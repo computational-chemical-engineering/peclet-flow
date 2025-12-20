@@ -1,0 +1,43 @@
+# Build directories
+build/
+bin/
+lib/
+*.so
+*.a
+*.o
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.venv
+*.egg-info/
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+_deps/
+
+# Data
+data/
+
+# Output files
+*.vtp
+*.vti
+*.edges
+
