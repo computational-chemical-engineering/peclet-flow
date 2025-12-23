@@ -24,6 +24,8 @@ set(SOURCES
     src/bindings.cpp
     src/sdf_reader.cpp
     src/pore_extraction.cu
+    src/cfd_solver.cu
+    src/cfd_solver_ibm.cu
 )
 
 # Define the Python extension module
@@ -31,3 +33,6 @@ pybind11_add_module(pnm_backend ${SOURCES})
 
 # target include directories
 target_include_directories(pnm_backend PRIVATE src)
+
+# Link against CUDA Runtime
+target_link_libraries(pnm_backend PRIVATE CUDA::cudart)
