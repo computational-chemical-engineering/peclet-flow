@@ -67,6 +67,9 @@ struct MacGrid {
   float *rhs;       // RHS for pressure solve
   float *sdf;       // Signed Distance Field (centered)
 
+  // Surface Fractions (Face-Centered)
+  float *frac_u, *frac_v, *frac_w;
+
   // IBM Data (SoA) - Centered (Pressure/SDF)
   IBM_Data ibm_data;
   int *ibm_id_map; // Map from grid index to ibm_cells index (-1 if fluid)
@@ -110,6 +113,10 @@ public:
   std::vector<float> get_w() const;
   std::vector<float> get_p() const;
 
+  void set_u(const std::vector<float> &u);
+  void set_v(const std::vector<float> &v);
+  void set_w(const std::vector<float> &w);
+
 private:
   MacGrid grid;
   size_t num_elements;
@@ -123,6 +130,7 @@ private:
   float p_tol_;
   int v_max_iter_;
   float v_tol_;
+  int outer_iterations_ = 1;
 
   // Helper to compute max velocity magnitude on device
   float compute_max_velocity();
@@ -140,10 +148,14 @@ public:
   // Solver Parameters
   void set_pressure_solver_params(int max_iter, float tol);
   void set_velocity_solver_params(int max_iter, float tol);
+  void set_outer_iterations(int n);
 
   // Run one time step
   // dt: time step size (optional/auto)
   void step(float dt);
+
+  // Perform Pressure Projection only (for Unit Testing/Splitting)
+  void project(float dt, bool incremental = false);
 
   // Temporary storage for Red-Black Gauss Seidel could go here if needed
   // or just reusing existing pointers
@@ -156,6 +168,9 @@ public:
   // Run one implicit Convection-Diffusion time step
   // dt: must be provided given implicit nature usually desires large dt
   void step_implicit(float dt);
+
+protected:
+  int pin_idx;
 };
 
 // Start of Kernel Declarations

@@ -1,6 +1,9 @@
 #include "cfd_solver.cuh"
 #include <cstdio>
 #include <iostream>
+#include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
+#include <thrust/reduce.h>
 
 #define CHECK_CUDA(call)                                                       \
   {                                                                            \
@@ -377,11 +380,11 @@ __global__ void add_body_force_kernel(float *u, float *v, float *w,
 // --------------------------------------------------------
 // Divergence Kernel (RHS Calculation)
 // --------------------------------------------------------
-__global__ void compute_divergence_kernel(const float *__restrict__ u,
-                                          const float *__restrict__ v,
-                                          const float *__restrict__ w,
-                                          float *__restrict__ rhs, int3 res,
-                                          float3 spacing, float dt, float rho) {
+__global__ void compute_divergence_kernel(
+    const float *__restrict__ u, const float *__restrict__ v,
+    const float *__restrict__ w, const float *__restrict__ frac_u,
+    const float *__restrict__ frac_v, const float *__restrict__ frac_w,
+    float *__restrict__ rhs, int3 res, float3 spacing, float dt, float rho) {
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
   int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -401,9 +404,9 @@ __global__ void compute_divergence_kernel(const float *__restrict__ u,
   // u[idx] corresponds to u_{i+1/2}
   // u[xm1] corresponds to u_{i-1/2}
 
-  float du_dx = (u[idx] - u[xm1]) / spacing.x;
-  float dv_dy = (v[idx] - v[ym1]) / spacing.y;
-  float dw_dz = (w[idx] - w[zm1]) / spacing.z;
+  float du_dx = (u[idx] * frac_u[idx] - u[xm1] * frac_u[xm1]) / spacing.x;
+  float dv_dy = (v[idx] * frac_v[idx] - v[ym1] * frac_v[ym1]) / spacing.y;
+  float dw_dz = (w[idx] * frac_w[idx] - w[zm1] * frac_w[zm1]) / spacing.z;
 
   float div = du_dx + dv_dy + dw_dz;
   rhs[idx] = (div * rho) / dt;
@@ -505,11 +508,12 @@ __global__ void compute_max_velocity_kernel(const float *__restrict__ u,
 // --------------------------------------------------------
 // Red-Black Gauss-Seidel Kernel (IBM Modified)
 // --------------------------------------------------------
-__global__ void
-solve_pressure_rbgs_kernel(float *__restrict__ p, const float *__restrict__ rhs,
-                           const float *__restrict__ sdf, IBM_Data ibm_data,
-                           const int *__restrict__ ibm_id_map, int3 res,
-                           float3 spacing, bool is_red) {
+__global__ void solve_pressure_rbgs_kernel(
+    float *__restrict__ p, const float *__restrict__ rhs,
+    const float *__restrict__ sdf, const float *__restrict__ frac_u,
+    const float *__restrict__ frac_v, const float *__restrict__ frac_w,
+    IBM_Data ibm_data, const int *__restrict__ ibm_id_map, int3 res,
+    float3 spacing, bool is_red, int pin_idx) {
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
   int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -544,25 +548,54 @@ solve_pressure_rbgs_kernel(float *__restrict__ p, const float *__restrict__ rhs,
   int idx_zp = get_idx(idx_x, idx_y, idx_z + 1, res);
   int idx_zm = get_idx(idx_x, idx_y, idx_z - 1, res);
 
+  // Pin Pressure at idx 0 to remove null space
+  // Pin Pressure at specific fluid cell to remove null space
+  if (idx == pin_idx) {
+    p[idx] = 0.0f;
+    return;
+  }
+
   float sum_neighbors = 0.0f;
   float coeff = 0.0f;
 
-  // Standard Logic: Always add neighbors (Continuum assumption)
-  // if (sdf[idx_xp] >= 0.0f) { ... } -> Always True
-  sum_neighbors += p[idx_xp] * inv_dx2;
-  coeff += inv_dx2;
-  sum_neighbors += p[idx_xm] * inv_dx2;
-  coeff += inv_dx2;
+  // Weighted Laplacian logic
+  // coeff_xp = A_{i+1/2} * inv_dx2 = frac_u[idx] * inv_dx2
+  // coeff_xm = A_{i-1/2} * inv_dx2 = frac_u[idx_xm] * inv_dx2
 
-  sum_neighbors += p[idx_yp] * inv_dy2;
-  coeff += inv_dy2;
-  sum_neighbors += p[idx_ym] * inv_dy2;
-  coeff += inv_dy2;
+  float c_xp = frac_u[idx] * inv_dx2;
+  float c_xm = frac_u[idx_xm] * inv_dx2;
+  float c_yp = frac_v[idx] * inv_dy2;
+  float c_ym = frac_v[idx_ym] * inv_dy2;
+  float c_zp = frac_w[idx] * inv_dz2;
+  float c_zm = frac_w[idx_zm] * inv_dz2;
 
-  sum_neighbors += p[idx_zp] * inv_dz2;
-  coeff += inv_dz2;
-  sum_neighbors += p[idx_zm] * inv_dz2;
-  coeff += inv_dz2;
+  float total_weight = c_xp + c_xm + c_yp + c_ym + c_zp + c_zm;
+
+  if (total_weight < 1e-9f) {
+    // Deep Solid / Disconnected logic: Fallback to standard Laplacian
+    // Solve Delta p = 0. RHS should be 0 there too (divergence 0).
+    c_xp = inv_dx2;
+    c_xm = inv_dx2;
+    c_yp = inv_dy2;
+    c_ym = inv_dy2;
+    c_zp = inv_dz2;
+    c_zm = inv_dz2;
+  }
+
+  sum_neighbors += p[idx_xp] * c_xp;
+  coeff += c_xp;
+  sum_neighbors += p[idx_xm] * c_xm;
+  coeff += c_xm;
+
+  sum_neighbors += p[idx_yp] * c_yp;
+  coeff += c_yp;
+  sum_neighbors += p[idx_ym] * c_ym;
+  coeff += c_ym;
+
+  sum_neighbors += p[idx_zp] * c_zp;
+  coeff += c_zp;
+  sum_neighbors += p[idx_zm] * c_zm;
+  coeff += c_zm;
 
   if (coeff > 1e-9f) {
     p[idx] = (sum_neighbors - rhs[idx]) / coeff;
@@ -570,11 +603,11 @@ solve_pressure_rbgs_kernel(float *__restrict__ p, const float *__restrict__ rhs,
 }
 
 // ... Projection Kernel ... (Unchanged)
-__global__ void project_velocity_kernel(float *__restrict__ u,
-                                        float *__restrict__ v,
-                                        float *__restrict__ w,
-                                        const float *__restrict__ p, int3 res,
-                                        float3 spacing, float dt, float rho) {
+__global__ void project_velocity_kernel(
+    float *__restrict__ u, float *__restrict__ v, float *__restrict__ w,
+    const float *__restrict__ p, const float *__restrict__ frac_u,
+    const float *__restrict__ frac_v, const float *__restrict__ frac_w,
+    int3 res, float3 spacing, float dt, float rho) {
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
   int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -595,19 +628,31 @@ __global__ void project_velocity_kernel(float *__restrict__ u,
   // But let's leave as is for now, relying on velocity mask.
 
   {
-    int idx_next = get_idx(idx_x + 1, idx_y, idx_z, res);
-    float dp_dx = (p[idx_next] - p[idx]) / spacing.x;
-    u[idx] -= scale * dp_dx;
+    if (frac_u[idx] > 0.0f) {
+      int idx_next = get_idx(idx_x + 1, idx_y, idx_z, res);
+      float dp_dx = (p[idx_next] - p[idx]) / spacing.x;
+      u[idx] -= scale * dp_dx;
+    } else {
+      u[idx] = 0.0f;
+    }
   }
   {
-    int idy_next = get_idx(idx_x, idx_y + 1, idx_z, res);
-    float dp_dy = (p[idy_next] - p[idx]) / spacing.y;
-    v[idx] -= scale * dp_dy;
+    if (frac_v[idx] > 0.0f) {
+      int idy_next = get_idx(idx_x, idx_y + 1, idx_z, res);
+      float dp_dy = (p[idy_next] - p[idx]) / spacing.y;
+      v[idx] -= scale * dp_dy;
+    } else {
+      v[idx] = 0.0f;
+    }
   }
   {
-    int idz_next = get_idx(idx_x, idx_y, idx_z + 1, res);
-    float dp_dz = (p[idz_next] - p[idx]) / spacing.z;
-    w[idx] -= scale * dp_dz;
+    if (frac_w[idx] > 0.0f) {
+      int idz_next = get_idx(idx_x, idx_y, idx_z + 1, res);
+      float dp_dz = (p[idz_next] - p[idx]) / spacing.z;
+      w[idx] -= scale * dp_dz;
+    } else {
+      w[idx] = 0.0f;
+    }
   }
 }
 
@@ -641,6 +686,11 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMemset(grid.p, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.rhs, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.sdf, 0, num_elements * sizeof(float)));
+
+  // Surface Fractions
+  CHECK_CUDA(cudaMalloc(&grid.frac_u, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.frac_v, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.frac_w, num_elements * sizeof(float)));
 
   // IBM Allocations (SoA)
   // Allocate for max potential (num_elements) to be safe, or manage resize.
@@ -696,6 +746,7 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   rho_ = 1.0f;
   mu_ = 0.01f;
   nu_ = mu_ / rho_;
+  pin_idx = -1;
 }
 
 CFDSolver::~CFDSolver() {
@@ -708,6 +759,10 @@ CFDSolver::~CFDSolver() {
   CHECK_CUDA(cudaFree(grid.v_temp));
   CHECK_CUDA(cudaFree(grid.w_temp));
   CHECK_CUDA(cudaFree(grid.sdf));
+
+  CHECK_CUDA(cudaFree(grid.frac_u));
+  CHECK_CUDA(cudaFree(grid.frac_v));
+  CHECK_CUDA(cudaFree(grid.frac_w));
 
   CHECK_CUDA(cudaFree(grid.ibm_id_map));
   CHECK_CUDA(cudaFree(grid.ibm_data.cell_index));
@@ -1207,6 +1262,192 @@ void check_field_nan(float *d_data, int n, const char *label) {
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
+// --------------------------------------------------------
+// Extrapolate Velocity Kernel (2nd Order IBM)
+// --------------------------------------------------------
+__global__ void extrapolate_velocity_kernel(float *u, float *v, float *w,
+                                            const float *__restrict__ sdf,
+                                            int3 res, float3 spacing) {
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+
+  // Extrapolate U (Face centered at i+1/2, j, k)
+  // Check SDF at Face U
+  float sdf_u =
+      sample_field(sdf, idx_x + 0.5f, idx_y + 0.0f, idx_z + 0.0f, res);
+
+  if (sdf_u < 0.0f) { // Solid Face
+    int idx = get_idx(idx_x, idx_y, idx_z, res);
+    int idx_m1 = get_idx(idx_x - 1, idx_y, idx_z, res);
+    int idx_m2 = get_idx(idx_x - 2, idx_y, idx_z, res);
+
+    float sdf_u_m1 = sample_field(sdf, idx_x - 1 + 0.5f, idx_y, idx_z, res);
+    float sdf_u_m2 = sample_field(sdf, idx_x - 2 + 0.5f, idx_y, idx_z, res);
+
+    int idx_p1 = get_idx(idx_x + 1, idx_y, idx_z, res);
+    int idx_p2 = get_idx(idx_x + 2, idx_y, idx_z, res);
+    float sdf_u_p1 = sample_field(sdf, idx_x + 1 + 0.5f, idx_y, idx_z, res);
+    float sdf_u_p2 = sample_field(sdf, idx_x + 2 + 0.5f, idx_y, idx_z, res);
+
+    bool left_valid = (sdf_u_m1 > 0.0f);
+    bool right_valid = (sdf_u_p1 > 0.0f);
+
+    if (left_valid) {
+      float u_m1 = u[idx_m1];
+      float theta = sdf_u_m1 / (sdf_u_m1 - sdf_u + 1e-9f);
+
+      float val = 0.0f;
+      if (sdf_u_m2 > 0.0f) {
+        float u_m2 = u[idx_m2];
+        float du = u_m2 - u_m1;
+        float c1 = -(u_m1 + du * theta * theta) / (theta + theta * theta);
+        float c2 = c1 + du;
+        val = u_m1 + c1 + c2;
+      } else {
+        val = u_m1 * (1.0f - 1.0f / theta);
+      }
+      u[idx] = val;
+    } else if (right_valid) {
+      float u_p1 = u[idx_p1];
+      float theta = sdf_u_p1 / (sdf_u_p1 - sdf_u + 1e-9f);
+
+      float val = 0.0f;
+      if (sdf_u_p2 > 0.0f) {
+        float u_p2 = u[idx_p2];
+        float du = u_p2 - u_p1;
+        float c2 = -(u_p1 - du * theta) / (theta + theta * theta);
+        float c1 = du - c2;
+        val = u_p1 - c1 + c2;
+      } else {
+        val = u_p1 * (1.0f - 1.0f / theta);
+      }
+      u[idx] = val;
+    }
+  }
+
+  // Reuse logic for V (Y direction)
+  {
+    float sdf_v =
+        sample_field(sdf, idx_x + 0.0f, idx_y + 0.5f, idx_z + 0.0f, res);
+    if (sdf_v < 0.0f) {
+      int idx = get_idx(idx_x, idx_y, idx_z, res);
+      int idx_m1 = get_idx(idx_x, idx_y - 1, idx_z, res);
+      int idx_m2 = get_idx(idx_x, idx_y - 2, idx_z, res);
+      float sdf_m1 = sample_field(sdf, idx_x, idx_y - 1 + 0.5f, idx_z, res);
+      float sdf_m2 = sample_field(sdf, idx_x, idx_y - 2 + 0.5f, idx_z, res);
+
+      int idx_p1 = get_idx(idx_x, idx_y + 1, idx_z, res);
+      int idx_p2 = get_idx(idx_x, idx_y + 2, idx_z, res);
+      float sdf_p1 = sample_field(sdf, idx_x, idx_y + 1 + 0.5f, idx_z, res);
+      float sdf_p2 = sample_field(sdf, idx_x, idx_y + 2 + 0.5f, idx_z, res);
+
+      bool left_valid = (sdf_m1 > 0.0f);
+      bool right_valid = (sdf_p1 > 0.0f);
+
+      if (left_valid) {
+        float u_m1 = v[idx_m1];
+        float theta = sdf_m1 / (sdf_m1 - sdf_v + 1e-9f);
+        float val = 0.0f;
+        if (sdf_m2 > 0.0f) {
+          float u_m2 = v[idx_m2];
+          float du = u_m2 - u_m1;
+          float c1 = -(u_m1 + du * theta * theta) / (theta + theta * theta);
+          float c2 = c1 + du;
+          val = u_m1 + c1 + c2;
+        } else {
+          val = u_m1 * (1.0f - 1.0f / theta);
+        }
+        v[idx] = val;
+      } else if (right_valid) {
+        float u_p1 = v[idx_p1];
+        float theta = sdf_p1 / (sdf_p1 - sdf_v + 1e-9f);
+        float val = 0.0f;
+        if (sdf_p2 > 0.0f) {
+          float u_p2 = v[idx_p2];
+          float du = u_p2 - u_p1;
+          float c2 = -(u_p1 - du * theta) / (theta + theta * theta);
+          float c1 = du - c2;
+          val = u_p1 - c1 + c2;
+        } else {
+          val = u_p1 * (1.0f - 1.0f / theta);
+        }
+        v[idx] = val;
+      }
+    }
+  }
+
+  // Reuse logic for W (Z direction)
+  {
+    float sdf_w =
+        sample_field(sdf, idx_x + 0.0f, idx_y + 0.0f, idx_z + 0.5f, res);
+    if (sdf_w < 0.0f) {
+      int idx = get_idx(idx_x, idx_y, idx_z, res);
+
+      int idx_m1 = get_idx(idx_x, idx_y, idx_z - 1, res);
+      int idx_m2 = get_idx(idx_x, idx_y, idx_z - 2, res);
+      float sdf_m1 = sample_field(sdf, idx_x, idx_y, idx_z - 1 + 0.5f, res);
+      float sdf_m2 = sample_field(sdf, idx_x, idx_y, idx_z - 2 + 0.5f, res);
+
+      int idx_p1 = get_idx(idx_x, idx_y, idx_z + 1, res);
+      int idx_p2 = get_idx(idx_x, idx_y, idx_z + 2, res);
+      float sdf_p1 = sample_field(sdf, idx_x, idx_y, idx_z + 1 + 0.5f, res);
+      float sdf_p2 = sample_field(sdf, idx_x, idx_y, idx_z + 2 + 0.5f, res);
+
+      bool left_valid = (sdf_m1 > 0.0f);
+      bool right_valid = (sdf_p1 > 0.0f);
+
+      if (left_valid) {
+        float u_m1 = w[idx_m1];
+        float theta = sdf_m1 / (sdf_m1 - sdf_w + 1e-9f);
+        float val = 0.0f;
+        if (sdf_m2 > 0.0f) {
+          float u_m2 = w[idx_m2];
+          float du = u_m2 - u_m1;
+          float c1 = -(u_m1 + du * theta * theta) / (theta + theta * theta);
+          float c2 = c1 + du;
+          val = u_m1 + c1 + c2;
+        } else {
+          val = u_m1 * (1.0f - 1.0f / theta);
+        }
+        w[idx] = val;
+      } else if (right_valid) {
+        float u_p1 = w[idx_p1];
+        float theta = sdf_p1 / (sdf_p1 - sdf_w + 1e-9f);
+        float val = 0.0f;
+        if (sdf_p2 > 0.0f) {
+          float u_p2 = w[idx_p2];
+          float du = u_p2 - u_p1;
+          float c2 = -(u_p1 - du * theta) / (theta + theta * theta);
+          float c1 = du - c2;
+          val = u_p1 - c1 + c2;
+        } else {
+          val = u_p1 * (1.0f - 1.0f / theta);
+        }
+        w[idx] = val;
+      }
+    }
+  }
+}
+
+// --------------------------------------------------------
+// Find Pin Index Kernel
+// --------------------------------------------------------
+__global__ void find_pin_idx_kernel(const float *__restrict__ sdf, int *pin_idx,
+                                    int num_elements) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_elements)
+    return;
+
+  // Find first fluid cell (sdf > 0)
+  if (sdf[idx] > 0.0f) {
+    atomicMin(pin_idx, idx);
+  }
+}
+
 void CFDSolver::step(float dt_in) {
   // If dt_in provided (> 0), use it.
   // If dt_in <= 0, compute from CFL if target_cfl_ > 0, else error/default.
@@ -1411,38 +1652,14 @@ void CFDSolver::step(float dt_in) {
 
   check_field_nan(grid.u, num_elements, "U_after_Diff");
 
-  // Mask after Diffusion (removed, handled by final mask)
-
-  // 4. Compute Divergence
-  // 4. Compute Divergence
-  compute_divergence_kernel<<<blocks, threads>>>(
-      grid.u, grid.v, grid.w, grid.rhs, grid.res, grid.spacing, dt, rho_);
-  CHECK_CUDA(cudaDeviceSynchronize());
-  check_field_nan(grid.rhs, num_elements, "RHS_Press");
-
-  // 5. Pressure Solve (Red-Black GS)
-  for (int iter = 0; iter < p_max_iter_; ++iter) {
-    solve_pressure_rbgs_kernel<<<blocks, threads>>>(
-        grid.p, grid.rhs, grid.sdf, grid.ibm_data, grid.ibm_id_map, grid.res,
-        grid.spacing, true);
-    solve_pressure_rbgs_kernel<<<blocks, threads>>>(
-        grid.p, grid.rhs, grid.sdf, grid.ibm_data, grid.ibm_id_map, grid.res,
-        grid.spacing, false);
-  }
-  CHECK_CUDA(cudaDeviceSynchronize());
-  check_field_nan(grid.p, num_elements, "P_after_Solve");
-
-  // 6. Projection (Correct Velocity)
-  // u = u - dt/rho * grad(p)
-  project_velocity_kernel<<<blocks, threads>>>(
-      grid.u, grid.v, grid.w, grid.p, grid.res, grid.spacing, dt, rho_);
-  CHECK_CUDA(cudaDeviceSynchronize());
-  check_field_nan(grid.u, num_elements, "U_after_Proj");
-
-  // 7. Velocity Mask
+  // Mask after Diffusion (ensure BCs for Divergence)
   apply_velocity_mask_kernel<<<blocks, threads>>>(grid.u, grid.v, grid.w,
                                                   grid.sdf, grid.res);
   CHECK_CUDA(cudaDeviceSynchronize());
+
+  // 4. Pressure Projection (IBM)
+  project(dt);
+
   CHECK_CUDA(cudaGetLastError());
 }
 
@@ -1817,10 +2034,15 @@ __global__ void solve_velocity_implicit_kernel(
 // --------------------------------------------------------
 // rhs = u_old / dt + body_force
 // --------------------------------------------------------
-__global__ void
-initialize_implicit_rhs_kernel(const float *__restrict__ phi_old,
-                               float *__restrict__ rhs, int3 res, float dt,
-                               float body_force) {
+// --------------------------------------------------------
+// Initialize Implicit RHS Kernel
+// --------------------------------------------------------
+// rhs = u_old / dt + body_force - (1/rho)*grad(p_old)
+// --------------------------------------------------------
+__global__ void initialize_implicit_rhs_kernel(
+    const float *__restrict__ phi_old, float *__restrict__ rhs,
+    const float *__restrict__ p_old, int3 res, float3 spacing, float dt,
+    float body_force, float rho, int component_idx) {
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
   int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -1829,7 +2051,32 @@ initialize_implicit_rhs_kernel(const float *__restrict__ phi_old,
     return;
   int idx = get_idx(idx_x, idx_y, idx_z, res);
 
-  rhs[idx] = phi_old[idx] / dt + body_force;
+  // Compute grad(p) at face center
+  // p is cell-centered (i, j, k)
+  // U face (i+1/2, j, k): dp/dx = (p[i+1] - p[i]) / dx
+  // V face (i, j+1/2, k): dp/dy = (p[j+1] - p[j]) / dy
+  // W face (i, j, k+1/2): dp/dz = (p[k+1] - p[k]) / dz
+
+  float dp_dxi = 0.0f;
+  if (component_idx == 0) { // U
+    int idx_next = get_idx(idx_x + 1, idx_y, idx_z, res);
+    dp_dxi = (p_old[idx_next] - p_old[idx]) / spacing.x;
+  } else if (component_idx == 1) { // V
+    int idx_next = get_idx(idx_x, idx_y + 1, idx_z, res);
+    dp_dxi = (p_old[idx_next] - p_old[idx]) / spacing.y;
+  } else { // W
+    int idx_next = get_idx(idx_x, idx_y, idx_z + 1, res);
+    dp_dxi = (p_old[idx_next] - p_old[idx]) / spacing.z;
+  }
+
+  // Momentum Eq: (u - u_n)/dt = Adv + Diff + F - (1/rho)GradP
+  // Implicit form solves for u*:
+  // (I - mu*L) u* = u_n + dt*F - (dt/rho)*GradP
+  // Initialize RHS with explicit terms being moved to RHS.
+  // Note: We solve (I/dt - nu*L) u = rhs_init.
+  // So standard form: rhs_init = u_n/dt + F - (1/rho)*GradP
+
+  rhs[idx] = phi_old[idx] / dt + body_force - (1.0f / rho) * dp_dxi;
 }
 
 void CFDSolver::step_implicit(float dt) {
@@ -1855,78 +2102,226 @@ void CFDSolver::step_implicit(float dt) {
                         cudaMemcpyDeviceToDevice));
 
   // -----------------------------------------------------
-  // Solve Momentum Implicitly per Component
+  // OUTER ITERATION LOOP (SIMPLE/PISO)
   // -----------------------------------------------------
+  for (int outer_iter = 0; outer_iter < outer_iterations_; ++outer_iter) {
 
-  auto solve_component = [&](float *u_curr, const float *u_old_snap, float *rhs,
-                             float force, int comp_idx, IBM_Data &ibm_d_vel,
-                             int *ibm_map_vel) {
-    // A. Init RHS
-    initialize_implicit_rhs_kernel<<<blocks, threads>>>(u_old_snap, rhs,
-                                                        grid.res, dt, force);
+    // For subsequent iterations, we use the *latest* pressure (grid.p)
+    // in initialize_implicit_rhs_kernel.
 
-    // B. Add Defect Term (Deferred Correction)
-    // Inputs: u/v/w_temp (Old time level)
-    // Note: Defect adds (Adv_FOU - Adv_Cen).
-    // Implicit Eq: Adv_FOU^n+1 u^n+1 = ... + Adv_FOU^n u^n - Adv_Cen^n u^n.
-    // So Defect Logic matches.
-    compute_convection_defect_kernel<<<blocks, threads>>>(
-        grid.u_temp, grid.v_temp, grid.w_temp, rhs, grid.res, grid.spacing,
-        comp_idx);
-    CHECK_CUDA(cudaGetLastError());
+    auto solve_component = [&](float *u_curr, const float *u_old_snap,
+                               float *rhs, float force, int comp_idx,
+                               IBM_Data &ibm_d_vel, int *ibm_map_vel) {
+      // A. Init RHS
+      // Note: grid.p is updated at the end of this loop
+      initialize_implicit_rhs_kernel<<<blocks, threads>>>(
+          u_old_snap, rhs, grid.p, grid.res, grid.spacing, dt, force, rho_,
+          comp_idx);
 
-    // C. Solve (RBGS)
-    // Use u_old_snap for Linearization coefficients ($u^n$).
-    // Update u_curr ($u^{n+1, k}$).
-    int iter_count = v_max_iter_; // Use implicit solver iter param
-    for (int k = 0; k < iter_count; k++) {
-      solve_velocity_implicit_kernel<<<blocks, threads>>>(
-          u_curr, rhs, grid.u_temp, grid.v_temp, grid.w_temp, grid.sdf,
-          ibm_d_vel, ibm_map_vel, grid.res, grid.spacing, dt, nu_, comp_idx,
-          true); // Red
-      solve_velocity_implicit_kernel<<<blocks, threads>>>(
-          u_curr, rhs, grid.u_temp, grid.v_temp, grid.w_temp, grid.sdf,
-          ibm_d_vel, ibm_map_vel, grid.res, grid.spacing, dt, nu_, comp_idx,
-          false); // Black
-    }
-  };
+      // B. Add Defect Term (Deferred Correction)
+      // Inputs: u/v/w_temp (Old time level) -> Wait, for intra-step iteration,
+      // should we use u_current or u_old?
+      // Standard SIMPLE: linearized about u*, but deferred term usually from
+      // old time n? For now, keep using u_old_snap for linearization in RBGS,
+      // and u_temp (time n) for deferred correction base. Ideally, u_temp
+      // should update if we want non-linear update? Let's stick to linearizing
+      // around u^n for stability first. The main goal is Pressure-Velocity
+      // coupling.
 
-  // Solve U
-  solve_component(grid.u, grid.u_temp, grid.rhs, grid.body_accel_.x, 0,
-                  grid.ibm_data_u, grid.ibm_id_map_u);
-  // Solve V
-  solve_component(grid.v, grid.v_temp, grid.rhs, grid.body_accel_.y, 1,
-                  grid.ibm_data_v, grid.ibm_id_map_v);
-  // Solve W
-  solve_component(grid.w, grid.w_temp, grid.rhs, grid.body_accel_.z, 2,
-                  grid.ibm_data_w, grid.ibm_id_map_w);
+      compute_convection_defect_kernel<<<blocks, threads>>>(
+          grid.u_temp, grid.v_temp, grid.w_temp, rhs, grid.res, grid.spacing,
+          comp_idx);
+      CHECK_CUDA(cudaGetLastError());
 
-  CHECK_CUDA(cudaDeviceSynchronize());
+      // C. Solve (RBGS)
+      int iter_count = v_max_iter_;
+      for (int k = 0; k < iter_count; k++) {
+        solve_velocity_implicit_kernel<<<blocks, threads>>>(
+            u_curr, rhs, grid.u_temp, grid.v_temp, grid.w_temp, grid.sdf,
+            ibm_d_vel, ibm_map_vel, grid.res, grid.spacing, dt, nu_, comp_idx,
+            true); // Red
+        solve_velocity_implicit_kernel<<<blocks, threads>>>(
+            u_curr, rhs, grid.u_temp, grid.v_temp, grid.w_temp, grid.sdf,
+            ibm_d_vel, ibm_map_vel, grid.res, grid.spacing, dt, nu_, comp_idx,
+            false); // Black
+      }
+    };
 
-  // 2. Pressure Projection
-  check_field_nan(grid.u, num_elements, "U_Implicit");
+    // Solve U
+    solve_component(grid.u, grid.u_temp, grid.rhs, grid.body_accel_.x, 0,
+                    grid.ibm_data_u, grid.ibm_id_map_u);
+    // Solve V
+    solve_component(grid.v, grid.v_temp, grid.rhs, grid.body_accel_.y, 1,
+                    grid.ibm_data_v, grid.ibm_id_map_v);
+    // Solve W
+    solve_component(grid.w, grid.w_temp, grid.rhs, grid.body_accel_.z, 2,
+                    grid.ibm_data_w, grid.ibm_id_map_w);
 
-  compute_divergence_kernel<<<blocks, threads>>>(
-      grid.u, grid.v, grid.w, grid.rhs, grid.res, grid.spacing, dt, rho_);
-  CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaDeviceSynchronize());
 
-  for (int iter = 0; iter < p_max_iter_; ++iter) {
-    solve_pressure_rbgs_kernel<<<blocks, threads>>>(
-        grid.p, grid.rhs, grid.sdf, grid.ibm_data, grid.ibm_id_map, grid.res,
-        grid.spacing, true); // Red
-    solve_pressure_rbgs_kernel<<<blocks, threads>>>(
-        grid.p, grid.rhs, grid.sdf, grid.ibm_data, grid.ibm_id_map, grid.res,
-        grid.spacing, false); // Black
+    // 2. Pressure Projection (Incremental)
+    project(dt, true);
+
+    // 3. Mask Velocity
+    apply_velocity_mask_kernel<<<blocks, threads>>>(grid.u, grid.v, grid.w,
+                                                    grid.sdf, grid.res);
+    CHECK_CUDA(cudaDeviceSynchronize());
   }
 
-  // 3. Project Velocity
-  project_velocity_kernel<<<blocks, threads>>>(
-      grid.u, grid.v, grid.w, grid.p, grid.res, grid.spacing, dt, rho_);
+  CHECK_CUDA(cudaGetLastError());
+}
 
-  // 4. Mask
-  apply_velocity_mask_kernel<<<blocks, threads>>>(grid.u, grid.v, grid.w,
-                                                  grid.sdf, grid.res);
+void CFDSolver::set_outer_iterations(int n) {
+  if (n < 1)
+    n = 1;
+  outer_iterations_ = n;
+}
+// Removed redundant code
 
+void CFDSolver::set_u(const std::vector<float> &h_u) {
+  if (h_u.size() != num_elements) {
+    throw std::runtime_error("set_u: Input size mismatch");
+  }
+  CHECK_CUDA(cudaMemcpy(grid.u, h_u.data(), num_elements * sizeof(float),
+                        cudaMemcpyHostToDevice));
+}
+
+void CFDSolver::set_v(const std::vector<float> &h_v) {
+  if (h_v.size() != num_elements) {
+    throw std::runtime_error("set_v: Input size mismatch");
+  }
+  CHECK_CUDA(cudaMemcpy(grid.v, h_v.data(), num_elements * sizeof(float),
+                        cudaMemcpyHostToDevice));
+}
+
+void CFDSolver::set_w(const std::vector<float> &h_w) {
+  if (h_w.size() != num_elements) {
+    throw std::runtime_error("set_w: Input size mismatch");
+  }
+  CHECK_CUDA(cudaMemcpy(grid.w, h_w.data(), num_elements * sizeof(float),
+                        cudaMemcpyHostToDevice));
+}
+
+// Kernel to subtract mean from RHS
+__global__ void subtract_mean_kernel(float *__restrict__ rhs, float mean,
+                                     int num_elements) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_elements)
+    return;
+  rhs[idx] -= mean;
+}
+
+__global__ void add_correction_kernel(float *p, const float *phi,
+                                      int num_elements) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_elements)
+    return;
+  p[idx] += phi[idx];
+}
+
+// Re-enable pinning logic with mean subtraction
+void CFDSolver::project(float dt, bool incremental) {
+  dim3 threads(8, 8, 8);
+  dim3 blocks((grid.res.x + threads.x - 1) / threads.x,
+              (grid.res.y + threads.y - 1) / threads.y,
+              (grid.res.z + threads.z - 1) / threads.z);
+
+  // A. Compute Fractions (IBM)
+  compute_fluid_fraction_kernel<<<blocks, threads>>>(
+      grid.sdf, grid.frac_u, grid.res, grid.spacing, make_float3(0.5, 0, 0), 1);
+  compute_fluid_fraction_kernel<<<blocks, threads>>>(
+      grid.sdf, grid.frac_v, grid.res, grid.spacing, make_float3(0, 0.5, 0), 2);
+  compute_fluid_fraction_kernel<<<blocks, threads>>>(
+      grid.sdf, grid.frac_w, grid.res, grid.spacing, make_float3(0, 0, 0.5), 3);
+  CHECK_CUDA(cudaGetLastError());
+
+  // B. Extrapolate
+  extrapolate_velocity_kernel<<<blocks, threads>>>(
+      grid.u, grid.v, grid.w, grid.sdf, grid.res, grid.spacing);
+
+  // C. Pinning logic
+  int *d_pin;
+  CHECK_CUDA(cudaMalloc(&d_pin, sizeof(int)));
+  int init_val = num_elements;
+  CHECK_CUDA(cudaMemcpy(d_pin, &init_val, sizeof(int), cudaMemcpyHostToDevice));
+
+  find_pin_idx_kernel<<<blocks, threads>>>(grid.sdf, d_pin, num_elements);
+  CHECK_CUDA(cudaMemcpy(&pin_idx, d_pin, sizeof(int), cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaFree(d_pin));
+
+  if (pin_idx >= num_elements) {
+    printf("WARNING: No valid fluid cell found for pinning! Defaulting "
+           "to 0.\n");
+    pin_idx = 0;
+  } else {
+    // printf("Pressure pinned at fluid cell: %d\n", pin_idx);
+  }
+
+  // Setup Pressure Target
+  // If Incremental: Solve for correction (Phi). Use u_temp as buffer for
+  // Phi. If Standard: Solve for Pressure (P). Use p directly?
+  // Actually, let's use `u_temp` as swap/buffer anyway to be safe or just
+  // solve into P. Standard: Solve into P. Incremental: Solve into u_temp
+  // (Phi), then add to P.
+
+  float *d_pressure_solver_target = incremental ? grid.u_temp : grid.p;
+  // If incremental, initial guess for correction is 0.
+  if (incremental) {
+    CHECK_CUDA(
+        cudaMemset(d_pressure_solver_target, 0, num_elements * sizeof(float)));
+  }
+
+  // D. Divergence
+  compute_divergence_kernel<<<blocks, threads>>>(
+      grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w, grid.rhs,
+      grid.res, grid.spacing, dt, rho_);
   CHECK_CUDA(cudaDeviceSynchronize());
+  check_field_nan(grid.rhs, num_elements, "RHS_Press");
+
+  // D2. Enforce Compatibility: Subtract Mean(RHS)
+  // Use Thrust for reduction
+  thrust::device_ptr<float> d_rhs = thrust::device_pointer_cast(grid.rhs);
+  float sum_rhs =
+      thrust::reduce(d_rhs, d_rhs + num_elements, 0.0f, thrust::plus<float>());
+  float mean_rhs = sum_rhs / (float)num_elements;
+
+  // printf("RHS Mean Correction: %e (Sum: %e)\n", mean_rhs, sum_rhs);
+
+  int threads_1d = 256;
+  int blocks_1d = (num_elements + threads_1d - 1) / threads_1d;
+  subtract_mean_kernel<<<blocks_1d, threads_1d>>>(grid.rhs, mean_rhs,
+                                                  num_elements);
+  CHECK_CUDA(cudaDeviceSynchronize());
+
+  // E. Solve Pressure (or Correction)
+  for (int iter = 0; iter < p_max_iter_; ++iter) {
+    solve_pressure_rbgs_kernel<<<blocks, threads>>>(
+        d_pressure_solver_target, grid.rhs, grid.sdf, grid.frac_u, grid.frac_v,
+        grid.frac_w, grid.ibm_data, grid.ibm_id_map, grid.res, grid.spacing,
+        true,
+        pin_idx); // Red
+    solve_pressure_rbgs_kernel<<<blocks, threads>>>(
+        d_pressure_solver_target, grid.rhs, grid.sdf, grid.frac_u, grid.frac_v,
+        grid.frac_w, grid.ibm_data, grid.ibm_id_map, grid.res, grid.spacing,
+        false, pin_idx); // Black
+  }
+  CHECK_CUDA(cudaDeviceSynchronize());
+  check_field_nan(d_pressure_solver_target, num_elements, "P_after_Solve");
+
+  // 3. Project Velocity
+  // Update velocity using the computed field (P or Phi)
+  project_velocity_kernel<<<blocks, threads>>>(
+      grid.u, grid.v, grid.w, d_pressure_solver_target, grid.frac_u,
+      grid.frac_v, grid.frac_w, grid.res, grid.spacing, dt, rho_);
+  CHECK_CUDA(cudaDeviceSynchronize());
+  check_field_nan(grid.u, num_elements, "U_after_Proj");
+
+  // If Incremental, add correction to total pressure
+  if (incremental) {
+    add_correction_kernel<<<blocks_1d, threads_1d>>>(
+        grid.p, grid.u_temp, num_elements); // u_temp holds Phi
+    CHECK_CUDA(cudaDeviceSynchronize());
+  }
+
   CHECK_CUDA(cudaGetLastError());
 }
