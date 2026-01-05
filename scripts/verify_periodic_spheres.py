@@ -76,13 +76,15 @@ def run_simulation(sdf_values, res_n, dx, R, L, phi_real, label):
     solver.set_body_force(pnm_backend.float3(f_mag, 0, 0))
     dt = 0.1 * dx
     
+    solver.set_mu(rho * nu)
+    
     u_mean_history = []
     max_steps = 5000 
     
     # print(f"--- {label} (phi={phi_real:.4f}) ---")
     
     for i in range(max_steps):
-        solver.step(dt, rho, nu, 20, 1e-4) # 20 inner iters
+        solver.step(dt)
         
         if i % 100 == 0:
             u_field = np.array(solver.get_u())

@@ -1,0 +1,343 @@
+\documentclass[preprint,12pt]{elsarticle}
+
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{adjustbox}
+\usepackage{amssymb}
+\usepackage{amsmath}
+
+\journal{Journal Name}
+
+\begin{document}
+
+\begin{frontmatter}
+
+%% Title, authors and addresses
+
+\title{Description of GPU Navier-Stokes Solver}
+
+\author{E.A.J.F.\ Peters}
+
+\address{}
+
+\begin{abstract}
+This paper presents a GPU-accelerated Incompressible Navier-Stokes solver utilizing a staggered MAC grid and a Robust Scaled Ghost-Cell Immersed Boundary Method (IBM). The system is designed to handle complex porous geometries defined by a Signed Distance Function (SDF). High performance is achieved through a specialized matrix-free implementation on the GPU.
+\end{abstract}
+
+\begin{keyword}
+GPU Computing \sep Navier-Stokes \sep Immersed Boundary Method \sep Signed Distance Function \sep Staggered Grid \sep Porous Media
+\end{keyword}
+
+\end{frontmatter}
+
+%%
+%% Start line numbering here if you want
+%%
+%\linenumbers
+\section{Navier-Stokes Projection Scheme}
+
+This work addresses the numerical solution of the unsteady Navier-Stokes equations subject to the incompressibility constraint. The solver is designed for high-performance execution on GPUs, employing a standard Marker-and-Cell (MAC) staggered grid arrangement. The primary variables are defined as follows: the velocity components $u$, $v$, and $w$ are located at the face centers $(i+1/2, j, k)$, $(i, j+1/2, k)$, and $(i, j, k+1/2)$ respectively, while the pressure $p$ is defined at the cell centers $(i, j, k)$.
+
+\subsection{Numerical Discretization}
+The momentum equation is discretized using a finite difference approach. For the advection terms, we employ a Total Variation Diminishing (TVD) scheme with the Koren limiter. To handle complex geometries and ensure high performance on the GPU, we introduce a \textbf{Symmetric Branchless} formulation for the ghost-cell IBM using a \textbf{Robust Scaled Scheme}.
+
+We formulate the solution procedure as a Newton-Raphson iteration to find the root of the residual vector $\mathbf{f}(\mathbf{u}) = 0$. Using the robust scaling approach, the entire discrete momentum equation is multiplied by the regularization factor $\mathcal{D}_{rescale}$:
+\begin{multline}
+    \mathbf{f} = \mathcal{D}_{rescale} \left[ \frac{\rho}{\Delta t} (\mathbf{u} - \mathbf{u}_\mathrm{old}) + \theta \, \nabla p + (1-\theta) \, \nabla p_\mathrm{old} \right] \\
+    + \theta \left( \rho \, \mathbf{c}_{scaled}(\mathbf{u}) - \mu \, \mathbf{L}_{u,scaled} \, \mathbf{u} \right)
+    \\+ (1-\theta) \left( \rho \, \mathbf{c}_{scaled}(\mathbf{u}_\mathrm{old}) - \mu \, \mathbf{L}_{u,scaled} \, \mathbf{u}_\mathrm{old} \right)
+\end{multline}
+where the scaled spatial operators are defined such that their coefficients include the regularization factor. A key property is that the ratio $\mathcal{D}_{rescale}/\mathcal{D}$ appearing in the stencil weights is strictly bounded ($\le 1$) and computed directly, avoiding all singularities.
+
+To solve this system, we invert the Jacobian $\mathbf{J}$. To ensure diagonal dominance and solver robustness, we approximate the advection part using the linear First-Order Upwind operator:
+\begin{equation}
+    \mathbf{J} \approx \frac{\rho \mathcal{D}_{rescale}}{\Delta t} \mathbf{I} + \theta (\rho \, \mathbf{C}_{u,scaled} - \mu \, \mathbf{L}_{u,scaled})
+\end{equation}
+
+\subsection{Non-Linear Advection Implementation}
+The non-linear advection operator $\mathbf{c}_{scaled}(\mathbf{u})$ is decomposed into a robust linear part, suitable for the implicit Jacobian, and a deferred correction source term:
+\begin{equation}
+    \mathbf{c}_{scaled}(\mathbf{u}) = \mathbf{C}_{u,scaled} \, \mathbf{u} + \mathbf{c}_{corr, scaled}(\mathbf{u})
+\end{equation}
+The linear operator $\mathbf{C}_{u,scaled}$ corresponds to the First-Order Upwind (FOU) scheme (scaled by $\mathcal{D}_{rescale}$). The correction term encapsulates the difference between the high-order TVD scheme and the FOU operator:
+\begin{equation}
+    \mathbf{c}_{corr, scaled} = -\mathcal{D}_{rescale} \, \nabla \cdot  \mathbf{F}_{corr}
+\end{equation}
+where $\mathbf{F}_{corr}$ represents the unscaled difference between the TVD and FOU fluxes:
+\begin{equation}
+   F_{corr, face} = \frac{1}{2} \Psi(r) (F_{CDS} - F_{FOU})
+\end{equation}
+The Koren limiter function is given by $\Psi(r) = \max \left( 0, \min \left( 2r, (1+2r)/3, 2 \right) \right)$. The calculation of this correction term requires careful handling of the Immersed Boundary to avoid singularities:
+\begin{itemize}
+    \item \textbf{Far-Point Solid}: If the upwind node required for the gradient ratio $r$ lies inside the solid, the limiter logic is bypassed. We switch to Central Differencing by enforcing $\Psi=2$, which effectively removes the dependency on the invalid far-upwind node.
+    \item \textbf{Near-Point Solid (Distributive Scaling)}: If the stencil involves a ghost-cell near the interface, the flux $F_{corr}$ naturally contains a singularity ($\sim 1/\mathcal{D}_{stencil}$). We handle this by distributing the global scaling factor $\mathcal{D}_{rescale}$ into the divergence summation. For each face $f$, the contribution is computed as:
+    \begin{equation}
+        \text{Contribution}_f = \text{clamp}\left( \frac{\mathcal{D}_{rescale}}{\mathcal{D}_{stencil}} \right) \cdot \mathcal{F}_{num}
+    \end{equation}
+    where $\mathcal{F}_{num}$ is the numerator of the interpolation polynomial (bounded) and the ratio of scaling factors is explicitly clamped ($\le 1$). This ensures that the correction term remains well-behaved throughout the domain without ever forming the singular fraction explicitly.
+\end{itemize}
+
+For time integration, we introduce a parameter $\theta \in [0.5, 1]$. Setting $\theta=1$ recovers the Fully Implicit scheme, known for its robustness, while $\theta=0.5$ yields the second-order Crank-Nicolson method.
+
+\subsection{Pressure Solver}
+The pressure Poisson equation is solved using a Red-Black Gauss-Seidel (RB-GS) smoother. This iterative solver is particularly well-suited for GPU architectures due to its inherent parallelism and "matrix-free" implementation, avoiding the explicit storage of the large system matrix.
+
+\subsection{Projection Step}
+To decouple the system, we employ a projection-like update. First, we compute an intermediate velocity increment, $\delta\mathbf{u}^*$, ignoring the pressure update. Subsequently, we introduce an auxiliary scalar field, $\phi$, such that adding its gradient projects the velocity onto the divergence-free subspace:
+\begin{align}
+    \left( \frac{\rho \mathcal{D}_{rescale}}{\Delta t} \mathbf{I} + \theta (\rho \, \mathbf{C}_{u,scaled} - \mu \, \mathbf{L}_{u,scaled}) \right) \delta \mathbf{u}^* &= - \mathbf{f}^{(k)} \\
+    \mathbf{D} \mathbf{G} \, \phi &= \mathbf{D} \, (\mathbf{u}^{(k)} + \delta \mathbf{u}^*) \label{eq:pressure-poisson}\\
+    \delta \mathbf{u}^{(k+1)} &= \delta \mathbf{u}^* - \mathbf{G} \, \phi
+\end{align}
+Here, the second line is a Poisson-type equation for $\phi$, derived by requiring that $\mathbf{D} \delta \mathbf{u}^{(k+1)} = -\mathbf{D} \mathbf{u}^{(k)}$.
+
+Substituting the corrected velocity $\delta \mathbf{u}^{(k+1)}$ back into the linearized momentum equation roughly implies $\delta \mathbf{u} \approx - (\mathbf{J})^{-1} (\mathcal{D}_{rescale} \mathbf{G} \delta p)$. In the pressure correction step, the global scaling factor $\mathcal{D}_{rescale}$ effectively cancels out with the scaled mass matrix term $\frac{\rho \mathcal{D}_{rescale}}{\Delta t}$, preserving the standard structure of the pressure Poisson equation. The simplified update becomes:
+\begin{equation}
+    \delta \tilde{p}^{(k+1)} = \left( \frac{\rho}{\theta \, \Delta t} \mathbf{I} + \rho \, \mathbf{C}_\phi - \mu \, \mathbf{L}_\phi \right) \, \phi
+    \label{eq:pressure_from_phi}
+\end{equation}
+The velocity and pressure updates are iterated until convergence.
+
+\section{Immersed Boundary Method Treatment}
+
+\subsection{Geometric Representation and Grid Classification}
+The solid geometry is represented implicitly using a global Signed Distance Function (SDF), denoted as $\psi(\mathbf{x})$. The SDF indicates the shortest distance to the solid surface, with the convention that $\psi < 0$ inside the solid and $\psi > 0$ in the fluid. 
+
+The solver employs a staggered MAC grid. The primary SDF values are defined at cell centers. Values at staggered velocity locations (faces) are obtained via linear interpolation. The \texttt{classify\_cells\_kernel} is executed to determine the status of each control volume. A velocity component is classified as \textit{fluid} if its corresponding (interpolated) SDF value is positive ($\psi > 0$), and \textit{solid} otherwise ($\psi < 0$). For cell volumes and face areas, the SDF is further utilized to compute fluid volume fractions and area fractions, respectively.
+
+
+\subsection{Directional Ghost-Cell Methodology}
+To impose no-slip boundary conditions with second-order spatial accuracy, we employ a Directional Ghost-Cell Immersed Boundary Method (GC-IBM). When a fluid velocity variable $u_c$ (where $u$ represents any velocity component $u, v, \text{or } w$) has a neighbor classified as solid, it is treated as a "ghost" value. 
+
+We construct a quadratic polynomial fit that satisfies the fluid neighbor value $u_{nb}$, the central value $u_c$, and the physical boundary condition $u_{bc}$ at the surface location $\xi$. The ghost value $u_\mathrm{ghost}$ is then expressed as a function of these known quantities:
+\begin{equation}
+    u_\mathrm{ghost} \approx w_{nb} \, u_{nb} + w_c \, u_c + w_{bc} \, u_{bc} \label{eq:ghost}
+\end{equation}
+Standard calculation of these weights $w$ introduces singularities when the boundary distance $\xi \to 0$.
+
+\subsection{Robust Scaled Formulation}
+
+To ensure numerical stability, we implement a \textit{Robust Scaled Scheme}. We define polynomial numerators ($\mathcal{N}$) and a common denominator ($\mathcal{D}$) such that $w = \mathcal{N}/\mathcal{D}$. The discrete governing equation is formally multiplied by $\mathcal{D}$ to eliminate rational singularities.
+
+The geometric functions for the directional neighbor ($\mathcal{N}_{nb}$), center ($\mathcal{N}_c$), and inhomogeneous boundary term ($\mathcal{N}_{bc}$) are defined in Table~\ref{tab:ibm_coeffs}. Note that $\mathcal{N}_{nb}$ corresponds to the fluid neighbor opposite to the ghost cell (e.g., if east is ghost, $\mathcal{N}_{nb}$ applies to West).
+
+\begin{table}[h!]
+    \centering
+    \renewcommand{\arraystretch}{1.5}
+    \begin{tabular}{|l|c|c|c|c|}
+        \hline
+        \textbf{Scheme} & $\mathcal{D}(\xi)$ & $\mathcal{N}_{nb,d}(\xi)$ &
+        $\mathcal{N}_c(\xi)$ &
+        $\mathcal{N}_{bc}(\xi)$ \\
+        \hline
+        Point-value & $\xi(1+\xi)$ & $\xi(1-\xi)$ & $2(\xi^2 - 1)$ & $2$ \\
+        \hline
+        Cell-avg & $\xi(1+\xi) - \frac{1}{12}$ & $\xi(1-\xi) + \frac{1}{12}$ & $2(\xi^2 - 1) - \frac{1}{6}$ & $2$ \\
+        \hline
+    \end{tabular}
+    \caption{Geometric scaling factors for the robust GC-IBM. $\mathcal{N}_{nb}$ applies to the fluid neighbor used in the interpolation stencil.}
+    \label{tab:ibm_coeffs}
+\end{table}
+
+\subsection{Modified Matrix Coefficients}
+In the linear solver, we construct the modified row coefficients $a'$ and source term $b'$ as follows:
+\begin{align}
+    a'_c &= \mathcal{D} \, a_c + \mathcal{N}_c \, a_{ghost}\\
+    a'_{nb,d} &= \mathcal{D} \, a_{nb,d} + \mathcal{N}_{nb,d} \, a_{ghost} \\
+    a'_{nb,\mathrm{other}} &= \mathcal{D} \, a_{nb,\mathrm{other}} \quad \text{(other directions)} \\
+    a'_{ghost} &= 0 \\
+    b'_c &= \mathcal{D} \, b_c -  \mathcal{N}_{bc} \, u_{bc} \, a_{ghost}
+\end{align}
+
+\subsubsection{Double-Sided Boundary (Sandwiched Cell)}
+In packed geometries, a fluid cell $c$ may be bounded by solid surfaces on both sides, e.g., West at distance $\xi_-$ and East at distance $\xi_+$. In this scenario, both neighbors $u_{nb,-}$ and $u_{nb,+}$ are ghost cells.
+
+We construct a quadratic polynomial that satisfies the boundary conditions $u_{bc,-}$ and $u_{bc,+}$ exactly. The linear system row for cell $c$ is modified to eliminate both neighbors ($a_{nb,-}$ and $a_{nb,+}$):
+\begin{equation}
+    a'_c u_c = b'_c
+\end{equation}
+The modified coefficient and source term are derived as:
+\begin{align}
+    a'_c &= \mathcal{D} \, a_c +  \mathcal{N}_{c,-} \, a_{ghost,-} + \mathcal{N}_{c,+} \, a_{ghost,+} \\
+    b'_c &= \mathcal{D} \, b_c - \mathcal{N}_{bc,-,-}  \, u_{bc,-} \,  a_{ghost,-} - \mathcal{N}_{bc,-,+}  \, u_{bc,-} \, a_{ghost,+} \nonumber \\
+    & \quad
+        - \mathcal{N}_{bc,+,-}  \, u_{bc,+} \, a_{ghost,-}
+     - \mathcal{N}_{bc,+,+}  \, u_{bc,+} \,  a_{ghost,+}
+\end{align}
+Although the expression for $b'_c$ is complex, factors can be pre-computed and combined if the boundary values are time-independent. Furthermore, for stationary objects with no-slip conditions ($u_{bc}=0$), many terms vanish.
+The polynomials for the double-sided case are provided in Table \ref{tab:ibm_double}. 
+
+\begin{table}[h!]
+    \centering
+    \renewcommand{\arraystretch}{2.0}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{|l|c|c|}
+        \hline
+        \textbf{Factor} & \textbf{Point-value} & \textbf{Cell-average} \\
+        \hline
+        $\mathcal{D}$ & $(\xi_- + \xi_+) \xi_- \xi_+$ & $(\xi_- + \xi_+) (\xi_- \xi_+ - \frac{1}{12})$ \\
+        \hline
+        $\mathcal{N}_{c,+}$& $(\xi_- + \xi_+) (\xi_- + 1)(\xi_+ - 1)$ & $(\xi_- + \xi_+) [ (\xi_- + 1)(\xi_+ - 1) - \frac{1}{12} ]$ \\
+        \hline
+        $\mathcal{N}_{bc,+,+}$& $\xi_- (1 + \xi_-)$ & $\xi_- (1 + \xi_-) - \frac{1}{12}$ \\
+        \hline
+        $\mathcal{N}_{bc,-,+}$ & $\xi_+ (1 - \xi_+)$ & $\xi_+ (1 - \xi_+) + \frac{1}{12}$ \\
+        \hline
+    \end{tabular}%
+    }
+    \caption{Geometric polynomials for the double-sided (sandwiched) case. The cases for $- \leftrightarrow +$ can be obtained by interchanging $\xi_- \leftrightarrow \xi_+$.}
+    \label{tab:ibm_double}
+\end{table}
+
+\subsection{Multi-Directional IBM}
+
+For boundaries that are not grid-aligned, the IBM stencil often requires corrections in multiple spatial directions. In such cases, we scale by the factor:
+\begin{equation}
+  \mathcal{D}_\mathrm{rescale} = \mathcal{D}_{d_{min}}, \text{ where } d_{min} = \mathrm{argmin}_{d} (|\mathcal{D}_d|) \label{eq:D_rescale}
+\end{equation}
+The modified coefficients (for the one-sided case) become:
+\begin{align}
+    a'_c &= \mathcal{D}_\mathrm{rescale} \, a_c + \sum_d \mathcal{N}_{c,d} \, \frac{\mathcal{D}_\mathrm{rescale}}{\mathcal{D}_{d}} \, a_{ghost,d}\\
+    a'_{nb,d} &= \mathcal{D}_\mathrm{rescale} \, a_{nb,d} + \sum_d \mathcal{N}_{nb,d}  \, \frac{\mathcal{D}_\mathrm{rescale}}{\mathcal{D}_{d}} \, a_{ghost,d} \\
+    a'_{nb,\mathrm{other}} &= \mathcal{D}_\mathrm{rescale} \, a_{nb,\mathrm{other}} \quad \text{(other directions)} \\
+    a'_{ghost,d} &= 0 \\
+    b'_c &= \mathcal{D}_\mathrm{rescale} \, b_c - \sum_d  \mathcal{N}_{bc,d} \, \frac{\mathcal{D}_\mathrm{rescale}}{\mathcal{D}_d} \, u_{bc,d} \, a_{ghost,d}
+\end{align}
+The summation runs over all directions where the IBM is applied. For directions where $d \neq d_{min}$, the ratio $|\mathcal{D}_\mathrm{rescale}/\mathcal{D}_d| \le 1$. A singularity ($0/0$) may seemingly arise if $\mathcal{D}_\mathrm{rescale} \approx 0$ and $\mathcal{D}_{d} \approx 0$. This occurs when the IBM interaction point is at (for point values) or very close to (for cell averages) the cell center. In such instances, we define $\mathcal{D}_\mathrm{rescale}/\mathcal{D}_d = 1$. Since the interaction points in all directions are spatially proximate, the boundary values $u_{bc,d}$ are similar, and the boundary condition remains well-posed.
+
+\subsection{IBM for Pressure Computations}
+
+In incompressible systems, pressure acts as a Lagrange multiplier enforcing the incompressibility constraint. Pressure values are required in cells where any face contains a ``fluid'' velocity, as the pressure gradient must be defined there. The pressures are updated via the projection scalar $\phi$, necessitating the computation of the velocity divergence.
+
+The divergence is calculated based on superficial velocities (or fluxes), $\tilde{\mathbf{u}}$, which are defined as the intrinsic fluid velocity $\mathbf{u}$ weighted by the fluid area fraction $\alpha_f$ of the corresponding face:
+\begin{equation}
+    \tilde{u} = \alpha_f u
+\end{equation}
+The area fraction $\alpha_f$ for a face (e.g., with normal in the $x$-direction) is approximated by assuming a planar interface:
+\begin{equation}
+    \alpha_f \approx \text{clamp}\left( 0.5 + \frac{\psi}{ |n_y|\Delta y + |n_z|\Delta z } , 0, 1 \right)
+\end{equation}
+where $\psi$ is the Signed Distance Function (SDF) evaluated at the face center, and $\mathbf{n}$ is the interface normal vector. This formula represents a linearized approximation of the interface cutting through the cell face. The $\alpha_f$ fractions are incorporated in the divergence operator, $\mathbf{D}$, as used in Eq.~\eqref{eq:pressure-poisson}.
+
+For faces classified as ``solid'' (where the center is in the solid, $\psi < 0$) but possessing a non-zero fluid area fraction ($\alpha_f > 0$), we cannot solve for the velocity directly. Instead, we employ an extrapolated velocity value from a fluid neighbor to compute the flux. In edge cases where no suitable fluid neighbor exists for directional extrapolation (e.g., in under-resolved narrow gaps), we fall back to using the local boundary velocity $u_{bc}$ to avoid numerical instability and complex branching logic on the GPU.
+
+For cells surrounded entirely by solid faces ($\alpha_f = 0$ for all faces), we interpolate values from the boundaries by solving a Laplace equation:
+\begin{equation}
+    \mathbf{D}_s \mathbf{G} p^{(k+1)} = 0
+\end{equation}
+Here, $\mathbf{D}_s$ denotes the divergence operator acting on the unweighted (intrinsic) velocities, distinguishing it from the weighted operator $\mathbf{D}$ extending to the cut-cells.
+
+To formulate a unified equation for $\phi$ across both fluid and solid domains, we impose the following relation inside the solid:
+\begin{equation}
+    \delta \tilde{p}^{(k+1)} = c\,  \phi
+\end{equation}
+where $c$ is a constant of similar magnitude to the diagonal components of the matrices in Eq.~\eqref{eq:pressure_from_phi} ($c\approx\rho/\Delta t+ \rho v/\Delta x+\mu/\Delta x^2$). This yields:
+\begin{equation}
+    \mathbf{D}_s \mathbf{G} \, (p^{(k)} + c\,  \phi) = 0 \; \rightarrow \; \mathbf{D}_s \mathbf{G} \, \phi = - c^{-1} \, \mathbf{D}_s \mathbf{G} \, p^{(k)}
+\end{equation}
+
+
+
+
+\subsection{Staggered Grid Interpolation}
+The convective fluxes require velocity components to be defined at locations where they are not naturally stored. To obtain the advective velocity $u$ at the face center, we employ a symmetric 4-point average. Similar to the flux calculation, if any node in this stencil lies within the solid, it is treated as a ghost value dependent on the local fluid velocity.
+
+\begin{equation}
+    \bar{u} = \frac{1}{4} \sum_{k=0}^{1} \sum_{j=0}^{1} u_{i+\delta_i j, j+\delta_j k, k} \quad \text{(Symmetric 4-point average)}
+\end{equation}
+where $u$ is the fluid value for valid cells, or the IBM-reconstructed value for solid cells (Eq.~\eqref{eq:ghost}). This ensures that the interpolated convective velocity field smoothly approaches the physical no-slip boundary condition ($u=0$), rather than artificially dropping to zero or using a staircase approximation at the solid interface.
+
+\section{GPU Implementation Strategy}
+\paragraph{Implementation Details}
+Modern GPUs handle \texttt{min()}, \texttt{max()}, and floating-point comparisons more efficiently than warp-divergent \texttt{if} statements.
+For the TVD scheme, the selection of the upwind node direction is determined branchlessly using \texttt{signbit} masks or comparison checks (e.g., $v>0$).
+The Koren limiter evaluation involves computing the gradient ratio $r$ and clamping the result. This is implemented using intrinsic \texttt{fmin} and \texttt{fmax} instructions, which map directly to hardware units. For example, the limiter function can be evaluated as:
+\begin{equation}
+    \Psi(r) = \texttt{fmax}(0.0, \texttt{fmin}(2.0*r, \texttt{fmin}( (1.0+2.0*r)/3.0, 2.0 ) ) )
+\end{equation}
+To avoid division-by-zero when computing $r$, we use a protected division or multiply-add logic that gracefully handles uniform regions.
+A key challenge in implementing Immersed Boundary Methods (IBM) on SIMT (Single Instruction, Multiple Threads) architectures is the potential for thread divergence caused by conditional branching (e.g., checking for cut-cells). To mitigate this, we adopt a \textit{bake-in} strategy: all geometric complexity is pre-calculated into sparse modification lists. The linear solver kernel itself remains agnostic to the boundary conditions, executing a uniform instruction set across the domain.
+
+\subsection{Data Structures and Memory Layout}
+To ensure coalesced memory access, we employ a Structure-of-Arrays (SoA) layout. The computational domain is discretized into $N_x \times N_y \times N_z$ cells. Consistent with visualization standards (e.g., VTK/ParaView), the $x$-index is the fastest-varying index in memory. 
+
+The 7-point stencil coefficients for the linearized momentum equation are stored explicitly in seven aligned arrays:
+\begin{equation}
+    \mathcal{A}_{d} \in \mathbb{R}^{N_z \times N_y \times N_x}, \quad d \in \{C, W, E, S, N, B, T\}
+\end{equation}
+representing the coefficients for the Center, West, East, South, North, Bottom, and Top stencil points, respectively. The source term (Right-Hand Side) is stored in a separate array $\mathcal{B}$.
+
+\subsection{Geometric Pre-computation}
+To avoid conditional branching during the linear solve, we employ a unified "bake-in" strategy. During initialization, we identify all cells $c$ that require IBM corrections (i.e., cells with at least one solid neighbor). These cells are stored in a single list, $\mathcal{L}_{IBM}$.
+
+For each cell in $\mathcal{L}_{IBM}$, we pre-compute a set of scaling and modification factors for all three spatial directions ($d \in \{x, y, z\}$). Correct handling of the stencil requires modifying the center coefficient, the neighbor coefficients, and the source term.
+For a given direction $d$ with neighbors at indices $nb,-$ and $nb,+$, we determine the status (e.g., Minus-Side Solid, Plus-Side Solid, Sandwiched, or None) and compute the following factors:
+\begin{itemize}
+    \item $K_{c,-}, K_{c,+}$: Factors for adding the neighbor's coefficient to the center.
+    \item $M_-, M_+$: Self-multipliers for the neighbor coefficients.
+    \item $X_-, X_+$: Cross-multipliers for adding one neighbor's original coefficient to the other.
+    \item $B_{val}$: Correction for the source term $b_c$.
+\end{itemize}
+The global scaling factor $\mathcal{D}_{rescale}$ is also stored. Importantly, for directions that do not require modification (no solid neighbor), the additive factors ($K, X$) are set to 0 and the multiplicative factors ($M$) are set to $\mathcal{D}_{rescale}$, such that the mathematical operations remain valid but have no net effect beyond permissible scaling.
+
+Complementary to the momentum operator, the discrete Laplacian for the pressure projection (Eq.~\ref{eq:pressure-poisson}) is also constructed in a "baked-in" fashion during the initialization phase. The face area fractions $\alpha_f$, required for the divergence and gradient operators, are computed from the SDF and incorporated directly into the 7-point pressure stencil coefficients. Since the solid boundaries are stationary, this pressure matrix is constant, avoiding the need for per-timestep geometric updates and allowing the use of highly optimized, uniform RB-GS kernels for the pressure solve.
+
+\subsection{Time-Step Update Algorithm}
+At each time step (or non-linear iteration), the linear system is assembled in three passes:
+
+\paragraph{1. Base Stencil Generation}
+A kernel launches over the full domain to compute the standard physical coefficients (convection, diffusion, time-accumulation) for a 7-point stencil, ignoring immersed boundaries.
+
+\paragraph{2. Sparse Geometric Modification}
+We launch a kernel over the list $\mathcal{L}_{IBM}$ to apply the geometric constraints. This kernel operates without conditional branches by executing the same sequence of floating-point operations for every item.
+
+For a cell $c$, we first scale the center coefficient:
+\begin{equation}
+   a_c \leftarrow a_c \cdot \mathcal{D}_{rescale}
+\end{equation}
+Then, we loop over the three spatial directions $d \in \{x, y, z\}$. Let $a_{nb,-}$ and $a_{nb,+}$ denote the coefficients of the "left" (minus) and "right" (plus) neighbors in direction $d$. The update proceeds as follows:
+\begin{align}
+    % Add neighbors to center
+    a_c &\leftarrow a_c + a_{nb,-} \cdot K_{c,-} + a_{nb,+} \cdot K_{c,+} \\
+    % Compute temp cross values
+    T_- &= a_{nb,-} \cdot X_- \\
+    T_+ &= a_{nb,+} \cdot X_+ \\
+    % Update neighbors
+    a_{nb,-} &\leftarrow a_{nb,-} \cdot M_- + T_+ \\
+    a_{nb,+} &\leftarrow a_{nb,+} \cdot M_+ + T_-
+\end{align}
+Finally, the right-hand side is updated:
+\begin{equation}
+    b_c \leftarrow b_c \cdot \mathcal{D}_{rescale}.
+\end{equation}
+The values $a_c$, $a_{nb,\pm}$ and $b_c$ refer to the entries in the specific stencil arrays (e.g., $\mathcal{A}_C$, $\mathcal{A}_W, \mathcal{A}_E$, $\mathcal{B}$) at index $c$. This branchless logic covers all topological cases, including sandwiched cells, by appropriate setting of the pre-computed factors (e.g., setting $M=0$ to zero out a ghost connection). The update uses atomic operations when modifying the center coefficient to handle potential race conditions if multiple directions contribute simultaneously, though in this structured loop approach over directions for a single cell, race conditions on $a_c$ are naturally avoided within the thread. Note that updating neighbors $a_{nb,-}, a_{nb,+}$ theoretically could race if two different item threads update the same neighbor, but since the list iterates over \emph{affected cells} and updates their \emph{own} stencil entries (row-based modification), no race condition exists between threads for the matrix coefficients of cell $c$.
+
+\paragraph{3. Red-Black Gauss-Seidel Solver}
+The linear solver kernel iterates over the domain using a Red-Black checkerboard pattern. Because the IBM logic has been fully absorbed into the modified coefficients $a$, the solver kernel contains no conditional branching related to geometry. It performs a standard update:
+\begin{equation}
+    u^{(k+1)}_c = \frac{1}{a_c} \left( b_c - \sum_{nb} a_{nb} \, u^{(k)}_{nb} \right)
+\end{equation}
+This approach ensures optimal thread occupancy and prevents warp divergence, as all threads execute identical floating-point operations.
+
+
+
+
+\section{Verification}
+To demonstrate the accuracy and robustness of the solver, we present a suite of verification benchmarks. These tests confirm the correct implementation of the numerical schemes and the immersed boundary treatment.
+
+\subsection{Advecting Taylor-Green Vortex}
+We verify the advection operator using the Taylor-Green vortex in a periodic cube domain $[0, 2\pi]^3$. The setup involves an initial vortex field superposed with a constant convective velocity $\vec{U} = (1, 1, 1)$. The pass criteria requires that the numerical kinetic energy decay matches the analytical profile $E(t)$, independent of the convection speed $\vec{U}$. This ensures the Galilean invariance and correctness of the advection scheme.
+
+\subsection{Plane Poiseuille Flow}
+We simulate a pressure-driven flow in a periodic domain containing a centered solid slab. This setup reproduces the classic plane Poiseuille flow between two parallel plates. We measure the resulting velocity profile against the analytical parabolic solution. It is crucial to note that the discrete velocities in our finite-volume formulation represent cell-averaged quantities. Therefore, to rigorously establish the second-order spatial accuracy ($O(\Delta x^2)$) of the discretization and IBM operations, we compare the numerical results against the cell-averaged analytical solution rather than point values.
+
+\subsection{Flow Past Periodic Spheres}
+To validate the solver's capability in handling complex porous media, we compute the flow through Simple Cubic (SC) arrays of spheres. The drag force exerted on the spheres is quantified using the dimensionless drag factor $K$. Our results are compared with the reference values provided by Zick and Homsy (1982). We observe excellent agreement, reproducing $K \approx 4.95$ for a solid volume fraction $\phi=0.05$ and $K \approx 39.5$ for $\phi=0.50$.
+
+\subsection{Divergence and Energy Conservation}
+Correct enforcement of the incompressibility constraint is monitored via automated tests. We track the $L_2$ norm of the velocity divergence field to ensure it remains within machine precision tolerances. Additionally, we verify the reduction of kinetic energy during the projection step, confirming the orthogonal projection of the velocity field onto the valid divergence-free subspace.
+
+\end{document}
+
+%%
+%% End of file `elsarticle-template-1-num.tex'. 

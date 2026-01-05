@@ -84,11 +84,7 @@ PYBIND11_MODULE(pnm_backend, m) {
            py::arg("max_iter"), py::arg("tol"))
       .def("set_velocity_solver_params", &CFDSolver::set_velocity_solver_params,
            py::arg("max_iter"), py::arg("tol"))
-      .def("set_outer_iterations", &CFDSolver::set_outer_iterations,
-           py::arg("iterations"))
-      // step function: optional dt (default -1.0)
-      .def("step", &CFDSolver::step, py::arg("dt") = -1.0f)
-      .def("step_implicit", &CFDSolver::step_implicit, py::arg("dt") = -1.0f)
+      .def("step", &CFDSolver::step, py::arg("dt"))
       .def("get_u", &CFDSolver::get_u)
       .def("get_v", &CFDSolver::get_v)
       .def("get_w", &CFDSolver::get_w)

@@ -91,14 +91,27 @@ def run_simulation(res_n, save_plot=False):
 
     solver.set_cfl(cfl)
     
+    # Use Fully Implicit Diffusion as requested in verification plan
+    solver.set_diffusion_theta(1.0)
+    
+    # Analytical Max Velocity (Plane Poiseuille)
+    # U_max = (g * H^2) / (8 * nu)
+    U_ana_max = (g_x * H**2) / (8.0 * nu)
+    
+    # Estimate time step based on analytical max velocity
+    # Since we use implicit solver, we are not strictly limited by stability,
+    # but we want accuracy and reasonable convergence.
+    dt_est = cfl * dx / U_ana_max
+    
     # Run
-    max_steps = 10000
+    # Run slightly longer to ensure steady state with implicit stepping
+    max_steps = 20000 
     u_mean_history = []
     
-    print(f"Running N={res_n} with CFL={cfl}...")
+    print(f"Running N={res_n} with CFL={cfl}, dt={dt_est:.6e}, Theta=1.0...")
     for i in range(max_steps):
-        # Pass dt=-1.0 to trigger adaptive stepping
-        solver.step(-1.0)
+        # Use Newton solver with fixed dt
+        solver.step(dt_est)
         
         if i % 100 == 0:
             u_field = np.array(solver.get_u())
@@ -108,25 +121,13 @@ def run_simulation(res_n, save_plot=False):
             if len(u_mean_history) > 5:
                 err = abs(u_mean_history[-1] - u_mean_history[-2]) / (abs(u_mean_history[-1]) + 1e-12)
                 if err < 1e-6:
+                    print(f"  Converged at step {i}")
                     break
 
     u_field = np.array(solver.get_u())
     
-    # Get Mean Velocity in Fluid Phase only?
-    # Solver.get_u() returns domain average? No, get_u returns full grid.
-    # Masked values are 0.
-    # U_sup (Superficial) = sum(u) / V_total
-    # U_fluid_avg = sum(u) / V_fluid = U_sup / porosity
-    # Porosity phi_f = H / L
-    
-    u_field = np.array(solver.get_u())
-    
     # Check Centerline (Max) Velocity to avoid integration errors with cut-cells
     U_sim_max = np.max(u_field)
-    
-    # Analytical Max Velocity (Plane Poiseuille)
-    # U_max = (g * H^2) / (8 * nu)
-    U_ana_max = (g_x * H**2) / (8.0 * nu)
     
     error = 100 * abs(U_sim_max - U_ana_max) / U_ana_max
     

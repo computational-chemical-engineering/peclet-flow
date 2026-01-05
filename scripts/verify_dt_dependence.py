@@ -46,7 +46,7 @@ def run_simulation(dt_val, phi=0.05):
     max_steps = int(10.0 / dt_val) + 10
     
     for i in range(max_steps):
-        solver.step_implicit(dt_val)
+        solver.step(dt_val)
         
     u_field = np.array(solver.get_u())
     u_avg = np.mean(u_field)

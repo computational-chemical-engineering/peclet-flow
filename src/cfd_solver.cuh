@@ -4,6 +4,10 @@
 #include <cuda_runtime.h>
 #include <vector>
 
+#define BLOCK_SIZE_X 8
+#define BLOCK_SIZE_Y 8
+#define BLOCK_SIZE_Z 8
+
 // Device helper for periodic indexing
 // Index = i + j*nx + k*nx*ny
 __device__ inline int get_idx(int x, int y, int z, int3 res) {
@@ -11,64 +15,65 @@ __device__ inline int get_idx(int x, int y, int z, int3 res) {
   y = (y % res.y + res.y) % res.y;
   z = (z % res.z + res.z) % res.z;
   return z * res.y * res.x + y * res.x + x;
-  return z * res.y * res.x + y * res.x + x;
 }
 
-// SoA Structure for IBM Data
+// SoA Structure for IBM Data (Robust Scaled)
 struct IBM_Data {
   int num_active_cells;
 
-  // Per-Cell Data (Size: num_elements or compacted)
-  // We use compacted list indexing via ibm_id_map
-  // Size = num_elements (max potential) or Reallocated?
-  // Let's allocate num_elements for safety/simplicity first.
-
+  // Per-Cell Data
   int *cell_index;     // [num_active] - Global Grid Index
-  float *S_row;        // [num_active]
-  int *num_boundaries; // [num_active]
+  float *D_rescale;    // [num_active] - Scaling factor D_rescale (Eq. 17)
+  int *num_boundaries; // [num_active] - Number of modified directions
 
   // Per-Direction Data (Size: 6 * num_active)
-  // Access: cells[list_idx].dirs[k] -> arrays[6 * list_idx + k]
-  float *N_bc;
-  float *val_bc;
-  int *nb_idx;
+  // Access: cells[list_idx * 6 + k]
+  // We store modification factors for the "baked-in" update
+  // Direction Indices k=0..5 correspond to directions (X+, X-, Y+, ...) or just
+  // sequential list? Paper says: Loop over directions d. We need to know WHICH
+  // direction `d` this modification applies to (to update a_nb,d). So we store
+  // `nb_idx` (direction code or neighbor index).
+
+  int *dir_code; // [num_active * 6] - Direction Code (0:X+, 1:X-, etc.)
+
+  // Modification Factors (Eq 23-26):
+  // a_c += a_nb * K
+  // a_nb = a_nb * M + a_other * X (Cross-term for sandwich)
+  // b_c += B_val
+
+  float *K_val; // [num_active * 6] - Factor K (Add neighbor to center)
+  float *M_val; // [num_active * 6] - Factor M (Scale neighbor)
+  float *X_val; // [num_active * 6] - Factor X (Cross-term, usually 0 unless
+                // sandwich)
+  float *B_val; // [num_active * 6] - Factor B (Correction to RHS)
+
+  // Note: Standard N_bc, val_bc are subsumed into B_val calculation
+  // or kept for explicit flux calculation if needed?
+  // Paper Eq 28: b'_c = D*b_c - sum( ... u_bc ... )
+  // So B_val pre-calculates the u_bc term.
 };
 
-// HELPER IMPLEMENTATION
-__device__ inline float
-get_ibm_update_rbgs(int idx, float current_sum_neighbors, float current_rhs,
-                    const IBM_Data &ibm_data, const int *ibm_id_map) {
-  int list_idx = ibm_id_map[idx];
-  if (list_idx == -1)
-    return -1e9f;
-
-  float s_row = ibm_data.S_row[list_idx];
-  int num_b = ibm_data.num_boundaries[list_idx];
-
-  float ibm_rhs = current_rhs;
-  for (int k = 0; k < num_b; k++) {
-    int entry = 6 * list_idx + k; // Stride 6
-    float n_bc = ibm_data.N_bc[entry];
-    float v_bc = ibm_data.val_bc[entry];
-    ibm_rhs += n_bc * v_bc;
-  }
-
-  return (ibm_rhs + current_sum_neighbors) * s_row;
-}
-
 struct MacGrid {
-  int3 res; // Resolution (cells). Face counts match cell counts (Periodic)
+  int3 res;         // Resolution (cells)
   float3 spacing;   // dx, dy, dz
   int num_elements; // res.x * res.y * res.z
 
   // Fields
   float *u, *v, *w; // Velocity (staggered)
   float *p;         // Pressure (centered)
-  float *rhs;       // RHS for pressure solve
+  float *rhs;       // RHS for pressure solve / Temporary RHS for Momentum
   float *sdf;       // Signed Distance Field (centered)
 
   // Surface Fractions (Face-Centered)
   float *frac_u, *frac_v, *frac_w;
+
+  // Stencil Arrays (7-point) - For Generic RB-GS Solver
+  // A_C (Center), A_W (-X), A_E (+X), A_S (-Y), A_N (+Y), A_B (-Z), A_T (+Z)
+  float *A_C;
+  float *A_W, *A_E;
+  float *A_S, *A_N;
+  float *A_B, *A_T;
+  float *B_RHS; // Unified Source Term Storage
 
   // IBM Data (SoA) - Centered (Pressure/SDF)
   IBM_Data ibm_data;
@@ -80,20 +85,25 @@ struct MacGrid {
   int *ibm_id_map_u, *ibm_id_map_v, *ibm_id_map_w;
   int num_ibm_cells_u, num_ibm_cells_v, num_ibm_cells_w;
 
-  // Double buffering temps
-  float *u_temp, *v_temp, *w_temp;
+  // Newton-Raphson Buffers
+  float *u_old, *v_old, *w_old; // Previous time step values (u^n)
+  float *p_old;                 // Previous time step pressure (p^n)
+  float *res_u, *res_v, *res_w; // Momentum residuals f^(k)
+  float *phi;                   // Pressure correction auxiliary variable
+  float *du, *dv, *dw;          // Velocity increments (delta u*, delta v*, delta w*)
 
-  float3 body_force_; // Force per Unit Volume (if user intends f) or
-                      // Mass-Specific Force? User said "set_body_force sets
-                      // acceleration". F=ma => a=F/m. In CFD, usually f =
-                      // Force/Volume. Then a = f/rho.
-  float3 body_accel_; // Derived: body_force_ / rho_
+  float3 body_force_;
+  float3 body_accel_;
 };
 
 class CFDSolver {
 public:
   CFDSolver(int3 res, float3 spacing);
   ~CFDSolver();
+
+  // Disable copying
+  CFDSolver(const CFDSolver &) = delete;
+  CFDSolver &operator=(const CFDSolver &) = delete;
 
   // Initialize from host data (if needed, or just zero out)
   void initialize(const SDFData &sdf_data);
@@ -148,26 +158,18 @@ public:
   // Solver Parameters
   void set_pressure_solver_params(int max_iter, float tol);
   void set_velocity_solver_params(int max_iter, float tol);
-  void set_outer_iterations(int n);
 
-  // Run one time step
-  // dt: time step size (optional/auto)
+  // Unified Solver Step (Picard Iteration)
+  // Replaces step_newton
   void step(float dt);
 
   // Perform Pressure Projection only (for Unit Testing/Splitting)
   void project(float dt, bool incremental = false);
 
-  // Temporary storage for Red-Black Gauss Seidel could go here if needed
-  // or just reusing existing pointers
-
   // Compute Volume/Area Fractions
   // type: 0=Vol, 1=Ax, 2=Ay, 3=Az
   // offset: {0,0,0} or staggered
   std::vector<float> get_fluid_fraction(int type, float3 offset);
-
-  // Run one implicit Convection-Diffusion time step
-  // dt: must be provided given implicit nature usually desires large dt
-  void step_implicit(float dt);
 
 protected:
   int pin_idx;
@@ -186,6 +188,8 @@ __global__ void compute_convection_defect_kernel(const float *__restrict__ u,
                                                  int3 res, float3 spacing,
                                                  int component_idx);
 
+// HELPER IMPLEMENTATION
+// (Removed get_ibm_update_rbgs as we switched to Stencil Solver)
 __global__ void solve_velocity_implicit_kernel(
     float *__restrict__ u, const float *__restrict__ rhs,
     const float *__restrict__ u_old, const float *__restrict__ v_old,
