@@ -575,7 +575,9 @@ __global__ void compute_divergence_kernel(
   float dw_dz = (w[idx] * frac_w[idx] - w[zm1] * frac_w[zm1]) / spacing.z;
 
   float div = du_dx + dv_dy + dw_dz;
-  rhs[idx] = -(div * rho) / dt;
+  // Paper convention: ∇²φ = div(u), so RHS = -div(u)
+  // (no ρ/dt factor - that goes into pressure update Eq. 14)
+  rhs[idx] = -div;
 }
 
 // --------------------------------------------------------
@@ -1381,7 +1383,9 @@ __global__ void project_velocity_kernel(
     return;
   int idx = get_idx(idx_x, idx_y, idx_z, res);
 
-  float scale = dt / rho;
+  // Paper convention: u = u* - ∇φ (no dt/rho factor)
+  // The ρ/(θΔt) factor is in the pressure update (Eq. 14)
+  float scale = 1.0f;
 
   // NOTE: Simple projection doesn't account for IBM faces.
   // Ideally, grad(p) at solid face should use Neumann 0, which implies p_n = p.
@@ -1424,19 +1428,14 @@ __global__ void project_velocity_kernel(
 // --------------------------------------------------------
 // Pressure Update from Phi Kernel (Incremental Pressure Correction)
 // --------------------------------------------------------
-// Implements Eq. 14 from Robust_Scaled_IBM_Solver.tex, adjusted for our scaling.
+// Implements Eq. 14 from Robust_Scaled_IBM_Solver.tex directly:
 //
-// LaTeX uses: ∇²φ_latex = div(u)
-// Our code:   ∇²φ_our = (ρ/Δt)*div(u)
-// Therefore:  φ_our = (ρ/Δt)*φ_latex, i.e., φ_latex = (Δt/ρ)*φ_our
+//   δp = (ρ/(θΔt))*φ + ρ*(u·∇φ) - μ*∇²φ
 //
-// Eq. 14 for φ_latex: δp = (ρ/(θΔt))*φ_latex + ρ*C(φ_latex) - μ*L(φ_latex)
-// Substituting φ_latex = (Δt/ρ)*φ_our:
-//   δp = (ρ/(θΔt))*(Δt/ρ)*φ + ρ*(Δt/ρ)*C(φ) - μ*(Δt/ρ)*L(φ)
-//      = φ/θ + Δt*C(φ) - (μΔt/ρ)*L(φ)
-//      = φ/θ + Δt*(u·∇φ) - ν*Δt*∇²φ
+// where φ satisfies the Poisson equation: ∇²φ = div(u)
 //
-// This is the "rotational" incremental pressure correction scheme.
+// This formulation is appropriate for large Δt (steady-state simulations)
+// because the (ρ/(θΔt)) term naturally diminishes as Δt → ∞.
 __global__ void update_pressure_from_phi_kernel(
     float *__restrict__ p, const float *__restrict__ phi,
     const float *__restrict__ p_old,
@@ -1479,13 +1478,10 @@ __global__ void update_pressure_from_phi_kernel(
   float inv_dy2 = 1.0f / (dy * dy);
   float inv_dz2 = 1.0f / (dz * dz);
 
-  // Kinematic viscosity
-  float nu = mu / rho;
+  // 1. Temporal/accumulation term: (ρ/(θΔt))*φ
+  float temporal_term = (rho / (theta * dt)) * phi_C;
 
-  // 1. Temporal term: φ/θ
-  float temporal_term = phi_C / theta;
-
-  // 2. Convection term: Δt * (u·∇φ)
+  // 2. Convection term: ρ*(u·∇φ)
   // Get cell-centered velocity (average of staggered values)
   float uc = 0.5f * (u[idx_W] + u[idx]);
   float vc = 0.5f * (v[idx_S] + v[idx]);
@@ -1496,16 +1492,16 @@ __global__ void update_pressure_from_phi_kernel(
   float dphi_dy = (phi_N - phi_S) * inv_2dy;
   float dphi_dz = (phi_T - phi_B) * inv_2dz;
 
-  float convection_term = dt * (uc * dphi_dx + vc * dphi_dy + wc * dphi_dz);
+  float convection_term = rho * (uc * dphi_dx + vc * dphi_dy + wc * dphi_dz);
 
-  // 3. Diffusion term: -ν*Δt*∇²φ (rotational correction)
+  // 3. Diffusion term: -μ*∇²φ
   float laplacian = (phi_E - 2.0f * phi_C + phi_W) * inv_dx2 +
                     (phi_N - 2.0f * phi_C + phi_S) * inv_dy2 +
                     (phi_T - 2.0f * phi_C + phi_B) * inv_dz2;
-  float diffusion_term = -nu * dt * laplacian;
+  float diffusion_term = -mu * laplacian;
 
-  // Full pressure update (adjusted Eq. 14):
-  // δp = φ/θ + Δt*(u·∇φ) - ν*Δt*∇²φ
+  // Full pressure update (Eq. 14):
+  // δp = (ρ/(θΔt))*φ + ρ*(u·∇φ) - μ*∇²φ
   float delta_p = temporal_term + convection_term + diffusion_term;
 
   // Update pressure: p = p_old + δp
