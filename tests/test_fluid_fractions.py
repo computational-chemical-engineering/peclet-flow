@@ -73,25 +73,18 @@ def test_fluid_fraction():
     # Correct.
     
     # 2. Check Area Fraction X (U-Face)
-    # Type 1. Offset (0.5, 0, 0).
-    # U_i is at i + 0.5.
-    # U_5 is at 5.5.
-    # SDF interpolated at 5.5 is 0.0.
-    # Normal X: ny=0, nz=0.
-    # Denom = 0 -> clamped to epsilon.
-    # Frac = 0.5 + 0/eps = 0.5.
-    # U_4 is at 4.5. SDF = -1.0. Frac = 0 (solid).
-    # U_6 is at 6.5. SDF = 1.0. Frac = 1 (fluid).
-    # So U_5 should be 0.5 (or jump if numer != 0).
+    # Type 1. Offset (-0.5, 0, 0).
+    # U_i is at i.
+    # For plane at x=5.5:
+    # U_5 is at 5.0 -> SDF = -0.5 -> fraction ~ 0.
+    # U_6 is at 6.0 -> SDF = +0.5 -> fraction ~ 1.
+    # Interface at x=5.5 lies between these faces.
     
-    af_u = solver.get_fluid_fraction(1, pnm_backend.float3(0.5, 0, 0))
+    af_u = solver.get_fluid_fraction(1, pnm_backend.float3(-0.5, 0, 0))
     af_u = np.array(af_u)
     print("AF_U Row:", af_u[0:nx])
     
-    if abs(af_u[5] - 0.5) < 1e-3:
-        print("AF_U at interface is 0.5 (Correct behavior for sharp interface aligned with grid).")
-    else:
-        print(f"AF_U at interface: {af_u[5]}")
+    print(f"AF_U at i=5 (x=5.0): {af_u[5]:.3f}, i=6 (x=6.0): {af_u[6]:.3f}")
 
     print("Test Passed.")
 

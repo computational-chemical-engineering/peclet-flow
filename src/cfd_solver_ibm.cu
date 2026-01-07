@@ -539,7 +539,7 @@ __global__ void modify_stencil_ibm_kernel(
 //   sdf: Centered SDF Field
 //   res: Grid Resolution
 //   spacing: Grid Spacing (dx, dy, dz)
-//   offset: {0,0,0} for Center/Vol, {0.5,0,0} for U-Face, etc.
+//   offset: {0,0,0} for Center/Vol, {-0.5,0,0} for U-Face, etc.
 //   type: 0..3
 // Output:
 //   fractions: Output array [num_elements]

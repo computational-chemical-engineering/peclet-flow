@@ -64,12 +64,12 @@ def check_divergence():
     sdf = sdf_vals.reshape((nx, ny, nz), order='F')
     
     # Compute Divergence
-    u_right = u
-    u_left = np.roll(u, 1, axis=0) # u[i-1] moves to i
-    v_top = v
-    v_bottom = np.roll(v, 1, axis=1)
-    w_front = w
-    w_back = np.roll(w, 1, axis=2)
+    u_right = np.roll(u, -1, axis=0) # u[i+1]
+    u_left = u
+    v_top = np.roll(v, -1, axis=1)
+    v_bottom = v
+    w_front = np.roll(w, -1, axis=2)
+    w_back = w
     
     div = (u_right - u_left)/dx + (v_top - v_bottom)/dy + (w_front - w_back)/dz
     

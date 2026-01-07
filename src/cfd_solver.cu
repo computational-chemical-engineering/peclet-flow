@@ -37,8 +37,8 @@ __global__ void compute_pressure_stencil_kernel(
     float *__restrict__ A_T, float *__restrict__ B_RHS,
     const float *__restrict__ rhs_input, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
-    const float *__restrict__ p_old, int3 res, float3 spacing,
-    float solid_c);
+    const float *__restrict__ sdf, const float *__restrict__ p_old, int3 res,
+    float3 spacing, float solid_c);
 
 __global__ void compute_fluid_fraction_kernel(
     const float *__restrict__ sdf, float *fractions, int3 res, float3 spacing,
@@ -353,70 +353,10 @@ __global__ void advect_ppm_split_kernel(const float *__restrict__ field_in,
   };
 
   // --- Compute Flux at Right Face (i+1/2) ---
-  // Velocity at face?
-  // If advecting a scalar: Velocity is defined at faces.
-  // If direction=X, vel_in is 'u'. 'u' is defined at i+1/2.
-  // So vel_in[idx] IS u_{i+1/2}.
-  // BUT checking our MacGrid struct...
-  // u[idx] is technically u_{i+1/2}. Correct.
-  // v[idx] is v_{j+1/2}.
-  // w[idx] is w_{k+1/2}.
-  // HOWEVER, if we are advecting 'u' itself using 'u' (Burgers term u*du/dx):
-  // The control volume for 'u' is centered at i+1/2.
-  // Its faces are at i and i+1.
-  // We need u at i?
-  // This staggering makes generic kernels tricky.
-  // Simpler Assumption for Phase 1 Conservative/High-Order:
-  // Treat the quantity being advected (field_in) as Cell-Centered for the
-  // reconstruction logic. Treat the velocity (vel_in) as Face-Centered at
-  // i+1/2. This matches:
-  // - Advecting Density/Sdist: Cell centered. Velocity u is at faces. Perfect.
-  // - Advecting U: Control volume i+1/2. Faces at i, i+1.
-  //   Velocity at i? We have u_{i-1/2} (idx-1) and u_{i+1/2} (idx). Average?
-
-  // Determine Advecting Velocity at Right Face (i+1/2 relative to current cell)
-  // And Left Face (i-1/2)
-
-  // CASE A: Advecting a Scalar (or generic).
-  // Let's assume field_in is cell centered at X.
-  // Let's implement the generic "Advect Cell quantity by Face Velocity" kernel.
-  // When advecting u (which is face-centered), we will shift our mental model:
-  // We effectively reconstruct u at i and i+1.
-  // And we need advecting velocity at i and i+1.
-  // u_{avg_i} = 0.5*(u_{i-1/2} + u_{i+1/2}).
-
-  // IMPLEMENTATION CHOICE:
-  // We simply use the `vel_in` array.
-  // If advecting u with u:
-  // For update u_i (at i+1/2), we need fluxes at i and i+1.
-  // Flux at i+1 needs velocity at i+1.
-  // Velocity at i+1 approx 0.5*(u_{i+1/2} + u_{i+3/2}).
-
-  // Generalizing:
-  // Pass a flag or specialize?
-  // Let's just Average vel_in[idx] and vel_in[idx+1] for the velocity at the
-  // face i+1/2 IF we are advecting the SAME component (u advecting u). If u
-  // advecting v (Transport of Y-momentum by X-velocity): v is at j+1/2. u is at
-  // i+1/2. X-faces of v-cell are at i+1/2. That's exactly where u is! So for
-  // Transverse Advection (u advecting v, u advecting w), u aligned with faces.
-  // For Self Advection (u advecting u), u is at cell centers.
-
-  // Resolution:
-  // If direction == component_being_advected:
-  //    Velocity at interface i+1/2 = 0.5 * (vel[i] + vel[i+1])
-  // Else:
-  //    Velocity at interface i+1/2 = vel[i] (or vel[i+1] depending on indexing)
-  //    Checking: u(i, j, k) is at i+1/2.
-  //    v(i, j, k) is at j+1/2.
-  //    Advecting v with u (X-pass):
-  //    v_cell center is (i, j+1/2). Faces are i-1/2, i+1/2.
-  //    u is defined at i+1/2!
-  //    So vel_face = u[idx].
-
-  // Since we don't pass "component ID" to this generic kernel easily (we can
-  // add it), let's just do the rigorous thing: Interpolate velocity to the Flux
-  // Face. Flux Face is always at relative +0.5 in 'direction'. Cell Center (of
-  // field_in) is assumed 0.0.
+  // Velocity at face:
+  // - We treat field_in as cell-centered for reconstruction.
+  // - Velocity is face-centered; for self-advection we approximate face values
+  //   by averaging adjacent face nodes.
 
   // --- Compute Flux at Right Face (i+1/2) ---
   // Reconstruct phi at i+1/2 (Right face of cell i)
@@ -600,11 +540,11 @@ __device__ inline float sample_sdf_component(const float *__restrict__ sdf,
                                              int idx_z, int comp_idx) {
   float3 offset = make_float3(0.0f, 0.0f, 0.0f);
   if (comp_idx == 0) {
-    offset = make_float3(0.5f, 0.0f, 0.0f);
+    offset = make_float3(-0.5f, 0.0f, 0.0f);
   } else if (comp_idx == 1) {
-    offset = make_float3(0.0f, 0.5f, 0.0f);
+    offset = make_float3(0.0f, -0.5f, 0.0f);
   } else {
-    offset = make_float3(0.0f, 0.0f, 0.5f);
+    offset = make_float3(0.0f, 0.0f, -0.5f);
   }
   return sample_sdf_interp_local(idx_x + offset.x, idx_y + offset.y,
                                  idx_z + offset.z, sdf, res);
@@ -660,17 +600,17 @@ __global__ void apply_face_sdf_mask_kernel(
   if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
     return;
 
-  float sdf_u = sample_sdf_interp_local(idx_x + 0.5f, idx_y, idx_z, sdf, res);
+  float sdf_u = sample_sdf_interp_local(idx_x - 0.5f, idx_y, idx_z, sdf, res);
   if (sdf_u < 0.0f) {
     u[get_idx(idx_x, idx_y, idx_z, res)] = 0.0f;
   }
 
-  float sdf_v = sample_sdf_interp_local(idx_x, idx_y + 0.5f, idx_z, sdf, res);
+  float sdf_v = sample_sdf_interp_local(idx_x, idx_y - 0.5f, idx_z, sdf, res);
   if (sdf_v < 0.0f) {
     v[get_idx(idx_x, idx_y, idx_z, res)] = 0.0f;
   }
 
-  float sdf_w = sample_sdf_interp_local(idx_x, idx_y, idx_z + 0.5f, sdf, res);
+  float sdf_w = sample_sdf_interp_local(idx_x, idx_y, idx_z - 0.5f, sdf, res);
   if (sdf_w < 0.0f) {
     w[get_idx(idx_x, idx_y, idx_z, res)] = 0.0f;
   }
@@ -694,42 +634,74 @@ __global__ void compute_divergence_kernel(
   int idx = get_idx(idx_x, idx_y, idx_z, res);
 
   // Divergence at cell center (i, j, k)
-  // u is at (i+1/2), so u[i] is Right face, u[i-1] is Left face.
-  // Neighbors
-  int xm1 = get_idx(idx_x - 1, idx_y, idx_z, res);
-  int ym1 = get_idx(idx_x, idx_y - 1, idx_z, res);
-  int zm1 = get_idx(idx_x, idx_y, idx_z - 1, res);
-
-  // Note: get_idx handles wrapping for -1.
-  // u[idx] corresponds to u_{i+1/2}
-  // u[xm1] corresponds to u_{i-1/2}
+  // u is at x=i (left face), so u[i] is Left face, u[i+1] is Right face.
+  // v is at y=j (south face), v[j] is South, v[j+1] is North.
+  // w is at z=k (bottom face), w[k] is Bottom, w[k+1] is Top.
+  int xp1 = get_idx(idx_x + 1, idx_y, idx_z, res);
+  int yp1 = get_idx(idx_x, idx_y + 1, idx_z, res);
+  int zp1 = get_idx(idx_x, idx_y, idx_z + 1, res);
 
   const float bc_val = 0.0f;
 
-  float u_r = get_face_velocity_for_flux(
-      u, sdf, res, make_float3(0.5f, 0.0f, 0.0f), idx_x, idx_y, idx_z,
-      frac_u[idx], bc_val, 0);
-  float u_l = get_face_velocity_for_flux(
-      u, sdf, res, make_float3(0.5f, 0.0f, 0.0f), idx_x - 1, idx_y, idx_z,
-      frac_u[xm1], bc_val, 0);
+  float sdf_u_r =
+      sample_sdf_interp_local(idx_x + 0.5f, idx_y, idx_z, sdf, res);
+  float sdf_u_l =
+      sample_sdf_interp_local(idx_x - 0.5f, idx_y, idx_z, sdf, res);
+  float sdf_v_n =
+      sample_sdf_interp_local(idx_x, idx_y + 0.5f, idx_z, sdf, res);
+  float sdf_v_s =
+      sample_sdf_interp_local(idx_x, idx_y - 0.5f, idx_z, sdf, res);
+  float sdf_w_t =
+      sample_sdf_interp_local(idx_x, idx_y, idx_z + 0.5f, sdf, res);
+  float sdf_w_b =
+      sample_sdf_interp_local(idx_x, idx_y, idx_z - 0.5f, sdf, res);
 
-  float v_n = get_face_velocity_for_flux(
-      v, sdf, res, make_float3(0.0f, 0.5f, 0.0f), idx_x, idx_y, idx_z,
-      frac_v[idx], bc_val, 1);
-  float v_s = get_face_velocity_for_flux(
-      v, sdf, res, make_float3(0.0f, 0.5f, 0.0f), idx_x, idx_y - 1, idx_z,
-      frac_v[ym1], bc_val, 1);
+  float frac_u_r = (sdf_u_r > 0.0f) ? frac_u[xp1] : 0.0f;
+  float frac_u_l = (sdf_u_l > 0.0f) ? frac_u[idx] : 0.0f;
+  float frac_v_n = (sdf_v_n > 0.0f) ? frac_v[yp1] : 0.0f;
+  float frac_v_s = (sdf_v_s > 0.0f) ? frac_v[idx] : 0.0f;
+  float frac_w_t = (sdf_w_t > 0.0f) ? frac_w[zp1] : 0.0f;
+  float frac_w_b = (sdf_w_b > 0.0f) ? frac_w[idx] : 0.0f;
 
-  float w_t = get_face_velocity_for_flux(
-      w, sdf, res, make_float3(0.0f, 0.0f, 0.5f), idx_x, idx_y, idx_z,
-      frac_w[idx], bc_val, 2);
-  float w_b = get_face_velocity_for_flux(
-      w, sdf, res, make_float3(0.0f, 0.0f, 0.5f), idx_x, idx_y, idx_z - 1,
-      frac_w[zm1], bc_val, 2);
+  float u_r = (frac_u_r > 0.0f)
+                  ? get_face_velocity_for_flux(
+                        u, sdf, res, make_float3(-0.5f, 0.0f, 0.0f),
+                        idx_x + 1, idx_y, idx_z, frac_u_r, bc_val, 0)
+                  : 0.0f;
+  float u_l =
+      (frac_u_l > 0.0f)
+          ? get_face_velocity_for_flux(
+                u, sdf, res, make_float3(-0.5f, 0.0f, 0.0f), idx_x, idx_y,
+                idx_z, frac_u_l, bc_val, 0)
+          : 0.0f;
 
-  float du_dx = (u_r * frac_u[idx] - u_l * frac_u[xm1]) / spacing.x;
-  float dv_dy = (v_n * frac_v[idx] - v_s * frac_v[ym1]) / spacing.y;
-  float dw_dz = (w_t * frac_w[idx] - w_b * frac_w[zm1]) / spacing.z;
+  float v_n = (frac_v_n > 0.0f)
+                  ? get_face_velocity_for_flux(
+                        v, sdf, res, make_float3(0.0f, -0.5f, 0.0f), idx_x,
+                        idx_y + 1, idx_z, frac_v_n, bc_val, 1)
+                  : 0.0f;
+  float v_s =
+      (frac_v_s > 0.0f)
+          ? get_face_velocity_for_flux(
+                v, sdf, res, make_float3(0.0f, -0.5f, 0.0f), idx_x, idx_y,
+                idx_z, frac_v_s, bc_val, 1)
+          : 0.0f;
+
+  float w_t = (frac_w_t > 0.0f)
+                  ? get_face_velocity_for_flux(
+                        w, sdf, res, make_float3(0.0f, 0.0f, -0.5f), idx_x,
+                        idx_y, idx_z + 1, frac_w_t, bc_val, 2)
+                  : 0.0f;
+  float w_b =
+      (frac_w_b > 0.0f)
+          ? get_face_velocity_for_flux(
+                w, sdf, res, make_float3(0.0f, 0.0f, -0.5f), idx_x, idx_y,
+                idx_z, frac_w_b, bc_val, 2)
+          : 0.0f;
+
+  float du_dx = (u_r * frac_u_r - u_l * frac_u_l) / spacing.x;
+  float dv_dy = (v_n * frac_v_n - v_s * frac_v_s) / spacing.y;
+  float dw_dz = (w_t * frac_w_t - w_b * frac_w_b) / spacing.z;
 
   float div = du_dx + dv_dy + dw_dz;
   // Paper convention: ∇²φ = div(u), so RHS = -div(u)
@@ -741,7 +713,7 @@ __global__ void compute_divergence_kernel(
 // Velocity Mask Kernel (Staircase IBM)
 // --------------------------------------------------------
 // Sets u, v, w to 0 if the face touches a solid cell (SDF < 0)
-// u[i,j,k] is face between cell (i,j,k) and (i+1,j,k)
+// u[i,j,k] is face between cell (i-1,j,k) and (i,j,k)
 __global__ void apply_velocity_mask_kernel(float *__restrict__ u,
                                            float *__restrict__ v,
                                            float *__restrict__ w,
@@ -755,27 +727,25 @@ __global__ void apply_velocity_mask_kernel(float *__restrict__ u,
     return;
   int idx = get_idx(idx_x, idx_y, idx_z, res);
 
-  // Check neighbors for u (Face i+1/2)
-  // Touches cell i and i+1
   float sdf_c = sdf[idx];
 
   {
-    float sdf_next = sdf[get_idx(idx_x + 1, idx_y, idx_z, res)];
-    if (sdf_c < 0.0f || sdf_next < 0.0f) {
+    float sdf_prev = sdf[get_idx(idx_x - 1, idx_y, idx_z, res)];
+    if (sdf_prev < 0.0f || sdf_c < 0.0f) {
       u[idx] = 0.0f;
     }
   }
 
   {
-    float sdf_next = sdf[get_idx(idx_x, idx_y + 1, idx_z, res)];
-    if (sdf_c < 0.0f || sdf_next < 0.0f) {
+    float sdf_prev = sdf[get_idx(idx_x, idx_y - 1, idx_z, res)];
+    if (sdf_prev < 0.0f || sdf_c < 0.0f) {
       v[idx] = 0.0f;
     }
   }
 
   {
-    float sdf_next = sdf[get_idx(idx_x, idx_y, idx_z + 1, res)];
-    if (sdf_c < 0.0f || sdf_next < 0.0f) {
+    float sdf_prev = sdf[get_idx(idx_x, idx_y, idx_z - 1, res)];
+    if (sdf_prev < 0.0f || sdf_c < 0.0f) {
       w[idx] = 0.0f;
     }
   }
@@ -843,8 +813,8 @@ __global__ void compute_pressure_stencil_kernel(
     float *__restrict__ A_T, float *__restrict__ B_RHS,
     const float *__restrict__ rhs_input, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
-    const float *__restrict__ p_old, int3 res, float3 spacing,
-    float solid_c) {
+    const float *__restrict__ sdf, const float *__restrict__ p_old, int3 res,
+    float3 spacing, float solid_c) {
 
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -869,20 +839,42 @@ __global__ void compute_pressure_stencil_kernel(
   int idx_zp = get_idx(idx_x, idx_y, idx_z + 1, res);
   int idx_zm = get_idx(idx_x, idx_y, idx_z - 1, res);
 
+  // Face-centered SDF classification for pressure coupling
+  float sdf_u_r =
+      sample_sdf_interp_local(idx_x + 0.5f, idx_y, idx_z, sdf, res);
+  float sdf_u_l =
+      sample_sdf_interp_local(idx_x - 0.5f, idx_y, idx_z, sdf, res);
+  float sdf_v_n =
+      sample_sdf_interp_local(idx_x, idx_y + 0.5f, idx_z, sdf, res);
+  float sdf_v_s =
+      sample_sdf_interp_local(idx_x, idx_y - 0.5f, idx_z, sdf, res);
+  float sdf_w_t =
+      sample_sdf_interp_local(idx_x, idx_y, idx_z + 0.5f, sdf, res);
+  float sdf_w_b =
+      sample_sdf_interp_local(idx_x, idx_y, idx_z - 0.5f, sdf, res);
+
+  bool face_u_r = sdf_u_r > 0.0f;
+  bool face_u_l = sdf_u_l > 0.0f;
+  bool face_v_n = sdf_v_n > 0.0f;
+  bool face_v_s = sdf_v_s > 0.0f;
+  bool face_w_t = sdf_w_t > 0.0f;
+  bool face_w_b = sdf_w_b > 0.0f;
+
+  int fluid_faces = (int)face_u_r + (int)face_u_l + (int)face_v_n +
+                    (int)face_v_s + (int)face_w_t + (int)face_w_b;
+
   // Surface Fractions for Weighted Laplacian
-  // A_E corresponds to face i+1/2 (frac_u[i])
-  // A_W corresponds to face i-1/2 (frac_u[i-1])
+  // A_E corresponds to face at x=i+1 (frac_u[i+1]) if fluid
+  // A_W corresponds to face at x=i (frac_u[i]) if fluid
+  float ax_p = face_u_r ? frac_u[idx_xp] * inv_dx2 : 0.0f;
+  float ax_m = face_u_l ? frac_u[idx] * inv_dx2 : 0.0f;
+  float ay_p = face_v_n ? frac_v[idx_yp] * inv_dy2 : 0.0f;
+  float ay_m = face_v_s ? frac_v[idx] * inv_dy2 : 0.0f;
+  float az_p = face_w_t ? frac_w[idx_zp] * inv_dz2 : 0.0f;
+  float az_m = face_w_b ? frac_w[idx] * inv_dz2 : 0.0f;
 
-  float ax_p = frac_u[idx] * inv_dx2;
-  float ax_m = frac_u[idx_xm] * inv_dx2;
-  float ay_p = frac_v[idx] * inv_dy2;
-  float ay_m = frac_v[idx_ym] * inv_dy2;
-  float az_p = frac_w[idx] * inv_dz2;
-  float az_m = frac_w[idx_zm] * inv_dz2;
-
-  // Check if disconnected (Deep Solid)
-  float sum_a = ax_p + ax_m + ay_p + ay_m + az_p + az_m;
-  if (sum_a < 1e-9f) {
+  // If all faces are solid, decouple from fluid and use unweighted Laplacian.
+  if (fluid_faces == 0) {
     // Solid cell: use unweighted Laplacian and enforce
     // Ds G phi = -(1/c) Ds G p_old.
     float ax = inv_dx2;
@@ -951,10 +943,10 @@ __device__ inline float quick_interp(float u_face, float phi_m1, float phi_0,
 // idx: target cell index (i, j, k)
 // Returns: Advecting velocity at the corresponding face
 //
-// Grid Staggereing:
-// U is at (i+1/2, j, k)
-// V is at (i, j+1/2, k)
-// W is at (i, j, k+1/2)
+// Grid Staggering:
+// U is at (i, j+1/2, k+1/2)
+// V is at (i+1/2, j, k+1/2)
+// W is at (i+1/2, j+1/2, k)
 // Helper: Get Advection Velocity (Interpolated)
 __device__ inline float get_advection_velocity(const float *__restrict__ u,
                                                const float *__restrict__ v,
@@ -971,47 +963,47 @@ __device__ inline float get_advection_velocity(const float *__restrict__ u,
   int idx_z = idx.z;
 
   if (comp_idx == 0) {   // U-Momentum
-    if (face_dir == 0) { // X-Face
+    if (face_dir == 0) { // X-Face (x=i+0.5)
       float u_c = u[get_idx(idx_x, idx_y, idx_z, res)];
       float u_e = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
       return 0.5f * (u_c + u_e);
-    } else if (face_dir == 1) { // Y-Face
-      float v_right = v[get_idx(idx_x + 1, idx_y, idx_z, res)];
-      float v_self = v[get_idx(idx_x, idx_y, idx_z, res)];
-      return 0.5f * (v_self + v_right);
-    } else { // Z-Face
-      float w_self = w[get_idx(idx_x, idx_y, idx_z, res)];
-      float w_right = w[get_idx(idx_x + 1, idx_y, idx_z, res)];
-      return 0.5f * (w_self + w_right);
+    } else if (face_dir == 1) { // Y-Face (y=j+1)
+      float v_l = v[get_idx(idx_x - 1, idx_y + 1, idx_z, res)];
+      float v_r = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
+      return 0.5f * (v_l + v_r);
+    } else { // Z-Face (z=k+1)
+      float w_l = w[get_idx(idx_x - 1, idx_y, idx_z + 1, res)];
+      float w_r = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
+      return 0.5f * (w_l + w_r);
     }
   }
 
   if (comp_idx == 1) {   // V-Momentum
-    if (face_dir == 0) { // X-Face
-      float u_self = u[get_idx(idx_x, idx_y, idx_z, res)];
-      float u_top = u[get_idx(idx_x, idx_y + 1, idx_z, res)];
-      return 0.5f * (u_self + u_top);
-    } else if (face_dir == 1) { // Y-Face
+    if (face_dir == 0) { // X-Face (x=i+1)
+      float u_s = u[get_idx(idx_x + 1, idx_y - 1, idx_z, res)];
+      float u_n = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
+      return 0.5f * (u_s + u_n);
+    } else if (face_dir == 1) { // Y-Face (y=j+0.5)
       float v_c = v[get_idx(idx_x, idx_y, idx_z, res)];
       float v_n = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
       return 0.5f * (v_c + v_n);
-    } else { // Z-Face
-      float w_self = w[get_idx(idx_x, idx_y, idx_z, res)];
-      float w_top = w[get_idx(idx_x, idx_y + 1, idx_z, res)];
-      return 0.5f * (w_self + w_top);
+    } else { // Z-Face (z=k+1)
+      float w_s = w[get_idx(idx_x, idx_y - 1, idx_z + 1, res)];
+      float w_n = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
+      return 0.5f * (w_s + w_n);
     }
   }
 
   if (comp_idx == 2) {   // W-Momentum
-    if (face_dir == 0) { // X-Face
-      float u_self = u[get_idx(idx_x, idx_y, idx_z, res)];
-      float u_front = u[get_idx(idx_x, idx_y, idx_z + 1, res)];
-      return 0.5f * (u_self + u_front);
-    } else if (face_dir == 1) { // Y-Face
-      float v_self = v[get_idx(idx_x, idx_y, idx_z, res)];
-      float v_front = v[get_idx(idx_x, idx_y, idx_z + 1, res)];
-      return 0.5f * (v_self + v_front);
-    } else { // Z-Face
+    if (face_dir == 0) { // X-Face (x=i+1)
+      float u_b = u[get_idx(idx_x + 1, idx_y, idx_z - 1, res)];
+      float u_t = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
+      return 0.5f * (u_b + u_t);
+    } else if (face_dir == 1) { // Y-Face (y=j+1)
+      float v_b = v[get_idx(idx_x, idx_y + 1, idx_z - 1, res)];
+      float v_t = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
+      return 0.5f * (v_b + v_t);
+    } else { // Z-Face (z=k+0.5)
       float w_c = w[get_idx(idx_x, idx_y, idx_z, res)];
       float w_f = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
       return 0.5f * (w_c + w_f);
@@ -1243,10 +1235,10 @@ __global__ void compute_explicit_terms_kernel(
                 (u_b - 2.0f * uc + u_t) * inv_dz2;
     float diff_term = mu * lap;
 
-    // Grad P (at u_face i+1/2) -> (p_{i+1} - p_i)/dx
+    // Grad P at u-face (x=i) -> (p_i - p_{i-1})/dx
     float p_c = p[idx];
-    float p_e = p[get_idx(idx_x + 1, idx_y, idx_z, res)];
-    float gp = (p_e - p_c) * inv_dx;
+    float p_w = p[get_idx(idx_x - 1, idx_y, idx_z, res)];
+    float gp = (p_c - p_w) * inv_dx;
 
     // Body Force is usually implicit or explicit?
     // Eq 46 doesn't mention force explicitly, usually added to RHS.
@@ -1305,10 +1297,10 @@ __global__ void compute_explicit_terms_kernel(
                 (v_b - 2.0f * vc + v_t) * inv_dz2;
     float diff_term = mu * lap;
 
-    // Grad P (at v_face j+1/2) -> (p_{j+1} - p_j)/dy
+    // Grad P at v-face (y=j) -> (p_j - p_{j-1})/dy
     float p_c = p[idx];
-    float p_n = p[get_idx(idx_x, idx_y + 1, idx_z, res)];
-    float gp = (p_n - p_c) * inv_dy;
+    float p_s = p[get_idx(idx_x, idx_y - 1, idx_z, res)];
+    float gp = (p_c - p_s) * inv_dy;
 
     explicit_v[idx] = -(adv_term - diff_term + gp);
   }
@@ -1359,10 +1351,10 @@ __global__ void compute_explicit_terms_kernel(
                 (w_b - 2.0f * wc + w_t) * inv_dz2;
     float diff_term = mu * lap;
 
-    // Grad P (at w_face k+1/2) -> (p_{k+1} - p_k)/dz
+    // Grad P at w-face (z=k) -> (p_k - p_{k-1})/dz
     float p_c = p[idx];
-    float p_t = p[get_idx(idx_x, idx_y, idx_z + 1, res)];
-    float gp = (p_t - p_c) * inv_dz;
+    float p_b = p[get_idx(idx_x, idx_y, idx_z - 1, res)];
+    float gp = (p_c - p_b) * inv_dz;
 
     explicit_w[idx] = -(adv_term - diff_term + gp);
   }
@@ -1431,36 +1423,44 @@ __global__ void compute_momentum_stencil_kernel(
 #define AVG4(v1, v2, v3, v4) (0.25f * ((v1) + (v2) + (v3) + (v4)))
 #define AVG2(v1, v2) (0.5f * ((v1) + (v2)))
 
-  if (component_idx == 0) { // U-Component at (i+1/2, j, k)
+  if (component_idx == 0) { // U-Component at (i, j+1/2, k+1/2)
     uc = u_curr[idx];
-    // V at (i+1/2, j) averaged from corners
-    int id_xp = get_idx(idx_x + 1, idx_y, idx_z, res);
-    vc = AVG4(v_curr[idx], v_curr[id_xp],
-              v_curr[get_idx(idx_x, idx_y - 1, idx_z, res)],
-              v_curr[get_idx(idx_x + 1, idx_y - 1, idx_z, res)]);
-    wc = AVG4(w_curr[idx], w_curr[id_xp],
-              w_curr[get_idx(idx_x, idx_y, idx_z - 1, res)],
-              w_curr[get_idx(idx_x + 1, idx_y, idx_z - 1, res)]);
+    // Interpolate V to (i, j+0.5, k+0.5)
+    vc = AVG4(v_curr[get_idx(idx_x - 1, idx_y, idx_z, res)],
+              v_curr[get_idx(idx_x, idx_y, idx_z, res)],
+              v_curr[get_idx(idx_x - 1, idx_y + 1, idx_z, res)],
+              v_curr[get_idx(idx_x, idx_y + 1, idx_z, res)]);
+    // Interpolate W to (i, j+0.5, k+0.5)
+    wc = AVG4(w_curr[get_idx(idx_x - 1, idx_y, idx_z, res)],
+              w_curr[get_idx(idx_x, idx_y, idx_z, res)],
+              w_curr[get_idx(idx_x - 1, idx_y, idx_z + 1, res)],
+              w_curr[get_idx(idx_x, idx_y, idx_z + 1, res)]);
 
-  } else if (component_idx == 1) { // V at (i, j+1/2, k)
+  } else if (component_idx == 1) { // V at (i+0.5, j, k+0.5)
     vc = v_curr[idx];
-    int id_yp = get_idx(idx_x, idx_y + 1, idx_z, res);
-    uc = AVG4(u_curr[idx], u_curr[id_yp],
-              u_curr[get_idx(idx_x - 1, idx_y, idx_z, res)],
-              u_curr[get_idx(idx_x - 1, idx_y + 1, idx_z, res)]);
-    wc = AVG4(w_curr[idx], w_curr[id_yp],
-              w_curr[get_idx(idx_x, idx_y, idx_z - 1, res)],
-              w_curr[get_idx(idx_x, idx_y + 1, idx_z - 1, res)]);
+    // Interpolate U to (i+0.5, j, k+0.5)
+    uc = AVG4(u_curr[get_idx(idx_x, idx_y - 1, idx_z, res)],
+              u_curr[get_idx(idx_x + 1, idx_y - 1, idx_z, res)],
+              u_curr[get_idx(idx_x, idx_y, idx_z, res)],
+              u_curr[get_idx(idx_x + 1, idx_y, idx_z, res)]);
+    // Interpolate W to (i+0.5, j, k+0.5)
+    wc = AVG4(w_curr[get_idx(idx_x, idx_y - 1, idx_z, res)],
+              w_curr[get_idx(idx_x, idx_y, idx_z, res)],
+              w_curr[get_idx(idx_x, idx_y - 1, idx_z + 1, res)],
+              w_curr[get_idx(idx_x, idx_y, idx_z + 1, res)]);
 
-  } else { // W at (i, j, k+1/2)
+  } else { // W at (i+0.5, j+0.5, k)
     wc = w_curr[idx];
-    int id_zp = get_idx(idx_x, idx_y, idx_z + 1, res);
-    uc = AVG4(u_curr[idx], u_curr[id_zp],
-              u_curr[get_idx(idx_x - 1, idx_y, idx_z, res)],
-              u_curr[get_idx(idx_x - 1, idx_y, idx_z + 1, res)]);
-    vc = AVG4(v_curr[idx], v_curr[id_zp],
-              v_curr[get_idx(idx_x, idx_y - 1, idx_z, res)],
-              v_curr[get_idx(idx_x, idx_y - 1, idx_z + 1, res)]);
+    // Interpolate U to (i+0.5, j+0.5, k)
+    uc = AVG4(u_curr[get_idx(idx_x, idx_y, idx_z - 1, res)],
+              u_curr[get_idx(idx_x + 1, idx_y, idx_z - 1, res)],
+              u_curr[get_idx(idx_x, idx_y, idx_z, res)],
+              u_curr[get_idx(idx_x + 1, idx_y, idx_z, res)]);
+    // Interpolate V to (i+0.5, j+0.5, k)
+    vc = AVG4(v_curr[get_idx(idx_x, idx_y, idx_z - 1, res)],
+              v_curr[get_idx(idx_x, idx_y + 1, idx_z - 1, res)],
+              v_curr[get_idx(idx_x, idx_y, idx_z, res)],
+              v_curr[get_idx(idx_x, idx_y + 1, idx_z, res)]);
   }
 
 #undef AVG4
@@ -1606,8 +1606,8 @@ __global__ void project_velocity_kernel(
 
   {
     if (frac_u[idx] > 0.0f) {
-      int idx_next = get_idx(idx_x + 1, idx_y, idx_z, res);
-      float dp_dx = (p[idx_next] - p[idx]) / spacing.x;
+      int idx_prev = get_idx(idx_x - 1, idx_y, idx_z, res);
+      float dp_dx = (p[idx] - p[idx_prev]) / spacing.x;
       u[idx] -= scale * dp_dx;
     } else {
       u[idx] = 0.0f;
@@ -1615,8 +1615,8 @@ __global__ void project_velocity_kernel(
   }
   {
     if (frac_v[idx] > 0.0f) {
-      int idy_next = get_idx(idx_x, idx_y + 1, idx_z, res);
-      float dp_dy = (p[idy_next] - p[idx]) / spacing.y;
+      int idy_prev = get_idx(idx_x, idx_y - 1, idx_z, res);
+      float dp_dy = (p[idx] - p[idy_prev]) / spacing.y;
       v[idx] -= scale * dp_dy;
     } else {
       v[idx] = 0.0f;
@@ -1624,8 +1624,8 @@ __global__ void project_velocity_kernel(
   }
   {
     if (frac_w[idx] > 0.0f) {
-      int idz_next = get_idx(idx_x, idx_y, idx_z + 1, res);
-      float dp_dz = (p[idz_next] - p[idx]) / spacing.z;
+      int idz_prev = get_idx(idx_x, idx_y, idx_z - 1, res);
+      float dp_dz = (p[idx] - p[idz_prev]) / spacing.z;
       w[idx] -= scale * dp_dz;
     } else {
       w[idx] = 0.0f;
@@ -2074,32 +2074,32 @@ void CFDSolver::update_ibm_geometry() {
   // U-Face (Area X)
   compute_fluid_fraction_kernel<<<blocks, threads>>>(
       grid.sdf, grid.frac_u, grid.res, grid.spacing,
-      make_float3(0.5f, 0.0f, 0.0f), 1);
+      make_float3(-0.5f, 0.0f, 0.0f), 1);
   // V-Face (Area Y)
   compute_fluid_fraction_kernel<<<blocks, threads>>>(
       grid.sdf, grid.frac_v, grid.res, grid.spacing,
-      make_float3(0.0f, 0.5f, 0.0f), 2);
+      make_float3(0.0f, -0.5f, 0.0f), 2);
   // W-Face (Area Z)
   compute_fluid_fraction_kernel<<<blocks, threads>>>(
       grid.sdf, grid.frac_w, grid.res, grid.spacing,
-      make_float3(0.0f, 0.0f, 0.5f), 3);
+      make_float3(0.0f, 0.0f, -0.5f), 3);
   CHECK_CUDA(cudaGetLastError());
 
   // 1. Centered (Pressure) - Neumann (1)
   grid.num_ibm_cells = run_geo_pass(grid.ibm_data, grid.ibm_id_map,
                                     make_float3(0.0f, 0.0f, 0.0f), 1);
 
-  // 2. U (Face X: +0.5 x) - Dirichlet (0)
+  // 2. U (Face X: 0.0 x) - Dirichlet (0)
   grid.num_ibm_cells_u = run_geo_pass(grid.ibm_data_u, grid.ibm_id_map_u,
-                                      make_float3(0.5f, 0.0f, 0.0f), 0);
+                                      make_float3(-0.5f, 0.0f, 0.0f), 0);
 
-  // 3. V (Face Y: +0.5 y) - Dirichlet (0)
+  // 3. V (Face Y: 0.0 y) - Dirichlet (0)
   grid.num_ibm_cells_v = run_geo_pass(grid.ibm_data_v, grid.ibm_id_map_v,
-                                      make_float3(0.0f, 0.5f, 0.0f), 0);
+                                      make_float3(0.0f, -0.5f, 0.0f), 0);
 
-  // 4. W (Face Z: +0.5 z) - Dirichlet (0)
+  // 4. W (Face Z: 0.0 z) - Dirichlet (0)
   grid.num_ibm_cells_w = run_geo_pass(grid.ibm_data_w, grid.ibm_id_map_w,
-                                      make_float3(0.0f, 0.0f, 0.5f), 0);
+                                      make_float3(0.0f, 0.0f, -0.5f), 0);
 
   CHECK_CUDA(cudaFree(d_counter));
 
@@ -2639,11 +2639,11 @@ void CFDSolver::step(float dt) {
   if (!ibm_initialized || true) { // Always run for now
     // Update area fractions for cut-cell pressure handling.
     compute_fluid_fraction_kernel<<<grid_dim, block>>>(
-        grid.sdf, grid.frac_u, res, spacing, make_float3(0.5f, 0.0f, 0.0f), 1);
+        grid.sdf, grid.frac_u, res, spacing, make_float3(-0.5f, 0.0f, 0.0f), 1);
     compute_fluid_fraction_kernel<<<grid_dim, block>>>(
-        grid.sdf, grid.frac_v, res, spacing, make_float3(0.0f, 0.5f, 0.0f), 2);
+        grid.sdf, grid.frac_v, res, spacing, make_float3(0.0f, -0.5f, 0.0f), 2);
     compute_fluid_fraction_kernel<<<grid_dim, block>>>(
-        grid.sdf, grid.frac_w, res, spacing, make_float3(0.0f, 0.0f, 0.5f), 3);
+        grid.sdf, grid.frac_w, res, spacing, make_float3(0.0f, 0.0f, -0.5f), 3);
     CHECK_CUDA(cudaGetLastError());
 
     int *d_counter;
@@ -2663,7 +2663,7 @@ void CFDSolver::step(float dt) {
     CHECK_CUDA(cudaMemset(d_counter, 0, sizeof(int)));
     compute_ibm_geometry_kernel<<<grid_dim, block>>>(
         grid.ibm_data_u, grid.ibm_id_map_u, grid.sdf, res, spacing, d_counter,
-        make_float3(0.5f, 0.0f, 0.0f), 0);
+        make_float3(-0.5f, 0.0f, 0.0f), 0);
     CHECK_CUDA(
         cudaMemcpy(&h_counter, d_counter, sizeof(int), cudaMemcpyDeviceToHost));
     grid.ibm_data_u.num_active_cells = h_counter;
@@ -2672,7 +2672,7 @@ void CFDSolver::step(float dt) {
     CHECK_CUDA(cudaMemset(d_counter, 0, sizeof(int)));
     compute_ibm_geometry_kernel<<<grid_dim, block>>>(
         grid.ibm_data_v, grid.ibm_id_map_v, grid.sdf, res, spacing, d_counter,
-        make_float3(0.0f, 0.5f, 0.0f), 0);
+        make_float3(0.0f, -0.5f, 0.0f), 0);
     CHECK_CUDA(
         cudaMemcpy(&h_counter, d_counter, sizeof(int), cudaMemcpyDeviceToHost));
     grid.ibm_data_v.num_active_cells = h_counter;
@@ -2681,7 +2681,7 @@ void CFDSolver::step(float dt) {
     CHECK_CUDA(cudaMemset(d_counter, 0, sizeof(int)));
     compute_ibm_geometry_kernel<<<grid_dim, block>>>(
         grid.ibm_data_w, grid.ibm_id_map_w, grid.sdf, res, spacing, d_counter,
-        make_float3(0.0f, 0.0f, 0.5f), 0);
+        make_float3(0.0f, 0.0f, -0.5f), 0);
     CHECK_CUDA(
         cudaMemcpy(&h_counter, d_counter, sizeof(int), cudaMemcpyDeviceToHost));
     grid.ibm_data_w.num_active_cells = h_counter;
@@ -2843,7 +2843,7 @@ void CFDSolver::step(float dt) {
         grid.rhs, // Div U
         grid.frac_u, grid.frac_v,
         grid.frac_w, // Using fluid fractions for Laplacian
-        grid.p_old, res, spacing, solid_c);
+        grid.sdf, grid.p_old, res, spacing, solid_c);
 
     // d. IBM Stencil modification DISABLED for pressure
     // The frac-weighted Laplacian already handles geometry correctly:
@@ -2990,7 +2990,86 @@ void CFDSolver::step(float dt) {
 
   // Re-enable pinning logic with mean subtraction
   void CFDSolver::project(float dt, bool incremental) {
-    // Stubbed out to fix compilation. Not used in Newton solver.
+    int3 res = grid.res;
+    float3 spacing = grid.spacing;
+    int num_elements = grid.num_elements;
+
+    dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z);
+    dim3 grid_dim((res.x + block.x - 1) / block.x,
+                  (res.y + block.y - 1) / block.y,
+                  (res.z + block.z - 1) / block.z);
+
+    // Update area fractions for cut-cell pressure handling.
+    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+        grid.sdf, grid.frac_u, res, spacing, make_float3(-0.5f, 0.0f, 0.0f), 1);
+    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+        grid.sdf, grid.frac_v, res, spacing, make_float3(0.0f, -0.5f, 0.0f), 2);
+    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+        grid.sdf, grid.frac_w, res, spacing, make_float3(0.0f, 0.0f, -0.5f), 3);
+    CHECK_CUDA(cudaGetLastError());
+
+    // Save previous pressure for incremental pressure correction if requested.
+    if (incremental) {
+      CHECK_CUDA(cudaMemcpy(grid.p_old, grid.p,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+    } else {
+      CHECK_CUDA(cudaMemcpy(grid.p_old, grid.p,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+    }
+
+    // Enforce zero velocity inside solid faces before divergence.
+    apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
+                                                    grid.sdf, res);
+
+    // Initialize phi
+    CHECK_CUDA(cudaMemset(grid.phi, 0, num_elements * sizeof(float)));
+
+    // Compute divergence of current velocity
+    compute_divergence_kernel<<<grid_dim, block>>>(
+        grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf,
+        grid.rhs, res, spacing, dt, rho_);
+
+    float inv_dx = 1.0f / spacing.x;
+    float inv_dy = 1.0f / spacing.y;
+    float inv_dz = 1.0f / spacing.z;
+    float max_vel = compute_max_velocity();
+    float adv_scale = max_vel * (inv_dx + inv_dy + inv_dz);
+    float diff_scale =
+        mu_ * (inv_dx * inv_dx + inv_dy * inv_dy + inv_dz * inv_dz);
+    float solid_c = (rho_ / (diffusion_theta * dt)) + rho_ * adv_scale +
+                    diff_scale;
+
+    // Build pressure stencil (Laplacian with area fractions)
+    compute_pressure_stencil_kernel<<<grid_dim, block>>>(
+        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+        grid.B_RHS, grid.rhs, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf,
+        grid.p_old, res, spacing, solid_c);
+
+    // Solve for phi (pressure correction)
+    for (int k = 0; k < p_max_iter_; k++) {
+      solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
+          grid.phi, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.B_RHS, res, true, pin_idx);
+      solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
+          grid.phi, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.B_RHS, res, false, pin_idx);
+    }
+
+    // Project velocity
+    project_velocity_kernel<<<grid_dim, block>>>(
+        grid.u, grid.v, grid.w, grid.phi, grid.frac_u, grid.frac_v, grid.frac_w,
+        res, spacing, dt, rho_);
+
+    // Enforce solid face mask after projection.
+    apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
+                                                    grid.sdf, res);
+
+    // Update pressure (incremental correction)
+    update_pressure_from_phi_kernel<<<grid_dim, block>>>(
+        grid.p, grid.phi, grid.p_old, grid.u, grid.v, grid.w,
+        res, spacing, dt, diffusion_theta, rho_, mu_);
   }
 
   // --------------------------------------------------------

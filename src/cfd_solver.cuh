@@ -59,6 +59,12 @@ struct MacGrid {
   float3 spacing;   // dx, dy, dz
   int num_elements; // res.x * res.y * res.z
 
+  // Grid indexing convention (origin at 0,0,0):
+  // - Cell-centered fields (SDF, pressure): (i+0.5, j+0.5, k+0.5) * spacing
+  // - u(i,j,k): (i, j+0.5, k+0.5) * spacing
+  // - v(i,j,k): (i+0.5, j, k+0.5) * spacing
+  // - w(i,j,k): (i+0.5, j+0.5, k) * spacing
+
   // Fields
   float *u, *v, *w; // Velocity (staggered)
   float *p;         // Pressure (centered)
@@ -169,7 +175,7 @@ public:
 
   // Compute Volume/Area Fractions
   // type: 0=Vol, 1=Ax, 2=Ay, 3=Az
-  // offset: {0,0,0} or staggered
+  // offset: {0,0,0} or staggered (e.g., {-0.5,0,0} for u-faces)
   std::vector<float> get_fluid_fraction(int type, float3 offset);
 
 protected:

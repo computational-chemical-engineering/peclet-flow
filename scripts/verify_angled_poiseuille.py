@@ -98,48 +98,58 @@ def run_simulation(res_n, L=1.0, slab_thickness=0.2, verbose=True):
     solver.set_mu(mu)
     solver.set_body_force(pnm_backend.float3(fx, fy, fz))
 
-    # Solver parameters
-    if res_n <= 16:
-        pressure_max_iter = 500
+    # Match settings used in scripts/plot_poiseuille_profiles.py
+    if res_n <= 8:
+        pressure_max_iter = 100
+    elif res_n == 16:
+        pressure_max_iter = 100
     elif res_n == 32:
-        pressure_max_iter = 1000
+        pressure_max_iter = 500
     else:
-        pressure_max_iter = 3000
+        pressure_max_iter = 2000
+
+    velocity_max_iter = 50
+    cfl = 0.5
+    theta = 1.0
+    max_steps = 40000
+    check_interval = 100
 
     solver.set_pressure_solver_params(max_iter=pressure_max_iter, tol=1e-5)
-    solver.set_velocity_solver_params(max_iter=100, tol=1e-5)
-    solver.set_cfl(0.5)
-    solver.set_diffusion_theta(1.0)
+    solver.set_velocity_solver_params(max_iter=velocity_max_iter, tol=1e-5)
+    solver.set_cfl(cfl)
+    solver.set_diffusion_theta(theta)
 
     # Analytical max velocity (Poiseuille between parallel plates)
     U_ana_max = (f_mag * H**2) / (8.0 * nu)
 
     # Time stepping
-    dt = 0.5 * dx / (U_ana_max + 1e-10)
+    dt = 0.5 * dx / (U_ana_max + 1e-12)
 
     if verbose:
         print(f"  U_ana_max={U_ana_max:.6e}, dt={dt:.6e}")
 
-    # Run to steady state
-    max_steps = 30000
-    check_interval = 100
+    # Run to steady state with convergence check
     u_mean_history = []
-
     for i in range(max_steps):
         solver.step(dt)
 
         if i % check_interval == 0:
-            u_field = np.array(solver.get_u())
-            v_field = np.array(solver.get_v())
+            u_field = np.array(solver.get_u()).reshape((res_n, res_n, res_n), order='F')
+            v_field = np.array(solver.get_v()).reshape((res_n, res_n, res_n), order='F')
 
-            # Velocity magnitude in flow direction
-            u_parallel = (u_field + v_field) / sqrt2
-            u_mean = np.mean(np.abs(u_parallel))
+            u_center = 0.5 * (u_field + np.roll(u_field, -1, axis=0))
+            v_center = 0.5 * (v_field + np.roll(v_field, -1, axis=1))
+
+            u_parallel = (u_center + v_center) / sqrt2
+            u_mean = np.mean(u_parallel)
             u_mean_history.append(u_mean)
+
+            if verbose:
+                print(f"  Step {i}/{max_steps}")
 
             if len(u_mean_history) > 5:
                 rel_change = abs(u_mean_history[-1] - u_mean_history[-2]) / (abs(u_mean_history[-1]) + 1e-12)
-                if rel_change < 1e-6:
+                if rel_change < 5e-7:
                     if verbose:
                         print(f"  Converged at step {i}")
                     break
@@ -147,9 +157,14 @@ def run_simulation(res_n, L=1.0, slab_thickness=0.2, verbose=True):
     # Get final fields
     u_field = np.array(solver.get_u()).reshape((res_n, res_n, res_n), order='F')
     v_field = np.array(solver.get_v()).reshape((res_n, res_n, res_n), order='F')
+    w_field = np.array(solver.get_w()).reshape((res_n, res_n, res_n), order='F')
+    p_field = np.array(solver.get_p()).reshape((res_n, res_n, res_n), order='F')
 
-    # Velocity in flow direction: u_parallel = (u + v) / √2
-    u_parallel = (u_field + v_field) / sqrt2
+    u_center = 0.5 * (u_field + np.roll(u_field, -1, axis=0))
+    v_center = 0.5 * (v_field + np.roll(v_field, -1, axis=1))
+
+    # Velocity in flow direction at cell centers
+    u_parallel = (u_center + v_center) / sqrt2
 
     # Max velocity
     U_sim_max = np.max(u_parallel)
@@ -168,6 +183,8 @@ def run_simulation(res_n, L=1.0, slab_thickness=0.2, verbose=True):
         'H': H,
         'u_field': u_field,
         'v_field': v_field,
+        'w_field': w_field,
+        'p_field': p_field,
         'u_parallel': u_parallel,
         'sdf': sdf_values.reshape((res_n, res_n, res_n), order='F'),
         'dx': dx,
@@ -247,12 +264,220 @@ def analytical_profile(d_vals, H, slab_thickness, f_mag, nu):
     return u_ana
 
 
+def analytical_component_at_points(x, y, L, slab_thickness, f_mag, nu, comp):
+    """
+    Analytical component value at physical points for angled Poiseuille flow.
+
+    comp: 'u', 'v', or 'w'
+    """
+    sqrt2 = np.sqrt(2.0)
+    period = L / sqrt2
+    half_t = slab_thickness / 2.0
+    H = period - slab_thickness
+
+    # Wrap y into [0, L)
+    y = np.mod(y, L)
+
+    d = (y - x) / sqrt2
+    d_wrapped = d - period * np.round(d / period)
+
+    u_parallel = np.zeros_like(d_wrapped)
+    abs_d = np.abs(d_wrapped)
+    fluid = abs_d > half_t
+    d_wall = abs_d[fluid] - half_t
+    u_parallel[fluid] = (f_mag / (2.0 * nu)) * d_wall * (H - d_wall)
+
+    if comp == 'u' or comp == 'v':
+        return u_parallel / sqrt2
+    return np.zeros_like(u_parallel)
+
+
+def trilinear_sample(field, x_idx, y_idx, z_idx):
+    """Trilinear sample on periodic grid using index-space coordinates."""
+    n = field.shape[0]
+    i0 = int(np.floor(x_idx))
+    j0 = int(np.floor(y_idx))
+    k0 = int(np.floor(z_idx))
+    i1 = i0 + 1
+    j1 = j0 + 1
+    k1 = k0 + 1
+
+    tx = x_idx - i0
+    ty = y_idx - j0
+    tz = z_idx - k0
+
+    i0 %= n
+    j0 %= n
+    k0 %= n
+    i1 %= n
+    j1 %= n
+    k1 %= n
+
+    c000 = field[i0, j0, k0]
+    c100 = field[i1, j0, k0]
+    c010 = field[i0, j1, k0]
+    c110 = field[i1, j1, k0]
+    c001 = field[i0, j0, k1]
+    c101 = field[i1, j0, k1]
+    c011 = field[i0, j1, k1]
+    c111 = field[i1, j1, k1]
+
+    c00 = c000 * (1.0 - tx) + c100 * tx
+    c10 = c010 * (1.0 - tx) + c110 * tx
+    c01 = c001 * (1.0 - tx) + c101 * tx
+    c11 = c011 * (1.0 - tx) + c111 * tx
+
+    c0 = c00 * (1.0 - ty) + c10 * ty
+    c1 = c01 * (1.0 - ty) + c11 * ty
+
+    return c0 * (1.0 - tz) + c1 * tz
+
+
+def sample_component_at_point(result, comp, x, y, z):
+    """Sample a component at a physical point using trilinear interpolation."""
+    dx = result['dx']
+    if comp == 'u':
+        field = result['u_field']
+        x_idx = x / dx
+        y_idx = y / dx - 0.5
+        z_idx = z / dx - 0.5
+    elif comp == 'v':
+        field = result['v_field']
+        x_idx = x / dx - 0.5
+        y_idx = y / dx
+        z_idx = z / dx - 0.5
+    elif comp == 'w':
+        field = result['w_field']
+        x_idx = x / dx - 0.5
+        y_idx = y / dx - 0.5
+        z_idx = z / dx
+    else:
+        field = result['p_field']
+        x_idx = x / dx - 0.5
+        y_idx = y / dx - 0.5
+        z_idx = z / dx - 0.5
+
+    return trilinear_sample(field, x_idx, y_idx, z_idx)
+
+
+def extract_line_samples(result, comp, axis, x0, y0, z0):
+    """
+    Extract a line of a component varying along one axis at fixed x,y,z.
+
+    For MAC grid with cell centers at (i+0.5)dx, component locations are:
+    - u: (i)dx, (j+0.5)dx, (k+0.5)dx
+    - v: (i+0.5)dx, (j)dx, (k+0.5)dx
+    - w: (i+0.5)dx, (j+0.5)dx, (k)dx
+    """
+    res_n = result['res']
+    dx = result['dx']
+
+    if axis == 'x':
+        if comp == 'v':
+            line = (np.arange(res_n) + 0.5) * dx
+        else:
+            line = (np.arange(res_n) + 0.5) * dx
+        x = line
+        y = np.full_like(line, y0)
+        z = np.full_like(line, z0)
+    elif axis == 'y':
+        if comp == 'v':
+            line = (np.arange(res_n) + 0.0) * dx
+        else:
+            line = (np.arange(res_n) + 0.5) * dx
+        x = np.full_like(line, x0)
+        y = line
+        z = np.full_like(line, z0)
+    else:
+        if comp == 'w':
+            line = (np.arange(res_n) + 0.0) * dx
+        else:
+            line = (np.arange(res_n) + 0.5) * dx
+        x = np.full_like(line, x0)
+        y = np.full_like(line, y0)
+        z = line
+
+    values = np.array([
+        sample_component_at_point(result, comp, x_i, y_i, z_i)
+        for x_i, y_i, z_i in zip(x, y, z)
+    ])
+
+    return x, y, z, values
+
+
+def make_staggered_line_plots(results):
+    """Plot u, v, w, p along fixed lines and compare to high-res profile."""
+    f_mag = 0.01
+    nu = 0.01
+
+    comps = ['u', 'v', 'w', 'p']
+    titles = ['u (x-velocity)', 'v (y-velocity)', 'w (z-velocity)', 'p (pressure)']
+    markers = ['o', 's', '^']
+    colors = ['C0', 'C1', 'C2']
+    line_specs = {
+        'u': {'axis': 'y', 'x': 0.5, 'y': None, 'z': 0.5},
+        'v': {'axis': 'x', 'x': None, 'y': 0.5, 'z': 0.5},
+        'w': {'axis': 'z', 'x': 0.5, 'y': 0.5, 'z': None},
+        'p': {'axis': 'y', 'x': 0.5, 'y': None, 'z': 0.5},
+    }
+
+    for comp, title in zip(comps, titles):
+        fig, ax = plt.subplots(figsize=(6, 4))
+        spec = line_specs[comp]
+        axis = spec['axis']
+        x0 = spec['x'] if spec['x'] is not None else 0.5
+        y0 = spec['y'] if spec['y'] is not None else 0.5
+        z0 = spec['z'] if spec['z'] is not None else 0.5
+
+        # High-resolution reference line from finest grid
+        r_ref = results[-1]
+        fine = np.linspace(0.0, r_ref['L'], 400)
+        if axis == 'x':
+            x_ref, y_ref, z_ref = fine, np.full_like(fine, y0), np.full_like(fine, z0)
+            axis_label = 'x'
+        elif axis == 'y':
+            x_ref, y_ref, z_ref = np.full_like(fine, x0), fine, np.full_like(fine, z0)
+            axis_label = 'y'
+        else:
+            x_ref, y_ref, z_ref = np.full_like(fine, x0), np.full_like(fine, y0), fine
+            axis_label = 'z'
+
+        ref_vals = np.array([
+            sample_component_at_point(r_ref, comp, xr, yr, zr)
+            for xr, yr, zr in zip(x_ref, y_ref, z_ref)
+        ])
+        ax.plot(fine, ref_vals, 'k-', linewidth=2, label='High-res reference')
+
+        for i, r in enumerate(results):
+            x, y, z, vals = extract_line_samples(r, comp, axis, x0, y0, z0)
+            coord = x if axis == 'x' else (y if axis == 'y' else z)
+            ax.scatter(
+                coord, vals, s=30, marker=markers[i], color=colors[i],
+                edgecolors='k', linewidths=0.5,
+                label=f"N={r['res']}"
+            )
+
+        ax.set_title(f"{title} along {axis_label} at x={x0:.4f}, y={y0:.4f}, z={z0:.4f}")
+        ax.set_xlabel(axis_label)
+        if comp == 'p':
+            ax.set_ylabel('pressure')
+        else:
+            ax.set_ylabel('velocity')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        plt.tight_layout()
+        out_path = f'output/angled_poiseuille_staggered_{comp}.png'
+        plt.savefig(out_path, dpi=200)
+        plt.close(fig)
+        print(f"Staggered line plot saved to {out_path}")
+
+
 def run_convergence_study():
     """Run grid convergence study."""
     resolutions = [8, 16, 32]
     L = 1.0
     slab_thickness = 0.2
-
     print("=" * 60)
     print("Angled Poiseuille Flow Verification (45° walls)")
     print("=" * 60)
@@ -300,7 +525,7 @@ def make_plots(results):
 
     for i, r in enumerate(results):
         d_vals, u_profile, sdf_profile = extract_profile_along_normal(r)
-        ax1.scatter(d_vals, u_profile, c=colors[i], marker=markers[i], s=40,
+        ax1.scatter(sdf_profile, u_profile, c=colors[i], marker=markers[i], s=40,
                    label=f"N={r['res']} (err={r['error']:.1f}%)",
                    edgecolors='k', linewidths=0.5, zorder=2)
 
@@ -380,3 +605,4 @@ def make_plots(results):
 if __name__ == "__main__":
     results = run_convergence_study()
     make_plots(results)
+    make_staggered_line_plots(results)
