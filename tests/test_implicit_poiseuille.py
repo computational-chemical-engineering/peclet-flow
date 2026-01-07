@@ -52,6 +52,7 @@ def test_implicit_poiseuille():
     # Update to use Dynamic Viscosity mu
     mu = nu * rho
     solver.set_mu(mu)
+    solver.set_diffusion_theta(1.0)
     solver.set_body_force(pnm_backend.float3(g, 0.0, 0.0)) # Flow in X
     
     # Implicit Parameters
@@ -79,7 +80,7 @@ def test_implicit_poiseuille():
     
     start_time = time.time()
     for n in range(num_steps):
-        solver.step_implicit(dt)
+        solver.step(dt)
         if n % 10 == 0:
             u_field = np.array(solver.get_u()).reshape(nz, ny, nx)
             curr_max = np.max(u_field)

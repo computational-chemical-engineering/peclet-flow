@@ -109,11 +109,16 @@ Created `notebooks/verification_incremental_pressure.ipynb` with:
 
 ## Next Steps
 
-1. **Geometric Multigrid**: Implement V-cycle multigrid for the pressure Poisson solve to enable efficient high-resolution simulations
+1. **IBM Improvement for Normal Flow**: The current IBM under-predicts drag for 3D curved surfaces where flow impinges normal to the boundary. Possible approaches:
+   - Adaptive interpolation based on flow-surface angle
+   - Higher-order reconstruction at stagnation points
+   - Direct forcing at cells where flow is normal to surface
 
-2. **Higher Resolution Testing**: Once multigrid is implemented, verify K convergence at N=128, 256
+2. **Geometric Multigrid**: Implement V-cycle multigrid for the pressure Poisson solve to enable efficient high-resolution simulations
 
-3. **IBM Refinement**: Investigate if the K≈2.37 value improves with resolution
+3. **Higher Resolution Testing**: Once multigrid is implemented, verify K convergence at N=128, 256
+
+4. **IBM Refinement**: Investigate if K improves with resolution (current N=32 may be too coarse)
 
 ---
 

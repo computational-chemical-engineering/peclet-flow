@@ -37,7 +37,12 @@ __global__ void compute_pressure_stencil_kernel(
     float *__restrict__ A_T, float *__restrict__ B_RHS,
     const float *__restrict__ rhs_input, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
-    int3 res, float3 spacing);
+    const float *__restrict__ p_old, int3 res, float3 spacing,
+    float solid_c);
+
+__global__ void compute_fluid_fraction_kernel(
+    const float *__restrict__ sdf, float *fractions, int3 res, float3 spacing,
+    float3 offset, int type);
 
 __global__ void modify_stencil_ibm_kernel(
     float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
@@ -51,11 +56,12 @@ __global__ void solve_rbgs_stencil_kernel(
     const float *__restrict__ A_B, const float *__restrict__ A_T,
     const float *__restrict__ B_RHS, int3 res, bool is_red, int pin_idx);
 
-__global__ void compute_divergence_kernel(const float *__restrict__ u,
-                                          const float *__restrict__ v,
-                                          const float *__restrict__ w,
-                                          float *__restrict__ rhs, int3 res,
-                                          float3 spacing);
+__global__ void compute_divergence_kernel(
+    const float *__restrict__ u, const float *__restrict__ v,
+    const float *__restrict__ w, const float *__restrict__ frac_u,
+    const float *__restrict__ frac_v, const float *__restrict__ frac_w,
+    const float *__restrict__ sdf, float *__restrict__ rhs, int3 res,
+    float3 spacing, float dt, float rho);
 
 __global__ void
 project_velocity_kernel(float *__restrict__ u, float *__restrict__ v,
@@ -544,13 +550,141 @@ __global__ void add_body_force_kernel(float *u, float *v, float *w,
 }
 
 // --------------------------------------------------------
+// SDF Sampling Helpers (local copy to avoid cross-TU device linkage)
+// --------------------------------------------------------
+__device__ inline float sample_sdf_interp_local(float x, float y, float z,
+                                                const float *__restrict__ sdf,
+                                                int3 res) {
+  float fx = floorf(x);
+  float fy = floorf(y);
+  float fz = floorf(z);
+
+  float wx = x - fx;
+  float wy = y - fy;
+  float wz = z - fz;
+
+  int ix = (int)fx;
+  int iy = (int)fy;
+  int iz = (int)fz;
+
+  int x0 = (ix % res.x + res.x) % res.x;
+  int y0 = (iy % res.y + res.y) % res.y;
+  int z0 = (iz % res.z + res.z) % res.z;
+
+  int x1 = (x0 + 1) % res.x;
+  int y1 = (y0 + 1) % res.y;
+  int z1 = (z0 + 1) % res.z;
+
+  float c000 = sdf[z0 * res.y * res.x + y0 * res.x + x0];
+  float c100 = sdf[z0 * res.y * res.x + y0 * res.x + x1];
+  float c010 = sdf[z0 * res.y * res.x + y1 * res.x + x0];
+  float c110 = sdf[z0 * res.y * res.x + y1 * res.x + x1];
+  float c001 = sdf[z1 * res.y * res.x + y0 * res.x + x0];
+  float c101 = sdf[z1 * res.y * res.x + y0 * res.x + x1];
+  float c011 = sdf[z1 * res.y * res.x + y1 * res.x + x0];
+  float c111 = sdf[z1 * res.y * res.x + y1 * res.x + x1];
+
+  float c00 = c000 * (1.0f - wx) + c100 * wx;
+  float c10 = c010 * (1.0f - wx) + c110 * wx;
+  float c01 = c001 * (1.0f - wx) + c101 * wx;
+  float c11 = c011 * (1.0f - wx) + c111 * wx;
+
+  float c0 = c00 * (1.0f - wy) + c10 * wy;
+  float c1 = c01 * (1.0f - wy) + c11 * wy;
+
+  return c0 * (1.0f - wz) + c1 * wz;
+}
+
+__device__ inline float sample_sdf_component(const float *__restrict__ sdf,
+                                             int3 res, int idx_x, int idx_y,
+                                             int idx_z, int comp_idx) {
+  float3 offset = make_float3(0.0f, 0.0f, 0.0f);
+  if (comp_idx == 0) {
+    offset = make_float3(0.5f, 0.0f, 0.0f);
+  } else if (comp_idx == 1) {
+    offset = make_float3(0.0f, 0.5f, 0.0f);
+  } else {
+    offset = make_float3(0.0f, 0.0f, 0.5f);
+  }
+  return sample_sdf_interp_local(idx_x + offset.x, idx_y + offset.y,
+                                 idx_z + offset.z, sdf, res);
+}
+
+__device__ inline float get_face_velocity_for_flux(
+    const float *__restrict__ vel, const float *__restrict__ sdf, int3 res,
+    float3 offset, int idx_x, int idx_y, int idx_z, float frac, float bc_val,
+    int axis) {
+  if (frac <= 0.0f) {
+    return 0.0f;
+  }
+
+  float sdf_face = sample_sdf_interp_local(idx_x + offset.x, idx_y + offset.y,
+                                           idx_z + offset.z, sdf, res);
+  float face_val = vel[get_idx(idx_x, idx_y, idx_z, res)];
+  if (sdf_face >= 0.0f) {
+    return face_val;
+  }
+
+  int dx = (axis == 0) ? 1 : 0;
+  int dy = (axis == 1) ? 1 : 0;
+  int dz = (axis == 2) ? 1 : 0;
+
+  float sdf_p = sample_sdf_interp_local(idx_x + dx + offset.x,
+                                        idx_y + dy + offset.y,
+                                        idx_z + dz + offset.z, sdf, res);
+  if (sdf_p >= 0.0f) {
+    return vel[get_idx(idx_x + dx, idx_y + dy, idx_z + dz, res)];
+  }
+
+  float sdf_m = sample_sdf_interp_local(idx_x - dx + offset.x,
+                                        idx_y - dy + offset.y,
+                                        idx_z - dz + offset.z, sdf, res);
+  if (sdf_m >= 0.0f) {
+    return vel[get_idx(idx_x - dx, idx_y - dy, idx_z - dz, res)];
+  }
+
+  return bc_val;
+}
+
+// --------------------------------------------------------
+// Velocity Mask Kernel (Face-Centered SDF)
+// --------------------------------------------------------
+// Sets u, v, w to 0 if the face center lies inside solid (SDF < 0).
+__global__ void apply_face_sdf_mask_kernel(
+    float *__restrict__ u, float *__restrict__ v, float *__restrict__ w,
+    const float *__restrict__ sdf, int3 res) {
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+
+  float sdf_u = sample_sdf_interp_local(idx_x + 0.5f, idx_y, idx_z, sdf, res);
+  if (sdf_u < 0.0f) {
+    u[get_idx(idx_x, idx_y, idx_z, res)] = 0.0f;
+  }
+
+  float sdf_v = sample_sdf_interp_local(idx_x, idx_y + 0.5f, idx_z, sdf, res);
+  if (sdf_v < 0.0f) {
+    v[get_idx(idx_x, idx_y, idx_z, res)] = 0.0f;
+  }
+
+  float sdf_w = sample_sdf_interp_local(idx_x, idx_y, idx_z + 0.5f, sdf, res);
+  if (sdf_w < 0.0f) {
+    w[get_idx(idx_x, idx_y, idx_z, res)] = 0.0f;
+  }
+}
+
+// --------------------------------------------------------
 // Divergence Kernel (RHS Calculation)
 // --------------------------------------------------------
 __global__ void compute_divergence_kernel(
     const float *__restrict__ u, const float *__restrict__ v,
     const float *__restrict__ w, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
-    float *__restrict__ rhs, int3 res, float3 spacing, float dt, float rho) {
+    const float *__restrict__ sdf, float *__restrict__ rhs, int3 res,
+    float3 spacing, float dt, float rho) {
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
   int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -570,9 +704,32 @@ __global__ void compute_divergence_kernel(
   // u[idx] corresponds to u_{i+1/2}
   // u[xm1] corresponds to u_{i-1/2}
 
-  float du_dx = (u[idx] * frac_u[idx] - u[xm1] * frac_u[xm1]) / spacing.x;
-  float dv_dy = (v[idx] * frac_v[idx] - v[ym1] * frac_v[ym1]) / spacing.y;
-  float dw_dz = (w[idx] * frac_w[idx] - w[zm1] * frac_w[zm1]) / spacing.z;
+  const float bc_val = 0.0f;
+
+  float u_r = get_face_velocity_for_flux(
+      u, sdf, res, make_float3(0.5f, 0.0f, 0.0f), idx_x, idx_y, idx_z,
+      frac_u[idx], bc_val, 0);
+  float u_l = get_face_velocity_for_flux(
+      u, sdf, res, make_float3(0.5f, 0.0f, 0.0f), idx_x - 1, idx_y, idx_z,
+      frac_u[xm1], bc_val, 0);
+
+  float v_n = get_face_velocity_for_flux(
+      v, sdf, res, make_float3(0.0f, 0.5f, 0.0f), idx_x, idx_y, idx_z,
+      frac_v[idx], bc_val, 1);
+  float v_s = get_face_velocity_for_flux(
+      v, sdf, res, make_float3(0.0f, 0.5f, 0.0f), idx_x, idx_y - 1, idx_z,
+      frac_v[ym1], bc_val, 1);
+
+  float w_t = get_face_velocity_for_flux(
+      w, sdf, res, make_float3(0.0f, 0.0f, 0.5f), idx_x, idx_y, idx_z,
+      frac_w[idx], bc_val, 2);
+  float w_b = get_face_velocity_for_flux(
+      w, sdf, res, make_float3(0.0f, 0.0f, 0.5f), idx_x, idx_y, idx_z - 1,
+      frac_w[zm1], bc_val, 2);
+
+  float du_dx = (u_r * frac_u[idx] - u_l * frac_u[xm1]) / spacing.x;
+  float dv_dy = (v_n * frac_v[idx] - v_s * frac_v[ym1]) / spacing.y;
+  float dw_dz = (w_t * frac_w[idx] - w_b * frac_w[zm1]) / spacing.z;
 
   float div = du_dx + dv_dy + dw_dz;
   // Paper convention: ∇²φ = div(u), so RHS = -div(u)
@@ -686,7 +843,8 @@ __global__ void compute_pressure_stencil_kernel(
     float *__restrict__ A_T, float *__restrict__ B_RHS,
     const float *__restrict__ rhs_input, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
-    int3 res, float3 spacing) {
+    const float *__restrict__ p_old, int3 res, float3 spacing,
+    float solid_c) {
 
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -725,10 +883,27 @@ __global__ void compute_pressure_stencil_kernel(
   // Check if disconnected (Deep Solid)
   float sum_a = ax_p + ax_m + ay_p + ay_m + az_p + az_m;
   if (sum_a < 1e-9f) {
-    // Set to standard Laplacian to avoid singularity (dummy solve inside solid)
-    ax_p = ax_m = inv_dx2;
-    ay_p = ay_m = inv_dy2;
-    az_p = az_m = inv_dz2;
+    // Solid cell: use unweighted Laplacian and enforce
+    // Ds G phi = -(1/c) Ds G p_old.
+    float ax = inv_dx2;
+    float ay = inv_dy2;
+    float az = inv_dz2;
+
+    A_E[idx] = -ax;
+    A_W[idx] = -ax;
+    A_N[idx] = -ay;
+    A_S[idx] = -ay;
+    A_T[idx] = -az;
+    A_B[idx] = -az;
+    A_C[idx] = 2.0f * (ax + ay + az);
+
+    float lap_p =
+        (p_old[idx_xp] - 2.0f * p_old[idx] + p_old[idx_xm]) * inv_dx2 +
+        (p_old[idx_yp] - 2.0f * p_old[idx] + p_old[idx_ym]) * inv_dy2 +
+        (p_old[idx_zp] - 2.0f * p_old[idx] + p_old[idx_zm]) * inv_dz2;
+    float inv_c = (solid_c > 0.0f) ? (1.0f / solid_c) : 0.0f;
+    B_RHS[idx] = -inv_c * lap_p;
+    return;
   }
 
   // Populate Stencil Arrays (Neighbor Coeffs are typically negative in
@@ -915,6 +1090,45 @@ __device__ inline float tvd_flux(float phi_LL, float phi_L, float phi_R,
 
   F_CDS = u_face * 0.5f * (phi_L + phi_R);
   return F_FOU + 0.5f * psi * (F_CDS - F_FOU);
+}
+
+__device__ inline float tvd_flux_ibm(float phi_LL, float phi_L, float phi_R,
+                                     float phi_RR, float u_face,
+                                     bool far_upwind_solid) {
+  float F_FOU, F_CDS, psi;
+
+  if (u_face >= 0.0f) {
+    F_FOU = u_face * phi_L;
+    if (far_upwind_solid) {
+      psi = 2.0f;
+    } else {
+      float r = gradient_ratio(phi_LL, phi_L, phi_R);
+      psi = koren_limiter(r);
+    }
+  } else {
+    F_FOU = u_face * phi_R;
+    if (far_upwind_solid) {
+      psi = 2.0f;
+    } else {
+      float r = gradient_ratio(phi_RR, phi_R, phi_L);
+      psi = koren_limiter(r);
+    }
+  }
+
+  F_CDS = u_face * 0.5f * (phi_L + phi_R);
+  return F_FOU + 0.5f * psi * (F_CDS - F_FOU);
+}
+
+__device__ inline float get_ibm_ratio(const int *__restrict__ ibm_id_map,
+                                      IBM_Data ibm_data, int idx, int dir) {
+  if (ibm_id_map == nullptr) {
+    return 1.0f;
+  }
+  int list_idx = ibm_id_map[idx];
+  if (list_idx < 0) {
+    return 1.0f;
+  }
+  return ibm_data.R_val[list_idx * 6 + dir];
 }
 
 // Computes: explicit_term = - (1-theta) * [ rho*Adv(u_old) - mu*Lap(u_old) +
@@ -1387,14 +1601,8 @@ __global__ void project_velocity_kernel(
   // The ρ/(θΔt) factor is in the pressure update (Eq. 14)
   float scale = 1.0f;
 
-  // NOTE: Simple projection doesn't account for IBM faces.
-  // Ideally, grad(p) at solid face should use Neumann 0, which implies p_n = p.
-  // Then grad p = 0.
-  // Current implementation simply differences neighbors.
-  // If p inside solid is 0, this creates artificial gradient.
-  // Phase 2a masked U to 0 after projection, effectively fixing this.
-  // For Phase 2b, we should verify boundaries.
-  // But let's leave as is for now, relying on velocity mask.
+  // Use standard gradients - the frac-weighted Laplacian in the Poisson solve
+  // ensures divergence-free result. If frac=0, face is blocked and u is set to 0.
 
   {
     if (frac_u[idx] > 0.0f) {
@@ -1478,34 +1686,63 @@ __global__ void update_pressure_from_phi_kernel(
   float inv_dy2 = 1.0f / (dy * dy);
   float inv_dz2 = 1.0f / (dz * dz);
 
-  // 1. Temporal/accumulation term: (ρ/(θΔt))*φ
-  float temporal_term = (rho / (theta * dt)) * phi_C;
-
-  // 2. Convection term: ρ*(u·∇φ)
-  // Get cell-centered velocity (average of staggered values)
-  float uc = 0.5f * (u[idx_W] + u[idx]);
-  float vc = 0.5f * (v[idx_S] + v[idx]);
-  float wc = 0.5f * (w[idx_B] + w[idx]);
-
-  // Central difference for ∇φ
-  float dphi_dx = (phi_E - phi_W) * inv_2dx;
-  float dphi_dy = (phi_N - phi_S) * inv_2dy;
-  float dphi_dz = (phi_T - phi_B) * inv_2dz;
-
-  float convection_term = rho * (uc * dphi_dx + vc * dphi_dy + wc * dphi_dz);
-
-  // 3. Diffusion term: -μ*∇²φ
-  float laplacian = (phi_E - 2.0f * phi_C + phi_W) * inv_dx2 +
-                    (phi_N - 2.0f * phi_C + phi_S) * inv_dy2 +
-                    (phi_T - 2.0f * phi_C + phi_B) * inv_dz2;
-  float diffusion_term = -mu * laplacian;
-
-  // Full pressure update (Eq. 14):
-  // δp = (ρ/(θΔt))*φ + ρ*(u·∇φ) - μ*∇²φ
-  float delta_p = temporal_term + convection_term + diffusion_term;
+  // Simple pressure update: δp = (ρ/Δt)*φ
+  // The convection and diffusion terms in Eq. 14 can cause instability
+  // when the Poisson equation doesn't account for them consistently.
+  // The basic projection uses just the temporal term.
+  float delta_p = (rho / dt) * phi_C;
 
   // Update pressure: p = p_old + δp
   p[idx] = p_old[idx] + delta_p;
+}
+
+// --------------------------------------------------------
+// Extrapolate Phi to Solid Cells (Neumann BC)
+// --------------------------------------------------------
+// For solid cells at the fluid-solid interface, set phi = average of fluid neighbors.
+// This ensures ∂phi/∂n ≈ 0 at the boundary, which is required for consistent projection.
+// Without this, the Poisson solve gives arbitrary phi values in solid cells,
+// and projection uses those wrong values.
+__global__ void extrapolate_phi_neumann_kernel(
+    float *__restrict__ phi, const float *__restrict__ sdf,
+    int3 res) {
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+  int idx = get_idx(idx_x, idx_y, idx_z, res);
+
+  // Only process solid cells
+  if (sdf[idx] >= 0.0f)
+    return;
+
+  // Find fluid neighbors and average their phi values
+  float sum_phi = 0.0f;
+  int count = 0;
+
+  // Check 6 neighbors
+  int neighbors[6] = {
+      get_idx(idx_x + 1, idx_y, idx_z, res),
+      get_idx(idx_x - 1, idx_y, idx_z, res),
+      get_idx(idx_x, idx_y + 1, idx_z, res),
+      get_idx(idx_x, idx_y - 1, idx_z, res),
+      get_idx(idx_x, idx_y, idx_z + 1, res),
+      get_idx(idx_x, idx_y, idx_z - 1, res)};
+
+  for (int i = 0; i < 6; i++) {
+    int nb = neighbors[i];
+    if (sdf[nb] >= 0.0f) {  // Fluid neighbor
+      sum_phi += phi[nb];
+      count++;
+    }
+  }
+
+  if (count > 0) {
+    phi[idx] = sum_phi / (float)count;
+  }
+  // If no fluid neighbors, leave phi as is (deep solid, doesn't affect projection)
 }
 
 CFDSolver::CFDSolver(int3 res, float3 spacing)
@@ -1588,6 +1825,7 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.ibm_data.M_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data.X_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data.B_val, n * 6 * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.ibm_data.R_val, n * 6 * sizeof(float)));
   grid.ibm_data.num_active_cells = 0;
 
   // Staggered IBM U
@@ -1600,6 +1838,7 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_u.M_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_u.X_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_u.B_val, n * 6 * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.ibm_data_u.R_val, n * 6 * sizeof(float)));
   grid.ibm_data_u.num_active_cells = 0;
 
   // Staggered IBM V
@@ -1612,6 +1851,7 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_v.M_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_v.X_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_v.B_val, n * 6 * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.ibm_data_v.R_val, n * 6 * sizeof(float)));
   grid.ibm_data_v.num_active_cells = 0;
 
   // Staggered IBM W
@@ -1624,6 +1864,7 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_w.M_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_w.X_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_w.B_val, n * 6 * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.ibm_data_w.R_val, n * 6 * sizeof(float)));
   grid.ibm_data_w.num_active_cells = 0;
 
   grid.num_ibm_cells = 0;
@@ -1646,7 +1887,9 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   rho_ = 1.0f;
   mu_ = 0.01f;
   nu_ = mu_ / rho_;
-  pin_idx = -1;
+  // Pin pressure at cell 0 to prevent drift in periodic domains
+  // For Neumann BC problems, pressure is only defined up to a constant
+  pin_idx = 0;
 }
 
 CFDSolver::~CFDSolver() {
@@ -1693,6 +1936,7 @@ CFDSolver::~CFDSolver() {
     CHECK_CUDA(cudaFree(data.M_val));
     CHECK_CUDA(cudaFree(data.X_val));
     CHECK_CUDA(cudaFree(data.B_val));
+    CHECK_CUDA(cudaFree(data.R_val));
   };
 
   free_ibm(grid.ibm_data);
@@ -1826,19 +2070,19 @@ void CFDSolver::update_ibm_geometry() {
     return count;
   };
 
-  // Declare kernel (if not in header)
-  __global__ void update_fractions_kernel(float *, const float *, int3, float3);
-
-  // 0. Update Dense Fractions (for Projection & Pressure Stencil)
-  // U-Face
-  update_fractions_kernel<<<blocks, threads>>>(grid.frac_u, grid.sdf, grid.res,
-                                               make_float3(0.5f, 0.0f, 0.0f));
-  // V-Face
-  update_fractions_kernel<<<blocks, threads>>>(grid.frac_v, grid.sdf, grid.res,
-                                               make_float3(0.0f, 0.5f, 0.0f));
-  // W-Face
-  update_fractions_kernel<<<blocks, threads>>>(grid.frac_w, grid.sdf, grid.res,
-                                               make_float3(0.0f, 0.0f, 0.5f));
+  // 0. Update Area Fractions (for Projection & Pressure Stencil)
+  // U-Face (Area X)
+  compute_fluid_fraction_kernel<<<blocks, threads>>>(
+      grid.sdf, grid.frac_u, grid.res, grid.spacing,
+      make_float3(0.5f, 0.0f, 0.0f), 1);
+  // V-Face (Area Y)
+  compute_fluid_fraction_kernel<<<blocks, threads>>>(
+      grid.sdf, grid.frac_v, grid.res, grid.spacing,
+      make_float3(0.0f, 0.5f, 0.0f), 2);
+  // W-Face (Area Z)
+  compute_fluid_fraction_kernel<<<blocks, threads>>>(
+      grid.sdf, grid.frac_w, grid.res, grid.spacing,
+      make_float3(0.0f, 0.0f, 0.5f), 3);
   CHECK_CUDA(cudaGetLastError());
 
   // 1. Centered (Pressure) - Neumann (1)
@@ -2245,7 +2489,8 @@ __global__ void compute_tvd_correction_kernel(
     const float *__restrict__ v, const float *__restrict__ w,
     const float
         *__restrict__ phi, // The scalar field being advected (u, v, or w)
-    int comp_idx, int3 res, float3 spacing, float rho) {
+    const float *__restrict__ sdf, const int *__restrict__ ibm_id_map,
+    IBM_Data ibm_data, int comp_idx, int3 res, float3 spacing, float rho) {
 
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -2285,14 +2530,22 @@ __global__ void compute_tvd_correction_kernel(
   float p_ee = phi[get_idx(idx_x + 2, idx_y, idx_z, res)];
   float p_ww = phi[get_idx(idx_x - 2, idx_y, idx_z, res)];
 
-  float f_tvd_r = tvd_flux(p_w, p_c, p_e, p_ee, u_face_r);
+  int far_x_r = (u_face_r >= 0.0f) ? (idx_x - 1) : (idx_x + 2);
+  bool far_solid_r =
+      sample_sdf_component(sdf, res, far_x_r, idx_y, idx_z, comp_idx) < 0.0f;
+  float f_tvd_r = tvd_flux_ibm(p_w, p_c, p_e, p_ee, u_face_r, far_solid_r);
   float f_upw_r = upwind_flux_full(p_c, p_e, u_face_r);
-  float diff_r = f_tvd_r - f_upw_r;
+  float R_r = get_ibm_ratio(ibm_id_map, ibm_data, idx, 0);
+  float diff_r = (f_tvd_r - f_upw_r) * R_r;
 
   // Face Left: Neighbors shift by -1. L=p_w, R=p_c, LL=p_ww, RR=p_e
-  float f_tvd_l = tvd_flux(p_ww, p_w, p_c, p_e, u_face_l);
+  int far_x_l = (u_face_l >= 0.0f) ? (idx_x - 2) : (idx_x + 1);
+  bool far_solid_l =
+      sample_sdf_component(sdf, res, far_x_l, idx_y, idx_z, comp_idx) < 0.0f;
+  float f_tvd_l = tvd_flux_ibm(p_ww, p_w, p_c, p_e, u_face_l, far_solid_l);
   float f_upw_l = upwind_flux_full(p_w, p_c, u_face_l);
-  float diff_l = f_tvd_l - f_upw_l;
+  float R_l = get_ibm_ratio(ibm_id_map, ibm_data, idx, 1);
+  float diff_l = (f_tvd_l - f_upw_l) * R_l;
 
   // Y-Fluxes
   float v_face_n = get_advection_velocity(u, v, w, comp_idx, 1, idx_3d, res);
@@ -2304,13 +2557,21 @@ __global__ void compute_tvd_correction_kernel(
   float p_nn = phi[get_idx(idx_x, idx_y + 2, idx_z, res)];
   float p_ss = phi[get_idx(idx_x, idx_y - 2, idx_z, res)];
 
-  float f_tvd_n = tvd_flux(p_s, p_c, p_n, p_nn, v_face_n);
+  int far_y_n = (v_face_n >= 0.0f) ? (idx_y - 1) : (idx_y + 2);
+  bool far_solid_n =
+      sample_sdf_component(sdf, res, idx_x, far_y_n, idx_z, comp_idx) < 0.0f;
+  float f_tvd_n = tvd_flux_ibm(p_s, p_c, p_n, p_nn, v_face_n, far_solid_n);
   float f_upw_n = upwind_flux_full(p_c, p_n, v_face_n);
-  float diff_n = f_tvd_n - f_upw_n;
+  float R_n = get_ibm_ratio(ibm_id_map, ibm_data, idx, 2);
+  float diff_n = (f_tvd_n - f_upw_n) * R_n;
 
-  float f_tvd_s = tvd_flux(p_ss, p_s, p_c, p_n, v_face_s);
+  int far_y_s = (v_face_s >= 0.0f) ? (idx_y - 2) : (idx_y + 1);
+  bool far_solid_s =
+      sample_sdf_component(sdf, res, idx_x, far_y_s, idx_z, comp_idx) < 0.0f;
+  float f_tvd_s = tvd_flux_ibm(p_ss, p_s, p_c, p_n, v_face_s, far_solid_s);
   float f_upw_s = upwind_flux_full(p_s, p_c, v_face_s);
-  float diff_s = f_tvd_s - f_upw_s;
+  float R_s = get_ibm_ratio(ibm_id_map, ibm_data, idx, 3);
+  float diff_s = (f_tvd_s - f_upw_s) * R_s;
 
   // Z-Fluxes
   float w_face_t = get_advection_velocity(u, v, w, comp_idx, 2, idx_3d, res);
@@ -2322,13 +2583,21 @@ __global__ void compute_tvd_correction_kernel(
   float p_tt = phi[get_idx(idx_x, idx_y, idx_z + 2, res)];
   float p_bb = phi[get_idx(idx_x, idx_y, idx_z - 2, res)];
 
-  float f_tvd_t = tvd_flux(p_b, p_c, p_t, p_tt, w_face_t);
+  int far_z_t = (w_face_t >= 0.0f) ? (idx_z - 1) : (idx_z + 2);
+  bool far_solid_t =
+      sample_sdf_component(sdf, res, idx_x, idx_y, far_z_t, comp_idx) < 0.0f;
+  float f_tvd_t = tvd_flux_ibm(p_b, p_c, p_t, p_tt, w_face_t, far_solid_t);
   float f_upw_t = upwind_flux_full(p_c, p_t, w_face_t);
-  float diff_t = f_tvd_t - f_upw_t;
+  float R_t = get_ibm_ratio(ibm_id_map, ibm_data, idx, 4);
+  float diff_t = (f_tvd_t - f_upw_t) * R_t;
 
-  float f_tvd_b = tvd_flux(p_bb, p_b, p_c, p_t, w_face_b);
+  int far_z_b = (w_face_b >= 0.0f) ? (idx_z - 2) : (idx_z + 1);
+  bool far_solid_b =
+      sample_sdf_component(sdf, res, idx_x, idx_y, far_z_b, comp_idx) < 0.0f;
+  float f_tvd_b = tvd_flux_ibm(p_bb, p_b, p_c, p_t, w_face_b, far_solid_b);
   float f_upw_b = upwind_flux_full(p_b, p_c, w_face_b);
-  float diff_b = f_tvd_b - f_upw_b;
+  float R_b = get_ibm_ratio(ibm_id_map, ibm_data, idx, 5);
+  float diff_b = (f_tvd_b - f_upw_b) * R_b;
 
   // Total Correction Source Term
   // Adv_exact = Adv_upwind + Div(Diffs) ?
@@ -2368,6 +2637,15 @@ void CFDSolver::step(float dt) {
   // geometry)
   static bool ibm_initialized = false;
   if (!ibm_initialized || true) { // Always run for now
+    // Update area fractions for cut-cell pressure handling.
+    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+        grid.sdf, grid.frac_u, res, spacing, make_float3(0.5f, 0.0f, 0.0f), 1);
+    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+        grid.sdf, grid.frac_v, res, spacing, make_float3(0.0f, 0.5f, 0.0f), 2);
+    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+        grid.sdf, grid.frac_w, res, spacing, make_float3(0.0f, 0.0f, 0.5f), 3);
+    CHECK_CUDA(cudaGetLastError());
+
     int *d_counter;
     CHECK_CUDA(cudaMalloc(&d_counter, sizeof(int)));
 
@@ -2412,6 +2690,10 @@ void CFDSolver::step(float dt) {
     ibm_initialized = true;
   }
 
+  // Enforce zero velocity inside solid faces before using them in advection.
+  apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
+                                                  grid.sdf, res);
+
   // Save previous state (for Time Derivative in RHS)
   CHECK_CUDA(cudaMemcpy(grid.u_old, grid.u, num_elements * sizeof(float),
                         cudaMemcpyDeviceToDevice));
@@ -2444,14 +2726,10 @@ void CFDSolver::step(float dt) {
         grid.w_old, grid.res_u, // Explicit term stored in res_u
         res, spacing, dt, rho_, mu_, grid.body_accel_, 0, theta);
 
-    // 2. Add QUICK Correction (Scaled by theta for Implicit Part?)
-    // Note: Implicit Advection LHS is scaled by theta.
-    // The Deferred Correction term = (QUICK - Upwind).
-    // If LHS is theta*Upwind, we want (theta*QUICK) effectively.
-    // So we add theta * (QUICK - Upwind).
+    // 2. Add TVD Correction (deferred correction for higher-order advection)
     compute_tvd_correction_kernel<<<grid_dim, block>>>(
-        grid.B_RHS, grid.u, grid.v, grid.w, grid.u, 0, res, spacing,
-        rho_ * theta);
+        grid.B_RHS, grid.u, grid.v, grid.w, grid.u, grid.sdf, grid.ibm_id_map_u,
+        grid.ibm_data_u, 0, res, spacing, rho_ * theta);
 
     // 3. Modify Stencil (IBM)
     if (grid.ibm_data_u.num_active_cells > 0) {
@@ -2481,8 +2759,8 @@ void CFDSolver::step(float dt) {
         res, spacing, dt, rho_, mu_, grid.body_accel_, 1, theta);
 
     compute_tvd_correction_kernel<<<grid_dim, block>>>(
-        grid.B_RHS, grid.u, grid.v, grid.w, grid.v, 1, res, spacing,
-        rho_ * theta);
+        grid.B_RHS, grid.u, grid.v, grid.w, grid.v, grid.sdf, grid.ibm_id_map_v,
+        grid.ibm_data_v, 1, res, spacing, rho_ * theta);
 
     if (grid.ibm_data_v.num_active_cells > 0) {
       int n_ibm = grid.ibm_data_v.num_active_cells;
@@ -2510,8 +2788,8 @@ void CFDSolver::step(float dt) {
         res, spacing, dt, rho_, mu_, grid.body_accel_, 2, theta);
 
     compute_tvd_correction_kernel<<<grid_dim, block>>>(
-        grid.B_RHS, grid.u, grid.v, grid.w, grid.w, 2, res, spacing,
-        rho_ * theta);
+        grid.B_RHS, grid.u, grid.v, grid.w, grid.w, grid.sdf, grid.ibm_id_map_w,
+        grid.ibm_data_w, 2, res, spacing, rho_ * theta);
 
     if (grid.ibm_data_w.num_active_cells > 0) {
       int n_ibm = grid.ibm_data_w.num_active_cells;
@@ -2546,8 +2824,17 @@ void CFDSolver::step(float dt) {
 
     // b. Compute Divergence of current velocity (into grid.rhs)
     compute_divergence_kernel<<<grid_dim, block>>>(
-        grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w, grid.rhs,
-        res, spacing, dt, rho_);
+        grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf,
+        grid.rhs, res, spacing, dt, rho_);
+
+    float inv_dx = 1.0f / spacing.x;
+    float inv_dy = 1.0f / spacing.y;
+    float inv_dz = 1.0f / spacing.z;
+    float max_vel = compute_max_velocity();
+    float adv_scale = max_vel * (inv_dx + inv_dy + inv_dz);
+    float diff_scale =
+        mu_ * (inv_dx * inv_dx + inv_dy * inv_dy + inv_dz * inv_dz);
+    float solid_c = (rho_ / (theta * dt)) + rho_ * adv_scale + diff_scale;
 
     // c. Build Pressure Stencil (Laplacian with area fractions)
     compute_pressure_stencil_kernel<<<grid_dim, block>>>(
@@ -2556,15 +2843,18 @@ void CFDSolver::step(float dt) {
         grid.rhs, // Div U
         grid.frac_u, grid.frac_v,
         grid.frac_w, // Using fluid fractions for Laplacian
-        res, spacing);
+        grid.p_old, res, spacing, solid_c);
 
-    // d. Modify Stencil (IBM Neumann for pressure)
-    if (grid.ibm_data.num_active_cells > 0) {
-      int n_ibm = grid.ibm_data.num_active_cells;
-      modify_stencil_ibm_kernel<<<(n_ibm + 255) / 256, 256>>>(
-          grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-          grid.B_RHS, grid.ibm_data);
-    }
+    // d. IBM Stencil modification DISABLED for pressure
+    // The frac-weighted Laplacian already handles geometry correctly:
+    // - Divergence uses frac-weighted fluxes: div = sum(u*frac)/dx
+    // - Laplacian uses same fracs: lap = sum(frac*(phi_nb - phi_c))/dx^2
+    // - These are mathematically consistent, so projection works
+    // IBM modification was causing mismatch because it uses cell-center SDF
+    // while fracs use face-center SDF.
+    // Note: Keep IBM for velocity (Dirichlet BC) where ghost-cell approach is needed.
+
+    // REMOVED: modify_stencil_ibm_kernel for pressure
 
     // e. Solve for phi (pressure correction) using RB-GS
     for (int k = 0; k < p_max_iter_; k++) {
@@ -2576,10 +2866,18 @@ void CFDSolver::step(float dt) {
           grid.A_T, grid.B_RHS, res, false, pin_idx);
     }
 
-    // f. Project Velocity using phi: u -= (dt/rho) * grad(phi)
+    // e2. REMOVED: phi extrapolation was breaking Poisson solution consistency
+    // The frac-weighted Laplacian is self-consistent with frac-weighted divergence
+    // No extrapolation needed - the Poisson solve determines all phi values
+
+    // f. Project Velocity using phi: u -= grad(phi)
     project_velocity_kernel<<<grid_dim, block>>>(
         grid.u, grid.v, grid.w, grid.phi, grid.frac_u, grid.frac_v, grid.frac_w,
         res, spacing, dt, rho_);
+
+    // Ensure solid faces are zero after projection as well.
+    apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
+                                                    grid.sdf, res);
 
     // g. Update Pressure from phi (Eq. 14): p = p_old + c * phi
     update_pressure_from_phi_kernel<<<grid_dim, block>>>(

@@ -38,8 +38,13 @@ def test_periodic_channel_flow():
     steps = 10
     
     print(f"Running {steps} steps with Fx={force_x}...")
+    
+    solver.set_rho(rho)
+    solver.set_mu(0.0)
+    solver.set_pressure_solver_params(10, 1e-5)
+    
     for i in range(steps):
-        solver.step(dt, rho, 0.0, 10, 1e-5)
+        solver.step(dt)
         
     u = np.array(solver.get_u()).reshape((nx, ny, nz), order='F')
     

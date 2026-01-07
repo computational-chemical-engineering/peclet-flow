@@ -314,43 +314,45 @@ __global__ void compute_ibm_geometry_kernel(IBM_Data ibm_data, int *ibm_id_map,
       float R = D_rescale / D_axis;
       if (fabsf(D_axis) < 1e-9f)
         R = 1.0f;
+      ibm_data.R_val[list_idx * 6 + kp] = R;
+      ibm_data.R_val[list_idx * 6 + km] = R;
 
       if (sandwich) {
         float N_c_plus = poly_N_c_sandwich(xi_vals[km], xi_vals[kp]);
-        ibm_data.K_val[list_idx * 6 + kp] = (N_c_plus / D_axis) * R;
+        ibm_data.K_val[list_idx * 6 + kp] = N_c_plus * R;
         ibm_data.M_val[list_idx * 6 + kp] = 0.0f;
         ibm_data.X_val[list_idx * 6 + kp] = 0.0f;
         ibm_data.B_val[list_idx * 6 + kp] = 0.0f;
 
         float N_c_minus = poly_N_c_sandwich(xi_vals[kp], xi_vals[km]);
-        ibm_data.K_val[list_idx * 6 + km] = (N_c_minus / D_axis) * R;
+        ibm_data.K_val[list_idx * 6 + km] = N_c_minus * R;
         ibm_data.M_val[list_idx * 6 + km] = 0.0f;
         ibm_data.X_val[list_idx * 6 + km] = 0.0f;
         ibm_data.B_val[list_idx * 6 + km] = 0.0f;
       } else {
         if (is_ghost[kp]) {
           ibm_data.K_val[list_idx * 6 + kp] =
-              (poly_N_c(xi_vals[kp]) / D_axis) * R;
+              poly_N_c(xi_vals[kp]) * R;
           ibm_data.M_val[list_idx * 6 + kp] = 0.0f;
           ibm_data.X_val[list_idx * 6 + kp] =
-              (poly_N_nb(xi_vals[kp]) / D_axis) * R;
+              poly_N_nb(xi_vals[kp]) * R;
           ibm_data.B_val[list_idx * 6 + kp] = 0.0f;
         } else {
           ibm_data.K_val[list_idx * 6 + kp] = 0.0f;
-          ibm_data.M_val[list_idx * 6 + kp] = R;
+          ibm_data.M_val[list_idx * 6 + kp] = 1.0f;
           ibm_data.X_val[list_idx * 6 + kp] = 0.0f;
           ibm_data.B_val[list_idx * 6 + kp] = 0.0f;
         }
         if (is_ghost[km]) {
           ibm_data.K_val[list_idx * 6 + km] =
-              (poly_N_c(xi_vals[km]) / D_axis) * R;
+              poly_N_c(xi_vals[km]) * R;
           ibm_data.M_val[list_idx * 6 + km] = 0.0f;
           ibm_data.X_val[list_idx * 6 + km] =
-              (poly_N_nb(xi_vals[km]) / D_axis) * R;
+              poly_N_nb(xi_vals[km]) * R;
           ibm_data.B_val[list_idx * 6 + km] = 0.0f;
         } else {
           ibm_data.K_val[list_idx * 6 + km] = 0.0f;
-          ibm_data.M_val[list_idx * 6 + km] = R;
+          ibm_data.M_val[list_idx * 6 + km] = 1.0f;
           ibm_data.X_val[list_idx * 6 + km] = 0.0f;
           ibm_data.B_val[list_idx * 6 + km] = 0.0f;
         }
@@ -364,6 +366,7 @@ __global__ void compute_ibm_geometry_kernel(IBM_Data ibm_data, int *ibm_id_map,
     ibm_data.D_rescale[list_idx] = 1.0f;
     for (int k = 0; k < 6; k++) {
       ibm_data.dir_code[list_idx * 6 + k] = k;
+      ibm_data.R_val[list_idx * 6 + k] = 1.0f;
       if (is_ghost[k]) {
         // Ghost: phi_g = phi_c
         // Term in stencil: A_nb * phi_g = A_nb * phi_c.
@@ -424,84 +427,78 @@ __global__ void modify_stencil_ibm_kernel(
   // but here we update the cell c itself uniquely (one thread per IBM cell).
   // So updating A_C[c] and B_RHS[c] is safe.
 
+  // Save original coefficient values BEFORE any modifications
+  // This prevents cascading corruption in the direction loop
+  float orig_AE = A_E[c_idx];
+  float orig_AW = A_W[c_idx];
+  float orig_AN = A_N[c_idx];
+  float orig_AS = A_S[c_idx];
+  float orig_AT = A_T[c_idx];
+  float orig_AB = A_B[c_idx];
+  float orig_vals[6] = {orig_AE, orig_AW, orig_AN, orig_AS, orig_AT, orig_AB};
+
   A_C[c_idx] *= descale;
   B_RHS[c_idx] *= descale;
 
-  // 2. Loop over 6 directions
-  // Stride 6
+  // Initialize neighbor modifications (will be accumulated)
+  float mod_AE = 0.0f, mod_AW = 0.0f, mod_AN = 0.0f;
+  float mod_AS = 0.0f, mod_AT = 0.0f, mod_AB = 0.0f;
+
+  // 2. Compute all modifications using ORIGINAL values
   for (int k = 0; k < 6; k++) {
     int entry = list_idx * 6 + k;
-    int dir = ibm_data.dir_code[entry]; // Should be k if we stored 0..5 ordered
 
     float K = ibm_data.K_val[entry];
     float M = ibm_data.M_val[entry];
     float X = ibm_data.X_val[entry];
     float B = ibm_data.B_val[entry];
 
-    // Determine neighbor pointer
-    // k=0: +X (East), k=1: -X (West), ...
-    float *A_nb_ptr = nullptr;
-    float *A_opp_ptr = nullptr; // Opposite neighbor pointer (for cross term)
-    // Actually X term adds to "Other" neighbor.
-    // In 1-sided Case: X adds to Fluid Neighbor (Opposite).
-    // So if k is Ghost, X adds to Opposite.
+    float val_nb = orig_vals[k];
 
-    // Map k to A array
-    if (k == 0) {
-      A_nb_ptr = A_E;
-      A_opp_ptr = A_W;
-    } else if (k == 1) {
-      A_nb_ptr = A_W;
-      A_opp_ptr = A_E;
-    } else if (k == 2) {
-      A_nb_ptr = A_N;
-      A_opp_ptr = A_S;
-    } else if (k == 3) {
-      A_nb_ptr = A_S;
-      A_opp_ptr = A_N;
-    } else if (k == 4) {
-      A_nb_ptr = A_T;
-      A_opp_ptr = A_B;
-    } else if (k == 5) {
-      A_nb_ptr = A_B;
-      A_opp_ptr = A_T;
-    }
-
-    // A_nb is the coefficient corresponding to the neighbor in direction k.
-    // e.g. if k=0 (+X), A_nb is A_E[c_idx].
-
-    float val_nb = A_nb_ptr[c_idx];
-
-    // Update Center: A_c += A_nb * K
+    // Update Center: A_c += A_nb * K (using original A_nb)
     A_C[c_idx] += val_nb * K;
 
     // Update RHS: b_c += B
-    // Note: My derivation said B_val includes the term.
-    // b' = D*b - ...
-    // If B_val is additive, we add it.
-    // (Wait, B_val in my pre-computation was 0.0 for now, but mechanically
-    // correct).
     B_RHS[c_idx] += B;
 
-    // Update Neighbor Coefficient: A_nb = A_nb * M
-    // BUT we also have Cross Term: A_opp += A_nb * X?
-    // Let's re-read Eq 25/26:
-    // a'_{nb,d} = D * a_{nb,d} + ...
-    // Actually, if fluid-fluid, M=1 (scaled by D/D=1? No M=R).
-    // Wait. simple scaling: new_A_nb = old_A_nb * M + old_A_opp * X ??
-    // No.
-    // Pre-calc logic:
-    // X_val adds to the *other* neighbor.
-    // So A_opp[c] += A_nb[c] * X.
-    // AND A_nb[c] *= M.
-
-    // We must handle the READ of A_nb before WRITE if we modify distinct
-    // pointers? A_nb_ptr and A_opp_ptr are distinct arrays (A_E vs A_W). So
-    // safe.
-
-    A_nb_ptr[c_idx] *= M;
-    A_opp_ptr[c_idx] += val_nb * X;
+    // Accumulate neighbor modifications
+    // M multiplies the neighbor in direction k
+    // X adds to the opposite neighbor
+    switch (k) {
+    case 0: // East
+      mod_AE += orig_AE * (descale * M - 1.0f); // Apply row scaling + mask
+      mod_AW += orig_AE * X;                    // Cross term to West
+      break;
+    case 1: // West
+      mod_AW += orig_AW * (descale * M - 1.0f);
+      mod_AE += orig_AW * X;
+      break;
+    case 2: // North
+      mod_AN += orig_AN * (descale * M - 1.0f);
+      mod_AS += orig_AN * X;
+      break;
+    case 3: // South
+      mod_AS += orig_AS * (descale * M - 1.0f);
+      mod_AN += orig_AS * X;
+      break;
+    case 4: // Top
+      mod_AT += orig_AT * (descale * M - 1.0f);
+      mod_AB += orig_AT * X;
+      break;
+    case 5: // Bottom
+      mod_AB += orig_AB * (descale * M - 1.0f);
+      mod_AT += orig_AB * X;
+      break;
+    }
   }
+
+  // Apply accumulated modifications
+  A_E[c_idx] = orig_AE + mod_AE;
+  A_W[c_idx] = orig_AW + mod_AW;
+  A_N[c_idx] = orig_AN + mod_AN;
+  A_S[c_idx] = orig_AS + mod_AS;
+  A_T[c_idx] = orig_AT + mod_AT;
+  A_B[c_idx] = orig_AB + mod_AB;
 }
 
 // --------------------------------------------------------

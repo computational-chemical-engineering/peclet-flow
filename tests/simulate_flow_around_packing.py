@@ -113,14 +113,18 @@ def simulate_flow():
     dt = 0.01
     rho = 1.0
     nu = 0.5 # Viscous flow
-    max_iter = 20 # Pressure iterations
+    max_iter = 1000 # Pressure iterations
     tol = 1e-4
+    
+    solver.set_rho(rho)
+    solver.set_mu(nu * rho)
+    solver.set_pressure_solver_params(max_iter, tol)
     
     steps = 100
     print(f"Running {steps} steps flow around sphere...")
     
     for i in range(steps):
-        solver.step(dt, rho, nu, max_iter, tol)
+        solver.step(dt)
         if i % 20 == 0:
             print(f"Step {i}")
             

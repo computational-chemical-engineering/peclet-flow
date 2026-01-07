@@ -46,6 +46,7 @@ struct IBM_Data {
   float *X_val; // [num_active * 6] - Factor X (Cross-term, usually 0 unless
                 // sandwich)
   float *B_val; // [num_active * 6] - Factor B (Correction to RHS)
+  float *R_val; // [num_active * 6] - D_rescale / D_axis ratio per direction
 
   // Note: Standard N_bc, val_bc are subsumed into B_val calculation
   // or kept for explicit flux calculation if needed?
