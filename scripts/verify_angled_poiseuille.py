@@ -601,6 +601,22 @@ def make_plots(results):
     plt.savefig('output/angled_poiseuille_2d_slices.png', dpi=150)
     print(f"2D slice plot saved to output/angled_poiseuille_2d_slices.png")
 
+    # 2D pressure field
+    fig3, ax3 = plt.subplots(figsize=(6, 5))
+    p_slice = r['p_field'][:, :, mid_z]
+    p_centered = p_slice - np.mean(p_slice)
+    im = ax3.imshow(p_centered.T, origin='lower', extent=extent, cmap='RdBu_r')
+    ax3.contour(sdf_slice.T, levels=[0], colors='k', linewidths=2,
+               extent=extent, origin='lower')
+    ax3.set_xlabel('x')
+    ax3.set_ylabel('y')
+    ax3.set_title(f'Pressure (mean subtracted) at z={mid_z*r["dx"]:.2f} (N={r["res"]})')
+    ax3.set_aspect('equal')
+    plt.colorbar(im, ax=ax3, label='p - mean(p)')
+    plt.tight_layout()
+    plt.savefig('output/angled_poiseuille_2d_pressure.png', dpi=150)
+    print(f"2D pressure plot saved to output/angled_poiseuille_2d_pressure.png")
+
 
 if __name__ == "__main__":
     results = run_convergence_study()

@@ -38,7 +38,7 @@ __global__ void compute_pressure_stencil_kernel(
     const float *__restrict__ rhs_input, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
     const float *__restrict__ sdf, const float *__restrict__ p_old, int3 res,
-    float3 spacing, float solid_c);
+    float3 spacing, float rho, float dt);
 
 __global__ void compute_fluid_fraction_kernel(
     const float *__restrict__ sdf, float *fractions, int3 res, float3 spacing,
@@ -814,7 +814,7 @@ __global__ void compute_pressure_stencil_kernel(
     const float *__restrict__ rhs_input, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
     const float *__restrict__ sdf, const float *__restrict__ p_old, int3 res,
-    float3 spacing, float solid_c) {
+    float3 spacing, float rho, float dt) {
 
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -873,10 +873,15 @@ __global__ void compute_pressure_stencil_kernel(
   float az_p = face_w_t ? frac_w[idx_zp] * inv_dz2 : 0.0f;
   float az_m = face_w_b ? frac_w[idx] * inv_dz2 : 0.0f;
 
-  // If all faces are solid, decouple from fluid and use unweighted Laplacian.
+  // If all faces are solid, decouple from fluid.
+  // We want ∇²p = 0 in solid. This requires solving a Laplace equation
+  // with the fluid pressure as boundary condition.
+  // For stability, we set B_RHS = 0 for solid cells. This makes φ = 0 in
+  // the solid interior (harmonic with zero BC from decoupled fluid).
+  // The pressure in the solid remains unchanged, which is acceptable since
+  // the solid pressure doesn't affect the fluid dynamics.
   if (fluid_faces == 0) {
-    // Solid cell: use unweighted Laplacian and enforce
-    // Ds G phi = -(1/c) Ds G p_old.
+    // Solid cell: use unweighted Laplacian with B_RHS = 0
     float ax = inv_dx2;
     float ay = inv_dy2;
     float az = inv_dz2;
@@ -888,13 +893,7 @@ __global__ void compute_pressure_stencil_kernel(
     A_T[idx] = -az;
     A_B[idx] = -az;
     A_C[idx] = 2.0f * (ax + ay + az);
-
-    float lap_p =
-        (p_old[idx_xp] - 2.0f * p_old[idx] + p_old[idx_xm]) * inv_dx2 +
-        (p_old[idx_yp] - 2.0f * p_old[idx] + p_old[idx_ym]) * inv_dy2 +
-        (p_old[idx_zp] - 2.0f * p_old[idx] + p_old[idx_zm]) * inv_dz2;
-    float inv_c = (solid_c > 0.0f) ? (1.0f / solid_c) : 0.0f;
-    B_RHS[idx] = -inv_c * lap_p;
+    // B_RHS[idx] already set to rhs_input[idx] (divergence = 0 for solid)
     return;
   }
 
@@ -2827,15 +2826,6 @@ void CFDSolver::step(float dt) {
         grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf,
         grid.rhs, res, spacing, dt, rho_);
 
-    float inv_dx = 1.0f / spacing.x;
-    float inv_dy = 1.0f / spacing.y;
-    float inv_dz = 1.0f / spacing.z;
-    float max_vel = compute_max_velocity();
-    float adv_scale = max_vel * (inv_dx + inv_dy + inv_dz);
-    float diff_scale =
-        mu_ * (inv_dx * inv_dx + inv_dy * inv_dy + inv_dz * inv_dz);
-    float solid_c = (rho_ / (theta * dt)) + rho_ * adv_scale + diff_scale;
-
     // c. Build Pressure Stencil (Laplacian with area fractions)
     compute_pressure_stencil_kernel<<<grid_dim, block>>>(
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
@@ -2843,7 +2833,7 @@ void CFDSolver::step(float dt) {
         grid.rhs, // Div U
         grid.frac_u, grid.frac_v,
         grid.frac_w, // Using fluid fractions for Laplacian
-        grid.sdf, grid.p_old, res, spacing, solid_c);
+        grid.sdf, grid.p_old, res, spacing, rho_, dt);
 
     // d. IBM Stencil modification DISABLED for pressure
     // The frac-weighted Laplacian already handles geometry correctly:
@@ -3031,21 +3021,11 @@ void CFDSolver::step(float dt) {
         grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf,
         grid.rhs, res, spacing, dt, rho_);
 
-    float inv_dx = 1.0f / spacing.x;
-    float inv_dy = 1.0f / spacing.y;
-    float inv_dz = 1.0f / spacing.z;
-    float max_vel = compute_max_velocity();
-    float adv_scale = max_vel * (inv_dx + inv_dy + inv_dz);
-    float diff_scale =
-        mu_ * (inv_dx * inv_dx + inv_dy * inv_dy + inv_dz * inv_dz);
-    float solid_c = (rho_ / (diffusion_theta * dt)) + rho_ * adv_scale +
-                    diff_scale;
-
     // Build pressure stencil (Laplacian with area fractions)
     compute_pressure_stencil_kernel<<<grid_dim, block>>>(
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
         grid.B_RHS, grid.rhs, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf,
-        grid.p_old, res, spacing, solid_c);
+        grid.p_old, res, spacing, rho_, dt);
 
     // Solve for phi (pressure correction)
     for (int k = 0; k < p_max_iter_; k++) {
