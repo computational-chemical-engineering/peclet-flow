@@ -85,9 +85,8 @@ def run_simulation(res_n, L=1.0, slab_thickness=0.2, verbose=True):
     solver.initialize(sdf_data)
 
     # Physical parameters
-    rho = 1.0
-    nu = 0.01
-    mu = nu * rho
+    rho = 0.01
+    mu = 0.01
 
     # Body force magnitude and direction (parallel to wall)
     f_mag = 1.0e-2
@@ -109,21 +108,20 @@ def run_simulation(res_n, L=1.0, slab_thickness=0.2, verbose=True):
         pressure_max_iter = 2000
 
     velocity_max_iter = 50
-    cfl = 0.5
     theta = 1.0
-    max_steps = 40000
-    check_interval = 100
+    max_steps = 20
+    check_interval = 1
 
-    solver.set_pressure_solver_params(max_iter=pressure_max_iter, tol=1e-5)
+    solver.set_pressure_solver_params(max_iter=pressure_max_iter, tol=1e-9)
     solver.set_velocity_solver_params(max_iter=velocity_max_iter, tol=1e-5)
-    solver.set_cfl(cfl)
     solver.set_diffusion_theta(theta)
 
     # Analytical max velocity (Poiseuille between parallel plates)
-    U_ana_max = (f_mag * H**2) / (8.0 * nu)
+    U_ana_max = (f_mag * H**2) / (8.0 * mu)
 
     # Time stepping
-    dt = 0.5 * dx / (U_ana_max + 1e-12)
+    #dt = 0.5 * dx / (U_ana_max + 1e-12)
+    dt = 10.0
 
     if verbose:
         print(f"  U_ana_max={U_ana_max:.6e}, dt={dt:.6e}")
@@ -242,7 +240,7 @@ def extract_profile_along_normal(result):
     return d_vals, np.array(u_profile), np.array(sdf_profile)
 
 
-def analytical_profile(d_vals, H, slab_thickness, f_mag, nu):
+def analytical_profile(d_vals, H, slab_thickness, f_mag, mu):
     """Compute analytical Poiseuille profile."""
     sqrt2 = np.sqrt(2.0)
 
@@ -259,12 +257,12 @@ def analytical_profile(d_vals, H, slab_thickness, f_mag, nu):
             # Distance from wall (at |d| = half_t)
             d_from_wall = abs(d) - half_t
             # Parabolic: u = (f/(2ν)) * y * (H - y) where y is distance from wall
-            u_ana[i] = (f_mag / (2*nu)) * d_from_wall * (H - d_from_wall)
+            u_ana[i] = (f_mag / (2*mu)) * d_from_wall * (H - d_from_wall)
 
     return u_ana
 
 
-def analytical_component_at_points(x, y, L, slab_thickness, f_mag, nu, comp):
+def analytical_component_at_points(x, y, L, slab_thickness, f_mag, mu, comp):
     """
     Analytical component value at physical points for angled Poiseuille flow.
 
@@ -285,7 +283,7 @@ def analytical_component_at_points(x, y, L, slab_thickness, f_mag, nu, comp):
     abs_d = np.abs(d_wrapped)
     fluid = abs_d > half_t
     d_wall = abs_d[fluid] - half_t
-    u_parallel[fluid] = (f_mag / (2.0 * nu)) * d_wall * (H - d_wall)
+    u_parallel[fluid] = (f_mag / (2.0 * mu)) * d_wall * (H - d_wall)
 
     if comp == 'u' or comp == 'v':
         return u_parallel / sqrt2
@@ -408,7 +406,7 @@ def extract_line_samples(result, comp, axis, x0, y0, z0):
 def make_staggered_line_plots(results):
     """Plot u, v, w, p along fixed lines and compare to high-res profile."""
     f_mag = 0.01
-    nu = 0.01
+    mu = 0.01
 
     comps = ['u', 'v', 'w', 'p']
     titles = ['u (x-velocity)', 'v (y-velocity)', 'w (z-velocity)', 'p (pressure)']
@@ -515,7 +513,7 @@ def make_plots(results):
 
     sqrt2 = np.sqrt(2.0)
     f_mag = 0.01
-    nu = 0.01
+    mu = 0.01
 
     # Plot 1: Velocity profiles
     ax1 = axes[0]
@@ -532,7 +530,7 @@ def make_plots(results):
     # Analytical profile (use finest grid parameters)
     r = results[-1]
     d_ana = np.linspace(-r['L']/(2*sqrt2), r['L']/(2*sqrt2), 200)
-    u_ana = analytical_profile(d_ana, r['H'], r['slab_thickness'], f_mag, nu)
+    u_ana = analytical_profile(d_ana, r['H'], r['slab_thickness'], f_mag, mu)
     ax1.plot(d_ana, u_ana, 'k-', linewidth=2, label='Analytical', zorder=1)
 
     # Shade solid region

@@ -57,6 +57,15 @@ def get_sangani_acrivos_k_sc(phi):
     if phi < phis[0]: return 1.0 # Or Hasimoto
     return np.interp(phi, phis, ks)
 
+def get_zick_homsy_k_sc(phi):
+    # Simple interpolation (lookup table)
+    phis = np.array([0.000125, 0.001, 0.008, 0.027, 0.064, 0.125, 0.216, 0.343, 0.45, 0.5236])
+    ks   = np.array([1.096, 1.212, 1.525, 2.008, 2.810, 4.292, 7.442, 15.4, 28.1, 42.1])
+    
+    # Linear interp for now
+    if phi < phis[0]: return 1.0 # Or Hasimoto
+    return np.interp(phi, phis, ks)
+
 def run_simulation(sdf_values, res_n, dx, R, L, phi_real, label):
     sdf_data = pnm_backend.SDFData(
         sdf_values, 
@@ -70,17 +79,20 @@ def run_simulation(sdf_values, res_n, dx, R, L, phi_real, label):
     )
     solver.initialize(sdf_data)
     
-    rho = 1.0
-    nu = 0.01 
+    rho = 0.1
+    mu = 0.01 
     f_mag = 1.0e-4 
     solver.set_body_force(pnm_backend.float3(f_mag, 0, 0))
-    dt = 0.1 * dx
+    dt = 5.0
     
-    solver.set_mu(rho * nu)
+    solver.set_mu(mu)
     
     u_mean_history = []
-    max_steps = 5000 
+    max_steps = 500
     
+    solver.set_pressure_solver_params(max_iter=200, tol=1e-9)
+    solver.set_velocity_solver_params(max_iter=100, tol=1e-6)
+
     # print(f"--- {label} (phi={phi_real:.4f}) ---")
     
     for i in range(max_steps):
@@ -102,7 +114,6 @@ def run_simulation(sdf_values, res_n, dx, R, L, phi_real, label):
     U_sup = np.mean(u_field)
     
     F_drag = f_mag * (1.0 - phi_real) * (L**3)
-    mu = rho * nu
     K = F_drag / (6.0 * np.pi * mu * R * U_sup)
     
     # print(f"  Result: K={K:.4f}")
@@ -110,7 +121,7 @@ def run_simulation(sdf_values, res_n, dx, R, L, phi_real, label):
 
 def run_sweep():
     # Sweep phi from 0.05 to 0.5
-    phis = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50]
+    phis = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.5236]
     res_n = 64
     L = 1.0
     dx = L/res_n
@@ -127,8 +138,9 @@ def run_sweep():
         # For now use target R/phi.
         
         k_sim = run_simulation(sdf, res_n, dx, R, L, phi_target, f"SC phi={phi_target}")
-        k_ref = get_sangani_acrivos_k_sc(phi_target)
-        
+#        k_ref = get_sangani_acrivos_k_sc(phi_target)
+        k_ref = get_zick_homsy_k_sc(phi_target)
+
         err = 100.0 * (k_sim - k_ref) / k_ref
         print(f"{phi_target:<10.3f} {k_sim:<10.4f} {k_ref:<10.4f} {err:<10.2f}")
         results.append((phi_target, k_sim, k_ref))

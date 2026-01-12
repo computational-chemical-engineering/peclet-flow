@@ -80,10 +80,17 @@ PYBIND11_MODULE(pnm_backend, m) {
       .def("get_dt", &CFDSolver::get_dt)
       .def("set_rho", &CFDSolver::set_rho, py::arg("rho"))
       .def("set_mu", &CFDSolver::set_mu, py::arg("mu"))
+      .def("set_ibm_scheme", &CFDSolver::set_ibm_scheme, py::arg("scheme"))
+      .def("set_boundary_velocity", &CFDSolver::set_boundary_velocity,
+           py::arg("u_bc"))
       .def("set_pressure_solver_params", &CFDSolver::set_pressure_solver_params,
            py::arg("max_iter"), py::arg("tol"))
       .def("set_velocity_solver_params", &CFDSolver::set_velocity_solver_params,
            py::arg("max_iter"), py::arg("tol"))
+      .def("set_outer_iterations", &CFDSolver::set_outer_iterations,
+           py::arg("iterations"))
+      .def("set_outer_tolerance", &CFDSolver::set_outer_tolerance,
+           py::arg("tol"))
       .def("step", &CFDSolver::step, py::arg("dt"))
       .def("get_u", &CFDSolver::get_u)
       .def("get_v", &CFDSolver::get_v)
@@ -95,5 +102,9 @@ PYBIND11_MODULE(pnm_backend, m) {
       .def("set_v", &CFDSolver::set_v, py::arg("v"))
       .def("set_w", &CFDSolver::set_w, py::arg("w"))
       .def("project", &CFDSolver::project, py::arg("dt"),
-           py::arg("incremental") = false);
+           py::arg("incremental") = false)
+      .def("get_diffusion_stencil", &CFDSolver::get_diffusion_stencil,
+           py::arg("component_idx"), py::arg("ibm_enabled"))
+      .def("get_ibm_scaling", &CFDSolver::get_ibm_scaling,
+           py::arg("component_idx"));
 }

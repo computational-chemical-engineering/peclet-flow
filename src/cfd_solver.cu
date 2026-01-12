@@ -1,4 +1,5 @@
 #include "cfd_solver.cuh"
+#include "cfd_solver_ibm_kernels.cuh"
 #include <cstdio>
 #include <iostream>
 #include <thrust/device_ptr.h>
@@ -21,33 +22,17 @@
 // Defined in cfd_solver.cuh
 
 // Forward Declarations
-__global__ void compute_momentum_stencil_kernel(
-    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
-    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
-    float *__restrict__ A_T, float *__restrict__ B_RHS,
-    const float *__restrict__ u, const float *__restrict__ v,
-    const float *__restrict__ w, const float *__restrict__ p,
-    const float *__restrict__ u_old, const float *__restrict__ v_old,
-    const float *__restrict__ w_old, int3 res, float3 spacing, float dt,
-    float rho, float mu, float3 body_accel, int component_idx);
-
-__global__ void compute_pressure_stencil_kernel(
-    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
-    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
-    float *__restrict__ A_T, float *__restrict__ B_RHS,
-    const float *__restrict__ rhs_input, const float *__restrict__ frac_u,
-    const float *__restrict__ frac_v, const float *__restrict__ frac_w,
-    const float *__restrict__ sdf, const float *__restrict__ p_old, int3 res,
-    float3 spacing, float rho, float dt);
-
-__global__ void compute_fluid_fraction_kernel(
-    const float *__restrict__ sdf, float *fractions, int3 res, float3 spacing,
-    float3 offset, int type);
+// Note: compute_ibm_geometry_kernel is templated and defined in header.
 
 __global__ void modify_stencil_ibm_kernel(
     float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
     float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
-    float *__restrict__ A_T, float *__restrict__ B_RHS, IBM_Data ibm_data);
+    float *__restrict__ A_T, float *__restrict__ B_RHS, IBM_Data ibm_data,
+    float u_bc_val);
+
+__global__ void populate_ibm_scaling_kernel(float *__restrict__ d_rescale,
+                                            IBM_Data ibm_data,
+                                            int num_elements);
 
 __global__ void solve_rbgs_stencil_kernel(
     float *__restrict__ phi, const float *__restrict__ A_C,
@@ -1012,14 +997,49 @@ __device__ inline float get_advection_velocity(const float *__restrict__ u,
   return 0.0f;
 }
 
+// Helper: Koren Limiter Flux
+// u_face: Advecting velocity
+// phi_up_m1: i-1 (Upstream - 1)
+// phi_up:    i   (Upstream)
+// phi_down:  i+1 (Downstream)
+// (Indices relative to flow direction)
+__device__ inline float tvd_flux_koren(float phi_up_m1, float phi_up, float phi_down, float u_face) {
+    // Gradient Ratio r
+    float num = phi_up - phi_up_m1;
+    float den = phi_down - phi_up;
+    
+    // Avoid division by zero
+    float r = (fabsf(den) < 1e-10f) ? 0.0f : num / den; 
+    if (fabsf(den) < 1e-10f && fabsf(num) < 1e-10f) r = 1.0f; // Uniform region
+
+    // Koren Limiter Psi(r)
+    // max(0, min(2r, min((1+2r)/3, 2)))
+    float psi = fmaxf(0.0f, fminf(2.0f * r, fminf((1.0f + 2.0f * r) / 3.0f, 2.0f)));
+
+    // TVD Flux = FOU + 0.5 * Psi(r) * (F_CDS - F_FOU) 
+    // F_CDS - F_FOU = u * 0.5 * (phi_down - phi_up)
+    // So Flux = u * (phi_up + 0.5 * psi * (phi_down - phi_up))
+    return u_face * (phi_up + 0.5f * psi * (phi_down - phi_up));
+}
+
+// Wrapper to handle direction
+__device__ inline float get_tvd_flux(float phi_LL, float phi_L, float phi_R, float phi_RR, float u_face) {
+    if (u_face > 0.0f) {
+        // Flow L -> R. Upstream: L, LL. Downstream: R.
+        return tvd_flux_koren(phi_LL, phi_L, phi_R, u_face);
+    } else {
+        // Flow R -> L. Upstream: R, RR. Downstream: L.
+        return tvd_flux_koren(phi_RR, phi_R, phi_L, u_face);
+    }
+}
+
 // Helper: Standard QUICK Flux Interpolation (Full Stencil)
 __device__ inline float quick_interp(float phi_LL, float phi_L, float phi_R,
                                      float u_face) {
   if (u_face > 0.0f) {
-    return 0.75f * phi_L + 0.375f * phi_R - 0.125f * phi_LL;
+    return 0.125f * (6.0f * phi_L + 3.0f * phi_R - phi_LL);
   } else {
-    // Error usage or specific case
-    return 0.0f;
+    return 0.125f * (6.0f * phi_R + 3.0f * phi_L - phi_LL); // phi_LL here is actually phi_RR relative to flow
   }
 }
 
@@ -1366,6 +1386,53 @@ __global__ void compute_explicit_terms_kernel(
 // (rho/dt) * u + rho * (u_conv . grad) u - mu * lap(u)
 // Uses First-Order Upwind for advection to ensure diagonal dominance.
 // --------------------------------------------------------
+// Diffusion Only Stencil Kernel (For Verification)
+// --------------------------------------------------------
+__global__ void compute_diffusion_only_stencil_kernel(
+    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
+    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
+    float *__restrict__ A_T, float *__restrict__ B_RHS, int3 res,
+    float3 spacing, float mu) {
+
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+
+  int idx = get_idx(idx_x, idx_y, idx_z, res);
+
+  float idx2 = 1.0f / (spacing.x * spacing.x);
+  float idy2 = 1.0f / (spacing.y * spacing.y);
+  float idz2 = 1.0f / (spacing.z * spacing.z);
+
+  // Diffusion Operator L(u) ~ mu * Laplacian(u)
+  // Standard Central Difference:
+  // d2u/dx2 = (uE - 2uC + uW) / dx2
+  // Term at uC is -2/dx2 - 2/dy2 - 2/dz2
+  
+  float aw = mu * idx2;
+  float ae = mu * idx2;
+  float as = mu * idy2;
+  float an = mu * idy2;
+  float ab = mu * idz2;
+  float at = mu * idz2;
+  float ac = -2.0f * mu * (idx2 + idy2 + idz2);
+
+  A_C[idx] = ac;
+  A_W[idx] = aw;
+  A_E[idx] = ae;
+  A_S[idx] = as;
+  A_N[idx] = an;
+  A_B[idx] = ab;
+  A_T[idx] = at;
+  
+  // Initialize RHS to 0 (pure operator extraction)
+  B_RHS[idx] = 0.0f;
+}
+
+// --------------------------------------------------------
 // Compute Momentum Stencil (Picard Linearization)
 // --------------------------------------------------------
 // Generates 7-point stencil (A_C, A_W, ...) and RHS (B_RHS)
@@ -1379,7 +1446,7 @@ __global__ void compute_momentum_stencil_kernel(
     const float *__restrict__ w, const float *__restrict__ p,
     const float *__restrict__ u_old, const float *__restrict__ v_old,
     const float *__restrict__ w_old, const float *__restrict__ explicit_term,
-    int3 res, float3 spacing, float dt, float rho, float mu, float3 body_accel,
+    int3 res, float3 spacing, float dt, float rho, float mu, float3 body_force,
     int component_idx, float theta) {
 
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1498,21 +1565,21 @@ __global__ void compute_momentum_stencil_kernel(
     at += term_z;
   }
 
-  // Calculate RHS: (rho/dt)*u_old + rho*g
+  // Calculate RHS: (rho/dt)*u_old + theta*f
   float val_old = 0.0f;
   float force = 0.0f;
   if (component_idx == 0) {
     val_old = u_old[idx];
-    force = body_accel.x;
+    force = body_force.x;
   } else if (component_idx == 1) {
     val_old = v_old[idx];
-    force = body_accel.y;
+    force = body_force.y;
   } else {
     val_old = w_old[idx];
-    force = body_accel.z;
+    force = body_force.z;
   }
 
-  B_RHS[idx] = (rho / dt) * val_old + rho * force;
+  B_RHS[idx] = (rho / dt) * val_old + theta * force;
 
   // Add explicit terms (1-theta) * (...)
   if (explicit_term != nullptr) {
@@ -1752,8 +1819,8 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   grid.res = res;
   grid.spacing = spacing;
   grid.num_elements = num_elements; // Fix: Initialize grid member
-  grid.body_force_ = make_float3(0.0f, 0.0f, 0.0f);
-  grid.body_accel_ = make_float3(0.0f, 0.0f, 0.0f);
+  grid.body_force_density_ = make_float3(0.0f, 0.0f, 0.0f);
+  grid.u_bc_ = make_float3(0.0f, 0.0f, 0.0f);
 
   // Allocate MacGrid arrays
   CHECK_CUDA(cudaMalloc(&grid.u, num_elements * sizeof(float)));
@@ -1823,7 +1890,7 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.ibm_data.K_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data.M_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data.X_val, n * 6 * sizeof(float)));
-  CHECK_CUDA(cudaMalloc(&grid.ibm_data.B_val, n * 6 * sizeof(float)));
+    { cudaError_t err = cudaMalloc(&grid.ibm_data.Nbc_val, n * 6 * sizeof(float)); if (err != cudaSuccess) { std::cerr << "CUDA error in " << "/home/frankp/Codes/pnm_from_sdf/src/cfd_solver.cu" << ":" << 1861 << ": " << cudaGetErrorString(err) << std::endl; exit(1); } };
   CHECK_CUDA(cudaMalloc(&grid.ibm_data.R_val, n * 6 * sizeof(float)));
   grid.ibm_data.num_active_cells = 0;
 
@@ -1836,7 +1903,7 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_u.K_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_u.M_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_u.X_val, n * 6 * sizeof(float)));
-  CHECK_CUDA(cudaMalloc(&grid.ibm_data_u.B_val, n * 6 * sizeof(float)));
+    { cudaError_t err = cudaMalloc(&grid.ibm_data_u.Nbc_val, n * 6 * sizeof(float)); if (err != cudaSuccess) { std::cerr << "CUDA error in " << "/home/frankp/Codes/pnm_from_sdf/src/cfd_solver.cu" << ":" << 1874 << ": " << cudaGetErrorString(err) << std::endl; exit(1); } };
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_u.R_val, n * 6 * sizeof(float)));
   grid.ibm_data_u.num_active_cells = 0;
 
@@ -1849,7 +1916,7 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_v.K_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_v.M_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_v.X_val, n * 6 * sizeof(float)));
-  CHECK_CUDA(cudaMalloc(&grid.ibm_data_v.B_val, n * 6 * sizeof(float)));
+    { cudaError_t err = cudaMalloc(&grid.ibm_data_v.Nbc_val, n * 6 * sizeof(float)); if (err != cudaSuccess) { std::cerr << "CUDA error in " << "/home/frankp/Codes/pnm_from_sdf/src/cfd_solver.cu" << ":" << 1887 << ": " << cudaGetErrorString(err) << std::endl; exit(1); } };
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_v.R_val, n * 6 * sizeof(float)));
   grid.ibm_data_v.num_active_cells = 0;
 
@@ -1862,7 +1929,7 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_w.K_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_w.M_val, n * 6 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_w.X_val, n * 6 * sizeof(float)));
-  CHECK_CUDA(cudaMalloc(&grid.ibm_data_w.B_val, n * 6 * sizeof(float)));
+    { cudaError_t err = cudaMalloc(&grid.ibm_data_w.Nbc_val, n * 6 * sizeof(float)); if (err != cudaSuccess) { std::cerr << "CUDA error in " << "/home/frankp/Codes/pnm_from_sdf/src/cfd_solver.cu" << ":" << 1900 << ": " << cudaGetErrorString(err) << std::endl; exit(1); } };
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_w.R_val, n * 6 * sizeof(float)));
   grid.ibm_data_w.num_active_cells = 0;
 
@@ -1934,7 +2001,7 @@ CFDSolver::~CFDSolver() {
     CHECK_CUDA(cudaFree(data.K_val));
     CHECK_CUDA(cudaFree(data.M_val));
     CHECK_CUDA(cudaFree(data.X_val));
-    CHECK_CUDA(cudaFree(data.B_val));
+    { cudaError_t err = cudaFree(data.Nbc_val); if (err != cudaSuccess) { std::cerr << "CUDA error in " << "/home/frankp/Codes/pnm_from_sdf/src/cfd_solver.cu" << ":" << 1972 << ": " << cudaGetErrorString(err) << std::endl; exit(1); } };
     CHECK_CUDA(cudaFree(data.R_val));
   };
 
@@ -1961,13 +2028,9 @@ void CFDSolver::set_rho(float rho) {
   rho_ = rho;
   if (rho_ > 0.0f) {
     nu_ = mu_ / rho_;
-    grid.body_accel_ =
-        make_float3(grid.body_force_.x / rho_, grid.body_force_.y / rho_,
-                    grid.body_force_.z / rho_);
   } else {
     // Avoid division by zero, though rho should be physical
     nu_ = 0.0f;
-    grid.body_accel_ = make_float3(0.0f, 0.0f, 0.0f);
   }
 }
 
@@ -2033,9 +2096,9 @@ void CFDSolver::initialize(const SDFData &sdf_data) {
 
 // Forward Declaration of Kernel (it's in another file, need to link or extern)
 // Ideally put prototype in header or extern here.
-extern __global__ void compute_ibm_geometry_kernel(
-    IBM_Data ibm_data, int *ibm_id_map, const float *__restrict__ sdf, int3 res,
-    float3 spacing, int *counter, float3 offset, int bc_type);
+// extern __global__ void compute_ibm_geometry_kernel(
+//    IBM_Data ibm_data, int *ibm_id_map, const float *__restrict__ sdf, int3 res,
+//    float3 spacing, int *counter, float3 offset, int bc_type);
 
 __global__ void check_id_map_kernel(const int *map, int n, int max_idx,
                                     IBM_Data ibm_data, int num_elements) {
@@ -2059,9 +2122,15 @@ void CFDSolver::update_ibm_geometry() {
   auto run_geo_pass = [&](IBM_Data &data, int *map, float3 offset,
                           int bc_type) -> int {
     CHECK_CUDA(cudaMemset(d_counter, 0, sizeof(int)));
-    compute_ibm_geometry_kernel<<<blocks, threads>>>(
-        data, map, grid.sdf, grid.res, grid.spacing, d_counter, offset,
-        bc_type);
+    if (ibm_scheme_ == 1) {
+        compute_ibm_geometry_kernel<1><<<blocks, threads>>>(
+            data, map, grid.sdf, grid.res, grid.spacing, d_counter, offset,
+            bc_type);
+    } else {
+        compute_ibm_geometry_kernel<0><<<blocks, threads>>>(
+            data, map, grid.sdf, grid.res, grid.spacing, d_counter, offset,
+            bc_type);
+    }
     int count;
     CHECK_CUDA(
         cudaMemcpy(&count, d_counter, sizeof(int), cudaMemcpyDeviceToHost));
@@ -2109,14 +2178,17 @@ void CFDSolver::update_ibm_geometry() {
   std::cout << "  W-Face: " << grid.num_ibm_cells_w << std::endl;
 }
 
-void CFDSolver::set_body_force(float3 force) {
-  grid.body_force_ = force;
-  if (rho_ > 0.0f) {
-    grid.body_accel_ =
-        make_float3(force.x / rho_, force.y / rho_, force.z / rho_);
-  } else {
-    grid.body_accel_ = make_float3(0.0f, 0.0f, 0.0f);
-  }
+void CFDSolver::set_body_force(float3 force_density) {
+  // Store force density directly (N/m^3)
+  grid.body_force_density_ = force_density;
+}
+
+void CFDSolver::set_boundary_velocity(float3 u_bc) {
+  grid.u_bc_ = u_bc;
+}
+
+void CFDSolver::set_ibm_scheme(int scheme) {
+  ibm_scheme_ = scheme;
 }
 
 // Getters
@@ -2479,17 +2551,16 @@ __global__ void compute_momentum_residual_kernel(
 // --------------------------------------------------------
 
 // --------------------------------------------------------
-// Deferred Correction Residual Kernel (TVD with Koren Limiter)
+// Advection Correction Kernel (Defect Correction: TVD - FOU)
 // --------------------------------------------------------
-// Computes B_add = - Div ( F_TVD - F_UPWIND )
+// Computes B_add = - Div ( F_TVD - F_FOU )
 // To be added to B_RHS.
-__global__ void compute_tvd_correction_kernel(
+__global__ void compute_advection_correction_kernel(
     float *__restrict__ B_RHS, const float *__restrict__ u,
     const float *__restrict__ v, const float *__restrict__ w,
-    const float
-        *__restrict__ phi, // The scalar field being advected (u, v, or w)
+    const float *__restrict__ phi, // The scalar field being advected
     const float *__restrict__ sdf, const int *__restrict__ ibm_id_map,
-    IBM_Data ibm_data, int comp_idx, int3 res, float3 spacing, float rho) {
+    IBM_Data ibm_data, int comp_idx, int3 res, float3 spacing, float rho_theta) {
 
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -2501,118 +2572,119 @@ __global__ void compute_tvd_correction_kernel(
   int idx = get_idx(idx_x, idx_y, idx_z, res);
   int3 idx_3d = make_int3(idx_x, idx_y, idx_z);
 
-  // Neighbors for Stencil (Phi)
-  // X: x-2, x-1, x, x+1, x+2
-  // We need fluxes at Face West (i-1/2 -> index i, i-1?) NO.
-  // CV faces are at i and i+1?
-  // Let's use standard convention: "Right" face is (i+1/2) relative to center
-  // i.
-  //   For U-CV (i+1/2): Right face is x_{i+1}, Left is x_i.
-  //   Phi indices: C=i, E=i+1, W=i-1, EE=i+2, WW=i-2.
-  //   Face Right (between i and i+1): Uses L=i, R=i+1, LL=i-1, RR=i+2.
-  //   Face Left  (between i-1 and i): Uses L=i-1, R=i, LL=i-2, RR=i+1.
+  float inv_dx = 1.0f / spacing.x;
+  float inv_dy = 1.0f / spacing.y;
+  float inv_dz = 1.0f / spacing.z;
 
   // X-Fluxes
-  float u_face_r = get_advection_velocity(u, v, w, comp_idx, 0, idx_3d, res);
-  // For Left face, we need velocity at x_i.
-  // We can call get_advection with x-1?
-  int3 idx_w =
-      make_int3(idx_x - 1, idx_y,
-                idx_z); // Indices wrap in get_idx? No, handled manually?
-  // get_advection_velocity handles get_idx internally. We pass logical coords.
-  float u_face_l = get_advection_velocity(u, v, w, comp_idx, 0, idx_w, res);
+  float diff_x_r, diff_x_l;
+  {
+      float u_face = get_advection_velocity(u, v, w, comp_idx, 0, idx_3d, res);
+      // For U-component, U is centered at faces. So interpolate U to U-face-X?
+      // No, U-control volume faces.
+      // For U (0), X-Face is at i+1 relative to center i.
+      // u_face is the velocity AT the face.
+      if (comp_idx == 0) u_face = 0.5f * (phi[idx] + phi[get_idx(idx_x+1, idx_y, idx_z, res)]);
+      
+      float phi_LL = phi[get_idx(idx_x - 1, idx_y, idx_z, res)];
+      float phi_L  = phi[idx];
+      float phi_R  = phi[get_idx(idx_x + 1, idx_y, idx_z, res)];
+      float phi_RR = phi[get_idx(idx_x + 2, idx_y, idx_z, res)];
+      
+      float f_tvd = get_tvd_flux(phi_LL, phi_L, phi_R, phi_RR, u_face);
+      // FOU Flux
+      float f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+      
+      float R = get_ibm_ratio(ibm_id_map, ibm_data, idx, 0);
+      diff_x_r = (f_tvd - f_fou) * R;
+      
+      // Left Face
+      u_face = get_advection_velocity(u, v, w, comp_idx, 0, make_int3(idx_x-1, idx_y, idx_z), res);
+      if (comp_idx == 0) u_face = 0.5f * (phi[get_idx(idx_x-1, idx_y, idx_z, res)] + phi[idx]);
 
-  // Phi values X
-  float p_c = phi[idx];
-  float p_e = phi[get_idx(idx_x + 1, idx_y, idx_z, res)];
-  float p_w = phi[get_idx(idx_x - 1, idx_y, idx_z, res)];
-  float p_ee = phi[get_idx(idx_x + 2, idx_y, idx_z, res)];
-  float p_ww = phi[get_idx(idx_x - 2, idx_y, idx_z, res)];
-
-  int far_x_r = (u_face_r >= 0.0f) ? (idx_x - 1) : (idx_x + 2);
-  bool far_solid_r =
-      sample_sdf_component(sdf, res, far_x_r, idx_y, idx_z, comp_idx) < 0.0f;
-  float f_tvd_r = tvd_flux_ibm(p_w, p_c, p_e, p_ee, u_face_r, far_solid_r);
-  float f_upw_r = upwind_flux_full(p_c, p_e, u_face_r);
-  float R_r = get_ibm_ratio(ibm_id_map, ibm_data, idx, 0);
-  float diff_r = (f_tvd_r - f_upw_r) * R_r;
-
-  // Face Left: Neighbors shift by -1. L=p_w, R=p_c, LL=p_ww, RR=p_e
-  int far_x_l = (u_face_l >= 0.0f) ? (idx_x - 2) : (idx_x + 1);
-  bool far_solid_l =
-      sample_sdf_component(sdf, res, far_x_l, idx_y, idx_z, comp_idx) < 0.0f;
-  float f_tvd_l = tvd_flux_ibm(p_ww, p_w, p_c, p_e, u_face_l, far_solid_l);
-  float f_upw_l = upwind_flux_full(p_w, p_c, u_face_l);
-  float R_l = get_ibm_ratio(ibm_id_map, ibm_data, idx, 1);
-  float diff_l = (f_tvd_l - f_upw_l) * R_l;
+      phi_LL = phi[get_idx(idx_x - 2, idx_y, idx_z, res)];
+      phi_L  = phi[get_idx(idx_x - 1, idx_y, idx_z, res)];
+      phi_R  = phi[idx];
+      phi_RR = phi[get_idx(idx_x + 1, idx_y, idx_z, res)];
+      
+      f_tvd = get_tvd_flux(phi_LL, phi_L, phi_R, phi_RR, u_face);
+      f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+      
+      R = get_ibm_ratio(ibm_id_map, ibm_data, idx, 1);
+      diff_x_l = (f_tvd - f_fou) * R;
+  }
 
   // Y-Fluxes
-  float v_face_n = get_advection_velocity(u, v, w, comp_idx, 1, idx_3d, res);
-  float v_face_s = get_advection_velocity(
-      u, v, w, comp_idx, 1, make_int3(idx_x, idx_y - 1, idx_z), res);
+  float diff_y_t, diff_y_b;
+  {
+      float v_face = get_advection_velocity(u, v, w, comp_idx, 1, idx_3d, res);
+      if (comp_idx == 1) v_face = 0.5f * (phi[idx] + phi[get_idx(idx_x, idx_y+1, idx_z, res)]);
 
-  float p_n = phi[get_idx(idx_x, idx_y + 1, idx_z, res)];
-  float p_s = phi[get_idx(idx_x, idx_y - 1, idx_z, res)];
-  float p_nn = phi[get_idx(idx_x, idx_y + 2, idx_z, res)];
-  float p_ss = phi[get_idx(idx_x, idx_y - 2, idx_z, res)];
+      float phi_LL = phi[get_idx(idx_x, idx_y - 1, idx_z, res)];
+      float phi_L  = phi[idx];
+      float phi_R  = phi[get_idx(idx_x, idx_y + 1, idx_z, res)];
+      float phi_RR = phi[get_idx(idx_x, idx_y + 2, idx_z, res)];
+      
+      float f_tvd = get_tvd_flux(phi_LL, phi_L, phi_R, phi_RR, v_face);
+      float f_fou = (v_face > 0) ? v_face * phi_L : v_face * phi_R;
+      
+      float R = get_ibm_ratio(ibm_id_map, ibm_data, idx, 2);
+      diff_y_t = (f_tvd - f_fou) * R;
+      
+      v_face = get_advection_velocity(u, v, w, comp_idx, 1, make_int3(idx_x, idx_y-1, idx_z), res);
+      if (comp_idx == 1) v_face = 0.5f * (phi[get_idx(idx_x, idx_y-1, idx_z, res)] + phi[idx]);
 
-  int far_y_n = (v_face_n >= 0.0f) ? (idx_y - 1) : (idx_y + 2);
-  bool far_solid_n =
-      sample_sdf_component(sdf, res, idx_x, far_y_n, idx_z, comp_idx) < 0.0f;
-  float f_tvd_n = tvd_flux_ibm(p_s, p_c, p_n, p_nn, v_face_n, far_solid_n);
-  float f_upw_n = upwind_flux_full(p_c, p_n, v_face_n);
-  float R_n = get_ibm_ratio(ibm_id_map, ibm_data, idx, 2);
-  float diff_n = (f_tvd_n - f_upw_n) * R_n;
-
-  int far_y_s = (v_face_s >= 0.0f) ? (idx_y - 2) : (idx_y + 1);
-  bool far_solid_s =
-      sample_sdf_component(sdf, res, idx_x, far_y_s, idx_z, comp_idx) < 0.0f;
-  float f_tvd_s = tvd_flux_ibm(p_ss, p_s, p_c, p_n, v_face_s, far_solid_s);
-  float f_upw_s = upwind_flux_full(p_s, p_c, v_face_s);
-  float R_s = get_ibm_ratio(ibm_id_map, ibm_data, idx, 3);
-  float diff_s = (f_tvd_s - f_upw_s) * R_s;
+      phi_LL = phi[get_idx(idx_x, idx_y - 2, idx_z, res)];
+      phi_L  = phi[get_idx(idx_x, idx_y - 1, idx_z, res)];
+      phi_R  = phi[idx];
+      phi_RR = phi[get_idx(idx_x, idx_y + 1, idx_z, res)];
+      
+      f_tvd = get_tvd_flux(phi_LL, phi_L, phi_R, phi_RR, v_face);
+      f_fou = (v_face > 0) ? v_face * phi_L : v_face * phi_R;
+      
+      R = get_ibm_ratio(ibm_id_map, ibm_data, idx, 3);
+      diff_y_b = (f_tvd - f_fou) * R;
+  }
 
   // Z-Fluxes
-  float w_face_t = get_advection_velocity(u, v, w, comp_idx, 2, idx_3d, res);
-  float w_face_b = get_advection_velocity(
-      u, v, w, comp_idx, 2, make_int3(idx_x, idx_y, idx_z - 1), res);
+  float diff_z_t, diff_z_b;
+  {
+      float w_face = get_advection_velocity(u, v, w, comp_idx, 2, idx_3d, res);
+      if (comp_idx == 2) w_face = 0.5f * (phi[idx] + phi[get_idx(idx_x, idx_y, idx_z+1, res)]);
 
-  float p_t = phi[get_idx(idx_x, idx_y, idx_z + 1, res)];
-  float p_b = phi[get_idx(idx_x, idx_y, idx_z - 1, res)];
-  float p_tt = phi[get_idx(idx_x, idx_y, idx_z + 2, res)];
-  float p_bb = phi[get_idx(idx_x, idx_y, idx_z - 2, res)];
+      float phi_LL = phi[get_idx(idx_x, idx_y, idx_z - 1, res)];
+      float phi_L  = phi[idx];
+      float phi_R  = phi[get_idx(idx_x, idx_y, idx_z + 1, res)];
+      float phi_RR = phi[get_idx(idx_x, idx_y, idx_z + 2, res)];
+      
+      float f_tvd = get_tvd_flux(phi_LL, phi_L, phi_R, phi_RR, w_face);
+      float f_fou = (w_face > 0) ? w_face * phi_L : w_face * phi_R;
+      
+      float R = get_ibm_ratio(ibm_id_map, ibm_data, idx, 4);
+      diff_z_t = (f_tvd - f_fou) * R;
+      
+      w_face = get_advection_velocity(u, v, w, comp_idx, 2, make_int3(idx_x, idx_y, idx_z-1), res);
+      if (comp_idx == 2) w_face = 0.5f * (phi[get_idx(idx_x, idx_y, idx_z-1, res)] + phi[idx]);
 
-  int far_z_t = (w_face_t >= 0.0f) ? (idx_z - 1) : (idx_z + 2);
-  bool far_solid_t =
-      sample_sdf_component(sdf, res, idx_x, idx_y, far_z_t, comp_idx) < 0.0f;
-  float f_tvd_t = tvd_flux_ibm(p_b, p_c, p_t, p_tt, w_face_t, far_solid_t);
-  float f_upw_t = upwind_flux_full(p_c, p_t, w_face_t);
-  float R_t = get_ibm_ratio(ibm_id_map, ibm_data, idx, 4);
-  float diff_t = (f_tvd_t - f_upw_t) * R_t;
+      phi_LL = phi[get_idx(idx_x, idx_y, idx_z - 2, res)];
+      phi_L  = phi[get_idx(idx_x, idx_y, idx_z - 1, res)];
+      phi_R  = phi[idx];
+      phi_RR = phi[get_idx(idx_x, idx_y, idx_z + 1, res)];
+      
+      f_tvd = get_tvd_flux(phi_LL, phi_L, phi_R, phi_RR, w_face);
+      f_fou = (w_face > 0) ? w_face * phi_L : w_face * phi_R;
+      
+      R = get_ibm_ratio(ibm_id_map, ibm_data, idx, 5);
+      diff_z_b = (f_tvd - f_fou) * R;
+  }
 
-  int far_z_b = (w_face_b >= 0.0f) ? (idx_z - 2) : (idx_z + 1);
-  bool far_solid_b =
-      sample_sdf_component(sdf, res, idx_x, idx_y, far_z_b, comp_idx) < 0.0f;
-  float f_tvd_b = tvd_flux_ibm(p_bb, p_b, p_c, p_t, w_face_b, far_solid_b);
-  float f_upw_b = upwind_flux_full(p_b, p_c, w_face_b);
-  float R_b = get_ibm_ratio(ibm_id_map, ibm_data, idx, 5);
-  float diff_b = (f_tvd_b - f_upw_b) * R_b;
+  // Div(Diffs)
+  float div_diff = (diff_x_r - diff_x_l) * inv_dx + 
+                   (diff_y_t - diff_y_b) * inv_dy + 
+                   (diff_z_t - diff_z_b) * inv_dz;
 
-  // Total Correction Source Term
-  // Adv_exact = Adv_upwind + Div(Diffs) ?
-  // Operator: Adv_upw (implicit) = RHS - Adv_deferred
-  // Adv_deferred = Adv_quick - Adv_upw
-  // RHS_new = RHS_old - Adv_deferred
-  // Adv_deferred = (Diff_R - Diff_L)/dx + ...
-
-  float corr_x = (diff_r - diff_l) / spacing.x;
-  float corr_y = (diff_n - diff_s) / spacing.y;
-  float corr_z = (diff_t - diff_b) / spacing.z;
-
-  float total_correction = -rho * (corr_x + corr_y + corr_z);
-
-  // Add to existing B_RHS
-  B_RHS[idx] += total_correction;
+  // Add to RHS: - rho * theta * Div(Diffs)
+  B_RHS[idx] -= rho_theta * div_diff;
 }
 
 // --------------------------------------------------------
@@ -2650,9 +2722,15 @@ void CFDSolver::step(float dt) {
 
     // Pressure (Centered, Neumann BC=1)
     CHECK_CUDA(cudaMemset(d_counter, 0, sizeof(int)));
-    compute_ibm_geometry_kernel<<<grid_dim, block>>>(
-        grid.ibm_data, grid.ibm_id_map, grid.sdf, res, spacing, d_counter,
-        make_float3(0.0f, 0.0f, 0.0f), 1);
+    if (ibm_scheme_ == 1) {
+        compute_ibm_geometry_kernel<1><<<grid_dim, block>>>(
+            grid.ibm_data, grid.ibm_id_map, grid.sdf, res, spacing, d_counter,
+            make_float3(0.0f, 0.0f, 0.0f), 1);
+    } else {
+        compute_ibm_geometry_kernel<0><<<grid_dim, block>>>(
+            grid.ibm_data, grid.ibm_id_map, grid.sdf, res, spacing, d_counter,
+            make_float3(0.0f, 0.0f, 0.0f), 1);
+    }
     int h_counter;
     CHECK_CUDA(
         cudaMemcpy(&h_counter, d_counter, sizeof(int), cudaMemcpyDeviceToHost));
@@ -2660,27 +2738,45 @@ void CFDSolver::step(float dt) {
 
     // Velocity U (Staggered X, Dirichlet BC=0)
     CHECK_CUDA(cudaMemset(d_counter, 0, sizeof(int)));
-    compute_ibm_geometry_kernel<<<grid_dim, block>>>(
-        grid.ibm_data_u, grid.ibm_id_map_u, grid.sdf, res, spacing, d_counter,
-        make_float3(-0.5f, 0.0f, 0.0f), 0);
+    if (ibm_scheme_ == 1) {
+        compute_ibm_geometry_kernel<1><<<grid_dim, block>>>(
+            grid.ibm_data_u, grid.ibm_id_map_u, grid.sdf, res, spacing, d_counter,
+            make_float3(-0.5f, 0.0f, 0.0f), 0);
+    } else {
+        compute_ibm_geometry_kernel<0><<<grid_dim, block>>>(
+            grid.ibm_data_u, grid.ibm_id_map_u, grid.sdf, res, spacing, d_counter,
+            make_float3(-0.5f, 0.0f, 0.0f), 0);
+    }
     CHECK_CUDA(
         cudaMemcpy(&h_counter, d_counter, sizeof(int), cudaMemcpyDeviceToHost));
     grid.ibm_data_u.num_active_cells = h_counter;
 
     // Velocity V (Staggered Y, Dirichlet BC=0)
     CHECK_CUDA(cudaMemset(d_counter, 0, sizeof(int)));
-    compute_ibm_geometry_kernel<<<grid_dim, block>>>(
-        grid.ibm_data_v, grid.ibm_id_map_v, grid.sdf, res, spacing, d_counter,
-        make_float3(0.0f, -0.5f, 0.0f), 0);
+    if (ibm_scheme_ == 1) {
+        compute_ibm_geometry_kernel<1><<<grid_dim, block>>>(
+            grid.ibm_data_v, grid.ibm_id_map_v, grid.sdf, res, spacing, d_counter,
+            make_float3(0.0f, -0.5f, 0.0f), 0);
+    } else {
+        compute_ibm_geometry_kernel<0><<<grid_dim, block>>>(
+            grid.ibm_data_v, grid.ibm_id_map_v, grid.sdf, res, spacing, d_counter,
+            make_float3(0.0f, -0.5f, 0.0f), 0);
+    }
     CHECK_CUDA(
         cudaMemcpy(&h_counter, d_counter, sizeof(int), cudaMemcpyDeviceToHost));
     grid.ibm_data_v.num_active_cells = h_counter;
 
     // Velocity W (Staggered Z, Dirichlet BC=0)
     CHECK_CUDA(cudaMemset(d_counter, 0, sizeof(int)));
-    compute_ibm_geometry_kernel<<<grid_dim, block>>>(
-        grid.ibm_data_w, grid.ibm_id_map_w, grid.sdf, res, spacing, d_counter,
-        make_float3(0.0f, 0.0f, -0.5f), 0);
+    if (ibm_scheme_ == 1) {
+        compute_ibm_geometry_kernel<1><<<grid_dim, block>>>(
+            grid.ibm_data_w, grid.ibm_id_map_w, grid.sdf, res, spacing, d_counter,
+            make_float3(0.0f, 0.0f, -0.5f), 0);
+    } else {
+        compute_ibm_geometry_kernel<0><<<grid_dim, block>>>(
+            grid.ibm_data_w, grid.ibm_id_map_w, grid.sdf, res, spacing, d_counter,
+            make_float3(0.0f, 0.0f, -0.5f), 0);
+    }
     CHECK_CUDA(
         cudaMemcpy(&h_counter, d_counter, sizeof(int), cudaMemcpyDeviceToHost));
     grid.ibm_data_w.num_active_cells = h_counter;
@@ -2711,7 +2807,7 @@ void CFDSolver::step(float dt) {
   compute_explicit_terms_kernel<<<grid_dim, block>>>(
       grid.res_u, grid.res_v, grid.res_w, grid.u_old, grid.v_old, grid.w_old,
       grid.p, grid.frac_u, grid.frac_v, grid.frac_w, res, spacing, rho_, mu_,
-      grid.body_accel_);
+      grid.body_force_density_);
 
   // 1. Momentum Solve (Newton-Raphson/Defect Correction)
   // Replaces global Picard loop with component-wise defect correction
@@ -2723,10 +2819,10 @@ void CFDSolver::step(float dt) {
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
         grid.B_RHS, grid.u, grid.v, grid.w, grid.p_old, grid.u_old, grid.v_old,
         grid.w_old, grid.res_u, // Explicit term stored in res_u
-        res, spacing, dt, rho_, mu_, grid.body_accel_, 0, theta);
+        res, spacing, dt, rho_, mu_, grid.body_force_density_, 0, theta);
 
     // 2. Add TVD Correction (deferred correction for higher-order advection)
-    compute_tvd_correction_kernel<<<grid_dim, block>>>(
+    compute_advection_correction_kernel<<<grid_dim, block>>>(
         grid.B_RHS, grid.u, grid.v, grid.w, grid.u, grid.sdf, grid.ibm_id_map_u,
         grid.ibm_data_u, 0, res, spacing, rho_ * theta);
 
@@ -2735,7 +2831,7 @@ void CFDSolver::step(float dt) {
       int n_ibm = grid.ibm_data_u.num_active_cells;
       modify_stencil_ibm_kernel<<<(n_ibm + 255) / 256, 256>>>(
           grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-          grid.B_RHS, grid.ibm_data_u);
+          grid.B_RHS, grid.ibm_data_u, grid.u_bc_.x);
     }
 
     // 4. Solve Linear System
@@ -2755,9 +2851,9 @@ void CFDSolver::step(float dt) {
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
         grid.B_RHS, grid.u, grid.v, grid.w, grid.p_old, grid.u_old, grid.v_old,
         grid.w_old, grid.res_v, // Explicit term stored in res_v
-        res, spacing, dt, rho_, mu_, grid.body_accel_, 1, theta);
+        res, spacing, dt, rho_, mu_, grid.body_force_density_, 1, theta);
 
-    compute_tvd_correction_kernel<<<grid_dim, block>>>(
+    compute_advection_correction_kernel<<<grid_dim, block>>>(
         grid.B_RHS, grid.u, grid.v, grid.w, grid.v, grid.sdf, grid.ibm_id_map_v,
         grid.ibm_data_v, 1, res, spacing, rho_ * theta);
 
@@ -2765,7 +2861,7 @@ void CFDSolver::step(float dt) {
       int n_ibm = grid.ibm_data_v.num_active_cells;
       modify_stencil_ibm_kernel<<<(n_ibm + 255) / 256, 256>>>(
           grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-          grid.B_RHS, grid.ibm_data_v);
+          grid.B_RHS, grid.ibm_data_v, grid.u_bc_.y);
     }
 
     for (int k = 0; k < 5; k++) {
@@ -2784,9 +2880,9 @@ void CFDSolver::step(float dt) {
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
         grid.B_RHS, grid.u, grid.v, grid.w, grid.p_old, grid.u_old, grid.v_old,
         grid.w_old, grid.res_w, // Explicit term stored in res_w
-        res, spacing, dt, rho_, mu_, grid.body_accel_, 2, theta);
+        res, spacing, dt, rho_, mu_, grid.body_force_density_, 2, theta);
 
-    compute_tvd_correction_kernel<<<grid_dim, block>>>(
+    compute_advection_correction_kernel<<<grid_dim, block>>>(
         grid.B_RHS, grid.u, grid.v, grid.w, grid.w, grid.sdf, grid.ibm_id_map_w,
         grid.ibm_data_w, 2, res, spacing, rho_ * theta);
 
@@ -2794,7 +2890,7 @@ void CFDSolver::step(float dt) {
       int n_ibm = grid.ibm_data_w.num_active_cells;
       modify_stencil_ibm_kernel<<<(n_ibm + 255) / 256, 256>>>(
           grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-          grid.B_RHS, grid.ibm_data_w);
+          grid.B_RHS, grid.ibm_data_w, grid.u_bc_.z);
     }
 
     for (int k = 0; k < 5; k++) {
@@ -3051,6 +3147,111 @@ void CFDSolver::step(float dt) {
         grid.p, grid.phi, grid.p_old, grid.u, grid.v, grid.w,
         res, spacing, dt, diffusion_theta, rho_, mu_);
   }
+
+std::vector<float> CFDSolver::get_ibm_scaling(int component_idx) {
+  int num_elements = grid.num_elements;
+  std::vector<float> h_scale(num_elements, 1.0f);
+  
+  float *d_scale;
+  CHECK_CUDA(cudaMalloc(&d_scale, num_elements * sizeof(float)));
+  
+  // Initialize device array to 1.0
+  thrust::device_ptr<float> ptr(d_scale);
+  thrust::fill(ptr, ptr + num_elements, 1.0f);
+  
+  IBM_Data *ibm_data_ptr = nullptr;
+  if (component_idx == 0)
+    ibm_data_ptr = &grid.ibm_data_u;
+  else if (component_idx == 1)
+    ibm_data_ptr = &grid.ibm_data_v;
+  else if (component_idx == 2)
+    ibm_data_ptr = &grid.ibm_data_w;
+    
+  if (ibm_data_ptr && ibm_data_ptr->num_active_cells > 0) {
+    populate_ibm_scaling_kernel<<<(ibm_data_ptr->num_active_cells + 255) / 256, 256>>>(
+        d_scale, *ibm_data_ptr, num_elements);
+    CHECK_CUDA(cudaGetLastError());
+  }
+  
+  CHECK_CUDA(cudaMemcpy(h_scale.data(), d_scale, num_elements * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaFree(d_scale));
+  
+  return h_scale;
+}
+
+std::vector<std::vector<float>>
+CFDSolver::get_diffusion_stencil(int component_idx, bool ibm_enabled) {
+  int num_elements = grid.num_elements;
+  int3 res = grid.res;
+  float3 spacing = grid.spacing;
+
+  dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z);
+  dim3 grid_dim((res.x + block.x - 1) / block.x,
+                (res.y + block.y - 1) / block.y,
+                (res.z + block.z - 1) / block.z);
+
+  // 1. Build Base Diffusion Stencil
+  compute_diffusion_only_stencil_kernel<<<grid_dim, block>>>(
+      grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+      grid.B_RHS, res, spacing, mu_);
+  CHECK_CUDA(cudaGetLastError());
+
+  // 2. Apply IBM Modification if requested
+  if (ibm_enabled) {
+    IBM_Data *ibm_data_ptr = nullptr;
+    float u_bc_val = 0.0f;
+    if (component_idx == 0) {
+        ibm_data_ptr = &grid.ibm_data_u;
+        u_bc_val = grid.u_bc_.x;
+    } else if (component_idx == 1) {
+        ibm_data_ptr = &grid.ibm_data_v;
+        u_bc_val = grid.u_bc_.y;
+    } else if (component_idx == 2) {
+        ibm_data_ptr = &grid.ibm_data_w;
+        u_bc_val = grid.u_bc_.z;
+    }
+
+    if (ibm_data_ptr && ibm_data_ptr->num_active_cells > 0) {
+      int n_ibm = ibm_data_ptr->num_active_cells;
+      
+      modify_stencil_ibm_kernel<<<(n_ibm + 255) / 256, 256>>>(
+          grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+          grid.B_RHS, *ibm_data_ptr, u_bc_val);
+      CHECK_CUDA(cudaGetLastError());
+    }
+  }
+
+  // 3. Copy Stencil to Host
+  std::vector<std::vector<float>> result(7);
+  for (int i = 0; i < 7; ++i)
+    result[i].resize(num_elements);
+
+  CHECK_CUDA(cudaMemcpy(result[0].data(), grid.A_C,
+                        num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(result[1].data(), grid.A_W,
+                        num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(result[2].data(), grid.A_E,
+                        num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(result[3].data(), grid.A_S,
+                        num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(result[4].data(), grid.A_N,
+                        num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(result[5].data(), grid.A_B,
+                        num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(result[6].data(), grid.A_T,
+                        num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+
+  return result;
+}
+
+void CFDSolver::set_outer_iterations(int iterations) {
+  outer_iterations_ = iterations;
+}
+
+void CFDSolver::set_outer_tolerance(float tol) {
+  outer_tol_ = tol;
+}
 
   // --------------------------------------------------------
   // Project Velocity Kernel (Update U with Pressure Gradient)

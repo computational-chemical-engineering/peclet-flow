@@ -45,7 +45,7 @@ struct IBM_Data {
   float *M_val; // [num_active * 6] - Factor M (Scale neighbor)
   float *X_val; // [num_active * 6] - Factor X (Cross-term, usually 0 unless
                 // sandwich)
-  float *B_val; // [num_active * 6] - Factor B (Correction to RHS)
+  float *Nbc_val; // [num_active * 6] - Geometric factor N_bc * R (multiplies u_bc)
   float *R_val; // [num_active * 6] - D_rescale / D_axis ratio per direction
 
   // Note: Standard N_bc, val_bc are subsumed into B_val calculation
@@ -93,14 +93,18 @@ struct MacGrid {
   int num_ibm_cells_u, num_ibm_cells_v, num_ibm_cells_w;
 
   // Newton-Raphson Buffers
-  float *u_old, *v_old, *w_old; // Previous time step values (u^n)
-  float *p_old;                 // Previous time step pressure (p^n)
-  float *res_u, *res_v, *res_w; // Momentum residuals f^(k)
-  float *phi;                   // Pressure correction auxiliary variable
-  float *du, *dv, *dw;          // Velocity increments (delta u*, delta v*, delta w*)
+  float3 u_bc_; // Boundary velocity for Dirichlet
+  
+  // Body Force Density (N/m^3) - e.g. Pressure Gradient or Gravity*Rho
+  float3 body_force_density_;
 
-  float3 body_force_;
-  float3 body_accel_;
+  // --- Solver Scratch ---
+  float *u_old, *v_old, *w_old; // Previous time step
+  float *p_old;                 // Previous pressure
+  
+  float *res_u, *res_v, *res_w; // Explicit residuals
+  float *phi;                   // Pressure correction
+  float *du, *dv, *dw;          // Newton updates
 };
 
 class CFDSolver {
@@ -118,8 +122,15 @@ public:
   // Set Body Force
   void set_body_force(float3 force);
 
+  // Set Boundary Velocity (for moving walls)
+  // Currently uniform across domain for simplicity
+  void set_boundary_velocity(float3 u_bc);
+
   // Pre-process IBM Geometry
   void update_ibm_geometry();
+
+  // Set IBM Polynomial Scheme (0 = Point-Value, 1 = Cell-Average)
+  void set_ibm_scheme(int scheme);
 
   // Set Diffusion Scheme (0.5 = Crank-Nicolson, 1.0 = Fully Implicit)
   void set_diffusion_theta(float theta);
@@ -138,6 +149,7 @@ private:
   MacGrid grid;
   size_t num_elements;
   float diffusion_theta;
+  int ibm_scheme_ = 0; // 0: Point-Value (Default), 1: Cell-Average
   float current_dt_;
   float target_cfl_;
   float rho_;
@@ -147,12 +159,20 @@ private:
   float p_tol_;
   int v_max_iter_;
   float v_tol_;
-  int outer_iterations_ = 1;
+  int outer_iterations_ = 4;
+  float outer_tol_ = 1e-4f;
 
   // Helper to compute max velocity magnitude on device
   float compute_max_velocity();
 
+  // Helper to check convergence (max diff between current and previous)
+  bool check_convergence(const float *d_current, const float *d_prev, float tol);
+
 public:
+  // Set Outer Iterations (Newton/Defect Correction)
+  void set_outer_iterations(int iterations);
+  void set_outer_tolerance(float tol);
+
   // CFL Control
   void set_cfl(float cfl);
   float get_cfl() const;
@@ -178,6 +198,16 @@ public:
   // offset: {0,0,0} or staggered (e.g., {-0.5,0,0} for u-faces)
   std::vector<float> get_fluid_fraction(int type, float3 offset);
 
+  // Extract Diffusion Stencil (7 arrays: C, W, E, S, N, B, T)
+  // component_idx: 0=U, 1=V, 2=W
+  // ibm_enabled: Apply IBM modification
+  std::vector<std::vector<float>> get_diffusion_stencil(int component_idx,
+                                                        bool ibm_enabled);
+
+  // Extract IBM Scaling Factors (D_rescale) for a velocity component
+  // Returns: vector of size num_elements (1.0 for fluid/solid, D_rescale for cut cells)
+  std::vector<float> get_ibm_scaling(int component_idx);
+
 protected:
   int pin_idx;
 };
@@ -188,12 +218,12 @@ __global__ void compute_fluid_fraction_kernel(const float *__restrict__ sdf,
                                               float3 spacing, float3 offset,
                                               int type);
 
-__global__ void compute_convection_defect_kernel(const float *__restrict__ u,
-                                                 const float *__restrict__ v,
-                                                 const float *__restrict__ w,
-                                                 float *__restrict__ rhs,
-                                                 int3 res, float3 spacing,
-                                                 int component_idx);
+__global__ void compute_advection_correction_kernel(
+    float *__restrict__ B_RHS, const float *__restrict__ u,
+    const float *__restrict__ v, const float *__restrict__ w,
+    const float *__restrict__ phi, // The scalar field being advected
+    const float *__restrict__ sdf, const int *__restrict__ ibm_id_map,
+    IBM_Data ibm_data, int comp_idx, int3 res, float3 spacing, float rho_theta);
 
 // HELPER IMPLEMENTATION
 // (Removed get_ibm_update_rbgs as we switched to Stencil Solver)

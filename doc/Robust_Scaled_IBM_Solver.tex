@@ -195,15 +195,16 @@ For boundaries that are not grid-aligned, the IBM stencil often requires correct
 \begin{equation}
   \mathcal{D}_\mathrm{rescale} = \mathcal{D}_{d_{min}}, \text{ where } d_{min} = \mathrm{argmin}_{d} (|\mathcal{D}_d|) \label{eq:D_rescale}
 \end{equation}
+We define the scaling ratio for direction $d$ as $\mathcal{R}_d = \mathcal{D}_{rescale}/\mathcal{D}_d$.
 The modified coefficients (for the one-sided case) become:
 \begin{align}
-    a'_c &= \mathcal{D}_\mathrm{rescale} \, a_c + \sum_d \mathcal{N}_{c,d} \, \frac{\mathcal{D}_\mathrm{rescale}}{\mathcal{D}_{d}} \, a_{ghost,d}\\
-    a'_{nb,d} &= \mathcal{D}_\mathrm{rescale} \, a_{nb,d} + \sum_d \mathcal{N}_{nb,d}  \, \frac{\mathcal{D}_\mathrm{rescale}}{\mathcal{D}_{d}} \, a_{ghost,d} \\
+    a'_c &= \mathcal{D}_\mathrm{rescale} \, a_c + \sum_d \mathcal{N}_{c,d} \, \mathcal{R}_d \, a_{ghost,d}\\
+    a'_{nb,d} &= \mathcal{D}_\mathrm{rescale} \, a_{nb,d} + \sum_d \mathcal{N}_{nb,d}  \, \mathcal{R}_d \, a_{ghost,d} \\
     a'_{nb,\mathrm{other}} &= \mathcal{D}_\mathrm{rescale} \, a_{nb,\mathrm{other}} \quad \text{(other directions)} \\
     a'_{ghost,d} &= 0 \\
-    b'_c &= \mathcal{D}_\mathrm{rescale} \, b_c - \sum_d  \mathcal{N}_{bc,d} \, \frac{\mathcal{D}_\mathrm{rescale}}{\mathcal{D}_d} \, u_{bc,d} \, a_{ghost,d}
+    b'_c &= \mathcal{D}_\mathrm{rescale} \, b_c - \sum_d  \mathcal{N}_{bc,d} \, \mathcal{R}_d \, u_{bc,d} \, a_{ghost,d}
 \end{align}
-The summation runs over all directions where the IBM is applied. For directions where $d \neq d_{min}$, the ratio $|\mathcal{D}_\mathrm{rescale}/\mathcal{D}_d| \le 1$. A singularity ($0/0$) may seemingly arise if $\mathcal{D}_\mathrm{rescale} \approx 0$ and $\mathcal{D}_{d} \approx 0$. This occurs when the IBM interaction point is at (for point values) or very close to (for cell averages) the cell center. In such instances, we define $\mathcal{D}_\mathrm{rescale}/\mathcal{D}_d = 1$. Since the interaction points in all directions are spatially proximate, the boundary values $u_{bc,d}$ are similar, and the boundary condition remains well-posed.
+The summation runs over all directions where the IBM is applied. For directions where $d \neq d_{min}$, we have $|\mathcal{R}_d| \le 1$. A singularity ($0/0$) may seemingly arise if $\mathcal{D}_\mathrm{rescale} \approx 0$ and $\mathcal{D}_{d} \approx 0$. This occurs when the IBM interaction point is at (for point values) or very close to (for cell averages) the cell center. In such instances, we define $\mathcal{R}_d = 1$. Since the interaction points in all directions are spatially proximate, the boundary values $u_{bc,d}$ are similar, and the boundary condition remains well-posed.
 
 \subsection{IBM for Pressure Computations}
 
@@ -268,16 +269,25 @@ The 7-point stencil coefficients for the linearized momentum equation are stored
 representing the coefficients for the Center, West, East, South, North, Bottom, and Top stencil points, respectively. The source term (Right-Hand Side) is stored in a separate array $\mathcal{B}$.
 
 \subsection{Geometric Pre-computation}
-To avoid conditional branching during the linear solve, we employ a unified "bake-in" strategy. During initialization, we identify all cells $c$ that require IBM corrections (i.e., cells with at least one solid neighbor). These cells are stored in a single list, $\mathcal{L}_{IBM}$.
+To avoid conditional branching during the linear solve, we employ a unified "bake-in" strategy. During initialization, we identify all cells $c$ that require IBM corrections (i.e., cells with at least one solid neighbor). Due to the staggered grid arrangement, the geometric configuration differs for each velocity component. Therefore, we generate separate sparsity lists for each field: $\mathcal{L}_{IBM}^u, \mathcal{L}_{IBM}^v, \text{and } \mathcal{L}_{IBM}^w$.
 
-For each cell in $\mathcal{L}_{IBM}$, we pre-compute a set of scaling and modification factors for all three spatial directions ($d \in \{x, y, z\}$). Correct handling of the stencil requires modifying the center coefficient, the neighbor coefficients, and the source term.
+For each cell in these lists, we pre-compute a set of scaling and modification factors for all three spatial directions ($d \in \{x, y, z\}$). Correct handling of the stencil requires modifying the center coefficient, the neighbor coefficients, and the source term.
 For a given direction $d$ with neighbors at indices $nb,-$ and $nb,+$, we determine the status (e.g., Minus-Side Solid, Plus-Side Solid, Sandwiched, or None) and compute the following factors:
 \begin{itemize}
     \item $K_{c,-}, K_{c,+}$: Factors for adding the neighbor's coefficient to the center.
     \item $M_-, M_+$: Self-multipliers for the neighbor coefficients.
     \item $X_-, X_+$: Cross-multipliers for adding one neighbor's original coefficient to the other.
-    \item $B_{val}$: Correction for the source term $b_c$.
+    \item $B_{val,-}, B_{val,+}$: Terms for updating the source term $b_c$ with the inhomogeneous boundary values $u_{bc}$.
 \end{itemize}
+The factors $K, X,$ and $B_{val}$ implicitly contain the scaling ratio $\mathcal{R}_d = \mathcal{D}_{rescale}/\mathcal{D}_d$. For example, the cross-multiplier becomes $X \propto \mathcal{N}_{nb} \cdot \mathcal{R}_d$. A potential $0/0$ singularity arises if $\mathcal{D}_d \to 0$. However, by definition (Eq.~\ref{eq:D_rescale}), $|\mathcal{D}_{rescale}| \le |\mathcal{D}_d|$, ensuring that the numerator vanishes at least as fast as the denominator. In the numerical implementation, we compute this ratio using a safe division:
+\begin{equation}
+    \mathcal{R}_d = \begin{cases} 
+    1 & \text{if } |\mathcal{D}_d| < \epsilon \\
+    \mathcal{D}_{rescale} / \mathcal{D}_d & \text{otherwise}
+    \end{cases}
+\end{equation}
+where $\epsilon$ is a small tolerance. This guarantees that the pre-computed factors remain bounded and valid even when the ghost-cell interaction point coincides with a grid node.
+
 The global scaling factor $\mathcal{D}_{rescale}$ is also stored. Importantly, for directions that do not require modification (no solid neighbor), the additive factors ($K, X$) are set to 0 and the multiplicative factors ($M$) are set to $\mathcal{D}_{rescale}$, such that the mathematical operations remain valid but have no net effect beyond permissible scaling.
 
 Complementary to the momentum operator, the discrete Laplacian for the pressure projection (Eq.~\ref{eq:pressure-poisson}) is also constructed in a "baked-in" fashion during the initialization phase. The face area fractions $\alpha_f$, required for the divergence and gradient operators, are computed from the SDF and incorporated directly into the 7-point pressure stencil coefficients. Since the solid boundaries are stationary, this pressure matrix is constant, avoiding the need for per-timestep geometric updates and allowing the use of highly optimized, uniform RB-GS kernels for the pressure solve.
@@ -291,12 +301,13 @@ A kernel launches over the full domain to compute the standard physical coeffici
 \paragraph{2. Sparse Geometric Modification}
 We launch a kernel over the list $\mathcal{L}_{IBM}$ to apply the geometric constraints. This kernel operates without conditional branches by executing the same sequence of floating-point operations for every item.
 
-For a cell $c$, we first scale the center coefficient:
+For a cell $c$, we first scale the center coefficient and source term:
 \begin{equation}
-   a_c \leftarrow a_c \cdot \mathcal{D}_{rescale}
+   a_c \leftarrow a_c \cdot \mathcal{D}_{rescale}, \quad b_c \leftarrow b_c \cdot \mathcal{D}_{rescale}
 \end{equation}
 Then, we loop over the three spatial directions $d \in \{x, y, z\}$. Let $a_{nb,-}$ and $a_{nb,+}$ denote the coefficients of the "left" (minus) and "right" (plus) neighbors in direction $d$. The update proceeds as follows:
 \begin{align}
+    b_c &\leftarrow b_c - (a_{nb,-} \cdot B_{val,-} + a_{nb,+} \cdot B_{val,+}) \\
     % Add neighbors to center
     a_c &\leftarrow a_c + a_{nb,-} \cdot K_{c,-} + a_{nb,+} \cdot K_{c,+} \\
     % Compute temp cross values
@@ -306,10 +317,7 @@ Then, we loop over the three spatial directions $d \in \{x, y, z\}$. Let $a_{nb,
     a_{nb,-} &\leftarrow a_{nb,-} \cdot M_- + T_+ \\
     a_{nb,+} &\leftarrow a_{nb,+} \cdot M_+ + T_-
 \end{align}
-Finally, the right-hand side is updated:
-\begin{equation}
-    b_c \leftarrow b_c \cdot \mathcal{D}_{rescale}.
-\end{equation}
+
 The values $a_c$, $a_{nb,\pm}$ and $b_c$ refer to the entries in the specific stencil arrays (e.g., $\mathcal{A}_C$, $\mathcal{A}_W, \mathcal{A}_E$, $\mathcal{B}$) at index $c$. This branchless logic covers all topological cases, including sandwiched cells, by appropriate setting of the pre-computed factors (e.g., setting $M=0$ to zero out a ghost connection). The update uses atomic operations when modifying the center coefficient to handle potential race conditions if multiple directions contribute simultaneously, though in this structured loop approach over directions for a single cell, race conditions on $a_c$ are naturally avoided within the thread. Note that updating neighbors $a_{nb,-}, a_{nb,+}$ theoretically could race if two different item threads update the same neighbor, but since the list iterates over \emph{affected cells} and updates their \emph{own} stencil entries (row-based modification), no race condition exists between threads for the matrix coefficients of cell $c$.
 
 \paragraph{3. Red-Black Gauss-Seidel Solver}
