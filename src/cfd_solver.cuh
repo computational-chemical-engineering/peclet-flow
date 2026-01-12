@@ -66,8 +66,8 @@ struct MacGrid {
   // - w(i,j,k): (i+0.5, j+0.5, k) * spacing
 
   // Fields
-  float *u, *v, *w; // Velocity (staggered)
-  float *p;         // Pressure (centered)
+  double *u, *v, *w; // Velocity (staggered) - Mixed Precision: State is Double
+  double *p;         // Pressure (centered) - Mixed Precision: State is Double
   float *rhs;       // RHS for pressure solve / Temporary RHS for Momentum
   float *sdf;       // Signed Distance Field (centered)
 
@@ -99,8 +99,8 @@ struct MacGrid {
   float3 body_force_density_;
 
   // --- Solver Scratch ---
-  float *u_old, *v_old, *w_old; // Previous time step
-  float *p_old;                 // Previous pressure
+  double *u_old, *v_old, *w_old; // Previous time step (Double)
+  double *p_old;                 // Previous pressure (Double)
   
   float *res_u, *res_v, *res_w; // Explicit residuals
   float *phi;                   // Pressure correction
@@ -136,14 +136,14 @@ public:
   void set_diffusion_theta(float theta);
 
   // Getters for visualization (copy to host)
-  std::vector<float> get_u() const;
-  std::vector<float> get_v() const;
-  std::vector<float> get_w() const;
-  std::vector<float> get_p() const;
+  std::vector<double> get_u() const;
+  std::vector<double> get_v() const;
+  std::vector<double> get_w() const;
+  std::vector<double> get_p() const;
 
-  void set_u(const std::vector<float> &u);
-  void set_v(const std::vector<float> &v);
-  void set_w(const std::vector<float> &w);
+  void set_u(const std::vector<double> &u);
+  void set_v(const std::vector<double> &v);
+  void set_w(const std::vector<double> &w);
 
 private:
   MacGrid grid;
