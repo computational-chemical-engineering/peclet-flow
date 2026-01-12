@@ -932,8 +932,8 @@ __device__ inline float quick_interp(float u_face, float phi_m1, float phi_0,
 // U is at (i, j+1/2, k+1/2)
 // V is at (i+1/2, j, k+1/2)
 // W is at (i+1/2, j+1/2, k)
-// Helper: Get Advection Velocity (Interpolated)
-__device__ inline float get_advection_velocity(const double *__restrict__ u,
+// Helper: Get Advection Velocity (Interpolated) - Double precision for accuracy
+__device__ inline double get_advection_velocity(const double *__restrict__ u,
                                                const double *__restrict__ v,
                                                const double *__restrict__ w,
                                                int comp_idx, int face_dir,
@@ -949,53 +949,53 @@ __device__ inline float get_advection_velocity(const double *__restrict__ u,
 
   if (comp_idx == 0) {   // U-Momentum
     if (face_dir == 0) { // X-Face (x=i+0.5)
-      float u_c = u[get_idx(idx_x, idx_y, idx_z, res)];
-      float u_e = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
-      return 0.5f * (u_c + u_e);
+      double u_c = u[get_idx(idx_x, idx_y, idx_z, res)];
+      double u_e = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
+      return 0.5 * (u_c + u_e);
     } else if (face_dir == 1) { // Y-Face (y=j+1)
-      float v_l = v[get_idx(idx_x - 1, idx_y + 1, idx_z, res)];
-      float v_r = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
-      return 0.5f * (v_l + v_r);
+      double v_l = v[get_idx(idx_x - 1, idx_y + 1, idx_z, res)];
+      double v_r = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
+      return 0.5 * (v_l + v_r);
     } else { // Z-Face (z=k+1)
-      float w_l = w[get_idx(idx_x - 1, idx_y, idx_z + 1, res)];
-      float w_r = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
-      return 0.5f * (w_l + w_r);
+      double w_l = w[get_idx(idx_x - 1, idx_y, idx_z + 1, res)];
+      double w_r = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
+      return 0.5 * (w_l + w_r);
     }
   }
 
   if (comp_idx == 1) {   // V-Momentum
     if (face_dir == 0) { // X-Face (x=i+1)
-      float u_s = u[get_idx(idx_x + 1, idx_y - 1, idx_z, res)];
-      float u_n = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
-      return 0.5f * (u_s + u_n);
+      double u_s = u[get_idx(idx_x + 1, idx_y - 1, idx_z, res)];
+      double u_n = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
+      return 0.5 * (u_s + u_n);
     } else if (face_dir == 1) { // Y-Face (y=j+0.5)
-      float v_c = v[get_idx(idx_x, idx_y, idx_z, res)];
-      float v_n = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
-      return 0.5f * (v_c + v_n);
+      double v_c = v[get_idx(idx_x, idx_y, idx_z, res)];
+      double v_n = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
+      return 0.5 * (v_c + v_n);
     } else { // Z-Face (z=k+1)
-      float w_s = w[get_idx(idx_x, idx_y - 1, idx_z + 1, res)];
-      float w_n = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
-      return 0.5f * (w_s + w_n);
+      double w_s = w[get_idx(idx_x, idx_y - 1, idx_z + 1, res)];
+      double w_n = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
+      return 0.5 * (w_s + w_n);
     }
   }
 
   if (comp_idx == 2) {   // W-Momentum
     if (face_dir == 0) { // X-Face (x=i+1)
-      float u_b = u[get_idx(idx_x + 1, idx_y, idx_z - 1, res)];
-      float u_t = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
-      return 0.5f * (u_b + u_t);
+      double u_b = u[get_idx(idx_x + 1, idx_y, idx_z - 1, res)];
+      double u_t = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
+      return 0.5 * (u_b + u_t);
     } else if (face_dir == 1) { // Y-Face (y=j+1)
-      float v_b = v[get_idx(idx_x, idx_y + 1, idx_z - 1, res)];
-      float v_t = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
-      return 0.5f * (v_b + v_t);
+      double v_b = v[get_idx(idx_x, idx_y + 1, idx_z - 1, res)];
+      double v_t = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
+      return 0.5 * (v_b + v_t);
     } else { // Z-Face (z=k+0.5)
-      float w_c = w[get_idx(idx_x, idx_y, idx_z, res)];
-      float w_f = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
-      return 0.5f * (w_c + w_f);
+      double w_c = w[get_idx(idx_x, idx_y, idx_z, res)];
+      double w_f = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
+      return 0.5 * (w_c + w_f);
     }
   }
 
-  return 0.0f;
+  return 0.0;
 }
 
 // Helper: Koren Limiter Flux
@@ -1173,210 +1173,161 @@ __global__ void compute_explicit_terms_kernel(
   int idx = get_idx(idx_x, idx_y, idx_z, res);
   int3 idx_3d = make_int3(idx_x, idx_y, idx_z);
 
-  float inv_dx = 1.0f / spacing.x;
-  float inv_dy = 1.0f / spacing.y;
-  float inv_dz = 1.0f / spacing.z;
-  float inv_dx2 = inv_dx * inv_dx;
-  float inv_dy2 = inv_dy * inv_dy;
-  float inv_dz2 = inv_dz * inv_dz;
-
-  // We process all 3 components in one kernel to save reads if possible?
-  // Or just 3 separates? u,v,w pointers are separate.
-  // One kernel is fine. We read u,v,w,p.
+  // Use double precision for intermediate calculations
+  double inv_dx = 1.0 / (double)spacing.x;
+  double inv_dy = 1.0 / (double)spacing.y;
+  double inv_dz = 1.0 / (double)spacing.z;
+  double inv_dx2 = inv_dx * inv_dx;
+  double inv_dy2 = inv_dy * inv_dy;
+  double inv_dz2 = inv_dz * inv_dz;
+  double d_rho = (double)rho;
+  double d_mu = (double)mu;
 
   // --- Component U ---
   {
-    // Advection u*du/dx + v*du/dy + w*du/dz
-    // Use simple Upwind or Central? Paper implies QUICK for Advection.
-    // Eq 47: explicit part uses QUICK? "explicitly evaluated...".
-    // For simplicity, let's use the Upwind helper for now, or assume 2nd order
-    // central? Let's use get_advection_velocity + Upwind for consistency with
-    // Base Stencil approximation? The paper says: "The full QUICK
-    // discretization is evaluated explicitly in the residual f". So yes, we
-    // should use QUICK ideally. But for "explicit terms" of CN, often same
-    // order as implicit. Let's use Upwind for now to be safe/stable, can
-    // upgrade to QUICK later.
-    // ... Actually, implemented Upwind here.
-
-    float uc = u[idx];
-    float u_adv_x = 0.0f;
+    double uc = u[idx];
+    double u_adv_x = 0.0;
     {
-      float vel = get_advection_velocity(u, v, w, 0, 0, idx_3d, res);
-      // Upwind gradient
-      float u_my = uc;
-      float u_other = (vel > 0) ? u[get_idx(idx_x - 1, idx_y, idx_z, res)]
-                                : u[get_idx(idx_x + 1, idx_y, idx_z, res)];
-      // If vel > 0, grad = (u_i - u_{i-1})/dx
-      // If vel < 0, grad = (u_{i+1} - u_i)/dx
-      // flux = vel * (upstream).
-      // Term is vel * du/dx = vel * (u_c - u_up)/dx ?
-      // Conservative form: Div(u u).
-      // Let's stick to non-conservative U * dU/dx for consistency with stencil.
+      double vel = get_advection_velocity(u, v, w, 0, 0, idx_3d, res);
       if (vel > 0)
-        u_adv_x =
-            vel * (uc - u[get_idx(idx_x - 1, idx_y, idx_z, res)]) * inv_dx;
+        u_adv_x = vel * (uc - u[get_idx(idx_x - 1, idx_y, idx_z, res)]) * inv_dx;
       else
-        u_adv_x =
-            vel * (u[get_idx(idx_x + 1, idx_y, idx_z, res)] - uc) * inv_dx;
+        u_adv_x = vel * (u[get_idx(idx_x + 1, idx_y, idx_z, res)] - uc) * inv_dx;
     }
-    float u_adv_y = 0.0f;
+    double u_adv_y = 0.0;
     {
-      float vel = get_advection_velocity(u, v, w, 0, 1, idx_3d, res);
-      // dU/dy
-      // Upwind based on V.
+      double vel = get_advection_velocity(u, v, w, 0, 1, idx_3d, res);
       if (vel > 0)
-        u_adv_y =
-            vel * (uc - u[get_idx(idx_x, idx_y - 1, idx_z, res)]) * inv_dy;
+        u_adv_y = vel * (uc - u[get_idx(idx_x, idx_y - 1, idx_z, res)]) * inv_dy;
       else
-        u_adv_y =
-            vel * (u[get_idx(idx_x, idx_y + 1, idx_z, res)] - uc) * inv_dy;
+        u_adv_y = vel * (u[get_idx(idx_x, idx_y + 1, idx_z, res)] - uc) * inv_dy;
     }
-    float u_adv_z = 0.0f;
+    double u_adv_z = 0.0;
     {
-      float vel = get_advection_velocity(u, v, w, 0, 2, idx_3d, res);
+      double vel = get_advection_velocity(u, v, w, 0, 2, idx_3d, res);
       if (vel > 0)
-        u_adv_z =
-            vel * (uc - u[get_idx(idx_x, idx_y, idx_z - 1, res)]) * inv_dz;
+        u_adv_z = vel * (uc - u[get_idx(idx_x, idx_y, idx_z - 1, res)]) * inv_dz;
       else
-        u_adv_z =
-            vel * (u[get_idx(idx_x, idx_y, idx_z + 1, res)] - uc) * inv_dz;
+        u_adv_z = vel * (u[get_idx(idx_x, idx_y, idx_z + 1, res)] - uc) * inv_dz;
     }
-    float adv_term = rho * (u_adv_x + u_adv_y + u_adv_z);
+    double adv_term = d_rho * (u_adv_x + u_adv_y + u_adv_z);
 
     // Laplacian (Standard 7-point)
-    float u_w = u[get_idx(idx_x - 1, idx_y, idx_z, res)];
-    float u_e = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
-    float u_s = u[get_idx(idx_x, idx_y - 1, idx_z, res)];
-    float u_n = u[get_idx(idx_x, idx_y + 1, idx_z, res)];
-    float u_b = u[get_idx(idx_x, idx_y, idx_z - 1, res)];
-    float u_t = u[get_idx(idx_x, idx_y, idx_z + 1, res)];
-    float lap = (u_w - 2.0f * uc + u_e) * inv_dx2 +
-                (u_s - 2.0f * uc + u_n) * inv_dy2 +
-                (u_b - 2.0f * uc + u_t) * inv_dz2;
-    float diff_term = mu * lap;
+    double u_w = u[get_idx(idx_x - 1, idx_y, idx_z, res)];
+    double u_e = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
+    double u_s = u[get_idx(idx_x, idx_y - 1, idx_z, res)];
+    double u_n = u[get_idx(idx_x, idx_y + 1, idx_z, res)];
+    double u_b = u[get_idx(idx_x, idx_y, idx_z - 1, res)];
+    double u_t = u[get_idx(idx_x, idx_y, idx_z + 1, res)];
+    double lap = (u_w - 2.0 * uc + u_e) * inv_dx2 +
+                 (u_s - 2.0 * uc + u_n) * inv_dy2 +
+                 (u_b - 2.0 * uc + u_t) * inv_dz2;
+    double diff_term = d_mu * lap;
 
     // Grad P at u-face (x=i) -> (p_i - p_{i-1})/dx
-    float p_c = p[idx];
-    float p_w = p[get_idx(idx_x - 1, idx_y, idx_z, res)];
-    float gp = (p_c - p_w) * inv_dx;
-
-    // Body Force is usually implicit or explicit?
-    // Eq 46 doesn't mention force explicitly, usually added to RHS.
-    // If constant, cancels out or added fully.
-    // Let's assume body force is handled in the implicit setup only (as
-    // source).
+    double p_c = p[idx];
+    double p_w = p[get_idx(idx_x - 1, idx_y, idx_z, res)];
+    double gp = (p_c - p_w) * inv_dx;
 
     // Total Explicit Value = -(rho*Adv - mu*Lap + GradP)
-    // Note: We confirm signs. f has +rho*c ... - mu*L ... + grad p.
-    explicit_u[idx] = -(adv_term - diff_term + gp);
+    // Cast to float for output
+    explicit_u[idx] = (float)(-(adv_term - diff_term + gp));
   }
 
   // --- Component V ---
   {
-    float vc = v[idx];
-    float v_adv_x = 0.0f;
+    double vc = v[idx];
+    double v_adv_x = 0.0;
     {
-      float vel = get_advection_velocity(u, v, w, 1, 0, idx_3d, res);
+      double vel = get_advection_velocity(u, v, w, 1, 0, idx_3d, res);
       if (vel > 0)
-        v_adv_x =
-            vel * (vc - v[get_idx(idx_x - 1, idx_y, idx_z, res)]) * inv_dx;
+        v_adv_x = vel * (vc - v[get_idx(idx_x - 1, idx_y, idx_z, res)]) * inv_dx;
       else
-        v_adv_x =
-            vel * (v[get_idx(idx_x + 1, idx_y, idx_z, res)] - vc) * inv_dx;
+        v_adv_x = vel * (v[get_idx(idx_x + 1, idx_y, idx_z, res)] - vc) * inv_dx;
     }
-    float v_adv_y = 0.0f;
+    double v_adv_y = 0.0;
     {
-      float vel = get_advection_velocity(u, v, w, 1, 1, idx_3d, res);
+      double vel = get_advection_velocity(u, v, w, 1, 1, idx_3d, res);
       if (vel > 0)
-        v_adv_y =
-            vel * (vc - v[get_idx(idx_x, idx_y - 1, idx_z, res)]) * inv_dy;
+        v_adv_y = vel * (vc - v[get_idx(idx_x, idx_y - 1, idx_z, res)]) * inv_dy;
       else
-        v_adv_y =
-            vel * (v[get_idx(idx_x, idx_y + 1, idx_z, res)] - vc) * inv_dy;
+        v_adv_y = vel * (v[get_idx(idx_x, idx_y + 1, idx_z, res)] - vc) * inv_dy;
     }
-    float v_adv_z = 0.0f;
+    double v_adv_z = 0.0;
     {
-      float vel = get_advection_velocity(u, v, w, 1, 2, idx_3d, res);
+      double vel = get_advection_velocity(u, v, w, 1, 2, idx_3d, res);
       if (vel > 0)
-        v_adv_z =
-            vel * (vc - v[get_idx(idx_x, idx_y, idx_z - 1, res)]) * inv_dz;
+        v_adv_z = vel * (vc - v[get_idx(idx_x, idx_y, idx_z - 1, res)]) * inv_dz;
       else
-        v_adv_z =
-            vel * (v[get_idx(idx_x, idx_y, idx_z + 1, res)] - vc) * inv_dz;
+        v_adv_z = vel * (v[get_idx(idx_x, idx_y, idx_z + 1, res)] - vc) * inv_dz;
     }
-    float adv_term = rho * (v_adv_x + v_adv_y + v_adv_z);
+    double adv_term = d_rho * (v_adv_x + v_adv_y + v_adv_z);
 
-    float v_w = v[get_idx(idx_x - 1, idx_y, idx_z, res)];
-    float v_e = v[get_idx(idx_x + 1, idx_y, idx_z, res)];
-    float v_s = v[get_idx(idx_x, idx_y - 1, idx_z, res)];
-    float v_n = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
-    float v_b = v[get_idx(idx_x, idx_y, idx_z - 1, res)];
-    float v_t = v[get_idx(idx_x, idx_y, idx_z + 1, res)];
-    float lap = (v_w - 2.0f * vc + v_e) * inv_dx2 +
-                (v_s - 2.0f * vc + v_n) * inv_dy2 +
-                (v_b - 2.0f * vc + v_t) * inv_dz2;
-    float diff_term = mu * lap;
+    double v_w = v[get_idx(idx_x - 1, idx_y, idx_z, res)];
+    double v_e = v[get_idx(idx_x + 1, idx_y, idx_z, res)];
+    double v_s = v[get_idx(idx_x, idx_y - 1, idx_z, res)];
+    double v_n = v[get_idx(idx_x, idx_y + 1, idx_z, res)];
+    double v_b = v[get_idx(idx_x, idx_y, idx_z - 1, res)];
+    double v_t = v[get_idx(idx_x, idx_y, idx_z + 1, res)];
+    double lap = (v_w - 2.0 * vc + v_e) * inv_dx2 +
+                 (v_s - 2.0 * vc + v_n) * inv_dy2 +
+                 (v_b - 2.0 * vc + v_t) * inv_dz2;
+    double diff_term = d_mu * lap;
 
     // Grad P at v-face (y=j) -> (p_j - p_{j-1})/dy
-    float p_c = p[idx];
-    float p_s = p[get_idx(idx_x, idx_y - 1, idx_z, res)];
-    float gp = (p_c - p_s) * inv_dy;
+    double p_c = p[idx];
+    double p_s = p[get_idx(idx_x, idx_y - 1, idx_z, res)];
+    double gp = (p_c - p_s) * inv_dy;
 
-    explicit_v[idx] = -(adv_term - diff_term + gp);
+    explicit_v[idx] = (float)(-(adv_term - diff_term + gp));
   }
 
   // --- Component W ---
   {
-    float wc = w[idx];
-    float w_adv_x = 0.0f;
+    double wc = w[idx];
+    double w_adv_x = 0.0;
     {
-      float vel = get_advection_velocity(u, v, w, 2, 0, idx_3d, res);
+      double vel = get_advection_velocity(u, v, w, 2, 0, idx_3d, res);
       if (vel > 0)
-        w_adv_x =
-            vel * (wc - w[get_idx(idx_x - 1, idx_y, idx_z, res)]) * inv_dx;
+        w_adv_x = vel * (wc - w[get_idx(idx_x - 1, idx_y, idx_z, res)]) * inv_dx;
       else
-        w_adv_x =
-            vel * (w[get_idx(idx_x + 1, idx_y, idx_z, res)] - wc) * inv_dx;
+        w_adv_x = vel * (w[get_idx(idx_x + 1, idx_y, idx_z, res)] - wc) * inv_dx;
     }
-    float w_adv_y = 0.0f;
+    double w_adv_y = 0.0;
     {
-      float vel = get_advection_velocity(u, v, w, 2, 1, idx_3d, res);
+      double vel = get_advection_velocity(u, v, w, 2, 1, idx_3d, res);
       if (vel > 0)
-        w_adv_y =
-            vel * (wc - w[get_idx(idx_x, idx_y - 1, idx_z, res)]) * inv_dy;
+        w_adv_y = vel * (wc - w[get_idx(idx_x, idx_y - 1, idx_z, res)]) * inv_dy;
       else
-        w_adv_y =
-            vel * (w[get_idx(idx_x, idx_y + 1, idx_z, res)] - wc) * inv_dy;
+        w_adv_y = vel * (w[get_idx(idx_x, idx_y + 1, idx_z, res)] - wc) * inv_dy;
     }
-    float w_adv_z = 0.0f;
+    double w_adv_z = 0.0;
     {
-      float vel = get_advection_velocity(u, v, w, 2, 2, idx_3d, res);
+      double vel = get_advection_velocity(u, v, w, 2, 2, idx_3d, res);
       if (vel > 0)
-        w_adv_z =
-            vel * (wc - w[get_idx(idx_x, idx_y, idx_z - 1, res)]) * inv_dz;
+        w_adv_z = vel * (wc - w[get_idx(idx_x, idx_y, idx_z - 1, res)]) * inv_dz;
       else
-        w_adv_z =
-            vel * (w[get_idx(idx_x, idx_y, idx_z + 1, res)] - wc) * inv_dz;
+        w_adv_z = vel * (w[get_idx(idx_x, idx_y, idx_z + 1, res)] - wc) * inv_dz;
     }
-    float adv_term = rho * (w_adv_x + w_adv_y + w_adv_z);
+    double adv_term = d_rho * (w_adv_x + w_adv_y + w_adv_z);
 
-    float w_w = w[get_idx(idx_x - 1, idx_y, idx_z, res)];
-    float w_e = w[get_idx(idx_x + 1, idx_y, idx_z, res)];
-    float w_s = w[get_idx(idx_x, idx_y - 1, idx_z, res)];
-    float w_n = w[get_idx(idx_x, idx_y + 1, idx_z, res)];
-    float w_b = w[get_idx(idx_x, idx_y, idx_z - 1, res)];
-    float w_t = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
-    float lap = (w_w - 2.0f * wc + w_e) * inv_dx2 +
-                (w_s - 2.0f * wc + w_n) * inv_dy2 +
-                (w_b - 2.0f * wc + w_t) * inv_dz2;
-    float diff_term = mu * lap;
+    double w_w = w[get_idx(idx_x - 1, idx_y, idx_z, res)];
+    double w_e = w[get_idx(idx_x + 1, idx_y, idx_z, res)];
+    double w_s = w[get_idx(idx_x, idx_y - 1, idx_z, res)];
+    double w_n = w[get_idx(idx_x, idx_y + 1, idx_z, res)];
+    double w_b = w[get_idx(idx_x, idx_y, idx_z - 1, res)];
+    double w_t = w[get_idx(idx_x, idx_y, idx_z + 1, res)];
+    double lap = (w_w - 2.0 * wc + w_e) * inv_dx2 +
+                 (w_s - 2.0 * wc + w_n) * inv_dy2 +
+                 (w_b - 2.0 * wc + w_t) * inv_dz2;
+    double diff_term = d_mu * lap;
 
     // Grad P at w-face (z=k) -> (p_k - p_{k-1})/dz
-    float p_c = p[idx];
-    float p_b = p[get_idx(idx_x, idx_y, idx_z - 1, res)];
-    float gp = (p_c - p_b) * inv_dz;
+    double p_c = p[idx];
+    double p_b = p[get_idx(idx_x, idx_y, idx_z - 1, res)];
+    double gp = (p_c - p_b) * inv_dz;
 
-    explicit_w[idx] = -(adv_term - diff_term + gp);
+    explicit_w[idx] = (float)(-(adv_term - diff_term + gp));
   }
 }
 
@@ -1484,11 +1435,12 @@ __global__ void compute_momentum_stencil_kernel(
   const double *w_curr = w;
 
   // Determine Advection Velocity (uc, vc, wc) at the component location
-  float uc = 0.0f, vc = 0.0f, wc = 0.0f;
+  // Use double precision for velocity interpolation
+  double uc = 0.0, vc = 0.0, wc = 0.0;
 
-// Helpers for averaging
-#define AVG4(v1, v2, v3, v4) (0.25f * ((v1) + (v2) + (v3) + (v4)))
-#define AVG2(v1, v2) (0.5f * ((v1) + (v2)))
+// Helpers for averaging - use double precision
+#define AVG4(v1, v2, v3, v4) (0.25 * ((v1) + (v2) + (v3) + (v4)))
+#define AVG2(v1, v2) (0.5 * ((v1) + (v2)))
 
   if (component_idx == 0) { // U-Component at (i, j+1/2, k+1/2)
     uc = u_curr[idx];
@@ -1539,8 +1491,8 @@ __global__ void compute_momentum_stencil_kernel(
   // if u < 0: u * (u_e - u_c)/dx  => Diag -= u/dx, A_E += u/dx (but u is neg,
   // so A_E -= |u|/dx).
 
-  float term_x = theta * rho * uc * inv_dx;
-  if (uc > 0.0f) {
+  float term_x = (float)(theta * rho * uc * inv_dx);
+  if (uc > 0.0) {
     diag += term_x;
     aw -= term_x;
   } else {
@@ -1548,8 +1500,8 @@ __global__ void compute_momentum_stencil_kernel(
     ae += term_x; // term_x is negative, so A_E decreases (standard transport)
   }
 
-  float term_y = theta * rho * vc * inv_dy;
-  if (vc > 0.0f) {
+  float term_y = (float)(theta * rho * vc * inv_dy);
+  if (vc > 0.0) {
     diag += term_y;
     as -= term_y;
   } else {
@@ -1557,8 +1509,8 @@ __global__ void compute_momentum_stencil_kernel(
     an += term_y;
   }
 
-  float term_z = theta * rho * wc * inv_dz;
-  if (wc > 0.0f) {
+  float term_z = (float)(theta * rho * wc * inv_dz);
+  if (wc > 0.0) {
     diag += term_z;
     ab -= term_z;
   } else {
@@ -1567,7 +1519,8 @@ __global__ void compute_momentum_stencil_kernel(
   }
 
   // Calculate RHS: (rho/dt)*u_old + theta*f
-  float val_old = 0.0f;
+  // Use double for val_old to preserve precision from state
+  double val_old = 0.0;
   float force = 0.0f;
   if (component_idx == 0) {
     val_old = u_old[idx];
@@ -1580,12 +1533,15 @@ __global__ void compute_momentum_stencil_kernel(
     force = body_force.z;
   }
 
-  B_RHS[idx] = (rho / dt) * val_old + theta * force;
+  // Compute RHS in double, then cast to float
+  double rhs_val = ((double)rho / (double)dt) * val_old + (double)(theta * force);
 
   // Add explicit terms (1-theta) * (...)
   if (explicit_term != nullptr) {
-    B_RHS[idx] += (1.0f - theta) * explicit_term[idx];
+    rhs_val += (1.0 - (double)theta) * (double)explicit_term[idx];
   }
+
+  B_RHS[idx] = (float)rhs_val;
 
   // Store
   A_C[idx] = diag;
