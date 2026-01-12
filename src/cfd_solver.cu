@@ -102,24 +102,17 @@ __global__ void compute_single_residual_kernel(
   if (idx >= num_elements)
     return;
 
-  float u_c = (float)u[idx];
+  double u_c = u[idx];
   // Assuming A_* are stored in same layout
-  float Ax = A_C[idx] * u_c + A_W[idx] * (float)u[idx - 1] + A_E[idx] * (float)u[idx + 1] +
-             A_S[idx] * (float)u[idx - 256] +
-             A_N[idx] * (float)u[idx + 256] + // HARDCODED OFFSET BAD!
-             /// ... We need get_neighbor logic or simplified stride.
-             /// Stencil arrays are 1D.
-             /// Neighbor indices depend on Res.
-             // But wait, `solve_rbgs` uses generic `get_idx`.
-             // `compute_momentum_stencil` uses `get_idx`.
-             // We need `int3 res` to compute neighbors.
-             0.0f;
-  // Leaving this placeholder.
+  double Ax = A_C[idx] * u_c + A_W[idx] * u[idx - 1] + A_E[idx] * u[idx + 1] +
+             A_S[idx] * u[idx - 256] +
+             A_N[idx] * u[idx + 256]; // Placeholder logic
+  res_out[idx] = B_RHS[idx] - (float)Ax;
 }
 
-// Better Implementation:
-__global__ void compute_stencil_residual_kernel(
-    const float *__restrict__ phi, const float *__restrict__ A_C,
+// Correct Stencil Residual Kernel using 3D Indexing
+__global__ void compute_momentum_residual_stencil_kernel(
+    const double *__restrict__ phi, const float *__restrict__ A_C,
     const float *__restrict__ A_W, const float *__restrict__ A_E,
     const float *__restrict__ A_S, const float *__restrict__ A_N,
     const float *__restrict__ A_B, const float *__restrict__ A_T,
@@ -132,13 +125,7 @@ __global__ void compute_stencil_residual_kernel(
   if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
     return;
 
-  int idx = idx_x + idx_y * res.x + idx_z * res.x * res.y;
-
-  // Neighbor Indices
-  // Simple clamping or periodic?
-  // The solver assumes specific boundary handling (ghosts).
-  // `get_idx` handles periodic.
-  // We should use `get_idx`.
+  int idx = get_idx(idx_x, idx_y, idx_z, res);
 
   auto get_idx_dev = [&](int x, int y, int z) {
     int ix = (x + res.x) % res.x;
@@ -154,14 +141,25 @@ __global__ void compute_stencil_residual_kernel(
   int idx_b = get_idx_dev(idx_x, idx_y, idx_z - 1);
   int idx_t = get_idx_dev(idx_x, idx_y, idx_z + 1);
 
-  float Sum = A_W[idx] * phi[idx_w] + A_E[idx] * phi[idx_e] +
-              A_S[idx] * phi[idx_s] + A_N[idx] * phi[idx_n] +
-              A_B[idx] * phi[idx_b] + A_T[idx] * phi[idx_t];
+  // Mixed Precision: Coeffs are Float, State is Double.
+  // Compute Ax in Double.
+  double Sum = (double)A_W[idx] * phi[idx_w] + (double)A_E[idx] * phi[idx_e] +
+               (double)A_S[idx] * phi[idx_s] + (double)A_N[idx] * phi[idx_n] +
+               (double)A_B[idx] * phi[idx_b] + (double)A_T[idx] * phi[idx_t];
 
-  float Ax = A_C[idx] * phi[idx] + Sum;
+  double Ax = (double)A_C[idx] * phi[idx] + Sum;
 
   // Residual = b - Ax
-  residual[idx] = B_RHS[idx] - Ax;
+  residual[idx] = B_RHS[idx] - (float)Ax;
+}
+
+__global__ void apply_correction_kernel(double *__restrict__ u,
+                                        const float *__restrict__ du,
+                                        int num_elements) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_elements)
+    return;
+  u[idx] += (double)du[idx];
 }
 
 // The original compute_momentum_residual_kernel is conceptually replaced by
@@ -1851,6 +1849,9 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.res_u, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.res_v, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.res_w, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.explicit_u, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.explicit_v, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.explicit_w, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.phi, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.du, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.dv, num_elements * sizeof(float)));
@@ -1872,6 +1873,9 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMemset(grid.res_u, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.res_v, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.res_w, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.explicit_u, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.explicit_v, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.explicit_w, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.phi, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.du, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.dv, 0, num_elements * sizeof(float)));
@@ -1985,6 +1989,9 @@ CFDSolver::~CFDSolver() {
   CHECK_CUDA(cudaFree(grid.res_u));
   CHECK_CUDA(cudaFree(grid.res_v));
   CHECK_CUDA(cudaFree(grid.res_w));
+  CHECK_CUDA(cudaFree(grid.explicit_u));
+  CHECK_CUDA(cudaFree(grid.explicit_v));
+  CHECK_CUDA(cudaFree(grid.explicit_w));
   CHECK_CUDA(cudaFree(grid.phi));
   CHECK_CUDA(cudaFree(grid.du));
   CHECK_CUDA(cudaFree(grid.dv));
@@ -2708,6 +2715,9 @@ void CFDSolver::step(float dt) {
                 (res.y + block.y - 1) / block.y,
                 (res.z + block.z - 1) / block.z);
 
+  dim3 block1d(256);
+  dim3 grid1d((num_elements + 255) / 256);
+
   // 1. Initialize IBM Geometry (Lazy Init for now - assumption: static
   // geometry)
   static bool ibm_initialized = false;
@@ -2809,7 +2819,7 @@ void CFDSolver::step(float dt) {
 
   // 0. Compute Explicit Terms (for CN) based on u_old, p_old
   compute_explicit_terms_kernel<<<grid_dim, block>>>(
-      grid.res_u, grid.res_v, grid.res_w, grid.u_old, grid.v_old, grid.w_old,
+      grid.explicit_u, grid.explicit_v, grid.explicit_w, grid.u_old, grid.v_old, grid.w_old,
       grid.p, grid.frac_u, grid.frac_v, grid.frac_w, res, spacing, rho_, mu_,
       grid.body_force_density_);
 
@@ -2822,7 +2832,7 @@ void CFDSolver::step(float dt) {
     compute_momentum_stencil_kernel<<<grid_dim, block>>>(
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
         grid.B_RHS, grid.u, grid.v, grid.w, grid.p_old, grid.u_old, grid.v_old,
-        grid.w_old, grid.res_u, // Explicit term stored in res_u
+        grid.w_old, grid.explicit_u, // Explicit term stored in explicit_u
         res, spacing, dt, rho_, mu_, grid.body_force_density_, 0, theta);
 
     // 2. Add TVD Correction (deferred correction for higher-order advection)
@@ -2838,15 +2848,24 @@ void CFDSolver::step(float dt) {
           grid.B_RHS, grid.ibm_data_u, grid.u_bc_.x);
     }
 
-    // 4. Solve Linear System
+    // 4. Compute Residual (R = B - A*u) -> grid.res_u (Float)
+    compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
+        grid.u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+        grid.A_T, grid.B_RHS, grid.res_u, res);
+
+    // 5. Solve for Delta (A * du = R)
+    CHECK_CUDA(cudaMemset(grid.du, 0, num_elements * sizeof(float)));
     for (int k = 0; k < 5; k++) {
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
-          grid.u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, res, true, -1);
+          grid.du, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.res_u, res, true, -1);
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
-          grid.u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, res, false, -1);
+          grid.du, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.res_u, res, false, -1);
     }
+
+    // 6. Update State (u += du)
+    apply_correction_kernel<<<grid1d, block1d>>>(grid.u, grid.du, num_elements);
   }
 
   // --- Solve V ---
@@ -2854,7 +2873,7 @@ void CFDSolver::step(float dt) {
     compute_momentum_stencil_kernel<<<grid_dim, block>>>(
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
         grid.B_RHS, grid.u, grid.v, grid.w, grid.p_old, grid.u_old, grid.v_old,
-        grid.w_old, grid.res_v, // Explicit term stored in res_v
+        grid.w_old, grid.explicit_v, // Explicit term stored in explicit_v
         res, spacing, dt, rho_, mu_, grid.body_force_density_, 1, theta);
 
     compute_advection_correction_kernel<<<grid_dim, block>>>(
@@ -2868,14 +2887,24 @@ void CFDSolver::step(float dt) {
           grid.B_RHS, grid.ibm_data_v, grid.u_bc_.y);
     }
 
+    // Compute Residual
+    compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
+        grid.v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+        grid.A_T, grid.B_RHS, grid.res_v, res);
+
+    // Solve Delta
+    CHECK_CUDA(cudaMemset(grid.dv, 0, num_elements * sizeof(float)));
     for (int k = 0; k < 5; k++) {
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
-          grid.v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, res, true, -1);
+          grid.dv, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.res_v, res, true, -1);
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
-          grid.v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, res, false, -1);
+          grid.dv, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.res_v, res, false, -1);
     }
+
+    // Apply Correction
+    apply_correction_kernel<<<grid1d, block1d>>>(grid.v, grid.dv, num_elements);
   }
 
   // --- Solve W ---
@@ -2883,7 +2912,7 @@ void CFDSolver::step(float dt) {
     compute_momentum_stencil_kernel<<<grid_dim, block>>>(
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
         grid.B_RHS, grid.u, grid.v, grid.w, grid.p_old, grid.u_old, grid.v_old,
-        grid.w_old, grid.res_w, // Explicit term stored in res_w
+        grid.w_old, grid.explicit_w, // Explicit term stored in explicit_w
         res, spacing, dt, rho_, mu_, grid.body_force_density_, 2, theta);
 
     compute_advection_correction_kernel<<<grid_dim, block>>>(
@@ -2897,14 +2926,24 @@ void CFDSolver::step(float dt) {
           grid.B_RHS, grid.ibm_data_w, grid.u_bc_.z);
     }
 
+    // Compute Residual
+    compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
+        grid.w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+        grid.A_T, grid.B_RHS, grid.res_w, res);
+
+    // Solve Delta
+    CHECK_CUDA(cudaMemset(grid.dw, 0, num_elements * sizeof(float)));
     for (int k = 0; k < 5; k++) {
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
-          grid.w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, res, true, -1);
+          grid.dw, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.res_w, res, true, -1);
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
-          grid.w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, res, false, -1);
+          grid.dw, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.res_w, res, false, -1);
     }
+
+    // Apply Correction
+    apply_correction_kernel<<<grid1d, block1d>>>(grid.w, grid.dw, num_elements);
   }
 
   /*

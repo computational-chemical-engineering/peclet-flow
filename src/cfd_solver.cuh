@@ -103,6 +103,7 @@ struct MacGrid {
   double *p_old;                 // Previous pressure (Double)
   
   float *res_u, *res_v, *res_w; // Explicit residuals
+  float *explicit_u, *explicit_v, *explicit_w; // Explicit terms (stored separately)
   float *phi;                   // Pressure correction
   float *du, *dv, *dw;          // Newton updates
 };
