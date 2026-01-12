@@ -536,7 +536,7 @@ __device__ inline float sample_sdf_component(const float *__restrict__ sdf,
                                  idx_z + offset.z, sdf, res);
 }
 
-__device__ inline float get_face_velocity_for_flux(
+__device__ inline double get_face_velocity_for_flux(
     const double *__restrict__ vel, const float *__restrict__ sdf, int3 res,
     float3 offset, int idx_x, int idx_y, int idx_z, float frac, float bc_val,
     int axis) {
@@ -1758,7 +1758,7 @@ __global__ void update_pressure_from_phi_kernel(
   // The convection and diffusion terms in Eq. 14 can cause instability
   // when the Poisson equation doesn't account for them consistently.
   // The basic projection uses just the temporal term.
-  float delta_p = (rho / dt) * phi_C;
+  double delta_p = ((double)rho / (double)dt) * (double)phi_C;
 
   // Update pressure: p = p_old + δp
   p[idx] = p_old[idx] + delta_p;
