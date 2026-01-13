@@ -100,6 +100,10 @@ PYBIND11_MODULE(pnm_backend, m) {
            py::arg("fluid_only") = false)
       .def("get_divergence_max", &CFDSolver::get_divergence_max,
            py::arg("dt"), py::arg("fluid_only") = false)
+      .def("set_debug_stats", &CFDSolver::set_debug_stats,
+           py::arg("enabled"))
+      .def("get_debug_stats", &CFDSolver::get_debug_stats)
+      .def("get_debug_fields", &CFDSolver::get_debug_fields)
       .def("get_fluid_fraction", &CFDSolver::get_fluid_fraction,
            py::arg("type"), py::arg("offset"))
       .def("set_u", &CFDSolver::set_u, py::arg("u"))

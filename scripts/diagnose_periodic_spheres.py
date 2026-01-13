@@ -148,6 +148,70 @@ def save_vti(filename, res, spacing, u, v, w, p, sdf):
     print(f"  Written: {filename}")
 
 
+def save_debug_vti(filename, res, spacing, debug_fields):
+    """
+    Save debug residual/divergence fields to VTI (Float32).
+
+    debug_fields order:
+      0: res_u_pre
+      1: res_v_pre
+      2: res_w_pre
+      3: res_u_post
+      4: res_v_post
+      5: res_w_post
+      6: div_pre
+      7: div_post
+      8: pressure_fluid_flag
+    """
+    nx, ny, nz = res
+    dx, dy, dz = spacing
+
+    names = [
+        "res_u_pre",
+        "res_v_pre",
+        "res_w_pre",
+        "res_u_post",
+        "res_v_post",
+        "res_w_post",
+        "div_pre",
+        "div_post",
+        "pressure_fluid_flag",
+    ]
+
+    with open(filename, "wb") as f:
+        f.write(b'<VTKFile type="ImageData" version="1.0" byte_order="LittleEndian" header_type="UInt64">\n')
+        f.write(f'  <ImageData WholeExtent="0 {nx} 0 {ny} 0 {nz}" Origin="0 0 0" Spacing="{dx} {dy} {dz}">\n'.encode("ascii"))
+        f.write(f'    <Piece Extent="0 {nx} 0 {ny} 0 {nz}">\n'.encode("ascii"))
+        f.write(b'      <CellData Scalars="res_u_pre">\n')
+
+        offset = 0
+        field_len = nx * ny * nz * 4
+        for name in names:
+            f.write(f'        <DataArray type="Float32" Name="{name}" NumberOfComponents="1" format="appended" offset="{offset}"/>\n'.encode("ascii"))
+            offset += field_len + 8
+
+        f.write(b'      </CellData>\n')
+        f.write(b'    </Piece>\n')
+        f.write(b'  </ImageData>\n')
+
+        f.write(b'  <AppendedData encoding="raw">\n')
+        f.write(b'    _')
+
+        def write_chunk_f32(data):
+            flat = data.astype("<f4")
+            nbytes = flat.nbytes
+            f.write(np.array([nbytes], dtype="<u8").tobytes())
+            flat.tofile(f)
+
+        for field in debug_fields:
+            write_chunk_f32(field.flatten("F"))
+
+        f.write(b'\n  </AppendedData>\n')
+        f.write(b'</VTKFile>\n')
+
+    print(f"  Written: {filename}")
+
+
 def run_stokes_diagnostic(phi_target=0.20, res_n=64):
     """Run diagnostic in Stokes limit."""
     L = 1.0
@@ -172,6 +236,7 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
         pnm_backend.float3(dx, dx, dx)
     )
     solver.initialize(sdf_data)
+    solver.set_debug_stats(True)
 
     # STOKES LIMIT: very small rho
     rho = 1e-1  # Very small for Stokes limit
@@ -196,7 +261,7 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
 
     # Time stepping
     dt = 10.0  # Large dt for steady state
-    max_steps = 200
+    max_steps = 20
 
     print(f"  dt = {dt}, max_steps = {max_steps}")
     print()
@@ -227,7 +292,16 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
         if step < 10 or step % 20 == 0 or du_max < 1e-12:
             res_max = solver.get_momentum_residual_max(fluid_only=True)
             div_max = solver.get_divergence_max(dt, fluid_only=True)
+            stats = solver.get_debug_stats()
+            res_before = max(stats[0:3])
+            res_after = max(stats[3:6])
+            corr_max = max(stats[6:9])
+            div_before = stats[9]
+            div_after = stats[10]
+
             print(f"{step:<8} {du_max:<15.6e} {res_max:<15.6e} {div_max:<15.6e} {u_mean:<15.6e}")
+            print(f"         NR_res_pre={res_before:.6e} NR_res_post={res_after:.6e} "
+                  f"du_max={corr_max:.6e} div_pre={div_before:.6e} div_post={div_after:.6e}")
 
         u_prev = u.copy()
         v_prev = v.copy()
@@ -382,6 +456,43 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
         (res_n, res_n, res_n),
         (dx, dx, dx),
         u_c, v_c, w_c, p, sdf_3d.astype(np.float32)
+    )
+
+    debug_fields = solver.get_debug_fields()
+    debug_arrays = [
+        np.array(field).reshape((res_n, res_n, res_n), order="F")
+        for field in debug_fields
+    ]
+    div_post = debug_arrays[7]
+    abs_div_post = np.abs(div_post)
+    flat_idx = int(np.argmax(abs_div_post))
+    max_idx = np.unravel_index(flat_idx, div_post.shape, order="F")
+    max_val = float(div_post[max_idx])
+    print(
+        "  Max |div_post| cell index (i,j,k) = "
+        f"{max_idx}, value = {max_val:.6e}"
+    )
+    print(f"  Max |div_post| flat index (F-order) = {flat_idx}")
+    sdf_u_r = 0.5 * (sdf_3d + np.roll(sdf_3d, -1, axis=0))
+    sdf_u_l = 0.5 * (sdf_3d + np.roll(sdf_3d, 1, axis=0))
+    sdf_v_n = 0.5 * (sdf_3d + np.roll(sdf_3d, -1, axis=1))
+    sdf_v_s = 0.5 * (sdf_3d + np.roll(sdf_3d, 1, axis=1))
+    sdf_w_t = 0.5 * (sdf_3d + np.roll(sdf_3d, -1, axis=2))
+    sdf_w_b = 0.5 * (sdf_3d + np.roll(sdf_3d, 1, axis=2))
+    fluid_flag = (
+        (sdf_u_r > 0.0)
+        | (sdf_u_l > 0.0)
+        | (sdf_v_n > 0.0)
+        | (sdf_v_s > 0.0)
+        | (sdf_w_t > 0.0)
+        | (sdf_w_b > 0.0)
+    ).astype(np.float32)
+    debug_arrays.append(fluid_flag)
+    save_debug_vti(
+        str(out_dir / f'sphere_debug_phi{phi_target}_N{res_n}.vti'),
+        (res_n, res_n, res_n),
+        (dx, dx, dx),
+        debug_arrays,
     )
 
     return {

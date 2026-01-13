@@ -4,6 +4,7 @@
 #include <cmath>
 #include <iostream>
 #include <cuda/functional>
+#include <limits>
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
 #include <thrust/reduce.h>
@@ -57,7 +58,8 @@ project_velocity_kernel(double *__restrict__ u, double *__restrict__ v,
                         double *__restrict__ w, const float *__restrict__ p,
                         const float *__restrict__ frac_u,
                         const float *__restrict__ frac_v,
-                        const float *__restrict__ frac_w, int3 res,
+                        const float *__restrict__ frac_w,
+                        const float *__restrict__ sdf, int3 res,
                         float3 spacing, float dt, float rho);
 
 // Refactored Residual Kernel using Stencil Arrays
@@ -870,19 +872,15 @@ __global__ void compute_pressure_stencil_kernel(
   // The pressure in the solid remains unchanged, which is acceptable since
   // the solid pressure doesn't affect the fluid dynamics.
   if (fluid_faces == 0) {
-    // Solid cell: use unweighted Laplacian with B_RHS = 0
-    float ax = inv_dx2;
-    float ay = inv_dy2;
-    float az = inv_dz2;
-
-    A_E[idx] = -ax;
-    A_W[idx] = -ax;
-    A_N[idx] = -ay;
-    A_S[idx] = -ay;
-    A_T[idx] = -az;
-    A_B[idx] = -az;
-    A_C[idx] = 2.0f * (ax + ay + az);
-    // B_RHS[idx] already set to rhs_input[idx] (divergence = 0 for solid)
+    // Solid cell: decouple from pressure solve.
+    A_E[idx] = 0.0f;
+    A_W[idx] = 0.0f;
+    A_N[idx] = 0.0f;
+    A_S[idx] = 0.0f;
+    A_T[idx] = 0.0f;
+    A_B[idx] = 0.0f;
+    A_C[idx] = 1.0f;
+    B_RHS[idx] = 0.0f;
     return;
   }
 
@@ -1579,11 +1577,7 @@ __global__ void solve_rbgs_stencil_kernel(
     return;
 
   int idx = get_idx(idx_x, idx_y, idx_z, res);
-
-  if (idx == pin_idx) {
-    phi[idx] = 0.0f;
-    return;
-  }
+  (void)pin_idx;
 
   // Load Coefficients
   float ac = A_C[idx];
@@ -1615,7 +1609,8 @@ __global__ void project_velocity_kernel(
     double *__restrict__ u, double *__restrict__ v, double *__restrict__ w,
     const float *__restrict__ p, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
-    int3 res, float3 spacing, float dt, float rho) {
+    const float *__restrict__ sdf, int3 res, float3 spacing, float dt,
+    float rho) {
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
   int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -1632,7 +1627,8 @@ __global__ void project_velocity_kernel(
   // ensures divergence-free result. If frac=0, face is blocked and u is set to 0.
 
   {
-    if (frac_u[idx] > 0.0f) {
+    float sdf_u = sample_sdf_interp_local(idx_x - 0.5f, idx_y, idx_z, sdf, res);
+    if (sdf_u > 0.0f && frac_u[idx] > 0.0f) {
       int idx_prev = get_idx(idx_x - 1, idx_y, idx_z, res);
       float dp_dx = (p[idx] - p[idx_prev]) / spacing.x;
       u[idx] -= scale * dp_dx;
@@ -1641,7 +1637,8 @@ __global__ void project_velocity_kernel(
     }
   }
   {
-    if (frac_v[idx] > 0.0f) {
+    float sdf_v = sample_sdf_interp_local(idx_x, idx_y - 0.5f, idx_z, sdf, res);
+    if (sdf_v > 0.0f && frac_v[idx] > 0.0f) {
       int idy_prev = get_idx(idx_x, idx_y - 1, idx_z, res);
       float dp_dy = (p[idx] - p[idy_prev]) / spacing.y;
       v[idx] -= scale * dp_dy;
@@ -1650,7 +1647,8 @@ __global__ void project_velocity_kernel(
     }
   }
   {
-    if (frac_w[idx] > 0.0f) {
+    float sdf_w = sample_sdf_interp_local(idx_x, idx_y, idx_z - 0.5f, sdf, res);
+    if (sdf_w > 0.0f && frac_w[idx] > 0.0f) {
       int idz_prev = get_idx(idx_x, idx_y, idx_z - 1, res);
       float dp_dz = (p[idx] - p[idz_prev]) / spacing.z;
       w[idx] -= scale * dp_dz;
@@ -1721,6 +1719,14 @@ __global__ void update_pressure_from_phi_kernel(
 
   // Update pressure: p = p_old + δp
   p[idx] = p_old[idx] + delta_p;
+}
+
+__global__ void shift_pressure_kernel(double *__restrict__ p, int num_elements,
+                                      double offset) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_elements)
+    return;
+  p[idx] -= offset;
 }
 
 // --------------------------------------------------------
@@ -1807,6 +1813,12 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.res_u, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.res_v, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.res_w, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.res_u_pre, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.res_v_pre, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.res_w_pre, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.res_u_post, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.res_v_post, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.res_w_post, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.explicit_u, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.explicit_v, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.explicit_w, num_elements * sizeof(float)));
@@ -1814,6 +1826,8 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.du, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.dv, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.dw, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.div_pre, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.div_post, num_elements * sizeof(float)));
 
   CHECK_CUDA(cudaMalloc(&grid.sdf, num_elements * sizeof(float)));
 
@@ -1831,6 +1845,12 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMemset(grid.res_u, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.res_v, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.res_w, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.res_u_pre, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.res_v_pre, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.res_w_pre, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.res_u_post, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.res_v_post, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.res_w_post, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.explicit_u, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.explicit_v, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.explicit_w, 0, num_elements * sizeof(float)));
@@ -1838,6 +1858,8 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMemset(grid.du, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.dv, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.dw, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.div_pre, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.div_post, 0, num_elements * sizeof(float)));
 
   // Surface Fractions
   CHECK_CUDA(cudaMalloc(&grid.frac_u, num_elements * sizeof(float)));
@@ -1919,8 +1941,8 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   rho_ = 1.0f;
   mu_ = 0.01f;
   nu_ = mu_ / rho_;
-  // Pin pressure at cell 0 to prevent drift in periodic domains
-  // For Neumann BC problems, pressure is only defined up to a constant
+  // pin_idx is set in initialize() using the max SDF cell.
+  // For Neumann BC problems, pressure is only defined up to a constant.
   pin_idx = 0;
 }
 
@@ -1947,6 +1969,12 @@ CFDSolver::~CFDSolver() {
   CHECK_CUDA(cudaFree(grid.res_u));
   CHECK_CUDA(cudaFree(grid.res_v));
   CHECK_CUDA(cudaFree(grid.res_w));
+  CHECK_CUDA(cudaFree(grid.res_u_pre));
+  CHECK_CUDA(cudaFree(grid.res_v_pre));
+  CHECK_CUDA(cudaFree(grid.res_w_pre));
+  CHECK_CUDA(cudaFree(grid.res_u_post));
+  CHECK_CUDA(cudaFree(grid.res_v_post));
+  CHECK_CUDA(cudaFree(grid.res_w_post));
   CHECK_CUDA(cudaFree(grid.explicit_u));
   CHECK_CUDA(cudaFree(grid.explicit_v));
   CHECK_CUDA(cudaFree(grid.explicit_w));
@@ -1954,6 +1982,8 @@ CFDSolver::~CFDSolver() {
   CHECK_CUDA(cudaFree(grid.du));
   CHECK_CUDA(cudaFree(grid.dv));
   CHECK_CUDA(cudaFree(grid.dw));
+  CHECK_CUDA(cudaFree(grid.div_pre));
+  CHECK_CUDA(cudaFree(grid.div_post));
   CHECK_CUDA(cudaFree(grid.sdf));
 
   CHECK_CUDA(cudaFree(grid.frac_u));
@@ -2018,6 +2048,59 @@ void CFDSolver::set_pressure_solver_params(int iter) {
 
 void CFDSolver::set_velocity_solver_params(int iter) {
   v_max_iter_ = iter;
+}
+
+void CFDSolver::set_debug_stats(bool enabled) { debug_stats_enabled_ = enabled; }
+
+std::vector<float> CFDSolver::get_debug_stats() const {
+  std::vector<float> stats;
+  stats.reserve(11);
+  for (int i = 0; i < 3; ++i) {
+    stats.push_back(debug_stats_.res_before[i]);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stats.push_back(debug_stats_.res_after[i]);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stats.push_back(debug_stats_.corr_max[i]);
+  }
+  stats.push_back(debug_stats_.div_before);
+  stats.push_back(debug_stats_.div_after);
+  return stats;
+}
+
+std::vector<std::vector<float>> CFDSolver::get_debug_fields() const {
+  std::vector<std::vector<float>> fields(8);
+  for (auto &field : fields) {
+    field.resize(num_elements);
+  }
+
+  CHECK_CUDA(cudaMemcpy(fields[0].data(), grid.res_u_pre,
+                        num_elements * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(fields[1].data(), grid.res_v_pre,
+                        num_elements * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(fields[2].data(), grid.res_w_pre,
+                        num_elements * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(fields[3].data(), grid.res_u_post,
+                        num_elements * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(fields[4].data(), grid.res_v_post,
+                        num_elements * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(fields[5].data(), grid.res_w_post,
+                        num_elements * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(fields[6].data(), grid.div_pre,
+                        num_elements * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(fields[7].data(), grid.div_post,
+                        num_elements * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+
+  return fields;
 }
 
 float CFDSolver::compute_max_velocity() {
@@ -2117,6 +2200,16 @@ void CFDSolver::initialize(const SDFData &sdf_data) {
     std::cerr << "SDF size mismatch!" << std::endl;
     return;
   }
+  float max_df = -std::numeric_limits<float>::infinity();
+  int max_idx = 0;
+  for (size_t i = 0; i < sdf_data.sdf_values.size(); ++i) {
+    float val = sdf_data.sdf_values[i];
+    if (val > max_df) {
+      max_df = val;
+      max_idx = static_cast<int>(i);
+    }
+  }
+  pin_idx = max_idx;
   CHECK_CUDA(cudaMemcpy(grid.sdf, sdf_data.sdf_values.data(),
                         num_elements * sizeof(float), cudaMemcpyHostToDevice));
 
@@ -3003,6 +3096,12 @@ void CFDSolver::step(float dt) {
     compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
         grid.u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
         grid.A_T, grid.B_RHS, grid.res_u, res);
+    if (debug_stats_enabled_) {
+      CHECK_CUDA(cudaMemcpy(grid.res_u_pre, grid.res_u,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+      debug_stats_.res_before[0] = max_abs_device(grid.res_u, num_elements);
+    }
 
     // 5. Solve for Delta (A * du = R)
     CHECK_CUDA(cudaMemset(grid.du, 0, num_elements * sizeof(float)));
@@ -3017,6 +3116,16 @@ void CFDSolver::step(float dt) {
 
     // 6. Update State (u += du)
     apply_correction_kernel<<<grid1d, block1d>>>(grid.u, grid.du, num_elements);
+    if (debug_stats_enabled_) {
+      debug_stats_.corr_max[0] = max_abs_device(grid.du, num_elements);
+      compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
+          grid.u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.B_RHS, grid.res_u, res);
+      CHECK_CUDA(cudaMemcpy(grid.res_u_post, grid.res_u,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+      debug_stats_.res_after[0] = max_abs_device(grid.res_u, num_elements);
+    }
 
     if (outer_tol_ > 0.0f) {
       float max_corr = max_abs_device(grid.du, num_elements);
@@ -3049,6 +3158,12 @@ void CFDSolver::step(float dt) {
     compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
         grid.v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
         grid.A_T, grid.B_RHS, grid.res_v, res);
+    if (debug_stats_enabled_) {
+      CHECK_CUDA(cudaMemcpy(grid.res_v_pre, grid.res_v,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+      debug_stats_.res_before[1] = max_abs_device(grid.res_v, num_elements);
+    }
 
     // Solve Delta
     CHECK_CUDA(cudaMemset(grid.dv, 0, num_elements * sizeof(float)));
@@ -3063,6 +3178,16 @@ void CFDSolver::step(float dt) {
 
     // Apply Correction
     apply_correction_kernel<<<grid1d, block1d>>>(grid.v, grid.dv, num_elements);
+    if (debug_stats_enabled_) {
+      debug_stats_.corr_max[1] = max_abs_device(grid.dv, num_elements);
+      compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
+          grid.v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.B_RHS, grid.res_v, res);
+      CHECK_CUDA(cudaMemcpy(grid.res_v_post, grid.res_v,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+      debug_stats_.res_after[1] = max_abs_device(grid.res_v, num_elements);
+    }
 
     if (outer_tol_ > 0.0f) {
       float max_corr = max_abs_device(grid.dv, num_elements);
@@ -3095,6 +3220,12 @@ void CFDSolver::step(float dt) {
     compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
         grid.w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
         grid.A_T, grid.B_RHS, grid.res_w, res);
+    if (debug_stats_enabled_) {
+      CHECK_CUDA(cudaMemcpy(grid.res_w_pre, grid.res_w,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+      debug_stats_.res_before[2] = max_abs_device(grid.res_w, num_elements);
+    }
 
     // Solve Delta
     CHECK_CUDA(cudaMemset(grid.dw, 0, num_elements * sizeof(float)));
@@ -3109,6 +3240,16 @@ void CFDSolver::step(float dt) {
 
     // Apply Correction
     apply_correction_kernel<<<grid1d, block1d>>>(grid.w, grid.dw, num_elements);
+    if (debug_stats_enabled_) {
+      debug_stats_.corr_max[2] = max_abs_device(grid.dw, num_elements);
+      compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
+          grid.w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.B_RHS, grid.res_w, res);
+      CHECK_CUDA(cudaMemcpy(grid.res_w_post, grid.res_w,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+      debug_stats_.res_after[2] = max_abs_device(grid.res_w, num_elements);
+    }
 
     if (outer_tol_ > 0.0f) {
       float max_corr = max_abs_device(grid.dw, num_elements);
@@ -3136,6 +3277,12 @@ void CFDSolver::step(float dt) {
     compute_divergence_kernel<<<grid_dim, block>>>(
         grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf,
         grid.rhs, res, spacing, dt, rho_);
+    if (debug_stats_enabled_) {
+      CHECK_CUDA(cudaMemcpy(grid.div_pre, grid.rhs,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+      debug_stats_.div_before = max_abs_device(grid.rhs, num_elements);
+    }
 
     // c. Build Pressure Stencil (Laplacian with area fractions)
     compute_pressure_stencil_kernel<<<grid_dim, block>>>(
@@ -3174,16 +3321,30 @@ void CFDSolver::step(float dt) {
     // f. Project Velocity using phi: u -= grad(phi)
     project_velocity_kernel<<<grid_dim, block>>>(
         grid.u, grid.v, grid.w, grid.phi, grid.frac_u, grid.frac_v, grid.frac_w,
-        res, spacing, dt, rho_);
+        grid.sdf, res, spacing, dt, rho_);
 
     // Ensure solid faces are zero after projection as well.
     apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
                                                     grid.sdf, res);
 
+    if (debug_stats_enabled_) {
+      compute_divergence_kernel<<<grid_dim, block>>>(
+          grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w,
+          grid.sdf, grid.rhs, res, spacing, dt, rho_);
+      CHECK_CUDA(cudaMemcpy(grid.div_post, grid.rhs,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+      debug_stats_.div_after = max_abs_device(grid.rhs, num_elements);
+    }
+
     // g. Update Pressure from phi (Eq. 14): p = p_old + c * phi
     update_pressure_from_phi_kernel<<<grid_dim, block>>>(
         grid.p, grid.phi, grid.p_old, grid.u, grid.v, grid.w,
         res, spacing, dt, theta, rho_, mu_);
+    double p_pin = 0.0;
+    CHECK_CUDA(cudaMemcpy(&p_pin, grid.p + pin_idx, sizeof(double),
+                          cudaMemcpyDeviceToHost));
+    shift_pressure_kernel<<<grid1d, block1d>>>(grid.p, num_elements, p_pin);
   }
 
   // --------------------------------------------------------
@@ -3289,7 +3450,7 @@ void CFDSolver::step(float dt) {
   // Project Velocity Kernel (Update U with Pressure Gradient)
   // --------------------------------------------------------
 
-  // Re-enable pinning logic with mean subtraction
+  // Pressure shifting is applied after correction to keep pin_idx at zero.
   void CFDSolver::project(float dt, bool incremental) {
     int3 res = grid.res;
     float3 spacing = grid.spacing;
@@ -3351,7 +3512,7 @@ void CFDSolver::step(float dt) {
     // Project velocity
     project_velocity_kernel<<<grid_dim, block>>>(
         grid.u, grid.v, grid.w, grid.phi, grid.frac_u, grid.frac_v, grid.frac_w,
-        res, spacing, dt, rho_);
+        grid.sdf, res, spacing, dt, rho_);
 
     // Enforce solid face mask after projection.
     apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
@@ -3361,6 +3522,12 @@ void CFDSolver::step(float dt) {
     update_pressure_from_phi_kernel<<<grid_dim, block>>>(
         grid.p, grid.phi, grid.p_old, grid.u, grid.v, grid.w,
         res, spacing, dt, diffusion_theta, rho_, mu_);
+    double p_pin = 0.0;
+    CHECK_CUDA(cudaMemcpy(&p_pin, grid.p + pin_idx, sizeof(double),
+                          cudaMemcpyDeviceToHost));
+    dim3 block1d(256);
+    dim3 grid1d((num_elements + 255) / 256);
+    shift_pressure_kernel<<<grid1d, block1d>>>(grid.p, num_elements, p_pin);
   }
 
 std::vector<float> CFDSolver::get_ibm_scaling(int component_idx) {
