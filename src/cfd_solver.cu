@@ -592,18 +592,46 @@ __global__ void apply_face_sdf_mask_kernel(
     return;
 
   float sdf_u = sample_sdf_interp_local(idx_x - 0.5f, idx_y, idx_z, sdf, res);
-  if (sdf_u < 0.0f) {
+  if (sdf_u <= 0.0f) {
     u[get_idx(idx_x, idx_y, idx_z, res)] = 0.0f;
   }
 
   float sdf_v = sample_sdf_interp_local(idx_x, idx_y - 0.5f, idx_z, sdf, res);
-  if (sdf_v < 0.0f) {
+  if (sdf_v <= 0.0f) {
     v[get_idx(idx_x, idx_y, idx_z, res)] = 0.0f;
   }
 
   float sdf_w = sample_sdf_interp_local(idx_x, idx_y, idx_z - 0.5f, sdf, res);
-  if (sdf_w < 0.0f) {
+  if (sdf_w <= 0.0f) {
     w[get_idx(idx_x, idx_y, idx_z, res)] = 0.0f;
+  }
+}
+
+__global__ void apply_solid_face_stencil_kernel(
+    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
+    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
+    float *__restrict__ A_T, float *__restrict__ B_RHS,
+    const float *__restrict__ sdf, int3 res, float3 offset) {
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+
+  int idx = get_idx(idx_x, idx_y, idx_z, res);
+  float sdf_face =
+      sample_sdf_interp_local(idx_x + offset.x, idx_y + offset.y,
+                              idx_z + offset.z, sdf, res);
+  if (sdf_face <= 0.0f) {
+    A_C[idx] = 1.0f;
+    A_W[idx] = 0.0f;
+    A_E[idx] = 0.0f;
+    A_S[idx] = 0.0f;
+    A_N[idx] = 0.0f;
+    A_B[idx] = 0.0f;
+    A_T[idx] = 0.0f;
+    B_RHS[idx] = 0.0f;
   }
 }
 
@@ -3091,6 +3119,9 @@ void CFDSolver::step(float dt) {
           grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
           grid.B_RHS, grid.ibm_data_u, grid.u_bc_.x);
     }
+    apply_solid_face_stencil_kernel<<<grid_dim, block>>>(
+        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+        grid.B_RHS, grid.sdf, res, make_float3(-0.5f, 0.0f, 0.0f));
 
     // 4. Compute Residual (R = B - A*u) -> grid.res_u (Float)
     compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
@@ -3153,6 +3184,9 @@ void CFDSolver::step(float dt) {
           grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
           grid.B_RHS, grid.ibm_data_v, grid.u_bc_.y);
     }
+    apply_solid_face_stencil_kernel<<<grid_dim, block>>>(
+        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+        grid.B_RHS, grid.sdf, res, make_float3(0.0f, -0.5f, 0.0f));
 
     // Compute Residual
     compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
@@ -3215,6 +3249,9 @@ void CFDSolver::step(float dt) {
           grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
           grid.B_RHS, grid.ibm_data_w, grid.u_bc_.z);
     }
+    apply_solid_face_stencil_kernel<<<grid_dim, block>>>(
+        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+        grid.B_RHS, grid.sdf, res, make_float3(0.0f, 0.0f, -0.5f));
 
     // Compute Residual
     compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(

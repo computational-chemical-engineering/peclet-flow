@@ -126,7 +126,11 @@ __global__ void compute_ibm_geometry_kernel(IBM_Data ibm_data, int *ibm_id_map,
                                   idx_z + offset.z, sdf, res);
 
   // Determine if this cell is solid or fluid
-  bool is_solid_c = (sdf_c < 0.0f);
+  bool is_solid_c = (sdf_c <= 0.0f);
+  if (is_solid_c) {
+    ibm_id_map[idx] = -1;
+    return;
+  }
 
   // Identify neighbors
   float D_vals[6];

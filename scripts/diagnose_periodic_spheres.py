@@ -249,10 +249,10 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
 
     # High accuracy settings
     solver.set_pressure_solver_params(iter=5000)
-    solver.set_velocity_solver_params(iter=200)
+    solver.set_velocity_solver_params(iter=1000)
     solver.set_diffusion_theta(1.0)
     solver.set_outer_iterations(8)
-    solver.set_outer_tolerance(1e-10)
+    solver.set_outer_tolerance(1e-14)
 
     print(f"  rho = {rho} (Stokes limit)")
     print(f"  mu = {mu}")
@@ -463,22 +463,39 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
         np.array(field).reshape((res_n, res_n, res_n), order="F")
         for field in debug_fields
     ]
-    div_post = debug_arrays[7]
-    abs_div_post = np.abs(div_post)
-    flat_idx = int(np.argmax(abs_div_post))
-    max_idx = np.unravel_index(flat_idx, div_post.shape, order="F")
-    max_val = float(div_post[max_idx])
+    div_pre = debug_arrays[6]
+    abs_div_pre = np.abs(div_pre)
+    flat_idx = int(np.argmax(abs_div_pre))
+    max_idx = np.unravel_index(flat_idx, div_pre.shape, order="F")
+    max_val = float(div_pre[max_idx])
     print(
-        "  Max |div_post| cell index (i,j,k) = "
+        "  Max |div_pre| cell index (i,j,k) = "
         f"{max_idx}, value = {max_val:.6e}"
     )
-    print(f"  Max |div_post| flat index (F-order) = {flat_idx}")
+    print(f"  Max |div_pre| flat index (F-order) = {flat_idx}")
     sdf_u_r = 0.5 * (sdf_3d + np.roll(sdf_3d, -1, axis=0))
     sdf_u_l = 0.5 * (sdf_3d + np.roll(sdf_3d, 1, axis=0))
     sdf_v_n = 0.5 * (sdf_3d + np.roll(sdf_3d, -1, axis=1))
     sdf_v_s = 0.5 * (sdf_3d + np.roll(sdf_3d, 1, axis=1))
     sdf_w_t = 0.5 * (sdf_3d + np.roll(sdf_3d, -1, axis=2))
     sdf_w_b = 0.5 * (sdf_3d + np.roll(sdf_3d, 1, axis=2))
+    solid_mask = (
+        (sdf_u_r <= 0.0)
+        & (sdf_u_l <= 0.0)
+        & (sdf_v_n <= 0.0)
+        & (sdf_v_s <= 0.0)
+        & (sdf_w_t <= 0.0)
+        & (sdf_w_b <= 0.0)
+    )
+    if np.any(solid_mask):
+        solid_div_max = np.max(np.abs(div_pre[solid_mask]))
+        solid_all_zero = np.allclose(div_pre[solid_mask], 0.0, atol=1e-12)
+        print(
+            "  Solid-cell div_pre max = "
+            f"{solid_div_max:.6e} (all_zero={solid_all_zero})"
+        )
+    else:
+        print("  Solid-cell div_pre max = n/a (no fully solid cells)")
     fluid_flag = (
         (sdf_u_r > 0.0)
         | (sdf_u_l > 0.0)
