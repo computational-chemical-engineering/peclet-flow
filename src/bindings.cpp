@@ -84,9 +84,9 @@ PYBIND11_MODULE(pnm_backend, m) {
       .def("set_boundary_velocity", &CFDSolver::set_boundary_velocity,
            py::arg("u_bc"))
       .def("set_pressure_solver_params", &CFDSolver::set_pressure_solver_params,
-           py::arg("max_iter"), py::arg("tol"))
+           py::arg("iter"))
       .def("set_velocity_solver_params", &CFDSolver::set_velocity_solver_params,
-           py::arg("max_iter"), py::arg("tol"))
+           py::arg("iter"))
       .def("set_outer_iterations", &CFDSolver::set_outer_iterations,
            py::arg("iterations"))
       .def("set_outer_tolerance", &CFDSolver::set_outer_tolerance,
@@ -96,6 +96,10 @@ PYBIND11_MODULE(pnm_backend, m) {
       .def("get_v", &CFDSolver::get_v)
       .def("get_w", &CFDSolver::get_w)
       .def("get_p", &CFDSolver::get_p)
+      .def("get_momentum_residual_max", &CFDSolver::get_momentum_residual_max,
+           py::arg("fluid_only") = false)
+      .def("get_divergence_max", &CFDSolver::get_divergence_max,
+           py::arg("dt"), py::arg("fluid_only") = false)
       .def("get_fluid_fraction", &CFDSolver::get_fluid_fraction,
            py::arg("type"), py::arg("offset"))
       .def("set_u", &CFDSolver::set_u, py::arg("u"))

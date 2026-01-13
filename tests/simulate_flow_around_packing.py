@@ -155,7 +155,7 @@ def simulate_flow():
     
     solver.set_rho(rho)
     solver.set_mu(nu * rho)
-    solver.set_pressure_solver_params(max_iter, tol)
+    solver.set_pressure_solver_params(iter=max_iter)
     
     steps = 100
     print(f"Running {steps} steps flow around sphere...")

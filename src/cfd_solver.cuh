@@ -141,6 +141,8 @@ public:
   std::vector<double> get_v() const;
   std::vector<double> get_w() const;
   std::vector<double> get_p() const;
+  float get_momentum_residual_max(bool fluid_only = false);
+  float get_divergence_max(float dt, bool fluid_only = false);
 
   void set_u(const std::vector<double> &u);
   void set_v(const std::vector<double> &v);
@@ -157,11 +159,9 @@ private:
   float mu_;
   float nu_;
   int p_max_iter_;
-  float p_tol_;
   int v_max_iter_;
-  float v_tol_;
   int outer_iterations_ = 4;
-  float outer_tol_ = 1e-4f;
+  float outer_tol_ = -1.0f;
 
   // Helper to compute max velocity magnitude on device
   float compute_max_velocity();
@@ -184,8 +184,8 @@ public:
   void set_mu(float mu);
 
   // Solver Parameters
-  void set_pressure_solver_params(int max_iter, float tol);
-  void set_velocity_solver_params(int max_iter, float tol);
+  void set_pressure_solver_params(int iter);
+  void set_velocity_solver_params(int iter);
 
   // Unified Solver Step (Picard Iteration)
   // Replaces step_newton

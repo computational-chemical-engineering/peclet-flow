@@ -38,8 +38,8 @@ def run_simulation(dt_val, phi=0.05):
     body_force = 10.0
     solver.set_body_force(pnm_backend.float3(body_force, 0.0, 0.0))
     
-    solver.set_pressure_solver_params(2000, 1e-6)
-    solver.set_velocity_solver_params(100, 1e-6)
+    solver.set_pressure_solver_params(iter=2000)
+    solver.set_velocity_solver_params(iter=100)
     
     # Run to steady state
     # Max steps adjusted for dt to ensure roughly same physical time T=10.0

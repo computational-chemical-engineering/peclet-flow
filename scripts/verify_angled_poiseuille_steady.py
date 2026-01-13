@@ -166,8 +166,8 @@ def run_simulation(res_n, L=1.0, slab_thickness=0.2, verbose=True, ibm_scheme=0,
     max_steps = 20 
     check_interval = 1
 
-    solver.set_pressure_solver_params(max_iter=pressure_max_iter, tol=1e-9)
-    solver.set_velocity_solver_params(max_iter=velocity_max_iter, tol=1e-5)
+    solver.set_pressure_solver_params(iter=pressure_max_iter)
+    solver.set_velocity_solver_params(iter=velocity_max_iter)
     solver.set_diffusion_theta(theta)
 
     # Analytical max velocity

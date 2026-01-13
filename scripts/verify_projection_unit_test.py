@@ -77,7 +77,7 @@ def run_test():
     # Project
     dt = 0.1
     solver.set_rho(1.0)
-    solver.set_pressure_solver_params(1000, 1e-6) # Ensure tight convergence
+    solver.set_pressure_solver_params(iter=1000) # Ensure tight convergence
     solver.project(dt)
     
     # Get Results

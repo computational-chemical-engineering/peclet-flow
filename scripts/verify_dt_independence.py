@@ -37,8 +37,8 @@ def run_simulation(dt_val, rho=1.0, mu=1.0, outer_iters=1):
     solver.set_body_force(pnm_backend.float3(body_force, 0.0, 0.0))
     
     # We use sufficient iterations for large dt (stiff Poisson)
-    solver.set_pressure_solver_params(2000, 1e-6)
-    solver.set_velocity_solver_params(100, 1e-6)
+    solver.set_pressure_solver_params(iter=2000)
+    solver.set_velocity_solver_params(iter=100)
     
     # Set Outer Iterations
     try:

@@ -86,8 +86,8 @@ def run_simulation(res_n, save_plot=False):
     velocity_tol = 1e-5
     cfl = 0.5
     
-    solver.set_pressure_solver_params(max_iter=pressure_max_iter, tol=pressure_tol)
-    solver.set_velocity_solver_params(max_iter=velocity_max_iter, tol=velocity_tol)
+    solver.set_pressure_solver_params(iter=pressure_max_iter)
+    solver.set_velocity_solver_params(iter=velocity_max_iter)
 
     solver.set_cfl(cfl)
     

@@ -64,8 +64,8 @@ def run_simulation(res_n, L=1.0, slab_thickness=0.2):
     else:
         pressure_max_iter = 2000
 
-    solver.set_pressure_solver_params(max_iter=pressure_max_iter, tol=1e-5)
-    solver.set_velocity_solver_params(max_iter=50, tol=1e-5)
+    solver.set_pressure_solver_params(iter=pressure_max_iter)
+    solver.set_velocity_solver_params(iter=50)
     solver.set_cfl(0.5)
     solver.set_diffusion_theta(1.0)
 

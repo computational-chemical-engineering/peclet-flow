@@ -100,8 +100,8 @@ def run_newton_verification():
     solver.set_w(w_init.ravel(order='F').astype(np.float32))
     
     # Solver parameters
-    solver.set_pressure_solver_params(max_iter=500, tol=1e-9)
-    solver.set_velocity_solver_params(max_iter=50, tol=1e-9) # Tight tol to see drift
+    solver.set_pressure_solver_params(iter=500)
+    solver.set_velocity_solver_params(iter=50) # Tight tol to see drift
     solver.set_diffusion_theta(1.0) # Implicit
 
     # Run a dummy step to ensure IBM geometry and stencils are fully populated

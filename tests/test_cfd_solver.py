@@ -41,7 +41,7 @@ def test_periodic_channel_flow():
     
     solver.set_rho(rho)
     solver.set_mu(0.0)
-    solver.set_pressure_solver_params(10, 1e-5)
+    solver.set_pressure_solver_params(iter=10)
     
     for i in range(steps):
         solver.step(dt)

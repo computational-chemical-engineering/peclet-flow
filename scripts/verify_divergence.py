@@ -48,7 +48,7 @@ def check_divergence():
     solver.set_body_force(pnm_backend.float3(1.0, 0, 0)) # Force in X
     
     dt = 0.05
-    solver.set_pressure_solver_params(5000, 1e-6)
+    solver.set_pressure_solver_params(iter=5000)
     
     print("Running 5 steps...")
     for i in range(5):

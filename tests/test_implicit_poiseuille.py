@@ -56,8 +56,8 @@ def test_implicit_poiseuille():
     solver.set_body_force(pnm_backend.float3(g, 0.0, 0.0)) # Flow in X
     
     # Implicit Parameters
-    solver.set_pressure_solver_params(100, 1e-5)
-    solver.set_velocity_solver_params(20, 1e-5) # Inner iterations
+    solver.set_pressure_solver_params(iter=100)
+    solver.set_velocity_solver_params(iter=20) # Inner iterations
     
     # Determine Time Step for High CFL
     # u_max_analytical = g H^2 / (8 nu)

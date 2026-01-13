@@ -33,6 +33,9 @@ Makefile
 install_manifest.txt
 _deps/
 
+# Cache
+.cache/
+
 # Data
 data/
 

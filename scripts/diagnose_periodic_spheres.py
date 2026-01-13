@@ -183,8 +183,8 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
     solver.set_body_force(pnm_backend.float3(f_mag, 0, 0))
 
     # High accuracy settings
-    solver.set_pressure_solver_params(max_iter=5000, tol=1e-12)
-    solver.set_velocity_solver_params(max_iter=200, tol=1e-10)
+    solver.set_pressure_solver_params(iter=5000)
+    solver.set_velocity_solver_params(iter=200)
     solver.set_diffusion_theta(1.0)
     solver.set_outer_iterations(8)
     solver.set_outer_tolerance(1e-10)
@@ -206,8 +206,8 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
     v_prev = np.zeros((res_n, res_n, res_n))
     w_prev = np.zeros((res_n, res_n, res_n))
 
-    print(f"{'Step':<8} {'dU_max':<15} {'Div_max':<15} {'U_mean':<15}")
-    print("-" * 55)
+    print(f"{'Step':<8} {'dU_max':<15} {'NS_res_max':<15} {'Div_max':<15} {'U_mean':<15}")
+    print("-" * 75)
 
     for step in range(max_steps):
         solver.step(dt)
@@ -222,14 +222,12 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
                      np.max(np.abs(v - v_prev)),
                      np.max(np.abs(w - w_prev)))
 
-        # Compute divergence
-        div = compute_divergence(u, v, w, dx)
-        div_max = np.max(np.abs(div))
-
         u_mean = np.mean(u)
 
         if step < 10 or step % 20 == 0 or du_max < 1e-12:
-            print(f"{step:<8} {du_max:<15.6e} {div_max:<15.6e} {u_mean:<15.6e}")
+            res_max = solver.get_momentum_residual_max(fluid_only=True)
+            div_max = solver.get_divergence_max(dt, fluid_only=True)
+            print(f"{step:<8} {du_max:<15.6e} {res_max:<15.6e} {div_max:<15.6e} {u_mean:<15.6e}")
 
         u_prev = u.copy()
         v_prev = v.copy()
@@ -247,6 +245,8 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
 
     # Compute derived fields
     div = compute_divergence(u, v, w, dx)
+    res_max_cpp = solver.get_momentum_residual_max(fluid_only=True)
+    div_max_cpp = solver.get_divergence_max(dt, fluid_only=True)
     vel_mag, u_c, v_c, w_c = compute_velocity_magnitude_at_centers(u, v, w)
 
     # Compute K
@@ -268,7 +268,8 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
     print(f"  K_sim = {K_sim:.4f}")
     print(f"  K_ref = {K_ref:.4f} (Zick & Homsy)")
     print(f"  Error = {error:+.2f}%")
-    print(f"  Max |divergence| = {np.max(np.abs(div)):.6e}")
+    print(f"  Max |NS residual| = {res_max_cpp:.6e}")
+    print(f"  Max |divergence| (C++ kernel) = {div_max_cpp:.6e}")
     print(f"  Mean velocity U = {U_sup:.6e}")
 
     # Create output directory
@@ -387,7 +388,8 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
         'K_sim': K_sim,
         'K_ref': K_ref,
         'error': error,
-        'div_max': np.max(np.abs(div)),
+        'div_max': div_max_cpp,
+        'residual_max': res_max_cpp,
         'u_mean': U_sup,
     }
 
@@ -406,7 +408,8 @@ def main():
     print(f"  K_sim = {result['K_sim']:.4f}")
     print(f"  K_ref = {result['K_ref']:.4f}")
     print(f"  Error = {result['error']:+.2f}%")
-    print(f"  Max |div| = {result['div_max']:.6e}")
+    print(f"  Max |NS residual| = {result['residual_max']:.6e}")
+    print(f"  Max |div| (C++ kernel) = {result['div_max']:.6e}")
 
 
 if __name__ == "__main__":

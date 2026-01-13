@@ -29,8 +29,8 @@ def test_cfl_control():
     solver.set_mu(0.01)
 
     # Set Solver Params
-    solver.set_pressure_solver_params(100, 1e-5)
-    solver.set_velocity_solver_params(10, 1e-5)
+    solver.set_pressure_solver_params(iter=100)
+    solver.set_velocity_solver_params(iter=10)
 
     cfl_target = 0.5
     solver.set_cfl(cfl_target)

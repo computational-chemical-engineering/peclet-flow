@@ -90,8 +90,8 @@ def run_simulation(sdf_values, res_n, dx, R, L, phi_real, label, high_accuracy=T
         # High-accuracy settings for mixed-precision solver
         dt = 50.0
         max_steps = 300
-        solver.set_pressure_solver_params(max_iter=2000, tol=1e-11)
-        solver.set_velocity_solver_params(max_iter=100, tol=1e-9)
+        solver.set_pressure_solver_params(iter=2000)
+        solver.set_velocity_solver_params(iter=100)
         solver.set_diffusion_theta(1.0)  # Fully implicit
         solver.set_outer_iterations(6)
         solver.set_outer_tolerance(1e-9)
@@ -101,8 +101,8 @@ def run_simulation(sdf_values, res_n, dx, R, L, phi_real, label, high_accuracy=T
         # Original settings
         dt = 5.0
         max_steps = 500
-        solver.set_pressure_solver_params(max_iter=200, tol=1e-9)
-        solver.set_velocity_solver_params(max_iter=100, tol=1e-6)
+        solver.set_pressure_solver_params(iter=200)
+        solver.set_velocity_solver_params(iter=100)
         conv_tol = 1e-6
         check_interval = 100
 
