@@ -45,7 +45,8 @@ struct IBM_Data {
   float *M_val; // [num_active * 6] - Factor M (Scale neighbor)
   float *X_val; // [num_active * 6] - Factor X (Cross-term, usually 0 unless
                 // sandwich)
-  float *Nbc_val; // [num_active * 6] - Geometric factor N_bc * R (multiplies u_bc)
+  float *
+      Nbc_val; // [num_active * 6] - Geometric factor N_bc * R (multiplies u_bc)
   float *R_val; // [num_active * 6] - D_rescale / D_axis ratio per direction
 
   // Note: Standard N_bc, val_bc are subsumed into B_val calculation
@@ -68,8 +69,8 @@ struct MacGrid {
   // Fields
   double *u, *v, *w; // Velocity (staggered) - Mixed Precision: State is Double
   double *p;         // Pressure (centered) - Mixed Precision: State is Double
-  float *rhs;       // RHS for pressure solve / Temporary RHS for Momentum
-  float *sdf;       // Signed Distance Field (centered)
+  float *rhs;        // RHS for pressure solve / Temporary RHS for Momentum
+  float *sdf;        // Signed Distance Field (centered)
 
   // Surface Fractions (Face-Centered)
   float *frac_u, *frac_v, *frac_w;
@@ -94,7 +95,7 @@ struct MacGrid {
 
   // Newton-Raphson Buffers
   float3 u_bc_; // Boundary velocity for Dirichlet
-  
+
   // Body Force Density (N/m^3) - e.g. Pressure Gradient or Gravity*Rho
   float3 body_force_density_;
 
@@ -102,14 +103,18 @@ struct MacGrid {
   double *u_old, *v_old, *w_old; // Previous time step (Double)
   double *p_old;                 // Pressure before correction (Double)
   double *p_prev;                // Previous time step pressure (Double)
-  
-  float *res_u, *res_v, *res_w; // Explicit residuals
-  float *res_u_pre, *res_v_pre, *res_w_pre;   // Residuals before correction
+
+  float *res_u, *res_v, *res_w;                // Explicit residuals
+  float *res_u_pre, *res_v_pre, *res_w_pre;    // Residuals before correction
   float *res_u_post, *res_v_post, *res_w_post; // Residuals after correction
-  float *explicit_u, *explicit_v, *explicit_w; // Explicit terms (stored separately)
-  float *phi;                   // Pressure correction
-  float *du, *dv, *dw;          // Newton updates
-  float *div_pre, *div_post;    // Divergence before/after projection
+  float *explicit_u, *explicit_v,
+      *explicit_w;           // Explicit terms (stored separately)
+  float *phi;                // Pressure correction
+  float *du, *dv, *dw;       // Newton updates
+  float *div_pre, *div_post; // Divergence before/after projection
+
+  // Inhomogeneous Term Buffer (for IBM Refactor)
+  float *d_inhom_scratch;
 };
 
 class CFDSolver {
@@ -189,7 +194,8 @@ private:
   float compute_max_velocity();
 
   // Helper to check convergence (max diff between current and previous)
-  bool check_convergence(const float *d_current, const float *d_prev, float tol);
+  bool check_convergence(const float *d_current, const float *d_prev,
+                         float tol);
 
 public:
   // Set Outer Iterations (Newton/Defect Correction)
@@ -228,7 +234,8 @@ public:
                                                         bool ibm_enabled);
 
   // Extract IBM Scaling Factors (D_rescale) for a velocity component
-  // Returns: vector of size num_elements (1.0 for fluid/solid, D_rescale for cut cells)
+  // Returns: vector of size num_elements (1.0 for fluid/solid, D_rescale for
+  // cut cells)
   std::vector<float> get_ibm_scaling(int component_idx);
 
 protected:

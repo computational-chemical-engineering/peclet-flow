@@ -48,11 +48,12 @@ __global__ void populate_ghost_cells_kernel(float *u, float *v, float *w,
 // --------------------------------------------------------
 // Applies the geometric factors to the global stencil arrays
 // A_c, A_nb, RHS
-__global__ void modify_stencil_ibm_kernel(
-    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
-    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
-    float *__restrict__ A_T, float *__restrict__ B_RHS, IBM_Data ibm_data,
-    float u_bc_val) {
+__global__ void
+modify_stencil_ibm_kernel(float *__restrict__ A_C, float *__restrict__ A_W,
+                          float *__restrict__ A_E, float *__restrict__ A_S,
+                          float *__restrict__ A_N, float *__restrict__ A_B,
+                          float *__restrict__ A_T, float *__restrict__ a_inhom,
+                          IBM_Data ibm_data, float u_bc_val) {
 
   int list_idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (list_idx >= ibm_data.num_active_cells)
@@ -61,7 +62,7 @@ __global__ void modify_stencil_ibm_kernel(
   int c_idx = ibm_data.cell_index[list_idx];
   float descale = ibm_data.D_rescale[list_idx];
 
-  // 1. Scale Center & RHS
+  // 1. Scale Center
   // Save original coefficient values BEFORE any modifications
   // This prevents cascading corruption in the direction loop
   float orig_AE = A_E[c_idx];
@@ -73,11 +74,11 @@ __global__ void modify_stencil_ibm_kernel(
   float orig_vals[6] = {orig_AE, orig_AW, orig_AN, orig_AS, orig_AT, orig_AB};
 
   A_C[c_idx] *= descale;
-  B_RHS[c_idx] *= descale;
 
   // Initialize neighbor modifications (will be accumulated)
   float mod_AE = 0.0f, mod_AW = 0.0f, mod_AN = 0.0f;
   float mod_AS = 0.0f, mod_AT = 0.0f, mod_AB = 0.0f;
+  float inhom_accum = 0.0f;
 
   // 2. Compute all modifications using ORIGINAL values
   for (int k = 0; k < 6; k++) {
@@ -93,14 +94,18 @@ __global__ void modify_stencil_ibm_kernel(
     // Update Center: A_c += A_nb * K (using original A_nb)
     A_C[c_idx] += val_nb * K;
 
-    // Update RHS: b_c += B_val (Equation: b' = D*b - Nbc * u_bc * a_ghost)
-    B_RHS[c_idx] -= Nbc * u_bc_val * val_nb;
+    // Calculate Inhomogeneous Term Correction
+    // Was: B_RHS[c_idx] -= Nbc * u_bc_val * val_nb;
+    // Now: a_inhom (term to be subtracted from B) = sum(Nbc * u_bc * a_nb)
+    if (a_inhom != nullptr) {
+      inhom_accum += Nbc * u_bc_val * val_nb;
+    }
 
     // Accumulate neighbor modifications
     // M multiplies the neighbor in direction k
     // X adds to the opposite neighbor
     switch (k) {
-    case 0: // East
+    case 0:                                     // East
       mod_AE += orig_AE * (descale * M - 1.0f); // Apply row scaling + mask
       mod_AW += orig_AE * X;                    // Cross term to West
       break;
@@ -134,6 +139,32 @@ __global__ void modify_stencil_ibm_kernel(
   A_S[c_idx] = orig_AS + mod_AS;
   A_T[c_idx] = orig_AT + mod_AT;
   A_B[c_idx] = orig_AB + mod_AB;
+
+  // Output Inhomogeneous Term
+  if (a_inhom != nullptr) {
+    // Accumulate into the buffer (assuming initialized to 0 by caller)
+    // Atomic not needed if one thread per cell
+    // But verify: ONE list_idx maps to ONE c_idx. Yes.
+    // However, multiple ibm_data entries for the SAME c_idx?
+    // No, ibm_data is 1-to-1 with cut cells.
+    a_inhom[c_idx] += inhom_accum;
+  }
+}
+
+// --------------------------------------------------------
+// Apply IBM Scaling Kernel (Standalone)
+// --------------------------------------------------------
+// Applies D_rescale Factor to a vector field
+__global__ void apply_ibm_scaling_kernel(float *vector, IBM_Data ibm_data,
+                                         int num_elements) {
+  int list_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (list_idx >= ibm_data.num_active_cells)
+    return;
+
+  int c_idx = ibm_data.cell_index[list_idx];
+  float descale = ibm_data.D_rescale[list_idx];
+
+  vector[c_idx] *= descale;
 }
 
 // --------------------------------------------------------
@@ -160,28 +191,28 @@ __global__ void compute_fluid_fraction_kernel(const float *__restrict__ sdf,
 
   // 1. Sample SDF at location (Center or Face)
   float sd = sample_sdf_interp(idx_x + offset.x, idx_y + offset.y,
-                                idx_z + offset.z, sdf, res);
+                               idx_z + offset.z, sdf, res);
 
   // 2. Compute normal components |n|*delta
   float gx = 0.0f, gy = 0.0f, gz = 0.0f;
   float epsilon = 1.0f; // 1 grid cell spacing for finite difference step
 
   float sd_xp = sample_sdf_interp(idx_x + offset.x + epsilon, idx_y + offset.y,
-                                   idx_z + offset.z, sdf, res);
+                                  idx_z + offset.z, sdf, res);
   float sd_xm = sample_sdf_interp(idx_x + offset.x - epsilon, idx_y + offset.y,
-                                   idx_z + offset.z, sdf, res);
+                                  idx_z + offset.z, sdf, res);
   gx = (sd_xp - sd_xm) / (2.0f * spacing.x);
 
   float sd_yp = sample_sdf_interp(idx_x + offset.x, idx_y + offset.y + epsilon,
-                                   idx_z + offset.z, sdf, res);
+                                  idx_z + offset.z, sdf, res);
   float sd_ym = sample_sdf_interp(idx_x + offset.x, idx_y + offset.y - epsilon,
-                                   idx_z + offset.z, sdf, res);
+                                  idx_z + offset.z, sdf, res);
   gy = (sd_yp - sd_ym) / (2.0f * spacing.y);
 
   float sd_zp = sample_sdf_interp(idx_x + offset.x, idx_y + offset.y,
-                                   idx_z + offset.z + epsilon, sdf, res);
+                                  idx_z + offset.z + epsilon, sdf, res);
   float sd_zm = sample_sdf_interp(idx_x + offset.x, idx_y + offset.y,
-                                   idx_z + offset.z - epsilon, sdf, res);
+                                  idx_z + offset.z - epsilon, sdf, res);
   gz = (sd_zp - sd_zm) / (2.0f * spacing.z);
 
   // Magnitude of Gradient
@@ -233,7 +264,7 @@ __global__ void populate_ibm_scaling_kernel(float *__restrict__ d_rescale,
 
   int c_idx = ibm_data.cell_index[list_idx];
   float scale = ibm_data.D_rescale[list_idx];
-  
+
   // Cells not in list retain initialized value (1.0)
   d_rescale[c_idx] = scale;
 }
