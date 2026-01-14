@@ -257,9 +257,3 @@ __global__ void compute_advection_correction_kernel(
 
 // HELPER IMPLEMENTATION
 // (Removed get_ibm_update_rbgs as we switched to Stencil Solver)
-__global__ void solve_velocity_implicit_kernel(
-    float *__restrict__ u, const float *__restrict__ rhs,
-    const float *__restrict__ u_old, const float *__restrict__ v_old,
-    const float *__restrict__ w_old, const float *__restrict__ sdf,
-    IBM_Data ibm_data, const int *__restrict__ ibm_id_map, int3 res,
-    float3 spacing, float dt, float nu, int component_idx, bool is_red);

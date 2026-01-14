@@ -172,22 +172,6 @@ __global__ void apply_correction_kernel(double *__restrict__ u,
   u[idx] += (double)du[idx];
 }
 
-// The original compute_momentum_residual_kernel is conceptually replaced by
-// compute_stencil_residual_kernel and will be called for each component (u, v,
-// w) separately. The old declaration is commented out as it's no longer used in
-// its original form.
-/*
-__global__ void compute_momentum_residual_kernel(
-    const float *__restrict__ u, const float *__restrict__ u_old,
-    const float *__restrict__ v, const float *__restrict__ v_old,
-    const float *__restrict__ w, const float *__restrict__ w_old,
-    const float *__restrict__ p, float *__restrict__ res_u,
-    float *__restrict__ res_v, float *__restrict__ res_w, IBM_Data ibm_data_u,
-    IBM_Data ibm_data_v, IBM_Data ibm_data_w, int *ibm_id_map_u,
-    int *ibm_id_map_v, int *ibm_id_map_w, int3 res, float3 spacing, float dt,
-    float rho, float mu, float3 body_accel);
-*/
-
 // Helper: Trilinear Interpolation with Periodic Wrap
 __device__ float sample_field(const float *__restrict__ field, float x, float y,
                               float z, int3 res) {
@@ -612,33 +596,6 @@ __global__ void apply_face_sdf_mask_kernel(double *__restrict__ u,
   float sdf_w = sample_sdf_interp_local(idx_x, idx_y, idx_z - 0.5f, sdf, res);
   if (sdf_w <= 0.0f) {
     w[get_idx(idx_x, idx_y, idx_z, res)] = 0.0f;
-  }
-}
-
-__global__ void apply_solid_face_stencil_kernel(
-    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
-    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
-    float *__restrict__ A_T, float *__restrict__ B_RHS,
-    const float *__restrict__ sdf, int3 res, float3 offset) {
-  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
-  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
-  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
-
-  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
-    return;
-
-  int idx = get_idx(idx_x, idx_y, idx_z, res);
-  float sdf_face = sample_sdf_interp_local(idx_x + offset.x, idx_y + offset.y,
-                                           idx_z + offset.z, sdf, res);
-  if (sdf_face <= 0.0f) {
-    A_C[idx] = 1.0f;
-    A_W[idx] = 0.0f;
-    A_E[idx] = 0.0f;
-    A_S[idx] = 0.0f;
-    A_N[idx] = 0.0f;
-    A_B[idx] = 0.0f;
-    A_T[idx] = 0.0f;
-    B_RHS[idx] = 0.0f;
   }
 }
 
@@ -1523,182 +1480,6 @@ __global__ void compute_diffusion_only_stencil_kernel(
 }
 
 // --------------------------------------------------------
-// Compute Momentum Stencil (Picard Linearization)
-// --------------------------------------------------------
-// Generates 7-point stencil (A_C, A_W, ...) and RHS (B_RHS)
-// Equation: (rho/dt + theta*(Advect - Diff)) u_new = rho/dt * u_old +
-// (1-theta)*Explicit Advection is linearized: u_conv * grad(u_new)
-__global__ void compute_momentum_stencil_kernel(
-    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
-    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
-    float *__restrict__ A_T, float *__restrict__ B_RHS,
-    const double *__restrict__ u, const double *__restrict__ v,
-    const double *__restrict__ w, const double *__restrict__ p,
-    const double *__restrict__ u_old, const double *__restrict__ v_old,
-    const double *__restrict__ w_old, const double *__restrict__ explicit_term,
-    int3 res, float3 spacing, float dt, float rho, float mu, float3 body_force,
-    int component_idx, float theta) {
-
-  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
-  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
-  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
-
-  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
-    return;
-
-  int idx = get_idx(idx_x, idx_y, idx_z, res);
-
-  // Initialize Coefficients
-  // Diag includes rho/dt + 2*mu/h^2 terms
-  float inv_dx = 1.0f / spacing.x;
-  float inv_dy = 1.0f / spacing.y;
-  float inv_dz = 1.0f / spacing.z;
-  float inv_dx2 = inv_dx * inv_dx;
-  float inv_dy2 = inv_dy * inv_dy;
-  float inv_dz2 = inv_dz * inv_dz;
-
-  float diff_corr = 2.0f * mu * (inv_dx2 + inv_dy2 + inv_dz2);
-  float diag = rho / dt + theta * diff_corr;
-
-  float aw = -theta * mu * inv_dx2;
-  float ae = -theta * mu * inv_dx2;
-  float as = -theta * mu * inv_dy2;
-  float an = -theta * mu * inv_dy2;
-  float ab = -theta * mu * inv_dz2;
-  float at = -theta * mu * inv_dz2;
-
-  // Aliases for body code compatibility
-  const double *u_curr = u;
-  const double *v_curr = v;
-  const double *w_curr = w;
-
-  // Determine Advection Velocity (uc, vc, wc) at the component location
-  // Use double precision for velocity interpolation
-  double uc = 0.0, vc = 0.0, wc = 0.0;
-
-// Helpers for averaging - use double precision
-#define AVG4(v1, v2, v3, v4) (0.25 * ((v1) + (v2) + (v3) + (v4)))
-#define AVG2(v1, v2) (0.5 * ((v1) + (v2)))
-
-  if (component_idx == 0) { // U-Component at (i, j+1/2, k+1/2)
-    uc = u_curr[idx];
-    // Interpolate V to (i, j+0.5, k+0.5)
-    vc = AVG4(v_curr[get_idx(idx_x - 1, idx_y, idx_z, res)],
-              v_curr[get_idx(idx_x, idx_y, idx_z, res)],
-              v_curr[get_idx(idx_x - 1, idx_y + 1, idx_z, res)],
-              v_curr[get_idx(idx_x, idx_y + 1, idx_z, res)]);
-    // Interpolate W to (i, j+0.5, k+0.5)
-    wc = AVG4(w_curr[get_idx(idx_x - 1, idx_y, idx_z, res)],
-              w_curr[get_idx(idx_x, idx_y, idx_z, res)],
-              w_curr[get_idx(idx_x - 1, idx_y, idx_z + 1, res)],
-              w_curr[get_idx(idx_x, idx_y, idx_z + 1, res)]);
-
-  } else if (component_idx == 1) { // V at (i+0.5, j, k+0.5)
-    vc = v_curr[idx];
-    // Interpolate U to (i+0.5, j, k+0.5)
-    uc = AVG4(u_curr[get_idx(idx_x, idx_y - 1, idx_z, res)],
-              u_curr[get_idx(idx_x + 1, idx_y - 1, idx_z, res)],
-              u_curr[get_idx(idx_x, idx_y, idx_z, res)],
-              u_curr[get_idx(idx_x + 1, idx_y, idx_z, res)]);
-    // Interpolate W to (i+0.5, j, k+0.5)
-    wc = AVG4(w_curr[get_idx(idx_x, idx_y - 1, idx_z, res)],
-              w_curr[get_idx(idx_x, idx_y, idx_z, res)],
-              w_curr[get_idx(idx_x, idx_y - 1, idx_z + 1, res)],
-              w_curr[get_idx(idx_x, idx_y, idx_z + 1, res)]);
-
-  } else { // W at (i+0.5, j+0.5, k)
-    wc = w_curr[idx];
-    // Interpolate U to (i+0.5, j+0.5, k)
-    uc = AVG4(u_curr[get_idx(idx_x, idx_y, idx_z - 1, res)],
-              u_curr[get_idx(idx_x + 1, idx_y, idx_z - 1, res)],
-              u_curr[get_idx(idx_x, idx_y, idx_z, res)],
-              u_curr[get_idx(idx_x + 1, idx_y, idx_z, res)]);
-    // Interpolate V to (i+0.5, j+0.5, k)
-    vc = AVG4(v_curr[get_idx(idx_x, idx_y, idx_z - 1, res)],
-              v_curr[get_idx(idx_x, idx_y + 1, idx_z - 1, res)],
-              v_curr[get_idx(idx_x, idx_y, idx_z, res)],
-              v_curr[get_idx(idx_x, idx_y + 1, idx_z, res)]);
-  }
-
-#undef AVG4
-#undef AVG2
-
-  // Upwind Discretization
-  // u * du/dx
-  // if u > 0: u * (u_c - u_w)/dx  => Diag += u/dx, A_W -= u/dx.
-  // if u < 0: u * (u_e - u_c)/dx  => Diag -= u/dx, A_E += u/dx (but u is neg,
-  // so A_E -= |u|/dx).
-
-  float term_x = (float)(theta * rho * uc * inv_dx);
-  if (uc > 0.0) {
-    diag += term_x;
-    aw -= term_x;
-  } else {
-    diag -= term_x;
-    ae += term_x; // term_x is negative, so A_E decreases (standard transport)
-  }
-
-  float term_y = (float)(theta * rho * vc * inv_dy);
-  if (vc > 0.0) {
-    diag += term_y;
-    as -= term_y;
-  } else {
-    diag -= term_y;
-    an += term_y;
-  }
-
-  float term_z = (float)(theta * rho * wc * inv_dz);
-  if (wc > 0.0) {
-    diag += term_z;
-    ab -= term_z;
-  } else {
-    diag -= term_z;
-    at += term_z;
-  }
-
-  // Calculate RHS: (rho/dt)*u_old + theta*f
-  // Use double for val_old to preserve precision from state
-  double val_old = 0.0;
-  float force = 0.0f;
-  double gp_current = 0.0;
-  if (component_idx == 0) {
-    val_old = u_old[idx];
-    force = body_force.x;
-    gp_current = (p[idx] - p[get_idx(idx_x - 1, idx_y, idx_z, res)]) * inv_dx;
-  } else if (component_idx == 1) {
-    val_old = v_old[idx];
-    force = body_force.y;
-    gp_current = (p[idx] - p[get_idx(idx_x, idx_y - 1, idx_z, res)]) * inv_dy;
-  } else {
-    val_old = w_old[idx];
-    force = body_force.z;
-    gp_current = (p[idx] - p[get_idx(idx_x, idx_y, idx_z - 1, res)]) * inv_dz;
-  }
-
-  // Compute RHS in double, then cast to float
-  double rhs_val =
-      ((double)rho / (double)dt) * val_old + (double)(theta * force);
-
-  // Add explicit terms (1-theta) * (...)
-  if (explicit_term != nullptr) {
-    rhs_val += (1.0 - (double)theta) * explicit_term[idx];
-  }
-  // Include theta * grad(p) from current iteration (see Eq. 46).
-  rhs_val -= (double)theta * gp_current;
-
-  B_RHS[idx] = (float)rhs_val;
-
-  // Store
-  A_C[idx] = diag;
-  A_W[idx] = aw;
-  A_E[idx] = ae;
-  A_S[idx] = as;
-  A_N[idx] = an;
-  A_B[idx] = ab;
-  A_T[idx] = at;
-}
-
-// --------------------------------------------------------
 // FUSED RESIDUAL AND ASSEMBLY KERNEL (Mixed-Precision Delta Form)
 // --------------------------------------------------------
 // This kernel computes the Jacobian in double precision, applies IBM
@@ -2271,33 +2052,9 @@ __global__ void update_pressure_from_phi_kernel(
     return;
   int idx = get_idx(idx_x, idx_y, idx_z, res);
 
-  // Get neighbor indices (periodic wrapping handled by get_idx)
-  int idx_E = get_idx(idx_x + 1, idx_y, idx_z, res);
-  int idx_W = get_idx(idx_x - 1, idx_y, idx_z, res);
-  int idx_N = get_idx(idx_x, idx_y + 1, idx_z, res);
-  int idx_S = get_idx(idx_x, idx_y - 1, idx_z, res);
-  int idx_T = get_idx(idx_x, idx_y, idx_z + 1, res);
-  int idx_B = get_idx(idx_x, idx_y, idx_z - 1, res);
-
   // Load phi values
   float phi_C = phi[idx];
-  float phi_E = phi[idx_E];
-  float phi_W = phi[idx_W];
-  float phi_N = phi[idx_N];
-  float phi_S = phi[idx_S];
-  float phi_T = phi[idx_T];
-  float phi_B = phi[idx_B];
 
-  // Grid spacing
-  float dx = spacing.x;
-  float dy = spacing.y;
-  float dz = spacing.z;
-  float inv_2dx = 0.5f / dx;
-  float inv_2dy = 0.5f / dy;
-  float inv_2dz = 0.5f / dz;
-  float inv_dx2 = 1.0f / (dx * dx);
-  float inv_dy2 = 1.0f / (dy * dy);
-  float inv_dz2 = 1.0f / (dz * dz);
 
   // Simple pressure update: δp = (ρ/Δt)*φ
   // The convection and diffusion terms in Eq. 14 can cause instability
@@ -2827,9 +2584,6 @@ static float sample_sdf_interp_host(float x, float y, float z, const float *sdf,
   return c0 * (1.0f - wz) + c1 * wz;
 }
 
-// Forward Declaration
-__global__ void check_id_map_kernel(const int *map, int n, int max_idx,
-                                    IBM_Data ibm_data, int num_elements);
 
 void CFDSolver::initialize(const SDFData &sdf_data) {
   if (sdf_data.size() != num_elements) {
@@ -2851,9 +2605,6 @@ void CFDSolver::initialize(const SDFData &sdf_data) {
 
   // Initialize IBM Geometry
   update_ibm_geometry();
-  check_id_map_kernel<<<(num_elements + 255) / 256, 256>>>(
-      grid.ibm_id_map, num_elements, grid.num_ibm_cells, grid.ibm_data,
-      num_elements);
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
@@ -2863,10 +2614,6 @@ void CFDSolver::initialize(const SDFData &sdf_data) {
 //    IBM_Data ibm_data, int *ibm_id_map, const float *__restrict__ sdf, int3
 //    res, float3 spacing, int *counter, float3 offset, int bc_type);
 
-__global__ void check_id_map_kernel(const int *map, int n, int max_idx,
-                                    IBM_Data ibm_data, int num_elements) {
-  // Stubbed out debug kernel
-}
 
 void CFDSolver::update_ibm_geometry() {
   int *d_counter;
@@ -3183,9 +2930,6 @@ __global__ void solve_diffusion_rbgs_kernel(float *__restrict__ u,
     return;
   }
 
-  float dx2 = spacing.x * spacing.x;
-  float dy2 = spacing.y * spacing.y;
-  float dz2 = spacing.z * spacing.z;
 
   // Neighbors
   float u_xp = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
@@ -3195,10 +2939,7 @@ __global__ void solve_diffusion_rbgs_kernel(float *__restrict__ u,
   float u_zp = u[get_idx(idx_x, idx_y, idx_z + 1, res)];
   float u_zm = u[get_idx(idx_x, idx_y, idx_z - 1, res)];
 
-  // Helper invs
-  float inv_dx2 = 1.0f / dx2;
-  float inv_dy2 = 1.0f / dy2;
-  float inv_dz2 = 1.0f / dz2;
+
 
   // Eq: (1 + 2*mu*(...)) * u_c - mu/dx2(u_e+u_w) ... = rhs
   // Matrix (Diag Dominant):
@@ -3983,46 +3724,7 @@ std::vector<float> CFDSolver::get_fluid_fraction(int type, float3 offset) {
 
   return h_frac;
 }
-// --------------------------------------------------------
-// Convection Defect Kernel
-// --------------------------------------------------------
-// Explicitly adds (FOU - Central) to RHS.
-// component_idx: 0=U, 1=V, 2=Z  (Advected Scalar)
-// --------------------------------------------------------
-__global__ void compute_convection_defect_kernel(const float *__restrict__ u,
-                                                 const float *__restrict__ v,
-                                                 const float *__restrict__ w,
-                                                 float *__restrict__ rhs,
-                                                 int3 res, float3 spacing,
-                                                 int component_idx) {
-  // Stubbed out due to verification issues. Not used in Newton solver.
-}
 
-// --------------------------------------------------------
-// Implicit Velocity Solver (Generlized RBGS)
-// --------------------------------------------------------
-__global__ void solve_velocity_implicit_kernel(
-    float *__restrict__ u, const float *__restrict__ rhs,
-    const float *__restrict__ u_old, const float *__restrict__ v_old,
-    const float *__restrict__ w_old, const float *__restrict__ sdf,
-    IBM_Data ibm_data, const int *__restrict__ ibm_id_map, int3 res,
-    float3 spacing, float dt, float nu, int component_idx, bool is_red) {}
-
-// --------------------------------------------------------
-// Initialize Implicit RHS Kernel
-// --------------------------------------------------------
-// rhs = u_old / dt + body_force
-// --------------------------------------------------------
-// --------------------------------------------------------
-// Stubbed out to fix compilation. Not used in Newton solver.
-__global__ void initialize_implicit_rhs_kernel(
-    const float *__restrict__ phi_old, float *__restrict__ rhs,
-    const float *__restrict__ p_old, int3 res, float3 spacing, float dt,
-    float body_force, float rho, int component_idx) {
-  // Stubbed.
-}
-
-// Removed redundant code
 
 void CFDSolver::set_u(const std::vector<double> &h_u) {
   if (h_u.size() != num_elements) {
