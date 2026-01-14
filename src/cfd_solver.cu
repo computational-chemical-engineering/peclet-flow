@@ -1700,6 +1700,425 @@ __global__ void compute_momentum_stencil_kernel(
 }
 
 // --------------------------------------------------------
+// FUSED RESIDUAL AND ASSEMBLY KERNEL (Mixed-Precision Delta Form)
+// --------------------------------------------------------
+// This kernel computes the Jacobian in double precision, applies IBM
+// modifications, computes the residual f(u) = J*u - b in double, then
+// stores the residual and Jacobian as float for the linear solver.
+//
+// Key benefits:
+// 1. IBM modifications are applied at double precision BEFORE residual
+// 2. Residual computation uses consistent double-precision Jacobian
+// 3. No intermediate storage of double-precision global matrix
+// --------------------------------------------------------
+template <int COMPONENT>
+__global__ void compute_fused_residual_and_assembly_kernel(
+    // Input State (Double)
+    const double *__restrict__ u, const double *__restrict__ v,
+    const double *__restrict__ w, const double *__restrict__ p,
+    const double *__restrict__ u_old, const double *__restrict__ v_old,
+    const double *__restrict__ w_old, const float *__restrict__ explicit_term,
+    // IBM Geometry
+    const int *__restrict__ ibm_id_map, IBM_Data ibm_data,
+    // Output: Residual (Float)
+    float *__restrict__ residual,
+    // Output: Jacobian (Float)
+    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
+    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
+    float *__restrict__ A_T, float *__restrict__ B_RHS,
+    // Parameters
+    int3 res, float3 spacing, float dt, float rho, float mu, float3 body_force,
+    float theta, float u_bc_val) {
+
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+
+  int idx = get_idx(idx_x, idx_y, idx_z, res);
+
+  // Neighbor indices
+  int idx_W = get_idx(idx_x - 1, idx_y, idx_z, res);
+  int idx_E = get_idx(idx_x + 1, idx_y, idx_z, res);
+  int idx_S = get_idx(idx_x, idx_y - 1, idx_z, res);
+  int idx_N = get_idx(idx_x, idx_y + 1, idx_z, res);
+  int idx_B = get_idx(idx_x, idx_y, idx_z - 1, res);
+  int idx_T = get_idx(idx_x, idx_y, idx_z + 1, res);
+
+  // ========================================
+  // STEP 1: Build Base Stencil (Double Precision)
+  // ========================================
+  double d_inv_dx = 1.0 / (double)spacing.x;
+  double d_inv_dy = 1.0 / (double)spacing.y;
+  double d_inv_dz = 1.0 / (double)spacing.z;
+  double d_inv_dx2 = d_inv_dx * d_inv_dx;
+  double d_inv_dy2 = d_inv_dy * d_inv_dy;
+  double d_inv_dz2 = d_inv_dz * d_inv_dz;
+  double d_rho = (double)rho;
+  double d_mu = (double)mu;
+  double d_theta = (double)theta;
+  double d_dt = (double)dt;
+
+  // Diffusion coefficients
+  double diff_corr = 2.0 * d_mu * (d_inv_dx2 + d_inv_dy2 + d_inv_dz2);
+  double val_C = d_rho / d_dt + d_theta * diff_corr;
+  double val_W = -d_theta * d_mu * d_inv_dx2;
+  double val_E = -d_theta * d_mu * d_inv_dx2;
+  double val_S = -d_theta * d_mu * d_inv_dy2;
+  double val_N = -d_theta * d_mu * d_inv_dy2;
+  double val_B = -d_theta * d_mu * d_inv_dz2;
+  double val_T = -d_theta * d_mu * d_inv_dz2;
+
+  // Get advection velocity at this location (double precision)
+  double uc = 0.0, vc = 0.0, wc = 0.0;
+
+#define AVG4_D(v1, v2, v3, v4) (0.25 * ((v1) + (v2) + (v3) + (v4)))
+
+  if (COMPONENT == 0) { // U at (i, j+0.5, k+0.5)
+    uc = u[idx];
+    vc = AVG4_D(v[get_idx(idx_x - 1, idx_y, idx_z, res)],
+                v[get_idx(idx_x, idx_y, idx_z, res)],
+                v[get_idx(idx_x - 1, idx_y + 1, idx_z, res)],
+                v[get_idx(idx_x, idx_y + 1, idx_z, res)]);
+    wc = AVG4_D(w[get_idx(idx_x - 1, idx_y, idx_z, res)],
+                w[get_idx(idx_x, idx_y, idx_z, res)],
+                w[get_idx(idx_x - 1, idx_y, idx_z + 1, res)],
+                w[get_idx(idx_x, idx_y, idx_z + 1, res)]);
+  } else if (COMPONENT == 1) { // V at (i+0.5, j, k+0.5)
+    vc = v[idx];
+    uc = AVG4_D(u[get_idx(idx_x, idx_y - 1, idx_z, res)],
+                u[get_idx(idx_x + 1, idx_y - 1, idx_z, res)],
+                u[get_idx(idx_x, idx_y, idx_z, res)],
+                u[get_idx(idx_x + 1, idx_y, idx_z, res)]);
+    wc = AVG4_D(w[get_idx(idx_x, idx_y - 1, idx_z, res)],
+                w[get_idx(idx_x, idx_y, idx_z, res)],
+                w[get_idx(idx_x, idx_y - 1, idx_z + 1, res)],
+                w[get_idx(idx_x, idx_y, idx_z + 1, res)]);
+  } else { // W at (i+0.5, j+0.5, k)
+    wc = w[idx];
+    uc = AVG4_D(u[get_idx(idx_x, idx_y, idx_z - 1, res)],
+                u[get_idx(idx_x + 1, idx_y, idx_z - 1, res)],
+                u[get_idx(idx_x, idx_y, idx_z, res)],
+                u[get_idx(idx_x + 1, idx_y, idx_z, res)]);
+    vc = AVG4_D(v[get_idx(idx_x, idx_y, idx_z - 1, res)],
+                v[get_idx(idx_x, idx_y + 1, idx_z - 1, res)],
+                v[get_idx(idx_x, idx_y, idx_z, res)],
+                v[get_idx(idx_x, idx_y + 1, idx_z, res)]);
+  }
+#undef AVG4_D
+
+  // FOU Upwind Advection (for Jacobian diagonal dominance)
+  double term_x = d_theta * d_rho * uc * d_inv_dx;
+  if (uc > 0.0) {
+    val_C += term_x;
+    val_W -= term_x;
+  } else {
+    val_C -= term_x;
+    val_E += term_x;
+  }
+
+  double term_y = d_theta * d_rho * vc * d_inv_dy;
+  if (vc > 0.0) {
+    val_C += term_y;
+    val_S -= term_y;
+  } else {
+    val_C -= term_y;
+    val_N += term_y;
+  }
+
+  double term_z = d_theta * d_rho * wc * d_inv_dz;
+  if (wc > 0.0) {
+    val_C += term_z;
+    val_B -= term_z;
+  } else {
+    val_C -= term_z;
+    val_T += term_z;
+  }
+
+  // Build RHS: (rho/dt)*u_old + theta*force + (1-theta)*explicit
+  double val_old = 0.0;
+  double force = 0.0;
+  double gp_current = 0.0;
+  const double *phi_field = nullptr;
+
+  if (COMPONENT == 0) {
+    val_old = u_old[idx];
+    force = (double)body_force.x;
+    gp_current = (p[idx] - p[idx_W]) * d_inv_dx;
+    phi_field = u;
+  } else if (COMPONENT == 1) {
+    val_old = v_old[idx];
+    force = (double)body_force.y;
+    gp_current = (p[idx] - p[idx_S]) * d_inv_dy;
+    phi_field = v;
+  } else {
+    val_old = w_old[idx];
+    force = (double)body_force.z;
+    gp_current = (p[idx] - p[idx_B]) * d_inv_dz;
+    phi_field = w;
+  }
+
+  double rhs_val = (d_rho / d_dt) * val_old + d_theta * force;
+
+  // Add explicit terms (1-theta) * (...)
+  if (explicit_term != nullptr) {
+    rhs_val += (1.0 - d_theta) * (double)explicit_term[idx];
+  }
+
+  // Pressure gradient term
+  rhs_val -= d_theta * gp_current;
+
+  // ========================================
+  // STEP 2: TVD Advection Correction (Double Precision)
+  // ========================================
+  // Compute F_TVD - F_FOU for deferred correction
+  double tvd_corr = 0.0;
+  {
+    // X-direction flux correction
+    double phi_LL, phi_L, phi_R, phi_RR;
+    double u_face, f_tvd, f_fou, R_ibm;
+
+    // Right face (i+1)
+    phi_LL = phi_field[idx_W];
+    phi_L = phi_field[idx];
+    phi_R = phi_field[idx_E];
+    phi_RR = phi_field[get_idx(idx_x + 2, idx_y, idx_z, res)];
+
+    if (COMPONENT == 0)
+      u_face = 0.5 * (phi_field[idx] + phi_field[idx_E]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 0,
+                                      make_int3(idx_x, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                  (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 0);
+    double diff_x_r = (f_tvd - f_fou) * R_ibm;
+
+    // Left face (i)
+    phi_LL = phi_field[get_idx(idx_x - 2, idx_y, idx_z, res)];
+    phi_L = phi_field[idx_W];
+    phi_R = phi_field[idx];
+    phi_RR = phi_field[idx_E];
+
+    if (COMPONENT == 0)
+      u_face = 0.5 * (phi_field[idx_W] + phi_field[idx]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 0,
+                                      make_int3(idx_x - 1, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                  (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 1);
+    double diff_x_l = (f_tvd - f_fou) * R_ibm;
+
+    tvd_corr += (diff_x_r - diff_x_l) * d_inv_dx;
+
+    // Y-direction flux correction
+    // Top face (j+1)
+    phi_LL = phi_field[idx_S];
+    phi_L = phi_field[idx];
+    phi_R = phi_field[idx_N];
+    phi_RR = phi_field[get_idx(idx_x, idx_y + 2, idx_z, res)];
+
+    if (COMPONENT == 1)
+      u_face = 0.5 * (phi_field[idx] + phi_field[idx_N]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 1,
+                                      make_int3(idx_x, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                  (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 2);
+    double diff_y_t = (f_tvd - f_fou) * R_ibm;
+
+    // Bottom face (j)
+    phi_LL = phi_field[get_idx(idx_x, idx_y - 2, idx_z, res)];
+    phi_L = phi_field[idx_S];
+    phi_R = phi_field[idx];
+    phi_RR = phi_field[idx_N];
+
+    if (COMPONENT == 1)
+      u_face = 0.5 * (phi_field[idx_S] + phi_field[idx]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 1,
+                                      make_int3(idx_x, idx_y - 1, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                  (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 3);
+    double diff_y_b = (f_tvd - f_fou) * R_ibm;
+
+    tvd_corr += (diff_y_t - diff_y_b) * d_inv_dy;
+
+    // Z-direction flux correction
+    // Front face (k+1)
+    phi_LL = phi_field[idx_B];
+    phi_L = phi_field[idx];
+    phi_R = phi_field[idx_T];
+    phi_RR = phi_field[get_idx(idx_x, idx_y, idx_z + 2, res)];
+
+    if (COMPONENT == 2)
+      u_face = 0.5 * (phi_field[idx] + phi_field[idx_T]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 2,
+                                      make_int3(idx_x, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                  (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 4);
+    double diff_z_t = (f_tvd - f_fou) * R_ibm;
+
+    // Back face (k)
+    phi_LL = phi_field[get_idx(idx_x, idx_y, idx_z - 2, res)];
+    phi_L = phi_field[idx_B];
+    phi_R = phi_field[idx];
+    phi_RR = phi_field[idx_T];
+
+    if (COMPONENT == 2)
+      u_face = 0.5 * (phi_field[idx_B] + phi_field[idx]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 2,
+                                      make_int3(idx_x, idx_y, idx_z - 1), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                  (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 5);
+    double diff_z_b = (f_tvd - f_fou) * R_ibm;
+
+    tvd_corr += (diff_z_t - diff_z_b) * d_inv_dz;
+  }
+
+  // Add TVD correction to RHS (deferred correction approach)
+  // rhs -= theta * rho * div(F_TVD - F_FOU)
+  rhs_val -= d_theta * d_rho * tvd_corr;
+
+  // ========================================
+  // STEP 3: IBM Modification (Double Precision)
+  // ========================================
+  int list_idx = (ibm_id_map != nullptr) ? ibm_id_map[idx] : -1;
+
+  if (list_idx >= 0) {
+    // Load D_rescale and promote to double
+    double D_rescale = (double)ibm_data.D_rescale[list_idx];
+
+    // Scale center and RHS first
+    val_C *= D_rescale;
+    rhs_val *= D_rescale;
+
+    // Store original neighbor values BEFORE modification
+    double orig_vals[6] = {val_E, val_W, val_N, val_S, val_T, val_B};
+
+    // Accumulated modifications for neighbors
+    double mod_E = 0.0, mod_W = 0.0, mod_N = 0.0;
+    double mod_S = 0.0, mod_T = 0.0, mod_B = 0.0;
+    double inhom_accum = 0.0;
+
+    // Apply IBM modifications for each direction
+    for (int k = 0; k < 6; k++) {
+      int entry = list_idx * 6 + k;
+
+      double K = (double)ibm_data.K_val[entry];
+      double M = (double)ibm_data.M_val[entry];
+      double X = (double)ibm_data.X_val[entry];
+      double Nbc = (double)ibm_data.Nbc_val[entry];
+
+      double val_nb = orig_vals[k];
+
+      // Update Center: a_c += a_nb * K
+      val_C += val_nb * K;
+
+      // Accumulate inhomogeneous term: sum(Nbc * u_bc * a_nb)
+      inhom_accum += Nbc * (double)u_bc_val * val_nb;
+
+      // Compute neighbor modifications
+      // M multiplies the neighbor in direction k
+      // X adds to the opposite neighbor
+      switch (k) {
+      case 0: // East (+X)
+        mod_E += orig_vals[0] * (D_rescale * M - 1.0);
+        mod_W += orig_vals[0] * X;
+        break;
+      case 1: // West (-X)
+        mod_W += orig_vals[1] * (D_rescale * M - 1.0);
+        mod_E += orig_vals[1] * X;
+        break;
+      case 2: // North (+Y)
+        mod_N += orig_vals[2] * (D_rescale * M - 1.0);
+        mod_S += orig_vals[2] * X;
+        break;
+      case 3: // South (-Y)
+        mod_S += orig_vals[3] * (D_rescale * M - 1.0);
+        mod_N += orig_vals[3] * X;
+        break;
+      case 4: // Top (+Z)
+        mod_T += orig_vals[4] * (D_rescale * M - 1.0);
+        mod_B += orig_vals[4] * X;
+        break;
+      case 5: // Bottom (-Z)
+        mod_B += orig_vals[5] * (D_rescale * M - 1.0);
+        mod_T += orig_vals[5] * X;
+        break;
+      }
+    }
+
+    // Apply accumulated neighbor modifications
+    val_E = orig_vals[0] + mod_E;
+    val_W = orig_vals[1] + mod_W;
+    val_N = orig_vals[2] + mod_N;
+    val_S = orig_vals[3] + mod_S;
+    val_T = orig_vals[4] + mod_T;
+    val_B = orig_vals[5] + mod_B;
+
+    // Subtract inhomogeneous term from RHS
+    rhs_val -= inhom_accum;
+  }
+
+  // ========================================
+  // STEP 4: Compute Residual (Double Precision)
+  // ========================================
+  // Load current state values (double)
+  double phi_C = phi_field[idx];
+  double phi_W = phi_field[idx_W];
+  double phi_E = phi_field[idx_E];
+  double phi_S = phi_field[idx_S];
+  double phi_N = phi_field[idx_N];
+  double phi_B = phi_field[idx_B];
+  double phi_T = phi_field[idx_T];
+
+  // Compute A*phi in double precision
+  double Ax = val_C * phi_C + val_W * phi_W + val_E * phi_E + val_S * phi_S +
+              val_N * phi_N + val_B * phi_B + val_T * phi_T;
+
+  // Residual: r = b - Ax
+  double res_double = rhs_val - Ax;
+
+  // ========================================
+  // STEP 5: Store Outputs (Float)
+  // ========================================
+  // Store residual as float
+  residual[idx] = (float)res_double;
+
+  // Store Jacobian as float
+  A_C[idx] = (float)val_C;
+  A_W[idx] = (float)val_W;
+  A_E[idx] = (float)val_E;
+  A_S[idx] = (float)val_S;
+  A_N[idx] = (float)val_N;
+  A_B[idx] = (float)val_B;
+  A_T[idx] = (float)val_T;
+  B_RHS[idx] = (float)rhs_val; // For verification/debug
+}
+
+// --------------------------------------------------------
 // Generic RB-GS Stencil Solver
 // --------------------------------------------------------
 template <typename T>
@@ -3287,39 +3706,22 @@ void CFDSolver::step(float dt) {
         grid.v_old, grid.w_old, grid.p_prev, grid.frac_u, grid.frac_v,
         grid.frac_w, res, spacing, rho_, mu_, grid.body_force_density_);
 
-    // --- Solve U ---
-    compute_momentum_stencil_kernel<<<grid_dim, block>>>(
+    // --- Solve U (Fused Delta Form) ---
+    // FUSED STEP: Builds J (double registers), applies IBM (double),
+    // computes TVD correction (double), computes residual, stores as float
+    compute_fused_residual_and_assembly_kernel<0><<<grid_dim, block>>>(
+        grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
+        grid.explicit_u, grid.ibm_id_map_u, grid.ibm_data_u, grid.res_u,
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old,
-        grid.w_old, grid.explicit_u, res, spacing, dt, rho_, mu_,
-        grid.body_force_density_, 0, theta);
+        grid.B_RHS, res, spacing, dt, rho_, mu_, grid.body_force_density_,
+        theta, grid.u_bc_.x);
 
-    compute_advection_correction_kernel<<<grid_dim, block>>>(
-        grid.B_RHS, grid.u, grid.v, grid.w, grid.u, grid.sdf, grid.ibm_id_map_u,
-        grid.ibm_data_u, 0, res, spacing, rho_ * theta);
-
-    // Apply IBM Scaling to RHS (Robust Scaled)
-    if (grid.ibm_data_u.num_active_cells > 0) {
-      int n_ibm = grid.ibm_data_u.num_active_cells;
-      // 1. Scale RHS
-      apply_ibm_scaling_kernel<<<(n_ibm + 255) / 256, 256>>>(
-          grid.B_RHS, grid.ibm_data_u, num_elements);
-
-      // 2. Modify Matrix & Compute Inhomogeneous Term
-      CHECK_CUDA(
-          cudaMemset(grid.d_inhom_scratch, 0, num_elements * sizeof(float)));
-      modify_stencil_ibm_kernel<<<(n_ibm + 255) / 256, 256>>>(
-          grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-          grid.d_inhom_scratch, grid.ibm_data_u, grid.u_bc_.x);
-
-      // 3. Subtract Inhomogeneous Term from RHS
-      subtract_inhom_kernel<<<grid_dim, block>>>(
-          grid.B_RHS, grid.d_inhom_scratch, num_elements);
-    }
+    // Apply solid face mask (needed for pure solid cells)
     apply_solid_face_stencil_kernel<<<grid_dim, block>>>(
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
         grid.B_RHS, grid.sdf, res, make_float3(-0.5f, 0.0f, 0.0f));
 
+    // Recompute residual after solid masking for consistency
     compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
         grid.u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
         grid.A_T, grid.B_RHS, grid.res_u, res);
@@ -3358,38 +3760,19 @@ void CFDSolver::step(float dt) {
       debug_cell_info_[49] = read_debug_val(grid.w);
     }
 
-    // --- Solve V ---
-    compute_momentum_stencil_kernel<<<grid_dim, block>>>(
+    // --- Solve V (Fused Delta Form) ---
+    compute_fused_residual_and_assembly_kernel<1><<<grid_dim, block>>>(
+        grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
+        grid.explicit_v, grid.ibm_id_map_v, grid.ibm_data_v, grid.res_v,
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old,
-        grid.w_old, grid.explicit_v, res, spacing, dt, rho_, mu_,
-        grid.body_force_density_, 1, theta);
+        grid.B_RHS, res, spacing, dt, rho_, mu_, grid.body_force_density_,
+        theta, grid.u_bc_.y);
 
-    compute_advection_correction_kernel<<<grid_dim, block>>>(
-        grid.B_RHS, grid.u, grid.v, grid.w, grid.v, grid.sdf, grid.ibm_id_map_v,
-        grid.ibm_data_v, 1, res, spacing, rho_ * theta);
-
-    if (grid.ibm_data_v.num_active_cells > 0) {
-      int n_ibm = grid.ibm_data_v.num_active_cells;
-      // 1. Scale RHS
-      apply_ibm_scaling_kernel<<<(n_ibm + 255) / 256, 256>>>(
-          grid.B_RHS, grid.ibm_data_v, num_elements);
-
-      // 2. Modify Matrix & Compute Inhomogeneous Term
-      CHECK_CUDA(
-          cudaMemset(grid.d_inhom_scratch, 0, num_elements * sizeof(float)));
-      modify_stencil_ibm_kernel<<<(n_ibm + 255) / 256, 256>>>(
-          grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-          grid.d_inhom_scratch, grid.ibm_data_v, grid.u_bc_.y);
-
-      // 3. Subtract Inhomogeneous Term from RHS
-      subtract_inhom_kernel<<<grid_dim, block>>>(
-          grid.B_RHS, grid.d_inhom_scratch, num_elements);
-    }
     apply_solid_face_stencil_kernel<<<grid_dim, block>>>(
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
         grid.B_RHS, grid.sdf, res, make_float3(0.0f, -0.5f, 0.0f));
 
+    // Recompute residual after solid masking for consistency
     compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
         grid.v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
         grid.A_T, grid.B_RHS, grid.res_v, res);
@@ -3428,38 +3811,19 @@ void CFDSolver::step(float dt) {
       debug_cell_info_[52] = read_debug_val(grid.w);
     }
 
-    // --- Solve W ---
-    compute_momentum_stencil_kernel<<<grid_dim, block>>>(
+    // --- Solve W (Fused Delta Form) ---
+    compute_fused_residual_and_assembly_kernel<2><<<grid_dim, block>>>(
+        grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
+        grid.explicit_w, grid.ibm_id_map_w, grid.ibm_data_w, grid.res_w,
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old,
-        grid.w_old, grid.explicit_w, res, spacing, dt, rho_, mu_,
-        grid.body_force_density_, 2, theta);
+        grid.B_RHS, res, spacing, dt, rho_, mu_, grid.body_force_density_,
+        theta, grid.u_bc_.z);
 
-    compute_advection_correction_kernel<<<grid_dim, block>>>(
-        grid.B_RHS, grid.u, grid.v, grid.w, grid.w, grid.sdf, grid.ibm_id_map_w,
-        grid.ibm_data_w, 2, res, spacing, rho_ * theta);
-
-    if (grid.ibm_data_w.num_active_cells > 0) {
-      int n_ibm = grid.ibm_data_w.num_active_cells;
-      // 1. Scale RHS
-      apply_ibm_scaling_kernel<<<(n_ibm + 255) / 256, 256>>>(
-          grid.B_RHS, grid.ibm_data_w, num_elements);
-
-      // 2. Modify Matrix & Compute Inhomogeneous Term
-      CHECK_CUDA(
-          cudaMemset(grid.d_inhom_scratch, 0, num_elements * sizeof(float)));
-      modify_stencil_ibm_kernel<<<(n_ibm + 255) / 256, 256>>>(
-          grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-          grid.d_inhom_scratch, grid.ibm_data_w, grid.u_bc_.z);
-
-      // 3. Subtract Inhomogeneous Term from RHS
-      subtract_inhom_kernel<<<grid_dim, block>>>(
-          grid.B_RHS, grid.d_inhom_scratch, num_elements);
-    }
     apply_solid_face_stencil_kernel<<<grid_dim, block>>>(
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
         grid.B_RHS, grid.sdf, res, make_float3(0.0f, 0.0f, -0.5f));
 
+    // Recompute residual after solid masking for consistency
     compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
         grid.w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
         grid.A_T, grid.B_RHS, grid.res_w, res);

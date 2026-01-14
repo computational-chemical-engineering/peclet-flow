@@ -53,7 +53,7 @@ def generate_angled_slab_sdf(res_n, L, slab_thickness):
     return sdf.ravel(order='F').astype(np.float32)
 
 
-def run_simulation(res_n, L=1.0, slab_thickness=0.2, verbose=True):
+def run_simulation(res_n, L=1.0, slab_thickness=0.2, u_wall_mag=0.0, verbose=True):
     """Run angled Poiseuille simulation and return results."""
 
     sqrt2 = np.sqrt(2.0)
@@ -66,7 +66,7 @@ def run_simulation(res_n, L=1.0, slab_thickness=0.2, verbose=True):
     H = period - slab_thickness
 
     if verbose:
-        print(f"N={res_n}: period={period:.4f}, slab_t={slab_thickness:.4f}, H={H:.4f}")
+        print(f"N={res_n}: period={period:.4f}, slab_t={slab_thickness:.4f}, H={H:.4f}, U_wall={u_wall_mag:.4f}")
 
     # Generate SDF
     sdf_values = generate_angled_slab_sdf(res_n, L, slab_thickness)
@@ -93,9 +93,14 @@ def run_simulation(res_n, L=1.0, slab_thickness=0.2, verbose=True):
     f_dir = np.array([1.0/sqrt2, 1.0/sqrt2, 0.0])
     fx, fy, fz = f_mag * f_dir
 
+    # Wall velocity vector (parallel to wall)
+    # Tangent is same as body force direction
+    wx, wy, wz = u_wall_mag * f_dir
+
     solver.set_rho(rho)
     solver.set_mu(mu)
     solver.set_body_force(pnm_backend.float3(fx, fy, fz))
+    solver.set_boundary_velocity(pnm_backend.float3(wx, wy, wz))
 
     # Match settings used in scripts/plot_poiseuille_profiles.py
     if res_n <= 8:
@@ -476,18 +481,20 @@ def run_convergence_study():
     resolutions = [8, 16, 32]
     L = 1.0
     slab_thickness = 0.2
+    u_wall_mag = 0.00
     print("=" * 60)
     print("Angled Poiseuille Flow Verification (45° walls)")
     print("=" * 60)
     print(f"Wall normal: (-1/√2, 1/√2, 0)")
     print(f"Body force:  ( 1/√2, 1/√2, 0) * 0.01")
     print(f"Slab thickness: {slab_thickness}")
+    print(f"U_wall: {u_wall_mag}")
     print("=" * 60)
 
     results = []
     for res in resolutions:
         print(f"\n--- Resolution N={res} ---")
-        r = run_simulation(res, L, slab_thickness)
+        r = run_simulation(res, L, slab_thickness, u_wall_mag=u_wall_mag)
         results.append(r)
 
     # Print summary
