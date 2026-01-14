@@ -107,8 +107,8 @@ struct MacGrid {
   float *res_u, *res_v, *res_w;                // Explicit residuals
   float *res_u_pre, *res_v_pre, *res_w_pre;    // Residuals before correction
   float *res_u_post, *res_v_post, *res_w_post; // Residuals after correction
-  float *explicit_u, *explicit_v,
-      *explicit_w;           // Explicit terms (stored separately)
+  double *explicit_u, *explicit_v,
+      *explicit_w;           // Explicit terms (stored separately) - Double for precision
   float *phi;                // Pressure correction
   float *du, *dv, *dw;       // Newton updates
   float *div_pre, *div_post; // Divergence before/after projection

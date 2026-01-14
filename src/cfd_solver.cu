@@ -1278,8 +1278,8 @@ __device__ inline float get_ibm_ratio(const int *__restrict__ ibm_id_map,
 // time), we add (1-theta)*val_explicit.
 
 __global__ void compute_explicit_terms_kernel(
-    float *__restrict__ explicit_u, float *__restrict__ explicit_v,
-    float *__restrict__ explicit_w, const double *__restrict__ u,
+    double *__restrict__ explicit_u, double *__restrict__ explicit_v,
+    double *__restrict__ explicit_w, const double *__restrict__ u,
     const double *__restrict__ v, const double *__restrict__ w,
     const double *__restrict__ p_prev, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
@@ -1357,8 +1357,7 @@ __global__ void compute_explicit_terms_kernel(
     double gp = (p_c - p_w) * inv_dx;
 
     // Total Explicit Value = -(rho*Adv - mu*Lap + GradP)
-    // Cast to float for output
-    explicit_u[idx] = (float)(-(adv_term - diff_term + gp));
+    explicit_u[idx] = -(adv_term - diff_term + gp);
   }
 
   // --- Component V ---
@@ -1412,7 +1411,7 @@ __global__ void compute_explicit_terms_kernel(
     double p_s = p_prev[get_idx(idx_x, idx_y - 1, idx_z, res)];
     double gp = (p_c - p_s) * inv_dy;
 
-    explicit_v[idx] = (float)(-(adv_term - diff_term + gp));
+    explicit_v[idx] = -(adv_term - diff_term + gp);
   }
 
   // --- Component W ---
@@ -1466,7 +1465,7 @@ __global__ void compute_explicit_terms_kernel(
     double p_b = p_prev[get_idx(idx_x, idx_y, idx_z - 1, res)];
     double gp = (p_c - p_b) * inv_dz;
 
-    explicit_w[idx] = (float)(-(adv_term - diff_term + gp));
+    explicit_w[idx] = -(adv_term - diff_term + gp);
   }
 }
 
@@ -1536,7 +1535,7 @@ __global__ void compute_momentum_stencil_kernel(
     const double *__restrict__ u, const double *__restrict__ v,
     const double *__restrict__ w, const double *__restrict__ p,
     const double *__restrict__ u_old, const double *__restrict__ v_old,
-    const double *__restrict__ w_old, const float *__restrict__ explicit_term,
+    const double *__restrict__ w_old, const double *__restrict__ explicit_term,
     int3 res, float3 spacing, float dt, float rho, float mu, float3 body_force,
     int component_idx, float theta) {
 
@@ -1682,7 +1681,7 @@ __global__ void compute_momentum_stencil_kernel(
 
   // Add explicit terms (1-theta) * (...)
   if (explicit_term != nullptr) {
-    rhs_val += (1.0 - (double)theta) * (double)explicit_term[idx];
+    rhs_val += (1.0 - (double)theta) * explicit_term[idx];
   }
   // Include theta * grad(p) from current iteration (see Eq. 46).
   rhs_val -= (double)theta * gp_current;
@@ -1717,7 +1716,9 @@ __global__ void compute_fused_residual_and_assembly_kernel(
     const double *__restrict__ u, const double *__restrict__ v,
     const double *__restrict__ w, const double *__restrict__ p,
     const double *__restrict__ u_old, const double *__restrict__ v_old,
-    const double *__restrict__ w_old, const float *__restrict__ explicit_term,
+    const double *__restrict__ w_old, const double *__restrict__ explicit_term,
+    // SDF for solid masking
+    const float *__restrict__ sdf,
     // IBM Geometry
     const int *__restrict__ ibm_id_map, IBM_Data ibm_data,
     // Output: Residual (Float)
@@ -1738,6 +1739,29 @@ __global__ void compute_fused_residual_and_assembly_kernel(
     return;
 
   int idx = get_idx(idx_x, idx_y, idx_z, res);
+
+  // ========================================
+  // SOLID FACE MASKING (Fused)
+  // ========================================
+  // Check if this face is inside solid. If so, set identity stencil.
+  float offset_x = (COMPONENT == 0) ? -0.5f : 0.0f;
+  float offset_y = (COMPONENT == 1) ? -0.5f : 0.0f;
+  float offset_z = (COMPONENT == 2) ? -0.5f : 0.0f;
+  float sdf_face = sample_sdf_interp_local(idx_x + offset_x, idx_y + offset_y,
+                                           idx_z + offset_z, sdf, res);
+  if (sdf_face <= 0.0f) {
+    // Solid face: identity stencil, zero RHS, zero residual
+    A_C[idx] = 1.0f;
+    A_W[idx] = 0.0f;
+    A_E[idx] = 0.0f;
+    A_S[idx] = 0.0f;
+    A_N[idx] = 0.0f;
+    A_B[idx] = 0.0f;
+    A_T[idx] = 0.0f;
+    B_RHS[idx] = 0.0f;
+    residual[idx] = 0.0f;
+    return;
+  }
 
   // Neighbor indices
   int idx_W = get_idx(idx_x - 1, idx_y, idx_z, res);
@@ -1864,7 +1888,7 @@ __global__ void compute_fused_residual_and_assembly_kernel(
 
   // Add explicit terms (1-theta) * (...)
   if (explicit_term != nullptr) {
-    rhs_val += (1.0 - d_theta) * (double)explicit_term[idx];
+    rhs_val += (1.0 - d_theta) * explicit_term[idx];
   }
 
   // Pressure gradient term
@@ -2384,9 +2408,9 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.res_u_post, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.res_v_post, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.res_w_post, num_elements * sizeof(float)));
-  CHECK_CUDA(cudaMalloc(&grid.explicit_u, num_elements * sizeof(float)));
-  CHECK_CUDA(cudaMalloc(&grid.explicit_v, num_elements * sizeof(float)));
-  CHECK_CUDA(cudaMalloc(&grid.explicit_w, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMalloc(&grid.explicit_u, num_elements * sizeof(double)));
+  CHECK_CUDA(cudaMalloc(&grid.explicit_v, num_elements * sizeof(double)));
+  CHECK_CUDA(cudaMalloc(&grid.explicit_w, num_elements * sizeof(double)));
   CHECK_CUDA(cudaMalloc(&grid.phi, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.du, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&grid.dv, num_elements * sizeof(float)));
@@ -2417,9 +2441,9 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMemset(grid.res_u_post, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.res_v_post, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.res_w_post, 0, num_elements * sizeof(float)));
-  CHECK_CUDA(cudaMemset(grid.explicit_u, 0, num_elements * sizeof(float)));
-  CHECK_CUDA(cudaMemset(grid.explicit_v, 0, num_elements * sizeof(float)));
-  CHECK_CUDA(cudaMemset(grid.explicit_w, 0, num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(grid.explicit_u, 0, num_elements * sizeof(double)));
+  CHECK_CUDA(cudaMemset(grid.explicit_v, 0, num_elements * sizeof(double)));
+  CHECK_CUDA(cudaMemset(grid.explicit_w, 0, num_elements * sizeof(double)));
   CHECK_CUDA(cudaMemset(grid.phi, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.du, 0, num_elements * sizeof(float)));
   CHECK_CUDA(cudaMemset(grid.dv, 0, num_elements * sizeof(float)));
@@ -3708,23 +3732,14 @@ void CFDSolver::step(float dt) {
 
     // --- Solve U (Fused Delta Form) ---
     // FUSED STEP: Builds J (double registers), applies IBM (double),
-    // computes TVD correction (double), computes residual, stores as float
+    // computes TVD correction (double), applies solid masking, computes residual
     compute_fused_residual_and_assembly_kernel<0><<<grid_dim, block>>>(
         grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-        grid.explicit_u, grid.ibm_id_map_u, grid.ibm_data_u, grid.res_u,
-        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, res, spacing, dt, rho_, mu_, grid.body_force_density_,
-        theta, grid.u_bc_.x);
+        grid.explicit_u, grid.sdf, grid.ibm_id_map_u, grid.ibm_data_u,
+        grid.res_u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+        grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
+        grid.body_force_density_, theta, grid.u_bc_.x);
 
-    // Apply solid face mask (needed for pure solid cells)
-    apply_solid_face_stencil_kernel<<<grid_dim, block>>>(
-        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, grid.sdf, res, make_float3(-0.5f, 0.0f, 0.0f));
-
-    // Recompute residual after solid masking for consistency
-    compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
-        grid.u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-        grid.A_T, grid.B_RHS, grid.res_u, res);
     if (debug_stats_enabled_) {
       CHECK_CUDA(cudaMemcpy(grid.res_u_pre, grid.res_u,
                             num_elements * sizeof(float),
@@ -3763,19 +3778,11 @@ void CFDSolver::step(float dt) {
     // --- Solve V (Fused Delta Form) ---
     compute_fused_residual_and_assembly_kernel<1><<<grid_dim, block>>>(
         grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-        grid.explicit_v, grid.ibm_id_map_v, grid.ibm_data_v, grid.res_v,
-        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, res, spacing, dt, rho_, mu_, grid.body_force_density_,
-        theta, grid.u_bc_.y);
+        grid.explicit_v, grid.sdf, grid.ibm_id_map_v, grid.ibm_data_v,
+        grid.res_v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+        grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
+        grid.body_force_density_, theta, grid.u_bc_.y);
 
-    apply_solid_face_stencil_kernel<<<grid_dim, block>>>(
-        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, grid.sdf, res, make_float3(0.0f, -0.5f, 0.0f));
-
-    // Recompute residual after solid masking for consistency
-    compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
-        grid.v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-        grid.A_T, grid.B_RHS, grid.res_v, res);
     if (debug_stats_enabled_) {
       CHECK_CUDA(cudaMemcpy(grid.res_v_pre, grid.res_v,
                             num_elements * sizeof(float),
@@ -3814,19 +3821,11 @@ void CFDSolver::step(float dt) {
     // --- Solve W (Fused Delta Form) ---
     compute_fused_residual_and_assembly_kernel<2><<<grid_dim, block>>>(
         grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-        grid.explicit_w, grid.ibm_id_map_w, grid.ibm_data_w, grid.res_w,
-        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, res, spacing, dt, rho_, mu_, grid.body_force_density_,
-        theta, grid.u_bc_.z);
+        grid.explicit_w, grid.sdf, grid.ibm_id_map_w, grid.ibm_data_w,
+        grid.res_w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+        grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
+        grid.body_force_density_, theta, grid.u_bc_.z);
 
-    apply_solid_face_stencil_kernel<<<grid_dim, block>>>(
-        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, grid.sdf, res, make_float3(0.0f, 0.0f, -0.5f));
-
-    // Recompute residual after solid masking for consistency
-    compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
-        grid.w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-        grid.A_T, grid.B_RHS, grid.res_w, res);
     if (debug_stats_enabled_) {
       CHECK_CUDA(cudaMemcpy(grid.res_w_pre, grid.res_w,
                             num_elements * sizeof(float),
