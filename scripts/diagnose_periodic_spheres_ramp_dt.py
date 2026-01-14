@@ -1,6 +1,7 @@
 """
 Diagnostic script for periodic sphere array verification.
 - Runs in Stokes limit (very small rho)
+- Pseudo-transient continuation: halve dt until Co target is reached
 - Creates 2D plots of residual, divergence, velocity magnitude
 - Outputs VTI files for ParaView visualization
 """
@@ -64,6 +65,12 @@ def compute_velocity_magnitude_at_centers(u, v, w):
     w_c = 0.5 * (w + np.roll(w, -1, axis=2))
 
     return np.sqrt(u_c**2 + v_c**2 + w_c**2), u_c, v_c, w_c
+
+
+def compute_courant(u, v, w, dt, dx):
+    """Compute max CFL number using staggered velocity components."""
+    u_max = max(np.max(np.abs(u)), np.max(np.abs(v)), np.max(np.abs(w)))
+    return u_max * dt / dx, u_max
 
 
 def sample_sdf_interp_local(sdf, x, y, z):
@@ -334,11 +341,14 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
         f"(all_faces_solid={all_faces_solid})"
     )
 
-    # Time stepping
-    dt = 10.0  # Large dt for steady state
-    max_steps = 20
+    # Time stepping with dt continuation
+    dt = 1e3  # Start with large dt
+    target_co = 0.1
+    steps_per_dt = 100
+    max_steps = 20000
 
-    print(f"  dt = {dt}, max_steps = {max_steps}")
+    print(f"  dt_init = {dt}, target_Co = {target_co}, steps_per_dt = {steps_per_dt}")
+    print(f"  max_steps = {max_steps}")
     print()
 
     # Store previous for residual
@@ -346,8 +356,8 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
     v_prev = np.zeros((res_n, res_n, res_n))
     w_prev = np.zeros((res_n, res_n, res_n))
 
-    print(f"{'Step':<8} {'dU_max':<15} {'NS_res_max':<15} {'Div_max':<15} {'U_mean':<15}")
-    print("-" * 75)
+    print(f"{'Step':<8} {'dt':<12} {'Co':<12} {'dU_max':<15} {'NS_res_max':<15} {'Div_max':<15}")
+    print("-" * 88)
 
     debug_prev_div = 0.0
     dbg_len = 22
@@ -383,8 +393,10 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
     dbg_v4 = 57
     dbg_w4 = 58
 
-    for step in range(max_steps):
+    step = 0
+    while step < max_steps:
         solver.step(dt)
+        step += 1
 
         # Get fields
         u = np.array(solver.get_u()).reshape((res_n, res_n, res_n), order='F')
@@ -397,6 +409,7 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
                      np.max(np.abs(w - w_prev)))
 
         u_mean = np.mean(u)
+        co, u_max = compute_courant(u, v, w, dt, dx)
 
         if step < 10 or step % 20 == 0 or du_max < 1e-12:
             res_max = solver.get_momentum_residual_max(fluid_only=True)
@@ -408,7 +421,10 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
             div_before = stats[9]
             div_after = stats[10]
 
-            print(f"{step:<8} {du_max:<15.6e} {res_max:<15.6e} {div_max:<15.6e} {u_mean:<15.6e}")
+            print(
+                f"{step:<8} {dt:<12.4e} {co:<12.4e} "
+                f"{du_max:<15.6e} {res_max:<15.6e} {div_max:<15.6e}"
+            )
             print(f"         NR_res_pre={res_before:.6e} NR_res_post={res_after:.6e} "
                   f"du_max={corr_max:.6e} div_pre={div_before:.6e} div_post={div_after:.6e}")
 
@@ -469,6 +485,15 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
         v_prev = v.copy()
         w_prev = w.copy()
 
+        if step % steps_per_dt == 0:
+            if co > target_co:
+                old_dt = dt
+                dt *= 0.5
+                print(
+                    f"         CFL {co:.4e} > {target_co:.2e}, "
+                    f"halving dt {old_dt:.4e} -> {dt:.4e}"
+                )
+
         if du_max < 1e-14:
             print(f"\n*** Converged at step {step} ***")
             break
@@ -484,6 +509,7 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
     res_max_cpp = solver.get_momentum_residual_max(fluid_only=True)
     div_max_cpp = solver.get_divergence_max(dt, fluid_only=True)
     vel_mag, u_c, v_c, w_c = compute_velocity_magnitude_at_centers(u, v, w)
+    co_final, u_max_final = compute_courant(u, v, w, dt, dx)
 
     # Compute K
     U_sup = np.mean(u)
@@ -507,6 +533,7 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
     print(f"  Max |NS residual| = {res_max_cpp:.6e}")
     print(f"  Max |divergence| (C++ kernel) = {div_max_cpp:.6e}")
     print(f"  Mean velocity U = {U_sup:.6e}")
+    print(f"  Final dt = {dt:.6e}, Co = {co_final:.6e}, max|u| = {u_max_final:.6e}")
 
     # Create output directory
     out_dir = Path("output/sphere_diagnostic")

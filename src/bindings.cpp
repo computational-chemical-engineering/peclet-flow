@@ -104,6 +104,8 @@ PYBIND11_MODULE(pnm_backend, m) {
            py::arg("enabled"))
       .def("get_debug_stats", &CFDSolver::get_debug_stats)
       .def("get_debug_fields", &CFDSolver::get_debug_fields)
+      .def("set_debug_cell", &CFDSolver::set_debug_cell, py::arg("cell"))
+      .def("get_debug_cell_info", &CFDSolver::get_debug_cell_info)
       .def("get_fluid_fraction", &CFDSolver::get_fluid_fraction,
            py::arg("type"), py::arg("offset"))
       .def("set_u", &CFDSolver::set_u, py::arg("u"))

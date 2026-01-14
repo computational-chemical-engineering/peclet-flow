@@ -100,7 +100,8 @@ struct MacGrid {
 
   // --- Solver Scratch ---
   double *u_old, *v_old, *w_old; // Previous time step (Double)
-  double *p_old;                 // Previous pressure (Double)
+  double *p_old;                 // Pressure before correction (Double)
+  double *p_prev;                // Previous time step pressure (Double)
   
   float *res_u, *res_v, *res_w; // Explicit residuals
   float *res_u_pre, *res_v_pre, *res_w_pre;   // Residuals before correction
@@ -149,6 +150,8 @@ public:
   void set_debug_stats(bool enabled);
   std::vector<float> get_debug_stats() const;
   std::vector<std::vector<float>> get_debug_fields() const;
+  void set_debug_cell(int3 cell);
+  std::vector<float> get_debug_cell_info() const;
 
   void set_u(const std::vector<double> &u);
   void set_v(const std::vector<double> &v);
@@ -169,6 +172,9 @@ private:
   int outer_iterations_ = 4;
   float outer_tol_ = -1.0f;
   bool debug_stats_enabled_ = false;
+  bool debug_cell_enabled_ = false;
+  int3 debug_cell_ = make_int3(0, 0, 0);
+  std::vector<float> debug_cell_info_;
 
   struct DebugStats {
     float res_before[3];
