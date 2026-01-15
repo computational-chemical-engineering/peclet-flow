@@ -93,6 +93,10 @@ struct MacGrid {
   int *ibm_id_map_u, *ibm_id_map_v, *ibm_id_map_w;
   int num_ibm_cells_u, num_ibm_cells_v, num_ibm_cells_w;
 
+  // Pure Fluid Cell Indices
+  int *fluid_indices_u, *fluid_indices_v, *fluid_indices_w;
+  int num_fluid_cells_u, num_fluid_cells_v, num_fluid_cells_w;
+
   // Newton-Raphson Buffers
   float3 u_bc_; // Boundary velocity for Dirichlet
 

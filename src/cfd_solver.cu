@@ -1,3 +1,8 @@
+#include <thrust/copy.h>
+#include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
+#include <thrust/iterator/counting_iterator.h>
+
 #include "cfd_solver.cuh"
 #include "cfd_solver_ibm_kernels.cuh"
 #include <cmath>
@@ -1479,449 +1484,6 @@ __global__ void compute_diffusion_only_stencil_kernel(
   B_RHS[idx] = 0.0f;
 }
 
-// --------------------------------------------------------
-// FUSED RESIDUAL AND ASSEMBLY KERNEL (Mixed-Precision Delta Form)
-// --------------------------------------------------------
-// This kernel computes the Jacobian in double precision, applies IBM
-// modifications, computes the residual f(u) = J*u - b in double, then
-// stores the residual and Jacobian as float for the linear solver.
-//
-// Key benefits:
-// 1. IBM modifications are applied at double precision BEFORE residual
-// 2. Residual computation uses consistent double-precision Jacobian
-// 3. No intermediate storage of double-precision global matrix
-// --------------------------------------------------------
-template <int COMPONENT>
-__global__ void compute_fused_residual_and_assembly_kernel(
-    // Input State (Double)
-    const double *__restrict__ u, const double *__restrict__ v,
-    const double *__restrict__ w, const double *__restrict__ p,
-    const double *__restrict__ u_old, const double *__restrict__ v_old,
-    const double *__restrict__ w_old, const double *__restrict__ explicit_term,
-    // SDF for solid masking
-    const float *__restrict__ sdf,
-    // IBM Geometry
-    const int *__restrict__ ibm_id_map, IBM_Data ibm_data,
-    // Output: Residual (Float)
-    float *__restrict__ residual,
-    // Output: Jacobian (Float)
-    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
-    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
-    float *__restrict__ A_T, float *__restrict__ B_RHS,
-    // Parameters
-    int3 res, float3 spacing, float dt, float rho, float mu, float3 body_force,
-    float theta, float u_bc_val) {
-
-  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
-  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
-  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
-
-  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
-    return;
-
-  int idx = get_idx(idx_x, idx_y, idx_z, res);
-
-  // ========================================
-  // SOLID FACE MASKING (Fused)
-  // ========================================
-  // Check if this face is inside solid. If so, set identity stencil.
-  float offset_x = (COMPONENT == 0) ? -0.5f : 0.0f;
-  float offset_y = (COMPONENT == 1) ? -0.5f : 0.0f;
-  float offset_z = (COMPONENT == 2) ? -0.5f : 0.0f;
-  float sdf_face = sample_sdf_interp_local(idx_x + offset_x, idx_y + offset_y,
-                                           idx_z + offset_z, sdf, res);
-  if (sdf_face <= 0.0f) {
-    // Solid face: identity stencil, zero RHS, zero residual
-    A_C[idx] = 1.0f;
-    A_W[idx] = 0.0f;
-    A_E[idx] = 0.0f;
-    A_S[idx] = 0.0f;
-    A_N[idx] = 0.0f;
-    A_B[idx] = 0.0f;
-    A_T[idx] = 0.0f;
-    B_RHS[idx] = 0.0f;
-    residual[idx] = 0.0f;
-    return;
-  }
-
-  // Neighbor indices
-  int idx_W = get_idx(idx_x - 1, idx_y, idx_z, res);
-  int idx_E = get_idx(idx_x + 1, idx_y, idx_z, res);
-  int idx_S = get_idx(idx_x, idx_y - 1, idx_z, res);
-  int idx_N = get_idx(idx_x, idx_y + 1, idx_z, res);
-  int idx_B = get_idx(idx_x, idx_y, idx_z - 1, res);
-  int idx_T = get_idx(idx_x, idx_y, idx_z + 1, res);
-
-  // ========================================
-  // STEP 1: Build Base Stencil (Double Precision)
-  // ========================================
-  double d_inv_dx = 1.0 / (double)spacing.x;
-  double d_inv_dy = 1.0 / (double)spacing.y;
-  double d_inv_dz = 1.0 / (double)spacing.z;
-  double d_inv_dx2 = d_inv_dx * d_inv_dx;
-  double d_inv_dy2 = d_inv_dy * d_inv_dy;
-  double d_inv_dz2 = d_inv_dz * d_inv_dz;
-  double d_rho = (double)rho;
-  double d_mu = (double)mu;
-  double d_theta = (double)theta;
-  double d_dt = (double)dt;
-
-  // Diffusion coefficients
-  double diff_corr = 2.0 * d_mu * (d_inv_dx2 + d_inv_dy2 + d_inv_dz2);
-  double val_C = d_rho / d_dt + d_theta * diff_corr;
-  double val_W = -d_theta * d_mu * d_inv_dx2;
-  double val_E = -d_theta * d_mu * d_inv_dx2;
-  double val_S = -d_theta * d_mu * d_inv_dy2;
-  double val_N = -d_theta * d_mu * d_inv_dy2;
-  double val_B = -d_theta * d_mu * d_inv_dz2;
-  double val_T = -d_theta * d_mu * d_inv_dz2;
-
-  // Get advection velocity at this location (double precision)
-  double uc = 0.0, vc = 0.0, wc = 0.0;
-
-#define AVG4_D(v1, v2, v3, v4) (0.25 * ((v1) + (v2) + (v3) + (v4)))
-
-  if (COMPONENT == 0) { // U at (i, j+0.5, k+0.5)
-    uc = u[idx];
-    vc = AVG4_D(v[get_idx(idx_x - 1, idx_y, idx_z, res)],
-                v[get_idx(idx_x, idx_y, idx_z, res)],
-                v[get_idx(idx_x - 1, idx_y + 1, idx_z, res)],
-                v[get_idx(idx_x, idx_y + 1, idx_z, res)]);
-    wc = AVG4_D(w[get_idx(idx_x - 1, idx_y, idx_z, res)],
-                w[get_idx(idx_x, idx_y, idx_z, res)],
-                w[get_idx(idx_x - 1, idx_y, idx_z + 1, res)],
-                w[get_idx(idx_x, idx_y, idx_z + 1, res)]);
-  } else if (COMPONENT == 1) { // V at (i+0.5, j, k+0.5)
-    vc = v[idx];
-    uc = AVG4_D(u[get_idx(idx_x, idx_y - 1, idx_z, res)],
-                u[get_idx(idx_x + 1, idx_y - 1, idx_z, res)],
-                u[get_idx(idx_x, idx_y, idx_z, res)],
-                u[get_idx(idx_x + 1, idx_y, idx_z, res)]);
-    wc = AVG4_D(w[get_idx(idx_x, idx_y - 1, idx_z, res)],
-                w[get_idx(idx_x, idx_y, idx_z, res)],
-                w[get_idx(idx_x, idx_y - 1, idx_z + 1, res)],
-                w[get_idx(idx_x, idx_y, idx_z + 1, res)]);
-  } else { // W at (i+0.5, j+0.5, k)
-    wc = w[idx];
-    uc = AVG4_D(u[get_idx(idx_x, idx_y, idx_z - 1, res)],
-                u[get_idx(idx_x + 1, idx_y, idx_z - 1, res)],
-                u[get_idx(idx_x, idx_y, idx_z, res)],
-                u[get_idx(idx_x + 1, idx_y, idx_z, res)]);
-    vc = AVG4_D(v[get_idx(idx_x, idx_y, idx_z - 1, res)],
-                v[get_idx(idx_x, idx_y + 1, idx_z - 1, res)],
-                v[get_idx(idx_x, idx_y, idx_z, res)],
-                v[get_idx(idx_x, idx_y + 1, idx_z, res)]);
-  }
-#undef AVG4_D
-
-  // FOU Upwind Advection (for Jacobian diagonal dominance)
-  double term_x = d_theta * d_rho * uc * d_inv_dx;
-  if (uc > 0.0) {
-    val_C += term_x;
-    val_W -= term_x;
-  } else {
-    val_C -= term_x;
-    val_E += term_x;
-  }
-
-  double term_y = d_theta * d_rho * vc * d_inv_dy;
-  if (vc > 0.0) {
-    val_C += term_y;
-    val_S -= term_y;
-  } else {
-    val_C -= term_y;
-    val_N += term_y;
-  }
-
-  double term_z = d_theta * d_rho * wc * d_inv_dz;
-  if (wc > 0.0) {
-    val_C += term_z;
-    val_B -= term_z;
-  } else {
-    val_C -= term_z;
-    val_T += term_z;
-  }
-
-  // Build RHS: (rho/dt)*u_old + theta*force + (1-theta)*explicit
-  double val_old = 0.0;
-  double force = 0.0;
-  double gp_current = 0.0;
-  const double *phi_field = nullptr;
-
-  if (COMPONENT == 0) {
-    val_old = u_old[idx];
-    force = (double)body_force.x;
-    gp_current = (p[idx] - p[idx_W]) * d_inv_dx;
-    phi_field = u;
-  } else if (COMPONENT == 1) {
-    val_old = v_old[idx];
-    force = (double)body_force.y;
-    gp_current = (p[idx] - p[idx_S]) * d_inv_dy;
-    phi_field = v;
-  } else {
-    val_old = w_old[idx];
-    force = (double)body_force.z;
-    gp_current = (p[idx] - p[idx_B]) * d_inv_dz;
-    phi_field = w;
-  }
-
-  double rhs_val = (d_rho / d_dt) * val_old + d_theta * force;
-
-  // Add explicit terms (1-theta) * (...)
-  if (explicit_term != nullptr) {
-    rhs_val += (1.0 - d_theta) * explicit_term[idx];
-  }
-
-  // Pressure gradient term
-  rhs_val -= d_theta * gp_current;
-
-  // ========================================
-  // STEP 2: TVD Advection Correction (Double Precision)
-  // ========================================
-  // Compute F_TVD - F_FOU for deferred correction
-  double tvd_corr = 0.0;
-  {
-    // X-direction flux correction
-    double phi_LL, phi_L, phi_R, phi_RR;
-    double u_face, f_tvd, f_fou, R_ibm;
-
-    // Right face (i+1)
-    phi_LL = phi_field[idx_W];
-    phi_L = phi_field[idx];
-    phi_R = phi_field[idx_E];
-    phi_RR = phi_field[get_idx(idx_x + 2, idx_y, idx_z, res)];
-
-    if (COMPONENT == 0)
-      u_face = 0.5 * (phi_field[idx] + phi_field[idx_E]);
-    else
-      u_face = get_advection_velocity(u, v, w, COMPONENT, 0,
-                                      make_int3(idx_x, idx_y, idx_z), res);
-
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
-                                  (float)phi_RR, (float)u_face);
-    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
-    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 0);
-    double diff_x_r = (f_tvd - f_fou) * R_ibm;
-
-    // Left face (i)
-    phi_LL = phi_field[get_idx(idx_x - 2, idx_y, idx_z, res)];
-    phi_L = phi_field[idx_W];
-    phi_R = phi_field[idx];
-    phi_RR = phi_field[idx_E];
-
-    if (COMPONENT == 0)
-      u_face = 0.5 * (phi_field[idx_W] + phi_field[idx]);
-    else
-      u_face = get_advection_velocity(u, v, w, COMPONENT, 0,
-                                      make_int3(idx_x - 1, idx_y, idx_z), res);
-
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
-                                  (float)phi_RR, (float)u_face);
-    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
-    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 1);
-    double diff_x_l = (f_tvd - f_fou) * R_ibm;
-
-    tvd_corr += (diff_x_r - diff_x_l) * d_inv_dx;
-
-    // Y-direction flux correction
-    // Top face (j+1)
-    phi_LL = phi_field[idx_S];
-    phi_L = phi_field[idx];
-    phi_R = phi_field[idx_N];
-    phi_RR = phi_field[get_idx(idx_x, idx_y + 2, idx_z, res)];
-
-    if (COMPONENT == 1)
-      u_face = 0.5 * (phi_field[idx] + phi_field[idx_N]);
-    else
-      u_face = get_advection_velocity(u, v, w, COMPONENT, 1,
-                                      make_int3(idx_x, idx_y, idx_z), res);
-
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
-                                  (float)phi_RR, (float)u_face);
-    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
-    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 2);
-    double diff_y_t = (f_tvd - f_fou) * R_ibm;
-
-    // Bottom face (j)
-    phi_LL = phi_field[get_idx(idx_x, idx_y - 2, idx_z, res)];
-    phi_L = phi_field[idx_S];
-    phi_R = phi_field[idx];
-    phi_RR = phi_field[idx_N];
-
-    if (COMPONENT == 1)
-      u_face = 0.5 * (phi_field[idx_S] + phi_field[idx]);
-    else
-      u_face = get_advection_velocity(u, v, w, COMPONENT, 1,
-                                      make_int3(idx_x, idx_y - 1, idx_z), res);
-
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
-                                  (float)phi_RR, (float)u_face);
-    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
-    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 3);
-    double diff_y_b = (f_tvd - f_fou) * R_ibm;
-
-    tvd_corr += (diff_y_t - diff_y_b) * d_inv_dy;
-
-    // Z-direction flux correction
-    // Front face (k+1)
-    phi_LL = phi_field[idx_B];
-    phi_L = phi_field[idx];
-    phi_R = phi_field[idx_T];
-    phi_RR = phi_field[get_idx(idx_x, idx_y, idx_z + 2, res)];
-
-    if (COMPONENT == 2)
-      u_face = 0.5 * (phi_field[idx] + phi_field[idx_T]);
-    else
-      u_face = get_advection_velocity(u, v, w, COMPONENT, 2,
-                                      make_int3(idx_x, idx_y, idx_z), res);
-
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
-                                  (float)phi_RR, (float)u_face);
-    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
-    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 4);
-    double diff_z_t = (f_tvd - f_fou) * R_ibm;
-
-    // Back face (k)
-    phi_LL = phi_field[get_idx(idx_x, idx_y, idx_z - 2, res)];
-    phi_L = phi_field[idx_B];
-    phi_R = phi_field[idx];
-    phi_RR = phi_field[idx_T];
-
-    if (COMPONENT == 2)
-      u_face = 0.5 * (phi_field[idx_B] + phi_field[idx]);
-    else
-      u_face = get_advection_velocity(u, v, w, COMPONENT, 2,
-                                      make_int3(idx_x, idx_y, idx_z - 1), res);
-
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
-                                  (float)phi_RR, (float)u_face);
-    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
-    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 5);
-    double diff_z_b = (f_tvd - f_fou) * R_ibm;
-
-    tvd_corr += (diff_z_t - diff_z_b) * d_inv_dz;
-  }
-
-  // Add TVD correction to RHS (deferred correction approach)
-  // rhs -= theta * rho * div(F_TVD - F_FOU)
-  rhs_val -= d_theta * d_rho * tvd_corr;
-
-  // ========================================
-  // STEP 3: IBM Modification (Double Precision)
-  // ========================================
-  int list_idx = (ibm_id_map != nullptr) ? ibm_id_map[idx] : -1;
-
-  if (list_idx >= 0) {
-    // Load D_rescale and promote to double
-    double D_rescale = (double)ibm_data.D_rescale[list_idx];
-
-    // Scale center and RHS first
-    val_C *= D_rescale;
-    rhs_val *= D_rescale;
-
-    // Store original neighbor values BEFORE modification
-    double orig_vals[6] = {val_E, val_W, val_N, val_S, val_T, val_B};
-
-    // Accumulated modifications for neighbors
-    double mod_E = 0.0, mod_W = 0.0, mod_N = 0.0;
-    double mod_S = 0.0, mod_T = 0.0, mod_B = 0.0;
-    double inhom_accum = 0.0;
-
-    // Apply IBM modifications for each direction
-    for (int k = 0; k < 6; k++) {
-      int entry = list_idx * 6 + k;
-
-      double K = (double)ibm_data.K_val[entry];
-      double M = (double)ibm_data.M_val[entry];
-      double X = (double)ibm_data.X_val[entry];
-      double Nbc = (double)ibm_data.Nbc_val[entry];
-
-      double val_nb = orig_vals[k];
-
-      // Update Center: a_c += a_nb * K
-      val_C += val_nb * K;
-
-      // Accumulate inhomogeneous term: sum(Nbc * u_bc * a_nb)
-      inhom_accum += Nbc * (double)u_bc_val * val_nb;
-
-      // Compute neighbor modifications
-      // M multiplies the neighbor in direction k
-      // X adds to the opposite neighbor
-      switch (k) {
-      case 0: // East (+X)
-        mod_E += orig_vals[0] * (D_rescale * M - 1.0);
-        mod_W += orig_vals[0] * X;
-        break;
-      case 1: // West (-X)
-        mod_W += orig_vals[1] * (D_rescale * M - 1.0);
-        mod_E += orig_vals[1] * X;
-        break;
-      case 2: // North (+Y)
-        mod_N += orig_vals[2] * (D_rescale * M - 1.0);
-        mod_S += orig_vals[2] * X;
-        break;
-      case 3: // South (-Y)
-        mod_S += orig_vals[3] * (D_rescale * M - 1.0);
-        mod_N += orig_vals[3] * X;
-        break;
-      case 4: // Top (+Z)
-        mod_T += orig_vals[4] * (D_rescale * M - 1.0);
-        mod_B += orig_vals[4] * X;
-        break;
-      case 5: // Bottom (-Z)
-        mod_B += orig_vals[5] * (D_rescale * M - 1.0);
-        mod_T += orig_vals[5] * X;
-        break;
-      }
-    }
-
-    // Apply accumulated neighbor modifications
-    val_E = orig_vals[0] + mod_E;
-    val_W = orig_vals[1] + mod_W;
-    val_N = orig_vals[2] + mod_N;
-    val_S = orig_vals[3] + mod_S;
-    val_T = orig_vals[4] + mod_T;
-    val_B = orig_vals[5] + mod_B;
-
-    // Subtract inhomogeneous term from RHS
-    rhs_val -= inhom_accum;
-  }
-
-  // ========================================
-  // STEP 4: Compute Residual (Double Precision)
-  // ========================================
-  // Load current state values (double)
-  double phi_C = phi_field[idx];
-  double phi_W = phi_field[idx_W];
-  double phi_E = phi_field[idx_E];
-  double phi_S = phi_field[idx_S];
-  double phi_N = phi_field[idx_N];
-  double phi_B = phi_field[idx_B];
-  double phi_T = phi_field[idx_T];
-
-  // Compute A*phi in double precision
-  double Ax = val_C * phi_C + val_W * phi_W + val_E * phi_E + val_S * phi_S +
-              val_N * phi_N + val_B * phi_B + val_T * phi_T;
-
-  // Residual: r = b - Ax
-  double res_double = rhs_val - Ax;
-
-  // ========================================
-  // STEP 5: Store Outputs (Float)
-  // ========================================
-  // Store residual as float
-  residual[idx] = (float)res_double;
-
-  // Store Jacobian as float
-  A_C[idx] = (float)val_C;
-  A_W[idx] = (float)val_W;
-  A_E[idx] = (float)val_E;
-  A_S[idx] = (float)val_S;
-  A_N[idx] = (float)val_N;
-  A_B[idx] = (float)val_B;
-  A_T[idx] = (float)val_T;
-  B_RHS[idx] = (float)rhs_val; // For verification/debug
-}
 
 // --------------------------------------------------------
 // Generic RB-GS Stencil Solver
@@ -2304,6 +1866,11 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   CHECK_CUDA(cudaMalloc(&grid.ibm_data_w.R_val, n * 6 * sizeof(float)));
   grid.ibm_data_w.num_active_cells = 0;
 
+  // Allocate fluid indices (will be populated later)
+  CHECK_CUDA(cudaMalloc(&grid.fluid_indices_u, n * sizeof(int)));
+  CHECK_CUDA(cudaMalloc(&grid.fluid_indices_v, n * sizeof(int)));
+  CHECK_CUDA(cudaMalloc(&grid.fluid_indices_w, n * sizeof(int)));
+
   grid.num_ibm_cells = 0;
   grid.num_ibm_cells_u = 0;
   grid.num_ibm_cells_v = 0;
@@ -2408,6 +1975,10 @@ CFDSolver::~CFDSolver() {
 
   CHECK_CUDA(cudaFree(grid.ibm_id_map_w));
   free_ibm(grid.ibm_data_w);
+
+  CHECK_CUDA(cudaFree(grid.fluid_indices_u));
+  CHECK_CUDA(cudaFree(grid.fluid_indices_v));
+  CHECK_CUDA(cudaFree(grid.fluid_indices_w));
 }
 
 void CFDSolver::set_diffusion_theta(float theta) { diffusion_theta = theta; }
@@ -2615,6 +2186,33 @@ void CFDSolver::initialize(const SDFData &sdf_data) {
 //    res, float3 spacing, int *counter, float3 offset, int bc_type);
 
 
+// Functor for Thrust to identify pure fluid cells
+struct is_fluid_functor {
+    const float* sdf;
+    const int* ibm_id_map;
+    float3 offset;
+    int3 res;
+
+    is_fluid_functor(const float* _sdf, const int* _ibm_id_map, float3 _offset, int3 _res)
+        : sdf(_sdf), ibm_id_map(_ibm_id_map), offset(_offset), res(_res) {}
+
+    __device__
+    bool operator()(int idx) const {
+        // Condition 1: Not an IBM cell
+        if (ibm_id_map[idx] != -1) {
+            return false;
+        }
+
+        // Condition 2: Not a solid cell (sample SDF at the component-specific location)
+        int z = idx / (res.x * res.y);
+        int y = (idx % (res.x * res.y)) / res.x;
+        int x = idx % res.x;
+
+        float sdf_val = sample_sdf_interp(x + offset.x, y + offset.y, z + offset.z, sdf, res);
+        return sdf_val > 0.0f;
+    }
+};
+
 void CFDSolver::update_ibm_geometry() {
   int *d_counter;
   CHECK_CUDA(cudaMalloc(&d_counter, sizeof(int)));
@@ -2623,11 +2221,6 @@ void CFDSolver::update_ibm_geometry() {
   dim3 blocks((grid.res.x + threads.x - 1) / threads.x,
               (grid.res.y + threads.y - 1) / threads.y,
               (grid.res.z + threads.z - 1) / threads.z);
-
-  // Helper lambda to run kernel and update counts
-  // We can't use lambda with captures easily if we wanted to avoid code
-  // duplication without std::function overhead or template mess in this file
-  // context. I'll just write it out or use a simple local logic.
 
   auto run_geo_pass = [&](IBM_Data &data, int *map, float3 offset,
                           int bc_type) -> int {
@@ -2649,15 +2242,12 @@ void CFDSolver::update_ibm_geometry() {
   };
 
   // 0. Update Area Fractions (for Projection & Pressure Stencil)
-  // U-Face (Area X)
   compute_fluid_fraction_kernel<<<blocks, threads>>>(
       grid.sdf, grid.frac_u, grid.res, grid.spacing,
       make_float3(-0.5f, 0.0f, 0.0f), 1);
-  // V-Face (Area Y)
   compute_fluid_fraction_kernel<<<blocks, threads>>>(
       grid.sdf, grid.frac_v, grid.res, grid.spacing,
       make_float3(0.0f, -0.5f, 0.0f), 2);
-  // W-Face (Area Z)
   compute_fluid_fraction_kernel<<<blocks, threads>>>(
       grid.sdf, grid.frac_w, grid.res, grid.spacing,
       make_float3(0.0f, 0.0f, -0.5f), 3);
@@ -2678,14 +2268,35 @@ void CFDSolver::update_ibm_geometry() {
   // 4. W (Face Z: 0.0 z) - Dirichlet (0)
   grid.num_ibm_cells_w = run_geo_pass(grid.ibm_data_w, grid.ibm_id_map_w,
                                       make_float3(0.0f, 0.0f, -0.5f), 0);
-
+    
   CHECK_CUDA(cudaFree(d_counter));
 
+  // 5. Classify pure fluid cells
+  auto classify_fluid = [&](int* fluid_indices, int& num_fluid_cells, int* ibm_id_map, float3 offset) {
+      thrust::counting_iterator<int> first(0);
+      thrust::counting_iterator<int> last = first + num_elements;
+      is_fluid_functor pred(grid.sdf, ibm_id_map, offset, grid.res);
+      
+      // Use copy_if to get the fluid indices
+      try {
+          thrust::device_ptr<int> fluid_indices_ptr(fluid_indices);
+          auto end_it = thrust::copy_if(thrust::device, first, last, fluid_indices_ptr, pred);
+          num_fluid_cells = end_it - fluid_indices_ptr;
+      } catch (const std::exception& e) {
+          std::cerr << "Thrust error during fluid cell classification: " << e.what() << std::endl;
+          exit(1);
+      }
+  };
+
+  classify_fluid(grid.fluid_indices_u, grid.num_fluid_cells_u, grid.ibm_id_map_u, make_float3(-0.5f, 0.0f, 0.0f));
+  classify_fluid(grid.fluid_indices_v, grid.num_fluid_cells_v, grid.ibm_id_map_v, make_float3(0.0f, -0.5f, 0.0f));
+  classify_fluid(grid.fluid_indices_w, grid.num_fluid_cells_w, grid.ibm_id_map_w, make_float3(0.0f, 0.0f, -0.5f));
+
   std::cout << "IBM Geometry Updated." << std::endl;
-  std::cout << "  Pressure/Center: " << grid.num_ibm_cells << std::endl;
-  std::cout << "  U-Face: " << grid.num_ibm_cells_u << std::endl;
-  std::cout << "  V-Face: " << grid.num_ibm_cells_v << std::endl;
-  std::cout << "  W-Face: " << grid.num_ibm_cells_w << std::endl;
+  std::cout << "  Pressure/Center: " << grid.num_ibm_cells << " IBM cells" << std::endl;
+  std::cout << "  U-Face: " << grid.num_ibm_cells_u << " IBM cells, " << grid.num_fluid_cells_u << " fluid cells" << std::endl;
+  std::cout << "  V-Face: " << grid.num_ibm_cells_v << " IBM cells, " << grid.num_fluid_cells_v << " fluid cells" << std::endl;
+  std::cout << "  W-Face: " << grid.num_ibm_cells_w << " IBM cells, " << grid.num_fluid_cells_w << " fluid cells" << std::endl;
 }
 
 void CFDSolver::set_body_force(float3 force_density) {
@@ -3323,6 +2934,651 @@ __global__ void compute_advection_correction_kernel(
 // (Removed solve_velocity_linearized_kernel and check_id_map_kernel)
 // --------------------------------------------------------
 
+
+// --------------------------------------------------------
+// FUSED IBM KERNEL
+// --------------------------------------------------------
+template <int COMPONENT>
+__global__ void compute_fused_ibm_kernel(
+    // Input State (Double)
+    const double *__restrict__ u, const double *__restrict__ v,
+    const double *__restrict__ w, const double *__restrict__ p,
+    const double *__restrict__ u_old, const double *__restrict__ v_old,
+    const double *__restrict__ w_old, const double *__restrict__ explicit_term,
+    // SDF for solid masking
+    const float *__restrict__ sdf,
+    // IBM Geometry
+    const int *__restrict__ ibm_id_map, IBM_Data ibm_data,
+    // Output: Residual (Float)
+    float *__restrict__ residual,
+    // Output: Jacobian (Float)
+    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
+    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
+    float *__restrict__ A_T, float *__restrict__ B_RHS,
+    // Parameters
+    int3 res, float3 spacing, float dt, float rho, float mu, float3 body_force,
+    float theta, float u_bc_val) {
+
+    int list_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (list_idx >= ibm_data.num_active_cells) return;
+
+    int idx = ibm_data.cell_index[list_idx];
+
+  // ========================================
+  // SOLID FACE MASKING (Fused)
+  // ========================================
+  // This should not be strictly necessary if the list generation is correct, but as a safety check.
+  float offset_x = (COMPONENT == 0) ? -0.5f : 0.0f;
+  float offset_y = (COMPONENT == 1) ? -0.5f : 0.0f;
+  float offset_z = (COMPONENT == 2) ? -0.5f : 0.0f;
+
+  int idx_x = idx % res.x;
+  int idx_y = (idx / res.x) % res.y;
+  int idx_z = idx / (res.x * res.y);
+
+  float sdf_face = sample_sdf_interp(idx_x + offset_x, idx_y + offset_y,
+                                           idx_z + offset_z, sdf, res);
+  if (sdf_face <= 0.0f) {
+    A_C[idx] = 1.0f;
+    A_W[idx] = 0.0f;
+    A_E[idx] = 0.0f;
+    A_S[idx] = 0.0f;
+    A_N[idx] = 0.0f;
+    A_B[idx] = 0.0f;
+    A_T[idx] = 0.0f;
+    B_RHS[idx] = 0.0f;
+    residual[idx] = 0.0f;
+    return;
+  }
+
+  // Neighbor indices
+  int idx_W = get_idx(idx_x - 1, idx_y, idx_z, res);
+  int idx_E = get_idx(idx_x + 1, idx_y, idx_z, res);
+  int idx_S = get_idx(idx_x, idx_y - 1, idx_z, res);
+  int idx_N = get_idx(idx_x, idx_y + 1, idx_z, res);
+  int idx_B = get_idx(idx_x, idx_y, idx_z - 1, res);
+  int idx_T = get_idx(idx_x, idx_y, idx_z + 1, res);
+
+  // ========================================
+  // STEP 1: Build Base Stencil (Double Precision)
+  // ========================================
+  double d_inv_dx = 1.0 / (double)spacing.x;
+  double d_inv_dy = 1.0 / (double)spacing.y;
+  double d_inv_dz = 1.0 / (double)spacing.z;
+  double d_inv_dx2 = d_inv_dx * d_inv_dx;
+  double d_inv_dy2 = d_inv_dy * d_inv_dy;
+  double d_inv_dz2 = d_inv_dz * d_inv_dz;
+  double d_rho = (double)rho;
+  double d_mu = (double)mu;
+  double d_theta = (double)theta;
+  double d_dt = (double)dt;
+
+  // Diffusion coefficients
+  double diff_corr = 2.0 * d_mu * (d_inv_dx2 + d_inv_dy2 + d_inv_dz2);
+  double val_C = d_rho / d_dt + d_theta * diff_corr;
+  double val_W = -d_theta * d_mu * d_inv_dx2;
+  double val_E = -d_theta * d_mu * d_inv_dx2;
+  double val_S = -d_theta * d_mu * d_inv_dy2;
+  double val_N = -d_theta * d_mu * d_inv_dy2;
+  double val_B = -d_theta * d_mu * d_inv_dz2;
+  double val_T = -d_theta * d_mu * d_inv_dz2;
+
+  // Get advection velocity at this location (double precision)
+  double uc = 0.0, vc = 0.0, wc = 0.0;
+
+#define AVG4_D(v1, v2, v3, v4) (0.25 * ((v1) + (v2) + (v3) + (v4)))
+
+  if (COMPONENT == 0) { // U at (i, j+0.5, k+0.5)
+    uc = u[idx];
+    vc = AVG4_D(v[get_idx(idx_x - 1, idx_y, idx_z, res)],
+                v[get_idx(idx_x, idx_y, idx_z, res)],
+                v[get_idx(idx_x - 1, idx_y + 1, idx_z, res)],
+                v[get_idx(idx_x, idx_y + 1, idx_z, res)]);
+    wc = AVG4_D(w[get_idx(idx_x - 1, idx_y, idx_z, res)],
+                w[get_idx(idx_x, idx_y, idx_z, res)],
+                w[get_idx(idx_x - 1, idx_y, idx_z + 1, res)],
+                w[get_idx(idx_x, idx_y, idx_z + 1, res)]);
+  } else if (COMPONENT == 1) { // V at (i+0.5, j, k+0.5)
+    vc = v[idx];
+    uc = AVG4_D(u[get_idx(idx_x, idx_y - 1, idx_z, res)],
+                u[get_idx(idx_x + 1, idx_y - 1, idx_z, res)],
+                u[get_idx(idx_x, idx_y, idx_z, res)],
+                u[get_idx(idx_x + 1, idx_y, idx_z, res)]);
+    wc = AVG4_D(w[get_idx(idx_x, idx_y - 1, idx_z, res)],
+                w[get_idx(idx_x, idx_y, idx_z, res)],
+                w[get_idx(idx_x, idx_y - 1, idx_z + 1, res)],
+                w[get_idx(idx_x, idx_y, idx_z + 1, res)]);
+  } else { // W at (i+0.5, j+0.5, k)
+    wc = w[idx];
+    uc = AVG4_D(u[get_idx(idx_x, idx_y, idx_z - 1, res)],
+                u[get_idx(idx_x + 1, idx_y, idx_z - 1, res)],
+                u[get_idx(idx_x, idx_y, idx_z, res)],
+                u[get_idx(idx_x + 1, idx_y, idx_z, res)]);
+    vc = AVG4_D(v[get_idx(idx_x, idx_y, idx_z - 1, res)],
+                v[get_idx(idx_x, idx_y + 1, idx_z - 1, res)],
+                v[get_idx(idx_x, idx_y, idx_z, res)],
+                v[get_idx(idx_x, idx_y + 1, idx_z, res)]);
+  }
+#undef AVG4_D
+
+  // FOU Upwind Advection (for Jacobian diagonal dominance)
+  double term_x = d_theta * d_rho * uc * d_inv_dx;
+  if (uc > 0.0) {
+    val_C += term_x;
+    val_W -= term_x;
+  } else {
+    val_C -= term_x;
+    val_E += term_x;
+  }
+
+  double term_y = d_theta * d_rho * vc * d_inv_dy;
+  if (vc > 0.0) {
+    val_C += term_y;
+    val_S -= term_y;
+  } else {
+    val_C -= term_y;
+    val_N += term_y;
+  }
+
+  double term_z = d_theta * d_rho * wc * d_inv_dz;
+  if (wc > 0.0) {
+    val_C += term_z;
+    val_B -= term_z;
+  } else {
+    val_C -= term_z;
+    val_T += term_z;
+  }
+
+  // Build RHS: (rho/dt)*u_old + theta*force + (1-theta)*explicit
+  double val_old = 0.0;
+  double force = 0.0;
+  double gp_current = 0.0;
+  const double *phi_field = nullptr;
+
+  if (COMPONENT == 0) {
+    val_old = u_old[idx];
+    force = (double)body_force.x;
+    gp_current = (p[idx] - p[idx_W]) * d_inv_dx;
+    phi_field = u;
+  } else if (COMPONENT == 1) {
+    val_old = v_old[idx];
+    force = (double)body_force.y;
+    gp_current = (p[idx] - p[idx_S]) * d_inv_dy;
+    phi_field = v;
+  } else {
+    val_old = w_old[idx];
+    force = (double)body_force.z;
+    gp_current = (p[idx] - p[idx_B]) * d_inv_dz;
+    phi_field = w;
+  }
+
+  double rhs_val = (d_rho / d_dt) * val_old + d_theta * force;
+
+  // Add explicit terms (1-theta) * (...)
+  if (explicit_term != nullptr) {
+    rhs_val += (1.0 - d_theta) * explicit_term[idx];
+  }
+
+  // Pressure gradient term
+  rhs_val -= d_theta * gp_current;
+
+  // ========================================
+  // STEP 2: TVD Advection Correction (Double Precision)
+  // ========================================
+  double tvd_corr = 0.0;
+  {
+    double phi_LL, phi_L, phi_R, phi_RR;
+    double u_face, f_tvd, f_fou, R_ibm;
+
+    // Right face (i+1)
+    phi_LL = phi_field[idx_W];
+    phi_L = phi_field[idx];
+    phi_R = phi_field[idx_E];
+    phi_RR = phi_field[get_idx(idx_x + 2, idx_y, idx_z, res)];
+
+    if (COMPONENT == 0) u_face = 0.5 * (phi_field[idx] + phi_field[idx_E]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 0, make_int3(idx_x, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 0);
+    double diff_x_r = (f_tvd - f_fou) * R_ibm;
+
+    // Left face (i)
+    phi_LL = phi_field[get_idx(idx_x - 2, idx_y, idx_z, res)];
+    phi_L = phi_field[idx_W];
+    phi_R = phi_field[idx];
+    phi_RR = phi_field[idx_E];
+
+    if (COMPONENT == 0) u_face = 0.5 * (phi_field[idx_W] + phi_field[idx]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 0, make_int3(idx_x - 1, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 1);
+    double diff_x_l = (f_tvd - f_fou) * R_ibm;
+
+    tvd_corr += (diff_x_r - diff_x_l) * d_inv_dx;
+
+    // Y-direction flux correction
+    phi_LL = phi_field[idx_S];
+    phi_L = phi_field[idx];
+    phi_R = phi_field[idx_N];
+    phi_RR = phi_field[get_idx(idx_x, idx_y + 2, idx_z, res)];
+
+    if (COMPONENT == 1) u_face = 0.5 * (phi_field[idx] + phi_field[idx_N]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 1, make_int3(idx_x, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 2);
+    double diff_y_t = (f_tvd - f_fou) * R_ibm;
+
+    phi_LL = phi_field[get_idx(idx_x, idx_y - 2, idx_z, res)];
+    phi_L = phi_field[idx_S];
+    phi_R = phi_field[idx];
+    phi_RR = phi_field[idx_N];
+
+    if (COMPONENT == 1) u_face = 0.5 * (phi_field[idx_S] + phi_field[idx]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 1, make_int3(idx_x, idx_y - 1, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 3);
+    double diff_y_b = (f_tvd - f_fou) * R_ibm;
+
+    tvd_corr += (diff_y_t - diff_y_b) * d_inv_dy;
+
+    // Z-direction flux correction
+    phi_LL = phi_field[idx_B];
+    phi_L = phi_field[idx];
+    phi_R = phi_field[idx_T];
+    phi_RR = phi_field[get_idx(idx_x, idx_y, idx_z + 2, res)];
+
+    if (COMPONENT == 2) u_face = 0.5 * (phi_field[idx] + phi_field[idx_T]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 2, make_int3(idx_x, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 4);
+    double diff_z_t = (f_tvd - f_fou) * R_ibm;
+
+    phi_LL = phi_field[get_idx(idx_x, idx_y, idx_z - 2, res)];
+    phi_L = phi_field[idx_B];
+    phi_R = phi_field[idx];
+    phi_RR = phi_field[idx_T];
+
+    if (COMPONENT == 2) u_face = 0.5 * (phi_field[idx_B] + phi_field[idx]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 2, make_int3(idx_x, idx_y, idx_z - 1), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 5);
+    double diff_z_b = (f_tvd - f_fou) * R_ibm;
+    
+    tvd_corr += (diff_z_t - diff_z_b) * d_inv_dz;
+  }
+
+  rhs_val -= d_theta * d_rho * tvd_corr;
+
+  // ========================================
+  // STEP 3: IBM Modification (Double Precision)
+  // ========================================
+  // The list_idx is the global thread ID, which is correct for this kernel
+  double D_rescale = (double)ibm_data.D_rescale[list_idx];
+  val_C *= D_rescale;
+  rhs_val *= D_rescale;
+
+  double orig_vals[6] = {val_E, val_W, val_N, val_S, val_T, val_B};
+  double mod_E = 0.0, mod_W = 0.0, mod_N = 0.0;
+  double mod_S = 0.0, mod_T = 0.0, mod_B = 0.0;
+  double inhom_accum = 0.0;
+
+  for (int k = 0; k < 6; k++) {
+    int entry = list_idx * 6 + k;
+    double K = (double)ibm_data.K_val[entry];
+    double M = (double)ibm_data.M_val[entry];
+    double X = (double)ibm_data.X_val[entry];
+    double Nbc = (double)ibm_data.Nbc_val[entry];
+    double val_nb = orig_vals[k];
+    val_C += val_nb * K;
+    inhom_accum += Nbc * (double)u_bc_val * val_nb;
+
+    switch (k) {
+    case 0: mod_E += orig_vals[0] * (D_rescale * M - 1.0); mod_W += orig_vals[0] * X; break;
+    case 1: mod_W += orig_vals[1] * (D_rescale * M - 1.0); mod_E += orig_vals[1] * X; break;
+    case 2: mod_N += orig_vals[2] * (D_rescale * M - 1.0); mod_S += orig_vals[2] * X; break;
+    case 3: mod_S += orig_vals[3] * (D_rescale * M - 1.0); mod_N += orig_vals[3] * X; break;
+    case 4: mod_T += orig_vals[4] * (D_rescale * M - 1.0); mod_B += orig_vals[4] * X; break;
+    case 5: mod_B += orig_vals[5] * (D_rescale * M - 1.0); mod_T += orig_vals[5] * X; break;
+    }
+  }
+
+  val_E = orig_vals[0] + mod_E;
+  val_W = orig_vals[1] + mod_W;
+  val_N = orig_vals[2] + mod_N;
+  val_S = orig_vals[3] + mod_S;
+  val_T = orig_vals[4] + mod_T;
+  val_B = orig_vals[5] + mod_B;
+  rhs_val -= inhom_accum;
+
+  // ========================================
+  // STEP 4: Compute Residual (Double Precision)
+  // ========================================
+  double phi_C = phi_field[idx];
+  double phi_W = phi_field[idx_W];
+  double phi_E = phi_field[idx_E];
+  double phi_S = phi_field[idx_S];
+  double phi_N = phi_field[idx_N];
+  double phi_B = phi_field[idx_B];
+  double phi_T = phi_field[idx_T];
+
+  double Ax = val_C * phi_C + val_W * phi_W + val_E * phi_E + val_S * phi_S +
+              val_N * phi_N + val_B * phi_B + val_T * phi_T;
+
+  double res_double = rhs_val - Ax;
+
+  // ========================================
+  // STEP 5: Store Outputs (Float)
+  // ========================================
+  residual[idx] = (float)res_double;
+  A_C[idx] = (float)val_C;
+  A_W[idx] = (float)val_W;
+  A_E[idx] = (float)val_E;
+  A_S[idx] = (float)val_S;
+  A_N[idx] = (float)val_N;
+  A_B[idx] = (float)val_B;
+  A_T[idx] = (float)val_T;
+  B_RHS[idx] = (float)rhs_val;
+}
+
+// --------------------------------------------------------
+// FUSED FLUID KERNEL
+// --------------------------------------------------------
+template <int COMPONENT>
+__global__ void compute_fused_fluid_kernel(
+    // Input State (Double)
+    const double *__restrict__ u, const double *__restrict__ v,
+    const double *__restrict__ w, const double *__restrict__ p,
+    const double *__restrict__ u_old, const double *__restrict__ v_old,
+    const double *__restrict__ w_old, const double *__restrict__ explicit_term,
+    // Output: Residual (Float)
+    float *__restrict__ residual,
+    // Output: Jacobian (Float)
+    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
+    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
+    float *__restrict__ A_T, float *__restrict__ B_RHS,
+    // Cell lists
+    const int* __restrict__ cell_indices, int num_cells,
+    // Parameters
+    int3 res, float3 spacing, float dt, float rho, float mu, float3 body_force,
+    float theta) {
+
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (global_tid >= num_cells) return;
+
+    int idx = cell_indices[global_tid];
+
+  // Neighbor indices
+  int idx_x = idx % res.x;
+  int idx_y = (idx / res.x) % res.y;
+  int idx_z = idx / (res.x * res.y);
+  
+  int idx_W = get_idx(idx_x - 1, idx_y, idx_z, res);
+  int idx_E = get_idx(idx_x + 1, idx_y, idx_z, res);
+  int idx_S = get_idx(idx_x, idx_y - 1, idx_z, res);
+  int idx_N = get_idx(idx_x, idx_y + 1, idx_z, res);
+  int idx_B = get_idx(idx_x, idx_y, idx_z - 1, res);
+  int idx_T = get_idx(idx_x, idx_y, idx_z + 1, res);
+
+  // ========================================
+  // STEP 1: Build Base Stencil (Double Precision)
+  // ========================================
+  double d_inv_dx = 1.0 / (double)spacing.x;
+  double d_inv_dy = 1.0 / (double)spacing.y;
+  double d_inv_dz = 1.0 / (double)spacing.z;
+  double d_inv_dx2 = d_inv_dx * d_inv_dx;
+  double d_inv_dy2 = d_inv_dy * d_inv_dy;
+  double d_inv_dz2 = d_inv_dz * d_inv_dz;
+  double d_rho = (double)rho;
+  double d_mu = (double)mu;
+  double d_theta = (double)theta;
+  double d_dt = (double)dt;
+
+  // Diffusion coefficients
+  double diff_corr = 2.0 * d_mu * (d_inv_dx2 + d_inv_dy2 + d_inv_dz2);
+  double val_C = d_rho / d_dt + d_theta * diff_corr;
+  double val_W = -d_theta * d_mu * d_inv_dx2;
+  double val_E = -d_theta * d_mu * d_inv_dx2;
+  double val_S = -d_theta * d_mu * d_inv_dy2;
+  double val_N = -d_theta * d_mu * d_inv_dy2;
+  double val_B = -d_theta * d_mu * d_inv_dz2;
+  double val_T = -d_theta * d_mu * d_inv_dz2;
+
+  // Get advection velocity at this location (double precision)
+  double uc = 0.0, vc = 0.0, wc = 0.0;
+
+#define AVG4_D(v1, v2, v3, v4) (0.25 * ((v1) + (v2) + (v3) + (v4)))
+
+  if (COMPONENT == 0) { // U at (i, j+0.5, k+0.5)
+    uc = u[idx];
+    vc = AVG4_D(v[get_idx(idx_x - 1, idx_y, idx_z, res)],
+                v[get_idx(idx_x, idx_y, idx_z, res)],
+                v[get_idx(idx_x - 1, idx_y + 1, idx_z, res)],
+                v[get_idx(idx_x, idx_y + 1, idx_z, res)]);
+    wc = AVG4_D(w[get_idx(idx_x - 1, idx_y, idx_z, res)],
+                w[get_idx(idx_x, idx_y, idx_z, res)],
+                w[get_idx(idx_x - 1, idx_y, idx_z + 1, res)],
+                w[get_idx(idx_x, idx_y, idx_z + 1, res)]);
+  } else if (COMPONENT == 1) { // V at (i+0.5, j, k+0.5)
+    vc = v[idx];
+    uc = AVG4_D(u[get_idx(idx_x, idx_y - 1, idx_z, res)],
+                u[get_idx(idx_x + 1, idx_y - 1, idx_z, res)],
+                u[get_idx(idx_x, idx_y, idx_z, res)],
+                u[get_idx(idx_x + 1, idx_y, idx_z, res)]);
+    wc = AVG4_D(w[get_idx(idx_x, idx_y - 1, idx_z, res)],
+                w[get_idx(idx_x, idx_y, idx_z, res)],
+                w[get_idx(idx_x, idx_y - 1, idx_z + 1, res)],
+                w[get_idx(idx_x, idx_y, idx_z + 1, res)]);
+  } else { // W at (i+0.5, j+0.5, k)
+    wc = w[idx];
+    uc = AVG4_D(u[get_idx(idx_x, idx_y, idx_z - 1, res)],
+                u[get_idx(idx_x + 1, idx_y, idx_z - 1, res)],
+                u[get_idx(idx_x, idx_y, idx_z, res)],
+                u[get_idx(idx_x + 1, idx_y, idx_z, res)]);
+    vc = AVG4_D(v[get_idx(idx_x, idx_y, idx_z - 1, res)],
+                v[get_idx(idx_x, idx_y + 1, idx_z - 1, res)],
+                v[get_idx(idx_x, idx_y, idx_z, res)],
+                v[get_idx(idx_x, idx_y + 1, idx_z, res)]);
+  }
+#undef AVG4_D
+
+  // FOU Upwind Advection (for Jacobian diagonal dominance)
+  double term_x = d_theta * d_rho * uc * d_inv_dx;
+  if (uc > 0.0) {
+    val_C += term_x;
+    val_W -= term_x;
+  } else {
+    val_C -= term_x;
+    val_E += term_x;
+  }
+
+  double term_y = d_theta * d_rho * vc * d_inv_dy;
+  if (vc > 0.0) {
+    val_C += term_y;
+    val_S -= term_y;
+  } else {
+    val_C -= term_y;
+    val_N += term_y;
+  }
+
+  double term_z = d_theta * d_rho * wc * d_inv_dz;
+  if (wc > 0.0) {
+    val_C += term_z;
+    val_B -= term_z;
+  } else {
+    val_C -= term_z;
+    val_T += term_z;
+  }
+
+  // Build RHS: (rho/dt)*u_old + theta*force + (1-theta)*explicit
+  double val_old = 0.0;
+  double force = 0.0;
+  double gp_current = 0.0;
+  const double *phi_field = nullptr;
+
+  if (COMPONENT == 0) {
+    val_old = u_old[idx];
+    force = (double)body_force.x;
+    gp_current = (p[idx] - p[idx_W]) * d_inv_dx;
+    phi_field = u;
+  } else if (COMPONENT == 1) {
+    val_old = v_old[idx];
+    force = (double)body_force.y;
+    gp_current = (p[idx] - p[idx_S]) * d_inv_dy;
+    phi_field = v;
+  } else {
+    val_old = w_old[idx];
+    force = (double)body_force.z;
+    gp_current = (p[idx] - p[idx_B]) * d_inv_dz;
+    phi_field = w;
+  }
+
+  double rhs_val = (d_rho / d_dt) * val_old + d_theta * force;
+
+  // Add explicit terms (1-theta) * (...)
+  if (explicit_term != nullptr) {
+    rhs_val += (1.0 - d_theta) * explicit_term[idx];
+  }
+
+  // Pressure gradient term
+  rhs_val -= d_theta * gp_current;
+
+  // ========================================
+  // STEP 2: TVD Advection Correction (Double Precision)
+  // ========================================
+  double tvd_corr = 0.0;
+  {
+    double phi_LL, phi_L, phi_R, phi_RR;
+    double u_face, f_tvd, f_fou;
+
+    // Right face (i+1)
+    phi_LL = phi_field[idx_W];
+    phi_L = phi_field[idx];
+    phi_R = phi_field[idx_E];
+    phi_RR = phi_field[get_idx(idx_x + 2, idx_y, idx_z, res)];
+
+    if (COMPONENT == 0) u_face = 0.5 * (phi_field[idx] + phi_field[idx_E]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 0, make_int3(idx_x, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    double diff_x_r = (f_tvd - f_fou);
+
+    // Left face (i)
+    phi_LL = phi_field[get_idx(idx_x - 2, idx_y, idx_z, res)];
+    phi_L = phi_field[idx_W];
+    phi_R = phi_field[idx];
+    phi_RR = phi_field[idx_E];
+
+    if (COMPONENT == 0) u_face = 0.5 * (phi_field[idx_W] + phi_field[idx]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 0, make_int3(idx_x - 1, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    double diff_x_l = (f_tvd - f_fou);
+
+    tvd_corr += (diff_x_r - diff_x_l) * d_inv_dx;
+
+    // Y-direction flux correction
+    phi_LL = phi_field[idx_S];
+    phi_L = phi_field[idx];
+    phi_R = phi_field[idx_N];
+    phi_RR = phi_field[get_idx(idx_x, idx_y + 2, idx_z, res)];
+
+    if (COMPONENT == 1) u_face = 0.5 * (phi_field[idx] + phi_field[idx_N]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 1, make_int3(idx_x, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    double diff_y_t = (f_tvd - f_fou);
+
+    phi_LL = phi_field[get_idx(idx_x, idx_y - 2, idx_z, res)];
+    phi_L = phi_field[idx_S];
+    phi_R = phi_field[idx];
+    phi_RR = phi_field[idx_N];
+
+    if (COMPONENT == 1) u_face = 0.5 * (phi_field[idx_S] + phi_field[idx]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 1, make_int3(idx_x, idx_y - 1, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    double diff_y_b = (f_tvd - f_fou);
+
+    tvd_corr += (diff_y_t - diff_y_b) * d_inv_dy;
+
+    // Z-direction flux correction
+    phi_LL = phi_field[idx_B];
+    phi_L = phi_field[idx];
+    phi_R = phi_field[idx_T];
+    phi_RR = phi_field[get_idx(idx_x, idx_y, idx_z + 2, res)];
+
+    if (COMPONENT == 2) u_face = 0.5 * (phi_field[idx] + phi_field[idx_T]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 2, make_int3(idx_x, idx_y, idx_z), res);
+    
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    double diff_z_t = (f_tvd - f_fou);
+
+    phi_LL = phi_field[get_idx(idx_x, idx_y, idx_z - 2, res)];
+    phi_L = phi_field[idx_B];
+    phi_R = phi_field[idx];
+    phi_RR = phi_field[idx_T];
+
+    if (COMPONENT == 2) u_face = 0.5 * (phi_field[idx_B] + phi_field[idx]);
+    else u_face = get_advection_velocity(u, v, w, COMPONENT, 2, make_int3(idx_x, idx_y, idx_z - 1), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
+    double diff_z_b = (f_tvd - f_fou);
+    
+    tvd_corr += (diff_z_t - diff_z_b) * d_inv_dz;
+  }
+
+  rhs_val -= d_theta * d_rho * tvd_corr;
+
+  // ========================================
+  // STEP 4: Compute Residual (Double Precision)
+  // ========================================
+  double phi_C = phi_field[idx];
+  double phi_W = phi_field[idx_W];
+  double phi_E = phi_field[idx_E];
+  double phi_S = phi_field[idx_S];
+  double phi_N = phi_field[idx_N];
+  double phi_B = phi_field[idx_B];
+  double phi_T = phi_field[idx_T];
+
+  double Ax = val_C * phi_C + val_W * phi_W + val_E * phi_E + val_S * phi_S +
+              val_N * phi_N + val_B * phi_B + val_T * phi_T;
+
+  double res_double = rhs_val - Ax;
+
+  // ========================================
+  // STEP 5: Store Outputs (Float)
+  // ========================================
+  residual[idx] = (float)res_double;
+  A_C[idx] = (float)val_C;
+  A_W[idx] = (float)val_W;
+  A_E[idx] = (float)val_E;
+  A_S[idx] = (float)val_S;
+  A_N[idx] = (float)val_N;
+  A_B[idx] = (float)val_B;
+  A_T[idx] = (float)val_T;
+  B_RHS[idx] = (float)rhs_val;
+}
+
+
+
 // --------------------------------------------------------
 // Picard / Newton Step Implementation
 // --------------------------------------------------------
@@ -3472,14 +3728,29 @@ void CFDSolver::step(float dt) {
         grid.frac_w, res, spacing, rho_, mu_, grid.body_force_density_);
 
     // --- Solve U (Fused Delta Form) ---
-    // FUSED STEP: Builds J (double registers), applies IBM (double),
-    // computes TVD correction (double), applies solid masking, computes residual
-    compute_fused_residual_and_assembly_kernel<0><<<grid_dim, block>>>(
-        grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-        grid.explicit_u, grid.sdf, grid.ibm_id_map_u, grid.ibm_data_u,
-        grid.res_u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-        grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
-        grid.body_force_density_, theta, grid.u_bc_.x);
+    // Launch fluid kernel
+    int num_fluid_u = grid.num_fluid_cells_u;
+    if (num_fluid_u > 0) {
+        dim3 fluid_grid1d((num_fluid_u + 255) / 256);
+        compute_fused_fluid_kernel<0><<<fluid_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
+            grid.explicit_u, grid.res_u, 
+            grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T, grid.B_RHS,
+            grid.fluid_indices_u, num_fluid_u,
+            res, spacing, dt, rho_, mu_, grid.body_force_density_, theta);
+    }
+
+    // Launch IBM kernel
+    int num_ibm_u = grid.ibm_data_u.num_active_cells;
+    if (num_ibm_u > 0) {
+        dim3 ibm_grid1d((num_ibm_u + 255) / 256);
+        compute_fused_ibm_kernel<0><<<ibm_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
+            grid.explicit_u, grid.sdf, grid.ibm_id_map_u, grid.ibm_data_u,
+            grid.res_u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+            grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
+            grid.body_force_density_, theta, grid.u_bc_.x);
+    }
 
     if (debug_stats_enabled_) {
       CHECK_CUDA(cudaMemcpy(grid.res_u_pre, grid.res_u,
@@ -3517,12 +3788,27 @@ void CFDSolver::step(float dt) {
     }
 
     // --- Solve V (Fused Delta Form) ---
-    compute_fused_residual_and_assembly_kernel<1><<<grid_dim, block>>>(
-        grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-        grid.explicit_v, grid.sdf, grid.ibm_id_map_v, grid.ibm_data_v,
-        grid.res_v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-        grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
-        grid.body_force_density_, theta, grid.u_bc_.y);
+    int num_fluid_v = grid.num_fluid_cells_v;
+    if (num_fluid_v > 0) {
+        dim3 fluid_grid1d((num_fluid_v + 255) / 256);
+        compute_fused_fluid_kernel<1><<<fluid_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
+            grid.explicit_v, grid.res_v,
+            grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T, grid.B_RHS,
+            grid.fluid_indices_v, num_fluid_v,
+            res, spacing, dt, rho_, mu_, grid.body_force_density_, theta);
+    }
+
+    int num_ibm_v = grid.ibm_data_v.num_active_cells;
+    if (num_ibm_v > 0) {
+        dim3 ibm_grid1d((num_ibm_v + 255) / 256);
+        compute_fused_ibm_kernel<1><<<ibm_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
+            grid.explicit_v, grid.sdf, grid.ibm_id_map_v, grid.ibm_data_v,
+            grid.res_v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+            grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
+            grid.body_force_density_, theta, grid.u_bc_.y);
+    }
 
     if (debug_stats_enabled_) {
       CHECK_CUDA(cudaMemcpy(grid.res_v_pre, grid.res_v,
@@ -3560,12 +3846,27 @@ void CFDSolver::step(float dt) {
     }
 
     // --- Solve W (Fused Delta Form) ---
-    compute_fused_residual_and_assembly_kernel<2><<<grid_dim, block>>>(
-        grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-        grid.explicit_w, grid.sdf, grid.ibm_id_map_w, grid.ibm_data_w,
-        grid.res_w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-        grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
-        grid.body_force_density_, theta, grid.u_bc_.z);
+    int num_fluid_w = grid.num_fluid_cells_w;
+    if (num_fluid_w > 0) {
+        dim3 fluid_grid1d((num_fluid_w + 255) / 256);
+        compute_fused_fluid_kernel<2><<<fluid_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
+            grid.explicit_w, grid.res_w,
+            grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T, grid.B_RHS,
+            grid.fluid_indices_w, num_fluid_w,
+            res, spacing, dt, rho_, mu_, grid.body_force_density_, theta);
+    }
+    
+    int num_ibm_w = grid.ibm_data_w.num_active_cells;
+    if (num_ibm_w > 0) {
+        dim3 ibm_grid1d((num_ibm_w + 255) / 256);
+        compute_fused_ibm_kernel<2><<<ibm_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
+            grid.explicit_w, grid.sdf, grid.ibm_id_map_w, grid.ibm_data_w,
+            grid.res_w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+            grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
+            grid.body_force_density_, theta, grid.u_bc_.z);
+    }
 
     if (debug_stats_enabled_) {
       CHECK_CUDA(cudaMemcpy(grid.res_w_pre, grid.res_w,
