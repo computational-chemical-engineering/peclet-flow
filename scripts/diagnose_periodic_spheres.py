@@ -278,65 +278,66 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
         pnm_backend.float3(dx, dx, dx)
     )
     solver.initialize(sdf_data)
-    solver.set_debug_stats(True)
+    solver.set_debug_stats(False)
 
     # STOKES LIMIT: very small rho
-    rho = 1e-1  # Very small for Stokes limit
+    rho = 0.0  # Very small for Stokes limit
     mu = 1.0
-    f_mag = 1.0e-2
+    f_mag = 1.0
 
     solver.set_rho(rho)
     solver.set_mu(mu)
     solver.set_body_force(pnm_backend.float3(f_mag, 0, 0))
 
     # High accuracy settings
-    solver.set_pressure_solver_params(iter=5000)
-    solver.set_velocity_solver_params(iter=1000)
+    solver.set_pressure_solver_params(iter=50)
+    solver.set_velocity_solver_params(iter=2)
     solver.set_diffusion_theta(1.0)
-    solver.set_outer_iterations(8)
-    solver.set_outer_tolerance(1e-14)
+    solver.set_outer_iterations(800)
+    solver.set_outer_tolerance(0.0)
 
     print(f"  rho = {rho} (Stokes limit)")
     print(f"  mu = {mu}")
     print(f"  f_mag = {f_mag}")
     print(f"  Sphere radius R = {R:.4f}")
 
-    debug_cell = (18, 16, 10)
-    print(f"  Debug cell (i,j,k) = {debug_cell}")
 
-    solver.set_debug_cell(pnm_backend.int3(*debug_cell))
+#    debug_cell = (18, 16, 10)
+#    print(f"  Debug cell (i,j,k) = {debug_cell}")
 
-    sdf_u_r = sample_sdf_interp_local(sdf_3d, debug_cell[0] + 0.5,
-                                      debug_cell[1], debug_cell[2])
-    sdf_u_l = sample_sdf_interp_local(sdf_3d, debug_cell[0] - 0.5,
-                                      debug_cell[1], debug_cell[2])
-    sdf_v_n = sample_sdf_interp_local(sdf_3d, debug_cell[0], debug_cell[1] + 0.5,
-                                      debug_cell[2])
-    sdf_v_s = sample_sdf_interp_local(sdf_3d, debug_cell[0], debug_cell[1] - 0.5,
-                                      debug_cell[2])
-    sdf_w_t = sample_sdf_interp_local(sdf_3d, debug_cell[0], debug_cell[1],
-                                      debug_cell[2] + 0.5)
-    sdf_w_b = sample_sdf_interp_local(sdf_3d, debug_cell[0], debug_cell[1],
-                                      debug_cell[2] - 0.5)
-    all_faces_solid = (
-        (sdf_u_r <= 0.0)
-        and (sdf_u_l <= 0.0)
-        and (sdf_v_n <= 0.0)
-        and (sdf_v_s <= 0.0)
-        and (sdf_w_t <= 0.0)
-        and (sdf_w_b <= 0.0)
-    )
-    print(
-        "  Debug cell face SDFs: "
-        f"u_r={sdf_u_r:.6e} u_l={sdf_u_l:.6e} "
-        f"v_n={sdf_v_n:.6e} v_s={sdf_v_s:.6e} "
-        f"w_t={sdf_w_t:.6e} w_b={sdf_w_b:.6e} "
-        f"(all_faces_solid={all_faces_solid})"
-    )
+#    solver.set_debug_cell(pnm_backend.int3(*debug_cell))
+
+#    sdf_u_r = sample_sdf_interp_local(sdf_3d, debug_cell[0] + 0.5,
+#                                      debug_cell[1], debug_cell[2])
+#    sdf_u_l = sample_sdf_interp_local(sdf_3d, debug_cell[0] - 0.5,
+#                                      debug_cell[1], debug_cell[2])
+#    sdf_v_n = sample_sdf_interp_local(sdf_3d, debug_cell[0], debug_cell[1] + 0.5,
+#                                      debug_cell[2])
+#    sdf_v_s = sample_sdf_interp_local(sdf_3d, debug_cell[0], debug_cell[1] - 0.5,
+#                                      debug_cell[2])
+#    sdf_w_t = sample_sdf_interp_local(sdf_3d, debug_cell[0], debug_cell[1],
+#                                      debug_cell[2] + 0.5)
+#    sdf_w_b = sample_sdf_interp_local(sdf_3d, debug_cell[0], debug_cell[1],
+#                                      debug_cell[2] - 0.5)
+#    all_faces_solid = (
+#        (sdf_u_r <= 0.0)
+#        and (sdf_u_l <= 0.0)
+#        and (sdf_v_n <= 0.0)
+#        and (sdf_v_s <= 0.0)
+#        and (sdf_w_t <= 0.0)
+#        and (sdf_w_b <= 0.0)
+#    )
+#    print(
+#        "  Debug cell face SDFs: "
+#        f"u_r={sdf_u_r:.6e} u_l={sdf_u_l:.6e} "
+#        f"v_n={sdf_v_n:.6e} v_s={sdf_v_s:.6e} "
+#        f"w_t={sdf_w_t:.6e} w_b={sdf_w_b:.6e} "
+#        f"(all_faces_solid={all_faces_solid})"
+#    )
 
     # Time stepping
-    dt = 10.0  # Large dt for steady state
-    max_steps = 20
+    dt = 1.0  # Large dt for steady state
+    max_steps = 1000
 
     print(f"  dt = {dt}, max_steps = {max_steps}")
     print()
@@ -349,39 +350,39 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
     print(f"{'Step':<8} {'dU_max':<15} {'NS_res_max':<15} {'Div_max':<15} {'U_mean':<15}")
     print("-" * 75)
 
-    debug_prev_div = 0.0
-    dbg_len = 22
-    dbg_div = 0
-    dbg_du_dx = 1
-    dbg_dv_dy = 2
-    dbg_dw_dz = 3
-    dbg_u_r = 4
-    dbg_u_l = 5
-    dbg_v_n = 6
-    dbg_v_s = 7
-    dbg_w_t = 8
-    dbg_w_b = 9
-    dbg_frac_u_r = 10
-    dbg_frac_u_l = 11
-    dbg_frac_v_n = 12
-    dbg_frac_v_s = 13
-    dbg_frac_w_t = 14
-    dbg_frac_w_b = 15
-    dbg_u0 = 44
-    dbg_v0 = 45
-    dbg_w0 = 46
-    dbg_u1 = 47
-    dbg_v1 = 48
-    dbg_w1 = 49
-    dbg_u2 = 50
-    dbg_v2 = 51
-    dbg_w2 = 52
-    dbg_u3 = 53
-    dbg_v3 = 54
-    dbg_w3 = 55
-    dbg_u4 = 56
-    dbg_v4 = 57
-    dbg_w4 = 58
+    # debug_prev_div = 0.0
+    # dbg_len = 22
+    # dbg_div = 0
+    # dbg_du_dx = 1
+    # dbg_dv_dy = 2
+    # dbg_dw_dz = 3
+    # dbg_u_r = 4
+    # dbg_u_l = 5
+    # dbg_v_n = 6
+    # dbg_v_s = 7
+    # dbg_w_t = 8
+    # dbg_w_b = 9
+    # dbg_frac_u_r = 10
+    # dbg_frac_u_l = 11
+    # dbg_frac_v_n = 12
+    # dbg_frac_v_s = 13
+    # dbg_frac_w_t = 14
+    # dbg_frac_w_b = 15
+    # dbg_u0 = 44
+    # dbg_v0 = 45
+    # dbg_w0 = 46
+    # dbg_u1 = 47
+    # dbg_v1 = 48
+    # dbg_w1 = 49
+    # dbg_u2 = 50
+    # dbg_v2 = 51
+    # dbg_w2 = 52
+    # dbg_u3 = 53
+    # dbg_v3 = 54
+    # dbg_w3 = 55
+    # dbg_u4 = 56
+    # dbg_v4 = 57
+    # dbg_w4 = 58
 
     for step in range(max_steps):
         solver.step(dt)
@@ -409,61 +410,61 @@ def run_stokes_diagnostic(phi_target=0.20, res_n=64):
             div_after = stats[10]
 
             print(f"{step:<8} {du_max:<15.6e} {res_max:<15.6e} {div_max:<15.6e} {u_mean:<15.6e}")
-            print(f"         NR_res_pre={res_before:.6e} NR_res_post={res_after:.6e} "
-                  f"du_max={corr_max:.6e} div_pre={div_before:.6e} div_post={div_after:.6e}")
+            # print(f"         NR_res_pre={res_before:.6e} NR_res_post={res_after:.6e} "
+            #       f"du_max={corr_max:.6e} div_pre={div_before:.6e} div_post={div_after:.6e}")
 
-            debug_fields = solver.get_debug_fields()
-            div_pre = np.array(debug_fields[6]).reshape((res_n, res_n, res_n), order="F")
-            div_post = np.array(debug_fields[7]).reshape((res_n, res_n, res_n), order="F")
-            dbg_div_pre = div_pre[debug_cell]
-            dbg_div_post = div_post[debug_cell]
-            dbg_info = solver.get_debug_cell_info()
-            dbg_pre = dbg_info[:dbg_len]
-            dbg_post = dbg_info[dbg_len:]
-            print(
-                "         dbg_cell div_prev={:.6e} div_pre={:.6e} "
-                "div_post={:.6e} (gpu_pre={:.6e} gpu_post={:.6e})".format(
-                    debug_prev_div, dbg_div_pre, dbg_div_post,
-                    dbg_pre[dbg_div], dbg_post[dbg_div]
-                )
-            )
-            print(
-                "         dbg_cell pre du_dx={:.6e} dv_dy={:.6e} dw_dz={:.6e}".format(
-                    dbg_pre[dbg_du_dx], dbg_pre[dbg_dv_dy], dbg_pre[dbg_dw_dz]
-                )
-            )
-            print(
-                "         dbg_cell pre u_r={:.6e} u_l={:.6e} v_n={:.6e} v_s={:.6e} "
-                "w_t={:.6e} w_b={:.6e}".format(
-                    dbg_pre[dbg_u_r], dbg_pre[dbg_u_l], dbg_pre[dbg_v_n],
-                    dbg_pre[dbg_v_s], dbg_pre[dbg_w_t], dbg_pre[dbg_w_b]
-                )
-            )
-            print(
-                "         dbg_cell pre frac u_r={:.6e} u_l={:.6e} v_n={:.6e} v_s={:.6e} "
-                "w_t={:.6e} w_b={:.6e}".format(
-                    dbg_pre[dbg_frac_u_r], dbg_pre[dbg_frac_u_l],
-                    dbg_pre[dbg_frac_v_n], dbg_pre[dbg_frac_v_s],
-                    dbg_pre[dbg_frac_w_t], dbg_pre[dbg_frac_w_b]
-                )
-            )
-            print(
-                "         dbg_cell post du_dx={:.6e} dv_dy={:.6e} dw_dz={:.6e}".format(
-                    dbg_post[dbg_du_dx], dbg_post[dbg_dv_dy], dbg_post[dbg_dw_dz]
-                )
-            )
-            print(
-                "         dbg_cell u/v/w pre={:.6e}/{:.6e}/{:.6e} "
-                "after_u={:.6e}/{:.6e}/{:.6e} after_v={:.6e}/{:.6e}/{:.6e} "
-                "after_w={:.6e}/{:.6e}/{:.6e} post_proj={:.6e}/{:.6e}/{:.6e}".format(
-                    dbg_info[dbg_u0], dbg_info[dbg_v0], dbg_info[dbg_w0],
-                    dbg_info[dbg_u1], dbg_info[dbg_v1], dbg_info[dbg_w1],
-                    dbg_info[dbg_u2], dbg_info[dbg_v2], dbg_info[dbg_w2],
-                    dbg_info[dbg_u3], dbg_info[dbg_v3], dbg_info[dbg_w3],
-                    dbg_info[dbg_u4], dbg_info[dbg_v4], dbg_info[dbg_w4],
-                )
-            )
-            debug_prev_div = dbg_div_post
+            # debug_fields = solver.get_debug_fields()
+            # div_pre = np.array(debug_fields[6]).reshape((res_n, res_n, res_n), order="F")
+            # div_post = np.array(debug_fields[7]).reshape((res_n, res_n, res_n), order="F")
+            # dbg_div_pre = div_pre[debug_cell]
+            # dbg_div_post = div_post[debug_cell]
+            # dbg_info = solver.get_debug_cell_info()
+            # dbg_pre = dbg_info[:dbg_len]
+            # dbg_post = dbg_info[dbg_len:]
+            # print(
+            #     "         dbg_cell div_prev={:.6e} div_pre={:.6e} "
+            #     "div_post={:.6e} (gpu_pre={:.6e} gpu_post={:.6e})".format(
+            #         debug_prev_div, dbg_div_pre, dbg_div_post,
+            #         dbg_pre[dbg_div], dbg_post[dbg_div]
+            #     )
+            # )
+            # print(
+            #     "         dbg_cell pre du_dx={:.6e} dv_dy={:.6e} dw_dz={:.6e}".format(
+            #         dbg_pre[dbg_du_dx], dbg_pre[dbg_dv_dy], dbg_pre[dbg_dw_dz]
+            #     )
+            # )
+            # print(
+            #     "         dbg_cell pre u_r={:.6e} u_l={:.6e} v_n={:.6e} v_s={:.6e} "
+            #     "w_t={:.6e} w_b={:.6e}".format(
+            #         dbg_pre[dbg_u_r], dbg_pre[dbg_u_l], dbg_pre[dbg_v_n],
+            #         dbg_pre[dbg_v_s], dbg_pre[dbg_w_t], dbg_pre[dbg_w_b]
+            #     )
+            # )
+            # print(
+            #     "         dbg_cell pre frac u_r={:.6e} u_l={:.6e} v_n={:.6e} v_s={:.6e} "
+            #     "w_t={:.6e} w_b={:.6e}".format(
+            #         dbg_pre[dbg_frac_u_r], dbg_pre[dbg_frac_u_l],
+            #         dbg_pre[dbg_frac_v_n], dbg_pre[dbg_frac_v_s],
+            #         dbg_pre[dbg_frac_w_t], dbg_pre[dbg_frac_w_b]
+            #     )
+            # )
+            # print(
+            #     "         dbg_cell post du_dx={:.6e} dv_dy={:.6e} dw_dz={:.6e}".format(
+            #         dbg_post[dbg_du_dx], dbg_post[dbg_dv_dy], dbg_post[dbg_dw_dz]
+            #     )
+            # )
+            # print(
+            #     "         dbg_cell u/v/w pre={:.6e}/{:.6e}/{:.6e} "
+            #     "after_u={:.6e}/{:.6e}/{:.6e} after_v={:.6e}/{:.6e}/{:.6e} "
+            #     "after_w={:.6e}/{:.6e}/{:.6e} post_proj={:.6e}/{:.6e}/{:.6e}".format(
+            #         dbg_info[dbg_u0], dbg_info[dbg_v0], dbg_info[dbg_w0],
+            #         dbg_info[dbg_u1], dbg_info[dbg_v1], dbg_info[dbg_w1],
+            #         dbg_info[dbg_u2], dbg_info[dbg_v2], dbg_info[dbg_w2],
+            #         dbg_info[dbg_u3], dbg_info[dbg_v3], dbg_info[dbg_w3],
+            #         dbg_info[dbg_u4], dbg_info[dbg_v4], dbg_info[dbg_w4],
+            #     )
+            # )
+            # debug_prev_div = dbg_div_post
 
         u_prev = u.copy()
         v_prev = v.copy()
@@ -690,7 +691,7 @@ def main():
     print("=" * 70)
 
     # Run at phi=0.20 with resolution 64
-    result = run_stokes_diagnostic(phi_target=0.40, res_n=64)
+    result = run_stokes_diagnostic(phi_target=0.30, res_n=32)
 
     print("\n" + "=" * 70)
     print("SUMMARY")

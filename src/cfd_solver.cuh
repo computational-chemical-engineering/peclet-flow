@@ -112,8 +112,8 @@ struct MacGrid {
   float *res_u_pre, *res_v_pre, *res_w_pre;    // Residuals before correction
   float *res_u_post, *res_v_post, *res_w_post; // Residuals after correction
   double *explicit_u, *explicit_v,
-      *explicit_w;           // Explicit terms (stored separately) - Double for precision
-  float *phi;                // Pressure correction
+      *explicit_w; // Explicit terms (stored separately) - Double for precision
+  float *phi;      // Pressure correction
   float *du, *dv, *dw;       // Newton updates
   float *div_pre, *div_post; // Divergence before/after projection
 
@@ -147,7 +147,7 @@ public:
   void set_ibm_scheme(int scheme);
 
   // Set Diffusion Scheme (0.5 = Crank-Nicolson, 1.0 = Fully Implicit)
-  void set_diffusion_theta(float theta);
+  void set_theta_(float theta);
 
   // Getters for visualization (copy to host)
   std::vector<double> get_u() const;
@@ -169,13 +169,10 @@ public:
 private:
   MacGrid grid;
   size_t num_elements;
-  float diffusion_theta;
+  float theta_;
   int ibm_scheme_ = 0; // 0: Point-Value (Default), 1: Cell-Average
-  float current_dt_;
-  float target_cfl_;
   float rho_;
   float mu_;
-  float nu_;
   int p_max_iter_;
   int v_max_iter_;
   int outer_iterations_ = 4;

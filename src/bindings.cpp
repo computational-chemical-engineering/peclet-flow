@@ -73,11 +73,7 @@ PYBIND11_MODULE(pnm_backend, m) {
       .def(py::init<int3, float3>(), py::arg("res"), py::arg("spacing"))
       .def("initialize", &CFDSolver::initialize, py::arg("sdf_data"))
       .def("set_body_force", &CFDSolver::set_body_force, py::arg("force"))
-      .def("set_diffusion_theta", &CFDSolver::set_diffusion_theta,
-           py::arg("theta"))
-      .def("set_cfl", &CFDSolver::set_cfl, py::arg("cfl"))
-      .def("get_cfl", &CFDSolver::get_cfl)
-      .def("get_dt", &CFDSolver::get_dt)
+      .def("set_theta_", &CFDSolver::set_theta_, py::arg("theta"))
       .def("set_rho", &CFDSolver::set_rho, py::arg("rho"))
       .def("set_mu", &CFDSolver::set_mu, py::arg("mu"))
       .def("set_ibm_scheme", &CFDSolver::set_ibm_scheme, py::arg("scheme"))
@@ -98,10 +94,9 @@ PYBIND11_MODULE(pnm_backend, m) {
       .def("get_p", &CFDSolver::get_p)
       .def("get_momentum_residual_max", &CFDSolver::get_momentum_residual_max,
            py::arg("fluid_only") = false)
-      .def("get_divergence_max", &CFDSolver::get_divergence_max,
-           py::arg("dt"), py::arg("fluid_only") = false)
-      .def("set_debug_stats", &CFDSolver::set_debug_stats,
-           py::arg("enabled"))
+      .def("get_divergence_max", &CFDSolver::get_divergence_max, py::arg("dt"),
+           py::arg("fluid_only") = false)
+      .def("set_debug_stats", &CFDSolver::set_debug_stats, py::arg("enabled"))
       .def("get_debug_stats", &CFDSolver::get_debug_stats)
       .def("get_debug_fields", &CFDSolver::get_debug_fields)
       .def("set_debug_cell", &CFDSolver::set_debug_cell, py::arg("cell"))

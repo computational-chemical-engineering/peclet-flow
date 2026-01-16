@@ -56,7 +56,7 @@ __global__ void solve_rbgs_stencil_kernel(
     const float *__restrict__ A_W, const float *__restrict__ A_E,
     const float *__restrict__ A_S, const float *__restrict__ A_N,
     const float *__restrict__ A_B, const float *__restrict__ A_T,
-    const float *__restrict__ B_RHS, int3 res, bool is_red, int pin_idx);
+    const float *__restrict__ B_RHS, int3 res, bool is_red);
 
 __global__ void compute_divergence_kernel(
     const double *__restrict__ u, const double *__restrict__ v,
@@ -69,8 +69,7 @@ __global__ void project_velocity_kernel(
     double *__restrict__ u, double *__restrict__ v, double *__restrict__ w,
     const float *__restrict__ p, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
-    const float *__restrict__ sdf, int3 res, float3 spacing, float dt,
-    float rho);
+    const float *__restrict__ sdf, int3 res, float3 spacing);
 
 // Refactored Residual Kernel using Stencil Arrays
 // R = B_RHS - (A_C*u + A_W*u_W + ... )
@@ -885,10 +884,10 @@ __global__ void compute_pressure_stencil_kernel(
     float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
     float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
     float *__restrict__ A_T, float *__restrict__ B_RHS,
-    const float *__restrict__ rhs_input, const float *__restrict__ frac_u,
-    const float *__restrict__ frac_v, const float *__restrict__ frac_w,
-    const float *__restrict__ sdf, const double *__restrict__ p_old, int3 res,
-    float3 spacing, float rho, float dt) {
+    const float *__restrict__ frac_u, const float *__restrict__ frac_v,
+    const float *__restrict__ frac_w, const float *__restrict__ sdf,
+    const double *__restrict__ u, const double *__restrict__ v,
+    const double *__restrict__ w, int3 res, float3 spacing) {
 
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -897,9 +896,6 @@ __global__ void compute_pressure_stencil_kernel(
   if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
     return;
   int idx = get_idx(idx_x, idx_y, idx_z, res);
-
-  // Initialize RHS
-  B_RHS[idx] = rhs_input[idx]; // For Pressure, this is Divergence/dt
 
   float inv_dx2 = 1.0f / (spacing.x * spacing.x);
   float inv_dy2 = 1.0f / (spacing.y * spacing.y);
@@ -921,25 +917,50 @@ __global__ void compute_pressure_stencil_kernel(
   float sdf_w_t = sample_sdf_interp_local(idx_x, idx_y, idx_z + 0.5f, sdf, res);
   float sdf_w_b = sample_sdf_interp_local(idx_x, idx_y, idx_z - 0.5f, sdf, res);
 
+  /*
   bool face_u_r = sdf_u_r > 0.0f;
   bool face_u_l = sdf_u_l > 0.0f;
   bool face_v_n = sdf_v_n > 0.0f;
   bool face_v_s = sdf_v_s > 0.0f;
   bool face_w_t = sdf_w_t > 0.0f;
   bool face_w_b = sdf_w_b > 0.0f;
+  */
 
+  float frac_u_r = (sdf_u_r > 0.0f) ? frac_u[idx_xp] : 0.0f;
+  float frac_u_l = (sdf_u_l > 0.0f) ? frac_u[idx] : 0.0f;
+  float frac_v_n = (sdf_v_n > 0.0f) ? frac_v[idx_yp] : 0.0f;
+  float frac_v_s = (sdf_v_s > 0.0f) ? frac_v[idx] : 0.0f;
+  float frac_w_t = (sdf_w_t > 0.0f) ? frac_w[idx_zp] : 0.0f;
+  float frac_w_b = (sdf_w_b > 0.0f) ? frac_w[idx] : 0.0f;
+
+  /*
   int fluid_faces = (int)face_u_r + (int)face_u_l + (int)face_v_n +
                     (int)face_v_s + (int)face_w_t + (int)face_w_b;
-
+  */
   // Surface Fractions for Weighted Laplacian
   // A_E corresponds to face at x=i+1 (frac_u[i+1]) if fluid
   // A_W corresponds to face at x=i (frac_u[i]) if fluid
-  float ax_p = face_u_r ? frac_u[idx_xp] * inv_dx2 : 0.0f;
-  float ax_m = face_u_l ? frac_u[idx] * inv_dx2 : 0.0f;
-  float ay_p = face_v_n ? frac_v[idx_yp] * inv_dy2 : 0.0f;
-  float ay_m = face_v_s ? frac_v[idx] * inv_dy2 : 0.0f;
-  float az_p = face_w_t ? frac_w[idx_zp] * inv_dz2 : 0.0f;
-  float az_m = face_w_b ? frac_w[idx] * inv_dz2 : 0.0f;
+  /*
+    float ax_p = face_u_r ? frac_u[idx_xp] * inv_dx2 : 0.0f;
+    float ax_m = face_u_l ? frac_u[idx] * inv_dx2 : 0.0f;
+    float ay_p = face_v_n ? frac_v[idx_yp] * inv_dy2 : 0.0f;
+    float ay_m = face_v_s ? frac_v[idx] * inv_dy2 : 0.0f;
+    float az_p = face_w_t ? frac_w[idx_zp] * inv_dz2 : 0.0f;
+    float az_m = face_w_b ? frac_w[idx] * inv_dz2 : 0.0f;
+  */
+
+  float ax_p = frac_u_r * inv_dx2;
+  float ax_m = frac_u_l * inv_dx2;
+  float ay_p = frac_v_n * inv_dy2;
+  float ay_m = frac_v_s * inv_dy2;
+  float az_p = frac_w_t * inv_dz2;
+  float az_m = frac_w_b * inv_dz2;
+
+  double du_dx = (u[idx_xp] * frac_u_r - u[idx] * frac_u_l) / spacing.x;
+  double dv_dy = (v[idx_yp] * frac_v_n - v[idx] * frac_v_s) / spacing.y;
+  double dw_dz = (w[idx_zp] * frac_w_t - w[idx] * frac_w_b) / spacing.z;
+
+  double div = du_dx + dv_dy + dw_dz;
 
   // If all faces are solid, decouple from fluid.
   // We want ∇²p = 0 in solid. This requires solving a Laplace equation
@@ -948,19 +969,20 @@ __global__ void compute_pressure_stencil_kernel(
   // the solid interior (harmonic with zero BC from decoupled fluid).
   // The pressure in the solid remains unchanged, which is acceptable since
   // the solid pressure doesn't affect the fluid dynamics.
-  if (fluid_faces == 0) {
-    // Solid cell: decouple from pressure solve.
-    A_E[idx] = 0.0f;
-    A_W[idx] = 0.0f;
-    A_N[idx] = 0.0f;
-    A_S[idx] = 0.0f;
-    A_T[idx] = 0.0f;
-    A_B[idx] = 0.0f;
-    A_C[idx] = 1.0f;
-    B_RHS[idx] = 0.0f;
-    return;
-  }
-
+  /*
+    if (fluid_faces == 0) {
+      // Solid cell: decouple from pressure solve.
+      A_E[idx] = 0.0f;
+      A_W[idx] = 0.0f;
+      A_N[idx] = 0.0f;
+      A_S[idx] = 0.0f;
+      A_T[idx] = 0.0f;
+      A_B[idx] = 0.0f;
+      A_C[idx] = 0.0f;
+      B_RHS[idx] = 0.0f;
+      return;
+    }
+  */
   // Populate Stencil Arrays (Neighbor Coeffs are typically negative in
   // -Laplacian form) But RB-GS solver usually solves: A_C*u_C + Sum(A_nb*u_nb)
   // = B. Standard: -Lap u = f  =>  (Sum 1/h^2)*u_c - Sum (1/h^2)*u_nb = f. So
@@ -975,6 +997,8 @@ __global__ void compute_pressure_stencil_kernel(
 
   // A_C is sum of absolute values of neighbors (Diagonal Dominance)
   A_C[idx] = ax_p + ax_m + ay_p + ay_m + az_p + az_m;
+  // Initialize RHS
+  B_RHS[idx] = (float)(-div);
 }
 
 // --------------------------------------------------------
@@ -1484,7 +1508,6 @@ __global__ void compute_diffusion_only_stencil_kernel(
   B_RHS[idx] = 0.0f;
 }
 
-
 // --------------------------------------------------------
 // Generic RB-GS Stencil Solver
 // --------------------------------------------------------
@@ -1494,7 +1517,7 @@ __global__ void solve_rbgs_stencil_kernel(
     const float *__restrict__ A_W, const float *__restrict__ A_E,
     const float *__restrict__ A_S, const float *__restrict__ A_N,
     const float *__restrict__ A_B, const float *__restrict__ A_T,
-    const float *__restrict__ B_RHS, int3 res, bool is_red, int pin_idx) {
+    const float *__restrict__ B_RHS, int3 res, bool is_red) {
 
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1508,7 +1531,6 @@ __global__ void solve_rbgs_stencil_kernel(
     return;
 
   int idx = get_idx(idx_x, idx_y, idx_z, res);
-  (void)pin_idx;
 
   // Load Coefficients
   float ac = A_C[idx];
@@ -1540,8 +1562,7 @@ __global__ void project_velocity_kernel(
     double *__restrict__ u, double *__restrict__ v, double *__restrict__ w,
     const float *__restrict__ p, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
-    const float *__restrict__ sdf, int3 res, float3 spacing, float dt,
-    float rho) {
+    const float *__restrict__ sdf, int3 res, float3 spacing) {
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
   int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -1604,8 +1625,9 @@ __global__ void project_velocity_kernel(
 __global__ void update_pressure_from_phi_kernel(
     double *__restrict__ p, const float *__restrict__ phi,
     const double *__restrict__ p_old, const double *__restrict__ u,
-    const double *__restrict__ v, const double *__restrict__ w, int3 res,
-    float3 spacing, float dt, float theta, float rho, float mu) {
+    const double *__restrict__ v, const double *__restrict__ w,
+    const float *__restrict__ rhs_phi, int3 res, float3 spacing, float dt,
+    float theta, float rho, float mu) {
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
   int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -1614,18 +1636,14 @@ __global__ void update_pressure_from_phi_kernel(
     return;
   int idx = get_idx(idx_x, idx_y, idx_z, res);
 
-  // Load phi values
-  float phi_C = phi[idx];
-
-
   // Simple pressure update: δp = (ρ/Δt)*φ
   // The convection and diffusion terms in Eq. 14 can cause instability
   // when the Poisson equation doesn't account for them consistently.
   // The basic projection uses just the temporal term.
-  double delta_p = ((double)rho / (double)dt) * (double)phi_C;
+  double delta_p = (double)((rho / dt) * phi[idx] + mu * rhs_phi[idx]);
 
   // Update pressure: p = p_old + δp
-  p[idx] = p_old[idx] + delta_p;
+  p[idx] = p[idx] + delta_p;
 }
 
 __global__ void shift_pressure_kernel(double *__restrict__ p, int num_elements,
@@ -1686,9 +1704,9 @@ __global__ void extrapolate_phi_neumann_kernel(float *__restrict__ phi,
 }
 
 CFDSolver::CFDSolver(int3 res, float3 spacing)
-    : num_elements(res.x * res.y * res.z), rho_(1.0f), mu_(1.0f), nu_(1.0f),
-      pin_idx(0), v_max_iter_(5), p_max_iter_(50), diffusion_theta(0.5f),
-      target_cfl_(0.5f), current_dt_(0.0f) {
+    : num_elements(res.x * res.y * res.z), rho_(1.0f), mu_(1.0f), pin_idx(0),
+      v_max_iter_(5), p_max_iter_(50), theta_(1.0f), outer_iterations_(2),
+      outer_tol_(-1.0f) {
   grid.res = res;
   grid.spacing = spacing;
   grid.num_elements = num_elements; // Fix: Initialize grid member
@@ -1875,22 +1893,6 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
   grid.num_ibm_cells_u = 0;
   grid.num_ibm_cells_v = 0;
   grid.num_ibm_cells_w = 0;
-
-  // Solver Parameters Defaults
-  rho_ = 1.0f;
-  mu_ = 0.0f;
-  target_cfl_ = 0.5f;
-  current_dt_ = 0.0f;
-  v_max_iter_ = 5;
-  p_max_iter_ = 50;
-  diffusion_theta = 0.5f;
-
-  diffusion_theta = 0.5f; // Default Crank-Nicolson
-  current_dt_ = 0.0f;
-  target_cfl_ = 0.0f;
-  rho_ = 1.0f;
-  mu_ = 0.01f;
-  nu_ = mu_ / rho_;
   // pin_idx is set in initialize() using the max SDF cell.
   // For Neumann BC problems, pressure is only defined up to a constant.
   pin_idx = 0;
@@ -1981,30 +1983,9 @@ CFDSolver::~CFDSolver() {
   CHECK_CUDA(cudaFree(grid.fluid_indices_w));
 }
 
-void CFDSolver::set_diffusion_theta(float theta) { diffusion_theta = theta; }
-
-void CFDSolver::set_cfl(float cfl) { target_cfl_ = cfl; }
-float CFDSolver::get_cfl() const { return target_cfl_; }
-float CFDSolver::get_dt() const { return current_dt_; }
-
-void CFDSolver::set_rho(float rho) {
-  rho_ = rho;
-  if (rho_ > 0.0f) {
-    nu_ = mu_ / rho_;
-  } else {
-    // Avoid division by zero, though rho should be physical
-    nu_ = 0.0f;
-  }
-}
-
-void CFDSolver::set_mu(float mu) {
-  mu_ = mu;
-  if (rho_ > 0.0f) {
-    nu_ = mu_ / rho_;
-  } else {
-    nu_ = 0.0f; // Undefined if rho=0, but safe.
-  }
-}
+void CFDSolver::set_theta_(float theta) { theta_ = theta; }
+void CFDSolver::set_rho(float rho) { rho_ = rho; }
+void CFDSolver::set_mu(float mu) { mu_ = mu; }
 
 void CFDSolver::set_pressure_solver_params(int iter) { p_max_iter_ = iter; }
 
@@ -2155,7 +2136,6 @@ static float sample_sdf_interp_host(float x, float y, float z, const float *sdf,
   return c0 * (1.0f - wz) + c1 * wz;
 }
 
-
 void CFDSolver::initialize(const SDFData &sdf_data) {
   if (sdf_data.size() != num_elements) {
     std::cerr << "SDF size mismatch!" << std::endl;
@@ -2185,32 +2165,33 @@ void CFDSolver::initialize(const SDFData &sdf_data) {
 //    IBM_Data ibm_data, int *ibm_id_map, const float *__restrict__ sdf, int3
 //    res, float3 spacing, int *counter, float3 offset, int bc_type);
 
-
 // Functor for Thrust to identify pure fluid cells
 struct is_fluid_functor {
-    const float* sdf;
-    const int* ibm_id_map;
-    float3 offset;
-    int3 res;
+  const float *sdf;
+  const int *ibm_id_map;
+  float3 offset;
+  int3 res;
 
-    is_fluid_functor(const float* _sdf, const int* _ibm_id_map, float3 _offset, int3 _res)
-        : sdf(_sdf), ibm_id_map(_ibm_id_map), offset(_offset), res(_res) {}
+  is_fluid_functor(const float *_sdf, const int *_ibm_id_map, float3 _offset,
+                   int3 _res)
+      : sdf(_sdf), ibm_id_map(_ibm_id_map), offset(_offset), res(_res) {}
 
-    __device__
-    bool operator()(int idx) const {
-        // Condition 1: Not an IBM cell
-        if (ibm_id_map[idx] != -1) {
-            return false;
-        }
-
-        // Condition 2: Not a solid cell (sample SDF at the component-specific location)
-        int z = idx / (res.x * res.y);
-        int y = (idx % (res.x * res.y)) / res.x;
-        int x = idx % res.x;
-
-        float sdf_val = sample_sdf_interp(x + offset.x, y + offset.y, z + offset.z, sdf, res);
-        return sdf_val > 0.0f;
+  __device__ bool operator()(int idx) const {
+    // Condition 1: Not an IBM cell
+    if (ibm_id_map[idx] != -1) {
+      return false;
     }
+
+    // Condition 2: Not a solid cell (sample SDF at the component-specific
+    // location)
+    int z = idx / (res.x * res.y);
+    int y = (idx % (res.x * res.y)) / res.x;
+    int x = idx % res.x;
+
+    float sdf_val =
+        sample_sdf_interp(x + offset.x, y + offset.y, z + offset.z, sdf, res);
+    return sdf_val > 0.0f;
+  }
 };
 
 void CFDSolver::update_ibm_geometry() {
@@ -2268,35 +2249,45 @@ void CFDSolver::update_ibm_geometry() {
   // 4. W (Face Z: 0.0 z) - Dirichlet (0)
   grid.num_ibm_cells_w = run_geo_pass(grid.ibm_data_w, grid.ibm_id_map_w,
                                       make_float3(0.0f, 0.0f, -0.5f), 0);
-    
+
   CHECK_CUDA(cudaFree(d_counter));
 
   // 5. Classify pure fluid cells
-  auto classify_fluid = [&](int* fluid_indices, int& num_fluid_cells, int* ibm_id_map, float3 offset) {
-      thrust::counting_iterator<int> first(0);
-      thrust::counting_iterator<int> last = first + num_elements;
-      is_fluid_functor pred(grid.sdf, ibm_id_map, offset, grid.res);
-      
-      // Use copy_if to get the fluid indices
-      try {
-          thrust::device_ptr<int> fluid_indices_ptr(fluid_indices);
-          auto end_it = thrust::copy_if(thrust::device, first, last, fluid_indices_ptr, pred);
-          num_fluid_cells = end_it - fluid_indices_ptr;
-      } catch (const std::exception& e) {
-          std::cerr << "Thrust error during fluid cell classification: " << e.what() << std::endl;
-          exit(1);
-      }
+  auto classify_fluid = [&](int *fluid_indices, int &num_fluid_cells,
+                            int *ibm_id_map, float3 offset) {
+    thrust::counting_iterator<int> first(0);
+    thrust::counting_iterator<int> last = first + num_elements;
+    is_fluid_functor pred(grid.sdf, ibm_id_map, offset, grid.res);
+
+    // Use copy_if to get the fluid indices
+    try {
+      thrust::device_ptr<int> fluid_indices_ptr(fluid_indices);
+      auto end_it =
+          thrust::copy_if(thrust::device, first, last, fluid_indices_ptr, pred);
+      num_fluid_cells = end_it - fluid_indices_ptr;
+    } catch (const std::exception &e) {
+      std::cerr << "Thrust error during fluid cell classification: " << e.what()
+                << std::endl;
+      exit(1);
+    }
   };
 
-  classify_fluid(grid.fluid_indices_u, grid.num_fluid_cells_u, grid.ibm_id_map_u, make_float3(-0.5f, 0.0f, 0.0f));
-  classify_fluid(grid.fluid_indices_v, grid.num_fluid_cells_v, grid.ibm_id_map_v, make_float3(0.0f, -0.5f, 0.0f));
-  classify_fluid(grid.fluid_indices_w, grid.num_fluid_cells_w, grid.ibm_id_map_w, make_float3(0.0f, 0.0f, -0.5f));
+  classify_fluid(grid.fluid_indices_u, grid.num_fluid_cells_u,
+                 grid.ibm_id_map_u, make_float3(-0.5f, 0.0f, 0.0f));
+  classify_fluid(grid.fluid_indices_v, grid.num_fluid_cells_v,
+                 grid.ibm_id_map_v, make_float3(0.0f, -0.5f, 0.0f));
+  classify_fluid(grid.fluid_indices_w, grid.num_fluid_cells_w,
+                 grid.ibm_id_map_w, make_float3(0.0f, 0.0f, -0.5f));
 
   std::cout << "IBM Geometry Updated." << std::endl;
-  std::cout << "  Pressure/Center: " << grid.num_ibm_cells << " IBM cells" << std::endl;
-  std::cout << "  U-Face: " << grid.num_ibm_cells_u << " IBM cells, " << grid.num_fluid_cells_u << " fluid cells" << std::endl;
-  std::cout << "  V-Face: " << grid.num_ibm_cells_v << " IBM cells, " << grid.num_fluid_cells_v << " fluid cells" << std::endl;
-  std::cout << "  W-Face: " << grid.num_ibm_cells_w << " IBM cells, " << grid.num_fluid_cells_w << " fluid cells" << std::endl;
+  std::cout << "  Pressure/Center: " << grid.num_ibm_cells << " IBM cells"
+            << std::endl;
+  std::cout << "  U-Face: " << grid.num_ibm_cells_u << " IBM cells, "
+            << grid.num_fluid_cells_u << " fluid cells" << std::endl;
+  std::cout << "  V-Face: " << grid.num_ibm_cells_v << " IBM cells, "
+            << grid.num_fluid_cells_v << " fluid cells" << std::endl;
+  std::cout << "  W-Face: " << grid.num_ibm_cells_w << " IBM cells, "
+            << grid.num_fluid_cells_w << " fluid cells" << std::endl;
 }
 
 void CFDSolver::set_body_force(float3 force_density) {
@@ -2541,7 +2532,6 @@ __global__ void solve_diffusion_rbgs_kernel(float *__restrict__ u,
     return;
   }
 
-
   // Neighbors
   float u_xp = u[get_idx(idx_x + 1, idx_y, idx_z, res)];
   float u_xm = u[get_idx(idx_x - 1, idx_y, idx_z, res)];
@@ -2549,8 +2539,6 @@ __global__ void solve_diffusion_rbgs_kernel(float *__restrict__ u,
   float u_ym = u[get_idx(idx_x, idx_y - 1, idx_z, res)];
   float u_zp = u[get_idx(idx_x, idx_y, idx_z + 1, res)];
   float u_zm = u[get_idx(idx_x, idx_y, idx_z - 1, res)];
-
-
 
   // Eq: (1 + 2*mu*(...)) * u_c - mu/dx2(u_e+u_w) ... = rhs
   // Matrix (Diag Dominant):
@@ -2612,6 +2600,7 @@ void check_field_nan(float *d_data, int n, const char *label) {
 // Momentum Residual Kernel (QUICK + IB Diffusion)
 // --------------------------------------------------------
 // f = rho*(u - u_old)/dt + rho*Adv(u) - mu*Lap(u) + Grad(p)
+
 __global__ void compute_momentum_residual_kernel(
     const float *__restrict__ u, const float *__restrict__ u_old,
     const float *__restrict__ v, const float *__restrict__ v_old,
@@ -2934,7 +2923,6 @@ __global__ void compute_advection_correction_kernel(
 // (Removed solve_velocity_linearized_kernel and check_id_map_kernel)
 // --------------------------------------------------------
 
-
 // --------------------------------------------------------
 // FUSED IBM KERNEL
 // --------------------------------------------------------
@@ -2943,31 +2931,33 @@ __global__ void compute_fused_ibm_kernel(
     // Input State (Double)
     const double *__restrict__ u, const double *__restrict__ v,
     const double *__restrict__ w, const double *__restrict__ p,
-    const double *__restrict__ u_old, const double *__restrict__ v_old,
-    const double *__restrict__ w_old, const double *__restrict__ explicit_term,
+    double *__restrict__ explicit_term,
     // SDF for solid masking
     const float *__restrict__ sdf,
     // IBM Geometry
-    const int *__restrict__ ibm_id_map, IBM_Data ibm_data,
+
+    IBM_Data ibm_data,
     // Output: Residual (Float)
     float *__restrict__ residual,
     // Output: Jacobian (Float)
     float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
     float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
-    float *__restrict__ A_T, float *__restrict__ B_RHS,
+    float *__restrict__ A_T,
     // Parameters
     int3 res, float3 spacing, float dt, float rho, float mu, float3 body_force,
-    float theta, float u_bc_val) {
+    float theta, float u_bc_val, bool compute_explicit) {
 
-    int list_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (list_idx >= ibm_data.num_active_cells) return;
+  int list_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (list_idx >= ibm_data.num_active_cells)
+    return;
 
-    int idx = ibm_data.cell_index[list_idx];
+  int idx = ibm_data.cell_index[list_idx];
 
   // ========================================
   // SOLID FACE MASKING (Fused)
   // ========================================
-  // This should not be strictly necessary if the list generation is correct, but as a safety check.
+  // This should not be strictly necessary if the list generation is correct,
+  // but as a safety check.
   float offset_x = (COMPONENT == 0) ? -0.5f : 0.0f;
   float offset_y = (COMPONENT == 1) ? -0.5f : 0.0f;
   float offset_z = (COMPONENT == 2) ? -0.5f : 0.0f;
@@ -2977,7 +2967,7 @@ __global__ void compute_fused_ibm_kernel(
   int idx_z = idx / (res.x * res.y);
 
   float sdf_face = sample_sdf_interp(idx_x + offset_x, idx_y + offset_y,
-                                           idx_z + offset_z, sdf, res);
+                                     idx_z + offset_z, sdf, res);
   if (sdf_face <= 0.0f) {
     A_C[idx] = 1.0f;
     A_W[idx] = 0.0f;
@@ -2986,7 +2976,6 @@ __global__ void compute_fused_ibm_kernel(
     A_N[idx] = 0.0f;
     A_B[idx] = 0.0f;
     A_T[idx] = 0.0f;
-    B_RHS[idx] = 0.0f;
     residual[idx] = 0.0f;
     return;
   }
@@ -3015,13 +3004,13 @@ __global__ void compute_fused_ibm_kernel(
 
   // Diffusion coefficients
   double diff_corr = 2.0 * d_mu * (d_inv_dx2 + d_inv_dy2 + d_inv_dz2);
-  double val_C = d_rho / d_dt + d_theta * diff_corr;
-  double val_W = -d_theta * d_mu * d_inv_dx2;
-  double val_E = -d_theta * d_mu * d_inv_dx2;
-  double val_S = -d_theta * d_mu * d_inv_dy2;
-  double val_N = -d_theta * d_mu * d_inv_dy2;
-  double val_B = -d_theta * d_mu * d_inv_dz2;
-  double val_T = -d_theta * d_mu * d_inv_dz2;
+  double val_C = diff_corr;
+  double val_W = -d_mu * d_inv_dx2;
+  double val_E = -d_mu * d_inv_dx2;
+  double val_S = -d_mu * d_inv_dy2;
+  double val_N = -d_mu * d_inv_dy2;
+  double val_B = -d_mu * d_inv_dz2;
+  double val_T = -d_mu * d_inv_dz2;
 
   // Get advection velocity at this location (double precision)
   double uc = 0.0, vc = 0.0, wc = 0.0;
@@ -3061,67 +3050,67 @@ __global__ void compute_fused_ibm_kernel(
   }
 #undef AVG4_D
 
-  // FOU Upwind Advection (for Jacobian diagonal dominance)
-  double term_x = d_theta * d_rho * uc * d_inv_dx;
-  if (uc > 0.0) {
-    val_C += term_x;
-    val_W -= term_x;
-  } else {
-    val_C -= term_x;
-    val_E += term_x;
-  }
+  /*
+    // FOU Upwind Advection (for Jacobian diagonal dominance)
+    double term_x = d_rho * uc * d_inv_dx;
+    if (uc > 0.0) {
+      val_C += term_x;
+      val_W -= term_x;
+    } else {
+      val_C -= term_x;
+      val_E += term_x;
+    }
 
-  double term_y = d_theta * d_rho * vc * d_inv_dy;
-  if (vc > 0.0) {
-    val_C += term_y;
-    val_S -= term_y;
-  } else {
-    val_C -= term_y;
-    val_N += term_y;
-  }
+    double term_y = d_rho * vc * d_inv_dy;
+    if (vc > 0.0) {
+      val_C += term_y;
+      val_S -= term_y;
+    } else {
+      val_C -= term_y;
+      val_N += term_y;
+    }
 
-  double term_z = d_theta * d_rho * wc * d_inv_dz;
-  if (wc > 0.0) {
-    val_C += term_z;
-    val_B -= term_z;
-  } else {
-    val_C -= term_z;
-    val_T += term_z;
-  }
+    double term_z = d_rho * wc * d_inv_dz;
+    if (wc > 0.0) {
+      val_C += term_z;
+      val_B -= term_z;
+    } else {
+      val_C -= term_z;
+      val_T += term_z;
+    }
+  */
+
+  // Central differencing near IBM walls
+  double term_x = 0.5 * d_rho * uc * d_inv_dx;
+  val_E += term_x;
+  val_W -= term_x;
+  double term_y = 0.5 * d_rho * vc * d_inv_dy;
+  val_S -= term_y;
+  val_N += term_y;
+  double term_z = 0.5 * d_rho * wc * d_inv_dz;
+  val_B -= term_z;
+  val_T += term_z;
 
   // Build RHS: (rho/dt)*u_old + theta*force + (1-theta)*explicit
-  double val_old = 0.0;
   double force = 0.0;
   double gp_current = 0.0;
   const double *phi_field = nullptr;
 
   if (COMPONENT == 0) {
-    val_old = u_old[idx];
     force = (double)body_force.x;
     gp_current = (p[idx] - p[idx_W]) * d_inv_dx;
     phi_field = u;
   } else if (COMPONENT == 1) {
-    val_old = v_old[idx];
     force = (double)body_force.y;
     gp_current = (p[idx] - p[idx_S]) * d_inv_dy;
     phi_field = v;
   } else {
-    val_old = w_old[idx];
     force = (double)body_force.z;
     gp_current = (p[idx] - p[idx_B]) * d_inv_dz;
     phi_field = w;
   }
 
-  double rhs_val = (d_rho / d_dt) * val_old + d_theta * force;
-
-  // Add explicit terms (1-theta) * (...)
-  if (explicit_term != nullptr) {
-    rhs_val += (1.0 - d_theta) * explicit_term[idx];
-  }
-
-  // Pressure gradient term
-  rhs_val -= d_theta * gp_current;
-
+  /*
   // ========================================
   // STEP 2: TVD Advection Correction (Double Precision)
   // ========================================
@@ -3136,10 +3125,14 @@ __global__ void compute_fused_ibm_kernel(
     phi_R = phi_field[idx_E];
     phi_RR = phi_field[get_idx(idx_x + 2, idx_y, idx_z, res)];
 
-    if (COMPONENT == 0) u_face = 0.5 * (phi_field[idx] + phi_field[idx_E]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 0, make_int3(idx_x, idx_y, idx_z), res);
+    if (COMPONENT == 0)
+      u_face = 0.5 * (phi_field[idx] + phi_field[idx_E]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 0,
+                                      make_int3(idx_x, idx_y, idx_z), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 0);
     double diff_x_r = (f_tvd - f_fou) * R_ibm;
@@ -3150,10 +3143,14 @@ __global__ void compute_fused_ibm_kernel(
     phi_R = phi_field[idx];
     phi_RR = phi_field[idx_E];
 
-    if (COMPONENT == 0) u_face = 0.5 * (phi_field[idx_W] + phi_field[idx]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 0, make_int3(idx_x - 1, idx_y, idx_z), res);
+    if (COMPONENT == 0)
+      u_face = 0.5 * (phi_field[idx_W] + phi_field[idx]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 0,
+                                      make_int3(idx_x - 1, idx_y, idx_z), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 1);
     double diff_x_l = (f_tvd - f_fou) * R_ibm;
@@ -3166,10 +3163,14 @@ __global__ void compute_fused_ibm_kernel(
     phi_R = phi_field[idx_N];
     phi_RR = phi_field[get_idx(idx_x, idx_y + 2, idx_z, res)];
 
-    if (COMPONENT == 1) u_face = 0.5 * (phi_field[idx] + phi_field[idx_N]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 1, make_int3(idx_x, idx_y, idx_z), res);
+    if (COMPONENT == 1)
+      u_face = 0.5 * (phi_field[idx] + phi_field[idx_N]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 1,
+                                      make_int3(idx_x, idx_y, idx_z), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 2);
     double diff_y_t = (f_tvd - f_fou) * R_ibm;
@@ -3179,10 +3180,14 @@ __global__ void compute_fused_ibm_kernel(
     phi_R = phi_field[idx];
     phi_RR = phi_field[idx_N];
 
-    if (COMPONENT == 1) u_face = 0.5 * (phi_field[idx_S] + phi_field[idx]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 1, make_int3(idx_x, idx_y - 1, idx_z), res);
+    if (COMPONENT == 1)
+      u_face = 0.5 * (phi_field[idx_S] + phi_field[idx]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 1,
+                                      make_int3(idx_x, idx_y - 1, idx_z), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 3);
     double diff_y_b = (f_tvd - f_fou) * R_ibm;
@@ -3195,10 +3200,14 @@ __global__ void compute_fused_ibm_kernel(
     phi_R = phi_field[idx_T];
     phi_RR = phi_field[get_idx(idx_x, idx_y, idx_z + 2, res)];
 
-    if (COMPONENT == 2) u_face = 0.5 * (phi_field[idx] + phi_field[idx_T]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 2, make_int3(idx_x, idx_y, idx_z), res);
+    if (COMPONENT == 2)
+      u_face = 0.5 * (phi_field[idx] + phi_field[idx_T]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 2,
+                                      make_int3(idx_x, idx_y, idx_z), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 4);
     double diff_z_t = (f_tvd - f_fou) * R_ibm;
@@ -3208,18 +3217,21 @@ __global__ void compute_fused_ibm_kernel(
     phi_R = phi_field[idx];
     phi_RR = phi_field[idx_T];
 
-    if (COMPONENT == 2) u_face = 0.5 * (phi_field[idx_B] + phi_field[idx]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 2, make_int3(idx_x, idx_y, idx_z - 1), res);
+    if (COMPONENT == 2)
+      u_face = 0.5 * (phi_field[idx_B] + phi_field[idx]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 2,
+                                      make_int3(idx_x, idx_y, idx_z - 1), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     R_ibm = (double)get_ibm_ratio(ibm_id_map, ibm_data, idx, 5);
     double diff_z_b = (f_tvd - f_fou) * R_ibm;
-    
+
     tvd_corr += (diff_z_t - diff_z_b) * d_inv_dz;
   }
-
-  rhs_val -= d_theta * d_rho * tvd_corr;
+*/
 
   // ========================================
   // STEP 3: IBM Modification (Double Precision)
@@ -3227,7 +3239,6 @@ __global__ void compute_fused_ibm_kernel(
   // The list_idx is the global thread ID, which is correct for this kernel
   double D_rescale = (double)ibm_data.D_rescale[list_idx];
   val_C *= D_rescale;
-  rhs_val *= D_rescale;
 
   double orig_vals[6] = {val_E, val_W, val_N, val_S, val_T, val_B};
   double mod_E = 0.0, mod_W = 0.0, mod_N = 0.0;
@@ -3245,12 +3256,30 @@ __global__ void compute_fused_ibm_kernel(
     inhom_accum += Nbc * (double)u_bc_val * val_nb;
 
     switch (k) {
-    case 0: mod_E += orig_vals[0] * (D_rescale * M - 1.0); mod_W += orig_vals[0] * X; break;
-    case 1: mod_W += orig_vals[1] * (D_rescale * M - 1.0); mod_E += orig_vals[1] * X; break;
-    case 2: mod_N += orig_vals[2] * (D_rescale * M - 1.0); mod_S += orig_vals[2] * X; break;
-    case 3: mod_S += orig_vals[3] * (D_rescale * M - 1.0); mod_N += orig_vals[3] * X; break;
-    case 4: mod_T += orig_vals[4] * (D_rescale * M - 1.0); mod_B += orig_vals[4] * X; break;
-    case 5: mod_B += orig_vals[5] * (D_rescale * M - 1.0); mod_T += orig_vals[5] * X; break;
+    case 0:
+      mod_E += orig_vals[0] * (D_rescale * M - 1.0);
+      mod_W += orig_vals[0] * X;
+      break;
+    case 1:
+      mod_W += orig_vals[1] * (D_rescale * M - 1.0);
+      mod_E += orig_vals[1] * X;
+      break;
+    case 2:
+      mod_N += orig_vals[2] * (D_rescale * M - 1.0);
+      mod_S += orig_vals[2] * X;
+      break;
+    case 3:
+      mod_S += orig_vals[3] * (D_rescale * M - 1.0);
+      mod_N += orig_vals[3] * X;
+      break;
+    case 4:
+      mod_T += orig_vals[4] * (D_rescale * M - 1.0);
+      mod_B += orig_vals[4] * X;
+      break;
+    case 5:
+      mod_B += orig_vals[5] * (D_rescale * M - 1.0);
+      mod_T += orig_vals[5] * X;
+      break;
     }
   }
 
@@ -3260,7 +3289,6 @@ __global__ void compute_fused_ibm_kernel(
   val_S = orig_vals[3] + mod_S;
   val_T = orig_vals[4] + mod_T;
   val_B = orig_vals[5] + mod_B;
-  rhs_val -= inhom_accum;
 
   // ========================================
   // STEP 4: Compute Residual (Double Precision)
@@ -3276,20 +3304,27 @@ __global__ void compute_fused_ibm_kernel(
   double Ax = val_C * phi_C + val_W * phi_W + val_E * phi_E + val_S * phi_S +
               val_N * phi_N + val_B * phi_B + val_T * phi_T;
 
-  double res_double = rhs_val - Ax;
+  double res_double = D_rescale * (force - gp_current) - Ax;
+  if (explicit_term != nullptr)
+    if (compute_explicit)
+      explicit_term[idx] = D_rescale * (d_rho / d_dt) * phi_field[idx] +
+                           (1.0 - d_theta) * res_double;
+    else
+      res_double = explicit_term[idx] -
+                   D_rescale * (d_rho / d_dt) * phi_field[idx] +
+                   d_theta * res_double;
 
   // ========================================
   // STEP 5: Store Outputs (Float)
   // ========================================
   residual[idx] = (float)res_double;
-  A_C[idx] = (float)val_C;
-  A_W[idx] = (float)val_W;
-  A_E[idx] = (float)val_E;
-  A_S[idx] = (float)val_S;
-  A_N[idx] = (float)val_N;
-  A_B[idx] = (float)val_B;
-  A_T[idx] = (float)val_T;
-  B_RHS[idx] = (float)rhs_val;
+  A_C[idx] = theta * (float)val_C + (float)(D_rescale * (d_rho / d_dt));
+  A_W[idx] = theta * (float)val_W;
+  A_E[idx] = theta * (float)val_E;
+  A_S[idx] = theta * (float)val_S;
+  A_N[idx] = theta * (float)val_N;
+  A_B[idx] = theta * (float)val_B;
+  A_T[idx] = theta * (float)val_T;
 }
 
 // --------------------------------------------------------
@@ -3300,30 +3335,30 @@ __global__ void compute_fused_fluid_kernel(
     // Input State (Double)
     const double *__restrict__ u, const double *__restrict__ v,
     const double *__restrict__ w, const double *__restrict__ p,
-    const double *__restrict__ u_old, const double *__restrict__ v_old,
-    const double *__restrict__ w_old, const double *__restrict__ explicit_term,
+    double *__restrict__ explicit_term,
     // Output: Residual (Float)
     float *__restrict__ residual,
     // Output: Jacobian (Float)
     float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
     float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
-    float *__restrict__ A_T, float *__restrict__ B_RHS,
+    float *__restrict__ A_T,
     // Cell lists
-    const int* __restrict__ cell_indices, int num_cells,
+    const int *__restrict__ cell_indices, int num_cells,
     // Parameters
     int3 res, float3 spacing, float dt, float rho, float mu, float3 body_force,
-    float theta) {
+    float theta, bool compute_explicit) {
 
-    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (global_tid >= num_cells) return;
+  int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (global_tid >= num_cells)
+    return;
 
-    int idx = cell_indices[global_tid];
+  int idx = cell_indices[global_tid];
 
   // Neighbor indices
   int idx_x = idx % res.x;
   int idx_y = (idx / res.x) % res.y;
   int idx_z = idx / (res.x * res.y);
-  
+
   int idx_W = get_idx(idx_x - 1, idx_y, idx_z, res);
   int idx_E = get_idx(idx_x + 1, idx_y, idx_z, res);
   int idx_S = get_idx(idx_x, idx_y - 1, idx_z, res);
@@ -3347,13 +3382,13 @@ __global__ void compute_fused_fluid_kernel(
 
   // Diffusion coefficients
   double diff_corr = 2.0 * d_mu * (d_inv_dx2 + d_inv_dy2 + d_inv_dz2);
-  double val_C = d_rho / d_dt + d_theta * diff_corr;
-  double val_W = -d_theta * d_mu * d_inv_dx2;
-  double val_E = -d_theta * d_mu * d_inv_dx2;
-  double val_S = -d_theta * d_mu * d_inv_dy2;
-  double val_N = -d_theta * d_mu * d_inv_dy2;
-  double val_B = -d_theta * d_mu * d_inv_dz2;
-  double val_T = -d_theta * d_mu * d_inv_dz2;
+  double val_C = diff_corr;
+  double val_W = -d_mu * d_inv_dx2;
+  double val_E = -d_mu * d_inv_dx2;
+  double val_S = -d_mu * d_inv_dy2;
+  double val_N = -d_mu * d_inv_dy2;
+  double val_B = -d_mu * d_inv_dz2;
+  double val_T = -d_mu * d_inv_dz2;
 
   // Get advection velocity at this location (double precision)
   double uc = 0.0, vc = 0.0, wc = 0.0;
@@ -3394,7 +3429,7 @@ __global__ void compute_fused_fluid_kernel(
 #undef AVG4_D
 
   // FOU Upwind Advection (for Jacobian diagonal dominance)
-  double term_x = d_theta * d_rho * uc * d_inv_dx;
+  double term_x = d_rho * uc * d_inv_dx;
   if (uc > 0.0) {
     val_C += term_x;
     val_W -= term_x;
@@ -3403,7 +3438,7 @@ __global__ void compute_fused_fluid_kernel(
     val_E += term_x;
   }
 
-  double term_y = d_theta * d_rho * vc * d_inv_dy;
+  double term_y = d_rho * vc * d_inv_dy;
   if (vc > 0.0) {
     val_C += term_y;
     val_S -= term_y;
@@ -3412,7 +3447,7 @@ __global__ void compute_fused_fluid_kernel(
     val_N += term_y;
   }
 
-  double term_z = d_theta * d_rho * wc * d_inv_dz;
+  double term_z = d_rho * wc * d_inv_dz;
   if (wc > 0.0) {
     val_C += term_z;
     val_B -= term_z;
@@ -3421,38 +3456,23 @@ __global__ void compute_fused_fluid_kernel(
     val_T += term_z;
   }
 
-  // Build RHS: (rho/dt)*u_old + theta*force + (1-theta)*explicit
-  double val_old = 0.0;
   double force = 0.0;
   double gp_current = 0.0;
   const double *phi_field = nullptr;
 
   if (COMPONENT == 0) {
-    val_old = u_old[idx];
     force = (double)body_force.x;
     gp_current = (p[idx] - p[idx_W]) * d_inv_dx;
     phi_field = u;
   } else if (COMPONENT == 1) {
-    val_old = v_old[idx];
     force = (double)body_force.y;
     gp_current = (p[idx] - p[idx_S]) * d_inv_dy;
     phi_field = v;
   } else {
-    val_old = w_old[idx];
     force = (double)body_force.z;
     gp_current = (p[idx] - p[idx_B]) * d_inv_dz;
     phi_field = w;
   }
-
-  double rhs_val = (d_rho / d_dt) * val_old + d_theta * force;
-
-  // Add explicit terms (1-theta) * (...)
-  if (explicit_term != nullptr) {
-    rhs_val += (1.0 - d_theta) * explicit_term[idx];
-  }
-
-  // Pressure gradient term
-  rhs_val -= d_theta * gp_current;
 
   // ========================================
   // STEP 2: TVD Advection Correction (Double Precision)
@@ -3468,10 +3488,14 @@ __global__ void compute_fused_fluid_kernel(
     phi_R = phi_field[idx_E];
     phi_RR = phi_field[get_idx(idx_x + 2, idx_y, idx_z, res)];
 
-    if (COMPONENT == 0) u_face = 0.5 * (phi_field[idx] + phi_field[idx_E]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 0, make_int3(idx_x, idx_y, idx_z), res);
+    if (COMPONENT == 0)
+      u_face = 0.5 * (phi_field[idx] + phi_field[idx_E]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 0,
+                                      make_int3(idx_x, idx_y, idx_z), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     double diff_x_r = (f_tvd - f_fou);
 
@@ -3481,10 +3505,14 @@ __global__ void compute_fused_fluid_kernel(
     phi_R = phi_field[idx];
     phi_RR = phi_field[idx_E];
 
-    if (COMPONENT == 0) u_face = 0.5 * (phi_field[idx_W] + phi_field[idx]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 0, make_int3(idx_x - 1, idx_y, idx_z), res);
+    if (COMPONENT == 0)
+      u_face = 0.5 * (phi_field[idx_W] + phi_field[idx]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 0,
+                                      make_int3(idx_x - 1, idx_y, idx_z), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     double diff_x_l = (f_tvd - f_fou);
 
@@ -3496,10 +3524,14 @@ __global__ void compute_fused_fluid_kernel(
     phi_R = phi_field[idx_N];
     phi_RR = phi_field[get_idx(idx_x, idx_y + 2, idx_z, res)];
 
-    if (COMPONENT == 1) u_face = 0.5 * (phi_field[idx] + phi_field[idx_N]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 1, make_int3(idx_x, idx_y, idx_z), res);
+    if (COMPONENT == 1)
+      u_face = 0.5 * (phi_field[idx] + phi_field[idx_N]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 1,
+                                      make_int3(idx_x, idx_y, idx_z), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     double diff_y_t = (f_tvd - f_fou);
 
@@ -3508,10 +3540,14 @@ __global__ void compute_fused_fluid_kernel(
     phi_R = phi_field[idx];
     phi_RR = phi_field[idx_N];
 
-    if (COMPONENT == 1) u_face = 0.5 * (phi_field[idx_S] + phi_field[idx]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 1, make_int3(idx_x, idx_y - 1, idx_z), res);
+    if (COMPONENT == 1)
+      u_face = 0.5 * (phi_field[idx_S] + phi_field[idx]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 1,
+                                      make_int3(idx_x, idx_y - 1, idx_z), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     double diff_y_b = (f_tvd - f_fou);
 
@@ -3523,10 +3559,14 @@ __global__ void compute_fused_fluid_kernel(
     phi_R = phi_field[idx_T];
     phi_RR = phi_field[get_idx(idx_x, idx_y, idx_z + 2, res)];
 
-    if (COMPONENT == 2) u_face = 0.5 * (phi_field[idx] + phi_field[idx_T]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 2, make_int3(idx_x, idx_y, idx_z), res);
-    
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    if (COMPONENT == 2)
+      u_face = 0.5 * (phi_field[idx] + phi_field[idx_T]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 2,
+                                      make_int3(idx_x, idx_y, idx_z), res);
+
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     double diff_z_t = (f_tvd - f_fou);
 
@@ -3535,17 +3575,19 @@ __global__ void compute_fused_fluid_kernel(
     phi_R = phi_field[idx];
     phi_RR = phi_field[idx_T];
 
-    if (COMPONENT == 2) u_face = 0.5 * (phi_field[idx_B] + phi_field[idx]);
-    else u_face = get_advection_velocity(u, v, w, COMPONENT, 2, make_int3(idx_x, idx_y, idx_z - 1), res);
+    if (COMPONENT == 2)
+      u_face = 0.5 * (phi_field[idx_B] + phi_field[idx]);
+    else
+      u_face = get_advection_velocity(u, v, w, COMPONENT, 2,
+                                      make_int3(idx_x, idx_y, idx_z - 1), res);
 
-    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R, (float)phi_RR, (float)u_face);
+    f_tvd = (double)get_tvd_flux((float)phi_LL, (float)phi_L, (float)phi_R,
+                                 (float)phi_RR, (float)u_face);
     f_fou = (u_face > 0) ? u_face * phi_L : u_face * phi_R;
     double diff_z_b = (f_tvd - f_fou);
-    
+
     tvd_corr += (diff_z_t - diff_z_b) * d_inv_dz;
   }
-
-  rhs_val -= d_theta * d_rho * tvd_corr;
 
   // ========================================
   // STEP 4: Compute Residual (Double Precision)
@@ -3561,23 +3603,28 @@ __global__ void compute_fused_fluid_kernel(
   double Ax = val_C * phi_C + val_W * phi_W + val_E * phi_E + val_S * phi_S +
               val_N * phi_N + val_B * phi_B + val_T * phi_T;
 
-  double res_double = rhs_val - Ax;
+  double res_double = force - gp_current - d_rho * tvd_corr - Ax;
+  if (explicit_term != nullptr)
+    if (compute_explicit)
+      explicit_term[idx] =
+          (d_rho / d_dt) * phi_field[idx] + (1.0 - d_theta) * res_double;
+    else
+      res_double = explicit_term[idx] - (d_rho / d_dt) * phi_field[idx] +
+                   d_theta * res_double;
 
   // ========================================
   // STEP 5: Store Outputs (Float)
   // ========================================
+
   residual[idx] = (float)res_double;
-  A_C[idx] = (float)val_C;
-  A_W[idx] = (float)val_W;
-  A_E[idx] = (float)val_E;
-  A_S[idx] = (float)val_S;
-  A_N[idx] = (float)val_N;
-  A_B[idx] = (float)val_B;
-  A_T[idx] = (float)val_T;
-  B_RHS[idx] = (float)rhs_val;
+  A_C[idx] = theta * (float)val_C + rho / dt;
+  A_W[idx] = theta * (float)val_W;
+  A_E[idx] = theta * (float)val_E;
+  A_S[idx] = theta * (float)val_S;
+  A_N[idx] = theta * (float)val_N;
+  A_B[idx] = theta * (float)val_B;
+  A_T[idx] = theta * (float)val_T;
 }
-
-
 
 // --------------------------------------------------------
 // Picard / Newton Step Implementation
@@ -3692,9 +3739,9 @@ void CFDSolver::step(float dt) {
   }
 
   // Enforce zero velocity inside solid faces before using them in advection.
-  apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
-                                                  grid.sdf, res);
-
+  /*  apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
+                                                    grid.sdf, res);
+  */
   // Save previous state (for Time Derivative in RHS)
   CHECK_CUDA(cudaMemcpy(grid.u_old, grid.u, num_elements * sizeof(double),
                         cudaMemcpyDeviceToDevice));
@@ -3715,41 +3762,42 @@ void CFDSolver::step(float dt) {
   }
 
   // Theta Parameter
-  float theta = diffusion_theta;
+  float theta = theta_;
   float max_corr_u = 0.0f;
   float max_corr_v = 0.0f;
   float max_corr_w = 0.0f;
 
+  bool compute_explicit = true;
   for (int outer = 0; outer < outer_iterations_; ++outer) {
     // 0. Compute Explicit Terms (for CN) based on u_old and current pressure
+    /*
     compute_explicit_terms_kernel<<<grid_dim, block>>>(
         grid.explicit_u, grid.explicit_v, grid.explicit_w, grid.u_old,
         grid.v_old, grid.w_old, grid.p_prev, grid.frac_u, grid.frac_v,
         grid.frac_w, res, spacing, rho_, mu_, grid.body_force_density_);
+    */
 
     // --- Solve U (Fused Delta Form) ---
+    CHECK_CUDA(cudaMemset(grid.A_C, 0.0, num_elements * sizeof(float)));
     // Launch fluid kernel
     int num_fluid_u = grid.num_fluid_cells_u;
     if (num_fluid_u > 0) {
-        dim3 fluid_grid1d((num_fluid_u + 255) / 256);
-        compute_fused_fluid_kernel<0><<<fluid_grid1d, block1d>>>(
-            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-            grid.explicit_u, grid.res_u, 
-            grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T, grid.B_RHS,
-            grid.fluid_indices_u, num_fluid_u,
-            res, spacing, dt, rho_, mu_, grid.body_force_density_, theta);
+      dim3 fluid_grid1d((num_fluid_u + 255) / 256);
+      compute_fused_fluid_kernel<0><<<fluid_grid1d, block1d>>>(
+          grid.u, grid.v, grid.w, grid.p, grid.explicit_u, grid.res_u, grid.A_C,
+          grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+          grid.fluid_indices_u, num_fluid_u, res, spacing, dt, rho_, mu_,
+          grid.body_force_density_, theta, compute_explicit);
     }
-
     // Launch IBM kernel
     int num_ibm_u = grid.ibm_data_u.num_active_cells;
     if (num_ibm_u > 0) {
-        dim3 ibm_grid1d((num_ibm_u + 255) / 256);
-        compute_fused_ibm_kernel<0><<<ibm_grid1d, block1d>>>(
-            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-            grid.explicit_u, grid.sdf, grid.ibm_id_map_u, grid.ibm_data_u,
-            grid.res_u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-            grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
-            grid.body_force_density_, theta, grid.u_bc_.x);
+      dim3 ibm_grid1d((num_ibm_u + 255) / 256);
+      compute_fused_ibm_kernel<0><<<ibm_grid1d, block1d>>>(
+          grid.u, grid.v, grid.w, grid.p, grid.explicit_u, grid.sdf,
+          grid.ibm_data_u, grid.res_u, grid.A_C, grid.A_W, grid.A_E, grid.A_S,
+          grid.A_N, grid.A_B, grid.A_T, res, spacing, dt, rho_, mu_,
+          grid.body_force_density_, theta, grid.u_bc_.x, compute_explicit);
     }
 
     if (debug_stats_enabled_) {
@@ -3763,19 +3811,35 @@ void CFDSolver::step(float dt) {
     for (int k = 0; k < v_max_iter_; k++) {
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
           grid.du, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.res_u, res, true, -1);
+          grid.A_T, grid.res_u, res, true);
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
           grid.du, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.res_u, res, false, -1);
+          grid.A_T, grid.res_u, res, false);
     }
 
     apply_correction_kernel<<<grid1d, block1d>>>(grid.u, grid.du, num_elements);
     max_corr_u = max_abs_device(grid.du, num_elements);
     if (debug_stats_enabled_) {
       debug_stats_.corr_max[0] = max_corr_u;
-      compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
-          grid.u, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, grid.res_u, res);
+      int num_fluid_u = grid.num_fluid_cells_u;
+      if (num_fluid_u > 0) {
+        dim3 fluid_grid1d((num_fluid_u + 255) / 256);
+        compute_fused_fluid_kernel<0><<<fluid_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.explicit_u, grid.res_u,
+            grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+            grid.A_T, grid.fluid_indices_u, num_fluid_u, res, spacing, dt, rho_,
+            mu_, grid.body_force_density_, theta, compute_explicit);
+      }
+      // Launch IBM kernel
+      int num_ibm_u = grid.ibm_data_u.num_active_cells;
+      if (num_ibm_u > 0) {
+        dim3 ibm_grid1d((num_ibm_u + 255) / 256);
+        compute_fused_ibm_kernel<0><<<ibm_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.explicit_u, grid.sdf,
+            grid.ibm_data_u, grid.res_u, grid.A_C, grid.A_W, grid.A_E, grid.A_S,
+            grid.A_N, grid.A_B, grid.A_T, res, spacing, dt, rho_, mu_,
+            grid.body_force_density_, theta, grid.u_bc_.x, compute_explicit);
+      }
       CHECK_CUDA(cudaMemcpy(grid.res_u_post, grid.res_u,
                             num_elements * sizeof(float),
                             cudaMemcpyDeviceToDevice));
@@ -3788,26 +3852,24 @@ void CFDSolver::step(float dt) {
     }
 
     // --- Solve V (Fused Delta Form) ---
+    CHECK_CUDA(cudaMemset(grid.A_C, 0.0, num_elements * sizeof(float)));
     int num_fluid_v = grid.num_fluid_cells_v;
     if (num_fluid_v > 0) {
-        dim3 fluid_grid1d((num_fluid_v + 255) / 256);
-        compute_fused_fluid_kernel<1><<<fluid_grid1d, block1d>>>(
-            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-            grid.explicit_v, grid.res_v,
-            grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T, grid.B_RHS,
-            grid.fluid_indices_v, num_fluid_v,
-            res, spacing, dt, rho_, mu_, grid.body_force_density_, theta);
+      dim3 fluid_grid1d((num_fluid_v + 255) / 256);
+      compute_fused_fluid_kernel<1><<<fluid_grid1d, block1d>>>(
+          grid.u, grid.v, grid.w, grid.p, grid.explicit_v, grid.res_v, grid.A_C,
+          grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+          grid.fluid_indices_v, num_fluid_v, res, spacing, dt, rho_, mu_,
+          grid.body_force_density_, theta, compute_explicit);
     }
-
     int num_ibm_v = grid.ibm_data_v.num_active_cells;
     if (num_ibm_v > 0) {
-        dim3 ibm_grid1d((num_ibm_v + 255) / 256);
-        compute_fused_ibm_kernel<1><<<ibm_grid1d, block1d>>>(
-            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-            grid.explicit_v, grid.sdf, grid.ibm_id_map_v, grid.ibm_data_v,
-            grid.res_v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-            grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
-            grid.body_force_density_, theta, grid.u_bc_.y);
+      dim3 ibm_grid1d((num_ibm_v + 255) / 256);
+      compute_fused_ibm_kernel<1><<<ibm_grid1d, block1d>>>(
+          grid.u, grid.v, grid.w, grid.p, grid.explicit_v, grid.sdf,
+          grid.ibm_data_v, grid.res_v, grid.A_C, grid.A_W, grid.A_E, grid.A_S,
+          grid.A_N, grid.A_B, grid.A_T, res, spacing, dt, rho_, mu_,
+          grid.body_force_density_, theta, grid.u_bc_.y, compute_explicit);
     }
 
     if (debug_stats_enabled_) {
@@ -3821,19 +3883,34 @@ void CFDSolver::step(float dt) {
     for (int k = 0; k < v_max_iter_; k++) {
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
           grid.dv, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.res_v, res, true, -1);
+          grid.A_T, grid.res_v, res, true);
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
           grid.dv, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.res_v, res, false, -1);
+          grid.A_T, grid.res_v, res, false);
     }
 
     apply_correction_kernel<<<grid1d, block1d>>>(grid.v, grid.dv, num_elements);
     max_corr_v = max_abs_device(grid.dv, num_elements);
     if (debug_stats_enabled_) {
       debug_stats_.corr_max[1] = max_corr_v;
-      compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
-          grid.v, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, grid.res_v, res);
+      int num_fluid_v = grid.num_fluid_cells_v;
+      if (num_fluid_v > 0) {
+        dim3 fluid_grid1d((num_fluid_v + 255) / 256);
+        compute_fused_fluid_kernel<1><<<fluid_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.explicit_v, grid.res_v,
+            grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+            grid.A_T, grid.fluid_indices_v, num_fluid_v, res, spacing, dt, rho_,
+            mu_, grid.body_force_density_, theta, compute_explicit);
+      }
+      int num_ibm_v = grid.ibm_data_v.num_active_cells;
+      if (num_ibm_v > 0) {
+        dim3 ibm_grid1d((num_ibm_v + 255) / 256);
+        compute_fused_ibm_kernel<1><<<ibm_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.explicit_v, grid.sdf,
+            grid.ibm_data_v, grid.res_v, grid.A_C, grid.A_W, grid.A_E, grid.A_S,
+            grid.A_N, grid.A_B, grid.A_T, res, spacing, dt, rho_, mu_,
+            grid.body_force_density_, theta, grid.u_bc_.y, compute_explicit);
+      }
       CHECK_CUDA(cudaMemcpy(grid.res_v_post, grid.res_v,
                             num_elements * sizeof(float),
                             cudaMemcpyDeviceToDevice));
@@ -3846,26 +3923,24 @@ void CFDSolver::step(float dt) {
     }
 
     // --- Solve W (Fused Delta Form) ---
+    CHECK_CUDA(cudaMemset(grid.A_C, 0.0, num_elements * sizeof(float)));
     int num_fluid_w = grid.num_fluid_cells_w;
     if (num_fluid_w > 0) {
-        dim3 fluid_grid1d((num_fluid_w + 255) / 256);
-        compute_fused_fluid_kernel<2><<<fluid_grid1d, block1d>>>(
-            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-            grid.explicit_w, grid.res_w,
-            grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T, grid.B_RHS,
-            grid.fluid_indices_w, num_fluid_w,
-            res, spacing, dt, rho_, mu_, grid.body_force_density_, theta);
+      dim3 fluid_grid1d((num_fluid_w + 255) / 256);
+      compute_fused_fluid_kernel<2><<<fluid_grid1d, block1d>>>(
+          grid.u, grid.v, grid.w, grid.p, grid.explicit_w, grid.res_w, grid.A_C,
+          grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+          grid.fluid_indices_w, num_fluid_w, res, spacing, dt, rho_, mu_,
+          grid.body_force_density_, theta, compute_explicit);
     }
-    
     int num_ibm_w = grid.ibm_data_w.num_active_cells;
     if (num_ibm_w > 0) {
-        dim3 ibm_grid1d((num_ibm_w + 255) / 256);
-        compute_fused_ibm_kernel<2><<<ibm_grid1d, block1d>>>(
-            grid.u, grid.v, grid.w, grid.p, grid.u_old, grid.v_old, grid.w_old,
-            grid.explicit_w, grid.sdf, grid.ibm_id_map_w, grid.ibm_data_w,
-            grid.res_w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-            grid.A_T, grid.B_RHS, res, spacing, dt, rho_, mu_,
-            grid.body_force_density_, theta, grid.u_bc_.z);
+      dim3 ibm_grid1d((num_ibm_w + 255) / 256);
+      compute_fused_ibm_kernel<2><<<ibm_grid1d, block1d>>>(
+          grid.u, grid.v, grid.w, grid.p, grid.explicit_w, grid.sdf,
+          grid.ibm_data_w, grid.res_w, grid.A_C, grid.A_W, grid.A_E, grid.A_S,
+          grid.A_N, grid.A_B, grid.A_T, res, spacing, dt, rho_, mu_,
+          grid.body_force_density_, theta, grid.u_bc_.z, compute_explicit);
     }
 
     if (debug_stats_enabled_) {
@@ -3879,19 +3954,34 @@ void CFDSolver::step(float dt) {
     for (int k = 0; k < v_max_iter_; k++) {
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
           grid.dw, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.res_w, res, true, -1);
+          grid.A_T, grid.res_w, res, true);
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
           grid.dw, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.res_w, res, false, -1);
+          grid.A_T, grid.res_w, res, false);
     }
 
     apply_correction_kernel<<<grid1d, block1d>>>(grid.w, grid.dw, num_elements);
     max_corr_w = max_abs_device(grid.dw, num_elements);
     if (debug_stats_enabled_) {
       debug_stats_.corr_max[2] = max_corr_w;
-      compute_momentum_residual_stencil_kernel<<<grid_dim, block>>>(
-          grid.w, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, grid.res_w, res);
+      int num_fluid_w = grid.num_fluid_cells_w;
+      if (num_fluid_w > 0) {
+        dim3 fluid_grid1d((num_fluid_w + 255) / 256);
+        compute_fused_fluid_kernel<2><<<fluid_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.explicit_w, grid.res_w,
+            grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+            grid.A_T, grid.fluid_indices_w, num_fluid_w, res, spacing, dt, rho_,
+            mu_, grid.body_force_density_, theta, compute_explicit);
+      }
+      int num_ibm_w = grid.ibm_data_w.num_active_cells;
+      if (num_ibm_w > 0) {
+        dim3 ibm_grid1d((num_ibm_w + 255) / 256);
+        compute_fused_ibm_kernel<2><<<ibm_grid1d, block1d>>>(
+            grid.u, grid.v, grid.w, grid.p, grid.explicit_w, grid.sdf,
+            grid.ibm_data_w, grid.res_w, grid.A_C, grid.A_W, grid.A_E, grid.A_S,
+            grid.A_N, grid.A_B, grid.A_T, res, spacing, dt, rho_, mu_,
+            grid.body_force_density_, theta, grid.u_bc_.z, compute_explicit);
+      }
       CHECK_CUDA(cudaMemcpy(grid.res_w_post, grid.res_w,
                             num_elements * sizeof(float),
                             cudaMemcpyDeviceToDevice));
@@ -3908,50 +3998,56 @@ void CFDSolver::step(float dt) {
                           cudaMemcpyDeviceToDevice));
     CHECK_CUDA(cudaMemset(grid.phi, 0, num_elements * sizeof(float)));
 
-    compute_divergence_kernel<<<grid_dim, block>>>(
-        grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf,
-        grid.rhs, res, spacing, dt, rho_);
-    if (debug_cell_enabled_) {
-      compute_divergence_cell_debug_kernel<<<1, 1>>>(
-          grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w,
-          grid.sdf, res, spacing, debug_cell_, d_debug_cell);
-    }
-    if (debug_stats_enabled_) {
-      CHECK_CUDA(cudaMemcpy(grid.div_pre, grid.rhs,
-                            num_elements * sizeof(float),
-                            cudaMemcpyDeviceToDevice));
-      debug_stats_.div_before = max_abs_device(grid.rhs, num_elements);
-    }
+    /*    compute_divergence_kernel<<<grid_dim, block>>>(
+            grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w,
+       grid.sdf, grid.rhs, res, spacing, dt, rho_);
+    */
 
     compute_pressure_stencil_kernel<<<grid_dim, block>>>(
         grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, grid.rhs, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf,
-        grid.p_old, res, spacing, rho_, dt);
+        grid.B_RHS, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf, grid.u,
+        grid.v, grid.w, res, spacing);
+    CHECK_CUDA(cudaMemcpy(grid.rhs, grid.B_RHS, num_elements * sizeof(float),
+                          cudaMemcpyDeviceToDevice));
+
+    if (debug_cell_enabled_) {
+    }
+    if (debug_stats_enabled_) {
+      compute_pressure_stencil_kernel<<<grid_dim, block>>>(
+          grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+          grid.B_RHS, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf, grid.u,
+          grid.v, grid.w, res, spacing);
+      CHECK_CUDA(cudaMemcpy(grid.div_pre, grid.B_RHS,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+      debug_stats_.div_before = max_abs_device(grid.B_RHS, num_elements);
+    }
 
     for (int k = 0; k < p_max_iter_; k++) {
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
           grid.phi, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, res, true, pin_idx);
+          grid.A_T, grid.B_RHS, res, true);
       solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
           grid.phi, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, res, false, pin_idx);
+          grid.A_T, grid.B_RHS, res, false);
     }
 
     project_velocity_kernel<<<grid_dim, block>>>(
         grid.u, grid.v, grid.w, grid.phi, grid.frac_u, grid.frac_v, grid.frac_w,
-        grid.sdf, res, spacing, dt, rho_);
+        grid.sdf, res, spacing);
 
-    apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
-                                                    grid.sdf, res);
-
+    /*    apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v,
+       grid.w, grid.sdf, res);
+    */
     if (debug_stats_enabled_) {
-      compute_divergence_kernel<<<grid_dim, block>>>(
-          grid.u, grid.v, grid.w, grid.frac_u, grid.frac_v, grid.frac_w,
-          grid.sdf, grid.rhs, res, spacing, dt, rho_);
-      CHECK_CUDA(cudaMemcpy(grid.div_post, grid.rhs,
+      compute_pressure_stencil_kernel<<<grid_dim, block>>>(
+          grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
+          grid.B_RHS, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf, grid.u,
+          grid.v, grid.w, res, spacing);
+      CHECK_CUDA(cudaMemcpy(grid.div_post, grid.B_RHS,
                             num_elements * sizeof(float),
                             cudaMemcpyDeviceToDevice));
-      debug_stats_.div_after = max_abs_device(grid.rhs, num_elements);
+      debug_stats_.div_after = max_abs_device(grid.B_RHS, num_elements);
     }
     if (debug_cell_enabled_) {
       compute_divergence_cell_debug_kernel<<<1, 1>>>(
@@ -3969,8 +4065,8 @@ void CFDSolver::step(float dt) {
     }
 
     update_pressure_from_phi_kernel<<<grid_dim, block>>>(
-        grid.p, grid.phi, grid.p_old, grid.u, grid.v, grid.w, res, spacing, dt,
-        theta, rho_, mu_);
+        grid.p, grid.phi, grid.p_old, grid.u, grid.v, grid.w, grid.rhs, res,
+        spacing, dt, theta, rho_, mu_);
     double p_pin = 0.0;
     CHECK_CUDA(cudaMemcpy(&p_pin, grid.p + pin_idx, sizeof(double),
                           cudaMemcpyDeviceToHost));
@@ -3982,6 +4078,7 @@ void CFDSolver::step(float dt) {
         break;
       }
     }
+    compute_explicit = false;
   }
 
   if (debug_cell_enabled_ && d_debug_cell != nullptr) {
@@ -4025,7 +4122,6 @@ std::vector<float> CFDSolver::get_fluid_fraction(int type, float3 offset) {
 
   return h_frac;
 }
-
 
 void CFDSolver::set_u(const std::vector<double> &h_u) {
   if (h_u.size() != num_elements) {
@@ -4095,9 +4191,9 @@ void CFDSolver::project(float dt, bool incremental) {
   }
 
   // Enforce zero velocity inside solid faces before divergence.
-  apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
-                                                  grid.sdf, res);
-
+  /*  apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
+                                                    grid.sdf, res);
+  */
   // Initialize phi
   CHECK_CUDA(cudaMemset(grid.phi, 0, num_elements * sizeof(float)));
 
@@ -4109,32 +4205,32 @@ void CFDSolver::project(float dt, bool incremental) {
   // Build pressure stencil (Laplacian with area fractions)
   compute_pressure_stencil_kernel<<<grid_dim, block>>>(
       grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-      grid.B_RHS, grid.rhs, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf,
-      grid.p_old, res, spacing, rho_, dt);
+      grid.B_RHS, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf, grid.u,
+      grid.v, grid.w, res, spacing);
 
   // Solve for phi (pressure correction)
   for (int k = 0; k < p_max_iter_; k++) {
     solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
         grid.phi, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-        grid.A_T, grid.B_RHS, res, true, pin_idx);
+        grid.A_T, grid.B_RHS, res, true);
     solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
         grid.phi, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-        grid.A_T, grid.B_RHS, res, false, pin_idx);
+        grid.A_T, grid.B_RHS, res, false);
   }
 
   // Project velocity
   project_velocity_kernel<<<grid_dim, block>>>(
       grid.u, grid.v, grid.w, grid.phi, grid.frac_u, grid.frac_v, grid.frac_w,
-      grid.sdf, res, spacing, dt, rho_);
+      grid.sdf, res, spacing);
 
   // Enforce solid face mask after projection.
-  apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
-                                                  grid.sdf, res);
-
+  /*  apply_face_sdf_mask_kernel<<<grid_dim, block>>>(grid.u, grid.v, grid.w,
+                                                    grid.sdf, res);
+  */
   // Update pressure (incremental correction)
   update_pressure_from_phi_kernel<<<grid_dim, block>>>(
-      grid.p, grid.phi, grid.p_old, grid.u, grid.v, grid.w, res, spacing, dt,
-      diffusion_theta, rho_, mu_);
+      grid.p, grid.phi, grid.p_old, grid.u, grid.v, grid.w, grid.rhs, res,
+      spacing, dt, theta_, rho_, mu_);
   double p_pin = 0.0;
   CHECK_CUDA(cudaMemcpy(&p_pin, grid.p + pin_idx, sizeof(double),
                         cudaMemcpyDeviceToHost));
