@@ -92,24 +92,11 @@ PYBIND11_MODULE(pnm_backend, m) {
       .def("get_v", &CFDSolver::get_v)
       .def("get_w", &CFDSolver::get_w)
       .def("get_p", &CFDSolver::get_p)
-      .def("get_momentum_residual_max", &CFDSolver::get_momentum_residual_max,
-           py::arg("fluid_only") = false)
-      .def("get_divergence_max", &CFDSolver::get_divergence_max, py::arg("dt"),
-           py::arg("fluid_only") = false)
-      .def("set_debug_stats", &CFDSolver::set_debug_stats, py::arg("enabled"))
-      .def("get_debug_stats", &CFDSolver::get_debug_stats)
-      .def("get_debug_fields", &CFDSolver::get_debug_fields)
-      .def("set_debug_cell", &CFDSolver::set_debug_cell, py::arg("cell"))
-      .def("get_debug_cell_info", &CFDSolver::get_debug_cell_info)
       .def("get_fluid_fraction", &CFDSolver::get_fluid_fraction,
            py::arg("type"), py::arg("offset"))
       .def("set_u", &CFDSolver::set_u, py::arg("u"))
       .def("set_v", &CFDSolver::set_v, py::arg("v"))
       .def("set_w", &CFDSolver::set_w, py::arg("w"))
-      .def("project", &CFDSolver::project, py::arg("dt"),
-           py::arg("incremental") = false)
-      .def("get_diffusion_stencil", &CFDSolver::get_diffusion_stencil,
-           py::arg("component_idx"), py::arg("ibm_enabled"))
       .def("get_ibm_scaling", &CFDSolver::get_ibm_scaling,
            py::arg("component_idx"));
 }
