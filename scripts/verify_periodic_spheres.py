@@ -145,7 +145,7 @@ class SimulationRunner:
 def run_sweep():
     # 1. Define parameter space
     phis = [0.001, 0.008, 0.027, 0.064, 0.125, 0.216, 0.343, 0.45, 0.5236]
-    resolutions = [16, 32, 64, 128, 256]
+    resolutions = [16, 32, 64, 128]
 
     # Cartesian product (Grid Search)
     param_grid = list(product(phis, resolutions))
