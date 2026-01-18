@@ -57,26 +57,17 @@ def compute_velocity_at_centers(u, v, w):
     return u_c, v_c, w_c
 
 class SimulationRunner:
-    def __init__(self, phi, res_n, L=1.0):
-        self.phi = phi
-        self.res_n = res_n
-        self.L = L
+    def __init__(self, filename_sdf):
         
-        self.sdf_values, self.R, self.spacing_tuple = generate_sc_sdf(phi, res_n, L)
-        self.dx, self.dy, self.dz = self.spacing_tuple
-        
-        # Setup Data Objects
-        self.sdf_data = pnm_backend.SDFData(
-            self.sdf_values, 
-            pnm_backend.int3(res_n, res_n, res_n),
-            pnm_backend.float3(0,0,0),
-            pnm_backend.float3(self.dx, self.dy, self.dz)
-        )
+        sdf_data = pnm_backend.SDFReader.read_vti(filename_sdf)
+        res = sdf_data.resolution
+        dx = sdf_data.spacing
+
         self.solver = pnm_backend.CFDSolver(
-            pnm_backend.int3(res_n, res_n, res_n), 
-            pnm_backend.float3(self.dx, self.dy, self.dz)
+            pnm_backend.int3(res[0], res[1], res[2]), 
+            pnm_backend.float3(dx[0], dx[1], dx[2])
         )
-        self.solver.initialize(self.sdf_data)
+        self.solver.initialize(sdf_data)
         
         # Parameters (Low Re)
         self.rho = 0.0
@@ -100,8 +91,6 @@ class SimulationRunner:
         
         u_mean_history = []
         
-        print(f"Running phi={self.phi:.3f}, Res={self.res_n}^3, dt={dt:.4f}...")
-        
         start_time = time.time()
         for i in range(max_steps):
             # Use Implicit Step
@@ -124,12 +113,6 @@ class SimulationRunner:
         u = np.array(self.solver.get_u())
         U_sup = np.mean(u)
         
-        # Calculate K
-        F = self.f_mag * (self.L**3)
-        K = F / (6.0 * np.pi * self.mu * self.R * U_sup)
-        
-        print(f"  K_sim = {K:.4f} (Time: {elapsed:.2f}s)")
-        
         u = u.reshape((self.res_n,self.res_n,self.res_n), order='F')
         p = np.array(self.solver.get_p()).reshape((self.res_n,self.res_n,self.res_n), order='F')
         if save_output and filename:            
@@ -141,53 +124,15 @@ class SimulationRunner:
         p_prof_1d = np.mean(p, axis=(1,2))
         u_prof_1d = np.mean(u, axis=(1,2))
 
-        return K, U_sup, p_prof_1d, u_prof_1d
-
-def run_sweep():
-    # 1. Define parameter space
-    phis = [0.001, 0.008, 0.027, 0.064, 0.125, 0.216, 0.343, 0.45, 0.5236]
-    resolutions = [16, 32, 64, 128]
-
-    # Cartesian product (Grid Search)
-    param_grid = list(product(phis, resolutions))
-
-    results_list = []
-
-    # 2. Run Loop with Progress Bar
-    for phi, res in tqdm(param_grid, desc="Simulating"):
-        
-        # Initialize and Run
-        simulator = SimulationRunner(phi, res) 
-        k_sim, u_sup, p_prof_1d, u_prof_1d = simulator.run(
-            save_output=True, 
-            filename=f"output/phi_{phi:.2f}_N_{res}_cell_avg.vti", 
-            dt=1.0, 
-            max_steps=100
-        )
-        
-        k_ref = get_analytical_k(phi)
-        R = (phi * 3.0 / (4.0 * np.pi))**(1.0/3.0)
-        
-        results_list.append({
-            'phi': phi,
-            'R': R,
-            'resolution': res,
-            'k_sim': k_sim,
-            'k_ref': k_ref,
-            'error': (k_sim - k_ref) / k_ref,
-            'p_profile': p_prof_1d,
-            'u_profile': u_prof_1d
-        })
-
-    # 3. Create DataFrame
-    df = pd.DataFrame(results_list)
-    df.to_csv('output/drag_dimensionless_sc_cell_avg.csv', index=False)
-    # --- Output: Table ---
-    # Display table with background gradient (Pandas native feature)
-    display_cols = ['phi', 'resolution', 'k_sim', 'k_ref', 'error']
-    display(df[display_cols].style.background_gradient(subset=['error'], cmap='coolwarm', axis=None))
-
+        return U_sup, p_prof_1d, u_prof_1d
 
 if __name__ == "__main__":
     # Run convergence test first
-    run_sweep()
+    filename_sdf = "ring_packing_sdf.vti"
+    simulator = SimulationRunner(filename_sdf)
+    u_sup, p_prof_1d, u_prof_1d = simulator.run(
+        save_output=True, 
+        filename=f"output/ring_packing_flow.vti", 
+        dt=1.0, 
+        max_steps=100
+    )
