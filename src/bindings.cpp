@@ -1,38 +1,55 @@
 #include "cfd_solver.cuh"
 #include "pore_extraction.cuh"
 #include "sdf_reader.h"
+#include <array>
 #include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <vector>
 
 namespace py = pybind11;
 
 PYBIND11_MODULE(pnm_backend, m) {
   m.doc() = "PNM Extraction Backend reading VTI files";
 
-  py::class_<SDFData>(m, "SDFData")
-      .def(py::init([](std::vector<float> sdf_values, int3 res, float3 origin,
-                       float3 spacing) {
-             return SDFData{sdf_values,
-                            {res.x, res.y, res.z},
-                            {origin.x, origin.y, origin.z},
-                            {spacing.x, spacing.y, spacing.z}};
-           }),
-           py::arg("sdf_values"), py::arg("resolution"), py::arg("origin"),
-           py::arg("spacing"))
-      .def_readonly("resolution", &SDFData::resolution)
-      .def_readonly("origin", &SDFData::origin)
-      .def_readonly("spacing", &SDFData::spacing)
-      .def_property_readonly("sdf_values", [](SDFData &d) {
-        return py::array_t<float>({d.resolution[2], d.resolution[1],
-                                   d.resolution[0]}, // Shape (Z, Y, X)
-                                  d.sdf_values.data());
-      });
-
+  // -----------------------------------------------------------------------
+  // SDFReader
+  // -----------------------------------------------------------------------
   py::class_<SDFReader>(m, "SDFReader")
-      .def_static("read_vti", &SDFReader::read_vti);
+      .def_static(
+          "read_vti",
+          [](const std::string &filename) {
+            auto *data = new SDFData(SDFReader::read_vti(filename));
 
+            // Map resolution {nx, ny, nz} -> shape {nz, ny, nx}
+            std::vector<ssize_t> py_shape = {
+                static_cast<ssize_t>(data->resolution[2]),
+                static_cast<ssize_t>(data->resolution[1]),
+                static_cast<ssize_t>(data->resolution[0])};
+
+            // Map origin/spacing {x, y, z} -> {z, y, x}
+            std::vector<double> py_org = {static_cast<double>(data->origin[2]),
+                                          static_cast<double>(data->origin[1]),
+                                          static_cast<double>(data->origin[0])};
+            std::vector<double> py_spc = {
+                static_cast<double>(data->spacing[2]),
+                static_cast<double>(data->spacing[1]),
+                static_cast<double>(data->spacing[0])};
+
+            py::capsule free_when_done(
+                data, [](void *f) { delete reinterpret_cast<SDFData *>(f); });
+
+            auto sdf_3d = py::array_t<float>(py_shape, data->sdf_values.data(),
+                                             free_when_done);
+
+            return py::make_tuple(sdf_3d, py_org, py_spc);
+          },
+          "Reads VTI; returns (sdf_3d[nz,ny,nx], origin_zyx, spacing_zyx)");
+
+  // -----------------------------------------------------------------------
+  // Pore Struct
+  // -----------------------------------------------------------------------
   py::class_<Pore>(m, "Pore")
       .def_readwrite("x", &Pore::x)
       .def_readwrite("y", &Pore::y)
@@ -44,18 +61,86 @@ PYBIND11_MODULE(pnm_backend, m) {
                ">";
       });
 
-  m.def("extract_pores", &extract_pores_gpu,
-        "Extract pore centers from SDF data on GPU");
+  // -----------------------------------------------------------------------
+  // Extract Pores
+  // -----------------------------------------------------------------------
+  m.def(
+      "extract_pores",
+      [](py::array_t<float> sdf_array, std::vector<double> origin_zyx,
+         std::vector<double> spacing_zyx) {
+        py::buffer_info buf = sdf_array.request();
+        if (buf.ndim != 3) {
+          throw std::runtime_error("SDF array must be 3D (Nz, Ny, Nx)");
+        }
 
-  m.def("segment_volume", &segment_volume_gpu,
-        "Partition volume into Pores (+ID) and Solids (-ID)");
+        // Reconstruct SDFData using std::array
+        SDFData temp_sdf;
 
-  m.def("extract_topology_gpu", &extract_topology_gpu, "Extract Topology (GPU)",
-        py::arg("segmentation"), py::arg("resolution"));
+        // Shape (Nz, Ny, Nx) -> Resolution (Nx, Ny, Nz)
+        temp_sdf.resolution = {static_cast<int>(buf.shape[2]),
+                               static_cast<int>(buf.shape[1]),
+                               static_cast<int>(buf.shape[0])};
 
-  // --------------------------------------------------------
-  // CFD Solver Bindings
-  // --------------------------------------------------------
+        // ZYX -> XYZ and explicit double->float cast
+        temp_sdf.origin = {static_cast<float>(origin_zyx[2]),
+                           static_cast<float>(origin_zyx[1]),
+                           static_cast<float>(origin_zyx[0])};
+
+        temp_sdf.spacing = {static_cast<float>(spacing_zyx[2]),
+                            static_cast<float>(spacing_zyx[1]),
+                            static_cast<float>(spacing_zyx[0])};
+
+        float *ptr = static_cast<float *>(buf.ptr);
+        temp_sdf.sdf_values.assign(
+            ptr, ptr + (buf.shape[0] * buf.shape[1] * buf.shape[2]));
+
+        return extract_pores_gpu(temp_sdf);
+      },
+      "Extract pore centers. Inputs: (sdf_3d, origin_zyx, spacing_zyx)");
+
+  // -----------------------------------------------------------------------
+  // Segment Volume
+  // -----------------------------------------------------------------------
+  m.def(
+      "segment_volume",
+      [](py::array_t<float> sdf_array, std::vector<double> spacing_zyx) {
+        py::buffer_info buf = sdf_array.request();
+        if (buf.ndim != 3)
+          throw std::runtime_error("SDF array must be 3D");
+
+        SDFData temp_sdf;
+        // Construct std::array directly
+        temp_sdf.resolution = {static_cast<int>(buf.shape[2]),
+                               static_cast<int>(buf.shape[1]),
+                               static_cast<int>(buf.shape[0])};
+
+        temp_sdf.spacing = {static_cast<float>(spacing_zyx[2]),
+                            static_cast<float>(spacing_zyx[1]),
+                            static_cast<float>(spacing_zyx[0])};
+
+        float *ptr = static_cast<float *>(buf.ptr);
+        temp_sdf.sdf_values.assign(
+            ptr, ptr + (buf.shape[0] * buf.shape[1] * buf.shape[2]));
+
+        return segment_volume_gpu(temp_sdf);
+      },
+      "Partition volume. Inputs: (sdf_3d, spacing_zyx)");
+
+  // -----------------------------------------------------------------------
+  // Extract Topology
+  // -----------------------------------------------------------------------
+  m.def(
+      "extract_topology_gpu",
+      [](std::vector<int> segmentation, std::vector<int> shape_zyx) {
+        // Fix: Use std::array<int, 3> because the C++ signature requires it
+        std::array<int, 3> res_xyz = {shape_zyx[2], shape_zyx[1], shape_zyx[0]};
+        return extract_topology_gpu(segmentation, res_xyz);
+      },
+      py::arg("segmentation"), py::arg("shape"));
+
+  // -----------------------------------------------------------------------
+  // CFD Solver
+  // -----------------------------------------------------------------------
   py::class_<int3>(m, "int3")
       .def(py::init([](int x, int y, int z) { return make_int3(x, y, z); }))
       .def_readwrite("x", &int3::x)
@@ -70,8 +155,78 @@ PYBIND11_MODULE(pnm_backend, m) {
       .def_readwrite("z", &float3::z);
 
   py::class_<CFDSolver>(m, "CFDSolver")
-      .def(py::init<int3, float3>(), py::arg("res"), py::arg("spacing"))
-      .def("initialize", &CFDSolver::initialize, py::arg("sdf_data"))
+      .def(py::init(
+               [](std::vector<int> shape_zyx, std::vector<double> spacing_zyx) {
+                 int3 res = {shape_zyx[2], shape_zyx[1], shape_zyx[0]};
+                 float3 spc = {static_cast<float>(spacing_zyx[2]),
+                               static_cast<float>(spacing_zyx[1]),
+                               static_cast<float>(spacing_zyx[0])};
+                 return new CFDSolver(res, spc);
+               }),
+           py::arg("shape"), py::arg("spacing"))
+
+      .def(
+          "initialize",
+          [](CFDSolver &self, py::array_t<float> sdf_array,
+             std::vector<double> origin_zyx, std::vector<double> spacing_zyx) {
+            py::buffer_info buf = sdf_array.request();
+
+            SDFData temp_sdf;
+            // Explicit std::array construction
+            temp_sdf.resolution = {static_cast<int>(buf.shape[2]),
+                                   static_cast<int>(buf.shape[1]),
+                                   static_cast<int>(buf.shape[0])};
+
+            temp_sdf.origin = {static_cast<float>(origin_zyx[2]),
+                               static_cast<float>(origin_zyx[1]),
+                               static_cast<float>(origin_zyx[0])};
+
+            temp_sdf.spacing = {static_cast<float>(spacing_zyx[2]),
+                                static_cast<float>(spacing_zyx[1]),
+                                static_cast<float>(spacing_zyx[0])};
+
+            float *ptr = static_cast<float *>(buf.ptr);
+            temp_sdf.sdf_values.assign(
+                ptr, ptr + (buf.shape[0] * buf.shape[1] * buf.shape[2]));
+
+            self.initialize(temp_sdf);
+          },
+          py::arg("sdf_array"), py::arg("origin"), py::arg("spacing"))
+
+      // --- Getters returning 3D arrays ---
+      .def("get_u",
+           [](CFDSolver &self) {
+             auto data = self.get_u();
+             int3 res = self.get_resolution(); // Using PUBLIC getter
+             std::vector<ssize_t> shape = {(ssize_t)res.z, (ssize_t)res.y,
+                                           (ssize_t)res.x};
+             return py::array_t<double>(shape, data.data());
+           })
+      .def("get_v",
+           [](CFDSolver &self) {
+             auto data = self.get_v();
+             int3 res = self.get_resolution();
+             std::vector<ssize_t> shape = {(ssize_t)res.z, (ssize_t)res.y,
+                                           (ssize_t)res.x};
+             return py::array_t<double>(shape, data.data());
+           })
+      .def("get_w",
+           [](CFDSolver &self) {
+             auto data = self.get_w();
+             int3 res = self.get_resolution();
+             std::vector<ssize_t> shape = {(ssize_t)res.z, (ssize_t)res.y,
+                                           (ssize_t)res.x};
+             return py::array_t<double>(shape, data.data());
+           })
+      .def("get_p",
+           [](CFDSolver &self) {
+             auto data = self.get_p();
+             int3 res = self.get_resolution();
+             std::vector<ssize_t> shape = {(ssize_t)res.z, (ssize_t)res.y,
+                                           (ssize_t)res.x};
+             return py::array_t<double>(shape, data.data());
+           })
+
       .def("set_body_force", &CFDSolver::set_body_force, py::arg("force"))
       .def("set_theta_", &CFDSolver::set_theta_, py::arg("theta"))
       .def("set_rho", &CFDSolver::set_rho, py::arg("rho"))
@@ -88,10 +243,6 @@ PYBIND11_MODULE(pnm_backend, m) {
       .def("set_outer_tolerance", &CFDSolver::set_outer_tolerance,
            py::arg("tol"))
       .def("step", &CFDSolver::step, py::arg("dt"))
-      .def("get_u", &CFDSolver::get_u)
-      .def("get_v", &CFDSolver::get_v)
-      .def("get_w", &CFDSolver::get_w)
-      .def("get_p", &CFDSolver::get_p)
       .def("get_fluid_fraction", &CFDSolver::get_fluid_fraction,
            py::arg("type"), py::arg("offset"))
       .def("set_u", &CFDSolver::set_u, py::arg("u"))

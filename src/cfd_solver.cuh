@@ -130,6 +130,11 @@ public:
   CFDSolver(const CFDSolver &) = delete;
   CFDSolver &operator=(const CFDSolver &) = delete;
 
+  // Expose grid resolution to Python bindings
+  int3 get_resolution() const { return grid.res; }
+  // Optional: Expose spacing if needed later
+  float3 get_spacing() const { return grid.spacing; }
+
   // Initialize from host data (if needed, or just zero out)
   void initialize(const SDFData &sdf_data);
 
