@@ -238,6 +238,12 @@ PYBIND11_MODULE(pnm_backend, m) {
            py::arg("iter"))
       .def("set_velocity_solver_params", &CFDSolver::set_velocity_solver_params,
            py::arg("iter"))
+      .def("set_pressure_multigrid_enabled",
+           &CFDSolver::set_pressure_multigrid_enabled, py::arg("enabled"))
+      .def("set_pressure_multigrid_params",
+           &CFDSolver::set_pressure_multigrid_params, py::arg("max_levels"),
+           py::arg("pre_sweeps"), py::arg("post_sweeps"),
+           py::arg("bottom_sweeps"), py::arg("v_cycles"))
       .def("set_outer_iterations", &CFDSolver::set_outer_iterations,
            py::arg("iterations"))
       .def("set_outer_tolerance", &CFDSolver::set_outer_tolerance,

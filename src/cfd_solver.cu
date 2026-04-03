@@ -848,6 +848,7 @@ CFDSolver::CFDSolver(int3 res, float3 spacing)
 }
 
 CFDSolver::~CFDSolver() {
+  free_pressure_multigrid();
   CHECK_CUDA(cudaFree(grid.u));
   CHECK_CUDA(cudaFree(grid.v));
   CHECK_CUDA(cudaFree(grid.w));
@@ -1105,6 +1106,10 @@ void CFDSolver::initialize(const SDFData &sdf_data) {
 
   // Initialize IBM Geometry
   update_ibm_geometry();
+  pressure_mg_built_ = false;
+  if (pressure_multigrid_enabled_) {
+    build_pressure_multigrid();
+  }
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
@@ -1237,6 +1242,7 @@ void CFDSolver::update_ibm_geometry() {
             << grid.num_fluid_cells_v << " fluid cells" << std::endl;
   std::cout << "  W-Face: " << grid.num_ibm_cells_w << " IBM cells, "
             << grid.num_fluid_cells_w << " fluid cells" << std::endl;
+  pressure_mg_built_ = false;
 }
 
 void CFDSolver::set_body_force(float3 force_density) {
@@ -2200,21 +2206,48 @@ void CFDSolver::step(float dt) {
     CHECK_CUDA(cudaMemcpy(grid.p_old, grid.p, num_elements * sizeof(double),
                           cudaMemcpyDeviceToDevice));
     CHECK_CUDA(cudaMemset(grid.phi, 0, num_elements * sizeof(float)));
+    if (pressure_multigrid_enabled_) {
+      if (!pressure_mg_built_) {
+        build_pressure_multigrid();
+      }
 
-    compute_pressure_stencil_kernel<<<grid_dim, block>>>(
-        grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B, grid.A_T,
-        grid.B_RHS, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf, grid.u,
-        grid.v, grid.w, res, spacing);
-    CHECK_CUDA(cudaMemcpy(grid.rhs, grid.B_RHS, num_elements * sizeof(float),
-                          cudaMemcpyDeviceToDevice));
+      compute_pressure_rhs_kernel<<<grid_dim, block>>>(
+          grid.B_RHS, grid.frac_u, grid.frac_v, grid.frac_w, grid.sdf, grid.u,
+          grid.v, grid.w, res, spacing);
+      CHECK_CUDA(cudaGetLastError());
+      remove_mean_from_device_vector(grid.B_RHS, num_elements);
+      CHECK_CUDA(cudaMemcpy(grid.rhs, grid.B_RHS, num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
 
-    for (int k = 0; k < p_max_iter_; k++) {
-      solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
-          grid.phi, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, res, true);
-      solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
-          grid.phi, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
-          grid.A_T, grid.B_RHS, res, false);
+      PressureMGLevel &fine_level = pressure_mg_levels_.front();
+      CHECK_CUDA(cudaMemcpy(fine_level.rhs, grid.B_RHS,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+      CHECK_CUDA(cudaMemset(fine_level.x, 0, num_elements * sizeof(float)));
+
+      for (int cycle = 0; cycle < pressure_mg_v_cycles_; ++cycle) {
+        pressure_v_cycle(0);
+      }
+
+      CHECK_CUDA(cudaMemcpy(grid.phi, fine_level.x,
+                            num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+    } else {
+      compute_pressure_stencil_kernel<<<grid_dim, block>>>(
+          grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N, grid.A_B,
+          grid.A_T, grid.B_RHS, grid.frac_u, grid.frac_v, grid.frac_w,
+          grid.sdf, grid.u, grid.v, grid.w, res, spacing);
+      CHECK_CUDA(cudaMemcpy(grid.rhs, grid.B_RHS, num_elements * sizeof(float),
+                            cudaMemcpyDeviceToDevice));
+
+      for (int k = 0; k < p_max_iter_; k++) {
+        solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
+            grid.phi, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N,
+            grid.A_B, grid.A_T, grid.B_RHS, res, true);
+        solve_rbgs_stencil_kernel<<<grid_dim, block>>>(
+            grid.phi, grid.A_C, grid.A_W, grid.A_E, grid.A_S, grid.A_N,
+            grid.A_B, grid.A_T, grid.B_RHS, res, false);
+      }
     }
 
     project_velocity_kernel<<<grid_dim, block>>>(
