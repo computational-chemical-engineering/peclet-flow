@@ -104,6 +104,38 @@ __device__ inline float sample_sdf_interp(float x, float y, float z,
 // --------------------------------------------------------
 // Compute IBM Geometry Kernel (Robust Scaled)
 // --------------------------------------------------------
+static __global__ void count_ibm_cells_kernel(const float *__restrict__ sdf,
+                                              int3 res, float3 offset,
+                                              int *counter) {
+  // Lightweight count pass for compact IBM allocation. The subsequent geometry
+  // kernel performs the authoritative fill and records the final active count.
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+
+  float sdf_c = sample_sdf_interp(idx_x + offset.x, idx_y + offset.y,
+                                  idx_z + offset.z, sdf, res);
+  if (sdf_c <= 0.0f)
+    return;
+
+  const int dirs[6][3] = {
+      {1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
+      {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
+  };
+  for (int k = 0; k < 6; ++k) {
+    float sdf_n = sample_sdf_interp(idx_x + dirs[k][0] + offset.x,
+                                    idx_y + dirs[k][1] + offset.y,
+                                    idx_z + dirs[k][2] + offset.z, sdf, res);
+    if (sdf_n < 0.0f) {
+      atomicAdd(counter, 1);
+      return;
+    }
+  }
+}
+
 // bc_type: 0 = Dirichlet (Robust Scaled Polynomials)
 //          1 = Neumann (Zero Gradient: phi_g = phi_c => K=1, M=0)
 template <int SCHEME>

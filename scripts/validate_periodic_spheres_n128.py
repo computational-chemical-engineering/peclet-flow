@@ -45,8 +45,10 @@ def get_reference_k(phi):
     return float(np.interp(phi, ZICK_HOMSY_PHIS, ZICK_HOMSY_K))
 
 
-def build_solver(phi, res_n, enable_mg, mg_params, pressure_iter, velocity_iter,
-                 outer_iterations):
+def build_solver(phi, res_n, enable_pressure_mg, pressure_mg_params,
+                 enable_velocity_mg, velocity_mg_params, pressure_iter,
+                 velocity_iter, outer_iterations, outer_tolerance,
+                 outer_mode):
     sdf_zyx, radius, spacing = generate_sc_sdf_zyx(phi, res_n)
     solver = pnm_backend.CFDSolver([res_n, res_n, res_n], spacing)
     solver.initialize(sdf_zyx, [0.0, 0.0, 0.0], spacing)
@@ -57,11 +59,15 @@ def build_solver(phi, res_n, enable_mg, mg_params, pressure_iter, velocity_iter,
     solver.set_pressure_solver_params(iter=pressure_iter)
     solver.set_velocity_solver_params(iter=velocity_iter)
     solver.set_outer_iterations(outer_iterations)
-    solver.set_outer_tolerance(0.0)
+    solver.set_outer_tolerance(outer_tolerance)
+    solver.set_outer_convergence_mode(outer_mode)
 
-    solver.set_pressure_multigrid_enabled(enable_mg)
-    if enable_mg:
-        solver.set_pressure_multigrid_params(*mg_params)
+    solver.set_pressure_multigrid_enabled(enable_pressure_mg)
+    if enable_pressure_mg:
+        solver.set_pressure_multigrid_params(*pressure_mg_params)
+    solver.set_velocity_multigrid_enabled(enable_velocity_mg)
+    if enable_velocity_mg:
+        solver.set_velocity_multigrid_params(*velocity_mg_params)
 
     return solver, radius
 
@@ -70,11 +76,15 @@ def warm_up_cuda():
     solver, _ = build_solver(
         phi=0.001,
         res_n=16,
-        enable_mg=False,
-        mg_params=(2, 1, 1, 4, 1),
+        enable_pressure_mg=False,
+        pressure_mg_params=(2, 1, 1, 4, 1),
+        enable_velocity_mg=False,
+        velocity_mg_params=(2, 1, 1, 4, 1),
         pressure_iter=2,
         velocity_iter=1,
         outer_iterations=2,
+        outer_tolerance=0.0,
+        outer_mode=0,
     )
     solver.step(0.1)
     np.array(solver.get_u(), copy=False).mean()
@@ -84,19 +94,34 @@ def compute_drag_factor(radius, u_superficial, force=1.0, mu=1.0):
     return force / (6.0 * math.pi * mu * radius * u_superficial)
 
 
-def run_case(phi, res_n, enable_mg, mg_params, pressure_iter, velocity_iter,
-             outer_iterations, dt, max_steps, convergence_stride,
-             convergence_rel_tol):
-    solver, radius = build_solver(phi, res_n, enable_mg, mg_params, pressure_iter,
-                                  velocity_iter, outer_iterations)
+def run_case(phi, res_n, enable_pressure_mg, pressure_mg_params,
+             enable_velocity_mg, velocity_mg_params, pressure_iter,
+             velocity_iter, outer_iterations, outer_tolerance, outer_mode,
+             dt, max_steps,
+             convergence_stride, convergence_rel_tol):
+    solver, radius = build_solver(
+        phi,
+        res_n,
+        enable_pressure_mg,
+        pressure_mg_params,
+        enable_velocity_mg,
+        velocity_mg_params,
+        pressure_iter,
+        velocity_iter,
+        outer_iterations,
+        outer_tolerance,
+        outer_mode,
+    )
 
     u_mean_history = []
+    outer_iterations_used = []
     steps_taken = 0
     start = time.perf_counter()
 
     for step_idx in range(max_steps):
         solver.step(dt)
         steps_taken = step_idx + 1
+        outer_iterations_used.append(int(solver.get_last_outer_iterations()))
 
         if step_idx % convergence_stride != 0:
             continue
@@ -131,7 +156,13 @@ def run_case(phi, res_n, enable_mg, mg_params, pressure_iter, velocity_iter,
     return {
         "phi": phi,
         "resolution": res_n,
-        "method": "multigrid" if enable_mg else "rbgs",
+        "method": (
+            "pressure+velocity-multigrid"
+            if (enable_pressure_mg and enable_velocity_mg)
+            else "pressure-multigrid"
+            if enable_pressure_mg
+            else "rbgs"
+        ),
         "steps_taken": steps_taken,
         "elapsed_s": elapsed,
         "per_step_s": elapsed / max(steps_taken, 1),
@@ -139,6 +170,8 @@ def run_case(phi, res_n, enable_mg, mg_params, pressure_iter, velocity_iter,
         "k_sim": k_sim,
         "k_ref": k_ref,
         "ref_rel_error": ref_rel_error,
+        "outer_iterations_mean": float(np.mean(outer_iterations_used)),
+        "outer_iterations_max": int(np.max(outer_iterations_used)),
     }
 
 
@@ -147,10 +180,14 @@ def validate_pair(phi, args):
         phi,
         args.res,
         False,
-        args.mg_params,
+        args.pressure_mg_params,
+        False,
+        args.velocity_mg_params,
         args.pressure_iter,
         args.velocity_iter,
         args.outer_iterations,
+        args.outer_tol,
+        args.outer_mode,
         args.dt,
         args.max_steps,
         args.convergence_stride,
@@ -160,10 +197,14 @@ def validate_pair(phi, args):
         phi,
         args.res,
         True,
-        args.mg_params,
+        args.pressure_mg_params,
+        args.enable_velocity_mg,
+        args.velocity_mg_params,
         args.pressure_iter,
         args.velocity_iter,
         args.outer_iterations,
+        args.outer_tol,
+        args.outer_mode,
         args.dt,
         args.max_steps,
         args.convergence_stride,
@@ -188,11 +229,17 @@ def print_summary(results, args):
     print(
         f"Validation setup: N={args.res}, dt={args.dt}, max_steps={args.max_steps}, "
         f"pressure_iter={args.pressure_iter}, velocity_iter={args.velocity_iter}, "
-        f"outer_iterations={args.outer_iterations}"
+        f"outer_iterations={args.outer_iterations}, outer_tol={args.outer_tol}, "
+        f"outer_mode={args.outer_mode}"
     )
     print(
-        f"MG params: levels={args.mg_levels}, pre={args.mg_pre}, post={args.mg_post}, "
-        f"bottom={args.mg_bottom}, cycles={args.mg_cycles}"
+        f"Pressure MG params: levels={args.mg_levels}, pre={args.mg_pre}, "
+        f"post={args.mg_post}, bottom={args.mg_bottom}, cycles={args.mg_cycles}"
+    )
+    print(
+        f"Velocity MG: enabled={args.enable_velocity_mg}, levels={args.velocity_mg_levels}, "
+        f"pre={args.velocity_mg_pre}, post={args.velocity_mg_post}, "
+        f"bottom={args.velocity_mg_bottom}, cycles={args.velocity_mg_cycles}"
     )
     print(
         f"Tolerances: reference_rel_tol={args.reference_rel_tol:.4f}, "
@@ -202,7 +249,8 @@ def print_summary(results, args):
     print(
         f"{'phi':>8} {'K_ref':>10} {'K_rbgs':>10} {'K_mg':>10} "
         f"{'err_rbgs%':>10} {'err_mg%':>10} {'mg-rbgs%':>10} "
-        f"{'t_rbgs(s)':>10} {'t_mg(s)':>10} {'speedup':>8}"
+        f"{'t_rbgs(s)':>10} {'t_mg(s)':>10} {'speedup':>8} "
+        f"{'outer_rbgs':>10} {'outer_mg':>10}"
     )
     print("-" * 110)
 
@@ -214,7 +262,9 @@ def print_summary(results, args):
             f"{100.0 * res['mg']['ref_rel_error']:10.2f} "
             f"{100.0 * res['reproduce_rel_error']:10.3f} "
             f"{res['rbgs']['elapsed_s']:10.3f} {res['mg']['elapsed_s']:10.3f} "
-            f"{res['speedup']:8.3f}"
+            f"{res['speedup']:8.3f} "
+            f"{res['rbgs']['outer_iterations_mean']:10.2f} "
+            f"{res['mg']['outer_iterations_mean']:10.2f}"
         )
 
     print()
@@ -241,6 +291,10 @@ def write_csv(results, path):
             "speedup",
             "rbgs_steps",
             "mg_steps",
+            "rbgs_outer_iterations_mean",
+            "mg_outer_iterations_mean",
+            "rbgs_outer_iterations_max",
+            "mg_outer_iterations_max",
         ])
         for res in results:
             writer.writerow([
@@ -257,6 +311,10 @@ def write_csv(results, path):
                 res["speedup"],
                 res["rbgs"]["steps_taken"],
                 res["mg"]["steps_taken"],
+                res["rbgs"]["outer_iterations_mean"],
+                res["mg"]["outer_iterations_mean"],
+                res["rbgs"]["outer_iterations_max"],
+                res["mg"]["outer_iterations_max"],
             ])
 
 
@@ -279,6 +337,13 @@ def parse_args():
     parser.add_argument("--pressure-iter", type=int, default=50)
     parser.add_argument("--velocity-iter", type=int, default=2)
     parser.add_argument("--outer-iterations", type=int, default=800)
+    parser.add_argument("--outer-tol", type=float, default=0.0)
+    parser.add_argument(
+        "--outer-mode",
+        type=int,
+        default=0,
+        help="0 = absolute max correction over all cells, 1 = RMS correction over active velocity DOFs",
+    )
     parser.add_argument("--reference-rel-tol", type=float, default=0.02)
     parser.add_argument("--reproduce-rel-tol", type=float, default=0.01)
     parser.add_argument("--mg-levels", type=int, default=4)
@@ -286,6 +351,12 @@ def parse_args():
     parser.add_argument("--mg-post", type=int, default=2)
     parser.add_argument("--mg-bottom", type=int, default=32)
     parser.add_argument("--mg-cycles", type=int, default=2)
+    parser.add_argument("--enable-velocity-mg", action="store_true")
+    parser.add_argument("--velocity-mg-levels", type=int, default=4)
+    parser.add_argument("--velocity-mg-pre", type=int, default=1)
+    parser.add_argument("--velocity-mg-post", type=int, default=1)
+    parser.add_argument("--velocity-mg-bottom", type=int, default=16)
+    parser.add_argument("--velocity-mg-cycles", type=int, default=1)
     parser.add_argument(
         "--output-csv",
         default="output/periodic_spheres_n128_rbgs_vs_mg.csv",
@@ -296,12 +367,19 @@ def parse_args():
 
 def main():
     args = parse_args()
-    args.mg_params = (
+    args.pressure_mg_params = (
         args.mg_levels,
         args.mg_pre,
         args.mg_post,
         args.mg_bottom,
         args.mg_cycles,
+    )
+    args.velocity_mg_params = (
+        args.velocity_mg_levels,
+        args.velocity_mg_pre,
+        args.velocity_mg_post,
+        args.velocity_mg_bottom,
+        args.velocity_mg_cycles,
     )
 
     warm_up_cuda()

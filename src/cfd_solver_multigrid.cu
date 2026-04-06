@@ -117,7 +117,7 @@ __device__ float sample_field_interp_device(const float *__restrict__ field,
 }
 
 template <typename T>
-__global__ void solve_rbgs_pressure_kernel(
+__global__ void solve_rbgs_mg_kernel(
     T *__restrict__ phi, const float *__restrict__ A_C,
     const float *__restrict__ A_W, const float *__restrict__ A_E,
     const float *__restrict__ A_S, const float *__restrict__ A_N,
@@ -178,9 +178,10 @@ __global__ void compute_residual_kernel(
   residual[idx] = rhs[idx] - Ax;
 }
 
-__global__ void restrict_cell_average_kernel(float *__restrict__ coarse,
-                                             const float *__restrict__ fine,
-                                             int3 coarse_res, int3 fine_res) {
+template <typename T>
+__global__ void restrict_average_kernel(T *__restrict__ coarse,
+                                        const T *__restrict__ fine,
+                                        int3 coarse_res, int3 fine_res) {
   int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
   int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
   int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -188,7 +189,7 @@ __global__ void restrict_cell_average_kernel(float *__restrict__ coarse,
   if (idx_x >= coarse_res.x || idx_y >= coarse_res.y || idx_z >= coarse_res.z)
     return;
 
-  float sum = 0.0f;
+  T sum = static_cast<T>(0);
   for (int dz = 0; dz < 2; ++dz) {
     for (int dy = 0; dy < 2; ++dy) {
       for (int dx = 0; dx < 2; ++dx) {
@@ -197,7 +198,7 @@ __global__ void restrict_cell_average_kernel(float *__restrict__ coarse,
       }
     }
   }
-  coarse[get_idx(idx_x, idx_y, idx_z, coarse_res)] = 0.125f * sum;
+  coarse[get_idx(idx_x, idx_y, idx_z, coarse_res)] = static_cast<T>(0.125) * sum;
 }
 
 __global__ void prolongate_trilinear_add_kernel(
@@ -223,6 +224,54 @@ __global__ void subtract_mean_mg_kernel(float *__restrict__ data, float mean,
   if (idx >= num_elements)
     return;
   data[idx] -= mean;
+}
+
+void build_sdf_hierarchy_host(const float *fine_sdf_device, int3 fine_res,
+                              float3 fine_spacing, int max_levels,
+                              std::vector<int3> &level_res,
+                              std::vector<float3> &level_spacing,
+                              std::vector<std::vector<float>> &host_sdf_levels) {
+  level_res.clear();
+  level_spacing.clear();
+  host_sdf_levels.clear();
+
+  const int fine_num_elements = fine_res.x * fine_res.y * fine_res.z;
+  level_res.push_back(fine_res);
+  level_spacing.push_back(fine_spacing);
+  host_sdf_levels.emplace_back(fine_num_elements);
+  CHECK_CUDA(cudaMemcpy(host_sdf_levels[0].data(), fine_sdf_device,
+                        fine_num_elements * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+
+  while (static_cast<int>(level_res.size()) < max_levels) {
+    int3 curr_res = level_res.back();
+    if ((curr_res.x % 2) != 0 || (curr_res.y % 2) != 0 || (curr_res.z % 2) != 0)
+      break;
+    if (curr_res.x < 8 || curr_res.y < 8 || curr_res.z < 8)
+      break;
+
+    int3 coarse_res =
+        make_int3(curr_res.x / 2, curr_res.y / 2, curr_res.z / 2);
+    float3 curr_spacing = level_spacing.back();
+    float3 coarse_spacing = make_float3(2.0f * curr_spacing.x,
+                                        2.0f * curr_spacing.y,
+                                        2.0f * curr_spacing.z);
+    std::vector<float> coarse_sdf(coarse_res.x * coarse_res.y * coarse_res.z);
+    const auto &curr_sdf = host_sdf_levels.back();
+    for (int z = 0; z < coarse_res.z; ++z) {
+      for (int y = 0; y < coarse_res.y; ++y) {
+        for (int x = 0; x < coarse_res.x; ++x) {
+          coarse_sdf[get_idx_host(x, y, z, coarse_res)] =
+              sample_field_interp_host(curr_sdf, curr_res, 2.0f * x + 0.5f,
+                                       2.0f * y + 0.5f, 2.0f * z + 0.5f);
+        }
+      }
+    }
+
+    level_res.push_back(coarse_res);
+    level_spacing.push_back(coarse_spacing);
+    host_sdf_levels.push_back(std::move(coarse_sdf));
+  }
 }
 
 } // namespace
@@ -334,10 +383,10 @@ void CFDSolver::pressure_smooth_level(PressureMGLevel &level, int sweeps) {
                 (level.res.y + block.y - 1) / block.y,
                 (level.res.z + block.z - 1) / block.z);
   for (int k = 0; k < sweeps; ++k) {
-    solve_rbgs_pressure_kernel<<<grid_dim, block>>>(
+    solve_rbgs_mg_kernel<<<grid_dim, block>>>(
         level.x, level.A_C, level.A_W, level.A_E, level.A_S, level.A_N,
         level.A_B, level.A_T, level.rhs, level.res, true);
-    solve_rbgs_pressure_kernel<<<grid_dim, block>>>(
+    solve_rbgs_mg_kernel<<<grid_dim, block>>>(
         level.x, level.A_C, level.A_W, level.A_E, level.A_S, level.A_N,
         level.A_B, level.A_T, level.rhs, level.res, false);
   }
@@ -370,7 +419,7 @@ void CFDSolver::pressure_v_cycle(int level_idx) {
   dim3 coarse_grid_dim((coarse.res.x + block.x - 1) / block.x,
                        (coarse.res.y + block.y - 1) / block.y,
                        (coarse.res.z + block.z - 1) / block.z);
-  restrict_cell_average_kernel<<<coarse_grid_dim, block>>>(
+  restrict_average_kernel<<<coarse_grid_dim, block>>>(
       coarse.rhs, level.residual, coarse.res, level.res);
   CHECK_CUDA(cudaGetLastError());
   remove_mean_from_device_vector(coarse.rhs, coarse.num_elements);
@@ -418,42 +467,8 @@ void CFDSolver::build_pressure_multigrid() {
   std::vector<int3> level_res;
   std::vector<float3> level_spacing;
   std::vector<std::vector<float>> host_sdf_levels;
-
-  level_res.push_back(grid.res);
-  level_spacing.push_back(grid.spacing);
-  host_sdf_levels.emplace_back(grid.num_elements);
-  CHECK_CUDA(cudaMemcpy(host_sdf_levels[0].data(), grid.sdf,
-                        grid.num_elements * sizeof(float),
-                        cudaMemcpyDeviceToHost));
-
-  while (static_cast<int>(level_res.size()) < pressure_mg_max_levels_) {
-    int3 fine_res = level_res.back();
-    if ((fine_res.x % 2) != 0 || (fine_res.y % 2) != 0 || (fine_res.z % 2) != 0)
-      break;
-    if (fine_res.x < 8 || fine_res.y < 8 || fine_res.z < 8)
-      break;
-
-    int3 coarse_res = make_int3(fine_res.x / 2, fine_res.y / 2, fine_res.z / 2);
-    float3 fine_spacing = level_spacing.back();
-    float3 coarse_spacing =
-        make_float3(2.0f * fine_spacing.x, 2.0f * fine_spacing.y, 2.0f * fine_spacing.z);
-
-    std::vector<float> coarse_sdf(coarse_res.x * coarse_res.y * coarse_res.z);
-    const auto &fine_sdf = host_sdf_levels.back();
-    for (int z = 0; z < coarse_res.z; ++z) {
-      for (int y = 0; y < coarse_res.y; ++y) {
-        for (int x = 0; x < coarse_res.x; ++x) {
-          coarse_sdf[get_idx_host(x, y, z, coarse_res)] =
-              sample_field_interp_host(fine_sdf, fine_res, 2.0f * x + 0.5f,
-                                       2.0f * y + 0.5f, 2.0f * z + 0.5f);
-        }
-      }
-    }
-
-    level_res.push_back(coarse_res);
-    level_spacing.push_back(coarse_spacing);
-    host_sdf_levels.push_back(std::move(coarse_sdf));
-  }
+  build_sdf_hierarchy_host(grid.sdf, grid.res, grid.spacing, pressure_mg_max_levels_,
+                           level_res, level_spacing, host_sdf_levels);
 
   pressure_mg_levels_.resize(level_res.size());
   dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z);
