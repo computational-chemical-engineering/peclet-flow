@@ -226,6 +226,7 @@ PYBIND11_MODULE(pnm_backend, m) {
                                            (ssize_t)res.x};
              return py::array_t<double>(shape, data.data());
            })
+      .def("get_last_outer_iterations", &CFDSolver::get_last_outer_iterations)
 
       .def("set_body_force", &CFDSolver::set_body_force, py::arg("force"))
       .def("set_theta_", &CFDSolver::set_theta_, py::arg("theta"))
@@ -238,10 +239,24 @@ PYBIND11_MODULE(pnm_backend, m) {
            py::arg("iter"))
       .def("set_velocity_solver_params", &CFDSolver::set_velocity_solver_params,
            py::arg("iter"))
+      .def("set_pressure_multigrid_enabled",
+           &CFDSolver::set_pressure_multigrid_enabled, py::arg("enabled"))
+      .def("set_pressure_multigrid_params",
+           &CFDSolver::set_pressure_multigrid_params, py::arg("max_levels"),
+           py::arg("pre_sweeps"), py::arg("post_sweeps"),
+           py::arg("bottom_sweeps"), py::arg("v_cycles"))
+      .def("set_velocity_multigrid_enabled",
+           &CFDSolver::set_velocity_multigrid_enabled, py::arg("enabled"))
+      .def("set_velocity_multigrid_params",
+           &CFDSolver::set_velocity_multigrid_params, py::arg("max_levels"),
+           py::arg("pre_sweeps"), py::arg("post_sweeps"),
+           py::arg("bottom_sweeps"), py::arg("v_cycles"))
       .def("set_outer_iterations", &CFDSolver::set_outer_iterations,
            py::arg("iterations"))
       .def("set_outer_tolerance", &CFDSolver::set_outer_tolerance,
            py::arg("tol"))
+      .def("set_outer_convergence_mode",
+           &CFDSolver::set_outer_convergence_mode, py::arg("mode"))
       .def("step", &CFDSolver::step, py::arg("dt"))
       .def("get_fluid_fraction", &CFDSolver::get_fluid_fraction,
            py::arg("type"), py::arg("offset"))

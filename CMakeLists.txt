@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
-set(CMAKE_CUDA_ARCHITECTURES 75 80 86)
+set(CMAKE_CUDA_ARCHITECTURES 75 80 86 120)
 set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
 enable_language(CUDA)
 
@@ -26,6 +26,7 @@ set(SOURCES
     src/pore_extraction.cu
     src/cfd_solver.cu
     src/cfd_solver_ibm.cu
+    src/cfd_solver_multigrid.cu
 )
 
 # Define the Python extension module

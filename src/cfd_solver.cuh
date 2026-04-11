@@ -121,6 +121,70 @@ struct MacGrid {
   float *d_inhom_scratch;
 };
 
+struct PressureMGLevel {
+  int3 res = make_int3(0, 0, 0);
+  float3 spacing = make_float3(0.0f, 0.0f, 0.0f);
+  int num_elements = 0;
+
+  float *sdf = nullptr;
+  float *frac_u = nullptr;
+  float *frac_v = nullptr;
+  float *frac_w = nullptr;
+
+  float *A_C = nullptr;
+  float *A_W = nullptr;
+  float *A_E = nullptr;
+  float *A_S = nullptr;
+  float *A_N = nullptr;
+  float *A_B = nullptr;
+  float *A_T = nullptr;
+
+  float *x = nullptr;
+  float *rhs = nullptr;
+  float *residual = nullptr;
+};
+
+struct VelocityMGLevel {
+  int3 res = make_int3(0, 0, 0);
+  float3 spacing = make_float3(0.0f, 0.0f, 0.0f);
+  int num_elements = 0;
+
+  float *sdf = nullptr;
+  double *u = nullptr;
+  double *v = nullptr;
+  double *w = nullptr;
+  double *p = nullptr;
+
+  IBM_Data ibm_data_u{};
+  IBM_Data ibm_data_v{};
+  IBM_Data ibm_data_w{};
+  int *ibm_id_map_u = nullptr;
+  int *ibm_id_map_v = nullptr;
+  int *ibm_id_map_w = nullptr;
+  int *fluid_indices_u = nullptr;
+  int *fluid_indices_v = nullptr;
+  int *fluid_indices_w = nullptr;
+  int num_ibm_cells_u = 0;
+  int num_ibm_cells_v = 0;
+  int num_ibm_cells_w = 0;
+  int num_fluid_cells_u = 0;
+  int num_fluid_cells_v = 0;
+  int num_fluid_cells_w = 0;
+
+  float *A_C = nullptr;
+  float *A_W = nullptr;
+  float *A_E = nullptr;
+  float *A_S = nullptr;
+  float *A_N = nullptr;
+  float *A_B = nullptr;
+  float *A_T = nullptr;
+
+  float *x = nullptr;
+  float *rhs = nullptr;
+  float *residual = nullptr;
+  bool owns_storage = false;
+};
+
 class CFDSolver {
 public:
   CFDSolver(int3 res, float3 spacing);
@@ -161,6 +225,8 @@ public:
   std::vector<double> get_p() const;
   float get_momentum_residual_max(bool fluid_only = false);
   float get_divergence_max(float dt, bool fluid_only = false);
+  int get_last_outer_iterations() const { return last_outer_iterations_used_; }
+  void set_outer_convergence_mode(int mode);
   void set_debug_stats(bool enabled);
   std::vector<float> get_debug_stats() const;
   std::vector<std::vector<float>> get_debug_fields() const;
@@ -182,6 +248,12 @@ private:
   int v_max_iter_;
   int outer_iterations_ = 4;
   float outer_tol_ = -1.0f;
+  // 0: absolute max correction, 1: RMS over active velocity DOFs.
+  int outer_convergence_mode_ = 0;
+  int last_outer_iterations_used_ = 0;
+  // Static geometries rebuild IBM preprocessing only when the geometry or
+  // scheme changes.
+  bool ibm_geometry_dirty_ = true;
   bool debug_stats_enabled_ = false;
   bool debug_cell_enabled_ = false;
   int3 debug_cell_ = make_int3(0, 0, 0);
@@ -220,6 +292,14 @@ public:
   // Solver Parameters
   void set_pressure_solver_params(int iter);
   void set_velocity_solver_params(int iter);
+  void set_pressure_multigrid_enabled(bool enabled);
+  void set_pressure_multigrid_params(int max_levels, int pre_sweeps,
+                                     int post_sweeps, int bottom_sweeps,
+                                     int v_cycles);
+  void set_velocity_multigrid_enabled(bool enabled);
+  void set_velocity_multigrid_params(int max_levels, int pre_sweeps,
+                                     int post_sweeps, int bottom_sweeps,
+                                     int v_cycles);
 
   // Unified Solver Step (Picard Iteration)
   // Replaces step_newton
@@ -246,6 +326,46 @@ public:
 
 protected:
   int pin_idx;
+
+private:
+  void free_pressure_multigrid();
+  void build_pressure_multigrid();
+  void pressure_v_cycle(int level_idx);
+  void pressure_smooth_level(PressureMGLevel &level, int sweeps);
+  void free_velocity_multigrid();
+  void build_velocity_multigrid();
+  void velocity_bind_fine_level(const double *u, const double *v,
+                                const double *w, const double *p, float *x,
+                                float *rhs, float *A_C, float *A_W, float *A_E,
+                                float *A_S, float *A_N, float *A_B,
+                                float *A_T);
+  void velocity_update_coarse_operators(int component, float dt, float theta);
+  void velocity_v_cycle(int level_idx);
+  void velocity_smooth_level(VelocityMGLevel &level, int sweeps);
+  void solve_velocity_with_multigrid(
+      int component, const double *u, const double *v, const double *w,
+      const double *p, float *x, float *rhs, float *A_C, float *A_W,
+      float *A_E, float *A_S, float *A_N, float *A_B, float *A_T, float dt,
+      float theta);
+  void remove_mean_from_device_vector(float *d_data, int num_elements);
+
+private:
+  std::vector<PressureMGLevel> pressure_mg_levels_;
+  std::vector<VelocityMGLevel> velocity_mg_levels_;
+  bool pressure_multigrid_enabled_ = false;
+  bool pressure_mg_built_ = false;
+  bool velocity_multigrid_enabled_ = false;
+  bool velocity_mg_built_ = false;
+  int pressure_mg_max_levels_ = 4;
+  int pressure_mg_pre_sweeps_ = 2;
+  int pressure_mg_post_sweeps_ = 2;
+  int pressure_mg_bottom_sweeps_ = 32;
+  int pressure_mg_v_cycles_ = 2;
+  int velocity_mg_max_levels_ = 4;
+  int velocity_mg_pre_sweeps_ = 2;
+  int velocity_mg_post_sweeps_ = 2;
+  int velocity_mg_bottom_sweeps_ = 16;
+  int velocity_mg_v_cycles_ = 1;
 };
 
 // Start of Kernel Declarations
@@ -260,6 +380,20 @@ __global__ void compute_advection_correction_kernel(
     const float *__restrict__ phi, // The scalar field being advected
     const float *__restrict__ sdf, const int *__restrict__ ibm_id_map,
     IBM_Data ibm_data, int comp_idx, int3 res, float3 spacing, float rho_theta);
+
+__global__ void compute_pressure_operator_kernel(
+    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
+    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
+    float *__restrict__ A_T, const float *__restrict__ frac_u,
+    const float *__restrict__ frac_v, const float *__restrict__ frac_w,
+    const float *__restrict__ sdf, int3 res, float3 spacing);
+
+__global__ void compute_pressure_rhs_kernel(
+    float *__restrict__ B_RHS, const float *__restrict__ frac_u,
+    const float *__restrict__ frac_v, const float *__restrict__ frac_w,
+    const float *__restrict__ sdf, const double *__restrict__ u,
+    const double *__restrict__ v, const double *__restrict__ w, int3 res,
+    float3 spacing);
 
 // HELPER IMPLEMENTATION
 // (Removed get_ibm_update_rbgs as we switched to Stencil Solver)
