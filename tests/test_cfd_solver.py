@@ -1,71 +1,47 @@
-import sys
 import os
+import sys
+
 import numpy as np
 
-# Add build directory to path to find the module
-sys.path.append(os.path.join(os.path.dirname(__file__), '../build'))
+sys.path.append(os.path.join(os.path.dirname(__file__), "../build"))
 
-try:
-    import pnm_backend
-    print("Successfully imported pnm_backend")
-except ImportError as e:
-    print(f"Failed to import pnm_backend: {e}")
-    sys.exit(1)
+import pnm_backend
 
-def test_periodic_channel_flow():
-    """
-    Test a simple periodic channel flow driven by a body force.
-    """
-    nx, ny, nz = 32, 32, 32
-    res = pnm_backend.int3(nx, ny, nz)
-    spacing = pnm_backend.float3(1.0, 1.0, 1.0)
-    
-    # Create Solver
-    solver = pnm_backend.CFDSolver(res, spacing)
-    
-    # Apply Body Force in X direction
-    force_x = 1.0
-    solver.set_body_force(pnm_backend.float3(force_x, 0.0, 0.0))
-    
-    # Run Simulation
-    # Re=100? No viscosity yet (Inviscid). 
-    # Velocity should increase linearly v = F*t if no advection and no pressure gradient opposes it.
-    # But pressure gradient will likely not oppose it in periodic x-direction unless we block it (but it's empty space).
-    # So u should grow indefinitely.
-    
-    dt = 0.1
-    rho = 1.0
-    steps = 10
-    
-    print(f"Running {steps} steps with Fx={force_x}...")
-    
-    solver.set_rho(rho)
-    solver.set_mu(0.0)
-    solver.set_pressure_solver_params(iter=10)
-    
-    for i in range(steps):
-        solver.step(dt)
-        
-    u = np.array(solver.get_u()).reshape((nx, ny, nz), order='F')
-    
-    mean_u = np.mean(u)
-    expected_u = force_x * dt * steps # f = ma => a = f/rho (rho=1) => v = a*t
-    
-    print(f"Mean U: {mean_u:.4f}")
-    print(f"Expected U (approx): {expected_u:.4f}")
-    
-    if np.abs(mean_u - expected_u) < 1e-2:
-        print("PASS: Velocity matches acceleration from body force.")
-    else:
-        print("FAIL: Velocity mismatch.")
 
-    # Check Divergence free (should be 0 for uniform flow)
-    # The solver projects it.
-    
-def test_cavity_like_setup():
-    # Not actually lid driven since we don't support BCs yet (only periodic),
-    # but we can test if the solver runs without crashing on random init?
-    pass
+def make_sphere_sdf_zyx(n, radius):
+    dx = 1.0 / n
+    coords = np.linspace(0.0, 1.0, n, endpoint=False) + 0.5 * dx
+    x, y, z = np.meshgrid(coords, coords, coords, indexing="ij")
+    sdf_xyz = np.sqrt((x - 0.5) ** 2 + (y - 0.5) ** 2 + (z - 0.5) ** 2) - radius
+    return np.transpose(sdf_xyz, (2, 1, 0)).astype(np.float32), dx
+
+
+def test_single_sphere_large_dt_continuation():
+    n = 24
+    sdf_zyx, dx = make_sphere_sdf_zyx(n, radius=0.18)
+    spacing = [dx, dx, dx]
+    solver = pnm_backend.CFDSolver([n, n, n], spacing)
+    solver.initialize(sdf_zyx, [0.0, 0.0, 0.0], spacing)
+    solver.set_rho(1.0)
+    solver.set_mu(1.0)
+    solver.set_body_force(pnm_backend.float3(10.0, 0.0, 0.0))
+    solver.set_pressure_solver_params(200)
+    solver.set_velocity_solver_params(30)
+    solver.set_pressure_multigrid_enabled(True)
+    solver.set_pressure_multigrid_params(4, 2, 2, 32, 2)
+    solver.set_velocity_multigrid_enabled(False)
+    solver.set_outer_iterations(100)
+    solver.set_outer_tolerance(1e-4)
+
+    residuals = []
+    for _ in range(3):
+        solver.step(1.0)
+        u = np.array(solver.get_u(), copy=False)
+        assert np.isfinite(u).all()
+        residuals.append(solver.get_momentum_residual_max(True))
+
+    assert residuals[-1] < residuals[0]
+
 
 if __name__ == "__main__":
-    test_periodic_channel_flow()
+    test_single_sphere_large_dt_continuation()

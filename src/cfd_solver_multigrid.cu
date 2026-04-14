@@ -328,6 +328,100 @@ __global__ void compute_pressure_operator_kernel(
   A_C[idx] = ax_p + ax_m + ay_p + ay_m + az_p + az_m;
 }
 
+__global__ void compute_periodic_pressure_operator_kernel(
+    float *__restrict__ A_C, float *__restrict__ A_W, float *__restrict__ A_E,
+    float *__restrict__ A_S, float *__restrict__ A_N, float *__restrict__ A_B,
+    float *__restrict__ A_T, int3 res, float3 spacing) {
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+  int idx = get_idx(idx_x, idx_y, idx_z, res);
+
+  float inv_dx2 = 1.0f / (spacing.x * spacing.x);
+  float inv_dy2 = 1.0f / (spacing.y * spacing.y);
+  float inv_dz2 = 1.0f / (spacing.z * spacing.z);
+
+  A_E[idx] = -inv_dx2;
+  A_W[idx] = -inv_dx2;
+  A_N[idx] = -inv_dy2;
+  A_S[idx] = -inv_dy2;
+  A_T[idx] = -inv_dz2;
+  A_B[idx] = -inv_dz2;
+  A_C[idx] = 2.0f * (inv_dx2 + inv_dy2 + inv_dz2);
+}
+
+__global__ void compute_periodic_pressure_rhs_kernel(
+    float *__restrict__ B_RHS, const double *__restrict__ u,
+    const double *__restrict__ v, const double *__restrict__ w, int3 res,
+    float3 spacing) {
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+  int idx = get_idx(idx_x, idx_y, idx_z, res);
+  int idx_xp = get_idx(idx_x + 1, idx_y, idx_z, res);
+  int idx_yp = get_idx(idx_x, idx_y + 1, idx_z, res);
+  int idx_zp = get_idx(idx_x, idx_y, idx_z + 1, res);
+
+  double du_dx = (u[idx_xp] - u[idx]) / spacing.x;
+  double dv_dy = (v[idx_yp] - v[idx]) / spacing.y;
+  double dw_dz = (w[idx_zp] - w[idx]) / spacing.z;
+  B_RHS[idx] = static_cast<float>(-(du_dx + dv_dy + dw_dz));
+}
+
+__global__ void subtract_vectors_kernel(float *__restrict__ out,
+                                        const float *__restrict__ a,
+                                        const float *__restrict__ b,
+                                        int num_elements) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_elements)
+    return;
+  out[idx] = a[idx] - b[idx];
+}
+
+__global__ void copy_vector_kernel(float *__restrict__ dst,
+                                   const float *__restrict__ src,
+                                   int num_elements) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_elements)
+    return;
+  dst[idx] = src[idx];
+}
+
+__global__ void project_velocity_periodic_kernel(
+    double *__restrict__ u, double *__restrict__ v, double *__restrict__ w,
+    const float *__restrict__ phi, int3 res, float3 spacing) {
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+  int idx = get_idx(idx_x, idx_y, idx_z, res);
+  int idx_xm = get_idx(idx_x - 1, idx_y, idx_z, res);
+  int idx_ym = get_idx(idx_x, idx_y - 1, idx_z, res);
+  int idx_zm = get_idx(idx_x, idx_y, idx_z - 1, res);
+
+  u[idx] -= (phi[idx] - phi[idx_xm]) / spacing.x;
+  v[idx] -= (phi[idx] - phi[idx_ym]) / spacing.y;
+  w[idx] -= (phi[idx] - phi[idx_zm]) / spacing.z;
+}
+
+__global__ void update_pressure_from_phi_periodic_kernel(
+    double *__restrict__ p, const float *__restrict__ phi_delta,
+    const float *__restrict__ rhs_phi, int num_elements, float dt, float rho,
+    float mu) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_elements)
+    return;
+  p[idx] += static_cast<double>((rho / dt) * phi_delta[idx] + mu * rhs_phi[idx]);
+}
+
 __global__ void compute_pressure_rhs_kernel(
     float *__restrict__ B_RHS, const float *__restrict__ frac_u,
     const float *__restrict__ frac_v, const float *__restrict__ frac_w,
@@ -393,44 +487,122 @@ void CFDSolver::pressure_smooth_level(PressureMGLevel &level, int sweeps) {
   CHECK_CUDA(cudaGetLastError());
 }
 
-void CFDSolver::pressure_v_cycle(int level_idx) {
-  PressureMGLevel &level = pressure_mg_levels_[level_idx];
-  const bool is_bottom = (level_idx + 1 == static_cast<int>(pressure_mg_levels_.size()));
-  if (is_bottom) {
-    pressure_smooth_level(level, pressure_mg_bottom_sweeps_);
-    remove_mean_from_device_vector(level.x, level.num_elements);
-    return;
-  }
+void CFDSolver::pressure_restrict_state_to_coarse(
+    const double *u, const double *v, const double *w, const double *p,
+    int3 fine_res, PressureMGLevel &coarse) {
+  dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z);
+  dim3 coarse_grid_dim((coarse.res.x + block.x - 1) / block.x,
+                       (coarse.res.y + block.y - 1) / block.y,
+                       (coarse.res.z + block.z - 1) / block.z);
+  restrict_average_kernel<<<coarse_grid_dim, block>>>(coarse.u, u, coarse.res,
+                                                      fine_res);
+  restrict_average_kernel<<<coarse_grid_dim, block>>>(coarse.v, v, coarse.res,
+                                                      fine_res);
+  restrict_average_kernel<<<coarse_grid_dim, block>>>(coarse.w, w, coarse.res,
+                                                      fine_res);
+  restrict_average_kernel<<<coarse_grid_dim, block>>>(coarse.p, p, coarse.res,
+                                                      fine_res);
+  CHECK_CUDA(cudaGetLastError());
+  CHECK_CUDA(cudaMemset(coarse.x, 0, coarse.num_elements * sizeof(float)));
+  CHECK_CUDA(cudaMemset(coarse.x_applied, 0,
+                        coarse.num_elements * sizeof(float)));
+}
 
-  pressure_smooth_level(level, pressure_mg_pre_sweeps_);
+void CFDSolver::pressure_compute_level_rhs(PressureMGLevel &level,
+                                           bool use_periodic_operator) {
+  dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z);
+  dim3 grid_dim((level.res.x + block.x - 1) / block.x,
+                (level.res.y + block.y - 1) / block.y,
+                (level.res.z + block.z - 1) / block.z);
+  if (use_periodic_operator) {
+    compute_periodic_pressure_rhs_kernel<<<grid_dim, block>>>(
+        level.rhs, level.u, level.v, level.w, level.res, level.spacing);
+  } else {
+    compute_pressure_rhs_kernel<<<grid_dim, block>>>(
+        level.rhs, level.frac_u, level.frac_v, level.frac_w, level.sdf, level.u,
+        level.v, level.w, level.res, level.spacing);
+  }
+  CHECK_CUDA(cudaGetLastError());
+  remove_mean_from_device_vector(level.rhs, level.num_elements);
+}
+
+void CFDSolver::pressure_apply_level_projection(PressureMGLevel &level, float dt,
+                                                float theta,
+                                                bool use_periodic_operator) {
+  (void)theta;
+  if (!level.owns_state)
+    return;
 
   dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z);
   dim3 grid_dim((level.res.x + block.x - 1) / block.x,
                 (level.res.y + block.y - 1) / block.y,
                 (level.res.z + block.z - 1) / block.z);
+  dim3 block1d(256);
+  dim3 grid1d((level.num_elements + block1d.x - 1) / block1d.x);
 
+  subtract_vectors_kernel<<<grid1d, block1d>>>(level.residual, level.x,
+                                               level.x_applied,
+                                               level.num_elements);
+  CHECK_CUDA(cudaGetLastError());
+
+  if (use_periodic_operator) {
+    project_velocity_periodic_kernel<<<grid_dim, block>>>(
+        level.u, level.v, level.w, level.residual, level.res, level.spacing);
+    CHECK_CUDA(cudaGetLastError());
+    update_pressure_from_phi_periodic_kernel<<<grid1d, block1d>>>(
+        level.p, level.residual, level.rhs, level.num_elements, dt, rho_, mu_);
+    CHECK_CUDA(cudaGetLastError());
+  }
+
+  copy_vector_kernel<<<grid1d, block1d>>>(level.x_applied, level.x,
+                                          level.num_elements);
+  CHECK_CUDA(cudaGetLastError());
+  pressure_compute_level_rhs(level, use_periodic_operator);
+}
+
+void CFDSolver::pressure_v_cycle(int level_idx, float dt, float theta) {
+  (void)dt;
+  (void)theta;
+  PressureMGLevel &level = pressure_mg_levels_[level_idx];
+  const bool is_bottom =
+      (level_idx + 1 == static_cast<int>(pressure_mg_levels_.size()));
+  const bool use_periodic_operator = (level_idx > 0);
+  const int sweep_scale = use_periodic_operator ? (level_idx + 1) : 1;
+  const int pre_sweeps = pressure_mg_pre_sweeps_ * sweep_scale;
+  const int post_sweeps = pressure_mg_post_sweeps_ * sweep_scale;
+  const int bottom_sweeps = pressure_mg_bottom_sweeps_ * sweep_scale;
+  if (is_bottom) {
+    pressure_smooth_level(level, bottom_sweeps);
+    remove_mean_from_device_vector(level.x, level.num_elements);
+    return;
+  }
+
+  pressure_smooth_level(level, pre_sweeps);
+
+  PressureMGLevel &coarse = pressure_mg_levels_[level_idx + 1];
+  dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z);
+  dim3 grid_dim((level.res.x + block.x - 1) / block.x,
+                (level.res.y + block.y - 1) / block.y,
+                (level.res.z + block.z - 1) / block.z);
   compute_residual_kernel<<<grid_dim, block>>>(
       level.residual, level.x, level.A_C, level.A_W, level.A_E, level.A_S,
       level.A_N, level.A_B, level.A_T, level.rhs, level.res);
   CHECK_CUDA(cudaGetLastError());
 
-  PressureMGLevel &coarse = pressure_mg_levels_[level_idx + 1];
-  CHECK_CUDA(cudaMemset(coarse.x, 0, coarse.num_elements * sizeof(float)));
   dim3 coarse_grid_dim((coarse.res.x + block.x - 1) / block.x,
                        (coarse.res.y + block.y - 1) / block.y,
                        (coarse.res.z + block.z - 1) / block.z);
-  restrict_average_kernel<<<coarse_grid_dim, block>>>(
-      coarse.rhs, level.residual, coarse.res, level.res);
+  restrict_average_kernel<<<coarse_grid_dim, block>>>(coarse.rhs, level.residual,
+                                                      coarse.res, level.res);
   CHECK_CUDA(cudaGetLastError());
-  remove_mean_from_device_vector(coarse.rhs, coarse.num_elements);
-
-  pressure_v_cycle(level_idx + 1);
+  CHECK_CUDA(cudaMemset(coarse.x, 0, coarse.num_elements * sizeof(float)));
+  pressure_v_cycle(level_idx + 1, dt, theta);
 
   prolongate_trilinear_add_kernel<<<grid_dim, block>>>(level.x, coarse.x,
                                                        level.res, coarse.res);
   CHECK_CUDA(cudaGetLastError());
 
-  pressure_smooth_level(level, pressure_mg_post_sweeps_);
+  pressure_smooth_level(level, post_sweeps);
   remove_mean_from_device_vector(level.x, level.num_elements);
 }
 
@@ -451,7 +623,18 @@ void CFDSolver::free_pressure_multigrid() {
     free_if(level.A_N);
     free_if(level.A_B);
     free_if(level.A_T);
+    if (level.owns_state) {
+      if (level.u != nullptr)
+        CHECK_CUDA(cudaFree(level.u));
+      if (level.v != nullptr)
+        CHECK_CUDA(cudaFree(level.v));
+      if (level.w != nullptr)
+        CHECK_CUDA(cudaFree(level.w));
+      if (level.p != nullptr)
+        CHECK_CUDA(cudaFree(level.p));
+    }
     free_if(level.x);
+    free_if(level.x_applied);
     free_if(level.rhs);
     free_if(level.residual);
   }
@@ -478,6 +661,7 @@ void CFDSolver::build_pressure_multigrid() {
     level.res = level_res[level_idx];
     level.spacing = level_spacing[level_idx];
     level.num_elements = level.res.x * level.res.y * level.res.z;
+    level.owns_state = (level_idx > 0);
 
     size_t bytes = static_cast<size_t>(level.num_elements) * sizeof(float);
     CHECK_CUDA(cudaMalloc(&level.sdf, bytes));
@@ -492,12 +676,25 @@ void CFDSolver::build_pressure_multigrid() {
     CHECK_CUDA(cudaMalloc(&level.A_B, bytes));
     CHECK_CUDA(cudaMalloc(&level.A_T, bytes));
     CHECK_CUDA(cudaMalloc(&level.x, bytes));
+    CHECK_CUDA(cudaMalloc(&level.x_applied, bytes));
     CHECK_CUDA(cudaMalloc(&level.rhs, bytes));
     CHECK_CUDA(cudaMalloc(&level.residual, bytes));
+    if (level.owns_state) {
+      size_t dbytes = static_cast<size_t>(level.num_elements) * sizeof(double);
+      CHECK_CUDA(cudaMalloc(&level.u, dbytes));
+      CHECK_CUDA(cudaMalloc(&level.v, dbytes));
+      CHECK_CUDA(cudaMalloc(&level.w, dbytes));
+      CHECK_CUDA(cudaMalloc(&level.p, dbytes));
+      CHECK_CUDA(cudaMemset(level.u, 0, dbytes));
+      CHECK_CUDA(cudaMemset(level.v, 0, dbytes));
+      CHECK_CUDA(cudaMemset(level.w, 0, dbytes));
+      CHECK_CUDA(cudaMemset(level.p, 0, dbytes));
+    }
 
     CHECK_CUDA(cudaMemcpy(level.sdf, host_sdf_levels[level_idx].data(), bytes,
                           cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemset(level.x, 0, bytes));
+    CHECK_CUDA(cudaMemset(level.x_applied, 0, bytes));
     CHECK_CUDA(cudaMemset(level.rhs, 0, bytes));
     CHECK_CUDA(cudaMemset(level.residual, 0, bytes));
 
@@ -505,19 +702,25 @@ void CFDSolver::build_pressure_multigrid() {
                   (level.res.y + block.y - 1) / block.y,
                   (level.res.z + block.z - 1) / block.z);
 
-    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
-        level.sdf, level.frac_u, level.res, level.spacing,
-        make_float3(-0.5f, 0.0f, 0.0f), 1);
-    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
-        level.sdf, level.frac_v, level.res, level.spacing,
-        make_float3(0.0f, -0.5f, 0.0f), 2);
-    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
-        level.sdf, level.frac_w, level.res, level.spacing,
-        make_float3(0.0f, 0.0f, -0.5f), 3);
-    compute_pressure_operator_kernel<<<grid_dim, block>>>(
-        level.A_C, level.A_W, level.A_E, level.A_S, level.A_N, level.A_B,
-        level.A_T, level.frac_u, level.frac_v, level.frac_w, level.sdf,
-        level.res, level.spacing);
+    if (level_idx == 0) {
+      compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+          level.sdf, level.frac_u, level.res, level.spacing,
+          make_float3(-0.5f, 0.0f, 0.0f), 1);
+      compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+          level.sdf, level.frac_v, level.res, level.spacing,
+          make_float3(0.0f, -0.5f, 0.0f), 2);
+      compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+          level.sdf, level.frac_w, level.res, level.spacing,
+          make_float3(0.0f, 0.0f, -0.5f), 3);
+      compute_pressure_operator_kernel<<<grid_dim, block>>>(
+          level.A_C, level.A_W, level.A_E, level.A_S, level.A_N, level.A_B,
+          level.A_T, level.frac_u, level.frac_v, level.frac_w, level.sdf,
+          level.res, level.spacing);
+    } else {
+      compute_periodic_pressure_operator_kernel<<<grid_dim, block>>>(
+          level.A_C, level.A_W, level.A_E, level.A_S, level.A_N, level.A_B,
+          level.A_T, level.res, level.spacing);
+    }
     CHECK_CUDA(cudaGetLastError());
   }
 

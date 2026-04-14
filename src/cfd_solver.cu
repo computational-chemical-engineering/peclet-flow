@@ -16,6 +16,7 @@
 #include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
 #include <thrust/reduce.h>
+#include <thrust/sequence.h>
 #include <thrust/transform_reduce.h>
 
 #define CHECK_CUDA(call)                                                       \
@@ -663,6 +664,35 @@ __global__ void shift_pressure_kernel(double *__restrict__ p, int num_elements,
   if (idx >= num_elements)
     return;
   p[idx] -= offset;
+}
+
+template <int Component>
+__global__ void add_brinkman_drag_kernel(
+    float *__restrict__ residual, float *__restrict__ A_C,
+    const double *__restrict__ u, const double *__restrict__ v,
+    const double *__restrict__ w, const float *__restrict__ vol_frac, int3 res,
+    float3 spacing, float theta, float mu) {
+  int idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+  int idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+  int idx_z = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (idx_x >= res.x || idx_y >= res.y || idx_z >= res.z)
+    return;
+
+  const int idx = get_idx(idx_x, idx_y, idx_z, res);
+  const float inv_dx2 = 1.0f / (spacing.x * spacing.x);
+  const float inv_dy2 = 1.0f / (spacing.y * spacing.y);
+  const float inv_dz2 = 1.0f / (spacing.z * spacing.z);
+  const float fluid = fminf(fmaxf(vol_frac[idx], 0.0f), 1.0f);
+  const float solid = 1.0f - fluid;
+  const float diff_diag = 2.0f * mu * (inv_dx2 + inv_dy2 + inv_dz2);
+
+  const float drag = diff_diag * solid / fmaxf(fluid, 5.0e-2f);
+  const double vel =
+      (Component == 0 ? u[idx] : (Component == 1 ? v[idx] : w[idx]));
+
+  A_C[idx] += theta * drag;
+  residual[idx] -= static_cast<float>(theta * drag * vel);
 }
 
 CFDSolver::CFDSolver(int3 res, float3 spacing)
@@ -2302,6 +2332,65 @@ void CFDSolver::velocity_smooth_level(VelocityMGLevel &level, int sweeps) {
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
+void CFDSolver::velocity_project_coarse_state(int level_idx, float dt,
+                                              float theta) {
+  if (level_idx <= 0 ||
+      level_idx >= static_cast<int>(velocity_mg_levels_.size()) ||
+      !pressure_multigrid_enabled_) {
+    return;
+  }
+  if (!pressure_mg_built_) {
+    build_pressure_multigrid();
+  }
+  if (level_idx >= static_cast<int>(pressure_mg_levels_.size())) {
+    return;
+  }
+
+  VelocityMGLevel &vel_level = velocity_mg_levels_[level_idx];
+  PressureMGLevel &pressure_level = pressure_mg_levels_[level_idx];
+  if (!pressure_level.owns_state) {
+    return;
+  }
+  if (vel_level.res.x != pressure_level.res.x ||
+      vel_level.res.y != pressure_level.res.y ||
+      vel_level.res.z != pressure_level.res.z) {
+    return;
+  }
+
+  const size_t state_bytes =
+      static_cast<size_t>(vel_level.num_elements) * sizeof(double);
+  const size_t scalar_bytes =
+      static_cast<size_t>(vel_level.num_elements) * sizeof(float);
+
+  CHECK_CUDA(cudaMemcpy(pressure_level.u, vel_level.u, state_bytes,
+                        cudaMemcpyDeviceToDevice));
+  CHECK_CUDA(cudaMemcpy(pressure_level.v, vel_level.v, state_bytes,
+                        cudaMemcpyDeviceToDevice));
+  CHECK_CUDA(cudaMemcpy(pressure_level.w, vel_level.w, state_bytes,
+                        cudaMemcpyDeviceToDevice));
+  CHECK_CUDA(cudaMemcpy(pressure_level.p, vel_level.p, state_bytes,
+                        cudaMemcpyDeviceToDevice));
+  const int pressure_cycles = pressure_mg_v_cycles_ * (level_idx + 1);
+  for (int cycle = 0; cycle < pressure_cycles; ++cycle) {
+    CHECK_CUDA(cudaMemset(pressure_level.x, 0, scalar_bytes));
+    CHECK_CUDA(cudaMemset(pressure_level.x_applied, 0, scalar_bytes));
+    CHECK_CUDA(cudaMemset(pressure_level.rhs, 0, scalar_bytes));
+    CHECK_CUDA(cudaMemset(pressure_level.residual, 0, scalar_bytes));
+    pressure_compute_level_rhs(pressure_level, true);
+    pressure_v_cycle(level_idx, dt, theta);
+    pressure_apply_level_projection(pressure_level, dt, theta, true);
+  }
+
+  CHECK_CUDA(cudaMemcpy(vel_level.u, pressure_level.u, state_bytes,
+                        cudaMemcpyDeviceToDevice));
+  CHECK_CUDA(cudaMemcpy(vel_level.v, pressure_level.v, state_bytes,
+                        cudaMemcpyDeviceToDevice));
+  CHECK_CUDA(cudaMemcpy(vel_level.w, pressure_level.w, state_bytes,
+                        cudaMemcpyDeviceToDevice));
+  CHECK_CUDA(cudaMemcpy(vel_level.p, pressure_level.p, state_bytes,
+                        cudaMemcpyDeviceToDevice));
+}
+
 void CFDSolver::velocity_update_coarse_operators(int component, float dt,
                                                  float theta) {
   if (velocity_mg_levels_.size() < 2)
@@ -2327,66 +2416,50 @@ void CFDSolver::velocity_update_coarse_operators(int component, float dt,
     CHECK_CUDA(cudaGetLastError());
     CHECK_CUDA(cudaDeviceSynchronize());
 
+    velocity_project_coarse_state(static_cast<int>(level_idx), dt, theta);
+
     CHECK_CUDA(cudaMemset(coarse.A_C, 0, coarse.num_elements * sizeof(float)));
+    CHECK_CUDA(cudaMemset(coarse.A_W, 0, coarse.num_elements * sizeof(float)));
+    CHECK_CUDA(cudaMemset(coarse.A_E, 0, coarse.num_elements * sizeof(float)));
+    CHECK_CUDA(cudaMemset(coarse.A_S, 0, coarse.num_elements * sizeof(float)));
+    CHECK_CUDA(cudaMemset(coarse.A_N, 0, coarse.num_elements * sizeof(float)));
+    CHECK_CUDA(cudaMemset(coarse.A_B, 0, coarse.num_elements * sizeof(float)));
+    CHECK_CUDA(cudaMemset(coarse.A_T, 0, coarse.num_elements * sizeof(float)));
     CHECK_CUDA(cudaMemset(coarse.residual, 0, coarse.num_elements * sizeof(float)));
 
     if (component == 0) {
-      if (coarse.num_fluid_cells_u > 0) {
-        dim3 fluid_grid((coarse.num_fluid_cells_u + 255) / 256);
-        compute_fused_fluid_kernel<0><<<fluid_grid, block1d>>>(
-            coarse.u, coarse.v, coarse.w, coarse.p, nullptr, coarse.residual,
-            coarse.A_C, coarse.A_W, coarse.A_E, coarse.A_S, coarse.A_N,
-            coarse.A_B, coarse.A_T, coarse.fluid_indices_u,
-            coarse.num_fluid_cells_u, coarse.res, coarse.spacing, dt, rho_,
-            mu_, grid.body_force_density_, theta, false);
-      }
-      if (coarse.num_ibm_cells_u > 0) {
-        dim3 ibm_grid((coarse.num_ibm_cells_u + 255) / 256);
-        compute_fused_ibm_kernel<0><<<ibm_grid, block1d>>>(
-            coarse.u, coarse.v, coarse.w, coarse.p, nullptr, coarse.sdf,
-            coarse.ibm_data_u, coarse.residual, coarse.A_C, coarse.A_W,
-            coarse.A_E, coarse.A_S, coarse.A_N, coarse.A_B, coarse.A_T,
-            coarse.res, coarse.spacing, dt, rho_, mu_, grid.body_force_density_,
-            theta, grid.u_bc_.x, false);
-      }
+      dim3 fluid_grid((coarse.num_fluid_cells_u + 255) / 256);
+      compute_fused_fluid_kernel<0><<<fluid_grid, block1d>>>(
+          coarse.u, coarse.v, coarse.w, coarse.p, nullptr, coarse.residual,
+          coarse.A_C, coarse.A_W, coarse.A_E, coarse.A_S, coarse.A_N,
+          coarse.A_B, coarse.A_T, coarse.fluid_indices_u,
+          coarse.num_fluid_cells_u, coarse.res, coarse.spacing, dt, rho_, mu_,
+          grid.body_force_density_, theta, false);
+      add_brinkman_drag_kernel<0><<<coarse_grid_dim, block>>>(
+          coarse.residual, coarse.A_C, coarse.u, coarse.v, coarse.w,
+          coarse.vol_frac_u, coarse.res, coarse.spacing, theta, mu_);
     } else if (component == 1) {
-      if (coarse.num_fluid_cells_v > 0) {
-        dim3 fluid_grid((coarse.num_fluid_cells_v + 255) / 256);
-        compute_fused_fluid_kernel<1><<<fluid_grid, block1d>>>(
-            coarse.u, coarse.v, coarse.w, coarse.p, nullptr, coarse.residual,
-            coarse.A_C, coarse.A_W, coarse.A_E, coarse.A_S, coarse.A_N,
-            coarse.A_B, coarse.A_T, coarse.fluid_indices_v,
-            coarse.num_fluid_cells_v, coarse.res, coarse.spacing, dt, rho_,
-            mu_, grid.body_force_density_, theta, false);
-      }
-      if (coarse.num_ibm_cells_v > 0) {
-        dim3 ibm_grid((coarse.num_ibm_cells_v + 255) / 256);
-        compute_fused_ibm_kernel<1><<<ibm_grid, block1d>>>(
-            coarse.u, coarse.v, coarse.w, coarse.p, nullptr, coarse.sdf,
-            coarse.ibm_data_v, coarse.residual, coarse.A_C, coarse.A_W,
-            coarse.A_E, coarse.A_S, coarse.A_N, coarse.A_B, coarse.A_T,
-            coarse.res, coarse.spacing, dt, rho_, mu_, grid.body_force_density_,
-            theta, grid.u_bc_.y, false);
-      }
+      dim3 fluid_grid((coarse.num_fluid_cells_v + 255) / 256);
+      compute_fused_fluid_kernel<1><<<fluid_grid, block1d>>>(
+          coarse.u, coarse.v, coarse.w, coarse.p, nullptr, coarse.residual,
+          coarse.A_C, coarse.A_W, coarse.A_E, coarse.A_S, coarse.A_N,
+          coarse.A_B, coarse.A_T, coarse.fluid_indices_v,
+          coarse.num_fluid_cells_v, coarse.res, coarse.spacing, dt, rho_, mu_,
+          grid.body_force_density_, theta, false);
+      add_brinkman_drag_kernel<1><<<coarse_grid_dim, block>>>(
+          coarse.residual, coarse.A_C, coarse.u, coarse.v, coarse.w,
+          coarse.vol_frac_v, coarse.res, coarse.spacing, theta, mu_);
     } else {
-      if (coarse.num_fluid_cells_w > 0) {
-        dim3 fluid_grid((coarse.num_fluid_cells_w + 255) / 256);
-        compute_fused_fluid_kernel<2><<<fluid_grid, block1d>>>(
-            coarse.u, coarse.v, coarse.w, coarse.p, nullptr, coarse.residual,
-            coarse.A_C, coarse.A_W, coarse.A_E, coarse.A_S, coarse.A_N,
-            coarse.A_B, coarse.A_T, coarse.fluid_indices_w,
-            coarse.num_fluid_cells_w, coarse.res, coarse.spacing, dt, rho_,
-            mu_, grid.body_force_density_, theta, false);
-      }
-      if (coarse.num_ibm_cells_w > 0) {
-        dim3 ibm_grid((coarse.num_ibm_cells_w + 255) / 256);
-        compute_fused_ibm_kernel<2><<<ibm_grid, block1d>>>(
-            coarse.u, coarse.v, coarse.w, coarse.p, nullptr, coarse.sdf,
-            coarse.ibm_data_w, coarse.residual, coarse.A_C, coarse.A_W,
-            coarse.A_E, coarse.A_S, coarse.A_N, coarse.A_B, coarse.A_T,
-            coarse.res, coarse.spacing, dt, rho_, mu_, grid.body_force_density_,
-            theta, grid.u_bc_.z, false);
-      }
+      dim3 fluid_grid((coarse.num_fluid_cells_w + 255) / 256);
+      compute_fused_fluid_kernel<2><<<fluid_grid, block1d>>>(
+          coarse.u, coarse.v, coarse.w, coarse.p, nullptr, coarse.residual,
+          coarse.A_C, coarse.A_W, coarse.A_E, coarse.A_S, coarse.A_N,
+          coarse.A_B, coarse.A_T, coarse.fluid_indices_w,
+          coarse.num_fluid_cells_w, coarse.res, coarse.spacing, dt, rho_, mu_,
+          grid.body_force_density_, theta, false);
+      add_brinkman_drag_kernel<2><<<coarse_grid_dim, block>>>(
+          coarse.residual, coarse.A_C, coarse.u, coarse.v, coarse.w,
+          coarse.vol_frac_w, coarse.res, coarse.spacing, theta, mu_);
     }
     CHECK_CUDA(cudaGetLastError());
     CHECK_CUDA(cudaDeviceSynchronize());
@@ -2506,12 +2579,20 @@ void CFDSolver::free_velocity_multigrid() {
     free_float(level.x);
     free_float(level.rhs);
     free_float(level.residual);
+    free_float(level.vol_frac_u);
+    free_float(level.vol_frac_v);
+    free_float(level.vol_frac_w);
     free_int(level.ibm_id_map_u);
     free_int(level.ibm_id_map_v);
     free_int(level.ibm_id_map_w);
     free_int(level.fluid_indices_u);
-    free_int(level.fluid_indices_v);
-    free_int(level.fluid_indices_w);
+    if (level.fluid_indices_v != level.fluid_indices_u) {
+      free_int(level.fluid_indices_v);
+    }
+    if (level.fluid_indices_w != level.fluid_indices_u &&
+        level.fluid_indices_w != level.fluid_indices_v) {
+      free_int(level.fluid_indices_w);
+    }
     free_ibm(level.ibm_data_u);
     free_ibm(level.ibm_data_v);
     free_ibm(level.ibm_data_w);
@@ -2532,19 +2613,6 @@ void CFDSolver::build_velocity_multigrid() {
                                  velocity_mg_max_levels_, level_res,
                                  level_spacing, host_sdf_levels);
 
-  auto alloc_ibm = [&](IBM_Data &data, size_t n) {
-    CHECK_CUDA(cudaMalloc(&data.cell_index, n * sizeof(int)));
-    CHECK_CUDA(cudaMalloc(&data.D_rescale, n * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&data.num_boundaries, n * sizeof(int)));
-    CHECK_CUDA(cudaMalloc(&data.dir_code, n * 6 * sizeof(int)));
-    CHECK_CUDA(cudaMalloc(&data.K_val, n * 6 * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&data.M_val, n * 6 * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&data.X_val, n * 6 * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&data.Nbc_val, n * 6 * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&data.R_val, n * 6 * sizeof(float)));
-    data.num_active_cells = 0;
-  };
-
   velocity_mg_levels_.resize(level_res.size());
   dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, BLOCK_SIZE_Z);
   for (size_t level_idx = 0; level_idx < velocity_mg_levels_.size(); ++level_idx) {
@@ -2560,7 +2628,6 @@ void CFDSolver::build_velocity_multigrid() {
 
     size_t float_bytes = static_cast<size_t>(level.num_elements) * sizeof(float);
     size_t double_bytes = static_cast<size_t>(level.num_elements) * sizeof(double);
-    size_t int_bytes = static_cast<size_t>(level.num_elements) * sizeof(int);
 
     CHECK_CUDA(cudaMalloc(&level.sdf, float_bytes));
     CHECK_CUDA(cudaMemcpy(level.sdf, host_sdf_levels[level_idx].data(), float_bytes,
@@ -2569,6 +2636,9 @@ void CFDSolver::build_velocity_multigrid() {
     CHECK_CUDA(cudaMalloc(&level.v, double_bytes));
     CHECK_CUDA(cudaMalloc(&level.w, double_bytes));
     CHECK_CUDA(cudaMalloc(&level.p, double_bytes));
+    CHECK_CUDA(cudaMalloc(&level.vol_frac_u, float_bytes));
+    CHECK_CUDA(cudaMalloc(&level.vol_frac_v, float_bytes));
+    CHECK_CUDA(cudaMalloc(&level.vol_frac_w, float_bytes));
     CHECK_CUDA(cudaMalloc(&level.A_C, float_bytes));
     CHECK_CUDA(cudaMalloc(&level.A_W, float_bytes));
     CHECK_CUDA(cudaMalloc(&level.A_E, float_bytes));
@@ -2579,15 +2649,10 @@ void CFDSolver::build_velocity_multigrid() {
     CHECK_CUDA(cudaMalloc(&level.x, float_bytes));
     CHECK_CUDA(cudaMalloc(&level.rhs, float_bytes));
     CHECK_CUDA(cudaMalloc(&level.residual, float_bytes));
-    CHECK_CUDA(cudaMalloc(&level.ibm_id_map_u, int_bytes));
-    CHECK_CUDA(cudaMalloc(&level.ibm_id_map_v, int_bytes));
-    CHECK_CUDA(cudaMalloc(&level.ibm_id_map_w, int_bytes));
-    CHECK_CUDA(cudaMalloc(&level.fluid_indices_u, int_bytes));
-    CHECK_CUDA(cudaMalloc(&level.fluid_indices_v, int_bytes));
-    CHECK_CUDA(cudaMalloc(&level.fluid_indices_w, int_bytes));
-    alloc_ibm(level.ibm_data_u, level.num_elements);
-    alloc_ibm(level.ibm_data_v, level.num_elements);
-    alloc_ibm(level.ibm_data_w, level.num_elements);
+    CHECK_CUDA(cudaMalloc(&level.fluid_indices_u,
+                          static_cast<size_t>(level.num_elements) * sizeof(int)));
+    level.fluid_indices_v = level.fluid_indices_u;
+    level.fluid_indices_w = level.fluid_indices_u;
 
     CHECK_CUDA(cudaMemset(level.u, 0, double_bytes));
     CHECK_CUDA(cudaMemset(level.v, 0, double_bytes));
@@ -2596,54 +2661,29 @@ void CFDSolver::build_velocity_multigrid() {
     CHECK_CUDA(cudaMemset(level.x, 0, float_bytes));
     CHECK_CUDA(cudaMemset(level.rhs, 0, float_bytes));
     CHECK_CUDA(cudaMemset(level.residual, 0, float_bytes));
+    thrust::sequence(thrust::device, level.fluid_indices_u,
+                     level.fluid_indices_u + level.num_elements, 0);
 
     dim3 grid_dim((level.res.x + block.x - 1) / block.x,
                   (level.res.y + block.y - 1) / block.y,
                   (level.res.z + block.z - 1) / block.z);
-    int *d_counter;
-    CHECK_CUDA(cudaMalloc(&d_counter, sizeof(int)));
-    auto run_geo_pass = [&](IBM_Data &data, int *map, float3 offset) -> int {
-      CHECK_CUDA(cudaMemset(d_counter, 0, sizeof(int)));
-      if (ibm_scheme_ == 1) {
-        compute_ibm_geometry_kernel<1><<<grid_dim, block>>>(
-            data, map, level.sdf, level.res, level.spacing, d_counter, offset, 0);
-      } else {
-        compute_ibm_geometry_kernel<0><<<grid_dim, block>>>(
-            data, map, level.sdf, level.res, level.spacing, d_counter, offset, 0);
-      }
-      int count = 0;
-      CHECK_CUDA(
-          cudaMemcpy(&count, d_counter, sizeof(int), cudaMemcpyDeviceToHost));
-      data.num_active_cells = count;
-      return count;
-    };
-    level.num_ibm_cells_u =
-        run_geo_pass(level.ibm_data_u, level.ibm_id_map_u,
-                     make_float3(-0.5f, 0.0f, 0.0f));
-    level.num_ibm_cells_v =
-        run_geo_pass(level.ibm_data_v, level.ibm_id_map_v,
-                     make_float3(0.0f, -0.5f, 0.0f));
-    level.num_ibm_cells_w =
-        run_geo_pass(level.ibm_data_w, level.ibm_id_map_w,
-                     make_float3(0.0f, 0.0f, -0.5f));
-    CHECK_CUDA(cudaFree(d_counter));
+    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+        level.sdf, level.vol_frac_u, level.res, level.spacing,
+        make_float3(-0.5f, 0.0f, 0.0f), 0);
+    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+        level.sdf, level.vol_frac_v, level.res, level.spacing,
+        make_float3(0.0f, -0.5f, 0.0f), 0);
+    compute_fluid_fraction_kernel<<<grid_dim, block>>>(
+        level.sdf, level.vol_frac_w, level.res, level.spacing,
+        make_float3(0.0f, 0.0f, -0.5f), 0);
+    level.num_ibm_cells_u = 0;
+    level.num_ibm_cells_v = 0;
+    level.num_ibm_cells_w = 0;
+    level.num_fluid_cells_u = level.num_elements;
+    level.num_fluid_cells_v = level.num_elements;
+    level.num_fluid_cells_w = level.num_elements;
+    CHECK_CUDA(cudaGetLastError());
     CHECK_CUDA(cudaDeviceSynchronize());
-
-    auto classify_fluid = [&](int *fluid_indices, int &num_fluid_cells,
-                              int *ibm_id_map, float3 offset) {
-      thrust::counting_iterator<int> first(0);
-      thrust::counting_iterator<int> last = first + level.num_elements;
-      is_fluid_functor pred(level.sdf, ibm_id_map, offset, level.res);
-      thrust::device_ptr<int> out_ptr(fluid_indices);
-      auto end_it = thrust::copy_if(thrust::device, first, last, out_ptr, pred);
-      num_fluid_cells = static_cast<int>(end_it - out_ptr);
-    };
-    classify_fluid(level.fluid_indices_u, level.num_fluid_cells_u,
-                   level.ibm_id_map_u, make_float3(-0.5f, 0.0f, 0.0f));
-    classify_fluid(level.fluid_indices_v, level.num_fluid_cells_v,
-                   level.ibm_id_map_v, make_float3(0.0f, -0.5f, 0.0f));
-    classify_fluid(level.fluid_indices_w, level.num_fluid_cells_w,
-                   level.ibm_id_map_w, make_float3(0.0f, 0.0f, -0.5f));
     level.owns_storage = true;
   }
 
@@ -2939,7 +2979,7 @@ void CFDSolver::step(float dt) {
       CHECK_CUDA(cudaMemset(fine_level.x, 0, num_elements * sizeof(float)));
 
       for (int cycle = 0; cycle < pressure_mg_v_cycles_; ++cycle) {
-        pressure_v_cycle(0);
+        pressure_v_cycle(0, dt, theta);
       }
 
       CHECK_CUDA(cudaMemcpy(grid.phi, fine_level.x,

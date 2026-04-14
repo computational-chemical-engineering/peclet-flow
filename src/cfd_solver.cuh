@@ -139,9 +139,16 @@ struct PressureMGLevel {
   float *A_B = nullptr;
   float *A_T = nullptr;
 
+  double *u = nullptr;
+  double *v = nullptr;
+  double *w = nullptr;
+  double *p = nullptr;
+
   float *x = nullptr;
+  float *x_applied = nullptr;
   float *rhs = nullptr;
   float *residual = nullptr;
+  bool owns_state = false;
 };
 
 struct VelocityMGLevel {
@@ -154,6 +161,9 @@ struct VelocityMGLevel {
   double *v = nullptr;
   double *w = nullptr;
   double *p = nullptr;
+  float *vol_frac_u = nullptr;
+  float *vol_frac_v = nullptr;
+  float *vol_frac_w = nullptr;
 
   IBM_Data ibm_data_u{};
   IBM_Data ibm_data_v{};
@@ -330,8 +340,17 @@ protected:
 private:
   void free_pressure_multigrid();
   void build_pressure_multigrid();
-  void pressure_v_cycle(int level_idx);
+  void pressure_v_cycle(int level_idx, float dt, float theta);
   void pressure_smooth_level(PressureMGLevel &level, int sweeps);
+  void pressure_restrict_state_to_coarse(const double *u, const double *v,
+                                         const double *w, const double *p,
+                                         int3 fine_res,
+                                         PressureMGLevel &coarse);
+  void pressure_compute_level_rhs(PressureMGLevel &level,
+                                  bool use_periodic_operator);
+  void pressure_apply_level_projection(PressureMGLevel &level, float dt,
+                                       float theta,
+                                       bool use_periodic_operator);
   void free_velocity_multigrid();
   void build_velocity_multigrid();
   void velocity_bind_fine_level(const double *u, const double *v,
@@ -339,6 +358,7 @@ private:
                                 float *rhs, float *A_C, float *A_W, float *A_E,
                                 float *A_S, float *A_N, float *A_B,
                                 float *A_T);
+  void velocity_project_coarse_state(int level_idx, float dt, float theta);
   void velocity_update_coarse_operators(int component, float dt, float theta);
   void velocity_v_cycle(int level_idx);
   void velocity_smooth_level(VelocityMGLevel &level, int sweeps);

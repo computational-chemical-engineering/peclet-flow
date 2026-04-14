@@ -225,8 +225,12 @@ PYBIND11_MODULE(pnm_backend, m) {
              std::vector<ssize_t> shape = {(ssize_t)res.z, (ssize_t)res.y,
                                            (ssize_t)res.x};
              return py::array_t<double>(shape, data.data());
-           })
+            })
       .def("get_last_outer_iterations", &CFDSolver::get_last_outer_iterations)
+      .def("get_momentum_residual_max", &CFDSolver::get_momentum_residual_max,
+           py::arg("fluid_only") = false)
+      .def("set_debug_stats", &CFDSolver::set_debug_stats, py::arg("enabled"))
+      .def("get_debug_stats", &CFDSolver::get_debug_stats)
 
       .def("set_body_force", &CFDSolver::set_body_force, py::arg("force"))
       .def("set_theta_", &CFDSolver::set_theta_, py::arg("theta"))
