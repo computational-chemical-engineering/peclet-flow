@@ -25,30 +25,34 @@ __device__ inline float poly_Nbc_avg(float xi) { return 2.0f; }
 // Table 2: Sandwiched (Double-sided) Point-value
 // Neighbors at xi_m (minus) and xi_p (plus)
 __device__ inline float poly_D_sandwich(float xi_m, float xi_p) {
-  return (xi_m + xi_p) * xi_m * xi_p;
+  return xi_m * xi_p;
 }
 __device__ inline float poly_N_c_sandwich(float xi_m, float xi_p) {
   // N_{c,+} term (factor for Plus-side ghost)
-  return (xi_m + xi_p) * (xi_m + 1.0f) * (xi_p - 1.0f);
+  return (xi_m + 1.0f) * (xi_p - 1.0f);
 }
 
 // Sandwich Boundary Factors (Point-Value)
-__device__ inline float poly_Nbc_pp_sw(float xi_m, float xi_p) { return xi_m * (1.0f + xi_m); }
-__device__ inline float poly_Nbc_mp_sw(float xi_m, float xi_p) { return xi_p * (1.0f - xi_p); }
+__device__ inline float poly_Nbc_pp_sw(float xi_m, float xi_p) {
+  return (xi_m / (xi_m + xi_p)) * (1.0f + xi_m);
+}
+__device__ inline float poly_Nbc_mp_sw(float xi_m, float xi_p) {
+  return (xi_p / (xi_m + xi_p)) * (1.0f - xi_p);
+}
 
 // Table 2: Sandwiched (Double-sided) Cell-average
 __device__ inline float poly_D_sandwich_avg(float xi_m, float xi_p) {
-  return (xi_m + xi_p) * (xi_m * xi_p - 1.0f / 12.0f);
+  return xi_m * xi_p - 1.0f / 12.0f;
 }
 __device__ inline float poly_N_c_sandwich_avg(float xi_m, float xi_p) {
   // factor for Plus-side ghost
-  return (xi_m + xi_p) * ((xi_m + 1.0f) * (xi_p - 1.0f) - 1.0f / 12.0f);
+  return (xi_m + 1.0f) * (xi_p - 1.0f) - 1.0f / 12.0f;
 }
 __device__ inline float poly_Nbc_pp_sw_avg(float xi_m, float xi_p) {
-  return xi_m * (1.0f + xi_m) - 1.0f / 12.0f;
+  return (xi_m / (xi_m + xi_p)) * (1.0f + xi_m) - 1.0f / 12.0f;
 }
 __device__ inline float poly_Nbc_mp_sw_avg(float xi_m, float xi_p) {
-  return xi_p * (1.0f - xi_p) + 1.0f / 12.0f;
+  return (xi_p / (xi_m + xi_p)) * (1.0f - xi_p) + 1.0f / 12.0f;
 }
 
 // Trilinear Interpolation of periodic SDF
@@ -192,11 +196,11 @@ __global__ void compute_ibm_geometry_kernel(IBM_Data ibm_data, int *ibm_id_map,
           theta = 1.0f;
         xi_vals[k] = theta;
         
-        if (SCHEME == 0) {
-            D_vals[k] = poly_D(theta); 
-        } else {
-            D_vals[k] = poly_D_avg(theta);
-        }
+         if (SCHEME == 0) {
+             D_vals[k] = poly_D(theta);
+         } else {
+             D_vals[k] = poly_D_avg(theta);
+         }
       } else {
         // Neumann: K=1, M=0
         xi_vals[k] = 0.5f;

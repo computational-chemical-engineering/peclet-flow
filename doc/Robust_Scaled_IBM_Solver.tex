@@ -139,32 +139,39 @@ The geometric functions for the directional neighbor ($\mathcal{N}_{nb}$), cente
     \label{tab:ibm_coeffs}
 \end{table}
 
-\subsection{Modified Matrix Coefficients}
-In the linear solver, we construct the modified row coefficients $a'$ and source term $b'$ as follows:
-\begin{align}
-    a'_c &= \mathcal{D} \, a_c + \mathcal{N}_c \, a_{ghost}\\
-    a'_{nb,d} &= \mathcal{D} \, a_{nb,d} + \mathcal{N}_{nb,d} \, a_{ghost} \\
-    a'_{nb,\mathrm{other}} &= \mathcal{D} \, a_{nb,\mathrm{other}} \quad \text{(other directions)} \\
-    a'_{ghost} &= 0 \\
-    b'_c &= \mathcal{D} \, b_c -  \mathcal{N}_{bc} \, u_{bc} \, a_{ghost}
-\end{align}
+\subsection{Modified Matrix Equation}
+In the linear solver, we construct the modified system matrix $\mathbf{A}_{IBM}$ and an inhomogeneous term vector $\mathbf{a}_{inhom}$. The original equation $\mathbf{A} \mathbf{x} = \mathbf{b}$ is transformed to:
+\begin{equation}
+    \mathbf{A}_{IBM} \mathbf{x} + \mathbf{a}_{inhom} = \mathcal{D}_{rescale} \mathbf{b}
+\end{equation}
+The modified row coefficients $a'$ and the inhomogeneous contribution $a_{inhom}$ for a cell $c$ are computed as follows:
+\begin{equation}
+    \begin{aligned}
+    a'_c &= \mathcal{D}_{rescale} \, a_c + \sum_d \mathcal{N}_{c,d} \, \mathcal{R}_d \, a_{ghost,d}\\
+    a'_{nb,d} &= \mathcal{D}_{rescale} \, a_{nb,d} + \sum_d \mathcal{N}_{nb,d}  \, \mathcal{R}_d \, a_{ghost,d} \\
+    a'_{nb,\mathrm{other}} &= \mathcal{D}_{rescale} \, a_{nb,\mathrm{other}} \quad \text{(other directions)} \\
+    a'_{ghost,d} &= 0 \\
+    a_{inhom,c} &= \sum_d \mathcal{N}_{bc,d} \, \mathcal{R}_d \, u_{bc,d} \, a_{ghost,d}
+    \end{aligned}
+\end{equation}
+where $a_{ghost,d}$ is the original stencil coefficient for the neighbor in direction $d$ which is now classified as a ghost cell. For stationary objects with no-slip conditions ($u_{bc}=0$), $a_{inhom}$ vanishes.
+When there are only solid neighbors in one direction, the sum over $d$ consist only of that direction, $\mathcal{D}_{rescale} = \mathcal{D}$, as introduced above, and $\mathcal{R}_d =1$.
 
 \subsubsection{Double-Sided Boundary (Sandwiched Cell)}
 In packed geometries, a fluid cell $c$ may be bounded by solid surfaces on both sides, e.g., West at distance $\xi_-$ and East at distance $\xi_+$. In this scenario, both neighbors $u_{nb,-}$ and $u_{nb,+}$ are ghost cells.
 
-We construct a quadratic polynomial that satisfies the boundary conditions $u_{bc,-}$ and $u_{bc,+}$ exactly. The linear system row for cell $c$ is modified to eliminate both neighbors ($a_{nb,-}$ and $a_{nb,+}$):
+The system row for cell $c$ is modified to eliminate both neighbors:
 \begin{equation}
-    a'_c u_c = b'_c
+    a'_c u_c + a_{inhom,c} = \mathcal{D} b_c
 \end{equation}
-The modified coefficient and source term are derived as:
+The modified coefficient and inhomogeneous term are derived as:
 \begin{align}
     a'_c &= \mathcal{D} \, a_c +  \mathcal{N}_{c,-} \, a_{ghost,-} + \mathcal{N}_{c,+} \, a_{ghost,+} \\
-    b'_c &= \mathcal{D} \, b_c - \mathcal{N}_{bc,-,-}  \, u_{bc,-} \,  a_{ghost,-} - \mathcal{N}_{bc,-,+}  \, u_{bc,-} \, a_{ghost,+} \nonumber \\
+    a_{inhom,c} &= \mathcal{N}_{bc,-,-}  \, u_{bc,-} \,  a_{ghost,-} + \mathcal{N}_{bc,-,+}  \, u_{bc,-} \, a_{ghost,+} \nonumber \\
     & \quad
-        - \mathcal{N}_{bc,+,-}  \, u_{bc,+} \, a_{ghost,-}
-     - \mathcal{N}_{bc,+,+}  \, u_{bc,+} \,  a_{ghost,+}
+        + \mathcal{N}_{bc,+,-}  \, u_{bc,+} \, a_{ghost,-}
+     + \mathcal{N}_{bc,+,+}  \, u_{bc,+} \,  a_{ghost,+}
 \end{align}
-Although the expression for $b'_c$ is complex, factors can be pre-computed and combined if the boundary values are time-independent. Furthermore, for stationary objects with no-slip conditions ($u_{bc}=0$), many terms vanish.
 The polynomials for the double-sided case are provided in Table \ref{tab:ibm_double}. 
 
 \begin{table}[h!]
@@ -175,13 +182,13 @@ The polynomials for the double-sided case are provided in Table \ref{tab:ibm_dou
         \hline
         \textbf{Factor} & \textbf{Point-value} & \textbf{Cell-average} \\
         \hline
-        $\mathcal{D}$ & $(\xi_- + \xi_+) \xi_- \xi_+$ & $(\xi_- + \xi_+) (\xi_- \xi_+ - \frac{1}{12})$ \\
+        $\mathcal{D}$ & $\xi_- \xi_+$ & $(\xi_- \xi_+ - \frac{1}{12})$ \\
         \hline
-        $\mathcal{N}_{c,+}$& $(\xi_- + \xi_+) (\xi_- + 1)(\xi_+ - 1)$ & $(\xi_- + \xi_+) [ (\xi_- + 1)(\xi_+ - 1) - \frac{1}{12} ]$ \\
+        $\mathcal{N}_{c,+}$& $(\xi_- + 1)(\xi_+ - 1)$ & $(\xi_- + 1)(\xi_+ - 1) - \frac{1}{12}$ \\
         \hline
-        $\mathcal{N}_{bc,+,+}$& $\xi_- (1 + \xi_-)$ & $\xi_- (1 + \xi_-) - \frac{1}{12}$ \\
+        $\mathcal{N}_{bc,+,+}$& $\frac{\xi_-}{\xi_- + \xi_+} (1 + \xi_-)$ & $\frac{\xi_-}{\xi_- + \xi_+} (1 + \xi_-) - \frac{1}{12}$ \\
         \hline
-        $\mathcal{N}_{bc,-,+}$ & $\xi_+ (1 - \xi_+)$ & $\xi_+ (1 - \xi_+) + \frac{1}{12}$ \\
+        $\mathcal{N}_{bc,-,+}$ & $\frac{\xi_+}{\xi_- + \xi_+} (1 - \xi_+)$ & $\frac{\xi_+}{\xi_- + \xi_+} (1 - \xi_+) + \frac{1}{12}$ \\
         \hline
     \end{tabular}%
     }
@@ -196,14 +203,6 @@ For boundaries that are not grid-aligned, the IBM stencil often requires correct
   \mathcal{D}_\mathrm{rescale} = \mathcal{D}_{d_{min}}, \text{ where } d_{min} = \mathrm{argmin}_{d} (|\mathcal{D}_d|) \label{eq:D_rescale}
 \end{equation}
 We define the scaling ratio for direction $d$ as $\mathcal{R}_d = \mathcal{D}_{rescale}/\mathcal{D}_d$.
-The modified coefficients (for the one-sided case) become:
-\begin{align}
-    a'_c &= \mathcal{D}_\mathrm{rescale} \, a_c + \sum_d \mathcal{N}_{c,d} \, \mathcal{R}_d \, a_{ghost,d}\\
-    a'_{nb,d} &= \mathcal{D}_\mathrm{rescale} \, a_{nb,d} + \sum_d \mathcal{N}_{nb,d}  \, \mathcal{R}_d \, a_{ghost,d} \\
-    a'_{nb,\mathrm{other}} &= \mathcal{D}_\mathrm{rescale} \, a_{nb,\mathrm{other}} \quad \text{(other directions)} \\
-    a'_{ghost,d} &= 0 \\
-    b'_c &= \mathcal{D}_\mathrm{rescale} \, b_c - \sum_d  \mathcal{N}_{bc,d} \, \mathcal{R}_d \, u_{bc,d} \, a_{ghost,d}
-\end{align}
 The summation runs over all directions where the IBM is applied. For directions where $d \neq d_{min}$, we have $|\mathcal{R}_d| \le 1$. A singularity ($0/0$) may seemingly arise if $\mathcal{D}_\mathrm{rescale} \approx 0$ and $\mathcal{D}_{d} \approx 0$. This occurs when the IBM interaction point is at (for point values) or very close to (for cell averages) the cell center. In such instances, we define $\mathcal{R}_d = 1$. Since the interaction points in all directions are spatially proximate, the boundary values $u_{bc,d}$ are similar, and the boundary condition remains well-posed.
 
 \subsection{IBM for Pressure Computations}
@@ -299,26 +298,23 @@ At each time step (or non-linear iteration), the linear system is assembled in t
 A kernel launches over the full domain to compute the standard physical coefficients (convection, diffusion, time-accumulation) for a 7-point stencil, ignoring immersed boundaries.
 
 \paragraph{2. Sparse Geometric Modification}
-We launch a kernel over the list $\mathcal{L}_{IBM}$ to apply the geometric constraints. This kernel operates without conditional branches by executing the same sequence of floating-point operations for every item.
+We launch a kernel over the list $\mathcal{L}_{IBM}$ to apply the geometric constraints. To ensure modularity and correct handling of the source term scaling, this is performed in two steps (or fused if the source term is available).
 
-For a cell $c$, we first scale the center coefficient and source term:
+First, we modify the matrix coefficients $a$ and compute the inhomogeneous contribution $a_{inhom}$. For a cell $c$, we scale the center coefficient:
 \begin{equation}
-   a_c \leftarrow a_c \cdot \mathcal{D}_{rescale}, \quad b_c \leftarrow b_c \cdot \mathcal{D}_{rescale}
+   a_c \leftarrow a_c \cdot \mathcal{D}_{rescale}
 \end{equation}
-Then, we loop over the three spatial directions $d \in \{x, y, z\}$. Let $a_{nb,-}$ and $a_{nb,+}$ denote the coefficients of the "left" (minus) and "right" (plus) neighbors in direction $d$. The update proceeds as follows:
-\begin{align}
-    b_c &\leftarrow b_c - (a_{nb,-} \cdot B_{val,-} + a_{nb,+} \cdot B_{val,+}) \\
-    % Add neighbors to center
-    a_c &\leftarrow a_c + a_{nb,-} \cdot K_{c,-} + a_{nb,+} \cdot K_{c,+} \\
-    % Compute temp cross values
-    T_- &= a_{nb,-} \cdot X_- \\
-    T_+ &= a_{nb,+} \cdot X_+ \\
-    % Update neighbors
-    a_{nb,-} &\leftarrow a_{nb,-} \cdot M_- + T_+ \\
-    a_{nb,+} &\leftarrow a_{nb,+} \cdot M_+ + T_-
-\end{align}
+Then, we loop over the three spatial directions $d \in \{x, y, z\}$ to update $a_c$ and the neighbors $a_{nb,\pm}$ using the factors $K, M, X$. Simultaneously, we accumulate the inhomogeneous term:
+\begin{equation}
+    a_{inhom,c} = \sum_{d, \pm} a_{nb,\pm} \cdot B_{val,\pm}
+\end{equation}
+where $B_{val}$ represents the term $\mathcal{N}_{bc} \mathcal{R} u_{bc}$.
 
-The values $a_c$, $a_{nb,\pm}$ and $b_c$ refer to the entries in the specific stencil arrays (e.g., $\mathcal{A}_C$, $\mathcal{A}_W, \mathcal{A}_E$, $\mathcal{B}$) at index $c$. This branchless logic covers all topological cases, including sandwiched cells, by appropriate setting of the pre-computed factors (e.g., setting $M=0$ to zero out a ghost connection). The update uses atomic operations when modifying the center coefficient to handle potential race conditions if multiple directions contribute simultaneously, though in this structured loop approach over directions for a single cell, race conditions on $a_c$ are naturally avoided within the thread. Note that updating neighbors $a_{nb,-}, a_{nb,+}$ theoretically could race if two different item threads update the same neighbor, but since the list iterates over \emph{affected cells} and updates their \emph{own} stencil entries (row-based modification), no race condition exists between threads for the matrix coefficients of cell $c$.
+Finally, in a separate pass (or at the end of the step), we apply the scaling to the source term vector $\mathbf{b}$ and subtract the inhomogeneous part to form the final right-hand side for the linear solver:
+\begin{equation}
+    b_c \leftarrow b_c \cdot \mathcal{D}_{rescale} - a_{inhom,c}
+\end{equation}
+This split ensures that the matrix operator can be constructed independently of the source term vector if needed (e.g., for implicit diffusion where the matrix is constant but the RHS varies).
 
 \paragraph{3. Red-Black Gauss-Seidel Solver}
 The linear solver kernel iterates over the domain using a Red-Black checkerboard pattern. Because the IBM logic has been fully absorbed into the modified coefficients $a$, the solver kernel contains no conditional branching related to geometry. It performs a standard update:
@@ -340,7 +336,39 @@ We verify the advection operator using the Taylor-Green vortex in a periodic cub
 We simulate a pressure-driven flow in a periodic domain containing a centered solid slab. This setup reproduces the classic plane Poiseuille flow between two parallel plates. We measure the resulting velocity profile against the analytical parabolic solution. It is crucial to note that the discrete velocities in our finite-volume formulation represent cell-averaged quantities. Therefore, to rigorously establish the second-order spatial accuracy ($O(\Delta x^2)$) of the discretization and IBM operations, we compare the numerical results against the cell-averaged analytical solution rather than point values.
 
 \subsection{Flow Past Periodic Spheres}
-To validate the solver's capability in handling complex porous media, we compute the flow through Simple Cubic (SC) arrays of spheres. The drag force exerted on the spheres is quantified using the dimensionless drag factor $K$. Our results are compared with the reference values provided by Zick and Homsy (1982). We observe excellent agreement, reproducing $K \approx 4.95$ for a solid volume fraction $\phi=0.05$ and $K \approx 39.5$ for $\phi=0.50$.
+
+To validate the solver's capability in handling complex porous media, we compute the flow through Simple Cubic (SC) arrays of spheres.  We used a periodic cubic domain of size $L$ and uniform grids with resolutions $N=16$, $32$, $64$, and $128$. The simulation was run for Stokes flow by setting $\rho=0$.
+
+A signed-distance function is used to define the solid spheres inside (negative) and outside (positive) of the sphere with radius $R$. The solid volume fraction is varied by changing the radius of the sphere.
+The solid volume fraction is given by $\phi = \frac{4/3 \pi R^3}{L^3}$, where $R$ is the radius of the spheres. The solid volume fraction is varied by changing the radius of the spheres.
+
+On the fluid a body force, $f$, in the x-direction is applied to drive the flow. The superficial velocity, , $U_{sup}$, is computed by averaging the velocity field over the full domain (including the solid region where velocities equal 0). A dimensionless drag factor is defined as
+\begin{equation}
+    K = \frac{f \, L^3}{6 \pi \, \mu \, U_{sup} \, R}
+\end{equation}
+where $\mu$ is the dynamic viscosity.
+
+Our results are compared with the reference values provided by Zick and Homsy (1982). These are numerical values, but highly accurate and widely used as a benchmark for immersed boundary methods.
+Figure \ref{fig:drag_spheres} presents the comparison of our computed dimensionless drag against the reference data for solid volume fractions $\phi$ ranging from $0.001$ to $0.5236$. We observe excellent agreement across the entire range. Furthermore, we analyze the grid convergence of the method by computing the relative error with respect to a highly resolved reference case. As shown in Figure \ref{fig:drag_spheres} (b), the method exhibits clear second-order spatial accuracy ($O(N^{-2})$), confirming the efficacy of the proposed IBM treatment for curved geometries. For the highest resolutions the somewhat irregular behavior is due to the fact that the reference values are reported with a limited number of significant digits.
+
+\begin{figure}[h!]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/drag_simple_cubic_spheres.png}
+        \caption{Dimensionless drag factor $F$ vs solid volume fraction $\phi$.}
+        \label{fig:drag_spheres_plot}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/drag_simple_cubic_spheres_convergence.png}
+        \caption{Relative error convergence showing $O(N^{-2})$ scaling.}
+        \label{fig:drag_spheres_conv}
+    \end{subfigure}
+    \caption{Validation of flow through simple cubic arrays of spheres. (a) Comparison with Zick and Homsy (1982). (b) Grid refinement showing second-order accuracy.}
+    \label{fig:drag_spheres}
+\end{figure}
 
 \subsection{Divergence and Energy Conservation}
 Correct enforcement of the incompressibility constraint is monitored via automated tests. We track the $L_2$ norm of the velocity divergence field to ensure it remains within machine precision tolerances. Additionally, we verify the reduction of kinetic energy during the projection step, confirming the orthogonal projection of the velocity field onto the valid divergence-free subspace.

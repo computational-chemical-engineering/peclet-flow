@@ -1857,16 +1857,33 @@ __global__ void compute_fused_ibm_kernel(
   }
 #undef AVG4_D
 
-  // Central differencing near IBM walls
-  double term_x = 0.5 * d_rho * uc * d_inv_dx;
-  val_E += term_x;
-  val_W -= term_x;
-  double term_y = 0.5 * d_rho * vc * d_inv_dy;
-  val_S -= term_y;
-  val_N += term_y;
-  double term_z = 0.5 * d_rho * wc * d_inv_dz;
-  val_B -= term_z;
-  val_T += term_z;
+  // Test mode: use the same FOU upwind stencil near IBM faces as in fluid cells.
+  double term_x = d_rho * uc * d_inv_dx;
+  if (uc > 0.0) {
+    val_C += term_x;
+    val_W -= term_x;
+  } else {
+    val_C -= term_x;
+    val_E += term_x;
+  }
+
+  double term_y = d_rho * vc * d_inv_dy;
+  if (vc > 0.0) {
+    val_C += term_y;
+    val_S -= term_y;
+  } else {
+    val_C -= term_y;
+    val_N += term_y;
+  }
+
+  double term_z = d_rho * wc * d_inv_dz;
+  if (wc > 0.0) {
+    val_C += term_z;
+    val_B -= term_z;
+  } else {
+    val_C -= term_z;
+    val_T += term_z;
+  }
 
   // Build RHS: (rho/dt)*u_old + theta*force + (1-theta)*explicit
   double force = 0.0;
