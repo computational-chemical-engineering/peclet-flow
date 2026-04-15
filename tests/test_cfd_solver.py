@@ -43,5 +43,31 @@ def test_single_sphere_large_dt_continuation():
     assert residuals[-1] < residuals[0]
 
 
+def test_state_import_and_scaling():
+    n = 8
+    sdf_zyx, dx = make_sphere_sdf_zyx(n, radius=0.18)
+    spacing = [dx, dx, dx]
+    solver = pnm_backend.CFDSolver([n, n, n], spacing)
+    solver.initialize(sdf_zyx, [0.0, 0.0, 0.0], spacing)
+
+    u = np.arange(n ** 3, dtype=np.float64).reshape((n, n, n))
+    v = -2.0 * u
+    w = 0.5 * u
+    p = 3.0 * u + 1.0
+    solver.set_state(u, v, w, p)
+
+    np.testing.assert_allclose(np.asarray(solver.get_u()), u)
+    np.testing.assert_allclose(np.asarray(solver.get_v()), v)
+    np.testing.assert_allclose(np.asarray(solver.get_w()), w)
+    np.testing.assert_allclose(np.asarray(solver.get_p()), p)
+
+    solver.scale_state(0.25, 2.0)
+    np.testing.assert_allclose(np.asarray(solver.get_u()), 0.25 * u)
+    np.testing.assert_allclose(np.asarray(solver.get_v()), 0.25 * v)
+    np.testing.assert_allclose(np.asarray(solver.get_w()), 0.25 * w)
+    np.testing.assert_allclose(np.asarray(solver.get_p()), 2.0 * p)
+
+
 if __name__ == "__main__":
     test_single_sphere_large_dt_continuation()
+    test_state_import_and_scaling()

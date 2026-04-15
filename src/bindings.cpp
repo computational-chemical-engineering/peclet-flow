@@ -10,6 +10,34 @@
 
 namespace py = pybind11;
 
+namespace {
+
+std::vector<double> copy_field_from_numpy(const py::array_t<double> &field,
+                                          int3 res,
+                                          const char *name) {
+  py::buffer_info buf = field.request();
+  const ssize_t expected_size =
+      static_cast<ssize_t>(res.x) * res.y * res.z;
+
+  if (buf.size != expected_size) {
+    throw std::runtime_error(std::string(name) + ": expected " +
+                             std::to_string(expected_size) +
+                             " values, got " + std::to_string(buf.size));
+  }
+
+  if (buf.ndim != 1 &&
+      !(buf.ndim == 3 && buf.shape[0] == res.z && buf.shape[1] == res.y &&
+        buf.shape[2] == res.x)) {
+    throw std::runtime_error(std::string(name) +
+                             ": expected flat array or shape (nz, ny, nx)");
+  }
+
+  const double *ptr = static_cast<const double *>(buf.ptr);
+  return std::vector<double>(ptr, ptr + expected_size);
+}
+
+} // namespace
+
 PYBIND11_MODULE(pnm_backend, m) {
   m.doc() = "PNM Extraction Backend reading VTI files";
 
@@ -264,9 +292,57 @@ PYBIND11_MODULE(pnm_backend, m) {
       .def("step", &CFDSolver::step, py::arg("dt"))
       .def("get_fluid_fraction", &CFDSolver::get_fluid_fraction,
            py::arg("type"), py::arg("offset"))
-      .def("set_u", &CFDSolver::set_u, py::arg("u"))
-      .def("set_v", &CFDSolver::set_v, py::arg("v"))
-      .def("set_w", &CFDSolver::set_w, py::arg("w"))
+      .def("set_u",
+           [](CFDSolver &self,
+              py::array_t<double, py::array::c_style | py::array::forcecast>
+                  u_array) {
+             self.set_u(copy_field_from_numpy(u_array, self.get_resolution(),
+                                              "set_u"));
+           },
+           py::arg("u"))
+      .def("set_v",
+           [](CFDSolver &self,
+              py::array_t<double, py::array::c_style | py::array::forcecast>
+                  v_array) {
+             self.set_v(copy_field_from_numpy(v_array, self.get_resolution(),
+                                              "set_v"));
+           },
+           py::arg("v"))
+      .def("set_w",
+           [](CFDSolver &self,
+              py::array_t<double, py::array::c_style | py::array::forcecast>
+                  w_array) {
+             self.set_w(copy_field_from_numpy(w_array, self.get_resolution(),
+                                              "set_w"));
+           },
+           py::arg("w"))
+      .def("set_p",
+           [](CFDSolver &self,
+              py::array_t<double, py::array::c_style | py::array::forcecast>
+                  p_array) {
+             self.set_p(copy_field_from_numpy(p_array, self.get_resolution(),
+                                              "set_p"));
+           },
+           py::arg("p"))
+      .def("set_state",
+           [](CFDSolver &self,
+              py::array_t<double, py::array::c_style | py::array::forcecast>
+                  u_array,
+              py::array_t<double, py::array::c_style | py::array::forcecast>
+                  v_array,
+              py::array_t<double, py::array::c_style | py::array::forcecast>
+                  w_array,
+              py::array_t<double, py::array::c_style | py::array::forcecast>
+                  p_array) {
+             const int3 res = self.get_resolution();
+             self.set_u(copy_field_from_numpy(u_array, res, "set_state(u)"));
+             self.set_v(copy_field_from_numpy(v_array, res, "set_state(v)"));
+             self.set_w(copy_field_from_numpy(w_array, res, "set_state(w)"));
+             self.set_p(copy_field_from_numpy(p_array, res, "set_state(p)"));
+           },
+           py::arg("u"), py::arg("v"), py::arg("w"), py::arg("p"))
+      .def("scale_state", &CFDSolver::scale_state, py::arg("velocity_scale"),
+           py::arg("pressure_scale"))
       .def("get_ibm_scaling", &CFDSolver::get_ibm_scaling,
            py::arg("component_idx"));
 }

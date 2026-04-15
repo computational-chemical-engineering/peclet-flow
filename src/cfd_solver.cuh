@@ -246,6 +246,8 @@ public:
   void set_u(const std::vector<double> &u);
   void set_v(const std::vector<double> &v);
   void set_w(const std::vector<double> &w);
+  void set_p(const std::vector<double> &p);
+  void scale_state(double velocity_scale, double pressure_scale);
 
 private:
   MacGrid grid;

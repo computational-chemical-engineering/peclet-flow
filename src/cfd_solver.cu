@@ -84,6 +84,14 @@ __global__ void apply_correction_kernel(double *__restrict__ u,
   u[idx] += (double)du[idx];
 }
 
+__global__ void scale_field_kernel(double *__restrict__ field, double scale,
+                                   int num_elements) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_elements)
+    return;
+  field[idx] *= scale;
+}
+
 // Helper: Trilinear Interpolation with Periodic Wrap
 __device__ float sample_field(const float *__restrict__ field, float x, float y,
                               float z, int3 res) {
@@ -3073,7 +3081,6 @@ void CFDSolver::set_u(const std::vector<double> &h_u) {
   }
   CHECK_CUDA(cudaMemcpy(grid.u, h_u.data(), num_elements * sizeof(double),
                         cudaMemcpyHostToDevice));
-  std::cout << "DEBUG_SET_U: grid.u_ptr = " << grid.u << std::endl;
 }
 
 void CFDSolver::set_v(const std::vector<double> &h_v) {
@@ -3090,6 +3097,33 @@ void CFDSolver::set_w(const std::vector<double> &h_w) {
   }
   CHECK_CUDA(cudaMemcpy(grid.w, h_w.data(), num_elements * sizeof(double),
                         cudaMemcpyHostToDevice));
+}
+
+void CFDSolver::set_p(const std::vector<double> &h_p) {
+  if (h_p.size() != num_elements) {
+    throw std::runtime_error("set_p: Input size mismatch");
+  }
+  CHECK_CUDA(cudaMemcpy(grid.p, h_p.data(), num_elements * sizeof(double),
+                        cudaMemcpyHostToDevice));
+}
+
+void CFDSolver::scale_state(double velocity_scale, double pressure_scale) {
+  const int threads = 256;
+  const int blocks = (num_elements + threads - 1) / threads;
+
+  if (velocity_scale != 1.0) {
+    scale_field_kernel<<<blocks, threads>>>(grid.u, velocity_scale,
+                                            num_elements);
+    scale_field_kernel<<<blocks, threads>>>(grid.v, velocity_scale,
+                                            num_elements);
+    scale_field_kernel<<<blocks, threads>>>(grid.w, velocity_scale,
+                                            num_elements);
+  }
+  if (pressure_scale != 1.0) {
+    scale_field_kernel<<<blocks, threads>>>(grid.p, pressure_scale,
+                                            num_elements);
+  }
+  CHECK_CUDA(cudaDeviceSynchronize());
 }
 
 // Kernel to subtract mean from RHS
