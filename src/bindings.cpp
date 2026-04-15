@@ -259,6 +259,23 @@ PYBIND11_MODULE(pnm_backend, m) {
            py::arg("fluid_only") = false)
       .def("set_debug_stats", &CFDSolver::set_debug_stats, py::arg("enabled"))
       .def("get_debug_stats", &CFDSolver::get_debug_stats)
+      .def("get_debug_fields",
+           [](CFDSolver &self) {
+             auto fields = self.get_debug_fields();
+             int3 res = self.get_resolution();
+             py::list out;
+             for (const auto &field : fields) {
+               py::array_t<float> array(
+                   {static_cast<ssize_t>(res.z), static_cast<ssize_t>(res.y),
+                    static_cast<ssize_t>(res.x)});
+               std::memcpy(array.mutable_data(), field.data(),
+                           field.size() * sizeof(float));
+               out.append(array);
+             }
+             return out;
+           })
+      .def("set_debug_cell", &CFDSolver::set_debug_cell, py::arg("cell"))
+      .def("get_debug_cell_info", &CFDSolver::get_debug_cell_info)
 
       .def("set_body_force", &CFDSolver::set_body_force, py::arg("force"))
       .def("set_theta_", &CFDSolver::set_theta_, py::arg("theta"))
