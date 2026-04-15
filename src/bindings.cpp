@@ -2,6 +2,7 @@
 #include "pore_extraction.cuh"
 #include "sdf_reader.h"
 #include <array>
+#include <cstring>
 #include <pybind11/iostream.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -11,6 +12,13 @@
 namespace py = pybind11;
 
 namespace {
+
+py::array_t<double> make_owned_array(const std::vector<double> &data, int3 res) {
+  py::array_t<double> array({static_cast<ssize_t>(res.z), static_cast<ssize_t>(res.y),
+                             static_cast<ssize_t>(res.x)});
+  std::memcpy(array.mutable_data(), data.data(), data.size() * sizeof(double));
+  return array;
+}
 
 std::vector<double> copy_field_from_numpy(const py::array_t<double> &field,
                                           int3 res,
@@ -223,37 +231,29 @@ PYBIND11_MODULE(pnm_backend, m) {
 
       // --- Getters returning 3D arrays ---
       .def("get_u",
-           [](CFDSolver &self) {
-             auto data = self.get_u();
-             int3 res = self.get_resolution(); // Using PUBLIC getter
-             std::vector<ssize_t> shape = {(ssize_t)res.z, (ssize_t)res.y,
-                                           (ssize_t)res.x};
-             return py::array_t<double>(shape, data.data());
-           })
-      .def("get_v",
-           [](CFDSolver &self) {
-             auto data = self.get_v();
-             int3 res = self.get_resolution();
-             std::vector<ssize_t> shape = {(ssize_t)res.z, (ssize_t)res.y,
-                                           (ssize_t)res.x};
-             return py::array_t<double>(shape, data.data());
-           })
-      .def("get_w",
-           [](CFDSolver &self) {
-             auto data = self.get_w();
-             int3 res = self.get_resolution();
-             std::vector<ssize_t> shape = {(ssize_t)res.z, (ssize_t)res.y,
-                                           (ssize_t)res.x};
-             return py::array_t<double>(shape, data.data());
-           })
-      .def("get_p",
-           [](CFDSolver &self) {
-             auto data = self.get_p();
-             int3 res = self.get_resolution();
-             std::vector<ssize_t> shape = {(ssize_t)res.z, (ssize_t)res.y,
-                                           (ssize_t)res.x};
-             return py::array_t<double>(shape, data.data());
+            [](CFDSolver &self) {
+              auto data = self.get_u();
+              int3 res = self.get_resolution();
+              return make_owned_array(data, res);
             })
+      .def("get_v",
+            [](CFDSolver &self) {
+              auto data = self.get_v();
+              int3 res = self.get_resolution();
+              return make_owned_array(data, res);
+            })
+      .def("get_w",
+            [](CFDSolver &self) {
+              auto data = self.get_w();
+              int3 res = self.get_resolution();
+              return make_owned_array(data, res);
+            })
+      .def("get_p",
+            [](CFDSolver &self) {
+              auto data = self.get_p();
+              int3 res = self.get_resolution();
+              return make_owned_array(data, res);
+             })
       .def("get_last_outer_iterations", &CFDSolver::get_last_outer_iterations)
       .def("get_momentum_residual_max", &CFDSolver::get_momentum_residual_max,
            py::arg("fluid_only") = false)
@@ -341,6 +341,7 @@ PYBIND11_MODULE(pnm_backend, m) {
              self.set_p(copy_field_from_numpy(p_array, res, "set_state(p)"));
            },
            py::arg("u"), py::arg("v"), py::arg("w"), py::arg("p"))
+      // Scale continuation states on the GPU to avoid unnecessary host copies.
       .def("scale_state", &CFDSolver::scale_state, py::arg("velocity_scale"),
            py::arg("pressure_scale"))
       .def("get_ibm_scaling", &CFDSolver::get_ibm_scaling,

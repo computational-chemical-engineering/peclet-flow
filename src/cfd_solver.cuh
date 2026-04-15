@@ -228,10 +228,13 @@ public:
   // Set Diffusion Scheme (0.5 = Crank-Nicolson, 1.0 = Fully Implicit)
   void set_theta_(float theta);
 
-  // Getters for visualization (copy to host)
+  /// Copy the staggered x-velocity field to host memory.
   std::vector<double> get_u() const;
+  /// Copy the staggered y-velocity field to host memory.
   std::vector<double> get_v() const;
+  /// Copy the staggered z-velocity field to host memory.
   std::vector<double> get_w() const;
+  /// Copy the pressure field to host memory.
   std::vector<double> get_p() const;
   float get_momentum_residual_max(bool fluid_only = false);
   float get_divergence_max(float dt, bool fluid_only = false);
@@ -243,10 +246,15 @@ public:
   void set_debug_cell(int3 cell);
   std::vector<float> get_debug_cell_info() const;
 
+  /// Replace the staggered x-velocity field from host memory.
   void set_u(const std::vector<double> &u);
+  /// Replace the staggered y-velocity field from host memory.
   void set_v(const std::vector<double> &v);
+  /// Replace the staggered z-velocity field from host memory.
   void set_w(const std::vector<double> &w);
+  /// Replace the pressure field from host memory.
   void set_p(const std::vector<double> &p);
+  /// Scale velocity and pressure fields in place on the device.
   void scale_state(double velocity_scale, double pressure_scale);
 
 private:

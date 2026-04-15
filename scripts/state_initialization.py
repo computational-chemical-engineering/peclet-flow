@@ -1,7 +1,10 @@
+"""Helpers for continuation sweeps and cross-resolution solver initialization."""
+
 import numpy as np
 
 
 def fit_force_law(u_mean_samples, force_samples):
+    """Fit ``force ~= a*u_mean + b*u_mean**2`` in a least-squares sense."""
     u_mean_samples = np.asarray(u_mean_samples, dtype=np.float64)
     force_samples = np.asarray(force_samples, dtype=np.float64)
     design = np.column_stack([u_mean_samples, u_mean_samples ** 2])
@@ -10,6 +13,7 @@ def fit_force_law(u_mean_samples, force_samples):
 
 
 def predict_u_mean(force, linear_coeff, quadratic_coeff):
+    """Invert ``force = a*u_mean + b*u_mean**2`` for the positive root."""
     force = float(force)
     linear_coeff = float(linear_coeff)
     quadratic_coeff = float(quadratic_coeff)
@@ -24,6 +28,7 @@ def predict_u_mean(force, linear_coeff, quadratic_coeff):
 
 
 def scale_solver_state(solver, previous_u_mean, target_u_mean, previous_force, target_force):
+    """Scale an already converged solver state in place for continuation."""
     if abs(previous_u_mean) < 1e-14:
         raise ValueError("previous_u_mean must be non-zero")
     if abs(previous_force) < 1e-14:
@@ -35,6 +40,7 @@ def scale_solver_state(solver, previous_u_mean, target_u_mean, previous_force, t
 
 
 def extract_solver_state(solver):
+    """Copy ``u``, ``v``, ``w`` and ``p`` from a solver into NumPy arrays."""
     return {
         "u": np.asarray(solver.get_u(), dtype=np.float64),
         "v": np.asarray(solver.get_v(), dtype=np.float64),
@@ -44,6 +50,7 @@ def extract_solver_state(solver):
 
 
 def load_solver_state(solver, state):
+    """Load a previously extracted state into a solver."""
     solver.set_state(
         np.asarray(state["u"], dtype=np.float64),
         np.asarray(state["v"], dtype=np.float64),
@@ -53,6 +60,7 @@ def load_solver_state(solver, state):
 
 
 def _resample_axis(field, target_coords, axis):
+    """Periodically resample one axis of a structured field."""
     source_coords = np.linspace(0.0, 1.0, field.shape[axis], endpoint=False)
     field = np.moveaxis(field, axis, 0)
     resampled = np.empty((target_coords.size,) + field.shape[1:], dtype=np.float64)
@@ -67,6 +75,7 @@ def _resample_axis(field, target_coords, axis):
 
 
 def resample_field_linear(field, target_shape):
+    """Periodically resample a scalar field to a new ``(nz, ny, nx)`` shape."""
     field = np.asarray(field, dtype=np.float64)
     if field.ndim != 3:
         raise ValueError("field must have shape (nz, ny, nx)")
@@ -85,6 +94,7 @@ def resample_field_linear(field, target_shape):
 
 
 def resample_state_linear(state, target_shape):
+    """Resample all entries of a state dictionary with linear interpolation."""
     return {
         name: resample_field_linear(field, target_shape)
         for name, field in state.items()
