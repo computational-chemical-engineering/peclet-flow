@@ -226,8 +226,19 @@ PYBIND11_MODULE(pnm_backend, m) {
                 ptr, ptr + (buf.shape[0] * buf.shape[1] * buf.shape[2]));
 
             self.initialize(temp_sdf);
-          },
-          py::arg("sdf_array"), py::arg("origin"), py::arg("spacing"))
+           },
+           py::arg("sdf_array"), py::arg("origin"), py::arg("spacing"))
+      .def("get_resolution",
+           [](const CFDSolver &self) {
+             int3 res = self.get_resolution();
+             return py::make_tuple(res.z, res.y, res.x);
+           })
+      .def("get_spacing",
+           [](const CFDSolver &self) {
+             float3 spc = self.get_spacing();
+             return py::make_tuple(spc.z, spc.y, spc.x);
+           })
+      .def("update_ibm_geometry", &CFDSolver::update_ibm_geometry)
 
       // --- Getters returning 3D arrays ---
       .def("get_u",
@@ -254,11 +265,11 @@ PYBIND11_MODULE(pnm_backend, m) {
               int3 res = self.get_resolution();
               return make_owned_array(data, res);
              })
-      .def("get_last_outer_iterations", &CFDSolver::get_last_outer_iterations)
-      .def("get_momentum_residual_max", &CFDSolver::get_momentum_residual_max,
-           py::arg("fluid_only") = false)
-      .def("set_debug_stats", &CFDSolver::set_debug_stats, py::arg("enabled"))
-      .def("get_debug_stats", &CFDSolver::get_debug_stats)
+       .def("get_last_outer_iterations", &CFDSolver::get_last_outer_iterations)
+       .def("get_momentum_residual_max", &CFDSolver::get_momentum_residual_max,
+            py::arg("fluid_only") = false)
+       .def("set_debug_stats", &CFDSolver::set_debug_stats, py::arg("enabled"))
+       .def("get_debug_stats", &CFDSolver::get_debug_stats)
       .def("get_debug_fields",
            [](CFDSolver &self) {
              auto fields = self.get_debug_fields();
@@ -302,16 +313,16 @@ PYBIND11_MODULE(pnm_backend, m) {
            py::arg("bottom_sweeps"), py::arg("v_cycles"))
       .def("set_outer_iterations", &CFDSolver::set_outer_iterations,
            py::arg("iterations"))
-      .def("set_outer_tolerance", &CFDSolver::set_outer_tolerance,
-           py::arg("tol"))
-      .def("set_outer_convergence_mode",
-           &CFDSolver::set_outer_convergence_mode, py::arg("mode"))
-      .def("step", &CFDSolver::step, py::arg("dt"))
-      .def("get_fluid_fraction", &CFDSolver::get_fluid_fraction,
-           py::arg("type"), py::arg("offset"))
-      .def("set_u",
-           [](CFDSolver &self,
-              py::array_t<double, py::array::c_style | py::array::forcecast>
+       .def("set_outer_tolerance", &CFDSolver::set_outer_tolerance,
+            py::arg("tol"))
+       .def("set_outer_convergence_mode",
+            &CFDSolver::set_outer_convergence_mode, py::arg("mode"))
+       .def("step", &CFDSolver::step, py::arg("dt"))
+       .def("get_fluid_fraction", &CFDSolver::get_fluid_fraction,
+            py::arg("type"), py::arg("offset"))
+       .def("set_u",
+            [](CFDSolver &self,
+               py::array_t<double, py::array::c_style | py::array::forcecast>
                   u_array) {
              self.set_u(copy_field_from_numpy(u_array, self.get_resolution(),
                                               "set_u"));
