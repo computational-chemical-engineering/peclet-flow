@@ -43,11 +43,17 @@ ctest --test-dir build_mpi --output-on-failure     # mac_halo_np{1,2,4}
 - Establishes the per-step **exchange → update-inner** pattern the distributed solver will use, and
   confirms the width-2 halo stays correct on every block boundary across a multi-step time loop.
 
+### Step 4 — distributed implicit diffusion (Red-Black Gauss-Seidel) ✅ verified
+- `tests/test_gs_implicit_mpi.cu`: solve `(I - beta*Lap) phi = b` with RB-GS, **halo exchange after
+  each colour sweep**. Red/black uses **global parity** `(gx+gy+gz)&1` so colouring is consistent
+  across block boundaries. Distributed matches serial RB-GS cell-for-cell over 30 iterations,
+  np=1,2,4. This is the iterative implicit-solver pattern the momentum and pressure solves use.
+
 ## Remaining (planned)
 
-- **Step 4** — distributed *implicit* velocity diffusion (Red-Black Gauss-Seidel): halo exchange
-  after each colour sweep; validate vs the serial diffusion solve (all-fluid, no IBM).
-- **Step 5** — distributed pressure Poisson (single-level Jacobi/RB-GS) vs serial (all-fluid).
+- **Step 5** — distributed pressure projection (Chorin) on an all-fluid periodic MAC grid: staggered
+  divergence → Poisson solve (RB-GS, reuses Step 4 pattern) → gradient correction; validate the
+  resulting divergence-free velocity vs serial.
 - **Step 6** — thread the validated exchanges into `step()`: allocate state/scratch as extended local
   blocks, run the existing kernels on them with exchanges between sweeps; validate vs single-rank
   `scripts/verify_poiseuille.py`, `verify_divergence.py`.
