@@ -35,11 +35,14 @@ struct MacGridHalo {
   int ghost = 1;
 
   /// Build the decomposition and halo for `global_res`, assigning block `rank` to this MPI rank.
+  /// ghost_width must cover the widest stencil reach (cfd: 1 for the Laplacian/diffusion, 2 for the
+  /// Koren TVD advection flux which reads phi_LL..phi_RR).
   void init(int3 global_resolution, int rank_, int size_, std::array<bool, 3> periodic,
-            MPI_Comm comm = MPI_COMM_WORLD) {
+            int ghost_width = 1, MPI_Comm comm = MPI_COMM_WORLD) {
     global_res = global_resolution;
     rank = rank_;
     size = size_;
+    ghost = ghost_width;
     dec.init(static_cast<std::size_t>(size),
              {global_res.x, global_res.y, global_res.z});
     halo.buildTopology(dec, rank, ghost, periodic, comm);
