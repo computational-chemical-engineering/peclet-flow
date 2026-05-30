@@ -100,3 +100,28 @@ u = np.array(solver.get_u()).reshape((nx, ny, nz), order='F')
 - **SDF sign**: Negative inside solid, positive in fluid
 - **CUDA kernels**: Named with `_kernel` suffix
 - **Staggered grid**: u at (i+1/2,j,k), v at (i,j+1/2,k), w at (i,j,k+1/2), p at cell centers
+
+## MPI distribution (transport-core integration — in progress)
+
+The solver is moving toward MPI block-parallelism on the shared `transport-core` library (sibling
+repo `../transport-core`). First step landed: `src/mac_halo.cuh` — `MacGridHalo`, an adapter that
+decomposes the global MAC cell grid (ORB) into rank-owned blocks and exchanges a width-1 ghost layer
+for any `double` cell-field laid out as the *extended local block*. Because cfd's index convention is
+already x-fastest (`I = x + y*nx + z*nx*ny`) and width-1, the halo drops in directly.
+
+- Build/test (opt-in; the default module build is untouched):
+  ```bash
+  export PATH=/usr/local/cuda-13.2/bin:$PATH
+  cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON \
+    -DFETCHCONTENT_SOURCE_DIR_PYBIND11=$PWD/build/_deps/pybind11-src
+  cmake --build build_mpi --target test_mac_halo -j
+  ctest --test-dir build_mpi --output-on-failure     # mac_halo_np{1,2,4}
+  ```
+- `tests/test_mac_halo.cu` validates that `MacGridHalo` reproduces cfd's **own** periodic 7-point
+  Laplacian (via the real `get_idx`) on the distributed extended block — i.e. the solver's stencils
+  can run block-distributed with halo exchange replacing in-kernel global wrapping.
+- **Remaining (the larger task):** thread `MacGridHalo::exchange()` through `step()`: allocate the
+  state/scratch fields as extended local blocks, replace `get_idx` wrapping with local indexing +
+  a ghost exchange after each Red-Black Gauss-Seidel / Jacobi sweep, and handle the multigrid
+  hierarchy (restriction/prolongation across block boundaries). Validate against the single-rank
+  references (`scripts/verify_poiseuille.py`, `verify_periodic_spheres.py`, `verify_divergence.py`).

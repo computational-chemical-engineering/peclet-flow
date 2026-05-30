@@ -37,3 +37,31 @@ target_include_directories(pnm_backend PRIVATE src)
 
 # Link against CUDA Runtime
 target_link_libraries(pnm_backend PRIVATE CUDA::cudart)
+
+# ---------------------------------------------------------------------------
+# Optional: MPI distributed-halo capability (transport-core integration).
+# Off by default so the standard module build is unchanged. Enable with
+#   cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON
+# transport-core is header-only and picked up from the sibling checkout.
+# ---------------------------------------------------------------------------
+option(CFD_BUILD_MPI "Build MPI distributed-halo tests (needs transport-core + MPI)" OFF)
+if(CFD_BUILD_MPI)
+  find_package(MPI REQUIRED COMPONENTS CXX)
+  set(TPX_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../transport-core/include")
+  if(NOT EXISTS "${TPX_INCLUDE}/tpx/halo/grid_halo.hpp")
+    message(FATAL_ERROR "transport-core not found at ${TPX_INCLUDE} (clone it as a sibling repo)")
+  endif()
+
+  enable_testing()
+  add_executable(test_mac_halo tests/test_mac_halo.cu)
+  target_include_directories(test_mac_halo PRIVATE src ${TPX_INCLUDE})
+  target_link_libraries(test_mac_halo PRIVATE CUDA::cudart MPI::MPI_CXX)
+  # transport-core's halo headers are C++17-clean; the RTX 5080 is sm_120.
+  set_target_properties(test_mac_halo PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
+
+  foreach(np IN ITEMS 1 2 4)
+    add_test(NAME mac_halo_np${np}
+             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
+                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_mac_halo> ${MPIEXEC_POSTFLAGS})
+  endforeach()
+endif()
