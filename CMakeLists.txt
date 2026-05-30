@@ -53,15 +53,20 @@ if(CFD_BUILD_MPI)
   endif()
 
   enable_testing()
-  add_executable(test_mac_halo tests/test_mac_halo.cu)
-  target_include_directories(test_mac_halo PRIVATE src ${TPX_INCLUDE})
-  target_link_libraries(test_mac_halo PRIVATE CUDA::cudart MPI::MPI_CXX)
   # transport-core's halo headers are C++17-clean; the RTX 5080 is sm_120.
-  set_target_properties(test_mac_halo PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
+  foreach(t test_mac_halo test_advdiff_mpi)
+    add_executable(${t} tests/${t}.cu)
+    target_include_directories(${t} PRIVATE src ${TPX_INCLUDE})
+    target_link_libraries(${t} PRIVATE CUDA::cudart MPI::MPI_CXX)
+    set_target_properties(${t} PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
+  endforeach()
 
   foreach(np IN ITEMS 1 2 4)
     add_test(NAME mac_halo_np${np}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
                      ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_mac_halo> ${MPIEXEC_POSTFLAGS})
+    add_test(NAME advdiff_np${np}
+             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
+                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_advdiff_mpi> ${MPIEXEC_POSTFLAGS})
   endforeach()
 endif()

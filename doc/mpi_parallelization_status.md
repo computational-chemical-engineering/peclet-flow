@@ -35,11 +35,16 @@ ctest --test-dir build_mpi --output-on-failure     # mac_halo_np{1,2,4}
 - `tests/test_mac_halo.cu`: distributed separable ±1..R stencils == serial for **R=1 and R=2**,
   np=1,2,4.
 
+### Step 3 — distributed explicit advection–diffusion time loop ✅ verified
+- `tests/test_advdiff_mpi.cu`: explicit scalar transport with the **Koren TVD** advection limiter
+  (the same reconstruction cfd uses; reach ±2) + central diffusion, constant velocity, periodic.
+  Serial (full grid, `get_idx`) and distributed (extended block, halo exchange each step) share one
+  `cell_update` device function and match cell-for-cell over 25 steps, np=1,2,4.
+- Establishes the per-step **exchange → update-inner** pattern the distributed solver will use, and
+  confirms the width-2 halo stays correct on every block boundary across a multi-step time loop.
+
 ## Remaining (planned)
 
-- **Step 3** — distributed *explicit* operators on an all-fluid periodic domain vs serial:
-  divergence (pressure RHS) and the explicit advection–diffusion term. Establishes the per-operator
-  exchange pattern (exchange → compute inner).
 - **Step 4** — distributed *implicit* velocity diffusion (Red-Black Gauss-Seidel): halo exchange
   after each colour sweep; validate vs the serial diffusion solve (all-fluid, no IBM).
 - **Step 5** — distributed pressure Poisson (single-level Jacobi/RB-GS) vs serial (all-fluid).
