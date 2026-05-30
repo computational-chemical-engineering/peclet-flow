@@ -49,16 +49,37 @@ ctest --test-dir build_mpi --output-on-failure     # mac_halo_np{1,2,4}
   across block boundaries. Distributed matches serial RB-GS cell-for-cell over 30 iterations,
   np=1,2,4. This is the iterative implicit-solver pattern the momentum and pressure solves use.
 
-## Remaining (planned)
+### Step 5 — distributed pressure projection (Chorin) ✅ verified
+- `tests/test_projection_mpi.cu`: the full incompressible update on a staggered MAC grid — exchange
+  (u,v,w) → cell-centred divergence → Poisson solve for phi (RB-GS, exchange between sweeps) →
+  subtract grad(phi). Distributed matches serial **cell-for-cell** for u,v,w, np=1,2,4. Composes
+  multi-field exchange + staggered operators + the iterative solve — the canonical incompressible
+  operation, distributed.
 
-- **Step 5** — distributed pressure projection (Chorin) on an all-fluid periodic MAC grid: staggered
-  divergence → Poisson solve (RB-GS, reuses Step 4 pattern) → gradient correction; validate the
-  resulting divergence-free velocity vs serial.
-- **Step 6** — thread the validated exchanges into `step()`: allocate state/scratch as extended local
-  blocks, run the existing kernels on them with exchanges between sweeps; validate vs single-rank
-  `scripts/verify_poiseuille.py`, `verify_divergence.py`.
-- **Step 7** — IBM (cut-cell data is local per block; verify cut cells near block boundaries) and the
-  **multigrid hierarchy** (restriction/prolongation across block boundaries) — the hardest parts.
+## Summary: all core distributed patterns are verified
+
+The halo (widths 1 & 2), explicit advection–diffusion (Koren TVD), implicit Red-Black Gauss-Seidel
+(exchange between sweeps), and the full staggered Chorin projection all reproduce the serial result
+cell-for-cell across np=1,2,4. **12/12 MPI ctests pass.** The mechanism for distributing cfd's solver
+is proven on cfd's own conventions and field layout.
+
+## Remaining — the integration into the real solver (large)
+
+- **Step 6** — thread the validated exchanges into the actual `step()`: allocate the state/scratch
+  fields (`MacGrid::u,v,w,p`, residuals, explicit terms) as **extended local blocks**, replace the
+  in-kernel `get_idx` periodic wrapping with local indexing, and insert `MacGridHalo::exchange()` at
+  the right points (after each Red-Black/Jacobi sweep, before each explicit operator, ghost width 2
+  where advection is involved). This touches the 3000-line `cfd_solver.cu` pervasively; do it
+  operator-by-operator, re-validating against the single-rank references
+  (`scripts/verify_poiseuille.py`, `verify_divergence.py`, `verify_periodic_spheres.py`) after each.
+- **Step 7** — **IBM**: cut-cell SoA data (`ibm_data*`, `ibm_id_map*`) is built per block; verify cut
+  cells straddling block boundaries and that `D_rescale` stencil edits are applied consistently with
+  exchanged ghosts. **Multigrid**: the pressure/velocity V-cycles need halo exchange at every level
+  and correct restriction/prolongation across block boundaries (coarse-grid decomposition) — the
+  hardest remaining piece; a single-level RB-GS fallback (Step 4/5 pattern) works in the meantime.
+- **Non-periodic BCs & load balance**: physical boundaries handled as today (BC fills ghosts that fall
+  outside the domain); ORB already balances cell counts, but IBM/solid load imbalance may warrant
+  weighting later.
 
 ## Constraints / notes
 
