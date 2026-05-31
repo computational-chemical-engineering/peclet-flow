@@ -95,12 +95,20 @@ top of this proven foundation.
   decomposition + halo are correct with a solid present; (b) **exact no-slip** (velocity identically
   zero in the solid). This is a complete MPI-parallel incompressible solver handling SDF solids.
 
+### Step 8 — distributed Poiseuille channel flow (analytic validation) ✅ verified
+- `tests/test_poiseuille_mpi.cu`: body-force-driven flow between two masked no-slip walls (hard
+  Dirichlet enforced after every Gauss-Seidel sweep, ghosts masked by wrapped global-y), periodic in
+  x,z. Validated: (a) distributed == serial **cell-for-cell**, np=1,2,4; (b) **physical** — the steady
+  interior momentum balance `nu*Lap_y(u)+g` is ~5e-9, and the peak velocity matches the analytic
+  parabolic profile `g*W^2/(8*nu)` to 0.16%. Mirrors cfd's own `verify_poiseuille.py`.
+
 ## Status: a working distributed incompressible solver with solids
 
-Steps 1–7 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2),
+Steps 1–8 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2),
 Koren advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a full unsteady-Stokes
-timestep (Taylor–Green-verified to ~2e-15), and flow around an SDF solid. **18/18 MPI ctests pass**,
-np=1,2,4. The production `pnm_backend` build is untouched.
+timestep (Taylor–Green-verified to ~2e-15), flow around an SDF solid, and channel flow matching the
+analytic Poiseuille profile. **21/21 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is
+untouched.
 
 ## Remaining (further work, same pattern)
 
