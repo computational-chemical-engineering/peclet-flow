@@ -101,27 +101,40 @@ u = np.array(solver.get_u()).reshape((nx, ny, nz), order='F')
 - **CUDA kernels**: Named with `_kernel` suffix
 - **Staggered grid**: u at (i+1/2,j,k), v at (i,j+1/2,k), w at (i,j,k+1/2), p at cell centers
 
-## MPI distribution (transport-core integration — in progress)
+## MPI distribution (transport-core integration)
 
-The solver is moving toward MPI block-parallelism on the shared `transport-core` library (sibling
-repo `../transport-core`). First step landed: `src/mac_halo.cuh` — `MacGridHalo`, an adapter that
-decomposes the global MAC cell grid (ORB) into rank-owned blocks and exchanges a width-1 ghost layer
-for any `double` cell-field laid out as the *extended local block*. Because cfd's index convention is
-already x-fastest (`I = x + y*nx + z*nx*ny`) and width-1, the halo drops in directly.
+There is a **complete, validated distributed incompressible Navier–Stokes solver** built on the shared
+`transport-core` library (sibling repo `../transport-core`), opt-in and **separate from the production
+`pnm_backend` module** (which is untouched). Full step-by-step status is in
+[`doc/mpi_parallelization_status.md`](doc/mpi_parallelization_status.md).
 
-- Build/test (opt-in; the default module build is untouched):
-  ```bash
-  export PATH=/usr/local/cuda-13.2/bin:$PATH
-  cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON \
-    -DFETCHCONTENT_SOURCE_DIR_PYBIND11=$PWD/build/_deps/pybind11-src
-  cmake --build build_mpi --target test_mac_halo -j
-  ctest --test-dir build_mpi --output-on-failure     # mac_halo_np{1,2,4}
-  ```
-- `tests/test_mac_halo.cu` validates that `MacGridHalo` reproduces cfd's **own** periodic 7-point
-  Laplacian (via the real `get_idx`) on the distributed extended block — i.e. the solver's stencils
-  can run block-distributed with halo exchange replacing in-kernel global wrapping.
-- **Remaining (the larger task):** thread `MacGridHalo::exchange()` through `step()`: allocate the
-  state/scratch fields as extended local blocks, replace `get_idx` wrapping with local indexing +
-  a ghost exchange after each Red-Black Gauss-Seidel / Jacobi sweep, and handle the multigrid
-  hierarchy (restriction/prolongation across block boundaries). Validate against the single-rank
-  references (`scripts/verify_poiseuille.py`, `verify_periodic_spheres.py`, `verify_divergence.py`).
+Key pieces (all `src/*.cuh`, header-only, on branch `mpi-halo-integration`):
+- `mac_halo.cuh` — `MacGridHalo`: decomposes the global MAC cell grid (ORB) into rank-owned blocks and
+  exchanges a ghost layer (configurable width; 2 for the Koren advection reach) for `double`
+  cell-fields on the extended local block. cfd's x-fastest indexing means the halo drops in directly.
+- `staggered_advection.cuh` — `sadv::advect`: cfd's exact staggered Koren TVD advection, templated on a
+  field accessor so the same operator serves the full grid and a local block.
+- `distributed_stokes.cuh` — `dstokes::DistributedStokes`: the reusable solver. `step(n_diff, n_pois)`
+  does per-component implicit diffusion (RB-GS, halo exchange between sweeps) + Chorin projection, with
+  `set_advection(true)` (full Navier–Stokes), `set_body_force`, `set_solid` (no-slip masking), and
+  `gather_to_root` (assemble the global field for VTI output via `tpx::geom`).
+
+Validated cell-for-cell vs serial and against analytics (Taylor–Green ~2e-15, Poiseuille, momentum
+conservation), **36/36 ctests, real multi-rank np=1,2,4**.
+
+Build/test (opt-in; default module build untouched):
+```bash
+export PATH=/usr/local/cuda-13.2/bin:$PATH
+cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON \
+  -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun \
+  -DFETCHCONTENT_SOURCE_DIR_PYBIND11=$PWD/build/_deps/pybind11-src
+cmake --build build_mpi -j
+ctest --test-dir build_mpi --output-on-failure
+```
+**Force `-DMPIEXEC_EXECUTABLE=/usr/bin/mpirun`** — FindMPI may pick ParaView's bundled `mpiexec` on
+`PATH`, which launches the OpenMPI-linked test binaries as singletons (so `*_np4` silently runs 4×np=1).
+
+**Remaining (largest task):** the *in-place* `cfd_solver.cu` rewrite — extended-block state/scratch +
+MPI global reductions (`max_abs`, `remove_mean`, pressure pin) + distributed **multigrid** (halo per
+level, restriction/prolongation across blocks) + the full Robust-Scaled cut-cell IBM (vs masking). The
+`DistributedStokes` solver is the working single-level path and proves the mechanism end to end.
