@@ -88,12 +88,26 @@ top of this proven foundation.
   projection is an exact no-op), the solver reproduces the analytic backward-Euler decay rate to
   <0.1%. This is a correct, MPI-parallel incompressible-flow solver assembled from the verified pieces.
 
-## Remaining
+### Step 7 — distributed flow around an SDF-described solid ✅ verified
+- `tests/test_stokes_solid_mpi.cu`: the Step 6 solver + a static solid (sphere, SDF < 0 inside)
+  handled by a no-slip immersed boundary (velocity zeroed on faces inside the solid each step,
+  applied last). Validated: (a) distributed == serial **cell-for-cell** over 20 steps, np=1,2,4 — the
+  decomposition + halo are correct with a solid present; (b) **exact no-slip** (velocity identically
+  zero in the solid). This is a complete MPI-parallel incompressible solver handling SDF solids.
 
-- **Step 7** — add **SDF-described solids** (no-slip immersed boundary by velocity masking): velocity
-  forced to zero inside the solid each step, projection over the fluid; validate distributed == serial
-  cell-for-cell and zero velocity in the solid, np=1,2,4. (The full Robust-Scaled cut-cell IBM and the
-  nonlinear staggered advection are further work layered on the same pattern.)
+## Status: a working distributed incompressible solver with solids
+
+Steps 1–7 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2),
+Koren advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a full unsteady-Stokes
+timestep (Taylor–Green-verified to ~2e-15), and flow around an SDF solid. **18/18 MPI ctests pass**,
+np=1,2,4. The production `pnm_backend` build is untouched.
+
+## Remaining (further work, same pattern)
+
+- **Nonlinear staggered advection** in the distributed step (use the Step-3 Koren operator with the
+  staggered advecting-velocity interpolation; ghost width 2) → full Navier–Stokes, not just Stokes.
+- **Full Robust-Scaled cut-cell IBM** (D_rescale stencil edits) in place of velocity masking, with cut
+  cells straddling block boundaries.
 - **Full in-place `cfd_solver.cu`** — extended-block fields + MPI global reductions + distributed
   **multigrid** (halo per level, restriction/prolongation across block boundaries). Largest remaining
   piece; the single-level RB-GS path (Steps 4–6) is the working fallback.
