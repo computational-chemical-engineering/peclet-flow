@@ -129,15 +129,21 @@ top of this proven foundation.
   serial full-grid integration of the identical scheme **cell-for-cell** over 10 steps, np=1,2,4 —
   the rigorous distribution check for the full nonlinear solver.
 
+### Step 12 (capstone) — distributed Navier–Stokes flow around an SDF solid ✅ verified
+- `tests/test_ns_solid_mpi.cu`: the `DistributedStokes` solver with **both** nonlinear advection and
+  an SDF solid (sphere, no-slip by masking), body-force-driven flow past the sphere. Matches an
+  independent serial full-grid integration of the identical scheme **cell-for-cell** over 8 steps,
+  np=1,2,4 — the complete capability (decomposition + async halo + advection + projection + solids).
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids
 
-Steps 1–11 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
+Steps 1–12 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
 advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a full unsteady-Stokes
 timestep (Taylor–Green-verified to ~2e-15), flow around an SDF solid, channel flow matching the
-analytic Poiseuille profile, a **reusable `DistributedStokes` solver class**, the **staggered nonlinear
-momentum advection** operator (cfd's scheme, momentum-conserving), and the **full distributed
-Navier–Stokes** step (cell-for-cell vs serial). **30/30 MPI ctests pass**, np=1,2,4. The production
-`pnm_backend` build is untouched.
+analytic Poiseuille profile, a **reusable `DistributedStokes` solver class**, staggered nonlinear
+momentum advection (cfd's scheme, momentum-conserving), the **full distributed Navier–Stokes** step,
+and **Navier–Stokes flow around an SDF solid** — all validated cell-for-cell vs serial / against
+analytics. **33/33 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
 
 ## Remaining (further work, same pattern)
 
