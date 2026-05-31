@@ -101,4 +101,14 @@ if(CFD_BUILD_MPI)
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
                      ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_gather_vti_mpi> ${MPIEXEC_POSTFLAGS})
   endforeach()
+
+  # Runnable demo (writes a ParaView .vti); CI runs only a tiny smoke case.
+  add_executable(demo_flow_sphere tests/demo_flow_sphere.cu)
+  target_include_directories(demo_flow_sphere PRIVATE src ${TPX_INCLUDE})
+  target_link_libraries(demo_flow_sphere PRIVATE CUDA::cudart MPI::MPI_CXX)
+  set_target_properties(demo_flow_sphere PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
+  add_test(NAME demo_flow_sphere_smoke
+           COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+                   $<TARGET_FILE:demo_flow_sphere> 16 3 ${CMAKE_CURRENT_BINARY_DIR}/smoke.vti
+                   ${MPIEXEC_POSTFLAGS})
 endif()

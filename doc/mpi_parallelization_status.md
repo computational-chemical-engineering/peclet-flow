@@ -158,6 +158,15 @@ momentum advection (cfd's scheme, momentum-conserving), the **full distributed N
 **Navier–Stokes flow around an SDF solid**, and **gather-to-root + VTI output**. **36/36 MPI ctests
 pass**, np=1,2,4. The production `pnm_backend` build is untouched.
 
+## Demo
+
+`tests/demo_flow_sphere.cu` (target `demo_flow_sphere`) is a runnable example: distributed
+Navier–Stokes flow past an SDF sphere, gathered and written as a ParaView `.vti`.
+```bash
+mpirun -np 4 ./build_mpi/demo_flow_sphere [N] [steps] [out.vti]   # defaults: 48, 60, flow_sphere.vti
+```
+CI runs only a tiny smoke case (`demo_flow_sphere_smoke`).
+
 ## Remaining (further work, same pattern)
 
 - **Nonlinear staggered advection** in the distributed step (use the Step-3 Koren operator with the
