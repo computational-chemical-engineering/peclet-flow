@@ -18,6 +18,7 @@
 
 #include "cfd_solver.cuh"  // get_idx (unused at runtime here; kept for convention parity)
 #include "mac_halo.cuh"
+#include "staggered_advection.cuh"
 
 namespace dstokes {
 
@@ -32,6 +33,17 @@ __global__ void rhs_k(const double* c, double* b, double dtf, int3 e, int g) {
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
   long i = L3(x, y, z, e);
   b[i] = c[i] + dtf;
+}
+// b = comp - dt*advect(comp) + dt*f : explicit nonlinear advection folded into the diffusion RHS.
+__global__ void advect_rhs_k(int comp, const double* u, const double* v, const double* w,
+                             const double* phi, double* b, double dt, double f, int3 e, int g) {
+  int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
+      z = blockIdx.z * blockDim.z + threadIdx.z;
+  if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
+  double A = sadv::advect(comp, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e}, sadv::LocAcc{w, e},
+                          sadv::LocAcc{phi, e});
+  long i = L3(x, y, z, e);
+  b[i] = phi[i] - dt * A + dt * f;
 }
 // one Red-Black diffusion sweep: c <- (b + beta*sum_nbr c)/(1+6 beta), global parity.
 __global__ void diff_k(double* c, const double* b, int3 e, int3 og, int g, double beta, double Ac,
@@ -85,11 +97,13 @@ class DistributedStokes {
  public:
   void init(int3 global_res, int rank, int size, double nu, double dt,
             MPI_Comm comm = MPI_COMM_WORLD) {
-    mac_.init(global_res, rank, size, {true, true, true}, /*ghost_width=*/1, comm);
+    // Ghost width 2 covers the Koren advection reach (diffusion/projection use only width 1).
+    mac_.init(global_res, rank, size, {true, true, true}, /*ghost_width=*/2, comm);
     nu_ = nu;
     dt_ = dt;
     n_ = mac_.num_local_cells();
-    for (double** p : {&u_, &v_, &w_, &b_, &phi_, &div_, &solid_}) cudaMalloc(p, n_ * sizeof(double));
+    for (double** p : {&u_, &v_, &w_, &phi_, &div_, &solid_, &b_[0], &b_[1], &b_[2]})
+      cudaMalloc(p, n_ * sizeof(double));
     cudaMemset(u_, 0, n_ * 8);
     cudaMemset(v_, 0, n_ * 8);
     cudaMemset(w_, 0, n_ * 8);
@@ -99,7 +113,7 @@ class DistributedStokes {
     grd_ = dim3((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
   }
   ~DistributedStokes() {
-    for (double* p : {u_, v_, w_, b_, phi_, div_, solid_})
+    for (double* p : {u_, v_, w_, phi_, div_, solid_, b_[0], b_[1], b_[2]})
       if (p) cudaFree(p);
   }
   DistributedStokes() = default;
@@ -116,6 +130,8 @@ class DistributedStokes {
   double* w() { return w_; }
 
   void set_body_force(double fx, double fy, double fz) { fx_ = fx; fy_ = fy; fz_ = fz; }
+  // Enable explicit nonlinear advection (full Navier-Stokes instead of Stokes).
+  void set_advection(bool on) { advection_ = on; }
 
   // Upload the per-cell solid mask (extended-block layout; 1.0 = solid). Caller builds it (e.g. from
   // an SDF) for all local cells including ghosts (mask is a function of global position).
@@ -147,14 +163,26 @@ class DistributedStokes {
     double* comp[3] = {u_, v_, w_};
     double f[3] = {fx_, fy_, fz_};
     int g = mac_.ghost;
+
+    // Build the per-component diffusion RHS. With advection on, all three use the SAME n-level
+    // velocity (u,v,w), so compute every RHS before any component is updated.
+    if (advection_) {
+      mac_.exchange(u_);
+      mac_.exchange(v_);
+      mac_.exchange(w_);
+      for (int c = 0; c < 3; ++c)
+        advect_rhs_k<<<grd_, blk_>>>(c, u_, v_, w_, comp[c], b_[c], dt_, f[c], ext_, g);
+    } else {
+      for (int c = 0; c < 3; ++c) rhs_k<<<grd_, blk_>>>(comp[c], b_[c], dt_ * f[c], ext_, g);
+    }
+
     for (int c = 0; c < 3; ++c) {
-      rhs_k<<<grd_, blk_>>>(comp[c], b_, dt_ * f[c], ext_, g);
       for (int it = 0; it < n_diff; ++it) {
         mac_.exchange(comp[c]);
-        diff_k<<<grd_, blk_>>>(comp[c], b_, ext_, mac_.origin_incl_ghost, g, beta, Ac, 0);
+        diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 0);
         if (has_solid_) apply_mask(comp[c]);
         mac_.exchange(comp[c]);
-        diff_k<<<grd_, blk_>>>(comp[c], b_, ext_, mac_.origin_incl_ghost, g, beta, Ac, 1);
+        diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 1);
         if (has_solid_) apply_mask(comp[c]);
       }
     }
@@ -179,11 +207,13 @@ class DistributedStokes {
   MacGridHalo mac_;
   double nu_ = 0, dt_ = 0, fx_ = 0, fy_ = 0, fz_ = 0;
   bool has_solid_ = false;
+  bool advection_ = false;
   std::size_t n_ = 0;
   int3 ext_{}, origin_{};
   dim3 blk_, grd_;
-  double *u_ = nullptr, *v_ = nullptr, *w_ = nullptr, *b_ = nullptr, *phi_ = nullptr,
-         *div_ = nullptr, *solid_ = nullptr;
+  double *u_ = nullptr, *v_ = nullptr, *w_ = nullptr, *phi_ = nullptr, *div_ = nullptr,
+         *solid_ = nullptr;
+  double* b_[3] = {nullptr, nullptr, nullptr};
 };
 
 }  // namespace dstokes

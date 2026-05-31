@@ -17,6 +17,9 @@
 
 #include "cfd_solver.cuh"
 #include "mac_halo.cuh"
+#include "staggered_advection.cuh"
+
+using namespace sadv;  // koren, tvd, FullAcc, LocAcc, adv_vel, advect
 
 __host__ __device__ inline double hashv(int x, int y, int z, int seed) {
   unsigned long long h = (unsigned long long)(x * 73856093) ^ (unsigned long long)(y * 19349663) ^
@@ -25,68 +28,6 @@ __host__ __device__ inline double hashv(int x, int y, int z, int seed) {
   h *= 0xff51afd7ed558ccdULL;
   h ^= h >> 33;
   return (double)(h & 0xFFFFFFULL) / (double)0x1000000ULL - 0.5;
-}
-
-// Koren TVD flux (double), matching cfd's tvd_flux_koren / get_tvd_flux.
-__device__ inline double koren(double up_m1, double up, double down, double vel) {
-  double num = up - up_m1, den = down - up;
-  double r = (fabs(den) < 1e-10) ? 0.0 : num / den;
-  if (fabs(den) < 1e-10 && fabs(num) < 1e-10) r = 1.0;
-  double psi = fmax(0.0, fmin(2.0 * r, fmin((1.0 + 2.0 * r) / 3.0, 2.0)));
-  return vel * (up + 0.5 * psi * (down - up));
-}
-__device__ inline double tvd(double LL, double L, double R, double RR, double vel) {
-  return (vel > 0.0) ? koren(LL, L, R, vel) : koren(RR, R, L, vel);
-}
-
-// Field accessors: full grid wraps (get_idx); local extended block indexes directly.
-struct FullAcc {
-  const double* d;
-  int3 res;
-  __device__ double operator()(int x, int y, int z) const { return d[get_idx(x, y, z, res)]; }
-};
-struct LocAcc {
-  const double* d;
-  int3 e;
-  __device__ double operator()(int x, int y, int z) const {
-    return d[(long)x + (long)y * e.x + (long)z * (long)e.x * e.y];
-  }
-};
-
-// Advecting velocity at the +face_dir face of the comp control volume at (x,y,z). Mirrors
-// get_advection_velocity in cfd_solver.cu exactly.
-template <class A>
-__device__ inline double adv_vel(int comp, int fd, int x, int y, int z, A U, A V, A W) {
-  if (comp == 0) {
-    if (fd == 0) return 0.5 * (U(x, y, z) + U(x + 1, y, z));
-    if (fd == 1) return 0.5 * (V(x - 1, y + 1, z) + V(x, y + 1, z));
-    return 0.5 * (W(x - 1, y, z + 1) + W(x, y, z + 1));
-  }
-  if (comp == 1) {
-    if (fd == 0) return 0.5 * (U(x + 1, y - 1, z) + U(x + 1, y, z));
-    if (fd == 1) return 0.5 * (V(x, y, z) + V(x, y + 1, z));
-    return 0.5 * (W(x, y - 1, z + 1) + W(x, y, z + 1));
-  }
-  if (fd == 0) return 0.5 * (U(x + 1, y, z - 1) + U(x + 1, y, z));
-  if (fd == 1) return 0.5 * (V(x, y + 1, z - 1) + V(x, y + 1, z));
-  return 0.5 * (W(x, y, z) + W(x, y, z + 1));
-}
-
-// Conservative advection A = sum_dir (F_plus - F_minus); PHI is the advected component field.
-template <class A>
-__device__ inline double advect(int comp, int x, int y, int z, A U, A V, A W, A PHI) {
-  double out = 0.0;
-  for (int fd = 0; fd < 3; ++fd) {
-    int ox = (fd == 0), oy = (fd == 1), oz = (fd == 2);
-    double velp = adv_vel(comp, fd, x, y, z, U, V, W);
-    double velm = adv_vel(comp, fd, x - ox, y - oy, z - oz, U, V, W);
-    double Fp = tvd(PHI(x - ox, y - oy, z - oz), PHI(x, y, z), PHI(x + ox, y + oy, z + oz),
-                    PHI(x + 2 * ox, y + 2 * oy, z + 2 * oz), velp);
-    double Fm = tvd(PHI(x - 2 * ox, y - 2 * oy, z - 2 * oz), PHI(x - ox, y - oy, z - oz),
-                    PHI(x, y, z), PHI(x + ox, y + oy, z + oz), velm);
-    out += Fp - Fm;
-  }
-  return out;
 }
 
 __global__ void init_full(double* u, double* v, double* w, int3 res) {

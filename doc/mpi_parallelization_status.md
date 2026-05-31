@@ -120,14 +120,24 @@ top of this proven foundation.
   np=1,2,4; (b) **conservation** — global sum of A is ~1e-14 (flux form telescopes), so advection
   conserves total momentum. This is the operator that upgrades the Stokes solver to full Navier–Stokes.
 
-## Status: a working, reusable distributed incompressible solver with solids
+### Step 11 — full distributed Navier–Stokes ✅ verified
+- `src/staggered_advection.cuh`: the advection operator factored into a shared header (single source
+  for the solver and the Step-10 test). `DistributedStokes::set_advection(true)` folds explicit Koren
+  advection into the momentum RHS (`b = u - dt*A + dt*f`, all components from the n-level velocity);
+  the class now uses ghost width 2 to cover the advection reach.
+- `tests/test_navier_stokes_mpi.cu`: the distributed solver (advection on) matches an independent
+  serial full-grid integration of the identical scheme **cell-for-cell** over 10 steps, np=1,2,4 —
+  the rigorous distribution check for the full nonlinear solver.
 
-Steps 1–10 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
+## Status: a working, reusable distributed Navier–Stokes solver with solids
+
+Steps 1–11 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
 advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a full unsteady-Stokes
 timestep (Taylor–Green-verified to ~2e-15), flow around an SDF solid, channel flow matching the
-analytic Poiseuille profile, a **reusable `DistributedStokes` solver class**, and the **staggered
-nonlinear momentum advection** operator (cfd's scheme, momentum-conserving). **27/27 MPI ctests pass**,
-np=1,2,4. The production `pnm_backend` build is untouched.
+analytic Poiseuille profile, a **reusable `DistributedStokes` solver class**, the **staggered nonlinear
+momentum advection** operator (cfd's scheme, momentum-conserving), and the **full distributed
+Navier–Stokes** step (cell-for-cell vs serial). **30/30 MPI ctests pass**, np=1,2,4. The production
+`pnm_backend` build is untouched.
 
 ## Remaining (further work, same pattern)
 
