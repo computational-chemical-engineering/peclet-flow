@@ -111,13 +111,23 @@ top of this proven foundation.
   Taylor–Green decay (rel_err ~2e-15) and the Poiseuille profile (peak to 0.16%, residual ~5e-9),
   np=1,2,4.
 
+### Step 10 — distributed staggered momentum advection operator ✅ verified
+- `tests/test_advection_mpi.cu`: replicates cfd's exact nonlinear advection — `get_advection_velocity`
+  (2-point staggered interpolation of the advecting velocity) + Koren TVD flux
+  (`psi=max(0,min(2r,min((1+2r)/3,2)))`, sign-upwinded), conservative form `A = sum_dir(F+ - F-)`,
+  reach ±2 (ghost width 2). A templated field accessor lets the same operator serve the full grid
+  (wrapping) and the local extended block. Validated: (a) distributed == serial **cell-for-cell**,
+  np=1,2,4; (b) **conservation** — global sum of A is ~1e-14 (flux form telescopes), so advection
+  conserves total momentum. This is the operator that upgrades the Stokes solver to full Navier–Stokes.
+
 ## Status: a working, reusable distributed incompressible solver with solids
 
-Steps 1–9 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
+Steps 1–10 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
 advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a full unsteady-Stokes
 timestep (Taylor–Green-verified to ~2e-15), flow around an SDF solid, channel flow matching the
-analytic Poiseuille profile, and a **reusable `DistributedStokes` solver class**. **24/24 MPI ctests
-pass**, np=1,2,4. The production `pnm_backend` build is untouched.
+analytic Poiseuille profile, a **reusable `DistributedStokes` solver class**, and the **staggered
+nonlinear momentum advection** operator (cfd's scheme, momentum-conserving). **27/27 MPI ctests pass**,
+np=1,2,4. The production `pnm_backend` build is untouched.
 
 ## Remaining (further work, same pattern)
 
