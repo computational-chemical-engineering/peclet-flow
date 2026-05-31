@@ -16,10 +16,15 @@ against the serial full-grid result (computed with cfd's *own* `get_idx`) before
 Build/run the MPI tests (opt-in; default `pnm_backend` build untouched):
 ```bash
 export PATH=/usr/local/cuda-13.2/bin:$PATH
-cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON -DFETCHCONTENT_SOURCE_DIR_PYBIND11=$PWD/build/_deps/pybind11-src
-cmake --build build_mpi --target test_mac_halo -j
-ctest --test-dir build_mpi --output-on-failure     # mac_halo_np{1,2,4}
+cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON \
+  -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun \
+  -DFETCHCONTENT_SOURCE_DIR_PYBIND11=$PWD/build/_deps/pybind11-src
+cmake --build build_mpi -j
+ctest --test-dir build_mpi --output-on-failure     # *_np{1,2,4}, real multi-rank
 ```
+**Important:** force `-DMPIEXEC_EXECUTABLE=/usr/bin/mpirun`. FindMPI may otherwise pick a different
+`mpiexec` on `PATH` (e.g. ParaView's bundled one), which is incompatible with the system-OpenMPI-linked
+binaries and silently launches the ranks as MPI *singletons* (so `*_np4` would run as 4×np=1).
 
 ## Steps
 
@@ -135,15 +140,23 @@ top of this proven foundation.
   independent serial full-grid integration of the identical scheme **cell-for-cell** over 8 steps,
   np=1,2,4 — the complete capability (decomposition + async halo + advection + projection + solids).
 
-## Status: a working, reusable distributed Navier–Stokes solver with solids
+### Step 13 — gather-to-root + VTI output ✅ verified
+- `DistributedStokes::gather_to_root()` assembles the global field from the rank-owned blocks onto
+  rank 0 (block geometry known to every rank from the replicated decomposition).
+- `tests/test_gather_vti_mpi.cu`: gathers the TGV u-field and checks it matches the analytic decayed
+  pattern cell-for-cell (maxerr ~1e-15 — a wrong assembly would scramble it), then writes it via
+  `tpx::geom::writeVti` and reads it back bit-exactly. Completes the output pipeline and ties the
+  distributed solver to transport-core's geometry/field I/O. np=1,2,4.
 
-Steps 1–12 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
+## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
+
+Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
 advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a full unsteady-Stokes
 timestep (Taylor–Green-verified to ~2e-15), flow around an SDF solid, channel flow matching the
 analytic Poiseuille profile, a **reusable `DistributedStokes` solver class**, staggered nonlinear
 momentum advection (cfd's scheme, momentum-conserving), the **full distributed Navier–Stokes** step,
-and **Navier–Stokes flow around an SDF solid** — all validated cell-for-cell vs serial / against
-analytics. **33/33 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
+**Navier–Stokes flow around an SDF solid**, and **gather-to-root + VTI output**. **36/36 MPI ctests
+pass**, np=1,2,4. The production `pnm_backend` build is untouched.
 
 ## Remaining (further work, same pattern)
 

@@ -99,6 +99,7 @@ class DistributedStokes {
             MPI_Comm comm = MPI_COMM_WORLD) {
     // Ghost width 2 covers the Koren advection reach (diffusion/projection use only width 1).
     mac_.init(global_res, rank, size, {true, true, true}, /*ghost_width=*/2, comm);
+    comm_ = comm;
     nu_ = nu;
     dt_ = dt;
     n_ = mac_.num_local_cells();
@@ -155,6 +156,51 @@ class DistributedStokes {
   // extended array sees current neighbour values at block boundaries).
   void exchange_all() { mac_.exchange(u_); mac_.exchange(v_); mac_.exchange(w_); }
 
+  // Assemble the global field of a device component (u_/v_/w_) onto `root` in x-fastest order.
+  // Returns the global array on root, empty elsewhere. Each rank contributes its block's inner cells;
+  // block geometry is known to every rank from the (replicated) decomposition.
+  std::vector<double> gather_to_root(double* comp_dev, int root = 0) {
+    std::vector<double> host(n_);
+    cudaMemcpy(host.data(), comp_dev, n_ * sizeof(double), cudaMemcpyDeviceToHost);
+    int g = mac_.ghost;
+    int3 e = ext_;
+    int3 isz = make_int3(e.x - 2 * g, e.y - 2 * g, e.z - 2 * g);
+    std::vector<double> loc((size_t)isz.x * isz.y * isz.z);
+    size_t t = 0;
+    for (int bz = 0; bz < isz.z; ++bz)
+      for (int by = 0; by < isz.y; ++by)
+        for (int bx = 0; bx < isz.x; ++bx)
+          loc[t++] = host[(size_t)(bx + g) + (size_t)(by + g) * e.x + (size_t)(bz + g) * e.x * e.y];
+
+    const auto& gs = mac_.dec.globalSize();
+    std::vector<double> global;
+    if (mac_.rank != root) {
+      MPI_Send(loc.data(), (int)loc.size(), MPI_DOUBLE, root, 901, comm_);
+      return global;
+    }
+    global.assign((size_t)gs[0] * gs[1] * gs[2], 0.0);
+    std::vector<double> buf;
+    for (int r = 0; r < mac_.size; ++r) {
+      auto o = mac_.dec.origins()[r];
+      auto s = mac_.dec.sizes()[r];
+      size_t cnt = (size_t)s[0] * s[1] * s[2];
+      const double* src = loc.data();
+      if (r != root) {
+        buf.resize(cnt);
+        MPI_Recv(buf.data(), (int)cnt, MPI_DOUBLE, r, 901, comm_, MPI_STATUS_IGNORE);
+        src = buf.data();
+      }
+      size_t t2 = 0;
+      for (long bz = 0; bz < s[2]; ++bz)
+        for (long by = 0; by < s[1]; ++by)
+          for (long bx = 0; bx < s[0]; ++bx) {
+            long gx = o[0] + bx, gy = o[1] + by, gz = o[2] + bz;
+            global[(size_t)gx + (size_t)gy * gs[0] + (size_t)gz * gs[0] * gs[1]] = src[t2++];
+          }
+    }
+    return global;
+  }
+
   // Advance one timestep: implicit diffusion (+body force, +no-slip) for each component, then
   // projection. n_diff GS iterations per component, n_pois for the pressure Poisson.
   void step(int n_diff, int n_pois) {
@@ -205,6 +251,7 @@ class DistributedStokes {
   void apply_mask(double* c) { detail::mask_k<<<grd_, blk_>>>(c, solid_, ext_); }
 
   MacGridHalo mac_;
+  MPI_Comm comm_ = MPI_COMM_WORLD;
   double nu_ = 0, dt_ = 0, fx_ = 0, fy_ = 0, fz_ = 0;
   bool has_solid_ = false;
   bool advection_ = false;
