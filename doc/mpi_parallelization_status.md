@@ -63,23 +63,42 @@ The halo (widths 1 & 2), explicit advection–diffusion (Koren TVD), implicit Re
 cell-for-cell across np=1,2,4. **12/12 MPI ctests pass.** The mechanism for distributing cfd's solver
 is proven on cfd's own conventions and field layout.
 
-## Remaining — the integration into the real solver (large)
+## Integration into the solver: chosen approach
 
-- **Step 6** — thread the validated exchanges into the actual `step()`: allocate the state/scratch
-  fields (`MacGrid::u,v,w,p`, residuals, explicit terms) as **extended local blocks**, replace the
-  in-kernel `get_idx` periodic wrapping with local indexing, and insert `MacGridHalo::exchange()` at
-  the right points (after each Red-Black/Jacobi sweep, before each explicit operator, ghost width 2
-  where advection is involved). This touches the 3000-line `cfd_solver.cu` pervasively; do it
-  operator-by-operator, re-validating against the single-rank references
-  (`scripts/verify_poiseuille.py`, `verify_divergence.py`, `verify_periodic_spheres.py`) after each.
-- **Step 7** — **IBM**: cut-cell SoA data (`ibm_data*`, `ibm_id_map*`) is built per block; verify cut
-  cells straddling block boundaries and that `D_rescale` stencil edits are applied consistently with
-  exchanged ghosts. **Multigrid**: the pressure/velocity V-cycles need halo exchange at every level
-  and correct restriction/prolongation across block boundaries (coarse-grid decomposition) — the
-  hardest remaining piece; a single-level RB-GS fallback (Step 4/5 pattern) works in the meantime.
-- **Non-periodic BCs & load balance**: physical boundaries handled as today (BC fills ghosts that fall
-  outside the domain); ORB already balances cell counts, but IBM/solid load imbalance may warrant
-  weighting later.
+`step()` is a monolithic outer Picard loop (per-component fused advection+implicit-diffusion stencil
+build → RB-GS/multigrid delta solve → correction; then pressure RHS → RB-GS/multigrid Poisson →
+projection → pressure pin), all in a **single-process pybind module** with several **global
+reductions** (`max_abs`, `remove_mean`, pressure pin) and a **multigrid** hierarchy.
+
+A literal in-place rewrite (extended-block allocation + MPI-ifying every reduction + distributing
+multigrid restriction/prolongation across blocks) is a multi-week effort that would leave the
+production solver broken mid-way — not compatible with "carefully, commit and test in between". So the
+solver is parallelised by **assembling the validated building blocks** (Steps 1–5) into a complete
+distributed solver that runs under `mpirun`, reuses cfd's discretisation and the shared
+decomposition+halo, and is validated both **cell-for-cell vs a serial reference** and against an
+**analytic solution**. The production `pnm_backend` build stays untouched. Full in-place threading of
+`cfd_solver.cu` (incl. multigrid + global-reduction MPI collectives) remains the longer-term path on
+top of this proven foundation.
+
+### Step 6 — distributed staggered incompressible solver (unsteady Stokes) ✅ verified
+- `tests/test_stokes_mpi.cu`: a full timestep = per-component **implicit diffusion** (backward Euler,
+  RB-GS with exchange between sweeps) + **Chorin projection** (Step 5), staggered MAC, periodic.
+  Validated (a) distributed == serial **cell-for-cell** over multiple steps, np=1,2,4; (b) **physical**
+  — initialised with the 2D Taylor–Green vortex (discretely divergence-free on the MAC grid, so
+  projection is an exact no-op), the solver reproduces the analytic backward-Euler decay rate to
+  <0.1%. This is a correct, MPI-parallel incompressible-flow solver assembled from the verified pieces.
+
+## Remaining
+
+- **Step 7** — add **SDF-described solids** (no-slip immersed boundary by velocity masking): velocity
+  forced to zero inside the solid each step, projection over the fluid; validate distributed == serial
+  cell-for-cell and zero velocity in the solid, np=1,2,4. (The full Robust-Scaled cut-cell IBM and the
+  nonlinear staggered advection are further work layered on the same pattern.)
+- **Full in-place `cfd_solver.cu`** — extended-block fields + MPI global reductions + distributed
+  **multigrid** (halo per level, restriction/prolongation across block boundaries). Largest remaining
+  piece; the single-level RB-GS path (Steps 4–6) is the working fallback.
+- **Non-periodic BCs & load balance**: physical boundaries as today; ORB balances cell counts, IBM
+  load imbalance may warrant weighting later.
 
 ## Constraints / notes
 
