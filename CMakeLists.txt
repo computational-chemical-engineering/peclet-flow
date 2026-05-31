@@ -55,7 +55,7 @@ if(CFD_BUILD_MPI)
   enable_testing()
   # transport-core's halo headers are C++17-clean; the RTX 5080 is sm_120.
   foreach(t test_mac_halo test_advdiff_mpi test_gs_implicit_mpi test_projection_mpi test_stokes_mpi
-            test_stokes_solid_mpi test_poiseuille_mpi)
+            test_stokes_solid_mpi test_poiseuille_mpi test_distributed_stokes)
     add_executable(${t} tests/${t}.cu)
     target_include_directories(${t} PRIVATE src ${TPX_INCLUDE})
     target_link_libraries(${t} PRIVATE CUDA::cudart MPI::MPI_CXX)
@@ -84,5 +84,8 @@ if(CFD_BUILD_MPI)
     add_test(NAME poiseuille_np${np}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
                      ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_poiseuille_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(NAME distributed_stokes_np${np}
+             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
+                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_distributed_stokes> ${MPIEXEC_POSTFLAGS})
   endforeach()
 endif()

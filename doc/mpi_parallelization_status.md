@@ -102,13 +102,22 @@ top of this proven foundation.
   interior momentum balance `nu*Lap_y(u)+g` is ~5e-9, and the peak velocity matches the analytic
   parabolic profile `g*W^2/(8*nu)` to 0.16%. Mirrors cfd's own `verify_poiseuille.py`.
 
-## Status: a working distributed incompressible solver with solids
+### Step 9 — reusable `DistributedStokes` solver component ✅ verified
+- `src/distributed_stokes.cuh`: consolidates the validated kernels into a `dstokes::DistributedStokes`
+  class — fields + `MacGridHalo` + a `step(n_diff, n_pois)` doing per-component implicit diffusion +
+  Chorin projection, with `set_body_force()` and `set_solid()` (per-cell no-slip mask). A clean,
+  reusable API instead of loose test code.
+- `tests/test_distributed_stokes.cu`: drives the class through its public API to reproduce both the
+  Taylor–Green decay (rel_err ~2e-15) and the Poiseuille profile (peak to 0.16%, residual ~5e-9),
+  np=1,2,4.
 
-Steps 1–8 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2),
-Koren advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a full unsteady-Stokes
-timestep (Taylor–Green-verified to ~2e-15), flow around an SDF solid, and channel flow matching the
-analytic Poiseuille profile. **21/21 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is
-untouched.
+## Status: a working, reusable distributed incompressible solver with solids
+
+Steps 1–9 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
+advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a full unsteady-Stokes
+timestep (Taylor–Green-verified to ~2e-15), flow around an SDF solid, channel flow matching the
+analytic Poiseuille profile, and a **reusable `DistributedStokes` solver class**. **24/24 MPI ctests
+pass**, np=1,2,4. The production `pnm_backend` build is untouched.
 
 ## Remaining (further work, same pattern)
 
