@@ -16,7 +16,6 @@
 #include <vector>
 
 #include "distributed_stokes.cuh"
-#include "tpx/geom/grid_sdf.hpp"
 #include "tpx/geom/vti_io.hpp"
 
 using dstokes::DistributedStokes;
@@ -73,18 +72,19 @@ int main(int argc, char** argv) {
   std::vector<double> gw = sol.gather_to_root(sol.w(), 0);
 
   if (rank == 0) {
-    tpx::geom::GridSdf grid;
-    grid.dims = {res.x, res.y, res.z};
-    grid.origin = {0, 0, 0};
-    grid.spacing = {1, 1, 1};
-    grid.values.resize(gu.size());
+    tpx::geom::VtiVector vel;
+    vel.dims = {res.x, res.y, res.z};
+    vel.origin = {0, 0, 0};
+    vel.spacing = {1, 1, 1};
+    vel.values.resize(3 * gu.size());
     double umax = 0;
     for (size_t i = 0; i < gu.size(); ++i) {
-      double m = std::sqrt(gu[i] * gu[i] + gv[i] * gv[i] + gw[i] * gw[i]);
-      grid.values[i] = (float)m;
-      umax = std::fmax(umax, m);
+      vel.values[3 * i] = (float)gu[i];
+      vel.values[3 * i + 1] = (float)gv[i];
+      vel.values[3 * i + 2] = (float)gw[i];
+      umax = std::fmax(umax, std::sqrt(gu[i] * gu[i] + gv[i] * gv[i] + gw[i] * gw[i]));
     }
-    tpx::geom::writeVti(out, grid, "speed");
+    tpx::geom::writeVtiVector(out, vel, "velocity");  // ParaView glyphs/streamlines
     std::printf("# wrote %s  (peak speed %.4f, %.1f ms/step over %d ranks)\n", out.c_str(), umax,
                 1e3 * t / steps, size);
   }
