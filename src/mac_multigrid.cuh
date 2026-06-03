@@ -41,6 +41,66 @@ __global__ void mg_smooth_k(double* __restrict__ x, const double* __restrict__ b
   x[i] = (sum + h2 * b[i]) / 6.0;
 }
 
+// ---- variable-coefficient fine-level operator (the SDF / cut-cell case) ----
+// Assemble the 7-point coefficients from staggered face transmissibilities. ox[i] is the openness of
+// the -x face of cell i (== the +x face of cell i-1); the +x face of cell i is ox[i+1]. The face is
+// shared, so neighbouring ranks derive the SAME coefficient for it -> the operator is symmetric across
+// block boundaries. Mirrors compute_pressure_operator_kernel (A_E = -frac_r*inv_dx2, etc.); here the
+// face openness stands in for the masked fluid fraction.
+__global__ void mg_build_op_k(double* AC, double* AW, double* AE, double* AS, double* AN, double* AB,
+                              double* AT, const double* ox, const double* oy, const double* oz,
+                              int3 ext, int g, double idx2, double idy2, double idz2) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
+  if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
+  size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
+  double te = ox[i + sx] * idx2, tw = ox[i] * idx2;
+  double tn = oy[i + sy] * idy2, ts = oy[i] * idy2;
+  double tt = oz[i + sz] * idz2, tb = oz[i] * idz2;
+  AE[i] = -te;
+  AW[i] = -tw;
+  AN[i] = -tn;
+  AS[i] = -ts;
+  AT[i] = -tt;
+  AB[i] = -tb;
+  AC[i] = te + tw + tn + ts + tt + tb;
+}
+
+__global__ void mg_smooth_var_k(double* __restrict__ x, const double* __restrict__ b,
+                                const double* AC, const double* AW, const double* AE,
+                                const double* AS, const double* AN, const double* AB,
+                                const double* AT, int3 ext, int3 og, int g, int color) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
+  if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
+  if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color) return;
+  size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
+  double ac = AC[i];
+  if (ac < 1e-300) return;  // fully closed (solid) cell
+  double s = AE[i] * x[i + sx] + AW[i] * x[i - sx] + AN[i] * x[i + sy] + AS[i] * x[i - sy] +
+             AT[i] * x[i + sz] + AB[i] * x[i - sz];
+  x[i] = (b[i] - s) / ac;
+}
+
+__global__ void mg_residual_var_k(double* __restrict__ r, const double* __restrict__ x,
+                                  const double* __restrict__ b, const double* AC, const double* AW,
+                                  const double* AE, const double* AS, const double* AN,
+                                  const double* AB, const double* AT, int3 ext, int g) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
+  if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
+  size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
+  double Ax = AC[i] * x[i] + AE[i] * x[i + sx] + AW[i] * x[i - sx] + AN[i] * x[i + sy] +
+              AS[i] * x[i - sy] + AT[i] * x[i + sz] + AB[i] * x[i - sz];
+  r[i] = b[i] - Ax;
+}
+
 __global__ void mg_residual_k(double* __restrict__ r, const double* __restrict__ x,
                               const double* __restrict__ b, int3 ext, int g, double invh2) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
@@ -113,6 +173,10 @@ struct MGLevel {
   size_t n = 0;
   int3 ext{}, og{}, inner{};
   int g = 1;
+  // variable-coefficient operator (fine level only); null on constant-coefficient levels
+  bool variable = false;
+  double *AC = nullptr, *AW = nullptr, *AE = nullptr, *AS = nullptr, *AN = nullptr, *AB = nullptr,
+         *AT = nullptr;
 };
 
 // Distributed V-cycle solver for the periodic constant-coefficient Poisson on power-of-two grids.
@@ -167,12 +231,33 @@ class DistributedPoissonMG {
   void free() {
     for (auto& lp : levels_) {
       MGLevel& lv = *lp;
-      if (lv.x) cudaFree(lv.x);
-      if (lv.rhs) cudaFree(lv.rhs);
-      if (lv.res) cudaFree(lv.res);
-      lv.x = lv.rhs = lv.res = nullptr;
+      for (double** p : {&lv.x, &lv.rhs, &lv.res, &lv.AC, &lv.AW, &lv.AE, &lv.AS, &lv.AN, &lv.AB,
+                         &lv.AT}) {
+        if (*p) cudaFree(*p);
+        *p = nullptr;
+      }
     }
     levels_.clear();
+  }
+
+  // Install a variable-coefficient operator on the fine level (level 0) from staggered face
+  // openness/transmissibility fields on the extended block: ox[i] = openness of the -x face of cell i
+  // (similarly oy, oz). The caller fills ox/oy/oz on the WHOLE extended block (incl. ghosts); because
+  // a face is a deterministic function of its global position, every rank derives matching values for
+  // shared faces (no exchange needed). idx2 = 1/dx^2, etc. Coarse levels stay constant-coefficient
+  // (mirrors the serial use_periodic_operator = level>0).
+  void setFineVariableOperator(const double* ox, const double* oy, const double* oz, double idx2,
+                               double idy2, double idz2) {
+    MGLevel& lv = *levels_[0];
+    if (!lv.AC) {
+      for (double** p : {&lv.AC, &lv.AW, &lv.AE, &lv.AS, &lv.AN, &lv.AB, &lv.AT})
+        cudaMalloc(p, lv.n * 8);
+    }
+    lv.variable = true;
+    dim3 blk(8, 8, 8);
+    dim3 grd((lv.inner.x + 7) / 8, (lv.inner.y + 7) / 8, (lv.inner.z + 7) / 8);
+    mgdetail::mg_build_op_k<<<grd, blk>>>(lv.AC, lv.AW, lv.AE, lv.AS, lv.AN, lv.AB, lv.AT, ox, oy, oz,
+                                          lv.ext, lv.g, idx2, idy2, idz2);
   }
 
   MGLevel& level(int L) { return *levels_[L]; }
@@ -192,11 +277,26 @@ class DistributedPoissonMG {
     dim3 grd((lv.inner.x + 7) / 8, (lv.inner.y + 7) / 8, (lv.inner.z + 7) / 8);
     double h2 = lv.h * lv.h;
     for (int k = 0; k < sweeps; ++k) {
-      lv.mac.exchange(lv.x);
-      mgdetail::mg_smooth_k<<<grd, blk>>>(lv.x, lv.rhs, lv.ext, lv.og, lv.g, h2, 0);
-      lv.mac.exchange(lv.x);
-      mgdetail::mg_smooth_k<<<grd, blk>>>(lv.x, lv.rhs, lv.ext, lv.og, lv.g, h2, 1);
+      for (int color = 0; color < 2; ++color) {
+        lv.mac.exchange(lv.x);
+        if (lv.variable)
+          mgdetail::mg_smooth_var_k<<<grd, blk>>>(lv.x, lv.rhs, lv.AC, lv.AW, lv.AE, lv.AS, lv.AN,
+                                                  lv.AB, lv.AT, lv.ext, lv.og, lv.g, color);
+        else
+          mgdetail::mg_smooth_k<<<grd, blk>>>(lv.x, lv.rhs, lv.ext, lv.og, lv.g, h2, color);
+      }
     }
+  }
+
+  void residual(MGLevel& lv) {
+    dim3 blk(8, 8, 8);
+    dim3 grd((lv.inner.x + 7) / 8, (lv.inner.y + 7) / 8, (lv.inner.z + 7) / 8);
+    lv.mac.exchange(lv.x);
+    if (lv.variable)
+      mgdetail::mg_residual_var_k<<<grd, blk>>>(lv.res, lv.x, lv.rhs, lv.AC, lv.AW, lv.AE, lv.AS,
+                                                lv.AN, lv.AB, lv.AT, lv.ext, lv.g);
+    else
+      mgdetail::mg_residual_k<<<grd, blk>>>(lv.res, lv.x, lv.rhs, lv.ext, lv.g, 1.0 / (lv.h * lv.h));
   }
 
   void vcycle(int L) {
@@ -212,9 +312,8 @@ class DistributedPoissonMG {
 
     smooth(lv, pre_);
 
-    // residual (needs current ghosts)
-    lv.mac.exchange(lv.x);
-    mgdetail::mg_residual_k<<<grd, blk>>>(lv.res, lv.x, lv.rhs, lv.ext, lv.g, 1.0 / (lv.h * lv.h));
+    // residual (needs current ghosts); variable operator on the fine level, constant on coarse
+    residual(lv);
 
     // restrict residual -> coarse rhs (local); reset coarse x
     MGLevel& cs = *levels_[L + 1];

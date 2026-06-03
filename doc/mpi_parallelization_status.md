@@ -182,6 +182,25 @@ top of this proven foundation.
   **variable-coefficient / cut-cell** operator on level 0 (the `A_C..A_T` from `frac_u/v/w + sdf`, vs
   the constant-coefficient operator here) and wiring the V-cycle into `DistributedStokes::step`.
 
+### Step 16 — variable-coefficient fine-level operator for the multigrid ✅ verified
+- `mac_multigrid.cuh` gains a **variable-coefficient** fine level: per-cell 7-point coefficients
+  `A_C..A_T` assembled (`mg_build_op_k`) from staggered **face transmissibilities** — `ox[i]` = openness
+  of the −x face of cell i (== +x face of cell i−1), so a face is shared and every rank derives the
+  same coefficient → the operator is **symmetric across block boundaries**. Mirrors the serial
+  `compute_pressure_operator_kernel` (`A_E = -frac_r·inv_dx2`, …); `mg_smooth_var_k` / `mg_residual_var_k`
+  read the per-cell coefficients with a halo-exchanged neighbour `x` (and an `A_C` guard skips fully
+  closed solid cells). `setFineVariableOperator(ox,oy,oz, idx2,idy2,idz2)` installs it on level 0;
+  **coarse levels stay constant-coefficient** (mirrors the serial `use_periodic_operator = level>0`).
+- `tests/test_multigrid_var_mpi.cu`: the fine operator is built from an analytic **periodic sphere SDF**
+  (face openness in [0.1, 1] — a 10× coefficient ratio; the production path swaps in cfd's
+  gradient-normalised fluid fraction with the same assembly). A serial full-grid reference V-cycle runs
+  the identical operations (wrap-indexed twins). Distributed matches **cell-for-cell ~1e-15** at
+  np=1,2,4, with residual reduction 5.0e-1 → 3.2e-2 over 4 V-cycles, **identical across np**.
+- With this the distributed pressure-solve machinery is complete end to end: variable fine operator +
+  constant-coefficient coarse hierarchy + block-local transfers + global mean removal. Remaining is
+  computing the openness from the real SDF/`frac_u/v/w` on the extended block (cfd's fraction kernel,
+  ghost width 2 for its stencil) and threading the V-cycle into `DistributedStokes::step`.
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
 Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
@@ -191,8 +210,9 @@ analytic Poiseuille profile, a **reusable `DistributedStokes` solver class**, st
 momentum advection (cfd's scheme, momentum-conserving), the **full distributed Navier–Stokes** step,
 **Navier–Stokes flow around an SDF solid**, **gather-to-root + VTI output**, **distributed global
 reductions** (`max_abs`, `remove_mean`), and a **distributed geometric multigrid** V-cycle for the
-periodic Poisson (block-local restriction/prolongation, machine-precision match to a serial reference).
-**43/43 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
+Poisson — both constant-coefficient and **variable-coefficient (SDF / cut-cell) fine operators**, with
+block-local restriction/prolongation and machine-precision match to a serial reference.
+**46/46 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
 
 ## Demo
 
@@ -210,12 +230,12 @@ CI runs only a tiny smoke case (`demo_flow_sphere_smoke`).
 - **Full Robust-Scaled cut-cell IBM** (D_rescale stencil edits) in place of velocity masking, with cut
   cells straddling block boundaries.
 - **Full in-place `cfd_solver.cu`** — extended-block fields, wiring the distributed pieces into the
-  in-place step. The building blocks are now done: MPI global reductions (`max_abs`, `remove_mean`,
-  Step 14) and the **distributed geometric multigrid V-cycle** (Step 15, `mac_multigrid.cuh`,
-  block-local restriction/prolongation, machine-precision vs serial). What remains is the
-  **variable-coefficient / Robust-Scaled cut-cell** operator on the fine level (the `A_C..A_T` stencil
-  from `frac_u/v/w + sdf`, with cut cells straddling block boundaries) feeding the same V-cycle, and
-  threading it through `DistributedStokes::step` in place of the single-level RB-GS Poisson.
+  in-place step. The building blocks are done: MPI global reductions (Step 14), the distributed
+  geometric multigrid V-cycle (Step 15), and the **variable-coefficient / cut-cell fine operator**
+  (Step 16, `A_C..A_T` from staggered face transmissibilities, symmetric across blocks). What remains:
+  compute the face openness from the real SDF + `frac_u/v/w` on the extended block (cfd's fraction
+  kernel, ghost width 2), and thread the V-cycle through `DistributedStokes::step` in place of the
+  single-level RB-GS Poisson.
 - **Non-periodic BCs & load balance**: physical boundaries as today; ORB balances cell counts, IBM
   load imbalance may warrant weighting later.
 

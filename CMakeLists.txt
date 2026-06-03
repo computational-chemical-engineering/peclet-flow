@@ -57,7 +57,7 @@ if(CFD_BUILD_MPI)
   foreach(t test_mac_halo test_advdiff_mpi test_gs_implicit_mpi test_projection_mpi test_stokes_mpi
             test_stokes_solid_mpi test_poiseuille_mpi test_distributed_stokes test_advection_mpi
             test_navier_stokes_mpi test_ns_solid_mpi test_gather_vti_mpi test_reductions_mpi
-            test_multigrid_mpi)
+            test_multigrid_mpi test_multigrid_var_mpi)
     add_executable(${t} tests/${t}.cu)
     target_include_directories(${t} PRIVATE src ${TPX_INCLUDE})
     target_link_libraries(${t} PRIVATE CUDA::cudart MPI::MPI_CXX)
@@ -107,6 +107,9 @@ if(CFD_BUILD_MPI)
     add_test(NAME multigrid_np${np}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
                      ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_multigrid_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(NAME multigrid_var_np${np}
+             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
+                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_multigrid_var_mpi> ${MPIEXEC_POSTFLAGS})
   endforeach()
 
   # Runnable demo (writes a ParaView .vti); CI runs only a tiny smoke case.
