@@ -148,6 +148,21 @@ top of this proven foundation.
   `tpx::geom::writeVti` and reads it back bit-exactly. Completes the output pipeline and ties the
   distributed solver to transport-core's geometry/field I/O. np=1,2,4.
 
+### Step 14 — distributed global reductions (`max_abs`, `remove_mean`) ✅ verified
+- `src/mac_reductions.cuh`: reduce a `double` cell-field over each rank's **inner** (owned) cells —
+  skipping the ghost layer that duplicates neighbours — then `MPI_Allreduce`. `mac_reduce` returns the
+  global sum and global max|.|; `mac_max_abs` is the CFL/convergence max; `mac_remove_mean` subtracts
+  the global mean (sum / full-grid cell count) over the **whole** extended block, so every rank
+  subtracts the same constant and the ghost layer stays consistent with neighbours' inner cells — no
+  halo exchange needed afterward. (`atomicMaxDouble` via `atomicCAS`; inner-cell reduce kernel.)
+- `tests/test_reductions_mpi.cu`: the global field is a deterministic hash over global coords, so the
+  host computes the EXACT global sum / max|.| / mean by sweeping all global cells. Distributed result
+  matches **cell-for-cell**: max|.| exact (order-independent), `remove_mean` residual sum ~5e-16
+  relative, max|f−mean| exact, sum to ~1e-16 relative. np=1,2,4.
+- These are the prerequisite for the distributed **multigrid** (mean removal between V-cycles for the
+  pure-Neumann pressure) and for any CFL/convergence gate in the in-place solver. `DistributedStokes`
+  itself needs no mean removal on its periodic all-fluid Poisson (consistent iteration from φ=0).
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
 Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
@@ -155,8 +170,9 @@ advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a ful
 timestep (Taylor–Green-verified to ~2e-15), flow around an SDF solid, channel flow matching the
 analytic Poiseuille profile, a **reusable `DistributedStokes` solver class**, staggered nonlinear
 momentum advection (cfd's scheme, momentum-conserving), the **full distributed Navier–Stokes** step,
-**Navier–Stokes flow around an SDF solid**, and **gather-to-root + VTI output**. **36/36 MPI ctests
-pass**, np=1,2,4. The production `pnm_backend` build is untouched.
+**Navier–Stokes flow around an SDF solid**, **gather-to-root + VTI output**, and **distributed global
+reductions** (`max_abs`, `remove_mean`). **40/40 MPI ctests pass**, np=1,2,4. The production
+`pnm_backend` build is untouched.
 
 ## Demo
 
@@ -173,9 +189,11 @@ CI runs only a tiny smoke case (`demo_flow_sphere_smoke`).
   staggered advecting-velocity interpolation; ghost width 2) → full Navier–Stokes, not just Stokes.
 - **Full Robust-Scaled cut-cell IBM** (D_rescale stencil edits) in place of velocity masking, with cut
   cells straddling block boundaries.
-- **Full in-place `cfd_solver.cu`** — extended-block fields + MPI global reductions + distributed
-  **multigrid** (halo per level, restriction/prolongation across block boundaries). Largest remaining
-  piece; the single-level RB-GS path (Steps 4–6) is the working fallback.
+- **Full in-place `cfd_solver.cu`** — extended-block fields + distributed **multigrid** (halo per
+  level, restriction/prolongation across block boundaries). The MPI global reductions it needs
+  (`max_abs`, `remove_mean`) are **done** (Step 14, `mac_reductions.cuh`); the distributed multigrid
+  hierarchy is the largest remaining piece. The single-level RB-GS path (Steps 4–6) is the working
+  fallback.
 - **Non-periodic BCs & load balance**: physical boundaries as today; ORB balances cell counts, IBM
   load imbalance may warrant weighting later.
 
