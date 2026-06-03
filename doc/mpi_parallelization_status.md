@@ -163,6 +163,25 @@ top of this proven foundation.
   pure-Neumann pressure) and for any CFL/convergence gate in the in-place solver. `DistributedStokes`
   itself needs no mean removal on its periodic all-fluid Poisson (consistent iteration from φ=0).
 
+### Step 15 — distributed geometric multigrid (periodic Poisson) ✅ verified
+- `src/mac_multigrid.cuh`: `DistributedPoissonMG` — a V-cycle on a hierarchy of `MacGridHalo` levels
+  (level L = global grid at `res>>L`). Because transport-core's ORB cuts power-of-two grids at
+  midpoints, **each rank owns the same spatial sub-box halved at every level** (asserted in `init` via
+  the inner-block start `og+ghost`), so **restriction (8:1 average) and prolongation (trilinear) are
+  local within a rank's block** — only the per-level ghost exchange and the per-level mean removal
+  (Step 14 reductions) cross ranks. Operator: constant-coefficient periodic Laplacian (`A=-Lap`,
+  spacing doubling per level); RB-GS smoother coloured by **global** parity (halo exchange between
+  colours); residual; restrict; recurse; prolong (needs the coarse ghost layer first); post-smooth;
+  remove mean. All `double`.
+- `tests/test_multigrid_mpi.cu`: runs the identical V-cycle as a **serial full-grid reference** (wrap
+  indexing) and the distributed solver, and compares cell-for-cell. **max|d| ~1e-15** (machine
+  precision — halo vs in-kernel wrap give identical neighbours; the only divergence is the mean
+  reduction order) AND a convergence gate (residual max 5.0e-1 → 1.9e-4 over 3 V-cycles, **identical
+  across np**, proving the solver is real, not a no-op). 64³, 4 levels, np=1,2,4.
+- This is the core of the distributed pressure solve. Remaining for the full in-place solver: the
+  **variable-coefficient / cut-cell** operator on level 0 (the `A_C..A_T` from `frac_u/v/w + sdf`, vs
+  the constant-coefficient operator here) and wiring the V-cycle into `DistributedStokes::step`.
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
 Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
@@ -170,9 +189,10 @@ advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a ful
 timestep (Taylor–Green-verified to ~2e-15), flow around an SDF solid, channel flow matching the
 analytic Poiseuille profile, a **reusable `DistributedStokes` solver class**, staggered nonlinear
 momentum advection (cfd's scheme, momentum-conserving), the **full distributed Navier–Stokes** step,
-**Navier–Stokes flow around an SDF solid**, **gather-to-root + VTI output**, and **distributed global
-reductions** (`max_abs`, `remove_mean`). **40/40 MPI ctests pass**, np=1,2,4. The production
-`pnm_backend` build is untouched.
+**Navier–Stokes flow around an SDF solid**, **gather-to-root + VTI output**, **distributed global
+reductions** (`max_abs`, `remove_mean`), and a **distributed geometric multigrid** V-cycle for the
+periodic Poisson (block-local restriction/prolongation, machine-precision match to a serial reference).
+**43/43 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
 
 ## Demo
 
@@ -189,11 +209,13 @@ CI runs only a tiny smoke case (`demo_flow_sphere_smoke`).
   staggered advecting-velocity interpolation; ghost width 2) → full Navier–Stokes, not just Stokes.
 - **Full Robust-Scaled cut-cell IBM** (D_rescale stencil edits) in place of velocity masking, with cut
   cells straddling block boundaries.
-- **Full in-place `cfd_solver.cu`** — extended-block fields + distributed **multigrid** (halo per
-  level, restriction/prolongation across block boundaries). The MPI global reductions it needs
-  (`max_abs`, `remove_mean`) are **done** (Step 14, `mac_reductions.cuh`); the distributed multigrid
-  hierarchy is the largest remaining piece. The single-level RB-GS path (Steps 4–6) is the working
-  fallback.
+- **Full in-place `cfd_solver.cu`** — extended-block fields, wiring the distributed pieces into the
+  in-place step. The building blocks are now done: MPI global reductions (`max_abs`, `remove_mean`,
+  Step 14) and the **distributed geometric multigrid V-cycle** (Step 15, `mac_multigrid.cuh`,
+  block-local restriction/prolongation, machine-precision vs serial). What remains is the
+  **variable-coefficient / Robust-Scaled cut-cell** operator on the fine level (the `A_C..A_T` stencil
+  from `frac_u/v/w + sdf`, with cut cells straddling block boundaries) feeding the same V-cycle, and
+  threading it through `DistributedStokes::step` in place of the single-level RB-GS Poisson.
 - **Non-periodic BCs & load balance**: physical boundaries as today; ORB balances cell counts, IBM
   load imbalance may warrant weighting later.
 
