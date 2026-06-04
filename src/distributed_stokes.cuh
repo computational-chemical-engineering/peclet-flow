@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "cfd_solver.cuh"  // get_idx (unused at runtime here; kept for convention parity)
+#include "mac_cutcell.cuh"    // cut-cell face openness from an SDF
 #include "mac_halo.cuh"
 #include "mac_multigrid.cuh"  // DistributedPoissonMG (opt-in multigrid pressure solve)
 #include "staggered_advection.cuh"
@@ -80,6 +81,17 @@ __global__ void diverg_k(const double* u, const double* v, const double* w, doub
   long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = (long)e.x * e.y;
   d[i] = (u[i + sx] - u[i]) + (v[i + sy] - v[i]) + (w[i + sz] - w[i]);
 }
+// cut-cell flux divergence: open-face-weighted, consistent with the cut-cell operator
+// A = -div(open grad). ox[i] is the -x face openness of cell i (== +x face of cell i-1).
+__global__ void diverg_open_k(const double* u, const double* v, const double* w, const double* ox,
+                              const double* oy, const double* oz, double* d, int3 e, int g) {
+  int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
+      z = blockIdx.z * blockDim.z + threadIdx.z;
+  if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
+  long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = (long)e.x * e.y;
+  d[i] = (ox[i + sx] * u[i + sx] - ox[i] * u[i]) + (oy[i + sy] * v[i + sy] - oy[i] * v[i]) +
+         (oz[i + sz] * w[i + sz] - oz[i] * w[i]);
+}
 __global__ void pois_k(double* phi, const double* d, int3 e, int3 og, int g, int color) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -121,7 +133,7 @@ class DistributedStokes {
     grd_ = dim3((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
   }
   ~DistributedStokes() {
-    for (double* p : {u_, v_, w_, phi_, div_, solid_, b_[0], b_[1], b_[2]})
+    for (double* p : {u_, v_, w_, phi_, div_, solid_, b_[0], b_[1], b_[2], ox_, oy_, oz_})
       if (p) cudaFree(p);
     if (mg_built_) mg_.free();
   }
@@ -154,6 +166,36 @@ class DistributedStokes {
     mg_pre_ = pre;
     mg_post_ = post;
     mg_bottom_ = bottom;
+  }
+
+  // Install the real cut-cell pressure operator on the multigrid fine level from an SDF (extended-block
+  // layout, all cells incl. ghosts, negative inside solid -- a function of global position, like
+  // set_solid). The staggered face openness (cfd's gradient-normalised fluid fraction, masked) replaces
+  // the constant-coefficient Laplacian on level 0 (coarse levels stay constant-coefficient, mirroring
+  // the serial multigrid). Enables and builds the multigrid; call after init(). Spacing is unit (dx=1),
+  // matching diverg_k/correct_k.
+  void set_cutcell_pressure_operator(const std::vector<double>& sdf_ext) {
+    mg_enabled_ = true;
+    ensure_mg_built();
+    if (!ox_) for (double** p : {&ox_, &oy_, &oz_}) cudaMalloc(p, n_ * sizeof(double));
+    double* sdf = nullptr;
+    cudaMalloc(&sdf, n_ * sizeof(double));
+    cudaMemcpy(sdf, sdf_ext.data(), n_ * sizeof(double), cudaMemcpyHostToDevice);
+    dim3 gE((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
+    // staggered face openness, kept for the cut-cell flux divergence (projection RHS + diagnostic)
+    cfdmpi::ccdetail::cc_build_open_k<<<gE, dim3(8, 8, 4)>>>(ox_, oy_, oz_, sdf, ext_, 1.0, 1.0, 1.0);
+    mg_.setFineVariableOperator(ox_, oy_, oz_, 1.0, 1.0, 1.0);
+    cudaFree(sdf);
+    cutcell_ = true;
+  }
+
+  // Global max of the cut-cell flux divergence |div(open u)| over owned cells (the quantity the
+  // cut-cell projection drives to zero). Uses div_ as scratch; call between steps.
+  double max_open_divergence() {
+    if (!cutcell_) return 0.0;
+    mac_.exchange(u_); mac_.exchange(v_); mac_.exchange(w_);
+    detail::diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, ox_, oy_, oz_, div_, ext_, mac_.ghost);
+    return cfdmpi::mac_max_abs(div_, mac_, comm_);
   }
 
   // Upload the per-cell solid mask (extended-block layout; 1.0 = solid). Caller builds it (e.g. from
@@ -254,9 +296,12 @@ class DistributedStokes {
         if (has_solid_) apply_mask(comp[c]);
       }
     }
-    // projection
+    // projection (cut-cell operator -> open-weighted flux divergence RHS; else plain divergence)
     mac_.exchange(u_); mac_.exchange(v_); mac_.exchange(w_);
-    diverg_k<<<grd_, blk_>>>(u_, v_, w_, div_, ext_, g);
+    if (cutcell_)
+      diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, ox_, oy_, oz_, div_, ext_, g);
+    else
+      diverg_k<<<grd_, blk_>>>(u_, v_, w_, div_, ext_, g);
     if (mg_enabled_) {
       // multigrid pressure solve: n_pois V-cycles of A phi = -div (same periodic Laplacian as pois_k)
       ensure_mg_built();
@@ -304,6 +349,9 @@ class DistributedStokes {
   cfdmpi::DistributedPoissonMG mg_;
   bool mg_enabled_ = false, mg_built_ = false;
   int mg_levels_ = 4, mg_pre_ = 2, mg_post_ = 2, mg_bottom_ = 12;
+  // cut-cell pressure operator: staggered face openness + the flux-divergence flag
+  double *ox_ = nullptr, *oy_ = nullptr, *oz_ = nullptr;
+  bool cutcell_ = false;
 };
 
 }  // namespace dstokes

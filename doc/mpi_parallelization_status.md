@@ -214,6 +214,24 @@ top of this proven foundation.
   Initial max|div| 2.6 → after 8 iterations: single-level GS leaves it large, the **V-cycle reaches
   6.5e-10** (~8×10⁷ lower), and the value is **identical across np=1,2,4** (distribution-exact). np=1,2,4.
 
+### Step 18 — real SDF/fraction cut-cell pressure operator ✅ verified
+- `src/mac_cutcell.cuh`: builds the staggered face openness `ox/oy/oz` from an SDF on the extended block
+  using cfd's **gradient-normalised fluid fraction** (`cc_fraction_core` = `compute_fluid_fraction_kernel`
+  math: `0.5 + sd/denom`, normal from the SDF gradient, clamped) plus the operator mask (`sd≤0 → closed`,
+  from `compute_pressure_operator_kernel`). The fraction math is shared with a serial reference so the
+  distributed and serial builds use identical arithmetic. Fed to `setFineVariableOperator` it gives the
+  true cut-cell `A_C..A_T` on the MG fine level.
+- `DistributedStokes::set_cutcell_pressure_operator(sdf_ext)` installs it (enables + builds the MG) and
+  keeps the openness for the **cut-cell flux divergence** `div(open·u)` (`diverg_open_k`) — the quantity
+  the cut-cell projection is consistent with. `step()` uses the flux divergence as the Poisson RHS when
+  the cut-cell operator is active (plain divergence otherwise); `max_open_divergence()` reports it.
+- `tests/test_cutcell_operator_mpi.cu`: [1] the distributed `A_C..A_T` from a sphere SDF match the serial
+  full-grid reference **bit-for-bit (max|d| = 0)** at np=1,2,4 (coefficients are deterministic functions
+  of the SDF — no reduction-order divergence). [2] the `DistributedStokes` cut-cell projection reduces the
+  flux divergence (2.6 → 0.30, **identical across np** → exact). Full convergence of the stiff cut-cell
+  system is limited by the constant-coefficient coarse operator (as in the serial MG — Galerkin
+  coarsening would be the enhancement), not by the distribution.
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
 Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
@@ -225,8 +243,10 @@ momentum advection (cfd's scheme, momentum-conserving), the **full distributed N
 reductions** (`max_abs`, `remove_mean`), and a **distributed geometric multigrid** V-cycle for the
 Poisson — both constant-coefficient and **variable-coefficient (SDF / cut-cell) fine operators**, with
 block-local restriction/prolongation and machine-precision match to a serial reference — **wired as an
-opt-in pressure solver in `DistributedStokes::step`** (drives projection divergence to ~1e-9).
-**49/49 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
+opt-in pressure solver in `DistributedStokes::step`** (drives projection divergence to ~1e-9), including
+the **real SDF/fraction cut-cell operator** (bit-exact coefficients vs serial) with its consistent
+flux-divergence projection. **52/52 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is
+untouched.
 
 ## Demo
 
@@ -243,15 +263,14 @@ CI runs only a tiny smoke case (`demo_flow_sphere_smoke`).
   staggered advecting-velocity interpolation; ghost width 2) → full Navier–Stokes, not just Stokes.
 - **Full Robust-Scaled cut-cell IBM** (D_rescale stencil edits) in place of velocity masking, with cut
   cells straddling block boundaries.
-- **Full in-place `cfd_solver.cu`** — extended-block fields, wiring the distributed pieces into the
-  in-place step. The building blocks are done and assembled into `DistributedStokes`: MPI global
-  reductions (Step 14), the distributed geometric multigrid V-cycle (Step 15), the
-  **variable-coefficient / cut-cell fine operator** (Step 16), and the **V-cycle wired into the
-  projection** (Step 17, opt-in `set_pressure_multigrid`). What remains: compute the face openness from
-  the real SDF + `frac_u/v/w` on the extended block (cfd's fraction kernel, ghost width 2) and feed it
-  to `setFineVariableOperator` so the in-`DistributedStokes` V-cycle uses the true cut-cell pressure
-  operator (currently it uses the constant-coefficient operator, matching the existing periodic
-  `pois_k`).
+- **Distributed pressure-solve stack is complete** through `DistributedStokes`: MPI global reductions
+  (Step 14), the geometric multigrid V-cycle (Step 15), the variable-coefficient fine operator
+  (Step 16), the V-cycle wired into the projection (Step 17), and the **real SDF/fraction cut-cell
+  operator + consistent flux-divergence projection** (Step 18, bit-exact vs serial). Possible further
+  work: **Galerkin (operator-dependent) coarsening** so the multigrid converges the stiff cut-cell
+  system as fast as the constant-coefficient one; and folding all of this into the in-place
+  `cfd_solver.cu` (extended-block state/scratch) to replace the production single-GPU solver's globals
+  + multigrid with the distributed equivalents.
 - **Non-periodic BCs & load balance**: physical boundaries as today; ORB balances cell counts, IBM
   load imbalance may warrant weighting later.
 
