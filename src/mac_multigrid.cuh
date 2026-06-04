@@ -183,15 +183,18 @@ struct MGLevel {
 class DistributedPoissonMG {
  public:
   // global_res must be power-of-two and divisible by 2^(n_levels-1) (with even per-rank blocks). h0 is
-  // the finest spacing; comm the communicator. Asserts level-to-level partition alignment.
-  void init(int3 global_res, int rank, int size, double h0, int n_levels, MPI_Comm comm) {
+  // the finest spacing; comm the communicator. ghost is the halo width of every level (1 suffices for
+  // the 7-point stencil; pass a wider width to share a layout with a host solver). Asserts
+  // level-to-level partition alignment.
+  void init(int3 global_res, int rank, int size, double h0, int n_levels, MPI_Comm comm,
+            int ghost = 1) {
     comm_ = comm;
     levels_.clear();
     for (int L = 0; L < n_levels; ++L) levels_.push_back(std::make_unique<MGLevel>());
     for (int L = 0; L < n_levels; ++L) {
       int3 r = make_int3(global_res.x >> L, global_res.y >> L, global_res.z >> L);
       MGLevel& lv = *levels_[L];
-      lv.mac.init(r, rank, size, {true, true, true}, /*ghost=*/1, comm);
+      lv.mac.init(r, rank, size, {true, true, true}, ghost, comm);
       lv.g = lv.mac.ghost;
       lv.ext = lv.mac.local_ext;
       lv.og = lv.mac.origin_incl_ghost;

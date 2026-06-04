@@ -201,6 +201,19 @@ top of this proven foundation.
   computing the openness from the real SDF/`frac_u/v/w` on the extended block (cfd's fraction kernel,
   ghost width 2 for its stencil) and threading the V-cycle into `DistributedStokes::step`.
 
+### Step 17 — multigrid V-cycle wired into `DistributedStokes::step` ✅ verified
+- `DistributedStokes::set_pressure_multigrid(on, n_levels, pre, post, bottom)` makes the projection's
+  pressure Poisson use the distributed geometric multigrid (Step 15) instead of the single-level RB-GS.
+  Both solve the **same** periodic constant-coefficient Laplacian, so the V-cycle is a drop-in that
+  converges far faster per unit work; `step()`'s `n_pois` then counts V-cycles. The MG owns its own
+  level hierarchy on the **same ORB decomposition and ghost width (2)** as the solver, so MG level-0
+  blocks share the layout — `div` is copied straight into the V-cycle RHS (`b = -div`) and the solution
+  `phi` straight back, no remap. Built lazily on the first step; the single-level path stays the default
+  (every prior cell-for-cell test is untouched).
+- `tests/test_mg_projection_mpi.cu`: pure projection (`nu=0`, `n_diff=0`) of a divergent random field.
+  Initial max|div| 2.6 → after 8 iterations: single-level GS leaves it large, the **V-cycle reaches
+  6.5e-10** (~8×10⁷ lower), and the value is **identical across np=1,2,4** (distribution-exact). np=1,2,4.
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
 Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
@@ -211,8 +224,9 @@ momentum advection (cfd's scheme, momentum-conserving), the **full distributed N
 **Navier–Stokes flow around an SDF solid**, **gather-to-root + VTI output**, **distributed global
 reductions** (`max_abs`, `remove_mean`), and a **distributed geometric multigrid** V-cycle for the
 Poisson — both constant-coefficient and **variable-coefficient (SDF / cut-cell) fine operators**, with
-block-local restriction/prolongation and machine-precision match to a serial reference.
-**46/46 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
+block-local restriction/prolongation and machine-precision match to a serial reference — **wired as an
+opt-in pressure solver in `DistributedStokes::step`** (drives projection divergence to ~1e-9).
+**49/49 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
 
 ## Demo
 
@@ -230,12 +244,14 @@ CI runs only a tiny smoke case (`demo_flow_sphere_smoke`).
 - **Full Robust-Scaled cut-cell IBM** (D_rescale stencil edits) in place of velocity masking, with cut
   cells straddling block boundaries.
 - **Full in-place `cfd_solver.cu`** — extended-block fields, wiring the distributed pieces into the
-  in-place step. The building blocks are done: MPI global reductions (Step 14), the distributed
-  geometric multigrid V-cycle (Step 15), and the **variable-coefficient / cut-cell fine operator**
-  (Step 16, `A_C..A_T` from staggered face transmissibilities, symmetric across blocks). What remains:
-  compute the face openness from the real SDF + `frac_u/v/w` on the extended block (cfd's fraction
-  kernel, ghost width 2), and thread the V-cycle through `DistributedStokes::step` in place of the
-  single-level RB-GS Poisson.
+  in-place step. The building blocks are done and assembled into `DistributedStokes`: MPI global
+  reductions (Step 14), the distributed geometric multigrid V-cycle (Step 15), the
+  **variable-coefficient / cut-cell fine operator** (Step 16), and the **V-cycle wired into the
+  projection** (Step 17, opt-in `set_pressure_multigrid`). What remains: compute the face openness from
+  the real SDF + `frac_u/v/w` on the extended block (cfd's fraction kernel, ghost width 2) and feed it
+  to `setFineVariableOperator` so the in-`DistributedStokes` V-cycle uses the true cut-cell pressure
+  operator (currently it uses the constant-coefficient operator, matching the existing periodic
+  `pois_k`).
 - **Non-periodic BCs & load balance**: physical boundaries as today; ORB balances cell counts, IBM
   load imbalance may warrant weighting later.
 

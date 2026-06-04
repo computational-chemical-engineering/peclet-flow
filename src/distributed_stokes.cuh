@@ -18,6 +18,7 @@
 
 #include "cfd_solver.cuh"  // get_idx (unused at runtime here; kept for convention parity)
 #include "mac_halo.cuh"
+#include "mac_multigrid.cuh"  // DistributedPoissonMG (opt-in multigrid pressure solve)
 #include "staggered_advection.cuh"
 
 namespace dstokes {
@@ -25,6 +26,12 @@ namespace dstokes {
 namespace detail {
 __device__ inline long L3(int x, int y, int z, int3 e) {
   return (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+}
+// dst = -src over the whole extended block (build the multigrid RHS b = -div: the V-cycle solves
+// A x = b with A = -Laplacian, so x converges to phi with Lap phi = div, matching pois_k).
+__global__ void neg_k(double* dst, const double* src, long n) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) dst[i] = -src[i];
 }
 // b = comp + dt*f   (body force folded into the implicit-diffusion RHS), inner cells.
 __global__ void rhs_k(const double* c, double* b, double dtf, int3 e, int g) {
@@ -116,6 +123,7 @@ class DistributedStokes {
   ~DistributedStokes() {
     for (double* p : {u_, v_, w_, phi_, div_, solid_, b_[0], b_[1], b_[2]})
       if (p) cudaFree(p);
+    if (mg_built_) mg_.free();
   }
   DistributedStokes() = default;
   DistributedStokes(const DistributedStokes&) = delete;
@@ -133,6 +141,20 @@ class DistributedStokes {
   void set_body_force(double fx, double fy, double fz) { fx_ = fx; fy_ = fy; fz_ = fz; }
   // Enable explicit nonlinear advection (full Navier-Stokes instead of Stokes).
   void set_advection(bool on) { advection_ = on; }
+
+  // Opt-in: solve the pressure Poisson with the distributed geometric multigrid V-cycle
+  // (src/mac_multigrid.cuh) instead of the single-level Red-Black Gauss-Seidel. Both solve the same
+  // periodic constant-coefficient Laplacian; the V-cycle converges far faster per unit work. Requires
+  // a power-of-two global resolution divisible by 2^(n_levels-1) with even per-rank blocks (the MG
+  // asserts this). step()'s n_pois argument then counts V-cycles, not GS sweeps. Built lazily on the
+  // first step so it can be configured after init().
+  void set_pressure_multigrid(bool on, int n_levels = 4, int pre = 2, int post = 2, int bottom = 12) {
+    mg_enabled_ = on;
+    mg_levels_ = n_levels;
+    mg_pre_ = pre;
+    mg_post_ = post;
+    mg_bottom_ = bottom;
+  }
 
   // Upload the per-cell solid mask (extended-block layout; 1.0 = solid). Caller builds it (e.g. from
   // an SDF) for all local cells including ghosts (mask is a function of global position).
@@ -235,12 +257,23 @@ class DistributedStokes {
     // projection
     mac_.exchange(u_); mac_.exchange(v_); mac_.exchange(w_);
     diverg_k<<<grd_, blk_>>>(u_, v_, w_, div_, ext_, g);
-    cudaMemset(phi_, 0, n_ * 8);
-    for (int it = 0; it < n_pois; ++it) {
-      mac_.exchange(phi_);
-      pois_k<<<grd_, blk_>>>(phi_, div_, ext_, mac_.origin_incl_ghost, g, 0);
-      mac_.exchange(phi_);
-      pois_k<<<grd_, blk_>>>(phi_, div_, ext_, mac_.origin_incl_ghost, g, 1);
+    if (mg_enabled_) {
+      // multigrid pressure solve: n_pois V-cycles of A phi = -div (same periodic Laplacian as pois_k)
+      ensure_mg_built();
+      cfdmpi::MGLevel& l0 = mg_.level(0);  // ghost-2 layout identical to this solver's blocks
+      int threads = 256, blocks = (int)((n_ + threads - 1) / threads);
+      neg_k<<<blocks, threads>>>(l0.rhs, div_, (long)n_);
+      cudaMemset(l0.x, 0, n_ * 8);
+      mg_.solve(n_pois, mg_pre_, mg_post_, mg_bottom_);
+      cudaMemcpy(phi_, l0.x, n_ * 8, cudaMemcpyDeviceToDevice);
+    } else {
+      cudaMemset(phi_, 0, n_ * 8);
+      for (int it = 0; it < n_pois; ++it) {
+        mac_.exchange(phi_);
+        pois_k<<<grd_, blk_>>>(phi_, div_, ext_, mac_.origin_incl_ghost, g, 0);
+        mac_.exchange(phi_);
+        pois_k<<<grd_, blk_>>>(phi_, div_, ext_, mac_.origin_incl_ghost, g, 1);
+      }
     }
     mac_.exchange(phi_);
     correct_k<<<grd_, blk_>>>(u_, v_, w_, phi_, ext_, g);
@@ -249,6 +282,12 @@ class DistributedStokes {
 
  private:
   void apply_mask(double* c) { detail::mask_k<<<grd_, blk_>>>(c, solid_, ext_); }
+  void ensure_mg_built() {
+    if (mg_built_) return;
+    // same ORB decomposition + ghost width (2) as this solver, so MG level-0 blocks share the layout.
+    mg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, mg_levels_, comm_, /*ghost=*/mac_.ghost);
+    mg_built_ = true;
+  }
 
   MacGridHalo mac_;
   MPI_Comm comm_ = MPI_COMM_WORLD;
@@ -261,6 +300,10 @@ class DistributedStokes {
   double *u_ = nullptr, *v_ = nullptr, *w_ = nullptr, *phi_ = nullptr, *div_ = nullptr,
          *solid_ = nullptr;
   double* b_[3] = {nullptr, nullptr, nullptr};
+  // opt-in multigrid pressure solve (built lazily on first step)
+  cfdmpi::DistributedPoissonMG mg_;
+  bool mg_enabled_ = false, mg_built_ = false;
+  int mg_levels_ = 4, mg_pre_ = 2, mg_post_ = 2, mg_bottom_ = 12;
 };
 
 }  // namespace dstokes
