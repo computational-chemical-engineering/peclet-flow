@@ -101,6 +101,28 @@ __global__ void mg_residual_var_k(double* __restrict__ r, const double* __restri
   r[i] = b[i] - Ax;
 }
 
+// y = A x for the variable operator (inner cells); used as the matvec in PCG.
+__global__ void mg_apply_var_k(double* __restrict__ y, const double* __restrict__ x, const double* AC,
+                               const double* AW, const double* AE, const double* AS, const double* AN,
+                               const double* AB, const double* AT, int3 ext, int g) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
+  if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
+  size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
+  y[i] = AC[i] * x[i] + AE[i] * x[i + sx] + AW[i] * x[i - sx] + AN[i] * x[i + sy] +
+         AS[i] * x[i - sy] + AT[i] * x[i + sz] + AB[i] * x[i - sz];
+}
+__global__ void mg_axpy_k(double* y, double a, const double* x, long n) {  // y += a*x
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) y[i] += a * x[i];
+}
+__global__ void mg_aypx_k(double* y, double a, const double* x, long n) {  // y = x + a*y
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) y[i] = x[i] + a * y[i];
+}
+
 __global__ void mg_residual_k(double* __restrict__ r, const double* __restrict__ x,
                               const double* __restrict__ b, int3 ext, int g, double invh2) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
@@ -162,6 +184,88 @@ __global__ void mg_prolong_k(double* __restrict__ fine, const double* __restrict
   fine[fi] += trilerp_ext(coarse, cx, cy, cz, cext);
 }
 
+// ---- Galerkin (aggregation/variational) coarsening for the variable-coefficient operator ----
+// With piecewise-constant aggregation transfers P (injection) and R = P^T (8-cell sum), the variational
+// coarse operator A_c = P^T A_f P stays a 7-point stencil whose face transmissibility is the SUM of the
+// four fine-grid face transmissibilities spanning the coarse face. So the coarse operators are derived
+// from the fine cut-cell operator (they "see" the solid), unlike the re-discretised constant-coefficient
+// coarse operator. The matching cycle uses injection prolongation + summation restriction (both local,
+// no halo) and the variable smoother/residual on every level.
+
+// staggered face transmissibility T = openness / h^2 (the fine-level operator coefficient input)
+__global__ void mg_scale_to_T_k(double* tx, double* ty, double* tz, const double* ox,
+                                const double* oy, const double* oz, long n, double ix, double iy,
+                                double iz) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  tx[i] = ox[i] * ix;
+  ty[i] = oy[i] * iy;
+  tz[i] = oz[i] * iz;
+}
+
+// coarse face transmissibility = sum of the 4 fine faces spanning the coarse face (= P^T A_f P, local).
+// fine_local child base of coarse cell (clx,cly,clz) is (2*clx-g, 2*cly-g, 2*clz-g); the coarse -x face
+// is the 4 fine -x faces at that base x across the (y,z) children. Fine indices are clamped (only the
+// outermost coarse ghosts, never read by the operator assembly, would go out of range).
+__global__ void mg_agg_T_k(double* txc, double* tyc, double* tzc, const double* txf,
+                           const double* tyf, const double* tzf, int3 cext, int3 fext, int g) {
+  int clx = blockIdx.x * blockDim.x + threadIdx.x;
+  int cly = blockIdx.y * blockDim.y + threadIdx.y;
+  int clz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (clx >= cext.x || cly >= cext.y || clz >= cext.z) return;
+  int fx0 = 2 * clx - g, fy0 = 2 * cly - g, fz0 = 2 * clz - g;
+  size_t fsy = fext.x, fsz = (size_t)fext.x * fext.y;
+  auto cl = [](int v, int n) { return v < 0 ? 0 : (v >= n ? n - 1 : v); };
+  auto F = [&](const double* T, int x, int y, int z) {
+    return T[(size_t)cl(x, fext.x) + (size_t)cl(y, fext.y) * fsy + (size_t)cl(z, fext.z) * fsz];
+  };
+  double sx = 0, sy = 0, sz = 0;
+  for (int a = 0; a < 2; ++a)
+    for (int b = 0; b < 2; ++b) {
+      sx += F(txf, fx0, fy0 + a, fz0 + b);
+      sy += F(tyf, fx0 + a, fy0, fz0 + b);
+      sz += F(tzf, fx0 + a, fy0 + b, fz0);
+    }
+  size_t i = (size_t)clx + (size_t)cly * cext.x + (size_t)clz * (size_t)cext.x * cext.y;
+  txc[i] = sx;
+  tyc[i] = sy;
+  tzc[i] = sz;
+}
+
+// R = P^T : coarse residual = SUM of the 8 fine children (not the 1/8 average used by geometric MG)
+__global__ void mg_restrict_sum_k(double* coarse, const double* fine, int3 cext, int3 fext, int g,
+                                  int3 cinner) {
+  int icx = blockIdx.x * blockDim.x + threadIdx.x;
+  int icy = blockIdx.y * blockDim.y + threadIdx.y;
+  int icz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (icx >= cinner.x || icy >= cinner.y || icz >= cinner.z) return;
+  size_t fsy = fext.x, fsz = (size_t)fext.x * fext.y;
+  double sum = 0.0;
+  for (int dz = 0; dz < 2; ++dz)
+    for (int dy = 0; dy < 2; ++dy)
+      for (int dx = 0; dx < 2; ++dx) {
+        int fx = 2 * icx + dx + g, fy = 2 * icy + dy + g, fz = 2 * icz + dz + g;
+        sum += fine[(size_t)fx + (size_t)fy * fsy + (size_t)fz * fsz];
+      }
+  size_t ci = (size_t)(icx + g) + (size_t)(icy + g) * cext.x + (size_t)(icz + g) * cext.x * cext.y;
+  coarse[ci] = sum;
+}
+
+// P : piecewise-constant injection -- each fine cell adds its coarse parent's correction (reads coarse
+// INNER cells only, so no coarse halo exchange is needed before prolongation).
+__global__ void mg_prolong_inject_k(double* fine, const double* coarse, int3 fext, int3 cext, int g,
+                                    int3 finner) {
+  int ifx = blockIdx.x * blockDim.x + threadIdx.x;
+  int ify = blockIdx.y * blockDim.y + threadIdx.y;
+  int ifz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (ifx >= finner.x || ify >= finner.y || ifz >= finner.z) return;
+  int flx = ifx + g, fly = ify + g, flz = ifz + g;
+  int clx = (flx + g) / 2, cly = (fly + g) / 2, clz = (flz + g) / 2;
+  size_t fi = (size_t)flx + (size_t)fly * fext.x + (size_t)flz * (size_t)fext.x * fext.y;
+  size_t ci = (size_t)clx + (size_t)cly * cext.x + (size_t)clz * (size_t)cext.x * cext.y;
+  fine[fi] += coarse[ci];
+}
+
 }  // namespace mgdetail
 
 struct MGLevel {
@@ -173,10 +277,12 @@ struct MGLevel {
   size_t n = 0;
   int3 ext{}, og{}, inner{};
   int g = 1;
-  // variable-coefficient operator (fine level only); null on constant-coefficient levels
+  // variable-coefficient operator (fine level, or every level under Galerkin coarsening)
   bool variable = false;
   double *AC = nullptr, *AW = nullptr, *AE = nullptr, *AS = nullptr, *AN = nullptr, *AB = nullptr,
          *AT = nullptr;
+  // staggered face transmissibilities (Galerkin only): tx[i] = T of the -x face of cell i
+  double *tx = nullptr, *ty = nullptr, *tz = nullptr;
 };
 
 // Distributed V-cycle solver for the periodic constant-coefficient Poisson on power-of-two grids.
@@ -235,7 +341,7 @@ class DistributedPoissonMG {
     for (auto& lp : levels_) {
       MGLevel& lv = *lp;
       for (double** p : {&lv.x, &lv.rhs, &lv.res, &lv.AC, &lv.AW, &lv.AE, &lv.AS, &lv.AN, &lv.AB,
-                         &lv.AT}) {
+                         &lv.AT, &lv.tx, &lv.ty, &lv.tz}) {
         if (*p) cudaFree(*p);
         *p = nullptr;
       }
@@ -243,24 +349,61 @@ class DistributedPoissonMG {
     levels_.clear();
   }
 
-  // Install a variable-coefficient operator on the fine level (level 0) from staggered face
-  // openness/transmissibility fields on the extended block: ox[i] = openness of the -x face of cell i
-  // (similarly oy, oz). The caller fills ox/oy/oz on the WHOLE extended block (incl. ghosts); because
-  // a face is a deterministic function of its global position, every rank derives matching values for
-  // shared faces (no exchange needed). idx2 = 1/dx^2, etc. Coarse levels stay constant-coefficient
-  // (mirrors the serial use_periodic_operator = level>0).
+  // Install a variable-coefficient operator on the fine level from staggered face openness fields on
+  // the extended block: ox[i] = openness of the -x face of cell i (similarly oy, oz). The caller fills
+  // ox/oy/oz on the WHOLE extended block (incl. ghosts); a face is a deterministic function of its
+  // global position, so every rank derives matching values for shared faces (no exchange needed).
+  // idx2 = 1/dx^2, etc.
+  //
+  // galerkin=false: only the fine level is variable; coarse levels stay constant-coefficient (mirrors
+  //   the serial use_periodic_operator = level>0). Cheap, but a poor coarse model for stiff cut cells.
+  // galerkin=true: build the variational coarse operators A_c = P^T A_f P (aggregation) -- the coarse
+  //   face transmissibility is the sum of the 4 fine faces it spans -- on EVERY level, so the coarse
+  //   grids see the geometry. The V-cycle then uses injection prolongation + summation restriction.
   void setFineVariableOperator(const double* ox, const double* oy, const double* oz, double idx2,
-                               double idy2, double idz2) {
-    MGLevel& lv = *levels_[0];
-    if (!lv.AC) {
-      for (double** p : {&lv.AC, &lv.AW, &lv.AE, &lv.AS, &lv.AN, &lv.AB, &lv.AT})
-        cudaMalloc(p, lv.n * 8);
-    }
-    lv.variable = true;
+                               double idy2, double idz2, bool galerkin = false) {
+    galerkin_ = galerkin;
+    MGLevel& f = *levels_[0];
+    auto alloc_op = [](MGLevel& lv) {
+      if (!lv.AC)
+        for (double** p : {&lv.AC, &lv.AW, &lv.AE, &lv.AS, &lv.AN, &lv.AB, &lv.AT}) cudaMalloc(p, lv.n * 8);
+    };
+    auto alloc_T = [](MGLevel& lv) {
+      if (!lv.tx)
+        for (double** p : {&lv.tx, &lv.ty, &lv.tz}) cudaMalloc(p, lv.n * 8);
+    };
     dim3 blk(8, 8, 8);
-    dim3 grd((lv.inner.x + 7) / 8, (lv.inner.y + 7) / 8, (lv.inner.z + 7) / 8);
-    mgdetail::mg_build_op_k<<<grd, blk>>>(lv.AC, lv.AW, lv.AE, lv.AS, lv.AN, lv.AB, lv.AT, ox, oy, oz,
-                                          lv.ext, lv.g, idx2, idy2, idz2);
+    auto grd = [](const MGLevel& lv) {
+      return dim3((lv.inner.x + 7) / 8, (lv.inner.y + 7) / 8, (lv.inner.z + 7) / 8);
+    };
+    alloc_op(f);
+    f.variable = true;
+
+    if (!galerkin) {
+      mgdetail::mg_build_op_k<<<grd(f), blk>>>(f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT, ox, oy, oz,
+                                               f.ext, f.g, idx2, idy2, idz2);
+      return;
+    }
+
+    // fine transmissibility T = openness/h^2; fine operator assembled from T (idx2=1)
+    alloc_T(f);
+    int t1 = 256, b1 = (int)((f.n + t1 - 1) / t1);
+    mgdetail::mg_scale_to_T_k<<<b1, t1>>>(f.tx, f.ty, f.tz, ox, oy, oz, (long)f.n, idx2, idy2, idz2);
+    mgdetail::mg_build_op_k<<<grd(f), blk>>>(f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT, f.tx, f.ty,
+                                             f.tz, f.ext, f.g, 1.0, 1.0, 1.0);
+    // coarsen the transmissibilities and re-assemble the variational operator on every coarse level
+    for (int L = 1; L < (int)levels_.size(); ++L) {
+      MGLevel& c = *levels_[L];
+      MGLevel& fin = *levels_[L - 1];
+      alloc_op(c);
+      alloc_T(c);
+      c.variable = true;
+      dim3 gAll((c.ext.x + 7) / 8, (c.ext.y + 7) / 8, (c.ext.z + 7) / 8);
+      mgdetail::mg_agg_T_k<<<gAll, blk>>>(c.tx, c.ty, c.tz, fin.tx, fin.ty, fin.tz, c.ext, fin.ext,
+                                          c.g);
+      mgdetail::mg_build_op_k<<<grd(c), blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, c.tx, c.ty,
+                                               c.tz, c.ext, c.g, 1.0, 1.0, 1.0);
+    }
   }
 
   MGLevel& level(int L) { return *levels_[L]; }
@@ -274,13 +417,82 @@ class DistributedPoissonMG {
     for (int v = 0; v < n_vcycles; ++v) vcycle(0);
   }
 
+  // Conjugate Gradients preconditioned by ONE symmetric V-cycle (M^{-1}). For the stiff cut-cell /
+  // strongly-variable operator the standalone (unsmoothed-aggregation) V-cycle is only a modest
+  // smoother, but as an SPD preconditioner it makes CG converge robustly. Requires the variable
+  // operator (level 0 .variable). rhs on level 0 is the RHS; the solution is left in level-0 x.
+  // Returns the iteration count; stops when max|r| < rtol*max|r0| or max_iter is reached.
+  int solve_pcg(int max_iter, double rtol, int pre, int post, int bottom) {
+    pre_ = pre;
+    post_ = post;
+    bottom_ = bottom;
+    MGLevel& l0 = *levels_[0];
+    int g = l0.g;
+    long n = (long)l0.n;
+    dim3 blk(8, 8, 8);
+    dim3 grd((l0.inner.x + 7) / 8, (l0.inner.y + 7) / 8, (l0.inner.z + 7) / 8);
+    int t1 = 256, b1 = (int)((n + t1 - 1) / t1);
+
+    double *b, *x, *r, *p, *z, *Ap;
+    for (double** q : {&b, &x, &r, &p, &z, &Ap}) cudaMalloc(q, n * 8);
+    cudaMemcpy(b, l0.rhs, n * 8, cudaMemcpyDeviceToDevice);  // PCG RHS (rhs is reused as V-cycle scratch)
+    cudaMemcpy(x, l0.x, n * 8, cudaMemcpyDeviceToDevice);    // initial guess
+
+    auto matvec = [&](double* y, double* v) {  // y = A v
+      l0.mac.exchange(v);
+      mgdetail::mg_apply_var_k<<<grd, blk>>>(y, v, l0.AC, l0.AW, l0.AE, l0.AS, l0.AN, l0.AB, l0.AT,
+                                             l0.ext, g);
+    };
+    auto precond = [&](double* zz, double* rr) {  // zz = M^{-1} rr  (one symmetric V-cycle)
+      cudaMemcpy(l0.rhs, rr, n * 8, cudaMemcpyDeviceToDevice);
+      cudaMemset(l0.x, 0, n * 8);
+      vcycle(0, /*sym=*/true);
+      cudaMemcpy(zz, l0.x, n * 8, cudaMemcpyDeviceToDevice);
+    };
+
+    matvec(Ap, x);                                  // r = b - A x
+    cudaMemcpy(r, b, n * 8, cudaMemcpyDeviceToDevice);
+    mgdetail::mg_axpy_k<<<b1, t1>>>(r, -1.0, Ap, n);
+    double r0 = mac_max_abs(r, l0.mac, comm_);
+    int it = 0;
+    if (r0 > 0.0) {
+      precond(z, r);
+      cudaMemcpy(p, z, n * 8, cudaMemcpyDeviceToDevice);
+      double rz = mac_dot(r, z, l0.mac, comm_);
+      for (; it < max_iter; ++it) {
+        matvec(Ap, p);
+        double pAp = mac_dot(p, Ap, l0.mac, comm_);
+        double alpha = rz / pAp;
+        mgdetail::mg_axpy_k<<<b1, t1>>>(x, alpha, p, n);    // x += alpha p
+        mgdetail::mg_axpy_k<<<b1, t1>>>(r, -alpha, Ap, n);  // r -= alpha Ap
+        if (mac_max_abs(r, l0.mac, comm_) < rtol * r0) {
+          ++it;
+          break;
+        }
+        precond(z, r);
+        double rz_new = mac_dot(r, z, l0.mac, comm_);
+        double beta = rz_new / rz;
+        mgdetail::mg_aypx_k<<<b1, t1>>>(p, beta, z, n);  // p = z + beta p
+        rz = rz_new;
+      }
+    }
+    cudaMemcpy(l0.x, x, n * 8, cudaMemcpyDeviceToDevice);
+    mac_remove_mean(l0.x, l0.mac, comm_);
+    cudaMemcpy(l0.rhs, b, n * 8, cudaMemcpyDeviceToDevice);  // restore RHS (precond used it as scratch)
+    for (double* q : {b, x, r, p, z, Ap}) cudaFree(q);
+    return it;
+  }
+
  private:
-  void smooth(MGLevel& lv, int sweeps) {
+  // reverse=true sweeps black-then-red (the transpose ordering) so that a forward pre-smooth + reverse
+  // post-smooth makes the V-cycle symmetric -> usable as an SPD preconditioner for CG.
+  void smooth(MGLevel& lv, int sweeps, bool reverse = false) {
     dim3 blk(8, 8, 8);
     dim3 grd((lv.inner.x + 7) / 8, (lv.inner.y + 7) / 8, (lv.inner.z + 7) / 8);
     double h2 = lv.h * lv.h;
     for (int k = 0; k < sweeps; ++k) {
-      for (int color = 0; color < 2; ++color) {
+      for (int s = 0; s < 2; ++s) {
+        int color = reverse ? (1 - s) : s;
         lv.mac.exchange(lv.x);
         if (lv.variable)
           mgdetail::mg_smooth_var_k<<<grd, blk>>>(lv.x, lv.rhs, lv.AC, lv.AW, lv.AE, lv.AS, lv.AN,
@@ -302,7 +514,9 @@ class DistributedPoissonMG {
       mgdetail::mg_residual_k<<<grd, blk>>>(lv.res, lv.x, lv.rhs, lv.ext, lv.g, 1.0 / (lv.h * lv.h));
   }
 
-  void vcycle(int L) {
+  // sym=true makes the cycle symmetric (reverse post-smooth) for use as a CG preconditioner; the
+  // default solve() path uses sym=false, preserving the exact behaviour the cell-for-cell tests check.
+  void vcycle(int L, bool sym = false) {
     MGLevel& lv = *levels_[L];
     dim3 blk(8, 8, 8);
     dim3 grd((lv.inner.x + 7) / 8, (lv.inner.y + 7) / 8, (lv.inner.z + 7) / 8);
@@ -318,25 +532,35 @@ class DistributedPoissonMG {
     // residual (needs current ghosts); variable operator on the fine level, constant on coarse
     residual(lv);
 
-    // restrict residual -> coarse rhs (local); reset coarse x
+    // restrict residual -> coarse rhs (local); reset coarse x. Galerkin uses R = P^T (sum); the
+    // geometric path uses full-weighting (1/8 average).
     MGLevel& cs = *levels_[L + 1];
     dim3 cgrd((cs.inner.x + 7) / 8, (cs.inner.y + 7) / 8, (cs.inner.z + 7) / 8);
-    mgdetail::mg_restrict_k<<<cgrd, blk>>>(cs.rhs, lv.res, cs.ext, lv.ext, lv.g, cs.inner);
+    if (galerkin_)
+      mgdetail::mg_restrict_sum_k<<<cgrd, blk>>>(cs.rhs, lv.res, cs.ext, lv.ext, lv.g, cs.inner);
+    else
+      mgdetail::mg_restrict_k<<<cgrd, blk>>>(cs.rhs, lv.res, cs.ext, lv.ext, lv.g, cs.inner);
     cudaMemset(cs.x, 0, cs.n * 8);
 
-    vcycle(L + 1);
+    vcycle(L + 1, sym);
 
-    // prolong coarse correction -> fine (needs coarse ghosts)
-    cs.mac.exchange(cs.x);
-    mgdetail::mg_prolong_k<<<grd, blk>>>(lv.x, cs.x, lv.ext, cs.ext, lv.g, lv.inner);
+    // prolong coarse correction -> fine. Galerkin uses injection (P, no coarse halo); the geometric
+    // path uses trilinear interpolation (needs the coarse ghosts).
+    if (galerkin_) {
+      mgdetail::mg_prolong_inject_k<<<grd, blk>>>(lv.x, cs.x, lv.ext, cs.ext, lv.g, lv.inner);
+    } else {
+      cs.mac.exchange(cs.x);
+      mgdetail::mg_prolong_k<<<grd, blk>>>(lv.x, cs.x, lv.ext, cs.ext, lv.g, lv.inner);
+    }
 
-    smooth(lv, post_);
+    smooth(lv, post_, /*reverse=*/sym);
     mac_remove_mean(lv.x, lv.mac, comm_);
   }
 
   std::vector<std::unique_ptr<MGLevel>> levels_;
   MPI_Comm comm_ = MPI_COMM_WORLD;
   int pre_ = 2, post_ = 2, bottom_ = 8;
+  bool galerkin_ = false;  // variational (aggregation) coarse operators + injection/sum transfers
 };
 
 }  // namespace cfdmpi

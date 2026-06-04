@@ -13,6 +13,7 @@
 
 #include <mpi.h>
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -174,7 +175,9 @@ class DistributedStokes {
   // the constant-coefficient Laplacian on level 0 (coarse levels stay constant-coefficient, mirroring
   // the serial multigrid). Enables and builds the multigrid; call after init(). Spacing is unit (dx=1),
   // matching diverg_k/correct_k.
-  void set_cutcell_pressure_operator(const std::vector<double>& sdf_ext) {
+  // galerkin=true (default) builds variational (aggregation) coarse operators so the multigrid
+  // converges the stiff cut-cell system; false keeps constant-coefficient coarse levels.
+  void set_cutcell_pressure_operator(const std::vector<double>& sdf_ext, bool galerkin = true) {
     mg_enabled_ = true;
     ensure_mg_built();
     if (!ox_) for (double** p : {&ox_, &oy_, &oz_}) cudaMalloc(p, n_ * sizeof(double));
@@ -184,9 +187,18 @@ class DistributedStokes {
     dim3 gE((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
     // staggered face openness, kept for the cut-cell flux divergence (projection RHS + diagnostic)
     cfdmpi::ccdetail::cc_build_open_k<<<gE, dim3(8, 8, 4)>>>(ox_, oy_, oz_, sdf, ext_, 1.0, 1.0, 1.0);
-    mg_.setFineVariableOperator(ox_, oy_, oz_, 1.0, 1.0, 1.0);
+    mg_.setFineVariableOperator(ox_, oy_, oz_, 1.0, 1.0, 1.0, galerkin);
     cudaFree(sdf);
     cutcell_ = true;
+  }
+
+  // Solve the pressure Poisson with CG preconditioned by the (Galerkin) V-cycle instead of plain
+  // V-cycles. Needed to actually converge the stiff cut-cell operator; requires the cut-cell operator
+  // (set_cutcell_pressure_operator). step()'s n_pois is then ignored in favour of max_iter/rtol.
+  void set_pressure_pcg(bool on, int max_iter = 60, double rtol = 1e-8) {
+    pcg_ = on;
+    pcg_maxit_ = max_iter;
+    pcg_rtol_ = rtol;
   }
 
   // Global max of the cut-cell flux divergence |div(open u)| over owned cells (the quantity the
@@ -196,6 +208,16 @@ class DistributedStokes {
     mac_.exchange(u_); mac_.exchange(v_); mac_.exchange(w_);
     detail::diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, ox_, oy_, oz_, div_, ext_, mac_.ghost);
     return cfdmpi::mac_max_abs(div_, mac_, comm_);
+  }
+  // RMS of the cut-cell flux divergence (bulk measure; less sensitive to a single thin cut cell)
+  double rms_open_divergence() {
+    if (!cutcell_) return 0.0;
+    mac_.exchange(u_); mac_.exchange(v_); mac_.exchange(w_);
+    detail::diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, ox_, oy_, oz_, div_, ext_, mac_.ghost);
+    double ss = cfdmpi::mac_dot(div_, div_, mac_, comm_);
+    auto gs = mac_.dec.globalSize();
+    double N = (double)gs[0] * gs[1] * gs[2];
+    return std::sqrt(ss / N);
   }
 
   // Upload the per-cell solid mask (extended-block layout; 1.0 = solid). Caller builds it (e.g. from
@@ -309,7 +331,10 @@ class DistributedStokes {
       int threads = 256, blocks = (int)((n_ + threads - 1) / threads);
       neg_k<<<blocks, threads>>>(l0.rhs, div_, (long)n_);
       cudaMemset(l0.x, 0, n_ * 8);
-      mg_.solve(n_pois, mg_pre_, mg_post_, mg_bottom_);
+      if (pcg_ && cutcell_)
+        mg_.solve_pcg(pcg_maxit_, pcg_rtol_, mg_pre_, mg_post_, mg_bottom_);
+      else
+        mg_.solve(n_pois, mg_pre_, mg_post_, mg_bottom_);
       cudaMemcpy(phi_, l0.x, n_ * 8, cudaMemcpyDeviceToDevice);
     } else {
       cudaMemset(phi_, 0, n_ * 8);
@@ -352,6 +377,10 @@ class DistributedStokes {
   // cut-cell pressure operator: staggered face openness + the flux-divergence flag
   double *ox_ = nullptr, *oy_ = nullptr, *oz_ = nullptr;
   bool cutcell_ = false;
+  // CG-accelerated pressure solve (for the stiff cut-cell operator)
+  bool pcg_ = false;
+  int pcg_maxit_ = 60;
+  double pcg_rtol_ = 1e-8;
 };
 
 }  // namespace dstokes

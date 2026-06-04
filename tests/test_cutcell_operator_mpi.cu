@@ -152,46 +152,60 @@ int main(int argc, char** argv) {
   double gmaxd = 0.0;
   MPI_Reduce(&maxd, &gmaxd, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
-  // ---- part 2: drive DistributedStokes through set_cutcell_pressure_operator (the wiring) ----
-  dstokes::DistributedStokes s;
-  s.init(res, rank, size, /*nu=*/0.0, /*dt=*/0.1);
-  int3 e2 = s.ext(), og2 = s.origin_incl_ghost();
-  int g2 = s.ghost();
-  size_t n2 = s.num_cells();
-  std::vector<double> sdfx(n2), solid(n2, 0.0), hu(n2, 0), hv(n2, 0), hw(n2, 0);
-  for (int lz = 0; lz < e2.z; ++lz)
-    for (int ly = 0; ly < e2.y; ++ly)
-      for (int lx = 0; lx < e2.x; ++lx) {
-        size_t i = (size_t)lx + (size_t)ly * e2.x + (size_t)lz * e2.x * e2.y;
-        double sd = psdf(lx + og2.x, ly + og2.y, lz + og2.z, res);
-        sdfx[i] = sd;
-        solid[i] = (sd < 0.0) ? 1.0 : 0.0;
-        if (lx >= g2 && ly >= g2 && lz >= g2 && lx < e2.x - g2 && ly < e2.y - g2 && lz < e2.z - g2) {
-          hu[i] = hash01(lx + og2.x, ly + og2.y, lz + og2.z, 11);
-          hv[i] = hash01(lx + og2.x, ly + og2.y, lz + og2.z, 22);
-          hw[i] = hash01(lx + og2.x, ly + og2.y, lz + og2.z, 33);
+  // ---- part 2: drive DistributedStokes through set_cutcell_pressure_operator. The stiff cut-cell
+  // operator needs CG accelerating the Galerkin V-cycle (a plain V-cycle stalls); compare the two. ----
+  auto run_cutcell = [&](bool pcg, int budget, double& dv0, double& dv1, double& rms1) {
+    dstokes::DistributedStokes s;
+    s.init(res, rank, size, /*nu=*/0.0, /*dt=*/0.1);
+    int3 e2 = s.ext(), og2 = s.origin_incl_ghost();
+    int g2 = s.ghost();
+    size_t n2 = s.num_cells();
+    std::vector<double> sdfx(n2), solid(n2, 0.0), hu(n2, 0), hv(n2, 0), hw(n2, 0);
+    for (int lz = 0; lz < e2.z; ++lz)
+      for (int ly = 0; ly < e2.y; ++ly)
+        for (int lx = 0; lx < e2.x; ++lx) {
+          size_t i = (size_t)lx + (size_t)ly * e2.x + (size_t)lz * e2.x * e2.y;
+          double sd = psdf(lx + og2.x, ly + og2.y, lz + og2.z, res);
+          sdfx[i] = sd;
+          solid[i] = (sd < 0.0) ? 1.0 : 0.0;
+          if (lx >= g2 && ly >= g2 && lz >= g2 && lx < e2.x - g2 && ly < e2.y - g2 &&
+              lz < e2.z - g2) {
+            hu[i] = hash01(lx + og2.x, ly + og2.y, lz + og2.z, 11);
+            hv[i] = hash01(lx + og2.x, ly + og2.y, lz + og2.z, 22);
+            hw[i] = hash01(lx + og2.x, ly + og2.y, lz + og2.z, 33);
+          }
         }
-      }
-  s.upload_velocity(hu.data(), hv.data(), hw.data());
-  s.set_solid(solid);                      // no-slip masking inside the sphere
-  s.set_cutcell_pressure_operator(sdfx);   // real cut-cell operator on the MG fine level
-  double dv0 = s.max_open_divergence();    // the cut-cell flux divergence (what the operator projects)
-  s.step(/*n_diff=*/0, /*n_pois=*/8);      // pure cut-cell projection (8 V-cycles)
-  double dv1 = s.max_open_divergence();
+    s.upload_velocity(hu.data(), hv.data(), hw.data());
+    // NB: no set_solid here -- the cut-cell operator handles the geometry through the open fractions;
+    // velocity masking would zero partially-open solid-adjacent faces and reintroduce divergence
+    // (an inconsistency between masking and the open-weighted operator).
+    (void)solid;
+    s.set_cutcell_pressure_operator(sdfx, /*galerkin=*/true);  // real cut-cell operator, Galerkin coarse
+    if (pcg) s.set_pressure_pcg(true, budget, 1e-10);
+    dv0 = s.max_open_divergence();                 // cut-cell flux divergence (what is projected)
+    s.step(/*n_diff=*/0, /*n_pois=*/budget);       // budget = V-cycles (no PCG) or CG iteration cap
+    dv1 = s.max_open_divergence();
+    rms1 = s.rms_open_divergence();
+  };
+
+  double vc_dv0, vc_dv1, vc_rms, pc_dv0, pc_dv1, pc_rms;
+  run_cutcell(/*pcg=*/false, /*budget=*/12, vc_dv0, vc_dv1, vc_rms);   // Galerkin V-cycles alone
+  run_cutcell(/*pcg=*/true, /*budget=*/80, pc_dv0, pc_dv1, pc_rms);    // CG + Galerkin V-cycle
 
   int fail = 0;
   if (rank == 0) {
     bool coeff_ok = (gmaxd <= 1e-12 && !std::isnan(gmaxd));
-    // cut-cell flux divergence substantially reduced (full convergence is limited by the
-    // constant-coefficient coarse operator, as in the serial MG; the value is np-invariant -> exact).
-    bool run_ok = std::isfinite(dv1) && dv1 < 0.2 * dv0;
-    fail = (coeff_ok && run_ok) ? 0 : 1;
+    // CG drives the bulk (RMS) flux divergence to ~0; the max-norm floor is a single thin cut cell.
+    bool pc_ok = std::isfinite(pc_rms) && pc_rms < 1e-6 * vc_rms;
+    bool better = pc_rms < 0.01 * vc_rms;
+    fail = (coeff_ok && pc_ok && better) ? 0 : 1;
     printf("np=%d  res=%dx%dx%d  cut-cell operator (sphere SDF, real fluid fraction)\n", size, res.x,
            res.y, res.z);
     printf("  [1] distributed vs serial coefficients: max|d| = %.3e   %s\n", gmaxd,
            coeff_ok ? "OK" : "FAIL");
-    printf("  [2] DistributedStokes cut-cell projection: max|flux div| %.3e -> %.3e   %s\n", dv0, dv1,
-           run_ok ? "OK" : "FAIL");
+    printf("  [2] Galerkin V-cycle projection (12):  rms|flux div| %.3e\n", vc_rms);
+    printf("  [3] CG + Galerkin projection:          rms|flux div| %.3e   (max %.3e)   %.1fx better rms   %s\n",
+           pc_rms, pc_dv1, vc_rms / pc_rms, (pc_ok && better) ? "OK" : "FAIL");
     printf("  %s\n", fail ? "FAIL" : "OK");
   }
   MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);

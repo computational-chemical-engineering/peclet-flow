@@ -45,6 +45,18 @@ __global__ void subtract_k(double* f, size_t n, double m) {
   if (i < n) f[i] -= m;
 }
 
+// dot product over INNER cells: sum a[i]*b[i]
+__global__ void dot_inner_k(const double* __restrict__ a, const double* __restrict__ b, int3 ext,
+                            int ghost, int3 inner, double* dsum) {
+  int ix = blockIdx.x * blockDim.x + threadIdx.x;
+  int iy = blockIdx.y * blockDim.y + threadIdx.y;
+  int iz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (ix >= inner.x || iy >= inner.y || iz >= inner.z) return;
+  size_t idx = (size_t)(ix + ghost) + (size_t)(iy + ghost) * ext.x +
+               (size_t)(iz + ghost) * ext.x * ext.y;
+  atomicAdd(dsum, a[idx] * b[idx]);
+}
+
 }  // namespace rdetail
 
 // Reduce a double cell-field (extended-block layout) over INNER cells across ALL ranks:
@@ -82,6 +94,26 @@ inline double mac_max_abs(const double* d_field, const MacGridHalo& h, MPI_Comm 
   double s, m;
   mac_reduce(d_field, h, comm, &s, &m);
   return m;
+}
+
+// Global inner-product <a, b> over owned cells (for Krylov methods).
+inline double mac_dot(const double* a, const double* b, const MacGridHalo& h, MPI_Comm comm) {
+  double* dsum = nullptr;
+  cudaMalloc(&dsum, sizeof(double));
+  double zero = 0.0;
+  cudaMemcpy(dsum, &zero, sizeof(double), cudaMemcpyHostToDevice);
+  int3 inner = h.inner_res();
+  if (inner.x > 0 && inner.y > 0 && inner.z > 0) {
+    dim3 blk(8, 8, 8);
+    dim3 grd((inner.x + 7) / 8, (inner.y + 7) / 8, (inner.z + 7) / 8);
+    rdetail::dot_inner_k<<<grd, blk>>>(a, b, h.local_ext, h.ghost, inner, dsum);
+  }
+  double lsum = 0.0;
+  cudaMemcpy(&lsum, dsum, sizeof(double), cudaMemcpyDeviceToHost);
+  cudaFree(dsum);
+  double gsum = 0.0;
+  MPI_Allreduce(&lsum, &gsum, 1, MPI_DOUBLE, MPI_SUM, comm);
+  return gsum;
 }
 
 // Subtract the global mean (over the full grid) -- the pure-Neumann pressure null-space removal.

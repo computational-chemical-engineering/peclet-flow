@@ -227,10 +227,94 @@ top of this proven foundation.
   the cut-cell operator is active (plain divergence otherwise); `max_open_divergence()` reports it.
 - `tests/test_cutcell_operator_mpi.cu`: [1] the distributed `A_C..A_T` from a sphere SDF match the serial
   full-grid reference **bit-for-bit (max|d| = 0)** at np=1,2,4 (coefficients are deterministic functions
-  of the SDF — no reduction-order divergence). [2] the `DistributedStokes` cut-cell projection reduces the
-  flux divergence (2.6 → 0.30, **identical across np** → exact). Full convergence of the stiff cut-cell
-  system is limited by the constant-coefficient coarse operator (as in the serial MG — Galerkin
-  coarsening would be the enhancement), not by the distribution.
+  of the SDF — no reduction-order divergence). [2]/[3] the `DistributedStokes` cut-cell projection (solved
+  with Galerkin MG + CG, Step 19) drives the flux divergence to RMS ~3e-11, identical across np.
+
+### Step 19 — Galerkin coarsening + CG for the cut-cell multigrid ✅ verified
+This step replaces the constant-coefficient coarse operators of Steps 15–18 with **operator-dependent
+(Galerkin) coarse operators**, and wraps the V-cycle in **Conjugate Gradients**, so the stiff cut-cell
+pressure system actually converges. It is the largest deviation from the original plan; see
+"Deviations from the original plan" below for the full rationale.
+
+**Galerkin (aggregation) coarse operators** (`mac_multigrid.cuh`):
+- With piecewise-constant **aggregation** transfers — injection prolongation `P` (`mg_prolong_inject_k`,
+  each fine cell takes its 2×2×2 parent's value) and its transpose restriction `R = Pᵀ`
+  (`mg_restrict_sum_k`, sum of the 8 children) — the variational coarse operator `A_c = Pᵀ A_f P` stays a
+  **7-point stencil** whose face transmissibility is the **sum of the 4 fine faces spanning the coarse
+  face** (`mg_agg_T_k`). So the coarse operators are *derived from the fine cut-cell operator* and see the
+  geometry, unlike the re-discretised constant-coefficient operator. Every level is variable; the
+  variable smoother/residual (Step 16) run on all of them. `setFineVariableOperator(..., galerkin=true)`
+  builds the hierarchy: fine transmissibility `T = openness/h²`, then `mg_agg_T_k` down each level, then
+  `mg_build_op_k` per level. Transfers are local (no halo).
+- Limitation (documented, not a bug): **unsmoothed aggregation is a good *preconditioner* but a poor
+  standalone solver** — its V-cycle reduces the residual only ~6× more than the constant-coefficient
+  coarse V-cycle and still stalls (`test_galerkin_mpi`: 12 V-cycles → residual 1.6e-3).
+
+**CG acceleration** (`solve_pcg`): the symmetric (forward pre-smooth + reverse post-smooth, `Rb=Pᵀ`,
+`A_c=PᵀA_fP`) Galerkin V-cycle is an SPD preconditioner; one V-cycle per CG iteration. Needs a
+distributed dot product (`mac_dot`, added to `mac_reductions.cuh`) and a matvec (`mg_apply_var_k`).
+`test_galerkin_mpi` (strongly-variable smooth Poisson, openness 0.02–1, 50× ratio): the const-coeff
+V-cycle stalls at 2e-2, the Galerkin V-cycle at 3e-3, and **CG+Galerkin converges to 2.5e-11 in 28
+iterations** — identical across np=1,2,4 (distribution-exact). Wired into `DistributedStokes` via
+`set_pressure_pcg(on, max_iter, rtol)`.
+
+**Cut-cell projection consistency** (two corrections needed to make the sphere actually converge):
+- The Poisson RHS must be the **open-weighted flux divergence** `div(open·u)` (Step 18), not the plain
+  divergence.
+- **Do not mask the velocity** when using the cut-cell operator. Velocity masking (`set_solid`) zeros
+  partially-open solid-adjacent faces *after* the projection, reintroducing divergence and pinning the
+  residual; the open fractions already encode the geometry. `test_cutcell_operator_mpi`: with the
+  cut-cell operator + CG and **no masking**, the flux divergence converges to RMS 2.8e-11 (max 2e-10),
+  ~1.3×10⁶ better than the Galerkin V-cycle alone, identical across np=1,2,4.
+
+## Deviations from the original plan
+
+The original plan (the suite-level multigrid design and Steps 15–18 here) specified a **geometric
+multigrid**: a constant-coefficient periodic Laplacian on every coarse level, with trilinear
+prolongation and full-weighting (1/8-average) restriction. That is what Steps 15–17 built and validated
+to machine precision against a serial reference, and it is still the default path (`set_pressure_multigrid`,
+`setFineVariableOperator(..., galerkin=false)`). The constant-coefficient coarse operator is a fine model
+for the all-fluid Poisson but a poor one for the cut-cell operator, so Step 19 deviates. The deviations,
+and why each was necessary:
+
+1. **Coarse operator: constant-coefficient → Galerkin (operator-dependent).** A re-discretised
+   constant-coefficient coarse grid does not see the solid, so the multigrid could not converge the
+   stiff cut-cell system (Step 18 stalled at a ~8× reduction). Step 19 builds variational coarse
+   operators `A_c = Pᵀ A_f P` instead, so the coarse grids inherit the geometry. *Sub-deviation:* to keep
+   the coarse operator a cheap 7-point stencil I used **aggregation** (piecewise-constant) transfers —
+   injection prolongation + summation restriction — rather than the trilinear/full-weighting transfers of
+   the geometric path. (The strictly-Galerkin operator for trilinear transfers is a 27-point stencil,
+   needing a corner-inclusive halo and far more code; aggregation is the pragmatic, still-variational
+   choice.) Both transfer schemes coexist behind the `galerkin_` flag; the geometric path is unchanged.
+
+2. **Standalone V-cycle → CG-preconditioned.** Unsmoothed aggregation is a good *preconditioner* but a
+   poor standalone solver (its V-cycle reduces the residual only ~6× more than the constant-coefficient
+   coarse V-cycle and then stalls). The deviation is to run the symmetric Galerkin V-cycle as the SPD
+   preconditioner inside **Conjugate Gradients** (`solve_pcg`), which converges the system (~1e-11). This
+   added a distributed dot product (`mac_dot`) and a symmetric smoother option (reverse post-smooth);
+   neither affects the existing geometric path (`solve()` uses the original forward-only smoother, so the
+   cell-for-cell tests are unchanged).
+
+3. **Projection RHS: plain divergence → open-weighted flux divergence.** The cut-cell operator is
+   `A = -div(open·grad)`, so the consistent projection requires the **flux divergence** `div(open·u)` as
+   its RHS, not the plain divergence (which only matches the constant-coefficient operator). Plain
+   divergence is still used when no cut-cell operator is set.
+
+4. **No-slip handling: velocity masking is incompatible with the cut-cell operator.** The earlier solver
+   imposes no-slip by zeroing the velocity in solid cells (`set_solid`). With the cut-cell operator this
+   is *inconsistent*: masking zeros partially-open solid-adjacent faces after the projection and
+   reintroduces divergence, pinning the residual. The cut-cell open fractions already encode the
+   geometry, so the cut-cell path must **not** mask velocities. Masking remains correct for the
+   masking-based (constant-coefficient) path.
+
+Net effect: the constant-coefficient geometric multigrid (Steps 15–17) and the masking-based no-slip
+remain the validated defaults; the cut-cell operator + Galerkin + CG + flux-divergence + no-masking form
+a separate, self-consistent opt-in path. Everything is validated distributed-vs-serial (bit-exact
+coefficients) and by convergence + np-invariance (`test_galerkin_mpi`, `test_cutcell_operator_mpi`).
+
+**Possible further work:** smoothed aggregation or a 27-point geometric-Galerkin operator (better V-cycle
+convergence factor, so CG needs fewer iterations); a proper cut-cell no-slip (open-weighted velocity BC
+instead of masking); and folding the stack into the in-place `cfd_solver.cu`.
 
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
@@ -244,9 +328,9 @@ reductions** (`max_abs`, `remove_mean`), and a **distributed geometric multigrid
 Poisson — both constant-coefficient and **variable-coefficient (SDF / cut-cell) fine operators**, with
 block-local restriction/prolongation and machine-precision match to a serial reference — **wired as an
 opt-in pressure solver in `DistributedStokes::step`** (drives projection divergence to ~1e-9), including
-the **real SDF/fraction cut-cell operator** (bit-exact coefficients vs serial) with its consistent
-flux-divergence projection. **52/52 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is
-untouched.
+the **real SDF/fraction cut-cell operator** (bit-exact coefficients vs serial) solved with
+**Galerkin-coarsened multigrid + CG** (the stiff cut-cell projection converges to ~1e-11). **55/55 MPI
+ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
 
 ## Demo
 
@@ -265,12 +349,13 @@ CI runs only a tiny smoke case (`demo_flow_sphere_smoke`).
   cells straddling block boundaries.
 - **Distributed pressure-solve stack is complete** through `DistributedStokes`: MPI global reductions
   (Step 14), the geometric multigrid V-cycle (Step 15), the variable-coefficient fine operator
-  (Step 16), the V-cycle wired into the projection (Step 17), and the **real SDF/fraction cut-cell
-  operator + consistent flux-divergence projection** (Step 18, bit-exact vs serial). Possible further
-  work: **Galerkin (operator-dependent) coarsening** so the multigrid converges the stiff cut-cell
-  system as fast as the constant-coefficient one; and folding all of this into the in-place
-  `cfd_solver.cu` (extended-block state/scratch) to replace the production single-GPU solver's globals
-  + multigrid with the distributed equivalents.
+  (Step 16), the V-cycle wired into the projection (Step 17), the **real SDF/fraction cut-cell operator
+  + flux-divergence projection** (Step 18), and **Galerkin coarsening + CG** that converges the stiff
+  cut-cell system to ~1e-11 (Step 19). Possible further work (see "Deviations from the original plan"):
+  smoothed aggregation / 27-point geometric-Galerkin operators (fewer CG iterations), a proper
+  open-weighted cut-cell no-slip BC (vs masking), and folding the stack into the in-place
+  `cfd_solver.cu` (extended-block state/scratch) to replace the production single-GPU solver's globals +
+  multigrid with the distributed equivalents.
 - **Non-periodic BCs & load balance**: physical boundaries as today; ORB balances cell counts, IBM
   load imbalance may warrant weighting later.
 
