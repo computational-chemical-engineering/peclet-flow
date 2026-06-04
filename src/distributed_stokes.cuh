@@ -20,6 +20,7 @@
 #include "cfd_solver.cuh"  // get_idx (unused at runtime here; kept for convention parity)
 #include "mac_cutcell.cuh"    // cut-cell face openness from an SDF
 #include "mac_halo.cuh"
+#include "mac_ibm.cuh"        // Robust-Scaled velocity IBM (cut-cell no-slip)
 #include "mac_multigrid.cuh"  // DistributedPoissonMG (opt-in multigrid pressure solve)
 #include "staggered_advection.cuh"
 
