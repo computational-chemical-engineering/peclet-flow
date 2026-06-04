@@ -267,6 +267,37 @@ iterations** — identical across np=1,2,4 (distribution-exact). Wired into `Dis
   cut-cell operator + CG and **no masking**, the flux divergence converges to RMS 2.8e-11 (max 2e-10),
   ~1.3×10⁶ better than the Galerkin V-cycle alone, identical across np=1,2,4.
 
+### Step 20 — Robust-Scaled velocity IBM ported into the distributed solver ✅ verified
+This closes the last capability gap between `DistributedStokes` and the production `cfd_solver.cu`: the
+**Robust-Scaled cut-cell IBM for the velocity (momentum) solve** — accurate no-slip at SDF walls,
+replacing the crude velocity masking. (See the strategy note: rather than retrofit MPI into the
+production kernels, the production physics is ported onto the already-distributed solver.)
+
+- `src/mac_ibm.cuh`: ports the production velocity IBM to a MacGridHalo extended block. Per cut cell the
+  SDF geometry gives polynomial factors (`D_rescale`, K/M/X/Nbc) — computed by `ibm_geometry_ext_k`
+  using clamped extended-block SDF sampling (`cc_sample_ext`, no wrap). These bake into the velocity
+  diffusion stencil + an inhomogeneous Dirichlet term via `ibm_modify_stencil_k`, a **verbatim reuse**
+  of the production modify logic, which is *indexing-agnostic* (edits only each cut cell's own row → no
+  neighbour coupling → distributes trivially). The IBM math is factored into `ibm_fill_entry`, shared by
+  the extended build and a serial reference. Plus a backward-Euler stencil builder, a stencil RB-GS
+  sweep, and a per-component solid mask, all on the extended block.
+- `DistributedStokes::set_ibm_solid(sdf_ext, u_bc)` builds the per-component (u/v/w) IBM geometry once
+  and bakes the static modified stencil + inhom; `step()`'s diffusion then solves the IBM-modified
+  stencil (`A_ibm·u = b − inhom`) with halo-exchanged RB-GS, and masks the decoupled solid. No velocity
+  masking of the fluid — the IBM eliminates the solid ghost couplings.
+- `tests/test_ibm_stencil_mpi.cu`: the distributed IBM-modified u-stencil (`A_C..A_T`) + inhom from a
+  sphere SDF match a serial full-grid reference **bit-for-bit (max|d| = 0)** at np=1,2,4 (3986 cut
+  cells; deterministic in the SDF, incl. cut cells across block boundaries).
+- `tests/test_ibm_poiseuille_mpi.cu`: plane Poiseuille through an **SDF-defined channel** (walls at
+  non-grid positions → cut cells) reproduces the analytic parabola to **1.3 %** with no-slip at the
+  walls — **identical across np=1,2,4**. The fluid is correct even though the (masked-for-output) solid
+  is decoupled, which is exactly the IBM working.
+
+`DistributedStokes` is now feature-comparable to the production solver for the cut-cell cases
+(advection + Robust-Scaled velocity IBM + cut-cell pressure with Galerkin/CG). What remains toward
+*replacing* `pnm_backend`: the Picard/Newton outer-iteration structure and velocity multigrid (perf, not
+capability), a `pnm_backend`-compatible Python API, and reproducing its verification cases at np=1.
+
 ## Deviations from the original plan
 
 The original plan (the suite-level multigrid design and Steps 15–18 here) specified a **geometric
@@ -329,8 +360,9 @@ Poisson — both constant-coefficient and **variable-coefficient (SDF / cut-cell
 block-local restriction/prolongation and machine-precision match to a serial reference — **wired as an
 opt-in pressure solver in `DistributedStokes::step`** (drives projection divergence to ~1e-9), including
 the **real SDF/fraction cut-cell operator** (bit-exact coefficients vs serial) solved with
-**Galerkin-coarsened multigrid + CG** (the stiff cut-cell projection converges to ~1e-11). **55/55 MPI
-ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
+**Galerkin-coarsened multigrid + CG** (the stiff cut-cell projection converges to ~1e-11), plus the
+**Robust-Scaled cut-cell velocity IBM** (bit-exact stencil vs serial; analytic Poiseuille through SDF
+walls to ~1%). **61/61 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
 
 ## Demo
 

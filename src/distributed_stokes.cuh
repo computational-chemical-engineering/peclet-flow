@@ -137,6 +137,14 @@ class DistributedStokes {
   ~DistributedStokes() {
     for (double* p : {u_, v_, w_, phi_, div_, solid_, b_[0], b_[1], b_[2], ox_, oy_, oz_})
       if (p) cudaFree(p);
+    for (int c = 0; c < 3; ++c) {
+      if (idmap_[c]) cudaFree(idmap_[c]);
+      if (inhom_[c]) cudaFree(inhom_[c]);
+      if (solidmask_[c]) cudaFree(solidmask_[c]);
+      for (int k = 0; k < 7; ++k)
+        if (As_[c][k]) cudaFree(As_[c][k]);
+      if (ibmdata_[c].cell_index) cfdmpi::ibm_free(ibmdata_[c]);
+    }
     if (mg_built_) mg_.free();
   }
   DistributedStokes() = default;
@@ -200,6 +208,61 @@ class DistributedStokes {
     pcg_ = on;
     pcg_maxit_ = max_iter;
     pcg_rtol_ = rtol;
+  }
+
+  // Robust-Scaled cut-cell IBM no-slip for the momentum solve, from an SDF (extended-block layout, all
+  // cells incl. ghosts, negative inside solid). Builds the per-component (u/v/w) IBM geometry and bakes
+  // it into a static backward-Euler diffusion stencil + inhomogeneous Dirichlet term (u_bc = wall
+  // velocity, default no-slip). The diffusion sweeps then use the modified stencil instead of the
+  // constant-coefficient operator + velocity masking -- the accurate cut-cell boundary treatment.
+  // Static dt/nu (the stencil bakes beta = nu*dt). Call after init().
+  void set_ibm_solid(const std::vector<double>& sdf_ext, float3 u_bc = make_float3(0, 0, 0)) {
+    using namespace cfdmpi::ibmdetail;
+    double beta = nu_ * dt_;
+    int g = mac_.ghost;
+    int3 inner = mac_.inner_res();
+    dim3 blk(8, 8, 8);
+    dim3 gI((inner.x + 7) / 8, (inner.y + 7) / 8, (inner.z + 7) / 8);
+    dim3 gE((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
+    float3 spacing = make_float3(1, 1, 1);
+    float3 offs[3] = {make_float3(-0.5f, 0, 0), make_float3(0, -0.5f, 0), make_float3(0, 0, -0.5f)};
+    float ubc[3] = {u_bc.x, u_bc.y, u_bc.z};
+
+    double* sdf = nullptr;
+    cudaMalloc(&sdf, n_ * 8);
+    cudaMemcpy(sdf, sdf_ext.data(), n_ * 8, cudaMemcpyHostToDevice);
+    int* counter = nullptr;
+    cudaMalloc(&counter, sizeof(int));
+
+    for (int c = 0; c < 3; ++c) {
+      if (!idmap_[c]) cudaMalloc(&idmap_[c], n_ * sizeof(int));
+      cudaMemset(counter, 0, sizeof(int));
+      ibm_count_ext_k<<<gI, blk>>>(sdf, ext_, g, offs[c], counter);
+      int cnt = 0;
+      cudaMemcpy(&cnt, counter, sizeof(int), cudaMemcpyDeviceToHost);
+      if (ibmdata_[c].cell_index) cfdmpi::ibm_free(ibmdata_[c]);
+      ibmdata_[c] = cfdmpi::ibm_alloc(cnt);
+      cudaMemset(counter, 0, sizeof(int));
+      ibm_geometry_ext_k<0><<<gI, blk>>>(ibmdata_[c], idmap_[c], sdf, ext_, g, spacing, counter,
+                                         offs[c], /*bc=Dirichlet*/ 0);
+      cudaMemcpy(&ibmdata_[c].num_active_cells, counter, sizeof(int), cudaMemcpyDeviceToHost);
+
+      if (!As_[c][0])
+        for (int k = 0; k < 7; ++k) cudaMalloc(&As_[c][k], n_ * 8);
+      if (!inhom_[c]) cudaMalloc(&inhom_[c], n_ * 8);
+      if (!solidmask_[c]) cudaMalloc(&solidmask_[c], n_ * 8);
+      ibm_solid_mask_k<<<gE, blk>>>(solidmask_[c], sdf, ext_, offs[c]);
+      ibm_build_diffusion_k<<<gE, blk>>>(As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4],
+                                         As_[c][5], As_[c][6], ext_, beta);
+      cudaMemset(inhom_[c], 0, n_ * 8);
+      if (ibmdata_[c].num_active_cells > 0)
+        ibm_modify_stencil_k<<<(ibmdata_[c].num_active_cells + 255) / 256, 256>>>(
+            As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4], As_[c][5], As_[c][6], inhom_[c],
+            ibmdata_[c], ubc[c]);
+    }
+    cudaFree(sdf);
+    cudaFree(counter);
+    ibm_enabled_ = true;
   }
 
   // Global max of the cut-cell flux divergence |div(open u)| over owned cells (the quantity the
@@ -309,14 +372,35 @@ class DistributedStokes {
       for (int c = 0; c < 3; ++c) rhs_k<<<grd_, blk_>>>(comp[c], b_[c], dt_ * f[c], ext_, g);
     }
 
-    for (int c = 0; c < 3; ++c) {
-      for (int it = 0; it < n_diff; ++it) {
-        mac_.exchange(comp[c]);
-        diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 0);
-        if (has_solid_) apply_mask(comp[c]);
-        mac_.exchange(comp[c]);
-        diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 1);
-        if (has_solid_) apply_mask(comp[c]);
+    if (ibm_enabled_) {
+      // Robust-Scaled cut-cell IBM: solve the IBM-modified stencil A_ibm comp = b - inhom (the
+      // Dirichlet wall velocity is baked into inhom). No velocity masking -- the IBM eliminates the
+      // solid ghost couplings.
+      int threads = 256, blocks = (int)((n_ + threads - 1) / threads);
+      for (int c = 0; c < 3; ++c)
+        cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], -1.0, inhom_[c],
+                                                         (long)n_);  // b -= inhom
+      for (int c = 0; c < 3; ++c) {
+        for (int it = 0; it < n_diff; ++it) {
+          for (int color = 0; color < 2; ++color) {
+            mac_.exchange(comp[c]);
+            cfdmpi::ibmdetail::ibm_rbgs_stencil_k<<<grd_, blk_>>>(
+                comp[c], b_[c], As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4], As_[c][5],
+                As_[c][6], ext_, mac_.origin_incl_ghost, g, color);
+          }
+        }
+        detail::mask_k<<<grd_, blk_>>>(comp[c], solidmask_[c], ext_);  // zero the decoupled solid
+      }
+    } else {
+      for (int c = 0; c < 3; ++c) {
+        for (int it = 0; it < n_diff; ++it) {
+          mac_.exchange(comp[c]);
+          diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 0);
+          if (has_solid_) apply_mask(comp[c]);
+          mac_.exchange(comp[c]);
+          diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 1);
+          if (has_solid_) apply_mask(comp[c]);
+        }
       }
     }
     // projection (cut-cell operator -> open-weighted flux divergence RHS; else plain divergence)
@@ -378,6 +462,13 @@ class DistributedStokes {
   // cut-cell pressure operator: staggered face openness + the flux-divergence flag
   double *ox_ = nullptr, *oy_ = nullptr, *oz_ = nullptr;
   bool cutcell_ = false;
+  // Robust-Scaled velocity IBM: per-component (u/v/w) modified diffusion stencil + Dirichlet inhom
+  bool ibm_enabled_ = false;
+  IBM_Data ibmdata_[3] = {};
+  int* idmap_[3] = {nullptr, nullptr, nullptr};
+  double* As_[3][7] = {};
+  double* inhom_[3] = {nullptr, nullptr, nullptr};
+  double* solidmask_[3] = {nullptr, nullptr, nullptr};
   // CG-accelerated pressure solve (for the stiff cut-cell operator)
   bool pcg_ = false;
   int pcg_maxit_ = 60;

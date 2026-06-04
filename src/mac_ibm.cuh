@@ -235,6 +235,17 @@ __global__ void ibm_build_diffusion_k(double* A_C, double* A_W, double* A_E, dou
   A_W[i] = -beta; A_E[i] = -beta; A_S[i] = -beta; A_N[i] = -beta; A_B[i] = -beta; A_T[i] = -beta;
 }
 
+// solid mask for a velocity component: 1.0 where the staggered SDF point is inside the solid, else 0.
+__global__ void ibm_solid_mask_k(double* mask, const double* sdf, int3 ext, float3 off) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (lx >= ext.x || ly >= ext.y || lz >= ext.z) return;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
+  double sd = ccdetail::cc_sample_ext(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
+  mask[i] = (sd < 0.0) ? 1.0 : 0.0;
+}
+
 // one Red-Black sweep of the (IBM-modified) stencil: A_C x = b - sum(A_off x_nbr), global parity.
 __global__ void ibm_rbgs_stencil_k(double* x, const double* b, const double* A_C, const double* A_W,
                                    const double* A_E, const double* A_S, const double* A_N,
