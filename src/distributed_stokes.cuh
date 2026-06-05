@@ -124,7 +124,8 @@ class DistributedStokes {
     nu_ = nu;
     dt_ = dt;
     n_ = mac_.num_local_cells();
-    for (double** p : {&u_, &v_, &w_, &phi_, &div_, &solid_, &b_[0], &b_[1], &b_[2]})
+    for (double** p : {&u_, &v_, &w_, &phi_, &div_, &solid_, &b_[0], &b_[1], &b_[2], &u_old_, &v_old_,
+                       &w_old_, &up_, &vp_, &wp_})
       cudaMalloc(p, n_ * sizeof(double));
     cudaMemset(u_, 0, n_ * 8);
     cudaMemset(v_, 0, n_ * 8);
@@ -135,7 +136,8 @@ class DistributedStokes {
     grd_ = dim3((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
   }
   ~DistributedStokes() {
-    for (double* p : {u_, v_, w_, phi_, div_, solid_, b_[0], b_[1], b_[2], ox_, oy_, oz_})
+    for (double* p : {u_, v_, w_, phi_, div_, solid_, b_[0], b_[1], b_[2], ox_, oy_, oz_, u_old_,
+                      v_old_, w_old_, up_, vp_, wp_})
       if (p) cudaFree(p);
     for (int c = 0; c < 3; ++c) {
       if (idmap_[c]) cudaFree(idmap_[c]);
@@ -163,6 +165,15 @@ class DistributedStokes {
   void set_body_force(double fx, double fy, double fz) { fx_ = fx; fy_ = fy; fz_ = fz; }
   // Enable explicit nonlinear advection (full Navier-Stokes instead of Stokes).
   void set_advection(bool on) { advection_ = on; }
+
+  // Picard (defect-correction) outer iterations within each timestep: each iteration re-lags the
+  // advection at the latest velocity and re-projects, converging the nonlinear advection/pressure
+  // coupling that a single fractional step leaves. tol>0 stops early when the max velocity change over
+  // an outer iteration drops below it. iters=1 (default) reproduces the single-pass scheme exactly.
+  void set_outer_iterations(int iters) { outer_iters_ = iters < 1 ? 1 : iters; }
+  void set_outer_tolerance(double tol) { outer_tol_ = tol; }
+  int last_outer_iterations() const { return last_outer_iterations_; }
+  double last_outer_correction() const { return last_outer_correction_; }
 
   // Opt-in: solve the pressure Poisson with the distributed geometric multigrid V-cycle
   // (src/mac_multigrid.cuh) instead of the single-level Red-Black Gauss-Seidel. Both solve the same
@@ -357,20 +368,38 @@ class DistributedStokes {
     using namespace detail;
     double beta = nu_ * dt_, Ac = 1.0 + 6.0 * beta;
     double* comp[3] = {u_, v_, w_};
+    double* old[3] = {u_old_, v_old_, w_old_};
+    double* prev[3] = {up_, vp_, wp_};
     double f[3] = {fx_, fy_, fz_};
     int g = mac_.ghost;
+    int threads = 256, blocks = (int)((n_ + threads - 1) / threads);
 
-    // Build the per-component diffusion RHS. With advection on, all three use the SAME n-level
-    // velocity (u,v,w), so compute every RHS before any component is updated.
-    if (advection_) {
-      mac_.exchange(u_);
-      mac_.exchange(v_);
-      mac_.exchange(w_);
-      for (int c = 0; c < 3; ++c)
-        advect_rhs_k<<<grd_, blk_>>>(c, u_, v_, w_, comp[c], b_[c], dt_, f[c], ext_, g);
-    } else {
-      for (int c = 0; c < 3; ++c) rhs_k<<<grd_, blk_>>>(comp[c], b_[c], dt_ * f[c], ext_, g);
-    }
+    // time-derivative base u^n (fixed for the whole timestep)
+    for (int c = 0; c < 3; ++c) cudaMemcpy(old[c], comp[c], n_ * 8, cudaMemcpyDeviceToDevice);
+
+    int max_outer = outer_iters_;
+    last_outer_iterations_ = 0;
+    for (int outer = 0; outer < max_outer; ++outer) {
+      last_outer_iterations_ = outer + 1;
+      if (outer_tol_ > 0)
+        for (int c = 0; c < 3; ++c) cudaMemcpy(prev[c], comp[c], n_ * 8, cudaMemcpyDeviceToDevice);
+
+      // Per-component diffusion RHS b = u^n + dt*f - dt*advect(u^k): time-derivative from u^n, advection
+      // lagged at the current iterate u^k. (Single-pass outer=0 has u^k == u^n -> identical to before.)
+      if (advection_) {
+        mac_.exchange(u_);
+        mac_.exchange(v_);
+        mac_.exchange(w_);
+        for (int c = 0; c < 3; ++c)
+          advect_rhs_k<<<grd_, blk_>>>(c, u_, v_, w_, comp[c], b_[c], dt_, f[c], ext_, g);
+        // retarget the time base from u^k to u^n:  b += (u^n - u^k)
+        for (int c = 0; c < 3; ++c) {
+          cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], 1.0, old[c], (long)n_);
+          cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], -1.0, comp[c], (long)n_);
+        }
+      } else {
+        for (int c = 0; c < 3; ++c) rhs_k<<<grd_, blk_>>>(old[c], b_[c], dt_ * f[c], ext_, g);
+      }
 
     if (ibm_enabled_) {
       // Robust-Scaled cut-cell IBM: solve the IBM-modified stencil A_ibm comp = b - inhom (the
@@ -433,6 +462,19 @@ class DistributedStokes {
     mac_.exchange(phi_);
     correct_k<<<grd_, blk_>>>(u_, v_, w_, phi_, ext_, g);
     if (has_solid_) { apply_mask(u_); apply_mask(v_); apply_mask(w_); }
+
+      // outer-iteration convergence: max velocity change over this Picard iteration (div_ as scratch)
+      if (outer_tol_ > 0) {
+        double corr = 0.0;
+        for (int c = 0; c < 3; ++c) {
+          cudaMemcpy(div_, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);
+          cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(div_, -1.0, prev[c], (long)n_);
+          corr = fmax(corr, cfdmpi::mac_max_abs(div_, mac_, comm_));
+        }
+        last_outer_correction_ = corr;
+        if (corr < outer_tol_) break;
+      }
+    }  // outer Picard loop
   }
 
  private:
@@ -455,6 +497,13 @@ class DistributedStokes {
   double *u_ = nullptr, *v_ = nullptr, *w_ = nullptr, *phi_ = nullptr, *div_ = nullptr,
          *solid_ = nullptr;
   double* b_[3] = {nullptr, nullptr, nullptr};
+  // Picard outer loop: time-base u^n (old) + per-iteration snapshot (prev) for the convergence test
+  double *u_old_ = nullptr, *v_old_ = nullptr, *w_old_ = nullptr;
+  double *up_ = nullptr, *vp_ = nullptr, *wp_ = nullptr;
+  int outer_iters_ = 1;
+  double outer_tol_ = -1.0;
+  int last_outer_iterations_ = 0;
+  double last_outer_correction_ = 0.0;
   // opt-in multigrid pressure solve (built lazily on first step)
   cfdmpi::DistributedPoissonMG mg_;
   bool mg_enabled_ = false, mg_built_ = false;

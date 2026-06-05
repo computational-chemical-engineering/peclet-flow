@@ -298,6 +298,27 @@ production kernels, the production physics is ported onto the already-distribute
 *replacing* `pnm_backend`: the Picard/Newton outer-iteration structure and velocity multigrid (perf, not
 capability), a `pnm_backend`-compatible Python API, and reproducing its verification cases at np=1.
 
+### Step 21 — Picard outer-iteration loop ✅ verified
+The fractional step (advect → diffuse → project) lags the nonlinear advection at `u^n` and carries the
+projection splitting error; the production solver wraps this in a Picard/defect-correction outer loop.
+Ported into `DistributedStokes::step`:
+- The timestep's time-derivative base `u^n` is saved once; each outer iteration rebuilds the diffusion
+  RHS as `b = u^n + dt·f − dt·advect(u^k)` — advection **re-lagged at the latest iterate** `u^k` (the
+  base is retargeted from `u^k` to `u^n` with two AXPYs after `advect_rhs_k`) — then runs the diffusion
+  solve and projection, and measures the max velocity change over the iteration (`mac_max_abs` of the
+  difference). `set_outer_iterations(n)` / `set_outer_tolerance(tol)` control it; it stops early when the
+  change drops below `tol`. **`iters=1` (default) is byte-identical to the single-pass scheme**, so every
+  prior cell-for-cell test is unchanged (confirmed: `test_navier_stokes_mpi` still matches serial).
+- `tests/test_picard_mpi.cu` (Taylor–Green Navier–Stokes): the outer correction **decreases
+  monotonically** (≈1.4e-6 → 6e-8 across steps) and **early-stops** at a reachable tolerance (min 3
+  iterations/step once settled); the Picard solution **differs from the single-pass** one (it converges
+  the lagged-advection coupling); and the iteration counts + global kinetic energy are **identical across
+  np=1,2,4**.
+
+With this, `DistributedStokes` has the production solver's outer-iteration structure. The remaining gap
+to *replacing* `pnm_backend` is the velocity multigrid (a performance choice — the IBM diffusion here
+uses RB-GS, not MG) and a `pnm_backend`-compatible Python API + reproducing its verification cases.
+
 ## Deviations from the original plan
 
 The original plan (the suite-level multigrid design and Steps 15–18 here) specified a **geometric
@@ -362,7 +383,8 @@ opt-in pressure solver in `DistributedStokes::step`** (drives projection diverge
 the **real SDF/fraction cut-cell operator** (bit-exact coefficients vs serial) solved with
 **Galerkin-coarsened multigrid + CG** (the stiff cut-cell projection converges to ~1e-11), plus the
 **Robust-Scaled cut-cell velocity IBM** (bit-exact stencil vs serial; analytic Poiseuille through SDF
-walls to ~1%). **61/61 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
+walls to ~1%), and a **Picard outer-iteration loop** (converges the lagged-advection/projection
+coupling). **64/64 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
 
 ## Demo
 
