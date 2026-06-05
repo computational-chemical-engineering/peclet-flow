@@ -148,6 +148,7 @@ class DistributedStokes {
       if (ibmdata_[c].cell_index) cfdmpi::ibm_free(ibmdata_[c]);
     }
     if (mg_built_) mg_.free();
+    if (vmg_built_) vmg_.free();
   }
   DistributedStokes() = default;
   DistributedStokes(const DistributedStokes&) = delete;
@@ -219,6 +220,15 @@ class DistributedStokes {
     pcg_ = on;
     pcg_maxit_ = max_iter;
     pcg_rtol_ = rtol;
+  }
+
+  // Solve the IBM velocity diffusion with geometric multigrid (constant-coefficient coarse operators)
+  // instead of plain RB-GS -- far fewer iterations when the diffusion is stiff (large nu*dt). Requires
+  // the IBM operator (set_ibm_solid). n_diff then counts V-cycles.
+  void set_velocity_multigrid(bool on, int n_levels = 3, int v_cycles = 4) {
+    vmg_enabled_ = on;
+    vmg_levels_ = n_levels;
+    vmg_vcycles_ = v_cycles;
   }
 
   // Robust-Scaled cut-cell IBM no-slip for the momentum solve, from an SDF (extended-block layout, all
@@ -405,20 +415,33 @@ class DistributedStokes {
       // Robust-Scaled cut-cell IBM: solve the IBM-modified stencil A_ibm comp = b - inhom (the
       // Dirichlet wall velocity is baked into inhom). No velocity masking -- the IBM eliminates the
       // solid ghost couplings.
-      int threads = 256, blocks = (int)((n_ + threads - 1) / threads);
+      int ibthreads = 256, ibblocks = (int)((n_ + ibthreads - 1) / ibthreads);
       for (int c = 0; c < 3; ++c)
-        cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], -1.0, inhom_[c],
-                                                         (long)n_);  // b -= inhom
-      for (int c = 0; c < 3; ++c) {
-        for (int it = 0; it < n_diff; ++it) {
-          for (int color = 0; color < 2; ++color) {
-            mac_.exchange(comp[c]);
-            cfdmpi::ibmdetail::ibm_rbgs_stencil_k<<<grd_, blk_>>>(
-                comp[c], b_[c], As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4], As_[c][5],
-                As_[c][6], ext_, mac_.origin_incl_ghost, g, color);
-          }
+        cfdmpi::mgdetail::mg_axpy_k<<<ibblocks, ibthreads>>>(b_[c], -1.0, inhom_[c],
+                                                             (long)n_);  // b -= inhom
+      if (vmg_enabled_) {
+        ensure_vmg_built();
+        for (int c = 0; c < 3; ++c) {
+          vmg_.setDiffusionFine(As_[c]);  // fine = this component's IBM stencil (coarse built once)
+          cfdmpi::MGLevel& l0 = vmg_.level(0);
+          cudaMemcpy(l0.rhs, b_[c], n_ * 8, cudaMemcpyDeviceToDevice);
+          cudaMemcpy(l0.x, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);  // initial guess
+          vmg_.solve(vmg_vcycles_, vmg_pre_, vmg_post_, vmg_bottom_);  // (n_diff ignored under vmg)
+          cudaMemcpy(comp[c], l0.x, n_ * 8, cudaMemcpyDeviceToDevice);
+          detail::mask_k<<<grd_, blk_>>>(comp[c], solidmask_[c], ext_);
         }
-        detail::mask_k<<<grd_, blk_>>>(comp[c], solidmask_[c], ext_);  // zero the decoupled solid
+      } else {
+        for (int c = 0; c < 3; ++c) {
+          for (int it = 0; it < n_diff; ++it) {
+            for (int color = 0; color < 2; ++color) {
+              mac_.exchange(comp[c]);
+              cfdmpi::ibmdetail::ibm_rbgs_stencil_k<<<grd_, blk_>>>(
+                  comp[c], b_[c], As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4], As_[c][5],
+                  As_[c][6], ext_, mac_.origin_incl_ghost, g, color);
+            }
+          }
+          detail::mask_k<<<grd_, blk_>>>(comp[c], solidmask_[c], ext_);  // zero the decoupled solid
+        }
       }
     } else {
       for (int c = 0; c < 3; ++c) {
@@ -479,6 +502,12 @@ class DistributedStokes {
 
  private:
   void apply_mask(double* c) { detail::mask_k<<<grd_, blk_>>>(c, solid_, ext_); }
+  void ensure_vmg_built() {
+    if (vmg_built_) return;
+    vmg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, vmg_levels_, comm_, mac_.ghost);
+    vmg_.setDiffusionCoarse(nu_ * dt_, 1.0);  // const-coeff diffusion coarse operators (built once)
+    vmg_built_ = true;
+  }
   void ensure_mg_built() {
     if (mg_built_) return;
     // same ORB decomposition + ghost width (2) as this solver, so MG level-0 blocks share the layout.
@@ -508,6 +537,10 @@ class DistributedStokes {
   cfdmpi::DistributedPoissonMG mg_;
   bool mg_enabled_ = false, mg_built_ = false;
   int mg_levels_ = 4, mg_pre_ = 2, mg_post_ = 2, mg_bottom_ = 12;
+  // opt-in velocity-diffusion multigrid (for the IBM momentum solve)
+  cfdmpi::DistributedPoissonMG vmg_;
+  bool vmg_enabled_ = false, vmg_built_ = false;
+  int vmg_levels_ = 3, vmg_vcycles_ = 4, vmg_pre_ = 2, vmg_post_ = 2, vmg_bottom_ = 10;
   // cut-cell pressure operator: staggered face openness + the flux-divergence flag
   double *ox_ = nullptr, *oy_ = nullptr, *oz_ = nullptr;
   bool cutcell_ = false;

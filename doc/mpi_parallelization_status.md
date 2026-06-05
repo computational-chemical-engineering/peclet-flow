@@ -319,6 +319,32 @@ With this, `DistributedStokes` has the production solver's outer-iteration struc
 to *replacing* `pnm_backend` is the velocity multigrid (a performance choice — the IBM diffusion here
 uses RB-GS, not MG) and a `pnm_backend`-compatible Python API + reproducing its verification cases.
 
+### Step 22 — velocity-diffusion multigrid + sphere-packing profiling ✅ verified
+- **Velocity multigrid:** `DistributedPoissonMG` gains a non-singular operator path for the IBM velocity
+  diffusion `A = I − νΔt∇²`: `setDiffusionCoarse(νΔt, h0)` builds constant-coefficient
+  `I − νΔt∇²` coarse operators (component-independent, built once); `setDiffusionFine(A[7])` installs the
+  per-component IBM-modified fine stencil; a `remove_mean_` flag is **off** (the operator is
+  non-singular, unlike the pure-Neumann pressure). `DistributedStokes::set_velocity_multigrid(on, levels,
+  v_cycles)` solves the IBM momentum equation with geometric V-cycles instead of RB-GS.
+  `tests/test_ibm_poiseuille_mpi.cu` now runs **both**: RB-GS (200 sweeps/step) and velocity MG (8
+  V-cycles/step) reach the **same** analytic parabola (u_max 1.5317 vs 1.5315, ~1.3 % error), np-invariant.
+- **Profiling (`tests/profile_sphere_packing.cu`, 1 GPU):** the cut-cell pressure Poisson for a periodic
+  2×2×2 sphere packing (64³, ~0.80 porosity), smooth RHS, solved to a 1e-6 residual reduction:
+
+  | solver | iterations | wall time | speedup vs RB-GS |
+  |---|---|---|---|
+  | pure RB-GS | 2700 sweeps | 212 ms | 1× |
+  | geometric multigrid | 18 V-cycles | 56 ms | **3.8×** |
+  | Galerkin MG + CG | 15 CG iters | 56 ms | **3.8×** |
+
+  RB-GS needs ~150× more iterations (the classic O(N²)-iteration cost on smooth modes); multigrid is
+  ~3.8× faster in wall time at 64³, and the gap **grows with resolution** (multigrid iteration count is
+  ~O(1) in N, RB-GS is O(N²)). For the smooth flow RHS the const-coefficient and Galerkin multigrids are
+  comparable; the Galerkin/CG advantage is largest for the harder high-frequency / near-singular
+  thin-cut-cell modes (Step 19). *Honest caveat:* a random high-frequency RHS makes pure RB-GS and the
+  const-coefficient V-cycle stall and CG struggle — that regime is what Galerkin coarsening + CG was built
+  for; the realistic smooth flow divergence is the easy case shown here.
+
 ## Deviations from the original plan
 
 The original plan (the suite-level multigrid design and Steps 15–18 here) specified a **geometric
@@ -383,8 +409,9 @@ opt-in pressure solver in `DistributedStokes::step`** (drives projection diverge
 the **real SDF/fraction cut-cell operator** (bit-exact coefficients vs serial) solved with
 **Galerkin-coarsened multigrid + CG** (the stiff cut-cell projection converges to ~1e-11), plus the
 **Robust-Scaled cut-cell velocity IBM** (bit-exact stencil vs serial; analytic Poiseuille through SDF
-walls to ~1%), and a **Picard outer-iteration loop** (converges the lagged-advection/projection
-coupling). **64/64 MPI ctests pass**, np=1,2,4. The production `pnm_backend` build is untouched.
+walls to ~1%), a **Picard outer-iteration loop** (converges the lagged-advection/projection coupling),
+and a **velocity-diffusion multigrid**. **65/65 MPI ctests pass**, np=1,2,4 (+ a 1-GPU profiler:
+multigrid pressure ~3.8× faster than RB-GS at 64³). The production `pnm_backend` build is untouched.
 
 ## Demo
 

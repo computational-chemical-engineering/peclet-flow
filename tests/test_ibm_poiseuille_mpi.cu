@@ -36,60 +36,64 @@ int main(int argc, char** argv) {
   cudaSetDevice(0);
 
   int3 res = make_int3(16, 32, 8);  // channel along y
-  const double nu = 0.1, dt = 50.0, fx = 0.01;  // large dt -> near-steady backward-Euler solve
-  DistributedStokes s;
-  s.init(res, rank, size, nu, dt);
-  s.set_body_force(fx, 0.0, 0.0);
-
-  // SDF channel (all extended cells, from global y); negative inside the solid walls
-  int3 e = s.ext(), og = s.origin_incl_ghost();
-  size_t n = s.num_cells();
-  std::vector<double> sdf(n);
-  for (int lz = 0; lz < e.z; ++lz)
-    for (int ly = 0; ly < e.y; ++ly)
-      for (int lx = 0; lx < e.x; ++lx)
-        sdf[(size_t)lx + (size_t)ly * e.x + (size_t)lz * e.x * e.y] = channel_sdf(ly + og.y);
-  s.set_ibm_solid(sdf, make_float3(0, 0, 0));  // no-slip walls
-
-  // drive to steady state (diffusion only; x-independent flow is divergence-free)
-  for (int it = 0; it < 25; ++it) s.step(/*n_diff=*/200, /*n_pois=*/0);
-
-  std::vector<double> u(n), v(n), w(n);
-  s.download_velocity(u.data(), v.data(), w.data());
-
-  // compare to the analytic parabola at fluid cells; track no-slip at the walls
+  const double nu = 0.1, dt = 50.0, fx = 0.01;  // large dt -> near-steady backward-Euler (stiff diffusion)
   double amp = fx / (2.0 * nu);
-  double max_rel = 0.0, max_wall = 0.0, lcl_umax = 0.0, ana_umax = amp * 0.25 * (kYhi - kYlo) * (kYhi - kYlo);
-  long nfluid = 0;
-  for_inner(s, [&](size_t i, int, int gy, int) {
-    double sd = channel_sdf(gy);
-    double ana = amp * (gy - kYlo) * (kYhi - gy);
-    if (sd > 1.0) {  // interior fluid (away from the cut cells): check the parabola
-      double rel = fabs(u[i] - ana) / (ana_umax + 1e-30);
-      max_rel = fmax(max_rel, rel);
-      lcl_umax = fmax(lcl_umax, u[i]);
-      ++nfluid;
-    }
-    if (sd < -1.0) max_wall = fmax(max_wall, fabs(u[i]));  // deep solid: must stay ~0
-  });
+  double ana_umax = amp * 0.25 * (kYhi - kYlo) * (kYhi - kYlo);
 
-  double g_rel = 0, g_wall = 0, g_umax = 0;
-  long g_nf = 0;
-  MPI_Reduce(&max_rel, &g_rel, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-  MPI_Reduce(&max_wall, &g_wall, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-  MPI_Reduce(&lcl_umax, &g_umax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-  MPI_Reduce(&nfluid, &g_nf, 1, MPI_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+  // run the channel with RB-GS (vmg=false) or velocity multigrid (vmg=true); return parabola error +
+  // solid leak + centreline velocity.
+  auto run = [&](bool vmg, double& g_rel, double& g_wall, double& g_umax) {
+    DistributedStokes s;
+    s.init(res, rank, size, nu, dt);
+    s.set_body_force(fx, 0.0, 0.0);
+    int3 e = s.ext(), og = s.origin_incl_ghost();
+    size_t n = s.num_cells();
+    std::vector<double> sdf(n);
+    for (int lz = 0; lz < e.z; ++lz)
+      for (int ly = 0; ly < e.y; ++ly)
+        for (int lx = 0; lx < e.x; ++lx)
+          sdf[(size_t)lx + (size_t)ly * e.x + (size_t)lz * e.x * e.y] = channel_sdf(ly + og.y);
+    s.set_ibm_solid(sdf, make_float3(0, 0, 0));  // no-slip walls
+    if (vmg) s.set_velocity_multigrid(true, /*levels=*/2, /*v_cycles=*/8);
+
+    int steps = vmg ? 25 : 25, ndiff = vmg ? 0 : 200;  // vmg uses V-cycles (n_diff ignored)
+    for (int it = 0; it < steps; ++it) s.step(/*n_diff=*/ndiff, /*n_pois=*/0);
+
+    std::vector<double> u(n), v(n), w(n);
+    s.download_velocity(u.data(), v.data(), w.data());
+    double max_rel = 0.0, max_wall = 0.0, lcl_umax = 0.0;
+    long nfluid = 0;
+    for_inner(s, [&](size_t i, int, int gy, int) {
+      double sd = channel_sdf(gy);
+      double ana = amp * (gy - kYlo) * (kYhi - gy);
+      if (sd > 1.0) {
+        max_rel = fmax(max_rel, fabs(u[i] - ana) / (ana_umax + 1e-30));
+        lcl_umax = fmax(lcl_umax, u[i]);
+        ++nfluid;
+      }
+      if (sd < -1.0) max_wall = fmax(max_wall, fabs(u[i]));
+    });
+    MPI_Allreduce(&max_rel, &g_rel, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(&max_wall, &g_wall, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(&lcl_umax, &g_umax, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+  };
+
+  double rg_rel, rg_wall, rg_umax, vg_rel, vg_wall, vg_umax;
+  run(/*vmg=*/false, rg_rel, rg_wall, rg_umax);
+  run(/*vmg=*/true, vg_rel, vg_wall, vg_umax);
 
   int fail = 0;
   if (rank == 0) {
-    bool prof_ok = g_rel < 0.03 && !std::isnan(g_rel);     // parabola within 3%
-    bool wall_ok = g_wall < 0.02 * g_umax;                 // velocity ~0 in the solid
-    fail = (prof_ok && wall_ok && g_nf > 0) ? 0 : 1;
-    printf("np=%d  res=%dx%dx%d  IBM Poiseuille (SDF channel y in [%.0f,%.0f])\n", size, res.x, res.y,
-           res.z, kYlo, kYhi);
-    printf("  centreline u: numeric %.4f  analytic %.4f\n", g_umax, ana_umax);
-    printf("  max rel err vs parabola = %.3e   solid leak max = %.3e   %s\n", g_rel, g_wall,
-           fail ? "FAIL" : "OK");
+    bool rb_ok = rg_rel < 0.03 && rg_wall < 0.02 * rg_umax && !std::isnan(rg_rel);
+    bool vmg_ok = vg_rel < 0.03 && vg_wall < 0.02 * vg_umax && !std::isnan(vg_rel);
+    fail = (rb_ok && vmg_ok) ? 0 : 1;
+    printf("np=%d  res=%dx%dx%d  IBM Poiseuille (SDF channel y in [%.0f,%.0f]), analytic u_max %.4f\n",
+           size, res.x, res.y, res.z, kYlo, kYhi, ana_umax);
+    printf("  RB-GS  (200 sweeps/step): u_max %.4f  rel err %.3e  solid leak %.3e   %s\n", rg_umax,
+           rg_rel, rg_wall, rb_ok ? "OK" : "FAIL");
+    printf("  vel-MG (8 V-cycles/step): u_max %.4f  rel err %.3e  solid leak %.3e   %s\n", vg_umax,
+           vg_rel, vg_wall, vmg_ok ? "OK" : "FAIL");
+    printf("  %s\n", fail ? "FAIL" : "OK");
   }
   MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);
   MPI_Finalize();

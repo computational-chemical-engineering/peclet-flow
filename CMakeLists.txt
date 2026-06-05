@@ -58,7 +58,8 @@ if(CFD_BUILD_MPI)
             test_stokes_solid_mpi test_poiseuille_mpi test_distributed_stokes test_advection_mpi
             test_navier_stokes_mpi test_ns_solid_mpi test_gather_vti_mpi test_reductions_mpi
             test_multigrid_mpi test_multigrid_var_mpi test_mg_projection_mpi test_cutcell_operator_mpi
-            test_galerkin_mpi test_ibm_stencil_mpi test_ibm_poiseuille_mpi test_picard_mpi)
+            test_galerkin_mpi test_ibm_stencil_mpi test_ibm_poiseuille_mpi test_picard_mpi
+            profile_sphere_packing)
     add_executable(${t} tests/${t}.cu)
     target_include_directories(${t} PRIVATE src ${TPX_INCLUDE})
     target_link_libraries(${t} PRIVATE CUDA::cudart MPI::MPI_CXX)
@@ -130,6 +131,10 @@ if(CFD_BUILD_MPI)
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
                      ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_picard_mpi> ${MPIEXEC_POSTFLAGS})
   endforeach()
+  # profiler: RB-GS vs multigrid pressure solve on the sphere packing (timing; runs at np=1)
+  add_test(NAME profile_sphere_packing
+           COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1
+                   ${MPIEXEC_PREFLAGS} $<TARGET_FILE:profile_sphere_packing> ${MPIEXEC_POSTFLAGS})
 
   # Runnable demo (writes a ParaView .vti); CI runs only a tiny smoke case.
   add_executable(demo_flow_sphere tests/demo_flow_sphere.cu)

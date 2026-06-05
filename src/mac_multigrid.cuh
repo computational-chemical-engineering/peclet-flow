@@ -68,6 +68,20 @@ __global__ void mg_build_op_k(double* AC, double* AW, double* AE, double* AS, do
   AC[i] = te + tw + tn + ts + tt + tb;
 }
 
+// constant-coefficient diffusion operator A = I - nu_dt * Laplacian over the whole extended block:
+// A_C = 1 + 6*beta, off-diagonals = -beta with beta = nu_dt / h^2. Non-singular (the I term), so no
+// mean removal. Used on the coarse levels of the velocity-diffusion multigrid.
+__global__ void mg_const_diffusion_op_k(double* AC, double* AW, double* AE, double* AS, double* AN,
+                                        double* AB, double* AT, int3 ext, double beta) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (lx >= ext.x || ly >= ext.y || lz >= ext.z) return;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
+  AC[i] = 1.0 + 6.0 * beta;
+  AW[i] = -beta; AE[i] = -beta; AS[i] = -beta; AN[i] = -beta; AB[i] = -beta; AT[i] = -beta;
+}
+
 __global__ void mg_smooth_var_k(double* __restrict__ x, const double* __restrict__ b,
                                 const double* AC, const double* AW, const double* AE,
                                 const double* AS, const double* AN, const double* AB,
@@ -406,6 +420,36 @@ class DistributedPoissonMG {
     }
   }
 
+  // Velocity-diffusion multigrid: constant-coefficient A = I - nu_dt*Laplacian on the COARSE levels (the
+  // bulk diffusion, coarse spacing). Geometric (trilinear) transfers; NO mean removal (non-singular).
+  // Component-independent -> build once; then setDiffusionFine() swaps the fine stencil per component.
+  void setDiffusionCoarse(double nu_dt, double h0) {
+    galerkin_ = false;
+    remove_mean_ = false;
+    dim3 blk(8, 8, 8);
+    for (int L = 1; L < (int)levels_.size(); ++L) {
+      MGLevel& c = *levels_[L];
+      if (!c.AC)
+        for (double** p : {&c.AC, &c.AW, &c.AE, &c.AS, &c.AN, &c.AB, &c.AT}) cudaMalloc(p, c.n * 8);
+      c.variable = true;
+      double hL = h0 * (double)(1 << L), beta = nu_dt / (hL * hL);
+      dim3 gAll((c.ext.x + 7) / 8, (c.ext.y + 7) / 8, (c.ext.z + 7) / 8);
+      mgdetail::mg_const_diffusion_op_k<<<gAll, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, c.ext,
+                                                       beta);
+    }
+  }
+
+  // Install the fine-level 7-point stencil (copied from external A_C..A_T device arrays -- e.g. the
+  // IBM-modified diffusion stencil). fineA = {AC,AW,AE,AS,AN,AB,AT}, in the level-0 layout.
+  void setDiffusionFine(double* const fineA[7]) {
+    MGLevel& f = *levels_[0];
+    if (!f.AC)
+      for (double** p : {&f.AC, &f.AW, &f.AE, &f.AS, &f.AN, &f.AB, &f.AT}) cudaMalloc(p, f.n * 8);
+    f.variable = true;
+    double* fdst[7] = {f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT};
+    for (int k = 0; k < 7; ++k) cudaMemcpy(fdst[k], fineA[k], f.n * 8, cudaMemcpyDeviceToDevice);
+  }
+
   MGLevel& level(int L) { return *levels_[L]; }
   int n_levels() const { return (int)levels_.size(); }
 
@@ -477,7 +521,7 @@ class DistributedPoissonMG {
       }
     }
     cudaMemcpy(l0.x, x, n * 8, cudaMemcpyDeviceToDevice);
-    mac_remove_mean(l0.x, l0.mac, comm_);
+    if (remove_mean_) mac_remove_mean(l0.x, l0.mac, comm_);
     cudaMemcpy(l0.rhs, b, n * 8, cudaMemcpyDeviceToDevice);  // restore RHS (precond used it as scratch)
     for (double* q : {b, x, r, p, z, Ap}) cudaFree(q);
     return it;
@@ -523,7 +567,7 @@ class DistributedPoissonMG {
 
     if (L + 1 == (int)levels_.size()) {  // bottom: smooth + remove null space
       smooth(lv, bottom_);
-      mac_remove_mean(lv.x, lv.mac, comm_);
+      if (remove_mean_) mac_remove_mean(lv.x, lv.mac, comm_);
       return;
     }
 
@@ -554,13 +598,14 @@ class DistributedPoissonMG {
     }
 
     smooth(lv, post_, /*reverse=*/sym);
-    mac_remove_mean(lv.x, lv.mac, comm_);
+    if (remove_mean_) mac_remove_mean(lv.x, lv.mac, comm_);
   }
 
   std::vector<std::unique_ptr<MGLevel>> levels_;
   MPI_Comm comm_ = MPI_COMM_WORLD;
   int pre_ = 2, post_ = 2, bottom_ = 8;
-  bool galerkin_ = false;  // variational (aggregation) coarse operators + injection/sum transfers
+  bool galerkin_ = false;     // variational (aggregation) coarse operators + injection/sum transfers
+  bool remove_mean_ = true;   // false for non-singular operators (e.g. diffusion I - nu*dt*Lap)
 };
 
 }  // namespace cfdmpi
