@@ -378,6 +378,22 @@ With this, the distributed solver has a `pnm_backend`-comparable Python API and 
 production verification cases. It is feature-complete enough to stand in for `pnm_backend` on the
 cut-cell porous-media cases; the production module remains untouched and available.
 
+**Cross-validation against `pnm_backend`** (`scripts/cross_validate_dcfd_vs_pnm.py`): the same physical
+problem is run through both solvers (identical grid units, `ρ=1`, `μ=ν`) to steady state and the
+velocity fields compared. They are independent implementations (production: float, fused-delta Picard;
+distributed: double, backward-Euler + projection + multigrid), so agreement is to discretisation, not
+bit-for-bit.
+- **Poiseuille channel (advection-free): exact** — field L2 = 0.00 %, both at the analytic U_max to
+  0.69 %. At steady state both solve the *same* discrete IBM diffusion equation, so this rigorously
+  confirms the Robust-Scaled IBM + diffusion port.
+- **Flow around a sphere (full 3-D Navier–Stokes): 1.84 %** field L2 — within the expected
+  scheme/precision differences (Koren TVD vs the fused advection, float vs double, different pressure
+  solvers).
+- Convention note (found while building this): `pnm_backend.get_u()` returns a **`(nz,ny,nx)` C-array**
+  (the x-fastest buffer as `u[z,y,x]`), whereas `dcfd` returns a flat x-fastest array. Ravel to the
+  x-fastest buffer before reshaping to `u[x,y,z]`. (The channel hid this — its `u(y)` is symmetric in
+  x↔z; the directional sphere flow exposed it.)
+
 ## Deviations from the original plan
 
 The original plan (the suite-level multigrid design and Steps 15–18 here) specified a **geometric
