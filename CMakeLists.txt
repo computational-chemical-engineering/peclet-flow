@@ -66,6 +66,12 @@ if(CFD_BUILD_MPI)
     set_target_properties(${t} PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
   endforeach()
 
+  # Python module: distributed Navier-Stokes solver (DistributedStokes). -> dcfd.*.so
+  pybind11_add_module(dcfd src/dcfd_bindings.cu)
+  target_include_directories(dcfd PRIVATE src ${TPX_INCLUDE})
+  target_link_libraries(dcfd PRIVATE CUDA::cudart MPI::MPI_CXX)
+  set_target_properties(dcfd PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
+
   foreach(np IN ITEMS 1 2 4)
     add_test(NAME mac_halo_np${np}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}

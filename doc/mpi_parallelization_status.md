@@ -345,6 +345,39 @@ uses RB-GS, not MG) and a `pnm_backend`-compatible Python API + reproducing its 
   const-coefficient V-cycle stall and CG struggle — that regime is what Galerkin coarsening + CG was built
   for; the realistic smooth flow divergence is the easy case shown here.
 
+### Step 23 — Python API + verification cases ✅ verified
+- **`dcfd` Python module** (`src/dcfd_bindings.cu`, built under `-DCFD_BUILD_MPI=ON` → `dcfd.*.so`): a
+  pybind11 wrapper around `DistributedStokes`. Auto-initialises MPI, so it runs as plain `python` (one
+  rank, whole grid on one GPU) or `mpirun -np N python` (multi-rank). Global fields (SDF, velocity) are
+  passed as flat x-fastest numpy arrays; the wrapper scatters them to each rank's extended block
+  (periodic wrap) and gathers results back to the root. Exposes body force, advection, the outer
+  (Picard) loop, the cut-cell pressure operator + PCG, the velocity multigrid, the IBM solid, and
+  velocity get/set.
+- **`scripts/verify_poiseuille_dcfd.py`** (mirrors the production `verify_poiseuille.py`): plane
+  Poiseuille through an SDF channel with IBM no-slip; the centreline velocity matches the analytic
+  parabola and the error converges ~2nd order — **2.8 % → 0.69 % → 0.15 % at N = 16/32/64.**
+- **`scripts/verify_periodic_spheres_dcfd.py`** (mirrors `verify_periodic_spheres.py`): creeping Stokes
+  flow through a periodic 2×2×2 sphere packing (cut-cell pressure + Galerkin/CG, IBM no-slip). The flow
+  is **incompressible** (flux divergence ~1e-11), **no-slip is exact** in the solid (max|u| = 0), and a
+  finite Darcy permeability is recovered that rises as the spheres resolve (full k-convergence needs
+  finer grids — a cut-cell-geometry property, not a distribution one).
+
+Two bugs were found and fixed bringing the API up:
+1. The `py::array_t<double>(ssize_t, ptr)` return constructor silently broadcasts the first element;
+   fixed with an explicit shape vector (`to_numpy`). This had masked itself because the test fields were
+   uniform.
+2. **Robust-Scaled IBM RHS scaling was missing.** The method needs `b'_c = D_rescale·b_c − inhom`, but
+   the port scaled `A_C *= D_rescale` without scaling the RHS, so a thin cut cell (tiny `A_C`, unscaled
+   `b`) produced a huge, exponentially growing velocity (the sphere packing blew up at N=64). Adding the
+   per-cut-cell `D_rescale` RHS scale (`ibm_modify_stencil_k` now outputs it; `step` applies
+   `b *= descale`) fixed the instability **and improved the IBM accuracy** — `test_ibm_poiseuille_mpi`
+   went from ~1.3 % to **0.02 %** error. The projection also now re-imposes no-slip in the solid after
+   `correct_k` (the pressure gradient touches the solid).
+
+With this, the distributed solver has a `pnm_backend`-comparable Python API and reproduces the
+production verification cases. It is feature-complete enough to stand in for `pnm_backend` on the
+cut-cell porous-media cases; the production module remains untouched and available.
+
 ## Deviations from the original plan
 
 The original plan (the suite-level multigrid design and Steps 15–18 here) specified a **geometric
@@ -410,8 +443,10 @@ the **real SDF/fraction cut-cell operator** (bit-exact coefficients vs serial) s
 **Galerkin-coarsened multigrid + CG** (the stiff cut-cell projection converges to ~1e-11), plus the
 **Robust-Scaled cut-cell velocity IBM** (bit-exact stencil vs serial; analytic Poiseuille through SDF
 walls to ~1%), a **Picard outer-iteration loop** (converges the lagged-advection/projection coupling),
-and a **velocity-diffusion multigrid**. **65/65 MPI ctests pass**, np=1,2,4 (+ a 1-GPU profiler:
-multigrid pressure ~3.8× faster than RB-GS at 64³). The production `pnm_backend` build is untouched.
+a **velocity-diffusion multigrid**, and a **`pnm_backend`-comparable Python API (`dcfd`)** that
+reproduces the production verification cases (Poiseuille to 0.15 %; porous sphere-packing Stokes flow).
+**65/65 MPI ctests pass**, np=1,2,4 (+ a 1-GPU profiler: multigrid pressure ~3.8× faster than RB-GS at
+64³). The production `pnm_backend` build is untouched.
 
 ## Demo
 

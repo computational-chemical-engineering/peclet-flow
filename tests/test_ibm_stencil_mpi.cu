@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
   cudaMemcpy(&s_ibm.num_active_cells, cnt, sizeof(int), cudaMemcpyDeviceToHost);
   if (s_ibm.num_active_cells > 0)
     ibm_modify_stencil_k<<<(s_ibm.num_active_cells + 255) / 256, 256>>>(
-        sAC, sAW, sAE, sAS, sAN, sAB, sAT, sIN, s_ibm, u_bc);
+        sAC, sAW, sAE, sAS, sAN, sAB, sAT, sIN, nullptr, s_ibm, u_bc);
   std::vector<std::vector<double>> S(8, std::vector<double>(nf));
   double* sp[8] = {sAC, sAW, sAE, sAS, sAN, sAB, sAT, sIN};
   for (int k = 0; k < 8; ++k) cudaMemcpy(S[k].data(), sp[k], nf * 8, cudaMemcpyDeviceToHost);
@@ -182,7 +182,7 @@ int main(int argc, char** argv) {
   cudaMemcpy(&d_ibm.num_active_cells, cnt, sizeof(int), cudaMemcpyDeviceToHost);
   if (d_ibm.num_active_cells > 0)
     ibm_modify_stencil_k<<<(d_ibm.num_active_cells + 255) / 256, 256>>>(
-        dAC, dAW, dAE, dAS, dAN, dAB, dAT, dIN, d_ibm, u_bc);
+        dAC, dAW, dAE, dAS, dAN, dAB, dAT, dIN, nullptr, d_ibm, u_bc);
   std::vector<std::vector<double>> D(8, std::vector<double>(nl));
   double* dp[8] = {dAC, dAW, dAE, dAS, dAN, dAB, dAT, dIN};
   for (int k = 0; k < 8; ++k) cudaMemcpy(D[k].data(), dp[k], nl * 8, cudaMemcpyDeviceToHost);

@@ -192,13 +192,17 @@ __global__ void ibm_geometry_ext_k(IBM_Data ibm, int* id_map, const double* sdf,
 // Bake the IBM factors into the (double) velocity diffusion stencil + inhomogeneous Dirichlet term.
 // Verbatim port of modify_stencil_ibm_kernel (which is itself indexing-agnostic), retyped for double
 // stencils. a_inhom[c_idx] accumulates the wall-velocity contribution to be subtracted from the RHS.
+// rhs_scale[c] receives D_rescale at each cut cell (caller pre-fills 1.0 elsewhere): the Robust-Scaled
+// RHS is b'_c = D_rescale * b_c - a_inhom, so the RHS at cut cells must be scaled by D_rescale to match
+// the A_C *= D_rescale below -- otherwise a thin cut cell (tiny A_C, unscaled b) gives a huge velocity.
 __global__ void ibm_modify_stencil_k(double* A_C, double* A_W, double* A_E, double* A_S, double* A_N,
-                                     double* A_B, double* A_T, double* a_inhom, IBM_Data ibm,
-                                     float u_bc_val) {
+                                     double* A_B, double* A_T, double* a_inhom, double* rhs_scale,
+                                     IBM_Data ibm, float u_bc_val) {
   int list_idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (list_idx >= ibm.num_active_cells) return;
   int c = ibm.cell_index[list_idx];
   float descale = ibm.D_rescale[list_idx];
+  if (rhs_scale) rhs_scale[c] = descale;
   double orig[6] = {A_E[c], A_W[c], A_N[c], A_S[c], A_T[c], A_B[c]};
   A_C[c] *= descale;
   double mod[6] = {0, 0, 0, 0, 0, 0};
@@ -233,6 +237,15 @@ __global__ void ibm_build_diffusion_k(double* A_C, double* A_W, double* A_E, dou
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
   A_C[i] = 1.0 + 6.0 * beta;
   A_W[i] = -beta; A_E[i] = -beta; A_S[i] = -beta; A_N[i] = -beta; A_B[i] = -beta; A_T[i] = -beta;
+}
+
+__global__ void ibm_fill_k(double* a, double v, long n) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) a[i] = v;
+}
+__global__ void ibm_scale_k(double* a, const double* s, long n) {  // a *= s (elementwise)
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) a[i] *= s[i];
 }
 
 // solid mask for a velocity component: 1.0 where the staggered SDF point is inside the solid, else 0.

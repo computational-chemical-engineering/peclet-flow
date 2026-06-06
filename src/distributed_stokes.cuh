@@ -143,6 +143,7 @@ class DistributedStokes {
       if (idmap_[c]) cudaFree(idmap_[c]);
       if (inhom_[c]) cudaFree(inhom_[c]);
       if (solidmask_[c]) cudaFree(solidmask_[c]);
+      if (descale_[c]) cudaFree(descale_[c]);
       for (int k = 0; k < 7; ++k)
         if (As_[c][k]) cudaFree(As_[c][k]);
       if (ibmdata_[c].cell_index) cfdmpi::ibm_free(ibmdata_[c]);
@@ -272,14 +273,17 @@ class DistributedStokes {
         for (int k = 0; k < 7; ++k) cudaMalloc(&As_[c][k], n_ * 8);
       if (!inhom_[c]) cudaMalloc(&inhom_[c], n_ * 8);
       if (!solidmask_[c]) cudaMalloc(&solidmask_[c], n_ * 8);
+      if (!descale_[c]) cudaMalloc(&descale_[c], n_ * 8);
       ibm_solid_mask_k<<<gE, blk>>>(solidmask_[c], sdf, ext_, offs[c]);
       ibm_build_diffusion_k<<<gE, blk>>>(As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4],
                                          As_[c][5], As_[c][6], ext_, beta);
       cudaMemset(inhom_[c], 0, n_ * 8);
+      int t1 = 256, b1 = (int)((n_ + t1 - 1) / t1);
+      ibm_fill_k<<<b1, t1>>>(descale_[c], 1.0, (long)n_);  // Robust-Scaled RHS scale (1 outside cut cells)
       if (ibmdata_[c].num_active_cells > 0)
         ibm_modify_stencil_k<<<(ibmdata_[c].num_active_cells + 255) / 256, 256>>>(
             As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4], As_[c][5], As_[c][6], inhom_[c],
-            ibmdata_[c], ubc[c]);
+            descale_[c], ibmdata_[c], ubc[c]);
     }
     cudaFree(sdf);
     cudaFree(counter);
@@ -416,9 +420,11 @@ class DistributedStokes {
       // Dirichlet wall velocity is baked into inhom). No velocity masking -- the IBM eliminates the
       // solid ghost couplings.
       int ibthreads = 256, ibblocks = (int)((n_ + ibthreads - 1) / ibthreads);
-      for (int c = 0; c < 3; ++c)
-        cfdmpi::mgdetail::mg_axpy_k<<<ibblocks, ibthreads>>>(b_[c], -1.0, inhom_[c],
-                                                             (long)n_);  // b -= inhom
+      // Robust-Scaled RHS: b'_c = D_rescale * b_c - inhom (scale at cut cells, then the Dirichlet term)
+      for (int c = 0; c < 3; ++c) {
+        cfdmpi::ibmdetail::ibm_scale_k<<<ibblocks, ibthreads>>>(b_[c], descale_[c], (long)n_);
+        cfdmpi::mgdetail::mg_axpy_k<<<ibblocks, ibthreads>>>(b_[c], -1.0, inhom_[c], (long)n_);
+      }
       if (vmg_enabled_) {
         ensure_vmg_built();
         for (int c = 0; c < 3; ++c) {
@@ -485,6 +491,10 @@ class DistributedStokes {
     mac_.exchange(phi_);
     correct_k<<<grd_, blk_>>>(u_, v_, w_, phi_, ext_, g);
     if (has_solid_) { apply_mask(u_); apply_mask(v_); apply_mask(w_); }
+    // the projection's grad(phi) correction touches the solid too; re-impose no-slip there so the
+    // decoupled solid velocity cannot accumulate (the IBM operator keeps the fluid consistent).
+    if (ibm_enabled_)
+      for (int c = 0; c < 3; ++c) detail::mask_k<<<grd_, blk_>>>(comp[c], solidmask_[c], ext_);
 
       // outer-iteration convergence: max velocity change over this Picard iteration (div_ as scratch)
       if (outer_tol_ > 0) {
@@ -551,6 +561,7 @@ class DistributedStokes {
   double* As_[3][7] = {};
   double* inhom_[3] = {nullptr, nullptr, nullptr};
   double* solidmask_[3] = {nullptr, nullptr, nullptr};
+  double* descale_[3] = {nullptr, nullptr, nullptr};  // Robust-Scaled per-cell RHS scale (D_rescale)
   // CG-accelerated pressure solve (for the stiff cut-cell operator)
   bool pcg_ = false;
   int pcg_maxit_ = 60;
