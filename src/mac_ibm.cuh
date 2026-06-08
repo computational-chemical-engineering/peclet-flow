@@ -16,6 +16,15 @@
 #include "mac_cutcell.cuh"              // cc_sample_ext (clamped extended-block SDF sampling)
 
 namespace cfdmpi {
+
+// Mixed precision: the momentum-solve matrix (the velocity diffusion/advection stencil streamed every
+// Red-Black sweep) is stored in single precision, while the iterate, RHS, residual, inhomogeneous
+// Dirichlet term and the Robust-Scaled RHS factor stay double. The stencil only sets the OPERATOR, so
+// float storage perturbs it at ~1e-7 (the matrix-in-float choice); all accumulation that feeds the
+// solution (the diagonal assembly, inhom) is done in double and stored, so the converged velocity keeps
+// double accuracy. Flip to double to recover the original bit-for-bit behaviour.
+using mreal = float;
+
 namespace ibmdetail {
 
 // Decide whether the staggered point (sdf_c) with its 6 axis neighbours (sdf_n) is an IBM cut cell:
@@ -195,48 +204,50 @@ __global__ void ibm_geometry_ext_k(IBM_Data ibm, int* id_map, const double* sdf,
 // rhs_scale[c] receives D_rescale at each cut cell (caller pre-fills 1.0 elsewhere): the Robust-Scaled
 // RHS is b'_c = D_rescale * b_c - a_inhom, so the RHS at cut cells must be scaled by D_rescale to match
 // the A_C *= D_rescale below -- otherwise a thin cut cell (tiny A_C, unscaled b) gives a huge velocity.
-__global__ void ibm_modify_stencil_k(double* A_C, double* A_W, double* A_E, double* A_S, double* A_N,
-                                     double* A_B, double* A_T, double* a_inhom, double* rhs_scale,
+__global__ void ibm_modify_stencil_k(mreal* A_C, mreal* A_W, mreal* A_E, mreal* A_S, mreal* A_N,
+                                     mreal* A_B, mreal* A_T, double* a_inhom, double* rhs_scale,
                                      IBM_Data ibm, float u_bc_val) {
   int list_idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (list_idx >= ibm.num_active_cells) return;
   int c = ibm.cell_index[list_idx];
   float descale = ibm.D_rescale[list_idx];
-  if (rhs_scale) rhs_scale[c] = descale;
+  if (rhs_scale) rhs_scale[c] = descale;  // double: same value scales A_C and the RHS -> ratio cancels
   double orig[6] = {A_E[c], A_W[c], A_N[c], A_S[c], A_T[c], A_B[c]};
-  A_C[c] *= descale;
+  double aC = (double)A_C[c] * (double)descale;  // diagonal assembled in double, stored float
   double mod[6] = {0, 0, 0, 0, 0, 0};
   double inhom = 0.0;
   for (int k = 0; k < 6; ++k) {
     float K = ibm.K_val[list_idx * 6 + k], M = ibm.M_val[list_idx * 6 + k];
     float X = ibm.X_val[list_idx * 6 + k], Nbc = ibm.Nbc_val[list_idx * 6 + k];
     double vnb = orig[k];
-    A_C[c] += vnb * K;
+    aC += vnb * K;
     inhom += (double)Nbc * u_bc_val * vnb;
     int opp = k ^ 1;  // 0<->1, 2<->3, 4<->5
     mod[k] += vnb * ((double)descale * M - 1.0);
     mod[opp] += vnb * X;
   }
-  A_E[c] = orig[0] + mod[0];
-  A_W[c] = orig[1] + mod[1];
-  A_N[c] = orig[2] + mod[2];
-  A_S[c] = orig[3] + mod[3];
-  A_T[c] = orig[4] + mod[4];
-  A_B[c] = orig[5] + mod[5];
+  A_C[c] = (mreal)aC;
+  A_E[c] = (mreal)(orig[0] + mod[0]);
+  A_W[c] = (mreal)(orig[1] + mod[1]);
+  A_N[c] = (mreal)(orig[2] + mod[2]);
+  A_S[c] = (mreal)(orig[3] + mod[3]);
+  A_T[c] = (mreal)(orig[4] + mod[4]);
+  A_B[c] = (mreal)(orig[5] + mod[5]);
   if (a_inhom) a_inhom[c] += inhom;
 }
 
 // build the backward-Euler velocity diffusion stencil over the extended block: A_C = 1 + 6 beta,
 // off-diagonals = -beta (dx=1, beta = theta*dt*nu). RHS b is the explicit term; inhom is subtracted.
-__global__ void ibm_build_diffusion_k(double* A_C, double* A_W, double* A_E, double* A_S, double* A_N,
-                                      double* A_B, double* A_T, int3 ext, double beta) {
+__global__ void ibm_build_diffusion_k(mreal* A_C, mreal* A_W, mreal* A_E, mreal* A_S, mreal* A_N,
+                                      mreal* A_B, mreal* A_T, int3 ext, double beta) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x;
   int ly = blockIdx.y * blockDim.y + threadIdx.y;
   int lz = blockIdx.z * blockDim.z + threadIdx.z;
   if (lx >= ext.x || ly >= ext.y || lz >= ext.z) return;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
-  A_C[i] = 1.0 + 6.0 * beta;
-  A_W[i] = -beta; A_E[i] = -beta; A_S[i] = -beta; A_N[i] = -beta; A_B[i] = -beta; A_T[i] = -beta;
+  A_C[i] = (mreal)(1.0 + 6.0 * beta);
+  mreal nb = (mreal)(-beta);
+  A_W[i] = nb; A_E[i] = nb; A_S[i] = nb; A_N[i] = nb; A_B[i] = nb; A_T[i] = nb;
 }
 
 __global__ void ibm_fill_k(double* a, double v, long n) {
@@ -246,6 +257,12 @@ __global__ void ibm_fill_k(double* a, double v, long n) {
 __global__ void ibm_scale_k(double* a, const double* s, long n) {  // a *= s (elementwise)
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) a[i] *= s[i];
+}
+// cast a float matrix array to double, to stage the mixed-precision stencil for the all-double
+// velocity multigrid (which keeps its operator/iterate in double).
+__global__ void castf2d_k(double* d, const mreal* f, long n) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) d[i] = (double)f[i];
 }
 
 // solid mask for a velocity component: 1.0 where the staggered SDF point is inside the solid, else 0.
@@ -260,9 +277,12 @@ __global__ void ibm_solid_mask_k(double* mask, const double* sdf, int3 ext, floa
 }
 
 // one Red-Black sweep of the (IBM-modified) stencil: A_C x = b - sum(A_off x_nbr), global parity.
-__global__ void ibm_rbgs_stencil_k(double* x, const double* b, const double* A_C, const double* A_W,
-                                   const double* A_E, const double* A_S, const double* A_N,
-                                   const double* A_B, const double* A_T, int3 ext, int3 og, int g,
+// Mixed precision: float matrix coefficients, double iterate x and RHS b. Each product float*double
+// promotes to double and the sum/divide are in double, so the Gauss-Seidel update keeps double accuracy
+// on a float-stored operator.
+__global__ void ibm_rbgs_stencil_k(double* x, const double* b, const mreal* A_C, const mreal* A_W,
+                                   const mreal* A_E, const mreal* A_S, const mreal* A_N,
+                                   const mreal* A_B, const mreal* A_T, int3 ext, int3 og, int g,
                                    int color) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
@@ -273,8 +293,8 @@ __global__ void ibm_rbgs_stencil_k(double* x, const double* b, const double* A_C
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
   double ac = A_C[i];
   if (fabs(ac) < 1e-30) return;
-  double s = A_E[i] * x[i + sx] + A_W[i] * x[i - sx] + A_N[i] * x[i + sy] + A_S[i] * x[i - sy] +
-             A_T[i] * x[i + sz] + A_B[i] * x[i - sz];
+  double s = (double)A_E[i] * x[i + sx] + (double)A_W[i] * x[i - sx] + (double)A_N[i] * x[i + sy] +
+             (double)A_S[i] * x[i - sy] + (double)A_T[i] * x[i + sz] + (double)A_B[i] * x[i - sz];
   x[i] = (b[i] - s) / ac;
 }
 

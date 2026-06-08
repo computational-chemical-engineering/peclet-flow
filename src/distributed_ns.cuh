@@ -1,14 +1,15 @@
-// cfd-gpu — a small reusable distributed incompressible (unsteady Stokes) solver.
+// cfd-gpu — DistributedNS: a reusable distributed incompressible Navier–Stokes solver.
 //
 // Consolidates the building blocks validated in tests/test_*_mpi.cu into one component: a staggered
 // MAC velocity field decomposed into rank-owned blocks (transport-core ORB), advanced each step by
 // per-component implicit diffusion (backward Euler, Red-Black Gauss-Seidel with halo exchange between
-// sweeps) + Chorin projection, with optional body force and SDF-described solids (no-slip by
-// per-cell velocity masking). Periodic. Host-staged GPU halo (see ../transport-core).
+// sweeps) + Chorin projection. Full Navier–Stokes: optional nonlinear Koren TVD advection (explicit or
+// implicit-FOU deferred correction, set_advection / set_implicit_advection), Picard outer iterations,
+// body force, and SDF solids via the Robust-Scaled cut-cell IBM (or simple masking). The pressure solve
+// is single-level RB-GS, geometric/Galerkin multigrid, or CG; cut-cell pressure operator optional.
+// Periodic. Host-staged GPU halo (see ../transport-core). Full status: doc/mpi_parallelization_status.md.
 //
-// Scope: Stokes (no nonlinear advection) — the validated core. Nonlinear advection (Step 3 Koren
-// operator, ghost width 2) and the full Robust-Scaled cut-cell IBM layer on top; see
-// doc/mpi_parallelization_status.md.
+// (Historically named DistributedStokes when it was Stokes-only; now a full NS solver.)
 #pragma once
 
 #include <mpi.h>
@@ -24,7 +25,7 @@
 #include "mac_multigrid.cuh"  // DistributedPoissonMG (opt-in multigrid pressure solve)
 #include "staggered_advection.cuh"
 
-namespace dstokes {
+namespace dns {
 
 namespace detail {
 __device__ inline long L3(int x, int y, int z, int3 e) {
@@ -59,18 +60,22 @@ __global__ void advect_rhs_k(int comp, const double* u, const double* v, const d
 // (I - nu*dt*Lap) + dt*FOU_advection(u^k). The FOU upwind terms add to the diagonal -> diagonally
 // dominant -> stable at high Re. Built per Picard iteration (advecting velocity u,v,w frozen at u^k).
 template <int COMP>
-__global__ void build_adv_stencil_k(double* A_C, double* A_W, double* A_E, double* A_S, double* A_N,
-                                    double* A_B, double* A_T, const double* u, const double* v,
+__global__ void build_adv_stencil_k(cfdmpi::mreal* A_C, cfdmpi::mreal* A_W, cfdmpi::mreal* A_E,
+                                    cfdmpi::mreal* A_S, cfdmpi::mreal* A_N, cfdmpi::mreal* A_B,
+                                    cfdmpi::mreal* A_T, const double* u, const double* v,
                                     const double* w, int3 e, int g, double beta, double dt) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
   long i = L3(x, y, z, e);
+  // assemble in double (the advecting velocity, diffusion and FOU upwind terms), store float.
   double cC = 1.0 + 6.0 * beta, cxm = -beta, cxp = -beta, cym = -beta, cyp = -beta, czm = -beta,
          czp = -beta;
   sadv::fou_operator(COMP, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e}, sadv::LocAcc{w, e}, dt, cC,
                      cxm, cxp, cym, cyp, czm, czp);
-  A_C[i] = cC; A_W[i] = cxm; A_E[i] = cxp; A_S[i] = cym; A_N[i] = cyp; A_B[i] = czm; A_T[i] = czp;
+  A_C[i] = (cfdmpi::mreal)cC; A_W[i] = (cfdmpi::mreal)cxm; A_E[i] = (cfdmpi::mreal)cxp;
+  A_S[i] = (cfdmpi::mreal)cym; A_N[i] = (cfdmpi::mreal)cyp; A_B[i] = (cfdmpi::mreal)czm;
+  A_T[i] = (cfdmpi::mreal)czp;
 }
 // add the explicit FOU term to the RHS: b += dt*FOU(u^k) (so b = u^n + dt*f - dt*(Koren - FOU))
 template <int COMP>
@@ -143,7 +148,7 @@ __global__ void correct_k(double* u, double* v, double* w, const double* phi, in
 }
 }  // namespace detail
 
-class DistributedStokes {
+class DistributedNS {
  public:
   void init(int3 global_res, int rank, int size, double nu, double dt,
             MPI_Comm comm = MPI_COMM_WORLD) {
@@ -164,7 +169,7 @@ class DistributedStokes {
     blk_ = dim3(8, 8, 4);
     grd_ = dim3((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
   }
-  ~DistributedStokes() {
+  ~DistributedNS() {
     for (double* p : {u_, v_, w_, phi_, div_, solid_, b_[0], b_[1], b_[2], ox_, oy_, oz_, u_old_,
                       v_old_, w_old_, up_, vp_, wp_})
       if (p) cudaFree(p);
@@ -178,11 +183,15 @@ class DistributedStokes {
       if (ibmdata_[c].cell_index) cfdmpi::ibm_free(ibmdata_[c]);
     }
     if (mg_built_) mg_.free();
-    if (vmg_built_) vmg_.free();
+    if (vmg_built_) {
+      vmg_.free();
+      for (int k = 0; k < 7; ++k)
+        if (vmg_As64_[k]) cudaFree(vmg_As64_[k]);
+    }
   }
-  DistributedStokes() = default;
-  DistributedStokes(const DistributedStokes&) = delete;
-  DistributedStokes& operator=(const DistributedStokes&) = delete;
+  DistributedNS() = default;
+  DistributedNS(const DistributedNS&) = delete;
+  DistributedNS& operator=(const DistributedNS&) = delete;
 
   const MacGridHalo& halo() const { return mac_; }
   int ghost() const { return mac_.ghost; }
@@ -307,7 +316,7 @@ class DistributedStokes {
       cudaMemcpy(&ibmdata_[c].num_active_cells, counter, sizeof(int), cudaMemcpyDeviceToHost);
 
       if (!As_[c][0])
-        for (int k = 0; k < 7; ++k) cudaMalloc(&As_[c][k], n_ * 8);
+        for (int k = 0; k < 7; ++k) cudaMalloc(&As_[c][k], n_ * sizeof(cfdmpi::mreal));
       if (!inhom_[c]) cudaMalloc(&inhom_[c], n_ * 8);
       if (!solidmask_[c]) cudaMalloc(&solidmask_[c], n_ * 8);
       if (!descale_[c]) cudaMalloc(&descale_[c], n_ * 8);
@@ -456,7 +465,8 @@ class DistributedStokes {
           add_fou_rhs_k<2><<<grd_, blk_>>>(b_[2], u_, v_, w_, w_, ext_, g, dt_);
           float ub[3] = {ubc_ibm_.x, ubc_ibm_.y, ubc_ibm_.z};
           for (int c = 0; c < 3; ++c) {
-            double* A[7] = {As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4], As_[c][5], As_[c][6]};
+            cfdmpi::mreal* A[7] = {As_[c][0], As_[c][1], As_[c][2], As_[c][3],
+                                   As_[c][4], As_[c][5], As_[c][6]};
             if (c == 0)
               build_adv_stencil_k<0><<<grd_, blk_>>>(A[0], A[1], A[2], A[3], A[4], A[5], A[6], u_, v_,
                                                      w_, ext_, g, beta, dt_);
@@ -492,7 +502,10 @@ class DistributedStokes {
       if (vmg_enabled_ && !implicit_fou_) {  // implicit-FOU changes the stencil each iter -> RB-GS
         ensure_vmg_built();
         for (int c = 0; c < 3; ++c) {
-          vmg_.setDiffusionFine(As_[c]);  // fine = this component's IBM stencil (coarse built once)
+          // stage the float momentum stencil into double for the all-double velocity multigrid
+          for (int k = 0; k < 7; ++k)
+            cfdmpi::ibmdetail::castf2d_k<<<blocks, threads>>>(vmg_As64_[k], As_[c][k], (long)n_);
+          vmg_.setDiffusionFine(vmg_As64_);  // fine = this component's IBM stencil (coarse built once)
           cfdmpi::MGLevel& l0 = vmg_.level(0);
           cudaMemcpy(l0.rhs, b_[c], n_ * 8, cudaMemcpyDeviceToDevice);
           cudaMemcpy(l0.x, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);  // initial guess
@@ -580,6 +593,7 @@ class DistributedStokes {
     if (vmg_built_) return;
     vmg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, vmg_levels_, comm_, mac_.ghost);
     vmg_.setDiffusionCoarse(nu_ * dt_, 1.0);  // const-coeff diffusion coarse operators (built once)
+    for (int k = 0; k < 7; ++k) cudaMalloc(&vmg_As64_[k], n_ * sizeof(double));
     vmg_built_ = true;
   }
   void ensure_mg_built() {
@@ -623,7 +637,8 @@ class DistributedStokes {
   bool ibm_enabled_ = false;
   IBM_Data ibmdata_[3] = {};
   int* idmap_[3] = {nullptr, nullptr, nullptr};
-  double* As_[3][7] = {};
+  cfdmpi::mreal* As_[3][7] = {};  // momentum-solve matrix: single precision (see mac_ibm.cuh mreal)
+  double* vmg_As64_[7] = {};      // double staging of As_ for the all-double velocity multigrid
   double* inhom_[3] = {nullptr, nullptr, nullptr};
   double* solidmask_[3] = {nullptr, nullptr, nullptr};
   double* descale_[3] = {nullptr, nullptr, nullptr};  // Robust-Scaled per-cell RHS scale (D_rescale)
@@ -634,4 +649,4 @@ class DistributedStokes {
   double pcg_rtol_ = 1e-8;
 };
 
-}  // namespace dstokes
+}  // namespace dns

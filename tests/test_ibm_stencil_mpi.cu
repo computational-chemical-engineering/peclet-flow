@@ -73,12 +73,14 @@ __global__ void s_ibm_geometry(IBM_Data ibm, int* id_map, const double* sdf, int
   id_map[idx] = list_idx;
   ibm_fill_entry<SCHEME>(ibm, list_idx, idx, sc, sn, spacing, bc_type);
 }
-__global__ void s_build_diffusion(double* AC, double* AW, double* AE, double* AS, double* AN,
-                                  double* AB, double* AT, int n, double beta) {
+__global__ void s_build_diffusion(cfdmpi::mreal* AC, cfdmpi::mreal* AW, cfdmpi::mreal* AE,
+                                  cfdmpi::mreal* AS, cfdmpi::mreal* AN, cfdmpi::mreal* AB,
+                                  cfdmpi::mreal* AT, int n, double beta) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
-  AC[i] = 1.0 + 6.0 * beta;
-  AW[i] = -beta; AE[i] = -beta; AS[i] = -beta; AN[i] = -beta; AB[i] = -beta; AT[i] = -beta;
+  AC[i] = (cfdmpi::mreal)(1.0 + 6.0 * beta);
+  cfdmpi::mreal nb = (cfdmpi::mreal)(-beta);
+  AW[i] = nb; AE[i] = nb; AS[i] = nb; AN[i] = nb; AB[i] = nb; AT[i] = nb;
 }
 
 // allocate the IBM_Data SoA for `n` cut cells
@@ -134,8 +136,11 @@ int main(int argc, char** argv) {
   cudaMalloc(&s_map, nf * sizeof(int));
   cudaMemset(cnt, 0, sizeof(int));
   s_ibm_geometry<0><<<gF, blk>>>(s_ibm, s_map, sdf, res, spacing, cnt, off, 0);
-  double *sAC, *sAW, *sAE, *sAS, *sAN, *sAB, *sAT, *sIN;
-  for (double** p : {&sAC, &sAW, &sAE, &sAS, &sAN, &sAB, &sAT, &sIN}) cudaMalloc(p, nf * 8);
+  cfdmpi::mreal *sAC, *sAW, *sAE, *sAS, *sAN, *sAB, *sAT;
+  double* sIN;
+  for (cfdmpi::mreal** p : {&sAC, &sAW, &sAE, &sAS, &sAN, &sAB, &sAT})
+    cudaMalloc(p, nf * sizeof(cfdmpi::mreal));
+  cudaMalloc(&sIN, nf * 8);
   cudaMemset(sIN, 0, nf * 8);
   s_build_diffusion<<<(unsigned)((nf + 255) / 256), 256>>>(sAC, sAW, sAE, sAS, sAN, sAB, sAT, (int)nf,
                                                            beta);
@@ -144,9 +149,16 @@ int main(int argc, char** argv) {
     ibm_modify_stencil_k<<<(s_ibm.num_active_cells + 255) / 256, 256>>>(
         sAC, sAW, sAE, sAS, sAN, sAB, sAT, sIN, nullptr, s_ibm, u_bc);
   std::vector<std::vector<double>> S(8, std::vector<double>(nf));
-  double* sp[8] = {sAC, sAW, sAE, sAS, sAN, sAB, sAT, sIN};
-  for (int k = 0; k < 8; ++k) cudaMemcpy(S[k].data(), sp[k], nf * 8, cudaMemcpyDeviceToHost);
-  for (double* p : {sdf, sAC, sAW, sAE, sAS, sAN, sAB, sAT, sIN}) cudaFree(p);
+  cfdmpi::mreal* sp[7] = {sAC, sAW, sAE, sAS, sAN, sAB, sAT};
+  std::vector<cfdmpi::mreal> stmp(nf);
+  for (int k = 0; k < 7; ++k) {
+    cudaMemcpy(stmp.data(), sp[k], nf * sizeof(cfdmpi::mreal), cudaMemcpyDeviceToHost);
+    for (size_t ii = 0; ii < nf; ++ii) S[k][ii] = stmp[ii];
+  }
+  cudaMemcpy(S[7].data(), sIN, nf * 8, cudaMemcpyDeviceToHost);
+  cudaFree(sdf);
+  for (cfdmpi::mreal* p : {sAC, sAW, sAE, sAS, sAN, sAB, sAT}) cudaFree(p);
+  cudaFree(sIN);
   cudaFree(s_map); free_ibm(s_ibm);
 
   // ---- distributed: same on the extended block ----
@@ -174,8 +186,12 @@ int main(int argc, char** argv) {
   cudaMalloc(&d_map, nl * sizeof(int));
   cudaMemset(cnt, 0, sizeof(int));
   ibm_geometry_ext_k<0><<<gI, blk>>>(d_ibm, d_map, dsdf, e, g, spacing, cnt, off, 0);
-  double *dAC, *dAW, *dAE, *dAS, *dAN, *dAB, *dAT, *dIN;
-  for (double** p : {&dAC, &dAW, &dAE, &dAS, &dAN, &dAB, &dAT, &dIN}) cudaMalloc(p, nl * 8);
+  // Mixed precision: the stencil A_C..A_T is single precision (cfdmpi::mreal); the inhom term is double.
+  cfdmpi::mreal *dAC, *dAW, *dAE, *dAS, *dAN, *dAB, *dAT;
+  double* dIN;
+  for (cfdmpi::mreal** p : {&dAC, &dAW, &dAE, &dAS, &dAN, &dAB, &dAT})
+    cudaMalloc(p, nl * sizeof(cfdmpi::mreal));
+  cudaMalloc(&dIN, nl * 8);
   cudaMemset(dIN, 0, nl * 8);
   dim3 gE((e.x + 7) / 8, (e.y + 7) / 8, (e.z + 7) / 8);
   ibm_build_diffusion_k<<<gE, blk>>>(dAC, dAW, dAE, dAS, dAN, dAB, dAT, e, beta);
@@ -184,8 +200,13 @@ int main(int argc, char** argv) {
     ibm_modify_stencil_k<<<(d_ibm.num_active_cells + 255) / 256, 256>>>(
         dAC, dAW, dAE, dAS, dAN, dAB, dAT, dIN, nullptr, d_ibm, u_bc);
   std::vector<std::vector<double>> D(8, std::vector<double>(nl));
-  double* dp[8] = {dAC, dAW, dAE, dAS, dAN, dAB, dAT, dIN};
-  for (int k = 0; k < 8; ++k) cudaMemcpy(D[k].data(), dp[k], nl * 8, cudaMemcpyDeviceToHost);
+  cfdmpi::mreal* dp[7] = {dAC, dAW, dAE, dAS, dAN, dAB, dAT};
+  std::vector<cfdmpi::mreal> tmp(nl);
+  for (int k = 0; k < 7; ++k) {
+    cudaMemcpy(tmp.data(), dp[k], nl * sizeof(cfdmpi::mreal), cudaMemcpyDeviceToHost);
+    for (size_t ii = 0; ii < nl; ++ii) D[k][ii] = tmp[ii];
+  }
+  cudaMemcpy(D[7].data(), dIN, nl * 8, cudaMemcpyDeviceToHost);
 
   // compare inner cells cell-for-cell
   double maxd = 0.0;
@@ -199,7 +220,9 @@ int main(int argc, char** argv) {
         for (int k = 0; k < 8; ++k) maxd = fmax(maxd, fabs(D[k][li] - S[k][gi]));
       }
   ncut_local = d_ibm.num_active_cells;
-  for (double* p : {dsdf, dAC, dAW, dAE, dAS, dAN, dAB, dAT, dIN}) cudaFree(p);
+  cudaFree(dsdf);
+  for (cfdmpi::mreal* p : {dAC, dAW, dAE, dAS, dAN, dAB, dAT}) cudaFree(p);
+  cudaFree(dIN);
   cudaFree(d_map); free_ibm(d_ibm); cudaFree(cnt);
 
   double gmaxd = 0.0;
@@ -208,9 +231,11 @@ int main(int argc, char** argv) {
   MPI_Reduce(&ncut_local, &gcut, 1, MPI_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
   int fail = 0;
   if (rank == 0) {
+    // Decomposition invariance: the single-precision stencil + double inhom are assembled by identical
+    // per-cell ops on both paths, so distributed == serial bit-for-bit regardless of the block split.
     fail = (gmaxd > 1e-12 || std::isnan(gmaxd) || gcut == 0) ? 1 : 0;
-    printf("np=%d  res=%dx%dx%d  velocity IBM (u-faces, sphere SDF, Robust-Scaled)\n", size, res.x,
-           res.y, res.z);
+    printf("np=%d  res=%dx%dx%d  velocity IBM (u-faces, sphere SDF, Robust-Scaled, float stencil)\n",
+           size, res.x, res.y, res.z);
     printf("  cut cells (total) = %ld\n", gcut);
     printf("  distributed vs serial IBM-modified stencil + inhom: max|d| = %.3e   %s\n", gmaxd,
            fail ? "FAIL" : "OK");

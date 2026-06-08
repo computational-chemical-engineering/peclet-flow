@@ -107,12 +107,12 @@ top of this proven foundation.
   interior momentum balance `nu*Lap_y(u)+g` is ~5e-9, and the peak velocity matches the analytic
   parabolic profile `g*W^2/(8*nu)` to 0.16%. Mirrors cfd's own `verify_poiseuille.py`.
 
-### Step 9 — reusable `DistributedStokes` solver component ✅ verified
-- `src/distributed_stokes.cuh`: consolidates the validated kernels into a `dstokes::DistributedStokes`
+### Step 9 — reusable `DistributedNS` solver component ✅ verified
+- `src/distributed_ns.cuh`: consolidates the validated kernels into a `dns::DistributedNS`
   class — fields + `MacGridHalo` + a `step(n_diff, n_pois)` doing per-component implicit diffusion +
   Chorin projection, with `set_body_force()` and `set_solid()` (per-cell no-slip mask). A clean,
   reusable API instead of loose test code.
-- `tests/test_distributed_stokes.cu`: drives the class through its public API to reproduce both the
+- `tests/test_distributed_ns.cu`: drives the class through its public API to reproduce both the
   Taylor–Green decay (rel_err ~2e-15) and the Poiseuille profile (peak to 0.16%, residual ~5e-9),
   np=1,2,4.
 
@@ -127,7 +127,7 @@ top of this proven foundation.
 
 ### Step 11 — full distributed Navier–Stokes ✅ verified
 - `src/staggered_advection.cuh`: the advection operator factored into a shared header (single source
-  for the solver and the Step-10 test). `DistributedStokes::set_advection(true)` folds explicit Koren
+  for the solver and the Step-10 test). `DistributedNS::set_advection(true)` folds explicit Koren
   advection into the momentum RHS (`b = u - dt*A + dt*f`, all components from the n-level velocity);
   the class now uses ghost width 2 to cover the advection reach.
 - `tests/test_navier_stokes_mpi.cu`: the distributed solver (advection on) matches an independent
@@ -135,13 +135,13 @@ top of this proven foundation.
   the rigorous distribution check for the full nonlinear solver.
 
 ### Step 12 (capstone) — distributed Navier–Stokes flow around an SDF solid ✅ verified
-- `tests/test_ns_solid_mpi.cu`: the `DistributedStokes` solver with **both** nonlinear advection and
+- `tests/test_ns_solid_mpi.cu`: the `DistributedNS` solver with **both** nonlinear advection and
   an SDF solid (sphere, no-slip by masking), body-force-driven flow past the sphere. Matches an
   independent serial full-grid integration of the identical scheme **cell-for-cell** over 8 steps,
   np=1,2,4 — the complete capability (decomposition + async halo + advection + projection + solids).
 
 ### Step 13 — gather-to-root + VTI output ✅ verified
-- `DistributedStokes::gather_to_root()` assembles the global field from the rank-owned blocks onto
+- `DistributedNS::gather_to_root()` assembles the global field from the rank-owned blocks onto
   rank 0 (block geometry known to every rank from the replicated decomposition).
 - `tests/test_gather_vti_mpi.cu`: gathers the TGV u-field and checks it matches the analytic decayed
   pattern cell-for-cell (maxerr ~1e-15 — a wrong assembly would scramble it), then writes it via
@@ -160,7 +160,7 @@ top of this proven foundation.
   matches **cell-for-cell**: max|.| exact (order-independent), `remove_mean` residual sum ~5e-16
   relative, max|f−mean| exact, sum to ~1e-16 relative. np=1,2,4.
 - These are the prerequisite for the distributed **multigrid** (mean removal between V-cycles for the
-  pure-Neumann pressure) and for any CFL/convergence gate in the in-place solver. `DistributedStokes`
+  pure-Neumann pressure) and for any CFL/convergence gate in the in-place solver. `DistributedNS`
   itself needs no mean removal on its periodic all-fluid Poisson (consistent iteration from φ=0).
 
 ### Step 15 — distributed geometric multigrid (periodic Poisson) ✅ verified
@@ -180,7 +180,7 @@ top of this proven foundation.
   across np**, proving the solver is real, not a no-op). 64³, 4 levels, np=1,2,4.
 - This is the core of the distributed pressure solve. Remaining for the full in-place solver: the
   **variable-coefficient / cut-cell** operator on level 0 (the `A_C..A_T` from `frac_u/v/w + sdf`, vs
-  the constant-coefficient operator here) and wiring the V-cycle into `DistributedStokes::step`.
+  the constant-coefficient operator here) and wiring the V-cycle into `DistributedNS::step`.
 
 ### Step 16 — variable-coefficient fine-level operator for the multigrid ✅ verified
 - `mac_multigrid.cuh` gains a **variable-coefficient** fine level: per-cell 7-point coefficients
@@ -199,10 +199,10 @@ top of this proven foundation.
 - With this the distributed pressure-solve machinery is complete end to end: variable fine operator +
   constant-coefficient coarse hierarchy + block-local transfers + global mean removal. Remaining is
   computing the openness from the real SDF/`frac_u/v/w` on the extended block (cfd's fraction kernel,
-  ghost width 2 for its stencil) and threading the V-cycle into `DistributedStokes::step`.
+  ghost width 2 for its stencil) and threading the V-cycle into `DistributedNS::step`.
 
-### Step 17 — multigrid V-cycle wired into `DistributedStokes::step` ✅ verified
-- `DistributedStokes::set_pressure_multigrid(on, n_levels, pre, post, bottom)` makes the projection's
+### Step 17 — multigrid V-cycle wired into `DistributedNS::step` ✅ verified
+- `DistributedNS::set_pressure_multigrid(on, n_levels, pre, post, bottom)` makes the projection's
   pressure Poisson use the distributed geometric multigrid (Step 15) instead of the single-level RB-GS.
   Both solve the **same** periodic constant-coefficient Laplacian, so the V-cycle is a drop-in that
   converges far faster per unit work; `step()`'s `n_pois` then counts V-cycles. The MG owns its own
@@ -221,13 +221,13 @@ top of this proven foundation.
   from `compute_pressure_operator_kernel`). The fraction math is shared with a serial reference so the
   distributed and serial builds use identical arithmetic. Fed to `setFineVariableOperator` it gives the
   true cut-cell `A_C..A_T` on the MG fine level.
-- `DistributedStokes::set_cutcell_pressure_operator(sdf_ext)` installs it (enables + builds the MG) and
+- `DistributedNS::set_cutcell_pressure_operator(sdf_ext)` installs it (enables + builds the MG) and
   keeps the openness for the **cut-cell flux divergence** `div(open·u)` (`diverg_open_k`) — the quantity
   the cut-cell projection is consistent with. `step()` uses the flux divergence as the Poisson RHS when
   the cut-cell operator is active (plain divergence otherwise); `max_open_divergence()` reports it.
 - `tests/test_cutcell_operator_mpi.cu`: [1] the distributed `A_C..A_T` from a sphere SDF match the serial
   full-grid reference **bit-for-bit (max|d| = 0)** at np=1,2,4 (coefficients are deterministic functions
-  of the SDF — no reduction-order divergence). [2]/[3] the `DistributedStokes` cut-cell projection (solved
+  of the SDF — no reduction-order divergence). [2]/[3] the `DistributedNS` cut-cell projection (solved
   with Galerkin MG + CG, Step 19) drives the flux divergence to RMS ~3e-11, identical across np.
 
 ### Step 19 — Galerkin coarsening + CG for the cut-cell multigrid ✅ verified
@@ -255,7 +255,7 @@ pressure system actually converges. It is the largest deviation from the origina
 distributed dot product (`mac_dot`, added to `mac_reductions.cuh`) and a matvec (`mg_apply_var_k`).
 `test_galerkin_mpi` (strongly-variable smooth Poisson, openness 0.02–1, 50× ratio): the const-coeff
 V-cycle stalls at 2e-2, the Galerkin V-cycle at 3e-3, and **CG+Galerkin converges to 2.5e-11 in 28
-iterations** — identical across np=1,2,4 (distribution-exact). Wired into `DistributedStokes` via
+iterations** — identical across np=1,2,4 (distribution-exact). Wired into `DistributedNS` via
 `set_pressure_pcg(on, max_iter, rtol)`.
 
 **Cut-cell projection consistency** (two corrections needed to make the sphere actually converge):
@@ -268,7 +268,7 @@ iterations** — identical across np=1,2,4 (distribution-exact). Wired into `Dis
   ~1.3×10⁶ better than the Galerkin V-cycle alone, identical across np=1,2,4.
 
 ### Step 20 — Robust-Scaled velocity IBM ported into the distributed solver ✅ verified
-This closes the last capability gap between `DistributedStokes` and the production `cfd_solver.cu`: the
+This closes the last capability gap between `DistributedNS` and the production `cfd_solver.cu`: the
 **Robust-Scaled cut-cell IBM for the velocity (momentum) solve** — accurate no-slip at SDF walls,
 replacing the crude velocity masking. (See the strategy note: rather than retrofit MPI into the
 production kernels, the production physics is ported onto the already-distributed solver.)
@@ -281,7 +281,7 @@ production kernels, the production physics is ported onto the already-distribute
   neighbour coupling → distributes trivially). The IBM math is factored into `ibm_fill_entry`, shared by
   the extended build and a serial reference. Plus a backward-Euler stencil builder, a stencil RB-GS
   sweep, and a per-component solid mask, all on the extended block.
-- `DistributedStokes::set_ibm_solid(sdf_ext, u_bc)` builds the per-component (u/v/w) IBM geometry once
+- `DistributedNS::set_ibm_solid(sdf_ext, u_bc)` builds the per-component (u/v/w) IBM geometry once
   and bakes the static modified stencil + inhom; `step()`'s diffusion then solves the IBM-modified
   stencil (`A_ibm·u = b − inhom`) with halo-exchanged RB-GS, and masks the decoupled solid. No velocity
   masking of the fluid — the IBM eliminates the solid ghost couplings.
@@ -293,7 +293,7 @@ production kernels, the production physics is ported onto the already-distribute
   walls — **identical across np=1,2,4**. The fluid is correct even though the (masked-for-output) solid
   is decoupled, which is exactly the IBM working.
 
-`DistributedStokes` is now feature-comparable to the production solver for the cut-cell cases
+`DistributedNS` is now feature-comparable to the production solver for the cut-cell cases
 (advection + Robust-Scaled velocity IBM + cut-cell pressure with Galerkin/CG). What remains toward
 *replacing* `pnm_backend`: the Picard/Newton outer-iteration structure and velocity multigrid (perf, not
 capability), a `pnm_backend`-compatible Python API, and reproducing its verification cases at np=1.
@@ -301,7 +301,7 @@ capability), a `pnm_backend`-compatible Python API, and reproducing its verifica
 ### Step 21 — Picard outer-iteration loop ✅ verified
 The fractional step (advect → diffuse → project) lags the nonlinear advection at `u^n` and carries the
 projection splitting error; the production solver wraps this in a Picard/defect-correction outer loop.
-Ported into `DistributedStokes::step`:
+Ported into `DistributedNS::step`:
 - The timestep's time-derivative base `u^n` is saved once; each outer iteration rebuilds the diffusion
   RHS as `b = u^n + dt·f − dt·advect(u^k)` — advection **re-lagged at the latest iterate** `u^k` (the
   base is retargeted from `u^k` to `u^n` with two AXPYs after `advect_rhs_k`) — then runs the diffusion
@@ -315,7 +315,7 @@ Ported into `DistributedStokes::step`:
   the lagged-advection coupling); and the iteration counts + global kinetic energy are **identical across
   np=1,2,4**.
 
-With this, `DistributedStokes` has the production solver's outer-iteration structure. The remaining gap
+With this, `DistributedNS` has the production solver's outer-iteration structure. The remaining gap
 to *replacing* `pnm_backend` is the velocity multigrid (a performance choice — the IBM diffusion here
 uses RB-GS, not MG) and a `pnm_backend`-compatible Python API + reproducing its verification cases.
 
@@ -324,7 +324,7 @@ uses RB-GS, not MG) and a `pnm_backend`-compatible Python API + reproducing its 
   diffusion `A = I − νΔt∇²`: `setDiffusionCoarse(νΔt, h0)` builds constant-coefficient
   `I − νΔt∇²` coarse operators (component-independent, built once); `setDiffusionFine(A[7])` installs the
   per-component IBM-modified fine stencil; a `remove_mean_` flag is **off** (the operator is
-  non-singular, unlike the pure-Neumann pressure). `DistributedStokes::set_velocity_multigrid(on, levels,
+  non-singular, unlike the pure-Neumann pressure). `DistributedNS::set_velocity_multigrid(on, levels,
   v_cycles)` solves the IBM momentum equation with geometric V-cycles instead of RB-GS.
   `tests/test_ibm_poiseuille_mpi.cu` now runs **both**: RB-GS (200 sweeps/step) and velocity MG (8
   V-cycles/step) reach the **same** analytic parabola (u_max 1.5317 vs 1.5315, ~1.3 % error), np-invariant.
@@ -347,7 +347,7 @@ uses RB-GS, not MG) and a `pnm_backend`-compatible Python API + reproducing its 
 
 ### Step 23 — Python API + verification cases ✅ verified
 - **`dcfd` Python module** (`src/dcfd_bindings.cu`, built under `-DCFD_BUILD_MPI=ON` → `dcfd.*.so`): a
-  pybind11 wrapper around `DistributedStokes`. Auto-initialises MPI, so it runs as plain `python` (one
+  pybind11 wrapper around `DistributedNS`. Auto-initialises MPI, so it runs as plain `python` (one
   rank, whole grid on one GPU) or `mpirun -np N python` (multi-rank). Global fields (SDF, velocity) are
   passed as flat x-fastest numpy arrays; the wrapper scatters them to each rank's extended block
   (periodic wrap) and gathers results back to the root. Exposes body force, advection, the outer
@@ -467,18 +467,37 @@ coefficients) and by convergence + np-invariance (`test_galerkin_mpi`, `test_cut
 convergence factor, so CG needs fewer iterations); a proper cut-cell no-slip (open-weighted velocity BC
 instead of masking); and folding the stack into the in-place `cfd_solver.cu`.
 
+### Step 25 — mixed-precision momentum-solve matrix ✅ verified
+- Mirrors the production solver's "state double / matrix float" policy (`cfd_solver.cuh`): the velocity
+  diffusion/advection stencil `As_[3][7]` (streamed every Red-Black sweep / V-cycle) is stored in single
+  precision (`cfdmpi::mreal`, `mac_ibm.cuh`), while the iterate, RHS, residual, the inhomogeneous
+  Dirichlet term `inhom_` and the Robust-Scaled RHS factor `descale_` stay **double**. The stencil only
+  sets the *operator*, so float storage perturbs it at ~1e-7; every accumulation that feeds the solution
+  (the cut-cell diagonal assembly, `inhom`) is done in double and stored, and each Gauss-Seidel product
+  `float·double` promotes to double — so the converged velocity keeps double accuracy on a float matrix.
+- **IBM geometry factors** (`IBM_Data` K/M/X/Nbc/R/D_rescale) were already float and stay float: they
+  define the operator, and `D_rescale` scales a cut cell's `A_C` *and* its RHS by the same value, so its
+  rounding cancels in the solution ratio — float there does not degrade accuracy.
+- The all-double velocity multigrid ingests the float stencil via a `float→double` cast (`castf2d_k`);
+  the **pressure** multigrid/PCG operator stays double for now (it targets `rtol≈1e-8`, where a float
+  operator would floor the residual near 1e-7 — a separate pass).
+- Validated: `test_ibm_stencil_mpi` distributed == serial **bit-for-bit** (`max|d| = 0`, both paths do
+  identical float ops — decomposition invariance preserved); `test_ibm_poiseuille_mpi` analytic error
+  **2.07e-04** (RB-GS) / 3.51e-04 (vel-MG), unchanged from the double version; `dcfd` Poiseuille grid
+  convergence intact (2.78 % → 0.69 % → 0.15 %). Full suite **65/65, np=1,2,4**.
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
 Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren
 advection–diffusion, RB-GS implicit solves, staggered Chorin projection, a full unsteady-Stokes
 timestep (Taylor–Green-verified to ~2e-15), flow around an SDF solid, channel flow matching the
-analytic Poiseuille profile, a **reusable `DistributedStokes` solver class**, staggered nonlinear
+analytic Poiseuille profile, a **reusable `DistributedNS` solver class**, staggered nonlinear
 momentum advection (cfd's scheme, momentum-conserving), the **full distributed Navier–Stokes** step,
 **Navier–Stokes flow around an SDF solid**, **gather-to-root + VTI output**, **distributed global
 reductions** (`max_abs`, `remove_mean`), and a **distributed geometric multigrid** V-cycle for the
 Poisson — both constant-coefficient and **variable-coefficient (SDF / cut-cell) fine operators**, with
 block-local restriction/prolongation and machine-precision match to a serial reference — **wired as an
-opt-in pressure solver in `DistributedStokes::step`** (drives projection divergence to ~1e-9), including
+opt-in pressure solver in `DistributedNS::step`** (drives projection divergence to ~1e-9), including
 the **real SDF/fraction cut-cell operator** (bit-exact coefficients vs serial) solved with
 **Galerkin-coarsened multigrid + CG** (the stiff cut-cell projection converges to ~1e-11), plus the
 **Robust-Scaled cut-cell velocity IBM** (bit-exact stencil vs serial; analytic Poiseuille through SDF
@@ -503,7 +522,7 @@ CI runs only a tiny smoke case (`demo_flow_sphere_smoke`).
   staggered advecting-velocity interpolation; ghost width 2) → full Navier–Stokes, not just Stokes.
 - **Full Robust-Scaled cut-cell IBM** (D_rescale stencil edits) in place of velocity masking, with cut
   cells straddling block boundaries.
-- **Distributed pressure-solve stack is complete** through `DistributedStokes`: MPI global reductions
+- **Distributed pressure-solve stack is complete** through `DistributedNS`: MPI global reductions
   (Step 14), the geometric multigrid V-cycle (Step 15), the variable-coefficient fine operator
   (Step 16), the V-cycle wired into the projection (Step 17), the **real SDF/fraction cut-cell operator
   + flux-divergence projection** (Step 18), and **Galerkin coarsening + CG** that converges the stiff
