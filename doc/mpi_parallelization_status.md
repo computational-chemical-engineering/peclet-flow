@@ -503,6 +503,12 @@ instead of masking); and folding the stack into the in-place `cfd_solver.cu`.
 - Validated: numbers **identical across np=1,2,4** (float operator preserves rank-invariance); `dcfd`
   periodic sphere-packing Stokes flow incompressible (max flux div 2e-8/1.3e-7), **exact** no-slip,
   sensible permeability. Full suite **65/65, np=1,2,4**.
+- **Speedup** (`tests/bench_mixed_precision.cu`, single RTX 5080, float vs double operator, cut-cell
+  sphere packing): the bandwidth-bound inner kernels — the variable-coefficient RB-GS smoother and the
+  matvec `y=Ax` — run **~1.6–1.8× faster** at production sizes (128³ 1.55×/1.77×, 192³ 1.71×/1.82×, 256³
+  1.62×/1.68×; smoother/matvec). Higher than the naive byte ratio (1.3×) because the operator is the
+  dominant *un-reused* stream while the double iterate `x` is largely cached. At 64³ the kernels are
+  launch-latency-bound, not bandwidth-bound, so precision does not help there (≈0.7–0.8×).
 
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
