@@ -16,13 +16,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 import dcfd  # noqa: E402
 
 
-def channel_sdf_flat(nx, ny, nz, ylo, yhi):
-    """Global SDF, flat x-fastest (idx = x + y*nx + z*nx*ny). Negative inside the solid walls."""
+def channel_sdf(nx, ny, nz, ylo, yhi):
+    """Global SDF as a 3-D array sdf[x,y,z]; negative inside the solid walls."""
     gy = np.arange(ny, dtype=np.float64)
-    sdf_y = np.minimum(gy - ylo, yhi - gy)  # (ny,)
-    a = np.empty((nz, ny, nx), dtype=np.float64)  # C-order ravel -> x fastest
-    a[:, :, :] = sdf_y[None, :, None]
-    return a.ravel(order="C")
+    sdf = np.empty((nx, ny, nz))
+    sdf[:, :, :] = np.minimum(gy - ylo, yhi - gy)[None, :, None]
+    return sdf
 
 
 def run(N, nu=0.1, dt=50.0, fx=0.01, max_steps=400):
@@ -34,23 +33,21 @@ def run(N, nu=0.1, dt=50.0, fx=0.01, max_steps=400):
 
     s = dcfd.Solver(nx, ny, nz, nu, dt)
     s.set_body_force(fx, 0.0, 0.0)
-    sdf = channel_sdf_flat(nx, ny, nz, ylo, yhi)
-    s.set_ibm_solid(sdf)                                          # Robust-Scaled no-slip walls
+    s.set_ibm_solid(channel_sdf(nx, ny, nz, ylo, yhi))           # Robust-Scaled no-slip walls
     s.set_velocity_multigrid(True, levels=3, v_cycles=20)
 
     # advance to steady state (diffusion only; x-independent flow is divergence-free)
     prev = 0.0
     for it in range(max_steps):
         s.step(n_diff=0, n_pois=0)
-        u_now = float(np.asarray(s.get_u()).max()) if s.rank() == 0 else 0.0
+        u_now = float(s.get_u().max()) if s.rank() == 0 else 0.0
         if s.rank() == 0 and it > 5 and abs(u_now - prev) < 1e-7 * (abs(u_now) + 1e-12):
             break
         prev = u_now
 
     if s.rank() != 0:
         return None
-    u = np.asarray(s.get_u())  # global, flat x-fastest
-    U_sim = float(u.max())
+    U_sim = float(s.get_u().max())  # get_u() is a 3-D array u[x,y,z]
     U_ana = (fx / (2.0 * nu)) * (H / 2.0) ** 2
     err = 100.0 * abs(U_sim - U_ana) / U_ana
     return ny, H, U_sim, U_ana, err

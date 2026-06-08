@@ -386,9 +386,12 @@ bit-for-bit.
 - **Poiseuille channel (advection-free): exact** — field L2 = 0.00 %, both at the analytic U_max to
   0.69 %. At steady state both solve the *same* discrete IBM diffusion equation, so this rigorously
   confirms the Robust-Scaled IBM + diffusion port.
-- **Flow around a sphere (full 3-D Navier–Stokes): 1.84 %** field L2 — within the expected
-  scheme/precision differences (Koren TVD vs the fused advection, float vs double, different pressure
-  solvers).
+- **Flow around a sphere (full 3-D Navier–Stokes, Re≈30): 1.84 %** field L2 — within the expected
+  precision/scheme differences. (Both use **Koren TVD** advection; the residual is float vs double, the
+  production's **implicit-FOU deferred-correction** advection vs the distributed solver's **explicit
+  (Picard-lagged)** advection, and the different pressure solvers. The distributed advection being
+  explicit means it is CFL-limited at high Re, where the production's implicit-FOU part is more robust —
+  a known gap, closable by adding the deferred correction.)
 - Convention note (found while building this): `pnm_backend.get_u()` returns a **`(nz,ny,nx)` C-array**
   (the x-fastest buffer as `u[z,y,x]`), whereas `dcfd` returns a flat x-fastest array. Ravel to the
   x-fastest buffer before reshaping to `u[x,y,z]`. (The channel hid this — its `u(y)` is symmetric in

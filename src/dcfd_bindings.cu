@@ -17,11 +17,17 @@
 namespace py = pybind11;
 using dstokes::DistributedStokes;
 
-// copy a host vector into a fresh 1-D numpy array (explicit shape vector to avoid the ambiguous
-// single-integer array_t constructor that mis-broadcasts)
-static py::array_t<double> to_numpy(const std::vector<double>& v) {
-  py::array_t<double> a(std::vector<py::ssize_t>{(py::ssize_t)v.size()});
-  if (!v.empty()) std::memcpy(a.request().ptr, v.data(), v.size() * sizeof(double));
+// Wrap an x-fastest host buffer (flat[x + y*nx + z*nx*ny]) as a 3-D numpy array indexed u[x,y,z], so
+// callers never touch reshape/order. The x-fastest buffer is exactly the F-contiguous layout of shape
+// (nx,ny,nz): strides (8, 8*nx, 8*nx*ny). Empty input -> empty array (non-root ranks).
+static py::array_t<double> to_numpy3d(const std::vector<double>& v, int3 res) {
+  if (v.empty()) return py::array_t<double>(std::vector<py::ssize_t>{0});
+  std::vector<py::ssize_t> shape{res.x, res.y, res.z};
+  std::vector<py::ssize_t> strides{(py::ssize_t)sizeof(double),
+                                   (py::ssize_t)(sizeof(double) * res.x),
+                                   (py::ssize_t)(sizeof(double) * (size_t)res.x * res.y)};
+  py::array_t<double> a(shape, strides);
+  std::memcpy(a.request().ptr, v.data(), v.size() * sizeof(double));
   return a;
 }
 
@@ -66,7 +72,7 @@ class DCfdSolver {
   void set_velocity_multigrid(bool on, int levels, int v_cycles) {
     s_.set_velocity_multigrid(on, levels, v_cycles);
   }
-  using Arr = py::array_t<double, py::array::c_style | py::array::forcecast>;
+  using Arr = py::array_t<double, py::array::forcecast>;  // double, any memory order (strides respected)
   void set_cutcell_pressure_operator(Arr sdf, bool galerkin) {
     s_.set_cutcell_pressure_operator(to_block(sdf), galerkin);
   }
@@ -82,35 +88,34 @@ class DCfdSolver {
   int last_outer_iterations() const { return s_.last_outer_iterations(); }
   double max_open_divergence() { return s_.max_open_divergence(); }
 
-  // gather a velocity component to the root rank as a global flat (x-fastest) numpy array
+  // gather a velocity component to the root rank as a 3-D numpy array u[x,y,z] (empty on other ranks)
   py::array_t<double> get_u() { return gather(s_.u()); }
   py::array_t<double> get_v() { return gather(s_.v()); }
   py::array_t<double> get_w() { return gather(s_.w()); }
 
  private:
-  // global flat (x-fastest) array -> this rank's extended block via periodic wrap
+  // a 3-D global field g[x,y,z] (shape (nx,ny,nz), any memory order) -> this rank's extended block via
+  // periodic wrap. Reads through numpy strides, so the caller never has to flatten or pick an order.
   std::vector<double> to_block(const Arr& g) {
-    auto b = g.request();
-    if ((long)b.size != (long)res_.x * res_.y * res_.z)
-      throw std::runtime_error("dcfd: global field size != nx*ny*nz");
-    const double* gd = static_cast<const double*>(b.ptr);
+    if (g.ndim() != 3)
+      throw std::runtime_error("dcfd: field must be a 3-D (nx,ny,nz) array indexed [x,y,z]");
+    auto r = g.unchecked<3>();
+    if (r.shape(0) != res_.x || r.shape(1) != res_.y || r.shape(2) != res_.z)
+      throw std::runtime_error("dcfd: field shape must be (nx,ny,nz)");
     int3 e = s_.ext(), og = s_.origin_incl_ghost();
-    std::size_t n = s_.num_cells();
-    std::vector<double> out(n);
-    long sx = res_.x, sy = (long)res_.x * res_.y;
+    std::vector<double> out(s_.num_cells());
     auto wrap = [](int v, int m) { return ((v % m) + m) % m; };
     for (int lz = 0; lz < e.z; ++lz)
       for (int ly = 0; ly < e.y; ++ly)
         for (int lx = 0; lx < e.x; ++lx) {
           int gx = wrap(og.x + lx, res_.x), gy = wrap(og.y + ly, res_.y), gz = wrap(og.z + lz, res_.z);
-          out[(std::size_t)lx + (std::size_t)ly * e.x + (std::size_t)lz * e.x * e.y] =
-              gd[gx + gy * sx + gz * sy];
+          out[(std::size_t)lx + (std::size_t)ly * e.x + (std::size_t)lz * e.x * e.y] = r(gx, gy, gz);
         }
     return out;
   }
 
   py::array_t<double> gather(double* comp) {
-    return to_numpy(s_.gather_to_root(comp));  // global on root, empty elsewhere
+    return to_numpy3d(s_.gather_to_root(comp), res_);  // u[x,y,z] on root, empty elsewhere
   }
 
   DistributedStokes s_;

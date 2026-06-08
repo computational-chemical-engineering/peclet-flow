@@ -20,19 +20,19 @@ import dcfd  # noqa: E402
 NU = 0.1
 
 
-def umax_mean(u_in, res):
-    # dcfd.get_u returns a flat x-fastest array; pnm_backend.get_u returns a 3D (nz,ny,nx) C-array whose
-    # buffer is the same x-fastest data. Ravel to the x-fastest buffer, then reshape to u[x,y,z].
-    u = np.asarray(u_in, dtype=np.float64).ravel(order="C").reshape(res, order="F")
-    return float(u.max()), float(u.mean()), u
+# dcfd uses arrays indexed [x,y,z] (shape (nx,ny,nz)); pnm_backend uses [z,y,x] (shape (nz,ny,nx)).
+# These helpers convert between the two so both end up as u[x,y,z].
+def to_pnm(field_xyz):
+    return np.ascontiguousarray(np.transpose(field_xyz, (2, 1, 0)))   # [x,y,z] -> (nz,ny,nx)
 
 
-def run_pnm(res, sdf_flat, fx, advection_irrelevant, steps, dt, pmg=False):
-    nx, ny, nz = res
-    sdf3 = np.asarray(sdf_flat, np.float32).reshape((nx, ny, nz), order="F").transpose(2, 1, 0)
-    sdf3 = np.ascontiguousarray(sdf3)  # shape (nz,ny,nx); buffer is x-fastest, matching sdf_flat
+def from_pnm(field_zyx):
+    return np.transpose(np.asarray(field_zyx, np.float64), (2, 1, 0))  # (nz,ny,nx) -> [x,y,z]
+
+
+def run_pnm(res, sdf_xyz, fx, advection_irrelevant, steps, dt, pmg=False):
     s = pnm_backend.CFDSolver(list(res), [1.0, 1.0, 1.0])
-    s.initialize(sdf3, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    s.initialize(to_pnm(sdf_xyz).astype(np.float32), [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
     s.set_rho(1.0)
     s.set_mu(NU)
     s.set_body_force(pnm_backend.float3(fx, 0, 0))
@@ -45,23 +45,24 @@ def run_pnm(res, sdf_flat, fx, advection_irrelevant, steps, dt, pmg=False):
     for it in range(steps):
         s.step(dt)
         if it % 20 == 0:
-            _, um, _ = umax_mean(s.get_u(), res)
+            um = float(from_pnm(s.get_u()).mean())
             if it > 40 and abs(um - prev) < 1e-6 * (abs(um) + 1e-12):
                 break
             prev = um
-    return umax_mean(s.get_u(), res)
+    u = from_pnm(s.get_u())  # -> u[x,y,z]
+    return float(u.max()), float(u.mean()), u
 
 
-def run_dcfd(res, sdf_flat, fx, advection, steps, dt, cutcell=False):
+def run_dcfd(res, sdf_xyz, fx, advection, steps, dt, cutcell=False):
     nx, ny, nz = res
     s = dcfd.Solver(nx, ny, nz, NU, dt)
     s.set_body_force(fx, 0.0, 0.0)
     s.set_advection(advection)
     if advection:
         s.set_outer_iterations(3)  # Picard coupling for the nonlinear advection
-    s.set_ibm_solid(sdf_flat)
+    s.set_ibm_solid(sdf_xyz)
     if cutcell:
-        s.set_cutcell_pressure_operator(sdf_flat, galerkin=True)
+        s.set_cutcell_pressure_operator(sdf_xyz, galerkin=True)
         s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)
     s.set_velocity_multigrid(True, levels=3, v_cycles=16)
     prev = 0.0
@@ -69,18 +70,19 @@ def run_dcfd(res, sdf_flat, fx, advection, steps, dt, cutcell=False):
         s.step(n_diff=0, n_pois=8)
         if s.rank() != 0:
             return None
-        _, um, _ = umax_mean(s.get_u(), res)
+        um = float(s.get_u().mean())
         if it > 5 and abs(um - prev) < 1e-7 * (abs(um) + 1e-12):
             break
         prev = um
-    return umax_mean(s.get_u(), res)
+    u = s.get_u()  # already u[x,y,z]
+    return float(u.max()), float(u.mean()), u
 
 
-def compare(label, res, sdf_flat, fx, *, analytic=None, advection=False, steps_pnm=800,
+def compare(label, res, sdf, fx, *, analytic=None, advection=False, steps_pnm=800,
             steps_dcfd=400, dt_pnm=20.0, dt_dcfd=50.0, cutcell=False):
     print(f"--- {label}  (res={res[0]}x{res[1]}x{res[2]}, nu={NU}, fx={fx}) ---")
-    umax_p, mean_p, up = run_pnm(res, sdf_flat, fx, advection, steps_pnm, dt_pnm, pmg=cutcell)
-    out = run_dcfd(res, sdf_flat, fx, advection, steps_dcfd, dt_dcfd, cutcell=cutcell)
+    umax_p, mean_p, up = run_pnm(res, sdf, fx, advection, steps_pnm, dt_pnm, pmg=cutcell)
+    out = run_dcfd(res, sdf, fx, advection, steps_dcfd, dt_dcfd, cutcell=cutcell)
     if out is None:
         return None
     umax_d, mean_d, ud = out
@@ -95,21 +97,19 @@ def compare(label, res, sdf_flat, fx, *, analytic=None, advection=False, steps_p
     return l2, cl, umax_p, umax_d
 
 
-def channel_sdf(res, ylo, yhi):
+def channel_sdf(res, ylo, yhi):  # -> sdf[x,y,z]
     nx, ny, nz = res
     gy = np.arange(ny, dtype=np.float64)
-    a = np.empty((nz, ny, nx))
-    a[:, :, :] = np.minimum(gy - ylo, yhi - gy)[None, :, None]
-    return a.ravel(order="C")
+    sdf = np.empty((nx, ny, nz))
+    sdf[:, :, :] = np.minimum(gy - ylo, yhi - gy)[None, :, None]
+    return sdf
 
 
-def sphere_sdf(res, rfrac=0.3):
+def sphere_sdf(res, rfrac=0.3):  # -> sdf[x,y,z], negative inside the sphere
     nx, ny, nz = res
     R = nx * rfrac
     X, Y, Z = np.meshgrid(np.arange(nx), np.arange(ny), np.arange(nz), indexing="ij")
-    cx, cy, cz = nx / 2.0, ny / 2.0, nz / 2.0
-    d = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2 + (Z - cz) ** 2) - R  # negative inside the sphere
-    return np.ascontiguousarray(d.transpose(2, 1, 0)).ravel(order="C")
+    return np.sqrt((X - nx / 2.0) ** 2 + (Y - ny / 2.0) ** 2 + (Z - nz / 2.0) ** 2) - R
 
 
 def main():
@@ -123,8 +123,9 @@ def main():
                  analytic=(0.01 / (2 * NU)) * (H / 2) ** 2)
     results.append(("channel", r1))
     # (2) flow around a sphere: full 3D Navier-Stokes + cut-cell IBM + pressure coupling, both with
-    # advection at a moderate steady Reynolds number. The two advection discretisations differ (Koren
-    # TVD vs the production fused scheme), so agreement is to ~few % here, not exact.
+    # nonlinear advection at a moderate steady Reynolds number (~30). Both use Koren TVD advection; the
+    # residual difference is float vs double, the production's implicit-FOU deferred correction vs the
+    # distributed solver's explicit (Picard-lagged) advection, and the different pressure solvers.
     r2 = compare("flow around a sphere (NS)", (32, 32, 32), sphere_sdf((32, 32, 32)), 2e-4,
                  advection=True, cutcell=True, steps_pnm=800, steps_dcfd=400, dt_pnm=5.0, dt_dcfd=10.0)
     results.append(("sphere", r2))

@@ -18,13 +18,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 import dcfd  # noqa: E402
 
 
-def packing_sdf_flat(N, radius_frac=0.18):
-    """2x2x2 sphere packing; global SDF flat x-fastest, negative inside the spheres (min-image)."""
+def packing_sdf(N, radius_frac=0.18):
+    """2x2x2 sphere packing as a 3-D array sdf[x,y,z]; negative inside the spheres (min-image)."""
     R = N * radius_frac
     gx = np.arange(N)
-    # centres of the 2x2x2 lattice
-    cs = [(cx + 0.5) * N / 2.0 for cx in (0, 1)]
-    X, Y, Z = np.meshgrid(gx, gx, gx, indexing="ij")  # (N,N,N), index [x,y,z]
+    cs = [(cx + 0.5) * N / 2.0 for cx in (0, 1)]  # centres of the 2x2x2 lattice
+    X, Y, Z = np.meshgrid(gx, gx, gx, indexing="ij")  # (N,N,N) indexed [x,y,z]
     best = np.full((N, N, N), 1e30)
     for sx in cs:
         for sy in cs:
@@ -33,12 +32,11 @@ def packing_sdf_flat(N, radius_frac=0.18):
                 dy = Y - sy; dy -= N * np.round(dy / N)
                 dz = Z - sz; dz -= N * np.round(dz / N)
                 best = np.minimum(best, np.sqrt(dx * dx + dy * dy + dz * dz) - R)
-    # X is index [x,y,z]; flat x-fastest = transpose to [z,y,x] then C-ravel
-    return np.ascontiguousarray(np.transpose(best, (2, 1, 0))).ravel(order="C"), R
+    return best, R
 
 
 def run(N, nu=0.1, dt=60.0, fx=1e-3, max_steps=200):
-    sdf, R = packing_sdf_flat(N)
+    sdf, R = packing_sdf(N)  # 3-D sdf[x,y,z]
     porosity = 1.0 - 8.0 * (4.0 / 3.0 * np.pi * R**3) / N**3
 
     s = dcfd.Solver(N, N, N, nu, dt)
@@ -55,14 +53,14 @@ def run(N, nu=0.1, dt=60.0, fx=1e-3, max_steps=200):
         s.step(n_diff=0, n_pois=0)  # large dt -> backward Euler approaches the steady Stokes solve
         if s.rank() != 0:
             continue
-        umean = float(np.asarray(s.get_u()).mean())
+        umean = float(s.get_u().mean())
         if it > 8 and abs(umean - prev) < 3e-4 * (abs(umean) + 1e-15):
             break
         prev = umean
 
     if s.rank() != 0:
         return None
-    u = np.asarray(s.get_u())
+    u = s.get_u()  # 3-D u[x,y,z]
     k = nu * float(u.mean()) / fx          # Darcy permeability (grid units)
     u_solid = float(np.abs(u[deep_solid]).max())  # no-slip check (deep solid)
     div = s.max_open_divergence()
