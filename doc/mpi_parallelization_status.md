@@ -478,13 +478,31 @@ instead of masking); and folding the stack into the in-place `cfd_solver.cu`.
 - **IBM geometry factors** (`IBM_Data` K/M/X/Nbc/R/D_rescale) were already float and stay float: they
   define the operator, and `D_rescale` scales a cut cell's `A_C` *and* its RHS by the same value, so its
   rounding cancels in the solution ratio — float there does not degrade accuracy.
-- The all-double velocity multigrid ingests the float stencil via a `float→double` cast (`castf2d_k`);
-  the **pressure** multigrid/PCG operator stays double for now (it targets `rtol≈1e-8`, where a float
-  operator would floor the residual near 1e-7 — a separate pass).
 - Validated: `test_ibm_stencil_mpi` distributed == serial **bit-for-bit** (`max|d| = 0`, both paths do
   identical float ops — decomposition invariance preserved); `test_ibm_poiseuille_mpi` analytic error
   **2.07e-04** (RB-GS) / 3.51e-04 (vel-MG), unchanged from the double version; `dcfd` Poiseuille grid
-  convergence intact (2.78 % → 0.69 % → 0.15 %). Full suite **65/65, np=1,2,4**.
+  convergence intact (2.78 % → 0.69 % → 0.15 %).
+
+### Step 26 — mixed-precision pressure multigrid + cut-cell PCG ✅ verified
+- Extends the policy to the **pressure** solve (`mac_multigrid.cuh`): the 7-point operator coefficients
+  `AC..AT` on every level (constant-coefficient, variable cut-cell, and Galerkin-coarsened) are stored
+  single precision (`cfdmpi::mreal`), while the iterate, RHS, residual and **all the CG/Krylov vectors
+  and dot products stay double**; each `coeff·vector` promotes `float·double → double`. The build-time
+  transmissibilities `tx/ty/tz` (used once to assemble + coarsen the operator) stay double. The velocity
+  MG now ingests the float stencil `As_` **directly** (the staging cast added in Step 25 is removed).
+- **Convergence depth — the key subtlety:** CG measures the residual of the *float* system with the
+  *same* float operator (self-consistent), so it still converges deep — `test_galerkin_mpi` reaches
+  `4.45e-10` relative, **unchanged at the 1e-9 bar**. The single-precision floor only appears when
+  comparing the float operator/solution against a *double* reference (~1e-6) or in the absolute flux
+  divergence a projection can reach (`~1e-9` rms, was `~1e-11`) — both far below any physical tolerance.
+- Test adjustments (single-precision-aware, with comments): `test_cutcell_operator_mpi` coefficient
+  match vs the double serial reference `1e-12 → 1e-5` (observed 2.2e-7) and the CG flux-divergence check
+  to an absolute floor (observed 2.4e-9, a 15000× reduction); `test_multigrid_var_mpi` solution match vs
+  the double serial V-cycle `1e-8 → 1e-5` (observed 1.4e-6). Exact V-cycle decomposition invariance is
+  still guarded bit-for-bit (`1e-12`) by the constant-coefficient `test_multigrid_mpi` (unchanged).
+- Validated: numbers **identical across np=1,2,4** (float operator preserves rank-invariance); `dcfd`
+  periodic sphere-packing Stokes flow incompressible (max flux div 2e-8/1.3e-7), **exact** no-slip,
+  sensible permeability. Full suite **65/65, np=1,2,4**.
 
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 

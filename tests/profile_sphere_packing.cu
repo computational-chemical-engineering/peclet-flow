@@ -40,9 +40,9 @@ __host__ __device__ inline double packing_sdf(double x, double y, double z, int3
 }
 // zero the RHS in solid cells (A_C == 0) so the system is compatible (rhs perpendicular to the
 // isolated-solid null space), as it physically is -- divergence vanishes in the solid.
-__global__ void mask_rhs_solid_k(double* rhs, const double* AC, long n) {
+__global__ void mask_rhs_solid_k(double* rhs, const cfdmpi::mreal* AC, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n && AC[i] < 1e-300) rhs[i] = 0.0;
+  if (i < n && AC[i] < 1e-30f) rhs[i] = 0.0;
 }
 __global__ void fill_sdf_ext(double* sdf, int3 ext, int3 og, int3 res) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x, ly = blockIdx.y * blockDim.y + threadIdx.y,

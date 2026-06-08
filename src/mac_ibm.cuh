@@ -258,12 +258,6 @@ __global__ void ibm_scale_k(double* a, const double* s, long n) {  // a *= s (el
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) a[i] *= s[i];
 }
-// cast a float matrix array to double, to stage the mixed-precision stencil for the all-double
-// velocity multigrid (which keeps its operator/iterate in double).
-__global__ void castf2d_k(double* d, const mreal* f, long n) {
-  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) d[i] = (double)f[i];
-}
 
 // solid mask for a velocity component: 1.0 where the staggered SDF point is inside the solid, else 0.
 __global__ void ibm_solid_mask_k(double* mask, const double* sdf, int3 ext, float3 off) {

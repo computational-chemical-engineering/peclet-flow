@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "cfd_solver.cuh"          // get_idx (periodic wrap)
-#include "distributed_stokes.cuh"  // pulls in mac_cutcell.cuh + mac_multigrid.cuh
+#include "distributed_ns.cuh"  // pulls in mac_cutcell.cuh + mac_multigrid.cuh
 
 using cfdmpi::ccdetail::cc_fraction_core;
 
@@ -132,9 +132,14 @@ int main(int argc, char** argv) {
   mg.setFineVariableOperator(dox, doy, doz, 1.0, 1.0, 1.0);
   for (double* p : {dsdf, dox, doy, doz}) cudaFree(p);
 
+  // The MG operator is single precision (cfdmpi::mreal); copy into a float host buffer and widen.
   std::vector<std::vector<double>> D(7, std::vector<double>(l0.n));
-  double* dptr[7] = {l0.AC, l0.AW, l0.AE, l0.AS, l0.AN, l0.AB, l0.AT};
-  for (int k = 0; k < 7; ++k) cudaMemcpy(D[k].data(), dptr[k], l0.n * 8, cudaMemcpyDeviceToHost);
+  cfdmpi::mreal* dptr[7] = {l0.AC, l0.AW, l0.AE, l0.AS, l0.AN, l0.AB, l0.AT};
+  std::vector<cfdmpi::mreal> dtmp(l0.n);
+  for (int k = 0; k < 7; ++k) {
+    cudaMemcpy(dtmp.data(), dptr[k], l0.n * sizeof(cfdmpi::mreal), cudaMemcpyDeviceToHost);
+    for (size_t ii = 0; ii < l0.n; ++ii) D[k][ii] = dtmp[ii];
+  }
 
   // compare inner-cell coefficients to the serial reference
   double maxd = 0.0;
@@ -152,10 +157,10 @@ int main(int argc, char** argv) {
   double gmaxd = 0.0;
   MPI_Reduce(&maxd, &gmaxd, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
-  // ---- part 2: drive DistributedStokes through set_cutcell_pressure_operator. The stiff cut-cell
+  // ---- part 2: drive DistributedNS through set_cutcell_pressure_operator. The stiff cut-cell
   // operator needs CG accelerating the Galerkin V-cycle (a plain V-cycle stalls); compare the two. ----
   auto run_cutcell = [&](bool pcg, int budget, double& dv0, double& dv1, double& rms1) {
-    dstokes::DistributedStokes s;
+    dns::DistributedNS s;
     s.init(res, rank, size, /*nu=*/0.0, /*dt=*/0.1);
     int3 e2 = s.ext(), og2 = s.origin_incl_ghost();
     int g2 = s.ghost();
@@ -194,9 +199,12 @@ int main(int argc, char** argv) {
 
   int fail = 0;
   if (rank == 0) {
-    bool coeff_ok = (gmaxd <= 1e-12 && !std::isnan(gmaxd));
-    // CG drives the bulk (RMS) flux divergence to ~0; the max-norm floor is a single thin cut cell.
-    bool pc_ok = std::isfinite(pc_rms) && pc_rms < 1e-6 * vc_rms;
+    // single-precision operator vs the double serial reference: agreement at the float level
+    bool coeff_ok = (gmaxd <= 1e-5 && !std::isnan(gmaxd));
+    // CG drives the bulk (RMS) flux divergence to ~0 (essentially divergence-free). With the
+    // single-precision operator the float-system residual floors near ~1e-9 here (was ~1e-11 in double),
+    // far below any physical tolerance; check an absolute floor plus a large relative improvement.
+    bool pc_ok = std::isfinite(pc_rms) && pc_rms < 1e-6;
     bool better = pc_rms < 0.01 * vc_rms;
     fail = (coeff_ok && pc_ok && better) ? 0 : 1;
     printf("np=%d  res=%dx%dx%d  cut-cell operator (sphere SDF, real fluid fraction)\n", size, res.x,

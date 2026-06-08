@@ -25,6 +25,17 @@
 #include "mac_reductions.cuh"
 
 namespace cfdmpi {
+
+// Mixed precision: the 7-point operator coefficients (AC..AT), streamed by every smoother sweep,
+// residual and matvec, are stored in single precision; the iterate x, RHS b, residual r and all the
+// Krylov vectors / dot products stay double. Each coefficient*vector product promotes float*double ->
+// double, so the smoother and CG arithmetic run in double on a float-stored operator. The build-time
+// transmissibilities tx/ty/tz (used once to assemble the operator and to coarsen it) stay double.
+// Consequence: the achievable residual floors near the single-precision level of A (~1e-6..1e-7
+// relative), matching the production solver's float pressure operator. Same alias as mac_ibm.cuh
+// (identical-type redefinition is legal); flip to double to recover the original convergence depth.
+using mreal = float;
+
 namespace mgdetail {
 
 // RB-GS sweep over inner cells; colour by GLOBAL parity so the colouring is consistent across blocks.
@@ -47,8 +58,10 @@ __global__ void mg_smooth_k(double* __restrict__ x, const double* __restrict__ b
 // shared, so neighbouring ranks derive the SAME coefficient for it -> the operator is symmetric across
 // block boundaries. Mirrors compute_pressure_operator_kernel (A_E = -frac_r*inv_dx2, etc.); here the
 // face openness stands in for the masked fluid fraction.
-__global__ void mg_build_op_k(double* AC, double* AW, double* AE, double* AS, double* AN, double* AB,
-                              double* AT, const double* ox, const double* oy, const double* oz,
+// Inputs (openness or transmissibility ox/oy/oz) are double; the assembled operator AC..AT is stored
+// single precision. The coefficient sum (the diagonal) is formed in double, then cast.
+__global__ void mg_build_op_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal* AN, mreal* AB,
+                              mreal* AT, const double* ox, const double* oy, const double* oz,
                               int3 ext, int g, double idx2, double idy2, double idz2) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
@@ -59,33 +72,34 @@ __global__ void mg_build_op_k(double* AC, double* AW, double* AE, double* AS, do
   double te = ox[i + sx] * idx2, tw = ox[i] * idx2;
   double tn = oy[i + sy] * idy2, ts = oy[i] * idy2;
   double tt = oz[i + sz] * idz2, tb = oz[i] * idz2;
-  AE[i] = -te;
-  AW[i] = -tw;
-  AN[i] = -tn;
-  AS[i] = -ts;
-  AT[i] = -tt;
-  AB[i] = -tb;
-  AC[i] = te + tw + tn + ts + tt + tb;
+  AE[i] = (mreal)(-te);
+  AW[i] = (mreal)(-tw);
+  AN[i] = (mreal)(-tn);
+  AS[i] = (mreal)(-ts);
+  AT[i] = (mreal)(-tt);
+  AB[i] = (mreal)(-tb);
+  AC[i] = (mreal)(te + tw + tn + ts + tt + tb);
 }
 
 // constant-coefficient diffusion operator A = I - nu_dt * Laplacian over the whole extended block:
 // A_C = 1 + 6*beta, off-diagonals = -beta with beta = nu_dt / h^2. Non-singular (the I term), so no
 // mean removal. Used on the coarse levels of the velocity-diffusion multigrid.
-__global__ void mg_const_diffusion_op_k(double* AC, double* AW, double* AE, double* AS, double* AN,
-                                        double* AB, double* AT, int3 ext, double beta) {
+__global__ void mg_const_diffusion_op_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal* AN,
+                                        mreal* AB, mreal* AT, int3 ext, double beta) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x;
   int ly = blockIdx.y * blockDim.y + threadIdx.y;
   int lz = blockIdx.z * blockDim.z + threadIdx.z;
   if (lx >= ext.x || ly >= ext.y || lz >= ext.z) return;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
-  AC[i] = 1.0 + 6.0 * beta;
-  AW[i] = -beta; AE[i] = -beta; AS[i] = -beta; AN[i] = -beta; AB[i] = -beta; AT[i] = -beta;
+  AC[i] = (mreal)(1.0 + 6.0 * beta);
+  mreal nb = (mreal)(-beta);
+  AW[i] = nb; AE[i] = nb; AS[i] = nb; AN[i] = nb; AB[i] = nb; AT[i] = nb;
 }
 
 __global__ void mg_smooth_var_k(double* __restrict__ x, const double* __restrict__ b,
-                                const double* AC, const double* AW, const double* AE,
-                                const double* AS, const double* AN, const double* AB,
-                                const double* AT, int3 ext, int3 og, int g, int color) {
+                                const mreal* AC, const mreal* AW, const mreal* AE, const mreal* AS,
+                                const mreal* AN, const mreal* AB, const mreal* AT, int3 ext, int3 og,
+                                int g, int color) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
   int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
@@ -94,39 +108,42 @@ __global__ void mg_smooth_var_k(double* __restrict__ x, const double* __restrict
   size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
   double ac = AC[i];
-  if (ac < 1e-300) return;  // fully closed (solid) cell
-  double s = AE[i] * x[i + sx] + AW[i] * x[i - sx] + AN[i] * x[i + sy] + AS[i] * x[i - sy] +
-             AT[i] * x[i + sz] + AB[i] * x[i - sz];
+  if (ac < 1e-30) return;  // fully closed (solid) cell
+  double s = (double)AE[i] * x[i + sx] + (double)AW[i] * x[i - sx] + (double)AN[i] * x[i + sy] +
+             (double)AS[i] * x[i - sy] + (double)AT[i] * x[i + sz] + (double)AB[i] * x[i - sz];
   x[i] = (b[i] - s) / ac;
 }
 
 __global__ void mg_residual_var_k(double* __restrict__ r, const double* __restrict__ x,
-                                  const double* __restrict__ b, const double* AC, const double* AW,
-                                  const double* AE, const double* AS, const double* AN,
-                                  const double* AB, const double* AT, int3 ext, int g) {
+                                  const double* __restrict__ b, const mreal* AC, const mreal* AW,
+                                  const mreal* AE, const mreal* AS, const mreal* AN, const mreal* AB,
+                                  const mreal* AT, int3 ext, int g) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
   int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
   if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
   size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
-  double Ax = AC[i] * x[i] + AE[i] * x[i + sx] + AW[i] * x[i - sx] + AN[i] * x[i + sy] +
-              AS[i] * x[i - sy] + AT[i] * x[i + sz] + AB[i] * x[i - sz];
+  // Ax with the float operator, accumulated in double (the residual floor is set by A's float storage).
+  double Ax = (double)AC[i] * x[i] + (double)AE[i] * x[i + sx] + (double)AW[i] * x[i - sx] +
+              (double)AN[i] * x[i + sy] + (double)AS[i] * x[i - sy] + (double)AT[i] * x[i + sz] +
+              (double)AB[i] * x[i - sz];
   r[i] = b[i] - Ax;
 }
 
 // y = A x for the variable operator (inner cells); used as the matvec in PCG.
-__global__ void mg_apply_var_k(double* __restrict__ y, const double* __restrict__ x, const double* AC,
-                               const double* AW, const double* AE, const double* AS, const double* AN,
-                               const double* AB, const double* AT, int3 ext, int g) {
+__global__ void mg_apply_var_k(double* __restrict__ y, const double* __restrict__ x, const mreal* AC,
+                               const mreal* AW, const mreal* AE, const mreal* AS, const mreal* AN,
+                               const mreal* AB, const mreal* AT, int3 ext, int g) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
   int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
   if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
   size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
-  y[i] = AC[i] * x[i] + AE[i] * x[i + sx] + AW[i] * x[i - sx] + AN[i] * x[i + sy] +
-         AS[i] * x[i - sy] + AT[i] * x[i + sz] + AB[i] * x[i - sz];
+  y[i] = (double)AC[i] * x[i] + (double)AE[i] * x[i + sx] + (double)AW[i] * x[i - sx] +
+         (double)AN[i] * x[i + sy] + (double)AS[i] * x[i - sy] + (double)AT[i] * x[i + sz] +
+         (double)AB[i] * x[i - sz];
 }
 __global__ void mg_axpy_k(double* y, double a, const double* x, long n) {  // y += a*x
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -291,11 +308,12 @@ struct MGLevel {
   size_t n = 0;
   int3 ext{}, og{}, inner{};
   int g = 1;
-  // variable-coefficient operator (fine level, or every level under Galerkin coarsening)
+  // variable-coefficient operator (fine level, or every level under Galerkin coarsening); single
+  // precision (mreal) -- the streamed matrix. x/rhs/res above stay double.
   bool variable = false;
-  double *AC = nullptr, *AW = nullptr, *AE = nullptr, *AS = nullptr, *AN = nullptr, *AB = nullptr,
-         *AT = nullptr;
-  // staggered face transmissibilities (Galerkin only): tx[i] = T of the -x face of cell i
+  mreal *AC = nullptr, *AW = nullptr, *AE = nullptr, *AS = nullptr, *AN = nullptr, *AB = nullptr,
+        *AT = nullptr;
+  // staggered face transmissibilities (Galerkin only, build-time scratch): tx[i] = T of -x face of i
   double *tx = nullptr, *ty = nullptr, *tz = nullptr;
 };
 
@@ -354,8 +372,11 @@ class DistributedPoissonMG {
   void free() {
     for (auto& lp : levels_) {
       MGLevel& lv = *lp;
-      for (double** p : {&lv.x, &lv.rhs, &lv.res, &lv.AC, &lv.AW, &lv.AE, &lv.AS, &lv.AN, &lv.AB,
-                         &lv.AT, &lv.tx, &lv.ty, &lv.tz}) {
+      for (double** p : {&lv.x, &lv.rhs, &lv.res, &lv.tx, &lv.ty, &lv.tz}) {
+        if (*p) cudaFree(*p);
+        *p = nullptr;
+      }
+      for (mreal** p : {&lv.AC, &lv.AW, &lv.AE, &lv.AS, &lv.AN, &lv.AB, &lv.AT}) {
         if (*p) cudaFree(*p);
         *p = nullptr;
       }
@@ -380,7 +401,8 @@ class DistributedPoissonMG {
     MGLevel& f = *levels_[0];
     auto alloc_op = [](MGLevel& lv) {
       if (!lv.AC)
-        for (double** p : {&lv.AC, &lv.AW, &lv.AE, &lv.AS, &lv.AN, &lv.AB, &lv.AT}) cudaMalloc(p, lv.n * 8);
+        for (mreal** p : {&lv.AC, &lv.AW, &lv.AE, &lv.AS, &lv.AN, &lv.AB, &lv.AT})
+          cudaMalloc(p, lv.n * sizeof(mreal));
     };
     auto alloc_T = [](MGLevel& lv) {
       if (!lv.tx)
@@ -430,7 +452,8 @@ class DistributedPoissonMG {
     for (int L = 1; L < (int)levels_.size(); ++L) {
       MGLevel& c = *levels_[L];
       if (!c.AC)
-        for (double** p : {&c.AC, &c.AW, &c.AE, &c.AS, &c.AN, &c.AB, &c.AT}) cudaMalloc(p, c.n * 8);
+        for (mreal** p : {&c.AC, &c.AW, &c.AE, &c.AS, &c.AN, &c.AB, &c.AT})
+          cudaMalloc(p, c.n * sizeof(mreal));
       c.variable = true;
       double hL = h0 * (double)(1 << L), beta = nu_dt / (hL * hL);
       dim3 gAll((c.ext.x + 7) / 8, (c.ext.y + 7) / 8, (c.ext.z + 7) / 8);
@@ -441,13 +464,15 @@ class DistributedPoissonMG {
 
   // Install the fine-level 7-point stencil (copied from external A_C..A_T device arrays -- e.g. the
   // IBM-modified diffusion stencil). fineA = {AC,AW,AE,AS,AN,AB,AT}, in the level-0 layout.
-  void setDiffusionFine(double* const fineA[7]) {
+  void setDiffusionFine(mreal* const fineA[7]) {
     MGLevel& f = *levels_[0];
     if (!f.AC)
-      for (double** p : {&f.AC, &f.AW, &f.AE, &f.AS, &f.AN, &f.AB, &f.AT}) cudaMalloc(p, f.n * 8);
+      for (mreal** p : {&f.AC, &f.AW, &f.AE, &f.AS, &f.AN, &f.AB, &f.AT})
+        cudaMalloc(p, f.n * sizeof(mreal));
     f.variable = true;
-    double* fdst[7] = {f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT};
-    for (int k = 0; k < 7; ++k) cudaMemcpy(fdst[k], fineA[k], f.n * 8, cudaMemcpyDeviceToDevice);
+    mreal* fdst[7] = {f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT};
+    for (int k = 0; k < 7; ++k)
+      cudaMemcpy(fdst[k], fineA[k], f.n * sizeof(mreal), cudaMemcpyDeviceToDevice);
   }
 
   MGLevel& level(int L) { return *levels_[L]; }

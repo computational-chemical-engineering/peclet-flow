@@ -183,11 +183,7 @@ class DistributedNS {
       if (ibmdata_[c].cell_index) cfdmpi::ibm_free(ibmdata_[c]);
     }
     if (mg_built_) mg_.free();
-    if (vmg_built_) {
-      vmg_.free();
-      for (int k = 0; k < 7; ++k)
-        if (vmg_As64_[k]) cudaFree(vmg_As64_[k]);
-    }
+    if (vmg_built_) vmg_.free();
   }
   DistributedNS() = default;
   DistributedNS(const DistributedNS&) = delete;
@@ -502,10 +498,7 @@ class DistributedNS {
       if (vmg_enabled_ && !implicit_fou_) {  // implicit-FOU changes the stencil each iter -> RB-GS
         ensure_vmg_built();
         for (int c = 0; c < 3; ++c) {
-          // stage the float momentum stencil into double for the all-double velocity multigrid
-          for (int k = 0; k < 7; ++k)
-            cfdmpi::ibmdetail::castf2d_k<<<blocks, threads>>>(vmg_As64_[k], As_[c][k], (long)n_);
-          vmg_.setDiffusionFine(vmg_As64_);  // fine = this component's IBM stencil (coarse built once)
+          vmg_.setDiffusionFine(As_[c]);  // fine = this component's float IBM stencil (coarse built once)
           cfdmpi::MGLevel& l0 = vmg_.level(0);
           cudaMemcpy(l0.rhs, b_[c], n_ * 8, cudaMemcpyDeviceToDevice);
           cudaMemcpy(l0.x, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);  // initial guess
@@ -593,7 +586,6 @@ class DistributedNS {
     if (vmg_built_) return;
     vmg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, vmg_levels_, comm_, mac_.ghost);
     vmg_.setDiffusionCoarse(nu_ * dt_, 1.0);  // const-coeff diffusion coarse operators (built once)
-    for (int k = 0; k < 7; ++k) cudaMalloc(&vmg_As64_[k], n_ * sizeof(double));
     vmg_built_ = true;
   }
   void ensure_mg_built() {
@@ -638,7 +630,6 @@ class DistributedNS {
   IBM_Data ibmdata_[3] = {};
   int* idmap_[3] = {nullptr, nullptr, nullptr};
   cfdmpi::mreal* As_[3][7] = {};  // momentum-solve matrix: single precision (see mac_ibm.cuh mreal)
-  double* vmg_As64_[7] = {};      // double staging of As_ for the all-double velocity multigrid
   double* inhom_[3] = {nullptr, nullptr, nullptr};
   double* solidmask_[3] = {nullptr, nullptr, nullptr};
   double* descale_[3] = {nullptr, nullptr, nullptr};  // Robust-Scaled per-cell RHS scale (D_rescale)

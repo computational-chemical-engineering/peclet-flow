@@ -331,7 +331,11 @@ int main(int argc, char** argv) {
   int fail = 0;
   if (rank == 0) {
     double conv = rf_max / (r0_max + 1e-300);
-    bool match_ok = (gmaxd <= 1e-8 && !std::isnan(gmaxd));
+    // The distributed operator is single precision (cfdmpi::mreal) while this serial reference V-cycle
+    // is double, so the two solutions agree to the float-operator level (~1e-6), not bit-for-bit. Exact
+    // decomposition invariance of the V-cycle machinery is covered by the constant-coefficient
+    // test_multigrid_mpi (still double, 1e-12); here the point is the float operator tracks the double.
+    bool match_ok = (gmaxd <= 1e-5 && !std::isnan(gmaxd));
     bool conv_ok = (conv < 0.2 && !std::isnan(conv));
     fail = (match_ok && conv_ok) ? 0 : 1;
     printf("np=%d  res=%dx%dx%d  levels=%d vcycles=%d  variable fine operator (openness 0.1..1)\n",
