@@ -145,18 +145,38 @@ int main(int argc, char** argv) {
       mg.free();
     }
 
+    // (C) Chebyshev smoother (degree=2, i.e. pre/post=2 -- equal matvec cost to RB-GS pre/post=2) at a
+    // few spectral-band ratios; compare CG iterations to the RB-GS baseline it_pp[1].
+    double ratios[3] = {8.0, 16.0, 30.0};
+    int it_cheb[3] = {0, 0, 0};
+    for (int s = 0; s < 3; ++s) {
+      cfdmpi::DistributedPoissonMG mg;
+      build(mg);
+      mg.enableChebyshev(ratios[s]);
+      setup_rhs(mg);
+      it_cheb[s] = mg.solve_pcg(/*max_iter=*/200, /*rtol=*/1e-8, 2, 2, bottom);
+      mg.free();
+    }
+    int best_cheb = it_cheb[0];
+    for (int s = 1; s < 3; ++s)
+      if (it_cheb[s] > 0 && (best_cheb == 0 || it_cheb[s] < best_cheb)) best_cheb = it_cheb[s];
+
     if (rank == 0) {
       double R = N * 0.18;
       double porosity = 1.0 - 8.0 * (4.0 / 3.0 * M_PI * R * R * R) / ((double)N * N * N);
       printf("\n  N=%-4d (levels=%d, porosity ~%.2f)\n", N, nlev, porosity);
       printf("    standalone V-cycle asymptotic factor rho = %.3f  (smaller=stronger; <0.2 is good MG)\n",
              rho);
-      printf("    CG iters to 1e-8:  pre/post=1 -> %d    pre/post=2 -> %d    pre/post=4 -> %d\n",
+      printf("    RB-GS     CG iters to 1e-8:  pre/post=1 -> %d    pre/post=2 -> %d    pre/post=4 -> %d\n",
              it_pp[0], it_pp[1], it_pp[2]);
       printf("    smoother sensitivity (it@1 / it@4) = %.2fx %s\n",
              it_pp[2] ? (double)it_pp[0] / it_pp[2] : 0.0,
              (it_pp[2] && (double)it_pp[0] / it_pp[2] > 1.8) ? "(smoother-limited)"
                                                             : "(coarse-correction-limited)");
+      printf("    Chebyshev CG iters (deg=2):  eig_ratio=8 -> %d   16 -> %d   30 -> %d\n", it_cheb[0],
+             it_cheb[1], it_cheb[2]);
+      printf("    => best Chebyshev %d vs RB-GS(pre/post=2) %d   = %.2fx fewer iters (~equal cost)\n",
+             best_cheb, it_pp[1], best_cheb ? (double)it_pp[1] / best_cheb : 0.0);
     }
   }
   if (rank == 0)

@@ -470,12 +470,20 @@ instead of masking); and folding the stack into the in-place `cfd_solver.cu`.
 **Sizing the iteration-reduction opportunity** (`tests/profile_mg_scaling.cu`, sphere packing, np=1):
 the current Galerkin (unsmoothed-aggregation) + CG solve is **not h-independent** — the standalone
 V-cycle factor ρ grows 0.65 → 0.81 → 0.90 and CG iterations grow 15 → 20 → 30 across N = 32 → 64 → 128
-(rtol 1e-8) — so there *is* real room. But it is **smoother-limited**: going pre/post = 1 → 4 sweeps cuts
-CG iterations ~1.9× at every size. That points first at a **stronger smoother (Chebyshev)** — cheap, no
-coarse-operator change — and a **W-cycle** for the ρ-grows-with-N part, *before* the expensive smoothed-
-aggregation rewrite (27-point distributed coarse operators + wider halos). SA is a justified *secondary*
-lever (ρ rising with N shows the coarse correction also degrades), not the first thing to reach for.
-Realistic prize at 128³: ~1.5–2× on the pressure solve from the cheap levers; SA on top is uncertain.
+(rtol 1e-8) — so there *is* room, in the **coarse correction** (the aggregation coarse space degrades
+with scale). The "smoother-limited" signal (1 → 4 sweeps cuts CG iters ~1.9×) is real but means *more*
+smoothing helps **convergence**, not wall time — more sweeps cost proportionally more per cycle.
+
+**Chebyshev was implemented and measured — it is a wash** (`enableChebyshev`, opt-in). Degree-2
+Chebyshev (point-Jacobi) gives **16/20/28 CG iters vs RB-GS 15/20/30** at N = 32/64/128 (≈1.0×, eig_ratio
+8–30 all equal). Red-Black Gauss-Seidel is already a strong pointwise smoother (updated neighbours →
+~2× the smoothing factor of Jacobi per sweep), so a polynomial-Jacobi smoother does not beat it here.
+So **the cheap smoother lever does not exist** for this operator. The only thing that addresses the root
+cause (coarse-space degradation) is **smoothed aggregation** — expensive (27-point distributed coarse
+operators + wider halos) and uncertain for a modest, size-dependent gain. Net: the pressure solve is
+near its practical limit for this method on a single GPU; the big headroom was the reductions (Step 27).
+Chebyshev is kept as an opt-in smoother (correct, default off) — it may help at higher contrast or for
+parallel-smoother regimes, just not on this case.
 
 ### Step 25 — mixed-precision momentum-solve matrix ✅ verified
 - Mirrors the production solver's "state double / matrix float" policy (`cfd_solver.cuh`): the velocity

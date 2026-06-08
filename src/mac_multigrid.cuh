@@ -149,6 +149,24 @@ __global__ void mg_axpy_k(double* y, double a, const double* x, long n) {  // y 
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) y[i] += a * x[i];
 }
+
+// One step of the Chebyshev (point-Jacobi-preconditioned) smoother over inner cells:
+//   p <- cp*p + cr * D^{-1} r ;  x <- x + p     (D = diag(A) = AC, r = b - A x supplied by the caller)
+// cp=0 on the first step. Solid cells (AC==0) are skipped (decoupled by the IBM/cut-cell operator).
+__global__ void mg_cheb_step_k(double* __restrict__ x, double* __restrict__ p,
+                               const double* __restrict__ r, const mreal* __restrict__ AC, double cp,
+                               double cr, int3 ext, int g) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
+  if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
+  double ac = AC[i];
+  if (ac < 1e-30) { p[i] = 0.0; return; }  // fully closed (solid) cell
+  double pv = cp * p[i] + cr * (r[i] / ac);
+  p[i] = pv;
+  x[i] += pv;
+}
 __global__ void mg_aypx_k(double* y, double a, const double* x, long n) {  // y = x + a*y
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) y[i] = x[i] + a * y[i];
@@ -315,6 +333,7 @@ struct MGLevel {
         *AT = nullptr;
   // staggered face transmissibilities (Galerkin only, build-time scratch): tx[i] = T of -x face of i
   double *tx = nullptr, *ty = nullptr, *tz = nullptr;
+  double* cheb_p = nullptr;  // Chebyshev smoother direction vector (when enabled)
 };
 
 // Distributed V-cycle solver for the periodic constant-coefficient Poisson on power-of-two grids.
@@ -372,7 +391,7 @@ class DistributedPoissonMG {
   void free() {
     for (auto& lp : levels_) {
       MGLevel& lv = *lp;
-      for (double** p : {&lv.x, &lv.rhs, &lv.res, &lv.tx, &lv.ty, &lv.tz}) {
+      for (double** p : {&lv.x, &lv.rhs, &lv.res, &lv.tx, &lv.ty, &lv.tz, &lv.cheb_p}) {
         if (*p) cudaFree(*p);
         *p = nullptr;
       }
@@ -475,6 +494,24 @@ class DistributedPoissonMG {
       cudaMemcpy(fdst[k], fineA[k], f.n * sizeof(mreal), cudaMemcpyDeviceToDevice);
   }
 
+  // Use a degree-`pre/post` Chebyshev smoother (point-Jacobi preconditioned) instead of Red-Black
+  // Gauss-Seidel on the variable-coefficient levels. The damped band is [cheb_b/eig_ratio, cheb_b] with
+  // cheb_b = 2.1 (a rigorous upper bound on rho(D^{-1}A) for this M-matrix operator, +5% margin); a
+  // wider band (larger eig_ratio) covers more of the high-frequency spectrum and keeps the smoother
+  // non-amplifying for the CG preconditioner. Call after the operators are built (setFineVariable...).
+  void enableChebyshev(double eig_ratio = 30.0) {
+    cheb_enabled_ = true;
+    cheb_b_ = 2.1;
+    cheb_a_ = cheb_b_ / eig_ratio;
+    for (auto& lp : levels_) {
+      MGLevel& lv = *lp;
+      if (lv.variable && !lv.cheb_p) {
+        cudaMalloc(&lv.cheb_p, lv.n * sizeof(double));
+        cudaMemset(lv.cheb_p, 0, lv.n * sizeof(double));
+      }
+    }
+  }
+
   MGLevel& level(int L) { return *levels_[L]; }
   int n_levels() const { return (int)levels_.size(); }
 
@@ -556,6 +593,12 @@ class DistributedPoissonMG {
   // reverse=true sweeps black-then-red (the transpose ordering) so that a forward pre-smooth + reverse
   // post-smooth makes the V-cycle symmetric -> usable as an SPD preconditioner for CG.
   void smooth(MGLevel& lv, int sweeps, bool reverse = false) {
+    // Chebyshev is a polynomial in A -> symmetric by construction, so `reverse` (the RB-GS symmetry
+    // trick for the CG preconditioner) is unnecessary; one degree-`sweeps` pass serves pre and post.
+    if (cheb_enabled_ && lv.variable) {
+      smoothCheb(lv, sweeps);
+      return;
+    }
     dim3 blk(8, 8, 8);
     dim3 grd((lv.inner.x + 7) / 8, (lv.inner.y + 7) / 8, (lv.inner.z + 7) / 8);
     double h2 = lv.h * lv.h;
@@ -569,6 +612,29 @@ class DistributedPoissonMG {
         else
           mgdetail::mg_smooth_k<<<grd, blk>>>(lv.x, lv.rhs, lv.ext, lv.og, lv.g, h2, color);
       }
+    }
+  }
+
+  // Degree-`degree` Chebyshev smoother on the variable operator, point-Jacobi preconditioned. The
+  // damped interval is [cheb_a_, cheb_b_] in the spectrum of D^{-1}A; cheb_b_ > 2 >= rho(D^{-1}A)
+  // (Gershgorin: the M-matrix rows have |off-diag| sum == diagonal -> spectrum in [0,2] on every level),
+  // so the smoother never amplifies. Each step costs one residual (exchange + matvec) like a GS sweep,
+  // but fewer halo exchanges (one per degree vs two per GS sweep).
+  void smoothCheb(MGLevel& lv, int degree) {
+    if (degree < 1) return;
+    dim3 blk(8, 8, 8);
+    dim3 grd((lv.inner.x + 7) / 8, (lv.inner.y + 7) / 8, (lv.inner.z + 7) / 8);
+    double a = cheb_a_, b = cheb_b_;
+    double theta = 0.5 * (b + a), delta = 0.5 * (b - a), sigma = theta / delta, rho = 1.0 / sigma;
+    residual(lv);  // lv.res = b - A x
+    mgdetail::mg_cheb_step_k<<<grd, blk>>>(lv.x, lv.cheb_p, lv.res, lv.AC, /*cp=*/0.0,
+                                           /*cr=*/1.0 / theta, lv.ext, lv.g);
+    for (int k = 1; k < degree; ++k) {
+      residual(lv);
+      double rho_new = 1.0 / (2.0 * sigma - rho);
+      mgdetail::mg_cheb_step_k<<<grd, blk>>>(lv.x, lv.cheb_p, lv.res, lv.AC, /*cp=*/rho * rho_new,
+                                             /*cr=*/2.0 * rho_new / delta, lv.ext, lv.g);
+      rho = rho_new;
     }
   }
 
@@ -631,6 +697,8 @@ class DistributedPoissonMG {
   int pre_ = 2, post_ = 2, bottom_ = 8;
   bool galerkin_ = false;     // variational (aggregation) coarse operators + injection/sum transfers
   bool remove_mean_ = true;   // false for non-singular operators (e.g. diffusion I - nu*dt*Lap)
+  bool cheb_enabled_ = false;       // Chebyshev smoother (variable levels) instead of Red-Black GS
+  double cheb_a_ = 0.0, cheb_b_ = 0.0;  // damped spectral band [a,b] of D^{-1}A
 };
 
 }  // namespace cfdmpi
