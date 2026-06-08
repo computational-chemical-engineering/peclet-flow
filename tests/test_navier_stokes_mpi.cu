@@ -1,6 +1,6 @@
-// Step 11: full distributed Navier-Stokes (DistributedStokes with advection) vs a serial reference.
+// Step 11: full distributed Navier-Stokes (DistributedNS with advection) vs a serial reference.
 //
-// The DistributedStokes solver, with set_advection(true), does each step: explicit Koren advection
+// The DistributedNS solver, with set_advection(true), does each step: explicit Koren advection
 // folded into the momentum RHS + implicit diffusion (RB-GS) + Chorin projection. We validate it
 // against an independent SERIAL full-grid integration of the identical scheme (same kernels, same
 // iteration counts), requiring the distributed result to match cell-for-cell over multiple steps,
@@ -12,10 +12,10 @@
 #include <cstdio>
 #include <vector>
 
-#include "distributed_stokes.cuh"
+#include "distributed_ns.cuh"
 #include "staggered_advection.cuh"
 
-using dstokes::DistributedStokes;
+using dns::DistributedNS;
 
 static constexpr int kSteps = 10;
 static constexpr int kDiff = 30;
@@ -139,8 +139,8 @@ int main(int argc, char** argv) {
   cudaMemcpy(rw.data(), w, nf * 8, cudaMemcpyDeviceToHost);
   for (double* p : {u, v, w, phi, dvg, b[0], b[1], b[2]}) cudaFree(p);
 
-  // ----- distributed via DistributedStokes (advection on) -----
-  DistributedStokes sol;
+  // ----- distributed via DistributedNS (advection on) -----
+  DistributedNS sol;
   sol.init(res, rank, size, nu, dt);
   sol.set_advection(true);
   int3 e = sol.ext(), og = sol.origin_incl_ghost();

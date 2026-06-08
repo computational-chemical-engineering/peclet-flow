@@ -1,4 +1,4 @@
-// Picard (defect-correction) outer-iteration loop in DistributedStokes::step. With nonlinear advection
+// Picard (defect-correction) outer-iteration loop in DistributedNS::step. With nonlinear advection
 // a single fractional step lags the advection at u^n; the outer loop re-lags it at the latest iterate
 // and re-projects, converging the nonlinear coupling. This checks: (1) the outer loop CONVERGES (hits
 // the tolerance in fewer than the cap), (2) it does real work (the converged state differs from the
@@ -10,12 +10,12 @@
 #include <cstdio>
 #include <vector>
 
-#include "distributed_stokes.cuh"
+#include "distributed_ns.cuh"
 
-using dstokes::DistributedStokes;
+using dns::DistributedNS;
 
 template <typename F>
-static void for_inner(const DistributedStokes& s, F&& f) {
+static void for_inner(const DistributedNS& s, F&& f) {
   int3 e = s.ext();
   int3 og = s.origin_incl_ghost();
   int g = s.ghost();
@@ -26,7 +26,7 @@ static void for_inner(const DistributedStokes& s, F&& f) {
 }
 
 // global kinetic energy sum(u^2+v^2+w^2) over owned cells
-static double global_ke(DistributedStokes& s) {
+static double global_ke(DistributedNS& s) {
   std::size_t n = s.num_cells();
   std::vector<double> u(n), v(n), w(n);
   s.download_velocity(u.data(), v.data(), w.data());
@@ -43,7 +43,7 @@ static void run(int rank, int size, int outer_iters, double tol, double& ke, lon
   int N = 32;
   int3 res = make_int3(N, N, 8);
   double k = 2.0 * M_PI / N, nu = 0.02, dt = 0.4;
-  DistributedStokes s;
+  DistributedNS s;
   s.init(res, rank, size, nu, dt);
   s.set_advection(true);
   s.set_pressure_multigrid(true, 4);

@@ -55,7 +55,7 @@ if(CFD_BUILD_MPI)
   enable_testing()
   # transport-core's halo headers are C++17-clean; the RTX 5080 is sm_120.
   foreach(t test_mac_halo test_advdiff_mpi test_gs_implicit_mpi test_projection_mpi test_stokes_mpi
-            test_stokes_solid_mpi test_poiseuille_mpi test_distributed_stokes test_advection_mpi
+            test_stokes_solid_mpi test_poiseuille_mpi test_distributed_ns test_advection_mpi
             test_navier_stokes_mpi test_ns_solid_mpi test_gather_vti_mpi test_reductions_mpi
             test_multigrid_mpi test_multigrid_var_mpi test_mg_projection_mpi test_cutcell_operator_mpi
             test_galerkin_mpi test_ibm_stencil_mpi test_ibm_poiseuille_mpi test_picard_mpi
@@ -66,7 +66,7 @@ if(CFD_BUILD_MPI)
     set_target_properties(${t} PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
   endforeach()
 
-  # Python module: distributed Navier-Stokes solver (DistributedStokes). -> dcfd.*.so
+  # Python module: distributed Navier-Stokes solver (DistributedNS). -> dcfd.*.so
   pybind11_add_module(dcfd src/dcfd_bindings.cu)
   target_include_directories(dcfd PRIVATE src ${TPX_INCLUDE})
   target_link_libraries(dcfd PRIVATE CUDA::cudart MPI::MPI_CXX)
@@ -94,9 +94,9 @@ if(CFD_BUILD_MPI)
     add_test(NAME poiseuille_np${np}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
                      ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_poiseuille_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME distributed_stokes_np${np}
+    add_test(NAME distributed_ns_np${np}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_distributed_stokes> ${MPIEXEC_POSTFLAGS})
+                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_distributed_ns> ${MPIEXEC_POSTFLAGS})
     add_test(NAME advection_op_np${np}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
                      ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_advection_mpi> ${MPIEXEC_POSTFLAGS})

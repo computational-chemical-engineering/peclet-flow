@@ -9,16 +9,16 @@
 #include <cstdio>
 #include <vector>
 
-#include "distributed_stokes.cuh"
+#include "distributed_ns.cuh"
 
-using dstokes::DistributedStokes;
+using dns::DistributedNS;
 
 // non-integer wall positions so the SDF interface falls between u-sample points (-> real cut cells)
 static const double kYlo = 10.5, kYhi = 21.5;  // channel walls (index units)
 __host__ inline double channel_sdf(double gy) { return fmin(gy - kYlo, kYhi - gy); }
 
 template <typename F>
-static void for_inner(const DistributedStokes& s, F&& f) {
+static void for_inner(const DistributedNS& s, F&& f) {
   int3 e = s.ext();
   int3 og = s.origin_incl_ghost();
   int g = s.ghost();
@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
   // run the channel with RB-GS (vmg=false) or velocity multigrid (vmg=true); return parabola error +
   // solid leak + centreline velocity.
   auto run = [&](bool vmg, double& g_rel, double& g_wall, double& g_umax) {
-    DistributedStokes s;
+    DistributedNS s;
     s.init(res, rank, size, nu, dt);
     s.set_body_force(fx, 0.0, 0.0);
     int3 e = s.ext(), og = s.origin_incl_ghost();

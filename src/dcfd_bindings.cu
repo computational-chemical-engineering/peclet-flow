@@ -1,4 +1,4 @@
-// Python bindings for the distributed Navier-Stokes solver (DistributedStokes). Exposes a single-GPU-
+// Python bindings for the distributed Navier-Stokes solver (DistributedNS). Exposes a single-GPU-
 // friendly API: run as plain `python script.py` (one rank, whole grid on one GPU) or under
 // `mpirun -np N python script.py` (multi-rank). The module auto-initialises MPI. Global fields (SDF,
 // velocity) are passed as flat x-fastest numpy arrays of size nx*ny*nz; the wrapper scatters them to
@@ -12,10 +12,10 @@
 #include <cstring>
 #include <vector>
 
-#include "distributed_stokes.cuh"
+#include "distributed_ns.cuh"
 
 namespace py = pybind11;
-using dstokes::DistributedStokes;
+using dns::DistributedNS;
 
 // Wrap an x-fastest host buffer (flat[x + y*nx + z*nx*ny]) as a 3-D numpy array indexed u[x,y,z], so
 // callers never touch reshape/order. The x-fastest buffer is exactly the F-contiguous layout of shape
@@ -132,12 +132,12 @@ class DCfdSolver {
     return a;
   }
 
-  DistributedStokes s_;
+  DistributedNS s_;
   int3 res_{};
 };
 
 PYBIND11_MODULE(dcfd, m) {
-  m.doc() = "Distributed GPU incompressible Navier-Stokes solver (DistributedStokes) Python API";
+  m.doc() = "Distributed GPU incompressible Navier-Stokes solver (DistributedNS) Python API";
   py::class_<DCfdSolver>(m, "Solver")
       .def(py::init<int, int, int, double, double>(), py::arg("nx"), py::arg("ny"), py::arg("nz"),
            py::arg("nu"), py::arg("dt"))

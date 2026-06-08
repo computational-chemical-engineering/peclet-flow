@@ -114,7 +114,7 @@ Key pieces (all `src/*.cuh`, header-only, on branch `mpi-halo-integration`):
   cell-fields on the extended local block. cfd's x-fastest indexing means the halo drops in directly.
 - `staggered_advection.cuh` — `sadv::advect`: cfd's exact staggered Koren TVD advection, templated on a
   field accessor so the same operator serves the full grid and a local block.
-- `distributed_stokes.cuh` — `dstokes::DistributedStokes`: the reusable solver. `step(n_diff, n_pois)`
+- `distributed_ns.cuh` — `dns::DistributedNS`: the reusable solver. `step(n_diff, n_pois)`
   does per-component implicit diffusion (RB-GS, halo exchange between sweeps) + Chorin projection, with
   `set_advection(true)` (full Navier–Stokes), `set_body_force`, `set_solid` (no-slip masking), and
   `gather_to_root` (assemble the global field for VTI output via `tpx::geom`).
@@ -137,4 +137,4 @@ ctest --test-dir build_mpi --output-on-failure
 **Remaining (largest task):** the *in-place* `cfd_solver.cu` rewrite — extended-block state/scratch +
 MPI global reductions (`max_abs`, `remove_mean`, pressure pin) + distributed **multigrid** (halo per
 level, restriction/prolongation across blocks) + the full Robust-Scaled cut-cell IBM (vs masking). The
-`DistributedStokes` solver is the working single-level path and proves the mechanism end to end.
+`DistributedNS` solver is the working single-level path and proves the mechanism end to end.

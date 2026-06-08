@@ -1,4 +1,4 @@
-// Step 9: validate the reusable DistributedStokes solver (src/distributed_stokes.cuh) by reproducing
+// Step 9: validate the reusable DistributedNS solver (src/distributed_ns.cuh) by reproducing
 // two analytic results through its public API, at np=1,2,4:
 //   - Taylor-Green vortex decay (no solid)              -> backward-Euler decay rate to <0.1%;
 //   - Poiseuille channel flow (slab walls + body force) -> parabolic profile + momentum balance.
@@ -11,13 +11,13 @@
 #include <cstdio>
 #include <vector>
 
-#include "distributed_stokes.cuh"
+#include "distributed_ns.cuh"
 
-using dstokes::DistributedStokes;
+using dns::DistributedNS;
 
 // Visit each inner cell, calling f(local_index, gx, gy, gz).
 template <typename F>
-static void for_inner(const DistributedStokes& s, F&& f) {
+static void for_inner(const DistributedNS& s, F&& f) {
   int3 e = s.ext();
   int3 og = s.origin_incl_ghost();
   int g = s.ghost();
@@ -31,7 +31,7 @@ static int tgv_case(int rank, int size) {
   int N = 32;
   int3 res = make_int3(N, N, 4);
   double k = 2.0 * M_PI / N, nu = 0.05, dt = 0.5;
-  DistributedStokes s;
+  DistributedNS s;
   s.init(res, rank, size, nu, dt);
   std::size_t n = s.num_cells();
   std::vector<double> hu(n, 0), hv(n, 0), hw(n, 0);
@@ -67,7 +67,7 @@ static int poiseuille_case(int rank, int size) {
   int3 res = make_int3(N, N, 4);
   int wall = 4;
   double nu = 0.1, dt = 20.0, g = 1e-3;
-  DistributedStokes s;
+  DistributedNS s;
   s.init(res, rank, size, nu, dt);
   s.set_body_force(g, 0, 0);
 
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
   MPI_Allreduce(&loc, &total, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   if (rank == 0) {
     if (total == 0)
-      printf("OK (np=%d): DistributedStokes reproduces TGV decay and Poiseuille profile\n", size);
+      printf("OK (np=%d): DistributedNS reproduces TGV decay and Poiseuille profile\n", size);
     else
       fprintf(stderr, "FAILED (np=%d): tgv=%d poiseuille=%d\n", size, f1, f2);
   }

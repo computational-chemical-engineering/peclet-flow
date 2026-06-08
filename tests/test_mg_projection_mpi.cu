@@ -1,4 +1,4 @@
-// Wire-up test: DistributedStokes::step with the multigrid pressure solve (set_pressure_multigrid).
+// Wire-up test: DistributedNS::step with the multigrid pressure solve (set_pressure_multigrid).
 // Project a divergent random velocity field and measure the residual divergence. The multigrid V-cycle
 // must drive div(u) far lower than the single-level Red-Black GS for the same iteration budget (the
 // V-cycle kills the low-frequency error that GS leaves), confirming the V-cycle is correctly wired into
@@ -10,9 +10,9 @@
 #include <cstdio>
 #include <vector>
 
-#include "distributed_stokes.cuh"
+#include "distributed_ns.cuh"
 
-using dstokes::DistributedStokes;
+using dns::DistributedNS;
 
 __host__ inline double hash01(int x, int y, int z, int seed) {
   unsigned long long h = (unsigned long long)(x * 73856093) ^ (unsigned long long)(y * 19349663) ^
@@ -24,7 +24,7 @@ __host__ inline double hash01(int x, int y, int z, int seed) {
 }
 
 template <typename F>
-static void for_inner(const DistributedStokes& s, F&& f) {
+static void for_inner(const DistributedNS& s, F&& f) {
   int3 e = s.ext();
   int3 og = s.origin_incl_ghost();
   int g = s.ghost();
@@ -36,7 +36,7 @@ static void for_inner(const DistributedStokes& s, F&& f) {
 
 // global max |div(u)| over inner cells (velocity ghosts refreshed first so block-boundary stencils
 // read neighbour values).
-static double global_max_div(DistributedStokes& s) {
+static double global_max_div(DistributedNS& s) {
   s.exchange_all();
   std::size_t n = s.num_cells();
   std::vector<double> u(n), v(n), w(n);
@@ -56,7 +56,7 @@ static double global_max_div(DistributedStokes& s) {
 // one pure projection of a fixed divergent random field; returns residual max|div|. mg=true uses the
 // multigrid V-cycle (n_pois V-cycles), mg=false the single-level GS (n_pois sweeps).
 static double project_field(int rank, int size, int3 res, int n_pois, bool mg) {
-  DistributedStokes s;
+  DistributedNS s;
   s.init(res, rank, size, /*nu=*/0.0, /*dt=*/0.1);
   if (mg) s.set_pressure_multigrid(true, /*levels=*/4);
   std::size_t n = s.num_cells();

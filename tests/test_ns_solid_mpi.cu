@@ -1,6 +1,6 @@
 // Step 12 (capstone): full distributed Navier-Stokes flow AROUND an SDF solid.
 //
-// Exercises the DistributedStokes solver with BOTH nonlinear advection and an SDF solid (sphere,
+// Exercises the DistributedNS solver with BOTH nonlinear advection and an SDF solid (sphere,
 // no-slip by per-cell velocity masking). Validated against an independent serial full-grid
 // integration of the identical scheme, cell-for-cell over multiple steps, np=1,2,4 — the complete
 // distributed incompressible-flow capability (decomposition + async halo + advection + projection +
@@ -11,10 +11,10 @@
 #include <cstdio>
 #include <vector>
 
-#include "distributed_stokes.cuh"
+#include "distributed_ns.cuh"
 #include "staggered_advection.cuh"
 
-using dstokes::DistributedStokes;
+using dns::DistributedNS;
 
 static constexpr int kSteps = 8;
 static constexpr int kDiff = 25;
@@ -143,8 +143,8 @@ int main(int argc, char** argv) {
   cudaMemcpy(rw.data(), w, nf * 8, cudaMemcpyDeviceToHost);
   for (double* p : {u, v, w, phi, dvg, b[0], b[1], b[2]}) cudaFree(p);
 
-  // ----- distributed via DistributedStokes (advection + solid) -----
-  DistributedStokes sol;
+  // ----- distributed via DistributedNS (advection + solid) -----
+  DistributedNS sol;
   sol.init(res, rank, size, nu, dt);
   sol.set_advection(true);
   sol.set_body_force(fx, 0, 0);

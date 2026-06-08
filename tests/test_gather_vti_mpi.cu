@@ -1,6 +1,6 @@
 // Step 13: gather the distributed field to root and write it as VTI (transport-core I/O).
 //
-// Runs the DistributedStokes solver (Taylor-Green, no solid), gathers the global u-field from all
+// Runs the DistributedNS solver (Taylor-Green, no solid), gathers the global u-field from all
 // rank-owned blocks onto rank 0, and:
 //   (a) checks the assembled global field matches the analytic decayed TGV pattern cell-for-cell
 //       (gather correctness — a wrong assembly would scramble the pattern), np=1,2,4;
@@ -12,11 +12,11 @@
 #include <cstdio>
 #include <vector>
 
-#include "distributed_stokes.cuh"
+#include "distributed_ns.cuh"
 #include "tpx/geom/grid_sdf.hpp"
 #include "tpx/geom/vti_io.hpp"
 
-using dstokes::DistributedStokes;
+using dns::DistributedNS;
 
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
   double k = 2.0 * M_PI / N, nu = 0.05, dt = 0.5;
   const int steps = 10;
 
-  DistributedStokes s;
+  DistributedNS s;
   s.init(res, rank, size, nu, dt);  // advection off -> Stokes (TGV decays as a diffusion mode)
   int3 e = s.ext(), og = s.origin_incl_ghost();
   int g = s.ghost();

@@ -1,6 +1,6 @@
 // Demo: distributed Navier-Stokes flow around a sphere, writing a velocity-magnitude VTI.
 //
-// A runnable example of the DistributedStokes solver end-to-end: decompose a periodic box across MPI
+// A runnable example of the DistributedNS solver end-to-end: decompose a periodic box across MPI
 // ranks, place an SDF sphere (no-slip), drive flow past it with a body force, integrate the full
 // Navier-Stokes equations, gather the global field to rank 0 and write it as a ParaView .vti.
 //
@@ -15,10 +15,10 @@
 #include <string>
 #include <vector>
 
-#include "distributed_stokes.cuh"
+#include "distributed_ns.cuh"
 #include "tpx/geom/vti_io.hpp"
 
-using dstokes::DistributedStokes;
+using dns::DistributedNS;
 
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
   double nu = 0.05, dt = 0.2, fx = 0.02;
   double cx = N * 0.5, cy = N * 0.5, cz = res.z * 0.5, R = N * 0.16;
 
-  DistributedStokes sol;
+  DistributedNS sol;
   sol.init(res, rank, size, nu, dt);
   sol.set_advection(true);
   sol.set_body_force(fx, 0, 0);
