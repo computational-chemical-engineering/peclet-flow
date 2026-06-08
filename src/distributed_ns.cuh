@@ -168,6 +168,13 @@ class DistributedNS {
     ext_ = mac_.local_ext;
     blk_ = dim3(8, 8, 4);
     grd_ = dim3((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
+    // per-component streams + exchange engines for the concurrent velocity solve (share mac_'s topology)
+    for (int c = 0; c < 3; ++c) {
+      cudaStreamCreate(&vstreams_[c]);
+      vexch_[c].init(mac_.halo);
+    }
+    cudaEventCreateWithFlags(&vrhs_evt_, cudaEventDisableTiming);
+    vstreams_init_ = true;
   }
   ~DistributedNS() {
     for (double* p : {u_, v_, w_, phi_, div_, solid_, b_[0], b_[1], b_[2], ox_, oy_, oz_, u_old_,
@@ -184,6 +191,11 @@ class DistributedNS {
     }
     if (mg_built_) mg_.free();
     if (vmg_built_) vmg_.free();
+    if (vstreams_init_) {
+      for (int c = 0; c < 3; ++c)
+        if (vstreams_[c]) cudaStreamDestroy(vstreams_[c]);
+      if (vrhs_evt_) cudaEventDestroy(vrhs_evt_);
+    }
   }
   DistributedNS() = default;
   DistributedNS(const DistributedNS&) = delete;
@@ -197,6 +209,11 @@ class DistributedNS {
   double* u() { return u_; }
   double* v() { return v_; }
   double* w() { return w_; }
+
+  // Run the independent u/v/w IBM RB-GS momentum solves on 3 concurrent CUDA streams (default on).
+  // Overlaps at small per-component sizes where one stencil does not saturate the GPU; ~no effect once
+  // saturated. Only affects the cut-cell IBM RB-GS velocity path (not the velocity-multigrid path).
+  void set_velocity_streams(bool on) { vstreams_enabled_ = on; }
 
   void set_body_force(double fx, double fy, double fz) { fx_ = fx; fy_ = fy; fz_ = fz; }
   // Enable explicit nonlinear advection (full Navier-Stokes instead of Stokes).
@@ -506,6 +523,23 @@ class DistributedNS {
           cudaMemcpy(comp[c], l0.x, n_ * 8, cudaMemcpyDeviceToDevice);
           detail::mask_k<<<grd_, blk_>>>(comp[c], solidmask_[c], ext_);
         }
+      } else if (vstreams_enabled_) {
+        // 3-stream concurrent velocity solve: the u/v/w IBM RB-GS chains are independent -> one stream
+        // each. exchangeOnStream has no device-wide sync, so the components overlap (at small sizes; the
+        // GPU saturates at large). The RB-GS colours within a component stay ordered on its stream.
+        cudaEventRecord(vrhs_evt_, 0);  // b_ + comp were built on the default stream
+        for (int c = 0; c < 3; ++c) cudaStreamWaitEvent(vstreams_[c], vrhs_evt_, 0);
+        for (int it = 0; it < n_diff; ++it)
+          for (int color = 0; color < 2; ++color)
+            for (int c = 0; c < 3; ++c) {
+              vexch_[c].exchangeOnStream(comp[c], vstreams_[c], /*tag=*/c);
+              cfdmpi::ibmdetail::ibm_rbgs_stencil_k<<<grd_, blk_, 0, vstreams_[c]>>>(
+                  comp[c], b_[c], As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4], As_[c][5],
+                  As_[c][6], ext_, mac_.origin_incl_ghost, g, color);
+            }
+        for (int c = 0; c < 3; ++c)
+          detail::mask_k<<<grd_, blk_, 0, vstreams_[c]>>>(comp[c], solidmask_[c], ext_);
+        for (int c = 0; c < 3; ++c) cudaStreamSynchronize(vstreams_[c]);  // join before projection
       } else {
         for (int c = 0; c < 3; ++c) {
           for (int it = 0; it < n_diff; ++it) {
@@ -638,6 +672,14 @@ class DistributedNS {
   bool pcg_ = false;
   int pcg_maxit_ = 60;
   double pcg_rtol_ = 1e-8;
+  // 3-stream concurrent velocity solve: the independent u/v/w IBM RB-GS momentum solves run on their
+  // own CUDA streams with per-component exchange engines (separate host-staged buffers -> safe at any
+  // rank count). Overlaps at small per-component sizes; ~no effect once one stencil saturates the GPU.
+  bool vstreams_enabled_ = true;
+  bool vstreams_init_ = false;
+  cudaStream_t vstreams_[3] = {};
+  tpx::halo::DeviceGridExchange<double> vexch_[3];
+  cudaEvent_t vrhs_evt_ = nullptr;
 };
 
 }  // namespace dns

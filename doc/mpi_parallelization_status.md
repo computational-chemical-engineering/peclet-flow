@@ -528,6 +528,23 @@ instead of masking); and folding the stack into the in-place `cfd_solver.cu`.
   `test_multigrid_mpi` (the block reduction's reordered summation stays ~1e-16, far under tolerance) and
   `test_reductions_mpi` (vs a host reference).
 
+### Step 28 — 3-stream concurrent velocity solve ✅ verified
+- The three MAC velocity components (u/v/w) solve independent IBM RB-GS momentum systems, so each runs
+  on its own CUDA stream with a per-component exchange engine (separate host-staged buffers + a distinct
+  MPI tag → safe at any rank count). Needed a stream-aware exchange in transport-core
+  (`DeviceGridExchange::exchangeOnStream`): kernels/copies on a caller stream with **no device-wide
+  sync** (the old `exchange` does a full `cudaDeviceSynchronize` per call that would serialise streams).
+  `set_velocity_streams(bool)` toggles it (default on); only the cut-cell IBM RB-GS path is affected.
+- **Speedup** (`tests/bench_velocity_streams.cu`, IBM sphere, velocity-heavy step): **2.97× at 32³**,
+  **1.68× at 64³**, **0.97× at 128³**. The win is largest at small sizes for two reasons — the
+  components actually overlap (one stencil doesn't saturate the GPU), *and* the stream path drops the
+  per-exchange `cudaDeviceSynchronize` the serial path pays every colour. At 128³ one stencil saturates
+  the RTX 5080, so streaming is neutral (a single big GPU can't be beaten by concurrency there). This is
+  the common-case win for the 32–64³ REV sizes the verify scripts use, and the foundation for multi-GPU
+  compute/comm overlap.
+- Validated: bit-identical results (`test_ibm_poiseuille_mpi` rel err 2.07e-4, zero solid leak,
+  np=1,2,4). Full suite **68/68**.
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
 Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren

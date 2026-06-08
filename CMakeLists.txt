@@ -59,7 +59,7 @@ if(CFD_BUILD_MPI)
             test_navier_stokes_mpi test_ns_solid_mpi test_gather_vti_mpi test_reductions_mpi
             test_multigrid_mpi test_multigrid_var_mpi test_mg_projection_mpi test_cutcell_operator_mpi
             test_galerkin_mpi test_ibm_stencil_mpi test_ibm_poiseuille_mpi test_picard_mpi
-            profile_sphere_packing bench_mixed_precision bench_reductions)
+            profile_sphere_packing bench_mixed_precision bench_reductions bench_velocity_streams)
     add_executable(${t} tests/${t}.cu)
     target_include_directories(${t} PRIVATE src ${TPX_INCLUDE})
     target_link_libraries(${t} PRIVATE CUDA::cudart MPI::MPI_CXX)
@@ -149,6 +149,10 @@ if(CFD_BUILD_MPI)
   add_test(NAME bench_reductions
            COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
                    $<TARGET_FILE:bench_reductions> 64 200 ${MPIEXEC_POSTFLAGS})
+  # velocity-stream benchmark (also a smoke test of the streamed IBM RB-GS path)
+  add_test(NAME bench_velocity_streams
+           COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS}
+                   $<TARGET_FILE:bench_velocity_streams> 5 ${MPIEXEC_POSTFLAGS})
 
   # Runnable demo (writes a ParaView .vti); CI runs only a tiny smoke case.
   add_executable(demo_flow_sphere tests/demo_flow_sphere.cu)
