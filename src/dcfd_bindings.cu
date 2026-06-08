@@ -88,10 +88,17 @@ class DCfdSolver {
   int last_outer_iterations() const { return s_.last_outer_iterations(); }
   double max_open_divergence() { return s_.max_open_divergence(); }
 
-  // gather a velocity component to the root rank as a 3-D numpy array u[x,y,z] (empty on other ranks)
+  // gather a velocity component to the root rank as a 3-D numpy array u[x,y,z] (empty on other ranks).
+  // The array is F-contiguous, so x is fastest in memory (the VTK/ParaView convention, as in PyVista).
   py::array_t<double> get_u() { return gather(s_.u()); }
   py::array_t<double> get_v() { return gather(s_.v()); }
   py::array_t<double> get_w() { return gather(s_.w()); }
+
+  // x-fastest flat buffer (idx = x + y*nx + z*nx*ny), ready to write into a VTI / vtkImageData point
+  // array with no reshape or order= (equivalent to get_u().ravel(order='F'), without the footgun).
+  py::array_t<double> get_u_flat() { return flat(s_.u()); }
+  py::array_t<double> get_v_flat() { return flat(s_.v()); }
+  py::array_t<double> get_w_flat() { return flat(s_.w()); }
 
  private:
   // a 3-D global field g[x,y,z] (shape (nx,ny,nz), any memory order) -> this rank's extended block via
@@ -116,6 +123,12 @@ class DCfdSolver {
 
   py::array_t<double> gather(double* comp) {
     return to_numpy3d(s_.gather_to_root(comp), res_);  // u[x,y,z] on root, empty elsewhere
+  }
+  py::array_t<double> flat(double* comp) {  // x-fastest 1-D buffer on root, empty elsewhere
+    std::vector<double> g = s_.gather_to_root(comp);
+    py::array_t<double> a(std::vector<py::ssize_t>{(py::ssize_t)g.size()});
+    if (!g.empty()) std::memcpy(a.request().ptr, g.data(), g.size() * sizeof(double));
+    return a;
   }
 
   DistributedStokes s_;
@@ -149,5 +162,8 @@ PYBIND11_MODULE(dcfd, m) {
       .def("max_open_divergence", &DCfdSolver::max_open_divergence)
       .def("get_u", &DCfdSolver::get_u)
       .def("get_v", &DCfdSolver::get_v)
-      .def("get_w", &DCfdSolver::get_w);
+      .def("get_w", &DCfdSolver::get_w)
+      .def("get_u_flat", &DCfdSolver::get_u_flat)
+      .def("get_v_flat", &DCfdSolver::get_v_flat)
+      .def("get_w_flat", &DCfdSolver::get_w_flat);
 }
