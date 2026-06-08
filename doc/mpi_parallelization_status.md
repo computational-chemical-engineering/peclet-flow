@@ -510,6 +510,24 @@ instead of masking); and folding the stack into the in-place `cfd_solver.cu`.
   dominant *un-reused* stream while the double iterate `x` is largely cached. At 64³ the kernels are
   launch-latency-bound, not bandwidth-bound, so precision does not help there (≈0.7–0.8×).
 
+### Step 27 — fast global reductions (block reduction + persistent scratch + single collective) ✅ verified
+- The distributed reductions (`mac_reductions.cuh`) run many times per PCG / V-cycle iteration and were
+  the dominant solver overhead. Three fixes, no numerical change: (1) a **shared-memory block reduction**
+  (one atomic per block) replaces the per-cell single-address `atomicAdd` / CAS-loop `atomicMaxDouble`
+  — the per-cell atomic was catastrophic under contention; (2) a **process-lifetime pinned scratch**
+  replaces the per-call `cudaMalloc`/`cudaFree`; (3) the hot single-quantity paths (`mac_max_abs`,
+  `mac_dot`, `mac_remove_mean`) do **one `MPI_Allreduce`** instead of two (`mac_reduce` keeps the dual
+  sum+max form for the diagnostics that need both).
+- **Speedup** (`tests/bench_reductions.cu`, 128³, per-call): the reduction cost drops from milliseconds
+  to tens of µs — **~96× np=1** (9024→94 µs for max_abs+dot+remove_mean), **33× np=2**, **15× np=4**
+  (np>1 now bounded by the MPI collective latency, where the 2→1 collective cut helps directly).
+- **End-to-end** (`profile_sphere_packing`, 64³ cut-cell pressure solve, *identical* iteration counts and
+  residuals): geometric multigrid **3.3×** (58→17 ms), **Galerkin MG + CG 4.5×** (56→12 ms), pure RB-GS
+  1.7×. The win grows with resolution (the old atomic contention scaled with cell count).
+- Validated: full suite **67/67, np=1,2,4** — including the bit-for-bit 1e-12 cell-for-cell
+  `test_multigrid_mpi` (the block reduction's reordered summation stays ~1e-16, far under tolerance) and
+  `test_reductions_mpi` (vs a host reference).
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
 Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren

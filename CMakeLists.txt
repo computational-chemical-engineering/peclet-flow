@@ -59,7 +59,7 @@ if(CFD_BUILD_MPI)
             test_navier_stokes_mpi test_ns_solid_mpi test_gather_vti_mpi test_reductions_mpi
             test_multigrid_mpi test_multigrid_var_mpi test_mg_projection_mpi test_cutcell_operator_mpi
             test_galerkin_mpi test_ibm_stencil_mpi test_ibm_poiseuille_mpi test_picard_mpi
-            profile_sphere_packing bench_mixed_precision)
+            profile_sphere_packing bench_mixed_precision bench_reductions)
     add_executable(${t} tests/${t}.cu)
     target_include_directories(${t} PRIVATE src ${TPX_INCLUDE})
     target_link_libraries(${t} PRIVATE CUDA::cudart MPI::MPI_CXX)
@@ -145,6 +145,10 @@ if(CFD_BUILD_MPI)
   add_test(NAME bench_mixed_precision
            COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS}
                    $<TARGET_FILE:bench_mixed_precision> 64 100 ${MPIEXEC_POSTFLAGS})
+  # reduction benchmark (timing; small smoke size so `ctest` stays quick)
+  add_test(NAME bench_reductions
+           COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+                   $<TARGET_FILE:bench_reductions> 64 200 ${MPIEXEC_POSTFLAGS})
 
   # Runnable demo (writes a ParaView .vti); CI runs only a tiny smoke case.
   add_executable(demo_flow_sphere tests/demo_flow_sphere.cu)
