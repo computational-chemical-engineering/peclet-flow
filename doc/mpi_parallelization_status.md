@@ -467,6 +467,16 @@ coefficients) and by convergence + np-invariance (`test_galerkin_mpi`, `test_cut
 convergence factor, so CG needs fewer iterations); a proper cut-cell no-slip (open-weighted velocity BC
 instead of masking); and folding the stack into the in-place `cfd_solver.cu`.
 
+**Sizing the iteration-reduction opportunity** (`tests/profile_mg_scaling.cu`, sphere packing, np=1):
+the current Galerkin (unsmoothed-aggregation) + CG solve is **not h-independent** — the standalone
+V-cycle factor ρ grows 0.65 → 0.81 → 0.90 and CG iterations grow 15 → 20 → 30 across N = 32 → 64 → 128
+(rtol 1e-8) — so there *is* real room. But it is **smoother-limited**: going pre/post = 1 → 4 sweeps cuts
+CG iterations ~1.9× at every size. That points first at a **stronger smoother (Chebyshev)** — cheap, no
+coarse-operator change — and a **W-cycle** for the ρ-grows-with-N part, *before* the expensive smoothed-
+aggregation rewrite (27-point distributed coarse operators + wider halos). SA is a justified *secondary*
+lever (ρ rising with N shows the coarse correction also degrades), not the first thing to reach for.
+Realistic prize at 128³: ~1.5–2× on the pressure solve from the cheap levers; SA on top is uncertain.
+
 ### Step 25 — mixed-precision momentum-solve matrix ✅ verified
 - Mirrors the production solver's "state double / matrix float" policy (`cfd_solver.cuh`): the velocity
   diffusion/advection stencil `As_[3][7]` (streamed every Red-Black sweep / V-cycle) is stored in single
