@@ -65,6 +65,7 @@ class DCfdSolver {
 
   void set_body_force(double fx, double fy, double fz) { s_.set_body_force(fx, fy, fz); }
   void set_advection(bool on) { s_.set_advection(on); }
+  void set_implicit_advection(bool on) { s_.set_implicit_advection(on); }
   void set_outer_iterations(int n) { s_.set_outer_iterations(n); }
   void set_outer_tolerance(double t) { s_.set_outer_tolerance(t); }
   void set_pressure_multigrid(bool on, int levels) { s_.set_pressure_multigrid(on, levels); }
@@ -144,6 +145,7 @@ PYBIND11_MODULE(dcfd, m) {
       .def("size", &DCfdSolver::size)
       .def("set_body_force", &DCfdSolver::set_body_force, py::arg("fx"), py::arg("fy"), py::arg("fz"))
       .def("set_advection", &DCfdSolver::set_advection, py::arg("on"))
+      .def("set_implicit_advection", &DCfdSolver::set_implicit_advection, py::arg("on"))
       .def("set_outer_iterations", &DCfdSolver::set_outer_iterations, py::arg("n"))
       .def("set_outer_tolerance", &DCfdSolver::set_outer_tolerance, py::arg("tol"))
       .def("set_pressure_multigrid", &DCfdSolver::set_pressure_multigrid, py::arg("on"),

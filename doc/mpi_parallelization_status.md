@@ -397,6 +397,27 @@ bit-for-bit.
   x-fastest buffer before reshaping to `u[x,y,z]`. (The channel hid this — its `u(y)` is symmetric in
   x↔z; the directional sphere flow exposed it.)
 
+### Step 24 — implicit-FOU deferred-correction advection (high-Re robustness) ✅ verified
+The distributed solver is a full Navier–Stokes solver (Koren TVD advection, `set_advection(true)`), but
+its advection was **fully explicit** (Picard-lagged) and therefore **CFL-limited** — at high Reynolds
+number / large `dt` it blows up. The production solver avoids this with a **deferred correction**: the
+first-order-upwind (FOU) part of advection is implicit (added to the momentum stencil's diagonal →
+diagonally dominant → unconditionally stable for advection), and only the `(Koren − FOU)` correction is
+explicit. Ported as `set_implicit_advection(on)` (requires the IBM operator):
+- `sadv::advect_fou` / `sadv::fou_operator` (`staggered_advection.cuh`): the conservative FOU flux and
+  the matching operator coefficients (diagonal gets `max(velp,0) − min(velm,0) ≥ 0`, off-diagonals ≤ 0).
+- Each Picard iteration rebuilds the velocity stencil `A = (I − νΔt∇²) + Δt·FOU(uᵏ)` (`build_adv_stencil_k`)
+  and re-applies the IBM bake; the RHS gets `+Δt·FOU(uᵏ)` (`add_fou_rhs_k`) so `A u* = u^n + dt·f −
+  dt·(Koren − FOU)` → at convergence it is exactly the Koren scheme, just stabilised. The stencil changes
+  each iteration, so the velocity solve is RB-GS (not the static-operator MG).
+- `scripts/verify_implicit_advection_dcfd.py` (flow around a sphere): at **high Re** (`dt=5`, CFL≫1) the
+  **explicit advection blows up (NaN)** while **implicit-FOU stays finite** (U_max→3.0); at **moderate Re**
+  the two **agree to 0.55 %** (same Koren scheme at convergence). `set_implicit_advection` defaults off,
+  so the 65/65 MPI ctests are unaffected.
+
+This closes the high-Re robustness gap with the production solver: `dcfd` now matches its full
+Navier–Stokes capability *and* its deferred-correction stability.
+
 ## Deviations from the original plan
 
 The original plan (the suite-level multigrid design and Steps 15–18 here) specified a **geometric

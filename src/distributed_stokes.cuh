@@ -55,6 +55,35 @@ __global__ void advect_rhs_k(int comp, const double* u, const double* v, const d
   long i = L3(x, y, z, e);
   b[i] = phi[i] - dt * A + dt * f;
 }
+// implicit-FOU deferred correction: build the velocity stencil = backward-Euler diffusion
+// (I - nu*dt*Lap) + dt*FOU_advection(u^k). The FOU upwind terms add to the diagonal -> diagonally
+// dominant -> stable at high Re. Built per Picard iteration (advecting velocity u,v,w frozen at u^k).
+template <int COMP>
+__global__ void build_adv_stencil_k(double* A_C, double* A_W, double* A_E, double* A_S, double* A_N,
+                                    double* A_B, double* A_T, const double* u, const double* v,
+                                    const double* w, int3 e, int g, double beta, double dt) {
+  int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
+      z = blockIdx.z * blockDim.z + threadIdx.z;
+  if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
+  long i = L3(x, y, z, e);
+  double cC = 1.0 + 6.0 * beta, cxm = -beta, cxp = -beta, cym = -beta, cyp = -beta, czm = -beta,
+         czp = -beta;
+  sadv::fou_operator(COMP, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e}, sadv::LocAcc{w, e}, dt, cC,
+                     cxm, cxp, cym, cyp, czm, czp);
+  A_C[i] = cC; A_W[i] = cxm; A_E[i] = cxp; A_S[i] = cym; A_N[i] = cyp; A_B[i] = czm; A_T[i] = czp;
+}
+// add the explicit FOU term to the RHS: b += dt*FOU(u^k) (so b = u^n + dt*f - dt*(Koren - FOU))
+template <int COMP>
+__global__ void add_fou_rhs_k(double* b, const double* u, const double* v, const double* w,
+                              const double* phi, int3 e, int g, double dt) {
+  int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
+      z = blockIdx.z * blockDim.z + threadIdx.z;
+  if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
+  long i = L3(x, y, z, e);
+  b[i] += dt * sadv::advect_fou(COMP, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e},
+                                sadv::LocAcc{w, e}, sadv::LocAcc{phi, e});
+}
+
 // one Red-Black diffusion sweep: c <- (b + beta*sum_nbr c)/(1+6 beta), global parity.
 __global__ void diff_k(double* c, const double* b, int3 e, int3 og, int g, double beta, double Ac,
                        int color) {
@@ -168,6 +197,13 @@ class DistributedStokes {
   // Enable explicit nonlinear advection (full Navier-Stokes instead of Stokes).
   void set_advection(bool on) { advection_ = on; }
 
+  // Implicit-FOU deferred-correction advection (requires the IBM operator). The first-order-upwind part
+  // of advection is solved implicitly (added to the momentum stencil -> diagonally dominant), and the
+  // (Koren - FOU) correction is explicit, so the scheme stays Koren TVD at convergence but is robust at
+  // high Reynolds number (no longer CFL-limited like the fully-explicit path). Velocity solve is RB-GS
+  // (the stencil changes each Picard iteration); n_diff counts RB-GS sweeps.
+  void set_implicit_advection(bool on) { implicit_fou_ = on; }
+
   // Picard (defect-correction) outer iterations within each timestep: each iteration re-lags the
   // advection at the latest velocity and re-projects, converging the nonlinear advection/pressure
   // coupling that a single fractional step leaves. tol>0 stops early when the max velocity change over
@@ -249,6 +285,7 @@ class DistributedStokes {
     float3 spacing = make_float3(1, 1, 1);
     float3 offs[3] = {make_float3(-0.5f, 0, 0), make_float3(0, -0.5f, 0), make_float3(0, 0, -0.5f)};
     float ubc[3] = {u_bc.x, u_bc.y, u_bc.z};
+    ubc_ibm_ = u_bc;
 
     double* sdf = nullptr;
     cudaMalloc(&sdf, n_ * 8);
@@ -411,6 +448,33 @@ class DistributedStokes {
           cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], 1.0, old[c], (long)n_);
           cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], -1.0, comp[c], (long)n_);
         }
+        if (implicit_fou_ && ibm_enabled_) {
+          // deferred correction: b += dt*FOU(u^k) -> b = u^n + dt*f - dt*(Koren - FOU); and rebuild the
+          // velocity stencil = diffusion + dt*FOU(u^k), then re-apply the IBM bake (descale_/inhom_).
+          add_fou_rhs_k<0><<<grd_, blk_>>>(b_[0], u_, v_, w_, u_, ext_, g, dt_);
+          add_fou_rhs_k<1><<<grd_, blk_>>>(b_[1], u_, v_, w_, v_, ext_, g, dt_);
+          add_fou_rhs_k<2><<<grd_, blk_>>>(b_[2], u_, v_, w_, w_, ext_, g, dt_);
+          float ub[3] = {ubc_ibm_.x, ubc_ibm_.y, ubc_ibm_.z};
+          for (int c = 0; c < 3; ++c) {
+            double* A[7] = {As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4], As_[c][5], As_[c][6]};
+            if (c == 0)
+              build_adv_stencil_k<0><<<grd_, blk_>>>(A[0], A[1], A[2], A[3], A[4], A[5], A[6], u_, v_,
+                                                     w_, ext_, g, beta, dt_);
+            else if (c == 1)
+              build_adv_stencil_k<1><<<grd_, blk_>>>(A[0], A[1], A[2], A[3], A[4], A[5], A[6], u_, v_,
+                                                     w_, ext_, g, beta, dt_);
+            else
+              build_adv_stencil_k<2><<<grd_, blk_>>>(A[0], A[1], A[2], A[3], A[4], A[5], A[6], u_, v_,
+                                                     w_, ext_, g, beta, dt_);
+            cfdmpi::ibmdetail::ibm_fill_k<<<blocks, threads>>>(descale_[c], 1.0, (long)n_);
+            cudaMemset(inhom_[c], 0, n_ * 8);
+            if (ibmdata_[c].num_active_cells > 0)
+              cfdmpi::ibmdetail::ibm_modify_stencil_k<<<(ibmdata_[c].num_active_cells + 255) / 256,
+                                                        256>>>(A[0], A[1], A[2], A[3], A[4], A[5], A[6],
+                                                               inhom_[c], descale_[c], ibmdata_[c],
+                                                               ub[c]);
+          }
+        }
       } else {
         for (int c = 0; c < 3; ++c) rhs_k<<<grd_, blk_>>>(old[c], b_[c], dt_ * f[c], ext_, g);
       }
@@ -425,7 +489,7 @@ class DistributedStokes {
         cfdmpi::ibmdetail::ibm_scale_k<<<ibblocks, ibthreads>>>(b_[c], descale_[c], (long)n_);
         cfdmpi::mgdetail::mg_axpy_k<<<ibblocks, ibthreads>>>(b_[c], -1.0, inhom_[c], (long)n_);
       }
-      if (vmg_enabled_) {
+      if (vmg_enabled_ && !implicit_fou_) {  // implicit-FOU changes the stencil each iter -> RB-GS
         ensure_vmg_built();
         for (int c = 0; c < 3; ++c) {
           vmg_.setDiffusionFine(As_[c]);  // fine = this component's IBM stencil (coarse built once)
@@ -530,6 +594,7 @@ class DistributedStokes {
   double nu_ = 0, dt_ = 0, fx_ = 0, fy_ = 0, fz_ = 0;
   bool has_solid_ = false;
   bool advection_ = false;
+  bool implicit_fou_ = false;
   std::size_t n_ = 0;
   int3 ext_{}, origin_{};
   dim3 blk_, grd_;
@@ -562,6 +627,7 @@ class DistributedStokes {
   double* inhom_[3] = {nullptr, nullptr, nullptr};
   double* solidmask_[3] = {nullptr, nullptr, nullptr};
   double* descale_[3] = {nullptr, nullptr, nullptr};  // Robust-Scaled per-cell RHS scale (D_rescale)
+  float3 ubc_ibm_ = make_float3(0, 0, 0);             // IBM wall velocity (for per-iteration re-bake)
   // CG-accelerated pressure solve (for the stiff cut-cell operator)
   bool pcg_ = false;
   int pcg_maxit_ = 60;

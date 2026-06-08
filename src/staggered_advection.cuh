@@ -73,4 +73,41 @@ __device__ inline double advect(int comp, int x, int y, int z, A U, A V, A W, A 
   return out;
 }
 
+// ---- first-order upwind (FOU) variant, for the implicit-FOU deferred correction ----
+// FOU face flux: vel * (upwind value across the face L|R).
+__device__ inline double fou_flux(double L, double R, double vel) { return vel * (vel > 0.0 ? L : R); }
+
+// Conservative FOU advection of `comp` (same advecting velocities as advect(), low-order flux).
+template <class A>
+__device__ inline double advect_fou(int comp, int x, int y, int z, A U, A V, A W, A PHI) {
+  double out = 0.0;
+  for (int fd = 0; fd < 3; ++fd) {
+    int ox = (fd == 0), oy = (fd == 1), oz = (fd == 2);
+    double velp = adv_vel(comp, fd, x, y, z, U, V, W);
+    double velm = adv_vel(comp, fd, x - ox, y - oy, z - oz, U, V, W);
+    out += fou_flux(PHI(x, y, z), PHI(x + ox, y + oy, z + oz), velp) -
+           fou_flux(PHI(x - ox, y - oy, z - oz), PHI(x, y, z), velm);
+  }
+  return out;
+}
+
+// The FOU advection OPERATOR coefficients added to a cell's 7-point stencil (consistent with
+// advect_fou applied to the field): diagonal gets max(velp,0)-min(velm,0) >= 0 (diagonal dominance),
+// off-diagonals are <= 0. Returns via the out-params (added in, not assigned). cmp is the component.
+template <class A>
+__device__ inline void fou_operator(int comp, int x, int y, int z, A U, A V, A W, double dt, double& cC,
+                                    double& cxm, double& cxp, double& cym, double& cyp, double& czm,
+                                    double& czp) {
+  for (int fd = 0; fd < 3; ++fd) {
+    int ox = (fd == 0), oy = (fd == 1), oz = (fd == 2);
+    double velp = adv_vel(comp, fd, x, y, z, U, V, W);
+    double velm = adv_vel(comp, fd, x - ox, y - oy, z - oz, U, V, W);
+    cC += dt * (fmax(velp, 0.0) - fmin(velm, 0.0));
+    double cp = dt * fmin(velp, 0.0), cm = dt * (-fmax(velm, 0.0));
+    if (fd == 0) { cxp += cp; cxm += cm; }
+    else if (fd == 1) { cyp += cp; cym += cm; }
+    else { czp += cp; czm += cm; }
+  }
+}
+
 }  // namespace sadv
