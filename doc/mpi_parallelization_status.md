@@ -553,6 +553,9 @@ parallel-smoother regimes, just not on this case.
   (`DeviceGridExchange::exchangeOnStream`): kernels/copies on a caller stream with **no device-wide
   sync** (the old `exchange` does a full `cudaDeviceSynchronize` per call that would serialise streams).
   `set_velocity_streams(bool)` toggles it (default on); only the cut-cell IBM RB-GS path is affected.
+  *Dependency:* `exchangeOnStream` is merged to **transport-core `main`** (commit `53e2a17`), so a fresh
+  checkout builds against the sibling `../transport-core` with no special branch. (The Step-28 cfd commit
+  message predates the merge and still says "requires branch stream-aware-exchange" — now superseded.)
 - **Speedup** (`tests/bench_velocity_streams.cu`, IBM sphere, velocity-heavy step): **2.97× at 32³**,
   **1.68× at 64³**, **0.97× at 128³**. The win is largest at small sizes for two reasons — the
   components actually overlap (one stencil doesn't saturate the GPU), *and* the stream path drops the
