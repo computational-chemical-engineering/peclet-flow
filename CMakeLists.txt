@@ -66,12 +66,6 @@ if(CFD_BUILD_MPI)
     set_target_properties(${t} PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
   endforeach()
 
-  # Python module: distributed Navier-Stokes solver (DistributedNS). -> dcfd.*.so
-  pybind11_add_module(dcfd src/dcfd_bindings.cu)
-  target_include_directories(dcfd PRIVATE src ${TPX_INCLUDE})
-  target_link_libraries(dcfd PRIVATE CUDA::cudart MPI::MPI_CXX)
-  set_target_properties(dcfd PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
-
   foreach(np IN ITEMS 1 2 4)
     add_test(NAME mac_halo_np${np}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
@@ -167,4 +161,25 @@ if(CFD_BUILD_MPI)
            COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
                    $<TARGET_FILE:demo_flow_sphere> 16 3 ${CMAKE_CURRENT_BINARY_DIR}/smoke.vti
                    ${MPIEXEC_POSTFLAGS})
+endif()
+
+# ---------------------------------------------------------------------------
+# Canonical `sdflow` Python module (the convergence target). Built in BOTH modes from one source:
+#   * default build               -> single-rank, NO MPI linked (transport-core's TPX_NO_MPI stub)
+#   * -DCFD_BUILD_MPI=ON           -> linked against MPI for the multi-rank path (with the *_mpi tests)
+# transport-core is header-only, picked up from the sibling checkout; skipped if absent.
+# ---------------------------------------------------------------------------
+set(TPX_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../transport-core/include")
+if(EXISTS "${TPX_INCLUDE}/tpx/halo/grid_halo.hpp")
+  pybind11_add_module(sdflow src/sdflow_bindings.cu)
+  target_include_directories(sdflow PRIVATE src ${TPX_INCLUDE})
+  set_target_properties(sdflow PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "75;80;86;120")
+  if(CFD_BUILD_MPI)
+    target_link_libraries(sdflow PRIVATE CUDA::cudart MPI::MPI_CXX)
+    message(STATUS "cfd-gpu: sdflow module -> MPI (multi-rank)")
+  else()
+    target_compile_definitions(sdflow PRIVATE TPX_NO_MPI=1)
+    target_link_libraries(sdflow PRIVATE CUDA::cudart)
+    message(STATUS "cfd-gpu: sdflow module -> single-rank, no MPI linked")
+  endif()
 endif()

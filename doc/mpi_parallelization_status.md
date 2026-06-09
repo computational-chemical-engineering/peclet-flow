@@ -566,6 +566,49 @@ parallel-smoother regimes, just not on this case.
 - Validated: bit-identical results (`test_ibm_poiseuille_mpi` rel err 2.07e-4, zero solid leak,
   np=1,2,4). Full suite **68/68**.
 
+### Step 29 — consolidation to one solver + clean `sdflow` API (convergence Phase 1) ✅ verified
+- Began converging cfd-gpu's two parallel implementations into ONE. The extended-block `DistributedNS`
+  is the canonical solver, now exposed through a single clean Python module **`sdflow`** (renamed from
+  `dcfd`; retiring the production `cfd_solver*.cu`/`pnm_backend` is a later phase). Decisions (user): no
+  `pnm_backend` API compatibility (clean API); physical **rho/mu** units (`nu = mu/rho`); body force is a
+  **force per unit volume** (→ internal acceleration `f/rho`); pressure `p = rho/dt · phi` exposed via
+  `get_p` (from the existing projection potential — only an additive `phi()` accessor on `DistributedNS`
+  was needed); **periodic BCs only** (future BCs ride on the cut-cell IBM `u_bc`, not a halo-BC system).
+- API (`src/sdflow_bindings.cu`): `sdflow.Solver(nx,ny,nz)` + `set_rho/set_mu/set_dt`, `set_body_force`
+  (force/volume), `set_solid(sdf, cutcell_pressure, galerkin)` (folds IBM + cut-cell pressure operator),
+  persistent `set_velocity/pressure_solver_params`, `step()`, `get_u/v/w/p`, `set_state`,
+  `bcast_from_root` (collective early-stop for multi-rank drivers). Lazy init (rho/mu/dt must be set
+  before the geometry bakes the diffusion stencil). Grid spacing is unit (physical dx is a follow-up).
+- Verify scripts ported (`scripts/verify_*_sdflow.py`, `cross_validate_sdflow_vs_pnm.py`) and made
+  **multi-rank-correct**: all ranks call the collective gathers and `bcast_from_root` agrees the stop —
+  the old `dcfd` scripts deadlocked at np>1 (rank-0-only break + gather). Validated: Poiseuille analytic
+  parabola identical to before (2.78/0.69/0.15 % at N=16/32/64) at **np=1 and np=2**; sphere-packing
+  permeability identical (k 7.45→25.99, incompressible, exact no-slip); **cross-validation vs production
+  `pnm_backend` unchanged** — channel field L2 **0.00 %** (exact), sphere **1.84 %** (scheme/precision).
+- Remaining convergence phases: MPI-optional build (single-block no-MPI transport-core path → default
+  build links no MPI); then retire `cfd_solver*.cu`/`pnm_backend` once parity is signed off on real cases.
+
+### Step 30 — MPI-optional build (convergence Phase 2) ✅ verified
+- The canonical `sdflow` solver now builds **with or without MPI from one source**. Mechanism: a tiny
+  include shim `transport-core/include/tpx/common/mpi.hpp` — `#include <mpi.h>` normally, or
+  `mpi_stub.hpp` when `TPX_NO_MPI`. The stub is a **single-rank no-MPI implementation**: `rank=0`,
+  `size=1`, `MPI_Allreduce`/`MPI_Bcast` are local identities, and the point-to-point / neighbourhood
+  calls exist only to link (never reached at size 1 — every ghost is a periodic *self-copy*, so the
+  NBX topology round and `DeviceGridExchange` do zero remote comm). **One code path either way** — the
+  same `GridHalo`/`DeviceGridExchange`/`NbxEngine` run; the shim just swaps what `MPI_*` resolves to.
+- CMake: transport-core `option(TPX_ENABLE_MPI ON)` (OFF → defines `TPX_NO_MPI`, no MPI link); cfd-gpu
+  builds the `sdflow` module in **both** modes — default = **single-rank, NO MPI linked**
+  (`ldd sdflow.so` shows no `libmpi`), `-DCFD_BUILD_MPI=ON` = MPI multi-rank (+ the `*_mpi` tests). All
+  solver headers (`mac_*.cuh`, `distributed_ns.cuh`, `sdflow_bindings.cu`) and the transport-core halo
+  headers now include the shim instead of `<mpi.h>`.
+- Validated: transport-core MPI build **30/30** unchanged (shim transparent); cfd MPI build unchanged
+  (representative `mac_halo`/`reductions`/`ibm_poiseuille`/`multigrid` at np=2/4 pass); the **no-MPI
+  `sdflow` build** imports, links no MPI, and reproduces Poiseuille bit-identically (U_max 1.78750, err
+  0.694 % at N=32 / 0.148 % at N=64) with `get_p` working. Verify scripts pick the build via
+  `SDFLOW_BUILD` (default `build_mpi`).
+- Remaining (Phase 3): retire `cfd_solver*.cu`/`bindings.cpp`/`pnm_backend` once parity is signed off on
+  real cases; `sdflow` then becomes the only module and the default build is the single-GPU solver.
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
 Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren

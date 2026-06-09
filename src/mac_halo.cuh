@@ -13,7 +13,7 @@
 // the next (larger) task — see cfd-gpu/CLAUDE.md.
 #pragma once
 
-#include <mpi.h>
+#include "tpx/common/mpi.hpp"
 
 #include <array>
 #include <cstddef>

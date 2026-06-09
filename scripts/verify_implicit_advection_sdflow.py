@@ -15,8 +15,8 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "build_mpi")))
-import dcfd  # noqa: E402
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build_mpi"))))
+import sdflow  # noqa: E402
 
 N = 32
 NU = 0.1
@@ -29,17 +29,20 @@ def sphere_sdf(rfrac=0.3):  # sdf[x,y,z], negative inside the sphere
 
 def run(implicit, dt, fx, n_steps, to_steady=False):
     sdf = sphere_sdf()
-    s = dcfd.Solver(N, N, N, NU, dt)
+    s = sdflow.Solver(N, N, N)
+    s.set_rho(1.0)            # grid units: rho=1, mu=NU -> nu=NU
+    s.set_mu(NU)
+    s.set_dt(dt)
     s.set_body_force(fx, 0.0, 0.0)
     s.set_advection(True)
     s.set_implicit_advection(implicit)
     s.set_outer_iterations(3)
-    s.set_ibm_solid(sdf)
-    s.set_cutcell_pressure_operator(sdf, galerkin=True)
+    s.set_velocity_solver_params(80)  # implicit-FOU uses RB-GS (n_diff sweeps), not vel-MG
     s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)
+    s.set_solid(sdf, cutcell_pressure=True, galerkin=True)
     prev = 0.0
-    for it in range(n_steps):
-        s.step(n_diff=80, n_pois=0)
+    for it in range(n_steps):  # np=1 demo
+        s.step()
         u = s.get_u()
         if not np.isfinite(u).all():
             return None  # blew up

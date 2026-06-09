@@ -14,7 +14,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
-#include <mpi.h>
+#include "tpx/common/mpi.hpp"
 
 #include "mac_halo.cuh"
 

@@ -12,7 +12,7 @@
 // (Historically named DistributedStokes when it was Stokes-only; now a full NS solver.)
 #pragma once
 
-#include <mpi.h>
+#include "tpx/common/mpi.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -209,6 +209,7 @@ class DistributedNS {
   double* u() { return u_; }
   double* v() { return v_; }
   double* w() { return w_; }
+  double* phi() { return phi_; }  // projection potential; pressure p = rho/dt * phi (Chorin)
 
   // Run the independent u/v/w IBM RB-GS momentum solves on 3 concurrent CUDA streams (default on).
   // Overlaps at small per-component sizes where one stencil does not saturate the GPU; ~no effect once

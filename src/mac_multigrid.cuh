@@ -14,7 +14,7 @@
 // (the only per-cell difference, halo vs in-kernel wrap, yields identical neighbour values).
 #pragma once
 
-#include <mpi.h>
+#include "tpx/common/mpi.hpp"
 
 #include <cstdio>
 #include <cstdlib>
