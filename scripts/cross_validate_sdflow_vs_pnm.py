@@ -15,7 +15,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "build")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "build_mpi")))
 import pnm_backend  # noqa: E402
-import dcfd  # noqa: E402
+import sdflow  # noqa: E402
 
 NU = 0.1
 
@@ -53,23 +53,24 @@ def run_pnm(res, sdf_xyz, fx, advection_irrelevant, steps, dt, pmg=False):
     return float(u.max()), float(u.mean()), u
 
 
-def run_dcfd(res, sdf_xyz, fx, advection, steps, dt, cutcell=False):
+def run_sdflow(res, sdf_xyz, fx, advection, steps, dt, cutcell=False):
     nx, ny, nz = res
-    s = dcfd.Solver(nx, ny, nz, NU, dt)
+    s = sdflow.Solver(nx, ny, nz)
+    s.set_rho(1.0)            # grid units: rho=1, mu=NU -> nu=NU; body force F=fx -> accel fx
+    s.set_mu(NU)
+    s.set_dt(dt)
     s.set_body_force(fx, 0.0, 0.0)
     s.set_advection(advection)
     if advection:
         s.set_outer_iterations(3)  # Picard coupling for the nonlinear advection
-    s.set_ibm_solid(sdf_xyz)
-    if cutcell:
-        s.set_cutcell_pressure_operator(sdf_xyz, galerkin=True)
-        s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)
+    s.set_pressure_solver_params(8)
     s.set_velocity_multigrid(True, levels=3, v_cycles=16)
+    if cutcell:
+        s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)
+    s.set_solid(sdf_xyz, cutcell_pressure=cutcell, galerkin=True)
     prev = 0.0
-    for it in range(steps):
-        s.step(n_diff=0, n_pois=8)
-        if s.rank() != 0:
-            return None
+    for it in range(steps):  # np=1 cross-validation (production solver is single-GPU)
+        s.step()
         um = float(s.get_u().mean())
         if it > 5 and abs(um - prev) < 1e-7 * (abs(um) + 1e-12):
             break
@@ -82,7 +83,7 @@ def compare(label, res, sdf, fx, *, analytic=None, advection=False, steps_pnm=80
             steps_dcfd=400, dt_pnm=20.0, dt_dcfd=50.0, cutcell=False):
     print(f"--- {label}  (res={res[0]}x{res[1]}x{res[2]}, nu={NU}, fx={fx}) ---")
     umax_p, mean_p, up = run_pnm(res, sdf, fx, advection, steps_pnm, dt_pnm, pmg=cutcell)
-    out = run_dcfd(res, sdf, fx, advection, steps_dcfd, dt_dcfd, cutcell=cutcell)
+    out = run_sdflow(res, sdf, fx, advection, steps_dcfd, dt_dcfd, cutcell=cutcell)
     if out is None:
         return None
     umax_d, mean_d, ud = out
@@ -92,7 +93,7 @@ def compare(label, res, sdf, fx, *, analytic=None, advection=False, steps_pnm=80
     if analytic is not None:
         print(f"  analytic U_max = {analytic:.5f}")
     print(f"  pnm_backend : U_max={umax_p:.5f}  mean={mean_p:.5e}")
-    print(f"  dcfd        : U_max={umax_d:.5f}  mean={mean_d:.5e}")
+    print(f"  sdflow      : U_max={umax_d:.5f}  mean={mean_d:.5e}")
     print(f"  field agreement (relative L2) = {l2*100:.2f}%   centreline diff = {cl*100:.2f}%")
     return l2, cl, umax_p, umax_d
 
@@ -113,7 +114,7 @@ def sphere_sdf(res, rfrac=0.3):  # -> sdf[x,y,z], negative inside the sphere
 
 
 def main():
-    print("=== cross-validation: dcfd (distributed) vs pnm_backend (production) ===")
+    print("=== cross-validation: sdflow (distributed) vs pnm_backend (production) ===")
     results = []
     # (1) Poiseuille channel: walls at non-grid positions -> cut cells
     N = 32
