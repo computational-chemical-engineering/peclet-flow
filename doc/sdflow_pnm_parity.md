@@ -27,28 +27,41 @@ development was *not* doing this — sdflow was built as a from-scratch reimplem
   | 64 | 5.603e-3 | 5.020e-3 | 11.6% |
   | 128 | 5.586e-3 | 4.294e-3 | 30.1% |
 
-  **sdflow is grid-convergent** (changes −1.7% then −0.2%, settling to ~5.586e-3). **pnm_backend is NOT**
-  (changes −9.7% then −14.5%, *accelerating* downward — its permeability keeps dropping as the geometry
-  resolves). So the gap is **pnm_backend's resolution-dependent error**, not sdflow's — almost certainly
-  its **Brinkman penalization** (`add_brinkman_drag_kernel`: a soft drag that smears no-slip over a layer
-  and over-damps more as the cut-cell surface resolves), which sdflow's sharp Robust-Scaled cut-cell IBM
-  avoids. *Caveat:* "more accurate" is inferred from grid-convergence behaviour; absolute ground truth
-  would need N=256 and/or a body-fitted reference, but the convergence evidence is strong.
+  **sdflow is more grid-stable** (changes −1.7% then −0.2%, settling near ~5.586e-3) than pnm_backend
+  (−9.7% N=32→64). **Both solvers are genuinely converged** — verified: pnm at N=64 gives the same k/N²
+  for outer-iteration counts 50/200/800 (its production setting is `outer_iterations=800`, RB-GS v=2/p=50;
+  my first benchmark using the default `outer_iterations=2` was only ~1.5% under, and the MG variant had
+  already landed on the converged value). So the gap is a **real discretisation difference between the
+  two cut-cell IBM implementations** (they are separate codes — "same math" was checked bit-exact only vs
+  sdflow's *own* serial reference, never vs pnm_backend's kernels), **not** an under-convergence artifact.
+
+  **Corrections to an earlier wrong claim:** (1) it is **NOT** the Brinkman penalization — that lives only
+  in pnm_backend's velocity *multigrid*, and these runs used velocity RB-GS, so it was never active.
+  (2) The N=128 pnm point (4.294e-3, from velocity RB-GS-80) is **less certain** — RB-GS-80 may under-
+  resolve the velocity at N=128, and a full-multigrid re-check was too slow to complete; trust the
+  verified N=32/64 trend, not the 30% headline.
+
+  **Which permeability is correct is OPEN.** sdflow being more grid-stable *suggests* it's nearer the
+  continuum answer, but a consistently-biased scheme can also be grid-stable to a wrong value, and
+  pnm_backend was validated in prior work. Resolving it needs a **ground-truth reference** — N=256 and/or
+  a body-fitted (boundary-conforming) solver, or a published permeability for this packing. That, plus
+  localising the gap (item 3), is the real next step before claiming either solver is "the accurate one".
 
 ## Backlog
 
-1. **[DONE] Grid-convergence study** — see the table above. Result: **sdflow is grid-convergent;
-   pnm_backend is not** (its permeability drops accelerating with N). So sdflow appears to be the
-   *more accurate* solver, and the gap is pnm_backend's resolution-dependent Brinkman-penalization error.
-   This flips the earlier worry — sdflow is not "behind on numerics" here; if anything it's ahead.
-   Optional follow-up: N=256 and/or a body-fitted/published reference to nail absolute ground truth.
-2. **[TODO — user-requested] Revisit RB-GS and do better.** Simple RB-GS already matches pnm_backend
-   speed; make it the *default* for sdflow (it's the efficient choice for steady marches), and then see
-   if we can beat it — e.g. tuning sweep counts per step, better smoother, or a cheap accelerator that
-   doesn't carry the full multigrid cost. (The Galerkin-MG/PCG path stays available for stiff cases.)
-3. **[optional] Confirm the gap is the Brinkman drag** — re-run pnm with the Brinkman penalization
-   weakened/disabled (if exposable) and check whether its permeability then grid-converges toward
-   sdflow's ~5.586e-3. Would turn "almost certainly" into "confirmed".
+1. **[done, but inconclusive] Grid-convergence study** — see the table. sdflow is more grid-stable than
+   pnm_backend, and the ~12% gap is real (both converged). But **which is correct is unresolved** — needs
+   a ground-truth reference (see item 3). The earlier "sdflow is more accurate / pnm has a Brinkman error"
+   was over-claimed and partly wrong (Brinkman wasn't active).
+2. **[in progress — user-requested] Make RB-GS the default + do better.** Simple RB-GS matches
+   pnm_backend speed (16 vs 15 ms/step) and gives the same sdflow answer as the cut-cell PCG; it's the
+   efficient choice for steady marches. Make it the recommended default; the Galerkin-MG/PCG path stays
+   available for stiff cases. Then try to beat it (sweep-count tuning, better smoother, cheap accelerator).
+3. **[KEY next] Ground-truth the permeability** to resolve item 1: (a) N=256 grid-convergence (does
+   sdflow stay ~5.586e-3 and pnm keep drifting, or do they meet?); (b) a body-fitted / published
+   reference for this packing; (c) localise the gap — fixed analytic pressure → compare velocity IBM;
+   fixed velocity → compare pressure operator. Reference each piece against pnm_backend's actual kernels
+   (not sdflow's own serial reimplementation).
 4. **[deferred] Crank–Nicolson** — ported then reverted: the simple explicit Laplacian is inconsistent
    with the Robust-Scaled cut-cell IBM (θ=0.5 gave a 4% θ-dependent *steady* error — a bug). Correct CN
    would need the explicit half-step to use the cut-cell operator (research effort). No benefit for

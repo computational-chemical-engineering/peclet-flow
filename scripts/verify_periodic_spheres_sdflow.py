@@ -46,9 +46,12 @@ def run(N, rho=1.0, mu=0.1, dt=60.0, F=1e-3, max_steps=200):
     s.set_dt(dt)
     s.set_body_force(F, 0.0, 0.0)
     s.set_advection(False)  # creeping (Stokes) flow
-    s.set_pressure_pcg(True, max_iter=150, rtol=1e-9)            # CG-accelerated pressure solve
-    s.set_velocity_multigrid(True, levels=4, v_cycles=12)
-    s.set_solid(sdf, cutcell_pressure=True, galerkin=True)       # no-slip + cut-cell pressure operator
+    # Default solver: simple Red-Black Gauss-Seidel (matches pnm_backend's approach and per-step speed;
+    # the Galerkin-multigrid/PCG path stays available via set_pressure_pcg for stiff cases).
+    s.set_velocity_solver_params(80)                            # IBM RB-GS velocity sweeps
+    s.set_pressure_solver_params(20)                            # RB-GS sweeps on the cut-cell operator
+    s.set_pressure_multigrid(True, levels=1)                    # 1 level == pure RB-GS (keeps the operator)
+    s.set_solid(sdf, cutcell_pressure=True, galerkin=False)     # no-slip + cut-cell pressure operator
 
     deep_solid = sdf < -2.0  # cells whose every velocity face is solid -> must be exactly no-slip
     prev = 0.0
