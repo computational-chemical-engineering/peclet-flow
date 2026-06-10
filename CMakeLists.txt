@@ -59,6 +59,7 @@ if(CFD_BUILD_MPI)
             test_navier_stokes_mpi test_ns_solid_mpi test_gather_vti_mpi test_reductions_mpi
             test_multigrid_mpi test_multigrid_var_mpi test_mg_projection_mpi test_cutcell_operator_mpi
             test_galerkin_mpi test_ibm_stencil_mpi test_ibm_poiseuille_mpi test_picard_mpi
+            test_incremental_pressure_mpi
             profile_sphere_packing bench_mixed_precision bench_reductions bench_velocity_streams profile_mg_scaling)
     add_executable(${t} tests/${t}.cu)
     target_include_directories(${t} PRIVATE src ${TPX_INCLUDE})
@@ -130,6 +131,9 @@ if(CFD_BUILD_MPI)
     add_test(NAME picard_np${np}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
                      ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_picard_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(NAME incremental_pressure_np${np}
+             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
+                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_incremental_pressure_mpi> ${MPIEXEC_POSTFLAGS})
   endforeach()
   # profiler: RB-GS vs multigrid pressure solve on the sphere packing (timing; runs at np=1)
   add_test(NAME profile_sphere_packing

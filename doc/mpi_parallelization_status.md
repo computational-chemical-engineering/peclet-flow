@@ -609,6 +609,26 @@ parallel-smoother regimes, just not on this case.
 - Remaining (Phase 3): retire `cfd_solver*.cu`/`bindings.cpp`/`pnm_backend` once parity is signed off on
   real cases; `sdflow` then becomes the only module and the default build is the single-GPU solver.
 
+### Step 31 — incremental-rotational pressure correction (production scheme) ✅ verified
+- `DistributedNS` only had **classical non-incremental Chorin** (φ solved from zero each step, no pressure
+  gradient in the predictor, p = ρ/Δt·φ instantaneous) — whereas the production `pnm_backend` uses the
+  **incremental-rotational** scheme (it carries p, predictor uses −∇pⁿ, and `p = p_old + (ρ/Δt)φ −
+  μ∇·u*`). Ported the production scheme into the canonical solver: `set_incremental_pressure(bool)`. The
+  momentum predictor subtracts the accumulated-potential gradient (`sub_gradpot_k`, same stencil as the
+  projection's `correct_k`); the accumulated potential updates once per step by the rotational form
+  `Φ += φ − νΔt·div(u*)` (`pot_update_k`). Solid cells keep Φ≈0 naturally (φ, div ≈ 0 there). The Picard
+  convergence check moved to `b_[0]` scratch so `div(u*)` survives for the update.
+- **Opt-in:** default **off** in `DistributedNS` (the 69 cell-for-cell Chorin tests are byte-unchanged),
+  default **on** in the `sdflow` module (`get_p` then returns the accumulated `ρ/Δt·Φ`).
+- **Validated vs production** (`scripts/verify_incremental_pressure_sdflow.py`, sphere NS Re≈30): steady
+  velocity unchanged (incremental vs classical 1.8 %); **pressure field vs `pnm_backend` improves from
+  2.36 % (classical Chorin) to 0.42 % (incremental) — 5.6× closer** (the rotational form removes the
+  Chorin splitting/near-wall error). **And it's faster: 132.9 → 94.9 ms/step (−28.6 %)** — the predictor
+  carries −∇pⁿ so the correction φ is a small increment and the pressure PCG converges in fewer iters.
+- **Multi-rank:** new `test_incremental_pressure_mpi` (sphere-packing Stokes) — finite, incompressible
+  (open-div 1.2e-11), exact no-slip, and **byte-identical across np=1,2,4**. Poiseuille analytic and
+  sphere-packing permeability still pass with incremental on. Full suite **72/72**.
+
 ## Status: a working, reusable distributed Navier–Stokes solver with solids and I/O
 
 Steps 1–13 deliver, on the shared decomposition + halo: the async ghost exchange (widths 1 & 2), Koren

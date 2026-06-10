@@ -146,6 +146,29 @@ __global__ void correct_k(double* u, double* v, double* w, const double* phi, in
   v[i] -= phi[i] - phi[i - sy];
   w[i] -= phi[i] - phi[i - sz];
 }
+// Incremental pressure correction: subtract the accumulated-potential gradient from the momentum RHS,
+// b_c -= dPhi/dx_c (same staggered stencil as correct_k), so the predictor carries -grad(p^n)/rho.
+__global__ void sub_gradpot_k(double* bu, double* bv, double* bw, const double* P, int3 e, int g) {
+  int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
+      z = blockIdx.z * blockDim.z + threadIdx.z;
+  if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
+  long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = (long)e.x * e.y;
+  bu[i] -= P[i] - P[i - sx];
+  bv[i] -= P[i] - P[i - sy];
+  bw[i] -= P[i] - P[i - sz];
+}
+// Rotational incremental update of the accumulated potential Phi (= dt/rho * p):
+//   Phi += phi - nu*dt*div(u*)   <=>   p += (rho/dt)phi - mu*div(u*)   (Timmermans rotational form).
+// Inner cells. Solid cells stay ~0 (phi and div are ~0 there), so grad(Phi) at solid faces is consistent
+// without a special mask. At steady state div->0 and phi->0, so Phi (the pressure) stabilises exactly.
+__global__ void pot_update_k(double* P, const double* phi, const double* div, double nudt, int3 e,
+                             int g) {
+  int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
+      z = blockIdx.z * blockDim.z + threadIdx.z;
+  if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
+  long i = L3(x, y, z, e);
+  P[i] += phi[i] - nudt * div[i];
+}
 }  // namespace detail
 
 class DistributedNS {
@@ -158,13 +181,14 @@ class DistributedNS {
     nu_ = nu;
     dt_ = dt;
     n_ = mac_.num_local_cells();
-    for (double** p : {&u_, &v_, &w_, &phi_, &div_, &solid_, &b_[0], &b_[1], &b_[2], &u_old_, &v_old_,
-                       &w_old_, &up_, &vp_, &wp_})
+    for (double** p : {&u_, &v_, &w_, &phi_, &div_, &solid_, &phitot_, &b_[0], &b_[1], &b_[2], &u_old_,
+                       &v_old_, &w_old_, &up_, &vp_, &wp_})
       cudaMalloc(p, n_ * sizeof(double));
     cudaMemset(u_, 0, n_ * 8);
     cudaMemset(v_, 0, n_ * 8);
     cudaMemset(w_, 0, n_ * 8);
     cudaMemset(solid_, 0, n_ * 8);
+    cudaMemset(phitot_, 0, n_ * 8);  // accumulated pressure potential starts at 0
     ext_ = mac_.local_ext;
     blk_ = dim3(8, 8, 4);
     grd_ = dim3((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
@@ -177,8 +201,8 @@ class DistributedNS {
     vstreams_init_ = true;
   }
   ~DistributedNS() {
-    for (double* p : {u_, v_, w_, phi_, div_, solid_, b_[0], b_[1], b_[2], ox_, oy_, oz_, u_old_,
-                      v_old_, w_old_, up_, vp_, wp_})
+    for (double* p : {u_, v_, w_, phi_, div_, solid_, phitot_, b_[0], b_[1], b_[2], ox_, oy_, oz_,
+                      u_old_, v_old_, w_old_, up_, vp_, wp_})
       if (p) cudaFree(p);
     for (int c = 0; c < 3; ++c) {
       if (idmap_[c]) cudaFree(idmap_[c]);
@@ -210,6 +234,9 @@ class DistributedNS {
   double* v() { return v_; }
   double* w() { return w_; }
   double* phi() { return phi_; }  // projection potential; pressure p = rho/dt * phi (Chorin)
+  // The field to scale by rho/dt for the physical pressure: the accumulated potential under the
+  // incremental scheme, else the per-step Chorin projection potential.
+  double* pressure_potential() { return incremental_ ? phitot_ : phi_; }
 
   // Run the independent u/v/w IBM RB-GS momentum solves on 3 concurrent CUDA streams (default on).
   // Overlaps at small per-component sizes where one stencil does not saturate the GPU; ~no effect once
@@ -219,6 +246,13 @@ class DistributedNS {
   void set_body_force(double fx, double fy, double fz) { fx_ = fx; fy_ = fy; fz_ = fz; }
   // Enable explicit nonlinear advection (full Navier-Stokes instead of Stokes).
   void set_advection(bool on) { advection_ = on; }
+
+  // Incremental-rotational pressure correction (vs classical non-incremental Chorin). The momentum
+  // predictor carries -grad(p^n) and the accumulated potential Phi is updated by the rotational form
+  // Phi += phi - nu*dt*div(u*). Same steady velocity; more accurate transient + near-wall pressure
+  // (no Chorin splitting boundary layer). Default off here (keeps the cell-for-cell Chorin tests exact);
+  // the sdflow Python module turns it on by default.
+  void set_incremental_pressure(bool on) { incremental_ = on; }
 
   // Implicit-FOU deferred-correction advection (requires the IBM operator). The first-order-upwind part
   // of advection is solved implicitly (added to the momentum stencil -> diagonally dominant), and the
@@ -451,6 +485,10 @@ class DistributedNS {
     // time-derivative base u^n (fixed for the whole timestep)
     for (int c = 0; c < 3; ++c) cudaMemcpy(old[c], comp[c], n_ * 8, cudaMemcpyDeviceToDevice);
 
+    // incremental pressure: Phi^n is fixed for the whole step; refresh its ghosts once for the
+    // predictor's -grad(Phi) term (re-used by every Picard iteration).
+    if (incremental_) mac_.exchange(phitot_);
+
     int max_outer = outer_iters_;
     last_outer_iterations_ = 0;
     for (int outer = 0; outer < max_outer; ++outer) {
@@ -502,6 +540,11 @@ class DistributedNS {
       } else {
         for (int c = 0; c < 3; ++c) rhs_k<<<grd_, blk_>>>(old[c], b_[c], dt_ * f[c], ext_, g);
       }
+
+      // incremental predictor: b_c -= dPhi/dx_c  (carry -grad(p^n)/rho into the momentum RHS, before
+      // the IBM RHS scaling so it is descaled like the other source terms).
+      if (incremental_)
+        sub_gradpot_k<<<grd_, blk_>>>(b_[0], b_[1], b_[2], phitot_, ext_, g);
 
     if (ibm_enabled_) {
       // Robust-Scaled cut-cell IBM: solve the IBM-modified stencil A_ibm comp = b - inhom (the
@@ -601,18 +644,24 @@ class DistributedNS {
     if (ibm_enabled_)
       for (int c = 0; c < 3; ++c) detail::mask_k<<<grd_, blk_>>>(comp[c], solidmask_[c], ext_);
 
-      // outer-iteration convergence: max velocity change over this Picard iteration (div_ as scratch)
+      // outer-iteration convergence: max velocity change over this Picard iteration. Uses b_[0] as
+      // scratch (free post-projection) so div_ (= div(u*)) survives for the incremental update below.
       if (outer_tol_ > 0) {
         double corr = 0.0;
         for (int c = 0; c < 3; ++c) {
-          cudaMemcpy(div_, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);
-          cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(div_, -1.0, prev[c], (long)n_);
-          corr = fmax(corr, cfdmpi::mac_max_abs(div_, mac_, comm_));
+          cudaMemcpy(b_[0], comp[c], n_ * 8, cudaMemcpyDeviceToDevice);
+          cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[0], -1.0, prev[c], (long)n_);
+          corr = fmax(corr, cfdmpi::mac_max_abs(b_[0], mac_, comm_));
         }
         last_outer_correction_ = corr;
         if (corr < outer_tol_) break;
       }
     }  // outer Picard loop
+
+    // incremental-rotational pressure update, ONCE per step: Phi += phi - nu*dt*div(u*). phi_ is the
+    // final projection potential and div_ the final div(u*) (preserved past the convergence check).
+    if (incremental_)
+      pot_update_k<<<grd_, blk_>>>(phitot_, phi_, div_, beta, ext_, g);
   }
 
  private:
@@ -641,6 +690,9 @@ class DistributedNS {
   dim3 blk_, grd_;
   double *u_ = nullptr, *v_ = nullptr, *w_ = nullptr, *phi_ = nullptr, *div_ = nullptr,
          *solid_ = nullptr;
+  // incremental-rotational pressure: accumulated velocity potential Phi (= dt/rho * pressure)
+  double* phitot_ = nullptr;
+  bool incremental_ = false;
   double* b_[3] = {nullptr, nullptr, nullptr};
   // Picard outer loop: time-base u^n (old) + per-iteration snapshot (prev) for the convergence test
   double *u_old_ = nullptr, *v_old_ = nullptr, *w_old_ = nullptr;

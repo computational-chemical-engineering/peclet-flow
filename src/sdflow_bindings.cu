@@ -81,6 +81,9 @@ class Solver {
 
   // --- scheme flags (safe before or after init; just toggle members) ---
   void set_advection(bool on) { s_.set_advection(on); }
+  // Incremental-rotational pressure correction (default ON): more accurate transient + near-wall
+  // pressure than classical Chorin; same steady velocity. Off => classical non-incremental Chorin.
+  void set_incremental_pressure(bool on) { incremental_ = on; if (inited_) s_.set_incremental_pressure(on); }
   void set_implicit_advection(bool on) { s_.set_implicit_advection(on); }
   void set_outer_iterations(int n) { s_.set_outer_iterations(n); }
   void set_outer_tolerance(double t) { s_.set_outer_tolerance(t); }
@@ -118,7 +121,10 @@ class Solver {
   py::array_t<double> get_u() { ensure_init(); return gather(s_.u(), 1.0); }
   py::array_t<double> get_v() { ensure_init(); return gather(s_.v(), 1.0); }
   py::array_t<double> get_w() { ensure_init(); return gather(s_.w(), 1.0); }
-  py::array_t<double> get_p() { ensure_init(); return gather(s_.phi(), rho_ / dt_); }  // p = rho/dt * phi
+  py::array_t<double> get_p() {  // p = rho/dt * potential (accumulated under the incremental scheme)
+    ensure_init();
+    return gather(s_.pressure_potential(), rho_ / dt_);
+  }
 
  private:
   void require_pre_init(const char* what) const {
@@ -136,6 +142,7 @@ class Solver {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     s_.init(res_, rank, size, /*nu=*/mu_ / rho_, dt_, MPI_COMM_WORLD);
     s_.set_body_force(fx_ / rho_, fy_ / rho_, fz_ / rho_);
+    s_.set_incremental_pressure(incremental_);
     inited_ = true;
   }
 
@@ -171,6 +178,7 @@ class Solver {
   double rho_ = -1.0, mu_ = -1.0, dt_ = -1.0;   // physical params (must be set before use)
   double fx_ = 0.0, fy_ = 0.0, fz_ = 0.0;       // body force per unit volume
   int n_diff_ = 30, n_pois_ = 50;               // inner-iteration counts for step()
+  bool incremental_ = true;                     // incremental-rotational pressure (default on)
   bool inited_ = false;
 };
 
@@ -189,6 +197,7 @@ PYBIND11_MODULE(sdflow, m) {
       .def("set_dt", &Solver::set_dt, py::arg("dt"))
       .def("set_body_force", &Solver::set_body_force, py::arg("fx"), py::arg("fy"), py::arg("fz"))
       .def("set_advection", &Solver::set_advection, py::arg("on"))
+      .def("set_incremental_pressure", &Solver::set_incremental_pressure, py::arg("on"))
       .def("set_implicit_advection", &Solver::set_implicit_advection, py::arg("on"))
       .def("set_outer_iterations", &Solver::set_outer_iterations, py::arg("n"))
       .def("set_outer_tolerance", &Solver::set_outer_tolerance, py::arg("tol"))
