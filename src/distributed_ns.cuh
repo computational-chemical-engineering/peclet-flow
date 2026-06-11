@@ -290,9 +290,14 @@ class DistributedNS {
   // the constant-coefficient Laplacian on level 0 (coarse levels stay constant-coefficient, mirroring
   // the serial multigrid). Enables and builds the multigrid; call after init(). Spacing is unit (dx=1),
   // matching diverg_k/correct_k.
-  // galerkin=true (default) builds variational (aggregation) coarse operators so the multigrid
-  // converges the stiff cut-cell system; false keeps constant-coefficient coarse levels.
-  void set_cutcell_pressure_operator(const std::vector<double>& sdf_ext, bool galerkin = true) {
+  // coarse_mode selects how the multigrid coarse-level operators are built:
+  //   0 = REDISCRETIZED (default, recommended): average-coarsen the face openness and re-assemble the
+  //       cut-cell operator per level -- a genuine, consistent discretization on every grid. Grid-
+  //       independent V-cycle (rho ~0.15 flat in N); the correct + efficient choice.
+  //   1 = GALERKIN: variational (unsmoothed-aggregation) coarse operators. Inconsistent for the cut-cell
+  //       system (V-cycle rho -> 1 with N); kept only for comparison. Do not use for production.
+  //   2 = CONST: geometry-blind constant-coefficient coarse levels. Correct but a weak coarse model.
+  void set_cutcell_pressure_operator(const std::vector<double>& sdf_ext, int coarse_mode = 0) {
     mg_enabled_ = true;
     ensure_mg_built();
     if (!ox_) for (double** p : {&ox_, &oy_, &oz_}) cudaMalloc(p, n_ * sizeof(double));
@@ -302,7 +307,10 @@ class DistributedNS {
     dim3 gE((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
     // staggered face openness, kept for the cut-cell flux divergence (projection RHS + diagnostic)
     cfdmpi::ccdetail::cc_build_open_k<<<gE, dim3(8, 8, 4)>>>(ox_, oy_, oz_, sdf, ext_, 1.0, 1.0, 1.0);
-    mg_.setFineVariableOperator(ox_, oy_, oz_, 1.0, 1.0, 1.0, galerkin);
+    if (coarse_mode == 0)
+      mg_.setFineVariableOperatorRediscretized(ox_, oy_, oz_, 1.0, 1.0, 1.0);
+    else
+      mg_.setFineVariableOperator(ox_, oy_, oz_, 1.0, 1.0, 1.0, /*galerkin=*/coarse_mode == 1);
     cudaFree(sdf);
     cutcell_ = true;
   }

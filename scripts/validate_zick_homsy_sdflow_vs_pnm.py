@@ -57,25 +57,24 @@ def _upsample2(a):
 
 
 # ---------------------------------------------------------------- sdflow
-def run_sdflow(N, phi, mu=0.1, f=1e-3, dt=None, max_steps=600, tol=1e-6, galerkin=False, seed=None):
-    """Default = the CORRECT path: direct cut-cell RB-GS pressure operator (galerkin=False).
-    galerkin=True uses the Galerkin-MG + PCG pressure path (known to drift -- demonstrably buggy).
+def run_sdflow(N, phi, mu=0.1, f=1e-3, dt=None, max_steps=600, tol=1e-6, coarse="rediscretized",
+               seed=None):
+    """Multilevel MG-PCG pressure solve; `coarse` selects the coarse-operator mode
+    ('rediscretized' = the geometric per-level cut-cell operator, the recommended default;
+    'galerkin' = the inconsistent aggregation path; 'const' = geometry-blind coarse).
     `seed` = (u,v,w) from the next-coarser N, upsampled here, to start the march near steady."""
     import sdflow
     if dt is None:
         dt = 60.0 if N <= 64 else 120.0
+    lv = max(2, int(np.log2(N)) - 1)                          # coarsen to ~4^3
     sdf, R = sc_sdf_xyz(N, phi)
     s = sdflow.Solver(N, N, N)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(f, 0, 0); s.set_advection(False)
-    if galerkin:
-        lv = max(2, int(np.log2(N)) - 2)
-        s.set_velocity_multigrid(True, levels=lv, v_cycles=10)
-        s.set_pressure_multigrid(True, levels=lv)
-        s.set_pressure_pcg(True, max_iter=100, rtol=1e-6)
-    else:
-        s.set_velocity_solver_params(150); s.set_pressure_solver_params(60)
-        s.set_pressure_multigrid(True, levels=1)              # 1 level == pure RB-GS on the cut-cell op
-    s.set_solid(sdf, cutcell_pressure=True, galerkin=galerkin)
+    s.set_velocity_solver_params(200)                         # velocity RB-GS (the velocity MG under-
+    #                                                           converges the IBM diffusion -- separate bug)
+    s.set_pressure_multigrid(True, levels=lv)
+    s.set_pressure_pcg(True, max_iter=200, rtol=1e-8)
+    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse=coarse)
     if seed is not None:
         u, v, w = (np.asfortranarray(_upsample2(c)) for c in seed)
         s.set_state(u, v, w)

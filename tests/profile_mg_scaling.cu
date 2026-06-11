@@ -72,21 +72,30 @@ int main(int argc, char** argv) {
   if (sizes.empty()) sizes = {32, 64, 128};
 
   if (rank == 0)
-    printf("=== cut-cell pressure MG scaling (np=%d, Galerkin/unsmoothed-aggregation + CG) ===\n", size);
+    printf("=== cut-cell pressure MG: coarse-operator comparison (np=%d) ===\n", size);
+
+  // coarse-operator modes to compare (Phase 0 baseline; REDISC added in Phase 1)
+  enum Mode { SINGLE = 0, CONSTC = 1, GALERKIN = 2, REDISC = 3 };
+  const char* mode_name[] = {"1-level RB-GS ", "const-coeff MG", "Galerkin   MG ", "rediscret. MG "};
 
   for (int N : sizes) {
     int3 res = make_int3(N, N, N);
-    int nlev = levels_for(N), bottom = 20;
+    int nlev_full = levels_for(N), bottom = 20;
+    int cur_nlev = nlev_full;
 
-    auto build = [&](cfdmpi::DistributedPoissonMG& mg) {
-      mg.init(res, rank, size, 1.0, nlev, MPI_COMM_WORLD, /*ghost=*/2);
+    auto build = [&](cfdmpi::DistributedPoissonMG& mg, int mode) {
+      cur_nlev = (mode == SINGLE) ? 1 : nlev_full;
+      mg.init(res, rank, size, 1.0, cur_nlev, MPI_COMM_WORLD, /*ghost=*/2);
       cfdmpi::MGLevel& l0 = mg.level(0);
       double *sdf, *ox, *oy, *oz;
       for (double** p : {&sdf, &ox, &oy, &oz}) cudaMalloc(p, l0.n * 8);
       dim3 gE((l0.ext.x + 7) / 8, (l0.ext.y + 7) / 8, (l0.ext.z + 3) / 4);
       fill_sdf_ext<<<gE, dim3(8, 8, 4)>>>(sdf, l0.ext, l0.og, res);
       cfdmpi::ccdetail::cc_build_open_k<<<gE, dim3(8, 8, 4)>>>(ox, oy, oz, sdf, l0.ext, 1.0, 1.0, 1.0);
-      mg.setFineVariableOperator(ox, oy, oz, 1.0, 1.0, 1.0, /*galerkin=*/true);
+      if (mode == REDISC)
+        mg.setFineVariableOperatorRediscretized(ox, oy, oz, 1.0, 1.0, 1.0);
+      else
+        mg.setFineVariableOperator(ox, oy, oz, 1.0, 1.0, 1.0, /*galerkin=*/mode == GALERKIN);
       for (double* p : {sdf, ox, oy, oz}) cudaFree(p);
     };
     auto setup_rhs = [&](cfdmpi::DistributedPoissonMG& mg) {
@@ -112,77 +121,58 @@ int main(int argc, char** argv) {
       return cfdmpi::mac_max_abs(l0.res, l0.mac, MPI_COMM_WORLD);
     };
 
-    // (A) standalone V-cycle asymptotic factor rho: residual reduction per cycle, above the float floor
-    double rho = 0.0;
-    {
+    // standalone V-cycle asymptotic factor rho (median residual reduction per cycle, above float floor)
+    auto measure_rho = [&](int mode) {
       cfdmpi::DistributedPoissonMG mg;
-      build(mg);
+      build(mg, mode);
       setup_rhs(mg);
-      double r0 = resid(mg);
+      double r0 = resid(mg), rprev = r0, rho = 0.0;
       std::vector<double> ratios;
-      double rprev = r0;
       for (int v = 0; v < 30; ++v) {
         mg.solve(1, 2, 2, bottom);
         double r = resid(mg);
-        if (r > 1e-6 * r0 && r < 0.95 * rprev) ratios.push_back(r / rprev);  // clean decay window
+        if (r > 1e-6 * r0 && r < 0.95 * rprev) ratios.push_back(r / rprev);
         rprev = r;
       }
       if (!ratios.empty()) {
         std::sort(ratios.begin(), ratios.end());
-        rho = ratios[ratios.size() / 2];  // median per-cycle reduction
+        rho = ratios[ratios.size() / 2];
       }
       mg.free();
-    }
-
-    // (B) CG iterations to rtol across smoother sweeps (smoother- vs coarse-limited)
-    int it_pp[3] = {0, 0, 0};
-    int pps[3] = {1, 2, 4};
-    for (int s = 0; s < 3; ++s) {
+      return rho;  // 0 reported as n/a (e.g. single-level has no coarse correction)
+    };
+    // MG-preconditioned CG iterations to 1e-8 at pre/post=2
+    auto measure_iters = [&](int mode) {
       cfdmpi::DistributedPoissonMG mg;
-      build(mg);
+      build(mg, mode);
       setup_rhs(mg);
-      it_pp[s] = mg.solve_pcg(/*max_iter=*/200, /*rtol=*/1e-8, pps[s], pps[s], bottom);
+      int it = mg.solve_pcg(/*max_iter=*/400, /*rtol=*/1e-8, 2, 2, bottom);
       mg.free();
-    }
-
-    // (C) Chebyshev smoother (degree=2, i.e. pre/post=2 -- equal matvec cost to RB-GS pre/post=2) at a
-    // few spectral-band ratios; compare CG iterations to the RB-GS baseline it_pp[1].
-    double ratios[3] = {8.0, 16.0, 30.0};
-    int it_cheb[3] = {0, 0, 0};
-    for (int s = 0; s < 3; ++s) {
-      cfdmpi::DistributedPoissonMG mg;
-      build(mg);
-      mg.enableChebyshev(ratios[s]);
-      setup_rhs(mg);
-      it_cheb[s] = mg.solve_pcg(/*max_iter=*/200, /*rtol=*/1e-8, 2, 2, bottom);
-      mg.free();
-    }
-    int best_cheb = it_cheb[0];
-    for (int s = 1; s < 3; ++s)
-      if (it_cheb[s] > 0 && (best_cheb == 0 || it_cheb[s] < best_cheb)) best_cheb = it_cheb[s];
+      return it;
+    };
 
     if (rank == 0) {
       double R = N * 0.18;
       double porosity = 1.0 - 8.0 * (4.0 / 3.0 * M_PI * R * R * R) / ((double)N * N * N);
-      printf("\n  N=%-4d (levels=%d, porosity ~%.2f)\n", N, nlev, porosity);
-      printf("    standalone V-cycle asymptotic factor rho = %.3f  (smaller=stronger; <0.2 is good MG)\n",
-             rho);
-      printf("    RB-GS     CG iters to 1e-8:  pre/post=1 -> %d    pre/post=2 -> %d    pre/post=4 -> %d\n",
-             it_pp[0], it_pp[1], it_pp[2]);
-      printf("    smoother sensitivity (it@1 / it@4) = %.2fx %s\n",
-             it_pp[2] ? (double)it_pp[0] / it_pp[2] : 0.0,
-             (it_pp[2] && (double)it_pp[0] / it_pp[2] > 1.8) ? "(smoother-limited)"
-                                                            : "(coarse-correction-limited)");
-      printf("    Chebyshev CG iters (deg=2):  eig_ratio=8 -> %d   16 -> %d   30 -> %d\n", it_cheb[0],
-             it_cheb[1], it_cheb[2]);
-      printf("    => best Chebyshev %d vs RB-GS(pre/post=2) %d   = %.2fx fewer iters (~equal cost)\n",
-             best_cheb, it_pp[1], best_cheb ? (double)it_pp[1] / best_cheb : 0.0);
+      printf("\n  N=%-4d (levels=%d, porosity ~%.2f)   [coarse-operator comparison]\n", N, nlev_full,
+             porosity);
+      printf("    %-16s %12s   %10s\n", "coarse operator", "V-cyc rho", "PCG iters");
+    }
+    for (int mode = SINGLE; mode <= REDISC; ++mode) {
+      double rho = (mode == SINGLE) ? 0.0 : measure_rho(mode);  // no coarse grid for single level
+      int it = measure_iters(mode);
+      if (rank == 0) {
+        if (rho > 0.0)
+          printf("    %-16s %12.3f   %10d\n", mode_name[mode], rho, it);
+        else
+          printf("    %-16s %12s   %10d\n", mode_name[mode], "n/a", it);
+      }
     }
   }
   if (rank == 0)
     printf(
-        "\n  Read: CG iters ~flat across N => grid-independent (little SA room). Growing => SA room.\n"
-        "        big drop 1->4 sweeps => smoother-limited (Chebyshev helps); small => coarse-limited.\n");
+        "\n  Read: rho<0.2 & PCG iters flat across N => grid-independent MG (the goal).\n"
+        "        rho->1 / iters growing => poor coarse model. 'rediscret. MG' is the Phase-1 target.\n");
   MPI_Finalize();
   return 0;
 }

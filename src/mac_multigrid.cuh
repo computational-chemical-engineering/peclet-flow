@@ -281,6 +281,39 @@ __global__ void mg_agg_T_k(double* txc, double* tyc, double* tzc, const double* 
   tzc[i] = sz;
 }
 
+// ---- geometric rediscretization: coarsen the face OPENNESS (area fraction), not the transmissibility ----
+// The coarse face spans 4 fine sub-faces of 1/4 its area each, so the coarse openness (open-area
+// fraction) is the AVERAGE of the 4 fine opennesses. Rebuilding the operator from this coarsened openness
+// at the coarse spacing (idx2 -> idx2/4^L) gives a genuine cut-cell discretization on every level --
+// unlike the Galerkin sum (mg_agg_T_k) or the geometry-blind constant-coefficient coarse operator.
+// Runs over INNER coarse cells (their 4 fine faces are all in the fine inner block); the caller then
+// halo-exchanges the result to fill the coarse ghost openness (periodic), which the operator build reads.
+__global__ void mg_coarsen_open_avg_k(double* oxc, double* oyc, double* ozc, const double* oxf,
+                                      const double* oyf, const double* ozf, int3 cext, int3 fext, int g,
+                                      int3 cinner) {
+  int icx = blockIdx.x * blockDim.x + threadIdx.x;
+  int icy = blockIdx.y * blockDim.y + threadIdx.y;
+  int icz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (icx >= cinner.x || icy >= cinner.y || icz >= cinner.z) return;
+  int clx = icx + g, cly = icy + g, clz = icz + g;
+  int fx0 = 2 * clx - g, fy0 = 2 * cly - g, fz0 = 2 * clz - g;  // fine-local base of the 2x2x2 children
+  size_t fsy = fext.x, fsz = (size_t)fext.x * fext.y;
+  auto F = [&](const double* T, int x, int y, int z) {
+    return T[(size_t)x + (size_t)y * fsy + (size_t)z * fsz];
+  };
+  double sx = 0, sy = 0, sz = 0;
+  for (int a = 0; a < 2; ++a)
+    for (int b = 0; b < 2; ++b) {
+      sx += F(oxf, fx0, fy0 + a, fz0 + b);       // 4 fine -x faces spanning the coarse -x face
+      sy += F(oyf, fx0 + a, fy0, fz0 + b);
+      sz += F(ozf, fx0 + a, fy0 + b, fz0);
+    }
+  size_t ci = (size_t)clx + (size_t)cly * cext.x + (size_t)clz * (size_t)cext.x * cext.y;
+  oxc[ci] = 0.25 * sx;
+  oyc[ci] = 0.25 * sy;
+  ozc[ci] = 0.25 * sz;
+}
+
 // R = P^T : coarse residual = SUM of the 8 fine children (not the 1/8 average used by geometric MG)
 __global__ void mg_restrict_sum_k(double* coarse, const double* fine, int3 cext, int3 fext, int g,
                                   int3 cinner) {
@@ -458,6 +491,55 @@ class DistributedPoissonMG {
                                           c.g);
       mgdetail::mg_build_op_k<<<grd(c), blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, c.tx, c.ty,
                                                c.tz, c.ext, c.g, 1.0, 1.0, 1.0);
+    }
+  }
+
+  // Geometric REDISCRETIZED variable operator (the recommended cut-cell path): build the fine operator
+  // from the face openness, then on every coarse level average-coarsen the openness (mg_coarsen_open_avg_k
+  // + a periodic ghost exchange) and re-assemble the cut-cell operator at the coarse spacing. Every level
+  // is a genuine discretization (consistent, unlike Galerkin aggregation), and the V-cycle uses the
+  // geometric transfers (average restriction + trilinear prolongation, galerkin_=false) -- identical to
+  // the working constant-coefficient path but with a geometry-aware coarse operator. Coarse openness is
+  // stashed in the per-level tx/ty/tz scratch. idx2 = 1/dx^2 on the fine level.
+  void setFineVariableOperatorRediscretized(const double* ox, const double* oy, const double* oz,
+                                            double idx2, double idy2, double idz2) {
+    galerkin_ = false;  // geometric transfers (average restrict + trilinear prolong)
+    auto alloc_op = [](MGLevel& lv) {
+      if (!lv.AC)
+        for (mreal** p : {&lv.AC, &lv.AW, &lv.AE, &lv.AS, &lv.AN, &lv.AB, &lv.AT})
+          cudaMalloc(p, lv.n * sizeof(mreal));
+    };
+    auto alloc_T = [](MGLevel& lv) {
+      if (!lv.tx)
+        for (double** p : {&lv.tx, &lv.ty, &lv.tz}) cudaMalloc(p, lv.n * 8);
+    };
+    dim3 blk(8, 8, 8);
+    auto grd = [](const MGLevel& lv) {
+      return dim3((lv.inner.x + 7) / 8, (lv.inner.y + 7) / 8, (lv.inner.z + 7) / 8);
+    };
+    MGLevel& f = *levels_[0];
+    alloc_op(f);
+    f.variable = true;
+    mgdetail::mg_build_op_k<<<grd(f), blk>>>(f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT, ox, oy, oz, f.ext,
+                                             f.g, idx2, idy2, idz2);
+    const double *pox = ox, *poy = oy, *poz = oz;  // fine openness feeding the next coarsening
+    for (int L = 1; L < (int)levels_.size(); ++L) {
+      MGLevel& c = *levels_[L];
+      MGLevel& fin = *levels_[L - 1];
+      alloc_op(c);
+      alloc_T(c);
+      c.variable = true;
+      mgdetail::mg_coarsen_open_avg_k<<<grd(c), blk>>>(c.tx, c.ty, c.tz, pox, poy, poz, c.ext, fin.ext,
+                                                       c.g, c.inner);
+      c.mac.exchange(c.tx);  // periodic ghost openness (the operator build reads the +neighbour face)
+      c.mac.exchange(c.ty);
+      c.mac.exchange(c.tz);
+      double s = 1.0 / (double)(1 << (2 * L));  // coarse spacing h_L = 2^L h0 -> idx2_L = idx2 / 4^L
+      mgdetail::mg_build_op_k<<<grd(c), blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, c.tx, c.ty, c.tz,
+                                               c.ext, c.g, idx2 * s, idy2 * s, idz2 * s);
+      pox = c.tx;
+      poy = c.ty;
+      poz = c.tz;
     }
   }
 

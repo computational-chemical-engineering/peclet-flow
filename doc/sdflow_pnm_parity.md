@@ -3,12 +3,18 @@
 Living tracker for converging the canonical **sdflow** solver to match (and eventually replace) the
 production **pnm_backend**.
 
-> **STATUS (2026-06-11): accuracy RESOLVED.** Against the Zick & Homsy (1982) SC-sphere Stokes-drag
-> ground truth, **both** codes are correct to <0.05% at N=128 with clean grid convergence. sdflow's
-> *default* path (`galerkin=False`, RB-GS cut-cell pressure) is as accurate as pnm. The only real defect
-> is sdflow's **optional** Galerkin-multigrid pressure path (`galerkin=True`), which is inconsistent and
-> must be fixed or removed (backlog item 7) — it was the source of every earlier "sdflow drifts" finding.
-> Speed is at parity. Remaining work is the Galerkin-MG fix and Phase-3 retirement of pnm_backend.
+> **STATUS (2026-06-11): accuracy RESOLVED; the real bug re-identified.** Against the Zick & Homsy (1982)
+> SC-sphere Stokes-drag ground truth, **both** codes are correct to <0.05% at N=128 with clean grid
+> convergence. **Every sdflow *pressure* path is correct** (RB-GS, const-MG, Galerkin-MG, and the new
+> rediscretized-MG all give K=4.292 at N=128 when the pressure is solved to tolerance) — the pressure
+> coarse operator only affects the *iteration count*, not the answer. **CORRECTION:** the earlier
+> "Galerkin *pressure* drifts +4%" was a **misdiagnosis** — it was confounded with the **velocity
+> diffusion multigrid** (`set_velocity_multigrid`), which is the actual defect: with velocity-MG on it
+> drifts +3.5% at N=128, with velocity RB-GS it's exact. The velocity-MG under-converges the IBM
+> diffusion (fixed 4 V-cycles + a geometry-blind constant-coefficient coarse operator) — backlog item 7.
+> **Multigrid Phase 1 done:** a *rediscretized* cut-cell pressure coarse operator gives a grid-independent
+> V-cycle (rho≈0.15 flat, 8 PCG iters flat in N) — see `doc/sdflow_multigrid_plan.md`. Remaining: fix the
+> velocity-MG coarse operator (same technique), then Phase-3 retirement of pnm_backend.
 
 ## Established so far (single GPU, sphere-packing Stokes, N=64, grid units)
 
@@ -75,17 +81,25 @@ production **pnm_backend**.
    *and* is the **correct** path (item 1 / item 7). It's the recommended default. "Do better" (beat
    RB-GS speed) is still open but lower priority now that correctness is established.
 3. **[DONE — see item 1] Ground-truth the permeability.** Zick & Homsy was the reference; both codes
-   reproduce it. Body-fitted meshing no longer needed. The "localise the gap" sub-task collapsed into
-   item 7: the only real discrepancy was sdflow's Galerkin-MG pressure path.
-7. **[NEW — open bug] Fix or remove sdflow's Galerkin-multigrid pressure path (`galerkin=True`).** It is
-   **demonstrably inconsistent**: on the SC sphere it converges the per-step pressure solve to a wrong
-   operator's solution, giving a steady that drifts ~+4% in K at N=128 (worsening with N), whereas the
-   direct cut-cell RB-GS operator (`galerkin=False`) holds the correct Z&H value. Root cause is almost
-   certainly the RAP/Galerkin coarsening of the cut-cell pressure operator (coarse operator not a
-   consistent restriction of the fine cut-cell operator). Options: (a) fix the coarsening (rediscretise
-   the cut-cell operator on each level instead of RAP, or correct the transfer operators), or (b) drop
-   the Galerkin path entirely since RB-GS is the correct, fast default. Until fixed, **do not use
-   `galerkin=True` / `set_pressure_pcg` for production results** — guard or warn in the API.
+   reproduce it. Body-fitted meshing no longer needed.
+7. **[CORRECTED — the bug is the VELOCITY multigrid, not the pressure].** Earlier this item accused the
+   Galerkin *pressure* path; that was a **confound**. Isolating one solver at a time on the SC sphere at
+   N=128 (Z&H K=4.292): velocity RB-GS + pressure-{RB-GS, const-MG, Galerkin-MG, rediscretized-MG} **all
+   give 4.2921** (the pressure coarse operator only changes the iteration count, not the answer — PCG
+   converges the fine operator regardless). But **velocity-MG + pressure-RB-GS gives 4.4415 (+3.5%)**. So
+   **`set_velocity_multigrid` is the defect**: it under-converges the IBM diffusion — a *fixed* 4 V-cycles
+   (not solved to tolerance) over a **geometry-blind constant-coefficient coarse operator**
+   (`setDiffusionCoarse`) that is a poor model for the IBM fine stencil, biasing the velocity low (drift
+   grows with N). Fix: rediscretize the velocity-diffusion coarse operator with the cut-cell geometry
+   (the Phase-1 technique, applied to `I − νΔt·Lap_cutcell`), and/or wrap it in PCG / use more V-cycles.
+   Until fixed, **use velocity RB-GS** (`set_velocity_solver_params`); it's exact. The pressure
+   Galerkin path is *not* a correctness bug — just the slowest coarse operator (use rediscretized).
+8b. **[DONE — multigrid Phase 1] Rediscretized cut-cell PRESSURE coarse operator.**
+   `DistributedPoissonMG::setFineVariableOperatorRediscretized` (area-coarsen the face openness per
+   level + rebuild the operator at coarse spacing + geometric transfers). Grid-independent: V-cycle
+   ρ≈0.15 flat, **8 PCG iters flat in N** (vs RB-GS 18→47, Galerkin 15→30, const-MG 10→13). Correct
+   (Z&H). Exposed as `set_solid(..., pressure_coarse="rediscretized")` (the new default). Full design +
+   phases in `doc/sdflow_multigrid_plan.md`.
 4. **[deferred] Crank–Nicolson** — ported then reverted: the simple explicit Laplacian is inconsistent
    with the Robust-Scaled cut-cell IBM (θ=0.5 gave a 4% θ-dependent *steady* error — a bug). Correct CN
    would need the explicit half-step to use the cut-cell operator (research effort). No benefit for

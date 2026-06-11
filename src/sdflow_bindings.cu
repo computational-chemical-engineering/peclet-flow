@@ -101,11 +101,19 @@ class Solver {
 
   // Install an SDF solid (negative inside) -> Robust-Scaled cut-cell IBM no-slip (or moving wall u_bc),
   // AND the matching cut-cell pressure operator. SDF is a 3-D [x,y,z] array. Fixes the geometry.
-  void set_solid(Arr sdf, double ubx, double uby, double ubz, bool cutcell_pressure, bool galerkin) {
+  void set_solid(Arr sdf, double ubx, double uby, double ubz, bool cutcell_pressure,
+                 const std::string& pressure_coarse) {
     ensure_init();
     auto block = to_block(sdf);
     s_.set_ibm_solid(block, make_float3((float)ubx, (float)uby, (float)ubz));
-    if (cutcell_pressure) s_.set_cutcell_pressure_operator(block, galerkin);
+    if (cutcell_pressure) {
+      int mode = 0;  // rediscretized (default, recommended)
+      if (pressure_coarse == "galerkin") mode = 1;
+      else if (pressure_coarse == "const") mode = 2;
+      else if (pressure_coarse != "rediscretized")
+        throw std::runtime_error("sdflow: pressure_coarse must be 'rediscretized', 'galerkin' or 'const'");
+      s_.set_cutcell_pressure_operator(block, mode);
+    }
   }
   void set_state(Arr u, Arr v, Arr w) {  // restore/seed the velocity state
     ensure_init();
@@ -211,7 +219,8 @@ PYBIND11_MODULE(sdflow, m) {
       .def("set_velocity_solver_params", &Solver::set_velocity_solver_params, py::arg("n_diff"))
       .def("set_pressure_solver_params", &Solver::set_pressure_solver_params, py::arg("n_pois"))
       .def("set_solid", &Solver::set_solid, py::arg("sdf"), py::arg("ubx") = 0.0, py::arg("uby") = 0.0,
-           py::arg("ubz") = 0.0, py::arg("cutcell_pressure") = true, py::arg("galerkin") = true)
+           py::arg("ubz") = 0.0, py::arg("cutcell_pressure") = true,
+           py::arg("pressure_coarse") = "rediscretized")
       .def("set_state", &Solver::set_state, py::arg("u"), py::arg("v"), py::arg("w"))
       .def("step", &Solver::step)
       .def("last_outer_iterations", &Solver::last_outer_iterations)
