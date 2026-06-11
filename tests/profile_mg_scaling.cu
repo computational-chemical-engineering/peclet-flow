@@ -14,6 +14,7 @@
 #include <mpi.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -167,6 +168,52 @@ int main(int argc, char** argv) {
         else
           printf("    %-16s %12s   %10d\n", mode_name[mode], "n/a", it);
       }
+    }
+
+    // --- timing: standalone V-cycle vs MG-PCG to the SAME residual tolerance (rediscretized operator) ---
+    // PCG costs more per iteration (an extra matvec + 2 global dot-products/Allreduce + the axpys, plus a
+    // symmetric V-cycle) but usually needs fewer iterations. This measures whether the standalone V-cycle
+    // (a few more cheap cycles) beats PCG in wall-clock for the cut-cell pressure solve.
+    {
+      cfdmpi::DistributedPoissonMG mg;
+      build(mg, REDISC);
+      cfdmpi::MGLevel& l0 = mg.level(0);
+      size_t nb = l0.n * 8;
+      auto time_ms = [&](auto&& fn) {  // median of GPU-synced repeats, each cold-started (x=0)
+        auto run = [&] { cudaMemset(l0.x, 0, nb); fn(); };
+        run(); cudaDeviceSynchronize();  // warmup
+        std::vector<double> ts;
+        for (int r = 0; r < 7; ++r) {
+          cudaDeviceSynchronize();
+          auto a = std::chrono::high_resolution_clock::now();
+          run();
+          cudaDeviceSynchronize();
+          auto b = std::chrono::high_resolution_clock::now();
+          ts.push_back(std::chrono::duration<double, std::milli>(b - a).count());
+        }
+        std::sort(ts.begin(), ts.end());
+        return ts[ts.size() / 2];
+      };
+      if (rank == 0)
+        printf("    --- standalone V-cycle vs MG-PCG to a fixed tolerance (rediscretized; pre/post=2) ---\n");
+      double rtols[] = {1e-4, 1e-6, 1e-8};  // loose (per-step projection) -> tight
+      for (double rtol : rtols) {
+        setup_rhs(mg);
+        double r0 = resid(mg);
+        int kv = 1;
+        for (; kv <= 500; ++kv) { mg.solve(1, 2, 2, bottom); if (resid(mg) < rtol * r0) break; }
+        setup_rhs(mg);
+        int kp = mg.solve_pcg(500, rtol, 2, 2, bottom);
+        setup_rhs(mg);
+        double tv = time_ms([&] { mg.solve(kv, 2, 2, bottom); });
+        double tp = time_ms([&] { mg.solve_pcg(500, rtol, 2, 2, bottom); });
+        if (rank == 0)
+          printf("    rtol=%.0e :  V-cycle %2d cyc %7.3f ms (%.3f/cyc) | PCG %2d it %7.3f ms (%.3f/it)"
+                 "  -> V-cycle %.2fx %s\n",
+                 rtol, kv, tv, tv / kv, kp, tp, tp / kp, tp > tv ? tp / tv : tv / tp,
+                 tp > tv ? "faster" : "slower");
+      }
+      mg.free();
     }
   }
   if (rank == 0)
