@@ -171,6 +171,18 @@ __global__ void mg_aypx_k(double* y, double a, const double* x, long n) {  // y 
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) y[i] = x[i] + a * y[i];
 }
+__global__ void mg_scale_k(double* y, double s, long n) {  // y *= s
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) y[i] *= s;
+}
+__global__ void mg_lin_k(double* o, double a, const double* x, double b, const double* y, long n) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;  // o = a*x + b*y
+  if (i < n) o[i] = a * x[i] + b * y[i];
+}
+__global__ void mg_mask_solid_k(double* v, const mreal* AC, long n) {  // zero the operator null space
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;                // (solid cells: AC==0)
+  if (i < n && AC[i] < (mreal)1e-30) v[i] = 0.0;
+}
 
 __global__ void mg_residual_k(double* __restrict__ r, const double* __restrict__ x,
                               const double* __restrict__ b, int3 ext, int g, double invh2) {
@@ -669,6 +681,129 @@ class DistributedPoissonMG {
     cudaMemcpy(l0.rhs, b, n * 8, cudaMemcpyDeviceToDevice);  // restore RHS (precond used it as scratch)
     for (double* q : {b, x, r, p, z, Ap}) cudaFree(q);
     return it;
+  }
+
+  // Estimate the spectral bounds [lmin, lmax] of the preconditioned operator M^{-1}A (M = one symmetric
+  // V-cycle) by power iteration. lmax: power iteration on M^{-1}A; lmin: power iteration on lmax*I-M^{-1}A.
+  // This is a ONE-TIME setup cost (the operator is fixed, so the bounds are reused across every solve),
+  // so its reductions do NOT count against the per-solve communication budget Chebyshev is meant to cut.
+  void estimate_eigenvalues(double& lmin, double& lmax, int iters, int pre, int post, int bottom) {
+    pre_ = pre; post_ = post; bottom_ = bottom;
+    MGLevel& l0 = *levels_[0];
+    int g = l0.g;
+    long n = (long)l0.n;
+    dim3 blk(8, 8, 8);
+    dim3 grd((l0.inner.x + 7) / 8, (l0.inner.y + 7) / 8, (l0.inner.z + 7) / 8);
+    int t1 = 256, b1 = (int)((n + t1 - 1) / t1);
+    double *v, *w, *z, *srhs, *sx;
+    for (double** q : {&v, &w, &z, &srhs, &sx}) cudaMalloc(q, n * 8);
+    cudaMemcpy(srhs, l0.rhs, n * 8, cudaMemcpyDeviceToDevice);  // preserve caller state (precond scratch)
+    cudaMemcpy(sx, l0.x, n * 8, cudaMemcpyDeviceToDevice);
+    auto matvec = [&](double* y, double* x) {
+      l0.mac.exchange(x);
+      mgdetail::mg_apply_var_k<<<grd, blk>>>(y, x, l0.AC, l0.AW, l0.AE, l0.AS, l0.AN, l0.AB, l0.AT, l0.ext, g);
+    };
+    auto mask = [&](double* x) { mgdetail::mg_mask_solid_k<<<b1, t1>>>(x, l0.AC, n); };
+    auto applyT = [&](double* out, double* in) {  // out = M^{-1} A in, projected onto the fluid range
+      matvec(w, in);
+      cudaMemcpy(l0.rhs, w, n * 8, cudaMemcpyDeviceToDevice);
+      cudaMemset(l0.x, 0, n * 8);
+      vcycle(0, /*sym=*/true);
+      cudaMemcpy(out, l0.x, n * 8, cudaMemcpyDeviceToDevice);
+      if (remove_mean_) mac_remove_mean(out, l0.mac, comm_);  // project out the constant null mode
+      mask(out);                                              // project out the solid-cell null modes
+    };
+    auto normalize = [&](double* x) {
+      double nr = sqrt(mac_dot(x, x, l0.mac, comm_));
+      if (nr > 0) mgdetail::mg_scale_k<<<b1, t1>>>(x, 1.0 / nr, n);
+    };
+    auto seed = [&](double* x) {  // mean-zero, solid-free, normalized seed
+      cudaMemcpy(x, srhs, n * 8, cudaMemcpyDeviceToDevice);
+      if (remove_mean_) mac_remove_mean(x, l0.mac, comm_);
+      mask(x);
+      normalize(x);
+    };
+    seed(v);
+    lmax = 1.0;
+    for (int k = 0; k < iters; ++k) {
+      applyT(z, v);
+      lmax = mac_dot(v, z, l0.mac, comm_);  // Rayleigh quotient (v normalized)
+      cudaMemcpy(v, z, n * 8, cudaMemcpyDeviceToDevice);
+      normalize(v);
+    }
+    seed(v);
+    double mu = 0.0;
+    for (int k = 0; k < iters; ++k) {
+      applyT(z, v);
+      mgdetail::mg_lin_k<<<b1, t1>>>(z, lmax, v, -1.0, z, n);  // z = lmax*v - T v
+      mu = mac_dot(v, z, l0.mac, comm_);
+      cudaMemcpy(v, z, n * 8, cudaMemcpyDeviceToDevice);
+      normalize(v);
+    }
+    double e_hi = lmax, e_lo = lmax - mu;  // direct (max) and shifted (min) Rayleigh estimates
+    lmin = e_lo < e_hi ? e_lo : e_hi;      // robust bracket: a tight cluster can make the direct power
+    lmax = e_lo < e_hi ? e_hi : e_lo;      // iteration under-resolve the max, so take min/max of the two
+    if (lmin < 0.02 * lmax) lmin = 0.02 * lmax;
+    cudaMemcpy(l0.rhs, srhs, n * 8, cudaMemcpyDeviceToDevice);  // restore
+    cudaMemcpy(l0.x, sx, n * 8, cudaMemcpyDeviceToDevice);
+    for (double* q : {v, w, z, srhs, sx}) cudaFree(q);
+  }
+
+  // Chebyshev semi-iteration preconditioned by ONE symmetric V-cycle (M^{-1}). Same goal as solve_pcg,
+  // but the step coefficients come from the spectral bounds [a,b]=[lmin,lmax] of M^{-1}A (from
+  // estimate_eigenvalues) -- so NO per-iteration global dot-products. Per iteration: 1 V-cycle + 1 matvec
+  // + axpys + the residual check (1 reduction). At scale this avoids PCG's 2 dot-product Allreduce/iter.
+  // rhs on level 0 is the RHS; the solution is left in level-0 x. Returns the V-cycle (iteration) count.
+  int solve_chebyshev(int max_iter, double rtol, int pre, int post, int bottom, double a, double b) {
+    pre_ = pre; post_ = post; bottom_ = bottom;
+    MGLevel& l0 = *levels_[0];
+    int g = l0.g;
+    long n = (long)l0.n;
+    dim3 blk(8, 8, 8);
+    dim3 grd((l0.inner.x + 7) / 8, (l0.inner.y + 7) / 8, (l0.inner.z + 7) / 8);
+    int t1 = 256, b1 = (int)((n + t1 - 1) / t1);
+    if (a > b) { double t = a; a = b; b = t; }     // robust to swapped bounds
+    a *= 0.95; b *= 1.05;                           // safety margin: [a,b] must bracket the spectrum
+    double *rhs, *x, *r, *z, *d, *w;
+    for (double** q : {&rhs, &x, &r, &z, &d, &w}) cudaMalloc(q, n * 8);
+    cudaMemcpy(rhs, l0.rhs, n * 8, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(x, l0.x, n * 8, cudaMemcpyDeviceToDevice);
+    auto matvec = [&](double* y, double* v) {
+      l0.mac.exchange(v);
+      mgdetail::mg_apply_var_k<<<grd, blk>>>(y, v, l0.AC, l0.AW, l0.AE, l0.AS, l0.AN, l0.AB, l0.AT, l0.ext, g);
+    };
+    auto precond = [&](double* zz, double* rr) {  // zz = M^{-1} rr (one symmetric V-cycle)
+      cudaMemcpy(l0.rhs, rr, n * 8, cudaMemcpyDeviceToDevice);
+      cudaMemset(l0.x, 0, n * 8);
+      vcycle(0, /*sym=*/true);
+      cudaMemcpy(zz, l0.x, n * 8, cudaMemcpyDeviceToDevice);
+    };
+    double theta = 0.5 * (b + a), delta = 0.5 * (b - a), sigma1 = theta / delta, rho = 1.0 / sigma1;
+    matvec(w, x);  // r = rhs - A x
+    cudaMemcpy(r, rhs, n * 8, cudaMemcpyDeviceToDevice);
+    mgdetail::mg_axpy_k<<<b1, t1>>>(r, -1.0, w, n);
+    double r0 = mac_max_abs(r, l0.mac, comm_);
+    int nvc = 0;
+    if (r0 > 0.0) {
+      precond(z, r); ++nvc;                                        // z = M^{-1} r
+      mgdetail::mg_lin_k<<<b1, t1>>>(d, 1.0 / theta, z, 0.0, z, n);  // d = z / theta
+      mgdetail::mg_axpy_k<<<b1, t1>>>(x, 1.0, d, n);                 // x += d
+      for (int i = 1; i < max_iter; ++i) {
+        matvec(w, d);
+        mgdetail::mg_axpy_k<<<b1, t1>>>(r, -1.0, w, n);             // r -= A d
+        if (mac_max_abs(r, l0.mac, comm_) < rtol * r0) break;
+        precond(z, r); ++nvc;
+        double rho_new = 1.0 / (2.0 * sigma1 - rho);
+        mgdetail::mg_lin_k<<<b1, t1>>>(d, rho_new * rho, d, 2.0 * rho_new / delta, z, n);  // d update
+        mgdetail::mg_axpy_k<<<b1, t1>>>(x, 1.0, d, n);             // x += d
+        rho = rho_new;
+      }
+    }
+    cudaMemcpy(l0.x, x, n * 8, cudaMemcpyDeviceToDevice);
+    if (remove_mean_) mac_remove_mean(l0.x, l0.mac, comm_);
+    cudaMemcpy(l0.rhs, rhs, n * 8, cudaMemcpyDeviceToDevice);
+    for (double* q : {rhs, x, r, z, d, w}) cudaFree(q);
+    return nvc;
   }
 
  private:

@@ -194,8 +194,14 @@ int main(int argc, char** argv) {
         std::sort(ts.begin(), ts.end());
         return ts[ts.size() / 2];
       };
+      // one-time spectral bounds of M^{-1}A for Chebyshev (a setup cost, reused for every solve).
+      // setup_rhs first so the power iteration seeds from a non-trivial mean-zero vector (l0.rhs).
+      setup_rhs(mg);
+      double lmin = 0, lmax = 0;
+      mg.estimate_eigenvalues(lmin, lmax, /*iters=*/15, 2, 2, bottom);
       if (rank == 0)
-        printf("    --- standalone V-cycle vs MG-PCG to a fixed tolerance (rediscretized; pre/post=2) ---\n");
+        printf("    --- V-cycle vs MG-PCG vs Chebyshev to a fixed tolerance (rediscretized; pre/post=2)"
+               "  [M^-1A spectrum ~[%.3f, %.3f]] ---\n", lmin, lmax);
       double rtols[] = {1e-4, 1e-6, 1e-8};  // loose (per-step projection) -> tight
       for (double rtol : rtols) {
         setup_rhs(mg);
@@ -205,13 +211,15 @@ int main(int argc, char** argv) {
         setup_rhs(mg);
         int kp = mg.solve_pcg(500, rtol, 2, 2, bottom);
         setup_rhs(mg);
+        int kc = mg.solve_chebyshev(500, rtol, 2, 2, bottom, lmin, lmax);
+        setup_rhs(mg);
         double tv = time_ms([&] { mg.solve(kv, 2, 2, bottom); });
         double tp = time_ms([&] { mg.solve_pcg(500, rtol, 2, 2, bottom); });
+        double tc = time_ms([&] { mg.solve_chebyshev(500, rtol, 2, 2, bottom, lmin, lmax); });
         if (rank == 0)
-          printf("    rtol=%.0e :  V-cycle %2d cyc %7.3f ms (%.3f/cyc) | PCG %2d it %7.3f ms (%.3f/it)"
-                 "  -> V-cycle %.2fx %s\n",
-                 rtol, kv, tv, tv / kv, kp, tp, tp / kp, tp > tv ? tp / tv : tv / tp,
-                 tp > tv ? "faster" : "slower");
+          printf("    rtol=%.0e : V-cyc %2d/%6.3fms | PCG %2d/%6.3fms (%.2fx) | Cheb %2d/%6.3fms (%.2fx)"
+                 "   [Cheb vs PCG: %.2fx]\n",
+                 rtol, kv, tv, kp, tp, tv / tp, kc, tc, tv / tc, tp / tc);
       }
       mg.free();
     }

@@ -202,7 +202,18 @@ a case small enough to trigger agglomeration). (b) Scaling (needs the hardware):
 run, do not ship it (untestable infra). The hook points are `DistributedPoissonMG::vcycle` (bottom
 branch) and `init` (record `K` / the agglomeration threshold).
 
-## DEFERRED WORK — communication-light outer accelerator for multi-GPU (Chebyshev)
+## Communication-light outer accelerator for multi-GPU (Chebyshev) — PROTOTYPED & VERIFIED
+
+> **STATUS: prototyped (`DistributedPoissonMG::solve_chebyshev` + `estimate_eigenvalues`) and verified on
+> 1 GPU.** Chebyshev semi-iteration accelerated by the symmetric V-cycle, with spectral bounds of M⁻¹A
+> from power iteration (one-time setup; solid-cell + constant null modes masked out — they otherwise
+> poison the lower bound). **Result (`profile_mg_scaling`, rediscretized op, rtol 1e-8): Chebyshev matches
+> PCG's iteration count to within 0–3 iters** (N=128: Cheb 10 vs PCG 8 vs standalone-V 12), confirming
+> "≈ as good as PCG" in convergence. **On 1 GPU it is ~5–25% *slower* than PCG** (a few more iters, and
+> PCG's dot-products are free without a network) — i.e. ≈ standalone-V speed. **The win is purely at
+> scale** (no per-iteration dot-product Allreduce), which needs the multi-GPU box to measure. So the
+> method is ready; only the at-scale benefit and the production wiring (estimate bounds once at setup,
+> a `set_pressure_chebyshev` option in step()/binding) remain — do them with the multi-GPU push.
 
 **Why:** the single-GPU default is now MG-PCG (~1.2x faster than standalone V-cycles), but PCG's speedup
 **inverts at scale** — each PCG iteration needs 2–3 **global dot-products** (`MPI_Allreduce`), which are
