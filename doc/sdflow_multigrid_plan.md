@@ -202,6 +202,41 @@ a case small enough to trigger agglomeration). (b) Scaling (needs the hardware):
 run, do not ship it (untestable infra). The hook points are `DistributedPoissonMG::vcycle` (bottom
 branch) and `init` (record `K` / the agglomeration threshold).
 
+## DEFERRED WORK — communication-light outer accelerator for multi-GPU (Chebyshev)
+
+**Why:** the single-GPU default is now MG-PCG (~1.2x faster than standalone V-cycles), but PCG's speedup
+**inverts at scale** — each PCG iteration needs 2–3 **global dot-products** (`MPI_Allreduce`), which are
+latency-bound and grow with rank count, whereas a standalone V-cycle has only the mean-removal reductions.
+Measured: 1.2x faster at np=1; expected to lose at large np. We want PCG-like *acceleration* without the
+per-iteration global inner products.
+
+**The method: Chebyshev semi-iteration as the OUTER accelerator** (distinct from the existing Chebyshev
+*smoother* `enableChebyshev`, which is the inner relaxation). It accelerates the MG-preconditioned system
+with **coefficients precomputed from eigenvalue bounds [λmin, λmax]** instead of CG's inner-product-derived
+α/β — so **zero dot-products per iteration**; the only syncs are the V-cycle's own. For a symmetric
+operator whose spectrum is a tight interval — exactly what a good MG gives (ρ≈0.15 ⇒ eigenvalues clustered
+near 1) — Chebyshev converges at ≈ the CG rate, so it should match PCG's ~8 iters on one GPU while
+communicating like the standalone V-cycle at scale.
+
+**What it needs:** (1) a one-time estimate of λmax of M⁻¹A (a few power/Lanczos iterations at setup — a
+handful of reductions *once*, not per solve); λmin ≈ from the MG contraction or λmax/κ; Chebyshev is
+robust to loose bounds (just a few extra iters). (2) the **symmetric** V-cycle (PCG already uses it) and
+symmetric A (the pressure operator is). (3) null-space projection for the singular pressure operator (the
+existing mean removal). Caveat vs CG: Chebyshev can't exploit eigenvalue *clustering* (no superlinear
+convergence), so if the spectrum had outliers CG would win — but the MG-preconditioned spectrum is tight,
+so they should be close.
+
+**Alternatives** (keep CG's optimality, cut the communication): **pipelined / Gropp CG** overlaps the
+Allreduce with the matvec/preconditioner to hide latency; **s-step / communication-avoiding CG** batches s
+iterations' dot-products into one Allreduce. Both are more complex and less robust than Chebyshev for a
+well-conditioned MG-preconditioned system.
+
+**Plan when picked up (with the multi-GPU push):** add a Chebyshev outer-iteration option around the
+symmetric V-cycle (+ a setup-time λmax estimate); optionally pair with the Chebyshev *smoother* for a
+fully communication-minimal MG. Validate on 1 GPU that iters ≈ PCG (verifiable now), then benchmark
+wall-clock vs PCG and standalone-V at np = 8/16/32 (needs the hardware). Pairs naturally with the
+agglomerated coarse solve above.
+
 ## 3. Open questions / decisions
 1. **Default solver shape:** standalone V-cycle vs MG-PCG default. *(Current: MG-PCG available via
    `set_pressure_pcg`; standalone V-cycle via fixed `n_pois`. Lean V-cycle default.)*
