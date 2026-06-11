@@ -316,9 +316,10 @@ class DistributedNS {
     cutcell_ = true;
   }
 
-  // Solve the pressure Poisson with CG preconditioned by the (Galerkin) V-cycle instead of plain
-  // V-cycles. Needed to actually converge the stiff cut-cell operator; requires the cut-cell operator
-  // (set_cutcell_pressure_operator). step()'s n_pois is then ignored in favour of max_iter/rtol.
+  // Solve the pressure Poisson with CG preconditioned by the multigrid V-cycle instead of plain V-cycles.
+  // Converges the stiff cut-cell operator in fewer iterations; requires the cut-cell operator
+  // (set_cutcell_pressure_operator). step()'s n_pois is then ignored in favour of max_iter/rtol. The core
+  // default is OFF (standalone V-cycles); the sdflow module enables it by default on a single rank.
   void set_pressure_pcg(bool on, int max_iter = 60, double rtol = 1e-8) {
     pcg_ = on;
     pcg_maxit_ = max_iter;

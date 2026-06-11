@@ -89,7 +89,10 @@ class Solver {
   void set_outer_tolerance(double t) { s_.set_outer_tolerance(t); }
   void set_velocity_streams(bool on) { s_.set_velocity_streams(on); }
   void set_pressure_multigrid(bool on, int levels) { s_.set_pressure_multigrid(on, levels); }
-  void set_pressure_pcg(bool on, int max_iter, double rtol) { s_.set_pressure_pcg(on, max_iter, rtol); }
+  void set_pressure_pcg(bool on, int max_iter, double rtol) {
+    pcg_user_set_ = true;  // pin the choice -> disables the single-rank auto-default in ensure_init
+    s_.set_pressure_pcg(on, max_iter, rtol);
+  }
   void set_pressure_warmstart(bool on) { s_.set_pressure_warmstart(on); }
   void set_velocity_multigrid(bool on, int levels, int v_cycles) {
     s_.set_velocity_multigrid(on, levels, v_cycles);
@@ -152,6 +155,10 @@ class Solver {
     s_.init(res_, rank, size, /*nu=*/mu_ / rho_, dt_, MPI_COMM_WORLD);
     s_.set_body_force(fx_ / rho_, fy_ / rho_, fz_ / rho_);
     s_.set_incremental_pressure(incremental_);
+    // Single-GPU default: MG-PCG (~1.2x faster than standalone V-cycles for the cut-cell pressure solve).
+    // Multi-rank keeps standalone V-cycles (PCG's per-iteration global dot-products are latency-bound at
+    // scale). Overridden by an explicit set_pressure_pcg(...). Only takes effect with a cut-cell operator.
+    if (!pcg_user_set_ && size == 1) s_.set_pressure_pcg(true);
     inited_ = true;
   }
 
@@ -188,6 +195,7 @@ class Solver {
   double fx_ = 0.0, fy_ = 0.0, fz_ = 0.0;       // body force per unit volume
   int n_diff_ = 30, n_pois_ = 50;               // inner-iteration counts for step()
   bool incremental_ = true;                     // incremental-rotational pressure (default on)
+  bool pcg_user_set_ = false;                   // set_pressure_pcg called -> skip the single-rank PCG default
   bool inited_ = false;
 };
 
