@@ -57,7 +57,7 @@ def run_sdflow(N, dt):
     s.set_rho(1.0); s.set_mu(NU); s.set_dt(dt); s.set_body_force(FX, 0, 0); s.set_advection(False)
     s.set_velocity_multigrid(True, levels=4, v_cycles=12)
     s.set_pressure_pcg(True, max_iter=80, rtol=1e-6)          # accurate cut-cell pressure
-    s.set_solid(sdf, cutcell_pressure=True, galerkin=True)
+    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="galerkin")
     n, m = march(lambda: s.step(), lambda: float(s.get_u().mean()))
     return n, m
 

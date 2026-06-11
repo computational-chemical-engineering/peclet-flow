@@ -67,7 +67,7 @@ def run_sdflow(res, sdf_xyz, fx, advection, steps, dt, cutcell=False):
     s.set_velocity_multigrid(True, levels=3, v_cycles=16)
     if cutcell:
         s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)
-    s.set_solid(sdf_xyz, cutcell_pressure=cutcell, galerkin=True)
+    s.set_solid(sdf_xyz, cutcell_pressure=cutcell, pressure_coarse="galerkin")
     prev = 0.0
     for it in range(steps):  # np=1 cross-validation (production solver is single-GPU)
         s.step()

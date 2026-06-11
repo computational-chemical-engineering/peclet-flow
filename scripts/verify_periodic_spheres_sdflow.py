@@ -51,7 +51,7 @@ def run(N, rho=1.0, mu=0.1, dt=60.0, F=1e-3, max_steps=200):
     s.set_velocity_solver_params(80)                            # IBM RB-GS velocity sweeps
     s.set_pressure_solver_params(20)                            # RB-GS sweeps on the cut-cell operator
     s.set_pressure_multigrid(True, levels=1)                    # 1 level == pure RB-GS (keeps the operator)
-    s.set_solid(sdf, cutcell_pressure=True, galerkin=False)     # no-slip + cut-cell pressure operator
+    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="const")     # no-slip + cut-cell pressure operator
 
     deep_solid = sdf < -2.0  # cells whose every velocity face is solid -> must be exactly no-slip
     prev = 0.0

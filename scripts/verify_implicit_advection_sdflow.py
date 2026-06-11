@@ -39,7 +39,7 @@ def run(implicit, dt, fx, n_steps, to_steady=False):
     s.set_outer_iterations(3)
     s.set_velocity_solver_params(80)  # implicit-FOU uses RB-GS (n_diff sweeps), not vel-MG
     s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)
-    s.set_solid(sdf, cutcell_pressure=True, galerkin=True)
+    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="galerkin")
     prev = 0.0
     for it in range(n_steps):  # np=1 demo
         s.step()

@@ -55,7 +55,7 @@ def run_sdflow(incremental, steps=400, dt=10.0, fx=2e-4):
     s.set_velocity_solver_params(0)
     s.set_velocity_multigrid(True, levels=3, v_cycles=16)
     s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)
-    s.set_solid(sdf, cutcell_pressure=True, galerkin=True)
+    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="galerkin")
     for _ in range(5):
         s.step()  # warm up before timing
     t0 = time.perf_counter()

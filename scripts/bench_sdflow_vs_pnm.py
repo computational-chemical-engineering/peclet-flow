@@ -73,7 +73,7 @@ def run_sdflow():
     s.set_advection(False)
     s.set_velocity_multigrid(True, levels=4, v_cycles=12)
     s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)
-    s.set_solid(sdf, cutcell_pressure=True, galerkin=True)
+    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="galerkin")
     return march(lambda: s.step(), lambda: float(s.get_u().mean()))
 
 
