@@ -189,6 +189,7 @@ class DistributedNS {
     cudaMemset(w_, 0, n_ * 8);
     cudaMemset(solid_, 0, n_ * 8);
     cudaMemset(phitot_, 0, n_ * 8);  // accumulated pressure potential starts at 0
+    cudaMemset(phi_, 0, n_ * 8);     // projection potential (also the pressure-solve warm-start seed)
     ext_ = mac_.local_ext;
     blk_ = dim3(8, 8, 4);
     grd_ = dim3((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
@@ -323,6 +324,12 @@ class DistributedNS {
     pcg_maxit_ = max_iter;
     pcg_rtol_ = rtol;
   }
+
+  // Warm-start the pressure solve from the previous step's projection potential (opt-in; default off).
+  // A steady-march optimization: consecutive phi's are similar, so the previous phi is a good initial
+  // guess (fewer PCG iters / a more-converged phi per fixed sweep count). Off = cold start (zero guess),
+  // the bit-exact behaviour the cell-for-cell serial-reference tests assume.
+  void set_pressure_warmstart(bool on) { pwarm_ = on; }
 
   // Solve the IBM velocity diffusion with geometric multigrid (constant-coefficient coarse operators)
   // instead of plain RB-GS -- far fewer iterations when the diffusion is stiff (large nu*dt). Requires
@@ -629,14 +636,19 @@ class DistributedNS {
       cfdmpi::MGLevel& l0 = mg_.level(0);  // ghost-2 layout identical to this solver's blocks
       int threads = 256, blocks = (int)((n_ + threads - 1) / threads);
       neg_k<<<blocks, threads>>>(l0.rhs, div_, (long)n_);
-      cudaMemset(l0.x, 0, n_ * 8);
+      // warm start: seed the solve with the previous step's projection potential (consecutive phi's are
+      // similar along a steady march -> fewer PCG iters / a more-converged phi per fixed V-cycle count).
+      if (pwarm_)
+        cudaMemcpy(l0.x, phi_, n_ * 8, cudaMemcpyDeviceToDevice);
+      else
+        cudaMemset(l0.x, 0, n_ * 8);
       if (pcg_ && cutcell_)
         mg_.solve_pcg(pcg_maxit_, pcg_rtol_, mg_pre_, mg_post_, mg_bottom_);
       else
         mg_.solve(n_pois, mg_pre_, mg_post_, mg_bottom_);
       cudaMemcpy(phi_, l0.x, n_ * 8, cudaMemcpyDeviceToDevice);
     } else {
-      cudaMemset(phi_, 0, n_ * 8);
+      if (!pwarm_) cudaMemset(phi_, 0, n_ * 8);  // else keep the previous phi_ as the RB-GS warm start
       for (int it = 0; it < n_pois; ++it) {
         mac_.exchange(phi_);
         pois_k<<<grd_, blk_>>>(phi_, div_, ext_, mac_.origin_incl_ghost, g, 0);
@@ -678,6 +690,11 @@ class DistributedNS {
     if (vmg_built_) return;
     vmg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, vmg_levels_, comm_, mac_.ghost);
     vmg_.setDiffusionCoarse(nu_ * dt_, 1.0);  // const-coeff diffusion coarse operators (built once)
+    // NB: a geometry-aware (rediscretized) velocity coarse operator was tried and *diverges* -- the
+    // Robust-Scaled fine stencil is row-scaled by D_rescale at cut cells, so it is inconsistent with a
+    // clean I-beta*L coarse operator under geometric transfers (and the staggered velocity geometry is
+    // not the cell-face openness). The const-coeff coarse converges but slowly; velocity RB-GS
+    // (set_velocity_solver_params) is the exact, recommended default. Proper velocity MG = deferred.
     vmg_built_ = true;
   }
   void ensure_mg_built() {
@@ -733,6 +750,8 @@ class DistributedNS {
   bool pcg_ = false;
   int pcg_maxit_ = 60;
   double pcg_rtol_ = 1e-8;
+  bool pwarm_ = false;  // warm-start the pressure solve from the previous step's projection potential
+                        // (opt-in; off keeps the cold-start bit-exact behaviour the ctests assume)
   // 3-stream concurrent velocity solve: the independent u/v/w IBM RB-GS momentum solves run on their
   // own CUDA streams with per-component exchange engines (separate host-staged buffers -> safe at any
   // rank count). Overlaps at small per-component sizes; ~no effect once one stencil saturates the GPU.

@@ -127,25 +127,32 @@ Decisions confirmed: standalone-V default + MG-PCG option; RB-GS smoother defaul
 Result: grid-independent (ρ≈0.15 flat, 8 PCG iters flat) and correct (Z&H <0.05% at N=128 across φ).
 Exposed via `set_solid(..., pressure_coarse="rediscretized")` (default). All 24 MG ctests green.
 
-**Phase 2 — robustness & steady-march efficiency. [partial]**
-- **[NEW — top priority] Fix the velocity-diffusion MG.** Phase-1 isolation revealed
-  `set_velocity_multigrid` is the real "+4% at N=128" defect: it under-converges the IBM diffusion
-  (a *fixed* 4 V-cycles over a geometry-blind constant-coefficient coarse operator, `setDiffusionCoarse`).
-  Fix by **rediscretizing the velocity-diffusion coarse operator with the cut-cell geometry** — the exact
-  Phase-1 technique applied to `I − νΔt·Lap_cutcell` (coarsen the openness, build the Helmholtz operator
-  per level) — and/or wrap in PCG / use more V-cycles. Until done, velocity RB-GS is exact; use it.
-- MG-PCG default-available (symmetric V-cycle) for stiff/dense packings. *(already wired:
-  `set_pressure_pcg`.)*
-- **FMG / warm-start**: reuse the previous timestep's pressure as the initial guess (cheap, big win for
-  steady marches) and FMG for the first solve.
-- smoother tuning (RB-GS pre/post sweeps; optional Chebyshev on coarse levels).
+**Phase 2 — robustness & steady-march efficiency. [done, with one deferral]**
+- **Velocity-diffusion MG — rediscretization ATTEMPTED, diverges; DEFERRED.** Applying the Phase-1
+  technique (`I − νΔt·Lap_cutcell` from coarsened cell-face openness) *diverges* (K→4.99 at 4 cycles,
+  NaN beyond): the velocity fine stencil is **row-scaled by `D_rescale`** (the Robust-Scaled cut-cell
+  trick), so it is inconsistent with a clean `I−β·L` coarse operator under geometric transfers — and the
+  staggered velocity geometry is *not* the cell-face openness. A proper velocity MG needs the per-
+  component velocity geometry and a coarse operator consistent with the Robust-Scaling (research effort,
+  secondary payoff). Reverted to the const-coeff coarse (converges, slowly). **Velocity RB-GS
+  (`set_velocity_solver_params`) is exact and the recommended default** — the velocity Helmholtz is the
+  *easy*, non-singular operator; the pressure solve is the one that needed MG.
+- **Warm-start — DONE (opt-in, `set_pressure_warmstart`, default off).** Seeds the pressure solve from
+  the previous step's projection potential. Correct (same K on/off, PCG converges to tolerance); default
+  off preserves the bit-exact cold-start cell-for-cell ctests; turn on for steady production marches.
+- MG-PCG already available (`set_pressure_pcg`). FMG and Chebyshev-on-coarse left as future tuning.
 
-**Phase 3 — distributed coarse-grid scaling (makes it usable at scale).**
-- **Agglomerated redundant coarse solve**: below a per-rank-block threshold, gather the coarse level to
-  one rank, solve there, scatter the correction. Removes the latency-bound deep-coarse comm.
-- per-level halo tuning (coalesce/condense small coarse messages).
-- weak- and strong-scaling tests at np = 1,2,4,8 (and multi-GPU) — iteration count flat, time/solve
-  scaling cleanly. This is the deliverable that justifies "MG for large multi-GPU."
+**Phase 3 — distributed coarse-grid scaling (makes it usable at scale). [characterized; impl pending]**
+- **Measured first:** the rediscretized MG gives *identical* convergence at np=1/2/4 (ρ≈0.15, **8 PCG
+  iters** at N=64/128, independent of rank count). So the distributed coarsening + per-level halo are
+  correct and grid-independence already survives through np=4 — **agglomeration is not yet a bottleneck
+  at these scales.** The wall appears only at large np (many GPUs), where per-rank blocks become too
+  small to coarsen to a small global grid (the coarsest level stays distributed and latency-bound).
+- **Agglomerated redundant coarse solve** (the fix for large np): once distributed coarsening caps out,
+  gather the coarsest level's operator+RHS to root, solve there (serial), scatter the correction. Removes
+  the latency wall and decouples the level count from the per-rank block size. **Correctness is testable
+  at np≤4; the scaling benefit needs many-rank / multi-GPU hardware (not available on the 1-GPU dev box),
+  so it is deferred until that can be validated** — implementing it blind would ship unverifiable infra.
 
 **Phase 4 — generalize & clean up.**
 - (velocity-diffusion rediscretized coarse operator moved up to Phase 2 — it's the active defect.)
@@ -153,6 +160,47 @@ Exposed via `set_solid(..., pressure_coarse="rediscretized")` (default). All 24 
   `coarse_mode`). The Galerkin pressure path is **not buggy** (it converges to the right answer, just the
   slowest coarse model) — keep it for comparison; the rediscretized mode is the default. Update
   `doc/sdflow_pnm_parity.md` as findings settle.
+
+## DEFERRED WORK — agglomerated coarse solve (required for large-np / multi-GPU)
+
+**Status:** not implemented. Deferred because its payoff is unverifiable on the 1-GPU dev box (np≤4 is
+already grid-independent at 8 iters, and the trigger condition below would not even fire at np≤4). Pick
+this up **before any production run at large rank counts / on real multi-GPU**, where it is required to
+keep the pressure MG grid-independent.
+
+**Why it is needed.** `DistributedPoissonMG::init` coarsens 2:1 per level while each rank's block stays
+even and the partition stays aligned (it asserts this). The number of levels is therefore bounded by the
+*per-rank* block size, not the global size. At large np the per-rank block is small, so coarsening stops
+early → the coarsest *global* grid is still large → the coarse correction is weak (iteration count grows
+with np) **and** the coarse smoother's halo exchanges are tiny, latency-bound messages. This is the
+classic "MG stops strong-scaling" wall. Measured here: np=1/2/4 all give 8 PCG iters (the wall is past
+np=4 on these grids), so it does not show on the dev box.
+
+**Design (the standard hypre/AMReX approach: redundant agglomerated coarse grid).**
+1. **Distributed phase (existing).** Coarsen + smooth (RB-GS) + restrict as now, down to the coarsest
+   level `K` that the aligned per-rank coarsening allows.
+2. **Trigger.** When the level-`K` *global* grid is ≤ a threshold (e.g. 16³–32³ total cells) **or** the
+   per-rank block can no longer coarsen, switch to agglomeration for the bottom solve instead of the
+   current distributed `bottom_` RB-GS sweeps.
+3. **Gather.** Assemble level-`K`'s global operator (the 7 stencil arrays `AC..AT`) and RHS onto root
+   (and optionally a small subset of ranks for redundancy) via the ORB→global mapping. transport-core
+   already has a gather-to-root for fields (used for VTI output); reuse it for the RHS and each stencil
+   band. The operator only needs gathering once per `setFineVariableOperator*` (geometry is static); the
+   RHS gathers every V-cycle.
+4. **Redundant serial solve.** On root, solve the (small) coarse system to tight tolerance — a serial
+   geometric MG continuing the coarsening to ~1 cell, or a direct solve. Cheap because the grid is tiny.
+   Handle the singular pressure null space with the same mean removal.
+5. **Scatter.** Broadcast/scatter the coarse correction back to the level-`K` blocks; prolong up as now.
+6. **Variants / knobs.** redundant on 1 vs a few ranks (latency vs memory); threshold tuning; for the
+   non-singular velocity Helmholtz the same machinery applies (no mean removal).
+
+**Validation plan (when picked up).** (a) Correctness: the agglomerated V-cycle must converge to the
+*same* solution as the all-distributed path at np=1,2,4 (and match the serial reference cell-for-cell on
+a case small enough to trigger agglomeration). (b) Scaling (needs the hardware): PCG iteration count
+**flat** in np at fixed problem size (strong scaling) and flat per-rank work (weak scaling) at np = 8,
+16, 32, … on real multi-GPU — the deliverable that justifies "MG for large multi-GPU". Until (b) can be
+run, do not ship it (untestable infra). The hook points are `DistributedPoissonMG::vcycle` (bottom
+branch) and `init` (record `K` / the agglomeration threshold).
 
 ## 3. Open questions / decisions
 1. **Default solver shape:** standalone V-cycle vs MG-PCG default. *(Current: MG-PCG available via

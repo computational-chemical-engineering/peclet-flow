@@ -13,8 +13,16 @@ production **pnm_backend**.
 > drifts +3.5% at N=128, with velocity RB-GS it's exact. The velocity-MG under-converges the IBM
 > diffusion (fixed 4 V-cycles + a geometry-blind constant-coefficient coarse operator) — backlog item 7.
 > **Multigrid Phase 1 done:** a *rediscretized* cut-cell pressure coarse operator gives a grid-independent
-> V-cycle (rho≈0.15 flat, 8 PCG iters flat in N) — see `doc/sdflow_multigrid_plan.md`. Remaining: fix the
-> velocity-MG coarse operator (same technique), then Phase-3 retirement of pnm_backend.
+> V-cycle (rho≈0.15 flat, 8 PCG iters flat in N), correct, default — see `doc/sdflow_multigrid_plan.md`.
+>
+> **PARITY VALIDATED (Phase 4).** With each code in its correct config (sdflow = rediscretized MG-PCG +
+> velocity RB-GS; pnm = SIMPLE 800-outer), they are **bit-identical** across the cut-cell stress range:
+> SC drag vs Zick & Homsy φ=0.064→0.45 (both <0.1%, e.g. φ=0.45,N=128: both 28.088 vs Z&H 28.100), **and
+> on the 2×2×2 packing** (the original "30% gap" case): N=64 sdflow 5.60317e-3 vs pnm 5.60291e-3, N=128
+> 5.58656e-3 vs 5.58640e-3 (0.00% diff). The old gap was *entirely* misconfiguration. **sdflow is ready to
+> be the canonical solver.** Remaining toward retiring pnm: an explicit user sign-off + git tag (pnm kept
+> as the reference); the velocity-MG coarse operator and the large-np agglomerated coarse solve are the
+> two documented deferred items (neither blocks single-/few-GPU production with velocity RB-GS).
 
 ## Established so far (single GPU, sphere-packing Stokes, N=64, grid units)
 

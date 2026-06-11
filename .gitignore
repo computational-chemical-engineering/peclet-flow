@@ -1,10 +1,12 @@
 # Build directories
 build/
+build_*/
 bin/
 lib/
 *.so
 *.a
 *.o
+*.log
 
 # Python
 __pycache__/
@@ -43,4 +45,5 @@ data/
 *.vtp
 *.vti
 *.edges
+*.npz
 
