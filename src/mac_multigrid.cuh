@@ -369,6 +369,45 @@ __global__ void mg_prolong_inject_k(double* fine, const double* coarse, int3 fex
   fine[fi] += coarse[ci];
 }
 
+// ---- non-periodic domain boundaries (cavity / channel / step) on coarse levels ----
+// The inner openness coarsening + the periodic ghost exchange do NOT fill a non-periodic boundary face,
+// so the coarse operator there is undefined. Re-apply the boundary condition per level: set the boundary
+// FACE openness (axis a, side s) -- Neumann wall/inflow -> 0 (closed), Dirichlet outflow -> open (1, the
+// all-fluid coarse area fraction). Over the perpendicular plane. bf = the along-axis index of the face.
+__global__ void mg_set_face_openness_k(double* o, int3 ext, int g, int a, int s, double value) {
+  int dims[3] = {ext.x, ext.y, ext.z};
+  size_t strides[3] = {1, (size_t)ext.x, (size_t)ext.x * ext.y};
+  int b = (a + 1) % 3, c = (a + 2) % 3;
+  int p0 = blockIdx.x * blockDim.x + threadIdx.x;
+  int p1 = blockIdx.y * blockDim.y + threadIdx.y;
+  if (p0 >= dims[b] || p1 >= dims[c]) return;
+  int bf = (s == 0) ? g : (dims[a] - g);
+  o[(size_t)p0 * strides[b] + (size_t)p1 * strides[c] + (size_t)bf * strides[a]] = value;
+}
+
+// Fill the non-periodic boundary ghosts of a coarse correction before trilinear prolongation (which
+// samples one coarse cell beyond the block edge). Dirichlet (outflow): ghost = 0 (homogeneous correction).
+// Neumann (wall/inflow): ghost = nearest inner cell (zero-gradient extension). Over the perpendicular plane.
+__global__ void mg_fill_bc_ghost_k(double* x, int3 ext, int g, int a, int s, int dirichlet) {
+  int dims[3] = {ext.x, ext.y, ext.z};
+  size_t strides[3] = {1, (size_t)ext.x, (size_t)ext.x * ext.y};
+  int b = (a + 1) % 3, c = (a + 2) % 3;
+  int p0 = blockIdx.x * blockDim.x + threadIdx.x;
+  int p1 = blockIdx.y * blockDim.y + threadIdx.y;
+  if (p0 >= dims[b] || p1 >= dims[c]) return;
+  size_t base = (size_t)p0 * strides[b] + (size_t)p1 * strides[c];
+  size_t sa = strides[a];
+  int na = dims[a];
+  auto at = [&](int ia) -> double& { return x[base + (size_t)ia * sa]; };
+  if (s == 0) {
+    double v = dirichlet ? 0.0 : at(g);
+    for (int ia = 0; ia < g; ++ia) at(ia) = v;
+  } else {
+    double v = dirichlet ? 0.0 : at(na - g - 1);
+    for (int ia = na - g; ia < na; ++ia) at(ia) = v;
+  }
+}
+
 }  // namespace mgdetail
 
 struct MGLevel {
@@ -472,6 +511,18 @@ class DistributedPoissonMG {
   // set false when a Dirichlet face (e.g. a pressure outflow) makes the operator non-singular.
   void setRemoveMean(bool on) { remove_mean_ = on; }
 
+  // Per-face domain boundary types {-x,+x,-y,+y,-z,+z}: 0=periodic, 1/2=Neumann (wall/inflow), 3=Dirichlet
+  // (outflow). Default all-0 (periodic) -> the boundary handling below is a no-op, so the periodic / IBM
+  // pressure path stays byte-identical. Set by the solver for native-BC problems so the rediscretized
+  // coarse operators + the trilinear prolongation get the right non-periodic boundary treatment per level.
+  void setBoundaryConditions(const int bc[6]) {
+    has_bc_ = false;
+    for (int i = 0; i < 6; ++i) {
+      bc_type_[i] = bc[i];
+      if (bc[i] != 0) has_bc_ = true;
+    }
+  }
+
   void setFineVariableOperator(const double* ox, const double* oy, const double* oz, double idx2,
                                double idy2, double idz2, bool galerkin = false) {
     galerkin_ = galerkin;
@@ -559,6 +610,8 @@ class DistributedPoissonMG {
       c.mac.exchange(c.tx);  // periodic ghost openness (the operator build reads the +neighbour face)
       c.mac.exchange(c.ty);
       c.mac.exchange(c.tz);
+      if (has_bc_) applyBoundaryOpenness(c);  // re-impose non-periodic boundary faces (coarsen+exchange
+                                              //   leave them undefined): Neumann -> 0, Dirichlet -> open
       double s = 1.0 / (double)(1 << (2 * L));  // coarse spacing h_L = 2^L h0 -> idx2_L = idx2 / 4^L
       mgdetail::mg_build_op_k<<<grd(c), blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, c.tx, c.ty, c.tz,
                                                c.ext, c.g, idx2 * s, idy2 * s, idz2 * s);
@@ -915,6 +968,8 @@ class DistributedPoissonMG {
       mgdetail::mg_prolong_inject_k<<<grd, blk>>>(lv.x, cs.x, lv.ext, cs.ext, lv.g, lv.inner);
     } else {
       cs.mac.exchange(cs.x);
+      if (has_bc_) fillBCGhosts(cs);  // non-periodic boundary ghosts the trilinear prolong samples:
+                                      //   Neumann -> zero-gradient, Dirichlet -> 0
       mgdetail::mg_prolong_k<<<grd, blk>>>(lv.x, cs.x, lv.ext, cs.ext, lv.g, lv.inner);
     }
 
@@ -922,11 +977,52 @@ class DistributedPoissonMG {
     if (remove_mean_) mac_remove_mean(lv.x, lv.mac, comm_);
   }
 
+  // which domain-boundary faces this rank owns at level lv (low/high along each axis).
+  void bcFaceFlags(const MGLevel& lv, bool lo[3], bool hi[3]) const {
+    int g = lv.g;
+    int3 og = lv.og, N = lv.mac.global_res, e = lv.ext;
+    lo[0] = og.x + g == 0;  lo[1] = og.y + g == 0;  lo[2] = og.z + g == 0;
+    hi[0] = og.x + e.x - g == N.x;  hi[1] = og.y + e.y - g == N.y;  hi[2] = og.z + e.z - g == N.z;
+  }
+  // re-impose the boundary FACE openness on a coarse level (Neumann -> 0, Dirichlet outflow -> open).
+  void applyBoundaryOpenness(MGLevel& c) {
+    bool lo[3], hi[3];
+    bcFaceFlags(c, lo, hi);
+    int dims[3] = {c.ext.x, c.ext.y, c.ext.z};
+    double* oarr[3] = {c.tx, c.ty, c.tz};
+    for (int a = 0; a < 3; ++a) {
+      int b = (a + 1) % 3, cc = (a + 2) % 3;
+      dim3 blk(16, 16), grd((dims[b] + 15) / 16, (dims[cc] + 15) / 16);
+      for (int s = 0; s < 2; ++s) {
+        int face = 2 * a + s, t = bc_type_[face];
+        if (t == 0 || (s == 0 ? !lo[a] : !hi[a])) continue;
+        mgdetail::mg_set_face_openness_k<<<grd, blk>>>(oarr[a], c.ext, c.g, a, s, t == 3 ? 1.0 : 0.0);
+      }
+    }
+  }
+  // fill a coarse correction's non-periodic boundary ghosts before trilinear prolongation.
+  void fillBCGhosts(MGLevel& c) {
+    bool lo[3], hi[3];
+    bcFaceFlags(c, lo, hi);
+    int dims[3] = {c.ext.x, c.ext.y, c.ext.z};
+    for (int a = 0; a < 3; ++a) {
+      int b = (a + 1) % 3, cc = (a + 2) % 3;
+      dim3 blk(16, 16), grd((dims[b] + 15) / 16, (dims[cc] + 15) / 16);
+      for (int s = 0; s < 2; ++s) {
+        int face = 2 * a + s, t = bc_type_[face];
+        if (t == 0 || (s == 0 ? !lo[a] : !hi[a])) continue;
+        mgdetail::mg_fill_bc_ghost_k<<<grd, blk>>>(c.x, c.ext, c.g, a, s, t == 3 ? 1 : 0);
+      }
+    }
+  }
+
   std::vector<std::unique_ptr<MGLevel>> levels_;
   MPI_Comm comm_ = MPI_COMM_WORLD;
   int pre_ = 2, post_ = 2, bottom_ = 8;
   bool galerkin_ = false;     // variational (aggregation) coarse operators + injection/sum transfers
   bool remove_mean_ = true;   // false for non-singular operators (e.g. diffusion I - nu*dt*Lap)
+  int bc_type_[6] = {0, 0, 0, 0, 0, 0};  // per-face domain BC (0=periodic); see setBoundaryConditions
+  bool has_bc_ = false;       // any non-periodic face -> apply the coarse-level boundary handling
   bool cheb_enabled_ = false;       // Chebyshev smoother (variable levels) instead of Red-Black GS
   double cheb_a_ = 0.0, cheb_b_ = 0.0;  // damped spectral band [a,b] of D^{-1}A
 };

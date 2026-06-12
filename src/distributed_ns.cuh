@@ -324,6 +324,9 @@ class DistributedNS {
       cfdmpi::ccdetail::cc_build_open_k<<<gE, dim3(8, 8, 4)>>>(bx_, by_, bz_, sdf, ext_, 1.0, 1.0, 1.0);
       mg_.setRemoveMean(false);  // the Dirichlet outflow face makes the operator non-singular
     }
+    // tell the MG the per-face boundary types so the coarse rediscretized operators + the trilinear
+    // prolongation get the right non-periodic treatment per level (no-op if all-periodic).
+    if (has_domain_bc_) mg_.setBoundaryConditions(bc_type_);
     if (coarse_mode == 0)
       mg_.setFineVariableOperatorRediscretized(ox_, oy_, oz_, 1.0, 1.0, 1.0);
     else

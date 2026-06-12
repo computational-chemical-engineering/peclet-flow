@@ -198,8 +198,16 @@ developing plane channel (uniform inlet → parabolic Poiseuille outlet, `u_max/
 conservation, machine-precision divergence; `scripts/verify_channel_sdflow.py`); backward-facing step
 (Gartling expansion-ratio-2, `scripts/verify_bfs_sdflow.py`) — reattachment `x_r/S` 5.3 (Re_S=100) → 8.3
 (Re_S=200) on the Armaly/Biswas curve, `SDFLOW_BFS_RE800=1` pushes to the Gartling Re=800 benchmark.
-*Follow-ups:* convective outflow for unsteady wakes, non-periodic multilevel multigrid (MVP uses levels=1
-RB-GS), multi-rank inlet-profile scatter (validated single-rank).
+
+The **rediscretized geometric pressure multigrid is multilevel on these non-periodic domains** (not just the
+periodic/IBM case): each coarse level re-imposes the boundary face openness (Neumann wall/inflow → 0,
+Dirichlet outflow → open) and the trilinear prolongation fills the non-periodic boundary ghosts
+(Neumann → zero-gradient, Dirichlet → 0). Gated on `has_bc_`, so the periodic/IBM path is byte-identical.
+Convergence is grid-independent — e.g. a 256×64 channel at a fixed 10 V-cycles/step drives the flux
+divergence from `2e-3` (1 level) to `5e-7` (3 levels) at ~the same cost. The BC verify scripts request
+`levels=4` (auto-clamped by `clamp_levels`; a quasi-2D `nz=4` grid caps at 2). *Follow-ups:* convective
+outflow for unsteady wakes, **semi-coarsening** so thin-`z` (quasi-2D) grids reach more levels, multi-rank
+inlet-profile scatter (validated single-rank).
 
 Validated cell-for-cell vs serial and against analytics (Taylor–Green ~2e-15, Poiseuille, momentum
 conservation) **and against Zick & Homsy sphere-array drag (bit-identical to `pnm_backend`)** —
