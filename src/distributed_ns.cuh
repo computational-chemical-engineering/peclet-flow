@@ -92,14 +92,16 @@ __global__ void add_fou_rhs_k(double* b, const double* u, const double* v, const
 
 // one Red-Black diffusion sweep: c <- (b + beta*sum_nbr c)/(1+6 beta), global parity.
 __global__ void diff_k(double* c, const double* b, int3 e, int3 og, int g, double beta, double Ac,
-                       int color) {
+                       int color, const double* dcorr = nullptr) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
   if ((((x + og.x) + (y + og.y) + (z + og.z)) & 1) != color) return;
   long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = (long)e.x * e.y;
   double s = c[i + sx] + c[i - sx] + c[i + sy] + c[i - sy] + c[i + sz] + c[i - sz];
-  c[i] = (b[i] + beta * s) / Ac;
+  // dcorr (domain-BC face-fold): a wall face is dropped (its ghost is 0 in s) and its beta is added to
+  // the diagonal here, so the implicit solve never reads a lagged wall ghost.
+  c[i] = (b[i] + beta * s) / (Ac + (dcorr ? dcorr[i] : 0.0));
 }
 // zero velocity where the cell is solid (mask 1.0 = solid). Masks all cells (inner + ghost) so walls
 // stay consistent without an extra exchange.
@@ -213,6 +215,8 @@ class DistributedNS {
       if (inhom_[c]) cudaFree(inhom_[c]);
       if (solidmask_[c]) cudaFree(solidmask_[c]);
       if (descale_[c]) cudaFree(descale_[c]);
+      if (bc_dcorr_[c]) cudaFree(bc_dcorr_[c]);
+      if (bc_brhs_[c]) cudaFree(bc_brhs_[c]);
       for (int k = 0; k < 7; ++k)
         if (As_[c][k]) cudaFree(As_[c][k]);
       if (ibmdata_[c].cell_index) cfdmpi::ibm_free(ibmdata_[c]);
@@ -538,6 +542,7 @@ class DistributedNS {
         mac_.exchange(u_);
         mac_.exchange(v_);
         mac_.exchange(w_);
+        apply_velocity_bc();  // explicit advection reads the reflection wall ghosts
         for (int c = 0; c < 3; ++c)
           advect_rhs_k<<<grd_, blk_>>>(c, u_, v_, w_, comp[c], b_[c], dt_, f[c], ext_, g);
         // retarget the time base from u^k to u^n:  b += (u^n - u^k)
@@ -634,15 +639,24 @@ class DistributedNS {
         }
       }
     } else {
+      // Domain-BC walls are folded into the implicit diffusion: drop the wall ghosts (fold=1), add the
+      // dropped face's beta to the diagonal (bc_dcorr_) and 2*beta*wall to the RHS (bc_brhs_). This keeps
+      // u_inner implicit -- no one-sweep Gauss-Seidel lag on the wall term (the explicit advection above
+      // still used the reflection ghost). setup_bc_diffusion() is a no-op once built / without domain BC.
+      setup_bc_diffusion();
+      if (has_domain_bc_)
+        for (int c = 0; c < 3; ++c)
+          cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], 1.0, bc_brhs_[c], (long)n_);
       for (int c = 0; c < 3; ++c) {
+        const double* dcorr = has_domain_bc_ ? bc_dcorr_[c] : nullptr;
         for (int it = 0; it < n_diff; ++it) {
           mac_.exchange(comp[c]);
-          apply_velocity_bc_comp(comp[c], c);
-          diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 0);
+          apply_velocity_bc_comp(comp[c], c, /*fold=*/1);
+          diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 0, dcorr);
           if (has_solid_) apply_mask(comp[c]);
           mac_.exchange(comp[c]);
-          apply_velocity_bc_comp(comp[c], c);
-          diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 1);
+          apply_velocity_bc_comp(comp[c], c, /*fold=*/1);
+          diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 1, dcorr);
           if (has_solid_) apply_mask(comp[c]);
         }
       }
@@ -752,8 +766,9 @@ class DistributedNS {
     athi[0] = og.x + ext_.x - g == N.x;  athi[1] = og.y + ext_.y - g == N.y;
     athi[2] = og.z + ext_.z - g == N.z;
   }
-  // fill the boundary ghosts of ONE velocity component (call after its halo exchange)
-  void apply_velocity_bc_comp(double* f, int comp) {
+  // fill the boundary ghosts of ONE velocity component (call after its halo exchange). fold=0 ->
+  // reflection ghosts (explicit stencils); fold=1 -> wall ghosts dropped to 0 (implicit diffusion).
+  void apply_velocity_bc_comp(double* f, int comp, int fold = 0) {
     if (!has_domain_bc_) return;
     bool atlo[3], athi[3];
     bc_face_flags(atlo, athi);
@@ -766,7 +781,7 @@ class DistributedNS {
         if (bc_type_[face] == 0 || (s == 0 ? !atlo[a] : !athi[a])) continue;
         float3 wv = bc_vel_[face];
         double wc = comp == 0 ? wv.x : (comp == 1 ? wv.y : wv.z);
-        cfdmpi::bcdetail::bc_velocity_comp_k<<<grd, blk>>>(f, ext_, g, a, s, comp, wc);
+        cfdmpi::bcdetail::bc_velocity_comp_k<<<grd, blk>>>(f, ext_, g, a, s, comp, wc, fold);
       }
     }
   }
@@ -774,6 +789,37 @@ class DistributedNS {
     apply_velocity_bc_comp(u_, 0);
     apply_velocity_bc_comp(v_, 1);
     apply_velocity_bc_comp(w_, 2);
+  }
+  // Precompute the implicit-diffusion face-fold (once; beta = nu*dt is fixed): per component, a diagonal
+  // correction bc_dcorr_[c] (+beta per dropped tangential wall face) and an RHS fold bc_brhs_[c]
+  // (+2*beta*wall) at the wall-adjacent inner cells. The diffusion then drops the wall ghosts and folds
+  // their coefficient into the diagonal -- no lagged wall ghost in the implicit solve.
+  void setup_bc_diffusion() {
+    if (!has_domain_bc_ || bc_diff_built_) return;
+    double beta = nu_ * dt_;
+    bool atlo[3], athi[3];
+    bc_face_flags(atlo, athi);
+    int g = mac_.ghost, dims[3] = {ext_.x, ext_.y, ext_.z};
+    for (int comp = 0; comp < 3; ++comp) {
+      if (!bc_dcorr_[comp]) cudaMalloc(&bc_dcorr_[comp], n_ * 8);
+      if (!bc_brhs_[comp]) cudaMalloc(&bc_brhs_[comp], n_ * 8);
+      cudaMemset(bc_dcorr_[comp], 0, n_ * 8);
+      cudaMemset(bc_brhs_[comp], 0, n_ * 8);
+      for (int a = 0; a < 3; ++a) {
+        if (comp == a) continue;  // only TANGENTIAL walls are folded (normal faces are held directly)
+        int b = (a + 1) % 3, cc = (a + 2) % 3;
+        dim3 blk(16, 16), grd((dims[b] + 15) / 16, (dims[cc] + 15) / 16);
+        for (int s = 0; s < 2; ++s) {
+          int face = 2 * a + s;
+          if (bc_type_[face] == 0 || (s == 0 ? !atlo[a] : !athi[a])) continue;
+          float3 wv = bc_vel_[face];
+          double wc = comp == 0 ? wv.x : (comp == 1 ? wv.y : wv.z);
+          cfdmpi::bcdetail::bc_diffusion_fold_k<<<grd, blk>>>(bc_dcorr_[comp], bc_brhs_[comp], ext_, g, a,
+                                                              s, beta, wc);
+        }
+      }
+    }
+    bc_diff_built_ = true;
   }
   // zero the boundary-face openness on wall/Dirichlet faces (-> Neumann pressure). Call at operator build.
   void apply_wall_openness() {
@@ -869,6 +915,9 @@ class DistributedNS {
   int bc_type_[6] = {0, 0, 0, 0, 0, 0};
   float3 bc_vel_[6] = {};
   bool has_domain_bc_ = false;
+  double* bc_dcorr_[3] = {nullptr, nullptr, nullptr};  // implicit-diffusion face-fold: +beta diagonal
+  double* bc_brhs_[3] = {nullptr, nullptr, nullptr};   //   correction + 2*beta*wall RHS, per component
+  bool bc_diff_built_ = false;
   // CG-accelerated pressure solve (for the stiff cut-cell operator)
   bool pcg_ = false;
   int pcg_maxit_ = 60;
