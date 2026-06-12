@@ -211,9 +211,13 @@ branch) and `init` (record `K` / the agglomeration threshold).
 > PCG's iteration count to within 0–3 iters** (N=128: Cheb 10 vs PCG 8 vs standalone-V 12), confirming
 > "≈ as good as PCG" in convergence. **On 1 GPU it is ~5–25% *slower* than PCG** (a few more iters, and
 > PCG's dot-products are free without a network) — i.e. ≈ standalone-V speed. **The win is purely at
-> scale** (no per-iteration dot-product Allreduce), which needs the multi-GPU box to measure. So the
-> method is ready; only the at-scale benefit and the production wiring (estimate bounds once at setup,
-> a `set_pressure_chebyshev` option in step()/binding) remain — do them with the multi-GPU push.
+> scale** (no per-iteration dot-product Allreduce), which needs the multi-GPU box to measure.
+>
+> **WIRED IN (togglable):** `set_pressure_chebyshev(on, max_iter, rtol)` on `DistributedNS` and the sdflow
+> module (mutually exclusive with `set_pressure_pcg`; overrides the single-rank auto-PCG default). Spectral
+> bounds are estimated once, lazily, on the first step (RHS=−div is a good seed; the operator is fixed so
+> they are reused). Verified end-to-end: Z&H K=4.2914, identical to PCG; 72/72 ctests green. Only the
+> at-scale wall-clock benefit remains to measure (needs the multi-GPU box).
 
 **Why:** the single-GPU default is now MG-PCG (~1.2x faster than standalone V-cycles), but PCG's speedup
 **inverts at scale** — each PCG iteration needs 2–3 **global dot-products** (`MPI_Allreduce`), which are

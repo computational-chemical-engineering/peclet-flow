@@ -322,8 +322,22 @@ class DistributedNS {
   // default is OFF (standalone V-cycles); the sdflow module enables it by default on a single rank.
   void set_pressure_pcg(bool on, int max_iter = 60, double rtol = 1e-8) {
     pcg_ = on;
+    if (on) cheb_ = false;  // mutually exclusive outer accelerators
     pcg_maxit_ = max_iter;
     pcg_rtol_ = rtol;
+  }
+
+  // Solve the pressure Poisson with Chebyshev semi-iteration accelerating the multigrid V-cycle, instead
+  // of CG (set_pressure_pcg) or plain V-cycles. Same convergence as MG-PCG (~matches its iteration count)
+  // but with NO per-iteration global dot-products -- communication-light, intended for large multi-GPU
+  // where PCG's reductions are latency-bound. The spectral bounds of M^{-1}A are estimated once (lazily,
+  // on the first step). Requires the cut-cell operator. Overrides PCG when both are set.
+  void set_pressure_chebyshev(bool on, int max_iter = 60, double rtol = 1e-8) {
+    cheb_ = on;
+    if (on) pcg_ = false;
+    cheb_maxit_ = max_iter;
+    cheb_rtol_ = rtol;
+    cheb_bounds_set_ = false;  // re-estimate (e.g. if solver settings changed)
   }
 
   // Warm-start the pressure solve from the previous step's projection potential (opt-in; default off).
@@ -643,10 +657,20 @@ class DistributedNS {
         cudaMemcpy(l0.x, phi_, n_ * 8, cudaMemcpyDeviceToDevice);
       else
         cudaMemset(l0.x, 0, n_ * 8);
-      if (pcg_ && cutcell_)
+      if (cheb_ && cutcell_) {
+        // Chebyshev semi-iteration (no per-iteration global dot-products -> communication-light at scale).
+        // Estimate the spectral bounds of M^{-1}A once, lazily, on the first solve (the RHS = -div is a
+        // good non-trivial seed by then; the operator is fixed so the bounds are reused every step).
+        if (!cheb_bounds_set_) {
+          mg_.estimate_eigenvalues(cheb_a_, cheb_b_, /*iters=*/15, mg_pre_, mg_post_, mg_bottom_);
+          cheb_bounds_set_ = true;
+        }
+        mg_.solve_chebyshev(cheb_maxit_, cheb_rtol_, mg_pre_, mg_post_, mg_bottom_, cheb_a_, cheb_b_);
+      } else if (pcg_ && cutcell_) {
         mg_.solve_pcg(pcg_maxit_, pcg_rtol_, mg_pre_, mg_post_, mg_bottom_);
-      else
+      } else {
         mg_.solve(n_pois, mg_pre_, mg_post_, mg_bottom_);
+      }
       cudaMemcpy(phi_, l0.x, n_ * 8, cudaMemcpyDeviceToDevice);
     } else {
       if (!pwarm_) cudaMemset(phi_, 0, n_ * 8);  // else keep the previous phi_ as the RB-GS warm start
@@ -751,6 +775,11 @@ class DistributedNS {
   bool pcg_ = false;
   int pcg_maxit_ = 60;
   double pcg_rtol_ = 1e-8;
+  bool cheb_ = false;            // Chebyshev semi-iteration outer accelerator (communication-light)
+  int cheb_maxit_ = 60;
+  double cheb_rtol_ = 1e-8;
+  double cheb_a_ = 0.0, cheb_b_ = 0.0;  // estimated spectral bounds of M^{-1}A (set lazily on step 1)
+  bool cheb_bounds_set_ = false;
   bool pwarm_ = false;  // warm-start the pressure solve from the previous step's projection potential
                         // (opt-in; off keeps the cold-start bit-exact behaviour the ctests assume)
   // 3-stream concurrent velocity solve: the independent u/v/w IBM RB-GS momentum solves run on their

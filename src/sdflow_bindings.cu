@@ -93,6 +93,10 @@ class Solver {
     pcg_user_set_ = true;  // pin the choice -> disables the single-rank auto-default in ensure_init
     s_.set_pressure_pcg(on, max_iter, rtol);
   }
+  void set_pressure_chebyshev(bool on, int max_iter, double rtol) {
+    pcg_user_set_ = true;  // explicit choice -> disable the single-rank auto-PCG default
+    s_.set_pressure_chebyshev(on, max_iter, rtol);
+  }
   void set_pressure_warmstart(bool on) { s_.set_pressure_warmstart(on); }
   void set_velocity_multigrid(bool on, int levels, int v_cycles) {
     s_.set_velocity_multigrid(on, levels, v_cycles);
@@ -223,6 +227,8 @@ PYBIND11_MODULE(sdflow, m) {
            py::arg("levels") = 4)
       .def("set_pressure_pcg", &Solver::set_pressure_pcg, py::arg("on"), py::arg("max_iter") = 60,
            py::arg("rtol") = 1e-8)
+      .def("set_pressure_chebyshev", &Solver::set_pressure_chebyshev, py::arg("on"),
+           py::arg("max_iter") = 60, py::arg("rtol") = 1e-8)
       .def("set_pressure_warmstart", &Solver::set_pressure_warmstart, py::arg("on"))
       .def("set_velocity_multigrid", &Solver::set_velocity_multigrid, py::arg("on"),
            py::arg("levels") = 3, py::arg("v_cycles") = 4)
