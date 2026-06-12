@@ -262,3 +262,48 @@ agglomerated coarse solve above.
 4. **Coarsening rule for the face openness** — plain area-average (current, validated to <0.05% vs Z&H)
    vs a series/harmonic transmissibility combination near boundaries. Area-average works; revisit only if
    a denser packing underperforms.
+
+## Forward-compatibility: face-based operators (octree / AMR readiness)
+
+**Design principle (adopt now, cheaply):** express every operator as a **loop over faces with per-face
+geometric factors** — even though those factors are compile-time constants on the uniform Cartesian grid.
+Keep the numerics (MG cycling, smoother, Krylov/Chebyshev acceleration, time integration / a future PTC,
+the advection limiter policy) **mesh-agnostic**; isolate everything mesh-specific behind a **geometry
+provider**. A later octree/AMR port should then only *replace the provider*, not the numerics.
+
+**Why this is realistic here — we're already ~halfway:**
+- The **pressure operator is already a face-sum**: `mg_build_op_k` does `A_C = Σ_faces T_f`, off-diagonals
+  `= −T_f`, `T_f = openness_f · idx2`. The **openness fields `ox/oy/oz` are exactly the per-face geometric
+  factor** the pattern wants (already varying per face — the cut-cell aperture). Generalizing is small:
+  `T_f = aperture_f · A_f / d_f` where `A_f` (face area = `h²`) and `d_f` (centre distance = `h`) are the
+  current constants. Write them as provider calls that fold to constants on Cartesian.
+- **Advection** (Koren TVD) is already face-flux + per-face limiter; **time integration / PTC** is a
+  per-cell diagonal (Δτ damping). Both are inherently mesh-agnostic.
+- **Geometric rediscretization is the octree-*friendly* coarse path, not an obstacle** — "rebuild the
+  operator on each level from that level's geometry" is exactly what AMR multigrid does. Galerkin/RAP
+  (which we already discarded for cut cells) is the one that becomes a nightmare with hanging nodes. The
+  genuinely octree-specific coarse-level work is the **transfer operators** (restriction/prolongation
+  across non-2:1 refinement / hanging nodes), which live in the provider, not the operator assembly.
+
+**The two things to be deliberate about:**
+1. **The Robust-Scaled cut-cell *velocity* IBM is the problem child.** It row-scales the stencil by
+   `D_rescale`, so it is **not** a sum of face-symmetric fluxes — which is exactly why it is non-symmetric
+   (no CG) and why the velocity-MG rediscretization *diverged* (Phase 2). A face-based, octree-ready
+   design wants a **conservative, face-symmetric cut-cell / embedded-boundary** velocity formulation
+   (AMReX-EB style). That is a numerical-method choice, best made *before* an octree port — and it would
+   simultaneously fix the velocity-MG / CG limitation. (The pressure operator is already face-symmetric.)
+2. **The geometry provider must be a zero-cost abstraction** — a compile-time/templated policy that
+   returns constants on Cartesian so the compiler keeps the fast, coalesced 7-point path. A runtime
+   per-face list with indirection would gut GPU throughput. Template the operators on a
+   `GeometryProvider`; do **not** introduce runtime face lists on the structured path.
+
+Plus the unavoidable octree infrastructure (not "swap the provider"): tree traversal / neighbour-finding
+(today's flat extended-block arrays), and an octree-based decomposition replacing the ORB block.
+
+**Recommendation / timing:** adopt the face-term assembly *convention* now for any new or touched operator
+(`diag = Σ face_term; offdiag = −face_term; face_term = geom_factor · coeff`, `geom_factor` isolated) —
+near-zero cost, cleaner code, real forward-compat insurance; the pressure operator already conforms. Make
+the cut-cell **velocity** formulation face-symmetric when it is next revisited. **Defer the full
+provider/octree abstraction** until octrees are actually committed to — building an abstraction before it
+can be validated against a real second mesh is how abstractions go wrong (same reasoning as deferring the
+agglomerated coarse solve until multi-GPU hardware exists).
