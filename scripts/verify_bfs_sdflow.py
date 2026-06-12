@@ -36,9 +36,13 @@ def inlet_profile(H, S, nz, U_in):
 
 
 def reattachment(u_bottom):
-    """First sign change (- -> +) of the near-bottom-wall streamwise velocity = end of the primary bubble."""
-    for i in range(2, len(u_bottom)):
-        if u_bottom[i - 1] < 0.0 <= u_bottom[i]:
+    """End of the primary bubble = the first - -> + crossing of the near-bottom-wall streamwise velocity
+    AFTER the flow has actually reversed behind the step (skip any thin positive sliver at the step lip)."""
+    reversed_yet = False
+    for i in range(1, len(u_bottom)):
+        if u_bottom[i] < 0.0:
+            reversed_yet = True
+        elif reversed_yet and u_bottom[i] >= 0.0:
             return (i - 1) + u_bottom[i - 1] / (u_bottom[i - 1] - u_bottom[i])
     return 0.0
 
@@ -57,6 +61,7 @@ def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.4, max_steps=12000):
     s.set_pressure_solver_params(80)
     s.set_pressure_geometry(np.full((L, H, nz), 1e30))        # all-fluid + BC pressure faces
 
+    verbose = os.environ.get("SDFLOW_BFS_VERBOSE") == "1"
     t0 = time.time()
     prev = 0.0
     steps = max_steps
@@ -65,7 +70,11 @@ def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.4, max_steps=12000):
         if it % 100 == 99:
             u = s.get_u()
             xr = reattachment(u[:, 0, nz // 2]) if s.rank() == 0 else 0.0
-            done = it > 2000 and abs(xr - prev) < 1e-3 * S
+            # converge only once a real bubble has formed (x_r > S) AND its length has stopped drifting --
+            # early in the transient x_r sits near 0 ("stable" but undeveloped), which must NOT trigger.
+            done = it > 3000 and xr > S and abs(xr - prev) < 1e-3 * S
+            if verbose and s.rank() == 0:
+                print(f"    [Re={Re} it={it+1} x_r/S={xr/S:.2f} t={time.time()-t0:.0f}s]", flush=True)
             prev = xr
             if s.bcast_from_root(done):
                 steps = it + 1
@@ -99,7 +108,7 @@ def main():
     # push toward the Gartling Re=800 benchmark (long; opt in with SDFLOW_BFS_RE800=1). Informational
     # comparison: Gartling's lower-wall reattachment ~6.1 H (~12 S), S=32, L=30S.
     if os.environ.get("SDFLOW_BFS_RE800") == "1":
-        r = run(800, S=32, Lr=30, dt=0.3, max_steps=24000)
+        r = run(800, S=32, Lr=22, dt=0.3, max_steps=36000)
         if r is not None:
             print(f"  Re_S={r['Re']:<4d} S={r['S']} L={r['L']}  x_r/S={r['xr_S']:.2f}  x_r/H={r['xr_H']:.2f}"
                   f"  (Gartling ~6.1 H)  mass_err={r['mass_err']:.1e}  div={r['div']:.1e}  "
