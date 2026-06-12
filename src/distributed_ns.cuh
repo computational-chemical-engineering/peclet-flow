@@ -208,7 +208,7 @@ class DistributedNS {
   }
   ~DistributedNS() {
     for (double* p : {u_, v_, w_, phi_, div_, solid_, phitot_, b_[0], b_[1], b_[2], ox_, oy_, oz_,
-                      u_old_, v_old_, w_old_, up_, vp_, wp_})
+                      bx_, by_, bz_, u_old_, v_old_, w_old_, up_, vp_, wp_})
       if (p) cudaFree(p);
     for (int c = 0; c < 3; ++c) {
       if (idmap_[c]) cudaFree(idmap_[c]);
@@ -313,9 +313,16 @@ class DistributedNS {
     cudaMalloc(&sdf, n_ * sizeof(double));
     cudaMemcpy(sdf, sdf_ext.data(), n_ * sizeof(double), cudaMemcpyHostToDevice);
     dim3 gE((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
-    // staggered face openness, kept for the cut-cell flux divergence (projection RHS + diagnostic)
+    // OPERATOR openness alpha (ox_/oy_/oz_): walls/inflow zeroed (Neumann), outflow kept open (Dirichlet).
     cfdmpi::ccdetail::cc_build_open_k<<<gE, dim3(8, 8, 4)>>>(ox_, oy_, oz_, sdf, ext_, 1.0, 1.0, 1.0);
-    apply_wall_openness();  // domain wall/Dirichlet faces -> openness 0 -> homogeneous Neumann pressure
+    apply_wall_openness();
+    if (has_open_boundary_) {
+      // FLUX openness beta (bx_/by_/bz_): pure geometry, NOT zeroed at domain faces, so the divergence and
+      // projection count the inflow/outflow flux even where the operator is Neumann. Solids still close it.
+      if (!bx_) for (double** p : {&bx_, &by_, &bz_}) cudaMalloc(p, n_ * sizeof(double));
+      cfdmpi::ccdetail::cc_build_open_k<<<gE, dim3(8, 8, 4)>>>(bx_, by_, bz_, sdf, ext_, 1.0, 1.0, 1.0);
+      mg_.setRemoveMean(false);  // the Dirichlet outflow face makes the operator non-singular
+    }
     if (coarse_mode == 0)
       mg_.setFineVariableOperatorRediscretized(ox_, oy_, oz_, 1.0, 1.0, 1.0);
     else
@@ -323,6 +330,10 @@ class DistributedNS {
     cudaFree(sdf);
     cutcell_ = true;
   }
+  // flux-openness pointers for the divergence/correction: beta when an open boundary exists, else alpha.
+  double* fox() { return has_open_boundary_ ? bx_ : ox_; }
+  double* foy() { return has_open_boundary_ ? by_ : oy_; }
+  double* foz() { return has_open_boundary_ ? bz_ : oz_; }
 
   // Solve the pressure Poisson with CG preconditioned by the multigrid V-cycle instead of plain V-cycles.
   // Converges the stiff cut-cell operator in fewer iterations; requires the cut-cell operator
@@ -412,16 +423,27 @@ class DistributedNS {
   }
 
   // Set a domain-boundary condition on one of the 6 faces (0=-x,1=+x,2=-y,3=+y,4=-z,5=+z). type:
-  // 0=PERIODIC (default), 1=NOSLIP wall, 2=DIRICHLET velocity (vel). Call BEFORE the first step /
-  // set_solid -- it fixes the halo periodicity (an axis becomes non-periodic if either of its faces is
-  // non-periodic). Velocity ghosts on these faces are filled by apply_velocity_bc; wall pressure is
-  // Neumann via apply_wall_openness (zeroed boundary-face openness). (Inflow/outflow: future.)
+  // 0=PERIODIC (default), 1=NOSLIP wall, 2=DIRICHLET velocity / INFLOW (vel), 3=OUTFLOW (zero-gradient
+  // velocity + Dirichlet p=0). Call BEFORE the first step / set_solid -- it fixes the halo periodicity (an
+  // axis becomes non-periodic if either of its faces is non-periodic). Velocity ghosts on these faces are
+  // filled by apply_velocity_bc; the pressure operator gets Neumann at walls/inflow (zeroed face openness)
+  // and Dirichlet at outflow (open face + ghost p=0). An open boundary (outflow, or an inflow with a
+  // non-zero normal velocity) splits the openness: see set_cutcell_pressure_operator.
   void set_domain_bc(int face, int type, float3 vel = make_float3(0, 0, 0)) {
     bc_type_[face] = type;
     bc_vel_[face] = vel;
     int ax = face / 2;
     periodic_[ax] = (bc_type_[2 * ax] == 0 && bc_type_[2 * ax + 1] == 0);
     has_domain_bc_ = !(periodic_[0] && periodic_[1] && periodic_[2]);
+    // an open boundary makes the pressure operator differ from the flux divergence: outflow (Dirichlet), or
+    // an inflow (Dirichlet velocity) whose NORMAL component carries mass across the boundary.
+    has_open_boundary_ = false;
+    for (int fc = 0; fc < 6; ++fc) {
+      int a = fc / 2;
+      float3 v = bc_vel_[fc];
+      double vn = a == 0 ? v.x : (a == 1 ? v.y : v.z);
+      if (bc_type_[fc] == 3 || (bc_type_[fc] == 2 && vn != 0.0)) has_open_boundary_ = true;
+    }
   }
 
   // Global max of the cut-cell flux divergence |div(open u)| over owned cells (the quantity the
@@ -429,14 +451,14 @@ class DistributedNS {
   double max_open_divergence() {
     if (!cutcell_) return 0.0;
     mac_.exchange(u_); mac_.exchange(v_); mac_.exchange(w_);
-    detail::diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, ox_, oy_, oz_, div_, ext_, mac_.ghost);
+    detail::diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, fox(), foy(), foz(), div_, ext_, mac_.ghost);
     return cfdmpi::mac_max_abs(div_, mac_, comm_);
   }
   // RMS of the cut-cell flux divergence (bulk measure; less sensitive to a single thin cut cell)
   double rms_open_divergence() {
     if (!cutcell_) return 0.0;
     mac_.exchange(u_); mac_.exchange(v_); mac_.exchange(w_);
-    detail::diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, ox_, oy_, oz_, div_, ext_, mac_.ghost);
+    detail::diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, fox(), foy(), foz(), div_, ext_, mac_.ghost);
     double ss = cfdmpi::mac_dot(div_, div_, mac_, comm_);
     auto gs = mac_.dec.globalSize();
     double N = (double)gs[0] * gs[1] * gs[2];
@@ -665,7 +687,7 @@ class DistributedNS {
     mac_.exchange(u_); mac_.exchange(v_); mac_.exchange(w_);
     apply_velocity_bc();  // domain BC: set boundary normal velocity + ghosts before the divergence
     if (cutcell_)
-      diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, ox_, oy_, oz_, div_, ext_, g);
+      diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, fox(), foy(), foz(), div_, ext_, g);
     else
       diverg_k<<<grd_, blk_>>>(u_, v_, w_, div_, ext_, g);
     if (mg_enabled_) {
@@ -680,6 +702,9 @@ class DistributedNS {
         cudaMemcpy(l0.x, phi_, n_ * 8, cudaMemcpyDeviceToDevice);
       else
         cudaMemset(l0.x, 0, n_ * 8);
+      // Dirichlet outflow: hold the pressure ghost at 0 (the smoother is interior-only + the non-periodic
+      // halo skips it, so 0 persists through every sweep -> p=0 at the outflow).
+      if (has_open_boundary_) apply_outflow_pressure_ghost(l0.x);
       if (cheb_ && cutcell_) {
         // Chebyshev semi-iteration (no per-iteration global dot-products -> communication-light at scale).
         // Estimate the spectral bounds of M^{-1}A once, lazily, on the first solve (the RHS = -div is a
@@ -695,6 +720,7 @@ class DistributedNS {
         mg_.solve(n_pois, mg_pre_, mg_post_, mg_bottom_);
       }
       cudaMemcpy(phi_, l0.x, n_ * 8, cudaMemcpyDeviceToDevice);
+      if (has_open_boundary_) apply_outflow_pressure_ghost(phi_);  // ghost p=0 for correct_k / next warm
     } else {
       if (!pwarm_) cudaMemset(phi_, 0, n_ * 8);  // else keep the previous phi_ as the RB-GS warm start
       for (int it = 0; it < n_pois; ++it) {
@@ -706,7 +732,10 @@ class DistributedNS {
     }
     mac_.exchange(phi_);
     correct_k<<<grd_, blk_>>>(u_, v_, w_, phi_, ext_, g);
-    apply_velocity_bc();  // re-impose the domain BC (the projection must not move the boundary velocity)
+    // high-side outflow normal face (correct_k misses it): u_out -= (0 - phi_inner) -> mass leaves.
+    if (has_open_boundary_) apply_outflow_correction();
+    // re-impose Dirichlet walls/inflow; do_outflow=false keeps the just-corrected outflow velocity.
+    apply_velocity_bc(/*do_outflow=*/false);
     if (has_solid_) { apply_mask(u_); apply_mask(v_); apply_mask(w_); }
     // the projection's grad(phi) correction touches the solid too; re-impose no-slip there so the
     // decoupled solid velocity cannot accumulate (the IBM operator keeps the fluid consistent).
@@ -767,8 +796,10 @@ class DistributedNS {
     athi[2] = og.z + ext_.z - g == N.z;
   }
   // fill the boundary ghosts of ONE velocity component (call after its halo exchange). fold=0 ->
-  // reflection ghosts (explicit stencils); fold=1 -> wall ghosts dropped to 0 (implicit diffusion).
-  void apply_velocity_bc_comp(double* f, int comp, int fold = 0) {
+  // reflection / zero-gradient ghosts (explicit stencils); fold=1 -> ghosts dropped to 0 (implicit
+  // diffusion). do_outflow=false skips outflow faces (used after the projection, which already corrected
+  // the outflow velocity -- re-imposing zero-gradient would clobber it).
+  void apply_velocity_bc_comp(double* f, int comp, int fold = 0, bool do_outflow = true) {
     if (!has_domain_bc_) return;
     bool atlo[3], athi[3];
     bc_face_flags(atlo, athi);
@@ -779,21 +810,27 @@ class DistributedNS {
       for (int s = 0; s < 2; ++s) {
         int face = 2 * a + s;
         if (bc_type_[face] == 0 || (s == 0 ? !atlo[a] : !athi[a])) continue;
+        if (bc_type_[face] == 3) {  // OUTFLOW: zero-gradient (fold=0) / dropped (fold=1)
+          if (do_outflow) cfdmpi::bcdetail::bc_outflow_comp_k<<<grd, blk>>>(f, ext_, g, a, s, comp, fold);
+          continue;
+        }
         float3 wv = bc_vel_[face];
         double wc = comp == 0 ? wv.x : (comp == 1 ? wv.y : wv.z);
         cfdmpi::bcdetail::bc_velocity_comp_k<<<grd, blk>>>(f, ext_, g, a, s, comp, wc, fold);
       }
     }
   }
-  void apply_velocity_bc() {
-    apply_velocity_bc_comp(u_, 0);
-    apply_velocity_bc_comp(v_, 1);
-    apply_velocity_bc_comp(w_, 2);
+  void apply_velocity_bc(bool do_outflow = true) {
+    apply_velocity_bc_comp(u_, 0, 0, do_outflow);
+    apply_velocity_bc_comp(v_, 1, 0, do_outflow);
+    apply_velocity_bc_comp(w_, 2, 0, do_outflow);
   }
   // Precompute the implicit-diffusion face-fold (once; beta = nu*dt is fixed): per component, a diagonal
-  // correction bc_dcorr_[c] (+beta per dropped tangential wall face) and an RHS fold bc_brhs_[c]
-  // (+2*beta*wall) at the wall-adjacent inner cells. The diffusion then drops the wall ghosts and folds
-  // their coefficient into the diagonal -- no lagged wall ghost in the implicit solve.
+  // correction bc_dcorr_[c] and an RHS fold bc_brhs_[c] at the boundary-adjacent inner cells.
+  //   Dirichlet wall (tangential only): dcorr += beta, brhs += 2*beta*wall   (drop the 2*wall-u ghost).
+  //   Zero-gradient outflow (every comp): dcorr -= beta, brhs += 0           (drop the u_inner ghost).
+  // The diffusion then drops the boundary ghosts and folds their coefficient into the diagonal -- no
+  // lagged boundary ghost in the implicit solve.
   void setup_bc_diffusion() {
     if (!has_domain_bc_ || bc_diff_built_) return;
     double beta = nu_ * dt_;
@@ -806,22 +843,30 @@ class DistributedNS {
       cudaMemset(bc_dcorr_[comp], 0, n_ * 8);
       cudaMemset(bc_brhs_[comp], 0, n_ * 8);
       for (int a = 0; a < 3; ++a) {
-        if (comp == a) continue;  // only TANGENTIAL walls are folded (normal faces are held directly)
         int b = (a + 1) % 3, cc = (a + 2) % 3;
         dim3 blk(16, 16), grd((dims[b] + 15) / 16, (dims[cc] + 15) / 16);
         for (int s = 0; s < 2; ++s) {
           int face = 2 * a + s;
           if (bc_type_[face] == 0 || (s == 0 ? !atlo[a] : !athi[a])) continue;
-          float3 wv = bc_vel_[face];
-          double wc = comp == 0 ? wv.x : (comp == 1 ? wv.y : wv.z);
+          double dval, bval;
+          if (bc_type_[face] == 3) {       // OUTFLOW (zero-gradient): every component
+            dval = -beta; bval = 0.0;
+          } else if (comp != a) {          // Dirichlet WALL: tangential only (normal face held directly)
+            float3 wv = bc_vel_[face];
+            double wc = comp == 0 ? wv.x : (comp == 1 ? wv.y : wv.z);
+            dval = beta; bval = 2.0 * beta * wc;
+          } else {
+            continue;
+          }
           cfdmpi::bcdetail::bc_diffusion_fold_k<<<grd, blk>>>(bc_dcorr_[comp], bc_brhs_[comp], ext_, g, a,
-                                                              s, beta, wc);
+                                                              s, dval, bval);
         }
       }
     }
     bc_diff_built_ = true;
   }
-  // zero the boundary-face openness on wall/Dirichlet faces (-> Neumann pressure). Call at operator build.
+  // zero the OPERATOR-openness (ox_/oy_/oz_ = alpha) on wall/inflow faces (-> Neumann pressure). Outflow
+  // (type 3) is LEFT OPEN (alpha != 0 -> Dirichlet p=0). Call at operator build.
   void apply_wall_openness() {
     if (!has_domain_bc_ || !ox_) return;
     bool atlo[3], athi[3];
@@ -833,9 +878,37 @@ class DistributedNS {
       dim3 blk(16, 16), grd((dims[b] + 15) / 16, (dims[cc] + 15) / 16);
       for (int s = 0; s < 2; ++s) {
         int face = 2 * a + s;
-        if (bc_type_[face] == 0 || (s == 0 ? !atlo[a] : !athi[a])) continue;
+        if (bc_type_[face] == 0 || bc_type_[face] == 3 || (s == 0 ? !atlo[a] : !athi[a])) continue;
         cfdmpi::bcdetail::bc_zero_openness_k<<<grd, blk>>>(oarr[a], ext_, g, a, s);
       }
+    }
+  }
+  // hold the pressure ghost at 0 on every owned outflow face -> Dirichlet p=0 there.
+  void apply_outflow_pressure_ghost(double* p) {
+    bool atlo[3], athi[3];
+    bc_face_flags(atlo, athi);
+    int g = mac_.ghost, dims[3] = {ext_.x, ext_.y, ext_.z};
+    for (int a = 0; a < 3; ++a) {
+      int b = (a + 1) % 3, cc = (a + 2) % 3;
+      dim3 blk(16, 16), grd((dims[b] + 15) / 16, (dims[cc] + 15) / 16);
+      for (int s = 0; s < 2; ++s) {
+        int face = 2 * a + s;
+        if (bc_type_[face] != 3 || (s == 0 ? !atlo[a] : !athi[a])) continue;
+        cfdmpi::bcdetail::bc_zero_pressure_ghost_k<<<grd, blk>>>(p, ext_, g, a, s);
+      }
+    }
+  }
+  // correct the high-side outflow normal-velocity face (correct_k handles the low side + the interior).
+  void apply_outflow_correction() {
+    bool atlo[3], athi[3];
+    bc_face_flags(atlo, athi);
+    int g = mac_.ghost, dims[3] = {ext_.x, ext_.y, ext_.z};
+    double* comp[3] = {u_, v_, w_};
+    for (int a = 0; a < 3; ++a) {
+      if (bc_type_[2 * a + 1] != 3 || !athi[a]) continue;  // +a face is outflow and owned by this rank
+      int b = (a + 1) % 3, cc = (a + 2) % 3;
+      dim3 blk(16, 16), grd((dims[b] + 15) / 16, (dims[cc] + 15) / 16);
+      cfdmpi::bcdetail::correct_outflow_k<<<grd, blk>>>(comp[a], phi_, ext_, g, a);
     }
   }
   void ensure_vmg_built() {
@@ -915,8 +988,11 @@ class DistributedNS {
   int bc_type_[6] = {0, 0, 0, 0, 0, 0};
   float3 bc_vel_[6] = {};
   bool has_domain_bc_ = false;
-  double* bc_dcorr_[3] = {nullptr, nullptr, nullptr};  // implicit-diffusion face-fold: +beta diagonal
+  bool has_open_boundary_ = false;                     // inflow(normal)/outflow -> alpha (operator) != beta
+  double* bc_dcorr_[3] = {nullptr, nullptr, nullptr};  // implicit-diffusion face-fold: +-beta diagonal
   double* bc_brhs_[3] = {nullptr, nullptr, nullptr};   //   correction + 2*beta*wall RHS, per component
+  double* bx_ = nullptr, *by_ = nullptr, *bz_ = nullptr;  // FLUX openness (divergence/correction); open at
+                                                          //   inflow+outflow (ox_/oy_/oz_ = operator alpha)
   bool bc_diff_built_ = false;
   // CG-accelerated pressure solve (for the stiff cut-cell operator)
   bool pcg_ = false;

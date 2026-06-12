@@ -176,13 +176,21 @@ The canonical solver is exposed as the `sdflow` Python module (`src/sdflow_bindi
 
 Beyond periodic + IBM no-slip on immersed solids, sdflow has **native per-face domain BCs** (`mac_bc.cuh`):
 `set_domain_bc(face, type, vx, vy, vz)` for the 6 faces (0=−x,1=+x,2=−y,3=+y,4=−z,5=+z); `type` 0=periodic
-(default), 1=no-slip wall, 2=Dirichlet velocity. Velocity ghosts are filled in the MAC-staggered
-convention; wall pressure is Neumann (boundary-face openness zeroed). Call **before** geometry/first step.
-For a domain-BC problem with no immersed solid, use `set_pressure_geometry(all_fluid_sdf)` (the cut-cell
-pressure operator without the IBM). **Validated:** lid-driven cavity matches Ghia et al. Re=100 to
-~0.7% rms with machine-precision incompressibility (`scripts/verify_lid_cavity_sdflow.py`); plane
-Poiseuille between BC walls matches the analytic parabola. *Currently supported:* Dirichlet/no-slip walls
-(lid cavity). *Follow-ups:* inflow/outflow (channel, backward step) + non-periodic multilevel multigrid.
+(default), 1=no-slip wall, 2=Dirichlet velocity / inflow, 3=outflow. Velocity ghosts are filled in the
+MAC-staggered convention. Tangential walls use a **face-fold** in the implicit diffusion (drop the wall
+face, fold its β into the diagonal + RHS) so `u_inner` stays implicit — no Gauss–Seidel lag; explicit
+advection keeps the reflection ghost. Call **before** geometry/first step. For a domain-BC problem with no
+immersed solid, use `set_pressure_geometry(all_fluid_sdf)` (the cut-cell pressure operator without the IBM).
+
+**Open boundaries** (outflow, or inflow with a non-zero normal velocity) split the face openness into two
+roles: the **operator** openness α (pressure matrix) is 0 at walls + inflow (Neumann) and open at outflow
+(Dirichlet p=0, ghost held at 0 → non-singular, mean-removal off); the **flux** openness β
+(divergence/correction) stays open at inflow + outflow so their flux is counted. Outflow velocity is
+zero-gradient (∂/∂n=0); the projection corrects the outflow face so mass leaves. **Validated:** lid-driven
+cavity vs Ghia et al. Re=100 to ~0.7% rms (`scripts/verify_lid_cavity_sdflow.py`); developing plane channel
+(uniform inlet → parabolic Poiseuille outlet, `u_max/U_mean`→1.5, exact mass conservation, machine-precision
+divergence; `scripts/verify_channel_sdflow.py`). *Follow-ups:* convective outflow for unsteady wakes,
+backward-facing step (= this + the IBM step), non-periodic multilevel multigrid (MVP uses levels=1 RB-GS).
 
 Validated cell-for-cell vs serial and against analytics (Taylor–Green ~2e-15, Poiseuille, momentum
 conservation) **and against Zick & Homsy sphere-array drag (bit-identical to `pnm_backend`)** —

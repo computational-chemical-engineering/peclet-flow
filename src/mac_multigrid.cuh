@@ -468,6 +468,10 @@ class DistributedPoissonMG {
   // galerkin=true: build the variational coarse operators A_c = P^T A_f P (aggregation) -- the coarse
   //   face transmissibility is the sum of the 4 fine faces it spans -- on EVERY level, so the coarse
   //   grids see the geometry. The V-cycle then uses injection prolongation + summation restriction.
+  // Toggle the constant null-space (mean) removal. Default true for the all-Neumann pressure operator;
+  // set false when a Dirichlet face (e.g. a pressure outflow) makes the operator non-singular.
+  void setRemoveMean(bool on) { remove_mean_ = on; }
+
   void setFineVariableOperator(const double* ox, const double* oy, const double* oz, double idx2,
                                double idy2, double idz2, bool galerkin = false) {
     galerkin_ = galerkin;

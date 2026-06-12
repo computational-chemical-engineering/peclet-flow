@@ -124,8 +124,9 @@ class Solver {
   }
 
   // Domain boundary condition on one of the 6 faces (0=-x,1=+x,2=-y,3=+y,4=-z,5=+z). type: 0=periodic
-  // (default), 1=no-slip wall, 2=Dirichlet velocity (vx,vy,vz). Call BEFORE set_solid/set_pressure_geometry
-  // and the first step (it fixes the halo periodicity).
+  // (default), 1=no-slip wall, 2=Dirichlet velocity / inflow (vx,vy,vz), 3=outflow (zero-gradient velocity
+  // + Dirichlet p=0). Call BEFORE set_solid/set_pressure_geometry and the first step (it fixes the halo
+  // periodicity).
   void set_domain_bc(int face, int type, double vx, double vy, double vz) {
     if (inited_) throw std::runtime_error("sdflow: set_domain_bc() must precede the geometry/first step");
     s_.set_domain_bc(face, type, make_float3((float)vx, (float)vy, (float)vz));
