@@ -7,6 +7,30 @@
 //
 // The IBM math is factored into ibm_fill_entry (shared by the extended build here and a serial wrap
 // reference) so the distributed coefficients match the serial ones cell-for-cell.
+//
+// ===========================================================================================
+// SPARSE-OVERLAY ARCHITECTURE (octree/AMR forward-compatible -- see doc/ibm_overlay.md)
+// -------------------------------------------------------------------------------------------
+// The momentum operator is a mesh-agnostic BASE face operator + a sparse IBM OVERLAY. The IBM is
+// deliberately row-based / non-symmetric and is NEVER multigridded -- momentum is legitimately
+// non-conservative across an immersed boundary (the wall exerts force), and the D_rescale row scaling is
+// Gauss-Seidel-invariant but not MG-invariant. So we keep it row-based and treat it as an overlay on the
+// face architecture, not a competitor to it. Three layers + two mesh-specific providers:
+//
+//   1. BASE operator       ibm_build_diffusion_k   A = I - beta*L (face loop, beta per face = nu*dt*gf).
+//   2. OVERLAY (data)      IBM_Data (cfd_solver.cuh) -- a sparse SoA of cut cells: {cell handle
+//                          cell_index; per-face neighbour/direction hook dir_code + coefficients
+//                          R/K/M/X/Nbc; D_rescale}. Read-only here (shared with pnm_backend).
+//   3. APPLY               ibm_modify_stencil_k -- loop the overlay, modify each cut cell's OWN row.
+//
+//   Provider A (GEOMETRY): geometry -> overlay entries. Cartesian = ibm_gather_ext (SDF sampling) +
+//     ibm_fill_entry (already indexing-agnostic). Octree = tree-walk + per-cell SDF, the SAME ibm_fill_entry.
+//   Provider B (CONNECTIVITY): per face -> (base-stencil slot, opposite face for the X cross-term).
+//     Cartesian = the implicit 7-point (slot order below; OPP[k]=k^1). Octree = the tree (via dir_code).
+//
+// An octree port replaces only Provider A and Provider B; the numerics (base, overlay coefficients,
+// apply math) are unchanged. See doc/ibm_overlay.md for the extension steps.
+// ===========================================================================================
 #pragma once
 
 #include <cuda_runtime.h>
@@ -204,15 +228,23 @@ __global__ void ibm_geometry_ext_k(IBM_Data ibm, int* id_map, const double* sdf,
 // rhs_scale[c] receives D_rescale at each cut cell (caller pre-fills 1.0 elsewhere): the Robust-Scaled
 // RHS is b'_c = D_rescale * b_c - a_inhom, so the RHS at cut cells must be scaled by D_rescale to match
 // the A_C *= D_rescale below -- otherwise a thin cut cell (tiny A_C, unscaled b) gives a huge velocity.
+// The CONNECTIVITY provider (Cartesian 7-point). The overlay apply is otherwise mesh-agnostic: it only
+// needs, per cut-cell face k, (a) the base-stencil slot the face's coefficient lives in, and (b) the
+// OPPOSITE face -- the row-structured X cross-term folds face k's coefficient into its opposite. Here
+// faces k=0..5 are {x+, x-, y+, y-, z+, z-}: slot order is the natural {A_E,A_W,A_N,A_S,A_T,A_B} below,
+// and OPP[k] is the opposite face (== k^1 on Cartesian). An octree supplies these per overlay entry
+// (variable face count, neighbour handles via ibm.dir_code, tree-defined "opposite"); the math below is
+// unchanged. cc_face_term has no analogue here -- momentum is row-based, not a face flux (see ibm_fill_entry).
 __global__ void ibm_modify_stencil_k(mreal* A_C, mreal* A_W, mreal* A_E, mreal* A_S, mreal* A_N,
                                      mreal* A_B, mreal* A_T, double* a_inhom, double* rhs_scale,
                                      IBM_Data ibm, float u_bc_val) {
   int list_idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (list_idx >= ibm.num_active_cells) return;
+  constexpr int OPP[6] = {1, 0, 3, 2, 5, 4};  // opposite face per face (Cartesian connectivity)
   int c = ibm.cell_index[list_idx];
   float descale = ibm.D_rescale[list_idx];
   if (rhs_scale) rhs_scale[c] = descale;  // double: same value scales A_C and the RHS -> ratio cancels
-  double orig[6] = {A_E[c], A_W[c], A_N[c], A_S[c], A_T[c], A_B[c]};
+  double orig[6] = {A_E[c], A_W[c], A_N[c], A_S[c], A_T[c], A_B[c]};  // base coeff per face k (slot order)
   double aC = (double)A_C[c] * (double)descale;  // diagonal assembled in double, stored float
   double mod[6] = {0, 0, 0, 0, 0, 0};
   double inhom = 0.0;
@@ -222,9 +254,8 @@ __global__ void ibm_modify_stencil_k(mreal* A_C, mreal* A_W, mreal* A_E, mreal* 
     double vnb = orig[k];
     aC += vnb * K;
     inhom += (double)Nbc * u_bc_val * vnb;
-    int opp = k ^ 1;  // 0<->1, 2<->3, 4<->5
     mod[k] += vnb * ((double)descale * M - 1.0);
-    mod[opp] += vnb * X;
+    mod[OPP[k]] += vnb * X;  // cross-term: fold face k's coefficient into its opposite face
   }
   A_C[c] = (mreal)aC;
   A_E[c] = (mreal)(orig[0] + mod[0]);

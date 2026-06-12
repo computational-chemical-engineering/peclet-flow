@@ -286,12 +286,18 @@ provider**. A later octree/AMR port should then only *replace the provider*, not
   across non-2:1 refinement / hanging nodes), which live in the provider, not the operator assembly.
 
 **The two things to be deliberate about:**
-1. **The Robust-Scaled cut-cell *velocity* IBM is the problem child.** It row-scales the stencil by
-   `D_rescale`, so it is **not** a sum of face-symmetric fluxes — which is exactly why it is non-symmetric
-   (no CG) and why the velocity-MG rediscretization *diverged* (Phase 2). A face-based, octree-ready
-   design wants a **conservative, face-symmetric cut-cell / embedded-boundary** velocity formulation
-   (AMReX-EB style). That is a numerical-method choice, best made *before* an octree port — and it would
-   simultaneously fix the velocity-MG / CG limitation. (The pressure operator is already face-symmetric.)
+1. **The Robust-Scaled cut-cell *velocity* IBM is row-based — and stays that way (SPARSE OVERLAY).**
+   *(Updated per an expert review — supersedes the earlier "face-symmetrize the velocity" note.)* It
+   row-scales by `D_rescale`, so it is non-symmetric; but that is **physically legitimate** (momentum
+   isn't conserved across the immersed boundary — the wall exerts force), the row scaling is
+   Gauss-Seidel-invariant (so the smoother is unaffected), and the `X` cross-term is irreducibly
+   row-structured. The right move is **not** to face-symmetrize it but to treat it as a **sparse overlay
+   on the face base operator** — and to **never multigrid it** (row scaling is GS-invariant but not
+   MG-invariant; that is *why* the Phase-2 velocity-MG diverged — use RB-GS). This is now implemented and
+   documented: base `I−βL` (`ibm_build_diffusion_k`) + overlay (`IBM_Data`) + apply
+   (`ibm_modify_stencil_k`), with the two octree boundaries (GeometryProvider, Connectivity) isolated. See
+   **`doc/ibm_overlay.md`**. (The pressure operator is the face-symmetric one; the momentum overlay is the
+   row-based one — exactly the symmetry boundary "drawn at the projection".)
 2. **The geometry provider must be a zero-cost abstraction** — a compile-time/templated policy that
    returns constants on Cartesian so the compiler keeps the fast, coalesced 7-point path. A runtime
    per-face list with indirection would gut GPU throughput. Template the operators on a

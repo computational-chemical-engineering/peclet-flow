@@ -364,10 +364,7 @@ class DistributedNS {
   void set_ibm_solid(const std::vector<double>& sdf_ext, float3 u_bc = make_float3(0, 0, 0)) {
     using namespace cfdmpi::ibmdetail;
     double beta = nu_ * dt_;
-    int g = mac_.ghost;
-    int3 inner = mac_.inner_res();
     dim3 blk(8, 8, 8);
-    dim3 gI((inner.x + 7) / 8, (inner.y + 7) / 8, (inner.z + 7) / 8);
     dim3 gE((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
     float3 spacing = make_float3(1, 1, 1);
     float3 offs[3] = {make_float3(-0.5f, 0, 0), make_float3(0, -0.5f, 0), make_float3(0, 0, -0.5f)};
@@ -381,18 +378,10 @@ class DistributedNS {
     cudaMalloc(&counter, sizeof(int));
 
     for (int c = 0; c < 3; ++c) {
-      if (!idmap_[c]) cudaMalloc(&idmap_[c], n_ * sizeof(int));
-      cudaMemset(counter, 0, sizeof(int));
-      ibm_count_ext_k<<<gI, blk>>>(sdf, ext_, g, offs[c], counter);
-      int cnt = 0;
-      cudaMemcpy(&cnt, counter, sizeof(int), cudaMemcpyDeviceToHost);
-      if (ibmdata_[c].cell_index) cfdmpi::ibm_free(ibmdata_[c]);
-      ibmdata_[c] = cfdmpi::ibm_alloc(cnt);
-      cudaMemset(counter, 0, sizeof(int));
-      ibm_geometry_ext_k<0><<<gI, blk>>>(ibmdata_[c], idmap_[c], sdf, ext_, g, spacing, counter,
-                                         offs[c], /*bc=Dirichlet*/ 0);
-      cudaMemcpy(&ibmdata_[c].num_active_cells, counter, sizeof(int), cudaMemcpyDeviceToHost);
+      // GeometryProvider: geometry -> overlay (the one call site an octree port replaces).
+      build_ibm_overlay(c, sdf, offs[c], spacing, counter);
 
+      // base operator (face loop) + overlay apply (mesh-agnostic):
       if (!As_[c][0])
         for (int k = 0; k < 7; ++k) cudaMalloc(&As_[c][k], n_ * sizeof(cfdmpi::mreal));
       if (!inhom_[c]) cudaMalloc(&inhom_[c], n_ * 8);
@@ -710,6 +699,28 @@ class DistributedNS {
   }
 
  private:
+  // GeometryProvider (Cartesian, SDF -> IBM overlay): count cut cells, (re)allocate the overlay SoA, and
+  // fill it from the SDF for velocity component `comp`. This is the ONE call site an octree port replaces
+  // (tree-walk + per-cell SDF -> the same ibm_fill_entry); the rest of the momentum solve is mesh-agnostic
+  // (base face operator + ibm_modify_stencil_k overlay apply). See mac_ibm.cuh / doc/ibm_overlay.md.
+  void build_ibm_overlay(int comp, const double* sdf, float3 off, float3 spacing, int* counter) {
+    using namespace cfdmpi::ibmdetail;
+    int g = mac_.ghost;
+    int3 inner = mac_.inner_res();
+    dim3 blk(8, 8, 8);
+    dim3 gI((inner.x + 7) / 8, (inner.y + 7) / 8, (inner.z + 7) / 8);
+    if (!idmap_[comp]) cudaMalloc(&idmap_[comp], n_ * sizeof(int));
+    cudaMemset(counter, 0, sizeof(int));
+    ibm_count_ext_k<<<gI, blk>>>(sdf, ext_, g, off, counter);
+    int cnt = 0;
+    cudaMemcpy(&cnt, counter, sizeof(int), cudaMemcpyDeviceToHost);
+    if (ibmdata_[comp].cell_index) cfdmpi::ibm_free(ibmdata_[comp]);
+    ibmdata_[comp] = cfdmpi::ibm_alloc(cnt);
+    cudaMemset(counter, 0, sizeof(int));
+    ibm_geometry_ext_k<0><<<gI, blk>>>(ibmdata_[comp], idmap_[comp], sdf, ext_, g, spacing, counter, off,
+                                       /*bc=Dirichlet*/ 0);
+    cudaMemcpy(&ibmdata_[comp].num_active_cells, counter, sizeof(int), cudaMemcpyDeviceToHost);
+  }
   void apply_mask(double* c) { detail::mask_k<<<grd_, blk_>>>(c, solid_, ext_); }
   void ensure_vmg_built() {
     if (vmg_built_) return;
