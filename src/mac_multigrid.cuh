@@ -53,32 +53,41 @@ __global__ void mg_smooth_k(double* __restrict__ x, const double* __restrict__ b
 }
 
 // ---- variable-coefficient fine-level operator (the SDF / cut-cell case) ----
-// Assemble the 7-point coefficients from staggered face transmissibilities. ox[i] is the openness of
-// the -x face of cell i (== the +x face of cell i-1); the +x face of cell i is ox[i+1]. The face is
-// shared, so neighbouring ranks derive the SAME coefficient for it -> the operator is symmetric across
-// block boundaries. Mirrors compute_pressure_operator_kernel (A_E = -frac_r*inv_dx2, etc.); here the
-// face openness stands in for the masked fluid fraction.
-// Inputs (openness or transmissibility ox/oy/oz) are double; the assembled operator AC..AT is stored
-// single precision. The coefficient sum (the diagonal) is formed in double, then cast.
+// FACE-TERM ASSEMBLY CONVENTION (octree/AMR forward-compatible -- see doc/sdflow_multigrid_plan.md):
+// a finite-volume face contributes t_f = aperture_f * gf, where gf = A_f/(d_f*V_cell) is the face's
+// GEOMETRIC FACTOR (area / centre-distance / cell volume) and aperture_f is the cut-cell open fraction.
+// gf is the "geometry provider": a per-axis COMPILE-TIME CONSTANT on the uniform Cartesian grid
+// (gf_x = 1/dx^2, ...) that a later octree port would supply per face -- so the numerics below stay
+// mesh-agnostic. The operator is assembled purely from face terms: diagonal = sum_f t_f, off-diagonal
+// across face f = -t_f. (cc_face_term inlines to aperture*gf, so this is byte-identical / zero-cost.)
+__device__ __forceinline__ double cc_face_term(double aperture, double gf) { return aperture * gf; }
+
+// Assemble the symmetric 7-point cut-cell pressure operator by looping the 6 faces of each cell. ox[i] is
+// the aperture of the -x face of cell i (== the +x face of cell i-1), so the +x face is ox[i+sx]; shared
+// faces give matching coefficients on both sides -> symmetric across block/rank boundaries. (The Galerkin
+// path passes pre-scaled transmissibilities with gf=1; the convention still holds, gf just absorbs into
+// the coefficient.) Inputs ox/oy/oz are double; AC..AT stored single precision, the diagonal summed in
+// double then cast. Mirrors compute_pressure_operator_kernel.
 __global__ void mg_build_op_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal* AN, mreal* AB,
                               mreal* AT, const double* ox, const double* oy, const double* oz,
-                              int3 ext, int g, double idx2, double idy2, double idz2) {
+                              int3 ext, int g, double gfx, double gfy, double gfz) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
   int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
   if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
   size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
-  double te = ox[i + sx] * idx2, tw = ox[i] * idx2;
-  double tn = oy[i + sy] * idy2, ts = oy[i] * idy2;
-  double tt = oz[i + sz] * idz2, tb = oz[i] * idz2;
-  AE[i] = (mreal)(-te);
-  AW[i] = (mreal)(-tw);
-  AN[i] = (mreal)(-tn);
-  AS[i] = (mreal)(-ts);
-  AT[i] = (mreal)(-tt);
-  AB[i] = (mreal)(-tb);
-  AC[i] = (mreal)(te + tw + tn + ts + tt + tb);
+  // the 6 faces of cell i: low (-) and high (+) across each axis. aperture = openness; gf = axis factor.
+  double tw = cc_face_term(ox[i],      gfx);  // -x  (low face reads o[i])
+  double te = cc_face_term(ox[i + sx], gfx);  // +x  (high face == neighbour's -x face)
+  double ts = cc_face_term(oy[i],      gfy);  // -y
+  double tn = cc_face_term(oy[i + sy], gfy);  // +y
+  double tb = cc_face_term(oz[i],      gfz);  // -z
+  double tt = cc_face_term(oz[i + sz], gfz);  // +z
+  AW[i] = (mreal)(-tw);  AE[i] = (mreal)(-te);  // off-diagonal across each face = -t_f
+  AS[i] = (mreal)(-ts);  AN[i] = (mreal)(-tn);
+  AB[i] = (mreal)(-tb);  AT[i] = (mreal)(-tt);
+  AC[i] = (mreal)(te + tw + tn + ts + tt + tb);  // diagonal = sum of face terms (original add order)
 }
 
 // constant-coefficient diffusion operator A = I - nu_dt * Laplacian over the whole extended block:
