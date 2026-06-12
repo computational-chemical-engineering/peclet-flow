@@ -119,6 +119,27 @@ Key pieces (all `src/*.cuh`, header-only, on branch `mpi-halo-integration`):
   `set_advection(true)` (full Navier–Stokes), `set_body_force`, `set_solid` (no-slip masking), and
   `gather_to_root` (assemble the global field for VTI output via `tpx::geom`).
 
+### Pressure solver options (the `sdflow` module / `DistributedNS`)
+
+The canonical solver is exposed as the `sdflow` Python module (`src/sdflow_bindings.cu`, class
+`sdflow.Solver`). Its cut-cell pressure Poisson is solved by a geometric **multigrid** whose smoother is
+**Red-Black Gauss-Seidel** and whose coarse operator is the **rediscretized** cut-cell operator
+(`mac_multigrid.cuh`). Three outer drivers wrap that V-cycle — **select one per solver**:
+
+| driver | select with | use |
+|---|---|---|
+| **Standalone V-cycle** | default (neither below set) | multi-rank default. `set_pressure_multigrid(True, levels=1)` ⇒ pure RB-GS (no coarse grid) |
+| **MG-PCG** | `set_pressure_pcg(True, max_iter, rtol)` | **single-GPU default** (auto-enabled on 1 rank); ~1.2× faster than the V-cycle to a fixed tolerance |
+| **Chebyshev** | `set_pressure_chebyshev(True, max_iter, rtol)` | communication-light (no per-iteration global dot-products) — for large multi-GPU where PCG's reductions are latency-bound. ≈ PCG iteration count; bounds estimated once on step 1 |
+
+- **PCG and Chebyshev are mutually exclusive** (last set wins); either overrides the single-rank auto-PCG
+  default. With neither set, the solve is `n_pois` standalone V-cycles.
+- Coarse-operator mode: `set_solid(..., pressure_coarse="rediscretized")` (default; also `"galerkin"` /
+  `"const"`). `set_pressure_multigrid(on, levels)` sets the multigrid depth (`levels=1` == pure RB-GS).
+- `set_pressure_warmstart(True)` seeds each solve from the previous step's φ (opt-in, off by default).
+- Validated against Zick & Homsy SC-sphere drag, bit-identical to `pnm_backend`. Design + benchmarks:
+  [`doc/sdflow_multigrid_plan.md`](doc/sdflow_multigrid_plan.md); parity: [`doc/sdflow_pnm_parity.md`](doc/sdflow_pnm_parity.md).
+
 Validated cell-for-cell vs serial and against analytics (Taylor–Green ~2e-15, Poiseuille, momentum
 conservation), **36/36 ctests, real multi-rank np=1,2,4**.
 
