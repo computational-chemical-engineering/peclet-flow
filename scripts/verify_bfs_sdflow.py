@@ -105,8 +105,11 @@ def main():
         ok &= (r["bubble"] and r["mass_err"] < 1e-3 and r["div"] < 1e-6 and 0.5 < r["xr_S"] < 12.0
                and r["xr_S"] > xr_prev)
         xr_prev = r["xr_S"]
-    # push toward the Gartling Re=800 benchmark (long; opt in with SDFLOW_BFS_RE800=1). Informational
-    # comparison: Gartling's lower-wall reattachment ~6.1 H (~12 S), S=32, L=30S.
+    # push toward Re=800 (long: ~30 min, opt in with SDFLOW_BFS_RE800=1). NB our Re_S = U_in*S/nu, whereas
+    # Gartling's Re=800 uses the full height H=2S (~ our Re_S=400, where x_r/H ~ 6 would match his ~6.1).
+    # At Re_S=800 the bubble is large and slow: measured x_r/H ~ 7.3, still creeping at 36k steps -- a
+    # textbook slow open-flow transient near the steady/unsteady boundary. The laminar points above are the
+    # quantitative validation; this is a stress/illustration run (PASS gate = monotone growth + invariants).
     if os.environ.get("SDFLOW_BFS_RE800") == "1":
         r = run(800, S=32, Lr=22, dt=0.3, max_steps=36000)
         if r is not None:
