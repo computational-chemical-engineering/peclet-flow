@@ -35,8 +35,12 @@ namespace bcdetail {
 //   fold=1 (IMPLICIT diffusion):       wall ghosts = 0 (the face is DROPPED); only the normal boundary
 //          face is set. The dropped wall face's beta is moved to the diagonal by bc_diffusion_fold_k, so
 //          the implicit solve never reads a wall ghost (no one-sweep Gauss-Seidel lag).
+// prof (optional): a per-(b,c)-position INLET PROFILE laid out [p0][p1][3] with row stride prof_nc; when
+// non-null the prescribed value is prof[(p0*prof_nc+p1)*3+comp] instead of the scalar wall_comp (e.g. a
+// parabolic channel inlet / the backward-facing-step partial inlet). Tangential profile values feed the
+// explicit path; the implicit tangential fold still uses the scalar wall (set it for a sheared inlet).
 __global__ void bc_velocity_comp_k(double* f, int3 ext, int g, int a, int s, int comp, double wall_comp,
-                                   int fold) {
+                                   int fold, const double* prof = nullptr, int prof_nc = 0) {
   int dims[3] = {ext.x, ext.y, ext.z};
   size_t strides[3] = {1, (size_t)ext.x, (size_t)ext.x * ext.y};
   int b = (a + 1) % 3, c = (a + 2) % 3;  // the two perpendicular axes
@@ -47,23 +51,24 @@ __global__ void bc_velocity_comp_k(double* f, int3 ext, int g, int a, int s, int
   size_t sa = strides[a];
   int na = dims[a];
   int bf = (s == 0) ? g : (na - g);  // along-axis index of the normal boundary face
+  double wc = prof ? prof[((size_t)p0 * prof_nc + p1) * 3 + comp] : wall_comp;
   auto at = [&](int ia) -> double& { return f[base + (size_t)ia * sa]; };
   if (comp == a) {                   // NORMAL component: direct Dirichlet face (never lags) -- fold-agnostic
-    at(bf) = wall_comp;              // boundary-face Dirichlet value
+    at(bf) = wc;                     // boundary-face Dirichlet value
     if (s == 0)
-      for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wall_comp - at(2 * bf - ia);       // odd reflection
+      for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wc - at(2 * bf - ia);       // odd reflection
     else
-      for (int ia = na - g + 1; ia < na; ++ia) at(ia) = 2.0 * wall_comp - at(2 * bf - ia);
+      for (int ia = na - g + 1; ia < na; ++ia) at(ia) = 2.0 * wc - at(2 * bf - ia);
   } else if (fold) {                 // TANGENTIAL, implicit: drop the wall face (ghost -> 0). Its beta is
     if (s == 0)                      //   moved to the diagonal + RHS by bc_diffusion_fold_k -> u_inner
-      for (int ia = 0; ia < g; ++ia) at(ia) = 0.0;                                      //   stays implicit
+      for (int ia = 0; ia < g; ++ia) at(ia) = 0.0;                              //   stays implicit
     else
       for (int ia = na - g; ia < na; ++ia) at(ia) = 0.0;
   } else {                           // TANGENTIAL, explicit: reflection ghost (cell-centred; about bf-0.5)
     if (s == 0)
-      for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wall_comp - at(2 * bf - 1 - ia);
+      for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wc - at(2 * bf - 1 - ia);
     else
-      for (int ia = na - g; ia < na; ++ia) at(ia) = 2.0 * wall_comp - at(2 * bf - 1 - ia);
+      for (int ia = na - g; ia < na; ++ia) at(ia) = 2.0 * wc - at(2 * bf - 1 - ia);
   }
 }
 

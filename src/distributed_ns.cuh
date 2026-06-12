@@ -221,6 +221,7 @@ class DistributedNS {
         if (As_[c][k]) cudaFree(As_[c][k]);
       if (ibmdata_[c].cell_index) cfdmpi::ibm_free(ibmdata_[c]);
     }
+    for (double* p : bc_prof_) if (p) cudaFree(p);
     if (mg_built_) mg_.free();
     if (vmg_built_) vmg_.free();
     if (vstreams_init_) {
@@ -444,6 +445,48 @@ class DistributedNS {
       double vn = a == 0 ? v.x : (a == 1 ? v.y : v.z);
       if (bc_type_[fc] == 3 || (bc_type_[fc] == 2 && vn != 0.0)) has_open_boundary_ = true;
     }
+    if (has_prof_[0] || has_prof_[1] || has_prof_[2] || has_prof_[3] || has_prof_[4] || has_prof_[5])
+      has_open_boundary_ = true;
+  }
+
+  // Prescribe a per-(b,c)-position INLET PROFILE on a face (b,c = the two axes perpendicular to face/2).
+  // prof is the global plane flattened [Nb][Nc][3] (Nb=global_res[b], Nc=global_res[c]); it sets the face
+  // to inflow (type 2). Call BEFORE the first step. Use for a parabolic channel inlet or the partial inlet
+  // of a backward-facing step (parabola over the open part, 0 over the step face).
+  void set_domain_bc_profile(int face, const std::vector<double>& prof, int nb, int nc) {
+    bc_prof_host_[face] = prof;
+    bc_prof_nb_[face] = nb;
+    bc_prof_nc_[face] = nc;
+    has_prof_[face] = true;
+    if (bc_type_[face] == 0) set_domain_bc(face, 2);  // a profile implies inflow (updates periodicity)
+    bc_prof_built_ = false;
+    has_open_boundary_ = true;
+  }
+  // Build each face's local device profile (sized to this rank's extended perp-plane) from the stored
+  // global plane; ghost rows clamp to the edge. Lazy (needs ext_/origin from init).
+  void ensure_bc_profiles() {
+    if (bc_prof_built_) return;
+    int3 og = mac_.origin_incl_ghost, N = mac_.global_res;
+    int dims[3] = {ext_.x, ext_.y, ext_.z}, orig[3] = {og.x, og.y, og.z}, gres[3] = {N.x, N.y, N.z};
+    for (int face = 0; face < 6; ++face) {
+      if (!has_prof_[face]) continue;
+      int a = face / 2, b = (a + 1) % 3, c = (a + 2) % 3;
+      int Lb = dims[b], Lc = dims[c], Nb = bc_prof_nb_[face], Nc = bc_prof_nc_[face];
+      (void)gres;
+      std::vector<double> local((size_t)Lb * Lc * 3);
+      for (int p0 = 0; p0 < Lb; ++p0)
+        for (int p1 = 0; p1 < Lc; ++p1) {
+          int gb = orig[b] + p0, gc = orig[c] + p1;
+          gb = gb < 0 ? 0 : (gb >= Nb ? Nb - 1 : gb);  // clamp ghost rows to the plane edge
+          gc = gc < 0 ? 0 : (gc >= Nc ? Nc - 1 : gc);
+          for (int comp = 0; comp < 3; ++comp)
+            local[((size_t)p0 * Lc + p1) * 3 + comp] =
+                bc_prof_host_[face][((size_t)gb * Nc + gc) * 3 + comp];
+        }
+      if (!bc_prof_[face]) cudaMalloc(&bc_prof_[face], local.size() * 8);
+      cudaMemcpy(bc_prof_[face], local.data(), local.size() * 8, cudaMemcpyHostToDevice);
+    }
+    bc_prof_built_ = true;
   }
 
   // Global max of the cut-cell flux divergence |div(open u)| over owned cells (the quantity the
@@ -801,6 +844,7 @@ class DistributedNS {
   // the outflow velocity -- re-imposing zero-gradient would clobber it).
   void apply_velocity_bc_comp(double* f, int comp, int fold = 0, bool do_outflow = true) {
     if (!has_domain_bc_) return;
+    ensure_bc_profiles();
     bool atlo[3], athi[3];
     bc_face_flags(atlo, athi);
     int g = mac_.ghost, dims[3] = {ext_.x, ext_.y, ext_.z};
@@ -815,8 +859,9 @@ class DistributedNS {
           continue;
         }
         float3 wv = bc_vel_[face];
-        double wc = comp == 0 ? wv.x : (comp == 1 ? wv.y : wv.z);
-        cfdmpi::bcdetail::bc_velocity_comp_k<<<grd, blk>>>(f, ext_, g, a, s, comp, wc, fold);
+        double wc = comp == 0 ? wv.x : (comp == 1 ? wv.y : wv.z);  // scalar fallback / tangential fold value
+        cfdmpi::bcdetail::bc_velocity_comp_k<<<grd, blk>>>(f, ext_, g, a, s, comp, wc, fold,
+                                                           bc_prof_[face], dims[cc]);
       }
     }
   }
@@ -994,6 +1039,12 @@ class DistributedNS {
   double* bx_ = nullptr, *by_ = nullptr, *bz_ = nullptr;  // FLUX openness (divergence/correction); open at
                                                           //   inflow+outflow (ox_/oy_/oz_ = operator alpha)
   bool bc_diff_built_ = false;
+  // per-face inlet velocity profile (e.g. parabolic channel inlet / backward-step partial inlet)
+  double* bc_prof_[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};  // device, local plane
+  std::vector<double> bc_prof_host_[6];                  // global plane [Nb][Nc][3], set before init
+  int bc_prof_nb_[6] = {0, 0, 0, 0, 0, 0}, bc_prof_nc_[6] = {0, 0, 0, 0, 0, 0};
+  bool has_prof_[6] = {false, false, false, false, false, false};
+  bool bc_prof_built_ = false;
   // CG-accelerated pressure solve (for the stiff cut-cell operator)
   bool pcg_ = false;
   int pcg_maxit_ = 60;

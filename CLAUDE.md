@@ -186,11 +186,20 @@ immersed solid, use `set_pressure_geometry(all_fluid_sdf)` (the cut-cell pressur
 roles: the **operator** openness α (pressure matrix) is 0 at walls + inflow (Neumann) and open at outflow
 (Dirichlet p=0, ghost held at 0 → non-singular, mean-removal off); the **flux** openness β
 (divergence/correction) stays open at inflow + outflow so their flux is counted. Outflow velocity is
-zero-gradient (∂/∂n=0); the projection corrects the outflow face so mass leaves. **Validated:** lid-driven
-cavity vs Ghia et al. Re=100 to ~0.7% rms (`scripts/verify_lid_cavity_sdflow.py`); developing plane channel
-(uniform inlet → parabolic Poiseuille outlet, `u_max/U_mean`→1.5, exact mass conservation, machine-precision
-divergence; `scripts/verify_channel_sdflow.py`). *Follow-ups:* convective outflow for unsteady wakes,
-backward-facing step (= this + the IBM step), non-periodic multilevel multigrid (MVP uses levels=1 RB-GS).
+zero-gradient (∂/∂n=0); the projection corrects the outflow face so mass leaves.
+
+**Non-uniform inlets:** `set_domain_bc_profile(face, profile[Nb,Nc,3])` prescribes a per-position inlet
+velocity over the face's perpendicular plane (sets the face to inflow). Used for a parabolic channel inlet
+or the **backward-facing step**, whose step is realized purely as the inlet condition — the developed
+parabola over the open upper half, zero over the step face (no immersed solid needed).
+
+**Validated:** lid-driven cavity vs Ghia et al. Re=100 to ~0.7% rms (`scripts/verify_lid_cavity_sdflow.py`);
+developing plane channel (uniform inlet → parabolic Poiseuille outlet, `u_max/U_mean`→1.5, exact mass
+conservation, machine-precision divergence; `scripts/verify_channel_sdflow.py`); backward-facing step
+(Gartling expansion-ratio-2, `scripts/verify_bfs_sdflow.py`) — reattachment `x_r/S` 5.3 (Re_S=100) → 8.3
+(Re_S=200) on the Armaly/Biswas curve, `SDFLOW_BFS_RE800=1` pushes to the Gartling Re=800 benchmark.
+*Follow-ups:* convective outflow for unsteady wakes, non-periodic multilevel multigrid (MVP uses levels=1
+RB-GS), multi-rank inlet-profile scatter (validated single-rank).
 
 Validated cell-for-cell vs serial and against analytics (Taylor–Green ~2e-15, Poiseuille, momentum
 conservation) **and against Zick & Homsy sphere-array drag (bit-identical to `pnm_backend`)** —

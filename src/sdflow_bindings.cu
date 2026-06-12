@@ -131,6 +131,27 @@ class Solver {
     if (inited_) throw std::runtime_error("sdflow: set_domain_bc() must precede the geometry/first step");
     s_.set_domain_bc(face, type, make_float3((float)vx, (float)vy, (float)vz));
   }
+  // Per-face inlet velocity profile: `profile` is an (Nb, Nc, 3) array over the two axes perpendicular to
+  // face/2 (b=(a+1)%3, c=(a+2)%3), giving (u,v,w) at each plane position; (Nb,Nc) must match the global
+  // resolution on those axes. Sets the face to inflow. Use for a parabolic channel inlet or the partial
+  // inlet of a backward-facing step (parabola over the open part, 0 over the step face).
+  void set_domain_bc_profile(int face, Arr profile) {
+    if (inited_)
+      throw std::runtime_error("sdflow: set_domain_bc_profile() must precede the geometry/first step");
+    if (profile.ndim() != 3 || profile.shape(2) != 3)
+      throw std::runtime_error("sdflow: profile must be (Nb, Nc, 3)");
+    int a = face / 2, b = (a + 1) % 3, c = (a + 2) % 3, gr[3] = {res_.x, res_.y, res_.z};
+    int Nb = (int)profile.shape(0), Nc = (int)profile.shape(1);
+    if (Nb != gr[b] || Nc != gr[c])
+      throw std::runtime_error("sdflow: profile (Nb,Nc) must match the global resolution on the face's "
+                               "two perpendicular axes");
+    auto r = profile.unchecked<3>();
+    std::vector<double> v((size_t)Nb * Nc * 3);
+    for (int i = 0; i < Nb; ++i)
+      for (int j = 0; j < Nc; ++j)
+        for (int k = 0; k < 3; ++k) v[((size_t)i * Nc + j) * 3 + k] = r(i, j, k);
+    s_.set_domain_bc_profile(face, v, Nb, Nc);
+  }
   // Install only the cut-cell pressure operator (no IBM) -- for domain-BC problems with no immersed solid
   // (e.g. lid-driven cavity: pass an all-fluid SDF; domain walls give Neumann pressure via the BC).
   void set_pressure_geometry(Arr sdf, const std::string& pressure_coarse) {
@@ -253,6 +274,7 @@ PYBIND11_MODULE(sdflow, m) {
            py::arg("pressure_coarse") = "rediscretized")
       .def("set_domain_bc", &Solver::set_domain_bc, py::arg("face"), py::arg("type"), py::arg("vx") = 0.0,
            py::arg("vy") = 0.0, py::arg("vz") = 0.0)
+      .def("set_domain_bc_profile", &Solver::set_domain_bc_profile, py::arg("face"), py::arg("profile"))
       .def("set_pressure_geometry", &Solver::set_pressure_geometry, py::arg("sdf"),
            py::arg("pressure_coarse") = "rediscretized")
       .def("set_state", &Solver::set_state, py::arg("u"), py::arg("v"), py::arg("w"))
