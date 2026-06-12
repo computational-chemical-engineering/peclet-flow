@@ -22,6 +22,7 @@
 #include "mac_cutcell.cuh"    // cut-cell face openness from an SDF
 #include "mac_halo.cuh"
 #include "mac_ibm.cuh"        // Robust-Scaled velocity IBM (cut-cell no-slip)
+#include "mac_bc.cuh"         // native domain boundary conditions (velocity ghosts + wall openness)
 #include "mac_multigrid.cuh"  // DistributedPoissonMG (opt-in multigrid pressure solve)
 #include "staggered_advection.cuh"
 
@@ -175,8 +176,10 @@ class DistributedNS {
  public:
   void init(int3 global_res, int rank, int size, double nu, double dt,
             MPI_Comm comm = MPI_COMM_WORLD) {
-    // Ghost width 2 covers the Koren advection reach (diffusion/projection use only width 1).
-    mac_.init(global_res, rank, size, {true, true, true}, /*ghost_width=*/2, comm);
+    // Ghost width 2 covers the Koren advection reach (diffusion/projection use only width 1). periodic_
+    // is {true,true,true} unless set_domain_bc made an axis non-periodic (the halo then leaves the
+    // physical-boundary ghosts for apply_velocity_bc to fill -- transport-core grid_halo.hpp:78).
+    mac_.init(global_res, rank, size, periodic_, /*ghost_width=*/2, comm);
     comm_ = comm;
     nu_ = nu;
     dt_ = dt;
@@ -308,6 +311,7 @@ class DistributedNS {
     dim3 gE((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
     // staggered face openness, kept for the cut-cell flux divergence (projection RHS + diagnostic)
     cfdmpi::ccdetail::cc_build_open_k<<<gE, dim3(8, 8, 4)>>>(ox_, oy_, oz_, sdf, ext_, 1.0, 1.0, 1.0);
+    apply_wall_openness();  // domain wall/Dirichlet faces -> openness 0 -> homogeneous Neumann pressure
     if (coarse_mode == 0)
       mg_.setFineVariableOperatorRediscretized(ox_, oy_, oz_, 1.0, 1.0, 1.0);
     else
@@ -401,6 +405,19 @@ class DistributedNS {
     cudaFree(sdf);
     cudaFree(counter);
     ibm_enabled_ = true;
+  }
+
+  // Set a domain-boundary condition on one of the 6 faces (0=-x,1=+x,2=-y,3=+y,4=-z,5=+z). type:
+  // 0=PERIODIC (default), 1=NOSLIP wall, 2=DIRICHLET velocity (vel). Call BEFORE the first step /
+  // set_solid -- it fixes the halo periodicity (an axis becomes non-periodic if either of its faces is
+  // non-periodic). Velocity ghosts on these faces are filled by apply_velocity_bc; wall pressure is
+  // Neumann via apply_wall_openness (zeroed boundary-face openness). (Inflow/outflow: future.)
+  void set_domain_bc(int face, int type, float3 vel = make_float3(0, 0, 0)) {
+    bc_type_[face] = type;
+    bc_vel_[face] = vel;
+    int ax = face / 2;
+    periodic_[ax] = (bc_type_[2 * ax] == 0 && bc_type_[2 * ax + 1] == 0);
+    has_domain_bc_ = !(periodic_[0] && periodic_[1] && periodic_[2]);
   }
 
   // Global max of the cut-cell flux divergence |div(open u)| over owned cells (the quantity the
@@ -620,9 +637,11 @@ class DistributedNS {
       for (int c = 0; c < 3; ++c) {
         for (int it = 0; it < n_diff; ++it) {
           mac_.exchange(comp[c]);
+          apply_velocity_bc_comp(comp[c], c);
           diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 0);
           if (has_solid_) apply_mask(comp[c]);
           mac_.exchange(comp[c]);
+          apply_velocity_bc_comp(comp[c], c);
           diff_k<<<grd_, blk_>>>(comp[c], b_[c], ext_, mac_.origin_incl_ghost, g, beta, Ac, 1);
           if (has_solid_) apply_mask(comp[c]);
         }
@@ -630,6 +649,7 @@ class DistributedNS {
     }
     // projection (cut-cell operator -> open-weighted flux divergence RHS; else plain divergence)
     mac_.exchange(u_); mac_.exchange(v_); mac_.exchange(w_);
+    apply_velocity_bc();  // domain BC: set boundary normal velocity + ghosts before the divergence
     if (cutcell_)
       diverg_open_k<<<grd_, blk_>>>(u_, v_, w_, ox_, oy_, oz_, div_, ext_, g);
     else
@@ -672,6 +692,7 @@ class DistributedNS {
     }
     mac_.exchange(phi_);
     correct_k<<<grd_, blk_>>>(u_, v_, w_, phi_, ext_, g);
+    apply_velocity_bc();  // re-impose the domain BC (the projection must not move the boundary velocity)
     if (has_solid_) { apply_mask(u_); apply_mask(v_); apply_mask(w_); }
     // the projection's grad(phi) correction touches the solid too; re-impose no-slip there so the
     // decoupled solid velocity cannot accumulate (the IBM operator keeps the fluid consistent).
@@ -722,9 +743,59 @@ class DistributedNS {
     cudaMemcpy(&ibmdata_[comp].num_active_cells, counter, sizeof(int), cudaMemcpyDeviceToHost);
   }
   void apply_mask(double* c) { detail::mask_k<<<grd_, blk_>>>(c, solid_, ext_); }
+
+  // --- domain boundary conditions (apply only on the faces THIS rank owns at the domain boundary) ---
+  void bc_face_flags(bool atlo[3], bool athi[3]) const {
+    int g = mac_.ghost;
+    int3 og = mac_.origin_incl_ghost, N = mac_.global_res;
+    atlo[0] = og.x + g == 0;  atlo[1] = og.y + g == 0;  atlo[2] = og.z + g == 0;
+    athi[0] = og.x + ext_.x - g == N.x;  athi[1] = og.y + ext_.y - g == N.y;
+    athi[2] = og.z + ext_.z - g == N.z;
+  }
+  // fill the boundary ghosts of ONE velocity component (call after its halo exchange)
+  void apply_velocity_bc_comp(double* f, int comp) {
+    if (!has_domain_bc_) return;
+    bool atlo[3], athi[3];
+    bc_face_flags(atlo, athi);
+    int g = mac_.ghost, dims[3] = {ext_.x, ext_.y, ext_.z};
+    for (int a = 0; a < 3; ++a) {
+      int b = (a + 1) % 3, cc = (a + 2) % 3;
+      dim3 blk(16, 16), grd((dims[b] + 15) / 16, (dims[cc] + 15) / 16);
+      for (int s = 0; s < 2; ++s) {
+        int face = 2 * a + s;
+        if (bc_type_[face] == 0 || (s == 0 ? !atlo[a] : !athi[a])) continue;
+        float3 wv = bc_vel_[face];
+        double wc = comp == 0 ? wv.x : (comp == 1 ? wv.y : wv.z);
+        cfdmpi::bcdetail::bc_velocity_comp_k<<<grd, blk>>>(f, ext_, g, a, s, comp, wc);
+      }
+    }
+  }
+  void apply_velocity_bc() {
+    apply_velocity_bc_comp(u_, 0);
+    apply_velocity_bc_comp(v_, 1);
+    apply_velocity_bc_comp(w_, 2);
+  }
+  // zero the boundary-face openness on wall/Dirichlet faces (-> Neumann pressure). Call at operator build.
+  void apply_wall_openness() {
+    if (!has_domain_bc_ || !ox_) return;
+    bool atlo[3], athi[3];
+    bc_face_flags(atlo, athi);
+    int g = mac_.ghost, dims[3] = {ext_.x, ext_.y, ext_.z};
+    double* oarr[3] = {ox_, oy_, oz_};
+    for (int a = 0; a < 3; ++a) {
+      int b = (a + 1) % 3, cc = (a + 2) % 3;
+      dim3 blk(16, 16), grd((dims[b] + 15) / 16, (dims[cc] + 15) / 16);
+      for (int s = 0; s < 2; ++s) {
+        int face = 2 * a + s;
+        if (bc_type_[face] == 0 || (s == 0 ? !atlo[a] : !athi[a])) continue;
+        cfdmpi::bcdetail::bc_zero_openness_k<<<grd, blk>>>(oarr[a], ext_, g, a, s);
+      }
+    }
+  }
   void ensure_vmg_built() {
     if (vmg_built_) return;
-    vmg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, vmg_levels_, comm_, mac_.ghost);
+    vmg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, clamp_levels(vmg_levels_), comm_,
+              mac_.ghost, periodic_);
     vmg_.setDiffusionCoarse(nu_ * dt_, 1.0);  // const-coeff diffusion coarse operators (built once)
     // NB: a geometry-aware (rediscretized) velocity coarse operator was tried and *diverges* -- the
     // Robust-Scaled fine stencil is row-scaled by D_rescale at cut cells, so it is inconsistent with a
@@ -733,10 +804,21 @@ class DistributedNS {
     // (set_velocity_solver_params) is the exact, recommended default. Proper velocity MG = deferred.
     vmg_built_ = true;
   }
+  // Cap the requested MG level count so no axis coarsens below 2 cells (else the ORB decomposer divides
+  // by a zero dimension -- e.g. a quasi-2D nz=4 grid cannot take the default 4 levels: 4>>3 = 0).
+  int clamp_levels(int want) const {
+    int md = mac_.global_res.x;
+    if (mac_.global_res.y < md) md = mac_.global_res.y;
+    if (mac_.global_res.z < md) md = mac_.global_res.z;
+    int lev = want;
+    while (lev > 1 && (md >> (lev - 1)) < 2) --lev;
+    return lev;
+  }
   void ensure_mg_built() {
     if (mg_built_) return;
     // same ORB decomposition + ghost width (2) as this solver, so MG level-0 blocks share the layout.
-    mg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, mg_levels_, comm_, /*ghost=*/mac_.ghost);
+    mg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, clamp_levels(mg_levels_), comm_,
+             /*ghost=*/mac_.ghost, periodic_);
     mg_built_ = true;
   }
 
@@ -782,6 +864,11 @@ class DistributedNS {
   double* solidmask_[3] = {nullptr, nullptr, nullptr};
   double* descale_[3] = {nullptr, nullptr, nullptr};  // Robust-Scaled per-cell RHS scale (D_rescale)
   float3 ubc_ibm_ = make_float3(0, 0, 0);             // IBM wall velocity (for per-iteration re-bake)
+  // Domain boundary conditions (per face 0=-x,1=+x,2=-y,3=+y,4=-z,5=+z; type 0=periodic,1=noslip,2=dirichlet)
+  std::array<bool, 3> periodic_ = {true, true, true};
+  int bc_type_[6] = {0, 0, 0, 0, 0, 0};
+  float3 bc_vel_[6] = {};
+  bool has_domain_bc_ = false;
   // CG-accelerated pressure solve (for the stiff cut-cell operator)
   bool pcg_ = false;
   int pcg_maxit_ = 60;

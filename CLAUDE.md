@@ -172,6 +172,18 @@ The canonical solver is exposed as the `sdflow` Python module (`src/sdflow_bindi
 - Validated against Zick & Homsy SC-sphere drag, bit-identical to `pnm_backend`. Design + benchmarks:
   [`doc/sdflow_multigrid_plan.md`](doc/sdflow_multigrid_plan.md); parity: [`doc/sdflow_pnm_parity.md`](doc/sdflow_pnm_parity.md).
 
+### Domain boundary conditions
+
+Beyond periodic + IBM no-slip on immersed solids, sdflow has **native per-face domain BCs** (`mac_bc.cuh`):
+`set_domain_bc(face, type, vx, vy, vz)` for the 6 faces (0=−x,1=+x,2=−y,3=+y,4=−z,5=+z); `type` 0=periodic
+(default), 1=no-slip wall, 2=Dirichlet velocity. Velocity ghosts are filled in the MAC-staggered
+convention; wall pressure is Neumann (boundary-face openness zeroed). Call **before** geometry/first step.
+For a domain-BC problem with no immersed solid, use `set_pressure_geometry(all_fluid_sdf)` (the cut-cell
+pressure operator without the IBM). **Validated:** lid-driven cavity matches Ghia et al. Re=100 to
+~0.7% rms with machine-precision incompressibility (`scripts/verify_lid_cavity_sdflow.py`); plane
+Poiseuille between BC walls matches the analytic parabola. *Currently supported:* Dirichlet/no-slip walls
+(lid cavity). *Follow-ups:* inflow/outflow (channel, backward step) + non-periodic multilevel multigrid.
+
 Validated cell-for-cell vs serial and against analytics (Taylor–Green ~2e-15, Poiseuille, momentum
 conservation) **and against Zick & Homsy sphere-array drag (bit-identical to `pnm_backend`)** —
 **72/72 ctests, real multi-rank np=1,2,4**.

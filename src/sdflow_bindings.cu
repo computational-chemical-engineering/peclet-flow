@@ -109,19 +109,32 @@ class Solver {
 
   // Install an SDF solid (negative inside) -> Robust-Scaled cut-cell IBM no-slip (or moving wall u_bc),
   // AND the matching cut-cell pressure operator. SDF is a 3-D [x,y,z] array. Fixes the geometry.
+  static int coarse_mode(const std::string& pressure_coarse) {
+    if (pressure_coarse == "rediscretized") return 0;
+    if (pressure_coarse == "galerkin") return 1;
+    if (pressure_coarse == "const") return 2;
+    throw std::runtime_error("sdflow: pressure_coarse must be 'rediscretized', 'galerkin' or 'const'");
+  }
   void set_solid(Arr sdf, double ubx, double uby, double ubz, bool cutcell_pressure,
                  const std::string& pressure_coarse) {
     ensure_init();
     auto block = to_block(sdf);
     s_.set_ibm_solid(block, make_float3((float)ubx, (float)uby, (float)ubz));
-    if (cutcell_pressure) {
-      int mode = 0;  // rediscretized (default, recommended)
-      if (pressure_coarse == "galerkin") mode = 1;
-      else if (pressure_coarse == "const") mode = 2;
-      else if (pressure_coarse != "rediscretized")
-        throw std::runtime_error("sdflow: pressure_coarse must be 'rediscretized', 'galerkin' or 'const'");
-      s_.set_cutcell_pressure_operator(block, mode);
-    }
+    if (cutcell_pressure) s_.set_cutcell_pressure_operator(block, coarse_mode(pressure_coarse));
+  }
+
+  // Domain boundary condition on one of the 6 faces (0=-x,1=+x,2=-y,3=+y,4=-z,5=+z). type: 0=periodic
+  // (default), 1=no-slip wall, 2=Dirichlet velocity (vx,vy,vz). Call BEFORE set_solid/set_pressure_geometry
+  // and the first step (it fixes the halo periodicity).
+  void set_domain_bc(int face, int type, double vx, double vy, double vz) {
+    if (inited_) throw std::runtime_error("sdflow: set_domain_bc() must precede the geometry/first step");
+    s_.set_domain_bc(face, type, make_float3((float)vx, (float)vy, (float)vz));
+  }
+  // Install only the cut-cell pressure operator (no IBM) -- for domain-BC problems with no immersed solid
+  // (e.g. lid-driven cavity: pass an all-fluid SDF; domain walls give Neumann pressure via the BC).
+  void set_pressure_geometry(Arr sdf, const std::string& pressure_coarse) {
+    ensure_init();
+    s_.set_cutcell_pressure_operator(to_block(sdf), coarse_mode(pressure_coarse));
   }
   void set_state(Arr u, Arr v, Arr w) {  // restore/seed the velocity state
     ensure_init();
@@ -236,6 +249,10 @@ PYBIND11_MODULE(sdflow, m) {
       .def("set_pressure_solver_params", &Solver::set_pressure_solver_params, py::arg("n_pois"))
       .def("set_solid", &Solver::set_solid, py::arg("sdf"), py::arg("ubx") = 0.0, py::arg("uby") = 0.0,
            py::arg("ubz") = 0.0, py::arg("cutcell_pressure") = true,
+           py::arg("pressure_coarse") = "rediscretized")
+      .def("set_domain_bc", &Solver::set_domain_bc, py::arg("face"), py::arg("type"), py::arg("vx") = 0.0,
+           py::arg("vy") = 0.0, py::arg("vz") = 0.0)
+      .def("set_pressure_geometry", &Solver::set_pressure_geometry, py::arg("sdf"),
            py::arg("pressure_coarse") = "rediscretized")
       .def("set_state", &Solver::set_state, py::arg("u"), py::arg("v"), py::arg("w"))
       .def("step", &Solver::step)
