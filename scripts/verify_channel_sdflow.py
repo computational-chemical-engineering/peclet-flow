@@ -33,7 +33,7 @@ def run(H=32, L=224, Re=100.0, U=1.0, nz=4, max_steps=8000, dt=0.5):
     s.set_domain_bc(1, 3)                # +x outflow
     s.set_domain_bc(2, 1); s.set_domain_bc(3, 1)  # -y, +y no-slip walls
     s.set_velocity_solver_params(60)
-    s.set_pressure_multigrid(True, levels=4)       # multilevel MG (auto-clamped to 2 for nz=4; pre-geom)
+    s.set_pressure_multigrid(True, levels=8)       # semi-coarsening MG (z frozen, x/y deep; auto-capped)
     s.set_pressure_solver_params(80)
     s.set_pressure_geometry(np.full((L, H, nz), 1e30))  # all-fluid + BC pressure faces
 

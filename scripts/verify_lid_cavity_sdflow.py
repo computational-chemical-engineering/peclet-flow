@@ -35,7 +35,7 @@ def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=5000):
     s.set_domain_bc(0, 1); s.set_domain_bc(1, 1); s.set_domain_bc(2, 1)  # -x, +x, -y no-slip
     s.set_domain_bc(3, 2, U, 0.0, 0.0)                                   # +y lid moving in +x
     s.set_velocity_solver_params(60)
-    s.set_pressure_multigrid(True, levels=4)         # multilevel MG (auto-clamped to 2 for nz=4; pre-geom)
+    s.set_pressure_multigrid(True, levels=8)         # semi-coarsening MG (z frozen, x/y deep; auto-capped)
     s.set_pressure_solver_params(80)
     s.set_pressure_geometry(np.full((N, N, nz), 1e30))                  # all-fluid + Neumann walls
 

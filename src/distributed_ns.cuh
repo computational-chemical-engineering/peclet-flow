@@ -981,11 +981,30 @@ class DistributedNS {
     while (lev > 1 && (md >> (lev - 1)) < 2) --lev;
     return lev;
   }
+  // Levels achievable under SEMI-coarsening: halve each axis only while it stays even and >= 2, so a thin
+  // axis (quasi-2D nz=4) freezes while the others keep coarsening -> more depth than uniform clamp_levels.
+  int semi_level_count(int want) const {
+    int3 r = mac_.global_res;
+    int lev = 1;
+    while (lev < want) {
+      bool any = false;
+      if (r.x % 2 == 0 && r.x / 2 >= 2) { r.x /= 2; any = true; }
+      if (r.y % 2 == 0 && r.y / 2 >= 2) { r.y /= 2; any = true; }
+      if (r.z % 2 == 0 && r.z / 2 >= 2) { r.z /= 2; any = true; }
+      if (!any) break;
+      ++lev;
+    }
+    return lev;
+  }
   void ensure_mg_built() {
     if (mg_built_) return;
     // same ORB decomposition + ghost width (2) as this solver, so MG level-0 blocks share the layout.
-    mg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, clamp_levels(mg_levels_), comm_,
-             /*ghost=*/mac_.ghost, periodic_);
+    // Native-BC problems use semi-coarsening (thin axes freeze -> deeper hierarchy on the wide axes); the
+    // periodic / IBM (porous) path keeps uniform coarsening + clamp_levels -> byte-identical.
+    bool semi = has_domain_bc_;
+    int nlev = semi ? semi_level_count(mg_levels_) : clamp_levels(mg_levels_);
+    mg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, nlev, comm_, /*ghost=*/mac_.ghost,
+             periodic_, semi);
     mg_built_ = true;
   }
 

@@ -205,24 +205,25 @@ __global__ void mg_residual_k(double* __restrict__ r, const double* __restrict__
   r[i] = b[i] - invh2 * (6.0 * x[i] - sum);
 }
 
-// 8:1 average of the fine residual into the coarse rhs. Local: the 8 fine cells are in this rank's
-// fine block (origins align), so no exchange is needed (reads fine INNER cells only).
+// Full-weighting average of the fine residual into the coarse rhs over the rx*ry*rz children (ratio is 2
+// on a coarsened axis, 1 on a kept axis -> semi-coarsening). Local: reads fine INNER cells only (origins
+// align), so no exchange needed. ratio = {2,2,2} reproduces the 8:1 average exactly.
 __global__ void mg_restrict_k(double* __restrict__ coarse, const double* __restrict__ fine, int3 cext,
-                              int3 fext, int g, int3 cinner) {
+                              int3 fext, int g, int3 cinner, int3 ratio) {
   int icx = blockIdx.x * blockDim.x + threadIdx.x;
   int icy = blockIdx.y * blockDim.y + threadIdx.y;
   int icz = blockIdx.z * blockDim.z + threadIdx.z;
   if (icx >= cinner.x || icy >= cinner.y || icz >= cinner.z) return;
   size_t fsy = fext.x, fsz = (size_t)fext.x * fext.y;
   double sum = 0.0;
-  for (int dz = 0; dz < 2; ++dz)
-    for (int dy = 0; dy < 2; ++dy)
-      for (int dx = 0; dx < 2; ++dx) {
-        int fx = 2 * icx + dx + g, fy = 2 * icy + dy + g, fz = 2 * icz + dz + g;
+  for (int dz = 0; dz < ratio.z; ++dz)
+    for (int dy = 0; dy < ratio.y; ++dy)
+      for (int dx = 0; dx < ratio.x; ++dx) {
+        int fx = ratio.x * icx + dx + g, fy = ratio.y * icy + dy + g, fz = ratio.z * icz + dz + g;
         sum += fine[(size_t)fx + (size_t)fy * fsy + (size_t)fz * fsz];
       }
   size_t ci = (size_t)(icx + g) + (size_t)(icy + g) * cext.x + (size_t)(icz + g) * cext.x * cext.y;
-  coarse[ci] = 0.125 * sum;
+  coarse[ci] = sum / (double)(ratio.x * ratio.y * ratio.z);
 }
 
 __device__ inline double trilerp_ext(const double* c, double x, double y, double z, int3 cext) {
@@ -244,12 +245,16 @@ __device__ inline double trilerp_ext(const double* c, double x, double y, double
 // layer filled first (the stencil reaches one coarse cell beyond the block edge); sampling is then
 // direct in the coarse extended block (no wrap). Coarse local sample coord = 0.5*ifine - 0.25 + g.
 __global__ void mg_prolong_k(double* __restrict__ fine, const double* __restrict__ coarse, int3 fext,
-                             int3 cext, int g, int3 finner) {
+                             int3 cext, int g, int3 finner, int3 ratio) {
   int ifx = blockIdx.x * blockDim.x + threadIdx.x;
   int ify = blockIdx.y * blockDim.y + threadIdx.y;
   int ifz = blockIdx.z * blockDim.z + threadIdx.z;
   if (ifx >= finner.x || ify >= finner.y || ifz >= finner.z) return;
-  double cx = 0.5 * ifx - 0.25 + g, cy = 0.5 * ify - 0.25 + g, cz = 0.5 * ifz - 0.25 + g;
+  // coarsened axis (ratio 2): cell-centred coarse sample 0.5*ifine - 0.25 + g; kept axis (ratio 1): the
+  // fine and coarse cells coincide, so the (integer) coordinate ifine+g selects it (trilerp weight 1).
+  double cx = ratio.x == 2 ? 0.5 * ifx - 0.25 + g : (double)(ifx + g);
+  double cy = ratio.y == 2 ? 0.5 * ify - 0.25 + g : (double)(ify + g);
+  double cz = ratio.z == 2 ? 0.5 * ifz - 0.25 + g : (double)(ifz + g);
   size_t fi = (size_t)(ifx + g) + (size_t)(ify + g) * fext.x + (size_t)(ifz + g) * fext.x * fext.y;
   fine[fi] += trilerp_ext(coarse, cx, cy, cz, cext);
 }
@@ -311,28 +316,30 @@ __global__ void mg_agg_T_k(double* txc, double* tyc, double* tzc, const double* 
 // halo-exchanges the result to fill the coarse ghost openness (periodic), which the operator build reads.
 __global__ void mg_coarsen_open_avg_k(double* oxc, double* oyc, double* ozc, const double* oxf,
                                       const double* oyf, const double* ozf, int3 cext, int3 fext, int g,
-                                      int3 cinner) {
+                                      int3 cinner, int3 ratio) {
   int icx = blockIdx.x * blockDim.x + threadIdx.x;
   int icy = blockIdx.y * blockDim.y + threadIdx.y;
   int icz = blockIdx.z * blockDim.z + threadIdx.z;
   if (icx >= cinner.x || icy >= cinner.y || icz >= cinner.z) return;
-  int clx = icx + g, cly = icy + g, clz = icz + g;
-  int fx0 = 2 * clx - g, fy0 = 2 * cly - g, fz0 = 2 * clz - g;  // fine-local base of the 2x2x2 children
+  int rx = ratio.x, ry = ratio.y, rz = ratio.z;
+  int fx0 = rx * icx + g, fy0 = ry * icy + g, fz0 = rz * icz + g;  // fine-local base of the children
   size_t fsy = fext.x, fsz = (size_t)fext.x * fext.y;
   auto F = [&](const double* T, int x, int y, int z) {
     return T[(size_t)x + (size_t)y * fsy + (size_t)z * fsz];
   };
+  // each coarse -a face spans the (ratio_b * ratio_c) fine sub-faces across its two perpendicular axes;
+  // the open-area fraction is their average. ratio = {2,2,2} -> the original 4-face (0.25) average.
   double sx = 0, sy = 0, sz = 0;
-  for (int a = 0; a < 2; ++a)
-    for (int b = 0; b < 2; ++b) {
-      sx += F(oxf, fx0, fy0 + a, fz0 + b);       // 4 fine -x faces spanning the coarse -x face
-      sy += F(oyf, fx0 + a, fy0, fz0 + b);
-      sz += F(ozf, fx0 + a, fy0 + b, fz0);
-    }
-  size_t ci = (size_t)clx + (size_t)cly * cext.x + (size_t)clz * (size_t)cext.x * cext.y;
-  oxc[ci] = 0.25 * sx;
-  oyc[ci] = 0.25 * sy;
-  ozc[ci] = 0.25 * sz;
+  for (int a = 0; a < ry; ++a)
+    for (int b = 0; b < rz; ++b) sx += F(oxf, fx0, fy0 + a, fz0 + b);
+  for (int a = 0; a < rx; ++a)
+    for (int b = 0; b < rz; ++b) sy += F(oyf, fx0 + a, fy0, fz0 + b);
+  for (int a = 0; a < rx; ++a)
+    for (int b = 0; b < ry; ++b) sz += F(ozf, fx0 + a, fy0 + b, fz0);
+  size_t ci = (size_t)(icx + g) + (size_t)(icy + g) * cext.x + (size_t)(icz + g) * cext.x * cext.y;
+  oxc[ci] = sx / (double)(ry * rz);
+  oyc[ci] = sy / (double)(rx * rz);
+  ozc[ci] = sz / (double)(rx * ry);
 }
 
 // R = P^T : coarse residual = SUM of the 8 fine children (not the 1/8 average used by geometric MG)
@@ -419,6 +426,8 @@ struct MGLevel {
   size_t n = 0;
   int3 ext{}, og{}, inner{};
   int g = 1;
+  int3 ratio{2, 2, 2};    // coarsening ratio from THIS level to the next coarser (per axis, 1 or 2)
+  int3 cfac{1, 1, 1};     // cumulative coarsening factor vs level 0 (per axis, power of two) -> spacing
   // variable-coefficient operator (fine level, or every level under Galerkin coarsening); single
   // precision (mreal) -- the streamed matrix. x/rhs/res above stay double.
   bool variable = false;
@@ -436,48 +445,62 @@ class DistributedPoissonMG {
   // the finest spacing; comm the communicator. ghost is the halo width of every level (1 suffices for
   // the 7-point stencil; pass a wider width to share a layout with a host solver). Asserts
   // level-to-level partition alignment.
+  // semi=false: uniform 2:1 coarsening on every axis (the periodic / IBM / diffusion path; exactly
+  // n_levels levels). semi=true: per-axis coarsening -- an axis is halved only while it stays even and
+  // >= 2, so a thin axis (quasi-2D nz=4) freezes while the others keep coarsening; the hierarchy stops
+  // early when no axis can coarsen. ratio={2,2,2} on every level reproduces the uniform path exactly.
   void init(int3 global_res, int rank, int size, double h0, int n_levels, MPI_Comm comm, int ghost = 1,
-            std::array<bool, 3> periodic = {true, true, true}) {
+            std::array<bool, 3> periodic = {true, true, true}, bool semi = false) {
     comm_ = comm;
     levels_.clear();
-    for (int L = 0; L < n_levels; ++L) levels_.push_back(std::make_unique<MGLevel>());
+    int3 res = global_res, cfac = {1, 1, 1};
     for (int L = 0; L < n_levels; ++L) {
-      int3 r = make_int3(global_res.x >> L, global_res.y >> L, global_res.z >> L);
+      levels_.push_back(std::make_unique<MGLevel>());
       MGLevel& lv = *levels_[L];
-      lv.mac.init(r, rank, size, periodic, ghost, comm);
+      lv.mac.init(res, rank, size, periodic, ghost, comm);
       lv.g = lv.mac.ghost;
       lv.ext = lv.mac.local_ext;
       lv.og = lv.mac.origin_incl_ghost;
       lv.inner = lv.mac.inner_res();
       lv.n = lv.mac.num_local_cells();
-      lv.h = h0 * (double)(1 << L);
+      lv.cfac = cfac;
+      lv.h = h0 * (double)cfac.x;  // (scalar h: the uniform/const-coeff path, where cfac is isotropic)
       cudaMalloc(&lv.x, lv.n * 8);
       cudaMalloc(&lv.rhs, lv.n * 8);
       cudaMalloc(&lv.res, lv.n * 8);
       cudaMemset(lv.x, 0, lv.n * 8);
       cudaMemset(lv.rhs, 0, lv.n * 8);
       cudaMemset(lv.res, 0, lv.n * 8);
+      // decide this level's coarsening ratio to the next coarser level
+      int3 ratio = {1, 1, 1}, next = res;
+      auto coarsen = [&](int v) { return semi ? (v % 2 == 0 && v / 2 >= 2) : (v % 2 == 0); };
+      if (coarsen(res.x)) { ratio.x = 2; next.x = res.x / 2; }
+      if (coarsen(res.y)) { ratio.y = 2; next.y = res.y / 2; }
+      if (coarsen(res.z)) { ratio.z = 2; next.z = res.z / 2; }
+      lv.ratio = ratio;
       if (L > 0) {
         const MGLevel& f = *levels_[L - 1];
-        // inner-block start = origin_incl_ghost + ghost; coarse start must be exactly half the fine
-        // start, and coarse inner half the fine inner, so 2:1 coarsening stays local per rank.
+        int3 rt = f.ratio;  // fine -> this (coarse) ratio
         int fsx = f.og.x + f.g, fsy = f.og.y + f.g, fsz = f.og.z + f.g;
         int csx = lv.og.x + lv.g, csy = lv.og.y + lv.g, csz = lv.og.z + lv.g;
-        bool aligned = (f.inner.x == 2 * lv.inner.x) && (f.inner.y == 2 * lv.inner.y) &&
-                       (f.inner.z == 2 * lv.inner.z) && (fsx == 2 * csx) && (fsy == 2 * csy) &&
-                       (fsz == 2 * csz);
+        bool aligned = (f.inner.x == rt.x * lv.inner.x) && (f.inner.y == rt.y * lv.inner.y) &&
+                       (f.inner.z == rt.z * lv.inner.z) && (fsx == rt.x * csx) && (fsy == rt.y * csy) &&
+                       (fsz == rt.z * csz);
         if (!aligned) {
           int rk = 0;
           MPI_Comm_rank(comm, &rk);
           fprintf(stderr,
-                  "[DistributedPoissonMG] rank %d: level %d block not aligned to level %d "
-                  "(fine inner %d,%d,%d start %d,%d,%d ; coarse inner %d,%d,%d start %d,%d,%d). "
-                  "Requires power-of-two global_res with even per-rank blocks.\n",
-                  rk, L, L - 1, f.inner.x, f.inner.y, f.inner.z, fsx, fsy, fsz, lv.inner.x,
-                  lv.inner.y, lv.inner.z, csx, csy, csz);
+                  "[DistributedPoissonMG] rank %d: level %d block not aligned to level %d (ratio %d,%d,%d; "
+                  "fine inner %d,%d,%d start %d,%d,%d ; coarse inner %d,%d,%d start %d,%d,%d). Requires "
+                  "power-of-two global_res with even per-rank blocks.\n",
+                  rk, L, L - 1, rt.x, rt.y, rt.z, f.inner.x, f.inner.y, f.inner.z, fsx, fsy, fsz,
+                  lv.inner.x, lv.inner.y, lv.inner.z, csx, csy, csz);
           MPI_Abort(comm, 1);
         }
       }
+      if (next.x == res.x && next.y == res.y && next.z == res.z) break;  // nothing coarsens -> stop
+      res = next;
+      cfac = make_int3(cfac.x * ratio.x, cfac.y * ratio.y, cfac.z * ratio.z);
     }
   }
 
@@ -606,15 +629,17 @@ class DistributedPoissonMG {
       alloc_T(c);
       c.variable = true;
       mgdetail::mg_coarsen_open_avg_k<<<grd(c), blk>>>(c.tx, c.ty, c.tz, pox, poy, poz, c.ext, fin.ext,
-                                                       c.g, c.inner);
+                                                       c.g, c.inner, fin.ratio);
       c.mac.exchange(c.tx);  // periodic ghost openness (the operator build reads the +neighbour face)
       c.mac.exchange(c.ty);
       c.mac.exchange(c.tz);
       if (has_bc_) applyBoundaryOpenness(c);  // re-impose non-periodic boundary faces (coarsen+exchange
                                               //   leave them undefined): Neumann -> 0, Dirichlet -> open
-      double s = 1.0 / (double)(1 << (2 * L));  // coarse spacing h_L = 2^L h0 -> idx2_L = idx2 / 4^L
+      // per-axis coarse spacing (semi-coarsening is anisotropic): idx2_a = idx2 / cfac_a^2.
+      double sx = 1.0 / (double)(c.cfac.x * c.cfac.x), sy = 1.0 / (double)(c.cfac.y * c.cfac.y),
+             sz = 1.0 / (double)(c.cfac.z * c.cfac.z);
       mgdetail::mg_build_op_k<<<grd(c), blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, c.tx, c.ty, c.tz,
-                                               c.ext, c.g, idx2 * s, idy2 * s, idz2 * s);
+                                               c.ext, c.g, idx2 * sx, idy2 * sy, idz2 * sz);
       pox = c.tx;
       poy = c.ty;
       poz = c.tz;
@@ -957,7 +982,7 @@ class DistributedPoissonMG {
     if (galerkin_)
       mgdetail::mg_restrict_sum_k<<<cgrd, blk>>>(cs.rhs, lv.res, cs.ext, lv.ext, lv.g, cs.inner);
     else
-      mgdetail::mg_restrict_k<<<cgrd, blk>>>(cs.rhs, lv.res, cs.ext, lv.ext, lv.g, cs.inner);
+      mgdetail::mg_restrict_k<<<cgrd, blk>>>(cs.rhs, lv.res, cs.ext, lv.ext, lv.g, cs.inner, lv.ratio);
     cudaMemset(cs.x, 0, cs.n * 8);
 
     vcycle(L + 1, sym);
@@ -970,7 +995,7 @@ class DistributedPoissonMG {
       cs.mac.exchange(cs.x);
       if (has_bc_) fillBCGhosts(cs);  // non-periodic boundary ghosts the trilinear prolong samples:
                                       //   Neumann -> zero-gradient, Dirichlet -> 0
-      mgdetail::mg_prolong_k<<<grd, blk>>>(lv.x, cs.x, lv.ext, cs.ext, lv.g, lv.inner);
+      mgdetail::mg_prolong_k<<<grd, blk>>>(lv.x, cs.x, lv.ext, cs.ext, lv.g, lv.inner, lv.ratio);
     }
 
     smooth(lv, post_, /*reverse=*/sym);
