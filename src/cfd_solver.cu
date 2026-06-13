@@ -1,3 +1,5 @@
+/// @file
+/// @brief pnm_backend: core host driver and device kernels for the cut-cell NS solver.
 #include <thrust/copy.h>
 #include <thrust/count.h>
 #include <thrust/device_vector.h>

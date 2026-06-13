@@ -1,3 +1,4 @@
+"""Test adaptive CFL / time-step control."""
 import os
 import sys
 

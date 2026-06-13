@@ -1,3 +1,4 @@
+"""Verify the expected time-step dependence of the transient solution."""
 import sys
 import os
 import numpy as np

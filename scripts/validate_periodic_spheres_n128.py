@@ -1,3 +1,4 @@
+"""Validate periodic sphere-array flow at N=128 against reference drag."""
 import argparse
 import csv
 import math

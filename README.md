@@ -1,93 +1,68 @@
-# pnm_from_sdf
+# cfd-gpu
 
+GPU-accelerated incompressible **Navier–Stokes** solver for flow in complex geometry, built around a
+staggered **MAC** grid, a signed-distance-field (**SDF**) description of the solid, a cut-cell **Immersed
+Boundary Method**, and a pressure-projection step with a geometric **multigrid** Poisson solve. The code is
+written in CUDA C++ and exposed to Python through `pybind11`; simulations are driven from Python.
 
+> The repository is also known as `pnm_from_sdf` (its GitLab origin) — it computes pore-network–scale flow
+> directly from segmented SDF geometry.
 
-## Getting started
+## Two solvers
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+| Module | Role |
+|--------|------|
+| **`pnm_backend`** | The production solver — GPU cut-cell IBM Navier–Stokes for porous media. Validated cell-for-cell against analytics and against **Zick & Homsy** sphere-array drag. |
+| **`sdflow`** | The canonical **distributed** (MPI-optional) solver built on the shared `transport-core` block-decomposition + async halo layer. One code / one API / MPI-optional. It reproduces `pnm_backend`'s physics and adds native domain boundary conditions. |
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+`sdflow` is the convergence target that will eventually replace `pnm_backend`; both are kept in sync and
+cross-validated (`scripts/cross_validate_sdflow_vs_pnm.py`, `scripts/validate_zick_homsy_sdflow_vs_pnm.py`).
 
-## Add your files
+## Capabilities
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+- **Geometry:** SDF solids (negative inside); the cut-cell IBM applies a Robust-Scaled no-slip / moving-wall
+  condition and a matching cut-cell pressure operator (face openness from the SDF).
+- **Native domain boundary conditions** (`sdflow`): per-face periodic / no-slip wall / Dirichlet velocity
+  (inflow) / outflow, plus per-position **inlet velocity profiles**. Validated on the lid-driven cavity
+  (Ghia et al.), the developing plane channel (Poiseuille), and the backward-facing step (Armaly/Gartling).
+- **Pressure multigrid:** rediscretized geometric V-cycle, grid-independent, with MG-PCG and Chebyshev
+  outer accelerators. Works on periodic, IBM, and non-periodic (BC) domains, including **semi-coarsening**
+  for thin (quasi-2D) grids.
+- **Time integration:** pressure projection with optional incremental pressure, explicit (Koren) or
+  implicit-deferred-correction advection, and Picard outer iteration.
 
+## Build
+
+```bash
+mkdir -p build && cd build && cmake .. && cmake --build .   # -> build/pnm_backend.so
+# distributed sdflow build (opt-in MPI):
+cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON && cmake --build build_mpi -j   # -> build_mpi/sdflow*.so
 ```
-cd existing_repo
-git remote add origin https://gitlab.tue.nl/eajfpeters/pnm_from_sdf.git
-git branch -M main
-git push -uf origin main
+
+Requirements: CUDA (the device arch is pinned for the dev box's RTX 5080), a C++17/20 host compiler,
+`pybind11`, and — for `sdflow` — MPI. Python dependencies live in a virtual environment (`.venv`).
+
+## Run / verify
+
+Simulations are scripts, not C++ mains. The `scripts/verify_*_sdflow.py` files are the canonical
+verification entry points:
+
+```bash
+source .venv/bin/activate
+python scripts/verify_lid_cavity_sdflow.py     # lid-driven cavity vs Ghia, Ghia & Shin (1982)
+python scripts/verify_channel_sdflow.py        # developing plane channel -> Poiseuille
+python scripts/verify_bfs_sdflow.py            # backward-facing step (reattachment length)
+ctest --test-dir build_mpi --output-on-failure # the multi-rank C++ test suite
 ```
 
-## Integrate with your tools
+## Documentation
 
-- [ ] [Set up project integrations](https://gitlab.tue.nl/eajfpeters/pnm_from_sdf/-/settings/integrations)
+API documentation (C++ classes/kernels and Python scripts) is generated with **Doxygen** and published to
+GitHub Pages by the `Documentation` CI workflow. Build it locally with:
 
-## Collaborate with your team
+```bash
+doxygen docs/Doxyfile      # output in docs/html/index.html
+```
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+The architecture, conventions, and design rationale are described in `CLAUDE.md` and the design notes
+under `doc/` in the repository.

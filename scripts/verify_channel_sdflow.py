@@ -26,6 +26,12 @@ import sdflow  # noqa: E402
 
 
 def run(H=32, L=224, Re=100.0, U=1.0, nz=4, max_steps=8000, dt=0.5):
+    """Run the developing-channel case and return its convergence diagnostics.
+
+    Uniform inflow at -x, outflow at +x, no-slip walls at +-y, periodic z; marches to steady state and
+    returns a dict with the mass-conservation error, max divergence, outlet u_max/U_mean ratio, the
+    outlet-profile rms against the parabola, and the developed pressure gradient. Returns None off root.
+    """
     nu = U * H / Re
     s = sdflow.Solver(L, H, nz)
     s.set_rho(1.0); s.set_mu(nu); s.set_dt(dt); s.set_advection(True)
@@ -73,6 +79,7 @@ def run(H=32, L=224, Re=100.0, U=1.0, nz=4, max_steps=8000, dt=0.5):
 
 
 def main():
+    """Run the default channel case, print the diagnostics, and exit non-zero if it fails the tolerance."""
     r = run()
     if r is None:
         return

@@ -1,3 +1,4 @@
+"""Verify momentum advection against the Taylor-Green vortex."""
 import sys
 import os
 import numpy as np

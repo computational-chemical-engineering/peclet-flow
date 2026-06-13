@@ -1,3 +1,5 @@
+/// @file
+/// @brief Distributed geometric multigrid pressure Poisson (rediscretized, BC-aware, semi-coarsening).
 // cfd-gpu -- distributed geometric multigrid for the periodic constant-coefficient pressure Poisson.
 //
 // The pure-Neumann pressure solve (Lap phi = rhs, periodic, all-fluid) is the canonical inner solve of
@@ -438,7 +440,17 @@ struct MGLevel {
   double* cheb_p = nullptr;  // Chebyshev smoother direction vector (when enabled)
 };
 
-// Distributed V-cycle solver for the periodic constant-coefficient Poisson on power-of-two grids.
+/// @brief Distributed geometric multigrid V-cycle solver for the pressure Poisson system.
+///
+/// Builds a hierarchy of MacGridHalo levels (each rank owns the same sub-box, coarsened) and runs a
+/// V-cycle with red-black Gauss-Seidel (or Chebyshev) smoothing. Three coarse-operator strategies:
+/// rediscretized (re-build the cut-cell operator from average-coarsened face openness on every level —
+/// the recommended, grid-independent choice), Galerkin (variational A_c = PᵀAP), and constant-coefficient.
+/// Usable standalone (V-cycles), as an SPD preconditioner for CG (solve_pcg), or with a Chebyshev outer
+/// accelerator (solve_chebyshev, communication-light at scale). Handles non-periodic domain boundaries
+/// (Neumann walls / inflow, Dirichlet outflow) per level (setBoundaryConditions) and semi-coarsening for
+/// thin (quasi-2D) grids (init's `semi` flag). All arithmetic is double on a single-precision-stored
+/// operator. @see DistributedNS
 class DistributedPoissonMG {
  public:
   // global_res must be power-of-two and divisible by 2^(n_levels-1) (with even per-rank blocks). h0 is

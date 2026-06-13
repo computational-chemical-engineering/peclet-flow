@@ -1,3 +1,5 @@
+/// @file
+/// @brief MPI distributed-halo adapter for the MAC grid, built on transport-core.
 // cfd-gpu — MPI distributed-halo adapter for the MAC grid, built on transport-core.
 //
 // The MAC fields (u, v, w staggered; p, sdf centered) are all stored as res.x*res.y*res.z device

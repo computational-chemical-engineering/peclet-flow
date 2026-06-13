@@ -1,3 +1,4 @@
+"""Test the cut-cell fluid-fraction (face openness) computation."""
 import os
 import sys
 

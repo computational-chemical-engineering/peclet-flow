@@ -1,3 +1,5 @@
+/// @file
+/// @brief Cut-cell pressure-operator face openness from an SDF on a MacGridHalo block.
 // cfd-gpu -- cut-cell pressure-operator face openness from an SDF, on a MacGridHalo extended block.
 //
 // Reproduces cfd's compute_fluid_fraction_kernel (gradient-normalised fluid fraction) + the operator

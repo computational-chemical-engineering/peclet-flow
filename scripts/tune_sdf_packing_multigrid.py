@@ -1,3 +1,4 @@
+"""Tune multigrid parameters for the SDF sphere-packing pressure solve."""
 import argparse
 import csv
 import os

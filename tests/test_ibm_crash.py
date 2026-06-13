@@ -1,3 +1,4 @@
+"""Regression test for a previously-crashing IBM configuration."""
 import os
 import sys
 

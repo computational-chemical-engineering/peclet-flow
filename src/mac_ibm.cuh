@@ -1,3 +1,5 @@
+/// @file
+/// @brief Robust-Scaled cut-cell IBM for the velocity (momentum) solve.
 // cfd-gpu -- Robust-Scaled cut-cell IBM for the velocity (momentum) solve on a MacGridHalo extended
 // block. Ports the production solver's velocity IBM (cfd_solver_ibm.cu / _ibm_kernels.cuh): per cut cell
 // the SDF geometry gives polynomial factors (D_rescale, K/M/X/Nbc) that are baked into the velocity

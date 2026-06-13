@@ -1,3 +1,4 @@
+"""Benchmark the multigrid pressure solve on an SDF sphere-packing geometry."""
 import argparse
 import csv
 import os

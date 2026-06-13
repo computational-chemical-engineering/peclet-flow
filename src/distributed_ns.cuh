@@ -1,3 +1,5 @@
+/// @file
+/// @brief DistributedNS: the distributed (MPI-optional) cut-cell Navier-Stokes solver (sdflow core).
 // cfd-gpu — DistributedNS: a reusable distributed incompressible Navier–Stokes solver.
 //
 // Consolidates the building blocks validated in tests/test_*_mpi.cu into one component: a staggered
@@ -174,6 +176,16 @@ __global__ void pot_update_k(double* P, const double* phi, const double* div, do
 }
 }  // namespace detail
 
+/// @brief Distributed (MPI-optional) cut-cell IBM incompressible Navier-Stokes solver — the `sdflow` core.
+///
+/// Solves the incompressible Navier-Stokes equations on a staggered MAC grid decomposed into per-rank
+/// blocks (transport-core ORB + asynchronous ghost halo). The solid is described by an SDF; a Robust-Scaled
+/// cut-cell Immersed Boundary Method imposes no-slip / moving-wall conditions and a matching cut-cell
+/// pressure operator. Each step() advances one time step: a (semi-)implicit diffusion solve, optional
+/// advection (Koren TVD, explicit or implicit deferred-correction), and a pressure projection whose Poisson
+/// system is solved by the geometric multigrid (::cfdmpi::DistributedPoissonMG) with MG-PCG or Chebyshev
+/// acceleration. Supports native per-face domain boundary conditions (periodic / wall / inflow / outflow)
+/// and per-position inlet profiles. Lengths are in grid units (dx = 1); set nu and dt at construction.
 class DistributedNS {
  public:
   void init(int3 global_res, int rank, int size, double nu, double dt,

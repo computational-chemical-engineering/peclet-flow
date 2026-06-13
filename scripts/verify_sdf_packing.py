@@ -1,3 +1,4 @@
+"""Verify flow through an SDF sphere packing."""
 import sys
 import os
 import numpy as np

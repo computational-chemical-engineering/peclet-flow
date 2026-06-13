@@ -1,3 +1,4 @@
+"""Verify the IBM on a sandwiched-channel (two-wall) configuration."""
 import numpy as np
 
 # Point-Value Polynomials (Reference)

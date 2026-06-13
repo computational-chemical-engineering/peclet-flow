@@ -1,3 +1,4 @@
+"""Unit-verify the cut-cell IBM stencil mathematics."""
 import numpy as np
 
 def poly_D_pt(xi): return xi * (1.0 + xi)

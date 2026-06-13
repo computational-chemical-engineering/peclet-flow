@@ -47,3 +47,8 @@ data/
 *.edges
 *.npz
 
+# Generated documentation (built by Doxygen / CI)
+docs/html/
+docs/latex/
+doxygen_warn.txt
+

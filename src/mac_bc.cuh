@@ -1,3 +1,5 @@
+/// @file
+/// @brief Native per-face domain boundary conditions for the MAC velocity + cut-cell pressure.
 // cfd-gpu -- native domain boundary conditions for the MAC staggered velocity + cut-cell pressure.
 //
 // Periodic faces are handled by the halo (it wraps). NON-periodic faces are left unfilled by the halo

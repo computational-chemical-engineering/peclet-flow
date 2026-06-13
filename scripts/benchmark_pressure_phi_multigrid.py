@@ -1,3 +1,4 @@
+"""Benchmark the pressure (phi) multigrid solver."""
 import argparse
 import os
 import sys

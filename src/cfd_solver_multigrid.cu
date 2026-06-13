@@ -1,3 +1,5 @@
+/// @file
+/// @brief pnm_backend: geometric multigrid pressure-Poisson solve.
 #include "cfd_solver.cuh"
 #include "cfd_solver_ibm_kernels.cuh"
 

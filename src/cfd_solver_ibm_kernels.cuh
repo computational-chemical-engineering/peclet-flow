@@ -1,3 +1,5 @@
+/// @file
+/// @brief pnm_backend: device kernels for the cut-cell IBM momentum assembly.
 #pragma once
 #include "cfd_solver.cuh"
 #include <cstdio>

@@ -1,3 +1,4 @@
+"""Concatenate the source tree into a single text file for review / LLM ingestion."""
 import os
 
 # --- CONFIGURATION ---

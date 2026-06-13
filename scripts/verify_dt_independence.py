@@ -1,3 +1,4 @@
+"""Verify the steady solution is independent of the time step."""
 import sys
 import os
 import numpy as np

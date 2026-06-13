@@ -1,3 +1,5 @@
+/// @file
+/// @brief sdflow Python module: pybind11 bindings for the distributed cut-cell NS solver.
 // sdflow -- GPU incompressible Navier-Stokes flow through arbitrary SDF geometry (cut-cell immersed
 // boundary on a staggered MAC grid), optionally MPI-distributed. Python API for the canonical solver
 // (dns::DistributedNS). Run as plain `python script.py` (one rank, whole grid on one GPU) or under
@@ -47,9 +49,14 @@ static void ensure_mpi() {
   }
 }
 
-// The solver bakes beta = nu*dt into the IBM stencil at set_solid time, so rho/mu/dt must be fixed
-// before the geometry is installed. The wrapper therefore stores the physical parameters and lazily
-// initialises dns::DistributedNS (which needs nu, dt) on first use.
+/// @brief Python-facing wrapper around dns::DistributedNS — the `sdflow` solver object.
+///
+/// Constructed with the global grid resolution (nx, ny, nz). Physical parameters (rho, mu, dt, body force)
+/// and scheme flags are set first; the geometry (an SDF solid via set_solid, or all-fluid + domain BCs via
+/// set_pressure_geometry) is installed next; then step() advances the simulation and get_u/get_v/get_w/
+/// get_p return the gathered global fields as 3-D numpy arrays indexed [x,y,z]. Because nu*dt is baked into
+/// the IBM diffusion stencil at geometry time, rho/mu/dt must be fixed before the geometry is installed;
+/// the wrapper stores them and lazily initialises the underlying solver on first use.
 class Solver {
  public:
   Solver(int nx, int ny, int nz) {

@@ -1,3 +1,4 @@
+"""Verify flow through a periodic sphere array (pnm_backend)."""
 import sys
 import os
 import numpy as np

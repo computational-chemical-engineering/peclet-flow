@@ -1,3 +1,4 @@
+"""Test implicit-diffusion Poiseuille flow."""
 import os
 import sys
 import time

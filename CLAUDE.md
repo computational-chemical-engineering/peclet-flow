@@ -204,10 +204,17 @@ periodic/IBM case): each coarse level re-imposes the boundary face openness (Neu
 Dirichlet outflow → open) and the trilinear prolongation fills the non-periodic boundary ghosts
 (Neumann → zero-gradient, Dirichlet → 0). Gated on `has_bc_`, so the periodic/IBM path is byte-identical.
 Convergence is grid-independent — e.g. a 256×64 channel at a fixed 10 V-cycles/step drives the flux
-divergence from `2e-3` (1 level) to `5e-7` (3 levels) at ~the same cost. The BC verify scripts request
-`levels=4` (auto-clamped by `clamp_levels`; a quasi-2D `nz=4` grid caps at 2). *Follow-ups:* convective
-outflow for unsteady wakes, **semi-coarsening** so thin-`z` (quasi-2D) grids reach more levels, multi-rank
-inlet-profile scatter (validated single-rank).
+divergence from `2e-3` (1 level) to `5e-7` (3 levels) at ~the same cost.
+
+**Semi-coarsening** handles thin (quasi-2D) grids: uniform 2:1 coarsening caps an `nz=4` grid at 2 levels,
+so `init(..., semi=true)` halves an axis only while it stays even and ≥2 — a thin axis freezes while the
+wide axes keep coarsening (`MGLevel::ratio`/`cfac`; the transfer + openness kernels take a per-axis
+`int3 ratio`, the operator uses per-axis `idx2/cfac²`). The solver enables it only for native-BC problems
+(`has_domain_bc_`, `semi_level_count`); the periodic/IBM porous path stays uniform + `clamp_levels`, so it
+is byte-identical (72/72). A quasi-2D 256×64×4 channel now builds up to 8 levels (was 2): raw V-cycle flux
+divergence at a fixed 8 cycles drops `1.7e-4`→`8.6e-13`. The BC verify scripts request `levels=8`
+(auto-capped). *Follow-ups:* convective outflow for unsteady wakes, multi-rank inlet-profile scatter
+(validated single-rank).
 
 Validated cell-for-cell vs serial and against analytics (Taylor–Green ~2e-15, Poiseuille, momentum
 conservation) **and against Zick & Homsy sphere-array drag (bit-identical to `pnm_backend`)** —

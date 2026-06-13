@@ -1,3 +1,4 @@
+"""Inspect / summarise an SDF geometry file."""
 import sys
 import os
 import numpy as np

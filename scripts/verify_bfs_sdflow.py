@@ -48,6 +48,13 @@ def reattachment(u_bottom):
 
 
 def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.4, max_steps=12000):
+    """Run the backward-facing step at Reynolds number `Re` (Re_S = U_in*S/nu) and return its diagnostics.
+
+    Step height S, full channel height 2S, channel length Lr*S; a partial parabolic inlet feeds the upper
+    half, the lower half is the step face. Marches to steady state and returns a dict with the lower-wall
+    reattachment length (x_r/S, x_r/H), bubble presence, mass-conservation error and max divergence.
+    Returns None off root.
+    """
     H = 2 * S
     L = Lr * S
     nu = U_in * S / Re
@@ -92,6 +99,7 @@ def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.4, max_steps=12000):
 
 
 def main():
+    """Run the laminar de-risk (Re_S 100, 200) and optional Re=800 push; print results and set exit code."""
     print("=== sdflow: backward-facing step (Gartling expansion ratio 2) ===")
     # laminar de-risk: a bubble must form, x_r/S must grow with Re, flow stays mass-conserving & div-free
     laminar = [run(100), run(200)]

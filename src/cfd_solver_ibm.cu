@@ -1,3 +1,5 @@
+/// @file
+/// @brief pnm_backend: immersed-boundary (cut-cell) assembly for the momentum solve.
 #include "cfd_solver.cuh"
 #include "cfd_solver_ibm_kernels.cuh"
 #include <cstdio>

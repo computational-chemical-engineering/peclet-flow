@@ -1,3 +1,4 @@
+"""Generate a Jupyter notebook for the Poiseuille-flow verification."""
 
 import json
 import os

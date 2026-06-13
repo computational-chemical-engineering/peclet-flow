@@ -1,3 +1,5 @@
+/// @file
+/// @brief pnm_backend: GPU cut-cell IBM incompressible Navier-Stokes solver (public interface).
 #pragma once
 
 #include "sdf_reader.h"

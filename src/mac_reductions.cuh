@@ -1,3 +1,5 @@
+/// @file
+/// @brief Distributed global reductions over a MacGridHalo's owned (inner) cells.
 // transport-core / cfd-gpu -- distributed global reductions over a MacGridHalo's owned (inner) cells.
 //
 // The serial solver reduces over the full grid (thrust::reduce for the pressure mean removal,

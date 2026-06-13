@@ -1,3 +1,4 @@
+"""Verify the projected velocity field is discretely divergence-free."""
 import sys
 import os
 import numpy as np

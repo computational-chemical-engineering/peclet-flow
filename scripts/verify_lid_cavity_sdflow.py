@@ -29,6 +29,13 @@ GHIA_V = np.array([0, .09233, .10091, .10890, .12317, .16077, .17507, .17527, .0
 
 
 def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=5000):
+    """Run the lid-driven cavity to steady state and return the comparison to Ghia et al.
+
+    Sets three no-slip walls and a moving lid (Dirichlet velocity U on +y), marches to steady state, and
+    returns (N, Re, u-rms, v-rms, min centreline u, max divergence, steps) where the rms values are the
+    centreline-profile errors against the tabulated Ghia, Ghia & Shin (1982) data at the given Reynolds
+    number. Quasi-2D (periodic z). Returns None on non-root MPI ranks.
+    """
     nu = U * N / Re
     s = sdflow.Solver(N, N, nz)
     s.set_rho(1.0); s.set_mu(nu); s.set_dt(1.0); s.set_advection(True)
@@ -63,6 +70,7 @@ def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=5000):
 
 
 def main():
+    """Run the default cavity case, print the Ghia comparison, and exit non-zero if it fails the tolerance."""
     r = run()
     if r is None:
         return

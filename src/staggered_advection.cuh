@@ -1,3 +1,5 @@
+/// @file
+/// @brief Staggered MAC momentum advection (Koren TVD), shared by the solver and tests.
 // cfd-gpu — staggered MAC momentum advection (Koren TVD), shared by the distributed solver and tests.
 //
 // Replicates cfd_solver.cu's get_advection_velocity (2-point staggered interpolation of the advecting

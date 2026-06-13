@@ -1,3 +1,4 @@
+"""Unit test for the pressure-projection operator."""
 
 import sys
 import os

@@ -1,3 +1,4 @@
+"""Tests for the pnm_backend CFD solver."""
 import os
 import sys
 

@@ -1,3 +1,4 @@
+"""Plot computed vs analytic Poiseuille velocity profiles."""
 import os
 import sys
 import numpy as np

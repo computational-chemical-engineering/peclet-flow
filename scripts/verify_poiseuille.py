@@ -1,3 +1,4 @@
+"""Verify plane Poiseuille flow against the analytic parabola (pnm_backend)."""
 import sys
 import os
 import numpy as np

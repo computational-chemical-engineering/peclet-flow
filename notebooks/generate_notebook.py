@@ -1,3 +1,4 @@
+"""Generate a Jupyter notebook demonstrating the solver."""
 
 import json
 import os

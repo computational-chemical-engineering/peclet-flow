@@ -1,3 +1,5 @@
+/// @file
+/// @brief pnm_backend Python module: pybind11 bindings for the cut-cell NS solver.
 #include "cfd_solver.cuh"
 #include "pore_extraction.cuh"
 #include "sdf_reader.h"
