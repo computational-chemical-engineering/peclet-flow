@@ -717,7 +717,26 @@ class DistributedPoissonMG {
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
-    for (int v = 0; v < n_vcycles; ++v) vcycle(0);
+    // DIAGNOSTIC (env SDFLOW_VMG_TRACE): print the level-0 residual reduction per V-cycle for the first
+    // few solve() calls -- answers "is the V-cycle actually reducing the residual, or effectively a no-op?".
+    static int trace_left = -1;
+    if (trace_left < 0) trace_left = (std::getenv("SDFLOW_VMG_TRACE") ? 4 : 0);
+    bool trace = trace_left > 0;
+    if (trace) {
+      MGLevel& l0 = *levels_[0];
+      residual(l0);
+      std::fprintf(stderr, "[VMG] levels=%zu max|r0|=%.4e\n", levels_.size(),
+                   mac_max_abs(l0.res, l0.mac, comm_));
+    }
+    for (int v = 0; v < n_vcycles; ++v) {
+      vcycle(0);
+      if (trace) {
+        MGLevel& l0 = *levels_[0];
+        residual(l0);
+        std::fprintf(stderr, "[VMG]   cycle %d max|r|=%.4e\n", v, mac_max_abs(l0.res, l0.mac, comm_));
+      }
+    }
+    if (trace_left > 0) trace_left--;
   }
 
   // Conjugate Gradients preconditioned by ONE symmetric V-cycle (M^{-1}). For the stiff cut-cell /
