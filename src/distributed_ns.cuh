@@ -677,6 +677,10 @@ class DistributedNS {
         cfdmpi::ibmdetail::ibm_scale_k<<<ibblocks, ibthreads>>>(b_[c], descale_[c], (long)n_);
         cfdmpi::mgdetail::mg_axpy_k<<<ibblocks, ibthreads>>>(b_[c], -1.0, inhom_[c], (long)n_);
       }
+      static int dbg = -1;
+      if (dbg < 0) dbg = (std::getenv("SDFLOW_VMG_TRACE") ? 2 : 0);
+      if (dbg > 0) { std::fprintf(stderr, "[VMG-DISPATCH] ibm=%d vmg_enabled=%d implicit_fou=%d vstreams=%d\n",
+                                  (int)ibm_enabled_, (int)vmg_enabled_, (int)implicit_fou_, (int)vstreams_enabled_); dbg--; }
       if (vmg_enabled_ && !implicit_fou_) {  // implicit-FOU changes the stencil each iter -> RB-GS
         ensure_vmg_built();
         for (int c = 0; c < 3; ++c) {
