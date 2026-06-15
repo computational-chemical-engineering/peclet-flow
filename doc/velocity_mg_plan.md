@@ -5,6 +5,16 @@ solve `(I − νΔt·L)u = b`, so the steady-state march (and large-Δt steady-S
 resolution-robust instead of O(N) in RB-GS sweeps. **Standalone RB-GS V-cycle only** (no PCG/Chebyshev
 wrapper), **optional** (`set_velocity_multigrid`, default off; default RB-GS path byte-identical).
 
+> **STATUS (2026-06-16): Phase 1 + 2 implemented and TESTED — insufficient alone; reverted.** The masked
+> staircase coarse (Phase 1) + the `D_rescale` residual un-scale (Phase 2) compile cleanly, but on Z&H the
+> +2–4% drag bias and non-convergence are **unchanged** from the const-coeff version. That null result is
+> the key finding: **the dominant error is NOT the coarse operator — it is the unmasked transfers.** The
+> restriction/prolongation move corrections across the immersed boundary inconsistently, biasing the
+> cut-cell skin regardless of how good the coarse operator is. **⇒ Phase 3 (masked, volume-weighted
+> transfers) is a CORRECTNESS prerequisite, not an efficiency nicety — do it FIRST/together with 1+2.** The
+> masked coarse and the un-scale are correct building blocks underneath it. (Reverted to keep the 72-ctest
+> solver clean; the working tree is unchanged.)
+
 ## Why the current `vmg_` fails (measured)
 `ensure_vmg_built` wires `DistributedPoissonMG` with `setDiffusionCoarse` = **constant-coefficient** coarse
 (`mg_const_diffusion_op_k`, geometry-free) and feeds it the **row-scaled** fine IBM stencil. Result: at
@@ -78,8 +88,15 @@ where it departs from 1.)
 3. **Regression:** default (vmg off) byte-identical; **72/72 ctests** green (np=1,2,4).
 
 ## Sequencing & risk
-- **Land Stokes-only first** (Phase 1 masked-Laplacian coarse + Phase 2 un-scale + Phase 3 transfers): it's
-  the symmetric, cleanest operator and the one the convergence studies need. Validate on Z&H, then ring bed.
+- **Do Phase 3 (masked transfers) FIRST/together with 1+2, Stokes-only** — it's where the bias lives
+  (measured; see STATUS). Concretely: mask the prolongation (no correction into/at a fine solid-skin cell)
+  and volume-fraction-weight the restriction (`Σθ_f r_f / Σθ_f`), so the staircase-coarse ↔ sharp-fine
+  transfer is consistent at the boundary. *Then* the masked coarse (Phase 1) + residual un-scale (Phase 2)
+  set the convergence rate. **Validation gate stays Z&H** (drag == RB-GS to <0.01%, ρ≲0.3); only after that
+  passes does the ring bed test mean anything.
+- A cheap first probe before wiring the full vol-weighting: just **mask** the existing `mg_restrict_k` /
+  `mg_prolong_k` at solid cells (zero θ<ε entries) — if that alone removes the +2–4% Z&H bias, it confirms
+  the transfers are the culprit and the vol-weighting is then the refinement for partial cells.
 - Add Phase 4 (upwind/advection) only after Stokes converges.
 - The biggest new surface is the **per-component staggered θ hierarchy** (3 mask sets); everything else
   reuses the pressure MG machinery. The `D_rescale` un-scale is small but non-optional for the hard cases.
