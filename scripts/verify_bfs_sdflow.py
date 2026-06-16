@@ -64,6 +64,8 @@ def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.4, max_steps=12000):
     s.set_domain_bc(1, 3)                                      # +x outflow
     s.set_domain_bc(2, 1); s.set_domain_bc(3, 1)              # -y, +y no-slip walls
     s.set_velocity_solver_params(60)
+    if os.environ.get("SDFLOW_BFS_VMG") == "1":               # opt-in: velocity-MG (diffusion-only) on the BFS
+        s.set_velocity_multigrid(True, 8, 4)                  #   -- exercises the outflow -beta fold + inflow
     s.set_pressure_multigrid(True, levels=8)                  # semi-coarsening MG (z frozen, x/y deep; capped)
     s.set_pressure_solver_params(80)
     s.set_pressure_geometry(np.full((L, H, nz), 1e30))        # all-fluid + BC pressure faces

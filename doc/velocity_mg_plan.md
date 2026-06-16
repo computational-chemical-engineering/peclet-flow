@@ -101,3 +101,31 @@ where it departs from 1.)
 - The biggest new surface is the **per-component staggered θ hierarchy** (3 mask sets); everything else
   reuses the pressure MG machinery. The `D_rescale` un-scale is small but non-optional for the hard cases.
 - Keep the const-coeff coarse as a selectable fallback for A/B comparison.
+
+---
+
+## UPDATE (cavity path landed; upwind-convective design)
+
+**Done + committed (main 94b64b2, 87d69c4):** velocity-MG on the **domain-BC** path (cavity/BFS), which
+the dispatch never reached before (it lived only inside `if(ibm_enabled_)`). Operator = const-coeff
+`I − νΔt∇²` + per-component no-slip face-fold (`mg_diffusion_bc_fold_k`, the const-coeff analogue of
+`bc_dcorr_`); per-axis-β **semi-coarsening** (`mg_const_diffusion_op_aniso_k`, β_a=νΔt/(h0·cfac_a)²) so a
+quasi-2D grid builds a deep hierarchy (nz=4 cavity → 7 levels). Validated: lid cavity Re=100 == Ghia;
+V-cycle θ≈0.015; stiff regime (dt=30) −33% steps/wall vs RB-GS; 72/72 green. This is **diffusion-only**
+(convection explicit in the RHS) — correct + sufficient for time-accurate unsteady inertial (moderate dt).
+
+**Upwind-convective coarse operator (Phase 4, the remaining piece, task #56).** Only needed for
+*implicit-advection* large-dt high-Re **steady-state acceleration** (where the velocity operator is
+advection-dominated/stiff). Design, now fully mapped:
+- Fine operator already exists: `build_adv_stencil_k` → `sadv::fou_operator` adds first-order-upwind
+  advection to the diffusion stencil from the advecting u,v,w at unit spacing (`As_[c]`).
+- **Coarse** kernel `mg_build_adv_stencil_k`: aniso diffusion (per-axis β) **+** a coarse FOU built from
+  `sadv::adv_vel` on the *restricted* coarse velocity, with per-axis advective spacing `dt·(1/cfac_fd)`
+  (the FOU coefficient is `dt·vel/h_L`; `fou_operator` assumes h=1, so scale vel by 1/cfac per face dir).
+- Per Picard iteration: restrict the advecting u,v,w to every coarse level (reuse `mg_restrict_k`),
+  rebuild coarse stencils, fine = `As_[c]`, solve. Upwind keeps the operator an **M-matrix** (diagonally
+  dominant) → RB-GS smoothing + coarse correction stay stable for advection-dominated rows.
+- **Gate:** lift `!implicit_fou_`. NB **implicit advection is currently IBM-only** (`implicit_fou_ &&
+  ibm_enabled_`, distributed_ns.cuh:633) — to use this on cavity/BFS it must also be wired into the
+  domain-BC velocity path. Validate: a high-Re implicit-advection steady case, non-symmetric MG stability,
+  drag/x_r == RB-GS. Large multi-file change — do with fresh context.
