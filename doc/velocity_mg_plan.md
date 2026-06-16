@@ -57,14 +57,20 @@ coarse op. The coarse op only sets the convergence RATE. **Leave the residual sc
 *finite-cycle* artifact of unmasked transfers (Phase 3), not of the residual scaling. (`mac_ibm.cuh:18`: the
 IBM op is row-based, non-conservative across the wall, "NEVER multigridded; D_rescale … not MG-invariant".)
 
-### Phase 3 — volume-fraction-weighted transfers + solid masking
-- **Restriction:** `mg_restrict_volwt_k` (variant of `mg_restrict_k`): `coarse = Σ θ_f r_f / Σ θ_f` —
-  weight the fine residual by its fluid fraction so fine-partial → coarse-staircase is consistent.
-- **Prolongation:** keep `mg_prolong_k` (trilinear) but **mask**: zero the correction at coarse solid
-  cells and don't add into fine solid cells (multiply by θ). Prevents the coarse correction pumping error
-  into the skin that the smoother then fights every cycle.
-- Masks come from the per-component staggered solid field already built by `ibm_solid_mask_k`
-  (`solidmask_[c]`), coarsened to θ in Phase 1.
+### Phase 3 — clean-fluid-interior coarse coupling (the actual fix that landed)
+The volume-weighted-transfer idea was tried and dropped (it suppressed useful coupling and was unstable; the
+proven pressure cut-cell MG uses a geometry-aware *operator* with *plain* transfers). What actually works is
+restricting **which cells the coarse grid is allowed to touch**: the coarse grid couples ONLY where its clean
+operator matches the fine one — the **clean fluid interior** (a fluid cell with no solid neighbour).
+- A mask `ibm_clean_fluid_mask_k` = 1 at clean-fluid cells, **0 at IBM cut cells AND solid cells**.
+- **Restriction:** zero the fine residual at the masked cells before restricting (`mg_mul_mask_k` on
+  `lv.res_mask`). The inconsistent row-scaled cut-cell residuals and the stiff `1+6β` solid residuals never
+  reach the coarse grid.
+- **Prolongation:** `mg_prolong_masked_k` — no coarse correction is added INTO the masked cells.
+- The fine IBM RB-GS smoother owns the cut-cell band + the solid interior; the coarse grid solves the clean
+  interior. Excluding the **solid** cells (not just the cut cells) is what removes the large-β overshoot:
+  during the V-cycle the fine op carries solid cells as full `1+6β` (masked only at the end) while the coarse
+  op treats them as identity (θ<ε) — a factor-`(1+6β)` mismatch that diverges at large Δt without the mask.
 
 ### Phase 4 — finite-Re (advection) and gating
 - For Re>0 add an **upwind advective** term to `mg_build_velocity_coarse_k` from the coarsened advecting
@@ -156,8 +162,20 @@ paths are byte-identical, 72/72 green). What shipped:
     the residual geometrically (51→0.26→0.014→…, ρ≈0.06–0.13).
   - **72/72 ctests green** (default paths byte-identical).
 
-**Remaining (in progress):** the IBM-path *diffusion* coarse op is still the geometry-blind const-coeff
-`setDiffusionCoarse` (the +2–4% Z&H finite-cycle bias). The fix being implemented = **Phases 1+3, NOT
-Phase 2**: volume-fraction coarse `A_θ` (ε-solid-on-coarse) + masked volume-weighted transfers, correction
-scheme, true residual left scaled. Opt-in flag; Z&H gate (drag == RB-GS <0.01%, ρ≲0.3) before the ring bed.
-The BFS (open-boundary) case is wired by the same domain-BC path but not yet separately benchmarked at high Re.
+**IBM-path volume-fraction coarse op — DONE (opt-in; RB-GS stays the DEFAULT).**
+`set_velocity_mg_volfrac(on, eps=0.1, mask_xfer=False, res_mask=True)` selects the volume-fraction coarse
+operator (Phase 1, diagonal `1 + Σβ_f`, `β_f = νΔt·min(θ_i,θ_nbr)/h²`) + the clean-fluid-interior coupling
+(Phase 3). It is **off by default** — plain RB-GS remains the default IBM velocity solve. Validated
+(`scripts/verify_velocity_mg_volfrac_zh_sdflow.py`, Z&H SC sphere): converges to the **exact RB-GS drag**
+(0.000%), and is **stable at Δt where the geometry-blind const coarse op diverges** — e.g. dt=200 (β=νΔt=20):
+const → NaN, volfrac → exact. 72/72 ctests green (default path byte-identical).
+
+> **Time-step restriction.** The volfrac vel-MG is stable up to ~β=νΔt≈20 (dt≈200 in the Z&H units); at
+> β≳40 (dt≳400) the V-cycle diverges. So it accelerates large-Δt steady-state Stokes marches **within** that
+> window but is **not** unconditionally stable like RB-GS. **⇒ RB-GS is the default; enable volfrac vel-MG
+> only as an opt-in steady-state accelerator when Δt is in the stable range.** Lifting the β≳40 ceiling would
+> need FAS/τ-correction (carry the boundary force on the coarse grid); deferred.
+
+Open: a genuine packed-bed (thin-solid-wall) benchmark vs RB-GS to size the real payoff (RB-GS converges in
+O(pore-cells) sweeps for beds). The BFS (open-boundary) case is wired by the same domain-BC path but not yet
+separately benchmarked at high Re.

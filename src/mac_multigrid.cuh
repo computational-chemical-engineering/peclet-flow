@@ -413,6 +413,91 @@ __global__ void mg_prolong_inject_k(double* fine, const double* coarse, int3 fex
   fine[fi] += coarse[ci];
 }
 
+// r *= m  (elementwise; zero the residual at masked cells before restriction). Used on the IBM fine level
+// to drop the inconsistent cut-cell residuals so the coarse grid only corrects the standard-operator region.
+__global__ void mg_mul_mask_k(double* r, const double* m, long n) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) r[i] *= m[i];
+}
+
+// ---- volume-fraction velocity coarse operator + masked/weighted transfers (IBM momentum MG) ----
+// The IBM velocity operator (As_[c]) is row-based and non-conservative across the immersed wall, so it is
+// NOT coarsened (Galerkin/rediscretized). Instead the coarse levels carry a CLEAN, geometry-aware Helmholtz
+// built from the coarsened fluid VOLUME FRACTION theta (a smoothed momentum balance): the diffusion flux
+// through a face is reduced by its open fraction alpha_f = min(theta_i, theta_nbr), so beta_f = nu_dt/h^2 *
+// alpha_f. The operator is the backward-Euler POINT equation (I - nu_dt*div(alpha grad)): the diagonal I
+// term is 1 (a velocity, not an extensive quantity -- do NOT volume-weight it, that shrinks the diagonal and
+// mismatches the fine As_[c] O(1) diagonal -> two-grid overshoot/divergence). AC = 1 + sum beta_f keeps an
+// M-matrix with an O(1) diagonal; a fully-solid cell (all alpha_f=0) is then automatically the identity row.
+// eps masks the residual partial coupling at near-solid cells. SAFE on coarse levels only: a misclassified
+// coarse cell costs convergence RATE, never accuracy (fine As_[c] smoother + true residual). See mac_ibm.cuh:18.
+__global__ void mg_build_velocity_volfrac_op_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal* AN,
+                                              mreal* AB, mreal* AT, const double* th, int3 ext, int g,
+                                              double bx, double by, double bz, double eps) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
+  if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
+  size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
+  double ti = th[i];
+  if (ti < eps) {  // (nearly) solid coarse cell -> identity row (decoupled Dirichlet)
+    AC[i] = (mreal)1.0;
+    AW[i] = AE[i] = AS[i] = AN[i] = AB[i] = AT[i] = (mreal)0.0;
+    return;
+  }
+  // face open fraction = min of the two adjacent volume fractions; beta_f = nu_dt/h_a^2 * alpha_f.
+  double tw = bx * fmin(ti, th[i - sx]), te = bx * fmin(ti, th[i + sx]);
+  double ts = by * fmin(ti, th[i - sy]), tn = by * fmin(ti, th[i + sy]);
+  double tb = bz * fmin(ti, th[i - sz]), tt = bz * fmin(ti, th[i + sz]);
+  AW[i] = (mreal)(-tw); AE[i] = (mreal)(-te);
+  AS[i] = (mreal)(-ts); AN[i] = (mreal)(-tn);
+  AB[i] = (mreal)(-tb); AT[i] = (mreal)(-tt);
+  AC[i] = (mreal)(1.0 + tw + te + ts + tn + tb + tt);  // I term = 1 (point eq) + reduced face out-fluxes
+}
+
+// Volume-weighted restriction: coarse = sum(theta_f * r_f) / sum(theta_f) over the children. Weighting the
+// fine residual (= the wall force near the boundary) by its fluid fraction makes the fine-partial ->
+// coarse transfer consistent across the immersed boundary -- the fix for the cut-cell skin bias. Reduces to
+// the plain 1/8 full-weighting where theta==1 (bulk). den~0 (all-solid coarse cell) -> 0.
+__global__ void mg_restrict_volwt_k(double* coarse, const double* fine, const double* volf, int3 cext,
+                                    int3 fext, int g, int3 cinner, int3 ratio) {
+  int icx = blockIdx.x * blockDim.x + threadIdx.x;
+  int icy = blockIdx.y * blockDim.y + threadIdx.y;
+  int icz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (icx >= cinner.x || icy >= cinner.y || icz >= cinner.z) return;
+  size_t fsy = fext.x, fsz = (size_t)fext.x * fext.y;
+  double num = 0.0, den = 0.0;
+  for (int dz = 0; dz < ratio.z; ++dz)
+    for (int dy = 0; dy < ratio.y; ++dy)
+      for (int dx = 0; dx < ratio.x; ++dx) {
+        size_t fi = (size_t)(ratio.x * icx + dx + g) + (size_t)(ratio.y * icy + dy + g) * fsy +
+                    (size_t)(ratio.z * icz + dz + g) * fsz;
+        double w = volf[fi];
+        num += w * fine[fi];
+        den += w;
+      }
+  size_t ci = (size_t)(icx + g) + (size_t)(icy + g) * cext.x + (size_t)(icz + g) * cext.x * cext.y;
+  coarse[ci] = den > 1e-30 ? num / den : 0.0;
+}
+
+// Masked trilinear prolongation: like mg_prolong_k, but does NOT add the coarse correction into a (nearly)
+// solid fine cell (theta_f < eps) -- so the coarse correction never pumps error into the cut-cell skin that
+// the fine smoother then has to fight every cycle. Needs the coarse ghosts filled (caller exchanges).
+__global__ void mg_prolong_masked_k(double* fine, const double* coarse, const double* volf, int3 fext,
+                                    int3 cext, int g, int3 finner, int3 ratio, double eps) {
+  int ifx = blockIdx.x * blockDim.x + threadIdx.x;
+  int ify = blockIdx.y * blockDim.y + threadIdx.y;
+  int ifz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (ifx >= finner.x || ify >= finner.y || ifz >= finner.z) return;
+  size_t fi = (size_t)(ifx + g) + (size_t)(ify + g) * fext.x + (size_t)(ifz + g) * fext.x * fext.y;
+  if (volf[fi] < eps) return;  // no correction into a solid fine cell
+  double cx = ratio.x == 2 ? 0.5 * ifx - 0.25 + g : (double)(ifx + g);
+  double cy = ratio.y == 2 ? 0.5 * ify - 0.25 + g : (double)(ify + g);
+  double cz = ratio.z == 2 ? 0.5 * ifz - 0.25 + g : (double)(ifz + g);
+  fine[fi] += trilerp_ext(coarse, cx, cy, cz, cext);
+}
+
 // ---- non-periodic domain boundaries (cavity / channel / step) on coarse levels ----
 // The inner openness coarsening + the periodic ghost exchange do NOT fill a non-periodic boundary face,
 // so the coarse operator there is undefined. Re-apply the boundary condition per level: set the boundary
@@ -473,6 +558,8 @@ struct MGLevel {
   // staggered face transmissibilities (Galerkin only, build-time scratch): tx[i] = T of -x face of i
   double *tx = nullptr, *ty = nullptr, *tz = nullptr;
   double* cheb_p = nullptr;  // Chebyshev smoother direction vector (when enabled)
+  const double* vol = nullptr;  // borrowed: fluid volume fraction theta (velocity volfrac-MG transfers)
+  const double* res_mask = nullptr;  // borrowed: zero the residual here before restriction (IBM cut cells)
 };
 
 /// @brief Distributed geometric multigrid V-cycle solver for the pressure Poisson system.
@@ -698,6 +785,7 @@ class DistributedPoissonMG {
   // Component-independent -> build once; then setDiffusionFine() swaps the fine stencil per component.
   void setDiffusionCoarse(double nu_dt, double h0) {
     galerkin_ = false;
+    vel_volfrac_ = false;
     remove_mean_ = false;
     dim3 blk(8, 8, 8);
     for (int L = 1; L < (int)levels_.size(); ++L) {
@@ -747,6 +835,7 @@ class DistributedPoissonMG {
   // follow with setDiffusionBoundaryFold(comp,...) per component. Allocates once, rebuilds values per call.
   void setDiffusionConstAllLevels(double nu_dt, double h0) {
     galerkin_ = false;
+    vel_volfrac_ = false;
     remove_mean_ = false;
     dim3 blk(8, 8, 8);
     for (int L = 0; L < (int)levels_.size(); ++L) {
@@ -772,9 +861,54 @@ class DistributedPoissonMG {
       for (mreal** p : {&f.AC, &f.AW, &f.AE, &f.AS, &f.AN, &f.AB, &f.AT})
         cudaMalloc(p, f.n * sizeof(mreal));
     f.variable = true;
+    f.res_mask = nullptr;  // default: no residual masking (the volfrac path re-sets it per component)
     mreal* fdst[7] = {f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT};
     for (int k = 0; k < 7; ++k)
       cudaMemcpy(fdst[k], fineA[k], f.n * sizeof(mreal), cudaMemcpyDeviceToDevice);
+  }
+
+  // Velocity volume-fraction coarse operator (IBM momentum MG). Level 0 is left untouched (the caller sets
+  // it to the sharp IBM stencil As_[c] via setDiffusionFine, so residual + smoother use the TRUE operator
+  // and the fixed point is exact). On levels 1..N-1 build the clean geometry-aware Helmholtz A_theta from
+  // the coarsened fluid volume fraction, and switch the V-cycle to masked, volume-weighted transfers.
+  //   theta0      : fine (level-0) fluid volume fraction on the extended block, WITH ghosts (borrowed).
+  //   coarse_theta: caller scratch, one buffer per coarse level [1..N-1] sized level(L).n; filled here
+  //                 (coarsen + halo-exchange) and borrowed into level(L).vol. Pass coarse_theta[L] indexable
+  //                 by level (index 0 unused).
+  // Static geometry: rebuildable cheaply each solve (coarse grids are small). eps = solid threshold.
+  void setVelocityVolfracCoarse(const double* theta0, double* const coarse_theta[], double nu_dt,
+                                double h0, double eps, bool mask_xfer = false,
+                                const double* lvl0_res_mask = nullptr) {
+    galerkin_ = false;
+    remove_mean_ = false;
+    vel_volfrac_ = true;
+    vel_mask_xfer_ = mask_xfer;
+    vel_eps_ = eps;
+    levels_[0]->vol = theta0;
+    levels_[0]->res_mask = lvl0_res_mask;  // zero the cut-cell residual before restriction (level 0 only)
+    dim3 blk(8, 8, 8);
+    const double* tf = theta0;
+    for (int L = 1; L < (int)levels_.size(); ++L) {
+      MGLevel& c = *levels_[L];
+      MGLevel& f = *levels_[L - 1];
+      if (!c.AC)
+        for (mreal** p : {&c.AC, &c.AW, &c.AE, &c.AS, &c.AN, &c.AB, &c.AT})
+          cudaMalloc(p, c.n * sizeof(mreal));
+      c.variable = true;
+      double* th = coarse_theta[L];
+      // coarse volume fraction = average of the children (the coarse cell's fluid fraction)
+      dim3 cgrd((c.inner.x + 7) / 8, (c.inner.y + 7) / 8, (c.inner.z + 7) / 8);
+      mgdetail::mg_restrict_k<<<cgrd, blk>>>(th, tf, c.ext, f.ext, f.g, c.inner, f.ratio);
+      c.mac.exchange(th);  // periodic ghost theta (the operator build reads the +/- neighbour fraction)
+      c.vol = th;
+      double bx = nu_dt / ((h0 * c.cfac.x) * (h0 * c.cfac.x)),
+             by = nu_dt / ((h0 * c.cfac.y) * (h0 * c.cfac.y)),
+             bz = nu_dt / ((h0 * c.cfac.z) * (h0 * c.cfac.z));
+      dim3 gIn((c.inner.x + 7) / 8, (c.inner.y + 7) / 8, (c.inner.z + 7) / 8);
+      mgdetail::mg_build_velocity_volfrac_op_k<<<gIn, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT,
+                                                            th, c.ext, c.g, bx, by, bz, eps);
+      tf = th;
+    }
   }
 
   // Use a degree-`pre/post` Chebyshev smoother (point-Jacobi preconditioned) instead of Red-Black
@@ -1092,11 +1226,22 @@ class DistributedPoissonMG {
     // residual (needs current ghosts); variable operator on the fine level, constant on coarse
     residual(lv);
 
+    // IBM velocity-MG: zero the residual at the row-altered cut cells so the coarse grid only corrects the
+    // standard-operator region (the inconsistent, row-scaled cut-cell residuals would otherwise drive an
+    // overshooting coarse correction at the immersed boundary). Fine level only; the smoother owns the band.
+    if (lv.res_mask) {
+      long blocks = (lv.n + 255) / 256;
+      mgdetail::mg_mul_mask_k<<<blocks, 256>>>(lv.res, lv.res_mask, (long)lv.n);
+    }
+
     // restrict residual -> coarse rhs (local); reset coarse x. Galerkin uses R = P^T (sum); the
     // geometric path uses full-weighting (1/8 average).
     MGLevel& cs = *levels_[L + 1];
     dim3 cgrd((cs.inner.x + 7) / 8, (cs.inner.y + 7) / 8, (cs.inner.z + 7) / 8);
-    if (galerkin_)
+    if (vel_mask_xfer_)  // opt-in: volume-weighted restriction (off by default; see vcycle prolong note)
+      mgdetail::mg_restrict_volwt_k<<<cgrd, blk>>>(cs.rhs, lv.res, lv.vol, cs.ext, lv.ext, lv.g, cs.inner,
+                                                   lv.ratio);
+    else if (galerkin_)
       mgdetail::mg_restrict_sum_k<<<cgrd, blk>>>(cs.rhs, lv.res, cs.ext, lv.ext, lv.g, cs.inner);
     else
       mgdetail::mg_restrict_k<<<cgrd, blk>>>(cs.rhs, lv.res, cs.ext, lv.ext, lv.g, cs.inner, lv.ratio);
@@ -1106,7 +1251,15 @@ class DistributedPoissonMG {
 
     // prolong coarse correction -> fine. Galerkin uses injection (P, no coarse halo); the geometric
     // path uses trilinear interpolation (needs the coarse ghosts).
-    if (galerkin_) {
+    if (lv.res_mask) {  // IBM band fully owned by the smoother: no coarse correction INTO cut cells either
+      cs.mac.exchange(cs.x);                                  //   (res_mask is 0 at cut cells, 1 elsewhere)
+      mgdetail::mg_prolong_masked_k<<<grd, blk>>>(lv.x, cs.x, lv.res_mask, lv.ext, cs.ext, lv.g, lv.inner,
+                                                  lv.ratio, /*eps=*/0.5);
+    } else if (vel_mask_xfer_) {  // opt-in: masked trilinear prolong (no correction into solid fine cells)
+      cs.mac.exchange(cs.x);
+      mgdetail::mg_prolong_masked_k<<<grd, blk>>>(lv.x, cs.x, lv.vol, lv.ext, cs.ext, lv.g, lv.inner,
+                                                  lv.ratio, vel_eps_);
+    } else if (galerkin_) {
       mgdetail::mg_prolong_inject_k<<<grd, blk>>>(lv.x, cs.x, lv.ext, cs.ext, lv.g, lv.inner);
     } else {
       cs.mac.exchange(cs.x);
@@ -1162,6 +1315,10 @@ class DistributedPoissonMG {
   MPI_Comm comm_ = MPI_COMM_WORLD;
   int pre_ = 2, post_ = 2, bottom_ = 8;
   bool galerkin_ = false;     // variational (aggregation) coarse operators + injection/sum transfers
+  bool vel_volfrac_ = false;  // velocity volume-fraction coarse operator (IBM); plain transfers by default
+  bool vel_mask_xfer_ = false;  // experimental: masked volume-weighted transfers (off; plain matched the
+                                //   proven pressure cut-cell MG and avoided suppressing useful coupling)
+  double vel_eps_ = 0.1;      // theta < eps -> solid (coarse-op identity row [+ transfer mask if enabled])
   bool remove_mean_ = true;   // false for non-singular operators (e.g. diffusion I - nu*dt*Lap)
   int bc_type_[6] = {0, 0, 0, 0, 0, 0};  // per-face domain BC (0=periodic); see setBoundaryConditions
   bool has_bc_ = false;       // any non-periodic face -> apply the coarse-level boundary handling

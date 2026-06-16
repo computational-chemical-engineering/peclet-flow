@@ -292,6 +292,41 @@ __global__ void ibm_scale_k(double* a, const double* s, long n) {  // a *= s (el
   if (i < n) a[i] *= s[i];
 }
 
+// Fluid VOLUME FRACTION for a velocity component at the staggered point: a smoothed Heaviside of the SDF,
+// theta = clamp(0.5 + sdf, 0, 1) (cell size 1; sdf>0 in fluid). 1 deep in fluid, 0 deep in solid, a linear
+// ramp across the one-cell interface band. The volumetric analogue of the pressure path's face openness;
+// feeds the velocity multigrid's rediscretized coarse operator (smoothed momentum balance). NOT used by the
+// sharp fine IBM operator -- only by the geometry-aware coarse levels.
+__global__ void ibm_volfrac_k(double* theta, const double* sdf, int3 ext, float3 off) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (lx >= ext.x || ly >= ext.y || lz >= ext.z) return;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
+  double sd = ccdetail::cc_sample_ext(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
+  double t = 0.5 + sd;
+  theta[i] = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+}
+
+// Residual-restriction / prolongation mask for the IBM velocity multigrid: 1.0 only at CLEAN FLUID INTERIOR
+// cells (fluid centre, no solid neighbour -> the fine row is the standard coarsenable operator), 0.0 at IBM
+// cut cells AND solid cells. The coarse grid is coupled ONLY where its clean volume-fraction operator matches
+// the fine operator: the row-scaled cut-cell rows and the (live-during-the-cycle, masked-only-at-the-end)
+// solid rows are both excluded, so the coarse correction never overshoots the immersed-boundary band or the
+// stiff 1+6*beta solid interior (the fine smoother owns both). Self-contained from the SDF (clamped sampler
+// handles ghosts), independent of the inner-only id_map.
+__global__ void ibm_clean_fluid_mask_k(double* m, const double* sdf, int3 ext, float3 off) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (lx >= ext.x || ly >= ext.y || lz >= ext.z) return;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
+  float sc, sn[6];
+  ibm_gather_ext(sdf, ext, lx, ly, lz, off, sc, sn);
+  bool solid = (sc <= 0.0f);
+  m[i] = (solid || ibm_is_cut(sc, sn)) ? 0.0 : 1.0;
+}
+
 // solid mask for a velocity component: 1.0 where the staggered SDF point is inside the solid, else 0.
 __global__ void ibm_solid_mask_k(double* mask, const double* sdf, int3 ext, float3 off) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x;

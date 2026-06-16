@@ -108,6 +108,9 @@ class Solver {
   void set_velocity_multigrid(bool on, int levels, int v_cycles) {
     s_.set_velocity_multigrid(on, levels, v_cycles);
   }
+  void set_velocity_mg_volfrac(bool on, double eps, bool mask_xfer, bool res_mask) {
+    s_.set_velocity_mg_volfrac(on, eps, mask_xfer, res_mask);
+  }
   // inner-iteration counts used by step() (persistent; step() takes no per-call counts).
   void set_velocity_solver_params(int n_diff) { n_diff_ = n_diff < 1 ? 1 : n_diff; }
   void set_pressure_solver_params(int n_pois) { n_pois_ = n_pois < 1 ? 1 : n_pois; }
@@ -274,6 +277,8 @@ PYBIND11_MODULE(sdflow, m) {
       .def("set_pressure_warmstart", &Solver::set_pressure_warmstart, py::arg("on"))
       .def("set_velocity_multigrid", &Solver::set_velocity_multigrid, py::arg("on"),
            py::arg("levels") = 3, py::arg("v_cycles") = 4)
+      .def("set_velocity_mg_volfrac", &Solver::set_velocity_mg_volfrac, py::arg("on"),
+           py::arg("eps") = 0.1, py::arg("mask_xfer") = false, py::arg("res_mask") = true)
       .def("set_velocity_solver_params", &Solver::set_velocity_solver_params, py::arg("n_diff"))
       .def("set_pressure_solver_params", &Solver::set_pressure_solver_params, py::arg("n_pois"))
       .def("set_solid", &Solver::set_solid, py::arg("sdf"), py::arg("ubx") = 0.0, py::arg("uby") = 0.0,

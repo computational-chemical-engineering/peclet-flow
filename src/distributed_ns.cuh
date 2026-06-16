@@ -262,6 +262,9 @@ class DistributedNS {
     for (auto& v : {&vadv_u_, &vadv_v_, &vadv_w_})
       for (double* p : *v)
         if (p) cudaFree(p);
+    for (double* p : vfine_) if (p) cudaFree(p);
+    for (double* p : vresmask_) if (p) cudaFree(p);
+    for (double* p : vtheta_lvl_) if (p) cudaFree(p);
     if (mg_built_) mg_.free();
     if (vmg_built_) vmg_.free();
     if (vstreams_init_) {
@@ -418,6 +421,17 @@ class DistributedNS {
     vmg_vcycles_ = v_cycles;
   }
 
+  // Use the geometry-aware VOLUME-FRACTION coarse operator (smoothed momentum balance) + masked,
+  // volume-weighted transfers for the IBM velocity-MG, instead of the geometry-blind const-coeff coarse.
+  // Opt-in (default off = const-coeff, byte-identical). eps = volume fraction below which a COARSE cell is
+  // treated as solid (small-cell fix, safe on coarse levels only). Requires set_ibm_solid + vmg enabled.
+  void set_velocity_mg_volfrac(bool on, double eps = 0.1, bool mask_xfer = false, bool res_mask = true) {
+    vmg_volfrac_ = on;
+    vmg_eps_ = eps;
+    vmg_mask_xfer_ = mask_xfer;
+    vmg_res_mask_ = res_mask;  // zero cut-cell residual before restriction (only the coarsenable region)
+  }
+
   // Robust-Scaled cut-cell IBM no-slip for the momentum solve, from an SDF (extended-block layout, all
   // cells incl. ghosts, negative inside solid). Builds the per-component (u/v/w) IBM geometry and bakes
   // it into a static backward-Euler diffusion stencil + inhomogeneous Dirichlet term (u_bc = wall
@@ -451,6 +465,14 @@ class DistributedNS {
       if (!solidmask_[c]) cudaMalloc(&solidmask_[c], n_ * 8);
       if (!descale_[c]) cudaMalloc(&descale_[c], n_ * 8);
       ibm_solid_mask_k<<<gE, blk>>>(solidmask_[c], sdf, ext_, offs[c]);
+      // fluid volume fraction theta (for the opt-in volume-fraction velocity-MG coarse operator); static.
+      if (!vfine_[c]) cudaMalloc(&vfine_[c], n_ * 8);
+      ibm_volfrac_k<<<gE, blk>>>(vfine_[c], sdf, ext_, offs[c]);
+      mac_.exchange(vfine_[c]);  // periodic ghost theta (the coarse build + restriction read neighbours)
+      // coarse-coupling mask: 1 only at clean fluid interior; 0 at IBM cut cells + solid (the coarse grid
+      // couples only where its clean operator matches the fine one -> no overshoot at the boundary band/solid)
+      if (!vresmask_[c]) cudaMalloc(&vresmask_[c], n_ * 8);
+      ibm_clean_fluid_mask_k<<<gE, blk>>>(vresmask_[c], sdf, ext_, offs[c]);
       ibm_build_diffusion_k<<<gE, blk>>>(As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4],
                                          As_[c][5], As_[c][6], ext_, beta);
       cudaMemset(inhom_[c], 0, n_ * 8);
@@ -719,6 +741,12 @@ class DistributedNS {
         ensure_vmg_built();
         for (int c = 0; c < 3; ++c) {
           vmg_.setDiffusionFine(As_[c]);  // fine = this component's float IBM stencil (coarse built once)
+          // opt-in: geometry-aware volume-fraction coarse op (smoothed momentum balance) + masked
+          // volume-weighted transfers, rebuilt per component (static geometry, cheap). Level 0 stays As_[c]
+          // -> the residual + smoother use the TRUE operator, so the fixed point is the exact sharp solution.
+          if (vmg_volfrac_)
+            vmg_.setVelocityVolfracCoarse(vfine_[c], vtheta_lvl_.data(), nu_ * dt_, 1.0, vmg_eps_,
+                                          vmg_mask_xfer_, vmg_res_mask_ ? vresmask_[c] : nullptr);
           cfdmpi::MGLevel& l0 = vmg_.level(0);
           cudaMemcpy(l0.rhs, b_[c], n_ * 8, cudaMemcpyDeviceToDevice);
           cudaMemcpy(l0.x, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);  // initial guess
@@ -1097,6 +1125,13 @@ class DistributedNS {
       // The IBM path's setDiffusionCoarse (above) already did this for levels 1..N-1.
       if (has_domain_bc_) vmg_.setDiffusionConstAllLevels(nu_ * dt_, 1.0);
     }
+    // volume-fraction coarse-op scratch: one coarse theta buffer per coarse level (reused across the 3
+    // components and across steps; the geometry is static). Index L>=1; [0] unused (level 0 = vfine_[c]).
+    if (vmg_volfrac_ && !has_domain_bc_) {
+      int N = vmg_.n_levels();
+      vtheta_lvl_.assign(N, nullptr);
+      for (int L = 1; L < N; ++L) cudaMalloc(&vtheta_lvl_[L], vmg_.level(L).n * 8);
+    }
     // NB: a geometry-aware (rediscretized) velocity coarse operator was tried and *diverges* -- the
     // Robust-Scaled fine stencil is row-scaled by D_rescale at cut cells, so it is inconsistent with a
     // clean I-beta*L coarse operator under geometric transfers (and the staggered velocity geometry is
@@ -1229,6 +1264,16 @@ class DistributedNS {
   // upwind-convective velocity-MG (implicit-FOU path): per-level restricted advecting velocity. Index L>=1
   // holds the coarse-level scratch; [0] is left null and aliases u_/v_/w_ as the level-0 restriction source.
   std::vector<double*> vadv_u_, vadv_v_, vadv_w_;
+  // volume-fraction velocity-MG coarse operator (IBM diffusion path, opt-in). vfine_[c] = per-component
+  // fine fluid volume fraction theta (static, from the SDF); vtheta_lvl_ = coarse theta scratch reused
+  // across components/levels (index L>=1). See doc/velocity_mg_plan.md (Phases 1+3; NOT the un-scale).
+  bool vmg_volfrac_ = false;
+  bool vmg_mask_xfer_ = false;
+  bool vmg_res_mask_ = true;   // zero the cut-cell residual before restriction (the consistent-residual fix)
+  double vmg_eps_ = 0.1;
+  double* vfine_[3] = {nullptr, nullptr, nullptr};
+  double* vresmask_[3] = {nullptr, nullptr, nullptr};  // 0 at IBM cut cells, 1 elsewhere (per component)
+  std::vector<double*> vtheta_lvl_;
   // cut-cell pressure operator: staggered face openness + the flux-divergence flag
   double *ox_ = nullptr, *oy_ = nullptr, *oz_ = nullptr;
   bool cutcell_ = false;
