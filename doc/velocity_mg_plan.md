@@ -114,18 +114,32 @@ quasi-2D grid builds a deep hierarchy (nz=4 cavity → 7 levels). Validated: lid
 V-cycle θ≈0.015; stiff regime (dt=30) −33% steps/wall vs RB-GS; 72/72 green. This is **diffusion-only**
 (convection explicit in the RHS) — correct + sufficient for time-accurate unsteady inertial (moderate dt).
 
-**Upwind-convective coarse operator (Phase 4, the remaining piece, task #56).** Only needed for
+**Upwind-convective coarse operator (Phase 4, task #56) — DONE + LANDED (2026-06-16, IBM path).** For
 *implicit-advection* large-dt high-Re **steady-state acceleration** (where the velocity operator is
-advection-dominated/stiff). Design, now fully mapped:
-- Fine operator already exists: `build_adv_stencil_k` → `sadv::fou_operator` adds first-order-upwind
+advection-dominated/stiff). Opt-in: `set_velocity_multigrid(on,…)` **together with**
+`set_implicit_advection(on)` on the IBM path now takes the upwind-convective vel-MG (the combination was
+previously gated out → RB-GS; no current test sets both, so default paths are byte-identical, 72/72 green).
+What shipped:
+- Fine operator (pre-existing): `build_adv_stencil_k` → `sadv::fou_operator` adds first-order-upwind
   advection to the diffusion stencil from the advecting u,v,w at unit spacing (`As_[c]`).
-- **Coarse** kernel `mg_build_adv_stencil_k`: aniso diffusion (per-axis β) **+** a coarse FOU built from
-  `sadv::adv_vel` on the *restricted* coarse velocity, with per-axis advective spacing `dt·(1/cfac_fd)`
-  (the FOU coefficient is `dt·vel/h_L`; `fou_operator` assumes h=1, so scale vel by 1/cfac per face dir).
-- Per Picard iteration: restrict the advecting u,v,w to every coarse level (reuse `mg_restrict_k`),
-  rebuild coarse stencils, fine = `As_[c]`, solve. Upwind keeps the operator an **M-matrix** (diagonally
-  dominant) → RB-GS smoothing + coarse correction stay stable for advection-dominated rows.
-- **Gate:** lift `!implicit_fou_`. NB **implicit advection is currently IBM-only** (`implicit_fou_ &&
-  ibm_enabled_`, distributed_ns.cuh:633) — to use this on cavity/BFS it must also be wired into the
-  domain-BC velocity path. Validate: a high-Re implicit-advection steady case, non-symmetric MG stability,
-  drag/x_r == RB-GS. Large multi-file change — do with fresh context.
+- **Coarse** kernel `dns::detail::build_adv_coarse_stencil_k<COMP>` (distributed_ns.cuh): aniso const-coeff
+  diffusion (per-axis β from `cfac`) **+** a coarse FOU via new `sadv::fou_operator_aniso` on the
+  *restricted* coarse velocity, scaling vel by `s_a = 1/cfac_a` per face axis (the FOU coefficient is
+  `dt·vel/h_a`, and `fou_operator` assumes h=1). Launched over inner cells (smoother/residual read AC..AT
+  only there; the ±1 reach hits exchanged ghosts).
+- Per Picard iteration: `restrict_vmg_adv_velocities()` restricts u,v,w to every coarse level (reuse
+  `mg_restrict_k`, 8:1 volume average + ghost exchange), `build_vmg_adv_coarse(c)` rebuilds the coarse
+  stencils, `setDiffusionFine(As_[c])`, solve, mask. Per-level velocity scratch `vadv_{u,v,w}_` allocated
+  in `ensure_vmg_built` (only when `implicit_fou_ && !has_domain_bc_`); level 0 aliases u_/v_/w_.
+- Upwind keeps every level an **M-matrix** (diagonally dominant) → RB-GS smoothing + coarse correction
+  stable in advection-dominated rows.
+- **Validated** (`scripts/verify_velocity_mg_upwind_sdflow.py`, sphere + cut-cell IBM, dt=5): stable at
+  high Re (U~2, CFL≫1) where the operator is advection-dominated; converges to the **same field as RB-GS
+  to machine precision** (U_max/U_mean diff 0.000% at steady); the V-cycle drops the Helmholtz residual
+  geometrically (ρ≈0.02–0.05, ~8 cycles to machine ε). 72/72 ctests green.
+
+**Remaining (deferred):** wire onto the **domain-BC** velocity path — implicit advection is still IBM-only
+(`implicit_fou_ && ibm_enabled_`, distributed_ns.cuh:633; the new vel-MG branch is also under
+`if (ibm_enabled_)`). Using it on cavity/BFS needs implicit-FOU in the domain-BC velocity path first (a
+separate, larger change). The `D_rescale` residual un-scale (plan Phase 2) is still not applied — fine for
+the validated `D_rescale≈1` cases; revisit for thin-wall/near-contact stressors.

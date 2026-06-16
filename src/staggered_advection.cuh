@@ -112,4 +112,27 @@ __device__ inline void fou_operator(int comp, int x, int y, int z, A U, A V, A W
   }
 }
 
+// Coarse-level FOU operator for the velocity multigrid. Identical donor-cell upwinding to fou_operator,
+// but with a PER-AXIS inverse advective spacing s = (sx,sy,sz) = (1/h_x, 1/h_y, 1/h_z): the conservative
+// FOU coefficient is dt*vel/h_a, and fou_operator assumes h=1, so the advecting velocity along face-axis
+// `fd` is scaled by s_fd. On the coarse level h_a = h0*cfac_a, hence s_a = 1/(h0*cfac_a). sx=sy=sz=1
+// reproduces fou_operator exactly. Upwinding keeps the diagonal dominant -> M-matrix (RB-GS stable).
+template <class A>
+__device__ inline void fou_operator_aniso(int comp, int x, int y, int z, A U, A V, A W, double dt,
+                                          double sx, double sy, double sz, double& cC, double& cxm,
+                                          double& cxp, double& cym, double& cyp, double& czm,
+                                          double& czp) {
+  for (int fd = 0; fd < 3; ++fd) {
+    int ox = (fd == 0), oy = (fd == 1), oz = (fd == 2);
+    double s = (fd == 0) ? sx : (fd == 1) ? sy : sz;
+    double velp = s * adv_vel(comp, fd, x, y, z, U, V, W);
+    double velm = s * adv_vel(comp, fd, x - ox, y - oy, z - oz, U, V, W);
+    cC += dt * (fmax(velp, 0.0) - fmin(velm, 0.0));
+    double cp = dt * fmin(velp, 0.0), cm = dt * (-fmax(velm, 0.0));
+    if (fd == 0) { cxp += cp; cxm += cm; }
+    else if (fd == 1) { cyp += cp; cym += cm; }
+    else { czp += cp; czm += cm; }
+  }
+}
+
 }  // namespace sadv
