@@ -263,8 +263,13 @@ class DistributedNS {
       for (double* p : *v)
         if (p) cudaFree(p);
     for (double* p : vfine_) if (p) cudaFree(p);
+    for (double* p : vax_) if (p) cudaFree(p);
+    for (double* p : vay_) if (p) cudaFree(p);
+    for (double* p : vaz_) if (p) cudaFree(p);
     for (double* p : vresmask_) if (p) cudaFree(p);
-    for (double* p : vtheta_lvl_) if (p) cudaFree(p);
+    for (auto& v : {&vtheta_lvl_, &vax_lvl_, &vay_lvl_, &vaz_lvl_})
+      for (double* p : *v)
+        if (p) cudaFree(p);
     if (mg_built_) mg_.free();
     if (vmg_built_) vmg_.free();
     if (vstreams_init_) {
@@ -425,11 +430,10 @@ class DistributedNS {
   // volume-weighted transfers for the IBM velocity-MG, instead of the geometry-blind const-coeff coarse.
   // Opt-in (default off = const-coeff, byte-identical). eps = volume fraction below which a COARSE cell is
   // treated as solid (small-cell fix, safe on coarse levels only). Requires set_ibm_solid + vmg enabled.
-  void set_velocity_mg_volfrac(bool on, double eps = 0.1, bool mask_xfer = false, bool res_mask = true) {
+  void set_velocity_mg_volfrac(bool on, double eps = 0.1, bool res_mask = true) {
     vmg_volfrac_ = on;
     vmg_eps_ = eps;
-    vmg_mask_xfer_ = mask_xfer;
-    vmg_res_mask_ = res_mask;  // zero cut-cell residual before restriction (only the coarsenable region)
+    vmg_res_mask_ = res_mask;  // clean-fluid exclude-mask (required for stability; see member note)
   }
 
   // Robust-Scaled cut-cell IBM no-slip for the momentum solve, from an SDF (extended-block layout, all
@@ -465,12 +469,19 @@ class DistributedNS {
       if (!solidmask_[c]) cudaMalloc(&solidmask_[c], n_ * 8);
       if (!descale_[c]) cudaMalloc(&descale_[c], n_ * 8);
       ibm_solid_mask_k<<<gE, blk>>>(solidmask_[c], sdf, ext_, offs[c]);
-      // fluid volume fraction theta (for the opt-in volume-fraction velocity-MG coarse operator); static.
+      // fluid volume fraction theta + the three negative-face AREA fractions (for the volume-fraction
+      // velocity-MG coarse operator); static geometry. The face-centre sampling offsets are the component's
+      // control-volume -x/-y/-z faces (a unit cube centred at the staggered point offs[c]).
       if (!vfine_[c]) cudaMalloc(&vfine_[c], n_ * 8);
       ibm_volfrac_k<<<gE, blk>>>(vfine_[c], sdf, ext_, offs[c]);
       mac_.exchange(vfine_[c]);  // periodic ghost theta (the coarse build + restriction read neighbours)
-      // coarse-coupling mask: 1 only at clean fluid interior; 0 at IBM cut cells + solid (the coarse grid
-      // couples only where its clean operator matches the fine one -> no overshoot at the boundary band/solid)
+      if (!vax_[c]) { cudaMalloc(&vax_[c], n_ * 8); cudaMalloc(&vay_[c], n_ * 8); cudaMalloc(&vaz_[c], n_ * 8); }
+      float3 fx = make_float3(offs[c].x - 0.5f, offs[c].y, offs[c].z);  // -x face centre
+      float3 fy = make_float3(offs[c].x, offs[c].y - 0.5f, offs[c].z);  // -y face centre
+      float3 fz = make_float3(offs[c].x, offs[c].y, offs[c].z - 0.5f);  // -z face centre
+      ibm_areafrac_k<<<gE, blk>>>(vax_[c], vay_[c], vaz_[c], sdf, ext_, fx, fy, fz);
+      mac_.exchange(vax_[c]); mac_.exchange(vay_[c]); mac_.exchange(vaz_[c]);
+      // optional clean-fluid exclude-mask: 0 at IBM cut+solid cells, 1 elsewhere (off by default now)
       if (!vresmask_[c]) cudaMalloc(&vresmask_[c], n_ * 8);
       ibm_clean_fluid_mask_k<<<gE, blk>>>(vresmask_[c], sdf, ext_, offs[c]);
       ibm_build_diffusion_k<<<gE, blk>>>(As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4],
@@ -746,8 +757,9 @@ class DistributedNS {
           // volume-weighted transfers, rebuilt per component (static geometry, cheap). Level 0 stays As_[c]
           // -> the residual + smoother use the TRUE operator, so the fixed point is the exact sharp solution.
           if (vmg_volfrac_)
-            vmg_.setVelocityVolfracCoarse(vfine_[c], vtheta_lvl_.data(), nu_ * dt_, 1.0, vmg_eps_,
-                                          vmg_mask_xfer_, vmg_res_mask_ ? vresmask_[c] : nullptr);
+            vmg_.setVelocityVolfracCoarse(vfine_[c], vax_[c], vay_[c], vaz_[c], vtheta_lvl_.data(),
+                                          vax_lvl_.data(), vay_lvl_.data(), vaz_lvl_.data(), nu_ * dt_, 1.0,
+                                          vmg_eps_, vmg_res_mask_ ? vresmask_[c] : nullptr);
           cfdmpi::MGLevel& l0 = vmg_.level(0);
           cudaMemcpy(l0.rhs, b_[c], n_ * 8, cudaMemcpyDeviceToDevice);
           cudaMemcpy(l0.x, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);  // initial guess
@@ -1126,12 +1138,18 @@ class DistributedNS {
       // The IBM path's setDiffusionCoarse (above) already did this for levels 1..N-1.
       if (has_domain_bc_) vmg_.setDiffusionConstAllLevels(nu_ * dt_, 1.0);
     }
-    // volume-fraction coarse-op scratch: one coarse theta buffer per coarse level (reused across the 3
-    // components and across steps; the geometry is static). Index L>=1; [0] unused (level 0 = vfine_[c]).
+    // volume-fraction coarse-op scratch: coarse theta + 3 area-fraction buffers per coarse level (reused
+    // across the 3 components and across steps; static geometry). Index L>=1; [0] unused (level 0 fine).
     if (vmg_volfrac_ && !has_domain_bc_) {
       int N = vmg_.n_levels();
       vtheta_lvl_.assign(N, nullptr);
-      for (int L = 1; L < N; ++L) cudaMalloc(&vtheta_lvl_[L], vmg_.level(L).n * 8);
+      vax_lvl_.assign(N, nullptr);
+      vay_lvl_.assign(N, nullptr);
+      vaz_lvl_.assign(N, nullptr);
+      for (int L = 1; L < N; ++L) {
+        std::size_t nb = vmg_.level(L).n * 8;
+        for (double** p : {&vtheta_lvl_[L], &vax_lvl_[L], &vay_lvl_[L], &vaz_lvl_[L]}) cudaMalloc(p, nb);
+      }
     }
     // NB: a geometry-aware (rediscretized) velocity coarse operator was tried and *diverges* -- the
     // Robust-Scaled fine stencil is row-scaled by D_rescale at cut cells, so it is inconsistent with a
@@ -1269,12 +1287,16 @@ class DistributedNS {
   // fine fluid volume fraction theta (static, from the SDF); vtheta_lvl_ = coarse theta scratch reused
   // across components/levels (index L>=1). See doc/velocity_mg_plan.md (Phases 1+3; NOT the un-scale).
   bool vmg_volfrac_ = false;
-  bool vmg_mask_xfer_ = false;
-  bool vmg_res_mask_ = true;   // zero the cut-cell residual before restriction (the consistent-residual fix)
+  bool vmg_res_mask_ = true;   // clean-fluid exclude-mask: REQUIRED for stability (coupling the row-scaled
+                               // IBM cut/solid cells to any coarse grid overshoots at large beta, even at 1
+                               // level -- capping depth does not help; only excluding them does)
   double vmg_eps_ = 0.1;
-  double* vfine_[3] = {nullptr, nullptr, nullptr};
-  double* vresmask_[3] = {nullptr, nullptr, nullptr};  // 0 at IBM cut cells, 1 elsewhere (per component)
-  std::vector<double*> vtheta_lvl_;
+  double* vfine_[3] = {nullptr, nullptr, nullptr};        // fine volume fraction theta, per component
+  double* vax_[3] = {nullptr, nullptr, nullptr};          // fine -x/-y/-z face AREA fractions, per component
+  double* vay_[3] = {nullptr, nullptr, nullptr};
+  double* vaz_[3] = {nullptr, nullptr, nullptr};
+  double* vresmask_[3] = {nullptr, nullptr, nullptr};  // 0 at IBM cut+solid cells, 1 elsewhere (per comp)
+  std::vector<double*> vtheta_lvl_, vax_lvl_, vay_lvl_, vaz_lvl_;  // coarse theta + area-fraction scratch
   // cut-cell pressure operator: staggered face openness + the flux-divergence flag
   double *ox_ = nullptr, *oy_ = nullptr, *oz_ = nullptr;
   bool cutcell_ = false;

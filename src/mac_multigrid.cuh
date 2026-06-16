@@ -423,37 +423,36 @@ __global__ void mg_mul_mask_k(double* r, const double* m, long n) {
 // ---- volume-fraction velocity coarse operator + masked/weighted transfers (IBM momentum MG) ----
 // The IBM velocity operator (As_[c]) is row-based and non-conservative across the immersed wall, so it is
 // NOT coarsened (Galerkin/rediscretized). Instead the coarse levels carry a CLEAN, geometry-aware Helmholtz
-// built from the coarsened fluid VOLUME FRACTION theta (a smoothed momentum balance): the diffusion flux
-// through a face is reduced by its open fraction alpha_f = min(theta_i, theta_nbr), so beta_f = nu_dt/h^2 *
-// alpha_f. The operator is the backward-Euler POINT equation (I - nu_dt*div(alpha grad)): the diagonal I
-// term is 1 (a velocity, not an extensive quantity -- do NOT volume-weight it, that shrinks the diagonal and
-// mismatches the fine As_[c] O(1) diagonal -> two-grid overshoot/divergence). AC = 1 + sum beta_f keeps an
-// M-matrix with an O(1) diagonal; a fully-solid cell (all alpha_f=0) is then automatically the identity row.
-// eps masks the residual partial coupling at near-solid cells. SAFE on coarse levels only: a misclassified
-// coarse cell costs convergence RATE, never accuracy (fine As_[c] smoother + true residual). See mac_ibm.cuh:18.
-__global__ void mg_build_velocity_volfrac_op_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal* AN,
-                                              mreal* AB, mreal* AT, const double* th, int3 ext, int g,
-                                              double bx, double by, double bz, double eps) {
+// the velocity-MG coarse operator -- see mg_build_velocity_op_areafrac_k below, which uses coarsened AREA
+// fractions for the fluxes (the original min(theta) face-coefficient version was replaced by it).
+//
+// Velocity coarse operator from coarsened VOLUME fraction (theta, cell) + AREA fractions (ax/ay/az, the
+// negative faces) -- the rediscretized velocity analogue of mg_build_op_k. Backward-Euler POINT equation:
+// diagonal I term is 1 (not volume-weighted), the diffusion flux through each face is reduced by its open
+// AREA fraction: beta_f = nu_dt/h_a^2 * alpha_f. -x uses ax[i], +x uses ax[i+1] (the +face is the next
+// cell's -face). A cell with volume fraction theta < eps is solid (identity row). M-matrix, O(1) diagonal.
+__global__ void mg_build_velocity_op_areafrac_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal* AN,
+                                               mreal* AB, mreal* AT, const double* th, const double* ax,
+                                               const double* ay, const double* az, int3 ext, int g,
+                                               double bx, double by, double bz, double eps) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
   int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
   if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
   size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
-  double ti = th[i];
-  if (ti < eps) {  // (nearly) solid coarse cell -> identity row (decoupled Dirichlet)
+  if (th[i] < eps) {  // (nearly) solid coarse cell -> identity row (decoupled Dirichlet)
     AC[i] = (mreal)1.0;
     AW[i] = AE[i] = AS[i] = AN[i] = AB[i] = AT[i] = (mreal)0.0;
     return;
   }
-  // face open fraction = min of the two adjacent volume fractions; beta_f = nu_dt/h_a^2 * alpha_f.
-  double tw = bx * fmin(ti, th[i - sx]), te = bx * fmin(ti, th[i + sx]);
-  double ts = by * fmin(ti, th[i - sy]), tn = by * fmin(ti, th[i + sy]);
-  double tb = bz * fmin(ti, th[i - sz]), tt = bz * fmin(ti, th[i + sz]);
+  double tw = bx * ax[i], te = bx * ax[i + sx];  // -x = this cell's -x face; +x = neighbour's -x face
+  double ts = by * ay[i], tn = by * ay[i + sy];
+  double tb = bz * az[i], tt = bz * az[i + sz];
   AW[i] = (mreal)(-tw); AE[i] = (mreal)(-te);
   AS[i] = (mreal)(-ts); AN[i] = (mreal)(-tn);
   AB[i] = (mreal)(-tb); AT[i] = (mreal)(-tt);
-  AC[i] = (mreal)(1.0 + tw + te + ts + tn + tb + tt);  // I term = 1 (point eq) + reduced face out-fluxes
+  AC[i] = (mreal)(1.0 + tw + te + ts + tn + tb + tt);  // I term = 1 (point eq) + area-weighted face fluxes
 }
 
 // Volume-weighted restriction: coarse = sum(theta_f * r_f) / sum(theta_f) over the children. Weighting the
@@ -867,27 +866,28 @@ class DistributedPoissonMG {
       cudaMemcpy(fdst[k], fineA[k], f.n * sizeof(mreal), cudaMemcpyDeviceToDevice);
   }
 
-  // Velocity volume-fraction coarse operator (IBM momentum MG). Level 0 is left untouched (the caller sets
-  // it to the sharp IBM stencil As_[c] via setDiffusionFine, so residual + smoother use the TRUE operator
-  // and the fixed point is exact). On levels 1..N-1 build the clean geometry-aware Helmholtz A_theta from
-  // the coarsened fluid volume fraction, and switch the V-cycle to masked, volume-weighted transfers.
-  //   theta0      : fine (level-0) fluid volume fraction on the extended block, WITH ghosts (borrowed).
-  //   coarse_theta: caller scratch, one buffer per coarse level [1..N-1] sized level(L).n; filled here
-  //                 (coarsen + halo-exchange) and borrowed into level(L).vol. Pass coarse_theta[L] indexable
-  //                 by level (index 0 unused).
+  // Velocity rediscretized coarse operator (IBM momentum MG). Level 0 is left untouched (the caller sets it
+  // to the sharp IBM stencil As_[c] via setDiffusionFine, so residual + smoother use the TRUE operator and
+  // the fixed point is exact). On levels 1..N-1 build the clean geometry-aware Helmholtz from the coarsened
+  // VOLUME fraction theta (cell, for the diagonal + eps-solid) and the coarsened AREA fractions ax/ay/az
+  // (faces, for the diffusion fluxes) -- the velocity analogue of the proven rediscretized pressure path.
+  //   theta0/ax0/ay0/az0 : fine (level-0) volume fraction + negative-face area fractions, WITH ghosts.
+  //   cth/cax/cay/caz    : caller scratch, one buffer per coarse level [1..N-1] (index 0 unused); filled
+  //                        here (coarsen by averaging + halo-exchange) and borrowed into the level.
   // Static geometry: rebuildable cheaply each solve (coarse grids are small). eps = solid threshold.
-  void setVelocityVolfracCoarse(const double* theta0, double* const coarse_theta[], double nu_dt,
-                                double h0, double eps, bool mask_xfer = false,
-                                const double* lvl0_res_mask = nullptr) {
+  void setVelocityVolfracCoarse(const double* theta0, const double* ax0, const double* ay0,
+                                const double* az0, double* const cth[], double* const cax[],
+                                double* const cay[], double* const caz[], double nu_dt, double h0,
+                                double eps, const double* lvl0_res_mask = nullptr) {
     galerkin_ = false;
     remove_mean_ = false;
     vel_volfrac_ = true;
-    vel_mask_xfer_ = mask_xfer;
+    vel_mask_xfer_ = false;
     vel_eps_ = eps;
     levels_[0]->vol = theta0;
     levels_[0]->res_mask = lvl0_res_mask;  // zero the cut-cell residual before restriction (level 0 only)
     dim3 blk(8, 8, 8);
-    const double* tf = theta0;
+    const double *tf = theta0, *axf = ax0, *ayf = ay0, *azf = az0;
     for (int L = 1; L < (int)levels_.size(); ++L) {
       MGLevel& c = *levels_[L];
       MGLevel& f = *levels_[L - 1];
@@ -895,19 +895,25 @@ class DistributedPoissonMG {
         for (mreal** p : {&c.AC, &c.AW, &c.AE, &c.AS, &c.AN, &c.AB, &c.AT})
           cudaMalloc(p, c.n * sizeof(mreal));
       c.variable = true;
-      double* th = coarse_theta[L];
-      // coarse volume fraction = average of the children (the coarse cell's fluid fraction)
+      double *th = cth[L], *ax = cax[L], *ay = cay[L], *az = caz[L];
       dim3 cgrd((c.inner.x + 7) / 8, (c.inner.y + 7) / 8, (c.inner.z + 7) / 8);
+      // coarse volume fraction = 8-cell average; coarse area fractions = average of the 4 perpendicular
+      // sub-faces (the cut-cell openness coarsening, reused from the pressure path).
       mgdetail::mg_restrict_k<<<cgrd, blk>>>(th, tf, c.ext, f.ext, f.g, c.inner, f.ratio);
-      c.mac.exchange(th);  // periodic ghost theta (the operator build reads the +/- neighbour fraction)
+      mgdetail::mg_coarsen_open_avg_k<<<cgrd, blk>>>(ax, ay, az, axf, ayf, azf, c.ext, f.ext, c.g, c.inner,
+                                                     f.ratio);
+      c.mac.exchange(th);   // periodic ghosts (the operator build reads the +/- neighbour fraction/face)
+      c.mac.exchange(ax);
+      c.mac.exchange(ay);
+      c.mac.exchange(az);
       c.vol = th;
       double bx = nu_dt / ((h0 * c.cfac.x) * (h0 * c.cfac.x)),
              by = nu_dt / ((h0 * c.cfac.y) * (h0 * c.cfac.y)),
              bz = nu_dt / ((h0 * c.cfac.z) * (h0 * c.cfac.z));
       dim3 gIn((c.inner.x + 7) / 8, (c.inner.y + 7) / 8, (c.inner.z + 7) / 8);
-      mgdetail::mg_build_velocity_volfrac_op_k<<<gIn, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT,
-                                                            th, c.ext, c.g, bx, by, bz, eps);
-      tf = th;
+      mgdetail::mg_build_velocity_op_areafrac_k<<<gIn, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, th,
+                                                             ax, ay, az, c.ext, c.g, bx, by, bz, eps);
+      tf = th;  axf = ax;  ayf = ay;  azf = az;
     }
   }
 

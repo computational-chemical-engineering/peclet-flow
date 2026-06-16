@@ -327,6 +327,25 @@ __global__ void ibm_clean_fluid_mask_k(double* m, const double* sdf, int3 ext, f
   m[i] = (solid || ibm_is_cut(sc, sn)) ? 0.0 : 1.0;
 }
 
+// Fluid AREA fractions of a velocity control volume's three negative faces, from the SDF (planar-interface
+// approximation alpha = clamp(0.5 + psi_face, 0, 1), the velocity analogue of the pressure face openness).
+// The caller passes the three face-centre sampling offsets for this component (-x, -y, -z faces); the +face
+// of cell i is the -face of cell i+1, so storing only the negative faces suffices (mg_build_*_k reads a[i]
+// for the -face and a[i+1] for the +face, matching mg_build_op_k's ox convention). Feeds the rediscretized
+// velocity coarse operator; coarsened by averaging the 4 perpendicular sub-faces (mg_coarsen_open_avg_k).
+__global__ void ibm_areafrac_k(double* ax, double* ay, double* az, const double* sdf, int3 ext,
+                               float3 ofx, float3 ofy, float3 ofz) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (lx >= ext.x || ly >= ext.y || lz >= ext.z) return;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
+  auto cl = [](double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); };
+  ax[i] = cl(0.5 + ccdetail::cc_sample_ext(sdf, ext, lx + ofx.x, ly + ofx.y, lz + ofx.z));
+  ay[i] = cl(0.5 + ccdetail::cc_sample_ext(sdf, ext, lx + ofy.x, ly + ofy.y, lz + ofy.z));
+  az[i] = cl(0.5 + ccdetail::cc_sample_ext(sdf, ext, lx + ofz.x, ly + ofz.y, lz + ofz.z));
+}
+
 // solid mask for a velocity component: 1.0 where the staggered SDF point is inside the solid, else 0.
 __global__ void ibm_solid_mask_k(double* mask, const double* sdf, int3 ext, float3 off) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x;

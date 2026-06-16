@@ -162,19 +162,28 @@ paths are byte-identical, 72/72 green). What shipped:
     the residual geometrically (51→0.26→0.014→…, ρ≈0.06–0.13).
   - **72/72 ctests green** (default paths byte-identical).
 
-**IBM-path volume-fraction coarse op — DONE (opt-in; RB-GS stays the DEFAULT).**
-`set_velocity_mg_volfrac(on, eps=0.1, mask_xfer=False, res_mask=True)` selects the volume-fraction coarse
-operator (Phase 1, diagonal `1 + Σβ_f`, `β_f = νΔt·min(θ_i,θ_nbr)/h²`) + the clean-fluid-interior coupling
-(Phase 3). It is **off by default** — plain RB-GS remains the default IBM velocity solve. Validated
-(`scripts/verify_velocity_mg_volfrac_zh_sdflow.py`, Z&H SC sphere): converges to the **exact RB-GS drag**
-(0.000%), and is **stable at Δt where the geometry-blind const coarse op diverges** — e.g. dt=200 (β=νΔt=20):
-const → NaN, volfrac → exact. 72/72 ctests green (default path byte-identical).
+**IBM-path rediscretized coarse op — DONE (opt-in; RB-GS stays the DEFAULT).**
+`set_velocity_mg_volfrac(on, eps=0.1, res_mask=True)` selects the rediscretized velocity coarse operator:
+coarsened **volume fraction** θ (diagonal `1 + Σβ_f`, ε-solid identity rows) + coarsened **area fractions**
+`α_f` for the diffusion fluxes (`β_f = νΔt·α_f/h²`), mirroring the proven rediscretized *pressure* MG; plus the
+clean-fluid-interior coupling (Phase 3, `res_mask`). Off by default — plain RB-GS remains the default IBM
+velocity solve. Validated (`scripts/verify_velocity_mg_volfrac_zh_sdflow.py`, Z&H SC sphere): **exact RB-GS
+drag** (0.000%) and **stable where the geometry-blind const coarse op diverges** (dt=200, β=20: const→NaN). The
+area fractions raised the stable ceiling to **dt=400 at φ=0.216** (was dt=200 with the `min(θ)` coefficient);
+dense φ=0.5236 stays dt=200. 72/72 ctests green (default path byte-identical).
 
-> **Time-step restriction.** The volfrac vel-MG is stable up to ~β=νΔt≈20 (dt≈200 in the Z&H units); at
-> β≳40 (dt≳400) the V-cycle diverges. So it accelerates large-Δt steady-state Stokes marches **within** that
-> window but is **not** unconditionally stable like RB-GS. **⇒ RB-GS is the default; enable volfrac vel-MG
-> only as an opt-in steady-state accelerator when Δt is in the stable range.** Lifting the β≳40 ceiling would
-> need FAS/τ-correction (carry the boundary force on the coarse grid); deferred.
+> **Time-step restriction.** Stable to ~β=νΔt≈20–40 (φ-dependent); beyond that the V-cycle diverges. So it is
+> an opt-in large-Δt steady-state accelerator within that window, **not** unconditionally stable like RB-GS.
+> **⇒ RB-GS is the default.**
+
+**Measured dead-ends (do not retry blindly):**
+- **Coupling the partial cells (dropping `res_mask`) diverges at dt=200 even with ONE coarsening level.** The
+  overshoot is at the first coarse correction into the row-scaled IBM cut/solid cells, *independent of
+  coarsening depth* — so a **pore-scale coarsening cap cannot enable coupling** (it's at best a minor compute
+  saving with the exclude mask on). The clean-fluid exclude mask is **required**.
+- The corrected lever for coupling is **Brinkman/Darcy drag** on partial coarse cells (the coarse op overshoots
+  because it lacks the wall resistance the fine IBM imposes), *not* capping — but it needs a permeability model
+  and is unproven. Deferred.
 
 Open: a genuine packed-bed (thin-solid-wall) benchmark vs RB-GS to size the real payoff (RB-GS converges in
 O(pore-cells) sweeps for beds). The BFS (open-boundary) case is wired by the same domain-BC path but not yet
