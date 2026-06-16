@@ -5,15 +5,18 @@ solve `(I − νΔt·L)u = b`, so the steady-state march (and large-Δt steady-S
 resolution-robust instead of O(N) in RB-GS sweeps. **Standalone RB-GS V-cycle only** (no PCG/Chebyshev
 wrapper), **optional** (`set_velocity_multigrid`, default off; default RB-GS path byte-identical).
 
-> **STATUS (2026-06-16): Phase 1 + 2 implemented and TESTED — insufficient alone; reverted.** The masked
-> staircase coarse (Phase 1) + the `D_rescale` residual un-scale (Phase 2) compile cleanly, but on Z&H the
-> +2–4% drag bias and non-convergence are **unchanged** from the const-coeff version. That null result is
-> the key finding: **the dominant error is NOT the coarse operator — it is the unmasked transfers.** The
-> restriction/prolongation move corrections across the immersed boundary inconsistently, biasing the
-> cut-cell skin regardless of how good the coarse operator is. **⇒ Phase 3 (masked, volume-weighted
-> transfers) is a CORRECTNESS prerequisite, not an efficiency nicety — do it FIRST/together with 1+2.** The
-> masked coarse and the un-scale are correct building blocks underneath it. (Reverted to keep the 72-ctest
-> solver clean; the working tree is unchanged.)
+> **STATUS (2026-06-16): cavity/BFS diffusion vmg + upwind-FOU coarse op DONE (committed). IBM-path
+> diffusion fix = the scheme below; Phase 2 (`D_rescale` un-scale) is REJECTED, do not revive it.**
+>
+> The first IBM attempt (masked staircase coarse + `D_rescale` residual un-scale) left the +2–4% Z&H drag
+> bias unchanged. Diagnosis: the dominant error is the **unmasked transfers** (corrections move across the
+> immersed boundary, biasing the cut-cell skin), not the coarse operator. The un-scale (Phase 2) is both
+> **dangerous** (`D_rescale = min|D|` cut-face factor →0 for thin slivers; dividing the residual by it
+> amplifies near-solid noise) and **unnecessary**: the correction-scheme V-cycle already restricts the TRUE
+> residual `b' − A_f x` (level-0 op = the IBM `As_[c]`), so the fixed point is the exact sharp solution for
+> ANY coarse op — only the *rate* depends on it. `mac_ibm.cuh:18` is explicit that the row-based IBM op is
+> "NEVER multigridded; D_rescale is GS-invariant but not MG-invariant." **⇒ leave the residual scaled; fix
+> the coarse op + transfers (Phases 1+3 below), not the scaling.**
 
 ## Why the current `vmg_` fails (measured)
 `ensure_vmg_built` wires `DistributedPoissonMG` with `setDiffusionCoarse` = **constant-coefficient** coarse
@@ -45,13 +48,14 @@ geometry), mirroring `setFineVariableOperatorRediscretized`:
 3. Replace the `setDiffusionCoarse` call in `ensure_vmg_built` with three `setVelocityCoarse(c,…)` and a
    per-component coarse-operator swap (`AC..AT` per level), exactly like `setDiffusionFine` swaps level 0.
 
-### Phase 2 — un-scale the fine residual before restriction (the missing must-do)
-In `vcycle`, level 0 only: after `residual(lv)` (`lv.res = b − A_fine x`, `D_rescale`-scaled at cut cells),
-divide by `descale_`: new `mg_unscale_res_k(lv.res, descale, n)` (`res /= descale`), gated on a new
-`vel_unscale_` flag + a `const double* descale_lvl0_` pointer set by the solver. The **smoother keeps the
-row-scaled operator** (GS-invariant); only the *restricted residual* is un-scaled. (This is the piece the
-earlier code missed; it's a no-op for Z&H where `D_rescale≈1` but essential for thin walls / near-contacts
-where it departs from 1.)
+### Phase 2 — ~~un-scale the fine residual~~ **REJECTED — do not implement**
+~~Divide the restricted residual by `descale_`.~~ This is wrong on two counts: (a) `D_rescale = min|D|`
+cut-face factor →0 for thin slivers, so `res/descale` amplifies near-solid noise (blows up); (b) it is
+unnecessary — the correction scheme already restricts the TRUE residual `b' − A_f x` (level-0 op = `As_[c]`
+via `setDiffusionFine`), so `r=0 ⇒ correction=0` and the fixed point is the exact sharp IBM solution for any
+coarse op. The coarse op only sets the convergence RATE. **Leave the residual scaled.** The +2–4% bias is a
+*finite-cycle* artifact of unmasked transfers (Phase 3), not of the residual scaling. (`mac_ibm.cuh:18`: the
+IBM op is row-based, non-conservative across the wall, "NEVER multigridded; D_rescale … not MG-invariant".)
 
 ### Phase 3 — volume-fraction-weighted transfers + solid masking
 - **Restriction:** `mg_restrict_volwt_k` (variant of `mg_restrict_k`): `coarse = Σ θ_f r_f / Σ θ_f` —
@@ -152,6 +156,8 @@ paths are byte-identical, 72/72 green). What shipped:
     the residual geometrically (51→0.26→0.014→…, ρ≈0.06–0.13).
   - **72/72 ctests green** (default paths byte-identical).
 
-**Remaining (deferred):** the `D_rescale` residual un-scale (plan Phase 2) is still not applied — fine for
-the validated `D_rescale≈1` cases; revisit for thin-wall/near-contact stressors. The BFS (open-boundary)
-case is wired by the same domain-BC path but not yet separately benchmarked at high Re.
+**Remaining (in progress):** the IBM-path *diffusion* coarse op is still the geometry-blind const-coeff
+`setDiffusionCoarse` (the +2–4% Z&H finite-cycle bias). The fix being implemented = **Phases 1+3, NOT
+Phase 2**: volume-fraction coarse `A_θ` (ε-solid-on-coarse) + masked volume-weighted transfers, correction
+scheme, true residual left scaled. Opt-in flag; Z&H gate (drag == RB-GS <0.01%, ρ≲0.3) before the ring bed.
+The BFS (open-boundary) case is wired by the same domain-BC path but not yet separately benchmarked at high Re.
