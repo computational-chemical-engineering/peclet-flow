@@ -107,6 +107,24 @@ __global__ void mg_const_diffusion_op_k(mreal* AC, mreal* AW, mreal* AE, mreal* 
   AW[i] = nb; AE[i] = nb; AS[i] = nb; AN[i] = nb; AB[i] = nb; AT[i] = nb;
 }
 
+// Velocity-diffusion no-slip face-fold for the MG coarse/fine operator (the const-coeff analogue of
+// bc_diffusion_fold_k). At a Dirichlet wall the tangential ghost is 2*u_wall - u_inner, which moves +beta
+// onto the diagonal: AC[bic] += beta. The dropped off-diagonal stays -beta but multiplies a zero boundary
+// ghost (held 0 through interior-only smoothing under the non-periodic halo), so it need not be touched.
+// Applied per no-slip/inflow face whose axis != component (the NORMAL component's wall node is a fixed
+// Dirichlet face, handled by the caller, not folded). Launched over the perp plane of face (axis a, side s).
+__global__ void mg_diffusion_bc_fold_k(mreal* AC, int3 ext, int g, int a, int s, double beta) {
+  int dims[3] = {ext.x, ext.y, ext.z};
+  size_t strides[3] = {1, (size_t)ext.x, (size_t)ext.x * ext.y};
+  int b = (a + 1) % 3, c = (a + 2) % 3;
+  int p0 = blockIdx.x * blockDim.x + threadIdx.x;
+  int p1 = blockIdx.y * blockDim.y + threadIdx.y;
+  if (p0 >= dims[b] || p1 >= dims[c]) return;
+  int bic = (s == 0) ? g : (dims[a] - g - 1);  // boundary-adjacent inner cell along a
+  size_t i = (size_t)p0 * strides[b] + (size_t)p1 * strides[c] + (size_t)bic * strides[a];
+  AC[i] = (mreal)((double)AC[i] + beta);
+}
+
 __global__ void mg_smooth_var_k(double* __restrict__ x, const double* __restrict__ b,
                                 const mreal* AC, const mreal* AW, const mreal* AE, const mreal* AS,
                                 const mreal* AN, const mreal* AB, const mreal* AT, int3 ext, int3 og,
@@ -666,6 +684,54 @@ class DistributedPoissonMG {
     remove_mean_ = false;
     dim3 blk(8, 8, 8);
     for (int L = 1; L < (int)levels_.size(); ++L) {
+      MGLevel& c = *levels_[L];
+      if (!c.AC)
+        for (mreal** p : {&c.AC, &c.AW, &c.AE, &c.AS, &c.AN, &c.AB, &c.AT})
+          cudaMalloc(p, c.n * sizeof(mreal));
+      c.variable = true;
+      double hL = h0 * (double)(1 << L), beta = nu_dt / (hL * hL);
+      dim3 gAll((c.ext.x + 7) / 8, (c.ext.y + 7) / 8, (c.ext.z + 7) / 8);
+      mgdetail::mg_const_diffusion_op_k<<<gAll, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, c.ext,
+                                                       beta);
+    }
+  }
+
+  // Apply the no-slip velocity face-fold (AC += beta_L) to every level's operator, for the boundary faces
+  // that are tangential to component `comp`. bc[6] = per-face type {-x,+x,-y,+y,-z,+z}: 1/2 = no-slip
+  // wall / inflow (fold), 0 = periodic, 3 = outflow (no fold). The NORMAL component (face axis == comp) is
+  // skipped: its wall node is a fixed Dirichlet face, excluded from the solve by the caller. beta_L uses
+  // the same coarse spacing as setDiffusionCoarse (h_L = h0 * 2^L). Call after the operators are built and
+  // before solve(); component-dependent, so rebuild (setDiffusionCoarse/Fine) before re-folding per comp.
+  // Mirrors distributed_ns::setup_bc_diffusion exactly, at coarse spacing: no-slip wall/inflow (bc 1/2),
+  // TANGENTIAL (a!=comp) -> AC += beta_L; outflow (bc 3), EVERY component -> AC -= beta_L; the wall NORMAL
+  // component (a==comp, bc 1/2) is held directly (not folded). Single-rank: every level owns every physical
+  // face. (Multi-rank would gate per-level boundary ownership -- a later concern; validation is single-rank.)
+  void setDiffusionBoundaryFold(int comp, const int bc[6], double nu_dt, double h0) {
+    for (int L = 0; L < (int)levels_.size(); ++L) {
+      MGLevel& lv = *levels_[L];
+      if (!lv.AC) continue;
+      double hL = h0 * (double)(1 << L), beta = nu_dt / (hL * hL);
+      for (int f = 0; f < 6; ++f) {
+        int a = f / 2, s = f % 2;
+        double dval;
+        if (bc[f] == 3) dval = -beta;                       // outflow zero-gradient: every component
+        else if ((bc[f] == 1 || bc[f] == 2) && a != comp) dval = beta;  // no-slip/inflow wall: tangential
+        else continue;                                      // periodic, or normal component at a wall
+        int dims[3] = {lv.ext.x, lv.ext.y, lv.ext.z};
+        dim3 blk(16, 16), grd((dims[(a + 1) % 3] + 15) / 16, (dims[(a + 2) % 3] + 15) / 16);
+        mgdetail::mg_diffusion_bc_fold_k<<<grd, blk>>>(lv.AC, lv.ext, lv.g, a, s, dval);
+      }
+    }
+  }
+
+  // Const-coeff A = I - nu_dt*Laplacian on EVERY level (0..N), coarse spacing h_L = h0*2^L. For the
+  // domain-BC velocity solve (cavity/BFS), where the fine operator is ALSO const-coeff (no IBM stencil);
+  // follow with setDiffusionBoundaryFold(comp,...) per component. Allocates once, rebuilds values per call.
+  void setDiffusionConstAllLevels(double nu_dt, double h0) {
+    galerkin_ = false;
+    remove_mean_ = false;
+    dim3 blk(8, 8, 8);
+    for (int L = 0; L < (int)levels_.size(); ++L) {
       MGLevel& c = *levels_[L];
       if (!c.AC)
         for (mreal** p : {&c.AC, &c.AW, &c.AE, &c.AS, &c.AN, &c.AB, &c.AT})

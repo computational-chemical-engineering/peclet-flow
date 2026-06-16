@@ -731,6 +731,24 @@ class DistributedNS {
       if (has_domain_bc_)
         for (int c = 0; c < 3; ++c)
           cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], 1.0, bc_brhs_[c], (long)n_);
+      if (vmg_enabled_ && !implicit_fou_) {
+        // Velocity multigrid (const-coeff I - nu_dt*Lap + no-slip face-fold per component). The fold puts
+        // +beta on the boundary diagonal and the wall ghost is held 0 (non-periodic halo skips it +
+        // interior-only smoother), exactly the fine RB-GS representation; b_ already carries bc_brhs_.
+        ensure_vmg_built();
+        for (int c = 0; c < 3; ++c) {
+          vmg_.setDiffusionConstAllLevels(nu_ * dt_, 1.0);     // component-independent base
+          vmg_.setDiffusionBoundaryFold(c, bc_type_, nu_ * dt_, 1.0);  // component-dependent wall fold
+          mac_.exchange(comp[c]);
+          apply_velocity_bc_comp(comp[c], c, /*fold=*/1);      // zero wall ghosts + set normal Dirichlet face
+          cfdmpi::MGLevel& l0 = vmg_.level(0);
+          cudaMemcpy(l0.rhs, b_[c], n_ * 8, cudaMemcpyDeviceToDevice);
+          cudaMemcpy(l0.x, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);
+          vmg_.solve(vmg_vcycles_, vmg_pre_, vmg_post_, vmg_bottom_);
+          cudaMemcpy(comp[c], l0.x, n_ * 8, cudaMemcpyDeviceToDevice);
+          if (has_solid_) apply_mask(comp[c]);
+        }
+      } else
       for (int c = 0; c < 3; ++c) {
         const double* dcorr = has_domain_bc_ ? bc_dcorr_[c] : nullptr;
         for (int it = 0; it < n_diff; ++it) {
