@@ -724,9 +724,10 @@ class DistributedNS {
         sub_gradpot_k<<<grd_, blk_>>>(b_[0], b_[1], b_[2], phitot_, ext_, g);
 
     if (ibm_enabled_) {
-      // Robust-Scaled cut-cell IBM: solve the IBM-modified stencil A_ibm comp = b - inhom (the
-      // Dirichlet wall velocity is baked into inhom). No velocity masking -- the IBM eliminates the
-      // solid ghost couplings.
+      // Robust-Scaled cut-cell IBM: solve the IBM-modified stencil A_ibm comp = b - inhom (the Dirichlet
+      // wall velocity is baked into inhom). The cut-cell rows eliminate every fluid->solid coupling, so the
+      // fluid is fully decoupled from the solid; the RB-GS smoother also pins the slaved solid DOFs to 0
+      // throughout the sweeps (ibm_rbgs_stencil_k takes solidmask_), not just via the final mask_k.
       int ibthreads = 256, ibblocks = (int)((n_ + ibthreads - 1) / ibthreads);
       // Robust-Scaled RHS: b'_c = D_rescale * b_c - inhom (scale at cut cells, then the Dirichlet term)
       for (int c = 0; c < 3; ++c) {
@@ -784,7 +785,7 @@ class DistributedNS {
               vexch_[c].exchangeOnStream(comp[c], vstreams_[c], /*tag=*/c);
               cfdmpi::ibmdetail::ibm_rbgs_stencil_k<<<grd_, blk_, 0, vstreams_[c]>>>(
                   comp[c], b_[c], As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4], As_[c][5],
-                  As_[c][6], ext_, mac_.origin_incl_ghost, g, color);
+                  As_[c][6], solidmask_[c], ext_, mac_.origin_incl_ghost, g, color);
             }
         for (int c = 0; c < 3; ++c)
           detail::mask_k<<<grd_, blk_, 0, vstreams_[c]>>>(comp[c], solidmask_[c], ext_);
@@ -796,7 +797,7 @@ class DistributedNS {
               mac_.exchange(comp[c]);
               cfdmpi::ibmdetail::ibm_rbgs_stencil_k<<<grd_, blk_>>>(
                   comp[c], b_[c], As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4], As_[c][5],
-                  As_[c][6], ext_, mac_.origin_incl_ghost, g, color);
+                  As_[c][6], solidmask_[c], ext_, mac_.origin_incl_ghost, g, color);
             }
           }
           detail::mask_k<<<grd_, blk_>>>(comp[c], solidmask_[c], ext_);  // zero the decoupled solid

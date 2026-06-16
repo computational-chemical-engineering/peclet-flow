@@ -344,8 +344,8 @@ __global__ void ibm_solid_mask_k(double* mask, const double* sdf, int3 ext, floa
 // on a float-stored operator.
 __global__ void ibm_rbgs_stencil_k(double* x, const double* b, const mreal* A_C, const mreal* A_W,
                                    const mreal* A_E, const mreal* A_S, const mreal* A_N,
-                                   const mreal* A_B, const mreal* A_T, int3 ext, int3 og, int g,
-                                   int color) {
+                                   const mreal* A_B, const mreal* A_T, const double* solidmask, int3 ext,
+                                   int3 og, int g, int color) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
   int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
@@ -353,6 +353,13 @@ __global__ void ibm_rbgs_stencil_k(double* x, const double* b, const mreal* A_C,
   if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color) return;
   size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
+  // Pin solid cells to 0 instead of running the decoupled 1+6*beta diffusion on them. The cut-cell rows
+  // already zero every fluid->solid coupling, so the fluid update is unchanged (bit-identical); this just
+  // keeps the slaved solid DOFs at 0 throughout the sweeps rather than masking them only at the end.
+  if (solidmask && solidmask[i] > 0.5) {
+    x[i] = 0.0;
+    return;
+  }
   double ac = A_C[i];
   if (fabs(ac) < 1e-30) return;
   double s = (double)A_E[i] * x[i + sx] + (double)A_W[i] * x[i - sx] + (double)A_N[i] * x[i + sy] +
