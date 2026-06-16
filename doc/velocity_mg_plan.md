@@ -117,9 +117,9 @@ V-cycle θ≈0.015; stiff regime (dt=30) −33% steps/wall vs RB-GS; 72/72 green
 **Upwind-convective coarse operator (Phase 4, task #56) — DONE + LANDED (2026-06-16, IBM path).** For
 *implicit-advection* large-dt high-Re **steady-state acceleration** (where the velocity operator is
 advection-dominated/stiff). Opt-in: `set_velocity_multigrid(on,…)` **together with**
-`set_implicit_advection(on)` on the IBM path now takes the upwind-convective vel-MG (the combination was
-previously gated out → RB-GS; no current test sets both, so default paths are byte-identical, 72/72 green).
-What shipped:
+`set_implicit_advection(on)` now takes the upwind-convective vel-MG on **both** the IBM and the domain-BC
+(cavity/BFS) paths (the combination was previously gated out → RB-GS; no current test sets both, so default
+paths are byte-identical, 72/72 green). What shipped:
 - Fine operator (pre-existing): `build_adv_stencil_k` → `sadv::fou_operator` adds first-order-upwind
   advection to the diffusion stencil from the advecting u,v,w at unit spacing (`As_[c]`).
 - **Coarse** kernel `dns::detail::build_adv_coarse_stencil_k<COMP>` (distributed_ns.cuh): aniso const-coeff
@@ -128,18 +128,30 @@ What shipped:
   `dt·vel/h_a`, and `fou_operator` assumes h=1). Launched over inner cells (smoother/residual read AC..AT
   only there; the ±1 reach hits exchanged ghosts).
 - Per Picard iteration: `restrict_vmg_adv_velocities()` restricts u,v,w to every coarse level (reuse
-  `mg_restrict_k`, 8:1 volume average + ghost exchange), `build_vmg_adv_coarse(c)` rebuilds the coarse
-  stencils, `setDiffusionFine(As_[c])`, solve, mask. Per-level velocity scratch `vadv_{u,v,w}_` allocated
-  in `ensure_vmg_built` (only when `implicit_fou_ && !has_domain_bc_`); level 0 aliases u_/v_/w_.
+  `mg_restrict_k`, 8:1 volume average + ghost exchange), `build_vmg_adv_stencil(c, include_fine)` (re)builds
+  the velocity stencils, solve, mask. Per-level velocity scratch `vadv_{u,v,w}_` allocated in
+  `ensure_vmg_built` (whenever `implicit_fou_`), zero-init so non-periodic boundary ghosts read 0 (no
+  spurious coarse advective wall flux).
+  - **IBM path** (`ibm_enabled_`): level 0 stays the fine row-scaled `As_[c]` (`setDiffusionFine`,
+    `include_fine=false`); coarse levels = aniso diffusion + restricted FOU. Solution masked by `solidmask_`.
+  - **Domain-BC path** (cavity/BFS, `has_domain_bc_`, no IBM stencil): `build_vmg_adv_stencil` builds the
+    operator on **every** level (`include_fine=true`, level 0 from u_/v_/w_), then `setDiffusionBoundaryFold`
+    applies the no-slip/inflow/outflow wall fold on all levels; the dt·FOU deferred-correction RHS
+    (`add_fou_rhs_k`) is added for the `implicit_fou_ && vmg_enabled_` case. Semi-coarsening (quasi-2D)
+    works (per-axis `cfac` β + 1/cfac advective scaling).
 - Upwind keeps every level an **M-matrix** (diagonally dominant) → RB-GS smoothing + coarse correction
-  stable in advection-dominated rows.
-- **Validated** (`scripts/verify_velocity_mg_upwind_sdflow.py`, sphere + cut-cell IBM, dt=5): stable at
-  high Re (U~2, CFL≫1) where the operator is advection-dominated; converges to the **same field as RB-GS
-  to machine precision** (U_max/U_mean diff 0.000% at steady); the V-cycle drops the Helmholtz residual
-  geometrically (ρ≈0.02–0.05, ~8 cycles to machine ε). 72/72 ctests green.
+  stable in advection-dominated rows, at arbitrary CFL.
+- **Validated:**
+  - IBM (`scripts/verify_velocity_mg_upwind_sdflow.py`, sphere + cut-cell, dt=5): stable at high Re (U~2,
+    CFL≫1); converges to the **same field as RB-GS to machine precision** (U_max/U_mean diff 0.000%);
+    V-cycle ρ≈0.02–0.05 (~8 cycles to machine ε).
+  - Domain-BC (`scripts/verify_velocity_mg_upwind_cavity_sdflow.py`, lid cavity Ghia Re=100, quasi-2D
+    nz=4): at advective **CFL=40** (dt=40, grid units) **explicit advection blows up** while implicit-FOU +
+    upwind vmg stays **bounded and converges to the Ghia centreline** (u_min −0.2113 vs Ghia −0.2058),
+    machine-precision divergence (3.6e-16), steady in 201 steps; the 6-level semi-coarsened V-cycle drops
+    the residual geometrically (51→0.26→0.014→…, ρ≈0.06–0.13).
+  - **72/72 ctests green** (default paths byte-identical).
 
-**Remaining (deferred):** wire onto the **domain-BC** velocity path — implicit advection is still IBM-only
-(`implicit_fou_ && ibm_enabled_`, distributed_ns.cuh:633; the new vel-MG branch is also under
-`if (ibm_enabled_)`). Using it on cavity/BFS needs implicit-FOU in the domain-BC velocity path first (a
-separate, larger change). The `D_rescale` residual un-scale (plan Phase 2) is still not applied — fine for
-the validated `D_rescale≈1` cases; revisit for thin-wall/near-contact stressors.
+**Remaining (deferred):** the `D_rescale` residual un-scale (plan Phase 2) is still not applied — fine for
+the validated `D_rescale≈1` cases; revisit for thin-wall/near-contact stressors. The BFS (open-boundary)
+case is wired by the same domain-BC path but not yet separately benchmarked at high Re.

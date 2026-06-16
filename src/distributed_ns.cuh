@@ -658,12 +658,18 @@ class DistributedNS {
           cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], 1.0, old[c], (long)n_);
           cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], -1.0, comp[c], (long)n_);
         }
-        if (implicit_fou_ && ibm_enabled_) {
-          // deferred correction: b += dt*FOU(u^k) -> b = u^n + dt*f - dt*(Koren - FOU); and rebuild the
-          // velocity stencil = diffusion + dt*FOU(u^k), then re-apply the IBM bake (descale_/inhom_).
+        // Implicit-FOU deferred correction: b += dt*FOU(u^k) -> b = u^n + dt*f - dt*(Koren - FOU). This is
+        // geometry-independent, needed whenever the velocity operator carries the implicit FOU term: the
+        // IBM stencil As_[c] (rebuilt below) or the domain-BC vmg levels (built in the velocity solve). It
+        // requires an operator that includes FOU, so only when ibm_enabled_ (As_) or vmg_enabled_ (levels).
+        if (implicit_fou_ && (ibm_enabled_ || vmg_enabled_)) {
           add_fou_rhs_k<0><<<grd_, blk_>>>(b_[0], u_, v_, w_, u_, ext_, g, dt_);
           add_fou_rhs_k<1><<<grd_, blk_>>>(b_[1], u_, v_, w_, v_, ext_, g, dt_);
           add_fou_rhs_k<2><<<grd_, blk_>>>(b_[2], u_, v_, w_, w_, ext_, g, dt_);
+        }
+        if (implicit_fou_ && ibm_enabled_) {
+          // rebuild the IBM velocity stencil = diffusion + dt*FOU(u^k), then re-apply the IBM bake
+          // (descale_/inhom_). (The domain-BC FOU operator is built into the vmg levels, not here.)
           float ub[3] = {ubc_ibm_.x, ubc_ibm_.y, ubc_ibm_.z};
           for (int c = 0; c < 3; ++c) {
             cfdmpi::mreal* A[7] = {As_[c][0], As_[c][1], As_[c][2], As_[c][3],
@@ -729,7 +735,7 @@ class DistributedNS {
         ensure_vmg_built();
         restrict_vmg_adv_velocities();
         for (int c = 0; c < 3; ++c) {
-          build_vmg_adv_coarse(c);
+          build_vmg_adv_stencil(c, /*include_fine=*/false);  // coarse levels; level 0 = fine As_[c]
           vmg_.setDiffusionFine(As_[c]);
           cfdmpi::MGLevel& l0 = vmg_.level(0);
           cudaMemcpy(l0.rhs, b_[c], n_ * 8, cudaMemcpyDeviceToDevice);
@@ -787,6 +793,26 @@ class DistributedNS {
           vmg_.setDiffusionBoundaryFold(c, bc_type_, nu_ * dt_, 1.0);  // component-dependent wall fold
           mac_.exchange(comp[c]);
           apply_velocity_bc_comp(comp[c], c, /*fold=*/1);      // zero wall ghosts + set normal Dirichlet face
+          cfdmpi::MGLevel& l0 = vmg_.level(0);
+          cudaMemcpy(l0.rhs, b_[c], n_ * 8, cudaMemcpyDeviceToDevice);
+          cudaMemcpy(l0.x, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);
+          vmg_.solve(vmg_vcycles_, vmg_pre_, vmg_post_, vmg_bottom_);
+          cudaMemcpy(comp[c], l0.x, n_ * 8, cudaMemcpyDeviceToDevice);
+          if (has_solid_) apply_mask(comp[c]);
+        }
+      } else if (vmg_enabled_ && implicit_fou_) {
+        // Upwind-convective velocity multigrid on the domain-BC path (cavity/BFS, no IBM stencil). The
+        // operator on EVERY level is anisotropic const-coeff diffusion + dt*FOU(u^k) from the restricted
+        // advecting velocity, with the no-slip/inflow/outflow wall fold applied on top (same fold as the
+        // diffusion-only path; the fold acts on the diffusion wall term). b_ already carries bc_brhs_ +
+        // the dt*FOU deferred correction. Upwinding keeps every level an M-matrix -> stable at high CFL.
+        ensure_vmg_built();
+        restrict_vmg_adv_velocities();
+        for (int c = 0; c < 3; ++c) {
+          build_vmg_adv_stencil(c, /*include_fine=*/true);            // diffusion + FOU on all levels
+          vmg_.setDiffusionBoundaryFold(c, bc_type_, nu_ * dt_, 1.0);  // wall fold (per component)
+          mac_.exchange(comp[c]);
+          apply_velocity_bc_comp(comp[c], c, /*fold=*/1);
           cfdmpi::MGLevel& l0 = vmg_.level(0);
           cudaMemcpy(l0.rhs, b_[c], n_ * 8, cudaMemcpyDeviceToDevice);
           cudaMemcpy(l0.x, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);
@@ -1050,20 +1076,26 @@ class DistributedNS {
     if (!has_domain_bc_)
       vmg_.setDiffusionCoarse(nu_ * dt_, 1.0);  // IBM: coarse built once (fine swapped per comp); BC path
                                                 // rebuilds all levels per component via setDiffusionConstAllLevels
-    // Upwind-convective coarse operator (opt-in, implicit-FOU IBM path): per-level scratch for the
-    // restricted advecting velocity. The coarse AC..AT are already allocated by setDiffusionCoarse above
-    // (overwritten each Picard iteration by build_vmg_adv_coarse). Level 0 is the fine As_[c]; [0] null.
-    if (implicit_fou_ && !has_domain_bc_) {
+    // Upwind-convective coarse operator (opt-in, implicit-FOU path): per-level scratch for the restricted
+    // advecting velocity. Level 0 is the fine operator (IBM: As_[c]; domain-BC: built from u_/v_/w_), so
+    // [0] is left null. Zero-init so non-periodic boundary ghosts read 0 (no spurious coarse advective flux
+    // at walls; the halo exchange leaves them untouched and the restriction only writes inner cells).
+    if (implicit_fou_) {
       int N = vmg_.n_levels();
       vadv_u_.assign(N, nullptr);
       vadv_v_.assign(N, nullptr);
       vadv_w_.assign(N, nullptr);
       for (int L = 1; L < N; ++L) {
         std::size_t nb = vmg_.level(L).n * 8;
-        cudaMalloc(&vadv_u_[L], nb);
-        cudaMalloc(&vadv_v_[L], nb);
-        cudaMalloc(&vadv_w_[L], nb);
+        for (double** p : {&vadv_u_[L], &vadv_v_[L], &vadv_w_[L]}) {
+          cudaMalloc(p, nb);
+          cudaMemset(*p, 0, nb);
+        }
       }
+      // domain-BC: allocate the per-level operator arrays (AC..AT) and set the const-coeff MG flags
+      // (galerkin off, no mean removal); build_vmg_adv_stencil then overwrites them each Picard iteration.
+      // The IBM path's setDiffusionCoarse (above) already did this for levels 1..N-1.
+      if (has_domain_bc_) vmg_.setDiffusionConstAllLevels(nu_ * dt_, 1.0);
     }
     // NB: a geometry-aware (rediscretized) velocity coarse operator was tried and *diverges* -- the
     // Robust-Scaled fine stencil is row-scaled by D_rescale at cut cells, so it is inconsistent with a
@@ -1093,30 +1125,38 @@ class DistributedNS {
       }
     }
   }
-  // Rebuild the coarse-level velocity stencils (AC..AT) for component `comp`: anisotropic const-coeff
-  // backward-Euler diffusion (per-axis beta from cfac) + first-order-upwind advection from the restricted
-  // coarse velocity (scaled by 1/cfac per face axis). Level 0 stays the fine As_[comp]. Call after
-  // restrict_vmg_adv_velocities(), per component, before vmg_.solve().
-  void build_vmg_adv_coarse(int comp) {
+  // Build the velocity stencils (AC..AT) for component `comp`: anisotropic const-coeff backward-Euler
+  // diffusion (per-axis beta from cfac) + first-order-upwind advection from the restricted coarse velocity
+  // (scaled by 1/cfac per face axis). `include_fine` selects which levels are written: the IBM path keeps
+  // level 0 as the fine As_[comp] (include_fine=false, levels 1..N-1); the domain-BC path has no IBM
+  // stencil, so it also builds level 0 from u_,v_,w_ (include_fine=true) and folds the walls afterwards.
+  // Call after restrict_vmg_adv_velocities(), per component, before setDiffusionBoundaryFold + solve.
+  void build_vmg_adv_stencil(int comp, bool include_fine) {
     dim3 blk(8, 8, 4);
     int N = vmg_.n_levels();
-    for (int L = 1; L < N; ++L) {
+    double* l0[3] = {u_, v_, w_};
+    for (int L = include_fine ? 0 : 1; L < N; ++L) {
       cfdmpi::MGLevel& c = vmg_.level(L);
-      if (!c.AC) continue;
+      if (!c.AC)
+        for (cfdmpi::mreal** p : {&c.AC, &c.AW, &c.AE, &c.AS, &c.AN, &c.AB, &c.AT})
+          cudaMalloc(p, c.n * sizeof(cfdmpi::mreal));
+      c.variable = true;
       double hx = (double)c.cfac.x, hy = (double)c.cfac.y, hz = (double)c.cfac.z;  // h0 = 1
       double bx = nu_ * dt_ / (hx * hx), by = nu_ * dt_ / (hy * hy), bz = nu_ * dt_ / (hz * hz);
       double sx = 1.0 / hx, sy = 1.0 / hy, sz = 1.0 / hz;
       dim3 grd((c.ext.x + 7) / 8, (c.ext.y + 7) / 8, (c.ext.z + 3) / 4);
-      double *u = vadv_u_[L], *v = vadv_v_[L], *w = vadv_w_[L];
+      double* u = (L == 0) ? l0[0] : vadv_u_[L];
+      double* v = (L == 0) ? l0[1] : vadv_v_[L];
+      double* w = (L == 0) ? l0[2] : vadv_w_[L];
       if (comp == 0)
-        detail::build_adv_coarse_stencil_k<0><<<grd, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, u, v, w,
-                                                    c.ext, c.g, bx, by, bz, dt_, sx, sy, sz);
+        detail::build_adv_coarse_stencil_k<0><<<grd, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, u, v,
+                                                    w, c.ext, c.g, bx, by, bz, dt_, sx, sy, sz);
       else if (comp == 1)
-        detail::build_adv_coarse_stencil_k<1><<<grd, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, u, v, w,
-                                                    c.ext, c.g, bx, by, bz, dt_, sx, sy, sz);
+        detail::build_adv_coarse_stencil_k<1><<<grd, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, u, v,
+                                                    w, c.ext, c.g, bx, by, bz, dt_, sx, sy, sz);
       else
-        detail::build_adv_coarse_stencil_k<2><<<grd, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, u, v, w,
-                                                    c.ext, c.g, bx, by, bz, dt_, sx, sy, sz);
+        detail::build_adv_coarse_stencil_k<2><<<grd, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, u, v,
+                                                    w, c.ext, c.g, bx, by, bz, dt_, sx, sy, sz);
     }
   }
   // Cap the requested MG level count so no axis coarsens below 2 cells (else the ORB decomposer divides
