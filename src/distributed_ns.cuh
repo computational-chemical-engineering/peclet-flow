@@ -995,9 +995,15 @@ class DistributedNS {
   }
   void ensure_vmg_built() {
     if (vmg_built_) return;
-    vmg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, clamp_levels(vmg_levels_), comm_,
-              mac_.ghost, periodic_);
-    vmg_.setDiffusionCoarse(nu_ * dt_, 1.0);  // const-coeff diffusion coarse operators (built once)
+    // domain-BC (cavity/BFS): semi-coarsening so a thin (quasi-2D) axis freezes while the wide axes keep
+    // coarsening -> a deep hierarchy on shallow grids. semi self-limits (init breaks when nothing coarsens),
+    // so the requested level count need not be clamped. IBM/porous path stays uniform + clamp_levels.
+    bool semi = has_domain_bc_;
+    int nl = semi ? vmg_levels_ : clamp_levels(vmg_levels_);
+    vmg_.init(mac_.global_res, mac_.rank, mac_.size, /*h0=*/1.0, nl, comm_, mac_.ghost, periodic_, semi);
+    if (!has_domain_bc_)
+      vmg_.setDiffusionCoarse(nu_ * dt_, 1.0);  // IBM: coarse built once (fine swapped per comp); BC path
+                                                // rebuilds all levels per component via setDiffusionConstAllLevels
     // NB: a geometry-aware (rediscretized) velocity coarse operator was tried and *diverges* -- the
     // Robust-Scaled fine stencil is row-scaled by D_rescale at cut cells, so it is inconsistent with a
     // clean I-beta*L coarse operator under geometric transfers (and the staggered velocity geometry is

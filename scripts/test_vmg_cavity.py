@@ -7,10 +7,10 @@ import sdflow
 from verify_lid_cavity_sdflow import GHIA_Y, GHIA_U, GHIA_X, GHIA_V
 
 
-def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=4000, vmg=False, vlevels=3, vcycles=4, vel_iter=60):
+def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=4000, vmg=False, vlevels=3, vcycles=4, vel_iter=60, dt=1.0):
     nu = U * N / Re
     s = sdflow.Solver(N, N, nz)
-    s.set_rho(1.0); s.set_mu(nu); s.set_dt(1.0); s.set_advection(True)
+    s.set_rho(1.0); s.set_mu(nu); s.set_dt(dt); s.set_advection(True)
     s.set_domain_bc(0, 1); s.set_domain_bc(1, 1); s.set_domain_bc(2, 1)
     s.set_domain_bc(3, 2, U, 0.0, 0.0)
     s.set_velocity_solver_params(vel_iter)
@@ -48,10 +48,15 @@ def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=4000, vmg=False, vlevels=3, vcyc
 
 
 if __name__ == "__main__":
-    print("=== Velocity-MG vs RB-GS: lid-driven cavity Re=100, N=128 (quasi-2D nz=4) ===")
-    for label, kw in [("RB-GS (60)         ", dict(vmg=False)),
-                      ("vmg L=3 v=4        ", dict(vmg=True, vlevels=3, vcycles=4)),
-                      ("vmg L=3 v=8        ", dict(vmg=True, vlevels=3, vcycles=8))]:
-        r = run(**kw)
+    import os
+    N = int(os.environ.get("VMG_N", 128))
+    print(f"=== Velocity-MG (semi-coarsening) vs RB-GS: lid cavity Re=100, N={N} (quasi-2D nz=4) ===")
+    # under-solved RB-GS (few sweeps) vs few-cycle deep vmg: the MG should hold accuracy where RB-GS lags.
+    cfgs = [("RB-GS  60 sweeps   ", dict(vmg=False, vel_iter=60)),
+            ("RB-GS  20 sweeps   ", dict(vmg=False, vel_iter=20)),
+            ("vmg L=8 v=2 (semi) ", dict(vmg=True, vlevels=8, vcycles=2)),
+            ("vmg L=8 v=4 (semi) ", dict(vmg=True, vlevels=8, vcycles=4))]
+    for label, kw in cfgs:
+        r = run(N=N, **kw)
         print(f"  {label}: u_rms={r['u_rms']:.4f} v_rms={r['v_rms']:.4f} umin={r['umin']:.4f} "
               f"(Ghia -0.2058) div={r['div']:.1e} steps={r['steps']} wall={r['wall']:.1f}s")

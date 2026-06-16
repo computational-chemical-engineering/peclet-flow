@@ -107,6 +107,23 @@ __global__ void mg_const_diffusion_op_k(mreal* AC, mreal* AW, mreal* AE, mreal* 
   AW[i] = nb; AE[i] = nb; AS[i] = nb; AN[i] = nb; AB[i] = nb; AT[i] = nb;
 }
 
+// Anisotropic const-coeff A = I - nu_dt*Laplacian with a PER-AXIS beta (bx,by,bz = nu_dt/(h0*cfac_a)^2).
+// Needed for semi-coarsening, where the per-axis coarsening factors cfac differ on a level (a thin axis
+// freezes while the wide axes keep halving). bx=by=bz reproduces mg_const_diffusion_op_k exactly.
+__global__ void mg_const_diffusion_op_aniso_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal* AN,
+                                              mreal* AB, mreal* AT, int3 ext, double bx, double by,
+                                              double bz) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z;
+  if (lx >= ext.x || ly >= ext.y || lz >= ext.z) return;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
+  AC[i] = (mreal)(1.0 + 2.0 * (bx + by + bz));
+  AW[i] = (mreal)(-bx); AE[i] = (mreal)(-bx);
+  AS[i] = (mreal)(-by); AN[i] = (mreal)(-by);
+  AB[i] = (mreal)(-bz); AT[i] = (mreal)(-bz);
+}
+
 // Velocity-diffusion no-slip face-fold for the MG coarse/fine operator (the const-coeff analogue of
 // bc_diffusion_fold_k). At a Dirichlet wall the tangential ghost is 2*u_wall - u_inner, which moves +beta
 // onto the diagonal: AC[bic] += beta. The dropped off-diagonal stays -beta but multiplies a zero boundary
@@ -710,9 +727,10 @@ class DistributedPoissonMG {
     for (int L = 0; L < (int)levels_.size(); ++L) {
       MGLevel& lv = *levels_[L];
       if (!lv.AC) continue;
-      double hL = h0 * (double)(1 << L), beta = nu_dt / (hL * hL);
+      int cf[3] = {lv.cfac.x, lv.cfac.y, lv.cfac.z};
       for (int f = 0; f < 6; ++f) {
         int a = f / 2, s = f % 2;
+        double ha = h0 * (double)cf[a], beta = nu_dt / (ha * ha);  // per-axis beta for the folded face
         double dval;
         if (bc[f] == 3) dval = -beta;                       // outflow zero-gradient: every component
         else if ((bc[f] == 1 || bc[f] == 2) && a != comp) dval = beta;  // no-slip/inflow wall: tangential
@@ -737,10 +755,12 @@ class DistributedPoissonMG {
         for (mreal** p : {&c.AC, &c.AW, &c.AE, &c.AS, &c.AN, &c.AB, &c.AT})
           cudaMalloc(p, c.n * sizeof(mreal));
       c.variable = true;
-      double hL = h0 * (double)(1 << L), beta = nu_dt / (hL * hL);
+      // per-axis beta from the cumulative coarsening factor cfac (== uniform 2^L when cfac is isotropic)
+      double hx = h0 * (double)c.cfac.x, hy = h0 * (double)c.cfac.y, hz = h0 * (double)c.cfac.z;
       dim3 gAll((c.ext.x + 7) / 8, (c.ext.y + 7) / 8, (c.ext.z + 7) / 8);
-      mgdetail::mg_const_diffusion_op_k<<<gAll, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, c.ext,
-                                                       beta);
+      mgdetail::mg_const_diffusion_op_aniso_k<<<gAll, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT,
+                                                            c.ext, nu_dt / (hx * hx), nu_dt / (hy * hy),
+                                                            nu_dt / (hz * hz));
     }
   }
 
