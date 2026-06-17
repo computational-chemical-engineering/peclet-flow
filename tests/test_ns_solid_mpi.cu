@@ -37,14 +37,14 @@ __global__ void init_full(double* u, double* v, double* w, int3 res) {
   u[i] = 1.0; v[i] = 0.0; w[i] = 0.0;  // uniform inflow in x
 }
 __global__ void advect_rhs_full(int comp, const double* u, const double* v, const double* w,
-                                const double* phi, double* b, double dt, double f, int3 res) {
+                                const double* phi, double* b, double idt, double f, int3 res) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x >= res.x || y >= res.y || z >= res.z) return;
   int i = get_idx(x, y, z, res);
   double A = sadv::advect(comp, x, y, z, sadv::FullAcc{u, res}, sadv::FullAcc{v, res},
                           sadv::FullAcc{w, res}, sadv::FullAcc{phi, res});
-  b[i] = phi[i] - dt * A + dt * f;
+  b[i] = idt * phi[i] - A + f;  // divided convention: momentum equation scaled by 1/dt
 }
 __global__ void diff_full(double* c, const double* b, int3 res, double beta, double Ac, int color) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
 
   int N = 24;
   int3 res = make_int3(N, N, 8);
-  double nu = 0.05, dt = 0.2, fx = 0.02, beta = nu * dt, Ac = 1.0 + 6.0 * beta;
+  double nu = 0.05, dt = 0.2, fx = 0.02, idt = 1.0 / dt, beta = nu, Ac = idt + 6.0 * beta;
   Sph sph{N * 0.5, N * 0.5, res.z * 0.5, N * 0.18};
   cudaMemcpyToSymbol(c_sph, &sph, sizeof(Sph));
   dim3 blk(8, 8, 4), gF((res.x + 7) / 8, (res.y + 7) / 8, (res.z + 3) / 4);
@@ -118,7 +118,7 @@ int main(int argc, char** argv) {
   double* comp[3] = {u, v, w};
   double f[3] = {fx, 0, 0};
   for (int s = 0; s < kSteps; ++s) {
-    for (int c = 0; c < 3; ++c) advect_rhs_full<<<gF, blk>>>(c, u, v, w, comp[c], b[c], dt, f[c], res);
+    for (int c = 0; c < 3; ++c) advect_rhs_full<<<gF, blk>>>(c, u, v, w, comp[c], b[c], idt, f[c], res);
     for (int c = 0; c < 3; ++c)
       for (int it = 0; it < kDiff; ++it) {
         diff_full<<<gF, blk>>>(comp[c], b[c], res, beta, Ac, 0);
@@ -145,7 +145,8 @@ int main(int argc, char** argv) {
 
   // ----- distributed via DistributedNS (advection + solid) -----
   DistributedNS sol;
-  sol.init(res, rank, size, nu, dt);
+  sol.init(res, rank, size, 1.0, nu, dt);
+  sol.set_incremental_pressure(false);  // serial reference is classical (non-incremental) Chorin
   sol.set_advection(true);
   sol.set_body_force(fx, 0, 0);
   int3 e = sol.ext(), og = sol.origin_incl_ghost();

@@ -44,7 +44,7 @@ static void run(int rank, int size, int outer_iters, double tol, double& ke, lon
   int3 res = make_int3(N, N, 8);
   double k = 2.0 * M_PI / N, nu = 0.02, dt = 0.4;
   DistributedNS s;
-  s.init(res, rank, size, nu, dt);
+  s.init(res, rank, size, 1.0, nu, dt);
   s.set_advection(true);
   s.set_pressure_multigrid(true, 4);
   s.set_outer_iterations(outer_iters);

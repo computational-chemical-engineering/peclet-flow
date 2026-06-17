@@ -98,13 +98,13 @@ __global__ void mg_build_op_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal*
 // axes keep halving). bx=by=bz gives the isotropic const-coeff operator.
 __global__ void mg_const_diffusion_op_aniso_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal* AN,
                                               mreal* AB, mreal* AT, int3 ext, double bx, double by,
-                                              double bz) {
+                                              double bz, double idiag) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x;
   int ly = blockIdx.y * blockDim.y + threadIdx.y;
   int lz = blockIdx.z * blockDim.z + threadIdx.z;
   if (lx >= ext.x || ly >= ext.y || lz >= ext.z) return;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
-  AC[i] = (mreal)(1.0 + 2.0 * (bx + by + bz));
+  AC[i] = (mreal)(idiag + 2.0 * (bx + by + bz));
   AW[i] = (mreal)(-bx); AE[i] = (mreal)(-bx);
   AS[i] = (mreal)(-by); AN[i] = (mreal)(-by);
   AB[i] = (mreal)(-bz); AT[i] = (mreal)(-bz);
@@ -423,7 +423,8 @@ __global__ void mg_mul_mask_k(double* r, const double* m, long n) {
 // = 0.5 (majority). The coarsest level must stay fine enough that the staircase still resolves the walls.
 __global__ void mg_build_velocity_op_staircase_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal* AN,
                                                 mreal* AB, mreal* AT, const double* th, int3 ext, int g,
-                                                double bx, double by, double bz, double thresh) {
+                                                double bx, double by, double bz, double thresh,
+                                                double idiag) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
   int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
@@ -434,7 +435,7 @@ __global__ void mg_build_velocity_op_staircase_k(mreal* AC, mreal* AW, mreal* AE
     AW[i] = AE[i] = AS[i] = AN[i] = AB[i] = AT[i] = (mreal)0.0;
     return;
   }
-  AC[i] = (mreal)(1.0 + 2.0 * (bx + by + bz));
+  AC[i] = (mreal)(idiag + 2.0 * (bx + by + bz));
   AW[i] = (mreal)(-bx); AE[i] = (mreal)(-bx);
   AS[i] = (mreal)(-by); AN[i] = (mreal)(-by);
   AB[i] = (mreal)(-bz); AT[i] = (mreal)(-bz);
@@ -779,7 +780,7 @@ class DistributedPoissonMG {
   // Const-coeff A = I - nu_dt*Laplacian on EVERY level (0..N), coarse spacing h_L = h0*2^L. For the
   // domain-BC velocity solve (cavity/BFS), where the fine operator is ALSO const-coeff (no IBM stencil);
   // follow with setDiffusionBoundaryFold(comp,...) per component. Allocates once, rebuilds values per call.
-  void setDiffusionConstAllLevels(double nu_dt, double h0) {
+  void setDiffusionConstAllLevels(double nu_dt, double h0, double idiag = 1.0) {
     galerkin_ = false;
     remove_mean_ = false;
     dim3 blk(8, 8, 8);
@@ -794,7 +795,7 @@ class DistributedPoissonMG {
       dim3 gAll((c.ext.x + 7) / 8, (c.ext.y + 7) / 8, (c.ext.z + 7) / 8);
       mgdetail::mg_const_diffusion_op_aniso_k<<<gAll, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT,
                                                             c.ext, nu_dt / (hx * hx), nu_dt / (hy * hy),
-                                                            nu_dt / (hz * hz));
+                                                            nu_dt / (hz * hz), idiag);
     }
   }
 
@@ -821,7 +822,7 @@ class DistributedPoissonMG {
   // per coarse level (coarse theta + the binary staircase pin mask). thresh = 0.5.
   void setVelocityStaircaseCoarse(const double* theta0, const double* solidmask0, double* const cth[],
                                   double* const cmask[], double nu_dt, double h0, double thresh,
-                                  const double* lvl0_res_mask) {
+                                  const double* lvl0_res_mask, double idiag = 1.0) {
     galerkin_ = false;
     remove_mean_ = false;
     levels_[0]->vol = theta0;
@@ -850,7 +851,7 @@ class DistributedPoissonMG {
              bz = nu_dt / ((h0 * c.cfac.z) * (h0 * c.cfac.z));
       dim3 gIn((c.inner.x + 7) / 8, (c.inner.y + 7) / 8, (c.inner.z + 7) / 8);
       mgdetail::mg_build_velocity_op_staircase_k<<<gIn, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, th,
-                                                              c.ext, c.g, bx, by, bz, thresh);
+                                                              c.ext, c.g, bx, by, bz, thresh, idiag);
       tf = th;
     }
   }

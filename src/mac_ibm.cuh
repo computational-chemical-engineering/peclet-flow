@@ -269,16 +269,20 @@ __global__ void ibm_modify_stencil_k(mreal* A_C, mreal* A_W, mreal* A_E, mreal* 
   if (a_inhom) a_inhom[c] += inhom;
 }
 
-// build the backward-Euler velocity diffusion stencil over the extended block: A_C = 1 + 6 beta,
-// off-diagonals = -beta (dx=1, beta = theta*dt*nu). RHS b is the explicit term; inhom is subtracted.
+// build the backward-Euler velocity diffusion stencil over the extended block: A_C = idiag + 6 beta,
+// off-diagonals = -beta (dx=1). The momentum equation is scaled by 1/dt (the "divided" convention, so the
+// operator stays well-scaled as dt->infinity / steady state), hence idiag = 1/dt is the time-derivative
+// coefficient and beta = nu is the diffusion coefficient (no dt factor). RHS b is the explicit term;
+// inhom is subtracted. The IBM overlay (ibm_modify_stencil_k) is LINEAR in (A_C, off-diag), so scaling the
+// base stencil by 1/dt scales the whole modified row + inhom by 1/dt -- no IBM-side change needed.
 __global__ void ibm_build_diffusion_k(mreal* A_C, mreal* A_W, mreal* A_E, mreal* A_S, mreal* A_N,
-                                      mreal* A_B, mreal* A_T, int3 ext, double beta) {
+                                      mreal* A_B, mreal* A_T, int3 ext, double beta, double idiag) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x;
   int ly = blockIdx.y * blockDim.y + threadIdx.y;
   int lz = blockIdx.z * blockDim.z + threadIdx.z;
   if (lx >= ext.x || ly >= ext.y || lz >= ext.z) return;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
-  A_C[i] = (mreal)(1.0 + 6.0 * beta);
+  A_C[i] = (mreal)(idiag + 6.0 * beta);
   mreal nb = (mreal)(-beta);
   A_W[i] = nb; A_E[i] = nb; A_S[i] = nb; A_N[i] = nb; A_B[i] = nb; A_T[i] = nb;
 }

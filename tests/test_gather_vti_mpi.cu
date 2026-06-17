@@ -31,7 +31,8 @@ int main(int argc, char** argv) {
   const int steps = 10;
 
   DistributedNS s;
-  s.init(res, rank, size, nu, dt);  // advection off -> Stokes (TGV decays as a diffusion mode)
+  s.init(res, rank, size, 1.0, nu, dt);  // advection off -> Stokes (TGV decays as a diffusion mode)
+  s.set_incremental_pressure(false);  // analytic TGV diffusion-decay check (n_pois=0, classical Chorin)
   int3 e = s.ext(), og = s.origin_incl_ghost();
   int g = s.ghost();
   std::size_t n = s.num_cells();

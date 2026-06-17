@@ -161,7 +161,7 @@ int main(int argc, char** argv) {
   // operator needs CG accelerating the Galerkin V-cycle (a plain V-cycle stalls); compare the two. ----
   auto run_cutcell = [&](bool pcg, int budget, double& dv0, double& dv1, double& rms1) {
     dns::DistributedNS s;
-    s.init(res, rank, size, /*nu=*/0.0, /*dt=*/0.1);
+    s.init(res, rank, size, /*rho=*/1.0, /*mu=*/0.0, /*dt=*/0.1);
     int3 e2 = s.ext(), og2 = s.origin_incl_ghost();
     int g2 = s.ghost();
     size_t n2 = s.num_cells();

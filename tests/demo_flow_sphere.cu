@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
   double cx = N * 0.5, cy = N * 0.5, cz = res.z * 0.5, R = N * 0.16;
 
   DistributedNS sol;
-  sol.init(res, rank, size, nu, dt);
+  sol.init(res, rank, size, 1.0, nu, dt);
   sol.set_advection(true);
   sol.set_body_force(fx, 0, 0);
 

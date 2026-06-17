@@ -44,7 +44,8 @@ int main(int argc, char** argv) {
   // solid leak + centreline velocity.
   auto run = [&](bool vmg, double& g_rel, double& g_wall, double& g_umax) {
     DistributedNS s;
-    s.init(res, rank, size, nu, dt);
+    s.init(res, rank, size, 1.0, nu, dt);
+    s.set_incremental_pressure(false);  // analytic Poiseuille (n_pois=0, no projection -> classical Chorin)
     s.set_body_force(fx, 0.0, 0.0);
     int3 e = s.ext(), og = s.origin_incl_ghost();
     size_t n = s.num_cells();

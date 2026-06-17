@@ -50,14 +50,14 @@ __global__ void init_full(double* u, double* v, double* w, int3 res, double k) {
   w[i] = init_w(x, y, z, k);
 }
 __global__ void advect_rhs_full(int comp, const double* u, const double* v, const double* w,
-                                const double* phi, double* b, double dt, int3 res) {
+                                const double* phi, double* b, double idt, int3 res) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x >= res.x || y >= res.y || z >= res.z) return;
   int i = get_idx(x, y, z, res);
   double A = sadv::advect(comp, x, y, z, sadv::FullAcc{u, res}, sadv::FullAcc{v, res},
                           sadv::FullAcc{w, res}, sadv::FullAcc{phi, res});
-  b[i] = phi[i] - dt * A;
+  b[i] = idt * phi[i] - A;  // divided convention: momentum equation scaled by 1/dt
 }
 __global__ void diff_full(double* c, const double* b, int3 res, double beta, double Ac, int color) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
 
   int N = 24;
   int3 res = make_int3(N, N, 8);
-  double nu = 0.02, dt = 0.2, k = 2.0 * M_PI / N, beta = nu * dt, Ac = 1.0 + 6.0 * beta;
+  double nu = 0.02, dt = 0.2, k = 2.0 * M_PI / N, idt = 1.0 / dt, beta = nu, Ac = idt + 6.0 * beta;
   dim3 blk(8, 8, 4), gF((res.x + 7) / 8, (res.y + 7) / 8, (res.z + 3) / 4);
   auto alloc = [](size_t n) { double* p; cudaMalloc(&p, n * 8); return p; };
 
@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
   init_full<<<gF, blk>>>(u, v, w, res, k);
   double* comp[3] = {u, v, w};
   for (int s = 0; s < kSteps; ++s) {
-    for (int c = 0; c < 3; ++c) advect_rhs_full<<<gF, blk>>>(c, u, v, w, comp[c], b[c], dt, res);
+    for (int c = 0; c < 3; ++c) advect_rhs_full<<<gF, blk>>>(c, u, v, w, comp[c], b[c], idt, res);
     for (int c = 0; c < 3; ++c)
       for (int it = 0; it < kDiff; ++it) {
         diff_full<<<gF, blk>>>(comp[c], b[c], res, beta, Ac, 0);
@@ -141,7 +141,8 @@ int main(int argc, char** argv) {
 
   // ----- distributed via DistributedNS (advection on) -----
   DistributedNS sol;
-  sol.init(res, rank, size, nu, dt);
+  sol.init(res, rank, size, 1.0, nu, dt);
+  sol.set_incremental_pressure(false);  // serial reference is classical (non-incremental) Chorin
   sol.set_advection(true);
   int3 e = sol.ext(), og = sol.origin_incl_ghost();
   int g = sol.ghost();

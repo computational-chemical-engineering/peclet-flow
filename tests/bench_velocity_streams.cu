@@ -31,7 +31,7 @@ static std::vector<double> sphere_sdf(const DistributedNS& s, int3 res) {
 static double run(int rank, int size, int N, int iters, bool streams) {
   int3 res = make_int3(N, N, N);
   DistributedNS s;
-  s.init(res, rank, size, /*nu=*/0.05, /*dt=*/0.1);
+  s.init(res, rank, size, /*rho=*/1.0, /*mu=*/0.05, /*dt=*/0.1);
   s.set_velocity_streams(streams);
   s.set_body_force(1e-3, 0, 0);
   s.set_ibm_solid(sphere_sdf(s, res));

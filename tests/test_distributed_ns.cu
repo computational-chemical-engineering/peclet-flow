@@ -32,7 +32,8 @@ static int tgv_case(int rank, int size) {
   int3 res = make_int3(N, N, 4);
   double k = 2.0 * M_PI / N, nu = 0.05, dt = 0.5;
   DistributedNS s;
-  s.init(res, rank, size, nu, dt);
+  s.init(res, rank, size, 1.0, nu, dt);
+  s.set_incremental_pressure(false);  // analytic diffusion-decay check (no projection, classical Chorin)
   std::size_t n = s.num_cells();
   std::vector<double> hu(n, 0), hv(n, 0), hw(n, 0);
   for_inner(s, [&](size_t i, int gx, int gy, int) {
@@ -68,7 +69,8 @@ static int poiseuille_case(int rank, int size) {
   int wall = 4;
   double nu = 0.1, dt = 20.0, g = 1e-3;
   DistributedNS s;
-  s.init(res, rank, size, nu, dt);
+  s.init(res, rank, size, 1.0, nu, dt);
+  s.set_incremental_pressure(false);  // analytic Poiseuille check (n_pois=0, classical Chorin)
   s.set_body_force(g, 0, 0);
 
   // solid mask over ALL local cells (inner+ghost) by wrapped global y.

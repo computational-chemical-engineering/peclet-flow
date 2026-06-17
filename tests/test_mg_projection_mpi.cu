@@ -57,7 +57,7 @@ static double global_max_div(DistributedNS& s) {
 // multigrid V-cycle (n_pois V-cycles), mg=false the single-level GS (n_pois sweeps).
 static double project_field(int rank, int size, int3 res, int n_pois, bool mg) {
   DistributedNS s;
-  s.init(res, rank, size, /*nu=*/0.0, /*dt=*/0.1);
+  s.init(res, rank, size, /*rho=*/1.0, /*mu=*/0.0, /*dt=*/0.1);
   if (mg) s.set_pressure_multigrid(true, /*levels=*/4);
   std::size_t n = s.num_cells();
   std::vector<double> hu(n, 0), hv(n, 0), hw(n, 0);

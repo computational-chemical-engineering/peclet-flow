@@ -7,9 +7,10 @@
 // passed as 3-D numpy arrays indexed [x,y,z], shape (nx,ny,nz); the wrapper scatters them to each rank's
 // extended block (periodic wrap) and gathers results to the root.
 //
-// Units are physical: set_rho(rho) + set_mu(mu) (internally nu = mu/rho); body force is a force per unit
-// volume (e.g. a pressure gradient) -> internal acceleration f/rho; pressure p = rho/dt * phi. Grid
-// spacing is unit (dx=1): work in grid units and scale results afterwards (physical dx is a follow-up).
+// Units are physical: set_rho(rho) + set_mu(mu) feed the physical momentum equation rho*Du/Dt = -grad(p)
+// + mu*Lap(u) + f directly (no kinematic rescaling); body force is a force per unit volume (e.g. a pressure
+// gradient) and get_p returns the physical pressure p. Grid spacing is unit (dx=1): work in grid units and
+// scale results afterwards (physical dx is a follow-up).
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -54,8 +55,9 @@ static void ensure_mpi() {
 /// Constructed with the global grid resolution (nx, ny, nz). Physical parameters (rho, mu, dt, body force)
 /// and scheme flags are set first; the geometry (an SDF solid via set_solid, or all-fluid + domain BCs via
 /// set_pressure_geometry) is installed next; then step() advances the simulation and get_u/get_v/get_w/
-/// get_p return the gathered global fields as 3-D numpy arrays indexed [x,y,z]. Because nu*dt is baked into
-/// the IBM diffusion stencil at geometry time, rho/mu/dt must be fixed before the geometry is installed;
+/// get_p return the gathered global fields as 3-D numpy arrays indexed [x,y,z]. Because mu and rho/dt are
+/// baked into the IBM diffusion stencil at geometry time (the momentum operator (rho/dt)*I - mu*Lap is scaled
+/// by 1/dt, so it stays well-conditioned at large dt), rho/mu/dt must be fixed before the geometry is installed;
 /// the wrapper stores them and lazily initialises the underlying solver on first use.
 class Solver {
  public:
@@ -80,10 +82,10 @@ class Solver {
   void set_rho(double rho) { require_pre_init("set_rho"); rho_ = rho; }
   void set_mu(double mu) { require_pre_init("set_mu"); mu_ = mu; }
   void set_dt(double dt) { require_pre_init("set_dt"); dt_ = dt; }
-  // body force per unit volume (e.g. -dp/dx); stored, applied as acceleration f/rho once rho is known.
+  // body force per unit volume (e.g. -dp/dx); passed straight through (the solver works in physical units).
   void set_body_force(double fx, double fy, double fz) {
     fx_ = fx; fy_ = fy; fz_ = fz;
-    if (inited_) s_.set_body_force(fx_ / rho_, fy_ / rho_, fz_ / rho_);
+    if (inited_) s_.set_body_force(fx_, fy_, fz_);
   }
 
   // --- scheme flags (safe before or after init; just toggle members) ---
@@ -179,9 +181,9 @@ class Solver {
   py::array_t<double> get_u() { ensure_init(); return gather(s_.u(), 1.0); }
   py::array_t<double> get_v() { ensure_init(); return gather(s_.v(), 1.0); }
   py::array_t<double> get_w() { ensure_init(); return gather(s_.w(), 1.0); }
-  py::array_t<double> get_p() {  // p = rho/dt * potential (accumulated under the incremental scheme)
+  py::array_t<double> get_p() {  // physical pressure p (the solver works in physical units)
     ensure_init();
-    return gather(s_.pressure_potential(), rho_ / dt_);
+    return gather(s_.pressure_potential(), 1.0);
   }
 
  private:
@@ -198,8 +200,8 @@ class Solver {
     int rank = 0, size = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-    s_.init(res_, rank, size, /*nu=*/mu_ / rho_, dt_, MPI_COMM_WORLD);
-    s_.set_body_force(fx_ / rho_, fy_ / rho_, fz_ / rho_);
+    s_.init(res_, rank, size, rho_, mu_, dt_, MPI_COMM_WORLD);
+    s_.set_body_force(fx_, fy_, fz_);
     s_.set_incremental_pressure(incremental_);
     // Single-GPU default: MG-PCG (~1.2x faster than standalone V-cycles for the cut-cell pressure solve).
     // Multi-rank keeps standalone V-cycles (PCG's per-iteration global dot-products are latency-bound at

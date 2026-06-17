@@ -40,41 +40,46 @@ __global__ void neg_k(double* dst, const double* src, long n) {
   long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) dst[i] = -src[i];
 }
-// b = comp + dt*f   (body force folded into the implicit-diffusion RHS), inner cells.
-__global__ void rhs_k(const double* c, double* b, double dtf, int3 e, int g) {
+// b = ct*comp + f   (body force folded into the implicit-diffusion RHS), inner cells. Physical momentum
+// scaled by 1/dt (divided convention): the time-derivative coefficient ct = rho/dt, the body force f is a
+// force per unit volume. Stays well-scaled as dt->infinity / steady state.
+__global__ void rhs_k(const double* c, double* b, double ct, double f, int3 e, int g) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
   long i = L3(x, y, z, e);
-  b[i] = c[i] + dtf;
+  b[i] = ct * c[i] + f;
 }
-// b = comp - dt*advect(comp) + dt*f : explicit nonlinear advection folded into the diffusion RHS.
+// b = ct*comp - ca*advect(comp) + f : explicit nonlinear advection folded into the diffusion RHS. ct =
+// rho/dt is the time-derivative coefficient; ca = rho weights the conservative convective term rho*(u.grad)u.
 __global__ void advect_rhs_k(int comp, const double* u, const double* v, const double* w,
-                             const double* phi, double* b, double dt, double f, int3 e, int g) {
+                             const double* phi, double* b, double ct, double ca, double f, int3 e, int g) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
   double A = sadv::advect(comp, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e}, sadv::LocAcc{w, e},
                           sadv::LocAcc{phi, e});
   long i = L3(x, y, z, e);
-  b[i] = phi[i] - dt * A + dt * f;
+  b[i] = ct * phi[i] - ca * A + f;
 }
 // implicit-FOU deferred correction: build the velocity stencil = backward-Euler diffusion
-// (I - nu*dt*Lap) + dt*FOU_advection(u^k). The FOU upwind terms add to the diagonal -> diagonally
-// dominant -> stable at high Re. Built per Picard iteration (advecting velocity u,v,w frozen at u^k).
+// ((rho/dt)*I - mu*Lap) + rho*FOU_advection(u^k), the physical momentum equation scaled by 1/dt (divided
+// convention: idiag = rho/dt, beta = mu, FOU weight fou_w = rho). The FOU upwind terms add to the diagonal
+// -> diagonally dominant -> stable at high Re. Built per Picard iteration (advecting velocity frozen at u^k).
 template <int COMP>
 __global__ void build_adv_stencil_k(cfdmpi::mreal* A_C, cfdmpi::mreal* A_W, cfdmpi::mreal* A_E,
                                     cfdmpi::mreal* A_S, cfdmpi::mreal* A_N, cfdmpi::mreal* A_B,
                                     cfdmpi::mreal* A_T, const double* u, const double* v,
-                                    const double* w, int3 e, int g, double beta, double dt) {
+                                    const double* w, int3 e, int g, double beta, double idiag,
+                                    double fou_w) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
   long i = L3(x, y, z, e);
   // assemble in double (the advecting velocity, diffusion and FOU upwind terms), store float.
-  double cC = 1.0 + 6.0 * beta, cxm = -beta, cxp = -beta, cym = -beta, cyp = -beta, czm = -beta,
+  double cC = idiag + 6.0 * beta, cxm = -beta, cxp = -beta, cym = -beta, cyp = -beta, czm = -beta,
          czp = -beta;
-  sadv::fou_operator(COMP, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e}, sadv::LocAcc{w, e}, dt, cC,
+  sadv::fou_operator(COMP, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e}, sadv::LocAcc{w, e}, fou_w, cC,
                      cxm, cxp, cym, cyp, czm, czp);
   A_C[i] = (cfdmpi::mreal)cC; A_W[i] = (cfdmpi::mreal)cxm; A_E[i] = (cfdmpi::mreal)cxp;
   A_S[i] = (cfdmpi::mreal)cym; A_N[i] = (cfdmpi::mreal)cyp; A_B[i] = (cfdmpi::mreal)czm;
@@ -92,29 +97,31 @@ __global__ void build_adv_coarse_stencil_k(cfdmpi::mreal* A_C, cfdmpi::mreal* A_
                                            cfdmpi::mreal* A_S, cfdmpi::mreal* A_N, cfdmpi::mreal* A_B,
                                            cfdmpi::mreal* A_T, const double* u, const double* v,
                                            const double* w, int3 e, int g, double bx, double by,
-                                           double bz, double dt, double sx, double sy, double sz) {
+                                           double bz, double fou_w, double sx, double sy, double sz,
+                                           double idiag) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
   long i = L3(x, y, z, e);
-  double cC = 1.0 + 2.0 * (bx + by + bz), cxm = -bx, cxp = -bx, cym = -by, cyp = -by, czm = -bz,
+  double cC = idiag + 2.0 * (bx + by + bz), cxm = -bx, cxp = -bx, cym = -by, cyp = -by, czm = -bz,
          czp = -bz;
-  sadv::fou_operator_aniso(COMP, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e}, sadv::LocAcc{w, e}, dt,
+  sadv::fou_operator_aniso(COMP, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e}, sadv::LocAcc{w, e}, fou_w,
                            sx, sy, sz, cC, cxm, cxp, cym, cyp, czm, czp);
   A_C[i] = (cfdmpi::mreal)cC; A_W[i] = (cfdmpi::mreal)cxm; A_E[i] = (cfdmpi::mreal)cxp;
   A_S[i] = (cfdmpi::mreal)cym; A_N[i] = (cfdmpi::mreal)cyp; A_B[i] = (cfdmpi::mreal)czm;
   A_T[i] = (cfdmpi::mreal)czp;
 }
-// add the explicit FOU term to the RHS: b += dt*FOU(u^k) (so b = u^n + dt*f - dt*(Koren - FOU))
+// add the explicit FOU term to the RHS: b += w*FOU(u^k) (so b = (rho/dt)*u^n + f - rho*(Koren - FOU); the
+// caller passes w = rho, weighting the conservative convective term rho*(u.grad)u).
 template <int COMP>
-__global__ void add_fou_rhs_k(double* b, const double* u, const double* v, const double* w,
-                              const double* phi, int3 e, int g, double dt) {
+__global__ void add_fou_rhs_k(double* b, const double* u, const double* v, const double* w_vel,
+                              const double* phi, int3 e, int g, double w) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
   long i = L3(x, y, z, e);
-  b[i] += dt * sadv::advect_fou(COMP, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e},
-                                sadv::LocAcc{w, e}, sadv::LocAcc{phi, e});
+  b[i] += w * sadv::advect_fou(COMP, x, y, z, sadv::LocAcc{u, e}, sadv::LocAcc{v, e},
+                               sadv::LocAcc{w_vel, e}, sadv::LocAcc{phi, e});
 }
 
 // one Red-Black diffusion sweep: c <- (b + beta*sum_nbr c)/(1+6 beta), global parity.
@@ -176,8 +183,10 @@ __global__ void correct_k(double* u, double* v, double* w, const double* phi, in
   v[i] -= phi[i] - phi[i - sy];
   w[i] -= phi[i] - phi[i - sz];
 }
-// Incremental pressure correction: subtract the accumulated-potential gradient from the momentum RHS,
-// b_c -= dPhi/dx_c (same staggered stencil as correct_k), so the predictor carries -grad(p^n)/rho.
+// Incremental pressure correction: subtract the pressure gradient from the momentum RHS, b_c -= dp/dx_c
+// (same staggered stencil as correct_k), so the predictor carries -grad(p^n). In the divided convention the
+// momentum RHS pressure term is exactly -grad(p) (no dt factor: the divided physical momentum equation is
+// (rho/dt)(u-u^n) = -grad(p) + mu*Lap(u) + f - rho*advect).
 __global__ void sub_gradpot_k(double* bu, double* bv, double* bw, const double* P, int3 e, int g) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -187,17 +196,26 @@ __global__ void sub_gradpot_k(double* bu, double* bv, double* bw, const double* 
   bv[i] -= P[i] - P[i - sy];
   bw[i] -= P[i] - P[i - sz];
 }
-// Rotational incremental update of the accumulated potential Phi (= dt/rho * p):
-//   Phi += phi - nu*dt*div(u*)   <=>   p += (rho/dt)phi - mu*div(u*)   (Timmermans rotational form).
-// Inner cells. Solid cells stay ~0 (phi and div are ~0 there), so grad(Phi) at solid faces is consistent
-// without a special mask. At steady state div->0 and phi->0, so Phi (the pressure) stabilises exactly.
-__global__ void pot_update_k(double* P, const double* phi, const double* div, double nudt, int3 e,
-                             int g) {
+// Rotational incremental update of the pressure p (Timmermans form): p += (rho/dt)*phi - mu*div(u*), i.e.
+// ct = rho/dt and the rotational term uses the dynamic viscosity mu. Inner cells. Solid cells stay ~0 (phi
+// and div are ~0 there), so grad(p) at solid faces is consistent without a special mask. At steady state
+// div->0 and phi->0, so p stabilises exactly.
+__global__ void pot_update_k(double* P, const double* phi, const double* div, double ct, double mu,
+                             int3 e, int g) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
   long i = L3(x, y, z, e);
-  P[i] += phi[i] - nudt * div[i];
+  P[i] += ct * phi[i] - mu * div[i];
+}
+// Classical (non-incremental) Chorin pressure from the per-step projection potential: p = (rho/dt)*phi
+// (ct = rho/dt). Computed on demand for pressure_potential() when not accumulating.
+__global__ void pscale_k(double* P, const double* phi, double ct, int3 e, int g) {
+  int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
+      z = blockIdx.z * blockDim.z + threadIdx.z;
+  if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
+  long i = L3(x, y, z, e);
+  P[i] = ct * phi[i];
 }
 }  // namespace detail
 
@@ -210,27 +228,32 @@ __global__ void pot_update_k(double* P, const double* phi, const double* div, do
 /// advection (Koren TVD, explicit or implicit deferred-correction), and a pressure projection whose Poisson
 /// system is solved by the geometric multigrid (::cfdmpi::DistributedPoissonMG) with MG-PCG or Chebyshev
 /// acceleration. Supports native per-face domain boundary conditions (periodic / wall / inflow / outflow)
-/// and per-position inlet profiles. Lengths are in grid units (dx = 1); set nu and dt at construction.
+/// and per-position inlet profiles. The equations are solved in PHYSICAL units: density rho, dynamic
+/// viscosity mu, force per unit volume, and the physical pressure p. Lengths are in grid units (dx = 1);
+/// set rho, mu and dt at construction.
 class DistributedNS {
  public:
-  void init(int3 global_res, int rank, int size, double nu, double dt,
+  void init(int3 global_res, int rank, int size, double rho, double mu, double dt,
             MPI_Comm comm = MPI_COMM_WORLD) {
     // Ghost width 2 covers the Koren advection reach (diffusion/projection use only width 1). periodic_
     // is {true,true,true} unless set_domain_bc made an axis non-periodic (the halo then leaves the
     // physical-boundary ghosts for apply_velocity_bc to fill -- transport-core grid_halo.hpp:78).
     mac_.init(global_res, rank, size, periodic_, /*ghost_width=*/2, comm);
     comm_ = comm;
-    nu_ = nu;
+    rho_ = rho;
+    mu_ = mu;
     dt_ = dt;
+    idt_ = 1.0 / dt;          // 1/dt (divided convention)
+    ridt_ = rho / dt;         // rho/dt: the time-derivative coefficient of the physical momentum equation
     n_ = mac_.num_local_cells();
-    for (double** p : {&u_, &v_, &w_, &phi_, &div_, &solid_, &phitot_, &b_[0], &b_[1], &b_[2], &u_old_,
+    for (double** p : {&u_, &v_, &w_, &phi_, &div_, &solid_, &p_, &b_[0], &b_[1], &b_[2], &u_old_,
                        &v_old_, &w_old_, &up_, &vp_, &wp_})
       cudaMalloc(p, n_ * sizeof(double));
     cudaMemset(u_, 0, n_ * 8);
     cudaMemset(v_, 0, n_ * 8);
     cudaMemset(w_, 0, n_ * 8);
     cudaMemset(solid_, 0, n_ * 8);
-    cudaMemset(phitot_, 0, n_ * 8);  // accumulated pressure potential starts at 0
+    cudaMemset(p_, 0, n_ * 8);  // pressure starts at 0
     cudaMemset(phi_, 0, n_ * 8);     // projection potential (also the pressure-solve warm-start seed)
     ext_ = mac_.local_ext;
     blk_ = dim3(8, 8, 4);
@@ -244,7 +267,7 @@ class DistributedNS {
     vstreams_init_ = true;
   }
   ~DistributedNS() {
-    for (double* p : {u_, v_, w_, phi_, div_, solid_, phitot_, b_[0], b_[1], b_[2], ox_, oy_, oz_,
+    for (double* p : {u_, v_, w_, phi_, div_, solid_, p_, b_[0], b_[1], b_[2], ox_, oy_, oz_,
                       bx_, by_, bz_, u_old_, v_old_, w_old_, up_, vp_, wp_})
       if (p) cudaFree(p);
     for (int c = 0; c < 3; ++c) {
@@ -287,10 +310,14 @@ class DistributedNS {
   double* u() { return u_; }
   double* v() { return v_; }
   double* w() { return w_; }
-  double* phi() { return phi_; }  // projection potential; pressure p = rho/dt * phi (Chorin)
-  // The field to scale by rho/dt for the physical pressure: the accumulated potential under the
-  // incremental scheme, else the per-step Chorin projection potential.
-  double* pressure_potential() { return incremental_ ? phitot_ : phi_; }
+  double* phi() { return phi_; }  // projection potential; u = u* - grad(phi), Lap(phi) = div(u*)
+  // Physical pressure p. Accumulated in p_ under the incremental-rotational scheme; under classical Chorin
+  // derive it on demand from the last projection potential, p = (rho/dt)*phi. Either way it is the physical
+  // pressure (the binding returns it directly, no rescaling).
+  double* pressure_potential() {
+    if (!incremental_) detail::pscale_k<<<grd_, blk_>>>(p_, phi_, ridt_, ext_, mac_.ghost);
+    return p_;
+  }
 
   // Run the independent u/v/w IBM RB-GS momentum solves on 3 concurrent CUDA streams (default on).
   // Overlaps at small per-component sizes where one stencil does not saturate the GPU; ~no effect once
@@ -304,8 +331,8 @@ class DistributedNS {
   // Incremental-rotational pressure correction (vs classical non-incremental Chorin). The momentum
   // predictor carries -grad(p^n) and the accumulated potential Phi is updated by the rotational form
   // Phi += phi - nu*dt*div(u*). Same steady velocity; more accurate transient + near-wall pressure
-  // (no Chorin splitting boundary layer). Default off here (keeps the cell-for-cell Chorin tests exact);
-  // the sdflow Python module turns it on by default.
+  // (no Chorin splitting boundary layer). Default ON (matching the sdflow Python module); the cell-for-cell
+  // classical-Chorin ctests opt out explicitly with set_incremental_pressure(false).
   void set_incremental_pressure(bool on) { incremental_ = on; }
 
   // Implicit-FOU deferred-correction advection (requires the IBM operator). The first-order-upwind part
@@ -434,10 +461,11 @@ class DistributedNS {
   // it into a static backward-Euler diffusion stencil + inhomogeneous Dirichlet term (u_bc = wall
   // velocity, default no-slip). The diffusion sweeps then use the modified stencil instead of the
   // constant-coefficient operator + velocity masking -- the accurate cut-cell boundary treatment.
-  // Static dt/nu (the stencil bakes beta = nu*dt). Call after init().
+  // Static rho/mu/dt (the stencil bakes the divided physical operator (rho/dt)*I - mu*Lap: beta = mu,
+  // idiag = rho/dt). Call after init().
   void set_ibm_solid(const std::vector<double>& sdf_ext, float3 u_bc = make_float3(0, 0, 0)) {
     using namespace cfdmpi::ibmdetail;
-    double beta = nu_ * dt_;
+    double beta = mu_;
     dim3 blk(8, 8, 8);
     dim3 gE((ext_.x + 7) / 8, (ext_.y + 7) / 8, (ext_.z + 3) / 4);
     float3 spacing = make_float3(1, 1, 1);
@@ -471,7 +499,7 @@ class DistributedNS {
       if (!vresmask_[c]) cudaMalloc(&vresmask_[c], n_ * 8);
       ibm_clean_fluid_mask_k<<<gE, blk>>>(vresmask_[c], sdf, ext_, offs[c]);
       ibm_build_diffusion_k<<<gE, blk>>>(As_[c][0], As_[c][1], As_[c][2], As_[c][3], As_[c][4],
-                                         As_[c][5], As_[c][6], ext_, beta);
+                                         As_[c][5], As_[c][6], ext_, beta, ridt_);
       cudaMemset(inhom_[c], 0, n_ * 8);
       int t1 = 256, b1 = (int)((n_ + t1 - 1) / t1);
       ibm_fill_k<<<b1, t1>>>(descale_[c], 1.0, (long)n_);  // Robust-Scaled RHS scale (1 outside cut cells)
@@ -641,7 +669,10 @@ class DistributedNS {
   // projection. n_diff GS iterations per component, n_pois for the pressure Poisson.
   void step(int n_diff, int n_pois) {
     using namespace detail;
-    double beta = nu_ * dt_, Ac = 1.0 + 6.0 * beta;
+    // Physical momentum scaled by 1/dt (divided convention): the diffusion stencil is (rho/dt)*I - mu*Lap
+    // (beta = mu, diagonal Ac = rho/dt + 6*beta) and the RHS time term carries rho/dt. This keeps the
+    // operator well-scaled at large dt (steady state), instead of the dt-multiplied form.
+    double beta = mu_, Ac = ridt_ + 6.0 * beta;
     double* comp[3] = {u_, v_, w_};
     double* old[3] = {u_old_, v_old_, w_old_};
     double* prev[3] = {up_, vp_, wp_};
@@ -654,7 +685,7 @@ class DistributedNS {
 
     // incremental pressure: Phi^n is fixed for the whole step; refresh its ghosts once for the
     // predictor's -grad(Phi) term (re-used by every Picard iteration).
-    if (incremental_) mac_.exchange(phitot_);
+    if (incremental_) mac_.exchange(p_);
 
     int max_outer = outer_iters_;
     last_outer_iterations_ = 0;
@@ -671,20 +702,20 @@ class DistributedNS {
         mac_.exchange(w_);
         apply_velocity_bc();  // explicit advection reads the reflection wall ghosts
         for (int c = 0; c < 3; ++c)
-          advect_rhs_k<<<grd_, blk_>>>(c, u_, v_, w_, comp[c], b_[c], dt_, f[c], ext_, g);
-        // retarget the time base from u^k to u^n:  b += (u^n - u^k)
+          advect_rhs_k<<<grd_, blk_>>>(c, u_, v_, w_, comp[c], b_[c], ridt_, rho_, f[c], ext_, g);
+        // retarget the time base from u^k to u^n:  b += (rho/dt)*(u^n - u^k)
         for (int c = 0; c < 3; ++c) {
-          cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], 1.0, old[c], (long)n_);
-          cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], -1.0, comp[c], (long)n_);
+          cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], ridt_, old[c], (long)n_);
+          cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], -ridt_, comp[c], (long)n_);
         }
         // Implicit-FOU deferred correction: b += dt*FOU(u^k) -> b = u^n + dt*f - dt*(Koren - FOU). This is
         // geometry-independent, needed whenever the velocity operator carries the implicit FOU term: the
         // IBM stencil As_[c] (rebuilt below) or the domain-BC vmg levels (built in the velocity solve). It
         // requires an operator that includes FOU, so only when ibm_enabled_ (As_) or vmg_enabled_ (levels).
         if (implicit_fou_ && (ibm_enabled_ || vmg_enabled_)) {
-          add_fou_rhs_k<0><<<grd_, blk_>>>(b_[0], u_, v_, w_, u_, ext_, g, dt_);
-          add_fou_rhs_k<1><<<grd_, blk_>>>(b_[1], u_, v_, w_, v_, ext_, g, dt_);
-          add_fou_rhs_k<2><<<grd_, blk_>>>(b_[2], u_, v_, w_, w_, ext_, g, dt_);
+          add_fou_rhs_k<0><<<grd_, blk_>>>(b_[0], u_, v_, w_, u_, ext_, g, rho_);
+          add_fou_rhs_k<1><<<grd_, blk_>>>(b_[1], u_, v_, w_, v_, ext_, g, rho_);
+          add_fou_rhs_k<2><<<grd_, blk_>>>(b_[2], u_, v_, w_, w_, ext_, g, rho_);
         }
         if (implicit_fou_ && ibm_enabled_) {
           // rebuild the IBM velocity stencil = diffusion + dt*FOU(u^k), then re-apply the IBM bake
@@ -695,13 +726,13 @@ class DistributedNS {
                                    As_[c][4], As_[c][5], As_[c][6]};
             if (c == 0)
               build_adv_stencil_k<0><<<grd_, blk_>>>(A[0], A[1], A[2], A[3], A[4], A[5], A[6], u_, v_,
-                                                     w_, ext_, g, beta, dt_);
+                                                     w_, ext_, g, beta, ridt_, rho_);
             else if (c == 1)
               build_adv_stencil_k<1><<<grd_, blk_>>>(A[0], A[1], A[2], A[3], A[4], A[5], A[6], u_, v_,
-                                                     w_, ext_, g, beta, dt_);
+                                                     w_, ext_, g, beta, ridt_, rho_);
             else
               build_adv_stencil_k<2><<<grd_, blk_>>>(A[0], A[1], A[2], A[3], A[4], A[5], A[6], u_, v_,
-                                                     w_, ext_, g, beta, dt_);
+                                                     w_, ext_, g, beta, ridt_, rho_);
             cfdmpi::ibmdetail::ibm_fill_k<<<blocks, threads>>>(descale_[c], 1.0, (long)n_);
             cudaMemset(inhom_[c], 0, n_ * 8);
             if (ibmdata_[c].num_active_cells > 0)
@@ -712,13 +743,13 @@ class DistributedNS {
           }
         }
       } else {
-        for (int c = 0; c < 3; ++c) rhs_k<<<grd_, blk_>>>(old[c], b_[c], dt_ * f[c], ext_, g);
+        for (int c = 0; c < 3; ++c) rhs_k<<<grd_, blk_>>>(old[c], b_[c], ridt_, f[c], ext_, g);
       }
 
       // incremental predictor: b_c -= dPhi/dx_c  (carry -grad(p^n)/rho into the momentum RHS, before
       // the IBM RHS scaling so it is descaled like the other source terms).
       if (incremental_)
-        sub_gradpot_k<<<grd_, blk_>>>(b_[0], b_[1], b_[2], phitot_, ext_, g);
+        sub_gradpot_k<<<grd_, blk_>>>(b_[0], b_[1], b_[2], p_, ext_, g);
 
     if (ibm_enabled_) {
       // Robust-Scaled cut-cell IBM: solve the IBM-modified stencil A_ibm comp = b - inhom (the Dirichlet
@@ -745,7 +776,7 @@ class DistributedNS {
           // component (static geometry, cheap). The fine-level IBM-cell residuals are filtered (vresmask_).
           vmg_.setDiffusionFine(As_[c]);
           vmg_.setVelocityStaircaseCoarse(vfine_[c], solidmask_[c], vtheta_lvl_.data(), vpin_lvl_.data(),
-                                          nu_ * dt_, 1.0, /*thresh=*/0.5, vresmask_[c]);
+                                          mu_, 1.0, /*thresh=*/0.5, vresmask_[c], ridt_);
           cfdmpi::MGLevel& l0 = vmg_.level(0);
           cudaMemcpy(l0.rhs, b_[c], n_ * 8, cudaMemcpyDeviceToDevice);
           cudaMemcpy(l0.x, comp[c], n_ * 8, cudaMemcpyDeviceToDevice);  // initial guess
@@ -816,8 +847,8 @@ class DistributedNS {
         // interior-only smoother), exactly the fine RB-GS representation; b_ already carries bc_brhs_.
         ensure_vmg_built();
         for (int c = 0; c < 3; ++c) {
-          vmg_.setDiffusionConstAllLevels(nu_ * dt_, 1.0);     // component-independent base
-          vmg_.setDiffusionBoundaryFold(c, bc_type_, nu_ * dt_, 1.0);  // component-dependent wall fold
+          vmg_.setDiffusionConstAllLevels(mu_, 1.0, ridt_);     // component-independent base (physical)
+          vmg_.setDiffusionBoundaryFold(c, bc_type_, mu_, 1.0);  // component-dependent wall fold
           mac_.exchange(comp[c]);
           apply_velocity_bc_comp(comp[c], c, /*fold=*/1);      // zero wall ghosts + set normal Dirichlet face
           cfdmpi::MGLevel& l0 = vmg_.level(0);
@@ -837,7 +868,7 @@ class DistributedNS {
         restrict_vmg_adv_velocities();
         for (int c = 0; c < 3; ++c) {
           build_vmg_adv_stencil(c, /*include_fine=*/true);            // diffusion + FOU on all levels
-          vmg_.setDiffusionBoundaryFold(c, bc_type_, nu_ * dt_, 1.0);  // wall fold (per component)
+          vmg_.setDiffusionBoundaryFold(c, bc_type_, mu_, 1.0);  // wall fold (per component, physical)
           mac_.exchange(comp[c]);
           apply_velocity_bc_comp(comp[c], c, /*fold=*/1);
           cfdmpi::MGLevel& l0 = vmg_.level(0);
@@ -935,10 +966,10 @@ class DistributedNS {
       }
     }  // outer Picard loop
 
-    // incremental-rotational pressure update, ONCE per step: Phi += phi - nu*dt*div(u*). phi_ is the
+    // incremental-rotational pressure update, ONCE per step: P += idt*phi - nu*div(u*). phi_ is the
     // final projection potential and div_ the final div(u*) (preserved past the convergence check).
     if (incremental_)
-      pot_update_k<<<grd_, blk_>>>(phitot_, phi_, div_, beta, ext_, g);
+      pot_update_k<<<grd_, blk_>>>(p_, phi_, div_, ridt_, mu_, ext_, g);
   }
 
  private:
@@ -1006,7 +1037,7 @@ class DistributedNS {
     apply_velocity_bc_comp(v_, 1, 0, do_outflow);
     apply_velocity_bc_comp(w_, 2, 0, do_outflow);
   }
-  // Precompute the implicit-diffusion face-fold (once; beta = nu*dt is fixed): per component, a diagonal
+  // Precompute the implicit-diffusion face-fold (once; beta = nu is fixed, divided convention): per component, a diagonal
   // correction bc_dcorr_[c] and an RHS fold bc_brhs_[c] at the boundary-adjacent inner cells.
   //   Dirichlet wall (tangential only): dcorr += beta, brhs += 2*beta*wall   (drop the 2*wall-u ghost).
   //   Zero-gradient outflow (every comp): dcorr -= beta, brhs += 0           (drop the u_inner ghost).
@@ -1014,7 +1045,7 @@ class DistributedNS {
   // lagged boundary ghost in the implicit solve.
   void setup_bc_diffusion() {
     if (!has_domain_bc_ || bc_diff_built_) return;
-    double beta = nu_ * dt_;
+    double beta = mu_;  // physical: the diffusion operator off-diagonal is -mu, so the fold uses beta = mu
     bool atlo[3], athi[3];
     bc_face_flags(atlo, athi);
     int g = mac_.ghost, dims[3] = {ext_.x, ext_.y, ext_.z};
@@ -1118,7 +1149,7 @@ class DistributedNS {
       }
       // domain-BC: allocate the per-level operator arrays (AC..AT) and set the const-coeff MG flags
       // (galerkin off, no mean removal); build_vmg_adv_stencil then overwrites them each Picard iteration.
-      if (has_domain_bc_) vmg_.setDiffusionConstAllLevels(nu_ * dt_, 1.0);
+      if (has_domain_bc_) vmg_.setDiffusionConstAllLevels(mu_, 1.0, ridt_);
     }
     // IBM staircase coarse-op scratch (diffusion-only path): per coarse level, the coarse volume fraction
     // theta + the binary staircase pin mask (theta<0.5). Reused across the 3 components and across steps
@@ -1174,7 +1205,7 @@ class DistributedNS {
           cudaMalloc(p, c.n * sizeof(cfdmpi::mreal));
       c.variable = true;
       double hx = (double)c.cfac.x, hy = (double)c.cfac.y, hz = (double)c.cfac.z;  // h0 = 1
-      double bx = nu_ * dt_ / (hx * hx), by = nu_ * dt_ / (hy * hy), bz = nu_ * dt_ / (hz * hz);
+      double bx = mu_ / (hx * hx), by = mu_ / (hy * hy), bz = mu_ / (hz * hz);  // physical: beta = mu
       double sx = 1.0 / hx, sy = 1.0 / hy, sz = 1.0 / hz;
       dim3 grd((c.ext.x + 7) / 8, (c.ext.y + 7) / 8, (c.ext.z + 3) / 4);
       double* u = (L == 0) ? l0[0] : vadv_u_[L];
@@ -1182,13 +1213,13 @@ class DistributedNS {
       double* w = (L == 0) ? l0[2] : vadv_w_[L];
       if (comp == 0)
         detail::build_adv_coarse_stencil_k<0><<<grd, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, u, v,
-                                                    w, c.ext, c.g, bx, by, bz, dt_, sx, sy, sz);
+                                                    w, c.ext, c.g, bx, by, bz, rho_, sx, sy, sz, ridt_);
       else if (comp == 1)
         detail::build_adv_coarse_stencil_k<1><<<grd, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, u, v,
-                                                    w, c.ext, c.g, bx, by, bz, dt_, sx, sy, sz);
+                                                    w, c.ext, c.g, bx, by, bz, rho_, sx, sy, sz, ridt_);
       else
         detail::build_adv_coarse_stencil_k<2><<<grd, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, u, v,
-                                                    w, c.ext, c.g, bx, by, bz, dt_, sx, sy, sz);
+                                                    w, c.ext, c.g, bx, by, bz, rho_, sx, sy, sz, ridt_);
     }
   }
   // Cap the requested MG level count so no axis coarsens below 2 cells (else the ORB decomposer divides
@@ -1230,7 +1261,7 @@ class DistributedNS {
 
   MacGridHalo mac_;
   MPI_Comm comm_ = MPI_COMM_WORLD;
-  double nu_ = 0, dt_ = 0, fx_ = 0, fy_ = 0, fz_ = 0;
+  double rho_ = 1, mu_ = 0, dt_ = 0, idt_ = 0, ridt_ = 0, fx_ = 0, fy_ = 0, fz_ = 0;
   bool has_solid_ = false;
   bool advection_ = false;
   bool implicit_fou_ = false;
@@ -1239,9 +1270,10 @@ class DistributedNS {
   dim3 blk_, grd_;
   double *u_ = nullptr, *v_ = nullptr, *w_ = nullptr, *phi_ = nullptr, *div_ = nullptr,
          *solid_ = nullptr;
-  // incremental-rotational pressure: accumulated velocity potential Phi (= dt/rho * pressure)
-  double* phitot_ = nullptr;
-  bool incremental_ = false;
+  // Physical pressure p. Under the incremental-rotational scheme it is the accumulated pressure; under
+  // classical Chorin it is the per-step p = (rho/dt)*phi (derived on demand in pressure_potential()).
+  double* p_ = nullptr;
+  bool incremental_ = true;
   double* b_[3] = {nullptr, nullptr, nullptr};
   // Picard outer loop: time-base u^n (old) + per-iteration snapshot (prev) for the convergence test
   double *u_old_ = nullptr, *v_old_ = nullptr, *w_old_ = nullptr;

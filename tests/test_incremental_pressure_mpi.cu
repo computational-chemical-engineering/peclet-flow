@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
   const double nu = 0.1, dt = 60.0, fx = 1e-3;
 
   DistributedNS s;
-  s.init(res, rank, size, nu, dt);
+  s.init(res, rank, size, 1.0, nu, dt);
   s.set_body_force(fx, 0.0, 0.0);
   s.set_advection(false);                 // creeping (Stokes)
   s.set_incremental_pressure(true);       // <-- the scheme under test

@@ -194,7 +194,7 @@ int main(int argc, char** argv) {
   cudaMalloc(&dIN, nl * 8);
   cudaMemset(dIN, 0, nl * 8);
   dim3 gE((e.x + 7) / 8, (e.y + 7) / 8, (e.z + 7) / 8);
-  ibm_build_diffusion_k<<<gE, blk>>>(dAC, dAW, dAE, dAS, dAN, dAB, dAT, e, beta);
+  ibm_build_diffusion_k<<<gE, blk>>>(dAC, dAW, dAE, dAS, dAN, dAB, dAT, e, beta, /*idiag=*/1.0);
   cudaMemcpy(&d_ibm.num_active_cells, cnt, sizeof(int), cudaMemcpyDeviceToHost);
   if (d_ibm.num_active_cells > 0)
     ibm_modify_stencil_k<<<(d_ibm.num_active_cells + 255) / 256, 256>>>(
