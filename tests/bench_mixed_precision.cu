@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
   double sm_bytes = 7.0 * S + 6 * 8 + 8 + 8;
   auto smooth = [&]() {
     cfdmpi::mgdetail::mg_smooth_var_k<<<grd, blk>>>(l0.x, l0.rhs, l0.AC, l0.AW, l0.AE, l0.AS, l0.AN,
-                                                    l0.AB, l0.AT, l0.ext, l0.og, l0.g, 0);
+                                                    l0.AB, l0.AT, nullptr, l0.ext, l0.og, l0.g, 0);
   };
   // matvec: read 7 op + 7 x(double), write 1 y(double)
   double mv_bytes = 7.0 * S + 7 * 8 + 8;

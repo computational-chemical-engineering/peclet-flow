@@ -81,7 +81,7 @@ static void run(int rank, int size, int3 res, int nlev, int nv, int pre, int pos
   dim3 grd((l0.inner.x + 7) / 8, (l0.inner.y + 7) / 8, (l0.inner.z + 7) / 8);
   l0.mac.exchange(l0.x);
   cfdmpi::mgdetail::mg_residual_var_k<<<grd, blk>>>(l0.res, l0.x, l0.rhs, l0.AC, l0.AW, l0.AE, l0.AS,
-                                                    l0.AN, l0.AB, l0.AT, l0.ext, l0.g);
+                                                    l0.AN, l0.AB, l0.AT, nullptr, l0.ext, l0.g);
   rf = cfdmpi::mac_max_abs(l0.res, l0.mac, MPI_COMM_WORLD);
   mg.free();
 }

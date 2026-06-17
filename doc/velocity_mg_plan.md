@@ -162,28 +162,38 @@ paths are byte-identical, 72/72 green). What shipped:
     the residual geometrically (51→0.26→0.014→…, ρ≈0.06–0.13).
   - **72/72 ctests green** (default paths byte-identical).
 
-**IBM-path rediscretized coarse op — DONE (opt-in; RB-GS stays the DEFAULT).**
-`set_velocity_mg_volfrac(on, eps=0.1, res_mask=True)` selects the rediscretized velocity coarse operator:
-coarsened **volume fraction** θ (diagonal `1 + Σβ_f`, ε-solid identity rows) + coarsened **area fractions**
-`α_f` for the diffusion fluxes (`β_f = νΔt·α_f/h²`), mirroring the proven rediscretized *pressure* MG; plus the
-clean-fluid-interior coupling (Phase 3, `res_mask`). Off by default — plain RB-GS remains the default IBM
-velocity solve. Validated (`scripts/verify_velocity_mg_volfrac_zh_sdflow.py`, Z&H SC sphere): **exact RB-GS
-drag** (0.000%) and **stable where the geometry-blind const coarse op diverges** (dt=200, β=20: const→NaN). The
-area fractions raised the stable ceiling to **dt=400 at φ=0.216** (was dt=200 with the `min(θ)` coefficient);
-dense φ=0.5236 stays dt=200. 72/72 ctests green (default path byte-identical).
+**IBM-path coarse op — DONE (opt-in; RB-GS stays the DEFAULT).**
+`set_velocity_mg_volfrac(on, eps=0.1, res_mask=True, staircase=True)`. Off by default — plain RB-GS remains the
+default IBM velocity solve; 72/72 ctests green (default path byte-identical). Three coarse-operator variants
+were built and measured on the Z&H SC sphere (`scripts/verify_velocity_mg_volfrac_zh_sdflow.py`), all with the
+clean-fluid fine-level residual exclude (`res_mask`); all give the **exact RB-GS drag** (0.000%):
 
-> **Time-step restriction.** Stable to ~β=νΔt≈20–40 (φ-dependent); beyond that the V-cycle diverges. So it is
-> an opt-in large-Δt steady-state accelerator within that window, **not** unconditionally stable like RB-GS.
-> **⇒ RB-GS is the default.**
+| coarse operator | stable dt ceiling (β=νΔt) |
+|---|---|
+| const-coeff (geometry-blind) | dt≈200 |
+| rediscretized **area fractions** (θ diag, α_f fluxes) | dt≈400 (φ=0.216), 200 (φ=0.5236) |
+| **STAIRCASE** (θ≥0.5 fluid / <0.5 solid-pinned, plain const-coeff coeffs) — **DEFAULT** | **dt≈6400 both φ** |
+
+**The staircase operator (Frank's idea) essentially removes the dt restriction** and is the default: on the
+coarse levels the volume fraction is used ONLY to classify cells (θ≥0.5 fluid, θ<0.5 solid pinned to 0 — a
+first-order staircase no-slip); a plain const-coeff Helmholtz is built at fluid cells (**no area/volume
+fractions in the coefficients**). The binary classification disconnects fluid pockets across resolved walls
+(the const-coarse failure mode) without the weak partial-cell coupling that capped the area-fraction operator.
+Pinning is a new `MGLevel::pin` + `pin` arg on the smoother/residual kernels (nullptr ⇒ pressure MG
+bit-identical). V-cycle ρ≈0.23.
+
+> **Caveat — packed beds.** Validated on the SC sphere (one connected solid). For real packed beds the coarsest
+> level must stay fine enough to still resolve the thinnest inter-particle walls (else θ>0.5 everywhere → pockets
+> reconnect → the const-coarse failure returns); cap `levels` accordingly. A genuine packed-bed test is still
+> wanted before relying on it there.
 
 **Measured dead-ends (do not retry blindly):**
-- **Coupling the partial cells (dropping `res_mask`) diverges at dt=200 even with ONE coarsening level.** The
-  overshoot is at the first coarse correction into the row-scaled IBM cut/solid cells, *independent of
-  coarsening depth* — so a **pore-scale coarsening cap cannot enable coupling** (it's at best a minor compute
-  saving with the exclude mask on). The clean-fluid exclude mask is **required**.
-- The corrected lever for coupling is **Brinkman/Darcy drag** on partial coarse cells (the coarse op overshoots
-  because it lacks the wall resistance the fine IBM imposes), *not* capping — but it needs a permeability model
-  and is unproven. Deferred.
+- **Coupling the partial cells (dropping `res_mask`) diverges at dt=200 even with ONE coarsening level** — the
+  overshoot into the row-scaled IBM cut/solid cells is independent of coarsening depth, so a pore-scale cap
+  cannot enable coupling. The clean-fluid exclude mask is **required**.
+- Using the volume/area fractions AS COEFFICIENTS (area-fraction op) is *worse* than the staircase (weak
+  partial-cell coupling). Brinkman/Darcy on partial cells was the hypothesised coupling fix — moot now that the
+  staircase removes the restriction without coupling.
 
 Open: a genuine packed-bed (thin-solid-wall) benchmark vs RB-GS to size the real payoff (RB-GS converges in
 O(pore-cells) sweeps for beds). The BFS (open-boundary) case is wired by the same domain-BC path but not yet

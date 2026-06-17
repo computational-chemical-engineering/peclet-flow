@@ -144,8 +144,8 @@ __global__ void mg_diffusion_bc_fold_k(mreal* AC, int3 ext, int g, int a, int s,
 
 __global__ void mg_smooth_var_k(double* __restrict__ x, const double* __restrict__ b,
                                 const mreal* AC, const mreal* AW, const mreal* AE, const mreal* AS,
-                                const mreal* AN, const mreal* AB, const mreal* AT, int3 ext, int3 og,
-                                int g, int color) {
+                                const mreal* AN, const mreal* AB, const mreal* AT, const double* pin,
+                                int3 ext, int3 og, int g, int color) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
   int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
@@ -153,6 +153,7 @@ __global__ void mg_smooth_var_k(double* __restrict__ x, const double* __restrict
   if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color) return;
   size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
+  if (pin && pin[i] > 0.5) { x[i] = 0.0; return; }  // pinned (classified-solid) cell -> Dirichlet 0
   double ac = AC[i];
   if (ac < 1e-30) return;  // fully closed (solid) cell
   double s = (double)AE[i] * x[i + sx] + (double)AW[i] * x[i - sx] + (double)AN[i] * x[i + sy] +
@@ -163,13 +164,14 @@ __global__ void mg_smooth_var_k(double* __restrict__ x, const double* __restrict
 __global__ void mg_residual_var_k(double* __restrict__ r, const double* __restrict__ x,
                                   const double* __restrict__ b, const mreal* AC, const mreal* AW,
                                   const mreal* AE, const mreal* AS, const mreal* AN, const mreal* AB,
-                                  const mreal* AT, int3 ext, int g) {
+                                  const mreal* AT, const double* pin, int3 ext, int g) {
   int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
   int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
   int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
   if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
   size_t sx = 1, sy = ext.x, sz = (size_t)ext.x * ext.y;
   size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * sz;
+  if (pin && pin[i] > 0.5) { r[i] = 0.0; return; }  // pinned cell: residual 0 (excluded from coarsening)
   // Ax with the float operator, accumulated in double (the residual floor is set by A's float storage).
   double Ax = (double)AC[i] * x[i] + (double)AE[i] * x[i + sx] + (double)AW[i] * x[i - sx] +
               (double)AN[i] * x[i + sy] + (double)AS[i] * x[i - sy] + (double)AT[i] * x[i + sz] +
@@ -455,6 +457,38 @@ __global__ void mg_build_velocity_op_areafrac_k(mreal* AC, mreal* AW, mreal* AE,
   AC[i] = (mreal)(1.0 + tw + te + ts + tn + tb + tt);  // I term = 1 (point eq) + area-weighted face fluxes
 }
 
+// STAIRCASE velocity coarse operator: plain CONSTANT-COEFFICIENT Helmholtz (per-axis beta, NO area/volume
+// fractions in the coefficients) at cells CLASSIFIED fluid (theta >= thresh), and an identity row at cells
+// classified solid (theta < thresh, pinned to 0 -> a first-order staircase no-slip). The fluid stencil keeps
+// its full -beta coupling to solid neighbours, which (being pinned 0) act as Dirichlet walls. O(1) diagonal,
+// M-matrix, well-conditioned; the binary classification disconnects fluid pockets across resolved walls (the
+// const-coeff op's failure mode) without the weak partial-cell coupling of the area-fraction operator. thresh
+// = 0.5 (majority). The coarsest level must stay fine enough that the staircase still resolves the walls.
+__global__ void mg_build_velocity_op_staircase_k(mreal* AC, mreal* AW, mreal* AE, mreal* AS, mreal* AN,
+                                                mreal* AB, mreal* AT, const double* th, int3 ext, int g,
+                                                double bx, double by, double bz, double thresh) {
+  int lx = blockIdx.x * blockDim.x + threadIdx.x + g;
+  int ly = blockIdx.y * blockDim.y + threadIdx.y + g;
+  int lz = blockIdx.z * blockDim.z + threadIdx.z + g;
+  if (lx >= ext.x - g || ly >= ext.y - g || lz >= ext.z - g) return;
+  size_t i = (size_t)lx + (size_t)ly * ext.x + (size_t)lz * (size_t)ext.x * ext.y;
+  if (th[i] < thresh) {  // classified solid -> identity row (smoother/residual pin it to 0)
+    AC[i] = (mreal)1.0;
+    AW[i] = AE[i] = AS[i] = AN[i] = AB[i] = AT[i] = (mreal)0.0;
+    return;
+  }
+  AC[i] = (mreal)(1.0 + 2.0 * (bx + by + bz));
+  AW[i] = (mreal)(-bx); AE[i] = (mreal)(-bx);
+  AS[i] = (mreal)(-by); AN[i] = (mreal)(-by);
+  AB[i] = (mreal)(-bz); AT[i] = (mreal)(-bz);
+}
+
+// binary staircase classification mask over the whole extended block: m = 1 where theta < thresh (solid).
+__global__ void mg_threshold_mask_k(double* m, const double* th, double thresh, long n) {
+  long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) m[i] = (th[i] < thresh) ? 1.0 : 0.0;
+}
+
 // Volume-weighted restriction: coarse = sum(theta_f * r_f) / sum(theta_f) over the children. Weighting the
 // fine residual (= the wall force near the boundary) by its fluid fraction makes the fine-partial ->
 // coarse transfer consistent across the immersed boundary -- the fix for the cut-cell skin bias. Reduces to
@@ -559,6 +593,7 @@ struct MGLevel {
   double* cheb_p = nullptr;  // Chebyshev smoother direction vector (when enabled)
   const double* vol = nullptr;  // borrowed: fluid volume fraction theta (velocity volfrac-MG transfers)
   const double* res_mask = nullptr;  // borrowed: zero the residual here before restriction (IBM cut cells)
+  const double* pin = nullptr;  // borrowed: pin these cells to 0 in smoother/residual (staircase-solid)
 };
 
 /// @brief Distributed geometric multigrid V-cycle solver for the pressure Poisson system.
@@ -861,6 +896,7 @@ class DistributedPoissonMG {
         cudaMalloc(p, f.n * sizeof(mreal));
     f.variable = true;
     f.res_mask = nullptr;  // default: no residual masking (the volfrac path re-sets it per component)
+    f.pin = nullptr;       // default: no smoother pin (the staircase path re-sets it per component)
     mreal* fdst[7] = {f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT};
     for (int k = 0; k < 7; ++k)
       cudaMemcpy(fdst[k], fineA[k], f.n * sizeof(mreal), cudaMemcpyDeviceToDevice);
@@ -913,7 +949,54 @@ class DistributedPoissonMG {
       dim3 gIn((c.inner.x + 7) / 8, (c.inner.y + 7) / 8, (c.inner.z + 7) / 8);
       mgdetail::mg_build_velocity_op_areafrac_k<<<gIn, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, th,
                                                              ax, ay, az, c.ext, c.g, bx, by, bz, eps);
+      c.pin = nullptr;  // area-fraction path does not pin (eps-solid identity rows handle it)
       tf = th;  axf = ax;  ayf = ay;  azf = az;
+    }
+    levels_[0]->pin = nullptr;
+  }
+
+  // STAIRCASE velocity coarse operator (IBM momentum MG, Frank's variant). Level 0 stays the sharp IBM
+  // stencil As_[c] (caller's setDiffusionFine); its solid cells are pinned to 0 (solidmask0) in the smoother
+  // and its IBM-cell residuals are filtered (lvl0_res_mask). Coarse levels: coarsen theta only to CLASSIFY
+  // cells (theta < thresh -> solid, pinned; else fluid), and build a PLAIN const-coeff Helmholtz at fluid
+  // cells (NO area/volume fractions in the coefficients) -- a first-order staircase. cth/cmask: caller scratch
+  // per coarse level (coarse theta + the binary staircase pin mask). thresh = 0.5.
+  void setVelocityStaircaseCoarse(const double* theta0, const double* solidmask0, double* const cth[],
+                                  double* const cmask[], double nu_dt, double h0, double thresh,
+                                  const double* lvl0_res_mask) {
+    galerkin_ = false;
+    remove_mean_ = false;
+    vel_volfrac_ = true;
+    vel_mask_xfer_ = false;
+    vel_eps_ = thresh;
+    levels_[0]->vol = theta0;
+    levels_[0]->res_mask = lvl0_res_mask;
+    levels_[0]->pin = solidmask0;  // pin the fine solid cells to 0 in the (mg_smooth_var) level-0 smoother
+    dim3 blk(8, 8, 8);
+    const double* tf = theta0;
+    for (int L = 1; L < (int)levels_.size(); ++L) {
+      MGLevel& c = *levels_[L];
+      MGLevel& f = *levels_[L - 1];
+      if (!c.AC)
+        for (mreal** p : {&c.AC, &c.AW, &c.AE, &c.AS, &c.AN, &c.AB, &c.AT})
+          cudaMalloc(p, c.n * sizeof(mreal));
+      c.variable = true;
+      double* th = cth[L];
+      double* pm = cmask[L];
+      dim3 cgrd((c.inner.x + 7) / 8, (c.inner.y + 7) / 8, (c.inner.z + 7) / 8);
+      mgdetail::mg_restrict_k<<<cgrd, blk>>>(th, tf, c.ext, f.ext, f.g, c.inner, f.ratio);  // coarse theta
+      c.mac.exchange(th);
+      c.vol = th;
+      long blocks = (c.n + 255) / 256;
+      mgdetail::mg_threshold_mask_k<<<blocks, 256>>>(pm, th, thresh, (long)c.n);  // 1 where theta < thresh
+      c.pin = pm;
+      double bx = nu_dt / ((h0 * c.cfac.x) * (h0 * c.cfac.x)),
+             by = nu_dt / ((h0 * c.cfac.y) * (h0 * c.cfac.y)),
+             bz = nu_dt / ((h0 * c.cfac.z) * (h0 * c.cfac.z));
+      dim3 gIn((c.inner.x + 7) / 8, (c.inner.y + 7) / 8, (c.inner.z + 7) / 8);
+      mgdetail::mg_build_velocity_op_staircase_k<<<gIn, blk>>>(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, th,
+                                                              c.ext, c.g, bx, by, bz, thresh);
+      tf = th;
     }
   }
 
@@ -1173,7 +1256,7 @@ class DistributedPoissonMG {
         lv.mac.exchange(lv.x);
         if (lv.variable)
           mgdetail::mg_smooth_var_k<<<grd, blk>>>(lv.x, lv.rhs, lv.AC, lv.AW, lv.AE, lv.AS, lv.AN,
-                                                  lv.AB, lv.AT, lv.ext, lv.og, lv.g, color);
+                                                  lv.AB, lv.AT, lv.pin, lv.ext, lv.og, lv.g, color);
         else
           mgdetail::mg_smooth_k<<<grd, blk>>>(lv.x, lv.rhs, lv.ext, lv.og, lv.g, h2, color);
       }
@@ -1209,7 +1292,7 @@ class DistributedPoissonMG {
     lv.mac.exchange(lv.x);
     if (lv.variable)
       mgdetail::mg_residual_var_k<<<grd, blk>>>(lv.res, lv.x, lv.rhs, lv.AC, lv.AW, lv.AE, lv.AS,
-                                                lv.AN, lv.AB, lv.AT, lv.ext, lv.g);
+                                                lv.AN, lv.AB, lv.AT, lv.pin, lv.ext, lv.g);
     else
       mgdetail::mg_residual_k<<<grd, blk>>>(lv.res, lv.x, lv.rhs, lv.ext, lv.g, 1.0 / (lv.h * lv.h));
   }

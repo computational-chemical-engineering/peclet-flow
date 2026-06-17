@@ -430,10 +430,11 @@ class DistributedNS {
   // volume-weighted transfers for the IBM velocity-MG, instead of the geometry-blind const-coeff coarse.
   // Opt-in (default off = const-coeff, byte-identical). eps = volume fraction below which a COARSE cell is
   // treated as solid (small-cell fix, safe on coarse levels only). Requires set_ibm_solid + vmg enabled.
-  void set_velocity_mg_volfrac(bool on, double eps = 0.1, bool res_mask = true) {
+  void set_velocity_mg_volfrac(bool on, double eps = 0.1, bool res_mask = true, bool staircase = true) {
     vmg_volfrac_ = on;
     vmg_eps_ = eps;
     vmg_res_mask_ = res_mask;  // clean-fluid exclude-mask (required for stability; see member note)
+    vmg_staircase_ = staircase;  // const-coeff staircase coarse op (default; vs the area-fraction operator)
   }
 
   // Robust-Scaled cut-cell IBM no-slip for the momentum solve, from an SDF (extended-block layout, all
@@ -756,7 +757,11 @@ class DistributedNS {
           // opt-in: geometry-aware volume-fraction coarse op (smoothed momentum balance) + masked
           // volume-weighted transfers, rebuilt per component (static geometry, cheap). Level 0 stays As_[c]
           // -> the residual + smoother use the TRUE operator, so the fixed point is the exact sharp solution.
-          if (vmg_volfrac_)
+          if (vmg_volfrac_ && vmg_staircase_)
+            vmg_.setVelocityStaircaseCoarse(vfine_[c], solidmask_[c], vtheta_lvl_.data(), vax_lvl_.data(),
+                                            nu_ * dt_, 1.0, /*thresh=*/0.5,
+                                            vmg_res_mask_ ? vresmask_[c] : nullptr);
+          else if (vmg_volfrac_)
             vmg_.setVelocityVolfracCoarse(vfine_[c], vax_[c], vay_[c], vaz_[c], vtheta_lvl_.data(),
                                           vax_lvl_.data(), vay_lvl_.data(), vaz_lvl_.data(), nu_ * dt_, 1.0,
                                           vmg_eps_, vmg_res_mask_ ? vresmask_[c] : nullptr);
@@ -1287,6 +1292,8 @@ class DistributedNS {
   // fine fluid volume fraction theta (static, from the SDF); vtheta_lvl_ = coarse theta scratch reused
   // across components/levels (index L>=1). See doc/velocity_mg_plan.md (Phases 1+3; NOT the un-scale).
   bool vmg_volfrac_ = false;
+  bool vmg_staircase_ = false;  // coarse op = const-coeff staircase (theta>0.5 fluid / <0.5 solid-pinned),
+                                // NO area/volume fractions in the coefficients (Frank's variant)
   bool vmg_res_mask_ = true;   // clean-fluid exclude-mask: REQUIRED for stability (coupling the row-scaled
                                // IBM cut/solid cells to any coarse grid overshoots at large beta, even at 1
                                // level -- capping depth does not help; only excluding them does)
