@@ -162,42 +162,43 @@ paths are byte-identical, 72/72 green). What shipped:
     the residual geometrically (51→0.26→0.014→…, ρ≈0.06–0.13).
   - **72/72 ctests green** (default paths byte-identical).
 
-**IBM-path coarse op — DONE (opt-in; RB-GS stays the DEFAULT).**
-`set_velocity_mg_volfrac(on, eps=0.1, res_mask=True, staircase=True)`. Off by default — plain RB-GS remains the
-default IBM velocity solve; 72/72 ctests green (default path byte-identical). Three coarse-operator variants
-were built and measured on the Z&H SC sphere (`scripts/verify_velocity_mg_volfrac_zh_sdflow.py`), all with the
-clean-fluid fine-level residual exclude (`res_mask`); all give the **exact RB-GS drag** (0.000%):
+## IBM-path coarse operator — CONSOLIDATED to the STAIRCASE (opt-in; RB-GS stays the DEFAULT)
 
-| coarse operator | stable dt ceiling (β=νΔt) |
-|---|---|
-| const-coeff (geometry-blind) | dt≈200 |
-| rediscretized **area fractions** (θ diag, α_f fluxes) | dt≈400 (φ=0.216), 200 (φ=0.5236) |
-| **STAIRCASE** (θ≥0.5 fluid / <0.5 solid-pinned, plain const-coeff coeffs) — **DEFAULT** | **dt≈6400 both φ** |
+The IBM velocity-MG (`set_velocity_multigrid(on, levels, vcycles)` with `set_ibm_solid`) uses the **staircase**
+coarse operator — the *only* IBM coarse operator now (the geometry-blind const-coeff and the area-fraction
+variants were built, measured, and **removed** after the staircase dominated both). Off by default — plain
+RB-GS remains the default IBM velocity solve; 72/72 ctests green (default path byte-identical).
 
-**The staircase operator (Frank's idea) essentially removes the dt restriction** and is the default: on the
-coarse levels the volume fraction is used ONLY to classify cells (θ≥0.5 fluid, θ<0.5 solid pinned to 0 — a
-first-order staircase no-slip); a plain const-coeff Helmholtz is built at fluid cells (**no area/volume
-fractions in the coefficients**). The binary classification disconnects fluid pockets across resolved walls
-(the const-coarse failure mode) without the weak partial-cell coupling that capped the area-fraction operator.
-Pinning is a new `MGLevel::pin` + `pin` arg on the smoother/residual kernels (nullptr ⇒ pressure MG
-bit-identical). V-cycle ρ≈0.23.
+**The staircase operator** (`setVelocityStaircaseCoarse`, `mg_build_velocity_op_staircase_k`):
+- **Fine level** = the sharp row-based IBM stencil `As_[c]` (so the residual + smoother use the TRUE operator
+  and the fixed point is the exact sharp solution). Its solid cells are pinned to 0 in the smoother, and its
+  **IBM-cell residuals are filtered before restriction** (the clean-fluid exclude mask `ibm_clean_fluid_mask_k`
+  = 0 at cut+solid; restriction `mg_mul_mask_k`, masked prolong `mg_prolong_masked_k`). This exclude is
+  **required** — coupling the row-scaled IBM cut/solid cells to any coarse grid overshoots at large β (even at
+  one level; a pore-scale coarsening *cap* does not help — measured).
+- **Coarse levels** use the volume fraction θ ONLY to **classify** cells: θ≥0.5 fluid, θ<0.5 solid (pinned to
+  0 — a first-order staircase no-slip). A **plain const-coeff Helmholtz** is built at fluid cells (per-axis β;
+  **no area/volume fractions in the coefficients** — that was the area-fraction op, whose weak partial-cell
+  coupling capped it). Pinning is `MGLevel::pin` + a `pin` arg on `mg_smooth_var_k`/`mg_residual_var_k`
+  (nullptr ⇒ the pressure MG is bit-identical). The binary classification disconnects fluid pockets across
+  resolved walls — the failure mode of the geometry-blind const-coarse — so it's stable AND geometry-aware.
 
-**Packed-bed validated** (`scripts/verify_velocity_mg_staircase_packing_sdflow.py`, random periodic sphere
-packings): moderate bed (21 sph, φ=0.245, N=64) — staircase exact (0.000%) + stable at dt=800 where const
-(0.19%→NaN) and area-fraction (NaN) both fail; dense thin-neck bed (53 sph, φ=0.29, ~1-cell necks, N=128) —
-staircase exact (0.000–0.010% vs RB-GS) and stable to **dt=3200 (β=320)** with 16 V-cycles (the ceiling rises
-with V-cycle count; thin necks lower it vs the SC sphere's dt=6400). Exact across coarsening levels 2–6 — deep
-coarsening only affects the *rate*, not the answer (the fine smoother + exclude mask own the boundary), so
-`levels` is a tuning knob, not a correctness requirement. The staircase velocity-MG handles packed beds.
+**Validated** — exact (== RB-GS, 0.000%) and stable to very large Δt:
+- SC sphere (`scripts/verify_velocity_mg_staircase_zh_sdflow.py`): exact; stable to dt≈6400 (β=640) both φ.
+- Packed beds (`scripts/verify_velocity_mg_staircase_packing_sdflow.py`, random periodic sphere packings):
+  moderate (21 sph, φ=0.245) and dense thin-neck (53 sph, φ=0.29, ~1-cell necks) — exact (0.000–0.010%),
+  stable to dt=800–3200 (β up to 320; the ceiling rises with V-cycle count), and **exact across coarsening
+  levels 2–6** (deep coarsening only affects the *rate*, not the answer, since the fine smoother + exclude
+  mask own the boundary — so `levels` is a tuning knob, not a correctness requirement). V-cycle ρ≈0.23.
 
-**Measured dead-ends (do not retry blindly):**
-- **Coupling the partial cells (dropping `res_mask`) diverges at dt=200 even with ONE coarsening level** — the
-  overshoot into the row-scaled IBM cut/solid cells is independent of coarsening depth, so a pore-scale cap
-  cannot enable coupling. The clean-fluid exclude mask is **required**.
-- Using the volume/area fractions AS COEFFICIENTS (area-fraction op) is *worse* than the staircase (weak
-  partial-cell coupling). Brinkman/Darcy on partial cells was the hypothesised coupling fix — moot now that the
-  staircase removes the restriction without coupling.
+**Why conserve this** (it is not a big efficiency win on the current uniform grid — RB-GS converges in
+O(pore-cells) sweeps for beds, and at high res the pressure solve dominates the step): the staircase
+multigrid is the natural coarse operator for a future **AMR with extreme refinement near contact points**,
+where the velocity solve becomes genuinely stiff/multiscale and an O(1)-V-cycle solver pays off. The exact,
+unconditionally-stable behaviour (fine IBM smoother + clean-fluid exclude + staircase coarse) is exactly what
+an AMR hierarchy needs. Keep it intact.
 
-Open: a genuine packed-bed (thin-solid-wall) benchmark vs RB-GS to size the real payoff (RB-GS converges in
-O(pore-cells) sweeps for beds). The BFS (open-boundary) case is wired by the same domain-BC path but not yet
-separately benchmarked at high Re.
+**Measured dead-ends (do not retry blindly):** (a) un-scaling the residual by 1/D_rescale — amplifies thin
+slivers, and unnecessary (the true residual already gives the exact fixed point); (b) coupling the partial
+cells (dropping the exclude mask) — diverges at dt=200 even at one coarsening level, so a pore-scale cap
+cannot rescue it; (c) volume/area fractions AS COEFFICIENTS — strictly worse than the staircase. All removed.

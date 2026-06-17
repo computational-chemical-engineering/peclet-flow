@@ -47,22 +47,17 @@ def packing_sdf(N, R, target_phi, gap=2.0, seed=0):
     return sdf, len(centers), float((sdf < 0).mean())
 
 
-def run(sdf, mode, dt, vcyc=12, levels=4, mu=0.1, f=1e-3, steps=500, tol=1e-7):
+def run(sdf, mode, dt, vcyc=16, levels=4, mu=0.1, f=1e-3, steps=600, tol=1e-7):
+    """mode: 'rbgs' (plain RB-GS reference) | 'vmg' (the staircase velocity-MG, via set_velocity_multigrid)."""
     N = sdf.shape[0]
     s = sdflow.Solver(N, N, N)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(f, 0, 0); s.set_advection(False)
     if mode == "rbgs":
         s.set_velocity_solver_params(400)
     else:
-        s.set_velocity_multigrid(True, levels, vcyc)
-        if mode == "const":
-            pass                                              # geometry-blind const-coeff coarse (no volfrac)
-        elif mode == "area":
-            s.set_velocity_mg_volfrac(True, 0.1, True, False)  # area-fraction operator
-        elif mode == "stair":
-            s.set_velocity_mg_volfrac(True, 0.1, True, True)   # staircase operator
+        s.set_velocity_multigrid(True, levels, vcyc)          # IBM -> staircase coarse op (the default)
     plv = max(2, int(np.log2(N)) - 1)
-    s.set_pressure_multigrid(True, levels=plv); s.set_pressure_pcg(True, max_iter=200, rtol=1e-8)
+    s.set_pressure_multigrid(True, levels=plv); s.set_pressure_pcg(True, max_iter=300, rtol=1e-9)
     s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
     prev = 0.0
     for it in range(steps):
@@ -81,23 +76,27 @@ def main():
     N = int(os.environ.get("VMG_N", 64))
     R = float(os.environ.get("VMG_R", 9.0))
     phi = float(os.environ.get("VMG_PHI", 0.35))
-    sdf, nsph, phi_act = packing_sdf(N, R, phi, seed=int(os.environ.get("VMG_SEED", 1)))
-    print(f"=== packed bed: {nsph} spheres R={R:.0f} in {N}^3, solid phi={phi_act:.3f} ===")
+    gap = float(os.environ.get("VMG_GAP", 2.0))
+    sdf, nsph, phi_act = packing_sdf(N, R, phi, gap=gap, seed=int(os.environ.get("VMG_SEED", 1)))
+    print(f"=== packed bed: {nsph} spheres R={R:.0f} in {N}^3, solid phi={phi_act:.3f}, gap~{gap:g} cells ===")
 
     uref = run(sdf, "rbgs", dt=60.0)
     print(f"  RB-GS reference: U_sup={uref:.6e}")
-    print("--- correctness (vs RB-GS) + large-dt stability, levels=4 ---")
-    for mode in ["const", "area", "stair"]:
-        for dt in [60.0, 800.0]:
-            u = run(sdf, mode, dt=dt, levels=4)
-            e = "NaN" if u is None else f"{abs(u - uref) / abs(uref) * 100:.3f}%"
-            print(f"  {mode:6s} dt={dt:5.0f}: {'BLEW UP' if u is None else f'U_sup={u:.6e}  err {e}'}")
+    print("--- staircase velocity-MG (set_velocity_multigrid): exact vs RB-GS + large-dt stability ---")
+    for dt in [60.0, 800.0, 3200.0]:
+        u = run(sdf, "vmg", dt=dt, levels=4)
+        e = "NaN" if u is None else f"{abs(u - uref) / abs(uref) * 100:.3f}%"
+        print(f"  vmg dt={dt:6.0f} (beta={mu_b(dt):4.0f}): {'BLEW UP' if u is None else f'U_sup={u:.6e}  err {e}'}")
 
-    print("--- staircase: coarsening-level cap (deep levels dissolve thin necks), dt=60 ---")
-    for lv in [2, 3, 4, 5]:
-        u = run(sdf, "stair", dt=60.0, levels=lv)
+    print("--- coarsening-level robustness (deep levels dissolve thin necks), dt=60 ---")
+    for lv in [2, 3, 4, 5, 6]:
+        u = run(sdf, "vmg", dt=60.0, levels=lv)
         e = "NaN" if u is None else f"{abs(u - uref) / abs(uref) * 100:.3f}%"
         print(f"  levels={lv}: {'BLEW UP' if u is None else f'err {e}'}")
+
+
+def mu_b(dt, mu=0.1):
+    return mu * dt
 
 
 if __name__ == "__main__":
