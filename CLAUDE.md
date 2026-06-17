@@ -6,62 +6,53 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 GPU-accelerated incompressible Navier-Stokes CFD solver for porous media simulations. Uses a staggered MAC grid with the Immersed Boundary Method (IBM) over complex geometries defined by Signed Distance Functions (SDF), with cut-cell pressure projection.
 
-**Two solvers live in this repo:**
-- **`pnm_backend`** (`src/cfd_solver*.cu`, single-GPU) — the original implementation, validated against the Zick & Homsy sphere-array Stokes drag. Now kept as the **numerical reference** (git tag `pnm_backend-reference`); not deleted, retiring it needs explicit sign-off.
-- **`sdflow`** (`src/sdflow_bindings.cu` → `dns::DistributedNS` in `src/distributed_ns.cuh`) — the **canonical solver going forward**: the same cut-cell IBM physics, MPI-optional (single-GPU by default), with a grid-independent geometric **multigrid** pressure solve. Validated **bit-identical to `pnm_backend`** against Zick & Homsy. See the "MPI / sdflow" section below, [`doc/sdflow_pnm_parity.md`](doc/sdflow_pnm_parity.md), and [`doc/sdflow_multigrid_plan.md`](doc/sdflow_multigrid_plan.md).
+**`sdflow` is THE solver** (`src/sdflow_bindings.cu` → `dns::DistributedNS` in `src/distributed_ns.cuh`):
+cut-cell IBM physics on a staggered MAC grid, MPI-optional (single-GPU by default), with a grid-independent
+geometric **multigrid** pressure solve. It solves the equations in **physical units** (density `rho`,
+dynamic viscosity `mu`, physical pressure `p`). See the "MPI / sdflow" section below and
+[`doc/sdflow_multigrid_plan.md`](doc/sdflow_multigrid_plan.md).
 
-Much of the detail below (CFDSolver/MacGrid internals, the pnm_backend Python API) describes the **reference** solver; for new work use `sdflow`.
+The original single-GPU `CFDSolver` reference (`src/cfd_solver*.cu`) has been **retired** — `sdflow` was
+validated bit-identical to it (and to the Zick & Homsy sphere-array Stokes drag) before its removal; the
+restore point is the git tag `pnm_backend-reference`. The shared cut-cell IBM primitives it provided
+(`get_idx`, `IBM_Data`, the Robust-Scaled `poly_*`) now live in `src/cut_cell_ibm.cuh`.
+
+**`pnm_backend` is now the pore-network-extraction module** (`src/bindings.cpp` + `src/pore_extraction.cu`):
+`SDFReader`, `extract_pores`, `segment_volume`, `extract_topology_gpu` — the repo's namesake "pnm_from_sdf"
+feature, unrelated to the CFD solve.
 
 ## Build Commands
 
 ```bash
-# Default build (single-GPU, no MPI): builds BOTH the reference and the canonical module
+# Default build (single-GPU, no MPI): the sdflow solver + the pnm_backend pore-extraction module
 cmake -S . -B build && cmake --build build -j
-# Output: build/pnm_backend.so (reference) + build/sdflow.so (canonical, single-rank, TPX_NO_MPI)
+# Output: build/sdflow.so (the CFD solver, single-rank, TPX_NO_MPI) + build/pnm_backend.so (pore extraction)
 
 # Multi-rank build (opt-in): adds the MPI-linked sdflow + the *_mpi ctest suite (see the MPI section)
 cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun && cmake --build build_mpi -j
 ```
 
-(An existing `build/` may predate the `sdflow` target and hold only `pnm_backend.so` — reconfigure to pick up `sdflow`.)
-
 **Requirements:** CUDA Toolkit, CMake 3.18+, Python 3.10+, C++17 (+ MPI & `../transport-core` for the multi-rank build)
 
 ## Running Tests and Verification
 
+Drive `sdflow` verification from Python and run the C++ ctest suite:
 ```bash
-# Activate virtual environment first
 source .venv/bin/activate
-
-# Run unit tests
-python tests/test_cfd_solver.py
-python tests/test_implicit_poiseuille.py
-python tests/test_fluid_fractions.py
-
-# Run verification scripts (pnm_backend, the reference)
-python scripts/verify_poiseuille.py      # Plane Poiseuille (analytical solution)
-python scripts/verify_periodic_spheres.py # Flow around sphere packing
-python scripts/verify_divergence.py       # Check incompressibility
-```
-
-For the canonical **`sdflow`** solver (built into `build_mpi/`), drive verification from Python and run
-the C++ ctest suite:
-```bash
-PYTHONPATH=$PWD/build_mpi python scripts/verify_periodic_spheres_sdflow.py   # cut-cell Stokes (RB-GS)
+PYTHONPATH=$PWD/build_mpi python scripts/verify_periodic_spheres_sdflow.py   # cut-cell Stokes
 PYTHONPATH=$PWD/build_mpi python scripts/verify_poiseuille_sdflow.py         # analytic parabola
-PYTHONPATH=$PWD/build_mpi python scripts/validate_zick_homsy_sdflow_vs_pnm.py # ground-truth vs Z&H + pnm
+PYTHONPATH=$PWD/build_mpi python scripts/verify_lid_cavity_sdflow.py         # lid cavity vs Ghia
+PYTHONPATH=$PWD/build_mpi python scripts/verify_channel_sdflow.py            # developing channel
+PYTHONPATH=$PWD/build_mpi python scripts/verify_bfs_sdflow.py               # backward-facing step
+PYTHONPATH=$PWD/build_mpi python scripts/validate_zick_homsy_sdflow.py       # external ground truth (Z&H drag)
 ctest --test-dir build_mpi --output-on-failure                              # 72 multi-rank tests (np=1,2,4)
 mpirun -np 1 ./build_mpi/profile_mg_scaling 32 64 128                       # pressure-solver scaling/timing
 ```
 
+Pore-network extraction (the `pnm_backend` module): `python scripts/test_extraction.py`,
+`python scripts/verify_segmentation.py`.
+
 ## Architecture
-
-### Core Components
-
-- **`pnm_backend`** - Python extension module (built via pybind11)
-- **`CFDSolver`** - Main solver class with GPU-accelerated kernels
-- **`MacGrid`** - Staggered grid data structure (SoA layout for GPU coalescing)
-- **`SDFData`/`SDFReader`** - Geometry loading from VTI files
 
 ### Memory Layout
 
@@ -69,61 +60,46 @@ mpirun -np 1 ./build_mpi/profile_mg_scaling 32 64 128                       # pr
 - Python arrays: Fortran order `order='F'` with shape `(nx, ny, nz)`
 - Periodic boundaries with wrapping: `(x % res.x + res.x) % res.x`
 
-### Numerical Method
+### Numerical Method (`sdflow`)
 
-1. **Advection**: TVD scheme with Koren limiter
-2. **Diffusion**: Crank-Nicolson (θ configurable 0.5-1.0)
-3. **Momentum Solve**: Implicit Jacobian with Red-Black Gauss-Seidel
-4. **Pressure Projection**: Poisson solve for auxiliary scalar φ
-5. **IBM**: Robust Scaled method with D_rescale for near-wall handling
+The physical incompressible momentum equation `rho*(du/dt + (u.grad)u) = -grad(p) + mu*Lap(u) + f`, solved
+each step (semi-implicit), **scaled by 1/dt** (the "divided" convention — the operator is `(rho/dt)*I -
+mu*Lap`, well-conditioned at large dt / steady state):
+
+1. **Advection**: explicit Koren TVD, or implicit-FOU + deferred-correction TVD (`set_implicit_advection`)
+2. **Diffusion**: backward-Euler implicit, Red-Black Gauss-Seidel (or opt-in velocity multigrid)
+3. **Pressure projection**: `u = u* - grad(phi)`, `Lap(phi) = div(u*)`; physical pressure `p = (rho/dt)*phi`,
+   accumulated rotationally under the default incremental-pressure scheme. Geometric multigrid (V-cycle /
+   MG-PCG / Chebyshev).
+4. **IBM**: Robust-Scaled cut-cell method with D_rescale for near-wall handling.
 
 ### Key Source Files
 
-**`pnm_backend` (reference):**
-- `src/cfd_solver.cuh` - Data structures (MacGrid, IBM_Data) and public API
-- `src/cfd_solver.cu` - Main solver implementation
-- `src/cfd_solver_ibm.cu` - Immersed Boundary Method kernels
-- `src/cfd_solver_multigrid.cu` - geometric multigrid (rediscretized cut-cell coarse operator, RB-GS)
-- `src/bindings.cpp` - Python/C++ interop via pybind11
-
-**`sdflow` (canonical):**
+**`sdflow` (the CFD solver):**
 - `src/distributed_ns.cuh` - `DistributedNS`: the solver (diffusion, projection, three pressure drivers)
 - `src/mac_multigrid.cuh` - `DistributedPoissonMG`: distributed MG (V-cycle / PCG / Chebyshev), coarse-op modes
 - `src/mac_ibm.cuh`, `src/mac_cutcell.cuh`, `src/mac_halo.cuh`, `src/mac_reductions.cuh` - IBM stencil, cut-cell openness, halo, reductions
+- `src/cut_cell_ibm.cuh` - shared cut-cell IBM primitives (`get_idx`, `IBM_Data`, Robust-Scaled `poly_*`)
+- `src/staggered_advection.cuh` - staggered Koren TVD advection
 - `src/sdflow_bindings.cu` - the `sdflow` pybind module (`sdflow.Solver`)
 
-## Python API Usage (pnm_backend, the reference)
+**`pnm_backend` (pore-network extraction):**
+- `src/pore_extraction.cu` / `.cuh`, `src/sdf_reader.cpp` / `.h` - SDF VTI reading + pore/topology extraction
+- `src/bindings.cpp` - the `pnm_backend` pybind module (`SDFReader`, `extract_pores`, `segment_volume`, ...)
 
-For the canonical `sdflow` API see the "Pressure solver options" table and `scripts/*_sdflow.py`; the
-`pnm_backend` reference API is below.
+## Python API Usage (`sdflow`)
 
 ```python
-import pnm_backend
-
-# Create solver
-res = pnm_backend.int3(32, 32, 32)
-spacing = pnm_backend.float3(dx, dx, dx)
-solver = pnm_backend.CFDSolver(res, spacing)
-
-# Initialize geometry from SDF
-sdf_data = pnm_backend.SDFData(values, res, origin, spacing)
-solver.initialize(sdf_data)
-
-# Configure solver
-solver.set_rho(1.0)
-solver.set_mu(0.01)
-solver.set_body_force(pnm_backend.float3(1e-2, 0, 0))
-solver.set_cfl(0.5)
-solver.set_pressure_solver_params(max_iter=500, tol=1e-5)
-solver.set_velocity_solver_params(max_iter=50, tol=1e-5)
-solver.set_diffusion_theta(1.0)  # 0.5=CN, 1.0=Implicit
-
-# Time step
-solver.step(dt)
-
-# Get results (returns flat array, reshape with order='F')
-u = np.array(solver.get_u()).reshape((nx, ny, nz), order='F')
+import sdflow
+s = sdflow.Solver(nx, ny, nz)
+s.set_rho(1.0); s.set_mu(0.01); s.set_dt(60.0)   # physical units; fix before geometry
+s.set_body_force(1e-2, 0, 0)                       # force per unit volume
+s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")  # SDF [x,y,z], <0 inside
+for _ in range(n_steps):
+    s.step()
+u = s.get_u()   # 3-D numpy array [x,y,z];  p = s.get_p() is the physical pressure
 ```
+See the "Pressure solver options" table below and `scripts/*_sdflow.py` for the full API.
 
 ## Conventions
 
@@ -131,14 +107,13 @@ u = np.array(solver.get_u()).reshape((nx, ny, nz), order='F')
 - **CUDA kernels**: Named with `_kernel` suffix
 - **Staggered grid**: u at (i+1/2,j,k), v at (i,j+1/2,k), w at (i,j,k+1/2), p at cell centers
 
-## MPI / sdflow (the canonical solver, transport-core integration)
+## MPI / sdflow (the CFD solver, transport-core integration)
 
-The **`sdflow`** module is the canonical incompressible Navier–Stokes solver, built on the shared
+The **`sdflow`** module is the incompressible Navier–Stokes solver, built on the shared
 `transport-core` library (sibling repo `../transport-core`). It is **MPI-optional** — single-GPU by
-default, multi-rank with `-DCFD_BUILD_MPI=ON` — and is validated **bit-identical to `pnm_backend`**
-(which it is converging to replace; `pnm_backend` stays as the reference). Full status:
-[`doc/mpi_parallelization_status.md`](doc/mpi_parallelization_status.md) and
-[`doc/sdflow_pnm_parity.md`](doc/sdflow_pnm_parity.md).
+default, multi-rank with `-DCFD_BUILD_MPI=ON`. It was validated bit-identical to the retired `CFDSolver`
+reference (tag `pnm_backend-reference`) and against external analytics. Full status:
+[`doc/mpi_parallelization_status.md`](doc/mpi_parallelization_status.md).
 
 Key pieces (all `src/*.cuh`, header-only, on `main`):
 - `mac_halo.cuh` — `MacGridHalo`: decomposes the global MAC cell grid (ORB) into rank-owned blocks and
@@ -169,8 +144,8 @@ The canonical solver is exposed as the `sdflow` Python module (`src/sdflow_bindi
 - Coarse-operator mode: `set_solid(..., pressure_coarse="rediscretized")` (default; also `"galerkin"` /
   `"const"`). `set_pressure_multigrid(on, levels)` sets the multigrid depth (`levels=1` == pure RB-GS).
 - `set_pressure_warmstart(True)` seeds each solve from the previous step's φ (opt-in, off by default).
-- Validated against Zick & Homsy SC-sphere drag, bit-identical to `pnm_backend`. Design + benchmarks:
-  [`doc/sdflow_multigrid_plan.md`](doc/sdflow_multigrid_plan.md); parity: [`doc/sdflow_pnm_parity.md`](doc/sdflow_pnm_parity.md).
+- Validated against Zick & Homsy SC-sphere drag. Design + benchmarks:
+  [`doc/sdflow_multigrid_plan.md`](doc/sdflow_multigrid_plan.md).
 
 ### Domain boundary conditions
 
@@ -217,8 +192,7 @@ divergence at a fixed 8 cycles drops `1.7e-4`→`8.6e-13`. The BC verify scripts
 (validated single-rank).
 
 Validated cell-for-cell vs serial and against analytics (Taylor–Green ~2e-15, Poiseuille, momentum
-conservation) **and against Zick & Homsy sphere-array drag (bit-identical to `pnm_backend`)** —
-**72/72 ctests, real multi-rank np=1,2,4**.
+conservation) **and against Zick & Homsy sphere-array drag** — **72/72 ctests, real multi-rank np=1,2,4**.
 
 Build/test (opt-in; default module build untouched):
 ```bash
@@ -235,8 +209,8 @@ ctest --test-dir build_mpi --output-on-failure
 **Status:** `DistributedNS`/`sdflow` is the full solver, not a prototype — extended-block state, MPI
 global reductions, the Robust-Scaled cut-cell IBM, and a grid-independent geometric **multigrid**
 pressure solve (rediscretized cut-cell coarse operator; three selectable outer drivers — see the
-"Pressure solver options" table above) are all done and validated bit-identical to `pnm_backend` against
-Zick & Homsy. **Remaining toward retiring `pnm_backend`** (the only open items): the large-np scaling
-work — an **agglomerated coarse solve** and the communication-light **Chebyshev** accelerator's at-scale
-benchmark, both needing real multi-GPU hardware (designs in [`doc/sdflow_multigrid_plan.md`](doc/sdflow_multigrid_plan.md)) — plus an explicit
-sign-off. `pnm_backend` is **not** deleted; tag `pnm_backend-reference` is the restore point.
+"Pressure solver options" table above) are all done and validated against Zick & Homsy (and, before its
+retirement, bit-identical to the `CFDSolver` reference). The old `CFDSolver` reference is **retired** (tag
+`pnm_backend-reference` is the restore point). **Remaining open items:** the large-np scaling work — an
+**agglomerated coarse solve** and the communication-light **Chebyshev** accelerator's at-scale benchmark,
+both needing real multi-GPU hardware (designs in [`doc/sdflow_multigrid_plan.md`](doc/sdflow_multigrid_plan.md)).

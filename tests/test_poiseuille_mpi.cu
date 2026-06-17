@@ -14,7 +14,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "cfd_solver.cuh"
+#include "cut_cell_ibm.cuh"
 #include "mac_halo.cuh"
 
 static constexpr int kSteps = 400;

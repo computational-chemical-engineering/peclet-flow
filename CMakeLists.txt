@@ -24,9 +24,6 @@ set(SOURCES
     src/bindings.cpp
     src/sdf_reader.cpp
     src/pore_extraction.cu
-    src/cfd_solver.cu
-    src/cfd_solver_ibm.cu
-    src/cfd_solver_multigrid.cu
 )
 
 # Define the Python extension module

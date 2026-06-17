@@ -4,7 +4,7 @@
 //
 // The MAC fields (u, v, w staggered; p, sdf centered) are all stored as res.x*res.y*res.z device
 // arrays, x-fastest (I = x + y*nx + z*nx*ny), with periodicity currently handled by in-kernel
-// wrapping (get_idx in cfd_solver.cuh). This adapter is the first step toward distributing the solver
+// wrapping (get_idx in cut_cell_ibm.cuh). This adapter is the first step toward distributing the solver
 // across MPI ranks: it decomposes that global cell grid into rank-owned blocks (transport-core ORB),
 // and exchanges a width-1 ghost layer for any double cell-field laid out as the *extended local
 // block* (inner cells + ghost). A distributed solver replaces global wrapping with: fill ghosts via

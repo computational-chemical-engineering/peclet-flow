@@ -11,7 +11,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "cfd_solver.cuh"  // cfd's get_idx (the exact periodic indexing the solver uses)
+#include "cut_cell_ibm.cuh"  // cfd's get_idx (the exact periodic indexing the solver uses)
 #include "mac_halo.cuh"
 
 __host__ __device__ inline double field_val(int x, int y, int z) {

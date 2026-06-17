@@ -20,7 +20,6 @@
 #include <cstdint>
 #include <vector>
 
-#include "cfd_solver.cuh"  // get_idx (unused at runtime here; kept for convention parity)
 #include "mac_cutcell.cuh"    // cut-cell face openness from an SDF
 #include "mac_halo.cuh"
 #include "mac_ibm.cuh"        // Robust-Scaled velocity IBM (cut-cell no-slip)
@@ -88,7 +87,7 @@ __global__ void build_adv_stencil_k(cfdmpi::mreal* A_C, cfdmpi::mreal* A_W, cfdm
 // Velocity-multigrid COARSE-level operator for the implicit-FOU (upwind-convective) path: an anisotropic
 // constant-coefficient backward-Euler diffusion (per-axis beta bx,by,bz) PLUS a first-order-upwind
 // advection built from the RESTRICTED coarse advecting velocity (u,v,w on the coarse level). It mirrors
-// build_adv_stencil_k (the fine As_[c]) but at coarse spacing: bx=nu_dt/h_x^2 and the FOU velocity is
+// build_adv_stencil_k (the fine As_[c]) but at coarse spacing: bx=mu/h_x^2 and the FOU velocity is
 // scaled by s_a=1/h_a per face axis (h_a = h0*cfac_a). The fine residual+smoother give the exact fine
 // (sharp-IBM) answer; this coarse op only sets the convergence rate, and upwinding keeps it an M-matrix.
 // Launched over INNER cells (smoother/residual read AC..AT only there); the +-1 reach hits exchanged ghosts.
@@ -187,7 +186,7 @@ __global__ void correct_k(double* u, double* v, double* w, const double* phi, in
 // (same staggered stencil as correct_k), so the predictor carries -grad(p^n). In the divided convention the
 // momentum RHS pressure term is exactly -grad(p) (no dt factor: the divided physical momentum equation is
 // (rho/dt)(u-u^n) = -grad(p) + mu*Lap(u) + f - rho*advect).
-__global__ void sub_gradpot_k(double* bu, double* bv, double* bw, const double* P, int3 e, int g) {
+__global__ void sub_gradp_k(double* bu, double* bv, double* bw, const double* P, int3 e, int g) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
@@ -200,7 +199,7 @@ __global__ void sub_gradpot_k(double* bu, double* bv, double* bw, const double* 
 // ct = rho/dt and the rotational term uses the dynamic viscosity mu. Inner cells. Solid cells stay ~0 (phi
 // and div are ~0 there), so grad(p) at solid faces is consistent without a special mask. At steady state
 // div->0 and phi->0, so p stabilises exactly.
-__global__ void pot_update_k(double* P, const double* phi, const double* div, double ct, double mu,
+__global__ void press_update_k(double* P, const double* phi, const double* div, double ct, double mu,
                              int3 e, int g) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -209,8 +208,8 @@ __global__ void pot_update_k(double* P, const double* phi, const double* div, do
   P[i] += ct * phi[i] - mu * div[i];
 }
 // Classical (non-incremental) Chorin pressure from the per-step projection potential: p = (rho/dt)*phi
-// (ct = rho/dt). Computed on demand for pressure_potential() when not accumulating.
-__global__ void pscale_k(double* P, const double* phi, double ct, int3 e, int g) {
+// (ct = rho/dt). Computed on demand for pressure() when not accumulating.
+__global__ void press_from_phi_k(double* P, const double* phi, double ct, int3 e, int g) {
   int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y,
       z = blockIdx.z * blockDim.z + threadIdx.z;
   if (x < g || y < g || z < g || x >= e.x - g || y >= e.y - g || z >= e.z - g) return;
@@ -314,8 +313,8 @@ class DistributedNS {
   // Physical pressure p. Accumulated in p_ under the incremental-rotational scheme; under classical Chorin
   // derive it on demand from the last projection potential, p = (rho/dt)*phi. Either way it is the physical
   // pressure (the binding returns it directly, no rescaling).
-  double* pressure_potential() {
-    if (!incremental_) detail::pscale_k<<<grd_, blk_>>>(p_, phi_, ridt_, ext_, mac_.ghost);
+  double* pressure() {
+    if (!incremental_) detail::press_from_phi_k<<<grd_, blk_>>>(p_, phi_, ridt_, ext_, mac_.ghost);
     return p_;
   }
 
@@ -329,8 +328,8 @@ class DistributedNS {
   void set_advection(bool on) { advection_ = on; }
 
   // Incremental-rotational pressure correction (vs classical non-incremental Chorin). The momentum
-  // predictor carries -grad(p^n) and the accumulated potential Phi is updated by the rotational form
-  // Phi += phi - nu*dt*div(u*). Same steady velocity; more accurate transient + near-wall pressure
+  // predictor carries -grad(p^n) and the pressure p is updated by the rotational form
+  // p += (rho/dt)*phi - mu*div(u*). Same steady velocity; more accurate transient + near-wall pressure
   // (no Chorin splitting boundary layer). Default ON (matching the sdflow Python module); the cell-for-cell
   // classical-Chorin ctests opt out explicitly with set_incremental_pressure(false).
   void set_incremental_pressure(bool on) { incremental_ = on; }
@@ -442,7 +441,7 @@ class DistributedNS {
   void set_pressure_warmstart(bool on) { pwarm_ = on; }
 
   // Opt-in geometric multigrid for the velocity (momentum) diffusion solve, instead of plain RB-GS -- far
-  // fewer iterations when the diffusion is stiff (large nu*dt). `n_diff` then counts V-cycles. RB-GS stays
+  // fewer iterations when the diffusion is stiff (large mu*dt/rho). `n_diff` then counts V-cycles. RB-GS stays
   // the module DEFAULT. The coarse operator is geometry-dependent:
   //   - IBM (set_ibm_solid): the STAIRCASE operator (see setVelocityStaircaseCoarse / doc/velocity_mg_plan.md).
   //     The fine level is the sharp row-based IBM stencil; the coarse levels use the volume fraction only to
@@ -683,8 +682,8 @@ class DistributedNS {
     // time-derivative base u^n (fixed for the whole timestep)
     for (int c = 0; c < 3; ++c) cudaMemcpy(old[c], comp[c], n_ * 8, cudaMemcpyDeviceToDevice);
 
-    // incremental pressure: Phi^n is fixed for the whole step; refresh its ghosts once for the
-    // predictor's -grad(Phi) term (re-used by every Picard iteration).
+    // incremental pressure: p^n is fixed for the whole step; refresh its ghosts once for the
+    // predictor's -grad(p) term (re-used by every Picard iteration).
     if (incremental_) mac_.exchange(p_);
 
     int max_outer = outer_iters_;
@@ -746,10 +745,10 @@ class DistributedNS {
         for (int c = 0; c < 3; ++c) rhs_k<<<grd_, blk_>>>(old[c], b_[c], ridt_, f[c], ext_, g);
       }
 
-      // incremental predictor: b_c -= dPhi/dx_c  (carry -grad(p^n)/rho into the momentum RHS, before
-      // the IBM RHS scaling so it is descaled like the other source terms).
+      // incremental predictor: b_c -= dp/dx_c  (carry -grad(p^n) into the momentum RHS, before the IBM
+      // RHS scaling so it is descaled like the other source terms).
       if (incremental_)
-        sub_gradpot_k<<<grd_, blk_>>>(b_[0], b_[1], b_[2], p_, ext_, g);
+        sub_gradp_k<<<grd_, blk_>>>(b_[0], b_[1], b_[2], p_, ext_, g);
 
     if (ibm_enabled_) {
       // Robust-Scaled cut-cell IBM: solve the IBM-modified stencil A_ibm comp = b - inhom (the Dirichlet
@@ -842,7 +841,7 @@ class DistributedNS {
         for (int c = 0; c < 3; ++c)
           cfdmpi::mgdetail::mg_axpy_k<<<blocks, threads>>>(b_[c], 1.0, bc_brhs_[c], (long)n_);
       if (vmg_enabled_ && !implicit_fou_) {
-        // Velocity multigrid (const-coeff I - nu_dt*Lap + no-slip face-fold per component). The fold puts
+        // Velocity multigrid (const-coeff (rho/dt)*I - mu*Lap + no-slip face-fold per component). The fold puts
         // +beta on the boundary diagonal and the wall ghost is held 0 (non-periodic halo skips it +
         // interior-only smoother), exactly the fine RB-GS representation; b_ already carries bc_brhs_.
         ensure_vmg_built();
@@ -969,7 +968,7 @@ class DistributedNS {
     // incremental-rotational pressure update, ONCE per step: P += idt*phi - nu*div(u*). phi_ is the
     // final projection potential and div_ the final div(u*) (preserved past the convergence check).
     if (incremental_)
-      pot_update_k<<<grd_, blk_>>>(p_, phi_, div_, ridt_, mu_, ext_, g);
+      press_update_k<<<grd_, blk_>>>(p_, phi_, div_, ridt_, mu_, ext_, g);
   }
 
  private:
@@ -1271,7 +1270,7 @@ class DistributedNS {
   double *u_ = nullptr, *v_ = nullptr, *w_ = nullptr, *phi_ = nullptr, *div_ = nullptr,
          *solid_ = nullptr;
   // Physical pressure p. Under the incremental-rotational scheme it is the accumulated pressure; under
-  // classical Chorin it is the per-step p = (rho/dt)*phi (derived on demand in pressure_potential()).
+  // classical Chorin it is the per-step p = (rho/dt)*phi (derived on demand in pressure()).
   double* p_ = nullptr;
   bool incremental_ = true;
   double* b_[3] = {nullptr, nullptr, nullptr};

@@ -1,7 +1,7 @@
 // Multi-rank regression test for the incremental-rotational pressure correction
 // (DistributedNS::set_incremental_pressure). Stokes flow through a periodic sphere packing with the
 // cut-cell IBM + cut-cell pressure operator (PCG). Exercises every new code path -- the predictor's
-// -grad(Phi) term (sub_gradpot_k), the rotational potential update (pot_update_k), the Phi halo
+// -grad(p) term (sub_gradp_k), the rotational pressure update (press_update_k), the pressure halo
 // exchange, and the b_[0]-scratch convergence change -- and checks the physical invariants that must
 // hold at any rank count: incompressible (small open flux divergence), EXACT no-slip in the deep solid,
 // finite, and actual flow. Deterministic -> identical across np=1,2,4.
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
 
   std::vector<double> u(n), v(n), w(n), p(n);
   s.download_velocity(u.data(), v.data(), w.data());
-  cudaMemcpy(p.data(), s.pressure_potential(), n * sizeof(double), cudaMemcpyDeviceToHost);
+  cudaMemcpy(p.data(), s.pressure(), n * sizeof(double), cudaMemcpyDeviceToHost);
 
   // local checks over inner cells
   double leak = 0.0, umax = 0.0, umean = 0.0, pmax = 0.0;

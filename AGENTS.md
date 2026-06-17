@@ -2,21 +2,20 @@
 
 ## Project Structure & Module Organization
 - `src/`: C++/CUDA sources for the CFD solver and pybind11 bindings (`.cpp`, `.cu`, `.cuh`).
-- `tests/`: Python test scripts (`test_*.py`) that import the built extension.
-- `scripts/`: Verification and analysis scripts (e.g., `verify_poiseuille.py`).
-- `build/`: CMake build output (expects `build/pnm_backend.so`).
+- `tests/`: C++ multi-rank ctests (`test_*_mpi.cu`) + a couple of pore-extraction Python scripts.
+- `scripts/`: `sdflow` verification/analysis scripts (e.g., `verify_poiseuille_sdflow.py`).
+- `build/`: CMake build output (expects `build/sdflow.so` + `build/pnm_backend.so`).
 - `doc/`, `notebooks/`, `data/`: design notes, experiments, and input datasets.
 
 ## Build, Test, and Development Commands
 ```bash
-# Build the Python extension (requires CUDA Toolkit + CMake 3.18+)
-mkdir -p build && cd build && cmake .. && cmake --build .
+# Build the Python extensions (requires CUDA Toolkit + CMake 3.18+)
+cmake -S . -B build && cmake --build build -j
 
-# Activate venv (if used) and run core tests
+# Activate venv (if used) and run sdflow verification
 source .venv/bin/activate
-python tests/test_cfd_solver.py
-python tests/test_implicit_poiseuille.py
-python tests/test_fluid_fractions.py
+PYTHONPATH=$PWD/build python scripts/verify_poiseuille_sdflow.py
+PYTHONPATH=$PWD/build python scripts/verify_periodic_spheres_sdflow.py
 
 # Run verification scripts
 python scripts/verify_poiseuille.py

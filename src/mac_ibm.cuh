@@ -1,7 +1,7 @@
 /// @file
 /// @brief Robust-Scaled cut-cell IBM for the velocity (momentum) solve.
 // cfd-gpu -- Robust-Scaled cut-cell IBM for the velocity (momentum) solve on a MacGridHalo extended
-// block. Ports the production solver's velocity IBM (cfd_solver_ibm.cu / _ibm_kernels.cuh): per cut cell
+// block. The Robust-Scaled velocity IBM (cut_cell_ibm.cuh polynomials + ibm_fill_entry below): per cut cell
 // the SDF geometry gives polynomial factors (D_rescale, K/M/X/Nbc) that are baked into the velocity
 // diffusion stencil A_C..A_T plus an inhomogeneous Dirichlet term, eliminating the solid ghost values
 // and enforcing the wall velocity. The bake (ibm_modify_stencil_k) only edits each cut cell's OWN row,
@@ -20,9 +20,9 @@
 // face architecture, not a competitor to it. Three layers + two mesh-specific providers:
 //
 //   1. BASE operator       ibm_build_diffusion_k   A = I - beta*L (face loop, beta per face = nu*dt*gf).
-//   2. OVERLAY (data)      IBM_Data (cfd_solver.cuh) -- a sparse SoA of cut cells: {cell handle
+//   2. OVERLAY (data)      IBM_Data (cut_cell_ibm.cuh) -- a sparse SoA of cut cells: {cell handle
 //                          cell_index; per-face neighbour/direction hook dir_code + coefficients
-//                          R/K/M/X/Nbc; D_rescale}. Read-only here (shared with pnm_backend).
+//                          R/K/M/X/Nbc; D_rescale}. Read-only here.
 //   3. APPLY               ibm_modify_stencil_k -- loop the overlay, modify each cut cell's OWN row.
 //
 //   Provider A (GEOMETRY): geometry -> overlay entries. Cartesian = ibm_gather_ext (SDF sampling) +
@@ -37,8 +37,7 @@
 
 #include <cuda_runtime.h>
 
-#include "cfd_solver.cuh"               // IBM_Data, get_idx
-#include "cfd_solver_ibm_kernels.cuh"   // poly_* (Robust-Scaled polynomials)
+#include "cut_cell_ibm.cuh"            // IBM_Data, get_idx, Robust-Scaled polynomials
 #include "mac_cutcell.cuh"              // cc_sample_ext (clamped extended-block SDF sampling)
 
 namespace cfdmpi {

@@ -183,7 +183,7 @@ class Solver {
   py::array_t<double> get_w() { ensure_init(); return gather(s_.w(), 1.0); }
   py::array_t<double> get_p() {  // physical pressure p (the solver works in physical units)
     ensure_init();
-    return gather(s_.pressure_potential(), 1.0);
+    return gather(s_.pressure(), 1.0);
   }
 
  private:

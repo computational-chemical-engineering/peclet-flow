@@ -10,7 +10,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "cfd_solver.cuh"  // cfd's get_idx
+#include "cut_cell_ibm.cuh"  // cfd's get_idx
 #include "mac_halo.cuh"
 
 static constexpr int kSteps = 25;

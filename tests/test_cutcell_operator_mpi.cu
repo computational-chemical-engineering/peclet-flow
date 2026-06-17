@@ -10,7 +10,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "cfd_solver.cuh"          // get_idx (periodic wrap)
+#include "cut_cell_ibm.cuh"          // get_idx (periodic wrap)
 #include "distributed_ns.cuh"  // pulls in mac_cutcell.cuh + mac_multigrid.cuh
 
 using cfdmpi::ccdetail::cc_fraction_core;

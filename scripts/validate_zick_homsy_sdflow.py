@@ -2,16 +2,15 @@
 """GROUND TRUTH: simple-cubic (SC) array of spheres, Stokes drag factor K vs Zick & Homsy (1982).
 
 A single sphere centred in a periodic cube is the classic SC lattice. Z&H give the semi-analytic Stokes
-drag factor K(c) (c = sphere solid fraction) to high accuracy -- the external reference that grid
-refinement of our two cut-cell codes against *each other* could not provide. pnm_backend was previously
-validated against this to <0.1% (output/drag_dimensionless_sc.csv); this redoes it for **sdflow** (and
-re-runs pnm_backend to confirm), on the *identical* geometry.
+drag factor K(c) (c = sphere solid fraction) to high accuracy -- the external reference for the sdflow
+cut-cell IBM. (Historically this also re-ran the retired pnm_backend reference solver; sdflow was validated
+bit-identical to it before its retirement, so only the external Z&H comparison remains.)
 
   K = F_total / (6*pi*mu*R*U_sup),   F_total = f * V_cell,   U_sup = mean(u) over the whole cell.
 
-K is dimensionless and unit-invariant, so each solver runs in whatever units suit it; only K is compared.
+K is dimensionless and unit-invariant.
 
-Usage:  python scripts/validate_zick_homsy_sdflow_vs_pnm.py [N1,N2,...] [phi1,phi2,...] [both|sdflow|pnm]
+Usage:  python scripts/validate_zick_homsy_sdflow.py [N1,N2,...] [phi1,phi2,...]
 """
 import os
 import sys
@@ -56,7 +55,6 @@ def _upsample2(a):
     return np.repeat(np.repeat(np.repeat(a, 2, 0), 2, 1), 2, 2) * 4.0
 
 
-# ---------------------------------------------------------------- sdflow
 def run_sdflow(N, phi, mu=0.1, f=1e-3, dt=None, max_steps=600, tol=1e-6, coarse="rediscretized",
                seed=None):
     """Multilevel MG-PCG pressure solve; `coarse` selects the coarse-operator mode
@@ -90,51 +88,18 @@ def run_sdflow(N, phi, mu=0.1, f=1e-3, dt=None, max_steps=600, tol=1e-6, coarse=
     return drag_K(m, R, N, f, mu), (s.get_u(), s.get_v(), s.get_w()), time.time() - t0
 
 
-# ---------------------------------------------------------------- pnm_backend (the proven SIMPLE config)
-def run_pnm(N, phi, mu=1.0, f=1.0, dt=1.0, max_steps=200, tol=1e-5):
-    import pnm_backend
-    R = sphere_radius(phi, N)
-    sdf, _ = sc_sdf_xyz(N, phi)                              # sdf[x,y,z]
-    s = pnm_backend.CFDSolver([N, N, N], [1.0, 1.0, 1.0])
-    # current API: initialize takes a float32 array that ravels x-fastest -> shape (nz,ny,nx)
-    s.initialize(np.ascontiguousarray(np.transpose(sdf, (2, 1, 0))).astype(np.float32), [0.] * 3, [1.] * 3)
-    s.set_rho(0.0); s.set_mu(mu); s.set_body_force(pnm_backend.float3(f, 0, 0))
-    s.set_pressure_solver_params(50); s.set_velocity_solver_params(2)
-    s.set_outer_iterations(800); s.set_outer_tolerance(0.0)
-    prev = 0.0; t0 = time.time()
-    for it in range(max_steps):
-        s.step(dt)
-        if it % 5 == 0:
-            m = float(np.asarray(s.get_u()).mean())
-            if it > 10 and abs(m - prev) < tol * (abs(m) + 1e-30):
-                break
-            prev = m
-    m = float(np.asarray(s.get_u()).mean())
-    return drag_K(m, R, N, f, mu), time.time() - t0
-
-
 def main():
     Ns = [int(x) for x in sys.argv[1].split(",")] if len(sys.argv) > 1 else [32, 64, 128]
     phis = [float(x) for x in sys.argv[2].split(",")] if len(sys.argv) > 2 else [0.064, 0.125, 0.216]
-    which = sys.argv[3] if len(sys.argv) > 3 else "both"
-    print("=== Zick & Homsy (1982) SC drag factor K: sdflow vs pnm_backend ===")
-    hdr = f"{'phi':>7} {'N':>4} {'K_ZH':>8}"
-    if which in ("both", "sdflow"): hdr += f" {'K_sdflow':>9} {'err%':>7}"
-    if which in ("both", "pnm"):    hdr += f" {'K_pnm':>9} {'err%':>7}"
-    print(hdr)
+    print("=== Zick & Homsy (1982) SC drag factor K: sdflow ===")
+    print(f"{'phi':>7} {'N':>4} {'K_ZH':>8} {'K_sdflow':>9} {'err%':>7}")
     for phi in phis:
         kref = zh_ref(phi)
-        seed = None  # coarse->fine continuation per phi (sdflow path)
+        seed = None  # coarse->fine continuation per phi
         for N in sorted(Ns):
-            row = f"{phi:7.4f} {N:4d} {kref:8.3f}"
-            if which in ("both", "sdflow"):
-                ks, fld, ts = run_sdflow(N, phi, seed=seed)
-                seed = fld
-                row += f" {ks:9.3f} {100*(ks-kref)/kref:7.2f}"
-            if which in ("both", "pnm"):
-                kp, tp = run_pnm(N, phi)
-                row += f" {kp:9.3f} {100*(kp-kref)/kref:7.2f}"
-            print(row, flush=True)
+            ks, fld, ts = run_sdflow(N, phi, seed=seed)
+            seed = fld
+            print(f"{phi:7.4f} {N:4d} {kref:8.3f} {ks:9.3f} {100*(ks-kref)/kref:7.2f}", flush=True)
 
 
 if __name__ == "__main__":

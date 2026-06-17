@@ -12,7 +12,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "cfd_solver.cuh"  // get_idx (periodic wrap)
+#include "cut_cell_ibm.cuh"  // get_idx (periodic wrap)
 #include "mac_halo.cuh"
 #include "mac_multigrid.cuh"
 

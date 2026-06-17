@@ -2,14 +2,14 @@
 /// @brief Staggered MAC momentum advection (Koren TVD), shared by the solver and tests.
 // cfd-gpu — staggered MAC momentum advection (Koren TVD), shared by the distributed solver and tests.
 //
-// Replicates cfd_solver.cu's get_advection_velocity (2-point staggered interpolation of the advecting
-// velocity) and get_tvd_flux / tvd_flux_koren (Koren limiter, sign-upwinded), in double precision and
-// in conservative flux form A = sum_dir (F_plus - F_minus). The operator reaches +/-2 cells, so any
+// The advecting velocity is a 2-point staggered interpolation; the flux uses the Koren limiter
+// (sign-upwinded), in double precision and in conservative flux form A = sum_dir (F_plus - F_minus). The
+// operator reaches +/-2 cells, so any
 // distributed use needs ghost width 2. A field accessor templates the index mapping so the same code
 // serves the full periodic grid (wrapping get_idx) and a local extended block (direct strides).
 #pragma once
 
-#include "cfd_solver.cuh"  // get_idx
+#include "cut_cell_ibm.cuh"  // get_idx
 
 namespace sadv {
 
@@ -39,8 +39,7 @@ struct LocAcc {
   }
 };
 
-// Advecting velocity at the +face_dir face of the comp control volume at (x,y,z); mirrors
-// get_advection_velocity in cfd_solver.cu exactly.
+// Advecting velocity at the +face_dir face of the comp control volume at (x,y,z).
 template <class A>
 __device__ inline double adv_vel(int comp, int fd, int x, int y, int z, A U, A V, A W) {
   if (comp == 0) {
