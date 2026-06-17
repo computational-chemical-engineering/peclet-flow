@@ -46,6 +46,10 @@ data/
 *.vti
 *.edges
 *.npz
+output/
+*.png
+*.csv
+*.pvsm
 
 # Generated documentation (built by Doxygen / CI)
 docs/html/
