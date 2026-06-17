@@ -182,10 +182,13 @@ fractions in the coefficients**). The binary classification disconnects fluid po
 Pinning is a new `MGLevel::pin` + `pin` arg on the smoother/residual kernels (nullptr ⇒ pressure MG
 bit-identical). V-cycle ρ≈0.23.
 
-> **Caveat — packed beds.** Validated on the SC sphere (one connected solid). For real packed beds the coarsest
-> level must stay fine enough to still resolve the thinnest inter-particle walls (else θ>0.5 everywhere → pockets
-> reconnect → the const-coarse failure returns); cap `levels` accordingly. A genuine packed-bed test is still
-> wanted before relying on it there.
+**Packed-bed validated** (`scripts/verify_velocity_mg_staircase_packing_sdflow.py`, random periodic sphere
+packings): moderate bed (21 sph, φ=0.245, N=64) — staircase exact (0.000%) + stable at dt=800 where const
+(0.19%→NaN) and area-fraction (NaN) both fail; dense thin-neck bed (53 sph, φ=0.29, ~1-cell necks, N=128) —
+staircase exact (0.000–0.010% vs RB-GS) and stable to **dt=3200 (β=320)** with 16 V-cycles (the ceiling rises
+with V-cycle count; thin necks lower it vs the SC sphere's dt=6400). Exact across coarsening levels 2–6 — deep
+coarsening only affects the *rate*, not the answer (the fine smoother + exclude mask own the boundary), so
+`levels` is a tuning knob, not a correctness requirement. The staircase velocity-MG handles packed beds.
 
 **Measured dead-ends (do not retry blindly):**
 - **Coupling the partial cells (dropping `res_mask`) diverges at dt=200 even with ONE coarsening level** — the
