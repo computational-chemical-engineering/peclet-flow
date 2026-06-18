@@ -24,3 +24,8 @@ add_executable(test_advection test_advection.cpp)
 target_include_directories(test_advection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
 target_link_libraries(test_advection PRIVATE Kokkos::kokkos)
 add_test(NAME advection COMMAND test_advection)
+
+add_executable(test_stencils test_stencils.cpp)
+target_include_directories(test_stencils PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
+target_link_libraries(test_stencils PRIVATE Kokkos::kokkos)
+add_test(NAME stencils COMMAND test_stencils)
