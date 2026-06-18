@@ -349,6 +349,9 @@ class DistributedNS {
   void set_outer_tolerance(double tol) { outer_tol_ = tol; }
   int last_outer_iterations() const { return last_outer_iterations_; }
   double last_outer_correction() const { return last_outer_correction_; }
+  // Pressure-solver iterations used in the last step (PCG/Chebyshev iters, or V-cycle count), summed over
+  // the step's Picard sweeps. The per-step efficiency metric for the multigrid pressure solve.
+  int last_pressure_iterations() const { return last_pressure_iters_; }
 
   // Opt-in: solve the pressure Poisson with the distributed geometric multigrid V-cycle
   // (src/mac_multigrid.cuh) instead of the single-level Red-Black Gauss-Seidel. Both solve the same
@@ -688,6 +691,7 @@ class DistributedNS {
 
     int max_outer = outer_iters_;
     last_outer_iterations_ = 0;
+    last_pressure_iters_ = 0;  // accumulated pressure-solver iterations over this step's Picard sweeps
     for (int outer = 0; outer < max_outer; ++outer) {
       last_outer_iterations_ = outer + 1;
       if (outer_tol_ > 0)
@@ -922,11 +926,13 @@ class DistributedNS {
           mg_.estimate_eigenvalues(cheb_a_, cheb_b_, /*iters=*/15, mg_pre_, mg_post_, mg_bottom_);
           cheb_bounds_set_ = true;
         }
-        mg_.solve_chebyshev(cheb_maxit_, cheb_rtol_, mg_pre_, mg_post_, mg_bottom_, cheb_a_, cheb_b_);
+        last_pressure_iters_ +=
+            mg_.solve_chebyshev(cheb_maxit_, cheb_rtol_, mg_pre_, mg_post_, mg_bottom_, cheb_a_, cheb_b_);
       } else if (pcg_ && cutcell_) {
-        mg_.solve_pcg(pcg_maxit_, pcg_rtol_, mg_pre_, mg_post_, mg_bottom_);
+        last_pressure_iters_ += mg_.solve_pcg(pcg_maxit_, pcg_rtol_, mg_pre_, mg_post_, mg_bottom_);
       } else {
         mg_.solve(n_pois, mg_pre_, mg_post_, mg_bottom_);
+        last_pressure_iters_ += n_pois;  // standalone V-cycle driver: fixed count
       }
       cudaMemcpy(phi_, l0.x, n_ * 8, cudaMemcpyDeviceToDevice);
       if (has_open_boundary_) apply_outflow_pressure_ghost(phi_);  // ghost p=0 for correct_k / next warm
@@ -1280,6 +1286,7 @@ class DistributedNS {
   int outer_iters_ = 1;
   double outer_tol_ = -1.0;
   int last_outer_iterations_ = 0;
+  int last_pressure_iters_ = 0;
   double last_outer_correction_ = 0.0;
   // opt-in multigrid pressure solve (built lazily on first step)
   cfdmpi::DistributedPoissonMG mg_;

@@ -49,6 +49,11 @@ ctest --test-dir build_mpi --output-on-failure                              # 72
 mpirun -np 1 ./build_mpi/profile_mg_scaling 32 64 128                       # pressure-solver scaling/timing
 ```
 
+Single-GPU **accuracy + efficiency regression suite** (grid-convergence + recorded solver-iteration
+counts, checked against a saved baseline so regressions are caught — Z&H sphere, random-sphere bed,
+hollow-ring bed): `PYTHONPATH=$PWD/build python tests/regression/sdflow_regression.py` (`--update` to
+re-record the baseline). See [`tests/regression/README.md`](tests/regression/README.md).
+
 Pore-network extraction (the `pnm_backend` module): `python scripts/test_extraction.py`,
 `python scripts/verify_segmentation.py`.
 

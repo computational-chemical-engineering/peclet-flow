@@ -175,6 +175,7 @@ class Solver {
 
   void step() { ensure_init(); s_.step(n_diff_, n_pois_); }
   int last_outer_iterations() const { return s_.last_outer_iterations(); }
+  int last_pressure_iterations() const { return s_.last_pressure_iterations(); }
   double max_open_divergence() { ensure_init(); return s_.max_open_divergence(); }
 
   // gathered global fields on root (empty elsewhere), 3-D [x,y,z] (F-contiguous: x fastest, VTK order).
@@ -289,6 +290,7 @@ PYBIND11_MODULE(sdflow, m) {
       .def("set_state", &Solver::set_state, py::arg("u"), py::arg("v"), py::arg("w"))
       .def("step", &Solver::step)
       .def("last_outer_iterations", &Solver::last_outer_iterations)
+      .def("last_pressure_iterations", &Solver::last_pressure_iterations)
       .def("max_open_divergence", &Solver::max_open_divergence)
       .def("get_u", &Solver::get_u)
       .def("get_v", &Solver::get_v)
