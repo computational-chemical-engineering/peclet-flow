@@ -19,3 +19,8 @@ add_executable(test_reductions test_reductions.cpp)
 target_include_directories(test_reductions PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
 target_link_libraries(test_reductions PRIVATE Kokkos::kokkos)
 add_test(NAME reductions COMMAND test_reductions)
+
+add_executable(test_advection test_advection.cpp)
+target_include_directories(test_advection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
+target_link_libraries(test_advection PRIVATE Kokkos::kokkos)
+add_test(NAME advection COMMAND test_advection)
