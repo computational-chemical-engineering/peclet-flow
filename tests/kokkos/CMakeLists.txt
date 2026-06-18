@@ -29,3 +29,8 @@ add_executable(test_stencils test_stencils.cpp)
 target_include_directories(test_stencils PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
 target_link_libraries(test_stencils PRIVATE Kokkos::kokkos)
 add_test(NAME stencils COMMAND test_stencils)
+
+add_executable(test_transfer test_transfer.cpp)
+target_include_directories(test_transfer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
+target_link_libraries(test_transfer PRIVATE Kokkos::kokkos)
+add_test(NAME transfer COMMAND test_transfer)
