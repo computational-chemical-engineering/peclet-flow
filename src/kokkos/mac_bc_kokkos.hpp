@@ -29,7 +29,8 @@ KOKKOS_INLINE_FUNCTION void axisDims(B3 ext, int (&dims)[3], long (&strides)[3])
 
 // Fill component comp (0=u,1=v,2=w) ghosts for one domain face (axis a, side s=0 low/1 high) with a
 // scalar wall velocity. fold=1 drops the tangential wall face (ghost=0, implicit diffusion).
-inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, double wall, int fold) {
+inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, double wall, int fold,
+                           BField prof = BField(), int prof_nc = 0) {
   BExec space;
   int dims[3]; long strides[3];
   bcdetail::axisDims(ext, dims, strides);
@@ -37,17 +38,19 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int na = dims[a];
   const int bf = (s == 0) ? g : (na - g);
+  const bool hasProf = prof.extent(0) > 0;   // per-position inlet profile (resampled to the face grid)
   using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
   Kokkos::parallel_for(
       "cfdk::bc_vel", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
         const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
+        const double wc = hasProf ? prof((static_cast<long>(p0) * prof_nc + p1) * 3 + comp) : wall;
         auto at = [&](int ia) -> double& { return f(base + static_cast<long>(ia) * sa); };
         if (comp == a) {  // normal: Dirichlet face + odd reflection
-          at(bf) = wall;
+          at(bf) = wc;
           if (s == 0)
-            for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wall - at(2 * bf - ia);
+            for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wc - at(2 * bf - ia);
           else
-            for (int ia = na - g + 1; ia < na; ++ia) at(ia) = 2.0 * wall - at(2 * bf - ia);
+            for (int ia = na - g + 1; ia < na; ++ia) at(ia) = 2.0 * wc - at(2 * bf - ia);
         } else if (fold) {  // tangential implicit: drop wall face
           if (s == 0)
             for (int ia = 0; ia < g; ++ia) at(ia) = 0.0;
@@ -55,9 +58,9 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
             for (int ia = na - g; ia < na; ++ia) at(ia) = 0.0;
         } else {  // tangential explicit: cell-centred reflection about bf-0.5
           if (s == 0)
-            for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wall - at(2 * bf - 1 - ia);
+            for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wc - at(2 * bf - 1 - ia);
           else
-            for (int ia = na - g; ia < na; ++ia) at(ia) = 2.0 * wall - at(2 * bf - 1 - ia);
+            for (int ia = na - g; ia < na; ++ia) at(ia) = 2.0 * wc - at(2 * bf - 1 - ia);
         }
       });
   space.fence();

@@ -51,6 +51,15 @@ PYBIND11_MODULE(sdflow_kokkos, m) {
       .def("last_pressure_iterations", &SdflowIbm::lastPressureIterations)
       .def("set_domain_bc", &SdflowIbm::setDomainBc,
            py::arg("face"), py::arg("type"), py::arg("vx") = 0.0, py::arg("vy") = 0.0, py::arg("vz") = 0.0)
+      .def("set_domain_bc_profile",
+           [](SdflowIbm& s, int face, py::array_t<double, py::array::c_style | py::array::forcecast> prof) {
+             auto b = prof.request();
+             if (b.ndim != 3 || b.shape[2] != 3) throw std::runtime_error("profile must be (Nb,Nc,3)");
+             const int nb = (int)b.shape[0], nc = (int)b.shape[1];
+             std::vector<double> v((size_t)nb * nc * 3);
+             std::memcpy(v.data(), b.ptr, v.size() * sizeof(double));
+             s.setDomainBcProfile(face, v, nb, nc);
+           })
       .def("set_pressure_geometry",
            [](SdflowIbm& s, py::array_t<double, py::array::f_style | py::array::forcecast> sdf) {
              std::vector<double> v(static_cast<size_t>(sdf.size()));

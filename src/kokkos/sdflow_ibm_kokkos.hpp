@@ -74,6 +74,21 @@ class SdflowIbm {
     hasBc_=false; hasOutflow_=false;
     for (int i=0;i<6;++i) { if (bc_[i]) hasBc_=true; if (bc_[i]==3) hasOutflow_=true; }
   }
+  // per-position inlet velocity profile on `face` (CUDA set_domain_bc_profile): prof is (nb,nc,3) on the
+  // inner grid of the face's two perpendicular axes; sets the face to inflow (type 2). Resampled (clamp) to
+  // the ghost-inclusive face grid so the BC kernel indexes it directly by face position.
+  void setDomainBcProfile(int face, const std::vector<double>& prof, int nb, int nc) {
+    const int a=face/2; const int dims[3]={e_.x,e_.y,e_.z}; const int bax=(a+1)%3, cax=(a+2)%3;
+    const int Lb=dims[bax], Lc=dims[cax];
+    CCField pf("bcprof", (std::size_t)Lb*Lc*3); auto h=Kokkos::create_mirror_view(pf);
+    auto cl=[](int v,int n){ return v<0?0:(v>=n?n-1:v); };
+    for (int p0=0;p0<Lb;++p0) for (int p1=0;p1<Lc;++p1) {
+      const int ib=cl(p0-G,nb), ic=cl(p1-G,nc);
+      for (int k=0;k<3;++k) h(((long)p0*Lc+p1)*3+k) = prof[((std::size_t)ib*nc+ic)*3+k];
+    }
+    Kokkos::deep_copy(pf,h); bcProf_[face]=pf; bcProfNc_[face]=Lc;
+    bc_[face]=2; hasBc_=true;  // a profiled face is an inflow
+  }
   // all-fluid + domain-BC pressure (CUDA set_pressure_geometry): same path as set_solid with an open SDF.
   void setPressureGeometry(const std::vector<double>& sdfInner) { setSolid(sdfInner, true); }
 
@@ -103,7 +118,7 @@ class SdflowIbm {
         B3 e2{e_.x,e_.y,e_.z}; CCField oa[3]={ox_,oy_,oz_};  // an inflow with nonzero normal velocity. Walls
         for (int a=0;a<3;++a) for (int s=0;s<2;++s) {        // and tangential-only Dirichlet faces (e.g. a
           const int t=bc_[2*a+s];                            // lid: type 2 with zero normal vel) are CLOSED.
-          const bool open = (t==3) || (t==2 && std::fabs(bcVel_[2*a+s][a])>1e-12);
+          const bool open = (t==3) || (t==2 && (bcProf_[2*a+s].extent(0)>0 || std::fabs(bcVel_[2*a+s][a])>1e-12));
           if (t!=0 && !open) bcZeroOpenness(oa[a],e2,G,a,s);
         }
       }  // the MG re-derives the OPERATOR openness alpha (inflow Neumann -> closed) per level via setBC.
@@ -236,9 +251,10 @@ class SdflowIbm {
     if (!hasBc_) return;
     B3 e{e_.x,e_.y,e_.z};
     for (int a=0;a<3;++a) for (int s=0;s<2;++s) {
-      const int t=bc_[2*a+s]; if (t==0) continue;
+      const int f=2*a+s; const int t=bc_[f]; if (t==0) continue;
       if (t==3) { if (doOutflow) bcOutflowComp(C[comp].u, e, G, a, s, comp, fold); continue; }
-      bcVelocityComp(C[comp].u, e, G, a, s, comp, bcVel_[2*a+s][comp], fold);
+      if (bcProf_[f].extent(0)>0) bcVelocityComp(C[comp].u, e, G, a, s, comp, 0.0, fold, bcProf_[f], bcProfNc_[f]);
+      else bcVelocityComp(C[comp].u, e, G, a, s, comp, bcVel_[f][comp], fold);
     }
   }
   // implicit-diffusion wall fold (CUDA setup_bc_diffusion): dcorr += (wall:+beta tangential / outflow:-beta),
@@ -326,6 +342,7 @@ class SdflowIbm {
   long lastPressureIters_ = 0;
   CutcellMG mg_;
   int bc_[6] = {0,0,0,0,0,0}; double bcVel_[6][3] = {}; bool hasBc_ = false, hasOutflow_ = false;  // domain BCs
+  CCField bcProf_[6]; int bcProfNc_[6] = {0,0,0,0,0,0};  // per-position inlet profiles (face grid [Lb*Lc*3])
   CCField bcDcorr_[3], bcBrhs_[3];                // implicit-diffusion face fold (per component)
   bool advect_ = false, cutcellPressure_ = false;
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
