@@ -39,3 +39,8 @@ add_executable(test_cutcell test_cutcell.cpp)
 target_include_directories(test_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
 target_link_libraries(test_cutcell PRIVATE Kokkos::kokkos)
 add_test(NAME cutcell COMMAND test_cutcell)
+
+add_executable(test_bc test_bc.cpp)
+target_include_directories(test_bc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
+target_link_libraries(test_bc PRIVATE Kokkos::kokkos)
+add_test(NAME bc COMMAND test_bc)
