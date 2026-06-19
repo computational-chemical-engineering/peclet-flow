@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "mac_pressure_kokkos.hpp"
+#include "mac_bc_kokkos.hpp"
 
 namespace cfdk {
 
@@ -149,12 +150,34 @@ class CutcellMG {
   int nLevels() const { return (int)lv_.size(); }
   Level& level(int L) { return lv_[L]; }
 
+  // per-face domain BC types {-x,+x,-y,+y,-z,+z}: 0=periodic, 1/2=Neumann (wall/inflow), 3=Dirichlet
+  // (outflow). Default all-periodic -> applyBoundaryOpenness is a no-op (periodic/IBM path byte-identical).
+  void setBoundaryConditions(const int bc[6]) {
+    hasBC_ = false;
+    for (int i = 0; i < 6; ++i) { bc_[i] = bc[i]; if (bc[i]) hasBC_ = true; }
+    removeMean_ = true;  // singular (all-Neumann) unless a Dirichlet outflow makes it non-singular
+    for (int i = 0; i < 6; ++i) if (bc_[i] == 3) removeMean_ = false;
+  }
+  // re-impose the non-periodic boundary openness a periodic fill leaves wrong: Neumann wall/inflow -> 0
+  // (closed), Dirichlet outflow -> left open. Call after every (periodic) openness fill, per level.
+  void applyBoundaryOpenness(Level& lv) {
+    if (!hasBC_) return;
+    B3 e{lv.ext.x, lv.ext.y, lv.ext.z};
+    CCField oa[3] = {lv.ox, lv.oy, lv.oz};
+    for (int a = 0; a < 3; ++a)
+      for (int s = 0; s < 2; ++s) {
+        const int t = bc_[2 * a + s];
+        if (t == 1 || t == 2) bcZeroOpenness(oa[a], e, G, a, s);  // wall/inflow Neumann -> closed
+      }
+  }
+
   // rediscretized cut-cell operator on every level from the fine face openness (idx2 = 1/dx^2 fine).
   void setOpenness(CCConst ox, CCConst oy, CCConst oz, double idx2, double idy2, double idz2) {
     Level& f = lv_[0];
     Kokkos::deep_copy(f.ox, ox); Kokkos::deep_copy(f.oy, oy); Kokkos::deep_copy(f.oz, oz);
     fillOpenness(f);  // periodic fine-level openness ghosts (the operator reads the + neighbour face);
                       // idempotent when the caller already filled them, required when it passed inner-only.
+    applyBoundaryOpenness(f);  // re-impose non-periodic wall/inflow faces the periodic fill clobbered
     buildCutcellOp(f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT, CCConst(f.ox), CCConst(f.oy), CCConst(f.oz),
                    f.ext, G, idx2, idy2, idz2);
     for (int L = 1; L < (int)lv_.size(); ++L) {
@@ -162,6 +185,7 @@ class CutcellMG {
       coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(fin.ox), CCConst(fin.oy), CCConst(fin.oz), c.ext, fin.ext, G,
                      c.inner, fin.ratio);
       fillOpenness(c);  // periodic ghost openness (operator build reads the + neighbour face)
+      applyBoundaryOpenness(c);  // re-impose non-periodic boundary faces per coarse level
       const double sx = 1.0 / (double)(c.cfac.x * c.cfac.x), sy = 1.0 / (double)(c.cfac.y * c.cfac.y),
                    sz = 1.0 / (double)(c.cfac.z * c.cfac.z);
       buildCutcellOp(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.ox), CCConst(c.oy), CCConst(c.oz),
@@ -279,6 +303,7 @@ class CutcellMG {
     return m;
   }
   void removeMean(Level& lv, CCField f) {
+    if (!removeMean_) return;  // non-singular operator (Dirichlet outflow present) -> no null-space projection
     CCExec space; C3 e = lv.ext; CCField ff = f; FPV ac = lv.AC; double sum = 0; long cnt = 0;
     Kokkos::parallel_reduce("mgmeanr", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) { const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
@@ -292,6 +317,7 @@ class CutcellMG {
  private:
   std::vector<Level> lv_;
   int pre_ = 2, post_ = 2, bottom_ = 4;
+  int bc_[6] = {0, 0, 0, 0, 0, 0}; bool hasBC_ = false, removeMean_ = true;
 };
 
 }  // namespace cfdk
