@@ -80,6 +80,12 @@ class SdflowIbm {
   void setOuterTolerance(double tol) { outerTol_ = tol; }
   long lastOuterIterations() const { return lastOuterIters_; }
   void setPressureLevels(int levels) { nLevels_ = levels < 1 ? 1 : levels; }  // MG depth (CUDA default 4)
+  // Chebyshev pressure driver (CUDA set_pressure_chebyshev): communication-light alternative to MG-PCG --
+  // Chebyshev semi-iteration preconditioned by one symmetric V-cycle, no per-iteration global dot-products.
+  // Spectral bounds of M^{-1}A are estimated once (lazily) on the first solve and reused every step.
+  void setPressureChebyshev(bool on, int maxit, double rtol) {
+    useChebyshev_ = on; chebMaxit_ = maxit; chebRtol_ = rtol; chebBoundsSet_ = false;
+  }
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip wall,2=Dirichlet/inflow,3=outflow.
   void setDomainBc(int face, int type, double vx, double vy, double vz) {
     bc_[face]=type; bcVel_[face][0]=vx; bcVel_[face][1]=vy; bcVel_[face][2]=vz;
@@ -347,9 +353,15 @@ class SdflowIbm {
     { CCExec space; CCField r=rhs1_;
       Kokkos::parallel_for("negdiv", Kokkos::RangePolicy<CCExec>(space,0,n1_), KOKKOS_LAMBDA(std::size_t i){ r(i)=-r(i); });
       space.fence(); }
-    // geometric multigrid MG-PCG solve of the cut-cell pressure Poisson A phi = -div(u*) (CUDA mac_multigrid)
+    // geometric multigrid solve of the cut-cell pressure Poisson A phi = -div(u*) (CUDA mac_multigrid):
+    // MG-PCG by default, or the communication-light Chebyshev driver (bounds estimated once, then reused).
     Kokkos::deep_copy(phi1_, 0.0);
-    lastPressureIters_ = mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12);
+    if (useChebyshev_) {
+      if (!chebBoundsSet_) { mg_.estimateEigenvalues(CCConst(rhs1_), chebA_, chebB_, 15, 2, 2, 12); chebBoundsSet_ = true; }
+      lastPressureIters_ = mg_.solveChebyshev(rhs1_, phi1_, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
+    } else {
+      lastPressureIters_ = mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12);
+    }
     copyInner(phi_, e_, G, CCConst(phi1_), e1_, 1);  // bridge phi back g=1 -> g=2
     fillGhosts(phi_);
     if (hasOutflow_) {  // hold phi=0 at the outflow ghost so grad(phi) drives the outflow face (Dirichlet p=0)
@@ -398,6 +410,8 @@ class SdflowIbm {
   std::array<double,3> f_{{0,0,0}};
   int velIters_ = 200, presIters_ = 20;
   int pcgMaxit_ = 500; double pcgRtol_ = 1e-10;   // cut-cell pressure MG-PCG
+  bool useChebyshev_ = false, chebBoundsSet_ = false;  // Chebyshev pressure driver (set_pressure_chebyshev)
+  int chebMaxit_ = 120; double chebRtol_ = 1e-9, chebA_ = 0.0, chebB_ = 0.0;
   int nLevels_ = 4;                               // multigrid depth (CUDA default; set_pressure_multigrid)
   long lastPressureIters_ = 0;
   CutcellMG mg_;

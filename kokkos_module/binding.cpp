@@ -52,6 +52,8 @@ PYBIND11_MODULE(sdflow_kokkos, m) {
       .def("set_pressure_multigrid",
            [](SdflowIbm& s, bool, int levels) { s.setPressureLevels(levels); },
            py::arg("on"), py::arg("levels") = 4)
+      .def("set_pressure_chebyshev", &SdflowIbm::setPressureChebyshev,
+           py::arg("on"), py::arg("max_iter") = 120, py::arg("rtol") = 1e-9)
       .def("last_pressure_iterations", &SdflowIbm::lastPressureIterations)
       .def("set_domain_bc", &SdflowIbm::setDomainBc,
            py::arg("face"), py::arg("type"), py::arg("vx") = 0.0, py::arg("vy") = 0.0, py::arg("vz") = 0.0)

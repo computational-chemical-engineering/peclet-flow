@@ -294,6 +294,100 @@ class CutcellMG {
     Kokkos::parallel_for("mgaypx", Kokkos::RangePolicy<CCExec>(space, 0, n), KOKKOS_LAMBDA(std::size_t i) { yy(i) = xx(i) + a * yy(i); });
     space.fence();
   }
+  void scale(CCField y, double a) {
+    CCExec space; CCField yy = y; std::size_t n = y.extent(0);
+    Kokkos::parallel_for("mgscale", Kokkos::RangePolicy<CCExec>(space, 0, n), KOKKOS_LAMBDA(std::size_t i) { yy(i) *= a; });
+    space.fence();
+  }
+  void lin(CCField out, double a, CCField x, double b, CCField y) {  // out = a*x + b*y (mg_lin_k)
+    CCExec space; CCField oo = out, xx = x, yy = y; std::size_t n = out.extent(0);
+    Kokkos::parallel_for("mglin", Kokkos::RangePolicy<CCExec>(space, 0, n), KOKKOS_LAMBDA(std::size_t i) { oo(i) = a * xx(i) + b * yy(i); });
+    space.fence();
+  }
+  // zero the solid-cell entries (AC<=tiny) -> project out the solid null modes (mg_mask_solid_k).
+  void maskSolid(Level& lv, CCField f) {
+    CCExec space; CCField ff = f; FPV ac = lv.AC; std::size_t n = f.extent(0);
+    Kokkos::parallel_for("mgmasksolid", Kokkos::RangePolicy<CCExec>(space, 0, n),
+      KOKKOS_LAMBDA(std::size_t i) { if (!(ac(i) > 1e-30f)) ff(i) = 0.0; });
+    space.fence();
+  }
+
+  // Estimate the spectral bounds [lmin,lmax] of M^{-1}A (M^{-1} = one symmetric V-cycle) by power iteration
+  // (direct for the max + a shifted iteration for the min), seeded by `seed`. Communication-heavy, so the
+  // CUDA driver runs it once on step 1 and reuses the bounds. Port of estimate_eigenvalues.
+  void estimateEigenvalues(CCConst seed, double& lmin, double& lmax, int iters, int pre, int post, int bottom) {
+    pre_ = pre; post_ = post; bottom_ = bottom;
+    Level& l0 = lv_[0]; const std::size_t n = l0.n;
+    CCField v("ev_v", n), w("ev_w", n), z("ev_z", n), srhs("ev_srhs", n);
+    Kokkos::deep_copy(srhs, seed);
+    auto matvec = [&](CCField y, CCField x) {
+      fill(l0, x); applyOutflowGhost(l0.ext, x);
+      applyCutcellOp(y, CCConst(x), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN), FPC(l0.AB),
+                     FPC(l0.AT), l0.ext, G);
+    };
+    auto applyT = [&](CCField out, CCField in) {  // out = M^{-1} A in, projected onto the fluid range
+      matvec(w, in);
+      Kokkos::deep_copy(l0.rhs, w); Kokkos::deep_copy(l0.x, 0.0);
+      vcycle(0, /*sym=*/true);
+      Kokkos::deep_copy(out, l0.x);
+      removeMean(l0, out); maskSolid(l0, out);
+    };
+    auto normalize = [&](CCField x) { double nr = std::sqrt(dot(l0, x, x)); if (nr > 0) scale(x, 1.0 / nr); };
+    auto seedf = [&](CCField x) { Kokkos::deep_copy(x, srhs); removeMean(l0, x); maskSolid(l0, x); normalize(x); };
+    seedf(v);
+    lmax = 1.0;
+    for (int k = 0; k < iters; ++k) { applyT(z, v); lmax = dot(l0, v, z); Kokkos::deep_copy(v, z); normalize(v); }
+    seedf(v);
+    double mu = 0.0;
+    for (int k = 0; k < iters; ++k) {
+      applyT(z, v); lin(z, lmax, v, -1.0, z);  // z = lmax*v - T v
+      mu = dot(l0, v, z); Kokkos::deep_copy(v, z); normalize(v);
+    }
+    double e_hi = lmax, e_lo = lmax - mu;        // direct (max) + shifted (min) Rayleigh estimates
+    lmin = e_lo < e_hi ? e_lo : e_hi; lmax = e_lo < e_hi ? e_hi : e_lo;  // robust min/max bracket
+    if (lmin < 0.02 * lmax) lmin = 0.02 * lmax;
+  }
+
+  // Chebyshev semi-iteration preconditioned by ONE symmetric V-cycle -- same goal as solvePCG but the step
+  // coefficients come from the spectral bounds [a,b], so NO per-iteration global dot-products (communication-
+  // light at scale). rhs on level-0 supplied as `b`; solution left in `x`. Returns the V-cycle count. Port of
+  // solve_chebyshev.
+  int solveChebyshev(CCField b, CCField x, int maxit, double rtol, int pre, int post, int bottom, double a, double bnd) {
+    pre_ = pre; post_ = post; bottom_ = bottom;
+    Level& l0 = lv_[0]; const std::size_t n = l0.n;
+    if (a > bnd) { double t = a; a = bnd; bnd = t; }  // robust to swapped bounds
+    a *= 0.95; bnd *= 1.05;                            // safety margin: [a,b] must bracket the spectrum
+    CCField r("cb_r", n), z("cb_z", n), d("cb_d", n), w("cb_w", n);
+    auto matvec = [&](CCField y, CCField v) {
+      fill(l0, v); applyOutflowGhost(l0.ext, v);
+      applyCutcellOp(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN), FPC(l0.AB),
+                     FPC(l0.AT), l0.ext, G);
+    };
+    auto precond = [&](CCField zz, CCField rr) {
+      Kokkos::deep_copy(l0.rhs, rr); Kokkos::deep_copy(l0.x, 0.0);
+      vcycle(0, /*sym=*/true); Kokkos::deep_copy(zz, l0.x);
+    };
+    const double theta = 0.5 * (bnd + a), delta = 0.5 * (bnd - a), sigma1 = theta / delta;
+    double rho = 1.0 / sigma1;
+    matvec(w, x);                                     // r = b - A x
+    Kokkos::deep_copy(r, b); axpy(r, -1.0, w); removeMean(l0, r);
+    const double r0 = maxabs(l0, r);
+    int nvc = 0;
+    if (r0 > 0.0) {
+      precond(z, r); ++nvc;                           // z = M^{-1} r
+      lin(d, 1.0 / theta, z, 0.0, z); axpy(x, 1.0, d);  // d = z/theta; x += d
+      for (int i = 1; i < maxit; ++i) {
+        matvec(w, d); axpy(r, -1.0, w); removeMean(l0, r);  // r -= A d
+        if (maxabs(l0, r) < rtol * r0) break;
+        precond(z, r); ++nvc;
+        const double rho_new = 1.0 / (2.0 * sigma1 - rho);
+        lin(d, rho_new * rho, d, 2.0 * rho_new / delta, z); axpy(x, 1.0, d);  // d update; x += d
+        rho = rho_new;
+      }
+    }
+    removeMean(l0, x);
+    return nvc;
+  }
   // reductions / mean removal over inner FLUID cells (AC>tiny) of a level.
   double dot(Level& lv, CCField a, CCField b) {
     CCExec space; C3 e = lv.ext; CCField aa = a, bb = b; FPV ac = lv.AC; double s = 0;
