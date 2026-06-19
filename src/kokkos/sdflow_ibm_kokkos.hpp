@@ -92,6 +92,9 @@ class SdflowIbm {
   void setPressureChebyshev(bool on, int maxit, double rtol) {
     useChebyshev_ = on; chebMaxit_ = maxit; chebRtol_ = rtol; chebBoundsSet_ = false;
   }
+  // MG-PCG pressure tolerance/iteration cap (CUDA set_pressure_pcg). The Kokkos cut-cell pressure solve is
+  // MG-PCG by default; this just sets its bounds (the `on` flag is accepted for API parity).
+  void setPressurePcg(bool /*on*/, int maxit, double rtol) { pcgMaxit_ = maxit; pcgRtol_ = rtol; }
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip wall,2=Dirichlet/inflow,3=outflow.
   void setDomainBc(int face, int type, double vx, double vy, double vz) {
     bc_[face]=type; bcVel_[face][0]=vx; bcVel_[face][1]=vy; bcVel_[face][2]=vz;
