@@ -71,7 +71,8 @@ class SdflowIbm {
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip wall,2=Dirichlet/inflow,3=outflow.
   void setDomainBc(int face, int type, double vx, double vy, double vz) {
     bc_[face]=type; bcVel_[face][0]=vx; bcVel_[face][1]=vy; bcVel_[face][2]=vz;
-    hasBc_=false; for (int i=0;i<6;++i) if (bc_[i]) hasBc_=true;
+    hasBc_=false; hasOutflow_=false;
+    for (int i=0;i<6;++i) { if (bc_[i]) hasBc_=true; if (bc_[i]==3) hasOutflow_=true; }
   }
   // all-fluid + domain-BC pressure (CUDA set_pressure_geometry): same path as set_solid with an open SDF.
   void setPressureGeometry(const std::vector<double>& sdfInner) { setSolid(sdfInner, true); }
@@ -252,7 +253,15 @@ class SdflowIbm {
     lastPressureIters_ = mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12);
     copyInner(phi_, e_, G, CCConst(phi1_), e1_, 1);  // bridge phi back g=1 -> g=2
     fillGhosts(phi_);
+    if (hasOutflow_) {  // hold phi=0 at the outflow ghost so grad(phi) drives the outflow face (Dirichlet p=0)
+      B3 e{e_.x,e_.y,e_.z};
+      for (int a=0;a<3;++a) for (int s=0;s<2;++s) if (bc_[2*a+s]==3) bcZeroPressureGhost(phi_, e, G, a, s);
+    }
     projectCorrect(C[0].u,C[1].u,C[2].u, CCConst(phi_), e_, G);
+    if (hasOutflow_) {  // correct the high-side outflow normal face that projectCorrect misses (mass leaves)
+      B3 e{e_.x,e_.y,e_.z};
+      for (int a=0;a<3;++a) if (bc_[2*a+1]==3) bcCorrectOutflow(C[a].u, phi_, e, G, a);
+    }
     // the grad(phi) correction also touches solid faces; re-impose no-slip there so the decoupled solid
     // velocity cannot accumulate (matches the CUDA apply_mask/mask_k after correct_k -> stability).
     for (int c = 0; c < 3; ++c) maskVelocity(c);
@@ -293,7 +302,7 @@ class SdflowIbm {
   int nLevels_ = 4;                               // multigrid depth (CUDA default; set_pressure_multigrid)
   long lastPressureIters_ = 0;
   CutcellMG mg_;
-  int bc_[6] = {0,0,0,0,0,0}; double bcVel_[6][3] = {}; bool hasBc_ = false;  // per-face domain BCs
+  int bc_[6] = {0,0,0,0,0,0}; double bcVel_[6][3] = {}; bool hasBc_ = false, hasOutflow_ = false;  // domain BCs
   CCField bcDcorr_[3], bcBrhs_[3];                // implicit-diffusion face fold (per component)
   bool advect_ = false, cutcellPressure_ = false;
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;

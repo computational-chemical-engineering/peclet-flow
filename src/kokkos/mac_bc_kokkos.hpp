@@ -108,8 +108,44 @@ inline void bcDiffusionFold(BField dcorr, BField brhs, B3 ext, int g, int a, int
   space.fence();
 }
 
-// Zero the a-component face openness on a wall face -> homogeneous Neumann pressure.
-inline void bcZeroOpenness(BField oa, B3 ext, int g, int a, int s) {
+// Hold the pressure ghost at 0 on an outflow face (Dirichlet p=0; the open face couples to it).
+inline void bcZeroPressureGhost(BField phi, B3 ext, int g, int a, int s) {
+  BExec space;
+  int dims[3]; long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int na = dims[a];
+  const int lo = (s == 0) ? 0 : (na - g), hi = (s == 0) ? (g - 1) : (na - 1);
+  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "cfdk::bc_zero_p_ghost", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+        const long base = (long)p0 * sb + (long)p1 * sc;
+        for (int ia = lo; ia <= hi; ++ia) phi(base + (long)ia * sa) = 0.0;
+      });
+  space.fence();
+}
+
+// Projection correction of the high-side outflow normal face (index na-g) that correct_k misses:
+// f -= phi[bf] - phi[bf-sa] (with the Dirichlet ghost phi[bf]=0 -> += phi_inner). (correct_outflow_k.)
+inline void bcCorrectOutflow(BField f, BField phi, B3 ext, int g, int a) {
+  BExec space;
+  int dims[3]; long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "cfdk::bc_correct_outflow", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+        const long bf = (long)p0 * sb + (long)p1 * sc + (long)(dims[a] - g) * sa;
+        f(bf) -= phi(bf) - phi(bf - sa);
+      });
+  space.fence();
+}
+
+// Set the a-component face openness on a domain face to `val` (Neumann wall/inflow -> 0; the periodic fill
+// would otherwise wrap the wrong value into an outflow face from the opposite boundary -> set it open = 1).
+inline void bcSetOpenness(BField oa, B3 ext, int g, int a, int s, double val) {
   BExec space;
   int dims[3]; long strides[3];
   bcdetail::axisDims(ext, dims, strides);
@@ -118,11 +154,12 @@ inline void bcZeroOpenness(BField oa, B3 ext, int g, int a, int s) {
   const int bf = (s == 0) ? g : (dims[a] - g);
   using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
   Kokkos::parallel_for(
-      "cfdk::bc_zopen", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
-        oa(static_cast<long>(p0) * sb + static_cast<long>(p1) * sc + static_cast<long>(bf) * sa) = 0.0;
+      "cfdk::bc_setopen", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+        oa(static_cast<long>(p0) * sb + static_cast<long>(p1) * sc + static_cast<long>(bf) * sa) = val;
       });
   space.fence();
 }
+inline void bcZeroOpenness(BField oa, B3 ext, int g, int a, int s) { bcSetOpenness(oa, ext, g, a, s, 0.0); }
 
 }  // namespace cfdk
 

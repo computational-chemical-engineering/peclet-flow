@@ -153,10 +153,16 @@ class CutcellMG {
   // per-face domain BC types {-x,+x,-y,+y,-z,+z}: 0=periodic, 1/2=Neumann (wall/inflow), 3=Dirichlet
   // (outflow). Default all-periodic -> applyBoundaryOpenness is a no-op (periodic/IBM path byte-identical).
   void setBoundaryConditions(const int bc[6]) {
-    hasBC_ = false;
-    for (int i = 0; i < 6; ++i) { bc_[i] = bc[i]; if (bc[i]) hasBC_ = true; }
-    removeMean_ = true;  // singular (all-Neumann) unless a Dirichlet outflow makes it non-singular
-    for (int i = 0; i < 6; ++i) if (bc_[i] == 3) removeMean_ = false;
+    hasBC_ = false; hasOutflow_ = false;
+    for (int i = 0; i < 6; ++i) { bc_[i] = bc[i]; if (bc[i]) hasBC_ = true; if (bc[i] == 3) hasOutflow_ = true; }
+    removeMean_ = !hasOutflow_;  // singular all-Neumann -> remove mean; Dirichlet outflow -> non-singular
+  }
+  // hold the pressure/correction ghost at 0 on outflow faces (open face -> Dirichlet p=0). Call after every
+  // (periodic) fill of a solution / search-direction field, on the level it lives.
+  void applyOutflowGhost(C3 ext, CCField x) {
+    if (!hasOutflow_) return;
+    B3 e{ext.x, ext.y, ext.z};
+    for (int a = 0; a < 3; ++a) for (int s = 0; s < 2; ++s) if (bc_[2 * a + s] == 3) bcZeroPressureGhost(x, e, G, a, s);
   }
   // re-impose the non-periodic boundary openness a periodic fill leaves wrong: Neumann wall/inflow -> 0
   // (closed), Dirichlet outflow -> left open. Call after every (periodic) openness fill, per level.
@@ -167,7 +173,8 @@ class CutcellMG {
     for (int a = 0; a < 3; ++a)
       for (int s = 0; s < 2; ++s) {
         const int t = bc_[2 * a + s];
-        if (t == 1 || t == 2) bcZeroOpenness(oa[a], e, G, a, s);  // wall/inflow Neumann -> closed
+        if (t == 1 || t == 2) bcSetOpenness(oa[a], e, G, a, s, 0.0);  // wall/inflow Neumann -> closed
+        else if (t == 3) bcSetOpenness(oa[a], e, G, a, s, 1.0);       // outflow -> open (periodic fill wraps wrong)
       }
   }
 
@@ -201,7 +208,7 @@ class CutcellMG {
     Level& l0 = lv_[0];
     Kokkos::deep_copy(l0.x, x);
     auto matvec = [&](CCField y, CCField v) {
-      fill(l0, v);
+      fill(l0, v); applyOutflowGhost(l0.ext, v);
       applyCutcellOp(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN), FPC(l0.AB),
                      FPC(l0.AT), l0.ext, G);
     };
@@ -248,7 +255,7 @@ class CutcellMG {
     restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, G, cs.inner, lv.ratio);
     Kokkos::deep_copy(cs.x, 0.0);
     vcycle(L + 1, sym);
-    fill(cs, cs.x);
+    fill(cs, cs.x); applyOutflowGhost(cs.ext, cs.x);
     prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, G, lv.inner, lv.ratio);
     smooth(lv, post_, /*reverse=*/sym);
     removeMean(lv, lv.x);
@@ -258,7 +265,7 @@ class CutcellMG {
     for (int k = 0; k < sweeps; ++k)
       for (int s = 0; s < 2; ++s) {
         const int color = reverse ? (1 - s) : s;
-        fill(lv, lv.x);
+        fill(lv, lv.x); applyOutflowGhost(lv.ext, lv.x);
         cutcellSmoothColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
                            FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, G, color);
       }
@@ -317,7 +324,7 @@ class CutcellMG {
  private:
   std::vector<Level> lv_;
   int pre_ = 2, post_ = 2, bottom_ = 4;
-  int bc_[6] = {0, 0, 0, 0, 0, 0}; bool hasBC_ = false, removeMean_ = true;
+  int bc_[6] = {0, 0, 0, 0, 0, 0}; bool hasBC_ = false, removeMean_ = true, hasOutflow_ = false;
 };
 
 }  // namespace cfdk
