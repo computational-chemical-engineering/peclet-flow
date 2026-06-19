@@ -131,7 +131,7 @@ class SdflowIbm {
   std::vector<double> getPressure() { return gatherInner(P_); }
   double maxOpenDivergence() {
     if (!cutcellPressure_) return 0.0;
-    fillGhosts(C[0].u); fillGhosts(C[1].u); fillGhosts(C[2].u);
+    for (int c=0;c<3;++c) fillVelGhosts(c, 0);  // ghosts incl. outflow zero-gradient before the divergence
     divergOpen(CCConst(C[0].u),CCConst(C[1].u),CCConst(C[2].u), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
     return reduceMaxAbsInner(CCConst(div_));
   }
@@ -261,7 +261,10 @@ class SdflowIbm {
   // Incremental (rotational) cut-cell projection: solve A phi = -div_open(u*) (RB-GS, mean-removed),
   // u -= grad phi, then accumulate the physical pressure P += (rho/dt)*phi - mu*div(u*) (Timmermans).
   void project() {
-    fillGhosts(C[0].u); fillGhosts(C[1].u); fillGhosts(C[2].u);
+    // ghosts incl. domain BCs (outflow zero-gradient) BEFORE the divergence -- matches CUDA apply_velocity_bc
+    // before diverg_open, so div(u*) counts the outflow flux (else the rotational pressure pumps the
+    // mis-counted outflow divergence and blows up the outflow-wall corner).
+    for (int c=0;c<3;++c) fillVelGhosts(c, 0);
     divergOpen(CCConst(C[0].u),CCConst(C[1].u),CCConst(C[2].u), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
     // bridge -div(u*) (g=2 block) -> the MG rhs (g=1 block); keep div(u*) in div_ for the pressure update
     copyInner(rhs1_, e1_, 1, CCConst(div_), e_, G);
