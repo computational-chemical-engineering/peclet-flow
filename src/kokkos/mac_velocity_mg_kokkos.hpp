@@ -179,10 +179,15 @@ class VelocityMG {
   static constexpr int G = 2;
   struct Level {
     C3 ext, inner, ratio{2, 2, 2}, cfac{1, 1, 1};
+    C3 og{0, 0, 0};            // block inner origin (global red-black parity); {0,0,0} single-rank
     std::size_t n = 0;
     CCField x, rhs, res, theta, pin, resMask;
     CCField advU, advV, advW;  // restricted advecting velocity (upwind-convective coarse op; L>=1)
     FPV AC, AW, AE, AS, AN, AB, AT;
+#ifdef CFD_KOKKOS_MPI
+    std::shared_ptr<GridHalo<3>> halo;                       // per-level topology (decomposed)
+    std::shared_ptr<DeviceGridExchangeKokkos<double>> dev;   // per-level ghost exchange (ghost width G=2)
+#endif
   };
 
   // periodic uniform hierarchy (halve each axis while even and >=2, capped at nLevels).
@@ -212,7 +217,47 @@ class VelocityMG {
     }
     lv_[0].resMask = CCField("vmg_resmask0", lv_[0].n);  // level 0 only (clean-fluid exclude, staircase path)
   }
+#ifdef CFD_KOKKOS_MPI
+  // Multi-rank velocity-MG: coarsen the GLOBAL grid 2:1 per level; each level gets its own G=2 transport-core
+  // halo. No global reductions here (the velocity op is non-singular -> no mean removal, no Krylov), so the
+  // fold is just fill()->exchange + the block-origin red-black parity. Single-rank (size 1) == init().
+  void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm) {
+    lv_.clear(); distributed_ = true;
+    int rank = 0, size = 1; MPI_Comm_rank(comm, &rank); MPI_Comm_size(comm, &size);
+    std::array<bool, 3> per{true, true, true};
+    C3 gs{gnx, gny, gnz}, cf{1, 1, 1};
+    auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
+    for (int L = 0; L < nLevels; ++L) {
+      Level v;
+      v.halo = std::make_shared<GridHalo<3>>();
+      tpx::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), tpx::IVec<3>{gs.x, gs.y, gs.z});
+      v.halo->buildTopology(dec, rank, G, per, comm);
+      v.dev = std::make_shared<DeviceGridExchangeKokkos<double>>(); v.dev->init(*v.halo);
+      const auto& idx = v.halo->indexer();
+      const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
+      v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]}; v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};
+      v.og = {(int)oig[0] + G, (int)oig[1] + G, (int)oig[2] + G}; v.cfac = cf;
+      v.n = idx.numCellsInclGhost();
+      C3 next = gs, ratio{1, 1, 1};
+      if (L + 1 < nLevels) {
+        if (can(gs.x)) { ratio.x = 2; next.x = gs.x / 2; }
+        if (can(gs.y)) { ratio.y = 2; next.y = gs.y / 2; }
+        if (can(gs.z)) { ratio.z = 2; next.z = gs.z / 2; }
+      }
+      v.ratio = ratio;
+      v.x = CCField("vmg_x", v.n); v.rhs = CCField("vmg_rhs", v.n); v.res = CCField("vmg_res", v.n);
+      v.theta = CCField("vmg_th", v.n); v.pin = CCField("vmg_pin", v.n);
+      if (L > 0) { v.advU = CCField("vmg_au", v.n); v.advV = CCField("vmg_av", v.n); v.advW = CCField("vmg_aw", v.n); }
+      for (FPV* p : {&v.AC, &v.AW, &v.AE, &v.AS, &v.AN, &v.AB, &v.AT}) *p = FPV("vmg_A", v.n);
+      lv_.push_back(v);
+      if (next.x == gs.x && next.y == gs.y && next.z == gs.z) break;
+      gs = next; cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
+    }
+    lv_[0].resMask = CCField("vmg_resmask0", lv_[0].n);
+  }
+#endif
   int nLevels() const { return (int)lv_.size(); }
+  Level& level(int L) { return lv_[L]; }
 
   // level-0 fine operator = the external IBM stencil (7 float arrays on the same G=2 block).
   void setFineStencil(FPC AC, FPC AW, FPC AE, FPC AS, FPC AN, FPC AB, FPC AT) {
@@ -344,7 +389,7 @@ class VelocityMG {
     smooth(lv, post_, l0);
   }
   void smooth(Level& lv, int sweeps, bool isL0) {
-    const C3 og{0, 0, 0};
+    const C3 og = lv.og;  // global red-black parity (block inner origin); {0,0,0} single-rank
     CCConst pin = usePin_ ? CCConst(lv.pin) : empty_;
     for (int k = 0; k < sweeps; ++k)
       for (int color = 0; color < 2; ++color) {
@@ -356,7 +401,11 @@ class VelocityMG {
   }
   // periodic ghost fill; in domain-BC mode only the periodic axes wrap (non-periodic boundary ghosts are
   // left as the caller / correction set them -- the boundary fold + held ghost represent the wall).
+  // Distributed (periodic IBM path): the per-level transport-core halo (cross-rank + periodic in one call).
   void fill(Level& lv, CCField f) {
+#ifdef CFD_KOKKOS_MPI
+    if (distributed_ && !bcMode_) { lv.dev->exchange(f); return; }
+#endif
     for (int a = 0; a < 3; ++a)
       if (!bcMode_ || (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0)) fillAxis(lv, f, a);
   }
@@ -390,6 +439,7 @@ class VelocityMG {
   bool bcMode_ = false; int bc_[6] = {0, 0, 0, 0, 0, 0};  // domain-BC (non-periodic) mode
   std::function<void(CCField)> bcApplyL0_;  // re-impose the velocity BC on level 0 (domain-BC mode)
   CCConst empty_;                           // zero-extent View -> "no pin / no mask" to the kernels
+  bool distributed_ = false;                // multi-rank (initMpi); periodic IBM path -> fill() exchanges
 };
 
 }  // namespace cfdk
