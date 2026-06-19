@@ -49,3 +49,8 @@ add_executable(test_ibm test_ibm.cpp)
 target_include_directories(test_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
 target_link_libraries(test_ibm PRIVATE Kokkos::kokkos)
 add_test(NAME ibm COMMAND test_ibm)
+
+add_executable(test_ibm_overlay test_ibm_overlay.cpp)
+target_include_directories(test_ibm_overlay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
+target_link_libraries(test_ibm_overlay PRIVATE Kokkos::kokkos)
+add_test(NAME ibm_overlay COMMAND test_ibm_overlay)
