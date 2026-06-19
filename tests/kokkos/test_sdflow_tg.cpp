@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
       SdflowKokkos s(N, nu, dt);
       s.setAdvection(false);
       s.setIterations(/*nDiff*/ 300, /*nPois*/ 80);
+      s.setPressureMultigrid(true, 6);
       std::vector<double> u0, v0;
       initTG(s, u0, v0);
       const double a0 = s.l2(s.u());
@@ -84,26 +85,25 @@ int main(int argc, char** argv) {
     }
 
     // --- NS (advection on): decay should stay close to the same diffusion rate ---
-    // The post-projection divergence equals the pressure-Poisson residual. With advection, div(u*) is
-    // O(advection), so plain RB-GS (a slow pressure solver — this is why sdflow uses multigrid; the
-    // transfer operators are ported but not yet wired here) leaves a small residual that shrinks with
-    // more sweeps. We confirm the decay is right and that div decreases as the pressure solve does more.
+    // Post-projection divergence = the pressure-Poisson residual. Compare the wired multigrid pressure
+    // solve (a few V-cycles) against the old plain RB-GS (80 sweeps): MG should drive div far lower for
+    // much less work.
     {
-      SdflowKokkos s1(N, nu, dt), s2(N, nu, dt);
-      s1.setAdvection(true); s1.setIterations(300, 80);
-      s2.setAdvection(true); s2.setIterations(300, 400);
+      SdflowKokkos sMg(N, nu, dt), sRb(N, nu, dt);
+      sMg.setAdvection(true); sMg.setPressureMultigrid(true, 6);
+      sRb.setAdvection(true); sRb.setPressureMultigrid(false, 0); sRb.setIterations(300, 80);
       std::vector<double> u0, v0;
-      initTG(s1, u0, v0); initTG(s2, u0, v0);
-      const double a0 = s1.l2(s1.u());
-      for (int it = 0; it < nsteps; ++it) { s1.step(); s2.step(); }
-      const double ratio = s1.l2(s1.u()) / a0;
-      const double div80 = s1.maxDivU(), div400 = s2.maxDivU();
+      initTG(sMg, u0, v0); initTG(sRb, u0, v0);
+      const double a0 = sMg.l2(sMg.u());
+      for (int it = 0; it < nsteps; ++it) { sMg.step(); sRb.step(); }
+      const double ratio = sMg.l2(sMg.u()) / a0;
+      const double divMg = sMg.maxDivU(), divRb = sRb.maxDivU();
       const double rateErr = std::fabs(ratio - fExpect) / fExpect;
-      std::printf("[sdflow_tg] NS:     ratio=%.6f expected=%.6f (rel err %.2e); max|div| 80 sweeps=%.2e, 400 sweeps=%.2e\n",
-                  ratio, fExpect, rateErr, div80, div400);
+      std::printf("[sdflow_tg] NS:     ratio=%.6f expected=%.6f (rel err %.2e); max|div| MG(6 V-cyc)=%.2e vs RB-GS(80 sweeps)=%.2e\n",
+                  ratio, fExpect, rateErr, divMg, divRb);
       if (rateErr > 5e-2) { std::fprintf(stderr, "FAIL: NS decay too far from TG\n"); status = 1; }
-      if (div80 > 1e-2) { std::fprintf(stderr, "FAIL: NS divergence too large\n"); status = 1; }
-      if (!(div400 < div80)) { std::fprintf(stderr, "FAIL: more pressure sweeps did not reduce divergence\n"); status = 1; }
+      if (divMg > 1e-7) { std::fprintf(stderr, "FAIL: MG divergence too large\n"); status = 1; }
+      if (!(divMg < divRb)) { std::fprintf(stderr, "FAIL: MG did not beat RB-GS\n"); status = 1; }
     }
 
     if (!status)

@@ -10,6 +10,7 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "mac_mg_kokkos.hpp"
 #include "mac_reductions_kokkos.hpp"
 #include "mac_stencils_kokkos.hpp"
 #include "mac_transfer_kokkos.hpp"
@@ -22,13 +23,17 @@ class SdflowKokkos {
   using F = Kokkos::View<double*, SMem>;
   static constexpr int G = 2;
 
-  SdflowKokkos(int n, double nu, double dt) : N_(n), nu_(nu), dt_(dt) {
+  SdflowKokkos(int n, double nu, double dt) : N_(n), nu_(nu), dt_(dt), mg_(n) {
     e_ = I3{N_ + 2 * G, N_ + 2 * G, N_ + 2 * G};
     ne_ = (std::size_t)e_.x * e_.y * e_.z;
     u_ = F("u", ne_); v_ = F("v", ne_); w_ = F("w", ne_);
     us_ = F("us", ne_); vs_ = F("vs", ne_); ws_ = F("ws", ne_);
     bu_ = F("bu", ne_); bv_ = F("bv", ne_); bw_ = F("bw", ne_);
     phi_ = F("phi", ne_); div_ = F("div", ne_);
+    // g=1 scratch for the multigrid level-0 (MG uses ghost width 1; the solver uses 2).
+    eMg_ = I3{N_ + 2, N_ + 2, N_ + 2};
+    const std::size_t nm = (std::size_t)eMg_.x * eMg_.y * eMg_.z;
+    dMg_ = F("dMg", nm); phiMg_ = F("phiMg", nm);
   }
 
   F& u() { return u_; }
@@ -39,6 +44,8 @@ class SdflowKokkos {
   void setBodyForce(double fx, double fy, double fz) { fx_ = fx; fy_ = fy; fz_ = fz; }
   void setAdvection(bool on) { advect_ = on; }
   void setIterations(int nDiff, int nPois) { nDiff_ = nDiff; nPois_ = nPois; }
+  // Pressure solver: multigrid V-cycles (default) or plain RB-GS (useMg=false).
+  void setPressureMultigrid(bool useMg, int nVcycles) { useMg_ = useMg; nVcycles_ = nVcycles; }
 
   void step() {
     const I3 og{0, 0, 0};
@@ -56,10 +63,17 @@ class SdflowKokkos {
     periodicFill(us_); periodicFill(vs_); periodicFill(ws_);
     divergence(SConst(us_), SConst(vs_), SConst(ws_), div_, e_, G);
     Kokkos::deep_copy(phi_, 0.0);
-    for (int it = 0; it < nPois_; ++it) {
-      periodicFill(phi_);
-      poisSweep(phi_, SConst(div_), e_, og, G);
-      removeMean(phi_);
+    if (useMg_) {  // geometric multigrid V-cycles (fast); bridge g=2 <-> g=1 by inner-cell copy
+      copyInner(dMg_, eMg_, 1, SConst(div_), e_, G);
+      Kokkos::deep_copy(phiMg_, 0.0);
+      mg_.solve(phiMg_, SConst(dMg_), nVcycles_);
+      copyInner(phi_, e_, G, SConst(phiMg_), eMg_, 1);
+    } else {  // plain RB-GS (slow; kept for comparison)
+      for (int it = 0; it < nPois_; ++it) {
+        periodicFill(phi_);
+        poisSweep(phi_, SConst(div_), e_, og, G);
+        removeMean(phi_);
+      }
     }
     periodicFill(phi_);
     correct(us_, vs_, ws_, SConst(phi_), T3{e_.x, e_.y, e_.z}, G);
@@ -81,6 +95,20 @@ class SdflowKokkos {
 
   // (public: nvcc forbids extended __host__ __device__ lambdas inside private/protected members.)
   double idiag() const { return 1.0 / dt_; }
+
+  // Copy the N^3 inner cells between two extended blocks of different ghost width.
+  void copyInner(F dst, I3 de, int dg, SConst src, I3 se, int sg) {
+    SExec space; const int N = N_;
+    Kokkos::parallel_for(
+        "cfdk::copyInner", Kokkos::RangePolicy<SExec>(space, 0, (long)N * N * N),
+        KOKKOS_LAMBDA(long c) {
+          const int ix = (int)(c % N), iy = (int)((c / N) % N), iz = (int)(c / ((long)N * N));
+          const long di = (long)(ix+dg) + (long)(iy+dg)*de.x + (long)(iz+dg)*(long)de.x*de.y;
+          const long si = (long)(ix+sg) + (long)(iy+sg)*se.x + (long)(iz+sg)*(long)se.x*se.y;
+          dst(di) = src(si);
+        });
+    space.fence();
+  }
 
   void diffuseComp(F x, F b, double Ac) {
     periodicFill(x);
@@ -170,9 +198,11 @@ class SdflowKokkos {
   int N_; double nu_, dt_;
   I3 e_; std::size_t ne_;
   F u_, v_, w_, us_, vs_, ws_, bu_, bv_, bw_, phi_, div_;
+  MgPoisson mg_;
+  I3 eMg_; F dMg_, phiMg_;
   double fx_ = 0, fy_ = 0, fz_ = 0;
-  bool advect_ = true;
-  int nDiff_ = 20, nPois_ = 50;
+  bool advect_ = true, useMg_ = true;
+  int nDiff_ = 20, nPois_ = 50, nVcycles_ = 8;
 };
 
 }  // namespace cfdk

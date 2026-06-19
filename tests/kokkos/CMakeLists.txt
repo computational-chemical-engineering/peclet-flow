@@ -68,3 +68,8 @@ add_test(NAME sdflow_tg COMMAND test_sdflow_tg)
 add_executable(bench_rbgs bench_rbgs.cpp)
 target_include_directories(bench_rbgs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
 target_link_libraries(bench_rbgs PRIVATE Kokkos::kokkos)
+
+add_executable(test_mg test_mg.cpp)
+target_include_directories(test_mg PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
+target_link_libraries(test_mg PRIVATE Kokkos::kokkos)
+add_test(NAME mg COMMAND test_mg)
