@@ -59,3 +59,8 @@ add_executable(test_ibm_apply test_ibm_apply.cpp)
 target_include_directories(test_ibm_apply PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
 target_link_libraries(test_ibm_apply PRIVATE Kokkos::kokkos)
 add_test(NAME ibm_apply COMMAND test_ibm_apply)
+
+add_executable(test_sdflow_tg test_sdflow_tg.cpp)
+target_include_directories(test_sdflow_tg PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
+target_link_libraries(test_sdflow_tg PRIVATE Kokkos::kokkos)
+add_test(NAME sdflow_tg COMMAND test_sdflow_tg)
