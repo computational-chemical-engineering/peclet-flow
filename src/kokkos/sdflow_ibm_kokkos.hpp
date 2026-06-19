@@ -23,6 +23,7 @@
 #include "mac_ibm_kokkos.hpp"
 #include "mac_pressure_kokkos.hpp"
 #include "mac_cutcell_mg_kokkos.hpp"
+#include "mac_velocity_mg_kokkos.hpp"
 #include "mac_stencils_kokkos.hpp"
 #include "staggered_advection_kokkos.hpp"
 
@@ -79,6 +80,11 @@ class SdflowIbm {
   void setOuterIterations(int iters) { outerIters_ = iters < 1 ? 1 : iters; }
   void setOuterTolerance(double tol) { outerTol_ = tol; }
   long lastOuterIterations() const { return lastOuterIters_; }
+  // Velocity (momentum) multigrid for the IBM diffusion solve (CUDA set_velocity_multigrid): the STAIRCASE
+  // coarse operator (exact == RB-GS, stiff-stable at large dt). Call before set_solid; built at geometry time.
+  void setVelocityMultigrid(bool on, int levels, int vcycles) {
+    useVelocityMg_ = on; vmgLevels_ = levels < 1 ? 1 : levels; vmgVcycles_ = vcycles < 1 ? 1 : vcycles;
+  }
   void setPressureLevels(int levels) { nLevels_ = levels < 1 ? 1 : levels; }  // MG depth (CUDA default 4)
   // Chebyshev pressure driver (CUDA set_pressure_chebyshev): communication-light alternative to MG-PCG --
   // Chebyshev semi-iteration preconditioned by one symmetric V-cycle, no per-iteration global dot-products.
@@ -129,6 +135,10 @@ class SdflowIbm {
       Kokkos::deep_copy(C[c].u, 0.0);
     }
     rebuildStencils();
+    if (useVelocityMg_ && !hasBc_) {  // velocity-MG (staircase) hierarchy + per-component theta/clean scratch
+      vmg_.init(nx_, ny_, nz_, vmgLevels_);
+      vmgTheta_ = CCField("vmgTheta", n_); vmgClean_ = CCField("vmgClean", n_);
+    }
     if (hasBc_) setupBcDiffusion();  // bake the implicit-diffusion wall fold into the per-component stencil
     if (cutcellPressure_) {
       buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);  // on the g=2 velocity block
@@ -283,6 +293,18 @@ class SdflowIbm {
       }
       return;
     }
+    if (useVelocityMg_) {  // IBM velocity multigrid: fine = sharp As_[c], coarse = staircase (exact == RB-GS).
+      // Fine stencil + per-component geometry (volume fraction theta, clean-fluid exclude mask) -> staircase
+      // coarse op, then solve A_ibm u = b by V-cycles. Built per component (cheap, static geometry).
+      const Off3 offs[3] = {{-0.5f,0,0},{0,-0.5f,0},{0,0,-0.5f}};
+      ibmVolfrac(vmgTheta_, CCConst(sdf_), e_, offs[c]);
+      ibmCleanFluidMask(vmgClean_, CCConst(sdf_), e_, offs[c]);
+      vmg_.setFineStencil(FPC(C[c].AC),FPC(C[c].AW),FPC(C[c].AE),FPC(C[c].AS),FPC(C[c].AN),FPC(C[c].AB),FPC(C[c].AT));
+      vmg_.setStaircase(CCConst(vmgTheta_), CCConst(C[c].mask), CCConst(vmgClean_), mu_, rho_/dt_, 0.5);
+      vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8);
+      maskVelocity(c);  // re-impose no-slip at solid (the masked solve leaves them at the pin value)
+      return;
+    }
     for (int it = 0; it < velIters_; ++it) {  // IBM / periodic: Robust-Scaled cut-cell stencil (float)
       fillGhosts(C[c].u);
       ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
@@ -419,6 +441,8 @@ class SdflowIbm {
   CCField bcProf_[6]; int bcProfNc_[6] = {0,0,0,0,0,0};  // per-position inlet profiles (face grid [Lb*Lc*3])
   CCField bcDcorr_[3], bcBrhs_[3];                // implicit-diffusion face fold (per component)
   bool advect_ = false, cutcellPressure_ = false, implicitFou_ = false;
+  bool useVelocityMg_ = false; int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
+  VelocityMG vmg_; CCField vmgTheta_, vmgClean_;
   int outerIters_ = 1; double outerTol_ = 0.0;        // Picard outer iteration (CUDA set_outer_iterations)
   long lastOuterIters_ = 0; double lastOuterCorr_ = 0.0;
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
