@@ -147,6 +147,67 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
   }
 }
 
+// Build the backward-Euler velocity diffusion stencil over the extended block (divided convention):
+// A_C = idiag + 6*beta, off-diagonals = -beta (dx=1). idiag = 1/dt, beta = nu.
+inline void ibmBuildDiffusion(Kokkos::View<float*, IMem> AC, Kokkos::View<float*, IMem> AW,
+                              Kokkos::View<float*, IMem> AE, Kokkos::View<float*, IMem> AS,
+                              Kokkos::View<float*, IMem> AN, Kokkos::View<float*, IMem> AB,
+                              Kokkos::View<float*, IMem> AT, int ex, int ey, int ez, double beta,
+                              double idiag) {
+  Kokkos::DefaultExecutionSpace space;
+  const std::size_t n = (std::size_t)ex * ey * ez;
+  const float nb = (float)(-beta), c = (float)(idiag + 6.0 * beta);
+  Kokkos::parallel_for(
+      "cfdk::ibm_build_diff", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, n),
+      KOKKOS_LAMBDA(std::size_t i) {
+        AC(i) = c; AW(i) = nb; AE(i) = nb; AS(i) = nb; AN(i) = nb; AB(i) = nb; AT(i) = nb;
+      });
+  space.fence();
+}
+
+// Apply the Robust-Scaled overlay to the momentum stencil at each cut cell (port of
+// ibm_modify_stencil_k): modify A_C / 6 off-diagonals + accumulate the inhomogeneous (wall-velocity)
+// term and store the row scaling. Each cut cell owns a distinct grid index c -> no races.
+inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*, IMem> AW,
+                             Kokkos::View<float*, IMem> AE, Kokkos::View<float*, IMem> AS,
+                             Kokkos::View<float*, IMem> AN, Kokkos::View<float*, IMem> AB,
+                             Kokkos::View<float*, IMem> AT, Kokkos::View<double*, IMem> a_inhom,
+                             Kokkos::View<double*, IMem> rhs_scale, const IbmOverlay& ibm,
+                             int numActive, float u_bc_val) {
+  Kokkos::DefaultExecutionSpace space;
+  const bool hasInhom = (a_inhom.extent(0) != 0), hasScale = (rhs_scale.extent(0) != 0);
+  Kokkos::parallel_for(
+      "cfdk::ibm_modify", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, numActive),
+      KOKKOS_LAMBDA(int list_idx) {
+        const int OPP[6] = {1, 0, 3, 2, 5, 4};
+        const int c = ibm.cell_index(list_idx);
+        const float descale = ibm.D_rescale(list_idx);
+        if (hasScale) rhs_scale(c) = descale;
+        const double orig[6] = {AE(c), AW(c), AN(c), AS(c), AT(c), AB(c)};
+        double aC = (double)AC(c) * (double)descale;
+        double mod[6] = {0, 0, 0, 0, 0, 0};
+        double inhom = 0.0;
+        for (int k = 0; k < 6; ++k) {
+          const float K = ibm.K_val(list_idx * 6 + k), M = ibm.M_val(list_idx * 6 + k);
+          const float X = ibm.X_val(list_idx * 6 + k), Nbc = ibm.Nbc_val(list_idx * 6 + k);
+          const double vnb = orig[k];
+          aC += vnb * K;
+          inhom += (double)Nbc * u_bc_val * vnb;
+          mod[k] += vnb * ((double)descale * M - 1.0);
+          mod[OPP[k]] += vnb * X;
+        }
+        AC(c) = (float)aC;
+        AE(c) = (float)(orig[0] + mod[0]);
+        AW(c) = (float)(orig[1] + mod[1]);
+        AN(c) = (float)(orig[2] + mod[2]);
+        AS(c) = (float)(orig[3] + mod[3]);
+        AT(c) = (float)(orig[4] + mod[4]);
+        AB(c) = (float)(orig[5] + mod[5]);
+        if (hasInhom) a_inhom(c) += inhom;
+      });
+  space.fence();
+}
+
 }  // namespace cfdk
 
 #endif  // CFD_CUT_CELL_IBM_KOKKOS_HPP
