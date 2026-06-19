@@ -22,6 +22,7 @@
 
 #include "mac_ibm_kokkos.hpp"
 #include "mac_pressure_kokkos.hpp"
+#include "mac_cutcell_mg_kokkos.hpp"
 
 namespace cfdk {
 
@@ -35,8 +36,6 @@ class SdflowIbm {
     n_ = (std::size_t)e_.x * e_.y * e_.z;
     sdf_ = CCField("sdf", n_);
     ox_ = CCField("ox", n_); oy_ = CCField("oy", n_); oz_ = CCField("oz", n_);
-    PAC_=CCField("PAC",n_);PAW_=CCField("PAW",n_);PAE_=CCField("PAE",n_);PAS_=CCField("PAS",n_);
-    PAN_=CCField("PAN",n_);PAB_=CCField("PAB",n_);PAT_=CCField("PAT",n_);
     phi_ = CCField("phi", n_); div_ = CCField("div", n_); rhs_ = CCField("rhs", n_); P_ = CCField("P", n_);
     r_ = CCField("r", n_); z_ = CCField("z", n_); pp_ = CCField("pp", n_); Ap_ = CCField("Ap", n_);
     for (int c = 0; c < 3; ++c) {
@@ -60,6 +59,7 @@ class SdflowIbm {
   void setVelocityIterations(int it) { velIters_ = it; }
   void setPressureIterations(int it) { presIters_ = it; }
   void setAdvection(bool on) { advect_ = on; }       // explicit advection (not yet wired; Stokes only)
+  void setPressureLevels(int levels) { nLevels_ = levels < 1 ? 1 : levels; }  // MG depth (CUDA default 4)
 
   // SDF on the inner cells (flat x-fastest, size nx*ny*nz; <0 solid). cutcellPressure enables the
   // open-face-weighted cut-cell projection (off => velocity-only, e.g. unidirectional body-force flow).
@@ -82,7 +82,8 @@ class SdflowIbm {
     rebuildStencils();
     if (cutcellPressure_) {
       buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);
-      buildCutcellOp(PAC_,PAW_,PAE_,PAS_,PAN_,PAB_,PAT_, CCConst(ox_),CCConst(oy_),CCConst(oz_), e_, G, 1.0,1.0,1.0);
+      mg_.init(nx_, ny_, nz_, nLevels_);  // geometric multigrid on the cut-cell openness (MG-PCG pressure)
+      mg_.setOpenness(CCConst(ox_), CCConst(oy_), CCConst(oz_), 1.0, 1.0, 1.0);
       Kokkos::deep_copy(phi_, 0.0); Kokkos::deep_copy(P_, 0.0);
     }
   }
@@ -102,6 +103,7 @@ class SdflowIbm {
     divergOpen(CCConst(C[0].u),CCConst(C[1].u),CCConst(C[2].u), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
     return reduceMaxAbsInner(CCConst(div_));
   }
+  long lastPressureIterations() const { return lastPressureIters_; }
   int nx() const { return nx_; } int ny() const { return ny_; } int nz() const { return nz_; }
 
  private:
@@ -154,7 +156,9 @@ class SdflowIbm {
     { CCExec space; CCField d=div_, r=rhs_;  // rhs = -div(u*); keep div(u*) in div_ for the pressure update
       Kokkos::parallel_for("negdiv", Kokkos::RangePolicy<CCExec>(space,0,n_), KOKKOS_LAMBDA(std::size_t i){ r(i)=-d(i); });
       space.fence(); }
-    pressureSolvePCG();                          // resolves smooth modes (RB-GS alone destabilises rotational)
+    // geometric multigrid MG-PCG solve of the cut-cell pressure Poisson A phi = -div(u*) (CUDA mac_multigrid)
+    Kokkos::deep_copy(phi_, 0.0);
+    lastPressureIters_ = mg_.solvePCG(rhs_, phi_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12);
     fillGhosts(phi_);
     projectCorrect(C[0].u,C[1].u,C[2].u, CCConst(phi_), e_, G);
     // the grad(phi) correction also touches solid faces; re-impose no-slip there so the decoupled solid
@@ -165,69 +169,6 @@ class SdflowIbm {
     Kokkos::parallel_for("press", Kokkos::RangePolicy<CCExec>(space,0,n_),
       KOKKOS_LAMBDA(std::size_t i){ P(i) += ct*ph(i) - mu*d(i); });
     space.fence();
-  }
-  // subtract the mean of phi over fluid cells (PAC>tiny) so the periodic-singular solve stays in range.
-  void removeFluidMean(CCField f) {
-    CCExec space; C3 e=e_; CCField ff=f, ac=PAC_;
-    double sum=0; long cnt=0;
-    Kokkos::parallel_reduce("meanred", Kokkos::MDRangePolicy<CCExec,Kokkos::Rank<3>>(space,{G,G,G},{e.x-G,e.y-G,e.z-G}),
-      KOKKOS_LAMBDA(int x,int y,int z,double& s,long& k){ const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
-        if(ac(i)>1e-30){ s+=ff(i); k+=1; } }, sum, cnt);
-    if (cnt==0) return; const double mean=sum/(double)cnt;
-    Kokkos::parallel_for("meansub", Kokkos::MDRangePolicy<CCExec,Kokkos::Rank<3>>(space,{G,G,G},{e.x-G,e.y-G,e.z-G}),
-      KOKKOS_LAMBDA(int x,int y,int z){ const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y; if(ac(i)>1e-30) ff(i)-=mean; });
-    space.fence();
-  }
-  // Diagonal (Jacobi)-preconditioned CG for the singular cut-cell Poisson A phi = rhs_ (= -div). The
-  // constant null space (periodic, all-Neumann) is projected out of every residual/matvec so CG stays in
-  // the range space. Resolves the smooth pressure modes RB-GS cannot -> the rotational scheme is stable.
-  void pressureSolvePCG() {
-    const int maxit = pcgMaxit_; const double rtol = pcgRtol_;
-    Kokkos::deep_copy(phi_, 0.0);
-    Kokkos::deep_copy(r_, rhs_); removeFluidMean(r_);     // r = rhs - A*0 = rhs, projected
-    applyJacobi(z_, r_);
-    Kokkos::deep_copy(pp_, z_);
-    double rz = dotFluid(r_, z_), r0 = std::sqrt(dotFluid(r_, r_));
-    if (r0 < 1e-300) return;
-    for (int it = 0; it < maxit; ++it) {
-      fillGhosts(pp_);
-      applyCutcellOp(Ap_, CCConst(pp_), CCConst(PAC_),CCConst(PAW_),CCConst(PAE_),CCConst(PAS_),
-                     CCConst(PAN_),CCConst(PAB_),CCConst(PAT_), e_, G);
-      removeFluidMean(Ap_);
-      const double pAp = dotFluid(pp_, Ap_);
-      if (pAp <= 1e-300) break;
-      const double alpha = rz / pAp;
-      axpy(phi_, alpha, pp_); axpy(r_, -alpha, Ap_); removeFluidMean(r_);
-      if (std::sqrt(dotFluid(r_, r_)) < rtol * r0) break;
-      applyJacobi(z_, r_);
-      const double rznew = dotFluid(r_, z_), beta = rznew / rz;
-      aypx(pp_, beta, z_);  // pp = z + beta*pp
-      rz = rznew;
-    }
-    removeFluidMean(phi_);
-  }
-  void applyJacobi(CCField z, CCConst r) {  // z = r/AC on fluid (AC>tiny), 0 in solid
-    CCExec space; CCField zz=z; CCConst rr=r, ac=CCConst(PAC_);
-    Kokkos::parallel_for("jac", Kokkos::RangePolicy<CCExec>(space,0,n_),
-      KOKKOS_LAMBDA(std::size_t i){ const double a=ac(i); zz(i) = (a>1e-30) ? rr(i)/a : 0.0; });
-    space.fence();
-  }
-  void axpy(CCField y, double a, CCConst x) {  // y += a*x
-    CCExec space; CCField yy=y; CCConst xx=x;
-    Kokkos::parallel_for("axpy", Kokkos::RangePolicy<CCExec>(space,0,n_), KOKKOS_LAMBDA(std::size_t i){ yy(i)+=a*xx(i); });
-    space.fence();
-  }
-  void aypx(CCField y, double a, CCConst x) {  // y = x + a*y
-    CCExec space; CCField yy=y; CCConst xx=x;
-    Kokkos::parallel_for("aypx", Kokkos::RangePolicy<CCExec>(space,0,n_), KOKKOS_LAMBDA(std::size_t i){ yy(i)=xx(i)+a*yy(i); });
-    space.fence();
-  }
-  double dotFluid(CCConst a, CCConst b) {  // sum over inner fluid (PAC>tiny) of a*b
-    CCExec space; C3 e=e_; CCConst ac=CCConst(PAC_); double s=0;
-    Kokkos::parallel_reduce("dot", Kokkos::MDRangePolicy<CCExec,Kokkos::Rank<3>>(space,{G,G,G},{e.x-G,e.y-G,e.z-G}),
-      KOKKOS_LAMBDA(int x,int y,int z,double& acc){ const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
-        if(ac(i)>1e-30) acc += a(i)*b(i); }, s);
-    return s;
   }
   void maskVelocity(int c) {
     CCExec space; CCField u=C[c].u, m=C[c].mask;
@@ -256,9 +197,12 @@ class SdflowIbm {
   double rho_=1.0, mu_=0.1, dt_=50.0;
   std::array<double,3> f_{{0,0,0}};
   int velIters_ = 200, presIters_ = 20;
-  int pcgMaxit_ = 500; double pcgRtol_ = 1e-10;   // cut-cell pressure PCG (resolves smooth modes)
+  int pcgMaxit_ = 500; double pcgRtol_ = 1e-10;   // cut-cell pressure MG-PCG
+  int nLevels_ = 4;                               // multigrid depth (CUDA default; set_pressure_multigrid)
+  long lastPressureIters_ = 0;
+  CutcellMG mg_;
   bool advect_ = false, cutcellPressure_ = false;
-  CCField sdf_, ox_, oy_, oz_, PAC_,PAW_,PAE_,PAS_,PAN_,PAB_,PAT_, phi_, div_, rhs_, P_, r_, z_, pp_, Ap_;
+  CCField sdf_, ox_, oy_, oz_, phi_, div_, rhs_, P_, r_, z_, pp_, Ap_;
   Comp C[3];
 };
 

@@ -45,9 +45,10 @@ PYBIND11_MODULE(sdflow_kokkos, m) {
       .def("set_advection", &SdflowIbm::setAdvection)
       .def("set_velocity_solver_params", &SdflowIbm::setVelocityIterations, py::arg("iters"))
       .def("set_pressure_solver_params", &SdflowIbm::setPressureIterations, py::arg("iters"))
-      // levels>1 multigrid coarsening is a follow-up; levels=1 (pure RB-GS on the cut-cell operator) now.
       .def("set_pressure_multigrid",
-           [](SdflowIbm&, bool, int) {}, py::arg("on"), py::arg("levels") = 1)
+           [](SdflowIbm& s, bool, int levels) { s.setPressureLevels(levels); },
+           py::arg("on"), py::arg("levels") = 4)
+      .def("last_pressure_iterations", &SdflowIbm::lastPressureIterations)
       .def("set_solid",
            [](SdflowIbm& s, py::array_t<double, py::array::f_style | py::array::forcecast> sdf,
               bool cutcell_pressure, const std::string& /*pressure_coarse*/) {

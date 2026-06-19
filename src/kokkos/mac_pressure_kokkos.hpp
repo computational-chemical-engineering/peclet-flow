@@ -15,9 +15,11 @@
 namespace cfdk {
 
 // A = -div(open grad): AC = sum of the 6 face terms (openness*gf), off-diagonal across each face = -term.
-// ox[i] is the -x face openness of cell i (== +x face of cell i-1). (mg_build_op_k port.)
-inline void buildCutcellOp(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN, CCField AB,
-                           CCField AT, CCConst ox, CCConst oy, CCConst oz, C3 e, int g, double gfx,
+// ox[i] is the -x face openness of cell i (== +x face of cell i-1). (mg_build_op_k port.) OpV is the
+// operator-coefficient view type (float `mreal` to match CUDA, or double).
+template <class OpV>
+inline void buildCutcellOp(OpV AC, OpV AW, OpV AE, OpV AS, OpV AN, OpV AB,
+                           OpV AT, CCConst ox, CCConst oy, CCConst oz, C3 e, int g, double gfx,
                            double gfy, double gfz) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
@@ -53,8 +55,9 @@ inline void divergOpen(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst oy, 
 
 // One red/black sweep of the variable operator: phi=(b - offdiag)/AC; AC~0 (fully solid) cells decoupled.
 // b carries the negated divergence so the system is A phi = -div(u*) (matches the validated const-coeff sign).
-inline void cutcellSmoothColor(CCField phi, CCConst b, CCConst AC, CCConst AW, CCConst AE, CCConst AS,
-                               CCConst AN, CCConst AB, CCConst AT, C3 e, C3 og, int g, int color) {
+template <class OpV>
+inline void cutcellSmoothColor(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, OpV AS,
+                               OpV AN, OpV AB, OpV AT, C3 e, C3 og, int g, int color) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -73,8 +76,9 @@ inline void cutcellSmoothColor(CCField phi, CCConst b, CCConst AC, CCConst AW, C
 }
 
 // y = A x for the cut-cell operator over inner cells (matvec for PCG; mg_apply_var_k port).
-inline void applyCutcellOp(CCField y, CCConst x, CCConst AC, CCConst AW, CCConst AE, CCConst AS,
-                           CCConst AN, CCConst AB, CCConst AT, C3 e, int g) {
+template <class OpV>
+inline void applyCutcellOp(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV AS,
+                           OpV AN, OpV AB, OpV AT, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
