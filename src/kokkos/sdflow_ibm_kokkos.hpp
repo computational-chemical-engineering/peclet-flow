@@ -135,11 +135,12 @@ class SdflowIbm {
       Kokkos::deep_copy(C[c].u, 0.0);
     }
     rebuildStencils();
-    if (useVelocityMg_ && !hasBc_) {  // velocity-MG (staircase) hierarchy + per-component theta/clean scratch
-      vmg_.init(nx_, ny_, nz_, vmgLevels_);
-      vmgTheta_ = CCField("vmgTheta", n_); vmgClean_ = CCField("vmgClean", n_);
-    }
     if (hasBc_) setupBcDiffusion();  // bake the implicit-diffusion wall fold into the per-component stencil
+    if (useVelocityMg_) {  // velocity-MG hierarchy: IBM (staircase/upwind) or domain-BC (const-coeff) mode
+      vmg_.init(nx_, ny_, nz_, vmgLevels_);
+      if (hasBc_) vmg_.setBC(bc_);
+      else { vmgTheta_ = CCField("vmgTheta", n_); vmgClean_ = CCField("vmgClean", n_); }
+    }
     if (cutcellPressure_) {
       buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);  // on the g=2 velocity block
       if (hasBc_) {  // FLUX openness (beta): a face is OPEN only where it carries normal flux -- outflow, or
@@ -287,6 +288,17 @@ class SdflowIbm {
     return m;
   }
   void smoothComp(int c) {
+    if (hasBc_ && useVelocityMg_) {  // domain-BC velocity multigrid: const-coeff aniso op + no-slip/inflow/
+      // outflow boundary fold on every level (CUDA setDiffusionConstAllLevels + setDiffusionBoundaryFold).
+      vmg_.setDomainBcOp(c, mu_, rho_/dt_);  // per component (the fold is component-dependent)
+      fillVelGhosts(c, 1);  // set the level-0 boundary ghosts (wall fold=0, inflow value, outflow zero-grad)
+      // Re-impose the velocity BC on the vel-MG's level-0 iterate each colour/residual (the const-coeff smoother
+      // updates the held Dirichlet faces) -> the vel-MG converges to the RB-GS fixed point (not the ~2% drift
+      // CUDA's vmg leaves at the boundary corners).
+      vmg_.setBcApplyL0([this, c](CCField x) { fillVelGhostsTo(x, c, 1); });
+      vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8);
+      return;
+    }
     if (hasBc_) {  // domain-BC (no immersed solid): CUDA's double const-coeff diff_k + dcorr fold
       const I3 e{e_.x,e_.y,e_.z}, og{0,0,0}; const double beta=mu_, Ac=rho_/dt_ + 6.0*mu_;
       for (int it = 0; it < velIters_; ++it) {
@@ -340,18 +352,21 @@ class SdflowIbm {
     space.fence();
   }
   // domain-BC velocity ghosts: periodic-fill periodic axes, then apply per-face BCs (fold=0 explicit/1 implicit).
-  void fillVelGhosts(int comp, int fold) {
-    for (int a=0;a<3;++a) if (bc_[2*a]==0 && bc_[2*a+1]==0) fillAxis(C[comp].u, a);
-    applyVelocityBcComp(comp, fold, true);
+  void fillVelGhosts(int comp, int fold) { fillVelGhostsTo(C[comp].u, comp, fold); }
+  void applyVelocityBcComp(int comp, int fold, bool doOutflow) { applyVelocityBcCompTo(C[comp].u, comp, fold, doOutflow); }
+  // Field-parameterized variants (so the velocity-MG can re-impose the BC on its own level-0 iterate).
+  void fillVelGhostsTo(CCField f, int comp, int fold) {
+    for (int a=0;a<3;++a) if (bc_[2*a]==0 && bc_[2*a+1]==0) fillAxis(f, a);
+    applyVelocityBcCompTo(f, comp, fold, true);
   }
-  void applyVelocityBcComp(int comp, int fold, bool doOutflow) {
+  void applyVelocityBcCompTo(CCField f, int comp, int fold, bool doOutflow) {
     if (!hasBc_) return;
     B3 e{e_.x,e_.y,e_.z};
     for (int a=0;a<3;++a) for (int s=0;s<2;++s) {
-      const int f=2*a+s; const int t=bc_[f]; if (t==0) continue;
-      if (t==3) { if (doOutflow) bcOutflowComp(C[comp].u, e, G, a, s, comp, fold); continue; }
-      if (bcProf_[f].extent(0)>0) bcVelocityComp(C[comp].u, e, G, a, s, comp, 0.0, fold, bcProf_[f], bcProfNc_[f]);
-      else bcVelocityComp(C[comp].u, e, G, a, s, comp, bcVel_[f][comp], fold);
+      const int ff=2*a+s; const int t=bc_[ff]; if (t==0) continue;
+      if (t==3) { if (doOutflow) bcOutflowComp(f, e, G, a, s, comp, fold); continue; }
+      if (bcProf_[ff].extent(0)>0) bcVelocityComp(f, e, G, a, s, comp, 0.0, fold, bcProf_[ff], bcProfNc_[ff]);
+      else bcVelocityComp(f, e, G, a, s, comp, bcVel_[ff][comp], fold);
     }
   }
   // implicit-diffusion wall fold (CUDA setup_bc_diffusion): dcorr += (wall:+beta tangential / outflow:-beta),

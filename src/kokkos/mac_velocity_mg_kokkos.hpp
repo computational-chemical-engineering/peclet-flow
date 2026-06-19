@@ -17,6 +17,7 @@
 #define CFD_MAC_VELOCITY_MG_KOKKOS_HPP
 
 #include <Kokkos_Core.hpp>
+#include <functional>
 #include <vector>
 
 #include "mac_cutcell_mg_kokkos.hpp"       // restrictAvg, prolongAdd, FPV/FPC
@@ -110,6 +111,52 @@ inline void buildAdvCoarse(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV A
       AC(i) = (float)cC; AW(i) = (float)cxm; AE(i) = (float)cxp; AS(i) = (float)cym; AN(i) = (float)cyp;
       AB(i) = (float)czm; AT(i) = (float)czp;
     });
+  space.fence();
+}
+
+// CONST-COEFF anisotropic Helmholtz A = idiag*I - nu_dt*Lap (mg_const_diffusion_op_aniso_k), over the WHOLE
+// extended block (the domain-BC velocity op; coarse spacing via per-axis beta). For cavity/BFS where the fine
+// op is also const-coeff (no IBM stencil).
+inline void buildConstAniso(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV AT, C3 e, double bx,
+                            double by, double bz, double idiag) {
+  CCExec space; const std::size_t n = (std::size_t)e.x * e.y * e.z;
+  const float c = (float)(idiag + 2.0 * (bx + by + bz)), nx = (float)(-bx), ny = (float)(-by), nz = (float)(-bz);
+  Kokkos::parallel_for("cfdk::vmg_const_aniso", Kokkos::RangePolicy<CCExec>(space, 0, n),
+    KOKKOS_LAMBDA(std::size_t i) { AC(i) = c; AW(i) = nx; AE(i) = nx; AS(i) = ny; AN(i) = ny; AB(i) = nz; AT(i) = nz; });
+  space.fence();
+}
+
+// No-slip face-fold for the const-coeff MG operator (mg_diffusion_bc_fold_k): at a Dirichlet wall the
+// tangential ghost is 2*u_wall - u_inner -> +beta moves onto the boundary-adjacent inner cell's diagonal
+// (AC += beta); the dropped off-diagonal multiplies a held-0 ghost. Over the perp plane of face (a,s).
+inline void boundaryFold(FPV AC, C3 e, int g, int a, int s, double beta) {
+  CCExec space; int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
+  const int b = (a + 1) % 3, c = (a + 2) % 3; const long sa = st[a], sb = st[b], sc = st[c];
+  const int bic = (s == 0) ? g : (dims[a] - g - 1);  // boundary-adjacent inner cell along a
+  Kokkos::parallel_for("cfdk::vmg_bc_fold", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+    KOKKOS_LAMBDA(int p0, int p1) { const long i = (long)p0 * sb + (long)p1 * sc + (long)bic * sa;
+      AC(i) = (float)((double)AC(i) + beta); });
+  space.fence();
+}
+
+// Fill a non-periodic boundary ghost of a coarse correction before trilinear prolongation (mg_fill_bc_ghost_k):
+// Dirichlet (outflow) -> ghost 0; Neumann (wall/inflow) -> ghost = nearest inner (zero-gradient). Plane (a,s).
+inline void fillBcGhost(CCField x, C3 e, int g, int a, int s, int dirichlet) {
+  CCExec space; int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
+  const int b = (a + 1) % 3, c = (a + 2) % 3; const long sa = st[a], sb = st[b], sc = st[c]; const int na = dims[a];
+  Kokkos::parallel_for("cfdk::vmg_fill_bc_ghost", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+    KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
+      if (s == 0) { const double v = dirichlet ? 0.0 : x(base + (long)g * sa); for (int ia = 0; ia < g; ++ia) x(base + (long)ia * sa) = v; }
+      else { const double v = dirichlet ? 0.0 : x(base + (long)(na - g - 1) * sa); for (int ia = na - g; ia < na; ++ia) x(base + (long)ia * sa) = v; } });
+  space.fence();
+}
+
+// zero a field on the plane at index `idx` along `axis` (held-Dirichlet boundary-face residual exclude).
+inline void zeroPlane(CCField m, C3 e, int axis, int idx) {
+  CCExec space; int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
+  const int b = (axis + 1) % 3, c = (axis + 2) % 3; const long sa = st[axis], sb = st[b], sc = st[c];
+  Kokkos::parallel_for("cfdk::vmg_zero_plane", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+    KOKKOS_LAMBDA(int p0, int p1) { m((long)p0 * sb + (long)p1 * sc + (long)idx * sa) = 0.0; });
   space.fence();
 }
 
@@ -221,6 +268,50 @@ class VelocityMG {
     }
   }
 
+  // DOMAIN-BC const-coeff path (cavity/BFS): per-face BC types {-x,+x,-y,+y,-z,+z} (0=periodic,1=wall,
+  // 2=inflow,3=outflow). Enables the non-periodic fill (periodic axes wrap; non-periodic ghosts left as the
+  // caller / correction set them) + the Dirichlet/Neumann prolongation ghosts.
+  void setBC(const int bc[6]) {
+    bcMode_ = false;
+    for (int i = 0; i < 6; ++i) { bc_[i] = bc[i]; if (bc[i]) bcMode_ = true; }
+  }
+  // Re-impose the full velocity BC on the level-0 iterate before each smoother colour + the residual (exactly
+  // as the RB-GS path does via fillVelGhosts(c,1)): the const-coeff smoother updates the held Dirichlet faces,
+  // so without this the boundary corners drift (~2% vs RB-GS, as the CUDA vmg also does). With it the vel-MG
+  // converges to the RB-GS fixed point. SdflowIbm supplies this per component before the solve.
+  void setBcApplyL0(std::function<void(CCField)> fn) { bcApplyL0_ = std::move(fn); }
+  // const-coeff aniso operator + no-slip/inflow/outflow boundary fold for component comp, on EVERY level.
+  // nu_dt = mu, idiag = rho/dt, h0 = 1. Rebuilt per component (the fold is component-dependent). No pin.
+  // useResMask_: exclude the HELD normal-Dirichlet boundary face (a==comp, -side, wall/inflow) from
+  // coarsening -- that cell's value is pinned by the BC re-imposition, so its (nonzero) residual would drive a
+  // spurious coarse correction into the boundary (the ~2% drift CUDA's domain-BC vmg leaves). Excluding it
+  // makes the V-cycle converge to the RB-GS fixed point (analogue of the IBM clean-fluid exclude).
+  void setDomainBcOp(int comp, double nu_dt, double idiag) {
+    usePin_ = false;
+    Level& f = lv_[0];
+    Kokkos::deep_copy(f.resMask, 1.0);
+    useResMask_ = false;
+    for (int s = 0; s < 1; ++s) {  // only the -side face index G lands inside the smoother range [G, ext-G)
+      const int t = bc_[2 * comp + s];
+      if (t == 1 || t == 2) { zeroPlane(f.resMask, f.ext, comp, G); useResMask_ = true; }
+    }
+    for (int L = 0; L < (int)lv_.size(); ++L) {
+      Level& c = lv_[L];
+      const double bx = nu_dt / (double)(c.cfac.x * c.cfac.x), by = nu_dt / (double)(c.cfac.y * c.cfac.y),
+                   bz = nu_dt / (double)(c.cfac.z * c.cfac.z);
+      buildConstAniso(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, c.ext, bx, by, bz, idiag);
+      for (int f = 0; f < 6; ++f) {
+        const int a = f / 2, s = f % 2;
+        const double ba = (a == 0) ? bx : (a == 1) ? by : bz;
+        double dval;
+        if (bc_[f] == 3) dval = -ba;                              // outflow zero-gradient: every component
+        else if ((bc_[f] == 1 || bc_[f] == 2) && a != comp) dval = ba;  // wall/inflow: tangential fold
+        else continue;                                            // periodic, or the normal comp at a wall
+        boundaryFold(c.AC, c.ext, G, a, s, dval);
+      }
+    }
+  }
+
   // solve A x = b (b,x on the level-0 G=2 block): nvc V-cycles. Solution left in x.
   void solve(CCConst b, CCField x, int nvc, int pre, int post, int bottom) {
     pre_ = pre; post_ = post; bottom_ = bottom;
@@ -233,9 +324,11 @@ class VelocityMG {
  public:  // (public for nvcc extended-lambda)
   void vcycle(int L) {
     Level& lv = lv_[L];
-    if (L + 1 == (int)lv_.size()) { smooth(lv, bottom_); return; }  // velocity op non-singular -> no mean removal
-    smooth(lv, pre_);
+    const bool l0 = (L == 0);
+    if (L + 1 == (int)lv_.size()) { smooth(lv, bottom_, l0); return; }  // velocity op non-singular -> no mean removal
+    smooth(lv, pre_, l0);
     fill(lv, lv.x);
+    if (l0 && bcApplyL0_) bcApplyL0_(lv.x);  // domain-BC: re-impose the velocity BC before the level-0 residual
     residualVarPin(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
                    FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), usePin_ ? CCConst(lv.pin) : empty_, lv.ext, G);
     const bool masked = useResMask_ && (lv.resMask.extent(0) == lv.n);  // level 0: exclude the IBM cut-cell band
@@ -245,21 +338,39 @@ class VelocityMG {
     Kokkos::deep_copy(cs.x, 0.0);
     vcycle(L + 1);
     fill(cs, cs.x);
+    fillProlongBcGhosts(cs);  // non-periodic boundary ghosts the trilinear prolong samples (domain-BC mode)
     if (masked) prolongMasked(lv.x, CCConst(cs.x), CCConst(lv.resMask), lv.ext, cs.ext, G, lv.inner, lv.ratio, 0.5);
     else prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, G, lv.inner, lv.ratio);
-    smooth(lv, post_);
+    smooth(lv, post_, l0);
   }
-  void smooth(Level& lv, int sweeps) {
+  void smooth(Level& lv, int sweeps, bool isL0) {
     const C3 og{0, 0, 0};
     CCConst pin = usePin_ ? CCConst(lv.pin) : empty_;
     for (int k = 0; k < sweeps; ++k)
       for (int color = 0; color < 2; ++color) {
         fill(lv, lv.x);
+        if (isL0 && bcApplyL0_) bcApplyL0_(lv.x);  // re-impose the velocity BC (held Dirichlet faces) per colour
         ibmRbgsStencilColor(lv.x, CCConst(lv.rhs), MConst(lv.AC), MConst(lv.AW), MConst(lv.AE), MConst(lv.AS),
                             MConst(lv.AN), MConst(lv.AB), MConst(lv.AT), pin, lv.ext, og, G, color);
       }
   }
-  void fill(Level& lv, CCField f) { fillAxis(lv, f, 0); fillAxis(lv, f, 1); fillAxis(lv, f, 2); }
+  // periodic ghost fill; in domain-BC mode only the periodic axes wrap (non-periodic boundary ghosts are
+  // left as the caller / correction set them -- the boundary fold + held ghost represent the wall).
+  void fill(Level& lv, CCField f) {
+    for (int a = 0; a < 3; ++a)
+      if (!bcMode_ || (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0)) fillAxis(lv, f, a);
+  }
+  // non-periodic boundary ghosts of a coarse correction before trilinear prolong (Dirichlet outflow -> 0,
+  // Neumann wall/inflow -> zero-gradient).
+  void fillProlongBcGhosts(Level& lv) {
+    if (!bcMode_) return;
+    for (int a = 0; a < 3; ++a)
+      for (int s = 0; s < 2; ++s) {
+        const int t = bc_[2 * a + s];
+        if (t == 0) continue;
+        fillBcGhost(lv.x, lv.ext, G, a, s, t == 3 ? 1 : 0);
+      }
+  }
   void fillAxis(Level& lv, CCField f, int axis) {
     CCExec space; C3 e = lv.ext; int N3[3] = {lv.inner.x, lv.inner.y, lv.inner.z};
     int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
@@ -275,7 +386,9 @@ class VelocityMG {
  private:
   std::vector<Level> lv_;
   int pre_ = 2, post_ = 2, bottom_ = 8;
-  bool usePin_ = true, useResMask_ = true;  // staircase: pin + clean-fluid exclude; upwind: neither
+  bool usePin_ = true, useResMask_ = true;  // staircase: pin + clean-fluid exclude; upwind/domain-BC: neither
+  bool bcMode_ = false; int bc_[6] = {0, 0, 0, 0, 0, 0};  // domain-BC (non-periodic) mode
+  std::function<void(CCField)> bcApplyL0_;  // re-impose the velocity BC on level 0 (domain-BC mode)
   CCConst empty_;                           // zero-extent View -> "no pin / no mask" to the kernels
 };
 
