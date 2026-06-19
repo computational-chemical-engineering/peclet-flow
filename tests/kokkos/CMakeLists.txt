@@ -44,3 +44,8 @@ add_executable(test_bc test_bc.cpp)
 target_include_directories(test_bc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
 target_link_libraries(test_bc PRIVATE Kokkos::kokkos)
 add_test(NAME bc COMMAND test_bc)
+
+add_executable(test_ibm test_ibm.cpp)
+target_include_directories(test_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
+target_link_libraries(test_ibm PRIVATE Kokkos::kokkos)
+add_test(NAME ibm COMMAND test_ibm)
