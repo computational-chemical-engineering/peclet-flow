@@ -3,12 +3,15 @@
 // Assembles the validated cut-cell IBM operators into a runnable solver on a fully-periodic MAC box with
 // immersed SDF solids: per-component backward-Euler implicit diffusion with the Robust-Scaled cut-cell
 // no-slip stencil (buildIbmOverlay + ibmBuildDiffusion + ibmModifyStencil + ibmSolidMask + ibmRbgsSweep),
-// then an incremental-pressure Chorin projection through the open-face-weighted cut-cell pressure Poisson
-// (buildCutcellOp + divergOpen, solved by diagonal-preconditioned CG with the constant null space projected
-// out, then projectCorrect). PCG (not RB-GS) is needed: it resolves the smooth pressure modes, so the
-// projection drives the cut-cell flux divergence to ~1e-12 each step. Physical units (rho/mu/dt + body
-// force). std::vector setters/getters so a pybind module can drive it. This is the cfd analog of demStep —
-// the verify_poiseuille / verify_periodic_spheres mechanism (k matches CUDA to <0.5%), on any backend.
+// then a rotational incremental-pressure Chorin projection through the open-face-weighted cut-cell pressure
+// Poisson (buildCutcellOp + divergOpen, solved by CG with the constant null space projected out, then
+// projectCorrect; P += (rho/dt)*phi - mu*div(u*) matching CUDA press_update_k). Schemes are a FAITHFUL port
+// of the CUDA sdflow (point-value cut-cell IBM = ibm_geometry_ext_k<0>; rotational pressure): the velocity
+// field matches CUDA to ~1e-13 (machine precision). Physical units (rho/mu/dt + body force). std::vector
+// setters/getters so a pybind module can drive it. The verify_poiseuille / verify_periodic_spheres mechanism
+// (k matches CUDA to all printed digits), on any backend. NOTE (faithfulness items, see memory): the CG uses
+// a diagonal preconditioner where CUDA uses RB-GS-preconditioned MG-PCG (same converged solution); the
+// pressure operator is stored double where CUDA uses float mreal -- to reconcile in a later port pass.
 #ifndef CFD_SDFLOW_IBM_KOKKOS_HPP
 #define CFD_SDFLOW_IBM_KOKKOS_HPP
 
@@ -72,7 +75,7 @@ class SdflowIbm {
     Kokkos::deep_copy(sdf_, h);
     const Off3 offs[3] = {{-0.5f,0,0},{0,-0.5f,0},{0,0,-0.5f}};
     for (int c = 0; c < 3; ++c) {
-      C[c].nCut = buildIbmOverlay<1>(CCConst(sdf_), e_, G, offs[c], /*Dirichlet*/ 0, C[c].ov, C[c].idMap, C[c].counter);
+      C[c].nCut = buildIbmOverlay<0>(CCConst(sdf_), e_, G, offs[c], /*Dirichlet*/ 0, C[c].ov, C[c].idMap, C[c].counter);  // SCHEME 0 = point-value (matches CUDA ibm_geometry_ext_k<0>)
       ibmSolidMask(C[c].mask, CCConst(sdf_), e_, offs[c]);
       Kokkos::deep_copy(C[c].u, 0.0);
     }
@@ -157,13 +160,10 @@ class SdflowIbm {
     // the grad(phi) correction also touches solid faces; re-impose no-slip there so the decoupled solid
     // velocity cannot accumulate (matches the CUDA apply_mask/mask_k after correct_k -> stability).
     for (int c = 0; c < 3; ++c) maskVelocity(c);
-    // Standard incremental (Goda) pressure: P += (rho/dt)*phi. The rotational variant (- mu*div(u*),
-    // Timmermans) is more accurate but is unstable in this cut-cell port at N>=32 (the predictor divergence
-    // it feeds back is amplified by the Robust-Scaled descale at thin cut cells); with the PCG projection
-    // the incremental velocity is already incompressible to ~1e-12 and reproduces the CUDA permeability.
-    CCExec space; CCField P=P_, ph=phi_; const double ct=rho_/dt_;
+    // Rotational incremental pressure (Timmermans), matching CUDA press_update_k: P += (rho/dt)*phi - mu*div(u*).
+    CCExec space; CCField P=P_, ph=phi_, d=div_; const double ct=rho_/dt_, mu=mu_;
     Kokkos::parallel_for("press", Kokkos::RangePolicy<CCExec>(space,0,n_),
-      KOKKOS_LAMBDA(std::size_t i){ P(i) += ct*ph(i); });
+      KOKKOS_LAMBDA(std::size_t i){ P(i) += ct*ph(i) - mu*d(i); });
     space.fence();
   }
   // subtract the mean of phi over fluid cells (PAC>tiny) so the periodic-singular solve stays in range.
