@@ -1,22 +1,35 @@
-// cfd-gpu — pybind11 module for the Kokkos IBM velocity solver (sdflow_kokkos).
+// cfd-gpu — pybind11 module for the Kokkos IBM Navier-Stokes solver (drop-in for the sdflow Solver API).
 //
-// A Kokkos+Blackwell drop-in for the sdflow Solver API exercised by verify_poiseuille_sdflow: set
-// rho/mu/dt, a body force, an SDF solid (cut-cell IBM no-slip), step, and read back the velocity.
-// Kokkos is initialized at import and finalized via Python atexit (the solver holds Kokkos Views, so
-// callers must release the Solver before exit — del + gc.collect()).
+// A Kokkos+Blackwell drop-in for the sdflow Solver exercised by verify_poiseuille_sdflow (IBM channel)
+// and verify_periodic_spheres_sdflow (cut-cell Stokes through a sphere packing): set rho/mu/dt, a body
+// force, an SDF solid (cut-cell IBM no-slip + optional cut-cell pressure projection), step, read back the
+// velocity/pressure, and query the cut-cell flux divergence. Kokkos is initialized at import and finalized
+// via Python atexit (the solver holds Kokkos Views, so callers must release the Solver before exit -- del
+// + gc.collect()). rank()/bcast_from_root() are single-rank stubs (MPI is a follow-up).
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 #include <Kokkos_Core.hpp>
+#include <cstring>
 
 #include "sdflow_ibm_kokkos.hpp"
 
 namespace py = pybind11;
 using cfdk::SdflowIbm;
 
+// flat x-fastest vector -> (nx,ny,nz) Fortran-strided numpy array for [x,y,z] indexing
+static py::array_t<double> to_xyz(const std::vector<double>& v, int nx, int ny, int nz) {
+  py::array_t<double> out(std::vector<py::ssize_t>{nx, ny, nz},
+                          std::vector<py::ssize_t>{(py::ssize_t)sizeof(double),
+                                                   (py::ssize_t)(sizeof(double) * nx),
+                                                   (py::ssize_t)(sizeof(double) * nx * ny)});
+  std::memcpy(out.mutable_data(), v.data(), v.size() * sizeof(double));
+  return out;
+}
+
 PYBIND11_MODULE(sdflow_kokkos, m) {
-  m.doc() = "cfd-gpu sdflow (Kokkos + ArborX-free) IBM velocity solver";
+  m.doc() = "cfd-gpu sdflow (Kokkos) IBM Navier-Stokes solver";
   if (!Kokkos::is_initialized()) Kokkos::initialize();
   py::module_::import("atexit").attr("register")(py::cpp_function([]() {
     if (Kokkos::is_initialized() && !Kokkos::is_finalized()) Kokkos::finalize();
@@ -29,34 +42,26 @@ PYBIND11_MODULE(sdflow_kokkos, m) {
       .def("set_mu", &SdflowIbm::setMu)
       .def("set_dt", &SdflowIbm::setDt)
       .def("set_body_force", &SdflowIbm::setBodyForce)
+      .def("set_advection", &SdflowIbm::setAdvection)
       .def("set_velocity_solver_params", &SdflowIbm::setVelocityIterations, py::arg("iters"))
+      .def("set_pressure_solver_params", &SdflowIbm::setPressureIterations, py::arg("iters"))
+      // levels>1 multigrid coarsening is a follow-up; levels=1 (pure RB-GS on the cut-cell operator) now.
+      .def("set_pressure_multigrid",
+           [](SdflowIbm&, bool, int) {}, py::arg("on"), py::arg("levels") = 1)
       .def("set_solid",
-           [](SdflowIbm& s, py::array_t<double, py::array::f_style | py::array::forcecast> sdf) {
-             // sdf is (nx,ny,nz) Fortran-order == x-fastest flat
+           [](SdflowIbm& s, py::array_t<double, py::array::f_style | py::array::forcecast> sdf,
+              bool cutcell_pressure, const std::string& /*pressure_coarse*/) {
              std::vector<double> v(static_cast<size_t>(sdf.size()));
              std::memcpy(v.data(), sdf.data(), v.size() * sizeof(double));
-             s.setSolid(v);
-           })
+             s.setSolid(v, cutcell_pressure);
+           },
+           py::arg("sdf"), py::arg("cutcell_pressure") = false, py::arg("pressure_coarse") = "const")
       .def("step", &SdflowIbm::step)
-      .def("get_u", [](SdflowIbm& s) {
-        auto v = s.getVelocity(0);
-        py::array_t<double> a({s.nx(), s.ny(), s.nz()});  // C-order shape; we fill x-fastest below
-        // return as flat x-fastest reshaped to (nx,ny,nz) Fortran for [x,y,z] indexing
-        py::array_t<double> out(std::vector<py::ssize_t>{s.nx(), s.ny(), s.nz()},
-                                std::vector<py::ssize_t>{(py::ssize_t)sizeof(double),
-                                                         (py::ssize_t)(sizeof(double) * s.nx()),
-                                                         (py::ssize_t)(sizeof(double) * s.nx() * s.ny())});
-        std::memcpy(out.mutable_data(), v.data(), v.size() * sizeof(double));
-        (void)a;
-        return out;
-      })
-      .def("get_v", [](SdflowIbm& s) {
-        auto v = s.getVelocity(1);
-        py::array_t<double> out(std::vector<py::ssize_t>{s.nx(), s.ny(), s.nz()},
-                                std::vector<py::ssize_t>{(py::ssize_t)sizeof(double),
-                                                         (py::ssize_t)(sizeof(double) * s.nx()),
-                                                         (py::ssize_t)(sizeof(double) * s.nx() * s.ny())});
-        std::memcpy(out.mutable_data(), v.data(), v.size() * sizeof(double));
-        return out;
-      });
+      .def("get_u", [](SdflowIbm& s) { return to_xyz(s.getVelocity(0), s.nx(), s.ny(), s.nz()); })
+      .def("get_v", [](SdflowIbm& s) { return to_xyz(s.getVelocity(1), s.nx(), s.ny(), s.nz()); })
+      .def("get_w", [](SdflowIbm& s) { return to_xyz(s.getVelocity(2), s.nx(), s.ny(), s.nz()); })
+      .def("get_p", [](SdflowIbm& s) { return to_xyz(s.getPressure(), s.nx(), s.ny(), s.nz()); })
+      .def("max_open_divergence", &SdflowIbm::maxOpenDivergence)
+      .def("rank", [](SdflowIbm&) { return 0; })
+      .def("bcast_from_root", [](SdflowIbm&, py::object v) { return v; });
 }
