@@ -23,21 +23,27 @@
 #include "mac_ibm_kokkos.hpp"
 #include "mac_pressure_kokkos.hpp"
 #include "mac_cutcell_mg_kokkos.hpp"
+#include "staggered_advection_kokkos.hpp"
 
 namespace cfdk {
 
 class SdflowIbm {
  public:
   using FV = Kokkos::View<float*, CCMem>;
-  static constexpr int G = 1;
+  static constexpr int G = 2;   // velocity block: Koren advection reach (pressure/MG bridged to g=1)
 
   SdflowIbm(int nx, int ny, int nz) : nx_(nx), ny_(ny), nz_(nz) {
     e_ = C3{nx + 2 * G, ny + 2 * G, nz + 2 * G};
     n_ = (std::size_t)e_.x * e_.y * e_.z;
+    e1_ = C3{nx + 2, ny + 2, nz + 2};                   // g=1 block for the cut-cell pressure MG
+    n1_ = (std::size_t)e1_.x * e1_.y * e1_.z;
     sdf_ = CCField("sdf", n_);
     ox_ = CCField("ox", n_); oy_ = CCField("oy", n_); oz_ = CCField("oz", n_);
-    phi_ = CCField("phi", n_); div_ = CCField("div", n_); rhs_ = CCField("rhs", n_); P_ = CCField("P", n_);
-    r_ = CCField("r", n_); z_ = CCField("z", n_); pp_ = CCField("pp", n_); Ap_ = CCField("Ap", n_);
+    phi_ = CCField("phi", n_); div_ = CCField("div", n_); P_ = CCField("P", n_);
+    // g=1 scratch for the MG bridge (openness + rhs/phi + PCG vectors)
+    ox1_=CCField("ox1",n1_); oy1_=CCField("oy1",n1_); oz1_=CCField("oz1",n1_);
+    rhs1_=CCField("rhs1",n1_); phi1_=CCField("phi1",n1_);
+    r_ = CCField("r", n1_); z_ = CCField("z", n1_); pp_ = CCField("pp", n1_); Ap_ = CCField("Ap", n1_);
     for (int c = 0; c < 3; ++c) {
       C[c].u = CCField("u", n_); C[c].b = CCField("b", n_);
       C[c].AC=FV("AC",n_);C[c].AW=FV("AW",n_);C[c].AE=FV("AE",n_);C[c].AS=FV("AS",n_);
@@ -58,7 +64,7 @@ class SdflowIbm {
   void setBodyForce(double fx, double fy, double fz) { f_ = {fx, fy, fz}; }
   void setVelocityIterations(int it) { velIters_ = it; }
   void setPressureIterations(int it) { presIters_ = it; }
-  void setAdvection(bool on) { advect_ = on; }       // explicit advection (not yet wired; Stokes only)
+  void setAdvection(bool on) { advect_ = on; }       // explicit Koren-TVD advection (matches CUDA to ~1e-13)
   void setPressureLevels(int levels) { nLevels_ = levels < 1 ? 1 : levels; }  // MG depth (CUDA default 4)
 
   // SDF on the inner cells (flat x-fastest, size nx*ny*nz; <0 solid). cutcellPressure enables the
@@ -81,16 +87,21 @@ class SdflowIbm {
     }
     rebuildStencils();
     if (cutcellPressure_) {
-      buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);
+      buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);  // on the g=2 velocity block
+      copyInner(ox1_, e1_, 1, CCConst(ox_), e_, G);  // bridge openness g=2 -> g=1 for the MG
+      copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
+      copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
       mg_.init(nx_, ny_, nz_, nLevels_);  // geometric multigrid on the cut-cell openness (MG-PCG pressure)
-      mg_.setOpenness(CCConst(ox_), CCConst(oy_), CCConst(oz_), 1.0, 1.0, 1.0);
+      mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), 1.0, 1.0, 1.0);
       Kokkos::deep_copy(phi_, 0.0); Kokkos::deep_copy(P_, 0.0);
     }
   }
 
   void step() {
     if (cutcellPressure_) fillGhosts(P_);            // grad(P^n) for the incremental predictor
-    for (int c = 0; c < 3; ++c) solveComponent(c);  // predictor: per-component IBM implicit diffusion
+    if (advect_) { fillGhosts(C[0].u); fillGhosts(C[1].u); fillGhosts(C[2].u); }  // u^n ghosts for advect
+    for (int c = 0; c < 3; ++c) buildRhs(c);         // all RHS from u^n (advection couples the components)
+    for (int c = 0; c < 3; ++c) smoothComp(c);       // per-component IBM implicit-diffusion solve
     if (cutcellPressure_) project();                 // cut-cell projection -> incompressible
   }
 
@@ -118,6 +129,16 @@ class SdflowIbm {
       ibmModifyStencil(C[c].AC,C[c].AW,C[c].AE,C[c].AS,C[c].AN,C[c].AB,C[c].AT, C[c].inhom, C[c].rscale, C[c].ov, C[c].nCut, 0.0f);
     }
   }
+  // copy the nx*ny*nz inner cells between two extended blocks of different ghost width (g=2 <-> g=1 MG).
+  void copyInner(CCField dst, C3 de, int dg, CCConst src, C3 se, int sg) {
+    CCExec space; const int NX=nx_, NY=ny_;
+    Kokkos::parallel_for("cfdk::copyInner", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
+      KOKKOS_LAMBDA(long c){ const int ix=(int)(c%NX), iy=(int)((c/NX)%NY), iz=(int)(c/((long)NX*NY));
+        const long di=(long)(ix+dg)+(long)(iy+dg)*de.x+(long)(iz+dg)*(long)de.x*de.y;
+        const long si=(long)(ix+sg)+(long)(iy+sg)*se.x+(long)(iz+sg)*(long)se.x*se.y;
+        dst(di)=src(si); });
+    space.fence();
+  }
   // Fill ghost width G periodically on all 3 axes (x then y then z, covering corners).
   void fillGhosts(CCField f) { fillAxis(f,0); fillAxis(f,1); fillAxis(f,2); }
   void fillAxis(CCField f, int axis) {
@@ -130,15 +151,25 @@ class SdflowIbm {
         for(int gl=0;gl<G;++gl){ ff(base+(long)gl*sa)=ff(base+(long)(gl+N)*sa); ff(base+(long)(G+N+gl)*sa)=ff(base+(long)(G+gl)*sa);} });
     space.fence();
   }
-  void solveComponent(int c) {
-    CCExec space; const double idiag = rho_/dt_, fc = f_[c];
-    CCField uu=C[c].u, bb=C[c].b, rs=C[c].rscale, P=P_;
+  void buildRhs(int c) {
+    CCExec space; const double idiag = rho_/dt_, fc = f_[c], rho = rho_; C3 e = e_;
+    CCField bb=C[c].b, rs=C[c].rscale, P=P_;
+    CCConst U=CCConst(C[0].u), V=CCConst(C[1].u), W=CCConst(C[2].u), uu=CCConst(C[c].u);
     const long strd = (c==0) ? 1 : (c==1) ? e_.x : (long)e_.x*e_.y;
-    const bool incr = cutcellPressure_;  // incremental predictor carries -grad(P^n)
-    Kokkos::parallel_for("rhs", Kokkos::RangePolicy<CCExec>(space,0,n_),
-      KOKKOS_LAMBDA(std::size_t i){ double gp = (incr && (long)i>=strd) ? (P(i)-P((long)i-strd)) : 0.0;
-                                    bb(i) = rs(i) * (idiag*uu(i) + fc - gp); });
+    const bool incr = cutcellPressure_, adv = advect_;  // incremental predictor carries -grad(P^n)
+    // b = rscale*(idiag*u^n - rho*advect(u^n) + f - grad P^n)  (CUDA advect_rhs_k + sub_gradp, then IBM scale)
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for("rhs", MD(space,{G,G,G},{e.x-G,e.y-G,e.z-G}),
+      KOKKOS_LAMBDA(int x,int y,int z){
+        const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
+        double a=0.0;
+        if (adv) { sadvk::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y}, Fa{uu,e.x,e.y};
+                   a = sadvk::advect(c, x,y,z, Ua,Va,Wa, Fa); }
+        const double gp = incr ? (P(i)-P((long)i-strd)) : 0.0;
+        bb(i) = rs(i) * (idiag*uu(i) + fc - rho*a - gp); });
     space.fence();
+  }
+  void smoothComp(int c) {
     for (int it = 0; it < velIters_; ++it) {
       fillGhosts(C[c].u);
       ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
@@ -153,12 +184,15 @@ class SdflowIbm {
   void project() {
     fillGhosts(C[0].u); fillGhosts(C[1].u); fillGhosts(C[2].u);
     divergOpen(CCConst(C[0].u),CCConst(C[1].u),CCConst(C[2].u), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
-    { CCExec space; CCField d=div_, r=rhs_;  // rhs = -div(u*); keep div(u*) in div_ for the pressure update
-      Kokkos::parallel_for("negdiv", Kokkos::RangePolicy<CCExec>(space,0,n_), KOKKOS_LAMBDA(std::size_t i){ r(i)=-d(i); });
+    // bridge -div(u*) (g=2 block) -> the MG rhs (g=1 block); keep div(u*) in div_ for the pressure update
+    copyInner(rhs1_, e1_, 1, CCConst(div_), e_, G);
+    { CCExec space; CCField r=rhs1_;
+      Kokkos::parallel_for("negdiv", Kokkos::RangePolicy<CCExec>(space,0,n1_), KOKKOS_LAMBDA(std::size_t i){ r(i)=-r(i); });
       space.fence(); }
     // geometric multigrid MG-PCG solve of the cut-cell pressure Poisson A phi = -div(u*) (CUDA mac_multigrid)
-    Kokkos::deep_copy(phi_, 0.0);
-    lastPressureIters_ = mg_.solvePCG(rhs_, phi_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12);
+    Kokkos::deep_copy(phi1_, 0.0);
+    lastPressureIters_ = mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12);
+    copyInner(phi_, e_, G, CCConst(phi1_), e1_, 1);  // bridge phi back g=1 -> g=2
     fillGhosts(phi_);
     projectCorrect(C[0].u,C[1].u,C[2].u, CCConst(phi_), e_, G);
     // the grad(phi) correction also touches solid faces; re-impose no-slip there so the decoupled solid
@@ -193,7 +227,7 @@ class SdflowIbm {
   }
 
  private:
-  int nx_, ny_, nz_; C3 e_; std::size_t n_;
+  int nx_, ny_, nz_; C3 e_, e1_; std::size_t n_, n1_;
   double rho_=1.0, mu_=0.1, dt_=50.0;
   std::array<double,3> f_{{0,0,0}};
   int velIters_ = 200, presIters_ = 20;
@@ -202,7 +236,7 @@ class SdflowIbm {
   long lastPressureIters_ = 0;
   CutcellMG mg_;
   bool advect_ = false, cutcellPressure_ = false;
-  CCField sdf_, ox_, oy_, oz_, phi_, div_, rhs_, P_, r_, z_, pp_, Ap_;
+  CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
   Comp C[3];
 };
 

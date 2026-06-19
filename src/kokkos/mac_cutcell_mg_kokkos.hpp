@@ -153,6 +153,8 @@ class CutcellMG {
   void setOpenness(CCConst ox, CCConst oy, CCConst oz, double idx2, double idy2, double idz2) {
     Level& f = lv_[0];
     Kokkos::deep_copy(f.ox, ox); Kokkos::deep_copy(f.oy, oy); Kokkos::deep_copy(f.oz, oz);
+    fillOpenness(f);  // periodic fine-level openness ghosts (the operator reads the + neighbour face);
+                      // idempotent when the caller already filled them, required when it passed inner-only.
     buildCutcellOp(f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT, CCConst(f.ox), CCConst(f.oy), CCConst(f.oz),
                    f.ext, G, idx2, idy2, idz2);
     for (int L = 1; L < (int)lv_.size(); ++L) {
