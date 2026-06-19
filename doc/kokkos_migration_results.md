@@ -24,12 +24,17 @@ Same ring-packing SDF fed to CUDA `sdflow` and Kokkos `sdflow_kokkos`, identical
 (`stokes_permeability`: Stokes, MG-PCG pressure, RB-GS velocity). The Kokkos permeability is **bit-identical**
 to CUDA (and so are the step count, flux divergence, and peak velocity):
 
-| case | res  | porosity | k (CUDA)   | k (Kokkos) | rel Δk |
-|------|------|----------|------------|------------|--------|
-| A    | 64³  | 0.639    | 0.303278   | 0.303278   | 0.000% |
-| A    | 96³  | 0.669    | 0.924992   | 0.925001   | 0.001% |
-| A    | 128³ | 0.663    | 1.658330   | 1.658330   | 0.000% |
-| D    | 64³  | 0.654    | 0.355047   | 0.355047   | 0.000% |
+| case (RingBed protocol) | res  | porosity | k (CUDA)   | k (Kokkos) | rel Δk |
+|-------------------------|------|----------|------------|------------|--------|
+| A baseline              | 64³  | 0.639    | 0.303278   | 0.303278   | 0.000% |
+| B gentle-growth         | 64³  | 0.653    | 0.412314   | 0.412314   | 0.000% |
+| C high-iterations       | 64³  | 0.664    | 0.439025   | 0.439025   | 0.000% |
+| D higher-target-φ       | 64³  | 0.654    | 0.355047   | 0.355047   | 0.000% |
+| A baseline              | 96³  | 0.669    | 0.924992   | 0.925001   | 0.001% |
+| A baseline              | 128³ | 0.663    | 1.658330   | 1.658330   | 0.000% |
+| B gentle-growth         | 128³ | 0.657    | 1.539840   | 1.539840   | 0.000% |
+
+Bit-identical across every RingBed packing-protocol variant (A/B/C/D) and resolution.
 
 The residual ~1e-5 at 96³ is the float-stored MG-PCG operator + the Krylov inner-product summation order —
 explainable roundoff, not a scheme difference. `get_sdf_grid` itself matches CUDA to a near-surface band
