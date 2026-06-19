@@ -43,6 +43,10 @@ PYBIND11_MODULE(sdflow_kokkos, m) {
       .def("set_dt", &SdflowIbm::setDt)
       .def("set_body_force", &SdflowIbm::setBodyForce)
       .def("set_advection", &SdflowIbm::setAdvection)
+      .def("set_implicit_advection", &SdflowIbm::setImplicitAdvection, py::arg("on"))
+      .def("set_outer_iterations", &SdflowIbm::setOuterIterations, py::arg("n"))
+      .def("set_outer_tolerance", &SdflowIbm::setOuterTolerance, py::arg("tol"))
+      .def("last_outer_iterations", &SdflowIbm::lastOuterIterations)
       .def("set_velocity_solver_params", &SdflowIbm::setVelocityIterations, py::arg("iters"))
       .def("set_pressure_solver_params", &SdflowIbm::setPressureIterations, py::arg("iters"))
       .def("set_pressure_multigrid",

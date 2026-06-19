@@ -57,6 +57,8 @@ class SdflowIbm {
         FV("M",(std::size_t)maxCut*6),FV("X",(std::size_t)maxCut*6),FV("Nbc",(std::size_t)maxCut*6),FV("R",(std::size_t)maxCut*6)};
       C[c].idMap = Kokkos::View<int*,CCMem>("idMap", n_);
       C[c].counter = Kokkos::View<int,CCMem>("cnt");
+      old_[c] = CCField("uOld", n_);   // u^n time base (fixed over the step's Picard sweeps)
+      prev_[c] = CCField("uPrev", n_);  // previous Picard iterate (outer-tolerance check)
     }
   }
 
@@ -67,6 +69,16 @@ class SdflowIbm {
   void setVelocityIterations(int it) { velIters_ = it; }
   void setPressureIterations(int it) { presIters_ = it; }
   void setAdvection(bool on) { advect_ = on; }       // explicit Koren-TVD advection (matches CUDA to ~1e-13)
+  // Implicit-FOU deferred-correction advection (CUDA set_implicit_advection): solve the first-order-upwind
+  // part of advection implicitly (in the velocity operator) + keep (Koren-FOU) explicit in the RHS ->
+  // unconditionally stable for advection (high Re / large dt). Requires the IBM stencil (rebuilt per Picard
+  // iteration with the FOU term); the domain-BC path needs velocity-MG (separate milestone).
+  void setImplicitAdvection(bool on) { implicitFou_ = on; }
+  // Picard outer iterations over the step (CUDA set_outer_iterations): the advecting velocity is lagged at
+  // the current iterate u^k while the time base stays u^n. iters>=1; tol>0 stops early on max|du| < tol.
+  void setOuterIterations(int iters) { outerIters_ = iters < 1 ? 1 : iters; }
+  void setOuterTolerance(double tol) { outerTol_ = tol; }
+  long lastOuterIterations() const { return lastOuterIters_; }
   void setPressureLevels(int levels) { nLevels_ = levels < 1 ? 1 : levels; }  // MG depth (CUDA default 4)
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip wall,2=Dirichlet/inflow,3=outflow.
   void setDomainBc(int face, int type, double vx, double vy, double vz) {
@@ -133,12 +145,29 @@ class SdflowIbm {
   }
 
   void step() {
-    if (cutcellPressure_) { fillGhosts(P_); if (hasBc_) pressureBcGhost(); }  // grad(P^n) for the incremental predictor
-    if (advect_ || hasBc_) for (int c=0;c<3;++c) fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect
-    for (int c = 0; c < 3; ++c) buildRhs(c);         // all RHS from u^n (advection couples the components)
-    for (int c = 0; c < 3; ++c) smoothComp(c);       // per-component IBM implicit-diffusion solve
-    if (cutcellPressure_) project();                 // cut-cell projection -> incompressible
-    if (hasBc_) for (int c=0;c<3;++c) applyVelocityBcComp(c, 0, false);  // re-impose domain BCs (keep outflow)
+    // u^n time base, fixed for the whole step (Picard lags the advecting velocity at u^k, not the base).
+    for (int c = 0; c < 3; ++c) Kokkos::deep_copy(old_[c], C[c].u);
+    if (cutcellPressure_) { fillGhosts(P_); if (hasBc_) pressureBcGhost(); }  // grad(P^n) for the incremental predictor (once)
+    lastOuterIters_ = 0;
+    for (int outer = 0; outer < outerIters_; ++outer) {
+      lastOuterIters_ = outer + 1;
+      if (outerTol_ > 0) for (int c = 0; c < 3; ++c) Kokkos::deep_copy(prev_[c], C[c].u);
+      if (advect_ || hasBc_) for (int c=0;c<3;++c) fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect
+      for (int c = 0; c < 3; ++c) buildRhs(c);         // RHS from u^n base + advection lagged at u^k
+      // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k), then
+      // re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). IBM path only;
+      // the domain-BC FOU operator lives in the velocity-MG levels (separate milestone).
+      if (implicitFou_ && advect_ && !hasBc_) for (int c = 0; c < 3; ++c) buildAdvStencil(c);
+      for (int c = 0; c < 3; ++c) smoothComp(c);       // per-component IBM implicit-diffusion solve
+      if (cutcellPressure_) project();                 // cut-cell projection -> incompressible
+      if (hasBc_) for (int c=0;c<3;++c) applyVelocityBcComp(c, 0, false);  // re-impose domain BCs (keep outflow)
+      if (outerTol_ > 0) {  // outer convergence: max velocity change over this Picard iteration
+        double corr = 0.0;
+        for (int c = 0; c < 3; ++c) corr = Kokkos::fmax(corr, maxAbsDiffInner(CCConst(C[c].u), CCConst(prev_[c])));
+        lastOuterCorr_ = corr;
+        if (corr < outerTol_) break;
+      }
+    }
   }
 
   // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
@@ -189,22 +218,53 @@ class SdflowIbm {
   }
   void buildRhs(int c) {
     CCExec space; const double idiag = rho_/dt_, fc = f_[c], rho = rho_; C3 e = e_;
-    CCField bb=C[c].b, rs=C[c].rscale, P=P_, brhs=bcBrhs_[c];
-    CCConst U=CCConst(C[0].u), V=CCConst(C[1].u), W=CCConst(C[2].u), uu=CCConst(C[c].u);
+    CCField bb=C[c].b, rs=C[c].rscale, P=P_, brhs=bcBrhs_[c], inh=C[c].inhom;
+    CCConst U=CCConst(C[0].u), V=CCConst(C[1].u), W=CCConst(C[2].u), uu=CCConst(C[c].u), un=CCConst(old_[c]);
     const long strd = (c==0) ? 1 : (c==1) ? e_.x : (long)e_.x*e_.y;
     const bool incr = cutcellPressure_, adv = advect_, bc = hasBc_;  // incremental predictor carries -grad(P^n)
-    // b = rscale*(idiag*u^n - rho*advect(u^n) + f - grad P^n)  (CUDA advect_rhs_k + sub_gradp, then IBM scale)
+    const bool ifou = implicitFou_ && advect_;  // deferred correction: keep (Koren - FOU) explicit in the RHS
+    // b = descale*(idiag*u^n - rho*Koren(u^k) + rho*FOU(u^k) + f - grad P^n) - inhom  (+ BC fold brhs). The
+    // time base is u^n (Picard); the advecting velocity & advected field are the current iterate u^k.
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for("rhs", MD(space,{G,G,G},{e.x-G,e.y-G,e.z-G}),
       KOKKOS_LAMBDA(int x,int y,int z){
         const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
-        double a=0.0;
+        double aK=0.0, aF=0.0;
         if (adv) { sadvk::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y}, Fa{uu,e.x,e.y};
-                   a = sadvk::advect(c, x,y,z, Ua,Va,Wa, Fa); }
+                   aK = sadvk::advect(c, x,y,z, Ua,Va,Wa, Fa);
+                   if (ifou) aF = sadvk::advect_fou(c, x,y,z, Ua,Va,Wa, Fa); }
         const double gp = incr ? (P(i)-P((long)i-strd)) : 0.0;
-        // b = rscale*(idiag*u - rho*advect + f - gradP); + the BC implicit-diffusion RHS fold (CUDA b += brhs)
-        bb(i) = rs(i) * (idiag*uu(i) + fc - rho*a - gp) + (bc ? brhs(i) : 0.0); });
+        bb(i) = rs(i) * (idiag*un(i) + fc - rho*aK + rho*aF - gp)
+                + (bc ? brhs(i) : -inh(i)); });  // BC fold (brhs) on the domain-BC path; -inhom on the IBM path (=0 for no-slip)
     space.fence();
+  }
+  // Implicit-FOU velocity stencil (CUDA build_adv_stencil_k + ibm_modify_stencil): backward-Euler diffusion
+  // (idiag+6beta diag, -beta off) + rho*FOU(u^k) upwind operator (diagonally dominant -> stable at high Re),
+  // then the Robust-Scaled cut-cell bake. The advecting velocity u^k = the current C[*].u (ghosts filled).
+  void buildAdvStencil(int c) {
+    const double idiag = rho_/dt_, beta = mu_, fouw = rho_; C3 e = e_;
+    ibmBuildDiffusion(C[c].AC,C[c].AW,C[c].AE,C[c].AS,C[c].AN,C[c].AB,C[c].AT, e.x,e.y,e.z, beta, idiag);
+    CCExec space; FV AC=C[c].AC,AW=C[c].AW,AE=C[c].AE,AS=C[c].AS,AN=C[c].AN,AB=C[c].AB,AT=C[c].AT;
+    CCConst U=CCConst(C[0].u), V=CCConst(C[1].u), W=CCConst(C[2].u);
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for("advstencil", MD(space,{G,G,G},{e.x-G,e.y-G,e.z-G}),
+      KOKKOS_LAMBDA(int x,int y,int z){
+        const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
+        double cC=AC(i),cxm=AW(i),cxp=AE(i),cym=AS(i),cyp=AN(i),czm=AB(i),czp=AT(i);
+        sadvk::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y};
+        sadvk::fou_operator(c, x,y,z, Ua,Va,Wa, fouw, cC,cxm,cxp,cym,cyp,czm,czp);
+        AC(i)=(float)cC; AW(i)=(float)cxm; AE(i)=(float)cxp; AS(i)=(float)cym; AN(i)=(float)cyp; AB(i)=(float)czm; AT(i)=(float)czp; });
+    space.fence();
+    Kokkos::deep_copy(C[c].rscale, 1.0); Kokkos::deep_copy(C[c].inhom, 0.0);
+    ibmModifyStencil(C[c].AC,C[c].AW,C[c].AE,C[c].AS,C[c].AN,C[c].AB,C[c].AT, C[c].inhom, C[c].rscale, C[c].ov, C[c].nCut, 0.0f);
+  }
+  // max|a-b| over inner cells (Picard outer-tolerance check).
+  double maxAbsDiffInner(CCConst a, CCConst b) {
+    CCExec space; C3 e=e_; double m=0;
+    Kokkos::parallel_reduce("maxdiff", Kokkos::MDRangePolicy<CCExec,Kokkos::Rank<3>>(space,{G,G,G},{e.x-G,e.y-G,e.z-G}),
+      KOKKOS_LAMBDA(int x,int y,int z,double& acc){ const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
+        const double d=Kokkos::fabs(a(i)-b(i)); if(d>acc) acc=d; }, Kokkos::Max<double>(m));
+    return m;
   }
   void smoothComp(int c) {
     if (hasBc_) {  // domain-BC (no immersed solid): CUDA's double const-coeff diff_k + dcorr fold
@@ -344,8 +404,11 @@ class SdflowIbm {
   int bc_[6] = {0,0,0,0,0,0}; double bcVel_[6][3] = {}; bool hasBc_ = false, hasOutflow_ = false;  // domain BCs
   CCField bcProf_[6]; int bcProfNc_[6] = {0,0,0,0,0,0};  // per-position inlet profiles (face grid [Lb*Lc*3])
   CCField bcDcorr_[3], bcBrhs_[3];                // implicit-diffusion face fold (per component)
-  bool advect_ = false, cutcellPressure_ = false;
+  bool advect_ = false, cutcellPressure_ = false, implicitFou_ = false;
+  int outerIters_ = 1; double outerTol_ = 0.0;        // Picard outer iteration (CUDA set_outer_iterations)
+  long lastOuterIters_ = 0; double lastOuterCorr_ = 0.0;
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
+  CCField old_[3], prev_[3];                            // u^n time base + previous Picard iterate
   Comp C[3];
 };
 
