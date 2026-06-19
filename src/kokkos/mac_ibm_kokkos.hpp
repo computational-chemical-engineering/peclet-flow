@@ -11,7 +11,8 @@
 
 #include <Kokkos_Core.hpp>
 
-#include "mac_cutcell_kokkos.hpp"  // cfdk::C3, cfdk::ccSampleExt, CCConst
+#include "cut_cell_ibm_kokkos.hpp"  // IbmOverlay, ibmFillEntry
+#include "mac_cutcell_kokkos.hpp"   // cfdk::C3, cfdk::ccSampleExt, CCConst
 
 namespace cfdk {
 
@@ -28,6 +29,36 @@ KOKKOS_INLINE_FUNCTION bool ibmIsCut(float sc, const float sn[6]) {
   for (int k = 0; k < 6; ++k)
     if (sn[k] < 0.0f) return true;
   return false;
+}
+
+// Find cut cells over the inner block and build the Robust-Scaled overlay (port of ibm_count_ext_k +
+// ibm_geometry_ext_k): per inner cell, gather the 7 staggered SDF samples; if cut, atomically claim a
+// slot, set idMap[cell]=slot, and fill the overlay. counter/idMap are reset here. Returns the cut count
+// (overlay arrays must be sized >= number of inner cells). bc_type 0=Dirichlet, 1=Neumann.
+template <int SCHEME>
+inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, const IbmOverlay& ov,
+                           Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter) {
+  CCExec space;
+  Kokkos::deep_copy(space, counter, 0);
+  Kokkos::deep_copy(space, idMap, -1);
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "cfdk::ibm_build_overlay", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long idx = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
+        const float sc = (float)ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
+        const int d[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+        float sn[6];
+        for (int k = 0; k < 6; ++k)
+          sn[k] = (float)ccSampleExt(sdf, ext, lx + d[k][0] + off.x, ly + d[k][1] + off.y, lz + d[k][2] + off.z);
+        if (!ibmIsCut(sc, sn)) return;
+        const int slot = Kokkos::atomic_fetch_add(&counter(), 1);
+        idMap(idx) = slot;
+        ibmFillEntry<SCHEME>(ov, slot, (int)idx, sc, sn, bc_type);
+      });
+  space.fence();
+  int cnt = 0; Kokkos::deep_copy(cnt, counter);
+  return cnt;
 }
 
 // Volume fraction theta = clamp(0.5 + sdf_sample, 0, 1) at the staggered point (lx+off, ...).
