@@ -99,10 +99,14 @@ class SdflowIbm {
     if (hasBc_) setupBcDiffusion();  // bake the implicit-diffusion wall fold into the per-component stencil
     if (cutcellPressure_) {
       buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);  // on the g=2 velocity block
-      if (hasBc_) {                  // close wall/inflow faces on the g=2 openness (divergence consistency)
-        B3 e2{e_.x,e_.y,e_.z}; CCField oa[3]={ox_,oy_,oz_};
-        for (int a=0;a<3;++a) for (int s=0;s<2;++s) { int t=bc_[2*a+s]; if (t==1||t==2) bcZeroOpenness(oa[a],e2,G,a,s); }
-      }
+      if (hasBc_) {  // FLUX openness (beta): a face is OPEN only where it carries normal flux -- outflow, or
+        B3 e2{e_.x,e_.y,e_.z}; CCField oa[3]={ox_,oy_,oz_};  // an inflow with nonzero normal velocity. Walls
+        for (int a=0;a<3;++a) for (int s=0;s<2;++s) {        // and tangential-only Dirichlet faces (e.g. a
+          const int t=bc_[2*a+s];                            // lid: type 2 with zero normal vel) are CLOSED.
+          const bool open = (t==3) || (t==2 && std::fabs(bcVel_[2*a+s][a])>1e-12);
+          if (t!=0 && !open) bcZeroOpenness(oa[a],e2,G,a,s);
+        }
+      }  // the MG re-derives the OPERATOR openness alpha (inflow Neumann -> closed) per level via setBC.
       copyInner(ox1_, e1_, 1, CCConst(ox_), e_, G);  // bridge openness g=2 -> g=1 for the MG
       copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
       copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
