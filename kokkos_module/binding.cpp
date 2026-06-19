@@ -49,6 +49,14 @@ PYBIND11_MODULE(sdflow_kokkos, m) {
            [](SdflowIbm& s, bool, int levels) { s.setPressureLevels(levels); },
            py::arg("on"), py::arg("levels") = 4)
       .def("last_pressure_iterations", &SdflowIbm::lastPressureIterations)
+      .def("set_domain_bc", &SdflowIbm::setDomainBc,
+           py::arg("face"), py::arg("type"), py::arg("vx") = 0.0, py::arg("vy") = 0.0, py::arg("vz") = 0.0)
+      .def("set_pressure_geometry",
+           [](SdflowIbm& s, py::array_t<double, py::array::f_style | py::array::forcecast> sdf) {
+             std::vector<double> v(static_cast<size_t>(sdf.size()));
+             std::memcpy(v.data(), sdf.data(), v.size() * sizeof(double));
+             s.setPressureGeometry(v);
+           })
       .def("set_solid",
            [](SdflowIbm& s, py::array_t<double, py::array::f_style | py::array::forcecast> sdf,
               bool cutcell_pressure, const std::string& /*pressure_coarse*/) {

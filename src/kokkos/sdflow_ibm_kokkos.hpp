@@ -23,6 +23,7 @@
 #include "mac_ibm_kokkos.hpp"
 #include "mac_pressure_kokkos.hpp"
 #include "mac_cutcell_mg_kokkos.hpp"
+#include "mac_stencils_kokkos.hpp"
 #include "staggered_advection_kokkos.hpp"
 
 namespace cfdk {
@@ -49,6 +50,7 @@ class SdflowIbm {
       C[c].AC=FV("AC",n_);C[c].AW=FV("AW",n_);C[c].AE=FV("AE",n_);C[c].AS=FV("AS",n_);
       C[c].AN=FV("AN",n_);C[c].AB=FV("AB",n_);C[c].AT=FV("AT",n_);
       C[c].inhom=CCField("inhom",n_); C[c].rscale=CCField("rscale",n_); C[c].mask=CCField("mask",n_);
+      bcDcorr_[c]=CCField("dcorr",n_); bcBrhs_[c]=CCField("brhs",n_);
       const int maxCut = nx*ny*nz;
       C[c].ov = IbmOverlay{ Kokkos::View<int*,CCMem>("ci",maxCut),Kokkos::View<int*,CCMem>("nb",maxCut),
         FV("dr",maxCut),Kokkos::View<int*,CCMem>("dc",(std::size_t)maxCut*6),FV("K",(std::size_t)maxCut*6),
@@ -66,6 +68,13 @@ class SdflowIbm {
   void setPressureIterations(int it) { presIters_ = it; }
   void setAdvection(bool on) { advect_ = on; }       // explicit Koren-TVD advection (matches CUDA to ~1e-13)
   void setPressureLevels(int levels) { nLevels_ = levels < 1 ? 1 : levels; }  // MG depth (CUDA default 4)
+  // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip wall,2=Dirichlet/inflow,3=outflow.
+  void setDomainBc(int face, int type, double vx, double vy, double vz) {
+    bc_[face]=type; bcVel_[face][0]=vx; bcVel_[face][1]=vy; bcVel_[face][2]=vz;
+    hasBc_=false; for (int i=0;i<6;++i) if (bc_[i]) hasBc_=true;
+  }
+  // all-fluid + domain-BC pressure (CUDA set_pressure_geometry): same path as set_solid with an open SDF.
+  void setPressureGeometry(const std::vector<double>& sdfInner) { setSolid(sdfInner, true); }
 
   // SDF on the inner cells (flat x-fastest, size nx*ny*nz; <0 solid). cutcellPressure enables the
   // open-face-weighted cut-cell projection (off => velocity-only, e.g. unidirectional body-force flow).
@@ -86,12 +95,18 @@ class SdflowIbm {
       Kokkos::deep_copy(C[c].u, 0.0);
     }
     rebuildStencils();
+    if (hasBc_) setupBcDiffusion();  // bake the implicit-diffusion wall fold into the per-component stencil
     if (cutcellPressure_) {
       buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);  // on the g=2 velocity block
+      if (hasBc_) {                  // close wall/inflow faces on the g=2 openness (divergence consistency)
+        B3 e2{e_.x,e_.y,e_.z}; CCField oa[3]={ox_,oy_,oz_};
+        for (int a=0;a<3;++a) for (int s=0;s<2;++s) { int t=bc_[2*a+s]; if (t==1||t==2) bcZeroOpenness(oa[a],e2,G,a,s); }
+      }
       copyInner(ox1_, e1_, 1, CCConst(ox_), e_, G);  // bridge openness g=2 -> g=1 for the MG
       copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
       copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
       mg_.init(nx_, ny_, nz_, nLevels_);  // geometric multigrid on the cut-cell openness (MG-PCG pressure)
+      mg_.setBoundaryConditions(bc_);     // per-level wall openness + null-space gating (no-op if periodic)
       mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), 1.0, 1.0, 1.0);
       Kokkos::deep_copy(phi_, 0.0); Kokkos::deep_copy(P_, 0.0);
     }
@@ -99,10 +114,11 @@ class SdflowIbm {
 
   void step() {
     if (cutcellPressure_) fillGhosts(P_);            // grad(P^n) for the incremental predictor
-    if (advect_) { fillGhosts(C[0].u); fillGhosts(C[1].u); fillGhosts(C[2].u); }  // u^n ghosts for advect
+    if (advect_ || hasBc_) for (int c=0;c<3;++c) fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect
     for (int c = 0; c < 3; ++c) buildRhs(c);         // all RHS from u^n (advection couples the components)
     for (int c = 0; c < 3; ++c) smoothComp(c);       // per-component IBM implicit-diffusion solve
     if (cutcellPressure_) project();                 // cut-cell projection -> incompressible
+    if (hasBc_) for (int c=0;c<3;++c) applyVelocityBcComp(c, 0, false);  // re-impose domain BCs (keep outflow)
   }
 
   // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
@@ -153,10 +169,10 @@ class SdflowIbm {
   }
   void buildRhs(int c) {
     CCExec space; const double idiag = rho_/dt_, fc = f_[c], rho = rho_; C3 e = e_;
-    CCField bb=C[c].b, rs=C[c].rscale, P=P_;
+    CCField bb=C[c].b, rs=C[c].rscale, P=P_, brhs=bcBrhs_[c];
     CCConst U=CCConst(C[0].u), V=CCConst(C[1].u), W=CCConst(C[2].u), uu=CCConst(C[c].u);
     const long strd = (c==0) ? 1 : (c==1) ? e_.x : (long)e_.x*e_.y;
-    const bool incr = cutcellPressure_, adv = advect_;  // incremental predictor carries -grad(P^n)
+    const bool incr = cutcellPressure_, adv = advect_, bc = hasBc_;  // incremental predictor carries -grad(P^n)
     // b = rscale*(idiag*u^n - rho*advect(u^n) + f - grad P^n)  (CUDA advect_rhs_k + sub_gradp, then IBM scale)
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for("rhs", MD(space,{G,G,G},{e.x-G,e.y-G,e.z-G}),
@@ -166,17 +182,59 @@ class SdflowIbm {
         if (adv) { sadvk::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y}, Fa{uu,e.x,e.y};
                    a = sadvk::advect(c, x,y,z, Ua,Va,Wa, Fa); }
         const double gp = incr ? (P(i)-P((long)i-strd)) : 0.0;
-        bb(i) = rs(i) * (idiag*uu(i) + fc - rho*a - gp); });
+        // b = rscale*(idiag*u - rho*advect + f - gradP); + the BC implicit-diffusion RHS fold (CUDA b += brhs)
+        bb(i) = rs(i) * (idiag*uu(i) + fc - rho*a - gp) + (bc ? brhs(i) : 0.0); });
     space.fence();
   }
   void smoothComp(int c) {
-    for (int it = 0; it < velIters_; ++it) {
+    if (hasBc_) {  // domain-BC (no immersed solid): CUDA's double const-coeff diff_k + dcorr fold
+      const I3 e{e_.x,e_.y,e_.z}, og{0,0,0}; const double beta=mu_, Ac=rho_/dt_ + 6.0*mu_;
+      for (int it = 0; it < velIters_; ++it) {
+        fillVelGhosts(c, 1);  // re-impose wall faces (fold) before each color
+        diffSmoothColor(C[c].u, CCConst(C[c].b), e, og, G, beta, Ac, 0, CCConst(bcDcorr_[c]));
+        fillVelGhosts(c, 1);
+        diffSmoothColor(C[c].u, CCConst(C[c].b), e, og, G, beta, Ac, 1, CCConst(bcDcorr_[c]));
+      }
+      return;
+    }
+    for (int it = 0; it < velIters_; ++it) {  // IBM / periodic: Robust-Scaled cut-cell stencil (float)
       fillGhosts(C[c].u);
       ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
                           MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, C3{0,0,0}, G, 0);
       fillGhosts(C[c].u);
       ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
                           MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, C3{0,0,0}, G, 1);
+    }
+  }
+  // domain-BC velocity ghosts: periodic-fill periodic axes, then apply per-face BCs (fold=0 explicit/1 implicit).
+  void fillVelGhosts(int comp, int fold) {
+    for (int a=0;a<3;++a) if (bc_[2*a]==0 && bc_[2*a+1]==0) fillAxis(C[comp].u, a);
+    applyVelocityBcComp(comp, fold, true);
+  }
+  void applyVelocityBcComp(int comp, int fold, bool doOutflow) {
+    if (!hasBc_) return;
+    B3 e{e_.x,e_.y,e_.z};
+    for (int a=0;a<3;++a) for (int s=0;s<2;++s) {
+      const int t=bc_[2*a+s]; if (t==0) continue;
+      if (t==3) { if (doOutflow) bcOutflowComp(C[comp].u, e, G, a, s, comp, fold); continue; }
+      bcVelocityComp(C[comp].u, e, G, a, s, comp, bcVel_[2*a+s][comp], fold);
+    }
+  }
+  // implicit-diffusion wall fold (CUDA setup_bc_diffusion): dcorr += (wall:+beta tangential / outflow:-beta),
+  // brhs += 2*beta*wall (tangential Dirichlet); bake dcorr into the per-component stencil diagonal.
+  void setupBcDiffusion() {
+    const double beta = mu_; B3 e{e_.x,e_.y,e_.z};
+    for (int c=0;c<3;++c) {
+      Kokkos::deep_copy(bcDcorr_[c], 0.0); Kokkos::deep_copy(bcBrhs_[c], 0.0);
+      for (int a=0;a<3;++a) for (int s=0;s<2;++s) {
+        const int t=bc_[2*a+s]; double dval,bval;
+        if (t==3) { dval=-beta; bval=0.0; }
+        else if (t!=0 && c!=a) { dval=beta; bval=2.0*beta*bcVel_[2*a+s][c]; }
+        else continue;  // periodic, or the normal component at a wall (held directly)
+        bcDiffusionFold(bcDcorr_[c], bcBrhs_[c], e, G, a, s, dval, bval);
+      }
+      // dcorr is passed to the (double) const-coeff smoother diffSmoothColor each sweep -- matching CUDA
+      // diff_k (Ac + dcorr in double), NOT baked into the float stencil.
     }
   }
   // Incremental (rotational) cut-cell projection: solve A phi = -div_open(u*) (RB-GS, mean-removed),
@@ -235,6 +293,8 @@ class SdflowIbm {
   int nLevels_ = 4;                               // multigrid depth (CUDA default; set_pressure_multigrid)
   long lastPressureIters_ = 0;
   CutcellMG mg_;
+  int bc_[6] = {0,0,0,0,0,0}; double bcVel_[6][3] = {}; bool hasBc_ = false;  // per-face domain BCs
+  CCField bcDcorr_[3], bcBrhs_[3];                // implicit-diffusion face fold (per component)
   bool advect_ = false, cutcellPressure_ = false;
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
   Comp C[3];
