@@ -174,6 +174,10 @@ class SdflowIbm {
       // re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). IBM path only;
       // the domain-BC FOU operator lives in the velocity-MG levels (separate milestone).
       if (implicitFou_ && advect_ && !hasBc_) for (int c = 0; c < 3; ++c) buildAdvStencil(c);
+      // upwind-convective velocity-MG: restrict the (frozen u^k) advecting velocity to the coarse levels ONCE,
+      // before the per-component solves update it (shared across the 3 momentum components).
+      if (useVelocityMg_ && implicitFou_ && advect_ && !hasBc_)
+        vmg_.restrictAdvVelocities(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u));
       for (int c = 0; c < 3; ++c) smoothComp(c);       // per-component IBM implicit-diffusion solve
       if (cutcellPressure_) project();                 // cut-cell projection -> incompressible
       if (hasBc_) for (int c=0;c<3;++c) applyVelocityBcComp(c, 0, false);  // re-impose domain BCs (keep outflow)
@@ -293,14 +297,19 @@ class SdflowIbm {
       }
       return;
     }
-    if (useVelocityMg_) {  // IBM velocity multigrid: fine = sharp As_[c], coarse = staircase (exact == RB-GS).
-      // Fine stencil + per-component geometry (volume fraction theta, clean-fluid exclude mask) -> staircase
-      // coarse op, then solve A_ibm u = b by V-cycles. Built per component (cheap, static geometry).
-      const Off3 offs[3] = {{-0.5f,0,0},{0,-0.5f,0},{0,0,-0.5f}};
-      ibmVolfrac(vmgTheta_, CCConst(sdf_), e_, offs[c]);
-      ibmCleanFluidMask(vmgClean_, CCConst(sdf_), e_, offs[c]);
+    if (useVelocityMg_) {  // IBM velocity multigrid: fine = sharp As_[c]; coarse op depends on the regime.
       vmg_.setFineStencil(FPC(C[c].AC),FPC(C[c].AW),FPC(C[c].AE),FPC(C[c].AS),FPC(C[c].AN),FPC(C[c].AB),FPC(C[c].AT));
-      vmg_.setStaircase(CCConst(vmgTheta_), CCConst(C[c].mask), CCConst(vmgClean_), mu_, rho_/dt_, 0.5);
+      if (implicitFou_ && advect_) {
+        // UPWIND-CONVECTIVE coarse op (advection-dominated): aniso const-coeff diffusion + dt*FOU from the
+        // restricted advecting velocity (restrictAdvVelocities ran once in step()). No pin / no exclude mask.
+        vmg_.buildUpwindCoarse(c, mu_, rho_/dt_, rho_);
+      } else {
+        // STAIRCASE coarse op (diffusion-only): theta classification + clean-fluid exclude (exact == RB-GS).
+        const Off3 offs[3] = {{-0.5f,0,0},{0,-0.5f,0},{0,0,-0.5f}};
+        ibmVolfrac(vmgTheta_, CCConst(sdf_), e_, offs[c]);
+        ibmCleanFluidMask(vmgClean_, CCConst(sdf_), e_, offs[c]);
+        vmg_.setStaircase(CCConst(vmgTheta_), CCConst(C[c].mask), CCConst(vmgClean_), mu_, rho_/dt_, 0.5);
+      }
       vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8);
       maskVelocity(c);  // re-impose no-slip at solid (the masked solve leaves them at the pin value)
       return;

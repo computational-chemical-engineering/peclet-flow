@@ -19,8 +19,9 @@
 #include <Kokkos_Core.hpp>
 #include <vector>
 
-#include "mac_cutcell_mg_kokkos.hpp"  // restrictAvg, prolongAdd, FPV/FPC
-#include "mac_ibm_kokkos.hpp"         // ibmRbgsStencilColor (pin smoother), MConst
+#include "mac_cutcell_mg_kokkos.hpp"       // restrictAvg, prolongAdd, FPV/FPC
+#include "mac_ibm_kokkos.hpp"              // ibmRbgsStencilColor (pin smoother), MConst
+#include "staggered_advection_kokkos.hpp"  // fou_operator_aniso (upwind-convective coarse op)
 
 namespace cfdk {
 
@@ -91,6 +92,27 @@ inline void buildVelocityStaircase(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV A
   space.fence();
 }
 
+// UPWIND-CONVECTIVE coarse operator (build_adv_coarse_stencil_k): anisotropic const-coeff backward-Euler
+// diffusion (per-axis beta bx/by/bz) PLUS first-order-upwind advection from the restricted coarse advecting
+// velocity (scaled by s_a=1/cfac_a per face axis). M-matrix on every level -> stable in the advection-
+// dominated rows. The fine residual + smoother give the exact sharp-IBM answer; this only sets the rate.
+inline void buildAdvCoarse(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV AT, CCConst U, CCConst V,
+                           CCConst W, int comp, C3 e, int g, double bx, double by, double bz, double fouw,
+                           double sx, double sy, double sz, double idiag) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for("cfdk::vmg_adv_coarse", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+    KOKKOS_LAMBDA(int x, int y, int z) {
+      const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+      double cC = idiag + 2.0 * (bx + by + bz), cxm = -bx, cxp = -bx, cym = -by, cyp = -by, czm = -bz, czp = -bz;
+      sadvk::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y};
+      sadvk::fou_operator_aniso(comp, x, y, z, Ua, Va, Wa, fouw, sx, sy, sz, cC, cxm, cxp, cym, cyp, czm, czp);
+      AC(i) = (float)cC; AW(i) = (float)cxm; AE(i) = (float)cxp; AS(i) = (float)cym; AN(i) = (float)cyp;
+      AB(i) = (float)czm; AT(i) = (float)czp;
+    });
+  space.fence();
+}
+
 inline void thresholdMask(CCField m, CCConst theta, double thresh) {  // m = 1 where theta < thresh (solid)
   CCExec space; std::size_t n = m.extent(0); CCField mm = m; CCConst th = theta;
   Kokkos::parallel_for("cfdk::vmg_threshold", Kokkos::RangePolicy<CCExec>(space, 0, n),
@@ -112,6 +134,7 @@ class VelocityMG {
     C3 ext, inner, ratio{2, 2, 2}, cfac{1, 1, 1};
     std::size_t n = 0;
     CCField x, rhs, res, theta, pin, resMask;
+    CCField advU, advV, advW;  // restricted advecting velocity (upwind-convective coarse op; L>=1)
     FPV AC, AW, AE, AS, AN, AB, AT;
   };
 
@@ -132,12 +155,15 @@ class VelocityMG {
       v.ratio = ratio;
       v.x = CCField("vmg_x", v.n); v.rhs = CCField("vmg_rhs", v.n); v.res = CCField("vmg_res", v.n);
       v.theta = CCField("vmg_th", v.n); v.pin = CCField("vmg_pin", v.n);
+      if (L > 0) {  // coarse advecting velocity for the upwind-convective coarse op
+        v.advU = CCField("vmg_au", v.n); v.advV = CCField("vmg_av", v.n); v.advW = CCField("vmg_aw", v.n);
+      }
       for (FPV* p : {&v.AC, &v.AW, &v.AE, &v.AS, &v.AN, &v.AB, &v.AT}) *p = FPV("vmg_A", v.n);
       lv_.push_back(v);
       if (next.x == inner.x && next.y == inner.y && next.z == inner.z) break;
       inner = next; cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
     }
-    lv_[0].resMask = CCField("vmg_resmask0", lv_[0].n);  // level 0 only (clean-fluid exclude)
+    lv_[0].resMask = CCField("vmg_resmask0", lv_[0].n);  // level 0 only (clean-fluid exclude, staircase path)
   }
   int nLevels() const { return (int)lv_.size(); }
 
@@ -153,6 +179,7 @@ class VelocityMG {
   // by restricted theta and build a const-coeff Helmholtz. nu_dt = mu, idiag = rho/dt, h0 = 1.
   void setStaircase(CCConst theta0, CCConst solid0, CCConst resmask0, double nu_dt, double idiag,
                     double thresh) {
+    usePin_ = true; useResMask_ = true;  // staircase: pin classified-solid cells + exclude the IBM band
     Level& f = lv_[0];
     Kokkos::deep_copy(f.theta, theta0); Kokkos::deep_copy(f.pin, solid0); Kokkos::deep_copy(f.resMask, resmask0);
     for (int L = 1; L < (int)lv_.size(); ++L) {
@@ -163,6 +190,34 @@ class VelocityMG {
                    bz = nu_dt / (double)(c.cfac.z * c.cfac.z);
       buildVelocityStaircase(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.theta), c.ext, G, bx, by, bz,
                              thresh, idiag);
+    }
+  }
+
+  // UPWIND-CONVECTIVE coarse op (implicit-FOU): restrict the advecting velocity u/v/w (level-0 block) to
+  // every coarse level (8:1 average; numerical diffusion is welcome -> keeps the M-matrix). Call ONCE per
+  // Picard iteration, before buildUpwindCoarse for the 3 components (the velocity is shared/frozen at u^k).
+  void restrictAdvVelocities(CCConst u0, CCConst v0, CCConst w0) {
+    for (int L = 1; L < (int)lv_.size(); ++L) {
+      Level& cs = lv_[L]; Level& fin = lv_[L - 1];
+      CCConst fu = (L == 1) ? u0 : CCConst(fin.advU), fv = (L == 1) ? v0 : CCConst(fin.advV),
+              fw = (L == 1) ? w0 : CCConst(fin.advW);
+      restrictAvg(cs.advU, fu, cs.ext, fin.ext, G, cs.inner, fin.ratio); fill(cs, cs.advU);
+      restrictAvg(cs.advV, fv, cs.ext, fin.ext, G, cs.inner, fin.ratio); fill(cs, cs.advV);
+      restrictAvg(cs.advW, fw, cs.ext, fin.ext, G, cs.inner, fin.ratio); fill(cs, cs.advW);
+    }
+  }
+  // Build the coarse operators for component comp = aniso const-coeff diffusion + dt*FOU from the restricted
+  // advecting velocity (level 0 stays the fine As_[comp] set by setFineStencil). No pin / no exclude mask --
+  // the upwind M-matrix is stable; the fine residual gives the exact sharp answer. Per Picard iter, per comp.
+  void buildUpwindCoarse(int comp, double nu_dt, double idiag, double fouw) {
+    usePin_ = false; useResMask_ = false;  // upwind path: pure variable-coeff MG (no pin/exclude)
+    for (int L = 1; L < (int)lv_.size(); ++L) {
+      Level& c = lv_[L];
+      const double bx = nu_dt / (double)(c.cfac.x * c.cfac.x), by = nu_dt / (double)(c.cfac.y * c.cfac.y),
+                   bz = nu_dt / (double)(c.cfac.z * c.cfac.z);
+      const double sx = 1.0 / (double)c.cfac.x, sy = 1.0 / (double)c.cfac.y, sz = 1.0 / (double)c.cfac.z;
+      buildAdvCoarse(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.advU), CCConst(c.advV),
+                     CCConst(c.advW), comp, c.ext, G, bx, by, bz, fouw, sx, sy, sz, idiag);
     }
   }
 
@@ -182,8 +237,8 @@ class VelocityMG {
     smooth(lv, pre_);
     fill(lv, lv.x);
     residualVarPin(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
-                   FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), CCConst(lv.pin), lv.ext, G);
-    const bool masked = (lv.resMask.extent(0) == lv.n);  // level 0: exclude the IBM cut-cell band
+                   FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), usePin_ ? CCConst(lv.pin) : empty_, lv.ext, G);
+    const bool masked = useResMask_ && (lv.resMask.extent(0) == lv.n);  // level 0: exclude the IBM cut-cell band
     if (masked) mulMask(lv.res, CCConst(lv.resMask));
     Level& cs = lv_[L + 1];
     restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, G, cs.inner, lv.ratio);
@@ -196,11 +251,12 @@ class VelocityMG {
   }
   void smooth(Level& lv, int sweeps) {
     const C3 og{0, 0, 0};
+    CCConst pin = usePin_ ? CCConst(lv.pin) : empty_;
     for (int k = 0; k < sweeps; ++k)
       for (int color = 0; color < 2; ++color) {
         fill(lv, lv.x);
         ibmRbgsStencilColor(lv.x, CCConst(lv.rhs), MConst(lv.AC), MConst(lv.AW), MConst(lv.AE), MConst(lv.AS),
-                            MConst(lv.AN), MConst(lv.AB), MConst(lv.AT), CCConst(lv.pin), lv.ext, og, G, color);
+                            MConst(lv.AN), MConst(lv.AB), MConst(lv.AT), pin, lv.ext, og, G, color);
       }
   }
   void fill(Level& lv, CCField f) { fillAxis(lv, f, 0); fillAxis(lv, f, 1); fillAxis(lv, f, 2); }
@@ -219,6 +275,8 @@ class VelocityMG {
  private:
   std::vector<Level> lv_;
   int pre_ = 2, post_ = 2, bottom_ = 8;
+  bool usePin_ = true, useResMask_ = true;  // staircase: pin + clean-fluid exclude; upwind: neither
+  CCConst empty_;                           // zero-extent View -> "no pin / no mask" to the kernels
 };
 
 }  // namespace cfdk
