@@ -18,7 +18,21 @@
 #include "mac_pressure_kokkos.hpp"
 #include "mac_bc_kokkos.hpp"
 
+// Multi-rank (MPI) path is opt-in: the single-GPU module never links MPI, so all distributed code is gated
+// (mirrors the CUDA CFD_BUILD_MPI gating). When CFD_KOKKOS_MPI is off, CutcellMG is byte-identical to before.
+#ifdef CFD_KOKKOS_MPI
+#include <memory>
+#include "tpx/decomp/block_decomposer.hpp"
+#include "tpx/halo/grid_halo.hpp"
+#include "tpx/halo/grid_halo_kokkos.hpp"
+#endif
+
 namespace cfdk {
+
+#ifdef CFD_KOKKOS_MPI
+using tpx::halo::GridHalo;
+using tpx::halo::DeviceGridExchangeKokkos;
+#endif
 
 using MReal = float;                                  // operator storage = CUDA mreal
 using FPV = Kokkos::View<MReal*, CCMem>;
@@ -114,9 +128,14 @@ class CutcellMG {
  public:
   struct Level {
     C3 ext, inner, ratio{2, 2, 2}, cfac{1, 1, 1};
+    C3 og{0, 0, 0};            // block inner origin (global red-black parity); {0,0,0} single-rank
     std::size_t n = 0;
     CCField x, rhs, res, ox, oy, oz;
     FPV AC, AW, AE, AS, AN, AB, AT;
+#ifdef CFD_KOKKOS_MPI
+    std::shared_ptr<GridHalo<3>> halo;                              // per-level topology (decomposed)
+    std::shared_ptr<DeviceGridExchangeKokkos<double>> dev;          // per-level ghost exchange
+#endif
   };
   static constexpr int G = 1;
 
@@ -147,6 +166,44 @@ class CutcellMG {
       inner = next; cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
     }
   }
+#ifdef CFD_KOKKOS_MPI
+  // Multi-rank hierarchy: coarsen the GLOBAL grid 2:1 per level; each level gets its own transport-core halo
+  // over a BlockDecomposer of that level's grid (the ORB decomposition coarsens cleanly so restrict/prolong
+  // stay local). Sets the distributed flag -> fill() exchanges, the reductions Allreduce, the smoother uses
+  // the block's global-origin parity. Single-rank (size 1) reproduces init()'s field exactly.
+  void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm) {
+    lv_.clear(); distributed_ = true; comm_ = comm;
+    int rank = 0, size = 1; MPI_Comm_rank(comm, &rank); MPI_Comm_size(comm, &size);
+    std::array<bool, 3> per{true, true, true};
+    C3 gs{gnx, gny, gnz}, cf{1, 1, 1};
+    auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
+    for (int L = 0; L < nLevels; ++L) {
+      Level v;
+      v.halo = std::make_shared<GridHalo<3>>();
+      tpx::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), tpx::IVec<3>{gs.x, gs.y, gs.z});
+      v.halo->buildTopology(dec, rank, G, per, comm);
+      v.dev = std::make_shared<DeviceGridExchangeKokkos<double>>(); v.dev->init(*v.halo);
+      const auto& idx = v.halo->indexer();
+      const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
+      v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]}; v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};
+      v.og = {(int)oig[0] + G, (int)oig[1] + G, (int)oig[2] + G};  // inner origin == single-rank og=0 at origin 0
+      v.cfac = cf; v.n = idx.numCellsInclGhost();
+      C3 next = gs, ratio{1, 1, 1};
+      if (L + 1 < nLevels) {
+        if (can(gs.x)) { ratio.x = 2; next.x = gs.x / 2; }
+        if (can(gs.y)) { ratio.y = 2; next.y = gs.y / 2; }
+        if (can(gs.z)) { ratio.z = 2; next.z = gs.z / 2; }
+      }
+      v.ratio = ratio;
+      v.x = CCField("mg_x", v.n); v.rhs = CCField("mg_rhs", v.n); v.res = CCField("mg_res", v.n);
+      v.ox = CCField("mg_ox", v.n); v.oy = CCField("mg_oy", v.n); v.oz = CCField("mg_oz", v.n);
+      for (FPV* p : {&v.AC, &v.AW, &v.AE, &v.AS, &v.AN, &v.AB, &v.AT}) *p = FPV("mg_A", v.n);
+      lv_.push_back(v);
+      if (next.x == gs.x && next.y == gs.y && next.z == gs.z) break;
+      gs = next; cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
+    }
+  }
+#endif
   int nLevels() const { return (int)lv_.size(); }
   Level& level(int L) { return lv_[L]; }
 
@@ -261,7 +318,7 @@ class CutcellMG {
     removeMean(lv, lv.x);
   }
   void smooth(Level& lv, int sweeps, bool reverse) {
-    const C3 og{0, 0, 0};
+    const C3 og = lv.og;  // global red-black parity (block inner origin); {0,0,0} single-rank
     for (int k = 0; k < sweeps; ++k)
       for (int s = 0; s < 2; ++s) {
         const int color = reverse ? (1 - s) : s;
@@ -270,8 +327,14 @@ class CutcellMG {
                            FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, G, color);
       }
   }
-  // periodic ghost fill (3 axes) of a level-sized field / the openness triple.
-  void fill(Level& lv, CCField f) { fillAxis(lv, f, 0); fillAxis(lv, f, 1); fillAxis(lv, f, 2); }
+  // periodic ghost fill (3 axes) of a level-sized field / the openness triple. Distributed: the per-level
+  // transport-core halo (cross-rank + periodic in one call).
+  void fill(Level& lv, CCField f) {
+#ifdef CFD_KOKKOS_MPI
+    if (distributed_) { lv.dev->exchange(f); return; }
+#endif
+    fillAxis(lv, f, 0); fillAxis(lv, f, 1); fillAxis(lv, f, 2);
+  }
   void fillOpenness(Level& lv) { fill(lv, lv.ox); fill(lv, lv.oy); fill(lv, lv.oz); }
   void fillAxis(Level& lv, CCField f, int axis) {
     CCExec space; C3 e = lv.ext; int N3[3] = {lv.inner.x, lv.inner.y, lv.inner.z};
@@ -394,14 +457,14 @@ class CutcellMG {
     Kokkos::parallel_reduce("mgdot", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) { const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         if (ac(i) > 1e-30f) acc += aa(i) * bb(i); }, s);
-    return s;
+    return allreduce(s, MPI_SUM_);
   }
   double maxabs(Level& lv, CCField a) {
     CCExec space; C3 e = lv.ext; CCField aa = a; FPV ac = lv.AC; double m = 0;
     Kokkos::parallel_reduce("mgmax", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) { const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         if (ac(i) > 1e-30f) { const double v = Kokkos::fabs(aa(i)); if (v > acc) acc = v; } }, Kokkos::Max<double>(m));
-    return m;
+    return allreduce(m, MPI_MAX_);
   }
   void removeMean(Level& lv, CCField f) {
     if (!removeMean_) return;  // non-singular operator (Dirichlet outflow present) -> no null-space projection
@@ -409,6 +472,7 @@ class CutcellMG {
     Kokkos::parallel_reduce("mgmeanr", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) { const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         if (ac(i) > 1e-30f) { s += ff(i); k += 1; } }, sum, cnt);
+    sum = allreduce(sum, MPI_SUM_); cnt = (long)allreduce((double)cnt, MPI_SUM_);  // global fluid sum + count
     if (cnt == 0) return; const double mean = sum / (double)cnt;
     Kokkos::parallel_for("mgmeans", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) { const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y; if (ac(i) > 1e-30f) ff(i) -= mean; });
@@ -416,9 +480,23 @@ class CutcellMG {
   }
 
  private:
+  enum AllOp { kSum, kMax };
+  // Global reduction over ranks (no-op single-rank / non-distributed -> byte-identical to the local reduce).
+  double allreduce(double v, AllOp op) {
+#ifdef CFD_KOKKOS_MPI
+    if (distributed_) { double g = 0; MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, op == kSum ? MPI_SUM : MPI_MAX, comm_); return g; }
+#endif
+    (void)op; return v;
+  }
+  static constexpr AllOp MPI_SUM_ = kSum, MPI_MAX_ = kMax;
+
   std::vector<Level> lv_;
   int pre_ = 2, post_ = 2, bottom_ = 4;
   int bc_[6] = {0, 0, 0, 0, 0, 0}; bool hasBC_ = false, removeMean_ = true, hasOutflow_ = false;
+  bool distributed_ = false;
+#ifdef CFD_KOKKOS_MPI
+  MPI_Comm comm_ = MPI_COMM_NULL;
+#endif
 };
 
 }  // namespace cfdk

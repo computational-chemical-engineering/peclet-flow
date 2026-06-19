@@ -24,6 +24,7 @@ if(NOT MPIEXEC_EXECUTABLE)
 endif()
 
 enable_testing()
+# Standalone distributed primitives (own halo/reduction harness; do not need the gated CutcellMG MPI path).
 foreach(t distributed_diffusion distributed_pressure distributed_mg)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
@@ -33,4 +34,14 @@ foreach(t distributed_diffusion distributed_pressure distributed_mg)
   foreach(np 1 2 4)
     add_test(NAME ${t}_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_${t}>)
   endforeach()
+endforeach()
+
+# The production CutcellMG distributed (its MPI path is gated behind CFD_KOKKOS_MPI).
+add_executable(test_cutcellmg_mpi test_cutcellmg_mpi.cpp)
+target_include_directories(test_cutcellmg_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos ${TPX_DIR}/include)
+target_compile_definitions(test_cutcellmg_mpi PRIVATE CFD_KOKKOS_MPI)
+target_link_libraries(test_cutcellmg_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX)
+foreach(np 1 2 4)
+  add_test(NAME cutcellmg_mpi_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_cutcellmg_mpi>)
 endforeach()
