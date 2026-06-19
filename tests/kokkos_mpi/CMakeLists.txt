@@ -24,7 +24,7 @@ if(NOT MPIEXEC_EXECUTABLE)
 endif()
 
 enable_testing()
-foreach(t distributed_diffusion distributed_pressure)
+foreach(t distributed_diffusion distributed_pressure distributed_mg)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos
