@@ -40,7 +40,7 @@ inline void diffSmoothColor(SField c, SConst b, I3 e, I3 og, int g, double beta,
         const double s = c(i + sx) + c(i - sx) + c(i + sy) + c(i - sy) + c(i + sz) + c(i - sz);
         c(i) = (b(i) + beta * s) / (Ac + (hasD ? dcorr(i) : 0.0));
       });
-  space.fence();
+
 }
 
 // One Red-Black sweep colour of the (unit-coefficient) Poisson smoother: phi[i] = (sum - d[i]) / 6.
@@ -55,7 +55,7 @@ inline void poisSmoothColor(SField phi, SConst d, I3 e, I3 og, int g, int color)
         const double s = phi(i + sx) + phi(i - sx) + phi(i + sy) + phi(i - sy) + phi(i + sz) + phi(i - sz);
         phi(i) = (s - d(i)) / 6.0;
       });
-  space.fence();
+
 }
 
 // MAC divergence d[i] = (u[i+sx]-u[i]) + (v[i+sy]-v[i]) + (w[i+sz]-w[i]) over inner cells.
@@ -68,7 +68,7 @@ inline void divergence(SConst u, SConst v, SConst w, SField d, I3 e, int g) {
         const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
         d(i) = (u(i + sx) - u(i)) + (v(i + sy) - v(i)) + (w(i + sz) - w(i));
       });
-  space.fence();
+
 }
 
 // Full Red-Black Gauss-Seidel sweep (both colours) of the Poisson smoother.

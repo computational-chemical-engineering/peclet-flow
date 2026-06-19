@@ -226,7 +226,7 @@ class SdflowIbm {
         const long di=(long)(ix+dg)+(long)(iy+dg)*de.x+(long)(iz+dg)*(long)de.x*de.y;
         const long si=(long)(ix+sg)+(long)(iy+sg)*se.x+(long)(iz+sg)*(long)se.x*se.y;
         dst(di)=src(si); });
-    space.fence();
+
   }
   // Fill ghost width G periodically on all 3 axes (x then y then z, covering corners).
   void fillGhosts(CCField f) { fillAxis(f,0); fillAxis(f,1); fillAxis(f,2); }
@@ -238,7 +238,7 @@ class SdflowIbm {
     Kokkos::parallel_for("cfdk::ibm_pfill", Kokkos::MDRangePolicy<CCExec,Kokkos::Rank<2>>(space,{0,0},{dims[b],dims[c]}),
       KOKKOS_LAMBDA(int p0,int p1){ const long base=(long)p0*sb+(long)p1*sc;
         for(int gl=0;gl<G;++gl){ ff(base+(long)gl*sa)=ff(base+(long)(gl+N)*sa); ff(base+(long)(G+N+gl)*sa)=ff(base+(long)(G+gl)*sa);} });
-    space.fence();
+
   }
   void buildRhs(int c) {
     CCExec space; const double idiag = rho_/dt_, fc = f_[c], rho = rho_; C3 e = e_;
@@ -260,7 +260,7 @@ class SdflowIbm {
         const double gp = incr ? (P(i)-P((long)i-strd)) : 0.0;
         bb(i) = rs(i) * (idiag*un(i) + fc - rho*aK + rho*aF - gp)
                 + (bc ? brhs(i) : -inh(i)); });  // BC fold (brhs) on the domain-BC path; -inhom on the IBM path (=0 for no-slip)
-    space.fence();
+
   }
   // Implicit-FOU velocity stencil (CUDA build_adv_stencil_k + ibm_modify_stencil): backward-Euler diffusion
   // (idiag+6beta diag, -beta off) + rho*FOU(u^k) upwind operator (diagonally dominant -> stable at high Re),
@@ -278,7 +278,7 @@ class SdflowIbm {
         sadvk::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y};
         sadvk::fou_operator(c, x,y,z, Ua,Va,Wa, fouw, cC,cxm,cxp,cym,cyp,czm,czp);
         AC(i)=(float)cC; AW(i)=(float)cxm; AE(i)=(float)cxp; AS(i)=(float)cym; AN(i)=(float)cyp; AB(i)=(float)czm; AT(i)=(float)czp; });
-    space.fence();
+
     Kokkos::deep_copy(C[c].rscale, 1.0); Kokkos::deep_copy(C[c].inhom, 0.0);
     ibmModifyStencil(C[c].AC,C[c].AW,C[c].AE,C[c].AS,C[c].AN,C[c].AB,C[c].AT, C[c].inhom, C[c].rscale, C[c].ov, C[c].nCut, 0.0f);
   }
@@ -352,7 +352,7 @@ class SdflowIbm {
         KOKKOS_LAMBDA(int p0,int p1){ const long base=(long)p0*sb+(long)p1*sc; const double pin=P(base+(long)bic*sa);
           for(int ia=lo;ia<=hi;++ia) P(base+(long)ia*sa)=pin; });
     }
-    space.fence();
+
   }
   // domain-BC velocity ghosts: periodic-fill periodic axes, then apply per-face BCs (fold=0 explicit/1 implicit).
   void fillVelGhosts(int comp, int fold) { fillVelGhostsTo(C[comp].u, comp, fold); }
@@ -401,7 +401,7 @@ class SdflowIbm {
     copyInner(rhs1_, e1_, 1, CCConst(div_), e_, G);
     { CCExec space; CCField r=rhs1_;
       Kokkos::parallel_for("negdiv", Kokkos::RangePolicy<CCExec>(space,0,n1_), KOKKOS_LAMBDA(std::size_t i){ r(i)=-r(i); });
-      space.fence(); }
+ }
     // geometric multigrid solve of the cut-cell pressure Poisson A phi = -div(u*) (CUDA mac_multigrid):
     // MG-PCG by default, or the communication-light Chebyshev driver (bounds estimated once, then reused).
     Kokkos::deep_copy(phi1_, 0.0);
@@ -429,13 +429,13 @@ class SdflowIbm {
     CCExec space; CCField P=P_, ph=phi_, d=div_; const double ct=rho_/dt_, mu=mu_;
     Kokkos::parallel_for("press", Kokkos::RangePolicy<CCExec>(space,0,n_),
       KOKKOS_LAMBDA(std::size_t i){ P(i) += ct*ph(i) - mu*d(i); });
-    space.fence();
+
   }
   void maskVelocity(int c) {
     CCExec space; CCField u=C[c].u, m=C[c].mask;
     Kokkos::parallel_for("vmask", Kokkos::RangePolicy<CCExec>(space,0,n_),
       KOKKOS_LAMBDA(std::size_t i){ if (m(i) > 0.5) u(i) = 0.0; });
-    space.fence();
+
   }
   double reduceMaxAbsInner(CCConst f) {
     CCExec space; C3 e=e_; double m=0;

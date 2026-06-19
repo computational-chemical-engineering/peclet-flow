@@ -63,7 +63,7 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
             for (int ia = na - g; ia < na; ++ia) at(ia) = 2.0 * wc - at(2 * bf - 1 - ia);
         }
       });
-  space.fence();
+
 }
 
 // Zero-gradient (Neumann) outflow velocity ghost for component comp on one face.
@@ -90,7 +90,7 @@ inline void bcOutflowComp(BField f, B3 ext, int g, int a, int s, int comp, int f
           for (int ia = na - g; ia < na; ++ia) at(ia) = v;
         }
       });
-  space.fence();
+
 }
 
 // Implicit-diffusion face-fold accumulation at the boundary-adjacent inner cell.
@@ -108,7 +108,7 @@ inline void bcDiffusionFold(BField dcorr, BField brhs, B3 ext, int g, int a, int
         dcorr(i) += dval;
         brhs(i) += bval;
       });
-  space.fence();
+
 }
 
 // Hold the pressure ghost at 0 on an outflow face (Dirichlet p=0; the open face couples to it).
@@ -126,7 +126,7 @@ inline void bcZeroPressureGhost(BField phi, B3 ext, int g, int a, int s) {
         const long base = (long)p0 * sb + (long)p1 * sc;
         for (int ia = lo; ia <= hi; ++ia) phi(base + (long)ia * sa) = 0.0;
       });
-  space.fence();
+
 }
 
 // Projection correction of the high-side outflow normal face (index na-g) that correct_k misses:
@@ -143,7 +143,7 @@ inline void bcCorrectOutflow(BField f, BField phi, B3 ext, int g, int a) {
         const long bf = (long)p0 * sb + (long)p1 * sc + (long)(dims[a] - g) * sa;
         f(bf) -= phi(bf) - phi(bf - sa);
       });
-  space.fence();
+
 }
 
 // Set the a-component face openness on a domain face to `val` (Neumann wall/inflow -> 0; the periodic fill
@@ -160,7 +160,7 @@ inline void bcSetOpenness(BField oa, B3 ext, int g, int a, int s, double val) {
       "cfdk::bc_setopen", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
         oa(static_cast<long>(p0) * sb + static_cast<long>(p1) * sc + static_cast<long>(bf) * sa) = val;
       });
-  space.fence();
+
 }
 inline void bcZeroOpenness(BField oa, B3 ext, int g, int a, int s) { bcSetOpenness(oa, ext, g, a, s, 0.0); }
 

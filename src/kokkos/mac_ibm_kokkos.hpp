@@ -56,7 +56,7 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
         idMap(idx) = slot;
         ibmFillEntry<SCHEME>(ov, slot, (int)idx, sc, sn, bc_type);
       });
-  space.fence();
+
   int cnt = 0; Kokkos::deep_copy(cnt, counter);
   return cnt;
 }
@@ -73,7 +73,7 @@ inline void ibmVolfrac(CCField theta, CCConst sdf, C3 ext, Off3 off) {
         const double t = 0.5 + sd;
         theta(i) = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
       });
-  space.fence();
+
 }
 
 // Solid mask: 1 where the staggered SDF point is inside the solid (sd<0), else 0.
@@ -87,7 +87,7 @@ inline void ibmSolidMask(CCField mask, CCConst sdf, C3 ext, Off3 off) {
         const double sd = ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
         mask(i) = (sd < 0.0) ? 1.0 : 0.0;
       });
-  space.fence();
+
 }
 
 // Clean-fluid-interior mask: 1 only at fluid cells with no solid neighbour (not cut, not solid).
@@ -106,7 +106,7 @@ inline void ibmCleanFluidMask(CCField m, CCConst sdf, C3 ext, Off3 off) {
         const bool solid = (sc <= 0.0f);
         m(i) = (solid || ibmIsCut(sc, sn)) ? 0.0 : 1.0;
       });
-  space.fence();
+
 }
 
 // One Red-Black sweep of the variable-coefficient stencil: x[i] = (b[i] - sum(A_off*x_nbr)) / A_C[i].
@@ -131,7 +131,7 @@ inline void ibmRbgsStencilColor(CCField x, CCConst b, MConst AC, MConst AW, MCon
                          (double)AT(i) * x(i + sz) + (double)AB(i) * x(i - sz);
         x(i) = (b(i) - s) / ac;
       });
-  space.fence();
+
 }
 
 inline void ibmRbgsSweep(CCField x, CCConst b, MConst AC, MConst AW, MConst AE, MConst AS, MConst AN,

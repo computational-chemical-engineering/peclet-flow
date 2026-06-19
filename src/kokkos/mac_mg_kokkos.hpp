@@ -34,7 +34,7 @@ inline void mgPeriodicFill(SField f, I3 e, int N, int g) {
             ff(base + (long)(g + N + gl) * sa) = ff(base + (long)(g + gl) * sa);
           }
         });
-    space.fence();
+
   }
 }
 
@@ -64,7 +64,7 @@ class MgPoisson {
     SExec space; SField f0 = lv_[0].f;
     Kokkos::parallel_for("cfdk::mg_negd", Kokkos::RangePolicy<SExec>(space, 0, f0.extent(0)),
                          KOKKOS_LAMBDA(std::size_t i) { f0(i) = -d(i); });
-    space.fence();
+
     Kokkos::deep_copy(lv_[0].phi, phi);
     for (int v = 0; v < nVcycles; ++v) { vcycle(0, nu1, nu2); removeMean(lv_[0].phi, lv_[0]); }
     Kokkos::deep_copy(phi, lv_[0].phi);
@@ -92,7 +92,7 @@ class MgPoisson {
           const double s = phi(i+sx)+phi(i-sx)+phi(i+sy)+phi(i-sy)+phi(i+sz)+phi(i-sz);
           phi(i) = (s + h2 * f(i)) / 6.0;
         });
-    space.fence();
+
   }
   void smooth(Level& L, int sweeps) {
     for (int it = 0; it < sweeps; ++it) {
@@ -113,7 +113,7 @@ class MgPoisson {
           const double s = phi(i+sx)+phi(i-sx)+phi(i+sy)+phi(i-sy)+phi(i+sz)+phi(i-sz);
           r(i) = f(i) - (6.0 * phi(i) - s) / h2;  // f - A phi
         });
-    space.fence();
+
   }
   void vcycle(int l, int nu1, int nu2) {
     Level& L = lv_[l];
@@ -144,7 +144,7 @@ class MgPoisson {
     const double mean = sum / ((double)N * N * N);
     Kokkos::parallel_for("cfdk::mg_submean", Kokkos::RangePolicy<SExec>(space, 0, f.extent(0)),
                          KOKKOS_LAMBDA(std::size_t i) { f(i) -= mean; });
-    space.fence();
+
   }
   double maxAbsInner(SField f, Level& L) {
     SExec space; const I3 e = L.e; const int N = L.N;

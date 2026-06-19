@@ -58,7 +58,7 @@ inline void coarsenOpenAvg(CCField oxc, CCField oyc, CCField ozc, CCConst oxf, C
         const long ci = (long)(icx + g) + (long)(icy + g) * cext.x + (long)(icz + g) * (long)cext.x * cext.y;
         oxc(ci) = sx / (double)(ry * rz); oyc(ci) = sy / (double)(rx * rz); ozc(ci) = sz / (double)(rx * ry);
       });
-  space.fence();
+
 }
 
 // residual r = b - A x for the float operator (mg_residual_var_k port).
@@ -76,7 +76,7 @@ inline void residualCutcell(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC
                           (double)AB(i) * x(i - sz);
         r(i) = b(i) - Ax;
       });
-  space.fence();
+
 }
 
 // average restriction (coarse = mean of ratio^3 fine children; mg_restrict_k) + trilinear prolongation
@@ -96,7 +96,7 @@ inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int g, C
         const long ci = (long)(icx + g) + (long)(icy + g) * cext.x + (long)(icz + g) * (long)cext.x * cext.y;
         coarse(ci) = s / (double)(ratio.x * ratio.y * ratio.z);
       });
-  space.fence();
+
 }
 inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int g, C3 finner, C3 ratio) {
   CCExec space;
@@ -121,7 +121,7 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int g, C3
         const long fi = (long)(ifx + g) + (long)(ify + g) * fext.x + (long)(ifz + g) * (long)fext.x * fext.y;
         fine(fi) += c0 * (1 - wz) + c1 * wz;
       });
-  space.fence();
+
 }
 
 class CutcellMG {
@@ -345,34 +345,34 @@ class CutcellMG {
       KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
         for (int gl = 0; gl < G; ++gl) { ff(base + (long)gl * sa) = ff(base + (long)(gl + N) * sa);
           ff(base + (long)(G + N + gl) * sa) = ff(base + (long)(G + gl) * sa); } });
-    space.fence();
+
   }
   void axpy(CCField y, double a, CCField x) {
     CCExec space; CCField yy = y, xx = x; std::size_t n = y.extent(0);
     Kokkos::parallel_for("mgaxpy", Kokkos::RangePolicy<CCExec>(space, 0, n), KOKKOS_LAMBDA(std::size_t i) { yy(i) += a * xx(i); });
-    space.fence();
+
   }
   void aypx(CCField y, double a, CCField x) {
     CCExec space; CCField yy = y, xx = x; std::size_t n = y.extent(0);
     Kokkos::parallel_for("mgaypx", Kokkos::RangePolicy<CCExec>(space, 0, n), KOKKOS_LAMBDA(std::size_t i) { yy(i) = xx(i) + a * yy(i); });
-    space.fence();
+
   }
   void scale(CCField y, double a) {
     CCExec space; CCField yy = y; std::size_t n = y.extent(0);
     Kokkos::parallel_for("mgscale", Kokkos::RangePolicy<CCExec>(space, 0, n), KOKKOS_LAMBDA(std::size_t i) { yy(i) *= a; });
-    space.fence();
+
   }
   void lin(CCField out, double a, CCField x, double b, CCField y) {  // out = a*x + b*y (mg_lin_k)
     CCExec space; CCField oo = out, xx = x, yy = y; std::size_t n = out.extent(0);
     Kokkos::parallel_for("mglin", Kokkos::RangePolicy<CCExec>(space, 0, n), KOKKOS_LAMBDA(std::size_t i) { oo(i) = a * xx(i) + b * yy(i); });
-    space.fence();
+
   }
   // zero the solid-cell entries (AC<=tiny) -> project out the solid null modes (mg_mask_solid_k).
   void maskSolid(Level& lv, CCField f) {
     CCExec space; CCField ff = f; FPV ac = lv.AC; std::size_t n = f.extent(0);
     Kokkos::parallel_for("mgmasksolid", Kokkos::RangePolicy<CCExec>(space, 0, n),
       KOKKOS_LAMBDA(std::size_t i) { if (!(ac(i) > 1e-30f)) ff(i) = 0.0; });
-    space.fence();
+
   }
 
   // Estimate the spectral bounds [lmin,lmax] of M^{-1}A (M^{-1} = one symmetric V-cycle) by power iteration
@@ -476,7 +476,7 @@ class CutcellMG {
     if (cnt == 0) return; const double mean = sum / (double)cnt;
     Kokkos::parallel_for("mgmeans", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) { const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y; if (ac(i) > 1e-30f) ff(i) -= mean; });
-    space.fence();
+
   }
 
  private:

@@ -107,7 +107,7 @@ class SdflowKokkos {
           const long si = (long)(ix+sg) + (long)(iy+sg)*se.x + (long)(iz+sg)*(long)se.x*se.y;
           dst(di) = src(si);
         });
-    space.fence();
+
   }
 
   void diffuseComp(F x, F b, double Ac) {
@@ -137,7 +137,7 @@ class SdflowKokkos {
           bv(i) = id * v(i) + fy - av;
           bw(i) = id * w(i) + fz - aw;
         });
-    space.fence();
+
   }
 
   void removeMean(F f) {
@@ -146,7 +146,7 @@ class SdflowKokkos {
     SExec space; const I3 e = e_;
     Kokkos::parallel_for("cfdk::submean", Kokkos::RangePolicy<SExec>(space, 0, ne_),
                          KOKKOS_LAMBDA(std::size_t i) { f(i) -= mean; });
-    space.fence();
+
   }
 
   // sum + max|.| over inner cells (reuse mac_reductions math inline for the periodic block).
@@ -191,7 +191,7 @@ class SdflowKokkos {
             ff(base + (long)(G + N + gl) * sa) = ff(base + (long)(G + gl) * sa);
           }
         });
-    space.fence();
+
   }
 
  private:

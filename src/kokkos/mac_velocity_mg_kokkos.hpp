@@ -42,7 +42,7 @@ inline void residualVarPin(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC 
                         (double)AB(i) * x(i - sz);
       r(i) = b(i) - Ax;
     });
-  space.fence();
+
 }
 
 // masked trilinear prolongation (mg_prolong_masked_k): like prolongAdd but does NOT add the coarse
@@ -70,7 +70,7 @@ inline void prolongMasked(CCField fine, CCConst coarse, CCConst mask, C3 fext, C
       const double c0 = c00 * (1 - wy) + c10 * wy, c1 = c01 * (1 - wy) + c11 * wy;
       fine(fi) += c0 * (1 - wz) + c1 * wz;
     });
-  space.fence();
+
 }
 
 // STAIRCASE coarse operator (mg_build_velocity_op_staircase_k): theta<thresh -> identity (pinned) row;
@@ -90,7 +90,7 @@ inline void buildVelocityStaircase(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV A
       AS(i) = (float)(-by); AN(i) = (float)(-by);
       AB(i) = (float)(-bz); AT(i) = (float)(-bz);
     });
-  space.fence();
+
 }
 
 // UPWIND-CONVECTIVE coarse operator (build_adv_coarse_stencil_k): anisotropic const-coeff backward-Euler
@@ -111,7 +111,7 @@ inline void buildAdvCoarse(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV A
       AC(i) = (float)cC; AW(i) = (float)cxm; AE(i) = (float)cxp; AS(i) = (float)cym; AN(i) = (float)cyp;
       AB(i) = (float)czm; AT(i) = (float)czp;
     });
-  space.fence();
+
 }
 
 // CONST-COEFF anisotropic Helmholtz A = idiag*I - nu_dt*Lap (mg_const_diffusion_op_aniso_k), over the WHOLE
@@ -123,7 +123,7 @@ inline void buildConstAniso(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV 
   const float c = (float)(idiag + 2.0 * (bx + by + bz)), nx = (float)(-bx), ny = (float)(-by), nz = (float)(-bz);
   Kokkos::parallel_for("cfdk::vmg_const_aniso", Kokkos::RangePolicy<CCExec>(space, 0, n),
     KOKKOS_LAMBDA(std::size_t i) { AC(i) = c; AW(i) = nx; AE(i) = nx; AS(i) = ny; AN(i) = ny; AB(i) = nz; AT(i) = nz; });
-  space.fence();
+
 }
 
 // No-slip face-fold for the const-coeff MG operator (mg_diffusion_bc_fold_k): at a Dirichlet wall the
@@ -136,7 +136,7 @@ inline void boundaryFold(FPV AC, C3 e, int g, int a, int s, double beta) {
   Kokkos::parallel_for("cfdk::vmg_bc_fold", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
     KOKKOS_LAMBDA(int p0, int p1) { const long i = (long)p0 * sb + (long)p1 * sc + (long)bic * sa;
       AC(i) = (float)((double)AC(i) + beta); });
-  space.fence();
+
 }
 
 // Fill a non-periodic boundary ghost of a coarse correction before trilinear prolongation (mg_fill_bc_ghost_k):
@@ -148,7 +148,7 @@ inline void fillBcGhost(CCField x, C3 e, int g, int a, int s, int dirichlet) {
     KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
       if (s == 0) { const double v = dirichlet ? 0.0 : x(base + (long)g * sa); for (int ia = 0; ia < g; ++ia) x(base + (long)ia * sa) = v; }
       else { const double v = dirichlet ? 0.0 : x(base + (long)(na - g - 1) * sa); for (int ia = na - g; ia < na; ++ia) x(base + (long)ia * sa) = v; } });
-  space.fence();
+
 }
 
 // zero a field on the plane at index `idx` along `axis` (held-Dirichlet boundary-face residual exclude).
@@ -157,20 +157,20 @@ inline void zeroPlane(CCField m, C3 e, int axis, int idx) {
   const int b = (axis + 1) % 3, c = (axis + 2) % 3; const long sa = st[axis], sb = st[b], sc = st[c];
   Kokkos::parallel_for("cfdk::vmg_zero_plane", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
     KOKKOS_LAMBDA(int p0, int p1) { m((long)p0 * sb + (long)p1 * sc + (long)idx * sa) = 0.0; });
-  space.fence();
+
 }
 
 inline void thresholdMask(CCField m, CCConst theta, double thresh) {  // m = 1 where theta < thresh (solid)
   CCExec space; std::size_t n = m.extent(0); CCField mm = m; CCConst th = theta;
   Kokkos::parallel_for("cfdk::vmg_threshold", Kokkos::RangePolicy<CCExec>(space, 0, n),
     KOKKOS_LAMBDA(std::size_t i) { mm(i) = (th(i) < thresh) ? 1.0 : 0.0; });
-  space.fence();
+
 }
 inline void mulMask(CCField r, CCConst m) {  // r *= m (clean-fluid residual filter)
   CCExec space; std::size_t n = r.extent(0); CCField rr = r; CCConst mm = m;
   Kokkos::parallel_for("cfdk::vmg_mulmask", Kokkos::RangePolicy<CCExec>(space, 0, n),
     KOKKOS_LAMBDA(std::size_t i) { rr(i) *= mm(i); });
-  space.fence();
+
 }
 
 // Velocity (momentum) geometric multigrid with the staircase coarse operator. All levels ghost width G=2.
@@ -429,7 +429,7 @@ class VelocityMG {
       KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
         for (int gl = 0; gl < G; ++gl) { ff(base + (long)gl * sa) = ff(base + (long)(gl + N) * sa);
           ff(base + (long)(G + N + gl) * sa) = ff(base + (long)(G + gl) * sa); } });
-    space.fence();
+
   }
 
  private:

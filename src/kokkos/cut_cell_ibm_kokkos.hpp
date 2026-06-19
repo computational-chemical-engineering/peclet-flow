@@ -162,7 +162,7 @@ inline void ibmBuildDiffusion(Kokkos::View<float*, IMem> AC, Kokkos::View<float*
       KOKKOS_LAMBDA(std::size_t i) {
         AC(i) = c; AW(i) = nb; AE(i) = nb; AS(i) = nb; AN(i) = nb; AB(i) = nb; AT(i) = nb;
       });
-  space.fence();
+
 }
 
 // Apply the Robust-Scaled overlay to the momentum stencil at each cut cell (port of
@@ -205,7 +205,7 @@ inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*,
         AB(c) = (float)(orig[5] + mod[5]);
         if (hasInhom) a_inhom(c) += inhom;
       });
-  space.fence();
+
 }
 
 }  // namespace cfdk

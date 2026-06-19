@@ -40,7 +40,7 @@ inline void restrict_(TField coarse, TConst fine, T3 cext, T3 fext, int g, T3 ci
                         static_cast<long>(icz + g) * static_cast<long>(cext.x) * cext.y;
         coarse(ci) = sum / static_cast<double>(ratio.x * ratio.y * ratio.z);
       });
-  space.fence();
+
 }
 
 KOKKOS_INLINE_FUNCTION double trilerp(TConst c, double x, double y, double z, T3 cext) {
@@ -74,7 +74,7 @@ inline void prolong(TField fine, TConst coarse, T3 fext, T3 cext, int g, T3 finn
                         static_cast<long>(ifz + g) * static_cast<long>(fext.x) * fext.y;
         fine(fi) += trilerp(coarse, cx, cy, cz, cext);
       });
-  space.fence();
+
 }
 
 // Projection velocity correction: u -= grad(phi) on the staggered faces, over inner cells.
@@ -91,7 +91,7 @@ inline void correct(TField u, TField v, TField w, TConst phi, T3 e, int g) {
         v(i) -= phi(i) - phi(i - sy);
         w(i) -= phi(i) - phi(i - sz);
       });
-  space.fence();
+
 }
 
 }  // namespace cfdk
