@@ -118,7 +118,7 @@ class SdflowIbm {
   }
 
   void step() {
-    if (cutcellPressure_) fillGhosts(P_);            // grad(P^n) for the incremental predictor
+    if (cutcellPressure_) { fillGhosts(P_); if (hasBc_) pressureBcGhost(); }  // grad(P^n) for the incremental predictor
     if (advect_ || hasBc_) for (int c=0;c<3;++c) fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect
     for (int c = 0; c < 3; ++c) buildRhs(c);         // all RHS from u^n (advection couples the components)
     for (int c = 0; c < 3; ++c) smoothComp(c);       // per-component IBM implicit-diffusion solve
@@ -210,6 +210,22 @@ class SdflowIbm {
       ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
                           MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, C3{0,0,0}, G, 1);
     }
+  }
+  // pressure ghost at domain faces for the incremental predictor's grad(P): zero-gradient (Neumann) at
+  // every non-periodic face so grad(P) carries no spurious force there (the periodic fill wrapped the
+  // opposite boundary's pressure). Outflow pressure (Dirichlet p=0) is enforced separately in the MG solve.
+  void pressureBcGhost() {
+    CCExec space; C3 e=e_; CCField P=P_;
+    int dims[3]={e.x,e.y,e.z}; long st[3]={1,e.x,(long)e.x*e.y};
+    for (int a=0;a<3;++a) for (int s=0;s<2;++s) {
+      if (bc_[2*a+s]==0) continue;
+      const int b=(a+1)%3,c=(a+2)%3; const long sa=st[a],sb=st[b],sc=st[c]; const int na=dims[a];
+      const int bic=(s==0)?G:(na-G-1); const int lo=(s==0)?0:(na-G), hi=(s==0)?(G-1):(na-1);
+      Kokkos::parallel_for("pbcghost", Kokkos::MDRangePolicy<CCExec,Kokkos::Rank<2>>(space,{0,0},{dims[b],dims[c]}),
+        KOKKOS_LAMBDA(int p0,int p1){ const long base=(long)p0*sb+(long)p1*sc; const double pin=P(base+(long)bic*sa);
+          for(int ia=lo;ia<=hi;++ia) P(base+(long)ia*sa)=pin; });
+    }
+    space.fence();
   }
   // domain-BC velocity ghosts: periodic-fill periodic axes, then apply per-face BCs (fold=0 explicit/1 implicit).
   void fillVelGhosts(int comp, int fold) {
