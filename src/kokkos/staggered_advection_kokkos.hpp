@@ -72,6 +72,45 @@ KOKKOS_INLINE_FUNCTION double advect(int comp, int x, int y, int z, A U, A V, A 
   return out;
 }
 
+// FOU advection OPERATOR coefficients added to a cell's 7-point stencil (consistent with advect_fou
+// applied to the field): diagonal cC gets max(velp,0)-min(velm,0) >= 0, off-diagonals <= 0. Added
+// (not assigned) into the out-params. Port of fou_operator (staggered_advection.cuh).
+template <class A>
+KOKKOS_INLINE_FUNCTION void fou_operator(int comp, int x, int y, int z, A U, A V, A W, double dt,
+                                         double& cC, double& cxm, double& cxp, double& cym, double& cyp,
+                                         double& czm, double& czp) {
+  for (int fd = 0; fd < 3; ++fd) {
+    const int ox = (fd == 0), oy = (fd == 1), oz = (fd == 2);
+    const double velp = adv_vel(comp, fd, x, y, z, U, V, W);
+    const double velm = adv_vel(comp, fd, x - ox, y - oy, z - oz, U, V, W);
+    cC += dt * (Kokkos::fmax(velp, 0.0) - Kokkos::fmin(velm, 0.0));
+    const double cp = dt * Kokkos::fmin(velp, 0.0), cm = dt * (-Kokkos::fmax(velm, 0.0));
+    if (fd == 0) { cxp += cp; cxm += cm; }
+    else if (fd == 1) { cyp += cp; cym += cm; }
+    else { czp += cp; czm += cm; }
+  }
+}
+
+// Anisotropic (per-axis inverse spacing) FOU operator for the velocity multigrid coarse levels:
+// the advecting velocity along face-axis fd is scaled by s_fd = 1/h_fd. sx=sy=sz=1 == fou_operator.
+template <class A>
+KOKKOS_INLINE_FUNCTION void fou_operator_aniso(int comp, int x, int y, int z, A U, A V, A W, double dt,
+                                               double sx, double sy, double sz, double& cC, double& cxm,
+                                               double& cxp, double& cym, double& cyp, double& czm,
+                                               double& czp) {
+  for (int fd = 0; fd < 3; ++fd) {
+    const int ox = (fd == 0), oy = (fd == 1), oz = (fd == 2);
+    const double s = (fd == 0) ? sx : (fd == 1) ? sy : sz;
+    const double velp = s * adv_vel(comp, fd, x, y, z, U, V, W);
+    const double velm = s * adv_vel(comp, fd, x - ox, y - oy, z - oz, U, V, W);
+    cC += dt * (Kokkos::fmax(velp, 0.0) - Kokkos::fmin(velm, 0.0));
+    const double cp = dt * Kokkos::fmin(velp, 0.0), cm = dt * (-Kokkos::fmax(velm, 0.0));
+    if (fd == 0) { cxp += cp; cxm += cm; }
+    else if (fd == 1) { cyp += cp; cym += cm; }
+    else { czp += cp; czm += cm; }
+  }
+}
+
 // Conservative first-order-upwind advection of comp (low-order flux, same advecting velocities).
 template <class A>
 KOKKOS_INLINE_FUNCTION double advect_fou(int comp, int x, int y, int z, A U, A V, A W, A PHI) {

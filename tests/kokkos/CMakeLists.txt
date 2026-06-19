@@ -73,3 +73,8 @@ add_executable(test_mg test_mg.cpp)
 target_include_directories(test_mg PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
 target_link_libraries(test_mg PRIVATE Kokkos::kokkos)
 add_test(NAME mg COMMAND test_mg)
+
+add_executable(test_fou_operator test_fou_operator.cpp)
+target_include_directories(test_fou_operator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos)
+target_link_libraries(test_fou_operator PRIVATE Kokkos::kokkos)
+add_test(NAME fou_operator COMMAND test_fou_operator)
