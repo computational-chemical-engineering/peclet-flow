@@ -17,7 +17,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "mac_stencils_kokkos.hpp"  // cfdk::diffSmoothColor, I3, SField
+#include "mac_stencils.hpp"  // dns::diffSmoothColor, I3, SField
 
 #include "tpx/common/types.hpp"
 #include "tpx/common/view.hpp"
@@ -31,9 +31,9 @@ using tpx::wrap;
 using tpx::decomp::BlockDecomposer;
 using tpx::halo::DeviceGridExchangeKokkos;
 using tpx::halo::GridHalo;
-using cfdk::diffSmoothColor;
-using cfdk::I3;
-using cfdk::SField;
+using dns::diffSmoothColor;
+using dns::I3;
+using dns::SField;
 
 static constexpr int kDim = 3;
 static constexpr int G = 1;                 // diffusion stencil reach
@@ -48,11 +48,11 @@ static double source(int gx, int gy, int gz, IVec<kDim> gs) {
 
 // periodic ghost fill (3 axes, width G) of a single-block extended field on device.
 static void periodicFill(SField f, I3 e) {
-  cfdk::SExec sp; long st[3] = {1, e.x, (long)e.x * e.y}; int dims[3] = {e.x, e.y, e.z};
+  dns::SExec sp; long st[3] = {1, e.x, (long)e.x * e.y}; int dims[3] = {e.x, e.y, e.z};
   int N3[3] = {e.x - 2 * G, e.y - 2 * G, e.z - 2 * G};
   for (int a = 0; a < 3; ++a) {
     const int b = (a + 1) % 3, c = (a + 2) % 3; const long sa = st[a], sb = st[b], sc = st[c]; const int N = N3[a];
-    Kokkos::parallel_for("ref_pfill", Kokkos::MDRangePolicy<cfdk::SExec, Kokkos::Rank<2>>(sp, {0, 0}, {dims[b], dims[c]}),
+    Kokkos::parallel_for("ref_pfill", Kokkos::MDRangePolicy<dns::SExec, Kokkos::Rank<2>>(sp, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
         for (int gl = 0; gl < G; ++gl) { f(base + (long)gl * sa) = f(base + (long)(gl + N) * sa);
           f(base + (long)(G + N + gl) * sa) = f(base + (long)(G + gl) * sa); } });

@@ -1,4 +1,4 @@
-// Correctness of the Kokkos staggered advection operator (sadvk::advect / advect_fou) vs a host
+// Correctness of the Kokkos staggered advection operator (sadv::advect / advect_fou) vs a host
 // replication using the same templated functions. Random U,V,W,PHI on an extended (inner+ghost=2)
 // block; apply the conservative Koren-TVD (and FOU) advection per inner cell on the device and on the
 // host, require a match (per-cell deterministic double math). Runs on whatever backend Kokkos has.
@@ -9,9 +9,9 @@
 #include <random>
 #include <vector>
 
-#include "staggered_advection_kokkos.hpp"
+#include "staggered_advection.hpp"
 
-using namespace sadvk;
+using namespace sadv;
 using Mem = Kokkos::DefaultExecutionSpace::memory_space;
 using DView = Kokkos::View<double*, Mem>;
 using CView = Kokkos::View<const double*, Mem>;

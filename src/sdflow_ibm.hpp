@@ -12,22 +12,22 @@
 // (k matches CUDA to all printed digits), on any backend. NOTE (faithfulness items, see memory): the CG uses
 // a diagonal preconditioner where CUDA uses RB-GS-preconditioned MG-PCG (same converged solution); the
 // pressure operator is stored double where CUDA uses float mreal -- to reconcile in a later port pass.
-#ifndef CFD_SDFLOW_IBM_KOKKOS_HPP
-#define CFD_SDFLOW_IBM_KOKKOS_HPP
+#ifndef CFD_SDFLOW_IBM_HPP
+#define CFD_SDFLOW_IBM_HPP
 
 #include <Kokkos_Core.hpp>
 #include <array>
 #include <cmath>
 #include <vector>
 
-#include "mac_ibm_kokkos.hpp"
-#include "mac_pressure_kokkos.hpp"
-#include "mac_cutcell_mg_kokkos.hpp"
-#include "mac_velocity_mg_kokkos.hpp"
-#include "mac_stencils_kokkos.hpp"
-#include "staggered_advection_kokkos.hpp"
+#include "mac_ibm.hpp"
+#include "mac_pressure.hpp"
+#include "mac_cutcell_mg.hpp"
+#include "mac_velocity_mg.hpp"
+#include "mac_stencils.hpp"
+#include "staggered_advection.hpp"
 
-namespace cfdk {
+namespace dns {
 
 class SdflowIbm {
  public:
@@ -120,7 +120,7 @@ class SdflowIbm {
       fillGhosts(C[c].u);
     }
   }
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
   // Multi-rank: this rank's SdflowIbm is constructed with its LOCAL block dims (= the BlockDecomposer of the
   // GLOBAL grid for this rank); initMpi wires the g=2 velocity-block halo + the global-origin red-black parity,
   // and switches fillGhosts/maxOpenDivergence + the pressure MG (CutcellMG::initMpi) onto their distributed
@@ -166,7 +166,7 @@ class SdflowIbm {
   void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure) {
     cutcellPressure_ = cutcellPressure;
     auto h = Kokkos::create_mirror_view(sdf_);
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
     if (distributed_) {
       // Multi-rank: sdfInner is THIS rank's LOCAL inner block; fill the inner cells, then halo-exchange the
       // ghosts (cross-rank + periodic) so the overlay/openness read the neighbour's SDF at the block boundary.
@@ -202,7 +202,7 @@ class SdflowIbm {
     }
     if (cutcellPressure_) {
       buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);  // on the g=2 velocity block
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
       // openness ghosts (the operator + divergence read the +neighbour face) -> exchange across ranks
       if (distributed_) { velDev_->exchange(ox_); velDev_->exchange(oy_); velDev_->exchange(oz_); }
 #endif
@@ -217,7 +217,7 @@ class SdflowIbm {
       copyInner(ox1_, e1_, 1, CCConst(ox_), e_, G);  // bridge openness g=2 -> g=1 for the MG
       copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
       copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
       if (distributed_) mg_.initMpi(gnx_, gny_, gnz_, nLevels_, comm_); else
 #endif
       mg_.init(nx_, ny_, nz_, nLevels_);  // geometric multigrid on the cut-cell openness (MG-PCG pressure)
@@ -273,7 +273,7 @@ class SdflowIbm {
     for (int c=0;c<3;++c) fillVelGhosts(c, 0);  // ghosts incl. outflow zero-gradient before the divergence
     divergOpen(CCConst(C[0].u),CCConst(C[1].u),CCConst(C[2].u), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
     double m = reduceMaxAbsInner(CCConst(div_));
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
     if (distributed_) { double g = 0; MPI_Allreduce(&m, &g, 1, MPI_DOUBLE, MPI_MAX, comm_); return g; }
 #endif
     return m;
@@ -296,7 +296,7 @@ class SdflowIbm {
   // copy the nx*ny*nz inner cells between two extended blocks of different ghost width (g=2 <-> g=1 MG).
   void copyInner(CCField dst, C3 de, int dg, CCConst src, C3 se, int sg) {
     CCExec space; const int NX=nx_, NY=ny_;
-    Kokkos::parallel_for("cfdk::copyInner", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
+    Kokkos::parallel_for("dns::copyInner", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
       KOKKOS_LAMBDA(long c){ const int ix=(int)(c%NX), iy=(int)((c/NX)%NY), iz=(int)(c/((long)NX*NY));
         const long di=(long)(ix+dg)+(long)(iy+dg)*de.x+(long)(iz+dg)*(long)de.x*de.y;
         const long si=(long)(ix+sg)+(long)(iy+sg)*se.x+(long)(iz+sg)*(long)se.x*se.y;
@@ -306,7 +306,7 @@ class SdflowIbm {
   // Fill ghost width G periodically on all 3 axes (x then y then z, covering corners). Distributed: the
   // velocity-block halo (cross-rank + periodic, all ghosts incl. corners).
   void fillGhosts(CCField f) {
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
     if (distributed_) { velDev_->exchange(f); return; }
 #endif
     fillAxis(f,0); fillAxis(f,1); fillAxis(f,2);
@@ -318,11 +318,11 @@ class SdflowIbm {
   // dominant kernel-launch cost (~7200 -> ~2400 fill launches/step) at low resolution. NOT for the Koren
   // advection RHS (reads diagonals) -- keep the full fillGhosts there.
   void fillGhostsFaces(CCField f) {
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
     if (distributed_) { velDev_->exchange(f); return; }  // halo gives all ghosts; the 7-pt smoother uses the faces
 #endif
     CCExec space; C3 e=e_; const int Nx=nx_,Ny=ny_,Nz=nz_; const long sx=1,sy=e.x,sz=(long)e.x*e.y; CCField ff=f;
-    Kokkos::parallel_for("cfdk::ibm_facefill", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
+    Kokkos::parallel_for("dns::ibm_facefill", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
       KOKKOS_LAMBDA(long n){
         const int ix=(int)(n%Nx), iy=(int)((n/Nx)%Ny), iz=(int)(n/((long)Nx*Ny));
         const long i=(long)(ix+G)*sx+(long)(iy+G)*sy+(long)(iz+G)*sz;
@@ -335,7 +335,7 @@ class SdflowIbm {
     int dims[3]={e.x,e.y,e.z}; long st[3]={1,e.x,(long)e.x*e.y};
     const int a=axis,b=(axis+1)%3,c=(axis+2)%3; const long sa=st[a],sb=st[b],sc=st[c]; const int N=N3[a];
     CCField ff=f;
-    Kokkos::parallel_for("cfdk::ibm_pfill", Kokkos::MDRangePolicy<CCExec,Kokkos::Rank<2>>(space,{0,0},{dims[b],dims[c]}),
+    Kokkos::parallel_for("dns::ibm_pfill", Kokkos::MDRangePolicy<CCExec,Kokkos::Rank<2>>(space,{0,0},{dims[b],dims[c]}),
       KOKKOS_LAMBDA(int p0,int p1){ const long base=(long)p0*sb+(long)p1*sc;
         for(int gl=0;gl<G;++gl){ ff(base+(long)gl*sa)=ff(base+(long)(gl+N)*sa); ff(base+(long)(G+N+gl)*sa)=ff(base+(long)(G+gl)*sa);} });
 
@@ -354,9 +354,9 @@ class SdflowIbm {
       KOKKOS_LAMBDA(int x,int y,int z){
         const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
         double aK=0.0, aF=0.0;
-        if (adv) { sadvk::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y}, Fa{uu,e.x,e.y};
-                   aK = sadvk::advect(c, x,y,z, Ua,Va,Wa, Fa);
-                   if (ifou) aF = sadvk::advect_fou(c, x,y,z, Ua,Va,Wa, Fa); }
+        if (adv) { sadv::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y}, Fa{uu,e.x,e.y};
+                   aK = sadv::advect(c, x,y,z, Ua,Va,Wa, Fa);
+                   if (ifou) aF = sadv::advect_fou(c, x,y,z, Ua,Va,Wa, Fa); }
         const double gp = incr ? (P(i)-P((long)i-strd)) : 0.0;
         bb(i) = rs(i) * (idiag*un(i) + fc - rho*aK + rho*aF - gp)
                 + (bc ? brhs(i) : -inh(i)); });  // BC fold (brhs) on the domain-BC path; -inhom on the IBM path (=0 for no-slip)
@@ -375,8 +375,8 @@ class SdflowIbm {
       KOKKOS_LAMBDA(int x,int y,int z){
         const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
         double cC=AC(i),cxm=AW(i),cxp=AE(i),cym=AS(i),cyp=AN(i),czm=AB(i),czp=AT(i);
-        sadvk::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y};
-        sadvk::fou_operator(c, x,y,z, Ua,Va,Wa, fouw, cC,cxm,cxp,cym,cyp,czm,czp);
+        sadv::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y};
+        sadv::fou_operator(c, x,y,z, Ua,Va,Wa, fouw, cC,cxm,cxp,cym,cyp,czm,czp);
         AC(i)=(float)cC; AW(i)=(float)cxm; AE(i)=(float)cxp; AS(i)=(float)cym; AN(i)=(float)cyp; AB(i)=(float)czm; AT(i)=(float)czp; });
 
     Kokkos::deep_copy(C[c].rscale, 1.0); Kokkos::deep_copy(C[c].inhom, 0.0);
@@ -459,7 +459,7 @@ class SdflowIbm {
   void applyVelocityBcComp(int comp, int fold, bool doOutflow) { applyVelocityBcCompTo(C[comp].u, comp, fold, doOutflow); }
   // Field-parameterized variants (so the velocity-MG can re-impose the BC on its own level-0 iterate).
   void fillVelGhostsTo(CCField f, int comp, int fold) {
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
     if (distributed_) { velDev_->exchange(f); applyVelocityBcCompTo(f, comp, fold, true); return; }
 #endif
     for (int a=0;a<3;++a) if (bc_[2*a]==0 && bc_[2*a+1]==0) fillAxis(f, a);
@@ -573,7 +573,7 @@ class SdflowIbm {
   // --- multi-rank (MPI) state, gated (single-GPU module never links MPI -> byte-identical when off) ---
   bool distributed_ = false;
   C3 og_{0,0,0};   // velocity-block inner origin (global red-black parity); {0,0,0} single-rank
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
   std::shared_ptr<GridHalo<3>> velHalo_;                          // g=2 velocity-block topology
   std::shared_ptr<DeviceGridExchangeKokkos<double>> velDev_;      // g=2 velocity-block ghost exchange
   MPI_Comm comm_ = MPI_COMM_NULL; int gnx_=0, gny_=0, gnz_=0;     // communicator + GLOBAL dims
@@ -592,6 +592,6 @@ class SdflowIbm {
   Comp C[3];
 };
 
-}  // namespace cfdk
+}  // namespace dns
 
-#endif  // CFD_SDFLOW_IBM_KOKKOS_HPP
+#endif  // CFD_SDFLOW_IBM_HPP

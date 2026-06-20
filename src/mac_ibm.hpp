@@ -6,15 +6,15 @@
 // momentum operator (mixed precision: float matrix coefficients, double iterate). The Robust-Scaled
 // overlay BUILD (ibm_geometry/modify_stencil with the IBM_Data SoA + poly_*) is the heavier piece,
 // left for a dedicated follow-up. Reuses the cut-cell SDF sampler. Runs on any Kokkos backend.
-#ifndef CFD_MAC_IBM_KOKKOS_HPP
-#define CFD_MAC_IBM_KOKKOS_HPP
+#ifndef CFD_MAC_IBM_HPP
+#define CFD_MAC_IBM_HPP
 
 #include <Kokkos_Core.hpp>
 
-#include "cut_cell_ibm_kokkos.hpp"  // IbmOverlay, ibmFillEntry
-#include "mac_cutcell_kokkos.hpp"   // cfdk::C3, cfdk::ccSampleExt, CCConst
+#include "cut_cell_ibm.hpp"  // IbmOverlay, ibmFillEntry
+#include "mac_cutcell.hpp"   // dns::C3, dns::ccSampleExt, CCConst
 
-namespace cfdk {
+namespace dns {
 
 using mreal = float;  // matrix coefficient type (matches cfd's mreal)
 using MConst = Kokkos::View<const float*, CCMem>;
@@ -43,7 +43,7 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
   Kokkos::deep_copy(space, idMap, -1);
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::ibm_build_overlay", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
+      "dns::ibm_build_overlay", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long idx = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
         const float sc = (float)ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
@@ -66,7 +66,7 @@ inline void ibmVolfrac(CCField theta, CCConst sdf, C3 ext, Off3 off) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::ibm_volfrac", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
+      "dns::ibm_volfrac", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long i = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
         const double sd = ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
@@ -81,7 +81,7 @@ inline void ibmSolidMask(CCField mask, CCConst sdf, C3 ext, Off3 off) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::ibm_solid", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
+      "dns::ibm_solid", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long i = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
         const double sd = ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
@@ -95,7 +95,7 @@ inline void ibmCleanFluidMask(CCField m, CCConst sdf, C3 ext, Off3 off) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::ibm_clean", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
+      "dns::ibm_clean", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long i = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
         const float sc = (float)ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
@@ -118,7 +118,7 @@ inline void ibmRbgsStencilColor(CCField x, CCConst b, MConst AC, MConst AW, MCon
   const bool hasMask = (solidmask.extent(0) != 0);
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::ibm_rbgs", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
+      "dns::ibm_rbgs", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color) return;
         const long sx = 1, sy = ext.x, sz = (long)ext.x * ext.y;
@@ -140,6 +140,6 @@ inline void ibmRbgsSweep(CCField x, CCConst b, MConst AC, MConst AW, MConst AE, 
   ibmRbgsStencilColor(x, b, AC, AW, AE, AS, AN, AB, AT, solidmask, ext, og, g, 1);
 }
 
-}  // namespace cfdk
+}  // namespace dns
 
-#endif  // CFD_MAC_IBM_KOKKOS_HPP
+#endif  // CFD_MAC_IBM_HPP

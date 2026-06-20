@@ -13,10 +13,10 @@
 #include <Kokkos_Core.hpp>
 #include <cstring>
 
-#include "sdflow_ibm_kokkos.hpp"
+#include "sdflow_ibm.hpp"
 
 namespace py = pybind11;
-using cfdk::SdflowIbm;
+using dns::SdflowIbm;
 
 // flat x-fastest vector -> (nx,ny,nz) Fortran-strided numpy array for [x,y,z] indexing
 static py::array_t<double> to_xyz(const std::vector<double>& v, int nx, int ny, int nz) {
@@ -28,7 +28,7 @@ static py::array_t<double> to_xyz(const std::vector<double>& v, int nx, int ny, 
   return out;
 }
 
-PYBIND11_MODULE(sdflow_kokkos, m) {
+PYBIND11_MODULE(sdflow, m) {
   m.doc() = "cfd-gpu sdflow (Kokkos) IBM Navier-Stokes solver";
   if (!Kokkos::is_initialized()) Kokkos::initialize();
   py::module_::import("atexit").attr("register")(py::cpp_function([]() {

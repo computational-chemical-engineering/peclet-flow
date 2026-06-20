@@ -28,7 +28,7 @@ enable_testing()
 foreach(t distributed_diffusion distributed_pressure distributed_mg)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src
     ${TPX_DIR}/include)
   target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
   foreach(np 1 2 4)
@@ -36,12 +36,12 @@ foreach(t distributed_diffusion distributed_pressure distributed_mg)
   endforeach()
 endforeach()
 
-# The production CutcellMG / VelocityMG / assembled SdflowIbm distributed (gated behind CFD_KOKKOS_MPI).
+# The production CutcellMG / VelocityMG / assembled SdflowIbm distributed (gated behind CFD_MPI).
 foreach(t cutcellmg_mpi velocitymg_mpi sdflow_mpi)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kokkos ${TPX_DIR}/include)
-  target_compile_definitions(test_${t} PRIVATE CFD_KOKKOS_MPI)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${TPX_DIR}/include)
+  target_compile_definitions(test_${t} PRIVATE CFD_MPI)
   target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
   foreach(np 1 2 4)
     add_test(NAME ${t}_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_${t}>)

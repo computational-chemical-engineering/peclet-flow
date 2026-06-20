@@ -5,12 +5,12 @@
 // writes its own ghosts (disjoint, no races). MAC staggered convention: component a is stored at the
 // -a face of its cell. Faithful copies of the reflection / fold / outflow logic. Scalar wall velocity
 // (the per-position inlet-profile variant is a later specialization). Runs on any Kokkos backend.
-#ifndef CFD_MAC_BC_KOKKOS_HPP
-#define CFD_MAC_BC_KOKKOS_HPP
+#ifndef CFD_MAC_BC_HPP
+#define CFD_MAC_BC_HPP
 
 #include <Kokkos_Core.hpp>
 
-namespace cfdk {
+namespace dns {
 
 using BExec = Kokkos::DefaultExecutionSpace;
 using BMem = BExec::memory_space;
@@ -41,7 +41,7 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
   const bool hasProf = prof.extent(0) > 0;   // per-position inlet profile (resampled to the face grid)
   using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
   Kokkos::parallel_for(
-      "cfdk::bc_vel", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+      "dns::bc_vel", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
         const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
         const double wc = hasProf ? prof((static_cast<long>(p0) * prof_nc + p1) * 3 + comp) : wall;
         auto at = [&](int ia) -> double& { return f(base + static_cast<long>(ia) * sa); };
@@ -76,7 +76,7 @@ inline void bcOutflowComp(BField f, B3 ext, int g, int a, int s, int comp, int f
   const int na = dims[a];
   using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
   Kokkos::parallel_for(
-      "cfdk::bc_outflow", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+      "dns::bc_outflow", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
         const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
         auto at = [&](int ia) -> double& { return f(base + static_cast<long>(ia) * sa); };
         if (s == 0) {
@@ -103,7 +103,7 @@ inline void bcDiffusionFold(BField dcorr, BField brhs, B3 ext, int g, int a, int
   const int bic = (s == 0) ? g : (dims[a] - g - 1);
   using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
   Kokkos::parallel_for(
-      "cfdk::bc_fold", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+      "dns::bc_fold", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
         const long i = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc + static_cast<long>(bic) * sa;
         dcorr(i) += dval;
         brhs(i) += bval;
@@ -122,7 +122,7 @@ inline void bcZeroPressureGhost(BField phi, B3 ext, int g, int a, int s) {
   const int lo = (s == 0) ? 0 : (na - g), hi = (s == 0) ? (g - 1) : (na - 1);
   using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
   Kokkos::parallel_for(
-      "cfdk::bc_zero_p_ghost", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+      "dns::bc_zero_p_ghost", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
         const long base = (long)p0 * sb + (long)p1 * sc;
         for (int ia = lo; ia <= hi; ++ia) phi(base + (long)ia * sa) = 0.0;
       });
@@ -139,7 +139,7 @@ inline void bcCorrectOutflow(BField f, BField phi, B3 ext, int g, int a) {
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
   Kokkos::parallel_for(
-      "cfdk::bc_correct_outflow", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+      "dns::bc_correct_outflow", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
         const long bf = (long)p0 * sb + (long)p1 * sc + (long)(dims[a] - g) * sa;
         f(bf) -= phi(bf) - phi(bf - sa);
       });
@@ -157,13 +157,13 @@ inline void bcSetOpenness(BField oa, B3 ext, int g, int a, int s, double val) {
   const int bf = (s == 0) ? g : (dims[a] - g);
   using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
   Kokkos::parallel_for(
-      "cfdk::bc_setopen", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+      "dns::bc_setopen", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
         oa(static_cast<long>(p0) * sb + static_cast<long>(p1) * sc + static_cast<long>(bf) * sa) = val;
       });
 
 }
 inline void bcZeroOpenness(BField oa, B3 ext, int g, int a, int s) { bcSetOpenness(oa, ext, g, a, s, 0.0); }
 
-}  // namespace cfdk
+}  // namespace dns
 
-#endif  // CFD_MAC_BC_KOKKOS_HPP
+#endif  // CFD_MAC_BC_HPP

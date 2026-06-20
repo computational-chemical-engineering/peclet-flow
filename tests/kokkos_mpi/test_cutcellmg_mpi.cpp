@@ -1,5 +1,5 @@
 // cfd-gpu — the PRODUCTION CutcellMG, multi-rank. Folds the distributed halo + reductions into the real
-// class (gated behind CFD_KOKKOS_MPI) rather than a test-only copy.
+// class (gated behind CFD_MPI) rather than a test-only copy.
 //
 // Solves the periodic cut-cell pressure Poisson by the real CutcellMG::solvePCG (MG-PCG: CG preconditioned
 // by one symmetric V-cycle) two ways: distributed (initMpi over MPI_COMM_WORLD) and single-rank (init() on
@@ -10,21 +10,21 @@
 // inner-product Allreduce (summed in a different order than the single-rank local sum) steers the Krylov path
 // slightly differently and, with the float-stored operator (residual floor ~1e-7 relative), the two converged
 // solutions differ at ~1e-9. That is an operation-order/roundoff difference, not a method change (the
-// deterministic V-cycle machinery is bit-tight to 1e-11 -- see test_distributed_mg). Build with -DCFD_KOKKOS_MPI.
+// deterministic V-cycle machinery is bit-tight to 1e-11 -- see test_distributed_mg). Build with -DCFD_MPI.
 #include <mpi.h>
 
 #include <Kokkos_Core.hpp>
 #include <cmath>
 #include <cstdio>
 
-#include "mac_cutcell_mg_kokkos.hpp"
+#include "mac_cutcell_mg.hpp"
 
 #include "tpx/common/types.hpp"
 #include "tpx/decomp/block_decomposer.hpp"
 #include "tpx/halo/grid_halo.hpp"
 
 using tpx::Index; using tpx::IVec;
-using cfdk::CutcellMG; using cfdk::CCField; using cfdk::CCConst; using cfdk::C3;
+using dns::CutcellMG; using dns::CCField; using dns::CCConst; using dns::C3;
 
 static constexpr int G = 1, NLEV = 4;
 static double source(int gx, int gy, int gz, IVec<3> gs) {

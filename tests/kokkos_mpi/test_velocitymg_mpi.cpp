@@ -1,26 +1,26 @@
 // cfd-gpu — the PRODUCTION VelocityMG (staircase velocity multigrid), multi-rank.
 //
-// Folds the distributed halo into the real velocity-MG (gated behind CFD_KOKKOS_MPI). VelocityMG has NO global
+// Folds the distributed halo into the real velocity-MG (gated behind CFD_MPI). VelocityMG has NO global
 // reductions (the backward-Euler velocity operator is non-singular -> no mean removal, and the V-cycle is a
 // fixed iteration, not a Krylov method), so the fold is purely fill()->per-level halo exchange + the block-
 // origin red-black parity -- and the distributed V-cycle is therefore BIT-tight to the single-rank one (no
 // Allreduce reordering at all). Solves an all-fluid periodic backward-Euler diffusion (fine stencil =
 // idiag*I - beta*Lap; staircase coarse op with theta=1, no pin, full clean-fluid mask) distributed (initMpi)
-// vs single-rank (init() on the full grid). Build with -DCFD_KOKKOS_MPI.
+// vs single-rank (init() on the full grid). Build with -DCFD_MPI.
 #include <mpi.h>
 
 #include <Kokkos_Core.hpp>
 #include <cmath>
 #include <cstdio>
 
-#include "mac_velocity_mg_kokkos.hpp"
+#include "mac_velocity_mg.hpp"
 
 #include "tpx/common/types.hpp"
 #include "tpx/decomp/block_decomposer.hpp"
 #include "tpx/halo/grid_halo.hpp"
 
 using tpx::IVec;
-using cfdk::VelocityMG; using cfdk::CCField; using cfdk::CCConst; using cfdk::C3; using cfdk::FPV; using cfdk::FPC;
+using dns::VelocityMG; using dns::CCField; using dns::CCConst; using dns::C3; using dns::FPV; using dns::FPC;
 
 static constexpr int G = 2, NLEV = 4, NVCYC = 6;
 static constexpr double IDIAG = 1.0, BETA = 0.2;

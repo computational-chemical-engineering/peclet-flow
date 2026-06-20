@@ -5,14 +5,14 @@
 // operator A = -div(open grad) built from the staggered face openness, its red-black Gauss-Seidel
 // smoother (solid cells AC~0 decoupled), the open-weighted flux divergence, and the staggered gradient
 // correction. gf = 1/h^2 per axis (1 in grid units). Runs on any Kokkos backend.
-#ifndef CFD_MAC_PRESSURE_KOKKOS_HPP
-#define CFD_MAC_PRESSURE_KOKKOS_HPP
+#ifndef CFD_MAC_PRESSURE_HPP
+#define CFD_MAC_PRESSURE_HPP
 
 #include <Kokkos_Core.hpp>
 
-#include "mac_cutcell_kokkos.hpp"
+#include "mac_cutcell.hpp"
 
-namespace cfdk {
+namespace dns {
 
 // A = -div(open grad): AC = sum of the 6 face terms (openness*gf), off-diagonal across each face = -term.
 // ox[i] is the -x face openness of cell i (== +x face of cell i-1). (mg_build_op_k port.) OpV is the
@@ -24,7 +24,7 @@ inline void buildCutcellOp(OpV AC, OpV AW, OpV AE, OpV AS, OpV AN, OpV AB,
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::cc_build_op", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "dns::cc_build_op", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
@@ -43,7 +43,7 @@ inline void divergOpen(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst oy, 
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::diverg_open", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "dns::diverg_open", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -61,7 +61,7 @@ inline void cutcellSmoothColor(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, O
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::cc_smooth", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "dns::cc_smooth", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color) return;
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
@@ -82,7 +82,7 @@ inline void applyCutcellOp(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV AS,
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::cc_apply", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "dns::cc_apply", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
@@ -98,7 +98,7 @@ inline void projectCorrect(CCField u, CCField v, CCField w, CCConst phi, C3 e, i
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::correct", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "dns::correct", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -109,6 +109,6 @@ inline void projectCorrect(CCField u, CCField v, CCField w, CCConst phi, C3 e, i
 
 }
 
-}  // namespace cfdk
+}  // namespace dns
 
-#endif  // CFD_MAC_PRESSURE_KOKKOS_HPP
+#endif  // CFD_MAC_PRESSURE_HPP

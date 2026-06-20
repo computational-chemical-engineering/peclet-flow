@@ -12,9 +12,9 @@
 #include <cstdio>
 #include <vector>
 
-#include "sdflow_kokkos.hpp"
+#include "sdflow.hpp"
 
-using cfdk::SdflowKokkos;
+using dns::SdflowKokkos;
 
 // Initialise the staggered Taylor-Green field (grid units): u at the -x face, v at the -y face.
 static void initTG(SdflowKokkos& s, std::vector<double>& u0, std::vector<double>& v0) {

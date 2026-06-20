@@ -9,9 +9,9 @@
 #include <cstdio>
 #include <vector>
 
-#include "mac_ibm_kokkos.hpp"
+#include "mac_ibm.hpp"
 
-using namespace cfdk;
+using namespace dns;
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);

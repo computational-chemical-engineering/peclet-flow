@@ -8,28 +8,28 @@
 // iterate, exactly as CUDA. Reuses buildCutcellOp / cutcellSmoothColor / applyCutcellOp (mac_pressure).
 // Not yet ported (noted for later): Galerkin coarse op, Chebyshev smoother, semi-coarsening, domain-BC MG,
 // MPI. Runs on any Kokkos backend.
-#ifndef CFD_MAC_CUTCELL_MG_KOKKOS_HPP
-#define CFD_MAC_CUTCELL_MG_KOKKOS_HPP
+#ifndef CFD_MAC_CUTCELL_MG_HPP
+#define CFD_MAC_CUTCELL_MG_HPP
 
 #include <Kokkos_Core.hpp>
 #include <cmath>
 #include <vector>
 
-#include "mac_pressure_kokkos.hpp"
-#include "mac_bc_kokkos.hpp"
+#include "mac_pressure.hpp"
+#include "mac_bc.hpp"
 
 // Multi-rank (MPI) path is opt-in: the single-GPU module never links MPI, so all distributed code is gated
-// (mirrors the CUDA CFD_BUILD_MPI gating). When CFD_KOKKOS_MPI is off, CutcellMG is byte-identical to before.
-#ifdef CFD_KOKKOS_MPI
+// (mirrors the CUDA CFD_BUILD_MPI gating). When CFD_MPI is off, CutcellMG is byte-identical to before.
+#ifdef CFD_MPI
 #include <memory>
 #include "tpx/decomp/block_decomposer.hpp"
 #include "tpx/halo/grid_halo.hpp"
 #include "tpx/halo/grid_halo_kokkos.hpp"
 #endif
 
-namespace cfdk {
+namespace dns {
 
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
 using tpx::halo::GridHalo;
 using tpx::halo::DeviceGridExchangeKokkos;
 #endif
@@ -45,7 +45,7 @@ inline void coarsenOpenAvg(CCField oxc, CCField oyc, CCField ozc, CCConst oxf, C
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::coarsen_open", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
+      "dns::coarsen_open", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
         const int rx = ratio.x, ry = ratio.y, rz = ratio.z;
         const int fx0 = rx * icx + g, fy0 = ry * icy + g, fz0 = rz * icz + g;
@@ -67,7 +67,7 @@ inline void residualCutcell(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::cc_residual", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "dns::cc_residual", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
@@ -85,7 +85,7 @@ inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int g, C
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::restrict", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
+      "dns::restrict", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
         const long fsy = fext.x, fsz = (long)fext.x * fext.y;
         double s = 0;
@@ -102,7 +102,7 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int g, C3
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::prolong", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
+      "dns::prolong", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
       KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
         // coarse sample coord: coarsened axis (ratio 2) -> 0.5*ifine - 0.25 + g; kept axis (ratio 1) -> ifine+g
         const double cx = (ratio.x == 2) ? 0.5 * ifx - 0.25 + g : ifx + g;
@@ -132,7 +132,7 @@ class CutcellMG {
     std::size_t n = 0;
     CCField x, rhs, res, ox, oy, oz;
     FPV AC, AW, AE, AS, AN, AB, AT;
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
     std::shared_ptr<GridHalo<3>> halo;                              // per-level topology (decomposed)
     std::shared_ptr<DeviceGridExchangeKokkos<double>> dev;          // per-level ghost exchange
 #endif
@@ -166,7 +166,7 @@ class CutcellMG {
       inner = next; cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
     }
   }
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
   // Multi-rank hierarchy: coarsen the GLOBAL grid 2:1 per level; each level gets its own transport-core halo
   // over a BlockDecomposer of that level's grid (the ORB decomposition coarsens cleanly so restrict/prolong
   // stay local). Sets the distributed flag -> fill() exchanges, the reductions Allreduce, the smoother uses
@@ -330,7 +330,7 @@ class CutcellMG {
   // periodic ghost fill (3 axes) of a level-sized field / the openness triple. Distributed: the per-level
   // transport-core halo (cross-rank + periodic in one call).
   void fill(Level& lv, CCField f) {
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
     if (distributed_) { lv.dev->exchange(f); return; }
 #endif
     fillAxis(lv, f, 0); fillAxis(lv, f, 1); fillAxis(lv, f, 2);
@@ -341,7 +341,7 @@ class CutcellMG {
     int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
     const int a = axis, b = (axis + 1) % 3, c = (axis + 2) % 3;
     const long sa = st[a], sb = st[b], sc = st[c]; const int N = N3[a]; CCField ff = f;
-    Kokkos::parallel_for("cfdk::mg_pfill", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+    Kokkos::parallel_for("dns::mg_pfill", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
         for (int gl = 0; gl < G; ++gl) { ff(base + (long)gl * sa) = ff(base + (long)(gl + N) * sa);
           ff(base + (long)(G + N + gl) * sa) = ff(base + (long)(G + gl) * sa); } });
@@ -483,7 +483,7 @@ class CutcellMG {
   enum AllOp { kSum, kMax };
   // Global reduction over ranks (no-op single-rank / non-distributed -> byte-identical to the local reduce).
   double allreduce(double v, AllOp op) {
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
     if (distributed_) { double g = 0; MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, op == kSum ? MPI_SUM : MPI_MAX, comm_); return g; }
 #endif
     (void)op; return v;
@@ -494,11 +494,11 @@ class CutcellMG {
   int pre_ = 2, post_ = 2, bottom_ = 4;
   int bc_[6] = {0, 0, 0, 0, 0, 0}; bool hasBC_ = false, removeMean_ = true, hasOutflow_ = false;
   bool distributed_ = false;
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
   MPI_Comm comm_ = MPI_COMM_NULL;
 #endif
 };
 
-}  // namespace cfdk
+}  // namespace dns
 
-#endif  // CFD_MAC_CUTCELL_MG_KOKKOS_HPP
+#endif  // CFD_MAC_CUTCELL_MG_HPP

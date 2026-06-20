@@ -1,5 +1,5 @@
-// Consistency of the implicit-FOU advection operator (sadvk::fou_operator) with the explicit FOU
-// flux (sadvk::advect_fou): the 7-point operator coefficients applied to a field PHI must equal
+// Consistency of the implicit-FOU advection operator (sadv::fou_operator) with the explicit FOU
+// flux (sadv::advect_fou): the 7-point operator coefficients applied to a field PHI must equal
 // dt*advect_fou(PHI) per cell. Also checks fou_operator_aniso(s=1) == fou_operator and that the
 // operator is diagonally dominant (cC >= sum|off|). Runs on any Kokkos backend.
 #include <Kokkos_Core.hpp>
@@ -9,9 +9,9 @@
 #include <random>
 #include <vector>
 
-#include "staggered_advection_kokkos.hpp"
+#include "staggered_advection.hpp"
 
-using namespace sadvk;
+using namespace sadv;
 using Mem = Kokkos::DefaultExecutionSpace::memory_space;
 using DView = Kokkos::View<double*, Mem>;
 using CView = Kokkos::View<const double*, Mem>;

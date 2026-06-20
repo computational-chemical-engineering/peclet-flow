@@ -1,4 +1,4 @@
-// Correctness of the Kokkos MAC stencils (cfdk::poisSweep RB-GS + divergence) vs a host replication,
+// Correctness of the Kokkos MAC stencils (dns::poisSweep RB-GS + divergence) vs a host replication,
 // plus a smoother sanity check (Poisson residual decreases over sweeps). Extended (inner+ghost=1)
 // block, x-fastest. Within a Red-Black colour the updates are independent, so device (parallel) and
 // host (sequential, colour 0 then 1) match exactly. Runs on whatever backend Kokkos was built for.
@@ -9,9 +9,9 @@
 #include <random>
 #include <vector>
 
-#include "mac_stencils_kokkos.hpp"
+#include "mac_stencils.hpp"
 
-using namespace cfdk;
+using namespace dns;
 
 static long l3(int x, int y, int z, I3 e) {
   return (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;

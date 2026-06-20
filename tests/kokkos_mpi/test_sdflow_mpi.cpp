@@ -6,7 +6,7 @@
 // + the distributed pressure MG via CutcellMG::initMpi), and setSolid with its LOCAL SDF block (ghosts halo-
 // exchanged). The superficial velocity <u> (hence the permeability k = mu*<u>/F) is reduced over ranks. The
 // distributed solve must equal single-rank: np=1 bit-exact, np>1 to the MG-PCG reduction-order floor (the
-// inner-product Allreduce reorders the Krylov path -- same as test_cutcellmg_mpi). Build with -DCFD_KOKKOS_MPI.
+// inner-product Allreduce reorders the Krylov path -- same as test_cutcellmg_mpi). Build with -DCFD_MPI.
 #include <mpi.h>
 
 #include <Kokkos_Core.hpp>
@@ -14,13 +14,13 @@
 #include <cstdio>
 #include <vector>
 
-#include "sdflow_ibm_kokkos.hpp"
+#include "sdflow_ibm.hpp"
 
 #include "tpx/common/types.hpp"
 #include "tpx/decomp/block_decomposer.hpp"
 
 using tpx::IVec;
-using cfdk::SdflowIbm;
+using dns::SdflowIbm;
 
 static constexpr int N = 32, STEPS = 120;
 static constexpr double RHO = 1.0, MU = 0.1, F = 1e-3, DT = 60.0;

@@ -1,4 +1,4 @@
-// Correctness of the Kokkos Robust-Scaled IBM overlay build (cfdk::ibmFillEntry) vs a HostSpace
+// Correctness of the Kokkos Robust-Scaled IBM overlay build (dns::ibmFillEntry) vs a HostSpace
 // reference using the same code. Random cut-cell SDF configurations (fluid centre + mixed solid/fluid
 // neighbours, including sandwiched double-sided axes), across point-value (SCHEME 0) and cell-average
 // (1) and Dirichlet/Neumann. Compares every factor (D_rescale, dir_code, K/M/X/Nbc/R). Runs on any
@@ -10,9 +10,9 @@
 #include <random>
 #include <vector>
 
-#include "cut_cell_ibm_kokkos.hpp"
+#include "cut_cell_ibm.hpp"
 
-using namespace cfdk;
+using namespace dns;
 using DSpace = Kokkos::DefaultExecutionSpace;
 
 template <int SCHEME>

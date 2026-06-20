@@ -5,12 +5,12 @@
 // expressed as two parallel_for passes (color 0 then 1) with the global-parity filter
 // ((x+ogx)+(y+ogy)+(z+ogz))&1 == color — identical to the CUDA RB-GS (within a color the updates are
 // independent, so no data race). Faithful copy of the math. Runs on any Kokkos backend.
-#ifndef CFD_MAC_STENCILS_KOKKOS_HPP
-#define CFD_MAC_STENCILS_KOKKOS_HPP
+#ifndef CFD_MAC_STENCILS_HPP
+#define CFD_MAC_STENCILS_HPP
 
 #include <Kokkos_Core.hpp>
 
-namespace cfdk {
+namespace dns {
 
 using SExec = Kokkos::DefaultExecutionSpace;
 using SMem = SExec::memory_space;
@@ -33,7 +33,7 @@ inline void diffSmoothColor(SField c, SConst b, I3 e, I3 og, int g, double beta,
   const bool hasD = (dcorr.extent(0) != 0);
   using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::diff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "dns::diff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         if ((((x + og.x) + (y + og.y) + (z + og.z)) & 1) != color) return;
         const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
@@ -48,7 +48,7 @@ inline void poisSmoothColor(SField phi, SConst d, I3 e, I3 og, int g, int color)
   SExec space;
   using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::pois", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "dns::pois", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         if ((((x + og.x) + (y + og.y) + (z + og.z)) & 1) != color) return;
         const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
@@ -63,7 +63,7 @@ inline void divergence(SConst u, SConst v, SConst w, SField d, I3 e, int g) {
   SExec space;
   using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::diverg", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "dns::diverg", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
         d(i) = (u(i + sx) - u(i)) + (v(i + sy) - v(i)) + (w(i + sz) - w(i));
@@ -77,6 +77,6 @@ inline void poisSweep(SField phi, SConst d, I3 e, I3 og, int g) {
   poisSmoothColor(phi, d, e, og, g, 1);
 }
 
-}  // namespace cfdk
+}  // namespace dns
 
-#endif  // CFD_MAC_STENCILS_KOKKOS_HPP
+#endif  // CFD_MAC_STENCILS_HPP

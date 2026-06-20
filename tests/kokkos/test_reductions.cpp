@@ -1,4 +1,4 @@
-// Correctness of the Kokkos MAC reductions (cfdk::localSumMax / localDot / subtractAll) over the
+// Correctness of the Kokkos MAC reductions (dns::localSumMax / localDot / subtractAll) over the
 // inner cells of an extended (inner+ghost) block, vs a host reference. Validates the parallel_reduce
 // indexing (x-fastest, +ghost) and the mean-subtraction. Runs on whatever backend Kokkos was built
 // for (CUDA locally; OpenMP for CI). The MPI_Allreduce wrapper is host MPI and unchanged.
@@ -9,9 +9,9 @@
 #include <random>
 #include <vector>
 
-#include "mac_reductions_kokkos.hpp"
+#include "mac_reductions.hpp"
 
-using namespace cfdk;
+using namespace dns;
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);

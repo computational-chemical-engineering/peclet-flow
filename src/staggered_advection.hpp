@@ -5,13 +5,13 @@
 // The math is a faithful copy (double precision, conservative flux form, +/-2 cell reach). A View
 // accessor replaces the CUDA LocAcc. The functions are KOKKOS_INLINE_FUNCTION so the same code runs
 // on device and is reused by the host reference in the test.
-#ifndef CFD_STAGGERED_ADVECTION_KOKKOS_HPP
-#define CFD_STAGGERED_ADVECTION_KOKKOS_HPP
+#ifndef CFD_STAGGERED_ADVECTION_HPP
+#define CFD_STAGGERED_ADVECTION_HPP
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
-namespace sadvk {
+namespace sadv {
 
 KOKKOS_INLINE_FUNCTION double koren(double up_m1, double up, double down, double vel) {
   const double num = up - up_m1, den = down - up;
@@ -125,6 +125,6 @@ KOKKOS_INLINE_FUNCTION double advect_fou(int comp, int x, int y, int z, A U, A V
   return out;
 }
 
-}  // namespace sadvk
+}  // namespace sadv
 
-#endif  // CFD_STAGGERED_ADVECTION_KOKKOS_HPP
+#endif  // CFD_STAGGERED_ADVECTION_HPP

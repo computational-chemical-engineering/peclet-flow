@@ -5,15 +5,15 @@
 // (inner+ghost) block, x-fastest layout. The block-shared-memory + per-block-atomic CUDA reduction
 // becomes a single Kokkos::parallel_reduce. The MPI_Allreduce that turns these local results global
 // is unchanged (host MPI) and lives in the caller. Runs on any Kokkos backend.
-#ifndef CFD_MAC_REDUCTIONS_KOKKOS_HPP
-#define CFD_MAC_REDUCTIONS_KOKKOS_HPP
+#ifndef CFD_MAC_REDUCTIONS_HPP
+#define CFD_MAC_REDUCTIONS_HPP
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
 #include <cstddef>
 
-namespace cfdk {
+namespace dns {
 
 using Exec = Kokkos::DefaultExecutionSpace;
 using Mem = Exec::memory_space;
@@ -51,7 +51,7 @@ inline SumMax localSumMax(DConst f, Ext3 ext, int ghost, Ext3 inner) {
   SumMax r;
   if (n <= 0) return r;
   Kokkos::parallel_reduce(
-      "cfdk::sum_max", Kokkos::RangePolicy<Exec>(0, n),
+      "dns::sum_max", Kokkos::RangePolicy<Exec>(0, n),
       KOKKOS_LAMBDA(long c, SumMax& acc) {
         const double v = f(innerToExt(c, ext, ghost, inner));
         acc.sum += v;
@@ -68,7 +68,7 @@ inline double localDot(DConst a, DConst b, Ext3 ext, int ghost, Ext3 inner) {
   double s = 0.0;
   if (n <= 0) return s;
   Kokkos::parallel_reduce(
-      "cfdk::dot", Kokkos::RangePolicy<Exec>(0, n),
+      "dns::dot", Kokkos::RangePolicy<Exec>(0, n),
       KOKKOS_LAMBDA(long c, double& acc) {
         const std::size_t i = innerToExt(c, ext, ghost, inner);
         acc += a(i) * b(i);
@@ -81,9 +81,9 @@ inline double localDot(DConst a, DConst b, Ext3 ext, int ghost, Ext3 inner) {
 inline void subtractAll(DField f, double m) {
   const std::size_t n = f.extent(0);
   Kokkos::parallel_for(
-      "cfdk::subtract", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(std::size_t i) { f(i) -= m; });
+      "dns::subtract", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(std::size_t i) { f(i) -= m; });
 }
 
-}  // namespace cfdk
+}  // namespace dns
 
-#endif  // CFD_MAC_REDUCTIONS_KOKKOS_HPP
+#endif  // CFD_MAC_REDUCTIONS_HPP

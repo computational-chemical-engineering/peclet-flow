@@ -9,9 +9,9 @@
 #include <random>
 #include <vector>
 
-#include "cut_cell_ibm_kokkos.hpp"
+#include "cut_cell_ibm.hpp"
 
-using namespace cfdk;
+using namespace dns;
 using DSpace = Kokkos::DefaultExecutionSpace;
 using FV = Kokkos::View<float*, IMem>;
 using DV = Kokkos::View<double*, IMem>;

@@ -4,13 +4,13 @@
 // + trilinear SDF sampling, producing the staggered face openness ox/oy/oz (ox[i] = openness of the
 // -x face of cell i) over the extended (inner+ghost) block. Faithful copy of the fraction math.
 // KOKKOS_INLINE_FUNCTION so it is shared with the host reference. Runs on any Kokkos backend.
-#ifndef CFD_MAC_CUTCELL_KOKKOS_HPP
-#define CFD_MAC_CUTCELL_KOKKOS_HPP
+#ifndef CFD_MAC_CUTCELL_HPP
+#define CFD_MAC_CUTCELL_HPP
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
-namespace cfdk {
+namespace dns {
 
 using CCExec = Kokkos::DefaultExecutionSpace;
 using CCMem = CCExec::memory_space;
@@ -75,7 +75,7 @@ inline void buildOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ex
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "cfdk::cc_open", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
+      "dns::cc_open", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long i = static_cast<long>(lx) + static_cast<long>(ly) * ext.x +
                        static_cast<long>(lz) * static_cast<long>(ext.x) * ext.y;
@@ -86,6 +86,6 @@ inline void buildOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ex
 
 }
 
-}  // namespace cfdk
+}  // namespace dns
 
-#endif  // CFD_MAC_CUTCELL_KOKKOS_HPP
+#endif  // CFD_MAC_CUTCELL_HPP

@@ -13,18 +13,18 @@
 // velocity block: the IBM stencil + RHS + solution need no g=2<->g=1 bridging. Reuses restrictAvg /
 // prolongAdd (mac_cutcell_mg) and ibmRbgsStencilColor (the pin-aware variable-coeff RB-GS smoother ==
 // mg_smooth_var_k). Runs on any Kokkos backend.
-#ifndef CFD_MAC_VELOCITY_MG_KOKKOS_HPP
-#define CFD_MAC_VELOCITY_MG_KOKKOS_HPP
+#ifndef CFD_MAC_VELOCITY_MG_HPP
+#define CFD_MAC_VELOCITY_MG_HPP
 
 #include <Kokkos_Core.hpp>
 #include <functional>
 #include <vector>
 
-#include "mac_cutcell_mg_kokkos.hpp"       // restrictAvg, prolongAdd, FPV/FPC
-#include "mac_ibm_kokkos.hpp"              // ibmRbgsStencilColor (pin smoother), MConst
-#include "staggered_advection_kokkos.hpp"  // fou_operator_aniso (upwind-convective coarse op)
+#include "mac_cutcell_mg.hpp"       // restrictAvg, prolongAdd, FPV/FPC
+#include "mac_ibm.hpp"              // ibmRbgsStencilColor (pin smoother), MConst
+#include "staggered_advection.hpp"  // fou_operator_aniso (upwind-convective coarse op)
 
-namespace cfdk {
+namespace dns {
 
 // pin-aware variable-coefficient residual (mg_residual_var_k): r = 0 at pinned (classified-solid) cells,
 // else b - A x with the float operator accumulated in double.
@@ -32,7 +32,7 @@ inline void residualVarPin(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC 
                            FPC AT, CCConst pin, C3 e, int g) {
   CCExec space; const bool hasPin = (pin.extent(0) != 0);
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for("cfdk::vmg_resid", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  Kokkos::parallel_for("dns::vmg_resid", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
     KOKKOS_LAMBDA(int lx, int ly, int lz) {
       const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
       const long i = (long)lx + (long)ly * sy + (long)lz * sz;
@@ -51,7 +51,7 @@ inline void prolongMasked(CCField fine, CCConst coarse, CCConst mask, C3 fext, C
                           C3 ratio, double eps) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for("cfdk::vmg_prolong_masked", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
+  Kokkos::parallel_for("dns::vmg_prolong_masked", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
     KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
       const long fi = (long)(ifx + g) + (long)(ify + g) * fext.x + (long)(ifz + g) * (long)fext.x * fext.y;
       if (mask(fi) < eps) return;  // no correction into a cut/solid fine cell
@@ -79,7 +79,7 @@ inline void buildVelocityStaircase(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV A
                                    C3 e, int g, double bx, double by, double bz, double thresh, double idiag) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for("cfdk::vmg_staircase", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  Kokkos::parallel_for("dns::vmg_staircase", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
     KOKKOS_LAMBDA(int lx, int ly, int lz) {
       const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
       if (theta(i) < thresh) {  // classified solid -> identity row (smoother/residual pin it to 0)
@@ -102,12 +102,12 @@ inline void buildAdvCoarse(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV A
                            double sx, double sy, double sz, double idiag) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for("cfdk::vmg_adv_coarse", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  Kokkos::parallel_for("dns::vmg_adv_coarse", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
     KOKKOS_LAMBDA(int x, int y, int z) {
       const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
       double cC = idiag + 2.0 * (bx + by + bz), cxm = -bx, cxp = -bx, cym = -by, cyp = -by, czm = -bz, czp = -bz;
-      sadvk::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y};
-      sadvk::fou_operator_aniso(comp, x, y, z, Ua, Va, Wa, fouw, sx, sy, sz, cC, cxm, cxp, cym, cyp, czm, czp);
+      sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y};
+      sadv::fou_operator_aniso(comp, x, y, z, Ua, Va, Wa, fouw, sx, sy, sz, cC, cxm, cxp, cym, cyp, czm, czp);
       AC(i) = (float)cC; AW(i) = (float)cxm; AE(i) = (float)cxp; AS(i) = (float)cym; AN(i) = (float)cyp;
       AB(i) = (float)czm; AT(i) = (float)czp;
     });
@@ -121,7 +121,7 @@ inline void buildConstAniso(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV 
                             double by, double bz, double idiag) {
   CCExec space; const std::size_t n = (std::size_t)e.x * e.y * e.z;
   const float c = (float)(idiag + 2.0 * (bx + by + bz)), nx = (float)(-bx), ny = (float)(-by), nz = (float)(-bz);
-  Kokkos::parallel_for("cfdk::vmg_const_aniso", Kokkos::RangePolicy<CCExec>(space, 0, n),
+  Kokkos::parallel_for("dns::vmg_const_aniso", Kokkos::RangePolicy<CCExec>(space, 0, n),
     KOKKOS_LAMBDA(std::size_t i) { AC(i) = c; AW(i) = nx; AE(i) = nx; AS(i) = ny; AN(i) = ny; AB(i) = nz; AT(i) = nz; });
 
 }
@@ -133,7 +133,7 @@ inline void boundaryFold(FPV AC, C3 e, int g, int a, int s, double beta) {
   CCExec space; int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
   const int b = (a + 1) % 3, c = (a + 2) % 3; const long sa = st[a], sb = st[b], sc = st[c];
   const int bic = (s == 0) ? g : (dims[a] - g - 1);  // boundary-adjacent inner cell along a
-  Kokkos::parallel_for("cfdk::vmg_bc_fold", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+  Kokkos::parallel_for("dns::vmg_bc_fold", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
     KOKKOS_LAMBDA(int p0, int p1) { const long i = (long)p0 * sb + (long)p1 * sc + (long)bic * sa;
       AC(i) = (float)((double)AC(i) + beta); });
 
@@ -144,7 +144,7 @@ inline void boundaryFold(FPV AC, C3 e, int g, int a, int s, double beta) {
 inline void fillBcGhost(CCField x, C3 e, int g, int a, int s, int dirichlet) {
   CCExec space; int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
   const int b = (a + 1) % 3, c = (a + 2) % 3; const long sa = st[a], sb = st[b], sc = st[c]; const int na = dims[a];
-  Kokkos::parallel_for("cfdk::vmg_fill_bc_ghost", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+  Kokkos::parallel_for("dns::vmg_fill_bc_ghost", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
     KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
       if (s == 0) { const double v = dirichlet ? 0.0 : x(base + (long)g * sa); for (int ia = 0; ia < g; ++ia) x(base + (long)ia * sa) = v; }
       else { const double v = dirichlet ? 0.0 : x(base + (long)(na - g - 1) * sa); for (int ia = na - g; ia < na; ++ia) x(base + (long)ia * sa) = v; } });
@@ -155,20 +155,20 @@ inline void fillBcGhost(CCField x, C3 e, int g, int a, int s, int dirichlet) {
 inline void zeroPlane(CCField m, C3 e, int axis, int idx) {
   CCExec space; int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
   const int b = (axis + 1) % 3, c = (axis + 2) % 3; const long sa = st[axis], sb = st[b], sc = st[c];
-  Kokkos::parallel_for("cfdk::vmg_zero_plane", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+  Kokkos::parallel_for("dns::vmg_zero_plane", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
     KOKKOS_LAMBDA(int p0, int p1) { m((long)p0 * sb + (long)p1 * sc + (long)idx * sa) = 0.0; });
 
 }
 
 inline void thresholdMask(CCField m, CCConst theta, double thresh) {  // m = 1 where theta < thresh (solid)
   CCExec space; std::size_t n = m.extent(0); CCField mm = m; CCConst th = theta;
-  Kokkos::parallel_for("cfdk::vmg_threshold", Kokkos::RangePolicy<CCExec>(space, 0, n),
+  Kokkos::parallel_for("dns::vmg_threshold", Kokkos::RangePolicy<CCExec>(space, 0, n),
     KOKKOS_LAMBDA(std::size_t i) { mm(i) = (th(i) < thresh) ? 1.0 : 0.0; });
 
 }
 inline void mulMask(CCField r, CCConst m) {  // r *= m (clean-fluid residual filter)
   CCExec space; std::size_t n = r.extent(0); CCField rr = r; CCConst mm = m;
-  Kokkos::parallel_for("cfdk::vmg_mulmask", Kokkos::RangePolicy<CCExec>(space, 0, n),
+  Kokkos::parallel_for("dns::vmg_mulmask", Kokkos::RangePolicy<CCExec>(space, 0, n),
     KOKKOS_LAMBDA(std::size_t i) { rr(i) *= mm(i); });
 
 }
@@ -184,7 +184,7 @@ class VelocityMG {
     CCField x, rhs, res, theta, pin, resMask;
     CCField advU, advV, advW;  // restricted advecting velocity (upwind-convective coarse op; L>=1)
     FPV AC, AW, AE, AS, AN, AB, AT;
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
     std::shared_ptr<GridHalo<3>> halo;                       // per-level topology (decomposed)
     std::shared_ptr<DeviceGridExchangeKokkos<double>> dev;   // per-level ghost exchange (ghost width G=2)
 #endif
@@ -217,7 +217,7 @@ class VelocityMG {
     }
     lv_[0].resMask = CCField("vmg_resmask0", lv_[0].n);  // level 0 only (clean-fluid exclude, staircase path)
   }
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
   // Multi-rank velocity-MG: coarsen the GLOBAL grid 2:1 per level; each level gets its own G=2 transport-core
   // halo. No global reductions here (the velocity op is non-singular -> no mean removal, no Krylov), so the
   // fold is just fill()->exchange + the block-origin red-black parity. Single-rank (size 1) == init().
@@ -403,7 +403,7 @@ class VelocityMG {
   // left as the caller / correction set them -- the boundary fold + held ghost represent the wall).
   // Distributed (periodic IBM path): the per-level transport-core halo (cross-rank + periodic in one call).
   void fill(Level& lv, CCField f) {
-#ifdef CFD_KOKKOS_MPI
+#ifdef CFD_MPI
     if (distributed_ && !bcMode_) { lv.dev->exchange(f); return; }
 #endif
     for (int a = 0; a < 3; ++a)
@@ -425,7 +425,7 @@ class VelocityMG {
     int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
     const int a = axis, b = (axis + 1) % 3, c = (axis + 2) % 3;
     const long sa = st[a], sb = st[b], sc = st[c]; const int N = N3[a]; CCField ff = f;
-    Kokkos::parallel_for("cfdk::vmg_pfill", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+    Kokkos::parallel_for("dns::vmg_pfill", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
         for (int gl = 0; gl < G; ++gl) { ff(base + (long)gl * sa) = ff(base + (long)(gl + N) * sa);
           ff(base + (long)(G + N + gl) * sa) = ff(base + (long)(G + gl) * sa); } });
@@ -442,6 +442,6 @@ class VelocityMG {
   bool distributed_ = false;                // multi-rank (initMpi); periodic IBM path -> fill() exchanges
 };
 
-}  // namespace cfdk
+}  // namespace dns
 
-#endif  // CFD_MAC_VELOCITY_MG_KOKKOS_HPP
+#endif  // CFD_MAC_VELOCITY_MG_HPP
