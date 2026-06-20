@@ -1,18 +1,19 @@
-// cfd-gpu — portable (Kokkos) velocity (momentum) multigrid for the IBM diffusion solve: the STAIRCASE
-// coarse operator.
-//
-// Single-GPU (periodic) port of the velocity-MG path in CUDA's DistributedPoissonMG (mac_multigrid.cuh):
-// the fine level is the sharp Robust-Scaled IBM stencil As_[c] (so the residual + smoother use the TRUE
-// operator and the fixed point is the exact sharp solution); the coarse levels use the geometry-aware
-// STAIRCASE Helmholtz (volume fraction theta only CLASSIFIES cells: theta>=0.5 fluid / <0.5 solid-pinned,
-// then a plain constant-coefficient Helmholtz at fluid cells). The fine IBM-cell residuals are excluded
-// from coarsening (clean-fluid mask) and no coarse correction is pumped back into the cut-cell band
-// (masked prolong); the fine smoother owns the boundary. See [[velocity-mg-design]].
-//
-// The whole hierarchy uses ghost width G=2 (the velocity block's width), so level 0 IS the solver's
-// velocity block: the IBM stencil + RHS + solution need no g=2<->g=1 bridging. Reuses restrictAvg /
-// prolongAdd (mac_cutcell_mg) and ibmRbgsStencilColor (the pin-aware variable-coeff RB-GS smoother ==
-// mg_smooth_var_k). Runs on any Kokkos backend.
+/// @file
+/// @brief sdflow — portable (Kokkos) velocity (momentum) multigrid for the IBM diffusion solve: the STAIRCASE
+/// coarse operator.
+///
+/// Single-GPU (periodic) port of the velocity-MG path in CUDA's DistributedPoissonMG (mac_multigrid.cuh):
+/// the fine level is the sharp Robust-Scaled IBM stencil As_[c] (so the residual + smoother use the TRUE
+/// operator and the fixed point is the exact sharp solution); the coarse levels use the geometry-aware
+/// STAIRCASE Helmholtz (volume fraction theta only CLASSIFIES cells: theta>=0.5 fluid / <0.5 solid-pinned,
+/// then a plain constant-coefficient Helmholtz at fluid cells). The fine IBM-cell residuals are excluded
+/// from coarsening (clean-fluid mask) and no coarse correction is pumped back into the cut-cell band
+/// (masked prolong); the fine smoother owns the boundary. See [[velocity-mg-design]].
+///
+/// The whole hierarchy uses ghost width G=2 (the velocity block's width), so level 0 IS the solver's
+/// velocity block: the IBM stencil + RHS + solution need no g=2<->g=1 bridging. Reuses restrictAvg /
+/// prolongAdd (mac_cutcell_mg) and ibmRbgsStencilColor (the pin-aware variable-coeff RB-GS smoother ==
+/// mg_smooth_var_k). Runs on any Kokkos backend.
 #ifndef CFD_MAC_VELOCITY_MG_HPP
 #define CFD_MAC_VELOCITY_MG_HPP
 

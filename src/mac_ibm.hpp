@@ -1,11 +1,12 @@
-// cfd-gpu — portable (Kokkos) IBM geometric fields + variable-coefficient RB-GS smoother.
-//
-// Kokkos port of the self-contained pieces of mac_ibm.cuh: cut-cell detection (ibm_is_cut), the
-// staggered SDF gather, volume fraction (ibm_volfrac_k), solid + clean-fluid masks, and the
-// variable-coefficient Red-Black Gauss-Seidel smoother (ibm_rbgs_stencil_k) for the IBM-modified
-// momentum operator (mixed precision: float matrix coefficients, double iterate). The Robust-Scaled
-// overlay BUILD (ibm_geometry/modify_stencil with the IBM_Data SoA + poly_*) is the heavier piece,
-// left for a dedicated follow-up. Reuses the cut-cell SDF sampler. Runs on any Kokkos backend.
+/// @file
+/// @brief sdflow — portable (Kokkos) IBM geometric fields + variable-coefficient RB-GS smoother.
+///
+/// Kokkos port of the self-contained pieces of mac_ibm.cuh: cut-cell detection (ibm_is_cut), the
+/// staggered SDF gather, volume fraction (ibm_volfrac_k), solid + clean-fluid masks, and the
+/// variable-coefficient Red-Black Gauss-Seidel smoother (ibm_rbgs_stencil_k) for the IBM-modified
+/// momentum operator (mixed precision: float matrix coefficients, double iterate). The Robust-Scaled
+/// overlay BUILD (ibm_geometry/modify_stencil with the IBM_Data SoA + poly_*) is the heavier piece,
+/// left for a dedicated follow-up. Reuses the cut-cell SDF sampler. Runs on any Kokkos backend.
 #ifndef CFD_MAC_IBM_HPP
 #define CFD_MAC_IBM_HPP
 

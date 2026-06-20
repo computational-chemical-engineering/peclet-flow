@@ -1,10 +1,11 @@
-// cfd-gpu — portable (Kokkos) native per-face domain boundary conditions for the MAC grid.
-//
-// Kokkos port of mac_bc.cuh: fill the NON-periodic boundary face/ghosts the halo leaves untouched.
-// Each kernel runs over the boundary face's perpendicular (b,c) plane; one thread owns a column and
-// writes its own ghosts (disjoint, no races). MAC staggered convention: component a is stored at the
-// -a face of its cell. Faithful copies of the reflection / fold / outflow logic. Scalar wall velocity
-// (the per-position inlet-profile variant is a later specialization). Runs on any Kokkos backend.
+/// @file
+/// @brief sdflow — portable (Kokkos) native per-face domain boundary conditions for the MAC grid.
+///
+/// Kokkos port of mac_bc.cuh: fill the NON-periodic boundary face/ghosts the halo leaves untouched.
+/// Each kernel runs over the boundary face's perpendicular (b,c) plane; one thread owns a column and
+/// writes its own ghosts (disjoint, no races). MAC staggered convention: component a is stored at the
+/// -a face of its cell. Faithful copies of the reflection / fold / outflow logic. Scalar wall velocity
+/// (the per-position inlet-profile variant is a later specialization). Runs on any Kokkos backend.
 #ifndef CFD_MAC_BC_HPP
 #define CFD_MAC_BC_HPP
 

@@ -1,10 +1,10 @@
-# Doxygen configuration for cfd-gpu. Generates HTML API docs for the CUDA C++ sources (src/) and the
+# Doxygen configuration for sdflow. Generates HTML API docs for the Kokkos C++ sources (src/) and the
 # Python driver/verification scripts (scripts/, tests/). Build with:  doxygen docs/Doxyfile
 # Output lands in docs/html/ ; the Documentation CI workflow publishes it to GitHub Pages.
 
 #---- project -------------------------------------------------------------------------------------
-PROJECT_NAME           = "cfd-gpu"
-PROJECT_BRIEF          = "GPU cut-cell IBM incompressible Navier-Stokes (pnm_backend / sdflow)"
+PROJECT_NAME           = "sdflow"
+PROJECT_BRIEF          = "Kokkos cut-cell IBM incompressible Navier-Stokes solver + pnm pore extraction"
 OUTPUT_DIRECTORY       = docs
 HTML_OUTPUT            = html
 GENERATE_LATEX         = NO
@@ -14,10 +14,8 @@ CREATE_SUBDIRS         = NO
 INPUT                  = README.md src scripts tests
 USE_MDFILE_AS_MAINPAGE = README.md
 RECURSIVE              = YES
-FILE_PATTERNS          = *.cu *.cuh *.cpp *.cc *.h *.hpp *.py *.md
-# treat CUDA translation units as C++ so the parser understands them
-EXTENSION_MAPPING      = cu=C++ cuh=C++
-EXCLUDE_PATTERNS       = */build*/* */.venv/* */__pycache__/*
+FILE_PATTERNS          = *.cpp *.cc *.h *.hpp *.py *.md
+EXCLUDE_PATTERNS       = */build*/* */.venv/* */__pycache__/* */conductor/*
 
 #---- extraction ----------------------------------------------------------------------------------
 EXTRACT_ALL            = YES
@@ -32,18 +30,19 @@ PYTHON_DOCSTRING       = YES
 TAB_SIZE               = 2
 DISTRIBUTE_GROUP_DOC   = YES
 
-#---- CUDA / preprocessor -------------------------------------------------------------------------
-# strip CUDA execution-space qualifiers so the C++ parser is not confused by them
+#---- Kokkos / preprocessor -----------------------------------------------------------------------
+# Strip Kokkos execution-space qualifiers so the C++ parser is not confused by them; the device
+# kernels are ordinary C++ (Kokkos routes them through nvcc/hipcc at build time, never .cu).
 ENABLE_PREPROCESSING   = YES
 MACRO_EXPANSION        = YES
 EXPAND_ONLY_PREDEF     = YES
-PREDEFINED             = __global__= \
-                         __device__= \
+PREDEFINED             = KOKKOS_INLINE_FUNCTION= \
+                         KOKKOS_FORCEINLINE_FUNCTION= \
+                         KOKKOS_FUNCTION= \
+                         KOKKOS_DEFAULTED_FUNCTION= \
                          __host__= \
-                         __forceinline__= \
-                         __restrict__= \
-                         __launch_bounds__(x)= \
-                         __shared__=
+                         __device__= \
+                         __restrict__=
 
 #---- presentation --------------------------------------------------------------------------------
 GENERATE_TREEVIEW      = YES

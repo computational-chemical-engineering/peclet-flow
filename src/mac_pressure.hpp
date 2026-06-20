@@ -1,10 +1,11 @@
-// cfd-gpu — portable (Kokkos) cut-cell pressure operator + Chorin projection.
-//
-// Kokkos port of the variable-coefficient pressure machinery (mg_build_op_k / mg_smooth_var_k from
-// mac_multigrid.cuh, diverg_open_k / correct_k from distributed_ns.cuh): the open-face-weighted Poisson
-// operator A = -div(open grad) built from the staggered face openness, its red-black Gauss-Seidel
-// smoother (solid cells AC~0 decoupled), the open-weighted flux divergence, and the staggered gradient
-// correction. gf = 1/h^2 per axis (1 in grid units). Runs on any Kokkos backend.
+/// @file
+/// @brief sdflow — portable (Kokkos) cut-cell pressure operator + Chorin projection.
+///
+/// Kokkos port of the variable-coefficient pressure machinery (mg_build_op_k / mg_smooth_var_k from
+/// mac_multigrid.cuh, diverg_open_k / correct_k from distributed_ns.cuh): the open-face-weighted Poisson
+/// operator A = -div(open grad) built from the staggered face openness, its red-black Gauss-Seidel
+/// smoother (solid cells AC~0 decoupled), the open-weighted flux divergence, and the staggered gradient
+/// correction. gf = 1/h^2 per axis (1 in grid units). Runs on any Kokkos backend.
 #ifndef CFD_MAC_PRESSURE_HPP
 #define CFD_MAC_PRESSURE_HPP
 

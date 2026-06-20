@@ -1,10 +1,11 @@
-// cfd-gpu — assembled single-GPU periodic Navier-Stokes step on Kokkos fields.
-//
-// Composes the ported operators into a Chorin projection step on a staggered MAC grid (periodic box,
-// ghost width 2): explicit Koren-TVD advection (optional) + backward-Euler implicit diffusion
-// (RB-GS) -> divergence -> pressure Poisson (RB-GS + mean removal) -> projection correction. Divided
-// convention (operator (1/dt)I - nu*Lap). Single GPU: the "halo" is a periodic ghost wrap. This is
-// the cfd analog of the packing demStep — it wires the validated kernels into a runnable solver.
+/// @file
+/// @brief sdflow — assembled single-GPU periodic Navier-Stokes step on Kokkos fields.
+///
+/// Composes the ported operators into a Chorin projection step on a staggered MAC grid (periodic box,
+/// ghost width 2): explicit Koren-TVD advection (optional) + backward-Euler implicit diffusion
+/// (RB-GS) -> divergence -> pressure Poisson (RB-GS + mean removal) -> projection correction. Divided
+/// convention (operator (1/dt)I - nu*Lap). Single GPU: the "halo" is a periodic ghost wrap. This is
+/// the cfd analog of the packing demStep — it wires the validated kernels into a runnable solver.
 #ifndef CFD_SDFLOW_HPP
 #define CFD_SDFLOW_HPP
 

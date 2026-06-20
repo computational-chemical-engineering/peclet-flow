@@ -1,10 +1,11 @@
-// cfd-gpu — portable (Kokkos) Robust-Scaled cut-cell IBM primitives + per-cut-cell overlay build.
-//
-// Kokkos port of cut_cell_ibm.cuh (the boundary-distance polynomials) and ibm_fill_entry from
-// mac_ibm.cuh (the per-cut-cell stencil-modification factors K/M/X/Nbc/R + D_rescale). Faithful copy
-// of the Dirichlet/Neumann, point-value(SCHEME 0)/cell-average(1), and sandwiched (double-sided) cases.
-// Output factors are written into Kokkos Views (SoA, [list_idx*6+k]); the build kernel fills one entry
-// per cut cell. KOKKOS_INLINE_FUNCTION so the math is shared with the host reference.
+/// @file
+/// @brief sdflow — portable (Kokkos) Robust-Scaled cut-cell IBM primitives + per-cut-cell overlay build.
+///
+/// Kokkos port of cut_cell_ibm.cuh (the boundary-distance polynomials) and ibm_fill_entry from
+/// mac_ibm.cuh (the per-cut-cell stencil-modification factors K/M/X/Nbc/R + D_rescale). Faithful copy
+/// of the Dirichlet/Neumann, point-value(SCHEME 0)/cell-average(1), and sandwiched (double-sided) cases.
+/// Output factors are written into Kokkos Views (SoA, [list_idx*6+k]); the build kernel fills one entry
+/// per cut cell. KOKKOS_INLINE_FUNCTION so the math is shared with the host reference.
 #ifndef CFD_CUT_CELL_IBM_HPP
 #define CFD_CUT_CELL_IBM_HPP
 

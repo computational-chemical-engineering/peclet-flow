@@ -1,9 +1,10 @@
-// cfd-gpu — portable (Kokkos) cut-cell pressure-operator face openness from an SDF.
-//
-// Kokkos port of mac_cutcell.cuh: the gradient-normalised masked fluid fraction (cc_fraction_core)
-// + trilinear SDF sampling, producing the staggered face openness ox/oy/oz (ox[i] = openness of the
-// -x face of cell i) over the extended (inner+ghost) block. Faithful copy of the fraction math.
-// KOKKOS_INLINE_FUNCTION so it is shared with the host reference. Runs on any Kokkos backend.
+/// @file
+/// @brief sdflow — portable (Kokkos) cut-cell pressure-operator face openness from an SDF.
+///
+/// Kokkos port of mac_cutcell.cuh: the gradient-normalised masked fluid fraction (cc_fraction_core)
+/// + trilinear SDF sampling, producing the staggered face openness ox/oy/oz (ox[i] = openness of the
+/// -x face of cell i) over the extended (inner+ghost) block. Faithful copy of the fraction math.
+/// KOKKOS_INLINE_FUNCTION so it is shared with the host reference. Runs on any Kokkos backend.
 #ifndef CFD_MAC_CUTCELL_HPP
 #define CFD_MAC_CUTCELL_HPP
 

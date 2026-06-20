@@ -1,10 +1,11 @@
-// cfd-gpu — portable (Kokkos) MAC stencil operators: Red-Black Gauss-Seidel smoothers + divergence.
-//
-// Kokkos port of the core stencil kernels in distributed_ns.cuh (diff_k, pois_k, diverg_k): per inner
-// cell, a 7-point stencil on the extended (inner+ghost) block, x-fastest. Red-Black Gauss-Seidel is
-// expressed as two parallel_for passes (color 0 then 1) with the global-parity filter
-// ((x+ogx)+(y+ogy)+(z+ogz))&1 == color — identical to the CUDA RB-GS (within a color the updates are
-// independent, so no data race). Faithful copy of the math. Runs on any Kokkos backend.
+/// @file
+/// @brief sdflow — portable (Kokkos) MAC stencil operators: Red-Black Gauss-Seidel smoothers + divergence.
+///
+/// Kokkos port of the core stencil kernels in distributed_ns.cuh (diff_k, pois_k, diverg_k): per inner
+/// cell, a 7-point stencil on the extended (inner+ghost) block, x-fastest. Red-Black Gauss-Seidel is
+/// expressed as two parallel_for passes (color 0 then 1) with the global-parity filter
+/// ((x+ogx)+(y+ogy)+(z+ogz))&1 == color — identical to the CUDA RB-GS (within a color the updates are
+/// independent, so no data race). Faithful copy of the math. Runs on any Kokkos backend.
 #ifndef CFD_MAC_STENCILS_HPP
 #define CFD_MAC_STENCILS_HPP
 

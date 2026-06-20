@@ -1,10 +1,11 @@
-// cfd-gpu — portable (Kokkos) global reductions over a MAC grid's inner (owned) cells.
-//
-// Kokkos port of the local reduction kernels in mac_reductions.cuh (reduce_block_k / dot_block_k /
-// subtract_k): sum, max|.|, inner-product, and mean-subtraction over the INNER cells of an extended
-// (inner+ghost) block, x-fastest layout. The block-shared-memory + per-block-atomic CUDA reduction
-// becomes a single Kokkos::parallel_reduce. The MPI_Allreduce that turns these local results global
-// is unchanged (host MPI) and lives in the caller. Runs on any Kokkos backend.
+/// @file
+/// @brief sdflow — portable (Kokkos) global reductions over a MAC grid's inner (owned) cells.
+///
+/// Kokkos port of the local reduction kernels in mac_reductions.cuh (reduce_block_k / dot_block_k /
+/// subtract_k): sum, max|.|, inner-product, and mean-subtraction over the INNER cells of an extended
+/// (inner+ghost) block, x-fastest layout. The block-shared-memory + per-block-atomic CUDA reduction
+/// becomes a single Kokkos::parallel_reduce. The MPI_Allreduce that turns these local results global
+/// is unchanged (host MPI) and lives in the caller. Runs on any Kokkos backend.
 #ifndef CFD_MAC_REDUCTIONS_HPP
 #define CFD_MAC_REDUCTIONS_HPP
 

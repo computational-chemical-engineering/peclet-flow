@@ -1,17 +1,18 @@
-// cfd-gpu — host-facing Kokkos IBM Navier-Stokes solver (drop-in sdflow-style API).
-//
-// Assembles the validated cut-cell IBM operators into a runnable solver on a fully-periodic MAC box with
-// immersed SDF solids: per-component backward-Euler implicit diffusion with the Robust-Scaled cut-cell
-// no-slip stencil (buildIbmOverlay + ibmBuildDiffusion + ibmModifyStencil + ibmSolidMask + ibmRbgsSweep),
-// then a rotational incremental-pressure Chorin projection through the open-face-weighted cut-cell pressure
-// Poisson (buildCutcellOp + divergOpen, solved by CG with the constant null space projected out, then
-// projectCorrect; P += (rho/dt)*phi - mu*div(u*) matching CUDA press_update_k). Schemes are a FAITHFUL port
-// of the CUDA sdflow (point-value cut-cell IBM = ibm_geometry_ext_k<0>; rotational pressure): the velocity
-// field matches CUDA to ~1e-13 (machine precision). Physical units (rho/mu/dt + body force). std::vector
-// setters/getters so a pybind module can drive it. The verify_poiseuille / verify_periodic_spheres mechanism
-// (k matches CUDA to all printed digits), on any backend. NOTE (faithfulness items, see memory): the CG uses
-// a diagonal preconditioner where CUDA uses RB-GS-preconditioned MG-PCG (same converged solution); the
-// pressure operator is stored double where CUDA uses float mreal -- to reconcile in a later port pass.
+/// @file
+/// @brief sdflow — host-facing Kokkos IBM Navier-Stokes solver (drop-in sdflow-style API).
+///
+/// Assembles the validated cut-cell IBM operators into a runnable solver on a fully-periodic MAC box with
+/// immersed SDF solids: per-component backward-Euler implicit diffusion with the Robust-Scaled cut-cell
+/// no-slip stencil (buildIbmOverlay + ibmBuildDiffusion + ibmModifyStencil + ibmSolidMask + ibmRbgsSweep),
+/// then a rotational incremental-pressure Chorin projection through the open-face-weighted cut-cell pressure
+/// Poisson (buildCutcellOp + divergOpen, solved by CG with the constant null space projected out, then
+/// projectCorrect; P += (rho/dt)*phi - mu*div(u*) matching CUDA press_update_k). Schemes are a FAITHFUL port
+/// of the CUDA sdflow (point-value cut-cell IBM = ibm_geometry_ext_k<0>; rotational pressure): the velocity
+/// field matches CUDA to ~1e-13 (machine precision). Physical units (rho/mu/dt + body force). std::vector
+/// setters/getters so a pybind module can drive it. The verify_poiseuille / verify_periodic_spheres mechanism
+/// (k matches CUDA to all printed digits), on any backend. NOTE (faithfulness items, see memory): the CG uses
+/// a diagonal preconditioner where CUDA uses RB-GS-preconditioned MG-PCG (same converged solution); the
+/// pressure operator is stored double where CUDA uses float mreal -- to reconcile in a later port pass.
 #ifndef CFD_SDFLOW_IBM_HPP
 #define CFD_SDFLOW_IBM_HPP
 

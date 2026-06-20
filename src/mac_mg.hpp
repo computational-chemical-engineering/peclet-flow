@@ -1,10 +1,11 @@
-// cfd-gpu — portable (Kokkos) geometric multigrid V-cycle for the periodic pressure Poisson.
-//
-// Assembles the ported operators (RB-GS smoother, averaging restriction, trilinear prolongation,
-// mean removal) into a correction-scheme V-cycle for Lap(phi)=d on a periodic staggered grid. Coarse
-// operators are the rediscretized constant-coefficient Laplacian at the level spacing (A = -Lap =
-// (6 phi - sum)/h^2). This replaces the slow plain RB-GS pressure solve in SdflowKokkos. Single GPU
-// (periodic ghost wrap per level). Any Kokkos backend.
+/// @file
+/// @brief sdflow — portable (Kokkos) geometric multigrid V-cycle for the periodic pressure Poisson.
+///
+/// Assembles the ported operators (RB-GS smoother, averaging restriction, trilinear prolongation,
+/// mean removal) into a correction-scheme V-cycle for Lap(phi)=d on a periodic staggered grid. Coarse
+/// operators are the rediscretized constant-coefficient Laplacian at the level spacing (A = -Lap =
+/// (6 phi - sum)/h^2). This replaces the slow plain RB-GS pressure solve in SdflowKokkos. Single GPU
+/// (periodic ghost wrap per level). Any Kokkos backend.
 #ifndef CFD_MAC_MG_HPP
 #define CFD_MAC_MG_HPP
 

@@ -3,7 +3,8 @@
 GPU-accelerated incompressible **Navier–Stokes** solver for flow in complex geometry, built around a
 staggered **MAC** grid, a signed-distance-field (**SDF**) description of the solid, a cut-cell **Immersed
 Boundary Method**, and a pressure-projection step with a geometric **multigrid** Poisson solve. The code is
-written in CUDA C++ and exposed to Python through `pybind11`; simulations are driven from Python.
+written in **Kokkos** C++ (one source runs on the CUDA, HIP/AMD, and OpenMP backends, selected at build
+time) and exposed to Python through `pybind11`; simulations are driven from Python.
 
 > The repository is also known as `pnm_from_sdf` (its GitLab origin) — it computes pore-network–scale flow
 > directly from segmented SDF geometry.
@@ -15,9 +16,11 @@ written in CUDA C++ and exposed to Python through `pybind11`; simulations are dr
 | **`sdflow`** | **The CFD solver** — a **distributed** (MPI-optional) GPU cut-cell IBM Navier–Stokes solver in physical units, built on the shared `transport-core` block-decomposition + async halo layer. One code / one API / MPI-optional, with native domain boundary conditions. Validated against analytics and **Zick & Homsy** sphere-array drag (`scripts/validate_zick_homsy_sdflow.py`). |
 | **`pnm`** | **Pore-network extraction** — SDF VTI reading + pore/segmentation/topology extraction (`SDFReader`, `extract_pores`, `segment_volume`, `extract_topology_gpu`). The repo's namesake "pnm_from_sdf" feature. |
 
-The original single-GPU `CFDSolver` reference (`src/cfd_solver*.cu`) has been **retired**; `sdflow` was
-validated bit-identical to it before removal (restore point: git tag `pnm_backend-reference`). The shared
-cut-cell IBM primitives now live in `src/cut_cell_ibm.cuh`.
+The original CUDA implementation has been **retired** (Kokkos became canonical, 2026-06); `sdflow` was
+validated bit-identical to the CUDA solver — to machine precision, and against Zick & Homsy sphere-array
+drag — before the CUDA sources were deleted (restore point: git tag `pre-cuda-retirement`). The shared
+cut-cell IBM primitives now live in `src/cut_cell_ibm.hpp`; the operator headers are `src/mac_*.hpp` +
+`src/sdflow_ibm.hpp`.
 
 ## Capabilities
 

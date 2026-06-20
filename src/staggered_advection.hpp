@@ -1,10 +1,11 @@
-// cfd-gpu — portable (Kokkos) staggered MAC momentum advection (Koren TVD + FOU).
-//
-// Kokkos port of staggered_advection.cuh: the Koren-limited conservative advection operator and its
-// first-order-upwind variant, on the local extended block (direct strides; ghosts halo-exchanged).
-// The math is a faithful copy (double precision, conservative flux form, +/-2 cell reach). A View
-// accessor replaces the CUDA LocAcc. The functions are KOKKOS_INLINE_FUNCTION so the same code runs
-// on device and is reused by the host reference in the test.
+/// @file
+/// @brief sdflow — portable (Kokkos) staggered MAC momentum advection (Koren TVD + FOU).
+///
+/// Kokkos port of staggered_advection.cuh: the Koren-limited conservative advection operator and its
+/// first-order-upwind variant, on the local extended block (direct strides; ghosts halo-exchanged).
+/// The math is a faithful copy (double precision, conservative flux form, +/-2 cell reach). A View
+/// accessor replaces the CUDA LocAcc. The functions are KOKKOS_INLINE_FUNCTION so the same code runs
+/// on device and is reused by the host reference in the test.
 #ifndef CFD_STAGGERED_ADVECTION_HPP
 #define CFD_STAGGERED_ADVECTION_HPP
 

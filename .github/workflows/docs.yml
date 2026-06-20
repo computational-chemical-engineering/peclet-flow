@@ -1,8 +1,9 @@
 name: Documentation
 
-# Build the Doxygen API documentation (CUDA C++ in src/, Python in scripts/ & tests/) and publish it to
-# GitHub Pages. Requires Pages to be enabled for the repository with "Source: GitHub Actions"
-# (Settings -> Pages). Runs on every push to main; can also be triggered manually.
+# Build the Doxygen API documentation (Kokkos C++ in src/, Python in scripts/ & tests/) and publish it
+# to GitHub Pages. Requires Pages to be enabled for the repository with "Source: GitHub Actions"
+# (Settings -> Pages). Runs on every push to main; can also be triggered manually. Doxygen only parses
+# the sources (no Kokkos toolchain needed), so this runs on a plain ubuntu runner.
 
 on:
   push:

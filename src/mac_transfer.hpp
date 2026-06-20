@@ -1,9 +1,10 @@
-// cfd-gpu — portable (Kokkos) multigrid transfer operators + projection velocity correction.
-//
-// Kokkos port of mg_restrict_k / mg_prolong_k (mac_multigrid.cuh) and correct_k (distributed_ns.cuh):
-// per-axis-ratio averaging restriction, trilinear prolongation (added to the fine solution), and the
-// staggered pressure-gradient velocity correction. Faithful copies; per-axis ratio (1 or 2) supports
-// semi-coarsening. Runs on any Kokkos backend.
+/// @file
+/// @brief sdflow — portable (Kokkos) multigrid transfer operators + projection velocity correction.
+///
+/// Kokkos port of mg_restrict_k / mg_prolong_k (mac_multigrid.cuh) and correct_k (distributed_ns.cuh):
+/// per-axis-ratio averaging restriction, trilinear prolongation (added to the fine solution), and the
+/// staggered pressure-gradient velocity correction. Faithful copies; per-axis ratio (1 or 2) supports
+/// semi-coarsening. Runs on any Kokkos backend.
 #ifndef CFD_MAC_TRANSFER_HPP
 #define CFD_MAC_TRANSFER_HPP
 

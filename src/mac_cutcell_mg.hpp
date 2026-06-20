@@ -1,13 +1,14 @@
-// cfd-gpu — portable (Kokkos) geometric multigrid for the cut-cell (variable-openness) pressure Poisson.
-//
-// Single-GPU (periodic) port of CUDA's DistributedPoissonMG (mac_multigrid.cuh): a level hierarchy with the
-// rediscretized cut-cell operator (average-coarsen the face openness per level + re-assemble the operator at
-// the coarse spacing, mg_coarsen_open_avg_k), a V-cycle with red-black Gauss-Seidel smoothing + average
-// restriction + trilinear prolongation + constant-null-space (mean) removal, and an MG-PCG outer driver
-// (CG preconditioned by one symmetric V-cycle). Operator stored single-precision (mreal=float) + double
-// iterate, exactly as CUDA. Reuses buildCutcellOp / cutcellSmoothColor / applyCutcellOp (mac_pressure).
-// Not yet ported (noted for later): Galerkin coarse op, Chebyshev smoother, semi-coarsening, domain-BC MG,
-// MPI. Runs on any Kokkos backend.
+/// @file
+/// @brief sdflow — portable (Kokkos) geometric multigrid for the cut-cell (variable-openness) pressure Poisson.
+///
+/// Single-GPU (periodic) port of CUDA's DistributedPoissonMG (mac_multigrid.cuh): a level hierarchy with the
+/// rediscretized cut-cell operator (average-coarsen the face openness per level + re-assemble the operator at
+/// the coarse spacing, mg_coarsen_open_avg_k), a V-cycle with red-black Gauss-Seidel smoothing + average
+/// restriction + trilinear prolongation + constant-null-space (mean) removal, and an MG-PCG outer driver
+/// (CG preconditioned by one symmetric V-cycle). Operator stored single-precision (mreal=float) + double
+/// iterate, exactly as CUDA. Reuses buildCutcellOp / cutcellSmoothColor / applyCutcellOp (mac_pressure).
+/// Not yet ported (noted for later): Galerkin coarse op, Chebyshev smoother, semi-coarsening, domain-BC MG,
+/// MPI. Runs on any Kokkos backend.
 #ifndef CFD_MAC_CUTCELL_MG_HPP
 #define CFD_MAC_CUTCELL_MG_HPP
 

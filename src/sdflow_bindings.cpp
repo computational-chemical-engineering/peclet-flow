@@ -1,11 +1,13 @@
-// cfd-gpu — pybind11 module for the Kokkos IBM Navier-Stokes solver (drop-in for the sdflow Solver API).
-//
-// A Kokkos+Blackwell drop-in for the sdflow Solver exercised by verify_poiseuille_sdflow (IBM channel)
-// and verify_periodic_spheres_sdflow (cut-cell Stokes through a sphere packing): set rho/mu/dt, a body
-// force, an SDF solid (cut-cell IBM no-slip + optional cut-cell pressure projection), step, read back the
-// velocity/pressure, and query the cut-cell flux divergence. Kokkos is initialized at import and finalized
-// via Python atexit (the solver holds Kokkos Views, so callers must release the Solver before exit -- del
-// + gc.collect()). rank()/bcast_from_root() are single-rank stubs (MPI is a follow-up).
+/// @file
+/// @brief pybind11 module `sdflow` — the Kokkos cut-cell IBM Navier-Stokes solver (`sdflow.Solver`).
+///
+/// Exposes sdflow::SdflowIbm to Python: set rho/mu/dt, a body force, an SDF solid (cut-cell IBM no-slip
+/// + optional cut-cell pressure projection), step, read back the velocity/pressure, and query the
+/// cut-cell flux divergence. Exercised by verify_poiseuille_sdflow (IBM channel) and
+/// verify_periodic_spheres_sdflow (cut-cell Stokes through a sphere packing). Kokkos is initialized at
+/// import and finalized via Python atexit (the solver holds Kokkos Views, so callers must release the
+/// Solver before exit -- del + gc.collect()). rank()/bcast_from_root() are single-rank stubs (the
+/// multi-rank path lives in tests/kokkos_mpi).
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -29,7 +31,7 @@ static py::array_t<double> to_xyz(const std::vector<double>& v, int nx, int ny, 
 }
 
 PYBIND11_MODULE(sdflow, m) {
-  m.doc() = "cfd-gpu sdflow (Kokkos) IBM Navier-Stokes solver";
+  m.doc() = "sdflow (Kokkos) cut-cell IBM incompressible Navier-Stokes solver";
   if (!Kokkos::is_initialized()) Kokkos::initialize();
   py::module_::import("atexit").attr("register")(py::cpp_function([]() {
     if (Kokkos::is_initialized() && !Kokkos::is_finalized()) Kokkos::finalize();
