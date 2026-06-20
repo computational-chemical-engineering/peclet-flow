@@ -230,6 +230,22 @@ class SdflowIbm {
   }
   // Fill ghost width G periodically on all 3 axes (x then y then z, covering corners).
   void fillGhosts(CCField f) { fillAxis(f,0); fillAxis(f,1); fillAxis(f,2); }
+  // Fused periodic FACE-ghost fill in ONE kernel (vs 3 fillAxis): each inner boundary cell scatters its
+  // periodic image to the opposite face ghost, all 3 axes at once. Valid only for FACE-neighbour (7-point)
+  // stencils -- it does NOT fill the corner/edge ghosts (which fillAxis's sequential x->y->z does). The IBM
+  // RB-GS smoother reads only the 7-point stencil, so this is exact there and cuts the velocity solve's
+  // dominant kernel-launch cost (~7200 -> ~2400 fill launches/step) at low resolution. NOT for the Koren
+  // advection RHS (reads diagonals) -- keep the full fillGhosts there.
+  void fillGhostsFaces(CCField f) {
+    CCExec space; C3 e=e_; const int Nx=nx_,Ny=ny_,Nz=nz_; const long sx=1,sy=e.x,sz=(long)e.x*e.y; CCField ff=f;
+    Kokkos::parallel_for("cfdk::ibm_facefill", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
+      KOKKOS_LAMBDA(long n){
+        const int ix=(int)(n%Nx), iy=(int)((n/Nx)%Ny), iz=(int)(n/((long)Nx*Ny));
+        const long i=(long)(ix+G)*sx+(long)(iy+G)*sy+(long)(iz+G)*sz;
+        if (ix<G) ff(i+(long)Nx*sx)=ff(i); else if (ix>=Nx-G) ff(i-(long)Nx*sx)=ff(i);
+        if (iy<G) ff(i+(long)Ny*sy)=ff(i); else if (iy>=Ny-G) ff(i-(long)Ny*sy)=ff(i);
+        if (iz<G) ff(i+(long)Nz*sz)=ff(i); else if (iz>=Nz-G) ff(i-(long)Nz*sz)=ff(i); });
+  }
   void fillAxis(CCField f, int axis) {
     CCExec space; C3 e=e_; int N3[3]={nx_,ny_,nz_};
     int dims[3]={e.x,e.y,e.z}; long st[3]={1,e.x,(long)e.x*e.y};
@@ -330,10 +346,10 @@ class SdflowIbm {
       return;
     }
     for (int it = 0; it < velIters_; ++it) {  // IBM / periodic: Robust-Scaled cut-cell stencil (float)
-      fillGhosts(C[c].u);
+      fillGhostsFaces(C[c].u);  // 7-point smoother reads faces only -> the fused 1-kernel face fill suffices
       ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
                           MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, C3{0,0,0}, G, 0);
-      fillGhosts(C[c].u);
+      fillGhostsFaces(C[c].u);
       ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
                           MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, C3{0,0,0}, G, 1);
     }
