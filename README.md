@@ -1,4 +1,4 @@
-# cfd-gpu
+# sdflow
 
 GPU-accelerated incompressible **Navier–Stokes** solver for flow in complex geometry, built around a
 staggered **MAC** grid, a signed-distance-field (**SDF**) description of the solid, a cut-cell **Immersed
