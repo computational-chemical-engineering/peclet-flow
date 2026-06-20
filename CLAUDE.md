@@ -4,49 +4,67 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-GPU-accelerated incompressible Navier-Stokes CFD solver for porous media simulations. Uses a staggered MAC grid with the Immersed Boundary Method (IBM) over complex geometries defined by Signed Distance Functions (SDF), with cut-cell pressure projection.
+Performance-portable incompressible Navier-Stokes CFD solver for porous media simulations. Uses a staggered MAC grid with the Immersed Boundary Method (IBM) over complex geometries defined by Signed Distance Functions (SDF), with cut-cell pressure projection. Built on **Kokkos** — the same source runs on **CUDA, HIP (AMD/LUMI), and OpenMP** backends, selected at build time by the install prefix.
 
-**`sdflow` is THE solver** (`src/sdflow_bindings.cu` → `dns::DistributedNS` in `src/distributed_ns.cuh`):
-cut-cell IBM physics on a staggered MAC grid, MPI-optional (single-GPU by default), with a grid-independent
-geometric **multigrid** pressure solve. It solves the equations in **physical units** (density `rho`,
-dynamic viscosity `mu`, physical pressure `p`). See the "MPI / sdflow" section below and
-[`doc/sdflow_multigrid_plan.md`](doc/sdflow_multigrid_plan.md).
+**`sdflow` is THE solver** (`src/sdflow_bindings.cpp` → `dns::SdflowIbm` in `src/sdflow_ibm.hpp`):
+cut-cell IBM physics on a staggered MAC grid, with a grid-independent geometric **multigrid** pressure
+solve, and a multi-rank MPI path (transport-core grid halo). It solves the equations in **physical units**
+(density `rho`, dynamic viscosity `mu`, physical pressure `p`). See the "MPI / sdflow" section below.
 
-The original single-GPU `CFDSolver` reference (`src/cfd_solver*.cu`) has been **retired** — `sdflow` was
-validated bit-identical to it (and to the Zick & Homsy sphere-array Stokes drag) before its removal; the
-restore point is the git tag `pnm_backend-reference`. The shared cut-cell IBM primitives it provided
-(`get_idx`, `IBM_Data`, the Robust-Scaled `poly_*`) now live in `src/cut_cell_ibm.cuh`.
+The CUDA implementation was **retired** (Kokkos became canonical, 2026-06): `sdflow` was validated
+bit-identical to the CUDA solver (machine-precision, and against the Zick & Homsy sphere-array Stokes drag)
+before the CUDA sources were deleted. Restore point: the git tag `pre-cuda-retirement`. The cut-cell IBM
+primitives live in `src/cut_cell_ibm.hpp`; the operator headers are `src/mac_*.hpp` + `src/sdflow_ibm.hpp`.
 
-**`pnm_backend` is now the pore-network-extraction module** (`src/bindings.cpp` + `src/pore_extraction.cu`):
-`SDFReader`, `extract_pores`, `segment_volume`, `extract_topology_gpu` — the repo's namesake "pnm_from_sdf"
-feature, unrelated to the CFD solve.
+**`pnm_backend` is the pore-network-extraction module** (`src/pnm_bindings.cpp` + `src/pore_extraction.hpp`
+Kokkos compute + the pure-C++ `src/sdf_reader.cpp` VTI reader): `SDFReader`, `extract_pores`,
+`segment_volume`, `extract_topology_gpu` — the repo's namesake "pnm_from_sdf" feature, unrelated to the CFD solve.
 
 ## Build Commands
 
-```bash
-# Default build (single-GPU, no MPI): the sdflow solver + the pnm_backend pore-extraction module
-cmake -S . -B build && cmake --build build -j
-# Output: build/sdflow.so (the CFD solver, single-rank, TPX_NO_MPI) + build/pnm_backend.so (pore extraction)
+Kokkos + pybind11 are found via `find_package` against the bootstrapped install prefix
+(`../extern/install/<backend>`, built once by `../tools/bootstrap_deps.sh` — a **hard build dependency**;
+backend = `nvidia-cuda` / `host-openmp` / `lumi-hip`). With `nvcc`, put it on `PATH`
+(`export PATH=/usr/local/cuda-13.2/bin:$PATH`).
 
-# Multi-rank build (opt-in): adds the MPI-linked sdflow + the *_mpi ctest suite (see the MPI section)
-cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun && cmake --build build_mpi -j
+```bash
+source .venv/bin/activate
+# Canonical build: the sdflow solver + the pnm_backend pore-extraction module (single-rank Python modules).
+cmake -S . -B build \
+  -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda;$(python -m pybind11 --cmakedir)"
+cmake --build build -j
+# Output: build/sdflow.*.so (the CFD solver) + build/pnm_backend.*.so (pore extraction)
+
+# OpenMP backend: same source, just swap the prefix (extern/install/host-openmp).
 ```
 
-**Requirements:** CUDA Toolkit, CMake 3.18+, Python 3.10+, C++17 (+ MPI & `../transport-core` for the multi-rank build)
+**Requirements:** Kokkos 5.x (C++20), CMake 3.24+, Python 3.10+, pybind11; `../transport-core` (header-only)
++ MPI for the multi-rank test suite. The Kokkos/ArborX install prefix is produced by `../tools/bootstrap_deps.sh`.
 
 ## Running Tests and Verification
 
-Drive `sdflow` verification from Python and run the C++ ctest suite:
+Drive `sdflow` verification from Python:
 ```bash
 source .venv/bin/activate
-PYTHONPATH=$PWD/build_mpi python scripts/verify_periodic_spheres_sdflow.py   # cut-cell Stokes
-PYTHONPATH=$PWD/build_mpi python scripts/verify_poiseuille_sdflow.py         # analytic parabola
-PYTHONPATH=$PWD/build_mpi python scripts/verify_lid_cavity_sdflow.py         # lid cavity vs Ghia
-PYTHONPATH=$PWD/build_mpi python scripts/verify_channel_sdflow.py            # developing channel
-PYTHONPATH=$PWD/build_mpi python scripts/verify_bfs_sdflow.py               # backward-facing step
-PYTHONPATH=$PWD/build_mpi python scripts/validate_zick_homsy_sdflow.py       # external ground truth (Z&H drag)
-ctest --test-dir build_mpi --output-on-failure                              # 72 multi-rank tests (np=1,2,4)
-mpirun -np 1 ./build_mpi/profile_mg_scaling 32 64 128                       # pressure-solver scaling/timing
+export PYTHONPATH=$PWD/build
+python scripts/verify_periodic_spheres_sdflow.py   # cut-cell Stokes through a sphere packing
+python scripts/verify_poiseuille_sdflow.py         # analytic parabola
+python scripts/verify_lid_cavity_sdflow.py         # lid cavity vs Ghia
+python scripts/verify_channel_sdflow.py            # developing channel
+python scripts/verify_bfs_sdflow.py                # backward-facing step
+python scripts/verify_chebyshev_sdflow.py          # Chebyshev pressure driver == MG-PCG
+python scripts/validate_zick_homsy_sdflow.py       # external ground truth (Z&H drag)
+```
+
+C++ kernel + multi-rank test suites (own `find_package` projects; build against the same prefix):
+```bash
+# Single-rank Kokkos kernel unit tests:
+cmake -S tests/kokkos -B build_kokkos -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda
+cmake --build build_kokkos -j && ctest --test-dir build_kokkos --output-on-failure   # 14 tests
+# Multi-rank (MPI) tests, np=1,2,4:
+cmake -S tests/kokkos_mpi -B build_kmpi -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
+  -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
+cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure       # 18 tests (6 x np)
 ```
 
 Single-GPU **accuracy + efficiency regression suite** (grid-convergence + recorded solver-iteration
@@ -80,17 +98,20 @@ mu*Lap`, well-conditioned at large dt / steady state):
 
 ### Key Source Files
 
+All Kokkos, header-only (`namespace dns`), C++20.
+
 **`sdflow` (the CFD solver):**
-- `src/distributed_ns.cuh` - `DistributedNS`: the solver (diffusion, projection, three pressure drivers)
-- `src/mac_multigrid.cuh` - `DistributedPoissonMG`: distributed MG (V-cycle / PCG / Chebyshev), coarse-op modes
-- `src/mac_ibm.cuh`, `src/mac_cutcell.cuh`, `src/mac_halo.cuh`, `src/mac_reductions.cuh` - IBM stencil, cut-cell openness, halo, reductions
-- `src/cut_cell_ibm.cuh` - shared cut-cell IBM primitives (`get_idx`, `IBM_Data`, Robust-Scaled `poly_*`)
-- `src/staggered_advection.cuh` - staggered Koren TVD advection
-- `src/sdflow_bindings.cu` - the `sdflow` pybind module (`sdflow.Solver`)
+- `src/sdflow_ibm.hpp` - `dns::SdflowIbm`: the solver (diffusion, projection, three pressure drivers, Picard, MPI)
+- `src/mac_cutcell_mg.hpp` - `CutcellMG`: geometric pressure MG (V-cycle / PCG / Chebyshev), MPI-folded
+- `src/mac_velocity_mg.hpp` - `VelocityMG`: velocity multigrid (staircase / upwind / domain-BC), MPI-folded
+- `src/mac_ibm.hpp`, `src/mac_cutcell.hpp`, `src/mac_pressure.hpp`, `src/mac_bc.hpp`, `src/mac_reductions.hpp` - IBM stencil, cut-cell openness, projection, domain BCs, reductions
+- `src/cut_cell_ibm.hpp` - the Robust-Scaled cut-cell IBM overlay (`poly_*`, K/M/X/Nbc/R, D_rescale)
+- `src/staggered_advection.hpp` - `sadv::advect`: staggered Koren TVD advection (+ implicit-FOU operator)
+- `src/sdflow_bindings.cpp` - the `sdflow` pybind module (`sdflow.Solver`)
 
 **`pnm_backend` (pore-network extraction):**
-- `src/pore_extraction.cu` / `.cuh`, `src/sdf_reader.cpp` / `.h` - SDF VTI reading + pore/topology extraction
-- `src/bindings.cpp` - the `pnm_backend` pybind module (`SDFReader`, `extract_pores`, `segment_volume`, ...)
+- `src/pore_extraction.hpp` (`namespace pnm`, Kokkos compute), `src/sdf_reader.cpp` / `.h` (pure-C++ VTI reader)
+- `src/pnm_bindings.cpp` - the `pnm_backend` pybind module (`SDFReader`, `extract_pores`, `segment_volume`, ...)
 
 ## Python API Usage (`sdflow`)
 
@@ -109,34 +130,32 @@ See the "Pressure solver options" table below and `scripts/*_sdflow.py` for the 
 ## Conventions
 
 - **SDF sign**: Negative inside solid, positive in fluid
-- **CUDA kernels**: Named with `_kernel` suffix
+- **Kokkos kernels**: `parallel_for` / `parallel_reduce` over `Kokkos::View`s (`MDRangePolicy` for 3-D loops); device sources are `.hpp` compiled as C++ (the launch compiler routes through `nvcc`/`hipcc`), never `.cu`
 - **Staggered grid**: u at (i+1/2,j,k), v at (i,j+1/2,k), w at (i,j,k+1/2), p at cell centers
 
 ## MPI / sdflow (the CFD solver, transport-core integration)
 
-The **`sdflow`** module is the incompressible Navier–Stokes solver, built on the shared
-`transport-core` library (sibling repo `../transport-core`). It is **MPI-optional** — single-GPU by
-default, multi-rank with `-DCFD_BUILD_MPI=ON`. It was validated bit-identical to the retired `CFDSolver`
-reference (tag `pnm_backend-reference`) and against external analytics. Full status:
-[`doc/mpi_parallelization_status.md`](doc/mpi_parallelization_status.md).
+The **`sdflow`** solver (`dns::SdflowIbm`) is built on the shared `transport-core` library (sibling repo
+`../transport-core`), whose **Kokkos** grid halo (`tpx::halo::DeviceGridExchangeKokkos`) carries the
+multi-rank ghost exchange. The single-rank Python module is built by the main `CMakeLists.txt`; the
+multi-rank path is exercised by the `tests/kokkos_mpi` ctests (gated behind `CFD_MPI`, so the single-rank
+module is byte-identical). It was validated bit-identical (machine precision) to the retired CUDA solver
+and against external analytics.
 
-Key pieces (all `src/*.cuh`, header-only, on `main`):
-- `mac_halo.cuh` — `MacGridHalo`: decomposes the global MAC cell grid (ORB) into rank-owned blocks and
-  exchanges a ghost layer (configurable width; 2 for the Koren advection reach) for `double`
-  cell-fields on the extended local block. cfd's x-fastest indexing means the halo drops in directly.
-- `staggered_advection.cuh` — `sadv::advect`: cfd's exact staggered Koren TVD advection, templated on a
-  field accessor so the same operator serves the full grid and a local block.
-- `distributed_ns.cuh` — `dns::DistributedNS`: the reusable solver. `step(n_diff, n_pois)`
-  does per-component implicit diffusion (RB-GS, halo exchange between sweeps) + Chorin projection, with
-  `set_advection(true)` (full Navier–Stokes), `set_body_force`, `set_solid` (no-slip masking), and
-  `gather_to_root` (assemble the global field for VTI output via `tpx::geom`).
+Key pieces (all `src/*.hpp`, Kokkos, header-only, `namespace dns`):
+- `tpx::halo::DeviceGridExchangeKokkos` (transport-core) — per-level ORB block ghost exchange for the
+  `double` cell-fields on the extended local block. cfd's x-fastest layout matches `tpx::Field3D`.
+- `staggered_advection.hpp` — `sadv::advect`: staggered Koren TVD advection, templated on a field accessor.
+- `sdflow_ibm.hpp` — `dns::SdflowIbm`: the solver. `step()` does per-component implicit diffusion
+  (RB-GS or velocity-MG, halo exchange between sweeps) + cut-cell incremental-rotational projection, with
+  `set_advection`/`set_implicit_advection`, `set_body_force`, `set_solid` (cut-cell IBM no-slip), domain
+  BCs, and `initMpi(gnx,gny,gnz,comm)` for the multi-rank step.
 
-### Pressure solver options (the `sdflow` module / `DistributedNS`)
+### Pressure solver options (the `sdflow` module)
 
-The canonical solver is exposed as the `sdflow` Python module (`src/sdflow_bindings.cu`, class
-`sdflow.Solver`). Its cut-cell pressure Poisson is solved by a geometric **multigrid** whose smoother is
-**Red-Black Gauss-Seidel** and whose coarse operator is the **rediscretized** cut-cell operator
-(`mac_multigrid.cuh`). Three outer drivers wrap that V-cycle — **select one per solver**:
+The cut-cell pressure Poisson is solved by a geometric **multigrid** (`mac_cutcell_mg.hpp`, `CutcellMG`)
+whose smoother is **Red-Black Gauss-Seidel** and whose coarse operator is the **rediscretized** cut-cell
+operator. Three outer drivers wrap that V-cycle — **select one per solver**:
 
 | driver | select with | use |
 |---|---|---|
@@ -154,7 +173,7 @@ The canonical solver is exposed as the `sdflow` Python module (`src/sdflow_bindi
 
 ### Domain boundary conditions
 
-Beyond periodic + IBM no-slip on immersed solids, sdflow has **native per-face domain BCs** (`mac_bc.cuh`):
+Beyond periodic + IBM no-slip on immersed solids, sdflow has **native per-face domain BCs** (`mac_bc.hpp`):
 `set_domain_bc(face, type, vx, vy, vz)` for the 6 faces (0=−x,1=+x,2=−y,3=+y,4=−z,5=+z); `type` 0=periodic
 (default), 1=no-slip wall, 2=Dirichlet velocity / inflow, 3=outflow. Velocity ghosts are filled in the
 MAC-staggered convention. Tangential walls use a **face-fold** in the implicit diffusion (drop the wall
@@ -191,31 +210,31 @@ so `init(..., semi=true)` halves an axis only while it stays even and ≥2 — a
 wide axes keep coarsening (`MGLevel::ratio`/`cfac`; the transfer + openness kernels take a per-axis
 `int3 ratio`, the operator uses per-axis `idx2/cfac²`). The solver enables it only for native-BC problems
 (`has_domain_bc_`, `semi_level_count`); the periodic/IBM porous path stays uniform + `clamp_levels`, so it
-is byte-identical (72/72). A quasi-2D 256×64×4 channel now builds up to 8 levels (was 2): raw V-cycle flux
+is byte-identical. A quasi-2D 256×64×4 channel now builds up to 8 levels (was 2): raw V-cycle flux
 divergence at a fixed 8 cycles drops `1.7e-4`→`8.6e-13`. The BC verify scripts request `levels=8`
 (auto-capped). *Follow-ups:* convective outflow for unsteady wakes, multi-rank inlet-profile scatter
 (validated single-rank).
 
-Validated cell-for-cell vs serial and against analytics (Taylor–Green ~2e-15, Poiseuille, momentum
-conservation) **and against Zick & Homsy sphere-array drag** — **72/72 ctests, real multi-rank np=1,2,4**.
+Validated against analytics (Taylor–Green ~2e-15, Poiseuille, momentum conservation) **and against Zick &
+Homsy sphere-array drag**; the multi-rank step is bit-exact to the single-rank — **18 `tests/kokkos_mpi`
+ctests, real multi-rank np=1,2,4, on CUDA + OpenMP**.
 
-Build/test (opt-in; default module build untouched):
+Build/test the multi-rank ctests:
 ```bash
 export PATH=/usr/local/cuda-13.2/bin:$PATH
-cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON \
-  -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun \
-  -DFETCHCONTENT_SOURCE_DIR_PYBIND11=$PWD/build/_deps/pybind11-src
-cmake --build build_mpi -j
-ctest --test-dir build_mpi --output-on-failure
+cmake -S tests/kokkos_mpi -B build_kmpi \
+  -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
+  -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
+cmake --build build_kmpi -j
+ctest --test-dir build_kmpi --output-on-failure
 ```
 **Force `-DMPIEXEC_EXECUTABLE=/usr/bin/mpirun`** — FindMPI may pick ParaView's bundled `mpiexec` on
 `PATH`, which launches the OpenMPI-linked test binaries as singletons (so `*_np4` silently runs 4×np=1).
 
-**Status:** `DistributedNS`/`sdflow` is the full solver, not a prototype — extended-block state, MPI
-global reductions, the Robust-Scaled cut-cell IBM, and a grid-independent geometric **multigrid**
-pressure solve (rediscretized cut-cell coarse operator; three selectable outer drivers — see the
-"Pressure solver options" table above) are all done and validated against Zick & Homsy (and, before its
-retirement, bit-identical to the `CFDSolver` reference). The old `CFDSolver` reference is **retired** (tag
-`pnm_backend-reference` is the restore point). **Remaining open items:** the large-np scaling work — an
-**agglomerated coarse solve** and the communication-light **Chebyshev** accelerator's at-scale benchmark,
-both needing real multi-GPU hardware (designs in [`doc/sdflow_multigrid_plan.md`](doc/sdflow_multigrid_plan.md)).
+**Status:** `dns::SdflowIbm`/`sdflow` is the full solver — the Robust-Scaled cut-cell IBM, a grid-independent
+geometric **multigrid** pressure solve (rediscretized cut-cell coarse operator; three selectable outer
+drivers), velocity multigrid, implicit-FOU + Picard, all domain BCs, and a bit-exact multi-rank step
+(`CutcellMG` + `VelocityMG` MPI-folded). The CUDA implementation is **retired** (restore tag
+`pre-cuda-retirement`). **Remaining open items:** the large-np scaling work — an **agglomerated coarse
+solve** and the communication-light **Chebyshev** accelerator's at-scale benchmark, both needing real
+multi-GPU hardware.
