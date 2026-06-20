@@ -40,32 +40,37 @@ PYBIND11_MODULE(sdflow, m) {
 
   py::class_<SdflowIbm>(m, "Solver")
       .def(py::init<int, int, int>(), py::arg("nx"), py::arg("ny"), py::arg("nz"))
-      .def("set_rho", &SdflowIbm::setRho)
-      .def("set_mu", &SdflowIbm::setMu)
-      .def("set_dt", &SdflowIbm::setDt)
-      .def("set_body_force", &SdflowIbm::setBodyForce)
-      .def("set_advection", &SdflowIbm::setAdvection)
-      .def("set_incremental_pressure", &SdflowIbm::setIncrementalPressure, py::arg("on"))
-      .def("set_pressure_warmstart", &SdflowIbm::setPressureWarmstart, py::arg("on"))
-      .def("set_velocity_streams", &SdflowIbm::setVelocityStreams, py::arg("on"))
-      .def("set_implicit_advection", &SdflowIbm::setImplicitAdvection, py::arg("on"))
-      .def("set_outer_iterations", &SdflowIbm::setOuterIterations, py::arg("n"))
-      .def("set_outer_tolerance", &SdflowIbm::setOuterTolerance, py::arg("tol"))
-      .def("last_outer_iterations", &SdflowIbm::lastOuterIterations)
-      .def("set_velocity_solver_params", &SdflowIbm::setVelocityIterations, py::arg("iters"))
-      .def("set_pressure_solver_params", &SdflowIbm::setPressureIterations, py::arg("iters"))
+      .def("set_rho", &SdflowIbm::setRho, "Set fluid density rho (physical units). Set before geometry/first step.")
+      .def("set_mu", &SdflowIbm::setMu, "Set dynamic viscosity mu (physical units).")
+      .def("set_dt", &SdflowIbm::setDt, "Set the time step dt; the momentum solve is scaled by 1/dt (well-conditioned at large dt).")
+      .def("set_body_force", &SdflowIbm::setBodyForce, "Set the body force per unit volume (fx, fy, fz).")
+      .def("set_advection", &SdflowIbm::setAdvection, "Enable/disable explicit Koren-TVD momentum advection.")
+      .def("set_incremental_pressure", &SdflowIbm::setIncrementalPressure, py::arg("on"), "Toggle the rotational incremental-pressure projection.")
+      .def("set_pressure_warmstart", &SdflowIbm::setPressureWarmstart, py::arg("on"), "Seed each pressure solve from the previous step's phi (default off).")
+      .def("set_velocity_streams", &SdflowIbm::setVelocityStreams, py::arg("on"), "Toggle overlapped per-component velocity solves.")
+      .def("set_implicit_advection", &SdflowIbm::setImplicitAdvection, py::arg("on"), "Use implicit-FOU advection with deferred-correction TVD.")
+      .def("set_outer_iterations", &SdflowIbm::setOuterIterations, py::arg("n"), "Set the number of Picard/outer iterations per step.")
+      .def("set_outer_tolerance", &SdflowIbm::setOuterTolerance, py::arg("tol"), "Set the outer (Picard) convergence tolerance.")
+      .def("last_outer_iterations", &SdflowIbm::lastOuterIterations, "Return the outer-iteration count from the last step().")
+      .def("set_velocity_solver_params", &SdflowIbm::setVelocityIterations, py::arg("iters"), "Set the velocity (diffusion) smoother iteration count.")
+      .def("set_pressure_solver_params", &SdflowIbm::setPressureIterations, py::arg("iters"), "Set the pressure smoother iteration count.")
       .def("set_pressure_multigrid",
            [](SdflowIbm& s, bool, int levels) { s.setPressureLevels(levels); },
-           py::arg("on"), py::arg("levels") = 4)
+           py::arg("on"), py::arg("levels") = 4,
+           "Set the pressure multigrid depth (levels=1 => pure RB-GS, no coarse grid).")
       .def("set_pressure_chebyshev", &SdflowIbm::setPressureChebyshev,
-           py::arg("on"), py::arg("max_iter") = 120, py::arg("rtol") = 1e-9)
+           py::arg("on"), py::arg("max_iter") = 120, py::arg("rtol") = 1e-9,
+           "Use the communication-light Chebyshev pressure accelerator (exclusive with PCG).")
       .def("set_pressure_pcg", &SdflowIbm::setPressurePcg,
-           py::arg("on"), py::arg("max_iter") = 200, py::arg("rtol") = 1e-8)
+           py::arg("on"), py::arg("max_iter") = 200, py::arg("rtol") = 1e-8,
+           "Use the MG-PCG pressure accelerator (single-GPU default; exclusive with Chebyshev).")
       .def("set_velocity_multigrid", &SdflowIbm::setVelocityMultigrid,
-           py::arg("on"), py::arg("levels") = 4, py::arg("vcycles") = 8)
-      .def("last_pressure_iterations", &SdflowIbm::lastPressureIterations)
+           py::arg("on"), py::arg("levels") = 4, py::arg("vcycles") = 8,
+           "Enable velocity (momentum) multigrid for the implicit diffusion solve.")
+      .def("last_pressure_iterations", &SdflowIbm::lastPressureIterations, "Return the pressure-solver iteration count from the last step().")
       .def("set_domain_bc", &SdflowIbm::setDomainBc,
-           py::arg("face"), py::arg("type"), py::arg("vx") = 0.0, py::arg("vy") = 0.0, py::arg("vz") = 0.0)
+           py::arg("face"), py::arg("type"), py::arg("vx") = 0.0, py::arg("vy") = 0.0, py::arg("vz") = 0.0,
+           "Set a per-face domain BC (face 0..5 = -x,+x,-y,+y,-z,+z; type 0 periodic/1 wall/2 inflow/3 outflow).")
       .def("set_domain_bc_profile",
            [](SdflowIbm& s, int face, py::array_t<double, py::array::c_style | py::array::forcecast> prof) {
              auto b = prof.request();
@@ -74,13 +79,15 @@ PYBIND11_MODULE(sdflow, m) {
              std::vector<double> v((size_t)nb * nc * 3);
              std::memcpy(v.data(), b.ptr, v.size() * sizeof(double));
              s.setDomainBcProfile(face, v, nb, nc);
-           })
+           },
+           "Prescribe a per-position inlet velocity profile (Nb,Nc,3) over a face (sets it to inflow).")
       .def("set_pressure_geometry",
            [](SdflowIbm& s, py::array_t<double, py::array::f_style | py::array::forcecast> sdf) {
              std::vector<double> v(static_cast<size_t>(sdf.size()));
              std::memcpy(v.data(), sdf.data(), v.size() * sizeof(double));
              s.setPressureGeometry(v);
-           })
+           },
+           "Set an all-fluid SDF for the cut-cell pressure operator without an immersed solid.")
       .def("set_solid",
            [](SdflowIbm& s, py::array_t<double, py::array::f_style | py::array::forcecast> sdf,
               bool cutcell_pressure, const std::string& /*pressure_coarse*/) {
@@ -88,7 +95,8 @@ PYBIND11_MODULE(sdflow, m) {
              std::memcpy(v.data(), sdf.data(), v.size() * sizeof(double));
              s.setSolid(v, cutcell_pressure);
            },
-           py::arg("sdf"), py::arg("cutcell_pressure") = false, py::arg("pressure_coarse") = "const")
+           py::arg("sdf"), py::arg("cutcell_pressure") = false, py::arg("pressure_coarse") = "const",
+           "Set the solid SDF [x,y,z] (negative inside); optionally enable the cut-cell pressure operator.")
       .def("set_state",
            [](SdflowIbm& s,
               py::array_t<double, py::array::f_style | py::array::forcecast> u,
@@ -101,16 +109,17 @@ PYBIND11_MODULE(sdflow, m) {
              };
              s.uploadVelocity(vec(u), vec(v), vec(w));
            },
-           py::arg("u"), py::arg("v"), py::arg("w"))
-      .def("step", &SdflowIbm::step)
-      .def("get_u", [](SdflowIbm& s) { return to_xyz(s.getVelocity(0), s.nx(), s.ny(), s.nz()); })
-      .def("get_v", [](SdflowIbm& s) { return to_xyz(s.getVelocity(1), s.nx(), s.ny(), s.nz()); })
-      .def("get_w", [](SdflowIbm& s) { return to_xyz(s.getVelocity(2), s.nx(), s.ny(), s.nz()); })
-      .def("get_p", [](SdflowIbm& s) { return to_xyz(s.getPressure(), s.nx(), s.ny(), s.nz()); })
-      .def("max_open_divergence", &SdflowIbm::maxOpenDivergence)
-      .def("get_resolution", [](SdflowIbm& s) { return std::vector<int>{s.nx(), s.ny(), s.nz()}; })
+           py::arg("u"), py::arg("v"), py::arg("w"),
+           "Upload an initial velocity field (u,v,w as Fortran-order [x,y,z] arrays).")
+      .def("step", &SdflowIbm::step, "Advance the solver one time step.")
+      .def("get_u", [](SdflowIbm& s) { return to_xyz(s.getVelocity(0), s.nx(), s.ny(), s.nz()); }, "Return the x-velocity component as a 3-D [x,y,z] numpy array.")
+      .def("get_v", [](SdflowIbm& s) { return to_xyz(s.getVelocity(1), s.nx(), s.ny(), s.nz()); }, "Return the y-velocity component as a 3-D [x,y,z] numpy array.")
+      .def("get_w", [](SdflowIbm& s) { return to_xyz(s.getVelocity(2), s.nx(), s.ny(), s.nz()); }, "Return the z-velocity component as a 3-D [x,y,z] numpy array.")
+      .def("get_p", [](SdflowIbm& s) { return to_xyz(s.getPressure(), s.nx(), s.ny(), s.nz()); }, "Return the physical pressure as a 3-D [x,y,z] numpy array.")
+      .def("max_open_divergence", &SdflowIbm::maxOpenDivergence, "Return the max cut-cell flux divergence (the incompressibility residual).")
+      .def("get_resolution", [](SdflowIbm& s) { return std::vector<int>{s.nx(), s.ny(), s.nz()}; }, "Return the grid resolution [nx, ny, nz].")
       .def("get_spacing", [](SdflowIbm&) { return std::vector<double>{1.0, 1.0, 1.0}; })  // unit grid
-      .def("rank", [](SdflowIbm&) { return 0; })            // single-rank Python module (MPI = kokkos_mpi tests)
-      .def("size", [](SdflowIbm&) { return 1; })
+      .def("rank", [](SdflowIbm&) { return 0; })            // single-rank Python module (MPI = kokkos_mpi tests, "MPI rank (0 in the single-rank Python module).")
+      .def("size", [](SdflowIbm&) { return 1; }, "MPI size (1 in the single-rank Python module).")
       .def("bcast_from_root", [](SdflowIbm&, py::object v) { return v; });
 }
