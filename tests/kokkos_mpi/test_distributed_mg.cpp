@@ -28,7 +28,7 @@
 using tpx::Index; using tpx::IVec;
 using tpx::decomp::BlockDecomposer;
 using tpx::halo::DeviceGridExchangeKokkos; using tpx::halo::GridHalo;
-using dns::CCField; using dns::CCConst; using dns::CCExec; using dns::C3; using dns::FPV; using dns::FPC;
+using sdflow::CCField; using sdflow::CCConst; using sdflow::CCExec; using sdflow::C3; using sdflow::FPV; using sdflow::FPC;
 
 static constexpr int kDim = 3, G = 1, NLEV = 4, NVCYC = 6, PRE = 2, POST = 2, BOTTOM = 8;
 
@@ -72,7 +72,7 @@ struct DistMG {
       Kokkos::deep_copy(v.ox, 1.0); Kokkos::deep_copy(v.oy, 1.0); Kokkos::deep_copy(v.oz, 1.0);  // all-fluid
       for (FPV* p : {&v.AC, &v.AW, &v.AE, &v.AS, &v.AN, &v.AB, &v.AT}) *p = FPV("A", v.n);
       const double s = 1.0 / (double)(cf[0]);  // uniform: cfac isotropic here
-      dns::buildCutcellOp(v.AC, v.AW, v.AE, v.AS, v.AN, v.AB, v.AT, CCConst(v.ox), CCConst(v.oy), CCConst(v.oz),
+      sdflow::buildCutcellOp(v.AC, v.AW, v.AE, v.AS, v.AN, v.AB, v.AT, CCConst(v.ox), CCConst(v.oy), CCConst(v.oz),
                            v.e, G, 1.0 / (cf[0] * cf[0]), 1.0 / (cf[1] * cf[1]), 1.0 / (cf[2] * cf[2]));
       (void)s;
       lv.push_back(std::move(v));
@@ -95,7 +95,7 @@ struct DistMG {
     for (int k = 0; k < sweeps; ++k)
       for (int color = 0; color < 2; ++color) {
         v.dev->exchange(v.x);
-        dns::cutcellSmoothColor(v.x, CCConst(v.rhs), FPC(v.AC), FPC(v.AW), FPC(v.AE), FPC(v.AS), FPC(v.AN),
+        sdflow::cutcellSmoothColor(v.x, CCConst(v.rhs), FPC(v.AC), FPC(v.AW), FPC(v.AE), FPC(v.AS), FPC(v.AN),
                                  FPC(v.AB), FPC(v.AT), v.e, v.og, G, color);
       }
   }
@@ -104,14 +104,14 @@ struct DistMG {
     if (L + 1 == (int)lv.size()) { smooth(v, BOTTOM); removeMean(v, v.x); return; }
     smooth(v, PRE);
     v.dev->exchange(v.x);
-    dns::residualCutcell(v.res, CCConst(v.x), CCConst(v.rhs), FPC(v.AC), FPC(v.AW), FPC(v.AE), FPC(v.AS),
+    sdflow::residualCutcell(v.res, CCConst(v.x), CCConst(v.rhs), FPC(v.AC), FPC(v.AW), FPC(v.AE), FPC(v.AS),
                           FPC(v.AN), FPC(v.AB), FPC(v.AT), v.e, G);
     Level& c = lv[L + 1];
-    dns::restrictAvg(c.rhs, CCConst(v.res), c.e, v.e, G, c.inner, v.ratio);  // LOCAL (coarse block = fine/2)
+    sdflow::restrictAvg(c.rhs, CCConst(v.res), c.e, v.e, G, c.inner, v.ratio);  // LOCAL (coarse block = fine/2)
     Kokkos::deep_copy(c.x, 0.0);
     vcycle(L + 1);
     c.dev->exchange(c.x);
-    dns::prolongAdd(v.x, CCConst(c.x), v.e, c.e, G, v.inner, v.ratio);       // LOCAL
+    sdflow::prolongAdd(v.x, CCConst(c.x), v.e, c.e, G, v.inner, v.ratio);       // LOCAL
     smooth(v, POST);
     removeMean(v, v.x);
   }

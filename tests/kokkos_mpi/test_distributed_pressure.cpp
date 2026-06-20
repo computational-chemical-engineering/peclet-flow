@@ -28,8 +28,8 @@ using tpx::IVec;
 using tpx::decomp::BlockDecomposer;
 using tpx::halo::DeviceGridExchangeKokkos;
 using tpx::halo::GridHalo;
-using dns::CCField; using dns::CCConst; using dns::CCExec; using dns::C3;
-using OpV = Kokkos::View<double*, dns::CCMem>;
+using sdflow::CCField; using sdflow::CCConst; using sdflow::CCExec; using sdflow::C3;
+using OpV = Kokkos::View<double*, sdflow::CCMem>;
 
 static constexpr int kDim = 3, G = 1, CGIT = 40;
 
@@ -118,7 +118,7 @@ int main(int argc, char** argv) {
     CCField ox("ox", n), oy("oy", n), oz("oz", n);  // all-fluid openness (periodic Laplacian operator)
     Kokkos::deep_copy(ox, 1.0); Kokkos::deep_copy(oy, 1.0); Kokkos::deep_copy(oz, 1.0);
     OpV AC("AC", n), AW("AW", n), AE("AE", n), AS("AS", n), AN("AN", n), AB("AB", n), AT("AT", n);
-    dns::buildCutcellOp(AC, AW, AE, AS, AN, AB, AT, CCConst(ox), CCConst(oy), CCConst(oz), e, G, 1.0, 1.0, 1.0);
+    sdflow::buildCutcellOp(AC, AW, AE, AS, AN, AB, AT, CCConst(ox), CCConst(oy), CCConst(oz), e, G, 1.0, 1.0, 1.0);
 
     CCField b("b", n), x("x", n);
     auto hb = Kokkos::create_mirror_view(b);
@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
     CCField gox("gox", gn), goy("goy", gn), goz("goz", gn);
     Kokkos::deep_copy(gox, 1.0); Kokkos::deep_copy(goy, 1.0); Kokkos::deep_copy(goz, 1.0);
     OpV gAC("gAC", gn), gAW("gAW", gn), gAE("gAE", gn), gAS("gAS", gn), gAN("gAN", gn), gAB("gAB", gn), gAT("gAT", gn);
-    dns::buildCutcellOp(gAC, gAW, gAE, gAS, gAN, gAB, gAT, CCConst(gox), CCConst(goy), CCConst(goz), ge, G, 1.0, 1.0, 1.0);
+    sdflow::buildCutcellOp(gAC, gAW, gAE, gAS, gAN, gAB, gAT, CCConst(gox), CCConst(goy), CCConst(goz), ge, G, 1.0, 1.0, 1.0);
     CCField gb("gb", gn), gx("gx", gn);
     auto hgb = Kokkos::create_mirror_view(gb);
     for (Index c = 0; c < gn; ++c) hgb(c) = 0.0;

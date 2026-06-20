@@ -1,4 +1,4 @@
-// Correctness of the Kokkos domain BC ghost fills (dns::bcVelocityComp / bcOutflowComp /
+// Correctness of the Kokkos domain BC ghost fills (sdflow::bcVelocityComp / bcOutflowComp /
 // bcZeroOpenness) vs host replication, over several (axis, side, comp, fold) cases. The BC only
 // touches the boundary face + ghost cells; we compare the whole field. Runs on any Kokkos backend.
 #include <Kokkos_Core.hpp>
@@ -10,7 +10,7 @@
 
 #include "mac_bc.hpp"
 
-using namespace dns;
+using namespace sdflow;
 
 static void hostVel(std::vector<double>& f, B3 ext, int g, int a, int s, int comp, double wall, int fold) {
   int dims[3] = {ext.x, ext.y, ext.z};

@@ -1,7 +1,7 @@
 // Domain-BC validation in context: steady plane Poiseuille flow. Periodic in x (flow) and z, no-slip
 // walls in y, body force fx. The steady x-momentum reduces to -nu*Lap(u) = fx with u=0 at the walls,
 // whose solution is the parabola u(y) = (fx/2nu) y(Ly-y). We solve it with the ported RB-GS diffusion
-// smoother (dns::diffSmoothColor) using the wall face-fold for the no-slip tangential BC (the mac_bc
+// smoother (sdflow::diffSmoothColor) using the wall face-fold for the no-slip tangential BC (the mac_bc
 // operators), and check u_max/U_mean -> 1.5 and the profile matches the analytic parabola. Validates
 // the domain-BC operators assembled with the diffusion operator. Runs on any Kokkos backend.
 #include <Kokkos_Core.hpp>
@@ -12,7 +12,7 @@
 
 #include "mac_stencils.hpp"
 
-using namespace dns;
+using namespace sdflow;
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);

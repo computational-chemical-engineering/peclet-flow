@@ -24,7 +24,7 @@
 #include "tpx/halo/grid_halo.hpp"
 
 using tpx::Index; using tpx::IVec;
-using dns::CutcellMG; using dns::CCField; using dns::CCConst; using dns::C3;
+using sdflow::CutcellMG; using sdflow::CCField; using sdflow::CCConst; using sdflow::C3;
 
 static constexpr int G = 1, NLEV = 4;
 static double source(int gx, int gy, int gz, IVec<3> gs) {

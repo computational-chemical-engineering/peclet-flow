@@ -13,7 +13,7 @@
 
 #include <cstddef>
 
-namespace dns {
+namespace sdflow {
 
 using Exec = Kokkos::DefaultExecutionSpace;
 using Mem = Exec::memory_space;
@@ -51,7 +51,7 @@ inline SumMax localSumMax(DConst f, Ext3 ext, int ghost, Ext3 inner) {
   SumMax r;
   if (n <= 0) return r;
   Kokkos::parallel_reduce(
-      "dns::sum_max", Kokkos::RangePolicy<Exec>(0, n),
+      "sdflow::sum_max", Kokkos::RangePolicy<Exec>(0, n),
       KOKKOS_LAMBDA(long c, SumMax& acc) {
         const double v = f(innerToExt(c, ext, ghost, inner));
         acc.sum += v;
@@ -68,7 +68,7 @@ inline double localDot(DConst a, DConst b, Ext3 ext, int ghost, Ext3 inner) {
   double s = 0.0;
   if (n <= 0) return s;
   Kokkos::parallel_reduce(
-      "dns::dot", Kokkos::RangePolicy<Exec>(0, n),
+      "sdflow::dot", Kokkos::RangePolicy<Exec>(0, n),
       KOKKOS_LAMBDA(long c, double& acc) {
         const std::size_t i = innerToExt(c, ext, ghost, inner);
         acc += a(i) * b(i);
@@ -81,9 +81,9 @@ inline double localDot(DConst a, DConst b, Ext3 ext, int ghost, Ext3 inner) {
 inline void subtractAll(DField f, double m) {
   const std::size_t n = f.extent(0);
   Kokkos::parallel_for(
-      "dns::subtract", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(std::size_t i) { f(i) -= m; });
+      "sdflow::subtract", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(std::size_t i) { f(i) -= m; });
 }
 
-}  // namespace dns
+}  // namespace sdflow
 
 #endif  // CFD_MAC_REDUCTIONS_HPP

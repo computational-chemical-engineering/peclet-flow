@@ -1,4 +1,4 @@
-// Correctness of the Kokkos IBM pieces (dns): the variable-coefficient RB-GS smoother
+// Correctness of the Kokkos IBM pieces (sdflow): the variable-coefficient RB-GS smoother
 // (ibmRbgsSweep) vs host replication + a Laplacian convergence sanity, and the geometric fields
 // (ibmVolfrac / ibmSolidMask) property checks (all-fluid -> theta 1 / mask 0, all-solid -> 0 / 1).
 // Runs on whatever backend Kokkos was built for.
@@ -11,7 +11,7 @@
 
 #include "mac_ibm.hpp"
 
-using namespace dns;
+using namespace sdflow;
 
 static long l3(int x, int y, int z, C3 e) { return (long)x + (long)y * e.x + (long)z * (long)e.x * e.y; }
 

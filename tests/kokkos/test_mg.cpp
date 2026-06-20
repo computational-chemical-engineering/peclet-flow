@@ -1,4 +1,4 @@
-// Convergence test of the Kokkos geometric multigrid V-cycle (dns::MgPoisson) for the periodic
+// Convergence test of the Kokkos geometric multigrid V-cycle (sdflow::MgPoisson) for the periodic
 // Poisson Lap(phi)=d. Random mean-zero rhs; solve with increasing V-cycle counts and check the
 // residual drops by ~an order of magnitude per cycle (vs ~0.99/sweep for plain RB-GS). Runs on any
 // Kokkos backend.
@@ -11,7 +11,7 @@
 
 #include "mac_mg.hpp"
 
-using namespace dns;
+using namespace sdflow;
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);

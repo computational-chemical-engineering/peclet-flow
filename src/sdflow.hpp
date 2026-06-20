@@ -16,7 +16,7 @@
 #include "mac_transfer.hpp"
 #include "staggered_advection.hpp"
 
-namespace dns {
+namespace sdflow {
 
 class SdflowKokkos {
  public:
@@ -100,7 +100,7 @@ class SdflowKokkos {
   void copyInner(F dst, I3 de, int dg, SConst src, I3 se, int sg) {
     SExec space; const int N = N_;
     Kokkos::parallel_for(
-        "dns::copyInner", Kokkos::RangePolicy<SExec>(space, 0, (long)N * N * N),
+        "sdflow::copyInner", Kokkos::RangePolicy<SExec>(space, 0, (long)N * N * N),
         KOKKOS_LAMBDA(long c) {
           const int ix = (int)(c % N), iy = (int)((c / N) % N), iz = (int)(c / ((long)N * N));
           const long di = (long)(ix+dg) + (long)(iy+dg)*de.x + (long)(iz+dg)*(long)de.x*de.y;
@@ -123,7 +123,7 @@ class SdflowKokkos {
     F u = u_, v = v_, w = w_, bu = bu_, bv = bv_, bw = bw_;
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
-        "dns::sdflow_rhs", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        "sdflow::sdflow_rhs", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           double au = 0, av = 0, aw = 0;
@@ -144,7 +144,7 @@ class SdflowKokkos {
     SumMax s = localSumMax(SConst(f));
     const double mean = s.sum / ((double)N_ * N_ * N_);
     SExec space; const I3 e = e_;
-    Kokkos::parallel_for("dns::submean", Kokkos::RangePolicy<SExec>(space, 0, ne_),
+    Kokkos::parallel_for("sdflow::submean", Kokkos::RangePolicy<SExec>(space, 0, ne_),
                          KOKKOS_LAMBDA(std::size_t i) { f(i) -= mean; });
 
   }
@@ -156,7 +156,7 @@ class SdflowKokkos {
     SExec space; const I3 e = e_; const int N = N_;
     SumMax r;
     Kokkos::parallel_reduce(
-        "dns::sdflow_reduce", Kokkos::RangePolicy<SExec>(space, 0, (long)N * N * N),
+        "sdflow::sdflow_reduce", Kokkos::RangePolicy<SExec>(space, 0, (long)N * N * N),
         KOKKOS_LAMBDA(long c, SumMax& acc) {
           const int ix = (int)(c % N), iy = (int)((c / N) % N), iz = (int)(c / ((long)N * N));
           const long i = (long)(ix + G) + (long)(iy + G) * e.x + (long)(iz + G) * (long)e.x * e.y;
@@ -183,7 +183,7 @@ class SdflowKokkos {
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>;
     // copy the two ghost slabs from the wrapped inner planes; over the FULL perp extent so corners fill.
     Kokkos::parallel_for(
-        "dns::pfill", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+        "sdflow::pfill", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
           const long base = (long)p0 * sb + (long)p1 * sc;
           for (int gl = 0; gl < G; ++gl) {
             // low ghost gl  <- inner plane (gl + N)   ; high ghost (G+N+gl) <- inner plane (G+gl)
@@ -205,6 +205,6 @@ class SdflowKokkos {
   int nDiff_ = 20, nPois_ = 50, nVcycles_ = 8;
 };
 
-}  // namespace dns
+}  // namespace sdflow
 
 #endif  // CFD_SDFLOW_HPP

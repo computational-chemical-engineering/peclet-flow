@@ -15,20 +15,20 @@ int main(int argc, char** argv) {
     const int N = (argc > 1) ? std::atoi(argv[1]) : 128;
     const int K = (argc > 2) ? std::atoi(argv[2]) : 200;
     const int g = 1;
-    dns::I3 e{N + 2 * g, N + 2 * g, N + 2 * g}, og{0, 0, 0};
+    sdflow::I3 e{N + 2 * g, N + 2 * g, N + 2 * g}, og{0, 0, 0};
     const std::size_t n = (std::size_t)e.x * e.y * e.z;
-    dns::SField phi("phi", n), d("d", n);
+    sdflow::SField phi("phi", n), d("d", n);
     Kokkos::deep_copy(phi, 1.0);
     Kokkos::deep_copy(d, 0.5);
 
     // warmup
-    for (int i = 0; i < 10; ++i) dns::poisSweep(phi, dns::SConst(d), e, og, g);
+    for (int i = 0; i < 10; ++i) sdflow::poisSweep(phi, sdflow::SConst(d), e, og, g);
     Kokkos::fence();
 
     double best = 1e30;
     for (int rep = 0; rep < 5; ++rep) {
       Kokkos::Timer t;
-      for (int i = 0; i < K; ++i) dns::poisSweep(phi, dns::SConst(d), e, og, g);
+      for (int i = 0; i < K; ++i) sdflow::poisSweep(phi, sdflow::SConst(d), e, og, g);
       Kokkos::fence();
       double ms = t.seconds() * 1e3;
       if (ms < best) best = ms;

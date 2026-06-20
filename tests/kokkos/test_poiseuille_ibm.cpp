@@ -11,7 +11,7 @@
 
 #include "mac_ibm.hpp"
 
-using namespace dns;
+using namespace sdflow;
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);

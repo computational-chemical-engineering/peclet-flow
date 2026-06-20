@@ -27,7 +27,7 @@
 #include "tpx/halo/grid_halo_kokkos.hpp"
 #endif
 
-namespace dns {
+namespace sdflow {
 
 #ifdef CFD_MPI
 using tpx::halo::GridHalo;
@@ -45,7 +45,7 @@ inline void coarsenOpenAvg(CCField oxc, CCField oyc, CCField ozc, CCConst oxf, C
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "dns::coarsen_open", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
+      "sdflow::coarsen_open", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
         const int rx = ratio.x, ry = ratio.y, rz = ratio.z;
         const int fx0 = rx * icx + g, fy0 = ry * icy + g, fz0 = rz * icz + g;
@@ -67,7 +67,7 @@ inline void residualCutcell(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "dns::cc_residual", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "sdflow::cc_residual", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
@@ -85,7 +85,7 @@ inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int g, C
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "dns::restrict", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
+      "sdflow::restrict", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
         const long fsy = fext.x, fsz = (long)fext.x * fext.y;
         double s = 0;
@@ -102,7 +102,7 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int g, C3
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "dns::prolong", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
+      "sdflow::prolong", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
       KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
         // coarse sample coord: coarsened axis (ratio 2) -> 0.5*ifine - 0.25 + g; kept axis (ratio 1) -> ifine+g
         const double cx = (ratio.x == 2) ? 0.5 * ifx - 0.25 + g : ifx + g;
@@ -341,7 +341,7 @@ class CutcellMG {
     int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
     const int a = axis, b = (axis + 1) % 3, c = (axis + 2) % 3;
     const long sa = st[a], sb = st[b], sc = st[c]; const int N = N3[a]; CCField ff = f;
-    Kokkos::parallel_for("dns::mg_pfill", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+    Kokkos::parallel_for("sdflow::mg_pfill", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
         for (int gl = 0; gl < G; ++gl) { ff(base + (long)gl * sa) = ff(base + (long)(gl + N) * sa);
           ff(base + (long)(G + N + gl) * sa) = ff(base + (long)(G + gl) * sa); } });
@@ -499,6 +499,6 @@ class CutcellMG {
 #endif
 };
 
-}  // namespace dns
+}  // namespace sdflow
 
 #endif  // CFD_MAC_CUTCELL_MG_HPP

@@ -13,7 +13,7 @@ written in CUDA C++ and exposed to Python through `pybind11`; simulations are dr
 | Module | Role |
 |--------|------|
 | **`sdflow`** | **The CFD solver** — a **distributed** (MPI-optional) GPU cut-cell IBM Navier–Stokes solver in physical units, built on the shared `transport-core` block-decomposition + async halo layer. One code / one API / MPI-optional, with native domain boundary conditions. Validated against analytics and **Zick & Homsy** sphere-array drag (`scripts/validate_zick_homsy_sdflow.py`). |
-| **`pnm_backend`** | **Pore-network extraction** — SDF VTI reading + pore/segmentation/topology extraction (`SDFReader`, `extract_pores`, `segment_volume`, `extract_topology_gpu`). The repo's namesake "pnm_from_sdf" feature. |
+| **`pnm`** | **Pore-network extraction** — SDF VTI reading + pore/segmentation/topology extraction (`SDFReader`, `extract_pores`, `segment_volume`, `extract_topology_gpu`). The repo's namesake "pnm_from_sdf" feature. |
 
 The original single-GPU `CFDSolver` reference (`src/cfd_solver*.cu`) has been **retired**; `sdflow` was
 validated bit-identical to it before removal (restore point: git tag `pnm_backend-reference`). The shared
@@ -35,7 +35,7 @@ cut-cell IBM primitives now live in `src/cut_cell_ibm.cuh`.
 ## Build
 
 ```bash
-cmake -S . -B build && cmake --build build -j   # -> build/sdflow.so (CFD solver) + build/pnm_backend.so (pore extraction)
+cmake -S . -B build && cmake --build build -j   # -> build/sdflow.so (CFD solver) + build/pnm.so (pore extraction)
 # distributed sdflow build (opt-in MPI):
 cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON && cmake --build build_mpi -j   # -> build_mpi/sdflow*.so
 ```

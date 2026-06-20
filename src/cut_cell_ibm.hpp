@@ -11,7 +11,7 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
-namespace dns {
+namespace sdflow {
 
 using IMem = Kokkos::DefaultExecutionSpace::memory_space;
 
@@ -158,7 +158,7 @@ inline void ibmBuildDiffusion(Kokkos::View<float*, IMem> AC, Kokkos::View<float*
   const std::size_t n = (std::size_t)ex * ey * ez;
   const float nb = (float)(-beta), c = (float)(idiag + 6.0 * beta);
   Kokkos::parallel_for(
-      "dns::ibm_build_diff", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, n),
+      "sdflow::ibm_build_diff", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, n),
       KOKKOS_LAMBDA(std::size_t i) {
         AC(i) = c; AW(i) = nb; AE(i) = nb; AS(i) = nb; AN(i) = nb; AB(i) = nb; AT(i) = nb;
       });
@@ -177,7 +177,7 @@ inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*,
   Kokkos::DefaultExecutionSpace space;
   const bool hasInhom = (a_inhom.extent(0) != 0), hasScale = (rhs_scale.extent(0) != 0);
   Kokkos::parallel_for(
-      "dns::ibm_modify", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, numActive),
+      "sdflow::ibm_modify", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, numActive),
       KOKKOS_LAMBDA(int list_idx) {
         const int OPP[6] = {1, 0, 3, 2, 5, 4};
         const int c = ibm.cell_index(list_idx);
@@ -208,6 +208,6 @@ inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*,
 
 }
 
-}  // namespace dns
+}  // namespace sdflow
 
 #endif  // CFD_CUT_CELL_IBM_HPP

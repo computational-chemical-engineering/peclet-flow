@@ -20,7 +20,7 @@
 #include "tpx/halo/grid_halo.hpp"
 
 using tpx::IVec;
-using dns::VelocityMG; using dns::CCField; using dns::CCConst; using dns::C3; using dns::FPV; using dns::FPC;
+using sdflow::VelocityMG; using sdflow::CCField; using sdflow::CCConst; using sdflow::C3; using sdflow::FPV; using sdflow::FPC;
 
 static constexpr int G = 2, NLEV = 4, NVCYC = 6;
 static constexpr double IDIAG = 1.0, BETA = 0.2;

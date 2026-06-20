@@ -27,7 +27,7 @@
 #include "mac_stencils.hpp"
 #include "staggered_advection.hpp"
 
-namespace dns {
+namespace sdflow {
 
 class SdflowIbm {
  public:
@@ -296,7 +296,7 @@ class SdflowIbm {
   // copy the nx*ny*nz inner cells between two extended blocks of different ghost width (g=2 <-> g=1 MG).
   void copyInner(CCField dst, C3 de, int dg, CCConst src, C3 se, int sg) {
     CCExec space; const int NX=nx_, NY=ny_;
-    Kokkos::parallel_for("dns::copyInner", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
+    Kokkos::parallel_for("sdflow::copyInner", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
       KOKKOS_LAMBDA(long c){ const int ix=(int)(c%NX), iy=(int)((c/NX)%NY), iz=(int)(c/((long)NX*NY));
         const long di=(long)(ix+dg)+(long)(iy+dg)*de.x+(long)(iz+dg)*(long)de.x*de.y;
         const long si=(long)(ix+sg)+(long)(iy+sg)*se.x+(long)(iz+sg)*(long)se.x*se.y;
@@ -322,7 +322,7 @@ class SdflowIbm {
     if (distributed_) { velDev_->exchange(f); return; }  // halo gives all ghosts; the 7-pt smoother uses the faces
 #endif
     CCExec space; C3 e=e_; const int Nx=nx_,Ny=ny_,Nz=nz_; const long sx=1,sy=e.x,sz=(long)e.x*e.y; CCField ff=f;
-    Kokkos::parallel_for("dns::ibm_facefill", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
+    Kokkos::parallel_for("sdflow::ibm_facefill", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
       KOKKOS_LAMBDA(long n){
         const int ix=(int)(n%Nx), iy=(int)((n/Nx)%Ny), iz=(int)(n/((long)Nx*Ny));
         const long i=(long)(ix+G)*sx+(long)(iy+G)*sy+(long)(iz+G)*sz;
@@ -335,7 +335,7 @@ class SdflowIbm {
     int dims[3]={e.x,e.y,e.z}; long st[3]={1,e.x,(long)e.x*e.y};
     const int a=axis,b=(axis+1)%3,c=(axis+2)%3; const long sa=st[a],sb=st[b],sc=st[c]; const int N=N3[a];
     CCField ff=f;
-    Kokkos::parallel_for("dns::ibm_pfill", Kokkos::MDRangePolicy<CCExec,Kokkos::Rank<2>>(space,{0,0},{dims[b],dims[c]}),
+    Kokkos::parallel_for("sdflow::ibm_pfill", Kokkos::MDRangePolicy<CCExec,Kokkos::Rank<2>>(space,{0,0},{dims[b],dims[c]}),
       KOKKOS_LAMBDA(int p0,int p1){ const long base=(long)p0*sb+(long)p1*sc;
         for(int gl=0;gl<G;++gl){ ff(base+(long)gl*sa)=ff(base+(long)(gl+N)*sa); ff(base+(long)(G+N+gl)*sa)=ff(base+(long)(G+gl)*sa);} });
 
@@ -592,6 +592,6 @@ class SdflowIbm {
   Comp C[3];
 };
 
-}  // namespace dns
+}  // namespace sdflow
 
 #endif  // CFD_SDFLOW_IBM_HPP

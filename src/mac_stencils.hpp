@@ -10,7 +10,7 @@
 
 #include <Kokkos_Core.hpp>
 
-namespace dns {
+namespace sdflow {
 
 using SExec = Kokkos::DefaultExecutionSpace;
 using SMem = SExec::memory_space;
@@ -33,7 +33,7 @@ inline void diffSmoothColor(SField c, SConst b, I3 e, I3 og, int g, double beta,
   const bool hasD = (dcorr.extent(0) != 0);
   using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "dns::diff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "sdflow::diff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         if ((((x + og.x) + (y + og.y) + (z + og.z)) & 1) != color) return;
         const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
@@ -48,7 +48,7 @@ inline void poisSmoothColor(SField phi, SConst d, I3 e, I3 og, int g, int color)
   SExec space;
   using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "dns::pois", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "sdflow::pois", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         if ((((x + og.x) + (y + og.y) + (z + og.z)) & 1) != color) return;
         const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
@@ -63,7 +63,7 @@ inline void divergence(SConst u, SConst v, SConst w, SField d, I3 e, int g) {
   SExec space;
   using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "dns::diverg", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "sdflow::diverg", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
         d(i) = (u(i + sx) - u(i)) + (v(i + sy) - v(i)) + (w(i + sz) - w(i));
@@ -77,6 +77,6 @@ inline void poisSweep(SField phi, SConst d, I3 e, I3 og, int g) {
   poisSmoothColor(phi, d, e, og, g, 1);
 }
 
-}  // namespace dns
+}  // namespace sdflow
 
 #endif  // CFD_MAC_STENCILS_HPP

@@ -10,7 +10,7 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
-namespace dns {
+namespace sdflow {
 
 using CCExec = Kokkos::DefaultExecutionSpace;
 using CCMem = CCExec::memory_space;
@@ -75,7 +75,7 @@ inline void buildOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ex
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "dns::cc_open", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
+      "sdflow::cc_open", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long i = static_cast<long>(lx) + static_cast<long>(ly) * ext.x +
                        static_cast<long>(lz) * static_cast<long>(ext.x) * ext.y;
@@ -86,6 +86,6 @@ inline void buildOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ex
 
 }
 
-}  // namespace dns
+}  // namespace sdflow
 
 #endif  // CFD_MAC_CUTCELL_HPP

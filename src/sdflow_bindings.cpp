@@ -16,7 +16,7 @@
 #include "sdflow_ibm.hpp"
 
 namespace py = pybind11;
-using dns::SdflowIbm;
+using sdflow::SdflowIbm;
 
 // flat x-fastest vector -> (nx,ny,nz) Fortran-strided numpy array for [x,y,z] indexing
 static py::array_t<double> to_xyz(const std::vector<double>& v, int nx, int ny, int nz) {

@@ -20,7 +20,7 @@
 #include "tpx/decomp/block_decomposer.hpp"
 
 using tpx::IVec;
-using dns::SdflowIbm;
+using sdflow::SdflowIbm;
 
 static constexpr int N = 32, STEPS = 120;
 static constexpr double RHO = 1.0, MU = 0.1, F = 1e-3, DT = 60.0;
