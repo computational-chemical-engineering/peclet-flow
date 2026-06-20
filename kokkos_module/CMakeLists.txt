@@ -21,7 +21,8 @@ pybind11_add_module(sdflow_kokkos NO_EXTRAS binding.cpp)
 target_include_directories(sdflow_kokkos PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/kokkos)
 target_link_libraries(sdflow_kokkos PRIVATE Kokkos::kokkos)
 
-# pore-network extraction (drop-in for pnm_backend's compute API)
-pybind11_add_module(pnm_kokkos NO_EXTRAS pnm_binding.cpp)
-target_include_directories(pnm_kokkos PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/kokkos)
+# pore-network extraction (the canonical pnm_backend: Kokkos compute + pure-C++ SDFReader VTI reader)
+pybind11_add_module(pnm_kokkos NO_EXTRAS pnm_binding.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/sdf_reader.cpp)
+target_include_directories(pnm_kokkos PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/kokkos
+                                              ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(pnm_kokkos PRIVATE Kokkos::kokkos)
