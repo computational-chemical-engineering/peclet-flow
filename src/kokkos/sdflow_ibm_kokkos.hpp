@@ -95,6 +95,23 @@ class SdflowIbm {
   // MG-PCG pressure tolerance/iteration cap (CUDA set_pressure_pcg). The Kokkos cut-cell pressure solve is
   // MG-PCG by default; this just sets its bounds (the `on` flag is accepted for API parity).
   void setPressurePcg(bool /*on*/, int maxit, double rtol) { pcgMaxit_ = maxit; pcgRtol_ = rtol; }
+#ifdef CFD_KOKKOS_MPI
+  // Multi-rank: this rank's SdflowIbm is constructed with its LOCAL block dims (= the BlockDecomposer of the
+  // GLOBAL grid for this rank); initMpi wires the g=2 velocity-block halo + the global-origin red-black parity,
+  // and switches fillGhosts/maxOpenDivergence + the pressure MG (CutcellMG::initMpi) onto their distributed
+  // paths. The caller decomposes first (deterministic ORB) to size the constructor; initMpi re-derives it.
+  void initMpi(int gnx, int gny, int gnz, MPI_Comm comm) {
+    distributed_ = true; comm_ = comm; gnx_ = gnx; gny_ = gny; gnz_ = gnz;
+    int rank = 0, size = 1; MPI_Comm_rank(comm, &rank); MPI_Comm_size(comm, &size);
+    std::array<bool, 3> per{true, true, true};
+    velHalo_ = std::make_shared<GridHalo<3>>();
+    tpx::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), tpx::IVec<3>{gnx, gny, gnz});
+    velHalo_->buildTopology(dec, rank, G, per, comm);
+    velDev_ = std::make_shared<DeviceGridExchangeKokkos<double>>(); velDev_->init(*velHalo_);
+    const auto oig = velHalo_->indexer().originInclGhost();
+    og_ = {(int)oig[0] + G, (int)oig[1] + G, (int)oig[2] + G};  // block inner origin -> global parity
+  }
+#endif
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip wall,2=Dirichlet/inflow,3=outflow.
   void setDomainBc(int face, int type, double vx, double vy, double vz) {
     bc_[face]=type; bcVel_[face][0]=vx; bcVel_[face][1]=vy; bcVel_[face][2]=vz;
@@ -124,6 +141,19 @@ class SdflowIbm {
   void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure) {
     cutcellPressure_ = cutcellPressure;
     auto h = Kokkos::create_mirror_view(sdf_);
+#ifdef CFD_KOKKOS_MPI
+    if (distributed_) {
+      // Multi-rank: sdfInner is THIS rank's LOCAL inner block; fill the inner cells, then halo-exchange the
+      // ghosts (cross-rank + periodic) so the overlay/openness read the neighbour's SDF at the block boundary.
+      Kokkos::deep_copy(h, sdf_);
+      for (int z = 0; z < nz_; ++z) for (int y = 0; y < ny_; ++y) for (int x = 0; x < nx_; ++x)
+        h((long)(x+G) + (long)(y+G)*e_.x + (long)(z+G)*(long)e_.x*e_.y) =
+            sdfInner[(std::size_t)x + (std::size_t)y*nx_ + (std::size_t)z*(std::size_t)nx_*ny_];
+      Kokkos::deep_copy(sdf_, h);
+      velDev_->exchange(sdf_);
+    } else
+#endif
+    {
     auto wrap = [](int i, int n) { return (i % n + n) % n; };  // periodic ghosts in all 3 axes
     for (int z = 0; z < e_.z; ++z) for (int y = 0; y < e_.y; ++y) for (int x = 0; x < e_.x; ++x) {
       int ix = wrap(x - G, nx_), iy = wrap(y - G, ny_), iz = wrap(z - G, nz_);
@@ -131,6 +161,7 @@ class SdflowIbm {
           sdfInner[(std::size_t)ix + (std::size_t)iy*nx_ + (std::size_t)iz*(std::size_t)nx_*ny_];
     }
     Kokkos::deep_copy(sdf_, h);
+    }
     const Off3 offs[3] = {{-0.5f,0,0},{0,-0.5f,0},{0,0,-0.5f}};
     for (int c = 0; c < 3; ++c) {
       C[c].nCut = buildIbmOverlay<0>(CCConst(sdf_), e_, G, offs[c], /*Dirichlet*/ 0, C[c].ov, C[c].idMap, C[c].counter);  // SCHEME 0 = point-value (matches CUDA ibm_geometry_ext_k<0>)
@@ -146,6 +177,10 @@ class SdflowIbm {
     }
     if (cutcellPressure_) {
       buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);  // on the g=2 velocity block
+#ifdef CFD_KOKKOS_MPI
+      // openness ghosts (the operator + divergence read the +neighbour face) -> exchange across ranks
+      if (distributed_) { velDev_->exchange(ox_); velDev_->exchange(oy_); velDev_->exchange(oz_); }
+#endif
       if (hasBc_) {  // FLUX openness (beta): a face is OPEN only where it carries normal flux -- outflow, or
         B3 e2{e_.x,e_.y,e_.z}; CCField oa[3]={ox_,oy_,oz_};  // an inflow with nonzero normal velocity. Walls
         for (int a=0;a<3;++a) for (int s=0;s<2;++s) {        // and tangential-only Dirichlet faces (e.g. a
@@ -157,6 +192,9 @@ class SdflowIbm {
       copyInner(ox1_, e1_, 1, CCConst(ox_), e_, G);  // bridge openness g=2 -> g=1 for the MG
       copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
       copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
+#ifdef CFD_KOKKOS_MPI
+      if (distributed_) mg_.initMpi(gnx_, gny_, gnz_, nLevels_, comm_); else
+#endif
       mg_.init(nx_, ny_, nz_, nLevels_);  // geometric multigrid on the cut-cell openness (MG-PCG pressure)
       mg_.setBoundaryConditions(bc_);     // per-level wall openness + null-space gating (no-op if periodic)
       mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), 1.0, 1.0, 1.0);
@@ -201,7 +239,11 @@ class SdflowIbm {
     if (!cutcellPressure_) return 0.0;
     for (int c=0;c<3;++c) fillVelGhosts(c, 0);  // ghosts incl. outflow zero-gradient before the divergence
     divergOpen(CCConst(C[0].u),CCConst(C[1].u),CCConst(C[2].u), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
-    return reduceMaxAbsInner(CCConst(div_));
+    double m = reduceMaxAbsInner(CCConst(div_));
+#ifdef CFD_KOKKOS_MPI
+    if (distributed_) { double g = 0; MPI_Allreduce(&m, &g, 1, MPI_DOUBLE, MPI_MAX, comm_); return g; }
+#endif
+    return m;
   }
   long lastPressureIterations() const { return lastPressureIters_; }
   int nx() const { return nx_; } int ny() const { return ny_; } int nz() const { return nz_; }
@@ -228,8 +270,14 @@ class SdflowIbm {
         dst(di)=src(si); });
 
   }
-  // Fill ghost width G periodically on all 3 axes (x then y then z, covering corners).
-  void fillGhosts(CCField f) { fillAxis(f,0); fillAxis(f,1); fillAxis(f,2); }
+  // Fill ghost width G periodically on all 3 axes (x then y then z, covering corners). Distributed: the
+  // velocity-block halo (cross-rank + periodic, all ghosts incl. corners).
+  void fillGhosts(CCField f) {
+#ifdef CFD_KOKKOS_MPI
+    if (distributed_) { velDev_->exchange(f); return; }
+#endif
+    fillAxis(f,0); fillAxis(f,1); fillAxis(f,2);
+  }
   // Fused periodic FACE-ghost fill in ONE kernel (vs 3 fillAxis): each inner boundary cell scatters its
   // periodic image to the opposite face ghost, all 3 axes at once. Valid only for FACE-neighbour (7-point)
   // stencils -- it does NOT fill the corner/edge ghosts (which fillAxis's sequential x->y->z does). The IBM
@@ -237,6 +285,9 @@ class SdflowIbm {
   // dominant kernel-launch cost (~7200 -> ~2400 fill launches/step) at low resolution. NOT for the Koren
   // advection RHS (reads diagonals) -- keep the full fillGhosts there.
   void fillGhostsFaces(CCField f) {
+#ifdef CFD_KOKKOS_MPI
+    if (distributed_) { velDev_->exchange(f); return; }  // halo gives all ghosts; the 7-pt smoother uses the faces
+#endif
     CCExec space; C3 e=e_; const int Nx=nx_,Ny=ny_,Nz=nz_; const long sx=1,sy=e.x,sz=(long)e.x*e.y; CCField ff=f;
     Kokkos::parallel_for("cfdk::ibm_facefill", Kokkos::RangePolicy<CCExec>(space,0,(long)nx_*ny_*nz_),
       KOKKOS_LAMBDA(long n){
@@ -348,10 +399,10 @@ class SdflowIbm {
     for (int it = 0; it < velIters_; ++it) {  // IBM / periodic: Robust-Scaled cut-cell stencil (float)
       fillGhostsFaces(C[c].u);  // 7-point smoother reads faces only -> the fused 1-kernel face fill suffices
       ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
-                          MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, C3{0,0,0}, G, 0);
+                          MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 0);
       fillGhostsFaces(C[c].u);
       ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
-                          MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, C3{0,0,0}, G, 1);
+                          MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 1);
     }
   }
   // pressure ghost at domain faces for the incremental predictor's grad(P): zero-gradient (Neumann) at
@@ -375,6 +426,9 @@ class SdflowIbm {
   void applyVelocityBcComp(int comp, int fold, bool doOutflow) { applyVelocityBcCompTo(C[comp].u, comp, fold, doOutflow); }
   // Field-parameterized variants (so the velocity-MG can re-impose the BC on its own level-0 iterate).
   void fillVelGhostsTo(CCField f, int comp, int fold) {
+#ifdef CFD_KOKKOS_MPI
+    if (distributed_) { velDev_->exchange(f); applyVelocityBcCompTo(f, comp, fold, true); return; }
+#endif
     for (int a=0;a<3;++a) if (bc_[2*a]==0 && bc_[2*a+1]==0) fillAxis(f, a);
     applyVelocityBcCompTo(f, comp, fold, true);
   }
@@ -480,6 +534,14 @@ class SdflowIbm {
   int nLevels_ = 4;                               // multigrid depth (CUDA default; set_pressure_multigrid)
   long lastPressureIters_ = 0;
   CutcellMG mg_;
+  // --- multi-rank (MPI) state, gated (single-GPU module never links MPI -> byte-identical when off) ---
+  bool distributed_ = false;
+  C3 og_{0,0,0};   // velocity-block inner origin (global red-black parity); {0,0,0} single-rank
+#ifdef CFD_KOKKOS_MPI
+  std::shared_ptr<GridHalo<3>> velHalo_;                          // g=2 velocity-block topology
+  std::shared_ptr<DeviceGridExchangeKokkos<double>> velDev_;      // g=2 velocity-block ghost exchange
+  MPI_Comm comm_ = MPI_COMM_NULL; int gnx_=0, gny_=0, gnz_=0;     // communicator + GLOBAL dims
+#endif
   int bc_[6] = {0,0,0,0,0,0}; double bcVel_[6][3] = {}; bool hasBc_ = false, hasOutflow_ = false;  // domain BCs
   CCField bcProf_[6]; int bcProfNc_[6] = {0,0,0,0,0,0};  // per-position inlet profiles (face grid [Lb*Lc*3])
   CCField bcDcorr_[3], bcBrhs_[3];                // implicit-diffusion face fold (per component)
