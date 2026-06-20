@@ -56,9 +56,11 @@ jobs:
       - name: Import smoke test
         run: PYTHONPATH=$PWD/build python3 -c "import sdflow, pnm; print('sdflow + pnm import OK')"
 
-      - name: Build + run single-rank Kokkos kernel tests
+      - name: Build + run Kokkos kernel unit tests (tests/kokkos)
         run: |
+          # Kokkos-only unit suite (no MPI / transport-core): the ported cut-cell IBM, advection,
+          # multigrid-transfer, BC and reduction kernels, each checked against a serial reference.
           cmake -S tests/kokkos -B build_kokkos \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install" || { echo "::warning::tests/kokkos configure failed (may need extra deps); skipping"; exit 0; }
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"
           cmake --build build_kokkos -j
           ctest --test-dir build_kokkos --output-on-failure
