@@ -43,6 +43,9 @@ PYBIND11_MODULE(sdflow_kokkos, m) {
       .def("set_dt", &SdflowIbm::setDt)
       .def("set_body_force", &SdflowIbm::setBodyForce)
       .def("set_advection", &SdflowIbm::setAdvection)
+      .def("set_incremental_pressure", &SdflowIbm::setIncrementalPressure, py::arg("on"))
+      .def("set_pressure_warmstart", &SdflowIbm::setPressureWarmstart, py::arg("on"))
+      .def("set_velocity_streams", &SdflowIbm::setVelocityStreams, py::arg("on"))
       .def("set_implicit_advection", &SdflowIbm::setImplicitAdvection, py::arg("on"))
       .def("set_outer_iterations", &SdflowIbm::setOuterIterations, py::arg("n"))
       .def("set_outer_tolerance", &SdflowIbm::setOuterTolerance, py::arg("tol"))
@@ -84,12 +87,28 @@ PYBIND11_MODULE(sdflow_kokkos, m) {
              s.setSolid(v, cutcell_pressure);
            },
            py::arg("sdf"), py::arg("cutcell_pressure") = false, py::arg("pressure_coarse") = "const")
+      .def("set_state",
+           [](SdflowIbm& s,
+              py::array_t<double, py::array::f_style | py::array::forcecast> u,
+              py::array_t<double, py::array::f_style | py::array::forcecast> v,
+              py::array_t<double, py::array::f_style | py::array::forcecast> w) {
+             auto vec = [](const auto& a) {
+               std::vector<double> o(static_cast<size_t>(a.size()));
+               std::memcpy(o.data(), a.data(), o.size() * sizeof(double));
+               return o;
+             };
+             s.uploadVelocity(vec(u), vec(v), vec(w));
+           },
+           py::arg("u"), py::arg("v"), py::arg("w"))
       .def("step", &SdflowIbm::step)
       .def("get_u", [](SdflowIbm& s) { return to_xyz(s.getVelocity(0), s.nx(), s.ny(), s.nz()); })
       .def("get_v", [](SdflowIbm& s) { return to_xyz(s.getVelocity(1), s.nx(), s.ny(), s.nz()); })
       .def("get_w", [](SdflowIbm& s) { return to_xyz(s.getVelocity(2), s.nx(), s.ny(), s.nz()); })
       .def("get_p", [](SdflowIbm& s) { return to_xyz(s.getPressure(), s.nx(), s.ny(), s.nz()); })
       .def("max_open_divergence", &SdflowIbm::maxOpenDivergence)
-      .def("rank", [](SdflowIbm&) { return 0; })
+      .def("get_resolution", [](SdflowIbm& s) { return std::vector<int>{s.nx(), s.ny(), s.nz()}; })
+      .def("get_spacing", [](SdflowIbm&) { return std::vector<double>{1.0, 1.0, 1.0}; })  // unit grid
+      .def("rank", [](SdflowIbm&) { return 0; })            // single-rank Python module (MPI = kokkos_mpi tests)
+      .def("size", [](SdflowIbm&) { return 1; })
       .def("bcast_from_root", [](SdflowIbm&, py::object v) { return v; });
 }

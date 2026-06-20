@@ -95,6 +95,31 @@ class SdflowIbm {
   // MG-PCG pressure tolerance/iteration cap (CUDA set_pressure_pcg). The Kokkos cut-cell pressure solve is
   // MG-PCG by default; this just sets its bounds (the `on` flag is accepted for API parity).
   void setPressurePcg(bool /*on*/, int maxit, double rtol) { pcgMaxit_ = maxit; pcgRtol_ = rtol; }
+  // Incremental-rotational pressure (CUDA set_incremental_pressure, default ON): the predictor carries
+  // -grad(P^n) and the physical pressure is accumulated rotationally P += (rho/dt)*phi - mu*div(u*). OFF =>
+  // classical non-incremental Chorin (no -grad(P^n) predictor; P derived on demand as (rho/dt)*phi).
+  void setIncrementalPressure(bool on) { incremental_ = on; }
+  // Pressure warm-start (CUDA set_pressure_warmstart, default OFF): seed each cut-cell pressure solve from
+  // the previous step's projection potential (consecutive phi's are similar along a steady march -> a more
+  // converged phi per fixed solver budget) instead of zeroing the initial guess.
+  void setPressureWarmstart(bool on) { pwarm_ = on; }
+  // CUDA-only 3-stream concurrent velocity solve (set_velocity_streams): no Kokkos analogue in this port
+  // (the default-execution-space kernels are already stream-ordered). Accepted as a no-op for API parity.
+  void setVelocityStreams(bool /*on*/) {}
+  // Seed/restore the velocity state (CUDA set_state / upload_velocity): u/v/w are inner-cell fields
+  // (flat x-fastest, size nx*ny*nz); written into the velocity block + ghosts refreshed (periodic wrap).
+  void uploadVelocity(const std::vector<double>& uu, const std::vector<double>& vv,
+                      const std::vector<double>& ww) {
+    const std::vector<double>* src[3] = {&uu, &vv, &ww};
+    for (int c = 0; c < 3; ++c) {
+      auto h = Kokkos::create_mirror_view(C[c].u); Kokkos::deep_copy(h, C[c].u);
+      for (int z=0;z<nz_;++z) for (int y=0;y<ny_;++y) for (int x=0;x<nx_;++x)
+        h((long)(x+G)+(long)(y+G)*e_.x+(long)(z+G)*(long)e_.x*e_.y) =
+            (*src[c])[(std::size_t)x+(std::size_t)y*nx_+(std::size_t)z*(std::size_t)nx_*ny_];
+      Kokkos::deep_copy(C[c].u, h);
+      fillGhosts(C[c].u);
+    }
+  }
 #ifdef CFD_KOKKOS_MPI
   // Multi-rank: this rank's SdflowIbm is constructed with its LOCAL block dims (= the BlockDecomposer of the
   // GLOBAL grid for this rank); initMpi wires the g=2 velocity-block halo + the global-origin red-black parity,
@@ -205,7 +230,7 @@ class SdflowIbm {
   void step() {
     // u^n time base, fixed for the whole step (Picard lags the advecting velocity at u^k, not the base).
     for (int c = 0; c < 3; ++c) Kokkos::deep_copy(old_[c], C[c].u);
-    if (cutcellPressure_) { fillGhosts(P_); if (hasBc_) pressureBcGhost(); }  // grad(P^n) for the incremental predictor (once)
+    if (cutcellPressure_ && incremental_) { fillGhosts(P_); if (hasBc_) pressureBcGhost(); }  // grad(P^n) for the incremental predictor (once)
     lastOuterIters_ = 0;
     for (int outer = 0; outer < outerIters_; ++outer) {
       lastOuterIters_ = outer + 1;
@@ -234,7 +259,15 @@ class SdflowIbm {
 
   // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
   std::vector<double> getVelocity(int c) { return gatherInner(C[c].u); }
-  std::vector<double> getPressure() { return gatherInner(P_); }
+  std::vector<double> getPressure() {
+    // Incremental scheme: P_ accumulates the physical pressure. Classical Chorin (!incremental_): derive it
+    // on demand from the last projection potential, p = (rho/dt)*phi (CUDA press_from_phi_k).
+    if (incremental_) return gatherInner(P_);
+    std::vector<double> out = gatherInner(phi_);
+    const double ct = rho_/dt_;
+    for (double& x : out) x *= ct;
+    return out;
+  }
   double maxOpenDivergence() {
     if (!cutcellPressure_) return 0.0;
     for (int c=0;c<3;++c) fillVelGhosts(c, 0);  // ghosts incl. outflow zero-gradient before the divergence
@@ -312,7 +345,7 @@ class SdflowIbm {
     CCField bb=C[c].b, rs=C[c].rscale, P=P_, brhs=bcBrhs_[c], inh=C[c].inhom;
     CCConst U=CCConst(C[0].u), V=CCConst(C[1].u), W=CCConst(C[2].u), uu=CCConst(C[c].u), un=CCConst(old_[c]);
     const long strd = (c==0) ? 1 : (c==1) ? e_.x : (long)e_.x*e_.y;
-    const bool incr = cutcellPressure_, adv = advect_, bc = hasBc_;  // incremental predictor carries -grad(P^n)
+    const bool incr = cutcellPressure_ && incremental_, adv = advect_, bc = hasBc_;  // incremental predictor carries -grad(P^n)
     const bool ifou = implicitFou_ && advect_;  // deferred correction: keep (Koren - FOU) explicit in the RHS
     // b = descale*(idiag*u^n - rho*Koren(u^k) + rho*FOU(u^k) + f - grad P^n) - inhom  (+ BC fold brhs). The
     // time base is u^n (Picard); the advecting velocity & advected field are the current iterate u^k.
@@ -474,7 +507,8 @@ class SdflowIbm {
  }
     // geometric multigrid solve of the cut-cell pressure Poisson A phi = -div(u*) (CUDA mac_multigrid):
     // MG-PCG by default, or the communication-light Chebyshev driver (bounds estimated once, then reused).
-    Kokkos::deep_copy(phi1_, 0.0);
+    // Warm start (CUDA pwarm_): keep the previous step's phi1_ as the initial guess instead of zeroing.
+    if (!pwarm_) Kokkos::deep_copy(phi1_, 0.0);
     if (useChebyshev_) {
       if (!chebBoundsSet_) { mg_.estimateEigenvalues(CCConst(rhs1_), chebA_, chebB_, 15, 2, 2, 12); chebBoundsSet_ = true; }
       lastPressureIters_ = mg_.solveChebyshev(rhs1_, phi1_, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
@@ -496,10 +530,12 @@ class SdflowIbm {
     // velocity cannot accumulate (matches the CUDA apply_mask/mask_k after correct_k -> stability).
     for (int c = 0; c < 3; ++c) maskVelocity(c);
     // Rotational incremental pressure (Timmermans), matching CUDA press_update_k: P += (rho/dt)*phi - mu*div(u*).
-    CCExec space; CCField P=P_, ph=phi_, d=div_; const double ct=rho_/dt_, mu=mu_;
-    Kokkos::parallel_for("press", Kokkos::RangePolicy<CCExec>(space,0,n_),
-      KOKKOS_LAMBDA(std::size_t i){ P(i) += ct*ph(i) - mu*d(i); });
-
+    // Classical non-incremental Chorin (!incremental_) skips the accumulation; getPressure() derives p from phi.
+    if (incremental_) {
+      CCExec space; CCField P=P_, ph=phi_, d=div_; const double ct=rho_/dt_, mu=mu_;
+      Kokkos::parallel_for("press", Kokkos::RangePolicy<CCExec>(space,0,n_),
+        KOKKOS_LAMBDA(std::size_t i){ P(i) += ct*ph(i) - mu*d(i); });
+    }
   }
   void maskVelocity(int c) {
     CCExec space; CCField u=C[c].u, m=C[c].mask;
@@ -546,6 +582,7 @@ class SdflowIbm {
   CCField bcProf_[6]; int bcProfNc_[6] = {0,0,0,0,0,0};  // per-position inlet profiles (face grid [Lb*Lc*3])
   CCField bcDcorr_[3], bcBrhs_[3];                // implicit-diffusion face fold (per component)
   bool advect_ = false, cutcellPressure_ = false, implicitFou_ = false;
+  bool incremental_ = true, pwarm_ = false;     // incremental-rotational pressure (CUDA default on) + warm-start
   bool useVelocityMg_ = false; int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
   VelocityMG vmg_; CCField vmgTheta_, vmgClean_;
   int outerIters_ = 1; double outerTol_ = 0.0;        // Picard outer iteration (CUDA set_outer_iterations)
