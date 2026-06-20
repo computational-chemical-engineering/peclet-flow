@@ -2,9 +2,9 @@
 
 ## Project Structure & Module Organization
 - `src/`: C++/CUDA sources for the CFD solver and pybind11 bindings (`.cpp`, `.cu`, `.cuh`).
-- `tests/`: C++ multi-rank ctests (`test_*_mpi.cu`) + a couple of pore-extraction Python scripts.
+- `tests/`: C++ multi-rank ctests (`tests/kokkos_mpi/test_*.cpp`) + a couple of pore-extraction Python scripts.
 - `scripts/`: `sdflow` verification/analysis scripts (e.g., `verify_poiseuille_sdflow.py`).
-- `build/`: CMake build output (expects `build/sdflow.so` + `build/pnm_backend.so`).
+- `build/`: CMake build output (expects `build/sdflow.*.so` + `build/pnm.*.so`).
 - `doc/`, `notebooks/`, `data/`: design notes, experiments, and input datasets.
 
 ## Build, Test, and Development Commands
