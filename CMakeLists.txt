@@ -1,186 +1,36 @@
-cmake_minimum_required(VERSION 3.18)
-project(pnm_extraction)
+cmake_minimum_required(VERSION 3.24)
+project(cfd_gpu_sdflow LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# Canonical cfd-gpu build: the Kokkos `sdflow` cut-cell IBM Navier-Stokes solver + the `pnm_backend`
+# pore-network extraction, as importable Python modules. Kokkos provides the backend (CUDA / HIP / OpenMP),
+# selected by the install prefix (extern/install/<backend>, built by ../tools/bootstrap_deps.sh -- a HARD
+# build dependency).
+#
+# Build (single-rank Python modules):
+#   cmake -S . -B build \
+#     -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda;$(python -m pybind11 --cmakedir)"
+#   cmake --build build -j        ->  build/sdflow.*.so + build/pnm_backend.*.so
+#
+# Multi-rank MPI is exercised by the tests/kokkos_mpi ctest suite (its own find_package project); the
+# single-rank kernel unit tests live in tests/kokkos. See CLAUDE.md.
+
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
 
-# Find CUDA
-find_package(CUDAToolkit REQUIRED)
-set(CMAKE_CUDA_ARCHITECTURES 75 80 86 120)
-set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
-enable_language(CUDA)
+find_package(Kokkos CONFIG REQUIRED)
+find_package(pybind11 CONFIG REQUIRED)
+message(STATUS "cfd-gpu: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES})")
 
-# Fetch pybind11
-include(FetchContent)
-FetchContent_Declare(
-  pybind11
-  GIT_REPOSITORY https://github.com/pybind/pybind11.git
-  GIT_TAG        v2.11.1
-)
-FetchContent_MakeAvailable(pybind11)
+# sdflow -- the cut-cell IBM Navier-Stokes solver (single-rank Python module).
+# NO_EXTRAS: pybind LTO conflicts with the nvcc launch-compiler objects.
+pybind11_add_module(sdflow NO_EXTRAS src/sdflow_bindings.cpp)
+target_include_directories(sdflow PRIVATE src)
+target_link_libraries(sdflow PRIVATE Kokkos::kokkos)
 
-# Add source files
-set(SOURCES
-    src/bindings.cpp
-    src/sdf_reader.cpp
-    src/pore_extraction.cu
-)
-
-# Define the Python extension module
-pybind11_add_module(pnm_backend ${SOURCES})
-
-# target include directories
+# pnm_backend -- pore-network extraction (Kokkos GPU compute + pure-C++ SDFReader VTI reader).
+pybind11_add_module(pnm_backend NO_EXTRAS src/pnm_bindings.cpp src/sdf_reader.cpp)
 target_include_directories(pnm_backend PRIVATE src)
-
-# Link against CUDA Runtime
-target_link_libraries(pnm_backend PRIVATE CUDA::cudart)
-
-# ---------------------------------------------------------------------------
-# Optional: MPI distributed-halo capability (transport-core integration).
-# Off by default so the standard module build is unchanged. Enable with
-#   cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON
-# transport-core is header-only and picked up from the sibling checkout.
-# ---------------------------------------------------------------------------
-option(CFD_BUILD_MPI "Build MPI distributed-halo tests (needs transport-core + MPI)" OFF)
-if(CFD_BUILD_MPI)
-  find_package(MPI REQUIRED COMPONENTS CXX)
-  set(TPX_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../transport-core/include")
-  if(NOT EXISTS "${TPX_INCLUDE}/tpx/halo/grid_halo.hpp")
-    message(FATAL_ERROR "transport-core not found at ${TPX_INCLUDE} (clone it as a sibling repo)")
-  endif()
-
-  enable_testing()
-  # transport-core's halo headers are C++17-clean; the RTX 5080 is sm_120.
-  foreach(t test_mac_halo test_advdiff_mpi test_gs_implicit_mpi test_projection_mpi test_stokes_mpi
-            test_stokes_solid_mpi test_poiseuille_mpi test_distributed_ns test_advection_mpi
-            test_navier_stokes_mpi test_ns_solid_mpi test_gather_vti_mpi test_reductions_mpi
-            test_multigrid_mpi test_multigrid_var_mpi test_mg_projection_mpi test_cutcell_operator_mpi
-            test_galerkin_mpi test_ibm_stencil_mpi test_ibm_poiseuille_mpi test_picard_mpi
-            test_incremental_pressure_mpi
-            profile_sphere_packing bench_mixed_precision bench_reductions bench_velocity_streams profile_mg_scaling)
-    add_executable(${t} tests/${t}.cu)
-    target_include_directories(${t} PRIVATE src ${TPX_INCLUDE})
-    target_link_libraries(${t} PRIVATE CUDA::cudart MPI::MPI_CXX)
-    set_target_properties(${t} PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
-  endforeach()
-
-  foreach(np IN ITEMS 1 2 4)
-    add_test(NAME mac_halo_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_mac_halo> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME advdiff_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_advdiff_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME gs_implicit_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_gs_implicit_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME projection_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_projection_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME stokes_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_stokes_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME stokes_solid_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_stokes_solid_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME poiseuille_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_poiseuille_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME distributed_ns_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_distributed_ns> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME advection_op_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_advection_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME navier_stokes_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_navier_stokes_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME ns_solid_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_ns_solid_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME gather_vti_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_gather_vti_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME reductions_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_reductions_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME multigrid_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_multigrid_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME multigrid_var_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_multigrid_var_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME mg_projection_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_mg_projection_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME cutcell_operator_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_cutcell_operator_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME galerkin_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_galerkin_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME ibm_stencil_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_ibm_stencil_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME ibm_poiseuille_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_ibm_poiseuille_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME picard_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_picard_mpi> ${MPIEXEC_POSTFLAGS})
-    add_test(NAME incremental_pressure_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
-                     ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_incremental_pressure_mpi> ${MPIEXEC_POSTFLAGS})
-  endforeach()
-  # profiler: RB-GS vs multigrid pressure solve on the sphere packing (timing; runs at np=1)
-  add_test(NAME profile_sphere_packing
-           COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1
-                   ${MPIEXEC_PREFLAGS} $<TARGET_FILE:profile_sphere_packing> ${MPIEXEC_POSTFLAGS})
-  # mixed-precision kernel benchmark (timing; small smoke size so `ctest` stays quick)
-  add_test(NAME bench_mixed_precision
-           COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS}
-                   $<TARGET_FILE:bench_mixed_precision> 64 100 ${MPIEXEC_POSTFLAGS})
-  # reduction benchmark (timing; small smoke size so `ctest` stays quick)
-  add_test(NAME bench_reductions
-           COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
-                   $<TARGET_FILE:bench_reductions> 64 200 ${MPIEXEC_POSTFLAGS})
-  # velocity-stream benchmark (also a smoke test of the streamed IBM RB-GS path)
-  add_test(NAME bench_velocity_streams
-           COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS}
-                   $<TARGET_FILE:bench_velocity_streams> 5 ${MPIEXEC_POSTFLAGS})
-  # MG scaling/diagnostic profiler (small smoke size so `ctest` stays quick)
-  add_test(NAME profile_mg_scaling
-           COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 ${MPIEXEC_PREFLAGS}
-                   $<TARGET_FILE:profile_mg_scaling> 32 ${MPIEXEC_POSTFLAGS})
-
-  # Runnable demo (writes a ParaView .vti); CI runs only a tiny smoke case.
-  add_executable(demo_flow_sphere tests/demo_flow_sphere.cu)
-  target_include_directories(demo_flow_sphere PRIVATE src ${TPX_INCLUDE})
-  target_link_libraries(demo_flow_sphere PRIVATE CUDA::cudart MPI::MPI_CXX)
-  set_target_properties(demo_flow_sphere PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "120")
-  add_test(NAME demo_flow_sphere_smoke
-           COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
-                   $<TARGET_FILE:demo_flow_sphere> 16 3 ${CMAKE_CURRENT_BINARY_DIR}/smoke.vti
-                   ${MPIEXEC_POSTFLAGS})
-endif()
-
-# ---------------------------------------------------------------------------
-# Canonical `sdflow` Python module (the convergence target). Built in BOTH modes from one source:
-#   * default build               -> single-rank, NO MPI linked (transport-core's TPX_NO_MPI stub)
-#   * -DCFD_BUILD_MPI=ON           -> linked against MPI for the multi-rank path (with the *_mpi tests)
-# transport-core is header-only, picked up from the sibling checkout; skipped if absent.
-# ---------------------------------------------------------------------------
-set(TPX_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../transport-core/include")
-if(EXISTS "${TPX_INCLUDE}/tpx/halo/grid_halo.hpp")
-  pybind11_add_module(sdflow src/sdflow_bindings.cu)
-  target_include_directories(sdflow PRIVATE src ${TPX_INCLUDE})
-  set_target_properties(sdflow PROPERTIES CUDA_STANDARD 17 CUDA_ARCHITECTURES "75;80;86;120")
-  if(CFD_BUILD_MPI)
-    target_link_libraries(sdflow PRIVATE CUDA::cudart MPI::MPI_CXX)
-    message(STATUS "cfd-gpu: sdflow module -> MPI (multi-rank)")
-  else()
-    target_compile_definitions(sdflow PRIVATE TPX_NO_MPI=1)
-    target_link_libraries(sdflow PRIVATE CUDA::cudart)
-    message(STATUS "cfd-gpu: sdflow module -> single-rank, no MPI linked")
-  endif()
-endif()
+target_link_libraries(pnm_backend PRIVATE Kokkos::kokkos)
