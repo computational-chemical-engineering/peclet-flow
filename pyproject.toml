@@ -1,0 +1,38 @@
+# Python packaging for the `sdflow` CFD solver + the `pnm` pore-network-extraction module.
+#
+# `pip install .` builds both Kokkos extensions via scikit-build-core and installs them as top-level
+# `sdflow` and `pnm` modules. The Kokkos prefix is NOT pulled from PyPI (it is GPU-arch / backend
+# specific): point the build at a prefix you bootstrapped once with ../tools/bootstrap_deps.sh by
+# exporting CMAKE_PREFIX_PATH. The backend (Serial / OpenMP / CUDA / HIP) is whatever that prefix was
+# built for — one source, every environment.
+#
+#   # CPU / multicore (OpenMP):
+#   CMAKE_PREFIX_PATH=/path/to/extern/install/host-openmp pip install .
+#
+#   # NVIDIA GPU (Snellius) — put nvcc on PATH first:
+#   CMAKE_PREFIX_PATH=/path/to/extern/install/nvidia-cuda pip install .
+#
+# The Python module is single-rank; the multi-rank MPI solver is exercised by the C++ tests/kokkos_mpi
+# suite. See ../docs/DEPLOYMENT.md for the full environment matrix and HPC/container recipes.
+
+[build-system]
+requires = ["scikit-build-core>=0.8", "pybind11>=2.11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "sdflow"
+version = "0.1.0"
+description = "Kokkos cut-cell IBM incompressible Navier-Stokes solver (+ pnm pore extraction)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.20"]
+
+[project.urls]
+Homepage = "https://github.com/computational-chemical-engineering/sdflow"
+
+[tool.scikit-build]
+minimum-version = "0.8"
+cmake.version = ">=3.24"
+# Both extensions are installed by the CMake `install(TARGETS sdflow pnm ...)` rule (guarded by SKBUILD).
+wheel.install-dir = "."
+sdist.include = ["src", "CMakeLists.txt", "README.md"]

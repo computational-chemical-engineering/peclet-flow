@@ -34,3 +34,11 @@ target_link_libraries(sdflow PRIVATE Kokkos::kokkos)
 pybind11_add_module(pnm NO_EXTRAS src/pnm_bindings.cpp src/sdf_reader.cpp)
 target_include_directories(pnm PRIVATE src)
 target_link_libraries(pnm PRIVATE Kokkos::kokkos)
+
+# --- pip / scikit-build-core install rule -------------------------------------------------------
+# `pip install .` (driven by pyproject.toml) builds both modules against a Kokkos prefix on
+# CMAKE_PREFIX_PATH and installs them as top-level `sdflow` + `pnm` modules. Inert for a plain
+# `cmake --build` (no `cmake --install`), so the developer workflow is unchanged.
+if(DEFINED SKBUILD)
+  install(TARGETS sdflow pnm LIBRARY DESTINATION . COMPONENT python)
+endif()
