@@ -361,8 +361,8 @@ class SdflowSolver {
         const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
         double aK=0.0, aF=0.0;
         if (adv) { sadv::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y}, Fa{uu,e.x,e.y};
-                   aK = sadv::advect(c, x,y,z, Ua,Va,Wa, Fa);
-                   if (ifou) aF = sadv::advect_fou(c, x,y,z, Ua,Va,Wa, Fa); }
+                   aK = Grid::advect(c, x,y,z, Ua,Va,Wa, Fa);
+                   if (ifou) aF = Grid::advect_fou(c, x,y,z, Ua,Va,Wa, Fa); }
         const double gp = incr ? (P(i)-P((long)i-strd)) : 0.0;
         bb(i) = rs(i) * (idiag*un(i) + fc - rho*aK + rho*aF - gp)
                 + (bc ? brhs(i) : -inh(i)); });  // BC fold (brhs) on the domain-BC path; -inhom on the IBM path (=0 for no-slip)
@@ -382,7 +382,7 @@ class SdflowSolver {
         const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
         double cC=AC(i),cxm=AW(i),cxp=AE(i),cym=AS(i),cyp=AN(i),czm=AB(i),czp=AT(i);
         sadv::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y};
-        sadv::fou_operator(c, x,y,z, Ua,Va,Wa, fouw, cC,cxm,cxp,cym,cyp,czm,czp);
+        Grid::fou_operator(c, x,y,z, Ua,Va,Wa, fouw, cC,cxm,cxp,cym,cyp,czm,czp);
         AC(i)=(float)cC; AW(i)=(float)cxm; AE(i)=(float)cxp; AS(i)=(float)cym; AN(i)=(float)cyp; AB(i)=(float)czm; AT(i)=(float)czp; });
 
     Kokkos::deep_copy(C[c].rscale, 1.0); Kokkos::deep_copy(C[c].inhom, 0.0);

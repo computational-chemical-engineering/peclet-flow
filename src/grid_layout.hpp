@@ -11,9 +11,18 @@
 #ifndef CFD_GRID_LAYOUT_HPP
 #define CFD_GRID_LAYOUT_HPP
 
-#include "mac_ibm.hpp"  // sdflow::Off3
+#include "mac_ibm.hpp"               // sdflow::Off3
+#include "staggered_advection.hpp"   // sadv::advect / advect_fou / fou_operator
+#include "colocated_advection.hpp"   // cadv::advect / advect_fou / fou_operator
 
 namespace sdflow {
+
+// A GridLayout policy supplies the two grid-position-dependent pieces the orchestrator needs:
+//   - offset(c): where component c's velocity unknown sits (drives the cut-cell IBM overlay / openness /
+//     volume-fraction kernels);
+//   - advect / advect_fou / fou_operator: the conservative momentum advection for that control-volume
+//     placement (forwarded to the sadv:: or cadv:: free functions).
+// The policy is stateless; the advection methods are KOKKOS_INLINE_FUNCTION so they inline on device.
 
 // Staggered MAC grid: component c (0=u,1=v,2=w) lives on the low face along axis c (offset -1/2 there),
 // i.e. u@(i-1/2,j,k), v@(i,j-1/2,k), w@(i,j,k-1/2). This is the existing sdflow grid; the offsets
@@ -24,6 +33,42 @@ struct Staggered {
     return c == 0   ? Off3{-0.5f, 0.0f, 0.0f}
            : c == 1 ? Off3{0.0f, -0.5f, 0.0f}
                     : Off3{0.0f, 0.0f, -0.5f};
+  }
+  template <class A>
+  KOKKOS_INLINE_FUNCTION static double advect(int c, int x, int y, int z, A U, A V, A W, A F) {
+    return sadv::advect(c, x, y, z, U, V, W, F);
+  }
+  template <class A>
+  KOKKOS_INLINE_FUNCTION static double advect_fou(int c, int x, int y, int z, A U, A V, A W, A F) {
+    return sadv::advect_fou(c, x, y, z, U, V, W, F);
+  }
+  template <class A>
+  KOKKOS_INLINE_FUNCTION static void fou_operator(int c, int x, int y, int z, A U, A V, A W, double dt,
+                                                  double& cC, double& cxm, double& cxp, double& cym,
+                                                  double& cyp, double& czm, double& czp) {
+    sadv::fou_operator(c, x, y, z, U, V, W, dt, cC, cxm, cxp, cym, cyp, czm, czp);
+  }
+};
+
+// Collocated (cell-centered) grid: all three components live at the cell center (offset 0), advected on
+// the cell control volume with cell->face-averaged advecting velocities (cadv). The pressure coupling
+// (approximate/MAC projection) is added in a later phase; this policy carries the predictor pieces.
+struct Colocated {
+  static constexpr const char* name = "colocated";
+  static constexpr Off3 offset(int /*c*/) { return Off3{0.0f, 0.0f, 0.0f}; }
+  template <class A>
+  KOKKOS_INLINE_FUNCTION static double advect(int c, int x, int y, int z, A U, A V, A W, A F) {
+    return cadv::advect(c, x, y, z, U, V, W, F);
+  }
+  template <class A>
+  KOKKOS_INLINE_FUNCTION static double advect_fou(int c, int x, int y, int z, A U, A V, A W, A F) {
+    return cadv::advect_fou(c, x, y, z, U, V, W, F);
+  }
+  template <class A>
+  KOKKOS_INLINE_FUNCTION static void fou_operator(int c, int x, int y, int z, A U, A V, A W, double dt,
+                                                  double& cC, double& cxm, double& cxp, double& cym,
+                                                  double& cyp, double& czm, double& czp) {
+    cadv::fou_operator(c, x, y, z, U, V, W, dt, cC, cxm, cxp, cym, cyp, czm, czp);
   }
 };
 
