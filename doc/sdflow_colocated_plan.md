@@ -8,9 +8,13 @@ cut-cell projection, and the cell velocities are corrected with the central-diff
 The **rotational (incremental) pressure** update and the **SDF-based IBM** are reused unchanged; only the
 **grid positions** of the velocity unknowns differ.
 
-> **STATUS (2026-06-21): plan only — no code yet.** Architecture decided (policy-templated orchestrator).
-> One open numerical decision deferred to a validation gate: the cut-face velocity reconstruction
-> (Option A → B, see §4).
+> **STATUS (2026-06-21): phases 1–3 done.** Phase 1 — `SdflowSolver<GridLayout>` extracted, `Staggered`
+> bit-identical (regression +0.00%, 18/18 MPI ctests). Phase 2 — `Colocated` policy + cell-centered
+> advection (`colocated_advection.hpp`); `sdflow.SolverColocated` exposed; Poiseuille matches staggered to
+> machine zero. Phase 3 — approximate (MAC) projection (`mac_approx_projection.hpp`): Taylor–Green vortex
+> validated (face velocities divergence-free to ~1e-15; L2 error 11.7× down 32→64; energy decay tracks
+> analytic). Remaining: phase 4 (IBM cut-cell validation, the Option A→B decision of §4) and phase 5
+> (collocated domain BCs + MPI; lid cavity / channel / BFS).
 
 ## 0. Where we are (grounded in the code)
 

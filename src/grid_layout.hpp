@@ -29,6 +29,7 @@ namespace sdflow {
 // reproduce the previously hard-coded {-0.5,0,0}/{0,-0.5,0}/{0,0,-0.5} arrays exactly (bit-identical).
 struct Staggered {
   static constexpr const char* name = "staggered";
+  static constexpr bool collocated = false;  // stored velocity IS the face velocity (MAC)
   static constexpr Off3 offset(int c) {
     return c == 0   ? Off3{-0.5f, 0.0f, 0.0f}
            : c == 1 ? Off3{0.0f, -0.5f, 0.0f}
@@ -55,6 +56,7 @@ struct Staggered {
 // (approximate/MAC projection) is added in a later phase; this policy carries the predictor pieces.
 struct Colocated {
   static constexpr const char* name = "colocated";
+  static constexpr bool collocated = true;  // cell-centered velocity; approximate (MAC) projection
   static constexpr Off3 offset(int /*c*/) { return Off3{0.0f, 0.0f, 0.0f}; }
   template <class A>
   KOKKOS_INLINE_FUNCTION static double advect(int c, int x, int y, int z, A U, A V, A W, A F) {

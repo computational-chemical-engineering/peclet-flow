@@ -27,6 +27,7 @@
 #include "mac_velocity_mg.hpp"
 #include "mac_stencils.hpp"
 #include "staggered_advection.hpp"
+#include "mac_approx_projection.hpp"
 #include "grid_layout.hpp"
 
 namespace sdflow {
@@ -66,6 +67,9 @@ class SdflowSolver {
       C[c].counter = Kokkos::View<int,CCMem>("cnt");
       old_[c] = CCField("uOld", n_);   // u^n time base (fixed over the step's Picard sweeps)
       prev_[c] = CCField("uPrev", n_);  // previous Picard iterate (outer-tolerance check)
+    }
+    if constexpr (Grid::collocated) {  // transient face (MAC) field for the approximate projection
+      uf_ = CCField("uf", n_); vf_ = CCField("vf", n_); wf_ = CCField("wf", n_);
     }
   }
 
@@ -276,8 +280,15 @@ class SdflowSolver {
   }
   double maxOpenDivergence() {
     if (!cutcellPressure_) return 0.0;
+    if constexpr (Grid::collocated) {
+      // Report the residual of the PROJECTED face field uf_ (made divergence-free by project(), ghosts
+      // filled). Re-averaging the central-difference-corrected CELL field would instead show the inherent
+      // O(h^2) approximate-projection cell divergence -- a property of the scheme, not the solver residual.
+      divergOpen(CCConst(uf_),CCConst(vf_),CCConst(wf_), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
+    } else {
     for (int c=0;c<3;++c) fillVelGhosts(c, 0);  // ghosts incl. outflow zero-gradient before the divergence
     divergOpen(CCConst(C[0].u),CCConst(C[1].u),CCConst(C[2].u), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
+    }
     double m = reduceMaxAbsInner(CCConst(div_));
 #ifdef CFD_MPI
     if (distributed_) { double g = 0; MPI_Allreduce(&m, &g, 1, MPI_DOUBLE, MPI_MAX, comm_); return g; }
@@ -363,7 +374,11 @@ class SdflowSolver {
         if (adv) { sadv::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y}, Fa{uu,e.x,e.y};
                    aK = Grid::advect(c, x,y,z, Ua,Va,Wa, Fa);
                    if (ifou) aF = Grid::advect_fou(c, x,y,z, Ua,Va,Wa, Fa); }
-        const double gp = incr ? (P(i)-P((long)i-strd)) : 0.0;
+        // incremental predictor's -grad(P^n): central-difference cell gradient on the collocated grid,
+        // one-sided face gradient (P at the high cell of the staggered face) on the staggered grid.
+        const double gp = !incr ? 0.0
+                          : Grid::collocated ? 0.5*(P((long)i+strd)-P((long)i-strd))
+                                             : (P(i)-P((long)i-strd));
         bb(i) = rs(i) * (idiag*un(i) + fc - rho*aK + rho*aF - gp)
                 + (bc ? brhs(i) : -inh(i)); });  // BC fold (brhs) on the domain-BC path; -inhom on the IBM path (=0 for no-slip)
 
@@ -504,8 +519,16 @@ class SdflowSolver {
     // ghosts incl. domain BCs (outflow zero-gradient) BEFORE the divergence -- matches CUDA apply_velocity_bc
     // before diverg_open, so div(u*) counts the outflow flux (else the rotational pressure pumps the
     // mis-counted outflow divergence and blows up the outflow-wall corner).
-    for (int c=0;c<3;++c) fillVelGhosts(c, 0);
-    divergOpen(CCConst(C[0].u),CCConst(C[1].u),CCConst(C[2].u), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
+    if constexpr (Grid::collocated) {
+      // Approximate (MAC) projection: average the cell velocities onto a face field, then project THAT.
+      // The cell velocity ghosts (periodic / cross-rank) feed the averaging.
+      for (int c=0;c<3;++c) fillGhosts(C[c].u);
+      centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
+      divergOpen(CCConst(uf_),CCConst(vf_),CCConst(wf_), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
+    } else {
+      for (int c=0;c<3;++c) fillVelGhosts(c, 0);
+      divergOpen(CCConst(C[0].u),CCConst(C[1].u),CCConst(C[2].u), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
+    }
     // bridge -div(u*) (g=2 block) -> the MG rhs (g=1 block); keep div(u*) in div_ for the pressure update
     copyInner(rhs1_, e1_, 1, CCConst(div_), e_, G);
     { CCExec space; CCField r=rhs1_;
@@ -527,10 +550,18 @@ class SdflowSolver {
       B3 e{e_.x,e_.y,e_.z};
       for (int a=0;a<3;++a) for (int s=0;s<2;++s) if (bc_[2*a+s]==3) bcZeroPressureGhost(phi_, e, G, a, s);
     }
-    projectCorrect(C[0].u,C[1].u,C[2].u, CCConst(phi_), e_, G);
-    if (hasOutflow_) {  // correct the high-side outflow normal face that projectCorrect misses (mass leaves)
-      B3 e{e_.x,e_.y,e_.z};
-      for (int a=0;a<3;++a) if (bc_[2*a+1]==3) bcCorrectOutflow(C[a].u, phi_, e, G, a);
+    if constexpr (Grid::collocated) {
+      // Correct the face field (-> discretely divergence-free; transient this step) and the cell field
+      // (central-difference cell gradient). No outflow handling on the collocated periodic path (phase 3).
+      projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G);
+      fillGhosts(uf_); fillGhosts(vf_); fillGhosts(wf_);  // complete the divergence-free face field (boundary faces)
+      projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G);
+    } else {
+      projectCorrect(C[0].u,C[1].u,C[2].u, CCConst(phi_), e_, G);
+      if (hasOutflow_) {  // correct the high-side outflow normal face that projectCorrect misses (mass leaves)
+        B3 e{e_.x,e_.y,e_.z};
+        for (int a=0;a<3;++a) if (bc_[2*a+1]==3) bcCorrectOutflow(C[a].u, phi_, e, G, a);
+      }
     }
     // the grad(phi) correction also touches solid faces; re-impose no-slip there so the decoupled solid
     // velocity cannot accumulate (matches the CUDA apply_mask/mask_k after correct_k -> stability).
@@ -594,6 +625,7 @@ class SdflowSolver {
   int outerIters_ = 1; double outerTol_ = 0.0;        // Picard outer iteration (CUDA set_outer_iterations)
   long lastOuterIters_ = 0; double lastOuterCorr_ = 0.0;
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
+  CCField uf_, vf_, wf_;                                // collocated: transient face (MAC) field (approx projection)
   CCField old_[3], prev_[3];                            // u^n time base + previous Picard iterate
   Comp C[3];
 };
