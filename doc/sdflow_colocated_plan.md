@@ -8,13 +8,16 @@ cut-cell projection, and the cell velocities are corrected with the central-diff
 The **rotational (incremental) pressure** update and the **SDF-based IBM** are reused unchanged; only the
 **grid positions** of the velocity unknowns differ.
 
-> **STATUS (2026-06-21): phases 1–3 done.** Phase 1 — `SdflowSolver<GridLayout>` extracted, `Staggered`
+> **STATUS (2026-06-22): phases 1–4 done.** Phase 1 — `SdflowSolver<GridLayout>` extracted, `Staggered`
 > bit-identical (regression +0.00%, 18/18 MPI ctests). Phase 2 — `Colocated` policy + cell-centered
 > advection (`colocated_advection.hpp`); `sdflow.SolverColocated` exposed; Poiseuille matches staggered to
 > machine zero. Phase 3 — approximate (MAC) projection (`mac_approx_projection.hpp`): Taylor–Green vortex
 > validated (face velocities divergence-free to ~1e-15; L2 error 11.7× down 32→64; energy decay tracks
-> analytic). Remaining: phase 4 (IBM cut-cell validation, the Option A→B decision of §4) and phase 5
-> (collocated domain BCs + MPI; lid cavity / channel / BFS).
+> analytic). Phase 4 — cut-cell IBM: periodic sphere-packing Stokes permeability incompressible (face div
+> ~1e-10), exact no-slip, grid-converges and approaches the (Z&H-validated) staggered solver monotonically
+> (2.61%→1.12%, N=32→64). **§4 decision: Option A passes the gate; B / openness-aware cell gradient not
+> needed for converged integral quantities.** Remaining: phase 5 (collocated domain BCs + MPI; lid cavity /
+> channel / BFS).
 
 ## 0. Where we are (grounded in the code)
 
@@ -124,6 +127,14 @@ cut face, so it can mis-estimate the flux through the *wetted* (open) sub-area. 
 **Plan: build A, gate on Zick–Homsy + periodic-sphere permeability vs the staggered solver; escalate to B
 only if accuracy is insufficient.** The projection is approximate anyway — getting the *area weighting*
 right (A already does) is what protects mass conservation; the centroid correction is a 2nd-order refinement.
+
+**OUTCOME (phase 4): Option A passes.** Periodic 2×2×2 sphere-packing Stokes permeability (Option A
+averaging + plain central-difference cell correction) is incompressible (projected face div ~1e-10), exact
+no-slip in the deep solid, grid-converges, and approaches the Z&H-validated staggered permeability
+monotonically with resolution (rel. diff 2.61%→1.53%→1.12% at N=32/48/64). So neither the open-centroid
+reconstruction (B) nor the openness-aware cell gradient is needed for converged integral quantities; both
+remain available refinements if a future case needs accurate near-wall *cell* velocities or wall stress.
+See `scripts/verify_colocated_spheres.py`.
 
 **Two smaller IBM-entry points to handle in the collocated path:**
 - **Cell-correction gradient at cut cells.** `½(phi(i+1)−phi(i−1))` reaches neighbors that may be solid
