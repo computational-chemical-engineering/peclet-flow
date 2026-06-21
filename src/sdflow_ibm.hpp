@@ -27,15 +27,20 @@
 #include "mac_velocity_mg.hpp"
 #include "mac_stencils.hpp"
 #include "staggered_advection.hpp"
+#include "grid_layout.hpp"
 
 namespace sdflow {
 
-class SdflowIbm {
+// Templated on a GridLayout policy (grid_layout.hpp) that supplies the grid-position-dependent pieces
+// (currently: the per-component velocity sample offset). SdflowIbm == SdflowSolver<Staggered> (the alias
+// below) is bit-identical to the pre-policy solver; the Colocated policy is added in a later phase.
+template <class Grid>
+class SdflowSolver {
  public:
   using FV = Kokkos::View<float*, CCMem>;
   static constexpr int G = 2;   // velocity block: Koren advection reach (pressure/MG bridged to g=1)
 
-  SdflowIbm(int nx, int ny, int nz) : nx_(nx), ny_(ny), nz_(nz) {
+  SdflowSolver(int nx, int ny, int nz) : nx_(nx), ny_(ny), nz_(nz) {
     e_ = C3{nx + 2 * G, ny + 2 * G, nz + 2 * G};
     n_ = (std::size_t)e_.x * e_.y * e_.z;
     e1_ = C3{nx + 2, ny + 2, nz + 2};                   // g=1 block for the cut-cell pressure MG
@@ -188,10 +193,10 @@ class SdflowIbm {
     }
     Kokkos::deep_copy(sdf_, h);
     }
-    const Off3 offs[3] = {{-0.5f,0,0},{0,-0.5f,0},{0,0,-0.5f}};
     for (int c = 0; c < 3; ++c) {
-      C[c].nCut = buildIbmOverlay<0>(CCConst(sdf_), e_, G, offs[c], /*Dirichlet*/ 0, C[c].ov, C[c].idMap, C[c].counter);  // SCHEME 0 = point-value (matches CUDA ibm_geometry_ext_k<0>)
-      ibmSolidMask(C[c].mask, CCConst(sdf_), e_, offs[c]);
+      const Off3 off = Grid::offset(c);  // velocity-unknown placement (staggered: -1/2 face; collocated: 0)
+      C[c].nCut = buildIbmOverlay<0>(CCConst(sdf_), e_, G, off, /*Dirichlet*/ 0, C[c].ov, C[c].idMap, C[c].counter);  // SCHEME 0 = point-value (matches CUDA ibm_geometry_ext_k<0>)
+      ibmSolidMask(C[c].mask, CCConst(sdf_), e_, off);
       Kokkos::deep_copy(C[c].u, 0.0);
     }
     rebuildStencils();
@@ -421,9 +426,9 @@ class SdflowIbm {
         vmg_.buildUpwindCoarse(c, mu_, rho_/dt_, rho_);
       } else {
         // STAIRCASE coarse op (diffusion-only): theta classification + clean-fluid exclude (exact == RB-GS).
-        const Off3 offs[3] = {{-0.5f,0,0},{0,-0.5f,0},{0,0,-0.5f}};
-        ibmVolfrac(vmgTheta_, CCConst(sdf_), e_, offs[c]);
-        ibmCleanFluidMask(vmgClean_, CCConst(sdf_), e_, offs[c]);
+        const Off3 off = Grid::offset(c);  // velocity-unknown placement (staggered: -1/2 face; collocated: 0)
+        ibmVolfrac(vmgTheta_, CCConst(sdf_), e_, off);
+        ibmCleanFluidMask(vmgClean_, CCConst(sdf_), e_, off);
         vmg_.setStaircase(CCConst(vmgTheta_), CCConst(C[c].mask), CCConst(vmgClean_), mu_, rho_/dt_, 0.5);
       }
       vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8);
@@ -592,6 +597,10 @@ class SdflowIbm {
   CCField old_[3], prev_[3];                            // u^n time base + previous Picard iterate
   Comp C[3];
 };
+
+// The staggered MAC solver — THE sdflow solver, bit-identical to the pre-policy class. Bindings + the
+// kokkos_mpi tests reference this name unchanged.
+using SdflowIbm = SdflowSolver<Staggered>;
 
 }  // namespace sdflow
 
