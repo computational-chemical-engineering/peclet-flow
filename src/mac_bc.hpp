@@ -69,24 +69,29 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
 
 // Collocated (cell-centered) velocity Dirichlet / no-slip ghost on one domain face. The wall sits at the
 // boundary FACE (between the last inner cell and the first ghost), so EVERY component is reflected about it
-// -- ghost = 2*wall - mirror(interior) makes the face-interpolated value equal `wall`. No normal/tangential
+// -- ghost = 2*wc - mirror(interior) makes the face-interpolated value equal `wc`. No normal/tangential
 // split and no implicit fold: explicit reflection, re-imposed each smoother sweep (converges to no-slip).
-inline void bcVelocityColocated(BField f, B3 ext, int g, int a, int s, double wall) {
+// `wc` is the scalar `wall`, or a per-position value from `prof` (the resampled inlet profile, indexed
+// (p0*prof_nc+p1)*3+comp over the face's perpendicular plane) when one is supplied (e.g. the BFS step inlet).
+inline void bcVelocityColocated(BField f, B3 ext, int g, int a, int s, double wall, int comp = 0,
+                                BField prof = BField(), int prof_nc = 0) {
   BExec space;
   int dims[3]; long strides[3];
   bcdetail::axisDims(ext, dims, strides);
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int na = dims[a];
+  const bool hasProf = prof.extent(0) > 0;
   using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
   Kokkos::parallel_for(
       "sdflow::bc_vel_coloc", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
         const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
+        const double wc = hasProf ? prof((static_cast<long>(p0) * prof_nc + p1) * 3 + comp) : wall;
         auto at = [&](int ia) -> double& { return f(base + static_cast<long>(ia) * sa); };
         if (s == 0)
-          for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wall - at(2 * g - 1 - ia);            // mirror about g-1/2
+          for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wc - at(2 * g - 1 - ia);            // mirror about g-1/2
         else
-          for (int ia = na - g; ia < na; ++ia) at(ia) = 2.0 * wall - at(2 * (na - g) - 1 - ia);  // about na-g-1/2
+          for (int ia = na - g; ia < na; ++ia) at(ia) = 2.0 * wc - at(2 * (na - g) - 1 - ia);  // about na-g-1/2
       });
 }
 

@@ -27,9 +27,12 @@ The **rotational (incremental) pressure** update and the **SDF-based IBM** are r
 > divergence-free in the interior; at the open outflow the approximate projection leaves an O(h²) residual
 > (4.9e-5→2.0e-5, H=16→32; vs staggered's exact-projection 1e-6), so max_open_divergence re-imposes the
 > zero-gradient outflow face (matching the staggered diagnostic) and the collocated channel gate uses mass
-> conservation as the primary continuity check. Remaining: **backward-facing step** (needs a collocated
-> per-position profile-inlet ghost — a variant of bcVelocityColocated) and **phase 5c** (collocated
-> multi-rank: cell-velocity halo already wired via fillVelGhosts→exchange; needs a kokkos_mpi test).
+> conservation as the primary continuity check. The **backward-facing step** (Gartling expansion-ratio-2)
+> works via the collocated per-position profile inlet (bcVelocityColocated extended with a resampled
+> profile; the step is realized purely as the partial parabola): lower-wall reattachment x_r/S 5.26
+> (Re_S=100) → 8.27 (Re_S=200), matching the staggered solver / Armaly–Biswas curve (5.3→8.3), bubble
+> forms, mass conserved (7e-6 / 1.5e-4). Remaining: **phase 5c** (collocated multi-rank: cell-velocity halo
+> already wired via fillVelGhosts→exchange; needs a kokkos_mpi test).
 
 ## 0. Where we are (grounded in the code)
 

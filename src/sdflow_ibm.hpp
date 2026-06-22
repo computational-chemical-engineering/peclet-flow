@@ -517,7 +517,10 @@ class SdflowSolver {
       for (int a=0;a<3;++a) for (int s=0;s<2;++s) {
         const int ff=2*a+s; const int t=bc_[ff]; if (t==0) continue;
         if (t==3) { if (doOutflow) bcNeumannGhost(f, e, G, a, s); continue; }  // outflow: zero-gradient ghost
-        bcVelocityColocated(f, e, G, a, s, bcVel_[ff][comp]);                  // wall / inflow / lid (Dirichlet)
+        if (bcProf_[ff].extent(0)>0)  // per-position inlet profile (e.g. the BFS partial parabola)
+          bcVelocityColocated(f, e, G, a, s, 0.0, comp, bcProf_[ff], bcProfNc_[ff]);
+        else
+          bcVelocityColocated(f, e, G, a, s, bcVel_[ff][comp]);               // wall / inflow / lid (Dirichlet)
       }
       return;
     }
