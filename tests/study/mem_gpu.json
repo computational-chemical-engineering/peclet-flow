@@ -1,0 +1,38 @@
+{
+  "staggered/32": {
+    "solver": "staggered",
+    "N": 32,
+    "gpu_delta_mb": 38.0,
+    "rss_mb": 178.6875
+  },
+  "colocated/32": {
+    "solver": "colocated",
+    "N": 32,
+    "gpu_delta_mb": 38.0,
+    "rss_mb": 178.8125
+  },
+  "staggered/48": {
+    "solver": "staggered",
+    "N": 48,
+    "gpu_delta_mb": 156.0,
+    "rss_mb": 182.74609375
+  },
+  "colocated/48": {
+    "solver": "colocated",
+    "N": 48,
+    "gpu_delta_mb": 162.0,
+    "rss_mb": 183.25390625
+  },
+  "staggered/64": {
+    "solver": "staggered",
+    "N": 64,
+    "gpu_delta_mb": 420.0,
+    "rss_mb": 191.7421875
+  },
+  "colocated/64": {
+    "solver": "colocated",
+    "N": 64,
+    "gpu_delta_mb": 432.0,
+    "rss_mb": 192.87890625
+  }
+}

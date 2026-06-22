@@ -115,13 +115,14 @@ CFG = dict(rho=1.0, mu=0.1, dt=60.0, F=1e-3, vel_sweeps=80, pcg_maxit=300, pcg_r
 
 
 # --------------------------------------------------------------------------- run one (case, N)
-def run_case(name, N, cfg, quiet=True):
+def run_case(name, N, cfg, quiet=True, solver="staggered"):
     import sdflow
     spec = CASES[name]
     sdf, info = spec["sdf"](N)
     levels = max(2, int(np.floor(np.log2(N))) - 1)
 
-    s = sdflow.Solver(N, N, N)
+    SolverCls = sdflow.SolverColocated if solver == "colocated" else sdflow.Solver
+    s = SolverCls(N, N, N)
     s.set_rho(cfg["rho"]); s.set_mu(cfg["mu"]); s.set_dt(cfg["dt"])
     s.set_body_force(cfg["F"], 0.0, 0.0)
     s.set_advection(False)  # creeping Stokes
@@ -176,14 +177,14 @@ def fit_order(Ns, vals):
     return best[1], best[2]  # order, extrapolated f_inf
 
 
-def run_all(cfg, cases):
+def run_all(cfg, cases, solver="staggered"):
     out = {}
     for name in cases:
         grids = CASES[name]["grids"]
         per = {}
-        print(f"\n[{name}] grids {grids} ...", flush=True)
+        print(f"\n[{name}] ({solver}) grids {grids} ...", flush=True)
         for N in grids:
-            r = run_case(name, N, cfg)
+            r = run_case(name, N, cfg, solver=solver)
             per[str(N)] = r
             print(f"  N={N:3d}  {CASES[name]['metric']}={r['metric']:.5g}  "
                   f"p_iters_tot={r['pressure_iters_total']:5d} (/step {r['pressure_iters_per_step']:.0f})  "
@@ -249,10 +250,13 @@ def main():
     ap.add_argument("--update", action="store_true", help="(re)write the baseline instead of checking")
     ap.add_argument("--cases", default=",".join(CASES), help="comma-separated subset of cases")
     ap.add_argument("--build", default="build", help="sdflow build dir under the repo root")
+    ap.add_argument("--solver", default="staggered", choices=["staggered", "colocated"],
+                    help="which grid variant to run (sdflow.Solver / sdflow.SolverColocated)")
     ap.add_argument("--quick", action="store_true", help="coarser grids + looser march (fast smoke)")
     args = ap.parse_args()
 
     sys.path.insert(0, os.path.join(ROOT, args.build))
+    baseline = BASELINE if args.solver == "staggered" else os.path.join(HERE, "perf_baseline_colocated.json")
     cases = [c.strip() for c in args.cases.split(",") if c.strip()]
     cfg = dict(CFG)
     if args.quick:
@@ -261,21 +265,21 @@ def main():
             c["grids"] = c["grids"][:3]
 
     t0 = time.time()
-    cur = run_all(cfg, cases)
+    cur = run_all(cfg, cases, solver=args.solver)
     print(f"\n(total {time.time()-t0:.0f}s)")
 
     if args.update:
-        payload = {"_meta": {"generated": time.strftime("%Y-%m-%d %H:%M"), "config": cfg,
-                             "tol": TOL}, **cur}
-        with open(BASELINE, "w") as f:
+        payload = {"_meta": {"generated": time.strftime("%Y-%m-%d %H:%M"), "solver": args.solver,
+                             "config": cfg, "tol": TOL}, **cur}
+        with open(baseline, "w") as f:
             json.dump(payload, f, indent=2)
-        print(f"\nwrote baseline -> {BASELINE}")
+        print(f"\nwrote baseline -> {baseline}")
         return 0
 
-    if not os.path.exists(BASELINE):
-        print(f"\nNO baseline at {BASELINE}; run with --update first.")
+    if not os.path.exists(baseline):
+        print(f"\nNO baseline at {baseline}; run with --update first.")
         return 1
-    base = json.load(open(BASELINE))
+    base = json.load(open(baseline))
     ok, report = compare(base, cur)
     print(report)
     print(f"\n=== regression: {'PASS' if ok else 'FAIL'} ===")

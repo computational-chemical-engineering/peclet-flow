@@ -38,7 +38,13 @@ PYTHONPATH=$PWD/build python tests/regression/sdflow_regression.py            # 
 PYTHONPATH=$PWD/build python tests/regression/sdflow_regression.py --update   # (re)write the baseline
 PYTHONPATH=$PWD/build python tests/regression/sdflow_regression.py --quick    # fast smoke (coarse grids)
 PYTHONPATH=$PWD/build python tests/regression/sdflow_regression.py --cases zh_sphere
+PYTHONPATH=$PWD/build python tests/regression/sdflow_regression.py --solver colocated   # cell-centered variant
 ```
+
+`--solver colocated` runs `sdflow.SolverColocated` (the cell-centered / approximate-projection grid) against
+its own baseline `perf_baseline_colocated.json`; the default `staggered` uses `perf_baseline.json`. The
+collocated metric converges to the same continuum value but more slowly / non-monotonically on the Stokes
+sphere beds (its fitted order is low — see `doc/colocated_study/`), so its baseline records that behaviour.
 
 The full suite runs in ~20 s on an RTX 5080. **Re-record the baseline (`--update`) only when a change is
 expected to move the numbers** (and review the diff); otherwise a baseline change masks a regression.
