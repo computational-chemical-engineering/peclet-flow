@@ -16,8 +16,14 @@ The **rotational (incremental) pressure** update and the **SDF-based IBM** are r
 > analytic). Phase 4 — cut-cell IBM: periodic sphere-packing Stokes permeability incompressible (face div
 > ~1e-10), exact no-slip, grid-converges and approaches the (Z&H-validated) staggered solver monotonically
 > (2.61%→1.12%, N=32→64). **§4 decision: Option A passes the gate; B / openness-aware cell gradient not
-> needed for converged integral quantities.** Remaining: phase 5 (collocated domain BCs + MPI; lid cavity /
-> channel / BFS).
+> needed for converged integral quantities.** Phase 5a — collocated domain BCs (no-slip walls + Dirichlet
+> lid): cell-centered reflection ghosts (every component reflects about the boundary face; no fold),
+> explicit-reflection diffusion smoother, Neumann phi wall ghost. Lid-driven cavity Re=100 N=128 vs Ghia:
+> u_rms 0.0071 / v_rms 0.0075 (< 0.02), face div 1.2e-15 — matches the staggered solver. Remaining:
+> **phase 5b** (inflow/outflow: developing channel + backward-facing step — needs the collocated outflow
+> velocity ghost + mass-conserving outflow face correction, on top of the shared α/β openness split) and
+> **phase 5c** (collocated multi-rank: cell-velocity halo already wired via fillGhosts→exchange; needs a
+> kokkos_mpi test).
 
 ## 0. Where we are (grounded in the code)
 
