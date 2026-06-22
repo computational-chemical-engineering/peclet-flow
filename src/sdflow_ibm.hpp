@@ -204,7 +204,9 @@ class SdflowSolver {
       Kokkos::deep_copy(C[c].u, 0.0);
     }
     rebuildStencils();
-    if (hasBc_) setupBcDiffusion();  // bake the implicit-diffusion wall fold into the per-component stencil
+    // Staggered domain BCs bake an implicit-diffusion wall fold; the collocated grid instead uses explicit
+    // reflection ghosts (refreshed each smoother sweep), so it needs no fold.
+    if (hasBc_ && !Grid::collocated) setupBcDiffusion();
     if (useVelocityMg_) {  // velocity-MG hierarchy: IBM (staircase/upwind) or domain-BC (const-coeff) mode
       vmg_.init(nx_, ny_, nz_, vmgLevels_);
       if (hasBc_) vmg_.setBC(bc_);
@@ -412,6 +414,20 @@ class SdflowSolver {
     return m;
   }
   void smoothComp(int c) {
+    if constexpr (Grid::collocated) {
+      if (hasBc_) {  // collocated domain BC: the (all-fluid) IBM diffusion stencil + cell-centered wall
+        // reflection ghosts refreshed each colour (explicit no-slip; no fold). Converges to the wall value.
+        for (int it = 0; it < velIters_; ++it) {
+          fillVelGhostsTo(C[c].u, c, 0);
+          ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
+                              MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 0);
+          fillVelGhostsTo(C[c].u, c, 0);
+          ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC),MConst(C[c].AW),MConst(C[c].AE),MConst(C[c].AS),
+                              MConst(C[c].AN),MConst(C[c].AB),MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 1);
+        }
+        return;
+      }
+    }
     if (hasBc_ && useVelocityMg_) {  // domain-BC velocity multigrid: const-coeff aniso op + no-slip/inflow/
       // outflow boundary fold on every level (CUDA setDiffusionConstAllLevels + setDiffusionBoundaryFold).
       vmg_.setDomainBcOp(c, mu_, rho_/dt_);  // per component (the fold is component-dependent)
@@ -489,6 +505,16 @@ class SdflowSolver {
   void applyVelocityBcCompTo(CCField f, int comp, int fold, bool doOutflow) {
     if (!hasBc_) return;
     B3 e{e_.x,e_.y,e_.z};
+    if constexpr (Grid::collocated) {
+      // Cell-centered velocity: reflect this component about each non-periodic boundary face. Walls
+      // (type 1, vel 0) and Dirichlet/lid (type 2, prescribed vel) both use the same reflection; outflow
+      // (type 3) and per-position inlet profiles are the inflow/outflow milestone (phase 5b).
+      for (int a=0;a<3;++a) for (int s=0;s<2;++s) {
+        const int ff=2*a+s; const int t=bc_[ff]; if (t==0 || t==3) continue;
+        bcVelocityColocated(f, e, G, a, s, bcVel_[ff][comp]);
+      }
+      return;
+    }
     for (int a=0;a<3;++a) for (int s=0;s<2;++s) {
       const int ff=2*a+s; const int t=bc_[ff]; if (t==0) continue;
       if (t==3) { if (doOutflow) bcOutflowComp(f, e, G, a, s, comp, fold); continue; }
@@ -551,8 +577,13 @@ class SdflowSolver {
       for (int a=0;a<3;++a) for (int s=0;s<2;++s) if (bc_[2*a+s]==3) bcZeroPressureGhost(phi_, e, G, a, s);
     }
     if constexpr (Grid::collocated) {
+      // phi: zero-gradient (Neumann) at non-periodic walls so the cell-centered central-difference
+      // correction carries no spurious normal acceleration through the wall (the periodic fill wrapped the
+      // opposite boundary's phi). Outflow (Dirichlet p=0) is handled by hasOutflow_ above (phase 5b).
+      if (hasBc_) { B3 e{e_.x,e_.y,e_.z};
+        for (int a=0;a<3;++a) for (int s=0;s<2;++s) { const int t=bc_[2*a+s]; if (t!=0 && t!=3) bcNeumannGhost(phi_, e, G, a, s); } }
       // Correct the face field (-> discretely divergence-free; transient this step) and the cell field
-      // (central-difference cell gradient). No outflow handling on the collocated periodic path (phase 3).
+      // (central-difference cell gradient).
       projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G);
       fillGhosts(uf_); fillGhosts(vf_); fillGhosts(wf_);  // complete the divergence-free face field (boundary faces)
       projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G);

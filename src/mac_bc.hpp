@@ -67,6 +67,50 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
 
 }
 
+// Collocated (cell-centered) velocity Dirichlet / no-slip ghost on one domain face. The wall sits at the
+// boundary FACE (between the last inner cell and the first ghost), so EVERY component is reflected about it
+// -- ghost = 2*wall - mirror(interior) makes the face-interpolated value equal `wall`. No normal/tangential
+// split and no implicit fold: explicit reflection, re-imposed each smoother sweep (converges to no-slip).
+inline void bcVelocityColocated(BField f, B3 ext, int g, int a, int s, double wall) {
+  BExec space;
+  int dims[3]; long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int na = dims[a];
+  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "sdflow::bc_vel_coloc", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+        const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
+        auto at = [&](int ia) -> double& { return f(base + static_cast<long>(ia) * sa); };
+        if (s == 0)
+          for (int ia = 0; ia < g; ++ia) at(ia) = 2.0 * wall - at(2 * g - 1 - ia);            // mirror about g-1/2
+        else
+          for (int ia = na - g; ia < na; ++ia) at(ia) = 2.0 * wall - at(2 * (na - g) - 1 - ia);  // about na-g-1/2
+      });
+}
+
+// Zero-gradient (Neumann) ghost on one domain face: every ghost layer = the boundary-adjacent inner cell
+// (cell-centered). Used for the collocated pressure increment phi at walls so the cell-centered correction
+// carries no spurious normal acceleration (the same role pressureBcGhost plays for P in the predictor).
+inline void bcNeumannGhost(BField f, B3 ext, int g, int a, int s) {
+  BExec space;
+  int dims[3]; long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int na = dims[a];
+  const int bic = (s == 0) ? g : (na - g - 1);
+  const int lo = (s == 0) ? 0 : (na - g), hi = (s == 0) ? (g - 1) : (na - 1);
+  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "sdflow::bc_neumann_ghost", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+        const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
+        const double pin = f(base + static_cast<long>(bic) * sa);
+        for (int ia = lo; ia <= hi; ++ia) f(base + static_cast<long>(ia) * sa) = pin;
+      });
+}
+
 // Zero-gradient (Neumann) outflow velocity ghost for component comp on one face.
 inline void bcOutflowComp(BField f, B3 ext, int g, int a, int s, int comp, int fold) {
   BExec space;
