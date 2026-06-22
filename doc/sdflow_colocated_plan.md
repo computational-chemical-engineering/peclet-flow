@@ -19,11 +19,17 @@ The **rotational (incremental) pressure** update and the **SDF-based IBM** are r
 > needed for converged integral quantities.** Phase 5a — collocated domain BCs (no-slip walls + Dirichlet
 > lid): cell-centered reflection ghosts (every component reflects about the boundary face; no fold),
 > explicit-reflection diffusion smoother, Neumann phi wall ghost. Lid-driven cavity Re=100 N=128 vs Ghia:
-> u_rms 0.0071 / v_rms 0.0075 (< 0.02), face div 1.2e-15 — matches the staggered solver. Remaining:
-> **phase 5b** (inflow/outflow: developing channel + backward-facing step — needs the collocated outflow
-> velocity ghost + mass-conserving outflow face correction, on top of the shared α/β openness split) and
-> **phase 5c** (collocated multi-rank: cell-velocity halo already wired via fillGhosts→exchange; needs a
-> kokkos_mpi test).
+> u_rms 0.0071 / v_rms 0.0075 (< 0.02), face div 1.2e-15 — matches the staggered solver. Phase 5b — collocated inflow/outflow
+> (developing channel): inflow via the reflection ghost (prescribed normal velocity through the open face),
+> zero-gradient outflow velocity ghost (bcNeumannGhost), and the outflow face correction on the MAC field
+> (reused bcCorrectOutflow on uf). Channel Re=100: global mass conservation 2.3e-4, developed parabola
+> u_max/U_mean→1.494 (rms 0.0024) — identical to the staggered solver. The face field is machine
+> divergence-free in the interior; at the open outflow the approximate projection leaves an O(h²) residual
+> (4.9e-5→2.0e-5, H=16→32; vs staggered's exact-projection 1e-6), so max_open_divergence re-imposes the
+> zero-gradient outflow face (matching the staggered diagnostic) and the collocated channel gate uses mass
+> conservation as the primary continuity check. Remaining: **backward-facing step** (needs a collocated
+> per-position profile-inlet ghost — a variant of bcVelocityColocated) and **phase 5c** (collocated
+> multi-rank: cell-velocity halo already wired via fillVelGhosts→exchange; needs a kokkos_mpi test).
 
 ## 0. Where we are (grounded in the code)
 

@@ -286,6 +286,11 @@ class SdflowSolver {
       // Report the residual of the PROJECTED face field uf_ (made divergence-free by project(), ghosts
       // filled). Re-averaging the central-difference-corrected CELL field would instead show the inherent
       // O(h^2) approximate-projection cell divergence -- a property of the scheme, not the solver residual.
+      // At an outflow, re-impose the zero-gradient face (matching the staggered diagnostic, whose
+      // fillVelGhosts overwrites the mass-conserving outflow correction): the operator zeroes the
+      // alpha-divergence, but the raw beta-divergence at the open-boundary corner is otherwise spurious.
+      if (hasOutflow_) { B3 e{e_.x,e_.y,e_.z}; CCField fa[3]={uf_,vf_,wf_};
+        for (int a=0;a<3;++a) if (bc_[2*a+1]==3) bcNeumannGhost(fa[a], e, G, a, 1); }
       divergOpen(CCConst(uf_),CCConst(vf_),CCConst(wf_), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
     } else {
     for (int c=0;c<3;++c) fillVelGhosts(c, 0);  // ghosts incl. outflow zero-gradient before the divergence
@@ -510,8 +515,9 @@ class SdflowSolver {
       // (type 1, vel 0) and Dirichlet/lid (type 2, prescribed vel) both use the same reflection; outflow
       // (type 3) and per-position inlet profiles are the inflow/outflow milestone (phase 5b).
       for (int a=0;a<3;++a) for (int s=0;s<2;++s) {
-        const int ff=2*a+s; const int t=bc_[ff]; if (t==0 || t==3) continue;
-        bcVelocityColocated(f, e, G, a, s, bcVel_[ff][comp]);
+        const int ff=2*a+s; const int t=bc_[ff]; if (t==0) continue;
+        if (t==3) { if (doOutflow) bcNeumannGhost(f, e, G, a, s); continue; }  // outflow: zero-gradient ghost
+        bcVelocityColocated(f, e, G, a, s, bcVel_[ff][comp]);                  // wall / inflow / lid (Dirichlet)
       }
       return;
     }
@@ -547,8 +553,9 @@ class SdflowSolver {
     // mis-counted outflow divergence and blows up the outflow-wall corner).
     if constexpr (Grid::collocated) {
       // Approximate (MAC) projection: average the cell velocities onto a face field, then project THAT.
-      // The cell velocity ghosts (periodic / cross-rank) feed the averaging.
-      for (int c=0;c<3;++c) fillGhosts(C[c].u);
+      // Use the BC-aware ghost fill (periodic / cross-rank + domain BCs) so the averaged inflow/outflow
+      // faces carry the right value -- at open boundaries the flux is counted (closed walls are openness 0).
+      for (int c=0;c<3;++c) fillVelGhosts(c, 0);
       centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
       divergOpen(CCConst(uf_),CCConst(vf_),CCConst(wf_), CCConst(ox_),CCConst(oy_),CCConst(oz_), div_, e_, G);
     } else {
@@ -586,6 +593,10 @@ class SdflowSolver {
       // (central-difference cell gradient).
       projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G);
       fillGhosts(uf_); fillGhosts(vf_); fillGhosts(wf_);  // complete the divergence-free face field (boundary faces)
+      if (hasOutflow_) {  // correct the high-side outflow face on the face field so mass leaves (phi=0 there)
+        B3 e{e_.x,e_.y,e_.z}; CCField fa[3]={uf_,vf_,wf_};
+        for (int a=0;a<3;++a) if (bc_[2*a+1]==3) bcCorrectOutflow(fa[a], phi_, e, G, a);
+      }
       projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G);
     } else {
       projectCorrect(C[0].u,C[1].u,C[2].u, CCConst(phi_), e_, G);
