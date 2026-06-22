@@ -38,11 +38,18 @@ inline void centerToFace(CCField uf, CCField vf, CCField wf, CCConst U, CCConst 
       });
 }
 
-// Cell-centered velocity correction u_c -= grad_c(phi) with the central-difference gradient
-// ½(phi(i+1)-phi(i-1)) per axis (= the average of the two adjacent face gradients). Exact in all-fluid /
-// domain-BC regions; a cut-cell openness-aware one-sided variant near immersed solids is a later
-// refinement (see doc/sdflow_colocated_plan.md). phi ghosts must be filled first.
-inline void projectCorrectCenter(CCField u, CCField v, CCField w, CCConst phi, C3 e, int g) {
+// Cell-centered velocity correction u_c -= grad_c(phi), grad_c per axis = ½·(g⁻ + g⁺) of the two adjacent
+// FACE pressure-gradients, but a face that is fully CLOSED (openness 0 — a solid neighbour) contributes a
+// ZERO gradient instead of reading that neighbour's φ. Rationale:
+//   * interior fluid cell (both faces open): ½(φᵢ₊₁-φᵢ₋₁) — the central difference, bulk unchanged;
+//   * immersed cut cell (solid neighbour): the closed face's φ is DECOUPLED (≈0, AC≈0 in the operator), so
+//     reading it corrupts the gradient — zeroing that face uses only the fluid-side (open) gradient;
+//   * domain-BC wall (Neumann, φ-ghost = interior): the closed wall face truly has ∂φ/∂n≈0, and zeroing it
+//     gives ½·g_open — identical to the previous central difference with the Neumann ghost (no change there).
+// Cut faces (0<o<1) keep their real gradient (the neighbour is fluid). Only the cell field is touched; the
+// projection's face divergence-free guarantee is unaffected. phi ghosts + face openness must be filled first.
+inline void projectCorrectCenter(CCField u, CCField v, CCField w, CCConst phi, CCConst ox, CCConst oy,
+                                 CCConst oz, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -50,9 +57,15 @@ inline void projectCorrectCenter(CCField u, CCField v, CCField w, CCConst phi, C
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
-        u(i) -= 0.5 * (phi(i + sx) - phi(i - sx));
-        v(i) -= 0.5 * (phi(i + sy) - phi(i - sy));
-        w(i) -= 0.5 * (phi(i + sz) - phi(i - sz));
+        const double gm_x = (ox(i)      > 1e-12) ? (phi(i) - phi(i - sx)) : 0.0;
+        const double gp_x = (ox(i + sx) > 1e-12) ? (phi(i + sx) - phi(i)) : 0.0;
+        const double gm_y = (oy(i)      > 1e-12) ? (phi(i) - phi(i - sy)) : 0.0;
+        const double gp_y = (oy(i + sy) > 1e-12) ? (phi(i + sy) - phi(i)) : 0.0;
+        const double gm_z = (oz(i)      > 1e-12) ? (phi(i) - phi(i - sz)) : 0.0;
+        const double gp_z = (oz(i + sz) > 1e-12) ? (phi(i + sz) - phi(i)) : 0.0;
+        u(i) -= 0.5 * (gm_x + gp_x);
+        v(i) -= 0.5 * (gm_y + gp_y);
+        w(i) -= 0.5 * (gm_z + gp_z);
       });
 }
 

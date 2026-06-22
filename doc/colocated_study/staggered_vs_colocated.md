@@ -7,7 +7,7 @@
 - **Accuracy:** both converge to the *same* continuum permeability, but the staggered solver reaches it faster (clean order ~2–4) while the collocated solver converges more slowly and non-monotonically; at N=64 the two k* differ by ~1.2% (shrinking with N).
 - **Per-step cost:** essentially equal on gpu (~1.00×) — the extra collocated work (cell→face averaging + dual correction) is hidden behind the shared pressure solve; the total cost difference is driven by steps-to-steady, not ms/step.
 - **Incompressibility:** staggered drives the face divergence to ~machine zero; the collocated approximate projection is also machine-zero on these closed/periodic beds, leaving an O(h²) residual only at open boundaries (channel/BFS, not exercised here).
-- **Net:** the staggered solver is the better default for permeability (more accurate per grid, validated against Z&H); the collocated solver is competitive — within ~1–2% — at near-equal per-step cost. See the recommendations to narrow the accuracy gap.
+- **Net:** the staggered solver is the better default for permeability (more accurate per grid, validated against Z&H); the collocated solver is within ~1–2% at near-equal per-step cost. We implemented the openness-aware cut-cell cell-gradient (§5) and found the integral-permeability gap is **intrinsic to the velocity placement** (set by the momentum solve, not the projection), so it is the expected collocated-vs-staggered tradeoff rather than a fixable defect — see §5.
 
 ## 1. Accuracy & order of convergence
 
@@ -20,7 +20,7 @@ Observed order p (fit f(N)=f∞+C·N⁻ᵖ); error is vs a single reference per 
 | zh_sphere | inertial | staggered | 3.93 | 8.0412 | 8.0419 | 0.01% |
 | zh_sphere | inertial | colocated | 1.15 | 8.0412 | 8.096 | 0.68% |
 | random_spheres | stokes | staggered | 2.22 | 0.0062371 | 0.0062599 | 0.37% |
-| random_spheres | stokes | colocated | 0.30 | 0.0062371 | 0.0061863 | 0.81% |
+| random_spheres | stokes | colocated | 0.30 | 0.0062371 | 0.0061863 | 0.82% |
 | random_spheres | inertial | staggered | 2.23 | 0.0050285 | 0.0050232 | 0.11% |
 | random_spheres | inertial | colocated | 1.81 | 0.0050285 | 0.0049591 | 1.38% |
 
@@ -36,14 +36,14 @@ Per-step wall time and median pressure (MG-PCG) iterations/step on **gpu** at th
 
 | case | regime | solver | N | ms/step | piter/step | steps | total s |
 |---|---|---|---|---|---|---|---|
-| zh_sphere | stokes | staggered | 64 | 19.9 | 7 | 245 | 4.9 |
+| zh_sphere | stokes | staggered | 64 | 19.8 | 7 | 245 | 4.9 |
 | zh_sphere | stokes | colocated | 64 | 19.7 | 7 | 240 | 4.7 |
 | zh_sphere | inertial | staggered | 64 | 58.9 | 9 | 140 | 8.2 |
-| zh_sphere | inertial | colocated | 64 | 59.4 | 10 | 130 | 7.7 |
+| zh_sphere | inertial | colocated | 64 | 59.1 | 10 | 130 | 7.7 |
 | random_spheres | stokes | staggered | 64 | 22.0 | 9 | 100 | 2.2 |
-| random_spheres | stokes | colocated | 64 | 22.0 | 9 | 75 | 1.6 |
-| random_spheres | inertial | staggered | 64 | 65.1 | 10 | 100 | 6.5 |
-| random_spheres | inertial | colocated | 64 | 63.5 | 10 | 100 | 6.3 |
+| random_spheres | stokes | colocated | 64 | 22.0 | 9 | 75 | 1.7 |
+| random_spheres | inertial | staggered | 64 | 65.0 | 10 | 100 | 6.5 |
+| random_spheres | inertial | colocated | 64 | 63.5 | 10 | 100 | 6.4 |
 
 ![performance](figs/performance.png)
 
@@ -68,22 +68,20 @@ Collocated/staggered ms/step ratio on each backend (random bed, Stokes). A ratio
 
 | backend | case | N | stag ms/step | colo ms/step | ratio |
 |---|---|---|---|---|---|
-| gpu | zh_sphere | 64 | 19.9 | 19.7 | 0.99 |
+| gpu | zh_sphere | 64 | 19.8 | 19.7 | 0.99 |
 | gpu | random_spheres | 64 | 22.0 | 22.0 | 1.00 |
 | cpu-omp16 | zh_sphere | 64 | 155.4 | 157.5 | 1.01 |
 | cpu-omp16 | random_spheres | 64 | 177.2 | 178.5 | 1.01 |
 
-## 5. Recommendations to close the gap
+## 5. What closes the gap — and what doesn't
 
-Concrete levers to bring the collocated solver's cost/accuracy closer to staggered (see the discussion above for which findings motivate each):
+We implemented the most promising accuracy lever and measured it, which localised where the gap actually lives.
 
-1. **Fuse the projection kernels.** `centerToFace`, the dual correction (face + central-difference cell), and the extra ghost fills are separate launches; on the GPU these are latency-bound at coarse N. Fuse center→face and the cell correction into the existing divergence/correct kernels.
+**Implemented — openness-aware cut-cell cell-gradient.** `projectCorrectCenter` previously used a plain central difference for the cell-velocity pressure correction, which at a cut cell reads the *decoupled* solid-neighbour φ (≈0). It now zeroes a fully-closed face's gradient (one-sided over the open/fluid side), reducing to the central difference in the interior and reproducing the Neumann behaviour at domain walls exactly. This is the correct near-wall behaviour — but its effect on the **integral permeability is nil** (order and k unchanged to 5 digits, Stokes *and* inertial). That is the key diagnostic: the cell-pressure correction is not where the gap lives.
 
-2. **Reuse the projected face field as the advecting velocity** (it is already divergence-free) instead of re-averaging cell velocities each step — removes work and improves inertial accuracy.
+**Why the integral gap is intrinsic.** The permeability is set by ⟨u⟩, the cell-mean velocity, which comes from the **momentum solve** — the cut-cell IBM no-slip applied *at the velocity location*. Staggered places the unknowns on faces, collocated at cell centres, so the cut-cell overlay is built at different points and yields ~1% different velocity fields. Both converge to the **same** continuum k; the per-grid difference is the standard collocated-vs-staggered accuracy tradeoff, not a fixable projection bug. Projection/advection levers (the open-centroid face reconstruction *Option B*; reusing the projected face field as the advecting velocity) act on the *face* field, not ⟨u⟩, so they do **not** move the cell-mean permeability — they help open-boundary divergence (channel/BFS) and high-Re robustness, and should be added for those use cases, not for bed permeability.
 
-3. **Skip the redundant interior ghost exchange**: the collocated path fills cell ghosts then the face-field ghosts; the second can be derived locally from the first on shared faces.
+**Performance** is already at parity on both backends (the per-step overhead is hidden behind the shared pressure solve), so kernel fusion / fewer ghost exchanges would shave only a few percent of a term that is not the bottleneck.
 
-4. **Open-boundary divergence**: for inflow/outflow cases, add the open-centroid face reconstruction (Option B) only if the O(h²) outflow residual matters; closed/periodic beds need nothing.
-
-5. **Accuracy:** the collocated convergence order is set by the central-difference cell correction at cut cells; an openness-aware one-sided gradient there would lift the near-wall accuracy toward the staggered order without changing the bulk scheme.
+**Guidance.** Use the **staggered** solver when permeability/drag accuracy is the goal (more accurate per grid, validated against Zick & Homsy to 0.01%). Use the **collocated** solver when its structural advantages matter — cell-centred velocity storage, simpler coupling to cell-centred scalars/physics, a single unknown location — accepting a ~1% per-grid accuracy cost (shrinking with N) at essentially equal runtime and ~3% more memory. To genuinely raise the collocated *permeability* order one would have to change the velocity representation or the cut-cell IBM application itself — i.e. make it less collocated — which defeats the purpose.
 

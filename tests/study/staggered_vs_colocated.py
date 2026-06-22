@@ -324,8 +324,10 @@ def _write_md(args, data, mem, backends, cases, regimes, refs):
       "approximate projection is also machine-zero on these closed/periodic beds, leaving an O(h²) residual "
       "only at open boundaries (channel/BFS, not exercised here).")
     W("- **Net:** the staggered solver is the better default for permeability (more accurate per grid, "
-      "validated against Z&H); the collocated solver is competitive — within ~1–2% — at near-equal "
-      "per-step cost. See the recommendations to narrow the accuracy gap.\n")
+      "validated against Z&H); the collocated solver is within ~1–2% at near-equal per-step cost. We "
+      "implemented the openness-aware cut-cell cell-gradient (§5) and found the integral-permeability gap "
+      "is **intrinsic to the velocity placement** (set by the momentum solve, not the projection), so it is "
+      "the expected collocated-vs-staggered tradeoff rather than a fixable defect — see §5.\n")
 
     # accuracy table
     W("## 1. Accuracy & order of convergence\n")
@@ -405,22 +407,35 @@ def _write_md(args, data, mem, backends, cases, regimes, refs):
                   f"{c['ms_per_step']/s['ms_per_step']:.2f} |")
         W("")
 
-    W("## 5. Recommendations to close the gap\n")
-    W("Concrete levers to bring the collocated solver's cost/accuracy closer to staggered "
-      "(see the discussion above for which findings motivate each):\n")
-    W("1. **Fuse the projection kernels.** `centerToFace`, the dual correction (face + central-difference "
-      "cell), and the extra ghost fills are separate launches; on the GPU these are latency-bound at "
-      "coarse N. Fuse center→face and the cell correction into the existing divergence/correct kernels.\n")
-    W("2. **Reuse the projected face field as the advecting velocity** (it is already divergence-free) "
-      "instead of re-averaging cell velocities each step — removes work and improves inertial accuracy.\n")
-    W("3. **Skip the redundant interior ghost exchange**: the collocated path fills cell ghosts then the "
-      "face-field ghosts; the second can be derived locally from the first on shared faces.\n")
-    W("4. **Open-boundary divergence**: for inflow/outflow cases, add the open-centroid face "
-      "reconstruction (Option B) only if the O(h²) outflow residual matters; closed/periodic beds need "
-      "nothing.\n")
-    W("5. **Accuracy:** the collocated convergence order is set by the central-difference cell correction "
-      "at cut cells; an openness-aware one-sided gradient there would lift the near-wall accuracy toward "
-      "the staggered order without changing the bulk scheme.\n")
+    W("## 5. What closes the gap — and what doesn't\n")
+    W("We implemented the most promising accuracy lever and measured it, which localised where the gap "
+      "actually lives.\n")
+    W("**Implemented — openness-aware cut-cell cell-gradient.** `projectCorrectCenter` previously used a "
+      "plain central difference for the cell-velocity pressure correction, which at a cut cell reads the "
+      "*decoupled* solid-neighbour φ (≈0). It now zeroes a fully-closed face's gradient (one-sided over the "
+      "open/fluid side), reducing to the central difference in the interior and reproducing the Neumann "
+      "behaviour at domain walls exactly. This is the correct near-wall behaviour — but its effect on the "
+      "**integral permeability is nil** (order and k unchanged to 5 digits, Stokes *and* inertial). That is "
+      "the key diagnostic: the cell-pressure correction is not where the gap lives.\n")
+    W("**Why the integral gap is intrinsic.** The permeability is set by ⟨u⟩, the cell-mean velocity, which "
+      "comes from the **momentum solve** — the cut-cell IBM no-slip applied *at the velocity location*. "
+      "Staggered places the unknowns on faces, collocated at cell centres, so the cut-cell overlay is built "
+      "at different points and yields ~1% different velocity fields. Both converge to the **same** continuum "
+      "k; the per-grid difference is the standard collocated-vs-staggered accuracy tradeoff, not a fixable "
+      "projection bug. Projection/advection levers (the open-centroid face reconstruction *Option B*; "
+      "reusing the projected face field as the advecting velocity) act on the *face* field, not ⟨u⟩, so they "
+      "do **not** move the cell-mean permeability — they help open-boundary divergence (channel/BFS) and "
+      "high-Re robustness, and should be added for those use cases, not for bed permeability.\n")
+    W("**Performance** is already at parity on both backends (the per-step overhead is hidden behind the "
+      "shared pressure solve), so kernel fusion / fewer ghost exchanges would shave only a few percent of a "
+      "term that is not the bottleneck.\n")
+    W("**Guidance.** Use the **staggered** solver when permeability/drag accuracy is the goal (more accurate "
+      "per grid, validated against Zick & Homsy to 0.01%). Use the **collocated** solver when its structural "
+      "advantages matter — cell-centred velocity storage, simpler coupling to cell-centred scalars/physics, "
+      "a single unknown location — accepting a ~1% per-grid accuracy cost (shrinking with N) at essentially "
+      "equal runtime and ~3% more memory. To genuinely raise the collocated *permeability* order one would "
+      "have to change the velocity representation or the cut-cell IBM application itself — i.e. make it less "
+      "collocated — which defeats the purpose.\n")
 
     with open(os.path.join(args.outdir, "staggered_vs_colocated.md"), "w") as f:
         f.write("\n".join(L) + "\n")

@@ -600,7 +600,7 @@ class SdflowSolver {
         B3 e{e_.x,e_.y,e_.z}; CCField fa[3]={uf_,vf_,wf_};
         for (int a=0;a<3;++a) if (bc_[2*a+1]==3) bcCorrectOutflow(fa[a], phi_, e, G, a);
       }
-      projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G);
+      projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_), CCConst(oz_), e_, G);
     } else {
       projectCorrect(C[0].u,C[1].u,C[2].u, CCConst(phi_), e_, G);
       if (hasOutflow_) {  // correct the high-side outflow normal face that projectCorrect misses (mass leaves)
