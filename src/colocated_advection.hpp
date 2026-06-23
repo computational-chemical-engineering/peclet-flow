@@ -47,6 +47,24 @@ KOKKOS_INLINE_FUNCTION double advect(int comp, int x, int y, int z, A U, A V, A 
   return out;
 }
 
+// Conservative second-order-upwind advection (SOU flux; same cell->face advecting
+// velocities as cadv::advect).
+template <class A>
+KOKKOS_INLINE_FUNCTION double advect_sou(int comp, int x, int y, int z, A U, A V, A W, A PHI) {
+  double out = 0.0;
+  for (int fd = 0; fd < 3; ++fd) {
+    const int ox = (fd == 0), oy = (fd == 1), oz = (fd == 2);
+    const double velp = cadv::adv_vel(comp, fd, x, y, z, U, V, W);
+    const double velm = cadv::adv_vel(comp, fd, x - ox, y - oy, z - oz, U, V, W);
+    const double Fp = sadv::sou(PHI(x - ox, y - oy, z - oz), PHI(x, y, z), PHI(x + ox, y + oy, z + oz),
+                                PHI(x + 2 * ox, y + 2 * oy, z + 2 * oz), velp);
+    const double Fm = sadv::sou(PHI(x - 2 * ox, y - 2 * oy, z - 2 * oz), PHI(x - ox, y - oy, z - oz),
+                                PHI(x, y, z), PHI(x + ox, y + oy, z + oz), velm);
+    out += Fp - Fm;
+  }
+  return out;
+}
+
 // FOU advection OPERATOR coefficients added to a cell's 7-point stencil (consistent with advect_fou):
 // diagonal cC gets max(velp,0)-min(velm,0) >= 0, off-diagonals <= 0. Added (not assigned) into out-params.
 template <class A>

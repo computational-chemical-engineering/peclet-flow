@@ -79,7 +79,11 @@ class SdflowSolver {
   void setBodyForce(double fx, double fy, double fz) { f_ = {fx, fy, fz}; }
   void setVelocityIterations(int it) { velIters_ = it; }
   void setPressureIterations(int it) { presIters_ = it; }
-  void setAdvection(bool on) { advect_ = on; }       // explicit Koren-TVD advection (matches CUDA to ~1e-13)
+  void setAdvection(bool on) { advect_ = on; }       // explicit high-order advection (default SOU)
+  // High-order advection scheme for the (explicit, or deferred-correction) flux: 0 = second-order
+  // upwind (SOU, default — 2nd order at smooth extrema too); 1 = Koren TVD (monotone limiter, the
+  // legacy CUDA scheme). Only matters when advection is enabled; FOU stays the deferred-correction base.
+  void setAdvectionScheme(int s) { advScheme_ = s; }
   // Implicit-FOU deferred-correction advection (CUDA set_implicit_advection): solve the first-order-upwind
   // part of advection implicitly (in the velocity operator) + keep (Koren-FOU) explicit in the RHS ->
   // unconditionally stable for advection (high Re / large dt). Requires the IBM stencil (rebuilt per Picard
@@ -370,7 +374,8 @@ class SdflowSolver {
     CCConst U=CCConst(C[0].u), V=CCConst(C[1].u), W=CCConst(C[2].u), uu=CCConst(C[c].u), un=CCConst(old_[c]);
     const long strd = (c==0) ? 1 : (c==1) ? e_.x : (long)e_.x*e_.y;
     const bool incr = cutcellPressure_ && incremental_, adv = advect_, bc = hasBc_;  // incremental predictor carries -grad(P^n)
-    const bool ifou = implicitFou_ && advect_;  // deferred correction: keep (Koren - FOU) explicit in the RHS
+    const bool ifou = implicitFou_ && advect_;  // deferred correction: keep (HO - FOU) explicit in the RHS
+    const int sch = advScheme_;  // 0 = SOU (default), 1 = Koren TVD
     // b = descale*(idiag*u^n - rho*Koren(u^k) + rho*FOU(u^k) + f - grad P^n) - inhom  (+ BC fold brhs). The
     // time base is u^n (Picard); the advecting velocity & advected field are the current iterate u^k.
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
@@ -379,7 +384,8 @@ class SdflowSolver {
         const long i=(long)x+(long)y*e.x+(long)z*(long)e.x*e.y;
         double aK=0.0, aF=0.0;
         if (adv) { sadv::ViewAcc Ua{U,e.x,e.y}, Va{V,e.x,e.y}, Wa{W,e.x,e.y}, Fa{uu,e.x,e.y};
-                   aK = Grid::advect(c, x,y,z, Ua,Va,Wa, Fa);
+                   aK = (sch == 0) ? Grid::advect_sou(c, x,y,z, Ua,Va,Wa, Fa)
+                                   : Grid::advect(c, x,y,z, Ua,Va,Wa, Fa);
                    if (ifou) aF = Grid::advect_fou(c, x,y,z, Ua,Va,Wa, Fa); }
         // incremental predictor's -grad(P^n): central-difference cell gradient on the collocated grid,
         // one-sided face gradient (P at the high cell of the staggered face) on the staggered grid.
@@ -664,6 +670,7 @@ class SdflowSolver {
   CCField bcProf_[6]; int bcProfNc_[6] = {0,0,0,0,0,0};  // per-position inlet profiles (face grid [Lb*Lc*3])
   CCField bcDcorr_[3], bcBrhs_[3];                // implicit-diffusion face fold (per component)
   bool advect_ = false, cutcellPressure_ = false, implicitFou_ = false;
+  int advScheme_ = 0;  // high-order advection: 0 = SOU (default), 1 = Koren TVD
   bool incremental_ = true, pwarm_ = false;     // incremental-rotational pressure (CUDA default on) + warm-start
   bool useVelocityMg_ = false; int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
   VelocityMG vmg_; CCField vmgTheta_, vmgClean_;

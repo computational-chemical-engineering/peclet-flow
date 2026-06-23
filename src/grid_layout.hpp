@@ -40,6 +40,10 @@ struct Staggered {
     return sadv::advect(c, x, y, z, U, V, W, F);
   }
   template <class A>
+  KOKKOS_INLINE_FUNCTION static double advect_sou(int c, int x, int y, int z, A U, A V, A W, A F) {
+    return sadv::advect_sou(c, x, y, z, U, V, W, F);
+  }
+  template <class A>
   KOKKOS_INLINE_FUNCTION static double advect_fou(int c, int x, int y, int z, A U, A V, A W, A F) {
     return sadv::advect_fou(c, x, y, z, U, V, W, F);
   }
@@ -61,6 +65,10 @@ struct Colocated {
   template <class A>
   KOKKOS_INLINE_FUNCTION static double advect(int c, int x, int y, int z, A U, A V, A W, A F) {
     return cadv::advect(c, x, y, z, U, V, W, F);
+  }
+  template <class A>
+  KOKKOS_INLINE_FUNCTION static double advect_sou(int c, int x, int y, int z, A U, A V, A W, A F) {
+    return cadv::advect_sou(c, x, y, z, U, V, W, F);
   }
   template <class A>
   KOKKOS_INLINE_FUNCTION static double advect_fou(int c, int x, int y, int z, A U, A V, A W, A F) {

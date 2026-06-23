@@ -41,7 +41,9 @@ static void bind_solver(py::module_& m, const char* name) {
       .def("set_mu", &S::setMu, "Set dynamic viscosity mu (physical units).")
       .def("set_dt", &S::setDt, "Set the time step dt; the momentum solve is scaled by 1/dt (well-conditioned at large dt).")
       .def("set_body_force", &S::setBodyForce, "Set the body force per unit volume (fx, fy, fz).")
-      .def("set_advection", &S::setAdvection, "Enable/disable explicit Koren-TVD momentum advection.")
+      .def("set_advection", &S::setAdvection, "Enable/disable explicit high-order momentum advection (default scheme SOU).")
+      .def("set_advection_scheme", &S::setAdvectionScheme, py::arg("scheme"),
+           "High-order advection scheme: 0 = second-order upwind (SOU, default), 1 = Koren TVD.")
       .def("set_incremental_pressure", &S::setIncrementalPressure, py::arg("on"), "Toggle the rotational incremental-pressure projection.")
       .def("set_pressure_warmstart", &S::setPressureWarmstart, py::arg("on"), "Seed each pressure solve from the previous step's phi (default off).")
       .def("set_velocity_streams", &S::setVelocityStreams, py::arg("on"), "Toggle overlapped per-component velocity solves.")

@@ -27,6 +27,12 @@ KOKKOS_INLINE_FUNCTION double tvd(double LL, double L, double R, double RR, doub
 KOKKOS_INLINE_FUNCTION double fou_flux(double L, double R, double vel) {
   return vel * (vel > 0.0 ? L : R);
 }
+// Second-order upwind (SOU) face flux: linear extrapolation from the two upwind
+// cells (unlimited; 2nd-order everywhere, including smooth extrema where the TVD
+// limiter clips to 1st order). vel>0 uses LL,L; vel<0 uses RR,R.
+KOKKOS_INLINE_FUNCTION double sou(double LL, double L, double R, double RR, double vel) {
+  return (vel > 0.0) ? vel * (1.5 * L - 0.5 * LL) : vel * (1.5 * R - 0.5 * RR);
+}
 
 // Local extended-block accessor over a Kokkos View (direct strides, x-fastest; no wrap).
 struct ViewAcc {
@@ -67,6 +73,24 @@ KOKKOS_INLINE_FUNCTION double advect(int comp, int x, int y, int z, A U, A V, A 
     const double Fp = tvd(PHI(x - ox, y - oy, z - oz), PHI(x, y, z), PHI(x + ox, y + oy, z + oz),
                           PHI(x + 2 * ox, y + 2 * oy, z + 2 * oz), velp);
     const double Fm = tvd(PHI(x - 2 * ox, y - 2 * oy, z - 2 * oz), PHI(x - ox, y - oy, z - oz),
+                          PHI(x, y, z), PHI(x + ox, y + oy, z + oz), velm);
+    out += Fp - Fm;
+  }
+  return out;
+}
+
+// Conservative second-order-upwind advection (same control volume / advecting
+// velocities as advect(); SOU flux instead of the Koren limiter).
+template <class A>
+KOKKOS_INLINE_FUNCTION double advect_sou(int comp, int x, int y, int z, A U, A V, A W, A PHI) {
+  double out = 0.0;
+  for (int fd = 0; fd < 3; ++fd) {
+    const int ox = (fd == 0), oy = (fd == 1), oz = (fd == 2);
+    const double velp = adv_vel(comp, fd, x, y, z, U, V, W);
+    const double velm = adv_vel(comp, fd, x - ox, y - oy, z - oz, U, V, W);
+    const double Fp = sou(PHI(x - ox, y - oy, z - oz), PHI(x, y, z), PHI(x + ox, y + oy, z + oz),
+                          PHI(x + 2 * ox, y + 2 * oy, z + 2 * oz), velp);
+    const double Fm = sou(PHI(x - 2 * ox, y - 2 * oy, z - 2 * oz), PHI(x - ox, y - oy, z - oz),
                           PHI(x, y, z), PHI(x + ox, y + oy, z + oz), velm);
     out += Fp - Fm;
   }
