@@ -36,12 +36,18 @@ template <class Grid>
 static void bind_solver(py::module_& m, const char* name) {
   using S = sdflow::SdflowSolver<Grid>;
   py::class_<S>(m, name)
-      .def(py::init<int, int, int>(), py::arg("nx"), py::arg("ny"), py::arg("nz"))
-      .def("set_rho", &S::setRho, "Set fluid density rho (physical units). Set before geometry/first step.")
-      .def("set_mu", &S::setMu, "Set dynamic viscosity mu (physical units).")
-      .def("set_dt", &S::setDt, "Set the time step dt; the momentum solve is scaled by 1/dt (well-conditioned at large dt).")
-      .def("set_body_force", &S::setBodyForce, "Set the body force per unit volume (fx, fy, fz).")
-      .def("set_advection", &S::setAdvection, "Enable/disable explicit high-order momentum advection (default scheme SOU).")
+      .def(py::init<int, int, int>(), py::arg("nx"), py::arg("ny"), py::arg("nz"),
+           "Create a solver on an nx x ny x nz unit-spacing grid (x-fastest, I = x + y*nx + z*nx*ny). "
+           "Set physical parameters (rho/mu/dt) and any domain BCs before the geometry / first step.")
+      .def("set_rho", &S::setRho, py::arg("rho"),
+           "Set fluid density rho (physical units). Set before geometry/first step.")
+      .def("set_mu", &S::setMu, py::arg("mu"), "Set dynamic viscosity mu (physical units).")
+      .def("set_dt", &S::setDt, py::arg("dt"),
+           "Set the time step dt; the momentum solve is scaled by 1/dt (well-conditioned at large dt).")
+      .def("set_body_force", &S::setBodyForce, py::arg("fx"), py::arg("fy"), py::arg("fz"),
+           "Set the body force per unit volume (fx, fy, fz) — e.g. a mean pressure gradient.")
+      .def("set_advection", &S::setAdvection, py::arg("on"),
+           "Enable/disable explicit high-order momentum advection (default scheme SOU). Off ⇒ Stokes.")
       .def("set_advection_scheme", &S::setAdvectionScheme, py::arg("scheme"),
            "High-order advection scheme: 0 = second-order upwind (SOU, default), 1 = Koren TVD.")
       .def("set_incremental_pressure", &S::setIncrementalPressure, py::arg("on"), "Toggle the rotational incremental-pressure projection.")
@@ -95,7 +101,8 @@ static void bind_solver(py::module_& m, const char* name) {
              s.setSolid(v, cutcell_pressure);
            },
            py::arg("sdf"), py::arg("cutcell_pressure") = false, py::arg("pressure_coarse") = "const",
-           "Set the solid SDF [x,y,z] (negative inside); optionally enable the cut-cell pressure operator.")
+           "Set the solid SDF as a Fortran-order (nx,ny,nz) float64 array (negative inside the solid, "
+           "positive in fluid); optionally enable the cut-cell pressure operator.")
       .def("set_state",
            [](S& s,
               py::array_t<double, py::array::f_style | py::array::forcecast> u,
@@ -109,26 +116,51 @@ static void bind_solver(py::module_& m, const char* name) {
              s.uploadVelocity(vec(u), vec(v), vec(w));
            },
            py::arg("u"), py::arg("v"), py::arg("w"),
-           "Upload an initial velocity field (u,v,w as Fortran-order [x,y,z] arrays).")
-      .def("step", &S::step, "Advance the solver one time step.")
-      .def("get_u", [](S& s) { return to_xyz(s.getVelocity(0), s.nx(), s.ny(), s.nz()); }, "Return the x-velocity component as a 3-D [x,y,z] numpy array.")
-      .def("get_v", [](S& s) { return to_xyz(s.getVelocity(1), s.nx(), s.ny(), s.nz()); }, "Return the y-velocity component as a 3-D [x,y,z] numpy array.")
-      .def("get_w", [](S& s) { return to_xyz(s.getVelocity(2), s.nx(), s.ny(), s.nz()); }, "Return the z-velocity component as a 3-D [x,y,z] numpy array.")
-      .def("get_p", [](S& s) { return to_xyz(s.getPressure(), s.nx(), s.ny(), s.nz()); }, "Return the physical pressure as a 3-D [x,y,z] numpy array.")
-      .def("max_open_divergence", &S::maxOpenDivergence, "Return the max cut-cell flux divergence (the incompressibility residual).")
-      .def("get_resolution", [](S& s) { return std::vector<int>{s.nx(), s.ny(), s.nz()}; }, "Return the grid resolution [nx, ny, nz].")
-      .def("get_spacing", [](S&) { return std::vector<double>{1.0, 1.0, 1.0}; })  // unit grid
-      .def("rank", [](S&) { return 0; })            // single-rank Python module (MPI = kokkos_mpi tests)
+           "Upload an initial velocity field (u,v,w each a Fortran-order (nx,ny,nz) float64 array).")
+      .def("step", &S::step, "Advance the solver one time step (semi-implicit: diffusion + projection).")
+      .def("get_u", [](S& s) { return to_xyz(s.getVelocity(0), s.nx(), s.ny(), s.nz()); },
+           "Return the x-velocity component as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).")
+      .def("get_v", [](S& s) { return to_xyz(s.getVelocity(1), s.nx(), s.ny(), s.nz()); },
+           "Return the y-velocity component as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).")
+      .def("get_w", [](S& s) { return to_xyz(s.getVelocity(2), s.nx(), s.ny(), s.nz()); },
+           "Return the z-velocity component as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).")
+      .def("get_p", [](S& s) { return to_xyz(s.getPressure(), s.nx(), s.ny(), s.nz()); },
+           "Return the physical pressure as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).")
+      .def("max_open_divergence", &S::maxOpenDivergence,
+           "Return the max cut-cell flux divergence (the incompressibility residual; ~0 when converged).")
+      .def("get_resolution", [](S& s) { return std::vector<int>{s.nx(), s.ny(), s.nz()}; },
+           "Return the grid resolution [nx, ny, nz].")
+      .def("get_spacing", [](S&) { return std::vector<double>{1.0, 1.0, 1.0}; },
+           "Return the grid spacing [dx, dy, dz] (always unit on this grid).")
+      .def("rank", [](S&) { return 0; },
+           "MPI rank (always 0 in the single-rank Python module; the multi-rank path is the "
+           "tests/kokkos_mpi suite).")
       .def("size", [](S&) { return 1; }, "MPI size (1 in the single-rank Python module).")
-      .def("bcast_from_root", [](S&, py::object v) { return v; });
+      .def("bcast_from_root", [](S&, py::object v) { return v; }, py::arg("value"),
+           "Broadcast a value from rank 0 (identity in the single-rank module; mirrors the MPI API).");
 }
 
 PYBIND11_MODULE(sdflow, m) {
-  m.doc() = "sdflow (Kokkos) cut-cell IBM incompressible Navier-Stokes solver";
+  m.doc() =
+      "sdflow — Kokkos cut-cell IBM incompressible Navier-Stokes solver for porous media.\n\n"
+      "Two solver classes share an identical API (only the velocity-unknown placement differs):\n"
+      "  Solver          — staggered MAC grid (THE sdflow solver; permeability/drag accuracy default)\n"
+      "  SolverColocated — collocated / cell-centered velocities (ABC approximate projection)\n\n"
+      "Conventions: physical units throughout (density rho, viscosity mu, physical pressure p); SDFs\n"
+      "are negative inside the solid; fields are Fortran-order (nx,ny,nz) float64 (x-fastest). This is\n"
+      "the single-rank module — the multi-rank MPI path is exercised by the tests/kokkos_mpi suite.\n\n"
+      "Kokkos is initialized at import and finalized via atexit; the solver holds Kokkos Views, so\n"
+      "release every Solver before interpreter exit (del s; gc.collect()). Typical use:\n"
+      "  s = sdflow.Solver(nx, ny, nz)\n"
+      "  s.set_rho(1.0); s.set_mu(0.01); s.set_dt(60.0); s.set_body_force(1e-2, 0, 0)\n"
+      "  s.set_solid(sdf, cutcell_pressure=True)\n"
+      "  for _ in range(n): s.step()\n"
+      "  u = s.get_u()   # (nx,ny,nz);  p = s.get_p()";
   if (!Kokkos::is_initialized()) Kokkos::initialize();
   py::module_::import("atexit").attr("register")(py::cpp_function([]() {
     if (Kokkos::is_initialized() && !Kokkos::is_finalized()) Kokkos::finalize();
   }));
+  // The active Kokkos backend ("OpenMP", "Cuda", "HIP"), chosen by the build's install prefix.
   m.attr("execution_space") = py::str(Kokkos::DefaultExecutionSpace::name());
 
   // Staggered MAC grid (THE sdflow solver) + the collocated/cell-centered variant. Same Python API.
