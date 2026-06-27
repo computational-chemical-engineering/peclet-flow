@@ -22,8 +22,8 @@
 #include "tpx/common/types.hpp"
 #include "tpx/common/view.hpp"
 #include "tpx/decomp/block_decomposer.hpp"
+#include "tpx/halo/grid_halo_topology.hpp"
 #include "tpx/halo/grid_halo.hpp"
-#include "tpx/halo/grid_halo_kokkos.hpp"
 
 using tpx::Index; using tpx::IVec;
 using tpx::decomp::BlockDecomposer;

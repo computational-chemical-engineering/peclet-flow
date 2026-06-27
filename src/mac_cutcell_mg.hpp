@@ -24,8 +24,8 @@
 #ifdef CFD_MPI
 #include <memory>
 #include "tpx/decomp/block_decomposer.hpp"
+#include "tpx/halo/grid_halo_topology.hpp"
 #include "tpx/halo/grid_halo.hpp"
-#include "tpx/halo/grid_halo_kokkos.hpp"
 #endif
 
 namespace sdflow {

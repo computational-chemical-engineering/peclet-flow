@@ -56,3 +56,22 @@ docs/html/
 docs/latex/
 doxygen_warn.txt
 
+# Agent/scratch cruft — old planning notes, AI context dumps, session logs (keep these out of
+# `git add -A`). Tracked design docs (e.g. doc/sdflow_*_plan.md) are unaffected; force-add a new
+# plan with `git add -f` if it should be versioned.
+.codex
+codebase_context.txt
+output.txt
+doc/tmp.txt
+doc/refactor_claude.txt
+doc/session-*.json
+doc/plan_*.md
+doc/implementation_plan_*.md
+doc/*_handoff.md
+doc/*_review*.md
+doc/*investigation*.md
+doc/IBM_Implementation_Plan.md
+doc/continuation_force_sweep_*.md
+doc/pressure_from_phi_plan.md
+doc/pymrm_ghost_cell_ibm_transfer.md
+

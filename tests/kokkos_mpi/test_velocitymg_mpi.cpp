@@ -17,7 +17,7 @@
 
 #include "tpx/common/types.hpp"
 #include "tpx/decomp/block_decomposer.hpp"
-#include "tpx/halo/grid_halo.hpp"
+#include "tpx/halo/grid_halo_topology.hpp"
 
 using tpx::IVec;
 using sdflow::VelocityMG; using sdflow::CCField; using sdflow::CCConst; using sdflow::C3; using sdflow::FPV; using sdflow::FPC;
