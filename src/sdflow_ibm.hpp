@@ -143,10 +143,10 @@ class SdflowSolver {
     distributed_ = true; comm_ = comm; gnx_ = gnx; gny_ = gny; gnz_ = gnz;
     int rank = 0, size = 1; MPI_Comm_rank(comm, &rank); MPI_Comm_size(comm, &size);
     std::array<bool, 3> per{true, true, true};
-    velHalo_ = std::make_shared<GridHalo<3>>();
+    velHalo_ = std::make_shared<GridHaloTopology<3>>();
     tpx::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), tpx::IVec<3>{gnx, gny, gnz});
     velHalo_->buildTopology(dec, rank, G, per, comm);
-    velDev_ = std::make_shared<DeviceGridExchangeKokkos<double>>(); velDev_->init(*velHalo_);
+    velDev_ = std::make_shared<GridHalo<double>>(); velDev_->init(*velHalo_);
     const auto oig = velHalo_->indexer().originInclGhost();
     og_ = {(int)oig[0] + G, (int)oig[1] + G, (int)oig[2] + G};  // block inner origin -> global parity
   }
@@ -275,6 +275,18 @@ class SdflowSolver {
 
   // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
   std::vector<double> getVelocity(int c) { return gatherInner(C[c].u); }
+  // The divergence-free FACE velocity component (collocated: the projected MAC face field uf_/vf_/wf_,
+  // exactly div-free; staggered: C[c].u already lives on the faces). For a periodic bed its mean is the
+  // momentum-balance superficial velocity, unperturbed by the openness-aware cell gradient correction
+  // (projectCorrectCenter) that biases the cell-field mean at cut cells.
+  std::vector<double> getFaceVelocity(int c) {
+    if constexpr (Grid::collocated) {
+      CCField fa[3] = {uf_, vf_, wf_};
+      return gatherInner(fa[c]);
+    } else {
+      return gatherInner(C[c].u);
+    }
+  }
   std::vector<double> getPressure() {
     // Incremental scheme: P_ accumulates the physical pressure. Classical Chorin (!incremental_): derive it
     // on demand from the last projection potential, p = (rho/dt)*phi (CUDA press_from_phi_k).
@@ -662,8 +674,8 @@ class SdflowSolver {
   bool distributed_ = false;
   C3 og_{0,0,0};   // velocity-block inner origin (global red-black parity); {0,0,0} single-rank
 #ifdef CFD_MPI
-  std::shared_ptr<GridHalo<3>> velHalo_;                          // g=2 velocity-block topology
-  std::shared_ptr<DeviceGridExchangeKokkos<double>> velDev_;      // g=2 velocity-block ghost exchange
+  std::shared_ptr<GridHaloTopology<3>> velHalo_;                          // g=2 velocity-block topology
+  std::shared_ptr<GridHalo<double>> velDev_;      // g=2 velocity-block ghost exchange
   MPI_Comm comm_ = MPI_COMM_NULL; int gnx_=0, gny_=0, gnz_=0;     // communicator + GLOBAL dims
 #endif
   int bc_[6] = {0,0,0,0,0,0}; double bcVel_[6][3] = {}; bool hasBc_ = false, hasOutflow_ = false;  // domain BCs

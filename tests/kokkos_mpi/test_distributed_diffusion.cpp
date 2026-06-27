@@ -3,7 +3,7 @@
 //
 // Solves a periodic implicit-diffusion system ((idiag)I - beta*Lap) u = b by Red-Black Gauss-Seidel, with
 // the field decomposed over MPI ranks (ORB) and the per-colour ghost exchange done by transport-core's
-// portable GPU-resident halo (DeviceGridExchangeKokkos) instead of a single-process periodic fill. The cfd
+// portable GPU-resident halo (GridHalo) instead of a single-process periodic fill. The cfd
 // CCField and tpx::View<double> are the SAME Kokkos type (x-fastest, default memory space), so the solver
 // field exchanges directly. The distributed RB-GS is algebraically identical to the single-rank sweep (the
 // halo supplies the same neighbour values + the GLOBAL red-black parity via the block's global origin), so
@@ -29,8 +29,8 @@ using tpx::Index;
 using tpx::IVec;
 using tpx::wrap;
 using tpx::decomp::BlockDecomposer;
-using tpx::halo::DeviceGridExchangeKokkos;
 using tpx::halo::GridHalo;
+using tpx::halo::GridHaloTopology;
 using sdflow::diffSmoothColor;
 using sdflow::I3;
 using sdflow::SField;
@@ -72,7 +72,7 @@ int main(int argc, char** argv) {
 
     // ---- distributed solve ----
     BlockDecomposer<kDim> dec(static_cast<std::size_t>(size), gs);
-    GridHalo<kDim> halo;
+    GridHaloTopology<kDim> halo;
     halo.buildTopology(dec, rank, G, periodic, MPI_COMM_WORLD);
     const auto& idx = halo.indexer();
     const Index n = idx.numCellsInclGhost();
@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
       hb(idx.localMdToLocal(l)) = source(l[0] + og[0], l[1] + og[1], l[2] + og[2], gs); });
     Kokkos::deep_copy(b, hb); Kokkos::deep_copy(u, hu);
 
-    DeviceGridExchangeKokkos<double> dev;
+    GridHalo<double> dev;
     dev.init(halo);
     SField empty;
     for (int k = 0; k < SWEEPS; ++k)

@@ -2,7 +2,7 @@
 //
 // Solves the (singular, periodic) cut-cell pressure system A phi = b, A = -div(open grad), by Conjugate
 // Gradients with the field ORB-decomposed over MPI ranks. This exercises the two pieces the multi-rank
-// sdflow pressure solve needs beyond the grid halo: (1) the halo'd matvec (DeviceGridExchangeKokkos.exchange
+// sdflow pressure solve needs beyond the grid halo: (1) the halo'd matvec (GridHalo.exchange
 // before applyCutcellOp) and (2) the GLOBAL reductions -- every dot product, the residual max, and the
 // constant-null-space mean removal are a local Kokkos parallel_reduce followed by MPI_Allreduce. The CG with
 // distributed reductions is algebraically identical to single-rank CG (same operator, same global inner
@@ -26,8 +26,8 @@
 using tpx::Index;
 using tpx::IVec;
 using tpx::decomp::BlockDecomposer;
-using tpx::halo::DeviceGridExchangeKokkos;
 using tpx::halo::GridHalo;
+using tpx::halo::GridHaloTopology;
 using sdflow::CCField; using sdflow::CCConst; using sdflow::CCExec; using sdflow::C3;
 using OpV = Kokkos::View<double*, sdflow::CCMem>;
 
@@ -107,12 +107,12 @@ int main(int argc, char** argv) {
 
     // ---- distributed CG ----
     BlockDecomposer<kDim> dec(static_cast<std::size_t>(size), gs);
-    GridHalo<kDim> halo; halo.buildTopology(dec, rank, G, periodic, MPI_COMM_WORLD);
+    GridHaloTopology<kDim> halo; halo.buildTopology(dec, rank, G, periodic, MPI_COMM_WORLD);
     const auto& idx = halo.indexer();
     const Index n = idx.numCellsInclGhost();
     const auto eg = idx.sizeInclGhost(), og = idx.originInclGhost();
     const C3 e{(int)eg[0], (int)eg[1], (int)eg[2]};
-    DeviceGridExchangeKokkos<double> dev; dev.init(halo);
+    GridHalo<double> dev; dev.init(halo);
     Reduce red{e, MPI_COMM_WORLD};
 
     CCField ox("ox", n), oy("oy", n), oz("oz", n);  // all-fluid openness (periodic Laplacian operator)

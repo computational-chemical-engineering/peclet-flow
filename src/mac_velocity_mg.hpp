@@ -186,8 +186,8 @@ class VelocityMG {
     CCField advU, advV, advW;  // restricted advecting velocity (upwind-convective coarse op; L>=1)
     FPV AC, AW, AE, AS, AN, AB, AT;
 #ifdef CFD_MPI
-    std::shared_ptr<GridHalo<3>> halo;                       // per-level topology (decomposed)
-    std::shared_ptr<DeviceGridExchangeKokkos<double>> dev;   // per-level ghost exchange (ghost width G=2)
+    std::shared_ptr<GridHaloTopology<3>> halo;                       // per-level topology (decomposed)
+    std::shared_ptr<GridHalo<double>> dev;   // per-level ghost exchange (ghost width G=2)
 #endif
   };
 
@@ -230,10 +230,10 @@ class VelocityMG {
     auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
     for (int L = 0; L < nLevels; ++L) {
       Level v;
-      v.halo = std::make_shared<GridHalo<3>>();
+      v.halo = std::make_shared<GridHaloTopology<3>>();
       tpx::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), tpx::IVec<3>{gs.x, gs.y, gs.z});
       v.halo->buildTopology(dec, rank, G, per, comm);
-      v.dev = std::make_shared<DeviceGridExchangeKokkos<double>>(); v.dev->init(*v.halo);
+      v.dev = std::make_shared<GridHalo<double>>(); v.dev->init(*v.halo);
       const auto& idx = v.halo->indexer();
       const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
       v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]}; v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};

@@ -2,7 +2,7 @@
 //
 // The third MPI milestone: the geometric V-cycle itself, decomposed over ranks. A level hierarchy is built
 // by coarsening the global grid 2:1 per level; each level gets its OWN transport-core halo
-// (DeviceGridExchangeKokkos over a BlockDecomposer of that level's grid). The transport-core ORB decomposition
+// (GridHalo over a BlockDecomposer of that level's grid). The transport-core ORB decomposition
 // coarsens cleanly -- each rank's coarse block is exactly its fine block halved -- so the restriction /
 // prolongation stay LOCAL (a coarse cell's 2^3 fine children all live on the same rank); only the smoother /
 // residual / prolong ghosts cross ranks, via the per-level halo. The singular periodic null space is removed
@@ -27,7 +27,7 @@
 
 using tpx::Index; using tpx::IVec;
 using tpx::decomp::BlockDecomposer;
-using tpx::halo::DeviceGridExchangeKokkos; using tpx::halo::GridHalo;
+using tpx::halo::GridHalo; using tpx::halo::GridHaloTopology;
 using sdflow::CCField; using sdflow::CCConst; using sdflow::CCExec; using sdflow::C3; using sdflow::FPV; using sdflow::FPC;
 
 static constexpr int kDim = 3, G = 1, NLEV = 4, NVCYC = 6, PRE = 2, POST = 2, BOTTOM = 8;
@@ -37,8 +37,8 @@ static double source(int gx, int gy, int gz, IVec<kDim> gs) {
 }
 
 struct Level {
-  std::unique_ptr<GridHalo<kDim>> halo;
-  std::unique_ptr<DeviceGridExchangeKokkos<double>> dev;
+  std::unique_ptr<GridHaloTopology<kDim>> halo;
+  std::unique_ptr<GridHalo<double>> dev;
   C3 e, inner, og, ratio{2, 2, 2}, cfac{1, 1, 1};
   Index n = 0; long gCells = 0;
   CCField x, rhs, res, ox, oy, oz;
@@ -57,10 +57,10 @@ struct DistMG {
     IVec<kDim> g = gs, cf{1, 1, 1};
     for (int L = 0; L < NLEV; ++L) {
       Level v;
-      v.halo = std::make_unique<GridHalo<kDim>>();
+      v.halo = std::make_unique<GridHaloTopology<kDim>>();
       BlockDecomposer<kDim> dec(static_cast<std::size_t>(size), g);
       v.halo->buildTopology(dec, rank, G, per, comm);
-      v.dev = std::make_unique<DeviceGridExchangeKokkos<double>>(); v.dev->init(*v.halo);
+      v.dev = std::make_unique<GridHalo<double>>(); v.dev->init(*v.halo);
       const auto& idx = v.halo->indexer();
       const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), o = idx.originInclGhost();
       v.e = {(int)eg[0], (int)eg[1], (int)eg[2]}; v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};

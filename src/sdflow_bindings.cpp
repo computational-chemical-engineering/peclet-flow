@@ -126,6 +126,12 @@ static void bind_solver(py::module_& m, const char* name) {
            "Return the z-velocity component as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).")
       .def("get_p", [](S& s) { return to_xyz(s.getPressure(), s.nx(), s.ny(), s.nz()); },
            "Return the physical pressure as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).")
+      .def("get_uf", [](S& s) { return to_xyz(s.getFaceVelocity(0), s.nx(), s.ny(), s.nz()); },
+           "Return the divergence-free FACE x-velocity (collocated: projected MAC field; staggered: == get_u).")
+      .def("get_vf", [](S& s) { return to_xyz(s.getFaceVelocity(1), s.nx(), s.ny(), s.nz()); },
+           "Return the divergence-free FACE y-velocity (collocated: projected MAC field; staggered: == get_v).")
+      .def("get_wf", [](S& s) { return to_xyz(s.getFaceVelocity(2), s.nx(), s.ny(), s.nz()); },
+           "Return the divergence-free FACE z-velocity (collocated: projected MAC field; staggered: == get_w).")
       .def("max_open_divergence", &S::maxOpenDivergence,
            "Return the max cut-cell flux divergence (the incompressibility residual; ~0 when converged).")
       .def("get_resolution", [](S& s) { return std::vector<int>{s.nx(), s.ny(), s.nz()}; },
