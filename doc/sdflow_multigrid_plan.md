@@ -6,18 +6,23 @@ Goal: a **functional, efficient multigrid pressure solver** for sdflow that work
 whose iteration count is ~O(1) in N.
 
 > **STATUS (2026-06-11): Phase 0 + Phase 1 DONE.** A *rediscretized* cut-cell pressure coarse operator
-> (`DistributedPoissonMG::setFineVariableOperatorRediscretized`) is **grid-independent** (V-cycle ρ≈0.15
+> (`CutcellMG::setOpenness`, `src/mac_cutcell_mg.hpp`) is **grid-independent** (V-cycle ρ≈0.15
 > flat in N, **8 PCG iters flat** vs RB-GS 18→47 / Galerkin 15→30 / const-MG 10→13) and **correct**
 > (matches Zick & Homsy to <0.05% at N=128 across φ). Exposed as `set_solid(..., pressure_coarse=
 > "rediscretized")` (new default). All 24 MG ctests green (np=1,2,4). **Discovery along the way:** the
 > "+4% drift" previously blamed on the Galerkin *pressure* path is actually the **velocity diffusion
 > multigrid** under-converging the IBM operator (confound). Every *pressure* path is correct; the velocity
-> MG is the next fix (see "Velocity-diffusion MG" below). Tooling: `tests/profile_mg_scaling.cu` compares
-> all coarse modes; `scripts/validate_zick_homsy_sdflow_vs_pnm.py` checks correctness.
+> MG is the next fix (see "Velocity-diffusion MG" below). Tooling: the MG ctests
+> (`tests/kokkos/test_mg.cpp`, `tests/kokkos_mpi/test_cutcellmg_mpi.cpp`) plus the grid-convergence
+> regression suite `tests/regression/sdflow_regression.py` (records MG-PCG iteration counts across N via
+> `last_pressure_iterations()`); `scripts/validate_zick_homsy_sdflow.py` checks correctness.
+> <!-- TODO: the standalone coarse-mode comparison harness (the retired CUDA `tests/profile_mg_scaling.cu`)
+> was not ported to Kokkos; the per-coarse-mode V-cycle-ρ table below was produced by it. -->
 
 ## 0. Where we are (grounded in the code)
 
-**pnm_backend's MG works** (`src/cfd_solver_multigrid.cu`) and is, concretely, a **geometric multigrid
+**The reference MG works** (the retired pnm_backend CUDA `cfd_solver_multigrid.cu`, whose design is now
+realized in `src/mac_cutcell_mg.hpp` / `CutcellMG`) and is, concretely, a **geometric multigrid
 with rediscretized coarse operators**:
 - `build_sdf_hierarchy_host` — coarsen the *geometry* (SDF) level by level.
 - `compute_pressure_operator_kernel` — on each level, **rebuild** the 7-point cut-cell Poisson operator
@@ -28,7 +33,7 @@ with rediscretized coarse operators**:
   correction). `subtract_mean_mg_kernel` handles the singular (all-Neumann/periodic) null space.
 - Used as a **standalone V-cycle solver** (no outer Krylov). It nails Zick & Homsy to <0.1%.
 
-**sdflow already has most of the machinery** (`src/mac_multigrid.cuh`, `DistributedPoissonMG`):
+**sdflow already has most of the machinery** (`src/mac_cutcell_mg.hpp`, `CutcellMG`):
 - distributed per-level blocks with 2:1 local coarsening + per-level halo exchange (transport-core),
 - RB-GS smoother `mg_smooth_var_k` (red-black `color`), residual, **geometric** restriction
   (`mg_restrict_k`, 8:1 average) + trilinear prolongation (`mg_prolong_k`), per-level mean removal,
@@ -43,7 +48,7 @@ it):
   correction is weak, so it barely beats single-level RB-GS for dense packings.
 - `galerkin=true`: **unsmoothed-aggregation Galerkin** (`A_c = PᵀA_fP` via summation restriction +
   injection prolongation). This is the **buggy path** — on the SC sphere it drifts +4% in drag at N=128
-  and worsens with N (see `doc/sdflow_pnm_parity.md`). The aggregation operator + injection/summation
+  and worsens with N. The aggregation operator + injection/summation
   transfers are not a consistent pair for the singular cut-cell operator.
 
 So the plan is **not** "build an MG from scratch" — it's "add the rediscretized-coarse-operator mode
@@ -103,8 +108,8 @@ halo messages are tiny and **latency-bound** — the classic "MG doesn't strong-
 ## 2. Proposed plan (phased)
 
 **Phase 0 — baseline + decisions. [DONE]**
-`tests/profile_mg_scaling.cu` (extended to compare all coarse modes) on the SC packing, V-cycle ρ and
-MG-PCG iters to 1e-8 vs N:
+The coarse-mode comparison (retired CUDA `tests/profile_mg_scaling.cu`; not yet re-ported — see the
+TODO under STATUS) on the SC packing, V-cycle ρ and MG-PCG iters to 1e-8 vs N:
 
 | N | 1-level RB-GS | const-coeff MG | Galerkin MG | rediscretized MG |
 |---|---|---|---|---|
@@ -116,7 +121,7 @@ Every non-rediscretized path's iteration count grows with N (Galerkin's V-cycle 
 Decisions confirmed: standalone-V default + MG-PCG option; RB-GS smoother default.
 
 **Phase 1 — geometric rediscretized coarse operator (the core fix). [DONE]**
-`DistributedPoissonMG::setFineVariableOperatorRediscretized` (new `mg_coarsen_open_avg_k` kernel):
+`CutcellMG::setOpenness` (`src/mac_cutcell_mg.hpp`, `mg_coarsen_open_avg_k` kernel):
 1. **Coarsen the geometry** — area-average the staggered face openness (`ox,oy,oz`) 2:1 per level (coarse
    face = average of its 4 fine sub-faces; *not* the `mg_agg_T_k` sum the Galerkin path uses), with a
    periodic ghost exchange.
@@ -158,8 +163,7 @@ Exposed via `set_solid(..., pressure_coarse="rediscretized")` (default). All 24 
 - (velocity-diffusion rediscretized coarse operator moved up to Phase 2 — it's the active defect.)
 - API already migrated to a mode (`set_solid(..., pressure_coarse=...)` / `set_cutcell_pressure_operator`
   `coarse_mode`). The Galerkin pressure path is **not buggy** (it converges to the right answer, just the
-  slowest coarse model) — keep it for comparison; the rediscretized mode is the default. Update
-  `doc/sdflow_pnm_parity.md` as findings settle.
+  slowest coarse model) — keep it for comparison; the rediscretized mode is the default.
 
 ## DEFERRED WORK — agglomerated coarse solve (required for large-np / multi-GPU)
 
@@ -168,7 +172,7 @@ already grid-independent at 8 iters, and the trigger condition below would not e
 this up **before any production run at large rank counts / on real multi-GPU**, where it is required to
 keep the pressure MG grid-independent.
 
-**Why it is needed.** `DistributedPoissonMG::init` coarsens 2:1 per level while each rank's block stays
+**Why it is needed.** `CutcellMG::init` coarsens 2:1 per level while each rank's block stays
 even and the partition stays aligned (it asserts this). The number of levels is therefore bounded by the
 *per-rank* block size, not the global size. At large np the per-rank block is small, so coarsening stops
 early → the coarsest *global* grid is still large → the coarse correction is weak (iteration count grows
@@ -185,7 +189,7 @@ np=4 on these grids), so it does not show on the dev box.
 3. **Gather.** Assemble level-`K`'s global operator (the 7 stencil arrays `AC..AT`) and RHS onto root
    (and optionally a small subset of ranks for redundancy) via the ORB→global mapping. transport-core
    already has a gather-to-root for fields (used for VTI output); reuse it for the RHS and each stencil
-   band. The operator only needs gathering once per `setFineVariableOperator*` (geometry is static); the
+   band. The operator only needs gathering once per `setOpenness` (geometry is static); the
    RHS gathers every V-cycle.
 4. **Redundant serial solve.** On root, solve the (small) coarse system to tight tolerance — a serial
    geometric MG continuing the coarsening to ~1 cell, or a direct solve. Cheap because the grid is tiny.
@@ -199,21 +203,21 @@ np=4 on these grids), so it does not show on the dev box.
 a case small enough to trigger agglomeration). (b) Scaling (needs the hardware): PCG iteration count
 **flat** in np at fixed problem size (strong scaling) and flat per-rank work (weak scaling) at np = 8,
 16, 32, … on real multi-GPU — the deliverable that justifies "MG for large multi-GPU". Until (b) can be
-run, do not ship it (untestable infra). The hook points are `DistributedPoissonMG::vcycle` (bottom
+run, do not ship it (untestable infra). The hook points are `CutcellMG::vcycle` (bottom
 branch) and `init` (record `K` / the agglomeration threshold).
 
 ## Communication-light outer accelerator for multi-GPU (Chebyshev) — PROTOTYPED & VERIFIED
 
-> **STATUS: prototyped (`DistributedPoissonMG::solve_chebyshev` + `estimate_eigenvalues`) and verified on
+> **STATUS: prototyped (`CutcellMG::solveChebyshev` + `estimateEigenvalues`) and verified on
 > 1 GPU.** Chebyshev semi-iteration accelerated by the symmetric V-cycle, with spectral bounds of M⁻¹A
 > from power iteration (one-time setup; solid-cell + constant null modes masked out — they otherwise
-> poison the lower bound). **Result (`profile_mg_scaling`, rediscretized op, rtol 1e-8): Chebyshev matches
+> poison the lower bound). **Result (rediscretized op, rtol 1e-8): Chebyshev matches
 > PCG's iteration count to within 0–3 iters** (N=128: Cheb 10 vs PCG 8 vs standalone-V 12), confirming
 > "≈ as good as PCG" in convergence. **On 1 GPU it is ~5–25% *slower* than PCG** (a few more iters, and
 > PCG's dot-products are free without a network) — i.e. ≈ standalone-V speed. **The win is purely at
 > scale** (no per-iteration dot-product Allreduce), which needs the multi-GPU box to measure.
 >
-> **WIRED IN (togglable):** `set_pressure_chebyshev(on, max_iter, rtol)` on `DistributedNS` and the sdflow
+> **WIRED IN (togglable):** `set_pressure_chebyshev(on, max_iter, rtol)` on `SdflowIbm` and the sdflow
 > module (mutually exclusive with `set_pressure_pcg`; overrides the single-rank auto-PCG default). Spectral
 > bounds are estimated once, lazily, on the first step (RHS=−div is a good seed; the operator is fixed so
 > they are reused). Verified end-to-end: Z&H K=4.2914, identical to PCG; 72/72 ctests green. Only the

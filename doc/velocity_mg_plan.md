@@ -14,12 +14,12 @@ wrapper), **optional** (`set_velocity_multigrid`, default off; default RB-GS pat
 > **dangerous** (`D_rescale = min|D|` cut-face factor →0 for thin slivers; dividing the residual by it
 > amplifies near-solid noise) and **unnecessary**: the correction-scheme V-cycle already restricts the TRUE
 > residual `b' − A_f x` (level-0 op = the IBM `As_[c]`), so the fixed point is the exact sharp solution for
-> ANY coarse op — only the *rate* depends on it. `mac_ibm.cuh:18` is explicit that the row-based IBM op is
+> ANY coarse op — only the *rate* depends on it. `src/mac_ibm.hpp` is explicit that the row-based IBM op is
 > "NEVER multigridded; D_rescale is GS-invariant but not MG-invariant." **⇒ leave the residual scaled; fix
 > the coarse op + transfers (Phases 1+3 below), not the scaling.**
 
 ## Why the current `vmg_` fails (measured)
-`ensure_vmg_built` wires `DistributedPoissonMG` with `setDiffusionCoarse` = **constant-coefficient** coarse
+`ensure_vmg_built` wires `VelocityMG` with a `setDiffusionCoarse` = **constant-coefficient** coarse
 (`mg_const_diffusion_op_k`, geometry-free) and feeds it the **row-scaled** fine IBM stencil. Result: at
 moderate Δt the drag is biased +2% (dt=60) and it **NaNs at dt=200**. Two root causes:
 1. the coarse operator throws the solid geometry away → the coarse correction is inconsistent at the skin;
@@ -31,11 +31,11 @@ RB-GS smoother**; build the **coarse operators from a clean, un-scaled staircase
 discretization**; the V-cycle's fine residual+smoother guarantee the converged answer is the exact *fine*
 (sharp-IBM) solution regardless of how crude the coarse is — the coarse only sets the convergence *rate*.
 
-## Design (mirrors the proven pressure `setFineVariableOperatorRediscretized` path)
+## Design (mirrors the proven pressure `CutcellMG::setOpenness` path)
 
 ### Phase 1 — rediscretized staircase / volume-fraction coarse operator (the core)
-New `DistributedPoissonMG::setVelocityCoarse(comp, θ_fine, nu_dt, h0)` (built once per component; static
-geometry), mirroring `setFineVariableOperatorRediscretized`:
+New velocity coarse operator on `VelocityMG` (built once per component; static
+geometry), mirroring `CutcellMG::setOpenness`:
 1. **Coarsen the fluid volume fraction** `θ` (per the component's staggered grid) 2:1 per level — new
    `mg_coarsen_volfrac_k` (volume-average θ, like `mg_coarsen_open_avg_k` area-averages openness). Stash θ
    per level in the existing `tx` scratch.
@@ -45,7 +45,8 @@ geometry), mirroring `setFineVariableOperatorRediscretized`:
    - **fully-solid cells (θ≈0) decouple**: `AC=1`, off-diag=0 (identity row → masked Dirichlet).
    At Re=0 this is the **symmetric masked Laplacian** (the clean case to land first). It is an M-matrix →
    `mg_smooth_var_k` (RB-GS) smooths it cleanly and ρ<1. *(Re>0 upwind: Phase 4.)*
-3. Replace the `setDiffusionCoarse` call in `ensure_vmg_built` with three `setVelocityCoarse(c,…)` and a
+3. Replace the `setDiffusionCoarse` call in `ensure_vmg_built` with three per-component velocity-coarse
+   builds (`VelocityMG::setStaircase` / `buildUpwindCoarse`) and a
    per-component coarse-operator swap (`AC..AT` per level), exactly like `setDiffusionFine` swaps level 0.
 
 ### Phase 2 — ~~un-scale the fine residual~~ **REJECTED — do not implement**
@@ -54,7 +55,7 @@ cut-face factor →0 for thin slivers, so `res/descale` amplifies near-solid noi
 unnecessary — the correction scheme already restricts the TRUE residual `b' − A_f x` (level-0 op = `As_[c]`
 via `setDiffusionFine`), so `r=0 ⇒ correction=0` and the fixed point is the exact sharp IBM solution for any
 coarse op. The coarse op only sets the convergence RATE. **Leave the residual scaled.** The +2–4% bias is a
-*finite-cycle* artifact of unmasked transfers (Phase 3), not of the residual scaling. (`mac_ibm.cuh:18`: the
+*finite-cycle* artifact of unmasked transfers (Phase 3), not of the residual scaling. (`src/mac_ibm.hpp`: the
 IBM op is row-based, non-conservative across the wall, "NEVER multigridded; D_rescale … not MG-invariant".)
 
 ### Phase 3 — clean-fluid-interior coarse coupling (the actual fix that landed)
@@ -80,18 +81,18 @@ operator matches the fine one — the **clean fluid interior** (a fluid cell wit
   residual un-scale + vol-weighted transfers; default RB-GS path untouched.
 
 ## Files / touch list
-- `src/mac_multigrid.cuh`: new kernels `mg_coarsen_volfrac_k`, `mg_build_velocity_coarse_k`,
-  `mg_restrict_volwt_k`, `mg_unscale_res_k`; method `setVelocityCoarse(comp,…)`; a `vel_unscale_` flag +
+- `src/mac_velocity_mg.hpp` (`VelocityMG`): new kernels `mg_coarsen_volfrac_k`, `mg_build_velocity_coarse_k`,
+  `mg_restrict_volwt_k`, `mg_unscale_res_k`; the per-component velocity coarse operator; a `vel_unscale_` flag +
   `descale_lvl0_` and the level-0 residual-unscale + masked/weighted transfer hooks in `vcycle`.
-- `src/mac_ibm.cuh`: a θ (fluid-fraction) kernel from the staggered SDF (reuse `ibm_solid_mask_k` shape);
+- `src/mac_ibm.hpp`: a θ (fluid-fraction) kernel from the staggered SDF (reuse `ibm_solid_mask_k` shape);
   the residual-unscale kernel may live here next to `ibm_scale_k`.
-- `src/distributed_ns.cuh`: `ensure_vmg_built` — build the 3 per-component staircase coarse hierarchies
+- `src/sdflow_ibm.hpp` (`SdflowIbm`): `ensure_vmg_built` — build the 3 per-component staircase coarse hierarchies
   from the staggered θ; the vmg branch — set `descale_lvl0_ = descale_[c]` and enable `vel_unscale_`;
   keep the smoother on `As_[c]` (row-scaled).
-- `src/sdflow_bindings.cu`: no change (`set_velocity_multigrid` already exposed).
+- `src/sdflow_bindings.cpp`: no change (`set_velocity_multigrid` already exposed).
 
 ## Validation (gate each phase)
-1. **Z&H SC sphere** (`scripts/validate_zick_homsy_sdflow_vs_pnm.py`): vel-MG drag == RB-GS drag to
+1. **Z&H SC sphere** (`scripts/validate_zick_homsy_sdflow.py`): vel-MG drag == RB-GS drag to
    <0.01%; per-cycle Helmholtz residual drops geometrically (ρ≲0.3); fewer outer Picard steps than RB-GS.
 2. **Ring bed at high res** (the `D_rescale≠1` stressor): converges (no NaN/bias), matches RB-GS, and the
    **outer Picard count becomes ~resolution-independent** (the whole point — fixes the 600-step-cap stall).
@@ -132,7 +133,7 @@ advection-dominated/stiff). Opt-in: `set_velocity_multigrid(on,…)` **together 
 paths are byte-identical, 72/72 green). What shipped:
 - Fine operator (pre-existing): `build_adv_stencil_k` → `sadv::fou_operator` adds first-order-upwind
   advection to the diffusion stencil from the advecting u,v,w at unit spacing (`As_[c]`).
-- **Coarse** kernel `dns::detail::build_adv_coarse_stencil_k<COMP>` (distributed_ns.cuh): aniso const-coeff
+- **Coarse** stencil builder `buildAdvCoarse` / `VelocityMG::buildUpwindCoarse` (`src/mac_velocity_mg.hpp`): aniso const-coeff
   diffusion (per-axis β from `cfac`) **+** a coarse FOU via new `sadv::fou_operator_aniso` on the
   *restricted* coarse velocity, scaling vel by `s_a = 1/cfac_a` per face axis (the FOU coefficient is
   `dt·vel/h_a`, and `fou_operator` assumes h=1). Launched over inner cells (smoother/residual read AC..AT

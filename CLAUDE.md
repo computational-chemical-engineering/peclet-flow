@@ -22,24 +22,28 @@ Kokkos compute + the pure-C++ `src/sdf_reader.cpp` VTI reader): `SDFReader`, `ex
 
 ## Build Commands
 
-Kokkos + pybind11 are found via `find_package` against the bootstrapped install prefix
+Kokkos is found via `find_package` against the bootstrapped install prefix
 (`../extern/install/<backend>`, built once by `../tools/bootstrap_deps.sh` — a **hard build dependency**;
-backend = `nvidia-cuda` / `host-openmp` / `lumi-hip`). With `nvcc`, put it on `PATH`
-(`export PATH=/usr/local/cuda-13.2/bin:$PATH`).
+backend = `nvidia-cuda` / `host-openmp` / `lumi-hip`); **nanobind** is provisioned by the shared
+`SuiteNanobind` helper (found through the active Python interpreter, no cmakedir prefix needed). With
+`nvcc`, put it on `PATH` (`export PATH=/usr/local/cuda-13.2/bin:$PATH`).
 
 ```bash
 source .venv/bin/activate
-# Canonical build: the sdflow solver + the pnm pore-extraction module (single-rank Python modules).
-cmake -S . -B build \
-  -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda;$(python -m pybind11 --cmakedir)"
+# Canonical: build + install both modules (sdflow solver + pnm) via scikit-build-core.
+CMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda" pip install .
+
+# Or a dev cmake build (single-rank Python modules):
+cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda"
 cmake --build build -j
 # Output: build/sdflow.*.so (the CFD solver) + build/pnm.*.so (pore extraction)
 
 # OpenMP backend: same source, just swap the prefix (extern/install/host-openmp).
 ```
 
-**Requirements:** Kokkos 5.x (C++20), CMake 3.24+, Python 3.10+, pybind11; `../transport-core` (header-only)
-+ MPI for the multi-rank test suite. The Kokkos/ArborX install prefix is produced by `../tools/bootstrap_deps.sh`.
+**Requirements:** Kokkos 5.x (C++20), CMake 3.24+, Python 3.10+, nanobind + scikit-build-core;
+`../transport-core` (header-only) + MPI for the multi-rank test suite. The Kokkos/ArborX install prefix is
+produced by `../tools/bootstrap_deps.sh`.
 
 ## Running Tests and Verification
 
@@ -107,11 +111,13 @@ All Kokkos, header-only (`namespace sdflow`), C++20.
 - `src/mac_ibm.hpp`, `src/mac_cutcell.hpp`, `src/mac_pressure.hpp`, `src/mac_bc.hpp`, `src/mac_reductions.hpp` - IBM stencil, cut-cell openness, projection, domain BCs, reductions
 - `src/cut_cell_ibm.hpp` - the Robust-Scaled cut-cell IBM overlay (`poly_*`, K/M/X/Nbc/R, D_rescale)
 - `src/staggered_advection.hpp` - `sadv::advect`: staggered Koren TVD advection (+ implicit-FOU operator)
-- `src/sdflow_bindings.cpp` - the `sdflow` pybind module (`sdflow.Solver`)
+- `src/sdflow_bindings.cpp` - the `sdflow` nanobind module: `sdflow.Solver` (staggered MAC, default) and
+  `sdflow.SolverColocated` (collocated/cell-centered velocities via the `GridLayout` policy + ABC
+  approximate projection — identical Python API; see [`doc/sdflow_colocated_plan.md`](doc/sdflow_colocated_plan.md))
 
 **`pnm` (pore-network extraction):**
 - `src/pore_extraction.hpp` (`namespace pnm`, Kokkos compute), `src/sdf_reader.cpp` / `.h` (pure-C++ VTI reader)
-- `src/pnm_bindings.cpp` - the `pnm` pybind module (`SDFReader`, `extract_pores`, `segment_volume`, ...)
+- `src/pnm_bindings.cpp` - the `pnm` nanobind module (`SDFReader`, `extract_pores`, `segment_volume`, ...)
 
 ## Python API Usage (`sdflow`)
 
@@ -136,14 +142,14 @@ See the "Pressure solver options" table below and `scripts/*_sdflow.py` for the 
 ## MPI / sdflow (the CFD solver, transport-core integration)
 
 The **`sdflow`** solver (`sdflow::SdflowIbm`) is built on the shared `transport-core` library (sibling repo
-`../transport-core`), whose **Kokkos** grid halo (`tpx::halo::DeviceGridExchangeKokkos`) carries the
+`../transport-core`), whose **Kokkos** grid halo (`tpx::halo::GridHalo`) carries the
 multi-rank ghost exchange. The single-rank Python module is built by the main `CMakeLists.txt`; the
 multi-rank path is exercised by the `tests/kokkos_mpi` ctests (gated behind `CFD_MPI`, so the single-rank
 module is byte-identical). It was validated bit-identical (machine precision) to the retired CUDA solver
 and against external analytics.
 
 Key pieces (all `src/*.hpp`, Kokkos, header-only, `namespace sdflow`):
-- `tpx::halo::DeviceGridExchangeKokkos` (transport-core) — per-level ORB block ghost exchange for the
+- `tpx::halo::GridHalo` (transport-core) — per-level ORB block ghost exchange for the
   `double` cell-fields on the extended local block. cfd's x-fastest layout matches `tpx::Field3D`.
 - `staggered_advection.hpp` — `sadv::advect`: staggered Koren TVD advection, templated on a field accessor.
 - `sdflow_ibm.hpp` — `sdflow::SdflowIbm`: the solver. `step()` does per-component implicit diffusion

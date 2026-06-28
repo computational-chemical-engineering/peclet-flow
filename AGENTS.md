@@ -1,33 +1,31 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/`: C++/CUDA sources for the CFD solver and pybind11 bindings (`.cpp`, `.cu`, `.cuh`).
-- `tests/`: C++ multi-rank ctests (`tests/kokkos_mpi/test_*.cpp`) + a couple of pore-extraction Python scripts.
+- `src/`: header-only **Kokkos** C++ sources for the CFD solver + **nanobind** bindings (`.hpp` + `.cpp`; no `.cu/.cuh` — CUDA retired).
+- `tests/`: C++ Kokkos kernel tests (`tests/kokkos/`) + multi-rank ctests (`tests/kokkos_mpi/test_*.cpp`) + a couple of pore-extraction Python scripts.
 - `scripts/`: `sdflow` verification/analysis scripts (e.g., `verify_poiseuille_sdflow.py`).
 - `build/`: CMake build output (expects `build/sdflow.*.so` + `build/pnm.*.so`).
 - `doc/`, `notebooks/`, `data/`: design notes, experiments, and input datasets.
 
 ## Build, Test, and Development Commands
 ```bash
-# Build the Python extensions (requires CUDA Toolkit + CMake 3.18+)
-cmake -S . -B build && cmake --build build -j
+# Build/install the Python extensions via scikit-build-core (Kokkos prefix from ../tools/bootstrap_deps.sh)
+CMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" pip install .
+# Or a dev cmake build (nanobind found via the active interpreter; CMake 3.24+):
+cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" && cmake --build build -j
 
-# Activate venv (if used) and run sdflow verification
+# Activate venv and run sdflow verification (canonical scripts are scripts/verify_*_sdflow.py)
 source .venv/bin/activate
 PYTHONPATH=$PWD/build python scripts/verify_poiseuille_sdflow.py
 PYTHONPATH=$PWD/build python scripts/verify_periodic_spheres_sdflow.py
-
-# Run verification scripts
-python scripts/verify_poiseuille.py
-python scripts/verify_periodic_spheres.py
-python scripts/verify_divergence.py
+PYTHONPATH=$PWD/build python scripts/verify_lid_cavity_sdflow.py
 ```
 
 ## Coding Style & Naming Conventions
-- C++/CUDA uses 2-space indentation and K&R-style braces.
+- C++ uses 2-space indentation and K&R-style braces; device code is plain Kokkos C++ in `.hpp` headers.
 - Python uses 4-space indentation.
 - Files and functions use `snake_case`; types/classes use `PascalCase`.
-- Keep CUDA kernels suffixed with `_kernel` and headers as `.cuh`/`.h`.
+- Kokkos device work is `parallel_for`/`parallel_reduce` over `Kokkos::View`s; keep functor types suffixed `_kernel`/`_op`.
 
 ## Testing Guidelines
 - Tests are executable Python scripts under `tests/`.

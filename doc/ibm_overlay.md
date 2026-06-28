@@ -2,7 +2,7 @@
 
 How the velocity (momentum) cut-cell IBM is structured in sdflow, and exactly what an octree/AMR port has
 to replace. Companion to the face-based pressure operator (`doc/sdflow_multigrid_plan.md`,
-"Forward-compatibility" section). Code: `src/mac_ibm.cuh`, `src/distributed_ns.cuh`.
+"Forward-compatibility" section). Code: `src/mac_ibm.hpp`, `src/cut_cell_ibm.hpp`, `src/sdflow_ibm.hpp`.
 
 ## Principle: draw the symmetry boundary at the projection
 Not every operator carries the same obligations:
@@ -34,10 +34,10 @@ it**. That keeps the row-based scheme *and* the forward-compatibility.
 | layer | what | code |
 |---|---|---|
 | **Base operator** | `A = I − βL` (β per face = νΔt·gf); a face loop, like the pressure operator | `ibm_build_diffusion_k` |
-| **Overlay (data)** | a sparse SoA of cut cells: per cell a `cell_index` (handle), per-face `dir_code` (neighbour/direction hook) + coefficients `R/K/M/X/Nbc`, and `D_rescale` | `IBM_Data` (`cfd_solver.cuh`, shared with pnm_backend — **read-only** here) |
+| **Overlay (data)** | a sparse SoA of cut cells: per cell a `cell_index` (handle), per-face `dir_code` (neighbour/direction hook) + coefficients `R/K/M/X/Nbc`, and `D_rescale` | `IbmOverlay` (`src/cut_cell_ibm.hpp`) |
 | **Overlay apply** | loop the overlay, modify each cut cell's **own** row (diagonal ×`D_rescale`, off-diagonals via `K/M/X`, the Dirichlet `inhom`) | `ibm_modify_stencil_k` |
 
-The build/apply split already exists: `DistributedNS::set_ibm_solid` builds the overlay once from the
+The build/apply split already exists: `SdflowIbm::setSolid` builds the overlay once from the
 geometry, and the per-step velocity solve applies it onto the base stencil.
 
 ## The two provider boundaries — *all* an octree port replaces
@@ -45,11 +45,11 @@ Everything mesh-specific is isolated behind two providers; the numerics (base, o
 apply math) are mesh-agnostic.
 
 1. **GeometryProvider** — geometry → overlay entries.
-   - Cartesian: `build_ibm_overlay` (`distributed_ns.cuh`) = count cut cells (`ibm_count_ext_k`), allocate
-     the SoA (`ibm_alloc`), fill it (`ibm_geometry_ext_k` → `ibm_fill_entry`). `ibm_fill_entry` is already
+   - Cartesian: `build_ibm_overlay` (`src/sdflow_ibm.hpp` / `src/cut_cell_ibm.hpp`) = count cut cells (`ibm_count_ext_k`), allocate
+     the SoA (`ibm_alloc`), fill it (`ibm_geometry_ext_k` → `ibmFillEntry`). `ibmFillEntry` is already
      **indexing-agnostic** — it consumes the 7 SDF samples + a cell handle and emits the Robust-Scaled
      polynomials; it does not care about the layout.
-   - Octree: a tree-walk that gathers per-cell SDF and calls the **same** `ibm_fill_entry`. One call site
+   - Octree: a tree-walk that gathers per-cell SDF and calls the **same** `ibmFillEntry`. One call site
      (`build_ibm_overlay`) changes.
 
 2. **Connectivity** — per cut-cell face: (base-stencil slot, opposite face for the `X` cross-term).
@@ -62,9 +62,9 @@ apply math) are mesh-agnostic.
 Not built now — like the agglomerated coarse solve and the at-scale Chebyshev benchmark, this is forward
 compatibility, and the abstraction should be hardened against a *real* second mesh, not in the abstract.
 When octrees land:
-1. **Variable face count.** `IBM_Data` is fixed-6 (Cartesian). Introduce a variable-arity overlay entry
-   (offset+count into a flat per-face array), or fork an sdflow `IbmOverlay` type (don't modify the
-   shared `IBM_Data`). The apply loops `[0, num_faces)` instead of `[0,6)`.
+1. **Variable face count.** `IbmOverlay` is fixed-6 (Cartesian). Introduce a variable-arity overlay entry
+   (offset+count into a flat per-face array), or a separate variable-arity overlay type (leave the
+   fixed-6 `IbmOverlay` intact for the Cartesian path). The apply loops `[0, num_faces)` instead of `[0,6)`.
 2. **Cell handles, not linear indices.** `cell_index` and the neighbour references become tree cell IDs;
    the apply addresses rows/neighbours through the tree's accessor instead of `i±stride`.
 3. **Connectivity for the `X` opposite term.** Define "opposite face" in the tree (a coarse cell faces
@@ -75,10 +75,10 @@ When octrees land:
    octree the overlay lists are rebuilt at adaptation alongside the face connectivity, by the same
    rebuild-phase machinery.
 
-The base operator and `ibm_fill_entry` need no octree-specific changes — only the two providers above.
+The base operator and `ibmFillEntry` need no octree-specific changes — only the two providers above.
 
 ## Verification
 The Cartesian implementation is **bit-identical** to before (the connectivity refactor uses `OPP[k]==k^1`
-and the same slot order). `tests/test_ibm_stencil_mpi.cu` compares the baked stencil cell-for-cell against
+and the same slot order). The `tests/kokkos_mpi` IBM stencil tests compare the baked stencil cell-for-cell against
 a serial reference using the same kernel; together with `ns_solid`/`stokes_solid`/`ibm_poiseuille` and the
 Zick & Homsy validation, it certifies the overlay refactor changed nothing numerically.

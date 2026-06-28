@@ -30,14 +30,20 @@ Conventions:
 
 - **SDF sign:** negative in solid, positive in fluid
 - **domain:** periodic in all directions
-- **storage:** structured scalar field read by `pnm_backend.SDFReader.read_vti(...)`
+- **storage:** structured scalar field read by `pnm.SDFReader.read_vti(...)` (the `pnm` module)
 
 The solver is initialized with:
 
 ```python
-sdf_zyx, origin, spacing = pnm_backend.SDFReader.read_vti("data/packing_256.vti")
-solver = pnm_backend.CFDSolver([nx, ny, nz], spacing)
-solver.initialize(sdf_zyx, origin, spacing)
+import sdflow, pnm
+# read_vti returns (sdf, origin_zyx, spacing_zyx)
+sdf_zyx, origin, spacing = pnm.SDFReader.read_vti("data/packing_256.vti")
+# sdflow runs in dimensionless grid units (unit spacing). set_solid wants a Fortran-order
+# (nx, ny, nz) float64 SDF (negative inside solid); convert from the read order as needed
+# (see scripts/verify_periodic_spheres_sdflow.py for the full pipeline).
+solver = sdflow.Solver(nx, ny, nz)
+solver.set_rho(1.0); solver.set_mu(1.0); solver.set_dt(dt)   # physical units; fix before geometry
+solver.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
 ```
 
 ### 2.2 Recommended way to create the three resolutions
@@ -72,31 +78,41 @@ Across `64^3`, `128^3`, and `256^3`, keep:
 
 Use the current stabilized scheme in the codebase:
 
-- corrected sandwich IBM formulas in `src/cfd_solver_ibm_kernels.cuh`
+- corrected sandwich IBM formulas in `src/cut_cell_ibm.hpp`
 - **fluid-region TVD deferred correction**
 - **IBM/interface rows kept on FOU/upwind**
 
 This is the configuration used in:
 
-- `doc/re100_stability_report.md`
 - `doc/packing_multires_resolution_report.md`
 
 ### 3.1 Recommended solver settings
 
-The current recommended settings are encoded in `build_solver(...)` in `scripts/run_packing_multires_re_targets.py`:
+The recommended settings map to the current `sdflow.Solver` API as follows.
+
+<!-- TODO: the original driver script `scripts/run_packing_multires_re_targets.py` (and its `build_solver(...)`
+helper, referenced throughout this doc) is NOT present in the current tree — it was a CUDA/pnm_backend-era
+script. Treat the script references below as methodology, not as runnable paths; the continuation helper
+`scripts/state_initialization.py` still exists but its `solver.scale_state(...)` call is not in the current
+nanobind bindings (src/sdflow_bindings.cpp). -->
+
 
 ```python
 solver.set_rho(1.0)
 solver.set_mu(1.0)
-solver.set_ibm_scheme(0)
-solver.set_pressure_solver_params(iter=50)
-solver.set_velocity_solver_params(iter=2)
-solver.set_outer_iterations(20)
+solver.set_pressure_solver_params(50)         # pressure smoother iters
+solver.set_velocity_solver_params(2)          # velocity (diffusion) smoother iters
+solver.set_outer_iterations(20)               # Picard / outer iterations per step
 solver.set_outer_tolerance(1e-4)
-solver.set_outer_convergence_mode(1)
-solver.set_pressure_multigrid_enabled(True)
-solver.set_pressure_multigrid_params(3, 1, 1, 16, 1)
-solver.set_velocity_multigrid_enabled(False)
+solver.set_pressure_multigrid(True, levels=3) # geometric MG depth (levels=1 => pure RB-GS)
+solver.set_pressure_pcg(True)                 # MG-PCG outer driver (single-GPU default)
+solver.set_velocity_multigrid(False)          # velocity MG off (RB-GS velocity is the default)
+# pressure coarse-operator mode is selected on set_solid(..., pressure_coarse="rediscretized")
+# (also "galerkin" / "const"); set_pressure_warmstart(True) seeds each solve from the previous phi.
+# <!-- TODO: the retired API's set_ibm_scheme(0) (sharp vs averaged cut-cell polynomials) and
+# set_outer_convergence_mode(1) are NOT exposed in the current nanobind bindings
+# (src/sdflow_bindings.cpp); the IBM scheme is now a compile-time template (SCHEME) in
+# src/cut_cell_ibm.hpp. -->
 ```
 
 Use these as the default study settings unless you are explicitly benchmarking solver variants.
@@ -362,7 +378,6 @@ From `scripts/run_packing_multires_re_targets.py`:
 
 ### Background references
 
-- `doc/re100_stability_report.md`
 - `doc/packing_multires_resolution_report.md`
 
 ## 12. Practical recommendation

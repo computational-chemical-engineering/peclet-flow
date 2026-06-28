@@ -4,7 +4,8 @@ GPU-accelerated incompressible **Navier–Stokes** solver for flow in complex ge
 staggered **MAC** grid, a signed-distance-field (**SDF**) description of the solid, a cut-cell **Immersed
 Boundary Method**, and a pressure-projection step with a geometric **multigrid** Poisson solve. The code is
 written in **Kokkos** C++ (one source runs on the CUDA, HIP/AMD, and OpenMP backends, selected at build
-time) and exposed to Python through `pybind11`; simulations are driven from Python.
+time) and exposed to Python through **nanobind** (zero-copy, on `transport-core`'s View↔ndarray bridge);
+simulations are driven from Python.
 
 > The repository is also known as `pnm_from_sdf` (its GitLab origin) — it computes pore-network–scale flow
 > directly from segmented SDF geometry.
@@ -13,7 +14,7 @@ time) and exposed to Python through `pybind11`; simulations are driven from Pyth
 
 | Module | Role |
 |--------|------|
-| **`sdflow`** | **The CFD solver** — a **distributed** (MPI-optional) GPU cut-cell IBM Navier–Stokes solver in physical units, built on the shared `transport-core` block-decomposition + async halo layer. One code / one API / MPI-optional, with native domain boundary conditions. Validated against analytics and **Zick & Homsy** sphere-array drag (`scripts/validate_zick_homsy_sdflow.py`). |
+| **`sdflow`** | **The CFD solver** — a **distributed** (MPI-optional) GPU cut-cell IBM Navier–Stokes solver in physical units, built on the shared `transport-core` block-decomposition + async halo layer. One code / one API / MPI-optional, with native domain boundary conditions. Exposes `sdflow.Solver` (staggered MAC, default) and `sdflow.SolverColocated` (collocated/cell-centered velocities, ABC approximate projection) — identical API via a `GridLayout` policy. Validated against analytics and **Zick & Homsy** sphere-array drag (`scripts/validate_zick_homsy_sdflow.py`). |
 | **`pnm`** | **Pore-network extraction** — SDF VTI reading + pore/segmentation/topology extraction (`SDFReader`, `extract_pores`, `segment_volume`, `extract_topology_gpu`). The repo's namesake "pnm_from_sdf" feature. |
 
 The original CUDA implementation has been **retired** (Kokkos became canonical, 2026-06); `sdflow` was
@@ -38,13 +39,19 @@ cut-cell IBM primitives now live in `src/cut_cell_ibm.hpp`; the operator headers
 ## Build
 
 ```bash
-cmake -S . -B build && cmake --build build -j   # -> build/sdflow.so (CFD solver) + build/pnm.so (pore extraction)
+# Canonical: build + install both modules via scikit-build-core
+CMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" pip install .   # -> sdflow + pnm
+# Or a dev cmake build (nanobind found via the active interpreter, no cmakedir needed):
+cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" && cmake --build build -j
 # distributed sdflow build (opt-in MPI):
-cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON && cmake --build build_mpi -j   # -> build_mpi/sdflow*.so
+cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" \
+  && cmake --build build_mpi -j
 ```
 
-Requirements: CUDA (the device arch is pinned for the dev box's RTX 5080), a C++17/20 host compiler,
-`pybind11`, and — for `sdflow` — MPI. Python dependencies live in a virtual environment (`.venv`).
+`<backend>` is one of `nvidia-cuda` / `host-openmp` / `lumi-hip` under `../extern/install/`, produced once
+by `../tools/bootstrap_deps.sh` (a hard build dependency). Requirements: a Kokkos backend (CUDA/HIP/OpenMP
+— CUDA is just one option, not required), a C++20 host compiler, **nanobind + scikit-build-core**, and —
+for distributed `sdflow` — MPI. Python dependencies live in a virtual environment (`.venv`).
 
 ## Run / verify
 
