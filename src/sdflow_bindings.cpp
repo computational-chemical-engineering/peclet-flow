@@ -152,12 +152,18 @@ NB_MODULE(sdflow, m) {
       "Conventions: physical units throughout (density rho, viscosity mu, physical pressure p); SDFs\n"
       "are negative inside the solid; fields are Fortran-order (nx,ny,nz) float64 (x-fastest). This is\n"
       "the single-rank module — the multi-rank MPI path is exercised by the tests/kokkos_mpi suite.\n\n"
-      "Kokkos is initialized at import and left initialized for the interpreter's lifetime.";
+      "Kokkos is initialized at import and finalized via a Python atexit hook. Release every Solver "
+      "before interpreter exit (it goes out of scope, or `del s; gc.collect()`) so no Kokkos View "
+      "outlives finalize.";
   if (!Kokkos::is_initialized()) Kokkos::initialize();
-  // Deliberately NO atexit Kokkos::finalize: a Solver (or any returned field's owning capsule) holds
-  // Kokkos Views that can outlive an atexit hook, and finalizing first aborts ("deallocated after
-  // Kokkos::finalize"). Leaving Kokkos initialized until process teardown is benign — the OS reclaims
-  // the memory. Matches transport-core's tpx_amr binding.
+  // Register Kokkos::finalize via Python atexit. This is REQUIRED on CUDA: without it, Kokkos's
+  // internal device state is torn down by static destructors AFTER the CUDA runtime unloads, aborting
+  // with cudaErrorCudartUnloading at every exit. atexit runs the hook while the driver is still up.
+  // (Returned fields are backed by host std::vectors, not device Views, so they never block finalize;
+  // a live Solver still holding Views at exit must be released first — hence the docstring note.)
+  nb::module_::import_("atexit").attr("register")(nb::cpp_function([]() {
+    if (Kokkos::is_initialized() && !Kokkos::is_finalized()) Kokkos::finalize();
+  }));
   // The active Kokkos backend ("OpenMP", "Cuda", "HIP"), chosen by the build's install prefix.
   m.attr("execution_space") = nb::str(Kokkos::DefaultExecutionSpace::name());
 

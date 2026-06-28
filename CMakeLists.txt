@@ -31,12 +31,14 @@ set(TPX_INC "${CMAKE_CURRENT_SOURCE_DIR}/../transport-core/include")
 # sdflow -- the cut-cell IBM Navier-Stokes solver (single-rank Python module).
 # NB_STATIC: bundle nanobind's runtime into the module (no shared libnanobind to ship); the Kokkos
 # device path is routed by the launch compiler regardless.
-nanobind_add_module(sdflow NB_STATIC src/sdflow_bindings.cpp)
+# NOMINSIZE: nanobind's default -Os size optimization is rejected by nvcc ("'s': expected a number")
+# since the Kokkos device sources compile as CXX through the launch compiler.
+nanobind_add_module(sdflow NB_STATIC NOMINSIZE src/sdflow_bindings.cpp)
 target_include_directories(sdflow PRIVATE src "${TPX_INC}")
 target_link_libraries(sdflow PRIVATE Kokkos::kokkos)
 
 # pnm -- pore-network extraction (Kokkos GPU compute + pure-C++ SDFReader VTI reader).
-nanobind_add_module(pnm NB_STATIC src/pnm_bindings.cpp src/sdf_reader.cpp)
+nanobind_add_module(pnm NB_STATIC NOMINSIZE src/pnm_bindings.cpp src/sdf_reader.cpp)
 target_include_directories(pnm PRIVATE src "${TPX_INC}")
 target_link_libraries(pnm PRIVATE Kokkos::kokkos)
 
