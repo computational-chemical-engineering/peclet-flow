@@ -125,12 +125,23 @@ class SdflowSolver {
   void uploadVelocity(const std::vector<double>& uu, const std::vector<double>& vv,
                       const std::vector<double>& ww) {
     const std::vector<double>* src[3] = {&uu, &vv, &ww};
+    CCExec space;
+    const int ex = e_.x, ey = e_.y, nx = nx_, ny = ny_, nz = nz_, g = G;
     for (int c = 0; c < 3; ++c) {
-      auto h = Kokkos::create_mirror_view(C[c].u); Kokkos::deep_copy(h, C[c].u);
-      for (int z=0;z<nz_;++z) for (int y=0;y<ny_;++y) for (int x=0;x<nx_;++x)
-        h((long)(x+G)+(long)(y+G)*e_.x+(long)(z+G)*(long)e_.x*e_.y) =
-            (*src[c])[(std::size_t)x+(std::size_t)y*nx_+(std::size_t)z*(std::size_t)nx_*ny_];
-      Kokkos::deep_copy(C[c].u, h);
+      // Upload the inner field once, write it into the inner cells on device, then refresh the periodic
+      // ghosts (G4) — the old path mirrored the field down, looped on host, and copied back up.
+      CCField din("sdflow::vel_in_d", static_cast<std::size_t>(nx_) * ny_ * nz_);
+      Kokkos::deep_copy(din, Kokkos::View<const double*, Kokkos::HostSpace,
+                                          Kokkos::MemoryTraits<Kokkos::Unmanaged>>(src[c]->data(),
+                                                                                   src[c]->size()));
+      CCField u = C[c].u;
+      Kokkos::parallel_for(
+          "sdflow::upload_velocity",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            u((long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey) =
+                din((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny);
+          });
       fillGhosts(C[c].u);
     }
   }
@@ -179,11 +190,11 @@ class SdflowSolver {
   // open-face-weighted cut-cell projection (off => velocity-only, e.g. unidirectional body-force flow).
   void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure) {
     cutcellPressure_ = cutcellPressure;
-    auto h = Kokkos::create_mirror_view(sdf_);
 #ifdef CFD_MPI
     if (distributed_) {
       // Multi-rank: sdfInner is THIS rank's LOCAL inner block; fill the inner cells, then halo-exchange the
       // ghosts (cross-rank + periodic) so the overlay/openness read the neighbour's SDF at the block boundary.
+      auto h = Kokkos::create_mirror_view(sdf_);
       Kokkos::deep_copy(h, sdf_);
       for (int z = 0; z < nz_; ++z) for (int y = 0; y < ny_; ++y) for (int x = 0; x < nx_; ++x)
         h((long)(x+G) + (long)(y+G)*e_.x + (long)(z+G)*(long)e_.x*e_.y) =
@@ -193,13 +204,26 @@ class SdflowSolver {
     } else
 #endif
     {
-    auto wrap = [](int i, int n) { return (i % n + n) % n; };  // periodic ghosts in all 3 axes
-    for (int z = 0; z < e_.z; ++z) for (int y = 0; y < e_.y; ++y) for (int x = 0; x < e_.x; ++x) {
-      int ix = wrap(x - G, nx_), iy = wrap(y - G, ny_), iz = wrap(z - G, nz_);
-      h((long)x + (long)y*e_.x + (long)z*(long)e_.x*e_.y) =
-          sdfInner[(std::size_t)ix + (std::size_t)iy*nx_ + (std::size_t)iz*(std::size_t)nx_*ny_];
-    }
-    Kokkos::deep_copy(sdf_, h);
+    // Single-rank: upload the inner SDF once and do the periodic-wrap gather on device (G4) — fills the
+    // whole extended block (inner + periodic ghosts) in one kernel instead of a host triple loop + a
+    // full extended-block H2D.
+    CCField din("sdflow::sdfInner_d", static_cast<std::size_t>(nx_) * ny_ * nz_);
+    Kokkos::deep_copy(din, Kokkos::View<const double*, Kokkos::HostSpace,
+                                        Kokkos::MemoryTraits<Kokkos::Unmanaged>>(sdfInner.data(),
+                                                                                 sdfInner.size()));
+    CCExec space;
+    const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
+    CCField sdf = sdf_;
+    Kokkos::parallel_for(
+        "sdflow::sdf_periodic_wrap",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {ex, ey, ez}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
+                    iz = (((z - g) % nz) + nz) % nz;
+          sdf((long)x + (long)y * ex + (long)z * (long)ex * ey) =
+              din((std::size_t)ix + (std::size_t)iy * nx + (std::size_t)iz * (std::size_t)nx * ny);
+        });
+    space.fence();
     }
     for (int c = 0; c < 3; ++c) {
       const Off3 off = Grid::offset(c);  // velocity-unknown placement (staggered: -1/2 face; collocated: 0)
