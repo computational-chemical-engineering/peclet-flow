@@ -4,7 +4,7 @@ name: CI
 # run the single-rank Kokkos kernel unit tests. The GPU (CUDA/HIP) backends and the multi-rank MPI
 # tests are NOT exercisable on free GitHub runners (no GPU); this CI covers the portable host build and
 # the CPU kernel tests, which is what catches the vast majority of regressions. The single-rank modules
-# never link MPI/transport-core (the distributed path is gated behind CFD_MPI), so Kokkos + pybind11 is
+# never link MPI/core (the distributed path is gated behind CFD_MPI), so Kokkos + pybind11 is
 # the whole dependency set here.
 
 on:
@@ -58,7 +58,7 @@ jobs:
 
       - name: Build + run Kokkos kernel unit tests (tests/kokkos)
         run: |
-          # Kokkos-only unit suite (no MPI / transport-core): the ported cut-cell IBM, advection,
+          # Kokkos-only unit suite (no MPI / core): the ported cut-cell IBM, advection,
           # multigrid-transfer, BC and reduction kernels, each checked against a serial reference.
           cmake -S tests/kokkos -B build_kokkos \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"

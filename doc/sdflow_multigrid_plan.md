@@ -34,7 +34,7 @@ with rediscretized coarse operators**:
 - Used as a **standalone V-cycle solver** (no outer Krylov). It nails Zick & Homsy to <0.1%.
 
 **sdflow already has most of the machinery** (`src/mac_cutcell_mg.hpp`, `CutcellMG`):
-- distributed per-level blocks with 2:1 local coarsening + per-level halo exchange (transport-core),
+- distributed per-level blocks with 2:1 local coarsening + per-level halo exchange (core),
 - RB-GS smoother `mg_smooth_var_k` (red-black `color`), residual, **geometric** restriction
   (`mg_restrict_k`, 8:1 average) + trilinear prolongation (`mg_prolong_k`), per-level mean removal,
 - an optional Chebyshev (point-Jacobi) smoother,
@@ -101,7 +101,7 @@ grid then stays *distributed and not-small*, so (i) the coarse correction is wea
 halo messages are tiny and **latency-bound** — the classic "MG doesn't strong-scale" wall.
 | option | idea | trade-off |
 |---|---|---|
-| **Agglomerated redundant coarse solve** | below a size threshold, gather the coarse level onto 1 (or a few) rank(s), solve redundantly (serial MG / direct), scatter back | removes deep-coarse latency; standard at scale (hypre/AMReX); needs a gather (transport-core has one) + a serial coarse solver | **recommended** |
+| **Agglomerated redundant coarse solve** | below a size threshold, gather the coarse level onto 1 (or a few) rank(s), solve redundantly (serial MG / direct), scatter back | removes deep-coarse latency; standard at scale (hypre/AMReX); needs a gather (core has one) + a serial coarse solver | **recommended** |
 | Keep-distributed coarse Krylov | run a CG with many iters on the coarsest affordable level | no gather, but comm-heavy and slow | fallback |
 | Stop early + heavy smoothing | few levels, many RB-GS sweeps on a mid-size coarsest grid | simplest; loses O(1) scaling | interim |
 
@@ -187,7 +187,7 @@ np=4 on these grids), so it does not show on the dev box.
    per-rank block can no longer coarsen, switch to agglomeration for the bottom solve instead of the
    current distributed `bottom_` RB-GS sweeps.
 3. **Gather.** Assemble level-`K`'s global operator (the 7 stencil arrays `AC..AT`) and RHS onto root
-   (and optionally a small subset of ranks for redundancy) via the ORB→global mapping. transport-core
+   (and optionally a small subset of ranks for redundancy) via the ORB→global mapping. core
    already has a gather-to-root for fields (used for VTI output); reuse it for the RHS and each stencil
    band. The operator only needs gathering once per `setOpenness` (geometry is static); the
    RHS gathers every V-cycle.

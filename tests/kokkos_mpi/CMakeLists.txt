@@ -1,10 +1,10 @@
 # cfd-gpu — distributed (MPI) Kokkos grid-halo integration tests (the multi-rank sdflow foundation).
 #
-# Standalone find_package project (like tests/kokkos): Kokkos + MPI + the header-only transport-core +
+# Standalone find_package project (like tests/kokkos): Kokkos + MPI + the header-only core +
 # the cfd Kokkos operator headers. Build:
 #   cmake -S tests/kokkos_mpi -B build_kmpi \
 #         -DCMAKE_PREFIX_PATH="<suite>/extern/install/<backend>" \
-#         -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun -DTPX_DIR=<suite>/transport-core
+#         -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun -DTPX_DIR=<suite>/core
 #   cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure
 cmake_minimum_required(VERSION 3.24)
 project(cfd_kokkos_mpi LANGUAGES CXX)
@@ -18,7 +18,7 @@ endif()
 find_package(Kokkos CONFIG REQUIRED)
 find_package(MPI REQUIRED)
 
-set(TPX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../transport-core" CACHE PATH "transport-core repo")
+set(TPX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../core" CACHE PATH "core repo")
 if(NOT MPIEXEC_EXECUTABLE)
   set(MPIEXEC_EXECUTABLE /usr/bin/mpirun)
 endif()

@@ -4,7 +4,7 @@ GPU-accelerated incompressible **Navier–Stokes** solver for flow in complex ge
 staggered **MAC** grid, a signed-distance-field (**SDF**) description of the solid, a cut-cell **Immersed
 Boundary Method**, and a pressure-projection step with a geometric **multigrid** Poisson solve. The code is
 written in **Kokkos** C++ (one source runs on the CUDA, HIP/AMD, and OpenMP backends, selected at build
-time) and exposed to Python through **nanobind** (zero-copy, on `transport-core`'s View↔ndarray bridge);
+time) and exposed to Python through **nanobind** (zero-copy, on `core`'s View↔ndarray bridge);
 simulations are driven from Python.
 
 > The repository is also known as `pnm_from_sdf` (its GitLab origin) — it computes pore-network–scale flow
@@ -14,7 +14,7 @@ simulations are driven from Python.
 
 | Module | Role |
 |--------|------|
-| **`sdflow`** | **The CFD solver** — a **distributed** (MPI-optional) GPU cut-cell IBM Navier–Stokes solver in physical units, built on the shared `transport-core` block-decomposition + async halo layer. One code / one API / MPI-optional, with native domain boundary conditions. Exposes `sdflow.Solver` (staggered MAC, default) and `sdflow.SolverColocated` (collocated/cell-centered velocities, ABC approximate projection) — identical API via a `GridLayout` policy. Validated against analytics and **Zick & Homsy** sphere-array drag (`scripts/validate_zick_homsy_sdflow.py`). |
+| **`sdflow`** | **The CFD solver** — a **distributed** (MPI-optional) GPU cut-cell IBM Navier–Stokes solver in physical units, built on the shared `core` block-decomposition + async halo layer. One code / one API / MPI-optional, with native domain boundary conditions. Exposes `sdflow.Solver` (staggered MAC, default) and `sdflow.SolverColocated` (collocated/cell-centered velocities, ABC approximate projection) — identical API via a `GridLayout` policy. Validated against analytics and **Zick & Homsy** sphere-array drag (`scripts/validate_zick_homsy_sdflow.py`). |
 | **`pnm`** | **Pore-network extraction** — SDF VTI reading + pore/segmentation/topology extraction (`SDFReader`, `extract_pores`, `segment_volume`, `extract_topology_gpu`). The repo's namesake "pnm_from_sdf" feature. |
 
 The original CUDA implementation has been **retired** (Kokkos became canonical, 2026-06); `sdflow` was

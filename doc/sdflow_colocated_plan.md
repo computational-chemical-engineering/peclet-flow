@@ -32,7 +32,7 @@ The **rotational (incremental) pressure** update and the **SDF-based IBM** are r
 > profile; the step is realized purely as the partial parabola): lower-wall reattachment x_r/S 5.26
 > (Re_S=100) → 8.27 (Re_S=200), matching the staggered solver / Armaly–Biswas curve (5.3→8.3), bubble
 > forms, mass conserved (7e-6 / 1.5e-4). Phase 5c — collocated multi-rank: the approximate projection runs
-> on the same transport-core halo (cell-velocity halo → centerToFace, projected face field halo-exchanged,
+> on the same core halo (cell-velocity halo → centerToFace, projected face field halo-exchanged,
 > CutcellMG MPI-folded). `tests/kokkos_mpi/test_sdflow_colocated_mpi` (sphere-packing Stokes permeability):
 > np=1 **bit-exact** to single-rank (rel 0), np=2/4 to the MG-PCG reduction floor (4e-7/7e-7), face div
 > ~1e-11. **The collocated grid variant is complete — all 5 phases done.**

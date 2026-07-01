@@ -8,7 +8,7 @@ Performance-portable incompressible Navier-Stokes CFD solver for porous media si
 
 **`sdflow` is THE solver** (`src/sdflow_bindings.cpp` → `sdflow::SdflowIbm` in `src/sdflow_ibm.hpp`):
 cut-cell IBM physics on a staggered MAC grid, with a grid-independent geometric **multigrid** pressure
-solve, and a multi-rank MPI path (transport-core grid halo). It solves the equations in **physical units**
+solve, and a multi-rank MPI path (core grid halo). It solves the equations in **physical units**
 (density `rho`, dynamic viscosity `mu`, physical pressure `p`). See the "MPI / sdflow" section below.
 
 The CUDA implementation was **retired** (Kokkos became canonical, 2026-06): `sdflow` was validated
@@ -42,7 +42,7 @@ cmake --build build -j
 ```
 
 **Requirements:** Kokkos 5.x (C++20), CMake 3.24+, Python 3.10+, nanobind + scikit-build-core;
-`../transport-core` (header-only) + MPI for the multi-rank test suite. The Kokkos/ArborX install prefix is
+`../core` (header-only) + MPI for the multi-rank test suite. The Kokkos/ArborX install prefix is
 produced by `../tools/bootstrap_deps.sh`.
 
 ## Running Tests and Verification
@@ -139,17 +139,17 @@ See the "Pressure solver options" table below and `scripts/*_sdflow.py` for the 
 - **Kokkos kernels**: `parallel_for` / `parallel_reduce` over `Kokkos::View`s (`MDRangePolicy` for 3-D loops); device sources are `.hpp` compiled as C++ (the launch compiler routes through `nvcc`/`hipcc`), never `.cu`
 - **Staggered grid**: u at (i+1/2,j,k), v at (i,j+1/2,k), w at (i,j,k+1/2), p at cell centers
 
-## MPI / sdflow (the CFD solver, transport-core integration)
+## MPI / sdflow (the CFD solver, core integration)
 
-The **`sdflow`** solver (`sdflow::SdflowIbm`) is built on the shared `transport-core` library (sibling repo
-`../transport-core`), whose **Kokkos** grid halo (`tpx::halo::GridHalo`) carries the
+The **`sdflow`** solver (`sdflow::SdflowIbm`) is built on the shared `core` library (sibling repo
+`../core`), whose **Kokkos** grid halo (`tpx::halo::GridHalo`) carries the
 multi-rank ghost exchange. The single-rank Python module is built by the main `CMakeLists.txt`; the
 multi-rank path is exercised by the `tests/kokkos_mpi` ctests (gated behind `CFD_MPI`, so the single-rank
 module is byte-identical). It was validated bit-identical (machine precision) to the retired CUDA solver
 and against external analytics.
 
 Key pieces (all `src/*.hpp`, Kokkos, header-only, `namespace sdflow`):
-- `tpx::halo::GridHalo` (transport-core) — per-level ORB block ghost exchange for the
+- `tpx::halo::GridHalo` (core) — per-level ORB block ghost exchange for the
   `double` cell-fields on the extended local block. cfd's x-fastest layout matches `tpx::Field3D`.
 - `staggered_advection.hpp` — `sadv::advect`: staggered Koren TVD advection, templated on a field accessor.
 - `sdflow_ibm.hpp` — `sdflow::SdflowIbm`: the solver. `step()` does per-component implicit diffusion
