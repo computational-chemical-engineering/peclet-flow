@@ -19,6 +19,11 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# Multi-rank: -DPECLET_FLOW_MPI=ON links MPI + exposes Solver.init_mpi / rank / size + the module-level
+# mpi_block() in the flow module (the distributed IbmSolver step, bit-exact to single-rank). OFF (default)
+# leaves the single-rank module byte-identical.
+option(PECLET_FLOW_MPI "Build the flow module with the distributed (MPI) step exposed" OFF)
+
 # Dependencies via the vendored PecletDeps helper: an installed Kokkos prefix + sibling checkout for the
 # dev/suite build, or FetchContent-built Kokkos + fetched core headers for a self-contained
 # sdist/wheel (cibuildwheel). See cmake/PecletDeps.cmake.
@@ -46,6 +51,15 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/__init__.py COPYONLY)
 target_include_directories(sdflow PRIVATE src "${TPX_INC}")
 target_link_libraries(sdflow PRIVATE Kokkos::kokkos)
+
+# Distributed (MPI) flow: compile the binding TU with the halo-gating flag + link MPI (the core grid
+# halo lives in the header-only TPX_INC). Mirrors dem's PECLET_DEM_MPI wiring; OFF keeps sdflow untouched.
+if(PECLET_FLOW_MPI)
+  find_package(MPI REQUIRED COMPONENTS CXX)
+  target_compile_definitions(sdflow PRIVATE PECLET_FLOW_MPI=1)
+  target_link_libraries(sdflow PRIVATE MPI::MPI_CXX)
+  message(STATUS "flow: distributed step ENABLED (MPI)")
+endif()
 
 # pnm -- pore-network extraction (Kokkos GPU compute + pure-C++ SDFReader VTI reader).
 nanobind_add_module(pnm NB_STATIC NOMINSIZE src/pnm_bindings.cpp src/sdf_reader.cpp)

@@ -14,6 +14,7 @@
 /// and inputs are read as flat x-fastest buffers. See tpx/python/ndarray_interop.hpp.
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
@@ -21,8 +22,28 @@
 #include <cstdint>
 #include <vector>
 
+#ifdef PECLET_FLOW_MPI
+#include <mpi.h>
+
+#include "peclet/core/common/types.hpp"
+#include "peclet/core/decomp/block_decomposer.hpp"
+#endif
+
 #include "flow_ibm.hpp"
 #include "peclet/core/python/ndarray_interop.hpp"
+
+#ifdef PECLET_FLOW_MPI
+// Ensure MPI_Init has been called (mirrors the dem init_mpi idiom); safe to call repeatedly.
+static void ensure_mpi_init() {
+  int inited = 0;
+  MPI_Initialized(&inited);
+  if (!inited) {
+    int argc = 0;
+    char** argv = nullptr;
+    MPI_Init(&argc, &argv);
+  }
+}
+#endif
 
 namespace nb = nanobind;
 
@@ -135,10 +156,28 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Return the grid resolution [nx, ny, nz].")
       .def("get_spacing", [](S&) { return std::vector<double>{1.0, 1.0, 1.0}; },
            "Return the grid spacing [dx, dy, dz] (always unit on this grid).")
+#ifdef PECLET_FLOW_MPI
+      // Distributed path (built with -DPECLET_FLOW_MPI): construct the Solver with this rank's LOCAL block
+      // dims (see the module-level mpi_block()), then init_mpi with the GLOBAL grid dims. step() then does
+      // the g=2 velocity-block halo exchange + the distributed cut-cell pressure MG. Bit-exact to single-rank.
+      .def("init_mpi",
+           [](S& s, int gnx, int gny, int gnz) {
+             ensure_mpi_init();
+             s.initMpi(gnx, gny, gnz, MPI_COMM_WORLD);
+           },
+           nb::arg("gnx"), nb::arg("gny"), nb::arg("gnz"),
+           "Wire the multi-rank step: pass the GLOBAL grid dims (gnx,gny,gnz). The Solver must have been "
+           "constructed with this rank's LOCAL block dims (from mpi_block). MPI_Init is called if needed.")
+      .def("rank", [](S&) { ensure_mpi_init(); int r = 0; MPI_Comm_rank(MPI_COMM_WORLD, &r); return r; },
+           "This rank's index in MPI_COMM_WORLD.")
+      .def("size", [](S&) { ensure_mpi_init(); int n = 1; MPI_Comm_size(MPI_COMM_WORLD, &n); return n; },
+           "The number of ranks in MPI_COMM_WORLD.")
+#else
       .def("rank", [](S&) { return 0; },
            "MPI rank (always 0 in the single-rank Python module; the multi-rank path is the "
            "tests/kokkos_mpi suite).")
       .def("size", [](S&) { return 1; }, "MPI size (1 in the single-rank Python module).")
+#endif
       .def("bcast_from_root", [](S&, nb::object v) { return v; }, nb::arg("value"),
            "Broadcast a value from rank 0 (identity in the single-rank module; mirrors the MPI API).");
 }
@@ -170,4 +209,32 @@ NB_MODULE(_flow, m) {
   // Staggered MAC grid (THE flow solver) + the collocated/cell-centered variant. Same Python API.
   bind_solver<peclet::flow::Staggered>(m, "Solver");
   bind_solver<peclet::flow::Colocated>(m, "SolverColocated");
+
+#ifdef PECLET_FLOW_MPI
+  // Module-level: this rank's ORB block of the global (gnx,gny,gnz) grid, matching the deterministic
+  // BlockDecomposer the Solver's initMpi re-derives internally (and the C++ tests/kokkos_mpi template).
+  // Returns (origin=[ox,oy,oz], size=[lnx,lny,lnz]); slice the global SDF with these to build the local
+  // block, then Solver(*size) + init_mpi(gnx,gny,gnz). MPI_Init is called if needed.
+  m.def("mpi_block",
+        [](int gnx, int gny, int gnz) {
+          ensure_mpi_init();
+          int rank = 0, size = 1;
+          MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+          MPI_Comm_size(MPI_COMM_WORLD, &size);
+          peclet::core::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size),
+                                                       peclet::core::IVec<3>{gnx, gny, gnz});
+          auto blk = dec.block(static_cast<std::size_t>(rank));
+          std::vector<int> origin{(int)blk.origin[0], (int)blk.origin[1], (int)blk.origin[2]};
+          std::vector<int> bsize{(int)blk.size[0], (int)blk.size[1], (int)blk.size[2]};
+          return std::make_pair(origin, bsize);
+        },
+        nb::arg("gnx"), nb::arg("gny"), nb::arg("gnz"),
+        "Return this MPI rank's ORB block of the global (gnx,gny,gnz) grid as (origin, size), each a "
+        "length-3 list [x,y,z]. Use it to slice the global SDF into this rank's local block for a "
+        "distributed Solver (see Solver.init_mpi). MPI_Init is called if needed.");
+
+  m.attr("has_mpi") = true;
+#else
+  m.attr("has_mpi") = false;
+#endif
 }
