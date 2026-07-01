@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) velocity (momentum) multigrid for the IBM diffusion solve: the STAIRCASE
+/// @brief flow — portable (Kokkos) velocity (momentum) multigrid for the IBM diffusion solve: the STAIRCASE
 /// coarse operator.
 ///
 /// Single-GPU (periodic) port of the velocity-MG path in CUDA's DistributedPoissonMG (mac_multigrid.cuh):
@@ -219,7 +219,7 @@ class VelocityMG {
     lv_[0].resMask = CCField("vmg_resmask0", lv_[0].n);  // level 0 only (clean-fluid exclude, staircase path)
   }
 #ifdef PECLET_FLOW_MPI
-  // Multi-rank velocity-MG: coarsen the GLOBAL grid 2:1 per level; each level gets its own G=2 transport-core
+  // Multi-rank velocity-MG: coarsen the GLOBAL grid 2:1 per level; each level gets its own G=2 core
   // halo. No global reductions here (the velocity op is non-singular -> no mean removal, no Krylov), so the
   // fold is just fill()->exchange + the block-origin red-black parity. Single-rank (size 1) == init().
   void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm) {
@@ -402,7 +402,7 @@ class VelocityMG {
   }
   // periodic ghost fill; in domain-BC mode only the periodic axes wrap (non-periodic boundary ghosts are
   // left as the caller / correction set them -- the boundary fold + held ghost represent the wall).
-  // Distributed (periodic IBM path): the per-level transport-core halo (cross-rank + periodic in one call).
+  // Distributed (periodic IBM path): the per-level core halo (cross-rank + periodic in one call).
   void fill(Level& lv, CCField f) {
 #ifdef PECLET_FLOW_MPI
     if (distributed_ && !bcMode_) { lv.dev->exchange(f); return; }

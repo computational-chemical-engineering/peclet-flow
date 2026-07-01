@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) IBM geometric fields + variable-coefficient RB-GS smoother.
+/// @brief flow — portable (Kokkos) IBM geometric fields + variable-coefficient RB-GS smoother.
 ///
 /// Kokkos port of the self-contained pieces of mac_ibm.cuh: cut-cell detection (ibm_is_cut), the
 /// staggered SDF gather, volume fraction (ibm_volfrac_k), solid + clean-fluid masks, and the

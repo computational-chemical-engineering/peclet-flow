@@ -86,10 +86,10 @@ operator matches the fine one — the **clean fluid interior** (a fluid cell wit
   `descale_lvl0_` and the level-0 residual-unscale + masked/weighted transfer hooks in `vcycle`.
 - `src/mac_ibm.hpp`: a θ (fluid-fraction) kernel from the staggered SDF (reuse `ibm_solid_mask_k` shape);
   the residual-unscale kernel may live here next to `ibm_scale_k`.
-- `src/sdflow_ibm.hpp` (`SdflowIbm`): `ensure_vmg_built` — build the 3 per-component staircase coarse hierarchies
+- `src/flow_ibm.hpp` (`IbmSolver`): `ensure_vmg_built` — build the 3 per-component staircase coarse hierarchies
   from the staggered θ; the vmg branch — set `descale_lvl0_ = descale_[c]` and enable `vel_unscale_`;
   keep the smoother on `As_[c]` (row-scaled).
-- `src/sdflow_bindings.cpp`: no change (`set_velocity_multigrid` already exposed).
+- `src/flow_bindings.cpp`: no change (`set_velocity_multigrid` already exposed).
 
 ## Validation (gate each phase)
 1. **Z&H SC sphere** (`scripts/validate_zick_homsy_sdflow.py`): vel-MG drag == RB-GS drag to

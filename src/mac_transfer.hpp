@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) multigrid transfer operators + projection velocity correction.
+/// @brief flow — portable (Kokkos) multigrid transfer operators + projection velocity correction.
 ///
 /// Kokkos port of mg_restrict_k / mg_prolong_k (mac_multigrid.cuh) and correct_k (distributed_ns.cuh):
 /// per-axis-ratio averaging restriction, trilinear prolongation (added to the fine solution), and the

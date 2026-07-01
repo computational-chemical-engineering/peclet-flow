@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) cut-cell pressure-operator face openness from an SDF.
+/// @brief flow — portable (Kokkos) cut-cell pressure-operator face openness from an SDF.
 ///
 /// Kokkos port of mac_cutcell.cuh: the gradient-normalised masked fluid fraction (cc_fraction_core)
 /// + trilinear SDF sampling, producing the staggered face openness ox/oy/oz (ox[i] = openness of the

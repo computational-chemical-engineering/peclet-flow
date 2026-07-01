@@ -1,5 +1,5 @@
 /// @file
-/// @brief nanobind module `sdflow` — the Kokkos cut-cell IBM Navier-Stokes solver (`sdflow.Solver`).
+/// @brief nanobind module `flow` — the Kokkos cut-cell IBM Navier-Stokes solver (`peclet.flow.Solver`).
 ///
 /// Exposes peclet::flow::IbmSolver to Python: set rho/mu/dt, a body force, an SDF solid (cut-cell IBM no-slip
 /// + optional cut-cell pressure projection), step, read back the velocity/pressure, and query the
@@ -9,7 +9,7 @@
 /// Solver before exit -- del + gc.collect()). rank()/bcast_from_root() are single-rank stubs (the
 /// multi-rank path lives in tests/kokkos_mpi).
 ///
-/// Arrays cross the boundary through the shared zero-copy bridge (peclet::core::python, in transport-core):
+/// Arrays cross the boundary through the shared zero-copy bridge (peclet::core::python, in core):
 /// fields come back as Fortran-order (nx,ny,nz) float64 NumPy arrays referencing the field buffer,
 /// and inputs are read as flat x-fastest buffers. See tpx/python/ndarray_interop.hpp.
 #include <nanobind/nanobind.h>
@@ -145,9 +145,9 @@ static void bind_solver(nb::module_& m, const char* name) {
 
 NB_MODULE(_flow, m) {
   m.attr("__doc__") =
-      "sdflow — Kokkos cut-cell IBM incompressible Navier-Stokes solver for porous media.\n\n"
+      "flow — Kokkos cut-cell IBM incompressible Navier-Stokes solver for porous media.\n\n"
       "Two solver classes share an identical API (only the velocity-unknown placement differs):\n"
-      "  Solver          — staggered MAC grid (THE sdflow solver; permeability/drag accuracy default)\n"
+      "  Solver          — staggered MAC grid (THE flow solver; permeability/drag accuracy default)\n"
       "  SolverColocated — collocated / cell-centered velocities (ABC approximate projection)\n\n"
       "Conventions: physical units throughout (density rho, viscosity mu, physical pressure p); SDFs\n"
       "are negative inside the solid; fields are Fortran-order (nx,ny,nz) float64 (x-fastest). This is\n"
@@ -167,7 +167,7 @@ NB_MODULE(_flow, m) {
   // The active Kokkos backend ("OpenMP", "Cuda", "HIP"), chosen by the build's install prefix.
   m.attr("execution_space") = nb::str(Kokkos::DefaultExecutionSpace::name());
 
-  // Staggered MAC grid (THE sdflow solver) + the collocated/cell-centered variant. Same Python API.
+  // Staggered MAC grid (THE flow solver) + the collocated/cell-centered variant. Same Python API.
   bind_solver<peclet::flow::Staggered>(m, "Solver");
   bind_solver<peclet::flow::Colocated>(m, "SolverColocated");
 }

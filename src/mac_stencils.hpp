@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) MAC stencil operators: Red-Black Gauss-Seidel smoothers + divergence.
+/// @brief flow — portable (Kokkos) MAC stencil operators: Red-Black Gauss-Seidel smoothers + divergence.
 ///
 /// Kokkos port of the core stencil kernels in distributed_ns.cuh (diff_k, pois_k, diverg_k): per inner
 /// cell, a 7-point stencil on the extended (inner+ghost) block, x-fastest. Red-Black Gauss-Seidel is

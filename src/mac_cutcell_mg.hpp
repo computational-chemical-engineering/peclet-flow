@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) geometric multigrid for the cut-cell (variable-openness) pressure Poisson.
+/// @brief flow — portable (Kokkos) geometric multigrid for the cut-cell (variable-openness) pressure Poisson.
 ///
 /// Single-GPU (periodic) port of CUDA's DistributedPoissonMG (mac_multigrid.cuh): a level hierarchy with the
 /// rediscretized cut-cell operator (average-coarsen the face openness per level + re-assemble the operator at
@@ -168,7 +168,7 @@ class CutcellMG {
     }
   }
 #ifdef PECLET_FLOW_MPI
-  // Multi-rank hierarchy: coarsen the GLOBAL grid 2:1 per level; each level gets its own transport-core halo
+  // Multi-rank hierarchy: coarsen the GLOBAL grid 2:1 per level; each level gets its own core halo
   // over a BlockDecomposer of that level's grid (the ORB decomposition coarsens cleanly so restrict/prolong
   // stay local). Sets the distributed flag -> fill() exchanges, the reductions Allreduce, the smoother uses
   // the block's global-origin parity. Single-rank (size 1) reproduces init()'s field exactly.
@@ -329,7 +329,7 @@ class CutcellMG {
       }
   }
   // periodic ghost fill (3 axes) of a level-sized field / the openness triple. Distributed: the per-level
-  // transport-core halo (cross-rank + periodic in one call).
+  // core halo (cross-rank + periodic in one call).
   void fill(Level& lv, CCField f) {
 #ifdef PECLET_FLOW_MPI
     if (distributed_) { lv.dev->exchange(f); return; }

@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) native per-face domain boundary conditions for the MAC grid.
+/// @brief flow — portable (Kokkos) native per-face domain boundary conditions for the MAC grid.
 ///
 /// Kokkos port of mac_bc.cuh: fill the NON-periodic boundary face/ghosts the halo leaves untouched.
 /// Each kernel runs over the boundary face's perpendicular (b,c) plane; one thread owns a column and

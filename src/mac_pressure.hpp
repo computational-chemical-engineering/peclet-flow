@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) cut-cell pressure operator + Chorin projection.
+/// @brief flow — portable (Kokkos) cut-cell pressure operator + Chorin projection.
 ///
 /// Kokkos port of the variable-coefficient pressure machinery (mg_build_op_k / mg_smooth_var_k from
 /// mac_multigrid.cuh, diverg_open_k / correct_k from distributed_ns.cuh): the open-face-weighted Poisson

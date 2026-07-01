@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — assembled single-GPU periodic Navier-Stokes step on Kokkos fields.
+/// @brief flow — assembled single-GPU periodic Navier-Stokes step on Kokkos fields.
 ///
 /// Composes the ported operators into a Chorin projection step on a staggered MAC grid (periodic box,
 /// ghost width 2): explicit Koren-TVD advection (optional) + backward-Euler implicit diffusion

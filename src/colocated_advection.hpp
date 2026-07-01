@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — collocated (cell-centered) momentum advection (Koren TVD + FOU).
+/// @brief flow — collocated (cell-centered) momentum advection (Koren TVD + FOU).
 ///
 /// The collocated counterpart of staggered_advection.hpp. All three velocity components live at the cell
 /// center, so a single cell is the control volume for every component and the advecting normal velocity at

@@ -1,8 +1,8 @@
 # The IBM as a sparse overlay (octree/AMR forward-compatible)
 
-How the velocity (momentum) cut-cell IBM is structured in sdflow, and exactly what an octree/AMR port has
-to replace. Companion to the face-based pressure operator (`doc/sdflow_multigrid_plan.md`,
-"Forward-compatibility" section). Code: `src/mac_ibm.hpp`, `src/cut_cell_ibm.hpp`, `src/sdflow_ibm.hpp`.
+How the velocity (momentum) cut-cell IBM is structured in flow, and exactly what an octree/AMR port has
+to replace. Companion to the face-based pressure operator (`doc/flow_multigrid_plan.md`,
+"Forward-compatibility" section). Code: `src/mac_ibm.hpp`, `src/cut_cell_ibm.hpp`, `src/flow_ibm.hpp`.
 
 ## Principle: draw the symmetry boundary at the projection
 Not every operator carries the same obligations:
@@ -37,7 +37,7 @@ it**. That keeps the row-based scheme *and* the forward-compatibility.
 | **Overlay (data)** | a sparse SoA of cut cells: per cell a `cell_index` (handle), per-face `dir_code` (neighbour/direction hook) + coefficients `R/K/M/X/Nbc`, and `D_rescale` | `IbmOverlay` (`src/cut_cell_ibm.hpp`) |
 | **Overlay apply** | loop the overlay, modify each cut cell's **own** row (diagonal ×`D_rescale`, off-diagonals via `K/M/X`, the Dirichlet `inhom`) | `ibm_modify_stencil_k` |
 
-The build/apply split already exists: `SdflowIbm::setSolid` builds the overlay once from the
+The build/apply split already exists: `IbmSolver::setSolid` builds the overlay once from the
 geometry, and the per-step velocity solve applies it onto the base stencil.
 
 ## The two provider boundaries — *all* an octree port replaces
@@ -45,7 +45,7 @@ Everything mesh-specific is isolated behind two providers; the numerics (base, o
 apply math) are mesh-agnostic.
 
 1. **GeometryProvider** — geometry → overlay entries.
-   - Cartesian: `build_ibm_overlay` (`src/sdflow_ibm.hpp` / `src/cut_cell_ibm.hpp`) = count cut cells (`ibm_count_ext_k`), allocate
+   - Cartesian: `build_ibm_overlay` (`src/flow_ibm.hpp` / `src/cut_cell_ibm.hpp`) = count cut cells (`ibm_count_ext_k`), allocate
      the SoA (`ibm_alloc`), fill it (`ibm_geometry_ext_k` → `ibmFillEntry`). `ibmFillEntry` is already
      **indexing-agnostic** — it consumes the 7 SDF samples + a cell handle and emits the Robust-Scaled
      polynomials; it does not care about the layout.

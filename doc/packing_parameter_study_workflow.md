@@ -35,13 +35,13 @@ Conventions:
 The solver is initialized with:
 
 ```python
-import sdflow, pnm
+import peclet.flow, pnm
 # read_vti returns (sdf, origin_zyx, spacing_zyx)
 sdf_zyx, origin, spacing = pnm.SDFReader.read_vti("data/packing_256.vti")
-# sdflow runs in dimensionless grid units (unit spacing). set_solid wants a Fortran-order
+# flow runs in dimensionless grid units (unit spacing). set_solid wants a Fortran-order
 # (nx, ny, nz) float64 SDF (negative inside solid); convert from the read order as needed
 # (see scripts/verify_periodic_spheres_sdflow.py for the full pipeline).
-solver = sdflow.Solver(nx, ny, nz)
+solver = peclet.flow.Solver(nx, ny, nz)
 solver.set_rho(1.0); solver.set_mu(1.0); solver.set_dt(dt)   # physical units; fix before geometry
 solver.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
 ```
@@ -88,13 +88,13 @@ This is the configuration used in:
 
 ### 3.1 Recommended solver settings
 
-The recommended settings map to the current `sdflow.Solver` API as follows.
+The recommended settings map to the current `peclet.flow.Solver` API as follows.
 
 <!-- TODO: the original driver script `scripts/run_packing_multires_re_targets.py` (and its `build_solver(...)`
 helper, referenced throughout this doc) is NOT present in the current tree — it was a CUDA/pnm_backend-era
 script. Treat the script references below as methodology, not as runnable paths; the continuation helper
 `scripts/state_initialization.py` still exists but its `solver.scale_state(...)` call is not in the current
-nanobind bindings (src/sdflow_bindings.cpp). -->
+nanobind bindings (src/flow_bindings.cpp). -->
 
 
 ```python
@@ -111,7 +111,7 @@ solver.set_velocity_multigrid(False)          # velocity MG off (RB-GS velocity 
 # (also "galerkin" / "const"); set_pressure_warmstart(True) seeds each solve from the previous phi.
 # <!-- TODO: the retired API's set_ibm_scheme(0) (sharp vs averaged cut-cell polynomials) and
 # set_outer_convergence_mode(1) are NOT exposed in the current nanobind bindings
-# (src/sdflow_bindings.cpp); the IBM scheme is now a compile-time template (SCHEME) in
+# (src/flow_bindings.cpp); the IBM scheme is now a compile-time template (SCHEME) in
 # src/cut_cell_ibm.hpp. -->
 ```
 

@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) staggered MAC momentum advection (Koren TVD + FOU).
+/// @brief flow — portable (Kokkos) staggered MAC momentum advection (Koren TVD + FOU).
 ///
 /// Kokkos port of staggered_advection.cuh: the Koren-limited conservative advection operator and its
 /// first-order-upwind variant, on the local extended block (direct strides; ghosts halo-exchanged).

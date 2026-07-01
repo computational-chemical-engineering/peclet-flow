@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — collocated approximate (MAC) projection helpers (Almgren–Bell–Colella style).
+/// @brief flow — collocated approximate (MAC) projection helpers (Almgren–Bell–Colella style).
 ///
 /// The collocated solver stores all three velocity components at the cell center. Its pressure coupling is
 /// the approximate projection: average the cell velocities onto a face (MAC) field, make THAT field

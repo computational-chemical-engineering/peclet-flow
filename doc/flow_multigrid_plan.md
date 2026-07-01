@@ -1,6 +1,6 @@
-# sdflow multigrid: design review & plan
+# flow multigrid: design review & plan
 
-Goal: a **functional, efficient multigrid pressure solver** for sdflow that works on large multi-GPU
+Goal: a **functional, efficient multigrid pressure solver** for flow that works on large multi-GPU
 (MPI block-decomposed) cut-cell problems, where plain RB-GS does not scale (its iteration count grows
 ~O(N) with resolution). Motivation: at scale, the pressure-Poisson solve dominates and needs a solver
 whose iteration count is ~O(1) in N.
@@ -33,14 +33,14 @@ with rediscretized coarse operators**:
   correction). `subtract_mean_mg_kernel` handles the singular (all-Neumann/periodic) null space.
 - Used as a **standalone V-cycle solver** (no outer Krylov). It nails Zick & Homsy to <0.1%.
 
-**sdflow already has most of the machinery** (`src/mac_cutcell_mg.hpp`, `CutcellMG`):
+**flow already has most of the machinery** (`src/mac_cutcell_mg.hpp`, `CutcellMG`):
 - distributed per-level blocks with 2:1 local coarsening + per-level halo exchange (core),
 - RB-GS smoother `mg_smooth_var_k` (red-black `color`), residual, **geometric** restriction
   (`mg_restrict_k`, 8:1 average) + trilinear prolongation (`mg_prolong_k`), per-level mean removal,
 - an optional Chebyshev (point-Jacobi) smoother,
 - both a standalone V-cycle (`solve`) and an MG-preconditioned CG (`solve_pcg`).
 
-**What sdflow is missing is exactly the piece that makes pnm correct: a consistent variable-coefficient
+**What flow is missing is exactly the piece that makes pnm correct: a consistent variable-coefficient
 coarse operator.** Its two current coarse-operator options are both inadequate (the code comments admit
 it):
 - `galerkin=false`: coarse levels are **constant-coefficient** (ignore the geometry) — *"a poor coarse
@@ -52,7 +52,7 @@ it):
   transfers are not a consistent pair for the singular cut-cell operator.
 
 So the plan is **not** "build an MG from scratch" — it's "add the rediscretized-coarse-operator mode
-that pnm proved, into sdflow's existing distributed V-cycle, and then make the coarse grid scale on
+that pnm proved, into flow's existing distributed V-cycle, and then make the coarse grid scale on
 multi-GPU."
 
 ## 1. Review — the multigrid design axes (what can be envisioned)
@@ -217,7 +217,7 @@ branch) and `init` (record `K` / the agglomeration threshold).
 > PCG's dot-products are free without a network) — i.e. ≈ standalone-V speed. **The win is purely at
 > scale** (no per-iteration dot-product Allreduce), which needs the multi-GPU box to measure.
 >
-> **WIRED IN (togglable):** `set_pressure_chebyshev(on, max_iter, rtol)` on `SdflowIbm` and the sdflow
+> **WIRED IN (togglable):** `set_pressure_chebyshev(on, max_iter, rtol)` on `IbmSolver` and the flow
 > module (mutually exclusive with `set_pressure_pcg`; overrides the single-rank auto-PCG default). Spectral
 > bounds are estimated once, lazily, on the first step (RHS=−div is a good seed; the operator is fixed so
 > they are reused). Verified end-to-end: Z&H K=4.2914, identical to PCG; 72/72 ctests green. Only the

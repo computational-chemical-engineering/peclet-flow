@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) geometric multigrid V-cycle for the periodic pressure Poisson.
+/// @brief flow — portable (Kokkos) geometric multigrid V-cycle for the periodic pressure Poisson.
 ///
 /// Assembles the ported operators (RB-GS smoother, averaging restriction, trilinear prolongation,
 /// mean removal) into a correction-scheme V-cycle for Lap(phi)=d on a periodic staggered grid. Coarse

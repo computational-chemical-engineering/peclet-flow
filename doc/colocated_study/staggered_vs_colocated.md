@@ -1,4 +1,4 @@
-# Staggered vs collocated sdflow: grid-convergence, accuracy & performance
+# Staggered vs collocated flow: grid-convergence, accuracy & performance
 
 *Primary backend:* **gpu** (`Cuda`). Second backend: **cpu-omp16**. Both solvers share every operator (cut-cell IBM, geometric pressure multigrid, rotational pressure, MPI); they differ only in velocity placement and the projection: the staggered MAC solver stores face-normal velocities and runs an exact projection, the collocated solver stores cell-centered velocities and runs the Almgren–Bell–Colella approximate (MAC) projection.
 

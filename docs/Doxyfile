@@ -1,9 +1,9 @@
-# Doxygen configuration for sdflow. Generates HTML API docs for the Kokkos C++ sources (src/) and the
+# Doxygen configuration for peclet.flow. Generates HTML API docs for the Kokkos C++ sources (src/) and the
 # Python driver/verification scripts (scripts/, tests/). Build with:  doxygen docs/Doxyfile
 # Output lands in docs/html/ ; the Documentation CI workflow publishes it to GitHub Pages.
 
 #---- project -------------------------------------------------------------------------------------
-PROJECT_NAME           = "sdflow"
+PROJECT_NAME           = "flow"
 PROJECT_BRIEF          = "Kokkos cut-cell IBM incompressible Navier-Stokes solver + pnm pore extraction"
 OUTPUT_DIRECTORY       = docs
 HTML_OUTPUT            = html

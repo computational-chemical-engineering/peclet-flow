@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) Robust-Scaled cut-cell IBM primitives + per-cut-cell overlay build.
+/// @brief flow — portable (Kokkos) Robust-Scaled cut-cell IBM primitives + per-cut-cell overlay build.
 ///
 /// Kokkos port of cut_cell_ibm.cuh (the boundary-distance polynomials) and ibm_fill_entry from
 /// mac_ibm.cuh (the per-cut-cell stencil-modification factors K/M/X/Nbc/R + D_rescale). Faithful copy

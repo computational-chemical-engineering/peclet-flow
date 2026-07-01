@@ -1,6 +1,6 @@
-# sdflow collocated grid: design & plan
+# flow collocated grid: design & plan
 
-Goal: add a **cell-centered (collocated) velocity** variant of the sdflow solver *alongside* the existing
+Goal: add a **cell-centered (collocated) velocity** variant of the flow solver *alongside* the existing
 staggered MAC solver, sharing as much code as possible. The pressure coupling uses the
 **MAC / approximate projection** of Almgren–Bell–Colella (the scheme Basilisk uses — **not** Rhie–Chow):
 cell velocities are averaged to faces, the *face* field is made divergence-free by the **already-implemented**
@@ -8,9 +8,9 @@ cut-cell projection, and the cell velocities are corrected with the central-diff
 The **rotational (incremental) pressure** update and the **SDF-based IBM** are reused unchanged; only the
 **grid positions** of the velocity unknowns differ.
 
-> **STATUS (2026-06-22): phases 1–4 done.** Phase 1 — `SdflowSolver<GridLayout>` extracted, `Staggered`
+> **STATUS (2026-06-22): phases 1–4 done.** Phase 1 — `Solver<GridLayout>` extracted, `Staggered`
 > bit-identical (regression +0.00%, 18/18 MPI ctests). Phase 2 — `Colocated` policy + cell-centered
-> advection (`colocated_advection.hpp`); `sdflow.SolverColocated` exposed; Poiseuille matches staggered to
+> advection (`colocated_advection.hpp`); `peclet.flow.SolverColocated` exposed; Poiseuille matches staggered to
 > machine zero. Phase 3 — approximate (MAC) projection (`mac_approx_projection.hpp`): Taylor–Green vortex
 > validated (face velocities divergence-free to ~1e-15; L2 error 11.7× down 32→64; energy decay tracks
 > analytic). Phase 4 — cut-cell IBM: periodic sphere-packing Stokes permeability incompressible (face div
@@ -39,8 +39,8 @@ The **rotational (incremental) pressure** update and the **SDF-based IBM** are r
 
 ## 0. Where we are (grounded in the code)
 
-sdflow is already organized as **grid-agnostic free-function operator headers** + a **thin orchestrator
-class** (`sdflow::SdflowIbm`, `src/sdflow_ibm.hpp`, 598 lines). Most of the machinery is already
+flow is already organized as **grid-agnostic free-function operator headers** + a **thin orchestrator
+class** (`peclet::flow::IbmSolver`, `src/flow_ibm.hpp`, 598 lines). Most of the machinery is already
 face-based and therefore reusable by a collocated solver with no change.
 
 **Already grid-agnostic (reused verbatim):**
@@ -51,10 +51,10 @@ face-based and therefore reusable by a collocated solver with no change.
 - `src/mac_cutcell_mg.hpp` (`CutcellMG`) — the entire rotational pressure solve (V-cycle / MG-PCG /
   Chebyshev, MPI-folded) is reused unchanged. This is the "same rotational method".
 - `src/cut_cell_ibm.hpp` + the diffusion stencil build in `src/mac_ibm.hpp` — the Robust-Scaled IBM
-  overlay is **already parameterized by a velocity offset** `Off3 off` (`sdflow_ibm.hpp:191`).
+  overlay is **already parameterized by a velocity offset** `Off3 off` (`flow_ibm.hpp:191`).
 
 **Staggered-specific (needs a collocated counterpart):**
-1. **Component offsets** — `offs[3]` (`sdflow_ibm.hpp:191`, `:424`). Staggered passes
+1. **Component offsets** — `offs[3]` (`flow_ibm.hpp:191`, `:424`). Staggered passes
    `{-0.5,0,0},{0,-0.5,0},{0,0,-0.5}`; collocated passes `{0,0,0}` for all three.
 2. **Advection** — `src/staggered_advection.hpp` `adv_vel()` (line 43) interpolates advecting velocities
    onto the faces of *staggered* control volumes. The one piece of real math that must be rewritten for a
@@ -79,7 +79,7 @@ Per step, after the cell-centered predictor `u*` (existing IBM implicit diffusio
 4. **Correct the centers**: `u_c −= grad_c(phi)`, with the central-difference cell gradient
    `grad_c phi|_x = ½(phi(i+1) − phi(i−1))` (= the average of the two adjacent face gradients).
 5. **Rotational pressure update**: `P += (rho/dt)·phi − mu·div(u_f*)` — unchanged
-   (`sdflow_ibm.hpp:533`).
+   (`flow_ibm.hpp:533`).
 
 The face field is *exactly* divergence-free; the cell field is only approximately so — this is precisely
 the Almgren–Bell–Colella approximate projection. No Rhie–Chow term, hence no `D_f` interpolation through
@@ -98,10 +98,10 @@ Three layers; the existing operator headers stay as free functions:
     (§4), and the central-difference cell correction (`projectCorrectCenter`).
 - **`GridLayout` policy** — two small traits, `Staggered` / `Colocated`, supplying: the component offsets,
   the advection call, the face-averaging + reconstruction call, and the correction call.
-- **One orchestrator** `SdflowSolver<GridLayout>` — produced by refactoring today's `SdflowIbm`. The step
+- **One orchestrator** `Solver<GridLayout>` — produced by refactoring today's `IbmSolver`. The step
   loop, field allocation, ghost handling, implicit diffusion, MG bridge (g=2↔g=1), and MPI are **shared**;
-  the ~4 grid-specific spots dispatch through the policy. `SdflowIbm` becomes
-  `using SdflowIbm = SdflowSolver<Staggered>` (bit-identical); collocated is `SdflowSolver<Colocated>`.
+  the ~4 grid-specific spots dispatch through the policy. `IbmSolver` becomes
+  `using IbmSolver = Solver<Staggered>` (bit-identical); collocated is `Solver<Colocated>`.
 
 Rationale: maximum reuse, branch-free hot path, future capabilities written once. Cost: a one-time
 templating refactor of the orchestrator, guarded bit-identical by the regression suite + ctests.
@@ -162,7 +162,7 @@ See `scripts/verify_colocated_spheres.py`.
 
 ## 5. Phasing & validation
 
-1. **Refactor, no behavior change.** Extract `SdflowSolver<GridLayout>`; `Staggered` is the policy. Prove
+1. **Refactor, no behavior change.** Extract `Solver<GridLayout>`; `Staggered` is the policy. Prove
    bit-identical via `tests/regression/sdflow_regression.py` + the 18 `tests/kokkos_mpi` ctests + the Python
    verify scripts. Commit.
 2. **Collocated advection + diffusion, no pressure.** Add `colocated_advection.hpp`, offsets `{0,0,0}`;

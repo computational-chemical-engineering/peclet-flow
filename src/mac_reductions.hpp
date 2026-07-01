@@ -1,5 +1,5 @@
 /// @file
-/// @brief sdflow — portable (Kokkos) global reductions over a MAC grid's inner (owned) cells.
+/// @brief flow — portable (Kokkos) global reductions over a MAC grid's inner (owned) cells.
 ///
 /// Kokkos port of the local reduction kernels in mac_reductions.cuh (reduce_block_k / dot_block_k /
 /// subtract_k): sum, max|.|, inner-product, and mean-subtraction over the INNER cells of an extended
