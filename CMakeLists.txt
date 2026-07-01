@@ -51,6 +51,11 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/__init__.py COPYONLY)
 target_include_directories(sdflow PRIVATE src "${TPX_INC}")
 target_link_libraries(sdflow PRIVATE Kokkos::kokkos)
+# HIP/lld strictness: nanobind's --gc-sections can drop Kokkos SharedAllocationRecord<HIPSpace> vtables
+# it only later finds referenced -> "undefined hidden symbol: vtable". Keep sections on HIP (nvcc/ld is lenient).
+if(Kokkos_ENABLE_HIP)
+  target_link_options(sdflow PRIVATE -Wl,--no-gc-sections)
+endif()
 
 # Distributed (MPI) flow: compile the binding TU with the halo-gating flag + link MPI (the core grid
 # halo lives in the header-only TPX_INC). Mirrors dem's PECLET_DEM_MPI wiring; OFF keeps sdflow untouched.
@@ -69,6 +74,9 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_pnm_init.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/pnm/__init__.py COPYONLY)
 target_include_directories(pnm PRIVATE src "${TPX_INC}")
 target_link_libraries(pnm PRIVATE Kokkos::kokkos)
+if(Kokkos_ENABLE_HIP)
+  target_link_options(pnm PRIVATE -Wl,--no-gc-sections)
+endif()
 
 # --- pip / scikit-build-core install rule -------------------------------------------------------
 if(DEFINED SKBUILD)
