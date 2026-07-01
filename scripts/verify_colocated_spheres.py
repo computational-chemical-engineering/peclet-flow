@@ -17,7 +17,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build"))))
-import sdflow  # noqa: E402
+from peclet import flow as sdflow  # noqa: E402
 
 
 def packing_sdf(N, radius_frac=0.18):

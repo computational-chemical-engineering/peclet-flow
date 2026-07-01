@@ -20,19 +20,26 @@ requires = ["scikit-build-core>=0.8", "nanobind>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "sdflow"
+name = "peclet-flow"
 version = "0.1.0"
-description = "Kokkos cut-cell IBM incompressible Navier-Stokes solver (+ pnm pore extraction)"
+description = "peclet.flow — Kokkos cut-cell IBM incompressible Navier-Stokes solver (+ pnm pore extraction)"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Frank Peters", email = "e.a.j.f.peters@gmail.com" }]
 dependencies = ["numpy>=1.20"]
 
 [project.urls]
-Homepage = "https://github.com/computational-chemical-engineering/sdflow"
+Homepage = "https://github.com/computational-chemical-engineering/peclet"
+Documentation = "https://github.com/computational-chemical-engineering/peclet"
+Source = "https://github.com/computational-chemical-engineering/sdflow"
 
 [tool.scikit-build]
 minimum-version = "0.8"
 cmake.version = ">=3.24"
-# Both extensions are installed by the CMake `install(TARGETS sdflow pnm ...)` rule (guarded by SKBUILD).
+# Both extensions + the peclet/flow package __init__.py files are placed by the CMake install() rules
+# (guarded by SKBUILD) into the peclet namespace; disable package auto-discovery so nothing else is added.
 wheel.install-dir = "."
-sdist.include = ["src", "CMakeLists.txt", "README.md"]
+wheel.packages = []
+sdist.include = ["src", "packaging", "CMakeLists.txt", "README.md", "LICENSE"]

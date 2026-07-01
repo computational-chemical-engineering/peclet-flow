@@ -61,7 +61,7 @@ def run_sdflow(N, phi, mu=0.1, f=1e-3, dt=None, max_steps=600, tol=1e-6, coarse=
     ('rediscretized' = the geometric per-level cut-cell operator, the recommended default;
     'galerkin' = the inconsistent aggregation path; 'const' = geometry-blind coarse).
     `seed` = (u,v,w) from the next-coarser N, upsampled here, to start the march near steady."""
-    import sdflow
+    from peclet import flow as sdflow
     if dt is None:
         dt = 60.0 if N <= 64 else 120.0
     lv = max(2, int(np.log2(N)) - 1)                          # coarsen to ~4^3

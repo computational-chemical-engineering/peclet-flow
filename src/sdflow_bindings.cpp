@@ -143,7 +143,7 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Broadcast a value from rank 0 (identity in the single-rank module; mirrors the MPI API).");
 }
 
-NB_MODULE(sdflow, m) {
+NB_MODULE(_flow, m) {
   m.attr("__doc__") =
       "sdflow — Kokkos cut-cell IBM incompressible Navier-Stokes solver for porous media.\n\n"
       "Two solver classes share an identical API (only the velocity-unknown placement differs):\n"

@@ -3,7 +3,7 @@
 import sys, pathlib, time
 import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import sdflow
+from peclet import flow as sdflow
 from verify_lid_cavity_sdflow import GHIA_Y, GHIA_U, GHIA_X, GHIA_V
 
 

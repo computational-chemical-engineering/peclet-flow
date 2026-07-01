@@ -20,7 +20,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
                                                  os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-import sdflow  # noqa: E402
+from peclet import flow as sdflow  # noqa: E402
 
 
 def cavity(N, nz, Re, dt, mode, U=1.0, nsteps=200, vcyc=4, vel_iter=60, outer=2, pit=40):

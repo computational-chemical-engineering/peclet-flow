@@ -33,19 +33,35 @@ set(TPX_INC "${CMAKE_CURRENT_SOURCE_DIR}/../transport-core/include")
 # device path is routed by the launch compiler regardless.
 # NOMINSIZE: nanobind's default -Os size optimization is rejected by nvcc ("'s': expected a number")
 # since the Kokkos device sources compile as CXX through the launch compiler.
+# The two extensions are assembled into the PEP-420 peclet namespace: the solver as `peclet.flow` (the
+# private `_flow` extension re-exported by peclet/flow/__init__.py) and pore extraction as
+# `peclet.flow.pnm`. The package __init__.py files are kept as plain files under packaging/ (OUTSIDE any
+# importable peclet/ dir, so an incomplete source package can never shadow the installed one) and staged
+# into <build>/peclet/... so `PYTHONPATH=<build> python …` (`import peclet.flow`) works in the dev loop
+# too. The SKBUILD install rules (guarded below) place them into the wheel.
 nanobind_add_module(sdflow NB_STATIC NOMINSIZE src/sdflow_bindings.cpp)
+set_target_properties(sdflow PROPERTIES OUTPUT_NAME _flow   # -> peclet.flow._flow (NB_MODULE(_flow))
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/flow")
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
+               ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/__init__.py COPYONLY)
 target_include_directories(sdflow PRIVATE src "${TPX_INC}")
 target_link_libraries(sdflow PRIVATE Kokkos::kokkos)
 
 # pnm -- pore-network extraction (Kokkos GPU compute + pure-C++ SDFReader VTI reader).
 nanobind_add_module(pnm NB_STATIC NOMINSIZE src/pnm_bindings.cpp src/sdf_reader.cpp)
+set_target_properties(pnm PROPERTIES OUTPUT_NAME _pnm       # -> peclet.flow.pnm._pnm (NB_MODULE(_pnm))
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/pnm")
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_pnm_init.py
+               ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/pnm/__init__.py COPYONLY)
 target_include_directories(pnm PRIVATE src "${TPX_INC}")
 target_link_libraries(pnm PRIVATE Kokkos::kokkos)
 
 # --- pip / scikit-build-core install rule -------------------------------------------------------
-# `pip install .` (driven by pyproject.toml) builds both modules against a Kokkos prefix on
-# CMAKE_PREFIX_PATH and installs them as top-level `sdflow` + `pnm` modules. Inert for a plain
-# `cmake --build` (no `cmake --install`), so the developer workflow is unchanged.
 if(DEFINED SKBUILD)
-  install(TARGETS sdflow pnm LIBRARY DESTINATION . COMPONENT python)
+  install(TARGETS sdflow LIBRARY DESTINATION peclet/flow COMPONENT python)
+  install(TARGETS pnm    LIBRARY DESTINATION peclet/flow/pnm COMPONENT python)
+  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
+          DESTINATION peclet/flow RENAME __init__.py COMPONENT python)
+  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_pnm_init.py
+          DESTINATION peclet/flow/pnm RENAME __init__.py COMPONENT python)
 endif()

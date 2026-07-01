@@ -15,7 +15,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
                                                  os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-import sdflow  # noqa: E402
+from peclet import flow as sdflow  # noqa: E402
 
 # Ghia, Ghia & Shin (1982), Re=100 -- u along the vertical centreline, v along the horizontal centreline.
 GHIA_Y = np.array([0, .0547, .0625, .0703, .1016, .1719, .2813, .4531, .5, .6172, .7344, .8516, .9531,

@@ -92,7 +92,7 @@ def run_one(sdflow, case, regime, solver, N, mu_override=None):
 
 
 def cmd_run(args):
-    import sdflow
+    from peclet import flow as sdflow
     backend = args.backend or sdflow.execution_space
     out = {"_meta": {"backend": backend, "exec_space": sdflow.execution_space,
                      "omp_threads": os.environ.get("OMP_NUM_THREADS", ""), "re_target": RE_TARGET,
@@ -142,7 +142,7 @@ def gpu_mem_mb():
 def cmd_mem(args):
     # one (solver, N) measured per fresh subprocess so device allocations are isolated
     if args.measure:
-        import sdflow
+        from peclet import flow as sdflow
         solver, N = args.measure.split(":"); N = int(N)
         base = gpu_mem_mb()
         sdf, _ = sdf_random_spheres(N)

@@ -21,7 +21,7 @@ import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent /
                        os.environ.get("SDFLOW_BUILD", "build_mpi")))
-import sdflow  # noqa: E402
+from peclet import flow as sdflow  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from verify_lid_cavity_sdflow import GHIA_Y, GHIA_U  # noqa: E402
 

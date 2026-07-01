@@ -19,7 +19,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build"))))
-import sdflow  # noqa: E402
+from peclet import flow as sdflow  # noqa: E402
 
 
 def run(H, L, Re=100.0, U=1.0, nz=4, max_steps=8000, dt=0.5):

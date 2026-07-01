@@ -16,7 +16,7 @@ Findings (2026-06-25):
 import os, sys, time
 import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build_omp"))))
-import sdflow
+from peclet import flow as sdflow
 
 ZH_PHI = [0.000125,0.001,0.008,0.027,0.064,0.125,0.216,0.343,0.45,0.5236]
 ZH_K   = [1.096,1.212,1.525,2.008,2.810,4.292,7.442,15.4,28.1,42.1]

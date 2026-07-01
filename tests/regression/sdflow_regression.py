@@ -116,7 +116,7 @@ CFG = dict(rho=1.0, mu=0.1, dt=60.0, F=1e-3, vel_sweeps=80, pcg_maxit=300, pcg_r
 
 # --------------------------------------------------------------------------- run one (case, N)
 def run_case(name, N, cfg, quiet=True, solver="staggered"):
-    import sdflow
+    from peclet import flow as sdflow
     spec = CASES[name]
     sdf, info = spec["sdf"](N)
     levels = max(2, int(np.floor(np.log2(N))) - 1)
