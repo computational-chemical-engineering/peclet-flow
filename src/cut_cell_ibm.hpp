@@ -6,13 +6,13 @@
 /// of the Dirichlet/Neumann, point-value(SCHEME 0)/cell-average(1), and sandwiched (double-sided) cases.
 /// Output factors are written into Kokkos Views (SoA, [list_idx*6+k]); the build kernel fills one entry
 /// per cut cell. KOKKOS_INLINE_FUNCTION so the math is shared with the host reference.
-#ifndef CFD_CUT_CELL_IBM_HPP
-#define CFD_CUT_CELL_IBM_HPP
+#ifndef PECLET_FLOW_CUT_CELL_IBM_HPP
+#define PECLET_FLOW_CUT_CELL_IBM_HPP
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
-namespace sdflow {
+namespace peclet::flow {
 
 using IMem = Kokkos::DefaultExecutionSpace::memory_space;
 
@@ -159,7 +159,7 @@ inline void ibmBuildDiffusion(Kokkos::View<float*, IMem> AC, Kokkos::View<float*
   const std::size_t n = (std::size_t)ex * ey * ez;
   const float nb = (float)(-beta), c = (float)(idiag + 6.0 * beta);
   Kokkos::parallel_for(
-      "sdflow::ibm_build_diff", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, n),
+      "peclet::flow::ibm_build_diff", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, n),
       KOKKOS_LAMBDA(std::size_t i) {
         AC(i) = c; AW(i) = nb; AE(i) = nb; AS(i) = nb; AN(i) = nb; AB(i) = nb; AT(i) = nb;
       });
@@ -178,7 +178,7 @@ inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*,
   Kokkos::DefaultExecutionSpace space;
   const bool hasInhom = (a_inhom.extent(0) != 0), hasScale = (rhs_scale.extent(0) != 0);
   Kokkos::parallel_for(
-      "sdflow::ibm_modify", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, numActive),
+      "peclet::flow::ibm_modify", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, numActive),
       KOKKOS_LAMBDA(int list_idx) {
         const int OPP[6] = {1, 0, 3, 2, 5, 4};
         const int c = ibm.cell_index(list_idx);
@@ -209,6 +209,6 @@ inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*,
 
 }
 
-}  // namespace sdflow
+}  // namespace peclet::flow
 
-#endif  // CFD_CUT_CELL_IBM_HPP
+#endif  // PECLET_FLOW_CUT_CELL_IBM_HPP

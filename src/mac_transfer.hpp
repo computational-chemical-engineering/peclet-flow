@@ -5,13 +5,13 @@
 /// per-axis-ratio averaging restriction, trilinear prolongation (added to the fine solution), and the
 /// staggered pressure-gradient velocity correction. Faithful copies; per-axis ratio (1 or 2) supports
 /// semi-coarsening. Runs on any Kokkos backend.
-#ifndef CFD_MAC_TRANSFER_HPP
-#define CFD_MAC_TRANSFER_HPP
+#ifndef PECLET_FLOW_MAC_TRANSFER_HPP
+#define PECLET_FLOW_MAC_TRANSFER_HPP
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
-namespace sdflow {
+namespace peclet::flow {
 
 using TExec = Kokkos::DefaultExecutionSpace;
 using TMem = TExec::memory_space;
@@ -27,7 +27,7 @@ inline void restrict_(TField coarse, TConst fine, T3 cext, T3 fext, int g, T3 ci
   TExec space;
   using MD = Kokkos::MDRangePolicy<TExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "sdflow::restrict", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
+      "peclet::flow::restrict", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
         const long fsy = fext.x, fsz = static_cast<long>(fext.x) * fext.y;
         double sum = 0.0;
@@ -66,7 +66,7 @@ inline void prolong(TField fine, TConst coarse, T3 fext, T3 cext, int g, T3 finn
   TExec space;
   using MD = Kokkos::MDRangePolicy<TExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "sdflow::prolong", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
+      "peclet::flow::prolong", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
       KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
         const double cx = ratio.x == 2 ? 0.5 * ifx - 0.25 + g : (double)(ifx + g);
         const double cy = ratio.y == 2 ? 0.5 * ify - 0.25 + g : (double)(ify + g);
@@ -83,7 +83,7 @@ inline void correct(TField u, TField v, TField w, TConst phi, T3 e, int g) {
   TExec space;
   using MD = Kokkos::MDRangePolicy<TExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "sdflow::correct", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "peclet::flow::correct", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = static_cast<long>(x) + static_cast<long>(y) * e.x +
                        static_cast<long>(z) * static_cast<long>(e.x) * e.y;
@@ -95,6 +95,6 @@ inline void correct(TField u, TField v, TField w, TConst phi, T3 e, int g) {
 
 }
 
-}  // namespace sdflow
+}  // namespace peclet::flow
 
-#endif  // CFD_MAC_TRANSFER_HPP
+#endif  // PECLET_FLOW_MAC_TRANSFER_HPP

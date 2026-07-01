@@ -1,8 +1,8 @@
-// cfd-gpu — the ASSEMBLED multi-rank SdflowIbm step (the capstone of the cfd MPI port).
+// cfd-gpu — the ASSEMBLED multi-rank IbmSolver step (the capstone of the cfd MPI port).
 //
-// Solves creeping (Stokes) flow through a periodic 2x2x2 sphere packing with the REAL SdflowIbm solver, two
+// Solves creeping (Stokes) flow through a periodic 2x2x2 sphere packing with the REAL IbmSolver solver, two
 // ways: single-rank (the validated single-GPU path) on the full grid, and distributed -- each rank constructs
-// SdflowIbm with its ORB block dims, calls initMpi (g=2 velocity-block halo + global-origin red-black parity
+// IbmSolver with its ORB block dims, calls initMpi (g=2 velocity-block halo + global-origin red-black parity
 // + the distributed pressure MG via CutcellMG::initMpi), and setSolid with its LOCAL SDF block (ghosts halo-
 // exchanged). The superficial velocity <u> (hence the permeability k = mu*<u>/F) is reduced over ranks. The
 // distributed solve must equal single-rank: np=1 bit-exact, np>1 to the MG-PCG reduction-order floor (the
@@ -14,13 +14,13 @@
 #include <cstdio>
 #include <vector>
 
-#include "sdflow_ibm.hpp"
+#include "flow_ibm.hpp"
 
-#include "tpx/common/types.hpp"
-#include "tpx/decomp/block_decomposer.hpp"
+#include "peclet/core/common/types.hpp"
+#include "peclet/core/decomp/block_decomposer.hpp"
 
-using tpx::IVec;
-using sdflow::SdflowIbm;
+using peclet::core::IVec;
+using peclet::flow::IbmSolver;
 
 static constexpr int N = 32, STEPS = 120;
 static constexpr double RHO = 1.0, MU = 0.1, F = 1e-3, DT = 60.0;
@@ -42,14 +42,14 @@ static std::vector<double> packingSdf(double rfrac = 0.18) {
   return sdf;
 }
 
-static void configure(SdflowIbm& s) {
+static void configure(IbmSolver& s) {
   s.setRho(RHO); s.setMu(MU); s.setDt(DT); s.setBodyForce(F, 0, 0);
   s.setAdvection(false); s.setVelocityIterations(80); s.setPressureLevels(4);
   s.setPressurePcg(true, 200, 1e-9);
 }
 
 // local sum of u over this solver's inner block (getVelocity(0) returns the inner block, x-fastest).
-static double localUSum(SdflowIbm& s) {
+static double localUSum(IbmSolver& s) {
   auto u = s.getVelocity(0); double sum = 0; for (double v : u) sum += v; return sum;
 }
 
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     const double gcells = (double)N * N * N;
 
     // --- distributed solve ---
-    tpx::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), IVec<3>{N, N, N});
+    peclet::core::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), IVec<3>{N, N, N});
     auto blk = dec.block(rank);
     const int ox = (int)blk.origin[0], oy = (int)blk.origin[1], oz = (int)blk.origin[2];
     const int lnx = (int)blk.size[0], lny = (int)blk.size[1], lnz = (int)blk.size[2];
@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
       lsdf[(std::size_t)x + (std::size_t)y * lnx + (std::size_t)z * lnx * lny] =
           gsdf[(std::size_t)(x + ox) + (std::size_t)(y + oy) * N + (std::size_t)(z + oz) * N * N];
 
-    SdflowIbm sd(lnx, lny, lnz);
+    IbmSolver sd(lnx, lny, lnz);
     sd.initMpi(N, N, N, MPI_COMM_WORLD);
     configure(sd);
     sd.setSolid(lsdf, /*cutcell_pressure=*/true);
@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
     // --- single-rank reference (full grid, the validated single-GPU path) on rank 0 ---
     double k_ref = 0.0;
     if (rank == 0) {
-      SdflowIbm ref(N, N, N);
+      IbmSolver ref(N, N, N);
       configure(ref);
       ref.setSolid(gsdf, true);
       for (int it = 0; it < STEPS; ++it) ref.step();
@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
   int totalFail = 0;
   MPI_Allreduce(&fail, &totalFail, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   if (rank == 0) {
-    if (totalFail == 0) std::printf("OK (np=%d): distributed SdflowIbm Stokes permeability == single-rank\n", size);
+    if (totalFail == 0) std::printf("OK (np=%d): distributed IbmSolver Stokes permeability == single-rank\n", size);
     else std::fprintf(stderr, "FAILED (np=%d)\n", size);
   }
   Kokkos::finalize();

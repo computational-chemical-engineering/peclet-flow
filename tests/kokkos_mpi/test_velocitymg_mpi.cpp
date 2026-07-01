@@ -1,6 +1,6 @@
 // cfd-gpu — the PRODUCTION VelocityMG (staircase velocity multigrid), multi-rank.
 //
-// Folds the distributed halo into the real velocity-MG (gated behind CFD_MPI). VelocityMG has NO global
+// Folds the distributed halo into the real velocity-MG (gated behind PECLET_FLOW_MPI). VelocityMG has NO global
 // reductions (the backward-Euler velocity operator is non-singular -> no mean removal, and the V-cycle is a
 // fixed iteration, not a Krylov method), so the fold is purely fill()->per-level halo exchange + the block-
 // origin red-black parity -- and the distributed V-cycle is therefore BIT-tight to the single-rank one (no
@@ -15,12 +15,12 @@
 
 #include "mac_velocity_mg.hpp"
 
-#include "tpx/common/types.hpp"
-#include "tpx/decomp/block_decomposer.hpp"
-#include "tpx/halo/grid_halo_topology.hpp"
+#include "peclet/core/common/types.hpp"
+#include "peclet/core/decomp/block_decomposer.hpp"
+#include "peclet/core/halo/grid_halo_topology.hpp"
 
-using tpx::IVec;
-using sdflow::VelocityMG; using sdflow::CCField; using sdflow::CCConst; using sdflow::C3; using sdflow::FPV; using sdflow::FPC;
+using peclet::core::IVec;
+using peclet::flow::VelocityMG; using peclet::flow::CCField; using peclet::flow::CCConst; using peclet::flow::C3; using peclet::flow::FPV; using peclet::flow::FPC;
 
 static constexpr int G = 2, NLEV = 4, NVCYC = 6;
 static constexpr double IDIAG = 1.0, BETA = 0.2;

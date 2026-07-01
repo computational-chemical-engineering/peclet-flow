@@ -1,7 +1,7 @@
 /// @file
 /// @brief nanobind module `sdflow` — the Kokkos cut-cell IBM Navier-Stokes solver (`sdflow.Solver`).
 ///
-/// Exposes sdflow::SdflowIbm to Python: set rho/mu/dt, a body force, an SDF solid (cut-cell IBM no-slip
+/// Exposes peclet::flow::IbmSolver to Python: set rho/mu/dt, a body force, an SDF solid (cut-cell IBM no-slip
 /// + optional cut-cell pressure projection), step, read back the velocity/pressure, and query the
 /// cut-cell flux divergence. Exercised by verify_poiseuille_sdflow (IBM channel) and
 /// verify_periodic_spheres_sdflow (cut-cell Stokes through a sphere packing). Kokkos is initialized at
@@ -9,7 +9,7 @@
 /// Solver before exit -- del + gc.collect()). rank()/bcast_from_root() are single-rank stubs (the
 /// multi-rank path lives in tests/kokkos_mpi).
 ///
-/// Arrays cross the boundary through the shared zero-copy bridge (tpx::python, in transport-core):
+/// Arrays cross the boundary through the shared zero-copy bridge (peclet::core::python, in transport-core):
 /// fields come back as Fortran-order (nx,ny,nz) float64 NumPy arrays referencing the field buffer,
 /// and inputs are read as flat x-fastest buffers. See tpx/python/ndarray_interop.hpp.
 #include <nanobind/nanobind.h>
@@ -21,8 +21,8 @@
 #include <cstdint>
 #include <vector>
 
-#include "sdflow_ibm.hpp"
-#include "tpx/python/ndarray_interop.hpp"
+#include "flow_ibm.hpp"
+#include "peclet/core/python/ndarray_interop.hpp"
 
 namespace nb = nanobind;
 
@@ -33,7 +33,7 @@ static nb::ndarray<nb::numpy, double> field_out(S& s, std::vector<double>&& v) {
   const auto nx = static_cast<std::size_t>(s.nx());
   const auto ny = static_cast<std::size_t>(s.ny());
   const auto nz = static_cast<std::size_t>(s.nz());
-  return tpx::python::vector_to_ndarray(
+  return peclet::core::python::vector_to_ndarray(
       std::move(v), {nx, ny, nz},
       {1, static_cast<std::int64_t>(nx), static_cast<std::int64_t>(nx * ny)});
 }
@@ -41,15 +41,15 @@ static nb::ndarray<nb::numpy, double> field_out(S& s, std::vector<double>&& v) {
 // A Fortran-order (nx,ny,nz) float64 array -> flat x-fastest host vector (F-contiguous data() is
 // already x-fastest). nanobind casts/copies the input to f_contig double if needed.
 static std::vector<double> grid_in(nb::ndarray<double, nb::f_contig> a) {
-  return tpx::python::ndarray_to_vector<double>(nb::ndarray<>(a));
+  return peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(a));
 }
 
 // Register a solver class for the given GridLayout policy (Staggered -> "Solver", Colocated ->
 // "SolverColocated"). The Python API is identical across grids; only the velocity-unknown placement and
-// the advection control volume differ inside SdflowSolver<Grid>.
+// the advection control volume differ inside Solver<Grid>.
 template <class Grid>
 static void bind_solver(nb::module_& m, const char* name) {
-  using S = sdflow::SdflowSolver<Grid>;
+  using S = peclet::flow::Solver<Grid>;
   nb::class_<S>(m, name)
       .def(nb::init<int, int, int>(), nb::arg("nx"), nb::arg("ny"), nb::arg("nz"),
            "Create a solver on an nx x ny x nz unit-spacing grid (x-fastest, I = x + y*nx + z*nx*ny). "
@@ -95,7 +95,7 @@ static void bind_solver(nb::module_& m, const char* name) {
            [](S& s, int face, nb::ndarray<double, nb::c_contig> prof) {
              if (prof.ndim() != 3 || prof.shape(2) != 3) throw std::runtime_error("profile must be (Nb,Nc,3)");
              const int nb_ = (int)prof.shape(0), nc = (int)prof.shape(1);
-             s.setDomainBcProfile(face, tpx::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_, nc);
+             s.setDomainBcProfile(face, peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_, nc);
            },
            nb::arg("face"), nb::arg("profile"),
            "Prescribe a per-position inlet velocity profile (Nb,Nc,3) over a face (sets it to inflow).")
@@ -168,6 +168,6 @@ NB_MODULE(_flow, m) {
   m.attr("execution_space") = nb::str(Kokkos::DefaultExecutionSpace::name());
 
   // Staggered MAC grid (THE sdflow solver) + the collocated/cell-centered variant. Same Python API.
-  bind_solver<sdflow::Staggered>(m, "Solver");
-  bind_solver<sdflow::Colocated>(m, "SolverColocated");
+  bind_solver<peclet::flow::Staggered>(m, "Solver");
+  bind_solver<peclet::flow::Colocated>(m, "SolverColocated");
 }

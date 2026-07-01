@@ -9,14 +9,14 @@
 /// approximately so — hence "approximate projection". These two kernels are the only collocated-specific
 /// projection pieces; everything else (operator, divergence, MG solve, rotational pressure update) is
 /// shared with the staggered solver.
-#ifndef CFD_MAC_APPROX_PROJECTION_HPP
-#define CFD_MAC_APPROX_PROJECTION_HPP
+#ifndef PECLET_FLOW_MAC_APPROX_PROJECTION_HPP
+#define PECLET_FLOW_MAC_APPROX_PROJECTION_HPP
 
 #include <Kokkos_Core.hpp>
 
-#include "mac_cutcell.hpp"  // sdflow::C3, CCField, CCConst, CCExec
+#include "mac_cutcell.hpp"  // peclet::flow::C3, CCField, CCConst, CCExec
 
-namespace sdflow {
+namespace peclet::flow {
 
 // Average cell-centered velocities onto the staggered face layout: uf(i) is the velocity at the low (-x)
 // face of cell i (located at i-1/2) = ½(U(i-1)+U(i)); likewise vf/wf along y/z. This reproduces the exact
@@ -28,7 +28,7 @@ inline void centerToFace(CCField uf, CCField vf, CCField wf, CCConst U, CCConst 
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "sdflow::center_to_face", MD(space, {1, 1, 1}, {e.x, e.y, e.z}),
+      "peclet::flow::center_to_face", MD(space, {1, 1, 1}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -53,7 +53,7 @@ inline void projectCorrectCenter(CCField u, CCField v, CCField w, CCConst phi, C
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "sdflow::correct_center", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "peclet::flow::correct_center", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -69,6 +69,6 @@ inline void projectCorrectCenter(CCField u, CCField v, CCField w, CCConst phi, C
       });
 }
 
-}  // namespace sdflow
+}  // namespace peclet::flow
 
-#endif  // CFD_MAC_APPROX_PROJECTION_HPP
+#endif  // PECLET_FLOW_MAC_APPROX_PROJECTION_HPP

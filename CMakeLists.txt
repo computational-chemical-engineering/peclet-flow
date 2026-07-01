@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(cfd_gpu_sdflow LANGUAGES CXX)
+project(peclet_flow LANGUAGES CXX)
 
 # Canonical cfd-gpu build: the Kokkos `sdflow` cut-cell IBM Navier-Stokes solver + the `pnm`
 # pore-network extraction, as importable Python modules. Kokkos provides the backend (CUDA / HIP / OpenMP),
@@ -39,7 +39,7 @@ peclet_sibling_include(transport-core "${PECLET_TPX_TAG}" "../transport-core" TP
 # importable peclet/ dir, so an incomplete source package can never shadow the installed one) and staged
 # into <build>/peclet/... so `PYTHONPATH=<build> python …` (`import peclet.flow`) works in the dev loop
 # too. The SKBUILD install rules (guarded below) place them into the wheel.
-nanobind_add_module(sdflow NB_STATIC NOMINSIZE src/sdflow_bindings.cpp)
+nanobind_add_module(sdflow NB_STATIC NOMINSIZE src/flow_bindings.cpp)
 set_target_properties(sdflow PROPERTIES OUTPUT_NAME _flow   # -> peclet.flow._flow (NB_MODULE(_flow))
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/flow")
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py

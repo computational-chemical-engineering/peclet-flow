@@ -12,13 +12,13 @@
 #include <cstdio>
 #include <vector>
 
-#include "sdflow.hpp"
+#include "flow_reference.hpp"
 
-using sdflow::SdflowKokkos;
+using peclet::flow::FlowReference;
 
 // Initialise the staggered Taylor-Green field (grid units): u at the -x face, v at the -y face.
-static void initTG(SdflowKokkos& s, std::vector<double>& u0, std::vector<double>& v0) {
-  const int N = s.N(), G = SdflowKokkos::G;
+static void initTG(FlowReference& s, std::vector<double>& u0, std::vector<double>& v0) {
+  const int N = s.N(), G = FlowReference::G;
   auto e = s.ext();
   const double k = 2.0 * M_PI / N;
   auto hu = Kokkos::create_mirror_view(s.u());
@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
 
     // --- STOKES (advection off): tight check vs the discrete decay ---
     {
-      SdflowKokkos s(N, nu, dt);
+      FlowReference s(N, nu, dt);
       s.setAdvection(false);
       s.setIterations(/*nDiff*/ 300, /*nPois*/ 80);
       s.setPressureMultigrid(true, 6);
@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
     // solve (a few V-cycles) against the old plain RB-GS (80 sweeps): MG should drive div far lower for
     // much less work.
     {
-      SdflowKokkos sMg(N, nu, dt), sRb(N, nu, dt);
+      FlowReference sMg(N, nu, dt), sRb(N, nu, dt);
       sMg.setAdvection(true); sMg.setPressureMultigrid(true, 6);
       sRb.setAdvection(true); sRb.setPressureMultigrid(false, 0); sRb.setIterations(300, 80);
       std::vector<double> u0, v0;

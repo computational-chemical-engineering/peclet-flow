@@ -11,7 +11,7 @@
 
 #include "cut_cell_ibm.hpp"
 
-using namespace sdflow;
+using namespace peclet::flow;
 using DSpace = Kokkos::DefaultExecutionSpace;
 using FV = Kokkos::View<float*, IMem>;
 using DV = Kokkos::View<double*, IMem>;

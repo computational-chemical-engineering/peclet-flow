@@ -1,4 +1,4 @@
-// Correctness of the Kokkos Robust-Scaled IBM overlay build (sdflow::ibmFillEntry) vs a HostSpace
+// Correctness of the Kokkos Robust-Scaled IBM overlay build (peclet::flow::ibmFillEntry) vs a HostSpace
 // reference using the same code. Random cut-cell SDF configurations (fluid centre + mixed solid/fluid
 // neighbours, including sandwiched double-sided axes), across point-value (SCHEME 0) and cell-average
 // (1) and Dirichlet/Neumann. Compares every factor (D_rescale, dir_code, K/M/X/Nbc/R). Runs on any
@@ -12,7 +12,7 @@
 
 #include "cut_cell_ibm.hpp"
 
-using namespace sdflow;
+using namespace peclet::flow;
 using DSpace = Kokkos::DefaultExecutionSpace;
 
 template <int SCHEME>

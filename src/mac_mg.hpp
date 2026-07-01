@@ -4,10 +4,10 @@
 /// Assembles the ported operators (RB-GS smoother, averaging restriction, trilinear prolongation,
 /// mean removal) into a correction-scheme V-cycle for Lap(phi)=d on a periodic staggered grid. Coarse
 /// operators are the rediscretized constant-coefficient Laplacian at the level spacing (A = -Lap =
-/// (6 phi - sum)/h^2). This replaces the slow plain RB-GS pressure solve in SdflowKokkos. Single GPU
+/// (6 phi - sum)/h^2). This replaces the slow plain RB-GS pressure solve in FlowReference. Single GPU
 /// (periodic ghost wrap per level). Any Kokkos backend.
-#ifndef CFD_MAC_MG_HPP
-#define CFD_MAC_MG_HPP
+#ifndef PECLET_FLOW_MAC_MG_HPP
+#define PECLET_FLOW_MAC_MG_HPP
 
 #include <Kokkos_Core.hpp>
 #include <vector>
@@ -15,7 +15,7 @@
 #include "mac_stencils.hpp"   // SField/SConst, I3, L3
 #include "mac_transfer.hpp"   // restrict_, prolong, T3
 
-namespace sdflow {
+namespace peclet::flow {
 
 // Periodic ghost fill (g ghosts, all 3 axes) of a level field with inner size N.
 inline void mgPeriodicFill(SField f, I3 e, int N, int g) {
@@ -28,7 +28,7 @@ inline void mgPeriodicFill(SField f, I3 e, int N, int g) {
     SField ff = f;
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>;
     Kokkos::parallel_for(
-        "sdflow::mg_pfill", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+        "peclet::flow::mg_pfill", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
           const long base = (long)p0 * sb + (long)p1 * sc;
           for (int gl = 0; gl < g; ++gl) {
             ff(base + (long)gl * sa) = ff(base + (long)(gl + N) * sa);
@@ -63,7 +63,7 @@ class MgPoisson {
   void solve(SField phi, SConst d, int nVcycles, int nu1 = 2, int nu2 = 2) {
     // f0 = -d
     SExec space; SField f0 = lv_[0].f;
-    Kokkos::parallel_for("sdflow::mg_negd", Kokkos::RangePolicy<SExec>(space, 0, f0.extent(0)),
+    Kokkos::parallel_for("peclet::flow::mg_negd", Kokkos::RangePolicy<SExec>(space, 0, f0.extent(0)),
                          KOKKOS_LAMBDA(std::size_t i) { f0(i) = -d(i); });
 
     Kokkos::deep_copy(lv_[0].phi, phi);
@@ -86,7 +86,7 @@ class MgPoisson {
     SField phi = L.phi, f = L.f;
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
-        "sdflow::mg_smooth", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        "peclet::flow::mg_smooth", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           if (((x + y + z) & 1) != color) return;
           const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = (long)e.x * e.y;
@@ -108,7 +108,7 @@ class MgPoisson {
     SField phi = L.phi, f = L.f, r = L.r;
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
-        "sdflow::mg_resid", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        "peclet::flow::mg_resid", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = (long)e.x * e.y;
           const double s = phi(i+sx)+phi(i-sx)+phi(i+sy)+phi(i-sy)+phi(i+sz)+phi(i-sz);
@@ -137,13 +137,13 @@ class MgPoisson {
     SExec space; const I3 e = L.e; const int N = L.N;
     double sum = 0;
     Kokkos::parallel_reduce(
-        "sdflow::mg_mean", Kokkos::RangePolicy<SExec>(space, 0, (long)N * N * N),
+        "peclet::flow::mg_mean", Kokkos::RangePolicy<SExec>(space, 0, (long)N * N * N),
         KOKKOS_LAMBDA(long c, double& acc) {
           const int ix=(int)(c%N), iy=(int)((c/N)%N), iz=(int)(c/((long)N*N));
           acc += f(L3(ix+G, iy+G, iz+G, e));
         }, sum);
     const double mean = sum / ((double)N * N * N);
-    Kokkos::parallel_for("sdflow::mg_submean", Kokkos::RangePolicy<SExec>(space, 0, f.extent(0)),
+    Kokkos::parallel_for("peclet::flow::mg_submean", Kokkos::RangePolicy<SExec>(space, 0, f.extent(0)),
                          KOKKOS_LAMBDA(std::size_t i) { f(i) -= mean; });
 
   }
@@ -151,7 +151,7 @@ class MgPoisson {
     SExec space; const I3 e = L.e; const int N = L.N;
     double m = 0;
     Kokkos::parallel_reduce(
-        "sdflow::mg_maxabs", Kokkos::RangePolicy<SExec>(space, 0, (long)N * N * N),
+        "peclet::flow::mg_maxabs", Kokkos::RangePolicy<SExec>(space, 0, (long)N * N * N),
         KOKKOS_LAMBDA(long c, double& acc) {
           const int ix=(int)(c%N), iy=(int)((c/N)%N), iz=(int)(c/((long)N*N));
           double v = Kokkos::fabs(f(L3(ix+G, iy+G, iz+G, e)));
@@ -161,6 +161,6 @@ class MgPoisson {
   }
 };
 
-}  // namespace sdflow
+}  // namespace peclet::flow
 
-#endif  // CFD_MAC_MG_HPP
+#endif  // PECLET_FLOW_MAC_MG_HPP

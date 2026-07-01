@@ -1,5 +1,5 @@
-// Correctness of the Kokkos multigrid transfer (sdflow::restrict_ / prolong) + projection correction
-// (sdflow::correct) vs host replication. Plus property checks: restriction of a constant is that
+// Correctness of the Kokkos multigrid transfer (peclet::flow::restrict_ / prolong) + projection correction
+// (peclet::flow::correct) vs host replication. Plus property checks: restriction of a constant is that
 // constant; prolongation of a constant adds that constant. Runs on whatever backend Kokkos has.
 #include <Kokkos_Core.hpp>
 
@@ -10,7 +10,7 @@
 
 #include "mac_transfer.hpp"
 
-using namespace sdflow;
+using namespace peclet::flow;
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);

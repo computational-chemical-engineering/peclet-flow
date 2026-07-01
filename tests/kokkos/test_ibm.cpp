@@ -11,7 +11,7 @@
 
 #include "mac_ibm.hpp"
 
-using namespace sdflow;
+using namespace peclet::flow;
 
 static long l3(int x, int y, int z, C3 e) { return (long)x + (long)y * e.x + (long)z * (long)e.x * e.y; }
 

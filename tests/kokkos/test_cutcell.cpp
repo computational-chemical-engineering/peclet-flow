@@ -1,4 +1,4 @@
-// Correctness of the Kokkos cut-cell face openness (sdflow::buildOpenness) vs a host replication on a
+// Correctness of the Kokkos cut-cell face openness (peclet::flow::buildOpenness) vs a host replication on a
 // sphere SDF, plus properties: an all-fluid SDF gives openness 1, an all-solid SDF gives 0. SDF sign
 // convention: negative inside solid, positive in fluid. Runs on whatever backend Kokkos was built for.
 #include <Kokkos_Core.hpp>
@@ -9,7 +9,7 @@
 
 #include "mac_cutcell.hpp"
 
-using namespace sdflow;
+using namespace peclet::flow;
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);

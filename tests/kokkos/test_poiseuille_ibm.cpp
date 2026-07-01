@@ -11,7 +11,7 @@
 
 #include "mac_ibm.hpp"
 
-using namespace sdflow;
+using namespace peclet::flow;
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);

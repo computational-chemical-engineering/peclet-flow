@@ -1,5 +1,5 @@
 // cfd-gpu — the PRODUCTION CutcellMG, multi-rank. Folds the distributed halo + reductions into the real
-// class (gated behind CFD_MPI) rather than a test-only copy.
+// class (gated behind PECLET_FLOW_MPI) rather than a test-only copy.
 //
 // Solves the periodic cut-cell pressure Poisson by the real CutcellMG::solvePCG (MG-PCG: CG preconditioned
 // by one symmetric V-cycle) two ways: distributed (initMpi over MPI_COMM_WORLD) and single-rank (init() on
@@ -19,12 +19,12 @@
 
 #include "mac_cutcell_mg.hpp"
 
-#include "tpx/common/types.hpp"
-#include "tpx/decomp/block_decomposer.hpp"
-#include "tpx/halo/grid_halo_topology.hpp"
+#include "peclet/core/common/types.hpp"
+#include "peclet/core/decomp/block_decomposer.hpp"
+#include "peclet/core/halo/grid_halo_topology.hpp"
 
-using tpx::Index; using tpx::IVec;
-using sdflow::CutcellMG; using sdflow::CCField; using sdflow::CCConst; using sdflow::C3;
+using peclet::core::Index; using peclet::core::IVec;
+using peclet::flow::CutcellMG; using peclet::flow::CCField; using peclet::flow::CCConst; using peclet::flow::C3;
 
 static constexpr int G = 1, NLEV = 4;
 static double source(int gx, int gy, int gz, IVec<3> gs) {

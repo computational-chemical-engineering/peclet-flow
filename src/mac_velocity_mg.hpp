@@ -14,8 +14,8 @@
 /// velocity block: the IBM stencil + RHS + solution need no g=2<->g=1 bridging. Reuses restrictAvg /
 /// prolongAdd (mac_cutcell_mg) and ibmRbgsStencilColor (the pin-aware variable-coeff RB-GS smoother ==
 /// mg_smooth_var_k). Runs on any Kokkos backend.
-#ifndef CFD_MAC_VELOCITY_MG_HPP
-#define CFD_MAC_VELOCITY_MG_HPP
+#ifndef PECLET_FLOW_MAC_VELOCITY_MG_HPP
+#define PECLET_FLOW_MAC_VELOCITY_MG_HPP
 
 #include <Kokkos_Core.hpp>
 #include <functional>
@@ -25,7 +25,7 @@
 #include "mac_ibm.hpp"              // ibmRbgsStencilColor (pin smoother), MConst
 #include "staggered_advection.hpp"  // fou_operator_aniso (upwind-convective coarse op)
 
-namespace sdflow {
+namespace peclet::flow {
 
 // pin-aware variable-coefficient residual (mg_residual_var_k): r = 0 at pinned (classified-solid) cells,
 // else b - A x with the float operator accumulated in double.
@@ -33,7 +33,7 @@ inline void residualVarPin(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC 
                            FPC AT, CCConst pin, C3 e, int g) {
   CCExec space; const bool hasPin = (pin.extent(0) != 0);
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for("sdflow::vmg_resid", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  Kokkos::parallel_for("peclet::flow::vmg_resid", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
     KOKKOS_LAMBDA(int lx, int ly, int lz) {
       const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
       const long i = (long)lx + (long)ly * sy + (long)lz * sz;
@@ -52,7 +52,7 @@ inline void prolongMasked(CCField fine, CCConst coarse, CCConst mask, C3 fext, C
                           C3 ratio, double eps) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for("sdflow::vmg_prolong_masked", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
+  Kokkos::parallel_for("peclet::flow::vmg_prolong_masked", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
     KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
       const long fi = (long)(ifx + g) + (long)(ify + g) * fext.x + (long)(ifz + g) * (long)fext.x * fext.y;
       if (mask(fi) < eps) return;  // no correction into a cut/solid fine cell
@@ -80,7 +80,7 @@ inline void buildVelocityStaircase(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV A
                                    C3 e, int g, double bx, double by, double bz, double thresh, double idiag) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for("sdflow::vmg_staircase", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  Kokkos::parallel_for("peclet::flow::vmg_staircase", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
     KOKKOS_LAMBDA(int lx, int ly, int lz) {
       const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
       if (theta(i) < thresh) {  // classified solid -> identity row (smoother/residual pin it to 0)
@@ -103,7 +103,7 @@ inline void buildAdvCoarse(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV A
                            double sx, double sy, double sz, double idiag) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for("sdflow::vmg_adv_coarse", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  Kokkos::parallel_for("peclet::flow::vmg_adv_coarse", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
     KOKKOS_LAMBDA(int x, int y, int z) {
       const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
       double cC = idiag + 2.0 * (bx + by + bz), cxm = -bx, cxp = -bx, cym = -by, cyp = -by, czm = -bz, czp = -bz;
@@ -122,7 +122,7 @@ inline void buildConstAniso(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV 
                             double by, double bz, double idiag) {
   CCExec space; const std::size_t n = (std::size_t)e.x * e.y * e.z;
   const float c = (float)(idiag + 2.0 * (bx + by + bz)), nx = (float)(-bx), ny = (float)(-by), nz = (float)(-bz);
-  Kokkos::parallel_for("sdflow::vmg_const_aniso", Kokkos::RangePolicy<CCExec>(space, 0, n),
+  Kokkos::parallel_for("peclet::flow::vmg_const_aniso", Kokkos::RangePolicy<CCExec>(space, 0, n),
     KOKKOS_LAMBDA(std::size_t i) { AC(i) = c; AW(i) = nx; AE(i) = nx; AS(i) = ny; AN(i) = ny; AB(i) = nz; AT(i) = nz; });
 
 }
@@ -134,7 +134,7 @@ inline void boundaryFold(FPV AC, C3 e, int g, int a, int s, double beta) {
   CCExec space; int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
   const int b = (a + 1) % 3, c = (a + 2) % 3; const long sa = st[a], sb = st[b], sc = st[c];
   const int bic = (s == 0) ? g : (dims[a] - g - 1);  // boundary-adjacent inner cell along a
-  Kokkos::parallel_for("sdflow::vmg_bc_fold", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+  Kokkos::parallel_for("peclet::flow::vmg_bc_fold", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
     KOKKOS_LAMBDA(int p0, int p1) { const long i = (long)p0 * sb + (long)p1 * sc + (long)bic * sa;
       AC(i) = (float)((double)AC(i) + beta); });
 
@@ -145,7 +145,7 @@ inline void boundaryFold(FPV AC, C3 e, int g, int a, int s, double beta) {
 inline void fillBcGhost(CCField x, C3 e, int g, int a, int s, int dirichlet) {
   CCExec space; int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
   const int b = (a + 1) % 3, c = (a + 2) % 3; const long sa = st[a], sb = st[b], sc = st[c]; const int na = dims[a];
-  Kokkos::parallel_for("sdflow::vmg_fill_bc_ghost", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+  Kokkos::parallel_for("peclet::flow::vmg_fill_bc_ghost", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
     KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
       if (s == 0) { const double v = dirichlet ? 0.0 : x(base + (long)g * sa); for (int ia = 0; ia < g; ++ia) x(base + (long)ia * sa) = v; }
       else { const double v = dirichlet ? 0.0 : x(base + (long)(na - g - 1) * sa); for (int ia = na - g; ia < na; ++ia) x(base + (long)ia * sa) = v; } });
@@ -156,20 +156,20 @@ inline void fillBcGhost(CCField x, C3 e, int g, int a, int s, int dirichlet) {
 inline void zeroPlane(CCField m, C3 e, int axis, int idx) {
   CCExec space; int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
   const int b = (axis + 1) % 3, c = (axis + 2) % 3; const long sa = st[axis], sb = st[b], sc = st[c];
-  Kokkos::parallel_for("sdflow::vmg_zero_plane", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+  Kokkos::parallel_for("peclet::flow::vmg_zero_plane", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
     KOKKOS_LAMBDA(int p0, int p1) { m((long)p0 * sb + (long)p1 * sc + (long)idx * sa) = 0.0; });
 
 }
 
 inline void thresholdMask(CCField m, CCConst theta, double thresh) {  // m = 1 where theta < thresh (solid)
   CCExec space; std::size_t n = m.extent(0); CCField mm = m; CCConst th = theta;
-  Kokkos::parallel_for("sdflow::vmg_threshold", Kokkos::RangePolicy<CCExec>(space, 0, n),
+  Kokkos::parallel_for("peclet::flow::vmg_threshold", Kokkos::RangePolicy<CCExec>(space, 0, n),
     KOKKOS_LAMBDA(std::size_t i) { mm(i) = (th(i) < thresh) ? 1.0 : 0.0; });
 
 }
 inline void mulMask(CCField r, CCConst m) {  // r *= m (clean-fluid residual filter)
   CCExec space; std::size_t n = r.extent(0); CCField rr = r; CCConst mm = m;
-  Kokkos::parallel_for("sdflow::vmg_mulmask", Kokkos::RangePolicy<CCExec>(space, 0, n),
+  Kokkos::parallel_for("peclet::flow::vmg_mulmask", Kokkos::RangePolicy<CCExec>(space, 0, n),
     KOKKOS_LAMBDA(std::size_t i) { rr(i) *= mm(i); });
 
 }
@@ -185,7 +185,7 @@ class VelocityMG {
     CCField x, rhs, res, theta, pin, resMask;
     CCField advU, advV, advW;  // restricted advecting velocity (upwind-convective coarse op; L>=1)
     FPV AC, AW, AE, AS, AN, AB, AT;
-#ifdef CFD_MPI
+#ifdef PECLET_FLOW_MPI
     std::shared_ptr<GridHaloTopology<3>> halo;                       // per-level topology (decomposed)
     std::shared_ptr<GridHalo<double>> dev;   // per-level ghost exchange (ghost width G=2)
 #endif
@@ -218,7 +218,7 @@ class VelocityMG {
     }
     lv_[0].resMask = CCField("vmg_resmask0", lv_[0].n);  // level 0 only (clean-fluid exclude, staircase path)
   }
-#ifdef CFD_MPI
+#ifdef PECLET_FLOW_MPI
   // Multi-rank velocity-MG: coarsen the GLOBAL grid 2:1 per level; each level gets its own G=2 transport-core
   // halo. No global reductions here (the velocity op is non-singular -> no mean removal, no Krylov), so the
   // fold is just fill()->exchange + the block-origin red-black parity. Single-rank (size 1) == init().
@@ -231,7 +231,7 @@ class VelocityMG {
     for (int L = 0; L < nLevels; ++L) {
       Level v;
       v.halo = std::make_shared<GridHaloTopology<3>>();
-      tpx::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), tpx::IVec<3>{gs.x, gs.y, gs.z});
+      peclet::core::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), peclet::core::IVec<3>{gs.x, gs.y, gs.z});
       v.halo->buildTopology(dec, rank, G, per, comm);
       v.dev = std::make_shared<GridHalo<double>>(); v.dev->init(*v.halo);
       const auto& idx = v.halo->indexer();
@@ -324,7 +324,7 @@ class VelocityMG {
   // Re-impose the full velocity BC on the level-0 iterate before each smoother colour + the residual (exactly
   // as the RB-GS path does via fillVelGhosts(c,1)): the const-coeff smoother updates the held Dirichlet faces,
   // so without this the boundary corners drift (~2% vs RB-GS, as the CUDA vmg also does). With it the vel-MG
-  // converges to the RB-GS fixed point. SdflowIbm supplies this per component before the solve.
+  // converges to the RB-GS fixed point. IbmSolver supplies this per component before the solve.
   void setBcApplyL0(std::function<void(CCField)> fn) { bcApplyL0_ = std::move(fn); }
   // const-coeff aniso operator + no-slip/inflow/outflow boundary fold for component comp, on EVERY level.
   // nu_dt = mu, idiag = rho/dt, h0 = 1. Rebuilt per component (the fold is component-dependent). No pin.
@@ -404,7 +404,7 @@ class VelocityMG {
   // left as the caller / correction set them -- the boundary fold + held ghost represent the wall).
   // Distributed (periodic IBM path): the per-level transport-core halo (cross-rank + periodic in one call).
   void fill(Level& lv, CCField f) {
-#ifdef CFD_MPI
+#ifdef PECLET_FLOW_MPI
     if (distributed_ && !bcMode_) { lv.dev->exchange(f); return; }
 #endif
     for (int a = 0; a < 3; ++a)
@@ -426,7 +426,7 @@ class VelocityMG {
     int dims[3] = {e.x, e.y, e.z}; long st[3] = {1, e.x, (long)e.x * e.y};
     const int a = axis, b = (axis + 1) % 3, c = (axis + 2) % 3;
     const long sa = st[a], sb = st[b], sc = st[c]; const int N = N3[a]; CCField ff = f;
-    Kokkos::parallel_for("sdflow::vmg_pfill", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+    Kokkos::parallel_for("peclet::flow::vmg_pfill", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
         for (int gl = 0; gl < G; ++gl) { ff(base + (long)gl * sa) = ff(base + (long)(gl + N) * sa);
           ff(base + (long)(G + N + gl) * sa) = ff(base + (long)(G + gl) * sa); } });
@@ -443,6 +443,6 @@ class VelocityMG {
   bool distributed_ = false;                // multi-rank (initMpi); periodic IBM path -> fill() exchanges
 };
 
-}  // namespace sdflow
+}  // namespace peclet::flow
 
-#endif  // CFD_MAC_VELOCITY_MG_HPP
+#endif  // PECLET_FLOW_MAC_VELOCITY_MG_HPP

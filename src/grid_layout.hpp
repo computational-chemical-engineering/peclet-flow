@@ -1,21 +1,21 @@
 /// @file
 /// @brief sdflow — GridLayout policy traits (placement of the velocity unknowns).
 ///
-/// The orchestrator sdflow::SdflowSolver<Grid> is templated on a GridLayout policy that supplies the
+/// The orchestrator peclet::flow::Solver<Grid> is templated on a GridLayout policy that supplies the
 /// grid-position-dependent pieces of the solver. Phase 1 of the collocated-grid plan
 /// (doc/sdflow_colocated_plan.md) factors out the single seam needed to keep the staggered path
 /// bit-identical: the per-component velocity sample offset that the cut-cell IBM overlay / openness /
 /// volume-fraction kernels are built at. The Staggered policy places u,v,w on the low (-x/-y/-z) faces;
 /// the future Colocated policy will place all three components at the cell center (offset 0) and add the
 /// face-averaging + approximate-projection hooks. Header-only, constexpr — no runtime cost.
-#ifndef CFD_GRID_LAYOUT_HPP
-#define CFD_GRID_LAYOUT_HPP
+#ifndef PECLET_FLOW_GRID_LAYOUT_HPP
+#define PECLET_FLOW_GRID_LAYOUT_HPP
 
-#include "mac_ibm.hpp"               // sdflow::Off3
+#include "mac_ibm.hpp"               // peclet::flow::Off3
 #include "staggered_advection.hpp"   // sadv::advect / advect_fou / fou_operator
 #include "colocated_advection.hpp"   // cadv::advect / advect_fou / fou_operator
 
-namespace sdflow {
+namespace peclet::flow {
 
 // A GridLayout policy supplies the two grid-position-dependent pieces the orchestrator needs:
 //   - offset(c): where component c's velocity unknown sits (drives the cut-cell IBM overlay / openness /
@@ -82,6 +82,6 @@ struct Colocated {
   }
 };
 
-}  // namespace sdflow
+}  // namespace peclet::flow
 
-#endif  // CFD_GRID_LAYOUT_HPP
+#endif  // PECLET_FLOW_GRID_LAYOUT_HPP

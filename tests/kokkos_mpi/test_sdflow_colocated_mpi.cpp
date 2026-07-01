@@ -1,7 +1,7 @@
 // cfd-gpu — the assembled multi-rank COLLOCATED solver step (collocated plan phase 5c).
 //
 // The collocated counterpart of test_sdflow_mpi: solves creeping (Stokes) flow through a periodic 2x2x2
-// sphere packing with SdflowSolver<Colocated>, two ways -- single-rank on the full grid, and distributed
+// sphere packing with Solver<Colocated>, two ways -- single-rank on the full grid, and distributed
 // (each rank constructs the solver with its ORB block dims, calls initMpi, setSolid with its LOCAL SDF
 // block). The collocated approximate (MAC) projection runs multi-rank on exactly the same transport-core
 // halo machinery as the staggered solver: the cell-velocity halo feeds centerToFace, the projected face
@@ -15,13 +15,13 @@
 #include <cstdio>
 #include <vector>
 
-#include "sdflow_ibm.hpp"
+#include "flow_ibm.hpp"
 
-#include "tpx/common/types.hpp"
-#include "tpx/decomp/block_decomposer.hpp"
+#include "peclet/core/common/types.hpp"
+#include "peclet/core/decomp/block_decomposer.hpp"
 
-using tpx::IVec;
-using Colo = sdflow::SdflowSolver<sdflow::Colocated>;
+using peclet::core::IVec;
+using Colo = peclet::flow::Solver<peclet::flow::Colocated>;
 
 static constexpr int N = 32, STEPS = 120;
 static constexpr double RHO = 1.0, MU = 0.1, F = 1e-3, DT = 60.0;
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     const double gcells = (double)N * N * N;
 
     // --- distributed solve ---
-    tpx::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), IVec<3>{N, N, N});
+    peclet::core::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), IVec<3>{N, N, N});
     auto blk = dec.block(rank);
     const int ox = (int)blk.origin[0], oy = (int)blk.origin[1], oz = (int)blk.origin[2];
     const int lnx = (int)blk.size[0], lny = (int)blk.size[1], lnz = (int)blk.size[2];

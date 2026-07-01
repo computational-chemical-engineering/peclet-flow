@@ -11,8 +11,8 @@
 /// NOTE: in phase 2 (no pressure) the advecting velocity is the plain cell->face average of the stored
 /// cell velocities. Once the approximate projection lands (phase 3), the natural advecting field is the
 /// projected, divergence-free face velocity — this header's adv_vel is where that swap happens.
-#ifndef CFD_COLOCATED_ADVECTION_HPP
-#define CFD_COLOCATED_ADVECTION_HPP
+#ifndef PECLET_FLOW_COLOCATED_ADVECTION_HPP
+#define PECLET_FLOW_COLOCATED_ADVECTION_HPP
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
@@ -99,4 +99,4 @@ KOKKOS_INLINE_FUNCTION double advect_fou(int comp, int x, int y, int z, A U, A V
 
 }  // namespace cadv
 
-#endif  // CFD_COLOCATED_ADVECTION_HPP
+#endif  // PECLET_FLOW_COLOCATED_ADVECTION_HPP

@@ -4,7 +4,7 @@
 // Solves a periodic implicit-diffusion system ((idiag)I - beta*Lap) u = b by Red-Black Gauss-Seidel, with
 // the field decomposed over MPI ranks (ORB) and the per-colour ghost exchange done by transport-core's
 // portable GPU-resident halo (GridHalo) instead of a single-process periodic fill. The cfd
-// CCField and tpx::View<double> are the SAME Kokkos type (x-fastest, default memory space), so the solver
+// CCField and peclet::core::View<double> are the SAME Kokkos type (x-fastest, default memory space), so the solver
 // field exchanges directly. The distributed RB-GS is algebraically identical to the single-rank sweep (the
 // halo supplies the same neighbour values + the GLOBAL red-black parity via the block's global origin), so
 // the multi-rank result must equal a serial reference to machine precision. Validates the consumption
@@ -17,23 +17,23 @@
 #include <cstdio>
 #include <vector>
 
-#include "mac_stencils.hpp"  // sdflow::diffSmoothColor, I3, SField
+#include "mac_stencils.hpp"  // peclet::flow::diffSmoothColor, I3, SField
 
-#include "tpx/common/types.hpp"
-#include "tpx/common/view.hpp"
-#include "tpx/decomp/block_decomposer.hpp"
-#include "tpx/halo/grid_halo_topology.hpp"
-#include "tpx/halo/grid_halo.hpp"
+#include "peclet/core/common/types.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/core/decomp/block_decomposer.hpp"
+#include "peclet/core/halo/grid_halo_topology.hpp"
+#include "peclet/core/halo/grid_halo.hpp"
 
-using tpx::Index;
-using tpx::IVec;
-using tpx::wrap;
-using tpx::decomp::BlockDecomposer;
-using tpx::halo::GridHalo;
-using tpx::halo::GridHaloTopology;
-using sdflow::diffSmoothColor;
-using sdflow::I3;
-using sdflow::SField;
+using peclet::core::Index;
+using peclet::core::IVec;
+using peclet::core::wrap;
+using peclet::core::decomp::BlockDecomposer;
+using peclet::core::halo::GridHalo;
+using peclet::core::halo::GridHaloTopology;
+using peclet::flow::diffSmoothColor;
+using peclet::flow::I3;
+using peclet::flow::SField;
 
 static constexpr int kDim = 3;
 static constexpr int G = 1;                 // diffusion stencil reach
@@ -48,11 +48,11 @@ static double source(int gx, int gy, int gz, IVec<kDim> gs) {
 
 // periodic ghost fill (3 axes, width G) of a single-block extended field on device.
 static void periodicFill(SField f, I3 e) {
-  sdflow::SExec sp; long st[3] = {1, e.x, (long)e.x * e.y}; int dims[3] = {e.x, e.y, e.z};
+  peclet::flow::SExec sp; long st[3] = {1, e.x, (long)e.x * e.y}; int dims[3] = {e.x, e.y, e.z};
   int N3[3] = {e.x - 2 * G, e.y - 2 * G, e.z - 2 * G};
   for (int a = 0; a < 3; ++a) {
     const int b = (a + 1) % 3, c = (a + 2) % 3; const long sa = st[a], sb = st[b], sc = st[c]; const int N = N3[a];
-    Kokkos::parallel_for("ref_pfill", Kokkos::MDRangePolicy<sdflow::SExec, Kokkos::Rank<2>>(sp, {0, 0}, {dims[b], dims[c]}),
+    Kokkos::parallel_for("ref_pfill", Kokkos::MDRangePolicy<peclet::flow::SExec, Kokkos::Rank<2>>(sp, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) { const long base = (long)p0 * sb + (long)p1 * sc;
         for (int gl = 0; gl < G; ++gl) { f(base + (long)gl * sa) = f(base + (long)(gl + N) * sa);
           f(base + (long)(G + N + gl) * sa) = f(base + (long)(G + gl) * sa); } });
