@@ -19,14 +19,14 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-find_package(Kokkos CONFIG REQUIRED)
-message(STATUS "cfd-gpu: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES})")
-
-# nanobind (shared suite helper) + the header-only View<->ndarray zero-copy bridge in transport-core.
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
-include(SuiteNanobind)
-suite_require_nanobind()
-set(TPX_INC "${CMAKE_CURRENT_SOURCE_DIR}/../transport-core/include")
+# Dependencies via the vendored PecletDeps helper: an installed Kokkos prefix + sibling checkout for the
+# dev/suite build, or FetchContent-built Kokkos + fetched transport-core headers for a self-contained
+# sdist/wheel (cibuildwheel). See cmake/PecletDeps.cmake.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(PecletDeps)
+peclet_require_kokkos()
+peclet_require_nanobind()
+peclet_sibling_include(transport-core "${PECLET_TPX_TAG}" "../transport-core" TPX_INC)
 
 # sdflow -- the cut-cell IBM Navier-Stokes solver (single-rank Python module).
 # NB_STATIC: bundle nanobind's runtime into the module (no shared libnanobind to ship); the Kokkos

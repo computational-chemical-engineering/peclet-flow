@@ -42,4 +42,21 @@ cmake.version = ">=3.24"
 # (guarded by SKBUILD) into the peclet namespace; disable package auto-discovery so nothing else is added.
 wheel.install-dir = "."
 wheel.packages = []
-sdist.include = ["src", "packaging", "CMakeLists.txt", "README.md", "LICENSE"]
+sdist.include = ["src", "packaging", "cmake", "CMakeLists.txt", "README.md", "LICENSE"]
+
+# ---------------------------------------------------------------------------
+# Self-contained redistributable CPU wheels (cibuildwheel). PECLET_VENDOR_DEPS=ON makes the build
+# FetchContent-build Kokkos (OpenMP+Serial) + the transport-core headers, so the wheel needs no prefix
+# and runs multicore on any x86-64 Linux. GPU/HIP + MPI stay a source (sdist) / container build — a
+# portable GPU wheel is impossible (arch x CUDA/ROCm x MPI-ABI). Linux-only: the Kokkos build needs a
+# recent toolchain (manylinux_2_28 = GCC 12+, for C++20).
+# ---------------------------------------------------------------------------
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux* *_i686 pp*"
+build-frontend = "build"
+manylinux-x86_64-image = "manylinux_2_28"
+test-command = "python -c \"import peclet.flow as f; from peclet.flow import pnm; assert hasattr(f,'Solver'); print('peclet.flow', f.execution_space)\""
+
+[tool.cibuildwheel.environment]
+PECLET_VENDOR_DEPS = "ON"
