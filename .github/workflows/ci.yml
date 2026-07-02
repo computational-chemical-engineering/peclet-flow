@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build libomp-dev python3-dev python3-pip
-          python3 -m pip install --upgrade pip pybind11 numpy
+          python3 -m pip install --upgrade pip nanobind numpy
 
       - name: Cache Kokkos install
         id: kokkos-cache
@@ -50,11 +50,11 @@ jobs:
       - name: Build sdflow + pnm modules
         run: |
           cmake -S . -B build \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install;$(python3 -m pybind11 --cmakedir)"
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"
           cmake --build build -j
 
       - name: Import smoke test
-        run: PYTHONPATH=$PWD/build python3 -c "import sdflow, pnm; print('sdflow + pnm import OK')"
+        run: PYTHONPATH=$PWD/build python3 -c "import peclet.flow, peclet.flow.pnm; print('peclet.flow + pnm import OK')"
 
       - name: Build + run Kokkos kernel unit tests (tests/kokkos)
         run: |
