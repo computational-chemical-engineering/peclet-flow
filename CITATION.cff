@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "peclet-flow: GPU-accelerated incompressible Navier–Stokes solver for flow in complex geometry"
+abstract: >-
+  A performance-portable incompressible Navier–Stokes solver for flow in complex (porous-media) geometry:
+  staggered MAC grid, a signed-distance-field description of the solid, a cut-cell Immersed Boundary
+  Method, and pressure projection with a geometric multigrid Poisson solve. Written in Kokkos C++
+  (CUDA/HIP/OpenMP), MPI-optional on the peclet-core decomposition, and exposed to Python via nanobind.
+  Includes a pore-network-extraction module (pnm).
+type: software
+authors:
+  - family-names: Peters
+    given-names: Frank
+    email: e.a.j.f.peters@gmail.com
+    affiliation: "Eindhoven University of Technology"
+version: 0.2.0
+date-released: "2026-07-02"
+license: MIT
+doi: 10.5281/zenodo.21132439
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21132439
+    description: "Concept DOI (all versions) — always resolves to the latest release"
+  - type: doi
+    value: 10.5281/zenodo.21132440
+    description: "Version DOI for v0.2.0"
+repository-code: "https://github.com/computational-chemical-engineering/peclet-flow"
+keywords:
+  - computational fluid dynamics
+  - Navier–Stokes
+  - immersed boundary method
+  - signed distance function
+  - porous media
+  - multigrid
+  - Kokkos
+  - GPU computing

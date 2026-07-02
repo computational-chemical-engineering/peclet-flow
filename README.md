@@ -4,6 +4,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/peclet-flow.svg)](https://pypi.org/project/peclet-flow/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/computational-chemical-engineering/peclet-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/computational-chemical-engineering/peclet-flow/actions/workflows/ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21132439.svg)](https://doi.org/10.5281/zenodo.21132439)
 
 GPU-accelerated incompressible **Navier–Stokes** solver for flow in complex geometry, built around a
 staggered **MAC** grid, a signed-distance-field (**SDF**) description of the solid, a cut-cell **Immersed
