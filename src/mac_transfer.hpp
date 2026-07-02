@@ -1,10 +1,10 @@
 /// @file
 /// @brief flow — portable (Kokkos) multigrid transfer operators + projection velocity correction.
 ///
-/// Kokkos port of mg_restrict_k / mg_prolong_k (mac_multigrid.cuh) and correct_k (distributed_ns.cuh):
-/// per-axis-ratio averaging restriction, trilinear prolongation (added to the fine solution), and the
-/// staggered pressure-gradient velocity correction. Faithful copies; per-axis ratio (1 or 2) supports
-/// semi-coarsening. Runs on any Kokkos backend.
+/// Kokkos port of mg_restrict_k / mg_prolong_k (mac_multigrid.cuh) and correct_k
+/// (distributed_ns.cuh): per-axis-ratio averaging restriction, trilinear prolongation (added to the
+/// fine solution), and the staggered pressure-gradient velocity correction. Faithful copies;
+/// per-axis ratio (1 or 2) supports semi-coarsening. Runs on any Kokkos backend.
 #ifndef PECLET_FLOW_MAC_TRANSFER_HPP
 #define PECLET_FLOW_MAC_TRANSFER_HPP
 
@@ -34,14 +34,15 @@ inline void restrict_(TField coarse, TConst fine, T3 cext, T3 fext, int g, T3 ci
         for (int dz = 0; dz < ratio.z; ++dz)
           for (int dy = 0; dy < ratio.y; ++dy)
             for (int dx = 0; dx < ratio.x; ++dx) {
-              const int fx = ratio.x * icx + dx + g, fy = ratio.y * icy + dy + g, fz = ratio.z * icz + dz + g;
-              sum += fine(static_cast<long>(fx) + static_cast<long>(fy) * fsy + static_cast<long>(fz) * fsz);
+              const int fx = ratio.x * icx + dx + g, fy = ratio.y * icy + dy + g,
+                        fz = ratio.z * icz + dz + g;
+              sum += fine(static_cast<long>(fx) + static_cast<long>(fy) * fsy +
+                          static_cast<long>(fz) * fsz);
             }
         const long ci = static_cast<long>(icx + g) + static_cast<long>(icy + g) * cext.x +
                         static_cast<long>(icz + g) * static_cast<long>(cext.x) * cext.y;
         coarse(ci) = sum / static_cast<double>(ratio.x * ratio.y * ratio.z);
       });
-
 }
 
 KOKKOS_INLINE_FUNCTION double trilerp(TConst c, double x, double y, double z, T3 cext) {
@@ -61,7 +62,8 @@ KOKKOS_INLINE_FUNCTION double trilerp(TConst c, double x, double y, double z, T3
   return c0 * (1 - wz) + c1 * wz;
 }
 
-// Trilinear prolongation of the coarse correction, ADDED to the fine field (coarse ghost pre-filled).
+// Trilinear prolongation of the coarse correction, ADDED to the fine field (coarse ghost
+// pre-filled).
 inline void prolong(TField fine, TConst coarse, T3 fext, T3 cext, int g, T3 finner, T3 ratio) {
   TExec space;
   using MD = Kokkos::MDRangePolicy<TExec, Kokkos::Rank<3>>;
@@ -75,7 +77,6 @@ inline void prolong(TField fine, TConst coarse, T3 fext, T3 cext, int g, T3 finn
                         static_cast<long>(ifz + g) * static_cast<long>(fext.x) * fext.y;
         fine(fi) += trilerp(coarse, cx, cy, cz, cext);
       });
-
 }
 
 // Projection velocity correction: u -= grad(phi) on the staggered faces, over inner cells.
@@ -92,7 +93,6 @@ inline void correct(TField u, TField v, TField w, TConst phi, T3 e, int g) {
         v(i) -= phi(i) - phi(i - sy);
         w(i) -= phi(i) - phi(i - sz);
       });
-
 }
 
 }  // namespace peclet::flow
