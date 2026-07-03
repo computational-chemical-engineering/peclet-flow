@@ -24,6 +24,12 @@ endif()
 # leaves the single-rank module byte-identical.
 option(PECLET_FLOW_MPI "Build the flow module with the distributed (MPI) step exposed" OFF)
 
+# Redistributable single-GPU CUDA wheel: libcudart is provided by the `nvidia-cuda-runtime` PyPI
+# dependency (installed to site-packages/nvidia/cu13/lib), not the system. ON sets each module's RPATH
+# to reach that wheel from its install location so `import peclet.flow` works with no system CUDA. Used
+# by the peclet-flow-cu13 packaging (packaging/pyproject-cuda.toml + the release workflow's cuda job).
+option(PECLET_CUDA_RUNTIME_WHEEL "RPATH the modules to the nvidia-cuda-runtime wheel's libcudart" OFF)
+
 # Dependencies via the vendored PecletDeps helper: an installed Kokkos prefix + sibling checkout for the
 # dev/suite build, or FetchContent-built Kokkos + fetched core headers for a self-contained
 # sdist/wheel (cibuildwheel). See cmake/PecletDeps.cmake.
@@ -76,6 +82,16 @@ target_include_directories(pnm PRIVATE src "${TPX_INC}")
 target_link_libraries(pnm PRIVATE Kokkos::kokkos)
 if(Kokkos_ENABLE_HIP)
   target_link_options(pnm PRIVATE -Wl,--no-gc-sections)
+endif()
+
+# Redistributable CUDA wheel: point each module at the nvidia-cuda-runtime wheel's libcudart via a
+# relative $ORIGIN RPATH (up to site-packages, then into nvidia/cu13/lib). sdflow lives at peclet/flow,
+# pnm one level deeper at peclet/flow/pnm.
+if(PECLET_CUDA_RUNTIME_WHEEL)
+  set_target_properties(sdflow PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../../nvidia/cu13/lib" INSTALL_RPATH_USE_LINK_PATH OFF)
+  set_target_properties(pnm PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../../../nvidia/cu13/lib" INSTALL_RPATH_USE_LINK_PATH OFF)
 endif()
 
 # --- pip / scikit-build-core install rule -------------------------------------------------------
