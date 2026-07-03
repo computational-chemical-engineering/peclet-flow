@@ -21,7 +21,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "peclet-flow"
-version = "0.2.0"
+version = "0.2.1"
 description = "peclet.flow — Kokkos cut-cell IBM incompressible Navier-Stokes solver (+ pnm pore extraction)"
 readme = "README.md"
 requires-python = ">=3.10"

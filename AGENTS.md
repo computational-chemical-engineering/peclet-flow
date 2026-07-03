@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 - `src/`: header-only **Kokkos** C++ sources for the CFD solver + **nanobind** bindings (`.hpp` + `.cpp`; no `.cu/.cuh` — CUDA retired).
 - `tests/`: C++ Kokkos kernel tests (`tests/kokkos/`) + multi-rank ctests (`tests/kokkos_mpi/test_*.cpp`) + a couple of pore-extraction Python scripts.
-- `scripts/`: `flow` verification/analysis scripts (e.g., `verify_poiseuille_sdflow.py`).
+- `scripts/`: `flow` verification/analysis scripts (e.g., `verify_poiseuille_flow.py`).
 - `build/`: CMake build output (expects `build/peclet.flow.*.so` + `build/pnm.*.so`).
 - `doc/`, `notebooks/`, `data/`: design notes, experiments, and input datasets.
 
@@ -16,7 +16,7 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" && cm
 
 # Activate venv and run flow verification (canonical scripts are scripts/verify_*_sdflow.py)
 source .venv/bin/activate
-PYTHONPATH=$PWD/build python scripts/verify_poiseuille_sdflow.py
+PYTHONPATH=$PWD/build python scripts/verify_poiseuille_flow.py
 PYTHONPATH=$PWD/build python scripts/verify_periodic_spheres_sdflow.py
 PYTHONPATH=$PWD/build python scripts/verify_lid_cavity_sdflow.py
 ```

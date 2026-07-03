@@ -138,6 +138,14 @@ class Solver {
   void setPressureLevels(int levels) {
     nLevels_ = levels < 1 ? 1 : levels;
   }  // MG depth (CUDA default 4)
+  // Backflow stabilization at outflow faces (Bazilevs 2009 / Esmaily-Moghadam 2011): beta in [0,1]
+  // scales the dissipative outflow term that prevents backflow divergence (0 = off). Default 0.2.
+  void setBackflowStab(double beta) { backflowBeta_ = beta < 0.0 ? 0.0 : beta; }
+  // Deferred-correction advection: on (default) = implicit FOU operator + explicit (HO - FOU)
+  // high-order correction (2nd order; HO = SOU by default, or Koren TVD via set_advection_scheme).
+  // off = pure implicit FOU (1st order, more dissipative, unconditionally stable) -- useful for very
+  // sharp shear layers where the (unlimited SOU) explicit correction overshoots and destabilizes.
+  void setDeferredCorrection(bool on) { deferredCorr_ = on; }
   // Chebyshev pressure driver (CUDA set_pressure_chebyshev): communication-light alternative to
   // MG-PCG -- Chebyshev semi-iteration preconditioned by one symmetric V-cycle, no per-iteration
   // global dot-products. Spectral bounds of M^{-1}A are estimated once (lazily) on the first solve
@@ -273,6 +281,19 @@ class Solver {
   // flow).
   void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure) {
     cutcellPressure_ = cutcellPressure;
+    hasSolid_ = false;  // does the geometry actually contain solid? (all-fluid set_pressure_geometry
+    for (double v : sdfInner)  // passes sd>0 everywhere -> stays false, keeping the channel/BFS path)
+      if (v < 0.0) {
+        hasSolid_ = true;
+        break;
+      }
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {  // a solid anywhere in the global domain enables the IBM momentum path
+      int local = hasSolid_ ? 1 : 0, global = 0;
+      MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MAX, comm_);
+      hasSolid_ = global != 0;
+    }
+#endif
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       // Multi-rank: sdfInner is THIS rank's LOCAL inner block; fill the inner cells, then
@@ -402,11 +423,18 @@ class Solver {
       for (int c = 0; c < 3; ++c)
         buildRhs(c);  // RHS from u^n base + advection lagged at u^k
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
-      // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). IBM
-      // path only; the domain-BC FOU operator lives in the velocity-MG levels (separate milestone).
-      if (implicitFou_ && advect_ && !hasBc_)
+      // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies to
+      // the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC stencil path
+      // (inflow/outflow) -- implicitAdv() -> fully-implicit upwind advection (stable at large dt). The
+      // velocity-MG BC path keeps its own FOU coarse operator.
+      if (implicitAdv() && (!hasBc_ || !useVelocityMg_))
         for (int c = 0; c < 3; ++c)
           buildAdvStencil(c);
+      // Outflow backflow stabilization: dissipate reverse flow at the outlet in the momentum operator
+      // used by the domain-BC stencil smoother (prevents backflow divergence). Inert without reversal.
+      if (bcStencilPath() && backflowBeta_ > 0.0 && hasOutflow_)
+        for (int c = 0; c < 3; ++c)
+          applyBackflowStab(c);
       // upwind-convective velocity-MG: restrict the (frozen u^k) advecting velocity to the coarse
       // levels ONCE, before the per-component solves update it (shared across the 3 momentum
       // components).
@@ -508,6 +536,16 @@ class Solver {
   };
 
  public:  // nvcc forbids extended __host__ __device__ lambdas inside private/protected members.
+  // Advection treated implicitly (implicit-FOU upwind + deferred correction): the user opt-in
+  // (set_implicit_advection) on any path, OR the DEFAULT on the domain-BC path (inflow/outflow),
+  // where explicit advection is unstable. The velocity-MG BC path carries its own FOU coarse operator,
+  // so the default does not apply there (it still honours the explicit opt-in).
+  bool implicitAdv() const { return advect_ && (implicitFou_ || (hasBc_ && !useVelocityMg_)); }
+  // Domain-BC momentum solved via the Robust-Scaled cut-cell / FOU stencil smoother (ibmRbgsStencilColor
+  // + reflection-ghost BCs), not the all-fluid const-coeff fold. Needed when (a) an immersed solid is
+  // present (cut-cell no-slip must be in the operator), or (b) advection is implicit (the FOU upwind
+  // lives in the stencil -> stable at large dt, the fully-implicit design).
+  bool bcStencilPath() const { return hasBc_ && !useVelocityMg_ && (hasSolid_ || implicitAdv()); }
   void rebuildStencils() {
     const double idiag = rho_ / dt_, beta = mu_;
     for (int c = 0; c < 3; ++c) {
@@ -615,10 +653,18 @@ class Solver {
     CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u), uu = CCConst(C[c].u),
             un = CCConst(old_[c]);
     const long strd = (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y;
-    const bool incr = cutcellPressure_ && incremental_, adv = advect_,
-               bc = hasBc_;  // incremental predictor carries -grad(P^n)
+    // Pure implicit FOU (no deferred correction): 1st-order upwind carried entirely by the operator,
+    // no explicit high-order term in the RHS -- maximally dissipative/stable (diffuses sharp shear
+    // layers). Only meaningful on an implicit-advection path.
+    const bool pureFou = implicitAdv() && !deferredCorr_;
+    const bool incr = cutcellPressure_ && incremental_, adv = advect_ && !pureFou,
+               bc = hasBc_ && !bcStencilPath();  // fold RHS only on the const-coeff domain-BC path;
+    // on the stencil path (solid and/or implicit advection) the walls enter via reflection ghosts
+    // (smoothComp) and the RHS carries the IBM inhom (=0 for no-slip) + the deferred correction. incr
+    // predictor carries -grad(P^n).
     const bool ifou =
-        implicitFou_ && advect_;  // deferred correction: keep (HO - FOU) explicit in the RHS
+        implicitAdv() && deferredCorr_;  // deferred correction: keep (HO - FOU) explicit in the RHS
+                                         // (implicit on the domain-BC path by default, opt-in elsewhere)
     const int sch = advScheme_;   // 0 = SOU (default), 1 = Koren TVD
     // b = descale*(idiag*u^n - rho*Koren(u^k) + rho*FOU(u^k) + f - grad P^n) - inhom  (+ BC fold
     // brhs). The time base is u^n (Picard); the advecting velocity & advected field are the current
@@ -682,6 +728,45 @@ class Solver {
     ibmModifyStencil(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, C[c].inhom,
                      C[c].rscale, C[c].ov, C[c].nCut, 0.0f);
   }
+  // Backflow stabilization (Bazilevs 2009 / Esmaily-Moghadam 2011) for the NORMAL momentum at outflow
+  // faces: add the dissipative diagonal term beta*rho*|min(u.n,0)| where the outflow reverses (fluid
+  // re-entering, u.n<0). This removes the spurious kinetic-energy influx that the do-nothing/zero-
+  // gradient outflow advects in -- the "backflow divergence" that blows up separated flows (e.g. the
+  // BFS recirculation reaching the outlet), worse on finer grids. Purely dissipative (u_ext=0), so it
+  // is implicit + unconditionally stable, and INERT where the outlet is outgoing (u.n>=0) -> the
+  // channel and any non-reversing outflow stay byte-identical. Applied to C[c].AC after buildAdvStencil
+  // (per Picard iteration, lagged at u^k); only the component normal to each outflow face.
+  void applyBackflowStab(int c) {
+    if (backflowBeta_ <= 0.0 || !hasOutflow_)
+      return;
+    CCExec space;
+    const double beta = backflowBeta_, rho = rho_;
+    C3 e = e_;
+    int dims[3] = {e.x, e.y, e.z};
+    long st[3] = {1, e.x, (long)e.x * e.y};
+    FV AC = C[c].AC;
+    CCConst u = CCConst(C[c].u);
+    const int a = c;  // the normal component of a face on axis a is component a
+    for (int s = 0; s < 2; ++s) {
+      if (bc_[2 * a + s] != 3)
+        continue;  // outflow faces only
+      const long sa = st[a];
+      const int na = dims[a];
+      const int bic = (s == 0) ? G : (na - G - 1);  // outflow-adjacent inner normal-velocity cell
+      const double sgn = (s == 0) ? 1.0 : -1.0;     // reversal (u.n<0): u>0 at -a, u<0 at +a
+      const int b = (a + 1) % 3, cc = (a + 2) % 3;
+      const long sb = st[b], sc = st[cc];
+      using MD2 = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+      Kokkos::parallel_for(
+          "peclet::flow::backflow", MD2(space, {G, G}, {dims[b] - G, dims[cc] - G}),
+          KOKKOS_LAMBDA(int p0, int p1) {
+            const long i = (long)p0 * sb + (long)p1 * sc + (long)bic * sa;
+            const double back = sgn * u(i);  // > 0 exactly where the outflow reverses (|min(u.n,0)|)
+            if (back > 0.0)
+              AC(i) += (float)(beta * rho * back);  // dissipative diagonal (u_ext = 0)
+          });
+    }
+  }
   // max|a-b| over inner cells (Picard outer-tolerance check).
   double maxAbsDiffInner(CCConst a, CCConst b) {
     CCExec space;
@@ -718,6 +803,25 @@ class Solver {
         }
         return;
       }
+    }
+    if (bcStencilPath()) {
+      // Domain BCs solved with the Robust-Scaled cut-cell / FOU stencil (built by setSolid /
+      // buildAdvStencil) while refreshing the domain-BC ghosts each colour -- explicit walls/inflow
+      // (reflection, fold=0) + outflow zero-gradient. Mirrors the collocated path above. Used for an
+      // immersed solid (cut-cell no-slip in the operator) and/or implicit advection (FOU upwind in the
+      // stencil -> stable at large dt). The const-coeff fold smoothers below are all-fluid,
+      // diffusion-only: they ignore the solid AND run advection explicitly (CFL-limited).
+      for (int it = 0; it < velIters_; ++it) {
+        fillVelGhostsTo(C[c].u, c, 0);
+        ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                            MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
+                            MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 0);
+        fillVelGhostsTo(C[c].u, c, 0);
+        ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                            MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
+                            MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 1);
+      }
+      return;
     }
     if (hasBc_ &&
         useVelocityMg_) {  // domain-BC velocity multigrid: const-coeff aniso op + no-slip/inflow/
@@ -1089,10 +1193,15 @@ class Solver {
   int bc_[6] = {0, 0, 0, 0, 0, 0};
   double bcVel_[6][3] = {};
   bool hasBc_ = false, hasOutflow_ = false;  // domain BCs
+  bool hasSolid_ = false;  // an immersed solid is present (any inner SDF < 0) -- with domain BCs, the
+                           // momentum solve must use the cut-cell IBM stencil, not the all-fluid fold
+  double backflowBeta_ = 0.2;  // outflow backflow-stabilization coefficient (0 = off; inert unless the
+                               // outflow reverses, so purely-outgoing outlets stay byte-identical)
   CCField bcProf_[6];
   int bcProfNc_[6] = {0, 0, 0, 0, 0, 0};  // per-position inlet profiles (face grid [Lb*Lc*3])
   CCField bcDcorr_[3], bcBrhs_[3];        // implicit-diffusion face fold (per component)
   bool advect_ = false, cutcellPressure_ = false, implicitFou_ = false;
+  bool deferredCorr_ = true;  // deferred-correction advection (off = pure implicit FOU, 1st order)
   int advScheme_ = 0;  // high-order advection: 0 = SOU (default), 1 = Koren TVD
   bool incremental_ = true,
        pwarm_ = false;  // incremental-rotational pressure (CUDA default on) + warm-start

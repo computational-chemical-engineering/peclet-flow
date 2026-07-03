@@ -52,7 +52,7 @@ Drive `flow` verification from Python:
 source .venv/bin/activate
 export PYTHONPATH=$PWD/build
 python scripts/verify_periodic_spheres_sdflow.py   # cut-cell Stokes through a sphere packing
-python scripts/verify_poiseuille_sdflow.py         # analytic parabola
+python scripts/verify_poiseuille_flow.py         # analytic parabola
 python scripts/verify_lid_cavity_sdflow.py         # lid cavity vs Ghia
 python scripts/verify_channel_sdflow.py            # developing channel
 python scripts/verify_bfs_sdflow.py                # backward-facing step

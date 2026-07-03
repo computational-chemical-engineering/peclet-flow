@@ -109,6 +109,16 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Return the outer-iteration count from the last step().")
       .def("set_velocity_solver_params", &S::setVelocityIterations, nb::arg("iters"),
            "Set the velocity (diffusion) smoother iteration count.")
+      .def("set_deferred_correction", &S::setDeferredCorrection, nb::arg("on"),
+           "Deferred-correction advection: True (default) = 2nd order (implicit FOU + explicit "
+           "high-order correction, the high-order scheme being SOU by default or Koren TVD via "
+           "set_advection_scheme); False = pure implicit FOU (1st-order upwind, more dissipative but "
+           "unconditionally stable at sharp shear layers).")
+      .def("set_backflow_stabilization", &S::setBackflowStab, nb::arg("beta"),
+           "Outflow backflow-stabilization coefficient (Bazilevs 2009 / Esmaily-Moghadam 2011): beta "
+           "in [0,1] scales the dissipative outflow term that prevents backflow divergence when flow "
+           "reverses at the outlet (e.g. a separated wake / BFS recirculation). Default 0.2; 0 = off. "
+           "Inert where the outlet is purely outgoing.")
       .def("set_pressure_solver_params", &S::setPressureIterations, nb::arg("iters"),
            "Set the pressure smoother iteration count.")
       .def(
@@ -147,7 +157,10 @@ static void bind_solver(nb::module_& m, const char* name) {
           "set_pressure_geometry",
           [](S& s, nb::ndarray<double, nb::f_contig> sdf) { s.setPressureGeometry(grid_in(sdf)); },
           nb::arg("sdf"),
-          "Set an all-fluid SDF for the cut-cell pressure operator without an immersed solid.")
+          "Set an all-fluid SDF for the cut-cell pressure operator without an immersed solid (the "
+          "channel/BFS domain-BC path). For a no-slip immersed BODY in an inflow/outflow domain, call "
+          "set_solid(sdf, cutcell_pressure=True) instead -- do NOT also call this (a second geometry "
+          "setter overwrites the SDF and wipes the solid).")
       .def(
           "set_solid",
           [](S& s, nb::ndarray<double, nb::f_contig> sdf, bool cutcell_pressure,
@@ -156,8 +169,9 @@ static void bind_solver(nb::module_& m, const char* name) {
           },
           nb::arg("sdf"), nb::arg("cutcell_pressure") = false, nb::arg("pressure_coarse") = "const",
           "Set the solid SDF as a Fortran-order (nx,ny,nz) float64 array (negative inside the "
-          "solid, "
-          "positive in fluid); optionally enable the cut-cell pressure operator.")
+          "solid, positive in fluid). cutcell_pressure=True enables the open-face-weighted cut-cell "
+          "pressure operator (proper no-slip); it composes with domain BCs, so this is the single "
+          "call for a no-slip immersed body in an inflow/outflow domain.")
       .def(
           "set_state",
           [](S& s, nb::ndarray<double, nb::f_contig> u, nb::ndarray<double, nb::f_contig> v,
