@@ -47,7 +47,7 @@ def reattachment(u_bottom):
     return 0.0
 
 
-def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.4, max_steps=12000):
+def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.2, max_steps=24000):
     """Run the backward-facing step at Reynolds number `Re` (Re_S = U_in*S/nu) and return its diagnostics.
 
     Step height S, full channel height 2S, channel length Lr*S; a partial parabolic inlet feeds the upper
@@ -55,6 +55,12 @@ def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.4, max_steps=12000):
     reattachment length (x_r/S, x_r/H), bubble presence, mass-conservation error and max divergence.
     Returns None off root.
     """
+    # dt=0.2 (was 0.4): the step-lip shear layer is stiff for the explicit (SOU) deferred-correction
+    # advection -- at dt=0.4 the anti-diffusive correction is marginally unstable (a roundoff-sensitive
+    # transient divergence spike that can tip to NaN, worse on finer grids). Halving dt keeps it well
+    # under that explicit stability limit while retaining full 2nd-order accuracy (x_r/S unchanged).
+    # (Alternatives if speed matters: set_deferred_correction(False) for robust 1st-order, or
+    #  set_outer_iterations(>1) to converge the correction -- both leave the SOU default intact.)
     H = 2 * S
     L = Lr * S
     nu = U_in * S / Re
