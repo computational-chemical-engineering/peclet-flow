@@ -434,10 +434,10 @@ class Solver {
     // Multiphysics: refresh material properties / body forces from the current fields (frozen over
     // the step). No-op (byte-identical) when no closure is registered.
     updateProperties();
-    // Variable properties: rebuild the diffusion stencil from the current mu/rho fields (the
-    // implicit-FOU path rebuilds it per Picard in buildAdvStencilVar, so only the non-advective
-    // path needs this).
-    if ((varProps_ || varRho_) && !implicitAdv())
+    // Variable properties / implicit drag: rebuild the diffusion stencil from the current mu/rho and
+    // drag_beta fields (the implicit-FOU path rebuilds it per Picard in buildAdvStencil*, so only the
+    // non-advective path needs this).
+    if ((varProps_ || varRho_ || hasDrag_) && !implicitAdv())
       rebuildStencils();
     // u^n time base, fixed for the whole step (Picard lags the advecting velocity at u^k, not the
     // base).
@@ -647,6 +647,8 @@ class Solver {
                           e_.z, beta, idiag);
       ibmModifyStencil(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, C[c].inhom,
                        C[c].rscale, C[c].ov, C[c].nCut, 0.0f);
+      if (hasDrag_)
+        addDragDiagonal(c);
     }
   }
   // copy the nx*ny*nz inner cells between two extended blocks of different ghost width (g=2 <-> g=1
@@ -940,6 +942,8 @@ class Solver {
     Kokkos::deep_copy(C[c].inhom, 0.0);
     ibmModifyStencil(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, C[c].inhom,
                      C[c].rscale, C[c].ov, C[c].nCut, 0.0f);
+    if (hasDrag_)
+      addDragDiagonal(c);
   }
   // Variable-property sibling of buildAdvStencil: VarFaceProps diffusion build (per-face mu, face-
   // density time diagonal) + the FOU upwind weighted by the FACE density (constant path: fouw=rho_).
@@ -984,6 +988,8 @@ class Solver {
     Kokkos::deep_copy(C[c].inhom, 0.0);
     ibmModifyStencil(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, C[c].inhom,
                      C[c].rscale, C[c].ov, C[c].nCut, 0.0f);
+    if (hasDrag_)
+      addDragDiagonal(c);
   }
   // Backflow stabilization (Bazilevs 2009 / Esmaily-Moghadam 2011) for the NORMAL momentum at outflow
   // faces: add the dissipative diagonal term beta*rho*|min(u.n,0)| where the outflow reverses (fluid
@@ -1744,6 +1750,40 @@ class Solver {
     for (auto& cl : closures_)
       applyClosure(cl, e_, G);
   }
+  // Allocate + register the per-cell body-force fields ("force_x/y/z") and route them into the
+  // momentum RHS, for an EXTERNAL writer (CFD-DEM feedback) to fill directly via field_view — no
+  // closure needed. buildRhsForced then adds them each step (they persist; the writer overwrites).
+  void enableCellForce() { ensureCellForceAll(); }
+  // Implicit (semi-implicit) linear drag: a per-cell coefficient field "drag_beta" is added to the
+  // momentum diagonal each step, so a drag source −β(u − u_p) is treated implicitly (the fluid solve
+  // becomes (ρ/dt + β)u = … + β u_p). The drag TARGET β·u_p goes into the force_x/y/z fields (the
+  // RHS). Unconditionally stable for any β (unlike an explicit −β u force, which diverges for the
+  // stiff β of a dense particle bed). The external writer (CFD-DEM) fills "drag_beta" + "force_*"
+  // via field_view; enableDrag() allocates them and turns the diagonal path on.
+  void enableDrag() {
+    if (!fields_.has("drag_beta"))
+      dragBeta_ = addField("drag_beta");
+    else
+      dragBeta_ = fields_.at("drag_beta").data;
+    ensureCellForceAll();  // force_* carries beta*u_p (the implicit-drag RHS target)
+    hasDrag_ = true;
+  }
+  // Add the drag coefficient beta(i) to the (float) momentum diagonal of component c. Called after
+  // each stencil (re)build when hasDrag_. All-fluid (rscale==1) is exact; the drag×cut-cell-IBM
+  // interaction (rscale≠1) is untested (documented).
+  void addDragDiagonal(int c) {
+    CCExec space;
+    C3 e = e_;
+    FV AC = C[c].AC;
+    CCConst beta = CCConst(dragBeta_);
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "peclet::flow::add_drag_diag", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          AC(i) = (float)((double)AC(i) + beta(i));
+        });
+  }
 
  private:
   // Resolve a closure target to a registered buffer. A force component allocates ALL three
@@ -1913,6 +1953,9 @@ class Solver {
   bool varRho_ = false;               // variable density (momentum + projection); staggered only
   CCField rhoField_;                  // per-cell density (when varRho_); rho_ is the reference rho0
   CCField rho1_, cx1_, cy1_, cz1_;    // g=1 MG-block density bridge + projection face coefficients
+  bool hasDrag_ = false;              // implicit linear drag (CFD-DEM): beta on the momentum diagonal
+  CCField dragBeta_;                  // per-cell drag coefficient (added to AC; target beta*u_p rides
+                                      // the force_* cellForce fields)
 };
 
 // The staggered MAC solver — THE flow solver, bit-identical to the pre-policy class. Bindings + the

@@ -349,6 +349,17 @@ static void bind_solver(nb::module_& m, const char* name) {
           "update_properties", [](S& s) { s.updateProperties(); },
           "Apply all registered property/force closures now (also done at the top of step()).")
       .def(
+          "enable_cell_force", [](S& s) { s.enableCellForce(); },
+          "Allocate + register the per-cell body-force fields force_x/force_y/force_z and route them "
+          "into the momentum RHS, for an external writer (e.g. CFD-DEM drag feedback) to fill "
+          "directly via field_view('force_z'). They persist across steps until overwritten.")
+      .def(
+          "enable_drag", [](S& s) { s.enableDrag(); },
+          "Enable implicit (semi-implicit) linear drag for CFD-DEM: allocate the per-cell 'drag_beta' "
+          "field (added to the momentum diagonal so a -beta*(u-u_p) source is treated implicitly -> "
+          "unconditionally stable for the stiff beta of a dense bed) plus force_x/y/z (which carry "
+          "beta*u_p, the RHS target). Fill 'drag_beta' and 'force_*' via field_view each step.")
+      .def(
           "set_property_mode",
           [](S& s, const std::string& mode, bool harmonic) {
             s.setPropertyMode(mode == "variable", harmonic);
