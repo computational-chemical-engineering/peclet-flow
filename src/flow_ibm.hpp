@@ -31,6 +31,7 @@
 #include "mac_stencils.hpp"
 #include "mac_velocity_mg.hpp"
 #include "peclet/core/field/field_set.hpp"
+#include "scalar_transport.hpp"
 #include "staggered_advection.hpp"
 
 namespace peclet::flow {
@@ -466,6 +467,10 @@ class Solver {
           break;
       }
     }
+    // Segregated multiphysics: advance any transported scalars with the just-projected
+    // divergence-free velocity (properties frozen over the step). No-op (byte-identical) when no
+    // scalar is registered.
+    advanceScalars();
   }
 
   // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
@@ -1220,7 +1225,129 @@ class Solver {
   std::array<int, 3> blockShape() const { return {e_.x, e_.y, e_.z}; }
   int ghostWidth() const { return G; }
 
+  // --- Scalar transport (advection-diffusion) -------------------------------------------------
+  // Register a transported scalar `name` with constant diffusivity D (grid units). scheme: 0 FOU,
+  // 1 Koren TVD (default), 2 SOU. iters = RB-GS sweeps for the implicit diffusion solve. Its field
+  // is registered in the directory (get_field/set_field/field_view). Openness (set_solid /
+  // set_pressure_geometry) must be established for transport to occur.
+  void addScalar(const std::string& name, double D, int scheme, int iters) {
+    ScalarField sc;
+    sc.name = name;
+    sc.c = addField(name);  // registered, zero-initialised, on the G=2 block
+    sc.cOld = CCField(name + "_old", n_);
+    sc.b = CCField(name + "_b", n_);
+    sc.AC = CCField(name + "_AC", n_);
+    sc.AW = CCField(name + "_AW", n_);
+    sc.AE = CCField(name + "_AE", n_);
+    sc.AS = CCField(name + "_AS", n_);
+    sc.AN = CCField(name + "_AN", n_);
+    sc.AB = CCField(name + "_AB", n_);
+    sc.AT = CCField(name + "_AT", n_);
+    sc.D = D;
+    sc.scheme = scheme;
+    sc.iters = iters < 1 ? 1 : iters;
+    scalars_.push_back(sc);
+  }
+  bool hasScalar(const std::string& name) const {
+    for (const auto& sc : scalars_)
+      if (sc.name == name)
+        return true;
+    return false;
+  }
+  // Per-face scalar BC: face 0..5 = -x,+x,-y,+y,-z,+z; type 0 periodic, 1 Neumann zero-flux
+  // (adiabatic), 2 Dirichlet value. Single-rank / non-decomposed domains (distributed BC deferred).
+  void setScalarBc(const std::string& name, int face, int type, double value) {
+    for (auto& sc : scalars_)
+      if (sc.name == name) {
+        sc.bc[face] = type;
+        sc.bcVal[face] = value;
+        return;
+      }
+    throw std::runtime_error("set_scalar_bc: no scalar named '" + name + "'");
+  }
+  // Advance all registered scalars one dt with the current divergence-free velocity (also called at
+  // the end of step()). Exposed so a test can prescribe a velocity and transport a scalar in
+  // isolation.
+  void advanceScalars() {
+    if (scalars_.empty())
+      return;
+    const double idt = 1.0 / dt_;
+    CCField Uf, Vf, Wf;
+    if constexpr (Grid::collocated) {
+      Uf = uf_;
+      Vf = vf_;
+      Wf = wf_;
+    } else {
+      Uf = C[0].u;
+      Vf = C[1].u;
+      Wf = C[2].u;
+    }
+    fillGhosts(Uf);
+    fillGhosts(Vf);
+    fillGhosts(Wf);  // face velocities need the ±2 advection reach
+    for (auto& sc : scalars_) {
+      scalarBuildDiffusionOpen(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(ox_),
+                               CCConst(oy_), CCConst(oz_), sc.D, idt, e_, G);
+      Kokkos::deep_copy(sc.cOld, sc.c);
+      scalarFillGhosts(sc);
+      scalarBuildRhs(sc.b, CCConst(sc.cOld), CCConst(Uf), CCConst(Vf), CCConst(Wf), CCConst(ox_),
+                     CCConst(oy_), CCConst(oz_), idt, sc.scheme, e_, G);
+      // implicit diffusion: red-black Gauss-Seidel with a ghost fill before each color sweep.
+      for (int it = 0; it < sc.iters; ++it) {
+        scalarFillGhosts(sc);
+        cutcellSmoothColor(sc.c, CCConst(sc.b), sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, e_,
+                           og_, G, 0);
+        scalarFillGhosts(sc);
+        cutcellSmoothColor(sc.c, CCConst(sc.b), sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, e_,
+                           og_, G, 1);
+      }
+      scalarFillGhosts(sc);
+    }
+  }
+
  private:
+  // Ghost fill for a scalar: periodic (single-rank) / MPI halo base, then override any domain
+  // Dirichlet/Neumann faces.
+  void scalarFillGhosts(ScalarField& sc) {
+    fillGhosts(sc.c);
+    applyScalarBc(sc);
+  }
+  // Overwrite the ghost band on each Dirichlet/Neumann domain face (both layers, for the ±2
+  // advection reach). Single-rank only — distributed domain-BC scalars are a later phase.
+  void applyScalarBc(ScalarField& sc) {
+    bool any = false;
+    for (int f = 0; f < 6; ++f)
+      any = any || (sc.bc[f] != 0);
+    if (!any || distributed_)
+      return;
+    for (int f = 0; f < 6; ++f)
+      if (sc.bc[f] != 0)
+        applyScalarBcFace(sc.c, f / 2, f % 2, sc.bc[f], sc.bcVal[f]);
+  }
+  void applyScalarBcFace(CCField c, int a, int side, int type, double val) {
+    const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
+    const int nt1 = (t1 == 0) ? nx_ : (t1 == 1) ? ny_ : nz_;
+    const int nt2 = (t2 == 0) ? nx_ : (t2 == 1) ? ny_ : nz_;
+    const int na = (a == 0) ? nx_ : (a == 1) ? ny_ : nz_;
+    const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
+    const long sa = (a == 0) ? sx : (a == 1) ? sy : sz;
+    const long st1 = (t1 == 0) ? sx : (t1 == 1) ? sy : sz;
+    const long st2 = (t2 == 0) ? sx : (t2 == 1) ? sy : sz;
+    const int aInner = (side == 0) ? G : (G + na - 1);  // inner boundary cell a-index
+    const int dir = (side == 0) ? -1 : +1;              // toward the ghost
+    CCExec space;
+    Kokkos::parallel_for(
+        "peclet::flow::scalar_bc_face",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {G, G}, {G + nt1, G + nt2}),
+        KOKKOS_LAMBDA(int j1, int j2) {
+          const long base = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
+          for (int L = 1; L <= 2; ++L) {
+            const long gcell = base + (long)dir * L * sa;
+            const long icell = base - (long)dir * (L - 1) * sa;
+            c(gcell) = (type == 2) ? (2.0 * val - c(icell)) : c(icell);
+          }
+        });
+  }
   int nx_, ny_, nz_;
   C3 e_, e1_;
   std::size_t n_, n1_;
@@ -1273,7 +1400,8 @@ class Solver {
   CCField uf_, vf_, wf_;      // collocated: transient face (MAC) field (approx projection)
   CCField old_[3], prev_[3];  // u^n time base + previous Picard iterate
   Comp C[3];
-  peclet::core::FieldSet fields_;  // named directory of all cell fields (velocity/p/sdf + user)
+  peclet::core::FieldSet fields_;    // named directory of all cell fields (velocity/p/sdf + user)
+  std::vector<ScalarField> scalars_;  // transported scalars (advection-diffusion)
 };
 
 // The staggered MAC solver — THE flow solver, bit-identical to the pre-policy class. Bindings + the

@@ -282,6 +282,32 @@ static void bind_solver(nb::module_& m, const char* name) {
           nb::arg("name"),
           "Fill a registered field's ghost cells (cross-rank + periodic under MPI; periodic "
           "single-rank).")
+      // --- Scalar transport (advection-diffusion) ----------------------------------------------
+      .def(
+          "add_scalar",
+          [](S& s, const std::string& name, double diffusivity, int scheme, int iters) {
+            s.addScalar(name, diffusivity, scheme, iters);
+          },
+          nb::arg("name"), nb::arg("diffusivity") = 0.0, nb::arg("scheme") = 1,
+          nb::arg("iters") = 50,
+          "Register a transported scalar (temperature/concentration/…): constant diffusivity (grid "
+          "units), advection scheme 0=FOU/1=Koren TVD/2=SOU, and RB-GS diffusion sweeps. The scalar "
+          "is a registered field (get_field/set_field/field_view). Requires geometry "
+          "(set_solid/set_pressure_geometry) for the openness-weighted operators.")
+      .def(
+          "set_scalar_bc",
+          [](S& s, const std::string& name, int face, int type, double value) {
+            s.setScalarBc(name, face, type, value);
+          },
+          nb::arg("name"), nb::arg("face"), nb::arg("type"), nb::arg("value") = 0.0,
+          "Scalar boundary condition on a domain face (0..5 = -x,+x,-y,+y,-z,+z): type 0 periodic, "
+          "1 Neumann zero-flux (adiabatic), 2 Dirichlet value. Single-rank.")
+      .def(
+          "has_scalar", [](S& s, const std::string& name) { return s.hasScalar(name); },
+          nb::arg("name"), "Whether a transported scalar of this name is registered.")
+      .def(
+          "advance_scalars", [](S& s) { s.advanceScalars(); },
+          "Advance all registered scalars one dt with the current velocity (also done by step()).")
       .def(
           "ghost_width", [](S& s) { return s.ghostWidth(); },
           "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")

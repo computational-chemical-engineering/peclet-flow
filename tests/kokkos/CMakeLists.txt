@@ -27,6 +27,13 @@ target_include_directories(test_field_registry PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(test_field_registry PRIVATE Kokkos::kokkos)
 add_test(NAME field_registry COMMAND test_field_registry)
 
+# Scalar transport (advection-diffusion): 2nd-order diffusion operator + advection conservation.
+add_executable(test_scalar_transport test_scalar_transport.cpp)
+target_include_directories(test_scalar_transport PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR}/../../../core/include)
+target_link_libraries(test_scalar_transport PRIVATE Kokkos::kokkos)
+add_test(NAME scalar_transport COMMAND test_scalar_transport)
+
 add_executable(test_advection test_advection.cpp)
 target_include_directories(test_advection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_advection PRIVATE Kokkos::kokkos)
