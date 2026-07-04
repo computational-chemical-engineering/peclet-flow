@@ -127,6 +127,11 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Toggle the rotational incremental-pressure projection.")
       .def("set_pressure_warmstart", &S::setPressureWarmstart, nb::arg("on"),
            "Seed each pressure solve from the previous step's phi (default off).")
+      .def("set_face_interp", &S::setFaceInterp, nb::arg("mode"),
+           "Collocated cell->face interpolation for the approximate projection: 0 = plain "
+           "averaging (default), 1 = wall-aware (wall-anchored weighted-LSQ quadratic at faces "
+           "bordering the immersed solid; 2nd-order at curved walls). No effect on the staggered "
+           "solver.")
       .def("set_velocity_streams", &S::setVelocityStreams, nb::arg("on"),
            "Toggle overlapped per-component velocity solves.")
       .def("set_implicit_advection", &S::setImplicitAdvection, nb::arg("on"),
@@ -352,7 +357,29 @@ static void bind_solver(nb::module_& m, const char* name) {
           "Enable variable-coefficient momentum (variable viscosity): mode 'variable' binds the 'mu' "
           "field (get/set_field('mu')) into the diffusion operator; 'constant' reverts. harmonic = "
           "harmonic face-viscosity mean (continuous shear stress across a jump) vs arithmetic. A "
-          "closure targeting 'mu' enables this automatically.")
+          "closure targeting 'mu' enables this automatically. The incremental-rotational pressure "
+          "scheme (large-dt / steady-Stokes) stays active — see set_variable_rotational.")
+      .def(
+          "set_variable_rotational",
+          [](S& s, const std::string& mode, double chi) {
+            int m = 0;
+            if (mode == "min")
+              m = 0;
+            else if (mode == "full")
+              m = 1;
+            else if (mode == "off")
+              m = 2;
+            else
+              throw std::runtime_error("set_variable_rotational: mode must be min/full/off");
+            s.setVariableRotational(m, chi);
+          },
+          nb::arg("mode") = "min", nb::arg("chi") = 1.0,
+          "Rotational-pressure term under variable viscosity (the constant-mu Timmermans term "
+          "-mu*div(u*) is only valid for homogeneous viscosity — Deteix & Yakoubi 2018). 'min' "
+          "(default): constant coefficient chi*mu_min — provably stable at any contrast, exact "
+          "fallback to the constant-mu scheme for uniform mu. 'full': pointwise chi*mu(i) — better "
+          "pressure consistency at MILD contrast only. 'off': plain incremental (no rotational "
+          "term). All modes keep the incremental predictor (large-dt / steady-Stokes capability).")
       .def(
           "ghost_width", [](S& s) { return s.ghostWidth(); },
           "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")

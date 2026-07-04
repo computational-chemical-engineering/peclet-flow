@@ -186,6 +186,10 @@ class Solver {
   // steady march -> a more converged phi per fixed solver budget) instead of zeroing the initial
   // guess.
   void setPressureWarmstart(bool on) { pwarm_ = on; }
+  // Collocated cell->face interpolation for the approximate projection: 0 = plain ½/½ averaging
+  // (default), 1 = wall-aware (wall-anchored weighted-LSQ quadratic at faces bordering the immersed
+  // solid; centerToFaceWallAware in mac_approx_projection.hpp). No effect on the staggered path.
+  void setFaceInterp(int mode) { faceInterp_ = mode; }
   // CUDA-only 3-stream concurrent velocity solve (set_velocity_streams): no Kokkos analogue in this
   // port (the default-execution-space kernels are already stream-ordered). Accepted as a no-op for
   // API parity.
@@ -1118,7 +1122,11 @@ class Solver {
       // (closed walls are openness 0).
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);
-      centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
+      if (faceInterp_ == 1)  // wall-aware reconstruction at solid-bordering faces (setFaceInterp)
+        centerToFaceWallAware(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u),
+                              CCConst(sdf_), e_, G);
+      else
+        centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
       divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
                  div_, e_, G);
     } else {
@@ -1217,12 +1225,22 @@ class Solver {
       CCField P = P_, ph = phi_, d = div_;
       const double ct = rho_ / dt_, mu = mu_;
       if (varProps_) {
-        // Variable viscosity: the rotational term uses the per-cell mu (constant mu_ here injects a
-        // rotational pressure error that accumulates under the incremental scheme -> divergence).
-        CCConst mf = CCConst(muField_);
-        Kokkos::parallel_for(
-            "press_var", Kokkos::RangePolicy<CCExec>(space, 0, n_),
-            KOKKOS_LAMBDA(std::size_t i) { P(i) += ct * ph(i) - mf(i) * d(i); });
+        // Variable viscosity: the pointwise Timmermans term -mu(i)*div(u*) is inconsistent for
+        // heterogeneous mu (see setVariableRotational). Default = constant coefficient chi*mu_min
+        // (stable by domination, exact fallback to the uniform-mu scheme); "full" = pointwise
+        // (mild contrast only); "off" = plain incremental.
+        if (varRotMode_ == 1) {
+          CCConst mf = CCConst(muField_);
+          const double chi = varRotChi_;
+          Kokkos::parallel_for(
+              "press_var_full", Kokkos::RangePolicy<CCExec>(space, 0, n_),
+              KOKKOS_LAMBDA(std::size_t i) { P(i) += ct * ph(i) - chi * mf(i) * d(i); });
+        } else {
+          const double muRot = (varRotMode_ == 2) ? 0.0 : varRotChi_ * minMuInner();
+          Kokkos::parallel_for(
+              "press_var_min", Kokkos::RangePolicy<CCExec>(space, 0, n_),
+              KOKKOS_LAMBDA(std::size_t i) { P(i) += ct * ph(i) - muRot * d(i); });
+        }
       } else {
         Kokkos::parallel_for(
             "press", Kokkos::RangePolicy<CCExec>(space, 0, n_),
@@ -1238,6 +1256,32 @@ class Solver {
           if (m(i) > 0.5)
             u(i) = 0.0;
         });
+  }
+  // Minimum viscosity over the (global, under MPI) inner cells — the provably-stable rotational
+  // coefficient for variable viscosity (chi*mu_min <= mu(x) everywhere).
+  double minMuInner() {
+    CCExec space;
+    C3 e = e_;
+    CCConst f = CCConst(muField_);
+    double m = 1e300;
+    Kokkos::parallel_reduce(
+        "minmu",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          if (f(i) < acc)
+            acc = f(i);
+        },
+        Kokkos::Min<double>(m));
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      double g = m;
+      MPI_Allreduce(&m, &g, 1, MPI_DOUBLE, MPI_MIN, comm_);
+      m = g;
+    }
+#endif
+    return m;
   }
   double reduceMaxAbsInner(CCConst f) {
     CCExec space;
@@ -1422,11 +1466,27 @@ class Solver {
         Kokkos::deep_copy(muField_, mu_);  // default to the scalar mu until a closure/set_field sets it
       }
       useVelocityMg_ = false;  // the velocity multigrid takes a scalar mu (variable-coeff vmg deferred)
-      incremental_ = false;    // classical Chorin projection: the rotational-incremental form is not
-                               // consistent under strongly variable viscosity (it accumulates ->
-                               // divergence). Exact at steady state; proper variable-coeff rotational
-                               // pressure is the variable-density projection work (Phase 5).
     }
+  }
+  // Rotational-pressure treatment under variable viscosity. The Timmermans rotational term
+  // P += (rho/dt)phi - mu*div(u*) is only valid for HOMOGENEOUS viscosity (Deteix & Yakoubi, Appl.
+  // Math. Lett. 2018 / arXiv:1902.05643): with spatially varying mu the pointwise term is no longer
+  // the gradient part of the viscous stress, and the accumulated inconsistency destabilises the
+  // incremental scheme at strong contrast (observed: 10x jump + harmonic faces -> divergence).
+  // Modes (the incremental predictor -grad(P^n) and P accumulation are kept in ALL of them — that is
+  // what enables large-dt / steady-Stokes stepping):
+  //   0 "min"  (default): rotational coefficient chi*mu_min — a CONSTANT dominated by the true local
+  //            dissipation everywhere (mu_min <= mu(x)), so the constant-viscosity stability theory
+  //            carries over; reduces EXACTLY to the validated scheme when mu is uniform.
+  //   1 "full": chi*mu(i) pointwise — better pressure consistency at MILD contrast; not stable at
+  //            strong contrast (user's responsibility).
+  //   2 "off" : plain incremental (no rotational term) — unconditionally stable, keeps the artificial
+  //            pressure Neumann layer of the non-rotational scheme.
+  // The fully consistent variable-viscosity correction (shear-rate projection: an extra Poisson
+  // solve for psi with rhs div(div(2 nu D(u)))) is deferred.
+  void setVariableRotational(int mode, double chi) {
+    varRotMode_ = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+    varRotChi_ = chi < 0.0 ? 0.0 : chi;
   }
   // Tabulated property: out = piecewise-linear interp of (xs, ys) at the input field (xs ascending).
   void setPropertyTable(const std::string& target, const std::string& in0,
@@ -1503,6 +1563,9 @@ class Solver {
       patchScalarDirichletFace(sc.AC, band, sc.D, a, side);
     }
   }
+  // nvcc requires member functions that contain extended (device) lambdas to be PUBLIC — the
+  // OpenMP/host build accepts them private, so the breakage only shows on the CUDA backend.
+ public:
   void patchScalarDirichletFace(CCField AC, CCField band, double D, int a, int side) {
     const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
     const int nt1 = (t1 == 0) ? nx_ : (t1 == 1) ? ny_ : nz_;
@@ -1549,6 +1612,8 @@ class Solver {
           }
         });
   }
+
+ private:
   int nx_, ny_, nz_;
   C3 e_, e1_;
   std::size_t n_, n1_;
@@ -1588,7 +1653,8 @@ class Solver {
   bool deferredCorr_ = true;  // deferred-correction advection (off = pure implicit FOU, 1st order)
   int advScheme_ = 0;  // high-order advection: 0 = SOU (default), 1 = Koren TVD
   bool incremental_ = true,
-       pwarm_ = false;  // incremental-rotational pressure (CUDA default on) + warm-start
+       pwarm_ = false;    // incremental-rotational pressure (CUDA default on) + warm-start
+  int faceInterp_ = 0;    // collocated cell->face map: 0 = plain average, 1 = wall-aware (opt-in)
   bool useVelocityMg_ = false;
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
   VelocityMG vmg_;
@@ -1609,6 +1675,8 @@ class Solver {
   bool varProps_ = false;             // variable-coefficient momentum (variable viscosity)
   bool harmonicMu_ = false;           // harmonic vs arithmetic face-viscosity mean
   CCField muField_;                   // per-cell dynamic viscosity (when varProps_)
+  int varRotMode_ = 0;                // rotational term under varProps: 0 chi*mu_min, 1 chi*mu(i), 2 off
+  double varRotChi_ = 1.0;            // rotational coefficient scale chi
 };
 
 // The staggered MAC solver — THE flow solver, bit-identical to the pre-policy class. Bindings + the
