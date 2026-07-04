@@ -46,6 +46,37 @@ struct FieldFaceProps {
   }
 };
 
+// General accessor: viscosity constant-or-field AND density constant-or-field. The time diagonal
+// for a variable density is the FACE density of the staggered velocity unknown (component stride
+// sc): idiag(i) = 0.5*(rho(i)+rho(i-sc))/dt — the arithmetic mean (mass is volume-additive), and
+// the SAME face density the variable-density projection uses, which is what makes discrete
+// hydrostatic balance exact. Flags select the constant fallbacks so a single-variable case (only mu
+// or only rho) composes.
+struct VarFaceProps {
+  CCConst mu;
+  bool haveMu = false;
+  double muC = 0.0;
+  bool harmMu = false;
+  CCConst rho;
+  bool haveRho = false;
+  double rhoIdtC = 0.0;  // rho_/dt fallback
+  double idt = 0.0;      // 1/dt (variable-rho path)
+  long sc = 0;           // component face stride (staggered velocity placement)
+  KOKKOS_INLINE_FUNCTION double idiag(long i) const {
+    return haveRho ? 0.5 * (rho(i) + rho(i - sc)) * idt : rhoIdtC;
+  }
+  KOKKOS_INLINE_FUNCTION double beta(long i, long j) const {
+    if (!haveMu)
+      return muC;
+    const double a = mu(i), b = mu(j);
+    if (harmMu) {
+      const double s = a + b;
+      return (s > 0.0) ? (2.0 * a * b / s) : 0.0;
+    }
+    return 0.5 * (a + b);
+  }
+};
+
 }  // namespace peclet::flow
 
 #endif  // PECLET_FLOW_FACE_PROPS_HPP

@@ -128,10 +128,10 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def("set_pressure_warmstart", &S::setPressureWarmstart, nb::arg("on"),
            "Seed each pressure solve from the previous step's phi (default off).")
       .def("set_face_interp", &S::setFaceInterp, nb::arg("mode"),
-           "Collocated cell->face interpolation for the approximate projection: 0 = plain "
-           "averaging (default), 1 = wall-aware (wall-anchored weighted-LSQ quadratic at faces "
-           "bordering the immersed solid; 2nd-order at curved walls). No effect on the staggered "
-           "solver.")
+           "Collocated cut-cell projection treatment: 0 = plain averaging + central-difference "
+           "grad(P) (default), 1 = wall-aware cell->face map only (ablation; breaks the adjoint "
+           "pairing — don't use), 2 = wall-aware map + its transpose as pressure gradient and "
+           "correction (consistent pair). No effect on the staggered solver.")
       .def("set_velocity_streams", &S::setVelocityStreams, nb::arg("on"),
            "Toggle overlapped per-component velocity solves.")
       .def("set_implicit_advection", &S::setImplicitAdvection, nb::arg("on"),
@@ -380,6 +380,18 @@ static void bind_solver(nb::module_& m, const char* name) {
           "fallback to the constant-mu scheme for uniform mu. 'full': pointwise chi*mu(i) — better "
           "pressure consistency at MILD contrast only. 'off': plain incremental (no rotational "
           "term). All modes keep the incremental predictor (large-dt / steady-Stokes capability).")
+      .def(
+          "set_density_mode",
+          [](S& s, const std::string& mode) { s.setDensityMode(mode == "variable"); },
+          nb::arg("mode") = "variable",
+          "Enable variable density (staggered solver only): binds the 'rho' field "
+          "(get/set_field('rho'), created seeded with set_rho's value if absent) into the momentum "
+          "time term, the advection weight, the per-cell body force (face-interpolated), and the "
+          "pressure projection (face coefficient openness*rho0/rho_f with the matching 1/rho_f "
+          "velocity correction; rho0 = set_rho's value, so a uniform field reduces exactly to the "
+          "constant solver). A closure targeting 'rho' (e.g. a linear mixture of a transported "
+          "phase fraction) enables this automatically. For gravity, register a closure "
+          "force_z = linear(rho, params=[0, -g]).")
       .def(
           "ghost_width", [](S& s) { return s.ghostWidth(); },
           "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")

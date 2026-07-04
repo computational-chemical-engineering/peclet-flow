@@ -116,6 +116,45 @@ inline void projectCorrect(CCField u, CCField v, CCField w, CCConst phi, C3 e, i
       });
 }
 
+// Variable-density projection correction (sibling of projectCorrect): u_f -= (rho0/rho_f) grad(phi)
+// with rho_f the arithmetic face mean — the SAME face density that scaled the Poisson coefficient
+// c_f = open_f*rho0/rho_f, so the corrected open flux telescopes to A*phi exactly (discrete
+// consistency; constant rho == rho0 reduces to projectCorrect identically, ratio 1.0 exact in FP).
+inline void projectCorrectVar(CCField u, CCField v, CCField w, CCConst phi, CCConst rho, double rho0,
+                              C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::correct_var", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        u(i) -= rho0 / (0.5 * (rho(i) + rho(i - sx))) * (phi(i) - phi(i - sx));
+        v(i) -= rho0 / (0.5 * (rho(i) + rho(i - sy))) * (phi(i) - phi(i - sy));
+        w(i) -= rho0 / (0.5 * (rho(i) + rho(i - sz))) * (phi(i) - phi(i - sz));
+      });
+}
+
+// Variable-density Poisson face coefficients on the MG (g=1) block: c_f = open_f * rho0 / rho_f,
+// rho_f = arithmetic face mean. Computed over the inner cells only — CutcellMG::setOpenness runs
+// its own periodic/halo ghost fill + non-periodic boundary re-imposition on whatever level-0 fields
+// it receives, exactly as for the raw openness (the coefficient "rides the openness rails"). The
+// rho ghost ring of the g=1 block must be valid (bridged from the filled G=2 field).
+inline void buildRhoCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy, CCConst oz,
+                          CCConst rho, double rho0, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::rho_coeff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        cx(i) = ox(i) * rho0 / (0.5 * (rho(i) + rho(i - sx)));
+        cy(i) = oy(i) * rho0 / (0.5 * (rho(i) + rho(i - sy)));
+        cz(i) = oz(i) * rho0 / (0.5 * (rho(i) + rho(i - sz)));
+      });
+}
+
 }  // namespace peclet::flow
 
 #endif  // PECLET_FLOW_MAC_PRESSURE_HPP

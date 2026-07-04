@@ -48,6 +48,13 @@ target_include_directories(test_variable_mu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(test_variable_mu PRIVATE Kokkos::kokkos)
 add_test(NAME variable_mu COMMAND test_variable_mu)
 
+# Variable-density projection: hydrostatic acid test (ratio 3 + 1e3) + uniform-rho reduction.
+add_executable(test_vardensity_projection test_vardensity_projection.cpp)
+target_include_directories(test_vardensity_projection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR}/../../../core/include)
+target_link_libraries(test_vardensity_projection PRIVATE Kokkos::kokkos)
+add_test(NAME vardensity_projection COMMAND test_vardensity_projection)
+
 add_executable(test_advection test_advection.cpp)
 target_include_directories(test_advection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_advection PRIVATE Kokkos::kokkos)
