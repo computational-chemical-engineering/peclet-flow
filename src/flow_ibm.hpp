@@ -30,6 +30,7 @@
 #include "mac_pressure.hpp"
 #include "mac_stencils.hpp"
 #include "mac_velocity_mg.hpp"
+#include "peclet/core/field/field_set.hpp"
 #include "staggered_advection.hpp"
 
 namespace peclet::flow {
@@ -101,6 +102,15 @@ class Solver {
       vf_ = CCField("vf", n_);
       wf_ = CCField("wf", n_);
     }
+    // Register the pre-existing solver fields in the named directory so the multiphysics machinery
+    // (scalar transport, property closures) and load-balance redistribution can enumerate the whole
+    // set uniformly. adopt() aliases the members (no reallocation, no ownership); all live on the G=2
+    // velocity block and share velHalo_ under MPI.
+    fields_.adopt("u", C[0].u, G, peclet::core::Centering::FaceX);
+    fields_.adopt("v", C[1].u, G, peclet::core::Centering::FaceY);
+    fields_.adopt("w", C[2].u, G, peclet::core::Centering::FaceZ);
+    fields_.adopt("p", P_, G, peclet::core::Centering::Cell);
+    fields_.adopt("sdf", sdf_, G, peclet::core::Centering::Cell);
   }
 
   void setRho(double r) { rho_ = r; }
@@ -471,6 +481,14 @@ class Solver {
     } else {
       return gatherInner(C[c].u);
     }
+  }
+  // TEMP DIAGNOSTIC: the face openness (fluid area fraction) used by the cut-cell projection.
+  // component c: 0 -> ox_ (low -x face of each inner cell), 1 -> oy_, 2 -> oz_. Grid-independent
+  // (built once from the SDF). Exposed to compare the open-weighted superficial flux against the
+  // raw velocity mean.
+  std::vector<double> getOpenness(int c) {
+    CCField o[3] = {ox_, oy_, oz_};
+    return gatherInner(o[c]);
   }
   std::vector<double> getPressure() {
     // Incremental scheme: P_ accumulates the physical pressure. Classical Chorin (!incremental_):
@@ -1163,6 +1181,44 @@ class Solver {
               h((long)(x + G) + (long)(y + G) * e_.x + (long)(z + G) * (long)e_.x * e_.y);
     return out;
   }
+  // Inverse of gatherInner: scatter an x-fastest (nx,ny,nz) inner-region host buffer into the inner
+  // cells of a ghosted G=2 field (ghost cells untouched — refill via exchangeField/fillGhosts).
+  void scatterInner(CCField fld, const std::vector<double>& in) {
+    if (in.size() != (std::size_t)nx_ * ny_ * nz_)
+      throw std::runtime_error("flow::setField: array size does not match the inner grid");
+    auto h = Kokkos::create_mirror_view(fld);
+    Kokkos::deep_copy(h, fld);  // preserve existing ghosts
+    for (int z = 0; z < nz_; ++z)
+      for (int y = 0; y < ny_; ++y)
+        for (int x = 0; x < nx_; ++x)
+          h((long)(x + G) + (long)(y + G) * e_.x + (long)(z + G) * (long)e_.x * e_.y) =
+              in[(std::size_t)x + (std::size_t)y * nx_ + (std::size_t)z * (std::size_t)nx_ * ny_];
+    Kokkos::deep_copy(fld, h);
+  }
+
+  // --- Named field registry (multiphysics field container) ------------------------------------
+  // Register a new zero-initialised cell-centred field on the G=2 velocity block and return its
+  // buffer. Idempotent: re-adding an existing name returns the existing buffer unchanged.
+  CCField addField(const std::string& name) {
+    if (fields_.has(name))
+      return fields_.at(name).data;
+    return fields_.add(name, n_, G, peclet::core::Centering::Cell).data;
+  }
+  bool hasField(const std::string& name) const { return fields_.has(name); }
+  CCField fieldView(const std::string& name) { return fields_.at(name).data; }
+  std::vector<std::string> fieldNames() const { return fields_.names(); }
+  // Ghost-exchange a registered field (cross-rank + periodic under MPI; periodic-only single-rank).
+  void exchangeField(const std::string& name) { fillGhosts(fields_.at(name).data); }
+  // Host round-trip: read a registered field's inner region as an x-fastest (nx,ny,nz) buffer, or
+  // write one (ghosts left stale until the next exchangeField).
+  std::vector<double> getField(const std::string& name) { return gatherInner(fields_.at(name).data); }
+  void setField(const std::string& name, const std::vector<double>& v) {
+    scatterInner(fields_.at(name).data, v);
+  }
+  // Padded-block extents + ghost width, so a zero-copy field buffer (size ex*ey*ez, x-fastest) can
+  // be reshaped in Python.
+  std::array<int, 3> blockShape() const { return {e_.x, e_.y, e_.z}; }
+  int ghostWidth() const { return G; }
 
  private:
   int nx_, ny_, nz_;
@@ -1217,6 +1273,7 @@ class Solver {
   CCField uf_, vf_, wf_;      // collocated: transient face (MAC) field (approx projection)
   CCField old_[3], prev_[3];  // u^n time base + previous Picard iterate
   Comp C[3];
+  peclet::core::FieldSet fields_;  // named directory of all cell fields (velocity/p/sdf + user)
 };
 
 // The staggered MAC solver — THE flow solver, bit-identical to the pre-policy class. Bindings + the

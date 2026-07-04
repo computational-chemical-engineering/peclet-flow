@@ -20,8 +20,10 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <array>
 #include <cstdint>
 #include <Kokkos_Core.hpp>
+#include <string>
 #include <vector>
 
 #ifdef PECLET_FLOW_MPI
@@ -66,6 +68,34 @@ static nb::ndarray<nb::numpy, double> field_out(S& s, std::vector<double>&& v) {
 // already x-fastest). nanobind casts/copies the input to f_contig double if needed.
 static std::vector<double> grid_in(nb::ndarray<double, nb::f_contig> a) {
   return peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(a));
+}
+
+// Zero-copy export of a registered field's padded device buffer as a Fortran-order 3-D array of the
+// full block shape (ex,ey,ez) = (nx+2G, ny+2G, nz+2G), x-fastest strides {1,ex,ex*ey}. Includes the
+// ghost band (the flat buffer is contiguous; a ghost-stripped view would not be). The capsule owns a
+// copy of the managed CCField, so the allocation outlives the array — host → NumPy referencing the
+// buffer, device → DLPack for CuPy/torch. Mirrors peclet::core::python::view_to_ndarray but with an
+// explicit 3-D reshape of the flat 1-D field.
+template <class S>
+static auto field3d_out(S& s, peclet::flow::CCField f) {
+  namespace pcp = peclet::core::python;
+  using Mem = peclet::flow::CCMem;
+  const auto bs = s.blockShape();
+  std::array<std::size_t, 3> shape{static_cast<std::size_t>(bs[0]), static_cast<std::size_t>(bs[1]),
+                                   static_cast<std::size_t>(bs[2])};
+  std::array<std::int64_t, 3> strides{1, static_cast<std::int64_t>(bs[0]),
+                                      static_cast<std::int64_t>(bs[0]) * bs[1]};
+  auto* held = new peclet::flow::CCField(f);
+  nb::capsule owner(held, [](void* p) noexcept { delete static_cast<peclet::flow::CCField*>(p); });
+  double* data = f.data();
+  if constexpr (pcp::is_host_space_v<Mem>) {
+    return nb::ndarray<nb::numpy, double>(data, 3, shape.data(), owner, strides.data(),
+                                          nb::dtype<double>(), nb::device::cpu::value, 0);
+  } else {
+    auto dev = pcp::dlpack_device<Mem>();
+    return nb::ndarray<double>(data, 3, shape.data(), owner, strides.data(), nb::dtype<double>(),
+                               dev.first, dev.second);
+  }
 }
 
 // Register a solver class for the given GridLayout policy (Staggered -> "Solver", Colocated ->
@@ -199,6 +229,15 @@ static void bind_solver(nb::module_& m, const char* name) {
           "Return the physical pressure as a Fortran-order (nx,ny,nz) float64 array (index "
           "[x,y,z]).")
       .def(
+          "get_ox", [](S& s) { return field_out(s, s.getOpenness(0)); },
+          "TEMP: -x face openness (fluid area fraction) per inner cell, (nx,ny,nz).")
+      .def(
+          "get_oy", [](S& s) { return field_out(s, s.getOpenness(1)); },
+          "TEMP: -y face openness per inner cell, (nx,ny,nz).")
+      .def(
+          "get_oz", [](S& s) { return field_out(s, s.getOpenness(2)); },
+          "TEMP: -z face openness per inner cell, (nx,ny,nz).")
+      .def(
           "get_uf", [](S& s) { return field_out(s, s.getFaceVelocity(0)); },
           "Return the divergence-free FACE x-velocity (collocated: projected MAC field; staggered: "
           "== get_u).")
@@ -210,6 +249,42 @@ static void bind_solver(nb::module_& m, const char* name) {
           "get_wf", [](S& s) { return field_out(s, s.getFaceVelocity(2)); },
           "Return the divergence-free FACE z-velocity (collocated: projected MAC field; staggered: "
           "== get_w).")
+      // --- Named field registry (multiphysics field container) ---------------------------------
+      .def(
+          "add_field", [](S& s, const std::string& name) { s.addField(name); }, nb::arg("name"),
+          "Register a new zero-initialised cell-centred field on the grid (for transported scalars "
+          "or material properties). Idempotent.")
+      .def(
+          "has_field", [](S& s, const std::string& name) { return s.hasField(name); },
+          nb::arg("name"), "Whether a field of this name is registered.")
+      .def(
+          "field_names", [](S& s) { return s.fieldNames(); },
+          "Names of all registered fields (velocity u/v/w, p, sdf, plus any added), sorted.")
+      .def(
+          "get_field", [](S& s, const std::string& name) { return field_out(s, s.getField(name)); },
+          nb::arg("name"),
+          "Return a registered field's inner region as a Fortran-order (nx,ny,nz) float64 array.")
+      .def(
+          "set_field",
+          [](S& s, const std::string& name, nb::ndarray<double, nb::f_contig> a) {
+            s.setField(name, grid_in(a));
+          },
+          nb::arg("name"), nb::arg("array"),
+          "Write a Fortran-order (nx,ny,nz) float64 array into a registered field's inner region "
+          "(ghosts refilled on the next exchange_field/step).")
+      .def(
+          "field_view", [](S& s, const std::string& name) { return field3d_out(s, s.fieldView(name)); },
+          nb::arg("name"),
+          "Zero-copy view of a registered field's full padded buffer as a Fortran-order "
+          "(nx+2g, ny+2g, nz+2g) array (g = ghost_width); host → NumPy, device → DLPack (CuPy).")
+      .def(
+          "exchange_field", [](S& s, const std::string& name) { s.exchangeField(name); },
+          nb::arg("name"),
+          "Fill a registered field's ghost cells (cross-rank + periodic under MPI; periodic "
+          "single-rank).")
+      .def(
+          "ghost_width", [](S& s) { return s.ghostWidth(); },
+          "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")
       .def("max_open_divergence", &S::maxOpenDivergence,
            "Return the max cut-cell flux divergence (the incompressibility residual; ~0 when "
            "converged).")

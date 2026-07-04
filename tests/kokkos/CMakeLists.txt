@@ -20,6 +20,13 @@ target_include_directories(test_reductions PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.
 target_link_libraries(test_reductions PRIVATE Kokkos::kokkos)
 add_test(NAME reductions COMMAND test_reductions)
 
+# Named field registry on the Solver (includes flow_ibm.hpp -> needs the core headers).
+add_executable(test_field_registry test_field_registry.cpp)
+target_include_directories(test_field_registry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR}/../../../core/include)
+target_link_libraries(test_field_registry PRIVATE Kokkos::kokkos)
+add_test(NAME field_registry COMMAND test_field_registry)
+
 add_executable(test_advection test_advection.cpp)
 target_include_directories(test_advection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_advection PRIVATE Kokkos::kokkos)
