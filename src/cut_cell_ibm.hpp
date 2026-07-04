@@ -233,6 +233,37 @@ inline void ibmBuildDiffusion(Kokkos::View<float*, IMem> AC, Kokkos::View<float*
       });
 }
 
+// Variable-viscosity backward-Euler diffusion stencil (sibling of ibmBuildDiffusion): the face
+// off-diagonal is -beta_face (per-face viscosity from FaceProps) and A_C = idiag(i) + sum of the 6
+// face betas. Built over INNER cells (neighbour mu at i+-stride must be valid — fill the mu ghosts
+// first). Face means are computed in double, cast to float once (mirroring the constant path).
+// FaceProps: UniformFaceProps reproduces the constant operator; FieldFaceProps reads a mu field.
+template <class FaceProps>
+inline void ibmBuildDiffusionVar(Kokkos::View<float*, IMem> AC, Kokkos::View<float*, IMem> AW,
+                                 Kokkos::View<float*, IMem> AE, Kokkos::View<float*, IMem> AS,
+                                 Kokkos::View<float*, IMem> AN, Kokkos::View<float*, IMem> AB,
+                                 Kokkos::View<float*, IMem> AT, int ex, int ey, int ez, int g,
+                                 FaceProps fp) {
+  Kokkos::DefaultExecutionSpace space;
+  using MD = Kokkos::MDRangePolicy<Kokkos::DefaultExecutionSpace, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::ibm_build_diff_var", MD(space, {g, g, g}, {ex - g, ey - g, ez - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = ex, sz = (long)ex * ey;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const double bw = fp.beta(i, i - sx), be = fp.beta(i, i + sx);
+        const double bs = fp.beta(i, i - sy), bn = fp.beta(i, i + sy);
+        const double bb = fp.beta(i, i - sz), bt = fp.beta(i, i + sz);
+        AW(i) = (float)(-bw);
+        AE(i) = (float)(-be);
+        AS(i) = (float)(-bs);
+        AN(i) = (float)(-bn);
+        AB(i) = (float)(-bb);
+        AT(i) = (float)(-bt);
+        AC(i) = (float)(fp.idiag(i) + bw + be + bs + bn + bb + bt);
+      });
+}
+
 // Apply the Robust-Scaled overlay to the momentum stencil at each cut cell (port of
 // ibm_modify_stencil_k): modify A_C / 6 off-diagonals + accumulate the inhomogeneous
 // (wall-velocity) term and store the row scaling. Each cut cell owns a distinct grid index c -> no

@@ -41,6 +41,13 @@ target_include_directories(test_closures PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../
 target_link_libraries(test_closures PRIVATE Kokkos::kokkos)
 add_test(NAME closures COMMAND test_closures)
 
+# Variable-viscosity diffusion stencil (ibmBuildDiffusionVar + FaceProps means vs oracle).
+add_executable(test_variable_mu test_variable_mu.cpp)
+target_include_directories(test_variable_mu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR}/../../../core/include)
+target_link_libraries(test_variable_mu PRIVATE Kokkos::kokkos)
+add_test(NAME variable_mu COMMAND test_variable_mu)
+
 add_executable(test_advection test_advection.cpp)
 target_include_directories(test_advection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_advection PRIVATE Kokkos::kokkos)

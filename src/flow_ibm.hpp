@@ -30,6 +30,7 @@
 #include "mac_pressure.hpp"
 #include "mac_stencils.hpp"
 #include "mac_velocity_mg.hpp"
+#include "face_props.hpp"
 #include "peclet/core/field/field_set.hpp"
 #include "property_closures.hpp"
 #include "scalar_transport.hpp"
@@ -417,6 +418,10 @@ class Solver {
     // Multiphysics: refresh material properties / body forces from the current fields (frozen over
     // the step). No-op (byte-identical) when no closure is registered.
     updateProperties();
+    // Variable viscosity: rebuild the diffusion stencil from the current mu field (the implicit-FOU
+    // path rebuilds it per Picard in buildAdvStencil, so only the non-advective path needs this).
+    if (varProps_ && !implicitAdv())
+      rebuildStencils();
     // u^n time base, fixed for the whole step (Picard lags the advecting velocity at u^k, not the
     // base).
     for (int c = 0; c < 3; ++c)
@@ -573,14 +578,33 @@ class Solver {
   // + reflection-ghost BCs), not the all-fluid const-coeff fold. Needed when (a) an immersed solid is
   // present (cut-cell no-slip must be in the operator), or (b) advection is implicit (the FOU upwind
   // lives in the stencil -> stable at large dt, the fully-implicit design).
-  bool bcStencilPath() const { return hasBc_ && !useVelocityMg_ && (hasSolid_ || implicitAdv()); }
+  bool bcStencilPath() const {
+    return hasBc_ && !useVelocityMg_ && (hasSolid_ || implicitAdv() || varProps_);
+  }
+  // Fill the mu-field ghosts for the face means: periodic/halo base, then zero-gradient (copy) on
+  // domain-BC (wall/inflow/outflow) faces — a periodic wrap there would bring the wrong layer's mu
+  // to the wall face (destabilising, especially for the harmonic mean).
+  void fillMuGhosts() {
+    fillGhosts(muField_);
+    if (!distributed_)
+      for (int f = 0; f < 6; ++f)
+        if (bc_[f] != 0)
+          applyScalarBcFace(muField_, f / 2, f % 2, 1, 0.0);  // type 1 = Neumann copy
+  }
   void rebuildStencils() {
     const double idiag = rho_ / dt_, beta = mu_;
+    if (varProps_)
+      fillMuGhosts();  // face means read mu at i +- stride (boundary inner cells -> ghosts)
     for (int c = 0; c < 3; ++c) {
       Kokkos::deep_copy(C[c].rscale, 1.0);
       Kokkos::deep_copy(C[c].inhom, 0.0);
-      ibmBuildDiffusion(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x, e_.y,
-                        e_.z, beta, idiag);
+      if (varProps_)
+        ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x,
+                             e_.y, e_.z, G,
+                             FieldFaceProps{CCConst(muField_), idiag, harmonicMu_});
+      else
+        ibmBuildDiffusion(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x, e_.y,
+                          e_.z, beta, idiag);
       ibmModifyStencil(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, C[c].inhom,
                        C[c].rscale, C[c].ov, C[c].nCut, 0.0f);
     }
@@ -764,8 +788,14 @@ class Solver {
   void buildAdvStencil(int c) {
     const double idiag = rho_ / dt_, beta = mu_, fouw = rho_;
     C3 e = e_;
-    ibmBuildDiffusion(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y, e.z,
-                      beta, idiag);
+    if (varProps_) {
+      if (c == 0)
+        fillMuGhosts();
+      ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y,
+                           e.z, G, FieldFaceProps{CCConst(muField_), idiag, harmonicMu_});
+    } else
+      ibmBuildDiffusion(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y, e.z,
+                        beta, idiag);
     CCExec space;
     FV AC = C[c].AC, AW = C[c].AW, AE = C[c].AE, AS = C[c].AS, AN = C[c].AN, AB = C[c].AB,
        AT = C[c].AT;
@@ -1186,9 +1216,18 @@ class Solver {
       CCExec space;
       CCField P = P_, ph = phi_, d = div_;
       const double ct = rho_ / dt_, mu = mu_;
-      Kokkos::parallel_for(
-          "press", Kokkos::RangePolicy<CCExec>(space, 0, n_),
-          KOKKOS_LAMBDA(std::size_t i) { P(i) += ct * ph(i) - mu * d(i); });
+      if (varProps_) {
+        // Variable viscosity: the rotational term uses the per-cell mu (constant mu_ here injects a
+        // rotational pressure error that accumulates under the incremental scheme -> divergence).
+        CCConst mf = CCConst(muField_);
+        Kokkos::parallel_for(
+            "press_var", Kokkos::RangePolicy<CCExec>(space, 0, n_),
+            KOKKOS_LAMBDA(std::size_t i) { P(i) += ct * ph(i) - mf(i) * d(i); });
+      } else {
+        Kokkos::parallel_for(
+            "press", Kokkos::RangePolicy<CCExec>(space, 0, n_),
+            KOKKOS_LAMBDA(std::size_t i) { P(i) += ct * ph(i) - mu * d(i); });
+      }
     }
   }
   void maskVelocity(int c) {
@@ -1365,6 +1404,29 @@ class Solver {
     for (int k = 0; k < 4 && k < (int)params.size(); ++k)
       cl.p[k] = params[k];
     closures_.push_back(cl);
+    if (target == "mu")  // a closure driving mu turns on variable viscosity
+      setPropertyMode(true, harmonicMu_);
+  }
+  // Enable/disable variable-coefficient momentum (variable viscosity). variable=true binds the "mu"
+  // field (creating it, seeded with the current scalar mu, if absent) and forces the stencil solve
+  // path. harmonic selects the harmonic face mean (continuous shear stress across a viscosity jump)
+  // vs arithmetic. Escape hatch: set_field("mu", arr) then set_property_mode(True).
+  void setPropertyMode(bool variable, bool harmonic) {
+    varProps_ = variable;
+    harmonicMu_ = harmonic;
+    if (variable) {
+      if (fields_.has("mu"))
+        muField_ = fields_.at("mu").data;
+      else {
+        muField_ = addField("mu");
+        Kokkos::deep_copy(muField_, mu_);  // default to the scalar mu until a closure/set_field sets it
+      }
+      useVelocityMg_ = false;  // the velocity multigrid takes a scalar mu (variable-coeff vmg deferred)
+      incremental_ = false;    // classical Chorin projection: the rotational-incremental form is not
+                               // consistent under strongly variable viscosity (it accumulates ->
+                               // divergence). Exact at steady state; proper variable-coeff rotational
+                               // pressure is the variable-density projection work (Phase 5).
+    }
   }
   // Tabulated property: out = piecewise-linear interp of (xs, ys) at the input field (xs ascending).
   void setPropertyTable(const std::string& target, const std::string& in0,
@@ -1544,6 +1606,9 @@ class Solver {
   std::vector<Closure> closures_;     // property/body-force closures (applied at top of step())
   CCField cellForce_[3];              // per-cell momentum body force (Boussinesq / CFD-DEM feedback)
   bool hasCellForce_ = false;
+  bool varProps_ = false;             // variable-coefficient momentum (variable viscosity)
+  bool harmonicMu_ = false;           // harmonic vs arithmetic face-viscosity mean
+  CCField muField_;                   // per-cell dynamic viscosity (when varProps_)
 };
 
 // The staggered MAC solver — THE flow solver, bit-identical to the pre-policy class. Bindings + the

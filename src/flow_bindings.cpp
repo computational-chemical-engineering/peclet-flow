@@ -344,6 +344,16 @@ static void bind_solver(nb::module_& m, const char* name) {
           "update_properties", [](S& s) { s.updateProperties(); },
           "Apply all registered property/force closures now (also done at the top of step()).")
       .def(
+          "set_property_mode",
+          [](S& s, const std::string& mode, bool harmonic) {
+            s.setPropertyMode(mode == "variable", harmonic);
+          },
+          nb::arg("mode") = "variable", nb::arg("harmonic") = false,
+          "Enable variable-coefficient momentum (variable viscosity): mode 'variable' binds the 'mu' "
+          "field (get/set_field('mu')) into the diffusion operator; 'constant' reverts. harmonic = "
+          "harmonic face-viscosity mean (continuous shear stress across a jump) vs arithmetic. A "
+          "closure targeting 'mu' enables this automatically.")
+      .def(
           "ghost_width", [](S& s) { return s.ghostWidth(); },
           "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")
       .def("max_open_divergence", &S::maxOpenDivergence,
