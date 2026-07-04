@@ -31,6 +31,7 @@
 #include "mac_stencils.hpp"
 #include "mac_velocity_mg.hpp"
 #include "peclet/core/field/field_set.hpp"
+#include "property_closures.hpp"
 #include "scalar_transport.hpp"
 #include "staggered_advection.hpp"
 
@@ -413,6 +414,9 @@ class Solver {
   }
 
   void step() {
+    // Multiphysics: refresh material properties / body forces from the current fields (frozen over
+    // the step). No-op (byte-identical) when no closure is registered.
+    updateProperties();
     // u^n time base, fixed for the whole step (Picard lags the advecting velocity at u^k, not the
     // base).
     for (int c = 0; c < 3; ++c)
@@ -432,7 +436,8 @@ class Solver {
         for (int c = 0; c < 3; ++c)
           fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect
       for (int c = 0; c < 3; ++c)
-        buildRhs(c);  // RHS from u^n base + advection lagged at u^k
+        hasCellForce_ ? buildRhsForced(c) : buildRhs(c);  // RHS from u^n base + advection lagged
+                                                          // at u^k (+ per-cell body force)
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
       // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies to
       // the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC stencil path
@@ -714,6 +719,43 @@ class Solver {
           bb(i) =
               rs(i) * (idiag * un(i) + fc - rho * aK + rho * aF - gp) + (bc ? brhs(i) : -inh(i));
         });  // BC fold (brhs) on the domain-BC path; -inhom on the IBM path (=0 for no-slip)
+  }
+  // Sibling of buildRhs adding a per-cell body force fb(i) (Boussinesq buoyancy / CFD-DEM feedback):
+  // the constant fc becomes fc + fb(i). Kept as a separate kernel so buildRhs stays byte-identical
+  // (no codegen drift on the single-phase path). Selected in step() when hasCellForce_.
+  void buildRhsForced(int c) {
+    CCExec space;
+    const double idiag = rho_ / dt_, fc = f_[c], rho = rho_;
+    C3 e = e_;
+    CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
+    CCConst fb = CCConst(cellForce_[c]);
+    CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u), uu = CCConst(C[c].u),
+            un = CCConst(old_[c]);
+    const long strd = (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y;
+    const bool pureFou = implicitAdv() && !deferredCorr_;
+    const bool incr = cutcellPressure_ && incremental_, adv = advect_ && !pureFou,
+               bc = hasBc_ && !bcStencilPath();
+    const bool ifou = implicitAdv() && deferredCorr_;
+    const int sch = advScheme_;
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "rhs_forced", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          double aK = 0.0, aF = 0.0;
+          if (adv) {
+            sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{uu, e.x, e.y};
+            aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa)
+                            : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa);
+            if (ifou)
+              aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa);
+          }
+          const double gp = !incr              ? 0.0
+                            : Grid::collocated ? 0.5 * (P((long)i + strd) - P((long)i - strd))
+                                               : (P(i) - P((long)i - strd));
+          bb(i) = rs(i) * (idiag * un(i) + fc + fb(i) - rho * aK + rho * aF - gp) +
+                  (bc ? brhs(i) : -inh(i));
+        });
   }
   // Implicit-FOU velocity stencil (CUDA build_adv_stencil_k + ibm_modify_stencil): backward-Euler
   // diffusion (idiag+6beta diag, -beta off) + rho*FOU(u^k) upwind operator (diagonally dominant ->
@@ -1288,6 +1330,7 @@ class Solver {
     for (auto& sc : scalars_) {
       scalarBuildDiffusionOpen(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(ox_),
                                CCConst(oy_), CCConst(oz_), sc.D, idt, e_, G);
+      applyScalarBcStencil(sc);  // re-open Dirichlet domain faces (set_domain_bc closes openness)
       Kokkos::deep_copy(sc.cOld, sc.c);
       scalarFillGhosts(sc);
       scalarBuildRhs(sc.b, CCConst(sc.cOld), CCConst(Uf), CCConst(Vf), CCConst(Wf), CCConst(ox_),
@@ -1305,7 +1348,64 @@ class Solver {
     }
   }
 
+  // --- Property closures + per-cell body force ------------------------------------------------
+  // Register a property/force closure. target: a registered field name — a material property
+  // ("mu"/"rho"/…) or a body-force component ("force_x"/"force_y"/"force_z"). kind: LinearMix /
+  // BoussinesqForce / ArrheniusMu. in0/in1: input field names (in1 "" if unused). params: up to 4
+  // doubles (meaning per kind — property_closures.hpp). Applied at the top of step() in registration
+  // order. Targeting a force component turns on the per-cell body-force RHS path.
+  void setPropertyModel(const std::string& target, ClosureKind kind, const std::string& in0,
+                        const std::string& in1, const std::vector<double>& params) {
+    Closure cl;
+    cl.kind = kind;
+    cl.out = ensureTarget(target);
+    cl.in0 = CCConst(fields_.at(in0).data);
+    if (!in1.empty())
+      cl.in1 = CCConst(fields_.at(in1).data);
+    for (int k = 0; k < 4 && k < (int)params.size(); ++k)
+      cl.p[k] = params[k];
+    closures_.push_back(cl);
+  }
+  // Tabulated property: out = piecewise-linear interp of (xs, ys) at the input field (xs ascending).
+  void setPropertyTable(const std::string& target, const std::string& in0,
+                        const std::vector<double>& xs, const std::vector<double>& ys) {
+    Closure cl;
+    cl.kind = ClosureKind::Table1D;
+    cl.out = ensureTarget(target);
+    cl.in0 = CCConst(fields_.at(in0).data);
+    cl.nTab = (int)std::min(xs.size(), ys.size());
+    cl.tabX = CCField(target + "_tabx", cl.nTab);
+    cl.tabY = CCField(target + "_taby", cl.nTab);
+    auto hx = Kokkos::create_mirror_view(cl.tabX);
+    auto hy = Kokkos::create_mirror_view(cl.tabY);
+    for (int k = 0; k < cl.nTab; ++k) {
+      hx(k) = xs[k];
+      hy(k) = ys[k];
+    }
+    Kokkos::deep_copy(cl.tabX, hx);
+    Kokkos::deep_copy(cl.tabY, hy);
+    closures_.push_back(cl);
+  }
+  // Apply all closures (also called at the top of step()). Exposed for testing.
+  void updateProperties() {
+    for (auto& cl : closures_)
+      applyClosure(cl, e_, G);
+  }
+
  private:
+  // Resolve a closure target to a registered buffer. A force component allocates ALL three
+  // cellForce_ slots (buildRhsForced reads every component) and enables the body-force RHS path.
+  CCField ensureTarget(const std::string& name) {
+    if (name == "force_x" || name == "force_y" || name == "force_z")
+      ensureCellForceAll();
+    return addField(name);  // idempotent; returns the (now-existing) buffer
+  }
+  void ensureCellForceAll() {
+    static const char* fn[3] = {"force_x", "force_y", "force_z"};
+    for (int c = 0; c < 3; ++c)
+      cellForce_[c] = addField(fn[c]);  // zero-initialised, registered
+    hasCellForce_ = true;
+  }
   // Ghost fill for a scalar: periodic (single-rank) / MPI halo base, then override any domain
   // Dirichlet/Neumann faces.
   void scalarFillGhosts(ScalarField& sc) {
@@ -1323,6 +1423,45 @@ class Solver {
     for (int f = 0; f < 6; ++f)
       if (sc.bc[f] != 0)
         applyScalarBcFace(sc.c, f / 2, f % 2, sc.bc[f], sc.bcVal[f]);
+  }
+  // Re-open the diffusion face at a Dirichlet domain boundary: set_domain_bc closes the boundary
+  // openness (ox_=0), which correctly makes Neumann/adiabatic walls zero-flux but would also cut a
+  // Dirichlet wall's heat path. For each Dirichlet face, restore the face coefficient (band = -D,
+  // A_C += D); the ghost carries 2*value - inner so the row is the standard Dirichlet operator.
+  void applyScalarBcStencil(ScalarField& sc) {
+    if (distributed_)
+      return;
+    for (int f = 0; f < 6; ++f) {
+      if (sc.bc[f] != 2)
+        continue;  // only Dirichlet reopens; Neumann/periodic leave the (closed/interior) band
+      const int a = f / 2, side = f % 2;
+      CCField band = (a == 0)   ? (side == 0 ? sc.AW : sc.AE)
+                     : (a == 1) ? (side == 0 ? sc.AS : sc.AN)
+                                : (side == 0 ? sc.AB : sc.AT);
+      patchScalarDirichletFace(sc.AC, band, sc.D, a, side);
+    }
+  }
+  void patchScalarDirichletFace(CCField AC, CCField band, double D, int a, int side) {
+    const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
+    const int nt1 = (t1 == 0) ? nx_ : (t1 == 1) ? ny_ : nz_;
+    const int nt2 = (t2 == 0) ? nx_ : (t2 == 1) ? ny_ : nz_;
+    const int na = (a == 0) ? nx_ : (a == 1) ? ny_ : nz_;
+    const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
+    const long sa = (a == 0) ? sx : (a == 1) ? sy : sz;
+    const long st1 = (t1 == 0) ? sx : (t1 == 1) ? sy : sz;
+    const long st2 = (t2 == 0) ? sx : (t2 == 1) ? sy : sz;
+    const int aInner = (side == 0) ? G : (G + na - 1);
+    CCExec space;
+    Kokkos::parallel_for(
+        "peclet::flow::scalar_bc_stencil",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {G, G}, {G + nt1, G + nt2}),
+        KOKKOS_LAMBDA(int j1, int j2) {
+          const long i = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
+          // base build put band(i) = -D*open_face and A_C += D*open_face; force the face fully open
+          // (band -> -D, A_C gains D*(1-open)) without double-counting when it was already open.
+          AC(i) += D + band(i);
+          band(i) = -D;
+        });
   }
   void applyScalarBcFace(CCField c, int a, int side, int type, double val) {
     const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
@@ -1400,8 +1539,11 @@ class Solver {
   CCField uf_, vf_, wf_;      // collocated: transient face (MAC) field (approx projection)
   CCField old_[3], prev_[3];  // u^n time base + previous Picard iterate
   Comp C[3];
-  peclet::core::FieldSet fields_;    // named directory of all cell fields (velocity/p/sdf + user)
+  peclet::core::FieldSet fields_;     // named directory of all cell fields (velocity/p/sdf + user)
   std::vector<ScalarField> scalars_;  // transported scalars (advection-diffusion)
+  std::vector<Closure> closures_;     // property/body-force closures (applied at top of step())
+  CCField cellForce_[3];              // per-cell momentum body force (Boussinesq / CFD-DEM feedback)
+  bool hasCellForce_ = false;
 };
 
 // The staggered MAC solver — THE flow solver, bit-identical to the pre-policy class. Bindings + the

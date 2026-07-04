@@ -34,6 +34,13 @@ target_include_directories(test_scalar_transport PRIVATE ${CMAKE_CURRENT_SOURCE_
 target_link_libraries(test_scalar_transport PRIVATE Kokkos::kokkos)
 add_test(NAME scalar_transport COMMAND test_scalar_transport)
 
+# Property closures + per-cell body force (LinearMix / Boussinesq / Arrhenius vs host oracle).
+add_executable(test_closures test_closures.cpp)
+target_include_directories(test_closures PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR}/../../../core/include)
+target_link_libraries(test_closures PRIVATE Kokkos::kokkos)
+add_test(NAME closures COMMAND test_closures)
+
 add_executable(test_advection test_advection.cpp)
 target_include_directories(test_advection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_advection PRIVATE Kokkos::kokkos)

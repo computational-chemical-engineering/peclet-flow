@@ -308,6 +308,41 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "advance_scalars", [](S& s) { s.advanceScalars(); },
           "Advance all registered scalars one dt with the current velocity (also done by step()).")
+      // --- Property closures + Boussinesq body force -------------------------------------------
+      .def(
+          "set_property_model",
+          [](S& s, const std::string& target, const std::string& kind, const std::string& in0,
+             const std::vector<double>& params, const std::string& in1) {
+            peclet::flow::ClosureKind k;
+            if (kind == "linear")
+              k = peclet::flow::ClosureKind::LinearMix;
+            else if (kind == "boussinesq")
+              k = peclet::flow::ClosureKind::BoussinesqForce;
+            else if (kind == "arrhenius")
+              k = peclet::flow::ClosureKind::ArrheniusMu;
+            else
+              throw std::runtime_error("set_property_model: unknown kind '" + kind + "'");
+            s.setPropertyModel(target, k, in0, in1, params);
+          },
+          nb::arg("target"), nb::arg("kind"), nb::arg("field"),
+          nb::arg("params") = std::vector<double>{}, nb::arg("field2") = std::string{},
+          "Register a device closure writing a property/body-force field from input field(s). "
+          "target: a registered field (a property 'mu'/'rho'/… or a body-force component "
+          "'force_x'/'force_y'/'force_z'). kind: 'linear' (params [p0,p1,p2]: p0+p1*field+p2*field2), "
+          "'boussinesq' (params [rho0,g,beta,T0]: rho0*g*beta*(field-T0) buoyancy), 'arrhenius' "
+          "(params [mu_ref,B,Tref]: mu_ref*exp(B*(1/field-1/Tref))). Applied at the top of step().")
+      .def(
+          "set_property_table",
+          [](S& s, const std::string& target, const std::string& field,
+             const std::vector<double>& x, const std::vector<double>& y) {
+            s.setPropertyTable(target, field, x, y);
+          },
+          nb::arg("target"), nb::arg("field"), nb::arg("x"), nb::arg("y"),
+          "Register a tabulated property: target = piecewise-linear interpolation of (x, y) at the "
+          "input field value (x ascending, clamped at the ends).")
+      .def(
+          "update_properties", [](S& s) { s.updateProperties(); },
+          "Apply all registered property/force closures now (also done at the top of step()).")
       .def(
           "ghost_width", [](S& s) { return s.ghostWidth(); },
           "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")
