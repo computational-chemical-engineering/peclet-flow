@@ -18,6 +18,10 @@
 
 namespace peclet::flow {
 
+// const view of the (float) IBM stencil coefficients (same alias mac_ibm.hpp defines; this header is
+// included first, so declare it here for the mode-4 stencilMatvec).
+using MConst = Kokkos::View<const float*, CCMem>;
+
 // Average cell-centered velocities onto the staggered face layout: uf(i) is the velocity at the low
 // (-x) face of cell i (located at i-1/2) = ½(U(i-1)+U(i)); likewise vf/wf along y/z. This
 // reproduces the exact layout the staggered solver stores directly, so divergOpen / projectCorrect
@@ -254,6 +258,125 @@ inline void transposeGradWallAware(CCField out, CCConst p, CCConst sdf, CCConst 
               acc += w[k] * o(f) * (p(f) - p(f - sa));
         }
         out(i) = acc;
+      });
+}
+
+// Cell fluid volume fraction cs (mode 4): 1 in clear fluid, 0 in solid, subsampled (4x4x4 trilinear
+// SDF) at cut cells. Static, one-time at setSolid. Used to weight the FV momentum time term and the
+// body/pressure forcing so a cut cell is driven over its FLUID volume only (omitting cs is an O(h)
+// surface error — part of what keeps modes 0-3 first-order).
+inline void buildCellFraction(CCField cs, CCConst sdf, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::cell_fraction", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        const double sc = sdf(i);
+        // fully clear one cell away on all axes -> not a cut cell; cheap exact classification
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const bool f0 = sc >= 0.0;
+        const bool cut =
+            (sdf(i + sx) >= 0.0) != f0 || (sdf(i - sx) >= 0.0) != f0 || (sdf(i + sy) >= 0.0) != f0 ||
+            (sdf(i - sy) >= 0.0) != f0 || (sdf(i + sz) >= 0.0) != f0 || (sdf(i - sz) >= 0.0) != f0;
+        if (!cut) {
+          cs(i) = sc >= 0.0 ? 1.0 : 0.0;
+          return;
+        }
+        int nf = 0;
+        for (int j0 = 0; j0 < 4; ++j0)
+          for (int j1 = 0; j1 < 4; ++j1)
+            for (int j2 = 0; j2 < 4; ++j2) {
+              const double o0 = -0.375 + 0.25 * j0, o1 = -0.375 + 0.25 * j1, o2 = -0.375 + 0.25 * j2;
+              if (ccSampleExt(sdf, e, x + o0, y + o1, z + o2) > 0.0)
+                ++nf;
+            }
+        cs(i) = nf / 64.0;
+      });
+}
+
+// FINITE-VOLUME MOMENTUM OPERATOR (mode 4): applies L_FV(U) over the fluid control volume of each
+// cell (the centroid wall-gradient is validated a priori in tests/study/fv_wallflux_apriori.py):
+//   L_FV(U)_i = idt·cs_i·U_i + mu·[ Σ_f o_f·(U_i − U_nbr) + Σ_a W_a·g_a^centroid(U) ]
+// The o_f-weighted two-point face fluxes + the fragment-centroid wall drag = the same finite-volume
+// boundary geometry the projection uses. In the interior (cs=1, o_f=1, W=0) this is exactly the
+// backward-Euler diffusion operator idt·U − mu·Lap(U) — identical to the IBM matrix M there, so the
+// defect correction (M·u − L_FV·u) vanishes and interior cells stay byte-identical to mode 0.
+inline void fvViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCConst ox, CCConst oy,
+                           CCConst oz, double mu, double idt, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::fv_viscous_apply", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long st[3] = {sx, sy, sz};
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        CCConst oa[3] = {ox, oy, oz};
+        double W[3], of[3];       // fragment normal per axis; low/high face openness
+        double diag = 0.0, offs = 0.0, aw = 0.0;
+        for (int a = 0; a < 3; ++a) {
+          const double om = oa[a](i), op = oa[a](i + st[a]);
+          W[a] = om - op;
+          of[a] = om + op;  // low + high face openness
+          diag += om + op;
+          offs += om * U(i - st[a]) + op * U(i + st[a]);
+          aw += (W[a] < 0.0 ? -W[a] : W[a]);
+        }
+        double wall = 0.0;
+        if (aw > 1e-12) {  // centroid-anchored wall drag mu·Σ_a W_a g_a (a-priori-validated: fv_wallflux_apriori.py)
+          double nx = 0.5 * (sdf(i + sx) - sdf(i - sx));
+          double ny = 0.5 * (sdf(i + sy) - sdf(i - sy));
+          double nz = 0.5 * (sdf(i + sz) - sdf(i - sz));
+          double nn = Kokkos::sqrt(nx * nx + ny * ny + nz * nz);
+          if (nn > 1e-12) {
+            nx /= nn;
+            ny /= nn;
+            nz /= nn;
+            const double nv[3] = {nx, ny, nz};
+            const double sdi = sdf(i);
+            // foot point p* = x − sdi·n̂, clamped into the sampleable block [1, e−2] so the two
+            // off-cell trilinear taps (p*+2σ) never index outside the padded field (guards a NaN/
+            // large sdi too — ccSampleExt only clamps integer indices, not a NaN coordinate).
+            auto cl = [](double v, double hi) { return v < 1.0 ? 1.0 : (v > hi ? hi : v); };
+            const double px = cl(x - sdi * nx, e.x - 2.0);
+            const double py = cl(y - sdi * ny, e.y - 2.0);
+            const double pz = cl(z - sdi * nz, e.z - 2.0);
+            for (int a = 0; a < 3; ++a) {
+              const double sg = nv[a] >= 0.0 ? 1.0 : -1.0;
+              const double u1 = ccSampleExt(U, e, px + (a == 0 ? sg : 0.0),
+                                            py + (a == 1 ? sg : 0.0), pz + (a == 2 ? sg : 0.0));
+              const double u2 =
+                  ccSampleExt(U, e, px + (a == 0 ? 2.0 * sg : 0.0), py + (a == 1 ? 2.0 * sg : 0.0),
+                              pz + (a == 2 ? 2.0 * sg : 0.0));
+              wall += W[a] * sg * (2.0 * u1 - 0.5 * u2);
+            }
+          }
+        }
+        // FV viscous operator = idt·cs·U + μ·[Σo_f(U_i−U_nbr) − Σ_a W_a g_a].  The wall term sign is
+        // −μ Σ W_a g_a: from ∫_CV −μ∇²u = −μ[flux_out − flux_in], the wall flux g_a enters with a
+        // minus, so a resistive wall (∂u/∂n<0) ADDS to the operator (dissipative), matching the
+        // interior −μLap. (+ would be anti-dissipative and blows the solve up.)
+        Lu(i) = idt * cs(i) * U(i) + mu * (diag * U(i) - offs - wall);
+        (void)of;
+      });
+}
+
+// 7-point stencil matvec y = M·u using the stored (rs-scaled) IBM operator coefficients. Used to
+// form the mode-4 defect-correction RHS  b = M·u^k − rs·L_FV(u^k) + rs·b_FV, whose fixed point
+// satisfies L_FV·u* = b_FV exactly, with M only the (stable, small-cell-safe) preconditioner.
+inline void stencilMatvec(CCField y, CCConst u, MConst AC, MConst AW, MConst AE, MConst AS, MConst AN,
+                          MConst AB, MConst AT, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::stencil_matvec", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y2, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y2 * sy + (long)z * sz;
+        y(i) = (double)AC(i) * u(i) + (double)AW(i) * u(i - sx) + (double)AE(i) * u(i + sx) +
+               (double)AS(i) * u(i - sy) + (double)AN(i) * u(i + sy) + (double)AB(i) * u(i - sz) +
+               (double)AT(i) * u(i + sz);
       });
 }
 

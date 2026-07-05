@@ -348,6 +348,42 @@ the coupled-solve behaviour — the next implementation step. Reproduce the a-pr
 `tests/study/fv_wallflux_apriori.py` (pure NumPy, no build needed); the Z&H drag A/B harness used
 for the mode-0..3 solver numbers is `tests/study/collocated_zh_ab.py` (GPU build, edit the mode).
 
+## Implementation of the fully-FV route (mode 4, 2026-07-05)
+
+`set_face_interp(4)` implements the fully-FV design as a **defect correction** on the collocated
+momentum, reusing the mode-3 centroid projection (constraint + o-weighted-adjoint force):
+
+    solve   M·u^{k+1} = M·u^k − ω·rs·( L_FV(u^k) − b_FV )
+
+with `M` the existing (stable, small-cell-safe) Robust-Scaled IBM matrix as preconditioner and
+`L_FV` the finite-volume operator — `idt·cs·U + μ[ Σ_f o_f(U_i−U_nbr) − Σ_a W_a g_a^centroid ]`,
+`b_FV = idt·cs·u^n + cs·(f − ∇p)`. The fixed point satisfies `L_FV·u* = b_FV` exactly, independent
+of `M` and of the under-relaxation `ω`. New pieces (`mac_approx_projection.hpp`): `buildCellFraction`
+(`cs`, subsampled), `fvViscousApply` (`L_FV`), `stencilMatvec` (`M·u`); wired into `buildRhs` for
+`faceInterp==4`. Interior cells have `M = L_FV`, so the defect vanishes and they stay byte-identical
+to mode 0.
+
+**Two lessons on the way to a running solve:**
+- **Sign.** The FV wall term is `−μ Σ W_a g_a` (from `∫_CV −μ∇²u = −μ[flux_out − flux_in]`); a `+`
+  makes the wall anti-dissipative and the solve blows up.
+- **Kokkos capture.** A `KOKKOS_LAMBDA` must not read a solver *member* (`fvRelax_`): the device
+  dereferences the host `this` pointer → `cudaErrorIllegalAddress`. Copy members to locals first.
+
+**Result — the fixed point is NOT second order.** Once stable, mode 4 converges to an ω-independent
+fixed point, but the Z&H sphere drag is `+0.81% / +0.99% / +0.93%` at N=32/48/64 — comparable to mode 0
+(`+1.00% / +0.68% / +0.60%`) and **non-convergent** (flat/worsening at finer N), not the a-priori-promised O(h²).
+
+**Why (the missing ingredient):** the a-priori test validated only the *wall* flux placement
+(centroid). The FV operator's **open-face** fluxes `μ o_f (U_i − U_nbr)` still evaluate the two-point
+gradient at the **face centre**, not at the open-area centroid — the *same* O(h) sub-cell placement
+error the wall term had, left unfixed on the six axis faces. A cut face's open area sits off-centre
+(toward the fluid), so the face-centre gradient mis-weights the flux by O(h), and that survives to
+the converged drag. So the fully-FV operator is only as good as its *least* accurate flux, and the
+face fluxes were never upgraded. **Next step:** apply the open-area-centroid placement (the mode-3
+`buildFaceCentroidDist` geometry, already computed) to the `o_f` face fluxes in `fvViscousApply` —
+a face-flux deferred correction paralleling the wall one — then re-measure the order. Until then,
+mode 0 remains the best of the collocated family and `Solver` (staggered) the production choice.
+
 ## Caveats (what is proven vs argued)
 
 - **Proven (measured):** flat-wall exactness on both grids; staggered second-order and

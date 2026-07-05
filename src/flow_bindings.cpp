@@ -129,9 +129,14 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Seed each pressure solve from the previous step's phi (default off).")
       .def("set_face_interp", &S::setFaceInterp, nb::arg("mode"),
            "Collocated cut-cell projection treatment: 0 = plain averaging + central-difference "
-           "grad(P) (default), 1 = wall-aware cell->face map only (ablation; breaks the adjoint "
-           "pairing — don't use), 2 = wall-aware map + its transpose as pressure gradient and "
-           "correction (consistent pair). No effect on the staggered solver.")
+           "grad(P) (default), 1 = wall-aware cell->face map only (ablation), 2 = wall-aware map + "
+           "its transpose (face-centre; ablation), 3 = mode 2 at the open-face-centroid (FV "
+           "constraint, FD momentum), 4 = fully-FV (mode-3 projection + second-order wall "
+           "viscous-flux deferred correction on the momentum; targets 2nd-order drag). No effect on "
+           "the staggered solver.")
+      .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
+           "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
+           "explicit-lagged wall term). Steady state is independent of w.")
       .def("set_velocity_streams", &S::setVelocityStreams, nb::arg("on"),
            "Toggle overlapped per-component velocity solves.")
       .def("set_implicit_advection", &S::setImplicitAdvection, nb::arg("on"),

@@ -114,6 +114,10 @@ class Solver {
       vf_ = CCField("vf", n_);
       wf_ = CCField("wf", n_);
       tgp_ = CCField("tgp", n_);  // scratch: wall-aware transpose gradient (setFaceInterp(2/3))
+      wdef_ = CCField("wdef", n_);  // scratch: FV wall viscous-flux defect (setFaceInterp(4))
+      fvM_ = CCField("fvM", n_);    // scratch: M·u^k (mode-4 defect matvec)
+      fvL_ = CCField("fvL", n_);    // scratch: L_FV(u^k) (mode-4 FV operator apply)
+      cs_ = CCField("cs", n_);      // static cell fluid fraction (setFaceInterp(4))
       xcx_ = CCField("xcx", n_);  // static per-face open-centroid wall distance (setFaceInterp(3))
       xcy_ = CCField("xcy", n_);
       xcz_ = CCField("xcz", n_);
@@ -207,8 +211,16 @@ class Solver {
   //   2 = wall-aware map + its TRANSPOSE as the predictor -grad(P) and the cell correction
   //       (consistent pair, but face-CENTER point values under-count the open-area flux — ablation);
   //   3 = mode 2 evaluated at the OPEN-FACE-CENTROID wall distance (static geometry from
-  //       buildFaceCentroidDist) — the flux-consistent quadrature. The intended production mode.
+  //       buildFaceCentroidDist) — the flux-consistent constraint quadrature (stable, but the momentum
+  //       row is still the O(h) axis-by-axis IBM: FV constraint vs FD momentum are inconsistent);
+  //   4 = FULLY-FV: mode-3 projection PLUS the second-order wall viscous-flux deferred correction on
+  //       the momentum (fvViscousApply: μ Σ_a W_a·centroid wall drag via defect correction, W_a from the
+  //       divergence-theorem fragment normal o_{a−}−o_{a+}, centroid gradient at the SDF foot point).
+  //       Momentum and constraint now share the same finite-volume cut-cell geometry → targets O(h²).
   void setFaceInterp(int mode) { faceInterp_ = mode; }
+  // Under-relaxation of the mode-4 FV wall-flux defect correction (1 = full; <1 damps the stiff
+  // explicit-lagged wall term). The steady state is independent of this value.
+  void setFvRelax(double w) { fvRelax_ = w; }
   // CUDA-only 3-stream concurrent velocity solve (set_velocity_streams): no Kokkos analogue in this
   // port (the default-execution-space kernels are already stream-ordered). Accepted as a no-op for
   // API parity.
@@ -476,8 +488,10 @@ class Solver {
     }
     if (cutcellPressure_) {
       buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);  // on the g=2 velocity block
-      if constexpr (Grid::collocated)  // static open-centroid wall distances (setFaceInterp(3))
+      if constexpr (Grid::collocated) {  // static open-centroid wall distances (setFaceInterp(3))
         buildFaceCentroidDist(xcx_, xcy_, xcz_, CCConst(sdf_), e_);
+        buildCellFraction(cs_, CCConst(sdf_), e_, G);  // cell fluid fraction (setFaceInterp(4))
+      }
 #ifdef PECLET_FLOW_MPI
       // openness ghosts (the operator + divergence read the +neighbour face) -> exchange across
       // ranks
@@ -543,9 +557,9 @@ class Solver {
       if (outerTol_ > 0)
         for (int c = 0; c < 3; ++c)
           Kokkos::deep_copy(prev_[c], C[c].u);
-      if (advect_ || hasBc_)
+      if (advect_ || hasBc_ || (Grid::collocated && faceInterp_ >= 4))
         for (int c = 0; c < 3; ++c)
-          fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect
+          fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect / mode-4 FV defect matvec
       for (int c = 0; c < 3; ++c)  // RHS from u^n base + advection lagged at u^k
         varRho_ ? buildRhsVar(c) : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c));
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
@@ -876,9 +890,26 @@ class Solver {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         transposeGradWallAware(tgp_, CCConst(P_), CCConst(sdf_), CCConst(oax[c]), CCConst(xcs[c]),
-                               faceInterp_ == 3, c, e_, G);
+                               faceInterp_ >= 3, c, e_, G);
       }
     CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg is false there)
+    // Mode-4 fully-FV momentum via DEFECT CORRECTION: solve M·u^{k+1} = M·u^k − rs·L_FV(u^k) + rs·b_FV
+    // so the fixed point satisfies the second-order finite-volume balance L_FV·u* = b_FV exactly, with
+    // the (stable, small-cell-safe) IBM matrix M only as preconditioner. fvM_ = M·u^k (stencilMatvec),
+    // fvL_ = L_FV(u^k) (fvViscousApply: o_f faces + cs time + centroid wall drag). Interior cells:
+    // M = L_FV → the defect vanishes → byte-identical to mode 0. Stokes only (advection folds into
+    // the IBM matrix, not yet into L_FV).
+    const bool wd = Grid::collocated && faceInterp_ >= 4;
+    if constexpr (Grid::collocated)
+      if (wd) {
+        stencilMatvec(fvM_, CCConst(C[c].u), MConst(C[c].AC), MConst(C[c].AW), MConst(C[c].AE),
+                      MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB), MConst(C[c].AT), e_, G);
+        fvViscousApply(fvL_, CCConst(C[c].u), CCConst(sdf_), CCConst(cs_), CCConst(ox_),
+                       CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G);
+      }
+    CCConst fvM = CCConst(fvM_), fvL = CCConst(fvL_), cs = CCConst(cs_);
+    const double fvw = fvRelax_;  // local copy — a KOKKOS_LAMBDA must not read a member (device deref
+                                  // of the host `this` pointer = illegal memory access)
     // b = descale*(idiag*u^n - rho*Koren(u^k) + rho*FOU(u^k) + f - grad P^n) - inhom  (+ BC fold
     // brhs). The time base is u^n (Picard); the advecting velocity & advected field are the current
     // iterate u^k.
@@ -902,8 +933,15 @@ class Solver {
                             : Grid::collocated ? (tg ? gpw(i)
                                                      : 0.5 * (P((long)i + strd) - P((long)i - strd)))
                                                : (P(i) - P((long)i - strd));
-          bb(i) =
-              rs(i) * (idiag * un(i) + fc - rho * aK + rho * aF - gp) + (bc ? brhs(i) : -inh(i));
+          if (wd) {  // FV defect-correction RHS  M·u − ω·rs·(L_FV·u − b_FV),  b_FV = idt·cs·u^n +
+                     // cs·(f − grad P). ω<1 damps the (stiff, explicit-lagged) wall-flux correction;
+                     // the fixed point L_FV·u* = b_FV is independent of ω.
+            const double bfv = idiag * cs(i) * un(i) + cs(i) * (fc - gp);
+            bb(i) = fvM(i) - fvw * rs(i) * (fvL(i) - bfv);
+          } else {
+            bb(i) = rs(i) * (idiag * un(i) + fc - rho * aK + rho * aF - gp) +
+                    (bc ? brhs(i) : -inh(i));
+          }
         });  // BC fold (brhs) on the domain-BC path; -inhom on the IBM path (=0 for no-slip)
   }
   // Sibling of buildRhs adding a per-cell body force fb(i) (Boussinesq buoyancy / CFD-DEM feedback):
@@ -929,7 +967,7 @@ class Solver {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         transposeGradWallAware(tgp_, CCConst(P_), CCConst(sdf_), CCConst(oax[c]), CCConst(xcs[c]),
-                               faceInterp_ == 3, c, e_, G);
+                               faceInterp_ >= 3, c, e_, G);
       }
     CCConst gpw = CCConst(tgp_);
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
@@ -1378,7 +1416,7 @@ class Solver {
       if (faceInterp_ >= 1)  // wall-aware reconstruction at solid-bordering faces (setFaceInterp)
         centerToFaceWallAware(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u),
                               CCConst(sdf_), CCConst(xcx_), CCConst(xcy_), CCConst(xcz_),
-                              faceInterp_ == 3, e_, G);
+                              faceInterp_ >= 3, e_, G);
       else
         centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
       divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
@@ -1477,7 +1515,7 @@ class Solver {
         CCField oax[3] = {ox_, oy_, oz_};
         for (int cc = 0; cc < 3; ++cc) {
           transposeGradWallAware(tgp_, CCConst(phi_), CCConst(sdf_), CCConst(oax[cc]),
-                                 CCConst(xcs[cc]), faceInterp_ == 3, cc, e_, G);
+                                 CCConst(xcs[cc]), faceInterp_ >= 3, cc, e_, G);
           subtractField(C[cc].u, CCConst(tgp_), e_, G);
         }
       } else {
@@ -2045,6 +2083,7 @@ class Solver {
   bool incremental_ = true,
        pwarm_ = false;    // incremental-rotational pressure (CUDA default on) + warm-start
   int faceInterp_ = 0;    // collocated cell->face map: 0 = plain average, 1 = wall-aware (opt-in)
+  double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
   VelocityMG vmg_;
@@ -2056,6 +2095,8 @@ class Solver {
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
   CCField uf_, vf_, wf_;      // collocated: transient face (MAC) field (approx projection)
   CCField tgp_;               // collocated: transpose-gradient scratch (setFaceInterp(2/3))
+  CCField wdef_;              // collocated: FV wall viscous-flux defect scratch (setFaceInterp(4))
+  CCField fvM_, fvL_, cs_;    // collocated: mode-4 defect scratch (M·u, L_FV·u) + cell fluid fraction
   CCField xcx_, xcy_, xcz_;   // collocated: open-centroid wall distance per face (setFaceInterp(3))
   CCField old_[3], prev_[3];  // u^n time base + previous Picard iterate
   Comp C[3];
