@@ -446,18 +446,34 @@ Findings, in order of importance:
    (wall-aware constraint + weighted correction) *over*-corrects and crosses zero. **Mode 6 is the
    cleanest** and the recommended embed configuration, but the tail stalls near −0.2% (order ~1.6, not a
    clean 2) — a residual constraint/pressure inconsistency the bracketing localises but does not close.
-3. **The flat-wall sliver is a MOMENTUM issue, not a projection one (Rung 4).** A grid-aligned channel
-   wall at a fractional position gives a thin fluid sliver (cs≈0.26 at N=32): the embed *momentum* under-
-   drags it, giving a +7% centreline error at N=32 (fine by N=48/64). This is unchanged between modes 6
-   and 7 because a unidirectional channel has no pressure gradient — the projection is inactive — so it is
-   pure sliver-momentum, the Basilisk small-cell (cs-limiting / 1-point fallback) territory not yet done.
+3. **The solid-cut-cell mask was the flat-wall bug (Rung 4 core, now fixed).** A grid-aligned channel
+   wall at a fractional position gives a thin fluid sliver (cs≈0.26 at N=32) and a +7% centreline error.
+   Root cause (profile dump): `ibmSolidMask`/`maskVelocity` zero **every** cell with sdf(centre)<0 —
+   including *solid-centred cut cells* (cs>0), which for the embed FV scheme must hold their reconstructed
+   near-wall velocity (the below-wall extrapolation U=−0.152). Masking them to 0 leaves the adjacent fluid
+   cell under-constrained → a uniform +0.15 shift of the whole channel. **Fix** (`setSolid`, gated
+   `faceInterp_>=5`): re-mask from `cs`, pinning only fully-solid cells (cs<1e-6). Flat-wall N=32 → the
+   analytic profile to 0.04%; mode-6 flat Poiseuille is now ~2nd order (+0.67→+0.23→+0.07% at N=32/48/64,
+   below mode 0 by N=64). Correct for mode 0's IBM (no-slip on the fluid rows), the mask was wrong only
+   for the embed momentum.
+4. **With the momentum correct, defect (a) — the cell→face flux map — is the sole remaining barrier.** The
+   sliver fix flips Z&H mode 6 from an under-drag that fortuitously *cancelled* the constraint error
+   (pre-fix −1.94→−0.21%, apparent order ~1.6) to a clean *over*-drag that grows (−0.05, +0.29, +0.42% at
+   N=32/48/64) — the plain ½/½ `centerToFace` **over-counts** the curved-cut-face flux; the wall-aware
+   centroid map (mode 7) *over-corrects* worse (+2.2%). Even the exact cell values give ½(U_i+U_j)=0.149
+   vs the true face flux 0.161 (a 7% linear-interp deficit of a curved profile). This is the approximate
+   projection reconstructing `uf` **from cell values** — the O(h) flux error the analysis diagnosed as
+   defect (a). Basilisk avoids it by evolving `uf` as a **face-primary** variable, not interpolating it;
+   closing p=2 here needs that face-centred constraint, not another cell→face reconstruction.
 
-**Status:** the true-normal embed momentum (Rungs 0–2) is validated and the openness-weighted correction
-(Rung 3, defect (b)) is in; mode 6 realises them and beats mode 0 at practical resolution, but a clean
-p=2 still needs (a) the constraint-side reconstruction that neither plain nor wall-aware nails, and (b)
-Basilisk sliver handling (Rung 4). Modes 5/6/7 kept default-off; **mode 0 / `Solver` remain the
-production defaults.** Repro: `tests/study/collocated_zh_embed6.py` (mode 6 vs 0),
-`tests/study/collocated_zh_embed.py` (mode 5), `tests/study/embed_flatwall_guard.py` (sliver).
+**Status:** the true-normal embed momentum (Rungs 0–2), the openness-weighted pressure correction (Rung 3,
+defect (b)), and the solid-cut-cell sliver mask (Rung 4 core) are all in and each **individually correct**
+— mode 6 is now pointwise-accurate on the flat wall. The **one** remaining barrier to 2nd-order *curved*-
+wall drag is defect (a): the approximate projection's cell→face flux interpolation, which fundamentally
+needs a face-primary `uf` (Basilisk centered.h) rather than any cell reconstruction — a larger change than
+the operator swaps done here. Modes 5/6/7 kept default-off; **mode 0 / `Solver` remain the production
+defaults** (regression suite byte-identical). Repro: `tests/study/collocated_zh_embed6.py` (mode 6 vs 0),
+`tests/study/collocated_zh_embed.py` (mode 5), `tests/study/embed_flatwall_guard.py` (flat-wall sliver).
 
 ## Caveats (what is proven vs argued)
 

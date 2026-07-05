@@ -503,6 +503,19 @@ class Solver {
       if constexpr (Grid::collocated) {  // static open-centroid wall distances (setFaceInterp(3))
         buildFaceCentroidDist(xcx_, xcy_, xcz_, CCConst(sdf_), e_);
         buildCellFraction(cs_, CCConst(sdf_), e_, G);  // cell fluid fraction (setFaceInterp(4))
+        if (faceInterp_ >= 5) {  // EMBED: a solid-CENTRED cut cell (cs>0) is partially fluid and holds
+          // its reconstructed near-wall velocity — masking it to 0 (the sdf<0 IBM mask) drops the
+          // near-wall closure and shifts the whole channel. Re-mask from cs: pin ONLY fully-solid
+          // cells (cs≈0), keeping every partial-fluid cut cell live in the embed solve + projection.
+          CCConst cs = CCConst(cs_);
+          const std::size_t nn = n_;
+          for (int c = 0; c < 3; ++c) {
+            CCField m = C[c].mask;
+            Kokkos::parallel_for(
+                "peclet::flow::embed_solid_mask", Kokkos::RangePolicy<CCExec>(0, nn),
+                KOKKOS_LAMBDA(std::size_t i) { m(i) = cs(i) < 1e-6 ? 1.0 : 0.0; });
+          }
+        }
       }
 #ifdef PECLET_FLOW_MPI
       // openness ghosts (the operator + divergence read the +neighbour face) -> exchange across
