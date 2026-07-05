@@ -416,7 +416,23 @@ static void bind_solver(nb::module_& m, const char* name) {
            "converged).")
       .def(
           "get_resolution", [](S& s) { return std::vector<int>{s.nx(), s.ny(), s.nz()}; },
-          "Return the grid resolution [nx, ny, nz].")
+          "Return the LOCAL grid resolution [nx, ny, nz] (this rank's block under MPI).")
+      .def(
+          "global_resolution",
+          [](S& s) {
+            auto g = s.globalResolution();
+            return std::vector<int>{g[0], g[1], g[2]};
+          },
+          "Return the GLOBAL grid resolution [gnx, gny, gnz] (== local single-rank). For the "
+          "CFD-DEM co-decomposition weight field.")
+      .def(
+          "block_origin",
+          [](S& s) {
+            auto o = s.blockOrigin();
+            return std::vector<int>{o[0], o[1], o[2]};
+          },
+          "This rank's inner-block origin in GLOBAL cells ([0,0,0] single-rank). Shift the coupling "
+          "deposit origin by this so particles in global coordinates land in the local block.")
       .def(
           "get_spacing", [](S&) { return std::vector<double>{1.0, 1.0, 1.0}; },
           "Return the grid spacing [dx, dy, dz] (always unit on this grid).")

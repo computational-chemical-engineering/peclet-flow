@@ -1652,6 +1652,17 @@ class Solver {
   // be reshaped in Python.
   std::array<int, 3> blockShape() const { return {e_.x, e_.y, e_.z}; }
   int ghostWidth() const { return G; }
+  // Global grid dims (== local dims single-rank). For the CFD-DEM co-decomposition weight field.
+  std::array<int, 3> globalResolution() const {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      return {gnx_, gny_, gnz_};
+#endif
+    return {nx_, ny_, nz_};
+  }
+  // This rank's inner-block origin in GLOBAL cells ({0,0,0} single-rank). The deposit-origin shift so
+  // particles in global coords land in the local block (gm origin = blockOrigin * h).
+  std::array<int, 3> blockOrigin() const { return {og_.x, og_.y, og_.z}; }
 
   // --- Scalar transport (advection-diffusion) -------------------------------------------------
   // Register a transported scalar `name` with constant diffusivity D (grid units). scheme: 0 FOU,
