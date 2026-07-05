@@ -373,16 +373,31 @@ to mode 0.
 fixed point, but the Z&H sphere drag is `+0.81% / +0.99% / +0.93%` at N=32/48/64 — comparable to mode 0
 (`+1.00% / +0.68% / +0.60%`) and **non-convergent** (flat/worsening at finer N), not the a-priori-promised O(h²).
 
-**Why (the missing ingredient):** the a-priori test validated only the *wall* flux placement
-(centroid). The FV operator's **open-face** fluxes `μ o_f (U_i − U_nbr)` still evaluate the two-point
-gradient at the **face centre**, not at the open-area centroid — the *same* O(h) sub-cell placement
-error the wall term had, left unfixed on the six axis faces. A cut face's open area sits off-centre
-(toward the fluid), so the face-centre gradient mis-weights the flux by O(h), and that survives to
-the converged drag. So the fully-FV operator is only as good as its *least* accurate flux, and the
-face fluxes were never upgraded. **Next step:** apply the open-area-centroid placement (the mode-3
-`buildFaceCentroidDist` geometry, already computed) to the `o_f` face fluxes in `fvViscousApply` —
-a face-flux deferred correction paralleling the wall one — then re-measure the order. Until then,
-mode 0 remains the best of the collocated family and `Solver` (staggered) the production choice.
+**Where the O(h) is — the viscous operator is NOT it.** An a-priori truncation test of the FV
+viscous operator itself (`tests/study/fv_operator_truncation.py`: manufactured field `u = sdf`, so
+`∇u = n̂`, `∇²u = 2/r`, and the wall gradient `g_a = n_a` is *exact* — isolating the `o_f` face
+fluxes) gives the discrete operator vs `∫_fluidCV(−μ∇²u)dV` at **clean O(h²)** (order 1.98–2.00,
+N=32→128). So the face-centre two-point flux `μ o_f(U_i−U_nbr)` is second-order-consistent — Basilisk
+was right, and my earlier "face-flux placement" hypothesis is **refuted**. The remaining O(h) is in
+the **pressure coupling**, not the viscous operator.
+
+**What was tried on the pressure side, and failed.** The spec's flagged missing piece — a wall
+pressure term `−p_i·W_c` added to the momentum force (the mode-3 transpose has only the o-weighted
+*face* pressure force, not the wall term of `−∮ p·n dA`) — was implemented and A/B'd. With the
+physically-dissipative sign it is stable but makes the drag *worse* (N=32 +0.81%→+1.04%); the opposite
+sign diverges. So the naive wall pressure term is not the fix either.
+
+**Conclusion of the mode-4 arc:** the fully-FV *operator* is second-order (proven), but second-order
+*drag* in the coupled solve needs the momentum operator, the incompressibility constraint (the
+`divergOpen`/`centerToFaceWallAware` divergence), and the pressure force to be **mutually FV-consistent
+and adjoint-paired simultaneously** — sharing one embedded-boundary geometry across all three. My
+incremental patches each fix one operator against a projection built for a different geometry, so the
+coupling stays inconsistent (mode 3: FV projection + FD momentum; mode 4: FV momentum + mode-3
+projection; +wall-pressure: still a non-adjoint force). That simultaneous consistency is the Basilisk
+`embed.h` reformulation — a from-scratch rebuild of the collocated cut-cell operator set, not an
+increment on mode 0. Until it is done, **mode 0 remains the best of the collocated family and
+`Solver` (staggered) the production choice.** Mode 4 is kept (default off) as the validated FV
+machinery (cs, FV operator, defect correction) for that rebuild to reuse.
 
 ## Caveats (what is proven vs argued)
 
