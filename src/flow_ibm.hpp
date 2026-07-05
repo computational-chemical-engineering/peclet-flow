@@ -2004,6 +2004,7 @@ class Solver {
       // rebuild (chebBoundsSet_ invalidation in project()). An explicit driver set afterwards wins.
       useChebyshev_ = true;
       chebBoundsSet_ = false;
+      configurePorousDragSolver();  // if drag already on, switch to GraphAMG+PCG (Chebyshev diverges)
     }
   }
   // Reseed eps^n = eps^{n+1} so d(eps)/dt = 0 this step. Call after the FIRST void-fraction deposition
@@ -2091,6 +2092,20 @@ class Solver {
       dragBeta_ = fields_.at("drag_beta").data;
     ensureCellForceAll();  // force_* carries beta*u_p (the implicit-drag RHS target)
     hasDrag_ = true;
+    configurePorousDragSolver();
+  }
+  // Porous + implicit drag: the drag-relaxation w_f=idt/(idt+beta) makes the pressure coefficient
+  // high-ratio (~1 in the freeboard, ->0 in the dense bed). Chebyshev diverges on it; the algebraic
+  // GraphAMG coarse solve + PCG is robust. Applied whenever BOTH porous_ and hasDrag_ are on (either
+  // set second). An explicit set_pressure_* afterwards still wins.
+  void configurePorousDragSolver() {
+    if (!(porous_ && hasDrag_))
+      return;
+    pressGraphAmg_ = true;                 // a later set_solid applies it via setGraphAmgBottom
+    if (cutcellPressure_)                  // MG already built (set_solid ran) -> apply now
+      mg_.setGraphAmgBottom(true);
+    useChebyshev_ = false;                 // PCG, not Chebyshev (diverges on the high w_f ratio)
+    chebBoundsSet_ = false;
   }
   // Add the drag coefficient beta(i) to the (float) momentum diagonal of component c. Called after
   // each stencil (re)build when hasDrag_. All-fluid (rscale==1) is exact; the drag×cut-cell-IBM
