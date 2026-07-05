@@ -710,12 +710,13 @@ class Solver {
                   CCConst(oz_), CCConst(epsField_), div_, e_, G);
     {  // add back the SAME d(eps)/dt source the projection used (depsdt_ from the last project())
       CCExec space;
+      C3 e = e_;  // local copy — capturing e_ in the KOKKOS_LAMBDA would read this-> on the device
       CCField d = div_, dd = depsdt_;
       using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
       Kokkos::parallel_for(
-          "peclet::flow::porous_resid", MD(space, {G, G, G}, {e_.x - G, e_.y - G, e_.z - G}),
+          "peclet::flow::porous_resid", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
           KOKKOS_LAMBDA(int x, int y, int z) {
-            const long i = (long)x + (long)y * e_.x + (long)z * e_.x * e_.y;
+            const long i = (long)x + (long)y * e.x + (long)z * e.x * e.y;
             d(i) += dd(i);
           });
     }
@@ -1504,13 +1505,14 @@ class Solver {
     // fraction; stored in depsdt_ (epsPrev_ is overwritten at step end, so the residual reuses this).
     if (porous_) {
       CCExec space;
+      C3 e = e_;  // local copy — a KOKKOS_LAMBDA capturing e_ would read this-> on the device
       CCField d = div_, dd = depsdt_, ep = epsField_, epp = epsPrev_;
       const double idt = 1.0 / dt_;
       using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
       Kokkos::parallel_for(
-          "peclet::flow::deps_dt", MD(space, {G, G, G}, {e_.x - G, e_.y - G, e_.z - G}),
+          "peclet::flow::deps_dt", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
           KOKKOS_LAMBDA(int x, int y, int z) {
-            const long i = (long)x + (long)y * e_.x + (long)z * e_.x * e_.y;
+            const long i = (long)x + (long)y * e.x + (long)z * e.x * e.y;
             dd(i) = (ep(i) - epp(i)) * idt;
             d(i) += dd(i);
           });
@@ -1543,12 +1545,23 @@ class Solver {
       chebBoundsSet_ = false;  // spectrum changed with the coefficients (re-estimated by the solve)
     }
     // Porous continuity: the Poisson operator is eps-weighted (c_f = open_f * eps_f), same rails as
-    // the density coefficient above. Rebuilt every step (eps moves with the particles).
+    // the density coefficient above. Rebuilt every step (eps moves with the particles). With implicit
+    // CFD-DEM drag the coefficient AND the correction carry the drag-relaxation w_f = idt/(idt+beta_f)
+    // (idt = rho/dt) so the pressure correction is consistent with the drag-loaded momentum diagonal
+    // A_P = idt+beta (SIMPLE/PISO-with-implicit-drag; stiff drag -> w_f->0 -> the drag holds the
+    // velocity, stable). beta==0 reduces exactly to the plain eps-weighted operator.
     if (porous_) {
       fillPropGhosts(epsField_);
       copyBlockShifted(eps1_, e1_, CCConst(epsField_), e_, G - 1);
-      buildPorousCoeff(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(eps1_),
-                       e1_, 1);
+      if (hasDrag_) {
+        fillPropGhosts(dragBeta_);
+        copyBlockShifted(beta1_, e1_, CCConst(dragBeta_), e_, G - 1);
+        buildPorousCoeffDrag(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_),
+                             CCConst(eps1_), CCConst(beta1_), rho_ / dt_, e1_, 1);
+      } else {
+        buildPorousCoeff(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_),
+                         CCConst(eps1_), e1_, 1);
+      }
       mg_.setBoundaryConditions(bc_);
       mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), 1.0, 1.0, 1.0);
       chebBoundsSet_ = false;
@@ -1626,7 +1639,10 @@ class Solver {
                              CCConst(oz_), e_, G);
       }
     } else {
-      if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
+      if (porous_ && hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
+        projectCorrectPorousDrag(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(dragBeta_), rho_ / dt_,
+                                 e_, G);
+      else if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
         projectCorrectVar(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G);
       else
         projectCorrect(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G);
@@ -1974,6 +1990,8 @@ class Solver {
       Kokkos::deep_copy(epsPrev_, epsField_);  // d(eps)/dt=0 on the first step
       if (eps1_.extent(0) == 0)
         eps1_ = CCField("eps1", n1_);
+      if (beta1_.extent(0) == 0)
+        beta1_ = CCField("beta1", n1_);
       if (rho1_.extent(0) == 0) {  // share the g=1 coefficient scratch with the varRho path
         rho1_ = CCField("rho1", n1_);
         cx1_ = CCField("cx1", n1_);
@@ -2266,6 +2284,7 @@ class Solver {
   CCField rho1_, cx1_, cy1_, cz1_;    // g=1 MG-block density bridge + projection face coefficients
   bool porous_ = false;               // volume-averaged continuity d(eps)/dt+div(eps u)=0 (CFD-DEM)
   CCField epsField_, epsPrev_, eps1_, depsdt_;  // eps^{n+1}, eps^n, g=1 bridge, stored d(eps)/dt
+  CCField beta1_;                     // g=1 bridge of the drag coeff (semi-implicit-drag pressure)
   bool hasDrag_ = false;              // implicit linear drag (CFD-DEM): beta on the momentum diagonal
   CCField dragBeta_;                  // per-cell drag coefficient (added to AC; target beta*u_p rides
                                       // the force_* cellForce fields)

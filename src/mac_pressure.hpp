@@ -197,6 +197,45 @@ inline void buildPorousCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCC
       });
 }
 
+// Semi-implicit-drag porous coefficient: c_f = open_f * eps_f * w_f, with the face drag-relaxation
+// w_f = idt/(idt + beta_f) (idt = rho/dt, beta = the momentum-diagonal drag coefficient). This makes
+// the pressure correction CONSISTENT with the drag-loaded momentum diagonal A_P = idt + beta: where
+// the drag is stiff (dense bed) w_f -> 0 and the pressure barely moves the velocity (the drag holds
+// it) — the SIMPLE/PISO-with-implicit-drag scheme (OpenFOAM rAU, MFIX). Reduces to buildPorousCoeff
+// when beta==0 (w==1). The correction MUST use the same w_f (projectCorrectPorousDrag) so the
+// open*eps*w flux telescopes to A*phi.
+inline void buildPorousCoeffDrag(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy, CCConst oz,
+                                 CCConst eps, CCConst beta, double idt, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::porous_coeff_drag", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        cx(i) = ox(i) * 0.5 * (eps(i) + eps(i - sx)) * idt / (idt + 0.5 * (beta(i) + beta(i - sx)));
+        cy(i) = oy(i) * 0.5 * (eps(i) + eps(i - sy)) * idt / (idt + 0.5 * (beta(i) + beta(i - sy)));
+        cz(i) = oz(i) * 0.5 * (eps(i) + eps(i - sz)) * idt / (idt + 0.5 * (beta(i) + beta(i - sz)));
+      });
+}
+
+// Drag-relaxed velocity correction (sibling of projectCorrect): u_f -= w_f * grad(phi), w_f the SAME
+// face drag relaxation as buildPorousCoeffDrag. beta==0 -> w==1 -> projectCorrect exactly.
+inline void projectCorrectPorousDrag(CCField u, CCField v, CCField w, CCConst phi, CCConst beta,
+                                     double idt, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::correct_porous_drag", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        u(i) -= idt / (idt + 0.5 * (beta(i) + beta(i - sx))) * (phi(i) - phi(i - sx));
+        v(i) -= idt / (idt + 0.5 * (beta(i) + beta(i - sy))) * (phi(i) - phi(i - sy));
+        w(i) -= idt / (idt + 0.5 * (beta(i) + beta(i - sz))) * (phi(i) - phi(i - sz));
+      });
+}
+
 }  // namespace peclet::flow
 
 #endif  // PECLET_FLOW_MAC_PRESSURE_HPP
