@@ -466,14 +466,31 @@ Findings, in order of importance:
    defect (a). Basilisk avoids it by evolving `uf` as a **face-primary** variable, not interpolating it;
    closing p=2 here needs that face-centred constraint, not another cell→face reconstruction.
 
+5. **Defect (a) is a real field error (not a diagnostic), and the face-primary fix needs a
+   time-convention change.** cs-weighting the drag mean (superficial velocity) leaves the over-drag
+   essentially unchanged (+0.25/+0.39% at N=48/64) — the error is in the converged field. Reading Basilisk
+   `centered.h`, the fix is the *acceleration event*: `uf = fs·(face_avg(u) + dt·a)`, so the cut-cell body-
+   force flux `o·dt·a` enters `div(o·uf)` as a source where the openness varies — the pressure response our
+   cs-weighted cell momentum omits (the flat wall's cut faces are fully open, `fs=1`, so it never exercised
+   this). Implemented as a trial mode 8 (body-force-free viscous predictor + body force at the face and via
+   the centered-gradient correction). **It fails: −75% drag at N=32.** Basilisk applies the body force with
+   an *explicit* correction `u += dt·(a − ∇p)` valid for its `(I − dt·μ∇²)` viscous convention; our solver
+   uses the **divided convention** `(ρ/dt·cs − μ∇²_embed)` (well-conditioned at large dt/steady state), in
+   which the implicit viscous barely dissipates at large dt, so an explicit `dt·a` body force runs away
+   unbalanced (`−μ·embed(dt·a)` grows with dt). Porting the face-primary constraint therefore requires
+   switching the whole momentum step to Basilisk's undivided time convention — a solver-wide change, not a
+   projection swap. Reverted.
+
 **Status:** the true-normal embed momentum (Rungs 0–2), the openness-weighted pressure correction (Rung 3,
 defect (b)), and the solid-cut-cell sliver mask (Rung 4 core) are all in and each **individually correct**
 — mode 6 is now pointwise-accurate on the flat wall. The **one** remaining barrier to 2nd-order *curved*-
-wall drag is defect (a): the approximate projection's cell→face flux interpolation, which fundamentally
-needs a face-primary `uf` (Basilisk centered.h) rather than any cell reconstruction — a larger change than
-the operator swaps done here. Modes 5/6/7 kept default-off; **mode 0 / `Solver` remain the production
-defaults** (regression suite byte-identical). Repro: `tests/study/collocated_zh_embed6.py` (mode 6 vs 0),
-`tests/study/collocated_zh_embed.py` (mode 5), `tests/study/embed_flatwall_guard.py` (flat-wall sliver).
+wall drag is defect (a): the approximate projection's cell→face flux interpolation. The Basilisk face-
+primary cure (`uf = fs·(face_avg(u)+dt·a)`) is incompatible with this solver's divided time convention (a
+trial mode 8 diverged) — closing p=2 needs either the undivided convention or an equivalent implicit face-
+flux body-force source, a solver-wide change beyond the operator swaps done here. Modes 5/6/7 kept
+default-off; **mode 0 / `Solver` remain the production defaults** (regression suite byte-identical). Repro:
+`tests/study/collocated_zh_embed6.py` (mode 6 vs 0), `tests/study/collocated_zh_embed.py` (mode 5),
+`tests/study/embed_flatwall_guard.py` (flat-wall sliver).
 
 ## Caveats (what is proven vs argued)
 
