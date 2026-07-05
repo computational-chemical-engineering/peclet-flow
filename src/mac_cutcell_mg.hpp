@@ -16,10 +16,12 @@
 
 #include <cmath>
 #include <Kokkos_Core.hpp>
+#include <memory>
 #include <vector>
 
 #include "mac_bc.hpp"
 #include "mac_pressure.hpp"
+#include "peclet/core/solver/graph_amg.hpp"  // decomposition-agnostic algebraic bottom solve
 
 // Multi-rank (MPI) path is opt-in: the single-GPU module never links MPI, so all distributed code
 // is gated (mirrors the CUDA PECLET_FLOW_BUILD_MPI gating). When PECLET_FLOW_MPI is off, CutcellMG
@@ -166,6 +168,10 @@ class CutcellMG {
   // cubic), capped at nLevels (mirrors DistributedPoissonMG::init uniform path).
   void init(int nx, int ny, int nz, int nLevels) {
     lv_.clear();
+    amg_.reset();
+    gnxF_ = nx;
+    gnyF_ = ny;
+    gnzF_ = nz;
     C3 inner{nx, ny, nz}, cf{1, 1, 1};
     for (int L = 0; L < nLevels; ++L) {
       Level v;
@@ -221,8 +227,12 @@ class CutcellMG {
   void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm,
                const peclet::core::decomp::BlockDecomposer<3>* dec0 = nullptr) {
     lv_.clear();
+    amg_.reset();
     distributed_ = true;
     comm_ = comm;
+    gnxF_ = gnx;
+    gnyF_ = gny;
+    gnzF_ = gnz;
     int rank = 0, size = 1;
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &size);
@@ -416,7 +426,10 @@ class CutcellMG {
   void vcycle(int L, bool sym) {
     Level& lv = lv_[L];
     if (L + 1 == (int)lv_.size()) {
-      smooth(lv, bottom_, false);
+      if (useGraphAmgBottom_)
+        graphAmgSolveBottom(lv);  // agglomerated mesh-agnostic coarse solve (decomposition-agnostic)
+      else
+        smooth(lv, bottom_, false);
       removeMean(lv, lv.x);
       return;
     }
@@ -444,6 +457,218 @@ class CutcellMG {
                            FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, G, color);
       }
   }
+
+  // --- Agglomerated GraphAMG bottom solve --------------------------------------------------------
+  // Assemble the coarsest level's cut-cell operator as a GLOBAL CSR (gathered to rank 0) and build a
+  // mesh-agnostic smoothed-aggregation AMG on it. Decomposition-agnostic: the CSR is keyed by GLOBAL
+  // cell id (periodic-wrapped neighbours), so any (weighted) ORB gives the SAME operator.
+  void buildAmg(Level& lv) {
+    int gbx = gnxF_, gby = gnyF_, gbz = gnzF_;  // bottom global dims (coarsen by the ratios above it)
+    for (int L = 0; L + 1 < (int)lv_.size(); ++L) {
+      gbx /= lv_[L].ratio.x;
+      gby /= lv_[L].ratio.y;
+      gbz /= lv_[L].ratio.z;
+    }
+    amgGlobalN_ = gbx * gby * gbz;
+    const int nx = lv.inner.x, ny = lv.inner.y, nz = lv.inner.z, ex = lv.ext.x, ey = lv.ext.y;
+    auto host = [](FPV v) {
+      auto h = Kokkos::create_mirror_view(v);
+      Kokkos::deep_copy(h, v);
+      return h;
+    };
+    auto hC = host(lv.AC), hW = host(lv.AW), hE = host(lv.AE), hS = host(lv.AS), hN = host(lv.AN),
+         hB = host(lv.AB), hT = host(lv.AT);
+    // this rank's rows: (gid, diag) and off-diagonals (gid -> ngid, coef), periodic-wrapped.
+    std::vector<int> lgid, lrow, lcol;
+    std::vector<double> ldiag, lval;
+    amgGlobalOfLocal_.clear();
+    const int band[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+    for (int k = 0; k < nz; ++k)
+      for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+          const long p = (long)(i + G) + (long)(j + G) * ex + (long)(k + G) * ex * ey;
+          const int gx = lv.og.x + i, gy = lv.og.y + j, gz = lv.og.z + k;
+          const int gid = gx + gy * gbx + gz * gbx * gby;
+          amgGlobalOfLocal_.push_back(gid);
+          lgid.push_back(gid);
+          // solid cells (all faces closed => diag 0, no coupling) get an identity row so D^-1 is
+          // finite; their rhs is 0, so x stays 0 (correct — no flow inside the solid).
+          const double dc = (double)hC(p);
+          ldiag.push_back(dc != 0.0 ? dc : 1.0);
+          const double bc[6] = {(double)hW(p), (double)hE(p), (double)hS(p),
+                                (double)hN(p), (double)hB(p), (double)hT(p)};
+          for (int d = 0; d < 6; ++d) {
+            if (bc[d] == 0.0)
+              continue;  // closed face (wall) -> no coupling
+            const int ngx = ((gx + band[d][0]) % gbx + gbx) % gbx;
+            const int ngy = ((gy + band[d][1]) % gby + gby) % gby;
+            const int ngz = ((gz + band[d][2]) % gbz + gbz) % gbz;
+            lrow.push_back(gid);
+            lcol.push_back(ngx + ngy * gbx + ngz * gbx * gby);
+            lval.push_back(bc[d]);
+          }
+        }
+    // gather every rank's rows to rank 0 (no-op / identity single-rank).
+    std::vector<int> ggid = lgid, grow = lrow, gcol = lcol;
+    std::vector<double> gdiag = ldiag, gval = lval;
+    int rank0 = true;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      int rank = 0;
+      MPI_Comm_rank(comm_, &rank);
+      rank0 = (rank == 0);
+      gatherv(lgid, ggid);
+      gatherv(ldiag, gdiag);
+      gatherv(lrow, grow);
+      gatherv(lcol, gcol);
+      gatherv(lval, gval);
+    }
+#endif
+    if (rank0) {  // assemble the global CSR keyed by gid
+      peclet::core::solver::HostCsrOp A;
+      A.n = amgGlobalN_;
+      A.diag.assign((std::size_t)amgGlobalN_, 0.0);
+      for (std::size_t r = 0; r < ggid.size(); ++r)
+        A.diag[(std::size_t)ggid[r]] = gdiag[r];
+      std::vector<std::vector<std::pair<int, double>>> rows((std::size_t)amgGlobalN_);
+      for (std::size_t e = 0; e < grow.size(); ++e)
+        rows[(std::size_t)grow[e]].push_back({gcol[e], gval[e]});
+      A.start.assign((std::size_t)amgGlobalN_ + 1, 0);
+      for (int r = 0; r < amgGlobalN_; ++r)
+        A.start[(std::size_t)r + 1] = A.start[(std::size_t)r] + (long)rows[(std::size_t)r].size();
+      A.nbr.reserve(grow.size());
+      A.coef.reserve(grow.size());
+      for (int r = 0; r < amgGlobalN_; ++r)
+        for (auto& [c, v] : rows[(std::size_t)r]) {
+          A.nbr.push_back(c);
+          A.coef.push_back(v);
+        }
+      amgA_ = A;
+      amg_ = std::make_shared<peclet::core::solver::GraphAMG>();
+      amg_->build(A);
+    }
+  }
+  // Solve the coarsest level with the agglomerated AMG: gather rhs -> rank 0, GraphAMG-preconditioned
+  // CG on the singular (mean-removed) Poisson, scatter the solution back.
+  void graphAmgSolveBottom(Level& lv) {
+    if (!amg_ && !distributed_)
+      buildAmg(lv);
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && amgGlobalN_ == 0)
+      buildAmg(lv);
+#endif
+    const int nx = lv.inner.x, ny = lv.inner.y, nz = lv.inner.z, ex = lv.ext.x, ey = lv.ext.y;
+    auto hrhs = Kokkos::create_mirror_view(lv.rhs);
+    Kokkos::deep_copy(hrhs, lv.rhs);
+    std::vector<double> lb;
+    lb.reserve(amgGlobalOfLocal_.size());
+    for (int k = 0; k < nz; ++k)
+      for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i)
+          lb.push_back((double)hrhs((long)(i + G) + (long)(j + G) * ex + (long)(k + G) * ex * ey));
+    // gather rhs by global id to rank 0 -> b; solve; keep the (rank 0) solution to scatter.
+    std::vector<double> z((std::size_t)std::max(amgGlobalN_, 1), 0.0);
+    bool rank0 = true;
+#ifdef PECLET_FLOW_MPI
+    int rank = 0;
+    if (distributed_) {
+      MPI_Comm_rank(comm_, &rank);
+      rank0 = (rank == 0);
+      std::vector<int> ggid;
+      std::vector<double> gb;
+      gatherv(amgGlobalOfLocal_, ggid);
+      gatherv(lb, gb);
+      if (rank0) {
+        std::vector<double> b((std::size_t)amgGlobalN_, 0.0);
+        for (std::size_t r = 0; r < ggid.size(); ++r)
+          b[(std::size_t)ggid[r]] = gb[r];
+        pcgAmg(b, z);
+      }
+      MPI_Bcast(z.data(), amgGlobalN_, MPI_DOUBLE, 0, comm_);
+    } else
+#endif
+    {
+      std::vector<double> b(lb.begin(), lb.end());
+      pcgAmg(b, z);
+    }
+    (void)rank0;
+    // scatter z[gid] back into this rank's inner cells.
+    auto hx = Kokkos::create_mirror_view(lv.x);
+    Kokkos::deep_copy(hx, 0.0);
+    std::size_t c = 0;
+    for (int k = 0; k < nz; ++k)
+      for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i)
+          hx((long)(i + G) + (long)(j + G) * ex + (long)(k + G) * ex * ey) =
+              z[(std::size_t)amgGlobalOfLocal_[c++]];
+    Kokkos::deep_copy(lv.x, hx);
+  }
+  // GraphAMG-preconditioned CG on the (singular, constant-null-space) global bottom operator. Mean is
+  // removed from rhs + iterate so the Poisson is consistent. Runs on rank 0 only.
+  void pcgAmg(std::vector<double>& b, std::vector<double>& x) {
+    const std::size_t n = (std::size_t)amgGlobalN_;
+    auto meanZero = [&](std::vector<double>& v) {
+      double m = 0;
+      for (double e : v)
+        m += e;
+      m /= (double)n;
+      for (double& e : v)
+        e -= m;
+    };
+    meanZero(b);
+    x.assign(n, 0.0);
+    std::vector<double> r = b, z(n), p(n), Ap(n);
+    amg_->apply(r, z);
+    meanZero(z);
+    p = z;
+    auto dot = [&](const std::vector<double>& a, const std::vector<double>& c) {
+      double s = 0;
+      for (std::size_t i = 0; i < n; ++i)
+        s += a[i] * c[i];
+      return s;
+    };
+    double rz = dot(r, z), r0 = std::sqrt(dot(r, r));
+    for (int it = 0; it < 200 && r0 > 0; ++it) {
+      amgA_.apply(p, Ap);
+      const double a = rz / dot(p, Ap);
+      for (std::size_t i = 0; i < n; ++i) {
+        x[i] += a * p[i];
+        r[i] -= a * Ap[i];
+      }
+      if (std::sqrt(dot(r, r)) <= 1e-10 * r0)
+        break;
+      amg_->apply(r, z);
+      meanZero(z);
+      const double rzn = dot(r, z);
+      const double beta = rzn / rz;
+      rz = rzn;
+      for (std::size_t i = 0; i < n; ++i)
+        p[i] = z[i] + beta * p[i];
+    }
+    meanZero(x);
+  }
+#ifdef PECLET_FLOW_MPI
+  template <class T>
+  void gatherv(const std::vector<T>& local, std::vector<T>& all) {
+    int rank = 0, size = 1;
+    MPI_Comm_rank(comm_, &rank);
+    MPI_Comm_size(comm_, &size);
+    const int lbytes = (int)(local.size() * sizeof(T));
+    std::vector<int> bc(size), bd(size, 0);
+    MPI_Gather(&lbytes, 1, MPI_INT, bc.data(), 1, MPI_INT, 0, comm_);
+    int tot = 0;
+    if (rank == 0) {
+      for (int r = 0; r < size; ++r) {
+        bd[r] = tot;
+        tot += bc[r];
+      }
+      all.resize((std::size_t)tot / sizeof(T));
+    }
+    MPI_Gatherv(local.data(), lbytes, MPI_BYTE, rank == 0 ? all.data() : nullptr,
+                rank == 0 ? bc.data() : nullptr, rank == 0 ? bd.data() : nullptr, MPI_BYTE, 0, comm_);
+  }
+#endif
+
   // periodic ghost fill (3 axes) of a level-sized field / the openness triple. Distributed: the
   // per-level core halo (cross-rank + periodic in one call).
   void fill(Level& lv, CCField f) {
@@ -752,9 +977,34 @@ class CutcellMG {
   int bc_[6] = {0, 0, 0, 0, 0, 0};
   bool hasBC_ = false, removeMean_ = true, hasOutflow_ = false;
   bool distributed_ = false;
+  // --- decomposition-agnostic algebraic bottom solve (GraphAMG) ---
+  // The geometric coarse hierarchy needs a cleanly-coarsening (equal-weight) ORB. Under a WEIGHTED
+  // decomposition the coarse levels misalign, so the multilevel path is unavailable and only pure
+  // RB-GS (nLevels==1) works. With this enabled, the coarsest level is solved by an AGGLOMERATED
+  // algebraic multigrid: the operator + rhs of the coarsest level are gathered to rank 0, solved by a
+  // mesh-agnostic smoothed-aggregation AMG (core::solver::GraphAMG, exact by construction on any
+  // decomposition), and the solution scattered back. With nLevels==1 this makes the whole pressure
+  // solve mesh-independent AND decomposition-agnostic.
+  bool useGraphAmgBottom_ = false;
+  int gnxF_ = 0, gnyF_ = 0, gnzF_ = 0;  // GLOBAL fine dims (== local single-rank)
+  mutable std::shared_ptr<peclet::core::solver::GraphAMG> amg_;  // built once from the bottom operator
+  mutable peclet::core::solver::HostCsrOp amgA_;  // rank 0: the assembled global bottom operator (CG matvec)
+  mutable std::vector<int> amgOwnerCount_;  // rank 0: #bottom cells each rank owns (gather layout)
+  mutable std::vector<int> amgGlobalOfLocal_;  // this rank's bottom inner cells -> global bottom index
+  mutable int amgGlobalN_ = 0;                 // total bottom global cells (rank 0)
 #ifdef PECLET_FLOW_MPI
   MPI_Comm comm_ = MPI_COMM_NULL;
 #endif
+
+ public:
+  // Enable the agglomerated GraphAMG bottom solve (decomposition-agnostic multigrid coarse solve).
+  // Rebuilds lazily on the next solve. Safe single-rank (local assemble + serial AMG).
+  void setGraphAmgBottom(bool on) {
+    useGraphAmgBottom_ = on;
+    amg_.reset();
+  }
+
+ private:
 };
 
 }  // namespace peclet::flow

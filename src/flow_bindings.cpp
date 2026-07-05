@@ -168,6 +168,11 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def("set_pressure_chebyshev", &S::setPressureChebyshev, nb::arg("on"),
            nb::arg("max_iter") = 120, nb::arg("rtol") = 1e-9,
            "Use the communication-light Chebyshev pressure accelerator (exclusive with PCG).")
+      .def("set_pressure_graph_amg", &S::setPressureGraphAmg, nb::arg("on"),
+           "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
+           "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "
+           "mesh-independent pressure solve that works under a WEIGHTED ORB (where the geometric "
+           "coarse levels can't cleanly coarsen). Applied at the next set_solid.")
       .def("set_pressure_pcg", &S::setPressurePcg, nb::arg("on"), nb::arg("max_iter") = 200,
            nb::arg("rtol") = 1e-8,
            "Use the MG-PCG pressure accelerator (single-GPU default; exclusive with Chebyshev).")

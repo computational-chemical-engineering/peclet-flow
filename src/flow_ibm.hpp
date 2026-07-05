@@ -165,6 +165,11 @@ class Solver {
     vmgLevels_ = levels < 1 ? 1 : levels;
     vmgVcycles_ = vcycles < 1 ? 1 : vcycles;
   }
+  // Enable the agglomerated GraphAMG bottom solve in the pressure MG: the coarsest level is solved by
+  // a mesh-agnostic algebraic multigrid on the operator gathered to rank 0 -- decomposition-agnostic,
+  // so multilevel convergence works under a WEIGHTED ORB (where the geometric coarse levels can't
+  // cleanly coarsen). Applied at the next set_solid / geometry rebuild.
+  void setPressureGraphAmg(bool on) { pressGraphAmg_ = on; }
   void setPressureLevels(int levels) {
     nLevels_ = levels < 1 ? 1 : levels;
   }  // MG depth (CUDA default 4)
@@ -528,6 +533,7 @@ class Solver {
       mg_.setBoundaryConditions(
           bc_);  // per-level wall openness + null-space gating (no-op if periodic)
       mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), 1.0, 1.0, 1.0);
+      mg_.setGraphAmgBottom(pressGraphAmg_);  // decomposition-agnostic algebraic coarse solve
       Kokkos::deep_copy(phi_, 0.0);
       Kokkos::deep_copy(P_, 0.0);
     }
@@ -2054,6 +2060,7 @@ class Solver {
   int chebMaxit_ = 120;
   double chebRtol_ = 1e-9, chebA_ = 0.0, chebB_ = 0.0;
   int nLevels_ = 4;  // multigrid depth (CUDA default; set_pressure_multigrid)
+  bool pressGraphAmg_ = false;  // agglomerated GraphAMG bottom solve (decomposition-agnostic)
   long lastPressureIters_ = 0;
   CutcellMG mg_;
   // --- multi-rank (MPI) state, gated (single-GPU module never links MPI -> byte-identical when
