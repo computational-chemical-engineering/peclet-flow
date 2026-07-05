@@ -20,7 +20,9 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <Kokkos_Core.hpp>
+#include <memory>
 #include <vector>
 
 #include "grid_layout.hpp"
@@ -48,7 +50,14 @@ class Solver {
   using FV = Kokkos::View<float*, CCMem>;
   static constexpr int G = 2;  // velocity block: Koren advection reach (pressure/MG bridged to g=1)
 
-  Solver(int nx, int ny, int nz) : nx_(nx), ny_(ny), nz_(nz) {
+  Solver(int nx, int ny, int nz) { allocateBlock(nx, ny, nz); }
+
+  // (Re)allocate every per-block buffer for a local inner block of nx*ny*nz. Called by the
+  // constructor and by redistribute() after a re-decomposition changes this rank's block size.
+  void allocateBlock(int nx, int ny, int nz) {
+    nx_ = nx;
+    ny_ = ny;
+    nz_ = nz;
     e_ = C3{nx + 2 * G, ny + 2 * G, nz + 2 * G};
     n_ = (std::size_t)e_.x * e_.y * e_.z;
     e1_ = C3{nx + 2, ny + 2, nz + 2};  // g=1 block for the cut-cell pressure MG
@@ -239,24 +248,91 @@ class Solver {
   // (CutcellMG::initMpi) onto their distributed paths. The caller decomposes first (deterministic
   // ORB) to size the constructor; initMpi re-derives it.
   void initMpi(int gnx, int gny, int gnz, MPI_Comm comm) {
-    distributed_ = true;
-    comm_ = comm;
-    gnx_ = gnx;
-    gny_ = gny;
-    gnz_ = gnz;
-    int rank = 0, size = 1;
-    MPI_Comm_rank(comm, &rank);
+    int size = 1;
     MPI_Comm_size(comm, &size);
-    std::array<bool, 3> per{true, true, true};
-    velHalo_ = std::make_shared<GridHaloTopology<3>>();
     peclet::core::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size),
                                                  peclet::core::IVec<3>{gnx, gny, gnz});
+    initMpi(dec, comm);
+  }
+  // Shared-decomposition overload: wire the g=2 velocity-block halo from an EXTERNALLY-built ORB
+  // (so flow and dem share one BlockDecomposer for coupled runs, and redistribute() can re-init onto
+  // a re-decomposed partition). The local block size must already match dec.block(rank).size (set via
+  // the constructor / allocateBlock).
+  void initMpi(const peclet::core::decomp::BlockDecomposer<3>& dec, MPI_Comm comm) {
+    distributed_ = true;
+    comm_ = comm;
+    const auto& gs = dec.globalSize();
+    gnx_ = (int)gs[0];
+    gny_ = (int)gs[1];
+    gnz_ = (int)gs[2];
+    int rank = 0;
+    MPI_Comm_rank(comm, &rank);
+    std::array<bool, 3> per{true, true, true};
+    velHalo_ = std::make_shared<GridHaloTopology<3>>();
     velHalo_->buildTopology(dec, rank, G, per, comm);
     velDev_ = std::make_shared<GridHalo<double>>();
     velDev_->init(*velHalo_);
+    dec_ = std::make_shared<peclet::core::decomp::BlockDecomposer<3>>(dec);  // remember the partition
     const auto oig = velHalo_->indexer().originInclGhost();
     og_ = {(int)oig[0] + G, (int)oig[1] + G,
            (int)oig[2] + G};  // block inner origin -> global parity
+  }
+  // Redistribute the solver's state onto a NEW decomposition (dynamic load balancing). Enumerates
+  // the registered fields, moves them from the current block layout to the new one (bit-exact via
+  // redistributeGridFields), reallocates every buffer to the new block, re-inits the halo + pressure
+  // MG on the new partition, and rebuilds all geometry-derived state (openness / IBM overlay /
+  // stencils) from the migrated SDF. Velocity + pressure + SDF (+ any registered scalar/property
+  // fields) survive; per-step scratch is rebuilt.
+  void redistribute(const peclet::core::decomp::BlockDecomposer<3>& newDec) {
+    if (!distributed_ || !dec_)
+      return;
+    int rank = 0;
+    MPI_Comm_rank(comm_, &rank);
+    const auto ob = dec_->block(rank), nb = newDec.block(rank);
+    const int oex = (int)ob.size[0] + 2 * G, oey = (int)ob.size[1] + 2 * G,
+              oez = (int)ob.size[2] + 2 * G;
+    const int nex = (int)nb.size[0] + 2 * G, ney = (int)nb.size[1] + 2 * G,
+              nez = (int)nb.size[2] + 2 * G;
+
+    // 1. gather the surviving registered fields to host padded buffers on the OLD block.
+    const auto names = fields_.names();
+    std::vector<std::vector<double>> oldHost(names.size()), newHost(names.size());
+    for (std::size_t k = 0; k < names.size(); ++k) {
+      CCField f = fields_.at(names[k]).data;
+      auto h = Kokkos::create_mirror_view(f);
+      Kokkos::deep_copy(h, f);
+      oldHost[k].assign(h.data(), h.data() + (std::size_t)oex * oey * oez);
+      newHost[k].assign((std::size_t)nex * ney * nez, 0.0);
+    }
+    // 2. redistribute each field OLD -> NEW (host, bit-exact pure data movement).
+    std::vector<const double*> op(names.size());
+    std::vector<double*> np(names.size());
+    for (std::size_t k = 0; k < names.size(); ++k) {
+      op[k] = oldHost[k].data();
+      np[k] = newHost[k].data();
+    }
+    peclet::core::decomp::redistributeGridFields<double>(*dec_, newDec, rank, G, op, np, comm_);
+
+    // 3. reallocate every buffer to the new block; re-init the halo + MG on the new partition.
+    allocateBlock((int)nb.size[0], (int)nb.size[1], (int)nb.size[2]);
+    initMpi(newDec, comm_);
+    // scatter a padded host buffer into a registered field's device buffer.
+    auto scatterPadded = [&](const std::string& name, const std::vector<double>& src) {
+      CCField f = fields_.at(name).data;
+      auto h = Kokkos::create_mirror_view(f);
+      std::memcpy(h.data(), src.data(), sizeof(double) * (std::size_t)nex * ney * nez);
+      Kokkos::deep_copy(f, h);
+    };
+    // 4. scatter all migrated fields into the fresh (new-block) buffers.
+    for (std::size_t k = 0; k < names.size(); ++k)
+      scatterPadded(names[k], newHost[k]);
+    // 5. rebuild geometry-derived state (openness/IBM/stencils/MG) from the migrated SDF. setSolid
+    //    zeroes the velocity + pressure (it is the initial-geometry setup), so re-instate every
+    //    non-SDF field afterward from the migrated data.
+    setSolid(gatherInner(sdf_), cutcellPressure_);
+    for (std::size_t k = 0; k < names.size(); ++k)
+      if (names[k] != "sdf")
+        scatterPadded(names[k], newHost[k]);
   }
 #endif
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip
@@ -416,8 +492,8 @@ class Solver {
       copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
       copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
 #ifdef PECLET_FLOW_MPI
-      if (distributed_)
-        mg_.initMpi(gnx_, gny_, gnz_, nLevels_, comm_);
+      if (distributed_)  // share the level-0 decomposition so the MG block matches this rank's block
+        mg_.initMpi(gnx_, gny_, gnz_, nLevels_, comm_, dec_.get());
       else
 #endif
         mg_.init(nx_, ny_, nz_,
@@ -1907,6 +1983,7 @@ class Solver {
 #ifdef PECLET_FLOW_MPI
   std::shared_ptr<GridHaloTopology<3>> velHalo_;  // g=2 velocity-block topology
   std::shared_ptr<GridHalo<double>> velDev_;      // g=2 velocity-block ghost exchange
+  std::shared_ptr<peclet::core::decomp::BlockDecomposer<3>> dec_;  // current partition (redistribute)
   MPI_Comm comm_ = MPI_COMM_NULL;
   int gnx_ = 0, gny_ = 0, gnz_ = 0;  // communicator + GLOBAL dims
 #endif

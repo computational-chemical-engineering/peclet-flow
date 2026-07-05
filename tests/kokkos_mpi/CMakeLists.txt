@@ -37,7 +37,7 @@ foreach(t distributed_diffusion distributed_pressure distributed_mg)
 endforeach()
 
 # The production CutcellMG / VelocityMG / assembled SdflowIbm distributed (gated behind PECLET_FLOW_MPI).
-foreach(t cutcellmg_mpi velocitymg_mpi sdflow_mpi sdflow_colocated_mpi)
+foreach(t cutcellmg_mpi velocitymg_mpi sdflow_mpi sdflow_colocated_mpi redistribute_mpi)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${TPX_DIR}/include)

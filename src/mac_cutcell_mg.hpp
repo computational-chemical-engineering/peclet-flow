@@ -28,6 +28,7 @@
 #include <memory>
 
 #include "peclet/core/decomp/block_decomposer.hpp"
+#include "peclet/core/decomp/grid_redistribute.hpp"
 #include "peclet/core/halo/grid_halo.hpp"
 #include "peclet/core/halo/grid_halo_topology.hpp"
 #endif
@@ -211,7 +212,14 @@ class CutcellMG {
   // restrict/prolong stay local). Sets the distributed flag -> fill() exchanges, the reductions
   // Allreduce, the smoother uses the block's global-origin parity. Single-rank (size 1) reproduces
   // init()'s field exactly.
-  void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm) {
+  // dec0: OPTIONAL shared level-0 decomposition (load-balance / CFD-DEM co-decomposition). When
+  // given, level 0 uses it so the MG's level-0 block matches the caller's (possibly weighted) block;
+  // the coarse levels keep the equal-weight ORB of the coarsened grid. For a weighted dec0 the
+  // coarse-level transfer is only clean when nLevels==1 (pure RB-GS) — use that (or the
+  // decomposition-agnostic GraphAMG) for a weighted co-decomposition. nullptr => equal-weight
+  // everywhere (the original behaviour, byte-identical).
+  void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm,
+               const peclet::core::decomp::BlockDecomposer<3>* dec0 = nullptr) {
     lv_.clear();
     distributed_ = true;
     comm_ = comm;
@@ -224,8 +232,9 @@ class CutcellMG {
     for (int L = 0; L < nLevels; ++L) {
       Level v;
       v.halo = std::make_shared<GridHaloTopology<3>>();
-      peclet::core::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size),
-                                                   peclet::core::IVec<3>{gs.x, gs.y, gs.z});
+      peclet::core::decomp::BlockDecomposer<3> decOwn(static_cast<std::size_t>(size),
+                                                      peclet::core::IVec<3>{gs.x, gs.y, gs.z});
+      const peclet::core::decomp::BlockDecomposer<3>& dec = (L == 0 && dec0) ? *dec0 : decOwn;
       v.halo->buildTopology(dec, rank, G, per, comm);
       v.dev = std::make_shared<GridHalo<double>>();
       v.dev->init(*v.halo);
