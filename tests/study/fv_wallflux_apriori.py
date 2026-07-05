@@ -157,6 +157,152 @@ def run(N, use_far2=False):
     FB *= MU
     return dict(Fest=Fest, Fcen=Fcen, FB=FB, sumW=sumW, area=area, orphan=orphan_share)
 
+# ------------------------------------------------------------------------------------------------
+# Variant C: Basilisk `dirichlet_gradient` — TRUE-NORMAL image-point wall gradient.
+# Instead of decomposing into three axis-anchored 1-D quadratics, reconstruct the single scalar
+# wall-normal derivative d(ux)/dn along n̂ = ∇sdf directly, exactly as Basilisk embed.h does:
+#   * boundary point p = SDF foot point x - sdf·n̂ (proxy for the fragment centroid), in cell units;
+#   * along the DOMINANT axis (largest |n̂_a|) take two image points i=1,2 cells into the fluid;
+#   * get u there by TRANSVERSE bi-quadratic interpolation of the cell-centred values (Basilisk's
+#     `quadratic` Lagrange stencil), gated `defined` on the 3x3 transverse cells being fluid;
+#   * fit the quadratic {u=0 at wall, v0 at d0, v1 at d1} for a 2nd-order d(ux)/dn;
+#   * FALLBACKS (Basilisk): if only the near image point is defined -> 1-point linear (2nd order);
+#     if neither is defined (sliver) -> the degenerate 1-point through the cell centre itself.
+# The wall flux is then F = -mu * Σ_frag A_frag · d(ux)/dn  (A_frag = |W|, the fragment area;
+# n̂ = fluid-outward so d(ux)/dn > 0 and F < 0, matching the reference). This is the ingredient the
+# C++ embed operator will use; the test confirms it is O(h²) AND that the sliver fallback keeps it
+# well-behaved (fallback-cell share reported).
+
+def _quad(x, a1, a2, a3):
+    # Lagrange quadratic through (-1,a1),(0,a2),(+1,a3), evaluated at x (Basilisk `quadratic`).
+    return (a1 * (x - 1.0) + a3 * (x + 1.0)) * x / 2.0 - a2 * (x - 1.0) * (x + 1.0)
+
+def run_normal(N, analytic=False):
+    h = 1.0 / N
+    c = (np.arange(N) + 0.5) * h - 0.5
+    X, Y, Z = np.meshgrid(c, c, c, indexing="ij")
+    S = sdf(X, Y, Z)
+    fl = S >= 0
+    U = np.where(fl, ux(X, Y, Z), 0.0)
+
+    # fragment area per cell from the face openness (same W as variants A/B)
+    W = []
+    for a in range(3):
+        O = face_openness(N, a, h)
+        Wa = h * h * (O[:-1] - O[1:])
+        W.append(np.moveaxis(Wa, [0, 1, 2], [a, (a + 1) % 3, (a + 2) % 3]))
+    A = np.sqrt(W[0]**2 + W[1]**2 + W[2]**2)               # fragment area per cell
+    m = A > 0                                              # fragment cells (fluid- AND solid-centred)
+
+    # unit inward-to-fluid normal n̂ = ∇sdf (analytic here; ∇sdf in the solver) at fragment cells
+    Im, Jm, Km = np.nonzero(m)
+    xm, ym, zm = X[m], Y[m], Z[m]
+    rx, ry, rz = xm - C0[0], ym - C0[1], zm - C0[2]
+    rr = np.sqrt(rx * rx + ry * ry + rz * rz)
+    nhat = np.stack([rx / rr, ry / rr, rz / rr], axis=1)   # (M,3), fluid-outward = ∇sdf
+    sdm = S[m]
+    pcell = -sdm[:, None] / h * nhat                       # foot point, cell units, per axis (M,3)
+    cidx = np.stack([Im, Jm, Km], axis=1)                  # (M,3) integer cell coords
+    Ucell = U[m]
+    Aw = A[m]
+
+    Mn = len(Im)
+    grad = np.full(Mn, np.nan)                             # d(ux)/dn (into fluid)
+    used = np.zeros(Mn, dtype=int)                         # 0=degenerate coef, 1=near-only, 2=two-pt
+    bl = np.zeros(Mn, dtype=bool)                          # any image point used biased-linear interp
+    da = np.argmax(np.abs(nhat), axis=1)                   # dominant axis per cell
+
+    def gather(cc, a, oa, t1, ot1, t2, ot2):
+        idx = [cc[:, 0].copy(), cc[:, 1].copy(), cc[:, 2].copy()]
+        idx[a] = np.clip(idx[a] + oa, 0, N - 1)
+        idx[t1] = np.clip(idx[t1] + ot1, 0, N - 1)
+        idx[t2] = np.clip(idx[t2] + ot2, 0, N - 1)
+        return U[idx[0], idx[1], idx[2]], (S[idx[0], idx[1], idx[2]] >= 0)
+
+    for a in range(3):
+        g = np.nonzero(da == a)[0]
+        if len(g) == 0:
+            continue
+        t1, t2 = (a + 1) % 3, (a + 2) % 3
+        cc = cidx[g]
+        na, nt1, nt2 = nhat[g, a], nhat[g, t1], nhat[g, t2]
+        pa, pt1, pt2 = pcell[g, a], pcell[g, t1], pcell[g, t2]
+        sgn = np.where(na >= 0, 1.0, -1.0)
+        v = [None, None]
+        dd = [None, None]
+        defd = [None, None]
+        for l in (0, 1):
+            i = (l + 1) * sgn.astype(int)                  # ±1, ±2 into the fluid
+            dl = (i - pa) / na                             # distance (cells) to image plane
+            y1 = pt1 + dl * nt1
+            z1 = pt2 + dl * nt2
+            j = np.clip(np.round(y1), -1, 1).astype(int)
+            k = np.clip(np.round(z1), -1, 1).astype(int)
+            ly, lz = y1 - j, z1 - k
+            if analytic:  # sample the exact field at the image point (isolate geometry+fit)
+                imx = [None, None, None]
+                imx[a] = X[cc[:, 0], cc[:, 1], cc[:, 2]] + i * h if a == 0 else None
+                # build physical image-point coords from cell center + (i, y1, z1)*h
+                base = [X[cc[:, 0], cc[:, 1], cc[:, 2]], Y[cc[:, 0], cc[:, 1], cc[:, 2]],
+                        Z[cc[:, 0], cc[:, 1], cc[:, 2]]]
+                base[a] = base[a] + i * h
+                base[t1] = base[t1] + y1 * h
+                base[t2] = base[t2] + z1 * h
+                v[l] = ux(base[0], base[1], base[2])
+                dd[l] = dl
+                defd[l] = np.ones(len(g), dtype=bool)
+            else:
+                # gather the 3x3 transverse stencil (values + fluid flags) at column a=i
+                vv = {}
+                sf = {}
+                for dk in (-1, 0, 1):
+                    for dj in (-1, 0, 1):
+                        vv[(dj, dk)], sf[(dj, dk)] = gather(cc, a, i, t1, j + dj, t2, k + dk)
+                full = np.ones(len(g), dtype=bool)
+                for key in sf:
+                    full &= sf[key]
+                # (1) full 3x3 fluid -> bi-quadratic (Basilisk `quadratic` x `quadratic`)
+                vbq = _quad(lz, _quad(ly, vv[(-1, -1)], vv[(0, -1)], vv[(1, -1)]),
+                            _quad(ly, vv[(-1, 0)], vv[(0, 0)], vv[(1, 0)]),
+                            _quad(ly, vv[(-1, 1)], vv[(0, 1)], vv[(1, 1)]))
+                # (2) home cell fluid but stencil straddles -> Basilisk `embed_interpolate`
+                #     biased-linear: anchored at the fluid home cell, each transverse gradient
+                #     biased toward whichever side (+ or -) is fluid.
+                home = sf[(0, 0)]
+
+                def biased(coord, keyP, keyM):  # bias toward +side if fluid, else -side
+                    return np.where(sf[keyP], np.abs(coord) * (vv[keyP] - vv[(0, 0)]),
+                                    np.where(sf[keyM], np.abs(coord) * (vv[(0, 0)] - vv[keyM]), 0.0))
+                # transverse t1 forward = sign(ly); t2 forward = sign(lz)
+                spj = ly >= 0
+                spk = lz >= 0
+                cj = np.where(spj, biased(ly, (1, 0), (-1, 0)), biased(ly, (-1, 0), (1, 0)))
+                ck = np.where(spk, biased(lz, (0, 1), (0, -1)), biased(lz, (0, -1), (0, 1)))
+                vbl = vv[(0, 0)] + cj + ck
+                v[l] = np.where(full, vbq, vbl)
+                dd[l] = dl
+                defd[l] = full | home
+                bl[g] |= (home & ~full)                    # this image point fell to biased-linear
+        d0, d1 = dd[0], dd[1]
+        v0, v1 = v[0], v[1]
+        two = defd[0] & defd[1]
+        near = defd[0] & ~defd[1]
+        deg = ~defd[0]
+        gg = np.zeros(len(g))
+        gg[two] = (v0[two] * d1[two] / d0[two] - v1[two] * d0[two] / d1[two]) / \
+                  ((d1[two] - d0[two]) * h)
+        gg[near] = v0[near] / (d0[near] * h)
+        d0deg = np.maximum(1e-3, np.abs(pa[deg] / na[deg]))
+        gg[deg] = Ucell[g][deg] / (d0deg * h)
+        grad[g] = gg
+        used[g] = np.where(two, 2, np.where(near, 1, 0))
+
+    Fnorm = -MU * float(np.sum(Aw * grad))
+    frac_bl = float(np.mean(bl))                           # share using biased-linear (straddling)
+    frac_deg = float(np.mean(used == 0))                   # truly degenerate (coef path, u_cell)
+    return dict(Fnorm=Fnorm, frac_bl=frac_bl, frac_deg=frac_deg,
+                area=float(Aw.sum()), Mn=Mn)
+
 Fex = reference()
 print(f"F_exact = {Fex:+.6e}   (mu * closed-surface integral of grad(ux).n, n fluid-outward)")
 print(f"{'N':>5} | {'A: axis-intercept':>17} {'ord':>5} | {'B: centroid-anchored':>20} {'ord':>5} | "
@@ -173,3 +319,17 @@ for N in (32, 64, 128, 192):
           f"{eB:>+19.4f}% {oB/fac if pB else float('nan'):>5.2f} | {eC:>+12.2f}% | "
           f"{r['area']/(4*np.pi*R*R):>13.6f}")
     pA, pB, pN = eA, eB, N
+
+# --- Variant C: true-normal Basilisk dirichlet_gradient (the C++ embed operator's ingredient) ---
+print()
+print("Variant C: true-normal image-point wall gradient (Basilisk dirichlet_gradient)")
+print(f"{'N':>5} | {'C: true-normal':>16} {'ord':>5} | {'biased-lin %':>12} | {'degen %':>8} | "
+      f"{'Ncut':>7}")
+pC = pN2 = None
+for N in (32, 64, 128, 192):
+    r = run_normal(N)
+    eC = 100 * (r["Fnorm"] - Fex) / abs(Fex)
+    oC = np.log2(abs(pC) / abs(eC)) / np.log2(N / pN2) if pC else float("nan")
+    print(f"{N:>5} | {eC:>+15.4f}% {oC:>5.2f} | {100*r['frac_bl']:>11.2f}% | "
+          f"{100*r['frac_deg']:>7.3f}% | {r['Mn']:>7}")
+    pC, pN2 = eC, N
