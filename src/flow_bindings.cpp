@@ -421,9 +421,22 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "ghost_width", [](S& s) { return s.ghostWidth(); },
           "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")
+      .def(
+          "set_porous_continuity", [](S& s, bool on) { s.setPorousContinuity(on); },
+          nb::arg("on") = true,
+          "Enable the volume-averaged (porous) continuity for unresolved CFD-DEM (staggered only): "
+          "the projection enforces d(eps)/dt + div(eps u) = 0 instead of div(u)=0, so the fluid "
+          "velocity is NOT solenoidal where the void fraction changes (bubbling/expansion). Binds "
+          "the 'eps' field (void fraction from the particle deposition, created seeded to 1 if "
+          "absent; the coupling writes it each step BEFORE step()). eps=1 everywhere reduces exactly "
+          "to div(u)=0. Pair with max_porous_residual() for the meaningful convergence check.")
       .def("max_open_divergence", &S::maxOpenDivergence,
-           "Return the max cut-cell flux divergence (the incompressibility residual; ~0 when "
-           "converged).")
+           "Return the max cut-cell velocity-flux divergence max|div(open*u)|. With porous "
+           "continuity this is NOT ~0 -- it equals -d(eps)/dt (the bed expanding). Use "
+           "max_porous_residual() for the continuity residual.")
+      .def("max_porous_residual", &S::maxPorousResidual,
+           "Residual of the volume-averaged continuity max|div(open*eps*u) + d(eps)/dt| -- the "
+           "quantity the porous projection drives to zero. 0 unless set_porous_continuity(True).")
       .def(
           "get_resolution", [](S& s) { return std::vector<int>{s.nx(), s.ny(), s.nz()}; },
           "Return the LOCAL grid resolution [nx, ny, nz] (this rank's block under MPI).")

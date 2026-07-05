@@ -698,6 +698,37 @@ class Solver {
 #endif
     return m;
   }
+  // Residual of the volume-averaged continuity, max|div(open*eps*u) + d(eps)/dt| — the quantity the
+  // porous projection actually drives to zero (NOT the velocity divergence, which is -d(eps)/dt != 0
+  // in a fluidizing bed). Meaningful only with set_porous_continuity(True); returns 0 otherwise.
+  double maxPorousResidual() {
+    if (!porous_ || !cutcellPressure_)
+      return 0.0;
+    for (int c = 0; c < 3; ++c)
+      fillVelGhosts(c, 0);
+    divergOpenEps(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
+                  CCConst(oz_), CCConst(epsField_), div_, e_, G);
+    {  // add back the SAME d(eps)/dt source the projection used (depsdt_ from the last project())
+      CCExec space;
+      CCField d = div_, dd = depsdt_;
+      using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+      Kokkos::parallel_for(
+          "peclet::flow::porous_resid", MD(space, {G, G, G}, {e_.x - G, e_.y - G, e_.z - G}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i = (long)x + (long)y * e_.x + (long)z * e_.x * e_.y;
+            d(i) += dd(i);
+          });
+    }
+    double m = reduceMaxAbsInner(CCConst(div_));
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      double g = 0;
+      MPI_Allreduce(&m, &g, 1, MPI_DOUBLE, MPI_MAX, comm_);
+      return g;
+    }
+#endif
+    return m;
+  }
   long lastPressureIterations() const { return lastPressureIters_; }
   int nx() const { return nx_; }
   int ny() const { return ny_; }
@@ -1461,8 +1492,28 @@ class Solver {
     } else {
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);
-      divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
-                 CCConst(oz_), div_, e_, G);
+      if (porous_)  // volume-averaged continuity: div(open*eps*u*), constraint div(eps u)=-d(eps)/dt
+        divergOpenEps(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
+                      CCConst(oz_), CCConst(epsField_), div_, e_, G);
+      else
+        divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
+                   CCConst(oz_), div_, e_, G);
+    }
+    // Porous continuity source: fold d(eps)/dt into the divergence so the Poisson solves for
+    // div(eps u) = -d(eps)/dt (not 0). d(eps)/dt = (eps^{n+1}-eps^n)/dt from the deposited void
+    // fraction; stored in depsdt_ (epsPrev_ is overwritten at step end, so the residual reuses this).
+    if (porous_) {
+      CCExec space;
+      CCField d = div_, dd = depsdt_, ep = epsField_, epp = epsPrev_;
+      const double idt = 1.0 / dt_;
+      using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+      Kokkos::parallel_for(
+          "peclet::flow::deps_dt", MD(space, {G, G, G}, {e_.x - G, e_.y - G, e_.z - G}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i = (long)x + (long)y * e_.x + (long)z * e_.x * e_.y;
+            dd(i) = (ep(i) - epp(i)) * idt;
+            d(i) += dd(i);
+          });
     }
     // bridge -div(u*) (g=2 block) -> the MG rhs (g=1 block); keep div(u*) in div_ for the pressure
     // update
@@ -1490,6 +1541,17 @@ class Solver {
       mg_.setBoundaryConditions(bc_);
       mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), 1.0, 1.0, 1.0);
       chebBoundsSet_ = false;  // spectrum changed with the coefficients (re-estimated by the solve)
+    }
+    // Porous continuity: the Poisson operator is eps-weighted (c_f = open_f * eps_f), same rails as
+    // the density coefficient above. Rebuilt every step (eps moves with the particles).
+    if (porous_) {
+      fillPropGhosts(epsField_);
+      copyBlockShifted(eps1_, e1_, CCConst(epsField_), e_, G - 1);
+      buildPorousCoeff(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(eps1_),
+                       e1_, 1);
+      mg_.setBoundaryConditions(bc_);
+      mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), 1.0, 1.0, 1.0);
+      chebBoundsSet_ = false;
     }
     // geometric multigrid solve of the cut-cell pressure Poisson A phi = -div(u*) (CUDA
     // mac_multigrid): MG-PCG by default, or the communication-light Chebyshev driver (bounds
@@ -1611,6 +1673,9 @@ class Solver {
             KOKKOS_LAMBDA(std::size_t i) { P(i) += ct * ph(i) - mu * d(i); });
       }
     }
+    // Snapshot eps^{n+1} -> epsPrev_ for the next step's d(eps)/dt (this projection consumed it).
+    if (porous_)
+      Kokkos::deep_copy(epsPrev_, epsField_);
   }
   void maskVelocity(int c) {
     CCExec space;
@@ -1885,6 +1950,44 @@ class Solver {
       chebBoundsSet_ = false;
     }
   }
+  // Enable/disable the volume-averaged (porous) continuity for unresolved CFD-DEM: the projection
+  // enforces d(eps)/dt + div(eps u) = 0 instead of div(u)=0, so the velocity is NOT solenoidal where
+  // the void fraction changes. Binds the "eps" field (void fraction from the particle deposition;
+  // created seeded to 1 if absent). Staggered-only. The coupling deposits eps each step BEFORE step().
+  void setPorousContinuity(bool on) {
+    if constexpr (Grid::collocated) {
+      if (on)
+        throw std::runtime_error("set_porous_continuity: staggered-only (v1)");
+    }
+    porous_ = on;
+    if (on) {
+      if (fields_.has("eps"))
+        epsField_ = fields_.at("eps").data;
+      else {
+        epsField_ = addField("eps");
+        Kokkos::deep_copy(epsField_, 1.0);  // no particles -> eps=1 -> reduces to div(u)=0
+      }
+      if (epsPrev_.extent(0) == 0) {
+        epsPrev_ = CCField("epsPrev", n_);
+        depsdt_ = CCField("depsdt", n_);
+      }
+      Kokkos::deep_copy(epsPrev_, epsField_);  // d(eps)/dt=0 on the first step
+      if (eps1_.extent(0) == 0)
+        eps1_ = CCField("eps1", n1_);
+      if (rho1_.extent(0) == 0) {  // share the g=1 coefficient scratch with the varRho path
+        rho1_ = CCField("rho1", n1_);
+        cx1_ = CCField("cx1", n1_);
+        cy1_ = CCField("cy1", n1_);
+        cz1_ = CCField("cz1", n1_);
+      }
+      // CHEBYSHEV by default (as for variable density): MG-PCG stalls on the eps-scaled coefficient
+      // operator — its V-cycle preconditioner loses the SPD structure CG needs (observed: PCG 2000
+      // iters stuck where Chebyshev converges in ~40). Bounds re-estimated on every coefficient
+      // rebuild (chebBoundsSet_ invalidation in project()). An explicit driver set afterwards wins.
+      useChebyshev_ = true;
+      chebBoundsSet_ = false;
+    }
+  }
   // Enable/disable variable-coefficient momentum (variable viscosity). variable=true binds the "mu"
   // field (creating it, seeded with the current scalar mu, if absent) and forces the stencil solve
   // path. harmonic selects the harmonic face mean (continuous shear stress across a viscosity jump)
@@ -2155,6 +2258,8 @@ class Solver {
   bool varRho_ = false;               // variable density (momentum + projection); staggered only
   CCField rhoField_;                  // per-cell density (when varRho_); rho_ is the reference rho0
   CCField rho1_, cx1_, cy1_, cz1_;    // g=1 MG-block density bridge + projection face coefficients
+  bool porous_ = false;               // volume-averaged continuity d(eps)/dt+div(eps u)=0 (CFD-DEM)
+  CCField epsField_, epsPrev_, eps1_, depsdt_;  // eps^{n+1}, eps^n, g=1 bridge, stored d(eps)/dt
   bool hasDrag_ = false;              // implicit linear drag (CFD-DEM): beta on the momentum diagonal
   CCField dragBeta_;                  // per-cell drag coefficient (added to AC; target beta*u_p rides
                                       // the force_* cellForce fields)

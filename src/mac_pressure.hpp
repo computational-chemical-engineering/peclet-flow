@@ -155,6 +155,48 @@ inline void buildRhoCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCCons
       });
 }
 
+// --- Volume-averaged (porous) continuity for unresolved CFD-DEM -----------------------------------
+// The proper continuity is d(eps)/dt + div(eps u) = 0 (eps = void fraction from the particles), so the
+// velocity is NOT solenoidal: div(eps u) = -d(eps)/dt. These size the projection to that constraint.
+
+// eps-weighted open-face divergence: d = div(open * eps_f * u), eps_f = arithmetic face mean. Reduces
+// to divergOpen when eps == 1 everywhere (no particles).
+inline void divergOpenEps(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst oy, CCConst oz,
+                          CCConst eps, CCField d, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::diverg_open_eps", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        const double exp = 0.5 * (eps(i) + eps(i + sx)), exm = 0.5 * (eps(i) + eps(i - sx));
+        const double eyp = 0.5 * (eps(i) + eps(i + sy)), eym = 0.5 * (eps(i) + eps(i - sy));
+        const double ezp = 0.5 * (eps(i) + eps(i + sz)), ezm = 0.5 * (eps(i) + eps(i - sz));
+        d(i) = (ox(i + sx) * exp * u(i + sx) - ox(i) * exm * u(i)) +
+               (oy(i + sy) * eyp * v(i + sy) - oy(i) * eym * v(i)) +
+               (oz(i + sz) * ezp * w(i + sz) - oz(i) * ezm * w(i));
+      });
+}
+
+// Porous Poisson face coefficient c_f = open_f * eps_f (eps_f = arithmetic face mean). Constant-density
+// gas: the correction stays u -= grad(phi) (projectCorrect) so the open*eps flux telescopes to A*phi.
+// (Combining with variable rho — c_f *= rho0/rho_f, projectCorrectVar — is a later composition.)
+inline void buildPorousCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy, CCConst oz,
+                             CCConst eps, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::porous_coeff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        cx(i) = ox(i) * 0.5 * (eps(i) + eps(i - sx));
+        cy(i) = oy(i) * 0.5 * (eps(i) + eps(i - sy));
+        cz(i) = oz(i) * 0.5 * (eps(i) + eps(i - sz));
+      });
+}
+
 }  // namespace peclet::flow
 
 #endif  // PECLET_FLOW_MAC_PRESSURE_HPP
