@@ -1,5 +1,11 @@
 # Why the collocated solver is first-order at curved immersed boundaries
 
+> **⚠ Read [`collocated_second_order_open_problem.md`](collocated_second_order_open_problem.md) first.**
+> That note is a deliberately narrative-free statement of the open problem: what is *measured*, what is
+> merely *argued* (much of the "why" below is hypothesis that later attempts falsified), and the a-priori
+> constraint-truncation test that should settle it by measurement before any further scheme is ported.
+> This document is the accumulated design narrative and its dead ends — useful history, not gospel.
+
 **Status:** analysis + design note (2026-07-04). Motivated by a staggered-vs-collocated
 grid-convergence study on the Zick–Homsy sphere array. No code changed by this note; it
 documents *why* `SolverColocated` converges one order slower than `Solver` at curved
