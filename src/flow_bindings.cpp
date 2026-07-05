@@ -287,6 +287,11 @@ static void bind_solver(nb::module_& m, const char* name) {
           nb::arg("name"),
           "Fill a registered field's ghost cells (cross-rank + periodic under MPI; periodic "
           "single-rank).")
+      .def(
+          "exchange_field_add", [](S& s, const std::string& name) { s.exchangeFieldAdd(name); },
+          nb::arg("name"),
+          "Add-reduce halo: fold ghost-layer deposits back onto their owner (cross-rank + periodic). "
+          "The particle->grid deposition primitive for MPI CFD-DEM; single-rank non-periodic no-op.")
       // --- Scalar transport (advection-diffusion) ----------------------------------------------
       .def(
           "add_scalar",
@@ -431,6 +436,13 @@ static void bind_solver(nb::module_& m, const char* name) {
           "been "
           "constructed with this rank's LOCAL block dims (from mpi_block). MPI_Init is called if "
           "needed.")
+      .def(
+          "rebalance_by_weights",
+          [](S& s, const std::vector<double>& w) { s.rebalanceByWeights(w); }, nb::arg("weights"),
+          "Dynamic load balancing: redistribute the solver's state onto the weighted ORB of per-cell "
+          "weights (global x-fastest, gnx*gny*gnz). Pass fluid work + gamma*particle_count and the "
+          "coupled dem migrates onto the SAME partition from the same array. State-preserving "
+          "(bit-exact at np=1, reduction floor at np>1).")
       .def(
           "rank",
           [](S&) {

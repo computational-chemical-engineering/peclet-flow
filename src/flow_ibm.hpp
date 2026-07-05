@@ -334,6 +334,19 @@ class Solver {
       if (names[k] != "sdf")
         scatterPadded(names[k], newHost[k]);
   }
+  // Redistribute onto the weighted ORB of per-cell weights `w` (global x-fastest, gnx*gny*gnz). The
+  // ergonomic Python entry point for load balancing: the caller passes a weight field (e.g. fluid
+  // work + gamma*particle_count) and both flow and dem rebuild the SAME deterministic partition from
+  // it. No BlockDecomposer object crosses the language boundary.
+  void rebalanceByWeights(const std::vector<peclet::core::Real>& w) {
+    if (!distributed_)
+      return;
+    int size = 1;
+    MPI_Comm_size(comm_, &size);
+    peclet::core::decomp::BlockDecomposer<3> newDec(
+        (std::size_t)size, peclet::core::IVec<3>{gnx_, gny_, gnz_}, w);
+    redistribute(newDec);
+  }
 #endif
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip
   // wall,2=Dirichlet/inflow,3=outflow.
@@ -1611,6 +1624,24 @@ class Solver {
   std::vector<std::string> fieldNames() const { return fields_.names(); }
   // Ghost-exchange a registered field (cross-rank + periodic under MPI; periodic-only single-rank).
   void exchangeField(const std::string& name) { fillGhosts(fields_.at(name).data); }
+  // Add-reduce ("reverse") halo: fold ghost-layer deposits back onto their owner cell (both cross-rank
+  // AND periodic self-wrap). This is the coupling primitive for particle->grid deposition (e.g. void
+  // fraction / drag reaction) where a particle near a block boundary scatters into ghost cells owned by
+  // a neighbour; after this the inner block holds the complete sum. Single-rank non-periodic: a no-op.
+  void exchangeFieldAdd(const std::string& name) {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && velHalo_) {
+      CCField f = fields_.at(name).data;
+      auto h = Kokkos::create_mirror_view(f);
+      Kokkos::deep_copy(h, f);
+      peclet::core::halo::GridFieldView<double> view{h.data()};
+      velHalo_->reverseAdd(view);
+      Kokkos::deep_copy(f, h);
+    }
+#else
+    (void)name;
+#endif
+  }
   // Host round-trip: read a registered field's inner region as an x-fastest (nx,ny,nz) buffer, or
   // write one (ghosts left stale until the next exchangeField).
   std::vector<double> getField(const std::string& name) { return gatherInner(fields_.at(name).data); }
