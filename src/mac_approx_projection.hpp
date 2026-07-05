@@ -362,6 +362,150 @@ inline void fvViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCCon
       });
 }
 
+// Lagrange quadratic through (-1,a1),(0,a2),(+1,a3) evaluated at xx (Basilisk embed.h `quadratic`).
+KOKKOS_INLINE_FUNCTION double eQuad(double xx, double a1, double a2, double a3) {
+  return (a1 * (xx - 1.0) + a3 * (xx + 1.0)) * xx * 0.5 - a2 * (xx - 1.0) * (xx + 1.0);
+}
+
+// TRUE-NORMAL wall gradient d(U)/dn at the embedded boundary of a cut cell — the Basilisk embed.h
+// `dirichlet_gradient` (no-slip U_wall = 0), in cell units (h = 1). n̂ = unit inward-to-FLUID normal
+// (∇sdf), p = boundary-point offset from the cell centre (cell units). Along the dominant-|n̂| axis
+// it places two image points 1 and 2 cells into the fluid, interpolates U there by TRANSVERSE
+// bi-quadratic interpolation of the cell-centred values (`eQuad`×`eQuad`), and fits the quadratic
+// {0 at wall, v0 at d0, v1 at d1} for a 2nd-order derivative. Fallbacks (Basilisk): if the near
+// image point's 3×3 transverse stencil straddles the wall, a biased-linear `embed_interpolate`
+// anchored at the fluid home cell (uses only fluid cells); if even the home cell is solid, the
+// degenerate 1-point estimate through the cell centre. A-priori-validated O(h²) with 0% degenerate
+// on the Stokes sphere (tests/study/fv_wallflux_apriori.py, variant C). Interior/transverse reads of
+// U and sdf must be halo-filled (the velocity block carries G=2 ghosts).
+KOKKOS_INLINE_FUNCTION double embedDirichletGradient(CCConst U, CCConst sdf, C3 e, int x, int y,
+                                                     int z, double nx, double ny, double nz,
+                                                     double px, double py, double pz) {
+  const double nv[3] = {nx, ny, nz}, pv[3] = {px, py, pz};
+  const int ci[3] = {x, y, z}, ext[3] = {e.x, e.y, e.z};
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  int da = 0;
+  double best = Kokkos::fabs(nv[0]);
+  if (Kokkos::fabs(nv[1]) > best) {
+    best = Kokkos::fabs(nv[1]);
+    da = 1;
+  }
+  if (Kokkos::fabs(nv[2]) > best)
+    da = 2;
+  const int t1 = (da + 1) % 3, t2 = (da + 2) % 3;
+  const double sgn = nv[da] >= 0.0 ? 1.0 : -1.0;
+  auto clampi = [](int v, int n) { return v < 0 ? 0 : (v >= n ? n - 1 : v); };
+  auto rd = [](double v) {  // round to nearest integer, clamped to {-1,0,1} (Basilisk j/k)
+    double r = v >= 0.0 ? Kokkos::floor(v + 0.5) : Kokkos::ceil(v - 0.5);
+    return r > 1.0 ? 1.0 : (r < -1.0 ? -1.0 : r);
+  };
+  double vL[2], dL[2];
+  bool defd[2];
+  for (int l = 0; l < 2; ++l) {
+    const int io = (l + 1) * (int)sgn;  // ±1, ±2 cells into the fluid along the dominant axis
+    const double dl = ((double)io - pv[da]) / nv[da];  // distance (cells) from wall to image plane
+    const double y1 = pv[t1] + dl * nv[t1], z1 = pv[t2] + dl * nv[t2];
+    const int jj = (int)rd(y1), kk = (int)rd(z1);
+    const double ly = y1 - jj, lz = z1 - kk;
+    double vv[3][3];
+    bool sf[3][3];
+    for (int dk = -1; dk <= 1; ++dk)
+      for (int dj = -1; dj <= 1; ++dj) {
+        int cc[3];
+        cc[da] = ci[da] + io;
+        cc[t1] = ci[t1] + jj + dj;
+        cc[t2] = ci[t2] + kk + dk;
+        const long idx = (long)clampi(cc[0], ext[0]) * st[0] + (long)clampi(cc[1], ext[1]) * st[1] +
+                         (long)clampi(cc[2], ext[2]) * st[2];
+        vv[dj + 1][dk + 1] = U(idx);
+        sf[dj + 1][dk + 1] = sdf(idx) >= 0.0;
+      }
+    bool full = true;
+    for (int a2 = 0; a2 < 3; ++a2)
+      for (int b2 = 0; b2 < 3; ++b2)
+        full = full && sf[a2][b2];
+    const bool home = sf[1][1];
+    const double vbq = eQuad(lz, eQuad(ly, vv[0][0], vv[1][0], vv[2][0]),
+                             eQuad(ly, vv[0][1], vv[1][1], vv[2][1]),
+                             eQuad(ly, vv[0][2], vv[1][2], vv[2][2]));
+    double vbl = vv[1][1];  // biased-linear embed_interpolate (fluid-side only), anchored at home
+    {
+      const int fp = ly >= 0.0 ? 2 : 0, fm = ly >= 0.0 ? 0 : 2;
+      if (sf[fp][1])
+        vbl += Kokkos::fabs(ly) * (vv[fp][1] - vv[1][1]);
+      else if (sf[fm][1])
+        vbl += Kokkos::fabs(ly) * (vv[1][1] - vv[fm][1]);
+    }
+    {
+      const int fp = lz >= 0.0 ? 2 : 0, fm = lz >= 0.0 ? 0 : 2;
+      if (sf[1][fp])
+        vbl += Kokkos::fabs(lz) * (vv[1][fp] - vv[1][1]);
+      else if (sf[1][fm])
+        vbl += Kokkos::fabs(lz) * (vv[1][1] - vv[1][fm]);
+    }
+    vL[l] = full ? vbq : vbl;
+    dL[l] = dl;
+    defd[l] = full || home;
+  }
+  if (defd[0] && defd[1]) {  // 2-point quadratic fit (3rd-order value -> 2nd-order gradient)
+    const double d0 = dL[0], d1 = dL[1], v0 = vL[0], v1 = vL[1];
+    return (v0 * d1 / d0 - v1 * d0 / d1) / (d1 - d0);
+  }
+  if (defd[0])  // near image point only -> 1-point linear
+    return vL[0] / dL[0];
+  double d0 = Kokkos::fabs(pv[da] / nv[da]);  // degenerate sliver: 1-point through the cell centre
+  if (d0 < 1e-3)
+    d0 = 1e-3;
+  const long ii = (long)ci[0] * st[0] + (long)ci[1] * st[1] + (long)ci[2] * st[2];
+  return U(ii) / d0;
+}
+
+// EMBED viscous operator (setFaceInterp(5)): identical to fvViscousApply except the wall drag is the
+// TRUE-NORMAL Basilisk gradient (embedDirichletGradient) rather than the axis-by-axis fragment-normal
+// estimate. Per cut cell the fragment area is |W| = |o_{a−}−o_{a+}| (divergence-theorem normal) and
+// the wall flux is +μ·area·d(U)/dn — algebraically the −μ·(W·∇U) of fvViscousApply but with the
+// O(h²) true-normal derivative in place of the O(h) axis reconstruction. Interior cells (area→0)
+// reduce to idt·cs·U + μ(diag·U − offs) exactly, so the mode-0 defect vanishes there.
+inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCConst ox, CCConst oy,
+                              CCConst oz, double mu, double idt, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::embed_viscous_apply", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long st[3] = {sx, sy, sz};
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        CCConst oa[3] = {ox, oy, oz};
+        double Wv[3];
+        double diag = 0.0, offs = 0.0;
+        for (int a = 0; a < 3; ++a) {
+          const double om = oa[a](i), op = oa[a](i + st[a]);
+          Wv[a] = om - op;
+          diag += om + op;
+          offs += om * U(i - st[a]) + op * U(i + st[a]);
+        }
+        const double area = Kokkos::sqrt(Wv[0] * Wv[0] + Wv[1] * Wv[1] + Wv[2] * Wv[2]);
+        double wall = 0.0;
+        if (area > 1e-12) {
+          double nx = 0.5 * (sdf(i + sx) - sdf(i - sx));
+          double ny = 0.5 * (sdf(i + sy) - sdf(i - sy));
+          double nz = 0.5 * (sdf(i + sz) - sdf(i - sz));
+          const double nn = Kokkos::sqrt(nx * nx + ny * ny + nz * nz);
+          if (nn > 1e-12) {
+            nx /= nn;
+            ny /= nn;
+            nz /= nn;
+            const double sdi = sdf(i);  // foot-point (boundary centroid proxy) offset, cell units
+            const double dudn =
+                embedDirichletGradient(U, sdf, e, x, y, z, nx, ny, nz, -sdi * nx, -sdi * ny, -sdi * nz);
+            wall = area * dudn;  // +μ·area·dudn == −μ·(W·∇U) with the true-normal derivative
+          }
+        }
+        Lu(i) = idt * cs(i) * U(i) + mu * (diag * U(i) - offs + wall);
+      });
+}
+
 // 7-point stencil matvec y = M·u using the stored (rs-scaled) IBM operator coefficients. Used to
 // form the mode-4 defect-correction RHS  b = M·u^k − rs·L_FV(u^k) + rs·b_FV, whose fixed point
 // satisfies L_FV·u* = b_FV exactly, with M only the (stable, small-cell-safe) preconditioner.
@@ -389,6 +533,48 @@ inline void subtractField(CCField u, CCConst d, C3 e, int g) {
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         u(i) -= d(i);
+      });
+}
+
+// OPENNESS-WEIGHTED cell pressure gradient along one axis (Basilisk centered_gradient / embed cell
+// correction): out(i) = (o(i)·(p(i)−p(i−sa)) + o(i+sa)·(p(i+sa)−p(i))) / (o(i)+o(i+sa)). In the
+// interior (o=1) this is the central difference ½(p(i+sa)−p(i−sa)); at a CUT cell with one closed
+// face (o=0) it returns the OPEN face gradient at FULL weight (not the plain projectCorrectCenter's
+// ½), which is the flux-consistent pressure force the approximate projection needs at the embedded
+// boundary — the O(h) under-correction the plain map makes there (analysis defect (b)). Used for both
+// the incremental −grad(P^n) predictor and the projection correction of the EMBED path (mode 6), so
+// the two stay the openness-adjoint of the fs-weighted divergence constraint.
+inline void centerGradOpen(CCField out, CCConst p, CCConst o, int axis, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::center_grad_open", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
+        const double om = o(i), op = o(i + sa);
+        out(i) = (om * (p(i) - p(i - sa)) + op * (p(i + sa) - p(i))) / (om + op + 1e-12);
+      });
+}
+
+// u,v,w -= openness-weighted cell pressure gradient of phi (centerGradOpen per axis). The embed
+// analogue of projectCorrectCenter: the cut-cell cell velocity gets the full open-face pressure force.
+inline void projectCorrectCenterOpen(CCField u, CCField v, CCField w, CCConst phi, CCConst ox,
+                                     CCConst oy, CCConst oz, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::correct_center_open", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        const double omx = ox(i), opx = ox(i + sx);
+        const double omy = oy(i), opy = oy(i + sy);
+        const double omz = oz(i), opz = oz(i + sz);
+        u(i) -= (omx * (phi(i) - phi(i - sx)) + opx * (phi(i + sx) - phi(i))) / (omx + opx + 1e-12);
+        v(i) -= (omy * (phi(i) - phi(i - sy)) + opy * (phi(i + sy) - phi(i))) / (omy + opy + 1e-12);
+        w(i) -= (omz * (phi(i) - phi(i - sz)) + opz * (phi(i + sz) - phi(i))) / (omz + opz + 1e-12);
       });
 }
 

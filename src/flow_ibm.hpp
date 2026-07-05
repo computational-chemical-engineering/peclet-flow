@@ -222,6 +222,13 @@ class Solver {
   //       the momentum (fvViscousApply: μ Σ_a W_a·centroid wall drag via defect correction, W_a from the
   //       divergence-theorem fragment normal o_{a−}−o_{a+}, centroid gradient at the SDF foot point).
   //       Momentum and constraint now share the same finite-volume cut-cell geometry → targets O(h²).
+  //   5 = EMBED (Basilisk embed.h): like mode 4 but the momentum wall drag is the TRUE-NORMAL
+  //       image-point gradient embedDirichletGradient (μ·area·d(U)/dn along n̂, O(h²) a-priori) rather
+  //       than the axis-by-axis W_a g_a — the reconstruction the mode-4 arc found the O(h) ceiling in.
+  //       Keeps the mode-3 (wall-aware, o-adjoint) projection.
+  //   6 = EMBED momentum + PLAIN (mode-0) projection: the Basilisk pairing — embed viscous no-slip
+  //       with the ½/½ face average, fs-weighted cut-cell Poisson, and central-difference correction
+  //       (the mode-1/2/3 wall-aware projection was measured WORSE than plain; embed drives momentum).
   void setFaceInterp(int mode) { faceInterp_ = mode; }
   // Under-relaxation of the mode-4 FV wall-flux defect correction (1 = full; <1 damps the stiff
   // explicit-lagged wall term). The steady state is independent of this value.
@@ -890,15 +897,21 @@ class Solver {
     // cell->face constraint interpolation, precomputed per component (the plain path's central
     // difference is the transpose of the plain 1/2-1/2 average, so this keeps the momentum/
     // constraint operators an adjoint pair on both paths).
-    const bool tg = Grid::collocated && faceInterp_ >= 2 && incr;
-    if constexpr (Grid::collocated)
+    const bool tg = Grid::collocated && faceInterp_ >= 2 && faceInterp_ <= 5 && incr;
+    // modes 6/7: openness-weighted -grad(P^n) predictor, matching the fs-weighted correction
+    const bool wg = Grid::collocated && (faceInterp_ == 6 || faceInterp_ == 7) && incr;
+    if constexpr (Grid::collocated) {
       if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         transposeGradWallAware(tgp_, CCConst(P_), CCConst(sdf_), CCConst(oax[c]), CCConst(xcs[c]),
                                faceInterp_ >= 3, c, e_, G);
+      } else if (wg) {
+        CCField oax[3] = {ox_, oy_, oz_};
+        centerGradOpen(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G);
       }
-    CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg is false there)
+    }
+    CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg/wg false there)
     // Mode-4 fully-FV momentum via DEFECT CORRECTION: solve M·u^{k+1} = M·u^k − rs·L_FV(u^k) + rs·b_FV
     // so the fixed point satisfies the second-order finite-volume balance L_FV·u* = b_FV exactly, with
     // the (stable, small-cell-safe) IBM matrix M only as preconditioner. fvM_ = M·u^k (stencilMatvec),
@@ -910,8 +923,13 @@ class Solver {
       if (wd) {
         stencilMatvec(fvM_, CCConst(C[c].u), MConst(C[c].AC), MConst(C[c].AW), MConst(C[c].AE),
                       MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB), MConst(C[c].AT), e_, G);
-        fvViscousApply(fvL_, CCConst(C[c].u), CCConst(sdf_), CCConst(cs_), CCConst(ox_),
-                       CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G);
+        // modes 5/6: TRUE-NORMAL embed wall drag (embedDirichletGradient); mode 4: axis-by-axis W_a g_a
+        if (faceInterp_ >= 5)
+          embedViscousApply(fvL_, CCConst(C[c].u), CCConst(sdf_), CCConst(cs_), CCConst(ox_),
+                            CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G);
+        else
+          fvViscousApply(fvL_, CCConst(C[c].u), CCConst(sdf_), CCConst(cs_), CCConst(ox_),
+                         CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G);
       }
     CCConst fvM = CCConst(fvM_), fvL = CCConst(fvL_), cs = CCConst(cs_);
     const double fvw = fvRelax_;  // local copy — a KOKKOS_LAMBDA must not read a member (device deref
@@ -936,7 +954,7 @@ class Solver {
           // grid (or the wall-aware transpose gradient, mode 2), one-sided face gradient (P at the
           // high cell of the staggered face) on the staggered grid.
           const double gp = !incr              ? 0.0
-                            : Grid::collocated ? (tg ? gpw(i)
+                            : Grid::collocated ? ((tg || wg) ? gpw(i)
                                                      : 0.5 * (P((long)i + strd) - P((long)i - strd)))
                                                : (P(i) - P((long)i - strd));
           if (wd) {  // FV defect-correction RHS  M·u − ω·rs·(L_FV·u − b_FV),  b_FV = idt·cs·u^n +
@@ -1419,10 +1437,10 @@ class Solver {
       // (closed walls are openness 0).
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);
-      if (faceInterp_ >= 1)  // wall-aware reconstruction at solid-bordering faces (setFaceInterp)
+      if ((faceInterp_ >= 1 && faceInterp_ <= 5) || faceInterp_ == 7)  // wall-aware flux map at solid
         centerToFaceWallAware(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u),
                               CCConst(sdf_), CCConst(xcx_), CCConst(xcy_), CCConst(xcz_),
-                              faceInterp_ >= 3, e_, G);
+                              faceInterp_ >= 3, e_, G);       // faces (modes 1-5,7; mode 6 = plain)
       else
         centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
       divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
@@ -1515,8 +1533,8 @@ class Solver {
           if (bc_[2 * a + 1] == 3)
             bcCorrectOutflow(fa[a], phi_, e, G, a);
       }
-      if (faceInterp_ >= 2) {  // modes 2/3: cell correction = the TRANSPOSE of the wall-aware map,
-                               // keeping (T, Tᵀ) an adjoint pair (see transposeGradWallAware)
+      if (faceInterp_ >= 2 && faceInterp_ <= 5) {  // modes 2-5: cell correction = the TRANSPOSE of the
+                               // wall-aware map, keeping (T, Tᵀ) an adjoint pair (transposeGradWallAware)
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         for (int cc = 0; cc < 3; ++cc) {
@@ -1524,6 +1542,10 @@ class Solver {
                                  CCConst(xcs[cc]), faceInterp_ >= 3, cc, e_, G);
           subtractField(C[cc].u, CCConst(tgp_), e_, G);
         }
+      } else if (faceInterp_ == 6 || faceInterp_ == 7) {  // embed: openness-WEIGHTED cell correction
+                                      // (full open-face pressure force at cut cells) — Basilisk centered_grad
+        projectCorrectCenterOpen(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
+                                 CCConst(oz_), e_, G);
       } else {
         projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
                              CCConst(oz_), e_, G);

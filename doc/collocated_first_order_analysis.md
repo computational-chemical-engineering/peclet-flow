@@ -399,6 +399,66 @@ increment on mode 0. Until it is done, **mode 0 remains the best of the collocat
 `Solver` (staggered) the production choice.** Mode 4 is kept (default off) as the validated FV
 machinery (cs, FV operator, defect correction) for that rebuild to reuse.
 
+## The Basilisk `embed.h` port: true-normal wall drag (modes 5/6/7, 2026-07-05)
+
+Following `doc/collocated_embed_port_plan.md`, the mode-4 axis-by-axis wall reconstruction was replaced
+with the Basilisk `embed.h` **true-normal image-point gradient** (`embedDirichletGradient` in
+`src/mac_approx_projection.hpp`): along the dominant-|n̂| axis, two image points 1/2 cells into the
+fluid, transverse bi-quadratic interpolation of the cell-centred values, a quadratic fit for the O(h²)
+wall-normal derivative, with a biased-linear `embed_interpolate` fallback anchored at the fluid home
+cell for the near-tangent band and a 1-point degenerate fallback for slivers.
+
+**Rung 0 (a-priori, `tests/study/fv_wallflux_apriori.py` variant C):** the true-normal reconstruction is
+clean O(h²) on the Stokes sphere wall drag (order 1.8→2.2, +2.24%→+0.065% at N=32→192), **20× more
+accurate than the axis-intercept** (variant A, O(h)) and with **0% truly degenerate** cells — the
+biased-linear fallback keeps every fragment reaching the fluid instead of collapsing to the zero
+solid-cell value.
+
+**Modes** (`setFaceInterp`, collocated only; staggered + modes 0–4 stay byte-identical, regression
+suite PASS): **5** = embed momentum (`embedViscousApply`) + the mode-3 wall-aware projection;
+**6** = embed momentum + the plain (mode-0) face map + an **openness-weighted cell correction**
+(`centerGradOpen`/`projectCorrectCenterOpen` = Basilisk `centered_gradient`: at a cut cell with one
+closed face it applies the *open*-face pressure gradient at **full** weight, not the plain
+`projectCorrectCenter` ½ — the O(h) under-correction that is analysis defect (b)); **7** = mode 6 with
+the wall-aware flux constraint restored.
+
+**Measured Z&H drag** (φ=0.125 sphere, robust steady protocol: incremental-rotational pressure — Chorin
+is inaccurate at steady state — `dt=400`+warm-start, run to |ΔK|<5e-5 over 200 steps; the warm-detector
+protocol fires on false plateaus and must not be used):
+
+| N | mode 0 | mode 5 | mode 6 | mode 7 |
+|---:|---:|---:|---:|---:|
+| 32 | +1.00% | +0.11% | −1.94% | −0.75% |
+| 48 | +0.69% | +0.68% | −0.95% | — |
+| 64 | +0.59% | +0.77% | −0.27% | +0.47% |
+| 96 | +0.40% | — | −0.29% | — |
+| 128 | +0.31% | — | −0.21% | — |
+| order | ~1.0 | plateaus | ~1.6 | crosses 0 |
+
+Findings, in order of importance:
+
+1. **The embed momentum is the right fix and it works** — the a-priori O(h²) wall gradient, wired as a
+   defect correction (`embedViscousApply`, `Lu += μ·area·dudn`, area = |o_{a−}−o_{a+}|), improves the drag
+   at every fixed N over the axis reconstruction.
+2. **The projection is the remaining lever, and plain vs wall-aware BRACKET the truth.** Mode 5
+   (wall-aware, mode-3) *over*-drags and plateaus (does not converge); mode 6 (plain + openness-weighted
+   correction) *under*-drags but converges from below at **order ~1.6, below mode 0 for N≥64**; mode 7
+   (wall-aware constraint + weighted correction) *over*-corrects and crosses zero. **Mode 6 is the
+   cleanest** and the recommended embed configuration, but the tail stalls near −0.2% (order ~1.6, not a
+   clean 2) — a residual constraint/pressure inconsistency the bracketing localises but does not close.
+3. **The flat-wall sliver is a MOMENTUM issue, not a projection one (Rung 4).** A grid-aligned channel
+   wall at a fractional position gives a thin fluid sliver (cs≈0.26 at N=32): the embed *momentum* under-
+   drags it, giving a +7% centreline error at N=32 (fine by N=48/64). This is unchanged between modes 6
+   and 7 because a unidirectional channel has no pressure gradient — the projection is inactive — so it is
+   pure sliver-momentum, the Basilisk small-cell (cs-limiting / 1-point fallback) territory not yet done.
+
+**Status:** the true-normal embed momentum (Rungs 0–2) is validated and the openness-weighted correction
+(Rung 3, defect (b)) is in; mode 6 realises them and beats mode 0 at practical resolution, but a clean
+p=2 still needs (a) the constraint-side reconstruction that neither plain nor wall-aware nails, and (b)
+Basilisk sliver handling (Rung 4). Modes 5/6/7 kept default-off; **mode 0 / `Solver` remain the
+production defaults.** Repro: `tests/study/collocated_zh_embed6.py` (mode 6 vs 0),
+`tests/study/collocated_zh_embed.py` (mode 5), `tests/study/embed_flatwall_guard.py` (sliver).
+
 ## Caveats (what is proven vs argued)
 
 - **Proven (measured):** flat-wall exactness on both grids; staggered second-order and
