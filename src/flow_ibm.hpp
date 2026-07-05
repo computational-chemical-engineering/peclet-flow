@@ -1988,6 +1988,12 @@ class Solver {
       chebBoundsSet_ = false;
     }
   }
+  // Reseed eps^n = eps^{n+1} so d(eps)/dt = 0 this step. Call after the FIRST void-fraction deposition
+  // (the "eps" field starts empty, so without this step 0 sees a spurious d(eps)/dt from 0 -> eps).
+  void syncPorousPrev() {
+    if (porous_)
+      Kokkos::deep_copy(epsPrev_, epsField_);
+  }
   // Enable/disable variable-coefficient momentum (variable viscosity). variable=true binds the "mu"
   // field (creating it, seeded with the current scalar mu, if absent) and forces the stencil solve
   // path. harmonic selects the harmonic face mean (continuous shear stress across a viscosity jump)

@@ -434,6 +434,9 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Return the max cut-cell velocity-flux divergence max|div(open*u)|. With porous "
            "continuity this is NOT ~0 -- it equals -d(eps)/dt (the bed expanding). Use "
            "max_porous_residual() for the continuity residual.")
+      .def("sync_porous_prev", &S::syncPorousPrev,
+           "Reseed eps^n = eps^{n+1} (d(eps)/dt=0 this step) — call once after the first void-fraction "
+           "deposition so step 0 has no spurious source.")
       .def("max_porous_residual", &S::maxPorousResidual,
            "Residual of the volume-averaged continuity max|div(open*eps*u) + d(eps)/dt| -- the "
            "quantity the porous projection drives to zero. 0 unless set_porous_continuity(True).")
