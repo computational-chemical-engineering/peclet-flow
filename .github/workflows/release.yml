@@ -69,7 +69,7 @@ jobs:
         run: |
           dnf -y install dnf-plugins-core
           dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
-          dnf -y install cuda-nvcc-${CUDA_PKG} cuda-cudart-devel-${CUDA_PKG} cuda-crt-${CUDA_PKG} cuda-nvml-devel-${CUDA_PKG}
+          dnf -y install cuda-nvcc-${CUDA_PKG} cuda-cudart-devel-${CUDA_PKG} cuda-crt-${CUDA_PKG} cuda-nvml-devel-${CUDA_PKG} cuda-driver-devel-${CUDA_PKG}
           echo "${CUDA_HOME}/bin" >> "$GITHUB_PATH"
 
       - name: Build Kokkos-CUDA prefix (static; embedded in the module)
