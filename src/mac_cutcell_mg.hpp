@@ -500,9 +500,21 @@ class CutcellMG {
           for (int d = 0; d < 6; ++d) {
             if (bc[d] == 0.0)
               continue;  // closed face (wall) -> no coupling
-            const int ngx = ((gx + band[d][0]) % gbx + gbx) % gbx;
-            const int ngy = ((gy + band[d][1]) % gby + gby) % gby;
-            const int ngz = ((gz + band[d][2]) % gbz + gbz) % gbz;
+            // A face crossing the domain boundary couples to the wrapped cell ONLY on a periodic
+            // axis (bc_ type 0). On a non-periodic axis an OPEN boundary face is the Dirichlet
+            // outflow anchor: its coefficient lives in the diagonal (already in AC) with NO
+            // off-diagonal partner — wrapping it would add a spurious top<->bottom coupling and
+            // (with the mean projection skipped) a wrong, possibly indefinite bottom matrix.
+            const int rx = gx + band[d][0], ry = gy + band[d][1], rz = gz + band[d][2];
+            const int axis = d / 2;
+            const bool crosses = (axis == 0 && (rx < 0 || rx >= gbx)) ||
+                                 (axis == 1 && (ry < 0 || ry >= gby)) ||
+                                 (axis == 2 && (rz < 0 || rz >= gbz));
+            if (crosses && bc_[d] != 0)
+              continue;  // non-periodic boundary face: Dirichlet anchor stays diagonal-only
+            const int ngx = (rx % gbx + gbx) % gbx;
+            const int ngy = (ry % gby + gby) % gby;
+            const int ngz = (rz % gbz + gbz) % gbz;
             lrow.push_back(gid);
             lcol.push_back(ngx + ngy * gbx + ngz * gbx * gby);
             lval.push_back(bc[d]);
@@ -603,11 +615,17 @@ class CutcellMG {
               z[(std::size_t)amgGlobalOfLocal_[c++]];
     Kokkos::deep_copy(lv.x, hx);
   }
-  // GraphAMG-preconditioned CG on the (singular, constant-null-space) global bottom operator. Mean is
-  // removed from rhs + iterate so the Poisson is consistent. Runs on rank 0 only.
+  // GraphAMG-preconditioned CG on the global bottom operator. For the periodic/all-Neumann case the
+  // operator is singular (constant null space) and the mean must be projected out of the rhs and the
+  // preconditioned residual (compatibility). With a Dirichlet outflow (removeMean_ == false) the
+  // operator is NON-singular and the projection must be SKIPPED — removing the constant from a
+  // non-singular system returns a wrong bottom correction and the V-cycle around it diverges.
+  // Runs on rank 0 only.
   void pcgAmg(std::vector<double>& b, std::vector<double>& x) {
     const std::size_t n = (std::size_t)amgGlobalN_;
     auto meanZero = [&](std::vector<double>& v) {
+      if (!removeMean_)
+        return;  // Dirichlet-anchored (outflow) operator: non-singular, no null space to project
       double m = 0;
       for (double e : v)
         m += e;

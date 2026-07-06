@@ -2127,12 +2127,9 @@ class Solver {
   void configurePorousDragSolver() {
     if (!(porous_ && hasDrag_))
       return;
-    // GraphAMG bottom only for periodic/IBM problems: on a DOMAIN-BC operator the agglomerated
-    // bottom solve diverges (the drag-weighted supplied coefficients + Dirichlet-outflow rows; a
-    // converged PCG around it goes NaN within one solve -- reproduced on the porous fixed bed,
-    // 2026-07-06). Until GraphAMG handles domain-BC coarse operators, BC problems keep the plain
-    // geometric coarse solve.
-    pressGraphAmg_ = !hasBc_;
+    pressGraphAmg_ = true;                 // GraphAMG bottom (domain-BC operators: buildAmg skips
+                                           // the wrap across non-periodic faces and pcgAmg keeps the
+                                           // mean only when the operator is singular)
     if (cutcellPressure_)                  // MG already built (set_solid ran) -> apply now
       mg_.setGraphAmgBottom(pressGraphAmg_);
     useChebyshev_ = false;                 // PCG, not Chebyshev (diverges on the high w_f ratio)
