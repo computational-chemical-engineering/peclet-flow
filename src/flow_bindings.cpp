@@ -434,6 +434,15 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Return the max cut-cell velocity-flux divergence max|div(open*u)|. With porous "
            "continuity this is NOT ~0 -- it equals -d(eps)/dt (the bed expanding). Use "
            "max_porous_residual() for the continuity residual.")
+      .def(
+          "set_pressure_underrelax", [](S& s, double w) { s.setPressureUnderRelax(w); }, nb::arg("omega"),
+          "Pressure under-relaxation factor omega_p in (0,1] for the incremental accumulation (MFIX "
+          "§10.1); 1.0 = off (default). <1 damps the incremental predictor overshoot on stiff porous+drag.")
+      .def(
+          "set_porous_deps_dt", [](S& s, bool on) { s.setPorousDepsDt(on); }, nb::arg("on"),
+          "Include (default True) or drop the d(eps)/dt source in the porous projection RHS. Drop it "
+          "to enforce div(eps u)=0 when the per-cell eps deposit's time-derivative is too jagged and "
+          "destabilizes the eps-weighted pressure solve.")
       .def("sync_porous_prev", &S::syncPorousPrev,
            "Reseed eps^n = eps^{n+1} (d(eps)/dt=0 this step) — call once after the first void-fraction "
            "deposition so step 0 has no spurious source.")

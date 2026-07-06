@@ -169,7 +169,12 @@ class Solver {
   // a mesh-agnostic algebraic multigrid on the operator gathered to rank 0 -- decomposition-agnostic,
   // so multilevel convergence works under a WEIGHTED ORB (where the geometric coarse levels can't
   // cleanly coarsen). Applied at the next set_solid / geometry rebuild.
-  void setPressureGraphAmg(bool on) { pressGraphAmg_ = on; }
+  void setPressureGraphAmg(bool on) {
+    pressGraphAmg_ = on;
+    if (cutcellPressure_)
+      mg_.setGraphAmgBottom(on);  // propagate live (previously only applied at the next set_solid,
+                                  // so toggling after geometry silently had no effect)
+  }
   void setPressureLevels(int levels) {
     nLevels_ = levels < 1 ? 1 : levels;
   }  // MG depth (CUDA default 4)
@@ -712,12 +717,14 @@ class Solver {
       CCExec space;
       C3 e = e_;  // local copy — capturing e_ in the KOKKOS_LAMBDA would read this-> on the device
       CCField d = div_, dd = depsdt_;
+      const bool useDt = porousDepsDt_;
       using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
       Kokkos::parallel_for(
           "peclet::flow::porous_resid", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long i = (long)x + (long)y * e.x + (long)z * e.x * e.y;
-            d(i) += dd(i);
+            if (useDt)
+              d(i) += dd(i);  // residual of the SAME constraint the projection solved
           });
     }
     double m = reduceMaxAbsInner(CCConst(div_));
@@ -754,9 +761,16 @@ class Solver {
   // Domain-BC momentum solved via the Robust-Scaled cut-cell / FOU stencil smoother (ibmRbgsStencilColor
   // + reflection-ghost BCs), not the all-fluid const-coeff fold. Needed when (a) an immersed solid is
   // present (cut-cell no-slip must be in the operator), or (b) advection is implicit (the FOU upwind
-  // lives in the stencil -> stable at large dt, the fully-implicit design).
+  // lives in the stencil -> stable at large dt, the fully-implicit design), or (c) any per-cell
+  // coefficient lives in the stencil: variable properties, or the implicit CFD-DEM drag diagonal
+  // (hasDrag_). Without (c) an all-fluid domain-BC problem fell through to the CONST-COEFFICIENT
+  // fold smoother (Ac = rho/dt + 6mu computed inline), which never reads the assembled band -- the
+  // drag never entered the momentum operator while the porous projection's w_f=idt/(idt+beta_f)
+  // assumed it did, an inconsistency with pressure-loop gain beta*dt/rho (a fixed bed diverged
+  // whenever beta > rho/dt; measured gain 3.84 vs predicted 3.85 at beta=77, idt=20).
   bool bcStencilPath() const {
-    return hasBc_ && !useVelocityMg_ && (hasSolid_ || implicitAdv() || varProps_ || varRho_);
+    return hasBc_ && !useVelocityMg_ &&
+           (hasSolid_ || implicitAdv() || varProps_ || varRho_ || hasDrag_);
   }
   // Fill a property field's ghosts for the face means: periodic/halo base, then zero-gradient
   // (copy) on domain-BC (wall/inflow/outflow) faces — a periodic wrap there would bring the wrong
@@ -1508,13 +1522,15 @@ class Solver {
       C3 e = e_;  // local copy — a KOKKOS_LAMBDA capturing e_ would read this-> on the device
       CCField d = div_, dd = depsdt_, ep = epsField_, epp = epsPrev_;
       const double idt = 1.0 / dt_;
+      const bool useDt = porousDepsDt_;
       using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
       Kokkos::parallel_for(
           "peclet::flow::deps_dt", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long i = (long)x + (long)y * e.x + (long)z * e.x * e.y;
             dd(i) = (ep(i) - epp(i)) * idt;
-            d(i) += dd(i);
+            if (useDt)
+              d(i) += dd(i);  // off -> solve div(eps u)=0 (drop the noisy time-derivative source)
           });
     }
     // bridge -div(u*) (g=2 block) -> the MG rhs (g=1 block); keep div(u*) in div_ for the pressure
@@ -1665,7 +1681,11 @@ class Solver {
     if (incremental_) {
       CCExec space;
       CCField P = P_, ph = phi_, d = div_;
-      const double ct = rho_ / dt_, mu = mu_;
+      // Pressure under-relaxation (MFIX §10.1): accumulate only omega_p of the increment into the
+      // physical pressure P (the velocity correction still uses the full phi to satisfy continuity),
+      // so the next step's incremental predictor -grad(P^n) can't overshoot for a stiff drag diagonal.
+      // omega_p=1 (default) is the current behaviour; <1 only stabilizes the porous+drag path.
+      const double ct = pressUnderRelax_ * rho_ / dt_, mu = mu_;
       if (varProps_) {
         // Variable viscosity: the pointwise Timmermans term -mu(i)*div(u*) is inconsistent for
         // heterogeneous mu (see setVariableRotational). Default = constant coefficient chi*mu_min
@@ -2013,6 +2033,12 @@ class Solver {
     if (porous_)
       Kokkos::deep_copy(epsPrev_, epsField_);
   }
+  // Include (default) or drop the d(eps)/dt source in the porous projection RHS. Dropping it enforces
+  // div(eps u)=0 — useful when eps is a bare per-cell particle deposit whose time-derivative is too
+  // jagged and drives the eps-weighted pressure solve unstable.
+  void setPorousDepsDt(bool on) { porousDepsDt_ = on; }
+  // Pressure under-relaxation factor omega_p in (0,1] (MFIX-style); 1.0 = off (default).
+  void setPressureUnderRelax(double w) { pressUnderRelax_ = w; }
   // Enable/disable variable-coefficient momentum (variable viscosity). variable=true binds the "mu"
   // field (creating it, seeded with the current scalar mu, if absent) and forces the stencil solve
   // path. harmonic selects the harmonic face mean (continuous shear stress across a viscosity jump)
@@ -2101,9 +2127,14 @@ class Solver {
   void configurePorousDragSolver() {
     if (!(porous_ && hasDrag_))
       return;
-    pressGraphAmg_ = true;                 // a later set_solid applies it via setGraphAmgBottom
+    // GraphAMG bottom only for periodic/IBM problems: on a DOMAIN-BC operator the agglomerated
+    // bottom solve diverges (the drag-weighted supplied coefficients + Dirichlet-outflow rows; a
+    // converged PCG around it goes NaN within one solve -- reproduced on the porous fixed bed,
+    // 2026-07-06). Until GraphAMG handles domain-BC coarse operators, BC problems keep the plain
+    // geometric coarse solve.
+    pressGraphAmg_ = !hasBc_;
     if (cutcellPressure_)                  // MG already built (set_solid ran) -> apply now
-      mg_.setGraphAmgBottom(true);
+      mg_.setGraphAmgBottom(pressGraphAmg_);
     useChebyshev_ = false;                 // PCG, not Chebyshev (diverges on the high w_f ratio)
     chebBoundsSet_ = false;
   }
@@ -2115,12 +2146,24 @@ class Solver {
     C3 e = e_;
     FV AC = C[c].AC;
     CCConst beta = CCConst(dragBeta_);
+    const long sc = strideOf(c);
+    // Porous continuity: the projection's operator/correction carry the FACE drag relaxation
+    // w_f = idt/(idt + beta_f), beta_f = 1/2(beta(i)+beta(i-sc)) (buildPorousCoeffDrag /
+    // projectCorrectPorousDrag). The staggered momentum diagonal of u_c(i) — the face between cells
+    // i-sc and i — must carry the SAME beta_f: then a pressure perturbation deltaP produces
+    // du* = -grad(deltaP)/(idt+beta_f) and the projection returns phi = -deltaP/idt exactly (same
+    // operator), so the incremental predictor cancels pressure errors in one step. With the cell
+    // value beta(i) the loop has gain (idt+beta_f)/(idt+beta_cell) at a beta jump (bed top: ~3) and
+    // the accumulated pressure diverges exponentially. Non-porous (incompressible drag, w==1 path)
+    // keeps the validated cell-beta form.
+    const bool faceAvg = porous_;
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
         "peclet::flow::add_drag_diag", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          AC(i) = (float)((double)AC(i) + beta(i));
+          const double bd = faceAvg ? 0.5 * ((double)beta(i) + (double)beta(i - sc)) : (double)beta(i);
+          AC(i) = (float)((double)AC(i) + bd);
         });
   }
 
@@ -2298,6 +2341,11 @@ class Solver {
   CCField rhoField_;                  // per-cell density (when varRho_); rho_ is the reference rho0
   CCField rho1_, cx1_, cy1_, cz1_;    // g=1 MG-block density bridge + projection face coefficients
   bool porous_ = false;               // volume-averaged continuity d(eps)/dt+div(eps u)=0 (CFD-DEM)
+  double pressUnderRelax_ = 1.0;      // omega_p for the incremental pressure accumulation (1.0 = off)
+  bool porousDepsDt_ = true;          // include the d(eps)/dt source in the projection RHS. Off ->
+                                      // enforce div(eps u)=0 (drop the term, which is jagged/noisy
+                                      // because eps is a bare per-cell particle deposit; the noisy
+                                      // source can drive the eps-weighted pressure solve unstable).
   CCField epsField_, epsPrev_, eps1_, depsdt_;  // eps^{n+1}, eps^n, g=1 bridge, stored d(eps)/dt
   CCField beta1_;                     // g=1 bridge of the drag coeff (semi-implicit-drag pressure)
   bool hasDrag_ = false;              // implicit linear drag (CFD-DEM): beta on the momentum diagonal
