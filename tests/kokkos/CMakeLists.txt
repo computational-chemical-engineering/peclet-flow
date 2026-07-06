@@ -14,6 +14,12 @@ endif()
 find_package(Kokkos CONFIG REQUIRED)
 message(STATUS "cfd/kokkos: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES})")
 
+# core headers (field registry / GraphAMG bottom / halo types included by the solver headers):
+# the sibling checkout in the suite, or FetchContent at the release pin on a standalone CI checkout.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake")
+include(PecletDeps)
+peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../../../core" CORE_INC)
+
 enable_testing()
 add_executable(test_reductions test_reductions.cpp)
 target_include_directories(test_reductions PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
@@ -23,35 +29,35 @@ add_test(NAME reductions COMMAND test_reductions)
 # Named field registry on the Solver (includes flow_ibm.hpp -> needs the core headers).
 add_executable(test_field_registry test_field_registry.cpp)
 target_include_directories(test_field_registry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CMAKE_CURRENT_SOURCE_DIR}/../../../core/include)
+                           ${CORE_INC})
 target_link_libraries(test_field_registry PRIVATE Kokkos::kokkos)
 add_test(NAME field_registry COMMAND test_field_registry)
 
 # Scalar transport (advection-diffusion): 2nd-order diffusion operator + advection conservation.
 add_executable(test_scalar_transport test_scalar_transport.cpp)
 target_include_directories(test_scalar_transport PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CMAKE_CURRENT_SOURCE_DIR}/../../../core/include)
+                           ${CORE_INC})
 target_link_libraries(test_scalar_transport PRIVATE Kokkos::kokkos)
 add_test(NAME scalar_transport COMMAND test_scalar_transport)
 
 # Property closures + per-cell body force (LinearMix / Boussinesq / Arrhenius vs host oracle).
 add_executable(test_closures test_closures.cpp)
 target_include_directories(test_closures PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CMAKE_CURRENT_SOURCE_DIR}/../../../core/include)
+                           ${CORE_INC})
 target_link_libraries(test_closures PRIVATE Kokkos::kokkos)
 add_test(NAME closures COMMAND test_closures)
 
 # Variable-viscosity diffusion stencil (ibmBuildDiffusionVar + FaceProps means vs oracle).
 add_executable(test_variable_mu test_variable_mu.cpp)
 target_include_directories(test_variable_mu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CMAKE_CURRENT_SOURCE_DIR}/../../../core/include)
+                           ${CORE_INC})
 target_link_libraries(test_variable_mu PRIVATE Kokkos::kokkos)
 add_test(NAME variable_mu COMMAND test_variable_mu)
 
 # Variable-density projection: hydrostatic acid test (ratio 3 + 1e3) + uniform-rho reduction.
 add_executable(test_vardensity_projection test_vardensity_projection.cpp)
 target_include_directories(test_vardensity_projection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CMAKE_CURRENT_SOURCE_DIR}/../../../core/include)
+                           ${CORE_INC})
 target_link_libraries(test_vardensity_projection PRIVATE Kokkos::kokkos)
 add_test(NAME vardensity_projection COMMAND test_vardensity_projection)
 
