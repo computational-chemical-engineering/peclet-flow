@@ -130,3 +130,6 @@ jobs:
       # Uploads both peclet-flow (sdist + CPU wheels) and peclet-flow-cu13 (CUDA wheels); PyPI routes each
       # file by its metadata name. Both projects must have this workflow registered as a trusted publisher.
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true   # completing a partial upload (e.g. adding the cu13 files) must not
+                                # fail on the already-published peclet-flow files
