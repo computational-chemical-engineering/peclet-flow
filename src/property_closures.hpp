@@ -1,11 +1,13 @@
 /// @file
-/// @brief flow — device property closures: material properties / body forces as functions of fields.
+/// @brief flow — device property closures: material properties / body forces as functions of
+/// fields.
 ///
-/// A closure writes one target cell field (a material property like rho/mu, or a momentum body-force
-/// component) as a pointwise function of one or two input fields (a transported scalar, pressure, a
-/// phase fraction). Dispatch is a host-side enum switch launching ONE dedicated Kokkos kernel per
-/// closure kind — no per-cell Python, no device virtual dispatch. The Solver applies its closure list
-/// in registration order at the top of step() (properties frozen over the step; segregated coupling).
+/// A closure writes one target cell field (a material property like rho/mu, or a momentum
+/// body-force component) as a pointwise function of one or two input fields (a transported scalar,
+/// pressure, a phase fraction). Dispatch is a host-side enum switch launching ONE dedicated Kokkos
+/// kernel per closure kind — no per-cell Python, no device virtual dispatch. The Solver applies its
+/// closure list in registration order at the top of step() (properties frozen over the step;
+/// segregated coupling).
 ///
 /// This is the seam for field–field coupling: Boussinesq buoyancy (force from temperature),
 /// temperature-dependent viscosity (Arrhenius), composition-dependent density (linear mixture), and
@@ -13,8 +15,8 @@
 #ifndef PECLET_FLOW_PROPERTY_CLOSURES_HPP
 #define PECLET_FLOW_PROPERTY_CLOSURES_HPP
 
-#include <Kokkos_Core.hpp>
 #include <array>
+#include <Kokkos_Core.hpp>
 
 #include "mac_cutcell.hpp"
 

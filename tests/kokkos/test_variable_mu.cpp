@@ -1,9 +1,9 @@
 // Variable-viscosity diffusion stencil (ibmBuildDiffusionVar). Verifies the assembled 7-band
 // operator against a host oracle for UniformFaceProps (constant equivalence) and FieldFaceProps
 // with arithmetic and harmonic face means at a viscosity jump.
-#include <Kokkos_Core.hpp>
 #include <cmath>
 #include <cstdio>
+#include <Kokkos_Core.hpp>
 #include <vector>
 
 #include "cut_cell_ibm.hpp"
@@ -66,7 +66,8 @@ void run() {
   CHECK(std::fabs(at(AW, i4) - (-harm)) < 1e-6);
   // +x face of cell 4 is within the mu=0.1 layer: beta = 0.1 (both means agree)
   CHECK(std::fabs(at(AE, i4) - (float)(-0.1)) < 1e-6);
-  std::printf("variable-mu bands: uniform + arithmetic(-0.55) + harmonic(%.4f) vs oracle OK\n", harm);
+  std::printf("variable-mu bands: uniform + arithmetic(-0.55) + harmonic(%.4f) vs oracle OK\n",
+              harm);
 }
 }  // namespace
 

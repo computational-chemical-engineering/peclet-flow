@@ -25,6 +25,7 @@
 #include <memory>
 #include <vector>
 
+#include "face_props.hpp"
 #include "grid_layout.hpp"
 #include "mac_approx_projection.hpp"
 #include "mac_cutcell_mg.hpp"
@@ -32,7 +33,6 @@
 #include "mac_pressure.hpp"
 #include "mac_stencils.hpp"
 #include "mac_velocity_mg.hpp"
-#include "face_props.hpp"
 #include "peclet/core/field/field_set.hpp"
 #include "property_closures.hpp"
 #include "scalar_transport.hpp"
@@ -113,7 +113,7 @@ class Solver {
       uf_ = CCField("uf", n_);
       vf_ = CCField("vf", n_);
       wf_ = CCField("wf", n_);
-      tgp_ = CCField("tgp", n_);  // scratch: wall-aware transpose gradient (setFaceInterp(2/3))
+      tgp_ = CCField("tgp", n_);    // scratch: wall-aware transpose gradient (setFaceInterp(2/3))
       wdef_ = CCField("wdef", n_);  // scratch: FV wall viscous-flux defect (setFaceInterp(4))
       fvM_ = CCField("fvM", n_);    // scratch: M·u^k (mode-4 defect matvec)
       fvL_ = CCField("fvL", n_);    // scratch: L_FV(u^k) (mode-4 FV operator apply)
@@ -124,8 +124,8 @@ class Solver {
     }
     // Register the pre-existing solver fields in the named directory so the multiphysics machinery
     // (scalar transport, property closures) and load-balance redistribution can enumerate the whole
-    // set uniformly. adopt() aliases the members (no reallocation, no ownership); all live on the G=2
-    // velocity block and share velHalo_ under MPI.
+    // set uniformly. adopt() aliases the members (no reallocation, no ownership); all live on the
+    // G=2 velocity block and share velHalo_ under MPI.
     fields_.adopt("u", C[0].u, G, peclet::core::Centering::FaceX);
     fields_.adopt("v", C[1].u, G, peclet::core::Centering::FaceY);
     fields_.adopt("w", C[2].u, G, peclet::core::Centering::FaceZ);
@@ -165,10 +165,11 @@ class Solver {
     vmgLevels_ = levels < 1 ? 1 : levels;
     vmgVcycles_ = vcycles < 1 ? 1 : vcycles;
   }
-  // Enable the agglomerated GraphAMG bottom solve in the pressure MG: the coarsest level is solved by
-  // a mesh-agnostic algebraic multigrid on the operator gathered to rank 0 -- decomposition-agnostic,
-  // so multilevel convergence works under a WEIGHTED ORB (where the geometric coarse levels can't
-  // cleanly coarsen). Applied at the next set_solid / geometry rebuild.
+  // Enable the agglomerated GraphAMG bottom solve in the pressure MG: the coarsest level is solved
+  // by a mesh-agnostic algebraic multigrid on the operator gathered to rank 0 --
+  // decomposition-agnostic, so multilevel convergence works under a WEIGHTED ORB (where the
+  // geometric coarse levels can't cleanly coarsen). Applied at the next set_solid / geometry
+  // rebuild.
   void setPressureGraphAmg(bool on) {
     pressGraphAmg_ = on;
     if (cutcellPressure_)
@@ -183,8 +184,9 @@ class Solver {
   void setBackflowStab(double beta) { backflowBeta_ = beta < 0.0 ? 0.0 : beta; }
   // Deferred-correction advection: on (default) = implicit FOU operator + explicit (HO - FOU)
   // high-order correction (2nd order; HO = SOU by default, or Koren TVD via set_advection_scheme).
-  // off = pure implicit FOU (1st order, more dissipative, unconditionally stable) -- useful for very
-  // sharp shear layers where the (unlimited SOU) explicit correction overshoots and destabilizes.
+  // off = pure implicit FOU (1st order, more dissipative, unconditionally stable) -- useful for
+  // very sharp shear layers where the (unlimited SOU) explicit correction overshoots and
+  // destabilizes.
   void setDeferredCorrection(bool on) { deferredCorr_ = on; }
   // Chebyshev pressure driver (CUDA set_pressure_chebyshev): communication-light alternative to
   // MG-PCG -- Chebyshev semi-iteration preconditioned by one symmetric V-cycle, no per-iteration
@@ -219,21 +221,26 @@ class Solver {
   //       drag at curved walls);
   //   1 = wall-aware cell->face map only (ablation: breaks the adjoint pairing — WORSE, don't use);
   //   2 = wall-aware map + its TRANSPOSE as the predictor -grad(P) and the cell correction
-  //       (consistent pair, but face-CENTER point values under-count the open-area flux — ablation);
+  //       (consistent pair, but face-CENTER point values under-count the open-area flux —
+  //       ablation);
   //   3 = mode 2 evaluated at the OPEN-FACE-CENTROID wall distance (static geometry from
-  //       buildFaceCentroidDist) — the flux-consistent constraint quadrature (stable, but the momentum
-  //       row is still the O(h) axis-by-axis IBM: FV constraint vs FD momentum are inconsistent);
-  //   4 = FULLY-FV: mode-3 projection PLUS the second-order wall viscous-flux deferred correction on
-  //       the momentum (fvViscousApply: μ Σ_a W_a·centroid wall drag via defect correction, W_a from the
-  //       divergence-theorem fragment normal o_{a−}−o_{a+}, centroid gradient at the SDF foot point).
-  //       Momentum and constraint now share the same finite-volume cut-cell geometry → targets O(h²).
+  //       buildFaceCentroidDist) — the flux-consistent constraint quadrature (stable, but the
+  //       momentum row is still the O(h) axis-by-axis IBM: FV constraint vs FD momentum are
+  //       inconsistent);
+  //   4 = FULLY-FV: mode-3 projection PLUS the second-order wall viscous-flux deferred correction
+  //   on
+  //       the momentum (fvViscousApply: μ Σ_a W_a·centroid wall drag via defect correction, W_a
+  //       from the divergence-theorem fragment normal o_{a−}−o_{a+}, centroid gradient at the SDF
+  //       foot point). Momentum and constraint now share the same finite-volume cut-cell geometry →
+  //       targets O(h²).
   //   5 = EMBED (Basilisk embed.h): like mode 4 but the momentum wall drag is the TRUE-NORMAL
-  //       image-point gradient embedDirichletGradient (μ·area·d(U)/dn along n̂, O(h²) a-priori) rather
-  //       than the axis-by-axis W_a g_a — the reconstruction the mode-4 arc found the O(h) ceiling in.
-  //       Keeps the mode-3 (wall-aware, o-adjoint) projection.
+  //       image-point gradient embedDirichletGradient (μ·area·d(U)/dn along n̂, O(h²) a-priori)
+  //       rather than the axis-by-axis W_a g_a — the reconstruction the mode-4 arc found the O(h)
+  //       ceiling in. Keeps the mode-3 (wall-aware, o-adjoint) projection.
   //   6 = EMBED momentum + PLAIN (mode-0) projection: the Basilisk pairing — embed viscous no-slip
-  //       with the ½/½ face average, fs-weighted cut-cell Poisson, and central-difference correction
-  //       (the mode-1/2/3 wall-aware projection was measured WORSE than plain; embed drives momentum).
+  //       with the ½/½ face average, fs-weighted cut-cell Poisson, and central-difference
+  //       correction (the mode-1/2/3 wall-aware projection was measured WORSE than plain; embed
+  //       drives momentum).
   void setFaceInterp(int mode) { faceInterp_ = mode; }
   // Under-relaxation of the mode-4 FV wall-flux defect correction (1 = full; <1 damps the stiff
   // explicit-lagged wall term). The steady state is independent of this value.
@@ -284,9 +291,9 @@ class Solver {
     initMpi(dec, comm);
   }
   // Shared-decomposition overload: wire the g=2 velocity-block halo from an EXTERNALLY-built ORB
-  // (so flow and dem share one BlockDecomposer for coupled runs, and redistribute() can re-init onto
-  // a re-decomposed partition). The local block size must already match dec.block(rank).size (set via
-  // the constructor / allocateBlock).
+  // (so flow and dem share one BlockDecomposer for coupled runs, and redistribute() can re-init
+  // onto a re-decomposed partition). The local block size must already match dec.block(rank).size
+  // (set via the constructor / allocateBlock).
   void initMpi(const peclet::core::decomp::BlockDecomposer<3>& dec, MPI_Comm comm) {
     distributed_ = true;
     comm_ = comm;
@@ -301,17 +308,18 @@ class Solver {
     velHalo_->buildTopology(dec, rank, G, per, comm);
     velDev_ = std::make_shared<GridHalo<double>>();
     velDev_->init(*velHalo_);
-    dec_ = std::make_shared<peclet::core::decomp::BlockDecomposer<3>>(dec);  // remember the partition
+    dec_ =
+        std::make_shared<peclet::core::decomp::BlockDecomposer<3>>(dec);  // remember the partition
     const auto oig = velHalo_->indexer().originInclGhost();
     og_ = {(int)oig[0] + G, (int)oig[1] + G,
            (int)oig[2] + G};  // block inner origin -> global parity
   }
   // Redistribute the solver's state onto a NEW decomposition (dynamic load balancing). Enumerates
   // the registered fields, moves them from the current block layout to the new one (bit-exact via
-  // redistributeGridFields), reallocates every buffer to the new block, re-inits the halo + pressure
-  // MG on the new partition, and rebuilds all geometry-derived state (openness / IBM overlay /
-  // stencils) from the migrated SDF. Velocity + pressure + SDF (+ any registered scalar/property
-  // fields) survive; per-step scratch is rebuilt.
+  // redistributeGridFields), reallocates every buffer to the new block, re-inits the halo +
+  // pressure MG on the new partition, and rebuilds all geometry-derived state (openness / IBM
+  // overlay / stencils) from the migrated SDF. Velocity + pressure + SDF (+ any registered
+  // scalar/property fields) survive; per-step scratch is rebuilt.
   void redistribute(const peclet::core::decomp::BlockDecomposer<3>& newDec) {
     if (!distributed_ || !dec_)
       return;
@@ -365,15 +373,15 @@ class Solver {
   }
   // Redistribute onto the weighted ORB of per-cell weights `w` (global x-fastest, gnx*gny*gnz). The
   // ergonomic Python entry point for load balancing: the caller passes a weight field (e.g. fluid
-  // work + gamma*particle_count) and both flow and dem rebuild the SAME deterministic partition from
-  // it. No BlockDecomposer object crosses the language boundary.
+  // work + gamma*particle_count) and both flow and dem rebuild the SAME deterministic partition
+  // from it. No BlockDecomposer object crosses the language boundary.
   void rebalanceByWeights(const std::vector<peclet::core::Real>& w) {
     if (!distributed_)
       return;
     int size = 1;
     MPI_Comm_size(comm_, &size);
-    peclet::core::decomp::BlockDecomposer<3> newDec(
-        (std::size_t)size, peclet::core::IVec<3>{gnx_, gny_, gnz_}, w);
+    peclet::core::decomp::BlockDecomposer<3> newDec((std::size_t)size,
+                                                    peclet::core::IVec<3>{gnx_, gny_, gnz_}, w);
     redistribute(newDec);
   }
 #endif
@@ -426,8 +434,10 @@ class Solver {
   // flow).
   void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure) {
     cutcellPressure_ = cutcellPressure;
-    hasSolid_ = false;  // does the geometry actually contain solid? (all-fluid set_pressure_geometry
-    for (double v : sdfInner)  // passes sd>0 everywhere -> stays false, keeping the channel/BFS path)
+    hasSolid_ =
+        false;  // does the geometry actually contain solid? (all-fluid set_pressure_geometry
+    for (double v :
+         sdfInner)  // passes sd>0 everywhere -> stays false, keeping the channel/BFS path)
       if (v < 0.0) {
         hasSolid_ = true;
         break;
@@ -508,10 +518,12 @@ class Solver {
       if constexpr (Grid::collocated) {  // static open-centroid wall distances (setFaceInterp(3))
         buildFaceCentroidDist(xcx_, xcy_, xcz_, CCConst(sdf_), e_);
         buildCellFraction(cs_, CCConst(sdf_), e_, G);  // cell fluid fraction (setFaceInterp(4))
-        if (faceInterp_ >= 5) {  // EMBED: a solid-CENTRED cut cell (cs>0) is partially fluid and holds
+        if (faceInterp_ >=
+            5) {  // EMBED: a solid-CENTRED cut cell (cs>0) is partially fluid and holds
           // its reconstructed near-wall velocity — masking it to 0 (the sdf<0 IBM mask) drops the
           // near-wall closure and shifts the whole channel. Re-mask from cs: pin ONLY fully-solid
-          // cells (cs≈0), keeping every partial-fluid cut cell live in the embed solve + projection.
+          // cells (cs≈0), keeping every partial-fluid cut cell live in the embed solve +
+          // projection.
           CCConst cs = CCConst(cs_);
           const std::size_t nn = n_;
           for (int c = 0; c < 3; ++c) {
@@ -549,7 +561,8 @@ class Solver {
       copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
       copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
 #ifdef PECLET_FLOW_MPI
-      if (distributed_)  // share the level-0 decomposition so the MG block matches this rank's block
+      if (distributed_)  // share the level-0 decomposition so the MG block matches this rank's
+                         // block
         mg_.initMpi(gnx_, gny_, gnz_, nLevels_, comm_, dec_.get());
       else
 #endif
@@ -568,9 +581,9 @@ class Solver {
     // Multiphysics: refresh material properties / body forces from the current fields (frozen over
     // the step). No-op (byte-identical) when no closure is registered.
     updateProperties();
-    // Variable properties / implicit drag: rebuild the diffusion stencil from the current mu/rho and
-    // drag_beta fields (the implicit-FOU path rebuilds it per Picard in buildAdvStencil*, so only the
-    // non-advective path needs this).
+    // Variable properties / implicit drag: rebuild the diffusion stencil from the current mu/rho
+    // and drag_beta fields (the implicit-FOU path rebuilds it per Picard in buildAdvStencil*, so
+    // only the non-advective path needs this).
     if ((varProps_ || varRho_ || hasDrag_) && !implicitAdv())
       rebuildStencils();
     // u^n time base, fixed for the whole step (Picard lags the advecting velocity at u^k, not the
@@ -590,19 +603,21 @@ class Solver {
           Kokkos::deep_copy(prev_[c], C[c].u);
       if (advect_ || hasBc_ || (Grid::collocated && faceInterp_ >= 4))
         for (int c = 0; c < 3; ++c)
-          fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect / mode-4 FV defect matvec
+          fillVelGhosts(c,
+                        0);  // explicit ghosts (periodic + BC) for advect / mode-4 FV defect matvec
       for (int c = 0; c < 3; ++c)  // RHS from u^n base + advection lagged at u^k
         varRho_ ? buildRhsVar(c) : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c));
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
-      // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies to
-      // the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC stencil path
-      // (inflow/outflow) -- implicitAdv() -> fully-implicit upwind advection (stable at large dt). The
-      // velocity-MG BC path keeps its own FOU coarse operator.
+      // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies
+      // to the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC
+      // stencil path (inflow/outflow) -- implicitAdv() -> fully-implicit upwind advection (stable
+      // at large dt). The velocity-MG BC path keeps its own FOU coarse operator.
       if (implicitAdv() && (!hasBc_ || !useVelocityMg_))
         for (int c = 0; c < 3; ++c)
           (varProps_ || varRho_) ? buildAdvStencilVar(c) : buildAdvStencil(c);
-      // Outflow backflow stabilization: dissipate reverse flow at the outlet in the momentum operator
-      // used by the domain-BC stencil smoother (prevents backflow divergence). Inert without reversal.
+      // Outflow backflow stabilization: dissipate reverse flow at the outlet in the momentum
+      // operator used by the domain-BC stencil smoother (prevents backflow divergence). Inert
+      // without reversal.
       if (bcStencilPath() && backflowBeta_ > 0.0 && hasOutflow_)
         for (int c = 0; c < 3; ++c)
           applyBackflowStab(c);
@@ -704,8 +719,8 @@ class Solver {
     return m;
   }
   // Residual of the volume-averaged continuity, max|div(open*eps*u) + d(eps)/dt| — the quantity the
-  // porous projection actually drives to zero (NOT the velocity divergence, which is -d(eps)/dt != 0
-  // in a fluidizing bed). Meaningful only with set_porous_continuity(True); returns 0 otherwise.
+  // porous projection actually drives to zero (NOT the velocity divergence, which is -d(eps)/dt !=
+  // 0 in a fluidizing bed). Meaningful only with set_porous_continuity(True); returns 0 otherwise.
   double maxPorousResidual() {
     if (!porous_ || !cutcellPressure_)
       return 0.0;
@@ -755,19 +770,21 @@ class Solver {
  public:  // nvcc forbids extended __host__ __device__ lambdas inside private/protected members.
   // Advection treated implicitly (implicit-FOU upwind + deferred correction): the user opt-in
   // (set_implicit_advection) on any path, OR the DEFAULT on the domain-BC path (inflow/outflow),
-  // where explicit advection is unstable. The velocity-MG BC path carries its own FOU coarse operator,
-  // so the default does not apply there (it still honours the explicit opt-in).
+  // where explicit advection is unstable. The velocity-MG BC path carries its own FOU coarse
+  // operator, so the default does not apply there (it still honours the explicit opt-in).
   bool implicitAdv() const { return advect_ && (implicitFou_ || (hasBc_ && !useVelocityMg_)); }
-  // Domain-BC momentum solved via the Robust-Scaled cut-cell / FOU stencil smoother (ibmRbgsStencilColor
-  // + reflection-ghost BCs), not the all-fluid const-coeff fold. Needed when (a) an immersed solid is
-  // present (cut-cell no-slip must be in the operator), or (b) advection is implicit (the FOU upwind
-  // lives in the stencil -> stable at large dt, the fully-implicit design), or (c) any per-cell
-  // coefficient lives in the stencil: variable properties, or the implicit CFD-DEM drag diagonal
-  // (hasDrag_). Without (c) an all-fluid domain-BC problem fell through to the CONST-COEFFICIENT
-  // fold smoother (Ac = rho/dt + 6mu computed inline), which never reads the assembled band -- the
-  // drag never entered the momentum operator while the porous projection's w_f=idt/(idt+beta_f)
-  // assumed it did, an inconsistency with pressure-loop gain beta*dt/rho (a fixed bed diverged
-  // whenever beta > rho/dt; measured gain 3.84 vs predicted 3.85 at beta=77, idt=20).
+  // Domain-BC momentum solved via the Robust-Scaled cut-cell / FOU stencil smoother
+  // (ibmRbgsStencilColor
+  // + reflection-ghost BCs), not the all-fluid const-coeff fold. Needed when (a) an immersed solid
+  // is present (cut-cell no-slip must be in the operator), or (b) advection is implicit (the FOU
+  // upwind lives in the stencil -> stable at large dt, the fully-implicit design), or (c) any
+  // per-cell coefficient lives in the stencil: variable properties, or the implicit CFD-DEM drag
+  // diagonal (hasDrag_). Without (c) an all-fluid domain-BC problem fell through to the
+  // CONST-COEFFICIENT fold smoother (Ac = rho/dt + 6mu computed inline), which never reads the
+  // assembled band -- the drag never entered the momentum operator while the porous projection's
+  // w_f=idt/(idt+beta_f) assumed it did, an inconsistency with pressure-loop gain beta*dt/rho (a
+  // fixed bed diverged whenever beta > rho/dt; measured gain 3.84 vs predicted 3.85 at beta=77,
+  // idt=20).
   bool bcStencilPath() const {
     return hasBc_ && !useVelocityMg_ &&
            (hasSolid_ || implicitAdv() || varProps_ || varRho_ || hasDrag_);
@@ -854,8 +871,8 @@ class Solver {
         Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {de.x, de.y, de.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long di = (long)x + (long)y * de.x + (long)z * (long)de.x * de.y;
-          const long si = (long)(x + off) + (long)(y + off) * se.x +
-                          (long)(z + off) * (long)se.x * se.y;
+          const long si =
+              (long)(x + off) + (long)(y + off) * se.x + (long)(z + off) * (long)se.x * se.y;
           dst(di) = src(si);
         });
   }
@@ -939,19 +956,20 @@ class Solver {
     CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u), uu = CCConst(C[c].u),
             un = CCConst(old_[c]);
     const long strd = (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y;
-    // Pure implicit FOU (no deferred correction): 1st-order upwind carried entirely by the operator,
-    // no explicit high-order term in the RHS -- maximally dissipative/stable (diffuses sharp shear
-    // layers). Only meaningful on an implicit-advection path.
+    // Pure implicit FOU (no deferred correction): 1st-order upwind carried entirely by the
+    // operator, no explicit high-order term in the RHS -- maximally dissipative/stable (diffuses
+    // sharp shear layers). Only meaningful on an implicit-advection path.
     const bool pureFou = implicitAdv() && !deferredCorr_;
     const bool incr = cutcellPressure_ && incremental_, adv = advect_ && !pureFou,
                bc = hasBc_ && !bcStencilPath();  // fold RHS only on the const-coeff domain-BC path;
     // on the stencil path (solid and/or implicit advection) the walls enter via reflection ghosts
-    // (smoothComp) and the RHS carries the IBM inhom (=0 for no-slip) + the deferred correction. incr
-    // predictor carries -grad(P^n).
+    // (smoothComp) and the RHS carries the IBM inhom (=0 for no-slip) + the deferred correction.
+    // incr predictor carries -grad(P^n).
     const bool ifou =
-        implicitAdv() && deferredCorr_;  // deferred correction: keep (HO - FOU) explicit in the RHS
-                                         // (implicit on the domain-BC path by default, opt-in elsewhere)
-    const int sch = advScheme_;   // 0 = SOU (default), 1 = Koren TVD
+        implicitAdv() &&
+        deferredCorr_;           // deferred correction: keep (HO - FOU) explicit in the RHS
+                                 // (implicit on the domain-BC path by default, opt-in elsewhere)
+    const int sch = advScheme_;  // 0 = SOU (default), 1 = Koren TVD
     // Mode-2 wall-aware pressure force (collocated): -grad(P) = the TRANSPOSE of the wall-aware
     // cell->face constraint interpolation, precomputed per component (the plain path's central
     // difference is the transpose of the plain 1/2-1/2 average, so this keeps the momentum/
@@ -971,18 +989,19 @@ class Solver {
       }
     }
     CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg/wg false there)
-    // Mode-4 fully-FV momentum via DEFECT CORRECTION: solve M·u^{k+1} = M·u^k − rs·L_FV(u^k) + rs·b_FV
-    // so the fixed point satisfies the second-order finite-volume balance L_FV·u* = b_FV exactly, with
-    // the (stable, small-cell-safe) IBM matrix M only as preconditioner. fvM_ = M·u^k (stencilMatvec),
-    // fvL_ = L_FV(u^k) (fvViscousApply: o_f faces + cs time + centroid wall drag). Interior cells:
-    // M = L_FV → the defect vanishes → byte-identical to mode 0. Stokes only (advection folds into
-    // the IBM matrix, not yet into L_FV).
+    // Mode-4 fully-FV momentum via DEFECT CORRECTION: solve M·u^{k+1} = M·u^k − rs·L_FV(u^k) +
+    // rs·b_FV so the fixed point satisfies the second-order finite-volume balance L_FV·u* = b_FV
+    // exactly, with the (stable, small-cell-safe) IBM matrix M only as preconditioner. fvM_ = M·u^k
+    // (stencilMatvec), fvL_ = L_FV(u^k) (fvViscousApply: o_f faces + cs time + centroid wall drag).
+    // Interior cells: M = L_FV → the defect vanishes → byte-identical to mode 0. Stokes only
+    // (advection folds into the IBM matrix, not yet into L_FV).
     const bool wd = Grid::collocated && faceInterp_ >= 4;
     if constexpr (Grid::collocated)
       if (wd) {
         stencilMatvec(fvM_, CCConst(C[c].u), MConst(C[c].AC), MConst(C[c].AW), MConst(C[c].AE),
                       MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB), MConst(C[c].AT), e_, G);
-        // modes 5/6: TRUE-NORMAL embed wall drag (embedDirichletGradient); mode 4: axis-by-axis W_a g_a
+        // modes 5/6: TRUE-NORMAL embed wall drag (embedDirichletGradient); mode 4: axis-by-axis W_a
+        // g_a
         if (faceInterp_ >= 5)
           embedViscousApply(fvL_, CCConst(C[c].u), CCConst(sdf_), CCConst(cs_), CCConst(ox_),
                             CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G);
@@ -991,8 +1010,8 @@ class Solver {
                          CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G);
       }
     CCConst fvM = CCConst(fvM_), fvL = CCConst(fvL_), cs = CCConst(cs_);
-    const double fvw = fvRelax_;  // local copy — a KOKKOS_LAMBDA must not read a member (device deref
-                                  // of the host `this` pointer = illegal memory access)
+    const double fvw = fvRelax_;  // local copy — a KOKKOS_LAMBDA must not read a member (device
+                                  // deref of the host `this` pointer = illegal memory access)
     // b = descale*(idiag*u^n - rho*Koren(u^k) + rho*FOU(u^k) + f - grad P^n) - inhom  (+ BC fold
     // brhs). The time base is u^n (Picard); the advecting velocity & advected field are the current
     // iterate u^k.
@@ -1012,24 +1031,26 @@ class Solver {
           // incremental predictor's -grad(P^n): central-difference cell gradient on the collocated
           // grid (or the wall-aware transpose gradient, mode 2), one-sided face gradient (P at the
           // high cell of the staggered face) on the staggered grid.
-          const double gp = !incr              ? 0.0
-                            : Grid::collocated ? ((tg || wg) ? gpw(i)
-                                                     : 0.5 * (P((long)i + strd) - P((long)i - strd)))
-                                               : (P(i) - P((long)i - strd));
+          const double gp =
+              !incr ? 0.0
+              : Grid::collocated
+                  ? ((tg || wg) ? gpw(i) : 0.5 * (P((long)i + strd) - P((long)i - strd)))
+                  : (P(i) - P((long)i - strd));
           if (wd) {  // FV defect-correction RHS  M·u − ω·rs·(L_FV·u − b_FV),  b_FV = idt·cs·u^n +
-                     // cs·(f − grad P). ω<1 damps the (stiff, explicit-lagged) wall-flux correction;
-                     // the fixed point L_FV·u* = b_FV is independent of ω.
+                     // cs·(f − grad P). ω<1 damps the (stiff, explicit-lagged) wall-flux
+                     // correction; the fixed point L_FV·u* = b_FV is independent of ω.
             const double bfv = idiag * cs(i) * un(i) + cs(i) * (fc - gp);
             bb(i) = fvM(i) - fvw * rs(i) * (fvL(i) - bfv);
           } else {
-            bb(i) = rs(i) * (idiag * un(i) + fc - rho * aK + rho * aF - gp) +
-                    (bc ? brhs(i) : -inh(i));
+            bb(i) =
+                rs(i) * (idiag * un(i) + fc - rho * aK + rho * aF - gp) + (bc ? brhs(i) : -inh(i));
           }
         });  // BC fold (brhs) on the domain-BC path; -inhom on the IBM path (=0 for no-slip)
   }
-  // Sibling of buildRhs adding a per-cell body force fb(i) (Boussinesq buoyancy / CFD-DEM feedback):
-  // the constant fc becomes fc + fb(i). Kept as a separate kernel so buildRhs stays byte-identical
-  // (no codegen drift on the single-phase path). Selected in step() when hasCellForce_.
+  // Sibling of buildRhs adding a per-cell body force fb(i) (Boussinesq buoyancy / CFD-DEM
+  // feedback): the constant fc becomes fc + fb(i). Kept as a separate kernel so buildRhs stays
+  // byte-identical (no codegen drift on the single-phase path). Selected in step() when
+  // hasCellForce_.
   void buildRhsForced(int c) {
     CCExec space;
     const double idiag = rho_ / dt_, fc = f_[c], rho = rho_;
@@ -1066,10 +1087,10 @@ class Solver {
             if (ifou)
               aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa);
           }
-          const double gp = !incr              ? 0.0
-                            : Grid::collocated ? (tg ? gpw(i)
-                                                     : 0.5 * (P((long)i + strd) - P((long)i - strd)))
-                                               : (P(i) - P((long)i - strd));
+          const double gp = !incr ? 0.0
+                            : Grid::collocated
+                                ? (tg ? gpw(i) : 0.5 * (P((long)i + strd) - P((long)i - strd)))
+                                : (P(i) - P((long)i - strd));
           bb(i) = rs(i) * (idiag * un(i) + fc + fb(i) - rho * aK + rho * aF - gp) +
                   (bc ? brhs(i) : -inh(i));
         });
@@ -1156,8 +1177,8 @@ class Solver {
       addDragDiagonal(c);
   }
   // Variable-property sibling of buildAdvStencil: VarFaceProps diffusion build (per-face mu, face-
-  // density time diagonal) + the FOU upwind weighted by the FACE density (constant path: fouw=rho_).
-  // Separate kernel so the validated buildAdvStencil stays byte-identical.
+  // density time diagonal) + the FOU upwind weighted by the FACE density (constant path:
+  // fouw=rho_). Separate kernel so the validated buildAdvStencil stays byte-identical.
   void buildAdvStencilVar(int c) {
     C3 e = e_;
     if (c == 0) {
@@ -1201,14 +1222,15 @@ class Solver {
     if (hasDrag_)
       addDragDiagonal(c);
   }
-  // Backflow stabilization (Bazilevs 2009 / Esmaily-Moghadam 2011) for the NORMAL momentum at outflow
-  // faces: add the dissipative diagonal term beta*rho*|min(u.n,0)| where the outflow reverses (fluid
-  // re-entering, u.n<0). This removes the spurious kinetic-energy influx that the do-nothing/zero-
-  // gradient outflow advects in -- the "backflow divergence" that blows up separated flows (e.g. the
-  // BFS recirculation reaching the outlet), worse on finer grids. Purely dissipative (u_ext=0), so it
-  // is implicit + unconditionally stable, and INERT where the outlet is outgoing (u.n>=0) -> the
-  // channel and any non-reversing outflow stay byte-identical. Applied to C[c].AC after buildAdvStencil
-  // (per Picard iteration, lagged at u^k); only the component normal to each outflow face.
+  // Backflow stabilization (Bazilevs 2009 / Esmaily-Moghadam 2011) for the NORMAL momentum at
+  // outflow faces: add the dissipative diagonal term beta*rho*|min(u.n,0)| where the outflow
+  // reverses (fluid re-entering, u.n<0). This removes the spurious kinetic-energy influx that the
+  // do-nothing/zero- gradient outflow advects in -- the "backflow divergence" that blows up
+  // separated flows (e.g. the BFS recirculation reaching the outlet), worse on finer grids. Purely
+  // dissipative (u_ext=0), so it is implicit + unconditionally stable, and INERT where the outlet
+  // is outgoing (u.n>=0) -> the channel and any non-reversing outflow stay byte-identical. Applied
+  // to C[c].AC after buildAdvStencil (per Picard iteration, lagged at u^k); only the component
+  // normal to each outflow face.
   void applyBackflowStab(int c) {
     if (backflowBeta_ <= 0.0 || !hasOutflow_)
       return;
@@ -1234,7 +1256,8 @@ class Solver {
           "peclet::flow::backflow", MD2(space, {G, G}, {dims[b] - G, dims[cc] - G}),
           KOKKOS_LAMBDA(int p0, int p1) {
             const long i = (long)p0 * sb + (long)p1 * sc + (long)bic * sa;
-            const double back = sgn * u(i);  // > 0 exactly where the outflow reverses (|min(u.n,0)|)
+            const double back =
+                sgn * u(i);  // > 0 exactly where the outflow reverses (|min(u.n,0)|)
             if (back > 0.0)
               AC(i) += (float)(beta * rho * back);  // dissipative diagonal (u_ext = 0)
           });
@@ -1280,9 +1303,9 @@ class Solver {
     if (bcStencilPath()) {
       // Domain BCs solved with the Robust-Scaled cut-cell / FOU stencil (built by setSolid /
       // buildAdvStencil) while refreshing the domain-BC ghosts each colour -- explicit walls/inflow
-      // (reflection, fold=0) + outflow zero-gradient. Mirrors the collocated path above. Used for an
-      // immersed solid (cut-cell no-slip in the operator) and/or implicit advection (FOU upwind in the
-      // stencil -> stable at large dt). The const-coeff fold smoothers below are all-fluid,
+      // (reflection, fold=0) + outflow zero-gradient. Mirrors the collocated path above. Used for
+      // an immersed solid (cut-cell no-slip in the operator) and/or implicit advection (FOU upwind
+      // in the stencil -> stable at large dt). The const-coeff fold smoothers below are all-fluid,
       // diffusion-only: they ignore the solid AND run advection explicitly (CFL-limited).
       for (int it = 0; it < velIters_; ++it) {
         fillVelGhostsTo(C[c].u, c, 0);
@@ -1496,10 +1519,11 @@ class Solver {
       // (closed walls are openness 0).
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);
-      if ((faceInterp_ >= 1 && faceInterp_ <= 5) || faceInterp_ == 7)  // wall-aware flux map at solid
+      if ((faceInterp_ >= 1 && faceInterp_ <= 5) ||
+          faceInterp_ == 7)  // wall-aware flux map at solid
         centerToFaceWallAware(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u),
                               CCConst(sdf_), CCConst(xcx_), CCConst(xcy_), CCConst(xcz_),
-                              faceInterp_ >= 3, e_, G);       // faces (modes 1-5,7; mode 6 = plain)
+                              faceInterp_ >= 3, e_, G);  // faces (modes 1-5,7; mode 6 = plain)
       else
         centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
       divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
@@ -1507,7 +1531,8 @@ class Solver {
     } else {
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);
-      if (porous_)  // volume-averaged continuity: div(open*eps*u*), constraint div(eps u)=-d(eps)/dt
+      if (porous_)  // volume-averaged continuity: div(open*eps*u*), constraint div(eps
+                    // u)=-d(eps)/dt
         divergOpenEps(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
                       CCConst(oz_), CCConst(epsField_), div_, e_, G);
       else
@@ -1516,7 +1541,8 @@ class Solver {
     }
     // Porous continuity source: fold d(eps)/dt into the divergence so the Poisson solves for
     // div(eps u) = -d(eps)/dt (not 0). d(eps)/dt = (eps^{n+1}-eps^n)/dt from the deposited void
-    // fraction; stored in depsdt_ (epsPrev_ is overwritten at step end, so the residual reuses this).
+    // fraction; stored in depsdt_ (epsPrev_ is overwritten at step end, so the residual reuses
+    // this).
     if (porous_) {
       CCExec space;
       C3 e = e_;  // local copy — a KOKKOS_LAMBDA capturing e_ would read this-> on the device
@@ -1561,11 +1587,11 @@ class Solver {
       chebBoundsSet_ = false;  // spectrum changed with the coefficients (re-estimated by the solve)
     }
     // Porous continuity: the Poisson operator is eps-weighted (c_f = open_f * eps_f), same rails as
-    // the density coefficient above. Rebuilt every step (eps moves with the particles). With implicit
-    // CFD-DEM drag the coefficient AND the correction carry the drag-relaxation w_f = idt/(idt+beta_f)
-    // (idt = rho/dt) so the pressure correction is consistent with the drag-loaded momentum diagonal
-    // A_P = idt+beta (SIMPLE/PISO-with-implicit-drag; stiff drag -> w_f->0 -> the drag holds the
-    // velocity, stable). beta==0 reduces exactly to the plain eps-weighted operator.
+    // the density coefficient above. Rebuilt every step (eps moves with the particles). With
+    // implicit CFD-DEM drag the coefficient AND the correction carry the drag-relaxation w_f =
+    // idt/(idt+beta_f) (idt = rho/dt) so the pressure correction is consistent with the drag-loaded
+    // momentum diagonal A_P = idt+beta (SIMPLE/PISO-with-implicit-drag; stiff drag -> w_f->0 -> the
+    // drag holds the velocity, stable). beta==0 reduces exactly to the plain eps-weighted operator.
     if (porous_) {
       fillPropGhosts(epsField_);
       copyBlockShifted(eps1_, e1_, CCConst(epsField_), e_, G - 1);
@@ -1637,8 +1663,9 @@ class Solver {
           if (bc_[2 * a + 1] == 3)
             bcCorrectOutflow(fa[a], phi_, e, G, a);
       }
-      if (faceInterp_ >= 2 && faceInterp_ <= 5) {  // modes 2-5: cell correction = the TRANSPOSE of the
-                               // wall-aware map, keeping (T, Tᵀ) an adjoint pair (transposeGradWallAware)
+      if (faceInterp_ >= 2 &&
+          faceInterp_ <= 5) {  // modes 2-5: cell correction = the TRANSPOSE of the
+        // wall-aware map, keeping (T, Tᵀ) an adjoint pair (transposeGradWallAware)
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         for (int cc = 0; cc < 3; ++cc) {
@@ -1646,8 +1673,9 @@ class Solver {
                                  CCConst(xcs[cc]), faceInterp_ >= 3, cc, e_, G);
           subtractField(C[cc].u, CCConst(tgp_), e_, G);
         }
-      } else if (faceInterp_ == 6 || faceInterp_ == 7) {  // embed: openness-WEIGHTED cell correction
-                                      // (full open-face pressure force at cut cells) — Basilisk centered_grad
+      } else if (faceInterp_ == 6 ||
+                 faceInterp_ == 7) {  // embed: openness-WEIGHTED cell correction
+        // (full open-face pressure force at cut cells) — Basilisk centered_grad
         projectCorrectCenterOpen(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
                                  CCConst(oz_), e_, G);
       } else {
@@ -1655,9 +1683,10 @@ class Solver {
                              CCConst(oz_), e_, G);
       }
     } else {
-      if (porous_ && hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
-        projectCorrectPorousDrag(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(dragBeta_), rho_ / dt_,
-                                 e_, G);
+      if (porous_ &&
+          hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
+        projectCorrectPorousDrag(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(dragBeta_),
+                                 rho_ / dt_, e_, G);
       else if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
         projectCorrectVar(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G);
       else
@@ -1682,9 +1711,10 @@ class Solver {
       CCExec space;
       CCField P = P_, ph = phi_, d = div_;
       // Pressure under-relaxation (MFIX §10.1): accumulate only omega_p of the increment into the
-      // physical pressure P (the velocity correction still uses the full phi to satisfy continuity),
-      // so the next step's incremental predictor -grad(P^n) can't overshoot for a stiff drag diagonal.
-      // omega_p=1 (default) is the current behaviour; <1 only stabilizes the porous+drag path.
+      // physical pressure P (the velocity correction still uses the full phi to satisfy
+      // continuity), so the next step's incremental predictor -grad(P^n) can't overshoot for a
+      // stiff drag diagonal. omega_p=1 (default) is the current behaviour; <1 only stabilizes the
+      // porous+drag path.
       const double ct = pressUnderRelax_ * rho_ / dt_, mu = mu_;
       if (varProps_) {
         // Variable viscosity: the pointwise Timmermans term -mu(i)*div(u*) is inconsistent for
@@ -1804,10 +1834,11 @@ class Solver {
   std::vector<std::string> fieldNames() const { return fields_.names(); }
   // Ghost-exchange a registered field (cross-rank + periodic under MPI; periodic-only single-rank).
   void exchangeField(const std::string& name) { fillGhosts(fields_.at(name).data); }
-  // Add-reduce ("reverse") halo: fold ghost-layer deposits back onto their owner cell (both cross-rank
-  // AND periodic self-wrap). This is the coupling primitive for particle->grid deposition (e.g. void
-  // fraction / drag reaction) where a particle near a block boundary scatters into ghost cells owned by
-  // a neighbour; after this the inner block holds the complete sum. Single-rank non-periodic: a no-op.
+  // Add-reduce ("reverse") halo: fold ghost-layer deposits back onto their owner cell (both
+  // cross-rank AND periodic self-wrap). This is the coupling primitive for particle->grid
+  // deposition (e.g. void fraction / drag reaction) where a particle near a block boundary scatters
+  // into ghost cells owned by a neighbour; after this the inner block holds the complete sum.
+  // Single-rank non-periodic: a no-op.
   void exchangeFieldAdd(const std::string& name) {
 #ifdef PECLET_FLOW_MPI
     if (distributed_ && velHalo_) {
@@ -1824,7 +1855,9 @@ class Solver {
   }
   // Host round-trip: read a registered field's inner region as an x-fastest (nx,ny,nz) buffer, or
   // write one (ghosts left stale until the next exchangeField).
-  std::vector<double> getField(const std::string& name) { return gatherInner(fields_.at(name).data); }
+  std::vector<double> getField(const std::string& name) {
+    return gatherInner(fields_.at(name).data);
+  }
   void setField(const std::string& name, const std::vector<double>& v) {
     scatterInner(fields_.at(name).data, v);
   }
@@ -1840,8 +1873,8 @@ class Solver {
 #endif
     return {nx_, ny_, nz_};
   }
-  // This rank's inner-block origin in GLOBAL cells ({0,0,0} single-rank). The deposit-origin shift so
-  // particles in global coords land in the local block (gm origin = blockOrigin * h).
+  // This rank's inner-block origin in GLOBAL cells ({0,0,0} single-rank). The deposit-origin shift
+  // so particles in global coords land in the local block (gm origin = blockOrigin * h).
   std::array<int, 3> blockOrigin() const { return {og_.x, og_.y, og_.z}; }
 
   // --- Scalar transport (advection-diffusion) -------------------------------------------------
@@ -1929,8 +1962,8 @@ class Solver {
   // Register a property/force closure. target: a registered field name — a material property
   // ("mu"/"rho"/…) or a body-force component ("force_x"/"force_y"/"force_z"). kind: LinearMix /
   // BoussinesqForce / ArrheniusMu. in0/in1: input field names (in1 "" if unused). params: up to 4
-  // doubles (meaning per kind — property_closures.hpp). Applied at the top of step() in registration
-  // order. Targeting a force component turns on the per-cell body-force RHS path.
+  // doubles (meaning per kind — property_closures.hpp). Applied at the top of step() in
+  // registration order. Targeting a force component turns on the per-cell body-force RHS path.
   void setPropertyModel(const std::string& target, ClosureKind kind, const std::string& in0,
                         const std::string& in1, const std::vector<double>& params) {
     Closure cl;
@@ -1952,8 +1985,9 @@ class Solver {
   // (face coefficient open/rho_f + 1/rho_f correction). rho_ (set_rho) becomes the REFERENCE
   // density rho0 of the projection scaling — a uniform rho field == rho_ reduces exactly to the
   // constant solver. Escape hatch: set_field("rho", arr) + set_density_mode(True); or a closure
-  // targeting "rho" (e.g. rho = LinearMix of a transported phase fraction) enables it automatically.
-  // Staggered grid only (v1); the velocity multigrid (scalar-coefficient) is disabled.
+  // targeting "rho" (e.g. rho = LinearMix of a transported phase fraction) enables it
+  // automatically. Staggered grid only (v1); the velocity multigrid (scalar-coefficient) is
+  // disabled.
   void setDensityMode(bool variable) {
     if constexpr (Grid::collocated) {
       if (variable)
@@ -1973,7 +2007,7 @@ class Solver {
         cy1_ = CCField("cy1", n1_);
         cz1_ = CCField("cz1", n1_);
       }
-      ensureCellForceAll();    // buildRhsVar reads the per-cell force (zero until a closure sets it)
+      ensureCellForceAll();  // buildRhsVar reads the per-cell force (zero until a closure sets it)
       useVelocityMg_ = false;  // scalar-coefficient velocity MG (variable-coeff deferred)
       // Pressure driver: CHEBYSHEV by default under variable density. MG-PCG stalls on the
       // rho-scaled coefficient operator (the hierarchy's transfer pair was built/validated for
@@ -1987,9 +2021,10 @@ class Solver {
     }
   }
   // Enable/disable the volume-averaged (porous) continuity for unresolved CFD-DEM: the projection
-  // enforces d(eps)/dt + div(eps u) = 0 instead of div(u)=0, so the velocity is NOT solenoidal where
-  // the void fraction changes. Binds the "eps" field (void fraction from the particle deposition;
-  // created seeded to 1 if absent). Staggered-only. The coupling deposits eps each step BEFORE step().
+  // enforces d(eps)/dt + div(eps u) = 0 instead of div(u)=0, so the velocity is NOT solenoidal
+  // where the void fraction changes. Binds the "eps" field (void fraction from the particle
+  // deposition; created seeded to 1 if absent). Staggered-only. The coupling deposits eps each step
+  // BEFORE step().
   void setPorousContinuity(bool on) {
     if constexpr (Grid::collocated) {
       if (on)
@@ -2024,18 +2059,20 @@ class Solver {
       // rebuild (chebBoundsSet_ invalidation in project()). An explicit driver set afterwards wins.
       useChebyshev_ = true;
       chebBoundsSet_ = false;
-      configurePorousDragSolver();  // if drag already on, switch to GraphAMG+PCG (Chebyshev diverges)
+      configurePorousDragSolver();  // if drag already on, switch to GraphAMG+PCG (Chebyshev
+                                    // diverges)
     }
   }
-  // Reseed eps^n = eps^{n+1} so d(eps)/dt = 0 this step. Call after the FIRST void-fraction deposition
-  // (the "eps" field starts empty, so without this step 0 sees a spurious d(eps)/dt from 0 -> eps).
+  // Reseed eps^n = eps^{n+1} so d(eps)/dt = 0 this step. Call after the FIRST void-fraction
+  // deposition (the "eps" field starts empty, so without this step 0 sees a spurious d(eps)/dt from
+  // 0 -> eps).
   void syncPorousPrev() {
     if (porous_)
       Kokkos::deep_copy(epsPrev_, epsField_);
   }
-  // Include (default) or drop the d(eps)/dt source in the porous projection RHS. Dropping it enforces
-  // div(eps u)=0 — useful when eps is a bare per-cell particle deposit whose time-derivative is too
-  // jagged and drives the eps-weighted pressure solve unstable.
+  // Include (default) or drop the d(eps)/dt source in the porous projection RHS. Dropping it
+  // enforces div(eps u)=0 — useful when eps is a bare per-cell particle deposit whose
+  // time-derivative is too jagged and drives the eps-weighted pressure solve unstable.
   void setPorousDepsDt(bool on) { porousDepsDt_ = on; }
   // Pressure under-relaxation factor omega_p in (0,1] (MFIX-style); 1.0 = off (default).
   void setPressureUnderRelax(double w) { pressUnderRelax_ = w; }
@@ -2051,9 +2088,11 @@ class Solver {
         muField_ = fields_.at("mu").data;
       else {
         muField_ = addField("mu");
-        Kokkos::deep_copy(muField_, mu_);  // default to the scalar mu until a closure/set_field sets it
+        Kokkos::deep_copy(muField_,
+                          mu_);  // default to the scalar mu until a closure/set_field sets it
       }
-      useVelocityMg_ = false;  // the velocity multigrid takes a scalar mu (variable-coeff vmg deferred)
+      useVelocityMg_ =
+          false;  // the velocity multigrid takes a scalar mu (variable-coeff vmg deferred)
     }
   }
   // Rotational-pressure treatment under variable viscosity. The Timmermans rotational term
@@ -2061,14 +2100,16 @@ class Solver {
   // Math. Lett. 2018 / arXiv:1902.05643): with spatially varying mu the pointwise term is no longer
   // the gradient part of the viscous stress, and the accumulated inconsistency destabilises the
   // incremental scheme at strong contrast (observed: 10x jump + harmonic faces -> divergence).
-  // Modes (the incremental predictor -grad(P^n) and P accumulation are kept in ALL of them — that is
-  // what enables large-dt / steady-Stokes stepping):
-  //   0 "min"  (default): rotational coefficient chi*mu_min — a CONSTANT dominated by the true local
+  // Modes (the incremental predictor -grad(P^n) and P accumulation are kept in ALL of them — that
+  // is what enables large-dt / steady-Stokes stepping):
+  //   0 "min"  (default): rotational coefficient chi*mu_min — a CONSTANT dominated by the true
+  //   local
   //            dissipation everywhere (mu_min <= mu(x)), so the constant-viscosity stability theory
   //            carries over; reduces EXACTLY to the validated scheme when mu is uniform.
   //   1 "full": chi*mu(i) pointwise — better pressure consistency at MILD contrast; not stable at
   //            strong contrast (user's responsibility).
-  //   2 "off" : plain incremental (no rotational term) — unconditionally stable, keeps the artificial
+  //   2 "off" : plain incremental (no rotational term) — unconditionally stable, keeps the
+  //   artificial
   //            pressure Neumann layer of the non-rotational scheme.
   // The fully consistent variable-viscosity correction (shear-rate projection: an extra Poisson
   // solve for psi with rhs div(div(2 nu D(u)))) is deferred.
@@ -2076,7 +2117,8 @@ class Solver {
     varRotMode_ = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
     varRotChi_ = chi < 0.0 ? 0.0 : chi;
   }
-  // Tabulated property: out = piecewise-linear interp of (xs, ys) at the input field (xs ascending).
+  // Tabulated property: out = piecewise-linear interp of (xs, ys) at the input field (xs
+  // ascending).
   void setPropertyTable(const std::string& target, const std::string& in0,
                         const std::vector<double>& xs, const std::vector<double>& ys) {
     Closure cl;
@@ -2106,11 +2148,11 @@ class Solver {
   // closure needed. buildRhsForced then adds them each step (they persist; the writer overwrites).
   void enableCellForce() { ensureCellForceAll(); }
   // Implicit (semi-implicit) linear drag: a per-cell coefficient field "drag_beta" is added to the
-  // momentum diagonal each step, so a drag source −β(u − u_p) is treated implicitly (the fluid solve
-  // becomes (ρ/dt + β)u = … + β u_p). The drag TARGET β·u_p goes into the force_x/y/z fields (the
-  // RHS). Unconditionally stable for any β (unlike an explicit −β u force, which diverges for the
-  // stiff β of a dense particle bed). The external writer (CFD-DEM) fills "drag_beta" + "force_*"
-  // via field_view; enableDrag() allocates them and turns the diagonal path on.
+  // momentum diagonal each step, so a drag source −β(u − u_p) is treated implicitly (the fluid
+  // solve becomes (ρ/dt + β)u = … + β u_p). The drag TARGET β·u_p goes into the force_x/y/z fields
+  // (the RHS). Unconditionally stable for any β (unlike an explicit −β u force, which diverges for
+  // the stiff β of a dense particle bed). The external writer (CFD-DEM) fills "drag_beta" +
+  // "force_*" via field_view; enableDrag() allocates them and turns the diagonal path on.
   void enableDrag() {
     if (!fields_.has("drag_beta"))
       dragBeta_ = addField("drag_beta");
@@ -2122,17 +2164,17 @@ class Solver {
   }
   // Porous + implicit drag: the drag-relaxation w_f=idt/(idt+beta) makes the pressure coefficient
   // high-ratio (~1 in the freeboard, ->0 in the dense bed). Chebyshev diverges on it; the algebraic
-  // GraphAMG coarse solve + PCG is robust. Applied whenever BOTH porous_ and hasDrag_ are on (either
-  // set second). An explicit set_pressure_* afterwards still wins.
+  // GraphAMG coarse solve + PCG is robust. Applied whenever BOTH porous_ and hasDrag_ are on
+  // (either set second). An explicit set_pressure_* afterwards still wins.
   void configurePorousDragSolver() {
     if (!(porous_ && hasDrag_))
       return;
-    pressGraphAmg_ = true;                 // GraphAMG bottom (domain-BC operators: buildAmg skips
-                                           // the wrap across non-periodic faces and pcgAmg keeps the
-                                           // mean only when the operator is singular)
-    if (cutcellPressure_)                  // MG already built (set_solid ran) -> apply now
+    pressGraphAmg_ = true;  // GraphAMG bottom (domain-BC operators: buildAmg skips
+                            // the wrap across non-periodic faces and pcgAmg keeps the
+                            // mean only when the operator is singular)
+    if (cutcellPressure_)   // MG already built (set_solid ran) -> apply now
       mg_.setGraphAmgBottom(pressGraphAmg_);
-    useChebyshev_ = false;                 // PCG, not Chebyshev (diverges on the high w_f ratio)
+    useChebyshev_ = false;  // PCG, not Chebyshev (diverges on the high w_f ratio)
     chebBoundsSet_ = false;
   }
   // Add the drag coefficient beta(i) to the (float) momentum diagonal of component c. Called after
@@ -2159,7 +2201,8 @@ class Solver {
         "peclet::flow::add_drag_diag", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          const double bd = faceAvg ? 0.5 * ((double)beta(i) + (double)beta(i - sc)) : (double)beta(i);
+          const double bd =
+              faceAvg ? 0.5 * ((double)beta(i) + (double)beta(i - sc)) : (double)beta(i);
           AC(i) = (float)((double)AC(i) + bd);
         });
   }
@@ -2276,7 +2319,7 @@ class Solver {
        chebBoundsSet_ = false;  // Chebyshev pressure driver (set_pressure_chebyshev)
   int chebMaxit_ = 120;
   double chebRtol_ = 1e-9, chebA_ = 0.0, chebB_ = 0.0;
-  int nLevels_ = 4;  // multigrid depth (CUDA default; set_pressure_multigrid)
+  int nLevels_ = 4;             // multigrid depth (CUDA default; set_pressure_multigrid)
   bool pressGraphAmg_ = false;  // agglomerated GraphAMG bottom solve (decomposition-agnostic)
   long lastPressureIters_ = 0;
   CutcellMG mg_;
@@ -2287,23 +2330,26 @@ class Solver {
 #ifdef PECLET_FLOW_MPI
   std::shared_ptr<GridHaloTopology<3>> velHalo_;  // g=2 velocity-block topology
   std::shared_ptr<GridHalo<double>> velDev_;      // g=2 velocity-block ghost exchange
-  std::shared_ptr<peclet::core::decomp::BlockDecomposer<3>> dec_;  // current partition (redistribute)
+  std::shared_ptr<peclet::core::decomp::BlockDecomposer<3>>
+      dec_;  // current partition (redistribute)
   MPI_Comm comm_ = MPI_COMM_NULL;
   int gnx_ = 0, gny_ = 0, gnz_ = 0;  // communicator + GLOBAL dims
 #endif
   int bc_[6] = {0, 0, 0, 0, 0, 0};
   double bcVel_[6][3] = {};
   bool hasBc_ = false, hasOutflow_ = false;  // domain BCs
-  bool hasSolid_ = false;  // an immersed solid is present (any inner SDF < 0) -- with domain BCs, the
-                           // momentum solve must use the cut-cell IBM stencil, not the all-fluid fold
-  double backflowBeta_ = 0.2;  // outflow backflow-stabilization coefficient (0 = off; inert unless the
-                               // outflow reverses, so purely-outgoing outlets stay byte-identical)
+  bool hasSolid_ =
+      false;  // an immersed solid is present (any inner SDF < 0) -- with domain BCs, the
+              // momentum solve must use the cut-cell IBM stencil, not the all-fluid fold
+  double backflowBeta_ =
+      0.2;  // outflow backflow-stabilization coefficient (0 = off; inert unless the
+            // outflow reverses, so purely-outgoing outlets stay byte-identical)
   CCField bcProf_[6];
   int bcProfNc_[6] = {0, 0, 0, 0, 0, 0};  // per-position inlet profiles (face grid [Lb*Lc*3])
   CCField bcDcorr_[3], bcBrhs_[3];        // implicit-diffusion face fold (per component)
   bool advect_ = false, cutcellPressure_ = false, implicitFou_ = false;
   bool deferredCorr_ = true;  // deferred-correction advection (off = pure implicit FOU, 1st order)
-  int advScheme_ = 0;  // high-order advection: 0 = SOU (default), 1 = Koren TVD
+  int advScheme_ = 0;         // high-order advection: 0 = SOU (default), 1 = Koren TVD
   bool incremental_ = true,
        pwarm_ = false;    // incremental-rotational pressure (CUDA default on) + warm-start
   int faceInterp_ = 0;    // collocated cell->face map: 0 = plain average, 1 = wall-aware (opt-in)
@@ -2317,37 +2363,37 @@ class Solver {
   long lastOuterIters_ = 0;
   double lastOuterCorr_ = 0.0;
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
-  CCField uf_, vf_, wf_;      // collocated: transient face (MAC) field (approx projection)
-  CCField tgp_;               // collocated: transpose-gradient scratch (setFaceInterp(2/3))
-  CCField wdef_;              // collocated: FV wall viscous-flux defect scratch (setFaceInterp(4))
-  CCField fvM_, fvL_, cs_;    // collocated: mode-4 defect scratch (M·u, L_FV·u) + cell fluid fraction
+  CCField uf_, vf_, wf_;    // collocated: transient face (MAC) field (approx projection)
+  CCField tgp_;             // collocated: transpose-gradient scratch (setFaceInterp(2/3))
+  CCField wdef_;            // collocated: FV wall viscous-flux defect scratch (setFaceInterp(4))
+  CCField fvM_, fvL_, cs_;  // collocated: mode-4 defect scratch (M·u, L_FV·u) + cell fluid fraction
   CCField xcx_, xcy_, xcz_;   // collocated: open-centroid wall distance per face (setFaceInterp(3))
   CCField old_[3], prev_[3];  // u^n time base + previous Picard iterate
   Comp C[3];
   peclet::core::FieldSet fields_;     // named directory of all cell fields (velocity/p/sdf + user)
   std::vector<ScalarField> scalars_;  // transported scalars (advection-diffusion)
   std::vector<Closure> closures_;     // property/body-force closures (applied at top of step())
-  CCField cellForce_[3];              // per-cell momentum body force (Boussinesq / CFD-DEM feedback)
+  CCField cellForce_[3];  // per-cell momentum body force (Boussinesq / CFD-DEM feedback)
   bool hasCellForce_ = false;
-  bool varProps_ = false;             // variable-coefficient momentum (variable viscosity)
-  bool harmonicMu_ = false;           // harmonic vs arithmetic face-viscosity mean
-  CCField muField_;                   // per-cell dynamic viscosity (when varProps_)
-  int varRotMode_ = 0;                // rotational term under varProps: 0 chi*mu_min, 1 chi*mu(i), 2 off
-  double varRotChi_ = 1.0;            // rotational coefficient scale chi
-  bool varRho_ = false;               // variable density (momentum + projection); staggered only
-  CCField rhoField_;                  // per-cell density (when varRho_); rho_ is the reference rho0
-  CCField rho1_, cx1_, cy1_, cz1_;    // g=1 MG-block density bridge + projection face coefficients
-  bool porous_ = false;               // volume-averaged continuity d(eps)/dt+div(eps u)=0 (CFD-DEM)
-  double pressUnderRelax_ = 1.0;      // omega_p for the incremental pressure accumulation (1.0 = off)
-  bool porousDepsDt_ = true;          // include the d(eps)/dt source in the projection RHS. Off ->
-                                      // enforce div(eps u)=0 (drop the term, which is jagged/noisy
-                                      // because eps is a bare per-cell particle deposit; the noisy
-                                      // source can drive the eps-weighted pressure solve unstable).
+  bool varProps_ = false;    // variable-coefficient momentum (variable viscosity)
+  bool harmonicMu_ = false;  // harmonic vs arithmetic face-viscosity mean
+  CCField muField_;          // per-cell dynamic viscosity (when varProps_)
+  int varRotMode_ = 0;       // rotational term under varProps: 0 chi*mu_min, 1 chi*mu(i), 2 off
+  double varRotChi_ = 1.0;   // rotational coefficient scale chi
+  bool varRho_ = false;      // variable density (momentum + projection); staggered only
+  CCField rhoField_;         // per-cell density (when varRho_); rho_ is the reference rho0
+  CCField rho1_, cx1_, cy1_, cz1_;  // g=1 MG-block density bridge + projection face coefficients
+  bool porous_ = false;             // volume-averaged continuity d(eps)/dt+div(eps u)=0 (CFD-DEM)
+  double pressUnderRelax_ = 1.0;    // omega_p for the incremental pressure accumulation (1.0 = off)
+  bool porousDepsDt_ = true;        // include the d(eps)/dt source in the projection RHS. Off ->
+                                    // enforce div(eps u)=0 (drop the term, which is jagged/noisy
+                                    // because eps is a bare per-cell particle deposit; the noisy
+                                    // source can drive the eps-weighted pressure solve unstable).
   CCField epsField_, epsPrev_, eps1_, depsdt_;  // eps^{n+1}, eps^n, g=1 bridge, stored d(eps)/dt
-  CCField beta1_;                     // g=1 bridge of the drag coeff (semi-implicit-drag pressure)
-  bool hasDrag_ = false;              // implicit linear drag (CFD-DEM): beta on the momentum diagonal
-  CCField dragBeta_;                  // per-cell drag coefficient (added to AC; target beta*u_p rides
-                                      // the force_* cellForce fields)
+  CCField beta1_;         // g=1 bridge of the drag coeff (semi-implicit-drag pressure)
+  bool hasDrag_ = false;  // implicit linear drag (CFD-DEM): beta on the momentum diagonal
+  CCField dragBeta_;      // per-cell drag coefficient (added to AC; target beta*u_p rides
+                          // the force_* cellForce fields)
 };
 
 // The staggered MAC solver — THE flow solver, bit-identical to the pre-policy class. Bindings + the

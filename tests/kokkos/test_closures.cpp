@@ -1,8 +1,8 @@
 // Property closures + per-cell body force. Verifies each closure kernel against a host oracle, and
 // that a Boussinesq buoyancy force enters the momentum RHS (buildRhsForced path selected).
-#include <Kokkos_Core.hpp>
 #include <cmath>
 #include <cstdio>
+#include <Kokkos_Core.hpp>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -28,7 +28,8 @@ void run() {
     T[i] = 0.6 + 0.3 * std::sin(0.7 * i);
   s.setField("T", T);
 
-  // linear: rho = 2 - 0.5*T ; boussinesq: force_y = 1*9.81*0.1*(T-0.5) ; arrhenius mu = 0.01*exp(...)
+  // linear: rho = 2 - 0.5*T ; boussinesq: force_y = 1*9.81*0.1*(T-0.5) ; arrhenius mu =
+  // 0.01*exp(...)
   s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "T", "", {2.0, -0.5});
   s.setPropertyModel("force_y", peclet::flow::ClosureKind::BoussinesqForce, "T", "",
                      {1.0, 9.81, 0.1, 0.5});

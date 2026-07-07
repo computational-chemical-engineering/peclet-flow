@@ -1,10 +1,12 @@
 /// @file
-/// @brief flow — face/cell material-property accessors for the variable-coefficient momentum operator.
+/// @brief flow — face/cell material-property accessors for the variable-coefficient momentum
+/// operator.
 ///
 /// The variable-viscosity diffusion stencil (ibmBuildDiffusionVar) is templated on a small accessor
-/// supplying the per-cell time diagonal idiag(i) = rho/dt and the per-face viscosity beta between two
-/// adjacent cells. Two models:
-///   - UniformFaceProps: two constants — reproduces the constant-mu operator (used to cross-check the
+/// supplying the per-cell time diagonal idiag(i) = rho/dt and the per-face viscosity beta between
+/// two adjacent cells. Two models:
+///   - UniformFaceProps: two constants — reproduces the constant-mu operator (used to cross-check
+///   the
 ///     Var kernel against the scalar ibmBuildDiffusion at the solution level).
 ///   - FieldFaceProps: idiag from a (constant here) rho, beta from a per-cell mu field, averaged at
 ///     the face either arithmetically (default) or harmonically (correct for a viscosity jump — the

@@ -44,8 +44,12 @@ static std::vector<double> packingSdf(double rfrac = 0.18) {
 }
 
 static void configure(IbmSolver& s) {
-  s.setRho(RHO); s.setMu(MU); s.setDt(DT); s.setBodyForce(F, 0, 0);
-  s.setAdvection(false); s.setVelocityIterations(80);
+  s.setRho(RHO);
+  s.setMu(MU);
+  s.setDt(DT);
+  s.setBodyForce(F, 0, 0);
+  s.setAdvection(false);
+  s.setVelocityIterations(80);
   // Pure RB-GS pressure (levels=1): decomposition-agnostic, so redistribute onto a WEIGHTED
   // partition works (the geometric coarse levels assume clean-coarsening; weighted-ORB co-decomp +
   // multilevel MG is the GraphAMG follow-up).
@@ -142,8 +146,9 @@ int main(int argc, char** argv) {
     const double reld = std::fabs(k_dist - k_ref) / (std::fabs(k_ref) + 1e-30);
     const double tol = (size == 1) ? 1e-12 : 2e-5;  // np=1 bit-exact; np>1 MG-PCG reduction floor
     if (rank == 0)
-      std::printf("  k_dist=%.8e  k_ref=%.8e  rel=%.2e  div=%.2e  (np=%d, tol %.0e, redistributed)\n",
-                  k_dist, k_ref, reld, div_dist, size, tol);
+      std::printf(
+          "  k_dist=%.8e  k_ref=%.8e  rel=%.2e  div=%.2e  (np=%d, tol %.0e, redistributed)\n",
+          k_dist, k_ref, reld, div_dist, size, tol);
     if (reld > tol || !(div_dist < 1e-5))
       fail = 1;
   }

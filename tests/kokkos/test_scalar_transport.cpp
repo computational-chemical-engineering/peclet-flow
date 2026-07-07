@@ -1,9 +1,9 @@
 // Scalar transport on the flow Solver: openness-weighted implicit diffusion (2nd-order operator via
 // the discrete-eigenvalue convergence) + explicit conservative advection (machine-precision
 // conservation on a periodic all-fluid box).
-#include <Kokkos_Core.hpp>
 #include <cmath>
 #include <cstdio>
+#include <Kokkos_Core.hpp>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -39,13 +39,15 @@ double measureEigen(int N) {
   s.advanceScalars();  // velocity zero -> pure diffusion
   auto c1 = s.getField("c");
   const double peak0 = c0[0], peak1 = c1[0];  // x=y=z=0
-  return (peak0 / peak1 - 1.0) / (dt * D);     // mu_h (eigenmode: c1 = c0/(1+dt*D*mu_h))
+  return (peak0 / peak1 - 1.0) / (dt * D);    // mu_h (eigenmode: c1 = c0/(1+dt*D*mu_h))
 }
 
 void run() {
   // 2nd-order diffusion operator: |mu_h - k^2| ~ O(k^4) => relative error halves^2 per refinement.
-  const double e16 = std::fabs(measureEigen(16) - std::pow(2 * M_PI / 16, 2)) / std::pow(2 * M_PI / 16, 2);
-  const double e32 = std::fabs(measureEigen(32) - std::pow(2 * M_PI / 32, 2)) / std::pow(2 * M_PI / 32, 2);
+  const double e16 =
+      std::fabs(measureEigen(16) - std::pow(2 * M_PI / 16, 2)) / std::pow(2 * M_PI / 16, 2);
+  const double e32 =
+      std::fabs(measureEigen(32) - std::pow(2 * M_PI / 32, 2)) / std::pow(2 * M_PI / 32, 2);
   const double order = std::log(e16 / e32) / std::log(2.0);
   std::printf("diffusion rel-errs %.3e %.3e  order %.2f\n", e16, e32, order);
   CHECK(order > 1.9);

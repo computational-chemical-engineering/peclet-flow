@@ -120,8 +120,8 @@ inline void projectCorrect(CCField u, CCField v, CCField w, CCConst phi, C3 e, i
 // with rho_f the arithmetic face mean — the SAME face density that scaled the Poisson coefficient
 // c_f = open_f*rho0/rho_f, so the corrected open flux telescopes to A*phi exactly (discrete
 // consistency; constant rho == rho0 reduces to projectCorrect identically, ratio 1.0 exact in FP).
-inline void projectCorrectVar(CCField u, CCField v, CCField w, CCConst phi, CCConst rho, double rho0,
-                              C3 e, int g) {
+inline void projectCorrectVar(CCField u, CCField v, CCField w, CCConst phi, CCConst rho,
+                              double rho0, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -155,12 +155,13 @@ inline void buildRhoCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCCons
       });
 }
 
-// --- Volume-averaged (porous) continuity for unresolved CFD-DEM -----------------------------------
-// The proper continuity is d(eps)/dt + div(eps u) = 0 (eps = void fraction from the particles), so the
-// velocity is NOT solenoidal: div(eps u) = -d(eps)/dt. These size the projection to that constraint.
+// --- Volume-averaged (porous) continuity for unresolved CFD-DEM
+// ----------------------------------- The proper continuity is d(eps)/dt + div(eps u) = 0 (eps =
+// void fraction from the particles), so the velocity is NOT solenoidal: div(eps u) = -d(eps)/dt.
+// These size the projection to that constraint.
 
-// eps-weighted open-face divergence: d = div(open * eps_f * u), eps_f = arithmetic face mean. Reduces
-// to divergOpen when eps == 1 everywhere (no particles).
+// eps-weighted open-face divergence: d = div(open * eps_f * u), eps_f = arithmetic face mean.
+// Reduces to divergOpen when eps == 1 everywhere (no particles).
 inline void divergOpenEps(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst oy, CCConst oz,
                           CCConst eps, CCField d, C3 e, int g) {
   CCExec space;
@@ -179,9 +180,10 @@ inline void divergOpenEps(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst o
       });
 }
 
-// Porous Poisson face coefficient c_f = open_f * eps_f (eps_f = arithmetic face mean). Constant-density
-// gas: the correction stays u -= grad(phi) (projectCorrect) so the open*eps flux telescopes to A*phi.
-// (Combining with variable rho — c_f *= rho0/rho_f, projectCorrectVar — is a later composition.)
+// Porous Poisson face coefficient c_f = open_f * eps_f (eps_f = arithmetic face mean).
+// Constant-density gas: the correction stays u -= grad(phi) (projectCorrect) so the open*eps flux
+// telescopes to A*phi. (Combining with variable rho — c_f *= rho0/rho_f, projectCorrectVar — is a
+// later composition.)
 inline void buildPorousCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy, CCConst oz,
                              CCConst eps, C3 e, int g) {
   CCExec space;
@@ -198,14 +200,14 @@ inline void buildPorousCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCC
 }
 
 // Semi-implicit-drag porous coefficient: c_f = open_f * eps_f * w_f, with the face drag-relaxation
-// w_f = idt/(idt + beta_f) (idt = rho/dt, beta = the momentum-diagonal drag coefficient). This makes
-// the pressure correction CONSISTENT with the drag-loaded momentum diagonal A_P = idt + beta: where
-// the drag is stiff (dense bed) w_f -> 0 and the pressure barely moves the velocity (the drag holds
-// it) — the SIMPLE/PISO-with-implicit-drag scheme (OpenFOAM rAU, MFIX). Reduces to buildPorousCoeff
-// when beta==0 (w==1). The correction MUST use the same w_f (projectCorrectPorousDrag) so the
-// open*eps*w flux telescopes to A*phi.
-inline void buildPorousCoeffDrag(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy, CCConst oz,
-                                 CCConst eps, CCConst beta, double idt, C3 e, int g) {
+// w_f = idt/(idt + beta_f) (idt = rho/dt, beta = the momentum-diagonal drag coefficient). This
+// makes the pressure correction CONSISTENT with the drag-loaded momentum diagonal A_P = idt + beta:
+// where the drag is stiff (dense bed) w_f -> 0 and the pressure barely moves the velocity (the drag
+// holds it) — the SIMPLE/PISO-with-implicit-drag scheme (OpenFOAM rAU, MFIX). Reduces to
+// buildPorousCoeff when beta==0 (w==1). The correction MUST use the same w_f
+// (projectCorrectPorousDrag) so the open*eps*w flux telescopes to A*phi.
+inline void buildPorousCoeffDrag(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy,
+                                 CCConst oz, CCConst eps, CCConst beta, double idt, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -219,8 +221,8 @@ inline void buildPorousCoeffDrag(CCField cx, CCField cy, CCField cz, CCConst ox,
       });
 }
 
-// Drag-relaxed velocity correction (sibling of projectCorrect): u_f -= w_f * grad(phi), w_f the SAME
-// face drag relaxation as buildPorousCoeffDrag. beta==0 -> w==1 -> projectCorrect exactly.
+// Drag-relaxed velocity correction (sibling of projectCorrect): u_f -= w_f * grad(phi), w_f the
+// SAME face drag relaxation as buildPorousCoeffDrag. beta==0 -> w==1 -> projectCorrect exactly.
 inline void projectCorrectPorousDrag(CCField u, CCField v, CCField w, CCConst phi, CCConst beta,
                                      double idt, C3 e, int g) {
   CCExec space;

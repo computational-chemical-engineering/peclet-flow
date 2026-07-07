@@ -219,9 +219,9 @@ class CutcellMG {
   // Allreduce, the smoother uses the block's global-origin parity. Single-rank (size 1) reproduces
   // init()'s field exactly.
   // dec0: OPTIONAL shared level-0 decomposition (load-balance / CFD-DEM co-decomposition). When
-  // given, level 0 uses it so the MG's level-0 block matches the caller's (possibly weighted) block;
-  // the coarse levels keep the equal-weight ORB of the coarsened grid. For a weighted dec0 the
-  // coarse-level transfer is only clean when nLevels==1 (pure RB-GS) — use that (or the
+  // given, level 0 uses it so the MG's level-0 block matches the caller's (possibly weighted)
+  // block; the coarse levels keep the equal-weight ORB of the coarsened grid. For a weighted dec0
+  // the coarse-level transfer is only clean when nLevels==1 (pure RB-GS) — use that (or the
   // decomposition-agnostic GraphAMG) for a weighted co-decomposition. nullptr => equal-weight
   // everywhere (the original behaviour, byte-identical).
   void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm,
@@ -427,7 +427,8 @@ class CutcellMG {
     Level& lv = lv_[L];
     if (L + 1 == (int)lv_.size()) {
       if (useGraphAmgBottom_)
-        graphAmgSolveBottom(lv);  // agglomerated mesh-agnostic coarse solve (decomposition-agnostic)
+        graphAmgSolveBottom(
+            lv);  // agglomerated mesh-agnostic coarse solve (decomposition-agnostic)
       else
         smooth(lv, bottom_, false);
       removeMean(lv, lv.x);
@@ -459,11 +460,12 @@ class CutcellMG {
   }
 
   // --- Agglomerated GraphAMG bottom solve --------------------------------------------------------
-  // Assemble the coarsest level's cut-cell operator as a GLOBAL CSR (gathered to rank 0) and build a
-  // mesh-agnostic smoothed-aggregation AMG on it. Decomposition-agnostic: the CSR is keyed by GLOBAL
-  // cell id (periodic-wrapped neighbours), so any (weighted) ORB gives the SAME operator.
+  // Assemble the coarsest level's cut-cell operator as a GLOBAL CSR (gathered to rank 0) and build
+  // a mesh-agnostic smoothed-aggregation AMG on it. Decomposition-agnostic: the CSR is keyed by
+  // GLOBAL cell id (periodic-wrapped neighbours), so any (weighted) ORB gives the SAME operator.
   void buildAmg(Level& lv) {
-    int gbx = gnxF_, gby = gnyF_, gbz = gnzF_;  // bottom global dims (coarsen by the ratios above it)
+    int gbx = gnxF_, gby = gnyF_,
+        gbz = gnzF_;  // bottom global dims (coarsen by the ratios above it)
     for (int L = 0; L + 1 < (int)lv_.size(); ++L) {
       gbx /= lv_[L].ratio.x;
       gby /= lv_[L].ratio.y;
@@ -560,8 +562,8 @@ class CutcellMG {
       amg_->build(A);
     }
   }
-  // Solve the coarsest level with the agglomerated AMG: gather rhs -> rank 0, GraphAMG-preconditioned
-  // CG on the singular (mean-removed) Poisson, scatter the solution back.
+  // Solve the coarsest level with the agglomerated AMG: gather rhs -> rank 0,
+  // GraphAMG-preconditioned CG on the singular (mean-removed) Poisson, scatter the solution back.
   void graphAmgSolveBottom(Level& lv) {
     if (!amg_ && !distributed_)
       buildAmg(lv);
@@ -616,9 +618,9 @@ class CutcellMG {
     Kokkos::deep_copy(lv.x, hx);
   }
   // GraphAMG-preconditioned CG on the global bottom operator. For the periodic/all-Neumann case the
-  // operator is singular (constant null space) and the mean must be projected out of the rhs and the
-  // preconditioned residual (compatibility). With a Dirichlet outflow (removeMean_ == false) the
-  // operator is NON-singular and the projection must be SKIPPED — removing the constant from a
+  // operator is singular (constant null space) and the mean must be projected out of the rhs and
+  // the preconditioned residual (compatibility). With a Dirichlet outflow (removeMean_ == false)
+  // the operator is NON-singular and the projection must be SKIPPED — removing the constant from a
   // non-singular system returns a wrong bottom correction and the V-cycle around it diverges.
   // Runs on rank 0 only.
   void pcgAmg(std::vector<double>& b, std::vector<double>& x) {
@@ -683,7 +685,8 @@ class CutcellMG {
       all.resize((std::size_t)tot / sizeof(T));
     }
     MPI_Gatherv(local.data(), lbytes, MPI_BYTE, rank == 0 ? all.data() : nullptr,
-                rank == 0 ? bc.data() : nullptr, rank == 0 ? bd.data() : nullptr, MPI_BYTE, 0, comm_);
+                rank == 0 ? bc.data() : nullptr, rank == 0 ? bd.data() : nullptr, MPI_BYTE, 0,
+                comm_);
   }
 #endif
 
@@ -999,17 +1002,20 @@ class CutcellMG {
   // The geometric coarse hierarchy needs a cleanly-coarsening (equal-weight) ORB. Under a WEIGHTED
   // decomposition the coarse levels misalign, so the multilevel path is unavailable and only pure
   // RB-GS (nLevels==1) works. With this enabled, the coarsest level is solved by an AGGLOMERATED
-  // algebraic multigrid: the operator + rhs of the coarsest level are gathered to rank 0, solved by a
-  // mesh-agnostic smoothed-aggregation AMG (core::solver::GraphAMG, exact by construction on any
+  // algebraic multigrid: the operator + rhs of the coarsest level are gathered to rank 0, solved by
+  // a mesh-agnostic smoothed-aggregation AMG (core::solver::GraphAMG, exact by construction on any
   // decomposition), and the solution scattered back. With nLevels==1 this makes the whole pressure
   // solve mesh-independent AND decomposition-agnostic.
   bool useGraphAmgBottom_ = false;
   int gnxF_ = 0, gnyF_ = 0, gnzF_ = 0;  // GLOBAL fine dims (== local single-rank)
-  mutable std::shared_ptr<peclet::core::solver::GraphAMG> amg_;  // built once from the bottom operator
-  mutable peclet::core::solver::HostCsrOp amgA_;  // rank 0: the assembled global bottom operator (CG matvec)
+  mutable std::shared_ptr<peclet::core::solver::GraphAMG>
+      amg_;  // built once from the bottom operator
+  mutable peclet::core::solver::HostCsrOp
+      amgA_;  // rank 0: the assembled global bottom operator (CG matvec)
   mutable std::vector<int> amgOwnerCount_;  // rank 0: #bottom cells each rank owns (gather layout)
-  mutable std::vector<int> amgGlobalOfLocal_;  // this rank's bottom inner cells -> global bottom index
-  mutable int amgGlobalN_ = 0;                 // total bottom global cells (rank 0)
+  mutable std::vector<int>
+      amgGlobalOfLocal_;        // this rank's bottom inner cells -> global bottom index
+  mutable int amgGlobalN_ = 0;  // total bottom global cells (rank 0)
 #ifdef PECLET_FLOW_MPI
   MPI_Comm comm_ = MPI_COMM_NULL;
 #endif
