@@ -32,7 +32,7 @@ kref=4.2920
 M0={32:+0.99,48:+0.68,64:+0.598,96:+0.397,128:+0.299}   # mode-0 baselines (prior runs)
 print(f"Z&H K={kref}. Collocated: mode0 = plain avg (baseline), mode3 = wall-aware @ open-centroid + transpose.",flush=True)
 print(f"{'N':>4} | {'mode0 err%':>10} | {'mode3 err%':>10} | steps | secs",flush=True)
-prev_e=None
+prev_e,prev_N=None,None
 for N in (32,48,64,96,128):
     K,steps,secs=drag(N,3)
     e=100*(K-kref)/kref

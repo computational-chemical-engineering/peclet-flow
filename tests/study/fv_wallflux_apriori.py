@@ -307,7 +307,7 @@ Fex = reference()
 print(f"F_exact = {Fex:+.6e}   (mu * closed-surface integral of grad(ux).n, n fluid-outward)")
 print(f"{'N':>5} | {'A: axis-intercept':>17} {'ord':>5} | {'B: centroid-anchored':>20} {'ord':>5} | "
       f"{'central naive':>13} | {'sum|W|/4piR^2':>13}")
-pA = pB = None
+pA = pB = pN = None
 for N in (32, 64, 128, 192):
     r = run(N)
     eA = 100*(r["Fest"]-Fex)/abs(Fex); eB = 100*(r["FB"]-Fex)/abs(Fex)
