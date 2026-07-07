@@ -2,19 +2,21 @@
 /// @brief flow — cell-centred scalar transport (advection–diffusion) on the cut-cell grid.
 ///
 /// A transported scalar c (temperature, concentration, phase fraction) obeys, in the solver's
-/// divided-by-dt convention (dx = 1 grid units; physical diffusivity converted by the Python layer):
+/// divided-by-dt convention (dx = 1 grid units; physical diffusivity converted by the Python
+/// layer):
 ///
 ///   (1/dt)(c^{n+1} - c^n) + div(open u c) = div(open D grad c) + S
 ///
 /// Diffusion is backward-Euler implicit (an openness-weighted 7-band operator, solved by the same
 /// red-black Gauss–Seidel as the pressure Poisson — cutcellSmoothColor); advection is explicit,
-/// conservative flux-form, reusing the momentum limiter helpers (sadv::tvd / sou / fou_flux) with the
-/// MAC face-normal velocities (staggered: C[fd].u is the -fd face velocity, co-located with the face
-/// openness). Closed faces (openness 0) carry no flux and no diffusion, so an immersed solid is
-/// adiabatic (zero-flux) for free and solid cells stay frozen (A_C = 1/dt, all off-diagonals 0).
+/// conservative flux-form, reusing the momentum limiter helpers (sadv::tvd / sou / fou_flux) with
+/// the MAC face-normal velocities (staggered: C[fd].u is the -fd face velocity, co-located with the
+/// face openness). Closed faces (openness 0) carry no flux and no diffusion, so an immersed solid
+/// is adiabatic (zero-flux) for free and solid cells stay frozen (A_C = 1/dt, all off-diagonals 0).
 ///
 /// This header holds the field-agnostic kernels + the per-scalar state; the Solver owns the scalars
-/// and calls advanceScalars() at the end of step() with the just-projected divergence-free velocity.
+/// and calls advanceScalars() at the end of step() with the just-projected divergence-free
+/// velocity.
 #ifndef PECLET_FLOW_SCALAR_TRANSPORT_HPP
 #define PECLET_FLOW_SCALAR_TRANSPORT_HPP
 
@@ -31,7 +33,8 @@ namespace peclet::flow {
 enum class ScalarBc { Periodic = 0, Neumann = 1, Dirichlet = 2 };
 
 // One transported scalar. `c` aliases the Solver's registered field (fields_); the rest is private
-// scratch on the same G=2 block. Bands are double (a scalar is cheap; no float-quantization concern).
+// scratch on the same G=2 block. Bands are double (a scalar is cheap; no float-quantization
+// concern).
 struct ScalarField {
   std::string name;
   CCField c, cOld, b;                  // solution (registered), time base c^n, rhs

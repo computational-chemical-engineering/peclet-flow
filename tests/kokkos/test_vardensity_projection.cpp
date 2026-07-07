@@ -3,9 +3,9 @@
 // (any inconsistency between the momentum face density, the force face value, and the projection
 // face coefficient shows up as a spurious velocity); (b) uniform-rho reduction — the varRho path
 // with rho == rho_ reproduces the constant-density solver.
-#include <Kokkos_Core.hpp>
 #include <cmath>
 #include <cstdio>
+#include <Kokkos_Core.hpp>
 #include <vector>
 
 #include "flow_ibm.hpp"

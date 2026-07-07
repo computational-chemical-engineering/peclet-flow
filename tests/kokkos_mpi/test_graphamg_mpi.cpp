@@ -1,12 +1,13 @@
 // Decomposition-agnostic pressure solve via the agglomerated GraphAMG bottom solve.
 //
 // The geometric coarse hierarchy needs a cleanly-coarsening (equal-weight) ORB, so under a WEIGHTED
-// decomposition only pure RB-GS (nLevels==1) is available -- and RB-GS alone is NOT mesh-independent.
-// With set_pressure_graph_amg(true), the coarsest level (== the whole grid at nLevels==1) is solved by
-// a mesh-agnostic smoothed-aggregation AMG on the operator gathered to rank 0: decomposition-agnostic
-// AND mesh-independent. This test runs Stokes flow through a sphere packing on a WEIGHTED ORB and
-// checks the permeability equals the single-rank reference (np=1 bit-exact-ish; np>1 to the
-// reduction-order floor), for BOTH the RB-GS and the GraphAMG bottom. Build with -DPECLET_FLOW_MPI.
+// decomposition only pure RB-GS (nLevels==1) is available -- and RB-GS alone is NOT
+// mesh-independent. With set_pressure_graph_amg(true), the coarsest level (== the whole grid at
+// nLevels==1) is solved by a mesh-agnostic smoothed-aggregation AMG on the operator gathered to
+// rank 0: decomposition-agnostic AND mesh-independent. This test runs Stokes flow through a sphere
+// packing on a WEIGHTED ORB and checks the permeability equals the single-rank reference (np=1
+// bit-exact-ish; np>1 to the reduction-order floor), for BOTH the RB-GS and the GraphAMG bottom.
+// Build with -DPECLET_FLOW_MPI.
 #include <mpi.h>
 
 #include <cmath>
@@ -46,10 +47,14 @@ static std::vector<double> packingSdf(double rfrac = 0.18) {
 }
 
 static void configure(IbmSolver& s, bool amg) {
-  s.setRho(RHO); s.setMu(MU); s.setDt(DT); s.setBodyForce(F, 0, 0);
-  s.setAdvection(false); s.setVelocityIterations(80);
-  s.setPressureLevels(1);                  // pure RB-GS geometrically (decomposition-agnostic)
-  s.setPressureGraphAmg(amg);              // ... upgraded to a mesh-agnostic algebraic coarse solve
+  s.setRho(RHO);
+  s.setMu(MU);
+  s.setDt(DT);
+  s.setBodyForce(F, 0, 0);
+  s.setAdvection(false);
+  s.setVelocityIterations(80);
+  s.setPressureLevels(1);      // pure RB-GS geometrically (decomposition-agnostic)
+  s.setPressureGraphAmg(amg);  // ... upgraded to a mesh-agnostic algebraic coarse solve
   s.setPressurePcg(true, 400, 1e-9);
 }
 

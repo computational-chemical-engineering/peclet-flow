@@ -1,8 +1,8 @@
 // Field registry on the flow Solver — the named directory of cell fields (multiphysics container).
 // Verifies the built-in fields are adopted, a user field allocates + round-trips through the inner
 // region (scatterInner/gatherInner), and fieldView aliases the live buffer.
-#include <Kokkos_Core.hpp>
 #include <cstdio>
+#include <Kokkos_Core.hpp>
 #include <vector>
 
 #include "flow_ibm.hpp"

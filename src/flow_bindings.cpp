@@ -72,10 +72,10 @@ static std::vector<double> grid_in(nb::ndarray<double, nb::f_contig> a) {
 
 // Zero-copy export of a registered field's padded device buffer as a Fortran-order 3-D array of the
 // full block shape (ex,ey,ez) = (nx+2G, ny+2G, nz+2G), x-fastest strides {1,ex,ex*ey}. Includes the
-// ghost band (the flat buffer is contiguous; a ghost-stripped view would not be). The capsule owns a
-// copy of the managed CCField, so the allocation outlives the array — host → NumPy referencing the
-// buffer, device → DLPack for CuPy/torch. Mirrors peclet::core::python::view_to_ndarray but with an
-// explicit 3-D reshape of the flat 1-D field.
+// ghost band (the flat buffer is contiguous; a ghost-stripped view would not be). The capsule owns
+// a copy of the managed CCField, so the allocation outlives the array — host → NumPy referencing
+// the buffer, device → DLPack for CuPy/torch. Mirrors peclet::core::python::view_to_ndarray but
+// with an explicit 3-D reshape of the flat 1-D field.
 template <class S>
 static auto field3d_out(S& s, peclet::flow::CCField f) {
   namespace pcp = peclet::core::python;
@@ -127,13 +127,14 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Toggle the rotational incremental-pressure projection.")
       .def("set_pressure_warmstart", &S::setPressureWarmstart, nb::arg("on"),
            "Seed each pressure solve from the previous step's phi (default off).")
-      .def("set_face_interp", &S::setFaceInterp, nb::arg("mode"),
-           "Collocated cut-cell projection treatment: 0 = plain averaging + central-difference "
-           "grad(P) (default), 1 = wall-aware cell->face map only (ablation), 2 = wall-aware map + "
-           "its transpose (face-centre; ablation), 3 = mode 2 at the open-face-centroid (FV "
-           "constraint, FD momentum), 4 = fully-FV (mode-3 projection + second-order wall "
-           "viscous-flux deferred correction on the momentum; targets 2nd-order drag). No effect on "
-           "the staggered solver.")
+      .def(
+          "set_face_interp", &S::setFaceInterp, nb::arg("mode"),
+          "Collocated cut-cell projection treatment: 0 = plain averaging + central-difference "
+          "grad(P) (default), 1 = wall-aware cell->face map only (ablation), 2 = wall-aware map + "
+          "its transpose (face-centre; ablation), 3 = mode 2 at the open-face-centroid (FV "
+          "constraint, FD momentum), 4 = fully-FV (mode-3 projection + second-order wall "
+          "viscous-flux deferred correction on the momentum; targets 2nd-order drag). No effect on "
+          "the staggered solver.")
       .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
            "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
            "explicit-lagged wall term). Steady state is independent of w.")
@@ -152,12 +153,16 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def("set_deferred_correction", &S::setDeferredCorrection, nb::arg("on"),
            "Deferred-correction advection: True (default) = 2nd order (implicit FOU + explicit "
            "high-order correction, the high-order scheme being SOU by default or Koren TVD via "
-           "set_advection_scheme); False = pure implicit FOU (1st-order upwind, more dissipative but "
+           "set_advection_scheme); False = pure implicit FOU (1st-order upwind, more dissipative "
+           "but "
            "unconditionally stable at sharp shear layers).")
       .def("set_backflow_stabilization", &S::setBackflowStab, nb::arg("beta"),
-           "Outflow backflow-stabilization coefficient (Bazilevs 2009 / Esmaily-Moghadam 2011): beta "
-           "in [0,1] scales the dissipative outflow term that prevents backflow divergence when flow "
-           "reverses at the outlet (e.g. a separated wake / BFS recirculation). Default 0.2; 0 = off. "
+           "Outflow backflow-stabilization coefficient (Bazilevs 2009 / Esmaily-Moghadam 2011): "
+           "beta "
+           "in [0,1] scales the dissipative outflow term that prevents backflow divergence when "
+           "flow "
+           "reverses at the outlet (e.g. a separated wake / BFS recirculation). Default 0.2; 0 = "
+           "off. "
            "Inert where the outlet is purely outgoing.")
       .def("set_pressure_solver_params", &S::setPressureIterations, nb::arg("iters"),
            "Set the pressure smoother iteration count.")
@@ -203,8 +208,10 @@ static void bind_solver(nb::module_& m, const char* name) {
           [](S& s, nb::ndarray<double, nb::f_contig> sdf) { s.setPressureGeometry(grid_in(sdf)); },
           nb::arg("sdf"),
           "Set an all-fluid SDF for the cut-cell pressure operator without an immersed solid (the "
-          "channel/BFS domain-BC path). For a no-slip immersed BODY in an inflow/outflow domain, call "
-          "set_solid(sdf, cutcell_pressure=True) instead -- do NOT also call this (a second geometry "
+          "channel/BFS domain-BC path). For a no-slip immersed BODY in an inflow/outflow domain, "
+          "call "
+          "set_solid(sdf, cutcell_pressure=True) instead -- do NOT also call this (a second "
+          "geometry "
           "setter overwrites the SDF and wipes the solid).")
       .def(
           "set_solid",
@@ -214,7 +221,8 @@ static void bind_solver(nb::module_& m, const char* name) {
           },
           nb::arg("sdf"), nb::arg("cutcell_pressure") = false, nb::arg("pressure_coarse") = "const",
           "Set the solid SDF as a Fortran-order (nx,ny,nz) float64 array (negative inside the "
-          "solid, positive in fluid). cutcell_pressure=True enables the open-face-weighted cut-cell "
+          "solid, positive in fluid). cutcell_pressure=True enables the open-face-weighted "
+          "cut-cell "
           "pressure operator (proper no-slip); it composes with domain BCs, so this is the single "
           "call for a no-slip immersed body in an inflow/outflow domain.")
       .def(
@@ -288,7 +296,8 @@ static void bind_solver(nb::module_& m, const char* name) {
           "Write a Fortran-order (nx,ny,nz) float64 array into a registered field's inner region "
           "(ghosts refilled on the next exchange_field/step).")
       .def(
-          "field_view", [](S& s, const std::string& name) { return field3d_out(s, s.fieldView(name)); },
+          "field_view",
+          [](S& s, const std::string& name) { return field3d_out(s, s.fieldView(name)); },
           nb::arg("name"),
           "Zero-copy view of a registered field's full padded buffer as a Fortran-order "
           "(nx+2g, ny+2g, nz+2g) array (g = ghost_width); host → NumPy, device → DLPack (CuPy).")
@@ -300,8 +309,10 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "exchange_field_add", [](S& s, const std::string& name) { s.exchangeFieldAdd(name); },
           nb::arg("name"),
-          "Add-reduce halo: fold ghost-layer deposits back onto their owner (cross-rank + periodic). "
-          "The particle->grid deposition primitive for MPI CFD-DEM; single-rank non-periodic no-op.")
+          "Add-reduce halo: fold ghost-layer deposits back onto their owner (cross-rank + "
+          "periodic). "
+          "The particle->grid deposition primitive for MPI CFD-DEM; single-rank non-periodic "
+          "no-op.")
       // --- Scalar transport (advection-diffusion) ----------------------------------------------
       .def(
           "add_scalar",
@@ -311,7 +322,8 @@ static void bind_solver(nb::module_& m, const char* name) {
           nb::arg("name"), nb::arg("diffusivity") = 0.0, nb::arg("scheme") = 1,
           nb::arg("iters") = 50,
           "Register a transported scalar (temperature/concentration/…): constant diffusivity (grid "
-          "units), advection scheme 0=FOU/1=Koren TVD/2=SOU, and RB-GS diffusion sweeps. The scalar "
+          "units), advection scheme 0=FOU/1=Koren TVD/2=SOU, and RB-GS diffusion sweeps. The "
+          "scalar "
           "is a registered field (get_field/set_field/field_view). Requires geometry "
           "(set_solid/set_pressure_geometry) for the openness-weighted operators.")
       .def(
@@ -348,15 +360,15 @@ static void bind_solver(nb::module_& m, const char* name) {
           nb::arg("params") = std::vector<double>{}, nb::arg("field2") = std::string{},
           "Register a device closure writing a property/body-force field from input field(s). "
           "target: a registered field (a property 'mu'/'rho'/… or a body-force component "
-          "'force_x'/'force_y'/'force_z'). kind: 'linear' (params [p0,p1,p2]: p0+p1*field+p2*field2), "
+          "'force_x'/'force_y'/'force_z'). kind: 'linear' (params [p0,p1,p2]: "
+          "p0+p1*field+p2*field2), "
           "'boussinesq' (params [rho0,g,beta,T0]: rho0*g*beta*(field-T0) buoyancy), 'arrhenius' "
           "(params [mu_ref,B,Tref]: mu_ref*exp(B*(1/field-1/Tref))). Applied at the top of step().")
       .def(
           "set_property_table",
           [](S& s, const std::string& target, const std::string& field,
-             const std::vector<double>& x, const std::vector<double>& y) {
-            s.setPropertyTable(target, field, x, y);
-          },
+             const std::vector<double>& x,
+             const std::vector<double>& y) { s.setPropertyTable(target, field, x, y); },
           nb::arg("target"), nb::arg("field"), nb::arg("x"), nb::arg("y"),
           "Register a tabulated property: target = piecewise-linear interpolation of (x, y) at the "
           "input field value (x ascending, clamped at the ends).")
@@ -365,13 +377,16 @@ static void bind_solver(nb::module_& m, const char* name) {
           "Apply all registered property/force closures now (also done at the top of step()).")
       .def(
           "enable_cell_force", [](S& s) { s.enableCellForce(); },
-          "Allocate + register the per-cell body-force fields force_x/force_y/force_z and route them "
+          "Allocate + register the per-cell body-force fields force_x/force_y/force_z and route "
+          "them "
           "into the momentum RHS, for an external writer (e.g. CFD-DEM drag feedback) to fill "
           "directly via field_view('force_z'). They persist across steps until overwritten.")
       .def(
           "enable_drag", [](S& s) { s.enableDrag(); },
-          "Enable implicit (semi-implicit) linear drag for CFD-DEM: allocate the per-cell 'drag_beta' "
-          "field (added to the momentum diagonal so a -beta*(u-u_p) source is treated implicitly -> "
+          "Enable implicit (semi-implicit) linear drag for CFD-DEM: allocate the per-cell "
+          "'drag_beta' "
+          "field (added to the momentum diagonal so a -beta*(u-u_p) source is treated implicitly "
+          "-> "
           "unconditionally stable for the stiff beta of a dense bed) plus force_x/y/z (which carry "
           "beta*u_p, the RHS target). Fill 'drag_beta' and 'force_*' via field_view each step.")
       .def(
@@ -380,7 +395,8 @@ static void bind_solver(nb::module_& m, const char* name) {
             s.setPropertyMode(mode == "variable", harmonic);
           },
           nb::arg("mode") = "variable", nb::arg("harmonic") = false,
-          "Enable variable-coefficient momentum (variable viscosity): mode 'variable' binds the 'mu' "
+          "Enable variable-coefficient momentum (variable viscosity): mode 'variable' binds the "
+          "'mu' "
           "field (get/set_field('mu')) into the diffusion operator; 'constant' reverts. harmonic = "
           "harmonic face-viscosity mean (continuous shear stress across a jump) vs arithmetic. A "
           "closure targeting 'mu' enables this automatically. The incremental-rotational pressure "
@@ -428,23 +444,30 @@ static void bind_solver(nb::module_& m, const char* name) {
           "the projection enforces d(eps)/dt + div(eps u) = 0 instead of div(u)=0, so the fluid "
           "velocity is NOT solenoidal where the void fraction changes (bubbling/expansion). Binds "
           "the 'eps' field (void fraction from the particle deposition, created seeded to 1 if "
-          "absent; the coupling writes it each step BEFORE step()). eps=1 everywhere reduces exactly "
+          "absent; the coupling writes it each step BEFORE step()). eps=1 everywhere reduces "
+          "exactly "
           "to div(u)=0. Pair with max_porous_residual() for the meaningful convergence check.")
       .def("max_open_divergence", &S::maxOpenDivergence,
            "Return the max cut-cell velocity-flux divergence max|div(open*u)|. With porous "
            "continuity this is NOT ~0 -- it equals -d(eps)/dt (the bed expanding). Use "
            "max_porous_residual() for the continuity residual.")
       .def(
-          "set_pressure_underrelax", [](S& s, double w) { s.setPressureUnderRelax(w); }, nb::arg("omega"),
-          "Pressure under-relaxation factor omega_p in (0,1] for the incremental accumulation (MFIX "
-          "§10.1); 1.0 = off (default). <1 damps the incremental predictor overshoot on stiff porous+drag.")
+          "set_pressure_underrelax", [](S& s, double w) { s.setPressureUnderRelax(w); },
+          nb::arg("omega"),
+          "Pressure under-relaxation factor omega_p in (0,1] for the incremental accumulation "
+          "(MFIX "
+          "§10.1); 1.0 = off (default). <1 damps the incremental predictor overshoot on stiff "
+          "porous+drag.")
       .def(
           "set_porous_deps_dt", [](S& s, bool on) { s.setPorousDepsDt(on); }, nb::arg("on"),
-          "Include (default True) or drop the d(eps)/dt source in the porous projection RHS. Drop it "
-          "to enforce div(eps u)=0 when the per-cell eps deposit's time-derivative is too jagged and "
+          "Include (default True) or drop the d(eps)/dt source in the porous projection RHS. Drop "
+          "it "
+          "to enforce div(eps u)=0 when the per-cell eps deposit's time-derivative is too jagged "
+          "and "
           "destabilizes the eps-weighted pressure solve.")
       .def("sync_porous_prev", &S::syncPorousPrev,
-           "Reseed eps^n = eps^{n+1} (d(eps)/dt=0 this step) — call once after the first void-fraction "
+           "Reseed eps^n = eps^{n+1} (d(eps)/dt=0 this step) — call once after the first "
+           "void-fraction "
            "deposition so step 0 has no spurious source.")
       .def("max_porous_residual", &S::maxPorousResidual,
            "Residual of the volume-averaged continuity max|div(open*eps*u) + d(eps)/dt| -- the "
@@ -466,7 +489,8 @@ static void bind_solver(nb::module_& m, const char* name) {
             auto o = s.blockOrigin();
             return std::vector<int>{o[0], o[1], o[2]};
           },
-          "This rank's inner-block origin in GLOBAL cells ([0,0,0] single-rank). Shift the coupling "
+          "This rank's inner-block origin in GLOBAL cells ([0,0,0] single-rank). Shift the "
+          "coupling "
           "deposit origin by this so particles in global coordinates land in the local block.")
       .def(
           "get_spacing", [](S&) { return std::vector<double>{1.0, 1.0, 1.0}; },
@@ -490,7 +514,8 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "rebalance_by_weights",
           [](S& s, const std::vector<double>& w) { s.rebalanceByWeights(w); }, nb::arg("weights"),
-          "Dynamic load balancing: redistribute the solver's state onto the weighted ORB of per-cell "
+          "Dynamic load balancing: redistribute the solver's state onto the weighted ORB of "
+          "per-cell "
           "weights (global x-fastest, gnx*gny*gnz). Pass fluid work + gamma*particle_count and the "
           "coupled dem migrates onto the SAME partition from the same array. State-preserving "
           "(bit-exact at np=1, reduction floor at np>1).")

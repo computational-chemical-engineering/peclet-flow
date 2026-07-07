@@ -18,8 +18,8 @@
 
 namespace peclet::flow {
 
-// const view of the (float) IBM stencil coefficients (same alias mac_ibm.hpp defines; this header is
-// included first, so declare it here for the mode-4 stencilMatvec).
+// const view of the (float) IBM stencil coefficients (same alias mac_ibm.hpp defines; this header
+// is included first, so declare it here for the mode-4 stencilMatvec).
 using MConst = Kokkos::View<const float*, CCMem>;
 
 // Average cell-centered velocities onto the staggered face layout: uf(i) is the velocity at the low
@@ -77,7 +77,7 @@ KOKKOS_INLINE_FUNCTION int wallAwareFaceStencil(CCConst sdf, long i, long sa, in
     return 2;
   }
   if (!fm && !fp)
-    return 0;  // fully solid face (openness 0; value irrelevant)
+    return 0;                       // fully solid face (openness 0; value irrelevant)
   const long ic = fp ? i : i - sa;  // the fluid cell
   const double sc = fp ? sp : sm, ss = fp ? sm : sp;
   double th = sc / (sc - ss);  // axis intercept from the fluid center (ibmFillEntry convention)
@@ -276,9 +276,9 @@ inline void buildCellFraction(CCField cs, CCConst sdf, C3 e, int g) {
         // fully clear one cell away on all axes -> not a cut cell; cheap exact classification
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const bool f0 = sc >= 0.0;
-        const bool cut =
-            (sdf(i + sx) >= 0.0) != f0 || (sdf(i - sx) >= 0.0) != f0 || (sdf(i + sy) >= 0.0) != f0 ||
-            (sdf(i - sy) >= 0.0) != f0 || (sdf(i + sz) >= 0.0) != f0 || (sdf(i - sz) >= 0.0) != f0;
+        const bool cut = (sdf(i + sx) >= 0.0) != f0 || (sdf(i - sx) >= 0.0) != f0 ||
+                         (sdf(i + sy) >= 0.0) != f0 || (sdf(i - sy) >= 0.0) != f0 ||
+                         (sdf(i + sz) >= 0.0) != f0 || (sdf(i - sz) >= 0.0) != f0;
         if (!cut) {
           cs(i) = sc >= 0.0 ? 1.0 : 0.0;
           return;
@@ -287,7 +287,8 @@ inline void buildCellFraction(CCField cs, CCConst sdf, C3 e, int g) {
         for (int j0 = 0; j0 < 4; ++j0)
           for (int j1 = 0; j1 < 4; ++j1)
             for (int j2 = 0; j2 < 4; ++j2) {
-              const double o0 = -0.375 + 0.25 * j0, o1 = -0.375 + 0.25 * j1, o2 = -0.375 + 0.25 * j2;
+              const double o0 = -0.375 + 0.25 * j0, o1 = -0.375 + 0.25 * j1,
+                           o2 = -0.375 + 0.25 * j2;
               if (ccSampleExt(sdf, e, x + o0, y + o1, z + o2) > 0.0)
                 ++nf;
             }
@@ -313,7 +314,7 @@ inline void fvViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCCon
         const long st[3] = {sx, sy, sz};
         const long i = (long)x + (long)y * sy + (long)z * sz;
         CCConst oa[3] = {ox, oy, oz};
-        double W[3], of[3];       // fragment normal per axis; low/high face openness
+        double W[3], of[3];  // fragment normal per axis; low/high face openness
         double diag = 0.0, offs = 0.0, aw = 0.0;
         for (int a = 0; a < 3; ++a) {
           const double om = oa[a](i), op = oa[a](i + st[a]);
@@ -324,7 +325,8 @@ inline void fvViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCCon
           aw += (W[a] < 0.0 ? -W[a] : W[a]);
         }
         double wall = 0.0;
-        if (aw > 1e-12) {  // centroid-anchored wall drag mu·Σ_a W_a g_a (a-priori-validated: fv_wallflux_apriori.py)
+        if (aw > 1e-12) {  // centroid-anchored wall drag mu·Σ_a W_a g_a (a-priori-validated:
+                           // fv_wallflux_apriori.py)
           double nx = 0.5 * (sdf(i + sx) - sdf(i - sx));
           double ny = 0.5 * (sdf(i + sy) - sdf(i - sy));
           double nz = 0.5 * (sdf(i + sz) - sdf(i - sz));
@@ -353,9 +355,9 @@ inline void fvViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCCon
             }
           }
         }
-        // FV viscous operator = idt·cs·U + μ·[Σo_f(U_i−U_nbr) − Σ_a W_a g_a].  The wall term sign is
-        // −μ Σ W_a g_a: from ∫_CV −μ∇²u = −μ[flux_out − flux_in], the wall flux g_a enters with a
-        // minus, so a resistive wall (∂u/∂n<0) ADDS to the operator (dissipative), matching the
+        // FV viscous operator = idt·cs·U + μ·[Σo_f(U_i−U_nbr) − Σ_a W_a g_a].  The wall term sign
+        // is −μ Σ W_a g_a: from ∫_CV −μ∇²u = −μ[flux_out − flux_in], the wall flux g_a enters with
+        // a minus, so a resistive wall (∂u/∂n<0) ADDS to the operator (dissipative), matching the
         // interior −μLap. (+ would be anti-dissipative and blows the solve up.)
         Lu(i) = idt * cs(i) * U(i) + mu * (diag * U(i) - offs - wall);
         (void)of;
@@ -376,8 +378,8 @@ KOKKOS_INLINE_FUNCTION double eQuad(double xx, double a1, double a2, double a3) 
 // image point's 3×3 transverse stencil straddles the wall, a biased-linear `embed_interpolate`
 // anchored at the fluid home cell (uses only fluid cells); if even the home cell is solid, the
 // degenerate 1-point estimate through the cell centre. A-priori-validated O(h²) with 0% degenerate
-// on the Stokes sphere (tests/study/fv_wallflux_apriori.py, variant C). Interior/transverse reads of
-// U and sdf must be halo-filled (the velocity block carries G=2 ghosts).
+// on the Stokes sphere (tests/study/fv_wallflux_apriori.py, variant C). Interior/transverse reads
+// of U and sdf must be halo-filled (the velocity block carries G=2 ghosts).
 KOKKOS_INLINE_FUNCTION double embedDirichletGradient(CCConst U, CCConst sdf, C3 e, int x, int y,
                                                      int z, double nx, double ny, double nz,
                                                      double px, double py, double pz) {
@@ -425,9 +427,9 @@ KOKKOS_INLINE_FUNCTION double embedDirichletGradient(CCConst U, CCConst sdf, C3 
       for (int b2 = 0; b2 < 3; ++b2)
         full = full && sf[a2][b2];
     const bool home = sf[1][1];
-    const double vbq = eQuad(lz, eQuad(ly, vv[0][0], vv[1][0], vv[2][0]),
-                             eQuad(ly, vv[0][1], vv[1][1], vv[2][1]),
-                             eQuad(ly, vv[0][2], vv[1][2], vv[2][2]));
+    const double vbq =
+        eQuad(lz, eQuad(ly, vv[0][0], vv[1][0], vv[2][0]), eQuad(ly, vv[0][1], vv[1][1], vv[2][1]),
+              eQuad(ly, vv[0][2], vv[1][2], vv[2][2]));
     double vbl = vv[1][1];  // biased-linear embed_interpolate (fluid-side only), anchored at home
     {
       const int fp = ly >= 0.0 ? 2 : 0, fm = ly >= 0.0 ? 0 : 2;
@@ -460,14 +462,15 @@ KOKKOS_INLINE_FUNCTION double embedDirichletGradient(CCConst U, CCConst sdf, C3 
   return U(ii) / d0;
 }
 
-// EMBED viscous operator (setFaceInterp(5)): identical to fvViscousApply except the wall drag is the
-// TRUE-NORMAL Basilisk gradient (embedDirichletGradient) rather than the axis-by-axis fragment-normal
-// estimate. Per cut cell the fragment area is |W| = |o_{a−}−o_{a+}| (divergence-theorem normal) and
-// the wall flux is +μ·area·d(U)/dn — algebraically the −μ·(W·∇U) of fvViscousApply but with the
-// O(h²) true-normal derivative in place of the O(h) axis reconstruction. Interior cells (area→0)
-// reduce to idt·cs·U + μ(diag·U − offs) exactly, so the mode-0 defect vanishes there.
-inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCConst ox, CCConst oy,
-                              CCConst oz, double mu, double idt, C3 e, int g) {
+// EMBED viscous operator (setFaceInterp(5)): identical to fvViscousApply except the wall drag is
+// the TRUE-NORMAL Basilisk gradient (embedDirichletGradient) rather than the axis-by-axis
+// fragment-normal estimate. Per cut cell the fragment area is |W| = |o_{a−}−o_{a+}|
+// (divergence-theorem normal) and the wall flux is +μ·area·d(U)/dn — algebraically the −μ·(W·∇U) of
+// fvViscousApply but with the O(h²) true-normal derivative in place of the O(h) axis
+// reconstruction. Interior cells (area→0) reduce to idt·cs·U + μ(diag·U − offs) exactly, so the
+// mode-0 defect vanishes there.
+inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCConst ox,
+                              CCConst oy, CCConst oz, double mu, double idt, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -497,8 +500,8 @@ inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CC
             ny /= nn;
             nz /= nn;
             const double sdi = sdf(i);  // foot-point (boundary centroid proxy) offset, cell units
-            const double dudn =
-                embedDirichletGradient(U, sdf, e, x, y, z, nx, ny, nz, -sdi * nx, -sdi * ny, -sdi * nz);
+            const double dudn = embedDirichletGradient(U, sdf, e, x, y, z, nx, ny, nz, -sdi * nx,
+                                                       -sdi * ny, -sdi * nz);
             wall = area * dudn;  // +μ·area·dudn == −μ·(W·∇U) with the true-normal derivative
           }
         }
@@ -509,8 +512,8 @@ inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CC
 // 7-point stencil matvec y = M·u using the stored (rs-scaled) IBM operator coefficients. Used to
 // form the mode-4 defect-correction RHS  b = M·u^k − rs·L_FV(u^k) + rs·b_FV, whose fixed point
 // satisfies L_FV·u* = b_FV exactly, with M only the (stable, small-cell-safe) preconditioner.
-inline void stencilMatvec(CCField y, CCConst u, MConst AC, MConst AW, MConst AE, MConst AS, MConst AN,
-                          MConst AB, MConst AT, C3 e, int g) {
+inline void stencilMatvec(CCField y, CCConst u, MConst AC, MConst AW, MConst AE, MConst AS,
+                          MConst AN, MConst AB, MConst AT, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -541,9 +544,9 @@ inline void subtractField(CCField u, CCConst d, C3 e, int g) {
 // interior (o=1) this is the central difference ½(p(i+sa)−p(i−sa)); at a CUT cell with one closed
 // face (o=0) it returns the OPEN face gradient at FULL weight (not the plain projectCorrectCenter's
 // ½), which is the flux-consistent pressure force the approximate projection needs at the embedded
-// boundary — the O(h) under-correction the plain map makes there (analysis defect (b)). Used for both
-// the incremental −grad(P^n) predictor and the projection correction of the EMBED path (mode 6), so
-// the two stay the openness-adjoint of the fs-weighted divergence constraint.
+// boundary — the O(h) under-correction the plain map makes there (analysis defect (b)). Used for
+// both the incremental −grad(P^n) predictor and the projection correction of the EMBED path (mode
+// 6), so the two stay the openness-adjoint of the fs-weighted divergence constraint.
 inline void centerGradOpen(CCField out, CCConst p, CCConst o, int axis, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
@@ -559,7 +562,8 @@ inline void centerGradOpen(CCField out, CCConst p, CCConst o, int axis, C3 e, in
 }
 
 // u,v,w -= openness-weighted cell pressure gradient of phi (centerGradOpen per axis). The embed
-// analogue of projectCorrectCenter: the cut-cell cell velocity gets the full open-face pressure force.
+// analogue of projectCorrectCenter: the cut-cell cell velocity gets the full open-face pressure
+// force.
 inline void projectCorrectCenterOpen(CCField u, CCField v, CCField w, CCConst phi, CCConst ox,
                                      CCConst oy, CCConst oz, C3 e, int g) {
   CCExec space;
