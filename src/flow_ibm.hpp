@@ -726,6 +726,8 @@ class Solver {
       return 0.0;
     for (int c = 0; c < 3; ++c)
       fillVelGhosts(c, 0);
+    fillPorousEpsGhosts();  // the SAME eps ghost policy the projection used (the coupling deposit
+                            // rewrites the ghosts between project() and this diagnostic)
     divergOpenEps(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
                   CCConst(oz_), CCConst(epsField_), div_, e_, G);
     {  // add back the SAME d(eps)/dt source the projection used (depsdt_ from the last project())
@@ -800,6 +802,29 @@ class Solver {
           applyScalarBcFace(f, face / 2, face % 2, 1, 0.0);  // type 1 = Neumann copy
   }
   void fillMuGhosts() { fillPropGhosts(muField_); }
+  // Eps ghost policy for the porous (volume-averaged) machinery. Periodic/halo base fill, then at
+  // non-periodic domain faces: wall -> zero-gradient; INFLOW/OUTFLOW -> mirror around 1 so the
+  // arithmetic face mean is EXACTLY 1 (the boundary is pure gas: below the distributor and in the
+  // freeboard eps = 1, so a prescribed inflow velocity is the SUPERFICIAL gas velocity and its face
+  // flux is open_f*1*u — the Kuipers/MFIX distributor convention). Every consumer — the projection
+  // RHS divergence, the Poisson coefficients, and maxPorousResidual — must use THIS fill: the
+  // external deposit writes its own leakage into these ghosts each step, and any two consumers
+  // reading different ghost values enforce two different constraints, which leaves an irreducible
+  // residual (eps_f_rhs - eps_f_resid)*u_in pinned at the distributor row and feeds gas at
+  // eps_f*U instead of U.
+  void fillPorousEpsGhosts() {
+    fillGhosts(epsField_);
+    if (!distributed_)
+      for (int face = 0; face < 6; ++face) {
+        const int t = bc_[face];
+        if (t == 0)
+          continue;
+        if (t == 2 || t == 3)
+          applyScalarBcFace(epsField_, face / 2, face % 2, 2, 1.0);  // open face: face eps == 1
+        else
+          applyScalarBcFace(epsField_, face / 2, face % 2, 1, 0.0);  // wall: zero-gradient
+      }
+  }
   // Staggered face stride of velocity component c (the -c face of cell i pairs cells i and i-s).
   long strideOf(int c) const { return (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y; }
   // The face-property accessor for the momentum stencil of component c: mu constant-or-field
@@ -1531,11 +1556,14 @@ class Solver {
     } else {
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);
-      if (porous_)  // volume-averaged continuity: div(open*eps*u*), constraint div(eps
-                    // u)=-d(eps)/dt
+      if (porous_) {            // volume-averaged continuity: div(open*eps*u*), constraint div(eps
+                                // u)=-d(eps)/dt
+        fillPorousEpsGhosts();  // BEFORE the divergence — one eps ghost policy for RHS,
+                                // coefficients and residual (the deposit rewrites these ghosts
+                                // every step)
         divergOpenEps(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
                       CCConst(oz_), CCConst(epsField_), div_, e_, G);
-      else
+      } else
         divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
                    CCConst(oz_), div_, e_, G);
     }
@@ -1593,7 +1621,9 @@ class Solver {
     // momentum diagonal A_P = idt+beta (SIMPLE/PISO-with-implicit-drag; stiff drag -> w_f->0 -> the
     // drag holds the velocity, stable). beta==0 reduces exactly to the plain eps-weighted operator.
     if (porous_) {
-      fillPropGhosts(epsField_);
+      // eps ghosts were filled by fillPorousEpsGhosts() before the divergence above — the SAME
+      // ghost values must feed the coefficient bridge (face eps == 1 at open domain faces), or the
+      // operator and the RHS disagree at the boundary rows.
       copyBlockShifted(eps1_, e1_, CCConst(epsField_), e_, G - 1);
       if (hasDrag_) {
         fillPropGhosts(dragBeta_);

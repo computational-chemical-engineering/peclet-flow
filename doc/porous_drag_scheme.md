@@ -58,6 +58,17 @@ any β. `ε ≡ 1, β ≡ 0` reduces every factor to 1.0 in floating point: the 
 recovered identically. `∂ε/∂t = (ε^{n+1}−ε^n)/dt` from the deposited fields (`sync_porous_prev()`
 seeds `ε^n` after the first deposition).
 
+**Boundary-face ε (the distributor contract).** All porous consumers — the RHS divergence, the
+Poisson coefficients, and `max_porous_residual` — read the eps field's ghosts through ONE fill
+(`fillPorousEpsGhosts`): periodic/halo base, zero-gradient at walls, and **mirror-around-1 at
+inflow/outflow faces so the arithmetic face mean is exactly 1** — the boundary is pure gas (below
+the distributor plate / in the freeboard), so a prescribed inflow velocity is the **superficial**
+gas velocity and the inlet face flux is `open_f·1·u_in` (the Kuipers/MFIX convention). Before this
+policy the RHS read the coupling deposit's ghost leakage while the residual read zero-gradient
+ghosts: two different constraints, leaving an irreducible residual `(ε_f^{rhs} − ε_f^{resid})·u_in`
+pinned at the distributor row and feeding the bed only `ε_f·U` instead of `U` (a bed under-fed by
+30–60%, with the target flux flickering with the bottom grains' deposit each step).
+
 ## 3. Pressure solver
 
 Geometric multigrid (`CutcellMG`): **red-black Gauss–Seidel** smoother, **rediscretized** coarse
