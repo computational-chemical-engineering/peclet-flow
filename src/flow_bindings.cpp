@@ -438,6 +438,11 @@ static void bind_solver(nb::module_& m, const char* name) {
           "ghost_width", [](S& s) { return s.ghostWidth(); },
           "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")
       .def(
+          "has_cutcell_pressure", [](S& s) { return s.hasCutcellPressure(); },
+          "True once the cut-cell pressure operator exists (set_solid or set_pressure_geometry was "
+          "called). The porous continuity requires it; the coupling driver auto-sets an all-fluid "
+          "geometry when absent.")
+      .def(
           "set_porous_continuity", [](S& s, bool on) { s.setPorousContinuity(on); },
           nb::arg("on") = true,
           "Enable the volume-averaged (porous) continuity for unresolved CFD-DEM (staggered only): "

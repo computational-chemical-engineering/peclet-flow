@@ -628,6 +628,16 @@ class Solver {
         vmg_.restrictAdvVelocities(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u));
       for (int c = 0; c < 3; ++c)
         smoothComp(c);  // per-component IBM implicit-diffusion solve
+      // The porous (volume-averaged) projection lives entirely on the cut-cell operator rails
+      // (divergOpenEps + buildPorousCoeff* into CutcellMG). Without set_solid /
+      // set_pressure_geometry there is NO projection at all — the gas would never accelerate to
+      // the interstitial velocity in a bed and the drag comes out ~5x too weak (a fluidized bed
+      // quietly refuses to fluidize). Fail loudly instead of silently dropping the constraint.
+      if (porous_ && !cutcellPressure_)
+        throw std::runtime_error(
+            "set_porous_continuity(True) requires the cut-cell pressure operator: call "
+            "set_solid(...) or set_pressure_geometry(all-fluid SDF) before stepping (a "
+            "domain-BC-only box otherwise runs with NO continuity constraint at all)");
       if (cutcellPressure_)
         project();  // cut-cell projection -> incompressible
       if (hasBc_)
@@ -2055,6 +2065,10 @@ class Solver {
   // where the void fraction changes. Binds the "eps" field (void fraction from the particle
   // deposition; created seeded to 1 if absent). Staggered-only. The coupling deposits eps each step
   // BEFORE step().
+  // Has the cut-cell pressure operator been built (set_solid / set_pressure_geometry)? The porous
+  // projection requires it — project() throws otherwise; the coupling driver queries this to
+  // auto-install an all-fluid geometry.
+  bool hasCutcellPressure() const { return cutcellPressure_; }
   void setPorousContinuity(bool on) {
     if constexpr (Grid::collocated) {
       if (on)
