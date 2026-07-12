@@ -363,6 +363,15 @@ class CutcellMG {
       buildCutcellOp(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.ox), CCConst(c.oy),
                      CCConst(c.oz), c.ext, G, idx2 * sx, idy2 * sy, idz2 * sz);
     }
+    // The operator (all levels, including the bottom) just changed: invalidate the agglomerated
+    // GraphAMG bottom solve so the next solve rebuilds it from the CURRENT coefficients. The porous
+    // and variable-rho paths rebuild the coefficients EVERY STEP — with a stale AMG bottom (frozen
+    // at the first step's operator) the bottom "solve" answers a different matrix, the V-cycle
+    // preconditioner drifts inconsistent/indefinite, and the outer PCG eventually breaks down and
+    // NaNs the projection (observed as a sporadic, data-dependent blow-up in porous CFD-DEM). The
+    // bottom level is tiny, so the per-step rebuild is negligible next to the V-cycles.
+    amg_.reset();
+    amgGlobalN_ = 0;
   }
 
   // CG preconditioned by one symmetric V-cycle (solve_pcg port). rhs on level 0; solution left in
@@ -392,16 +401,26 @@ class CutcellMG {
     removeMean(l0, r);  // compatibility: project rhs/residual onto the range
     const double r0 = maxabs(l0, r);
     int it = 0;
-    if (r0 > 0.0) {
+    // Breakdown guards: a non-finite recurrence scalar means the preconditioner or operator
+    // produced NaN/Inf (should not happen — the guards fail safe rather than poisoning x with a
+    // NaN alpha/beta and letting the projection silently corrupt every field downstream).
+    if (r0 > 0.0 && std::isfinite(r0)) {
       precond(z, r);
       Kokkos::deep_copy(p, z);
       double rz = dot(l0, r, z);
+      if (!std::isfinite(rz)) {
+        printf("peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
+               "returning zero correction\n");
+        Kokkos::deep_copy(x, 0.0);
+        Kokkos::deep_copy(l0.x, x);
+        return 0;
+      }
       for (; it < maxit; ++it) {
         matvec(Ap, p);
         removeMean(l0, Ap);
         const double pAp = dot(l0, p, Ap);
-        if (pAp <= 1e-300)
-          break;
+        if (!std::isfinite(pAp) || pAp <= 1e-300)
+          break;  // breakdown/converged direction: keep the last finite iterate
         const double alpha = rz / pAp;
         axpy(x, alpha, p);
         axpy(r, -alpha, Ap);
@@ -412,6 +431,8 @@ class CutcellMG {
         }
         precond(z, r);
         const double rznew = dot(l0, r, z), beta = rznew / rz;
+        if (!std::isfinite(rznew))
+          break;  // preconditioner breakdown: keep the last finite iterate
         aypx(p, beta, z);
         rz = rznew;
       }
