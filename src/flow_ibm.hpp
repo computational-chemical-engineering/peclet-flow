@@ -205,6 +205,26 @@ class Solver {
     pcgMaxit_ = maxit;
     pcgRtol_ = rtol;
   }
+  // EXPERIMENTAL directional ghost-cell projection (second staggered IBM, ghost_projection.hpp):
+  // point-based FD divergence with wall-anchored directional closures instead of the
+  // openness-weighted cut-cell projection. Call BEFORE set_solid (the overlay is built there).
+  // v1: staggered, single-rank, periodic + IBM only, stationary walls. The nonsymmetric extended
+  // stencil is solved by MG-preconditioned BiCGStab (binary-openness surrogate hierarchy).
+  void setGhostProjection(bool on) {
+    if constexpr (Grid::collocated) {
+      if (on)
+        throw std::runtime_error("set_ghost_projection: v1 is staggered-only");
+    }
+    if (on && (porous_ || varRho_ || hasBc_ || useChebyshev_))
+      throw std::runtime_error(
+          "set_ghost_projection: incompatible with porous/variable-rho/domain-BC/Chebyshev (v1)");
+#ifdef PECLET_FLOW_MPI
+    if (on && distributed_)
+      throw std::runtime_error("set_ghost_projection: single-rank only (v1)");
+#endif
+    ghostProjection_ = on;
+    gpNRows_ = -1;  // takes effect at the next set_solid
+  }
   // Incremental-rotational pressure (CUDA set_incremental_pressure, default ON): the predictor
   // carries -grad(P^n) and the physical pressure is accumulated rotationally P += (rho/dt)*phi -
   // mu*div(u*). OFF => classical non-incremental Chorin (no -grad(P^n) predictor; P derived on
@@ -560,6 +580,31 @@ class Solver {
       copyInner(ox1_, e1_, 1, CCConst(ox_), e_, G);  // bridge openness g=2 -> g=1 for the MG
       copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
       copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
+      if (ghostProjection_) {
+        // Directional ghost-cell projection: build the closure overlay + the binary (COUPLED)
+        // openness. The binary field replaces the geometric openness on the MG rails (the MG
+        // hierarchy becomes the symmetric surrogate preconditioner; the overlay delta enters only
+        // the fine-level BiCGStab matvec). The geometric ox_/oy_/oz_ above stay for diagnostics.
+        if (porous_ || varRho_ || hasBc_)
+          throw std::runtime_error(
+              "ghost projection: incompatible with porous/variable-rho/domain-BC (v1)");
+        const std::size_t nInner = (std::size_t)nx_ * ny_ * nz_;
+        gpOv_ = gpMakeOverlay((long)nInner);  // worst-case sizing, like the momentum overlay
+        gpIdMap_ = Kokkos::View<int*, CCMem>("gp_idmap", nInner);
+        gpCounter_ = Kokkos::View<int, CCMem>("gp_counter");
+        oxb_ = CCField("oxb", n_);
+        oyb_ = CCField("oyb", n_);
+        ozb_ = CCField("ozb", n_);
+        gpRh_ = CCField("gpRh", n1_);
+        gpT_ = CCField("gpT", n1_);
+        gpZ2_ = CCField("gpZ2", n1_);
+        gpBinaryOpenness(oxb_, oyb_, ozb_, CCConst(sdf_), e_);
+        gpNRows_ =
+            buildGpOverlay(CCConst(sdf_), e_, G, C3{nx_, ny_, nz_}, gpOv_, gpIdMap_, gpCounter_);
+        copyInner(ox1_, e1_, 1, CCConst(oxb_), e_, G);  // MG surrogate = binary openness
+        copyInner(oy1_, e1_, 1, CCConst(oyb_), e_, G);
+        copyInner(oz1_, e1_, 1, CCConst(ozb_), e_, G);
+      }
 #ifdef PECLET_FLOW_MPI
       if (distributed_)  // share the level-0 decomposition so the MG block matches this rank's
                          // block
@@ -715,8 +760,17 @@ class Solver {
     } else {
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);  // ghosts incl. outflow zero-gradient before the divergence
-      divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
-                 CCConst(oz_), div_, e_, G);
+      if (ghostProjection_ && gpNRows_ >= 0) {
+        // Ghost mode: the closed point divergence (same kernels as the RHS) IS the true residual
+        // of the mode. (EXPLICIT sliver faces read the corrected stored value here vs u* in the
+        // RHS — the only, and rare, departure from the exact identity.)
+        divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(oxb_), CCConst(oyb_),
+                   CCConst(ozb_), div_, e_, G);
+        gpDivergDelta(div_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), gpOv_, gpNRows_,
+                      C3{nx_, ny_, nz_}, e_, G);
+      } else
+        divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
+                   CCConst(oz_), div_, e_, G);
     }
     double m = reduceMaxAbsInner(CCConst(div_));
 #ifdef PECLET_FLOW_MPI
@@ -1573,6 +1627,19 @@ class Solver {
                                 // every step)
         divergOpenEps(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
                       CCConst(oz_), CCConst(epsField_), div_, e_, G);
+      } else if (ghostProjection_) {
+        // Directional ghost-cell divergence: binary-openness face differences (COUPLED faces)
+        // plus the wall-anchored closures at ghost faces, row-rescaled — the SAME kernel pair
+        // serves the RHS here and the diagnostic in maxOpenDivergence (diagnostic == residual).
+        if (gpNRows_ < 0)
+          throw std::runtime_error("ghost projection: call set_solid after set_ghost_projection");
+        if (porous_ || varRho_ || useChebyshev_)
+          throw std::runtime_error(
+              "ghost projection: porous/variable-rho/Chebyshev unsupported (v1)");
+        divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(oxb_), CCConst(oyb_),
+                   CCConst(ozb_), div_, e_, G);
+        gpDivergDelta(div_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), gpOv_, gpNRows_,
+                      C3{nx_, ny_, nz_}, e_, G);
       } else
         divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
                    CCConst(oz_), div_, e_, G);
@@ -1661,6 +1728,13 @@ class Solver {
       }
       lastPressureIters_ =
           mg_.solveChebyshev(rhs1_, phi1_, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
+    } else if (!Grid::collocated && ghostProjection_) {
+      // Nonsymmetric ghost-projection operator: BiCGStab, preconditioned by the symmetric
+      // binary-openness V-cycle (the hierarchy set up in setSolid); the overlay delta enters the
+      // fine-level matvec only.
+      lastPressureIters_ =
+          mg_.solveBiCGStab(rhs1_, phi1_, r_, gpRh_, pp_, Ap_, gpT_, z_, gpZ2_, pcgMaxit_,
+                            pcgRtol_, 2, 2, 12, gpOv_, gpNRows_, C3{nx_, ny_, nz_});
     } else {
       lastPressureIters_ =
           mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12);
@@ -2407,6 +2481,13 @@ class Solver {
   long lastOuterIters_ = 0;
   double lastOuterCorr_ = 0.0;
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
+  bool ghostProjection_ = false;  // directional ghost-cell projection (experimental 2nd IBM)
+  GpOverlay gpOv_;                // its per-row overlay (built by setSolid)
+  Kokkos::View<int*, CCMem> gpIdMap_;
+  Kokkos::View<int, CCMem> gpCounter_;
+  int gpNRows_ = -1;         // -1 = overlay not built (set_solid must run with the mode on)
+  CCField oxb_, oyb_, ozb_;  // binary (COUPLED) openness on the g=2 block (ghost divergence)
+  CCField gpRh_, gpT_, gpZ2_;  // extra BiCGStab scratch (g=1 block)
   CCField uf_, vf_, wf_;    // collocated: transient face (MAC) field (approx projection)
   CCField tgp_;             // collocated: transpose-gradient scratch (setFaceInterp(2/3))
   CCField wdef_;            // collocated: FV wall viscous-flux defect scratch (setFaceInterp(4))

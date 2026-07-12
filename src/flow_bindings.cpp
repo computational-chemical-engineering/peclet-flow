@@ -181,6 +181,12 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def("set_pressure_pcg", &S::setPressurePcg, nb::arg("on"), nb::arg("max_iter") = 200,
            nb::arg("rtol") = 1e-8,
            "Use the MG-PCG pressure accelerator (single-GPU default; exclusive with Chebyshev).")
+      .def("set_ghost_projection", &S::setGhostProjection, nb::arg("on"),
+           "EXPERIMENTAL directional ghost-cell projection (second staggered IBM): point-based FD "
+           "divergence with wall-anchored directional closures instead of the openness-weighted "
+           "cut-cell projection; solved by MG-preconditioned BiCGStab. Call BEFORE set_solid. "
+           "v1: staggered only, single-rank, periodic + IBM, stationary walls; incompatible with "
+           "porous/variable-rho/domain-BC/Chebyshev.")
       .def("set_velocity_multigrid", &S::setVelocityMultigrid, nb::arg("on"), nb::arg("levels") = 4,
            nb::arg("vcycles") = 8,
            "Enable velocity (momentum) multigrid for the implicit diffusion solve.")

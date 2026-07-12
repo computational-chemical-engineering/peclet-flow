@@ -19,6 +19,7 @@
 #include <memory>
 #include <vector>
 
+#include "ghost_projection.hpp"  // GpOverlay + gpApplyDelta (ghost-projection BiCGStab matvec)
 #include "mac_bc.hpp"
 #include "mac_pressure.hpp"
 #include "peclet/core/solver/graph_amg.hpp"  // decomposition-agnostic algebraic bottom solve
@@ -435,6 +436,111 @@ class CutcellMG {
           break;  // preconditioner breakdown: keep the last finite iterate
         aypx(p, beta, z);
         rz = rznew;
+      }
+    }
+    Kokkos::deep_copy(l0.x, x);
+    removeMean(l0, l0.x);
+    Kokkos::deep_copy(x, l0.x);
+    return it;
+  }
+
+  // BiCGStab preconditioned by one symmetric V-cycle, for the NONSYMMETRIC ghost-projection
+  // operator A = (binary-openness 7-point op) + (per-row overlay delta, gpApplyDelta). The MG
+  // hierarchy/preconditioner only ever sees the symmetric binary surrogate its levels were built
+  // from (setOpenness); the overlay enters the fine-level matvec only. Same breakdown guards +
+  // constant-mode (mean) removal as solvePCG, plus a stagnation guard: the nonsymmetric system's
+  // left null vector is NOT exactly the constants, so the attainable residual has a small
+  // compatibility floor — stop when no progress instead of burning maxit. Scratch: 7 level-0
+  // fields from the caller. Returns the iteration count.
+  int solveBiCGStab(CCField b, CCField x, CCField r, CCField rh, CCField p, CCField v, CCField t,
+                    CCField z, CCField z2, int maxit, double rtol, int pre, int post, int bottom,
+                    const GpOverlay& ov, int nOv, C3 nn) {
+    pre_ = pre;
+    post_ = post;
+    bottom_ = bottom;
+    Level& l0 = lv_[0];
+    auto matvec = [&](CCField y, CCField q) {
+      fill(l0, q);
+      applyOutflowGhost(l0.ext, q);
+      applyCutcellOp(y, CCConst(q), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
+                     FPC(l0.AB), FPC(l0.AT), l0.ext, G);
+      gpApplyDelta(y, CCConst(q), ov, nOv, nn, l0.ext, G);
+    };
+    auto precond = [&](CCField zz, CCField rr) {
+      Kokkos::deep_copy(l0.rhs, rr);
+      Kokkos::deep_copy(l0.x, 0.0);
+      vcycle(0, /*sym=*/true);
+      Kokkos::deep_copy(zz, l0.x);
+    };
+    matvec(t, x);  // r = b - A x  (t as scratch)
+    Kokkos::deep_copy(r, b);
+    axpy(r, -1.0, t);
+    removeMean(l0, r);
+    Kokkos::deep_copy(rh, r);  // shadow residual r^ = r_0
+    const double r0n = maxabs(l0, r);
+    int it = 0;
+    if (r0n > 0.0 && std::isfinite(r0n)) {
+      double rho = 1.0, alpha = 1.0, omega = 1.0;
+      double best = r0n;
+      int lastImprove = 0;
+      Kokkos::deep_copy(p, 0.0);
+      Kokkos::deep_copy(v, 0.0);
+      for (; it < maxit; ++it) {
+        const double rhoNew = dot(l0, rh, r);
+        if (!std::isfinite(rhoNew) || std::fabs(rhoNew) < 1e-300)
+          break;  // (rh, r) breakdown: keep the last finite iterate
+        const double beta = (rhoNew / rho) * (alpha / omega);
+        rho = rhoNew;
+        axpy(p, -omega, v);  // p = r + beta (p - omega v)
+        aypx(p, beta, r);
+        precond(z, p);
+        matvec(v, z);
+        removeMean(l0, v);
+        const double rhv = dot(l0, rh, v);
+        if (!std::isfinite(rhv) || std::fabs(rhv) < 1e-300)
+          break;
+        alpha = rho / rhv;
+        axpy(r, -alpha, v);  // r <- s = r - alpha v
+        removeMean(l0, r);
+        double rn = maxabs(l0, r);
+        if (!std::isfinite(rn))
+          break;
+        if (rn < rtol * r0n) {
+          axpy(x, alpha, z);
+          ++it;
+          break;
+        }
+        precond(z2, r);
+        matvec(t, z2);
+        removeMean(l0, t);
+        const double tt = dot(l0, t, t);
+        if (!std::isfinite(tt) || tt < 1e-300) {
+          axpy(x, alpha, z);  // omega breakdown: take the alpha half-step and stop
+          break;
+        }
+        omega = dot(l0, t, r) / tt;
+        if (!std::isfinite(omega) || std::fabs(omega) < 1e-300) {
+          axpy(x, alpha, z);
+          break;
+        }
+        axpy(x, alpha, z);
+        axpy(x, omega, z2);
+        axpy(r, -omega, t);
+        removeMean(l0, r);
+        rn = maxabs(l0, r);
+        if (!std::isfinite(rn))
+          break;
+        if (rn < rtol * r0n) {
+          ++it;
+          break;
+        }
+        if (rn < 0.999 * best) {
+          best = rn;
+          lastImprove = it;
+        } else if (it - lastImprove > 30) {
+          ++it;  // compatibility-floor stagnation: accept the best-so-far level
+          break;
+        }
       }
     }
     Kokkos::deep_copy(l0.x, x);
