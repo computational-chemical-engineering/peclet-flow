@@ -210,7 +210,13 @@ class Solver {
   // openness-weighted cut-cell projection. Call BEFORE set_solid (the overlay is built there).
   // v1: staggered, single-rank, periodic + IBM only, stationary walls. The nonsymmetric extended
   // stencil is solved by MG-preconditioned BiCGStab (binary-openness surrogate hierarchy).
-  void setGhostProjection(bool on) {
+  // matrixOrder/rhsOrder select the closure order (1 = linear, 2 = wall-anchored quadratic) for
+  // the implicit phi couplings and the divergence RHS/diagnostic respectively:
+  //   (2,2) full quadratic (13-point nonsymmetric matrix);
+  //   (1,1) linear everywhere (7-point matrix, 1st-order closure);
+  //   (1,2) MIXED/deferred: 2nd-order steady constraint with a 7-point near-symmetric matrix —
+  //         the operator mismatch converges through the time stepping (measured rate ~0.4).
+  void setGhostProjection(bool on, int matrixOrder = 2, int rhsOrder = 2) {
     if constexpr (Grid::collocated) {
       if (on)
         throw std::runtime_error("set_ghost_projection: v1 is staggered-only");
@@ -218,11 +224,15 @@ class Solver {
     if (on && (porous_ || varRho_ || hasBc_ || useChebyshev_))
       throw std::runtime_error(
           "set_ghost_projection: incompatible with porous/variable-rho/domain-BC/Chebyshev (v1)");
+    if (matrixOrder < 1 || matrixOrder > 2 || rhsOrder < 1 || rhsOrder > 2)
+      throw std::runtime_error("set_ghost_projection: matrix_order/rhs_order must be 1 or 2");
 #ifdef PECLET_FLOW_MPI
     if (on && distributed_)
       throw std::runtime_error("set_ghost_projection: single-rank only (v1)");
 #endif
     ghostProjection_ = on;
+    gpMatrixOrder_ = matrixOrder;
+    gpRhsOrder_ = rhsOrder;
     gpNRows_ = -1;  // takes effect at the next set_solid
   }
   // Incremental-rotational pressure (CUDA set_incremental_pressure, default ON): the predictor
@@ -599,8 +609,8 @@ class Solver {
         gpT_ = CCField("gpT", n1_);
         gpZ2_ = CCField("gpZ2", n1_);
         gpBinaryOpenness(oxb_, oyb_, ozb_, CCConst(sdf_), e_);
-        gpNRows_ =
-            buildGpOverlay(CCConst(sdf_), e_, G, C3{nx_, ny_, nz_}, gpOv_, gpIdMap_, gpCounter_);
+        gpNRows_ = buildGpOverlay(CCConst(sdf_), e_, G, C3{nx_, ny_, nz_}, gpOv_, gpIdMap_,
+                                  gpCounter_, gpMatrixOrder_, gpRhsOrder_);
         copyInner(ox1_, e1_, 1, CCConst(oxb_), e_, G);  // MG surrogate = binary openness
         copyInner(oy1_, e1_, 1, CCConst(oyb_), e_, G);
         copyInner(oz1_, e1_, 1, CCConst(ozb_), e_, G);
@@ -2486,6 +2496,7 @@ class Solver {
   Kokkos::View<int*, CCMem> gpIdMap_;
   Kokkos::View<int, CCMem> gpCounter_;
   int gpNRows_ = -1;         // -1 = overlay not built (set_solid must run with the mode on)
+  int gpMatrixOrder_ = 2, gpRhsOrder_ = 2;  // closure order: implicit phi couplings / RHS
   CCField oxb_, oyb_, ozb_;  // binary (COUPLED) openness on the g=2 block (ghost divergence)
   CCField gpRh_, gpT_, gpZ2_;  // extra BiCGStab scratch (g=1 block)
   CCField uf_, vf_, wf_;    // collocated: transient face (MAC) field (approx projection)

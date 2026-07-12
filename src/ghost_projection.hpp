@@ -61,15 +61,20 @@ enum GpState : int8_t {
 /// Per-overlay-row SoA. Face slot k = 2*axis + (0 = plus side, 1 = minus side), matching the
 /// momentum overlay's direction order {+x,-x,+y,-y,+z,-z}. Weights are the UNSCALED closure
 /// coefficients (u_face = w_bc*u_bc + w_n1*u_near + w_n2*u_far); the row rescale rho is applied
-/// at row level by the delta kernels.
+/// at row level by the delta kernels. TWO weight sets: w_* (rhs_order) feed the divergence
+/// (RHS + diagnostic, gpDivergDelta); wm_* (matrix_order) feed the implicit phi couplings
+/// (gpApplyDelta). Orders may differ (the mixed/deferred-correction scheme: rhs_order=2 keeps
+/// the 2nd-order steady constraint, matrix_order=1 keeps the matrix 7-point and near-symmetric —
+/// the operator mismatch converges through the time stepping, measured rate ~0.4).
 template <class Space>
 struct GpOverlayT {
   Kokkos::View<int*, Space> cell;         // packed INNER flat index x + y*nx + z*nx*ny
-  Kokkos::View<float*, Space> rescale;    // rho = min(1, min_f D_f)
+  Kokkos::View<float*, Space> rescale;    // rho = min(1, min_f D_f) of the MATRIX weights
   Kokkos::View<int8_t*, Space> coupled;   // 1 if the row has any phi coupling at all
   Kokkos::View<int8_t*, Space> state;     // [slot*6+k]
   Kokkos::View<float*, Space> th;         // [slot*6+k] (parity/diagnostics)
-  Kokkos::View<float*, Space> w_bc, w_n1, w_n2;  // [slot*6+k]
+  Kokkos::View<float*, Space> w_bc, w_n1, w_n2;  // [slot*6+k] RHS/diagnostic closure weights
+  Kokkos::View<float*, Space> wm_n1, wm_n2;      // [slot*6+k] matrix (implicit phi) weights
 };
 using GpOverlay = GpOverlayT<CCMem>;
 
@@ -83,7 +88,33 @@ inline GpOverlay gpMakeOverlay(long n) {
   ov.w_bc = Kokkos::View<float*, CCMem>("gp_wbc", 6 * n);
   ov.w_n1 = Kokkos::View<float*, CCMem>("gp_wn1", 6 * n);
   ov.w_n2 = Kokkos::View<float*, CCMem>("gp_wn2", 6 * n);
+  ov.wm_n1 = Kokkos::View<float*, CCMem>("gp_wmn1", 6 * n);
+  ov.wm_n2 = Kokkos::View<float*, CCMem>("gp_wmn2", 6 * n);
   return ov;
+}
+
+/// Closure weights for one ghost face at the requested extrapolation order. order=2 uses the
+/// wall-anchored quadratic (only available for GP_QUAD faces); order=1 (or a GP_LIN face) uses
+/// the wall-anchored linear closure th*u_g = u_bc + (th-1)*u_near. D is the conditioning factor
+/// feeding the row rescale.
+KOKKOS_INLINE_FUNCTION void gpOrderWeights(int8_t st, float th, int order, float& wbc, float& w1,
+                                           float& w2, float& D) {
+  wbc = w1 = w2 = 0.0f;
+  D = 1.0f;
+  if (st == GP_BC_ONLY) {
+    wbc = 1.0f;
+    return;
+  }
+  if (st == GP_QUAD && order == 2) {
+    D = poly_D(th);
+    wbc = 2.0f / D;
+    w1 = poly_Nc(th) / D;
+    w2 = poly_N_nb(th) / D;
+  } else {  // linear (GP_LIN, or a GP_QUAD face at order 1)
+    D = th;
+    wbc = 1.0f / th;
+    w1 = (th - 1.0f) / th;
+  }
 }
 
 struct GpFace {
@@ -145,11 +176,13 @@ KOKKOS_INLINE_FUNCTION GpFace gpClassifyFace(float sg, float sn, float sf, float
 
 /// Fill one overlay row from the per-axis sample sets. F[a][m+1] = face sdf at face index i+m
 /// (m = -1..2, face i+m sits between centers i+m-1 and i+m); Cq[a][q+2] = center sdf at i+q
-/// (q = -2..2; Cq[a][2] = own center, fluid by construction). Returns true if any face is
-/// non-COUPLED (i.e. the row belongs in the overlay).
+/// (q = -2..2; Cq[a][2] = own center, fluid by construction). Fills BOTH weight sets: w_* at
+/// rhsOrder (divergence RHS + diagnostic) and wm_* at matrixOrder (implicit phi couplings); the
+/// row rescale comes from the matrix weights (it conditions the matrix row). Returns true if any
+/// face is non-COUPLED (i.e. the row belongs in the overlay).
 template <class OV>
 KOKKOS_INLINE_FUNCTION bool gpFillRow(const OV& ov, int slot, int cellInner, const float F[3][4],
-                                      const float Cq[3][5]) {
+                                      const float Cq[3][5], int matrixOrder, int rhsOrder) {
   bool any = false;
   bool anyPhi = false;
   float rho = 1.0f;
@@ -166,14 +199,20 @@ KOKKOS_INLINE_FUNCTION bool gpFillRow(const OV& ov, int slot, int cellInner, con
     faces[2 * a] = gpClassifyFace(F[a][2], F[a][1], F[a][0], F[a][3], Cq[a][3], Cq[a][1],
                                   Cq[a][0], solidM);
   }
+  float wbcM[6], w1M[6], w2M[6];  // matrix-order weights (wbc unused in the matrix)
   for (int k = 0; k < 6; ++k) {
     const GpFace& f = faces[k];
     if (f.state != GP_COUPLED)
       any = true;
     if (f.state == GP_COUPLED || f.state == GP_QUAD || f.state == GP_LIN)
       anyPhi = true;
-    if ((f.state == GP_QUAD || f.state == GP_LIN) && f.D < rho)
-      rho = f.D;
+    wbcM[k] = w1M[k] = w2M[k] = 0.0f;
+    if (f.state == GP_QUAD || f.state == GP_LIN) {
+      float Dm;
+      gpOrderWeights(f.state, f.th, matrixOrder, wbcM[k], w1M[k], w2M[k], Dm);
+      if (Dm < rho)
+        rho = Dm;
+    }
   }
   if (!any)
     return false;
@@ -181,11 +220,18 @@ KOKKOS_INLINE_FUNCTION bool gpFillRow(const OV& ov, int slot, int cellInner, con
   ov.rescale(slot) = rho;
   ov.coupled(slot) = anyPhi ? 1 : 0;
   for (int k = 0; k < 6; ++k) {
-    ov.state(slot * 6 + k) = faces[k].state;
-    ov.th(slot * 6 + k) = faces[k].th;
-    ov.w_bc(slot * 6 + k) = faces[k].wbc;
-    ov.w_n1(slot * 6 + k) = faces[k].w1;
-    ov.w_n2(slot * 6 + k) = faces[k].w2;
+    const GpFace& f = faces[k];
+    float wbc, w1, w2, D;
+    gpOrderWeights(f.state, f.th, rhsOrder, wbc, w1, w2, D);
+    if (f.state == GP_COUPLED || f.state == GP_EXPLICIT)
+      wbc = w1 = w2 = 0.0f;
+    ov.state(slot * 6 + k) = f.state;
+    ov.th(slot * 6 + k) = f.th;
+    ov.w_bc(slot * 6 + k) = wbc;
+    ov.w_n1(slot * 6 + k) = w1;
+    ov.w_n2(slot * 6 + k) = w2;
+    ov.wm_n1(slot * 6 + k) = w1M[k];
+    ov.wm_n2(slot * 6 + k) = w2M[k];
   }
   return true;
 }
@@ -200,7 +246,8 @@ KOKKOS_INLINE_FUNCTION int gpWrap(int v, int n) {
 /// single-rank periodic), so the +/-2 reach never depends on g. Overlay arrays must be sized for
 /// the worst case; returns the row count. idMap (size nn.x*nn.y*nn.z) gets slot or -1.
 inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov,
-                          Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter) {
+                          Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter,
+                          int matrixOrder = 2, int rhsOrder = 2) {
   CCExec space;
   Kokkos::deep_copy(space, counter, 0);
   Kokkos::deep_copy(space, idMap, -1);
@@ -234,7 +281,7 @@ inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov
           return;
         const int inner = x + y * nn.x + z * nn.x * nn.y;
         const int slot = Kokkos::atomic_fetch_add(&counter(), 1);
-        if (!gpFillRow(ov, slot, inner, F, Cq)) {
+        if (!gpFillRow(ov, slot, inner, F, Cq, matrixOrder, rhsOrder)) {
           // all faces COUPLED after all (pre-check was conservative): release the slot lazily by
           // marking it inert (zero-weight row on its own cell).
           ov.cell(slot) = inner;
@@ -246,6 +293,8 @@ inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov
             ov.w_bc(slot * 6 + k) = 0.0f;
             ov.w_n1(slot * 6 + k) = 0.0f;
             ov.w_n2(slot * 6 + k) = 0.0f;
+            ov.wm_n1(slot * 6 + k) = 0.0f;
+            ov.wm_n2(slot * 6 + k) = 0.0f;
           }
         } else {
           idMap(inner) = slot;
@@ -314,9 +363,9 @@ inline void gpApplyDelta(CCField y, CCConst x, const GpOverlay& ov, int nOv, C3 
           const int sgn = (k & 1) ? -1 : 1;  // odd k = minus side
           const int mn = (k & 1) ? 1 : 0;    // near-face relative index
           const int mf = (k & 1) ? 2 : -1;   // far-face relative index
-          const double w1 = ov.w_n1(s * 6 + k), w2 = ov.w_n2(s * 6 + k);
+          const double w1 = ov.wm_n1(s * 6 + k), w2 = ov.wm_n2(s * 6 + k);
           delta += sgn * w1 * (X(a, mn - 1) - X(a, mn));
-          if (st == GP_QUAD)
+          if (st == GP_QUAD && w2 != 0.0)
             delta += sgn * w2 * (X(a, mf - 1) - X(a, mf));
         }
         const double rho = ov.rescale(s);
