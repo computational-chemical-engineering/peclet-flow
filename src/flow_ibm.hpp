@@ -235,6 +235,57 @@ class Solver {
     gpRhsOrder_ = rhsOrder;
     gpNRows_ = -1;  // takes effect at the next set_solid
   }
+  // Analytic-SDF capability: EXACT wall-crossing fractions overriding the linear-interp theta in
+  // BOTH the momentum cut-cell overlay and the ghost-projection closures. t is a flat array of
+  // size 9*nx*ny*nz, blocks ordered [(c*3 + k)]: for velocity component c, t[(c*3+k)*n + i] is
+  // the exact crossing fraction in (0,1) from component c's staggered point at inner cell i
+  // toward its +k-axis neighbour point, NaN where the segment has no wall crossing. Computed in
+  // Python from the analytic geometry (e.g. line-sphere intersection). Call BEFORE set_solid;
+  // pass an empty array to clear. Single-rank only.
+  void setExactCrossings(const std::vector<double>& t) {
+    const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
+    if (t.empty()) {
+      hasExactCross_ = false;
+      return;
+    }
+    if (t.size() != 9 * n)
+      throw std::runtime_error("set_exact_crossings: expected 9*nx*ny*nz values");
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      throw std::runtime_error("set_exact_crossings: single-rank only");
+#endif
+    for (int c = 0; c < 3; ++c)
+      for (int k = 0; k < 3; ++k) {
+        tEx_[c][k] = CCField("tEx", n);
+        Kokkos::deep_copy(
+            tEx_[c][k],
+            Kokkos::View<const double*, Kokkos::HostSpace,
+                         Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+                t.data() + ((std::size_t)c * 3 + k) * n, n));
+      }
+    hasExactCross_ = true;
+  }
+  // Analytic-SDF capability: EXACT face-openness (aperture) fields overriding the sampled-SDF
+  // ccFractionCore openness the cut-cell projection uses. Inner arrays (flat x-fastest,
+  // nx*ny*nz); ox[i] = fluid area fraction of the -x face of cell i, etc. Call BEFORE set_solid.
+  void setOpennessOverride(const std::vector<double>& ox, const std::vector<double>& oy,
+                           const std::vector<double>& oz) {
+    const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
+    if (ox.empty()) {
+      hasOpenOverride_ = false;
+      return;
+    }
+    if (ox.size() != n || oy.size() != n || oz.size() != n)
+      throw std::runtime_error("set_openness_override: expected nx*ny*nz values per field");
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      throw std::runtime_error("set_openness_override: single-rank only");
+#endif
+    oxOverride_ = ox;
+    oyOverride_ = oy;
+    ozOverride_ = oz;
+    hasOpenOverride_ = true;
+  }
   // Incremental-rotational pressure (CUDA set_incremental_pressure, default ON): the predictor
   // carries -grad(P^n) and the physical pressure is accumulated rotationally P += (rho/dt)*phi -
   // mu*div(u*). OFF => classical non-incremental Chorin (no -grad(P^n) predictor; P derived on
@@ -519,12 +570,16 @@ class Solver {
           });
       space.fence();
     }
+    const bool useEx = hasExactCross_ && !Grid::collocated;  // exact-theta arrays are for the
+                                                             // staggered point placement
     for (int c = 0; c < 3; ++c) {
       const Off3 off =
           Grid::offset(c);  // velocity-unknown placement (staggered: -1/2 face; collocated: 0)
       C[c].nCut = buildIbmOverlay<0>(
-          CCConst(sdf_), e_, G, off, /*Dirichlet*/ 0, C[c].ov, C[c].idMap,
-          C[c].counter);  // SCHEME 0 = point-value (matches CUDA ibm_geometry_ext_k<0>)
+          CCConst(sdf_), e_, G, off, /*Dirichlet*/ 0, C[c].ov, C[c].idMap, C[c].counter,
+          useEx ? CCConst(tEx_[c][0]) : CCConst(), useEx ? CCConst(tEx_[c][1]) : CCConst(),
+          useEx ? CCConst(tEx_[c][2]) : CCConst(),
+          C3{nx_, ny_, nz_});  // SCHEME 0 = point-value (matches CUDA ibm_geometry_ext_k<0>)
       ibmSolidMask(C[c].mask, CCConst(sdf_), e_, off);
       Kokkos::deep_copy(C[c].u, 0.0);
     }
@@ -545,6 +600,32 @@ class Solver {
     }
     if (cutcellPressure_) {
       buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);  // on the g=2 velocity block
+      if (hasOpenOverride_) {
+        // Analytic-SDF exact apertures (setOpennessOverride): overwrite the sampled-SDF openness
+        // with the user-provided inner fields + periodic wrap into the ghost ring (single-rank).
+        const std::vector<double>* src[3] = {&oxOverride_, &oyOverride_, &ozOverride_};
+        CCField dst[3] = {ox_, oy_, oz_};
+        for (int f = 0; f < 3; ++f) {
+          CCField din("peclet::flow::openOv_d", (std::size_t)nx_ * ny_ * nz_);
+          Kokkos::deep_copy(din, Kokkos::View<const double*, Kokkos::HostSpace,
+                                              Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+                                     src[f]->data(), src[f]->size()));
+          CCExec space;
+          const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
+          CCField o = dst[f];
+          Kokkos::parallel_for(
+              "peclet::flow::open_override_wrap",
+              Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {ex, ey, ez}),
+              KOKKOS_LAMBDA(int x, int y, int z) {
+                const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
+                          iz = (((z - g) % nz) + nz) % nz;
+                o((long)x + (long)y * ex + (long)z * (long)ex * ey) =
+                    din((std::size_t)ix + (std::size_t)iy * nx +
+                        (std::size_t)iz * (std::size_t)nx * ny);
+              });
+          space.fence();
+        }
+      }
       if constexpr (Grid::collocated) {  // static open-centroid wall distances (setFaceInterp(3))
         buildFaceCentroidDist(xcx_, xcy_, xcz_, CCConst(sdf_), e_);
         buildCellFraction(cs_, CCConst(sdf_), e_, G);  // cell fluid fraction (setFaceInterp(4))
@@ -610,7 +691,10 @@ class Solver {
         gpZ2_ = CCField("gpZ2", n1_);
         gpBinaryOpenness(oxb_, oyb_, ozb_, CCConst(sdf_), e_);
         gpNRows_ = buildGpOverlay(CCConst(sdf_), e_, G, C3{nx_, ny_, nz_}, gpOv_, gpIdMap_,
-                                  gpCounter_, gpMatrixOrder_, gpRhsOrder_);
+                                  gpCounter_, gpMatrixOrder_, gpRhsOrder_,
+                                  hasExactCross_ ? CCConst(tEx_[0][0]) : CCConst(),
+                                  hasExactCross_ ? CCConst(tEx_[1][1]) : CCConst(),
+                                  hasExactCross_ ? CCConst(tEx_[2][2]) : CCConst());
         copyInner(ox1_, e1_, 1, CCConst(oxb_), e_, G);  // MG surrogate = binary openness
         copyInner(oy1_, e1_, 1, CCConst(oyb_), e_, G);
         copyInner(oz1_, e1_, 1, CCConst(ozb_), e_, G);
@@ -660,6 +744,17 @@ class Solver {
         for (int c = 0; c < 3; ++c)
           fillVelGhosts(c,
                         0);  // explicit ghosts (periodic + BC) for advect / mode-4 FV defect matvec
+      // Porous advection-form compensation: the Koren/SOU/FOU advection operators are CONSERVATIVE
+      // (flux form, ∇·(u u)), which equals the true advective transport u·∇u only for a solenoidal
+      // advecting field. Under the volume-averaged continuity div(eps u)=0 the plain divergence
+      // div(u) = -(1/eps) u·grad(eps) != 0, and the flux form silently adds the spurious force
+      // +u(div u) — largest where grad(eps) is large (clusters), where it pumps particle kinetic
+      // energy through the drag with no physical source (measured: HCS variance rising ~x30 past
+      // the clustering plateau). Compensate by subtracting u_f·div(u)_f from the advection in the
+      // RHS (the exact identity u·∇u = ∇·(uu) − u∇·u; div(u) at the face = mean of the two cell
+      // divergences). Gated on porous_ so every other path is byte-identical.
+      if (porous_ && advect_)
+        computeDivAdv();
       for (int c = 0; c < 3; ++c)  // RHS from u^n base + advection lagged at u^k
         varRho_ ? buildRhsVar(c) : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c));
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
@@ -1047,6 +1142,25 @@ class Solver {
           }
         });
   }
+  // Cell divergence of the current velocity iterate, on the inner cells + one ghost ring (the RHS
+  // compensation reads div at i and i-strd, so faces at the low inner boundary need the ghost-cell
+  // value; velocity ghosts were just filled). Porous-only scratch (divAdv_).
+  void computeDivAdv() {
+    CCExec space;
+    C3 e = e_;
+    CCField dv = divAdv_;
+    CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u);
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "peclet::flow::div_adv",
+        MD(space, {G - 1, G - 1, G - 1}, {e.x - G + 1, e.y - G + 1, e.z - G + 1}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)x + (long)y * sy + (long)z * sz;
+          dv(i) = (U(i + sx) - U(i)) + (V(i + sy) - V(i)) + (W(i + sz) - W(i));
+        });
+  }
+
   void buildRhs(int c) {
     CCExec space;
     const double idiag = rho_ / dt_, fc = f_[c], rho = rho_;
@@ -1094,6 +1208,10 @@ class Solver {
     // (stencilMatvec), fvL_ = L_FV(u^k) (fvViscousApply: o_f faces + cs time + centroid wall drag).
     // Interior cells: M = L_FV → the defect vanishes → byte-identical to mode 0. Stokes only
     // (advection folds into the IBM matrix, not yet into L_FV).
+    // Porous advection-form compensation (+rho*u_f*div(u)_f): see the step() comment. Off (and the
+    // view untouched) on every non-porous path.
+    const bool pc = porous_ && advect_;
+    CCConst dv = CCConst(divAdv_);
     const bool wd = Grid::collocated && faceInterp_ >= 4;
     if constexpr (Grid::collocated)
       if (wd) {
@@ -1141,8 +1259,9 @@ class Solver {
             const double bfv = idiag * cs(i) * un(i) + cs(i) * (fc - gp);
             bb(i) = fvM(i) - fvw * rs(i) * (fvL(i) - bfv);
           } else {
-            bb(i) =
-                rs(i) * (idiag * un(i) + fc - rho * aK + rho * aF - gp) + (bc ? brhs(i) : -inh(i));
+            const double comp = pc ? rho * uu(i) * 0.5 * (dv(i) + dv((long)i - strd)) : 0.0;
+            bb(i) = rs(i) * (idiag * un(i) + fc - rho * aK + rho * aF + comp - gp) +
+                    (bc ? brhs(i) : -inh(i));
           }
         });  // BC fold (brhs) on the domain-BC path; -inhom on the IBM path (=0 for no-slip)
   }
@@ -1164,6 +1283,9 @@ class Solver {
                bc = hasBc_ && !bcStencilPath();
     const bool ifou = implicitAdv() && deferredCorr_;
     const int sch = advScheme_;
+    // Porous advection-form compensation (+rho*u_f*div(u)_f): see the step() comment.
+    const bool pc = porous_ && advect_;
+    CCConst dv = CCConst(divAdv_);
     const bool tg = Grid::collocated && faceInterp_ >= 2 && incr;  // wall-aware -grad(P) (mode 2/3)
     if constexpr (Grid::collocated)
       if (tg) {
@@ -1190,7 +1312,8 @@ class Solver {
                             : Grid::collocated
                                 ? (tg ? gpw(i) : 0.5 * (P((long)i + strd) - P((long)i - strd)))
                                 : (P(i) - P((long)i - strd));
-          bb(i) = rs(i) * (idiag * un(i) + fc + fb(i) - rho * aK + rho * aF - gp) +
+          const double comp = pc ? rho * uu(i) * 0.5 * (dv(i) + dv((long)i - strd)) : 0.0;
+          bb(i) = rs(i) * (idiag * un(i) + fc + fb(i) - rho * aK + rho * aF + comp - gp) +
                   (bc ? brhs(i) : -inh(i));
         });
   }
@@ -2170,6 +2293,8 @@ class Solver {
         epsPrev_ = CCField("epsPrev", n_);
         depsdt_ = CCField("depsdt", n_);
       }
+      if (divAdv_.extent(0) == 0)
+        divAdv_ = CCField("divAdv", n_);  // cell div(u) for the porous advection-form compensation
       Kokkos::deep_copy(epsPrev_, epsField_);  // d(eps)/dt=0 on the first step
       if (eps1_.extent(0) == 0)
         eps1_ = CCField("eps1", n1_);
@@ -2497,6 +2622,10 @@ class Solver {
   Kokkos::View<int, CCMem> gpCounter_;
   int gpNRows_ = -1;         // -1 = overlay not built (set_solid must run with the mode on)
   int gpMatrixOrder_ = 2, gpRhsOrder_ = 2;  // closure order: implicit phi couplings / RHS
+  CCField tEx_[3][3];             // exact crossings t[c][k] (inner grid; setExactCrossings)
+  bool hasExactCross_ = false;
+  std::vector<double> oxOverride_, oyOverride_, ozOverride_;  // exact apertures (inner)
+  bool hasOpenOverride_ = false;
   CCField oxb_, oyb_, ozb_;  // binary (COUPLED) openness on the g=2 block (ghost divergence)
   CCField gpRh_, gpT_, gpZ2_;  // extra BiCGStab scratch (g=1 block)
   CCField uf_, vf_, wf_;    // collocated: transient face (MAC) field (approx projection)
@@ -2526,6 +2655,7 @@ class Solver {
                                     // because eps is a bare per-cell particle deposit; the noisy
                                     // source can drive the eps-weighted pressure solve unstable).
   CCField epsField_, epsPrev_, eps1_, depsdt_;  // eps^{n+1}, eps^n, g=1 bridge, stored d(eps)/dt
+  CCField divAdv_;  // cell div(u) — porous advection-form compensation (see buildRhs*)
   CCField beta1_;         // g=1 bridge of the drag coeff (semi-implicit-drag pressure)
   bool hasDrag_ = false;  // implicit linear drag (CFD-DEM): beta on the momentum diagonal
   CCField dragBeta_;      // per-cell drag coefficient (added to AC; target beta*u_p rides

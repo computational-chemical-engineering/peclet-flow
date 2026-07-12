@@ -81,10 +81,14 @@ struct IbmOverlayT {
 using IbmOverlay = IbmOverlayT<IMem>;
 
 // Fill one overlay entry (list_idx) for a cut cell from its 7 SDF samples. Verbatim port of
-// ibm_fill_entry<SCHEME>. bc_type: 0 = Dirichlet, 1 = Neumann.
+// ibm_fill_entry<SCHEME>. bc_type: 0 = Dirichlet, 1 = Neumann. thEx (optional, may be nullptr):
+// per-direction EXACT wall-crossing fractions theta from the cut cell toward each of the 6
+// neighbours (analytic-SDF capability, setExactCrossings) — a finite thEx[k] overrides the
+// linear-interpolated theta; non-finite entries fall back.
 template <int SCHEME, class OV>
 KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, float sdf_c,
-                                         const float sdf_n[6], int bc_type) {
+                                         const float sdf_n[6], int bc_type,
+                                         const float* thEx) {
   o.cell_index(list_idx) = c_idx;
   o.num_boundaries(list_idx) = 6;
   bool is_ghost[6];
@@ -94,6 +98,8 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
       is_ghost[k] = true;
       if (bc_type == 0) {
         float theta = sdf_c / (sdf_c - sdf_n[k]);
+        if (thEx != nullptr && Kokkos::isfinite(thEx[k]))
+          theta = thEx[k];
         if (theta < 1e-4f)
           theta = 1e-4f;
         if (theta > 1.0f)
@@ -208,6 +214,13 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
       o.Nbc_val(list_idx * 6 + k) = 0.0f;
     }
   }
+}
+
+// Sampled-theta entry point (the historical signature; all existing call sites unchanged).
+template <int SCHEME, class OV>
+KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, float sdf_c,
+                                         const float sdf_n[6], int bc_type) {
+  ibmFillEntry<SCHEME>(o, list_idx, c_idx, sdf_c, sdf_n, bc_type, nullptr);
 }
 
 // Build the backward-Euler velocity diffusion stencil over the extended block (divided convention):

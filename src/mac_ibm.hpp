@@ -42,10 +42,13 @@ KOKKOS_INLINE_FUNCTION bool ibmIsCut(float sc, const float sn[6]) {
 // 1=Neumann.
 template <int SCHEME>
 inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, const IbmOverlay& ov,
-                           Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter) {
+                           Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter,
+                           CCConst tx = CCConst(), CCConst ty = CCConst(), CCConst tz = CCConst(),
+                           C3 nn = C3{0, 0, 0}) {
   CCExec space;
   Kokkos::deep_copy(space, counter, 0);
   Kokkos::deep_copy(space, idMap, -1);
+  const bool hasEx = tx.size() > 0;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "peclet::flow::ibm_build_overlay", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
@@ -61,7 +64,26 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
           return;
         const int slot = Kokkos::atomic_fetch_add(&counter(), 1);
         idMap(idx) = slot;
-        ibmFillEntry<SCHEME>(ov, slot, (int)idx, sc, sn, bc_type);
+        // Optional analytic-SDF exact crossings (setExactCrossings): tx/ty/tz are INNER-grid
+        // arrays, t_a(i) = exact crossing fraction from this component's staggered point i toward
+        // i + e_a (NaN = no crossing). +a dir: theta = t_a(i); -a dir: theta = 1 - t_a(i - e_a),
+        // periodic wrap on the inner grid.
+        float thEx[6];
+        if (hasEx) {
+          const int ix = lx - g, iy = ly - g, iz = lz - g;
+          auto wrap = [](int v, int n) { v %= n; return v < 0 ? v + n : v; };
+          const CCConst* ta[3] = {&tx, &ty, &tz};
+          for (int a = 0; a < 3; ++a) {
+            const long ip = (long)ix + (long)iy * nn.x + (long)iz * (long)nn.x * nn.y;
+            const int mx = a == 0 ? wrap(ix - 1, nn.x) : ix;
+            const int my = a == 1 ? wrap(iy - 1, nn.y) : iy;
+            const int mz = a == 2 ? wrap(iz - 1, nn.z) : iz;
+            const long im = (long)mx + (long)my * nn.x + (long)mz * (long)nn.x * nn.y;
+            thEx[2 * a] = (float)(*ta[a])(ip);
+            thEx[2 * a + 1] = 1.0f - (float)(*ta[a])(im);  // NaN propagates -> fallback
+          }
+        }
+        ibmFillEntry<SCHEME>(ov, slot, (int)idx, sc, sn, bc_type, hasEx ? thEx : nullptr);
       });
 
   int cnt = 0;

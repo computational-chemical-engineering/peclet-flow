@@ -181,6 +181,18 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def("set_pressure_pcg", &S::setPressurePcg, nb::arg("on"), nb::arg("max_iter") = 200,
            nb::arg("rtol") = 1e-8,
            "Use the MG-PCG pressure accelerator (single-GPU default; exclusive with Chebyshev).")
+      .def("set_exact_crossings", &S::setExactCrossings, nb::arg("t"),
+           "Analytic-SDF capability: exact wall-crossing fractions overriding the "
+           "linear-interpolated theta in the momentum cut-cell overlay AND the ghost-projection "
+           "closures. Flat array of 9*nx*ny*nz values, blocks [(c*3+k)]: component c's staggered "
+           "point at inner cell i toward its +k neighbour; NaN = no crossing. Call BEFORE "
+           "set_solid; empty list clears. Single-rank, staggered momentum placement.")
+      .def("set_openness_override", &S::setOpennessOverride, nb::arg("ox"), nb::arg("oy"),
+           nb::arg("oz"),
+           "Analytic-SDF capability: exact face-aperture (openness) fields for the cut-cell "
+           "projection, overriding the sampled-SDF openness. Inner nx*ny*nz arrays, x-fastest; "
+           "ox[i] = fluid fraction of the -x face of cell i. Call BEFORE set_solid; empty ox "
+           "clears. Single-rank.")
       .def("set_ghost_projection", &S::setGhostProjection, nb::arg("on"),
            nb::arg("matrix_order") = 2, nb::arg("rhs_order") = 2,
            "EXPERIMENTAL directional ghost-cell projection (second staggered IBM): point-based FD "

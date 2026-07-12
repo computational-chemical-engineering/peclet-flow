@@ -127,9 +127,13 @@ struct GpFace {
 ///   sf  = far face sdf              sb = beyond-ghost face sdf (one further into the solid)
 ///   snb = neighbor center sdf       sc1/sc2 = centers needed by the near/far face gradients
 ///   otherSolid = the cell's other face on this axis is solid (sandwich detection)
+///   exStd/exSliver = optional EXACT wall-crossing thetas (analytic-SDF capability) for the
+///   standard-ghost / extended-sliver branches; NaN falls back to the linear-interp theta.
 /// Pure function of the samples — shared verbatim with the host parity test.
 KOKKOS_INLINE_FUNCTION GpFace gpClassifyFace(float sg, float sn, float sf, float sb, float snb,
-                                             float sc1, float sc2, bool otherSolid) {
+                                             float sc1, float sc2, bool otherSolid,
+                                             float exStd = Kokkos::nan(""),
+                                             float exSliver = Kokkos::nan("")) {
   GpFace f{GP_COUPLED, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
   if (sg >= 0.0f && snb >= 0.0f)
     return f;  // COUPLED
@@ -140,14 +144,14 @@ KOKKOS_INLINE_FUNCTION GpFace gpClassifyFace(float sg, float sn, float sf, float
   }
   float th;
   if (sg < 0.0f) {  // standard ghost (near face fluid guaranteed: not sandwich)
-    th = sn / (sn - sg);
+    th = Kokkos::isfinite(exStd) ? exStd : sn / (sn - sg);
     th = th < GP_THETA_MIN ? GP_THETA_MIN : (th > 1.0f ? 1.0f : th);
   } else {  // sliver: face point fluid, neighbor center solid
     if (sb >= 0.0f) {
       f.state = GP_EXPLICIT;  // no crossing on the u-line: explicit u* flux, no phi coupling
       return f;
     }
-    th = 1.0f + sg / (sg - sb);  // extended theta in (1,2): evaluation INSIDE the data hull
+    th = Kokkos::isfinite(exSliver) ? exSliver : 1.0f + sg / (sg - sb);
     const float lo = 1.0f + GP_THETA_MIN;
     th = th < lo ? lo : (th > 2.0f ? 2.0f : th);
   }
@@ -182,22 +186,27 @@ KOKKOS_INLINE_FUNCTION GpFace gpClassifyFace(float sg, float sn, float sf, float
 /// face is non-COUPLED (i.e. the row belongs in the overlay).
 template <class OV>
 KOKKOS_INLINE_FUNCTION bool gpFillRow(const OV& ov, int slot, int cellInner, const float F[3][4],
-                                      const float Cq[3][5], int matrixOrder, int rhsOrder) {
+                                      const float Cq[3][5], int matrixOrder, int rhsOrder,
+                                      const float* exStd = nullptr,
+                                      const float* exSliver = nullptr) {
   bool any = false;
   bool anyPhi = false;
   float rho = 1.0f;
   GpFace faces[6];
+  const float nanv = Kokkos::nan("");
   for (int a = 0; a < 3; ++a) {
     const bool solidM = F[a][1] < 0.0f;  // own minus face (m=0)
     const bool solidP = F[a][2] < 0.0f;  // own plus face (m=1)
     // minus side (k = 2a+1): ghost m=0, near m=1, far m=2, beyond m=-1; nb center q=-1;
     // gradient cells q=+1, q=+2.
-    faces[2 * a + 1] = gpClassifyFace(F[a][1], F[a][2], F[a][3], F[a][0], Cq[a][1], Cq[a][3],
-                                      Cq[a][4], solidP);
+    faces[2 * a + 1] =
+        gpClassifyFace(F[a][1], F[a][2], F[a][3], F[a][0], Cq[a][1], Cq[a][3], Cq[a][4], solidP,
+                       exStd ? exStd[2 * a + 1] : nanv, exSliver ? exSliver[2 * a + 1] : nanv);
     // plus side (k = 2a): ghost m=1, near m=0, far m=-1, beyond m=2; nb center q=+1;
     // gradient cells q=-1, q=-2.
-    faces[2 * a] = gpClassifyFace(F[a][2], F[a][1], F[a][0], F[a][3], Cq[a][3], Cq[a][1],
-                                  Cq[a][0], solidM);
+    faces[2 * a] =
+        gpClassifyFace(F[a][2], F[a][1], F[a][0], F[a][3], Cq[a][3], Cq[a][1], Cq[a][0], solidM,
+                       exStd ? exStd[2 * a] : nanv, exSliver ? exSliver[2 * a] : nanv);
   }
   float wbcM[6], w1M[6], w2M[6];  // matrix-order weights (wbc unused in the matrix)
   for (int k = 0; k < 6; ++k) {
@@ -247,10 +256,12 @@ KOKKOS_INLINE_FUNCTION int gpWrap(int v, int n) {
 /// the worst case; returns the row count. idMap (size nn.x*nn.y*nn.z) gets slot or -1.
 inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov,
                           Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter,
-                          int matrixOrder = 2, int rhsOrder = 2) {
+                          int matrixOrder = 2, int rhsOrder = 2, CCConst tx = CCConst(),
+                          CCConst ty = CCConst(), CCConst tz = CCConst()) {
   CCExec space;
   Kokkos::deep_copy(space, counter, 0);
   Kokkos::deep_copy(space, idMap, -1);
+  const bool hasEx = tx.size() > 0;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "peclet::flow::gp_build_overlay", MD(space, {0, 0, 0}, {nn.x, nn.y, nn.z}),
@@ -280,8 +291,29 @@ inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov
         if (clean)
           return;
         const int inner = x + y * nn.x + z * nn.x * nn.y;
+        // Optional analytic-SDF exact crossings (setExactCrossings): t_a(j) = exact crossing
+        // fraction from same-component face point j toward j + e_a along axis a (NaN = none).
+        // minus side: std theta = 1 - t_a(i);      sliver theta = 2 - t_a(i-1)
+        // plus  side: std theta = t_a(i);          sliver theta = 1 + t_a(i+1)
+        float exStd[6], exSliver[6];
+        if (hasEx) {
+          const CCConst* ta[3] = {&tx, &ty, &tz};
+          for (int a = 0; a < 3; ++a) {
+            auto T = [&](int m) {
+              const int cx = a == 0 ? gpWrap(x + m, nn.x) : x;
+              const int cy = a == 1 ? gpWrap(y + m, nn.y) : y;
+              const int cz = a == 2 ? gpWrap(z + m, nn.z) : z;
+              return (float)(*ta[a])((long)cx + (long)cy * nn.x + (long)cz * (long)nn.x * nn.y);
+            };
+            exStd[2 * a + 1] = 1.0f - T(0);
+            exSliver[2 * a + 1] = 2.0f - T(-1);
+            exStd[2 * a] = T(0);
+            exSliver[2 * a] = 1.0f + T(1);
+          }
+        }
         const int slot = Kokkos::atomic_fetch_add(&counter(), 1);
-        if (!gpFillRow(ov, slot, inner, F, Cq, matrixOrder, rhsOrder)) {
+        if (!gpFillRow(ov, slot, inner, F, Cq, matrixOrder, rhsOrder, hasEx ? exStd : nullptr,
+                       hasEx ? exSliver : nullptr)) {
           // all faces COUPLED after all (pre-check was conservative): release the slot lazily by
           // marking it inert (zero-weight row on its own cell).
           ov.cell(slot) = inner;
