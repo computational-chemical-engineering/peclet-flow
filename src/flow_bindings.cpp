@@ -491,6 +491,14 @@ static void bind_solver(nb::module_& m, const char* name) {
           "to enforce div(eps u)=0 when the per-cell eps deposit's time-derivative is too jagged "
           "and "
           "destabilizes the eps-weighted pressure solve.")
+      .def(
+          "set_porous_conservative", [](S& s, bool on) { s.setPorousConservative(on); },
+          nb::arg("on"),
+          "eps-conservative porous momentum + projection pair (default True): time term "
+          "(eps_f rho/dt) u, eps rho-weighted advective form, projection coefficients "
+          "open*(eps rho idt)/(eps rho idt+beta) with matching correction. False = the legacy "
+          "plain-u pair (A/B only; it lets the projection drag gas with the moving porosity at "
+          "zero inertia cost — a spurious late-time energy source in clustering flows).")
       .def("sync_porous_prev", &S::syncPorousPrev,
            "Reseed eps^n = eps^{n+1} (d(eps)/dt=0 this step) — call once after the first "
            "void-fraction "

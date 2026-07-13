@@ -720,10 +720,18 @@ class Solver {
     // Multiphysics: refresh material properties / body forces from the current fields (frozen over
     // the step). No-op (byte-identical) when no closure is registered.
     updateProperties();
+    // eps-conservative porous momentum: the volume-averaged time term is (eps_f rho/dt) u, i.e.
+    // the variable-density machinery with the effective density rho_eff = eps*rho, refreshed from
+    // the just-deposited eps every step (eps ghosts are already filled by the coupling driver, so
+    // the whole-block product has valid ghosts). Without this weight the plain-u momentum lets the
+    // projection drag gas along with the moving porosity at zero inertia cost — a spurious energy
+    // source that pumps the particles through the drag (measured in the HCS benchmark).
+    if (porous_ && porousCons_)
+      updateEpsRho();
     // Variable properties / implicit drag: rebuild the diffusion stencil from the current mu/rho
     // and drag_beta fields (the implicit-FOU path rebuilds it per Picard in buildAdvStencil*, so
     // only the non-advective path needs this).
-    if ((varProps_ || varRho_ || hasDrag_) && !implicitAdv())
+    if ((varProps_ || varRho_ || hasDrag_ || (porous_ && porousCons_)) && !implicitAdv())
       rebuildStencils();
     // u^n time base, fixed for the whole step (Picard lags the advecting velocity at u^k, not the
     // base).
@@ -756,7 +764,7 @@ class Solver {
       if (porous_ && advect_)
         computeDivAdv();
       for (int c = 0; c < 3; ++c)  // RHS from u^n base + advection lagged at u^k
-        varRho_ ? buildRhsVar(c) : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c));
+        effVarRho() ? buildRhsVar(c) : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c));
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
       // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies
       // to the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC
@@ -764,7 +772,7 @@ class Solver {
       // at large dt). The velocity-MG BC path keeps its own FOU coarse operator.
       if (implicitAdv() && (!hasBc_ || !useVelocityMg_))
         for (int c = 0; c < 3; ++c)
-          (varProps_ || varRho_) ? buildAdvStencilVar(c) : buildAdvStencil(c);
+          (varProps_ || effVarRho()) ? buildAdvStencilVar(c) : buildAdvStencil(c);
       // Outflow backflow stabilization: dissipate reverse flow at the outlet in the momentum
       // operator used by the domain-BC stencil smoother (prevents backflow divergence). Inert
       // without reversal.
@@ -999,6 +1007,19 @@ class Solver {
   // The face-property accessor for the momentum stencil of component c: mu constant-or-field
   // (arithmetic/harmonic mean), rho constant-or-field (arithmetic face mean for the time diagonal —
   // the same face density the variable-density projection uses).
+  // Effective variable density: true varRho, or the eps-conservative porous momentum (rho_eff =
+  // eps*rho in epsRho_, refreshed per step by updateEpsRho).
+  bool effVarRho() const { return varRho_ || (porous_ && porousCons_); }
+  CCField effRhoField() { return varRho_ ? rhoField_ : epsRho_; }
+  void updateEpsRho() {
+    CCExec space;
+    CCField er = epsRho_;
+    CCConst ep = CCConst(epsField_);
+    const double rho = rho_;
+    Kokkos::parallel_for(
+        "peclet::flow::eps_rho", Kokkos::RangePolicy<CCExec>(space, 0, n_),
+        KOKKOS_LAMBDA(std::size_t i) { er(i) = ep(i) * rho; });
+  }
   VarFaceProps makeFaceProps(int c) {
     VarFaceProps fp;
     fp.haveMu = varProps_;
@@ -1007,9 +1028,9 @@ class Solver {
     else
       fp.muC = mu_;
     fp.harmMu = harmonicMu_;
-    fp.haveRho = varRho_;
-    if (varRho_) {
-      fp.rho = CCConst(rhoField_);
+    fp.haveRho = effVarRho();
+    if (effVarRho()) {
+      fp.rho = CCConst(effRhoField());
       fp.idt = 1.0 / dt_;
       fp.sc = strideOf(c);
     } else
@@ -1025,7 +1046,7 @@ class Solver {
     for (int c = 0; c < 3; ++c) {
       Kokkos::deep_copy(C[c].rscale, 1.0);
       Kokkos::deep_copy(C[c].inhom, 0.0);
-      if (varProps_ || varRho_)
+      if (varProps_ || effVarRho())
         ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x,
                              e_.y, e_.z, G, makeFaceProps(c));
       else
@@ -1329,7 +1350,7 @@ class Solver {
     C3 e = e_;
     CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
     CCConst fb = CCConst(cellForce_[c]);
-    CCConst rf = CCConst(rhoField_);
+    CCConst rf = CCConst(effRhoField());
     CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u), uu = CCConst(C[c].u),
             un = CCConst(old_[c]);
     const long strd = strideOf(c);
@@ -1338,6 +1359,11 @@ class Solver {
                bc = hasBc_ && !bcStencilPath();
     const bool ifou = implicitAdv() && deferredCorr_;
     const int sch = advScheme_;
+    // Porous advective-form compensation, weighted by the face density (rho_eff = eps*rho): the
+    // eps-weighted ADVECTIVE form eps*rho*(du/dt + u.grad u) IS the conservative volume-averaged
+    // momentum given the enforced continuity (the u*[d(eps)/dt + div(eps u)] bracket vanishes).
+    const bool pc = porous_ && advect_;
+    CCConst dv = CCConst(divAdv_);
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
         "rhs_var", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
@@ -1356,7 +1382,8 @@ class Solver {
                             : Grid::collocated ? 0.5 * (P((long)i + strd) - P((long)i - strd))
                                                : (P(i) - P((long)i - strd));
           const double fbF = 0.5 * (fb(i) + fb(i - strd));
-          bb(i) = rs(i) * (rhoF * idt * un(i) + fc + fbF - rhoF * aK + rhoF * aF - gp) +
+          const double comp = pc ? rhoF * uu(i) * 0.5 * (dv(i) + dv((long)i - strd)) : 0.0;
+          bb(i) = rs(i) * (rhoF * idt * un(i) + fc + fbF - rhoF * aK + rhoF * aF + comp - gp) +
                   (bc ? brhs(i) : -inh(i));
         });
   }
@@ -1408,6 +1435,8 @@ class Solver {
         fillMuGhosts();
       if (varRho_)
         fillPropGhosts(rhoField_);
+      if (!varRho_ && porous_ && porousCons_)
+        updateEpsRho();  // eps ghosts are driver-filled; whole-block product has valid ghosts
     }
     ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y,
                          e.z, G, makeFaceProps(c));
@@ -1415,9 +1444,9 @@ class Solver {
     FV AC = C[c].AC, AW = C[c].AW, AE = C[c].AE, AS = C[c].AS, AN = C[c].AN, AB = C[c].AB,
        AT = C[c].AT;
     CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u);
-    const bool vr = varRho_;
+    const bool vr = effVarRho();
     const double rhoC = rho_;
-    CCConst rf = vr ? CCConst(rhoField_) : CCConst();
+    CCConst rf = vr ? CCConst(effRhoField()) : CCConst();
     const long sc = strideOf(c);
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
@@ -1838,6 +1867,16 @@ class Solver {
       if (hasDrag_) {
         fillPropGhosts(dragBeta_);
         copyBlockShifted(beta1_, e1_, CCConst(dragBeta_), e_, G - 1);
+      } else if (porousCons_) {
+        Kokkos::deep_copy(beta1_, 0.0);  // conservative kernels read beta unconditionally when used
+      }
+      if (porousCons_) {
+        // eps-CONSERVATIVE pair: c_f = open * (eps_f rho idt)/(eps_f rho idt + beta_f), matching
+        // the eps-weighted momentum diagonal; the eps of the flux cancels the eps of the inertia
+        // (see mac_pressure.hpp). Correction: projectCorrectPorousCons below.
+        buildPorousCoeffCons(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_),
+                             CCConst(eps1_), CCConst(beta1_), hasDrag_, rho_ / dt_, e1_, 1);
+      } else if (hasDrag_) {
         buildPorousCoeffDrag(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_),
                              CCConst(eps1_), CCConst(beta1_), rho_ / dt_, e1_, 1);
       } else {
@@ -1930,8 +1969,12 @@ class Solver {
                              CCConst(oz_), e_, G);
       }
     } else {
-      if (porous_ &&
-          hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
+      if (porous_ && porousCons_)  // eps-conservative gradient rho*idt/(eps_f rho idt + beta_f),
+                                   // matching buildPorousCoeffCons (see mac_pressure.hpp)
+        projectCorrectPorousCons(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(epsField_),
+                                 CCConst(dragBeta_), hasDrag_, rho_ / dt_, e_, G);
+      else if (porous_ &&
+               hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
         projectCorrectPorousDrag(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(dragBeta_),
                                  rho_ / dt_, e_, G);
       else if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
@@ -2295,6 +2338,8 @@ class Solver {
       }
       if (divAdv_.extent(0) == 0)
         divAdv_ = CCField("divAdv", n_);  // cell div(u) for the porous advection-form compensation
+      if (epsRho_.extent(0) == 0)
+        epsRho_ = CCField("epsRho", n_);  // rho_eff = eps*rho (eps-conservative momentum)
       Kokkos::deep_copy(epsPrev_, epsField_);  // d(eps)/dt=0 on the first step
       if (eps1_.extent(0) == 0)
         eps1_ = CCField("eps1", n1_);
@@ -2327,6 +2372,7 @@ class Solver {
   // enforces div(eps u)=0 — useful when eps is a bare per-cell particle deposit whose
   // time-derivative is too jagged and drives the eps-weighted pressure solve unstable.
   void setPorousDepsDt(bool on) { porousDepsDt_ = on; }
+  void setPorousConservative(bool on) { porousCons_ = on; }
   // Pressure under-relaxation factor omega_p in (0,1] (MFIX-style); 1.0 = off (default).
   void setPressureUnderRelax(double w) { pressUnderRelax_ = w; }
   // Enable/disable variable-coefficient momentum (variable viscosity). variable=true binds the "mu"
@@ -2656,6 +2702,12 @@ class Solver {
                                     // source can drive the eps-weighted pressure solve unstable).
   CCField epsField_, epsPrev_, eps1_, depsdt_;  // eps^{n+1}, eps^n, g=1 bridge, stored d(eps)/dt
   CCField divAdv_;  // cell div(u) — porous advection-form compensation (see buildRhs*)
+  CCField epsRho_;  // rho_eff = eps*rho — eps-conservative porous momentum (updateEpsRho per step)
+  // eps-CONSERVATIVE porous momentum + projection pair (default): time term (eps_f rho/dt) u,
+  // eps_f rho-weighted advective form, projection c_f = open*(eps rho idt)/(eps rho idt + beta)
+  // with correction rho idt/(eps rho idt + beta) grad(phi). False = the legacy plain-u pair
+  // (for A/B only; it kinematically drags gas with the moving porosity — energy injection).
+  bool porousCons_ = true;
   CCField beta1_;         // g=1 bridge of the drag coeff (semi-implicit-drag pressure)
   bool hasDrag_ = false;  // implicit linear drag (CFD-DEM): beta on the momentum diagonal
   CCField dragBeta_;      // per-cell drag coefficient (added to AC; target beta*u_p rides

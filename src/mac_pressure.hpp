@@ -221,6 +221,56 @@ inline void buildPorousCoeffDrag(CCField cx, CCField cy, CCField cz, CCConst ox,
       });
 }
 
+// --- eps-CONSERVATIVE porous projection pair -------------------------------------------------
+// For the conservative volume-averaged momentum (time term (eps_f rho/dt) u, Model-B full -grad p)
+// the face momentum diagonal is D_f = eps_f*rho*idt + beta_f, the velocity correction is
+//   u_f -= (rho*idt / D_f) * grad(phi)          (beta=0, eps=1 -> plain projectCorrect exactly)
+// and the flux constraint div(eps u) = rhs makes the Poisson coefficient
+//   c_f = open_f * eps_f * (rho*idt/D_f) = open_f * (eps_f*rho*idt) / D_f
+// — the eps of the flux cancels against the eps of the inertia, unlike the plain-u pair above
+// (buildPorousCoeff*/projectCorrectPorousDrag), which is consistent only for the non-conservative
+// momentum form and kinematically drags gas along with the moving porosity (energy injection).
+inline void buildPorousCoeffCons(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy,
+                                 CCConst oz, CCConst eps, CCConst beta, bool useBeta, double rhoidt,
+                                 C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::porous_coeff_cons", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        auto cf = [&](long s, CCConst o) {
+          const double epsF = 0.5 * (eps(i) + eps(i - s));
+          const double bF = useBeta ? 0.5 * (beta(i) + beta(i - s)) : 0.0;
+          const double inert = epsF * rhoidt;
+          return o(i) * inert / (inert + bF) * 1.0;
+        };
+        cx(i) = cf(sx, ox);
+        cy(i) = cf(sy, oy);
+        cz(i) = cf(sz, oz);
+      });
+}
+inline void projectCorrectPorousCons(CCField u, CCField v, CCField w, CCConst phi, CCConst eps,
+                                     CCConst beta, bool useBeta, double rhoidt, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::correct_porous_cons", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        auto wf = [&](long s) {
+          const double epsF = 0.5 * (eps(i) + eps(i - s));
+          const double bF = useBeta ? 0.5 * (beta(i) + beta(i - s)) : 0.0;
+          return rhoidt / (epsF * rhoidt + bF);
+        };
+        u(i) -= wf(sx) * (phi(i) - phi(i - sx));
+        v(i) -= wf(sy) * (phi(i) - phi(i - sy));
+        w(i) -= wf(sz) * (phi(i) - phi(i - sz));
+      });
+}
+
 // Drag-relaxed velocity correction (sibling of projectCorrect): u_f -= w_f * grad(phi), w_f the
 // SAME face drag relaxation as buildPorousCoeffDrag. beta==0 -> w==1 -> projectCorrect exactly.
 inline void projectCorrectPorousDrag(CCField u, CCField v, CCField w, CCConst phi, CCConst beta,
