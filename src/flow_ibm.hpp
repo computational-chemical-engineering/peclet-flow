@@ -689,8 +689,91 @@ class Solver {
         gpRh_ = CCField("gpRh", n1_);
         gpT_ = CCField("gpT", n1_);
         gpZ2_ = CCField("gpZ2", n1_);
-        gpBinaryOpenness(oxb_, oyb_, ozb_, CCConst(sdf_), e_);
-        gpNRows_ = buildGpOverlay(CCConst(sdf_), e_, G, C3{nx_, ny_, nz_}, gpOv_, gpIdMap_,
+        // Fragmentation guard: the binary COUPLED-face condition is stricter than aperture
+        // connectivity, so tight-throat geometries (e.g. a random close packing with touching
+        // spheres) fragment the fluid graph into a main component + tiny pockets at the
+        // contacts. Each pocket adds its own null vector that the single global mean-removal
+        // cannot handle, and BiCGStab breaks down (measured: fields to ~1e152 on the RCP
+        // example). Host BFS over the coupled graph of the INNER sdf; fluid cells outside the
+        // largest component are treated as SOLID for the PROJECTION ONLY (sdfGp), decoupling
+        // their rows; the momentum step keeps the true sdf.
+        std::vector<double> sdfGpHost = sdfInner;
+        {
+          const int nx = nx_, ny = ny_, nz = nz_;
+          auto id = [&](int x, int y, int z) {
+            return (std::size_t)((x + nx) % nx) + (std::size_t)((y + ny) % ny) * nx +
+                   (std::size_t)((z + nz) % nz) * (std::size_t)nx * ny;
+          };
+          std::vector<int> comp(nInner, -1);
+          std::vector<std::size_t> stack;
+          int ncomp = 0, mainComp = -1;
+          std::size_t mainSize = 0, nActive = 0;
+          for (std::size_t seed = 0; seed < nInner; ++seed) {
+            if (comp[seed] >= 0 || sdfInner[seed] < 0.0)
+              continue;
+            std::size_t size = 0;
+            comp[seed] = ncomp;
+            stack.assign(1, seed);
+            while (!stack.empty()) {
+              const std::size_t c = stack.back();
+              stack.pop_back();
+              ++size;
+              const int x = (int)(c % nx), y = (int)((c / nx) % ny),
+                        z = (int)(c / ((std::size_t)nx * ny));
+              const int nb[6][3] = {{x - 1, y, z}, {x + 1, y, z}, {x, y - 1, z},
+                                    {x, y + 1, z}, {x, y, z - 1}, {x, y, z + 1}};
+              for (auto& q : nb) {
+                const std::size_t j = id(q[0], q[1], q[2]);
+                if (comp[j] >= 0 || sdfInner[j] < 0.0)
+                  continue;
+                // COUPLED face: mean-of-centers face sdf fluid AND both centers fluid
+                if (0.5 * (sdfInner[c] + sdfInner[j]) < 0.0)
+                  continue;
+                comp[j] = ncomp;
+                stack.push_back(j);
+              }
+            }
+            if (size > mainSize) {
+              mainSize = size;
+              mainComp = ncomp;
+            }
+            nActive += size;
+            ++ncomp;
+          }
+          if (ncomp > 1) {
+            std::size_t pockets = 0;
+            for (std::size_t i = 0; i < nInner; ++i)
+              if (sdfInner[i] >= 0.0 && comp[i] != mainComp) {
+                sdfGpHost[i] = -(std::abs(sdfInner[i]) * 1.001 + 1e-30);
+                ++pockets;
+              }
+            printf("peclet::flow ghost projection: %d fluid components; decoupled %zu pocket "
+                   "cells outside the main component (%zu of %zu fluid cells)\n",
+                   ncomp, pockets, mainSize, nActive);
+          }
+        }
+        CCField sdfGp("peclet::flow::sdfGp", n_);
+        {  // upload + periodic wrap (same pattern as the sdf upload above)
+          CCField din("peclet::flow::sdfGpInner_d", nInner);
+          Kokkos::deep_copy(din, Kokkos::View<const double*, Kokkos::HostSpace,
+                                              Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+                                     sdfGpHost.data(), sdfGpHost.size()));
+          CCExec space;
+          const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
+          Kokkos::parallel_for(
+              "peclet::flow::sdfgp_wrap",
+              Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {ex, ey, ez}),
+              KOKKOS_LAMBDA(int x, int y, int z) {
+                const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
+                          iz = (((z - g) % nz) + nz) % nz;
+                sdfGp((long)x + (long)y * ex + (long)z * (long)ex * ey) =
+                    din((std::size_t)ix + (std::size_t)iy * nx +
+                        (std::size_t)iz * (std::size_t)nx * ny);
+              });
+          space.fence();
+        }
+        gpBinaryOpenness(oxb_, oyb_, ozb_, CCConst(sdfGp), e_);
+        gpNRows_ = buildGpOverlay(CCConst(sdfGp), e_, G, C3{nx_, ny_, nz_}, gpOv_, gpIdMap_,
                                   gpCounter_, gpMatrixOrder_, gpRhsOrder_,
                                   hasExactCross_ ? CCConst(tEx_[0][0]) : CCConst(),
                                   hasExactCross_ ? CCConst(tEx_[1][1]) : CCConst(),
