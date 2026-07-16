@@ -1,5 +1,12 @@
 # The collocated cut-cell 2nd-order-drag problem — a first-principles statement
 
+> **✅ RESOLVED (2026-07-17) — see §9.** The directional ghost-cell projection
+> (`set_ghost_projection`, the staggered scheme's closures on the face-averaged field) plus a
+> directional one-sided cell gradient for `-grad(P)` closes the problem: Z&H drag converges
+> monotonically to the benchmark (−0.175% → −0.018% at N=32→128, vs mode-0's +1.00% → +0.30%,
+> O(h)), with the a-priori tests of §5 finally built and identifying the defects by measurement.
+> The sections below are kept as the (historically accurate) problem statement.
+
 **Status:** problem statement (2026-07-05), written to *stop* the pattern of porting a
 literature scheme, constructing a convincing rationale, implementing, and finding it fails. The
 companion notes (`collocated_first_order_analysis.md`, `collocated_second_order_literature.md`,
@@ -199,3 +206,76 @@ Mode 8 (Basilisk face-primary) was tried and reverted (M7).
 Do **not** port another scheme first. Write the a-priori constraint-truncation tests T1–T3 (Section 5),
 find out by *measurement* which of (Q1)/(Q2)/(Q3) is actually violated and at what order, and let that —
 not a paper — dictate the fix. Respect Section 6 or the fix will not run.
+
+---
+
+## 9. RESOLUTION (2026-07-17): the directional ghost-cell projection
+
+The Section-5 discipline was followed (`tests/study/ghost_collocated_apriori.py`, extending the
+staggered `ghost_projection_apriori.py`), and the measurements changed the diagnosis:
+
+**What the a-priori tests measured (all at 8/8 gates, N up to 128):**
+
+- **[C2] The dominant defect was never on the list: the `-grad(P)` operator itself.** The mode-0
+  predictor is the central difference `½(P_{i+1} − P_{i−1})`, and at a cut cell it reads P at the
+  **solid-centered neighbour, whose row is decoupled and holds 0** (RB-GS skips zero-diagonal rows;
+  mean-removal is gated on the active diagonal; `P += (ρ/dt)φ` keeps it 0). Reading that 0 is a
+  **gauge-dependent O(1) error in the gradient — O(1/h) in physical units** (measured: 11 → 92
+  physical-units error at N=16→128, order −1.0). The o-weighted kernels read the same 0 through
+  partially-open faces (`open_real`, same order −1.0); `projectCorrectCenter` is O(1) (its ½-weight
+  one-sided form); `centerGradOpen` with *binary* openness is the best prior art at O(h). A
+  **directional one-sided 2nd-order gradient** — central where both axis-neighbours are
+  fluid-centered, `(−3P_i + 4P_{i+1} − P_{i+2})/2` toward the fluid otherwise, never reading a
+  decoupled cell — is O(h²) (order 1.97–2.00) and exactly gauge-invariant (`gpCenterGrad`).
+  This error is forced on an O(h)-measure cut-cell layer → elliptic damping → O(h) drag: it alone
+  reproduces the observed first order, and it survived **every** prior constraint-side fix, which
+  is why modes 1–8 all stayed O(h).
+- **[C1] (= T1) The mode-0 constraint is worse than the O(h) the doc conjectured: it is O(1) at
+  cut cells** (openness divergence of the face-averaged exact solenoidal field: 0.44 → 0.53,
+  order ≈ 0 at N=16→128). The ghost-closed divergence of the same face-averaged field is the
+  staggered structure: O(h) localized at the IB (order → 0.99), O(h²) in the bulk (fixed-shell
+  order → 1.99).
+- **[C3] (= T2) The full manufactured chain** (perturb the cell field through the gradient
+  operator, face-average, ghost-divergence, singular solve, face + cell correction) delivers the
+  corrected **cell velocity at order 2.2–2.6** (L2 2.6–2.8) with the diagnostic ≡ residual
+  identity to round-off. The cell-correction ladder inside the chain reproduces the ranking
+  (ghost ≥ open ≫ pcc).
+
+**The scheme** (`set_ghost_projection(True, matrix_order, rhs_order)` on `SolverColocated`,
+`src/ghost_projection.hpp`): the staggered directional ghost projection carries over **verbatim**
+— the collocated projection already projects a MAC face field (`uf = ½(U_i+U_{i−1})`), the face
+correction `uf −= ∇φ` is the identical substitution, so the φ matrix, binary-openness MG
+surrogate, BiCGStab driver, and fragmentation guard are shared unchanged. New pieces: the RHS/
+diagnostic divergence closes the **face-averaged** field (`gpDivergDelta` on `uf_`), and both the
+incremental `-grad(Pⁿ)` predictor and the cell correction use `gpCenterGrad` (reading the
+projection's fragmentation-guarded sdf). Only `face_interp` mode 0 composes with it. At the
+steady fixed point φ→0, so the drag is set by (momentum + gpCenterGrad(P)) × (ghost constraint)
+— the (1,2) mixed form's decoupling, which is why the matrix could stay the staggered one.
+
+**Measured Z&H drag** (φ=0.125 SC sphere, K_ref=4.2920, warm-detector + tail protocol of
+`tests/study/collocated_zh_ghostproj.py`; ghost = (1,2) mixed):
+
+| N | mode 0 | ghost (1,2) | iters 0 / g |
+|---:|---:|---:|---:|
+| 32 | +1.004% | **−0.175%** | 10 / 6 |
+| 48 | +0.685% | **−0.084%** | 9 / 6 |
+| 64 | +0.598% | **−0.056%** | 10 / 7 |
+| 96 | +0.397% | **−0.029%** | 11 / 7 |
+| 128 | +0.299% | **−0.018%** | 10 / 7 |
+
+Monotone from below to the same limit (the staggered ghost's signature), 16× more accurate than
+mode 0 at N=128 and **below the Z&H table's own ~0.05% precision from N=96** (tail Richardson
+orders are not meaningful there — measured pairwise 1.8/1.45/1.6/1.6 over the resolved range,
+same caveat as the staggered study). BiCGStab holds flat 6–7 iterations vs PCG's 9–11. The
+flat-wall offset-slab Poiseuille stays pointwise exact (4e-6, ghost divergence 0). Both
+production defaults (staggered + collocated mode 0) are byte-identical (regression suite +0.00%).
+
+**Answering Section 4 by measurement:** the binding violations were (Q1) — but at O(1), in both
+C *and* G, not the conjectured O(h) in C alone — and the constraint that fixes them is not
+adjointness (Q3): the ghost pair (C, G) is deliberately **non-adjoint** (a nonsymmetric 13/7-point
+C with a one-sided G), yet stable under the MG-surrogate BiCGStab and convergent. A1's open-area
+flux hypothesis is moot — the ghost C is a *point* divergence, no apertures at all; the sub-cell
+throat caveat of the staggered study (RCP tight throats) applies to the collocated variant
+identically. Constraints of Section 6 respected: divided convention untouched (the ghost pieces
+are all in the projection/predictor), incremental-rotational pressure kept, still an approximate
+projection of the averaged face field, opt-in with byte-identical defaults.

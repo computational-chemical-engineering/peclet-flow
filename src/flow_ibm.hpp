@@ -208,7 +208,9 @@ class Solver {
   // EXPERIMENTAL directional ghost-cell projection (second staggered IBM, ghost_projection.hpp):
   // point-based FD divergence with wall-anchored directional closures instead of the
   // openness-weighted cut-cell projection. Call BEFORE set_solid (the overlay is built there).
-  // v1: staggered, single-rank, periodic + IBM only, stationary walls. The nonsymmetric extended
+  // v1: single-rank, periodic + IBM only, stationary walls (both grids; the collocated variant
+  // closes the face-AVERAGED field and adds the gpCenterGrad predictor/correction, face_interp 0
+  // only). The nonsymmetric extended
   // stencil is solved by MG-preconditioned BiCGStab (binary-openness surrogate hierarchy).
   // matrixOrder/rhsOrder select the closure order (1 = linear, 2 = wall-anchored quadratic) for
   // the implicit phi couplings and the divergence RHS/diagnostic respectively:
@@ -218,8 +220,13 @@ class Solver {
   //         the operator mismatch converges through the time stepping (measured rate ~0.4).
   void setGhostProjection(bool on, int matrixOrder = 2, int rhsOrder = 2) {
     if constexpr (Grid::collocated) {
-      if (on)
-        throw std::runtime_error("set_ghost_projection: v1 is staggered-only");
+      // Collocated ghost mode: the SAME phi matrix/closures on the 1/2-1/2 face-averaged field
+      // (the face correction uf -= grad(phi) is the identical substitution), plus the directional
+      // gpCenterGrad cell gradient for the predictor -grad(P^n) and the cell correction. Only the
+      // plain (mode-0) face map applies — the wall-aware/FV/embed face-interp modes replace the
+      // very operators this scheme owns.
+      if (on && faceInterp_ != 0)
+        throw std::runtime_error("set_ghost_projection: collocated ghost requires face_interp 0");
     }
     if (on && (porous_ || varRho_ || hasBc_ || useChebyshev_))
       throw std::runtime_error(
@@ -322,7 +329,11 @@ class Solver {
   //       with the ½/½ face average, fs-weighted cut-cell Poisson, and central-difference
   //       correction (the mode-1/2/3 wall-aware projection was measured WORSE than plain; embed
   //       drives momentum).
-  void setFaceInterp(int mode) { faceInterp_ = mode; }
+  void setFaceInterp(int mode) {
+    if (ghostProjection_ && mode != 0)
+      throw std::runtime_error("set_face_interp: incompatible with the ghost projection");
+    faceInterp_ = mode;
+  }
   // Under-relaxation of the mode-4 FV wall-flux defect correction (1 = full; <1 damps the stiff
   // explicit-lagged wall term). The steady state is independent of this value.
   void setFvRelax(double w) { fvRelax_ = w; }
@@ -752,7 +763,9 @@ class Solver {
                    ncomp, pockets, mainSize, nActive);
           }
         }
-        CCField sdfGp("peclet::flow::sdfGp", n_);
+        sdfGp_ = CCField("peclet::flow::sdfGp", n_);
+        CCField sdfGp = sdfGp_;  // the projection's sdf view (pockets decoupled); persisted for
+                                 // the collocated gpCenterGrad predictor/correction
         {  // upload + periodic wrap (same pattern as the sdf upload above)
           CCField din("peclet::flow::sdfGpInner_d", nInner);
           Kokkos::deep_copy(din, Kokkos::View<const double*, Kokkos::HostSpace,
@@ -951,8 +964,16 @@ class Solver {
           if (bc_[2 * a + 1] == 3)
             bcNeumannGhost(fa[a], e, G, a, 1);
       }
-      divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
-                 div_, e_, G);
+      if (ghostProjection_ && gpNRows_ >= 0) {
+        // Ghost mode: the closed point divergence of the projected face field (same kernel pair
+        // as the RHS) — the mode's true residual.
+        divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(oxb_), CCConst(oyb_),
+                   CCConst(ozb_), div_, e_, G);
+        gpDivergDelta(div_, CCConst(uf_), CCConst(vf_), CCConst(wf_), gpOv_, gpNRows_,
+                      C3{nx_, ny_, nz_}, e_, G);
+      } else
+        divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_),
+                   CCConst(oz_), div_, e_, G);
     } else {
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);  // ghosts incl. outflow zero-gradient before the divergence
@@ -1294,8 +1315,14 @@ class Solver {
     const bool tg = Grid::collocated && faceInterp_ >= 2 && faceInterp_ <= 5 && incr;
     // modes 6/7: openness-weighted -grad(P^n) predictor, matching the fs-weighted correction
     const bool wg = Grid::collocated && (faceInterp_ == 6 || faceInterp_ == 7) && incr;
+    // ghost mode: directional gpCenterGrad predictor — the mode-0 central difference reads the
+    // decoupled P=0 at solid-centered cells, a gauge-dependent O(1) gradient error at every cut
+    // cell (measured O(1/h) in physical units, ghost_collocated_apriori.py [C2]).
+    const bool gg = Grid::collocated && ghostProjection_ && incr;
     if constexpr (Grid::collocated) {
-      if (tg) {
+      if (gg) {
+        gpCenterGrad(tgp_, CCConst(P_), CCConst(sdfGp_), c, e_, G);
+      } else if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         transposeGradWallAware(tgp_, CCConst(P_), CCConst(sdf_), CCConst(oax[c]), CCConst(xcs[c]),
@@ -1305,7 +1332,7 @@ class Solver {
         centerGradOpen(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G);
       }
     }
-    CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg/wg false there)
+    CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg/wg/gg false there)
     // Mode-4 fully-FV momentum via DEFECT CORRECTION: solve M·u^{k+1} = M·u^k − rs·L_FV(u^k) +
     // rs·b_FV so the fixed point satisfies the second-order finite-volume balance L_FV·u* = b_FV
     // exactly, with the (stable, small-cell-safe) IBM matrix M only as preconditioner. fvM_ = M·u^k
@@ -1355,7 +1382,7 @@ class Solver {
           const double gp =
               !incr ? 0.0
               : Grid::collocated
-                  ? ((tg || wg) ? gpw(i) : 0.5 * (P((long)i + strd) - P((long)i - strd)))
+                  ? ((tg || wg || gg) ? gpw(i) : 0.5 * (P((long)i + strd) - P((long)i - strd)))
                   : (P(i) - P((long)i - strd));
           if (wd) {  // FV defect-correction RHS  M·u − ω·rs·(L_FV·u − b_FV),  b_FV = idt·cs·u^n +
                      // cs·(f − grad P). ω<1 damps the (stiff, explicit-lagged) wall-flux
@@ -1391,13 +1418,17 @@ class Solver {
     const bool pc = porous_ && advect_;
     CCConst dv = CCConst(divAdv_);
     const bool tg = Grid::collocated && faceInterp_ >= 2 && incr;  // wall-aware -grad(P) (mode 2/3)
-    if constexpr (Grid::collocated)
-      if (tg) {
+    const bool gg = Grid::collocated && ghostProjection_ && incr;  // directional ghost -grad(P)
+    if constexpr (Grid::collocated) {
+      if (gg) {
+        gpCenterGrad(tgp_, CCConst(P_), CCConst(sdfGp_), c, e_, G);
+      } else if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         transposeGradWallAware(tgp_, CCConst(P_), CCConst(sdf_), CCConst(oax[c]), CCConst(xcs[c]),
                                faceInterp_ >= 3, c, e_, G);
       }
+    }
     CCConst gpw = CCConst(tgp_);
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
@@ -1414,7 +1445,8 @@ class Solver {
           }
           const double gp = !incr ? 0.0
                             : Grid::collocated
-                                ? (tg ? gpw(i) : 0.5 * (P((long)i + strd) - P((long)i - strd)))
+                                ? ((tg || gg) ? gpw(i)
+                                              : 0.5 * (P((long)i + strd) - P((long)i - strd)))
                                 : (P(i) - P((long)i - strd));
           const double comp = pc ? rho * uu(i) * 0.5 * (dv(i) + dv((long)i - strd)) : 0.0;
           bb(i) = rs(i) * (idiag * un(i) + fc + fb(i) - rho * aK + rho * aF + comp - gp) +
@@ -1860,8 +1892,23 @@ class Solver {
                               faceInterp_ >= 3, e_, G);  // faces (modes 1-5,7; mode 6 = plain)
       else
         centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
-      divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
-                 div_, e_, G);
+      if (ghostProjection_) {
+        // Collocated ghost divergence: the SAME binary-openness + closure-delta pair as the
+        // staggered path, applied to the 1/2-1/2 face-averaged field (the closures only ever read
+        // faces whose two adjacent centers are fluid, so the masked solid-cell zeros never enter
+        // except at EXPLICIT slivers — faithfully modelled in the a-priori study).
+        if (gpNRows_ < 0)
+          throw std::runtime_error("ghost projection: call set_solid after set_ghost_projection");
+        if (porous_ || varRho_ || useChebyshev_)
+          throw std::runtime_error(
+              "ghost projection: porous/variable-rho/Chebyshev unsupported (v1)");
+        divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(oxb_), CCConst(oyb_),
+                   CCConst(ozb_), div_, e_, G);
+        gpDivergDelta(div_, CCConst(uf_), CCConst(vf_), CCConst(wf_), gpOv_, gpNRows_,
+                      C3{nx_, ny_, nz_}, e_, G);
+      } else
+        divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_),
+                   CCConst(oz_), div_, e_, G);
     } else {
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);
@@ -1983,10 +2030,10 @@ class Solver {
       }
       lastPressureIters_ =
           mg_.solveChebyshev(rhs1_, phi1_, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
-    } else if (!Grid::collocated && ghostProjection_) {
-      // Nonsymmetric ghost-projection operator: BiCGStab, preconditioned by the symmetric
-      // binary-openness V-cycle (the hierarchy set up in setSolid); the overlay delta enters the
-      // fine-level matvec only.
+    } else if (ghostProjection_) {
+      // Nonsymmetric ghost-projection operator (both grids — the phi matrix is identical):
+      // BiCGStab, preconditioned by the symmetric binary-openness V-cycle (the hierarchy set up
+      // in setSolid); the overlay delta enters the fine-level matvec only.
       lastPressureIters_ =
           mg_.solveBiCGStab(rhs1_, phi1_, r_, gpRh_, pp_, Ap_, gpT_, z_, gpZ2_, pcgMaxit_,
                             pcgRtol_, 2, 2, 12, gpOv_, gpNRows_, C3{nx_, ny_, nz_});
@@ -2032,8 +2079,17 @@ class Solver {
           if (bc_[2 * a + 1] == 3)
             bcCorrectOutflow(fa[a], phi_, e, G, a);
       }
-      if (faceInterp_ >= 2 &&
-          faceInterp_ <= 5) {  // modes 2-5: cell correction = the TRANSPOSE of the
+      if (ghostProjection_) {
+        // Ghost cell correction: the directional gpCenterGrad gradient of phi — 2nd-order
+        // one-sided at cut cells, never reads a decoupled (solid/pocket) phi. The same operator
+        // supplies the momentum's -grad(P^n) predictor (buildRhs), so the pressure force the
+        // momentum feels and the correction stay one operator family.
+        for (int cc = 0; cc < 3; ++cc) {
+          gpCenterGrad(tgp_, CCConst(phi_), CCConst(sdfGp_), cc, e_, G);
+          subtractField(C[cc].u, CCConst(tgp_), e_, G);
+        }
+      } else if (faceInterp_ >= 2 &&
+                 faceInterp_ <= 5) {  // modes 2-5: cell correction = the TRANSPOSE of the
         // wall-aware map, keeping (T, Tᵀ) an adjoint pair (transposeGradWallAware)
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
@@ -2756,6 +2812,8 @@ class Solver {
   std::vector<double> oxOverride_, oyOverride_, ozOverride_;  // exact apertures (inner)
   bool hasOpenOverride_ = false;
   CCField oxb_, oyb_, ozb_;  // binary (COUPLED) openness on the g=2 block (ghost divergence)
+  CCField sdfGp_;  // the projection's sdf (fragmentation pockets decoupled) — gpCenterGrad reads
+                   // it so the collocated predictor/correction never touch a decoupled cell
   CCField gpRh_, gpT_, gpZ2_;  // extra BiCGStab scratch (g=1 block)
   CCField uf_, vf_, wf_;    // collocated: transient face (MAC) field (approx projection)
   CCField tgp_;             // collocated: transpose-gradient scratch (setFaceInterp(2/3))
