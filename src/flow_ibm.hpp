@@ -329,6 +329,22 @@ class Solver {
   //       with the ½/½ face average, fs-weighted cut-cell Poisson, and central-difference
   //       correction (the mode-1/2/3 wall-aware projection was measured WORSE than plain; embed
   //       drives momentum).
+  //   9 = CUTCELL-GHOST HYBRID (the recommended collocated mode for tight-throat porous media):
+  //       mode-0's aperture projection unchanged (plain ½/½ map, real openness divergence —
+  //       throttles sub-cell throats, symmetric MG-PCG, no fragmentation concern) but the
+  //       predictor -grad(P) and the cell correction use the directional gpCenterGrad gradient
+  //       (2nd-order one-sided at cut cells, never reads a solid-centered cell's P — the measured
+  //       O(1/h) mode-0 defect). Measured: Z&H drag in a −0.04..−0.10% band N=32..128 (NOT clean
+  //       2nd order — the pinned-face aperture-constraint truncation floors it — but 7–20× below
+  //       mode 0); RCP permeability monotone toward the staggered-cutcell reference
+  //       (−13.0/−8.6/−6.2% at Ng=32/44/56) where mode 0 is erratic (−20%..+14%, pathologically
+  //       slow settling) and the ghost projection needs its fragmentation guard. See
+  //       doc/collocated_second_order_open_problem.md §9.
+  //  10 = mode 9 with the OPEN-CENTROID wall-aware constraint quadrature (the mode-3
+  //       centerToFaceWallAware map). DEAD ABLATION — kept for the record: O(h) with a worse
+  //       constant than mode 9 on Z&H, and DIVERGES on RCP slivers (the mode-3a non-telescoping
+  //       row-sum mechanism; the telescoping gpCenterGrad force does not cure the
+  //       constraint-side injection). Do not use.
   void setFaceInterp(int mode) {
     if (ghostProjection_ && mode != 0)
       throw std::runtime_error("set_face_interp: incompatible with the ghost projection");
@@ -640,8 +656,9 @@ class Solver {
       if constexpr (Grid::collocated) {  // static open-centroid wall distances (setFaceInterp(3))
         buildFaceCentroidDist(xcx_, xcy_, xcz_, CCConst(sdf_), e_);
         buildCellFraction(cs_, CCConst(sdf_), e_, G);  // cell fluid fraction (setFaceInterp(4))
-        if (faceInterp_ >=
-            5) {  // EMBED: a solid-CENTRED cut cell (cs>0) is partially fluid and holds
+        if (faceInterp_ >= 5 &&
+            faceInterp_ <= 7) {  // EMBED: a solid-CENTRED cut cell (cs>0) is partially fluid and
+                                 // holds
           // its reconstructed near-wall velocity — masking it to 0 (the sdf<0 IBM mask) drops the
           // near-wall closure and shifts the whole channel. Re-mask from cs: pin ONLY fully-solid
           // cells (cs≈0), keeping every partial-fluid cut cell live in the embed solve +
@@ -844,7 +861,7 @@ class Solver {
       if (outerTol_ > 0)
         for (int c = 0; c < 3; ++c)
           Kokkos::deep_copy(prev_[c], C[c].u);
-      if (advect_ || hasBc_ || (Grid::collocated && faceInterp_ >= 4))
+      if (advect_ || hasBc_ || (Grid::collocated && faceInterp_ >= 4 && faceInterp_ <= 7))
         for (int c = 0; c < 3; ++c)
           fillVelGhosts(c,
                         0);  // explicit ghosts (periodic + BC) for advect / mode-4 FV defect matvec
@@ -1315,13 +1332,15 @@ class Solver {
     const bool tg = Grid::collocated && faceInterp_ >= 2 && faceInterp_ <= 5 && incr;
     // modes 6/7: openness-weighted -grad(P^n) predictor, matching the fs-weighted correction
     const bool wg = Grid::collocated && (faceInterp_ == 6 || faceInterp_ == 7) && incr;
-    // ghost mode: directional gpCenterGrad predictor — the mode-0 central difference reads the
-    // decoupled P=0 at solid-centered cells, a gauge-dependent O(1) gradient error at every cut
-    // cell (measured O(1/h) in physical units, ghost_collocated_apriori.py [C2]).
-    const bool gg = Grid::collocated && ghostProjection_ && incr;
+    // ghost mode (and the mode-9/10 cutcell-ghost hybrids): directional gpCenterGrad predictor —
+    // the mode-0 central difference reads the decoupled P=0 at solid-centered cells, a
+    // gauge-dependent O(1) gradient error at every cut cell (measured O(1/h) in physical units,
+    // ghost_collocated_apriori.py [C2]).
+    const bool gg =
+        Grid::collocated && (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) && incr;
     if constexpr (Grid::collocated) {
       if (gg) {
-        gpCenterGrad(tgp_, CCConst(P_), CCConst(sdfGp_), c, e_, G);
+        gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G);
       } else if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
@@ -1343,7 +1362,7 @@ class Solver {
     // view untouched) on every non-porous path.
     const bool pc = porous_ && advect_;
     CCConst dv = CCConst(divAdv_);
-    const bool wd = Grid::collocated && faceInterp_ >= 4;
+    const bool wd = Grid::collocated && faceInterp_ >= 4 && faceInterp_ <= 7;
     if constexpr (Grid::collocated)
       if (wd) {
         stencilMatvec(fvM_, CCConst(C[c].u), MConst(C[c].AC), MConst(C[c].AW), MConst(C[c].AE),
@@ -1417,11 +1436,14 @@ class Solver {
     // Porous advection-form compensation (+rho*u_f*div(u)_f): see the step() comment.
     const bool pc = porous_ && advect_;
     CCConst dv = CCConst(divAdv_);
-    const bool tg = Grid::collocated && faceInterp_ >= 2 && incr;  // wall-aware -grad(P) (mode 2/3)
-    const bool gg = Grid::collocated && ghostProjection_ && incr;  // directional ghost -grad(P)
+    const bool tg = Grid::collocated && faceInterp_ >= 2 && faceInterp_ <= 5 &&
+                    incr;  // wall-aware -grad(P) (mode 2/3)
+    const bool gg =
+        Grid::collocated && (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) &&
+        incr;  // directional ghost -grad(P)
     if constexpr (Grid::collocated) {
       if (gg) {
-        gpCenterGrad(tgp_, CCConst(P_), CCConst(sdfGp_), c, e_, G);
+        gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G);
       } else if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
@@ -1885,11 +1907,11 @@ class Solver {
       // (closed walls are openness 0).
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);
-      if ((faceInterp_ >= 1 && faceInterp_ <= 5) ||
-          faceInterp_ == 7)  // wall-aware flux map at solid
+      if ((faceInterp_ >= 1 && faceInterp_ <= 5) || faceInterp_ == 7 ||
+          faceInterp_ == 10)  // wall-aware flux map at solid
         centerToFaceWallAware(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u),
                               CCConst(sdf_), CCConst(xcx_), CCConst(xcy_), CCConst(xcz_),
-                              faceInterp_ >= 3, e_, G);  // faces (modes 1-5,7; mode 6 = plain)
+                              faceInterp_ >= 3, e_, G);  // faces (modes 1-5,7,10; mode 6/9 = plain)
       else
         centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
       if (ghostProjection_) {
@@ -2079,13 +2101,14 @@ class Solver {
           if (bc_[2 * a + 1] == 3)
             bcCorrectOutflow(fa[a], phi_, e, G, a);
       }
-      if (ghostProjection_) {
-        // Ghost cell correction: the directional gpCenterGrad gradient of phi — 2nd-order
-        // one-sided at cut cells, never reads a decoupled (solid/pocket) phi. The same operator
-        // supplies the momentum's -grad(P^n) predictor (buildRhs), so the pressure force the
-        // momentum feels and the correction stay one operator family.
+      if (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) {
+        // Ghost cell correction (also the mode-9/10 cutcell-ghost hybrids): the directional
+        // gpCenterGrad gradient of phi — 2nd-order one-sided at cut cells, never reads a
+        // decoupled (solid/pocket) phi. The same operator supplies the momentum's -grad(P^n)
+        // predictor (buildRhs), so the pressure force the momentum feels and the correction stay
+        // one operator family.
         for (int cc = 0; cc < 3; ++cc) {
-          gpCenterGrad(tgp_, CCConst(phi_), CCConst(sdfGp_), cc, e_, G);
+          gpCenterGrad(tgp_, CCConst(phi_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), cc, e_, G);
           subtractField(C[cc].u, CCConst(tgp_), e_, G);
         }
       } else if (faceInterp_ >= 2 &&

@@ -133,8 +133,11 @@ static void bind_solver(nb::module_& m, const char* name) {
           "grad(P) (default), 1 = wall-aware cell->face map only (ablation), 2 = wall-aware map + "
           "its transpose (face-centre; ablation), 3 = mode 2 at the open-face-centroid (FV "
           "constraint, FD momentum), 4 = fully-FV (mode-3 projection + second-order wall "
-          "viscous-flux deferred correction on the momentum; targets 2nd-order drag). No effect on "
-          "the staggered solver.")
+          "viscous-flux deferred correction on the momentum), 5/6/7 = Basilisk-embed ablations, "
+          "9 = CUTCELL-GHOST HYBRID: mode-0 aperture projection + the directional gpCenterGrad "
+          "-grad(P)/cell correction (recommended for tight-throat porous media: throat-throttling "
+          "apertures, symmetric MG-PCG, ~7-20x below mode-0 drag error; not clean 2nd order), "
+          "10 = dead ablation (diverges), do not use. No effect on the staggered solver.")
       .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
            "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
            "explicit-lagged wall term). Steady state is independent of w.")

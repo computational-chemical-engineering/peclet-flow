@@ -279,3 +279,41 @@ throat caveat of the staggered study (RCP tight throats) applies to the collocat
 identically. Constraints of Section 6 respected: divided convention untouched (the ghost pieces
 are all in the projection/predictor), incremental-rotational pressure kept, still an approximate
 projection of the averaged face field, opt-in with byte-identical defaults.
+
+### 9.1 Tight-throat (RCP) behaviour and the mode-9 cutcell-ghost hybrid (2026-07-18)
+
+Measured on the peclet-examples random-close-packing geometry (dem `pack_bed`, N=180, φ=0.630,
+cached `tests/study/rcp_pack_seed3.npz`; harness `tests/study/rcp_permeability_ab.py`;
+permeability k vs the **staggered cutcell** reference on the same sampled SDF):
+
+| Ng | stag ghost | col mode 0 | col ghost | col mode 9 |
+|---:|---:|---:|---:|---:|
+| 32 | +27.2% | −19.6% | −10.1% | −13.0% |
+| 44 | +18.3% | −13.3% | −4.3% | −8.6% |
+| 56 | +14.2% | +13.6%* | −1.2% | −6.2% |
+
+(*) mode 0 at Ng=56 is genuinely erratic — the sign flip is real (re-verified at tol 1e-8) and
+it needed 7725 steps to settle vs ~650 for its neighbours: the O(1/h) gradient defect both
+scatters k and cripples the transient on under-resolved throats.
+
+- The **collocated ghost inherits the staggered ghost's throat defect** (binary graph fragments
+  identically — 99 pockets at Ng=56 — and the point closures over-carry the throats, sitting
+  ~5–7% above the aperture family), but its raw numbers look best here only because that
+  inflation *cancels* against the collocated under-shoot — two wrongs, not a scheme to trust on
+  tight throats.
+- **Mode 9** (`set_face_interp(9)`) is the throat-safe collocated cutcell: mode-0's aperture
+  projection verbatim (throttling, symmetric MG-PCG at 15–31 iters, no guard needed) with only
+  the two measured-O(1) operators — the `-grad(P)` predictor and the cell correction — replaced
+  by `gpCenterGrad`. It converges monotonically toward the staggered reference and is stable
+  where mode 0 is erratic. On Z&H it holds a −0.04..−0.10% error band at N=32..128 — **not**
+  clean 2nd order (the aperture constraint's truncation on the *pinned* ½/½ face average floors
+  it; the staggered scheme escapes only because its face values are free DOFs) but 7–20× below
+  mode 0 and comparable to the ghost at practical N.
+- **Mode 10** (mode 9 + the open-centroid wall-aware quadrature) is a dead ablation: O(h) with a
+  worse constant on Z&H and divergent on RCP slivers — the mode-3a non-telescoping row-sum
+  runaway, *not* cured by the telescoping force. This finally closes A1 in the coupled setting:
+  the constraint quadrature is not the lever, on either geometry.
+
+**Practical guidance (mirrors the staggered situation exactly):** ghost projection for
+resolved/smooth immersed geometry (2nd order, fewer iterations); aperture cutcell — mode 9
+rather than mode 0 — for under-resolved tight-throat porous media.
