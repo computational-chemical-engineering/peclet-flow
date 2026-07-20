@@ -83,6 +83,38 @@ inline void cutcellSmoothColor(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, O
       });
 }
 
+// Box-restricted red/black sweep for the distributed overlap smoother: sweeps [rlo,rhi) only,
+// skipping the box [slo,shi) (pass slo==shi to skip nothing). Used to split one color's sweep into
+// an INTERIOR pass (cells whose 7-point stencil reads no ghost cell — runs while the halo exchange
+// is in flight) and a boundary-SHELL pass (after the exchange lands). A color's cells never read
+// same-color cells, so interior-then-shell ordering is bit-identical to the full blocking sweep
+// (and a cell swept twice recomputes the identical value — overlapping shell slabs are safe).
+template <class OpV>
+inline void cutcellSmoothColorBox(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, OpV AS, OpV AN,
+                                  OpV AB, OpV AT, C3 e, C3 og, int color, C3 rlo, C3 rhi, C3 slo,
+                                  C3 shi) {
+  if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
+    return;
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::cc_smooth_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+          return;  // inside the skip box (already swept by the interior pass)
+        if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const double ac = AC(i);
+        if (ac < 1e-30)
+          return;
+        const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
+                         AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
+        phi(i) = (b(i) - s) / ac;
+      });
+}
+
 // y = A x for the cut-cell operator over inner cells (matvec for PCG; mg_apply_var_k port).
 template <class OpV>
 inline void applyCutcellOp(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV AS, OpV AN, OpV AB,

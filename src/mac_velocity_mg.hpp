@@ -565,6 +565,26 @@ class VelocityMG {
     CCConst pin = usePin_ ? CCConst(lv.pin) : empty_;
     for (int k = 0; k < sweeps; ++k)
       for (int color = 0; color < 2; ++color) {
+#ifdef PECLET_FLOW_MPI
+        if (distributed_ && !(isL0 && bcApplyL0_)) {
+          // Overlap the per-colour halo with the interior sweep (see CutcellMG::smooth) — only on
+          // the periodic/IBM path: the per-colour BC hook re-imposes ghost/held cells AFTER the
+          // fill in the blocking order, which the split would reorder.
+          const C3 lo{G + 1, G + 1, G + 1};
+          const C3 hi{lv.ext.x - G - 1, lv.ext.y - G - 1, lv.ext.z - G - 1};
+          lv.dev->exchangeBegin(lv.x);
+          ibmRbgsStencilColorBox(lv.x, CCConst(lv.rhs), MConst(lv.AC), MConst(lv.AW),
+                                 MConst(lv.AE), MConst(lv.AS), MConst(lv.AN), MConst(lv.AB),
+                                 MConst(lv.AT), pin, lv.ext, og, color, lo, hi, C3{0, 0, 0},
+                                 C3{0, 0, 0});
+          lv.dev->exchangeEnd(lv.x);
+          ibmRbgsStencilColorBox(lv.x, CCConst(lv.rhs), MConst(lv.AC), MConst(lv.AW),
+                                 MConst(lv.AE), MConst(lv.AS), MConst(lv.AN), MConst(lv.AB),
+                                 MConst(lv.AT), pin, lv.ext, og, color, C3{G, G, G},
+                                 C3{lv.ext.x - G, lv.ext.y - G, lv.ext.z - G}, lo, hi);
+          continue;
+        }
+#endif
         fill(lv, lv.x);
         if (isL0 && bcApplyL0_)
           bcApplyL0_(lv.x);  // re-impose the velocity BC (held Dirichlet faces) per colour

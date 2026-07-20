@@ -166,6 +166,41 @@ inline void ibmRbgsStencilColor(CCField x, CCConst b, MConst AC, MConst AW, MCon
       });
 }
 
+// Box-restricted variant for the distributed overlap smoother: sweeps [rlo,rhi) only, skipping
+// [slo,shi) (pass slo==shi to skip nothing). Interior-then-shell split of one colour's sweep is
+// bit-identical to the full sweep — a colour's cells never read same-colour cells (see
+// cutcellSmoothColorBox in mac_pressure.hpp).
+inline void ibmRbgsStencilColorBox(CCField x, CCConst b, MConst AC, MConst AW, MConst AE,
+                                   MConst AS, MConst AN, MConst AB, MConst AT, CCConst solidmask,
+                                   C3 ext, C3 og, int color, C3 rlo, C3 rhi, C3 slo, C3 shi) {
+  if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
+    return;
+  CCExec space;
+  const bool hasMask = (solidmask.extent(0) != 0);
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::ibm_rbgs_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+          return;
+        if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+          return;
+        const long sx = 1, sy = ext.x, sz = (long)ext.x * ext.y;
+        const long i = (long)lx + (long)ly * ext.x + (long)lz * sz;
+        if (hasMask && solidmask(i) > 0.5) {
+          x(i) = 0.0;
+          return;
+        }
+        const double ac = AC(i);
+        if (Kokkos::fabs(ac) < 1e-30)
+          return;
+        const double s = (double)AE(i) * x(i + sx) + (double)AW(i) * x(i - sx) +
+                         (double)AN(i) * x(i + sy) + (double)AS(i) * x(i - sy) +
+                         (double)AT(i) * x(i + sz) + (double)AB(i) * x(i - sz);
+        x(i) = (b(i) - s) / ac;
+      });
+}
+
 inline void ibmRbgsSweep(CCField x, CCConst b, MConst AC, MConst AW, MConst AE, MConst AS,
                          MConst AN, MConst AB, MConst AT, CCConst solidmask, C3 ext, C3 og, int g) {
   ibmRbgsStencilColor(x, b, AC, AW, AE, AS, AN, AB, AT, solidmask, ext, og, g, 0);

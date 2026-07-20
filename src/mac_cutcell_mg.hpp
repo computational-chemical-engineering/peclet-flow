@@ -579,6 +579,27 @@ class CutcellMG {
     for (int k = 0; k < sweeps; ++k)
       for (int s = 0; s < 2; ++s) {
         const int color = reverse ? (1 - s) : s;
+#ifdef PECLET_FLOW_MPI
+        if (distributed_) {
+          // Overlap the per-color halo with the interior sweep: post the exchange, smooth the
+          // cells whose 7-point stencil reads no ghost (they depend on neither the incoming halo
+          // nor the outflow ghost), complete the exchange, then sweep the boundary shell. A
+          // color's cells never read same-color cells, so this ordering is bit-identical to the
+          // blocking fill-then-full-sweep (validated by the np>1 bit-exact MG tests).
+          const C3 lo{G + 1, G + 1, G + 1};
+          const C3 hi{lv.ext.x - G - 1, lv.ext.y - G - 1, lv.ext.z - G - 1};
+          lv.dev->exchangeBegin(lv.x);
+          cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                                FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, color,
+                                lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
+          lv.dev->exchangeEnd(lv.x);
+          applyOutflowGhost(lv.ext, lv.x);
+          cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                                FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, color,
+                                C3{G, G, G}, C3{lv.ext.x - G, lv.ext.y - G, lv.ext.z - G}, lo, hi);
+          continue;
+        }
+#endif
         fill(lv, lv.x);
         applyOutflowGhost(lv.ext, lv.x);
         cutcellSmoothColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
