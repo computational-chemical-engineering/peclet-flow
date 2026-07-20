@@ -2502,6 +2502,11 @@ class Solver {
         divAdv_ = CCField("divAdv", n_);  // cell div(u) for the porous advection-form compensation
       if (epsRho_.extent(0) == 0)
         epsRho_ = CCField("epsRho", n_);  // rho_eff = eps*rho (eps-conservative momentum)
+      // The eps-conservative momentum path (porousCons_) routes through buildRhsVar, which reads
+      // the per-cell force unconditionally — allocate it (zero) like setDensityMode does. Without
+      // this a porous run with NO drag/closure (never the coupled case, which enables drag and
+      // thereby the force fields) dereferences an empty device View.
+      ensureCellForceAll();
       Kokkos::deep_copy(epsPrev_, epsField_);  // d(eps)/dt=0 on the first step
       if (eps1_.extent(0) == 0)
         eps1_ = CCField("eps1", n1_);

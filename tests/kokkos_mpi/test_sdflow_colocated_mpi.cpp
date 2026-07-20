@@ -48,7 +48,7 @@ static std::vector<double> packingSdf(double rfrac = 0.18) {
   return sdf;
 }
 
-static void configure(Colo& s) {
+static void configure(Colo& s, int faceInterp) {
   s.setRho(RHO);
   s.setMu(MU);
   s.setDt(DT);
@@ -57,6 +57,10 @@ static void configure(Colo& s) {
   s.setVelocityIterations(80);
   s.setPressureLevels(4);
   s.setPressurePcg(true, 200, 1e-9);
+  if (faceInterp != 0)
+    s.setFaceInterp(faceInterp);  // mode 9: throat-safe cutcell-ghost hybrid (aperture projection
+                                  // + gpCenterGrad predictor/correction) — local stencils only,
+                                  // must reproduce single-rank across ranks like mode 0
 }
 
 static double localUSum(Colo& s) {
@@ -90,9 +94,10 @@ int main(int argc, char** argv) {
               gsdf[(std::size_t)(x + ox) + (std::size_t)(y + oy) * N +
                    (std::size_t)(z + oz) * N * N];
 
+    for (int mode : {0, 9}) {
     Colo sd(lnx, lny, lnz);
     sd.initMpi(N, N, N, MPI_COMM_WORLD);
-    configure(sd);
+    configure(sd, mode);
     sd.setSolid(lsdf, /*cutcell_pressure=*/true);
     for (int it = 0; it < STEPS; ++it)
       sd.step();
@@ -105,7 +110,7 @@ int main(int argc, char** argv) {
     double k_ref = 0.0;
     if (rank == 0) {
       Colo ref(N, N, N);
-      configure(ref);
+      configure(ref, mode);
       ref.setSolid(gsdf, true);
       for (int it = 0; it < STEPS; ++it)
         ref.step();
@@ -123,10 +128,11 @@ int main(int argc, char** argv) {
     const double tol =
         (size == 1) ? 1e-12 : 2e-5;  // np=1 bit-exact; np>1 the MG-PCG reduction-order floor
     if (rank == 0)
-      std::printf("  k_dist=%.8e  k_ref=%.8e  rel=%.2e  div=%.2e  (np=%d, tol %.0e)\n", k_dist,
-                  k_ref, reld, div_dist, size, tol);
+      std::printf("  [mode %d] k_dist=%.8e  k_ref=%.8e  rel=%.2e  div=%.2e  (np=%d, tol %.0e)\n",
+                  mode, k_dist, k_ref, reld, div_dist, size, tol);
     if (reld > tol || !(div_dist < 1e-5))
       fail = 1;
+    }
   }
   int totalFail = 0;
   MPI_Allreduce(&fail, &totalFail, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
