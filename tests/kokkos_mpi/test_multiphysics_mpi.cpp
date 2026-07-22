@@ -73,7 +73,7 @@ static std::vector<double> blockOf(Fn f, int ox, int oy, int oz, int lnx, int ln
 
 struct Config {
   const char* name;
-  bool varMu = false, varRho = false, porous = false, scalar = false;
+  bool varMu = false, varRho = false, porous = false, scalar = false, scalarBc = false;
 };
 
 static void configure(IbmSolver& s, const Config& c, const std::vector<double>& lsdf, int ox,
@@ -105,6 +105,18 @@ static void configure(IbmSolver& s, const Config& c, const std::vector<double>& 
   if (c.scalar) {
     s.addScalar("c", /*D=*/0.05, /*scheme=*/1, /*iters=*/40);
     s.setField("c", blockOf(scalarAt, ox, oy, oz, lnx, lny, lnz));
+    s.exchangeField("c");
+  }
+  if (c.scalarBc) {
+    // Domain-BC scalar on the periodic flow (conjugated-transport style): hot/cold Dirichlet
+    // x-faces; y/z stay periodic. Drives a conduction+advection profile through the
+    // packing; validates the distributed per-face BC ownership (a rank applies a face's BC iff
+    // its block touches that global face).
+    s.addScalar("c", /*D=*/0.1, /*scheme=*/1, /*iters=*/40);
+    // x faces: the ORB splits x first, so at np>=2 some rank does NOT touch a BC face — the
+    // ownership test (touchesGlobalFace) is genuinely exercised, not trivially true.
+    s.setScalarBc("c", /*face=*/0, /*type=*/2, /*value=*/1.0);
+    s.setScalarBc("c", /*face=*/1, /*type=*/2, /*value=*/0.0);
     s.exchangeField("c");
   }
 }
@@ -179,10 +191,11 @@ int main(int argc, char** argv) {
               gsdf[(std::size_t)(x + ox) + (std::size_t)(y + oy) * N +
                    (std::size_t)(z + oz) * N * N];
 
-    const Config configs[] = {{"varmu", true, false, false, false},
-                              {"varrho", false, true, false, false},
-                              {"porous", false, false, true, false},
-                              {"scalar", false, false, false, true}};
+    const Config configs[] = {{"varmu", true, false, false, false, false},
+                              {"varrho", false, true, false, false, false},
+                              {"porous", false, false, true, false, false},
+                              {"scalar", false, false, false, true, false},
+                              {"scalarbc", false, false, false, false, true}};
 
     for (const Config& c : configs) {
       // --- distributed ---
@@ -193,7 +206,7 @@ int main(int argc, char** argv) {
         sd.step();
       auto gu = gatherGlobal(sd.getVelocity(0), ox, oy, oz, lnx, lny, lnz, rank, size);
       std::vector<double> gc;
-      if (c.scalar)
+      if (c.scalar || c.scalarBc)
         gc = gatherGlobal(sd.getField("c"), ox, oy, oz, lnx, lny, lnz, rank, size);
 
       // --- single-rank reference on rank 0 (full grid, same config) ---
@@ -204,12 +217,13 @@ int main(int argc, char** argv) {
         for (int it = 0; it < STEPS; ++it)
           ref.step();
         eu = relErr(gu, ref.getVelocity(0));
-        if (c.scalar)
+        const bool hasC = c.scalar || c.scalarBc;
+        if (hasC)
           ec = relErr(gc, ref.getField("c"));
         const double tol = (size == 1) ? 1e-12 : 5e-5;
-        const bool ok = eu <= tol && (!c.scalar || ec <= tol);
-        std::printf("  [%-6s np=%d] u rel=%.3e%s  tol=%.0e  %s\n", c.name, size, eu,
-                    c.scalar ? (std::string("  c rel=") + std::to_string(ec)).c_str() : "", tol,
+        const bool ok = eu <= tol && (!hasC || ec <= tol);
+        std::printf("  [%-8s np=%d] u rel=%.3e%s  tol=%.0e  %s\n", c.name, size, eu,
+                    hasC ? (std::string("  c rel=") + std::to_string(ec)).c_str() : "", tol,
                     ok ? "OK" : "FAIL");
         if (!ok)
           fail = 1;

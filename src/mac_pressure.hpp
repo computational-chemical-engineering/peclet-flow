@@ -131,6 +131,28 @@ inline void applyCutcellOp(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV AS,
       });
 }
 
+// Box-restricted matvec for the distributed overlap: rows in [rlo,rhi) skipping [slo,shi). Reads
+// x, writes y (no aliasing), so the interior rows can apply while x's ghost exchange is in flight
+// and the shell rows apply after it lands — trivially bit-identical to the blocking order.
+template <class OpV>
+inline void applyCutcellOpBox(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV AS, OpV AN, OpV AB,
+                              OpV AT, C3 e, C3 rlo, C3 rhi, C3 slo, C3 shi) {
+  if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
+    return;
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::cc_apply_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        y(i) = AC(i) * x(i) + AE(i) * x(i + sx) + AW(i) * x(i - sx) + AN(i) * x(i + sy) +
+               AS(i) * x(i - sy) + AT(i) * x(i + sz) + AB(i) * x(i - sz);
+      });
+}
+
 // Projection correction u -= grad(phi) on the staggered faces (correct_k port). No openness here —
 // the openness lives in the operator + divergence; closed faces carry phi~0 on both sides so stay
 // unchanged.

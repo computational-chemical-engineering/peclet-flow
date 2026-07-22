@@ -2694,26 +2694,37 @@ class Solver {
     applyScalarBc(sc);
   }
   // Overwrite the ghost band on each Dirichlet/Neumann domain face (both layers, for the ±2
-  // advection reach). Single-rank only — distributed domain-BC scalars are a later phase.
+  // advection reach). Distributed: a rank applies a face's BC iff its block TOUCHES that global
+  // face. The halo fill runs first (and may periodic-wrap those ghosts); the BC overwrite wins,
+  // exactly matching the single-rank fill-then-BC order. Cross-rank ghost CORNERS on a BC face
+  // keep their exchanged (pre-BC) values, but the scalar stencils only read axis-aligned ghosts
+  // (7-point diffusion + straight ±2 advection reach), so those corners are never consumed.
   void applyScalarBc(ScalarField& sc) {
-    bool any = false;
     for (int f = 0; f < 6; ++f)
-      any = any || (sc.bc[f] != 0);
-    if (!any || distributed_)
-      return;
-    for (int f = 0; f < 6; ++f)
-      if (sc.bc[f] != 0)
+      if (sc.bc[f] != 0 && touchesGlobalFace(f))
         applyScalarBcFace(sc.c, f / 2, f % 2, sc.bc[f], sc.bcVal[f]);
+  }
+  // Does this rank's block touch global domain face f (always true single-rank)?
+  bool touchesGlobalFace(int f) const {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      const int a = f / 2;
+      const int o = (a == 0) ? og_.x : (a == 1) ? og_.y : og_.z;
+      const int n = (a == 0) ? nx_ : (a == 1) ? ny_ : nz_;
+      const int gn = (a == 0) ? gnx_ : (a == 1) ? gny_ : gnz_;
+      return (f % 2 == 0) ? (o == 0) : (o + n == gn);
+    }
+#endif
+    (void)f;
+    return true;
   }
   // Re-open the diffusion face at a Dirichlet domain boundary: set_domain_bc closes the boundary
   // openness (ox_=0), which correctly makes Neumann/adiabatic walls zero-flux but would also cut a
   // Dirichlet wall's heat path. For each Dirichlet face, restore the face coefficient (band = -D,
   // A_C += D); the ghost carries 2*value - inner so the row is the standard Dirichlet operator.
   void applyScalarBcStencil(ScalarField& sc) {
-    if (distributed_)
-      return;
     for (int f = 0; f < 6; ++f) {
-      if (sc.bc[f] != 2)
+      if (sc.bc[f] != 2 || !touchesGlobalFace(f))
         continue;  // only Dirichlet reopens; Neumann/periodic leave the (closed/interior) band
       const int a = f / 2, side = f % 2;
       CCField band = (a == 0)   ? (side == 0 ? sc.AW : sc.AE)

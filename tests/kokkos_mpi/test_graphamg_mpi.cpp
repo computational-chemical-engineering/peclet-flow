@@ -46,15 +46,15 @@ static std::vector<double> packingSdf(double rfrac = 0.18) {
   return sdf;
 }
 
-static void configure(IbmSolver& s, bool amg) {
+static void configure(IbmSolver& s, bool amg, int levels) {
   s.setRho(RHO);
   s.setMu(MU);
   s.setDt(DT);
   s.setBodyForce(F, 0, 0);
   s.setAdvection(false);
   s.setVelocityIterations(80);
-  s.setPressureLevels(1);      // pure RB-GS geometrically (decomposition-agnostic)
-  s.setPressureGraphAmg(amg);  // ... upgraded to a mesh-agnostic algebraic coarse solve
+  s.setPressureLevels(levels);  // 1 = pure RB-GS geometrically (decomposition-agnostic)
+  s.setPressureGraphAmg(amg);   // agglomerated redundant algebraic coarse solve at the bottom
   s.setPressurePcg(true, 400, 1e-9);
 }
 
@@ -73,11 +73,11 @@ static std::vector<double> localSdf(const std::vector<double>& g, const BlockDec
 }
 
 static double perm(const std::vector<double>& gsdf, const BlockDecomposer<3>& dec, int rank,
-                   bool amg, MPI_Comm comm) {
+                   bool amg, int levels, MPI_Comm comm) {
   auto b = dec.block(rank);
   IbmSolver s((int)b.size[0], (int)b.size[1], (int)b.size[2]);
   s.initMpi(dec, comm);
-  configure(s, amg);
+  configure(s, amg, levels);
   s.setSolid(localSdf(gsdf, dec, rank), true);
   for (int it = 0; it < STEPS; ++it)
     s.step();
@@ -108,13 +108,13 @@ int main(int argc, char** argv) {
             w[(std::size_t)x + (std::size_t)y * N + (std::size_t)z * N * N] = 6.0;
     BlockDecomposer<3> dec((std::size_t)size, IVec<3>{N, N, N}, w);
 
-    const double k_amg = perm(gsdf, dec, rank, /*amg=*/true, MPI_COMM_WORLD);
+    const double k_amg = perm(gsdf, dec, rank, /*amg=*/true, /*levels=*/1, MPI_COMM_WORLD);
 
     // single-rank reference with the same GraphAMG solve.
     double k_ref = 0.0;
     if (rank == 0) {
       IbmSolver ref(N, N, N);
-      configure(ref, /*amg=*/true);
+      configure(ref, /*amg=*/true, /*levels=*/1);
       ref.setSolid(gsdf, true);
       for (int it = 0; it < STEPS; ++it)
         ref.step();
@@ -131,6 +131,32 @@ int main(int argc, char** argv) {
       std::printf("  GraphAMG on weighted ORB: k=%.8e  ref=%.8e  rel=%.2e  (np=%d, tol %.0e)\n",
                   k_amg, k_ref, reld, size, tol);
     if (!(reld < tol) || !std::isfinite(k_amg))
+      fail = 1;
+
+    // MULTI-LEVEL agglomerated bottom: the regular (equal-weight ORB) geometric hierarchy with
+    // the redundant GraphAMG replacing the distributed coarsest level — the large-np scaling
+    // configuration (no tiny latency-bound coarse level, no rank-0 gather).
+    BlockDecomposer<3> deq((std::size_t)size, IVec<3>{N, N, N});
+    const double k_ml = perm(gsdf, deq, rank, /*amg=*/true, /*levels=*/3, MPI_COMM_WORLD);
+    double k_mlref = 0.0;
+    if (rank == 0) {
+      IbmSolver ref(N, N, N);
+      configure(ref, /*amg=*/true, /*levels=*/3);
+      ref.setSolid(gsdf, true);
+      for (int it = 0; it < STEPS; ++it)
+        ref.step();
+      double rs = 0;
+      for (double v : ref.getVelocity(0))
+        rs += v;
+      k_mlref = MU * (rs / ((double)N * N * N)) / F;
+    }
+    MPI_Bcast(&k_mlref, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    const double reld2 = std::fabs(k_ml - k_mlref) / (std::fabs(k_mlref) + 1e-30);
+    if (rank == 0)
+      std::printf(
+          "  GraphAMG bottom, 3-level hierarchy: k=%.8e  ref=%.8e  rel=%.2e  (np=%d, tol %.0e)\n",
+          k_ml, k_mlref, reld2, size, tol);
+    if (!(reld2 < tol) || !std::isfinite(k_ml))
       fail = 1;
   }
   int tf = 0;

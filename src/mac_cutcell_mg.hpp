@@ -384,12 +384,7 @@ class CutcellMG {
     bottom_ = bottom;
     Level& l0 = lv_[0];
     Kokkos::deep_copy(l0.x, x);
-    auto matvec = [&](CCField y, CCField v) {
-      fill(l0, v);
-      applyOutflowGhost(l0.ext, v);
-      applyCutcellOp(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                     FPC(l0.AB), FPC(l0.AT), l0.ext, G);
-    };
+    auto matvec = [&](CCField y, CCField v) { matvecOverlap(l0, y, v); };
     auto precond = [&](CCField zz, CCField rr) {
       Kokkos::deep_copy(l0.rhs, rr);
       Kokkos::deep_copy(l0.x, 0.0);
@@ -670,15 +665,12 @@ class CutcellMG {
             lval.push_back(bc[d]);
           }
         }
-    // gather every rank's rows to rank 0 (no-op / identity single-rank).
+    // all-gather every rank's rows (no-op / identity single-rank): EVERY rank assembles the same
+    // global CSR and builds the same AMG (redundant coarse solve).
     std::vector<int> ggid = lgid, grow = lrow, gcol = lcol;
     std::vector<double> gdiag = ldiag, gval = lval;
-    int rank0 = true;
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
-      int rank = 0;
-      MPI_Comm_rank(comm_, &rank);
-      rank0 = (rank == 0);
       gatherv(lgid, ggid);
       gatherv(ldiag, gdiag);
       gatherv(lrow, grow);
@@ -686,7 +678,7 @@ class CutcellMG {
       gatherv(lval, gval);
     }
 #endif
-    if (rank0) {  // assemble the global CSR keyed by gid
+    {  // assemble the global CSR keyed by gid
       peclet::core::solver::HostCsrOp A;
       A.n = amgGlobalN_;
       A.diag.assign((std::size_t)amgGlobalN_, 0.0);
@@ -710,8 +702,10 @@ class CutcellMG {
       amg_->build(A);
     }
   }
-  // Solve the coarsest level with the agglomerated AMG: gather rhs -> rank 0,
-  // GraphAMG-preconditioned CG on the singular (mean-removed) Poisson, scatter the solution back.
+  // Solve the coarsest level with the agglomerated AMG, REDUNDANTLY: all-gather the coarse rhs,
+  // every rank runs the identical GraphAMG-preconditioned CG on the identical global operator
+  // (deterministic serial code on identical data => bit-identical solutions), and each extracts
+  // its own block — one Allgatherv per V-cycle, no rank-0 serialization, no result broadcast.
   void graphAmgSolveBottom(Level& lv) {
     if (!amg_ && !distributed_)
       buildAmg(lv);
@@ -728,32 +722,24 @@ class CutcellMG {
       for (int j = 0; j < ny; ++j)
         for (int i = 0; i < nx; ++i)
           lb.push_back((double)hrhs((long)(i + G) + (long)(j + G) * ex + (long)(k + G) * ex * ey));
-    // gather rhs by global id to rank 0 -> b; solve; keep the (rank 0) solution to scatter.
+    // all-gather rhs by global id -> b; every rank solves the identical problem.
     std::vector<double> z((std::size_t)std::max(amgGlobalN_, 1), 0.0);
-    bool rank0 = true;
 #ifdef PECLET_FLOW_MPI
-    int rank = 0;
     if (distributed_) {
-      MPI_Comm_rank(comm_, &rank);
-      rank0 = (rank == 0);
       std::vector<int> ggid;
       std::vector<double> gb;
       gatherv(amgGlobalOfLocal_, ggid);
       gatherv(lb, gb);
-      if (rank0) {
-        std::vector<double> b((std::size_t)amgGlobalN_, 0.0);
-        for (std::size_t r = 0; r < ggid.size(); ++r)
-          b[(std::size_t)ggid[r]] = gb[r];
-        pcgAmg(b, z);
-      }
-      MPI_Bcast(z.data(), amgGlobalN_, MPI_DOUBLE, 0, comm_);
+      std::vector<double> b((std::size_t)amgGlobalN_, 0.0);
+      for (std::size_t r = 0; r < ggid.size(); ++r)
+        b[(std::size_t)ggid[r]] = gb[r];
+      pcgAmg(b, z);
     } else
 #endif
     {
       std::vector<double> b(lb.begin(), lb.end());
       pcgAmg(b, z);
     }
-    (void)rank0;
     // scatter z[gid] back into this rank's inner cells.
     auto hx = Kokkos::create_mirror_view(lv.x);
     Kokkos::deep_copy(hx, 0.0);
@@ -818,26 +804,50 @@ class CutcellMG {
 #ifdef PECLET_FLOW_MPI
   template <class T>
   void gatherv(const std::vector<T>& local, std::vector<T>& all) {
-    int rank = 0, size = 1;
-    MPI_Comm_rank(comm_, &rank);
+    // REDUNDANT agglomeration: every rank receives the full concatenation (rank order, so the
+    // assembled coarse problem is bit-identical on all ranks and each solves it locally with no
+    // rank-0 bottleneck and no result broadcast).
+    int size = 1;
     MPI_Comm_size(comm_, &size);
     const int lbytes = (int)(local.size() * sizeof(T));
     std::vector<int> bc(size), bd(size, 0);
-    MPI_Gather(&lbytes, 1, MPI_INT, bc.data(), 1, MPI_INT, 0, comm_);
+    MPI_Allgather(&lbytes, 1, MPI_INT, bc.data(), 1, MPI_INT, comm_);
     int tot = 0;
-    if (rank == 0) {
-      for (int r = 0; r < size; ++r) {
-        bd[r] = tot;
-        tot += bc[r];
-      }
-      all.resize((std::size_t)tot / sizeof(T));
+    for (int r = 0; r < size; ++r) {
+      bd[r] = tot;
+      tot += bc[r];
     }
-    MPI_Gatherv(local.data(), lbytes, MPI_BYTE, rank == 0 ? all.data() : nullptr,
-                rank == 0 ? bc.data() : nullptr, rank == 0 ? bd.data() : nullptr, MPI_BYTE, 0,
-                comm_);
+    all.resize((std::size_t)tot / sizeof(T));
+    MPI_Allgatherv(local.data(), lbytes, MPI_BYTE, all.data(), bc.data(), bd.data(), MPI_BYTE,
+                   comm_);
   }
 #endif
 
+  // Level-0 matvec with the halo overlapped: post the exchange, apply the interior rows while the
+  // messages are in flight, land the ghosts (+ outflow ghost), apply the boundary shell. Reads v,
+  // writes y (no aliasing) => bit-identical to the blocking fill-then-apply. Single-rank: the
+  // blocking path.
+  void matvecOverlap(Level& l0, CCField y, CCField v) {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      const C3 lo{G + 1, G + 1, G + 1};
+      const C3 hi{l0.ext.x - G - 1, l0.ext.y - G - 1, l0.ext.z - G - 1};
+      l0.dev->exchangeBegin(v);
+      applyCutcellOpBox(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
+                        FPC(l0.AB), FPC(l0.AT), l0.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
+      l0.dev->exchangeEnd(v);
+      applyOutflowGhost(l0.ext, v);
+      applyCutcellOpBox(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
+                        FPC(l0.AB), FPC(l0.AT), l0.ext, C3{G, G, G},
+                        C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G}, lo, hi);
+      return;
+    }
+#endif
+    fill(l0, v);
+    applyOutflowGhost(l0.ext, v);
+    applyCutcellOp(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
+                   FPC(l0.AB), FPC(l0.AT), l0.ext, G);
+  }
   // periodic ghost fill (3 axes) of a level-sized field / the openness triple. Distributed: the
   // per-level core halo (cross-rank + periodic in one call).
   void fill(Level& lv, CCField f) {
@@ -935,12 +945,7 @@ class CutcellMG {
     const std::size_t n = l0.n;
     CCField v("ev_v", n), w("ev_w", n), z("ev_z", n), srhs("ev_srhs", n);
     Kokkos::deep_copy(srhs, seed);
-    auto matvec = [&](CCField y, CCField x) {
-      fill(l0, x);
-      applyOutflowGhost(l0.ext, x);
-      applyCutcellOp(y, CCConst(x), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                     FPC(l0.AB), FPC(l0.AT), l0.ext, G);
-    };
+    auto matvec = [&](CCField y, CCField x) { matvecOverlap(l0, y, x); };
     auto applyT = [&](CCField out,
                       CCField in) {  // out = M^{-1} A in, projected onto the fluid range
       matvec(w, in);
@@ -1005,12 +1010,7 @@ class CutcellMG {
     a *= 0.95;
     bnd *= 1.05;  // safety margin: [a,b] must bracket the spectrum
     CCField r("cb_r", n), z("cb_z", n), d("cb_d", n), w("cb_w", n);
-    auto matvec = [&](CCField y, CCField v) {
-      fill(l0, v);
-      applyOutflowGhost(l0.ext, v);
-      applyCutcellOp(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                     FPC(l0.AB), FPC(l0.AT), l0.ext, G);
-    };
+    auto matvec = [&](CCField y, CCField v) { matvecOverlap(l0, y, v); };
     auto precond = [&](CCField zz, CCField rr) {
       Kokkos::deep_copy(l0.rhs, rr);
       Kokkos::deep_copy(l0.x, 0.0);
