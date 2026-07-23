@@ -32,9 +32,13 @@
 ///   EXPLICIT  sliver with no crossing on the u-line      -> face flux = u* (no phi coupling)
 /// Rows with no phi coupling at all are decoupled (phi = 0, RHS zeroed).
 ///
-/// v1 scope: single-rank, periodic + IBM only (neighbor access uses explicit periodic wrap over
-/// the INNER grid, so the +/-2 reach never depends on the ghost-layer depth), stationary walls
-/// (u_bc = 0 at runtime; the w_bc weights are stored for the parity tests / future moving walls).
+/// v1 scope: periodic + IBM only, stationary walls (u_bc = 0 at runtime; the w_bc weights are
+/// stored for the parity tests / future moving walls). Neighbor access has two modes: single-rank
+/// uses explicit periodic wrap over the INNER grid (so the +/-2 reach never depends on the
+/// ghost-layer depth); distributed (useGhost) reads straight offsets into the exchanged halo —
+/// the +/-2 reach then requires a g=2 block with current ghosts (the solver's velocity block).
+/// Row ownership under MPI is by inner-block cell: each rank builds/applies only the rows of its
+/// own inner cells, and every coupling is a read into the halo.
 /// Reference implementation + gates: tests/study/ghost_projection_apriori.py.
 #ifndef PECLET_FLOW_GHOST_PROJECTION_HPP
 #define PECLET_FLOW_GHOST_PROJECTION_HPP
@@ -251,25 +255,30 @@ KOKKOS_INLINE_FUNCTION int gpWrap(int v, int n) {
 }
 
 /// Build the overlay over the inner grid nn from the cell-centered sdf on the extended block
-/// (ext, ghost width g). Neighbor access wraps periodically over the inner grid (v1 is
-/// single-rank periodic), so the +/-2 reach never depends on g. Overlay arrays must be sized for
-/// the worst case; returns the row count. idMap (size nn.x*nn.y*nn.z) gets slot or -1.
+/// (ext, ghost width g). Neighbor access: single-rank wraps periodically over the inner grid (so
+/// the +/-2 reach never depends on g); useGhost (distributed) reads straight offsets into the
+/// exchanged halo instead — requires g >= 2 and current sdf ghosts. The MDRange covers this
+/// rank's inner cells only, which IS the gp-row ownership under MPI. Overlay arrays must be sized
+/// for the worst case; returns the row count. idMap (size nn.x*nn.y*nn.z) gets slot or -1.
+/// (Exact crossings tx/ty/tz are inner-sized with wrap access — single-rank only, not lifted.)
 inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov,
                           Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter,
                           int matrixOrder = 2, int rhsOrder = 2, CCConst tx = CCConst(),
-                          CCConst ty = CCConst(), CCConst tz = CCConst()) {
+                          CCConst ty = CCConst(), CCConst tz = CCConst(),
+                          bool useGhost = false) {
   CCExec space;
   Kokkos::deep_copy(space, counter, 0);
   Kokkos::deep_copy(space, idMap, -1);
   const bool hasEx = tx.size() > 0;
+  const bool ug = useGhost;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "peclet::flow::gp_build_overlay", MD(space, {0, 0, 0}, {nn.x, nn.y, nn.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         auto S = [&](int dx, int dy, int dz) {
-          const long i = (long)(gpWrap(x + dx, nn.x) + g) +
-                         (long)(gpWrap(y + dy, nn.y) + g) * ext.x +
-                         (long)(gpWrap(z + dz, nn.z) + g) * (long)ext.x * ext.y;
+          const long i = (long)((ug ? x + dx : gpWrap(x + dx, nn.x)) + g) +
+                         (long)((ug ? y + dy : gpWrap(y + dy, nn.y)) + g) * ext.x +
+                         (long)((ug ? z + dz : gpWrap(z + dz, nn.z)) + g) * (long)ext.x * ext.y;
           return (float)sdf(i);
         };
         const float sc = S(0, 0, 0);
@@ -362,30 +371,33 @@ inline void gpBinaryOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3
 }
 
 /// Overlay matvec correction: y(r) = rho_r * (y(r) + closure-face phi terms), where y currently
-/// holds the binary-openness (COUPLED-part) matvec. x/y live on a block of ghost width gb with
-/// extents extb (works for both the g=1 MG block and the g=2 solver block); neighbor access
-/// wraps over the inner grid nn. Face at relative index m couples cells (i+m-1, i+m); the div
-/// coefficient c = sgn*w contributes A x += -c*x(i+m) + c*x(i+m-1)  =>  delta = sgn*w*(x_cm -
-/// x_cp). Distinct rows per thread: no atomics.
-inline void gpApplyDelta(CCField y, CCConst x, const GpOverlay& ov, int nOv, C3 nn, C3 extb,
-                         int gb) {
+/// holds the binary-openness (COUPLED-part) matvec. y lives on the (extY, gbY) block, x on the
+/// (extX, gbX) block — identical single-rank (both the g=1 MG block), but distributed the +/-2
+/// couplings need a g=2 halo, so x is the caller's staged g=2 copy while y stays on the MG block.
+/// Neighbor access: single-rank wraps over the inner grid nn; useGhost reads straight offsets
+/// into x's exchanged halo (requires gbX >= 2). Face at relative index m couples cells (i+m-1,
+/// i+m); the div coefficient c = sgn*w contributes A x += -c*x(i+m) + c*x(i+m-1)  =>  delta =
+/// sgn*w*(x_cm - x_cp). Distinct rows per thread: no atomics.
+inline void gpApplyDelta(CCField y, CCConst x, const GpOverlay& ov, int nOv, C3 nn, C3 extY,
+                         int gbY, C3 extX, int gbX, bool useGhost = false) {
   if (nOv <= 0)
     return;
   CCExec space;
+  const bool ug = useGhost;
   Kokkos::parallel_for(
       "peclet::flow::gp_apply_delta", Kokkos::RangePolicy<CCExec>(space, 0, nOv),
       KOKKOS_LAMBDA(int s) {
         const int inner = ov.cell(s);
         const int ix = inner % nn.x, iy = (inner / nn.x) % nn.y, iz = inner / (nn.x * nn.y);
         auto X = [&](int a, int q) {  // phi at cell offset q along axis a
-          const int cx = a == 0 ? gpWrap(ix + q, nn.x) : ix;
-          const int cy = a == 1 ? gpWrap(iy + q, nn.y) : iy;
-          const int cz = a == 2 ? gpWrap(iz + q, nn.z) : iz;
-          return x((long)(cx + gb) + (long)(cy + gb) * extb.x +
-                   (long)(cz + gb) * (long)extb.x * extb.y);
+          const int cx = a == 0 ? (ug ? ix + q : gpWrap(ix + q, nn.x)) : ix;
+          const int cy = a == 1 ? (ug ? iy + q : gpWrap(iy + q, nn.y)) : iy;
+          const int cz = a == 2 ? (ug ? iz + q : gpWrap(iz + q, nn.z)) : iz;
+          return x((long)(cx + gbX) + (long)(cy + gbX) * extX.x +
+                   (long)(cz + gbX) * (long)extX.x * extX.y);
         };
-        const long r = (long)(ix + gb) + (long)(iy + gb) * extb.x +
-                       (long)(iz + gb) * (long)extb.x * extb.y;
+        const long r = (long)(ix + gbY) + (long)(iy + gbY) * extY.x +
+                       (long)(iz + gbY) * (long)extY.x * extY.y;
         double delta = 0.0;
         for (int k = 0; k < 6; ++k) {
           const int8_t st = ov.state(s * 6 + k);
@@ -408,22 +420,25 @@ inline void gpApplyDelta(CCField y, CCConst x, const GpOverlay& ov, int nOv, C3 
 /// Overlay divergence correction: d(r) = rho_r * (d(r) + closure/BC/explicit face values), where
 /// d currently holds the binary-openness divergence (divergOpen on the binary fields: COUPLED
 /// faces only). u/v/w and d live on the solver block (extents extb, ghost width gb). u_bc = 0
-/// (v1 stationary walls). Rows with no phi coupling are zeroed (decoupled). Used identically for
+/// (v1 stationary walls). Neighbor access: single-rank wraps over the inner grid nn; useGhost
+/// (distributed) reads straight offsets into the exchanged velocity halo (reach -1..+2, gb >= 2).
+/// Rows with no phi coupling are zeroed (decoupled). Used identically for
 /// the RHS div(u*) and the post-correction diagnostic — the diagnostic IS the residual.
 inline void gpDivergDelta(CCField d, CCConst u, CCConst v, CCConst w, const GpOverlay& ov,
-                          int nOv, C3 nn, C3 extb, int gb) {
+                          int nOv, C3 nn, C3 extb, int gb, bool useGhost = false) {
   if (nOv <= 0)
     return;
   CCExec space;
+  const bool ug = useGhost;
   Kokkos::parallel_for(
       "peclet::flow::gp_diverg_delta", Kokkos::RangePolicy<CCExec>(space, 0, nOv),
       KOKKOS_LAMBDA(int s) {
         const int inner = ov.cell(s);
         const int ix = inner % nn.x, iy = (inner / nn.x) % nn.y, iz = inner / (nn.x * nn.y);
         auto U = [&](int a, int m) {  // face-field value at face index i+m along axis a
-          const int cx = a == 0 ? gpWrap(ix + m, nn.x) : ix;
-          const int cy = a == 1 ? gpWrap(iy + m, nn.y) : iy;
-          const int cz = a == 2 ? gpWrap(iz + m, nn.z) : iz;
+          const int cx = a == 0 ? (ug ? ix + m : gpWrap(ix + m, nn.x)) : ix;
+          const int cy = a == 1 ? (ug ? iy + m : gpWrap(iy + m, nn.y)) : iy;
+          const int cz = a == 2 ? (ug ? iz + m : gpWrap(iz + m, nn.z)) : iz;
           const long i = (long)(cx + gb) + (long)(cy + gb) * extb.x +
                          (long)(cz + gb) * (long)extb.x * extb.y;
           return a == 0 ? u(i) : (a == 1 ? v(i) : w(i));

@@ -447,19 +447,42 @@ class CutcellMG {
   // left null vector is NOT exactly the constants, so the attainable residual has a small
   // compatibility floor — stop when no progress instead of burning maxit. Scratch: 7 level-0
   // fields from the caller. Returns the iteration count.
+  // Distributed: the reductions/mean removal already Allreduce and the V-cycle is MPI-folded; the
+  // fine-level matvec is the one gp-specific piece. The overlay couplings reach +/-2 but the MG
+  // block only has a g=1 halo, so the caller passes a g=2 staging field (xg2, on its ext2 block)
+  // + that block's halo: stage q's inner cells there, exchange the 2-deep halo once, read the g=1
+  // halo back from the staged copy (one exchange serves both the 7-point op and the overlay), and
+  // apply the overlay in ghost mode. Single-rank (h2 == nullptr) is byte-identical to before.
   int solveBiCGStab(CCField b, CCField x, CCField r, CCField rh, CCField p, CCField v, CCField t,
                     CCField z, CCField z2, int maxit, double rtol, int pre, int post, int bottom,
-                    const GpOverlay& ov, int nOv, C3 nn) {
+                    const GpOverlay& ov, int nOv, C3 nn
+#ifdef PECLET_FLOW_MPI
+                    ,
+                    CCField xg2 = CCField(), GridHalo<double>* h2 = nullptr, C3 ext2 = C3{0, 0, 0}
+#endif
+  ) {
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
     Level& l0 = lv_[0];
     auto matvec = [&](CCField y, CCField q) {
+#ifdef PECLET_FLOW_MPI
+      if (distributed_ && h2) {
+        stageG2(l0, q, xg2, ext2);  // inner cells g=1 block -> g=2 block
+        h2->exchange(xg2);          // 2-deep halo (cross-rank + periodic)
+        unstageG2(l0, q, xg2);      // whole l0 block back (fills q's g=1 halo — no 2nd exchange)
+        applyOutflowGhost(l0.ext, q);
+        applyCutcellOp(y, CCConst(q), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
+                       FPC(l0.AB), FPC(l0.AT), l0.ext, G);
+        gpApplyDelta(y, CCConst(xg2), ov, nOv, nn, l0.ext, G, ext2, 2, /*useGhost=*/true);
+        return;
+      }
+#endif
       fill(l0, q);
       applyOutflowGhost(l0.ext, q);
       applyCutcellOp(y, CCConst(q), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
                      FPC(l0.AB), FPC(l0.AT), l0.ext, G);
-      gpApplyDelta(y, CCConst(q), ov, nOv, nn, l0.ext, G);
+      gpApplyDelta(y, CCConst(q), ov, nOv, nn, l0.ext, G, l0.ext, G);
     };
     auto precond = [&](CCField zz, CCField rr) {
       Kokkos::deep_copy(l0.rhs, rr);
@@ -887,6 +910,37 @@ class CutcellMG {
           }
         });
   }
+#ifdef PECLET_FLOW_MPI
+  // ghost-projection matvec staging (solveBiCGStab distributed): copy the l0 inner cells onto the
+  // caller's g=2 block (whose halo then carries the overlay's +/-2 reach) ...
+  void stageG2(Level& l0, CCField q, CCField xg2, C3 ext2) {
+    CCExec space;
+    const C3 e1 = l0.ext, nn = l0.inner;
+    CCField dst = xg2, src = q;
+    Kokkos::parallel_for(
+        "peclet::flow::gp_stage_g2",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nn.x, nn.y, nn.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          dst((long)(x + 2) + (long)(y + 2) * ext2.x + (long)(z + 2) * (long)ext2.x * ext2.y) =
+              src((long)(x + G) + (long)(y + G) * e1.x + (long)(z + G) * (long)e1.x * e1.y);
+        });
+  }
+  // ... and read the whole l0 block (inner + its g=1 ring) back from the exchanged g=2 copy, so
+  // the 7-point op's halo is current without a second exchange.
+  void unstageG2(Level& l0, CCField q, CCField xg2) {
+    CCExec space;
+    const C3 e1 = l0.ext;
+    const C3 ext2{e1.x + 2, e1.y + 2, e1.z + 2};  // same inner, gb 1 -> 2
+    CCField dst = q, src = xg2;
+    Kokkos::parallel_for(
+        "peclet::flow::gp_unstage_g2",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {e1.x, e1.y, e1.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          dst((long)x + (long)y * e1.x + (long)z * (long)e1.x * e1.y) =
+              src((long)(x + 1) + (long)(y + 1) * ext2.x + (long)(z + 1) * (long)ext2.x * ext2.y);
+        });
+  }
+#endif
   void axpy(CCField y, double a, CCField x) {
     CCExec space;
     CCField yy = y, xx = x;

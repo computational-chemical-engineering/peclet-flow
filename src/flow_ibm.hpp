@@ -208,9 +208,11 @@ class Solver {
   // EXPERIMENTAL directional ghost-cell projection (second staggered IBM, ghost_projection.hpp):
   // point-based FD divergence with wall-anchored directional closures instead of the
   // openness-weighted cut-cell projection. Call BEFORE set_solid (the overlay is built there).
-  // v1: single-rank, periodic + IBM only, stationary walls (both grids; the collocated variant
-  // closes the face-AVERAGED field and adds the gpCenterGrad predictor/correction, face_interp 0
-  // only). The nonsymmetric extended
+  // v1: periodic + IBM only, stationary walls (both grids; the collocated variant closes the
+  // face-AVERAGED field and adds the gpCenterGrad predictor/correction, face_interp 0 only).
+  // Runs multi-rank (initMpi): gp-row ownership is by inner-block cell, the closures read the
+  // exchanged g=2 halo, and the fragmentation guard runs on the allgathered GLOBAL sdf (the
+  // exact-crossings / openness-override study inputs stay single-rank). The nonsymmetric extended
   // stencil is solved by MG-preconditioned BiCGStab (binary-openness surrogate hierarchy).
   // matrixOrder/rhsOrder select the closure order (1 = linear, 2 = wall-anchored quadratic) for
   // the implicit phi couplings and the divergence RHS/diagnostic respectively:
@@ -233,10 +235,9 @@ class Solver {
           "set_ghost_projection: incompatible with porous/variable-rho/domain-BC/Chebyshev (v1)");
     if (matrixOrder < 1 || matrixOrder > 2 || rhsOrder < 1 || rhsOrder > 2)
       throw std::runtime_error("set_ghost_projection: matrix_order/rhs_order must be 1 or 2");
-#ifdef PECLET_FLOW_MPI
-    if (on && distributed_)
-      throw std::runtime_error("set_ghost_projection: single-rank only (v1)");
-#endif
+    if (on && distributed_ && (hasExactCross_ || hasOpenOverride_))
+      throw std::runtime_error(
+          "set_ghost_projection: exact-crossings/openness-override are single-rank only");
     ghostProjection_ = on;
     gpMatrixOrder_ = matrixOrder;
     gpRhsOrder_ = rhsOrder;
@@ -717,6 +718,8 @@ class Solver {
         gpRh_ = CCField("gpRh", n1_);
         gpT_ = CCField("gpT", n1_);
         gpZ2_ = CCField("gpZ2", n1_);
+        if (distributed_)
+          gpX2_ = CCField("gpXg2", n_);  // g=2 staging block for the distributed BiCGStab matvec
         // Fragmentation guard: the binary COUPLED-face condition is stricter than aperture
         // connectivity, so tight-throat geometries (e.g. a random close packing with touching
         // spheres) fragment the fluid graph into a main component + tiny pockets at the
@@ -725,19 +728,63 @@ class Solver {
         // example). Host BFS over the coupled graph of the INNER sdf; fluid cells outside the
         // largest component are treated as SOLID for the PROJECTION ONLY (sdfGp), decoupling
         // their rows; the momentum step keeps the true sdf.
-        std::vector<double> sdfGpHost = sdfInner;
+        // Distributed: connectivity is a GLOBAL property (a pocket can span rank boundaries) and
+        // every rank must agree on the main component, so allgather the inner sdf, run the
+        // deterministic guard on the global grid identically on every rank, and keep this
+        // rank's block of the result.
+        std::vector<double> sdfGpHost;
         {
-          const int nx = nx_, ny = ny_, nz = nz_;
+          std::vector<double> work;
+          int fx = nx_, fy = ny_, fz = nz_;
+          bool verbose = true;
+#ifdef PECLET_FLOW_MPI
+          int myRank = 0;
+          if (distributed_) {
+            MPI_Comm_rank(comm_, &myRank);
+            int nRanks = 1;
+            MPI_Comm_size(comm_, &nRanks);
+            fx = gnx_;
+            fy = gny_;
+            fz = gnz_;
+            verbose = myRank == 0;
+            std::vector<int> cnts(nRanks), disp(nRanks);
+            long acc = 0;
+            for (int r = 0; r < nRanks; ++r) {
+              const auto b = dec_->block(r);
+              cnts[r] = (int)(b.size[0] * b.size[1] * b.size[2]);
+              disp[r] = (int)acc;
+              acc += cnts[r];
+            }
+            std::vector<double> flat((std::size_t)acc);
+            MPI_Allgatherv(sdfInner.data(), (int)sdfInner.size(), MPI_DOUBLE, flat.data(),
+                           cnts.data(), disp.data(), MPI_DOUBLE, comm_);
+            work.assign((std::size_t)fx * fy * fz, 0.0);
+            for (int r = 0; r < nRanks; ++r) {
+              const auto b = dec_->block(r);
+              const double* src = flat.data() + disp[r];
+              for (int z = 0; z < (int)b.size[2]; ++z)
+                for (int y = 0; y < (int)b.size[1]; ++y)
+                  for (int x = 0; x < (int)b.size[0]; ++x)
+                    work[(std::size_t)(x + b.origin[0]) + (std::size_t)(y + b.origin[1]) * fx +
+                         (std::size_t)(z + b.origin[2]) * (std::size_t)fx * fy] =
+                        src[(std::size_t)x + (std::size_t)y * b.size[0] +
+                            (std::size_t)z * (std::size_t)b.size[0] * b.size[1]];
+            }
+          } else
+#endif
+            work = sdfInner;
+          const std::size_t nTot = work.size();
+          const int nx = fx, ny = fy, nz = fz;
           auto id = [&](int x, int y, int z) {
             return (std::size_t)((x + nx) % nx) + (std::size_t)((y + ny) % ny) * nx +
                    (std::size_t)((z + nz) % nz) * (std::size_t)nx * ny;
           };
-          std::vector<int> comp(nInner, -1);
+          std::vector<int> comp(nTot, -1);
           std::vector<std::size_t> stack;
           int ncomp = 0, mainComp = -1;
           std::size_t mainSize = 0, nActive = 0;
-          for (std::size_t seed = 0; seed < nInner; ++seed) {
-            if (comp[seed] >= 0 || sdfInner[seed] < 0.0)
+          for (std::size_t seed = 0; seed < nTot; ++seed) {
+            if (comp[seed] >= 0 || work[seed] < 0.0)
               continue;
             std::size_t size = 0;
             comp[seed] = ncomp;
@@ -752,10 +799,10 @@ class Solver {
                                     {x, y + 1, z}, {x, y, z - 1}, {x, y, z + 1}};
               for (auto& q : nb) {
                 const std::size_t j = id(q[0], q[1], q[2]);
-                if (comp[j] >= 0 || sdfInner[j] < 0.0)
+                if (comp[j] >= 0 || work[j] < 0.0)
                   continue;
                 // COUPLED face: mean-of-centers face sdf fluid AND both centers fluid
-                if (0.5 * (sdfInner[c] + sdfInner[j]) < 0.0)
+                if (0.5 * (work[c] + work[j]) < 0.0)
                   continue;
                 comp[j] = ncomp;
                 stack.push_back(j);
@@ -770,19 +817,50 @@ class Solver {
           }
           if (ncomp > 1) {
             std::size_t pockets = 0;
-            for (std::size_t i = 0; i < nInner; ++i)
-              if (sdfInner[i] >= 0.0 && comp[i] != mainComp) {
-                sdfGpHost[i] = -(std::abs(sdfInner[i]) * 1.001 + 1e-30);
+            for (std::size_t i = 0; i < nTot; ++i)
+              if (work[i] >= 0.0 && comp[i] != mainComp) {
+                work[i] = -(std::abs(work[i]) * 1.001 + 1e-30);
                 ++pockets;
               }
-            printf("peclet::flow ghost projection: %d fluid components; decoupled %zu pocket "
-                   "cells outside the main component (%zu of %zu fluid cells)\n",
-                   ncomp, pockets, mainSize, nActive);
+            if (verbose)
+              printf("peclet::flow ghost projection: %d fluid components; decoupled %zu pocket "
+                     "cells outside the main component (%zu of %zu fluid cells)\n",
+                     ncomp, pockets, mainSize, nActive);
           }
+#ifdef PECLET_FLOW_MPI
+          if (distributed_) {
+            const auto b = dec_->block(myRank);
+            sdfGpHost.resize(sdfInner.size());
+            for (int z = 0; z < nz_; ++z)
+              for (int y = 0; y < ny_; ++y)
+                for (int x = 0; x < nx_; ++x)
+                  sdfGpHost[(std::size_t)x + (std::size_t)y * nx_ +
+                            (std::size_t)z * (std::size_t)nx_ * ny_] =
+                      work[(std::size_t)(x + b.origin[0]) + (std::size_t)(y + b.origin[1]) * fx +
+                           (std::size_t)(z + b.origin[2]) * (std::size_t)fx * fy];
+          } else
+#endif
+            sdfGpHost = std::move(work);
         }
         sdfGp_ = CCField("peclet::flow::sdfGp", n_);
         CCField sdfGp = sdfGp_;  // the projection's sdf view (pockets decoupled); persisted for
                                  // the collocated gpCenterGrad predictor/correction
+#ifdef PECLET_FLOW_MPI
+        if (distributed_) {
+          // local inner block + halo exchange (cross-rank + periodic), same as the sdf_ upload:
+          // the overlay build reads sdfGp ghosts up to +/-2 = G across block boundaries.
+          auto h = Kokkos::create_mirror_view(sdfGp_);
+          Kokkos::deep_copy(h, sdfGp_);
+          for (int z = 0; z < nz_; ++z)
+            for (int y = 0; y < ny_; ++y)
+              for (int x = 0; x < nx_; ++x)
+                h((long)(x + G) + (long)(y + G) * e_.x + (long)(z + G) * (long)e_.x * e_.y) =
+                    sdfGpHost[(std::size_t)x + (std::size_t)y * nx_ +
+                              (std::size_t)z * (std::size_t)nx_ * ny_];
+          Kokkos::deep_copy(sdfGp_, h);
+          velDev_->exchange(sdfGp_);
+        } else
+#endif
         {  // upload + periodic wrap (same pattern as the sdf upload above)
           CCField din("peclet::flow::sdfGpInner_d", nInner);
           Kokkos::deep_copy(din, Kokkos::View<const double*, Kokkos::HostSpace,
@@ -807,7 +885,8 @@ class Solver {
                                   gpCounter_, gpMatrixOrder_, gpRhsOrder_,
                                   hasExactCross_ ? CCConst(tEx_[0][0]) : CCConst(),
                                   hasExactCross_ ? CCConst(tEx_[1][1]) : CCConst(),
-                                  hasExactCross_ ? CCConst(tEx_[2][2]) : CCConst());
+                                  hasExactCross_ ? CCConst(tEx_[2][2]) : CCConst(),
+                                  /*useGhost=*/distributed_);
         copyInner(ox1_, e1_, 1, CCConst(oxb_), e_, G);  // MG surrogate = binary openness
         copyInner(oy1_, e1_, 1, CCConst(oyb_), e_, G);
         copyInner(oz1_, e1_, 1, CCConst(ozb_), e_, G);
@@ -987,7 +1066,7 @@ class Solver {
         divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(oxb_), CCConst(oyb_),
                    CCConst(ozb_), div_, e_, G);
         gpDivergDelta(div_, CCConst(uf_), CCConst(vf_), CCConst(wf_), gpOv_, gpNRows_,
-                      C3{nx_, ny_, nz_}, e_, G);
+                      C3{nx_, ny_, nz_}, e_, G, distributed_);
       } else
         divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_),
                    CCConst(oz_), div_, e_, G);
@@ -1001,7 +1080,7 @@ class Solver {
         divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(oxb_), CCConst(oyb_),
                    CCConst(ozb_), div_, e_, G);
         gpDivergDelta(div_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), gpOv_, gpNRows_,
-                      C3{nx_, ny_, nz_}, e_, G);
+                      C3{nx_, ny_, nz_}, e_, G, distributed_);
       } else
         divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
                    CCConst(oz_), div_, e_, G);
@@ -1927,7 +2006,7 @@ class Solver {
         divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(oxb_), CCConst(oyb_),
                    CCConst(ozb_), div_, e_, G);
         gpDivergDelta(div_, CCConst(uf_), CCConst(vf_), CCConst(wf_), gpOv_, gpNRows_,
-                      C3{nx_, ny_, nz_}, e_, G);
+                      C3{nx_, ny_, nz_}, e_, G, distributed_);
       } else
         divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_),
                    CCConst(oz_), div_, e_, G);
@@ -1953,7 +2032,7 @@ class Solver {
         divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(oxb_), CCConst(oyb_),
                    CCConst(ozb_), div_, e_, G);
         gpDivergDelta(div_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), gpOv_, gpNRows_,
-                      C3{nx_, ny_, nz_}, e_, G);
+                      C3{nx_, ny_, nz_}, e_, G, distributed_);
       } else
         divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
                    CCConst(oz_), div_, e_, G);
@@ -2055,10 +2134,54 @@ class Solver {
     } else if (ghostProjection_) {
       // Nonsymmetric ghost-projection operator (both grids — the phi matrix is identical):
       // BiCGStab, preconditioned by the symmetric binary-openness V-cycle (the hierarchy set up
-      // in setSolid); the overlay delta enters the fine-level matvec only.
-      lastPressureIters_ =
-          mg_.solveBiCGStab(rhs1_, phi1_, r_, gpRh_, pp_, Ap_, gpT_, z_, gpZ2_, pcgMaxit_,
-                            pcgRtol_, 2, 2, 12, gpOv_, gpNRows_, C3{nx_, ny_, nz_});
+      // in setSolid); the overlay delta enters the fine-level matvec only. Distributed, the
+      // matvec stages the iterate on this solver's g=2 block (gpX2_) whose halo carries the
+      // overlay's +/-2 reach.
+#ifdef PECLET_FLOW_MPI
+      if (distributed_)
+        lastPressureIters_ =
+            mg_.solveBiCGStab(rhs1_, phi1_, r_, gpRh_, pp_, Ap_, gpT_, z_, gpZ2_, pcgMaxit_,
+                              pcgRtol_, 2, 2, 12, gpOv_, gpNRows_, C3{nx_, ny_, nz_}, gpX2_,
+                              velDev_.get(), e_);
+      else
+#endif
+        lastPressureIters_ =
+            mg_.solveBiCGStab(rhs1_, phi1_, r_, gpRh_, pp_, Ap_, gpT_, z_, gpZ2_, pcgMaxit_,
+                              pcgRtol_, 2, 2, 12, gpOv_, gpNRows_, C3{nx_, ny_, nz_});
+      // Pin the FREE variables of the binary-openness operator to their design value phi = 0:
+      // solid-centered (sdfGp < 0) cells and fully-BC_ONLY overlay rows have a zero row AND zero
+      // rhs, so the Krylov iteration leaves an arbitrary (V-cycle-prolongation, iteration-path,
+      // and decomposition dependent) value there — invisible to the gp residual (the closures
+      // never read those faces) but INJECTED into real near-wall fluid velocities by the plain
+      // projectCorrect face gradient. The doc contract of ghost_projection.hpp is "decoupled
+      // rows hold phi = 0"; enforce it (measured: without this, np=2 runs differ from the
+      // reference by ~1e-2 relative u at sphere-surface faces while agreeing 1e-13 elsewhere).
+      {
+        CCExec space;
+        CCField ph = phi1_;
+        CCConst sg = CCConst(sdfGp_);
+        auto idMap = gpIdMap_;
+        auto ov = gpOv_;
+        const C3 e1 = e1_, e2 = e_;
+        const int lnx = nx_, lny = ny_;
+        Kokkos::parallel_for(
+            "peclet::flow::gp_pin_decoupled",
+            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+            KOKKOS_LAMBDA(int x, int y, int z) {
+              const long i1 =
+                  (long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y;
+              const long i2 =
+                  (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
+              bool dec = sg(i2) < 0.0;
+              if (!dec) {
+                const int s = idMap((long)x + (long)y * lnx + (long)z * (long)lnx * lny);
+                if (s >= 0 && ov.coupled(s) == 0)
+                  dec = true;
+              }
+              if (dec)
+                ph(i1) = 0.0;
+            });
+      }
     } else {
       lastPressureIters_ =
           mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12);
@@ -2854,6 +2977,7 @@ class Solver {
   CCField sdfGp_;  // the projection's sdf (fragmentation pockets decoupled) — gpCenterGrad reads
                    // it so the collocated predictor/correction never touch a decoupled cell
   CCField gpRh_, gpT_, gpZ2_;  // extra BiCGStab scratch (g=1 block)
+  CCField gpX2_;  // distributed BiCGStab matvec staging (g=2 solver block; overlay +/-2 halo)
   CCField uf_, vf_, wf_;    // collocated: transient face (MAC) field (approx projection)
   CCField tgp_;             // collocated: transpose-gradient scratch (setFaceInterp(2/3))
   CCField wdef_;            // collocated: FV wall viscous-flux defect scratch (setFaceInterp(4))
