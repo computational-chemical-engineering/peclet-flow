@@ -14,14 +14,15 @@ time) and exposed to Python through **nanobind** (zero-copy, on `core`'s View↔
 simulations are driven from Python.
 
 > The repository is also known as `pnm_from_sdf` (its GitLab origin) — it computes pore-network–scale flow
-> directly from segmented SDF geometry.
+> directly from segmented SDF geometry. The pore-network *extraction* itself (the former
+> `peclet.flow.pnm` module) now lives in its own suite project,
+> [peclet-pnm](https://github.com/computational-chemical-engineering/peclet-pnm) (`peclet.pnm`).
 
 ## Modules
 
 | Module | Role |
 |--------|------|
 | **`flow`** | **The CFD solver** — a **distributed** (MPI-optional) GPU cut-cell IBM Navier–Stokes solver in physical units, built on the shared `core` block-decomposition + async halo layer. One code / one API / MPI-optional, with native domain boundary conditions. Exposes `peclet.flow.Solver` (staggered MAC, default) and `peclet.flow.SolverColocated` (collocated/cell-centered velocities, ABC approximate projection) — identical API via a `GridLayout` policy. Validated against analytics and **Zick & Homsy** sphere-array drag (`scripts/validate_zick_homsy_sdflow.py`). |
-| **`pnm`** | **Pore-network extraction** — SDF VTI reading + pore/segmentation/topology extraction (`SDFReader`, `extract_pores`, `segment_volume`, `extract_topology_gpu`). The repo's namesake "pnm_from_sdf" feature. |
 
 The original CUDA implementation has been **retired** (Kokkos became canonical, 2026-06); `flow` was
 validated bit-identical to the CUDA solver — to machine precision, and against Zick & Homsy sphere-array
@@ -45,8 +46,8 @@ cut-cell IBM primitives now live in `src/cut_cell_ibm.hpp`; the operator headers
 ## Build
 
 ```bash
-# Canonical: build + install both modules via scikit-build-core
-CMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" pip install .   # -> flow + pnm
+# Canonical: build + install via scikit-build-core
+CMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" pip install .   # -> peclet.flow
 # Or a dev cmake build (nanobind found via the active interpreter, no cmakedir needed):
 cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" && cmake --build build -j
 # distributed flow build (opt-in MPI):

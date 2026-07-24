@@ -106,7 +106,6 @@ jobs:
             ( cd "$work" && /opt/python/cp312-cp312/bin/python -m wheel unpack "$whl" )
             pkg=$(ls -d "$work"/*/)
             patchelf --add-rpath '$ORIGIN/../../nvidia/cu13/lib'    "$pkg"peclet/flow/_flow*.so
-            patchelf --add-rpath '$ORIGIN/../../../nvidia/cu13/lib' "$pkg"peclet/flow/pnm/_pnm*.so
             ( cd "$work" && /opt/python/cp312-cp312/bin/python -m wheel pack "$pkg" -d /tmp/out )
           done
 

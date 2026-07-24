@@ -6,7 +6,7 @@ abstract: >-
   staggered MAC grid, a signed-distance-field description of the solid, a cut-cell Immersed Boundary
   Method, and pressure projection with a geometric multigrid Poisson solve. Written in Kokkos C++
   (CUDA/HIP/OpenMP), MPI-optional on the peclet-core decomposition, and exposed to Python via nanobind.
-  Includes a pore-network-extraction module (pnm).
+  (Pore-network extraction lives in the companion peclet-pnm package.)
 type: software
 authors:
   - family-names: Peters

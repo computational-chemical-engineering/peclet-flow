@@ -1,14 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
 project(peclet_flow LANGUAGES CXX)
 
-# Canonical cfd-gpu build: the Kokkos `sdflow` cut-cell IBM Navier-Stokes solver + the `pnm`
-# pore-network extraction, as importable Python modules. Kokkos provides the backend (CUDA / HIP / OpenMP),
-# selected by the install prefix (extern/install/<backend>, built by ../tools/bootstrap_deps.sh -- a HARD
-# build dependency).
+# Canonical cfd-gpu build: the Kokkos `sdflow` cut-cell IBM Navier-Stokes solver, as an importable
+# Python module. Kokkos provides the backend (CUDA / HIP / OpenMP), selected by the install prefix
+# (extern/install/<backend>, built by ../tools/bootstrap_deps.sh -- a HARD build dependency).
+# (Pore-network extraction moved to its own suite project: ../pnm, peclet.pnm.)
 #
-# Build (single-rank Python modules); nanobind is found via the active interpreter (SuiteNanobind):
+# Build (single-rank Python module); nanobind is found via the active interpreter (SuiteNanobind):
 #   cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda"
-#   cmake --build build -j        ->  build/sdflow.*.so + build/pnm.*.so
+#   cmake --build build -j        ->  build/peclet/flow/_flow.*.so
 #
 # Multi-rank MPI is exercised by the tests/kokkos_mpi ctest suite (its own find_package project); the
 # single-rank kernel unit tests live in tests/kokkos. See CLAUDE.md.
@@ -44,12 +44,12 @@ peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../core" TPX_INC)
 # device path is routed by the launch compiler regardless.
 # NOMINSIZE: nanobind's default -Os size optimization is rejected by nvcc ("'s': expected a number")
 # since the Kokkos device sources compile as CXX through the launch compiler.
-# The two extensions are assembled into the PEP-420 peclet namespace: the solver as `peclet.flow` (the
-# private `_flow` extension re-exported by peclet/flow/__init__.py) and pore extraction as
-# `peclet.flow.pnm`. The package __init__.py files are kept as plain files under packaging/ (OUTSIDE any
-# importable peclet/ dir, so an incomplete source package can never shadow the installed one) and staged
-# into <build>/peclet/... so `PYTHONPATH=<build> python …` (`import peclet.flow`) works in the dev loop
-# too. The SKBUILD install rules (guarded below) place them into the wheel.
+# The extension is assembled into the PEP-420 peclet namespace as `peclet.flow` (the private `_flow`
+# extension re-exported by peclet/flow/__init__.py). The package __init__.py is kept as a plain file
+# under packaging/ (OUTSIDE any importable peclet/ dir, so an incomplete source package can never
+# shadow the installed one) and staged into <build>/peclet/... so `PYTHONPATH=<build> python …`
+# (`import peclet.flow`) works in the dev loop too. The SKBUILD install rules (guarded below) place
+# it into the wheel.
 nanobind_add_module(sdflow NB_STATIC NOMINSIZE src/flow_bindings.cpp)
 set_target_properties(sdflow PROPERTIES OUTPUT_NAME _flow   # -> peclet.flow._flow (NB_MODULE(_flow))
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/flow")
@@ -72,34 +72,16 @@ if(PECLET_FLOW_MPI)
   message(STATUS "flow: distributed step ENABLED (MPI)")
 endif()
 
-# pnm -- pore-network extraction (Kokkos GPU compute + pure-C++ SDFReader VTI reader).
-nanobind_add_module(pnm NB_STATIC NOMINSIZE src/pnm_bindings.cpp src/sdf_reader.cpp)
-set_target_properties(pnm PROPERTIES OUTPUT_NAME _pnm       # -> peclet.flow.pnm._pnm (NB_MODULE(_pnm))
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/pnm")
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_pnm_init.py
-               ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/pnm/__init__.py COPYONLY)
-target_include_directories(pnm PRIVATE src "${TPX_INC}")
-target_link_libraries(pnm PRIVATE Kokkos::kokkos)
-if(Kokkos_ENABLE_HIP)
-  target_link_options(pnm PRIVATE -Wl,--no-gc-sections)
-endif()
-
-# Redistributable CUDA wheel: point each module at the nvidia-cuda-runtime wheel's libcudart via a
-# relative $ORIGIN RPATH (up to site-packages, then into nvidia/cu13/lib). sdflow lives at peclet/flow,
-# pnm one level deeper at peclet/flow/pnm.
+# Redistributable CUDA wheel: point the module at the nvidia-cuda-runtime wheel's libcudart via a
+# relative $ORIGIN RPATH (up to site-packages, then into nvidia/cu13/lib).
 if(PECLET_CUDA_RUNTIME_WHEEL)
   set_target_properties(sdflow PROPERTIES
     INSTALL_RPATH "$ORIGIN/../../nvidia/cu13/lib" INSTALL_RPATH_USE_LINK_PATH OFF)
-  set_target_properties(pnm PROPERTIES
-    INSTALL_RPATH "$ORIGIN/../../../nvidia/cu13/lib" INSTALL_RPATH_USE_LINK_PATH OFF)
 endif()
 
 # --- pip / scikit-build-core install rule -------------------------------------------------------
 if(DEFINED SKBUILD)
   install(TARGETS sdflow LIBRARY DESTINATION peclet/flow COMPONENT python)
-  install(TARGETS pnm    LIBRARY DESTINATION peclet/flow/pnm COMPONENT python)
   install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
           DESTINATION peclet/flow RENAME __init__.py COMPONENT python)
-  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_pnm_init.py
-          DESTINATION peclet/flow/pnm RENAME __init__.py COMPONENT python)
 endif()

@@ -16,9 +16,9 @@ bit-identical to the CUDA solver (machine-precision, and against the Zick & Homs
 before the CUDA sources were deleted. Restore point: the git tag `pre-cuda-retirement`. The cut-cell IBM
 primitives live in `src/cut_cell_ibm.hpp`; the operator headers are `src/mac_*.hpp` + `src/flow_ibm.hpp`.
 
-**`pnm` is the pore-network-extraction module** (`src/pnm_bindings.cpp` + `src/pore_extraction.hpp`
-Kokkos compute + the pure-C++ `src/sdf_reader.cpp` VTI reader): `SDFReader`, `extract_pores`,
-`segment_volume`, `extract_topology_gpu` — the repo's namesake "pnm_from_sdf" feature, unrelated to the CFD solve.
+**Pore-network extraction moved out** (2026-07): the former `peclet.flow.pnm` module is now its own
+suite project, `../pnm` (`peclet.pnm`, repo `peclet-pnm`) — the "pnm_from_sdf" namesake feature,
+unrelated to the CFD solve. This repo builds only the solver.
 
 ## Build Commands
 
@@ -30,7 +30,7 @@ backend = `nvidia-cuda` / `host-openmp` / `lumi-hip`); **nanobind** is provision
 
 ```bash
 source .venv/bin/activate
-# Canonical: build + install both modules (flow solver + pnm) via scikit-build-core.
+# Canonical: build + install the flow solver via scikit-build-core.
 CMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda" pip install .
 
 # Or a dev cmake build (single-rank Python modules):
@@ -76,8 +76,6 @@ counts, checked against a saved baseline so regressions are caught — Z&H spher
 hollow-ring bed): `PYTHONPATH=$PWD/build python tests/regression/sdflow_regression.py` (`--update` to
 re-record the baseline). See [`tests/regression/README.md`](tests/regression/README.md).
 
-Pore-network extraction (the `pnm` module): `python scripts/test_extraction.py`,
-`python scripts/verify_segmentation.py`.
 
 ## Architecture
 
@@ -115,9 +113,6 @@ All Kokkos, header-only (`namespace flow`), C++20.
   `peclet.flow.SolverColocated` (collocated/cell-centered velocities via the `GridLayout` policy + ABC
   approximate projection — identical Python API; see [`doc/flow_colocated_plan.md`](doc/flow_colocated_plan.md))
 
-**`pnm` (pore-network extraction):**
-- `src/pore_extraction.hpp` (`namespace pnm`, Kokkos compute), `src/sdf_reader.cpp` / `.h` (pure-C++ VTI reader)
-- `src/pnm_bindings.cpp` - the `pnm` nanobind module (`SDFReader`, `extract_pores`, `segment_volume`, ...)
 
 ## Python API Usage (`flow`)
 

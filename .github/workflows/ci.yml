@@ -1,6 +1,6 @@
 name: CI
 
-# Build the Kokkos (OpenMP/Serial) backend from source, then build the sdflow + pnm Python modules and
+# Build the Kokkos (OpenMP/Serial) backend from source, then build the sdflow Python module and
 # run the single-rank Kokkos kernel unit tests. The GPU (CUDA/HIP) backends and the multi-rank MPI
 # tests are NOT exercisable on free GitHub runners (no GPU); this CI covers the portable host build and
 # the CPU kernel tests, which is what catches the vast majority of regressions. The single-rank modules
@@ -47,14 +47,14 @@ jobs:
           cmake --build /tmp/kokkos/build -j
           cmake --install /tmp/kokkos/build
 
-      - name: Build sdflow + pnm modules
+      - name: Build the sdflow module
         run: |
           cmake -S . -B build \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"
           cmake --build build -j
 
       - name: Import smoke test
-        run: PYTHONPATH=$PWD/build python3 -c "import peclet.flow, peclet.flow.pnm; print('peclet.flow + pnm import OK')"
+        run: PYTHONPATH=$PWD/build python3 -c "import peclet.flow; print('peclet.flow import OK')"
 
       - name: Build + run Kokkos kernel unit tests (tests/kokkos)
         run: |
