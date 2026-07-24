@@ -47,20 +47,24 @@
 
 #include <cstdint>
 
-#include "cut_cell_ibm.hpp"  // poly_D / poly_Nc / poly_N_nb
+#include "cut_cell_ibm.hpp"  // poly_D / poly_Nc / poly_N_nb (momentum IBM)
 #include "mac_cutcell.hpp"   // CCField/CCConst, C3, CCExec
+// The PURE per-face closure pieces (state cascade, closure weights, row fill) are shared with
+// core's AMR octree band — lifted verbatim into peclet::core::scheme (float arithmetic identical
+// to the definitions that lived here; Kokkos_Core.hpp is included above, so they compile as
+// KOKKOS_INLINE_FUNCTION). The grid-specific parts (overlay SoA, periodic wrap, delta kernels,
+// gpCenterGrad) stay here.
+#include "peclet/core/scheme/ghost_closure.hpp"
 
 namespace peclet::flow {
 
-constexpr float GP_THETA_MIN = 1e-4f;
-
-enum GpState : int8_t {
-  GP_COUPLED = 0,
-  GP_QUAD = 1,
-  GP_LIN = 2,
-  GP_BC_ONLY = 3,
-  GP_EXPLICIT = 4,
-};
+using peclet::core::scheme::GP_THETA_MIN;
+using enum peclet::core::scheme::GpState;
+using peclet::core::scheme::GpFace;
+using peclet::core::scheme::GpState;
+using peclet::core::scheme::gpClassifyFace;
+using peclet::core::scheme::gpFillRow;
+using peclet::core::scheme::gpOrderWeights;
 
 /// Per-overlay-row SoA. Face slot k = 2*axis + (0 = plus side, 1 = minus side), matching the
 /// momentum overlay's direction order {+x,-x,+y,-y,+z,-z}. Weights are the UNSCALED closure
@@ -95,158 +99,6 @@ inline GpOverlay gpMakeOverlay(long n) {
   ov.wm_n1 = Kokkos::View<float*, CCMem>("gp_wmn1", 6 * n);
   ov.wm_n2 = Kokkos::View<float*, CCMem>("gp_wmn2", 6 * n);
   return ov;
-}
-
-/// Closure weights for one ghost face at the requested extrapolation order. order=2 uses the
-/// wall-anchored quadratic (only available for GP_QUAD faces); order=1 (or a GP_LIN face) uses
-/// the wall-anchored linear closure th*u_g = u_bc + (th-1)*u_near. D is the conditioning factor
-/// feeding the row rescale.
-KOKKOS_INLINE_FUNCTION void gpOrderWeights(int8_t st, float th, int order, float& wbc, float& w1,
-                                           float& w2, float& D) {
-  wbc = w1 = w2 = 0.0f;
-  D = 1.0f;
-  if (st == GP_BC_ONLY) {
-    wbc = 1.0f;
-    return;
-  }
-  if (st == GP_QUAD && order == 2) {
-    D = poly_D(th);
-    wbc = 2.0f / D;
-    w1 = poly_Nc(th) / D;
-    w2 = poly_N_nb(th) / D;
-  } else {  // linear (GP_LIN, or a GP_QUAD face at order 1)
-    D = th;
-    wbc = 1.0f / th;
-    w1 = (th - 1.0f) / th;
-  }
-}
-
-struct GpFace {
-  int8_t state;
-  float th, wbc, w1, w2, D;
-};
-
-/// Classify + fill ONE face from its 1-D sdf samples along the face's axis.
-///   sg  = ghost (this) face sdf     sn = near face sdf (the cell's other face on this axis)
-///   sf  = far face sdf              sb = beyond-ghost face sdf (one further into the solid)
-///   snb = neighbor center sdf       sc1/sc2 = centers needed by the near/far face gradients
-///   otherSolid = the cell's other face on this axis is solid (sandwich detection)
-///   exStd/exSliver = optional EXACT wall-crossing thetas (analytic-SDF capability) for the
-///   standard-ghost / extended-sliver branches; NaN falls back to the linear-interp theta.
-/// Pure function of the samples — shared verbatim with the host parity test.
-KOKKOS_INLINE_FUNCTION GpFace gpClassifyFace(float sg, float sn, float sf, float sb, float snb,
-                                             float sc1, float sc2, bool otherSolid,
-                                             float exStd = Kokkos::nan(""),
-                                             float exSliver = Kokkos::nan("")) {
-  GpFace f{GP_COUPLED, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-  if (sg >= 0.0f && snb >= 0.0f)
-    return f;  // COUPLED
-  if (sg < 0.0f && otherSolid) {
-    f.state = GP_BC_ONLY;  // sandwich: both own faces solid, wall BCs determine the axis
-    f.wbc = 1.0f;
-    return f;
-  }
-  float th;
-  if (sg < 0.0f) {  // standard ghost (near face fluid guaranteed: not sandwich)
-    th = Kokkos::isfinite(exStd) ? exStd : sn / (sn - sg);
-    th = th < GP_THETA_MIN ? GP_THETA_MIN : (th > 1.0f ? 1.0f : th);
-  } else {  // sliver: face point fluid, neighbor center solid
-    if (sb >= 0.0f) {
-      f.state = GP_EXPLICIT;  // no crossing on the u-line: explicit u* flux, no phi coupling
-      return f;
-    }
-    th = Kokkos::isfinite(exSliver) ? exSliver : 1.0f + sg / (sg - sb);
-    const float lo = 1.0f + GP_THETA_MIN;
-    th = th < lo ? lo : (th > 2.0f ? 2.0f : th);
-  }
-  f.th = th;
-  const bool src1 = (sn >= 0.0f) && (sc1 >= 0.0f);
-  const bool src2 = (sf >= 0.0f) && (sc2 >= 0.0f);
-  if (!src1) {
-    f.state = GP_BC_ONLY;
-    f.wbc = 1.0f;
-    return f;
-  }
-  if (src2) {
-    f.state = GP_QUAD;
-    f.D = poly_D(th);
-    f.wbc = 2.0f / f.D;
-    f.w1 = poly_Nc(th) / f.D;
-    f.w2 = poly_N_nb(th) / f.D;
-  } else {
-    f.state = GP_LIN;
-    f.D = th;
-    f.wbc = 1.0f / th;
-    f.w1 = (th - 1.0f) / th;
-  }
-  return f;
-}
-
-/// Fill one overlay row from the per-axis sample sets. F[a][m+1] = face sdf at face index i+m
-/// (m = -1..2, face i+m sits between centers i+m-1 and i+m); Cq[a][q+2] = center sdf at i+q
-/// (q = -2..2; Cq[a][2] = own center, fluid by construction). Fills BOTH weight sets: w_* at
-/// rhsOrder (divergence RHS + diagnostic) and wm_* at matrixOrder (implicit phi couplings); the
-/// row rescale comes from the matrix weights (it conditions the matrix row). Returns true if any
-/// face is non-COUPLED (i.e. the row belongs in the overlay).
-template <class OV>
-KOKKOS_INLINE_FUNCTION bool gpFillRow(const OV& ov, int slot, int cellInner, const float F[3][4],
-                                      const float Cq[3][5], int matrixOrder, int rhsOrder,
-                                      const float* exStd = nullptr,
-                                      const float* exSliver = nullptr) {
-  bool any = false;
-  bool anyPhi = false;
-  float rho = 1.0f;
-  GpFace faces[6];
-  const float nanv = Kokkos::nan("");
-  for (int a = 0; a < 3; ++a) {
-    const bool solidM = F[a][1] < 0.0f;  // own minus face (m=0)
-    const bool solidP = F[a][2] < 0.0f;  // own plus face (m=1)
-    // minus side (k = 2a+1): ghost m=0, near m=1, far m=2, beyond m=-1; nb center q=-1;
-    // gradient cells q=+1, q=+2.
-    faces[2 * a + 1] =
-        gpClassifyFace(F[a][1], F[a][2], F[a][3], F[a][0], Cq[a][1], Cq[a][3], Cq[a][4], solidP,
-                       exStd ? exStd[2 * a + 1] : nanv, exSliver ? exSliver[2 * a + 1] : nanv);
-    // plus side (k = 2a): ghost m=1, near m=0, far m=-1, beyond m=2; nb center q=+1;
-    // gradient cells q=-1, q=-2.
-    faces[2 * a] =
-        gpClassifyFace(F[a][2], F[a][1], F[a][0], F[a][3], Cq[a][3], Cq[a][1], Cq[a][0], solidM,
-                       exStd ? exStd[2 * a] : nanv, exSliver ? exSliver[2 * a] : nanv);
-  }
-  float wbcM[6], w1M[6], w2M[6];  // matrix-order weights (wbc unused in the matrix)
-  for (int k = 0; k < 6; ++k) {
-    const GpFace& f = faces[k];
-    if (f.state != GP_COUPLED)
-      any = true;
-    if (f.state == GP_COUPLED || f.state == GP_QUAD || f.state == GP_LIN)
-      anyPhi = true;
-    wbcM[k] = w1M[k] = w2M[k] = 0.0f;
-    if (f.state == GP_QUAD || f.state == GP_LIN) {
-      float Dm;
-      gpOrderWeights(f.state, f.th, matrixOrder, wbcM[k], w1M[k], w2M[k], Dm);
-      if (Dm < rho)
-        rho = Dm;
-    }
-  }
-  if (!any)
-    return false;
-  ov.cell(slot) = cellInner;
-  ov.rescale(slot) = rho;
-  ov.coupled(slot) = anyPhi ? 1 : 0;
-  for (int k = 0; k < 6; ++k) {
-    const GpFace& f = faces[k];
-    float wbc, w1, w2, D;
-    gpOrderWeights(f.state, f.th, rhsOrder, wbc, w1, w2, D);
-    if (f.state == GP_COUPLED || f.state == GP_EXPLICIT)
-      wbc = w1 = w2 = 0.0f;
-    ov.state(slot * 6 + k) = f.state;
-    ov.th(slot * 6 + k) = f.th;
-    ov.w_bc(slot * 6 + k) = wbc;
-    ov.w_n1(slot * 6 + k) = w1;
-    ov.w_n2(slot * 6 + k) = w2;
-    ov.wm_n1(slot * 6 + k) = w1M[k];
-    ov.wm_n2(slot * 6 + k) = w2M[k];
-  }
-  return true;
 }
 
 KOKKOS_INLINE_FUNCTION int gpWrap(int v, int n) {
