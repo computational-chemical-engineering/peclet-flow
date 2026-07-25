@@ -7,7 +7,9 @@ reports which one this build has.
 
 * :class:`peclet.flow.Solver` — the staggered MAC solver.
 * :class:`peclet.flow.SolverColocated` — the collocated/cell-centered variant.
-* :mod:`peclet.flow.pnm` — pore-network extraction from SDF pore geometry.
+
+Pore-network extraction lives in the companion :mod:`peclet.pnm` package (peclet-pnm; it was
+``peclet.flow.pnm`` before 2026-07).
 
 ``peclet`` is an implicit (PEP 420) namespace shared with the other ``peclet-*`` packages, so it has no
 top-level ``__init__.py``.
