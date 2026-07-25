@@ -1030,6 +1030,16 @@ class Solver {
     CCField o[3] = {ox_, oy_, oz_};
     return gatherInner(o[c]);
   }
+  // The openness whose face fluxes the PROJECTION conserves: the binary (COUPLED) openness in
+  // ghost-projection mode (oxb_ — the geometric ox_ stays a diagnostic there), the geometric
+  // cut-cell openness otherwise. This is what flux bookkeeping downstream of the solve must use
+  // (e.g. peclet.pnm's extract_network_flow): sum(o_proj*u*A) over a cell's faces IS the
+  // discrete divergence the projection drives to zero.
+  std::vector<double> getOpennessProj(int c) {
+    const bool gp = ghostProjection_ && oxb_.extent(0) > 0;
+    CCField o[3] = {gp ? oxb_ : ox_, gp ? oyb_ : oy_, gp ? ozb_ : oz_};
+    return gatherInner(o[c]);
+  }
   std::vector<double> getPressure() {
     // Incremental scheme: P_ accumulates the physical pressure. Classical Chorin (!incremental_):
     // derive it on demand from the last projection potential, p = (rho/dt)*phi (CUDA

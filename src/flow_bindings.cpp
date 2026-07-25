@@ -288,6 +288,17 @@ static void bind_solver(nb::module_& m, const char* name) {
           "get_oz", [](S& s) { return field_out(s, s.getOpenness(2)); },
           "TEMP: -z face openness per inner cell, (nx,ny,nz).")
       .def(
+          "get_ox_proj", [](S& s) { return field_out(s, s.getOpennessProj(0)); },
+          "-x face openness whose fluxes the projection CONSERVES (binary/COUPLED under "
+          "set_ghost_projection, geometric cut-cell otherwise). Use for flux bookkeeping "
+          "(peclet.pnm extract_network_flow).")
+      .def(
+          "get_oy_proj", [](S& s) { return field_out(s, s.getOpennessProj(1)); },
+          "-y face openness the projection conserves (see get_ox_proj).")
+      .def(
+          "get_oz_proj", [](S& s) { return field_out(s, s.getOpennessProj(2)); },
+          "-z face openness the projection conserves (see get_ox_proj).")
+      .def(
           "get_uf", [](S& s) { return field_out(s, s.getFaceVelocity(0)); },
           "Return the divergence-free FACE x-velocity (collocated: projected MAC field; staggered: "
           "== get_u).")
