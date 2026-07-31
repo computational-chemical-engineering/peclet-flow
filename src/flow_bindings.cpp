@@ -651,8 +651,11 @@ NB_MODULE(_flow, m) {
         int rank = 0, size = 1;
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
         MPI_Comm_size(MPI_COMM_WORLD, &size);
-        peclet::core::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size),
-                                                     peclet::core::IVec<3>{gnx, gny, gnz});
+        // Align identically to Solver::initMpi so this local block size matches the solver's dec_
+        // (the pressure MG needs an aligned, coarsenable decomposition).
+        peclet::core::decomp::BlockDecomposer<3> dec(
+            static_cast<std::size_t>(size), peclet::core::IVec<3>{gnx, gny, gnz},
+            peclet::flow::CutcellMG::coarsenAlignment(gnx, gny, gnz));
         auto blk = dec.block(static_cast<std::size_t>(rank));
         std::vector<int> origin{(int)blk.origin[0], (int)blk.origin[1], (int)blk.origin[2]};
         std::vector<int> bsize{(int)blk.size[0], (int)blk.size[1], (int)blk.size[2]};

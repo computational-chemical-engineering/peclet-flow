@@ -225,6 +225,25 @@ class CutcellMG {
   // the coarse-level transfer is only clean when nLevels==1 (pure RB-GS) — use that (or the
   // decomposition-agnostic GraphAMG) for a weighted co-decomposition. nullptr => equal-weight
   // everywhere (the original behaviour, byte-identical).
+  // Per-axis split alignment that makes an ORB safely coarsenable by this MG: align[k] =
+  // 2^(number of times axis k can coarsen, until it turns odd) — the NATURAL MAXIMUM, independent of
+  // the actual nLevels (over-aligning is harmless: coarsened() still divides cleanly at every real
+  // level). Depends only on the global grid, so the solver's dec_, the mpi_block() sizing, and this
+  // MG all compute the SAME value without threading nLevels. The solver builds its shared
+  // decomposition with this alignment so initMpi derives nested coarse levels via coarsened().
+  static peclet::core::IVec<3> coarsenAlignment(int gnx, int gny, int gnz) {
+    auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
+    C3 gs{gnx, gny, gnz};
+    peclet::core::IVec<3> a{1, 1, 1};
+    for (bool any = true; any;) {
+      any = false;
+      if (can(gs.x)) { a[0] *= 2; gs.x /= 2; any = true; }
+      if (can(gs.y)) { a[1] *= 2; gs.y /= 2; any = true; }
+      if (can(gs.z)) { a[2] *= 2; gs.z /= 2; any = true; }
+    }
+    return a;
+  }
+
   void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm,
                const peclet::core::decomp::BlockDecomposer<3>* dec0 = nullptr) {
     lv_.clear();
@@ -240,12 +259,22 @@ class CutcellMG {
     std::array<bool, 3> per{true, true, true};
     C3 gs{gnx, gny, gnz}, cf{1, 1, 1};
     auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
+    // Coarse levels are NESTED: level 0 is the shared solver decomposition (dec0), and each coarse
+    // level is the previous level's decomposition coarsened IN PLACE (same tree/leaf order, split
+    // positions halved). This keeps restrict/prolong's coarse-local i <-> fine-local ratio*i mapping
+    // valid on every rank. (An independent ORB per level does NOT nest — coarse blocks can split a
+    // different axis than the fine level, sending restrict/prolong out of bounds.)
+    peclet::core::decomp::BlockDecomposer<3> curDec;
+    if (dec0) {
+      curDec = *dec0;  // solver's shared decomposition (built aligned; see flow_ibm initMpi)
+    } else {
+      curDec.init(static_cast<std::size_t>(size), peclet::core::IVec<3>{gs.x, gs.y, gs.z},
+                  coarsenAlignment(gnx, gny, gnz));
+    }
     for (int L = 0; L < nLevels; ++L) {
       Level v;
       v.halo = std::make_shared<GridHaloTopology<3>>();
-      peclet::core::decomp::BlockDecomposer<3> decOwn(static_cast<std::size_t>(size),
-                                                      peclet::core::IVec<3>{gs.x, gs.y, gs.z});
-      const peclet::core::decomp::BlockDecomposer<3>& dec = (L == 0 && dec0) ? *dec0 : decOwn;
+      const peclet::core::decomp::BlockDecomposer<3>& dec = curDec;
       v.halo->buildTopology(dec, rank, G, per, comm);
       v.dev = std::make_shared<GridHalo<double>>();
       v.dev->init(*v.halo);
@@ -259,15 +288,25 @@ class CutcellMG {
       v.n = idx.numCellsInclGhost();
       C3 next = gs, ratio{1, 1, 1};
       if (L + 1 < nLevels) {
-        if (can(gs.x)) {
+        // Coarsen an axis only if the GLOBAL dim can (can()) AND every rank's block is even on that
+        // axis, so coarsened() nests exactly. Alignment (coarsenAlignment) makes this hold for the
+        // full natural depth; on an unaligned/awkward decomposition it simply stops coarsening that
+        // axis early (fewer geometric levels, GraphAMG bottom picks up the rest) — never OOB.
+        auto evenBlocks = [&](int ax) {
+          for (std::size_t b = 0; b < curDec.sizes().size(); ++b)
+            if ((curDec.origins()[b][ax] % 2) || (curDec.sizes()[b][ax] % 2))
+              return false;
+          return true;
+        };
+        if (can(gs.x) && evenBlocks(0)) {
           ratio.x = 2;
           next.x = gs.x / 2;
         }
-        if (can(gs.y)) {
+        if (can(gs.y) && evenBlocks(1)) {
           ratio.y = 2;
           next.y = gs.y / 2;
         }
-        if (can(gs.z)) {
+        if (can(gs.z) && evenBlocks(2)) {
           ratio.z = 2;
           next.z = gs.z / 2;
         }
@@ -286,6 +325,8 @@ class CutcellMG {
         break;
       gs = next;
       cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
+      // Next level's decomposition = this level's coarsened in place (nested; preserves rank order).
+      curDec = curDec.coarsened(peclet::core::IVec<3>{ratio.x, ratio.y, ratio.z});
     }
   }
 #endif

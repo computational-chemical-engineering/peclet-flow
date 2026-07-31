@@ -395,8 +395,12 @@ class Solver {
   void initMpi(int gnx, int gny, int gnz, MPI_Comm comm) {
     int size = 1;
     MPI_Comm_size(comm, &size);
+    // Build the shared decomposition ALIGNED so the pressure MG can derive nested coarse levels
+    // (CutcellMG::coarsened). Alignment depends only on the global grid, so it matches mpi_block()'s
+    // sizing exactly. Negligible load imbalance (splits shift by <= a few cells).
     peclet::core::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size),
-                                                 peclet::core::IVec<3>{gnx, gny, gnz});
+                                                 peclet::core::IVec<3>{gnx, gny, gnz},
+                                                 CutcellMG::coarsenAlignment(gnx, gny, gnz));
     initMpi(dec, comm);
   }
   // Shared-decomposition overload: wire the g=2 velocity-block halo from an EXTERNALLY-built ORB
