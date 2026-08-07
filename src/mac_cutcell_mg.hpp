@@ -242,6 +242,17 @@ class CutcellMG {
       if (can(gs.y)) { a[1] *= 2; gs.y /= 2; any = true; }
       if (can(gs.z)) { a[2] *= 2; gs.z /= 2; any = true; }
     }
+    // Cap at 2^(default nLevels - 1): all the 5-level hierarchy needs. The UNCAPPED natural-max
+    // over-constrains the ORB on power-of-two-rich grids (e.g. 192^3 -> align 64): the split snap
+    // then rounds a balanced 96|96 to 128|64 (cascading 2:1 load imbalance), and once sub-boxes
+    // drop under 2*align the snap is skipped -> unaligned splits -> the even-coarsening gate
+    // collapses the MG depth (measured: 192^3 np=24 pure-MPI, 27 pressure iters/step vs 9, 3.4x
+    // step time). With the cap the same case decomposes perfectly evenly and keeps 5 nested
+    // levels; axes whose natural alignment is smaller are unchanged, deeper hierarchies degrade
+    // through the existing evenBlocks gate exactly as before.
+    for (int k = 0; k < 3; ++k)
+      if (a[k] > 16)
+        a[k] = 16;
     return a;
   }
 
