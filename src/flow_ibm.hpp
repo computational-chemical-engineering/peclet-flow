@@ -19,6 +19,7 @@
 #define PECLET_FLOW_SDFLOW_IBM_HPP
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <Kokkos_Core.hpp>
@@ -913,6 +914,9 @@ class Solver {
   }
 
   void step() {
+    const double ts0 = phaseTick();
+    tPredictor_ = tMomentum_ = tProjection_ = 0.0;
+    mg_.resetAllreduceCounters();
     // Multiphysics: refresh material properties / body forces from the current fields (frozen over
     // the step). No-op (byte-identical) when no closure is registered.
     updateProperties();
@@ -940,6 +944,7 @@ class Solver {
     }  // grad(P^n) for the incremental predictor (once)
     lastOuterIters_ = 0;
     for (int outer = 0; outer < outerIters_; ++outer) {
+      const double tp0 = phaseTick();
       lastOuterIters_ = outer + 1;
       if (outerTol_ > 0)
         for (int c = 0; c < 3; ++c)
@@ -980,8 +985,12 @@ class Solver {
       // components).
       if (useVelocityMg_ && implicitFou_ && advect_ && !hasBc_)
         vmg_.restrictAdvVelocities(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u));
+      const double tp1 = phaseTick();
+      tPredictor_ += tp1 - tp0;
       for (int c = 0; c < 3; ++c)
         smoothComp(c);  // per-component IBM implicit-diffusion solve
+      const double tp2 = phaseTick();
+      tMomentum_ += tp2 - tp1;
       // The porous (volume-averaged) projection lives entirely on the cut-cell operator rails
       // (divergOpenEps + buildPorousCoeff* into CutcellMG). Without set_solid /
       // set_pressure_geometry there is NO projection at all — the gas would never accelerate to
@@ -994,6 +1003,7 @@ class Solver {
             "domain-BC-only box otherwise runs with NO continuity constraint at all)");
       if (cutcellPressure_)
         project();  // cut-cell projection -> incompressible
+      tProjection_ += phaseTick() - tp2;
       if (hasBc_)
         for (int c = 0; c < 3; ++c)
           applyVelocityBcComp(c, 0, false);  // re-impose domain BCs (keep outflow)
@@ -1010,6 +1020,7 @@ class Solver {
     // divergence-free velocity (properties frozen over the step). No-op (byte-identical) when no
     // scalar is registered.
     advanceScalars();
+    tStep_ = phaseTick() - ts0;
   }
 
   // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
@@ -1146,6 +1157,17 @@ class Solver {
     return m;
   }
   long lastPressureIterations() const { return lastPressureIters_; }
+  // Per-phase wall times of the last step() in seconds, THIS RANK (device-fenced at each phase
+  // boundary): predictor = ghost fills + RHS/advection/stencil builds, momentum = the per-component
+  // implicit-diffusion solves, projection = the cut-cell pressure projection; step = the whole
+  // step() (remainder = BC re-imposition, Picard bookkeeping, scalars). The allreduce pair is the
+  // pressure solve's global-reduction tax (time in / count of MPI_Allreduce; 0 single-rank).
+  double lastStepSeconds() const { return tStep_; }
+  double lastPredictorSeconds() const { return tPredictor_; }
+  double lastMomentumSeconds() const { return tMomentum_; }
+  double lastProjectionSeconds() const { return tProjection_; }
+  double lastPressureAllreduceSeconds() const { return mg_.allreduceSeconds(); }
+  long lastPressureAllreduceCount() const { return mg_.allreduceCount(); }
   int nx() const { return nx_; }
   int ny() const { return ny_; }
   int nz() const { return nz_; }
@@ -2976,6 +2998,15 @@ class Solver {
   double outerTol_ = 0.0;  // Picard outer iteration (CUDA set_outer_iterations)
   long lastOuterIters_ = 0;
   double lastOuterCorr_ = 0.0;
+  // per-step phase timers (seconds, this rank; see lastStepSeconds)
+  double tStep_ = 0.0, tPredictor_ = 0.0, tMomentum_ = 0.0, tProjection_ = 0.0;
+  // fence-then-read wall clock: phase boundaries must not attribute queued device work to the
+  // next phase
+  static double phaseTick() {
+    Kokkos::fence();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
   bool ghostProjection_ = false;  // directional ghost-cell projection (experimental 2nd IBM)
   GpOverlay gpOv_;                // its per-row overlay (built by setSolid)

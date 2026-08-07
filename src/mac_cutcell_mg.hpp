@@ -14,6 +14,7 @@
 #ifndef PECLET_FLOW_MAC_CUTCELL_MG_HPP
 #define PECLET_FLOW_MAC_CUTCELL_MG_HPP
 
+#include <chrono>
 #include <cmath>
 #include <Kokkos_Core.hpp>
 #include <memory>
@@ -1219,6 +1220,16 @@ class CutcellMG {
         });
   }
 
+  // Accumulated wall time / call count of the global reductions (every dot product, residual max
+  // and mean-removal funnels through allreduce()). This is THE latency-bound term of the
+  // distributed pressure solve; the solver resets it per step and exposes it to Python.
+  double allreduceSeconds() const { return allreduceTime_; }
+  long allreduceCount() const { return allreduceCount_; }
+  void resetAllreduceCounters() {
+    allreduceTime_ = 0.0;
+    allreduceCount_ = 0;
+  }
+
  private:
   enum AllOp { kSum, kMax };
   // Global reduction over ranks (no-op single-rank / non-distributed -> byte-identical to the local
@@ -1226,8 +1237,11 @@ class CutcellMG {
   double allreduce(double v, AllOp op) {
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
+      const auto t0 = std::chrono::steady_clock::now();
       double g = 0;
       MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, op == kSum ? MPI_SUM : MPI_MAX, comm_);
+      allreduceTime_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      ++allreduceCount_;
       return g;
     }
 #endif
@@ -1241,6 +1255,8 @@ class CutcellMG {
   int bc_[6] = {0, 0, 0, 0, 0, 0};
   bool hasBC_ = false, removeMean_ = true, hasOutflow_ = false;
   bool distributed_ = false;
+  double allreduceTime_ = 0.0;
+  long allreduceCount_ = 0;
   // --- decomposition-agnostic algebraic bottom solve (GraphAMG) ---
   // The geometric coarse hierarchy needs a cleanly-coarsening (equal-weight) ORB. Under a WEIGHTED
   // decomposition the coarse levels misalign, so the multilevel path is unavailable and only pure

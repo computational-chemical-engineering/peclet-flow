@@ -213,6 +213,24 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Enable velocity (momentum) multigrid for the implicit diffusion solve.")
       .def("last_pressure_iterations", &S::lastPressureIterations,
            "Return the pressure-solver iteration count from the last step().")
+      .def(
+          "last_step_timers",
+          [](S& s) {
+            nb::dict d;
+            d["step"] = s.lastStepSeconds();
+            d["predictor"] = s.lastPredictorSeconds();
+            d["momentum"] = s.lastMomentumSeconds();
+            d["projection"] = s.lastProjectionSeconds();
+            d["pressure_allreduce"] = s.lastPressureAllreduceSeconds();
+            d["pressure_allreduce_count"] = s.lastPressureAllreduceCount();
+            return d;
+          },
+          "Per-phase wall times (seconds, THIS rank, device-fenced) of the last step(): 'predictor' "
+          "(ghost fills + RHS/advection/stencil builds), 'momentum' (implicit-diffusion solves), "
+          "'projection' (cut-cell pressure projection), 'step' (whole step). "
+          "'pressure_allreduce'/'pressure_allreduce_count' = time in / number of global reductions "
+          "(MPI_Allreduce) inside the pressure solve — the latency-bound term of the distributed "
+          "solve (0 on a single rank).")
       .def("set_domain_bc", &S::setDomainBc, nb::arg("face"), nb::arg("type"), nb::arg("vx") = 0.0,
            nb::arg("vy") = 0.0, nb::arg("vz") = 0.0,
            "Set a per-face domain BC (face 0..5 = -x,+x,-y,+y,-z,+z; type 0 periodic/1 wall/2 "
