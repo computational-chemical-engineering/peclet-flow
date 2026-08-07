@@ -84,10 +84,8 @@ inline void coarsenOpenAvg(CCField oxc, CCField oyc, CCField ozc, CCConst oxf, C
 // residual r = b - A x for the float operator (mg_residual_var_k port).
 inline void residualCutcell(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC AE, FPC AS, FPC AN,
                             FPC AB, FPC AT, C3 e, int g) {
-  CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for(
-      "peclet::flow::cc_residual", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::cc_residual", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
@@ -103,10 +101,8 @@ inline void residualCutcell(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC
 // prolongation (added to fine; mg_prolong_k). Both over inner cells.
 inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int g, C3 cinner,
                         C3 ratio) {
-  CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for(
-      "peclet::flow::restrict", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
+  ccFor3(
+      "peclet::flow::restrict", C3{0, 0, 0}, C3{cinner.x, cinner.y, cinner.z},
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
         const long fsy = fext.x, fsz = (long)fext.x * fext.y;
         double s = 0;
@@ -123,10 +119,8 @@ inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int g, C
       });
 }
 inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int g, C3 finner, C3 ratio) {
-  CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for(
-      "peclet::flow::prolong", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
+  ccFor3(
+      "peclet::flow::prolong", C3{0, 0, 0}, C3{finner.x, finner.y, finner.z},
       KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
         // coarse sample coord: coarsened axis (ratio 2) -> 0.5*ifine - 0.25 + g; kept axis (ratio
         // 1) -> ifine+g
@@ -466,7 +460,8 @@ class CutcellMG {
       }
       for (; it < maxit; ++it) {
         matvec(Ap, p);
-        removeMean(l0, Ap);
+        if (meanRemovalAll_)
+          removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
         const double pAp = dot(l0, p, Ap);
         if (!std::isfinite(pAp) || pAp <= 1e-300)
           break;  // breakdown/converged direction: keep the last finite iterate
@@ -629,7 +624,8 @@ class CutcellMG {
             lv);  // agglomerated mesh-agnostic coarse solve (decomposition-agnostic)
       else
         smooth(lv, bottom_, false);
-      removeMean(lv, lv.x);
+      if (meanRemovalAll_)
+        removeMean(lv, lv.x);
       return;
     }
     smooth(lv, pre_, false);
@@ -643,7 +639,8 @@ class CutcellMG {
     applyOutflowGhost(cs.ext, cs.x);
     prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, G, lv.inner, lv.ratio);
     smooth(lv, post_, /*reverse=*/sym);
-    removeMean(lv, lv.x);
+    if (meanRemovalAll_ || L == 0)
+      removeMean(lv, lv.x);
   }
   void smooth(Level& lv, int sweeps, bool reverse) {
     const C3 og = lv.og;  // global red-black parity (block inner origin); {0,0,0} single-rank
@@ -1161,10 +1158,8 @@ class CutcellMG {
     CCField aa = a, bb = b;
     FPV ac = lv.AC;
     double s = 0;
-    Kokkos::parallel_reduce(
-        "mgdot",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
+    ccReduce3(
+        "mgdot", C3{G, G, G}, C3{e.x - G, e.y - G, e.z - G},
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           if (ac(i) > 1e-30f)
@@ -1179,10 +1174,8 @@ class CutcellMG {
     CCField aa = a;
     FPV ac = lv.AC;
     double m = 0;
-    Kokkos::parallel_reduce(
-        "mgmax",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
+    ccReduce3(
+        "mgmax", C3{G, G, G}, C3{e.x - G, e.y - G, e.z - G},
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           if (ac(i) > 1e-30f) {
@@ -1215,8 +1208,9 @@ class CutcellMG {
           }
         },
         sum, cnt);
-    sum = allreduce(sum, MPI_SUM_);
-    cnt = (long)allreduce((double)cnt, MPI_SUM_);  // global fluid sum + count
+    double dcnt = (double)cnt;
+    allreduceSum2(sum, dcnt);  // ONE latency hit for the {sum, count} pair (was two)
+    cnt = (long)dcnt;
     if (cnt == 0)
       return;
     const double mean = sum / (double)cnt;
@@ -1230,6 +1224,15 @@ class CutcellMG {
             ff(i) -= mean;
         });
   }
+
+  // Mean-removal scope. "all" (legacy default): project the nullspace out at every V-cycle level,
+  // after every matvec and on every residual update — ~10 extra MPI_Allreduce latency hits per
+  // Krylov iteration whose only role is FP hygiene. "fine" keeps the removals that carry the
+  // algorithm (the rhs/residual projections + the fine-level V-cycle exit + the final iterate) and
+  // drops the interior-level ones: A maps mean-free vectors to mean-free vectors, so the Krylov
+  // space never sees the dropped components (they lie in the nullspace and are removed from the
+  // final x). Validated by iteration-count parity; not bit-identical to "all".
+  void setMeanRemovalScope(bool all) { meanRemovalAll_ = all; }
 
   // Accumulated wall time / call count of the global reductions (every dot product, residual max
   // and mean-removal funnels through allreduce()). This is THE latency-bound term of the
@@ -1259,12 +1262,28 @@ class CutcellMG {
     (void)op;
     return v;
   }
+  // One MPI_Allreduce of a {sum, count} pair — elementwise MPI_SUM on a 2-vector is bit-identical
+  // to two separate allreduces, at half the latency hits.
+  void allreduceSum2(double& a, double& b) {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      const auto t0 = std::chrono::steady_clock::now();
+      double v[2] = {a, b}, g[2] = {0.0, 0.0};
+      MPI_Allreduce(v, g, 2, MPI_DOUBLE, MPI_SUM, comm_);
+      allreduceTime_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      ++allreduceCount_;
+      a = g[0];
+      b = g[1];
+    }
+#endif
+  }
   static constexpr AllOp MPI_SUM_ = kSum, MPI_MAX_ = kMax;
 
   std::vector<Level> lv_;
   int pre_ = 2, post_ = 2, bottom_ = 4;
   int bc_[6] = {0, 0, 0, 0, 0, 0};
   bool hasBC_ = false, removeMean_ = true, hasOutflow_ = false;
+  bool meanRemovalAll_ = true;  // see setMeanRemovalScope
   bool distributed_ = false;
   double allreduceTime_ = 0.0;
   long allreduceCount_ = 0;

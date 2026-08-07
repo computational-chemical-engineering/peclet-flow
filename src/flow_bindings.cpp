@@ -151,8 +151,18 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Set the outer (Picard) convergence tolerance.")
       .def("last_outer_iterations", &S::lastOuterIterations,
            "Return the outer-iteration count from the last step().")
-      .def("set_velocity_solver_params", &S::setVelocityIterations, nb::arg("iters"),
-           "Set the velocity (diffusion) smoother iteration count.")
+      .def(
+          "set_velocity_solver_params",
+          [](S& s, int iters, double rtol, int min_iters) {
+            s.setVelocityIterations(iters);
+            s.setVelocityTolerance(rtol, min_iters);
+          },
+          nb::arg("iters"), nb::arg("rtol") = 0.0, nb::arg("min_iters") = 2,
+          "Momentum smoother control: `iters` RB-GS sweeps per component, or with rtol > 0 a "
+          "TOLERANCE STOP — end the loop once the sweep's max velocity increment has contracted "
+          "to rtol of the first sweep's (iters becomes the cap, min_iters the floor). Easy "
+          "regimes (small nu*dt/dx^2) exit after ~3-5 sweeps; stiff regimes run to the cap "
+          "unchanged. rtol = 0 (default) is the legacy fixed count, byte-identical.")
       .def("set_deferred_correction", &S::setDeferredCorrection, nb::arg("on"),
            "Deferred-correction advection: True (default) = 2nd order (implicit FOU + explicit "
            "high-order correction, the high-order scheme being SOU by default or Koren TVD via "
@@ -176,6 +186,20 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def("set_pressure_chebyshev", &S::setPressureChebyshev, nb::arg("on"),
            nb::arg("max_iter") = 120, nb::arg("rtol") = 1e-9,
            "Use the communication-light Chebyshev pressure accelerator (exclusive with PCG).")
+      .def(
+          "set_pressure_mean_removal",
+          [](S& s, const std::string& scope) {
+            if (scope != "all" && scope != "fine")
+              throw std::runtime_error("set_pressure_mean_removal: scope must be 'all' or 'fine'");
+            s.setPressureMeanRemoval(scope == "all");
+          },
+          nb::arg("scope"),
+          "Nullspace (mean) removal scope in the pressure solve: 'all' (legacy default — every "
+          "V-cycle level + after every matvec) or 'fine' (only the projections the Krylov "
+          "iteration needs: rhs/residual, the fine-level V-cycle exit, the final iterate) — "
+          "~3x fewer global-reduction latency hits per iteration for multi-node runs. Iteration "
+          "counts stay flat (A preserves mean-freeness); results equal to 'all' within solver "
+          "tolerance, not bit-identical.")
       .def("set_pressure_graph_amg", &S::setPressureGraphAmg, nb::arg("on"),
            "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
            "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "
@@ -223,6 +247,7 @@ static void bind_solver(nb::module_& m, const char* name) {
             d["projection"] = s.lastProjectionSeconds();
             d["pressure_allreduce"] = s.lastPressureAllreduceSeconds();
             d["pressure_allreduce_count"] = s.lastPressureAllreduceCount();
+            d["momentum_sweeps"] = s.lastMomentumSweeps();
             return d;
           },
           "Per-phase wall times (seconds, THIS rank, device-fenced) of the last step(): 'predictor' "

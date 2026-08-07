@@ -11,6 +11,8 @@
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
+#include <type_traits>
+#include <utility>
 
 namespace peclet::flow {
 
@@ -97,6 +99,40 @@ inline void buildOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ex
         oy(i) = ccFaceOpen(sdf, ext, lx, ly - 0.5, lz, 2, dx, dy, dz);
         oz(i) = ccFaceOpen(sdf, ext, lx, ly, lz - 0.5, 3, dx, dy, dz);
       });
+}
+
+// Launch a 3-D elementwise kernel with a HOST-TUNED MDRange tiling: one full-x row per tile (the
+// Kokkos host default tiles are tiny, wrecking streaming locality — measured 5.6x on the RB-GS
+// smoother when its loop went x-contiguous). The lambda is passed through UNCHANGED, and the
+// device keeps the default MDRange tiling untouched — byte-identical results on both backends
+// (elementwise kernels are order-independent).
+template <class F>
+inline void ccFor3(const char* name, C3 lo, C3 hi, F f) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    Kokkos::parallel_for(
+        name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x - lo.x, 2, 2}), f);
+  } else {
+    Kokkos::parallel_for(name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}), f);
+  }
+}
+
+// Reduction sibling of ccFor3 (same host tiling rationale). NOTE: the host tiling changes the
+// FP accumulation order of sum-reductions — numerically legitimate (parallel reductions are
+// unordered by contract) but not bit-identical to the previous host rounding.
+template <class F, class R>
+inline void ccReduce3(const char* name, C3 lo, C3 hi, F f, R&& reducer) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    Kokkos::parallel_reduce(
+        name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x - lo.x, 2, 2}), f,
+        std::forward<R>(reducer));
+  } else {
+    Kokkos::parallel_reduce(name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}), f,
+                            std::forward<R>(reducer));
+  }
 }
 
 }  // namespace peclet::flow

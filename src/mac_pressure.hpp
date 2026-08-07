@@ -11,6 +11,7 @@
 #define PECLET_FLOW_MAC_PRESSURE_HPP
 
 #include <Kokkos_Core.hpp>
+#include <type_traits>
 
 #include "mac_cutcell.hpp"
 
@@ -47,10 +48,8 @@ inline void buildCutcellOp(OpV AC, OpV AW, OpV AE, OpV AS, OpV AN, OpV AB, OpV A
 // (diverg_open_k).
 inline void divergOpen(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst oy, CCConst oz,
                        CCField d, C3 e, int g) {
-  CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for(
-      "peclet::flow::diverg_open", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::diverg_open", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -66,6 +65,28 @@ template <class OpV>
 inline void cutcellSmoothColor(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, OpV AS, OpV AN,
                                OpV AB, OpV AT, C3 e, C3 og, int g, int color) {
   CCExec space;
+  // Host backends: line-sweep form (one (y,z) pencil per task, stride-2 x-loop at the colour's
+  // parity) — bit-identical (same-colour cells are independent); device keeps MDRange untouched.
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
+    Kokkos::parallel_for(
+        "peclet::flow::cc_smooth", Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi),
+        KOKKOS_LAMBDA(long t) {
+          const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+          for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
+            const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+            const double ac = AC(i);
+            if (ac < 1e-30)
+              continue;  // fully closed (solid) cell: decoupled, phi stays 0
+            const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
+                             AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
+            phi(i) = (b(i) - s) / ac;
+          }
+        });
+    return;
+  }
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "peclet::flow::cc_smooth", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
@@ -96,6 +117,31 @@ inline void cutcellSmoothColorBox(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
   CCExec space;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    // Host line-sweep form of the box sweep (see cutcellSmoothColor); the (ly,lz)-level skip test
+    // hoists out of the x-loop, the x-range skip stays per cell.
+    const int nyi = rhi.y - rlo.y, nzi = rhi.z - rlo.z;
+    Kokkos::parallel_for(
+        "peclet::flow::cc_smooth_box", Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi),
+        KOKKOS_LAMBDA(long t) {
+          const int ly = rlo.y + (int)(t % nyi), lz = rlo.z + (int)(t / nyi);
+          const bool yzSkip = ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z;
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+          for (int lx = rlo.x + ((P ^ (rlo.x & 1)) & 1); lx < rhi.x; lx += 2) {
+            if (yzSkip && lx >= slo.x && lx < shi.x)
+              continue;  // inside the skip box (already swept by the interior pass)
+            const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+            const double ac = AC(i);
+            if (ac < 1e-30)
+              continue;
+            const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
+                             AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
+            phi(i) = (b(i) - s) / ac;
+          }
+        });
+    return;
+  }
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "peclet::flow::cc_smooth_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
@@ -119,10 +165,8 @@ inline void cutcellSmoothColorBox(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE
 template <class OpV>
 inline void applyCutcellOp(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV AS, OpV AN, OpV AB,
                            OpV AT, C3 e, int g) {
-  CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for(
-      "peclet::flow::cc_apply", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::cc_apply", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
@@ -157,10 +201,8 @@ inline void applyCutcellOpBox(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV 
 // the openness lives in the operator + divergence; closed faces carry phi~0 on both sides so stay
 // unchanged.
 inline void projectCorrect(CCField u, CCField v, CCField w, CCConst phi, C3 e, int g) {
-  CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for(
-      "peclet::flow::correct", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::correct", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;

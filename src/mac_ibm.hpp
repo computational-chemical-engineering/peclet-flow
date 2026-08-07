@@ -12,6 +12,7 @@
 #define PECLET_FLOW_MAC_IBM_HPP
 
 #include <Kokkos_Core.hpp>
+#include <type_traits>
 
 #include "cut_cell_ibm.hpp"  // IbmOverlay, ibmFillEntry
 #include "mac_cutcell.hpp"   // peclet::flow::C3, peclet::flow::ccSampleExt, CCConst
@@ -139,11 +140,40 @@ inline void ibmCleanFluidMask(CCField m, CCConst sdf, C3 ext, Off3 off) {
 
 // One Red-Black sweep of the variable-coefficient stencil: x[i] = (b[i] - sum(A_off*x_nbr)) /
 // A_C[i]. float matrix coeffs promote to double; solid cells pinned to 0. Call colour 0 then 1.
+// Host backends take a line-sweep form: one task per (y,z) pencil, contiguous stride-2 x-loop
+// starting at the colour's parity — no per-cell parity branch, unit-stride reads. Bit-identical to
+// the MDRange form (same-colour cells are independent, so update order within a colour cannot
+// change the result); the device keeps the MDRange form untouched.
 inline void ibmRbgsStencilColor(CCField x, CCConst b, MConst AC, MConst AW, MConst AE, MConst AS,
                                 MConst AN, MConst AB, MConst AT, CCConst solidmask, C3 ext, C3 og,
                                 int g, int color) {
   CCExec space;
   const bool hasMask = (solidmask.extent(0) != 0);
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    const int nyi = ext.y - 2 * g, nzi = ext.z - 2 * g;
+    Kokkos::parallel_for(
+        "peclet::flow::ibm_rbgs", Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi),
+        KOKKOS_LAMBDA(long t) {
+          const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
+          const long sx = 1, sy = ext.x, sz = (long)ext.x * ext.y;
+          const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+          for (int lx = g + ((P ^ (g & 1)) & 1); lx < ext.x - g; lx += 2) {
+            const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+            if (hasMask && solidmask(i) > 0.5) {
+              x(i) = 0.0;
+              continue;
+            }
+            const double ac = AC(i);
+            if (Kokkos::fabs(ac) < 1e-30)
+              continue;
+            const double s = (double)AE(i) * x(i + sx) + (double)AW(i) * x(i - sx) +
+                             (double)AN(i) * x(i + sy) + (double)AS(i) * x(i - sy) +
+                             (double)AT(i) * x(i + sz) + (double)AB(i) * x(i - sz);
+            x(i) = (b(i) - s) / ac;
+          }
+        });
+    return;
+  }
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "peclet::flow::ibm_rbgs", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
@@ -164,6 +194,73 @@ inline void ibmRbgsStencilColor(CCField x, CCConst b, MConst AC, MConst AW, MCon
                          (double)AT(i) * x(i + sz) + (double)AB(i) * x(i - sz);
         x(i) = (b(i) - s) / ac;
       });
+}
+
+// ibmRbgsStencilColor + a fused max|Δx| reduction over the swept colour (values already in
+// registers — no extra memory pass). The momentum tolerance stop runs this as the SECOND colour of
+// a sweep: one colour's max increment is the convergence proxy. Same math as the plain sweep.
+inline double ibmRbgsStencilColorDu(CCField x, CCConst b, MConst AC, MConst AW, MConst AE,
+                                    MConst AS, MConst AN, MConst AB, MConst AT, CCConst solidmask,
+                                    C3 ext, C3 og, int g, int color) {
+  CCExec space;
+  const bool hasMask = (solidmask.extent(0) != 0);
+  double du = 0.0;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    const int nyi = ext.y - 2 * g, nzi = ext.z - 2 * g;
+    Kokkos::parallel_reduce(
+        "peclet::flow::ibm_rbgs_du", Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi),
+        KOKKOS_LAMBDA(long t, double& m) {
+          const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
+          const long sx = 1, sy = ext.x, sz = (long)ext.x * ext.y;
+          const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+          for (int lx = g + ((P ^ (g & 1)) & 1); lx < ext.x - g; lx += 2) {
+            const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+            if (hasMask && solidmask(i) > 0.5) {
+              x(i) = 0.0;
+              continue;
+            }
+            const double ac = AC(i);
+            if (Kokkos::fabs(ac) < 1e-30)
+              continue;
+            const double s = (double)AE(i) * x(i + sx) + (double)AW(i) * x(i - sx) +
+                             (double)AN(i) * x(i + sy) + (double)AS(i) * x(i - sy) +
+                             (double)AT(i) * x(i + sz) + (double)AB(i) * x(i - sz);
+            const double xn = (b(i) - s) / ac;
+            const double d = Kokkos::fabs(xn - x(i));
+            if (d > m)
+              m = d;
+            x(i) = xn;
+          }
+        },
+        Kokkos::Max<double>(du));
+    return du;
+  }
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_reduce(
+      "peclet::flow::ibm_rbgs_du", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz, double& m) {
+        if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+          return;
+        const long sx = 1, sy = ext.x, sz = (long)ext.x * ext.y;
+        const long i = (long)lx + (long)ly * ext.x + (long)lz * sz;
+        if (hasMask && solidmask(i) > 0.5) {
+          x(i) = 0.0;
+          return;
+        }
+        const double ac = AC(i);
+        if (Kokkos::fabs(ac) < 1e-30)
+          return;
+        const double s = (double)AE(i) * x(i + sx) + (double)AW(i) * x(i - sx) +
+                         (double)AN(i) * x(i + sy) + (double)AS(i) * x(i - sy) +
+                         (double)AT(i) * x(i + sz) + (double)AB(i) * x(i - sz);
+        const double xn = (b(i) - s) / ac;
+        const double d = Kokkos::fabs(xn - x(i));
+        if (d > m)
+          m = d;
+        x(i) = xn;
+      },
+      Kokkos::Max<double>(du));
+  return du;
 }
 
 // Box-restricted variant for the distributed overlap smoother: sweeps [rlo,rhi) only, skipping

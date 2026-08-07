@@ -139,6 +139,21 @@ class Solver {
   void setDt(double d) { dt_ = d; }
   void setBodyForce(double fx, double fy, double fz) { f_ = {fx, fy, fz}; }
   void setVelocityIterations(int it) { velIters_ = it; }
+  // Momentum tolerance stop: end the RB-GS loop once the swept colour's max increment has dropped
+  // to rtol of the first sweep's (GS contracts geometrically, so the increment tracks the error).
+  // rtol = 0 (default) keeps the legacy fixed-count loop byte-identical. Easy regimes (small
+  // nu*dt/dx^2) exit after ~3-5 sweeps; stiff regimes run to the velIters_ cap unchanged. The
+  // check is fused into the sweep kernel (no extra memory pass) and the stop decision is
+  // rank-uniform (MPI max) so distributed halo exchanges stay in lockstep.
+  void setVelocityTolerance(double rtol, int minIters) {
+    velTol_ = rtol > 0.0 ? rtol : 0.0;
+    velMinIters_ = minIters < 1 ? 1 : minIters;
+  }
+  long lastMomentumSweeps() const { return lastMomentumSweeps_; }
+  // Pressure-solve mean-removal scope: "all" (legacy, default) or "fine" (drop the interior-level
+  // / post-matvec nullspace projections — ~3x fewer global-reduction latency hits per Krylov
+  // iteration; validated by iteration-count parity, not bit-identical). See CutcellMG.
+  void setPressureMeanRemoval(bool all) { mg_.setMeanRemovalScope(all); }
   void setPressureIterations(int it) { presIters_ = it; }
   void setAdvection(bool on) { advect_ = on; }  // explicit high-order advection (default SOU)
   // High-order advection scheme for the (explicit, or deferred-correction) flux: 0 = second-order
@@ -916,6 +931,7 @@ class Solver {
   void step() {
     const double ts0 = phaseTick();
     tPredictor_ = tMomentum_ = tProjection_ = 0.0;
+    lastMomentumSweeps_ = 0;
     mg_.resetAllreduceCounters();
     // Multiphysics: refresh material properties / body forces from the current fields (frozen over
     // the step). No-op (byte-identical) when no closure is registered.
@@ -1497,9 +1513,8 @@ class Solver {
     // b = descale*(idiag*u^n - rho*Koren(u^k) + rho*FOU(u^k) + f - grad P^n) - inhom  (+ BC fold
     // brhs). The time base is u^n (Picard); the advecting velocity & advected field are the current
     // iterate u^k.
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    Kokkos::parallel_for(
-        "rhs", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+    ccFor3(
+        "rhs", C3{G, G, G}, C3{e.x - G, e.y - G, e.z - G},
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           double aK = 0.0, aF = 0.0;
@@ -1784,22 +1799,60 @@ class Solver {
         Kokkos::Max<double>(m));
     return m;
   }
+  // Shared momentum RB-GS loop: fixed velIters_ sweeps, or (velTol_ > 0) the tolerance stop —
+  // colour 0 plain, colour 1 via the fused max-increment kernel, stop once the increment has
+  // contracted to velTol_ of the first sweep's. The decision is rank-uniform under MPI (all ranks
+  // see the same global max), so per-sweep halo exchanges stay in lockstep.
+  template <class Fill, class Color, class ColorDu>
+  void velSweepLoop(Fill&& fill, Color&& sweepColor, ColorDu&& sweepColorDu) {
+    double du0 = 0.0;
+    int used = velIters_;
+    for (int it = 0; it < velIters_; ++it) {
+      fill();
+      sweepColor(0);
+      fill();
+      if (velTol_ > 0.0) {
+        double du = sweepColorDu(1);
+#ifdef PECLET_FLOW_MPI
+        if (distributed_) {
+          double gd = 0.0;
+          MPI_Allreduce(&du, &gd, 1, MPI_DOUBLE, MPI_MAX, comm_);
+          du = gd;
+        }
+#endif
+        if (it == 0)
+          du0 = du;
+        if (it + 1 >= velMinIters_ && du <= velTol_ * du0) {
+          used = it + 1;
+          break;
+        }
+      } else {
+        sweepColor(1);
+      }
+    }
+    lastMomentumSweeps_ += used;
+  }
+
   void smoothComp(int c) {
     if constexpr (Grid::collocated) {
       if (hasBc_) {  // collocated domain BC: the (all-fluid) IBM diffusion stencil + cell-centered
                      // wall
         // reflection ghosts refreshed each colour (explicit no-slip; no fold). Converges to the
         // wall value.
-        for (int it = 0; it < velIters_; ++it) {
-          fillVelGhostsTo(C[c].u, c, 0);
-          ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                              MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
-                              MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 0);
-          fillVelGhostsTo(C[c].u, c, 0);
-          ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                              MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
-                              MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 1);
-        }
+        velSweepLoop(
+            [&] { fillVelGhostsTo(C[c].u, c, 0); },
+            [&](int col) {
+              ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                                  MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
+                                  MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G,
+                                  col);
+            },
+            [&](int col) {
+              return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), MConst(C[c].AC),
+                                           MConst(C[c].AW), MConst(C[c].AE), MConst(C[c].AS),
+                                           MConst(C[c].AN), MConst(C[c].AB), MConst(C[c].AT),
+                                           CCConst(C[c].mask), e_, og_, G, col);
+            });
         return;
       }
     }
@@ -1810,16 +1863,19 @@ class Solver {
       // an immersed solid (cut-cell no-slip in the operator) and/or implicit advection (FOU upwind
       // in the stencil -> stable at large dt). The const-coeff fold smoothers below are all-fluid,
       // diffusion-only: they ignore the solid AND run advection explicitly (CFL-limited).
-      for (int it = 0; it < velIters_; ++it) {
-        fillVelGhostsTo(C[c].u, c, 0);
-        ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                            MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
-                            MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 0);
-        fillVelGhostsTo(C[c].u, c, 0);
-        ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                            MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
-                            MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 1);
-      }
+      velSweepLoop(
+          [&] { fillVelGhostsTo(C[c].u, c, 0); },
+          [&](int col) {
+            ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                                MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
+                                MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, col);
+          },
+          [&](int col) {
+            return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                                         MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
+                                         MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_,
+                                         og_, G, col);
+          });
       return;
     }
     if (hasBc_ &&
@@ -1839,12 +1895,15 @@ class Solver {
     if (hasBc_) {  // domain-BC (no immersed solid): CUDA's double const-coeff diff_k + dcorr fold
       const I3 e{e_.x, e_.y, e_.z}, og{0, 0, 0};
       const double beta = mu_, Ac = rho_ / dt_ + 6.0 * mu_;
-      for (int it = 0; it < velIters_; ++it) {
-        fillVelGhosts(c, 1);  // re-impose wall faces (fold) before each color
-        diffSmoothColor(C[c].u, CCConst(C[c].b), e, og, G, beta, Ac, 0, CCConst(bcDcorr_[c]));
-        fillVelGhosts(c, 1);
-        diffSmoothColor(C[c].u, CCConst(C[c].b), e, og, G, beta, Ac, 1, CCConst(bcDcorr_[c]));
-      }
+      velSweepLoop(
+          [&] { fillVelGhosts(c, 1); },  // re-impose wall faces (fold) before each color
+          [&](int col) {
+            diffSmoothColor(C[c].u, CCConst(C[c].b), e, og, G, beta, Ac, col, CCConst(bcDcorr_[c]));
+          },
+          [&](int col) {
+            return diffSmoothColorDu(C[c].u, CCConst(C[c].b), e, og, G, beta, Ac, col,
+                                     CCConst(bcDcorr_[c]));
+          });
       return;
     }
     if (useVelocityMg_) {  // IBM velocity multigrid: fine = sharp As_[c]; coarse op depends on the
@@ -1871,18 +1930,21 @@ class Solver {
           c);  // re-impose no-slip at solid (the masked solve leaves them at the pin value)
       return;
     }
-    for (int it = 0; it < velIters_;
-         ++it) {  // IBM / periodic: Robust-Scaled cut-cell stencil (float)
-      fillGhostsFaces(
-          C[c].u);  // 7-point smoother reads faces only -> the fused 1-kernel face fill suffices
-      ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                          MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
-                          MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 0);
-      fillGhostsFaces(C[c].u);
-      ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                          MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
-                          MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, 1);
-    }
+    // IBM / periodic: Robust-Scaled cut-cell stencil (float). The 7-point smoother reads faces
+    // only -> the fused 1-kernel face fill suffices.
+    velSweepLoop(
+        [&] { fillGhostsFaces(C[c].u); },
+        [&](int col) {
+          ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                              MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
+                              MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, col);
+        },
+        [&](int col) {
+          return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                                       MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
+                                       MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_,
+                                       og_, G, col);
+        });
   }
   // pressure ghost at domain faces for the incremental predictor's grad(P): zero-gradient (Neumann)
   // at every non-periodic face so grad(P) carries no spurious force there (the periodic fill
@@ -2949,6 +3011,9 @@ class Solver {
   double rho_ = 1.0, mu_ = 0.1, dt_ = 50.0;
   std::array<double, 3> f_{{0, 0, 0}};
   int velIters_ = 200, presIters_ = 20;
+  double velTol_ = 0.0;         // momentum tolerance stop (0 = legacy fixed-count loop)
+  int velMinIters_ = 2;
+  long lastMomentumSweeps_ = 0;  // sweeps actually run last step (summed over components/Picard)
   int pcgMaxit_ = 500;
   double pcgRtol_ = 1e-10;  // cut-cell pressure MG-PCG
   bool useChebyshev_ = false,
