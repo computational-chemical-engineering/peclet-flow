@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <Kokkos_Core.hpp>
 #include <memory>
 #include <vector>
@@ -97,6 +98,26 @@ inline void residualCutcell(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC
       });
 }
 
+// Residual over a box [rlo,rhi) minus a skip box [slo,shi) — the halo-overlapped form of
+// residualCutcell (interior first while the exchange is in flight, then the boundary shell).
+inline void residualCutcellBox(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC AE, FPC AS,
+                               FPC AN, FPC AB, FPC AT, C3 e, C3 rlo, C3 rhi, C3 slo, C3 shi) {
+  if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
+    return;
+  ccFor3(
+      "peclet::flow::cc_residual_box", rlo, rhi, KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+          return;  // inside the skip box (already done by the interior pass)
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const double Ax = (double)AC(i) * x(i) + (double)AE(i) * x(i + sx) +
+                          (double)AW(i) * x(i - sx) + (double)AN(i) * x(i + sy) +
+                          (double)AS(i) * x(i - sy) + (double)AT(i) * x(i + sz) +
+                          (double)AB(i) * x(i - sz);
+        r(i) = b(i) - Ax;
+      });
+}
+
 // average restriction (coarse = mean of ratio^3 fine children; mg_restrict_k) + trilinear
 // prolongation (added to fine; mg_prolong_k). Both over inner cells.
 inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int g, C3 cinner,
@@ -143,6 +164,25 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int g, C3
             (long)(ifx + g) + (long)(ify + g) * fext.x + (long)(ifz + g) * (long)fext.x * fext.y;
         fine(fi) += c0 * (1 - wz) + c1 * wz;
       });
+}
+
+// Env-gated MG diagnostics (host printf only, off unless PECLET_FLOW_MG_DEBUG is set):
+//   1 = level table (per-level global/local dims + coarsening ratio) at build time
+//   2 = + PCG/V-cycle residual history for the first PECLET_FLOW_MG_DEBUG_SOLVES (default 3) solves
+// Used to diagnose decomposition-dependent iteration counts; no effect on the solve itself.
+inline int mgDebugLevel() {
+  static const int lv = [] {
+    const char* e = std::getenv("PECLET_FLOW_MG_DEBUG");
+    return e ? std::atoi(e) : 0;
+  }();
+  return lv;
+}
+inline int mgDebugSolves() {
+  static const int n = [] {
+    const char* e = std::getenv("PECLET_FLOW_MG_DEBUG_SOLVES");
+    return e ? std::atoi(e) : 3;
+  }();
+  return n;
 }
 
 class CutcellMG {
@@ -206,6 +246,14 @@ class CutcellMG {
         break;  // nothing coarsens
       inner = next;
       cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
+    }
+    if (mgDebugLevel()) {
+      printf("[mg] init %dx%dx%d single-rank -> %d levels (requested %d)\n", nx, ny, nz,
+             (int)lv_.size(), nLevels);
+      for (int L = 0; L < (int)lv_.size(); ++L)
+        printf("[mg]  L%d dims %4dx%4dx%4d  ratio(%d,%d,%d)\n", L, lv_[L].inner.x, lv_[L].inner.y,
+               lv_[L].inner.z, lv_[L].ratio.x, lv_[L].ratio.y, lv_[L].ratio.z);
+      fflush(stdout);
     }
   }
 #ifdef PECLET_FLOW_MPI
@@ -334,6 +382,18 @@ class CutcellMG {
       // Next level's decomposition = this level's coarsened in place (nested; preserves rank order).
       curDec = curDec.coarsened(peclet::core::IVec<3>{ratio.x, ratio.y, ratio.z});
     }
+    if (mgDebugLevel() && rank == 0) {
+      printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %d)\n", gnx, gny, gnz, size,
+             (int)lv_.size(), nLevels);
+      C3 g{gnx, gny, gnz};
+      for (int L = 0; L < (int)lv_.size(); ++L) {
+        printf("[mg]  L%d global %4dx%4dx%4d  rank0 block %4dx%4dx%4d  ratio(%d,%d,%d)\n", L, g.x,
+               g.y, g.z, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z, lv_[L].ratio.x,
+               lv_[L].ratio.y, lv_[L].ratio.z);
+        g = C3{g.x / lv_[L].ratio.x, g.y / lv_[L].ratio.y, g.z / lv_[L].ratio.z};
+      }
+      fflush(stdout);
+    }
   }
 #endif
   int nLevels() const { return (int)lv_.size(); }
@@ -444,6 +504,19 @@ class CutcellMG {
     removeMean(l0, r);  // compatibility: project rhs/residual onto the range
     const double r0 = maxabs(l0, r);
     int it = 0;
+    // Env-gated convergence trace (PECLET_FLOW_MG_DEBUG>=2): |b|inf, r0 and the per-iteration
+    // residual, so a decomposition-dependent iteration count can be read as a rate (preconditioner
+    // quality) or a floor (round-off) instead of guessed at.
+    int dbgRank = 0;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      MPI_Comm_rank(comm_, &dbgRank);
+#endif
+    const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves() && dbgRank == 0;
+    if (trace)
+      printf("[mg] solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0, rtol,
+             pre, post, bottom);
+    ++dbgSolve_;
     // Breakdown guards: a non-finite recurrence scalar means the preconditioner or operator
     // produced NaN/Inf (should not happen — the guards fail safe rather than poisoning x with a
     // NaN alpha/beta and letting the projection silently corrupt every field downstream).
@@ -469,7 +542,10 @@ class CutcellMG {
         axpy(x, alpha, p);
         axpy(r, -alpha, Ap);
         removeMean(l0, r);
-        if (maxabs(l0, r) < rtol * r0) {
+        const double rn = maxabs(l0, r);
+        if (trace)
+          printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
+        if (rn < rtol * r0) {
           ++it;
           break;
         }
@@ -629,8 +705,39 @@ class CutcellMG {
       return;
     }
     smooth(lv, pre_, false);
-    residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                    FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, G);
+    // Refresh the halo before the residual. The smoother exchanges BEFORE each color sweep, so on
+    // return the ghosts are one color-update stale: the residual — and hence the restricted coarse
+    // rhs — is wrong on the block-boundary shell. That perturbation is proportional to the block
+    // SURFACE, so it made the V-cycle's convergence rate decomposition-dependent: fat blocks (few
+    // ranks) needed measurably more Krylov iterations than thin ones on the SAME grid (768x640x384
+    // genoa: 12 iters at 12-24 ranks vs 8.1 at 96; 256^3 workstation: 8/6.5/9 at np=1/8/24 -> a
+    // flat 4.0 with the refresh). Distributed: overlap the exchange with the interior residual
+    // (same interior/shell split as the smoother); single-rank: the periodic wrap copy.
+    if (!resFill_) {
+      residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                      FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, G);
+    } else
+#ifdef PECLET_FLOW_MPI
+        if (distributed_) {
+      const C3 lo{G + 1, G + 1, G + 1};
+      const C3 hi{lv.ext.x - G - 1, lv.ext.y - G - 1, lv.ext.z - G - 1};
+      lv.dev->exchangeBegin(lv.x);
+      residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
+                         FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lo, hi,
+                         C3{0, 0, 0}, C3{0, 0, 0});
+      lv.dev->exchangeEnd(lv.x);
+      applyOutflowGhost(lv.ext, lv.x);
+      residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
+                         FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext,
+                         C3{G, G, G}, C3{lv.ext.x - G, lv.ext.y - G, lv.ext.z - G}, lo, hi);
+    } else
+#endif
+    {
+      fill(lv, lv.x);
+      applyOutflowGhost(lv.ext, lv.x);
+      residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                      FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, G);
+    }
     Level& cs = lv_[L + 1];
     restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, G, cs.inner, lv.ratio);
     Kokkos::deep_copy(cs.x, 0.0);
@@ -1288,6 +1395,13 @@ class CutcellMG {
   // way). setMeanRemovalScope(true) restores the legacy every-level scope.
   bool meanRemovalAll_ = false;
   bool distributed_ = false;
+  int dbgSolve_ = 0;  // solve counter for the env-gated convergence trace (mgDebugLevel() >= 2)
+  // Halo refresh before the V-cycle's residual (see vcycle). ON by default — the legacy
+  // stale-ghost residual is kept behind PECLET_FLOW_MG_RESFILL=0 purely as a benchmark ablation.
+  bool resFill_ = [] {
+    const char* e = std::getenv("PECLET_FLOW_MG_RESFILL");
+    return !e || std::atoi(e) != 0;
+  }();
   double allreduceTime_ = 0.0;
   long allreduceCount_ = 0;
   // --- decomposition-agnostic algebraic bottom solve (GraphAMG) ---
