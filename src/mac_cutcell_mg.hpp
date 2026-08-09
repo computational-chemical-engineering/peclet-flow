@@ -1225,9 +1225,9 @@ class CutcellMG {
         });
   }
 
-  // Mean-removal scope. "all" (legacy default): project the nullspace out at every V-cycle level,
+  // Mean-removal scope. "all" (legacy): project the nullspace out at every V-cycle level,
   // after every matvec and on every residual update — ~10 extra MPI_Allreduce latency hits per
-  // Krylov iteration whose only role is FP hygiene. "fine" keeps the removals that carry the
+  // Krylov iteration whose only role is FP hygiene. "fine" (DEFAULT) keeps the removals that carry the
   // algorithm (the rhs/residual projections + the fine-level V-cycle exit + the final iterate) and
   // drops the interior-level ones: A maps mean-free vectors to mean-free vectors, so the Krylov
   // space never sees the dropped components (they lie in the nullspace and are removed from the
@@ -1283,7 +1283,10 @@ class CutcellMG {
   int pre_ = 2, post_ = 2, bottom_ = 4;
   int bc_[6] = {0, 0, 0, 0, 0, 0};
   bool hasBC_ = false, removeMean_ = true, hasOutflow_ = false;
-  bool meanRemovalAll_ = true;  // see setMeanRemovalScope
+  // Default "fine" (measured winner of the at-scale ablation, Snellius H100 8+16 GPUs: 5.5%
+  // faster than "all" with identical iteration counts; single-rank the reductions are free either
+  // way). setMeanRemovalScope(true) restores the legacy every-level scope.
+  bool meanRemovalAll_ = false;
   bool distributed_ = false;
   double allreduceTime_ = 0.0;
   long allreduceCount_ = 0;

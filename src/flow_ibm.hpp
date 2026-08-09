@@ -150,9 +150,9 @@ class Solver {
     velMinIters_ = minIters < 1 ? 1 : minIters;
   }
   long lastMomentumSweeps() const { return lastMomentumSweeps_; }
-  // Pressure-solve mean-removal scope: "all" (legacy, default) or "fine" (drop the interior-level
-  // / post-matvec nullspace projections — ~3x fewer global-reduction latency hits per Krylov
-  // iteration; validated by iteration-count parity, not bit-identical). See CutcellMG.
+  // Pressure-solve mean-removal scope: "fine" (default — drops the interior-level / post-matvec
+  // nullspace projections, ~3x fewer global-reduction latency hits per Krylov iteration; measured
+  // winner of the at-scale ablation, iteration counts identical) or "all" (legacy). See CutcellMG.
   void setPressureMeanRemoval(bool all) { mg_.setMeanRemovalScope(all); }
   void setPressureIterations(int it) { presIters_ = it; }
   void setAdvection(bool on) { advect_ = on; }  // explicit high-order advection (default SOU)

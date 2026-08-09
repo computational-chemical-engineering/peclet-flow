@@ -194,12 +194,12 @@ static void bind_solver(nb::module_& m, const char* name) {
             s.setPressureMeanRemoval(scope == "all");
           },
           nb::arg("scope"),
-          "Nullspace (mean) removal scope in the pressure solve: 'all' (legacy default — every "
-          "V-cycle level + after every matvec) or 'fine' (only the projections the Krylov "
-          "iteration needs: rhs/residual, the fine-level V-cycle exit, the final iterate) — "
-          "~3x fewer global-reduction latency hits per iteration for multi-node runs. Iteration "
-          "counts stay flat (A preserves mean-freeness); results equal to 'all' within solver "
-          "tolerance, not bit-identical.")
+          "Nullspace (mean) removal scope in the pressure solve: 'fine' (DEFAULT — only the "
+          "projections the Krylov iteration needs: rhs/residual, the fine-level V-cycle exit, the "
+          "final iterate; ~3x fewer global-reduction latency hits per iteration, the measured "
+          "winner of the multi-GPU ablation) or 'all' (legacy — every V-cycle level + after every "
+          "matvec). Iteration counts are identical (A preserves mean-freeness); results equal "
+          "within solver tolerance, not bit-identical.")
       .def("set_pressure_graph_amg", &S::setPressureGraphAmg, nb::arg("on"),
            "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
            "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "
