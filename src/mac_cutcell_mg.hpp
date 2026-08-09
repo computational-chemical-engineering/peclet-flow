@@ -738,12 +738,15 @@ class CutcellMG {
     // genoa: 12 iters at 12-24 ranks vs 8.1 at 96; 256^3 workstation: 8/6.5/9 at np=1/8/24 -> a
     // flat 4.0 with the refresh). Distributed: overlap the exchange with the interior residual
     // (same interior/shell split as the smoother); single-rank: the periodic wrap copy.
-    if (!resFill_) {
+    auto fullResidual = [&] {
       residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
                       FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, G);
-    } else
+    };
+    if (!resFill_) {  // PECLET_FLOW_MG_RESFILL=0: the legacy stale-ghost residual (ablation only)
+      fullResidual();
+    }
 #ifdef PECLET_FLOW_MPI
-        if (distributed_) {
+    else if (distributed_) {
       const C3 lo{G + 1, G + 1, G + 1};
       const C3 hi{lv.ext.x - G - 1, lv.ext.y - G - 1, lv.ext.z - G - 1};
       lv.dev->exchangeBegin(lv.x);
@@ -758,10 +761,9 @@ class CutcellMG {
     } else
 #endif
     {
-      fill(lv, lv.x);
+      fill(lv, lv.x);  // single-rank: the periodic wrap copy
       applyOutflowGhost(lv.ext, lv.x);
-      residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                      FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, G);
+      fullResidual();
     }
     Level& cs = lv_[L + 1];
     restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, G, cs.inner, lv.ratio);
