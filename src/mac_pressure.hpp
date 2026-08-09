@@ -69,9 +69,8 @@ inline void cutcellSmoothColor(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, O
   // parity) — bit-identical (same-colour cells are independent); device keeps MDRange untouched.
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
     const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
-    Kokkos::parallel_for(
-        "peclet::flow::cc_smooth", Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi),
-        KOKKOS_LAMBDA(long t) {
+    const long cells = (long)nyi * nzi * (e.x - 2 * g);
+    auto pencil = KOKKOS_LAMBDA(long t) {
           const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
           const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
           const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
@@ -84,7 +83,14 @@ inline void cutcellSmoothColor(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, O
                              AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
             phi(i) = (b(i) - s) / ac;
           }
-        });
+    };
+    if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      for (long t = 0; t < (long)nyi * nzi; ++t)
+        pencil(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::cc_smooth",
+                         Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
     return;
   }
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
@@ -121,9 +127,8 @@ inline void cutcellSmoothColorBox(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE
     // Host line-sweep form of the box sweep (see cutcellSmoothColor); the (ly,lz)-level skip test
     // hoists out of the x-loop, the x-range skip stays per cell.
     const int nyi = rhi.y - rlo.y, nzi = rhi.z - rlo.z;
-    Kokkos::parallel_for(
-        "peclet::flow::cc_smooth_box", Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi),
-        KOKKOS_LAMBDA(long t) {
+    const long cells = (long)nyi * nzi * (rhi.x - rlo.x);
+    auto pencil = KOKKOS_LAMBDA(long t) {
           const int ly = rlo.y + (int)(t % nyi), lz = rlo.z + (int)(t / nyi);
           const bool yzSkip = ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z;
           const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
@@ -139,7 +144,14 @@ inline void cutcellSmoothColorBox(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE
                              AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
             phi(i) = (b(i) - s) / ac;
           }
-        });
+    };
+    if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      for (long t = 0; t < (long)nyi * nzi; ++t)
+        pencil(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::cc_smooth_box",
+                         Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
     return;
   }
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;

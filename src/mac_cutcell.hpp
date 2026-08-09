@@ -9,6 +9,7 @@
 #ifndef PECLET_FLOW_MAC_CUTCELL_HPP
 #define PECLET_FLOW_MAC_CUTCELL_HPP
 
+#include <cstdlib>
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 #include <type_traits>
@@ -101,6 +102,33 @@ inline void buildOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ex
       });
 }
 
+// HOST-only serial cutoff: below this many cells an OpenMP launch costs more than the work it does
+// (fork/join is ~20-30 us at 24 threads), so run the loop sequentially instead. That is
+// BIT-IDENTICAL for elementwise kernels and for colored sweeps (same-color cells are independent,
+// so the order within a sweep is irrelevant); reductions are deliberately NOT cut over — that would
+// change the FP summation order with the block size, and the multi-rank bit-exactness contract is
+// worth more than the microseconds. The device path never sees this (hostRunSerial is false there).
+//
+// MEASURED (5965WX, 24 threads, per-level V-cycle timer): the win lives almost entirely in the MG's
+// BOTTOM level, which fires ~24 trivial launches per V-cycle — 64^3/rank L4(4^3): 0.018 -> 0.007 s
+// per 50 V-cycles, ~8% of the whole V-cycle; 128^3/rank ~1.5%; 256^3/rank (the fat-rank target
+// size) ~0.2%, i.e. below run-to-run noise. A LARGER cutoff back-fires (131072 serializes levels
+// with real work: 64^3 projection 16.6 -> 20.6 ms/step), so keep it small.
+inline long hostSerialCellCutoff() {
+  static const long n = [] {
+    const char* e = std::getenv("PECLET_FLOW_HOST_SERIAL_CELLS");
+    return e ? std::atol(e) : 8192L;
+  }();
+  return n;
+}
+// True when a host launch of `cells` cells should run sequentially instead (always false on device).
+inline bool hostRunSerial(long cells) {
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>)
+    return cells > 0 && cells < hostSerialCellCutoff();
+  else
+    return false;
+}
+
 // Launch a 3-D elementwise kernel with a HOST-TUNED MDRange tiling: one full-x row per tile (the
 // Kokkos host default tiles are tiny, wrecking streaming locality — measured 5.6x on the RB-GS
 // smoother when its loop went x-contiguous). The lambda is passed through UNCHANGED, and the
@@ -111,6 +139,13 @@ inline void ccFor3(const char* name, C3 lo, C3 hi, F f) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    if (hostRunSerial((long)(hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z))) {
+      for (int lz = lo.z; lz < hi.z; ++lz)  // too small to be worth a fork/join (bit-identical)
+        for (int ly = lo.y; ly < hi.y; ++ly)
+          for (int lx = lo.x; lx < hi.x; ++lx)
+            f(lx, ly, lz);
+      return;
+    }
     Kokkos::parallel_for(
         name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x - lo.x, 2, 2}), f);
   } else {

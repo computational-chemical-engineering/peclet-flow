@@ -692,7 +692,32 @@ class CutcellMG {
   }
 
  public:  // (public for nvcc extended-lambda rule)
+  // Per-level V-cycle wall time (PECLET_FLOW_MG_DEBUG>=3; HOST backends only — no device fence, so
+  // on CUDA the numbers are launch times, not kernel times). Answers "how much of the solve is
+  // spent on the small coarse levels", i.e. whether coarse-level launch overhead is worth chasing.
   void vcycle(int L, bool sym) {
+    if (mgDebugLevel() >= 3) {
+      const auto t0 = std::chrono::steady_clock::now();
+      vcycleImpl(L, sym);
+      lvTime_.resize(lv_.size(), 0.0);
+      lvTime_[L] += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      if (L == 0 && ++lvCycles_ % 50 == 0) {
+        double tot = 0;
+        for (std::size_t i = 0; i < lvTime_.size(); ++i)
+          tot += (i + 1 < lvTime_.size() ? lvTime_[i] - lvTime_[i + 1] : lvTime_[i]);
+        printf("[mg] level times over %d V-cycles (total %.3f s):\n", lvCycles_, tot);
+        for (std::size_t i = 0; i < lvTime_.size(); ++i) {
+          const double self = (i + 1 < lvTime_.size() ? lvTime_[i] - lvTime_[i + 1] : lvTime_[i]);
+          printf("[mg]   L%zu %5dx%5dx%5d  self %7.3f s (%5.1f%%)\n", i, lv_[i].inner.x,
+                 lv_[i].inner.y, lv_[i].inner.z, self, 100.0 * self / (tot + 1e-30));
+        }
+        fflush(stdout);
+      }
+      return;
+    }
+    vcycleImpl(L, sym);
+  }
+  void vcycleImpl(int L, bool sym) {
     Level& lv = lv_[L];
     if (L + 1 == (int)lv_.size()) {
       if (useGraphAmgBottom_)
@@ -1396,6 +1421,8 @@ class CutcellMG {
   bool meanRemovalAll_ = false;
   bool distributed_ = false;
   int dbgSolve_ = 0;  // solve counter for the env-gated convergence trace (mgDebugLevel() >= 2)
+  std::vector<double> lvTime_;  // per-level V-cycle wall time (mgDebugLevel() >= 3)
+  int lvCycles_ = 0;
   // Halo refresh before the V-cycle's residual (see vcycle). ON by default — the legacy
   // stale-ghost residual is kept behind PECLET_FLOW_MG_RESFILL=0 purely as a benchmark ablation.
   bool resFill_ = [] {
