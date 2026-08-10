@@ -694,11 +694,10 @@ NB_MODULE(_flow, m) {
         int rank = 0, size = 1;
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
         MPI_Comm_size(MPI_COMM_WORLD, &size);
-        // Align identically to Solver::initMpi so this local block size matches the solver's dec_
-        // (the pressure MG needs an aligned, coarsenable decomposition).
-        peclet::core::decomp::BlockDecomposer<3> dec(
-            static_cast<std::size_t>(size), peclet::core::IVec<3>{gnx, gny, gnz},
-            peclet::flow::CutcellMG::coarsenAlignment(gnx, gny, gnz));
+        // Derive it through the SAME factory Solver::initMpi uses, so this local block size matches
+        // the solver's dec_ under either decomposition mode (see set_decomposition_levels).
+        auto dec = peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size), gnx, gny,
+                                                          gnz);
         auto blk = dec.block(static_cast<std::size_t>(rank));
         std::vector<int> origin{(int)blk.origin[0], (int)blk.origin[1], (int)blk.origin[2]};
         std::vector<int> bsize{(int)blk.size[0], (int)blk.size[1], (int)blk.size[2]};
@@ -708,6 +707,24 @@ NB_MODULE(_flow, m) {
       "Return this MPI rank's ORB block of the global (gnx,gny,gnz) grid as (origin, size), each a "
       "length-3 list [x,y,z]. Use it to slice the global SDF into this rank's local block for a "
       "distributed Solver (see Solver.init_mpi). MPI_Init is called if needed.");
+
+  m.def(
+      "set_decomposition_levels",
+      [](int levels) { peclet::flow::CutcellMG::setDecompositionLevels(levels); },
+      nb::arg("levels"),
+      "Choose how the shared MPI decomposition is built. 0 (default) = the aligned ORB: split "
+      "positions on the FINE grid are snapped to a power of two (capped at 16, i.e. 5 nested "
+      "multigrid levels). levels >= 2 = COARSE-FIRST: build the ORB on the grid coarsened "
+      "levels-1 times and refine the partition upward, so every block is a multiple of the "
+      "coarsening factor BY CONSTRUCTION and the hierarchy nests for the full requested depth. "
+      "Coarse-first also balances better: the aligned ORB picks a split and then rounds it (a "
+      "balanced 96|96 can round to 128|64), whereas on the coarse grid one cell IS the quantum, so "
+      "the rank count no longer has to be a power of two -- what matters is that the COARSE grid "
+      "divides among the ranks. Backs off automatically if the coarse grid would have fewer cells "
+      "than ranks. CALL BEFORE mpi_block() AND Solver.init_mpi(): both derive the same partition "
+      "from this setting and must agree. Env override: PECLET_FLOW_DECOMP_LEVELS.");
+  m.def("decomposition_levels", [] { return peclet::flow::CutcellMG::decompositionLevels(); },
+        "Current decomposition mode (0 = aligned ORB, >= 2 = coarse-first with that depth).");
 
   m.attr("has_mpi") = true;
 #else

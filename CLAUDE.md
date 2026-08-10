@@ -169,6 +169,35 @@ operator. Three outer drivers wrap that V-cycle — **select one per solver**:
 - Coarse-operator mode: `set_solid(..., pressure_coarse="rediscretized")` (default; also `"galerkin"` /
   `"const"`). `set_pressure_multigrid(on, levels)` sets the multigrid depth (`levels=1` == pure RB-GS).
 - `set_pressure_warmstart(True)` seeds each solve from the previous step's φ (opt-in, off by default).
+
+**Multigrid depth vs the decomposition (multi-rank).** An axis coarsens only while it stays even
+(`d % 2 == 0 && d / 2 >= 2`), **per axis independently** — so semi-coarsening is automatic (the long
+axis keeps halving after the short ones stop) and an axis's usable depth is its number of factors of
+two, not its size. **An odd dimension never coarsens at all**: measured on one GPU at 384×128×GNZ,
+`GNZ=256` needs 5.0 pressure iterations/step and `GNZ=255` needs 16.2 (3.2× the step time). Under
+MPI there is a second gate — a level coarsens an axis only if *every rank's block* is even on it, so
+the achievable depth is set by the per-rank block, not the global grid.
+
+Two ways to build a decomposition that survives that, selected by
+`flow.set_decomposition_levels(L)` (or `PECLET_FLOW_DECOMP_LEVELS`), which **must be set before
+`mpi_block()` and `Solver.init_mpi()` — both derive the same partition from it**:
+
+| `L` | how the level-0 partition is built |
+|---|---|
+| `0` (default) | **aligned ORB** — split positions chosen on the fine grid, then snapped to a power of two (capped at 16 = 5 nested levels) |
+| `>= 2` | **coarse-first** — decompose the grid coarsened `L-1` times, then `refined()` the partition upward; blocks are multiples of the coarsening factor by construction, so the hierarchy nests for the full depth |
+
+Coarse-first also balances better, because snapping can round a balanced split into an unbalanced one
+while on the coarse grid one cell *is* the quantum. Measured, 480×80×160 with 6 levels requested
+(max block / min block): np=4 1.143→1.000, np=7 1.125→1.029, np=12 1.333→1.038, np=16 1.333→1.000,
+**np=24 1.500→1.000**. Note none of these rank counts is a power of two and several are the *best*
+cases — what matters is that the coarse grid divides among the ranks, not that N is 2^k.
+
+Depth and balance genuinely trade off (each extra level doubles the quantum), so `decomposition()`
+builds each candidate depth and **measures** its imbalance, taking the deepest that stays within
+`PECLET_FLOW_DECOMP_MAX_IMBALANCE` (default 1.05) and otherwise falling back to the aligned ORB. The
+search is a pure function of (ranks, grid, levels), so every rank reaches the same answer with no
+communication.
 - Validated against Zick & Homsy SC-sphere drag. Design + benchmarks:
   [`doc/flow_multigrid_plan.md`](doc/flow_multigrid_plan.md).
 

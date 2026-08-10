@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <Kokkos_Core.hpp>
 #include <memory>
 #include <vector>
@@ -298,6 +299,95 @@ class CutcellMG {
     return a;
   }
 
+  // ---- coarse-first ("decompose coarse, refine upward") decomposition ---------------------------
+  // Requested hierarchy depth for the LEVEL-0 DECOMPOSITION: 0 (default) = the legacy aligned-ORB
+  // route above; L >= 2 = build the ORB on the grid coarsened L-1 times and refine the partition
+  // upward, which guarantees L nested levels and balances on the coarse grid instead of snapping
+  // fine splits afterwards. Read once from PECLET_FLOW_DECOMP_LEVELS, overridable programmatically.
+  // MUST be set before the decomposition is built (i.e. before mpi_block()/init_mpi), because all
+  // three call sites — mpi_block(), IbmSolver::initMpi and this class — derive the SAME partition
+  // from it and would otherwise disagree about the block layout.
+  static int& decompositionLevelsRef() {
+    static int v = [] {
+      const char* e = std::getenv("PECLET_FLOW_DECOMP_LEVELS");
+      return e ? std::atoi(e) : 0;
+    }();
+    return v;
+  }
+  static int decompositionLevels() { return decompositionLevelsRef(); }
+  static void setDecompositionLevels(int levels) { decompositionLevelsRef() = levels; }
+
+  // Per-axis coarsening factor a depth-`levels` hierarchy will actually apply: 2^(levels-1), bounded
+  // by that axis's factors of two (an odd axis never coarsens, so its factor stays 1).
+  static peclet::core::IVec<3> refineFactor(int gnx, int gny, int gnz, int levels) {
+    auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
+    C3 gs{gnx, gny, gnz};
+    peclet::core::IVec<3> r{1, 1, 1};
+    for (int L = 1; L < levels; ++L) {
+      if (can(gs.x)) { r[0] *= 2; gs.x /= 2; }
+      if (can(gs.y)) { r[1] *= 2; gs.y /= 2; }
+      if (can(gs.z)) { r[2] *= 2; gs.z /= 2; }
+    }
+    return r;
+  }
+
+  // THE shared level-0 decomposition. Every call site must go through this so the solver's block,
+  // mpi_block()'s sizing and the MG's level 0 cannot drift apart.
+  static peclet::core::decomp::BlockDecomposer<3> decomposition(std::size_t numBlocks, int gnx,
+                                                                int gny, int gnz) {
+    const int levels = decompositionLevels();
+    if (levels < 2)
+      return peclet::core::decomp::BlockDecomposer<3>(numBlocks, peclet::core::IVec<3>{gnx, gny, gnz},
+                                                      coarsenAlignment(gnx, gny, gnz));
+    // Depth and load balance pull against each other: each extra level doubles the quantum on every
+    // axis that still coarsens, and a partition built on the coarse grid can only place a split on a
+    // coarse-cell boundary. So rather than guess a granularity, BUILD each candidate and measure its
+    // imbalance: take the deepest one that stays within budget, else keep the legacy aligned ORB.
+    // The whole search is a pure function of (numBlocks, grid, levels) — every rank computes the
+    // same answer without communicating.
+    const double maxImbalance = [] {
+      const char* e = std::getenv("PECLET_FLOW_DECOMP_MAX_IMBALANCE");
+      const double v = e ? std::atof(e) : 1.05;
+      return v > 1.0 ? v : 1.05;
+    }();
+    auto imbalanceOf = [](const peclet::core::decomp::BlockDecomposer<3>& d) {
+      std::size_t hi = 0, lo = std::numeric_limits<std::size_t>::max();
+      for (const auto& s : d.sizes()) {
+        const std::size_t n = static_cast<std::size_t>(s[0]) * static_cast<std::size_t>(s[1]) *
+                              static_cast<std::size_t>(s[2]);
+        hi = n > hi ? n : hi;
+        lo = n < lo ? n : lo;
+      }
+      return lo ? static_cast<double>(hi) / static_cast<double>(lo)
+                : std::numeric_limits<double>::infinity();
+    };
+    for (int L = levels; L >= 2; --L) {
+      const peclet::core::IVec<3> r = refineFactor(gnx, gny, gnz, L);
+      if (r[0] == 1 && r[1] == 1 && r[2] == 1)
+        break;  // nothing coarsens on any axis — the aligned ORB is all there is
+      const std::size_t cells = static_cast<std::size_t>(gnx / r[0]) *
+                                static_cast<std::size_t>(gny / r[1]) *
+                                static_cast<std::size_t>(gnz / r[2]);
+      if (cells < numBlocks)
+        continue;  // a coarse grid thinner than the rank count would hand someone an empty block
+      // Decompose the COARSE grid — telling the ORB each coarse cell's true extent, so it picks the
+      // same split axes the fine grid would — then refine the partition upward. Blocks come out as
+      // exact multiples of r, so every level nests for the full depth.
+      peclet::core::decomp::BlockDecomposer<3> coarse;
+      coarse.init(numBlocks, peclet::core::IVec<3>{gnx / r[0], gny / r[1], gnz / r[2]},
+                  peclet::core::IVec<3>{1, 1, 1}, r);
+      peclet::core::decomp::BlockDecomposer<3> fine = coarse.refined(r);
+      if (imbalanceOf(fine) <= maxImbalance) {
+        if (mgDebugLevel())
+          printf("[mg] decomposition: coarse-first depth %d (refine %dx%dx%d, imbalance %.3f)\n", L,
+                 r[0], r[1], r[2], imbalanceOf(fine));
+        return fine;
+      }
+    }
+    return peclet::core::decomp::BlockDecomposer<3>(numBlocks, peclet::core::IVec<3>{gnx, gny, gnz},
+                                                    coarsenAlignment(gnx, gny, gnz));
+  }
+
   void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm,
                const peclet::core::decomp::BlockDecomposer<3>* dec0 = nullptr) {
     lv_.clear();
@@ -322,8 +412,7 @@ class CutcellMG {
     if (dec0) {
       curDec = *dec0;  // solver's shared decomposition (built aligned; see flow_ibm initMpi)
     } else {
-      curDec.init(static_cast<std::size_t>(size), peclet::core::IVec<3>{gs.x, gs.y, gs.z},
-                  coarsenAlignment(gnx, gny, gnz));
+      curDec = decomposition(static_cast<std::size_t>(size), gs.x, gs.y, gs.z);
     }
     for (int L = 0; L < nLevels; ++L) {
       Level v;
