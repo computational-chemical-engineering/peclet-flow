@@ -169,6 +169,16 @@ operator. Three outer drivers wrap that V-cycle — **select one per solver**:
 - Coarse-operator mode: `set_solid(..., pressure_coarse="rediscretized")` (default; also `"galerkin"` /
   `"const"`). `set_pressure_multigrid(on, levels)` sets the multigrid depth (`levels=1` == pure RB-GS).
 - `set_pressure_warmstart(True)` seeds each solve from the previous step's φ (opt-in, off by default).
+- `set_pressure_bottom("smoother" | "auto" | "agglomerated")` — coarse-level solve. A V-cycle is
+  domain-independent only if its coarsest level is effectively solved, and the hierarchy cannot always
+  get there (§1.1/1.2 of [`../docs/DECOMPOSITION_AND_MULTIGRID.md`](../docs/DECOMPOSITION_AND_MULTIGRID.md)).
+  `"auto"` agglomerates the coarsest level into a global operator (keyed by global cell id, so it is
+  decomposition-independent — np=6 vs np=1 to 4.5e-16) and solves it exactly whenever that grid
+  exceeds `PECLET_FLOW_AGGLOM_EXTENT` (4) cells on any axis. Measured, 2048×64×64 channel: 4 levels
+  13.5 → 4.0 iters/step, 6 levels 6.0 → 4.0 (91 → 69.5 ms) — better than full geometric depth (4.4,
+  77.2 ms). **Default is `"smoother"`**: on the cut-cell `random_spheres` regression the agglomerated
+  bottom makes iterations *worse* (+41 %), which is not yet understood, so `"auto"` is opt-in and
+  right for all-fluid domain-BC problems.
 
 **Multigrid depth vs the decomposition (multi-rank).** An axis coarsens only while it stays even
 (`d % 2 == 0 && d / 2 >= 2`), **per axis independently** — so semi-coarsening is automatic (the long
