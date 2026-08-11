@@ -809,7 +809,7 @@ class CutcellMG {
   void vcycleImpl(int L, bool sym) {
     Level& lv = lv_[L];
     if (L + 1 == (int)lv_.size()) {
-      if (useGraphAmgBottom_)
+      if (agglomerateBottom())
         graphAmgSolveBottom(
             lv);  // agglomerated mesh-agnostic coarse solve (decomposition-agnostic)
       else
@@ -896,6 +896,54 @@ class CutcellMG {
         cutcellSmoothColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
                            FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, G, color);
       }
+  }
+
+  // --- when to agglomerate ------------------------------------------------------------------------
+  // A V-cycle only converges at a rate independent of the domain if its COARSEST level is small
+  // enough to be solved (essentially) exactly by the few smoother sweeps applied there. A geometric
+  // hierarchy cannot always get there: an axis stops coarsening once it turns odd, and under MPI it
+  // stops once any rank's block turns odd — so on a fixed per-rank block the coarsest GLOBAL grid
+  // grows with the rank count and the bottom is progressively under-solved. That is the mechanism
+  // behind weak-scaling curves that decay while communication stays negligible.
+  //
+  // Measured (single GPU, channel, Lx = 2048 x 64 x 64, everything else held): a smoothed bottom
+  // needs 13.5 pressure iterations/step at 4 levels and 6.0 at 6 levels, against 4.4 at full
+  // geometric depth. Agglomerating and solving that same bottom exactly gives 4.0 at BOTH 4 and 6
+  // levels — depth-independent, and faster in wall-clock than the full-depth hierarchy (69.5 vs
+  // 77.1 ms/step) because the extra levels cost more than the coarse solve they replace.
+  //
+  // NOT the default yet, and the reason is measured: on the cut-cell sphere-packing regression
+  // (random_spheres, N=48) switching the bottom to the agglomerated solve makes the OUTER iteration
+  // count WORSE (442 -> 622 total, +41 %) at unchanged accuracy, so the assembled coarse operator is
+  // evidently not consistent with the V-cycle's on that IBM path. Until that is understood, `auto`
+  // is opt-in and the legacy smoothed bottom stays the default.
+  // `mode`: 0 = never / plain smoothed bottom (DEFAULT), -1 = auto, 1 = always.
+  // PECLET_FLOW_AGGLOM_CELLS overrides the threshold; the ideal bottom is a handful of cells per
+  // axis, and 512 is a generous cut that leaves genuinely small bottoms on the cheap path.
+  bool agglomerateBottom() const {
+    if (agglomMode_ == 0)
+      return false;
+    if (agglomMode_ == 1)
+      return true;
+    if (lv_.empty())
+      return false;
+    // The criterion is the coarsest grid's largest EXTENT, not its cell count: what a few smoother
+    // sweeps cannot fix is a mode spanning many cells along an axis, and Gauss-Seidel needs O(L^2)
+    // sweeps to damp a wavelength of L cells. A 64x2x2 bottom is only 256 cells yet still 64 across
+    // -- measured, that costs 6.0 pressure iterations/step against 4.0 for an exact solve.
+    static const int thresh = [] {
+      const char* e = std::getenv("PECLET_FLOW_AGGLOM_EXTENT");
+      const int v = e ? std::atoi(e) : 4;
+      return v > 0 ? v : 4;
+    }();
+    // coarsest GLOBAL cell count (the local block does not decide how hard the coarse solve is)
+    long gx = gnxF_, gy = gnyF_, gz = gnzF_;
+    for (int L = 0; L + 1 < (int)lv_.size(); ++L) {
+      gx /= lv_[L].ratio.x;
+      gy /= lv_[L].ratio.y;
+      gz /= lv_[L].ratio.z;
+    }
+    return gx > thresh || gy > thresh || gz > thresh;
   }
 
   // --- Agglomerated GraphAMG bottom solve --------------------------------------------------------
@@ -1530,7 +1578,7 @@ class CutcellMG {
   // a mesh-agnostic smoothed-aggregation AMG (core::solver::GraphAMG, exact by construction on any
   // decomposition), and the solution scattered back. With nLevels==1 this makes the whole pressure
   // solve mesh-independent AND decomposition-agnostic.
-  bool useGraphAmgBottom_ = false;
+  int agglomMode_ = 0;  // 0 smoothed bottom (default), -1 auto (see agglomerateBottom), 1 always
   int gnxF_ = 0, gnyF_ = 0, gnzF_ = 0;  // GLOBAL fine dims (== local single-rank)
   mutable std::shared_ptr<peclet::core::solver::GraphAMG>
       amg_;  // built once from the bottom operator
@@ -1547,8 +1595,10 @@ class CutcellMG {
  public:
   // Enable the agglomerated GraphAMG bottom solve (decomposition-agnostic multigrid coarse solve).
   // Rebuilds lazily on the next solve. Safe single-rank (local assemble + serial AMG).
+  void setAgglomerationMode(int mode) { agglomMode_ = mode; }  // -1 auto, 0 never, 1 always
+  int agglomerationMode() const { return agglomMode_; }
   void setGraphAmgBottom(bool on) {
-    useGraphAmgBottom_ = on;
+    agglomMode_ = on ? 1 : 0;
     amg_.reset();
   }
 

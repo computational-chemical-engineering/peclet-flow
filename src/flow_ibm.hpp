@@ -186,6 +186,13 @@ class Solver {
   // decomposition-agnostic, so multilevel convergence works under a WEIGHTED ORB (where the
   // geometric coarse levels can't cleanly coarsen). Applied at the next set_solid / geometry
   // rebuild.
+  // Coarse-level (bottom) solve policy: 0 smoothed bottom (default), -1 auto (agglomerate exactly
+  // when the geometric hierarchy cannot reach a small enough coarsest grid), 1 always. See CutcellMG.
+  void setPressureBottomMode(int mode) {
+    pressAgglomMode_ = mode;
+    if (cutcellPressure_)
+      mg_.setAgglomerationMode(mode);
+  }
   void setPressureGraphAmg(bool on) {
     pressGraphAmg_ = on;
     if (cutcellPressure_)
@@ -920,7 +927,9 @@ class Solver {
       mg_.setBoundaryConditions(
           bc_);  // per-level wall openness + null-space gating (no-op if periodic)
       mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), 1.0, 1.0, 1.0);
-      mg_.setGraphAmgBottom(pressGraphAmg_);  // decomposition-agnostic algebraic coarse solve
+      // Coarse-solve policy: an explicit set_pressure_graph_amg(True) forces agglomeration,
+      // otherwise the mode set by set_pressure_bottom (default auto) decides.
+      mg_.setAgglomerationMode(pressGraphAmg_ ? 1 : pressAgglomMode_);
       Kokkos::deep_copy(phi_, 0.0);
       Kokkos::deep_copy(P_, 0.0);
     }
@@ -2858,7 +2867,7 @@ class Solver {
                             // the wrap across non-periodic faces and pcgAmg keeps the
                             // mean only when the operator is singular)
     if (cutcellPressure_)   // MG already built (set_solid ran) -> apply now
-      mg_.setGraphAmgBottom(pressGraphAmg_);
+      mg_.setAgglomerationMode(1);
     useChebyshev_ = false;  // PCG, not Chebyshev (diverges on the high w_f ratio)
     chebBoundsSet_ = false;
   }
@@ -3019,7 +3028,8 @@ class Solver {
   int chebMaxit_ = 120;
   double chebRtol_ = 1e-9, chebA_ = 0.0, chebB_ = 0.0;
   int nLevels_ = 4;             // multigrid depth (CUDA default; set_pressure_multigrid)
-  bool pressGraphAmg_ = false;  // agglomerated GraphAMG bottom solve (decomposition-agnostic)
+  bool pressGraphAmg_ = false;
+  int pressAgglomMode_ = 0;  // coarse-solve policy: 0 smoothed (default), -1 auto, 1 always
   long lastPressureIters_ = 0;
   CutcellMG mg_;
   // --- multi-rank (MPI) state, gated (single-GPU module never links MPI -> byte-identical when

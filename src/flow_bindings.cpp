@@ -200,6 +200,26 @@ static void bind_solver(nb::module_& m, const char* name) {
           "winner of the multi-GPU ablation) or 'all' (legacy — every V-cycle level + after every "
           "matvec). Iteration counts are identical (A preserves mean-freeness); results equal "
           "within solver tolerance, not bit-identical.")
+      .def(
+          "set_pressure_bottom",
+          [](S& s, const std::string& m) {
+            if (m == "auto") s.setPressureBottomMode(-1);
+            else if (m == "smoother") s.setPressureBottomMode(0);
+            else if (m == "agglomerated") s.setPressureBottomMode(1);
+            else throw std::runtime_error("set_pressure_bottom: 'auto' | 'smoother' | 'agglomerated'");
+          },
+          nb::arg("mode"),
+          "Coarse-level (bottom) solve of the pressure multigrid. A V-cycle converges at a "
+          "domain-independent rate only if its COARSEST level is effectively solved, and a geometric "
+          "hierarchy cannot always get small enough: an axis stops coarsening once it turns odd, and "
+          "under MPI once ANY rank's block turns odd -- so at fixed cells/rank the coarsest GLOBAL "
+          "grid grows with the rank count and the bottom is progressively under-solved. "
+          "'auto' agglomerates the coarsest level onto a global operator and solves it "
+          "exactly whenever it exceeds PECLET_FLOW_AGGLOM_CELLS (512) cells, and uses the cheap "
+          "smoothed bottom otherwise. 'smoother' = never agglomerate (legacy). 'agglomerated' = "
+          "always. Measured on one GPU (2048x64x64 channel): a smoothed bottom needs 13.5 pressure "
+          "iterations/step at 4 levels and 6.0 at 6, against 4.4 at full geometric depth; "
+          "agglomerated it is 4.0 at BOTH depths, and faster in wall-clock than the deep hierarchy.")
       .def("set_pressure_graph_amg", &S::setPressureGraphAmg, nb::arg("on"),
            "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
            "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "
