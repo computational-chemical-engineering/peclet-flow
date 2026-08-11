@@ -198,6 +198,13 @@ builds each candidate depth and **measures** its imbalance, taking the deepest t
 `PECLET_FLOW_DECOMP_MAX_IMBALANCE` (default 1.05) and otherwise falling back to the aligned ORB. The
 search is a pure function of (ranks, grid, levels), so every rank reaches the same answer with no
 communication.
+
+Check any grid/rank-count combination **before** submitting a job — no GPU needed, runs oversubscribed:
+```bash
+PYTHONPATH=$PWD/build_mpi_omp python scripts/check_decomposition.py --grid 480,80,160 --levels 6 \
+  --np 4,7,24 --mode 0,coarse          # halvings, block, imbalance, splits, levels ACHIEVED
+```
+Full background, measurements and open problems: [`../docs/DECOMPOSITION_AND_MULTIGRID.md`](../docs/DECOMPOSITION_AND_MULTIGRID.md).
 - Validated against Zick & Homsy SC-sphere drag. Design + benchmarks:
   [`doc/flow_multigrid_plan.md`](doc/flow_multigrid_plan.md).
 
