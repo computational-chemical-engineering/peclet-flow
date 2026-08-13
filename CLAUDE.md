@@ -176,9 +176,13 @@ operator. Three outer drivers wrap that V-cycle — **select one per solver**:
   decomposition-independent — np=6 vs np=1 to 4.5e-16) and solves it exactly whenever that grid
   exceeds `PECLET_FLOW_AGGLOM_EXTENT` (4) cells on any axis. Measured, 2048×64×64 channel: 4 levels
   13.5 → 4.0 iters/step, 6 levels 6.0 → 4.0 (91 → 69.5 ms) — better than full geometric depth (4.4,
-  77.2 ms). **Default is `"smoother"`**: on the cut-cell `random_spheres` regression the agglomerated
-  bottom makes iterations *worse* (+41 %), which is not yet understood, so `"auto"` is opt-in and
-  right for all-fluid domain-BC problems.
+  77.2 ms). The former IBM anomaly (+41 % on `random_spheres`) is RESOLVED (2026-08-13): the bottom
+  null-space projection is now per-fluid-component (solid identity rows excluded), the fluid
+  diagonals are resummed in double so `A·1 = 0` exactly despite float level storage, and the inner
+  tolerance is 1e-8 — cut-cell beds now run at parity and the long-box case wins 25 → 7 iters/step
+  (`PECLET_FLOW_AGMG_DEBUG=1` prints the bottom-operator anatomy + inner-CG stats; see
+  `../docs/DECOMPOSITION_AND_MULTIGRID.md` §2.7). **Default is still `"smoother"`** pending the
+  suite-wide sweep to promote `"auto"`.
 
 **Multigrid depth vs the decomposition (multi-rank).** An axis coarsens only while it stays even
 (`d % 2 == 0 && d / 2 >= 2`), **per axis independently** — so semi-coarsening is automatic (the long

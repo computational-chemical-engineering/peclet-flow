@@ -970,6 +970,7 @@ class CutcellMG {
     // this rank's rows: (gid, diag) and off-diagonals (gid -> ngid, coef), periodic-wrapped.
     std::vector<int> lgid, lrow, lcol;
     std::vector<double> ldiag, lval;
+    std::vector<std::uint8_t> lsolid;  // AGMG_DEBUG: identity-row marker, per local row
     amgGlobalOfLocal_.clear();
     const int band[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
     for (int k = 0; k < nz; ++k)
@@ -984,6 +985,7 @@ class CutcellMG {
           // finite; their rhs is 0, so x stays 0 (correct — no flow inside the solid).
           const double dc = (double)hC(p);
           ldiag.push_back(dc != 0.0 ? dc : 1.0);
+          lsolid.push_back(dc == 0.0 ? 1 : 0);
           const double bc[6] = {(double)hW(p), (double)hE(p), (double)hS(p),
                                 (double)hN(p), (double)hB(p), (double)hT(p)};
           for (int d = 0; d < 6; ++d) {
@@ -1013,6 +1015,7 @@ class CutcellMG {
     // global CSR and builds the same AMG (redundant coarse solve).
     std::vector<int> ggid = lgid, grow = lrow, gcol = lcol;
     std::vector<double> gdiag = ldiag, gval = lval;
+    std::vector<std::uint8_t> gsolid = lsolid;
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       gatherv(lgid, ggid);
@@ -1020,8 +1023,88 @@ class CutcellMG {
       gatherv(lrow, grow);
       gatherv(lcol, gcol);
       gatherv(lval, gval);
+      gatherv(lsolid, gsolid);
     }
 #endif
+    amgSolid_.assign((std::size_t)amgGlobalN_, 0);
+    for (std::size_t r = 0; r < ggid.size(); ++r)
+      amgSolid_[(std::size_t)ggid[r]] = gsolid[r];
+    {  // connected components of the operator graph (union-find over the off-diagonal edges):
+      // each FLUID component carries its own constant null vector, so the null-space projection
+      // must be per-component. Solid identity rows are singletons and take no projection.
+      std::vector<int> parent((std::size_t)amgGlobalN_);
+      for (int i = 0; i < amgGlobalN_; ++i)
+        parent[(std::size_t)i] = i;
+      auto find = [&](int a) {
+        while (parent[(std::size_t)a] != a)
+          a = parent[(std::size_t)a] = parent[(std::size_t)parent[(std::size_t)a]];
+        return a;
+      };
+      for (std::size_t e = 0; e < grow.size(); ++e) {
+        const int ra = find(grow[e]), rb = find(gcol[e]);
+        if (ra != rb)
+          parent[(std::size_t)ra] = rb;
+      }
+      amgComp_.assign((std::size_t)amgGlobalN_, -1);
+      std::vector<int> remap((std::size_t)amgGlobalN_, -1);
+      amgNComp_ = 0;
+      for (int i = 0; i < amgGlobalN_; ++i) {
+        if (amgSolid_[(std::size_t)i])
+          continue;  // identity row: no null space, excluded from projection
+        const int r = find(i);
+        if (remap[(std::size_t)r] < 0)
+          remap[(std::size_t)r] = amgNComp_++;
+        amgComp_[(std::size_t)i] = remap[(std::size_t)r];
+      }
+    }
+    if (agmgDebug()) {
+      std::vector<long> csize((std::size_t)amgNComp_, 0);
+      for (int i = 0; i < amgGlobalN_; ++i)
+        if (amgComp_[(std::size_t)i] >= 0)
+          ++csize[(std::size_t)amgComp_[(std::size_t)i]];
+      printf("[agmg-build] fluid components=%d  sizes:", amgNComp_);
+      for (int c = 0; c < std::min(amgNComp_, 12); ++c)
+        printf(" %ld", csize[(std::size_t)c]);
+      printf(amgNComp_ > 12 ? " ...\n" : "\n");
+    }
+    if (agmgDebug()) {
+      long nSolid = 0, nTiny30 = 0, nTiny12 = 0;
+      double minFluidDiag = 1e300, maxFluidDiag = 0;
+      for (std::size_t r = 0; r < ggid.size(); ++r) {
+        if (gsolid[r]) {
+          ++nSolid;
+          continue;
+        }
+        const double ad = std::fabs(gdiag[r]);
+        minFluidDiag = std::min(minFluidDiag, ad);
+        maxFluidDiag = std::max(maxFluidDiag, ad);
+        nTiny30 += ad < 1e-30;
+        nTiny12 += ad < 1e-12;
+      }
+      printf("[agmg-build] n=%d solid=%ld fluid=%ld  fluid|diag| min=%.3e max=%.3e  "
+             "tiny<1e-30=%ld <1e-12=%ld\n",
+             amgGlobalN_, nSolid, (long)ggid.size() - nSolid, minFluidDiag, maxFluidDiag, nTiny30,
+             nTiny12);
+      // Row-sum defect: the operator's null vector is the constant ONLY if every fluid row sums
+      // to zero. The level coefficients are stored in float (MReal), so the diagonal is a
+      // float-rounded sum of the face coefficients — a nonzero defect here bounds how far a
+      // singular-consistent solve can converge.
+      std::vector<double> rowsum((std::size_t)amgGlobalN_, 0.0);
+      for (std::size_t r = 0; r < ggid.size(); ++r)
+        rowsum[(std::size_t)ggid[r]] = gsolid[r] ? 0.0 : gdiag[r];
+      for (std::size_t e = 0; e < grow.size(); ++e)
+        if (!amgSolid_[(std::size_t)grow[e]])
+          rowsum[(std::size_t)grow[e]] += gval[e];
+      double defMax = 0, defRelMax = 0;
+      for (std::size_t r = 0; r < ggid.size(); ++r)
+        if (!gsolid[r]) {
+          const double d = std::fabs(rowsum[(std::size_t)ggid[r]]);
+          defMax = std::max(defMax, d);
+          defRelMax = std::max(defRelMax, d / std::fabs(gdiag[r]));
+        }
+      printf("[agmg-build] fluid row-sum defect max=%.3e rel=%.3e\n", defMax, defRelMax);
+      fflush(stdout);
+    }
     {  // assemble the global CSR keyed by gid
       peclet::core::solver::HostCsrOp A;
       A.n = amgGlobalN_;
@@ -1041,6 +1124,20 @@ class CutcellMG {
           A.nbr.push_back(c);
           A.coef.push_back(v);
         }
+      // Singular (periodic / all-Neumann) path: every fluid diagonal is BY CONSTRUCTION the
+      // negative sum of its off-diagonals (walls/solids contribute zero, and no Dirichlet anchor
+      // exists when removeMean_). The float (MReal) level storage breaks that identity at ~5e-8
+      // relative, which shifts the operator's near-null vector off the constant the null-space
+      // projection assumes — measured as the inner CG flooring at ~1e-5 and burning its full
+      // iteration cap every call. Resum the diagonal in double so A·1 = 0 EXACTLY per fluid row.
+      if (removeMean_)
+        for (int r = 0; r < amgGlobalN_; ++r)
+          if (!amgSolid_[(std::size_t)r] && !rows[(std::size_t)r].empty()) {
+            double s = 0;
+            for (auto& [c, v] : rows[(std::size_t)r])
+              s += v;
+            A.diag[(std::size_t)r] = -s;
+          }
       amgA_ = A;
       amg_ = std::make_shared<peclet::core::solver::GraphAMG>();
       amg_->build(A);
@@ -1103,15 +1200,58 @@ class CutcellMG {
   // Runs on rank 0 only.
   void pcgAmg(std::vector<double>& b, std::vector<double>& x) {
     const std::size_t n = (std::size_t)amgGlobalN_;
+    const int dbg = agmgDebug();
+    double bSolidMax = 0, bFluidMax = 0, bFluidMean = 0, bAllMean = 0;
+    if (dbg) {  // rhs anatomy BEFORE the null-space projection (b is gid-ordered)
+      long nf = 0;
+      double sf = 0, sa = 0;
+      for (std::size_t i = 0; i < n; ++i) {
+        sa += b[i];
+        if (i < amgSolid_.size() && amgSolid_[i])
+          bSolidMax = std::max(bSolidMax, std::fabs(b[i]));
+        else {
+          bFluidMax = std::max(bFluidMax, std::fabs(b[i]));
+          sf += b[i];
+          ++nf;
+        }
+      }
+      bFluidMean = nf ? sf / (double)nf : 0.0;
+      bAllMean = n ? sa / (double)n : 0.0;
+    }
+    double bCompMax = 0;  // max per-component |sum(b)| / |b|_max: the per-pocket incompatibility
+    if (dbg && amgNComp_ > 1) {
+      std::vector<double> cs((std::size_t)amgNComp_, 0.0);
+      for (std::size_t i = 0; i < n; ++i)
+        if (amgComp_[i] >= 0)
+          cs[(std::size_t)amgComp_[i]] += b[i];
+      for (double s : cs)
+        bCompMax = std::max(bCompMax, std::fabs(s));
+      bCompMax /= (bFluidMax > 0 ? bFluidMax : 1.0);
+    }
     auto meanZero = [&](std::vector<double>& v) {
       if (!removeMean_)
         return;  // Dirichlet-anchored (outflow) operator: non-singular, no null space to project
-      double m = 0;
-      for (double e : v)
-        m += e;
-      m /= (double)n;
-      for (double& e : v)
-        e -= m;
+      // The null space is one constant PER CONNECTED FLUID COMPONENT — solid cells are identity
+      // rows (non-singular) and a coarse level can pinch fluid off into pockets, each carrying its
+      // own constant. Projecting the ALL-cell mean out instead (the old code) both leaves null
+      // components alive and writes a spurious value onto every solid coordinate; the next matvec
+      // (identity rows) feeds that back into the residual, the effective preconditioner turns
+      // nonsymmetric, and the inner CG stalls at its iteration cap (measured on random_spheres:
+      // every bottom solve capped at 200 with relres up to ~1, +41% outer iterations).
+      if (amgNComp_ <= 0)
+        return;
+      std::vector<double> m((std::size_t)amgNComp_, 0.0);
+      std::vector<long> cnt((std::size_t)amgNComp_, 0);
+      for (std::size_t i = 0; i < n; ++i)
+        if (amgComp_[i] >= 0) {
+          m[(std::size_t)amgComp_[i]] += v[i];
+          ++cnt[(std::size_t)amgComp_[i]];
+        }
+      for (std::size_t c = 0; c < m.size(); ++c)
+        m[c] = cnt[c] ? m[c] / (double)cnt[c] : 0.0;
+      for (std::size_t i = 0; i < n; ++i)
+        if (amgComp_[i] >= 0)
+          v[i] -= m[(std::size_t)amgComp_[i]];
     };
     meanZero(b);
     x.assign(n, 0.0);
@@ -1126,14 +1266,19 @@ class CutcellMG {
       return s;
     };
     double rz = dot(r, z), r0 = std::sqrt(dot(r, r));
-    for (int it = 0; it < 200 && r0 > 0; ++it) {
+    // 1e-8 is deliberate: the V-cycle's outer iteration count is unchanged from a far looser
+    // bottom (measured), while 1e-10 sits at/below the double-precision floor of this
+    // projected solve (rounding of the per-iteration null-space projection), where CG grinds
+    // out its full iteration cap for nothing.
+    int it = 0;
+    for (; it < 100 && r0 > 0; ++it) {
       amgA_.apply(p, Ap);
       const double a = rz / dot(p, Ap);
       for (std::size_t i = 0; i < n; ++i) {
         x[i] += a * p[i];
         r[i] -= a * Ap[i];
       }
-      if (std::sqrt(dot(r, r)) <= 1e-10 * r0)
+      if (std::sqrt(dot(r, r)) <= 1e-8 * r0)
         break;
       amg_->apply(r, z);
       meanZero(z);
@@ -1144,6 +1289,23 @@ class CutcellMG {
         p[i] = z[i] + beta * p[i];
     }
     meanZero(x);
+    if (dbg) {
+      double xSolidMax = 0, xFluidMax = 0;
+      for (std::size_t i = 0; i < n; ++i)
+        if (i < amgSolid_.size() && amgSolid_[i])
+          xSolidMax = std::max(xSolidMax, std::fabs(x[i]));
+        else
+          xFluidMax = std::max(xFluidMax, std::fabs(x[i]));
+      const double rn = std::sqrt(dot(r, r));
+      ++agmgCalls_;
+      if (dbg >= 2 || agmgCalls_ <= 60 || it >= 100 || agmgCalls_ % 50 == 0) {
+        printf("[agmg] call=%ld iters=%d relres=%.2e  |b|sol=%.3e |b|fl=%.3e  "
+               "mean(b) fl=%.3e all=%.3e  compat=%.2e  |x|sol=%.3e |x|fl=%.3e%s\n",
+               agmgCalls_, it, r0 > 0 ? rn / r0 : 0.0, bSolidMax, bFluidMax, bFluidMean, bAllMean,
+               bCompMax, xSolidMax, xFluidMax, it >= 100 ? "  CAP" : "");
+        fflush(stdout);
+      }
+    }
   }
 #ifdef PECLET_FLOW_MPI
   template <class T>
@@ -1588,6 +1750,18 @@ class CutcellMG {
   mutable std::vector<int>
       amgGlobalOfLocal_;        // this rank's bottom inner cells -> global bottom index
   mutable int amgGlobalN_ = 0;  // total bottom global cells (rank 0)
+  // PECLET_FLOW_AGMG_DEBUG instrumentation (see agmgDebug()): per-gid solid marker + call counter.
+  mutable std::vector<std::uint8_t> amgSolid_;
+  mutable std::vector<int> amgComp_;  // fluid component id per gid (-1 = solid identity row)
+  mutable int amgNComp_ = 0;          // number of fluid components (null-space dimension)
+  mutable long agmgCalls_ = 0;
+  static int agmgDebug() {
+    static const int v = [] {
+      const char* e = std::getenv("PECLET_FLOW_AGMG_DEBUG");
+      return e ? std::atoi(e) : 0;
+    }();
+    return v;
+  }
 #ifdef PECLET_FLOW_MPI
   MPI_Comm comm_ = MPI_COMM_NULL;
 #endif
