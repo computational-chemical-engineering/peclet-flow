@@ -3029,7 +3029,11 @@ class Solver {
   double chebRtol_ = 1e-9, chebA_ = 0.0, chebB_ = 0.0;
   int nLevels_ = 4;             // multigrid depth (CUDA default; set_pressure_multigrid)
   bool pressGraphAmg_ = false;
-  int pressAgglomMode_ = 0;  // coarse-solve policy: 0 smoothed (default), -1 auto, 1 always
+  // Coarse-solve policy: -1 auto (DEFAULT — agglomerate when the coarsest grid exceeds
+  // PECLET_FLOW_AGGLOM_EXTENT on any axis; identical to the smoothed bottom otherwise),
+  // 0 smoothed, 1 always. Auto became the default 2026-08-13 after the IBM-path anomaly was
+  // fixed (per-fluid-component null-space projection; see ../docs/DECOMPOSITION_AND_MULTIGRID.md).
+  int pressAgglomMode_ = -1;
   long lastPressureIters_ = 0;
   CutcellMG mg_;
   // --- multi-rank (MPI) state, gated (single-GPU module never links MPI -> byte-identical when

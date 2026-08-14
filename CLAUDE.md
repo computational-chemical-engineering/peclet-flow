@@ -179,10 +179,16 @@ operator. Three outer drivers wrap that V-cycle — **select one per solver**:
   77.2 ms). The former IBM anomaly (+41 % on `random_spheres`) is RESOLVED (2026-08-13): the bottom
   null-space projection is now per-fluid-component (solid identity rows excluded), the fluid
   diagonals are resummed in double so `A·1 = 0` exactly despite float level storage, and the inner
-  tolerance is 1e-8 — cut-cell beds now run at parity and the long-box case wins 25 → 7 iters/step
-  (`PECLET_FLOW_AGMG_DEBUG=1` prints the bottom-operator anatomy + inner-CG stats; see
-  `../docs/DECOMPOSITION_AND_MULTIGRID.md` §2.7). **Default is still `"smoother"`** pending the
-  suite-wide sweep to promote `"auto"`.
+  tolerance is 1e-8 — cut-cell beds run at parity, the long-box case wins 25 → 7 iters/step, and the
+  ghost-projection path is verified (its MG hierarchy is the binary-openness surrogate — the
+  nonsymmetric gp rows never reach the bottom). (`PECLET_FLOW_AGMG_DEBUG=1` prints the
+  bottom-operator anatomy + inner-CG stats; see `../docs/DECOMPOSITION_AND_MULTIGRID.md` §2.7.)
+  **`"auto"` is the DEFAULT since 2026-08-13** (suite sweep: staggered regression +0.00 %, colocated
+  13–27 % FEWER pressure iterations at identical accuracy, domain-BC verifies unchanged, MPI ctests
+  green); `"smoother"` remains available, and `PECLET_FLOW_AGGLOM_EXTENT=1000000` reproduces the
+  legacy behaviour without a code change. Porous / variable-ρ rebuild the operator every step and so
+  rebuild the bottom AMG every step — negligible for the intended few-cells-per-axis bottoms, but
+  avoid `auto` + a badly-factored grid (huge bottom) on those paths.
 
 **Multigrid depth vs the decomposition (multi-rank).** An axis coarsens only while it stays even
 (`d % 2 == 0 && d / 2 >= 2`), **per axis independently** — so semi-coarsening is automatic (the long

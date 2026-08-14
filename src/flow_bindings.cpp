@@ -214,12 +214,14 @@ static void bind_solver(nb::module_& m, const char* name) {
           "hierarchy cannot always get small enough: an axis stops coarsening once it turns odd, and "
           "under MPI once ANY rank's block turns odd -- so at fixed cells/rank the coarsest GLOBAL "
           "grid grows with the rank count and the bottom is progressively under-solved. "
-          "'auto' agglomerates the coarsest level onto a global operator and solves it "
-          "exactly whenever it exceeds PECLET_FLOW_AGGLOM_CELLS (512) cells, and uses the cheap "
-          "smoothed bottom otherwise. 'smoother' = never agglomerate (legacy). 'agglomerated' = "
-          "always. Measured on one GPU (2048x64x64 channel): a smoothed bottom needs 13.5 pressure "
-          "iterations/step at 4 levels and 6.0 at 6, against 4.4 at full geometric depth; "
-          "agglomerated it is 4.0 at BOTH depths, and faster in wall-clock than the deep hierarchy.")
+          "'auto' (DEFAULT) agglomerates the coarsest level onto a global operator and solves it "
+          "exactly whenever it exceeds PECLET_FLOW_AGGLOM_EXTENT (4) cells on any axis, and uses "
+          "the cheap smoothed bottom otherwise (byte-identical to 'smoother' then). 'smoother' = "
+          "never agglomerate (legacy). 'agglomerated' = always. Measured on one GPU (2048x64x64 "
+          "channel): a smoothed bottom needs 13.5 pressure iterations/step at 4 levels and 6.0 at "
+          "6, against 4.4 at full geometric depth; agglomerated it is 4.0 at BOTH depths, and "
+          "faster in wall-clock than the deep hierarchy. Works on the cut-cell IBM and "
+          "ghost-projection paths (per-fluid-component null-space projection, 2026-08-13).")
       .def("set_pressure_graph_amg", &S::setPressureGraphAmg, nb::arg("on"),
            "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
            "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "

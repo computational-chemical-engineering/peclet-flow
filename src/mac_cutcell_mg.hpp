@@ -927,6 +927,16 @@ class CutcellMG {
       return true;
     if (lv_.empty())
       return false;
+    // Auto engages only for the SINGULAR (periodic / all-Neumann / IBM) operator. On the
+    // Dirichlet-anchored (outflow) path the exact bottom measurably LOWERS the outer solve's
+    // attainable floor (128x32x32 inflow/outflow channel: flux divergence floor 8e-8 smoothed vs
+    // 2e-5 agglomerated at identical budgets; the CSR solution satisfies the V-cycle's own bottom
+    // operator to 1e-9, so this is not operator mismatch — the anchored operator's near-null mode
+    // makes the exact bottom return O(1e3 |b|) corrections whose float-hierarchy round-off the
+    // smoothed bottom never generates). Until that is understood, anchored operators keep the
+    // smoothed bottom; set_pressure_bottom("agglomerated") still forces it anywhere.
+    if (!removeMean_)
+      return false;
     // The criterion is the coarsest grid's largest EXTENT, not its cell count: what a few smoother
     // sweeps cannot fix is a mode spanning many cells along an axis, and Gauss-Seidel needs O(L^2)
     // sweeps to damp a wavelength of L cells. A 64x2x2 bottom is only 256 cells yet still 64 across
@@ -1191,6 +1201,24 @@ class CutcellMG {
           hx((long)(i + G) + (long)(j + G) * ex + (long)(k + G) * ex * ey) =
               z[(std::size_t)amgGlobalOfLocal_[c++]];
     Kokkos::deep_copy(lv.x, hx);
+    if (agmgDebug() && !distributed_) {
+      // Consistency check: the CSR solution must satisfy the V-cycle's OWN bottom operator
+      // (ghost fill + outflow ghost + 7-point apply). A large residual here means buildAmg
+      // assembled a DIFFERENT matrix than the one the hierarchy applies.
+      fill(lv, lv.x);
+      applyOutflowGhost(lv.ext, lv.x);
+      residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                      FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, G);
+      const double rn = maxabs(lv, lv.res);
+      auto hb = Kokkos::create_mirror_view(lv.rhs);
+      Kokkos::deep_copy(hb, lv.rhs);
+      double bn = 0;
+      for (std::size_t i = 0; i < hb.size(); ++i)
+        bn = std::max(bn, std::fabs((double)hb(i)));
+      printf("[agmg] vcycle-op residual of CSR solution: max|b-Ax|=%.3e  max|b|=%.3e  rel=%.3e\n",
+             rn, bn, bn > 0 ? rn / bn : 0.0);
+      fflush(stdout);
+    }
   }
   // GraphAMG-preconditioned CG on the global bottom operator. For the periodic/all-Neumann case the
   // operator is singular (constant null space) and the mean must be projected out of the rhs and
