@@ -1939,6 +1939,50 @@ class Solver {
     }
     // IBM / periodic: Robust-Scaled cut-cell stencil (float). The 7-point smoother reads faces
     // only -> the fused 1-kernel face fill suffices.
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      // Overlap the per-colour halo with the interior sweep (the momentum counterpart of the MG
+      // smoothers' split, 3ace962): post the exchange, sweep the interior cells — whose 7-point
+      // stencil reads no ghost — while the messages fly, complete it, then sweep the boundary
+      // shell. A colour's cells never read same-colour cells, so interior-then-shell is
+      // bit-identical to the blocking exchange + full sweep; the tolerance stop's max-increment
+      // combines the two passes by max (order-independent). Only this periodic/IBM path overlaps:
+      // the domain-BC paths re-impose ghost BCs each colour and keep the blocking order (the same
+      // decision as VelocityMG's overlap). The exchange is posted INSIDE the colour lambda (fill
+      // is a no-op) so the packed send values are exactly the blocking call's.
+      const C3 ilo{G, G, G}, ihi{e_.x - G, e_.y - G, e_.z - G};
+      const C3 lo{G + 1, G + 1, G + 1}, hi{e_.x - G - 1, e_.y - G - 1, e_.z - G - 1};
+      const C3 z0{0, 0, 0};
+      velSweepLoop(
+          [] {},
+          [&](int col) {
+            velDev_->exchangeBegin(C[c].u);
+            ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                                   MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
+                                   MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_,
+                                   col, lo, hi, z0, z0);
+            velDev_->exchangeEnd(C[c].u);
+            ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                                   MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
+                                   MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_,
+                                   col, ilo, ihi, lo, hi);
+          },
+          [&](int col) {
+            velDev_->exchangeBegin(C[c].u);
+            const double di = ibmRbgsStencilColorDuBox(
+                C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW), MConst(C[c].AE),
+                MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB), MConst(C[c].AT),
+                CCConst(C[c].mask), e_, og_, col, lo, hi, z0, z0);
+            velDev_->exchangeEnd(C[c].u);
+            const double ds = ibmRbgsStencilColorDuBox(
+                C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW), MConst(C[c].AE),
+                MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB), MConst(C[c].AT),
+                CCConst(C[c].mask), e_, og_, col, ilo, ihi, lo, hi);
+            return di > ds ? di : ds;
+          });
+      return;
+    }
+#endif
     velSweepLoop(
         [&] { fillGhostsFaces(C[c].u); },
         [&](int col) {
