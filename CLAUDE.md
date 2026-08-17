@@ -152,6 +152,19 @@ Key pieces (all `src/*.hpp`, Kokkos, header-only, `namespace flow`):
   `set_advection`/`set_implicit_advection`, `set_body_force`, `set_solid` (cut-cell IBM no-slip), domain
   BCs, and `initMpi(gnx,gny,gnz,comm)` for the multi-rank step.
 
+**Distributed smoother communication** (see `../docs/COMMUNICATION_SCALING.md`): every RB-GS sweep
+(momentum + each MG level) overlaps its halo exchange with the interior sweep (post / smooth
+interior / finish / smooth boundary shell — bit-identical by construction), and
+**communication-avoiding smoothing** (`PECLET_FLOW_CA`, default ON, `=0` kills it) exchanges a
+2-deep ghost layer ONCE per red-black pair instead of 1-deep per colour, redundantly re-smoothing
+the 1-deep ghost ring so the second colour needs no exchange — bit-identical, half the halo
+events. CA engages on the periodic/IBM operator where every rank's block extent is ≥ 4: in the
+momentum sweeps (the velocity block is g=2 already; stencil/mask/rhs ring exchanged per operator
+rebuild) and on `CutcellMG`'s coarse levels (per-level runtime ghost width `Level::g`, width-2
+topologies, operator ring assembled from exchanged openness; level 0 and domain-BC hierarchies
+keep g=1 — byte-identical). Parity trap: mixed ghost widths need the g-independent red-black
+origin (`CutcellMG::parityOg`) or the colours swap on g=2 levels.
+
 ### Pressure solver options (the `flow` module)
 
 The cut-cell pressure Poisson is solved by a geometric **multigrid** (`mac_cutcell_mg.hpp`, `CutcellMG`)

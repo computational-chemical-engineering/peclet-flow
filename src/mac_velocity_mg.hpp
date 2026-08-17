@@ -407,7 +407,7 @@ class VelocityMG {
     for (int L = 1; L < (int)lv_.size(); ++L) {
       Level& c = lv_[L];
       Level& fin = lv_[L - 1];
-      restrictAvg(c.theta, CCConst(fin.theta), c.ext, fin.ext, G, c.inner,
+      restrictAvg(c.theta, CCConst(fin.theta), c.ext, fin.ext, G, G, c.inner,
                   fin.ratio);  // coarse theta = avg
       thresholdMask(c.pin, CCConst(c.theta), thresh);
       const double bx = nu_dt / (double)(c.cfac.x * c.cfac.x),
@@ -428,11 +428,11 @@ class VelocityMG {
       Level& fin = lv_[L - 1];
       CCConst fu = (L == 1) ? u0 : CCConst(fin.advU), fv = (L == 1) ? v0 : CCConst(fin.advV),
               fw = (L == 1) ? w0 : CCConst(fin.advW);
-      restrictAvg(cs.advU, fu, cs.ext, fin.ext, G, cs.inner, fin.ratio);
+      restrictAvg(cs.advU, fu, cs.ext, fin.ext, G, G, cs.inner, fin.ratio);
       fill(cs, cs.advU);
-      restrictAvg(cs.advV, fv, cs.ext, fin.ext, G, cs.inner, fin.ratio);
+      restrictAvg(cs.advV, fv, cs.ext, fin.ext, G, G, cs.inner, fin.ratio);
       fill(cs, cs.advV);
-      restrictAvg(cs.advW, fw, cs.ext, fin.ext, G, cs.inner, fin.ratio);
+      restrictAvg(cs.advW, fw, cs.ext, fin.ext, G, G, cs.inner, fin.ratio);
       fill(cs, cs.advW);
     }
   }
@@ -547,7 +547,7 @@ class VelocityMG {
     if (masked)
       mulMask(lv.res, CCConst(lv.resMask));
     Level& cs = lv_[L + 1];
-    restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, G, cs.inner, lv.ratio);
+    restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, G, G, cs.inner, lv.ratio);
     Kokkos::deep_copy(cs.x, 0.0);
     vcycle(L + 1);
     fill(cs, cs.x);
@@ -557,7 +557,7 @@ class VelocityMG {
       prolongMasked(lv.x, CCConst(cs.x), CCConst(lv.resMask), lv.ext, cs.ext, G, lv.inner, lv.ratio,
                     0.5);
     else
-      prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, G, lv.inner, lv.ratio);
+      prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, G, G, lv.inner, lv.ratio);
     smooth(lv, post_, l0);
   }
   void smooth(Level& lv, int sweeps, bool isL0) {

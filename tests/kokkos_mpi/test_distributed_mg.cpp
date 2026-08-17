@@ -155,12 +155,12 @@ struct DistMG {
     peclet::flow::residualCutcell(v.res, CCConst(v.x), CCConst(v.rhs), FPC(v.AC), FPC(v.AW),
                                   FPC(v.AE), FPC(v.AS), FPC(v.AN), FPC(v.AB), FPC(v.AT), v.e, G);
     Level& c = lv[L + 1];
-    peclet::flow::restrictAvg(c.rhs, CCConst(v.res), c.e, v.e, G, c.inner,
+    peclet::flow::restrictAvg(c.rhs, CCConst(v.res), c.e, v.e, G, G, c.inner,
                               v.ratio);  // LOCAL (coarse block = fine/2)
     Kokkos::deep_copy(c.x, 0.0);
     vcycle(L + 1);
     c.dev->exchange(c.x);
-    peclet::flow::prolongAdd(v.x, CCConst(c.x), v.e, c.e, G, v.inner, v.ratio);  // LOCAL
+    peclet::flow::prolongAdd(v.x, CCConst(c.x), v.e, c.e, G, G, v.inner, v.ratio);  // LOCAL
     smooth(v, POST);
     removeMean(v, v.x);
   }

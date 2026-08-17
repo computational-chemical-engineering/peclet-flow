@@ -18,11 +18,13 @@
 #ifndef PECLET_FLOW_SDFLOW_IBM_HPP
 #define PECLET_FLOW_SDFLOW_IBM_HPP
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <Kokkos_Core.hpp>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -442,6 +444,19 @@ class Solver {
     velHalo_->buildTopology(dec, rank, G, per, comm);
     velDev_ = std::make_shared<GridHalo<double>>();
     velDev_->init(*velHalo_);
+    // Communication-avoiding momentum sweeps (see smoothComp): the velocity block is g=2 already,
+    // so the CA pair needs no new topology — only this float exchange for the stencil ring
+    // (operator coefficients are float). Eligible when every rank's block is >= 4 on every axis
+    // (rank-uniform: the decomposition is replicated), gated by PECLET_FLOW_CA.
+    velDevF_ = std::make_shared<GridHalo<float>>();
+    velDevF_->init(*velHalo_);
+    long minExt = std::numeric_limits<long>::max();
+    for (const auto& s : dec.sizes())
+      for (int k = 0; k < 3; ++k)
+        minExt = std::min(minExt, (long)s[k]);
+    caMomentum_ = caSmoothingEnabled() && minExt >= 4;
+    for (bool& d : momStencilDirty_)
+      d = true;
     dec_ =
         std::make_shared<peclet::core::decomp::BlockDecomposer<3>>(dec);  // remember the partition
     const auto oig = velHalo_->indexer().originInclGhost();
@@ -568,6 +583,10 @@ class Solver {
   // flow).
   void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure) {
     cutcellPressure_ = cutcellPressure;
+#ifdef PECLET_FLOW_MPI
+    for (bool& d : momStencilDirty_)  // stencil ring re-exchange for the CA momentum sweeps
+      d = true;
+#endif
     hasSolid_ =
         false;  // does the geometry actually contain solid? (all-fluid set_pressure_geometry
     for (double v :
@@ -916,6 +935,9 @@ class Solver {
         copyInner(oy1_, e1_, 1, CCConst(oyb_), e_, G);
         copyInner(oz1_, e1_, 1, CCConst(ozb_), e_, G);
       }
+      mg_.setBoundaryConditions(bc_);  // per-level wall openness + null-space gating (no-op if
+                                       // periodic); BEFORE initMpi — the per-level ghost width
+                                       // (CA smoothing) is chosen for the periodic operator only
 #ifdef PECLET_FLOW_MPI
       if (distributed_)  // share the level-0 decomposition so the MG block matches this rank's
                          // block
@@ -924,8 +946,6 @@ class Solver {
 #endif
         mg_.init(nx_, ny_, nz_,
                  nLevels_);  // geometric multigrid on the cut-cell openness (MG-PCG pressure)
-      mg_.setBoundaryConditions(
-          bc_);  // per-level wall openness + null-space gating (no-op if periodic)
       mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), 1.0, 1.0, 1.0);
       // Coarse-solve policy: an explicit set_pressure_graph_amg(True) forces agglomeration,
       // otherwise the mode set by set_pressure_bottom (default auto) decides.
@@ -1940,6 +1960,63 @@ class Solver {
     // IBM / periodic: Robust-Scaled cut-cell stencil (float). The 7-point smoother reads faces
     // only -> the fused 1-kernel face fill suffices.
 #ifdef PECLET_FLOW_MPI
+    if (distributed_ && caMomentum_) {
+      // Communication-avoiding pair (the momentum counterpart of CutcellMG::smooth's CA path):
+      // ONE 2-deep exchange per red-black pair instead of one per colour — the velocity block is
+      // g=2 already. Colour 0 overlaps the exchange with the interior sweep, then sweeps the
+      // boundary shell PLUS the 1-deep ghost ring, redundantly recomputing the neighbour's
+      // boundary cells from the same operands the neighbour uses (2-deep u ghosts; the ring rows
+      // of the stencil/mask/rhs are exchanged below, so they are the owner's bit-exact values).
+      // Colour 1 then sweeps with NO exchange: its boundary cells read only colour-0 ring cells,
+      // which equal what a fresh exchange would have delivered — bit-identical at half the halo
+      // events. The tolerance stop's colour-1 kernel is the ORIGINAL full-inner fused reduction
+      // (host pencil form intact), so du matches the blocking path exactly.
+      // Stencil + mask ring exchange: once per (re)build. The per-step machinery (implicit-FOU
+      // Picard rebuilds, variable properties, implicit drag, eps-conservative porous) rewrites the
+      // stencil every solve, so those paths re-exchange every solve — mirrors the step() rebuild
+      // gates; a false positive costs 8 extra exchanges, a false negative would break the np>1
+      // bit-exactness (the ring rows would read a stale operator).
+      const bool perStepStencil =
+          implicitAdv() || varProps_ || varRho_ || effVarRho() || hasDrag_;
+      if (momStencilDirty_[c] || perStepStencil) {
+        for (FV* a : {&C[c].AC, &C[c].AW, &C[c].AE, &C[c].AS, &C[c].AN, &C[c].AB, &C[c].AT})
+          velDevF_->exchange(*a);
+        velDev_->exchange(C[c].mask);
+        momStencilDirty_[c] = false;
+      }
+      velDev_->exchange(C[c].b);  // rhs ring (owner's inner values); fixed over the sweeps
+      const C3 lo{G + 1, G + 1, G + 1}, hi{e_.x - G - 1, e_.y - G - 1, e_.z - G - 1};
+      const C3 rlo{G - 1, G - 1, G - 1}, rhi{e_.x - G + 1, e_.y - G + 1, e_.z - G + 1};
+      const C3 z0{0, 0, 0};
+      velSweepLoop(
+          [] {},
+          [&](int col) {
+            if (col == 0) {
+              velDev_->exchangeBegin(C[c].u);
+              ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                                     MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
+                                     MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_,
+                                     col, lo, hi, z0, z0);
+              velDev_->exchangeEnd(C[c].u);
+              ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                                     MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
+                                     MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_,
+                                     col, rlo, rhi, lo, hi);
+            } else {
+              ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                                  MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
+                                  MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G,
+                                  col);
+            }
+          },
+          [&](int col) {
+            return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
+                                         MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
+                                         MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_,
+                                         og_, G, col);
+          });
+      return;
+    }
     if (distributed_) {
       // Overlap the per-colour halo with the interior sweep (the momentum counterpart of the MG
       // smoothers' split, 3ace962): post the exchange, sweep the interior cells — whose 7-point
@@ -3087,6 +3164,9 @@ class Solver {
 #ifdef PECLET_FLOW_MPI
   std::shared_ptr<GridHaloTopology<3>> velHalo_;  // g=2 velocity-block topology
   std::shared_ptr<GridHalo<double>> velDev_;      // g=2 velocity-block ghost exchange
+  std::shared_ptr<GridHalo<float>> velDevF_;      // float twin (momentum-stencil ring, CA sweeps)
+  bool caMomentum_ = false;  // communication-avoiding momentum sweeps (PECLET_FLOW_CA + extent>=4)
+  bool momStencilDirty_[3] = {true, true, true};  // per-component: stencil ring needs an exchange
   std::shared_ptr<peclet::core::decomp::BlockDecomposer<3>>
       dec_;  // current partition (redistribute)
   MPI_Comm comm_ = MPI_COMM_NULL;

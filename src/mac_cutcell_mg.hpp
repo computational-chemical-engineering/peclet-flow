@@ -51,16 +51,17 @@ using FPV = Kokkos::View<MReal*, CCMem>;
 using FPC = Kokkos::View<const MReal*, CCMem>;
 
 // coarsen staggered face openness: each coarse face = average of the ratio_b*ratio_c fine sub-faces
-// it spans (mg_coarsen_open_avg_k port).
+// it spans (mg_coarsen_open_avg_k port). gc/gf: coarse/fine block ghost widths (they can differ —
+// CA-eligible coarse levels carry g=2).
 inline void coarsenOpenAvg(CCField oxc, CCField oyc, CCField ozc, CCConst oxf, CCConst oyf,
-                           CCConst ozf, C3 cext, C3 fext, int g, C3 cinner, C3 ratio) {
+                           CCConst ozf, C3 cext, C3 fext, int gc, int gf, C3 cinner, C3 ratio) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "peclet::flow::coarsen_open", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
         const int rx = ratio.x, ry = ratio.y, rz = ratio.z;
-        const int fx0 = rx * icx + g, fy0 = ry * icy + g, fz0 = rz * icz + g;
+        const int fx0 = rx * icx + gf, fy0 = ry * icy + gf, fz0 = rz * icz + gf;
         const long fsy = fext.x, fsz = (long)fext.x * fext.y;
         auto F = [&](CCConst T, int x, int y, int z) {
           return T((long)x + (long)y * fsy + (long)z * fsz);
@@ -76,7 +77,7 @@ inline void coarsenOpenAvg(CCField oxc, CCField oyc, CCField ozc, CCConst oxf, C
           for (int b = 0; b < ry; ++b)
             sz += F(ozf, fx0 + a, fy0 + b, fz0);
         const long ci =
-            (long)(icx + g) + (long)(icy + g) * cext.x + (long)(icz + g) * (long)cext.x * cext.y;
+            (long)(icx + gc) + (long)(icy + gc) * cext.x + (long)(icz + gc) * (long)cext.x * cext.y;
         oxc(ci) = sx / (double)(ry * rz);
         oyc(ci) = sy / (double)(rx * rz);
         ozc(ci) = sz / (double)(rx * ry);
@@ -120,8 +121,9 @@ inline void residualCutcellBox(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, 
 }
 
 // average restriction (coarse = mean of ratio^3 fine children; mg_restrict_k) + trilinear
-// prolongation (added to fine; mg_prolong_k). Both over inner cells.
-inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int g, C3 cinner,
+// prolongation (added to fine; mg_prolong_k). Both over inner cells. gc/gf: coarse/fine block
+// ghost widths (CA-eligible coarse levels carry g=2, so they can differ across one transfer).
+inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int gc, int gf, C3 cinner,
                         C3 ratio) {
   ccFor3(
       "peclet::flow::restrict", C3{0, 0, 0}, C3{cinner.x, cinner.y, cinner.z},
@@ -131,24 +133,25 @@ inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int g, C
         for (int dz = 0; dz < ratio.z; ++dz)
           for (int dy = 0; dy < ratio.y; ++dy)
             for (int dx = 0; dx < ratio.x; ++dx) {
-              const int fx = ratio.x * icx + dx + g, fy = ratio.y * icy + dy + g,
-                        fz = ratio.z * icz + dz + g;
+              const int fx = ratio.x * icx + dx + gf, fy = ratio.y * icy + dy + gf,
+                        fz = ratio.z * icz + dz + gf;
               s += fine((long)fx + (long)fy * fsy + (long)fz * fsz);
             }
         const long ci =
-            (long)(icx + g) + (long)(icy + g) * cext.x + (long)(icz + g) * (long)cext.x * cext.y;
+            (long)(icx + gc) + (long)(icy + gc) * cext.x + (long)(icz + gc) * (long)cext.x * cext.y;
         coarse(ci) = s / (double)(ratio.x * ratio.y * ratio.z);
       });
 }
-inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int g, C3 finner, C3 ratio) {
+inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, int gc, C3 finner,
+                       C3 ratio) {
   ccFor3(
       "peclet::flow::prolong", C3{0, 0, 0}, C3{finner.x, finner.y, finner.z},
       KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
-        // coarse sample coord: coarsened axis (ratio 2) -> 0.5*ifine - 0.25 + g; kept axis (ratio
-        // 1) -> ifine+g
-        const double cx = (ratio.x == 2) ? 0.5 * ifx - 0.25 + g : ifx + g;
-        const double cy = (ratio.y == 2) ? 0.5 * ify - 0.25 + g : ify + g;
-        const double cz = (ratio.z == 2) ? 0.5 * ifz - 0.25 + g : ifz + g;
+        // coarse sample coord: coarsened axis (ratio 2) -> 0.5*ifine - 0.25 + gc; kept axis (ratio
+        // 1) -> ifine+gc
+        const double cx = (ratio.x == 2) ? 0.5 * ifx - 0.25 + gc : ifx + gc;
+        const double cy = (ratio.y == 2) ? 0.5 * ify - 0.25 + gc : ify + gc;
+        const double cz = (ratio.z == 2) ? 0.5 * ifz - 0.25 + gc : ifz + gc;
         const double fxw = Kokkos::floor(cx), fyw = Kokkos::floor(cy), fzw = Kokkos::floor(cz);
         const double wx = cx - fxw, wy = cy - fyw, wz = cz - fzw;
         const int x0 = (int)fxw, y0 = (int)fyw, z0 = (int)fzw;
@@ -162,7 +165,7 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int g, C3
         const double c11 = C(x0, y0 + 1, z0 + 1) * (1 - wx) + C(x0 + 1, y0 + 1, z0 + 1) * wx;
         const double c0 = c00 * (1 - wy) + c10 * wy, c1 = c01 * (1 - wy) + c11 * wy;
         const long fi =
-            (long)(ifx + g) + (long)(ify + g) * fext.x + (long)(ifz + g) * (long)fext.x * fext.y;
+            (long)(ifx + gf) + (long)(ify + gf) * fext.x + (long)(ifz + gf) * (long)fext.x * fext.y;
         fine(fi) += c0 * (1 - wz) + c1 * wz;
       });
 }
@@ -186,12 +189,29 @@ inline int mgDebugSolves() {
   return n;
 }
 
+// Communication-avoiding smoothing (PECLET_FLOW_CA, default ON; =0 kills it): exchange a 2-deep
+// ghost layer once per red-black PAIR instead of 1-deep before every colour, redundantly
+// re-smoothing the 1-deep ghost ring of the first colour so the second colour reads exactly the
+// values a per-colour exchange would have delivered — bit-identical, at half the halo events.
+// Consumed by CutcellMG's coarse levels and by the momentum RB-GS in flow_ibm.hpp.
+inline bool caSmoothingEnabled() {
+  static const bool v = [] {
+    const char* e = std::getenv("PECLET_FLOW_CA");
+    return !e || std::atoi(e) != 0;
+  }();
+  return v;
+}
+
 class CutcellMG {
  public:
   struct Level {
     C3 ext, inner, ratio{2, 2, 2}, cfac{1, 1, 1};
-    C3 og{0, 0, 0};  // block inner origin (global red-black parity); {0,0,0} single-rank
+    C3 og{0, 0, 0};  // block inner origin in GLOBAL cells; {0,0,0} single-rank
     std::size_t n = 0;
+    // Ghost width of this level's block (1 default; 2 on distributed coarse levels eligible for
+    // communication-avoiding smoothing — see initMpi). Single-rank always 1 (byte-identical).
+    int g = 1;
+    bool caOk = false;  // width-2 topology built and every rank's block extent >= 4
     CCField x, rhs, res, ox, oy, oz;
     FPV AC, AW, AE, AS, AN, AB, AT;
 #ifdef PECLET_FLOW_MPI
@@ -199,7 +219,14 @@ class CutcellMG {
     std::shared_ptr<GridHalo<double>> dev;      // per-level ghost exchange
 #endif
   };
-  static constexpr int G = 1;
+  static constexpr int G = 1;  // level-0 / single-rank ghost width (the flow_ibm g=1 bridge)
+  // The red-black parity origin for a level's smoother: the parity convention is the single-rank
+  // g=1 one (parity of og+local index INCLUDING a 1-cell ghost offset), so a level with g=2 must
+  // shift its origin by g-1 per axis or its colours come out swapped against the g=1 reference
+  // (3 axes -> parity flips). og itself stays the true global inner origin (buildAmg needs it).
+  static C3 parityOg(const Level& lv) {
+    return C3{lv.og.x - lv.g + 1, lv.og.y - lv.g + 1, lv.og.z - lv.g + 1};
+  }
 
   // build the periodic level hierarchy: per axis, halve inner while even and >=2 (uniform when
   // cubic), capped at nLevels (mirrors DistributedPoissonMG::init uniform path).
@@ -414,19 +441,37 @@ class CutcellMG {
     } else {
       curDec = decomposition(static_cast<std::size_t>(size), gs.x, gs.y, gs.z);
     }
+    // Smallest block extent (any rank, any axis) — the same on every rank (the decomposition is
+    // replicated), so the per-level ghost-width decision below is rank-uniform by construction.
+    auto minBlockExtent = [](const peclet::core::decomp::BlockDecomposer<3>& d) {
+      long m = std::numeric_limits<long>::max();
+      for (const auto& s : d.sizes())
+        for (int k = 0; k < 3; ++k)
+          m = std::min(m, (long)s[k]);
+      return m;
+    };
     for (int L = 0; L < nLevels; ++L) {
       Level v;
       v.halo = std::make_shared<GridHaloTopology<3>>();
       const peclet::core::decomp::BlockDecomposer<3>& dec = curDec;
-      v.halo->buildTopology(dec, rank, G, per, comm);
+      // Communication-avoiding smoothing needs a 2-deep ghost layer; give it to the COARSE levels
+      // (where every halo message is pure latency) whose blocks can carry it (extent >= 4 on every
+      // rank; below that fall back to the per-colour exchange). Level 0 keeps g=1: its exchanges
+      // are already overlapped with the interior sweep and the solver's g=1 bridge (openness/rhs/
+      // phi staging, ghost-projection g=2 staging) assumes it. Only for the periodic/IBM operator
+      // — with domain BCs (setBoundaryConditions BEFORE initMpi) every level keeps the g=1 layout,
+      // so that path is byte-identical to the pre-CA code.
+      v.g = (L > 0 && !hasBC_ && caSmoothingEnabled() && minBlockExtent(dec) >= 4) ? 2 : 1;
+      v.caOk = (v.g == 2);
+      v.halo->buildTopology(dec, rank, v.g, per, comm);
       v.dev = std::make_shared<GridHalo<double>>();
       v.dev->init(*v.halo);
       const auto& idx = v.halo->indexer();
       const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
       v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]};
       v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};
-      v.og = {(int)oig[0] + G, (int)oig[1] + G,
-              (int)oig[2] + G};  // inner origin == single-rank og=0 at origin 0
+      v.og = {(int)oig[0] + v.g, (int)oig[1] + v.g,
+              (int)oig[2] + v.g};  // inner origin == single-rank og=0 at origin 0
       v.cfac = cf;
       v.n = idx.numCellsInclGhost();
       C3 next = gs, ratio{1, 1, 1};
@@ -505,15 +550,16 @@ class CutcellMG {
         !hasOutflow_;  // singular all-Neumann -> remove mean; Dirichlet outflow -> non-singular
   }
   // hold the pressure/correction ghost at 0 on outflow faces (open face -> Dirichlet p=0). Call
-  // after every (periodic) fill of a solution / search-direction field, on the level it lives.
-  void applyOutflowGhost(C3 ext, CCField x) {
+  // after every (periodic) fill of a solution / search-direction field, on the level it lives
+  // (g = that level's ghost width).
+  void applyOutflowGhost(C3 ext, CCField x, int g = G) {
     if (!hasOutflow_)
       return;
     B3 e{ext.x, ext.y, ext.z};
     for (int a = 0; a < 3; ++a)
       for (int s = 0; s < 2; ++s)
         if (bc_[2 * a + s] == 3)
-          bcZeroPressureGhost(x, e, G, a, s);
+          bcZeroPressureGhost(x, e, g, a, s);
   }
   // re-impose the non-periodic boundary openness a periodic fill leaves wrong: Neumann wall/inflow
   // -> 0 (closed), Dirichlet outflow -> left open. Call after every (periodic) openness fill, per
@@ -527,9 +573,9 @@ class CutcellMG {
       for (int s = 0; s < 2; ++s) {
         const int t = bc_[2 * a + s];
         if (t == 1 || t == 2)
-          bcSetOpenness(oa[a], e, G, a, s, 0.0);  // wall/inflow Neumann -> closed
+          bcSetOpenness(oa[a], e, lv.g, a, s, 0.0);  // wall/inflow Neumann -> closed
         else if (t == 3)
-          bcSetOpenness(oa[a], e, G, a, s, 1.0);  // outflow -> open (periodic fill wraps wrong)
+          bcSetOpenness(oa[a], e, lv.g, a, s, 1.0);  // outflow -> open (periodic fill wraps wrong)
       }
   }
 
@@ -551,14 +597,20 @@ class CutcellMG {
       Level& c = lv_[L];
       Level& fin = lv_[L - 1];
       coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(fin.ox), CCConst(fin.oy), CCConst(fin.oz), c.ext,
-                     fin.ext, G, c.inner, fin.ratio);
+                     fin.ext, c.g, fin.g, c.inner, fin.ratio);
       fillOpenness(c);  // periodic ghost openness (operator build reads the + neighbour face)
       applyBoundaryOpenness(c);  // re-impose non-periodic boundary faces per coarse level
       const double sx = 1.0 / (double)(c.cfac.x * c.cfac.x),
                    sy = 1.0 / (double)(c.cfac.y * c.cfac.y),
                    sz = 1.0 / (double)(c.cfac.z * c.cfac.z);
+      // Width-2 (CA-eligible) levels also assemble the 1-deep ghost RING of the operator (build
+      // box widened by 1): the ring rows are a deterministic function of the EXCHANGED openness,
+      // so they come out bit-identical to the owning rank's inner rows — the redundant ring
+      // re-smoothing of the CA sweep reads them. Inner rows are computed from the same operands
+      // as the g-box build (identical). g=1 levels keep the inner-only build.
       buildCutcellOp(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.ox), CCConst(c.oy),
-                     CCConst(c.oz), c.ext, G, idx2 * sx, idy2 * sy, idz2 * sz);
+                     CCConst(c.oz), c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy,
+                     idz2 * sz);
     }
     // The operator (all levels, including the bottom) just changed: invalidate the agglomerated
     // GraphAMG bottom solve so the next solve rebuilds it from the CURRENT coefficients. The porous
@@ -829,44 +881,81 @@ class CutcellMG {
     // (same interior/shell split as the smoother); single-rank: the periodic wrap copy.
     auto fullResidual = [&] {
       residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                      FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, G);
+                      FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lv.g);
     };
     if (!resFill_) {  // PECLET_FLOW_MG_RESFILL=0: the legacy stale-ghost residual (ablation only)
       fullResidual();
     }
 #ifdef PECLET_FLOW_MPI
     else if (distributed_) {
-      const C3 lo{G + 1, G + 1, G + 1};
-      const C3 hi{lv.ext.x - G - 1, lv.ext.y - G - 1, lv.ext.z - G - 1};
+      const int g = lv.g;
+      const C3 lo{g + 1, g + 1, g + 1};
+      const C3 hi{lv.ext.x - g - 1, lv.ext.y - g - 1, lv.ext.z - g - 1};
       lv.dev->exchangeBegin(lv.x);
       residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
                          FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lo, hi,
                          C3{0, 0, 0}, C3{0, 0, 0});
       lv.dev->exchangeEnd(lv.x);
-      applyOutflowGhost(lv.ext, lv.x);
+      applyOutflowGhost(lv.ext, lv.x, g);
       residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
                          FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext,
-                         C3{G, G, G}, C3{lv.ext.x - G, lv.ext.y - G, lv.ext.z - G}, lo, hi);
+                         C3{g, g, g}, C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
     } else
 #endif
     {
       fill(lv, lv.x);  // single-rank: the periodic wrap copy
-      applyOutflowGhost(lv.ext, lv.x);
+      applyOutflowGhost(lv.ext, lv.x, lv.g);
       fullResidual();
     }
     Level& cs = lv_[L + 1];
-    restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, G, cs.inner, lv.ratio);
+    restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
     Kokkos::deep_copy(cs.x, 0.0);
     vcycle(L + 1, sym);
     fill(cs, cs.x);
-    applyOutflowGhost(cs.ext, cs.x);
-    prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, G, lv.inner, lv.ratio);
+    applyOutflowGhost(cs.ext, cs.x, cs.g);
+    prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
     smooth(lv, post_, /*reverse=*/sym);
     if (meanRemovalAll_ || L == 0)
       removeMean(lv, lv.x);
   }
+  // Communication-avoiding smoothing on this level? Needs the width-2 topology (caOk), and the
+  // periodic/IBM operator — with domain BCs the ring rows would need post-BC ghost openness the
+  // exchange does not deliver, so those keep the per-colour exchange.
+  bool caSmooth(const Level& lv) const { return distributed_ && lv.caOk && !hasBC_; }
   void smooth(Level& lv, int sweeps, bool reverse) {
-    const C3 og = lv.og;  // global red-black parity (block inner origin); {0,0,0} single-rank
+    const C3 og = parityOg(lv);  // red-black parity origin ({0,0,0} single-rank)
+#ifdef PECLET_FLOW_MPI
+    if (caSmooth(lv)) {
+      // Communication-avoiding pair: ONE 2-deep exchange per red-black pair instead of a 1-deep
+      // exchange per colour. The first colour overlaps its exchange with the interior sweep, then
+      // sweeps the boundary shell PLUS the 1-deep ghost ring — redundantly recomputing the
+      // neighbour's boundary cells from the same operands the neighbour uses (2-deep x ghosts,
+      // ring rows of the operator and rhs are exchanged/assembled bit-identical), so the ring
+      // values come out equal to what a fresh exchange would deliver. The second colour then
+      // sweeps with NO exchange: its boundary cells read only first-colour ring cells (a colour
+      // never reads its own colour). Bit-identical to the per-colour exchange at half the events.
+      const int g = lv.g;
+      const C3 lo{g + 1, g + 1, g + 1};
+      const C3 hi{lv.ext.x - g - 1, lv.ext.y - g - 1, lv.ext.z - g - 1};
+      const C3 rlo{g - 1, g - 1, g - 1};
+      const C3 rhi{lv.ext.x - g + 1, lv.ext.y - g + 1, lv.ext.z - g + 1};
+      lv.dev->exchange(lv.rhs);  // ring rhs (owner's inner values); rhs is fixed over the sweeps
+      for (int k = 0; k < sweeps; ++k) {
+        const int c0 = reverse ? 1 : 0, c1 = 1 - c0;
+        lv.dev->exchangeBegin(lv.x);
+        cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                              FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, c0, lo,
+                              hi, C3{0, 0, 0}, C3{0, 0, 0});
+        lv.dev->exchangeEnd(lv.x);
+        cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                              FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, c0, rlo,
+                              rhi, lo, hi);
+        cutcellSmoothColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
+                           FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, g, c1);
+      }
+      return;
+    }
+#endif
     for (int k = 0; k < sweeps; ++k)
       for (int s = 0; s < 2; ++s) {
         const int color = reverse ? (1 - s) : s;
@@ -877,24 +966,25 @@ class CutcellMG {
           // nor the outflow ghost), complete the exchange, then sweep the boundary shell. A
           // color's cells never read same-color cells, so this ordering is bit-identical to the
           // blocking fill-then-full-sweep (validated by the np>1 bit-exact MG tests).
-          const C3 lo{G + 1, G + 1, G + 1};
-          const C3 hi{lv.ext.x - G - 1, lv.ext.y - G - 1, lv.ext.z - G - 1};
+          const int g = lv.g;
+          const C3 lo{g + 1, g + 1, g + 1};
+          const C3 hi{lv.ext.x - g - 1, lv.ext.y - g - 1, lv.ext.z - g - 1};
           lv.dev->exchangeBegin(lv.x);
           cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
                                 FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, color,
                                 lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
           lv.dev->exchangeEnd(lv.x);
-          applyOutflowGhost(lv.ext, lv.x);
+          applyOutflowGhost(lv.ext, lv.x, g);
           cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
                                 FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, color,
-                                C3{G, G, G}, C3{lv.ext.x - G, lv.ext.y - G, lv.ext.z - G}, lo, hi);
+                                C3{g, g, g}, C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
           continue;
         }
 #endif
         fill(lv, lv.x);
-        applyOutflowGhost(lv.ext, lv.x);
+        applyOutflowGhost(lv.ext, lv.x, lv.g);
         cutcellSmoothColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
-                           FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, G, color);
+                           FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, lv.g, color);
       }
   }
 
@@ -983,10 +1073,11 @@ class CutcellMG {
     std::vector<std::uint8_t> lsolid;  // AGMG_DEBUG: identity-row marker, per local row
     amgGlobalOfLocal_.clear();
     const int band[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+    const int g = lv.g;
     for (int k = 0; k < nz; ++k)
       for (int j = 0; j < ny; ++j)
         for (int i = 0; i < nx; ++i) {
-          const long p = (long)(i + G) + (long)(j + G) * ex + (long)(k + G) * ex * ey;
+          const long p = (long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey;
           const int gx = lv.og.x + i, gy = lv.og.y + j, gz = lv.og.z + k;
           const int gid = gx + gy * gbx + gz * gbx * gby;
           amgGlobalOfLocal_.push_back(gid);
@@ -1165,6 +1256,7 @@ class CutcellMG {
       buildAmg(lv);
 #endif
     const int nx = lv.inner.x, ny = lv.inner.y, nz = lv.inner.z, ex = lv.ext.x, ey = lv.ext.y;
+    const int g = lv.g;
     auto hrhs = Kokkos::create_mirror_view(lv.rhs);
     Kokkos::deep_copy(hrhs, lv.rhs);
     std::vector<double> lb;
@@ -1172,7 +1264,7 @@ class CutcellMG {
     for (int k = 0; k < nz; ++k)
       for (int j = 0; j < ny; ++j)
         for (int i = 0; i < nx; ++i)
-          lb.push_back((double)hrhs((long)(i + G) + (long)(j + G) * ex + (long)(k + G) * ex * ey));
+          lb.push_back((double)hrhs((long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey));
     // all-gather rhs by global id -> b; every rank solves the identical problem.
     std::vector<double> z((std::size_t)std::max(amgGlobalN_, 1), 0.0);
 #ifdef PECLET_FLOW_MPI
@@ -1198,7 +1290,7 @@ class CutcellMG {
     for (int k = 0; k < nz; ++k)
       for (int j = 0; j < ny; ++j)
         for (int i = 0; i < nx; ++i)
-          hx((long)(i + G) + (long)(j + G) * ex + (long)(k + G) * ex * ey) =
+          hx((long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey) =
               z[(std::size_t)amgGlobalOfLocal_[c++]];
     Kokkos::deep_copy(lv.x, hx);
     if (agmgDebug() && !distributed_) {
@@ -1206,9 +1298,9 @@ class CutcellMG {
       // (ghost fill + outflow ghost + 7-point apply). A large residual here means buildAmg
       // assembled a DIFFERENT matrix than the one the hierarchy applies.
       fill(lv, lv.x);
-      applyOutflowGhost(lv.ext, lv.x);
+      applyOutflowGhost(lv.ext, lv.x, lv.g);
       residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                      FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, G);
+                      FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lv.g);
       const double rn = maxabs(lv, lv.res);
       auto hb = Kokkos::create_mirror_view(lv.rhs);
       Kokkos::deep_copy(hb, lv.rhs);
@@ -1403,6 +1495,7 @@ class CutcellMG {
   void fillAxis(Level& lv, CCField f, int axis) {
     CCExec space;
     C3 e = lv.ext;
+    const int G = lv.g;  // shadows the class constant: this level's ghost width
     int N3[3] = {lv.inner.x, lv.inner.y, lv.inner.z};
     int dims[3] = {e.x, e.y, e.z};
     long st[3] = {1, e.x, (long)e.x * e.y};
@@ -1616,11 +1709,12 @@ class CutcellMG {
   double dot(Level& lv, CCField a, CCField b) {
     CCExec space;
     C3 e = lv.ext;
+    const int g = lv.g;
     CCField aa = a, bb = b;
     FPV ac = lv.AC;
     double s = 0;
     ccReduce3(
-        "mgdot", C3{G, G, G}, C3{e.x - G, e.y - G, e.z - G},
+        "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           if (ac(i) > 1e-30f)
@@ -1632,11 +1726,12 @@ class CutcellMG {
   double maxabs(Level& lv, CCField a) {
     CCExec space;
     C3 e = lv.ext;
+    const int g = lv.g;
     CCField aa = a;
     FPV ac = lv.AC;
     double m = 0;
     ccReduce3(
-        "mgmax", C3{G, G, G}, C3{e.x - G, e.y - G, e.z - G},
+        "mgmax", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           if (ac(i) > 1e-30f) {
@@ -1653,14 +1748,15 @@ class CutcellMG {
       return;  // non-singular operator (Dirichlet outflow present) -> no null-space projection
     CCExec space;
     C3 e = lv.ext;
+    const int g = lv.g;
     CCField ff = f;
     FPV ac = lv.AC;
     double sum = 0;
     long cnt = 0;
     Kokkos::parallel_reduce(
         "mgmeanr",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {g, g, g},
+                                                       {e.x - g, e.y - g, e.z - g}),
         KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           if (ac(i) > 1e-30f) {
@@ -1677,8 +1773,8 @@ class CutcellMG {
     const double mean = sum / (double)cnt;
     Kokkos::parallel_for(
         "mgmeans",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {g, g, g},
+                                                       {e.x - g, e.y - g, e.z - g}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           if (ac(i) > 1e-30f)
