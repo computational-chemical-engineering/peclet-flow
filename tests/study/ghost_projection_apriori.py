@@ -215,12 +215,22 @@ def closure_weights(stf, thf):
     wbc[b] = 1.0
     return wbc, w1, w2, D
 
-def row_rescale(geo):
-    """rho = min(1, min over ghost faces of D_f) per cell (flat array)."""
+def as_order(stf, order):
+    """Closure ORDER selection, mirroring gpOrderWeights: order 1 evaluates a QUAD face with the
+    linear closure (that is what matrix_order=1 does to the implicit phi couplings)."""
+    if order >= 2:
+        return stf
+    out = stf.copy()
+    out[out == QUAD] = LIN
+    return out
+
+def row_rescale(geo, order=2):
+    """rho = min(1, min over ghost faces of D_f) per cell (flat array). D comes from the MATRIX
+    weights, so `order` is matrix_order."""
     N = geo["N"]
     rho = np.ones(N**3)
     for (a, side), (st, th) in geo["states"].items():
-        stf, thf = st.ravel(), th.ravel()
+        stf, thf = as_order(st.ravel(), order), th.ravel()
         _, _, _, D = closure_weights(stf, thf)
         m = (stf == QUAD) | (stf == LIN)
         rho[m] = np.minimum(rho[m], D[m])
@@ -274,7 +284,7 @@ def divergence(geo, u3, ubc_fn, rho=None, u_explicit=None):
     d[~geo["active"].ravel()] = 0.0
     return d
 
-def assemble(geo, rho):
+def assemble(geo, rho, order=2):
     """Sparse A (N^3 x N^3): binary-openness base + closure deltas, overlay rows scaled by rho.
     Inactive rows = identity. Convention: A phi = -div(u*) (positive diagonal)."""
     N = geo["N"]
@@ -291,7 +301,7 @@ def assemble(geo, rho):
     for a in range(3):
         for side in (-1, +1):
             st, th = geo["states"][(a, side)]
-            stf, thf = st.ravel(), th.ravel()
+            stf, thf = as_order(st.ravel(), order), th.ravel()
             sgn = float(side) if side > 0 else -1.0
             # face at roll-offset m couples cells (i+m-1, i+m); div term sgn*c_f*u(face m)
             # A[r, cp] -= rho_r*sgn*c_f ; A[r, cm] += rho_r*sgn*c_f
@@ -570,6 +580,253 @@ def test_probes(N):
     print(f"    deferred-correction rate max|1-lam| = {dc:.3f}  (<1 => DC converges)")
     return dict(gap=gap, re_min=float(re.min()), dc=dc)
 
+# ------------------------------------------------- phase A4/A5: sparse split + compatibility
+# (doc/ghost_hardening_plan.md). test_probes above answers the same questions densely on a single
+# analytic sphere at N=12; these run on geometries big enough to carry real thin-gap statistics —
+# a DEM-grown periodic bed (pack_bed.py npz, cubic box) or a two-sphere near-tangent pair.
+
+def sdf_bed(npz_path, jitter=0.0):
+    """Periodic union-of-spheres SDF from a pack_bed.py packing, mapped onto the unit box.
+
+    Requires a CUBIC packing box (s100/s101/s108); the harness grid is the unit cube, so the
+    sphere radius in cells is N/box. Periodic images are included, so the geometry the harness
+    classifies is the same one the solver sees on that bed at that resolution.
+    """
+    pk = np.load(npz_path)
+    box = np.asarray(pk["box"], float)
+    if not np.allclose(box, box[0]):
+        raise SystemExit(f"{npz_path}: box {box} is not cubic (the harness grid is the unit cube)")
+    c = np.asarray(pk["centers"], float)/box[0]        # -> [0,1)
+    r = np.asarray(pk["scales"], float)/box[0]
+    if jitter:
+        rng = np.random.default_rng(0)
+        c = c + jitter*rng.standard_normal(c.shape)/box[0]
+
+    def f(x, y, z):
+        d = np.full(np.shape(x), 1e30)
+        for sh in np.stack(np.meshgrid(*[[-1.0, 0.0, 1.0]]*3, indexing="ij"), -1).reshape(-1, 3):
+            for (cx, cy, cz), rr in zip(c + sh, r):
+                if (cx + rr < -0.55 or cx - rr > 0.55 or cy + rr < -0.55 or cy - rr > 0.55
+                        or cz + rr < -0.55 or cz - rr > 0.55):
+                    continue          # the harness box is [-0.5, 0.5)^3
+                d = np.minimum(d, np.sqrt((x - (cx - 0.5))**2 + (y - (cy - 0.5))**2
+                                          + (z - (cz - 0.5))**2) - rr)
+        return d
+    f.n_spheres = len(c)
+    f.r_unit = float(r[0])
+    return f
+
+def sdf_pair(gap, rad=0.22):
+    """Two spheres on the x-axis separated by `gap` (in units of the box side), periodic images
+    included. gap -> 0 is the near-tangent pathological configuration."""
+    off = rad + 0.5*gap
+
+    def f(x, y, z):
+        d = np.full(np.shape(x), 1e30)
+        for sh in ([-1.0, 0.0, 1.0] if True else []):
+            for cx in (-off + sh, off + sh):
+                d = np.minimum(d, np.sqrt((x - cx)**2 + y*y + z*z) - rad)
+        return d
+    return f
+
+def solve_set(geo, M):
+    """The cells the solver actually solves on: active, phi-coupled, and in the LARGEST connected
+    component of the COUPLED graph (flow's fragmentation guard, flow_ibm.hpp set_solid)."""
+    import scipy.sparse.csgraph as csg
+    activef = geo["active"].ravel()
+    coupled = np.zeros(geo["N"]**3, bool)
+    for (a, side), (st, _) in geo["states"].items():
+        coupled |= (st.ravel() == COUPLED)
+    cand = np.nonzero(activef & coupled)[0]
+    G = M.tocsr()[cand, :].tocsc()[:, cand]
+    ncomp, lab = csg.connected_components(G, directed=False)
+    keep = cand[lab == np.argmax(np.bincount(lab))]
+    return np.sort(keep), ncomp
+
+def probe_split(geo, verbose=True, power_iters=200, tol=1e-6, order=2):
+    """A4: rho(S^-1 N) by power iteration, S = binary-openness 7-point op, N = gp overlay delta.
+    A5: the compatibility bias of the nonsymmetric A under the solver's mean removal.
+    Sparse throughout, so it runs on beds the dense probe cannot touch."""
+    rho = row_rescale(geo, order)
+    A = assemble(geo, rho, order)
+    M = binary_openness_op(geo)
+    ii, ncomp = solve_set(geo, M)
+    n = len(ii)
+    S = sp.csc_matrix(M.tocsr()[ii, :].tocsc()[:, ii])
+    Aa = sp.csc_matrix(A.tocsr()[ii, :].tocsc()[:, ii])
+    Nn = (Aa - S).tocsr()
+
+    # gauge: S is singular (constants). Pin one dof, then project the mean out of every iterate --
+    # exactly what the solver's removeMean does around the V-cycle preconditioner.
+    jp = int(np.argmax(np.asarray(S.diagonal())))
+    Sp = S.tolil()
+    Sp[jp, :] = 0.0
+    Sp[:, jp] = 0.0
+    Sp[jp, jp] = 1.0
+    lu = spla.splu(sp.csc_matrix(Sp))
+
+    def Sinv(v):
+        v = v - v.mean()
+        v[jp] = 0.0
+        z = lu.solve(v)
+        return z - z.mean()
+
+    # B0 probe (doc/ghost_hardening_findings_A.md): what the split looks like if the
+    # PRECONDITIONER also carries the row rescale. A = diag(rho)*S + N, so preconditioning with
+    # S' = diag(rho)*S gives S'^-1 A = S^-1 (diag(rho)^-1 A), i.e. the rescale cancels out of the
+    # Krylov entirely -- rho only ever helped cut-cell because there it is baked into the same
+    # stencil the smoother reads.
+    Nu = (sp.diags(1.0/np.asarray(rho)[ii]) @ Aa - S).tocsr()
+
+    def power(Nmat):
+        rng = np.random.default_rng(7)
+        x = rng.standard_normal(n)
+        x -= x.mean()
+        x /= np.linalg.norm(x)
+        nrm = 0.0
+        for k in range(power_iters):
+            y = Sinv(Nmat @ x)
+            nrm = np.linalg.norm(y)
+            if nrm < 1e-300:
+                return 0.0
+            x = y/nrm
+        return float(nrm)
+
+    rho_b0 = power(Nu)
+
+    # smallest |eigenvalue| of the PRECONDITIONED operator M^-1 A (M = the binary-openness V-cycle
+    # surrogate): 1/rho(A^-1 M) by power iteration. Together with lam_max ~ 1 + rho(S^-1 N) this is
+    # the BiCGStab health metric -- a near-zero lam_min is the signature of rows the preconditioner
+    # cannot serve (the phase-A "B0" question).
+    lam_min = float("nan")
+    try:
+        Ap_ = sp.csc_matrix(Aa)
+        Ap_ = Ap_ + 1e-13*sp.identity(n, format="csc")
+        luA = spla.splu(Ap_)
+        rng2 = np.random.default_rng(3)
+        xx = rng2.standard_normal(n)
+        xx -= xx.mean()
+        xx /= np.linalg.norm(xx)
+        gmax = 0.0
+        for _ in range(120):
+            yy = luA.solve(S @ xx)
+            yy -= yy.mean()
+            gmax = np.linalg.norm(yy)
+            if gmax < 1e-300 or not np.isfinite(gmax):
+                break
+            xx = yy/gmax
+        lam_min = 1.0/gmax if gmax > 0 else float("nan")
+    except Exception as e:
+        print(f"    (lam_min probe skipped: {type(e).__name__})")
+    rng = np.random.default_rng(7)
+    x = rng.standard_normal(n)
+    x -= x.mean()
+    x /= np.linalg.norm(x)
+    lam = 0.0
+    for k in range(power_iters):
+        y = Sinv(Nn @ x)
+        nrm = np.linalg.norm(y)
+        if nrm < 1e-300:
+            lam = 0.0
+            break
+        lam_new = float(x @ y)          # Rayleigh quotient (x is unit)
+        x = y/nrm
+        if k > 20 and abs(lam_new - lam) < tol*max(1.0, abs(lam_new)):
+            lam = lam_new
+            break
+        lam = lam_new
+    rho_sn = float(nrm)                  # |S^-1 N x| at the fixed point = spectral radius estimate
+
+    # A5: how far the LEFT null vector is from the constants. 1^T A is exactly the column sums;
+    # the solver removes the mean (projects on 1), so whatever 1^T A leaves behind is the bias
+    # channel. Normalised by the row scale so it reads as a relative defect.
+    colsum = np.asarray(Aa.sum(axis=0)).ravel()
+    rowabs = np.asarray(abs(Aa).sum(axis=1)).ravel()
+    scale = float(np.mean(rowabs))
+    l1 = float(np.abs(colsum).sum())/(scale*n)
+    linf = float(np.abs(colsum).max())/scale
+    rowsum = np.asarray(Aa.sum(axis=1)).ravel()      # A@1: must be ~0 (constants right-null)
+    if verbose:
+        print(f"    solve set {n} cells ({ncomp} coupled components; "
+              f"{100.0*n/geo['N']**3:.1f} % of the grid)")
+        print(f"    rho(S^-1 N)                    = {rho_sn:.4f}   "
+              f"({'DC converges' if rho_sn < 1 else 'DC DIVERGES'}; Rayleigh {lam:+.4f})")
+        print(f"    rho(S^-1 N) with rho-aware S   = {rho_b0:.4f}   "
+              f"(B0: the preconditioner carries the row rescale too)")
+        print(f"    spec(M^-1 A): |lam|_min        = {lam_min:.4e}   "
+              f"lam_max ~ {1.0 + rho_sn:.3f}   spread ~ {(1.0 + rho_sn)/max(lam_min,1e-300):.3e}")
+        print(f"    A@1  max                       = {np.abs(rowsum).max():.2e}  "
+              f"(right null = constants)")
+        print(f"    |1^T A|_1/(n*scale)            = {l1:.3e}   "
+              f"|1^T A|_inf/scale = {linf:.3e}   (left null != constants)")
+    return dict(n=n, ncomp=ncomp, rho_sn=rho_sn, rho_b0=rho_b0, lam_min=lam_min,
+                l1=l1, linf=linf,
+                rowsum=float(np.abs(rowsum).max()), A=Aa, S=S, ii=ii, geo=geo, rho=rho)
+
+def compat_bias(pr, geo, exact_leftnull=True):
+    """A5 (second half): the per-solve bias the mean removal leaves behind. Build the physical RHS
+    b = -div(u*) the solver would see, project it the way the solver does (remove the mean), and
+    measure the component that the TRUE left null vector still sees -- that part is unreachable by
+    any Krylov iteration and is what the incremental-rotational pressure accumulates."""
+    Aa, ii = pr["A"], pr["ii"]
+    n = len(ii)
+    u3 = face_fields(geo, periodic_u)
+    pmf = phi_man(*geo["Xc"])
+    ustar = [u3[a] + (pmf - np.roll(pmf, +1, axis=a)) for a in range(3)]
+    b_raw = (-divergence(geo, ustar, periodic_u, rho=pr["rho"]))[ii]
+    b = b_raw - b_raw.mean()                          # the solver's mean removal
+    # Left null vector by inverse iteration on A^T (A is numerically singular, so the LU solve
+    # amplifies exactly the null direction). svds(which="SM") is unreliable here -- cross-checked
+    # against the dense eigendecomposition of test_probes: same vector to 1e-6.
+    if not exact_leftnull:   # the LU of the 13-point A^T is the expensive part; skip it on big N
+        print("    (left-null vector skipped: --no-leftnull)")
+        return dict(gap=float("nan"), gap_raw=float("nan"), ones_ang=float("nan"),
+                    lnres=float("nan"))
+    At = sp.csc_matrix(Aa.T)
+    lu = spla.splu(At + 1e-12*sp.identity(n, format="csc"))
+    w = np.ones(n)/np.sqrt(n)
+    for _ in range(30):
+        z = lu.solve(w)
+        nz = np.linalg.norm(z)
+        if not np.isfinite(nz) or nz == 0.0:
+            break
+        w = z/nz
+    resid = float(np.linalg.norm(At @ w))
+    gap = abs(float(w @ b))/max(np.linalg.norm(b), 1e-300)
+    gap_raw = abs(float(w @ b_raw))/max(np.linalg.norm(b_raw), 1e-300)
+    ones_ang = abs(float(w @ np.ones(n)))/np.sqrt(n)
+    print(f"    left-null residual |A^T w|     = {resid:.3e}")
+    print(f"    |w.1|/(|w||1|)                 = {ones_ang:.4f}   (1.0 => w IS the constants)")
+    print(f"    compat gap |w.b|/|b|           = {gap:.3e} after mean removal "
+          f"({gap_raw:.3e} raw)   (Krylov cannot reduce this)")
+    return dict(gap=gap, gap_raw=gap_raw, ones_ang=ones_ang, lnres=resid)
+
+def test_split(args):
+    """Phase-A4/A5 driver: run the sparse split + compatibility probes on the requested geometry."""
+    cases = []
+    if args.bed:
+        f = sdf_bed(args.bed)
+        for N in args.split_n:
+            cases.append((f"bed {args.bed.split('/')[-1]} N={N} (R={N*f.r_unit:.1f} cells)", N, f))
+    elif args.pair is not None:
+        for N in args.split_n:
+            cases.append((f"two spheres gap={args.pair:g} N={N} "
+                          f"(gap={args.pair*N:.2f} cells)", N, sdf_pair(args.pair)))
+    else:
+        for N in args.split_n:
+            cases.append((f"single analytic sphere N={N}", N, sdf_sphere))
+    out = []
+    for name, N, f in cases:
+        print(f"\n[A4/A5] {name}  matrix_order={args.matrix_order}")
+        geo = build_geo(N, sdf=f)
+        pr = probe_split(geo, order=args.matrix_order)
+        cb = compat_bias(pr, geo, exact_leftnull=not args.no_leftnull)
+        out.append(dict(name=name, N=N, **{k: pr[k] for k in
+                                           ("n", "ncomp", "rho_sn", "rho_b0", "lam_min",
+                                            "l1", "linf")},
+                        **cb))
+    return out
+
 def test_degenerate():
     print("\n[5] degenerate geometries (classification + null-space sanity)")
     N = 24
@@ -605,7 +862,23 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="smaller grids")
     ap.add_argument("--probe-n", type=int, default=12)
+    # phase A4/A5 of doc/ghost_hardening_plan.md (sparse, runs on real beds; skips tests 1-5)
+    ap.add_argument("--split", action="store_true",
+                    help="run ONLY the A4/A5 probes: rho(S^-1 N) + compatibility bias")
+    ap.add_argument("--bed", default="", help="pack_bed.py npz (cubic box) as the geometry")
+    ap.add_argument("--pair", type=float, default=None,
+                    help="two near-tangent spheres separated by this gap (box units)")
+    ap.add_argument("--split-n", type=int, nargs="+", default=[32],
+                    help="grid sizes for --split")
+    ap.add_argument("--matrix-order", type=int, default=2,
+                    help="closure order of the IMPLICIT phi couplings (1 = the mixed mode)")
+    ap.add_argument("--no-leftnull", action="store_true",
+                    help="skip the (expensive) exact left-null vector; keep |1^T A| only")
     args = ap.parse_args()
+
+    if args.split:
+        test_split(args)
+        raise SystemExit(0)
 
     Ns_eval = [16, 32, 64] if args.quick else [16, 32, 64, 128]
     Ns_solve = [16, 24, 32] if args.quick else [16, 24, 32, 48]

@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "face_props.hpp"
+#include "ghost_projection_debug.hpp"  // opt-in gp row forensics (PECLET_FLOW_GP_DEBUG), no-op off
 #include "grid_layout.hpp"
 #include "mac_approx_projection.hpp"
 #include "mac_cutcell_mg.hpp"
@@ -931,6 +932,14 @@ class Solver {
                                   hasExactCross_ ? CCConst(tEx_[1][1]) : CCConst(),
                                   hasExactCross_ ? CCConst(tEx_[2][2]) : CCConst(),
                                   /*useGhost=*/distributed_);
+        if (gpDebugLevel() > 0) {  // PECLET_FLOW_GP_DEBUG row forensics (analysis only)
+          int gpDbgRank = 0;
+#ifdef PECLET_FLOW_MPI
+          if (distributed_)
+            MPI_Comm_rank(comm_, &gpDbgRank);
+#endif
+          gpDebugReport(gpOv_, gpNRows_, C3{nx_, ny_, nz_}, gpIdMap_, gpDbgRank);
+        }
         copyInner(ox1_, e1_, 1, CCConst(oxb_), e_, G);  // MG surrogate = binary openness
         copyInner(oy1_, e1_, 1, CCConst(oyb_), e_, G);
         copyInner(oz1_, e1_, 1, CCConst(ozb_), e_, G);
