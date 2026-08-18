@@ -129,15 +129,24 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Seed each pressure solve from the previous step's phi (default off).")
       .def(
           "set_face_interp", &S::setFaceInterp, nb::arg("mode"),
-          "Collocated cut-cell projection treatment: 0 = plain averaging + central-difference "
-          "grad(P) (default), 1 = wall-aware cell->face map only (ablation), 2 = wall-aware map + "
-          "its transpose (face-centre; ablation), 3 = mode 2 at the open-face-centroid (FV "
-          "constraint, FD momentum), 4 = fully-FV (mode-3 projection + second-order wall "
-          "viscous-flux deferred correction on the momentum), 5/6/7 = Basilisk-embed ablations, "
-          "9 = CUTCELL-GHOST HYBRID: mode-0 aperture projection + the directional gpCenterGrad "
-          "-grad(P)/cell correction (recommended for tight-throat porous media: throat-throttling "
-          "apertures, symmetric MG-PCG, ~7-20x below mode-0 drag error; not clean 2nd order), "
-          "10 = dead ablation (diverges), do not use. No effect on the staggered solver.")
+          "DEPRECATED integer form of set_collocated_scheme (0 = plain, 9 = gauge-exact, the "
+          "default). Modes 1/2/5/6/7/10 were RETIRED 2026-08-18 (ablations; 10 measured divergent) "
+          "and now raise. Modes 3/4 survive as FV-constraint ablations (4 pairs with "
+          "set_fv_relax). No effect on the staggered solver.")
+      .def(
+          "set_collocated_scheme", &S::setCollocatedScheme, nb::arg("name"),
+          "Collocated cut-cell projection scheme (no effect on the staggered solver):\n"
+          "  'gauge-exact' (DEFAULT since 2026-08-18) — the aperture constraint unchanged "
+          "(throat-throttling, symmetric MG-PCG, no fragmentation guard) with the directional "
+          "gauge-exact pressure gradient replacing the two operators measured O(1) at cut cells: "
+          "the -grad(P) predictor and the projection's cell correction. Second order on sphere "
+          "beds at phi=0.50 AND phi=0.60, and the cheapest scheme measured — 4.6x faster than the "
+          "staggered cut-cell reference, 5-6x faster than the ghost projection.\n"
+          "  'plain' — the legacy path: plain 1/2-1/2 face average + central-difference grad(P). "
+          "FIRST order at curved cut cells (the cell gradient reads the decoupled p=0 of "
+          "solid-centred neighbours, an O(1/h) gauge error), and on a dense bed it also fails to "
+          "reach steady state within 800 steps at coarse resolution. Kept for reproducing "
+          "published results.")
       .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
            "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
            "explicit-lagged wall term). Steady state is independent of w.")
@@ -244,7 +253,7 @@ static void bind_solver(nb::module_& m, const char* name) {
            "clears. Single-rank.")
       .def("set_ghost_projection", &S::setGhostProjection, nb::arg("on"),
            nb::arg("matrix_order") = 2, nb::arg("rhs_order") = 2,
-           "EXPERIMENTAL directional ghost-cell projection (second staggered IBM): point-based FD "
+           "QUARANTINED 2026-08-18 (verification only, unsupported): superseded by the gauge-exact collocated scheme, which matches its accuracy at 5-6x lower cost. Kept as the independent second discretization behind the cross-IBM physics gate. Enabling it on the collocated grid silently selects the plain face map, since it owns the operators the gauge-exact scheme replaces. EXPERIMENTAL directional ghost-cell projection (second staggered IBM): point-based FD "
            "divergence with wall-anchored directional closures instead of the openness-weighted "
            "cut-cell projection; solved by MG-preconditioned BiCGStab. Call BEFORE set_solid. "
            "Closure orders (1=linear, 2=quadratic): (matrix_order, rhs_order) = (2,2) full "

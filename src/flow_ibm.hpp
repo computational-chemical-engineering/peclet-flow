@@ -26,9 +26,11 @@
 #include <Kokkos_Core.hpp>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "face_props.hpp"
+#include "gauge_exact_gradient.hpp"
 #include "ghost_projection_debug.hpp"  // opt-in gp row forensics (PECLET_FLOW_GP_DEBUG), no-op off
 #include "grid_layout.hpp"
 #include "mac_approx_projection.hpp"
@@ -254,7 +256,9 @@ class Solver {
       // plain (mode-0) face map applies — the wall-aware/FV/embed face-interp modes replace the
       // very operators this scheme owns.
       if (on && faceInterp_ != 0)
-        throw std::runtime_error("set_ghost_projection: collocated ghost requires face_interp 0");
+        faceInterp_ = 0;  // QUARANTINED verification path: it owns the operators mode 9 replaces,
+                          // so it selects the plain face map itself rather than throwing on the
+                          // (now default) gauge-exact scheme.
     }
     if (on && (porous_ || varRho_ || hasBc_ || useChebyshev_))
       throw std::runtime_error(
@@ -372,10 +376,48 @@ class Solver {
   //       constant than mode 9 on Z&H, and DIVERGES on RCP slivers (the mode-3a non-telescoping
   //       row-sum mechanism; the telescoping gpCenterGrad force does not cure the
   //       constraint-side injection). Do not use.
+  // Collocated cut-cell projection treatment. THE SUPPORTED VALUES ARE 0 AND 9 — prefer the
+  // string API setCollocatedScheme(). 9 ("gauge-exact") is the DEFAULT since 2026-08-18: the
+  // aperture constraint (unchanged, throat-safe, symmetric MG-PCG) with the directional
+  // gpCenterGrad replacing the two operators measured to be O(1) at cut cells — the -grad(P)
+  // predictor and the projection's cell correction. Measured on two periodic sphere beds
+  // (peclet-examples benchmarks/porous-scaling, colcmp*/colcmp060*): SECOND ORDER on both
+  // (2.36-2.89 over R=5..8, landing at +0.08 % of k_inf at R=16) where mode 0 is first order
+  // (0.94-1.20) and additionally fails to reach steady state within 800 steps on 3 of 5 rungs of
+  // the phi=0.60 bed; and cheapest of every variant tried, 4.6x faster than the STAGGERED
+  // cut-cell reference and 5-6x faster than the directional ghost projection.
+  //
+  // RETIRED 2026-08-18 (rejected here; the kernels remain but are unreachable, deletion is a
+  // follow-up): 1, 2, 5, 6, 7 were pure ablations, and 10 was a documented dead ablation (O(h)
+  // with a worse constant on Z&H, divergent on RCP slivers — doc/
+  // collocated_second_order_open_problem.md §9.1). 3 and 4 (the FV-constraint variants, 4 with
+  // set_fv_relax) survive as ablations reachable only through this integer entry point.
   void setFaceInterp(int mode) {
+    static constexpr int kRetired[] = {1, 2, 5, 6, 7, 10};
+    for (int r : kRetired)
+      if (mode == r)
+        throw std::runtime_error(
+            "set_face_interp(" + std::to_string(mode) +
+            "): retired 2026-08-18 (ablation / measured divergent). Use "
+            "set_collocated_scheme(\"gauge-exact\") — the default — or \"plain\" for the "
+            "legacy first-order aperture projection.");
+    if (mode != 0 && mode != 3 && mode != 4 && mode != 9)
+      throw std::runtime_error("set_face_interp: unknown mode " + std::to_string(mode));
     if (ghostProjection_ && mode != 0)
       throw std::runtime_error("set_face_interp: incompatible with the ghost projection");
     faceInterp_ = mode;
+  }
+  // Preferred API for the collocated projection scheme.
+  //   "gauge-exact" (default) aperture constraint + directional (gauge-exact) pressure gradient
+  //   "plain"                 the legacy plain-average / central-difference path (first order)
+  void setCollocatedScheme(const std::string& name) {
+    if (name == "gauge-exact")
+      setFaceInterp(9);
+    else if (name == "plain")
+      setFaceInterp(0);
+    else
+      throw std::runtime_error("set_collocated_scheme: expected \"gauge-exact\" or \"plain\", got \""
+                               + name + "\"");
   }
   // Under-relaxation of the mode-4 FV wall-flux defect correction (1 = full; <1 damps the stiff
   // explicit-lagged wall term). The steady state is independent of this value.
@@ -3198,7 +3240,7 @@ class Solver {
   int advScheme_ = 0;         // high-order advection: 0 = SOU (default), 1 = Koren TVD
   bool incremental_ = true,
        pwarm_ = false;    // incremental-rotational pressure (CUDA default on) + warm-start
-  int faceInterp_ = 0;    // collocated cell->face map: 0 = plain average, 1 = wall-aware (opt-in)
+  int faceInterp_ = 9;    // collocated scheme: 9 = gauge-exact (DEFAULT), 0 = plain (legacy)
   double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
