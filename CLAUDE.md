@@ -112,6 +112,37 @@ All Kokkos, header-only (`namespace flow`), C++20.
 - `src/flow_bindings.cpp` - the `flow` nanobind module: `peclet.flow.Solver` (staggered MAC, default) and
   `peclet.flow.SolverColocated` (collocated/cell-centered velocities via the `GridLayout` policy + ABC
   approximate projection — identical Python API; see [`doc/flow_colocated_plan.md`](doc/flow_colocated_plan.md))
+- `src/gauge_exact_gradient.hpp` - `gpCenterGrad`: the directional, gauge-exact cell-centre pressure
+  gradient. This is what makes the COLLOCATED projection second order, and it is the default.
+
+### Collocated scheme (the `SolverColocated` default, since 2026-08-18)
+
+`set_collocated_scheme("gauge-exact")` is the **default**: the aperture cut-cell constraint,
+unchanged (throat-throttling, symmetric, MG-PCG, no fragmentation guard), with the directional
+`gpCenterGrad` replacing the two operators measured to be O(1) at cut cells — the `-grad(P)`
+predictor and the projection's cell correction. `"plain"` restores the legacy first-order path.
+
+Measured on two periodic sphere beds (`peclet-examples/benchmarks/porous-scaling`, one fixed bed
+per φ, R = 5…16, march tol 1e-6, staggered cut-cell as the reference):
+
+| | err % R=5 → R=16 (φ=0.50) | (φ=0.60, contact-tight) | p.iters @R=16 | march wall @R=16 |
+|---|---|---|---|---|
+| gauge-exact | −2.714 → **+0.079** | −6.490 → **+0.079** | 17.4 | **29.2 s** |
+| plain | −6.937 → −2.365 | −13.015 → −3.454 | 30.3 | 313.2 s (3 rungs hit the 800-step cap) |
+| staggered cut-cell (ref) | +2.300 → +0.100 | −0.308 → +0.008 | 27.7 | 133.7 s |
+
+Second order on both beds (2.36–2.89 over R=5…8) against first order (0.94–1.20) for `"plain"`,
+and the cheapest scheme measured — 4.6× faster than the staggered reference. The old integer API
+`set_face_interp` survives as a deprecated alias; modes 1/2/5/6/7/10 were **retired** (ablations;
+10 measured divergent) and now raise; 3/4 remain as FV-constraint ablations.
+
+**The directional ghost-cell projection (`set_ghost_projection`) is QUARANTINED** — verification
+only, unsupported, default off. It matches the gauge-exact scheme's accuracy (+0.083 % vs
++0.079 %) at 5–6× the cost, so it buys nothing in production; it is kept as the independent second
+discretization behind the cross-IBM physics gate, along with its study harnesses. Phase A of its
+hardening plan also found the documented `(matrix_order=1, rhs_order=2)` mixed mode to be
+**march-unstable** above ~2000 spheres ([`doc/ghost_hardening_findings_A.md`](doc/ghost_hardening_findings_A.md));
+do not use it. Hardening phases B/C are cancelled.
 
 
 ## Python API Usage (`flow`)

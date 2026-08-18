@@ -1,3 +1,17 @@
+> **RESOLVED 2026-08-18 — this document is now history.** `set_face_interp(9)`, the mode §9.1
+> called "the throat-safe collocated cutcell", is the **default** collocated scheme under the name
+> `set_collocated_scheme("gauge-exact")`. Refinement ladders on two periodic sphere beds (φ=0.50
+> and a contact-tight φ=0.60) put it at **second order** and make it the cheapest scheme measured,
+> 4.6× faster than the staggered cut-cell reference and 5–6× faster than the ghost projection,
+> which it matches in accuracy. The ghost projection is quarantined. See
+> `../../peclet-examples/benchmarks/porous-scaling` (`colcmp*`, `colcmp060*`) and flow CLAUDE.md.
+>
+> One correction to §9.1 for future readers: its +14…+27 % throat over-carry is the **staggered**
+> ghost. The *collocated* ghost undershoots there (−10.1/−4.3/−1.2 %), and that is what the new
+> periodic-bed ladders reproduce (−4.5/−3.0/−1.3 %) — no over-carry appeared on either bed. Also
+> note `tests/study/rcp_pack_seed3.npz` is NON-periodic (92 of 180 spheres cross a box face), so it
+> cannot be fed to the periodic porous bench.
+
 # The collocated cut-cell 2nd-order-drag problem — a first-principles statement
 
 > **✅ RESOLVED (2026-07-17) — see §9.** The directional ghost-cell projection
