@@ -75,7 +75,8 @@ in `MPI_Waitall`, latency-bound on the small blocks.
 
 **Constructed stress case** (a periodic sphere lattice at the *reference* R=16 in which *every*
 neighbour pair is near-tangent — jittered gaps down to 0.02 R = 0.32 cells and 0.002 R = 0.032
-cells; `make_lattice_bed.py`): 64 and 216 spheres, both gaps, **all converge** in 95–105 steps.
+cells; `make_lattice_bed.py`, committed alongside the bench): 64 and 216 spheres, both gaps,
+**all converge** in 95–105 steps.
 The tighter gap needed *fewer* iterations (51 vs 61), not more.
 
 **The decisive control was already in the committed Snellius data.** `refine_np32_ghost` is
@@ -344,7 +345,7 @@ diagnostic, and the preconditioned spectrum is healthy. Ghost's ρ is not a part
   (that last one is actively harmful: split radius 1.15 → 15.4).
 - **New acceptance test, free:** the (1,2) mode on s116 must stop diverging — cheapest instance
   192×96×96, 1.8 M cells, ~1 min. Also available: the all-pairs-near-tangent lattice generator
-  (`make_lattice_bed.py`) for the plan's near-tangent case.
+  (`make_lattice_bed.py`, in the benchmark directory) for the plan's near-tangent case.
 
 **Phase C: GO, but re-specified — and re-cost it first.**
 
