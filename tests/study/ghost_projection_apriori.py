@@ -96,13 +96,26 @@ STATE_NAMES = {COUPLED: "COUPLED", QUAD: "QUAD", LIN: "LIN",
                BC_ONLY: "BC_ONLY", EXPLICIT: "EXPLICIT"}
 
 # ---------------------------------------------------------------- geometry + classification
-def build_geo(N, sdf=sdf_sphere):
-    """Classify every (cell, axis, side) face. Returns dict with sdf samples, states, thetas."""
+def build_geo(N, sdf=sdf_sphere, mode="center"):
+    """Classify every (cell, axis, side) face. Returns dict with sdf samples, states, thetas.
+
+    mode="center" (the shipped scheme): a cell carries a pressure unknown iff its CENTRE is fluid,
+    and a face is COUPLED iff the face point is fluid AND both centres are fluid. A fluid face
+    whose neighbour centre is solid therefore has nowhere to couple, which is what the SLIVER /
+    EXTENDED-theta / EXPLICIT branches exist to paper over.
+
+    mode="face" (the proposal, and the rule in doc/Robust_Scaled_IBM_Solver.tex: "pressure values
+    are required in cells where any face contains a fluid velocity"): a cell carries a pressure
+    unknown iff at least one of its six faces has a FLUID velocity point, and a face is COUPLED iff
+    its own velocity point is fluid. Every fluid face then has a live unknown on both sides, so the
+    sliver branches vanish; the wall-anchored closure is used only where it is really needed, at a
+    SOLID face point. Solid-centred cells that own fluid faces (the throats threading between
+    spheres) get their continuity equation back.
+    """
     h = 1.0/N
     c = (np.arange(N) + 0.5)*h - 0.5
     Xc = np.meshgrid(c, c, c, indexing="ij")
     Sc = sdf(*Xc)
-    active = Sc >= 0.0
 
     # face-point sdf per axis: Sf[a][i,j,k] = minus-face of cell (i,j,k) along axis a
     Sf = []
@@ -118,6 +131,14 @@ def build_geo(N, sdf=sdf_sphere):
 
     def face(m, a):           # Sf[a][i+m] along axis a
         return np.roll(Sf[a], -m, axis=a)
+
+    if mode == "face":
+        # a cell owns a pressure unknown iff any of its six face points is fluid
+        active = np.zeros(Sc.shape, bool)
+        for a in range(3):
+            active |= (face(0, a) >= 0) | (face(1, a) >= 0)
+    else:
+        active = Sc >= 0.0
 
     states = {}
     for a in range(3):
@@ -137,6 +158,27 @@ def build_geo(N, sdf=sdf_sphere):
 
             st = np.full(Sc.shape, COUPLED, dtype=np.int8)
             th = np.ones(Sc.shape)
+
+            if mode == "face":
+                # A fluid face point is COUPLED, full stop: both adjacent cells own an unknown
+                # (they share this fluid face), so the plain +-(phi_i - phi_nb) difference is
+                # available and the operator row stays symmetric. Only a SOLID face point needs
+                # the wall-anchored closure, and its sources are the fluid face points along the
+                # same axis -- whose own cells are active for the same reason.
+                sandwich = (face(0, a) < 0) & (face(1, a) < 0)
+                ghost = (Sg < 0) & ~sandwich
+                th_g = np.where(ghost, Sn/np.where(ghost, Sn - Sg, 1.0), 1.0)
+                src1 = Sn >= 0                       # near face point fluid
+                src2 = Sfar >= 0                     # far face point fluid
+                st[sandwich] = BC_ONLY
+                st[ghost & ~src1] = BC_ONLY
+                st[ghost & src1 & src2] = QUAD
+                st[ghost & src1 & ~src2] = LIN
+                th = np.where(ghost, np.clip(th_g, THETA_MIN, 1.0), th)
+                st[Sg >= 0] = COUPLED
+                st[~active] = BC_ONLY                # dead cells: no row, no flux
+                states[(a, side)] = (st, th)
+                continue
 
             coupled = (Sg >= 0) & (Snb >= 0)
             sandwich = (face(0, a) < 0) & (face(1, a) < 0)          # both faces of THIS cell solid
@@ -165,7 +207,8 @@ def build_geo(N, sdf=sdf_sphere):
             st[coupled] = COUPLED
             states[(a, side)] = (st, th)
 
-    return dict(N=N, h=h, Xc=Xc, Sc=Sc, Sf=Sf, Pf=Pf, active=active, states=states, sdf=sdf)
+    return dict(N=N, h=h, Xc=Xc, Sc=Sc, Sf=Sf, Pf=Pf, active=active, states=states, sdf=sdf,
+                mode=mode)
 
 def overlay_cells(geo):
     """Active cells with at least one non-COUPLED face."""
@@ -449,7 +492,7 @@ def solve_system(A, b, n_active):
             raise RuntimeError(f"lgmres failed: info={info}")
         return x
 
-def test_solve(Ns):
+def test_solve(Ns, mode="center"):
     print("\n[3] assembled projection solve, manufactured field (THE global-order gate)")
     print("    u* = u_exact + Dgrad(phi_man); expect phi and corrected u ~ O(h^2)")
     print(f"{'N':>5} {'max|phi err|':>13} {'ord':>6} {'max|u err|':>12} {'ord':>6} "
@@ -457,7 +500,7 @@ def test_solve(Ns):
     prev = None
     out = {}
     for N in Ns:
-        geo = build_geo(N)
+        geo = build_geo(N, mode=mode)
         h = geo["h"]
         rho = row_rescale(geo)
         activef = geo["active"].ravel()
@@ -818,7 +861,7 @@ def test_split(args):
     out = []
     for name, N, f in cases:
         print(f"\n[A4/A5] {name}  matrix_order={args.matrix_order}")
-        geo = build_geo(N, sdf=f)
+        geo = build_geo(N, sdf=f, mode=args.classify)
         pr = probe_split(geo, order=args.matrix_order)
         cb = compat_bias(pr, geo, exact_leftnull=not args.no_leftnull)
         out.append(dict(name=name, N=N, **{k: pr[k] for k in
@@ -870,6 +913,8 @@ if __name__ == "__main__":
                     help="two near-tangent spheres separated by this gap (box units)")
     ap.add_argument("--split-n", type=int, nargs="+", default=[32],
                     help="grid sizes for --split")
+    ap.add_argument("--classify", choices=["center", "face"], default="center",
+                    help="pressure-cell classification: shipped centre-based, or face-based")
     ap.add_argument("--matrix-order", type=int, default=2,
                     help="closure order of the IMPLICIT phi couplings (1 = the mixed mode)")
     ap.add_argument("--no-leftnull", action="store_true",
@@ -885,7 +930,7 @@ if __name__ == "__main__":
 
     s1 = test_extrapolation(Ns_eval)
     s2 = test_divergence(Ns_eval)
-    s3 = test_solve(Ns_solve)
+    s3 = test_solve(Ns_solve, mode=args.classify)
     s4 = test_probes(args.probe_n)
     s5 = test_degenerate()
 
