@@ -20,6 +20,7 @@
 #include <limits>
 #include <Kokkos_Core.hpp>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "ghost_projection.hpp"  // GpOverlay + gpApplyDelta (ghost-projection BiCGStab matvec)
@@ -189,15 +190,25 @@ inline int mgDebugSolves() {
   return n;
 }
 
-// Communication-avoiding smoothing (PECLET_FLOW_CA, default ON; =0 kills it): exchange a 2-deep
-// ghost layer once per red-black PAIR instead of 1-deep before every colour, redundantly
-// re-smoothing the 1-deep ghost ring of the first colour so the second colour reads exactly the
-// values a per-colour exchange would have delivered — bit-identical, at half the halo events.
-// Consumed by CutcellMG's coarse levels and by the momentum RB-GS in flow_ibm.hpp.
-inline bool caSmoothingEnabled() {
-  static const bool v = [] {
+// Communication-avoiding smoothing (PECLET_FLOW_CA): exchange a 2-deep ghost layer once per
+// red-black PAIR instead of 1-deep before every colour, redundantly re-smoothing the 1-deep ghost
+// ring of the first colour so the second colour reads exactly the values a per-colour exchange
+// would have delivered — bit-identical, at half the halo events. Consumed by CutcellMG's coarse
+// levels and by the momentum RB-GS in flow_ibm.hpp. PECLET_FLOW_CA values: unset / "1" = both
+// (default), "0" = off, "mom" = momentum sweeps only, "mg" = pressure-MG coarse levels only —
+// the split exists to ATTRIBUTE a measured regression to one subsystem without a rebuild.
+enum : int { kCaMomentum = 1, kCaMg = 2 };
+inline int caSmoothingMode() {
+  static const int v = [] {
     const char* e = std::getenv("PECLET_FLOW_CA");
-    return !e || std::atoi(e) != 0;
+    if (!e)
+      return kCaMomentum | kCaMg;
+    const std::string s(e);
+    if (s == "mom" || s == "momentum")
+      return (int)kCaMomentum;
+    if (s == "mg")
+      return (int)kCaMg;
+    return std::atoi(e) != 0 ? (kCaMomentum | kCaMg) : 0;
   }();
   return v;
 }
@@ -461,7 +472,7 @@ class CutcellMG {
       // phi staging, ghost-projection g=2 staging) assumes it. Only for the periodic/IBM operator
       // — with domain BCs (setBoundaryConditions BEFORE initMpi) every level keeps the g=1 layout,
       // so that path is byte-identical to the pre-CA code.
-      v.g = (L > 0 && !hasBC_ && caSmoothingEnabled() && minBlockExtent(dec) >= 4) ? 2 : 1;
+      v.g = (L > 0 && !hasBC_ && (caSmoothingMode() & kCaMg) && minBlockExtent(dec) >= 4) ? 2 : 1;
       v.caOk = (v.g == 2);
       v.halo->buildTopology(dec, rank, v.g, per, comm);
       v.dev = std::make_shared<GridHalo<double>>();

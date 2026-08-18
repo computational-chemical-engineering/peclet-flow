@@ -454,7 +454,7 @@ class Solver {
     for (const auto& s : dec.sizes())
       for (int k = 0; k < 3; ++k)
         minExt = std::min(minExt, (long)s[k]);
-    caMomentum_ = caSmoothingEnabled() && minExt >= 4;
+    caMomentum_ = (caSmoothingMode() & kCaMomentum) && minExt >= 4;
     for (bool& d : momStencilDirty_)
       d = true;
     dec_ =
