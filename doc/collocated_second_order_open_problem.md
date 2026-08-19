@@ -1,10 +1,14 @@
-> **RESOLVED 2026-08-18 — this document is now history.** `set_face_interp(9)`, the mode §9.1
-> called "the throat-safe collocated cutcell", is the **default** collocated scheme under the name
-> `set_collocated_scheme("gauge-exact")`. Refinement ladders on two periodic sphere beds (φ=0.50
-> and a contact-tight φ=0.60) put it at **second order** and make it the cheapest scheme measured,
-> 4.6× faster than the staggered cut-cell reference and 5–6× faster than the ghost projection,
-> which it matches in accuracy. The ghost projection is quarantined. See
-> `../../peclet-examples/benchmarks/porous-scaling` (`colcmp*`, `colcmp060*`) and flow CLAUDE.md.
+> **STATUS 2026-08-19 — partly resolved, and the remaining part is now quantified.**
+> `set_face_interp(9)`, the mode §9.1 called "the throat-safe collocated cutcell", is the default
+> collocated scheme under the name `set_collocated_scheme("gauge-exact")`: it removes the O(1/h)
+> gauge error in the cell gradient and is 4–6× more accurate than the plain path at every
+> resolution. But refinement ladders to R=32 on two periodic sphere beds show that it does **not**
+> converge to the staggered answer — it asymptotes to a fixed bias of +0.29 % (φ=0.50) / +0.39 %
+> (φ=0.60), and the ghost projection plateaus the same way at about half the magnitude. So §9.1's
+> defect (ii), the ½/½ face-average truncation in the constraint, is still open and is now the
+> binding one; only defect (i) is fixed. An earlier reading of this as "second order to a ~0.1 %
+> floor" was taken from an R≤16 ladder where the signed error was crossing zero — see
+> `peclet-examples/benchmarks/porous-scaling` (`colcmp*`, `colcmp060*`) for the corrected data.
 >
 > One correction to §9.1 for future readers: its +14…+27 % throat over-carry is the **staggered**
 > ghost. The *collocated* ghost undershoots there (−10.1/−4.3/−1.2 %), and that is what the new

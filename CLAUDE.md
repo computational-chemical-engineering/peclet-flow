@@ -123,23 +123,48 @@ unchanged (throat-throttling, symmetric, MG-PCG, no fragmentation guard), with t
 predictor and the projection's cell correction. `"plain"` restores the legacy first-order path.
 
 Measured on two periodic sphere beds (`peclet-examples/benchmarks/porous-scaling`, one fixed bed
-per φ, R = 5…16, march tol 1e-6, staggered cut-cell as the reference):
+per φ, R = 5…32, march tol 1e-6, staggered cut-cell as the reference). Error in k against the
+staggered k∞, and the cost at the finest rung:
 
-| | err % R=5 → R=16 (φ=0.50) | (φ=0.60, contact-tight) | p.iters @R=16 | march wall @R=16 |
+| | φ=0.50: R=8 → R=32 | φ=0.60: R=8 → R=32 | p.iters @R=32 | march wall @R=32 |
 |---|---|---|---|---|
-| gauge-exact | −2.714 → **+0.079** | −6.490 → **+0.079** | 17.4 | **29.2 s** |
-| plain | −6.937 → −2.365 | −13.015 → −3.454 | 30.3 | 313.2 s (3 rungs hit the 800-step cap) |
-| staggered cut-cell (ref) | +2.300 → +0.100 | −0.308 → +0.008 | 27.7 | 133.7 s |
+| gauge-exact | −0.773 → **+0.288** | −1.387 → **+0.385** | 43.1 | 193 s |
+| plain | −4.522 → −1.229 | −6.378 → −1.716 | 43.7 | 461 s |
+| ghost (quarantined) | −0.344 → +0.142 | −0.562 → +0.218 | 64.8 | 446 s |
+| staggered cut-cell (ref) | +0.698 → −0.009 | +0.883 → 0.000 | 43.0 | 158 s |
 
-Second order on both beds (2.36–2.89 over R=5…8) against first order (0.94–1.20) for `"plain"`,
-and the cheapest scheme measured — 4.6× faster than the staggered reference. The old integer API
-`set_face_interp` survives as a deprecated alias; modes 1/2/5/6/7/10 were **retired** (ablations;
-10 measured divergent) and now raise; 3/4 remain as FV-constraint ablations.
+Read this carefully — it is **not** a convergence-order story:
+
+- `"plain"` is first order (0.86–1.29 at every rung) and is still 1.2–1.7 % off at R=32.
+- `"gauge-exact"` converges fast, crosses the staggered limit near R=12, and then **asymptotes to
+  a fixed positive bias** — +0.29 % (φ=0.50) / +0.39 % (φ=0.60), moving only +0.01…+0.08 % from
+  R=24 to R=32. So it is 4–6× more accurate than `"plain"` at every resolution, but it does
+  **not** converge to the staggered answer.
+- That bias is a property of the **collocated approximate projection**, not of this gradient: the
+  ghost projection shows the same plateau at about half the magnitude (+0.14 % / +0.22 %). The
+  staggered scheme has no such bias. Mechanism: the constraint is imposed on the interpolated
+  ½/½ face field, and cut faces carry an h-independent share of the total flux (count ~1/h², each
+  carrying O(h²)), so an O(1) relative flux error per cut face does not shrink with refinement.
+  **Treat ~0.3 % as the accuracy ceiling of the collocated path**, including in AMR.
+- Cost is resolution- and geometry-dependent, so quote it per rung: at R=16 gauge-exact was 4.6×
+  faster to steady state than the staggered reference, but at R=32 it is *slower* on φ=0.50
+  (193 s vs 158 s) and 2.2× faster on φ=0.60. Against the ghost projection it is consistently
+  cheaper — 2.3–2.7× at R=32, more at coarser rungs.
+
+The march protocol was checked before these conclusions were drawn: a 100× tighter tolerance
+moves k by nothing to six digits (Snellius job 25805513), so the plateau is not an artefact of
+steady-state detection.
+
+The old integer API `set_face_interp` survives as a deprecated alias; modes 1/2/5/6/7/10 were
+**retired** (ablations; 10 measured divergent) and now raise; 3/4 remain as FV-constraint
+ablations.
 
 **The directional ghost-cell projection (`set_ghost_projection`) is QUARANTINED** — verification
-only, unsupported, default off. It matches the gauge-exact scheme's accuracy (+0.083 % vs
-+0.079 %) at 5–6× the cost, so it buys nothing in production; it is kept as the independent second
-discretization behind the cross-IBM physics gate, along with its study harnesses. Phase A of its
+only, unsupported, default off. It is asymptotically about **twice as accurate** as the
+gauge-exact scheme (bias +0.14 % / +0.22 % against +0.29 % / +0.39 %) but costs 2.3–2.7× more at
+R=32 and up to 5–6× at coarser rungs, and it brings a nonsymmetric operator, BiCGStab instead of
+CG, and a fragmented pressure graph needing a connectivity guard. It is kept as the independent
+second discretization behind the cross-IBM physics gate, along with its study harnesses. Phase A of its
 hardening plan also found the documented `(matrix_order=1, rhs_order=2)` mixed mode to be
 **march-unstable** above ~2000 spheres ([`doc/ghost_hardening_findings_A.md`](doc/ghost_hardening_findings_A.md));
 do not use it. Hardening phases B/C are cancelled.
