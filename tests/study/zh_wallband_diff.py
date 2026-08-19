@@ -69,7 +69,12 @@ def solve(N, kind, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=40
     s.set_pressure_multigrid(True, max(2, int(np.log2(N)) - 1))
     s.set_pressure_pcg(True, 200, 1e-8)
     if kind != "stag":
-        s.set_collocated_scheme(kind)
+        # set_collocated_scheme is new; fall back to the integer form so this runs against older
+        # builds too (the Snellius module predates it).
+        if hasattr(s, "set_collocated_scheme"):
+            s.set_collocated_scheme(kind)
+        else:
+            s.set_face_interp({"gauge-exact": 9, "plain": 0}[kind])
     s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
     prev, warm = 0.0, None
     for it in range(max_steps):
