@@ -25,14 +25,43 @@ sys.path.insert(0, os.path.abspath(os.path.join(
 from peclet import flow  # noqa: E402
 
 PHI0 = 0.125
+BED = os.environ.get("BED", "")     # pack_bed.py npz (cubic box) -> use a sphere BED, not Z&H
+
+
+def bed_sdf(N, npz):
+    """Periodic union-of-spheres SDF from a packing, sampled on an N^3 grid (cubic box only)."""
+    pk = np.load(npz)
+    box = np.asarray(pk["box"], float)
+    assert np.allclose(box, box[0]), f"{npz}: box {box} is not cubic"
+    Rc = N / box[0]                                   # cells per sphere radius
+    c = np.asarray(pk["centers"]) * Rc
+    r = np.asarray(pk["scales"]) * Rc
+    ax = np.arange(N) + 0.5
+    S = np.full((N, N, N), 1e30)
+    for sh in np.stack(np.meshgrid(*[[-1., 0., 1.]] * 3, indexing="ij"), -1).reshape(-1, 3):
+        cs = c + sh * N
+        keep = np.all((cs + (r + 3)[:, None] > 0) & (cs - (r + 3)[:, None] < N), axis=1)
+        for (cx, cy, cz), rr in zip(cs[keep], r[keep]):
+            i0, i1 = np.searchsorted(ax, [cx - rr - 3, cx + rr + 3])
+            j0, j1 = np.searchsorted(ax, [cy - rr - 3, cy + rr + 3])
+            k0, k1 = np.searchsorted(ax, [cz - rr - 3, cz + rr + 3])
+            if i0 >= i1 or j0 >= j1 or k0 >= k1:
+                continue
+            d = np.sqrt((ax[i0:i1, None, None] - cx) ** 2 + (ax[None, j0:j1, None] - cy) ** 2
+                        + (ax[None, None, k0:k1] - cz) ** 2) - rr
+            np.minimum(S[i0:i1, j0:j1, k0:k1], d, out=S[i0:i1, j0:j1, k0:k1])
+    return np.asfortranarray(np.clip(S, -1e3, 1e3)), Rc
 
 
 def solve(N, kind, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=4000):
-    R = (3 * PHI0 / (4 * np.pi)) ** (1 / 3) * N
-    g = np.arange(N) + 0.5
-    X, Y, Z = np.meshgrid(g, g, g, indexing="ij")
-    d = lambda A: A - 0.5 * N - N * np.round((A - 0.5 * N) / N)   # noqa: E731
-    sdf = np.asfortranarray(np.sqrt(d(X) ** 2 + d(Y) ** 2 + d(Z) ** 2) - R)
+    if BED:
+        sdf, R = bed_sdf(N, BED)
+    else:
+        R = (3 * PHI0 / (4 * np.pi)) ** (1 / 3) * N
+        g = np.arange(N) + 0.5
+        X, Y, Z = np.meshgrid(g, g, g, indexing="ij")
+        d = lambda A: A - 0.5 * N - N * np.round((A - 0.5 * N) / N)   # noqa: E731
+        sdf = np.asfortranarray(np.sqrt(d(X) ** 2 + d(Y) ** 2 + d(Z) ** 2) - R)
     s = flow.Solver(N, N, N) if kind == "stag" else flow.SolverColocated(N, N, N)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt)
     s.set_body_force(F, 0, 0); s.set_advection(False)
@@ -59,6 +88,8 @@ def solve(N, kind, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=40
 
 if __name__ == "__main__":
     Ns = [int(x) for x in (sys.argv[1:] or [32, 64, 128])]
+    if BED:
+        print(f"geometry: BED {os.path.basename(BED)}")
     print(f"{'N':>5} | {'<dFlux>':>11} {'ord':>6} | {'band<=2h share':>15} | "
           f"{'max|d| band':>12} {'ord':>6} | {'rms|d| band':>12} {'ord':>6}")
     prev = None
