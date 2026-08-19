@@ -388,12 +388,18 @@ class Solver {
   // cut-cell reference and 5-6x faster than the directional ghost projection.
   //
   // RETIRED 2026-08-18 (rejected here; the kernels remain but are unreachable, deletion is a
-  // follow-up): 1, 2, 5, 6, 7 were pure ablations, and 10 was a documented dead ablation (O(h)
+  // follow-up): 1, 2 were pure ablations, and 10 was a documented dead ablation (O(h)
   // with a worse constant on Z&H, divergent on RCP slivers — doc/
   // collocated_second_order_open_problem.md §9.1). 3 and 4 (the FV-constraint variants, 4 with
   // set_fv_relax) survive as ablations reachable only through this integer entry point.
+  //
+  // 5/6/7 were RE-INSTATED 2026-08-19: they are not ablations, they are the Basilisk embed.h port
+  // (true-normal dirichlet_gradient wall drag, openness-weighted cell correction, solid-cut-cell
+  // sliver mask — commits db5b4aa/f5fde8c/6d412ec/03a71c6, doc/collocated_embed_port_plan.md).
+  // That line is the live candidate for removing the collocated accuracy ceiling, so it must stay
+  // reachable. Retiring them was my error.
   void setFaceInterp(int mode) {
-    static constexpr int kRetired[] = {1, 2, 5, 6, 7, 10};
+    static constexpr int kRetired[] = {1, 2, 10};
     for (int r : kRetired)
       if (mode == r)
         throw std::runtime_error(
@@ -401,7 +407,7 @@ class Solver {
             "): retired 2026-08-18 (ablation / measured divergent). Use "
             "set_collocated_scheme(\"gauge-exact\") — the default — or \"plain\" for the "
             "legacy first-order aperture projection.");
-    if (mode != 0 && mode != 3 && mode != 4 && mode != 9)
+    if (mode != 0 && (mode < 3 || mode > 7) && mode != 9)
       throw std::runtime_error("set_face_interp: unknown mode " + std::to_string(mode));
     if (ghostProjection_ && mode != 0)
       throw std::runtime_error("set_face_interp: incompatible with the ghost projection");
