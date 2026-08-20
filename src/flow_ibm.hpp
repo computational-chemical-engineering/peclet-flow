@@ -448,6 +448,9 @@ class Solver {
   // relaxation of the smooth modes at large dt. phi = 0 stays the unique fixed point for ANY
   // w > 0, at every dt including dt -> infinity.
   void setRotationalWeight(double w) { rotWeight_ = w; }
+  // Wall-banded rotational blend (Frank, 2026-08-20): see the press_wallblend kernel. w0 = 0
+  // (default) disables; typical w0 ~ 0.3-0.5. Composes with setRotationalWeight (uniform factor).
+  void setRotationalWallWeight(double w0) { rotWallW_ = w0; }
   // Filtered rotational update (experimental): P += ct*phi - mu*S(div u*), S = one mask-aware
   // axis-wise (1,2,1)/4 smoothing pass per axis (one-sided 1/2(d_i+d_nbr) toward the open side at
   // a solid-centered neighbour, identity when sandwiched). S annihilates the axis checkerboard
@@ -2666,6 +2669,31 @@ class Solver {
               "press_var_min", Kokkos::RangePolicy<CCExec>(space, 0, n_),
               KOKKOS_LAMBDA(std::size_t i) { P(i) += ct * ph(i) - muRot * d(i); });
         }
+      } else if (rotWallW_ > 0.0 && rotationalP_) {
+        // Frank's wall-banded blend (setRotationalWallWeight): at fluid cells with a solid
+        // axis-neighbour (the rows whose one-sided gpCenterGrad makes the cell-centered
+        // rotational update marginally unstable) use
+        //   P += (rho/dt + w*mu/dx^2)*phi - (1-w)*mu*div(u*)
+        // (dx = 1 in cell units): the (1-w) shrinks the destabilizing off-diagonal there and the
+        // diagonal w*mu gain keeps those rows relaxing at dt -> infinity where rho/dt vanishes.
+        // Bulk cells (w = 0) keep the full-speed rotational update. Outer-shell cells keep the
+        // bulk formula (their P is ghost/overwritten).
+        CCConst sd = CCConst(sdf_);
+        const double w0 = rotWallW_, muF = rotWeight_ * mu_;
+        C3 e = e_;
+        Kokkos::parallel_for(
+            "press_wallblend", Kokkos::RangePolicy<CCExec>(space, 0, n_),
+            KOKKOS_LAMBDA(std::size_t i) {
+              const long sy = e.x, sz = (long)e.x * e.y;
+              const int x = (int)(i % e.x), y = (int)((i / e.x) % e.y), z = (int)(i / sz);
+              double w = 0.0;
+              if (x > 0 && y > 0 && z > 0 && x < e.x - 1 && y < e.y - 1 && z < e.z - 1 &&
+                  sd(i) >= 0.0 &&
+                  (sd(i - 1) < 0.0 || sd(i + 1) < 0.0 || sd(i - sy) < 0.0 || sd(i + sy) < 0.0 ||
+                   sd(i - sz) < 0.0 || sd(i + sz) < 0.0))
+                w = w0;
+              P(i) += (ct + w * muF) * ph(i) - (1.0 - w) * muF * d(i);
+            });
       } else {
         Kokkos::parallel_for(
             "press", Kokkos::RangePolicy<CCExec>(space, 0, n_),
@@ -3336,6 +3364,7 @@ class Solver {
                              // pressure-relaxation gain and the phi=0 (dt-free) fixed point.
   double rotFilterEps_ = 0.05;  // S' = eps I + (1-eps) S (see setRotationalFilter)
   double rotWeight_ = 1.0;      // rotational under-relaxation w (setRotationalWeight)
+  double rotWallW_ = 0.0;       // wall-banded rotational blend w0 (setRotationalWallWeight)
   double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)

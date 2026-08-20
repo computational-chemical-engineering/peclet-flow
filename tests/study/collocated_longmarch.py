@@ -31,6 +31,7 @@ KIND = os.environ.get("KIND", "gauge-exact")   # gauge-exact | gauge-2a | plain 
 ROT = int(os.environ.get("ROT", "1"))          # 0 = PM I ablation (set_rotational_pressure(False))
 ROTF = int(os.environ.get("ROTF", "0"))        # 1 = filtered rotational (set_rotational_filter)
 ROTW = float(os.environ.get("ROTW", "1"))      # rotational under-relaxation w (set_rotational_weight)
+WALLW = float(os.environ.get("WALLW", "0"))    # wall-banded blend w0 (set_rotational_wall_weight)
 # DTSWITCH: comma list of "step:dt" pairs, e.g. "8000:600,14000:6" -- at the given step the
 # solver's dt is changed in place (Frank's discriminator: a TRUE fixed point is dt-free, so any
 # k motion after a switch proves the state was a stalled trajectory, not the fixed point).
@@ -71,7 +72,9 @@ s.set_velocity_solver_params(150)
 s.set_pressure_multigrid(True, max(2, int(np.log2(N)) - 2))
 s.set_pressure_pcg(True, 300, 1e-8)
 if KIND != "stag":
-    if hasattr(s, "set_collocated_scheme"):
+    if KIND.startswith("mode"):
+        s.set_face_interp(int(KIND[4:]))     # numbered ablations (e.g. mode3 = adjoint (T,T^T) pair)
+    elif hasattr(s, "set_collocated_scheme"):
         s.set_collocated_scheme(KIND)
     else:
         s.set_face_interp({"gauge-exact": 9, "plain": 0}[KIND])
@@ -81,10 +84,12 @@ if ROTF:
     s.set_rotational_filter(True)
 if ROTW != 1.0:
     s.set_rotational_weight(ROTW)
+if WALLW > 0:
+    s.set_rotational_wall_weight(WALLW)
 s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
 fluid = sdf >= 0.0
 
-print(f"# bed {os.path.basename(BED)} N={N} R={R:.1f} kind={KIND} rot={ROT} rotf={ROTF} rotw={ROTW} dt={DT} steps={STEPS}", flush=True)
+print(f"# bed {os.path.basename(BED)} N={N} R={R:.1f} kind={KIND} rot={ROT} rotf={ROTF} rotw={ROTW} wallw={WALLW} dt={DT} steps={STEPS}", flush=True)
 print(f"{'step':>7} {'k_cell/R2':>13} {'k_face/R2':>13} {'m1_rms':>10} {'m2_rms':>10} "
       f"{'dk_cell':>10} {'dm1':>10}", flush=True)
 pk = pm = None

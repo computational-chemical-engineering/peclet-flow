@@ -163,6 +163,12 @@ static void bind_solver(nb::module_& m, const char* name) {
           "Under-relax the rotational term: P += ct*phi - w*mu*div(u*). 1 = shipped, 0 = PM I; "
           "small w raises the boundary-mode stability threshold ~1/w at ~1/w slower smooth-mode "
           "pressure relaxation. phi=0 stays the unique fixed point for any w>0 at every dt.")
+      .def(
+          "set_rotational_wall_weight", &S::setRotationalWallWeight, nb::arg("w0"),
+          "Wall-banded rotational blend: at fluid cells with a solid axis-neighbour use "
+          "P += (rho/dt + w0*mu/dx^2)*phi - (1-w0)*mu*div(u*); bulk keeps the full rotational "
+          "update. Stabilizes the boundary rows without slowing bulk pressure relaxation, and "
+          "keeps them relaxing at dt->infinity. 0 (default) = off.")
       .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
            "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
            "explicit-lagged wall term). Steady state is independent of w.")

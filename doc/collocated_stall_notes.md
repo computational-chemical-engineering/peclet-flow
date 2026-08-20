@@ -170,3 +170,24 @@ smooth-mode pressure relaxation slows ~1/w at large dt. THE open question (Frank
 requirement): does the required w scale with dt? Measuring: w=0.3 at DT=60 and DT=600, N=192.
 If w_crit ~ 1/dt the weight route fails the requirement too and the SIMPLE-style
 solve-and-under-relax loop becomes the remaining candidate.
+
+## Uniform weight verdict + the Uzawa/Schur reframing (late evening)
+
+w=0.3 uniform: DT=60 fully stable (k to 10 digits by step 6000, clean). DT=600: growth rate cut
+~6x (dm1 doubling ~500 steps vs ~82 unweighted) but still exponential — **uniform weighting is
+marginal, w_crit grows with dt**.
+
+Structural reading: at dt -> infinity the rotational update IS a unit-step Uzawa iteration on
+the discrete steady-Stokes Schur complement S = D A_u^-1 G_gp (pressure-error map I - w S).
+Our D (masked 1/2-1/2 + alpha apertures) and G_gp are NOT adjoint, so S is nonsymmetric and
+nothing guarantees its spectrum stays in the right half-plane; an eigenvalue with Re < 0 cannot
+be stabilized by ANY positive scalar/diagonal weight (|1 - w*lambda| > 1 for all w > 0).  This
+explains: w reduces the rate but never crosses to decay; finite dt masks it (extra contraction
+from the ct term + momentum memory); the staggered scheme (exact adjoint pair, S = SPSD) is
+immune; the flat-wall E2 test was clean (that geometry's boundary block happens benign).
+
+Decisive zero-code test queued: mode 3 (the retained wall-aware (T, T^T) ADJOINT-pair ablation)
+has S = D A_u^-1 D^T >= 0 by construction. If mode 3 is stable at DT=600 and DT=1e20 where
+gauge-exact grows, non-adjointness is THE mechanism and the fix is an accuracy-improved adjoint
+pair — not any weighting. (Wall-banded blend w0=0.5 chain still runs first; prediction under
+this hypothesis: helps like uniform w, fails at 1e20.)
