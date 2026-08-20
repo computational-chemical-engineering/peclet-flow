@@ -147,6 +147,12 @@ static void bind_solver(nb::module_& m, const char* name) {
           "solid-centred neighbours, an O(1/h) gauge error), and on a dense bed it also fails to "
           "reach steady state within 800 steps at coarse resolution. Kept for reproducing "
           "published results.")
+      .def(
+          "set_rotational_pressure", &S::setRotationalPressure, nb::arg("on"),
+          "PM I ablation (Guy-Fogelson 2005): False drops the rotational -mu*div(u*) term from "
+          "the incremental pressure accumulation (constant-mu path only). Default True = shipped "
+          "rotational (Timmermans) update. Also: set_collocated_scheme accepts \"gauge-2a\" -- "
+          "the experimental gradient-2a one-sided branch of the gauge-exact gradient.")
       .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
            "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
            "explicit-lagged wall term). Steady state is independent of w.")

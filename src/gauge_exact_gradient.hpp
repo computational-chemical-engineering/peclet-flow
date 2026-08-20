@@ -26,7 +26,18 @@ namespace peclet::flow {
 /// -grad(P^n) predictor and the projection's cell correction. The sdf must be the PROJECTION's
 /// view (the fragmentation-guarded sdfGp), so pocket cells whose phi rows are decoupled are not
 /// read either.
-inline void gpCenterGrad(CCField out, CCConst p, CCConst sdf, int axis, C3 e, int g) {
+/// grad2a selects the Guy–Fogelson "gradient 2a" one-sided branch (JCP 2005, eq. 95): the
+/// gradient is linearly EXTRAPOLATED from the two interior central differences,
+/// g_i = 2 g_{i+1} - g_{i+2} = (-2 p_i + p_{i+1} + 2 p_{i+2} - p_{i+3})/2, instead of formed by
+/// quadratic extrapolation of the pressure ((-3 p_i + 4 p_{i+1} - p_{i+2})/2 — their "gradient
+/// 2"). Both are 2nd order, but gradient 2 amplifies the highest-frequency (checkerboard) mode
+/// at the boundary row and is the combination their stability analysis shows to be unstable
+/// under the rotational pressure update on a cell-centered approximate projection — the exact
+/// scheme family of this solver. Gradient 2a annihilates that mode. When the +/-3 cell is not
+/// fluid, grad2a falls back to the 2-point one-sided difference (their stable "gradient 1"),
+/// never to gradient 2. Default off: byte-identical to the shipped gauge-exact scheme.
+inline void gpCenterGrad(CCField out, CCConst p, CCConst sdf, int axis, C3 e, int g,
+                         bool grad2a = false) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -40,16 +51,30 @@ inline void gpCenterGrad(CCField out, CCConst p, CCConst sdf, int axis, C3 e, in
           return;
         }
         const bool am = sdf(i - sa) >= 0.0, ap = sdf(i + sa) >= 0.0;
+        // the +/-3 cell of the grad2a stencil can sit one past the g-wide ghost pad; the axis
+        // coordinate guard falls back to the 2-point form there (never reads out of the block)
+        const int ca = (axis == 0) ? x : (axis == 1) ? y : z;
+        const int ea = (axis == 0) ? e.x : (axis == 1) ? e.y : e.z;
         double gr;
         if (am && ap)
           gr = 0.5 * (p(i + sa) - p(i - sa));
-        else if (ap)
-          gr = (sdf(i + 2 * sa) >= 0.0) ? 0.5 * (-3.0 * p(i) + 4.0 * p(i + sa) - p(i + 2 * sa))
-                                        : (p(i + sa) - p(i));
-        else if (am)
-          gr = (sdf(i - 2 * sa) >= 0.0) ? 0.5 * (3.0 * p(i) - 4.0 * p(i - sa) + p(i - 2 * sa))
-                                        : (p(i) - p(i - sa));
-        else
+        else if (ap) {
+          if (grad2a)
+            gr = (ca + 3 < ea && sdf(i + 2 * sa) >= 0.0 && sdf(i + 3 * sa) >= 0.0)
+                     ? 0.5 * (-2.0 * p(i) + p(i + sa) + 2.0 * p(i + 2 * sa) - p(i + 3 * sa))
+                     : (p(i + sa) - p(i));
+          else
+            gr = (sdf(i + 2 * sa) >= 0.0) ? 0.5 * (-3.0 * p(i) + 4.0 * p(i + sa) - p(i + 2 * sa))
+                                          : (p(i + sa) - p(i));
+        } else if (am) {
+          if (grad2a)
+            gr = (ca - 3 >= 0 && sdf(i - 2 * sa) >= 0.0 && sdf(i - 3 * sa) >= 0.0)
+                     ? 0.5 * (2.0 * p(i) - p(i - sa) - 2.0 * p(i - 2 * sa) + p(i - 3 * sa))
+                     : (p(i) - p(i - sa));
+          else
+            gr = (sdf(i - 2 * sa) >= 0.0) ? 0.5 * (3.0 * p(i) - 4.0 * p(i - sa) + p(i - 2 * sa))
+                                          : (p(i) - p(i - sa));
+        } else
           gr = 0.0;
         out(i) = gr;
       });

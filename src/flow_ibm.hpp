@@ -141,7 +141,13 @@ class Solver {
 
   void setRho(double r) { rho_ = r; }
   void setMu(double m) { mu_ = m; }
-  void setDt(double d) { dt_ = d; }
+  void setDt(double d) {
+    if (d != dt_) {
+      dt_ = d;
+      dtDirty_ = true;  // the momentum stencil bakes rho/dt in its diagonal (rebuildStencils);
+                        // a mid-run dt change must rebuild it or the operator and RHS disagree
+    }
+  }
   void setBodyForce(double fx, double fy, double fz) { f_ = {fx, fy, fz}; }
   void setVelocityIterations(int it) { velIters_ = it; }
   // Momentum tolerance stop: end the RB-GS loop once the swept colour's max increment has dropped
@@ -417,14 +423,24 @@ class Solver {
   //   "gauge-exact" (default) aperture constraint + directional (gauge-exact) pressure gradient
   //   "plain"                 the legacy plain-average / central-difference path (first order)
   void setCollocatedScheme(const std::string& name) {
-    if (name == "gauge-exact")
+    if (name == "gauge-exact") {
       setFaceInterp(9);
-    else if (name == "plain")
+      gauge2a_ = false;
+    } else if (name == "gauge-2a") {  // EXPERIMENTAL: gauge-exact with the "gradient 2a"
+      setFaceInterp(9);               // one-sided branch (see gauge_exact_gradient.hpp)
+      gauge2a_ = true;
+    } else if (name == "plain") {
       setFaceInterp(0);
-    else
-      throw std::runtime_error("set_collocated_scheme: expected \"gauge-exact\" or \"plain\", got \""
-                               + name + "\"");
+      gauge2a_ = false;
+    } else
+      throw std::runtime_error(
+          "set_collocated_scheme: expected \"gauge-exact\", \"gauge-2a\" or \"plain\", got \"" +
+          name + "\"");
   }
+  // PM I ablation (Guy-Fogelson): keep the incremental predictor -grad(P^n) but accumulate
+  // P += (rho/dt)*phi WITHOUT the rotational -mu*div(u*) term (constant-mu path only; the
+  // variable-mu branches keep their own treatment). Default true = shipped behaviour.
+  void setRotationalPressure(bool on) { rotationalP_ = on; }
   // Under-relaxation of the mode-4 FV wall-flux defect correction (1 = full; <1 damps the stiff
   // explicit-lagged wall term). The steady state is independent of this value.
   void setFvRelax(double w) { fvRelax_ = w; }
@@ -1031,8 +1047,10 @@ class Solver {
     // Variable properties / implicit drag: rebuild the diffusion stencil from the current mu/rho
     // and drag_beta fields (the implicit-FOU path rebuilds it per Picard in buildAdvStencil*, so
     // only the non-advective path needs this).
-    if ((varProps_ || varRho_ || hasDrag_ || (porous_ && porousCons_)) && !implicitAdv())
+    if (((varProps_ || varRho_ || hasDrag_ || (porous_ && porousCons_)) || dtDirty_) &&
+        !implicitAdv())
       rebuildStencils();
+    dtDirty_ = false;  // implicit-FOU rebuilds per Picard below (reads dt_ live) — clear either way
     // u^n time base, fixed for the whole step (Picard lags the advecting velocity at u^k, not the
     // base).
     for (int c = 0; c < 3; ++c)
@@ -1555,7 +1573,7 @@ class Solver {
         Grid::collocated && (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) && incr;
     if constexpr (Grid::collocated) {
       if (gg) {
-        gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G);
+        gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G, gauge2a_);
       } else if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
@@ -1657,7 +1675,7 @@ class Solver {
         incr;  // directional ghost -grad(P)
     if constexpr (Grid::collocated) {
       if (gg) {
-        gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G);
+        gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G, gauge2a_);
       } else if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
@@ -2514,7 +2532,7 @@ class Solver {
         // predictor (buildRhs), so the pressure force the momentum feels and the correction stay
         // one operator family.
         for (int cc = 0; cc < 3; ++cc) {
-          gpCenterGrad(tgp_, CCConst(phi_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), cc, e_, G);
+          gpCenterGrad(tgp_, CCConst(phi_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), cc, e_, G, gauge2a_);
           subtractField(C[cc].u, CCConst(tgp_), e_, G);
         }
       } else if (faceInterp_ >= 2 &&
@@ -2573,7 +2591,7 @@ class Solver {
       // continuity), so the next step's incremental predictor -grad(P^n) can't overshoot for a
       // stiff drag diagonal. omega_p=1 (default) is the current behaviour; <1 only stabilizes the
       // porous+drag path.
-      const double ct = pressUnderRelax_ * rho_ / dt_, mu = mu_;
+      const double ct = pressUnderRelax_ * rho_ / dt_, mu = rotationalP_ ? mu_ : 0.0;
       if (varProps_) {
         // Variable viscosity: the pointwise Timmermans term -mu(i)*div(u*) is inconsistent for
         // heterogeneous mu (see setVariableRotational). Default = constant coefficient chi*mu_min
@@ -3246,7 +3264,14 @@ class Solver {
   int advScheme_ = 0;         // high-order advection: 0 = SOU (default), 1 = Koren TVD
   bool incremental_ = true,
        pwarm_ = false;    // incremental-rotational pressure (CUDA default on) + warm-start
-  int faceInterp_ = 9;    // collocated scheme: 9 = gauge-exact (DEFAULT), 0 = plain (legacy)
+  bool dtDirty_ = false;  // set_dt after set_solid: momentum stencil needs a rebuild
+    int faceInterp_ = 9;    // collocated scheme: 9 = gauge-exact (DEFAULT), 0 = plain (legacy)
+  bool gauge2a_ = false;   // gauge-exact with the Guy-Fogelson "gradient 2a" one-sided branch
+                           // (set_collocated_scheme("gauge-2a"); experimental stall fix).
+                           // Single-rank exact; at rank seams the +/-3 stencil falls back to the
+                           // 2-point form (decomposition-dependent there until the halo is widened).
+  bool rotationalP_ = true;  // false = PM I ablation: drop the -mu*div(u*) Timmermans term from
+                             // the incremental pressure accumulation (constant-mu path only)
   double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
