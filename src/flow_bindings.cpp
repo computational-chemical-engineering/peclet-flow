@@ -153,6 +153,11 @@ static void bind_solver(nb::module_& m, const char* name) {
           "the incremental pressure accumulation (constant-mu path only). Default True = shipped "
           "rotational (Timmermans) update. Also: set_collocated_scheme accepts \"gauge-2a\" -- "
           "the experimental gradient-2a one-sided branch of the gauge-exact gradient.")
+      .def(
+          "set_rotational_filter", &S::setRotationalFilter, nb::arg("on"), nb::arg("eps") = 0.05,
+          "Experimental filtered rotational update: smooth div(u*) (mask-aware axis-wise 1-2-1, "
+          "one-sided into the fluid at walls) before accumulating -mu*div into P. Keeps the O(1) "
+          "pressure-relaxation gain, removes the checkerboard feedback channel.")
       .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
            "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
            "explicit-lagged wall term). Steady state is independent of w.")

@@ -116,3 +116,36 @@ residual re-projection div(a grad dp) = div(a r).  Combinations (PM I + gauge-2a
 
 Bookkeeping: set_dt staleness bug found & fixed (stencil diagonal rho/dt now rebuilt on dt
 change — the first dt-switch experiment's post-switch explosion was this artifact, not scheme).
+
+## PM I verdict (N=192, DT=60, killed early at Frank's call — decisive at step 4000)
+
+dm1 = +3.2e-7 (step 2000) -> +6.9e-8 (step 4000), DECAYING, where the baseline sat at +4.2e-5
+and accelerating: **PM I is stable at the discriminating scale.  The rotational -mu*div(u*)
+term is definitively the instability carrier** (with gauge-2a refuted standalone, the gradient
+choice only modulates the rate).  PM I converges visibly slower (dk -4.3e-9 at 4000 vs baseline
+-1.2e-9 when quasi-settled), consistent with its pressure-update gain ~ rho/dt: it FAILS the
+dt->infinity requirement outright (P freezes) and stays a diagnostic, not a candidate.
+
+## The dt->infty analysis that re-ranked the fixes (Frank's requirement: dt=1e20 must work)
+
+Mode analysis of the update gains at dt->infty, pressure error dP with Laplacian symbol l_c
+(phi = A^{-1} div u* ~ dP/(mu l_c)):
+- PM I gain (rho/dt) phi -> 0                                   : breaks.
+- flat/SIMPLE-diagonal gain kappa*mu*phi ~ kappa/l_c * dP       : unbounded overshoot for
+  smooth modes — wrong without the full solve-and-under-relax loop.
+- rotational gain mu*A*phi = mu*l_c*phi ~ dP                    : EXACTLY unit gain for every
+  smooth mode — why the rotational form marches steady Stokes so well.  Its only defect is the
+  discrete A over-amplifying grid-scale modes at boundary rows (Guy-Fogelson).
+=> The surgical fix keeps mu*A and damps only the top of the spectrum: the FILTERED update
+P += (rho/dt) phi - mu S'(div u*), S' = eps I + (1-eps) S, S = mask-aware axis-wise (1,2,1)/4
+(one-sided 1/2(self+open-nbr) at a solid neighbour).  S alone has an exact checkerboard null
+space -> at dt=infty the fixed point degenerates to a frozen-checkerboard family (Frank's
+dt->infty probe caught this); the eps-floor keeps S' > 0 so (rho/dt + mu S'A) phi = 0 forces
+phi = 0 at EVERY dt, smooth-mode gain ~ 1, dangerous-mode feedback cut ~1/eps.
+Also resolved: the div(a grad dp)=div(a r) re-solve proposal collapses into "the phi-solve we
+already run IS that solve (a = alpha = diagonal-Schur choice under uniform momentum diagonal;
+the drag-style A_p coefficient rails exist for the SIMPLE-consistent refinement)" — what was
+wrong was only the GAIN applied to phi in the P update, not the solve.
+
+Implemented: set_rotational_filter(on, eps=0.05).  Running: N=192 DT=60 (baseline growth
+window) then DT=600 (baseline blew up to m1=12 by step 3000 — the sharp test).

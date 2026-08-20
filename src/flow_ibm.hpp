@@ -441,6 +441,14 @@ class Solver {
   // P += (rho/dt)*phi WITHOUT the rotational -mu*div(u*) term (constant-mu path only; the
   // variable-mu branches keep their own treatment). Default true = shipped behaviour.
   void setRotationalPressure(bool on) { rotationalP_ = on; }
+  // Filtered rotational update (experimental): P += ct*phi - mu*S(div u*), S = one mask-aware
+  // axis-wise (1,2,1)/4 smoothing pass per axis (one-sided 1/2(d_i+d_nbr) toward the open side at
+  // a solid-centered neighbour, identity when sandwiched). S annihilates the axis checkerboard
+  // including AT wall-adjacent cells; for smooth fields S = I + O(h^2). Steady state unchanged.
+  void setRotationalFilter(bool on, double eps = 0.05) {
+    rotFilter_ = on;
+    rotFilterEps_ = eps;
+  }
   // Under-relaxation of the mode-4 FV wall-flux defect correction (1 = full; <1 damps the stiff
   // explicit-lagged wall term). The steady state is independent of this value.
   void setFvRelax(double w) { fvRelax_ = w; }
@@ -2276,6 +2284,44 @@ class Solver {
   // Incremental (rotational) cut-cell projection: solve A phi = -div_open(u*) (RB-GS,
   // mean-removed), u -= grad phi, then accumulate the physical pressure P += (rho/dt)*phi -
   // mu*div(u*) (Timmermans).
+  // one mask-aware axis-wise smoothing pass of a cell field (the filtered-rotational S; see
+  // setRotationalFilter). Reads the +/-1 axis neighbours' sdf: fluid-fluid -> (1,2,1)/4;
+  // one solid side -> 1/2(self + open-side neighbour); both solid -> identity.
+  void filterCellField(CCField f, int axis) {
+    CCExec space;
+    Kokkos::deep_copy(tgp_, f);
+    fillGhosts(tgp_);
+    CCConst src = CCConst(tgp_);
+    CCConst sd = CCConst(sdf_);
+    const double eps = rotFilterEps_;
+    C3 e = e_;
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "peclet::flow::rot_filter", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)x + (long)y * sy + (long)z * sz;
+          const long sa = (axis == 0) ? 1 : (axis == 1) ? sy : sz;
+          if (sd(i) < 0.0)
+            return;
+          const bool am = sd(i - sa) >= 0.0, ap = sd(i + sa) >= 0.0;
+          double sm;
+          if (am && ap)
+            sm = 0.25 * (src(i - sa) + 2.0 * src(i) + src(i + sa));
+          else if (ap)
+            sm = 0.5 * (src(i) + src(i + sa));
+          else if (am)
+            sm = 0.5 * (src(i) + src(i - sa));
+          else
+            sm = src(i);
+          // eps-floor blend: S' = eps*I + (1-eps)*S. A pure S has an exact checkerboard null
+          // space, which at dt -> infinity (where the (rho/dt)*phi term vanishes) degenerates the
+          // fixed point into a frozen-checkerboard family; the floor keeps S' > 0 so
+          // (rho/dt + mu S'A) phi = 0 forces phi = 0 at EVERY dt, while still cutting the
+          // dangerous mode's feedback gain by ~1/eps.
+          f(i) = eps * src(i) + (1.0 - eps) * sm;
+        });
+  }
   void project() {
     // ghosts incl. domain BCs (outflow zero-gradient) BEFORE the divergence -- matches CUDA
     // apply_velocity_bc before diverg_open, so div(u*) counts the outflow flux (else the rotational
@@ -2584,6 +2630,9 @@ class Solver {
     // - mu*div(u*). Classical non-incremental Chorin (!incremental_) skips the accumulation;
     // getPressure() derives p from phi.
     if (incremental_) {
+      if (rotFilter_ && rotationalP_)
+        for (int a = 0; a < 3; ++a)
+          filterCellField(div_, a);  // S(div u*): see setRotationalFilter
       CCExec space;
       CCField P = P_, ph = phi_, d = div_;
       // Pressure under-relaxation (MFIX §10.1): accumulate only omega_p of the increment into the
@@ -3272,6 +3321,12 @@ class Solver {
                            // 2-point form (decomposition-dependent there until the halo is widened).
   bool rotationalP_ = true;  // false = PM I ablation: drop the -mu*div(u*) Timmermans term from
                              // the incremental pressure accumulation (constant-mu path only)
+  bool rotFilter_ = false;   // filtered rotational: smooth div(u*) (mask-aware axis-wise 1-2-1,
+                             // one-sided toward the fluid at solid neighbours) before accumulating
+                             // -mu*div into P. Kills the wall-normal checkerboard feedback the
+                             // cell-centered rotational update is unstable through, keeps the O(1)
+                             // pressure-relaxation gain and the phi=0 (dt-free) fixed point.
+  double rotFilterEps_ = 0.05;  // S' = eps I + (1-eps) S (see setRotationalFilter)
   double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
