@@ -191,3 +191,22 @@ has S = D A_u^-1 D^T >= 0 by construction. If mode 3 is stable at DT=600 and DT=
 gauge-exact grows, non-adjointness is THE mechanism and the fix is an accuracy-improved adjoint
 pair — not any weighting. (Wall-banded blend w0=0.5 chain still runs first; prediction under
 this hypothesis: helps like uniform w, fails at 1e20.)
+
+## Wall-banded blend verdict: STABLE AT EVERY dt — and the residual stall isolated
+
+w0=0.5 (Frank's construction, press_wallblend): N=192 phi=0.60 bed, all three dt's FLAT with
+dm1 decaying — DT=60 (8000 steps), DT=600 (3000), **DT=1e20 (6000, k converged to 11 digits)**.
+The diagonal w*mu/dx^2 gain at wall rows supplies the coercivity the non-adjoint boundary Schur
+block lacks; the uniform-weight prediction ("fails at 1e20") was WRONG for the banded form —
+uniform w=0.3 DID blow up at 1e20 (doubling ~230 steps once surfaced).
+
+BUT the stabilized marches still park OFF the true fixed point: m1 stays ~1.8e-2 (phi not
+drained — a stable near-neutral subspace), and settled k differs by scheme variant (wall05
+3.98771..3.98836e-3 across dt; uniform w03 3.9961; contaminated baseline 3.9979) though all
+share the unique phi=0 fixed point. dt600 vs dt1e20 agree to 3e-5 relative -> the frozen state
+is reproducible under the blend; k(R=12) true value likely ~3.9877e-3 (gap vs staggered -0.76%,
+NOT the ladder's contaminated -0.50%).
+
+Next: dt-cycling drain (queued): a mode neutral at EVERY dt needs A phi = 0 => phi = 0, so
+cycling DT 60->600->6->1e20->60 under the blend must ratchet the frozen content down; watch m1.
+Snellius baseline dt-sweep job cancelled (superseded). Mode-3 adjoint probe runs first.
