@@ -82,3 +82,37 @@ transfer directly (our centerToFace carries no dt term), but the diagnosis langu
   (slow modes repopulated differently), spread >> march noise.
 - If instead everything is EXACTLY frozen and IC-independent, the map deviates from the
   Guy-Fogelson structure somewhere and the code must be re-derived against the model.
+
+## Growth-rate measurements (2026-08-20, evening — the instability quantified)
+
+R=12 (N=192) phi=0.60 bed, zero IC, gauge-exact unless noted; growth read from dm1 (m1 = rms
+|uf - halfavg(u)|/<u>) between 250-step reports:
+
+| variant           | DT  | growth                         | doubling time (steps) |
+|-------------------|-----|--------------------------------|----------------------|
+| gauge-exact       | 60  | exponential from ~step 1700    | ~750–780             |
+| gauge-exact       | 600 | exponential from ~step 700     | ~82 (rate ∝ dt)      |
+| gauge-2a          | 60  | exponential, smaller seed      | ~850 (NOT stabilized)|
+| gauge-exact, R=6  | 60  | none through 6000 steps        | — (stable at N=96)   |
+| gauge-2a, R=6     | 60  | none through 6000 steps        | —                    |
+| PM I (rot off) R=6| 60  | none through 6000 steps        | —                    |
+| staggered         | any | none (dt-flat to 8 digits)     | —                    |
+
+Key facts: the unstable mode is nearly MEAN-FREE (at DT=600 m1 grows 1.9e-2 -> 12 while k moves
+only 0.25%) — invisible to k-based march criteria; that is how every ladder run sampled a
+corrupted field without noticing.  The DT=600 dt-sweep run was not stable, merely short
+(600 steps from a tiny seed; its converged=False was the tell).  Growth requires the finer
+cut-cell structure of R=12 — R=6 (N=96) shows no growth in 6000 steps for ANY variant, so
+N=96 cannot discriminate fixes.
+
+**gauge-2a verdict: REFUTED as a standalone fix** — it delays onset and slows the rate ~0.85x
+but the growth remains exponential at N=192.  Either the tight-throat 2-point fallback rows
+(their "gradient 1", amplification 2/h) still feed the mode, or the aperture/cut-cell coupling
+adds a channel the 1D straight-wall model lacks.  PM I verdict pending (running).
+
+Fallback ladder if PM I also fails: PM III-style update (pressure-free momentum, p recomputed
+from phi); Rider-style periodic filtering of the non-solenoidal cell component; Frank's
+residual re-projection div(a grad dp) = div(a r).  Combinations (PM I + gauge-2a) also open.
+
+Bookkeeping: set_dt staleness bug found & fixed (stencil diagonal rho/dt now rebuilt on dt
+change — the first dt-switch experiment's post-switch explosion was this artifact, not scheme).
