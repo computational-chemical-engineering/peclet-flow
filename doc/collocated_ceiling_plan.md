@@ -1,3 +1,13 @@
+> **2026-08-20 — the Diagnosis section below is PARTLY REFUTED; read
+> [`collocated_accuracy_ceiling.md`](collocated_accuracy_ceiling.md) first.** Steps 0 and 1 were
+> executed: the conserved-flux estimator removes only 16–25 % of the plateau (Step 0 → the ceiling
+> is in the solution, not the readout), and the embed modes NaN on sphere beds (Step 1 → debugging
+> prerequisite). Crucially, the a-priori constraint-consistency test **exonerated the ½/½
+> constraint truncation** — the "defect (a)" attribution this plan is built on: the signed net
+> flux defect is 1e-5–1e-6 of the through-flux, three decades below the bias. The design
+> constraints (C1–C4) and the Step-2 candidate list remain valid; the *localisation* of the defect
+> is open, with the live suspects and next probes in the new document.
+
 # Removing the collocated accuracy ceiling — analysis and plan
 
 *2026-08-19. Supersedes the "second order" reading in `collocated_second_order_open_problem.md`'s
