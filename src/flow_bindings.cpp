@@ -158,6 +158,11 @@ static void bind_solver(nb::module_& m, const char* name) {
           "Experimental filtered rotational update: smooth div(u*) (mask-aware axis-wise 1-2-1, "
           "one-sided into the fluid at walls) before accumulating -mu*div into P. Keeps the O(1) "
           "pressure-relaxation gain, removes the checkerboard feedback channel.")
+      .def(
+          "set_rotational_weight", &S::setRotationalWeight, nb::arg("w"),
+          "Under-relax the rotational term: P += ct*phi - w*mu*div(u*). 1 = shipped, 0 = PM I; "
+          "small w raises the boundary-mode stability threshold ~1/w at ~1/w slower smooth-mode "
+          "pressure relaxation. phi=0 stays the unique fixed point for any w>0 at every dt.")
       .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
            "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
            "explicit-lagged wall term). Steady state is independent of w.")

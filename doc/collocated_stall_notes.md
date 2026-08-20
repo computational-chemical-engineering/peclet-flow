@@ -149,3 +149,24 @@ wrong was only the GAIN applied to phi in the P update, not the solve.
 
 Implemented: set_rotational_filter(on, eps=0.05).  Running: N=192 DT=60 (baseline growth
 window) then DT=600 (baseline blew up to m1=12 by step 3000 — the sharp test).
+
+## Filtered-rotational verdict: REFUTED (worse than baseline)
+
+N=192 DT=60 with S' (eps=0.05): m1 = 7.0e-2 at step 2000 and growing fast — 3.7x the baseline's
+level at the same step. Mechanism lesson: the filter's ONE-SIDED wall treatment (1/2(self +
+open-neighbour)) adds NEW wall-row <-> interior-row coupling with a phase-shifted symbol at
+exactly the marginal boundary rows — the same class of boundary-row perturbation the
+Guy-Fogelson criterion warns about. A smoothing filter must not touch the boundary rows
+asymmetrically; but a mask-respecting symmetric smoother cannot damp the wall-normal
+checkerboard AT the wall cell — the filter approach is structurally cornered. Retired.
+(set_rotational_filter kept in-tree as the record of the negative result.)
+
+## Next candidate: rotational under-relaxation (set_rotational_weight)
+
+P += ct*phi - w*mu*div(u*): shrinking the off-diagonal d ~ w*mu raises the destabilizing-
+perturbation threshold ~1/w (their eq. 94) WITHOUT touching boundary rows differently from the
+bulk; phi = 0 stays the unique fixed point for any w > 0 at every dt (incl. infinity). Cost:
+smooth-mode pressure relaxation slows ~1/w at large dt. THE open question (Frank's dt=1e20
+requirement): does the required w scale with dt? Measuring: w=0.3 at DT=60 and DT=600, N=192.
+If w_crit ~ 1/dt the weight route fails the requirement too and the SIMPLE-style
+solve-and-under-relax loop becomes the remaining candidate.

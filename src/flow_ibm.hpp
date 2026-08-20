@@ -441,6 +441,13 @@ class Solver {
   // P += (rho/dt)*phi WITHOUT the rotational -mu*div(u*) term (constant-mu path only; the
   // variable-mu branches keep their own treatment). Default true = shipped behaviour.
   void setRotationalPressure(bool on) { rotationalP_ = on; }
+  // Rotational under-relaxation: P += ct*phi - w*mu*div(u*). w = 1 is the shipped Timmermans
+  // update; w = 0 is PM I. Shrinking w shrinks the O(1) velocity->pressure off-diagonal that
+  // makes the cell-centered approximate projection marginally unstable (Guy-Fogelson eq. 92-94:
+  // the destabilizing-perturbation threshold scales ~1/w), at the cost of ~1/w slower pressure
+  // relaxation of the smooth modes at large dt. phi = 0 stays the unique fixed point for ANY
+  // w > 0, at every dt including dt -> infinity.
+  void setRotationalWeight(double w) { rotWeight_ = w; }
   // Filtered rotational update (experimental): P += ct*phi - mu*S(div u*), S = one mask-aware
   // axis-wise (1,2,1)/4 smoothing pass per axis (one-sided 1/2(d_i+d_nbr) toward the open side at
   // a solid-centered neighbour, identity when sandwiched). S annihilates the axis checkerboard
@@ -2640,7 +2647,8 @@ class Solver {
       // continuity), so the next step's incremental predictor -grad(P^n) can't overshoot for a
       // stiff drag diagonal. omega_p=1 (default) is the current behaviour; <1 only stabilizes the
       // porous+drag path.
-      const double ct = pressUnderRelax_ * rho_ / dt_, mu = rotationalP_ ? mu_ : 0.0;
+      const double ct = pressUnderRelax_ * rho_ / dt_,
+                   mu = rotationalP_ ? rotWeight_ * mu_ : 0.0;
       if (varProps_) {
         // Variable viscosity: the pointwise Timmermans term -mu(i)*div(u*) is inconsistent for
         // heterogeneous mu (see setVariableRotational). Default = constant coefficient chi*mu_min
@@ -3327,6 +3335,7 @@ class Solver {
                              // cell-centered rotational update is unstable through, keeps the O(1)
                              // pressure-relaxation gain and the phi=0 (dt-free) fixed point.
   double rotFilterEps_ = 0.05;  // S' = eps I + (1-eps) S (see setRotationalFilter)
+  double rotWeight_ = 1.0;      // rotational under-relaxation w (setRotationalWeight)
   double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
