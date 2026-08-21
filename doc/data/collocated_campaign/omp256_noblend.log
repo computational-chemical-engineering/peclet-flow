@@ -1,0 +1,28 @@
+Kokkos::OpenMP::initialize WARNING: OMP_PROC_BIND environment variable not set
+  In general, for best performance with OpenMP 4.0 or better set OMP_PROC_BIND=spread and OMP_PLACES=threads
+  For best performance with OpenMP 3.1 set OMP_PROC_BIND=true
+  For unit testing set OMP_PROC_BIND=false
+
+# bed packing_256x256x256_r16_phi0.60_s3.npz N=256 R=16.0 kind=gauge-exact rot=1 rotf=0 rotw=1.0 wallw=0.0 dt=600.0 steps=50
+   step     k_cell/R2     k_face/R2     m1_rms     m2_rms    dk_cell        dm1
+     25 4.1253868e-03 4.0903704e-03  1.536e-02  1.401e-02                       dP=           |P|=7.208e-02
+     50 4.0413121e-03 4.0070092e-03  1.338e-02  1.258e-02  -8.41e-05  -1.98e-03 dP= 3.085e-02 |P|=7.526e-02
+Kokkos allocation "cnt" is being deallocated after Kokkos::finalize was called
+
+Backtrace:
+[0x7f02e7a1b855] Kokkos::Impl::save_stacktrace()
+[0x7f02e79f6adc] Kokkos::Impl::host_abort(char const*)
+[0x7f02e7a1b827] Kokkos::Impl::SharedAllocationRecord<void, void>::decrement(Kokkos::Impl::SharedAllocationRecord<void, void>*)
+[0x7f02e7921df5] 
+[0x7f02e79310c0] 
+[0x7f02e79eb095] 
+[0x5fcc9b] 
+[0x5fcadd] 
+[0x57026f] 
+[0x6be21f] 
+[0x6a8325] 
+[0x6b68b4] Py_RunMain
+[0x681b2b] Py_BytesMain
+[0x7f0300a03ca8] 
+[0x7f0300a03d65] __libc_start_main
+[0x680ed1] _start

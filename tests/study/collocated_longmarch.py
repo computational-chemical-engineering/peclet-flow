@@ -68,11 +68,15 @@ sv = flow.Solver if KIND == "stag" else flow.SolverColocated
 s = sv(N, N, N)
 s.set_rho(1.0); s.set_mu(MU); s.set_dt(DT)
 s.set_body_force(F0, 0, 0); s.set_advection(False)
-s.set_velocity_solver_params(150)
-s.set_pressure_multigrid(True, max(2, int(np.log2(N)) - 2))
+s.set_velocity_solver_params(int(os.environ.get("VIT", "150")))
+s.set_pressure_multigrid(True, int(os.environ.get("MGL", "0")) or max(2, int(np.log2(N)) - 2))
 s.set_pressure_pcg(True, 300, 1e-8)
 if KIND != "stag":
-    if KIND.startswith("mode"):
+    if KIND == "ghost":
+        s.set_ghost_projection(True)         # fluid-only constraint + directional closures (route 2)
+    elif KIND == "fluidonly":
+        s.set_fluid_only_constraint(True)    # mode 14a: fluid-only openness filter + gauge-exact G
+    elif KIND.startswith("mode"):
         s.set_face_interp(int(KIND[4:]))     # numbered ablations (e.g. mode3 = adjoint (T,T^T) pair)
     elif hasattr(s, "set_collocated_scheme"):
         s.set_collocated_scheme(KIND)

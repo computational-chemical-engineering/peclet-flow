@@ -451,6 +451,9 @@ class Solver {
   // Wall-banded rotational blend (Frank, 2026-08-20): see the press_wallblend kernel. w0 = 0
   // (default) disables; typical w0 ~ 0.3-0.5. Composes with setRotationalWeight (uniform factor).
   void setRotationalWallWeight(double w0) { rotWallW_ = w0; }
+  // Mode-14a: fluid-only pressure constraint (close faces with a solid-centered side in the
+  // openness). Call BEFORE set_solid. Collocated experiment; defaults byte-identical when off.
+  void setFluidOnlyConstraint(bool on) { fluidOnlyConstraint_ = on; }
   // Filtered rotational update (experimental): P += ct*phi - mu*S(div u*), S = one mask-aware
   // axis-wise (1,2,1)/4 smoothing pass per axis (one-sided 1/2(d_i+d_nbr) toward the open side at
   // a solid-centered neighbour, identity when sandwiched). S annihilates the axis checkerboard
@@ -799,6 +802,33 @@ class Solver {
                 "peclet::flow::embed_solid_mask", Kokkos::RangePolicy<CCExec>(0, nn),
                 KOKKOS_LAMBDA(std::size_t i) { m(i) = cs(i) < 1e-6 ? 1.0 : 0.0; });
           }
+        }
+      }
+      if (fluidOnlyConstraint_) {
+        // Mode-14a FLUID-ONLY constraint (setFluidOnlyConstraint): close every face with a
+        // solid-CENTERED side in the openness the pressure stack consumes. The aperture operator,
+        // the divergence, the face correction and the MG rediscretization all read these fields,
+        // so one filter makes constraint/operator/correction consistent by construction: pressure
+        // DOFs decouple at solid-centered cells (their rows go empty like solid cells), the
+        // invisible multiplier subspace of collocated_invisible_subspace.md S4 ceases to exist,
+        // and the operator stays SPD + 7-point (CG + CutcellMG untouched). Closure quality is
+        // Neumann-zero at the closed faces (the crude end of the fluid-only family -- measured,
+        // not assumed); the consistent-closure variants ride on the gp row machinery instead.
+        CCConst sd = CCConst(sdf_);
+        CCField oa[3] = {ox_, oy_, oz_};
+        C3 e = e_;
+        for (int a = 0; a < 3; ++a) {
+          CCField o = oa[a];
+          const long sa = (a == 0) ? 1 : (a == 1) ? (long)e.x : (long)e.x * e.y;
+          Kokkos::parallel_for(
+              "peclet::flow::fluid_only_openness",
+              Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {1, 1, 1},
+                                                             {e.x, e.y, e.z}),
+              KOKKOS_LAMBDA(int x, int y, int z) {
+                const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+                if (sd(i) < 0.0 || sd(i - sa) < 0.0)
+                  o(i) = 0.0;
+              });
         }
       }
 #ifdef PECLET_FLOW_MPI
@@ -3409,6 +3439,7 @@ class Solver {
   double rotFilterEps_ = 0.05;  // S' = eps I + (1-eps) S (see setRotationalFilter)
   double rotWeight_ = 1.0;      // rotational under-relaxation w (setRotationalWeight)
   double rotWallW_ = 0.0;       // wall-banded rotational blend w0 (setRotationalWallWeight)
+  bool fluidOnlyConstraint_ = false;  // mode-14a fluid-only constraint (setFluidOnlyConstraint)
   double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)

@@ -114,6 +114,16 @@ unchanged for any $w_0 \in (0,1]$ (the bracket stays SPD). With $w_0 = 0.5$, $R=
 (`lm192_wall05_dt*.log`). This satisfies design requirement C2's stability half at all
 $\Delta t$; it does not by itself restore steady-state uniqueness — see Layer 2.
 
+**Margin caveat (2026-08-21, [MEASURED]).** The blend's stability window is
+*resolution-dependent*: at $R = 16$ (the bed's native $256^3$ rung) $w_0 = 0.5$ with
+$\Delta t = 600$ diverges violently (doubling 4–8 steps, $k$ negative by step 50; identical on
+H100/CUDA and OpenMP, so deterministic in the scheme), while $(R{=}12, \Delta t{=}600)$ and
+$(R{=}16, \Delta t{=}60)$ are healthy; a grid/surface-incidence explanation was refuted
+(grazing-cell counts vary smoothly with $N$). Mechanism: the destabilized rows' gain grows like
+$\nu\Delta t/h^2$ under refinement while the banded diagonal is fixed at $w_0\mu$ — the
+one-line blend is a *stopgap with a protocol-dependent margin*, not a uniform stabilizer. (The
+adjoint-aperture family of §6 needs no such device at any measured $(R, \Delta t)$.)
+
 ## 4. Layer 2: the invisible subspace and the attractor family
 
 Define the *invisible subspace*
@@ -187,18 +197,68 @@ $\Delta t$ incl. $10^{20}$; leaves Layer 2 (reproducible attractors; residual
 $\Delta t$-sensitivity of $k$ about $5\times 10^{-4}$ relative across $\Delta t \in [6, 10^{20}]$,
 vs $1.8\times10^{-3}$ before). Suitable as a stopgap default once validated on the ladder.
 
-**S1 (the principled fix): support-consistent gradients.** Make every operator that delivers
-pressure to the momentum/corrections read the same DOFs the constraint couples, collapsing
-$\mathcal K$ to constants (Prop. 2 then gives uniqueness as in Prop. 1):
-- The openness-weighted corrector/predictor of the *embed* line (modes 6/7,
-  `projectCorrectCenterOpen`) has exactly this support: face-difference averages weighted by
-  $\alpha_f$, reading solid-centered $p$ where $\alpha_f > 0$. Basilisk's embed operates this
-  way. The embed modes are currently broken on beds (a preconditioner NaN at $R=8$, never
-  root-caused) — **fixing that bug is now the highest-value implementation step**, followed by a
-  stability check (Layer-1 analysis applies to the new pair too) and the accuracy ladder.
-- Alternatively a *fluid-only aperture operator*: eliminate solid-centered DOFs from $A_p$ by
-  folding their $\alpha_f > 0$ connections into wall closures. Larger surgery; changes the
-  constraint discretization itself (ghost-projection-adjacent territory).
+**S1 (support-consistent gradients) — EXECUTED 2026-08-21; uniqueness restored, accuracy
+price measured.** Make every operator that delivers pressure to the momentum/corrections read
+the same DOFs the constraint couples, collapsing $\mathcal K$ (Prop. 2 then gives uniqueness as
+in Prop. 1). Findings, in order:
+
+1. *The embed line (modes 6/7) is dead.* The "preconditioner NaN" was root-caused (flow
+   `4732b17`): `embedDirichletGradient`'s degenerate-sliver branch returns $U/d_0$ with
+   $d_0 = |\mathrm{sdf}|$ floored at $10^{-3}$ — an **explicit lagged** wall drag whose gain
+   $\mu\,\mathrm{area}/d_0$ reaches $\sim 10^2\times$ the momentum diagonal whenever a cell
+   centre grazes the surface (guaranteed on beds, absent on Z&H). The march then diverges
+   $\times\!\sim\!100$/step $\Delta t$-free; the NaN is just the float coarse-level overflow.
+   (Basilisk's identical stencil is safe because its home coefficient goes into the *implicit*
+   diagonal.) Fix: floor $d_0$ at $0.5$, bounding the explicit gain by $\approx 0.6$ for any
+   $(\mu,\rho,\Delta t)$. [MEASURED, fixed] — but the *repaired* modes 6/7 remain
+   unconditionally unstable on beds: $\Delta t$-free pressure exponential ($\times 10$–$15$ per
+   250 steps at $\Delta t = 60$ and $600$ alike), immune to the wall-banded blend *and* to
+   scalar under-relaxation ($w = 0.3$ re-grows from step $\sim$1000); PM I is stable. That is
+   the Uzawa instability of the non-adjoint normalized pair, as §3 predicts — no rescaling can
+   cure it. [MEASURED]
+2. *The adjoint-aperture family (modes 11/12/13, shipped opt-in) collapses the family.* Mode 11:
+   $G_{11} = -(D_\alpha \Pi)^T$ (`centerGradAperture` — the un-normalized
+   $\tfrac12\alpha$-weighted difference; adjointness verified to $8\times10^{-16}$ a-priori, so
+   $\Sigma$ is SPSD). Mode 12: $\times$ per-cell $S = 6/\max(\Sigma_a o, 0.5)$. Mode 13:
+   the mode-6 per-axis normalization with the denominator floored (default $0.25$). All three at
+   $R = 8$: $m_1 \to 10^{-5}$ **monotonically** (the gauge-exact family freezes it at
+   $1.8\times10^{-2}$), $|P|$ frozen at the staggered scale (no runaway), and **C2 restored** —
+   $k(\Delta t = 60/600/10^{20}) \to$ one limit within $\sim 2\times10^{-6}$ relative (vs the
+   $5\times10^{-4}$ attractor spread), with **no blend needed including
+   $\Delta t = 10^{20}$**. [MEASURED]
+3. *The accuracy price is structural and first order.* $R=8$ gaps vs staggered:
+   $-11.1\%$ / $-8.10\%$ / $-8.55\%$ (modes 11/12/13) — three very different cut-cell
+   weightings, the same gap scale, so the weighting magnitude is not the lever. $R=12$
+   (mode 12): $-5.42\%$, i.e. contraction $\times 1.49$ on a $1.5\times$ refinement —
+   **cleanly $O(h)$**. [MEASURED] Interpretation: support-consistency makes the momentum read
+   solid-centered $\phi$, but those values are constraint *multipliers*, not samples of a smooth
+   pressure — an $O(1)$ value error at every cut cell, hence $O(h)$ globally.
+
+**The support/accuracy tension (the sharpened statement of this note).** For this operator pair
+the two desiderata are mutually exclusive: a gradient that *reads* the $\alpha$-coupled
+solid-centered DOFs inherits their multiplier values ($O(1)$ at cut cells $\Rightarrow O(h)$
+global bias, measured); a gradient that does *not* read them (gauge-exact, or any
+extrapolation-repaired stencil, whose output is independent of the solid values) has
+$\ker G \supseteq$ solid-supported fields and possesses the attractor family of Prop. 2. The
+only exit is to remove the DOFs from the *constraint* itself (a fluid-only $A_p$ with wall
+closures) — which is precisely the quarantined ghost projection's territory, with its own
+(half-height) plateau. [INFERRED from the above]
+
+- The *fluid-only constraint* is therefore the remaining S1 route with a chance at both
+  properties, and it is now **structurally de-risked** [MEASURED]: the fluid-column submatrix of
+  the gauge-exact $G$ on the percolating component of the real bed has **exactly one** zero
+  singular value (the constant) at $N = 32$ and $48$, with the next cluster at the smooth-mode
+  scale and spread (non-wall-localized) eigenvectors (`kernel_study.py`). Hence
+  $\mathcal K = \{\text{solid-supported}\} \oplus \{\text{pocket constants}\} \oplus
+  \{\text{const}\}$ — the attractor family lives *entirely in the solid-row flux-balance
+  equations*, and any constraint that drops those rows (with closures or merging for the
+  $\alpha_f > 0$ wall faces) is unique-mod-gauge by construction while keeping the $O(h^2)$
+  gradient. The quarantined ghost projection is exactly such a scheme; its recorded
+  half-height plateau predates the clean protocol (Layer-1 stabilization + fixed-march
+  discipline), so its clean-protocol convergence is being re-measured. A symmetric alternative
+  (keep the DOFs, pin them with an SPD ghost-penalty on normal second differences — CutFEM-style)
+  remains open if the closure route disappoints; its cost is a consistent near-wall
+  mass-balance perturbation.
 
 **S2 (containment, if S1 disappoints): protocol standardization.** The attractors are exact and
 path-independent; fixing the march protocol (one $\Delta t$, fixed convergence criterion) gives
@@ -260,3 +320,8 @@ mechanism identification credible.
 | clean gaps | $R8: -2.53\%$, $R12: -0.76\%$ | `ladder_R8_*.log`, `lm192_wall05_dt60.log` |
 | flat-wall isolation | E1/E1b identical stag==col; E2 leak $O(h^6)$; $s{=}0.5$ incidence $O(1)$ all solvers | `flatwall_sweep.log` |
 | TGV no-solid control | col$-$stag order $+2.00$ exactly | `tgv_control.log` |
+| embed NaN root cause | degenerate-sliver $U/d_0$, $d_0$ floor $10^{-3}$; fix floor $0.5$ | flow `4732b17` |
+| modes 6/7 post-fix | unconditionally unstable, $\Delta t$-free; PM I stable | `lm128_mode6_*.log` |
+| mode 11 C2 | $k(60/600/10^{20})$ = 3.5743523/3.5743595/3.5745995e-3, $m_1\to10^{-5}$ | `lm128_mode11_dt*.log` |
+| adjoint-family gaps $R=8$ | $-11.1/-8.10/-8.55\%$ (11/12/13) | `lm128_mode1{1,2,3}_dt600.log` |
+| mode-12 gap $R=12$ | $-5.42\%$ ($\times1.49$ per $1.5\times$ — $O(h)$) | `lm192_mode12_dt600.log` |

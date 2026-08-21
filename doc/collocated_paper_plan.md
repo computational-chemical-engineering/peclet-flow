@@ -60,10 +60,13 @@ appendix (the refutation catalogue).
 - [ ] Clean ladder R=16/24/32 + staggered refs (Snellius job 25914731) -> tracker on arrival
 
 **Needed for submission:**
-- [ ] Embed-NaN root cause + fix (S1 prerequisite)
-- [ ] Support-consistent scheme validated: stability (Layer-1 check on the new pair, blend if
-      needed), family collapse (m1 -> 0, P-drift gauge-only, dt-independence i.e. C2 across
-      dt=6..1e20), THEN the convergence ladder (R=8..32, both beds phi=0.50/0.60) vs staggered
+- [x] Embed-NaN root cause + fix (rows 23/26; flow 4732b17) -- and the repaired modes 6/7 are
+      measured unconditionally unstable (non-adjoint Uzawa), closing that branch
+- [x] Support-consistent scheme validated for STABILITY + COLLAPSE (rows 27-29): adjoint-aperture
+      modes 11/12/13 -- m1 -> 1e-5 monotone, P frozen, C2 restored dt=60..1e20 with NO blend;
+      accuracy measured O(h) with -8..-11% at R=8 (row 30: x1.49 contraction R=8->12) => the
+      support/accuracy tension is fundamental for this pair (note S6). Ladder R=16..32 queued
+      (Snellius 25922444); phi=0.50 bed replication still open
 - [ ] Z&H clean cross-check (external anchor) with the final scheme
 - [ ] Arnoldi/eigs verification of the boundary-block spectrum claim (Re lambda < 0) —
       assemble Sigma = D Pi A_u^-1 G on a small bed (N=48?), compute rightmost/leftmost
@@ -101,7 +104,7 @@ appendix (the refutation catalogue).
 | 19 | flat-wall E2 | stag exact (1e-14); gauge-exact O(h^6); plain O(h^1.6) | ibid | final |
 | 20 | s=0.5 incidence | O(1) error ALL solvers (robustness note) | ibid | final |
 | 21 | N=96 (R=6) stability | no growth any variant 6000 steps | `lm96_*.log` | final |
-| 22 | clean ladder R=16/24/32 | — | Snellius 25914731 `cleanladder_*.log` | RUNNING |
+| 22 | clean ladder R=16/24/32 | PROTOCOL INVALIDATED at R>=16 for wall05@dt600 (row 32); job 25914731 TIMED OUT after R24 (5h; divergent rungs ran ~300 PCG iters/step); harvested: R16_stag FINAL 4.0173693e-3, R24_stag partial (step 1500: 4.0192623e-3); re-run at dt=60 = job 25937469 (cleanladder2, incl. R24/R32 stag insurance) | `cleanladder_*.log` harvested to peclet-examples + doc/data | superseded by 25937469 |
 | 23 | embed NaN root cause | FOUND+FIXED: degenerate-sliver wall drag U/d0, d0=|sdf| floored at 1e-3 -> explicit lagged gain mu*area/d0 ~ 1e2 x diag at grazing centres (dt-free x~100/step, localized solid-ctr cells |sdf|~1e-3; Basilisk-safe only because implicit *coef*); fix = floor d0 at 0.5 (gain <= ~0.6 for any mu,rho,dt) | `probe_localize.py` runs + src/mac_approx_projection.hpp | fixed |
 | 24 | support-consistent ladder | — | — | TODO |
 | 25 | Arnoldi spectrum | — | — | TODO |
@@ -109,7 +112,17 @@ appendix (the refutation catalogue).
 | 27 | mode 11 (adjoint-aperture pair) | NEW SCHEME G=-(D_a Pi)^T (adjointness verified 8e-16 a-priori): COLLAPSE CONFIRMED at R=8 -- m1 -> 1e-5 monotone (gauge-exact freezes at 1.8e-2), |P| frozen at stag scale, k(dt=60/600/1e20) = 3.5743523/3.5743595/3.5745995e-3 all monotone to one limit (C2 to ~2e-6, vs 5e-4 attractor spread), NO blend needed incl. dt=1e20; accuracy price -11.1% vs stag at R=8 | `lm128_mode11_dt*.log` | final |
 | 28 | mode 12 (per-cell rescale S=6/sum(o)) | stable, collapse identical (m1 8.8e-6, k 10-digit settled 3.6958252e-3); gap -8.10% at R=8 | `lm128_mode12_dt600.log` | final |
 | 29 | mode 13 (capped per-axis normalize, floor 0.25) | stable, collapse identical (3.6776869e-3); gap -8.55% at R=8 == mode 12 -> weighting magnitude is NOT the accuracy lever; adjoint family shares structural ~-8..-11% at R=8 | `lm128_mode13_dt600.log` | final |
-| 30 | adjoint-family order check R=12 | — | `lm192_mode1{2,3}_dt600.log` | RUNNING |
+| 30 | adjoint-family order check R=12 | mode 12: 3.8000478e-3 = -5.425% (ratio 1.494 vs R=8), mode 13: 3.7898681e-3 = -5.678% (ratio 1.506) -> textbook O(h), two independent variants; support-consistency via multiplier-reading is FIRST order, period | `lm192_mode1{2,3}_dt600.log` | final |
+| 32 | wall-blend margin is R-DEPENDENT | w0=0.5 UNSTABLE at (R=16, dt=600): k negative by step 50, doubling ~4-8 steps, H100 AND OMP identical (code-deterministic, backend-independent); healthy at (R=12, dt=600) and (R=16, dt=60); incidence refuted (grazing-cell counts smooth in N); mechanism: GF gain ~ mu*dt/h^2 grows with refinement while the banded diagonal is fixed w0*mu -> the blend is NOT a uniform stabilizer; clean-ladder R>=16 rungs re-run at dt=60 (job 25937469); w0=1.0@dt600 diagnostic: diverges FASTER (1e14 by step 50) -> no w0 rescues dt>=600 at R>=16, blend stability domain = (R<=12, dt<=600) u (R=16, dt<=60) | `cleanladder_R16_wall05.log`, `cleanladder2_R16_w10_dt600.log`, `omp256_*.log`, `incidence_check.py` | final |
+| 33 | clean ladder stag refs | R=16: 4.0173693e-3 (R=8: 4.02144e-3, R=12: 4.01803e-3); R=24/32 pending (R32 may need job 25936720's insurance rung) | snellius `cleanladder_R16_stag.log` | partial |
+| 34 | phi=0.50 replication R=8 | stag 1.0923667e-2; wall05 1.0738996e-2 (-1.69%); mode12 1.0277467e-2 (-5.92%, m1 -> 4e-6) -- phi=0.60 story replicates | `p50_R8_*.log` | final |
+| 37 | clean gauge-exact ladder (dt=60) | R=12: -0.76%, R=16: -0.1335% (4.0120051e-3, dk 8e-12, STABLE at dt=60 w/ wall05; m1 frozen 1.25e-2 + |P| drift to 8.3 = Layer-2 family alive as expected); R=8 dt-60 re-run: 3.9194118e-3 = -2.536% == dt-600 value (protocol-robust); homogeneous dt-60 series -2.54 -> -0.76 -> -0.13 -> ~+0.20 (R=8/12/16/24; R24 = 4.0272055e-3, CONVERGED dk 3e-11 before its job timed out; gap provisional on the final R24 stag ref) -- sign crossed, heading toward the old +0.39% asymptote: the gauge-exact plateau appears REAL and family-borne under the clean protocol (m1 frozen 1.25e-2); R=32 + exact stag refs pending | `cleanladder2_R{16,24}_wall05_dt60.log`, `ladder_R8_wall05_dt60.log` | partial |
+| 40 | mode 14a (Design A fluid-only filter) | family-free + stable as designed (m1 -> 1e-6) but accuracy-dead: R=8 3.7326033e-3 = -7.18%, R=12 3.8477056e-3 = -4.24% (order ~1.3, constant ~ adjoint family) -> the Neumann-zero closure is insufficient; B/B+ carry route 2b (see fluid_only_constraint_plan.md) | `lm1{28,92}_fluidonly_dt600.log` | final |
+| 39 | ladder job economics | ALL THREE R>=16 jobs timed out after their R16 rungs: measured per-step 0.72 s (collocated 256^3), 3.3 s (384^3), ghost 1.94/9.6 s (256^3/384^3) under the fixed protocol -> R32@dt600 ghost ~25 h/rung, infeasible; re-plan: stag refs R24/32 as own job (25945148), ghost high rungs pend the dt-6000 C2 probe (large-dt short marches), adjoint R24/32 SKIPPED (O(h) proven) | sacct + partial logs | final |
+| 38 | adjoint-family O(h), third rung | mode 12 R=16: 3.8527726e-3 = -4.10% (-8.10 -> -5.42 -> -4.10: perfect 1/R line); mode 11 R=16: -5.21% (x2.14 per 2x) | snellius `mode11ladder_R16_*.log` | final |
+| 35 | ker(G_ge) fluid-side is TRIVIAL | a-priori (numpy mirror of gpCenterGrad, real bed, percolating component): exactly ONE zero eigenvalue (the constant) at N=32 AND N=48; next cluster at the smooth-mode scale with SPREAD eigenvectors (PR 0.44-0.62) -> the ENTIRE attractor family lives in the solid-row flux-balance equations; a fluid-only constraint + gauge-exact gradient is unique-by-construction (route 2 structurally de-risked) | `kernel_study.py` (doc/data) | final |
+| 36 | ghost CLEAN protocol R=8/R=12 | R=8: 3.9639024e-3 (-1.431%), R=12: 4.0073684e-3 (-0.265%) -- x5.4 contraction per 1.5x (super-quadratic => zero-crossing near R~13-16, R=16..32 decide: job 25937956); family-free signature BOTH rungs (m1 -> 1e-5 monotone, |P| frozen) AND NO Layer-1 growth at (R=12, dt=600) unblended where gauge-exact doubled every 82 steps -- the fluid-only constraint removed the instability with the family; R=16 (H100): 4.0204793e-3 = +0.0774% -- zero CROSSED between R=12 and 16, family-free + stable unblended; C2 CERTIFICATE PASS: k(dt=60/600/6000/1e20) = 3.9639025/3.9639024/3.9639210/3.9639208e-3, spread <= 5e-6 rel over 19 decades, all monotone to one limit; dt=6000 within 5e-6 at 2000 steps -> large-dt short marches licensed for R=32; R=24 running (job 25951131) | `lm128_ghost_dt*.log`, `lm192_ghost_dt600.log`, snellius `ghostladder_R16_ghost.log` | partial |
+| 31 | mode-12 dt-cycling (C2 flagship) | ONE fixed point across dt=60->600->6->1e20->60: segment-end k 3.6958242/3.6958241/3.6958214/3.6958229e-3 -- spread 7.6e-7 rel over 19 decades of dt (gauge-exact attractor spread 5e-4), m1 ~ 3e-6 throughout, stable at 1e20 mid-cycle with no blend | `lm128_mode12_cycle.log` | final |
 
 *(All cited scratchpad logs are archived in `flow/doc/data/collocated_campaign/`.)*
 

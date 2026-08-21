@@ -1,0 +1,33 @@
+# bed packing_256x256x256_r16_phi0.60_s3.npz N=256 R=16.0 kind=stag rot=1 rotf=0 rotw=1.0 wallw=0.0 dt=60.0 steps=4000
+   step     k_cell/R2     k_face/R2     m1_rms     m2_rms    dk_cell        dm1
+     50 4.0197263e-03 3.9993232e-03  0.000e+00  7.703e-09                       dP=           |P|=3.494e-01
+    500 4.0174151e-03 3.9970574e-03  0.000e+00  1.372e-10  -2.31e-06  +0.00e+00 dP= 1.684e-02 |P|=3.493e-01
+   1000 4.0173812e-03 3.9970240e-03  0.000e+00  1.342e-12  -3.39e-08  +0.00e+00 dP= 5.318e-03 |P|=3.492e-01
+   1500 4.0173744e-03 3.9970173e-03  0.000e+00  7.415e-13  -6.85e-09  +0.00e+00 dP= 2.965e-03 |P|=3.492e-01
+   2000 4.0173719e-03 3.9970148e-03  0.000e+00  4.861e-13  -2.51e-09  +0.00e+00 dP= 1.999e-03 |P|=3.492e-01
+   2500 4.0173707e-03 3.9970137e-03  0.000e+00  3.514e-13  -1.19e-09  +0.00e+00 dP= 1.471e-03 |P|=3.492e-01
+   3000 4.0173700e-03 3.9970130e-03  0.000e+00  2.691e-13  -6.63e-10  +0.00e+00 dP= 1.178e-03 |P|=3.492e-01
+   3500 4.0173696e-03 3.9970126e-03  0.000e+00  2.148e-13  -4.07e-10  +0.00e+00 dP= 1.031e-03 |P|=3.492e-01
+   4000 4.0173693e-03 3.9970124e-03  0.000e+00  1.768e-13  -2.68e-10  +0.00e+00 dP= 9.024e-04 |P|=3.492e-01
+Kokkos allocation "cnt" is being deallocated after Kokkos::finalize was called
+
+Backtrace:
+[0x14e6977b0505] Kokkos::Impl::save_stacktrace()
+[0x14e69779085c] Kokkos::Impl::host_abort(char const*)
+[0x14e6977b04c7] Kokkos::Impl::SharedAllocationRecord<void, void>::decrement(Kokkos::Impl::SharedAllocationRecord<void, void>*)
+[0x14e69761f645] 
+[0x14e697672f8f] 
+[0x14e6977872c5] 
+[0x14e6ca65802f] 
+[0x14e6ca72c046] 
+[0x14e6ca6655aa] 
+[0x14e6ca7480fc] 
+[0x14e6ca7479ed] 
+[0x14e6ca731795] Py_FinalizeEx
+[0x14e6ca73f8d0] Py_RunMain
+[0x14e6ca6fa1f7] Py_BytesMain
+[0x14e6ca180610] 
+[0x14e6ca1806c0] __libc_start_main
+[0x401065] _start
+srun: error: gcn150: task 0: Aborted (core dumped)
+srun: Terminating StepId=25914731.1

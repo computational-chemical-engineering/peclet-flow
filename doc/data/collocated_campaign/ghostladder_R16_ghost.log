@@ -1,0 +1,34 @@
+# bed packing_256x256x256_r16_phi0.60_s3.npz N=256 R=16.0 kind=ghost rot=1 rotf=0 rotw=1.0 wallw=0.0 dt=600.0 steps=4000
+   step     k_cell/R2     k_face/R2     m1_rms     m2_rms    dk_cell        dm1
+     50 4.0389906e-03 4.0097255e-03  8.563e-02  2.122e-02                       dP=           |P|=2.830e-02
+    500 4.0204938e-03 3.9888141e-03  1.037e-04  2.108e-02  -1.85e-05  -8.55e-02 dP= 1.454e-02 |P|=3.049e-02
+   1000 4.0204823e-03 3.9887998e-03  3.397e-05  2.108e-02  -1.14e-08  -6.97e-05 dP= 5.859e-03 |P|=3.050e-02
+   1500 4.0204804e-03 3.9887975e-03  1.709e-05  2.108e-02  -1.90e-09  -1.69e-05 dP= 2.822e-03 |P|=3.050e-02
+   2000 4.0204798e-03 3.9887967e-03  1.023e-05  2.108e-02  -6.21e-10  -6.86e-06 dP= 1.866e-03 |P|=3.051e-02
+   2500 4.0204795e-03 3.9887964e-03  6.761e-06  2.108e-02  -2.67e-10  -3.47e-06 dP= 1.398e-03 |P|=3.051e-02
+   3000 4.0204794e-03 3.9887962e-03  4.759e-06  2.108e-02  -1.35e-10  -2.00e-06 dP= 1.118e-03 |P|=3.052e-02
+   3500 4.0204793e-03 3.9887961e-03  3.508e-06  2.108e-02  -7.70e-11  -1.25e-06 dP= 8.953e-04 |P|=3.052e-02
+   4000 4.0204793e-03 3.9887961e-03  2.683e-06  2.108e-02  -4.79e-11  -8.25e-07 dP= 7.176e-04 |P|=3.053e-02
+peclet::flow ghost projection: 1838 fluid components; decoupled 2081 pocket cells outside the main component (6704808 of 6706889 fluid cells)
+Kokkos allocation "cnt" is being deallocated after Kokkos::finalize was called
+
+Backtrace:
+[0x14cb4ba50505] Kokkos::Impl::save_stacktrace()
+[0x14cb4ba3085c] Kokkos::Impl::host_abort(char const*)
+[0x14cb4ba504c7] Kokkos::Impl::SharedAllocationRecord<void, void>::decrement(Kokkos::Impl::SharedAllocationRecord<void, void>*)
+[0x14cb4b8bfa75] 
+[0x14cb4b91452f] 
+[0x14cb4ba272c5] 
+[0x14cb7e8f602f] 
+[0x14cb7e9ca046] 
+[0x14cb7e9035aa] 
+[0x14cb7e9e60fc] 
+[0x14cb7e9e59ed] 
+[0x14cb7e9cf795] Py_FinalizeEx
+[0x14cb7e9dd8d0] Py_RunMain
+[0x14cb7e9981f7] Py_BytesMain
+[0x14cb7e41e610] 
+[0x14cb7e41e6c0] __libc_start_main
+[0x401065] _start
+srun: error: gcn119: task 0: Aborted (core dumped)
+srun: Terminating StepId=25937956.0
