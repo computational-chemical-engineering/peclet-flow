@@ -413,7 +413,7 @@ class Solver {
             "): retired 2026-08-18 (ablation / measured divergent). Use "
             "set_collocated_scheme(\"gauge-exact\") — the default — or \"plain\" for the "
             "legacy first-order aperture projection.");
-    if (mode != 0 && (mode < 3 || mode > 7) && mode != 9)
+    if (mode != 0 && (mode < 3 || mode > 7) && mode != 9 && (mode < 11 || mode > 13))
       throw std::runtime_error("set_face_interp: unknown mode " + std::to_string(mode));
     if (ghostProjection_ && mode != 0)
       throw std::runtime_error("set_face_interp: incompatible with the ghost projection");
@@ -1583,6 +1583,10 @@ class Solver {
     const bool tg = Grid::collocated && faceInterp_ >= 2 && faceInterp_ <= 5 && incr;
     // modes 6/7: openness-weighted -grad(P^n) predictor, matching the fs-weighted correction
     const bool wg = Grid::collocated && (faceInterp_ == 6 || faceInterp_ == 7) && incr;
+    // mode 11: adjoint-aperture -grad(P^n) predictor G = -(D_a Pi)^T (centerGradAperture) --
+    // support-consistent AND adjoint; matches the mode-11 correction so momentum and constraint
+    // stay one operator family.
+    const bool ag = Grid::collocated && (faceInterp_ >= 11 && faceInterp_ <= 13) && incr;
     // ghost mode (and the mode-9/10 cutcell-ghost hybrids): directional gpCenterGrad predictor —
     // the mode-0 central difference reads the decoupled P=0 at solid-centered cells, a
     // gauge-dependent O(1) gradient error at every cut cell (measured O(1/h) in physical units,
@@ -1600,9 +1604,18 @@ class Solver {
       } else if (wg) {
         CCField oax[3] = {ox_, oy_, oz_};
         centerGradOpen(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G);
+      } else if (ag) {
+        CCField oax[3] = {ox_, oy_, oz_};
+        if (faceInterp_ == 12)
+          centerGradApertureScaled(tgp_, CCConst(P_), CCConst(ox_), CCConst(oy_), CCConst(oz_), c,
+                                   e_, G);
+        else if (faceInterp_ == 13)
+          centerGradOpenCapped(tgp_, CCConst(P_), CCConst(oax[c]), c, apertureFloor_, e_, G);
+        else
+          centerGradAperture(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G);
       }
     }
-    CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg/wg/gg false there)
+    CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg/wg/gg/ag false there)
     // Mode-4 fully-FV momentum via DEFECT CORRECTION: solve M·u^{k+1} = M·u^k − rs·L_FV(u^k) +
     // rs·b_FV so the fixed point satisfies the second-order finite-volume balance L_FV·u* = b_FV
     // exactly, with the (stable, small-cell-safe) IBM matrix M only as preconditioner. fvM_ = M·u^k
@@ -1651,7 +1664,7 @@ class Solver {
           const double gp =
               !incr ? 0.0
               : Grid::collocated
-                  ? ((tg || wg || gg) ? gpw(i) : 0.5 * (P((long)i + strd) - P((long)i - strd)))
+                  ? ((tg || wg || gg || ag) ? gpw(i) : 0.5 * (P((long)i + strd) - P((long)i - strd)))
                   : (P(i) - P((long)i - strd));
           if (wd) {  // FV defect-correction RHS  M·u − ω·rs·(L_FV·u − b_FV),  b_FV = idt·cs·u^n +
                      // cs·(f − grad P). ω<1 damps the (stiff, explicit-lagged) wall-flux
@@ -1691,6 +1704,8 @@ class Solver {
     const bool gg =
         Grid::collocated && (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) &&
         incr;  // directional ghost -grad(P)
+    const bool ag =
+        Grid::collocated && (faceInterp_ >= 11 && faceInterp_ <= 13) && incr;  // adjoint-aperture
     if constexpr (Grid::collocated) {
       if (gg) {
         gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G, gauge2a_);
@@ -1699,6 +1714,15 @@ class Solver {
         CCField oax[3] = {ox_, oy_, oz_};
         transposeGradWallAware(tgp_, CCConst(P_), CCConst(sdf_), CCConst(oax[c]), CCConst(xcs[c]),
                                faceInterp_ >= 3, c, e_, G);
+      } else if (ag) {
+        CCField oax[3] = {ox_, oy_, oz_};
+        if (faceInterp_ == 12)
+          centerGradApertureScaled(tgp_, CCConst(P_), CCConst(ox_), CCConst(oy_), CCConst(oz_), c,
+                                   e_, G);
+        else if (faceInterp_ == 13)
+          centerGradOpenCapped(tgp_, CCConst(P_), CCConst(oax[c]), c, apertureFloor_, e_, G);
+        else
+          centerGradAperture(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G);
       }
     }
     CCConst gpw = CCConst(tgp_);
@@ -1717,8 +1741,8 @@ class Solver {
           }
           const double gp = !incr ? 0.0
                             : Grid::collocated
-                                ? ((tg || gg) ? gpw(i)
-                                              : 0.5 * (P((long)i + strd) - P((long)i - strd)))
+                                ? ((tg || gg || ag) ? gpw(i)
+                                                    : 0.5 * (P((long)i + strd) - P((long)i - strd)))
                                 : (P(i) - P((long)i - strd));
           const double comp = pc ? rho * uu(i) * 0.5 * (dv(i) + dv((long)i - strd)) : 0.0;
           bb(i) = rs(i) * (idiag * un(i) + fc + fb(i) - rho * aK + rho * aF + comp - gp) +
@@ -2606,6 +2630,22 @@ class Solver {
         // (full open-face pressure force at cut cells) — Basilisk centered_grad
         projectCorrectCenterOpen(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
                                  CCConst(oz_), e_, G);
+      } else if (faceInterp_ >= 11 && faceInterp_ <= 13) {  // adjoint-aperture: cell correction
+        // = the TRANSPOSE of the aperture divergence of the 1/2-1/2 average, G = -(D_a Pi)^T
+        // (centerGradAperture) -- support-consistent (collapses the invisible subspace) and
+        // adjoint (SPSD Uzawa map). Mode 12 = the same times the per-cell openness rescale S(i)
+        // (centerGradApertureScaled), the accuracy repair for the 1/2*alpha under-weighting.
+        CCField oax[3] = {ox_, oy_, oz_};
+        for (int cc = 0; cc < 3; ++cc) {
+          if (faceInterp_ == 12)
+            centerGradApertureScaled(tgp_, CCConst(phi_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
+                                     cc, e_, G);
+          else if (faceInterp_ == 13)
+            centerGradOpenCapped(tgp_, CCConst(phi_), CCConst(oax[cc]), cc, apertureFloor_, e_, G);
+          else
+            centerGradAperture(tgp_, CCConst(phi_), CCConst(oax[cc]), cc, e_, G);
+          subtractField(C[cc].u, CCConst(tgp_), e_, G);
+        }
       } else {
         projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
                              CCConst(oz_), e_, G);
@@ -3351,6 +3391,10 @@ class Solver {
        pwarm_ = false;    // incremental-rotational pressure (CUDA default on) + warm-start
   bool dtDirty_ = false;  // set_dt after set_solid: momentum stencil needs a rebuild
     int faceInterp_ = 9;    // collocated scheme: 9 = gauge-exact (DEFAULT), 0 = plain (legacy)
+  double apertureFloor_ = [] {  // mode-13 denominator floor (PECLET_FLOW_APERTURE_FLOOR)
+    const char* v = std::getenv("PECLET_FLOW_APERTURE_FLOOR");
+    return v ? std::atof(v) : 0.25;
+  }();
   bool gauge2a_ = false;   // gauge-exact with the Guy-Fogelson "gradient 2a" one-sided branch
                            // (set_collocated_scheme("gauge-2a"); experimental stall fix).
                            // Single-rank exact; at rank seams the +/-3 stencil falls back to the

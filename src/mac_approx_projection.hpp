@@ -456,8 +456,16 @@ KOKKOS_INLINE_FUNCTION double embedDirichletGradient(CCConst U, CCConst sdf, C3 
   if (defd[0])  // near image point only -> 1-point linear
     return vL[0] / dL[0];
   double d0 = Kokkos::fabs(pv[da] / nv[da]);  // degenerate sliver: 1-point through the cell centre
-  if (d0 < 1e-3)
-    d0 = 1e-3;
+  // Floor d0 at the resolution scale. The degenerate estimate U/d0 enters the momentum march as an
+  // EXPLICIT lagged wall flux (defect correction), whose per-step gain ~ mu*area/d0 against the row
+  // diagonal mu*sum(o) + rho/dt must stay < 1: with area <= sqrt(3), d0 >= 0.5 bounds it by ~0.6 for
+  // any (mu, rho, dt). The previous 1e-3 floor let a cell centre grazing the surface (|sdf|~1e-3,
+  // guaranteed on multi-sphere beds) drive gains of O(10^2) -- the dt-independent x~100/step blowup
+  // behind the mode-6/7 "CutcellMG preconditioner non-finite z" abort. (Basilisk's identical
+  // dirichlet_gradient stencil is safe there because its home coefficient goes into the IMPLICIT
+  // diagonal via *coef; this port applies it explicitly, so the floor carries the stability.)
+  if (d0 < 0.5)
+    d0 = 0.5;
   const long ii = (long)ci[0] * st[0] + (long)ci[1] * st[1] + (long)ci[2] * st[2];
   return U(ii) / d0;
 }
@@ -558,6 +566,82 @@ inline void centerGradOpen(CCField out, CCConst p, CCConst o, int axis, C3 e, in
         const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
         const double om = o(i), op = o(i + sa);
         out(i) = (om * (p(i) - p(i - sa)) + op * (p(i + sa) - p(i))) / (om + op + 1e-12);
+      });
+}
+
+// ADJOINT-APERTURE cell pressure gradient along one axis (setFaceInterp(11)):
+// out(i) = 1/2·(o(i)·(p(i)−p(i−sa)) + o(i+sa)·(p(i+sa)−p(i))) — centerGradOpen WITHOUT the
+// normalization, which makes it the exact TRANSPOSE of the aperture divergence of the 1/2-1/2
+// face average: G = −(D_α Π)^T. Two structural consequences (collocated_invisible_subspace.md):
+// (i) support-consistent — it reads a solid-centred φ wherever the constraint couples it
+// (α_f > 0), so the invisible pressure subspace of the gauge-exact/plain gradients collapses;
+// (ii) adjoint — the dt→∞ Uzawa pressure map has an SPSD Schur complement, the stabilizable
+// case (the normalized embed pair (modes 6/7) is non-adjoint and measured unconditionally
+// unstable on beds, dt-free doubling ~75 steps). The price is the 1/2·α under-weighting of the
+// pressure force at nearly-closed cut cells (accuracy measured on the ladder, not assumed).
+inline void centerGradAperture(CCField out, CCConst p, CCConst o, int axis, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::center_grad_aperture", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
+        out(i) = 0.5 * (o(i) * (p(i) - p(i - sa)) + o(i + sa) * (p(i + sa) - p(i)));
+      });
+}
+
+// PER-CELL-RESCALED adjoint-aperture gradient (setFaceInterp(12)): centerGradAperture times the
+// scalar S(i) = 6 / max(sum_a(o_a(i) + o_a(i+sa)), 0.5), one weight per CELL (not per axis).
+// S == 1 in the bulk (sum = 6), so interior cells reproduce mode 11 / mode 0 exactly; at cut
+// cells it restores (on average) the full-weight pressure force the 1/2*alpha under-weighting of
+// the pure adjoint removes -- the mode-11 accuracy price -- while keeping the corrector a
+// positive-DIAGONAL rescaling S*G of the adjoint pair (support unchanged; contrast mode 6's
+// per-axis normalization, which is NOT such a rescaling and is measured unstable). The cap
+// sum >= 0.5 bounds S <= 12 at nearly-closed cells.
+inline void centerGradApertureScaled(CCField out, CCConst p, CCConst ox, CCConst oy, CCConst oz,
+                                     int axis, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::center_grad_aperture_scaled", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
+        CCConst o = (axis == 0) ? ox : (axis == 1) ? oy : oz;
+        double osum = ox(i) + ox(i + sx) + oy(i) + oy(i + sy) + oz(i) + oz(i + sz);
+        if (osum < 0.5)
+          osum = 0.5;
+        out(i) = (6.0 / osum) * 0.5 *
+                 (o(i) * (p(i) - p(i - sa)) + o(i + sa) * (p(i + sa) - p(i)));
+      });
+}
+
+// CAPPED per-axis normalized aperture gradient (setFaceInterp(13)): the mode-6 embed form
+// (om*d- + op*d+)/(om+op) with the denominator FLOORED at omin -- equivalently the adjoint
+// gradient centerGradAperture times the per-cell-per-COMPONENT diagonal S = 2/max(om+op, omin).
+// Rationale: mode 6's floor is 1e-12, an unbounded diagonal gain (up to ~1e12) at nearly-closed
+// axes, and the mode-6 pressure loop is measured unconditionally unstable on beds; mode 11
+// (S = 1) is unconditionally clean but under-weights the cut-cell pressure force by ~(om+op)/2
+// (k gap -11% at R=8). This kernel keeps the full-weight embed gradient wherever om+op >= omin
+// (every ordinary cut cell) and only caps the gain where an axis is nearly closed.
+inline void centerGradOpenCapped(CCField out, CCConst p, CCConst o, int axis, double omin, C3 e,
+                                 int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::center_grad_open_capped", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
+        const double om = o(i), op = o(i + sa);
+        double den = om + op;
+        if (den < omin)
+          den = omin;
+        out(i) = (om * (p(i) - p(i - sa)) + op * (p(i + sa) - p(i))) / den;
       });
 }
 

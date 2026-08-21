@@ -102,9 +102,14 @@ appendix (the refutation catalogue).
 | 20 | s=0.5 incidence | O(1) error ALL solvers (robustness note) | ibid | final |
 | 21 | N=96 (R=6) stability | no growth any variant 6000 steps | `lm96_*.log` | final |
 | 22 | clean ladder R=16/24/32 | — | Snellius 25914731 `cleanladder_*.log` | RUNNING |
-| 23 | embed NaN root cause | — | — | TODO |
+| 23 | embed NaN root cause | FOUND+FIXED: degenerate-sliver wall drag U/d0, d0=|sdf| floored at 1e-3 -> explicit lagged gain mu*area/d0 ~ 1e2 x diag at grazing centres (dt-free x~100/step, localized solid-ctr cells |sdf|~1e-3; Basilisk-safe only because implicit *coef*); fix = floor d0 at 0.5 (gain <= ~0.6 for any mu,rho,dt) | `probe_localize.py` runs + src/mac_approx_projection.hpp | fixed |
 | 24 | support-consistent ladder | — | — | TODO |
 | 25 | Arnoldi spectrum | — | — | TODO |
+| 26 | mode-6 post-fix instability | UNSTABLE: P exp-growth x~11-15/250 steps, dt-FREE (60==600), wall-blend w0=0.5 AND w0=1.0 ineffective; PM I (ROT=0) STABLE (m1 8e-3->4e-4) -> rotational-update Uzawa instability of the NON-ADJOINT normalized pair, not wall-band-local; rotw=0.3 only SLOWS it (re-grows from ~step 1000 at dt=60) -> no scalar/diagonal rescaling works, modes 6/7 structurally dead as S1 | `lm128_mode6_*.log` | final |
+| 27 | mode 11 (adjoint-aperture pair) | NEW SCHEME G=-(D_a Pi)^T (adjointness verified 8e-16 a-priori): COLLAPSE CONFIRMED at R=8 -- m1 -> 1e-5 monotone (gauge-exact freezes at 1.8e-2), |P| frozen at stag scale, k(dt=60/600/1e20) = 3.5743523/3.5743595/3.5745995e-3 all monotone to one limit (C2 to ~2e-6, vs 5e-4 attractor spread), NO blend needed incl. dt=1e20; accuracy price -11.1% vs stag at R=8 | `lm128_mode11_dt*.log` | final |
+| 28 | mode 12 (per-cell rescale S=6/sum(o)) | stable, collapse identical (m1 8.8e-6, k 10-digit settled 3.6958252e-3); gap -8.10% at R=8 | `lm128_mode12_dt600.log` | final |
+| 29 | mode 13 (capped per-axis normalize, floor 0.25) | stable, collapse identical (3.6776869e-3); gap -8.55% at R=8 == mode 12 -> weighting magnitude is NOT the accuracy lever; adjoint family shares structural ~-8..-11% at R=8 | `lm128_mode13_dt600.log` | final |
+| 30 | adjoint-family order check R=12 | — | `lm192_mode1{2,3}_dt600.log` | RUNNING |
 
 *(All cited scratchpad logs are archived in `flow/doc/data/collocated_campaign/`.)*
 
