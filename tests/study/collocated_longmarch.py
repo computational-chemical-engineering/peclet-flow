@@ -93,6 +93,7 @@ print(f"# bed {os.path.basename(BED)} N={N} R={R:.1f} kind={KIND} rot={ROT} rotf
 print(f"{'step':>7} {'k_cell/R2':>13} {'k_face/R2':>13} {'m1_rms':>10} {'m2_rms':>10} "
       f"{'dk_cell':>10} {'dm1':>10}", flush=True)
 pk = pm = None
+Pprev = None
 for it in range(1, STEPS + 1):
     if it in DTSWITCH:
         s.set_dt(DTSWITCH[it])
@@ -127,6 +128,9 @@ for it in range(1, STEPS + 1):
             m2 = float(np.sqrt((div[fluid] ** 2).mean())) / us
         dk = "" if pk is None else f"{kc - pk:+.2e}"
         dm = "" if pm is None else f"{m1 - pm:+.2e}"
-        print(f"{it:>7} {kc:>13.7e} {kf:>13.7e} {m1:>10.3e} {m2:>10.3e} {dk:>10} {dm:>10}",
-              flush=True)
+        Pf = np.asarray(s.get_p())
+        dP = "" if Pprev is None else f"{np.abs(Pf - Pprev).max():.3e}"
+        Pprev = Pf.copy()
+        print(f"{it:>7} {kc:>13.7e} {kf:>13.7e} {m1:>10.3e} {m2:>10.3e} {dk:>10} {dm:>10} "
+              f"dP={dP:>10} |P|={np.abs(Pf).max():.3e}", flush=True)
         pk, pm = kc, m1

@@ -210,3 +210,46 @@ NOT the ladder's contaminated -0.50%).
 Next: dt-cycling drain (queued): a mode neutral at EVERY dt needs A phi = 0 => phi = 0, so
 cycling DT 60->600->6->1e20->60 under the blend must ratchet the frozen content down; watch m1.
 Snellius baseline dt-sweep job cancelled (superseded). Mode-3 adjoint probe runs first.
+
+## 2026-08-21 — ROOT CAUSE FOUND: the invisible pressure subspace
+
+**dt-cycling drain: NEGATIVE — the states are exact dt-labeled ATTRACTORS.** Cycling DT
+60->600->6->1e20->60 under the wall-blend: each segment snaps to its own k and returning to
+DT=60 reproduces 3.9883632e-3 to 10 digits (path-independent, no ratcheting, m1 pinned ~1.8e-2
+at every dt).  So phi_inf != 0 is not frozen history — the iteration genuinely has a FAMILY of
+steady states.
+
+**P-drift instrumentation (R=8, wall05, u frozen to 9 digits):** collocated max|dP| = 0.217 per
+500 steps with |P|max grown to 1.30 — the pressure RUNS AWAY linearly while u is stationary.
+Staggered control: |P|max 0.017, small uniform drift (gauge).  The collocated P is 75x larger.
+
+**Mechanism (complete):** gpCenterGrad never reads solid-centered pressure values, but the
+aperture operator KEEPS those DOFs coupled (alpha>0 faces into solid-centered cells).  The
+u-dynamics therefore only enforces G_gp[(rho/dt + mu A) phi] = 0 — and ker(G_gp) is huge
+(solid-supported + constants), so the steady condition admits a FAMILY of states
+phi_inf in {phi : (ct + mu A) phi in ker G_gp}, dim ~ #solid cells.  Which member is selected
+depends on dt/protocol -> the dt-labeled attractors, the frozen m1/m2 defect, the k-bias (the
+visible shadow through the A-coupling at the wall band), and the runaway P (the increment
+accumulating in the invisible directions).  The staggered face gradient reads EVERY cell the
+divergence couples -> kernel = constants -> immune.  This is the root cause of the ~0.3%
+"plateau": THE COLLOCATED APERTURE SCHEME'S CELL GRADIENT AND ITS CONSTRAINT COUPLE DIFFERENT
+PRESSURE SUPPORTS.
+
+Note the family/kernel structure also explains why the ghost projection (binary openness =
+different, smaller invisible set) plateaus at HALF the height, and connects to the ghost-MPI
+lesson of 2026-07-23 ("solid-centered phi were Krylov garbage injected into near-wall u — pinned
+to 0"): same disease, aperture flavour.
+
+**Clean accuracy so far (same-machine, stabilized wall05, deep-converged):**
+R=8 gap vs staggered = -2.53% (contaminated ladder said -1.43%), R=12 = -0.76% (was -0.50%).
+R8->R12 ratio 3.3 (~order 3 on 1.5x, or pre-sign-flip).  R=16/24/32 + staggered refs running on
+Snellius (job 25914731, source rsync-overlay, no push).  Local R=16 OOM on the 16 GB 5080.
+
+**Fix directions (for the next design round):**
+- close the support gap: a cell correction/predictor gradient that reads solid-centered phi
+  where alpha>0 (embed's openness-weighted corrector has the small kernel — its bed-NaN bug
+  becomes worth fixing), or
+- eliminate solid-centered DOFs from the aperture operator (fold their alpha>0 connections into
+  wall closures — a fluid-only aperture operator), or
+- accept the attractor + wall-blend + FIXED protocol (reproducible to 10 digits; C2 violated at
+  ~0.05% across dt in k — quantified, may be tolerable) while the above are evaluated.
