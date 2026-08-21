@@ -1,0 +1,29 @@
+# bed packing_256x256x256_r16_phi0.60_s3.npz N=128 R=8.0 kind=gauge-exact rot=1 rotf=0 rotw=1.0 wallw=0.5 dt=600.0 steps=3000
+   step     k_cell/R2     k_face/R2     m1_rms     m2_rms    dk_cell        dm1
+     50 3.9225224e-03 3.7981302e-03  3.092e-02  2.957e-02                       dP=           |P|=2.310e-02
+    500 3.9197058e-03 3.7955305e-03  3.097e-02  2.941e-02  -2.82e-06  +4.89e-05 dP= 1.960e-01 |P|=2.170e-01
+   1000 3.9196604e-03 3.7954931e-03  3.097e-02  2.941e-02  -4.54e-08  +7.53e-07 dP= 2.172e-01 |P|=4.342e-01
+   1500 3.9196489e-03 3.7954841e-03  3.097e-02  2.941e-02  -1.16e-08  +1.60e-07 dP= 2.172e-01 |P|=6.514e-01
+   2000 3.9196440e-03 3.7954804e-03  3.097e-02  2.941e-02  -4.86e-09  +6.80e-08 dP= 2.172e-01 |P|=8.685e-01
+   2500 3.9196416e-03 3.7954786e-03  3.097e-02  2.941e-02  -2.41e-09  +3.63e-08 dP= 2.172e-01 |P|=1.086e+00
+   3000 3.9196403e-03 3.7954777e-03  3.097e-02  2.941e-02  -1.29e-09  +2.14e-08 dP= 2.172e-01 |P|=1.303e+00
+Kokkos allocation "cnt" is being deallocated after Kokkos::finalize was called
+
+Backtrace:
+[0x7f34abec2405] Kokkos::Impl::save_stacktrace()
+[0x7f34abe9f7ec] Kokkos::Impl::host_abort(char const*)
+[0x7f34abec23c7] Kokkos::Impl::SharedAllocationRecord<void, void>::decrement(Kokkos::Impl::SharedAllocationRecord<void, void>*)
+[0x7f34abd49c15] 
+[0x7f34abd64a90] 
+[0x7f34abe93d95] 
+[0x5fcc9b] 
+[0x5fcadd] 
+[0x57026f] 
+[0x6be21f] 
+[0x6a8325] 
+[0x6b68b4] Py_RunMain
+[0x681b2b] Py_BytesMain
+[0x7f3529303ca8] 
+[0x7f3529303d65] __libc_start_main
+[0x680ed1] _start
+Aborted

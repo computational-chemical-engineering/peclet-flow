@@ -1,0 +1,13 @@
+
+N=96 R=6.0 steps=3190 <|u|>_fluid=3.4685e-03 k/R^2=3.841837e-03
+    m1 |uf-halfavg(u)| ax0 (open faces): max 1.257e+00  p99 2.140e-01  med 1.915e-03  rms 4.505e-02
+    m1 |uf-halfavg(u)| ax1 (open faces): max 1.306e+00  p99 2.308e-01  med 1.436e-03  rms 4.856e-02
+    m1 |uf-halfavg(u)| ax2 (open faces): max 1.258e+00  p99 2.206e-01  med 1.450e-03  rms 4.706e-02
+        m2 alpha-div(halfavg(u)) fluid: max 6.162e-01  p99 1.629e-01  med 8.081e-03  rms 3.926e-02
+      m2f alpha-div(uf) fluid (solver): max 1.759e-07  p99 3.127e-08  med 2.527e-10  rms 7.148e-09
+      m3 |u-cellavg(uf)| ax0 NEAR wall: max 1.434e+00  p99 4.208e-01  med 5.179e-02  rms 1.165e-01
+           m3 |u-cellavg(uf)| ax0 bulk: max 2.202e-01  p99 1.215e-01  med 3.016e-02  rms 4.514e-02
+      m3 |u-cellavg(uf)| ax1 NEAR wall: max 1.637e+00  p99 4.051e-01  med 4.366e-02  rms 1.107e-01
+           m3 |u-cellavg(uf)| ax1 bulk: max 1.863e-01  p99 1.077e-01  med 2.468e-02  rms 3.827e-02
+      m3 |u-cellavg(uf)| ax2 NEAR wall: max 1.411e+00  p99 4.030e-01  med 4.376e-02  rms 1.100e-01
+           m3 |u-cellavg(uf)| ax2 bulk: max 2.153e-01  p99 1.098e-01  med 2.403e-02  rms 3.854e-02
