@@ -87,6 +87,39 @@ aperture gradient must be STABLE, at mode-11-class accuracy).
    MPI bring-up (A is trivial; B needs ghost-width-2 coverage of the star couplings -- verify
    the a_si a_sj/D_s stencil fits G=2); at-scale bed (s116-class) march for robustness.
 
+## B+ efficiency track (user-approved 2026-08-22): two deferred-correction variants
+
+Both target the ghost FIXED POINT (accuracy identical to the ghost scheme by construction);
+the win is replacing BiCGStab by CG/Chebyshev-able SPD solves (~2x on the pressure stage +
+the comm-avoiding MPI lever). Retain BOTH if both pass, one as default one optional:
+
+  * B+kron: base = the Design-B star operator (SPD, implemented), defect = A_ghost - A_star
+    lagged in the RHS. Note B's SCHEME instability is irrelevant here -- the fixed point
+    enforces the ghost constraint (the matched pair); only the defect-iteration spectrum
+    spec(A_star^-1 A_ghost) matters.
+  * B+sym: base = sym(A_ghost) (the binary 7-point part + symmetrized overlay -- rides the
+    solvePCG SPD-overlay machinery built for Design B), defect = the skew part, lagged.
+    Smaller defect, likely friendlier spectrum.
+
+GATE RESULTS (bplus_gate.py, real bed, N=32 AND N=48, percolating component):
+  * B+sym: FAILED. sym(A_ghost) is INDEFINITE at the closure rows -- a persistent family of
+    small negative eigenvalues (8+ at both N, ~-1e-3..-2.5e-3), and even after low-rank
+    Woodbury repair the preconditioned spectrum keeps real parts in [-4.5, +6.5] and a
+    1 +/- 73j pair (damping bound w < ~4e-4 -> thousands of iterations). Dead.
+  * B+kron: PASSED. A_star exactly SPD; spec(A_star^-1 A_ghost) ENTIRELY REAL POSITIVE:
+    [~0.02, 2.22] at N=32, [~0.02, 2.97] at N=48; small isolated cluster at 0.003..0.05
+    (through-wall star links the ghost lacks), tight bulk ~[0.9, 3].
+  * CONSEQUENCE (sharper than the original B+ framing): the win is not a stationary defect
+    loop (the small-lambda cluster prices it out) but PRECONDITIONING -- replace the ghost
+    solve's binary-openness surrogate hierarchy with the star-aperture structure (fine-level
+    star overlay on the filtered 7-point hierarchy = the Design-B solvePCG machinery,
+    verbatim). The measured preconditioned spectrum suggests a several-fold iteration cut
+    from the recorded ~65. The star operator, unstable as a SCHEME, is an excellent BASE --
+    the pairing lesson's preconditioning corollary.
+
+Priority: after C-hardening correctness (np>=16 root cause, guard lift); this is the
+first efficiency milestone and it reuses tonight's code.
+
 ## Constraints carried from the suite
 
 Defaults byte-identical (all behind flags; verified digit-for-digit after each edit); staggered
