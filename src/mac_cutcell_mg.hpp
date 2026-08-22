@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "ghost_projection.hpp"  // GpOverlay + gpApplyDelta (ghost-projection BiCGStab matvec)
+#include "star_elimination.hpp"  // StarOverlay + starApplyDelta (mode-B fluid-only PCG matvec)
 #include "mac_bc.hpp"
 #include "mac_pressure.hpp"
 #include "peclet/core/solver/graph_amg.hpp"  // decomposition-agnostic algebraic bottom solve
@@ -636,14 +637,23 @@ class CutcellMG {
 
   // CG preconditioned by one symmetric V-cycle (solve_pcg port). rhs on level 0; solution left in
   // level-0 x. Returns the iteration count. Scratch supplied by the caller (level-0-sized fields).
+  // Optional star overlay (mode-B fluid-only constraint): the SPD Kron-elimination couplings are
+  // added to the fine-level matvec only; the hierarchy/preconditioner sees the filtered 7-point
+  // surrogate it was built from (the symmetric sibling of solveBiCGStab's gp overlay pattern).
+  // Single-rank v1: the star kernels wrap periodically over the inner grid, so no halo work.
   int solvePCG(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
-               double rtol, int pre, int post, int bottom) {
+               double rtol, int pre, int post, int bottom, const StarOverlay* star = nullptr,
+               int nStar = 0, C3 nnStar = C3{0, 0, 0}) {
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
     Level& l0 = lv_[0];
     Kokkos::deep_copy(l0.x, x);
-    auto matvec = [&](CCField y, CCField v) { matvecOverlap(l0, y, v); };
+    auto matvec = [&](CCField y, CCField v) {
+      matvecOverlap(l0, y, v);
+      if (star)
+        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G);
+    };
     auto precond = [&](CCField zz, CCField rr) {
       Kokkos::deep_copy(l0.rhs, rr);
       Kokkos::deep_copy(l0.x, 0.0);

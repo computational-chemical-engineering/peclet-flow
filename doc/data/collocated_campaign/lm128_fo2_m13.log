@@ -1,0 +1,40 @@
+# bed packing_256x256x256_r16_phi0.60_s3.npz N=128 R=8.0 kind=fluidonly2_m13 rot=1 rotf=0 rotw=1.0 wallw=0.0 dt=600.0 steps=800
+   step     k_cell/R2     k_face/R2     m1_rms     m2_rms    dk_cell        dm1
+/home/frankp/Codes/suite/flow/tests/study/collocated_longmarch.py:132: RuntimeWarning: overflow encountered in square
+  m1sq += float(((UF[a] - half)[op] ** 2).sum()); cnt += int(op.sum())
+/home/frankp/Codes/suite/flow/tests/study/collocated_longmarch.py:136: RuntimeWarning: overflow encountered in square
+  m2 = float(np.sqrt((div[fluid] ** 2).mean())) / us
+     50 -8.2084535e+148 -2.3550495e+146        inf        inf                       dP=           |P|=5.189e+153
+/home/frankp/Codes/suite/flow/.venv/lib/python3.13/site-packages/numpy/_core/_methods.py:51: RuntimeWarning: overflow encountered in reduce
+  return umr_sum(a, axis, dtype, out, keepdims, initial, where)
+/home/frankp/Codes/suite/flow/.venv/lib/python3.13/site-packages/numpy/_core/_methods.py:134: RuntimeWarning: overflow encountered in reduce
+  ret = umr_sum(arr, axis, dtype, out, keepdims, where=where)
+/home/frankp/Codes/suite/flow/tests/study/collocated_longmarch.py:138: RuntimeWarning: invalid value encountered in scalar subtract
+  dm = "" if pm is None else f"{m1 - pm:+.2e}"
+    100 4.5826792e+148 1.2893211e+148        inf        inf +1.28e+149       +nan dP=6.724e+154 |P|=6.205e+154
+    200 3.5355414e+147 3.2496995e+147        inf  2.817e+00 -4.23e+148       +nan dP=1.848e+154 |P|=4.803e+154
+    300 2.7293915e+149 6.2788576e+147        inf        inf +2.69e+149       +nan dP=3.337e+154 |P|=1.666e+154
+    400 4.3875691e+148 -6.2912546e+147        inf        inf -2.29e+149       +nan dP=7.551e+154 |P|=9.217e+154
+    500 2.7486533e+148 -1.4355076e+147        inf        inf -1.64e+148       +nan dP=2.342e+154 |P|=7.390e+154
+    600 1.1540828e+149 -1.5187443e+148        inf        inf +8.79e+148       +nan dP=1.848e+154 |P|=5.818e+154
+    700 -2.2303345e+149 4.1554951e+148        inf        inf -3.38e+149       +nan dP=2.877e+154 |P|=2.942e+154
+    800 -5.7133441e+148 -2.4785270e+148        inf        inf +1.66e+149       +nan dP=1.006e+154 |P|=1.936e+154
+Kokkos allocation "cnt" is being deallocated after Kokkos::finalize was called
+
+Backtrace:
+[0x7fd42e8e0485] Kokkos::Impl::save_stacktrace()
+[0x7fd42e8bd86c] Kokkos::Impl::host_abort(char const*)
+[0x7fd42e8e0447] Kokkos::Impl::SharedAllocationRecord<void, void>::decrement(Kokkos::Impl::SharedAllocationRecord<void, void>*)
+[0x7fd42e759495] 
+[0x7fd42e774440] 
+[0x7fd42e8b1e15] 
+[0x5fcc9b] 
+[0x5fcadd] 
+[0x57026f] 
+[0x6be21f] 
+[0x6a8325] 
+[0x6b68b4] Py_RunMain
+[0x681b2b] Py_BytesMain
+[0x7fd4abc9bca8] 
+[0x7fd4abc9bd65] __libc_start_main
+[0x680ed1] _start

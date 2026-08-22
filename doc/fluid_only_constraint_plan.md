@@ -50,6 +50,32 @@ pin them with an SPD penalty on normal second differences (consistent, symmetric
 consistent near-wall mass-balance perturbation + non-7-point couplings. Revisit only if A/B/C
 all disappoint on accuracy or cost.
 
+## The pairing lesson (2026-08-22, added after Design B's failure)
+
+Design B is implemented and its solve is verified consistent (SPD operator == correction,
+clean PCG convergence) -- and the march still diverges violently, PM I INCLUDED, at every dt.
+Since removing the pressure update does not help, the instability lives in the projection loop
+itself: the gauge-exact directional cell gradient is structurally mismatched to the
+star/aperture constraint rows (D Pi G_ge disagrees with A_B at O(1) on wall-band modes -> the
+dt-free approximate-projection loop amplifies). Together with the session's other measurements
+this crystallizes into a design principle:
+
+  * STABILITY wants the (cell gradient, constraint) pair structurally MATCHED near the wall
+    (mode 11's exact adjoint pair, and the ghost's shared directional closures, are the two
+    stable examples; gauge-exact-vs-aperture, normalized-embed-vs-aperture, and
+    gauge-exact-vs-star are the three measured unstable mismatches).
+  * ACCURACY wants both sides built from O(h^2)-consistent VALUES (multiplier or averaged
+    values give O(h): modes 11/12/13, and Design A/B's phibar).
+  * The only architecture measured to satisfy both is the ghost's: constraint AND gradient
+    derived from the same directional, O(h^2)-consistent closure family.
+
+Consequence: the (b) endgame is not "a symmetric alternative to the ghost" -- it is a
+production-hardened ghost-architecture scheme. Symmetry is bounded by this principle: the
+directional closure rows are inherently one-sided, so exact SPD appears incompatible with the
+stable+accurate corner (CutFEM ghost-penalty remains the one untested possible exception).
+Pending confirmation: the fluidonly2_m13 pairing discriminator (star constraint + matched
+aperture gradient must be STABLE, at mode-11-class accuracy).
+
 ## Decision tree (keyed to pending measurements)
 
 1. Ghost R=24/32 clean rungs (job 25937956): if the +0.077% at R=16 DECAYS -> the fluid-only

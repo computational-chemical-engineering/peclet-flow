@@ -1,0 +1,29 @@
+# bed packing_256x256x256_r16_phi0.60_s3.npz N=192 R=12.0 kind=ghost rot=1 rotf=0 rotw=1.0 wallw=0.0 dt=600.0 steps=3000
+   step     k_cell/R2     k_face/R2     m1_rms     m2_rms    dk_cell        dm1
+     50 4.0539205e-03 4.0055260e-03  2.031e-01  3.333e-02                       dP=           |P|=2.114e-02
+    500 4.0073962e-03 3.9530017e-03  1.674e-04  3.293e-02  -4.65e-05  -2.03e-01 dP= 1.235e-02 |P|=2.483e-02
+   1000 4.0073735e-03 3.9529740e-03  5.848e-05  3.293e-02  -2.27e-08  -1.09e-04 dP= 4.200e-03 |P|=2.550e-02
+   1500 4.0073700e-03 3.9529698e-03  3.403e-05  3.293e-02  -3.50e-09  -2.45e-05 dP= 2.199e-03 |P|=2.553e-02
+   2000 4.0073689e-03 3.9529684e-03  2.293e-05  3.293e-02  -1.13e-09  -1.11e-05 dP= 1.634e-03 |P|=2.553e-02
+   2500 4.0073684e-03 3.9529678e-03  1.622e-05  3.293e-02  -5.17e-10  -6.71e-06 dP= 1.226e-03 |P|=2.553e-02
+   3000 4.0073681e-03 3.9529675e-03  1.177e-05  3.293e-02  -2.88e-10  -4.45e-06 dP= 9.163e-04 |P|=2.553e-02
+peclet::flow ghost projection: 1330 fluid components; decoupled 1455 pocket cells outside the main component (2827967 of 2829422 fluid cells)
+Kokkos allocation "cnt" is being deallocated after Kokkos::finalize was called
+
+Backtrace:
+[0x7fa95cace245] Kokkos::Impl::save_stacktrace()
+[0x7fa95caab62c] Kokkos::Impl::host_abort(char const*)
+[0x7fa95cace207] Kokkos::Impl::SharedAllocationRecord<void, void>::decrement(Kokkos::Impl::SharedAllocationRecord<void, void>*)
+[0x7fa95c952f15] 
+[0x7fa95c96ddd0] 
+[0x7fa95ca9fbd5] 
+[0x5fcc9b] 
+[0x5fcadd] 
+[0x57026f] 
+[0x6be21f] 
+[0x6a8325] 
+[0x6b68b4] Py_RunMain
+[0x681b2b] Py_BytesMain
+[0x7fa9d9fa0ca8] 
+[0x7fa9d9fa0d65] __libc_start_main
+[0x680ed1] _start

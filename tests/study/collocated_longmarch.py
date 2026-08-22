@@ -75,7 +75,11 @@ if KIND != "stag":
     if KIND == "ghost":
         s.set_ghost_projection(True)         # fluid-only constraint + directional closures (route 2)
     elif KIND == "fluidonly":
-        s.set_fluid_only_constraint(True)    # mode 14a: fluid-only openness filter + gauge-exact G
+        s.set_fluid_only_constraint(1)       # Design A: fluid-only openness filter + gauge-exact G
+    elif KIND.startswith("fluidonly2"):
+        s.set_fluid_only_constraint(2)       # Design B: SPD Kron star elimination + gauge-exact G
+        if "_m" in KIND:                     # e.g. fluidonly2_m13: pair with another cell gradient
+            s.set_face_interp(int(KIND.split("_m")[1]))
     elif KIND.startswith("mode"):
         s.set_face_interp(int(KIND[4:]))     # numbered ablations (e.g. mode3 = adjoint (T,T^T) pair)
     elif hasattr(s, "set_collocated_scheme"):

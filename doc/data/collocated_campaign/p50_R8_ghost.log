@@ -1,0 +1,31 @@
+# bed packing_256x256x256_r16_phi0.50_s100.npz N=128 R=8.0 kind=ghost rot=1 rotf=0 rotw=1.0 wallw=0.0 dt=600.0 steps=4000
+   step     k_cell/R2     k_face/R2     m1_rms     m2_rms    dk_cell        dm1
+     50 1.0908229e-02 1.0754296e-02  1.863e-01  3.612e-02                       dP=           |P|=1.586e-02
+    500 1.0810926e-02 1.0647001e-02  1.428e-04  3.584e-02  -9.73e-05  -1.86e-01 dP= 9.323e-03 |P|=1.867e-02
+   1000 1.0810869e-02 1.0646935e-02  7.246e-05  3.584e-02  -5.70e-08  -7.03e-05 dP= 2.717e-03 |P|=1.866e-02
+   1500 1.0810857e-02 1.0646922e-02  5.417e-05  3.584e-02  -1.19e-08  -1.83e-05 dP= 1.820e-03 |P|=1.866e-02
+   2000 1.0810853e-02 1.0646917e-02  4.238e-05  3.584e-02  -4.79e-09  -1.18e-05 dP= 1.540e-03 |P|=1.866e-02
+   2500 1.0810850e-02 1.0646914e-02  3.300e-05  3.584e-02  -2.58e-09  -9.38e-06 dP= 1.350e-03 |P|=1.866e-02
+   3000 1.0810848e-02 1.0646912e-02  2.552e-05  3.584e-02  -1.63e-09  -7.48e-06 dP= 1.184e-03 |P|=1.866e-02
+   3500 1.0810847e-02 1.0646911e-02  1.965e-05  3.584e-02  -1.12e-09  -5.87e-06 dP= 1.038e-03 |P|=1.866e-02
+   4000 1.0810846e-02 1.0646910e-02  1.510e-05  3.584e-02  -8.11e-10  -4.55e-06 dP= 9.099e-04 |P|=1.865e-02
+peclet::flow ghost projection: 338 fluid components; decoupled 345 pocket cells outside the main component (1047913 of 1048258 fluid cells)
+Kokkos allocation "cnt" is being deallocated after Kokkos::finalize was called
+
+Backtrace:
+[0x7ff0d88e0485] Kokkos::Impl::save_stacktrace()
+[0x7ff0d88bd86c] Kokkos::Impl::host_abort(char const*)
+[0x7ff0d88e0447] Kokkos::Impl::SharedAllocationRecord<void, void>::decrement(Kokkos::Impl::SharedAllocationRecord<void, void>*)
+[0x7ff0d8759495] 
+[0x7ff0d8774440] 
+[0x7ff0d88b1e15] 
+[0x5fcc9b] 
+[0x5fcadd] 
+[0x57026f] 
+[0x6be21f] 
+[0x6a8325] 
+[0x6b68b4] Py_RunMain
+[0x681b2b] Py_BytesMain
+[0x7ff155cb8ca8] 
+[0x7ff155cb8d65] __libc_start_main
+[0x680ed1] _start

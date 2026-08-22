@@ -169,9 +169,10 @@ static void bind_solver(nb::module_& m, const char* name) {
           "P += (rho/dt + w0*mu/dx^2)*phi - (1-w0)*mu*div(u*); bulk keeps the full rotational "
           "update. Stabilizes the boundary rows without slowing bulk pressure relaxation, and "
           "keeps them relaxing at dt->infinity. 0 (default) = off.")
-      .def("set_fluid_only_constraint", &S::setFluidOnlyConstraint, nb::arg("on"),
-           "Mode-14a fluid-only pressure constraint: close faces with a solid-centered side "
-           "in the openness (call before set_solid; collocated experiment).")
+      .def("set_fluid_only_constraint", &S::setFluidOnlyConstraint, nb::arg("mode"),
+           "Fluid-only pressure constraint (route 2b, call before set_solid; collocated "
+           "experiment). 1 = Design A (openness filter), 2 = Design B (SPD Kron star "
+           "elimination), 0 = off.")
       .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
            "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
            "explicit-lagged wall term). Steady state is independent of w.")

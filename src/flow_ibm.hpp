@@ -451,9 +451,17 @@ class Solver {
   // Wall-banded rotational blend (Frank, 2026-08-20): see the press_wallblend kernel. w0 = 0
   // (default) disables; typical w0 ~ 0.3-0.5. Composes with setRotationalWeight (uniform factor).
   void setRotationalWallWeight(double w0) { rotWallW_ = w0; }
-  // Mode-14a: fluid-only pressure constraint (close faces with a solid-centered side in the
-  // openness). Call BEFORE set_solid. Collocated experiment; defaults byte-identical when off.
-  void setFluidOnlyConstraint(bool on) { fluidOnlyConstraint_ = on; }
+  // Fluid-only pressure constraint (route 2b). Call BEFORE set_solid. Collocated experiment;
+  // defaults byte-identical when 0. mode 1 = Design A (close every openness face with a
+  // solid-centered side, everywhere); mode 2 = Design B (Kron star elimination: filtered
+  // openness feeds the MG hierarchy only, the SPD star overlay restores the throat coupling in
+  // the PCG matvec, the divergence keeps the original apertures on fluid rows, and fluid|solid
+  // faces are corrected with phibar_s -- see star_elimination.hpp).
+  void setFluidOnlyConstraint(int mode) {
+    if (mode < 0 || mode > 2)
+      throw std::runtime_error("set_fluid_only_constraint: mode must be 0, 1 or 2");
+    fluidOnlyMode_ = mode;
+  }
   // Filtered rotational update (experimental): P += ct*phi - mu*S(div u*), S = one mask-aware
   // axis-wise (1,2,1)/4 smoothing pass per axis (one-sided 1/2(d_i+d_nbr) toward the open side at
   // a solid-centered neighbour, identity when sandwiched). S annihilates the axis checkerboard
@@ -804,7 +812,7 @@ class Solver {
           }
         }
       }
-      if (fluidOnlyConstraint_) {
+      if (fluidOnlyMode_ == 1) {
         // Mode-14a FLUID-ONLY constraint (setFluidOnlyConstraint): close every face with a
         // solid-CENTERED side in the openness the pressure stack consumes. The aperture operator,
         // the divergence, the face correction and the MG rediscretization all read these fields,
@@ -857,6 +865,41 @@ class Solver {
       copyInner(ox1_, e1_, 1, CCConst(ox_), e_, G);  // bridge openness g=2 -> g=1 for the MG
       copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
       copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
+      if (fluidOnlyMode_ == 2) {
+        // Design B: the MG hierarchy is built from the FILTERED openness (Design A's operator,
+        // the symmetric surrogate preconditioner + the 7-point part of the true operator); the
+        // geometric ox_/oy_/oz_ stay ORIGINAL for the divergence and the face correction. Filter
+        // the g=1 bridge in place, then build the star overlay from the original apertures.
+        if (porous_ || varRho_ || hasBc_ || ghostProjection_ || distributed_ || !Grid::collocated)
+          throw std::runtime_error(
+              "set_fluid_only_constraint(2): v1 is single-rank periodic collocated only");
+        CCExec space;
+        CCConst sd = CCConst(sdf_);
+        CCField oa1[3] = {ox1_, oy1_, oz1_};
+        const C3 e1 = e1_, e2 = e_;
+        for (int a = 0; a < 3; ++a) {
+          CCField o1 = oa1[a];
+          const long sa2 = (a == 0) ? 1 : (a == 1) ? (long)e2.x : (long)e2.x * e2.y;
+          Kokkos::parallel_for(
+              "peclet::flow::star_filter_bridge",
+              Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+              KOKKOS_LAMBDA(int x, int y, int z) {
+                const long i2 =
+                    (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
+                if (sd(i2) < 0.0 || sd(i2 - sa2) < 0.0)
+                  o1((long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y) =
+                      0.0;
+              });
+        }
+        space.fence();
+        starCounter_ = Kokkos::View<int, CCMem>("star_counter");
+        const C3 nn{nx_, ny_, nz_};
+        nStar_ = buildStarOverlay(CCConst(sdf_), CCConst(ox_), CCConst(oy_), CCConst(oz_), e_, G,
+                                  nn, StarOverlay{}, starCounter_);
+        starOv_ = starMakeOverlay(std::max(nStar_, 1));
+        buildStarOverlay(CCConst(sdf_), CCConst(ox_), CCConst(oy_), CCConst(oz_), e_, G, nn,
+                         starOv_, starCounter_);
+      }
       if (ghostProjection_) {
         // Directional ghost-cell projection: build the closure overlay + the binary (COUPLED)
         // openness. The binary field replaces the geometric openness on the MG rails (the MG
@@ -2478,6 +2521,25 @@ class Solver {
           "negdiv", Kokkos::RangePolicy<CCExec>(space, 0, n1_),
           KOKKOS_LAMBDA(std::size_t i) { r(i) = -r(i); });
     }
+    if (fluidOnlyMode_ == 2) {
+      // Design B: solid rows carry no constraint -- mask their rhs (their operator rows are empty
+      // in the filtered 7-point part; the star overlay never adds to them), so phi_s stays 0.
+      if (useChebyshev_)
+        throw std::runtime_error("set_fluid_only_constraint(2): Chebyshev unsupported (v1)");
+      CCExec space;
+      CCField r = rhs1_;
+      CCConst sd = CCConst(sdf_);
+      const C3 e1 = e1_, e2 = e_;
+      Kokkos::parallel_for(
+          "peclet::flow::star_mask_rhs",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i2 =
+                (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
+            if (sd(i2) < 0.0)
+              r((long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y) = 0.0;
+          });
+    }
     // Variable density: rebuild the Poisson operator with the face coefficients
     // c_f = open_f * rho0/rho_f (rho0 = the scalar rho_, so uniform rho == rho_ reduces exactly to
     // the openness operator). The coefficient fields ride the openness rails: bridge rho to the g=1
@@ -2595,7 +2657,26 @@ class Solver {
       }
     } else {
       lastPressureIters_ =
-          mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12);
+          mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
+                       fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_});
+    }
+    if (fluidOnlyMode_ == 2) {
+      // Pin phi at solid-centered cells to 0 (their rows are unconstrained; the smoother must not
+      // leave garbage there -- projectCorrect reads phi_s at fluid|solid faces and the
+      // starCorrectFaces fix-up assumes the applied value was exactly 0).
+      CCExec space;
+      CCField ph = phi1_;
+      CCConst sd = CCConst(sdf_);
+      const C3 e1 = e1_, e2 = e_;
+      Kokkos::parallel_for(
+          "peclet::flow::star_pin_solid",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i2 =
+                (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
+            if (sd(i2) < 0.0)
+              ph((long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y) = 0.0;
+          });
     }
     copyInner(phi_, e_, G, CCConst(phi1_), e1_, 1);  // bridge phi back g=1 -> g=2
     fillGhosts(phi_);
@@ -2624,6 +2705,9 @@ class Solver {
       // Correct the face field (-> discretely divergence-free; transient this step) and the cell
       // field (central-difference cell gradient).
       projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G);
+      if (fluidOnlyMode_ == 2)  // Design B: replace the solid side's phi=0 by phibar_s at
+        starCorrectFaces(uf_, vf_, wf_, CCConst(phi_), starOv_, nStar_,  // fluid|solid faces
+                         C3{nx_, ny_, nz_}, e_, G, e_, G);
       fillGhosts(uf_);
       fillGhosts(vf_);
       fillGhosts(wf_);    // complete the divergence-free face field (boundary faces)
@@ -3439,7 +3523,10 @@ class Solver {
   double rotFilterEps_ = 0.05;  // S' = eps I + (1-eps) S (see setRotationalFilter)
   double rotWeight_ = 1.0;      // rotational under-relaxation w (setRotationalWeight)
   double rotWallW_ = 0.0;       // wall-banded rotational blend w0 (setRotationalWallWeight)
-  bool fluidOnlyConstraint_ = false;  // mode-14a fluid-only constraint (setFluidOnlyConstraint)
+  int fluidOnlyMode_ = 0;  // fluid-only constraint (setFluidOnlyConstraint): 1=A filter, 2=B star
+  StarOverlay starOv_;     // mode-B Kron star overlay (built in setSolid)
+  Kokkos::View<int, CCMem> starCounter_;
+  int nStar_ = 0;
   double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
