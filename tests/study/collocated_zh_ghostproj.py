@@ -27,7 +27,9 @@ def lattice_sdf(N, phi=0.125):
     return np.sqrt(dx * dx + dy * dy + dz * dz) - R, R
 
 
-def drag(N, ghost, orders=(1, 2), mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40,
+GPORD = tuple(int(v) for v in os.environ.get("GPORD", "1,2").split(","))
+
+def drag(N, ghost, orders=None, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40,
          max_steps=4000):
     sdf, R = lattice_sdf(N)
     lv = max(2, int(np.log2(N)) - 1)
@@ -41,7 +43,7 @@ def drag(N, ghost, orders=(1, 2), mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=4
     s.set_pressure_multigrid(True, levels=lv)
     s.set_pressure_pcg(True, 400, 1e-10)
     if ghost:
-        s.set_ghost_projection(True, *orders)
+        s.set_ghost_projection(True, *(orders or GPORD))
     s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
     prev, warm, um, t0 = 0.0, None, [], time.time()
     for it in range(max_steps):
