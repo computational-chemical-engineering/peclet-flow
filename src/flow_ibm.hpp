@@ -432,9 +432,20 @@ class Solver {
     } else if (name == "plain") {
       setFaceInterp(0);
       gauge2a_ = false;
+    } else if (name == "ghost") {
+      // The fluid-only constraint scheme (route 2b, 2026-08): binary-openness divergence +
+      // directional closures + gauge-exact gradient. Clean-protocol record: family-free
+      // (m1 -> 1e-5 monotone, |P| frozen), NO Layer-1 instability, C2 across dt = 60..1e20 with
+      // no stabilizer, both-bed ladders -1.4% -> +0.22% (R=8..24; its own small plateau), Z&H
+      // anchor -0.018% at N=128. Costs: BiCGStab (~2.3-2.7x pressure stage; star preconditioner
+      // planned), ~1.6 KB/cell overlay (caps single-GPU size), fragmentation guard. The (1,2)
+      // mixed mode stays quarantined (march-unstable on >2000-sphere beds).
+      setGhostProjection(true, 2, 2);
+      gauge2a_ = false;
     } else
       throw std::runtime_error(
-          "set_collocated_scheme: expected \"gauge-exact\", \"gauge-2a\" or \"plain\", got \"" +
+          "set_collocated_scheme: expected \"gauge-exact\", \"gauge-2a\", \"plain\" or "
+          "\"ghost\", got \"" +
           name + "\"");
   }
   // PM I ablation (Guy-Fogelson): keep the incremental predictor -grad(P^n) but accumulate

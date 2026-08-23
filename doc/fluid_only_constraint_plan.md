@@ -109,16 +109,42 @@ GATE RESULTS (bplus_gate.py, real bed, N=32 AND N=48, percolating component):
   * B+kron: PASSED. A_star exactly SPD; spec(A_star^-1 A_ghost) ENTIRELY REAL POSITIVE:
     [~0.02, 2.22] at N=32, [~0.02, 2.97] at N=48; small isolated cluster at 0.003..0.05
     (through-wall star links the ghost lacks), tight bulk ~[0.9, 3].
-  * CONSEQUENCE (sharper than the original B+ framing): the win is not a stationary defect
-    loop (the small-lambda cluster prices it out) but PRECONDITIONING -- replace the ghost
-    solve's binary-openness surrogate hierarchy with the star-aperture structure (fine-level
-    star overlay on the filtered 7-point hierarchy = the Design-B solvePCG machinery,
-    verbatim). The measured preconditioned spectrum suggests a several-fold iteration cut
-    from the recorded ~65. The star operator, unstable as a SCHEME, is an excellent BASE --
-    the pairing lesson's preconditioning corollary.
+  * CONSEQUENCE (sharper than the original B+ framing): the win would be PRECONDITIONING,
+    not a stationary defect loop (the small-lambda cluster prices the latter out).
+  * REVISED by the three-base comparison (2026-08-23, same gate): exact-base extreme spectra
+    vs A_ghost -- binary (current surrogate) [0, 2.29], star [0, 2.22], filtered-aperture
+    [0, 4.19]. The star base's lambda_max advantage over the current binary surrogate is
+    MARGINAL: the fine-base mismatch is NOT what costs the ghost its 13.5 iters/decade
+    (vs cut-cell 2.3). The efficiency study must look at the interior eigenvalue
+    DISTRIBUTION and the V-cycle hierarchy quality instead -- a deeper diagnosis, queued
+    behind correctness hardening. (The pairing-lesson preconditioning corollary still
+    stands -- the star base is as good as binary -- it is just not BETTER.)
 
 Priority: after C-hardening correctness (np>=16 root cause, guard lift); this is the
 first efficiency milestone and it reuses tonight's code.
+
+## AMR port plan (core::amr::AmrFlow -- the production branch's phase 5)
+
+AmrFlow IS the collocated aperture scheme on the octree, so it inherits the attractor family
+and the Layer-1 instability wholesale; the campaign's cure ports as follows.
+
+1. Structural precondition (already true): cut cells live in the FINEST band by refinement
+   policy, so the ghost closures never cross a level boundary -- the closure machinery is
+   uniform-grid code on the finest level, and the shared peclet::core::scheme::ghost_closure
+   kernels (lifted from flow in the July port) are already in core.
+2. Port order: (a) the binary-openness surrogate + closure overlay on the finest level, with
+   the level-boundary faces treated as COUPLED (they are fluid-fluid by (1)); (b) the
+   gauge-exact gradient is already AmrFlow's gradient family -- verify its band variant reads
+   only fluid-centered cells (the kernel-test methodology of kernel_study.py applies verbatim
+   on the octree's flattened band); (c) BiCGStab on the AMR BiCGStab rails (they exist -- the
+   ghost note's "(1,2) ports on the existing openness-MG rails" -- but port (2,2) ONLY);
+   (d) the fragmentation guard on the octree band (component labeling on the leaf graph).
+3. Validation ladder mirrors flow's: np1 bit-exactness vs the uniform-grid flow ghost on a
+   uniform octree; family collapse (m1 -> 0) on the Z&H sphere with a refined band; then the
+   bed ladder. The C2 dt-battery is the acceptance gate (AmrFlow's current scheme fails it
+   by construction).
+4. Do NOT port: the (1,2) mixed mode (march-unstable), the wall-blend (superseded by the
+   scheme change), modes 11-14 (mechanism ablations, flow-only).
 
 ## Constraints carried from the suite
 

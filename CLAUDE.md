@@ -115,60 +115,50 @@ All Kokkos, header-only (`namespace flow`), C++20.
 - `src/gauge_exact_gradient.hpp` - `gpCenterGrad`: the directional, gauge-exact cell-centre pressure
   gradient. This is what makes the COLLOCATED projection second order, and it is the default.
 
-### Collocated scheme (the `SolverColocated` default, since 2026-08-18)
+### Collocated schemes (`SolverColocated`) — REWRITTEN 2026-08-23 after the attractor campaign
 
-`set_collocated_scheme("gauge-exact")` is the **default**: the aperture cut-cell constraint,
-unchanged (throat-throttling, symmetric, MG-PCG, no fragmentation guard), with the directional
-`gpCenterGrad` replacing the two operators measured to be O(1) at cut cells — the `-grad(P)`
-predictor and the projection's cell correction. `"plain"` restores the legacy first-order path.
+**Read first if touching this path:** `doc/collocated_invisible_subspace.md` (the mechanism note),
+`doc/collocated_paper_plan.md` (results tracker, rows 1–47), `doc/fluid_only_constraint_plan.md`
+(the production plan). The 2026-08-18 "accuracy ceiling" narrative below the old table was
+**superseded**: the "~0.3 % ceiling" conflated (i) a rotational-update instability
+(Guy–Fogelson type) and (ii) an attractor FAMILY of steady states caused by the gradient and the
+aperture constraint coupling different pressure supports (solid-centered φ are constraint DOFs
+the gauge-exact gradient never reads). Under the clean protocol each scheme's true record is:
 
-Measured on two periodic sphere beds (`peclet-examples/benchmarks/porous-scaling`, one fixed bed
-per φ, R = 5…32, march tol 1e-6, staggered cut-cell as the reference). Error in k against the
-staggered k∞, and the cost at the finest rung:
+| scheme (`set_collocated_scheme`) | clean gaps vs staggered, φ=0.60, R=8→24 | stability / uniqueness |
+|---|---|---|
+| `"gauge-exact"` (default) | −2.54 → −0.76 → −0.13 → ~+0.20 % | attractor family (m1 frozen ~1e-2, P drift); wall-blend `set_rotational_wall_weight` is a STOPGAP whose margin dies at (R≥16, dt≥600) — fixed dt≤60 protocols at high R |
+| `"ghost"` (production candidate) | −1.43 → −0.265 → +0.077 → +0.219 % | family-free (m1→1e-5), NO stabilizer needed dt=60…1e20, C2/protocol-independent; Z&H −0.018 % @N=128; φ=0.50 replicated |
+| `"plain"` | first order, −6.4 % @R=8 | legacy |
 
-| | φ=0.50: R=8 → R=32 | φ=0.60: R=8 → R=32 | p.iters @R=32 | march wall @R=32 |
-|---|---|---|---|---|
-| gauge-exact | −0.773 → **+0.288** | −1.387 → **+0.385** | 43.1 | 193 s |
-| plain | −4.522 → −1.229 | −6.378 → −1.716 | 43.7 | 461 s |
-| ghost (quarantined) | −0.344 → +0.142 | −0.562 → +0.218 | 64.8 | 446 s |
-| staggered cut-cell (ref) | +0.698 → −0.009 | +0.883 → 0.000 | 43.0 | 158 s |
+Both converging schemes share a small **real** asymptote ~+0.2 % vs the staggered reference
+(which itself moves non-monotonically at the 5e-4 level over these rungs — the R=32 references
+pin this down). The adjoint-aperture ablations (modes 11–13) and the fluid-only filter/star
+designs (mode 14a / `set_fluid_only_constraint`) are retained as mechanism instruments: they
+prove uniqueness needs support-consistency, that support-consistent *values* are O(h)
+(multiplier/average reads), and that stability requires the (gradient, constraint) pair to be
+structurally matched — the ghost architecture (shared directional closures) is the only measured
+scheme that is stable, unique, AND converging. The B+ deferred-correction/preconditioner-swap
+ideas were spectrally gated: sym(A_ghost) is indefinite (dead); the star base equals the binary
+surrogate's λmax (no quick iteration win) — see the plan doc.
 
-Read this carefully — it is **not** a convergence-order story:
+`"ghost"` == `set_ghost_projection(True, 2, 2)`: fluid-only binary-openness constraint +
+directional closures + the gauge-exact gradient. Costs: BiCGStab (nonsymmetric, ~2.3–2.7× the
+pressure stage), ~1.6 KB/cell overlay (single-GPU cap ≈ 10 M cells / 16 GB, ≈ 60 M / 94 GB),
+fragmentation guard. MPI: validated np=1,2,4 (`ghost_projection_mpi` ctest, collocated included);
+the at-scale np≥16 weak-rung divergence is under active de-confounding (it ran the PURE (2,2)
+mode; single-rank on the same 7823-sphere bed is stable at R=8 — see tracker row 46). The
+`(matrix_order=1, rhs_order=2)` mixed mode remains **do-not-use** (march-unstable above ~2000
+spheres, `doc/ghost_hardening_findings_A.md`).
 
-- `"plain"` is first order (0.86–1.29 at every rung) and is still 1.2–1.7 % off at R=32.
-- `"gauge-exact"` converges fast, crosses the staggered limit near R=12, and then **asymptotes to
-  a fixed positive bias** — +0.29 % (φ=0.50) / +0.39 % (φ=0.60), moving only +0.01…+0.08 % from
-  R=24 to R=32. So it is 4–6× more accurate than `"plain"` at every resolution, but it does
-  **not** converge to the staggered answer.
-- That bias is a property of the **collocated approximate projection**, not of this gradient: the
-  ghost projection shows the same plateau at about half the magnitude (+0.14 % / +0.22 %). The
-  staggered scheme has no such bias. Mechanism: the constraint is imposed on the interpolated
-  ½/½ face field, and cut faces carry an h-independent share of the total flux (count ~1/h², each
-  carrying O(h²)), so an O(1) relative flux error per cut face does not shrink with refinement.
-  **Treat ~0.3 % as the accuracy ceiling of the collocated path**, including in AMR.
-- Cost is resolution- and geometry-dependent, so quote it per rung: at R=16 gauge-exact was 4.6×
-  faster to steady state than the staggered reference, but at R=32 it is *slower* on φ=0.50
-  (193 s vs 158 s) and 2.2× faster on φ=0.60. Against the ghost projection it is consistently
-  cheaper — 2.3–2.7× at R=32, more at coarser rungs.
+The old (contaminated-protocol) record is kept for the paper's refutation catalogue in
+`doc/collocated_accuracy_ceiling.md`; its asymptotes (+0.29/+0.39 gauge-exact, +0.14/+0.22
+ghost) match the clean-protocol asymptotes — the coarse-rung values were the contaminated part.
+Old integer API `set_face_interp`: modes 1/2/10 retired; 3/4 FV ablations; 11–14 campaign
+instruments (opt-in, single-rank).
 
-The march protocol was checked before these conclusions were drawn: a 100× tighter tolerance
-moves k by nothing to six digits (Snellius job 25805513), so the plateau is not an artefact of
-steady-state detection.
-
-The old integer API `set_face_interp` survives as a deprecated alias; modes 1/2/5/6/7/10 were
-**retired** (ablations; 10 measured divergent) and now raise; 3/4 remain as FV-constraint
-ablations.
-
-**The directional ghost-cell projection (`set_ghost_projection`) is QUARANTINED** — verification
-only, unsupported, default off. It is asymptotically about **twice as accurate** as the
-gauge-exact scheme (bias +0.14 % / +0.22 % against +0.29 % / +0.39 %) but costs 2.3–2.7× more at
-R=32 and up to 5–6× at coarser rungs, and it brings a nonsymmetric operator, BiCGStab instead of
-CG, and a fragmented pressure graph needing a connectivity guard. It is kept as the independent
-second discretization behind the cross-IBM physics gate, along with its study harnesses. Phase A of its
-hardening plan also found the documented `(matrix_order=1, rhs_order=2)` mixed mode to be
-**march-unstable** above ~2000 spheres ([`doc/ghost_hardening_findings_A.md`](doc/ghost_hardening_findings_A.md));
-do not use it. Hardening phases B/C are cancelled.
-
+**Regression**: `tests/regression/sdflow_regression.py --solver colocated --scheme ghost`
+(baseline `perf_baseline_colocated_ghost.json`).
 
 ## Python API Usage (`flow`)
 

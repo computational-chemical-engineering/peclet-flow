@@ -115,7 +115,7 @@ CFG = dict(rho=1.0, mu=0.1, dt=60.0, F=1e-3, vel_sweeps=80, pcg_maxit=300, pcg_r
 
 
 # --------------------------------------------------------------------------- run one (case, N)
-def run_case(name, N, cfg, quiet=True, solver="staggered"):
+def run_case(name, N, cfg, quiet=True, solver="staggered", scheme="gauge-exact"):
     from peclet import flow as sdflow
     spec = CASES[name]
     sdf, info = spec["sdf"](N)
@@ -129,6 +129,8 @@ def run_case(name, N, cfg, quiet=True, solver="staggered"):
     s.set_velocity_solver_params(cfg["vel_sweeps"])
     s.set_pressure_multigrid(True, levels=levels)
     s.set_pressure_pcg(True, cfg["pcg_maxit"], cfg["pcg_rtol"])
+    if solver == "colocated" and scheme != "gauge-exact":
+        s.set_collocated_scheme(scheme)      # e.g. "ghost" (route 2b) -- before set_solid
     s.set_solid(sdf, cutcell_pressure=True, pressure_coarse=cfg["coarse"])
 
     deep_solid = sdf < -2.0
@@ -177,14 +179,14 @@ def fit_order(Ns, vals):
     return best[1], best[2]  # order, extrapolated f_inf
 
 
-def run_all(cfg, cases, solver="staggered"):
+def run_all(cfg, cases, solver="staggered", scheme="gauge-exact"):
     out = {}
     for name in cases:
         grids = CASES[name]["grids"]
         per = {}
         print(f"\n[{name}] ({solver}) grids {grids} ...", flush=True)
         for N in grids:
-            r = run_case(name, N, cfg, solver=solver)
+            r = run_case(name, N, cfg, solver=solver, scheme=scheme)
             per[str(N)] = r
             print(f"  N={N:3d}  {CASES[name]['metric']}={r['metric']:.5g}  "
                   f"p_iters_tot={r['pressure_iters_total']:5d} (/step {r['pressure_iters_per_step']:.0f})  "
@@ -252,11 +254,16 @@ def main():
     ap.add_argument("--build", default="build", help="sdflow build dir under the repo root")
     ap.add_argument("--solver", default="staggered", choices=["staggered", "colocated"],
                     help="which grid variant to run (sdflow.Solver / sdflow.SolverColocated)")
+    ap.add_argument("--scheme", default="gauge-exact",
+                    help="colocated scheme (set_collocated_scheme name; 'ghost' = route 2b); "
+                         "each non-default scheme gets its own baseline file")
     ap.add_argument("--quick", action="store_true", help="coarser grids + looser march (fast smoke)")
     args = ap.parse_args()
 
     sys.path.insert(0, os.path.join(ROOT, args.build))
-    baseline = BASELINE if args.solver == "staggered" else os.path.join(HERE, "perf_baseline_colocated.json")
+    baseline = BASELINE if args.solver == "staggered" else os.path.join(
+        HERE, "perf_baseline_colocated.json" if args.scheme == "gauge-exact"
+        else f"perf_baseline_colocated_{args.scheme.replace('-', '_')}.json")
     cases = [c.strip() for c in args.cases.split(",") if c.strip()]
     cfg = dict(CFG)
     if args.quick:
@@ -265,11 +272,11 @@ def main():
             c["grids"] = c["grids"][:3]
 
     t0 = time.time()
-    cur = run_all(cfg, cases, solver=args.solver)
+    cur = run_all(cfg, cases, solver=args.solver, scheme=args.scheme)
     print(f"\n(total {time.time()-t0:.0f}s)")
 
     if args.update:
-        payload = {"_meta": {"generated": time.strftime("%Y-%m-%d %H:%M"), "solver": args.solver,
+        payload = {"_meta": {"generated": time.strftime("%Y-%m-%d %H:%M"), "solver": args.solver, "scheme": args.scheme,
                              "config": cfg, "tol": TOL}, **cur}
         with open(baseline, "w") as f:
             json.dump(payload, f, indent=2)
