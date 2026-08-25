@@ -129,8 +129,9 @@ def run_case(name, N, cfg, quiet=True, solver="staggered", scheme="gauge-exact")
     s.set_velocity_solver_params(cfg["vel_sweeps"])
     s.set_pressure_multigrid(True, levels=levels)
     s.set_pressure_pcg(True, cfg["pcg_maxit"], cfg["pcg_rtol"])
-    if solver == "colocated" and scheme != "gauge-exact":
-        s.set_collocated_scheme(scheme)      # e.g. "ghost" (route 2b) -- before set_solid
+    if solver == "colocated":
+        s.set_collocated_scheme(scheme)      # ALWAYS explicit: baselines pin schemes, not defaults
+        # (the shipped default is AUTO = ghost since 2026-08-25)
     s.set_solid(sdf, cutcell_pressure=True, pressure_coarse=cfg["coarse"])
 
     deep_solid = sdf < -2.0
@@ -210,7 +211,7 @@ TOL = dict(metric_rel=0.015, order_abs=0.4, extrap_rel=0.02,
            piter_total_rel=0.25, piter_step_abs=2.0, steps_rel=0.35, div_floor=1e-7)
 
 
-def compare(base, cur):
+def compare(base, cur, solver="staggered"):
     ok = True
     lines = []
     for name in cur:
@@ -219,9 +220,15 @@ def compare(base, cur):
         b, c = base[name], cur[name]
         mname = c["metric_name"]
         lines.append(f"\n[{name}]  (metric={mname})")
-        # order + extrapolated value
+        # order + extrapolated value. COLLOCATED: the fitted order is ADVISORY, not a gate --
+        # the attractor campaign measured collocated errors crossing zero inside these grid
+        # ranges (doc/collocated_paper_plan.md row 22 trap), where Richardson fits are noise:
+        # a ~1e-6 metric shift (any rebuild) flips p by O(1) while every value stays [ok].
         d_ord = abs(c["order"] - b["order"])
-        s_ord = "ok" if d_ord <= TOL["order_abs"] else "FAIL"; ok &= s_ord == "ok"
+        if solver == "colocated":
+            s_ord = "ok" if d_ord <= TOL["order_abs"] else "warn"
+        else:
+            s_ord = "ok" if d_ord <= TOL["order_abs"] else "FAIL"; ok &= s_ord == "ok"
         lines.append(f"  order p:        base {b['order']:.2f}  cur {c['order']:.2f}  (d={d_ord:.2f})  [{s_ord}]")
         d_ext = abs(c["extrapolated"] - b["extrapolated"]) / (abs(b["extrapolated"]) + 1e-30)
         s_ext = "ok" if d_ext <= TOL["extrap_rel"] else "FAIL"; ok &= s_ext == "ok"
@@ -287,7 +294,7 @@ def main():
         print(f"\nNO baseline at {baseline}; run with --update first.")
         return 1
     base = json.load(open(baseline))
-    ok, report = compare(base, cur)
+    ok, report = compare(base, cur, solver=args.solver)
     print(report)
     print(f"\n=== regression: {'PASS' if ok else 'FAIL'} ===")
     return 0 if ok else 1

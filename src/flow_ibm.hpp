@@ -275,6 +275,7 @@ class Solver {
       throw std::runtime_error(
           "set_ghost_projection: exact-crossings/openness-override are single-rank only");
     ghostProjection_ = on;
+    colSchemeAuto_ = false;  // explicit selection disables the AUTO default
     gpMatrixOrder_ = matrixOrder;
     gpRhsOrder_ = rhsOrder;
     gpNRows_ = -1;  // takes effect at the next set_solid
@@ -416,13 +417,20 @@ class Solver {
     if (mode != 0 && (mode < 3 || mode > 7) && mode != 9 && (mode < 11 || mode > 13))
       throw std::runtime_error("set_face_interp: unknown mode " + std::to_string(mode));
     if (ghostProjection_ && mode != 0)
-      throw std::runtime_error("set_face_interp: incompatible with the ghost projection");
+      throw std::runtime_error(
+          "set_face_interp: incompatible with the ghost projection (set_ghost_projection(False) "
+          "first, or use set_collocated_scheme which handles the transition)");
     faceInterp_ = mode;
+    colSchemeAuto_ = false;  // explicit selection disables the AUTO default
   }
   // Preferred API for the collocated projection scheme.
   //   "gauge-exact" (default) aperture constraint + directional (gauge-exact) pressure gradient
   //   "plain"                 the legacy plain-average / central-difference path (first order)
   void setCollocatedScheme(const std::string& name) {
+    if (name != "ghost" && ghostProjection_) {
+      ghostProjection_ = false;  // scheme transition: drop the ghost before selecting a face mode
+      gpNRows_ = -1;
+    }
     if (name == "gauge-exact") {
       setFaceInterp(9);
       gauge2a_ = false;
@@ -472,6 +480,8 @@ class Solver {
     if (mode < 0 || mode > 2)
       throw std::runtime_error("set_fluid_only_constraint: mode must be 0, 1 or 2");
     fluidOnlyMode_ = mode;
+    if (mode != 0)
+      colSchemeAuto_ = false;  // mechanism instruments run on the aperture rails, not AUTO-ghost
   }
   // Filtered rotational update (experimental): P += ct*phi - mu*S(div u*), S = one mask-aware
   // axis-wise (1,2,1)/4 smoothing pass per axis (one-sided 1/2(d_i+d_nbr) toward the open side at
@@ -688,6 +698,35 @@ class Solver {
   // flow).
   void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure) {
     cutcellPressure_ = cutcellPressure;
+    if constexpr (Grid::collocated) {
+      // DEFAULT SWITCH (2026-08-25, user decision after the attractor campaign): the collocated
+      // scheme default is AUTO = the GHOST (fluid-only) projection — family-free, unconditionally
+      // stable, protocol-independent (doc/collocated_invisible_subspace.md; clean ladders both
+      // beds) — falling back to gauge-exact with a stderr notice on the configurations the ghost
+      // v1 does not support (porous / variable-rho / domain-BC / Chebyshev / analytic overrides).
+      // Any explicit scheme selection (set_collocated_scheme / set_face_interp /
+      // set_ghost_projection / set_fluid_only_constraint) disables AUTO.
+      if (colSchemeAuto_) {
+        const bool ok = !(porous_ || varRho_ || hasBc_ || useChebyshev_ || hasExactCross_ ||
+                          hasOpenOverride_ || fluidOnlyMode_ != 0);
+        if (ok) {
+          ghostProjection_ = true;
+          gpMatrixOrder_ = 2;
+          gpRhsOrder_ = 2;
+          faceInterp_ = 0;  // the ghost owns the operators the face-interp modes replace
+          gpNRows_ = -1;
+        } else {
+          if (ghostProjection_)
+            gpNRows_ = -1;
+          ghostProjection_ = false;
+          faceInterp_ = 9;
+          fprintf(stderr,
+                  "peclet::flow SolverColocated: AUTO scheme fell back to gauge-exact "
+                  "(configuration unsupported by the ghost projection v1). Select explicitly "
+                  "with set_collocated_scheme to silence this notice.\n");
+        }
+      }
+    }
 #ifdef PECLET_FLOW_MPI
     for (bool& d : momStencilDirty_)  // stencil ring re-exchange for the CA momentum sweeps
       d = true;
@@ -3557,7 +3596,9 @@ class Solver {
         .count();
   }
   CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
-  bool ghostProjection_ = false;  // directional ghost-cell projection (experimental 2nd IBM)
+  bool ghostProjection_ = false;  // directional ghost-cell projection (the collocated AUTO default)
+  bool colSchemeAuto_ = Grid::collocated;  // AUTO scheme resolution at setSolid (cleared by any
+                                           // explicit scheme selection)
   GpOverlay gpOv_;                // its per-row overlay (built by setSolid)
   Kokkos::View<int*, CCMem> gpIdMap_;
   Kokkos::View<int, CCMem> gpCounter_;

@@ -40,11 +40,14 @@ DTSWITCH = dict((int(a), float(b)) for a, b in
 MU, F0 = 0.1, 1e-3
 
 
+SHIFT = np.array([float(v) for v in os.environ.get("SHIFT", "0,0,0").split(",")])  # cells
+
+
 def bed_sdf(N, npz):
     pk = np.load(npz)
     box = np.asarray(pk["box"], float)
     Rc = N / box[0]
-    c = np.asarray(pk["centers"]) * Rc
+    c = np.asarray(pk["centers"]) * Rc + SHIFT   # sub-cell translation (periodic; incidence probe)
     r = np.asarray(pk["scales"]) * Rc
     ax = np.arange(N) + 0.5
     S = np.full((N, N, N), 1e30)
@@ -72,7 +75,9 @@ s.set_velocity_solver_params(int(os.environ.get("VIT", "150")))
 s.set_pressure_multigrid(True, int(os.environ.get("MGL", "0")) or max(2, int(np.log2(N)) - 2))
 s.set_pressure_pcg(True, 300, 1e-8)
 if KIND != "stag":
-    if KIND == "ghost":
+    if KIND == "default":
+        pass                                 # AUTO: whatever the shipped default resolves to
+    elif KIND == "ghost":
         s.set_ghost_projection(True)         # fluid-only constraint + directional closures (route 2)
     elif KIND == "fluidonly":
         s.set_fluid_only_constraint(1)       # Design A: fluid-only openness filter + gauge-exact G

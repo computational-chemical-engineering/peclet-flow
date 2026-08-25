@@ -135,8 +135,11 @@ static void bind_solver(nb::module_& m, const char* name) {
           "set_fv_relax). No effect on the staggered solver.")
       .def(
           "set_collocated_scheme", &S::setCollocatedScheme, nb::arg("name"),
-          "Collocated cut-cell projection scheme (no effect on the staggered solver):\n"
-          "  'gauge-exact' (DEFAULT since 2026-08-18) — the aperture constraint with the "
+          "Collocated cut-cell projection scheme (no effect on the staggered solver). DEFAULT "
+          "since 2026-08-25: AUTO = 'ghost' where supported, falling back to 'gauge-exact' with "
+          "a stderr notice on porous/variable-rho/domain-BC/Chebyshev configurations (ghost v1 "
+          "limits); any explicit selection here disables AUTO.\n"
+          "  'gauge-exact' (default 2026-08-18..25; the AUTO fallback) — the aperture constraint with the "
           "directional gauge-exact pressure gradient. Cheapest scheme measured (symmetric MG-PCG, "
           "no fragmentation guard). CAVEATS from the 2026-08 campaign "
           "(doc/collocated_invisible_subspace.md): possesses an attractor FAMILY of steady states "

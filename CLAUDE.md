@@ -125,10 +125,15 @@ All Kokkos, header-only (`namespace flow`), C++20.
 aperture constraint coupling different pressure supports (solid-centered φ are constraint DOFs
 the gauge-exact gradient never reads). Under the clean protocol each scheme's true record is:
 
+**DEFAULT since 2026-08-25: AUTO = `"ghost"`** (the fluid-only scheme) where the configuration
+supports it, with a gauge-exact fallback + stderr notice on porous / variable-ρ / domain-BC /
+Chebyshev (ghost v1 limits). Any explicit `set_collocated_scheme` / `set_face_interp` /
+`set_ghost_projection` call disables AUTO. Baselines and tests pin schemes explicitly.
+
 | scheme (`set_collocated_scheme`) | clean gaps vs staggered, φ=0.60, R=8→24 | stability / uniqueness |
 |---|---|---|
-| `"gauge-exact"` (default) | −2.54 → −0.76 → −0.13 → ~+0.20 % | attractor family (m1 frozen ~1e-2, P drift); wall-blend `set_rotational_wall_weight` is a STOPGAP whose margin dies at (R≥16, dt≥600) — fixed dt≤60 protocols at high R |
-| `"ghost"` (production candidate) | −1.43 → −0.265 → +0.077 → +0.219 % | family-free (m1→1e-5), NO stabilizer needed dt=60…1e20, C2/protocol-independent; Z&H −0.018 % @N=128; φ=0.50 replicated |
+| `"gauge-exact"` (AUTO fallback; default 08-18..25) | −2.54 → −0.76 → −0.13 → ~+0.20 % | attractor family (m1 frozen ~1e-2, P drift); wall-blend `set_rotational_wall_weight` is a STOPGAP whose margin dies at (R≥16, dt≥600) — fixed dt≤60 protocols at high R |
+| `"ghost"` (the AUTO DEFAULT) | −1.43 → −0.265 → +0.077 → +0.219 % | family-free (m1→1e-5), NO stabilizer needed dt=60…1e20, C2/protocol-independent; Z&H −0.018 % @N=128; φ=0.50 replicated |
 | `"plain"` | first order, −6.4 % @R=8 | legacy |
 
 Both converging schemes share a small **real** asymptote ~+0.2 % vs the staggered reference
