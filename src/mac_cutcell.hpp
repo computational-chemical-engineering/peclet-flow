@@ -86,11 +86,84 @@ KOKKOS_INLINE_FUNCTION double ccFaceOpen(CCConst sdf, C3 ext, double fx, double 
       dz);
 }
 
+// Fluid fraction (sd >= 0 = fluid) of a triangle with linear vertex values (a, b, c): the exact
+// linear-simplex level-set area fraction. Denominators (x-y)(x-z) are strictly positive whenever
+// the signs are mixed (x is the odd one out), guarded against exact-zero degeneracies.
+KOKKOS_INLINE_FUNCTION double ccTriFrac(double a, double b, double c) {
+  const bool pa = a >= 0.0, pb = b >= 0.0, pc = c >= 0.0;
+  const int np = (pa ? 1 : 0) + (pb ? 1 : 0) + (pc ? 1 : 0);
+  if (np == 3)
+    return 1.0;
+  if (np == 0)
+    return 0.0;
+  double x, y, z;
+  if (np == 1) {  // rotate the positive vertex into x
+    if (pa) { x = a; y = b; z = c; } else if (pb) { x = b; y = c; z = a; } else { x = c; y = a; z = b; }
+    const double den = (x - y) * (x - z);
+    return den > 1e-300 ? (x * x) / den : 1.0;
+  }
+  // np == 2: rotate the negative vertex into x
+  if (!pa) { x = a; y = b; z = c; } else if (!pb) { x = b; y = c; z = a; } else { x = c; y = a; z = b; }
+  const double den = (x - y) * (x - z);
+  return 1.0 - (den > 1e-300 ? (x * x) / den : 1.0);
+}
+
+// MARCHING-SQUARES face openness (setApertureOrder(2), 2026-08-26): the O(h^2) upgrade of
+// ccFaceOpen motivated by the measured convexity bias of the one-sample linear model (the
+// tangent-plane estimate over-closes apertures on convex solids by +0.59%/+0.27% in bed
+// permeability at R=8/12, decaying ~h^2 -- flow doc/collocated_paper_plan.md row 51). Five
+// trilinear samples per face (4 corners + center), triangle-fan decomposition (4 triangles of
+// area 1/4 around the center sample -- no marching-squares saddle ambiguity), exact linear
+// fraction per triangle. Sub-resolution floor 1e-6 (measured lesson: alpha ~ 1e-12 rows from
+// exact geometry destroy the operator conditioning; the crude model's clip was an accidental
+// regularizer -- the floor makes the regularization explicit).
+KOKKOS_INLINE_FUNCTION double ccFaceOpenMS(CCConst sdf, C3 ext, double fx, double fy, double fz,
+                                           int type) {
+  const double e = 0.5;
+  double t1x = 0, t1y = 0, t1z = 0, t2x = 0, t2y = 0, t2z = 0;  // tangent half-offsets
+  if (type == 1) {
+    t1y = e;
+    t2z = e;
+  } else if (type == 2) {
+    t1x = e;
+    t2z = e;
+  } else {
+    t1x = e;
+    t2y = e;
+  }
+  const double c00 = ccSampleExt(sdf, ext, fx - t1x - t2x, fy - t1y - t2y, fz - t1z - t2z);
+  const double c10 = ccSampleExt(sdf, ext, fx + t1x - t2x, fy + t1y - t2y, fz + t1z - t2z);
+  const double c11 = ccSampleExt(sdf, ext, fx + t1x + t2x, fy + t1y + t2y, fz + t1z + t2z);
+  const double c01 = ccSampleExt(sdf, ext, fx - t1x + t2x, fy - t1y + t2y, fz - t1z + t2z);
+  const double cc = ccSampleExt(sdf, ext, fx, fy, fz);
+  const double frac = 0.25 * (ccTriFrac(c00, c10, cc) + ccTriFrac(c10, c11, cc) +
+                              ccTriFrac(c11, c01, cc) + ccTriFrac(c01, c00, cc));
+  if (frac < 1e-6)
+    return 0.0;
+  if (frac > 1.0 - 1e-12)
+    return 1.0;
+  return frac;
+}
+
 // Fill staggered face openness over the whole extended block (ox[i] = -x face of cell i, etc.).
+// order 1 = the shipped one-sample linear model (byte-identical default); order 2 =
+// marching-squares (ccFaceOpenMS).
 inline void buildOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ext, double dx,
-                          double dy, double dz) {
+                          double dy, double dz, int order = 1) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  if (order >= 2) {
+    Kokkos::parallel_for(
+        "peclet::flow::cc_open_ms", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          const long i = static_cast<long>(lx) + static_cast<long>(ly) * ext.x +
+                         static_cast<long>(lz) * static_cast<long>(ext.x) * ext.y;
+          ox(i) = ccFaceOpenMS(sdf, ext, lx - 0.5, ly, lz, 1);
+          oy(i) = ccFaceOpenMS(sdf, ext, lx, ly - 0.5, lz, 2);
+          oz(i) = ccFaceOpenMS(sdf, ext, lx, ly, lz - 0.5, 3);
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "peclet::flow::cc_open", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {

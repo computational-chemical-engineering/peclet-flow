@@ -72,6 +72,8 @@ s = sv(N, N, N)
 s.set_rho(1.0); s.set_mu(MU); s.set_dt(DT)
 s.set_body_force(F0, 0, 0); s.set_advection(False)
 s.set_velocity_solver_params(int(os.environ.get("VIT", "150")))
+if int(os.environ.get("APORDER", "1")) != 1:
+    s.set_aperture_order(int(os.environ["APORDER"]))   # 2 = marching-squares apertures
 s.set_pressure_multigrid(True, int(os.environ.get("MGL", "0")) or max(2, int(np.log2(N)) - 2))
 s.set_pressure_pcg(True, 300, 1e-8)
 if KIND != "stag":

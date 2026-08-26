@@ -476,6 +476,16 @@ class Solver {
   // openness feeds the MG hierarchy only, the SPD star overlay restores the throat coupling in
   // the PCG matvec, the divergence keeps the original apertures on fluid rows, and fluid|solid
   // faces are corrected with phibar_s -- see star_elimination.hpp).
+  // Aperture estimation order (2026-08-26): 1 = the shipped one-sample linear model (default,
+  // byte-identical), 2 = marching-squares (5 trilinear samples/face, triangle-fan; O(h^2),
+  // removes the convexity bias measured at +0.59%/+0.27% bed-k at R=8/12 -- tracker row 51).
+  // In-solver ceiling is the trilinear field; for ANALYTIC geometry use exact/Saye apertures
+  // via set_openness_override (scripts/exact_apertures_spheres.py). Call before set_solid.
+  void setApertureOrder(int order) {
+    if (order < 1 || order > 2)
+      throw std::runtime_error("set_aperture_order: order must be 1 or 2");
+    apertureOrder_ = order;
+  }
   void setFluidOnlyConstraint(int mode) {
     if (mode < 0 || mode > 2)
       throw std::runtime_error("set_fluid_only_constraint: mode must be 0, 1 or 2");
@@ -815,7 +825,8 @@ class Solver {
       }
     }
     if (cutcellPressure_) {
-      buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0);  // on the g=2 velocity block
+      buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0,
+                    apertureOrder_);  // on the g=2 velocity block
       if (hasOpenOverride_) {
         // Analytic-SDF exact apertures (setOpennessOverride): overwrite the sampled-SDF openness
         // with the user-provided inner fields + periodic wrap into the ghost ring (single-rank).
@@ -3573,6 +3584,7 @@ class Solver {
   double rotFilterEps_ = 0.05;  // S' = eps I + (1-eps) S (see setRotationalFilter)
   double rotWeight_ = 1.0;      // rotational under-relaxation w (setRotationalWeight)
   double rotWallW_ = 0.0;       // wall-banded rotational blend w0 (setRotationalWallWeight)
+  int apertureOrder_ = 1;  // face-aperture estimator order (setApertureOrder)
   int fluidOnlyMode_ = 0;  // fluid-only constraint (setFluidOnlyConstraint): 1=A filter, 2=B star
   StarOverlay starOv_;     // mode-B Kron star overlay (built in setSolid)
   Kokkos::View<int, CCMem> starCounter_;

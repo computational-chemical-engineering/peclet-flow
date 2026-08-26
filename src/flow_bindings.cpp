@@ -183,6 +183,12 @@ static void bind_solver(nb::module_& m, const char* name) {
           "P += (rho/dt + w0*mu/dx^2)*phi - (1-w0)*mu*div(u*); bulk keeps the full rotational "
           "update. Stabilizes the boundary rows without slowing bulk pressure relaxation, and "
           "keeps them relaxing at dt->infinity. 0 (default) = off.")
+      .def("set_aperture_order", &S::setApertureOrder, nb::arg("order"),
+           "Face-aperture estimator: 1 = one-sample linear model (default, byte-identical), 2 = "
+           "marching-squares (5 samples/face, O(h^2); removes the convexity bias measured at "
+           "+0.59/+0.27% bed permeability at R=8/12 -- see doc/collocated_paper_plan.md row 51). "
+           "For analytic geometry, exact apertures via set_openness_override are better still. "
+           "Call before set_solid.")
       .def("set_fluid_only_constraint", &S::setFluidOnlyConstraint, nb::arg("mode"),
            "Fluid-only pressure constraint (route 2b, call before set_solid; collocated "
            "experiment). 1 = Design A (openness filter), 2 = Design B (SPD Kron star "
