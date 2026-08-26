@@ -116,7 +116,10 @@ KOKKOS_INLINE_FUNCTION double ccTriFrac(double a, double b, double c) {
 // area 1/4 around the center sample -- no marching-squares saddle ambiguity), exact linear
 // fraction per triangle. Sub-resolution floor 1e-6 (measured lesson: alpha ~ 1e-12 rows from
 // exact geometry destroy the operator conditioning; the crude model's clip was an accidental
-// regularizer -- the floor makes the regularization explicit).
+// regularizer -- the floor makes the regularization explicit). Floor VALUE 1e-3 (2026-08-26):
+// 1e-6 measured insufficient -- alpha in [1e-6, 1e-2] rows drag plain RB-GS (levels=1) to a
+// ~1e-4 divergence floor within test budgets (redistribute_mpi_np4); a face open by <0.1% of
+// its area carries no resolved flux, so snapping it closed costs nothing measurable.
 KOKKOS_INLINE_FUNCTION double ccFaceOpenMS(CCConst sdf, C3 ext, double fx, double fy, double fz,
                                            int type) {
   const double e = 0.5;
@@ -131,14 +134,22 @@ KOKKOS_INLINE_FUNCTION double ccFaceOpenMS(CCConst sdf, C3 ext, double fx, doubl
     t1x = e;
     t2y = e;
   }
+  const double ccg = ccSampleExt(sdf, ext, fx, fy, fz);
+  if (ccg <= 0.0)
+    return 0.0;  // CENTER GATE (DOF-support consistency, kept from order 1): a face whose
+                 // staggered velocity point is solid has a MASKED u DOF -- an alpha > 0 aperture
+                 // there is a constraint the projection cannot act on (measured: dropping this
+                 // gate leaves an uncorrectable ~1.6e-4 divergence floor under plain RB-GS,
+                 // redistribute_mpi_np4). The marching-squares fraction below only refines the
+                 // AREA of center-fluid faces -- which is where the convexity bias lived.
   const double c00 = ccSampleExt(sdf, ext, fx - t1x - t2x, fy - t1y - t2y, fz - t1z - t2z);
   const double c10 = ccSampleExt(sdf, ext, fx + t1x - t2x, fy + t1y - t2y, fz + t1z - t2z);
   const double c11 = ccSampleExt(sdf, ext, fx + t1x + t2x, fy + t1y + t2y, fz + t1z + t2z);
   const double c01 = ccSampleExt(sdf, ext, fx - t1x + t2x, fy - t1y + t2y, fz - t1z + t2z);
-  const double cc = ccSampleExt(sdf, ext, fx, fy, fz);
+  const double cc = ccg;
   const double frac = 0.25 * (ccTriFrac(c00, c10, cc) + ccTriFrac(c10, c11, cc) +
                               ccTriFrac(c11, c01, cc) + ccTriFrac(c01, c00, cc));
-  if (frac < 1e-6)
+  if (frac < 1e-3)
     return 0.0;
   if (frac > 1.0 - 1e-12)
     return 1.0;

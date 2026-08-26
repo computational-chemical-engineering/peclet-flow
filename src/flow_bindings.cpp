@@ -184,7 +184,7 @@ static void bind_solver(nb::module_& m, const char* name) {
           "update. Stabilizes the boundary rows without slowing bulk pressure relaxation, and "
           "keeps them relaxing at dt->infinity. 0 (default) = off.")
       .def("set_aperture_order", &S::setApertureOrder, nb::arg("order"),
-           "Face-aperture estimator: 1 = one-sample linear model (default, byte-identical), 2 = "
+           "Face-aperture estimator (DEFAULT 2 since 2026-08-26): 1 = legacy one-sample linear model, 2 = "
            "marching-squares (5 samples/face, O(h^2); removes the convexity bias measured at "
            "+0.59/+0.27% bed permeability at R=8/12 -- see doc/collocated_paper_plan.md row 51). "
            "For analytic geometry, exact apertures via set_openness_override are better still. "

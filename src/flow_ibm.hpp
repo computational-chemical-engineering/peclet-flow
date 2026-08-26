@@ -3584,7 +3584,12 @@ class Solver {
   double rotFilterEps_ = 0.05;  // S' = eps I + (1-eps) S (see setRotationalFilter)
   double rotWeight_ = 1.0;      // rotational under-relaxation w (setRotationalWeight)
   double rotWallW_ = 0.0;       // wall-banded rotational blend w0 (setRotationalWallWeight)
-  int apertureOrder_ = 1;  // face-aperture estimator order (setApertureOrder)
+  int apertureOrder_ = [] {  // face-aperture estimator order (setApertureOrder; DEFAULT 2 =
+    // marching-squares since 2026-08-26 -- user decision, kills the convexity bias; 1 = the
+    // legacy one-sample model). PECLET_FLOW_APERTURE_ORDER overrides the default (diagnostics).
+    const char* v = std::getenv("PECLET_FLOW_APERTURE_ORDER");
+    return v ? std::atoi(v) : 2;
+  }();
   int fluidOnlyMode_ = 0;  // fluid-only constraint (setFluidOnlyConstraint): 1=A filter, 2=B star
   StarOverlay starOv_;     // mode-B Kron star overlay (built in setSolid)
   Kokkos::View<int, CCMem> starCounter_;

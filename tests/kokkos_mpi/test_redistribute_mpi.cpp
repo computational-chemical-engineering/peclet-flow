@@ -113,6 +113,9 @@ int main(int argc, char** argv) {
       double l = localUSum(sd);
       MPI_Allreduce(&l, &uPre, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     }
+    const double div_pre = sd.maxOpenDivergence();
+    if (rank == 0)
+      std::printf("  div PRE-redistribute = %.2e\n", div_pre);
     sd.redistribute(D2);
     {
       double l = localUSum(sd);
