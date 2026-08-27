@@ -29,7 +29,7 @@ backend = `nvidia-cuda` / `host-openmp` / `lumi-hip`); **nanobind** is provision
 `nvcc`, put it on `PATH` (`export PATH=/usr/local/cuda-13.2/bin:$PATH`).
 
 ```bash
-source .venv/bin/activate
+source ../.venv/bin/activate   # THE suite venv (suite/CLAUDE.md "One venv")
 # Canonical: build + install the flow solver via scikit-build-core.
 CMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda" pip install .
 
@@ -49,7 +49,7 @@ produced by `../tools/bootstrap_deps.sh`.
 
 Drive `flow` verification from Python:
 ```bash
-source .venv/bin/activate
+source ../.venv/bin/activate   # THE suite venv (suite/CLAUDE.md "One venv")
 export PYTHONPATH=$PWD/build
 python scripts/verify_periodic_spheres_sdflow.py   # cut-cell Stokes through a sphere packing
 python scripts/verify_poiseuille_flow.py         # analytic parabola
