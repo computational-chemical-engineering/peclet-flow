@@ -363,19 +363,21 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "set_scene",
           [](S& s, nb::ndarray<int, nb::c_contig> ni, nb::ndarray<double, nb::c_contig> nr,
-             nb::ndarray<int, nb::c_contig> ii, nb::ndarray<double, nb::c_contig> ir) {
+             nb::ndarray<int, nb::c_contig> ii, nb::ndarray<double, nb::c_contig> ir,
+             bool periodic) {
             s.setScene(std::vector<int>(ni.data(), ni.data() + ni.size()),
                        std::vector<double>(nr.data(), nr.data() + nr.size()),
                        std::vector<int>(ii.data(), ii.data() + ii.size()),
-                       std::vector<double>(ir.data(), ir.data() + ir.size()));
+                       std::vector<double>(ir.data(), ir.data() + ir.size()), periodic);
           },
           nb::arg("node_ints"), nb::arg("node_reals"), nb::arg("instance_ints"),
-          nb::arg("instance_reals"),
+          nb::arg("instance_reals"), nb::arg("periodic") = false,
           "Install an analytic geometry scene from core's flat encoding (3 ints + 16 reals per "
           "node, 2 ints + 17 reals per instance). Geometry is in CELL UNITS on the GLOBAL inner "
           "grid. The scene is replicated on every rank, so scene-derived geometry needs no "
           "communication and -- unlike set_exact_crossings -- is NOT single-rank only. "
-          "Periodicity is the caller's: instantiate images, nothing min-images for you.")
+          "periodic=True treats the scene as min-image periodic over the global grid (one "
+          "instance per body, no images); periodic=False leaves images to the caller.")
       .def("set_solid_from_scene", &S::setSolidFromScene, nb::arg("cutcell_pressure") = true,
            "Sample the installed scene onto this rank's inner grid and install it as the solid, "
            "entirely on device (no nx*ny*nz float64 host round trip).")

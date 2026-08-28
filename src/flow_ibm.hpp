@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-#include "peclet/core/geom/scene_builder.hpp"
+#include "peclet/core/geom/device_scene.hpp"
 
 #include "face_props.hpp"
 #include "gauge_exact_gradient.hpp"
@@ -727,54 +727,44 @@ class Solver {
 
   /// Install an analytic scene from core's flat node/instance encoding
   /// (peclet/core/geom/scene_builder.hpp: 3 ints + 16 reals per node, 2 ints + 17 reals per
-  /// instance). Uploads to device Views the solver owns. Call before set_solid_from_scene().
+  /// instance), held as a core SceneQueryDevice: mode selection (sphere-union fast path vs
+  /// general tree walk), candidate-grid acceleration and min-image periodicity all live in CORE
+  /// now — flow briefly hand-rolled the decode+upload+eval, which was the wrong layer for it.
+  /// Call before set_solid_from_scene().
+  ///
+  /// `periodic = true` treats the scene as min-image periodic over the GLOBAL inner grid, so a
+  /// periodic packing needs ONE instance per body — no 27-image instantiation. `periodic = false`
+  /// keeps the open-scene semantics (images are the caller's).
   void setScene(const std::vector<int>& nodeInts, const std::vector<double>& nodeReals,
-                const std::vector<int>& instInts, const std::vector<double>& instReals) {
+                const std::vector<int>& instInts, const std::vector<double>& instReals,
+                bool periodic = false) {
     namespace g = peclet::core::geom;
-    if (nodeInts.size() % g::kNodeIntStride || nodeReals.size() % g::kNodeRealStride)
-      throw std::runtime_error("set_scene: node arrays are not a whole number of records");
-    const std::size_t nn = nodeInts.size() / g::kNodeIntStride;
-    if (nn == 0 || nodeReals.size() / g::kNodeRealStride != nn)
-      throw std::runtime_error("set_scene: node int/real counts disagree");
-    if (instInts.size() % g::kInstanceIntStride || instReals.size() % g::kInstanceRealStride)
-      throw std::runtime_error("set_scene: instance arrays are not a whole number of records");
-    const std::size_t ni = instInts.size() / g::kInstanceIntStride;
-    if (ni == 0 || instReals.size() / g::kInstanceRealStride != ni)
-      throw std::runtime_error("set_scene: instance int/real counts disagree");
-
-    sceneNodes_ = Kokkos::View<g::ShapeNode<double>*, CCMem>("sceneNodes", nn);
-    sceneInsts_ = Kokkos::View<g::Instance<double>*, CCMem>("sceneInsts", ni);
-    auto hn = Kokkos::create_mirror_view(sceneNodes_);
-    auto hi = Kokkos::create_mirror_view(sceneInsts_);
-    for (std::size_t i = 0; i < nn; ++i)
-      hn(i) = g::decodeNode<double>(&nodeInts[i * g::kNodeIntStride],
-                                    &nodeReals[i * g::kNodeRealStride]);
-    for (std::size_t i = 0; i < ni; ++i) {
-      hi(i) = g::decodeInstance<double>(&instInts[i * g::kInstanceIntStride],
-                                        &instReals[i * g::kInstanceRealStride]);
-      if (hi(i).shapeRoot < 0 || hi(i).shapeRoot >= (int)nn)
-        throw std::runtime_error("set_scene: instance shapeRoot out of range");
-    }
-    Kokkos::deep_copy(sceneNodes_, hn);
-    Kokkos::deep_copy(sceneInsts_, hi);
-    // Grid leaves would need a sample pool shipped alongside; analytic scenes only for now.
-    for (std::size_t i = 0; i < nn; ++i)
-      if (hn(i).kind == g::kGrid)
+    g::SceneBuilder<double> b = g::SceneBuilder<double>::decode(nodeInts, nodeReals, instInts,
+                                                               instReals, /*grids=*/{},
+                                                               /*pool=*/{});
+    if (b.instances().empty())
+      throw std::runtime_error("set_scene: at least one instance required");
+    for (const auto& nd : b.nodes())
+      if (nd.kind == g::kGrid)
         throw std::runtime_error("set_scene: grid leaves are not supported (analytic scenes only)");
+    // Global inner-grid extents: the distributed build carries them (gnx_); single-rank (or a
+    // non-MPI build) the local block IS the global grid.
+    double GX = nx_, GY = ny_, GZ = nz_;
+#ifdef PECLET_FLOW_MPI
+    if (gnx_ > 0) {
+      GX = gnx_;
+      GY = gny_;
+      GZ = gnz_;
+    }
+#endif
+    g::PeriodicBox<double> box{GX, GY, GZ, periodic};
+    sceneQ_ = std::make_shared<g::SceneQueryDevice<double, CCMem>>(
+        g::SceneQueryDevice<double, CCMem>::build(
+            b, peclet::core::Vec3<double>{0, 0, 0}, peclet::core::Vec3<double>{GX, GY, GZ}, box));
     hasScene_ = true;
   }
 
   bool hasScene() const { return hasScene_; }
-
-  /// Device-side SceneView over the uploaded arrays. Captured by value into kernels.
-  peclet::core::geom::SceneView<double> sceneView() const {
-    peclet::core::geom::SceneView<double> sv;
-    sv.nodes = sceneNodes_.data();
-    sv.nodeCount = (int)sceneNodes_.extent(0);
-    sv.instances = sceneInsts_.data();
-    sv.instanceCount = (int)sceneInsts_.extent(0);
-    return sv;  // grids/samples stay null: analytic scenes only
-  }
 
   /// Sample the scene onto this rank's inner grid and install it as the solid, entirely on device
   /// -- no nx*ny*nz float64 host round trip, and correct on every rank.
@@ -783,7 +773,7 @@ class Solver {
       throw std::runtime_error("set_solid_from_scene: call set_scene first");
     const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
     CCField din("peclet::flow::sceneSdf", n);
-    const auto sv = sceneView();
+    const auto q = sceneQ_->view();
     const int nx = nx_, ny = ny_, nz = nz_;
     const C3 og = og_;
     CCExec space;
@@ -794,7 +784,7 @@ class Solver {
           const peclet::core::Vec3<double> p{(double)(x + og.x), (double)(y + og.y),
                                             (double)(z + og.z)};
           din((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny) =
-              peclet::core::geom::evalScene(sv, p);
+              q.eval(p);
         });
     space.fence();
     setSolidDevice(din, cutcellPressure);
@@ -813,12 +803,17 @@ class Solver {
     if (!hasScene_)
       throw std::runtime_error("set_exact_crossings_from_scene: call set_scene first");
     const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
-    const auto sv = sceneView();
+    const auto q = sceneQ_->view();
     const int nx = nx_, ny = ny_, nz = nz_;
     const C3 og = og_;
     CCExec space;
     for (int c = 0; c < 3; ++c) {
-      const double offc[3] = {c == 0 ? -0.5 : 0.0, c == 1 ? -0.5 : 0.0, c == 2 ? -0.5 : 0.0};
+      // Component c's sample placement comes from the GRID POLICY: staggered puts it on the low
+      // face along axis c (offset -1/2 there), collocated at the cell center (offset 0) -- the
+      // collocated ghost projection consumes tEx_[c][c] at CENTERS, so hardcoding the staggered
+      // offsets here would silently compute crossings from the wrong points on that path.
+      const auto po = Grid::offset(c);
+      const double offc[3] = {(double)po.x, (double)po.y, (double)po.z};
       for (int a = 0; a < 3; ++a) {
         tEx_[c][a] = CCField("tEx", n);
         CCField t = tEx_[c][a];
@@ -833,8 +828,7 @@ class Solver {
               const double dx = aa == 0 ? 1.0 : 0.0, dy = aa == 1 ? 1.0 : 0.0,
                            dz = aa == 2 ? 1.0 : 0.0;
               const auto f = [&](double s) {
-                return peclet::core::geom::evalScene(
-                    sv, peclet::core::Vec3<double>{px + s * dx, py + s * dy, pz + s * dz});
+                return q.eval(peclet::core::Vec3<double>{px + s * dx, py + s * dy, pz + s * dz});
               };
               const double f0 = f(0.0), f1 = f(1.0);
               const std::size_t idx =
@@ -3812,8 +3806,7 @@ class Solver {
   CCField tEx_[3][3];             // exact crossings t[c][k] (inner grid; setExactCrossings)
   bool hasExactCross_ = false;
   bool sceneCrossings_ = false;   // crossings came from the analytic scene (per-rank, no override)
-  Kokkos::View<peclet::core::geom::ShapeNode<double>*, CCMem> sceneNodes_;
-  Kokkos::View<peclet::core::geom::Instance<double>*, CCMem> sceneInsts_;
+  std::shared_ptr<peclet::core::geom::SceneQueryDevice<double, CCMem>> sceneQ_;
   bool hasScene_ = false;
   std::vector<double> oxOverride_, oyOverride_, ozOverride_;  // exact apertures (inner)
   bool hasOpenOverride_ = false;
