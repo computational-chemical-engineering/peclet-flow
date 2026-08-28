@@ -387,6 +387,20 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Bisection, not Newton: only SIGN correctness is guaranteed for bound-only leaves.")
       .def("has_scene", &S::hasScene)
       .def(
+          "get_cut_owner",
+          [](S& s) {
+            std::vector<int> v = s.getCutOwner();
+            const auto nx = static_cast<std::size_t>(s.nx());
+            const auto ny = static_cast<std::size_t>(s.ny());
+            const auto nz = static_cast<std::size_t>(s.nz());
+            return peclet::core::python::vector_to_ndarray(
+                std::move(v), {nx, ny, nz},
+                {1, static_cast<std::int64_t>(nx), static_cast<std::int64_t>(nx * ny)});
+          },
+          "Per-inner-cell owning scene instance (the argmin behind the sampled SDF), (nx,ny,nz) "
+          "int32; -1 before set_solid_from_scene. Moving geometry reads its wall velocity off the "
+          "owner and resolved CFD-DEM posts the hydrodynamic force back to it.")
+      .def(
           "set_solid",
           [](S& s, nb::ndarray<double, nb::f_contig> sdf, bool cutcell_pressure,
              const std::string& /*pressure_coarse*/) {

@@ -766,6 +766,18 @@ class Solver {
 
   bool hasScene() const { return hasScene_; }
 
+  /// Per-inner-cell owning instance (Layer 3 rung 1), x-fastest, -1 where no scene has been
+  /// sampled yet. Host copy; the device field is what the solver kernels read.
+  std::vector<int> getCutOwner() const {
+    const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
+    std::vector<int> out(n, -1);
+    if (cutOwner_.extent(0) != n)
+      return out;
+    using HostV = Kokkos::View<int*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+    Kokkos::deep_copy(HostV(out.data(), n), cutOwner_);
+    return out;
+  }
+
   /// Sample the scene onto this rank's inner grid and install it as the solid, entirely on device
   /// -- no nx*ny*nz float64 host round trip, and correct on every rank.
   void setSolidFromScene(bool cutcellPressure) {
@@ -773,6 +785,9 @@ class Solver {
       throw std::runtime_error("set_solid_from_scene: call set_scene first");
     const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
     CCField din("peclet::flow::sceneSdf", n);
+    if (cutOwner_.extent(0) != n)
+      cutOwner_ = Kokkos::View<int*, CCMem>("peclet::flow::cutOwner", n);
+    auto own = cutOwner_;
     const auto q = sceneQ_->view();
     const int nx = nx_, ny = ny_, nz = nz_;
     const C3 og = og_;
@@ -783,8 +798,13 @@ class Solver {
         KOKKOS_LAMBDA(int x, int y, int z) {
           const peclet::core::Vec3<double> p{(double)(x + og.x), (double)(y + og.y),
                                             (double)(z + og.z)};
-          din((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny) =
-              q.eval(p);
+          // evalOwner is ONE traversal returning bitwise eval's value plus the argmin instance, so
+          // carrying the ownership field costs nothing over the sample it rides on.
+          int oi = -1;
+          const std::size_t idx =
+              (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny;
+          din(idx) = q.evalOwner(p, oi);
+          own(idx) = oi;
         });
     space.fence();
     setSolidDevice(din, cutcellPressure);
@@ -3808,6 +3828,12 @@ class Solver {
   bool sceneCrossings_ = false;   // crossings came from the analytic scene (per-rank, no override)
   std::shared_ptr<peclet::core::geom::SceneQueryDevice<double, CCMem>> sceneQ_;
   bool hasScene_ = false;
+  // CUT OWNERSHIP (Layer 3 rung 1). Which scene instance owns the nearest surface, per INNER cell
+  // (x-fastest, nx*ny*nz), filled by set_solid_from_scene in the same traversal that samples the
+  // SDF (core's evalOwner answers both at once, so the field is free). Meaningful everywhere; only
+  // the cut cells consume it — moving geometry reads a wall velocity off the owner, and resolved
+  // CFD-DEM posts the hydrodynamic force back to it. Empty until a scene is sampled.
+  Kokkos::View<int*, CCMem> cutOwner_;
   std::vector<double> oxOverride_, oyOverride_, ozOverride_;  // exact apertures (inner)
   bool hasOpenOverride_ = false;
   CCField oxb_, oyb_, ozb_;  // binary (COUPLED) openness on the g=2 block (ghost divergence)
