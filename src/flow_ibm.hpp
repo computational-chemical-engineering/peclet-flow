@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 
+#include "peclet/core/geom/scene_builder.hpp"
+
 #include "face_props.hpp"
 #include "gauge_exact_gradient.hpp"
 #include "ghost_projection_debug.hpp"  // opt-in gp row forensics (PECLET_FLOW_GP_DEBUG), no-op off
@@ -706,8 +708,193 @@ class Solver {
   // SDF on the inner cells (flat x-fastest, size nx*ny*nz; <0 solid). cutcellPressure enables the
   // open-face-weighted cut-cell projection (off => velocity-only, e.g. unidirectional body-force
   // flow).
+  // ---------------------------------------------------------------------------------------
+  // ANALYTIC SCENE (Layer 2 of suite/docs/ANALYTIC_SDF_GEOMETRY.md)
+  //
+  // Geometry has only ever reached flow as an already-sampled field, with "analytic accuracy"
+  // supplied as override arrays computed in Python (set_exact_crossings / set_openness_override) --
+  // spheres only, and SINGLE-RANK only. A scene set here is device-resident and REPLICATED on every
+  // rank, so a rank derives its own block's geometry from it with no communication at all; that is
+  // what lifts the single-rank restriction rather than any new exchange.
+  //
+  // Geometry is expressed in CELL UNITS on the GLOBAL inner grid (cell centre (i,j,k) sits at
+  // (i,j,k)), matching scripts/exact_apertures_spheres.py's centers_cells / radii_cells.
+  //
+  // PERIODICITY is the caller's: the scene is evaluated at global cell coordinates and has no
+  // wrap of its own, so a periodic packing must instantiate its images (or use a node whose eval
+  // is periodic). Nothing here min-images for you.
+  // ---------------------------------------------------------------------------------------
+
+  /// Install an analytic scene from core's flat node/instance encoding
+  /// (peclet/core/geom/scene_builder.hpp: 3 ints + 16 reals per node, 2 ints + 17 reals per
+  /// instance). Uploads to device Views the solver owns. Call before set_solid_from_scene().
+  void setScene(const std::vector<int>& nodeInts, const std::vector<double>& nodeReals,
+                const std::vector<int>& instInts, const std::vector<double>& instReals) {
+    namespace g = peclet::core::geom;
+    if (nodeInts.size() % g::kNodeIntStride || nodeReals.size() % g::kNodeRealStride)
+      throw std::runtime_error("set_scene: node arrays are not a whole number of records");
+    const std::size_t nn = nodeInts.size() / g::kNodeIntStride;
+    if (nn == 0 || nodeReals.size() / g::kNodeRealStride != nn)
+      throw std::runtime_error("set_scene: node int/real counts disagree");
+    if (instInts.size() % g::kInstanceIntStride || instReals.size() % g::kInstanceRealStride)
+      throw std::runtime_error("set_scene: instance arrays are not a whole number of records");
+    const std::size_t ni = instInts.size() / g::kInstanceIntStride;
+    if (ni == 0 || instReals.size() / g::kInstanceRealStride != ni)
+      throw std::runtime_error("set_scene: instance int/real counts disagree");
+
+    sceneNodes_ = Kokkos::View<g::ShapeNode<double>*, CCMem>("sceneNodes", nn);
+    sceneInsts_ = Kokkos::View<g::Instance<double>*, CCMem>("sceneInsts", ni);
+    auto hn = Kokkos::create_mirror_view(sceneNodes_);
+    auto hi = Kokkos::create_mirror_view(sceneInsts_);
+    for (std::size_t i = 0; i < nn; ++i)
+      hn(i) = g::decodeNode<double>(&nodeInts[i * g::kNodeIntStride],
+                                    &nodeReals[i * g::kNodeRealStride]);
+    for (std::size_t i = 0; i < ni; ++i) {
+      hi(i) = g::decodeInstance<double>(&instInts[i * g::kInstanceIntStride],
+                                        &instReals[i * g::kInstanceRealStride]);
+      if (hi(i).shapeRoot < 0 || hi(i).shapeRoot >= (int)nn)
+        throw std::runtime_error("set_scene: instance shapeRoot out of range");
+    }
+    Kokkos::deep_copy(sceneNodes_, hn);
+    Kokkos::deep_copy(sceneInsts_, hi);
+    // Grid leaves would need a sample pool shipped alongside; analytic scenes only for now.
+    for (std::size_t i = 0; i < nn; ++i)
+      if (hn(i).kind == g::kGrid)
+        throw std::runtime_error("set_scene: grid leaves are not supported (analytic scenes only)");
+    hasScene_ = true;
+  }
+
+  bool hasScene() const { return hasScene_; }
+
+  /// Device-side SceneView over the uploaded arrays. Captured by value into kernels.
+  peclet::core::geom::SceneView<double> sceneView() const {
+    peclet::core::geom::SceneView<double> sv;
+    sv.nodes = sceneNodes_.data();
+    sv.nodeCount = (int)sceneNodes_.extent(0);
+    sv.instances = sceneInsts_.data();
+    sv.instanceCount = (int)sceneInsts_.extent(0);
+    return sv;  // grids/samples stay null: analytic scenes only
+  }
+
+  /// Sample the scene onto this rank's inner grid and install it as the solid, entirely on device
+  /// -- no nx*ny*nz float64 host round trip, and correct on every rank.
+  void setSolidFromScene(bool cutcellPressure) {
+    if (!hasScene_)
+      throw std::runtime_error("set_solid_from_scene: call set_scene first");
+    const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
+    CCField din("peclet::flow::sceneSdf", n);
+    const auto sv = sceneView();
+    const int nx = nx_, ny = ny_, nz = nz_;
+    const C3 og = og_;
+    CCExec space;
+    Kokkos::parallel_for(
+        "peclet::flow::scene_sample",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const peclet::core::Vec3<double> p{(double)(x + og.x), (double)(y + og.y),
+                                            (double)(z + og.z)};
+          din((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny) =
+              peclet::core::geom::evalScene(sv, p);
+        });
+    space.fence();
+    setSolidDevice(din, cutcellPressure);
+  }
+
+  /// EXACT wall crossings straight from the scene, on device, on every rank -- the in-solver
+  /// replacement for set_exact_crossings + scripts/exact_apertures_spheres.py.
+  ///
+  /// t[c][a](i) = the fraction in (0,1) along the unit segment from component c's staggered point
+  /// at inner cell i toward i + e_a at which the scene's SDF changes sign; NaN where the segment
+  /// does not cross (the consumer falls back to the linear-interpolated theta). Bisection, NOT
+  /// Newton: contract 2 of the design note only guarantees SIGN correctness for the bound-only
+  /// leaves (ellipsoid, superquadric, CSG seams), and a Newton step on a non-distance field can
+  /// leave the bracket entirely.
+  void setExactCrossingsFromScene() {
+    if (!hasScene_)
+      throw std::runtime_error("set_exact_crossings_from_scene: call set_scene first");
+    const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
+    const auto sv = sceneView();
+    const int nx = nx_, ny = ny_, nz = nz_;
+    const C3 og = og_;
+    CCExec space;
+    for (int c = 0; c < 3; ++c) {
+      const double offc[3] = {c == 0 ? -0.5 : 0.0, c == 1 ? -0.5 : 0.0, c == 2 ? -0.5 : 0.0};
+      for (int a = 0; a < 3; ++a) {
+        tEx_[c][a] = CCField("tEx", n);
+        CCField t = tEx_[c][a];
+        const double ox = offc[0], oy = offc[1], oz = offc[2];
+        const int aa = a;
+        Kokkos::parallel_for(
+            "peclet::flow::scene_crossings",
+            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+            KOKKOS_LAMBDA(int x, int y, int z) {
+              const double px = (double)(x + og.x) + ox, py = (double)(y + og.y) + oy,
+                           pz = (double)(z + og.z) + oz;
+              const double dx = aa == 0 ? 1.0 : 0.0, dy = aa == 1 ? 1.0 : 0.0,
+                           dz = aa == 2 ? 1.0 : 0.0;
+              const auto f = [&](double s) {
+                return peclet::core::geom::evalScene(
+                    sv, peclet::core::Vec3<double>{px + s * dx, py + s * dy, pz + s * dz});
+              };
+              const double f0 = f(0.0), f1 = f(1.0);
+              const std::size_t idx =
+                  (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny;
+              if ((f0 < 0.0) == (f1 < 0.0)) {  // no sign change -> no crossing on this segment
+                t(idx) = Kokkos::Experimental::quiet_NaN_v<double>;
+                return;
+              }
+              double lo = 0.0, hi = 1.0, flo = f0;
+              for (int it = 0; it < 52; ++it) {  // bisection to ~1 ulp of the unit interval
+                const double mid = 0.5 * (lo + hi);
+                const double fm = f(mid);
+                if ((fm < 0.0) == (flo < 0.0)) {
+                  lo = mid;
+                  flo = fm;
+                } else {
+                  hi = mid;
+                }
+              }
+              t(idx) = 0.5 * (lo + hi);
+            });
+      }
+    }
+    space.fence();
+    hasExactCross_ = true;
+    sceneCrossings_ = true;  // scene-derived: valid on every rank, unlike the host override path
+  }
+
+  /// Host entry point: upload the inner SDF once and delegate. Kept so every existing caller and
+  /// the Python binding are unchanged.
   void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure) {
+    const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
+    if (sdfInner.size() != n)
+      throw std::runtime_error("set_solid: expected nx*ny*nz values");
+    CCField din("peclet::flow::sdfInner_d", n);
+    using HostConst = Kokkos::View<const double*, Kokkos::HostSpace,
+                                   Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+    Kokkos::deep_copy(din, HostConst(sdfInner.data(), n));
+    setSolidDevice(din, cutcellPressure);
+  }
+
+  /// Device entry point (Layer 2): the inner SDF is ALREADY on device, so geometry never
+  /// round-trips through the host. This is the body every set_solid path shares.
+  void setSolidDevice(CCField din, bool cutcellPressure) {
     cutcellPressure_ = cutcellPressure;
+    // A few setup paths below (the ghost-projection pocket decoupling) are host-side
+    // connected-component analyses and genuinely need the inner SDF on the host. Materialise it
+    // ONCE, lazily, so the common path keeps the device-resident benefit.
+    std::vector<double> sdfInnerHost_;
+    auto sdfInner_ = [&]() -> const std::vector<double>& {
+      if (sdfInnerHost_.empty()) {
+        const std::size_t nI = (std::size_t)nx_ * ny_ * nz_;
+        sdfInnerHost_.resize(nI);
+        Kokkos::deep_copy(
+            Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+                sdfInnerHost_.data(), nI),
+            din);
+      }
+      return sdfInnerHost_;
+    };
     if constexpr (Grid::collocated) {
       // DEFAULT SWITCH (2026-08-25, user decision after the attractor campaign): the collocated
       // scheme default is AUTO = the GHOST (fluid-only) projection — family-free, unconditionally
@@ -741,14 +928,18 @@ class Solver {
     for (bool& d : momStencilDirty_)  // stencil ring re-exchange for the CA momentum sweeps
       d = true;
 #endif
-    hasSolid_ =
-        false;  // does the geometry actually contain solid? (all-fluid set_pressure_geometry
-    for (double v :
-         sdfInner)  // passes sd>0 everywhere -> stays false, keeping the channel/BFS path)
-      if (v < 0.0) {
-        hasSolid_ = true;
-        break;
-      }
+    // Does the geometry actually contain solid? (all-fluid set_pressure_geometry passes sd>0
+    // everywhere -> stays false, keeping the channel/BFS path.) Device reduction: din lives on
+    // device now, and pulling it back just to scan it would defeat the point.
+    {
+      const std::size_t nInner = (std::size_t)nx_ * ny_ * nz_;
+      int anySolid = 0;
+      CCConst dinC(din);
+      Kokkos::parallel_reduce(
+          "peclet::flow::has_solid", Kokkos::RangePolicy<CCExec>(0, nInner),
+          KOKKOS_LAMBDA(const std::size_t i, int& acc) { acc = acc || (dinC(i) < 0.0); }, anySolid);
+      hasSolid_ = anySolid != 0;
+    }
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {  // a solid anywhere in the global domain enables the IBM momentum path
       int local = hasSolid_ ? 1 : 0, global = 0;
@@ -758,30 +949,27 @@ class Solver {
 #endif
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
-      // Multi-rank: sdfInner is THIS rank's LOCAL inner block; fill the inner cells, then
+      // Multi-rank: din is THIS rank's LOCAL inner block; fill the inner cells ON DEVICE, then
       // halo-exchange the ghosts (cross-rank + periodic) so the overlay/openness read the
-      // neighbour's SDF at the block boundary.
-      auto h = Kokkos::create_mirror_view(sdf_);
-      Kokkos::deep_copy(h, sdf_);
-      for (int z = 0; z < nz_; ++z)
-        for (int y = 0; y < ny_; ++y)
-          for (int x = 0; x < nx_; ++x)
-            h((long)(x + G) + (long)(y + G) * e_.x + (long)(z + G) * (long)e_.x * e_.y) =
-                sdfInner[(std::size_t)x + (std::size_t)y * nx_ +
-                         (std::size_t)z * (std::size_t)nx_ * ny_];
-      Kokkos::deep_copy(sdf_, h);
+      // neighbour's SDF at the block boundary. (Was a host mirror + triple loop + full H2D.)
+      CCExec space;
+      const int ex = e_.x, ey = e_.y, nx = nx_, ny = ny_, nz = nz_, g = G;
+      CCField sdf = sdf_;
+      CCConst dinC(din);
+      Kokkos::parallel_for(
+          "peclet::flow::sdf_fill_inner",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            sdf((long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey) =
+                dinC((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny);
+          });
+      space.fence();
       velDev_->exchange(sdf_);
     } else
 #endif
     {
-      // Single-rank: upload the inner SDF once and do the periodic-wrap gather on device (G4) —
-      // fills the whole extended block (inner + periodic ghosts) in one kernel instead of a host
-      // triple loop + a full extended-block H2D.
-      CCField din("peclet::flow::sdfInner_d", static_cast<std::size_t>(nx_) * ny_ * nz_);
-      Kokkos::deep_copy(
-          din,
-          Kokkos::View<const double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
-              sdfInner.data(), sdfInner.size()));
+      // Single-rank: periodic-wrap gather on device (G4) — fills the whole extended block
+      // (inner + periodic ghosts) in one kernel. `din` is already device-resident.
       CCExec space;
       const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
       CCField sdf = sdf_;
@@ -1017,7 +1205,7 @@ class Solver {
               acc += cnts[r];
             }
             std::vector<double> flat((std::size_t)acc);
-            MPI_Allgatherv(sdfInner.data(), (int)sdfInner.size(), MPI_DOUBLE, flat.data(),
+            MPI_Allgatherv(sdfInner_().data(), (int)sdfInner_().size(), MPI_DOUBLE, flat.data(),
                            cnts.data(), disp.data(), MPI_DOUBLE, comm_);
             work.assign((std::size_t)fx * fy * fz, 0.0);
             for (int r = 0; r < nRanks; ++r) {
@@ -1033,7 +1221,7 @@ class Solver {
             }
           } else
 #endif
-            work = sdfInner;
+            work = sdfInner_();
           const std::size_t nTot = work.size();
           const int nx = fx, ny = fy, nz = fz;
           auto id = [&](int x, int y, int z) {
@@ -1091,7 +1279,7 @@ class Solver {
 #ifdef PECLET_FLOW_MPI
           if (distributed_) {
             const auto b = dec_->block(myRank);
-            sdfGpHost.resize(sdfInner.size());
+            sdfGpHost.resize(sdfInner_().size());
             for (int z = 0; z < nz_; ++z)
               for (int y = 0; y < ny_; ++y)
                 for (int x = 0; x < nx_; ++x)
@@ -3623,6 +3811,10 @@ class Solver {
   int gpMatrixOrder_ = 2, gpRhsOrder_ = 2;  // closure order: implicit phi couplings / RHS
   CCField tEx_[3][3];             // exact crossings t[c][k] (inner grid; setExactCrossings)
   bool hasExactCross_ = false;
+  bool sceneCrossings_ = false;   // crossings came from the analytic scene (per-rank, no override)
+  Kokkos::View<peclet::core::geom::ShapeNode<double>*, CCMem> sceneNodes_;
+  Kokkos::View<peclet::core::geom::Instance<double>*, CCMem> sceneInsts_;
+  bool hasScene_ = false;
   std::vector<double> oxOverride_, oyOverride_, ozOverride_;  // exact apertures (inner)
   bool hasOpenOverride_ = false;
   CCField oxb_, oyb_, ozb_;  // binary (COUPLED) openness on the g=2 block (ghost divergence)

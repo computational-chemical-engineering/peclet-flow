@@ -361,6 +361,30 @@ static void bind_solver(nb::module_& m, const char* name) {
           "geometry "
           "setter overwrites the SDF and wipes the solid).")
       .def(
+          "set_scene",
+          [](S& s, nb::ndarray<int, nb::c_contig> ni, nb::ndarray<double, nb::c_contig> nr,
+             nb::ndarray<int, nb::c_contig> ii, nb::ndarray<double, nb::c_contig> ir) {
+            s.setScene(std::vector<int>(ni.data(), ni.data() + ni.size()),
+                       std::vector<double>(nr.data(), nr.data() + nr.size()),
+                       std::vector<int>(ii.data(), ii.data() + ii.size()),
+                       std::vector<double>(ir.data(), ir.data() + ir.size()));
+          },
+          nb::arg("node_ints"), nb::arg("node_reals"), nb::arg("instance_ints"),
+          nb::arg("instance_reals"),
+          "Install an analytic geometry scene from core's flat encoding (3 ints + 16 reals per "
+          "node, 2 ints + 17 reals per instance). Geometry is in CELL UNITS on the GLOBAL inner "
+          "grid. The scene is replicated on every rank, so scene-derived geometry needs no "
+          "communication and -- unlike set_exact_crossings -- is NOT single-rank only. "
+          "Periodicity is the caller's: instantiate images, nothing min-images for you.")
+      .def("set_solid_from_scene", &S::setSolidFromScene, nb::arg("cutcell_pressure") = true,
+           "Sample the installed scene onto this rank's inner grid and install it as the solid, "
+           "entirely on device (no nx*ny*nz float64 host round trip).")
+      .def("set_exact_crossings_from_scene", &S::setExactCrossingsFromScene,
+           "Compute EXACT wall crossings from the installed scene, on device, on every rank -- the "
+           "in-solver replacement for set_exact_crossings + scripts/exact_apertures_spheres.py. "
+           "Bisection, not Newton: only SIGN correctness is guaranteed for bound-only leaves.")
+      .def("has_scene", &S::hasScene)
+      .def(
           "set_solid",
           [](S& s, nb::ndarray<double, nb::f_contig> sdf, bool cutcell_pressure,
              const std::string& /*pressure_coarse*/) {
