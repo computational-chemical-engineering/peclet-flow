@@ -427,6 +427,33 @@ static void bind_solver(nb::module_& m, const char* name) {
            "measured cost is ~65% momentum/IBM stencils, ~35% pressure/MG, scene sampling in the "
            "noise. Cells uncovered by the motion inherit zero, not an extrapolated fluid value.")
       .def(
+          "hydro_force_torque_reaction",
+          [](S& s) {
+            std::vector<double> v = s.hydroForceTorqueReaction();
+            const std::size_t n = v.size() / 6;
+            return peclet::core::python::vector_to_ndarray(
+                std::move(v), {2, n, 3},
+                {static_cast<std::int64_t>(3 * n), 3, 1});
+          },
+          "Hydrodynamic force and torque per scene instance from the DISCRETE REACTION -- the "
+          "momentum the fluid actually lost to each body, assembled from the composed step's "
+          "budget (time term, body force, and the viscous fluxes at u*; the pressure telescopes "
+          "inside each owner region and needs no field). Shape (2, n_instances, 3): [0] force, "
+          "[1] torque about the instance centre. This is the RECOMMENDED coupling force: exactly "
+          "conservative (sum = f * N_fluid-cells at steady state, to solver residual) and as "
+          "accurate as the flow solution it sustains. The traction integral "
+          "(hydro_force_torque) under-reads by a resolution-independent ~29% and remains as a "
+          "diagnostic. Staggered, no advection/porous/variable-properties/domain-BC (v1; refused "
+          "loudly). Atomics: tolerance-reproducible, not bitwise.")
+      .def(
+          "fluid_momentum_cells",
+          [](S& s) {
+            const auto n = s.fluidMomentumCells();
+            return std::array<long, 3>{n[0], n[1], n[2]};
+          },
+          "Unmasked (fluid) staggered momentum cells per component -- the exact discrete datum of "
+          "the reaction identity: at steady state, sum over bodies of F_c = f_c * N_c.")
+      .def(
           "hydro_force_torque",
           [](S& s) {
             std::vector<double> v = s.hydroForceTorque();
@@ -435,11 +462,13 @@ static void bind_solver(nb::module_& m, const char* name) {
                 std::move(v), {4, n, 3},
                 {static_cast<std::int64_t>(3 * n), 3, 1});
           },
-          "Hydrodynamic loads on every scene instance, shape (4, n_instances, 3): [0] force, "
-          "[1] torque about the instance centre, [2] the pressure part of the force, [3] the "
-          "viscous part ([0] == [2] + [3]). The cut-cell surface integral of "
-          "(-p I + mu(grad u + grad u^T)) against the exact aperture wall-area vector. Accumulated "
-          "by atomics, so tolerance-reproducible, not bitwise.")
+          "DIAGNOSTIC ONLY -- use hydro_force_torque_reaction for the coupling force. The "
+          "reconstructed-traction loads, shape (4, n_instances, 3): [0] force, [1] torque about "
+          "the instance centre, [2] the pressure part, [3] the viscous part ([0] == [2] + [3]). "
+          "The cut-cell surface integral of (-p I + mu(grad u + grad u^T)) against the exact "
+          "aperture wall-area vector; its central-difference gradient under-reads the drag by a "
+          "resolution-independent ~29% (measured; see the design note), which is why it is kept "
+          "only to keep that inconsistency visible. Atomics: tolerance-reproducible, not bitwise.")
       .def("wall_area_probe", &S::wallAreaProbe,
            "Diagnostic: [sum_c x_c*A_wall_x, sum_c y_c*A_wall_y, sum_c z_c*A_wall_z] over all cut "
            "cells. Must equal -V_solid componentwise if the aperture wall-area vectors are right, "

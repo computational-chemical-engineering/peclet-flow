@@ -1601,6 +1601,21 @@ class Solver {
       tPredictor_ += tp1 - tp0;
       for (int c = 0; c < 3; ++c)
         smoothComp(c);  // per-component IBM implicit-diffusion solve
+      // Route (b): stash u* for the reaction-force budget. Every Picard iteration overwrites, so
+      // what survives is the LAST momentum solve -- the one whose viscous fluxes, together with
+      // the last projection, actually produced u^{n+1} (the time base is u^n for every iteration,
+      // so earlier iterations leave no trace in the final state except through P_). A pure
+      // deep_copy: no numerical effect on any solve.
+      if constexpr (!Grid::collocated) {
+        if (hasScene_) {
+          for (int c = 0; c < 3; ++c) {
+            if (uStar_[c].extent(0) != n_)
+              uStar_[c] = CCField("uStar", n_);
+            Kokkos::deep_copy(uStar_[c], C[c].u);
+          }
+          haveUStar_ = true;
+        }
+      }
       const double tp2 = phaseTick();
       tMomentum_ += tp2 - tp1;
       // The porous (volume-averaged) projection lives entirely on the cut-cell operator rails
@@ -2175,6 +2190,162 @@ class Solver {
       std::vector<double> g(out.size(), 0.0);
       MPI_Allreduce(out.data(), g.data(), (int)out.size(), MPI_DOUBLE, MPI_SUM, comm_);
       out.swap(g);
+    }
+#endif
+    return out;
+  }
+
+  /// Hydrodynamic force and torque per instance from the DISCRETE REACTION (route (b) of the
+  /// design note's OPEN FOR REVIEW 1) -- the recommended source of the resolved CFD-DEM feedback.
+  /// Returns two 3*nInst blocks: force, torque about the instance centre.
+  ///
+  /// THE BUDGET. The composed step at any unmasked staggered face i is, exactly,
+  ///     rho/dt (u^{n+1}_i - u^n_i) = sum_nb mu (u*_nb - u*_i) + f_c - grad(pi)_i + F_wall_i
+  /// with u* the last momentum solve's iterate (the implicit viscous operator acted on u*, which
+  /// is why it is stashed) and pi the effective pressure (P^n predictor + (rho/dt) phi). Define
+  ///     R_i = rho/dt (u_i - u^n_i) - f_c - sum_{FLUID nbrs} mu (u*_nb - u*_i)
+  /// -- deliberately NOT subtracting the pressure. Then R_i = -grad(pi)_i + F_wall_i, and summed
+  /// over the owner region of a body the grad(pi) parts TELESCOPE: interior faces cancel
+  /// pairwise, leaving exactly the region-boundary pressure flux plus the wall pressure force --
+  /// the control-volume budget, with pressure counted once and in the right place without this
+  /// function ever reading a pressure field. F_body(k) = -sum_{owner k} R_i.
+  ///
+  /// WHY THIS IS THE ACCURATE FORCE, not just the conservative one: the modified cut rows do not
+  /// derive from symmetric fluxes, so ANY reconstruction of "the traction" is a choice; the
+  /// reaction is the momentum the fluid actually lost, and its accuracy is the (independently
+  /// validated, 2nd-order) accuracy of the flow solution it sustains. The traction integral
+  /// (hydroForceTorque above) under-reads by a resolution-INDEPENDENT ~29% and is kept as a
+  /// diagnostic only.
+  ///
+  /// EXACTNESS: at steady state, sum over bodies = f_c * N_fluid-momentum-cells per component, to
+  /// the momentum solver's residual (the only approximation in the budget; everything else is
+  /// identity). Per-body attribution is the control-volume one over the owner partition; the
+  /// region-boundary fluxes are counted symmetrically, so they cancel exactly in the total.
+  ///
+  /// v1 SCOPE, refused loudly: staggered only; advection, porous, variable properties, domain
+  /// BCs, ghost projection, drag diagonal, fluid-only star modes all put terms in the update this
+  /// budget does not carry, and a missing term here is a silently mis-attributed force.
+  std::vector<double> hydroForceTorqueReaction() {
+    std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 6, 0.0);
+    if (!hasScene_ || nInst_ <= 0)
+      return out;
+    if constexpr (Grid::collocated)
+      throw std::runtime_error("hydro_force_torque_reaction: staggered only (v1)");
+    if (advect_ || porous_ || varRho_ || varProps_ || hasBc_ || ghostProjection_ || hasDrag_ ||
+        fluidOnlyMode_ != 0)
+      throw std::runtime_error(
+          "hydro_force_torque_reaction: advection / porous / variable-properties / domain-BC / "
+          "ghost-projection / drag / star modes put momentum terms in the step that this budget "
+          "does not carry (v1) -- a missing term is a silently mis-attributed force");
+    if (!haveUStar_)
+      throw std::runtime_error("hydro_force_torque_reaction: call step() first (u* is stashed "
+                               "during the step)");
+    // u* ghosts: refresh with the standard fill (periodic wrap single-rank, halo exchange under
+    // MPI; hasBc_ is refused above so no BC is imposed). The audit's viscous term reads +-1.
+    for (int c = 0; c < 3; ++c)
+      fillVelGhostsTo(uStar_[c], c, 0);
+    const std::size_t m = (std::size_t)nInst_ * 3;
+    Kokkos::View<double*, CCMem> Fd("reactF", m), Td("reactT", m);
+    Kokkos::deep_copy(Fd, 0.0);
+    Kokkos::deep_copy(Td, 0.0);
+    CCExec space;
+    const C3 e = e_, og = og_;
+    const double idt = rho_ / dt_, mu = mu_;
+    const auto q = sceneQ_->view();
+    auto cen = instCenD_;
+    const auto box = q.box;
+    const bool hasFb = hasCellForce_;
+    for (int c = 0; c < 3; ++c) {
+      CCConst un = CCConst(old_[c]), uc = CCConst(C[c].u), us = CCConst(uStar_[c]),
+              mk = CCConst(C[c].mask);
+      CCConst fb = hasFb ? CCConst(cellForce_[c]) : CCConst();
+      const double fc = f_[c];
+      const auto po = Grid::offset(c);
+      const double offx = po.x, offy = po.y, offz = po.z;
+      const int cc = c;
+      Kokkos::parallel_for(
+          "peclet::flow::hydro_reaction",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
+                                                         {e.x - G, e.y - G, e.z - G}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long st[3] = {1, e.x, (long)e.x * e.y};
+            const long i = (long)x + (long)y * st[1] + (long)z * st[2];
+            if (mk(i) > 0.5)
+              return;  // solid staggered point: no fluid momentum here
+            double R = idt * (uc(i) - un(i)) - fc - (fb.data() ? fb(i) : 0.0);
+            for (int a = 0; a < 3; ++a) {
+              const long jp = i + st[a], jm = i - st[a];
+              if (mk(jp) <= 0.5)
+                R -= mu * (us(jp) - us(i));
+              if (mk(jm) <= 0.5)
+                R -= mu * (us(jm) - us(i));
+            }
+            const peclet::core::Vec3<double> p{(double)(x - G + og.x) + offx,
+                                              (double)(y - G + og.y) + offy,
+                                              (double)(z - G + og.z) + offz};
+            const int oi = q.owner(p);
+            if (oi < 0)
+              return;
+            const double F = -R;  // force ON the body = minus the wall force on the fluid
+            Kokkos::atomic_add(&Fd(3 * oi + cc), F);
+            const peclet::core::Vec3<double> r = peclet::core::geom::minImage(
+                peclet::core::Vec3<double>{p.x - cen(3 * oi + 0), p.y - cen(3 * oi + 1),
+                                           p.z - cen(3 * oi + 2)},
+                box);
+            // torque of the scalar force F e_c at lever r: r x (F e_c)
+            if (cc == 0) {
+              Kokkos::atomic_add(&Td(3 * oi + 1), r.z * F);
+              Kokkos::atomic_add(&Td(3 * oi + 2), -r.y * F);
+            } else if (cc == 1) {
+              Kokkos::atomic_add(&Td(3 * oi + 0), -r.z * F);
+              Kokkos::atomic_add(&Td(3 * oi + 2), r.x * F);
+            } else {
+              Kokkos::atomic_add(&Td(3 * oi + 0), r.y * F);
+              Kokkos::atomic_add(&Td(3 * oi + 1), -r.x * F);
+            }
+          });
+    }
+    space.fence();
+    using HostV = Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+    Kokkos::deep_copy(HostV(out.data(), m), Fd);
+    Kokkos::deep_copy(HostV(out.data() + m, m), Td);
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      std::vector<double> g(out.size(), 0.0);
+      MPI_Allreduce(out.data(), g.data(), (int)out.size(), MPI_DOUBLE, MPI_SUM, comm_);
+      out.swap(g);
+    }
+#endif
+    return out;
+  }
+
+  /// The number of unmasked (fluid) staggered momentum cells per component -- the exact discrete
+  /// datum the reaction identity is stated against: at steady state, sum_bodies F_c = f_c * N_c.
+  std::array<long, 3> fluidMomentumCells() {
+    std::array<long, 3> out{0, 0, 0};
+    CCExec space;
+    const C3 e = e_;
+    for (int c = 0; c < 3; ++c) {
+      CCConst mk = CCConst(C[c].mask);
+      long n = 0;
+      Kokkos::parallel_reduce(
+          "peclet::flow::fluid_cells",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
+                                                         {e.x - G, e.y - G, e.z - G}),
+          KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            if (mk(i) <= 0.5)
+              ++acc;
+          },
+          n);
+      out[(std::size_t)c] = n;
+    }
+    space.fence();
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      std::array<long, 3> g{0, 0, 0};
+      MPI_Allreduce(out.data(), g.data(), 3, MPI_LONG, MPI_SUM, comm_);
+      out = g;
     }
 #endif
     return out;
@@ -4360,6 +4531,11 @@ class Solver {
   bool hasMotion_ = false;
   CCField uBc_[3];     // R2: wall velocity component c AT component c's staggered points
   CCField uwCell_[3];  // R3: the whole wall velocity at CELL CENTRES (the wall-flux divergence)
+  // Route (b) instrumentation: u* = the LAST momentum solve's solution, stashed (ghosts included,
+  // exactly as the smoother left them) before the projection overwrites it. The reaction force
+  // needs the viscous fluxes AT u* -- the implicit solve acted on u*, not on the projected u.
+  CCField uStar_[3];
+  bool haveUStar_ = false;
   bool wallFluxDiv_ = true;  // rung 3 on (correct physics); off only to exhibit its absence
   // Rung 4: the scene is KEPT (not just its device query), so an instance transform can be updated
   // and the whole geometry re-derived without the caller re-encoding anything.
