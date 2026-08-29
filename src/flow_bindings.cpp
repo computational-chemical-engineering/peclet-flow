@@ -443,8 +443,9 @@ static void bind_solver(nb::module_& m, const char* name) {
           "conservative (sum = f * N_fluid-cells at steady state, to solver residual) and as "
           "accurate as the flow solution it sustains. The traction integral "
           "(hydro_force_torque) under-reads by a resolution-independent ~29% and remains as a "
-          "diagnostic. Staggered, no advection/porous/variable-properties/domain-BC (v1; refused "
-          "loudly). Atomics: tolerance-reproducible, not bitwise.")
+          "diagnostic. Staggered; EXPLICIT advection is carried (the stashed advective RHS term "
+          "is subtracted); implicit advection / porous / variable properties / domain BCs are "
+          "refused loudly (v2). Atomics: tolerance-reproducible, not bitwise.")
       .def(
           "fluid_momentum_cells",
           [](S& s) {
@@ -469,6 +470,19 @@ static void bind_solver(nb::module_& m, const char* name) {
           "aperture wall-area vector; its central-difference gradient under-reads the drag by a "
           "resolution-independent ~29% (measured; see the design note), which is why it is kept "
           "only to keep that inconsistency visible. Atomics: tolerance-reproducible, not bitwise.")
+      .def(
+          "reaction_budget_terms",
+          [](S& s) {
+            std::vector<double> v = s.reactionBudgetTerms();
+            return peclet::core::python::vector_to_ndarray(std::move(v), {2, std::size_t(3)},
+                                                           {3, 1});
+          },
+          "Diagnostic decomposition of the reaction identity, shape (2, 3): [0] the unsteady sum "
+          "sum_i (rho/dt)(u_i - u^n_i) and [1] the advective sum sum_i A_i, both over the FLUID "
+          "momentum cells of each component. The full discrete identity is sum_bodies F_c = "
+          "f_c*N_c + sum fb + [1]_c - [0]_c; the Stokes form drops both because they vanish at "
+          "steady state with advection off. sum_i A_i is the advection operator's net momentum "
+          "flux through the cut walls -- an O(h) property of that operator, not of the budget.")
       .def("wall_area_probe", &S::wallAreaProbe,
            "Diagnostic: [sum_c x_c*A_wall_x, sum_c y_c*A_wall_y, sum_c z_c*A_wall_z] over all cut "
            "cells. Must equal -V_solid componentwise if the aperture wall-area vectors are right, "

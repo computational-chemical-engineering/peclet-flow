@@ -2222,24 +2222,36 @@ class Solver {
   /// identity). Per-body attribution is the control-volume one over the owner partition; the
   /// region-boundary fluxes are counted symmetrically, so they cancel exactly in the total.
   ///
-  /// v1 SCOPE, refused loudly: staggered only; advection, porous, variable properties, domain
-  /// BCs, ghost projection, drag diagonal, fluid-only star modes all put terms in the update this
-  /// budget does not carry, and a missing term here is a silently mis-attributed force.
+  /// ADVECTION (R0). The explicit high-order advection adds one more RHS term to the same
+  /// composed step,  +A_i  with  A_i = rho*(FOU_i - HO_i)  exactly as buildRhs assembled it, so
+  /// the budget subtracts A_i alongside f_c. It is STASHED rather than recomputed: recomputing
+  /// would read the projected u^{n+1} while the RHS used the Picard iterate u^k, and the two
+  /// differ by the projection -- a silent O(1) attribution error. The IMPLICIT upwind path
+  /// (implicit_fou / the domain-BC stencil path) instead folds advection into the MATRIX, so the
+  /// reaction is no longer of this form; it stays refused.
+  ///
+  /// v2 SCOPE, refused loudly: staggered only; implicit advection, porous, variable properties,
+  /// domain BCs, ghost projection, drag diagonal, fluid-only star modes all put terms in the
+  /// update this budget does not carry, and a missing term here is a silently mis-attributed
+  /// force.
   std::vector<double> hydroForceTorqueReaction() {
     std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 6, 0.0);
     if (!hasScene_ || nInst_ <= 0)
       return out;
     if constexpr (Grid::collocated)
       throw std::runtime_error("hydro_force_torque_reaction: staggered only (v1)");
-    if (advect_ || porous_ || varRho_ || varProps_ || hasBc_ || ghostProjection_ || hasDrag_ ||
-        fluidOnlyMode_ != 0)
+    if (implicitAdv() || porous_ || varRho_ || varProps_ || hasBc_ || ghostProjection_ ||
+        hasDrag_ || fluidOnlyMode_ != 0)
       throw std::runtime_error(
-          "hydro_force_torque_reaction: advection / porous / variable-properties / domain-BC / "
-          "ghost-projection / drag / star modes put momentum terms in the step that this budget "
-          "does not carry (v1) -- a missing term is a silently mis-attributed force");
+          "hydro_force_torque_reaction: implicit advection / porous / variable-properties / "
+          "domain-BC / ghost-projection / drag / star modes put momentum terms in the step that "
+          "this budget does not carry (v2) -- a missing term is a silently mis-attributed force");
     if (!haveUStar_)
       throw std::runtime_error("hydro_force_torque_reaction: call step() first (u* is stashed "
                                "during the step)");
+    if (advect_ && (!haveAdvRhs_ || advRhs_[0].extent(0) != n_))
+      throw std::runtime_error("hydro_force_torque_reaction: the advective RHS term was not "
+                               "stashed -- set_advection was enabled after the last step()");
     // u* ghosts: refresh with the standard fill (periodic wrap single-rank, halo exchange under
     // MPI; hasBc_ is refused above so no BC is imposed). The audit's viscous term reads +-1.
     for (int c = 0; c < 3; ++c)
@@ -2259,6 +2271,7 @@ class Solver {
       CCConst un = CCConst(old_[c]), uc = CCConst(C[c].u), us = CCConst(uStar_[c]),
               mk = CCConst(C[c].mask);
       CCConst fb = hasFb ? CCConst(cellForce_[c]) : CCConst();
+      CCConst av = advect_ ? CCConst(advRhs_[c]) : CCConst();
       const double fc = f_[c];
       const auto po = Grid::offset(c);
       const double offx = po.x, offy = po.y, offz = po.z;
@@ -2272,7 +2285,8 @@ class Solver {
             const long i = (long)x + (long)y * st[1] + (long)z * st[2];
             if (mk(i) > 0.5)
               return;  // solid staggered point: no fluid momentum here
-            double R = idt * (uc(i) - un(i)) - fc - (fb.data() ? fb(i) : 0.0);
+            double R = idt * (uc(i) - un(i)) - fc - (fb.data() ? fb(i) : 0.0) -
+                       (av.data() ? av(i) : 0.0);
             for (int a = 0; a < 3; ++a) {
               const long jp = i + st[a], jm = i - st[a];
               if (mk(jp) <= 0.5)
@@ -2346,6 +2360,55 @@ class Solver {
       std::array<long, 3> g{0, 0, 0};
       MPI_Allreduce(out.data(), g.data(), 3, MPI_LONG, MPI_SUM, comm_);
       out = g;
+    }
+#endif
+    return out;
+  }
+
+  /// R0 DECOMPOSITION PROBE. The reaction identity in its full discrete form is
+  ///     sum_bodies F_c  =  f_c*N_c + sum_i fb_i + sum_i A_i  -  sum_i (rho/dt)(u_i - u^n_i)
+  /// (every RHS term of the composed step, summed over the FLUID momentum cells; the viscous
+  /// fluxes and grad(pi) telescope to zero over the whole fluid region). The Stokes gate drops the
+  /// last two terms because they vanish at steady state and A is absent; with advection on they do
+  /// not, so this returns them and the identity can be checked term by term instead of being
+  /// quietly absorbed. Returns 6 doubles: the three unsteady sums, then the three advective sums.
+  ///
+  /// sum_i A_i is NOT zero in general and that is a property of the ADVECTION OPERATOR, not of the
+  /// budget: the flux form telescopes over the interior, leaving the advective momentum flux
+  /// through the fluid region's boundary, which at a cut wall is reconstructed from stencils that
+  /// read the masked (wall-velocity) value one or two cells inside the solid. It is an O(h) wall
+  /// term and converges away under refinement -- measure it, do not assume it.
+  std::vector<double> reactionBudgetTerms() {
+    std::vector<double> out(6, 0.0);
+    CCExec space;
+    const C3 e = e_;
+    const double idt = rho_ / dt_;
+    const bool haveA = advect_ && haveAdvRhs_ && advRhs_[0].extent(0) == n_;
+    for (int c = 0; c < 3; ++c) {
+      CCConst un = CCConst(old_[c]), uc = CCConst(C[c].u), mk = CCConst(C[c].mask);
+      CCConst av = haveA ? CCConst(advRhs_[c]) : CCConst();
+      double su = 0.0, sa = 0.0;
+      Kokkos::parallel_reduce(
+          "peclet::flow::budget_terms",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
+                                                         {e.x - G, e.y - G, e.z - G}),
+          KOKKOS_LAMBDA(int x, int y, int z, double& au, double& aa) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            if (mk(i) > 0.5)
+              return;
+            au += idt * (uc(i) - un(i));
+            aa += av.data() ? av(i) : 0.0;
+          },
+          su, sa);
+      out[(std::size_t)c] = su;
+      out[(std::size_t)c + 3] = sa;
+    }
+    space.fence();
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      std::vector<double> g(6, 0.0);
+      MPI_Allreduce(out.data(), g.data(), 6, MPI_DOUBLE, MPI_SUM, comm_);
+      out.swap(g);
     }
 #endif
     return out;
@@ -2574,6 +2637,18 @@ class Solver {
         });
   }
 
+  /// R0 helper: allocate (once) and arm the per-component advective-term stash the reaction-force
+  /// budget consumes. Returns whether the RHS kernel should write it. Off (and untouched) unless a
+  /// scene is installed on the staggered grid with explicit advection on, so every other path is
+  /// byte-identical and pays no memory.
+  bool ensureAdvStash(int c, bool adv) {
+    const bool want = !Grid::collocated && hasScene_ && adv;
+    if (want && advRhs_[c].extent(0) != n_)
+      advRhs_[c] = CCField("advRhs", n_);
+    haveAdvRhs_ = want;
+    return want;
+  }
+
   void buildRhs(int c) {
     CCExec space;
     const double idiag = rho_ / dt_, fc = f_[c], rho = rho_;
@@ -2596,6 +2671,11 @@ class Solver {
         deferredCorr_;           // deferred correction: keep (HO - FOU) explicit in the RHS
                                  // (implicit on the domain-BC path by default, opt-in elsewhere)
     const int sch = advScheme_;  // 0 = SOU (default), 1 = Koren TVD
+    // R0: stash the explicit advective term for the reaction-force budget (staggered scenes only).
+    // The LAST Picard iteration overwrites, matching uStar_'s convention -- that is the RHS the
+    // final momentum solve actually saw.
+    const bool sa = ensureAdvStash(c, adv);
+    CCField ar = advRhs_[c];
     // Mode-2 wall-aware pressure force (collocated): -grad(P) = the TRANSPOSE of the wall-aware
     // cell->face constraint interpolation, precomputed per component (the plain path's central
     // difference is the transpose of the plain 1/2-1/2 average, so this keeps the momentum/
@@ -2678,6 +2758,8 @@ class Solver {
             if (ifou)
               aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa);
           }
+          if (sa)
+            ar(i) = rho * (aF - aK);
           // incremental predictor's -grad(P^n): central-difference cell gradient on the collocated
           // grid (or the wall-aware transpose gradient, mode 2), one-sided face gradient (P at the
           // high cell of the staggered face) on the staggered grid.
@@ -2716,6 +2798,8 @@ class Solver {
                bc = hasBc_ && !bcStencilPath();
     const bool ifou = implicitAdv() && deferredCorr_;
     const int sch = advScheme_;
+    const bool sa = ensureAdvStash(c, adv);  // R0: see buildRhs
+    CCField ar = advRhs_[c];
     // Porous advection-form compensation (+rho*u_f*div(u)_f): see the step() comment.
     const bool pc = porous_ && advect_;
     CCConst dv = CCConst(divAdv_);
@@ -2759,6 +2843,8 @@ class Solver {
             if (ifou)
               aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa);
           }
+          if (sa)
+            ar(i) = rho * (aF - aK);
           const double gp = !incr ? 0.0
                             : Grid::collocated
                                 ? ((tg || gg || ag) ? gpw(i)
@@ -4536,6 +4622,12 @@ class Solver {
   // needs the viscous fluxes AT u* -- the implicit solve acted on u*, not on the projected u.
   CCField uStar_[3];
   bool haveUStar_ = false;
+  // R0: the explicit advective term EXACTLY as the last Picard RHS used it, per component and per
+  // staggered cell, in the equation's own units (rho*(aF - aK), i.e. before the rscale descale).
+  // Written by buildRhs / buildRhsForced when a scene is installed and advection is on; consumed
+  // by hydroForceTorqueReaction, which must subtract every non-pressure, non-wall RHS term.
+  CCField advRhs_[3];
+  bool haveAdvRhs_ = false;
   bool wallFluxDiv_ = true;  // rung 3 on (correct physics); off only to exhibit its absence
   // Rung 4: the scene is KEPT (not just its device query), so an instance transform can be updated
   // and the whole geometry re-derived without the caller re-encoding anything.
