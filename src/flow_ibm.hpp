@@ -2038,6 +2038,188 @@ class Solver {
     space.fence();
   }
 
+  /// Hydrodynamic force and torque on each scene instance (Layer 4 rung 2) -- the resolved
+  /// CFD-DEM feedback. Returns four 3*nInst blocks: force, torque, and the force split into its
+  /// PRESSURE and VISCOUS parts (force == pressure + viscous), because the two carry different
+  /// discretisation error and a deficit that sits in one of them localises itself.
+  ///
+  /// THE SURFACE INTEGRAL, cut cell by cut cell. Over the wall patch inside a cell,
+  ///     sigma = -p I + mu (grad u + grad u^T),      dF_body = -(sigma . A_wall)
+  /// with A_wall = -(oE-oW, oN-oS, oT-oB) the FLUID-outward wall area vector from the aperture
+  /// identity (the same one rung 3's wall flux uses). The minus sign converts it to the BODY's
+  /// outward normal, which is the one the traction on the body is taken against. Cells with
+  /// A_wall = 0 -- fully open or fully solid -- contribute nothing, so no cut-cell list is needed:
+  /// the geometry selects the surface.
+  ///
+  /// Torque is about the owning instance's centre with the lever arm MIN-IMAGED, for the same
+  /// reason instanceVelocity min-images it: a body can own wall cells across a periodic seam.
+  ///
+  /// NOT bit-reproducible. The accumulation is by atomics over an unordered cell traversal, like
+  /// the coupling deposits; expect tolerance-level run-to-run variation, not bitwise equality.
+  ///
+  /// ACCURACY. Cut-cell force integration is O(h)-noisy: the aperture differences are exact but
+  /// the traction is evaluated from a cell-centred pressure and a central-differenced velocity
+  /// gradient whose stencil reaches into solid cells near the wall. Measure it (the Zick-Homsy
+  /// self-consistency gate does) rather than assuming a tolerance.
+  std::vector<double> hydroForceTorque() {
+    std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 12, 0.0);
+    if (!hasScene_ || nInst_ <= 0 || cutOwner_.extent(0) != (std::size_t)nx_ * ny_ * nz_)
+      return out;
+    const std::size_t m = (std::size_t)nInst_ * 3;
+    Kokkos::View<double*, CCMem> Fd("hydroF", m), Td("hydroT", m), Pd("hydroFp", m),
+        Vd("hydroFv", m);
+    Kokkos::deep_copy(Fd, 0.0);
+    Kokkos::deep_copy(Td, 0.0);
+    Kokkos::deep_copy(Pd, 0.0);
+    Kokkos::deep_copy(Vd, 0.0);
+    CCExec space;
+    const C3 e = e_, og = og_;
+    const int nx = nx_, ny = ny_;
+    const double mu = mu_;
+    CCConst oxv = CCConst(ox_), oyv = CCConst(oy_), ozv = CCConst(oz_);
+    CCConst U = CCConst(C[0].u), Vv = CCConst(C[1].u), W = CCConst(C[2].u);
+    CCConst Pf = CCConst(P_);
+    CCConst sd = CCConst(sdf_);
+    const bool haveWallVel = (uwCell_[0].extent(0) == n_);
+    CCConst wcx = haveWallVel ? CCConst(uwCell_[0]) : CCConst();
+    CCConst wcy = haveWallVel ? CCConst(uwCell_[1]) : CCConst();
+    CCConst wcz = haveWallVel ? CCConst(uwCell_[2]) : CCConst();
+
+    auto own = cutOwner_;
+    auto cen = instCenD_;
+    const auto box = sceneQ_->view().box;
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "peclet::flow::hydro_force", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long st[3] = {1, e.x, (long)e.x * e.y};
+          const long i = (long)x + (long)y * st[1] + (long)z * st[2];
+          const double A[3] = {-(oxv(i + st[0]) - oxv(i)), -(oyv(i + st[1]) - oyv(i)),
+                               -(ozv(i + st[2]) - ozv(i))};
+          if (A[0] == 0.0 && A[1] == 0.0 && A[2] == 0.0)
+            return;  // no wall passes through this cell
+          const int oi = own((std::size_t)(x - G) + (std::size_t)(y - G) * nx +
+                             (std::size_t)(z - G) * (std::size_t)nx * ny);
+          if (oi < 0)
+            return;
+          // Cell-centred velocity from the staggered faces.
+          //
+          // A SOLID CELL STORES A MASKED ZERO, WHICH IS THE MATERIAL VELOCITY ONLY WHEN THE WALL
+          // IS AT REST. Reading it as physical is harmless for static geometry and a sign error
+          // for moving geometry: the stencil then sees a spurious shear of the wall speed over one
+          // cell across the entire surface. Measured on the Galilean pair -- with the velocity
+          // field itself frame-invariant to 7e-7, the integrated force came out +7.08e+01 in the
+          // lab frame and -1.71e+02 in a frame boosted by 0.7, a ratio of -2.42. A resolved
+          // CFD-DEM loop driven by that does not settle, it runs away. Substituting the wall's own
+          // velocity restores frame invariance; with static geometry uwCell_ is empty and this is
+          // bit-identical to the plain expression.
+          auto uc = [&](int a, long c) {
+            if (haveWallVel && sd(c) < 0.0)
+              return a == 0 ? wcx(c) : (a == 1 ? wcy(c) : wcz(c));
+            const CCConst& F = a == 0 ? U : (a == 1 ? Vv : W);
+            return 0.5 * (F(c) + F(c + st[a]));
+          };
+          // PLAIN CENTRAL DIFFERENCE, as the Layer-4 spec prescribes. It spans 2h while the wall
+          // sits a fraction of a cell away, so it under-reads the wall shear -- measured as a
+          // RESOLUTION-INDEPENDENT ~29% drag deficit that lives almost entirely in the viscous
+          // part. The obvious one-sided repair, differencing to the wall over the crossing
+          // distance theta, was TRIED AND IS WORSE: cut cells with theta -> 0 make 1/theta
+          // unbounded and the drag came out 17x too large. That is precisely why the momentum
+          // operator uses a Robust-Scaled reconstruction rather than a raw one-sided difference,
+          // and it is why a correct wall-aware traction has to come from that machinery (or from
+          // the discrete reaction the operator already applies) rather than from a patch here.
+          // See the design note's OPEN FOR REVIEW.
+          double gu[3][3];
+          for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+              gu[a][b] = 0.5 * (uc(a, i + st[b]) - uc(a, i - st[b]));
+          const double p = Pf(i);
+          double dF[3], dFp[3], dFv[3];
+          for (int a = 0; a < 3; ++a) {
+            // A_wall is fluid-outward; the traction on the BODY takes -A_wall. Pressure and
+            // viscous parts are kept apart because they fail differently: the pressure term reads
+            // one cell-centred value, while the viscous term differences a velocity whose stencil
+            // reaches into solid cells -- so a deficit that lives entirely in one of them says
+            // immediately which.
+            dFp[a] = p * A[a];
+            double t = 0.0;
+            for (int b = 0; b < 3; ++b)
+              t += mu * (gu[a][b] + gu[b][a]) * A[b];
+            dFv[a] = -t;
+            dF[a] = dFp[a] + dFv[a];
+          }
+          const peclet::core::Vec3<double> r = peclet::core::geom::minImage(
+              peclet::core::Vec3<double>{(double)(x - G + og.x) - cen[3 * oi + 0],
+                                         (double)(y - G + og.y) - cen[3 * oi + 1],
+                                         (double)(z - G + og.z) - cen[3 * oi + 2]},
+              box);
+          for (int a = 0; a < 3; ++a) {
+            Kokkos::atomic_add(&Fd(3 * oi + a), dF[a]);
+            Kokkos::atomic_add(&Pd(3 * oi + a), dFp[a]);
+            Kokkos::atomic_add(&Vd(3 * oi + a), dFv[a]);
+          }
+          Kokkos::atomic_add(&Td(3 * oi + 0), r.y * dF[2] - r.z * dF[1]);
+          Kokkos::atomic_add(&Td(3 * oi + 1), r.z * dF[0] - r.x * dF[2]);
+          Kokkos::atomic_add(&Td(3 * oi + 2), r.x * dF[1] - r.y * dF[0]);
+        });
+    space.fence();
+    using HostV = Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+    Kokkos::deep_copy(HostV(out.data(), m), Fd);
+    Kokkos::deep_copy(HostV(out.data() + m, m), Td);
+    Kokkos::deep_copy(HostV(out.data() + 2 * m, m), Pd);
+    Kokkos::deep_copy(HostV(out.data() + 3 * m, m), Vd);
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      // Instances are REPLICATED, so each rank integrates only the wall cells inside its own
+      // block; the body's total is the sum over ranks.
+      std::vector<double> g(out.size(), 0.0);
+      MPI_Allreduce(out.data(), g.data(), (int)out.size(), MPI_DOUBLE, MPI_SUM, comm_);
+      out.swap(g);
+    }
+#endif
+    return out;
+  }
+
+  /// A_wall EXACTNESS PROBE (diagnostic for the Layer-4 force integral). For any smooth field q,
+  ///     sum_cells q(x_c) * A_wall,cell  ->  integral over the wall of q n_fluid dA
+  /// and taking q = x_a turns that, by the divergence theorem applied to the SOLID interior, into
+  /// exactly -V_solid along axis a and 0 on the others. So this returns
+  ///     [ sum_c x_c*Ax , sum_c y_c*Ay , sum_c z_c*Az ]  (per axis, summed over all instances)
+  /// which must equal -V_solid componentwise if the aperture wall-area vectors are right. It
+  /// isolates the GEOMETRY from the traction: a force deficit that shows up here is A_wall's, and
+  /// one that does not is the pressure / velocity-gradient reconstruction's.
+  std::array<double, 3> wallAreaProbe() {
+    std::array<double, 3> out{0, 0, 0};
+    if (!hasScene_)
+      return out;
+    CCExec space;
+    const C3 e = e_, og = og_;
+    CCConst oxv = CCConst(ox_), oyv = CCConst(oy_), ozv = CCConst(oz_);
+    double sx = 0, sy = 0, sz = 0;
+    Kokkos::parallel_reduce(
+        "peclet::flow::wall_area_probe",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& ax, double& ay, double& az) {
+          const long st[3] = {1, e.x, (long)e.x * e.y};
+          const long i = (long)x + (long)y * st[1] + (long)z * st[2];
+          ax += (double)(x - G + og.x) * -(oxv(i + st[0]) - oxv(i));
+          ay += (double)(y - G + og.y) * -(oyv(i + st[1]) - oyv(i));
+          az += (double)(z - G + og.z) * -(ozv(i + st[2]) - ozv(i));
+        },
+        sx, sy, sz);
+    space.fence();
+    out = {sx, sy, sz};
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      std::array<double, 3> g{0, 0, 0};
+      MPI_Allreduce(out.data(), g.data(), 3, MPI_DOUBLE, MPI_SUM, comm_);
+      out = g;
+    }
+#endif
+    return out;
+  }
+
   /// Net wall flux this rank injects, sum over inner cells of u_w . A_wall -- the compatibility
   /// datum of the singular pressure problem. Exactly zero for a translating body in a periodic
   /// box (the aperture differences telescope); small but nonzero for rotation and for a body

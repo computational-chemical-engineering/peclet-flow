@@ -426,6 +426,24 @@ static void bind_solver(nb::module_& m, const char* name) {
            "PRESERVED across the rebuild (set_solid zeroes them by design). Full rebuild: the "
            "measured cost is ~65% momentum/IBM stencils, ~35% pressure/MG, scene sampling in the "
            "noise. Cells uncovered by the motion inherit zero, not an extrapolated fluid value.")
+      .def(
+          "hydro_force_torque",
+          [](S& s) {
+            std::vector<double> v = s.hydroForceTorque();
+            const std::size_t n = v.size() / 12;
+            return peclet::core::python::vector_to_ndarray(
+                std::move(v), {4, n, 3},
+                {static_cast<std::int64_t>(3 * n), 3, 1});
+          },
+          "Hydrodynamic loads on every scene instance, shape (4, n_instances, 3): [0] force, "
+          "[1] torque about the instance centre, [2] the pressure part of the force, [3] the "
+          "viscous part ([0] == [2] + [3]). The cut-cell surface integral of "
+          "(-p I + mu(grad u + grad u^T)) against the exact aperture wall-area vector. Accumulated "
+          "by atomics, so tolerance-reproducible, not bitwise.")
+      .def("wall_area_probe", &S::wallAreaProbe,
+           "Diagnostic: [sum_c x_c*A_wall_x, sum_c y_c*A_wall_y, sum_c z_c*A_wall_z] over all cut "
+           "cells. Must equal -V_solid componentwise if the aperture wall-area vectors are right, "
+           "so it separates a force-integral error in the GEOMETRY from one in the traction.")
       .def("wall_flux_imbalance", &S::wallFluxImbalance,
            "Sum over cells of u_wall . A_wall -- the compatibility datum of the singular pressure "
            "problem. Exactly zero for a translating body in a periodic box; small but nonzero for "
