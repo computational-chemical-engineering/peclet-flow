@@ -281,14 +281,21 @@ inline void ibmBuildDiffusionVar(Kokkos::View<float*, IMem> AC, Kokkos::View<flo
 // ibm_modify_stencil_k): modify A_C / 6 off-diagonals + accumulate the inhomogeneous
 // (wall-velocity) term and store the row scaling. Each cut cell owns a distinct grid index c -> no
 // races.
+// `u_bc` (optional): per-cell wall velocity of THIS component, on the extended block -- the
+// kinematic no-slip datum for MOVING geometry (Layer 3 rung 2). An EMPTY View falls back to the
+// scalar u_bc_val, which is what keeps a static solver bit-identical: the accumulated term is
+// (double)Nbc * 0.0f * vnb either way, the same three roundings in the same order.
 inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*, IMem> AW,
                              Kokkos::View<float*, IMem> AE, Kokkos::View<float*, IMem> AS,
                              Kokkos::View<float*, IMem> AN, Kokkos::View<float*, IMem> AB,
                              Kokkos::View<float*, IMem> AT, Kokkos::View<double*, IMem> a_inhom,
                              Kokkos::View<double*, IMem> rhs_scale, const IbmOverlay& ibm,
-                             int numActive, float u_bc_val) {
+                             int numActive, float u_bc_val,
+                             Kokkos::View<const double*, IMem> u_bc =
+                                 Kokkos::View<const double*, IMem>()) {
   Kokkos::DefaultExecutionSpace space;
   const bool hasInhom = (a_inhom.extent(0) != 0), hasScale = (rhs_scale.extent(0) != 0);
+  const bool hasWallVel = (u_bc.extent(0) != 0);
   Kokkos::parallel_for(
       "peclet::flow::ibm_modify", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, numActive),
       KOKKOS_LAMBDA(int list_idx) {
@@ -297,6 +304,7 @@ inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*,
         const float descale = ibm.D_rescale(list_idx);
         if (hasScale)
           rhs_scale(c) = descale;
+        const double ubc = hasWallVel ? u_bc(c) : (double)u_bc_val;
         const double orig[6] = {AE(c), AW(c), AN(c), AS(c), AT(c), AB(c)};
         double aC = (double)AC(c) * (double)descale;
         double mod[6] = {0, 0, 0, 0, 0, 0};
@@ -306,7 +314,7 @@ inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*,
           const float X = ibm.X_val(list_idx * 6 + k), Nbc = ibm.Nbc_val(list_idx * 6 + k);
           const double vnb = orig[k];
           aC += vnb * K;
-          inhom += (double)Nbc * u_bc_val * vnb;
+          inhom += (double)Nbc * ubc * vnb;
           mod[k] += vnb * ((double)descale * M - 1.0);
           mod[OPP[k]] += vnb * X;
         }

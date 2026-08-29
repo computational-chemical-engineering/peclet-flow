@@ -16,6 +16,8 @@
 /// and inputs are read as flat x-fastest buffers. See tpx/python/ndarray_interop.hpp.
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/array.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -386,6 +388,48 @@ static void bind_solver(nb::module_& m, const char* name) {
            "in-solver replacement for set_exact_crossings + scripts/exact_apertures_spheres.py. "
            "Bisection, not Newton: only SIGN correctness is guaranteed for bound-only leaves.")
       .def("has_scene", &S::hasScene)
+      .def(
+          "set_instance_motion",
+          [](S& s, int i, std::array<double, 3> lin, std::array<double, 3> ang,
+             std::optional<std::array<double, 3>> center) {
+            s.setInstanceMotion(i, lin, ang, center ? center->data() : nullptr);
+          },
+          nb::arg("instance"), nb::arg("lin_vel") = std::array<double, 3>{0.0, 0.0, 0.0},
+          nb::arg("ang_vel") = std::array<double, 3>{0.0, 0.0, 0.0},
+          nb::arg("center") = nb::none(),
+          "Rigid-body motion of one scene instance, in CELL UNITS per time (the scene lives on the "
+          "global inner grid). Any nonzero component switches the solver onto the moving-geometry "
+          "path: the momentum operator's no-slip datum becomes the local wall velocity and the "
+          "cut-cell projection gains the wall's own volume flux. All-zero keeps the static path, "
+          "bit for bit. Staggered grid only in v1 (no ghost projection / porous / variable rho).")
+      .def("set_wall_flux_divergence", &S::setWallFluxDivergence, nb::arg("on"),
+           "Rung 3 on/off (default on = correct physics). Off leaves the moving wall's no-slip "
+           "datum in the momentum operator but drops the wall's own volume flux from the cut-cell "
+           "projection -- the configuration the Galilean gate uses to exhibit the failure the term "
+           "fixes.")
+      .def("has_moving_instance", &S::hasMovingInstance,
+           "True when at least one scene instance carries a nonzero velocity.")
+      .def("scene_instance_count", &S::sceneInstanceCount)
+      .def(
+          "set_instance_transform",
+          [](S& s, int i, std::array<double, 3> t, std::array<double, 4> q) {
+            s.setInstanceTransform(i, t, q);
+          },
+          nb::arg("instance"), nb::arg("translation"),
+          nb::arg("quat") = std::array<double, 4>{0.0, 0.0, 0.0, 1.0},
+          "Move one scene instance (quat as (x,y,z,w)). Takes effect at the next "
+          "rebuild_geometry(): the SDF, the cut-cell overlay, the apertures and the pressure "
+          "operator are all derived from the transforms, so moving one without rebuilding would "
+          "run the solver on stale geometry.")
+      .def("rebuild_geometry", &S::rebuildGeometry,
+           "Re-derive all geometry from the current instance transforms. Velocity and pressure are "
+           "PRESERVED across the rebuild (set_solid zeroes them by design). Full rebuild: the "
+           "measured cost is ~65% momentum/IBM stencils, ~35% pressure/MG, scene sampling in the "
+           "noise. Cells uncovered by the motion inherit zero, not an extrapolated fluid value.")
+      .def("wall_flux_imbalance", &S::wallFluxImbalance,
+           "Sum over cells of u_wall . A_wall -- the compatibility datum of the singular pressure "
+           "problem. Exactly zero for a translating body in a periodic box; small but nonzero for "
+           "rotation. Reported, not corrected.")
       .def(
           "get_cut_owner",
           [](S& s) {
