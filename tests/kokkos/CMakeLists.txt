@@ -61,6 +61,12 @@ target_include_directories(test_vardensity_projection PRIVATE ${CMAKE_CURRENT_SO
 target_link_libraries(test_vardensity_projection PRIVATE Kokkos::kokkos)
 add_test(NAME vardensity_projection COMMAND test_vardensity_projection)
 
+# VoF rung V0: PLIC toolbox (SZ/Lehmann-Gekle plane<->volume, MYC/Youngs normals, slab flux).
+add_executable(test_vof_plic test_vof_plic.cpp)
+target_include_directories(test_vof_plic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+target_link_libraries(test_vof_plic PRIVATE Kokkos::kokkos)
+add_test(NAME vof_plic COMMAND test_vof_plic)
+
 add_executable(test_advection test_advection.cpp)
 target_include_directories(test_advection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_advection PRIVATE Kokkos::kokkos)

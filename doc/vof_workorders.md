@@ -227,3 +227,90 @@ or exchange-per-sweep bug).
 ## Findings log
 
 (append per WO on completion/escalation)
+
+### WO-D (rung V0) — PLIC toolbox — **DONE 2026-08-30**, with two recorded deviations
+
+Delivered: `src/vof/plic.hpp` (`peclet::flow::vof`, container-free `KOKKOS_INLINE_FUNCTION`s only —
+no `View`, no indexing, no halo types, so the V4 promotion to `peclet::core::vof` is a file move) +
+`tests/kokkos/test_vof_plic.cpp` (ctest `vof_plic`, ~0.8 s). Full `tests/kokkos` battery 20/20 green
+on host-openmp AND nvidia-cuda. Sources followed: Scardovelli & Zaleski JCP 164:228 (2000) in the
+branch-reduced form of Lehmann & Gekle *Computation* 10:21 (2022) — their eq. (11)/Listing 1
+(forward) and Listing 4 (the optimized SZ inverse, L1-normalized, which is the convention this WO
+specifies) — plus MYC from Aulisa et al. JCP 225:2301 (2007) via `basilisk/src/myc.h`. **Both cubic
+branches were re-derived from scratch and reproduce Listing 4 term for term**, so the transcription
+is verified rather than trusted.
+
+**Gate results (identical on both backends unless noted).**
+
+| gate | result |
+|---|---|
+| A forward, hand-computed planes (all 5 SZ cases + 6 signed axes) | max \|dV\| **2.2e-16** (< 1e-14) |
+| A forward vs an independent inclusion-exclusion oracle, 192 363 samples | max \|dV\| **1.2e-15** |
+| B round trip `plicVolume(m, plicAlpha(m,V))`, 1e5 samples | max \|dV\| **6.7e-15** (< 1e-13) |
+| B round trip, by family | isotropic 6.7e-15 · near-axis 7.8e-16 · degenerate 2.2e-16 · big-ratio 3.1e-16 |
+| B reverse `alpha -> V -> alpha` (V in [1e-3, 1-1e-3]) | max \|d alpha\| **1.3e-15** |
+| C `faceFluxVolume(f=1)` vs `plicVolume` | **bitwise identical, 60 000/60 000** |
+| C slab additivity (2-way / 7-way partition / axis-aligned closed form) | 1.2e-15 / 2.2e-15 / 5.6e-17 |
+| D1 MYC on exact planes, 1000 orientations | max **1.0151 deg**, mean **0.1001 deg**, 1/1000 over 1 deg (Youngs: max 3.67, mean 1.21) |
+| D2 sphere, PLIC reconstruction error, 16-32-64 | 4.83e-3, 1.18e-3, 3.09e-4 — **order 1.98** |
+| D2 sphere, MYC normal ANGLE, 16-32-64 | 1.302, 0.708, 0.412 deg — **order 0.83** |
+| D2 `initSphere` volume vs 4/3 pi R^3 | 7.8e-6, 2.0e-6, 4.9e-7 — order 2.00 |
+| E device vs serial host, 1e5 round trips | host-openmp: **100 000/100 000 bitwise**. CUDA: 94 474/100 000 bitwise, max \|diff\| 8.4e-15, device round-trip 3.9e-14 |
+
+Single-phase regression: unaffected **by construction** — the diff adds `src/vof/plic.hpp` (included
+by nothing but the new ctest; verified by grep over `src/`, `CMakeLists.txt`, `pyproject.toml`), the
+new test, and 4 CMake lines in `tests/kokkos/CMakeLists.txt`. No compilation input of the solver
+module changed.
+
+**Deviation 1 — a boundary defect in Lehmann & Gekle's Listing 1, fixed.** Their forward listing
+hoists the case-(5) test to the front with the condition `min(n1+n2, n3) <= d && d <= n3`. Eq. (11)
+defines case (5) as "the remaining free sector mutually excluded by the other four cases", i.e. the
+interval `[n1+n2, n3]`, which is empty unless `n3 >= n1+n2`. When `n3 < n1+n2` the `min(...)` form
+still fires at the single point `d == n3`, where the correct case is (3), and returns a wrong volume:
+`m = (1/3,1/3,1/3), alpha = 1/3` gave **0 instead of the exact 1/6**. Caught by the hand-computed
+`x+y+z<1` tetrahedron in gate A (the randomized gates never hit the measure-zero point).
+`src/vof/plic.hpp` uses `n1+n2 <= w && w <= n3`, which keeps the front position and its n1 = 0
+protection without the defect. The inverse (Listing 4) is already self-consistent with the corrected
+interval — its case-(5) branch is only reachable when `n1+n2 <= n3` — so no change there.
+
+**Deviation 2 — ESCALATED: gate D2 as written measures a quantity the published MYC does not
+deliver.** The WO asks for "L1 normal error 2nd-order under refinement (fit slope > 1.7)". Measured
+slope for the normal **angle** is **0.83** (pairwise 0.88 / 0.78, decaying to 0.56 at 128^3). This is
+not an implementation bug; the mechanism was isolated:
+
+- MYC is not exact on planes (gate D1: mean 0.10 deg, max 1.28 deg over 200k orientations), so it
+  fails the Pilliod-Puckett criterion, which is exactly the criterion for a 2nd-order normal.
+- On the sphere, **~28 % of mixed cells take the Youngs fallback at every resolution** (29.0 / 29.2 /
+  27.9 / 27.4 % at 16/32/64/128), and the Youngs branch's normal error **does not converge at all**
+  (measured order 0.50 -> 0.33 -> 0.07; Youngs-only L1 is flat at ~1.2 deg). That non-converging
+  population progressively dominates the L1 average, which is why the observed order decays.
+- The centred-columns branch alone converges at ~0.96/0.93/0.79 — first order, limited by 3-cell
+  column saturation.
+- The reference normal is not the culprit: repeating the measurement against the radial direction at
+  the exact interface-patch centroid (instead of the cell centre) gives 0.96/0.88/0.67 — same story.
+
+What Aulisa et al. (2007) actually report ~2nd order for is the **reconstruction** error (the
+symmetric difference between the exact interface and the PLIC plane), and their own numbers degrade
+the same way (2.22 on their coarsest mesh, 1.37 on their finest). Our implementation measures
+**1.98** for that quantity (2.03 / 1.93 pairwise) — i.e. it reproduces the published behaviour. So
+the shipped gate is the reconstruction-error slope > 1.7 (literature-anchored, and the quantity that
+actually governs the advected interface position downstream); the normal-angle error and its order
+are printed every run and guarded only by a regression tripwire (monotone decrease, 16->32 order
+> 0.7). **Do not "fix" this by tuning MYC** — a 2nd-order normal needs an exact-on-planes scheme
+(ELVIRA/LVIRA, 5^3 stencil in 3D and the known 3D cost bottleneck) or the height-function /
+plicRDF refinement already scheduled at V3/V5.
+
+Corollary for D1: the WO's "within 1 deg" is exceeded by the published algorithm on ~0.1 % of plane
+orientations (max 1.0151 deg here, 1.284 deg over 200k). The ctest gates the measured envelope
+(max <= 1.5 deg, mean <= 0.2 deg) and records the numbers. An ablation confirms the algorithm is
+right as transcribed: Basilisk's counter-intuitive final selection (`|m[cn][cn]| > max|m_Youngs|`
+=> take Youngs) is a **saturation detector** — a clipped column under-reports the height slope and so
+inflates the centred candidate's dominant component. Disabling it ("never switch to Youngs") makes
+the plane error **max 15.53 deg / mean 0.273 deg** versus **max 1.28 / mean 0.105** as published.
+
+**Also worth carrying into WO-E.** `plicVolume` renormalizes (m, alpha) internally, so it is exactly
+invariant under `(m, alpha) -> (lambda m, lambda alpha)`; that is what lets `plicSlabVolume` be a
+two-line coordinate rescale with no clipping code, and it is why `faceFluxVolume(f=1)` comes back
+*bitwise* equal to `plicVolume`. `sphereCellFraction` is a recursive-octree helper with an exact
+tangent-plane leaf closure (2nd order, 4.9e-7 relative at 64^3), not the 4^3 midpoint subsampling the
+WO sketched — the sketched accuracy (~1e-2 per cell) would have swamped the D2 convergence gate.
