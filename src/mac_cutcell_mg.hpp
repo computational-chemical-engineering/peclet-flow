@@ -219,6 +219,9 @@ class CutcellMG {
   struct Level {
     C3 ext, inner, ratio{2, 2, 2}, cfac{1, 1, 1};
     C3 og{0, 0, 0};  // block inner origin in GLOBAL cells; {0,0,0} single-rank
+    // This level's GLOBAL inner dims (== inner single-rank). With og it decides which ranks own a
+    // global domain face — see touchesGlobalFace(lv, f).
+    C3 gdim{0, 0, 0};
     std::size_t n = 0;
     // Ghost width of this level's block (1 default; 2 on distributed coarse levels eligible for
     // communication-avoiding smoothing — see initMpi). Single-rank always 1 (byte-identical).
@@ -252,6 +255,7 @@ class CutcellMG {
     for (int L = 0; L < nLevels; ++L) {
       Level v;
       v.inner = inner;
+      v.gdim = inner;  // single-rank: the block IS the global grid
       v.ext = C3{inner.x + 2 * G, inner.y + 2 * G, inner.z + 2 * G};
       v.cfac = cf;
       v.n = (std::size_t)v.ext.x * v.ext.y * v.ext.z;
@@ -484,6 +488,7 @@ class CutcellMG {
       v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};
       v.og = {(int)oig[0] + v.g, (int)oig[1] + v.g,
               (int)oig[2] + v.g};  // inner origin == single-rank og=0 at origin 0
+      v.gdim = gs;                 // this level's GLOBAL dims (og + inner == gdim -> owns +face)
       v.cfac = cf;
       v.n = idx.numCellsInclGhost();
       C3 next = gs, ratio{1, 1, 1};
@@ -564,14 +569,23 @@ class CutcellMG {
   // hold the pressure/correction ghost at 0 on outflow faces (open face -> Dirichlet p=0). Call
   // after every (periodic) fill of a solution / search-direction field, on the level it lives
   // (g = that level's ghost width).
-  void applyOutflowGhost(C3 ext, CCField x, int g = G) {
+  void applyOutflowGhost(const Level& lv, CCField x, int g = G) {
     if (!hasOutflow_)
       return;
-    B3 e{ext.x, ext.y, ext.z};
+    B3 e{lv.ext.x, lv.ext.y, lv.ext.z};
     for (int a = 0; a < 3; ++a)
       for (int s = 0; s < 2; ++s)
-        if (bc_[2 * a + s] == 3)
+        if (bc_[2 * a + s] == 3 && touchesGlobalFace(lv, 2 * a + s))
           bcZeroPressureGhost(x, e, g, a, s);
+  }
+  // Does this rank's block on level `lv` touch global domain face f? Always true single-rank
+  // (og = 0 and gdim == inner), so every guarded BC application is byte-identical there.
+  static bool touchesGlobalFace(const Level& lv, int f) {
+    const int a = f / 2;
+    const int o = (a == 0) ? lv.og.x : (a == 1) ? lv.og.y : lv.og.z;
+    const int n = (a == 0) ? lv.inner.x : (a == 1) ? lv.inner.y : lv.inner.z;
+    const int gd = (a == 0) ? lv.gdim.x : (a == 1) ? lv.gdim.y : lv.gdim.z;
+    return (f % 2 == 0) ? (o == 0) : (o + n == gd);
   }
   // re-impose the non-periodic boundary openness a periodic fill leaves wrong: Neumann wall/inflow
   // -> 0 (closed), Dirichlet outflow -> left open. Call after every (periodic) openness fill, per
@@ -584,6 +598,8 @@ class CutcellMG {
     for (int a = 0; a < 3; ++a)
       for (int s = 0; s < 2; ++s) {
         const int t = bc_[2 * a + s];
+        if (!touchesGlobalFace(lv, 2 * a + s))
+          continue;  // interior rank boundary: the exchanged openness is the right value
         if (t == 1 || t == 2)
           bcSetOpenness(oa[a], e, lv.g, a, s, 0.0);  // wall/inflow Neumann -> closed
         else if (t == 3)
@@ -757,7 +773,7 @@ class CutcellMG {
         stageG2(l0, q, xg2, ext2);  // inner cells g=1 block -> g=2 block
         h2->exchange(xg2);          // 2-deep halo (cross-rank + periodic)
         unstageG2(l0, q, xg2);      // whole l0 block back (fills q's g=1 halo — no 2nd exchange)
-        applyOutflowGhost(l0.ext, q);
+        applyOutflowGhost(l0, q);
         applyCutcellOp(y, CCConst(q), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
                        FPC(l0.AB), FPC(l0.AT), l0.ext, G);
         gpApplyDelta(y, CCConst(xg2), ov, nOv, nn, l0.ext, G, ext2, 2, /*useGhost=*/true);
@@ -765,7 +781,7 @@ class CutcellMG {
       }
 #endif
       fill(l0, q);
-      applyOutflowGhost(l0.ext, q);
+      applyOutflowGhost(l0, q);
       applyCutcellOp(y, CCConst(q), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
                      FPC(l0.AB), FPC(l0.AT), l0.ext, G);
       gpApplyDelta(y, CCConst(q), ov, nOv, nn, l0.ext, G, l0.ext, G);
@@ -917,7 +933,7 @@ class CutcellMG {
                          FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lo, hi,
                          C3{0, 0, 0}, C3{0, 0, 0});
       lv.dev->exchangeEnd(lv.x);
-      applyOutflowGhost(lv.ext, lv.x, g);
+      applyOutflowGhost(lv, lv.x, g);
       residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
                          FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext,
                          C3{g, g, g}, C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
@@ -925,7 +941,7 @@ class CutcellMG {
 #endif
     {
       fill(lv, lv.x);  // single-rank: the periodic wrap copy
-      applyOutflowGhost(lv.ext, lv.x, lv.g);
+      applyOutflowGhost(lv, lv.x, lv.g);
       fullResidual();
     }
     Level& cs = lv_[L + 1];
@@ -933,7 +949,7 @@ class CutcellMG {
     Kokkos::deep_copy(cs.x, 0.0);
     vcycle(L + 1, sym);
     fill(cs, cs.x);
-    applyOutflowGhost(cs.ext, cs.x, cs.g);
+    applyOutflowGhost(cs, cs.x, cs.g);
     prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
     smooth(lv, post_, /*reverse=*/sym);
     if (meanRemovalAll_ || L == 0)
@@ -995,7 +1011,7 @@ class CutcellMG {
                                 FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, color,
                                 lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
           lv.dev->exchangeEnd(lv.x);
-          applyOutflowGhost(lv.ext, lv.x, g);
+          applyOutflowGhost(lv, lv.x, g);
           cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
                                 FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, color,
                                 C3{g, g, g}, C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
@@ -1003,7 +1019,7 @@ class CutcellMG {
         }
 #endif
         fill(lv, lv.x);
-        applyOutflowGhost(lv.ext, lv.x, lv.g);
+        applyOutflowGhost(lv, lv.x, lv.g);
         cutcellSmoothColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
                            FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, lv.g, color);
       }
@@ -1319,7 +1335,7 @@ class CutcellMG {
       // (ghost fill + outflow ghost + 7-point apply). A large residual here means buildAmg
       // assembled a DIFFERENT matrix than the one the hierarchy applies.
       fill(lv, lv.x);
-      applyOutflowGhost(lv.ext, lv.x, lv.g);
+      applyOutflowGhost(lv, lv.x, lv.g);
       residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
                       FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lv.g);
       const double rn = maxabs(lv, lv.res);
@@ -1483,7 +1499,7 @@ class CutcellMG {
       applyCutcellOpBox(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
                         FPC(l0.AB), FPC(l0.AT), l0.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
       l0.dev->exchangeEnd(v);
-      applyOutflowGhost(l0.ext, v);
+      applyOutflowGhost(l0, v);
       applyCutcellOpBox(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
                         FPC(l0.AB), FPC(l0.AT), l0.ext, C3{G, G, G},
                         C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G}, lo, hi);
@@ -1491,7 +1507,7 @@ class CutcellMG {
     }
 #endif
     fill(l0, v);
-    applyOutflowGhost(l0.ext, v);
+    applyOutflowGhost(l0, v);
     applyCutcellOp(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
                    FPC(l0.AB), FPC(l0.AT), l0.ext, G);
   }

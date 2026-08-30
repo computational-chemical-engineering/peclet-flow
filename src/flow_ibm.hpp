@@ -1227,6 +1227,17 @@ class Solver {
     // explicit reflection ghosts (refreshed each smoother sweep), so it needs no fold.
     if (hasBc_ && !Grid::collocated)
       setupBcDiffusion();
+    // The solver's velocity multigrid is SINGLE-RANK: IbmSolver only ever calls `vmg_.init` (never
+    // `VelocityMG::initMpi`, which the standalone `velocitymg_mpi` ctest does exercise), so under a
+    // decomposition its `fill()` would periodic-wrap this rank's BLOCK instead of exchanging —
+    // silently solving the momentum equation on a torus per rank. Disable it with a notice rather
+    // than run it wrong. (Wiring the distributed hierarchy is separate work; see the WO-F audit.)
+    if (useVelocityMg_ && distributed_) {
+      std::fprintf(stderr,
+                   "[flow] set_velocity_multigrid is single-rank only (the solver's VelocityMG is "
+                   "not wired to the halo) — disabled for this distributed run.\n");
+      useVelocityMg_ = false;
+    }
     if (useVelocityMg_) {  // velocity-MG hierarchy: IBM (staircase/upwind) or domain-BC
                            // (const-coeff) mode
       vmg_.init(nx_, ny_, nz_, vmgLevels_);
@@ -1331,8 +1342,8 @@ class Solver {
             const int t = bc_[2 * a + s];  // lid: type 2 with zero normal vel) are CLOSED.
             const bool open = (t == 3) || (t == 2 && (bcProf_[2 * a + s].extent(0) > 0 ||
                                                       std::fabs(bcVel_[2 * a + s][a]) > 1e-12));
-            if (t != 0 && !open)
-              bcZeroOpenness(oa[a], e2, G, a, s);
+            if (t != 0 && !open && touchesGlobalFace(2 * a + s))
+              bcZeroOpenness(oa[a], e2, G, a, s);  // rank-owned global face only
           }
       }  // the MG re-derives the OPERATOR openness alpha (inflow Neumann -> closed) per level via
          // setBC.
@@ -1780,7 +1791,7 @@ class Solver {
         B3 e{e_.x, e_.y, e_.z};
         CCField fa[3] = {uf_, vf_, wf_};
         for (int a = 0; a < 3; ++a)
-          if (bc_[2 * a + 1] == 3)
+          if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
             bcNeumannGhost(fa[a], e, G, a, 1);
       }
       if (ghostProjection_ && gpNRows_ >= 0) {
@@ -1909,12 +1920,15 @@ class Solver {
   // Fill a property field's ghosts for the face means: periodic/halo base, then zero-gradient
   // (copy) on domain-BC (wall/inflow/outflow) faces — a periodic wrap there would bring the wrong
   // layer's value to the wall face (destabilising, especially for the harmonic mean).
+  // Distributed: the override is per-face rank-OWNED (`touchesGlobalFace`), exactly as
+  // `applyScalarBc` does — the halo fill runs first (and periodic-wraps the global boundary ghost),
+  // the BC overwrite wins on the rank that owns the face. The former `if (!distributed_)` guard
+  // keyed on the wrong predicate: it dropped the override at EVERY np including 1.
   void fillPropGhosts(CCField f) {
     fillGhosts(f);
-    if (!distributed_)
-      for (int face = 0; face < 6; ++face)
-        if (bc_[face] != 0)
-          applyScalarBcFace(f, face / 2, face % 2, 1, 0.0);  // type 1 = Neumann copy
+    for (int face = 0; face < 6; ++face)
+      if (bc_[face] != 0 && touchesGlobalFace(face))
+        applyScalarBcFace(f, face / 2, face % 2, 1, 0.0);  // type 1 = Neumann copy
   }
   void fillMuGhosts() { fillPropGhosts(muField_); }
   // Eps ghost policy for the porous (volume-averaged) machinery. Periodic/halo base fill, then at
@@ -1929,16 +1943,15 @@ class Solver {
   // eps_f*U instead of U.
   void fillPorousEpsGhosts() {
     fillGhosts(epsField_);
-    if (!distributed_)
-      for (int face = 0; face < 6; ++face) {
-        const int t = bc_[face];
-        if (t == 0)
-          continue;
-        if (t == 2 || t == 3)
-          applyScalarBcFace(epsField_, face / 2, face % 2, 2, 1.0);  // open face: face eps == 1
-        else
-          applyScalarBcFace(epsField_, face / 2, face % 2, 1, 0.0);  // wall: zero-gradient
-      }
+    for (int face = 0; face < 6; ++face) {
+      const int t = bc_[face];
+      if (t == 0 || !touchesGlobalFace(face))
+        continue;  // rank-owned faces only (see fillPropGhosts)
+      if (t == 2 || t == 3)
+        applyScalarBcFace(epsField_, face / 2, face % 2, 2, 1.0);  // open face: face eps == 1
+      else
+        applyScalarBcFace(epsField_, face / 2, face % 2, 1, 0.0);  // wall: zero-gradient
+    }
   }
   // Staggered face stride of velocity component c (the -c face of cell i pairs cells i and i-s).
   long strideOf(int c) const { return (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y; }
@@ -3095,8 +3108,8 @@ class Solver {
     CCConst u = CCConst(C[c].u);
     const int a = c;  // the normal component of a face on axis a is component a
     for (int s = 0; s < 2; ++s) {
-      if (bc_[2 * a + s] != 3)
-        continue;  // outflow faces only
+      if (bc_[2 * a + s] != 3 || !touchesGlobalFace(2 * a + s))
+        continue;  // rank-owned outflow faces only
       const long sa = st[a];
       const int na = dims[a];
       const int bic = (s == 0) ? G : (na - G - 1);  // outflow-adjacent inner normal-velocity cell
@@ -3227,7 +3240,10 @@ class Solver {
       return;
     }
     if (hasBc_) {  // domain-BC (no immersed solid): CUDA's double const-coeff diff_k + dcorr fold
-      const I3 e{e_.x, e_.y, e_.z}, og{0, 0, 0};
+      // og_ is the GLOBAL block origin (red-black parity); {0,0,0} single-rank, so byte-identical
+      // there. It was hard-coded {0,0,0} here, which swaps the colours on any rank whose block
+      // origin has odd parity — the only smoother in the file that did not carry og_.
+      const I3 e{e_.x, e_.y, e_.z}, og{og_.x, og_.y, og_.z};
       const double beta = mu_, Ac = rho_ / dt_ + 6.0 * mu_;
       velSweepLoop(
           [&] { fillVelGhosts(c, 1); },  // re-impose wall faces (fold) before each color
@@ -3393,8 +3409,8 @@ class Solver {
     long st[3] = {1, e.x, (long)e.x * e.y};
     for (int a = 0; a < 3; ++a)
       for (int s = 0; s < 2; ++s) {
-        if (bc_[2 * a + s] == 0)
-          continue;
+        if (bc_[2 * a + s] == 0 || !touchesGlobalFace(2 * a + s))
+          continue;  // rank-owned global face only (interior ghosts come from the halo)
         const int b = (a + 1) % 3, c = (a + 2) % 3;
         const long sa = st[a], sb = st[b], sc = st[c];
         const int na = dims[a];
@@ -3432,6 +3448,12 @@ class Solver {
         fillAxis(f, a);
     applyVelocityBcCompTo(f, comp, fold, true);
   }
+  // Distributed: a rank applies a face's BC iff its block TOUCHES that global face
+  // (`touchesGlobalFace`, the same rule the scalar path uses in `applyScalarBc`). Without the test
+  // every rank imposed the wall on its OWN block faces, so a partition cutting a walled axis split
+  // the domain into independent sub-domains — invisible in the velocity (each sub-domain is
+  // separately consistent) and only visible in the pressure. Single-rank the test is always true,
+  // so this is byte-identical there.
   void applyVelocityBcCompTo(CCField f, int comp, int fold, bool doOutflow) {
     if (!hasBc_)
       return;
@@ -3445,8 +3467,8 @@ class Solver {
         for (int s = 0; s < 2; ++s) {
           const int ff = 2 * a + s;
           const int t = bc_[ff];
-          if (t == 0)
-            continue;
+          if (t == 0 || !touchesGlobalFace(ff))
+            continue;  // interior rank boundary: the halo exchange owns those ghosts
           if (t == 3) {
             if (doOutflow)
               bcNeumannGhost(f, e, G, a, s);
@@ -3465,8 +3487,8 @@ class Solver {
       for (int s = 0; s < 2; ++s) {
         const int ff = 2 * a + s;
         const int t = bc_[ff];
-        if (t == 0)
-          continue;
+        if (t == 0 || !touchesGlobalFace(ff))
+          continue;  // interior rank boundary: the halo exchange owns those ghosts
         if (t == 3) {
           if (doOutflow)
             bcOutflowComp(f, e, G, a, s, comp, fold);
@@ -3490,6 +3512,8 @@ class Solver {
       for (int a = 0; a < 3; ++a)
         for (int s = 0; s < 2; ++s) {
           const int t = bc_[2 * a + s];
+          if (!touchesGlobalFace(2 * a + s))
+            continue;  // the implicit wall fold belongs to the rank owning that global face
           double dval, bval;
           if (t == 3) {
             dval = -beta;
@@ -3804,7 +3828,7 @@ class Solver {
       B3 e{e_.x, e_.y, e_.z};
       for (int a = 0; a < 3; ++a)
         for (int s = 0; s < 2; ++s)
-          if (bc_[2 * a + s] == 3)
+          if (bc_[2 * a + s] == 3 && touchesGlobalFace(2 * a + s))
             bcZeroPressureGhost(phi_, e, G, a, s);
     }
     if constexpr (Grid::collocated) {
@@ -3817,7 +3841,7 @@ class Solver {
         for (int a = 0; a < 3; ++a)
           for (int s = 0; s < 2; ++s) {
             const int t = bc_[2 * a + s];
-            if (t != 0 && t != 3)
+            if (t != 0 && t != 3 && touchesGlobalFace(2 * a + s))
               bcNeumannGhost(phi_, e, G, a, s);
           }
       }
@@ -3835,7 +3859,7 @@ class Solver {
         B3 e{e_.x, e_.y, e_.z};
         CCField fa[3] = {uf_, vf_, wf_};
         for (int a = 0; a < 3; ++a)
-          if (bc_[2 * a + 1] == 3)
+          if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
             bcCorrectOutflow(fa[a], phi_, e, G, a);
       }
       if (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) {
@@ -3900,7 +3924,7 @@ class Solver {
                           // (mass leaves)
         B3 e{e_.x, e_.y, e_.z};
         for (int a = 0; a < 3; ++a)
-          if (bc_[2 * a + 1] == 3)
+          if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
             bcCorrectOutflow(C[a].u, phi_, e, G, a);
       }
     }

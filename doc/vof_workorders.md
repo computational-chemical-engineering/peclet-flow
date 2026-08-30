@@ -539,3 +539,131 @@ function has private access. (c) `debugRecomputeDilation` ships as a permanent, 
 gate G keeps the #1 trap a measured number; (d) no clipping at this rung, per the plan — the wisp
 census is printed instead (e.g. 9489 wisp cells at 128^3 after 3200 LeVeque steps, C in
 [-2.1e-17, 1.0]).
+
+### WO-F (blocker fix) — domain BCs are not rank-aware — **DONE 2026-08-30**, one new escalation
+
+Both WO-A escalations are fixed, and the audit found the omission in **nine more** per-face
+domain-BC application sites plus two adjacent MPI defects. The single-rank path is byte-identical by
+construction: `touchesGlobalFace` is identically true on one rank, so every guarded call runs exactly
+as before — verified, not assumed (single-phase regression **+0.00 %** on every metric with identical
+iteration counts, below).
+
+**The mechanism, once, so nobody re-derives it.** The core grid halo is built **periodic on all three
+axes** (`initMpi`: `std::array<bool,3> per{true,true,true}`), so the exchange fills *every* ghost —
+an interior rank boundary with the neighbour's data, a global domain face with the periodic wrap.
+The domain BC then **overwrites** the wrap on the rank that owns that face. That fill-then-BC order is
+exactly the single-rank order, which is why the ownership test is the whole fix and nothing else has
+to change. The transported-scalar path (`applyScalarBc`) already did this; the velocity, openness,
+pressure and property paths never adopted it.
+
+**Audit — FIXED (ownership test added).**
+
+| # | site | what it imposed on every rank's own block face |
+|---|---|---|
+| 1 | `flow_ibm.hpp` `applyVelocityBcCompTo` — **both** the staggered and the collocated loop (wall / Dirichlet-lid / per-position inlet profile / outflow branches) | **THE defect.** wall + inflow velocity ghosts, outflow zero-gradient |
+| 2 | `flow_ibm.hpp` `setSolid`: the FLUX-openness construction (`bcZeroOpenness`) | the "pressure-openness BC construction" of the WO — closed β at walls/tangential inflow |
+| 3 | `flow_ibm.hpp` `setupBcDiffusion` (`bcDiffusionFold`) | the implicit tangential wall fold baked into `bcDcorr_` / `bcBrhs_` |
+| 4 | `flow_ibm.hpp` `pressureBcGhost` (`"pbcghost"`) | zero-gradient P ghosts for the incremental predictor's ∇P |
+| 5 | `flow_ibm.hpp` `applyBackflowStab` | the dissipative outflow diagonal |
+| 6 | `flow_ibm.hpp` `project()` — outflow φ Dirichlet ghost (`bcZeroPressureGhost`) | φ = 0 at outflow |
+| 7 | `flow_ibm.hpp` `project()` — collocated φ wall ghost (`bcNeumannGhost`) | ∂φ/∂n = 0 at walls |
+| 8 | `flow_ibm.hpp` `project()` — `bcCorrectOutflow`, **both** the collocated face-field and the staggered cell-field site | the mass-conserving outflow face correction |
+| 9 | `flow_ibm.hpp` `maxOpenDivergence` — collocated outflow `bcNeumannGhost` | the diagnostic's outflow face |
+| 10 | `mac_cutcell_mg.hpp` `CutcellMG::applyBoundaryOpenness` | the OPERATOR openness α re-imposed **per level** (wall/inflow → 0, outflow → 1) |
+| 11 | `mac_cutcell_mg.hpp` `CutcellMG::applyOutflowGhost` | φ = 0 at outflow ghosts, **per level** |
+| 12 | `flow_ibm.hpp` `fillPropGhosts` / `fillPorousEpsGhosts` | the μ/ρ/ε domain-face override, previously gated `if (!distributed_)` — wrong at **every** np including 1 |
+
+10 and 11 needed a per-level ownership test, so `CutcellMG::Level` gained `gdim` (that level's GLOBAL
+inner dims) next to the existing `og`, and `CutcellMG::touchesGlobalFace(lv, f)` is `og == 0` /
+`og + inner == gdim`. `applyOutflowGhost`'s signature changed from `(C3 ext, …)` to `(const Level&, …)`
+— every call site already had the level in scope.
+
+**Audit — two adjacent MPI defects found and fixed (not per-face BCs, but in the same machinery).**
+
+- `flow_ibm.hpp` `smoothComp`'s **domain-BC const-coefficient smoother** hard-coded the red-black
+  parity origin `og{0,0,0}` instead of `og_` — the only smoother in the file that did not carry the
+  global block origin, so its colours swap on any rank whose block origin has odd parity. Reachable
+  only on a domain-BC problem with no solid, no advection and no variable coefficients (otherwise
+  `bcStencilPath()` takes over), which is why no ctest ever hit it. `{0,0,0}` single-rank → byte-identical.
+- The solver's **velocity multigrid is single-rank**: `IbmSolver` calls `vmg_.init` and *never*
+  `VelocityMG::initMpi` (which exists and is gated by the standalone `velocitymg_mpi` ctest). Under a
+  decomposition `VelocityMG::fill` would periodic-wrap this rank's own BLOCK instead of exchanging —
+  i.e. solve the momentum equation on a per-rank torus. It is now **disabled with a stderr notice**
+  when `distributed_`, rather than silently wrong. (varRho/varProps already disable it for their own
+  reason.) Wiring the distributed hierarchy is separate work.
+
+**Audit — CHECKED AND ALREADY CORRECT (no change).**
+
+- `applyScalarBc` / `applyScalarBcStencil` — already carry `touchesGlobalFace`; the pattern came from here.
+- `fillVelGhostsTo`'s periodic axis fill (`fillAxis`) — only on the `!distributed_` branch; the
+  distributed branch exchanges first and then applies the (now guarded) BC.
+- `CutcellMG::buildAmg`, the agglomerated coarse solve — its non-periodic boundary handling is
+  expressed in **global** cell ids (`crosses && bc_[d] != 0`), so it is decomposition-independent by
+  construction.
+- `CutcellMG::caSmooth` — communication-avoiding smoothing is disabled whenever `hasBC_`, so the CA
+  ghost-ring re-smoothing never interacts with a domain BC.
+- `CutcellMG::setBoundaryConditions` (`hasBC_`, `hasOutflow_`, `removeMean_`) — global flags, no
+  per-rank geometry.
+- `setDomainBcProfile` — the profile is resampled onto **this rank's** ghost-inclusive face plane and
+  indexed by local face position, so it is rank-local by construction; the only thing missing was the
+  ownership test, now in `applyVelocityBcCompTo` (#1). The caller must still hand each rank its own
+  block's slice — there is no scatter helper (`flow/CLAUDE.md`'s "multi-rank inlet-profile scatter").
+- `VelocityMG::fillProlongBcGhosts` / `setDomainBcOp`'s `boundaryFold` — per-face and unguarded, but
+  unreachable under MPI (see the velocity-MG item above); left alone deliberately, and recorded here
+  so a future distributed VelocityMG starts from this list.
+
+**Gates.**
+
+| gate | result |
+|---|---|
+| Single-phase regression, +0.00 % and identical iteration counts (**verified, not assumed**) | **PASS** — `tests/regression/sdflow_regression.py` on the nvidia-cuda build: **+0.00 %** on K / k\* / fitted order p / Richardson extrapolate, and **identical** `p_iter_tot`, per-step iteration medians and step counts on all 13 grid points of `zh_sphere` / `random_spheres` / `hollow_rings` |
+| Walled-axis-**cut** np 2/4 vs np 1 on **velocity AND pressure**, host + CUDA | **PASS.** `vardensity_mpi` on 16×16×32 with **z cut** (np=4 cuts x and z): host max\|u_dist−u_ref\| ≤ **5.9e-17**, max\|P_dist−P_ref\| ≤ **9.1e-13**; CUDA **bitwise 0.000e+00 at np=2**, ≤ 4.5e-17 / 2.8e-14 at np=4 (P is O(800)). The periodic `jump-z` companion is **bitwise identical at every np on both backends**. `varmu_mpi` on 16×32×8 with **y cut** (np=4 cuts x and y): du ≤ **7.8e-16**, dp ≤ **6.7e-17**. **Before the fix the same configuration read dp = 2.5e+01 / ∂P/∂z error 0.5** (and WO-A measured 4.0e+02 on the original grid) while the velocity canary stayed at 4e-17 throughout — the pressure comparison is the only thing that sees this |
+| Restored asymmetric two-layer Couette matches analytics at every np | **PASS** — the literal monotone μ1\|μ2 stack (10× jump on the CUT walled axis): analytic error **0.0003 %** at np = 1, 2, 4 on host and CUDA (the symmetric stack WO-A had to ship read 0.0129 %) |
+| Chebyshev V-cycle count vs decomposition | **PASS**, max-delta **0** over the non-degenerate window at every np on both backends |
+| All pre-existing MPI ctests green | **PASS** — `tests/kokkos_mpi` **42/42, 0 failed** on host-openmp with the new tests in place (1787 s), and `tests/kokkos` **21/21** single-rank |
+
+**Test changes.** Both ctests now do the opposite of what WO-A shipped: they **require** the walled
+axis to be cut (`if (size > 1 && !cut[axis]) FAIL`), so the day a decomposition change stops cutting
+it the coverage loss is loud. `test_vardensity_mpi` moved 32×16×16 → **16×16×32** (walls-z and the
+sharp ρ jump both on the long, cut z axis) and gates the pressure field; `test_varmu_mpi` moved
+32×16×8 → **16×32×8** and restored the literal two-layer stack. varμ's pressure gate carries an
+**absolute** floor (1e-14) beside the relative one, because plane Couette is pure shear and \|P\|
+is ~6e-8 there — a purely relative pressure gate would have been gating round-off. The strong
+pressure gate is `vardensity_mpi`'s hydrostatic column, where \|P\| = O(800).
+
+**ESCALATION — a THIRD pre-existing defect: closure-written body-force fields never have their ghosts
+filled.** Found by root-causing a residual `dp = 2.5e+01` that survived every ownership fix.
+`applyClosure` (`property_closures.hpp`) writes the **inner cells only** — its own comment says
+"ghosts untouched — refilled by the field's own exchange" — and while a closure targeting `"mu"` or
+`"rho"` does get that exchange (`fillPropGhosts`, called from `rebuildStencils` / `project`), a
+closure targeting **`force_x/y/z` gets none**: nothing in `step()` ever exchanges a `force_*` field.
+`buildRhsVar` / `buildRhsForced` then compute the face body force as `0.5*(fb(i) + fb(i-strd))`, so
+**the face force on the first inner plane of every block is halved** (the ghost is the field's
+zero-initialised value).
+
+Evidence, measured on the hydrostatic column with z cut at np = 2 (jump deliberately moved to z = 8
+so it does not coincide with the rank boundary at z = 16): every face reads the exact `∂P = −g·ρ_f`
+— `−100` in the heavy layer, `−50.05` at the ρ jump, `−0.1` in the light layer — **except z = 16,
+which reads `−0.05`, exactly half**. The rank-boundary ρ ghost itself was dumped and is *correct*
+(1000 on rank 1's low-z plane), and so is the assembled MG level-0 operator row; only the force ghost
+is wrong. The velocity stays at 3e-17 because the momentum's face inertia and the projection both use
+the same (correct) ρ_f, so `w* = f_f/(ρ_f/dt)` is still uniform — the error lands entirely in P.
+
+This is **not** an MPI-only bug and **not** in WO-F's scope: single-rank it halves the face force at
+the periodic wrap plane of any closure-driven body force, so `tests/study/rayleigh_taylor.py`, the
+Boussinesq thermal-convection validation and every CFD-DEM feedback closure are affected. Fixing it
+(one `fillGhosts` per closure output after `updateProperties()`) would therefore **change single-rank
+numbers of already-validated results**, which is exactly the case the WO says to escalate rather than
+decide. Not fixed here. The two ctests seed the ghost ring explicitly (`setField("force_z", …)` +
+`exchangeField`, alongside the closure, which rewrites the same static inner values every step), with
+the reasoning inline, so the WO-F gates measure WO-F's defect and not this one.
+
+**Note on a one-off battery failure (resolved).** An earlier full host-openmp `tests/kokkos_mpi` run reported
+`sdflow_colocated_mpi_np4` failing with `MPI_ERR_TRUNCATE` in `MPI_Waitall`. It is **not** caused by
+this work order: re-run twice in isolation the patched binary passes and prints `k_dist =
+5.77833108e+00` / `5.71014308e+00`, `rel = 3.54e-15` / `2.80e-15` — **digit-for-digit identical to a
+binary built from pristine HEAD in a separate worktree**. Every guarded site in this diff sits inside
+a `hasBc_` / `hasOutflow_` branch and that test is periodic + IBM, so the code path is provably inert
+there. The battery was running against a 12-core `nvcc` build and another agent's core MPI battery on
+the same 48-core host at the time; the final battery, run on a quiet machine, is 42/42. Recorded as an
+observed load-induced flake in the collocated np=4 halo, not investigated further.

@@ -4,7 +4,8 @@
 // the g=1 MG block (`copyBlockShifted`, offset G-1), the `fillPropGhosts` ghost ring, and the
 // Chebyshev bound estimation were *believed* MPI-ready. This test gates them.
 //
-// Two configurations on a 32x16x16 grid (the aligned ORB cuts only x at np = 1, 2, 4):
+// Two configurations on a 16x16x32 grid — the aligned ORB cuts the LONG z axis at np = 2, 4, which
+// is deliberately the axis both configurations load (WO-F: the walled axis must be CUT):
 //
 //   * `walls-z` — the WO-A hydrostatic acid test, the multi-rank twin of
 //     `tests/kokkos/test_vardensity_projection.cpp`: two layers at density ratio 1000 at rest
@@ -16,20 +17,21 @@
 //     gates are decomposition-independent physics: max|u| ~ 1e-16 and dP/dz == -g*rho_f at every np.
 //     The pressure gate is the sharper one — see the walled-axis note below.
 //
-//   * `jump-x` — the rho-ghost / rho-bridge canary: a SHARP ratio-1000 density jump stacked along
+//   * `jump-z` — the rho-ghost / rho-bridge canary: a SHARP ratio-1000 density jump stacked along
 //     the CUT axis, so at np = 2 and 4 the jump sits exactly on a rank boundary and the coefficient
 //     rho0/rho_f at that face is assembled from an exchanged ghost. Fully periodic, driven by a
 //     uniform body force (no rest state — this one is a pure np-consistency + Chebyshev-count gate).
 //
-// WALLED AXIS / MPI (WO-A finding, escalated — see the findings log in doc/vof_workorders.md):
-// flow's per-face domain BCs are imposed by EVERY rank on its own block faces —
-// `applyVelocityBcCompTo` (and the pressure-openness BC) have no `touchesGlobalFace` ownership
-// test, unlike the scalar BCs (`applyScalarBc`). If the decomposition cuts a walled axis the
-// domain splits into independent walled sub-columns: each one is separately hydrostatic, so the
-// VELOCITY canary still reads ~1e-17 and only the PRESSURE reveals it (measured on a 16x16x32 grid
-// with z cut: max|u| = 4.5e-17 but max|P_dist - P_ref| = 4.0e+02 and dP/dz off by 8x g*rho). The
-// configuration below therefore keeps the walled axis uncut and ASSERTS it, so the day the
-// decomposition changes this fails loudly instead of silently passing.
+// WALLED AXIS / MPI — this is the point of the configuration (WO-F). flow's per-face domain BCs
+// used to be imposed by EVERY rank on its OWN block faces: `applyVelocityBcCompTo`, the flux-
+// openness construction and the MG's per-level boundary openness had no `touchesGlobalFace`
+// ownership test, unlike the scalar BCs (`applyScalarBc`). A partition cutting a walled axis then
+// split the domain into independent walled sub-columns — each separately hydrostatic, so the
+// VELOCITY canary still read ~1e-17 and only the PRESSURE revealed it (WO-A measured on this grid
+// with z cut: max|u| = 4.5e-17 but max|P_dist - P_ref| = 4.0e+02 and dP/dz off by 8x g*rho). WO-A's
+// tests therefore kept the walled axis uncut and asserted it; WO-F fixed the ownership test, so
+// this test now REQUIRES the walled axis to be cut (asserted below) and gates the PRESSURE field
+// against the single-rank reference, which is the only thing that sees the defect.
 //
 // Comparison protocol (the `tests/kokkos_mpi` pattern): the distributed run is compared POINTWISE
 // against a full-grid single-rank reference built on rank 0 with the identical configuration.
@@ -54,13 +56,13 @@
 using peclet::core::IVec;
 using peclet::flow::IbmSolver;
 
-static constexpr int NX = 32, NY = 16, NZ = 16, STEPS = 20;
+static constexpr int NX = 16, NY = 16, NZ = 32, STEPS = 20;
 static constexpr double RATIO = 1000.0, GRAV = 0.1, DT = 1.0, RHO0 = 1.0, FX = 1e-3;
 static constexpr std::size_t GCELLS = (std::size_t)NX * NY * NZ;
 
 struct Config {
   const char* name;
-  int axis;    // density-layering axis (2 = z for the walled column, 0 = x for the cut-axis jump)
+  int axis;    // density-layering axis (z for both: the walled column AND the cut-axis jump)
   bool walls;  // hydrostatic acid test (else the periodic body-force consistency probe)
 };
 
@@ -97,8 +99,25 @@ static void configure(IbmSolver& s, const Config& c, int ox, int oy, int oz, int
   s.setField("rho", blockOf([&](int x, int y, int z) { return rhoAt(c, x, y, z); }, ox, oy, oz,
                             lnx, lny, lnz));
   s.exchangeField("rho");
-  if (c.walls)  // gravity closure: the per-cell force -g*rho, face-interpolated to -g*rho_f
+  if (c.walls) {
+    // gravity closure: the per-cell force -g*rho, face-interpolated to -g*rho_f
     s.setPropertyModel("force_z", peclet::flow::ClosureKind::LinearMix, "rho", "", {0.0, -GRAV});
+    // ...plus an explicit seed of the SAME field, only to fill its GHOST ring. `applyClosure`
+    // writes the inner cells only ("ghosts untouched — refilled by the field's own exchange"),
+    // and while mu/rho get that exchange from `fillPropGhosts`, a `force_*` field gets none —
+    // nothing in `step()` ever exchanges it. `buildRhsVar` reads `0.5*(fb(i) + fb(i-strd))`, so
+    // the face force on the first inner plane of every block is HALVED. That is a THIRD,
+    // independent pre-existing defect, found and root-caused while gating WO-F and escalated in
+    // the WO-F findings log rather than fixed here: fixing it would change SINGLE-RANK numerics
+    // for every closure-driven case (periodic Boussinesq/Rayleigh-Taylor read the same halved
+    // ghost at the wrap plane), which is outside this work order. rho is static here, so the
+    // closure rewrites the same inner values every step while these ghosts persist — the
+    // configuration stays a faithful test of the closure path AND isolates the domain-BC
+    // ownership this WO is about.
+    s.setField("force_z", blockOf([&](int x, int y, int z) { return -GRAV * rhoAt(c, x, y, z); },
+                                  ox, oy, oz, lnx, lny, lnz));
+    s.exchangeField("force_z");
+  }
 }
 
 // Gather per-rank inner blocks (x-fastest) into the global field on rank 0.
@@ -188,15 +207,17 @@ int main(int argc, char** argv) {
                   NX, NY, NZ, lnx, lny, lnz, cut[0] ? "x" : "", cut[1] ? "y" : "",
                   cut[2] ? "z" : "");
 
-    const Config configs[] = {{"walls-z", 2, true}, {"jump-x", 0, false}};
+    const Config configs[] = {{"walls-z", 2, true}, {"jump-z", 2, false}};
 
     for (const Config& c : configs) {
-      if (c.walls && cut[c.axis]) {
-        // Not a workaround: flow's per-face domain BCs have no rank-ownership test, so a cut
-        // walled axis splits the column into independent hydrostatic sub-columns (see the header).
+      // WO-F: the walled axis must be CUT — that is the case the domain-BC ownership test exists
+      // for. If a future decomposition change stops cutting z, this test would silently stop
+      // covering it, so fail loudly instead.
+      if (size > 1 && !cut[c.axis]) {
         if (rank == 0)
-          std::printf("  [%-7s np=%d] FAIL — the decomposition cuts the walled axis %d; flow's "
-                      "per-face domain BCs have no rank-ownership test (WO-A finding)\n",
+          std::printf("  [%-7s np=%d] FAIL — the decomposition does NOT cut axis %d; this test "
+                      "exists to gate the domain-BC / property-ghost rank ownership on a CUT "
+                      "walled axis (WO-F)\n",
                       c.name, size, c.axis);
         fail = 1;
         continue;

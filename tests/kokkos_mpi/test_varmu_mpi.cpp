@@ -5,36 +5,38 @@
 // "mu" ghost ring (`fillPropGhosts`), the HARMONIC face mean assembled across a rank boundary, and
 // `minMuInner`'s allreduce feeding the rotational term's chi*mu_min coefficient.
 //
-// Two configurations on a 32x16x8 grid (the aligned ORB cuts only x at np = 1, 2, 4):
+// Two configurations on a 16x32x8 grid — the aligned ORB cuts the LONG y axis at np = 2, 4, which
+// is deliberately the walled/loaded axis of both configurations (WO-F):
 //
-//   * `couette-y` — the WO-A configuration, a reduced mirror of tests/study/two_layer_couette.py:
-//     plane Couette across y (fixed -y wall, +y lid at U) through a SYMMETRIC three-layer
-//     viscosity stack mu2 | mu1 | mu2 with two 10x jumps, at y = NY/4 and y = 3NY/4. The shear
-//     stress tau is uniform, so the exact steady Stokes profile is u(y) = tau * int dy/mu — an
-//     ANALYTIC, decomposition-independent gate that only the HARMONIC face mean reproduces (the
-//     arithmetic mean misses it by O(1%)). The walled y axis is never cut, and the test asserts it.
+//   * `couette-y` — the LITERAL two-layer Couette of tests/study/two_layer_couette.py: plane
+//     Couette across y (fixed -y wall, +y lid at U) through a MONOTONE two-layer viscosity stack
+//     mu1 | mu2 with a single 10x jump at y = NY/2. The shear stress tau is uniform, so the exact
+//     steady Stokes profile is u(y) = tau * int dy/mu — an ANALYTIC, decomposition-independent gate
+//     that only the HARMONIC face mean reproduces (the arithmetic mean misses it by O(1%)).
 //
-//     Why symmetric and not the study's monotone two-layer stack: `fillPropGhosts` applies the
-//     zero-gradient property BC on domain-BC faces ONLY when `!distributed_` (flow_ibm.hpp), so
-//     under MPI the mu ghost on a walled face keeps its PERIODIC WRAP value. With a monotone stack
-//     mu(0) != mu(NY-1), and the distributed run then disagrees with the single-rank reference by
-//     2.7e-2 relative ALREADY AT np = 1 (measured; WO-A escalation #2 — see the findings log in
-//     doc/vof_workorders.md). The symmetric stack has mu(0) == mu(NY-1), so the wrap value
-//     coincides with the zero-gradient value and the configuration is exact; it still carries two
-//     10x jumps, so the harmonic-mean gate is unweakened. Restore the two-layer stack once the
-//     property-BC ghost path becomes rank-aware.
+//     WO-A had to ship a SYMMETRIC mu2|mu1|mu2 stack here instead, because `fillPropGhosts` /
+//     `fillPorousEpsGhosts` applied their domain-face override only `if (!distributed_)`, leaving
+//     the mu ghost on a walled face at its PERIODIC WRAP value in every distributed run. With a
+//     monotone stack mu(0) != mu(NY-1), so the wrap value is the WRONG layer and the distributed
+//     solver disagreed with the single-rank reference by 2.7e-2 relative ALREADY AT np = 1; the
+//     symmetric stack had mu(0) == mu(NY-1) and so hid it. WO-F replaced that guard with the
+//     per-face `touchesGlobalFace` ownership test (correct at every np, single-rank byte-identical
+//     because the test is always true there), which is exactly what the monotone stack gates.
 //
-//   * `per-x` — fully periodic (no domain BC, hence unaffected by the above), with the 10x
-//     viscosity jump stacked along the CUT axis, so at np = 2 and 4 it sits exactly on a rank
-//     boundary and the harmonic face mean there is assembled from an exchanged ghost. Driven by a
-//     zero-mean cos(2 pi x / NX) body force in z (a uniform force in a fully periodic box has no
-//     steady state). np-consistency gate only — no closed form.
+//   * `per-y` — fully periodic (no domain BC), with the 10x viscosity jump stacked along the CUT
+//     axis, so at np = 2 and 4 it sits exactly on a rank boundary and the harmonic face mean there
+//     is assembled from an exchanged ghost. Driven by a zero-mean cos(2 pi y / NY) body force in z
+//     (a uniform force in a fully periodic box has no steady state). np-consistency gate only — no
+//     closed form.
 //
-// WALLED AXIS / MPI (WO-A escalation #1): flow's per-face domain BCs are imposed by EVERY rank on
-// its own block faces — `applyVelocityBcCompTo` and the pressure-openness BC have no
-// `touchesGlobalFace` ownership test, unlike the scalar-transport BCs (`applyScalarBc`). A cut
-// walled axis silently splits the domain into independent sub-domains; the test asserts the walled
-// axis stays uncut.
+// WALLED AXIS / MPI (WO-A escalation #1, fixed by WO-F): flow's per-face domain BCs used to be
+// imposed by EVERY rank on its OWN block faces — `applyVelocityBcCompTo`, the flux-openness
+// construction and the pressure MG's per-level boundary openness had no `touchesGlobalFace`
+// ownership test, unlike the scalar-transport BCs (`applyScalarBc`), so a cut walled axis silently
+// split the domain into independent sub-domains. This test now REQUIRES the walled axis to be cut
+// and compares the PRESSURE as well as the velocity — WO-A measured that on a walled column the
+// velocity stays clean (4.5e-17) while the pressure is off by 4.0e+02, i.e. only the pressure sees
+// the defect.
 //
 // Comparison protocol (the `tests/kokkos_mpi` pattern): pointwise against a full-grid single-rank
 // reference on rank 0. np = 1 bit-exact; np > 1 to the MG-PCG reduction-order floor.
@@ -54,26 +56,22 @@
 using peclet::core::IVec;
 using peclet::flow::IbmSolver;
 
-static constexpr int NX = 32, NY = 16, NZ = 8;
+static constexpr int NX = 16, NY = 32, NZ = 8;
 static constexpr double MU1 = 1.0, MU2 = 0.1, ULID = 1.0, RHO = 1.0, DT = 100.0;
-static constexpr int STEPS_COUETTE = 80, STEPS_PERX = 40;
+static constexpr int STEPS_COUETTE = 80, STEPS_PERY = 40;
 static constexpr double FZ = 1e-2;
 static constexpr std::size_t GCELLS = (std::size_t)NX * NY * NZ;
 
 struct Config {
   const char* name;
-  bool couette;  // walled three-layer Couette (else the periodic cut-axis sandwich)
+  bool couette;  // walled two-layer Couette (else the periodic cut-axis sandwich)
   int steps;
 };
 
-// Couette: the symmetric mu2|mu1|mu2 stack across the walled y axis (see the header).
-// per-x: a single 10x jump across the CUT x axis.
-static double muAt(const Config& c, int x, int y, int) {
-  if (c.couette)
-    return (y < NY / 4 || y >= 3 * NY / 4) ? MU2 : MU1;
-  return (x < NX / 2) ? MU1 : MU2;
-}
-static double srcAt(int x, int, int) { return std::cos(2.0 * M_PI * x / NX); }
+// Both configurations load the CUT y axis: the literal monotone two-layer stack mu1|mu2 (see the
+// header), walled for `couette-y` and periodic for `per-y`.
+static double muAt(const Config&, int, int y, int) { return (y < NY / 2) ? MU1 : MU2; }
+static double srcAt(int, int y, int) { return std::cos(2.0 * M_PI * y / NY); }
 
 template <class Fn>
 static std::vector<double> blockOf(Fn f, int ox, int oy, int oz, int lnx, int lny, int lnz) {
@@ -109,6 +107,17 @@ static void configure(IbmSolver& s, const Config& c, int ox, int oy, int oz, int
     s.setField("src", blockOf(srcAt, ox, oy, oz, lnx, lny, lnz));
     s.exchangeField("src");
     s.setPropertyModel("force_z", peclet::flow::ClosureKind::LinearMix, "src", "", {0.0, FZ});
+    // ...plus an explicit seed of the SAME field, only to fill its GHOST ring — see the identical
+    // note in test_vardensity_mpi.cpp: `applyClosure` writes inner cells only and nothing in
+    // `step()` ever exchanges a `force_*` field, so `buildRhs*`'s face force
+    // `0.5*(fb(i) + fb(i-strd))` is halved on the first inner plane of every block. A THIRD
+    // pre-existing defect, root-caused and escalated in the WO-F findings log rather than fixed
+    // here (the fix would move single-rank numerics for every closure-driven case). `src` is
+    // static, so the closure rewrites the same inner values every step and these ghosts persist.
+    s.setField("force_z",
+               blockOf([](int x, int y, int z) { return FZ * srcAt(x, y, z); }, ox, oy, oz, lnx,
+                       lny, lnz));
+    s.exchangeField("force_z");
   }
 }
 
@@ -161,15 +170,13 @@ static double maxAbs(const std::vector<double>& a) {
   return m;
 }
 
-// Exact steady Stokes Couette through the symmetric mu2|mu1|mu2 stack: tau is uniform, so
-// u(y) = tau * integral(dy/mu) and U = tau*(0.5/mu2 + 0.5/mu1).
+// Exact steady Stokes Couette through the monotone two-layer mu1|mu2 stack: tau is uniform, so
+// u(y) = tau * integral(dy/mu) and U = tau*(0.5/mu1 + 0.5/mu2).
 static double couetteExact(double yc) {
-  const double tau = ULID / (0.5 / MU2 + 0.5 / MU1);
-  if (yc < 0.25)
-    return tau * yc / MU2;
-  if (yc < 0.75)
-    return tau * 0.25 / MU2 + tau * (yc - 0.25) / MU1;
-  return tau * 0.25 / MU2 + tau * 0.5 / MU1 + tau * (yc - 0.75) / MU2;
+  const double tau = ULID / (0.5 / MU1 + 0.5 / MU2);
+  if (yc < 0.5)
+    return tau * yc / MU1;
+  return tau * 0.5 / MU1 + tau * (yc - 0.5) / MU2;
 }
 static double couetteError(const std::vector<double>& u) {
   double e = 0;
@@ -204,13 +211,16 @@ int main(int argc, char** argv) {
       std::printf("VARMU MPI np=%d  grid %dx%dx%d  block %dx%dx%d  cut axes: %s%s%s\n", size, NX,
                   NY, NZ, lnx, lny, lnz, cut[0] ? "x" : "", cut[1] ? "y" : "", cut[2] ? "z" : "");
 
-    const Config configs[] = {{"couette-y", true, STEPS_COUETTE}, {"per-x", false, STEPS_PERX}};
+    const Config configs[] = {{"couette-y", true, STEPS_COUETTE}, {"per-y", false, STEPS_PERY}};
 
     for (const Config& c : configs) {
-      if (c.couette && cut[1]) {
+      // WO-F: the walled/loaded y axis must be CUT — that is the case the domain-BC and
+      // property-ghost ownership tests exist for.
+      if (size > 1 && !cut[1]) {
         if (rank == 0)
-          std::printf("  [%-9s np=%d] FAIL — the decomposition cuts the walled y axis; flow's "
-                      "per-face domain BCs have no rank-ownership test (WO-A finding)\n",
+          std::printf("  [%-9s np=%d] FAIL — the decomposition does NOT cut the walled y axis; "
+                      "this test exists to gate the domain-BC / property-ghost rank ownership on "
+                      "a CUT walled axis (WO-F)\n",
                       c.name, size);
         fail = 1;
         continue;
@@ -223,6 +233,10 @@ int main(int argc, char** argv) {
       std::vector<double> gu[3];
       for (int comp = 0; comp < 3; ++comp)
         gu[comp] = gatherGlobal(sd.getVelocity(comp), ox, oy, oz, lnx, lny, lnz, rank, size);
+      // WO-F: the PRESSURE is the field that exposes a non-rank-aware domain BC (the velocity of a
+      // split domain stays clean); gate it too.
+      const std::vector<double> gp =
+          gatherGlobal(sd.getPressure(), ox, oy, oz, lnx, lny, lnz, rank, size);
 
       if (rank == 0) {
         IbmSolver ref(NX, NY, NZ);
@@ -235,9 +249,18 @@ int main(int argc, char** argv) {
           umag = std::fmax(umag, maxAbs(ref.getVelocity(comp)));
         }
         const double rel = du / (umag + 1e-300);
-        const double tol = (size == 1) ? 0.0 : 1e-11;  // np=1 bit-exact; np>1 reduction floor
+        const double dp = maxAbsDiff(gp, ref.getPressure());
+        const double pmag = maxAbs(ref.getPressure());
+        // np=1 bit-exact; np>1 the MPI reduction-order floor. The pressure needs an ABSOLUTE
+        // floor as well as a relative one: this is a pure-shear Stokes flow, so |P| itself is
+        // ~1e-8 (numerical zero) and a purely relative gate would be gating round-off. The
+        // *velocity* is the strong gate here (the analytic Couette across the cut walled axis);
+        // the strong pressure gate lives in test_vardensity_mpi's hydrostatic column, where
+        // |P| = O(800) and the pre-WO-F defect showed up as 4.0e+02.
+        const double utol = (size == 1) ? 0.0 : std::fmax(1e-15, 1e-11 * umag);
+        const double ptol = (size == 1) ? 0.0 : std::fmax(1e-14, 1e-11 * pmag);
         double aerr = -1;
-        bool ok = rel <= tol;
+        bool ok = du <= utol && dp <= ptol;
         if (c.couette) {
           aerr = couetteError(gu[0]);
           ok = ok && aerr < 5e-3;  // the harmonic-mean gate (arithmetic misses by O(1%))
@@ -245,8 +268,9 @@ int main(int argc, char** argv) {
         char extra[64] = "";
         if (c.couette)
           std::snprintf(extra, sizeof(extra), "  analytic err=%.4f%%", aerr * 100.0);
-        std::printf("  [%-9s np=%d] rel du=%.3e (tol %.0e)%s  %s\n", c.name, size, rel, tol, extra,
-                    ok ? "OK" : "FAIL");
+        std::printf("  [%-9s np=%d] du=%.3e (rel %.2e, tol %.1e) | dp=%.3e (|P|=%.2e, tol %.1e)"
+                    "%s  %s\n",
+                    c.name, size, du, rel, utol, dp, pmag, ptol, extra, ok ? "OK" : "FAIL");
         if (!ok)
           fail = 1;
       }

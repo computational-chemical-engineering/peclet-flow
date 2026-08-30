@@ -339,12 +339,28 @@ divergence at a fixed 8 cycles drops `1.7e-4`→`8.6e-13`. The BC verify scripts
 Validated against analytics (Taylor–Green ~2e-15, Poiseuille, momentum conservation) **and against Zick &
 Homsy sphere-array drag**; the multi-rank step is bit-exact to the single-rank — **42 `tests/kokkos_mpi`
 ctests, real multi-rank np=1,2,4, on CUDA + OpenMP**. The variable-density and variable-viscosity
-layers are multi-rank + CUDA gated since 2026-08-30 (`vardensity_mpi`, `varmu_mpi`) — with **two open
-gaps in the DOMAIN-BC machinery** found while gating them: per-face domain BCs have no
-`touchesGlobalFace` ownership test (a partition that cuts a walled axis silently splits the domain —
-visible only in the pressure), and `fillPropGhosts` / `fillPorousEpsGhosts` apply their domain-face
-override only `if (!distributed_)`, so μ/ρ/ε ghosts on a walled face keep their periodic wrap value
-under MPI. Details + measured numbers: `doc/variable_density_projection.md` §4.
+layers are multi-rank + CUDA gated since 2026-08-30 (`vardensity_mpi`, `varmu_mpi`).
+
+**Domain BCs are rank-aware (WO-F, 2026-08-30).** Every per-face domain-BC application is guarded by
+an ownership test — `touchesGlobalFace(f)` in `IbmSolver`, `touchesGlobalFace(lv, f)` per level in
+`CutcellMG` — so a rank imposes a face's BC **iff its own block touches that global face**; the halo
+exchange (built periodic on all three axes) owns every interior ghost, and the BC overwrite wins on
+the owning rank, exactly the fill-then-BC order the single-rank path uses. Single-rank the test is
+identically true, so all of it is byte-identical there. Before the fix, every rank imposed the wall
+on its OWN block faces, so a partition cutting a walled/inflow/outflow axis split the domain into
+independent sub-domains — **invisible in the velocity** (each sub-domain is separately consistent)
+and visible only in the pressure (measured: max|u| 4.5e-17 while max|P_dist − P_ref| = 4.0e+02).
+Guarded sites: velocity BCs, the flux-openness construction, the implicit wall fold, the pressure /
+φ ghosts, `bcCorrectOutflow`, backflow stabilization, and the pressure MG's per-level boundary
+openness + outflow ghost. `fillPropGhosts` / `fillPorousEpsGhosts` used to key their override on
+`if (!distributed_)` — wrong at every np including 1 — and now use the same per-face test.
+Details + measured numbers: `doc/variable_density_projection.md` §4.
+
+Two related MPI restrictions remain, both now explicit rather than silent: the solver's **velocity
+multigrid is single-rank** (`IbmSolver` never calls `VelocityMG::initMpi`; `set_velocity_multigrid`
+is disabled with a stderr notice under MPI), and a **multi-rank inlet profile** must be handed to
+each rank as its own block's slice — `set_domain_bc_profile` resamples onto the local face plane and
+there is no scatter helper.
 
 Build/test the multi-rank ctests:
 ```bash
