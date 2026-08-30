@@ -1464,6 +1464,185 @@ OMP_NUM_THREADS=8 OMP_PROC_BIND=false PYTHONPATH=$PWD/build python \
 #   PECLET_FLOW_MG_DEBUG=2 PECLET_FLOW_MG_SOLVES=4 ... --drivers fcg
 ```
 
+### WO-H — the MG-PCG domain-BC stall + the PCG selector no-op — **DONE 2026-08-30**, one residual escalated
+
+Delivered: `CutcellMG::applyNeumannGhost` (`src/mac_cutcell_mg.hpp`) + its call before the
+prolongation in `vcycleImpl`, with the `PECLET_FLOW_MG_BCGHOST=0` ablation; a genuinely selecting
+`IbmSolver::setPressurePcg` (+ `setPressureChebyshev` made exclusive in both directions) and the two
+binding docstrings; the new ctest `tests/kokkos/test_pressure_wallbounded.cpp` (nz = 16, 6
+configurations x 3 drivers); and the doc corrections — `CLAUDE.md`'s pressure-driver bullets and the
+domain-BC multigrid paragraph, `doc/variable_density_projection.md` §2, and the two stale
+justifications inside `setDensityMode` / `setPorousContinuity`.
+
+**WHAT THE ASYMMETRY ACTUALLY WAS — a one-line omission, and the sibling class shows it.**
+`CutcellMG`'s per-level ghost fill is **periodic on all three axes** (`fill()` single-rank, the core
+`GridHalo` multi-rank — both built periodic by construction). On a walled face that leaves a level's
+`x` ghost holding the value from the **opposite side of the domain**. Every *operator* consumer is
+immune to that, which is why it survived three years: the wall face openness is 0, so the smoother,
+the residual and the matvec all multiply that ghost by `AW`/`AE` = 0. But **`prolongAdd` is not an
+operator consumer** — trilinear interpolation samples the coarse ghost with weight **1/4** whatever
+the openness (`cx = 0.5*ifx - 0.25 + gc` -> `floor` = `gc-1`, `wx` = 0.75), so every fine cell against
+a wall was receiving a quarter of its coarse correction *from the far wall*. That is a long-range
+coupling present in P and absent from R — an asymmetric coarse-grid correction, i.e. exactly the
+non-SPD preconditioner WO-C's `pr` instrument measured.
+
+The fix imposes the zero-gradient (Neumann) ghost on owned wall/inflow faces (`touchesGlobalFace`,
+per the WO-F pattern) after the periodic fill and before the prolongation, alongside the Dirichlet
+ghost `applyOutflowGhost` already imposed for outflow faces. Then the boundary fine cell simply takes
+the coarse value (`0.25*c0 + 0.75*c0 = c0`).
+
+**The strongest evidence that this is the intended design and not an invention: `VelocityMG` has
+always done it.** `mac_velocity_mg.hpp` carries `fillProlongBcGhosts` / `fillBcGhost` — "fill a
+non-periodic boundary ghost of a coarse correction before trilinear prolongation
+(`mg_fill_bc_ghost_k`): Dirichlet (outflow) -> ghost 0; Neumann (wall/inflow) -> ghost = nearest
+inner (zero-gradient)" — the port of the retired CUDA kernel of that name. The **pressure** MG only
+ever received the Dirichlet half. `CLAUDE.md`'s "the trilinear prolongation fills the non-periodic
+boundary ghosts (Neumann -> zero-gradient, Dirichlet -> 0)" was describing the velocity MG and the
+intent, not the pressure code.
+
+**A dense measurement of the preconditioner, not an inference.** A throwaway harness assembles the
+V-cycle preconditioner `M` as an explicit matrix — one `solvePCG(..., maxit=0)` per unit basis vector,
+so it is the very code path CG uses, mean-removal included — on an 8^3 box with unit openness, and
+reports `||M - M^T||_F / ||M||_F`:
+
+| BCs (8^3, levels 3, constant coefficient) | before | after |
+|---|---|---|
+| fully periodic | 0.0080 | **0.0080 (byte-identical)** |
+| walls +-z | 0.0430 | **0.0066** |
+| lid box (walls -x/+x/-z, prescribed-velocity +z) | 0.0512 | **0.0053** |
+| all six walls | 0.0535 | **0.0053** |
+| five walls + outflow +x | 0.0304 | **0.0094** |
+
+So the repair does not merely reduce the wall-bounded asymmetry — it puts it **below** the periodic
+hierarchy's own residual asymmetry (which comes from the R/P pair being averaging vs trilinear, is
+identical before and after, and is small enough that CG has always tolerated it).
+
+**`pr` before/after (the number WO-C asked WO-H to keep).** `PECLET_FLOW_MG_DEBUG=2`,
+`solveFCG`, constant rho, `levels=4`, 32^3, iterations >= 2, 4 solves — the same configurations
+WO-C tabulated, run in one build with `PECLET_FLOW_MG_BCGHOST` as the only difference:
+
+| configuration | median `pr` before | max before | median `pr` after | max after |
+|---|---|---|---|---|
+| immersed cylinder, **periodic** (the reference) | 0.0624 | 0.320 | **0.0624** | 0.320 |
+| immersed cylinder, hydrostatic (walls +-z) | 0.5176 | 1.424 | **0.0511** | 0.165 |
+| immersed cylinder, lid (walls) | 0.4157 | 1.401 | **0.0287** | 0.148 |
+| open box, hydrostatic | 0.4438 | 1.266 | **0.0860** | 0.500 |
+| open box, lid | 0.4776 | 1.359 | **0.0076** | 0.019 |
+
+The "before" column reproduces WO-C's recorded values (0.451 / 0.478 / 0.434 / 0.469 and periodic
+0.062) — the ablation is the same measurement, so the A/B is on one build.
+
+**Iteration counts on the previously stalling cases** (`tests/kokkos/test_pressure_wallbounded.cpp`,
+24x24x16, 4 levels, 8 steps, cap 200; median/max its and max\|div(open u)\|/u after the last step;
+"before" = the same binary under `PECLET_FLOW_MG_BCGHOST=0`):
+
+| configuration | driver | before | after |
+|---|---|---|---|
+| A lid box, **constant rho** | MG-PCG | **200/200**, div/u 5.1e-06 | **6 / 6**, 5.9e-13 |
+| A | FCG | 22 / 22, 1.4e-13 | **6 / 6**, 5.2e-13 |
+| A | Chebyshev | 12 / 12, 5.1e-13 | **7 / 7**, 4.4e-13 |
+| B hydrostatic column, **constant rho** | MG-PCG | **200/200**, 3.6e-14 | **6 / 6**, 1.6e-23 |
+| B | FCG | 15 / 22 | **6 / 6** |
+| B | Chebyshev | 11 / 12 | **7 / 7** |
+| C stratified column, ratio 1e2 | MG-PCG | 200/200, div/u **1.22** (destroyed) | 200/200, 2.1e-06 |
+| C ratio 1e2 | FCG | 55 / **200**, div/u **1.22** (destroyed) | **55 / 55**, 3.5e-22, max\|u\| 2.3e-14 |
+| C ratio 1e2 | Chebyshev | 14 / 14 | **10 / 10** |
+| C stratified column, ratio 1e3 | MG-PCG | 200/200, 1.54 | 200/200, 1.08 |
+| C ratio 1e3 | FCG | 29 / 200, 1.43 | 200/200, 1.08 |
+| C ratio 1e3 | Chebyshev | 16 / 16 | **12 / 12** |
+| D small coeff at an inflow face, 1e2 | MG-PCG | 200/200, 5.4e-08 | 200/200, 2.7e-13 |
+| D 1e2 | FCG | 22 / 27 | **10 / 18** |
+| D 1e2 | Chebyshev | 13 / 14 | **9 / 9** |
+| D small coeff at an inflow face, 1e3 | MG-PCG | 200/200, 5.6e-04 | 200/200, 2.0e-05 |
+| D 1e3 | FCG | 17 / **200**, div/u **5.6e-04** (destroyed) | **10 / 74**, 5.1e-15 |
+| D 1e3 | Chebyshev | 13 / 16 | **9 / 10** |
+
+Note that **Chebyshev improves too** (12 -> 7, 14 -> 10, 16 -> 12, 13 -> 9): the repair makes the
+V-cycle a *better* preconditioner, not only a symmetric one — the far-wall teleport was polluting the
+correction whatever the outer driver.
+
+**THE TWO RESIDUAL MODES ARE ONE DEFECT, AND IT IS A COEFFICIENT DEFECT, NOT A BOUNDARY ONE
+(ESCALATION).** WO-C's Residual #1 (stratified hydrostatic column) and Residual #2 (small coefficient
+against a prescribed-velocity face) are the same mechanism, and the dense harness names it: with a
+high-contrast coefficient the **V-cycle preconditioner becomes INDEFINITE**. `sym(M)`, factored by
+LDL^T on the 8^3 walled box with `c_f = rho0/rho_f` from a sharp mid-height slab:
+
+| coefficient contrast | walls +-z, before | walls +-z, after | fully periodic |
+|---|---|---|---|
+| 1 (uniform) | 0 negative pivots, skew 0.043 | 0 negative, skew 0.0066 | 0 negative, skew 0.0080 |
+| 1e2 | **1 negative** (-1.1e-12), skew 0.048 | 0 negative, skew 0.037 | 0 negative, skew 0.020 |
+| 1e3 | **1 negative** (-3.45), skew 0.048 | **1 negative** (-0.19), skew 0.037 | **1 negative**, skew 0.020 |
+| 1e4 | — | — | **7 negative** (-6.3), skew 0.020 |
+
+No choice of the CG beta survives an indefinite preconditioner, which is why FCG did not cure these
+and why the repair only *raises the ceiling* (ratio 1e2 stratified and both inflow-face ratios are now
+solved by FCG; ratio 1e3 stratified is not). The cause is `coarsenOpenAvg`'s **arithmetic** averaging
+of the face coefficient: across a 1000:1 jump the coarse face coefficient comes out ~0.5 where the
+physically right value is ~2e-3, so the coarse operator is not an approximation of the fine one at all.
+It is present **fully periodically** as well (a negative pivot at 1e3, seven at 1e4), so it is not a
+boundary-treatment problem and it is not something WO-H's scope could fix. **This is VOF_PLAN's S3
+(coefficient-aware coarsening), now indicated by a direct measurement instead of inferred** — and it
+is the honest reason Chebyshev (which needs only real spectrum bounds, and is healthy on every
+configuration in this WO) remains the varRho/porous default. Do NOT "fix" it by switching
+`coarsenOpenAvg` to a harmonic mean: that field is the *geometric openness* on the periodic/IBM path,
+where the arithmetic average is the validated cut-cell coarsening and any change breaks the
+byte-identity gate. A coefficient-aware variant has to be a separate, gated path.
+
+**Defect 1 — the selector, repaired.** `setPressurePcg(bool on, int, double)` now writes
+`useChebyshev_ = false; useFcg_ = false` when `on`, so MG-PCG is genuinely selectable after
+`set_density_mode` / `set_porous`; `setPressureChebyshev(true, ...)` clears `useFcg_` symmetrically;
+`setPressureFcg` already cleared `useChebyshev_`. `set_pressure_pcg(False, ...)` **throws** rather
+than being silently ignored — MG-PCG is the terminal fallback of the dispatch, so "not PCG" is only
+expressible by naming another driver, and the message says so (`setPressureFcg`'s precedent: write
+your own flag, clear the competing one, throw where the request cannot be honoured). Demonstrated on
+the wall-bounded lid box at 24x24x16, ratio 1e2, **after `set_density_mode("variable")`** — three
+distinguishable signatures on one operator (Chebyshev ~9, MG-PCG 200, FCG ~10):
+
+| after `set_density_mode("variable")`, then ... | iterations | driver actually run |
+|---|---|---|
+| (nothing) | 10, 9, 9, 9 | Chebyshev (the varRho default) |
+| `set_pressure_pcg(True, 200, 1e-8)` | **200, 200, 200, 200** | **MG-PCG — the no-op is gone** (was 10, 9, 9, 9) |
+| `set_pressure_fcg(True, 200, 1e-8)` | 18, 7, 10, 10 | FCG |
+| `set_pressure_fcg(True)` then `set_pressure_pcg(True)` | 200, 200, 200, 200 | MG-PCG |
+| `set_pressure_pcg(True)` then `set_pressure_chebyshev(True)` | 9, 8, 9, 9 | Chebyshev |
+| `set_pressure_fcg(True)` then `set_pressure_chebyshev(True)` | 9, 8, 9, 9 | Chebyshev |
+| `set_pressure_chebyshev(False, ...)` (the old working spelling) | 500 x4 | MG-PCG (cap = `pcgMaxit_`'s 500) |
+| `set_pressure_pcg(False, ...)` | raises `set_pressure_pcg(False): MG-PCG is the default/terminal pressure driver ...` | — |
+
+(This configuration is case D above, so MG-PCG capping here is the residual coefficient defect, not
+the selector — that is exactly why it makes a clean three-way signature.)
+
+**Gates.**
+
+| gate | result |
+|---|---|
+| Single-phase regression **bit-exact** | **PASS** — `tests/regression/sdflow_regression.py --build build_woh` on nvidia-cuda: **+0.00 %** on every metric (K, k*, order p, Richardson extrapolate) and **identical** pressure-iteration totals, per-step medians and step counts on all 13 grid points of `zh_sphere` / `random_spheres` / `hollow_rings`. Structurally guaranteed: `applyNeumannGhost` returns immediately unless `hasBC_`, which no periodic/IBM problem sets |
+| New 3-D wall-bounded ctest converges for PCG, FCG and Chebyshev | **PASS** — `pressure_wallbounded`, 14 gated (case, driver) pairs, nz = 16; green on **host-openmp AND nvidia-cuda** (19 s / 50 s) |
+| ...and **fails for PCG before the fix** | **DEMONSTRATED** — the same binary under `PECLET_FLOW_MG_BCGHOST=0` fails 9 checks (both constant-density cases, all three PCG rows plus the FCG rows of C-1e2 and D-1e3) |
+| `set_pressure_pcg(True)` after `set_density_mode("variable")` selects PCG | **PASS** — table above |
+| `pr` on wall-bounded configurations drops to the periodic level | **PASS** — 0.42-0.52 -> **0.008-0.086** against the periodic 0.062, on the same geometries |
+| Existing quasi-2D domain-BC verifications unchanged | **PASS** — lid cavity vs Ghia Re=100 N=128: u rms **0.0075**, v rms 0.0039, min centreline u **-0.2101** (Ghia -0.2058), max flux divergence **1.1e-16**, `result: PASS` — the recorded "~0.7 % rms". Channel + BFS below |
+| `tests/kokkos` full suite | **PASS 22/22** on host-openmp AND nvidia-cuda (the 21 pre-existing + `pressure_wallbounded`) |
+| All MPI ctests green, host + CUDA | see below |
+
+**Byte-identity of the periodic/IBM path, precisely.** `applyNeumannGhost` is `if (!hasBC_ || !bcGhost_) return;` and `hasBC_` is only set by `setBoundaryConditions` with a non-zero face type. The
+periodic + IBM hierarchy therefore never enters it — confirmed twice over: the dense `M` for the
+fully periodic case is **identical to the last bit** with the ablation on and off, and the regression
+reproduces every recorded iteration count exactly.
+
+**Reproduce.**
+```bash
+# the headline (PCG 200/200 -> 6 on a constant-density wall-bounded grid), and its ablation:
+OMP_NUM_THREADS=8 OMP_PROC_BIND=false ./build_ktest/test_pressure_wallbounded
+PECLET_FLOW_MG_BCGHOST=0 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ./build_ktest/test_pressure_wallbounded
+# the symmetry read-out, before vs after, on one build:
+PECLET_FLOW_MG_BCGHOST=0 PECLET_FLOW_MG_DEBUG=2 PECLET_FLOW_MG_DEBUG_SOLVES=4 \
+  python tests/study/vardensity_solver_probe.py --geoms box --shapes const --cases lid --drivers fcg
+# the battery, all three drivers:
+OMP_NUM_THREADS=8 OMP_PROC_BIND=false PYTHONPATH=$PWD/build python \
+  tests/study/vardensity_solver_probe.py --drivers cheb,pcg,fcg
+```
+
 ### WO-I (blocker fix) — `drag_beta` ghosts are stale in the momentum build — **DONE 2026-08-30**
 
 Fixed in one place, exactly as WO-G: `IbmSolver::fillDragBetaGhosts()` (`src/flow_ibm.hpp`), called
@@ -1640,10 +1819,12 @@ worktree.
 
 What is established:
 
-- **nvidia-cuda, np = 4, deterministic.** `test_bodyforce_ghost_mpi` fails 5/5 runs and
-  `test_dragbeta_ghost_mpi` likewise, on BOTH the pristine and the fixed tree, on 16×16×32 whose
-  np = 4 ORB is 8×16×16 — x AND z each cut into exactly two, so on those axes a rank's left and
-  right neighbour are the *same rank*.
+- **Four independent tests, three of them pre-existing.** `varmu_mpi_np4` (host, inside a loaded
+  `ctest`), `bodyforce_ghost_mpi_np4` (CUDA, 5/5 runs, pristine tree included),
+  `ghost_projection_mpi_np4` (CUDA, inside a loaded `ctest`) and `dragbeta_ghost_mpi_np4`. Every one
+  of them is a decomposition that cuts **two axes into exactly two blocks** — 16×16×32 → 8×16×16,
+  16×32×8 → 8×16×8 — so on those axes a rank's left and right neighbour are the *same rank*, and two
+  exchanges to that one neighbour are in flight together.
 - **`PECLET_FLOW_CA=0` fixes it completely.** With the communication-avoiding smoother exchange off,
   np = 4 CUDA runs green for both tests: `bodyforce_ghost_mpi` `PASS` on all three configurations,
   and `dragbeta_ghost_mpi` `du = dp = 0.000e+00` with `diag = [4, 4]` on all three. CA is exactly the
@@ -1651,12 +1832,15 @@ What is established:
   `MPI_ERR_TRUNCATE` is by definition a receive buffer smaller than its matching send — a same-tag,
   same-neighbour size mismatch, with the doubled neighbour of a 2-blocks-per-axis periodic
   decomposition as the obvious trigger.
-- **host-openmp, np = 4, INTERMITTENT and load-sensitive.** Standalone, `dragbeta_ghost_mpi_np4`
-  passes (measured repeatedly while writing the test). Inside a loaded `ctest` run (this session's
-  machine sat at load ~28 with two other agents' batteries running) `varmu_mpi_np4` and
-  `dragbeta_ghost_mpi_np4` failed with the same truncation while `bodyforce_ghost_mpi_np4` in the
-  same pass passed. `varmu_mpi_np4`'s grid is 16×32×8 → np = 4 blocks 8×16×8, i.e. again two axes cut
-  into exactly two — the same decomposition signature.
+- **It is LOAD-SENSITIVE, i.e. a race and not a fixed size bug.** The same binary and the same np
+  pass standalone and fail under concurrent load, on both backends: host `dragbeta_ghost_mpi_np4`
+  passes standalone (measured repeatedly, including after rebasing onto WO-H's changes) and failed
+  inside a loaded `ctest`; CUDA `ghost_projection_mpi_np4` failed inside the loaded `ctest` and then
+  produced zero truncations standalone; pristine host `varmu_mpi_np4` ran clean standalone twice
+  after failing in 0.58 s inside the loaded `ctest`. This session's machine sat at load ~28 with two
+  other agents' batteries running. A race between two in-flight exchanges of DIFFERENT ghost width
+  sharing a tag and a neighbour is the natural reading, and it is why the effect concentrates on the
+  doubled-neighbour decompositions above.
 
 Not diagnosed further and **not fixed**: it is in the halo / CA smoother communication layer, not the
 porous coefficient plumbing this WO is scoped to. Recommended next step for whoever takes it: post
@@ -1671,7 +1855,7 @@ pre-existing tests so the two are known to fail and pass together.
 |---|---|
 | New test **fails before** the fix (demonstrated, not asserted) | **PASS.** Pristine `98e2bb8` built in a separate `git worktree` with only the new test file + its CMake line added. host-openmp: at every np, `diag = [2.5, 4]` — the first inner plane's momentum diagonal is `idt + β/2 = 2.5` against `idt + β = 4` — and the velocity value gate fails: np=1 `per-z 0.33210449218750004`, `per-x 0.33217773437499998` (want `0.33203125`); np=2 all three configs `0.33217773…` with `du = 7.324e-05`; np=4 `per-x 0.33232421874999996`, `du = 1.465e-04`. Each rank boundary adds another half-plane, exactly as WO-G measured for the force. CUDA reproduces (`per-z np=4 diag [2.5, 4]`, `du = 7.324e-05`) |
 | New test **passes after** | **PASS.** host-openmp np = 1/2/4: `diag = [4, 4]` exactly, `u spread = 0.000e+00`, `value = 0.33203125` exactly, `cross = 0`, `max\|P\| = 0`, and **`du = dp = 0.000e+00` (bitwise vs the np=1 reference) at every np**. nvidia-cuda np = 1/2 identical; np = 4 identical **with `PECLET_FLOW_CA=0`** (escalation #2) |
-| np 2/4 vs np 1, host + CUDA, on all pre-existing tests | **PARTIAL — see escalation #2.** host-openmp, in two passes (1–37, then 38–48; the agent harness killed the first `ctest` at #38, not a test failure): **46 of 48 green**, the two failures being `varmu_mpi_np4` (**pre-existing**, no drag field) and `dragbeta_ghost_mpi_np4`, both `MPI_ERR_TRUNCATE` under machine load, both green standalone. nvidia-cuda: green through test 26 when the harness stopped the run, resumed 27–48; the `*_np4` legs of `bodyforce_ghost_mpi` (**pre-existing**) and `dragbeta_ghost_mpi` fail deterministically there and **pass under `PECLET_FLOW_CA=0`**, as does the pristine tree's — i.e. the failure tracks the CA exchange and the decomposition, not this fix |
+| np 2/4 vs np 1, host + CUDA, on all pre-existing tests | **PARTIAL — see escalation #2.** host-openmp, in two passes (1–37, then 38–48; the agent harness killed the first `ctest` at #38, not a test failure): **46 of 48 green**, the two failures being `varmu_mpi_np4` (**pre-existing**, registers no drag field, so `fillDragBetaGhosts` returns before doing anything) and `dragbeta_ghost_mpi_np4` — both `MPI_ERR_TRUNCATE` under machine load, both green standalone. nvidia-cuda, run in two passes for the same reason: green except the `*_np4` legs of `bodyforce_ghost_mpi` and `ghost_projection_mpi` (**both pre-existing**) and `dragbeta_ghost_mpi`, all the same truncation, all **green under `PECLET_FLOW_CA=0`**, and reproducing identically on the pristine tree — i.e. the failure tracks the CA exchange, the decomposition and the machine load, not this fix |
 | Single-rank `tests/kokkos` | **PASS — 21/21** on host-openmp |
 | **Single-phase regression bit-exact** (the WO's escalate-if) | **PASS — no movement at all.** All 13 grid points identical on `K` / `k*` / order `p` / `K_inf` / `k*_inf` / `p_iter_tot` / iters-per-step / step count / divergence, to every printed digit, before vs after; `=== regression: PASS ===`, `+0.00 %` against the recorded baseline on both sides |
 | Deltas measured and reported for every case in item 4 | **PASS** — the tables above, including an explicit list of what was not run |
