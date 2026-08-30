@@ -1612,6 +1612,11 @@ class Solver {
     // Multiphysics: refresh material properties / body forces from the current fields (frozen over
     // the step). No-op (byte-identical) when no closure is registered.
     updateProperties();
+    // WO-G: give the per-cell body force the ghost ring its consumer assumes. This is the ONE point
+    // in the step that is after BOTH writers (the closures just above; an external CFD-DEM
+    // field_view/exchange_field_add deposit, which happens before step()) and before every consumer
+    // (buildRhsVar in the Picard loop). Inert when no force field is registered.
+    fillCellForceGhosts();
     // eps-conservative porous momentum: the volume-averaged time term is (eps_f rho/dt) u, i.e.
     // the variable-density machinery with the effective density rho_eff = eps*rho, refreshed from
     // the just-deposited eps every step (eps ghosts are already filled by the coupling driver, so
@@ -1931,6 +1936,49 @@ class Solver {
         applyScalarBcFace(f, face / 2, face % 2, 1, 0.0);  // type 1 = Neumann copy
   }
   void fillMuGhosts() { fillPropGhosts(muField_); }
+  // Ghost ring of the per-cell body-force fields ("force_x/y/z") — WO-G.
+  //
+  // Neither writer of these fields fills their ghosts: `applyClosure` writes the INNER cells only
+  // ("ghosts untouched — refilled by the field's own exchange", `property_closures.hpp`), and the
+  // external CFD-DEM writer (`field_view` + `exchangeFieldAdd`) folds its ghost-band deposit onto
+  // the owners but leaves the ghost band holding that deposit residue. Nothing else exchanged them,
+  // so `buildRhsVar`'s face interpolation `0.5*(fb(i) + fb(i - s_c))` read the registration zero (or
+  // the residue) on the first inner plane of every block — the face body force came out exactly
+  // HALVED at every rank boundary, and single-rank at the periodic wrap plane. Net effect on a
+  // periodic axis: a body-force deficit of 1/(2*N_axis) on the whole domain, because the projection
+  // removes the non-uniform part and what survives is the (deficient) mean.
+  //
+  // WHY THE PROPERTY POLICY IS THE RIGHT ONE, even though a body force is not a transported
+  // property. `buildRhsVar` face-interpolates the force with the SAME arithmetic mean it uses for
+  // the momentum time term and the projection coefficient face-interpolate rho, and the physical
+  // content of that pair is the acceleration f_f/rho_f (this three-way consistency is what makes
+  // the discrete hydrostatic balance exact — `doc/variable_density_projection.md` §1/§3). Whatever
+  // ghost policy rho has, the force must have the SAME one or the ratio breaks at a boundary. rho
+  // uses `fillPropGhosts` (halo/periodic base, then Neumann copy on a rank-OWNED domain-BC face),
+  // so the force does too, per BC type:
+  //   * WALL / inflow (Dirichlet). The ghost feeds only the face force of the wall-NORMAL component
+  //     ON the boundary plane — the one unknown the Dirichlet BC pins (`bcVelocityComp`, comp == a:
+  //     `at(bf) = wall`) and whose flux openness is 0. So the value is unobservable there today,
+  //     which is exactly why the hydrostatic acid test passed at 2.75e-17 with the defect present.
+  //     Neumann copy is still the right answer: it is the only choice that keeps f_f/rho_f equal to
+  //     the intended acceleration if that pin is relaxed (free-slip / stress BC), and "zero" would
+  //     assert that the volumetric source stops at the wall. A body force is a SOURCE, not a flux —
+  //     there is no reflection or odd-extension principle to invoke, only extrapolation, and the
+  //     piecewise-constant (Neumann) extrapolation is O(h), the same order as rho's own ghost.
+  //   * OUTFLOW. Zero-gradient is what every other quantity gets there, and a zero ghost would
+  //     halve the body force on the outlet face — this same defect, relocated to the outlet.
+  // So the policy does NOT differ per BC type; `fillPropGhosts` is used verbatim.
+  //
+  // Consumer note: only `buildRhsVar` (variable density, or the eps-conservative porous momentum)
+  // reads the ghost. `buildRhsForced` reads the CELL value `fb(i)` alone, so on the constant-density
+  // forced path (Boussinesq) this fill is numerically INERT — applied unconditionally anyway, so the
+  // field's ghost contract does not depend on which RHS kernel happens to consume it.
+  void fillCellForceGhosts() {
+    if (!hasCellForce_)
+      return;
+    for (int c = 0; c < 3; ++c)
+      fillPropGhosts(cellForce_[c]);
+  }
   // Eps ghost policy for the porous (volume-averaged) machinery. Periodic/halo base fill, then at
   // non-periodic domain faces: wall -> zero-gradient; INFLOW/OUTFLOW -> mirror around 1 so the
   // arithmetic face mean is EXACTLY 1 (the boundary is pure gas: below the distributor and in the

@@ -107,17 +107,12 @@ static void configure(IbmSolver& s, const Config& c, int ox, int oy, int oz, int
     s.setField("src", blockOf(srcAt, ox, oy, oz, lnx, lny, lnz));
     s.exchangeField("src");
     s.setPropertyModel("force_z", peclet::flow::ClosureKind::LinearMix, "src", "", {0.0, FZ});
-    // ...plus an explicit seed of the SAME field, only to fill its GHOST ring — see the identical
-    // note in test_vardensity_mpi.cpp: `applyClosure` writes inner cells only and nothing in
-    // `step()` ever exchanges a `force_*` field, so `buildRhs*`'s face force
-    // `0.5*(fb(i) + fb(i-strd))` is halved on the first inner plane of every block. A THIRD
-    // pre-existing defect, root-caused and escalated in the WO-F findings log rather than fixed
-    // here (the fix would move single-rank numerics for every closure-driven case). `src` is
-    // static, so the closure rewrites the same inner values every step and these ghosts persist.
-    s.setField("force_z",
-               blockOf([](int x, int y, int z) { return FZ * srcAt(x, y, z); }, ox, oy, oz, lnx,
-                       lny, lnz));
-    s.exchangeField("force_z");
+    // WO-F carried an explicit seed of the SAME field here purely to fill its GHOST ring, because
+    // nothing in `step()` exchanged a `force_*` field. WO-G fixed that (`fillCellForceGhosts`), so
+    // the seed is gone. It was doubly inert in THIS test anyway: with variable mu but constant
+    // density the RHS kernel is `buildRhsForced`, which reads the CELL value `fb(i)` and never
+    // `fb(i-strd)` — only `buildRhsVar` (varRho / eps-conservative porous) face-interpolates the
+    // force and therefore reads the ghost. The WO-G gate for that is `test_bodyforce_ghost_mpi`.
   }
 }
 

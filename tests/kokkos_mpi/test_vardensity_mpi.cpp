@@ -102,21 +102,17 @@ static void configure(IbmSolver& s, const Config& c, int ox, int oy, int oz, int
   if (c.walls) {
     // gravity closure: the per-cell force -g*rho, face-interpolated to -g*rho_f
     s.setPropertyModel("force_z", peclet::flow::ClosureKind::LinearMix, "rho", "", {0.0, -GRAV});
-    // ...plus an explicit seed of the SAME field, only to fill its GHOST ring. `applyClosure`
-    // writes the inner cells only ("ghosts untouched — refilled by the field's own exchange"),
-    // and while mu/rho get that exchange from `fillPropGhosts`, a `force_*` field gets none —
-    // nothing in `step()` ever exchanges it. `buildRhsVar` reads `0.5*(fb(i) + fb(i-strd))`, so
-    // the face force on the first inner plane of every block is HALVED. That is a THIRD,
-    // independent pre-existing defect, found and root-caused while gating WO-F and escalated in
-    // the WO-F findings log rather than fixed here: fixing it would change SINGLE-RANK numerics
-    // for every closure-driven case (periodic Boussinesq/Rayleigh-Taylor read the same halved
-    // ghost at the wrap plane), which is outside this work order. rho is static here, so the
-    // closure rewrites the same inner values every step while these ghosts persist — the
-    // configuration stays a faithful test of the closure path AND isolates the domain-BC
-    // ownership this WO is about.
-    s.setField("force_z", blockOf([&](int x, int y, int z) { return -GRAV * rhoAt(c, x, y, z); },
-                                  ox, oy, oz, lnx, lny, lnz));
-    s.exchangeField("force_z");
+    // WO-A/WO-F used to follow this with an explicit `setField("force_z", …) + exchangeField` seed
+    // of the SAME values, whose only purpose was to fill the force field's GHOST ring by hand:
+    // `applyClosure` writes the inner cells only and nothing in `step()` exchanged a `force_*`
+    // field, so `buildRhsVar`'s `0.5*(fb(i) + fb(i-strd))` halved the face force on the first inner
+    // plane of every block. That was a third, independent pre-existing defect, out of WO-F's scope.
+    // WO-G FIXED it (`fillCellForceGhosts` at the top of `step()`), so the hand seed is gone and
+    // this configuration is once again a pure closure-path test. Note the seed and the fix do NOT
+    // agree at the WALL: the seed's exchange periodic-wraps (bringing the light layer's -g*1 to the
+    // heavy wall), the fix applies the Neumann copy rho itself gets (-g*RATIO), which is the value
+    // that keeps f_f/rho_f == -g there. Both are invisible in the result because the wall-normal
+    // velocity on that plane is pinned by the Dirichlet BC — see `test_bodyforce_ghost_mpi.cpp`.
   }
 }
 

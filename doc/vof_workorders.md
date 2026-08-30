@@ -722,3 +722,146 @@ a `hasBc_` / `hasOutflow_` branch and that test is periodic + IBM, so the code p
 there. The battery was running against a 12-core `nvcc` build and another agent's core MPI battery on
 the same 48-core host at the time; the final battery, run on a quiet machine, is 42/42. Recorded as an
 observed load-induced flake in the collocated np=4 halo, not investigated further.
+
+### WO-G (blocker fix) — body-force ghosts are never filled — **DONE 2026-08-30**, one new escalation
+
+Fixed in one place: `IbmSolver::fillCellForceGhosts()` (`src/flow_ibm.hpp`), called from `step()`
+immediately after `updateProperties()`, routing `force_x/y/z` through the (WO-F rank-aware)
+`fillPropGhosts`. That point is the only one in the step that is after **both** writers — the
+closures just above, and an external CFD-DEM `field_view` + `exchange_field_add` deposit, which
+happens before `step()` — and before the only consumer (`buildRhsVar`, in the Picard loop). Total
+production diff: 5 lines of code + the reasoning comment.
+
+**Ghost policy at a wall: Neumann copy, the same as rho — and the policy does NOT differ per BC
+type.** The argument, since a body force is indeed not a transported property:
+
+- `buildRhsVar` face-interpolates the force with the **same** arithmetic mean the momentum time term
+  and the projection coefficient use for rho (`f_f = ½(f(i)+f(i−s))`, `rho_f = ½(rho(i)+rho(i−s))`),
+  and the physical content of the *pair* is the acceleration `f_f/rho_f`. This three-way consistency
+  is exactly what `variable_density_projection.md` §1/§3 identifies as the reason discrete
+  hydrostatic balance is exact. So the force's ghost policy is not free: whatever policy rho has, the
+  force must have the SAME one, or the ratio breaks at the boundary and the telescoping stops. rho
+  gets `fillPropGhosts` → so does the force.
+- **Wall / inflow (Dirichlet).** The ghost is read *only* by the face force of the wall-NORMAL
+  component ON the boundary plane — the single unknown the Dirichlet BC pins (`bcVelocityComp`,
+  `comp == a`: `at(bf) = wall`) and whose flux openness is 0. It is therefore unobservable today
+  (that is the whole reason the acid test passed, see below). Neumann copy is still the right answer:
+  it is the only choice that keeps `f_f/rho_f` equal to the intended acceleration if that pin is ever
+  relaxed (free-slip / traction BC), and *zero* would be the assertion that a **volumetric source**
+  stops at the wall, which is false. A body force is a source, not a flux, so there is no reflection
+  or odd-extension principle available — only extrapolation, and the piecewise-constant (Neumann)
+  extrapolation is O(h), the same order as rho's own ghost. Nothing about a wall makes a different
+  extrapolation more accurate.
+- **Outflow.** Zero-gradient is what every other quantity gets there, and a zero ghost would halve
+  the body force on the outlet face — this very defect, relocated to the outlet.
+
+**The defect's actual reach, measured — narrower than the escalation assumed in one direction and
+sharper in another.**
+
+1. **Only `buildRhsVar` reads the ghost.** `buildRhsForced` (the constant-density forced path, i.e.
+   Boussinesq / de Vahl Davis / `flatwall_displacement.py`) reads the CELL value `fb(i)` alone — no
+   `fb(i−strd)`. So the WO's list of "affected physics" over-reaches: **Boussinesq thermal convection
+   was never affected.** The affected set is variable-density (`varRho_`) and the eps-conservative
+   porous momentum (`porous_ && porousCons_` → `effVarRho()`), i.e. VoF/RT-class runs and CFD-DEM.
+2. **On a periodic axis the error is a net body-force DEFICIT of exactly 1/(2·N_axis).** The halved
+   plane makes `u*` non-uniform, the projection removes the non-uniform part, and what survives is
+   the (deficient) mean: measured on a uniform-force periodic box, `u/u_exact` = **0.984375** at
+   N=32 (= 31.5/32) and **0.96875** at N=16 (= 15.5/16), to the last bit. Under MPI each rank
+   boundary costs another half-plane: np=2 on the z-cut 32-cell axis gives 0.96875, np=4 on the
+   x-cut 16-cell axis gives 0.9375. That is a 1.6–6.3 % force error, not a round-off effect.
+3. **At a WALL it is completely masked** — this answers the WO's question about WO-A's acid test.
+   The halved face is the wall-normal velocity plane, which the Dirichlet BC overwrites
+   (`at(bf) = wall`) before the divergence and whose flux openness is 0, so the value never reaches
+   the solution. Measured: the walls-z hydrostatic column at np=1 reads `dP/dz err = 1.39e-15` with
+   the defect present and `1.39e-15` after the fix — bit-identical. That is why WO-A's 2.75e-17
+   passed, and why **Rayleigh–Taylor (walled ±z, force_z) is unaffected too**.
+4. **An INTERIOR rank boundary has no such pin.** np=2/4 on the same walled column: `dP/dz` error
+   **0.5** (exactly half a face force) at plane z=16 — the rank boundary — while `max|u|` stayed at
+   **1.6e-17**. The velocity canary is blind; only the pressure sees it. Same signature as WO-F.
+
+**Before / after deltas (WO item 3) — nothing recorded was re-baselined; no `perf_baseline*.json`
+and no recorded number in any doc was edited.**
+
+| case | before (pristine HEAD) | after (fix) | delta |
+|---|---|---|---|
+| **Single-phase regression**, all 13 grid points (`zh_sphere` 16/24/32/48/64, `random_spheres` + `hollow_rings` 24/32/48/64), nvidia-cuda | K/k\* and iteration totals **equal to the recorded baseline** (`+0.00 %` on every metric) | **identical** — `+0.00 %` on K / k\* / fitted order p / Richardson extrapolate, identical `p_iter_tot`, per-step medians and step counts | **0** (as the WO predicted: these cases use `set_body_force`, a uniform scalar, and never register a force FIELD, so `hasCellForce_` is false and the new call is not even reached) |
+| **Hydrostatic acid test, ratio 3** (`tests/study/rayleigh_taylor.py`) | max\|u\| `3.994840715318005e-17`, ∂P/∂z rel-err `7.401486830834376e-16` | **bit-identical** | **0** |
+| **Hydrostatic acid test, ratio 1000** | max\|u\| `2.753321457158628e-17`, ∂P/∂z rel-err `3.411160243160793e-16` | **bit-identical** | **0** |
+| **Rayleigh–Taylor** amplitude series (the §3 record `1.5 → 19.5`, ×13) | `1.5`, `1.865885382400677`, `3.1271757233794446`, `5.535032809746294`, `9.30443304452113`, `14.160760845454503`, `19.518144168246145`; growth `13.012096112164096` | **bit-identical, every digit** | **0** |
+| **de Vahl Davis cavity** (`tests/study/dvd_cavity.py`), conduction N=24 Ra=0 | Nu `1.0000000000000338`, 200 steps | **bit-identical** | **0** |
+| **de Vahl Davis cavity**, N=32 Ra=1e4 | Nu `2.299525620604257`, u\* `16.585277478201778`, v\* `20.125750226019694`, 700 steps | **bit-identical** | **0** |
+| `tests/kokkos_mpi/test_vardensity_mpi` `walls-z` / `jump-z`, np 1/2 CUDA | du = dp = `0.000e+00`, max\|u\| `2.97e-17`, ∂P/∂z err `1.14e-15`, Chebyshev `17..13` | **identical**, with the WO-F hand-seed of the force ghosts REMOVED | **0** |
+
+So **every recorded validated number is bit-identical across this fix.** The reason is structural,
+not luck: all of them are either constant-density-forced (no ghost read at all) or walled on the
+forced axis (the Dirichlet pin masks the halved plane). What moved is exactly the set nothing had
+gated: periodic body forces and multi-rank interiors, which is what the new ctest now covers.
+
+**Gates.**
+
+| gate | result |
+|---|---|
+| New tests **fail before** the fix (demonstrated, not asserted) | **PASS.** Pristine HEAD built in a separate `git worktree` (host-openmp) and the pre-edit CUDA binary. host np=1: `per-z` value `0.984375` (want 1) FAIL, `per-x` `0.96875` FAIL, `walls-z` OK; np=2: `per-z` `0.96875`, du `1.563e-02`, dp `6.055e-02`; `walls-z` dp `2.500e-02`, **∂P/∂z err `5.000e-01` at plane z=16 with max\|u\| `1.63e-17`**; np=4: `per-x` `0.9375`, du `3.125e-02`. CUDA reproduces every value |
+| New tests **pass after** | **PASS**, host-openmp and nvidia-cuda, np 1/2/4: `per-z` and `per-x` `spread = 0.000e+00`, `value = 1` exactly, cross-component `0.00e+00`, and **du = dp = `0.000e+00` (bitwise vs the np=1 reference) at every np on both backends**; `walls-z` du ≤ `3.7e-17`, dp ≤ `2.3e-16`, ∂P/∂z err `1.388e-15` |
+| np 2/4 vs np 1, host + CUDA, on all pre-existing tests | **PASS — host-openmp `tests/kokkos_mpi` 45/45, 0 failed** (3440 s; 42 pre-existing + the 3 new `bodyforce_ghost_mpi_np{1,2,4}`). **nvidia-cuda 45/45**, in three passes: 1–38 first, then 34–38 and 39–45 re-run after `test_varmu_mpi` was rebuilt without its WO-F hand seed (the first CUDA `ctest` was killed by the agent harness at #39 — not a test failure). `varmu_mpi_np{1,2,4}` re-run green on host too (167/243/248 s) with the seed removed |
+| Single-rank `tests/kokkos` | **PASS — 21/21** on host-openmp |
+| Deltas measured and reported for every case in item 3 | **PASS** — the table above |
+| No baseline file and no recorded number in any doc edited | **PASS** — `git diff` touches `src/flow_ibm.hpp`, `CLAUDE.md` (new paragraph), `tests/kokkos_mpi/CMakeLists.txt` (one name), `test_vardensity_mpi.cpp` (removal of the hand seed) and adds `test_bodyforce_ghost_mpi.cpp`. `perf_baseline*.json` untouched; `doc/variable_density_projection.md` untouched |
+
+**Audit (WO item 2) — every field written inner-only (by `applyClosure` or a Python `field_view` /
+`set_field` write) and then read with a face average.**
+
+| field | face-average consumer(s) | ghost fill | verdict |
+|---|---|---|---|
+| `force_x/y/z` | `buildRhsVar` `0.5*(fb(i)+fb(i−s_c))` | none | **THE defect — fixed here** |
+| `rho` | `VarFaceProps::idiag`, `buildRhsVar` `rhoF`, `buildAdvStencilVar` `fouw`, `buildRhoCoeff`, `projectCorrectVar` | `fillPropGhosts(rhoField_)` in `rebuildStencils`, `buildAdvStencilVar` (c==0) and `project()` | correct — every consumer is preceded by a fill in the same step |
+| `mu` | `VarFaceProps` arithmetic/harmonic face mean | `fillMuGhosts()` in `rebuildStencils` / `buildAdvStencilVar` | correct |
+| `eps` | `divergOpenEps`, `buildPorousCoeff*`, `maxPorousResidual` | `fillPorousEpsGhosts()` before the divergence in `project()`, and the coupling driver fills + clips the ghosts before `step()` | correct, and deliberately driver-owned before the step (the comment at the coefficient bridge states the one-policy requirement) |
+| `epsRho_` (`rho_eff = eps·rho`) | `buildRhsVar` via `effRhoField()` | not exchanged — but `updateEpsRho` is a **whole-block** `RangePolicy(0, n_)` product, so its ghosts are valid iff `eps`'s are | correct by construction |
+| `drag_beta` | `mac_pressure` `buildPorousCoeffDrag/Cons`, `projectCorrectPorousDrag` (**and** `addDragDiagonal`'s `0.5*(beta(i)+beta(i−s_c))` when `porous_`) | `fillPropGhosts(dragBeta_)` in `project()` **only** | **ESCALATED — see below** |
+| `divAdv_` | `buildRhs*` `0.5*(dv(i)+dv(i−strd))` | none needed: `computeDivAdv` writes the `G−1` ring, i.e. one ghost layer, so the first inner plane's neighbour is valid | correct — and this is the pattern `applyClosure` should have used |
+| `P_` | `buildRhs*` `P(i)−P(i−strd)` | `fillGhosts(P_)` + `pressureBcGhost()` at the top of `step()` | correct |
+| transported scalars (`add_scalar`) | own advection/diffusion stencils | `scalarFillGhosts` (fill + `applyScalarBc`) | correct — this is where the rank-aware pattern came from |
+| `sdf`, openness `ox/oy/oz` | geometry face reads | filled at `setSolid` / `setPressureGeometry` | correct (static) |
+
+Python-side writers checked: `tests/study/dvd_cavity.py` (`force_y` closure — `buildRhsForced`, no
+ghost read), `tests/study/rayleigh_taylor.py` (`force_z` closure on a walled axis — masked),
+`tests/study/flatwall_displacement.py` (`set_field("force_*")`, constant density —
+`buildRhsForced`, no ghost read), `coupling/python/peclet_coupling/driver.py` (`force_*` and
+`drag_beta` via `field_view` + `exchange_field_add`, `eps` via `exchange_field` + explicit
+domain fill + clip).
+
+**ESCALATION — a FOURTH pre-existing defect, same family: `drag_beta`'s face average is consumed one
+phase before its ghosts are filled.** Under `porous_`, `addDragDiagonal` builds the momentum diagonal
+from `beta_f = 0.5*(beta(i) + beta(i−s_c))`, and all three of its call sites are inside stencil
+builds that run at the TOP of `step()` (`rebuildStencils` line ~1628, `buildAdvStencil`,
+`buildAdvStencilVar`). The only `fillPropGhosts(dragBeta_)` is inside `project()`, i.e. *after* those
+builds. So on the first inner plane of every block the momentum diagonal uses the previous step's
+ghost — or, for the CFD-DEM writer, the deposit residue that `exchange_field_add` leaves behind and
+never refills — while the projection's coefficient on that same face uses the freshly exchanged
+value. That is precisely the momentum/projection `beta_f` mismatch whose consequence
+`addDragDiagonal`'s own comment records ("the loop has gain (idt+beta_f)/(idt+beta_cell) at a beta
+jump (bed top: ~3) and the accumulated pressure diverges exponentially"), only localized to block
+boundaries instead of the bed top. **Not fixed here**: `drag_beta` is not a force field, the WO scopes
+this work order to the force-field ghost plumbing, and the fix would move CFD-DEM numbers (the HCS /
+fluidized-bed benchmarks) that need their own measurement campaign. The one-line shape of the fix is
+the same as this WO's: `fillPropGhosts(dragBeta_)` next to `fillCellForceGhosts()` at the top of
+`step()`, keeping the `project()` call (it must also run after any mid-step change).
+
+**Test notes.** `tests/kokkos_mpi/test_bodyforce_ghost_mpi.cpp` gates **absolute physics**, not a
+distributed-vs-reference comparison, and that is load-bearing: the single-rank reference carries the
+identical defect, so `du = 0` proves nothing — `per-z`/`per-x` at np=1 ARE the single-rank periodic
+wrap-plane variant the WO asks for, and they fail before the fix. `per-z` and `walls-z` require the
+z axis to be cut at np > 1 (loud on a decomposition change); `per-x` runs at every np because at
+np=2 its "rank boundary" is the periodic wrap plane in x, which is an equally hard gate. `per-x`
+writes the force through `setField` (the external CFD-DEM writer path) rather than a closure, so both
+writers are covered. `test_vardensity_mpi` lost the WO-F hand seed of the force ghosts (see the diff
+comment): the seed and the fix disagree at the wall — the seed's exchange periodic-wraps `-g·1` onto
+the heavy wall, the fix applies the Neumann copy `-g·RATIO` that rho itself gets — and the result is
+unchanged either way, because that plane is pinned.
+
+**Cost.** `fillCellForceGhosts` is 3 ghost exchanges per step, and only when a force field is
+registered. It is applied unconditionally rather than gated on `effVarRho()` so the field's ghost
+contract does not depend on which RHS kernel happens to consume it; on the Boussinesq path it is
+numerically inert (measured: de Vahl Davis bit-identical), which is itself the check that the fill
+reaches nothing it should not.

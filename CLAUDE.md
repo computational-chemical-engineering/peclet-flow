@@ -356,6 +356,23 @@ openness + outflow ghost. `fillPropGhosts` / `fillPorousEpsGhosts` used to key t
 `if (!distributed_)` — wrong at every np including 1 — and now use the same per-face test.
 Details + measured numbers: `doc/variable_density_projection.md` §4.
 
+**Per-cell body forces get a ghost fill (WO-G, 2026-08-30).** `applyClosure` writes the inner cells
+only and an external CFD-DEM writer folds its ghost deposit onto the owners without refilling the
+ghost band, and nothing exchanged `force_x/y/z` — so `buildRhsVar`'s face interpolation
+`0.5*(fb(i) + fb(i−s_c))` read the registration zero (or the deposit residue) on the **first inner
+plane of every block**, halving the face body force there. `step()` now calls `fillCellForceGhosts()`
+right after `updateProperties()` — the force fields go through the same rank-aware `fillPropGhosts`
+the other cell properties use (halo/periodic base + Neumann copy on an owned domain-BC face), which
+is required because the RHS face-interpolates the force with the *same* mean it uses for ρ and the
+physical content of the pair is f_f/ρ_f. Reach: only `buildRhsVar` (variable density, or the
+eps-conservative porous momentum) reads that ghost — `buildRhsForced` reads `fb(i)` alone, so the
+constant-density Boussinesq path is unaffected. On a **periodic** axis the old behaviour was a net
+body-force deficit of exactly 1/(2·N_axis) (the projection removes the non-uniform part and the
+deficient mean survives); at a **wall** it was fully masked, because the halved face is the
+wall-normal velocity plane the Dirichlet BC pins and whose flux openness is 0 — which is why the
+hydrostatic acid test, Rayleigh–Taylor and de Vahl Davis are all bit-identical across the fix and
+only the multi-rank/periodic cases moved. Gate: `tests/kokkos_mpi/test_bodyforce_ghost_mpi.cpp`.
+
 Two related MPI restrictions remain, both now explicit rather than silent: the solver's **velocity
 multigrid is single-rank** (`IbmSolver` never calls `VelocityMG::initMpi`; `set_velocity_multigrid`
 is disabled with a stderr notice under MPI), and a **multi-rank inlet profile** must be handed to
