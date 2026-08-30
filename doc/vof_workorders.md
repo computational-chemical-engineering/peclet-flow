@@ -32,7 +32,11 @@ Hard rules (violating any of these is an automatic escalation):
    GPU-vs-OpenMP tolerance policy: bitwise on identical backend, tolerance across backends.
 3. **Bit-exact MPI**: every np-2/4 result identical to np-1 (`tests/kokkos_mpi` pattern).
 4. Commit in `flow` at each validated gate, then bump the umbrella pointer (submodule
-   first, umbrella last). Do not push a red tree.
+   first, umbrella last). Do not push a red tree. **Never `git add -A` / `git add .` /
+   `git commit -a`** — stage the paths you changed, by name. Concurrent agents share these
+   checkouts and the suite carries untracked scratch directories; a blanket add both muddies
+   the commit and has already swept another agent's in-flight files into the wrong commit
+   (2026-08-30). Staging a submodule pointer (`git add flow`) is a named path and is fine.
 5. Style: match `flow/src/*.hpp` (namespaces `peclet::flow`, x-fastest indexing per
    `suite/docs/CONVENTIONS.md`, doubles for geometry).
 
