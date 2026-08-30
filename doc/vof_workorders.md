@@ -224,6 +224,54 @@ or exchange-per-sweep bug).
 
 ---
 
+## WO-F (blocker fix) — domain BCs are not rank-aware  [OPUS]
+
+**Why.** WO-A's gating uncovered two pre-existing defects in the DOMAIN-BC machinery (not in
+VoF). Both make any **wall-bounded multi-rank case with variable properties** wrong, so both
+sit on V2's critical path. Verified in the source 2026-08-30:
+
+1. **`applyVelocityBcCompTo` (`src/flow_ibm.hpp:3435`) has no ownership test.** It applies the
+   per-face BC whenever `bc_[ff] != 0`, regardless of whether *this rank's block* touches that
+   global face. A partition cutting a walled axis therefore imposes a wall at every interior
+   rank boundary, splitting the domain into independent sub-domains. `touchesGlobalFace(f)`
+   (`:4490`) already exists and the **scalar** path uses it (`applyScalarBc`, `:4486`) — the
+   velocity path simply never adopted it. Measured by WO-A: with z cut at np=2 the velocity
+   canary stays clean (max|u| 4.5e-17) while `max|P_dist − P_ref| = 4.0e+02` and ∂P/∂z is off
+   by 8·g·ρ. **The velocity does not reveal this — only the pressure does.**
+2. **`fillPropGhosts` (`:1912`) and `fillPorousEpsGhosts` skip the domain-face override under
+   MPI** (`if (!distributed_)`), so μ/ρ/ε ghosts on a walled face keep their *periodic wrap*
+   value. Wrong at **every np including 1** (the guard keys on `distributed_`, not on rank
+   count). The comment immediately above the guard states exactly why the override is needed
+   ("a periodic wrap there would bring the wrong layer's value to the wall face — destabilising,
+   especially for the harmonic mean"). Measured: the literal two-layer Couette differs from the
+   single-rank reference by 2.7e-2 relative at np=1, and is bitwise identical with varMu off.
+
+**Do.**
+1. Add the `touchesGlobalFace(f)` ownership test to the velocity BC path, matching the scalar
+   path's pattern. Audit **every** per-face BC application for the same omission — at minimum
+   `applyVelocityBcCompTo`, the pressure-openness BC construction, the outflow correction
+   (`bcCorrectOutflow`), and any inlet-profile application — and fix each. Enumerate what you
+   audited in the findings log, including the sites you checked and found already correct.
+2. Replace the `if (!distributed_)` guards in `fillPropGhosts` / `fillPorousEpsGhosts` with the
+   per-face `touchesGlobalFace(f)` test.
+3. Extend `tests/kokkos_mpi/test_vardensity_mpi.cpp` and `test_varmu_mpi.cpp` to **cut the
+   walled axis** (they currently assert it stays uncut — that assertion was the correct
+   temporary response to the bug and must now be removed), and add a **pressure** comparison,
+   not only velocity: the np-2/4 pressure field must match np-1. Restore the WO-A-documented
+   literal two-layer Couette (asymmetric μ) in `test_varmu_mpi`, which the symmetric stack was
+   chosen to dodge.
+
+**Gates.**
+- **Single-rank bit-exactness is automatic and must be verified, not assumed**: single-rank
+  `touchesGlobalFace` is always true, so the guarded code runs exactly as before. Single-phase
+  regression +0.00%, identical iteration counts.
+- Walled-axis-cut np 2/4 **bitwise** vs np 1 on **velocity AND pressure**, host + CUDA.
+- The restored asymmetric two-layer Couette matches the analytic solution at every np.
+- All pre-existing MPI ctests stay green.
+
+**Escalate if** a fix would change single-rank numerics — that means the defect is not what this
+WO describes and the diagnosis needs revisiting before any code lands.
+
 ## Findings log
 
 (append per WO on completion/escalation)
