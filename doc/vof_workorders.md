@@ -276,6 +276,61 @@ sit on V2's critical path. Verified in the source 2026-08-30:
 **Escalate if** a fix would change single-rank numerics — that means the defect is not what this
 WO describes and the diagnosis needs revisiting before any code lands.
 
+## WO-G (blocker fix) — body-force ghosts are never filled  [OPUS]
+
+**Why.** Found by WO-F, independently verified in-source 2026-08-30. This one is **not
+MPI-only** and it moves already-validated numbers, which is why it gets its own work order
+with an explicit no-re-baseline rule.
+
+The mechanism, confirmed at three sites:
+- `applyClosure` (`src/property_closures.hpp:44`) writes **inner cells only**
+  (`MDRangePolicy({g,g,g}, {e-g})`), and its own comment says the ghosts are "refilled by the
+  field's own exchange".
+- **Nothing ever exchanges `cellForce_`.** `fillPropGhosts` is called for `rhoField_`,
+  `muField_`, `dragBeta_`, `epsField_` — never for `cellForce_[c]`
+  (`grep cellForce_ | grep fillGhost` is empty). The fields are zero-initialised at
+  registration and their ghost rings stay at that value forever.
+- `buildRhsVar` (`flow_ibm.hpp:2998`) and the `buildRhsForced` siblings read the
+  face-interpolated force `0.5*(fb(i) + fb(i - strd))`, which reaches into the ghost on the
+  first inner plane.
+
+Consequence: **the face body force is halved on the first inner plane of every block** — at
+every rank boundary under MPI, and single-rank at the periodic wrap plane. Affected physics:
+Rayleigh–Taylor (gravity closure), Boussinesq thermal convection, CFD-DEM feedback forces —
+i.e. cases with *recorded validated numbers*. WO-A's hydrostatic acid test still passed at
+2.75e-17, so establish early whether the wall-BC velocity pin masks it there; that is
+diagnostic information, not a reason to doubt the defect.
+
+**Do.**
+1. Give `cellForce_[c]` the ghost fill its consumers assume. Prefer routing it through the
+   existing property-ghost path (`fillPropGhosts`, which is now per-face rank-aware after
+   WO-F) at the point the closures are applied, so periodic wrap, halo exchange and
+   domain-face policy are all inherited rather than re-implemented. Check whether a body
+   force wants Neumann-copy or something else at a *wall* face and justify the choice in the
+   findings log — a body force is not a transported property.
+2. Audit every other field written by `applyClosure` or by a Python-side `field_view` write
+   for the same "written inner-only, read with a face average" hazard, and list what you
+   checked.
+3. **MEASURE, DO NOT RE-BASELINE.** Report the before/after delta for: the single-phase
+   regression (all 13 grid points), `tests/study/rayleigh_taylor.py` (the amplitude series
+   recorded in `variable_density_projection.md` §3), `tests/study/dvd_cavity.py` vs de Vahl
+   Davis, and the hydrostatic acid tests at ratio 3 and 1000. Leave every `perf_baseline*.json`
+   and every recorded number in the docs **untouched**; put the deltas in the findings log.
+   The user decides whether to re-baseline.
+4. Add an MPI ctest that would have caught this: a uniform body force across a rank boundary,
+   asserting the face force is uniform (np 2/4 bitwise vs np 1), and a single-rank periodic
+   variant asserting no wrap-plane anomaly.
+
+**Gates.**
+- The new tests fail before the fix and pass after (demonstrate both).
+- np 2/4 bitwise vs np 1, host + CUDA, on the new tests and all pre-existing ones (42+).
+- Deltas measured and reported for every case in item 3.
+- **No baseline file and no recorded number in any doc is edited.**
+
+**Escalate if** the single-phase regression moves at all — it should not: the regression cases
+use `set_body_force` (a uniform scalar, not a closure field), so a `cellForce_` ghost fix must
+leave them bit-exact. A movement there means the fix reached further than intended.
+
 ## Findings log
 
 (append per WO on completion/escalation)
