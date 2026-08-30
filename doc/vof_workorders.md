@@ -396,6 +396,50 @@ that let this live since July.
 `set_pressure_pcg(True)` after `set_density_mode("variable")` demonstrably selects PCG;
 existing quasi-2D verifications unchanged; 45+ MPI ctests green.
 
+## WO-I (authorized 2026-08-30) — `drag_beta` ghosts are stale in the momentum build
+
+**Why.** Found by WO-G; the same defect class as the body-force ghosts, one phase earlier in
+the step. Verified in-source: `addDragDiagonal` (`flow_ibm.hpp:4593`) forms the face drag
+coefficient `0.5*(beta(i) + beta(i - s_c))`, and it is called from the momentum stencil builds
+at the **top** of `step()`; the only `fillPropGhosts(dragBeta_)` is inside `project()`
+(`:3831`). So on every block's first inner plane the **momentum diagonal uses the previous
+step's β ghost** (or, under CFD-DEM, the residue of the last deposit) while the projection
+coefficient on that same face uses the freshly exchanged value.
+
+That is exactly the momentum/projection β_f mismatch whose consequence `addDragDiagonal`'s own
+comment records: *"the accumulated pressure diverges exponentially."* Same three-way
+consistency argument as WO-G's ghost-policy note — the momentum time term, the drag diagonal
+and the projection coefficient must agree on the face value or the discrete balance breaks.
+
+**Unlike WO-G, this one is expected to move validated numbers.** It sits under the CFD-DEM and
+HCS gas–solid benchmarks. Therefore this work order is **measure-first and re-baseline-never**,
+exactly as WO-G was.
+
+**Do.**
+1. Exchange `dragBeta_` ghosts at a point that is after its writer (the CFD-DEM deposit /
+   closure) and before the *first* consumer (the momentum stencil build at the top of
+   `step()`). WO-G's `fillCellForceGhosts()` call site immediately after `updateProperties()`
+   is the natural precedent — reuse it if the ordering holds, and say why it does.
+2. Check whether `project()`'s existing `fillPropGhosts(dragBeta_)` then becomes redundant. If
+   it does, leave it (harmless, and removing it is a separate change) but say so.
+3. Audit the remaining porous fields for the same top-of-step-consumer / late-exchange
+   pattern: `epsField_`, `epsRho`, and anything else `buildPorousCoeff*` or the porous momentum
+   path face-averages. List what you checked.
+4. **MEASURE, DO NOT RE-BASELINE.** Report before/after deltas for: the single-phase regression
+   (13 grid points), the porous/CFD-DEM verification scripts in `flow/` and any HCS / gas–solid
+   benchmark scripts you can find and run (search `scripts/`, `tests/study/`, and the coupling
+   project), and a hydrostatic-in-porous case if one exists. Leave every `perf_baseline*.json`
+   and every recorded number in every doc **untouched**; the deltas go in the findings log.
+5. Add an MPI ctest that would have caught it: a uniform β across a rank boundary with the
+   momentum diagonal asserted uniform on the first inner plane, np 1/2/4 bitwise.
+
+**Gates.**
+- New test fails before the fix and passes after — demonstrate both.
+- np 2/4 bitwise vs np 1, host + CUDA; all pre-existing ctests green (45+ MPI, 21 kernel).
+- **Single-phase regression must stay bit-exact** — it does not enable the porous path, so a
+  movement there means the fix reached further than intended: escalate.
+- Deltas reported for every case in item 4; no baseline or recorded number edited.
+
 ## Findings log
 
 (append per WO on completion/escalation)
