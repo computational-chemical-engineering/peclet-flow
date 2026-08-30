@@ -72,6 +72,37 @@ rebuild) and is immune. Consequence, implemented in `setDensityMode`:
   positive coefficient fields (or add a coefficient-aware Galerkin option) so PCG becomes usable;
   until then Chebyshev iteration counts stay flat (≤32 observed at ratio 10³) so nothing is lost.
 
+> **SUPERSEDED 2026-08-30 by the WO-B (rung S0) measurement battery — the mechanism above is a
+> misdiagnosis.** Keep Chebyshev as the varRho default for now, but not for this reason. Full
+> numbers: `doc/vof_workorders.md`, the WO-B findings entry;
+> reproduce with `tests/study/vardensity_solver_probe.py`. Three measured facts:
+>
+> 1. **`set_pressure_pcg(True, …)` cannot select PCG.** `setPressurePcg(bool /*on*/, …)` ignores
+>    its flag and only stores `pcgMaxit_`/`pcgRtol_`; `setPressureChebyshev` is the only setter
+>    that writes `useChebyshev_`. So the escape hatch promised above ("an explicit
+>    `set_pressure_pcg` … still wins") does not exist, and every "PCG under varRho" measurement
+>    that used it — including §2's own control and WO-B's first pass — actually ran **Chebyshev**
+>    (the tell: it caps at 120, `chebMaxit_`'s default). The working spelling is
+>    `set_pressure_chebyshev(False, …)`.
+> 2. **With PCG genuinely selected the stall reproduces exactly — and ρ is not its cause.** The
+>    literal ratio-3 hydrostatic column runs 2000/2000 iterations every step; but the SAME stall
+>    occurs at **constant density** on any 3-D wall-bounded (domain-BC) grid — measured: lid box
+>    32×32×nz, constant ρ, PCG needs 18–55 iterations at nz ≤ 4 and **200/200 with
+>    max\|div(open·u)\| ≈ 1.2e-05** at nz ≥ 8, while Chebyshev needs 13–14 — and it does **not**
+>    occur on a periodic + IBM problem at any ratio: periodic cylinder, real PCG, ratio 1 / 10² /
+>    10³ / 10⁴ → **7 / 7–10 / 7–10 / 7–10** iterations, div 4.2e-12. It is present in the
+>    2026-07-06 release build (`4c781e3`), so it predates every 2026-08 change. It is invisible in
+>    the shipped domain-BC verifications because all of them are quasi-2D (nz = 4): the literal
+>    `verify_lid_cavity` configuration measures PCG at 62 iterations, div 3.1e-16.
+> 3. **The ratio changes the consequence, not the cause.** At ratio 3 the stalled PCG still returns
+>    the right answer (∂P/∂z error 7.4e-16); at ratio 1000 it destroys it (max\|u\| = 21.1,
+>    ∂P/∂z error 1.03, max\|div(open·u)\| = 43).
+>
+> Corollary for the deferred follow-up above: the transfer pair is **not** shown to be the problem
+> for ρ-scaled coefficients. On the fully periodic production configuration, MG-PCG solves the
+> ratio-10⁴ `packing_ring.vti` operator in **16** iterations (Chebyshev: 155). The open item is the
+> domain-BC hierarchy's boundary treatment at constant density — see WO-B escalations #1 and #2.
+
 ## 3. Validation (`tests/kokkos/test_vardensity_projection.cpp` + `tests/study/rayleigh_taylor.py`;
 host-openmp **and nvidia-cuda** since 2026-08-30 — see §3.1 for the multi-rank gates)
 

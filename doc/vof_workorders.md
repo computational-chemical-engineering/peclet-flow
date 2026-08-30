@@ -865,3 +865,264 @@ registered. It is applied unconditionally rather than gated on `effVarRho()` so 
 contract does not depend on which RHS kernel happens to consume it; on the Boussinesq path it is
 numerically inert (measured: de Vahl Davis bit-identical), which is itself the check that the fill
 reaches nothing it should not.
+
+### WO-B (rung S0) — pressure-driver measurement battery — **DONE 2026-08-30**, three escalations
+
+Delivered: `tests/study/vardensity_solver_probe.py` + `tests/study/vardensity_solver_probe.json`
+(the emitted markdown table is printed by the script and reproduced in condensed form below).
+**406 configurations × 20 steps** on nvidia-cuda (592 s) and the 32³ subset (328 configurations) on
+host-openmp (792 s), both stored as separate `runs` entries in the JSON: geometry ∈ {open box, immersed cylinder, the regression suite's 3-Raschig-ring bed,
+`data/packing_ring.vti` strided to 64³} × ρ-shape ∈ {**constant-ρ control**, slab, sphere blob,
+grid-diagonal tilted film} × edge ∈ {tanh over ~2 cells, sharp one-cell step} × ratio ∈ {10², 10³,
+10⁴} × driver ∈ {Chebyshev, MG-PCG} × case ∈ {hydrostatic, lid-driven, **fully periodic + body
+force**}. No production code was touched.
+
+**THE HEADLINE: `variable_density_projection.md` §2 is a misdiagnosis, and the real defect is
+bigger and older than variable density.** Three measured facts, each reproducible from the shipped
+script:
+
+1. **`set_pressure_pcg(True, …)` cannot select PCG at all.**
+   `IbmSolver::setPressurePcg(bool /*on*/, int maxit, double rtol)` (`flow_ibm.hpp`) ignores its
+   `on` flag and only stores `pcgMaxit_`/`pcgRtol_`; the only setter that writes `useChebyshev_` is
+   `setPressureChebyshev`. So after `set_density_mode("variable")` — which sets
+   `useChebyshev_ = true` — **every `set_pressure_pcg(True, …)` call leaves the solve on
+   Chebyshev**, contradicting the comment at `setDensityMode` ("an explicit set_pressure_pcg …
+   AFTER set_density_mode still wins (last set)"), the binding docstring ("exclusive with
+   Chebyshev") and `flow/CLAUDE.md` ("last set wins"). The tell is that such a "PCG" run caps at
+   exactly **120** iterations — `chebMaxit_`'s default — no matter what cap was passed. The whole
+   first pass of this battery ran that way; every number below uses
+   `set_pressure_chebyshev(False, …)` first, which is the only spelling that actually selects PCG.
+2. **With PCG genuinely selected the §2 stall reproduces exactly — and it is NOT caused by the
+   ρ-scaled coefficients.** On the literal §2 configuration (`rayleigh_taylor.py`'s
+   `hydrostatic()`: 8×8×24, walls ±z, μ=0, gravity closure, ratio 3) real PCG runs
+   **2000/2000 iterations on every step**. But the same stall appears at **constant density**, and
+   it does **not** appear on a periodic problem at any ratio (the one periodic weak spot — the
+   grid-diagonal `tilt` film — plateaus four orders lower, at the round-off floor; see below):
+
+   | configuration (32³ unless noted, real driver selection) | PCG | Chebyshev |
+   |---|---|---|
+   | periodic + immersed cylinder, ρ ≡ 1 (no varRho) | **7** its, div 4.1e-12 | 8 |
+   | periodic + immersed cylinder, ratio 10² / 10³ / 10⁴ | **7–10 / 7–10 / 7–10**, div 4.2e-12 | 8 / 8 / 8 |
+   | lid box, **constant density**, third axis nz = 2 / 4 | 24–37 / 18–55, div 6e-13 | 17–18 (nz = 4) |
+   | lid box, **constant density**, nz = 8 / 16 / 32 | **200/200**, div **1.1e-05 … 1.2e-05** | 13–14, div 2.1e-13 |
+   | all-six-walls box, constant density, nz = 4 / 32 | 21–119 / **200/200** (div 1.2e-05) | 14 / 14 |
+   | hydrostatic column (walls ±z), constant density, 32³ | **200/200**, div 2.2e-05 | 11–12 |
+
+   So the discriminator is **the domain-BC (non-periodic) coarse hierarchy on a genuinely 3-D
+   grid**, not ρ. `levels=1` (no coarse grid at all) converges in **1** iteration; every depth
+   2…6 stalls; `set_pressure_bottom` smoother/auto/agglomerated and
+   `set_pressure_mean_removal` all/fine make no difference; and the RHS is *not* the cause —
+   40, 400 and 2000 momentum RB-GS sweeps give bit-identical stalls. The V-cycle itself is a fine
+   preconditioner (Chebyshev, which only needs real bounds, converges in 11–18 everywhere here),
+   so this is exactly the "the preconditioner is not SPD w.r.t. the fine operator" signature §2
+   inferred — attached to the **boundary-condition** handling of the hierarchy, not to ρ.
+3. **What the density ratio changes is the consequence, not the cause.** On the §2 column with
+   real PCG: at ratio 3 the stalled solve still returns the right answer (steady max|u| 5.9e-17,
+   ∂P/∂z error 7.4e-16); at ratio 1000 it **destroys** it — iteration counts go erratic
+   (`12, 41, 34, 11, 9, 9` — the breakdown guard exiting early) and max|u| = **2.10e+01**,
+   ∂P/∂z error **1.03**, max|div(open·u)| = **43**.
+
+**This defect is pre-existing and long-standing, not introduced by WO-A/F/G.** Reproduced on the
+**2026-07-06 release build** (`4c781e3`, two days after varRho landed, built in a worktree against
+today's core): lid box nz=4 PCG 20–24 its (fine), nz=32 PCG **200/200** with div 1.23e-05, Chebyshev
+13–14. WO-F and WO-G are single-rank byte-identical on these paths, so they are not implicated.
+(The varRho commit `ab5ae43` itself does **not** compile standalone — it calls
+`buildFaceCentroidDist`/`transposeGradWallAware`, which only arrive in `cb4bfa0` — so the exact tree
+§2 was written against cannot be rebuilt.)
+
+**Why nothing caught it: every shipped domain-BC verification is quasi-2D.** `verify_lid_cavity`,
+`verify_channel`, `verify_bfs` and `dvd_cavity` all run with the third axis at 4 cells, which is
+inside the healthy regime. Measured on the **literal** `verify_lid_cavity_sdflow.run()` configuration
+(N=128, nz=4, Re=100, levels=8, 200 steps, host-openmp): PCG median **62** its (56–73),
+div **3.1e-16**, min centreline u/U = **−0.1690**; Chebyshev median 87, div 3.3e-14, the identical
+−0.1690. **No shipped validated result is affected.** The 3-D wall-bounded case that is affected is
+precisely the two-phase / hydrostatic geometry V2 needs.
+
+**The battery (nvidia-cuda; `it_median` aggregated over the three ρ-shapes / worst step; the
+constant-ρ control is the `const rho` column).**
+
+*Chebyshev is flat in the density ratio on every well-resolved geometry, in every case.*
+
+| case | geom | edge | const ρ | 10² | 10³ | 10⁴ |
+|---|---|---|---|---|---|---|
+| hydro | box | sharp | 11 | 12 | 12 | 12 |
+| hydro | cyl | sharp | 13 | 13 | 13 | 13 |
+| hydro | rings | sharp | 14 | 14 | 14 | 14 |
+| lid | box | sharp | 14 | 14 | 14 | 14 |
+| lid | cyl | sharp | 14 | 14 | 14 | 14 |
+| lid | rings | sharp | 14 | 15 | 15 | 15 |
+| per | cyl | sharp | 8 | 8 | 8 | 8 |
+| per | rings | sharp | 13 | 13 | 13 | 13 |
+| hydro | **pack** (64³) | sharp | 23 | 60 | 86 | **144** |
+| lid | **pack** | sharp | 68 | 75 | 134 | **177** |
+| per | **pack** | sharp | 69 | 74 | 90 | **155** |
+
+Smooth vs sharp is **not** a significant axis: the largest difference anywhere on
+box/cyl/rings is 18 vs 14 (rings, hydro, 10⁴) and the *smooth* edge is the worse one — a 2-cell
+tanh spreads the jump over more coarse-grid cells than a step does, so a sharp VoF interface is if
+anything the easier coefficient field for this hierarchy. Ratio 10²→10⁴ costs at most +1 iteration
+on box/cyl/rings (1.00×–1.09× vs the constant-ρ control).
+
+*On the PRODUCTION configuration (`per` — fully periodic pore-scale flow with a body force) the two
+drivers swap places, and PCG is much better than Chebyshev on the real pore geometry:*
+
+| geometry, `per` case, sharp edge | driver | ρ ≡ 1 | 10² | 10³ | 10⁴ |
+|---|---|---|---|---|---|
+| immersed cylinder | PCG | 7 | 7 | 7 | 7 |
+| immersed cylinder | Chebyshev | 8 | 8 | 8 | 8 |
+| 3-ring bed | PCG | 10 | 11 | 11 | 11 |
+| 3-ring bed | Chebyshev | 13 | 13 | 13 | 13 |
+| **`packing_ring.vti` 64³** | **PCG** | **14** | **14** | **16** | **16** |
+| **`packing_ring.vti` 64³** | Chebyshev | 69 | 74 | 90 | **155** |
+
+That last pair is the single most decision-relevant measurement in this work order: on the real
+ring packing at ratio 10⁴, **MG-PCG needs 16 iterations and Chebyshev needs 155**, on the identical
+operator. The `pack` difficulty reported in the wall-bounded rows above is therefore a **Chebyshev**
+weakness (fixed 15-step power-iteration spectrum bounds, then inflated ×0.95/×1.05, on a tortuous
+cut-cell spectrum), not a coefficient-aware-coarsening problem. Per-row on `pack`/`per`: PCG's
+median is **13–19** on every one of the 26 configurations (worst single step 34) and **all 26 are
+healthy**; Chebyshev's median runs 44 → 200 and 5 of its 13 rows cap.
+
+**PCG's one weak spot on the periodic path is the tilted film, and it is a floor, not a stall.**
+Of the 50 periodic 32³ PCG configurations, 33 are healthy and the 17 that are not are **exactly the
+`tilt` shape** (grid-diagonal interface, in a fully periodic — hence singular — box). They plateau
+at max|div(open·u)|/u between **5e-10 and 6.8e-7**, i.e. at the round-off floor of the mean-removed
+system, and simply never reach `rtol·r0 = 1e-8`; the `const`, `slab` and `blob` shapes are healthy
+at every ratio. Contrast the domain-BC failure, whose plateau is **1e-5** — four orders worse and a
+genuinely wrong projection. Chebyshev is healthy on all 50.
+
+**Resolution and coarse-solve controls on `pack`** (so the above is not read as a discretization
+artifact): at **128³** (`--geoms pack --n 128`, stride 2, so the ring walls are ~2 cells thick
+instead of sub-cell) Chebyshev gets *worse*, not better — const 58/69, ratio 10² 82/107, ratio 10⁴
+200/200 — so it is the geometry, not the 64³ downsampling. `set_pressure_bottom` makes no
+difference on `pack` (agglomerated 24/68/105/200 vs smoother 23/68/88/200 vs auto), and reducing the
+depth to `levels=3` is worse (71/68/115/200). The coarse *solve* is not the lever.
+
+**Chebyshev's per-step bound re-estimation is 2/3 of its pressure stage** (the S2 target,
+quantified). Under varRho the coefficient operator is rebuilt every step and `chebBoundsSet_` is
+invalidated with it, so `estimateEigenvalues(…, iters=15, …)` runs every step — **two 15-step power
+loops, each applying M⁻¹A once, i.e. 30 extra V-cycles per step** on top of the ~14 the solve needs.
+Isolated by A/B (constant density estimates once, at step 1, and reuses): the estimate costs
+**21.2 ms** of a **31.6 ms** varRho Chebyshev projection at 32³, i.e. **67 %**; amortizing it would
+leave 10.5 ms — a **3× cut of the varRho pressure stage**, independent of iteration count.
+
+**Ratio ceiling of the varRho path itself** (Chebyshev, hydrostatic column, 32³, measured while
+hunting for the stall — recorded because it bounds what "ratio sweep" can mean): ratio 10³ → 10⁴ →
+10⁵ are all machine-exact (steady max|u| 3.0e-17 / 3.8e-17 / 5.6e-17, 17 / 18 / 19 its), **10⁶
+loses hydrostatic exactness** (max|u| **1.7e-05**, 21 its) and **10⁸ NaNs** both drivers. The MG
+level fields are `float`, so ρ₀/ρ_f = 10⁻⁶ is at the edge of single-precision relative accuracy;
+this is a coefficient *storage* limit, not a driver limit (both drivers fail identically). Ratio 10⁴
+— an air/water contrast at 10³ plus margin — is comfortably inside it.
+
+**Gates.**
+
+| gate | result |
+|---|---|
+| The battery runs to completion on host **and** CUDA | **PASS** — nvidia-cuda 406/406 configurations (592 s) and host-openmp 328/328 (the 32³ `box`/`cyl`/`rings` battery, 792 s), both stored in the JSON. Cross-backend: over the 328 shared configurations the **healthy/unhealthy verdict is identical on every single one** (0 mismatches), and over the 198 that are healthy on both the largest median-iteration difference is **0.5** (a median over an even count — i.e. no configuration differs by a whole iteration). The per-driver tallies match exactly: Chebyshev 0/164 unhealthy on both backends, PCG 113/114 wall-bounded and 17/50 periodic unhealthy on both. See "Pruning" below for what the host run deliberately omits |
+| The §2 PCG stall is reproduced on at least one configuration | **PASS**, but only after fixing the driver selection, and the reproduction **refutes §2's mechanism** — see the headline. 2000/2000 iterations on the literal §2 case, and on the 32³ battery **113 of the 114 wall-bounded PCG configurations are unhealthy** (hydro 56/57, lid 57/57; 30 of them capped on all 20 steps) against **0 of 164 for Chebyshev**. The same stall occurs at constant density |
+| The table answers: Chebyshev its vs ratio, vs geometry, vs sharp/smooth | **PASS** — flat in ratio (1.00–1.09×) and in edge on box/cyl/rings; 11–18 its. Geometry is the only strong axis, and only for the real `packing_ring.vti` bed (23–69 constant-ρ, 144–177 at ratio 10⁴) |
+| Solver code untouched | **PASS** — the diff is one new study script, its JSON, this entry and a superseding note in `doc/variable_density_projection.md` §2 |
+
+**The S-ladder implication (recorded, not decided).** The WO's success metric — "Chebyshev ≤ ~40 its
+at 10³ across geometries ⇒ S2 is the only remaining work; > ~80 or ratio-divergent ⇒ S3/S4 promote"
+— splits: **12–15 its** on box/cylinder/3-ring-bed (S2 territory, comfortably), **90–155 its and
+ratio-divergent** on the real `packing_ring.vti` bed (nominally S3/S4 territory). But the promotion
+does not follow, because **MG-PCG solves that same ratio-10⁴ packing operator in 16 iterations**.
+Coefficient-aware coarsening (S3) and symmetric/Galerkin transfers (S4) are aimed at a hierarchy
+that fails on ρ-scaled coefficients; no measurement in this battery shows one — the periodic
+hierarchy handles ratio 10⁴ at parity with ratio 1 under *both* drivers on every geometry, and the
+wall-bounded hierarchy fails identically at ratio 1. What the measurements do indicate, in order:
+(i) fix the domain-BC MG-PCG stall and the `set_pressure_pcg` no-op — that is what made varRho look
+broken, and it is a prerequisite for any honest driver comparison on a wall-bounded two-phase case;
+(ii) **S1 (flexible CG, WO-C) is now the sharpest instrument available**, since the stall is exactly
+the non-SPD-preconditioner failure FCG is designed to tolerate, and this battery is ready to gate
+it; (iii) S2 remains worth its cost *for as long as Chebyshev is the varRho default*, and is worth
+**3×** on the pressure stage; (iv) **S3/S4 are not indicated by any measurement here** and should
+stay parked until one is.
+
+**Pruning (declared).** The host-openmp run omits the `pack` (64³ `packing_ring.vti`) sub-sweep: it
+is the only rung where a stalling PCG configuration costs ~4000 V-cycles on 2.6e5 cells, and the
+CUDA run already establishes both the geometry effect and the driver crossover there; the host run's
+purpose is the cross-backend consistency gate, which the three 32³ geometries serve at 1/10 the cost.
+Nothing else was dropped: the full geometry × shape × edge × ratio × driver × case cross-product ran
+on CUDA. Two combinations are structurally skipped by the script (`per` × `box` × {`const`, `slab`}):
+a z-only ρ stratification in a periodic box leaves the predictor x-uniform, so `div(u*) = 0`
+identically and the pressure solve returns after 0 iterations — a degenerate cell, not a measurement.
+
+**Reading the tables — three traps.** (a) A **low** iteration count is not a good solve: PCG's
+breakdown guard (`pAp <= 1e-300` or a non-finite recurrence scalar in `CutcellMG::solvePCG`) exits
+early and keeps the last finite iterate, which is how "8 / 200" rows arise next to div/u = O(1).
+The script therefore records `div_rel = max|div(open·u)| / u_scale` and a `healthy` flag, and the
+table's `ok` / `CAP` / `BAD` columns are the honest reading. (b) Conversely, a **capped** row is not
+always a bad solve: several `pack` and `per`/`tilt` rows hit the 200 cap with div/u at 1e-10…1e-8,
+i.e. the iteration plateaued at the round-off floor of the mean-removed singular system and simply
+never reached `rtol·r0`. Those are stopping-criterion artifacts; the domain-BC stall is not (its
+floor is div/u ≈ 1e-5). (c) Wall times are the **fastest** of the 20 steps, not the median: this host
+is shared with other agents (an AMR MPI battery was running through part of the sweep) and medians
+picked up 10× spikes. Iteration counts are immune and are the primary metric.
+
+**ESCALATION #1 — `set_pressure_pcg`'s `on` flag is a no-op, so PCG is unreachable under varRho
+(and under porous).** `setPressurePcg(bool /*on*/, …)` never writes `useChebyshev_`. Consequences
+beyond this WO: (i) `variable_density_projection.md` §2's own escape hatch does not exist, so the
+varRho Chebyshev default is currently *mandatory*, not a default; (ii) the same applies to the
+porous path — `setPorous` sets `useChebyshev_ = true` behind a comment that makes the *identical*
+claim from the *identical* kind of observation ("MG-PCG stalls on the eps-scaled coefficient
+operator … observed: PCG 2000 iters stuck where Chebyshev converges in ~40 … an explicit driver set
+afterwards wins"), so that finding is due the same re-measurement this WO gave §2's; (iii) any past
+measurement that selected PCG *after* one of those calls measured Chebyshev instead. The one-line shape of the fix is `useChebyshev_ = !on;` (or
+`if (on) useChebyshev_ = false;`) in `setPressurePcg`, but it is a production change and would flip
+the driver under every varRho/porous script that currently relies on the accidental Chebyshev — and
+straight into escalation #2 on wall-bounded cases. Not fixed here (measurement-only WO).
+
+**ESCALATION #2 — MG-PCG stalls on the domain-BC pressure hierarchy of any 3-D wall-bounded grid,
+at constant density.** Characterized above and reproducible with the shipped script
+(`--geoms box --shapes const --cases lid --drivers pcg`, or the compact matrix in the tables). The
+residual plateaus at r/r₀ ≈ 1.8e-2 after ~7 iterations and then oscillates for the remaining 193
+(`PECLET_FLOW_MG_DEBUG=2` prints the history), leaving max|div(open·u)|/u ≈ 1e-5 — a genuinely
+unconverged projection. Onset is between a third-axis extent of 4 and 8 cells; it is independent of
+which axis is walled vs periodic, of `set_pressure_bottom` (smoother / auto / agglomerated all
+stall), of `set_pressure_mean_removal` (fine / all), of the momentum tolerance (40 / 400 / 2000
+RB-GS sweeps give bit-identical stalls), and of μ.
+
+**It is in the geometric coarse levels, and two configurations avoid it entirely:**
+
+| lid box, constant ρ, PCG | nz = 4 | nz = 32 |
+|---|---|---|
+| `levels=4`, geometric bottom (the default) | 18–55 its, div 5.8e-13 | **200/200**, div 1.24e-05 |
+| `levels=4`, `set_pressure_graph_amg(True)` | **200/200**, div 1.57e-05 | **200/200**, div 1.39e-05 |
+| `levels=1` (no coarse grid) | 1 it, div 1.7e-13 | 1 it, div 1.7e-13 |
+| `levels=1` + `set_pressure_graph_amg(True)` | **1 it**, div 3.4e-14 | **1 it**, div 2.8e-13 |
+
+So the natural suspects are the coarse levels' boundary treatment —
+`CutcellMG::applyBoundaryOpenness`'s per-level re-imposition and the prolongation's non-periodic
+boundary ghosts, whose pair need not be the adjoint the V-cycle needs to stay SPD — but this WO
+measured rather than localized it. Note the third row: **the GraphAMG bottom does not cure it and at
+nz = 4 it causes it**, which matters because `configurePorousDragSolver` (`flow_ibm.hpp`) puts
+CFD-DEM-with-implicit-drag on exactly that combination (PCG + GraphAMG bottom). The clean workaround
+that does work is the mesh-independent single-level solve — `set_pressure_multigrid(True, levels=1)`
++ `set_pressure_graph_amg(True)`, one iteration on both grids — which is also a useful A/B for
+whoever fixes this.
+
+Reach: any 3-D wall-bounded run with PCG, i.e. all of V2's two-phase-in-a-box cases, and the
+CFD-DEM drag path; **no currently validated result** (all quasi-2D, verified above). Fixing it is a
+production change and needs its own work order; **WO-C (S1, flexible CG) should be gated on this
+battery**, because FCG is precisely the remedy for a non-SPD preconditioner and would settle whether
+the transfers must be rebuilt (S4) or merely tolerated.
+
+**ESCALATION #3 — the varRho hydrostatic path loses exactness at density ratio ≥ 10⁶.** Ratio 10⁵ is
+machine-exact (max|u| 5.6e-17); 10⁶ gives max|u| 1.7e-05 and 10⁸ NaNs both drivers. The MG level
+coefficient fields are `float` and the coefficient is ρ₀/ρ_f, so 10⁻⁶ sits at single-precision
+relative resolution. Out of scope for VoF (air/water is 10³) and recorded only so nobody reads the
+ratio axis as open-ended.
+
+**Reproduce.**
+```bash
+OMP_NUM_THREADS=8 OMP_PROC_BIND=false PYTHONPATH=$PWD/build python \
+  tests/study/vardensity_solver_probe.py --pack --cheb-overhead --tag nvidia-cuda
+# the §2 reproduction, on its own:
+#   --geoms box --shapes slab --edges sharp --ratios 1e3 --cases hydro --drivers pcg
+# the constant-density control that refutes the rho mechanism:
+#   --geoms box --shapes const --cases lid --drivers pcg,cheb
+# the production configuration where PCG beats Chebyshev 10x:
+#   --geoms pack --n 64 --shapes const,slab --edges sharp --cases per
+```
