@@ -286,7 +286,22 @@ static void bind_solver(nb::module_& m, const char* name) {
            "coarse levels can't cleanly coarsen). Applied at the next set_solid.")
       .def("set_pressure_pcg", &S::setPressurePcg, nb::arg("on"), nb::arg("max_iter") = 200,
            nb::arg("rtol") = 1e-8,
-           "Use the MG-PCG pressure accelerator (single-GPU default; exclusive with Chebyshev).")
+           "Use the MG-PCG pressure accelerator (single-GPU default; exclusive with Chebyshev). "
+           "KNOWN DEFECT: the `on` flag is a no-op -- this call only sets the cap/tolerance and "
+           "cannot switch the driver back from Chebyshev (see doc/vof_workorders.md WO-H). The "
+           "spelling that does select MG-PCG today is set_pressure_chebyshev(False, ...).")
+      .def("set_pressure_fcg", &S::setPressureFcg, nb::arg("on"), nb::arg("max_iter") = 200,
+           nb::arg("rtol") = 1e-8,
+           "Use the FLEXIBLE MG-CG pressure accelerator: the same V-cycle-preconditioned CG as "
+           "set_pressure_pcg, the same stopping estimate/mean removal, and the same cap+tolerance "
+           "(they are shared -- it is the same solve), differing only in the beta recurrence "
+           "(Polak-Ribiere r^T(z_{k+1}-z_k)/r^T z_k instead of Fletcher-Reeves). Costs one extra "
+           "level-0 vector and one extra global dot per iteration; buys tolerance of a "
+           "preconditioner that is not symmetric with respect to the fine operator. On a symmetric "
+           "preconditioner the two betas are algebraically identical, so FCG reproduces PCG's "
+           "iteration count. Unlike set_pressure_pcg this flag GENUINELY selects: on=True clears "
+           "the Chebyshev selection (so it works after set_density_mode/set_porous), on=False "
+           "returns to MG-PCG, and a later set_pressure_chebyshev(True, ...) wins over it.")
       .def("set_exact_crossings", &S::setExactCrossings, nb::arg("t"),
            "Analytic-SDF capability: exact wall-crossing fractions overriding the "
            "linear-interpolated theta in the momentum cut-cell overlay AND the ghost-projection "

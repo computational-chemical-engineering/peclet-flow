@@ -741,6 +741,106 @@ class CutcellMG {
     return it;
   }
 
+  // FLEXIBLE CG (Notay 2000 / Golub-Ye "inexact preconditioned CG"; the Polak-Ribiere form of
+  // Axelsson's generalized CG), preconditioned by the SAME one symmetric V-cycle as solvePCG.
+  //
+  // The ONLY difference from solvePCG is the beta recurrence: Fletcher-Reeves
+  //     beta = r_{k+1}^T z_{k+1} / (r_k^T z_k)
+  // is replaced by Polak-Ribiere
+  //     beta = r_{k+1}^T (z_{k+1} - z_k) / (r_k^T z_k),
+  // at the cost of one extra stored vector (z_k) and one extra global dot per iteration. The two
+  // forms are ALGEBRAICALLY IDENTICAL when the preconditioner is a fixed SPD operator, because
+  // then r_{k+1} is M^{-1}A-orthogonal to z_k, i.e. r_{k+1}^T z_k = 0 exactly -- so on a healthy
+  // problem FCG must reproduce PCG's iteration count (that equality is the sanity gate). When the
+  // preconditioner is NOT symmetric w.r.t. the fine operator, that orthogonality is lost, the
+  // Fletcher-Reeves numerator is contaminated by a term CG has no right to, and the iteration
+  // stalls; Polak-Ribiere subtracts exactly that term, which is why FCG converging where PCG
+  // stalls is a DIAGNOSIS ("the preconditioner is nonsymmetric") and not merely a fix.
+  //
+  // Everything else -- matvec (incl. the optional star overlay), preconditioner, mean removal,
+  // the maxabs(r) < rtol*r0 stopping estimate, the breakdown guards, the final mean removal -- is
+  // identical to solvePCG line for line. Keep the two in sync if either is ever changed.
+  // Scratch: solvePCG's five level-0 fields plus `zp` (the previous preconditioned residual).
+  int solveFCG(CCField b, CCField x, CCField r, CCField p, CCField z, CCField zp, CCField Ap,
+               int maxit, double rtol, int pre, int post, int bottom,
+               const StarOverlay* star = nullptr, int nStar = 0, C3 nnStar = C3{0, 0, 0}) {
+    pre_ = pre;
+    post_ = post;
+    bottom_ = bottom;
+    Level& l0 = lv_[0];
+    Kokkos::deep_copy(l0.x, x);
+    auto matvec = [&](CCField y, CCField v) {
+      matvecOverlap(l0, y, v);
+      if (star)
+        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G);
+    };
+    auto precond = [&](CCField zz, CCField rr) {
+      Kokkos::deep_copy(l0.rhs, rr);
+      Kokkos::deep_copy(l0.x, 0.0);
+      vcycle(0, /*sym=*/true);
+      Kokkos::deep_copy(zz, l0.x);
+    };
+    matvec(Ap, x);  // r = b - A x
+    Kokkos::deep_copy(r, b);
+    axpy(r, -1.0, Ap);
+    removeMean(l0, r);  // compatibility: project rhs/residual onto the range
+    const double r0 = maxabs(l0, r);
+    int it = 0;
+    int dbgRank = 0;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      MPI_Comm_rank(comm_, &dbgRank);
+#endif
+    const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves() && dbgRank == 0;
+    if (trace)
+      printf("[mg] fcg solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0,
+             rtol, pre, post, bottom);
+    ++dbgSolve_;
+    if (r0 > 0.0 && std::isfinite(r0)) {
+      precond(z, r);
+      Kokkos::deep_copy(p, z);
+      double rz = dot(l0, r, z);
+      if (!std::isfinite(rz)) {
+        printf("peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z; "
+               "returning zero correction\n");
+        Kokkos::deep_copy(x, 0.0);
+        Kokkos::deep_copy(l0.x, x);
+        return 0;
+      }
+      for (; it < maxit; ++it) {
+        matvec(Ap, p);
+        if (meanRemovalAll_)
+          removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
+        const double pAp = dot(l0, p, Ap);
+        if (!std::isfinite(pAp) || pAp <= 1e-300)
+          break;  // breakdown/converged direction: keep the last finite iterate
+        const double alpha = rz / pAp;
+        axpy(x, alpha, p);
+        axpy(r, -alpha, Ap);
+        removeMean(l0, r);
+        const double rn = maxabs(l0, r);
+        if (trace)
+          printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
+        if (rn < rtol * r0) {
+          ++it;
+          break;
+        }
+        Kokkos::deep_copy(zp, z);  // z_k, before the preconditioner overwrites it
+        precond(z, r);
+        const double rznew = dot(l0, r, z), rzcross = dot(l0, r, zp);
+        if (!std::isfinite(rznew) || !std::isfinite(rzcross))
+          break;  // preconditioner breakdown: keep the last finite iterate
+        const double beta = (rznew - rzcross) / rz;  // Polak-Ribiere: r^T (z_{k+1} - z_k) / r^T z
+        aypx(p, beta, z);
+        rz = rznew;
+      }
+    }
+    Kokkos::deep_copy(l0.x, x);
+    removeMean(l0, l0.x);
+    Kokkos::deep_copy(x, l0.x);
+    return it;
+  }
+
   // BiCGStab preconditioned by one symmetric V-cycle, for the NONSYMMETRIC ghost-projection
   // operator A = (binary-openness 7-point op) + (per-row overlay delta, gpApplyDelta). The MG
   // hierarchy/preconditioner only ever sees the symmetric binary surrogate its levels were built

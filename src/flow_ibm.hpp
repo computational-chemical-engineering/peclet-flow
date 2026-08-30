@@ -241,6 +241,30 @@ class Solver {
     pcgMaxit_ = maxit;
     pcgRtol_ = rtol;
   }
+  // FLEXIBLE MG-CG (set_pressure_fcg): the same Krylov driver as MG-PCG with the same V-cycle
+  // preconditioner, the same stopping estimate, the same mean removal and the same cap/tolerance
+  // (`pcgMaxit_`/`pcgRtol_`, shared deliberately — it is the same solve), differing ONLY in the
+  // beta recurrence: Polak-Ribiere `r^T(z_{k+1} - z_k) / r^T z_k` instead of Fletcher-Reeves.
+  // Costs one extra level-0 vector and one extra global dot per iteration; buys tolerance of a
+  // preconditioner that is not symmetric w.r.t. the fine operator (CutcellMG::solveFCG).
+  //
+  // This setter GENUINELY selects, unlike setPressurePcg above whose `on` flag is a documented
+  // no-op (see doc/vof_workorders.md WO-H (1); fixing that is WO-H's job, not this one's, because
+  // repairing it in isolation would move every varRho/porous script onto the stalling PCG). The
+  // pair (Chebyshev, FCG) is therefore mutually exclusive in BOTH directions: `on` clears
+  // `useChebyshev_` here, and `setPressureChebyshev(true, ...)` wins over a previously selected
+  // FCG at the dispatch in project(). `set_pressure_fcg(false)` returns the solve to MG-PCG.
+  void setPressureFcg(bool on, int maxit, double rtol) {
+    if (on && ghostProjection_)
+      throw std::runtime_error(
+          "set_pressure_fcg: the ghost-projection operator is nonsymmetric and is solved by "
+          "BiCGStab; FCG does not apply");
+    useFcg_ = on;
+    if (on)
+      useChebyshev_ = false;  // genuine selection (the pair is exclusive)
+    pcgMaxit_ = maxit;
+    pcgRtol_ = rtol;
+  }
   // EXPERIMENTAL directional ghost-cell projection (second staggered IBM, ghost_projection.hpp):
   // point-based FD divergence with wall-anchored directional closures instead of the
   // openness-weighted cut-cell projection. Call BEFORE set_solid (the overlay is built there).
@@ -3914,6 +3938,16 @@ class Solver {
                 ph(i1) = 0.0;
             });
       }
+    } else if (useFcg_) {
+      // Flexible CG (set_pressure_fcg): identical to the MG-PCG branch below but for the
+      // Polak-Ribiere beta, which tolerates a V-cycle preconditioner that is not symmetric w.r.t.
+      // the fine operator. Its one extra vector is allocated on first use, so an unselected FCG
+      // costs nothing (not even memory).
+      if (zp1_.extent(0) != n1_)
+        zp1_ = CCField("zp1", n1_);
+      lastPressureIters_ =
+          mg_.solveFCG(rhs1_, phi1_, r_, pp_, z_, zp1_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
+                       fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_});
     } else {
       lastPressureIters_ =
           mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
@@ -4719,6 +4753,9 @@ class Solver {
   double pcgRtol_ = 1e-10;  // cut-cell pressure MG-PCG
   bool useChebyshev_ = false,
        chebBoundsSet_ = false;  // Chebyshev pressure driver (set_pressure_chebyshev)
+  bool useFcg_ = false;         // flexible-CG pressure driver (set_pressure_fcg); OFF by default,
+                                // so the shipped MG-PCG path is untouched (zp1_ is not allocated)
+  CCField zp1_;                 // FCG's extra scratch: allocated lazily at the first FCG solve
   int chebMaxit_ = 120;
   double chebRtol_ = 1e-9, chebA_ = 0.0, chebB_ = 0.0;
   int nLevels_ = 4;             // multigrid depth (CUDA default; set_pressure_multigrid)

@@ -30,6 +30,11 @@ What is swept
                      interface presents to the operator)
   ratio      1e2, 1e3, 1e4
   driver     `cheb` (`set_pressure_chebyshev`)   `pcg` (`set_pressure_pcg`)
+             `fcg` (`set_pressure_fcg`, added by WO-C / rung S1) -- the SAME V-cycle-preconditioned
+                     CG as `pcg` with the same cap/tolerance/stopping estimate, differing only in
+                     the beta recurrence (Polak-Ribiere instead of Fletcher-Reeves).  `fcg` is NOT
+                     in the default `--drivers` set, so the WO-B battery reproduces unchanged; ask
+                     for it with `--drivers pcg,fcg` (or `cheb,pcg,fcg`).
 
 **Driver-selection trap -- read before changing `run_one`.**  `set_pressure_pcg(on, maxit, rtol)`
 **ignores its `on` flag**: `IbmSolver::setPressurePcg(bool /*on*/, ...)` only stores
@@ -100,7 +105,8 @@ SHAPES = ("slab", "blob", "tilt")
 GEOM_ORDER = ("box", "cyl", "rings", "pack")
 SHAPE_ORDER = ("const", "slab", "blob", "tilt")
 EDGES = ("smooth", "sharp")
-DRIVERS = ("cheb", "pcg")
+DRIVERS = ("cheb", "pcg", "fcg")
+DRIVERS_DEFAULT = ("cheb", "pcg")   # WO-B's battery; `fcg` (WO-C) is opt-in via --drivers
 CASES = ("hydro", "lid", "per")
 
 
@@ -250,6 +256,10 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
     elif driver == "pcg":
         s.set_pressure_chebyshev(False, MAXIT, RTOL)
         s.set_pressure_pcg(True, MAXIT, RTOL)
+    elif driver == "fcg":
+        # set_pressure_fcg DOES honour its flag (it clears useChebyshev_ itself), so unlike the
+        # `pcg` branch above no set_pressure_chebyshev(False) dance is needed.
+        s.set_pressure_fcg(True, MAXIT, RTOL)
     else:
         raise ValueError(driver)
 
@@ -304,9 +314,15 @@ def markdown(records):
                "host is shared with other agents, and a median picks up their load.\n")
     out.append("`ok` = stayed below the iteration cap AND left max|div(open u)|/u_scale < 1e-8; "
                "`CAP` = hit the cap; `BAD` = finished but the projection did not close.\n")
-    out.append("| geom | shape | edge | ratio | case | Cheb its (med/max) | Cheb | "
-               "Cheb div/u | Cheb proj ms | PCG its (med/max) | PCG | PCG div/u | PCG proj ms |")
-    out.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    # Columns follow whichever drivers are present, in DRIVERS order (cheb, pcg, fcg): a cheb+pcg
+    # run reproduces WO-B's table exactly, a --drivers pcg,fcg run gets the FCG trio instead.
+    label = {"cheb": "Cheb", "pcg": "PCG", "fcg": "FCG"}
+    present = [d for d in DRIVERS if any(r["driver"] == d for r in records)]
+    head = ["geom", "shape", "edge", "ratio", "case"]
+    for d in present:
+        head += [f"{label[d]} its (med/max)", label[d], f"{label[d]} div/u", f"{label[d]} proj ms"]
+    out.append("| " + " | ".join(head) + " |")
+    out.append("|" + "---|" * len(head))
     key = lambda r: (r["geom"], r["shape"], r["edge"], r["ratio"], r["case"])
     idx = {}
     for r in records:
@@ -315,7 +331,6 @@ def markdown(records):
                                         ("smooth", "sharp").index(k[2]), k[3],
                                         CASES.index(k[4]))):
         g, sh, e, ra, ca = k
-        c, p = idx[k].get("cheb"), idx[k].get("pcg")
         def cell(r):
             if r is None:
                 return ["-", "-", "-", "-"]
@@ -324,7 +339,10 @@ def markdown(records):
                            if not r["converged"] else "**BAD**"))
             return [f"{r['it_median']:.0f}/{r['it_max']}", state,
                     f"{r['div_rel']:.1e}", f"{r['t_proj_min']*1e3:.1f}"]
-        out.append("| " + " | ".join([g, sh, e, f"{ra:.0e}", ca] + cell(c) + cell(p)) + " |")
+        row = [g, sh, e, f"{ra:.0e}", ca]
+        for d in present:
+            row += cell(idx[k].get(d))
+        out.append("| " + " | ".join(row) + " |")
     return "\n".join(out)
 
 
@@ -477,7 +495,8 @@ def main():
     ap.add_argument("--shapes", default="const," + ",".join(SHAPES))
     ap.add_argument("--edges", default=",".join(EDGES))
     ap.add_argument("--ratios", default=",".join(f"{r:.0e}" for r in RATIOS))
-    ap.add_argument("--drivers", default=",".join(DRIVERS))
+    ap.add_argument("--drivers", default=",".join(DRIVERS_DEFAULT),
+                    help="cheb, pcg, fcg (comma-separated); default cheb,pcg = WO-B's battery")
     ap.add_argument("--cases", default=",".join(CASES))
     ap.add_argument("--pack", action="store_true",
                     help="append the data/packing_ring.vti sub-sweep at N=64 (shapes slab,blob)")
