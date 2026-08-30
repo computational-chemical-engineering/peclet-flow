@@ -64,7 +64,7 @@ C++ kernel + multi-rank test suites (own `find_package` projects; build against 
 ```bash
 # Single-rank Kokkos kernel unit tests:
 cmake -S tests/kokkos -B build_kokkos -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda
-cmake --build build_kokkos -j && ctest --test-dir build_kokkos --output-on-failure   # 19 tests
+cmake --build build_kokkos -j && ctest --test-dir build_kokkos --output-on-failure   # 22 tests
 # Multi-rank (MPI) tests, np=1,2,4:
 cmake -S tests/kokkos_mpi -B build_kmpi -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
   -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
@@ -225,29 +225,48 @@ operator. Four outer drivers wrap that V-cycle — **select one per solver**:
 | driver | select with | use |
 |---|---|---|
 | **Standalone V-cycle** | default (neither below set) | multi-rank default. `set_pressure_multigrid(True, levels=1)` ⇒ pure RB-GS (no coarse grid) |
-| **MG-PCG** | `set_pressure_pcg(True, max_iter, rtol)` | **single-GPU default** (auto-enabled on 1 rank); ~1.2× faster than the V-cycle to a fixed tolerance. **Stalls on 3-D wall-bounded (domain-BC) grids** — see the box below |
-| **Flexible MG-CG** | `set_pressure_fcg(True, max_iter, rtol)` | the same solve with the Polak–Ribière β, tolerant of a preconditioner that is not symmetric w.r.t. the fine operator. +1 vector, +1 global dot/iteration, ≤2 % projection-time overhead. **The working Krylov driver on domain-BC grids** |
+| **MG-PCG** | `set_pressure_pcg(True, max_iter, rtol)` | **single-GPU default** (auto-enabled on 1 rank); ~1.2× faster than the V-cycle to a fixed tolerance. Healthy on 3-D wall-bounded grids since the WO-H symmetry repair (below); still capped by a **high density/void CONTRAST** — see the last bullet |
+| **Flexible MG-CG** | `set_pressure_fcg(True, max_iter, rtol)` | the same solve with the Polak–Ribière β, tolerant of a preconditioner that is not symmetric w.r.t. the fine operator. +1 vector, +1 global dot/iteration, ≤2 % projection-time overhead. The most forgiving CG driver — the one to try when PCG caps |
 | **Chebyshev** | `set_pressure_chebyshev(True, max_iter, rtol)` | communication-light (no per-iteration global dot-products) — for large multi-GPU where PCG's reductions are latency-bound. ≈ PCG iteration count on periodic/IBM; bounds estimated once on step 1 (per step under varRho/porous, which costs 30 extra V-cycles) |
 
-- **Chebyshev and FCG are mutually exclusive in both directions** — `set_pressure_fcg(True, …)` clears
-  the Chebyshev selection (so it works after `set_density_mode`/`set_porous`), `set_pressure_fcg(False)`
-  returns to MG-PCG, and a later `set_pressure_chebyshev(True, …)` wins. With none set, the solve is
-  `n_pois` standalone V-cycles (or auto-PCG on 1 rank).
-- **KNOWN DEFECT — `set_pressure_pcg`'s `on` flag is a no-op** (`setPressurePcg(bool /*on*/, …)`
-  stores only the cap/tolerance and never writes `useChebyshev_`), so it cannot switch the driver
-  back from Chebyshev; after `set_density_mode("variable")` or `set_porous` it leaves the solve on
-  Chebyshev. The spelling that does select MG-PCG is `set_pressure_chebyshev(False, …)`. Left in place
-  deliberately: repairing it alone would move those users onto the stalling PCG. Scoped as WO-H in
-  [`doc/vof_workorders.md`](doc/vof_workorders.md).
-- **MG-PCG stalls on any 3-D wall-bounded grid, at constant density** — 200/200 iterations with
-  max|div(open·u)| ≈ 1e-5 once the third axis reaches 8 cells, while Chebyshev takes 13–14 and
-  **FCG 16–35** on the identical operator; periodic + IBM is healthy at every density ratio (PCG 7–16).
-  The cause is a V-cycle preconditioner that is not symmetric w.r.t. the fine operator, introduced by
-  the FIRST coarse level under domain BCs (`levels=1` solves in 1 iteration; `levels≥2` stalls). **On a
-  domain-BC problem use FCG or Chebyshev, not PCG.** Measurements: WO-B/WO-C in
-  [`doc/vof_workorders.md`](doc/vof_workorders.md), reproduce with
-  `tests/study/vardensity_solver_probe.py --drivers pcg,fcg`. No shipped validated result is affected
-  (every domain-BC verification script is quasi-2D, nz = 4, inside the healthy regime).
+- **The three Krylov drivers are mutually exclusive in both directions, last set wins** (repaired by
+  WO-H, 2026-08-30): `set_pressure_pcg(True, …)` clears both competing selections, `set_pressure_fcg(True, …)`
+  clears the Chebyshev selection, `set_pressure_chebyshev(True, …)` clears the FCG selection — so each
+  works after `set_density_mode` / `set_porous`. `set_pressure_fcg(False)` and
+  `set_pressure_chebyshev(False)` fall back to MG-PCG; `set_pressure_pcg(False)` **raises**, because
+  MG-PCG is the terminal fallback of the dispatch and cannot be deselected on its own — name the
+  driver you want instead. With none set, the solve is `n_pois` standalone V-cycles (or auto-PCG on 1
+  rank). *Before WO-H `set_pressure_pcg`'s `on` flag was silently discarded*, so after
+  `set_density_mode("variable")` / `set_porous` there was no way to select PCG at all and the working
+  spelling was `set_pressure_chebyshev(False, …)`; every "PCG under varRho/porous" measurement made
+  that way actually measured Chebyshev (the tell: it capped at 120, `chebMaxit_`'s default).
+- **The domain-BC V-cycle used to be an asymmetric preconditioner, and MG-PCG stalled on every 3-D
+  wall-bounded grid because of it** — 200/200 iterations with max|div(open·u)| ≈ 1e-5 once the third
+  axis reached 8 cells. **FIXED 2026-08-30 (WO-H)**: the per-level ghost fill is periodic on all three
+  axes, so a walled face's coarse ghost held the value from the *opposite* side of the domain; every
+  operator consumer is immune (the wall face openness is 0, so the smoother/residual/matvec multiply
+  that ghost by a zero coefficient) but the **trilinear prolongation is not** — it reads the coarse
+  ghost with weight ¼ whatever the openness. That teleport is a long-range coupling present in the
+  prolongation and absent from the restriction. `CutcellMG::applyNeumannGhost` now imposes the
+  zero-gradient ghost on owned wall/inflow faces before every prolongation, the pressure-side
+  counterpart of `VelocityMG::fillProlongBcGhosts` (the velocity MG always had both halves; the
+  pressure MG only ever got the Dirichlet one, `applyOutflowGhost`). Measured, 24×24×16 lid box at
+  constant density: **PCG 200/200 → 6, FCG 22 → 6, Chebyshev 12 → 7**; the direct symmetry read-out
+  `pr` (`PECLET_FLOW_MG_DEBUG=2`, zero iff M is symmetric w.r.t. the fine operator) drops from
+  0.42–0.52 median wall-bounded to **0.008–0.086**, at or below the 0.062 of the *periodic* hierarchy.
+  Periodic/IBM is byte-identical (`hasBC_` gates it) and the single-phase regression is +0.00 % with
+  identical iteration counts. `PECLET_FLOW_MG_BCGHOST=0` restores the old ghost as a measurement
+  ablation. Gate: `tests/kokkos/test_pressure_wallbounded.cpp` (nz = 16, all three drivers).
+- **What remains: a high coefficient CONTRAST makes the V-cycle preconditioner indefinite.** Both CG
+  drivers still cap on a wall-bounded *stratified* column at density ratio ≳ 10³ and PCG on the
+  small-coefficient-against-an-inflow-face case, while **Chebyshev is healthy on all of them**. Cause,
+  measured directly (dense `sym(M)` assembled from unit V-cycles on an 8³ box): a **negative LDL
+  pivot** from ratio ~10³ walled and ~10⁴ even fully periodic — i.e. the arithmetic coarsening of the
+  face coefficient (`coarsenOpenAvg`) produces a coarse operator inaccurate enough to make the
+  correction indefinite, which no choice of the CG β survives. This is the coefficient-aware-coarsening
+  item (VOF_PLAN S3), not a boundary-treatment one, and it is why **Chebyshev stays the varRho/porous
+  default**. Measurements: WO-B/WO-C/WO-H in [`doc/vof_workorders.md`](doc/vof_workorders.md);
+  reproduce with `tests/study/vardensity_solver_probe.py --drivers pcg,fcg`.
 - Coarse-operator mode: `set_solid(..., pressure_coarse="rediscretized")` (default; also `"galerkin"` /
   `"const"`). `set_pressure_multigrid(on, levels)` sets the multigrid depth (`levels=1` == pure RB-GS).
 - `set_pressure_warmstart(True)` seeds each solve from the previous step's φ (opt-in, off by default).
@@ -340,7 +359,10 @@ conservation, machine-precision divergence; `scripts/verify_channel_sdflow.py`);
 The **rediscretized geometric pressure multigrid is multilevel on these non-periodic domains** (not just the
 periodic/IBM case): each coarse level re-imposes the boundary face openness (Neumann wall/inflow → 0,
 Dirichlet outflow → open) and the trilinear prolongation fills the non-periodic boundary ghosts
-(Neumann → zero-gradient, Dirichlet → 0). Gated on `has_bc_`, so the periodic/IBM path is byte-identical.
+(Neumann → zero-gradient via `applyNeumannGhost`, Dirichlet → 0 via `applyOutflowGhost`). Gated on
+`has_bc_`, so the periodic/IBM path is byte-identical. *Until WO-H (2026-08-30) only the Dirichlet
+half existed and the Neumann ghost held the periodic wrap — that was the MG-PCG stall; see the
+pressure-driver bullets above.*
 Convergence is grid-independent — e.g. a 256×64 channel at a fixed 10 V-cycles/step drives the flux
 divergence from `2e-3` (1 level) to `5e-7` (3 levels) at ~the same cost.
 

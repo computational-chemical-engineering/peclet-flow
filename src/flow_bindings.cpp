@@ -242,7 +242,9 @@ static void bind_solver(nb::module_& m, const char* name) {
           "Set the pressure multigrid depth (levels=1 => pure RB-GS, no coarse grid).")
       .def("set_pressure_chebyshev", &S::setPressureChebyshev, nb::arg("on"),
            nb::arg("max_iter") = 120, nb::arg("rtol") = 1e-9,
-           "Use the communication-light Chebyshev pressure accelerator (exclusive with PCG).")
+           "Use the communication-light Chebyshev pressure accelerator. Mutually exclusive with the "
+           "two CG drivers (on=True clears an FCG selection); on=False deselects Chebyshev and "
+           "falls back to FCG if that is selected, otherwise to MG-PCG.")
       .def(
           "set_pressure_mean_removal",
           [](S& s, const std::string& scope) {
@@ -286,10 +288,14 @@ static void bind_solver(nb::module_& m, const char* name) {
            "coarse levels can't cleanly coarsen). Applied at the next set_solid.")
       .def("set_pressure_pcg", &S::setPressurePcg, nb::arg("on"), nb::arg("max_iter") = 200,
            nb::arg("rtol") = 1e-8,
-           "Use the MG-PCG pressure accelerator (single-GPU default; exclusive with Chebyshev). "
-           "KNOWN DEFECT: the `on` flag is a no-op -- this call only sets the cap/tolerance and "
-           "cannot switch the driver back from Chebyshev (see doc/vof_workorders.md WO-H). The "
-           "spelling that does select MG-PCG today is set_pressure_chebyshev(False, ...).")
+           "Use the MG-PCG pressure accelerator (single-GPU default) and set its iteration cap and "
+           "relative tolerance. on=True GENUINELY selects: it clears both competing selections "
+           "(Chebyshev and FCG), so it works after set_density_mode / set_porous -- last set wins. "
+           "on=False RAISES: MG-PCG is the terminal fallback of the driver dispatch, so it cannot "
+           "be deselected on its own -- select the driver you want instead "
+           "(set_pressure_chebyshev(True, ...) or set_pressure_fcg(True, ...)). Under "
+           "set_ghost_projection the nonsymmetric operator is solved by BiCGStab; this call still "
+           "sets that solve's cap/tolerance (they are shared) and does not change its method.")
       .def("set_pressure_fcg", &S::setPressureFcg, nb::arg("on"), nb::arg("max_iter") = 200,
            nb::arg("rtol") = 1e-8,
            "Use the FLEXIBLE MG-CG pressure accelerator: the same V-cycle-preconditioned CG as "

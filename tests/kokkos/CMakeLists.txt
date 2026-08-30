@@ -61,6 +61,15 @@ target_include_directories(test_vardensity_projection PRIVATE ${CMAKE_CURRENT_SO
 target_link_libraries(test_vardensity_projection PRIVATE Kokkos::kokkos)
 add_test(NAME vardensity_projection COMMAND test_vardensity_projection)
 
+# WO-H: 3-D wall-bounded (nz >= 8) pressure convergence for all three Krylov drivers, including the
+# stratified hydrostatic column and the small-coefficient-at-an-inflow-face configurations.
+# PECLET_FLOW_MG_BCGHOST=0 reinstates the pre-repair coarse ghost and makes every PCG row fail.
+add_executable(test_pressure_wallbounded test_pressure_wallbounded.cpp)
+target_include_directories(test_pressure_wallbounded PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_pressure_wallbounded PRIVATE Kokkos::kokkos)
+add_test(NAME pressure_wallbounded COMMAND test_pressure_wallbounded)
+
 # VoF rung V0: PLIC toolbox (SZ/Lehmann-Gekle plane<->volume, MYC/Youngs normals, slab flux).
 add_executable(test_vof_plic test_vof_plic.cpp)
 target_include_directories(test_vof_plic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)

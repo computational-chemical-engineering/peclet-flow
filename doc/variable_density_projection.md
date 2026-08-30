@@ -116,6 +116,27 @@ rebuild) and is immune. Consequence, implemented in `setDensityMode`:
 > (`levels=1` has no coarse grid and solves in 1 iteration). Two residual failure modes FCG does NOT
 > cover are recorded in the WO-C findings entry (the gravity-driven hydrostatic column with a global
 > stratification, and a small coefficient adjacent to a prescribed-velocity face).
+>
+> **REPAIRED 2026-08-30 by WO-H, and the two defects above are now separated cleanly.**
+> (i) *The asymmetry.* The coarse levels' ghost fill is periodic on all three axes, so a walled face's
+> coarse ghost held the value from the **opposite** side of the domain. Every operator consumer is
+> immune (the wall face openness is 0), but the trilinear `prolongAdd` reads that ghost with weight ¼
+> whatever the openness — a long-range coupling present in P and absent from R.
+> `CutcellMG::applyNeumannGhost` now imposes the zero-gradient ghost on owned wall/inflow faces
+> before every prolongation (the pressure-side counterpart of `VelocityMG::fillProlongBcGhosts`,
+> which always had it). Measured: `pr` wall-bounded **0.42–0.52 → 0.008–0.086**, at or below the
+> periodic 0.062; on a 24×24×16 constant-density lid box **PCG 200/200 → 6, FCG 22 → 6, Chebyshev
+> 12 → 7**. Periodic/IBM byte-identical; single-phase regression +0.00 %. Ablation:
+> `PECLET_FLOW_MG_BCGHOST=0`. Gate: `tests/kokkos/test_pressure_wallbounded.cpp`.
+> (ii) *What the repair does NOT cover* — the two residual modes above are the **same** defect, and it
+> is a coefficient defect, not a boundary one: at a high density contrast the arithmetic coarsening of
+> the face coefficient makes the V-cycle preconditioner **indefinite** (measured on a densely
+> assembled `sym(M)`: a negative LDL pivot from ratio ~10³ walled, ~10⁴ even fully periodic), which no
+> CG β survives. The repair does raise the ceiling — the stratified column is now solved by FCG at
+> ratio 10² (55 its, machine-exact rest state, was destroyed) and the inflow-face case by FCG at 10²
+> and 10³ — but ratio 10³ stratified still caps for both CG drivers. **Chebyshev is healthy on all of
+> them and stays the varRho default for exactly that reason.** Lifting it is VOF_PLAN's S3
+> (coefficient-aware coarsening), now indicated by a measurement rather than inferred.
 
 ## 3. Validation (`tests/kokkos/test_vardensity_projection.cpp` + `tests/study/rayleigh_taylor.py`;
 host-openmp **and nvidia-cuda** since 2026-08-30 — see §3.1 for the multi-rank gates)

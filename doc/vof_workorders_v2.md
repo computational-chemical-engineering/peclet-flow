@@ -112,3 +112,48 @@ resolution and report whether it appears.
 
 **Escalate** if the uniform-velocity test cannot be made exact: that means the two advections
 are not sharing fluxes, and the fix is structural, not a tolerance.
+
+---
+
+# Infrastructure blockers surfaced during V2 preparation
+
+## WO-L — `MPI_ERR_TRUNCATE` at np=4 in the communication-avoiding halo path  [OPUS]
+
+**Why this outranks new physics.** Every rung of this campaign is gated on "np 2/4 bitwise vs
+np 1". WO-I established that four MPI tests — three of them **pre-existing and unrelated to any
+of our work** (`varmu_mpi_np4`, `bodyforce_ghost_mpi_np4`, `ghost_projection_mpi_np4`) — abort
+with `MPI_ERR_TRUNCATE` at np=4, that it **reproduces on a pristine tree**, and that
+`PECLET_FLOW_CA=0` cures all of them. A gate that fails intermittently for reasons unrelated to
+the code under test is not a gate. Fix this before trusting any further np=4 result.
+
+**Evidence in hand** (do not re-derive):
+- Load-sensitive: the same binaries pass standalone and fail inside a loaded `ctest` run. WO-F
+  saw it once and filed it as a load flake; WO-I showed it is reproducible and CA-dependent.
+  Treat "flaky" as a symptom of a race, not as noise.
+- **Every affected grid cuts two axes into exactly two blocks.** With np=4 on a 2×2
+  decomposition a rank has the same neighbour across more than one axis, and diagonal/corner
+  neighbours coincide with face neighbours.
+- `PECLET_FLOW_CA=0` cures it. CA (`suite/docs/COMMUNICATION_SCALING.md`, default ON) exchanges
+  a **2-deep** ghost layer once per red-black pair, so width-2 and width-1 topologies are in
+  flight in the same step — MG level 0 and domain-BC hierarchies keep g=1 while coarse levels
+  use g=2 (`flow/CLAUDE.md`, "Distributed smoother communication").
+- **Prime suspect: two in-flight exchanges of different ghost width sharing an MPI tag and a
+  neighbour**, so a width-1 receive matches a width-2 send — which is exactly what
+  `MPI_ERR_TRUNCATE` means (message longer than the posted buffer). Related known trap in the
+  same machinery: the g-independent red-black origin `CutcellMG::parityOg`.
+
+**Do.** Confirm the mechanism before fixing it — post-mortem the failing pair (rank, tag,
+counts, expected vs received bytes) rather than reasoning from the suspect alone. Then make
+tags unambiguous across concurrently-live exchanges: the tag must distinguish (field or level,
+ghost width, axis/direction) so no two in-flight messages between the same rank pair can be
+mismatched. Check `GridHalo`/`GridHaloTopology` in `core` for whether the tag space is
+per-topology or shared — if the defect is in `core`, fix it there and bump the pointer.
+
+**Gates.** The four tests pass at np=4 with CA **ON**, in a loaded `ctest` run, repeatedly
+(run the suite at least 5× — a race that passes once proves nothing); `PECLET_FLOW_CA=0` and
+`=1` produce **bitwise identical** results (CA's contract is that it is bit-identical, so this
+is also a correctness check on the fix); full MPI suite green host + CUDA; single-phase
+regression +0.00%.
+
+**Escalate** if the mechanism turns out not to be tag collision — the fix then depends on what
+it actually is, and guessing at communication races produces heisenbugs rather than fixes.

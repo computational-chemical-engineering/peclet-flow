@@ -36,16 +36,15 @@ What is swept
                      in the default `--drivers` set, so the WO-B battery reproduces unchanged; ask
                      for it with `--drivers pcg,fcg` (or `cheb,pcg,fcg`).
 
-**Driver-selection trap -- read before changing `run_one`.**  `set_pressure_pcg(on, maxit, rtol)`
-**ignores its `on` flag**: `IbmSolver::setPressurePcg(bool /*on*/, ...)` only stores
-`pcgMaxit_`/`pcgRtol_` and never clears `useChebyshev_`.  So after `set_density_mode("variable")`
--- which sets `useChebyshev_ = true` -- a `set_pressure_pcg(True, ...)` call leaves the solve on
-**Chebyshev**, contradicting the comment at `setDensityMode` ("an explicit set_pressure_pcg AFTER
-set_density_mode still wins") and `CLAUDE.md`'s "last set wins".  The only spelling that actually
-selects PCG is `set_pressure_chebyshev(False, ...)` (which does write `useChebyshev_`), so that is
-what this script does, followed by `set_pressure_pcg` for the cap/tolerance.  The tell that you got
-it wrong: the "PCG" iteration counts cap at exactly **120**, which is `chebMaxit_`'s default, not
-whatever cap you passed.
+**Driver selection (historical trap, REPAIRED 2026-08-30 by WO-H).**  `set_pressure_pcg(on, ...)`
+now genuinely selects MG-PCG (it clears both `useChebyshev_` and `useFcg_`), so the plain
+`set_pressure_pcg(True, cap, rtol)` after `set_density_mode` is correct.  Until WO-H its `on` flag
+was **discarded** -- `IbmSolver::setPressurePcg(bool /*on*/, ...)` only stored
+`pcgMaxit_`/`pcgRtol_` -- so a "PCG" run after `set_density_mode("variable")` silently measured
+**Chebyshev** (the tell: it capped at exactly **120**, `chebMaxit_`'s default, not the cap passed),
+and the only working spelling was `set_pressure_chebyshev(False, ...)`.  `run_one` still issues that
+`set_pressure_chebyshev(False, ...)` before `set_pressure_pcg` -- redundant now, kept so this script
+reproduces WO-B's and WO-C's recorded batteries byte-for-byte on an older build.
   case       `hydro`  quiescent + gravity closure force_z = -g*rho (the hydrostatic setup);
                       periodic x/y, walls +-z
              `lid`    lid-driven flow: walls -x/+x/-z, the +z face translating at U in x,
@@ -247,9 +246,9 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
         if case == "hydro":
             s.set_property_model("force_z", "linear", "rho", [0.0, -GRAV])
 
-    # Driver selection AFTER set_density_mode. `set_pressure_chebyshev` is the switch (it is the
-    # only setter that writes useChebyshev_); `set_pressure_pcg` only carries the cap/tolerance.
-    # See the "Driver-selection trap" in the module docstring.
+    # Driver selection AFTER set_density_mode. All three setters genuinely select since WO-H; the
+    # extra `set_pressure_chebyshev(False, ...)` in the `pcg` branch is the pre-WO-H spelling, kept
+    # so this script also selects correctly on an older build (see the module docstring).
     if driver == "cheb":
         s.set_pressure_pcg(True, MAXIT, RTOL)
         s.set_pressure_chebyshev(True, MAXIT, RTOL)
@@ -257,8 +256,8 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
         s.set_pressure_chebyshev(False, MAXIT, RTOL)
         s.set_pressure_pcg(True, MAXIT, RTOL)
     elif driver == "fcg":
-        # set_pressure_fcg DOES honour its flag (it clears useChebyshev_ itself), so unlike the
-        # `pcg` branch above no set_pressure_chebyshev(False) dance is needed.
+        # set_pressure_fcg has always honoured its flag (it clears useChebyshev_ itself), so unlike
+        # the `pcg` branch above no set_pressure_chebyshev(False) dance is needed on any build.
         s.set_pressure_fcg(True, MAXIT, RTOL)
     else:
         raise ValueError(driver)

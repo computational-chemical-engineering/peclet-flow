@@ -578,6 +578,37 @@ class CutcellMG {
         if (bc_[2 * a + s] == 3 && touchesGlobalFace(lv, 2 * a + s))
           bcZeroPressureGhost(x, e, g, a, s);
   }
+  // Zero-gradient (Neumann) pressure/correction ghost on a wall/inflow face (BC type 1/2), the
+  // counterpart of applyOutflowGhost's Dirichlet ghost. WHY IT EXISTS (WO-H, 2026-08-30): the
+  // per-level ghost fill is PERIODIC on all three axes (fill()/GridHalo), so on a walled face a
+  // level's `x` ghost carries the value from the OPPOSITE side of the domain. Every *operator*
+  // consumer is immune — the wall face openness is 0, so the smoother/residual/matvec multiply that
+  // ghost by AW/AE/... = 0 — but `prolongAdd` is NOT: trilinear interpolation reads the coarse ghost
+  // with weight 1/4 whatever the openness, so the fine cells against a wall were receiving a quarter
+  // of the coarse correction from the far wall. That teleport is a long-range coupling present in P
+  // and absent from R, i.e. exactly the asymmetry that broke MG-PCG on domain-BC grids (measured:
+  // dense-M skew ||M-M^T||F/||M||F 3.5-5.4 % wall-bounded vs 0.8 % periodic, and PCG 200/200 vs 7).
+  // With the zero-gradient ghost the boundary fine cell simply takes the coarse value
+  // (0.25*c0 + 0.75*c0 = c0), which is also what the constant-mode-preserving prolongation must do.
+  // Call after every (periodic) fill of a level's solution field that a prolongation will read.
+  //
+  // This is the pressure-side counterpart of `VelocityMG::fillProlongBcGhosts` /
+  // `fillBcGhost` (mac_velocity_mg.hpp), the port of the retired CUDA `mg_fill_bc_ghost_k`: the
+  // VELOCITY multigrid has always done both halves (Dirichlet 0 AND Neumann zero-gradient) before
+  // its trilinear prolongation. The pressure MG only ever received the Dirichlet half
+  // (applyOutflowGhost) — CLAUDE.md's "the trilinear prolongation fills the non-periodic boundary
+  // ghosts (Neumann -> zero-gradient, Dirichlet -> 0)" described the intent, not the code.
+  void applyNeumannGhost(const Level& lv, CCField x, int g = G) {
+    if (!hasBC_ || !bcGhost_)
+      return;
+    B3 e{lv.ext.x, lv.ext.y, lv.ext.z};
+    for (int a = 0; a < 3; ++a)
+      for (int s = 0; s < 2; ++s) {
+        const int t = bc_[2 * a + s];
+        if ((t == 1 || t == 2) && touchesGlobalFace(lv, 2 * a + s))
+          bcNeumannGhost(x, e, g, a, s);
+      }
+  }
   // Does this rank's block on level `lv` touch global domain face f? Always true single-rank
   // (og = 0 and gdim == inner), so every guarded BC application is byte-identical there.
   static bool touchesGlobalFace(const Level& lv, int f) {
@@ -1059,6 +1090,10 @@ class CutcellMG {
     vcycle(L + 1, sym);
     fill(cs, cs.x);
     applyOutflowGhost(cs, cs.x, cs.g);
+    // The trilinear prolongation reads the coarse ghost with weight 1/4 regardless of openness, so
+    // a domain-BC face needs its real ghost policy here (Dirichlet 0 above, Neumann zero-gradient
+    // below) instead of the periodic wrap fill() just wrote. See applyNeumannGhost.
+    applyNeumannGhost(cs, cs.x, cs.g);
     prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
     smooth(lv, post_, /*reverse=*/sym);
     if (meanRemovalAll_ || L == 0)
@@ -1998,6 +2033,15 @@ class CutcellMG {
   // stale-ghost residual is kept behind PECLET_FLOW_MG_RESFILL=0 purely as a benchmark ablation.
   bool resFill_ = [] {
     const char* e = std::getenv("PECLET_FLOW_MG_RESFILL");
+    return !e || std::atoi(e) != 0;
+  }();
+  // Zero-gradient (Neumann) coarse ghost before the prolongation on wall/inflow faces — the WO-H
+  // symmetry repair (see applyNeumannGhost). ON by default; PECLET_FLOW_MG_BCGHOST=0 restores the
+  // pre-2026-08-30 periodic-wrap ghost purely as a MEASUREMENT ABLATION (it reinstates the
+  // asymmetry that stalls MG-PCG on every 3-D wall-bounded grid — never a production setting).
+  // Inert on periodic/IBM problems (hasBC_ == false), where the fix is a no-op either way.
+  bool bcGhost_ = [] {
+    const char* e = std::getenv("PECLET_FLOW_MG_BCGHOST");
     return !e || std::atoi(e) != 0;
   }();
   double allreduceTime_ = 0.0;
