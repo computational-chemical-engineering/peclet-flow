@@ -421,6 +421,15 @@ static void bind_solver(nb::module_& m, const char* name) {
           "rebuild_geometry(): the SDF, the cut-cell overlay, the apertures and the pressure "
           "operator are all derived from the transforms, so moving one without rebuilding would "
           "run the solver on stale geometry.")
+      .def("refresh_wall_velocity", &S::refreshWallVelocity,
+           "Re-derive ONLY the wall-velocity fields and the momentum operator that folds them in, "
+           "for a driver that changes an instance's VELOCITY every step while its transform stays "
+           "put -- the linearised oscillating body, a shear cell driven by counter-moving plates. "
+           "set_instance_motion alone does not reach those fields (they are built in "
+           "set_solid_from_scene), so the alternative is a full rebuild_geometry() per step to "
+           "update a boundary condition. Refuses if a transform has changed since the last "
+           "geometry build, because it does NOT re-sample the SDF, the apertures, the ownership "
+           "field or the pressure operator. Velocity and pressure are untouched.")
       .def("rebuild_geometry", &S::rebuildGeometry,
            "Re-derive all geometry from the current instance transforms. Velocity and pressure are "
            "PRESERVED across the rebuild (set_solid zeroes them by design). Full rebuild: the "

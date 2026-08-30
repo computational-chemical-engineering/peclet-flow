@@ -888,6 +888,30 @@ class Solver {
     Kokkos::deep_copy(P_, pSave);
   }
 
+  /// Re-derive ONLY the wall-velocity fields and the momentum operator that folds them in.
+  ///
+  /// The linearised moving-boundary problems -- an oscillating body at vanishing amplitude, a
+  /// shear cell driven by counter-moving plates -- change the wall VELOCITY every step while the
+  /// geometry never moves. `set_instance_motion` alone does not reach them: `uBc_` (the momentum
+  /// operator's no-slip datum) and `uwCell_` (the cut-cell projection's wall flux) are built in
+  /// `set_solid_from_scene`, so before this existed such a driver had to call `rebuild_geometry()`
+  /// every step and pay a full geometry re-derivation to update a boundary condition.
+  ///
+  /// SCOPE: the instance TRANSFORMS must be unchanged. Nothing here re-samples the SDF, the
+  /// apertures, the ownership field or the pressure operator, so if a body has actually moved this
+  /// is silently wrong -- call `rebuild_geometry()` instead. Velocity and pressure are untouched.
+  void refreshWallVelocity() {
+    if (!hasScene_)
+      throw std::runtime_error("refresh_wall_velocity: call set_scene first");
+    if (sceneDirty_)
+      throw std::runtime_error(
+          "refresh_wall_velocity: an instance TRANSFORM changed since the last geometry build -- "
+          "this call only refreshes the wall VELOCITY, so the run would continue on stale "
+          "geometry. Call rebuild_geometry() instead.");
+    buildWallVelocity();
+    rebuildStencils();
+  }
+
   /// True when at least one instance carries a nonzero velocity -- i.e. the moving-geometry paths
   /// are live. Everything downstream keys off this, so a driver can assert it.
   bool hasMovingInstance() const { return hasMotion_; }
@@ -1960,8 +1984,21 @@ class Solver {
   // crossing instead of along the gradient; that is the documented refinement, deliberately not
   // taken in v1 -- see the design note.
   void buildWallVelocity() {
-    if (!hasScene_ || !hasMotion_)
-      return;  // fields stay EMPTY -> every consumer takes its old, bit-identical path
+    if (!hasScene_ || !hasMotion_) {
+      // Never moved: the fields stay EMPTY and every consumer takes its old, bit-identical path.
+      // MOVED AND THEN STOPPED is different, and was wrong: wallVelView() keys off the field's
+      // extent, not hasMotion_, so a previously-built uBc_ would keep being folded into the
+      // momentum operator's inhomogeneity after the caller set the velocity back to zero. Zero
+      // them instead of stranding them. Allocation state is unchanged either way, so a run that
+      // never moves is bit-identical to before.
+      for (int c = 0; c < 3; ++c) {
+        if (uBc_[c].extent(0) == n_)
+          Kokkos::deep_copy(uBc_[c], 0.0);
+        if (uwCell_[c].extent(0) == n_)
+          Kokkos::deep_copy(uwCell_[c], 0.0);
+      }
+      return;
+    }
     for (int c = 0; c < 3; ++c) {
       if (uBc_[c].extent(0) != n_)
         uBc_[c] = CCField("uBc", n_);
