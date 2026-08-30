@@ -203,7 +203,9 @@ int main(int argc, char** argv) {
     runScene(SceneSpec{Scene::UniformSphere,
                        IVec<kDim>{32, 24, 20},
                        1.0 / 32,
-                       0.3 * (1.0 / 32),
+                       // At the default (proven 3D) cap of 0.25; this scene gates np-bitwise
+                       // identity, so the exact CFL is free and is kept inside the bound.
+                       0.25 * (1.0 / 32),
                        1.0,
                        24,
                        {true, true, true},
@@ -215,7 +217,7 @@ int main(int argc, char** argv) {
     runScene(SceneSpec{Scene::LeVequeWalls,
                        IVec<kDim>{24, 24, 24},
                        1.0 / 24,
-                       3.0 / 400,
+                       3.0 / 600,
                        3.0,
                        24,
                        {false, false, false},
@@ -226,7 +228,7 @@ int main(int argc, char** argv) {
     runScene(SceneSpec{Scene::LeVequeWalls,
                        IVec<kDim>{24, 24, 24},
                        1.0 / 24,
-                       3.0 / 400,
+                       3.0 / 600,
                        3.0,
                        24,
                        {true, false, true},

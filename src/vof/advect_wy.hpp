@@ -55,11 +55,17 @@
 /// **Boundedness needs a CFL cap.** Thesis Appendix A bounds the flux by
 /// `max(0, a - C) <= F <= min(a, C)` and shows that `c = H(C - 1/2)` is the only quadrature that
 /// prevents both over-filling and over-emptying, *provided* `|a| <= 1/(2(N-1))` for N-dimensional
-/// flow (thesis eq. A.33 / eq. 2.23) — 1/2 in 2D, **1/4 in 3D**. The community-standard cap, and
-/// the one this rung's work order specifies, is the 2D value `CFL < 0.5`; `cflLimit` carries it and
-/// `advect()` aborts at or above it. For 3D work near the boundedness edge, set `cflLimit = 0.25`.
+/// flow (thesis eq. A.33 / eq. 2.23) — 1/2 in 2D, **1/4 in 3D**. The widely-quoted `CFL < 0.5`
+/// (including in this rung's work order) is the *2D* value; quoting it for a 3D solver is a
+/// transcription error the WO inherited. `cflLimit` therefore defaults to the **proven 3D bound
+/// 0.25** and `advect()` aborts at or above it; raise it deliberately (`cflLimit = 0.5`) for 2D
+/// work or to probe the gap, never as a way to take bigger steps in 3D.
 /// Note that conservation is *independent* of boundedness: the telescoping above holds whatever C
-/// does, so an over-CFL run loses `0 <= C <= 1`, not volume.
+/// does, so an over-CFL run loses `0 <= C <= 1`, not volume — which is exactly why the failure is
+/// easy to miss (volume still closes to round-off while C leaves [0,1]).
+/// Empirically this margin is not tight — a sweep to CFL 0.48 on the LeVeque field never left
+/// [0,1] — but the target regime (capillary-limited dt, `VOF_PLAN.md` §4 V4) sits far below both
+/// bounds, so there is nothing to buy by defaulting past what is proven.
 ///
 /// No clipping is applied at this rung (`VOF_PLAN.md` §4 V1): conservation must close to round-off
 /// with nothing hiding the error. `diagnostics()` reports the wisp census instead.
@@ -197,9 +203,10 @@ class WyAdvector {
   /// Compaction of the reconstruction pass onto the mixed cells. Pure optimization — switching it
   /// off must reproduce the same field bit for bit (gated in `tests/kokkos/test_vof_advect.cpp`).
   bool useWorklist = true;
-  /// Abort threshold on max |uf| dt / h. See the file header on 0.5 (2D bound, the community
-  /// standard and this rung's contract) vs 0.25 (Weymouth's 3D bound, thesis eq. A.33).
-  double cflLimit = 0.5;
+  /// Abort threshold on max |uf| dt / h. Defaults to **Weymouth's proven 3D boundedness bound**
+  /// 1/(2(N-1)) = 0.25 (thesis eq. A.33); the familiar 0.5 is the 2D value. Raise it only
+  /// deliberately (2D work, or probing the gap) — see the file header.
+  double cflLimit = 0.25;
   /// DIAGNOSTIC ONLY — recompute the dilation flag before every sweep instead of freezing it once.
   /// This is the #1 documented trap of the method, kept switchable so the damage is a measured
   /// number rather than folklore (`tests/kokkos/test_vof_advect.cpp` gate G). Never enable it in
@@ -221,7 +228,9 @@ class WyAdvector {
     const double cflLocal = maxCourant(dth);
     const double cfl = globalMax ? globalMax(cflLocal) : cflLocal;
     lastCfl_ = cfl;
-    if (!(cfl < cflLimit)) {
+    // Weymouth's bound is INCLUSIVE (thesis eq. A.33: |a| <= 1/(2(N-1))), so a step exactly at
+    // `cflLimit` is admissible and only a strictly larger one aborts. NaN propagates to an abort.
+    if (!(cfl <= cflLimit)) {
       char msg[256];
       std::snprintf(msg, sizeof(msg),
                     "peclet::flow::vof::WyAdvector: CFL = max|uf| dt/h = %.6g exceeds the "

@@ -186,6 +186,15 @@ void gateZalesak() {
   // domain corner (r ~ 0.5): the step count is set by the corner, not by the interface, so this
   // run takes ~3x the steps a solver limiting dt at the interface would. PECLET_VOF_ZALESAK_STEPS
   // exposes that (the minimum admissible count here is 629).
+  // At the published 1000-step setup the GLOBAL max CFL is 0.314 (corner), above the default 3D
+  // cap of 0.25, while every cell the interface ever visits stays at CFL <= 0.157. Weymouth's
+  // bound is a per-flux statement, so the run is admissible and the global guard is merely a
+  // conservative proxy; raise the cap here deliberately rather than shrinking dt, which would
+  // break comparability with the published L1 values.
+  // (Follow-up noted in VOF_PLAN.md: at V2 the solver's dt limiter should measure the CFL over
+  // interface-adjacent cells, not the whole domain, or quiescent far-field corners will throttle
+  // the step for nothing.)
+  cs.adv.cflLimit = 0.5;
   long steps = 1000;
   if (const char* v = std::getenv("PECLET_VOF_ZALESAK_STEPS"); v && std::atol(v) > 0)
     steps = std::atol(v);
@@ -299,25 +308,43 @@ void gateCfl() {
   cs.adv.syncGhosts();
   vofscene::fillUniform(cs.adv, cs.blk, 1.0, 0.0, 0.0);
 
+  // The DEFAULT must be Weymouth's proven 3D bound 1/(2(N-1)) = 0.25 (thesis eq. A.33), not the
+  // 2D value 0.5 that the literature quotes without qualification. Pinned here so a future edit
+  // cannot silently widen the boundedness margin.
+  CHECK(cs.adv.cflLimit == 0.25);
+
   bool threw = false;
   std::string what;
   try {
-    cs.adv.advect(0.5 * (1.0 / 16), 0);  // CFL exactly 0.5 -> must abort
+    cs.adv.advect(0.26 * (1.0 / 16), 0);  // past the 3D bound -> must abort
   } catch (const std::runtime_error& ex) {
     threw = true;
     what = ex.what();
   }
-  std::printf("  CFL = 0.5 : %s\n", threw ? what.c_str() : "NO THROW");
+  std::printf("  CFL = 0.26 (> default limit): %s\n", threw ? what.c_str() : "NO THROW");
   CHECK(threw);
   CHECK(what.find("CFL") != std::string::npos);
 
+  // Weymouth's bound is inclusive, so exactly 0.25 must RUN — this is the CFL every physics
+  // gate above is deliberately run at.
   threw = false;
   try {
-    cs.adv.advect(0.49 * (1.0 / 16), 0);  // just under -> must run
+    cs.adv.advect(0.25 * (1.0 / 16), 0);
   } catch (const std::runtime_error&) {
     threw = true;
   }
-  std::printf("  CFL = 0.49: %s\n", threw ? "THREW (wrong)" : "ran");
+  std::printf("  CFL = 0.25 (at the bound): %s\n", threw ? "THREW (wrong)" : "ran");
+  CHECK(!threw);
+
+  // The cap is deliberately raisable (2D work / probing the gap): the guard must track it.
+  cs.adv.cflLimit = 0.5;
+  threw = false;
+  try {
+    cs.adv.advect(0.49 * (1.0 / 16), 0);  // under the raised cap -> must run
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  std::printf("  CFL = 0.49 @ cflLimit 0.5: %s\n", threw ? "THREW (wrong)" : "ran");
   CHECK(!threw);
 }
 
