@@ -132,7 +132,11 @@ computation only, default off.
 `tests/kokkos/test_vof_plic.cpp`.
 
 **Contents** (all `KOKKOS_INLINE_FUNCTION`, pure functions of local data, unit cube
-convention — cell mapped to [0,1]³, normal m with Σ|m_i| = 1):
+convention — cell mapped to [0,1]³, normal m with Σ|m_i| = 1). **Signature rule (hard):**
+these functions take scalars and small local arrays ONLY — no `View` types, no grid
+indexing, no halo/topology types. They are scheduled for promotion to
+`peclet::core::vof` at the V4 freeze (plan §11: shared by the structured, AMR, and
+bubble-block containers), and the promotion must be a file move:
 1. `plicVolume(mx,my,mz,alpha) -> V`: fluid volume under the plane m·x = α — the
    Scardovelli–Zaleski (2000) analytic forward formula, in the branch-reduced form of
    Lehmann & Gekle (2022) (mirror to the positive octant, sort m₁≤m₂≤m₃, the piecewise
