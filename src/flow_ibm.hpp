@@ -228,16 +228,42 @@ class Solver {
   // MG-PCG -- Chebyshev semi-iteration preconditioned by one symmetric V-cycle, no per-iteration
   // global dot-products. Spectral bounds of M^{-1}A are estimated once (lazily) on the first solve
   // and reused every step.
+  // Selecting it clears the competing FCG selection (the three Krylov drivers are mutually
+  // exclusive, last set wins); `on = false` only deselects Chebyshev, so the solve falls back to
+  // whatever else is selected — FCG if set, otherwise MG-PCG.
   void setPressureChebyshev(bool on, int maxit, double rtol) {
     useChebyshev_ = on;
+    if (on)
+      useFcg_ = false;
     chebMaxit_ = maxit;
     chebRtol_ = rtol;
     chebBoundsSet_ = false;
   }
-  // MG-PCG pressure tolerance/iteration cap (CUDA set_pressure_pcg). The Kokkos cut-cell pressure
-  // solve is MG-PCG by default; this just sets its bounds (the `on` flag is accepted for API
-  // parity).
-  void setPressurePcg(bool /*on*/, int maxit, double rtol) {
+  // MG-PCG pressure driver (CUDA set_pressure_pcg) + its iteration cap / relative tolerance.
+  // `on = true` GENUINELY SELECTS MG-PCG, clearing both competing selections (Chebyshev and FCG),
+  // so it works after set_density_mode / set_porous — "last set wins", as CLAUDE.md and the
+  // docstring have always claimed. Until 2026-08-30 the flag was silently discarded (WO-H defect 1;
+  // the working spelling was set_pressure_chebyshev(False, ...)), which is why every "PCG under
+  // varRho/porous" measurement before WO-B actually measured Chebyshev.
+  //
+  // `on = false` cannot be honoured and therefore THROWS rather than being silently ignored (the
+  // failure mode this repair exists to remove): MG-PCG is the terminal fallback of the dispatch in
+  // project() — with neither Chebyshev nor FCG selected the solve IS MG-PCG — so "not PCG" is only
+  // expressible by selecting another driver. Say which one: set_pressure_chebyshev(True, ...) or
+  // set_pressure_fcg(True, ...).
+  //
+  // Under set_ghost_projection the operator is nonsymmetric and is solved by BiCGStab; this call
+  // stays legal there (it is how that path's cap/tolerance is set — pcgMaxit_/pcgRtol_ are shared)
+  // and simply does not change which Krylov method the gp branch runs.
+  void setPressurePcg(bool on, int maxit, double rtol) {
+    if (!on)
+      throw std::runtime_error(
+          "set_pressure_pcg(False): MG-PCG is the default/terminal pressure driver, so it cannot be "
+          "deselected on its own — select the driver you want instead "
+          "(set_pressure_chebyshev(True, ...) or set_pressure_fcg(True, ...)).");
+    useChebyshev_ = false;  // genuine selection: the three drivers are mutually exclusive
+    useFcg_ = false;
+    chebBoundsSet_ = false;
     pcgMaxit_ = maxit;
     pcgRtol_ = rtol;
   }
@@ -248,12 +274,10 @@ class Solver {
   // Costs one extra level-0 vector and one extra global dot per iteration; buys tolerance of a
   // preconditioner that is not symmetric w.r.t. the fine operator (CutcellMG::solveFCG).
   //
-  // This setter GENUINELY selects, unlike setPressurePcg above whose `on` flag is a documented
-  // no-op (see doc/vof_workorders.md WO-H (1); fixing that is WO-H's job, not this one's, because
-  // repairing it in isolation would move every varRho/porous script onto the stalling PCG). The
-  // pair (Chebyshev, FCG) is therefore mutually exclusive in BOTH directions: `on` clears
-  // `useChebyshev_` here, and `setPressureChebyshev(true, ...)` wins over a previously selected
-  // FCG at the dispatch in project(). `set_pressure_fcg(false)` returns the solve to MG-PCG.
+  // All three Krylov drivers are mutually exclusive in both directions and the last set wins:
+  // `on` clears `useChebyshev_` here, `setPressureChebyshev(true, ...)` clears `useFcg_`, and
+  // `setPressurePcg(true, ...)` clears both. `set_pressure_fcg(false)` returns the solve to MG-PCG.
+  // (Before WO-H, setPressurePcg's `on` flag was silently discarded — see its comment.)
   void setPressureFcg(bool on, int maxit, double rtol) {
     if (on && ghostProjection_)
       throw std::runtime_error(
@@ -2423,6 +2447,26 @@ class Solver {
   /// over the cut cells with the EXACT aperture wall-area vectors -- no interior reconstruction,
   /// no near-wall gradient, and identically zero when nothing rotates.
   ///
+  /// PER-BODY ATTRIBUTION (v4, 2026-08-31): the owner-boundary pressure flux is now REMOVED from
+  /// each body's share. The telescoping of grad(pi) over an owner region leaves the wall pressure
+  /// force (physical -- kept) PLUS the flux through the region's boundary against OTHER owners'
+  /// regions. Those boundary terms cancel pairwise in the total -- which is why the identity gate
+  /// never saw them -- but they are NOT zero per body: they transfer force between attributions
+  /// across the owner partition's mid-surfaces. A single instance owns all fluid and has no such
+  /// boundary (bit-identical, the settling gate's case); a symmetric array cancels them per body
+  /// (the 4-sphere gate's case); an ASYMMETRIC pair does neither. Measured on a sphere translating
+  /// through a closed analytic tank -- the ten Cate configuration -- the sphere's attributed drag
+  /// was HALF the physical value (lambda 0.62 against a physical floor of 1.36; the identical
+  /// sphere in a single-instance periodic box reads 1.42), because the part of the pressure force
+  /// transmitted beyond the sphere/tank mid-surface was booked to the tank. The correction
+  /// subtracts, for every fluid-fluid staggered face whose two momentum points have different
+  /// owners, the face's pi-flux from the side that owned it and adds it to the other -- pairwise,
+  /// so the total is untouched to round-off, and exactly nothing changes with fewer than two
+  /// instances. pi is read from the accumulated P_ (incremental scheme; the rotational
+  /// -mu*div(u*) deviation is the projection residual). Faces are visited once via the +s
+  /// convention (each inner momentum point checks only its +s neighbour), which also makes the
+  /// pass MPI-clean. The torque uses each side's own lever about its own centre.
+  ///
   /// v2 SCOPE, refused loudly: staggered only; implicit advection, porous, variable properties,
   /// domain BCs, ghost projection, drag diagonal, fluid-only star modes all put terms in the
   /// update this budget does not carry, and a missing term here is a silently mis-attributed
@@ -2555,6 +2599,72 @@ class Solver {
             Kokkos::atomic_add(&Td(3 * oi + 1), mu * (r.z * vx - r.x * vz));
             Kokkos::atomic_add(&Td(3 * oi + 2), mu * (r.x * vy - r.y * vx));
           });
+      space.fence();
+    }
+    // v4: owner-boundary attribution correction (see the doc block). Only meaningful with at
+    // least two instances and the incremental pressure (P_ holds the physical pressure).
+    if (nInst_ > 1 && incremental_ && cutcellPressure_) {
+      fillGhosts(P_);
+      CCConst pf = CCConst(P_);
+      for (int c = 0; c < 3; ++c) {
+        CCConst mk = CCConst(C[c].mask);
+        const long strd = (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y;
+        const auto po = Grid::offset(c);
+        const double offx = po.x, offy = po.y, offz = po.z;
+        const int cc = c;
+        Kokkos::parallel_for(
+            "peclet::flow::hydro_reaction_owner_flux",
+            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
+                                                           {e.x - G, e.y - G, e.z - G}),
+            KOKKOS_LAMBDA(int x, int y, int z) {
+              const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+              const long j = i + strd;                       // the +s neighbour: visit once
+              if (mk(i) > 0.5 || mk(j) > 0.5)
+                return;                                      // wall faces stay in the wall force
+              const peclet::core::Vec3<double> pa{(double)(x - G + og.x) + offx,
+                                                 (double)(y - G + og.y) + offy,
+                                                 (double)(z - G + og.z) + offz};
+              peclet::core::Vec3<double> pb = pa;
+              (cc == 0 ? pb.x : cc == 1 ? pb.y : pb.z) += 1.0;
+              const int oa = q.owner(pa), ob = q.owner(pb);
+              if (oa == ob || oa < 0 || ob < 0)
+                return;
+              // One-sided staggered gradients: point i reads pi(i) - pi(i-s); point j = i+s
+              // reads pi(j) - pi(i). The cell shared by this owner-boundary face is cell i,
+              // entering a's telescoped sum(grad pi) with +pi(i) (via point i) and b's with
+              // -pi(i) (via point j). F_attr = -sum R carries +sum(grad pi), so a's attribution
+              // holds +pi(i) and b's -pi(i) from this face: a pure transfer across the owner
+              // partition that belongs to NEITHER wall. Remove it from both, symmetrically --
+              // the pairwise cancellation is what keeps the total exact.
+              const double flux = pf(i);
+              Kokkos::atomic_add(&Fd(3 * oa + cc), -flux);
+              Kokkos::atomic_add(&Fd(3 * ob + cc), +flux);
+              const peclet::core::Vec3<double> ra = peclet::core::geom::minImage(
+                  peclet::core::Vec3<double>{pa.x - cen(3 * oa + 0), pa.y - cen(3 * oa + 1),
+                                             pa.z - cen(3 * oa + 2)},
+                  box);
+              const peclet::core::Vec3<double> rb = peclet::core::geom::minImage(
+                  peclet::core::Vec3<double>{pa.x - cen(3 * ob + 0), pa.y - cen(3 * ob + 1),
+                                             pa.z - cen(3 * ob + 2)},
+                  box);
+              if (cc == 0) {
+                Kokkos::atomic_add(&Td(3 * oa + 1), ra.z * -flux);
+                Kokkos::atomic_add(&Td(3 * oa + 2), -ra.y * -flux);
+                Kokkos::atomic_add(&Td(3 * ob + 1), rb.z * +flux);
+                Kokkos::atomic_add(&Td(3 * ob + 2), -rb.y * +flux);
+              } else if (cc == 1) {
+                Kokkos::atomic_add(&Td(3 * oa + 0), -ra.z * -flux);
+                Kokkos::atomic_add(&Td(3 * oa + 2), ra.x * -flux);
+                Kokkos::atomic_add(&Td(3 * ob + 0), -rb.z * +flux);
+                Kokkos::atomic_add(&Td(3 * ob + 2), rb.x * +flux);
+              } else {
+                Kokkos::atomic_add(&Td(3 * oa + 0), ra.y * -flux);
+                Kokkos::atomic_add(&Td(3 * oa + 1), -ra.x * -flux);
+                Kokkos::atomic_add(&Td(3 * ob + 0), rb.y * +flux);
+                Kokkos::atomic_add(&Td(3 * ob + 1), -rb.x * +flux);
+              }
+            });
+      }
       space.fence();
     }
     using HostV = Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
@@ -4417,13 +4527,18 @@ class Solver {
       }
       ensureCellForceAll();  // buildRhsVar reads the per-cell force (zero until a closure sets it)
       useVelocityMg_ = false;  // scalar-coefficient velocity MG (variable-coeff deferred)
-      // Pressure driver: CHEBYSHEV by default under variable density. MG-PCG stalls on the
-      // rho-scaled coefficient operator (the hierarchy's transfer pair was built/validated for
-      // geometric openness; with scaled coefficients the V-cycle preconditioner loses the
-      // SPD-preserving structure CG needs — observed: PCG 5000 iters stuck where Chebyshev
-      // converges in ~20). Chebyshev only needs real spectrum bounds, which are re-estimated on
-      // every coefficient rebuild (chebBoundsSet_ invalidation in project()). An explicit
-      // set_pressure_pcg/set_pressure_chebyshev AFTER set_density_mode still wins (last set).
+      // Pressure driver: CHEBYSHEV by default under variable density — but NOT for the reason this
+      // comment used to give ("MG-PCG stalls on the rho-scaled coefficient operator"), which WO-B
+      // refuted: the stall it described is a DOMAIN-BC defect at constant density, repaired by
+      // WO-H (CutcellMG::applyNeumannGhost), and on the periodic pore-scale operator MG-PCG beats
+      // Chebyshev ~10x at density ratio 1e4. The reason that survives measurement is narrower and
+      // real: at a high density CONTRAST the arithmetic coarsening of the face coefficient makes
+      // the V-cycle preconditioner INDEFINITE (measured on a dense sym(M): a negative pivot from
+      // ratio ~1e3), and no Krylov CG survives that, while Chebyshev — which needs only real
+      // spectrum bounds, re-estimated on every coefficient rebuild — is healthy on every
+      // configuration measured. Coefficient-aware coarsening (VOF_PLAN S3) is what would lift it.
+      // An explicit set_pressure_pcg/_fcg/_chebyshev AFTER set_density_mode still wins (last set),
+      // and since WO-H set_pressure_pcg's `on` flag genuinely honours that promise.
       useChebyshev_ = true;
       chebBoundsSet_ = false;
     }
@@ -4474,9 +4589,14 @@ class Solver {
         cy1_ = CCField("cy1", n1_);
         cz1_ = CCField("cz1", n1_);
       }
-      // CHEBYSHEV by default (as for variable density): MG-PCG stalls on the eps-scaled coefficient
-      // operator — its V-cycle preconditioner loses the SPD structure CG needs (observed: PCG 2000
-      // iters stuck where Chebyshev converges in ~40). Bounds re-estimated on every coefficient
+      // CHEBYSHEV by default (as for variable density). CAVEAT on the original justification
+      // ("MG-PCG stalls on the eps-scaled coefficient operator"): it rests on the same kind of
+      // observation WO-B refuted for varRho, and it was recorded through the setter whose `on` flag
+      // was a no-op until WO-H — so a "PCG" run made that way actually measured Chebyshev. The
+      // default is kept because it is safe (Chebyshev needs only real spectrum bounds and is the
+      // one driver healthy on every high-contrast coefficient configuration measured), NOT because
+      // the eps-scaled PCG stall has been re-measured; that re-measurement is still owed
+      // (doc/vof_workorders.md, WO-B escalation #1). Bounds re-estimated on every coefficient
       // rebuild (chebBoundsSet_ invalidation in project()). An explicit driver set afterwards wins.
       useChebyshev_ = true;
       chebBoundsSet_ = false;
