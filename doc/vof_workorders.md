@@ -1836,8 +1836,10 @@ What is established:
   pass standalone and fail under concurrent load, on both backends: host `dragbeta_ghost_mpi_np4`
   passes standalone (measured repeatedly, including after rebasing onto WO-H's changes) and failed
   inside a loaded `ctest`; CUDA `ghost_projection_mpi_np4` failed inside the loaded `ctest` and then
-  produced zero truncations standalone; pristine host `varmu_mpi_np4` ran clean standalone twice
-  after failing in 0.58 s inside the loaded `ctest`. This session's machine sat at load ~28 with two
+  produced zero truncations standalone; and pristine host `varmu_mpi_np4`, after failing in **0.58 s**
+  inside the loaded `ctest`, runs standalone to a clean **`VARMU MPI (np=4): PASS`** —
+  `couette-y du=4.441e-16 dp=6.093e-17 analytic err 0.0003 %`, `per-y du=5.551e-16 dp=6.463e-17`,
+  i.e. the exact numbers §3.1 records, three runs for three runs. This session's machine sat at load ~28 with two
   other agents' batteries running. A race between two in-flight exchanges of DIFFERENT ghost width
   sharing a tag and a neighbour is the natural reading, and it is why the effect concentrates on the
   doubled-neighbour decompositions above.
