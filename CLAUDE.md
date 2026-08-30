@@ -68,7 +68,7 @@ cmake --build build_kokkos -j && ctest --test-dir build_kokkos --output-on-failu
 # Multi-rank (MPI) tests, np=1,2,4:
 cmake -S tests/kokkos_mpi -B build_kmpi -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
   -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
-cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure       # 42 tests (14 x np)
+cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure       # 48 tests (16 x np)
 ```
 
 Single-GPU **accuracy + efficiency regression suite** (grid-convergence + recorded solver-iteration
@@ -355,7 +355,7 @@ divergence at a fixed 8 cycles drops `1.7e-4`→`8.6e-13`. The BC verify scripts
 (validated single-rank).
 
 Validated against analytics (Taylor–Green ~2e-15, Poiseuille, momentum conservation) **and against Zick &
-Homsy sphere-array drag**; the multi-rank step is bit-exact to the single-rank — **42 `tests/kokkos_mpi`
+Homsy sphere-array drag**; the multi-rank step is bit-exact to the single-rank — **48 `tests/kokkos_mpi`
 ctests, real multi-rank np=1,2,4, on CUDA + OpenMP**. The variable-density and variable-viscosity
 layers are multi-rank + CUDA gated since 2026-08-30 (`vardensity_mpi`, `varmu_mpi`).
 
@@ -390,6 +390,28 @@ deficient mean survives); at a **wall** it was fully masked, because the halved 
 wall-normal velocity plane the Dirichlet BC pins and whose flux openness is 0 — which is why the
 hydrostatic acid test, Rayleigh–Taylor and de Vahl Davis are all bit-identical across the fix and
 only the multi-rank/periodic cases moved. Gate: `tests/kokkos_mpi/test_bodyforce_ghost_mpi.cpp`.
+
+**The drag coefficient gets the same fill, one phase earlier (WO-I, 2026-08-30) — and it moves the
+porous CFD-DEM numbers.** Under `set_porous_continuity`, `addDragDiagonal` builds the momentum
+diagonal from the FACE drag `β_f = ½(β(i) + β(i−s_c))`, deliberately, so it matches the projection's
+SIMPLE coefficient and correction (`doc/porous_drag_scheme.md` §2). But every writer of `drag_beta`
+writes inner cells only — `set_field`/`applyClosure`, and the CFD-DEM driver, which folds its
+ghost-band deposit onto the owners and then **zeroes** that band — and the only
+`fillPropGhosts(dragBeta_)` was inside `project()`, i.e. *after* the momentum stencil builds at the
+top of `step()`. So on the first inner plane of every block the momentum diagonal carried **β/2**
+while the projection used the full exchanged β: the β_f mismatch `addDragDiagonal`'s own comment
+warns about. `step()` now calls `fillDragBetaGhosts()` next to `fillCellForceGhosts()`, right after
+`updateProperties()` — the one point after both writers and before the first consumer;
+`project()`'s fill is thereby redundant but is kept (its own contract, one exchange on the porous
+path). Reach: **only** `porous_` reads that ghost (`addDragDiagonal` uses the cell value alone
+otherwise), so the incompressible-drag CFD-DEM path, the single-phase regression and every non-drag
+case are bit-identical. Measured on the periodic uniform fixed bed at N = 16: the mean face drag was
+low by exactly one half-plane in 16, `Σβ_f/N = 31β/32`, and the Ergun agreement recorded in
+`doc/porous_drag_scheme.md` §5 as "~3 %" is precisely that — `32/31 = 1.032258` against a measured
+`3.22581 %`. With the fill it drops to **2e−8…7e−8** (machine precision, matching the incompressible
+path) at all three drive levels. Gate: `tests/kokkos_mpi/test_dragbeta_ghost_mpi.cpp` (np 1/2/4,
+gating the assembled diagonal directly via `getMomentumDiagonal`). **Nothing was re-baselined** — the
+full before/after table is in `doc/vof_workorders.md`, WO-I findings.
 
 Two related MPI restrictions remain, both now explicit rather than silent: the solver's **velocity
 multigrid is single-rank** (`IbmSolver` never calls `VelocityMG::initMpi`; `set_velocity_multigrid`

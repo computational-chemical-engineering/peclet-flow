@@ -1665,6 +1665,10 @@ class Solver {
     // field_view/exchange_field_add deposit, which happens before step()) and before every consumer
     // (buildRhsVar in the Picard loop). Inert when no force field is registered.
     fillCellForceGhosts();
+    // WO-I: and the same for the per-cell drag coefficient, for the same reason one phase earlier.
+    // Same call site, same justification: after BOTH writers, before the FIRST consumer (the
+    // momentum stencil builds just below). See fillDragBetaGhosts().
+    fillDragBetaGhosts();
     // eps-conservative porous momentum: the volume-averaged time term is (eps_f rho/dt) u, i.e.
     // the variable-density machinery with the effective density rho_eff = eps*rho, refreshed from
     // the just-deposited eps every step (eps ghosts are already filled by the coupling driver, so
@@ -1806,6 +1810,24 @@ class Solver {
   std::vector<double> getOpenness(int c) {
     CCField o[3] = {ox_, oy_, oz_};
     return gatherInner(o[c]);
+  }
+  // Diagnostic read-out of the ASSEMBLED momentum-operator diagonal of component c — the float
+  // stencil `AC` after the diffusion build, the Robust-Scaled cut-cell bake and, under implicit
+  // drag, `addDragDiagonal`'s face drag beta_f — as an x-fastest (nx,ny,nz) inner-region host
+  // buffer. Read-only; no solver state is touched. Added for WO-I's
+  // `tests/kokkos_mpi/test_dragbeta_ghost_mpi.cpp`, which must gate the FACE drag mean where it is
+  // formed: on a periodic box the projection homogenizes a single bad plane into a uniform mean
+  // shift of the velocity, so a velocity-only gate sees THAT the drag was wrong but not WHERE.
+  std::vector<double> getMomentumDiagonal(int c) {
+    auto h = Kokkos::create_mirror_view(C[c].AC);
+    Kokkos::deep_copy(h, C[c].AC);
+    std::vector<double> out((std::size_t)nx_ * ny_ * nz_);
+    for (int z = 0; z < nz_; ++z)
+      for (int y = 0; y < ny_; ++y)
+        for (int x = 0; x < nx_; ++x)
+          out[(std::size_t)x + (std::size_t)y * nx_ + (std::size_t)z * (std::size_t)nx_ * ny_] =
+              (double)h((long)(x + G) + (long)(y + G) * e_.x + (long)(z + G) * (long)e_.x * e_.y);
+    return out;
   }
   // The openness whose face fluxes the PROJECTION conserves: the binary (COUPLED) openness in
   // ghost-projection mode (oxb_ — the geometric ox_ stays a diagnostic there), the geometric
@@ -2026,6 +2048,55 @@ class Solver {
       return;
     for (int c = 0; c < 3; ++c)
       fillPropGhosts(cellForce_[c]);
+  }
+  // Ghost ring of the per-cell drag coefficient "drag_beta" — WO-I.
+  //
+  // Same defect class as the body force above, one phase earlier in the step. Under `porous_`,
+  // `addDragDiagonal` builds the staggered momentum diagonal from the FACE drag
+  //
+  //     beta_f(i) = 0.5*(beta(i) + beta(i - s_c))
+  //
+  // and all three of its call sites (`rebuildStencils`, `buildAdvStencil`, `buildAdvStencilVar`)
+  // run at/after the TOP of `step()`. But no writer of `drag_beta` fills its ghosts: `setField` and
+  // `applyClosure` write the inner cells only, and the external CFD-DEM writer's driver FOLDS its
+  // ghost-band deposit onto the owners and then ZEROES that band (single rank) or leaves the
+  // reverse-halo residue in it (MPI). The only `fillPropGhosts(dragBeta_)` used to be inside
+  // `project()` — i.e. AFTER the momentum build. So on the first inner plane of every block the
+  // momentum diagonal was assembled from a stale/zero ghost while the projection's coefficient
+  // (`buildPorousCoeffDrag`/`Cons`) and its correction (`projectCorrectPorous*`) used the freshly
+  // exchanged value on that SAME face.
+  //
+  // That mismatch is exactly what `addDragDiagonal`'s own comment warns about: the incremental
+  // pressure loop then has gain (idt + beta_f)/(idt + beta_f^momentum) instead of 1, and "the
+  // accumulated pressure diverges exponentially" — here localized to block/wrap boundaries rather
+  // than to the bed top. With the CFD-DEM writer's zeroed ghost the momentum diagonal on that plane
+  // carried beta/2 against the projection's beta, a factor-2 error in the drag, not round-off.
+  //
+  // WHY THIS CALL SITE. It is the only point that is after BOTH writers — a closure targeting
+  // "drag_beta" (applied by `updateProperties()` immediately above) and the external deposit (which
+  // happens before `step()` is entered) — and before the FIRST consumer, the momentum stencil build
+  // a few lines below. Nothing inside `step()` writes `drag_beta`.
+  //
+  // WHY `fillPropGhosts` AND NOT SOME OTHER POLICY. There is no freedom here: `project()` already
+  // fills this very field with `fillPropGhosts` (halo/periodic base + Neumann copy on a rank-OWNED
+  // domain-BC face), and the whole point is that the momentum diagonal and the projection
+  // coefficient must agree on beta_f face by face — the three-way consistency
+  // `doc/variable_density_projection.md` §1/§3 states for (time term, body force, projection
+  // coefficient) and `doc/porous_drag_scheme.md` §2 states for (diagonal, operator, correction).
+  // Any policy other than the one `project()` uses would re-create the mismatch it is fixing.
+  //
+  // `project()`'s fill is therefore REDUNDANT after this one (nothing writes `drag_beta` in
+  // between). It is kept deliberately: removing it is a separate change, `project()` must keep its
+  // own ghost contract for any future mid-step writer, and it costs one exchange on the porous path
+  // only.
+  //
+  // Gated on `hasDrag_` (the field exists iff `enableDrag()` ran), not on `porous_`: the field's
+  // ghost contract should not depend on which consumer happens to read it. On the non-porous drag
+  // path `addDragDiagonal` uses the cell value alone, so the fill is numerically inert there.
+  void fillDragBetaGhosts() {
+    if (!hasDrag_)
+      return;
+    fillPropGhosts(dragBeta_);
   }
   // Eps ghost policy for the porous (volume-averaged) machinery. Periodic/halo base fill, then at
   // non-periodic domain faces: wall -> zero-gradient; INFLOW/OUTFLOW -> mirror around 1 so the

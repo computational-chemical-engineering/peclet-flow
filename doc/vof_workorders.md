@@ -1463,3 +1463,227 @@ OMP_NUM_THREADS=8 OMP_PROC_BIND=false PYTHONPATH=$PWD/build python \
 # the symmetry read-out (pr = |r^T z_k| / |r^T z_{k+1}|, zero iff M is symmetric):
 #   PECLET_FLOW_MG_DEBUG=2 PECLET_FLOW_MG_SOLVES=4 ... --drivers fcg
 ```
+
+### WO-I (blocker fix) — `drag_beta` ghosts are stale in the momentum build — **DONE 2026-08-30**
+
+Fixed in one place, exactly as WO-G: `IbmSolver::fillDragBetaGhosts()` (`src/flow_ibm.hpp`), called
+from `step()` immediately after `fillCellForceGhosts()`, routing `drag_beta` through the (WO-F
+rank-aware) `fillPropGhosts`. Production diff: 5 lines of code + the reasoning comment.
+
+**Call-site justification (WO item 1) — the WO-G site does hold, and for the same three reasons.**
+
+- *After every writer.* `drag_beta` has exactly two: a closure targeting it (applied by
+  `updateProperties()` two lines above) and the external CFD-DEM writer
+  (`field_view` + `exchangeFieldAdd`, which runs inside `CfdDem.compute_forces()` **before**
+  `flow.step()` is entered). Nothing inside `step()` writes the field.
+- *Before the first consumer.* All three `addDragDiagonal` call sites are downstream:
+  `rebuildStencils()` ~15 lines below, and `buildAdvStencil` / `buildAdvStencilVar` inside the Picard
+  loop.
+- *No policy freedom.* `project()` already fills this same field with `fillPropGhosts`, and the whole
+  point of the fix is that the momentum diagonal and the projection coefficient must agree on `β_f`
+  face by face (`doc/porous_drag_scheme.md` §2; the same three-way face-mean argument
+  `doc/variable_density_projection.md` §1/§3 makes for ρ). Any policy other than the one `project()`
+  uses would re-create the mismatch. So unlike WO-G there is no wall/outflow question to settle here —
+  it is settled by consistency.
+
+**WO item 2 — `project()`'s `fillPropGhosts(dragBeta_)` is now REDUNDANT.** Nothing writes
+`drag_beta` between the new call and it. It is **kept**: removing it is a separate change, `project()`
+should keep its own ghost contract for any future mid-step writer, and it costs one exchange and only
+on the porous path.
+
+**The defect's mechanism and size, measured.** Single rank the ghost band is not merely *stale*, it
+is **zero**: the coupling driver's `_fold(db)` folds the deposit's ghost band onto the owners and then
+assigns `0.0` to it, every step, before `flow.step()`. So `β_f = ½(β(i) + 0) = β/2` on the first inner
+plane of every block — a factor-2 drag error, not round-off — while `buildPorousCoeffDrag`/`Cons` and
+`projectCorrectPorous*` used the full exchanged value on the same face.
+
+On a **periodic uniform bed of N cells on the forced axis** the consequence is an exactly computable
+mean-drag deficit: the N face drags sum to `(N−½)β`, so the effective mean is `β(2N−1)/(2N)` and the
+steady velocity is high by `2N/(2N−1)`. At N = 16 that is **32/31 = 1.0322581**. The Ergun fixed-bed
+benchmark measured **1.0322581** (see the table). The agreement is to 7 digits and it identifies the
+"~3 %" recorded in `doc/porous_drag_scheme.md` §5 as *entirely* this defect, not a closure-model
+residual. (Structurally the same law WO-G measured for the halved body force, `1/(2·N_axis)`, with
+the drag in place of the force.)
+
+**Before / after deltas (WO item 4) — nothing was re-baselined; no `perf_baseline*.json` and no
+recorded number in any doc was edited.** Both sides are built from the same commit `98e2bb8` in two
+`git worktree`s (`wt_before` = pristine, `wt_after` = pristine + the fill), so the A/B is immune to
+the concurrent WO-H work in the shared checkout — **none of WO-H's `applyNeumannGhost` change is in
+either side of this table.** nvidia-cuda backend unless stated.
+
+| case | before (pristine) | after (fix) | delta |
+|---|---|---|---|
+| **Single-phase regression**, all 13 grid points (`zh_sphere` 16/24/32/48/64, `random_spheres` + `hollow_rings` 24/32/48/64) | `+0.00 %` on every metric vs the recorded baseline | **identical** — every `K` / `k*` / fitted order `p` / `K_inf` / `p_iter_tot` / iters-per-step / step count / divergence equal to the last printed digit | **0** — and structurally so: no `drag_beta` field is ever registered, `hasDrag_` is false, the new call returns immediately |
+| **Ergun fixed bed, POROUS path** (`coupling/tests/test_fixed_bed_ergun_porous.py`, N=16 periodic, Gidaspow, `f_drive = 0.2`) | `U = 1.5526859544e-03`, Ergun rel-err **3.225808 %** | `U = 1.5041664805e-03`, rel-err **2.28e-08** | U **−3.1250e-02** (= exactly `1 − 31/32`); the error collapses by **6 orders of magnitude** |
+| **…`f_drive = 20`** | `U = 1.5463744659e-01`, rel-err **3.225812 %** | `U = 1.4982417796e-01`, rel-err **6.84e-08** | U **−3.113e-02** |
+| **…`f_drive = 1000`** (inertial branch, quadratic drag → smaller velocity response) | `U = 6.6017128601`, rel-err **3.225809 %** | `U = 6.4216283623`, rel-err **5.40e-08** | U **−2.728e-02** |
+| **Cross-check the fix is RIGHT, not merely different**: the same uniform bed on the INCOMPRESSIBLE path (`test_fixed_bed_ergun.py`, `porous=False`) must give the same superficial `U` | porous `1.55269e-03` vs incompressible `1.50417e-03` — **3.2 % apart** | porous `1.5041664805e-03` vs incompressible `1.5041665900e-03` — agree to **7 digits** (and to 8 at f=1000) | the two independent paths now agree; before, only one of them was right |
+| **Ergun fixed bed, INCOMPRESSIBLE path** (drag ON, `porous_` OFF) | `U` = `1.5041665900e-03` / `1.498241712e-01` / `6.421628373`, rel-err 9.6e-08 / 2.3e-08 / 5.6e-08 | **bit-identical** | **0** — as designed: `addDragDiagonal`'s `faceAvg` is gated on `porous_`, so the non-porous drag path never reads the ghost |
+| **Terminal velocity** (`test_terminal_velocity.py`, single particle, `porous=False`), Stokes and Schiller–Naumann | slip `2.2172412719e-04` / `0.2992163301`, drag `4.1812295094e-03` / `6.2370071411` | **bit-identical** | **0** |
+| **Fluidized bed** (`coupling/examples/fluidized_bed.py` — cylindrical vessel, INFLOW + OUTFLOW domain BCs, moving grains, 120 steps) | `h0 = 2.8563998`, `hf = 11.880898` (ratio 4.16, FLUIDIZED) | `h0` identical, `hf = 11.881428` | `hf` **+4.5e-05 relative — BELOW this case's own run-to-run noise**: two `before` runs differ by 2.2e-04 and two `after` runs by 5.5e-04 (moving grains + atomic deposition). Qualitatively unchanged (fluidizes, same ratio to 3 digits) |
+| **MFIX-Exa HCS gas–solid clustering** (`peclet-examples/examples/hcs-clustering/make_hcs_gas_mfix.py`, 256×256×8, N=50 000, Tang/BVK drag, Δ\*=2, truncated to t\*=300) | see the HCS paragraph below | | |
+
+**Audit (WO item 3) — every remaining porous / drag field that is written inner-only and then
+face-averaged, and WHERE its ghosts are filled relative to its FIRST consumer in the step.**
+
+| field | face-average consumer(s) | first consumer in `step()` | ghost fill | verdict |
+|---|---|---|---|---|
+| `drag_beta` | `addDragDiagonal` `½(β(i)+β(i−s_c))` (only when `porous_`); `buildPorousCoeffDrag` / `buildPorousCoeffCons`; `projectCorrectPorousDrag` / `Cons` | `rebuildStencils` / `buildAdvStencil*` at the top of the step | was `project()` **only** → now `fillDragBetaGhosts()` at the top | **THE defect — fixed here** |
+| `eps` | `divergOpenEps` (i±s), `buildPorousCoeff*` via the `eps1_` bridge, `maxPorousResidual` — **and, indirectly, `updateEpsRho()`** | **`updateEpsRho()` at the top of `step()`** (`porous_ && porousCons_`, and `porousCons_` defaults to **true**), then `makeFaceProps`/`buildRhsVar` face-average `epsRho_` | `fillPorousEpsGhosts()` inside `project()` and in `maxPorousResidual`; the coupling driver fills its own before `step()` | **SAME STRUCTURAL PATTERN, one policy short — see the escalation below.** Not fixed here (out of this WO's scope, and it moves the same benchmarks again) |
+| `epsRho_` (`ρ_eff = ε·ρ`) | `VarFaceProps::idiag`, `buildRhsVar`'s `rhoF`, `buildAdvStencilVar`'s `fouw` | top of `step()` | never exchanged — but `updateEpsRho` is a whole-block `RangePolicy(0, n_)` product, so its ghosts are exactly as valid as `eps`'s | correct **by construction**, and therefore inherits `eps`'s status exactly |
+| `epsPrev_`, `depsdt_` | none (cell-local `(ε−ε_prev)/dt` on inner cells) | — | n/a | correct |
+| `divAdv_` | `buildRhs*` `½(dv(i)+dv(i−s))` (porous advection-form compensation) | inside the Picard loop, after `computeDivAdv()` in the same iteration | none needed: `computeDivAdv` writes the `G−1` ring itself | correct |
+| `force_x/y/z` | `buildRhsVar` `½(f(i)+f(i−s))` | Picard loop | `fillCellForceGhosts()` at the top | correct (WO-G) |
+| `rho`, `mu` | `VarFaceProps`, `buildRhoCoeff`, `projectCorrectVar` | `rebuildStencils` | `fillPropGhosts`/`fillMuGhosts` inside `rebuildStencils`, `buildAdvStencilVar` and `project()` | correct (re-checked) |
+| openness `ox/oy/oz`, `sdf` | geometry face reads | static | filled at `setSolid`/`setPressureGeometry` | correct (static) |
+
+Also swept for completeness: every `0.5 * (X(i) + X(i − stride))` in `src/*.hpp`
+(`face_props.hpp`, `flow_ibm.hpp`, `mac_pressure.hpp`, `mac_approx_projection.hpp`,
+`gauge_exact_gradient.hpp`). The only ones reading a *written-by-an-external-writer* cell field are
+the rows above; `filterCellField` does its own `fillGhosts` before its stencil, and the collocated
+face-interpolation and gauge-gradient reads are of `u`/`P`/`sdf`, all of which are filled in the same
+phase that reads them.
+
+**ESCALATION (not fixed) — `eps` has the same top-of-step-consumer / late-canonical-fill shape, and
+the CFD-DEM driver's own fill is NOT the projection's policy at an inflow/outflow face.**
+`porousCons_` defaults to true, so **every** porous run calls `updateEpsRho()` at the top of `step()`;
+that is a whole-block product, so the momentum time term and the implicit-FOU weight face-average an
+`ε` ghost that was last written either by the previous step's `fillPorousEpsGhosts()` (stale — the
+deposit rewrites it in between) or, in the coupled path, by the driver itself
+(`exchange_field("eps")` + `_fill_domain` + `clip`, `coupling/python/peclet_coupling/driver.py`).
+On a periodic axis the driver's fill and `fillPorousEpsGhosts` agree exactly (both are the wrap /
+halo value), which is why the periodic Ergun beds above are clean. They **disagree at an
+inflow/outflow domain face**: the driver applies zero-gradient, while `fillPorousEpsGhosts`
+deliberately mirrors about 1 so the arithmetic face mean is exactly 1 (the Kuipers/MFIX distributor
+convention, `doc/porous_drag_scheme.md` §2). So on a fluidized bed the momentum inertia at the
+distributor plane uses `ε_f = ε_inner` while the projection uses `ε_f = 1` — the same
+momentum/projection face-mean mismatch this WO fixes for β, one field over. It is *smaller* than the
+β one (a factor `ε` rather than 2, on one plane, and the driver additionally clips) and it is
+configuration-specific (open domain faces only), which is why it is recorded rather than fixed: the
+one-line shape is `fillPorousEpsGhosts()` next to `fillDragBetaGhosts()`, but it needs its own
+decision about whether the mirror-about-1 policy should also govern the momentum inertia (it changes
+what "superficial vs interstitial" means at the distributor row) and its own measurement campaign on
+the fluidized-bed / HCS benchmarks.
+
+**HCS gas–solid (the benchmark the WO worried about) — no resolvable change, and the run-to-run
+noise is why.** `peclet-examples/examples/hcs-clustering/make_hcs_gas_mfix.py` (256×256×8 diameters,
+N = 50 000, φ = 0.05, e = 0.8, ρ\*=1000, Tang/BVK2 drag, volume-averaged gas on a Δ\*=2 grid, i.e.
+`flow` at 128×128×4) truncated to **t\* = 300** (15 000 steps, ~10 min/run); the published run goes to
+t\* = 10 000 and was **not** re-run — that is a multi-hour GPU run and the cached asset
+(`hcs_gas_mfix.npz`) was deliberately left untouched. **Two runs per side**, because the deposit is
+atomic and the grains chaotic:
+
+| t\* | before #1 | before #2 | after #1 | after #2 |
+|---|---|---|---|---|
+| 50 | 8.073e-02 | 8.068e-02 | 8.067e-02 | 8.049e-02 |
+| 100 | 2.575e-02 | 2.571e-02 | 2.573e-02 | 2.560e-02 |
+| 150 | 1.199e-02 | 1.198e-02 | 1.200e-02 | 1.186e-02 |
+| 200 | 6.740e-03 | 6.737e-03 | 6.738e-03 | 6.647e-03 |
+| 250 | 4.270e-03 | 4.242e-03 | 4.239e-03 | 4.168e-03 |
+| 300 | **2.923e-03** | **2.886e-03** | **2.876e-03** | **2.820e-03** |
+
+(T/T₀; the clustering index `cidx` is 0.90 → 0.94–0.97 on every one of the four runs.) The
+before-group spread at t\* = 300 is 1.3 % and the after-group spread 2.0 %, against a group-mean
+difference of 1.9 % — i.e. **the effect is not resolvable with two runs per side**, and any statement
+stronger than "≲2 %, buried in the run-to-run noise" would be unsupported. Structurally that is
+plausible: the fix changes the *gas* momentum diagonal, while T/T₀ is the PARTICLE granular
+temperature, whose drag is applied per particle from the interpolated slip and never reads the face
+mean.
+
+**Distributed coupling (Python), np = 1/2/4, host-openmp.**
+`coupling/tests/test_mpi_fixed_bed_ergun.py` runs the **incompressible** path (`porous=False`), so it
+is — correctly — unchanged: `U` = 1.5042e-03 / 1.4982e-01 / 6.4216 and rel-err 0.0 % at np = 1, 2 and
+4, identical before and after. `coupling/tests/test_mpi_moving_suspension.py` — the one distributed
+test that IS porous (`CfdDem` defaults `porous=True`), Stokes drag, implicit, moving grains with
+ownership migration — is **also unchanged to every printed digit**: `mean_vx = -2.27080469e-01`
+(np=1) and `-2.27080460e-01` (np=2, rel-err 3.9e-08 vs np=1) on **both** the pristine and the fixed
+tree. Structurally consistent with the HCS result: the observable is the PARTICLE velocity, whose
+drag is applied per particle from the interpolated slip and never reads the face mean. Its np = 4 leg
+timed out at 1200 s on both trees alike (pre-existing, unrelated to this fix).
+
+**What was NOT run, explicitly.**
+- The **full-length HCS** run (t\* = 10 000) and the fluidization **sweep** (`fluidized_bed.py sweep`,
+  4 velocities × 120 steps): multi-hour, and their published numbers are the ones a re-baselining
+  decision would need — that is the user's call, not this WO's.
+- `coupling/tests/test_mpi_smoothing.py`, and the np = 4 leg of `test_mpi_moving_suspension.py`
+  (which timed out at 1200 s on the pristine and the fixed tree alike).
+- There is **no hydrostatic-in-porous case** anywhere in the repo (searched `flow/scripts`,
+  `flow/tests/study`, `flow/tests/kokkos*`, `coupling/tests`, `coupling/examples`): the only porous
+  configurations that exist are the two Ergun beds, the terminal-velocity drop, the fluidized bed and
+  the HCS example. Item 4's "if one exists" is answered: it does not.
+
+**Two incidental findings, both unrelated to this fix and both recorded rather than acted on.**
+1. `coupling/CMakeLists.txt` `configure_file`s only `__init__.py` and `driver.py` into the build
+   tree, but `python/peclet_coupling/__init__.py` does `from .resolved import ResolvedCfdDem` — so a
+   fresh dev build of `peclet.coupling` cannot be imported at all
+   (`ModuleNotFoundError: No module named 'peclet.coupling.resolved'`) until `resolved.py` is copied
+   in by hand. Every measurement above needed that copy.
+2. `dem`'s multi-rank module option is `PECLET_DEM_MPI`, but `dem/CMakeLists.txt`'s own header
+   comment (line 13) and `suite/CLAUDE.md` both document it as `-DDEM_MPI=ON`, which CMake silently
+   accepts as an unused variable — the module then builds *without* `init_mpi`/`step_mpi` and every
+   distributed coupling test dies with
+   `AttributeError: 'Simulation' object has no attribute 'init_mpi'`.
+
+**ESCALATION #2 (pre-existing, NOT WO-I) — `MPI_ERR_TRUNCATE` at np = 4, and
+`PECLET_FLOW_CA=0` cures it.** Found while running the np = 4 gate. Symptom:
+
+```
+*** An error occurred in MPI_Waitall
+*** MPI_ERR_TRUNCATE: message truncated
+*** MPI_ERRORS_ARE_FATAL
+```
+
+**It is not this WO's:** it strikes `varmu_mpi_np4` and `bodyforce_ghost_mpi_np4` — pre-existing
+tests, neither of which registers a `drag_beta` field, so `fillDragBetaGhosts()` returns before doing
+anything in both — and it reproduces on the **pristine `98e2bb8` tree** built in the `wt_before`
+worktree.
+
+What is established:
+
+- **nvidia-cuda, np = 4, deterministic.** `test_bodyforce_ghost_mpi` fails 5/5 runs and
+  `test_dragbeta_ghost_mpi` likewise, on BOTH the pristine and the fixed tree, on 16×16×32 whose
+  np = 4 ORB is 8×16×16 — x AND z each cut into exactly two, so on those axes a rank's left and
+  right neighbour are the *same rank*.
+- **`PECLET_FLOW_CA=0` fixes it completely.** With the communication-avoiding smoother exchange off,
+  np = 4 CUDA runs green for both tests: `bodyforce_ghost_mpi` `PASS` on all three configurations,
+  and `dragbeta_ghost_mpi` `du = dp = 0.000e+00` with `diag = [4, 4]` on all three. CA is exactly the
+  path that exchanges a **2-deep** ghost layer where every other exchange sends 1-deep, and
+  `MPI_ERR_TRUNCATE` is by definition a receive buffer smaller than its matching send — a same-tag,
+  same-neighbour size mismatch, with the doubled neighbour of a 2-blocks-per-axis periodic
+  decomposition as the obvious trigger.
+- **host-openmp, np = 4, INTERMITTENT and load-sensitive.** Standalone, `dragbeta_ghost_mpi_np4`
+  passes (measured repeatedly while writing the test). Inside a loaded `ctest` run (this session's
+  machine sat at load ~28 with two other agents' batteries running) `varmu_mpi_np4` and
+  `dragbeta_ghost_mpi_np4` failed with the same truncation while `bodyforce_ghost_mpi_np4` in the
+  same pass passed. `varmu_mpi_np4`'s grid is 16×32×8 → np = 4 blocks 8×16×8, i.e. again two axes cut
+  into exactly two — the same decomposition signature.
+
+Not diagnosed further and **not fixed**: it is in the halo / CA smoother communication layer, not the
+porous coefficient plumbing this WO is scoped to. Recommended next step for whoever takes it: post
+distinct tags (or distinct communicators) per ghost width in `GridHalo`, and add an np = 4 CUDA test
+on a 2-blocks-per-axis grid — the coverage gap that let this live. Consequence for the gate table
+below: np = 4 legs are reported both as-run and under `PECLET_FLOW_CA=0`, and always alongside the
+pre-existing tests so the two are known to fail and pass together.
+
+**Gates.**
+
+| gate | result |
+|---|---|
+| New test **fails before** the fix (demonstrated, not asserted) | **PASS.** Pristine `98e2bb8` built in a separate `git worktree` with only the new test file + its CMake line added. host-openmp: at every np, `diag = [2.5, 4]` — the first inner plane's momentum diagonal is `idt + β/2 = 2.5` against `idt + β = 4` — and the velocity value gate fails: np=1 `per-z 0.33210449218750004`, `per-x 0.33217773437499998` (want `0.33203125`); np=2 all three configs `0.33217773…` with `du = 7.324e-05`; np=4 `per-x 0.33232421874999996`, `du = 1.465e-04`. Each rank boundary adds another half-plane, exactly as WO-G measured for the force. CUDA reproduces (`per-z np=4 diag [2.5, 4]`, `du = 7.324e-05`) |
+| New test **passes after** | **PASS.** host-openmp np = 1/2/4: `diag = [4, 4]` exactly, `u spread = 0.000e+00`, `value = 0.33203125` exactly, `cross = 0`, `max\|P\| = 0`, and **`du = dp = 0.000e+00` (bitwise vs the np=1 reference) at every np**. nvidia-cuda np = 1/2 identical; np = 4 identical **with `PECLET_FLOW_CA=0`** (escalation #2) |
+| np 2/4 vs np 1, host + CUDA, on all pre-existing tests | **PARTIAL — see escalation #2.** host-openmp, in two passes (1–37, then 38–48; the agent harness killed the first `ctest` at #38, not a test failure): **46 of 48 green**, the two failures being `varmu_mpi_np4` (**pre-existing**, no drag field) and `dragbeta_ghost_mpi_np4`, both `MPI_ERR_TRUNCATE` under machine load, both green standalone. nvidia-cuda: green through test 26 when the harness stopped the run, resumed 27–48; the `*_np4` legs of `bodyforce_ghost_mpi` (**pre-existing**) and `dragbeta_ghost_mpi` fail deterministically there and **pass under `PECLET_FLOW_CA=0`**, as does the pristine tree's — i.e. the failure tracks the CA exchange and the decomposition, not this fix |
+| Single-rank `tests/kokkos` | **PASS — 21/21** on host-openmp |
+| **Single-phase regression bit-exact** (the WO's escalate-if) | **PASS — no movement at all.** All 13 grid points identical on `K` / `k*` / order `p` / `K_inf` / `k*_inf` / `p_iter_tot` / iters-per-step / step count / divergence, to every printed digit, before vs after; `=== regression: PASS ===`, `+0.00 %` against the recorded baseline on both sides |
+| Deltas measured and reported for every case in item 4 | **PASS** — the tables above, including an explicit list of what was not run |
+| No baseline file and no recorded number in any doc edited | **PASS** — `git diff` touches `src/flow_ibm.hpp`, `CLAUDE.md` (one new paragraph + the 42→48 ctest count), `tests/kokkos_mpi/CMakeLists.txt` (one name) and adds `tests/kokkos_mpi/test_dragbeta_ghost_mpi.cpp`. `perf_baseline*.json` untouched; `doc/porous_drag_scheme.md` untouched (its §5 "~3 %" is now known to be the defect — **left for the user to decide**); `doc/variable_density_projection.md` untouched |
+
+**Concurrency note.** WO-H was working in the same checkout throughout and landed its
+`applyNeumannGhost` pressure-MG repair while this WO was measuring. Every number above is from two
+`git worktree`s at `98e2bb8`, so **no WO-H change is inside either side of any delta**; the only
+consequence of the shared machine is wall-clock (load average ~28 for most of the session), which is
+why the HCS runs read 32–70 ms/step against the 18 ms/step recorded for this configuration.
+
+**Cost.** One ghost exchange per step, and only when `enableDrag()` has been called. Applied
+unconditionally rather than gated on `porous_` so the field's ghost contract does not depend on which
+consumer reads it; on the non-porous drag path it is numerically inert, which the bit-identical
+incompressible Ergun bed and terminal-velocity rows above are the check of.
