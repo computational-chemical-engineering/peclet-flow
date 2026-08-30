@@ -67,6 +67,13 @@ target_include_directories(test_vof_plic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../
 target_link_libraries(test_vof_plic PRIVATE Kokkos::kokkos)
 add_test(NAME vof_plic COMMAND test_vof_plic)
 
+# VoF rung V1: Weymouth-Yue split geometric advection on prescribed velocity fields.
+add_executable(test_vof_advect test_vof_advect.cpp)
+target_include_directories(test_vof_advect PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_vof_advect PRIVATE Kokkos::kokkos)
+add_test(NAME vof_advect COMMAND test_vof_advect)
+
 add_executable(test_advection test_advection.cpp)
 target_include_directories(test_advection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_advection PRIVATE Kokkos::kokkos)

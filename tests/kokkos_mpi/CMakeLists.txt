@@ -48,3 +48,15 @@ foreach(t cutcellmg_mpi velocitymg_mpi sdflow_mpi sdflow_colocated_mpi redistrib
     add_test(NAME ${t}_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_${t}>)
   endforeach()
 endforeach()
+
+# VoF rung V1: distributed Weymouth-Yue advection. Standalone (its own g=3 colour halo, no
+# CutcellMG), so it does NOT need PECLET_FLOW_MPI; it shares the scene builders with the
+# single-rank battery in tests/kokkos.
+add_executable(test_vof_advect_mpi test_vof_advect_mpi.cpp)
+target_include_directories(test_vof_advect_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${TPX_DIR}/include)
+target_link_libraries(test_vof_advect_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX)
+foreach(np 1 2 4)
+  add_test(NAME vof_advect_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_vof_advect_mpi>)
+endforeach()

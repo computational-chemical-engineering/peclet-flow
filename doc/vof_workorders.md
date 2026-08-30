@@ -314,3 +314,111 @@ two-line coordinate rescale with no clipping code, and it is why `faceFluxVolume
 *bitwise* equal to `plicVolume`. `sphereCellFraction` is a recursive-octree helper with an exact
 tangent-plane leaf closure (2nd order, 4.9e-7 relative at 64^3), not the 4^3 midpoint subsampling the
 WO sketched — the sketched accuracy (~1e-2 per cell) would have swamped the D2 convergence gate.
+
+### WO-E (rung V1) — Weymouth–Yue split advection, standalone — **DONE 2026-08-30**
+
+Delivered: `src/vof/advect_wy.hpp` (`peclet::flow::vof::WyAdvector` — its own extended block at
+**g = 3** with its own ghost-refresh callback; the solver's `G = 2` machinery, `flow_ibm.hpp` and
+`flow_bindings.cpp` are untouched), `tests/kokkos/test_vof_advect.cpp` (ctest `vof_advect`, 8.3 s on
+CUDA / 17 s host-openmp), `tests/kokkos/vof_advect_scenes.hpp` (scene builders shared by both
+batteries), `tests/kokkos_mpi/test_vof_advect_mpi.cpp` (ctests `vof_advect_mpi_np{1,2,4}`), plus 4 +
+11 lines of CMake registration. `tests/kokkos` **21/21 green on host-openmp AND nvidia-cuda**; the
+new MPI ctests green np = 1/2/4 on both backends.
+
+**Source.** The JCP paper is paywalled, so the primary source used is Weymouth's MIT thesis
+(*Physics and learning based computational models for breaking bow waves…*, 2008, dspace
+`1721.1/44754`), whose §2.2.2 **is** the paper's derivation and whose **Appendix A is the full
+boundedness proof** — strictly more than the paper contains. Cross-checked term for term against the
+independent restatement in Arrufat et al., *Computers & Fluids* 215:104785 (2021), arXiv:1811.12327
+§3.3.4 (their eqs. 20/26/27). Nothing was improvised.
+
+**Gate results** (CUDA; host-openmp identical except in the last bits, per the cross-backend
+tolerance policy).
+
+| gate | result |
+|---|---|
+| A planar slab, uniform diagonal flow, 1024 steps (8 laps), CFL 0.25 | **Linf 0.0, L1 0.0, drift 0.0 — exact, bit for bit** |
+| B sphere translation, L1(vol) at 16/32/64 | 3.9025e-3, 1.1540e-3, 2.4577e-4 — **order 1.76 / 2.23** |
+| B volume drift, per resolution / 32^3 over 1024 steps | ≤ 2.1e-16 / **2.12e-16** (gate 1e-13) |
+| C Zalesak, one revolution, 100^2, 1000 steps | **L1/V = 2.81e-2**, E1(per 2D cell) 1.634e-3, drift 2.0e-16 |
+| C sensitivity to step count (700 / 1000 / 2000) | 2.54e-2 / 2.81e-2 / 3.22e-2 — weak, not the cause |
+| D LeVeque T = 3 with reversal, L1(vol) at 32/64/128 | 7.7485e-3, 2.6779e-3, **5.9770e-4** — order 1.53 then **2.16** |
+| D relative shape error L1/V at 32/64/128 | 5.48e-1, 1.894e-1, 4.23e-2 |
+| D volume drift / discrete face divergence | 5.9e-15, 2.1e-14, **5.7e-14** / max \|div\| dt/h ≤ 1.2e-15 |
+| E CFL guard | throws at CFL = 0.5 with the value in the message; runs at 0.49 |
+| F worklist on/off, 40 LeVeque steps | **0 / 54 872 cells differ (bitwise)** |
+| G dilation flag frozen vs recomputed per sweep, 200 steps | **2.33e-15 vs 1.455e-2 — 6.2e12x worse** |
+| MPI np 1/2/4, periodic + walls + mixed, host + CUDA | **0 bitwise diffs** in every case; global drift ≤ 1.6e-15 |
+
+Single-phase regression: unaffected **by construction**, verified not assumed — the solver module is
+one TU (`nanobind_add_module(sdflow … src/flow_bindings.cpp)`, no globs) and
+`grep -rn "vof/" src/ CMakeLists.txt pyproject.toml` outside `src/vof/` returns nothing, so no
+compilation input of the solver changed. (`src/flow_ibm.hpp` / `src/flow_bindings.cpp` carry another
+agent's in-flight WO-A edits in this shared checkout; they are deliberately not staged here.)
+
+**Zalesak is anchored against published numbers, twice.** `L1/V` is the metric of Xie & Xiao,
+*THINC-scaling* (arXiv:2103.09541) eq. 27 — `sum|C-C_ex| / sum|C_ex|` — whose Table 5 at N = 100
+reads THINC-scaling 1.55e-2, MTHINC 1.61e-2, UMTHINC 2.61e-2, THINC/QQ 3.22e-2 on the identical disk
+(r = 0.15 at (0.5,0.75), slot |x-0.5| <= 0.025 and y <= 0.85). Ours, **2.81e-2**, sits inside that
+spread. The second anchor is Cassinelli et al. (arXiv:1903.11949) eq. 15, the per-cell mean
+`E1 = (1/N^2) sum|C-C_ex|`: ours is 1.63e-3 at D/h = 30, within their PLIC band. A linear PLIC is
+expected at the high end of that spread — the schemes below it use quadratic/THINC interface
+representations specifically to hold the slot's sharp corners, and MYC's own plane-normal error
+(WO-D: mean 0.10 deg, ~28 % Youngs fallback) is the other half. This is **not** a 10x miss.
+LeVeque likewise reproduces the published behaviour: Cassinelli report "asymptotically second-order
+convergence" for PLIC on this case, and the measured order goes 1.53 (32->64) then **2.16**
+(64->128).
+
+**Finding 1 — the CFL cap in the work order is the 2D bound; Weymouth's own 3D bound is half of
+it.** Thesis eq. 2.23 / A.33 gives the boundedness restriction as `|u| dt/h < 1/(2(N-1))` for
+N-dimensional flow: **1/2 in 2D but 1/4 in 3D**. The WO (and Basilisk / PARIS / AMR-Wind, and
+`VOF_PLAN.md` §6) all quote 0.5. Shipped as specified — `cflLimit = 0.5`, aborting at or above it —
+with the 3D value documented in the header and settable per instance. Two things make this safe
+rather than a latent bug: (i) **conservation is independent of boundedness** — the telescoping is
+algebraic and holds whatever C does, so an over-CFL run loses `0 <= C <= 1`, never volume; and (ii)
+measured on the LeVeque field at 32^3 and 64^3, sweeping the target CFL 0.24 -> 0.40 -> **0.48**, C
+stayed inside `[-5.6e-17, 1.0]` at every setting and the shape error even improved slightly
+(7.7485e-3 -> 7.5865e-3 at 32^3, fewer steps). So the 1/(2(N-1)) bound is *sufficient*, not tight,
+on this flow. `PECLET_VOF_LEVEQUE_CFL` reproduces the sweep. If a future rung ever sees C leave
+[0,1] under a 3D flow, set `cflLimit = 0.25` before suspecting the kernels.
+
+**Finding 2 — a naive zero-gradient wall ghost fill is decomposition-DEPENDENT, and it fails exactly
+where the WO says to look.** The natural non-periodic ghost fill is sequential zero-gradient axis
+passes over the block. It is not np-invariant: a ghost that is outside the domain in y while its
+x-neighbourhood is an *interior* halo gets the x-extension of the true row on one decomposition and
+the x-extension of the y = 0 row on another. That difference is not inert — it enters the 3^3 MYC
+stencil of the inner corner cell, hence its normal, hence its outgoing flux, and surfaces as
+"np differs at the last bit only in ghost-adjacent cells", the WO's own escalation symptom. The fix
+(`vofscene::clampFill`) defines the value of every outside-domain ghost as the field at its
+**globally clamped** index, which is decomposition-independent by definition; the clamped source is
+provably inside the block's extended range (a ghost at global index < 0 on axis a only exists when
+`origin[a] < g`) and is always either inner or already exchanged. This was found by reasoning about
+the fill rather than by chasing a failing gate, so no gate ever failed.
+
+**Two structural facts worth carrying into V2+.**
+1. **Full cells are exactly stationary in floating point, and that is load-bearing.** For a cell
+   whose 1D neighbourhood is full, both fluxes take the algebraic branch (`1 * a`) and the dilation
+   term is the exact negation of the flux difference; IEEE subtraction is antisymmetric, so
+   `fl(a_- - a_+) + fl(a_+ - a_-)` is an exact zero and `C + 0 == C`. Empty cells likewise stay
+   exactly 0. This is why the conservation floor scales with **interface area**, not domain volume
+   (the measured drifts are ~1e-16 at 32^3 and ~5.7e-14 at 128^3 over 3200 steps). It survives only
+   if the flux and the dilation term scale the SAME `uf` by the SAME `dt/h` — writing the dilation
+   as `(uf_+ - uf_-) * dth` instead of `uf_+*dth - uf_-*dth` would silently break it.
+2. **The velocity field must be discretely solenoidal, not analytically solenoidal.** The dilation
+   term adds `H(C-1/2) * div * dt/h` to *every* cell's budget, interior full cells included, so
+   pointwise-sampled `uf` would pin the conservation floor at O(h^2) — 10 orders above the gate. The
+   LeVeque field is therefore sampled as the **discrete curl of an edge vector potential**
+   `A = (0, -psi2(x,z) sin 2pi y, psi1(x,y) sin 2pi z) cos(pi t/T)`, `psi1 = sin^2(pi x) sin^2(pi y)/pi`,
+   `psi2 = sin^2(pi x) sin^2(pi z)/pi` (curl A reproduces the field exactly), which puts the measured
+   discrete divergence at 1e-17..1e-15 and the drift with it. Uniform translation and solid-body
+   rotation are exactly zero bitwise for free. When V2 couples this to the projection, the relevant
+   number is the projection's own divergence residual — that, not h, sets the conservation floor.
+
+**Deferred / notes.** (a) The 128^3 LeVeque rung is env-gated (`PECLET_VOF_LEVEQUE_128=1`, 3200
+steps, ~5 min on CUDA) so the default ctest stays under 10 s; its numbers are recorded in the table
+above from a real run. (b) `WyAdvector`'s implementation methods are `public` with a "treat as
+private" comment — nvcc rejects an extended `__host__ __device__` lambda whose enclosing member
+function has private access. (c) `debugRecomputeDilation` ships as a permanent, default-off switch so
+gate G keeps the #1 trap a measured number; (d) no clipping at this rung, per the plan — the wisp
+census is printed instead (e.g. 9489 wisp cells at 128^3 after 3200 LeVeque steps, C in
+[-2.1e-17, 1.0]).
