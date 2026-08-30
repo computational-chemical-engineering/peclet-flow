@@ -2327,6 +2327,30 @@ class Solver {
   /// (implicit_fou / the domain-BC stencil path) instead folds advection into the MATRIX, so the
   /// reaction is no longer of this form; it stays refused.
   ///
+  /// THE TORQUE (v3, 2026-08-31): the reaction alone is NOT the physical torque, and the gap is
+  /// closed here in closed form. The discrete momentum budget measures the LAPLACIAN-form wall
+  /// flux (the operator discretises mu*lap(u) = div(mu grad u)); the physical traction adds the
+  /// transposed term mu*(grad u)^T . n. In the interior the two agree for constant mu and a
+  /// solenoidal field (div(grad u)^T = grad(div u) = 0), but not as a boundary traction -- and
+  /// for an incompressible no-slip flow on a rigid wall moving with angular velocity Omega the
+  /// missing traction is computable from WALL DATA ALONE:
+  ///
+  ///     (grad u)^T . n  =  n x Omega        (pointwise on the wall, exactly)
+  ///
+  /// Derivation: split grad u on the surface into tangential derivatives -- which equal the
+  /// rigid-body field's, grad u_w = [Omega x] -- plus the normal derivative; continuity kills the
+  /// n(du/dn . n) piece (n . du/dn = -trace of the tangential part = 0 since [Omega x] is
+  /// antisymmetric); what survives is the tangential projection of (n x Omega), which is n x
+  /// Omega itself. Verified against the analytic rotlet to 3e-11 pointwise. Its FORCE integral
+  /// vanishes over any closed surface (oint n dA = 0), which is why the force identity above
+  /// never saw it; its TORQUE integral carries exactly ONE THIRD of the Stokes torque on a
+  /// rotating sphere (oint r x (n x Omega) dA = -(8pi/3) a^3 Omega), which is exactly the
+  /// resolution-independent -31% the rotating-sphere gate measured before this term (predicted
+  /// -33.3%; Maitri et al., Comput. Fluids 175 (2018) 111-128, measured the same 33-34% plateau
+  /// on an IBM omitting the same term). The correction below integrates mu * r x (n dA x Omega)
+  /// over the cut cells with the EXACT aperture wall-area vectors -- no interior reconstruction,
+  /// no near-wall gradient, and identically zero when nothing rotates.
+  ///
   /// v2 SCOPE, refused loudly: staggered only; implicit advection, porous, variable properties,
   /// domain BCs, ghost projection, drag diagonal, fluid-only star modes all put terms in the
   /// update this budget does not carry, and a missing term here is a silently mis-attributed
@@ -2417,6 +2441,50 @@ class Solver {
           });
     }
     space.fence();
+    // v3: the transposed-stress wall torque, mu * r x (n dA x Omega) per cut cell. n dA is the
+    // exact aperture wall-area vector with the BODY-outward orientation, (oE-oW, oN-oS, oT-oB)
+    // per the wallAreaProbe convention (sum x*(oE-oW) = +V_solid). Skipped entirely when no
+    // instance moves, so a static run stays bit-identical; a purely TRANSLATING instance has
+    // Omega = 0 and contributes exact zeros. The FORCE is deliberately left alone: the term's
+    // force integral is identically zero over a closed surface, and adding its discrete
+    // counterpart would only inject aperture-level rounding into an exactly-gated identity.
+    if (hasMotion_ && cutcellPressure_) {
+      CCConst oxv = CCConst(ox_), oyv = CCConst(oy_), ozv = CCConst(oz_);
+      auto ang = instAngD_;
+      Kokkos::parallel_for(
+          "peclet::flow::hydro_reaction_torque_transpose",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
+                                                         {e.x - G, e.y - G, e.z - G}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+            const long i = (long)x + (long)y * sy + (long)z * sz;
+            const double ax = oxv(i + sx) - oxv(i);
+            const double ay = oyv(i + sy) - oyv(i);
+            const double az = ozv(i + sz) - ozv(i);
+            if (ax == 0.0 && ay == 0.0 && az == 0.0)
+              return;  // not a cut cell
+            const peclet::core::Vec3<double> p{(double)(x - G + og.x), (double)(y - G + og.y),
+                                              (double)(z - G + og.z)};
+            const int oi = q.owner(p);
+            if (oi < 0)
+              return;
+            const double wx = ang(3 * oi + 0), wy = ang(3 * oi + 1), wz = ang(3 * oi + 2);
+            if (wx == 0.0 && wy == 0.0 && wz == 0.0)
+              return;
+            // v = (n dA) x Omega  -- the missing traction integrated over this cell's wall patch
+            const double vx = ay * wz - az * wy;
+            const double vy = az * wx - ax * wz;
+            const double vz = ax * wy - ay * wx;
+            const peclet::core::Vec3<double> r = peclet::core::geom::minImage(
+                peclet::core::Vec3<double>{p.x - cen(3 * oi + 0), p.y - cen(3 * oi + 1),
+                                           p.z - cen(3 * oi + 2)},
+                box);
+            Kokkos::atomic_add(&Td(3 * oi + 0), mu * (r.y * vz - r.z * vy));
+            Kokkos::atomic_add(&Td(3 * oi + 1), mu * (r.z * vx - r.x * vz));
+            Kokkos::atomic_add(&Td(3 * oi + 2), mu * (r.x * vy - r.y * vx));
+          });
+      space.fence();
+    }
     using HostV = Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
     Kokkos::deep_copy(HostV(out.data(), m), Fd);
     Kokkos::deep_copy(HostV(out.data() + m, m), Td);
