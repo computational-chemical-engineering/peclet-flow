@@ -331,6 +331,50 @@ diagnostic information, not a reason to doubt the defect.
 use `set_body_force` (a uniform scalar, not a closure field), so a `cellForce_` ghost fix must
 leave them bit-exact. A movement there means the fix reached further than intended.
 
+## WO-H (RECOMMENDED, not yet authorized) — the PCG selector no-op + the 3-D wall-bounded MG-PCG stall
+
+**Status: awaiting user go-ahead.** Off the VoF critical path (Chebyshev is the varRho default
+and converges in 11–18 its on box/cylinder/ring geometries), but it is a real pre-existing
+defect in the *documented* pressure-driver API and in the solver's behaviour on 3-D
+wall-bounded grids. Scoped here so it can be launched as-is.
+
+**The two coupled defects** (WO-B, verified in-source 2026-08-30):
+1. **`setPressurePcg(bool /*on*/, int, double)` (`flow_ibm.hpp:240`) never writes
+   `useChebyshev_`** — the `on` flag is discarded (the signature literally comments the
+   parameter out) and only `pcgMaxit_`/`pcgRtol_` are stored. The comment at `:237` explains
+   the original intent ("MG-PCG by default; the `on` flag is accepted for API parity"), which
+   was true before `setDensityMode` began setting `useChebyshev_ = true`. Consequence: after
+   `set_density_mode("variable")` **there is no way to select PCG through the documented
+   call**, contradicting `CLAUDE.md` ("PCG and Chebyshev are mutually exclusive — last set
+   wins"). The working spelling is `set_pressure_chebyshev(False, …)`. This is why
+   `variable_density_projection.md` §2's "PCG stalls on ρ-scaled coefficients" was actually
+   measuring Chebyshev against its own 120-iteration cap.
+2. **With PCG genuinely selected, MG-PCG stalls on 3-D wall-bounded grids at CONSTANT
+   density** — 200/200 iterations with div ≈ 1.2e-5 at nz ≥ 8 (Chebyshev: 13–14 on the same
+   operator), while periodic+IBM is healthy at every ratio from ρ≡1 to 10⁴ (7–10 its).
+   Present in the 2026-07-06 release build; independent of bottom mode, mean-removal scope,
+   momentum tolerance and μ; vanishes at `levels=1`. **It is not a variable-density defect at
+   all.** No shipped validated result is affected because every domain-BC verification script
+   is quasi-2D (nz=4), where the stall does not appear.
+
+**Order matters**: fixing (1) alone would silently switch users from a working Chebyshev to a
+stalling PCG on exactly the 3-D wall-bounded configurations of (2). **Fix (2) first, or fix
+both together and gate them jointly.**
+
+**Do.** Diagnose (2) properly before touching it: the `levels=1` cure points at the coarse
+hierarchy under domain BCs, and `nz ≥ 8` vs `nz = 4` points at how many levels actually
+coarsen the walled axis. Prime suspects to separate by measurement: whether the domain-BC
+V-cycle is symmetric (a nonsymmetric preconditioner breaks CG's orthogonality — note WO-C
+tests exactly this hypothesis with FCG, so **read WO-C's result before starting**), and
+whether the coarse-level BC re-imposition is self-adjoint. Then repair the selector, make the
+two setters genuinely mutually exclusive in both directions, and correct `CLAUDE.md` and the
+binding docstrings. Add a 3-D wall-bounded PCG convergence ctest (nz ≥ 8) — the coverage gap
+that let this live since July.
+
+**Gates.** Single-phase regression bit-exact; the new 3-D wall-bounded PCG test converges;
+`set_pressure_pcg(True)` after `set_density_mode("variable")` demonstrably selects PCG;
+existing quasi-2D verifications unchanged; 45+ MPI ctests green.
+
 ## Findings log
 
 (append per WO on completion/escalation)
