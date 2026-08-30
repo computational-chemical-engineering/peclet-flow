@@ -102,6 +102,20 @@ rebuild) and is immune. Consequence, implemented in `setDensityMode`:
 > for ρ-scaled coefficients. On the fully periodic production configuration, MG-PCG solves the
 > ratio-10⁴ `packing_ring.vti` operator in **16** iterations (Chebyshev: 155). The open item is the
 > domain-BC hierarchy's boundary treatment at constant density — see WO-B escalations #1 and #2.
+>
+> **CONFIRMED 2026-08-30 by WO-C (rung S1): the preconditioner is nonsymmetric, and the asymmetry is
+> introduced by the FIRST coarse level under domain BCs.** Flexible CG (`set_pressure_fcg`,
+> `CutcellMG::solveFCG`) — identical to MG-PCG but for the Polak–Ribière β — converges on **93 of the
+> 130** battery configurations where MG-PCG fails, with **zero** regressions, and reproduces PCG's
+> iteration count exactly where PCG is healthy (periodic + IBM: 7/7, 10/10, `packing_ring` 14/14 —
+> the two βs are algebraically identical under a symmetric preconditioner). Directly instrumented:
+> `PECLET_FLOW_MG_DEBUG=2` prints `pr = |rᵀz_k| / |rᵀz_{k+1}|`, the term Fletcher–Reeves keeps and
+> Polak–Ribière removes, which is **exactly zero** for a symmetric preconditioner — measured median
+> **0.062** (max 0.22) on periodic + IBM against **0.43–0.48** (max 1.08–1.40) on every wall-bounded
+> configuration, on the SAME geometry with only the BCs changed, and it appears at `levels=2`
+> (`levels=1` has no coarse grid and solves in 1 iteration). Two residual failure modes FCG does NOT
+> cover are recorded in the WO-C findings entry (the gravity-driven hydrostatic column with a global
+> stratification, and a small coefficient adjacent to a prescribed-velocity face).
 
 ## 3. Validation (`tests/kokkos/test_vardensity_projection.cpp` + `tests/study/rayleigh_taylor.py`;
 host-openmp **and nvidia-cuda** since 2026-08-30 — see §3.1 for the multi-rank gates)

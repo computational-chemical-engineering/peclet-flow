@@ -831,6 +831,15 @@ class CutcellMG {
         if (!std::isfinite(rznew) || !std::isfinite(rzcross))
           break;  // preconditioner breakdown: keep the last finite iterate
         const double beta = (rznew - rzcross) / rz;  // Polak-Ribiere: r^T (z_{k+1} - z_k) / r^T z
+        // DIAGNOSTIC (PECLET_FLOW_MG_DEBUG>=2): `pr` is |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| --
+        // the term Fletcher-Reeves keeps and Polak-Ribiere removes. With a preconditioner that is
+        // symmetric w.r.t. the fine operator this is EXACTLY zero in exact arithmetic, so a
+        // measured pr ~ 1e-14 says "the V-cycle is symmetric here (and FCG == PCG by construction)"
+        // while pr = O(1) says "it is not" -- a direct read-out of the hypothesis, per iteration,
+        // that needs no extra solve.
+        if (trace)
+          printf("[mg]   it %3d  beta=%.6e  pr=%.3e (|r^T z_k| / |r^T z_{k+1}|)\n", it + 1, beta,
+                 rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
         aypx(p, beta, z);
         rz = rznew;
       }

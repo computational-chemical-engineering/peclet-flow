@@ -371,6 +371,27 @@ two setters genuinely mutually exclusive in both directions, and correct `CLAUDE
 binding docstrings. Add a 3-D wall-bounded PCG convergence ctest (nz ≥ 8) — the coverage gap
 that let this live since July.
 
+> **ANSWERED IN PART BY WO-C (2026-08-30) — read its findings entry before starting.**
+> (i) **The suspect is confirmed: the domain-BC V-cycle is not a symmetric preconditioner.**
+> Flexible CG converges on **93 of the 130** configurations where MG-PCG fails, with 0
+> regressions, and the β-numerator contamination `pr = |rᵀz_k|/|rᵀz_{k+1}|` (zero iff M is
+> symmetric; printed under `PECLET_FLOW_MG_DEBUG=2` by `solveFCG`) measures **0.062 median** on
+> periodic + IBM against **0.43–0.48** wall-bounded on the *same* geometry.
+> (ii) **It is the FIRST coarse level.** `levels=1` solves in 1 iteration; `levels=2` already
+> shows the full effect (PCG 200/200, `pr` median 0.58) and deeper hierarchies are no worse. So
+> target the level-1 pair — `applyBoundaryOpenness`'s per-level re-imposition and the
+> non-periodic prolongation ghosts — as an adjoint pair, not the depth or the bottom solve.
+> (iii) **The fix order is now cheaper to satisfy.** A working Krylov driver on domain-BC grids
+> exists today (`set_pressure_fcg`), so the selector repair can land with the varRho/porous
+> defaults routed to FCG rather than PCG, without waiting for the symmetry work.
+> (iv) **Two residual failure modes FCG does NOT cure**, both new and both on V2's path: the
+> gravity-driven hydrostatic column with a global stratification (a *stationary* iteration — the
+> residual freezes at `r/r0 = 6.98` with `pr` locked at exactly 0.500 — while Chebyshev returns
+> the machine-exact rest state), and a small coefficient ρ₀/ρ_f adjacent to a prescribed-velocity
+> (inflow-type) face at ratio ≥ 10². Do not assume the symmetry repair covers them.
+> (v) The new ctest should gate **all three** Krylov-family drivers on a 3-D wall-bounded grid,
+> including the two residual configurations above.
+
 **Gates.** Single-phase regression bit-exact; the new 3-D wall-bounded PCG test converges;
 `set_pressure_pcg(True)` after `set_density_mode("variable")` demonstrably selects PCG;
 existing quasi-2D verifications unchanged; 45+ MPI ctests green.
@@ -1169,4 +1190,232 @@ OMP_NUM_THREADS=8 OMP_PROC_BIND=false PYTHONPATH=$PWD/build python \
 #   --geoms box --shapes const --cases lid --drivers pcg,cheb
 # the production configuration where PCG beats Chebyshev 10x:
 #   --geoms pack --n 64 --shapes const,slab --edges sharp --cases per
+```
+
+### WO-C (rung S1) — flexible CG driver — **DONE 2026-08-30**; VERDICT: nonsymmetric preconditioner CONFIRMED
+
+Delivered: `CutcellMG::solveFCG` (`src/mac_cutcell_mg.hpp`, a sibling of `solvePCG`),
+`IbmSolver::setPressureFcg` + the `set_pressure_fcg(on, max_iter, rtol)` binding, and an `fcg`
+driver in `tests/study/vardensity_solver_probe.py` (opt-in: `--drivers pcg,fcg`; the default
+`--drivers` stays `cheb,pcg` so WO-B's battery reproduces byte-for-byte). `CLAUDE.md`'s
+pressure-driver table and `doc/variable_density_projection.md` §2 updated.
+
+**The implementation.** `solveFCG` is `solvePCG` line for line — same matvec (star overlay
+included), same V-cycle preconditioner, same `removeMean` scope, same `maxabs(r) < rtol·r0`
+stopping estimate, same breakdown guards, same final mean removal — with exactly one difference:
+
+```
+Fletcher-Reeves (solvePCG):  beta = r_{k+1}^T z_{k+1} / (r_k^T z_k)
+Polak-Ribiere   (solveFCG):  beta = r_{k+1}^T (z_{k+1} - z_k) / (r_k^T z_k)
+```
+
+Cost: one extra level-0 vector (`zp1_`, allocated **lazily at the first FCG solve**, so an
+unselected FCG costs not even memory) and one extra global dot per iteration. Measured overhead on
+the periodic `packing_ring` bed: projection 14.1 ms (FCG) vs 13.8 ms (PCG) at identical iteration
+counts — **2 %**. The existing PCG/Chebyshev/BiCGStab code paths were not touched.
+
+**How the selector trap was avoided.** `setPressurePcg`'s `on` flag is still a no-op (WO-H defect 1,
+deliberately left — repairing it alone would move every varRho/porous script onto the stalling PCG),
+and `set_pressure_fcg` does **not** inherit the bug: it writes its own `useFcg_` **and** clears
+`useChebyshev_` when `on`, so it genuinely selects even after `set_density_mode`/`set_porous`.
+Exclusivity holds in both directions — `set_pressure_fcg(False)` returns to MG-PCG, and a later
+`set_pressure_chebyshev(True, …)` wins at the dispatch (which tests `useChebyshev_` first), so
+`setPressureChebyshev` needed no edit. `set_pressure_fcg(True)` throws under `set_ghost_projection`
+(that operator is nonsymmetric and is solved by BiCGStab) rather than being silently ignored — the
+failure mode that produced defect 1. Verified on the wall-bounded lid box at 32³ (three
+distinguishable signatures on one operator: Chebyshev ~14, PCG 200/200, FCG ~20):
+
+| after `set_density_mode("variable")`, then … | measured iterations | driver actually run |
+|---|---|---|
+| (nothing) | 18, 17, 16, 16 | Chebyshev (the varRho default) |
+| `set_pressure_pcg(True, 200, 1e-8)` | 18, 17, 16, 16 — **identical** | Chebyshev — **the no-op, reproduced** |
+| `set_pressure_fcg(True, 200, 1e-8)` | 200, 200, 200, 200 | **FCG** (this configuration is a residual, see below) |
+| `set_pressure_fcg(True, …)` then `(False, …)` | 200, 200, 200, 200 | MG-PCG |
+| `set_pressure_fcg(True, …)` then `set_pressure_chebyshev(True, …)` | 17, 15, 14, 15 | Chebyshev |
+
+**Gate 1 — inertness. PASS.** `tests/regression/sdflow_regression.py` on the nvidia-cuda build:
+**+0.00 %** on every metric (K, k\*, fitted order p, Richardson extrapolate) and **identical**
+pressure-iteration totals, per-step medians and step counts on all 13 grid points of `zh_sphere` /
+`random_spheres` / `hollow_rings`. Run twice — before and after the diagnostic trace line was added
+to `solveFCG` — with the same result. Inertness is *verified*, not argued: unlike WO-D/WO-E this WO
+does change compilation inputs of the solver module (`flow_ibm.hpp`, `flow_bindings.cpp`,
+`mac_cutcell_mg.hpp`).
+
+**Gate 2 — constant-density sanity (FCG ≈ PCG ±1). PASS, and it is exact where it should be.** With
+a preconditioner that is symmetric w.r.t. the fine operator, `r_{k+1}^T z_k = 0` identically, so the
+two βs coincide; on the configurations where PCG is healthy the two drivers agree:
+
+| constant-ρ control, periodic + IBM (PCG healthy) | PCG med/max | FCG med/max |
+|---|---|---|
+| immersed cylinder 32³ | 7 / 7 | **7 / 7** |
+| 3-Raschig-ring bed 32³ | 10 / 12 | **10 / 11** |
+| `packing_ring.vti` 64³ | 14 / 16 | **14 / 16** |
+
+Over the whole 328-configuration battery, of the 34 configurations healthy under *both* drivers the
+FCG−PCG median-iteration delta is **|Δ| ≤ 1 on 32**, and the two exceptions are FCG **better** (−7 on
+`rings/blob/hydro`, −75 on `rings/tilt/per` where PCG sat on a plateau). There is **no** configuration
+where FCG needs more iterations than PCG.
+
+**Gate 3 — THE DIAGNOSTIC RUN. FCG CONVERGES where PCG stalls ⇒ nonsymmetric preconditioner.**
+On the constant-density 3-D wall-bounded configurations that define the WO-B stall:
+
+| 32³, constant ρ (no varRho at all), levels 4 | PCG | FCG | Chebyshev (WO-B) |
+|---|---|---|---|
+| lid box (walls −x/+x/−z, lid +z) | **200/200**, div/u 9.6e-06 | **20 / 20**, div/u 7.8e-14 | 14 |
+| lid, immersed cylinder | **200/200**, div/u 1.9e-05 | **21 / 22**, div/u 1.8e-11 | 14 |
+| lid, 3-ring bed | **200/200**, div/u 1.2e-05 | **18 / 18**, div/u 5.3e-11 | 14 |
+| hydrostatic box (walls ±z) | **200/200**, div/u 1.6e-12 | **16 / 44**, div/u 4.4e-23 | 11 |
+| hydrostatic, immersed cylinder | **200/200**, div/u 1.1e-06 | **35 / 38**, div/u 1.3e-11 | 13 |
+| hydrostatic, 3-ring bed | **200/200**, div/u 7.5e-09 | **12 / 24**, div/u 2.5e-10 | 14 |
+| quasi-2D lid cavity 64×64×**4** (the shipped verify regime, PCG healthy) | 25 / **155** | **21 / 22** | 25 |
+
+Whole-battery tally (nvidia-cuda, 328 configurations = WO-B's cross-product with `--drivers pcg,fcg`):
+
+| | wall-bounded (hydro + lid) | periodic (`per`) |
+|---|---|---|
+| MG-PCG unhealthy | **113 / 114** | 17 / 50 |
+| FCG unhealthy | **36 / 114** | **1 / 50** |
+
+**93 of the 130 PCG failures are cured; 0 regressions** (no configuration is healthy under PCG and
+unhealthy under FCG). FCG also all but removes the periodic `tilt` plateau WO-B recorded (17 → 1).
+The PCG columns reproduce WO-B's tally exactly (113/114 and 17/50), which is the check that this is
+the same battery on the same operator.
+
+**Cross-backend: the full 328-configuration battery was run on host-openmp as well**, and the two
+agree more tightly than WO-B's own gate: **0 healthy-verdict mismatches out of 328**, and over the
+**161** configurations healthy on both backends the largest median-iteration difference is **0.0** —
+not one configuration differs by a single iteration. Raw records for all three runs (nvidia-cuda
+328, host-openmp 328, the `packing_ring` sweep 21) ship as
+`tests/study/vardensity_solver_probe_fcg.json`; WO-B's `vardensity_solver_probe.json` is left
+untouched.
+
+**Direct instrumentation of the hypothesis (the number WO-H should keep).** `solveFCG` prints, under
+`PECLET_FLOW_MG_DEBUG=2`, `pr = |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}|` — precisely the term
+Fletcher–Reeves keeps and Polak–Ribière subtracts, and **exactly zero in exact arithmetic iff the
+preconditioner is symmetric w.r.t. the fine operator**. (Iteration 1 is uninformative: `z_0 = p_0`
+and `r_1^T p_0 = 0` follows from the α step whatever the symmetry — measured 1e-15…1e-13 there in
+every case, which is also a check that the diagnostic is wired correctly.) From iteration 2 on,
+constant ρ, `levels=4`:
+
+| configuration | median `pr` | max `pr` | PCG |
+|---|---|---|---|
+| immersed cylinder, **periodic** | **0.062** | 0.221 | healthy, 7 its |
+| immersed cylinder, **lid (walls)** — same geometry | **0.451** | 1.401 | 200/200 |
+| open box, lid | 0.478 | 1.356 | 200/200 |
+| open box, hydrostatic | 0.434 | 1.078 | 200/200 |
+| immersed cylinder, hydrostatic | 0.469 | 1.121 | 200/200 |
+
+So the spurious term is **an order of magnitude larger on wall-bounded grids, and reaches the size of
+the legitimate term** (β goes negative — measured `beta = −1.94e−02` at iteration 3 on the lid box),
+while on the periodic hierarchy it stays at the few-percent level CG tolerates. Changing *only* the
+BCs on the same geometry moves it 0.062 → 0.451.
+
+**The asymmetry is introduced by the FIRST coarse level, not by depth or the bottom solve.** Lid box,
+constant ρ, depth sweep:
+
+| levels | PCG | FCG | median `pr` (it ≥ 2) | max `pr` |
+|---|---|---|---|---|
+| 1 (no coarse grid) | 1 it, div 1.1e-13 | 1 it, div 1.1e-13 | — (no iterations) | — |
+| 2 | **200/200**, div 1.1e-05 | 25 / 25, div 2.6e-13 | 0.580 | 1.027 |
+| 3 | **200/200**, div 1.9e-05 | 24 / 24, div 6.2e-14 | 0.550 | 1.081 |
+| 4 | **200/200**, div 9.6e-06 | 20 / 20, div 7.8e-14 | 0.489 | 1.356 |
+| 5 | **200/200**, div 5.9e-06 | 18 / 18, div 3.7e-13 | 0.503 | 1.177 |
+
+A single coarsening step under domain BCs is enough, and adding levels does not make it worse. That
+points WO-H at the **level-1** pair — `CutcellMG::applyBoundaryOpenness`'s per-level re-imposition of
+the non-periodic face openness, and the prolongation's non-periodic boundary ghosts (Neumann
+zero-gradient / Dirichlet 0) — and away from the coarse *solve* (WO-B already showed
+smoother/auto/agglomerated make no difference, and GraphAMG makes it worse). The pair need not be
+adjoints of each other, and that is exactly what an asymmetric M looks like.
+
+**Gate 4 — the ratio-10⁴ `packing_ring` periodic case (WO-B's decision-relevant pair).** 64³, sharp
+edge, `per`, aggregated over the ρ-shapes exactly as WO-B aggregated:
+
+| driver | ρ ≡ 1 | 10² | 10³ | 10⁴ | healthy |
+|---|---|---|---|---|---|
+| MG-PCG | 14.0 | 14.5 | 15.5 | **16.0** | 7/7 |
+| **FCG** | **14.0** | **15.0** | **17.0** | **16.0** | **7/7** |
+| Chebyshev | 69.0 | 74.5 | 90.5 | **155.0** | 6/7 (caps at 10⁴) |
+
+The Chebyshev column reproduces WO-B's `69 / 74 / 90 / 155` to the digit, so this is the same
+measurement. FCG is at parity with PCG (all 7 configurations healthy, div/u 3.2e-10 for both) and
+~10× Chebyshev at ratio 10⁴, at a 2 % projection-time cost. **On the production pore-scale
+configuration FCG is a strictly-safer drop-in for MG-PCG.**
+
+**RESIDUAL #1 (report, do not chase here) — the gravity-driven hydrostatic column with a GLOBAL
+stratification is a different failure, and FCG does not touch it.** The 36 wall-bounded FCG failures
+are exactly `hydro` × {`slab`, `tilt`} — all 18 of each, every geometry, every edge, every ratio —
+plus the one surviving periodic `tilt`. `hydro` × `blob` (a heavy sphere not touching the walls) is
+cured. Isolated at 32³, walls ±z, periodic x/y, sharp slab, ratio 10², gravity closure
+`force_z = −g·ρ`, showing max|u| per step:
+
+```
+Chebyshev  15/2.4e-06  16/7.8e-11  16/3.9e-11  16/6.4e-14 ... -> the machine-exact rest state
+MG-PCG    200/4.3e-01 200/8.6e-01 200/1.3e+00 200/1.7e+00 ... -> destroyed, |u| grows linearly
+FCG       200/4.3e-01 200/8.5e-01 200/1.3e+00 200/1.7e+00 ... -> destroyed, identically
+```
+
+The trace shows why it is a *different* mode: the residual **rises** to `r/r0 = 6.9765` at iteration 1
+and then **freezes to seven digits for the remaining 199 iterations**, with `pr` locked at exactly
+`0.5000` — a stationary iteration, not a slowly-converging one. Tightening `rtol` to 1e-12 changes
+nothing (Chebyshev then takes 21 its and reaches max|u| 1.9e-16). Both Krylov drivers are stuck on the
+same invariant subspace while the V-cycle *as a solver* (Chebyshev) has no difficulty, so the operator
+is compatible and solvable — WO-H should treat this as a second, separate defect and not assume the
+symmetry repair covers it.
+
+**RESIDUAL #2 — a small coefficient adjacent to a prescribed-velocity face.** Wall-bounded lid box,
+32³, sharp z-slab, no gravity, varying which side carries the heavy fluid (so which side carries the
+*small* coefficient ρ₀/ρ_f):
+
+| face +z | ratio | heavy BELOW (coeff ≈ 1 at the lid) | heavy ABOVE (coeff = 1/ratio at the lid) |
+|---|---|---|---|
+| **lid** (BC type 2, Dirichlet velocity) | 10 | FCG 28, div 3.0e-11 | FCG 20, div 5.7e-13 |
+| **lid** | 10² | FCG 30, div 2.0e-11 | FCG **200/200**, div 3.6e-03 |
+| **lid** | 10³ | FCG 30, div 9.8e-12 | FCG **200/200**, div 3.1e-04 |
+| **wall** (type 1) + body force | 10 / 10² / 10³ | FCG 30–33, div ≤ 1.1e-15 | FCG 30–33, div ≤ 1.1e-15 |
+
+MG-PCG is 200/200 in every row; Chebyshev is 13–17 and healthy in every row. So with **all walls** FCG
+is healthy at every ratio and orientation, and the failure appears only when a large coefficient
+contrast sits against an *inflow-type* face — where the operator openness α is 0 (Neumann) while the
+flux openness β stays open. A second candidate sub-site for WO-H, independent of Residual #1.
+
+**WHAT THIS MEANS FOR WO-H (the verdict the WO asked for).**
+1. **Pursue V-cycle symmetry.** FCG converging on 93 of PCG's 130 failures, with the β-numerator
+   contamination measured at 0.43–0.48 on wall-bounded grids against 0.062 periodic, on the same
+   geometry, is the answer to WO-H's "prime suspect" question: **the domain-BC V-cycle is not a
+   symmetric preconditioner.** The operator and the boundary treatment of the *fine* level are not
+   implicated on this evidence (Chebyshev, which needs only real spectrum bounds, converges on the
+   identical operator everywhere).
+2. **Look at level 1 specifically** — `applyBoundaryOpenness` per-level re-imposition and the
+   non-periodic prolongation ghosts, as an adjoint pair. `levels=2` already exhibits the full effect.
+3. **Fix order is unchanged and now cheaper.** WO-H can repair the `setPressurePcg` no-op the moment a
+   working Krylov driver exists on domain-BC grids — `set_pressure_fcg` is that driver today, so the
+   "repairing the selector strands users on a stalling PCG" objection can be answered by routing the
+   varRho/porous defaults to FCG instead of PCG even before the symmetry work lands.
+4. **Two residual failure modes are NOT covered by FCG** (above) and need their own diagnosis. In
+   particular the hydrostatic-with-global-stratification case is a *stationary* iteration, not a slow
+   one, and it is the configuration the VoF V2 rung depends on.
+5. **Chebyshev remains the correct varRho default** — it is the only driver healthy on all four of
+   {periodic, wall-bounded, hydrostatic-stratified, prescribed-velocity-face} — with the S2
+   bound-amortization (3× on the pressure stage) still the right investment while that is true.
+
+**Not delivered (declared).** No ctest: WO-C did not ask for one, and WO-H is already scoped to add
+the 3-D wall-bounded pressure-convergence ctest that would cover both drivers — adding a
+half-overlapping one here would have to be rewritten there. FCG is structurally MPI-ready (every
+reduction goes through the same MPI-folded `dot`/`maxabs`/`removeMean` as `solvePCG`, and the
+V-cycle is the same MPI-folded one) but is **not** MPI-gated; it is off by default, so nothing
+multi-rank reaches it.
+
+**Reproduce.**
+```bash
+# the diagnostic run (the whole battery, both drivers):
+OMP_NUM_THREADS=8 OMP_PROC_BIND=false PYTHONPATH=$PWD/build python \
+  tests/study/vardensity_solver_probe.py --drivers pcg,fcg --tag nvidia-cuda
+# the headline, on its own (PCG 200/200 vs FCG 20, constant density):
+#   --geoms box --shapes const --cases lid --drivers pcg,fcg
+# the ratio-1e4 packing_ring pair:
+#   --geoms "" --pack --shapes const,slab,blob --edges sharp --cases per --drivers cheb,pcg,fcg
+# raw records for all three runs above: tests/study/vardensity_solver_probe_fcg.json
+# the symmetry read-out (pr = |r^T z_k| / |r^T z_{k+1}|, zero iff M is symmetric):
+#   PECLET_FLOW_MG_DEBUG=2 PECLET_FLOW_MG_SOLVES=4 ... --drivers fcg
 ```

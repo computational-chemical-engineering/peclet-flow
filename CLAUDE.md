@@ -220,16 +220,34 @@ origin (`CutcellMG::parityOg`) or the colours swap on g=2 levels.
 
 The cut-cell pressure Poisson is solved by a geometric **multigrid** (`mac_cutcell_mg.hpp`, `CutcellMG`)
 whose smoother is **Red-Black Gauss-Seidel** and whose coarse operator is the **rediscretized** cut-cell
-operator. Three outer drivers wrap that V-cycle — **select one per solver**:
+operator. Four outer drivers wrap that V-cycle — **select one per solver**:
 
 | driver | select with | use |
 |---|---|---|
 | **Standalone V-cycle** | default (neither below set) | multi-rank default. `set_pressure_multigrid(True, levels=1)` ⇒ pure RB-GS (no coarse grid) |
-| **MG-PCG** | `set_pressure_pcg(True, max_iter, rtol)` | **single-GPU default** (auto-enabled on 1 rank); ~1.2× faster than the V-cycle to a fixed tolerance |
-| **Chebyshev** | `set_pressure_chebyshev(True, max_iter, rtol)` | communication-light (no per-iteration global dot-products) — for large multi-GPU where PCG's reductions are latency-bound. ≈ PCG iteration count; bounds estimated once on step 1 |
+| **MG-PCG** | `set_pressure_pcg(True, max_iter, rtol)` | **single-GPU default** (auto-enabled on 1 rank); ~1.2× faster than the V-cycle to a fixed tolerance. **Stalls on 3-D wall-bounded (domain-BC) grids** — see the box below |
+| **Flexible MG-CG** | `set_pressure_fcg(True, max_iter, rtol)` | the same solve with the Polak–Ribière β, tolerant of a preconditioner that is not symmetric w.r.t. the fine operator. +1 vector, +1 global dot/iteration, ≤2 % projection-time overhead. **The working Krylov driver on domain-BC grids** |
+| **Chebyshev** | `set_pressure_chebyshev(True, max_iter, rtol)` | communication-light (no per-iteration global dot-products) — for large multi-GPU where PCG's reductions are latency-bound. ≈ PCG iteration count on periodic/IBM; bounds estimated once on step 1 (per step under varRho/porous, which costs 30 extra V-cycles) |
 
-- **PCG and Chebyshev are mutually exclusive** (last set wins); either overrides the single-rank auto-PCG
-  default. With neither set, the solve is `n_pois` standalone V-cycles.
+- **Chebyshev and FCG are mutually exclusive in both directions** — `set_pressure_fcg(True, …)` clears
+  the Chebyshev selection (so it works after `set_density_mode`/`set_porous`), `set_pressure_fcg(False)`
+  returns to MG-PCG, and a later `set_pressure_chebyshev(True, …)` wins. With none set, the solve is
+  `n_pois` standalone V-cycles (or auto-PCG on 1 rank).
+- **KNOWN DEFECT — `set_pressure_pcg`'s `on` flag is a no-op** (`setPressurePcg(bool /*on*/, …)`
+  stores only the cap/tolerance and never writes `useChebyshev_`), so it cannot switch the driver
+  back from Chebyshev; after `set_density_mode("variable")` or `set_porous` it leaves the solve on
+  Chebyshev. The spelling that does select MG-PCG is `set_pressure_chebyshev(False, …)`. Left in place
+  deliberately: repairing it alone would move those users onto the stalling PCG. Scoped as WO-H in
+  [`doc/vof_workorders.md`](doc/vof_workorders.md).
+- **MG-PCG stalls on any 3-D wall-bounded grid, at constant density** — 200/200 iterations with
+  max|div(open·u)| ≈ 1e-5 once the third axis reaches 8 cells, while Chebyshev takes 13–14 and
+  **FCG 16–35** on the identical operator; periodic + IBM is healthy at every density ratio (PCG 7–16).
+  The cause is a V-cycle preconditioner that is not symmetric w.r.t. the fine operator, introduced by
+  the FIRST coarse level under domain BCs (`levels=1` solves in 1 iteration; `levels≥2` stalls). **On a
+  domain-BC problem use FCG or Chebyshev, not PCG.** Measurements: WO-B/WO-C in
+  [`doc/vof_workorders.md`](doc/vof_workorders.md), reproduce with
+  `tests/study/vardensity_solver_probe.py --drivers pcg,fcg`. No shipped validated result is affected
+  (every domain-BC verification script is quasi-2D, nz = 4, inside the healthy regime).
 - Coarse-operator mode: `set_solid(..., pressure_coarse="rediscretized")` (default; also `"galerkin"` /
   `"const"`). `set_pressure_multigrid(on, levels)` sets the multigrid depth (`levels=1` == pure RB-GS).
 - `set_pressure_warmstart(True)` seeds each solve from the previous step's φ (opt-in, off by default).
