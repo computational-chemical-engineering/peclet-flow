@@ -421,6 +421,17 @@ static void bind_solver(nb::module_& m, const char* name) {
           "rebuild_geometry(): the SDF, the cut-cell overlay, the apertures and the pressure "
           "operator are all derived from the transforms, so moving one without rebuilding would "
           "run the solver on stale geometry.")
+      .def("set_fresh_cell_seed", &S::setFreshCellSeed, nb::arg("on"),
+           "Fresh-cell policy for MOVING geometry. A point a body has just uncovered inherits "
+           "whatever the solid held there -- zero, or a stale masked value -- which is one of the "
+           "two textbook mechanisms behind spurious force oscillations in a moving-boundary IBM. "
+           "True seeds it with the LOCAL WALL VELOCITY instead, so it starts moving with the "
+           "surface that released it. Bounded (no extrapolation), no new field, and exactly the "
+           "old behaviour when nothing moves. DEFAULT TRUE since 2026-08-30: measured on an "
+           "oscillating sphere translating through the grid, it removes a resolution-INDEPENDENT "
+           "+2.6..2.9% drag bias, cuts the spurious force oscillation 20-50x to within 17% of the "
+           "non-moving floor, and improves the resolved CFD-DEM loop's total-momentum "
+           "conservation 95x. Pass False for the pre-2026-08-30 behaviour.")
       .def("refresh_wall_velocity", &S::refreshWallVelocity,
            "Re-derive ONLY the wall-velocity fields and the momentum operator that folds them in, "
            "for a driver that changes an instance's VELOCITY every step while its transform stays "

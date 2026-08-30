@@ -72,8 +72,8 @@ rebuild) and is immune. Consequence, implemented in `setDensityMode`:
   positive coefficient fields (or add a coefficient-aware Galerkin option) so PCG becomes usable;
   until then Chebyshev iteration counts stay flat (≤32 observed at ratio 10³) so nothing is lost.
 
-## 3. Validation (host-openmp; `tests/kokkos/test_vardensity_projection.cpp` +
-`tests/study/rayleigh_taylor.py`)
+## 3. Validation (`tests/kokkos/test_vardensity_projection.cpp` + `tests/study/rayleigh_taylor.py`;
+host-openmp **and nvidia-cuda** since 2026-08-30 — see §3.1 for the multi-rank gates)
 
 | test | result |
 |---|---|
