@@ -228,6 +228,71 @@ or exchange-per-sweep bug).
 
 (append per WO on completion/escalation)
 
+### WO-A (rung V-1) — MPI + CUDA validation of varRho/varMu — **DONE 2026-08-30**, two escalations
+
+Delivered: CUDA runs of `tests/kokkos/test_vardensity_projection.cpp` and `test_variable_mu.cpp`;
+two new MPI ctests `tests/kokkos_mpi/test_vardensity_mpi.cpp` + `test_varmu_mpi.cpp` (registered in
+the gated `PECLET_FLOW_MPI` foreach, np = 1/2/4, host-openmp **and** nvidia-cuda); a CUDA run of
+`tests/study/rayleigh_taylor.py`; and the doc update — `doc/variable_density_projection.md` §3
+(CUDA numbers), new §3.1 (the multi-rank table), §4 (the two escalations replace "MPI/CUDA
+validation deferred").
+
+**Gates.**
+
+| gate | result |
+|---|---|
+| CUDA unit tests pass; hydrostatic steady max\|u\| ≤ 1e-14 at ratio 1000 on CUDA | **PASS** — `2.75e-17` (ratio 1000), `3.99e-17` (ratio 3), ∂P/∂z error `3.41e-16` / `7.40e-16`; uniform-ρ reduction rel du `5.01e-14`; `test_variable_mu` OK |
+| MPI np 2/4 vs np 1, host AND CUDA | **PASS at the reduction-order floor.** np = 1 bitwise (`0.000e+00` on every field, both backends). np > 1: hydrostatic Δu ≤ `6.0e-17` / ΔP ≤ `2.8e-14` (P is O(800)); the ρ-jump-on-a-rank-boundary case Δu ≤ `3.3e-19` / ΔP ≤ `1.4e-17`; varμ rel du ≤ `2.0e-15`. **Literal bitwise equality at np > 1 is impossible by construction** — Chebyshev's bound estimation (`CutcellMG::dot`) and `removeMean` go through an `MPI_SUM` allreduce whose summation order is a function of the rank count. This is the established `tests/kokkos_mpi` convention (np = 1 bit-exact, np > 1 at the floor), stated in the tests' headers with the mechanism. |
+| Chebyshev iteration counts identical across np | **PASS, and the WO's escalation branch is NOT triggered.** On the non-degenerate solve (`jump-x`, ratio 1000, jump on the rank boundary) the per-step V-cycle count is *identical* for all 20 steps at np = 1, 2, 4 on both backends. The ±1–2 scatter visible on the hydrostatic case from step ~7 is round-off, not decomposition: once the state is at machine zero the driver's `r0` is noise and `maxabs(r) < rtol·r0` is a knife edge — at **fixed np = 1** the sequence already changes with the OpenMP thread count alone (steps 7.. read `15,13,13,…` at 1 thread, `16,13,14,…` at 2, `16,14,14,13,…` at 8). The ctest therefore gates the count to *exact* equality over the non-degenerate steps (window predicate: the reference's own max\|u\| entering the step). |
+| Rayleigh–Taylor on CUDA vs the host-openmp §3 record | **PASS, identical to every printed digit**: `1.50 → 1.87 → 3.13 → 5.54 → 9.30 → 14.16 → 19.52` (13.0×), monotone, on CUDA *and* on a same-day host-openmp rerun; the §3 record was "1.5 → 19.5 (13×)". |
+| Single-phase regression bit-exact | **PASS** — `tests/regression/sdflow_regression.py` on the nvidia-cuda build: **+0.00 %** on every metric (K, k\*, fitted order p, Richardson extrapolate) and **identical** pressure-iteration totals, per-step medians and step counts on all 13 grid points of `zh_sphere` / `random_spheres` / `hollow_rings`. No production code was touched by this WO — the deliverable is test files plus one CMake line. |
+
+**ESCALATION #1 — flow's per-face domain BCs are not rank-aware (production fix required).**
+`applyVelocityBcCompTo` and the pressure-openness BC impose the BC on **every** rank's own block
+faces; there is no `touchesGlobalFace` ownership test, although the transported-scalar BC path
+(`applyScalarBc`, `flow_ibm.hpp:4439`) has exactly that. If the decomposition cuts a non-periodic
+axis, the halo exchange fills the ghosts correctly and the BC then *overwrites* them, splitting the
+domain into independent sub-domains. **The velocity canary does not catch it** — measured on the
+hydrostatic column at 16×16×32 with z cut, np = 2 and 4: max\|u\| = `4.5e-17` (each sub-column is
+separately hydrostatic!) while max\|P_dist − P_ref\| = **`4.004e+02`** and the discrete ∂P/∂z is off
+by **8×g·ρ**. Only the pressure reveals it. Consequences: every multi-rank domain-BC run to date is
+only correct if the partition happens not to cut a walled/inflow/outflow axis, and neither the
+existing `tests/kokkos_mpi` suite nor `test_multiphysics_mpi` covered the combination (they are all
+periodic + IBM). Both new ctests choose a grid whose ORB cuts only x and **assert** the walled axis
+stays uncut, so the day the decomposition changes they fail loudly instead of silently passing.
+Not fixed here per the WO's hard rule 1 (production change = escalation, not a decision).
+
+**ESCALATION #2 — `fillPropGhosts` / `fillPorousEpsGhosts` skip the property BC under MPI.**
+Both apply their domain-face override (zero-gradient for μ/ρ; mirror-about-1 for ε) only
+`if (!distributed_)` (`flow_ibm.hpp`), so a distributed run leaves the μ / ρ / ε ghost on a
+non-periodic face at its **periodic wrap** value. This is the same family as #1 — the guard looks
+like a placeholder for the missing ownership test — but its effect is worse, because it is wrong at
+**every** np including np = 1. Measured: the WO's literal two-layer Couette (monotone μ stack, so
+μ(0) ≠ μ(N−1)) gives rel du = **`2.7e-2`** between the distributed solver and the single-rank
+reference **at np = 1**; with variable viscosity switched off the same configuration is bitwise
+identical, which localizes it to the μ ghost. `test_varmu_mpi` therefore ships a **symmetric**
+μ2|μ1|μ2 stack (two 10× jumps, so the harmonic-mean gate is unweakened) for which the wrap value
+coincides with the zero-gradient value; the file says so and names the restoration. varRho's
+hydrostatic column is immune only incidentally — its wall-face ρ ghost multiplies a closed
+(openness = 0) face.
+
+**Why the periodic "mean-removed buoyancy" hydrostatic variant was dropped** (recorded so nobody
+re-derives it): making the walled column periodic by driving it with `force = g(ρ̄ − ρ)` looks exact
+on paper (Σ of the face forces vanishes, so a periodic φ exists), but it is not a rest state — the
+domain-mean acceleration `mean(f_f/ρ_f)` is nonzero and lives in the projection's null space, so the
+constant mode is unremovable. Measured max\|u\| = 1/N_axis exactly (6.24e-2 at N = 16, 3.12e-2 at
+N = 32) at np = 1. The shipped `jump-x` configuration keeps the density jump on the rank boundary
+without claiming a rest state.
+
+**Note on cost.** `test_varmu_mpi` is the expensive one: 4096 cells but 240 momentum RB-GS sweeps
+per step × 80 steps × 2 solvers, so it is **launch/barrier-bound, not work-bound**. Measured ~12 s
+per np at 1 OpenMP thread, ~8× slower at 8 threads, and on CUDA 144 s at np=1 / 1322 s at np=2 —
+the latter on a GPU shared with four other agents' processes, where N ranks time-slice one context
+and every tiny kernel serialises. Do not read its wall time as solver cost. If it ever needs
+trimming, `STEPS_COUETTE` 80 → 60 costs 25 % of the runtime and moves the analytic error 0.0129 % →
+0.0960 % (still 5× inside the 0.5 % gate); the velocity multigrid is NOT an option — `setPropertyMode`
+disables it (variable-coefficient vmg is deferred).
+
 ### WO-D (rung V0) — PLIC toolbox — **DONE 2026-08-30**, with two recorded deviations
 
 Delivered: `src/vof/plic.hpp` (`peclet::flow::vof`, container-free `KOKKOS_INLINE_FUNCTION`s only —

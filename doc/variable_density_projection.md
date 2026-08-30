@@ -82,12 +82,45 @@ host-openmp **and nvidia-cuda** since 2026-08-30 — see §3.1 for the multi-ran
 | **Rayleigh–Taylor** (ratio 3, Atwood 0.5; transported phase fraction → ρ closure → gravity closure — the full two-phase chain) | amplitude 1.5 → 19.5 cells (**13×**), monotone; early growth ≈ 0.74·√(Agk) (viscous + finite-interface damping) |
 | **Single-phase regression** | bit-exact (+0.00%, identical iteration counts) — `varRho_=false` executes the original kernels |
 
+**CUDA (2026-08-30).** The same two files on the `nvidia-cuda` backend: hydrostatic steady
+max\|u\| **3.99e-17** (ratio 3) and **2.75e-17** (ratio 1000), ∂P/∂z error 7.40e-16 / 3.41e-16;
+uniform-ρ reduction rel du 5.01e-14; and the Rayleigh–Taylor amplitude history is identical to the
+host-openmp run to every printed digit — `1.50 → 1.87 → 3.13 → 5.54 → 9.30 → 14.16 → 19.52` (13.0×),
+monotone, on both backends.
+
 Why the hydrostatic test is exact (and what it guards): from rest, `w* = −g·dt` uniformly (the
 face force −g·ρ_f divided by the face inertia ρ_f/dt — same ρ_f), so the interior divergence
 vanishes and the wall-column divergence is exactly projectable; the correction returns u = 0 and
 `P` accumulates `∂P = −ρ_f·g` with the projection's ρ_f. Any mean mismatch (e.g. harmonic
 projection ρ vs arithmetic momentum ρ, or a cell-centred instead of face-interpolated force)
 breaks the telescoping and leaves a permanent spurious velocity — this test fails loudly.
+
+## 3.1 Multi-rank (VoF rung V-1 / WO-A, 2026-08-30)
+
+`tests/kokkos_mpi/test_vardensity_mpi.cpp` (+ `test_varmu_mpi.cpp` for the Phase-4 companion), np =
+1, 2, 4 on host-openmp **and** nvidia-cuda. Each run compares the distributed solver against a
+full-grid single-rank reference built on rank 0 with the identical configuration.
+
+| configuration | measured |
+|---|---|
+| **`walls-z`** — the hydrostatic acid test, ratio 1000, walls ±z, 32×16×16 | max\|u\| **2.9–3.1e-17** and ∂P/∂z error **5.7e-16** at every np; max\|u_dist − u_ref\| ≤ **6.0e-17**, max\|P_dist − P_ref\| ≤ **2.8e-14** (P itself is O(800)) |
+| **`jump-x`** — a SHARP ratio-1000 ρ jump on the *cut* axis (so the jump sits exactly on a rank boundary and the face coefficient ρ₀/ρ_f there is assembled from an exchanged ghost), periodic, body-force driven | max\|u_dist − u_ref\| **2.5e-19 … 3.3e-19**, ΔP ≤ **1.4e-17**; **Chebyshev V-cycle count identical at np = 1, 2, 4 for all 20 steps** |
+| **`couette-y`** — 10× μ jumps, harmonic face mean, walls + moving lid | analytic error **0.0129 %** at every np; rel du **0** (np=1) / **3.5e-16** (np=2) / **5.9e-16** (np=4) |
+| **`per-x`** — 10× μ jump on the cut axis, periodic | rel du **1.2e-15** (np=2) / **2.0e-15** (np=4) |
+
+**The Chebyshev bounds path is decomposition-independent** (the WO-A gate). On `jump-x` — a
+non-degenerate solve — the per-step V-cycle count is *identical* across np = 1, 2, 4 and across
+OpenMP thread counts 1, 2, 4, 8. The ±1–2 scatter one sees on `walls-z` from step ~7 onward is not
+an MPI effect: once the hydrostatic state has reached machine zero, the driver's own `r0` is
+round-off noise and `maxabs(r) < rtol·r0` is a knife edge — at *fixed* np = 1 the sequence already
+changes with the thread count alone (steps 7.. read `15,13,13,…` at 1 thread, `16,13,14,…` at 2,
+`16,14,14,13,…` at 8). The MPI ctest therefore gates the count over the non-degenerate steps only.
+
+**Bit-exactness, precisely.** np = 1 is bitwise identical (0.000e+00 on every field). np > 1 cannot
+be bitwise by construction: Chebyshev's bound estimation (`CutcellMG::dot`) and `removeMean` both go
+through an `MPI_SUM` allreduce whose summation order is a function of the rank count. The measured
+np>1 residues above (1e-19…1e-16 on u, ≤3e-14 on P) *are* that floor — and on CUDA at np = 2 the
+walls-z case happened to come out bitwise identical anyway.
 
 ## 4. Limitations / deferred
 
@@ -101,8 +134,23 @@ breaks the telescoping and leaves a permanent spurious velocity — this test fa
   (`set_variable_rotational`; constant-μ default term is valid for variable ρ — the μ-part of the
   stress is what the rotational correction concerns, cf. Guermond & Salgado [2] using exactly this
   constant-coefficient philosophy for variable density).
-- MPI/CUDA validation deferred with the plan phases (the ρ bridge and ghost fills use the halo
-  paths, and `minMuInner` already allreduces, so the structure is MPI-ready).
+- ~~MPI/CUDA validation deferred~~ — **done, §3 + §3.1** (VoF rung V-1 / WO-A). Two limitations were
+  found while gating it, both in the *domain-BC* machinery rather than in the variable-ρ/μ path
+  itself, and both are OPEN:
+  - **Per-face domain BCs are not rank-aware.** `applyVelocityBcCompTo` (and the pressure-openness
+    BC) impose the BC on *every* rank's own block faces — there is no `touchesGlobalFace` ownership
+    test, unlike the transported-scalar BCs (`applyScalarBc`). If the decomposition cuts a walled
+    axis, the domain silently splits into independent sub-domains. Measured on the hydrostatic
+    column at 16×16×32 with z cut, np = 2: the velocity canary still reads 4.5e-17 (each sub-column
+    is separately hydrostatic!) while max\|P_dist − P_ref\| = **4.0e+02** and ∂P/∂z is off by 8×g·ρ.
+    Until this is fixed, a multi-rank run with domain BCs is only correct if the partition does not
+    cut a non-periodic axis; the two MPI ctests assert that.
+  - **`fillPropGhosts` / `fillPorousEpsGhosts` skip the property BC under MPI.** Both apply the
+    zero-gradient (resp. mirror-about-1) override on domain-BC faces only `if (!distributed_)`, so a
+    distributed run leaves the μ / ρ / ε ghost on a walled face at its *periodic wrap* value.
+    Measured: a two-layer Couette with a monotone μ stack (μ(0) ≠ μ(N−1)) differs from the
+    single-rank reference by **2.7e-2 relative already at np = 1**. `test_varmu_mpi` sidesteps it
+    with a symmetric μ stack (wrap value == zero-gradient value) and says so.
 - PCG-on-coefficients MG follow-up (§2).
 
 ## References

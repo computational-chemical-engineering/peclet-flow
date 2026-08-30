@@ -64,11 +64,11 @@ C++ kernel + multi-rank test suites (own `find_package` projects; build against 
 ```bash
 # Single-rank Kokkos kernel unit tests:
 cmake -S tests/kokkos -B build_kokkos -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda
-cmake --build build_kokkos -j && ctest --test-dir build_kokkos --output-on-failure   # 14 tests
+cmake --build build_kokkos -j && ctest --test-dir build_kokkos --output-on-failure   # 19 tests
 # Multi-rank (MPI) tests, np=1,2,4:
 cmake -S tests/kokkos_mpi -B build_kmpi -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
   -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
-cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure       # 18 tests (6 x np)
+cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure       # 42 tests (14 x np)
 ```
 
 Single-GPU **accuracy + efficiency regression suite** (grid-convergence + recorded solver-iteration
@@ -337,8 +337,14 @@ divergence at a fixed 8 cycles drops `1.7e-4`→`8.6e-13`. The BC verify scripts
 (validated single-rank).
 
 Validated against analytics (Taylor–Green ~2e-15, Poiseuille, momentum conservation) **and against Zick &
-Homsy sphere-array drag**; the multi-rank step is bit-exact to the single-rank — **18 `tests/kokkos_mpi`
-ctests, real multi-rank np=1,2,4, on CUDA + OpenMP**.
+Homsy sphere-array drag**; the multi-rank step is bit-exact to the single-rank — **42 `tests/kokkos_mpi`
+ctests, real multi-rank np=1,2,4, on CUDA + OpenMP**. The variable-density and variable-viscosity
+layers are multi-rank + CUDA gated since 2026-08-30 (`vardensity_mpi`, `varmu_mpi`) — with **two open
+gaps in the DOMAIN-BC machinery** found while gating them: per-face domain BCs have no
+`touchesGlobalFace` ownership test (a partition that cuts a walled axis silently splits the domain —
+visible only in the pressure), and `fillPropGhosts` / `fillPorousEpsGhosts` apply their domain-face
+override only `if (!distributed_)`, so μ/ρ/ε ghosts on a walled face keep their periodic wrap value
+under MPI. Details + measured numbers: `doc/variable_density_projection.md` §4.
 
 Build/test the multi-rank ctests:
 ```bash
