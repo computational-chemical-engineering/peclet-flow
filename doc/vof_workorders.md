@@ -31,6 +31,14 @@ Hard rules (violating any of these is an automatic escalation):
    functions run in a serial host loop and results are compared bitwise (CUDA) — see the
    GPU-vs-OpenMP tolerance policy: bitwise on identical backend, tolerance across backends.
 3. **Bit-exact MPI**: every np-2/4 result identical to np-1 (`tests/kokkos_mpi` pattern).
+3b. **A capped pressure solve makes a run INVALID, not degraded.** MG-PCG can report
+   convergence per its own internal bookkeeping while the true residual sits ~100× above
+   `rtol` (measured 2026-08-31 by the collocated-campaign session, which had a permeability
+   value silently drift this way). Any gate that reports a functional — conservation, a growth
+   rate, a permeability, a terminal velocity — must record the max pressure-iteration count
+   against the cap and discard, not merely flag, a run that touched it. This matters doubly for
+   VoF: Weymouth–Yue's exact conservation is conditioned on a *discretely divergence-free* face
+   field, so an under-solved projection corrupts exactly what the VoF gates measure.
 4. Commit in `flow` at each validated gate, then bump the umbrella pointer (submodule
    first, umbrella last). Do not push a red tree. **Never `git add -A` / `git add .` /
    `git commit -a`** — stage the paths you changed, by name. Concurrent agents share these
