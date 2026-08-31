@@ -47,6 +47,7 @@
 #include "staggered_advection.hpp"
 #include "vof/advect_wy.hpp"    // VoF rung V1: the Weymouth-Yue colour advector (its own g=3 block)
 #include "vof/colour_field.hpp"  // VoF rung V2a: the G=2 <-> g=3 bridge + the colour ghost policy
+#include "vof/curvature_field.hpp"  // VoF rung V3: the HF curvature cascade + PV fallback
 #include "vof/momentum_advect.hpp"  // VoF rung V2b: momentum-consistent rho^c u_c transport
 
 namespace peclet::flow {
@@ -2181,6 +2182,7 @@ class Solver {
     }
 #endif
     // The half-shifted momentum CVs live on this same block, so they are rebuilt with it.
+    vofCurv_.init(nx_, ny_, nz_, kVofG);
     if (vofMomEnabled_) {
       vofMom_.init(vofAdv_, vofRhoG_, vofRhoL_);
       for (int c = 0; c < 3; ++c)
@@ -3504,13 +3506,13 @@ class Solver {
                  czp = AT(i);
           sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y};
           Grid::fou_operator(c, x, y, z, Ua, Va, Wa, fouw, cC, cxm, cxp, cym, cyp, czm, czp);
-          AC(i) = (float)cC;
-          AW(i) = (float)cxm;
-          AE(i) = (float)cxp;
-          AS(i) = (float)cym;
-          AN(i) = (float)cyp;
-          AB(i) = (float)czm;
-          AT(i) = (float)czp;
+          AC(i) = (MReal)cC;
+          AW(i) = (MReal)cxm;
+          AE(i) = (MReal)cxp;
+          AS(i) = (MReal)cym;
+          AN(i) = (MReal)cyp;
+          AB(i) = (MReal)czm;
+          AT(i) = (MReal)czp;
         });
 
     Kokkos::deep_copy(C[c].rscale, 1.0);
@@ -3553,13 +3555,13 @@ class Solver {
           sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y};
           const double fouw = vr ? 0.5 * (rf(i) + rf(i - sc)) : rhoC;
           Grid::fou_operator(c, x, y, z, Ua, Va, Wa, fouw, cC, cxm, cxp, cym, cyp, czm, czp);
-          AC(i) = (float)cC;
-          AW(i) = (float)cxm;
-          AE(i) = (float)cxp;
-          AS(i) = (float)cym;
-          AN(i) = (float)cyp;
-          AB(i) = (float)czm;
-          AT(i) = (float)czp;
+          AC(i) = (MReal)cC;
+          AW(i) = (MReal)cxm;
+          AE(i) = (MReal)cxp;
+          AS(i) = (MReal)cym;
+          AN(i) = (MReal)cyp;
+          AB(i) = (MReal)czm;
+          AT(i) = (MReal)czp;
         });
     Kokkos::deep_copy(C[c].rscale, 1.0);
     Kokkos::deep_copy(C[c].inhom, 0.0);
@@ -4827,6 +4829,64 @@ class Solver {
   void setRhoFaceHarmonic(bool on) { rhoFaceHarmonic_ = on; }
   bool rhoFaceHarmonic() const { return rhoFaceHarmonic_; }
 
+  // --- interface curvature (rung V3, WO-O) -----------------------------------------------------
+  //
+  // `compute_vof_curvature()` fills two registered G=2 cell fields from the CURRENT colour field:
+  //
+  //   "kappa"         kappa = 2H in units of 1/h (cell units). Multiply by 1/h for physical units.
+  //                   POSITIVE for a convex blob of liquid: a sphere of liquid of radius R cells
+  //                   reads +2/R. WO-P (balanced-force CSF) is the consumer.
+  //   "kappa_branch"  which tier of the cascade produced it (`vof::CurvatureBranch`): 0 not
+  //                   interfacial, 1 HF, 2 HF in a non-preferred direction, 3 mixed-HF fit (off by
+  //                   default), 4/5 the PLIC-volumetric paraboloid fit, 6 NO estimate.
+  //
+  // Reading "kappa" without reading "kappa_branch" is a mistake: kappa is 0 both where there is no
+  // interface (branch 0, correct) and where the cascade could not produce an estimate (branch 6,
+  // which must never happen and is loud when it does). The branch field is the difference.
+  //
+  // The whole cascade is a pure local stencil on the colour field's g = 3 block — no reductions,
+  // no new halo — so it is bitwise decomposition-independent by construction. See
+  // `vof/curvature.hpp` for the cascade, its literature anchors and its measured branch shares.
+  void computeVofCurvature() {
+    if (!vofEnabled_)
+      throw std::runtime_error(
+          "compute_vof_curvature: VoF is not enabled (call enable_vof / set_vof first)");
+    if (!kappaField_.extent(0)) {
+      kappaField_ = addField("kappa");
+      kappaBranch_ = addField("kappa_branch");
+    }
+    bridgeColourToVof();
+    vofCurvStats_ = vofCurv_.compute(vofAdv_.colour());
+    copyInner(kappaField_, e_, G, CCConst(vofCurv_.kappa()), e3_, kVofG);
+    copyInner(kappaBranch_, e_, G, CCConst(vofCurv_.branch()), e3_, kVofG);
+    // kappa is face-interpolated by the V4 surface-tension force exactly as the properties are, so
+    // it gets the same rank-aware ghost policy they do (WO-G / WO-I).
+    fillPropGhosts(kappaField_);
+    fillPropGhosts(kappaBranch_);
+  }
+  // The branch census of the last `computeVofCurvature()` — LOCAL to this rank (the driver is
+  // MPI-free; a distributed caller sums them).
+  vof::VofCurvature::Stats vofCurvatureStats() const { return vofCurvStats_; }
+  std::vector<double> getVofCurvature() {
+    if (!kappaField_.extent(0))
+      throw std::runtime_error("vof_curvature: call compute_vof_curvature() first");
+    return gatherInner(kappaField_);
+  }
+  std::vector<double> getVofCurvatureBranch() {
+    if (!kappaBranch_.extent(0))
+      throw std::runtime_error("vof_curvature_branch: call compute_vof_curvature() first");
+    return gatherInner(kappaBranch_);
+  }
+  // Wendland support width of the PV fallback fit, in cell units (Han et al.: 2.5 with a 5^3
+  // stencil; 3.5 recovers first-order spurious-current convergence on a translating droplet and
+  // 4.5 over-smooths and destroys it). Exposed for WO-P's sweep.
+  void setVofCurvatureWeightWidth(double d) { vofCurv_.weightWidth = d; }
+  double vofCurvatureWeightWidth() const { return vofCurv_.weightWidth; }
+  // Tier 2b, the mixed height-position fit. OFF by default and it should stay off — see
+  // `vof::VofCurvature::useMixedHeightFit` for the measurement that put it there.
+  void setVofCurvatureMixedHeightFit(bool on) { vofCurv_.useMixedHeightFit = on; }
+  bool vofCurvatureMixedHeightFit() const { return vofCurv_.useMixedHeightFit; }
+
   // Advance the colour field one dt with the just-projected face velocities. Called by step()
   // immediately before advanceScalars(); exposed so a test can drive it in isolation.
   //
@@ -5277,7 +5337,7 @@ class Solver {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           const double bd =
               faceAvg ? 0.5 * ((double)beta(i) + (double)beta(i - sc)) : (double)beta(i);
-          AC(i) = (float)((double)AC(i) + bd);
+          AC(i) = (MReal)((double)AC(i) + bd);
         });
   }
 
@@ -5588,6 +5648,10 @@ class Solver {
   C3 e3_{0, 0, 0};                // extended extents of that block (n + 2*kVofG)
   double vofCflLimit_ = 0.25;     // Weymouth's proven 3D boundedness bound 1/(2(N-1))
   long vofStep_ = 0;              // sweep-permutation counter (6-cycle)
+  // --- curvature (rung V3, WO-O) ---
+  vof::VofCurvature vofCurv_;         // the cascade, on the SAME g=3 block as the colour field
+  CCField kappaField_, kappaBranch_;  // the G=2 registry mirrors ("kappa", "kappa_branch")
+  vof::VofCurvature::Stats vofCurvStats_{};
   // --- momentum-consistent transport (rung V2b, WO-K) ---
   bool vofMomEnabled_ = false;             // rho^c u_c advected by the SAME geometric fluxes as C
   vof::MomentumConsistentAdvector vofMom_;  // the half-shifted CVs, on the SAME g=3 block

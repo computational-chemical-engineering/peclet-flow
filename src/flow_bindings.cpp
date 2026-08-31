@@ -748,6 +748,70 @@ static void bind_solver(nb::module_& m, const char* name) {
           "number of mixed cells (0<C<1) and of wisps (C within 1e-8 of 0 or 1). No clipping is "
           "applied at this rung, so min/max may leave [0,1] if the CFL cap is raised.")
       .def(
+          "compute_vof_curvature",
+          [](S& s) {
+            s.computeVofCurvature();
+            const auto d = s.vofCurvatureStats();
+            nb::dict r;
+            r["interfacial"] = d.interfacial;
+            r["hf"] = d.hf;
+            r["hf_mixed"] = d.hfMixed;
+            r["hf_fit"] = d.hfFit;
+            r["pv"] = d.pv;
+            r["pv_reduced"] = d.pvReduced;
+            r["no_estimate"] = d.noEstimate;
+            return r;
+          },
+          "VoF rung V3: compute the interface curvature from the CURRENT colour field and store it "
+          "in the registered cell fields 'kappa' and 'kappa_branch'. Returns THIS RANK's branch "
+          "census as a dict.\n\n"
+          "'kappa' is kappa = 2H in units of 1/h (CELL units — multiply by 1/h for physical "
+          "units), POSITIVE for a convex blob of liquid: a sphere of liquid of radius R cells "
+          "reads +2/R, an infinite cylinder +1/R, a plane 0.\n\n"
+          "The cascade is Popinet's (2009): a standard height function on 7-cell column sums of C "
+          "over the 3x3 transverse patch in the direction of the largest |n| (branch 1), the same "
+          "in the other two directions (branch 2), then the PLIC-VOLUMETRIC paraboloid fit of "
+          "Jibben et al. on a 5^3 Wendland-weighted stencil (branches 4/5) — the best "
+          "cost/accuracy fallback per Han, Evrard & Desjardins, IJMF 174:104769 (2024). Branch 3 "
+          "(the mixed height-position fit) is off by default; branch 0 is 'not an interfacial "
+          "cell' and branch 6 is 'NO estimate', which must never occur.\n\n"
+          "ALWAYS read 'kappa_branch' alongside 'kappa': kappa is 0 both where there is no "
+          "interface (branch 0) and where no estimate could be made (branch 6).\n\n"
+          "Two things the literature settles and this is NOT a bug: the fallback ALWAYS fires "
+          "somewhere below ~5 cells per diameter (measured here: 100% of interfacial cells at "
+          "D/dx = 2.8-4.4, ~19% at D/dx = 38-48 on a sphere), and with advection-realistic volume "
+          "fractions the curvature error STOPS CONVERGING below C*dx ~ 1e-2 for every known "
+          "method. Curvature order is not the thing to chase; transport fidelity is.")
+      .def(
+          "vof_curvature", [](S& s) { return field_out(s, s.getVofCurvature()); },
+          "The curvature field's inner region as a Fortran-order (nx,ny,nz) float64 array, in 1/h "
+          "(cell units). Call compute_vof_curvature() first. == get_field('kappa').")
+      .def(
+          "vof_curvature_branch", [](S& s) { return field_out(s, s.getVofCurvatureBranch()); },
+          "Which cascade branch produced each cell's curvature, as a Fortran-order (nx,ny,nz) "
+          "float64 array: 0 not interfacial, 1 height function, 2 height function in a "
+          "non-preferred direction, 3 mixed height-position fit, 4 PLIC-volumetric paraboloid fit, "
+          "5 the same with the rank-deficient 3-parameter model, 6 NO estimate. == "
+          "get_field('kappa_branch').")
+      .def(
+          "set_vof_curvature_weight_width", [](S& s, double d) { s.setVofCurvatureWeightWidth(d); },
+          nb::arg("width"),
+          "Wendland support width of the PLIC-volumetric fallback fit, in CELL units. Default 2.5, "
+          "which is Han et al.'s recommended pairing with the 5^3 stencil. Their translating "
+          "droplet recovers first-order convergence of the spurious currents at 3.5 and loses "
+          "convergence entirely at 4.5 (over-smoothing), so this is a real trade-off between the "
+          "locality of the estimate and its robustness to transport error — not a free knob.")
+      .def(
+          "set_vof_curvature_mixed_height_fit",
+          [](S& s, bool on) { s.setVofCurvatureMixedHeightFit(on); }, nb::arg("on") = true,
+          "Enable cascade branch 3, the mixed height-position fit (a paraboloid through the "
+          "interface positions of whichever columns closed). DEFAULT OFF and it should stay off: "
+          "measured on an exact-fraction sphere at 16/32/64 it takes over the 19.5-59.6% of cells "
+          "the height function cannot serve and DESTROYS the convergence of the max curvature "
+          "error (order 0.00 vs 1.86 with the PLIC-volumetric fallback instead), because its data "
+          "set is the columns that closed - a slope-selected, asymmetric subset whose lever-arm "
+          "bias is scale invariant. Shipped as a re-measurable instrument, not a configuration.")
+      .def(
           "set_rho_face_harmonic", [](S& s, bool on) { s.setRhoFaceHarmonic(on); },
           nb::arg("on") = true,
           "Use the HARMONIC instead of the arithmetic face mean of rho in the pressure projection "

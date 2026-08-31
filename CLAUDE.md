@@ -347,12 +347,39 @@ Campaign plan: [`../docs/VOF_PLAN.md`](../docs/VOF_PLAN.md); work orders + findi
   half-shifted MAC control volumes, driven by the SAME PLIC planes, sweep order and frozen state as
   the colour advection of that step. Opt-in (`enable_vof_momentum(rho_gas, rho_liquid)`), and what
   makes the scheme usable above density ratio ~100.
+- `src/vof/curvature.hpp` + `curvature_field.hpp` (V3) — interface curvature as the Popinet (2009)
+  height-function cascade with a **PLIC-volumetric paraboloid fallback** (Jibben 2019 / Han, Evrard
+  & Desjardins IJMF 2024, 5³ stencil, Wendland width 2.5). `curvature.hpp` is container-free like
+  `plic.hpp`; the driver is next door. **No new halo** — the whole cascade reaches exactly ±3, so
+  the colour field's g = 3 is the design and no reduction appears anywhere in it (hence *bitwise*
+  MPI, not the reduction-order floor).
+
+**Curvature (V3).** `compute_vof_curvature()` fills two registered `G=2` fields from the current
+colour field and returns this rank's branch census: **`"kappa"`** = κ = 2H in **1/h (cell units)**,
+positive for a convex blob of liquid (sphere `+2/R`, cylinder `+1/R`, plane `0`), and
+**`"kappa_branch"`** = which tier produced it. *Always read the branch field alongside κ*: κ is 0
+both where there is no interface (branch 0, correct) and where no estimate could be made (branch 6,
+which must never happen). Curvature comes from **column sums of C and PLIC volumes, never from
+differentiating the MYC normal** — V0 measured that normal's error not converging (order 0.83) while
+its reconstruction error does (1.98), which is the whole reason the plan rejected ∇C geometry.
+Measured (`tests/kokkos/test_vof_curvature.cpp`): exact-fraction sphere 16³→32³→64³ **order 2.26
+(L1) / 1.86 (max)**; plane 1.5e-14; cylinder 2.8e-3 against 1/R. Two literature facts the API
+docstrings repeat because they are physics and not defects: the **fallback always fires** below ~5
+cells/diameter (measured 100 % at D/Δ = 2.8–4.4, ~19 % at D/Δ = 38–48 — higher than Han's 2-D 0.9 %
+because a 3×3 patch in 3D needs 2.5 cells of column reach on the octant diagonal, exactly the
+capacity of a 7-column), and with **advection-realistic fractions the curvature error stops
+converging**, here between CΔ ≈ 0.16 and 0.08. Cascade tier 2b (the mixed height-position fit) is
+implemented and ships **OFF** — it destroys the max-error convergence (order 0.00 vs 1.86) because
+its data set is the slope-selected subset of columns that closed; `doc/vof_workorders_v34.md` WO-O
+has the mechanism and the width sweep.
 
 **Python:** `enable_vof()`, `set_vof(C)` / `get_vof()`, `vof_max_courant()` / `vof_last_courant()`,
 `set_vof_cfl_limit()`, `vof_diagnostics()`, `set_rho_face_harmonic()`; V2b adds
 `enable_vof_momentum(rho_gas, rho_liquid)`, `vof_advected_velocity(c)`,
 `vof_momentum_diagnostics()`, `set_vof_rho_floor()`, `set_vof_momentum_muscl()`,
-`set_vof_momentum_cell_flag()`, `set_vof_flux_clamp()`. `"C"` is an ordinary
+`set_vof_momentum_cell_flag()`, `set_vof_flux_clamp()`; V3 adds `compute_vof_curvature()`,
+`vof_curvature()`, `vof_curvature_branch()`, `set_vof_curvature_weight_width()`,
+`set_vof_curvature_mixed_height_fit()`. `"C"` is an ordinary
 registered `G=2` cell field, so ρ(C)/μ(C) go through the existing `LinearMix` closures
 (`set_property_model("rho","linear","C",[rho_g, rho_l-rho_g])`, which enables the varRho path) and
 `get_field`/`set_field`/`field_view`/`redistribute` work on it unchanged. The **g=3 working block**
@@ -410,9 +437,9 @@ balance exact, since the momentum time term and the face body force keep the ari
 Measured with it on: ∂P/∂z relative error **0.34** instead of 1e-15. It ships as a measured knob for
 the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
-Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`;
-`tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`, `vof_twophase_mpi_np{1,2,4}`,
-`vof_momentum_mpi_np{1,2,4}`; `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
+Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
+`vof_curvature`; `tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`, `vof_twophase_mpi_np{1,2,4}`,
+`vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`; `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
 falling drop, the RT near-Nyquist check — every gate there records the pressure iteration count
 against its cap and treats a capped run as INVALID);
 `tests/study/rayleigh_taylor.py` (diffuse and sharp records side by side).

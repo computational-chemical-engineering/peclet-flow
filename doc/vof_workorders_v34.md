@@ -250,3 +250,158 @@ OMP_NUM_THREADS=8 OMP_PROC_BIND=false ./build_wom_probe_f/mg_dense_precond --swe
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ./build_wom_probe_d/mg_dense_precond --sweep --outdir doc/data/wom
 python tests/study/mg_precond/mg_precond_analyze.py doc/data/wom
 ```
+
+---
+
+## Findings log (v3/v4 work orders)
+
+### WO-O (rung V3) — HF curvature cascade + PLIC-volumetric fallback — **DONE 2026-08-31**, one design deviation
+
+Delivered: `src/vof/curvature.hpp` (container-free `KOKKOS_INLINE_FUNCTION`s only, WO-D signature
+rule — no `View`, no indexing, no halo types, so the V4 promotion to `peclet::core::vof` is a file
+move) + `src/vof/curvature_field.hpp` (the view-level driver, the same `plic.hpp`/`colour_field.hpp`
+split V2a already uses) + `IbmSolver::computeVofCurvature()` registering the `"kappa"` and
+`"kappa_branch"` G=2 fields + five Python entry points + `tests/kokkos/test_vof_curvature.cpp`
+(ctest `vof_curvature`, 7 gates, ~3 s) + `tests/kokkos_mpi/test_vof_curvature_mpi.cpp`
+(`vof_curvature_mpi_np{1,2,4}`).
+
+**The cascade as built** (Popinet 2009; Han, Evrard & Desjardins, *IJMF* 174:104769 (2024),
+arXiv:2304.08643 — retrieved and read, all equations followed rather than approximated):
+
+| tier | branch code | what it is | ships |
+|---|---|---|---|
+| 1 | `kCurvHf` = 1 | standard HF: 7-cell column sums of C over the 3×3 transverse patch in the direction of the largest \|n_d\|, Han eqs. (3)–(5) | ON |
+| 2a | `kCurvHfMixed` = 2 | the same in the two remaining directions, in order of decreasing \|n_d\| (Basilisk `height_curvature`'s `foreach_dimension`) | ON |
+| 2b | `kCurvHfFit` = 3 | Popinet's *generalised* HF: a paraboloid through the interface positions of whichever of the 27 columns closed | **OFF** — see the deviation below |
+| 3 | `kCurvPv` = 4 / `kCurvPvReduced` = 5 | the **PV** method (Jibben et al. 2019; Han et al. §2.3): fit a paraboloid so that the volume under it matches the volume under the PLIC polygons, over a **5³ stencil with a Wendland C2 weight of width 2.5 cells** — Han's recommended configuration. Normal equations eqs. (13)–(15), assembled from Green's-theorem monomial integrals over each polygon's projection | ON |
+| — | `kCurvNoEstimate` = 6 | fewer than 3 usable polygons: no estimate, and it says so | must never fire |
+
+Sign/units: `kappa = 2H` in 1/h (cell units), **positive for a convex blob of liquid** — sphere
+`+2/R`, cylinder `+1/R`, plane `0`, all three gated (gate B2 exists so the factor in `kappa = 2H` is
+measured and not assumed). **Curvature never differentiates a normal field** (WO-D finding 2, and
+the whole reason `VOF_PLAN` §0 rejected ∇C geometry): tiers 1–2 read column sums of C, tier 3 reads
+PLIC volumes. The MYC normal appears twice, both times categorically — it *orders* the candidate
+column directions (Basilisk does the same) and it *defines the fit frame*.
+
+**No new halo, by design and it fits exactly.** Tier 1/2 reach 3×3×7 = ±3; tier 3 reaches a 5³ of
+MYC stencils = 7³ of colour = ±3. The colour field's existing g = 3 is precisely the reach and not
+one cell more. The cascade has **no reduction in it at all**, so it is bitwise
+decomposition-independent by construction — which is why the MPI gate below is literally bitwise and
+not at the usual reduction-order floor.
+
+**Gate results** (host-openmp and nvidia-cuda unless noted).
+
+| gate | result |
+|---|---|
+| A geometry primitives: the plane∧cube polygon vs the analytic `\|Γ\| = \|m\|₂ dV/dα` and `x̄ᵢ = −(dV/dmᵢ)/(dV/dα)`, 4000 random planes | max rel area error **3.6e-10**, max centroid error **9.6e-10** (both limited by the finite difference, not the polygon) |
+| A Green's-theorem monomials on the unit square | **0.0e+00** exact; random pentagon vs a 2000² quadrature oracle **5.2e-6** |
+| B2 oblique plane, exact fractions | kappa L1 **4.5e-15**, max **1.5e-14** against the analytic 0 |
+| B2 cylinder R = 0.3 at 48³ | L1 **2.8e-3**, max **4.8e-3** against `1/R` — the mean-curvature factor is gated |
+| **B static convergence, exact fractions, sphere R = 0.3, 16³→32³→64³** | L1 **3.03e-2 / 5.94e-3 / 1.32e-3**, fitted order **2.26**; max **5.01e-2 / 1.32e-2 / 3.79e-3**, order **1.86** |
+| B initialization ablation (octree `levels` 4 / 6 / 8 at 32³) | L1 5.9377e-3 / 5.9410e-3 / 5.9412e-3 — the manufactured fractions are **not** the limiting error |
+| C sphere sweep D/Δ = 2.8 … 48, no NaN, no silently-zero | branch table below; **0 NaN and 0 `kCurvNoEstimate` on every rung** |
+| D translating droplet, advection-realistic fractions | plateau measured, table below |
+| E device kernel vs serial host loop, same backend | host-openmp **32768/32768 bitwise**, max \|d\| 0.0. On CUDA the "serial host loop" is a *different* backend, so by the suite tolerance policy it is a tolerance comparison: 32062/32768 bitwise, max \|d\| **1.19e-15** (WO-D measured the same 1e-14-class spread on its round-trip battery) |
+| F the PV fallback forced on every interfacial cell | L1 3.62e-2 / 9.27e-3 / 2.33e-3 — order **1.96, 1.99** |
+| G tier-2b ablation | see the deviation |
+| MPI np 1/2/4, host + CUDA, periodic and walls-on-the-cut-axis | **0 of 8192 cells differ, bitwise, on kappa AND on the branch field; the summed branch census equals the single-rank census exactly** |
+| single-phase regression | **+0.00 % on all 13 grid points**, identical pressure-iteration totals, per-step medians and step counts on `zh_sphere` / `random_spheres` / `hollow_rings`; order p and the Richardson extrapolate unchanged to every printed digit. Run in an **isolated git worktree carrying only this WO's files** (the checkout is shared with WO-M, which has `mac_cutcell_mg.hpp` / `mac_velocity_mg.hpp` in flight), so the +0.00 % is attributable |
+| full ctest batteries | `tests/kokkos` **25/25** on host-openmp AND nvidia-cuda; `tests/kokkos_mpi` **57/57** on host-openmp (was 54; the 3 new ones are `vof_curvature_mpi_np{1,2,4}`) |
+
+**Branch statistics per resolution** (exact-fraction sphere, off-centre by an irrational fraction of
+a cell so it is never mesh-aligned):
+
+| D/Δ | CΔ | interfacial | HF | HF other dir | PV | no estimate |
+|---|---|---|---|---|---|---|
+| 2.8 | 0.714 | 41 | 0 % | 0 % | **100 %** | 0 |
+| 4.4 | 0.455 | 92 | 0 % | 0 % | **100 %** | 0 |
+| 7.0 | 0.286 | 239 | 20.9 % | 0 % | 79.1 % | 0 |
+| 12.0 | 0.167 | 681 | 54.3 % | 0 % | 45.7 % | 0 |
+| 24.0 | 0.083 | 2728 | 74.0 % | 0 % | 26.0 % | 0 |
+| 48.0 | 0.042 | 11437 | 80.6 % | 0 % | 19.4 % | 0 |
+
+**The fallback rate is ~19 % at D/Δ = 48, not the ~0.9 % Han et al. report at D/Δ = 102 — and that
+is geometry, not a defect.** Their 0.9 % is a **2-D** droplet, where the height patch is 1×3 and the
+worst-case transverse slope at the preferred axis is 1, so a 7-cell column always closes. In **3-D**
+the patch is 3×3 and the corner column at offset (±1,±1) must span `√2 · s` where the slope in the
+preferred direction reaches `s = √2` on the octant diagonal (the largest normal component is
+`≥ 1/√3`, with equality exactly there). That needs `√2·√2 + ½ = 2.5` cells of reach — the exact
+capacity of a 7-column — so the diagonal band is permanently marginal and the failing fraction tends
+to a **resolution-independent** ~19 %, which is what the table shows. Han et al. use **NH = 11** for
+their 3-D static tests for precisely this reason ("a column height of NH = 11 is necessary to ensure
+well-defined interface heights"); NH = 11 needs a g = 5 halo. **This is the one place where a wider
+halo would buy something**, and it is not needed: the PV fallback serves those cells at measured
+order 1.96–1.99 (gate F) and the combined cascade converges at 2.26 / 1.86.
+
+**The advection-realistic plateau** (sphere R = 0.2 transported one full diameter along the diagonal
+at CFL 0.25 by the V1 Weymouth–Yue advector, then curvature; the *same* geometry with exact
+fractions is the control):
+
+| D/Δ | CΔ | advected L1 | exact-fraction L1 | ratio | advected max |
+|---|---|---|---|---|---|
+| 6.4 | 0.3125 | 1.04e-1 | 7.79e-2 | 1.3× | 4.12e-1 |
+| 12.8 | 0.1562 | 4.91e-2 | 1.43e-2 | 3.4× | 1.60e-1 |
+| 25.6 | 0.0781 | 3.29e-2 | 3.20e-3 | 10.3× | 1.53e-1 |
+| | | order 1.09 → **0.58** | order 2.45 → 2.16 | | order 1.36 → **0.07** |
+
+**The plateau sets in between CΔ ≈ 0.16 and CΔ ≈ 0.08** and the max error is flat there already
+(1.60e-1 → 1.53e-1, order 0.07) while the exact-fraction control on the identical geometry keeps
+converging at 2.16. That is Han et al. §3 / Remmerswaal & Veldman's Lemma 3 reproduced: volume
+fractions that are first-order in L∞ make the curvature zeroth-order, and the transition happens at
+a *coarser* CΔ than their quoted ~1e-2 because our droplet is transported a full diameter (their
+random-perturbation study injects a fixed `k·C` error instead). Nothing to chase; the number to
+carry into V4 is that **at pore-scale resolutions the curvature error is set by the transport, not
+by the estimator**, so V4's spurious-current budget should be spent on the force discretisation
+(the balanced-force identity) rather than on a fancier curvature.
+
+**DEVIATION — tier 2b (the mixed height function) is implemented, measured, and ships OFF.**
+The WO specifies "standard HF → mixed-direction HF → PV fit". Both readings of "mixed" were built:
+2a (try the other two column directions) and 2b (Popinet's generalised HF / Basilisk's
+`height_curvature_fit`: a paraboloid through the interface positions of whichever columns closed).
+Measured on the exact-fraction sphere at 16/32/64, everything else identical (ctest gate G, so the
+numbers regenerate on every run):
+
+```
+tier 2b OFF   L1 3.03e-2 / 5.94e-3 / 1.32e-3  (order 2.26)   max 5.01e-2 / 1.32e-2 / 3.79e-3  (order 1.86)
+tier 2b ON    L1 2.83e-2 / 7.27e-3 / 4.21e-3  (order 1.37)   max 6.08e-2 / 4.64e-2 / 6.07e-2  (order 0.00)
+```
+
+Tier 2b takes over exactly the 19.5–59.6 % of cells tier 1 cannot serve, and **destroys the
+convergence of the max error** on cells the PV fallback handles at second order. It is not a
+parameter choice: Wendland widths 1.5, 2.0, 2.5, 3.5 and 6.0 cells were swept and **none** converges
+in the max (`PECLET_VOF_CURV_PTW` in the ctest reproduces the sweep). The mechanism is structural —
+**its data set is the columns the height function could close, which is a *slope-selected* and
+therefore asymmetric subset.** At a cell whose normal is near an octant diagonal the failing columns
+are exactly the corner ones on the steep side, so the surviving points sample the interface
+asymmetrically about the target and the quadratic fit picks up a lever-arm bias; that selection
+depends on the normal direction and not on h, so the bias is **scale invariant** — which is
+precisely the flat max-error curve. The PV fit is immune because a PLIC polygon exists in every
+mixed cell whatever the slope, so its 5³ data set is symmetric. Note the WO's own gate design is
+what caught this: *"report max and L1 separately, since the max is where the cascade's weakest
+branch shows"* — the L1 barely moves (2.26 → 1.37) while the max goes 1.86 → 0.00.
+Kept as `set_vof_curvature_mixed_height_fit(True)` / `VofCurvature::useMixedHeightFit`, an
+instrument rather than a configuration. Han et al. independently rank the PV fallback *above* HF
+once the volume fractions carry transport error — which is exactly the regime the fallback fires in.
+
+**Two smaller findings.**
+- **Tier 2a fires on 0.00–0.06 % of a sphere's interfacial cells** and is therefore near-vacuous as
+  a tier. That is structural too: the direction with the largest |n_d| is by construction the one
+  whose columns are most likely to close, so when it fails the other two usually fail as well. It is
+  free (the same colour read along another axis) and it does help on transported fields, so it
+  stays; but a cascade design that leans on it is leaning on nothing.
+- **A published sign error in Han et al. eq. (14f)**, found and corrected. Their `∫y'² dA` line
+  integral carries the edge factor `(x'_{v+1} − x'_v)`; evaluated on the counter-clockwise unit
+  square it returns `−1/3` where `∫y² dA = +1/3`. The correct factor is `(x'_v − x'_{v+1})`, the
+  natural x↔y antisymmetry of Green's theorem. All six monomials are re-derived in
+  `curvature.hpp` from `∫∫ x^a y^b dA = ∮ x^{a+1}y^b/(a+1) dy` rather than transcribed, verified
+  against the unit square (exact) and a quadrature oracle (5e-6), and (14a)–(14e) do check out —
+  (14d) agrees term for term after `(x0+x1)(x0²+x1²) = x0³+x0²x1+x0x1²+x1³`. *This is the second
+  transcription defect this campaign has found in a published listing (WO-D found one in Lehmann &
+  Gekle's Listing 1); the habit of gating a hand-computable case is what catches them, because the
+  randomized batteries do not.*
+
+**Build note for whoever adds a driver class next:** nvcc rejects an extended
+`__host__ __device__` lambda inside a **private or protected** member function ("The enclosing
+parent function ... cannot have private or protected access within its class"). `VofCurvature`'s
+four passes are public for that reason alone, as `WyAdvector`'s are. The host-openmp build compiles
+it happily, so this only shows up on the CUDA leg.

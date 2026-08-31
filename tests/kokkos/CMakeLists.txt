@@ -163,6 +163,13 @@ target_include_directories(test_vof_momentum PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(test_vof_momentum PRIVATE Kokkos::kokkos)
 add_test(NAME vof_momentum COMMAND test_vof_momentum)
 
+# VoF rung V3 (WO-O): the Popinet height-function curvature cascade + the Jibben/Han PLIC-volumetric
+# paraboloid fallback (src/vof/curvature.hpp, src/vof/curvature_field.hpp). Standalone — no Solver.
+add_executable(test_vof_curvature test_vof_curvature.cpp)
+target_include_directories(test_vof_curvature PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+target_link_libraries(test_vof_curvature PRIVATE Kokkos::kokkos)
+add_test(NAME vof_curvature COMMAND test_vof_curvature)
+
 add_executable(test_poiseuille_ibm test_poiseuille_ibm.cpp)
 target_include_directories(test_poiseuille_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_poiseuille_ibm PRIVATE Kokkos::kokkos)
