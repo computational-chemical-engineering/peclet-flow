@@ -1727,6 +1727,11 @@ class Solver {
         for (int c = 0; c < 3; ++c)
           fillVelGhosts(c,
                         0);  // explicit ghosts (periodic + BC) for advect / mode-4 FV defect matvec
+      // A0 (advective cut-wall flux): build the advection's wall-aware velocity inputs. AFTER the
+      // ghost exchange, over the extended block, so ghost solid rows carry the wall velocity too.
+      // No-op -- and no allocation -- unless a scene instance is moving; static scenes keep reading
+      // C[*].u byte for byte. See buildAdvInputs().
+      buildAdvInputs();
       // Porous advection-form compensation: the Koren/SOU/FOU advection operators are CONSERVATIVE
       // (flux form, ∇·(u u)), which equals the true advective transport u·∇u only for a solenoidal
       // advecting field. Under the volume-averaged continuity div(eps u)=0 the plain divergence
@@ -1767,7 +1772,8 @@ class Solver {
       // levels ONCE, before the per-component solves update it (shared across the 3 momentum
       // components).
       if (useVelocityMg_ && implicitFou_ && advect_ && !hasBc_)
-        vmg_.restrictAdvVelocities(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u));
+        vmg_.restrictAdvVelocities(advVelView(0), advVelView(1),
+                                   advVelView(2));  // A0: same inputs as the fine operator
       const double tp1 = phaseTick();
       tPredictor_ += tp1 - tp0;
       for (int c = 0; c < 3; ++c)
@@ -3194,6 +3200,73 @@ class Solver {
   /// budget consumes. Returns whether the RHS kernel should write it. Off (and untouched) unless a
   /// scene is installed on the staggered grid with explicit advection on, so every other path is
   /// byte-identical and pays no memory.
+  // --- A0: wall-aware advection inputs (advective cut-wall flux) -------------------------------
+  //
+  // The momentum advection kernels (`sadv::advect / advect_sou / advect_fou / fou_operator`) are
+  // geometry-blind: `adv_vel` averages the solid-masked rows into the advecting face velocity and
+  // the SOU/Koren `PHI` stencils read the advected field up to 2 cells INSIDE the solid.
+  // `maskVelocity` pins those rows to 0.0, which IS the wall velocity for a STATIC wall -- so a
+  // static scene only carries the O(h) aperture defect (D2, docs/ANALYTIC_SDF_GEOMETRY.md §7 item
+  // 8, measured -0.4..-1% on the 4-sphere bed). For a body moving at u_wall the advective term
+  // near the body is wrong by O(u_wall): an O(1) local error in exactly the term that produces the
+  // finite-Re screening of the confined wall correction (D1). This is the same defect family the
+  // fresh-cell seed closed for the TIME term (seedFreshCells); the advective term never got it.
+  //
+  // The fix does NOT touch the global mask convention -- the masked zeros are load-bearing for the
+  // viscous/pressure operators and for the reaction budget's telescoping. Instead the advection
+  // gets its own input: a copy of u whose masked rows hold `uBc_`, the local rigid-body wall
+  // velocity `v_inst + omega_inst x r` that `buildWallVelocity` already evaluates at component c's
+  // staggered points over the WHOLE extended block (ghosts included -- the scene is analytic, so
+  // ghost solid rows are computable pointwise and no extra exchange is needed).
+  //
+  // Both the explicit path (buildRhs / buildRhsForced / buildRhsVar) and the implicit-FOU stencil
+  // path (buildAdvStencil / buildAdvStencilVar) read these views, or the deferred correction
+  // rho*(aF - aK) would be assembled from two different velocity fields. The advRhs_ stash (the
+  // reaction budget's R0 term) therefore carries the corrected term automatically.
+  //
+  // The fluid rows are the current Picard iterate u^k, so the COPY is per Picard iteration; the
+  // WALL rows come from uBc_, which depends only on instance motion and is built once per
+  // geometry/motion update.
+  //
+  // ABLATION: `PECLET_FLOW_ADV_WALLVEL=0` restores the pre-A0 behaviour (masked zeros in the
+  // advection inputs) without a rebuild -- the instrument that differences "zeros vs wall velocity
+  // in the advective term" directly. Everything else on the moving path is untouched by it.
+  static bool advWallVelEnabled() {
+    static const bool en = [] {
+      const char* v = std::getenv("PECLET_FLOW_ADV_WALLVEL");
+      return !(v && v[0] == '0');
+    }();
+    return en;
+  }
+  bool advWallInputs() const {
+    return advWallVelEnabled() && !Grid::collocated && hasScene_ && hasMotion_ && advect_ &&
+           uBc_[0].extent(0) == n_ && C[0].mask.extent(0) == n_;
+  }
+  void buildAdvInputs() {
+    if (!advWallInputs())
+      return;
+    CCExec space;
+    for (int c = 0; c < 3; ++c) {
+      if (uwAdv_[c].extent(0) != n_)
+        uwAdv_[c] = CCField("uwAdv", n_);
+      Kokkos::deep_copy(uwAdv_[c], C[c].u);
+      CCField a = uwAdv_[c];
+      CCConst m = CCConst(C[c].mask), w = CCConst(uBc_[c]);
+      Kokkos::parallel_for(
+          "peclet::flow::adv_wall_inputs", Kokkos::RangePolicy<CCExec>(space, 0, (long)n_),
+          KOKKOS_LAMBDA(long i) {
+            if (m(i) > 0.5)
+              a(i) = w(i);
+          });
+    }
+    space.fence();
+  }
+  /// The velocity view the advection operators must read for component c: the wall-corrected
+  /// scratch while an instance is moving, the live field (byte-identical) otherwise.
+  CCConst advVelView(int c) const {
+    return advWallInputs() ? CCConst(uwAdv_[c]) : CCConst(C[c].u);
+  }
+
   bool ensureAdvStash(int c, bool adv) {
     const bool want = !Grid::collocated && hasScene_ && adv;
     if (want && advRhs_[c].extent(0) != n_)
@@ -3207,8 +3280,11 @@ class Solver {
     const double idiag = rho_ / dt_, fc = f_[c], rho = rho_;
     C3 e = e_;
     CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
-    CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u), uu = CCConst(C[c].u),
-            un = CCConst(old_[c]);
+    // A0: U/V/W (the advecting velocities) and aP (the advected field) come from the wall-aware
+    // advection inputs -- identical to C[*].u unless an instance is moving. `uu` stays the live
+    // field: its only other consumer is the porous advection-form compensation.
+    CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2), aP = advVelView(c),
+            uu = CCConst(C[c].u), un = CCConst(old_[c]);
     const long strd = (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y;
     // Pure implicit FOU (no deferred correction): 1st-order upwind carried entirely by the
     // operator, no explicit high-order term in the RHS -- maximally dissipative/stable (diffuses
@@ -3305,7 +3381,7 @@ class Solver {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           double aK = 0.0, aF = 0.0;
           if (adv) {
-            sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{uu, e.x, e.y};
+            sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{aP, e.x, e.y};
             aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa)
                             : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa);
             if (ifou)
@@ -3343,8 +3419,11 @@ class Solver {
     C3 e = e_;
     CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
     CCConst fb = CCConst(cellForce_[c]);
-    CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u), uu = CCConst(C[c].u),
-            un = CCConst(old_[c]);
+    // A0: U/V/W (the advecting velocities) and aP (the advected field) come from the wall-aware
+    // advection inputs -- identical to C[*].u unless an instance is moving. `uu` stays the live
+    // field: its only other consumer is the porous advection-form compensation.
+    CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2), aP = advVelView(c),
+            uu = CCConst(C[c].u), un = CCConst(old_[c]);
     const long strd = (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y;
     const bool pureFou = implicitAdv() && !deferredCorr_;
     const bool incr = cutcellPressure_ && incremental_, adv = advect_ && !pureFou,
@@ -3390,7 +3469,7 @@ class Solver {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           double aK = 0.0, aF = 0.0;
           if (adv) {
-            sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{uu, e.x, e.y};
+            sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{aP, e.x, e.y};
             aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa)
                             : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa);
             if (ifou)
@@ -3421,8 +3500,11 @@ class Solver {
     CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
     CCConst fb = CCConst(cellForce_[c]);
     CCConst rf = CCConst(effRhoField());
-    CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u), uu = CCConst(C[c].u),
-            un = CCConst(old_[c]);
+    // A0: U/V/W (the advecting velocities) and aP (the advected field) come from the wall-aware
+    // advection inputs -- identical to C[*].u unless an instance is moving. `uu` stays the live
+    // field: its only other consumer is the porous advection-form compensation.
+    CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2), aP = advVelView(c),
+            uu = CCConst(C[c].u), un = CCConst(old_[c]);
     const long strd = strideOf(c);
     const bool pureFou = implicitAdv() && !deferredCorr_;
     const bool incr = cutcellPressure_ && incremental_, adv = advect_ && !pureFou,
@@ -3442,7 +3524,7 @@ class Solver {
           const double rhoF = 0.5 * (rf(i) + rf(i - strd));  // face density of the velocity unknown
           double aK = 0.0, aF = 0.0;
           if (adv) {
-            sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{uu, e.x, e.y};
+            sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{aP, e.x, e.y};
             aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa)
                             : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa);
             if (ifou)
@@ -3632,7 +3714,7 @@ class Solver {
     CCExec space;
     FV AC = C[c].AC, AW = C[c].AW, AE = C[c].AE, AS = C[c].AS, AN = C[c].AN, AB = C[c].AB,
        AT = C[c].AT;
-    CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u);
+    CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2);  // A0: wall-aware inputs
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
         "advstencil", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
@@ -3676,7 +3758,7 @@ class Solver {
     CCExec space;
     FV AC = C[c].AC, AW = C[c].AW, AE = C[c].AE, AS = C[c].AS, AN = C[c].AN, AB = C[c].AB,
        AT = C[c].AT;
-    CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u);
+    CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2);  // A0: wall-aware inputs
     const bool vr = effVarRho();
     const double rhoC = rho_;
     CCConst rf = vr ? CCConst(effRhoField()) : CCConst();
@@ -5917,6 +5999,11 @@ class Solver {
   bool hasMotion_ = false;
   CCField uBc_[3];     // R2: wall velocity component c AT component c's staggered points
   CCField uwCell_[3];  // R3: the whole wall velocity at CELL CENTRES (the wall-flux divergence)
+  // A0 (advective cut-wall flux): the momentum advection's OWN velocity inputs -- a copy of C[c].u
+  // whose solid-masked rows carry uBc_ (the local rigid-body wall velocity) instead of the zeros
+  // maskVelocity pins there. Allocated and filled only while an instance is moving; every other
+  // configuration keeps reading C[c].u, byte for byte. See buildAdvInputs().
+  CCField uwAdv_[3];
   // Route (b) instrumentation: u* = the LAST momentum solve's solution, stashed (ghosts included,
   // exactly as the smoother left them) before the projection overwrites it. The reaction force
   // needs the viscous fluxes AT u* -- the implicit solve acted on u*, not on the projected u.
