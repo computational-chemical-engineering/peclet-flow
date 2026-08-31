@@ -665,3 +665,307 @@ actually works, and is worth making the default for any measurement campaign run
 | `tests/kokkos_mpi` ctests | **PASS 54/54 on nvidia-cuda AND 54/54 on host-openmp**, np 1/2/4, zero failures. Both suites had to be run in two segments because the first pass crawled under a 3-way GPU/CPU contention with the concurrent WO-O battery (`graphamg_mpi_np4` 543 s against its normal ~2 s; `velocitymg_mpi_np4` on host stalled >45 min inside ctest yet passed standalone with `max\|distributed − single-rank\| = 0.000e+00`). That is the load-triggered slowness WO-L documents, not a defect: once the competing battery finished, the remaining 23 CUDA legs took 1889 s and the remaining 40 host legs 1511 s, all green |
 | The float A/B is unchanged by the cast completion | **PASS** — every float number in §1 (hydrostatic, porous, Z&H, contrast) reproduces its pre-change digits exactly |
 | Measurements isolated from concurrent work | **PASS** — every number produced in a `git worktree` at HEAD + this WO's diff only |
+
+---
+
+### WO-P (rung V4) — balanced-force CSF + the capillary time step — **DONE 2026-08-31**, one design deviation, one V3 defect found, one inherited gate corrected
+
+Delivered: `src/vof/surface_tension.hpp` (container-free `KOKKOS_INLINE_FUNCTION`s only, WO-D
+signature rule — the face-curvature rule, the face force and the Brackbill limit) +
+`Solver::addCsfRhs` / `addCsfRhsCellInterp` / `updateVofCurvature` / `capillaryDt` /
+`vofStepLimits` / `csfDiagnostics` in `src/flow_ibm.hpp` + `VofCurvature::interfaceEps` in
+`src/vof/curvature_field.hpp` + ten Python entry points +
+`tests/kokkos/test_vof_surface_tension.cpp` (ctest `vof_surface_tension`, 7 gates) +
+`tests/kokkos_mpi/test_vof_surface_tension_mpi.cpp` (`vof_surface_tension_mpi_np{1,2,4}`) +
+`tests/study/vof_surface_tension.py` (the physics battery: `static`, `wave`, `lamb`, `hysing1/2`,
+`falling`, `limits`).
+
+**The force, and exactly which operator forms the face value.** At the staggered velocity unknown
+`u_c(i)`,
+
+```
+F_c(i) = sigma * kappa_f(i) * ( C(i) - C(i - s_c) ) / h                                       (1)
+```
+
+added to the momentum RHS at the same point, in the same units and with the same cut-cell rescale
+`rs(i)` as the incremental scheme's `-(P(i) - P(i - s_c))`. **The difference `C(i) - C(i - s_c)` is
+the projection's own face difference** — the identical operator `buildRhsVar` applies to `P` and
+`projectCorrectVar` applies to `phi`. `kappa_f` is the arithmetic mean of the two cells' curvatures
+where both carry one, the single available one where only one does, and 0 where neither does (an
+*orphan* face, counted by `csf_diagnostics()`, never silently dropped — Basilisk's `tension.h` makes
+the same three-way choice and marks the last branch "this should not happen").
+
+**DEVIATION — the force does NOT go through the per-cell force-field machinery, and that is the
+point of the rung.** The WO says to use `cellForce_` (whose ghosts WO-G repaired) "with the face
+value formed by the projection's own operator". The two are not simultaneously satisfiable:
+`cellForce_`'s face rule is the **arithmetic interpolation** `1/2 (f(i) + f(i-s_c))` of a
+cell-centred force, which is exactly right for `rho*g` (the pair `f_f/rho_f` is then the intended
+acceleration — `variable_density_projection.md` §1) and exactly wrong for `sigma*kappa*grad C`. So
+`addCsfRhs` is an additive sibling kernel at the same insertion point, and the interpolated variant
+ships as the **ablation** `set_csf_mode(1)` rather than as the mechanism. The reason, and the
+measurement:
+
+> With a constant `kappa`, (1) is *exactly* the discrete gradient of `sigma*kappa*C`. It therefore
+> lies in the range of the operator the projection inverts, the projection annihilates it
+> completely, and the discrete equilibrium is exact in floating point. An interpolated cell-centred
+> `sigma*kappa*grad C` is not in that range for any potential, the projection cannot remove it, and
+> what is left drives the classical spurious current.
+
+| stationary droplet, 32^3, constant kappa, 30 steps | max\|u\| | spurious Ca |
+|---|---|---|
+| **balanced force, (1)** — the shipped path | **1.93e-17** | **1.9e-18** |
+| `set_csf_mode(1)` — cell-centred force, face-interpolated | **5.76e-02** | **5.8e-03** |
+
+**3.0e+15 x.** That is the literature's "balanced force gives machine zero, naive CSF gives ~1e-2"
+(Francois et al., JCP 213:141 (2006); Popinet, JCP 228:5838 (2009)) reproduced as a switch on one
+line of one kernel, with the curvature, the grid, the time step and the pressure driver held
+identical. It is the momentum analogue of the harmonic-rho_f ablation that makes WO-J's hydrostatic
+gate mean something.
+
+**Gate results** (host-openmp and nvidia-cuda; `tests/kokkos/test_vof_surface_tension.cpp`).
+
+| gate | result |
+|---|---|
+| **P1 THE EXACTNESS GATE** — stationary droplet, constant kappa, uniform rho | max\|u\| **3.64e-17 / 1.93e-17 / 2.43e-17** at 16^3/32^3/48^3 (R = 4/8/12) and **9.38e-17 / 7.47e-17 / 1.93e-17 / 4.28e-18** at mu = 1e-3 / 1e-2 / 1e-1 / 1 — machine zero, independent of resolution and of viscosity, as Popinet (2009) requires |
+| P2 the operator ablation | the table above |
+| P3 Young-Laplace | dP(liquid-gas) = sigma*kappa to **2.2e-16** relative; max\|P - p0 - sigma*kappa*C\| over the WHOLE field **2.6e-15** — the equilibrium pressure field IS the discrete solution `sigma*kappa*C + const` |
+| P4 the capillary dt | `capillary_dt()` reproduces `sqrt((rho1+rho2) h^3/(4 pi sigma))` to **0.0e+00** both from the declared phase pair (`enable_vof_momentum`) and from `min(rho)+max(rho)` of a closure-driven field; `step()` REFUSES `dt = 1.01 dt_sigma`; `set_capillary_cfl(1e30)` is the escape hatch |
+| P5 inert when off | du = dp = dC = **0.0** bitwise against the V2a/V2b path, with `set_surface_tension(0)`, `set_vof_interface_eps` and `set_csf_mode` all touched |
+| P6 the wisp guard | the mechanism below |
+| P7 spurious currents, real curvature | Ca **2.54e-4 / 5.90e-5 / 2.65e-5 / 1.39e-5** at D/dx = 8 / 16 / 24 / 32 (60 steps), fitted order **2.10**; dkappa_rms 4.57e-3 -> 1.22e-4; orphan faces 0-1 per component at every rung |
+| MPI np 1/2/4, host + CUDA, periodic and walls-on-the-cut-axis | np = 1 **bitwise** on u, P, C and kappa; np = 2/4 du <= 1.5e-15, dP <= 2.2e-15, dC <= 6.7e-15, dkappa <= 8.8e-15 (the pressure driver's documented reduction-order floor, propagated into the colour and hence into kappa); the curvature **BRANCH** field bitwise at every np, and the exactness gate at machine zero on every decomposition |
+
+**THE V3 DEFECT THIS RUNG FOUND: the curvature cascade returns `|kappa|` up to 2.9e+11 for cells
+that carry no interface, and under a force that is fatal.**
+
+Weymouth-Yue leaves **round-off colour residue** in every cell its sweeps touch — measured on a
+static droplet at 64^3 after 10 steps: `C` down to **-3.2e-35**, and some **5300 extra cells** at
+`0 < C < 1e-30`, i.e. more "interfacial" cells than the interface itself has (10018 against 4719).
+Those cells satisfy `wyIsMixed` (`C > 0 && C < 1`), so the cascade dutifully builds a PLIC polygon of
+area ~0 for them and fits a paraboloid to it. Measured `|kappa|` in that population: **2.2e+02 ...
+2.9e+11**, where the physical value is 0.125.
+
+On its own that is a wrong number in a field nobody was reading — V3's own gates run on exact colour
+fields, where the population is empty, which is why WO-O never saw it. Under V4 it is fatal: a face
+between such a cell and a REAL interfacial cell has `dC = O(1)` and a face curvature
+`(kappa_real + 1e11)/2`. Measured, 32^3 static droplet, unguarded: max\|u\| **4.5e-4 at step 1 ->
+2.7e-1 by step 20**; at 96^3 the run trips the Weymouth-Yue CFL cap outright; the SAME run with the
+curvature frozen at its clean initial value stays bounded at 4e-3 — which is what isolates the
+curvature feedback as the mechanism rather than the transport or the force.
+
+The fix is a wisp threshold on the interfacial predicate — `VofCurvature::interfaceEps`: a cell
+carries an interface only while `eps < C < 1 - eps`. **Default 0, which is `wyIsMixed` verbatim, so
+rung V3 is byte-identical** (the `vof_curvature` ctest reproduces WO-O's numbers digit for digit:
+order 2.26 / 1.86, PV-only 1.96 / 1.99, tier-2b 1.37 / 0.00). `set_surface_tension` sets it to
+**1e-8**, the same threshold `WyAdvector::diagnostics` already reports wisps against.
+`set_vof_interface_eps(0)` is the ablation; measured at 64^3 over 60 steps:
+
+| interface_eps | cells served | max\|kappa\| (2/R = 0.125) | max\|u\| step 1 -> step 60 |
+|---|---|---|---|
+| **1e-8 (default)** | 4828 | **0.1258** | 2.11e-3 -> **1.39e-4** (decaying) |
+| 0 (the V3 predicate) | 10018 | **2.87e+11** | 2.11e-3 -> **1.85e-3** (not decaying) |
+
+This is VOF_PLAN §6's trap — *"with surface tension clipping is unavoidable (Arrufat)"* — arriving
+exactly where the plan said it would, and in the cheapest available form: a threshold on the
+*predicate* rather than clipping the colour field, so exact conservation is untouched. The wisps
+themselves are left alone; they are at 1e-30 and neither the density closure nor the force can see
+them.
+
+**WHY THE EXACTNESS GATE IS EXACT AT UNIFORM DENSITY AND ASYMPTOTIC AT VARIABLE DENSITY — a
+mechanism, measured, and NOT the float-storage floor.**
+
+At ratio 1 the gate is at 1e-17 from the first step. At ratio 10-1000 it starts at ~2e-4 and
+*decays*: **1.12e-4 / 5.90e-5 / 2.04e-5 / 4.07e-6 / 4.97e-7** at steps 1 / 10 / 30 / 100 / 300
+(ratio 10). Two ablations pin the mechanism:
+
+| ratio 100, step 1 | mu = 0 | 1e-4 | 1e-2 | 0.1 | 1 |
+|---|---|---|---|---|---|
+| max\|u\| | **3.30e-09** | 4.82e-07 | 4.35e-05 | 2.38e-04 | 7.17e-04 |
+
+| ratio 100, mu = 0.1, step 1 | dt/dt_sigma = 1e-4 | 1e-2 | 0.1 | 0.5 |
+|---|---|---|---|---|
+| max\|u\| | **1.95e-11** | 1.89e-07 | 1.60e-05 | 2.38e-04 |
+
+i.e. the residue scales as **mu . dt^2** and vanishes at either limit. The reason is the one that
+makes the gate exact at uniform density: the semi-implicit momentum operator
+`A = rho_f/dt - mu*Lap` **commutes with the discrete gradient only when `rho_f` is constant**, so
+`A^{-1} grad(Phi) = grad(A^{-1} Phi)` — a pure discrete gradient, which the projection annihilates
+exactly — only there. With `rho_f` varying, `u*` picks up a non-gradient part of order
+`mu dt^2 grad(rho_f)`; the fixed point (`u = 0`, `grad P = sigma kappa grad C`) still exists and is
+still exact, but it is *approached* instead of hit. The same statement applies at a **wall** at
+constant density (the face-folded viscous operator does not leave a gradient field invariant next to
+a Dirichlet boundary): measured on the MPI `exact-walls-z` configuration, 2.11e-10 at 10 steps ->
+1.18e-10 at 30 -> 2.91e-11 at 100 -> 3.59e-12 at 300, and **1.10e-16 at mu = 0**. That is why the
+MPI gate asserts machine zero on the periodic configuration and a bound plus decomposition-
+independence on the walled one.
+
+**It is NOT the float operator storage.** The same battery in a `-DPECLET_FLOW_MREAL_DOUBLE` build
+reproduces every number above to five significant figures (2.0374e-05 against 2.0374e-05 at ratio 10,
+mu = 0.1) even though `max|div(open u)|` improves from 9.4e-14 to 7.6e-21. What the double build
+*does* fix is the residue **at mu = 0**, where the mu-mechanism is absent:
+
+| mu = 0, 30 steps | ratio 1 | 10 | 100 | 1000 |
+|---|---|---|---|---|
+| float `MReal` (shipped) | 7.51e-17 | 8.60e-10 | 4.01e-10 | 1.35e-10 |
+| double `MReal` | 6.36e-17 | **6.84e-17** | **2.29e-17** | **8.86e-18** |
+
+So the balanced-force identity is exact at **every** density ratio to 1000 in a double build, and the
+float default carries WO-M's `A.1 = 0` floor at ~1e-10 — two orders below the mu-mechanism at any
+viscosity anyone would run, so it does not bind in practice. Both loci are separately identified,
+which is the point of measuring them apart.
+
+**THE CAPILLARY TIME STEP, AND IT BINDS EVERYWHERE AT PORE SCALE.**
+
+`capillary_dt()` = `sqrt((rho1+rho2) h^3/(4 pi sigma))` (Brackbill, Kothe & Zemach, JCP 100:335
+(1992), eq. 44; Denner & van Wachem, JCP 285:24 (2015) verified all three of its features — the
+`1/(4 pi)` prefactor IS the stability boundary rather than a conservative estimate, the scaling is
+`h^{3/2}`, and it is the **sum** of the densities because both phases oscillate). It is enforced by
+`step()` beside the Weymouth-Yue CFL cap, with `set_capillary_cfl(f)` (default 1.0) the deliberate
+escape hatch, and `vof_step_limits()` reports both limits and which binds.
+
+Swept over pore diameters 50 / 200 um, 16 / 32 / 64 cells per diameter and Ca = 1e-6 / 1e-4 / 1e-2
+for water/air (sigma 0.072 N/m, rho 1000/1.2, mu 1e-3): **the capillary limit binds in 18 of 18
+combinations**, by factors 6 (200 um, 16 cells, Ca 1e-2) to 5.9e+04 (50 um, 16 cells, Ca 1e-6) — and
+it becomes **more** binding under refinement, since `dt_sigma ~ h^{3/2}` against `dt_CFL ~ h`, so
+their ratio grows as `h^{-1/2}`. The step-count economics that follows, per pore volume traversed:
+
+| d [um] | cells/d | Ca | dt_sigma [s] | dt_CFL [s] | steps for one pore |
+|---|---|---|---|---|---|
+| 50 | 16 | 1e-6 | 1.84e-7 | 1.09e-2 | **3.8e+06** |
+| 50 | 64 | 1e-6 | 2.30e-8 | 2.71e-3 | **3.0e+07** |
+| 50 | 16 | 1e-2 | 1.84e-7 | 1.09e-6 | 3.8e+02 |
+| 200 | 64 | 1e-4 | 1.84e-7 | 1.09e-4 | 1.5e+05 |
+
+**So the answer to the WO's question is yes: at pore scale the capillary dt is the binding limit, by
+four to five orders at the capillary numbers of interest, and the cost is 1e6-1e7 steps per pore
+volume.** That is the number an implicit or semi-implicit surface-tension treatment would have to
+beat. Popinet (2018) says not yet, and nothing here contradicts him for *dynamic* problems (where
+`dt_CFL` shrinks alongside), but for a slow imbibition/drainage sweep at Ca ~ 1e-6 the explicit
+constraint is essentially the entire cost of the calculation.
+
+**THE PHYSICS BATTERY** (`tests/study/vof_surface_tension.py`, nvidia-cuda). Every run records the
+max pressure-iteration count against its cap and `max|div(open u)|`; none of the runs below capped.
+
+**Hysing rising bubble** (Hysing et al., IJNMF 60:1259 (2009)), quasi-2D on 64x128x4, adaptive
+`dt = 0.4 min(dt_CFL, dt_sigma)`, t = 0..3, both cases, against the published reference:
+
+| case | quantity | measured | reference | deviation |
+|---|---|---|---|---|
+| **1** (Re 35, Eo 10, ratio 10) | max rise velocity | **0.2497** at t = 0.886 | 0.2417 at t = 0.921 | **+3.3 %** |
+| 1 | y_c(3) | **1.0808** | 1.0810 | **-0.02 %** |
+| **2** (Eo 125, ratio 1000, mu ratio 100) | max rise velocity | **0.2574** at t = 0.671 | 0.2502 at t = 0.732 | **+2.9 %** |
+| 2 | y_c(3) | **1.1082** | 1.1376 | **-2.6 %** |
+
+Case 1: 2032 steps, and the binding limit was the CAPILLARY dt on **204 of 204** dt re-picks.
+Case 2: 1123 steps, and the binding limit was the **WY CFL on 108 of 113** — at ratio 1000 with
+sigma 12.5x smaller, `dt_sigma` is 3.4x larger while the velocities are the same, so the transport
+limit takes over. That is the clean statement of when each binds. Case 2's pressure solve is the
+weak point of the pair: 116/600 iterations and `max|div(open u)| = 1.85e-03` (1e-4 relative to
+|u| ~ 17 cells/s) against 20/600 and 9.1e-06 for case 1 — the density-ratio-1000 operator
+conditioning WO-M quantified (kappa ~ 0.18 N^2 x contrast), and the reason Hysing themselves report
+case 2 as not grid-converged across the three reference codes (y_c(3) = 1.1249 / 1.1376 / 1.1512).
+
+*Lateral BC*: the benchmark prescribes free-slip side walls, which this solver does not have. The
+runs use PERIODIC, and for case 1 that is **not an approximation** — mirroring a laterally symmetric
+bubble about x = 0 and x = 1 puts images at spacing 1, and the mirror of a symmetric bubble is its
+translate. Case 2 develops skirts that break the symmetry, so there it is an approximation.
+Circularity is not reported: it needs the PLIC interface length, which the solver does not expose.
+
+**MOMENTUM CONSISTENCY (V2b) IS WORTH 14 % ON HYSING CASE 1, AT DENSITY RATIO 10.** The case-1 run
+above has `enable_vof_momentum` on. With it OFF, everything else identical: max rise velocity
+**0.2827 (+16.9 %)** and y_c(3) **1.2083 (+11.8 %)**, against +3.3 % / -0.02 % with it on. WO-K
+finding 1 recorded that its uniform-velocity gate could not discriminate the consistent scheme from
+the inconsistent one on this solver (the momentum advection is in advective form, so a uniform
+velocity is a fixed point either way) and concluded that "the contrast this rung needs must come
+from a case where the momentum actually transports". This is that case, and the contrast is a
+factor 5 in the error against a published reference — **at ratio 10**, an order of magnitude below
+where the literature says consistency starts to matter.
+
+**Falling drop — the gate WO-K deferred. Both halves of WO-K's account turn out to be wrong, and the
+gate as written measured the wrong quantity.**
+
+WO-K's substitute reached 9 % of Hadamard-Rybczynski and named an under-resolved momentum solve as
+the suspected cause. Re-run here with surface tension holding the drop together (ratio 800,
+mu ratio 100, sigma 16, D/h = 15, 6 Stokes relaxation times, `dt = 0.5 dt_sigma`):
+
+1. **A periodic box driven by a zero-mean body force conserves total MOMENTUM, not total volume
+   flux.** The box's mean velocity is a free mode of the projection, and at ratio 800 with
+   phi = 1.6 % the light ambient recoils at ~19x the drop's speed
+   (`rho_g (1-phi) U_a = -rho_l phi U_d`). Measured: `U_drop = -1.64e-03` while
+   `U_ambient = +3.06e-02`. **The lab-frame drop velocity is a near-cancellation of two much larger
+   numbers and is not the settling velocity**; what Hadamard-Rybczynski predicts is
+   `U_drop - U_ambient = -3.23e-02`.
+2. **Converging the momentum solve changes nothing physical.** Driving the smoother to a tolerance
+   instead of a fixed count moves the *lab-frame* number a factor 5.7 — and leaves the *relative*
+   velocity alone to four digits:
+
+| momentum smoother | max sweeps/step | U_drop (lab) | U_rel | U_rel / (U_HR/K) |
+|---|---|---|---|---|
+| fixed 20 (WO-K's setting) | 60 | -8.90e-03 | -3.2202e-02 | **0.826** |
+| tolerance 1e-4, cap 400 | 857 | -1.64e-03 | -3.2284e-02 | **0.828** |
+| tolerance 1e-6, cap 2000 | 2649 | -1.57e-03 | -3.2287e-02 | **0.828** |
+
+   So WO-K's suspected mechanism is refuted outright: the sweep count is irrelevant to the physics
+   and only moves the cancellation.
+3. **Two formula corrections were needed to make the comparison mean anything**, and both matter at
+   the 20-50 % level: Hadamard-Rybczynski is `U = (2/3)(d rho) g R^2/mu_o (mu_o + mu_i)/(2 mu_o +
+   3 mu_i)` — the denominator carries `3 mu_i`, and the rigid limit must return Stokes'
+   `2 (d rho) g R^2/(9 mu_o)` — and the periodic-array correction is Hasimoto's (1959)
+   **denominator** form `K = 1/(1 - 1.7601 c^{1/3} + c - 1.5593 c^2)`, which is 1.748 at c = 0.016
+   against 1.443 for the linearised `1 + 1.7601 c^{1/3}`.
+4. **The result, with the momentum solve converged:**
+
+| D/h | phi | K | U_rel / (U_HR/K) |
+|---|---|---|---|
+| 10 | 0.0047 | 1.409 | **0.786** |
+| 15 | 0.0160 | 1.748 | **0.828** |
+| 20 | 0.0160 | 1.748 | **0.869** |
+
+   monotone in resolution and converging toward 1. **At 15 cells per diameter the drop reaches
+   83 % of the analytic terminal velocity — 17 % low, i.e. just OUTSIDE Arrufat's "within 15 %" —
+   and at 20 cells per diameter it is 13 % low, inside it.** That is the honest statement; the claim
+   is *not* reproduced at the resolution it is made for, and the residual is a resolution effect
+   rather than a solver-convergence one. What remains unattributed is whether the last ~15 % is the
+   one-cell-diffuse viscosity jump standing in for a mu-ratio-100 drop, or the array correction's
+   two-term expansion at L/D ~ 3-5; the gate does not separate them and this WO does not claim it.
+
+**Capillary wave against the analytical dispersion** (`omega^2 = sigma k^3/(rho_1+rho_2)`, the
+inviscid limit of Prosperetti 1981), quasi-2D standing wave, `a_0 = lambda/100`, matched kinematic
+viscosities, walls +-z, 2.5 periods:
+
+| cells / lambda | nu | omega measured | omega theory | err | decay measured | 2 nu k^2 | err |
+|---|---|---|---|---|---|---|---|
+| 32 | 0.005 | 0.06017 | 0.06152 | **-2.20 %** | 1.087e-3 | 3.855e-4 | +182 % |
+| 64 | 0.005 | 0.02130 | 0.02175 | **-2.06 %** | 4.628e-4 | 9.638e-5 | +380 % |
+| 32 | 0.020 | 0.05928 | 0.06152 | **-3.65 %** | 2.746e-3 | 1.542e-3 | +78 % |
+
+The frequency is 2-4 % low and the deficit grows with viscosity, which is the right sign (the
+viscous correction lowers omega) but far larger than the weak-damping estimate `(gamma/omega)^2/2 ~
+1e-4` allows. The decay rate is 2-5x the leading-order `2 nu k^2`; note that number is a two-extremum
+fit over 2.5 periods on an initial-value problem whose early behaviour is not a pure exponential
+(that is precisely why Prosperetti's full solution exists), so it is an upper bound on the true rate
+rather than a measurement of it. **Reported, not gated**: the honest comparison for the decay needs
+Prosperetti's Laplace-transform solution, which this WO did not implement.
+
+**Oscillating droplet against Lamb** (1932, art. 275; mode n = 2,
+`omega^2 = n(n-1)(n+1)(n+2) sigma / (R^3((n+1) rho_in + n rho_out))`), prolate perturbation of 5 % of
+R released from rest, frequency from the zero crossings of the `<2z^2-x^2-y^2>` moment:
+
+| grid | R | phi (drop/box) | rho ratio | omega measured | omega Lamb | err |
+|---|---|---|---|---|---|---|
+| 32^3 | 8 | 6.54 % | 1 | 0.09010 | 0.09682 | **-6.95 %** |
+| 48^3 | 12 | 6.54 % | 1 | 0.04925 | 0.05270 | **-6.56 %** |
+| 48^3 | 8 | 1.94 % | 1 | 0.09063 | 0.09682 | **-6.39 %** |
+| 64^3 | 8 | 0.82 % | 1 | 0.09069 | 0.09682 | **-6.33 %** |
+| 48^3 | 12 | 6.54 % | 100 | 0.00657 | 0.00678 | **-3.14 %** |
+
+**A 6.5 % frequency deficit that is neither confinement nor resolution**, and both were ruled out by
+measurement rather than assumed: an eightfold reduction in the drop-to-box volume ratio (6.54 % ->
+0.82 %, i.e. the periodic images' added mass down by ~8x) moves it from -6.95 % to -6.33 %, and R = 8
+vs R = 12 at fixed phi moves it from -6.95 % to -6.56 %. The ratio-100 row is consistent with a
+*small* confinement contribution (a 100x lighter outer fluid has much less added mass to confine, and
+the deficit halves), but it cannot be the bulk of it. The candidates this WO did not separate are the
+finite perturbation amplitude (Tsamopoulos & Brown's nonlinear frequency shift is negative, but at
+epsilon = 0.05 it is O(0.3 %)) and a systematic bias in the discrete curvature of a mode-2 shape.
+**Recorded as a measured deviation, not a pass** — the same sign and the same order as the capillary
+wave's, which suggests one mechanism rather than two.

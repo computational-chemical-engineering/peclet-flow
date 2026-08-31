@@ -396,13 +396,73 @@ implemented and ships **OFF** — it destroys the max-error convergence (order 0
 its data set is the slope-selected subset of columns that closed; `doc/vof_workorders_v34.md` WO-O
 has the mechanism and the width sweep.
 
+**Balanced-force surface tension (V4).** `set_surface_tension(sigma)` turns on the continuum
+surface force at the staggered face, formed with **the projection's own difference operator**:
+
+```
+F_c(i) = sigma * kappa_f(i) * ( C(i) - C(i - s_c) ) / h
+```
+
+added to the momentum RHS at the same place, in the same units and with the same cut-cell rescale
+as the incremental scheme's `-(P(i) - P(i - s_c))`. `kappa_f` is the mean of the two cells'
+curvatures where both carry one, the single available one where only one does. **That pairing is the
+whole rung.** With a constant κ the force is *exactly* the discrete gradient of `σκC`, so it lies in
+the range of the operator the projection inverts, the projection annihilates it, and a stationary
+droplet stays at machine zero — measured **max|u| = 3.6e-17 / 1.9e-17 / 2.4e-17 at 16³/32³/48³** and
+**9.4e-17 … 4.3e-18 over μ = 1e-3 … 1** (Francois et al. 2006; Popinet 2009). The ablation
+`set_csf_mode(1)` — a *cell-centred* `σκ∇C` face-interpolated exactly as the per-cell body-force
+machinery carries `ρg` — is the same physics with one wrong operator pairing and reads **5.8e-2,
+i.e. Ca = 5.8e-3 and 3.0e+15× the balanced-force value**: that is the literature's "naive CSF gives
+~1e-2", reproduced as a switch. Equilibrium `P = σκC + const` holds to **2.6e-15** over the whole
+field and the Young–Laplace jump to **2.2e-16**.
+
+With the *computed* curvature the residual currents are the curvature error and nothing else:
+measured **Ca = 2.5e-4 / 5.9e-5 / 2.6e-5 at D/Δ = 8 / 16 / 24**, converging. Note what that means
+for the pore scale: `Ca ≈ δκ·h` in cell units, so the ≲1e-7 budget is a *curvature* requirement, and
+WO-O measured that curvature error stops converging with advection-realistic fractions — the force
+discretization is exact, the estimator is the ceiling.
+
+Two things the rung had to pay for, both measured:
+- **A wisp guard on the curvature's interfacial predicate is not optional once κ feeds a force.**
+  Weymouth–Yue leaves round-off colour residue (down to −3e-35) in every cell its sweeps touch;
+  those cells satisfy `0 < C < 1`, so the V3 cascade builds a zero-area PLIC polygon for them and
+  returns **|κ| up to 1.2e+08** where the physical value is 0.125. A face between one of them and a
+  real interfacial cell then carries a force eight orders too large. `set_surface_tension` therefore
+  sets `VofCurvature::interfaceEps = 1e-8` (`set_vof_interface_eps`); the V3 default stays 0, so
+  `compute_vof_curvature()` without surface tension is unchanged. Ablation at `eps = 0`: a 32³ static
+  droplet goes 4.5e-4 → 2.7e-1 in 20 steps and a 96³ one trips the WY CFL cap.
+- **At variable density the equilibrium is approached, not hit.** The semi-implicit momentum
+  operator `A = ρ_f/dt − μ∇²` commutes with the discrete gradient only when `ρ_f` is constant (and
+  away from a wall), so `A⁻¹∇Φ` is a pure ρ-weighted gradient — which the projection removes
+  exactly — only there. With ρ varying the first-step residue scales as **μ·dt²** (measured at ratio
+  100: 3.3e-9 at μ=0 against 2.4e-4 at μ=0.1; 1.9e-11 at dt/dt_σ = 1e-4 against 2.4e-4 at 0.5) and
+  then **decays**: 1.1e-4 → 5.0e-7 over 300 steps at ratio 10. It is a property of the projection
+  splitting, not of the CSF, and it is NOT the float-storage floor — the numbers reproduce to five
+  figures in a `-DPECLET_FLOW_MREAL_DOUBLE` build. At μ = 0 that build reads **6.8e-17 … 8.9e-18 at
+  every ratio to 1000** while the float default floors at ~1e-10 (WO-M's `A·1 = 0` defect, two
+  orders below the μ mechanism at any realistic viscosity).
+
+**The capillary time step** `Δt < sqrt((ρ₁+ρ₂)Δx³/(4πσ))` (Brackbill 1992; Denner & van Wachem 2015
+verified the prefactor IS the stability boundary, the h^{3/2} scaling, and that it is the *sum* of
+the densities) is exposed as `capillary_dt()` and **enforced by `step()`** alongside the
+Weymouth–Yue CFL cap; `set_capillary_cfl(f)` is the safety factor (default 1.0, huge to disable).
+`vof_step_limits()` reports both limits and which binds. **At pore scale the capillary limit binds
+everywhere**: swept over pore diameters 50/200 µm, 16/32/64 cells per diameter and Ca = 1e-6…1e-2
+for water/air, `dt_σ` is the binding limit in 18 of 18 combinations, by factors 6 to 5.9e4 — and it
+gets *more* binding under refinement, since `dt_σ ~ h^{3/2}` against `dt_CFL ~ h`. The cost is real
+(3.8e6 steps to traverse one 50 µm pore at Ca = 1e-6), which is the measurement that decides whether
+implicit surface tension is ever worth revisiting.
+
 **Python:** `enable_vof()`, `set_vof(C)` / `get_vof()`, `vof_max_courant()` / `vof_last_courant()`,
 `set_vof_cfl_limit()`, `vof_diagnostics()`, `set_rho_face_harmonic()`; V2b adds
 `enable_vof_momentum(rho_gas, rho_liquid)`, `vof_advected_velocity(c)`,
 `vof_momentum_diagnostics()`, `set_vof_rho_floor()`, `set_vof_momentum_muscl()`,
 `set_vof_momentum_cell_flag()`, `set_vof_flux_clamp()`; V3 adds `compute_vof_curvature()`,
 `vof_curvature()`, `vof_curvature_branch()`, `set_vof_curvature_weight_width()`,
-`set_vof_curvature_mixed_height_fit()`. `"C"` is an ordinary
+`set_vof_curvature_mixed_height_fit()`; V4 adds
+`set_surface_tension()` / `surface_tension()`, `capillary_dt()`, `set_capillary_cfl()`,
+`vof_step_limits()`, `csf_diagnostics()`, `set_vof_interface_eps()` / `vof_interface_eps()`,
+`set_vof_kappa_frozen()`, `set_vof_kappa_constant()`, `set_csf_mode()`. `"C"` is an ordinary
 registered `G=2` cell field, so ρ(C)/μ(C) go through the existing `LinearMix` closures
 (`set_property_model("rho","linear","C",[rho_g, rho_l-rho_g])`, which enables the varRho path) and
 `get_field`/`set_field`/`field_view`/`redistribute` work on it unchanged. The **g=3 working block**
@@ -429,7 +489,7 @@ Three things this construction paid for, all in `doc/vof_workorders_v2.md` (WO-K
   empties (gain `Δρ·F/rho^c`); plain donor-cell upwind is the default and
   `set_vof_momentum_muscl(True)` the opt-in, measured 2.2e-10 vs 6.7e-16 at ratio 1e4.
 
-**Scope — say this to users:** no surface tension (V4). **Staggered only** (collocated is V8 —
+**Scope — say this to users:** **Staggered only** (collocated is V8 —
 `enable_vof` throws) and **no immersed solid** (the fluxes are not openness-weighted yet —
 `advectVof` throws; an all-fluid `set_pressure_geometry` is fine). Without
 `enable_vof_momentum` the rung is **valid only at modest density ratios for cases with motion**; a
@@ -461,11 +521,29 @@ Measured with it on: ∂P/∂z relative error **0.34** instead of 1e-15. It ship
 the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
 Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
-`vof_curvature`; `tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`, `vof_twophase_mpi_np{1,2,4}`,
-`vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`; `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
+`vof_curvature`, `vof_surface_tension`; `tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`,
+`vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,
+`vof_surface_tension_mpi_np{1,2,4}`; `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
 falling drop, the RT near-Nyquist check — every gate there records the pressure iteration count
-against its cap and treats a capped run as INVALID);
+against its cap and treats a capped run as INVALID); `tests/study/vof_surface_tension.py` (the V4
+physics battery: `static`, `wave`, `lamb`, `hysing1`, `hysing2`, `falling`, `limits`);
 `tests/study/rayleigh_taylor.py` (diffuse and sharp records side by side).
+
+**Benchmarks (V4, `tests/study/vof_surface_tension.py`).** **Hysing rising bubble**, quasi-2D
+64×128×4, adaptive `dt`, against the published reference: case 1 max rise velocity **0.2497 vs
+0.2417 (+3.3 %)** and `y_c(3)` **1.0808 vs 1.0810 (−0.02 %)**; case 2 **0.2574 vs 0.2502 (+2.9 %)**
+and `y_c(3)` **1.1082 vs 1.1376 (−2.6 %)**. **Momentum consistency (V2b) is worth 14 % on case 1 at
+density ratio 10** — with `enable_vof_momentum` OFF the same run reads +16.9 % / +11.8 %, which is
+the discriminating case WO-K's uniform-velocity gate could not provide. Capillary wave vs the
+analytical dispersion: frequency **−2.1 to −3.7 %** at 32–64 cells/λ. Lamb mode-2 droplet: **−6.3 to
+−7.0 %**, and neither confinement (φ 6.5 % → 0.8 %) nor resolution explains it — recorded as a
+measured deviation, not a pass. **Falling drop** (the gate WO-K deferred): the periodic zero-mean
+body force conserves *momentum*, not volume flux, so at ratio 800 the light ambient recoils at ~19×
+the drop's speed and the LAB-FRAME drop velocity — what WO-K measured — is a near-cancellation. The
+relative velocity reaches **0.786 / 0.828 / 0.869 of the Hasimoto-corrected Hadamard–Rybczynski at
+D/h = 10 / 15 / 20**, and is **insensitive to the momentum-sweep count to four digits** (0.826 at 60
+sweeps/step, 0.828 at 2649) — so WO-K's suspected under-resolved momentum solve is refuted. At 15
+cells/diameter it is 17 % low, just outside Arrufat's "within 15 %"; at 20 it is 13 % low, inside.
 
 ### Domain boundary conditions
 
