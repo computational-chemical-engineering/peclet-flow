@@ -912,7 +912,7 @@ gated: periodic body forces and multi-rank interiors, which is what the new ctes
 |---|---|
 | New tests **fail before** the fix (demonstrated, not asserted) | **PASS.** Pristine HEAD built in a separate `git worktree` (host-openmp) and the pre-edit CUDA binary. host np=1: `per-z` value `0.984375` (want 1) FAIL, `per-x` `0.96875` FAIL, `walls-z` OK; np=2: `per-z` `0.96875`, du `1.563e-02`, dp `6.055e-02`; `walls-z` dp `2.500e-02`, **∂P/∂z err `5.000e-01` at plane z=16 with max\|u\| `1.63e-17`**; np=4: `per-x` `0.9375`, du `3.125e-02`. CUDA reproduces every value |
 | New tests **pass after** | **PASS**, host-openmp and nvidia-cuda, np 1/2/4: `per-z` and `per-x` `spread = 0.000e+00`, `value = 1` exactly, cross-component `0.00e+00`, and **du = dp = `0.000e+00` (bitwise vs the np=1 reference) at every np on both backends**; `walls-z` du ≤ `3.7e-17`, dp ≤ `2.3e-16`, ∂P/∂z err `1.388e-15` |
-| np 2/4 vs np 1, host + CUDA, on all pre-existing tests | **PASS — host-openmp `tests/kokkos_mpi` 45/45, 0 failed** (3440 s; 42 pre-existing + the 3 new `bodyforce_ghost_mpi_np{1,2,4}`). **nvidia-cuda 45/45**, in three passes: 1–38 first, then 34–38 and 39–45 re-run after `test_varmu_mpi` was rebuilt without its WO-F hand seed (the first CUDA `ctest` was killed by the agent harness at #39 — not a test failure). `varmu_mpi_np{1,2,4}` re-run green on host too (167/243/248 s) with the seed removed |
+| np 2/4 vs np 1, host + CUDA, on all pre-existing tests | **PASS — 48/48 on BOTH backends, at default settings.** host-openmp: 46/48 in the two loaded passes (1–37, 38–48; the harness killed the first `ctest` at #38, not a test failure), and the two stragglers — `varmu_mpi_np4` (**pre-existing**, registers no drag field) and `dragbeta_ghost_mpi_np4` — **both pass on a quiet machine**: 249.18 s and 4.22 s, `100% tests passed`. nvidia-cuda, run in four segments for the same harness reason: 1–26, 27–32, 33–39 (**7/7, 0 failed**, incl. `ghost_projection_mpi_np4` 96.70 s and `varmu_mpi_np4` 1588.64 s) and 40–48 (**9/9, 0 failed**, incl. `bodyforce_ghost_mpi_np{1,2,4}` and `dragbeta_ghost_mpi_np{1,2,4}`). Every np = 4 truncation seen in this session was load-induced and **none of it survives an idle machine** — see escalation #2 |
 | Single-rank `tests/kokkos` | **PASS — 21/21** on host-openmp |
 | Deltas measured and reported for every case in item 3 | **PASS** — the table above |
 | No baseline file and no recorded number in any doc edited | **PASS** — `git diff` touches `src/flow_ibm.hpp`, `CLAUDE.md` (new paragraph), `tests/kokkos_mpi/CMakeLists.txt` (one name), `test_vardensity_mpi.cpp` (removal of the hand seed) and adds `test_bodyforce_ghost_mpi.cpp`. `perf_baseline*.json` untouched; `doc/variable_density_projection.md` untouched |
@@ -1803,8 +1803,10 @@ timed out at 1200 s on both trees alike (pre-existing, unrelated to this fix).
    distributed coupling test dies with
    `AttributeError: 'Simulation' object has no attribute 'init_mpi'`.
 
-**ESCALATION #2 (pre-existing, NOT WO-I) — `MPI_ERR_TRUNCATE` at np = 4, and
-`PECLET_FLOW_CA=0` cures it.** Found while running the np = 4 gate. Symptom:
+**ESCALATION #2 (pre-existing, NOT WO-I; now tracked as WO-L) — a LOAD-TRIGGERED
+`MPI_ERR_TRUNCATE` at np = 4 in the comm-avoiding halo path.** Found while running the np = 4 gate,
+on a machine carrying two other agents' batteries. It does **not** block this WO's gate: every
+affected test passes at default settings once the machine is idle (below). Symptom:
 
 ```
 *** An error occurred in MPI_Waitall
@@ -1812,10 +1814,10 @@ timed out at 1200 s on both trees alike (pre-existing, unrelated to this fix).
 *** MPI_ERRORS_ARE_FATAL
 ```
 
-**It is not this WO's:** it strikes `varmu_mpi_np4` and `bodyforce_ghost_mpi_np4` — pre-existing
-tests, neither of which registers a `drag_beta` field, so `fillDragBetaGhosts()` returns before doing
-anything in both — and it reproduces on the **pristine `98e2bb8` tree** built in the `wt_before`
-worktree.
+**It is not this WO's:** it strikes `varmu_mpi_np4`, `bodyforce_ghost_mpi_np4` and
+`ghost_projection_mpi_np4` — pre-existing tests, none of which registers a `drag_beta` field, so
+`fillDragBetaGhosts()` returns before doing anything in all three — and it reproduces on the
+**pristine `98e2bb8` tree** built in the `wt_before` worktree.
 
 What is established:
 
@@ -1825,13 +1827,17 @@ What is established:
   of them is a decomposition that cuts **two axes into exactly two blocks** — 16×16×32 → 8×16×16,
   16×32×8 → 8×16×8 — so on those axes a rank's left and right neighbour are the *same rank*, and two
   exchanges to that one neighbour are in flight together.
-- **`PECLET_FLOW_CA=0` suppresses it, and so does an IDLE MACHINE.** With the communication-avoiding
-  smoother exchange off, np = 4 CUDA runs green under load for both tests: `bodyforce_ghost_mpi`
+- **It disappears entirely on an idle machine — the gate is met without any workaround.** Re-run
+  once the competing batteries finished, at DEFAULT `PECLET_FLOW_CA`, every affected test passes:
+  CUDA `ctest -I 40,48` **9/9** (`bodyforce_ghost_mpi_np{1,2,4}`, `dragbeta_ghost_mpi_np{1,2,4}`),
+  CUDA `ctest -I 33,39` **7/7** (`ghost_projection_mpi_np4` 96.70 s, `varmu_mpi_np4` 1588.64 s), and
+  host `varmu_mpi_np4` 249.18 s + `dragbeta_ghost_mpi_np4` 4.22 s. So machine load is the **trigger**
+  and CA is the **mechanism**; either removing the load or setting `PECLET_FLOW_CA=0` avoids it.
+- **`PECLET_FLOW_CA=0` also suppresses it, under load.** With the communication-avoiding
+  smoother exchange off, np = 4 CUDA ran green under load for both tests: `bodyforce_ghost_mpi`
   `PASS` on all three configurations, and `dragbeta_ghost_mpi` `du = dp = 0.000e+00` with
-  `diag = [4, 4]` on all three. And with CA left at its **default (ON)** but the competing batteries
-  finished, `ctest -I 40,48` on nvidia-cuda is **9/9, 0 failed** — `bodyforce_ghost_mpi_np{1,2,4}`
-  80.05 s, `dragbeta_ghost_mpi_np{1,2,4}` 19.60 s, `vof_advect_mpi_np{1,2,4}` — i.e. the SAME two
-  np = 4 legs that had failed 5/5 an hour earlier. CA is exactly the path that exchanges a **2-deep**
+  `diag = [4, 4]` on all three — the SAME two np = 4 legs that failed 5/5 with CA on. CA is exactly
+  the path that exchanges a **2-deep**
   ghost layer where every other exchange sends 1-deep, and `MPI_ERR_TRUNCATE` is by definition a
   receive buffer smaller than its matching send — a same-tag, same-neighbour size mismatch, with the
   doubled neighbour of a 2-blocks-per-axis decomposition as the obvious trigger and message
@@ -1853,9 +1859,11 @@ What is established:
 Not diagnosed further and **not fixed**: it is in the halo / CA smoother communication layer, not the
 porous coefficient plumbing this WO is scoped to. Recommended next step for whoever takes it: post
 distinct tags (or distinct communicators) per ghost width in `GridHalo`, and add an np = 4 CUDA test
-on a 2-blocks-per-axis grid — the coverage gap that let this live. Consequence for the gate table
-below: np = 4 legs are reported both as-run and under `PECLET_FLOW_CA=0`, and always alongside the
-pre-existing tests so the two are known to fail and pass together.
+on a 2-blocks-per-axis grid — the coverage gap that let this live — and note that a CI runner is a
+loaded machine, so this will surface there far more often than it did here. Consequence for the gate
+table below: none in the end. Both backends reach **48/48 at default settings**; the np = 4 legs are
+reported with their loaded-run history so the pre-existing tests and the new one are known to fail
+and pass together.
 
 **Gates.**
 
