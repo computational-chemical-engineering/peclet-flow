@@ -1,7 +1,9 @@
 // flow — multi-rank validation of MOMENTUM-CONSISTENT VoF transport (rung V2b, WO-K): `rho^c u_c`
-// advected on the half-shifted MAC control volumes by the same geometric fluxes as the colour field.
+// advected on the half-shifted MAC control volumes by the same geometric fluxes as the colour
+// field.
 //
-// What is new here relative to `test_vof_twophase_mpi.cpp` (rung V2a), which gated the colour chain:
+// What is new here relative to `test_vof_twophase_mpi.cpp` (rung V2a), which gated the colour
+// chain:
 //
 //   1. THE SHIFTED CONTROL VOLUMES AND THEIR OWNERSHIP. `C^c` and the transported velocity are
 //      ordinary cell fields on the advector's g = 3 block, indexed in `flow`'s own low-face
@@ -40,7 +42,7 @@ static constexpr std::size_t GCELLS = (std::size_t)NX * NY * NZ;
 
 struct Config {
   const char* name;
-  bool walls;    // uniform-velocity identity in a walled box (else the periodic sheared sphere)
+  bool walls;  // uniform-velocity identity in a walled box (else the periodic sheared sphere)
   double ratio;
   double dt;
   int steps;
@@ -57,8 +59,7 @@ static double colourAt(int x, int y, int z) {
   for (double& v : m)
     v /= l1;
   const double alpha = 0.5 * (m[0] * NX + m[1] * NY + m[2] * NZ);
-  return peclet::flow::vof::plicVolume(m[0], m[1], m[2],
-                                       alpha - (m[0] * x + m[1] * y + m[2] * z));
+  return peclet::flow::vof::plicVolume(m[0], m[1], m[2], alpha - (m[0] * x + m[1] * y + m[2] * z));
 }
 static double forceXAt(int, int, int z) {
   return 5e-2 * std::sin(2 * M_PI * (z + 0.5) / NZ);

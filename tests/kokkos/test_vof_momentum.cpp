@@ -1,6 +1,6 @@
 // VoF rung V2b (WO-K) — momentum-consistent transport: `rho^c u_c` advected on the half-shifted MAC
-// control volumes by the SAME geometric fluxes, the same sweep order and one frozen dilation flag as
-// the colour field of the same step (`src/vof/momentum_advect.hpp`).
+// control volumes by the SAME geometric fluxes, the same sweep order and one frozen dilation flag
+// as the colour field of the same step (`src/vof/momentum_advect.hpp`).
 //
 // Gates, in the order they are run:
 //
@@ -41,9 +41,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <Kokkos_Core.hpp>
 #include <memory>
 #include <stdexcept>
-#include <Kokkos_Core.hpp>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -55,10 +55,10 @@ using peclet::flow::IbmSolver;
 int failures = 0;
 #define CHECK(cond)                                                                      \
   do {                                                                                   \
-    if (!(cond)) {                                                                        \
-      std::fprintf(stderr, "CHECK failed: %s\n  at %s:%d\n", #cond, __FILE__, __LINE__);  \
-      ++failures;                                                                         \
-    }                                                                                     \
+    if (!(cond)) {                                                                       \
+      std::fprintf(stderr, "CHECK failed: %s\n  at %s:%d\n", #cond, __FILE__, __LINE__); \
+      ++failures;                                                                        \
+    }                                                                                    \
   } while (0)
 
 std::size_t idx(int x, int y, int z, int n) {
@@ -101,8 +101,8 @@ std::vector<double> sceneTilted(int n) {
   for (int z = 0; z < n; ++z)
     for (int y = 0; y < n; ++y)
       for (int x = 0; x < n; ++x)
-        c[idx(x, y, z, n)] =
-            peclet::flow::vof::plicVolume(m[0], m[1], m[2], alpha - (m[0] * x + m[1] * y + m[2] * z));
+        c[idx(x, y, z, n)] = peclet::flow::vof::plicVolume(
+            m[0], m[1], m[2], alpha - (m[0] * x + m[1] * y + m[2] * z));
   return c;
 }
 std::vector<double> sceneSphere(int n) {
@@ -178,8 +178,10 @@ void uniformIdentity() {
     double w = 0.0;
     for (int c = 0; c < 3; ++c)
       w = std::fmax(w, maxAbsDev(s->getVelocity(c), U[c]));
-    std::printf("K1 tilted  ratio %-8g  40 coupled steps: max|u - U| = %.4e  "
-                "(the solver's float momentum-diagonal floor, not this rung)\n", R, w);
+    std::printf(
+        "K1 tilted  ratio %-8g  40 coupled steps: max|u - U| = %.4e  "
+        "(the solver's float momentum-diagonal floor, not this rung)\n",
+        R, w);
     CHECK(w < 1e-4);
   }
 }
@@ -270,8 +272,8 @@ void momentumConservation() {
     s->step();
     const auto d = s->vofMomentumDiagnostics();
     for (int c = 0; c < 3; ++c)
-      worst[c] = std::fmax(worst[c], std::fabs(d.sumM[c] - d.sumM0[c]) /
-                                         std::fmax(1e-30, std::fabs(d.sumM0[c])));
+      worst[c] = std::fmax(
+          worst[c], std::fabs(d.sumM[c] - d.sumM0[c]) / std::fmax(1e-30, std::fabs(d.sumM0[c])));
   }
   for (int c = 0; c < 3; ++c) {
     std::printf("K4 component %d: worst per-step |d sum(rho^e u)| / |sum| over 100 steps = %.3e\n",
@@ -312,7 +314,8 @@ void inertWhenOff() {
     du = std::fmax(du, maxAbsDiff(u0[0][c], u0[1][c]));
   const double dp = maxAbsDiff(p0[0], p0[1]);
   const double dc = maxAbsDiff(c0[0], c0[1]);
-  std::printf("K5 feature OFF, knobs touched vs untouched: du %.3e  dp %.3e  dC %.3e\n", du, dp, dc);
+  std::printf("K5 feature OFF, knobs touched vs untouched: du %.3e  dp %.3e  dC %.3e\n", du, dp,
+              dc);
   CHECK(du == 0.0);
   CHECK(dp == 0.0);
   CHECK(dc == 0.0);

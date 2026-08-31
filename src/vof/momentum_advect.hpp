@@ -41,8 +41,9 @@
 ///    and its `applySweep` — the planes are overwritten every sweep, so the momentum sweeps are
 ///    interleaved with the colour sweeps rather than run after `advect()` returns.
 ///    The face Courant number of the shifted CV is the `e`-average of the two staggered faces;
-///    summed over the three sweeps that is exactly `1/2 (div_{p-s_e} + div_p)`, so the dilation term
-///    vanishes with the projection's own divergence residual — the colour's conservation floor.
+///    summed over the three sweeps that is exactly `1/2 (div_{p-s_e} + div_p)`, so the dilation
+///    term vanishes with the projection's own divergence residual — the colour's conservation
+///    floor.
 /// 3. **Weymouth's flux bounds, on the shifted volume's OWN colour.** The geometric flux above is
 ///    bounded by the liquid content of the donor CV *as the current cell planes see it*, which is
 ///    not the same as the ADVECTED `C^e` once the second sweep re-reconstructs from an updated `C`.
@@ -52,11 +53,12 @@
 ///    therefore clamped into Weymouth's own admissible interval
 ///    `max(0, |a| - (1 - C^e_don)) <= |F| <= min(|a|, C^e_don)` (thesis Appendix A), which is
 ///    exactly the hypothesis of his boundedness proof and restores `0 <= C^e <= 1`. The clamp is
-///    inactive wherever the geometry is self-consistent (`clampedFluxes()` counts it), it is applied
-///    to the ONE face value both neighbours share so conservation still telescopes bit-exactly, and
-///    it is applied BEFORE the momentum flux is formed so the two updates keep sharing one `F` —
-///    the consistency identity is untouched. For `C^e_don` exactly 0 or 1 the interval collapses to
-///    the algebraic value, so full and empty control volumes stay exactly stationary.
+///    inactive wherever the geometry is self-consistent (`clampedFluxes()` counts it), it is
+///    applied to the ONE face value both neighbours share so conservation still telescopes
+///    bit-exactly, and it is applied BEFORE the momentum flux is formed so the two updates keep
+///    sharing one `F` — the consistency identity is untouched. For `C^e_don` exactly 0 or 1 the
+///    interval collapses to the algebraic value, so full and empty control volumes stay exactly
+///    stationary.
 /// 4. **One frozen flag for the pair.** `flag^e = H(C^{e,n} - 1/2)`, frozen once per step from the
 ///    freshly built `C^e` and used unchanged by all three sweeps in BOTH the `C^e` update and the
 ///    `rho^e u_e` update. That shared flag is what makes the two updates telescope identically.
@@ -90,12 +92,12 @@
 ///
 /// `u^` is the CURRENT transported velocity of the donor CV (plain donor-cell upwind by default;
 /// `momentumMuscl` adds a MinMod-limited slope to the flux slab's centroid, and the note on that
-/// flag says why it is NOT the default at high density ratio). With a uniform field `u^ = U` bit for
-/// bit either way, so the gate above is untouched.
-/// The velocity is exchanged between sweeps alongside `C^e` — fluxing the FROZEN `u^n`
-/// instead would be one exchange cheaper but leaves a term with gain `rho_l/rho_g` on any control
-/// volume a sweep empties (see the derivation in `momentumUpdate`), which is not something to carry
-/// into a high-ratio rung to save a halo exchange.
+/// flag says why it is NOT the default at high density ratio). With a uniform field `u^ = U` bit
+/// for bit either way, so the gate above is untouched. The velocity is exchanged between sweeps
+/// alongside `C^e` — fluxing the FROZEN `u^n` instead would be one exchange cheaper but leaves a
+/// term with gain `rho_l/rho_g` on any control volume a sweep empties (see the derivation in
+/// `momentumUpdate`), which is not something to carry into a high-ratio rung to save a halo
+/// exchange.
 #ifndef PECLET_FLOW_VOF_MOMENTUM_ADVECT_HPP
 #define PECLET_FLOW_VOF_MOMENTUM_ADVECT_HPP
 
@@ -317,7 +319,7 @@ class MomentumConsistentAdvector {
     const I3 e = e_, n = n_;
     const int g = g_;
     SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
-            al = w.planeAlpha();
+           al = w.planeAlpha();
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
     for (int comp = 0; comp < 3; ++comp) {
       const long se = strideOf(comp);
@@ -379,8 +381,8 @@ class MomentumConsistentAdvector {
 
   /// Face Courant number, geometric liquid flux and momentum flux of the shifted CV of component
   /// `comp`, for a sweep in direction `d`. Stored at the CV on the face's `-d` side, exactly as
-  /// `WyAdvector::computeFluxes` stores the colour flux — computing each face ONCE is what makes the
-  /// sum telescope bit-exactly, in-rank and across a rank boundary alike.
+  /// `WyAdvector::computeFluxes` stores the colour flux — computing each face ONCE is what makes
+  /// the sum telescope bit-exactly, in-rank and across a rank boundary alike.
   void momentumFluxes(const WyAdvector& w, int d, int comp, double dth) {
     const I3 e = e_;
     const int g = g_;
@@ -389,7 +391,7 @@ class MomentumConsistentAdvector {
     const double rg = rhoG_, rl = rhoL_;
     const bool muscl = momentumMuscl, clamp = clampFluxes;
     SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
-            al = w.planeAlpha();
+           al = w.planeAlpha();
     SField ud = w.faceVel(d), cvU = vel_[comp], cvC = cc_[comp];
     SField fc = fluxC_, fu = fluxU_, af = aFace_;
     int lo3[3] = {g, g, g};
@@ -511,20 +513,20 @@ class MomentumConsistentAdvector {
           // The conservative update of this control volume is
           //     rho_new u_new = rho_old u_old - (Psi_+ u^_+ - Psi_- u^_-) + rho^ u_old (a_+ - a_-)
           // with `Psi = rho_g a + drho F` the mass flux and `u^` the donor reconstruction of the
-          // CURRENT velocity. Stored and evolved as `rho^e u_e`, that is a sum of rho_l-scaled terms
-          // whose result is only rho_g-scaled in a gas control volume, and a volume a directional
-          // sweep fills and the next one empties passes through an intermediate `rho^e` a factor
-          // `ratio` larger than where it starts and ends; the rounding of that excursion is
-          // eps*ratio*|a| and does NOT cancel against the colour's own. Measured, it degraded the
-          // uniform-velocity gate LINEARLY IN THE DENSITY RATIO (6.7e-16 at 1e2 -> 3.2e-14 at 1e4)
-          // — wearing exactly the signature of the defect this rung exists to remove, for a purely
-          // floating-point reason.
+          // CURRENT velocity. Stored and evolved as `rho^e u_e`, that is a sum of rho_l-scaled
+          // terms whose result is only rho_g-scaled in a gas control volume, and a volume a
+          // directional sweep fills and the next one empties passes through an intermediate `rho^e`
+          // a factor `ratio` larger than where it starts and ends; the rounding of that excursion
+          // is eps*ratio*|a| and does NOT cancel against the colour's own. Measured, it degraded
+          // the uniform-velocity gate LINEARLY IN THE DENSITY RATIO (6.7e-16 at 1e2 -> 3.2e-14 at
+          // 1e4) — wearing exactly the signature of the defect this rung exists to remove, for a
+          // purely floating-point reason.
           //
           // Subtracting `rho_new u_old` from both sides is algebraically free (substitute
           // `rho_old = rho_new - drho dC` and watch every `u_old` term cancel) and removes it:
           //
-          //     u_new = u_old + [ rho_g (a_- dv_- - a_+ dv_+) + drho (F_- dv_- - F_+ dv_+) ]/rho_new
-          //     dv_+/- = u^_+/- - u_old
+          //     u_new = u_old + [ rho_g (a_- dv_- - a_+ dv_+) + drho (F_- dv_- - F_+ dv_+)
+          //     ]/rho_new dv_+/- = u^_+/- - u_old
           //
           // Every term is a DIFFERENCE OF VELOCITIES. For a uniform field each is exactly zero (the
           // same double, subtracted), so `u_new == u_old` bit for bit at ANY density ratio and for
