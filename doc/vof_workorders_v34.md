@@ -969,3 +969,46 @@ finite perturbation amplitude (Tsamopoulos & Brown's nonlinear frequency shift i
 epsilon = 0.05 it is O(0.3 %)) and a systematic bias in the discrete curvature of a mode-2 shape.
 **Recorded as a measured deviation, not a pass** — the same sign and the same order as the capillary
 wave's, which suggests one mechanism rather than two.
+
+Four further ablations on the Lamb case, all at 32^3 / R = 8, each of which could have explained it
+and none of which does:
+
+| what was varied | values | omega error |
+|---|---|---|
+| perturbation amplitude `epsilon` | 0.10 / 0.05 / 0.02 / 0.01 | -7.11 / -6.95 / -6.52 / **-6.25 %** (extrapolates to ~-6.1 % at epsilon = 0) |
+| time step `dt/dt_sigma` | 0.5 / 0.125 | -6.95 / **-6.92 %** (no temporal component) |
+| initialisation sub-sampling | 16 / 48 per axis | -6.95 / **-6.96 %** (not the initial fractions) |
+| PV Wendland support width | 1.2 / 1.8 / 2.5 / 3.5 / 5.0 | **diverged** / n/a (-12.97 % at R = 12) / -6.95 / -6.58 / **-5.36 %** |
+
+The width sweep is the interesting one and it points the *opposite* way to the obvious guess: a
+**wider**, smoother PV kernel gives a **better** frequency (-6.95 % -> -5.36 % going 2.5 -> 5.0
+cells) and a narrower one is worse and eventually unstable (width 1.2 trips the WY CFL cap outright).
+So curvature *noise* costs about 1.5 % of the frequency, but a very smooth curvature still leaves
+-5.4 %, and the smoothing-damps-the-restoring-force hypothesis is refuted rather than supported.
+What remains is an open, measured item for whoever takes the next curvature rung; it is NOT a
+balanced-force defect (the exactness gate is at 1e-17 on the same machinery), and the residual has
+the same sign and order in both oscillation benchmarks.
+
+**Full gate battery for this WO.**
+
+| battery | result |
+|---|---|
+| `tests/kokkos` (26 ctests) | **26/26 on host-openmp AND nvidia-cuda**; `vof_surface_tension` is the new one (93 s host, 34 s CUDA) |
+| `tests/kokkos_mpi` (60 ctests) | **60/60 on host-openmp**; the three new `vof_surface_tension_mpi_np{1,2,4}` also run green standalone on nvidia-cuda, where **np = 1 AND np = 2 are bitwise** on every field |
+| V3 regression (`vof_curvature`) | reproduces WO-O's record **digit for digit** — order 2.26 / 1.86, PV-only 1.96 / 1.99, tier-2b ON 1.37 / 0.00 — i.e. `interfaceEps` defaulting to 0 is byte-identical, as designed |
+| single-phase regression | **+0.00 % on all 13 grid points**, identical `p_iter_tot`, iterations/step, step counts and flux divergence on `zh_sphere` / `random_spheres` / `hollow_rings`; order p and the Richardson extrapolate unchanged to every printed digit. Run in an **isolated `git worktree` at this WO's commit only** (the checkout is shared with two other sessions), so the +0.00 % is attributable |
+| the shipped build with surface tension OFF | bitwise inert (ctest P5), and structurally so: `csfActive()` gates the RHS kernel, `updateVofCurvature()` returns immediately, and `VofCurvature::interfaceEps` defaults to the V3 predicate |
+
+**What a follow-on rung should pick up, in priority order.**
+1. **The 5-7 % frequency deficit shared by the two oscillation benchmarks.** Not a balanced-force
+   defect (the exactness gate is at 1e-17 on the same code) and not amplitude, dt, initialisation,
+   confinement or resolution — all measured. It is the one number in this rung that is unexplained.
+2. **A curvature that is defined where the force needs it.** The wisp guard fixes the fatal case, but
+   the orphan-face count is not identically zero (1-2 faces per component at 48^3-64^3), and a
+   face whose colour jumps with no curvature on either side silently loses its force. Extending
+   kappa one cell into the non-interfacial neighbours would close it.
+3. **Case 2 of Hysing shows the ratio-1000 pressure operator at its limit** — 116/600 iterations and
+   `max|div(open u)| = 1.85e-03` against 20/600 and 9.1e-06 for case 1. That is WO-M's `kappa ~ 0.18
+   N^2 x contrast` conditioning, and it is the first VoF case in this campaign where it is the
+   dominant error rather than a footnote.
+
