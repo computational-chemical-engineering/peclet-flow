@@ -758,6 +758,72 @@ static void bind_solver(nb::module_& m, const char* name) {
           "the face body force interpolate rho arithmetically and are not switched by this flag. "
           "Shipped as a measured knob for the coefficient-coarsening question (VOF_PLAN S3), not "
           "as an alternative scheme.")
+      // --- Momentum-consistent VoF transport (rung V2b, WO-K) ----------------------------------
+      .def(
+          "enable_vof_momentum",
+          [](S& s, double rg, double rl) { s.enableVofMomentum(rg, rl); }, nb::arg("rho_gas"),
+          nb::arg("rho_liquid"),
+          "Advect rho*u on the HALF-SHIFTED momentum control volumes with the SAME geometric "
+          "fluxes, the same sweep order and one frozen dilation flag as the colour field, then "
+          "recover u = (rho^c u)/rho^c. This is what makes the scheme usable above density ratio "
+          "~100 (Rudman 1998; Arrufat 2021: a raindrop accurate within 15% at 15 cells/diameter "
+          "instead of ~200).\n\n"
+          "The two phase densities are REQUIRED, and must be the ones the rho closure produces at "
+          "C=0 and C=1 — the momentum flux is rho_gas*(a-F) + rho_liquid*F with F the geometric "
+          "liquid flux, so the scheme has to know which density each phase carries.\n\n"
+          "Turning this on MOVES the VoF advection from the end of step() to its head (the momentum "
+          "advection must precede the predictor that consumes it), so the advecting field is u^n — "
+          "the previous step's projected output. u at step 0 must therefore be discretely "
+          "divergence-free (rest or a uniform field both are). Requires the variable-density path, "
+          "staggered layout, explicit advection, no immersed solid and no porous continuity.")
+      .def(
+          "vof_momentum_enabled", [](S& s) { return s.vofMomentumEnabled(); },
+          "Whether momentum-consistent transport is on.")
+      .def(
+          "set_vof_rho_floor", [](S& s, double f) { s.setVofRhoFloorFrac(f); }, nb::arg("fraction"),
+          "Floor on rho^c in the recovery divide u = (rho^c u)/rho^c, as a FRACTION of "
+          "min(rho_gas, rho_liquid). Default 1e-6. rho^c leaves [rho_gas, rho_liquid] only through "
+          "a wisp in the half-shifted colour and reaching zero would need C^c ~ -1/(ratio-1), so "
+          "this is a guard, not a model — vof_momentum_diagnostics()['floored'] reports how many "
+          "control volumes it actually touched.")
+      .def(
+          "vof_rho_floor", [](S& s) { return s.vofRhoFloor(); },
+          "The absolute rho^c floor used by the last recovery.")
+      .def(
+          "set_vof_momentum_upwind", [](S& s, bool on) { s.setVofMomentumUpwind(on); },
+          nb::arg("on") = true,
+          "ABLATION: first-order donor-cell velocity in the momentum flux instead of the "
+          "MinMod-limited linear reconstruction. Both preserve the uniform-velocity identity "
+          "exactly (a uniform field has a zero slope bit for bit).")
+      .def(
+          "set_vof_momentum_cell_flag", [](S& s, bool on) { s.setVofMomentumCellFlag(on); },
+          nb::arg("on") = true,
+          "ABLATION: use the PRESSURE-cell frozen dilation flag H(C^n-1/2) on the shifted control "
+          "volume instead of its structural analogue H(C^c,n-1/2). The flag that must be shared is "
+          "the one of the pair that telescopes, and both members of that pair live on the shifted "
+          "volume — this switch is the literal reading of the work order, kept as a measurement.")
+      .def(
+          "vof_momentum_diagnostics",
+          [](S& s) {
+            const auto d = s.vofMomentumDiagnostics();
+            nb::dict r;
+            r["min_Cc"] = nb::make_tuple(d.minCc[0], d.minCc[1], d.minCc[2]);
+            r["max_Cc"] = nb::make_tuple(d.maxCc[0], d.maxCc[1], d.maxCc[2]);
+            r["sum_momentum"] = nb::make_tuple(d.sumM[0], d.sumM[1], d.sumM[2]);
+            r["min_rho_c"] = d.minRhoC;
+            r["floored"] = d.floored;
+            return r;
+          },
+          "Census over THIS RANK's momentum control volumes: per-component min/max of the "
+          "half-shifted colour C^c, the summed momentum rho^c u_c (the conservation census), the "
+          "minimum rho^c before the floor, and the number of control volumes the floor touched.")
+      .def(
+          "vof_advected_velocity", [](S& s, int c) { return field_out(s, s.getVofAdvectedVelocity(c)); },
+          nb::arg("component"),
+          "The recovered advected velocity (rho^c u_c)/rho^c of component c on the inner cells — "
+          "the momentum RHS's time base. Exposed so the uniform-velocity consistency identity can "
+          "be gated on the ADVECTION ALONE, with the projection and the momentum solve out of the "
+          "picture.")
       // --- Property closures + Boussinesq body force -------------------------------------------
       .def(
           "set_property_model",

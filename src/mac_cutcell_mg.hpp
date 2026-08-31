@@ -48,7 +48,18 @@ using peclet::core::halo::GridHalo;
 using peclet::core::halo::GridHaloTopology;
 #endif
 
+// Operator/level storage precision. Float (the CUDA-era default) breaks the singular row-sum
+// identity A*1=0 at ~eps_f relative per row; under high face-coefficient contrast (order-2
+// apertures span 3 decades) the defect on mixed large+tiny rows is amplified to ~eps_f*contrast,
+// which perturbs the near-null vector the mean-removal deflation assumes and floors/rebounds the
+// CG-family drivers near r/r0 ~ 1e-6 (see doc/collocated_paper_plan.md row 55). The bottom AMG
+// already re-sums its diagonal in double for exactly this reason. -DPECLET_FLOW_MREAL_DOUBLE
+// switches the whole hierarchy to double (A/B instrument; ~2x operator memory).
+#ifdef PECLET_FLOW_MREAL_DOUBLE
+using MReal = double;
+#else
 using MReal = float;  // operator storage = CUDA mreal
+#endif
 using FPV = Kokkos::View<MReal*, CCMem>;
 using FPC = Kokkos::View<const MReal*, CCMem>;
 

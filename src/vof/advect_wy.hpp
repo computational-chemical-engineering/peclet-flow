@@ -263,6 +263,48 @@ class WyAdvector {
   double lastCfl() const { return lastCfl_; }
   long lastMixedCount() const { return mixedCount_; }
 
+  // ---- rung V2b (WO-K) hooks -----------------------------------------------------------------
+  // The momentum-consistent transport of `rho^c u_c` must be driven by the SAME PLIC planes, the
+  // SAME face Courant numbers and the SAME sweep order as this colour advection. The planes are
+  // re-reconstructed before EVERY sweep and overwritten in place, so a sibling advector that ran
+  // after `advect()` returned would see only the last sweep's planes — the momentum sweeps have to
+  // be INTERLEAVED with the colour sweeps. `MomentumConsistentAdvector` therefore drives the step
+  // itself out of the public pieces below (`freezeDilationFlag` / `reconstruct` / `computeFluxes` /
+  // `applySweep` / `exchange`) instead of calling `advect()`, and reads the planes through these
+  // accessors between `computeFluxes` and `applySweep`, i.e. while they still describe the field
+  // the sweep is about to move. Nothing here changes `advect()`.
+
+  /// PLIC normal component `d` of the current reconstruction (valid on the inner region grown by 1,
+  /// for mixed cells only — `wyIsMixed` is the contract, exactly as `wyFaceFlux` reads them).
+  SField planeM(int d) const { return d == 0 ? mx_ : (d == 1 ? my_ : mz_); }
+  /// PLIC plane offset of the current reconstruction.
+  SField planeAlpha() const { return alpha_; }
+  /// The frozen dilation indicator `H(C^n - 1/2)` of the current step (pressure cells).
+  UCField dilationFlag() const { return cc_; }
+
+  /// The interface-local (or global) Courant number for this dt, all-reduced, with the
+  /// Weymouth-Yue boundedness cap enforced exactly as `advect()` enforces it — `lastCfl_` is set
+  /// the same way, so a WO-K step reports the same number a WO-J step would.
+  ///
+  /// This duplicates the guard at the top of `advect()` rather than refactoring it: `advect()` is a
+  /// validated body (V1 gates A-G) and hard rule 1 of the work orders forbids editing one. Keep the
+  /// two in step if the cap ever changes.
+  double checkCourant(double dt) {
+    const double dth = dt / h_;
+    const double cflLocal = interfaceLocalCfl ? maxCourantInterface(dth) : maxCourant(dth);
+    const double cfl = globalMax ? globalMax(cflLocal) : cflLocal;
+    lastCfl_ = cfl;
+    if (!(cfl <= cflLimit)) {
+      char msg[256];
+      std::snprintf(msg, sizeof(msg),
+                    "peclet::flow::vof::WyAdvector: CFL = max|uf| dt/h = %.6g exceeds the "
+                    "Weymouth-Yue boundedness cap %.6g (dt = %.6g, h = %.6g) - reduce dt",
+                    cfl, cflLimit, dt, h_);
+      throw std::runtime_error(msg);
+    }
+    return cfl;
+  }
+
   /// Local census over the inner region.
   Diagnostics diagnostics() const {
     const I3 e = e_, n = n_;

@@ -225,14 +225,16 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
 
 // Build the backward-Euler velocity diffusion stencil over the extended block (divided convention):
 // A_C = idiag + 6*beta, off-diagonals = -beta (dx=1). idiag = 1/dt, beta = nu.
-inline void ibmBuildDiffusion(Kokkos::View<float*, IMem> AC, Kokkos::View<float*, IMem> AW,
-                              Kokkos::View<float*, IMem> AE, Kokkos::View<float*, IMem> AS,
-                              Kokkos::View<float*, IMem> AN, Kokkos::View<float*, IMem> AB,
-                              Kokkos::View<float*, IMem> AT, int ex, int ey, int ez, double beta,
+template <class MV>
+inline void ibmBuildDiffusion(MV AC, MV AW,
+                              MV AE, MV AS,
+                              MV AN, MV AB,
+                              MV AT, int ex, int ey, int ez, double beta,
                               double idiag) {
   Kokkos::DefaultExecutionSpace space;
   const std::size_t n = (std::size_t)ex * ey * ez;
-  const float nb = (float)(-beta), c = (float)(idiag + 6.0 * beta);
+  using MVreal = typename MV::non_const_value_type;
+  const MVreal nb = (MVreal)(-beta), c = (MVreal)(idiag + 6.0 * beta);
   Kokkos::parallel_for(
       "peclet::flow::ibm_build_diff", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, n),
       KOKKOS_LAMBDA(std::size_t i) {
@@ -251,11 +253,11 @@ inline void ibmBuildDiffusion(Kokkos::View<float*, IMem> AC, Kokkos::View<float*
 // face betas. Built over INNER cells (neighbour mu at i+-stride must be valid — fill the mu ghosts
 // first). Face means are computed in double, cast to float once (mirroring the constant path).
 // FaceProps: UniformFaceProps reproduces the constant operator; FieldFaceProps reads a mu field.
-template <class FaceProps>
-inline void ibmBuildDiffusionVar(Kokkos::View<float*, IMem> AC, Kokkos::View<float*, IMem> AW,
-                                 Kokkos::View<float*, IMem> AE, Kokkos::View<float*, IMem> AS,
-                                 Kokkos::View<float*, IMem> AN, Kokkos::View<float*, IMem> AB,
-                                 Kokkos::View<float*, IMem> AT, int ex, int ey, int ez, int g,
+template <class FaceProps, class MV>
+inline void ibmBuildDiffusionVar(MV AC, MV AW,
+                                 MV AE, MV AS,
+                                 MV AN, MV AB,
+                                 MV AT, int ex, int ey, int ez, int g,
                                  FaceProps fp) {
   Kokkos::DefaultExecutionSpace space;
   using MD = Kokkos::MDRangePolicy<Kokkos::DefaultExecutionSpace, Kokkos::Rank<3>>;
@@ -267,13 +269,13 @@ inline void ibmBuildDiffusionVar(Kokkos::View<float*, IMem> AC, Kokkos::View<flo
         const double bw = fp.beta(i, i - sx), be = fp.beta(i, i + sx);
         const double bs = fp.beta(i, i - sy), bn = fp.beta(i, i + sy);
         const double bb = fp.beta(i, i - sz), bt = fp.beta(i, i + sz);
-        AW(i) = (float)(-bw);
-        AE(i) = (float)(-be);
-        AS(i) = (float)(-bs);
-        AN(i) = (float)(-bn);
-        AB(i) = (float)(-bb);
-        AT(i) = (float)(-bt);
-        AC(i) = (float)(fp.idiag(i) + bw + be + bs + bn + bb + bt);
+        AW(i) = (typename MV::non_const_value_type)(-bw);
+        AE(i) = (typename MV::non_const_value_type)(-be);
+        AS(i) = (typename MV::non_const_value_type)(-bs);
+        AN(i) = (typename MV::non_const_value_type)(-bn);
+        AB(i) = (typename MV::non_const_value_type)(-bb);
+        AT(i) = (typename MV::non_const_value_type)(-bt);
+        AC(i) = (typename MV::non_const_value_type)(fp.idiag(i) + bw + be + bs + bn + bb + bt);
       });
 }
 
@@ -285,10 +287,11 @@ inline void ibmBuildDiffusionVar(Kokkos::View<float*, IMem> AC, Kokkos::View<flo
 // kinematic no-slip datum for MOVING geometry (Layer 3 rung 2). An EMPTY View falls back to the
 // scalar u_bc_val, which is what keeps a static solver bit-identical: the accumulated term is
 // (double)Nbc * 0.0f * vnb either way, the same three roundings in the same order.
-inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*, IMem> AW,
-                             Kokkos::View<float*, IMem> AE, Kokkos::View<float*, IMem> AS,
-                             Kokkos::View<float*, IMem> AN, Kokkos::View<float*, IMem> AB,
-                             Kokkos::View<float*, IMem> AT, Kokkos::View<double*, IMem> a_inhom,
+template <class MV>
+inline void ibmModifyStencil(MV AC, MV AW,
+                             MV AE, MV AS,
+                             MV AN, MV AB,
+                             MV AT, Kokkos::View<double*, IMem> a_inhom,
                              Kokkos::View<double*, IMem> rhs_scale, const IbmOverlay& ibm,
                              int numActive, float u_bc_val,
                              Kokkos::View<const double*, IMem> u_bc =
@@ -318,13 +321,13 @@ inline void ibmModifyStencil(Kokkos::View<float*, IMem> AC, Kokkos::View<float*,
           mod[k] += vnb * ((double)descale * M - 1.0);
           mod[OPP[k]] += vnb * X;
         }
-        AC(c) = (float)aC;
-        AE(c) = (float)(orig[0] + mod[0]);
-        AW(c) = (float)(orig[1] + mod[1]);
-        AN(c) = (float)(orig[2] + mod[2]);
-        AS(c) = (float)(orig[3] + mod[3]);
-        AT(c) = (float)(orig[4] + mod[4]);
-        AB(c) = (float)(orig[5] + mod[5]);
+        AC(c) = (typename MV::non_const_value_type)aC;
+        AE(c) = (typename MV::non_const_value_type)(orig[0] + mod[0]);
+        AW(c) = (typename MV::non_const_value_type)(orig[1] + mod[1]);
+        AN(c) = (typename MV::non_const_value_type)(orig[2] + mod[2]);
+        AS(c) = (typename MV::non_const_value_type)(orig[3] + mod[3]);
+        AT(c) = (typename MV::non_const_value_type)(orig[4] + mod[4]);
+        AB(c) = (typename MV::non_const_value_type)(orig[5] + mod[5]);
         if (hasInhom)
           a_inhom(c) += inhom;
       });

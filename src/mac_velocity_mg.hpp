@@ -573,14 +573,14 @@ class VelocityMG {
           const C3 lo{G + 1, G + 1, G + 1};
           const C3 hi{lv.ext.x - G - 1, lv.ext.y - G - 1, lv.ext.z - G - 1};
           lv.dev->exchangeBegin(lv.x);
-          ibmRbgsStencilColorBox(lv.x, CCConst(lv.rhs), MConst(lv.AC), MConst(lv.AW),
-                                 MConst(lv.AE), MConst(lv.AS), MConst(lv.AN), MConst(lv.AB),
-                                 MConst(lv.AT), pin, lv.ext, og, color, lo, hi, C3{0, 0, 0},
+          ibmRbgsStencilColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
+                                 FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB),
+                                 FPC(lv.AT), pin, lv.ext, og, color, lo, hi, C3{0, 0, 0},
                                  C3{0, 0, 0});
           lv.dev->exchangeEnd(lv.x);
-          ibmRbgsStencilColorBox(lv.x, CCConst(lv.rhs), MConst(lv.AC), MConst(lv.AW),
-                                 MConst(lv.AE), MConst(lv.AS), MConst(lv.AN), MConst(lv.AB),
-                                 MConst(lv.AT), pin, lv.ext, og, color, C3{G, G, G},
+          ibmRbgsStencilColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
+                                 FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB),
+                                 FPC(lv.AT), pin, lv.ext, og, color, C3{G, G, G},
                                  C3{lv.ext.x - G, lv.ext.y - G, lv.ext.z - G}, lo, hi);
           continue;
         }
@@ -588,8 +588,8 @@ class VelocityMG {
         fill(lv, lv.x);
         if (isL0 && bcApplyL0_)
           bcApplyL0_(lv.x);  // re-impose the velocity BC (held Dirichlet faces) per colour
-        ibmRbgsStencilColor(lv.x, CCConst(lv.rhs), MConst(lv.AC), MConst(lv.AW), MConst(lv.AE),
-                            MConst(lv.AS), MConst(lv.AN), MConst(lv.AB), MConst(lv.AT), pin, lv.ext,
+        ibmRbgsStencilColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                            FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), pin, lv.ext,
                             og, G, color);
       }
   }

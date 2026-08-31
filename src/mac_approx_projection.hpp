@@ -520,8 +520,9 @@ inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CC
 // 7-point stencil matvec y = M·u using the stored (rs-scaled) IBM operator coefficients. Used to
 // form the mode-4 defect-correction RHS  b = M·u^k − rs·L_FV(u^k) + rs·b_FV, whose fixed point
 // satisfies L_FV·u* = b_FV exactly, with M only the (stable, small-cell-safe) preconditioner.
-inline void stencilMatvec(CCField y, CCConst u, MConst AC, MConst AW, MConst AE, MConst AS,
-                          MConst AN, MConst AB, MConst AT, C3 e, int g) {
+template <class MC>
+inline void stencilMatvec(CCField y, CCConst u, MC AC, MC AW, MC AE, MC AS,
+                          MC AN, MC AB, MC AT, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(

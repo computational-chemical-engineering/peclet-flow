@@ -144,8 +144,9 @@ inline void ibmCleanFluidMask(CCField m, CCConst sdf, C3 ext, Off3 off) {
 // starting at the colour's parity — no per-cell parity branch, unit-stride reads. Bit-identical to
 // the MDRange form (same-colour cells are independent, so update order within a colour cannot
 // change the result); the device keeps the MDRange form untouched.
-inline void ibmRbgsStencilColor(CCField x, CCConst b, MConst AC, MConst AW, MConst AE, MConst AS,
-                                MConst AN, MConst AB, MConst AT, CCConst solidmask, C3 ext, C3 og,
+template <class MC>
+inline void ibmRbgsStencilColor(CCField x, CCConst b, MC AC, MC AW, MC AE, MC AS,
+                                MC AN, MC AB, MC AT, CCConst solidmask, C3 ext, C3 og,
                                 int g, int color) {
   CCExec space;
   const bool hasMask = (solidmask.extent(0) != 0);
@@ -199,8 +200,9 @@ inline void ibmRbgsStencilColor(CCField x, CCConst b, MConst AC, MConst AW, MCon
 // ibmRbgsStencilColor + a fused max|Δx| reduction over the swept colour (values already in
 // registers — no extra memory pass). The momentum tolerance stop runs this as the SECOND colour of
 // a sweep: one colour's max increment is the convergence proxy. Same math as the plain sweep.
-inline double ibmRbgsStencilColorDu(CCField x, CCConst b, MConst AC, MConst AW, MConst AE,
-                                    MConst AS, MConst AN, MConst AB, MConst AT, CCConst solidmask,
+template <class MC>
+inline double ibmRbgsStencilColorDu(CCField x, CCConst b, MC AC, MC AW, MC AE,
+                                    MC AS, MC AN, MC AB, MC AT, CCConst solidmask,
                                     C3 ext, C3 og, int g, int color) {
   CCExec space;
   const bool hasMask = (solidmask.extent(0) != 0);
@@ -267,8 +269,9 @@ inline double ibmRbgsStencilColorDu(CCField x, CCConst b, MConst AC, MConst AW, 
 // [slo,shi) (pass slo==shi to skip nothing). Interior-then-shell split of one colour's sweep is
 // bit-identical to the full sweep — a colour's cells never read same-colour cells (see
 // cutcellSmoothColorBox in mac_pressure.hpp).
-inline void ibmRbgsStencilColorBox(CCField x, CCConst b, MConst AC, MConst AW, MConst AE,
-                                   MConst AS, MConst AN, MConst AB, MConst AT, CCConst solidmask,
+template <class MC>
+inline void ibmRbgsStencilColorBox(CCField x, CCConst b, MC AC, MC AW, MC AE,
+                                   MC AS, MC AN, MC AB, MC AT, CCConst solidmask,
                                    C3 ext, C3 og, int color, C3 rlo, C3 rhi, C3 slo, C3 shi) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
@@ -302,8 +305,9 @@ inline void ibmRbgsStencilColorBox(CCField x, CCConst b, MConst AC, MConst AW, M
 // for the distributed overlap of the momentum tolerance stop: interior-then-shell partial maxima
 // combine by max, which is order-independent — max(interior, shell) is bit-identical to the
 // one-pass reduction.
-inline double ibmRbgsStencilColorDuBox(CCField x, CCConst b, MConst AC, MConst AW, MConst AE,
-                                       MConst AS, MConst AN, MConst AB, MConst AT,
+template <class MC>
+inline double ibmRbgsStencilColorDuBox(CCField x, CCConst b, MC AC, MC AW, MC AE,
+                                       MC AS, MC AN, MC AB, MC AT,
                                        CCConst solidmask, C3 ext, C3 og, int color, C3 rlo, C3 rhi,
                                        C3 slo, C3 shi) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)

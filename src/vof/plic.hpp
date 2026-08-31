@@ -239,6 +239,29 @@ KOKKOS_INLINE_FUNCTION double plicSlabVolume(double mx, double my, double mz, do
   return len * plicVolume(m[0], m[1], m[2], alpha - md * a);
 }
 
+/// Fluid volume of the PLIC polyhedron inside the axis-aligned BOX
+/// `[a0,b0] x [a1,b1] x [a2,b2]`, as a fraction of the WHOLE cell. The three-axis generalization of
+/// `plicSlabVolume` and, like it, a pure coordinate rescale rather than a polyhedron clipper: under
+/// `x_k = a_k + (b_k - a_k) xi_k` the plane becomes `m'.xi = alpha'` with `m'_k = m_k (b_k - a_k)`
+/// and `alpha' = alpha - sum_k m_k a_k`, so the answer is `prod_k (b_k - a_k) * plicVolume(m')`.
+///
+/// Added at rung V2b (WO-K): the momentum control volume of component `e` is shifted half a cell in
+/// `e`, so its flux slab for a sweep in a TRANSVERSE direction `d` is a box that is half a cell wide
+/// in `e` and `|a|` wide in `d` — two axes at once, which `plicSlabVolume` cannot express.
+/// `plicBoxVolume(..., 0,1, 0,1, 0,1) == plicVolume(...)` bitwise, and the single-axis restriction
+/// reproduces `plicSlabVolume` bitwise (both gated in `tests/kokkos/test_vof_plic.cpp`).
+KOKKOS_INLINE_FUNCTION double plicBoxVolume(double mx, double my, double mz, double alpha,
+                                            double a0, double b0, double a1, double b1, double a2,
+                                            double b2) {
+  const double len[3] = {b0 - a0, b1 - a1, b2 - a2};
+  if (!(len[0] > 0.0) || !(len[1] > 0.0) || !(len[2] > 0.0))
+    return 0.0;
+  const double m[3] = {mx, my, mz};
+  const double off = alpha - (m[0] * a0 + m[1] * a1 + m[2] * a2);
+  return len[0] * len[1] * len[2] *
+         plicVolume(m[0] * len[0], m[1] * len[1], m[2] * len[2], off);
+}
+
 /// Donor-cell geometric flux volume: the fluid volume swept out of the slab `[0, f]` along `dir`,
 /// as a fraction of the whole cell. `f = 1` reproduces `plicVolume` bitwise.
 KOKKOS_INLINE_FUNCTION double faceFluxVolume(double mx, double my, double mz, double alpha, int dir,

@@ -72,6 +72,29 @@ inline void copyFaceVelocity(SField dst, I3 de, int dg, SField src, I3 se, int s
       });
 }
 
+/// The INVERSE of `copyFaceVelocity`, restricted to the inner region: bring a face-indexed field
+/// back from the advector's `g = 3` block to the solver's `G = 2` block, undoing the high-face ->
+/// low-face shift.
+///
+///     dst(x + dg, y + dg, z + dg) = src(x + sg - [dir==0], y + sg - [dir==1], z + sg - [dir==2])
+///
+/// for `x,y,z` over the inner region `n`. Used at rung V2b (WO-K) to hand the momentum-consistent
+/// advected velocity back to the momentum RHS. The source index runs one cell BELOW the advector's
+/// inner region along `dir` — that is exactly the momentum control volume the solver's first
+/// velocity unknown on that axis belongs to, and `MomentumConsistentAdvector::cvRange` computes
+/// there for this reason (the two index sets are in one-to-one correspondence, so nothing is
+/// dropped or duplicated across a rank boundary).
+inline void copyAdvectedVelocity(SField dst, I3 de, int dg, SField src, I3 se, int sg, int dir,
+                                 I3 n) {
+  const int ox = sg - (dir == 0 ? 1 : 0), oy = sg - (dir == 1 ? 1 : 0), oz = sg - (dir == 2 ? 1 : 0);
+  Kokkos::parallel_for(
+      "vof::copyAdvectedVelocity",
+      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        dst(L3(x + dg, y + dg, z + dg, de)) = src(L3(x + ox, y + oy, z + oz, se));
+      });
+}
+
 /// Periodic wrap of a single-block extended field at ghost width `g` (the single-rank ghost path;
 /// under MPI `core::halo::GridHalo` does this and the cross-rank exchange in one call). Sequential
 /// axis passes, so edges and corners come out right.

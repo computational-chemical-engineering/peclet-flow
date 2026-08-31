@@ -47,6 +47,7 @@
 #include "staggered_advection.hpp"
 #include "vof/advect_wy.hpp"    // VoF rung V1: the Weymouth-Yue colour advector (its own g=3 block)
 #include "vof/colour_field.hpp"  // VoF rung V2a: the G=2 <-> g=3 bridge + the colour ghost policy
+#include "vof/momentum_advect.hpp"  // VoF rung V2b: momentum-consistent rho^c u_c transport
 
 namespace peclet::flow {
 
@@ -57,7 +58,7 @@ namespace peclet::flow {
 template <class Grid>
 class Solver {
  public:
-  using FV = Kokkos::View<float*, CCMem>;
+  using FV = Kokkos::View<MReal*, CCMem>;  // velocity operator storage tracks MReal
   static constexpr int G = 2;  // velocity block: Koren advection reach (pressure/MG bridged to g=1)
 
   Solver(int nx, int ny, int nz) { allocateBlock(nx, ny, nz); }
@@ -105,15 +106,16 @@ class Solver {
       bcDcorr_[c] = CCField("dcorr", n_);
       bcBrhs_[c] = CCField("brhs", n_);
       const int maxCut = nx * ny * nz;
+      using FV32 = Kokkos::View<float*, CCMem>;  // IbmOverlay row data stays float
       C[c].ov = IbmOverlay{Kokkos::View<int*, CCMem>("ci", maxCut),
                            Kokkos::View<int*, CCMem>("nb", maxCut),
-                           FV("dr", maxCut),
+                           FV32("dr", maxCut),
                            Kokkos::View<int*, CCMem>("dc", (std::size_t)maxCut * 6),
-                           FV("K", (std::size_t)maxCut * 6),
-                           FV("M", (std::size_t)maxCut * 6),
-                           FV("X", (std::size_t)maxCut * 6),
-                           FV("Nbc", (std::size_t)maxCut * 6),
-                           FV("R", (std::size_t)maxCut * 6)};
+                           FV32("K", (std::size_t)maxCut * 6),
+                           FV32("M", (std::size_t)maxCut * 6),
+                           FV32("X", (std::size_t)maxCut * 6),
+                           FV32("Nbc", (std::size_t)maxCut * 6),
+                           FV32("R", (std::size_t)maxCut * 6)};
       C[c].idMap = Kokkos::View<int*, CCMem>("idMap", n_);
       C[c].counter = Kokkos::View<int, CCMem>("cnt");
       old_[c] = CCField("uOld", n_);    // u^n time base (fixed over the step's Picard sweeps)
@@ -625,7 +627,7 @@ class Solver {
     // so the CA pair needs no new topology — only this float exchange for the stencil ring
     // (operator coefficients are float). Eligible when every rank's block is >= 4 on every axis
     // (rank-uniform: the decomposition is replicated), gated by PECLET_FLOW_CA.
-    velDevF_ = std::make_shared<GridHalo<float>>();
+    velDevF_ = std::make_shared<GridHalo<MReal>>();
     velDevF_->init(*velHalo_);
     long minExt = std::numeric_limits<long>::max();
     for (const auto& s : dec.sizes())
@@ -1666,6 +1668,13 @@ class Solver {
     tPredictor_ = tMomentum_ = tProjection_ = 0.0;
     lastMomentumSweeps_ = 0;
     mg_.resetAllreduceCounters();
+    // Momentum-consistent geometric VoF (rung V2b, WO-K): the colour field and rho^c u_c are
+    // advanced TOGETHER, by the same fluxes, at the head of the step — the momentum advection has
+    // to precede the predictor that consumes it. The advecting field is u^n, the previous step's
+    // projected (discretely divergence-free) output. No-op unless enable_vof_momentum ran; when it
+    // has NOT, the colour advection keeps WO-J's slot at the bottom of the step and this path is
+    // byte-identical to V2a. See enableVofMomentum().
+    advectVofMomentum();
     // Multiphysics: refresh material properties / body forces from the current fields (frozen over
     // the step). No-op (byte-identical) when no closure is registered.
     updateProperties();
@@ -1725,7 +1734,9 @@ class Solver {
       if (porous_ && advect_)
         computeDivAdv();
       for (int c = 0; c < 3; ++c)  // RHS from u^n base + advection lagged at u^k
-        effVarRho() ? buildRhsVar(c) : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c));
+        vofMomEnabled_ ? buildRhsVarMom(c)
+                       : (effVarRho() ? buildRhsVar(c)
+                                      : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c)));
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
       // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies
       // to the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC
@@ -1795,7 +1806,10 @@ class Solver {
     // divergence-free face velocities — the SAME slot, and the same justification, as
     // advanceScalars() below (Weymouth-Yue's exact conservation is conditioned on the advecting
     // field's discrete divergence; see advectVof()). No-op (byte-identical) when VoF is off.
-    advectVof();
+    // Under momentum consistency (V2b) the colour was already advanced at the head of the step,
+    // together with the momentum it shares its fluxes with — see advectVofMomentum().
+    if (!vofMomEnabled_)
+      advectVof();
     // Segregated multiphysics: advance any transported scalars with the just-projected
     // divergence-free velocity (properties frozen over the step). No-op (byte-identical) when no
     // scalar is registered.
@@ -2166,6 +2180,13 @@ class Solver {
       };
     }
 #endif
+    // The half-shifted momentum CVs live on this same block, so they are rebuilt with it.
+    if (vofMomEnabled_) {
+      vofMom_.init(vofAdv_, vofRhoG_, vofRhoL_);
+      for (int c = 0; c < 3; ++c)
+        if (uAdv_[c].extent(0) != n_)
+          uAdv_[c] = CCField("uAdv", n_);
+    }
   }
   // Is axis `a` periodic for the colour field? flow's per-face bc_ is 0 (periodic) on BOTH ends of
   // a periodic axis, so an axis is periodic iff neither of its faces carries a domain BC.
@@ -3248,8 +3269,8 @@ class Solver {
     const bool wd = Grid::collocated && faceInterp_ >= 4 && faceInterp_ <= 7;
     if constexpr (Grid::collocated)
       if (wd) {
-        stencilMatvec(fvM_, CCConst(C[c].u), MConst(C[c].AC), MConst(C[c].AW), MConst(C[c].AE),
-                      MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB), MConst(C[c].AT), e_, G);
+        stencilMatvec(fvM_, CCConst(C[c].u), FPC(C[c].AC), FPC(C[c].AW), FPC(C[c].AE),
+                      FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT), e_, G);
         // modes 5/6: TRUE-NORMAL embed wall drag (embedDirichletGradient); mode 4: axis-by-axis W_a
         // g_a
         if (faceInterp_ >= 5)
@@ -3423,6 +3444,44 @@ class Solver {
                   (bc ? brhs(i) : -inh(i));
         });
   }
+  // Momentum-consistent sibling of buildRhsVar (rung V2b, WO-K). The validated `buildRhsVar` is not
+  // touched; this one differs in exactly one term and drops one.
+  //
+  //   buildRhsVar :  rho_f/dt * u^n   - rho_f * adv(u^k)   (+ implicit-FOU deferred correction)
+  //   this        :  rho_f/dt * u^adv
+  //
+  // `u^adv` is `(rho^c u_c)/rho^c` after the geometric advection that shared its fluxes with the
+  // colour field, so it already contains BOTH the time base and the advection — the Koren/SOU term
+  // and the deferred correction are not merely unnecessary here, adding them would advect the
+  // momentum twice. Everything else (the incremental -grad(P^n), the face body force, the domain-BC
+  // inhomogeneity, the cut-cell rescale) is verbatim, and `rho_f` is the SAME arithmetic face mean
+  // the projection coefficient and the face body force use — the three-way consistency that makes
+  // hydrostatic balance exact is untouched (see the enableVofMomentum note).
+  void buildRhsVarMom(int c) {
+    CCExec space;
+    const double idt = 1.0 / dt_, fc = f_[c];
+    C3 e = e_;
+    CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
+    CCConst fb = CCConst(cellForce_[c]);
+    CCConst rf = CCConst(effRhoField());
+    CCConst ua = CCConst(uAdv_[c]);
+    const long strd = strideOf(c);
+    const bool incr = cutcellPressure_ && incremental_;
+    const bool bc = hasBc_ && !bcStencilPath();
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "rhs_var_mom", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const double rhoF = 0.5 * (rf(i) + rf(i - strd));
+          const double gp = !incr              ? 0.0
+                            : Grid::collocated ? 0.5 * (P((long)i + strd) - P((long)i - strd))
+                                               : (P(i) - P((long)i - strd));
+          const double fbF = 0.5 * (fb(i) + fb(i - strd));
+          bb(i) = rs(i) * (rhoF * idt * ua(i) + fc + fbF - gp) + (bc ? brhs(i) : -inh(i));
+        });
+  }
+
   // Implicit-FOU velocity stencil (CUDA build_adv_stencil_k + ibm_modify_stencil): backward-Euler
   // diffusion (idiag+6beta diag, -beta off) + rho*FOU(u^k) upwind operator (diagonally dominant ->
   // stable at high Re), then the Robust-Scaled cut-cell bake. The advecting velocity u^k = the
@@ -3611,15 +3670,15 @@ class Solver {
         velSweepLoop(
             [&] { fillVelGhostsTo(C[c].u, c, 0); },
             [&](int col) {
-              ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                                  MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
-                                  MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G,
+              ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                                  FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                                  FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_, og_, G,
                                   col);
             },
             [&](int col) {
-              return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), MConst(C[c].AC),
-                                           MConst(C[c].AW), MConst(C[c].AE), MConst(C[c].AS),
-                                           MConst(C[c].AN), MConst(C[c].AB), MConst(C[c].AT),
+              return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), FPC(C[c].AC),
+                                           FPC(C[c].AW), FPC(C[c].AE), FPC(C[c].AS),
+                                           FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT),
                                            CCConst(C[c].mask), e_, og_, G, col);
             });
         return;
@@ -3635,14 +3694,14 @@ class Solver {
       velSweepLoop(
           [&] { fillVelGhostsTo(C[c].u, c, 0); },
           [&](int col) {
-            ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                                MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
-                                MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, col);
+            ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                                FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB),
+                                FPC(C[c].AT), CCConst(C[c].mask), e_, og_, G, col);
           },
           [&](int col) {
-            return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                                         MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
-                                         MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_,
+            return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                                         FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                                         FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_,
                                          og_, G, col);
           });
       return;
@@ -3738,26 +3797,26 @@ class Solver {
           [&](int col) {
             if (col == 0) {
               velDev_->exchangeBegin(C[c].u);
-              ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                                     MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
-                                     MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_,
+              ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                                     FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                                     FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_, og_,
                                      col, lo, hi, z0, z0);
               velDev_->exchangeEnd(C[c].u);
-              ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                                     MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
-                                     MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_,
+              ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                                     FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                                     FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_, og_,
                                      col, rlo, rhi, lo, hi);
             } else {
-              ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                                  MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
-                                  MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G,
+              ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                                  FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                                  FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_, og_, G,
                                   col);
             }
           },
           [&](int col) {
-            return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                                         MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
-                                         MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_,
+            return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                                         FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                                         FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_,
                                          og_, G, col);
           });
       return;
@@ -3779,26 +3838,26 @@ class Solver {
           [] {},
           [&](int col) {
             velDev_->exchangeBegin(C[c].u);
-            ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                                   MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
-                                   MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_,
+            ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                                   FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                                   FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_, og_,
                                    col, lo, hi, z0, z0);
             velDev_->exchangeEnd(C[c].u);
-            ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                                   MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
-                                   MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_, og_,
+            ibmRbgsStencilColorBox(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                                   FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                                   FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_, og_,
                                    col, ilo, ihi, lo, hi);
           },
           [&](int col) {
             velDev_->exchangeBegin(C[c].u);
             const double di = ibmRbgsStencilColorDuBox(
-                C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW), MConst(C[c].AE),
-                MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB), MConst(C[c].AT),
+                C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW), FPC(C[c].AE),
+                FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT),
                 CCConst(C[c].mask), e_, og_, col, lo, hi, z0, z0);
             velDev_->exchangeEnd(C[c].u);
             const double ds = ibmRbgsStencilColorDuBox(
-                C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW), MConst(C[c].AE),
-                MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB), MConst(C[c].AT),
+                C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW), FPC(C[c].AE),
+                FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT),
                 CCConst(C[c].mask), e_, og_, col, ilo, ihi, lo, hi);
             return di > ds ? di : ds;
           });
@@ -3808,14 +3867,14 @@ class Solver {
     velSweepLoop(
         [&] { fillGhostsFaces(C[c].u); },
         [&](int col) {
-          ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                              MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN), MConst(C[c].AB),
-                              MConst(C[c].AT), CCConst(C[c].mask), e_, og_, G, col);
+          ibmRbgsStencilColor(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                              FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB),
+                              FPC(C[c].AT), CCConst(C[c].mask), e_, og_, G, col);
         },
         [&](int col) {
-          return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), MConst(C[c].AC), MConst(C[c].AW),
-                                       MConst(C[c].AE), MConst(C[c].AS), MConst(C[c].AN),
-                                       MConst(C[c].AB), MConst(C[c].AT), CCConst(C[c].mask), e_,
+          return ibmRbgsStencilColorDu(C[c].u, CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                                       FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                                       FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_,
                                        og_, G, col);
         });
   }
@@ -4822,6 +4881,125 @@ class Solver {
     fillPropGhosts(cField_);
   }
 
+  // --- momentum-consistent transport (rung V2b, WO-K) ------------------------------------------
+  //
+  // Turn on the transport of `rho^c u_c` on the half-shifted MAC control volumes by the SAME
+  // geometric fluxes, the same sweep order and one frozen dilation flag as the colour advection of
+  // the same step (`vof/momentum_advect.hpp` carries the construction and the consistency identity).
+  //
+  // The two phase densities are required EXPLICITLY rather than read off the closure: the momentum
+  // flux is `rho_g (a - F) + rho_l F` with `F` the geometric LIQUID flux, so the scheme needs to
+  // know which density each phase carries, and inferring that from a `rho` field would be a silent
+  // dependence on the closure kind. `enableVofMomentum` validates the pair against the registered
+  // density field on the spot (see `checkVofPhaseDensities`), so a mismatched call fails loudly.
+  //
+  // WHY THE ADVECTION MOVES TO THE HEAD OF THE STEP. WO-J placed `advectVof()` in the
+  // `advanceScalars()` slot because Weymouth-Yue needs a discretely divergence-free advecting field
+  // and the projection's output is the only one in the step. With momentum consistency the SAME
+  // fluxes must also carry the momentum, and the momentum advection has to happen before the
+  // predictor builds its RHS — so the whole VoF stage moves to the top of `step()`, where the
+  // advecting field is `u^n`, i.e. the PREVIOUS step's projected output. That is the same field, one
+  // step earlier in wall-clock: `u^{n+1}` at the bottom of step n IS `u^n` at the top of step n+1
+  // (WO-J's own note). The one real consequence is at step 0, where `u^0` is whatever the user set
+  // and is only divergence-free if the user made it so; every gate in this rung starts from rest or
+  // from a uniform field, both exactly divergence-free.
+  //
+  // With this placement `updateProperties()` then sees `C^{n+1}`, so the step runs with
+  // `rho(C^{n+1})`, `mu(C^{n+1})` — the density of the time level the momentum is being advanced TO,
+  // which is what the conservative form `rho^{n+1} u^{n+1} = rho^n u^n - div(rho u u) dt + ...`
+  // wants.
+  //
+  // WHAT IS *NOT* CHANGED, DELIBERATELY: the momentum time-term face density, the face body force
+  // and the projection coefficient all keep the arithmetic face mean `1/2 (rho(i) + rho(i-s_c))`.
+  // That three-way agreement is what makes discrete hydrostatic balance exact
+  // (`doc/variable_density_projection.md` §1) and it is a validated kernel. Momentum consistency
+  // enters as the ADVECTIVE base velocity `u^adv` replacing `u^n - dt*adv(u^n)`: the momentum
+  // equation solved is `rho_f (u* - u^adv)/dt = -grad p + visc + f`, i.e. exactly the conservative
+  // update divided through by the face density. Swapping the time term to the clipped `rho^c`
+  // instead would break the hydrostatic acid test at O(d rho) — measured and recorded in the WO-K
+  // findings.
+  void enableVofMomentum(double rhoGas, double rhoLiquid) {
+    if constexpr (Grid::collocated)
+      throw std::runtime_error(
+          "enable_vof_momentum: momentum-consistent VoF transport is STAGGERED-ONLY (rung V2b); the "
+          "collocated construction is Favre-averaged face states, rung V8.");
+    enableVof();
+    if (porous_)
+      throw std::runtime_error(
+          "enable_vof_momentum: the volume-averaged porous momentum and the momentum-consistent VoF "
+          "transport both own the momentum time term; they are not composable at this rung.");
+    if (!(rhoGas > 0.0) || !(rhoLiquid > 0.0))
+      throw std::runtime_error("enable_vof_momentum: both phase densities must be > 0");
+    vofRhoG_ = rhoGas;
+    vofRhoL_ = rhoLiquid;
+    vofMomEnabled_ = true;
+    for (int c = 0; c < 3; ++c)
+      if (uAdv_[c].extent(0) != n_)
+        uAdv_[c] = CCField("uAdv", n_);
+    vofMom_.init(vofAdv_, vofRhoG_, vofRhoL_);
+  }
+  bool vofMomentumEnabled() const { return vofMomEnabled_; }
+  // Floor on rho^c in the recovery divide u = (rho^c u)/rho^c, as a FRACTION of min(rho_g, rho_l)
+  // (default 1e-6). rho^c leaves [rho_g, rho_l] only through a wisp in the half-shifted colour, and
+  // driving it to zero would need C^c ~ -1/(ratio-1); the floor is a guard, not a model, and
+  // `vof_momentum_diagnostics()` reports how many control volumes it actually touched.
+  void setVofRhoFloorFrac(double f) { vofMom_.rhoFloorFrac = f; }
+  double vofRhoFloorFrac() const { return vofMom_.rhoFloorFrac; }
+  double vofRhoFloor() const { return vofMom_.lastRhoFloor(); }
+  // Ablations (measured, not tuning knobs): first-order donor velocity in the momentum flux, and
+  // the literal reading of "the same frozen dilation flag" (the PRESSURE-cell flag on the shifted
+  // control volume instead of its structural analogue). See vof/momentum_advect.hpp.
+  void setVofMomentumUpwind(bool on) { vofMom_.momentumUpwind = on; }
+  void setVofMomentumCellFlag(bool on) { vofMom_.useCellDilationFlag = on; }
+  vof::MomentumConsistentAdvector::Diagnostics vofMomentumDiagnostics() {
+    if (!vofMomEnabled_)
+      throw std::runtime_error("vof_momentum_diagnostics: enable_vof_momentum was never called");
+    return vofMom_.diagnostics();
+  }
+  // The recovered advected velocity of component c on the inner cells (the momentum RHS's time
+  // base). Exposed so a test can gate the uniform-velocity identity on the advection ALONE, with
+  // the projection and the momentum solve out of the picture.
+  std::vector<double> getVofAdvectedVelocity(int c) {
+    if (!vofMomEnabled_)
+      throw std::runtime_error("vof_advected_velocity: enable_vof_momentum was never called");
+    return gatherInner(uAdv_[c]);
+  }
+
+  // The coupled colour + momentum advection. Called from the head of step() when momentum
+  // consistency is on; exposed so a test can drive it in isolation.
+  void advectVofMomentum() {
+    if (!vofMomEnabled_)
+      return;
+    if (hasSolid_)
+      throw std::runtime_error(
+          "VoF with an immersed solid is not implemented at rung V2b (the geometric fluxes are not "
+          "openness-weighted yet — VOF_PLAN.md §3 rule 2 / rung V5).");
+    if (implicitAdv())
+      throw std::runtime_error(
+          "enable_vof_momentum is incompatible with implicit advection (set_implicit_advection / a "
+          "domain-BC stencil path): the momentum advection is already done conservatively by the "
+          "VoF fluxes, and the implicit-FOU operator would add a second one.");
+    if (!effVarRho())
+      throw std::runtime_error(
+          "enable_vof_momentum requires the variable-density momentum/projection path: register a "
+          "density closure on C (set_property_model('rho','linear','C',[rho_g, rho_l-rho_g])) or "
+          "call set_density_mode('variable').");
+    if (vofMom_.phaseRhoG() != vofRhoG_ || vofMom_.phaseRhoL() != vofRhoL_)
+      vofMom_.setPhaseDensities(vofRhoG_, vofRhoL_);
+    bridgeVelocityToVof();
+    bridgeColourToVof();
+    vofMom_.advect(vofAdv_, dt_, vofStep_++);
+    // Colour back to the G=2 registry mirror (same contract as advectVof), and the advected
+    // velocity back onto the solver's velocity index convention.
+    copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
+    fillPropGhosts(cField_);
+    // A plain inner-to-inner copy: the momentum control volumes are indexed in the solver's own
+    // low-face convention (vof/momentum_advect.hpp "Indexing"), so CV_c(i) IS the solver's u_c(i)
+    // and there is no shift here to get wrong.
+    for (int c = 0; c < 3; ++c)
+      copyInner(uAdv_[c], e_, G, CCConst(vofMom_.advectedVelocity(c)), e3_, kVofG);
+  }
+
   // --- Property closures + per-cell body force ------------------------------------------------
   // Register a property/force closure. target: a registered field name — a material property
   // ("mu"/"rho"/…) or a body-force component ("force_x"/"force_y"/"force_z"). kind: LinearMix /
@@ -5240,7 +5418,7 @@ class Solver {
 #ifdef PECLET_FLOW_MPI
   std::shared_ptr<GridHaloTopology<3>> velHalo_;  // g=2 velocity-block topology
   std::shared_ptr<GridHalo<double>> velDev_;      // g=2 velocity-block ghost exchange
-  std::shared_ptr<GridHalo<float>> velDevF_;      // float twin (momentum-stencil ring, CA sweeps)
+  std::shared_ptr<GridHalo<MReal>> velDevF_;      // float twin (momentum-stencil ring, CA sweeps)
   bool caMomentum_ = false;  // communication-avoiding momentum sweeps (PECLET_FLOW_CA + extent>=4)
   bool momStencilDirty_[3] = {true, true, true};  // per-component: stencil ring needs an exchange
   std::shared_ptr<peclet::core::decomp::BlockDecomposer<3>>
@@ -5402,6 +5580,11 @@ class Solver {
   C3 e3_{0, 0, 0};                // extended extents of that block (n + 2*kVofG)
   double vofCflLimit_ = 0.25;     // Weymouth's proven 3D boundedness bound 1/(2(N-1))
   long vofStep_ = 0;              // sweep-permutation counter (6-cycle)
+  // --- momentum-consistent transport (rung V2b, WO-K) ---
+  bool vofMomEnabled_ = false;             // rho^c u_c advected by the SAME geometric fluxes as C
+  vof::MomentumConsistentAdvector vofMom_;  // the half-shifted CVs, on the SAME g=3 block
+  CCField uAdv_[3];  // the recovered advected velocity on the solver's G=2 block (inner cells)
+  double vofRhoG_ = 1.0, vofRhoL_ = 1.0;  // the two phase densities (C = 0 / C = 1)
 #ifdef PECLET_FLOW_MPI
   std::shared_ptr<GridHaloTopology<3>> vofHalo_;  // the colour field's OWN g=3 topology
   std::shared_ptr<GridHalo<double>> vofDev_;
