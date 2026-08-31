@@ -639,9 +639,11 @@ The `(float)` → `(MReal)` hunks in `src/flow_ibm.hpp` were staged and committe
 WO-O session in `9047e1b` ("VoF V3 (WO-O): height-function curvature…"), which staged
 `src/flow_ibm.hpp` by name while this WO's edit to that file was in the working tree. The code is
 correct and complete on main (verified line by line against this WO's own worktree copy), and history
-was **not** rewritten — main is shared with two other live sessions. Recording it here because the
-commit message attributes the change to curvature work, and because it is the third time in two days
-that named-path staging in a shared checkout has crossed sessions. The mitigation this WO used for
+was **not** rewritten — main is shared with two other live sessions. It happened a second time a few hours later: the memory-accounting paragraph of §2 was
+carried into `cb7fcbb` ("WO-O findings: record the CUDA kokkos_mpi 57/57 leg"), which staged this
+same doc by name. Recording both here because the commit messages attribute the changes to curvature
+work, and because named-path staging in a shared checkout has now crossed sessions four times in two
+days. The mitigation this WO used for
 everything downstream of it — a `git worktree` at HEAD carrying only its own diff — is the one that
 actually works, and is worth making the default for any measurement campaign run beside another agent.
 
