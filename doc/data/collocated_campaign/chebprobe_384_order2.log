@@ -1,0 +1,21 @@
+[cfg] global 384x384x384 = 56.6M cells  ranks=1  backend=Cuda  grid=staggered  IBM=cutcell  face_interp=9  bottom=auto  spheres=587 R=24.0 cells  phi=0.6003  levels=7  pressure=cheby(maxit=300,rtol=1e-08,warmstart=0)  steps=0+6 then march(tol=0,max=6)
+  rank 0: block 384x384x384 at [0, 0, 0]  gcn121.local.snellius.surf.nl 0000:C6:00.0
+[sdf] built in 1.4s  voxel solid fraction=0.6003 (packing 0.6003)
+[mg] initMpi 384x384x384 np=1 -> 7 levels (requested 7)
+[mg]  L0 global  384x 384x 384  rank0 block  384x 384x 384  ratio(2,2,2)
+[mg]  L1 global  192x 192x 192  rank0 block  192x 192x 192  ratio(2,2,2)
+[mg]  L2 global   96x  96x  96  rank0 block   96x  96x  96  ratio(2,2,2)
+[mg]  L3 global   48x  48x  48  rank0 block   48x  48x  48  ratio(2,2,2)
+[mg]  L4 global   24x  24x  24  rank0 block   24x  24x  24  ratio(2,2,2)
+[mg]  L5 global   12x  12x  12  rank0 block   12x  12x  12  ratio(2,2,2)
+[mg]  L6 global    6x   6x   6  rank0 block    6x   6x   6  ratio(1,1,1)
+[run] warmup 0 steps...
+[run] step 1/6
+[run] step 2/6
+[run] step 3/6
+[run] step 4/6
+[run] step 5/6
+[run] step 6/6
+[perf] 8215.2 ms/step  6.9 Mcell/s (6.9/rank)  pressure iters/step 300.0
+[phases, rank-max ms/step] step=8215.1  predictor=4.1  momentum=766.9  projection=7441.0  pressure_allreduce=2.0  allreduce_count=922
+[out] spheres_bench_np1.json
