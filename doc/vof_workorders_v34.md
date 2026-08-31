@@ -306,7 +306,7 @@ not at the usual reduction-order floor.
 | G tier-2b ablation | see the deviation |
 | MPI np 1/2/4, host + CUDA, periodic and walls-on-the-cut-axis | **0 of 8192 cells differ, bitwise, on kappa AND on the branch field; the summed branch census equals the single-rank census exactly** |
 | single-phase regression | **+0.00 % on all 13 grid points**, identical pressure-iteration totals, per-step medians and step counts on `zh_sphere` / `random_spheres` / `hollow_rings`; order p and the Richardson extrapolate unchanged to every printed digit. Run in an **isolated git worktree carrying only this WO's files** (the checkout is shared with WO-M, which has `mac_cutcell_mg.hpp` / `mac_velocity_mg.hpp` in flight), so the +0.00 % is attributable |
-| full ctest batteries | `tests/kokkos` **25/25** on host-openmp AND nvidia-cuda; `tests/kokkos_mpi` **57/57** on host-openmp (was 54; the 3 new ones are `vof_curvature_mpi_np{1,2,4}`) |
+| full ctest batteries | `tests/kokkos` **25/25** on host-openmp AND nvidia-cuda; `tests/kokkos_mpi` **57/57** on host-openmp AND nvidia-cuda (was 54; the 3 new ones are `vof_curvature_mpi_np{1,2,4}`). On the CUDA leg two np=4 tests — `dragbeta_ghost_mpi_np4` and `vof_twophase_mpi_np4`, both pre-existing and both unrelated to this WO — hit the known **load-triggered `MPI_ERR_TRUNCATE` race of WO-L** while the GPU was time-slicing a second agent's full battery; each passes on re-run (8.7 s and 803 s). Not chased, per the work order. |
 
 **Branch statistics per resolution** (exact-fraction sphere, off-centre by an irrational fraction of
 a cell so it is never mesh-aligned):
@@ -482,7 +482,11 @@ repeats each (spread ≤ 5 %):
 | 160³ | 4.10 M | 21 | **350.1** | **390.3** | **+11.5 %** | 4442 MiB | 4908 MiB | **+119 B** |
 
 So a full fp64 hierarchy + momentum stencil costs **+12 % wall time and +120 B/cell (+10 % of total
-solver memory)**. On the high-contrast beds it is nonetheless *faster to solution* (28 iterations
+solver memory)**. The measured +120 B/cell is a good cross-check that the instrument is measuring
+what it should: the arrays that change are the pressure hierarchy's seven coefficients (7 × 4 B ×
+8/7 for the geometric tail = 32 B/cell) plus the three momentum components' seven each (3 × 7 × 4 =
+84), i.e. **116 B/cell predicted against 119–121 measured**. By the same accounting the
+double-diagonal's one array per operator is 4 × 8/7 + 3 × 4 = **17 B/cell**. On the high-contrast beds it is nonetheless *faster to solution* (28 iterations
 instead of a burnt 300).
 
 #### 3. The attainable floor, and why a fixed rtol of 1e-8 is not a meaningful target
