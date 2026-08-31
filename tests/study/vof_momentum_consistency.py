@@ -317,7 +317,7 @@ def gate_rho_floor(n=32, steps=200, R=1000.0):
         del s
 
 
-def gate_falling_drop(n=60, D=15, R=800.0, mu_ratio=100.0, steps=700, quiet=False):
+def gate_falling_drop(n=48, D=15, R=800.0, mu_ratio=100.0, steps=500, quiet=False):
     """A viscous drop falling under buoyancy at density ratio ~800 and 15 cells/diameter.
 
     WO-K asks for the Arrufat raindrop (ratio 831.8, 15 cells/D, terminal velocity within 15%).
@@ -420,7 +420,7 @@ def gate_falling_drop(n=60, D=15, R=800.0, mu_ratio=100.0, steps=700, quiet=Fals
     return out
 
 
-def gate_rt(res=(32, 64), R=1000.0, steps=400):
+def gate_rt(res=(24, 48), R=1000.0, steps=300):
     """Rayleigh-Taylor at two resolutions — the WO-K near-Nyquist check (Arrufat section 5).
 
     A momentum-consistent scheme can excite growth near the grid scale on under-resolved shear

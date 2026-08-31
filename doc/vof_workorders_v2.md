@@ -570,3 +570,54 @@ same payoff structure is a VISCOUS drop in the Stokes regime, whose terminal vel
 Hadamard-Rybczynski; that is what `gate_falling_drop` runs, at the same ratio and the same 15
 cells/diameter, with the periodic-array caveat stated. Numbers below.
 
+**Finding 8 — the falling-drop contrast is INCONCLUSIVE at this rung, and the reason is a second
+under-resolved solve, not the transport.** Measured (48³ box, D/h = 15, ratio 800, μ_l/μ_g = 100,
+buoyancy `f_z = −(ρ − ⟨ρ⟩)g` so the box carries no net force, 500 steps ≈ 5 Stokes response times,
+`max_iters 13/300`, `max|div(open u)| 3.8e-9`):
+
+| scheme | plateau U_drop | U / (U_HR/K) | max\|u\| |
+|---|---|---|---|
+| consistent | −3.20099e-03 | 0.0922 | 2.909e-02 |
+| inconsistent | −3.18719e-03 | 0.0918 | 2.911e-02 |
+
+Both are **stable**, both reach a genuinely flat plateau (the last ten samples vary by 0.3 %), and
+they agree with each other to **0.4 %**. But the plateau is only 9 % of the Hadamard–Rybczynski
+velocity corrected for the periodic array (`U_HR = 5.010e-2`, `K = 1.443` at φ = 0.016), so the case
+is nowhere near its analytic terminal velocity and the work order's "within 15 %" number **cannot be
+quoted from it**. The most likely cause is the momentum smoother rather than the transport: at
+`dt = 2`, `μ_g = 50` and `h = 1` the GAS-phase diffusion number is `ν dt/h² = 100`, far outside what
+a fixed number of backward-Euler RB-GS sweeps resolves — the same class of defect as an
+under-converged pressure solve, on the other solve. That diagnosis is *unverified* (it would need a
+`set_velocity_solver_params` sweep or velocity-MG, which is single-rank only), so it is filed as the
+suspected mechanism and not asserted.
+
+Two things can still be said honestly. (i) At ratio 800 and 15 cells/diameter the consistent scheme
+is stable and non-degrading, which is the qualitative claim the rung needs. (ii) The two schemes
+agree to 0.4 % on *this* case, which is expected: a nearly-spherical Stokes drop has no violent
+interfacial momentum transfer, and Arrufat's factor-of-13 resolution payoff is for a DEFORMING drop
+held by surface tension — i.e. the discriminating case genuinely lives at V4, not here. Re-run this
+gate at V4 with a converged momentum solve before claiming the Arrufat number.
+
+**Finding 9 — the near-Nyquist caveat (Arrufat §5) does NOT appear at these resolutions, stated as
+a negative result.** Rayleigh–Taylor, ratio 1000, single-mode, two resolutions, 300 steps:
+
+| n | amplitude consistent | amplitude inconsistent | max\|u\| consistent | pressure |
+|---|---|---|---|---|
+| 24 | 1.69493e-02 | 1.59502e-02 | 6.743e-03 | 14/300, max\|div\| 2.5e-7 |
+| 48 | 1.55911e-02 | 1.57881e-02 | 3.305e-03 | 15/300, max\|div\| 5.7e-7 |
+
+The signature to look for is the FINER grid being worse — grid-scale energy appearing where the
+scheme should be converging. It is not there: refining halves `max|u|` (6.7e-3 → 3.3e-3) and brings
+the two schemes' amplitudes together (6.3 % apart at n = 24, 1.2 % apart at n = 48). No shear layer
+in this configuration is under-resolved enough to excite it, so the honest statement is *not
+observed at n = 24/48 on RT at ratio 1000*, not *absent*. The KH half of the caveat needs a
+deliberately under-resolved shear layer and is left for V4, where surface tension sets the relevant
+scale.
+
+**A note on this shared checkout.** An earlier version of `src/vof/momentum_advect.hpp` (plus the
+additive hunks in `plic.hpp`, `advect_wy.hpp`, `colour_field.hpp`, `flow_ibm.hpp` and
+`flow_bindings.cpp`) was swept into flow `8246f07`, another session's `MReal` commit, while this
+work was in flight. Nothing was lost and the tree is correct; the attribution is simply split across
+two commits. This is the hazard the shared preamble's hard rule 4 warns about, seen from the other
+side — the sweeping commit, not the swept work. The remaining delta was staged by name into
+`7d1a1f0` / `1086254` / `5fea576`.
