@@ -414,16 +414,17 @@ with `-DPECLET_FLOW_MREAL_DOUBLE`, run on one RTX 5080. Harness: `tests/study/pr
 WO-O's V3 work, every number here was produced in a **`git worktree` at HEAD + this WO's diff only**,
 so none of it is contaminated by concurrent work.
 
-#### 0. The A/B switch was incomplete — three families of hard `(float)` casts (fixed, byte-identical)
+#### 0. The A/B switch was incomplete — four families of hard `(float)` casts (fixed, byte-identical)
 
-`MReal` types the operator views, but nine assignment sites cast to `float` *literally*, so their
-operator stayed fp32 even in a double build. Found by the porous case below reading **4.768e-08 in
-both builds**:
+`MReal` types the operator views, but a set of assignment sites cast to `float` *literally*, so
+their operator stayed fp32 even in a double build. Found by the porous case below reading
+**4.768e-08 in both builds**:
 
 | site | what it clamps |
 |---|---|
 | `IbmSolver::buildAdvStencil` / `buildAdvStencilVar` (`flow_ibm.hpp`) | the implicit-FOU momentum stencil, all 7 coefficients, both the constant and the varRho path |
 | `IbmSolver::addDragDiagonal` | the CFD-DEM face-drag momentum diagonal |
+| `IbmSolver::applyBackflowStab` | the backflow-stabilization diagonal increment (found in the same audit) |
 | `mac_velocity_mg.hpp` × 5 | the velocity-MG staircase / upwind-coarse / const-aniso operators, the identity row, and the no-slip boundary fold |
 
 All now cast to `MReal`, which is **byte-identical when `MReal` is float** (verified: the float
@@ -444,6 +445,25 @@ this the whole step-2 table would have been wrong in the momentum half.
 | **RCP permeability** (φ=0.63) Ng=44 / 56 | k | 1.00352402e-3 / 1.00879970e-3 | 1.00344076e-3 / **1.00879970e-3** | 8e-5 relative / **identical** |
 | **RCP bed, PCG rtol 1e-8 cap 300**, Ng=48/64/96 | its per step | 24 / 33 / **300 — CAPPED, INVALID** | 14 / 14 / **28** | **the solve is valid instead of invalid** |
 | " | max\|div(open·u)\| | 4.5e-6 / 6.5e-7 / 4.4e-6 | 9.5e-12 / 9.5e-12 / 3.2e-11 | **5 orders** |
+
+**The single-phase regression, run on BOTH builds** (13 grid points, `zh_sphere` /
+`random_spheres` / `hollow_rings`): **+0.00 % on every metric in both**, with **identical**
+`p_iter_tot`, iterations/step and step counts. The only thing that moves is the flux divergence,
+which drops about two orders (e.g. `zh_sphere` N=64 4.5e-11 → 2.1e-12; `hollow_rings` N=24 5.9e-11 →
+4.6e-12). That is the cleanest possible statement of the trade: on everything this suite exists to
+protect, fp64 changes *nothing* — it only lowers a residual that was already four orders below the
+gate.
+
+**On the Ergun bed specifically.** The work order named `coupling/tests/test_fixed_bed_ergun_porous.py`,
+which needs `peclet.dem` + `peclet.coupling`; the local builds of both predate the 2026-08-30
+OpenMP-prefix switch, and composing an old-prefix and a new-prefix module in one interpreter is
+explicitly forbidden (`suite/CLAUDE.md`), so rebuilding two projects was not the cheapest route to
+the answer. The `porous` case above exercises the *same flow-side code path*
+(`buildPorousCoeffCons` + `addDragDiagonal` + `projectCorrectPorousCons`) against an **exact**
+reference instead of an empirical correlation — and it settles the Ergun question anyway:
+**WO-I's post-fix Ergun agreement of "2e−8 … 7e−8 (machine precision)" is precisely this float
+floor**, not double machine precision. The identical 4.768e-08 here, and its collapse to 2.776e-16
+in a double build, identify that recorded number as fp32-limited. WO-N should record it as such.
 
 The pattern is sharp and it is not "double is better everywhere". **Every case that only needs an
 approximation is unchanged** (Z&H drag, the converged permeability, the hydrostatic rest state —
