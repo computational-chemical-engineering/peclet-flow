@@ -11,7 +11,15 @@
    TRANSPORTED phase fraction c drives rho via a linear-mixture closure (auto-enabling the
    variable-density path), gravity is a closure force_z = -g*rho, momentum + projection carry the
    variable density. The interface amplitude grows ~exponentially then nonlinearly; the measured
-   early growth rate is ~0.74x the inviscid sqrt(A g k) (viscous + finite-interface damping).
+   growth rate is ~0.75x the inviscid sqrt(A g k) (viscous + finite-interface damping).
+
+   TWO records, same physics, reported side by side (VoF rung V2a / WO-J):
+     * DIFFUSE C — the pre-VoF baseline: a tanh profile of width 1.5 advected by the Koren TVD
+       scalar transport. Amplitude 1.50 -> 19.52 (x13.0), rate 0.75x sqrt(A g k).
+     * SHARP C — geometric VoF (PLIC + Weymouth-Yue), adaptive dt from the INTERFACE-LOCAL
+       Courant number. Amplitude 1.50 -> 20.20 (x13.5), rate 0.77x sqrt(A g k), colour volume
+       drift -6.6e-09. The sharp interface grows marginally FASTER, which is the expected sign:
+       a two-cell-wide density ramp damps the mode that a sharp jump does not.
 
 Run:  PYTHONPATH=<build> python rayleigh_taylor.py
 """
@@ -71,6 +79,66 @@ def rayleigh_taylor(N=48, NZ=96, g=0.005, mu=0.002, dt=1.0, steps=240):
     return hist
 
 
+def rayleigh_taylor_vof(N=48, NZ=96, g=0.005, mu=0.002, steps=240, cfl=0.2, dt0=1.0):
+    """SHARP-interface Rayleigh-Taylor through the geometric VoF chain (rung V2a, WO-J).
+
+    Identical physics to `rayleigh_taylor()` above — same grid, same Atwood number (ratio 3),
+    same gravity, same viscosity, same initial interface z_i(x) = NZ/2 + 1.5 cos(2 pi x / N) —
+    with ONE difference: the phase field is a sharp geometric VoF colour field advected by
+    Weymouth-Yue instead of a tanh profile of width 1.5 advected by Koren TVD. Reporting both is
+    the point: the diffuse record is the pre-VoF baseline this rung has to reproduce.
+
+    Two deliberate departures from the diffuse driver, both forced by the method rather than
+    chosen:
+
+    * dt is ADAPTIVE. Weymouth-Yue is bounded only for an interface-local Courant number below
+      1/(2(N-1)) = 0.25 in 3D, and an RT interface accelerates, so a fixed dt = 1 that is safe at
+      t = 0 is not safe at t = 240. dt is therefore chosen from `vof_max_courant()` — the
+      INTERFACE-LOCAL Courant number, which is the quantity the bound applies to (a global max
+      would throttle on the far-field return flow; V1 measured 2x over-throttling on Zalesak, and
+      the WO-J ctest measures 22x on a jet-plus-quiescent-interface scene). Amplitudes are
+      therefore reported against PHYSICAL TIME, sampled at the same t = 40, 80, ... 240 as the
+      diffuse record.
+
+    * the amplitude comes from the COLUMN SUM of C, not from interpolating a C = 0.5 crossing.
+      For a sharp interface the column sum IS the interface height to machine precision
+      (z_i = NZ - sum_z C, heavy on top), while a 0.5-crossing interpolation of a two-cell-wide
+      profile carries an O(h) bias that the diffuse case cannot avoid and this one need not.
+    """
+    s = F.Solver(N, 4, NZ)
+    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt0)
+    s.set_advection(True)
+    s.set_domain_bc(4, 1, 0, 0, 0); s.set_domain_bc(5, 1, 0, 0, 0)
+    s.set_pressure_geometry(np.asfortranarray(np.full((N, 4, NZ), 10.0)))
+    s.enable_vof()
+    x, z = np.arange(N), np.arange(NZ)
+    zi = NZ / 2 + 1.5 * np.cos(2 * np.pi * x / N)
+    # exact cell fractions of {z > z_i(x)} (heavy on top), i.e. a SHARP interface
+    c0 = np.clip((z[None, :] + 1.0) - zi[:, None], 0.0, 1.0)
+    s.set_vof(np.asfortranarray(np.repeat(c0[:, None, :], 4, axis=1)))
+    s.set_property_model("rho", "linear", "C", [1.0, 2.0])           # rho = 1 + 2C (ratio 3)
+    s.set_property_model("force_z", "linear", "rho", [0.0, -g])
+
+    def amp():
+        h = s.get_vof()[:, 1, :].sum(axis=1)      # cells above the interface, per x-column
+        zc = NZ - h
+        return 0.5 * (zc.max() - zc.min())
+
+    v0 = s.get_vof().sum()
+    t, dt, sample, hist, tt = 0.0, dt0, 40.0, [amp()], [0.0]
+    while t < steps - 1e-9:
+        c = s.vof_max_courant()                    # interface-local, with the CURRENT dt
+        if c > 0:                                  # target `cfl`, never grow dt by more than 2x
+            dt = min(2.0 * dt, dt * cfl / c, dt0)
+        dt = min(dt, sample - t)
+        s.set_dt(dt)
+        s.step()
+        t += dt
+        if t >= sample - 1e-9:
+            hist.append(amp()); tt.append(t); sample += 40.0
+    return hist, tt, (s.get_vof().sum() - v0) / v0
+
+
 if __name__ == "__main__":
     for ratio in (3.0, 1000.0):
         m, perr = hydrostatic(ratio)
@@ -78,6 +146,34 @@ if __name__ == "__main__":
         assert m < 1e-12 and perr < 1e-11
     hist = rayleigh_taylor()
     growth = hist[-1] / hist[0]
-    print(f"Rayleigh-Taylor amplitude: {' -> '.join(f'{h:.2f}' for h in hist)}  (x{growth:.1f})")
+    print(f"Rayleigh-Taylor  DIFFUSE C amplitude: {' -> '.join(f'{h:.2f}' for h in hist)}  "
+          f"(x{growth:.1f})")
     assert growth > 3.0 and all(hist[i+1] >= hist[i] * 0.98 for i in range(len(hist) - 1))
+
+    vh, vt, vdrift = rayleigh_taylor_vof()
+    vgrowth = vh[-1] / vh[0]
+    print(f"Rayleigh-Taylor  SHARP  C amplitude: {' -> '.join(f'{h:.2f}' for h in vh)}  "
+          f"(x{vgrowth:.1f})   colour dV/V {vdrift:+.2e}")
+    # Linear theory: the inviscid interfacial growth rate n = sqrt(A g k), with A = (r-1)/(r+1)
+    # = 0.5 at ratio 3 and k = 2 pi / N. The rate is fitted over t in [40, 160] -- NOT over the
+    # first window. The linear solution from REST is a cosh, not a pure exponential, so the first
+    # window measures the establishment of the mode rather than its growth rate (measured: 0.30x
+    # there against 0.75x once established); by t = 160 the amplitude is ~10 cells = 0.2 lambda
+    # and the nonlinear (bubble/spike) stage is taking over. Both records use the same window.
+    A, k = 0.5, 2 * np.pi / 48
+    n_lin = np.sqrt(A * 0.005 * k)
+
+    def fit(a, t, t0=40.0, t1=160.0):
+        m = [i for i, ti in enumerate(t) if t0 - 1e-9 <= ti <= t1 + 1e-9]
+        return np.polyfit([t[i] for i in m], [np.log(a[i]) for i in m], 1)[0]
+
+    td = [40.0 * i for i in range(len(hist))]
+    n_dif, n_vof = fit(hist, td), fit(vh, vt)
+    print(f"growth rate over t in [40,160]: linear theory sqrt(A g k) = {n_lin:.5f}   "
+          f"diffuse {n_dif:.5f} ({n_dif/n_lin:.2f}x)   sharp {n_vof:.5f} ({n_vof/n_lin:.2f}x)")
+    assert vgrowth > 3.0 and all(vh[i+1] >= vh[i] * 0.98 for i in range(len(vh) - 1))
+    # The colour-volume floor here is the PROJECTION's divergence residual, not the advection
+    # (WO-E finding 2): most of it is deposited by the pressure driver's first solve on a fresh
+    # field, which leaves a transient velocity the advector faithfully transports once.
+    assert abs(vdrift) < 1e-7
     print("PASS")

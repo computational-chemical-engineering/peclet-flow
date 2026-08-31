@@ -167,3 +167,163 @@ regression +0.00%.
 
 **Escalate** if the mechanism turns out not to be tag collision — the fix then depends on what
 it actually is, and guessing at communication races produces heisenbugs rather than fixes.
+
+---
+
+# Findings log (rung V2)
+
+### WO-J (rung V2a) — the colour field wired into the solver — **DONE 2026-08-31**
+
+Delivered: `src/vof/colour_field.hpp` (the `G = 2` ↔ `g = 3` bridge + the colour ghost policy),
+the `"C"` field and the VoF section of `src/flow_ibm.hpp`, the harmonic-ρ_f siblings in
+`src/mac_pressure.hpp`, `interfaceLocalCfl` + `maxCourantInterface()` in `src/vof/advect_wy.hpp`,
+`tests/kokkos/test_vof_twophase.cpp` (ctest `vof_twophase`), `tests/kokkos_mpi/
+test_vof_twophase_mpi.cpp` (ctests `vof_twophase_mpi_np{1,2,4}`), and `rayleigh_taylor_vof()` in
+`tests/study/rayleigh_taylor.py`. Python: `enable_vof / set_vof / get_vof / vof_diagnostics /
+vof_max_courant / vof_last_courant / set_vof_cfl_limit / vof_cfl_limit / set_rho_face_harmonic`.
+`tests/kokkos` **23/23 green on host-openmp AND nvidia-cuda**; the new MPI ctests green np = 1/2/4
+on both backends; single-phase regression **+0.00 % with identical iteration counts** on CUDA.
+
+**The wiring.**
+
+| item | what shipped |
+|---|---|
+| `"C"` registration | an ORDINARY `G = 2` registered cell field; the `g = 3` block is the advector's own working block, with its own `GridHaloTopology` at width 3 under MPI (`buildVofBlock`, rebuilt from `initMpi` so enable/init order does not matter). The two blocks exchange INNER REGIONS ONLY (`copyInner`, both ways) and each fills its own ghosts with its own policy. |
+| advection | `advectVof()`, called from `step()` immediately before `advanceScalars()`. |
+| face velocities | `bridgeVelocityToVof()`: `fillVelGhosts(c, 0)` (the solver's own halo + domain-BC fill, i.e. exactly what the Picard loop does) then `vof::copyFaceVelocity` — a whole-block embed carrying the low-face → high-face index shift. |
+| ρ(C), μ(C) | the existing `LinearMix` closures, verbatim. No new closure machinery. |
+| interface-local CFL | `WyAdvector::maxCourantInterface` + `interfaceLocalCfl` (default OFF; the solver turns it on, so the V1 battery is byte-identical). |
+| harmonic ρ_f | `buildRhoCoeffHarm` + `projectCorrectVarHarm` siblings, `set_rho_face_harmonic`, default OFF. The validated arithmetic kernels are untouched. |
+| refused | collocated (`enable_vof` throws — rung V8), and an immersed solid (`advectVof` throws — the fluxes are not openness-weighted yet, plan §3 rule 2). An all-fluid `set_pressure_geometry` is supported. |
+
+**Why `"C"` is a `G = 2` registry field and not the `g = 3` buffer adopted into the FieldSet.** The
+plan's §3 rule 1 sketch was "adopt the colour field into the FieldSet with its own topology at
+width 3". That is not compatible with item 3 of this work order. `applyClosure` indexes its input
+and its output with the SAME linear index on the SAME extent, so a closure input MUST live on the
+`G = 2` block; adopting the `g = 3` buffer under the name `"C"` would make
+`set_property_model("rho", "linear", "C", …)` silently index a `(n+6)³` buffer with `(n+4)³`
+strides. Fixing that means editing `applyClosure` — a validated kernel body, which hard rule 1
+forbids. So the split is forced, not chosen, and it is also what gives `"C"`
+`get_field`/`set_field`/`field_view`/`exchange_field`/`redistribute` for free. What §3 rule 1
+actually protects — "do not widen the solver's `G = 2`" — is honoured exactly: `G` is untouched and
+the colour field's geometric work runs on a width-3 block with its own topology.
+
+**Ordering, and how WO-K drops in.** The advection takes the `advanceScalars()` slot (after the
+projection) because Weymouth–Yue's exact conservation is conditioned on a DISCRETELY
+divergence-free advecting field and the only such field in the step is the projection's output —
+the same reason `advanceScalars` sits there. Note `u^{n+1}` at the bottom of step *n* IS `u^n` at
+the top of step *n+1*: the two placements are the same point in the timeline and differ only in
+which side of `updateProperties()` they fall on. Taking this slot means step *n* runs with
+ρ(C^n), μ(C^n) — the same time level as its velocity base `u^n`, and the same segregated contract
+every other multiphysics field obeys. For **WO-K** the momentum advection must share the fluxes, so
+the call moves to the head of the predictor; three structural facts make that a local change:
+(i) everything WO-K must share lives inside `vofAdv_` and survives the call — the frozen dilation
+flag `cc_`, the per-sweep PLIC planes `mx_/my_/mz_/alpha_`, the face Courant numbers and the
+permutation index — so a sibling advector for ρ^c u_c reads those members rather than recomputing,
+and "sharing the fluxes" becomes a data-flow fact instead of a convention two call sites must keep;
+(ii) the colour advection is ONE call (`advectVof()`), and it moves to a velocity field (`u^n`)
+identical in content to the one it consumes today; (iii) the half-shifted colour field `C^c` is a
+new `g = 3` field on the SAME advector block — no new bridge, no new halo, and
+`bridgeVelocityToVof` already put the velocity there. The planes are on that block: WO-K clips
+them (`plicSlabVolume`, scale/offset invariant), it must not interpolate C.
+
+**Gate results** (host-openmp; CUDA identical except in the last bits).
+
+| gate | result |
+|---|---|
+| A bridge — solver-driven vs a STANDALONE `WyAdvector` on the same physical LeVeque field, 20 steps | max\|ΔC\| **5.6e-16** (CUDA 1.1e-15), L1 2.4e-14 |
+| B1 hydrostatic ∂P/∂z = −ρ_f·g through C, ratio 1000, free interface | rel-err **1.1e-15** (frozen 3.4e-16) |
+| B2 steady max\|u\|, interface FROZEN, vs the hand-set-ρ reference | ratio 3 `3.0646790727193918e-17`, ratio 1000 `2.1760599219479075e-17` — **BITWISE EQUAL to the hand-set-ρ run** at both ratios |
+| B2 free interface, 100 steps | ratio 3 **3.2e-13**, ratio 1000 **2.6e-12** (mechanism below) |
+| C volume conservation, ratio-10 sphere sheared, 1000 coupled steps | dV/V peak **5.6e-13**, final −2.4e-13, non-accumulating; max\|div(open·u)\| 1.4e-12…1.5e-11 |
+| D1 uniform C stationary under the coupled advection | **exactly 0.0** |
+| D2 VoF enabled, no closure, vs VoF off (sheared periodic box) | du **0.0**, dp **0.0** — bitwise inert |
+| D3 VoF + ρ(C≡1) vs hand-set uniform ρ + `set_density_mode` | du **0.0**, dp **0.0** — bitwise |
+| E harmonic ρ_f ablation, ratio 1000 | ∂P/∂z rel-err **0.3355** (arithmetic: 1.1e-15) — the knob breaks the balance loudly, as designed |
+| F interface-local vs global CFL (jet far from a quiescent interface) | **0.0022 vs 0.0492 — a 22× over-throttle avoided** |
+| MPI np 1/2/4, host + CUDA, `walls-z` (walled axis CUT) + `shear-per` | np=1 **bitwise 0.0** on u, P and C; np=2/4 `shear-per` du 1.0e-17, dp 3.2e-18, **dC 2.2e-16**, dV/V −3.1e-14; `walls-z` dp 1.2e-11 on \|P\| = 1.15e+03 (rel 1e-14), dC ≤ 2.3e-13 |
+| Rayleigh–Taylor, sharp vs the diffuse record (same physics) | sharp 1.50 → **20.20** (×13.5), rate **0.77×** √(Agk); diffuse 1.50 → 19.52 (×13.0), rate 0.75× — the sharp interface grows marginally faster, the expected sign (a 1.5-cell tanh ramp damps the mode) |
+| single-phase regression (CUDA) | **+0.00 % on every case, identical iteration counts** |
+
+**Finding 1 — a one-cell face-index shift between the two codes, and the conservation gate is the
+only thing that sees it.** `flow` puts `u(i)` on the **low** (`−x`) face of cell `i`
+(`projectCorrect`: `u(i) -= phi(i) - phi(i-sx)`; `divergOpen`: `d(i) = ox(i+sx)u(i+sx) - ox(i)u(i)`).
+`WyAdvector` puts `uf(i)` on the **high** (`+x`) face (`wyFaceFlux` fluxes from `p` into `p+sd`;
+the dilation term is `u(i) - u(i-sd)`). So the bridge must shift by one cell along each component's
+own axis, `u_adv(i) = u_solver(i + s_d)`. The first implementation did not, and the failure is
+nasty: it is invisible in a uniform flow, invisible in each axis' own discrete divergence (the
+shifted x-difference is still the solver's exact zero, merely evaluated at cell `i−1`), and
+invisible in `max|div(open·u)|` — but the advector sums the three axes AT ONE CELL, so it was
+handed `div_x(i−1) + div_y(i−s_y) + div_z(i−s_z)`, three different cells whose sum the projection
+never constrained. Weymouth–Yue adds `H(C−½)` times that to every full cell's budget. **Measured
+with the shift omitted: the sheared ratio-10 sphere gained 35 % of its volume over 1000 steps while
+the solver's own `max|div(open·u)|` read 7e-11.** Gate A exists because of this: it drives the
+solver and a standalone `WyAdvector` with the same PHYSICAL field and compares C. Note a uniform
+or solid-body-rotation scene would NOT have caught the axial half of the shift (neither field varies
+along its own component's axis) — the LeVeque field does.
+
+**Finding 2 — the acid test's velocity half cannot be gated at machine zero with a FREE interface,
+and the reason is a loop gain, not a wiring inconsistency.** The gate as written asks for "steady
+max|u| at machine zero". With the interface HELD FIXED the C → closure → ρ → projection chain
+returns `2.1760599219479075e-17` at ratio 1000 — *bit for bit* the hand-set-ρ number on the same
+grid, i.e. the chain is not merely consistent, it is the same computation. With the interface free
+the residual instead wanders up to ~1e-12 over a few hundred steps. Mechanism, isolated by scaling
+rather than asserted:
+
+* the colour field is an extra degree of freedom; a residual velocity ε displaces it by ε·dt;
+* that changes ρ by Δρ·ε·dt, hence the body force by g·Δρ·ε·dt, hence the acceleration in the LIGHT
+  layer by g·Δρ·ε·dt/ρ_g — a loop gain **g·Δρ·dt/ρ_g**, which is 100 at ratio 1000, g = 0.1, dt = 1;
+* the projection removes only the part of that perturbation that is a discrete gradient; what
+  survives is an interfacial gravity-wave mode, undamped at μ = 0.
+
+Measured, all starting from the exact frozen fixed point 2.176e-17, 200 steps:
+
+| loop gain g·Δρ·dt/ρ_g | configuration | max\|u\| after 200 steps |
+|---|---|---|
+| 100 | ratio 1e3, g = 0.1, dt = 1 | 2.4e-12 |
+| 10 | ratio 1e3, g = 0.1, dt = 0.1 | 7.9e-15 |
+| 1 | ratio 1e3, g = 1e-3, dt = 1 | 1.2e-16 |
+| 0.2 | ratio 3, g = 0.1, dt = 1 | 3.0e-14 |
+
+i.e. the level tracks the gain and nothing else; with C frozen the same runs sit at 2.2e-17 forever,
+bit-stable. The shipped gates are therefore: ∂P/∂z = −ρ_f·g at machine precision (this is the loud
+half, and the harmonic-ρ_f ablation turns it into 0.34, so it does fail loudly), the frozen-interface
+velocity **bitwise** against the hand-set-ρ reference, and the free-interface residual recorded and
+bounded. Note this is NOT the WO-K defect: the acid test runs with momentum advection off, so there
+is no mass-versus-momentum flux inconsistency to blame — it is the explicit buoyancy coupling of a
+free interface.
+
+**Finding 3 — the conservation gate as written (≤1e-13 over 1000 coupled steps) is a gate on the
+PRESSURE SOLVER, and WO-E predicted that in advance.** WY adds `H(C−½)·div·dt/h` to every full
+cell's budget, so once the advection is exact the conservation floor is the advecting field's own
+discrete divergence residual (WO-E finding 2: "For V2 the relevant number is the projection's own
+divergence residual — that, not h, sets the conservation floor"). Measured on the sheared ratio-10
+sphere: `max|div(open·u)|` per step 1.4e-12…1.5e-11 and dV/V a **bounded, non-accumulating** random
+walk with peak 5.6e-13 (−3.7e-13 at step 100, −5.6e-13 at 200, −2.9e-13 at 500, −2.4e-13 at 1000).
+Tightening the Chebyshev tolerance to `rtol = 1e-14, maxit = 300` moves it to +1.7e-13 — i.e. it is
+the driver's floor on this operator, not the tolerance. For contrast, V1's standalone floor with a
+prescribed field at `max|div| ≈ 1.2e-15` was 5.7e-14 over 3200 steps. The shipped ctest gate is
+therefore 1e-12 on the peak excursion, with `max|div|` printed next to it; reaching 1e-13 is an S-rung
+(pressure-driver) item, not a VoF one.
+
+**Finding 4 — a mixed-cell-only interface band is toothless on a perfectly sharp interface.** The
+first `maxCourantInterface` took its band as "mixed cells and their face neighbours", literally as
+specified. A grid-aligned sharp interface (…1,1,0,0…) has NO mixed cell, so the band was empty, the
+`Kokkos::Max` reduction returned its identity `−inf`, and the limiter reported no constraint at all
+on exactly the configuration the hydrostatic acid test starts from. The shipped predicate is a colour
+DIFFERENCE — cell `i` is in the band if it is mixed or any face neighbour carries a different colour
+— which coincides with the mixed-cell band for any resolved PLIC interface and covers the sharp
+case; the reduction is also clamped at 0 so a uniform colour field reports 0, not `−inf`.
+
+**Notes.** (a) With C ≡ const the solver reduces to the single-phase path **bitwise** in the two
+senses that are attainable (D2, D3). A bitwise reduction to the CONSTANT-density solver is not
+attainable and never was, independently of VoF: with `varRho_` on, the momentum RHS is a different
+kernel (`buildRhsVar`) and the default pressure driver is Chebyshev rather than MG-PCG. That
+pre-existing reduction is measured at 2e-14 by `test_vardensity_projection.cpp`. (b) Chebyshev
+re-estimates its bounds on every coefficient rebuild, which with a moving interface is every step
+(WO-B: 30 extra V-cycles, 67 % of the projection). Recorded, not addressed — that is S2. (c) The
+`walls-z` MPI configuration records a one-off colour displacement of 7.3016e-07, identical at
+np = 1/2/4 to within 1.6e-14: the pressure driver's first solve on a fresh field leaves
+max|u| ≈ 8.6e-6 (the documented varRho transient) and VoF faithfully advects it once. The test gates
+that it is decomposition-independent. (d) `vof_twophase` runs 48 s on host-openmp and 119 s on CUDA;
+`PECLET_VOF_TWOPHASE_LONG=1` extends the conservation gate from 200 to 1000 steps.

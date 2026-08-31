@@ -45,6 +45,8 @@
 #include "property_closures.hpp"
 #include "scalar_transport.hpp"
 #include "staggered_advection.hpp"
+#include "vof/advect_wy.hpp"    // VoF rung V1: the Weymouth-Yue colour advector (its own g=3 block)
+#include "vof/colour_field.hpp"  // VoF rung V2a: the G=2 <-> g=3 bridge + the colour ghost policy
 
 namespace peclet::flow {
 
@@ -637,6 +639,13 @@ class Solver {
     const auto oig = velHalo_->indexer().originInclGhost();
     og_ = {(int)oig[0] + G, (int)oig[1] + G,
            (int)oig[2] + G};  // block inner origin -> global parity
+    // The colour field's OWN g=3 topology follows the same partition (VOF_PLAN §3 rule 1). Rebuilt
+    // here rather than only in enableVof() so the order enable_vof/init_mpi does not matter — and
+    // because a redistribute() re-inits through this path. The advector's block carries no state
+    // between steps (C's canonical storage is the G=2 registry field "C"), so reallocating it is
+    // free of consequence.
+    if (vofEnabled_)
+      buildVofBlock();
   }
   // Redistribute the solver's state onto a NEW decomposition (dynamic load balancing). Enumerates
   // the registered fields, moves them from the current block layout to the new one (bit-exact via
@@ -1782,6 +1791,11 @@ class Solver {
           break;
       }
     }
+    // Geometric VoF (rung V2a): advance the colour field with the just-projected, discretely
+    // divergence-free face velocities — the SAME slot, and the same justification, as
+    // advanceScalars() below (Weymouth-Yue's exact conservation is conditioned on the advecting
+    // field's discrete divergence; see advectVof()). No-op (byte-identical) when VoF is off.
+    advectVof();
     // Segregated multiphysics: advance any transported scalars with the just-projected
     // divergence-free velocity (properties frozen over the step). No-op (byte-identical) when no
     // scalar is registered.
@@ -2120,6 +2134,93 @@ class Solver {
         applyScalarBcFace(epsField_, face / 2, face % 2, 1, 0.0);  // wall: zero-gradient
     }
   }
+  // --- VoF internals (rung V2a, WO-J) ---------------------------------------------------------
+  // Allocate the colour field's own g=3 working block and wire its ghost/all-reduce hooks. Called
+  // by enableVof() and again by any path that re-sizes the block (redistribute -> initMpi), since
+  // the advector's block must track the solver's.
+  void buildVofBlock() {
+    vofAdv_.init(nx_, ny_, nz_, 1.0, kVofG);  // h = 1: flow works in cell units
+    vofAdv_.cflLimit = vofCflLimit_;
+    vofAdv_.interfaceLocalCfl = true;  // WO-J item 4 — see maxCourantInterface()
+    const I3 e3 = vofAdv_.extent();
+    e3_ = C3{e3.x, e3.y, e3.z};
+    vofAdv_.exchange = [this](CCField f) { this->vofFillGhosts(f); };
+    vofAdv_.globalMax = nullptr;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && dec_) {
+      int rank = 0;
+      MPI_Comm_rank(comm_, &rank);
+      // Periodic on all three axes, exactly like the velocity halo: the halo owns every interior
+      // ghost and wraps the global boundary, and vofFillGhosts then overwrites the out-of-domain
+      // ghosts of any non-periodic axis with the globally-clamped value.
+      std::array<bool, 3> per{true, true, true};
+      vofHalo_ = std::make_shared<GridHaloTopology<3>>();
+      vofHalo_->buildTopology(*dec_, rank, kVofG, per, comm_);
+      vofDev_ = std::make_shared<GridHalo<double>>();
+      vofDev_->init(*vofHalo_);
+      MPI_Comm cm = comm_;
+      vofAdv_.globalMax = [cm](double v) {
+        double r = v;
+        MPI_Allreduce(&v, &r, 1, MPI_DOUBLE, MPI_MAX, cm);
+        return r;
+      };
+    }
+#endif
+  }
+  // Is axis `a` periodic for the colour field? flow's per-face bc_ is 0 (periodic) on BOTH ends of
+  // a periodic axis, so an axis is periodic iff neither of its faces carries a domain BC.
+  bool vofAxisPeriodic(int a) const { return bc_[2 * a] == 0 && bc_[2 * a + 1] == 0; }
+  // The colour field's ghost policy on its own g=3 block: halo/periodic base, then zero-gradient
+  // (globally clamped) on every non-periodic axis. Zero-gradient is the same policy the material
+  // properties get (`fillPropGhosts`) — a wall neither creates nor destroys colour, and the MYC
+  // stencil of an inner boundary cell must see a plausible continuation rather than a wrap from the
+  // far side of the domain. Prescribing C at an inflow face is a V5+ concern (it needs a flux BC,
+  // not a ghost value) and is not offered here.
+  void vofFillGhosts(CCField f) {
+    const bool px = vofAxisPeriodic(0), py = vofAxisPeriodic(1), pz = vofAxisPeriodic(2);
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && vofDev_)
+      vofDev_->exchange(f);
+    else
+#endif
+      vof::periodicFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, px, py, pz);
+    if (px && py && pz)
+      return;
+    const I3 gs = vofGlobalSize(), org = vofOrigin();
+    vof::clampFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, org, gs, px, py, pz);
+  }
+  I3 vofGlobalSize() const {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      return I3{gnx_, gny_, gnz_};
+#endif
+    return I3{nx_, ny_, nz_};
+  }
+  // Global index of this block's inner cell (0,0,0). og_ is exactly that (originInclGhost + G).
+  I3 vofOrigin() const { return I3{og_.x, og_.y, og_.z}; }
+  // Face velocities -> the advector's g=3 block. The advecting field must be the PROJECTED one
+  // (see advectVof), and its ghost ring must be valid because the advector reads the `-d` face of
+  // the first inner cell, which is a ghost cell's `+d` face. fillVelGhosts is the solver's own
+  // halo+domain-BC fill and is exactly what the Picard loop does at the top of every iteration, so
+  // calling it here leaves the velocity ghosts in the state the next consumer would have produced.
+  void bridgeVelocityToVof() {
+    for (int c = 0; c < 3; ++c) {
+      fillVelGhosts(c, 0);
+      // The uniform face-velocity seam (getFaceVelocity): staggered C[c].u already lives on the
+      // faces. The collocated branch (uf_/vf_/wf_) is unreachable — enableVof throws there.
+      // copyFaceVelocity carries the low-face -> high-face index shift; see colour_field.hpp.
+      vof::copyFaceVelocity(vofAdv_.faceVel(c), I3{e3_.x, e3_.y, e3_.z}, kVofG, C[c].u,
+                            I3{e_.x, e_.y, e_.z}, G, c);
+    }
+  }
+  // Colour: G=2 registry mirror -> the g=3 working block, then the colour field's own ghost policy.
+  // Inner cells only in the copy — the two blocks have different ghost extents and each fills its
+  // own (the one bridge; see the enableVof note).
+  void bridgeColourToVof() {
+    copyInner(vofAdv_.colour(), e3_, kVofG, CCConst(cField_), e_, G);
+    vofFillGhosts(vofAdv_.colour());
+  }
+
   // Staggered face stride of velocity component c (the -c face of cell i pairs cells i and i-s).
   long strideOf(int c) const { return (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y; }
   // The face-property accessor for the momentum stencil of component c: mu constant-or-field
@@ -4015,8 +4116,15 @@ class Solver {
     if (varRho_) {
       fillPropGhosts(rhoField_);
       copyBlockShifted(rho1_, e1_, CCConst(rhoField_), e_, G - 1);
-      buildRhoCoeff(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(rho1_),
-                    rho_, e1_, 1);
+      // Face mean of rho: ARITHMETIC by default (the hydrostatic-exactness + series-mobility
+      // choice); the harmonic sibling is the opt-in WO-J knob and must be paired with the matching
+      // correction in projectVelocities or the projection stops being exact (mac_pressure.hpp).
+      if (rhoFaceHarmonic_)
+        buildRhoCoeffHarm(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_),
+                          CCConst(rho1_), rho_, e1_, 1);
+      else
+        buildRhoCoeff(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(rho1_),
+                      rho_, e1_, 1);
       mg_.setBoundaryConditions(bc_);
       mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), 1.0, 1.0, 1.0);
       chebBoundsSet_ = false;  // spectrum changed with the coefficients (re-estimated by the solve)
@@ -4247,6 +4355,9 @@ class Solver {
                hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
         projectCorrectPorousDrag(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(dragBeta_),
                                  rho_ / dt_, e_, G);
+      else if (varRho_ && rhoFaceHarmonic_)  // the WO-J harmonic knob: coefficient AND correction
+        projectCorrectVarHarm(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_,
+                              G);
       else if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
         projectCorrectVar(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G);
       else
@@ -4545,6 +4656,168 @@ class Solver {
       }
       scalarFillGhosts(sc);
     }
+  }
+
+  // --- Geometric VoF: the colour field (rung V2a, WO-J) ---------------------------------------
+  //
+  // WHAT THIS RUNG IS. One phase, transported by geometric (PLIC + Weymouth-Yue) VoF, drives the
+  // fluid properties through the ORDINARY property closures, and the existing variable-density
+  // projection carries the density jump. No surface tension (V4), and — important — NO
+  // MOMENTUM-CONSISTENT TRANSPORT (that is rung V2b / WO-K). Mass and momentum are therefore
+  // advected by different fluxes, which multiplies the light phase's acceleration by the heavy
+  // phase's density in a mixed cell: a spurious interfacial momentum source of order Δρ. The
+  // literature is unambiguous that this breaks down around density ratio 1000 unless the
+  // resolution is absurd (Rudman 1998; Arrufat et al., Computers & Fluids 215:104785, 2021 —
+  // accurate raindrop at 15 cells/diameter WITH consistency versus ~200 without). SO: **V2a is
+  // valid only at modest density ratios.** A ratio-1000 case that is at REST (the hydrostatic acid
+  // test) is exact here, because there is no momentum to mis-advect; a ratio-1000 case with motion
+  // is not this rung's business.
+  //
+  // USAGE
+  //   s.enable_vof()                              # registers "C" and the g=3 working block
+  //   s.set_vof(C0)                               # sharp initial colour, C in [0,1]
+  //   s.set_property_model("rho", "linear", "C", [rho_g, rho_l - rho_g])   # rho(C); enables varRho
+  //   s.set_property_model("mu",  "linear", "C", [mu_g,  mu_l  - mu_g])    # mu(C) (optional)
+  //   s.set_property_model("force_z", "linear", "rho", [0.0, -g])          # gravity
+  //
+  // STRUCTURE (`suite/docs/VOF_PLAN.md` §3 rule 1: the colour field gets its own g=3 halo and the
+  // solver's G = 2 is NOT widened). There are two blocks and the split is deliberate:
+  //   * `"C"` is a NORMAL registered G=2 cell field. That is what makes item 3 of the work order
+  //     ("ρ(C) and μ(C) through the EXISTING closures, no new closure machinery") possible at all:
+  //     `applyClosure` indexes its input and its output with the SAME linear index on the SAME
+  //     extent, so a closure input MUST live on the G=2 block. It is also what gives C
+  //     get_field/set_field/field_view/exchange_field/redistribute for free.
+  //   * the g=3 block is the advector's own working block (`vof::WyAdvector`), with its own
+  //     `GridHaloTopology` at width 3 under MPI. MYC needs 3^3 and the donor ring is one cell
+  //     outside the inner region (so advection alone needs 2); width 3 is the plan's choice for the
+  //     V3 height-function columns.
+  // The two blocks exchange INNER REGIONS ONLY (`copyInner`, both ways) and each fills its own
+  // ghosts with its own policy — that is the one bridge, and it carries no offset arithmetic
+  // beyond `copyInner`'s. The face velocities go the other way, whole-block-embedded
+  // (`vof::copyBlockEmbed`), because the advector reads them one cell outside its inner region.
+  //
+  // STAGGERED ONLY. The collocated path is rung V8 and needs the collocated variable-density
+  // projection (which throws today) before it means anything; `enableVof` throws there rather than
+  // half-supporting it.
+  //
+  // NO IMMERSED SOLIDS YET. `VOF_PLAN.md` §3 rule 2 makes C the liquid fraction of the FLUID volume
+  // with openness-weighted geometric fluxes (Huang 2025/2026 solid-clipped flux polygons). That is
+  // not this work order's scope, and a silently-unweighted flux would leak C into the solid, so
+  // `advectVof` throws if an immersed solid is present. An ALL-FLUID `set_pressure_geometry` is
+  // fine (and is what the acid test uses) — the check is on `hasSolid_`, i.e. on any inner SDF < 0.
+  static constexpr int kVofG = 3;  // the colour field's ghost width (VOF_PLAN §3 rule 1)
+
+  void enableVof() {
+    if constexpr (Grid::collocated)
+      throw std::runtime_error(
+          "enable_vof: geometric VoF is STAGGERED-ONLY at rung V2a. The collocated path is rung V8 "
+          "and needs the collocated variable-density projection (set_density_mode currently throws "
+          "there) plus face-placed balanced forcing first.");
+    if (vofEnabled_)
+      return;
+    cField_ = addField("C");  // the G=2 registry mirror (closure input / IO / redistribute)
+    vofEnabled_ = true;
+    buildVofBlock();
+  }
+  bool vofEnabled() const { return vofEnabled_; }
+  // Initial / prescribed colour field on the inner cells (flat x-fastest, nx*ny*nz), C in [0,1]:
+  // the LIQUID fraction of the cell. Enables VoF if it is not on yet. Ghosts are refreshed here so
+  // a closure applied before the first step already sees a consistent field.
+  void setVof(const std::vector<double>& c) {
+    enableVof();
+    scatterInner(cField_, c);
+    fillPropGhosts(cField_);
+  }
+  std::vector<double> getVof() { return gatherInner(cField_); }
+  // Local (this rank's) colour census: sum / min / max / mixed-cell count / wisp count.
+  vof::WyAdvector::Diagnostics vofDiagnostics() {
+    bridgeColourToVof();
+    return vofAdv_.diagnostics();
+  }
+  // Interface-local Courant number max|uf|*dt/h over the faces of mixed cells and their face
+  // neighbours, with the CURRENT velocity and dt (an all-reduce max under MPI). This is the number
+  // the WY boundedness bound applies to — NOT the global max, which over-throttles badly (V1
+  // measured 0.314 in a quiescent Zalesak corner against 0.157 at the interface). Use it to pick
+  // dt: `dt_new = dt * cfl_target / vof_max_courant()`.
+  double vofMaxCourant() {
+    if (!vofEnabled_)
+      return 0.0;
+    bridgeVelocityToVof();
+    bridgeColourToVof();
+    const double loc = vofAdv_.maxCourantInterface(dt_ / vofAdv_.h());
+    return vofAdv_.globalMax ? vofAdv_.globalMax(loc) : loc;
+  }
+  // The interface-local Courant number of the step just taken (0 before the first step).
+  double vofLastCourant() const { return vofEnabled_ ? vofAdv_.lastCfl() : 0.0; }
+  // Weymouth-Yue boundedness cap (default 0.25, the PROVEN 3D bound 1/(2(N-1)); 0.5 is the 2D
+  // value). `step()` throws when the interface-local Courant number exceeds it.
+  void setVofCflLimit(double v) {
+    vofCflLimit_ = v;
+    if (vofEnabled_)
+      vofAdv_.cflLimit = v;
+  }
+  double vofCflLimit() const { return vofCflLimit_; }
+  // Harmonic instead of arithmetic rho_f in the pressure projection (WO-J item 5). DEFAULT OFF and
+  // it should stay off — read the long note in mac_pressure.hpp before turning it on: arithmetic
+  // rho_f IS the harmonic mean of the mobility 1/rho (the series-correct choice for a normal flux)
+  // and is what makes the discrete hydrostatic balance exact, because the momentum time term and
+  // the face body force interpolate rho arithmetically and are NOT switched by this flag. Shipped
+  // as a measured knob for the coefficient-coarsening question, not as an alternative scheme.
+  void setRhoFaceHarmonic(bool on) { rhoFaceHarmonic_ = on; }
+  bool rhoFaceHarmonic() const { return rhoFaceHarmonic_; }
+
+  // Advance the colour field one dt with the just-projected face velocities. Called by step()
+  // immediately before advanceScalars(); exposed so a test can drive it in isolation.
+  //
+  // WHY HERE (the ordering, WO-J item 2). Weymouth-Yue conserves volume exactly only against a
+  // DISCRETELY divergence-free face field: the dilation term adds H(C-1/2)*div*dt/h to every
+  // cell's budget, interior full cells included, so the conservation floor is the advecting field's
+  // own discrete divergence residual (WO-E finding 2 — with an analytically-but-not-discretely
+  // solenoidal field the floor sits at O(h^2), ten orders above the gate). The only field in the
+  // step with that property is the OUTPUT of the projection, which is exactly where
+  // `advanceScalars` already sits and for exactly the same reason. u* is not divergence-free; u^n
+  // is, but u^n at the top of step n+1 IS u^{n+1} at the bottom of step n, so the two placements
+  // are the same point in the timeline and differ only in which side of `updateProperties()` they
+  // fall on. Taking the `advanceScalars` slot therefore means the properties of step n are
+  // rho(C^n), mu(C^n) — the same time level as the velocity base u^n, and the same segregated
+  // contract every other multiphysics field in this solver obeys.
+  //
+  // HOW WO-K (rung V2b, momentum-consistent transport) DROPS IN. WO-K needs the momentum advection
+  // to use the same geometric fluxes, the same sweep order and the SAME frozen dilation flag as
+  // this colour advection, on half-shifted control volumes built by clipping the SAME PLIC planes
+  // (`plicSlabVolume` is scale/offset invariant, so that is a rescale). Three structural facts make
+  // that a local change here:
+  //   * everything WO-K must share lives inside `vofAdv_` and survives the call — the frozen flag
+  //     `cc_`, the per-sweep planes `mx_/my_/mz_/alpha_`, the face Courant numbers and the
+  //     permutation index. WO-K adds a sibling advector for rho^c u_c driven from those SAME
+  //     members rather than recomputing anything, so "sharing the fluxes" is a data-flow fact, not
+  //     a convention two call sites have to keep.
+  //   * the colour advection is ONE call (`advectVof()`), not a set of calls scattered through the
+  //     step, so moving it to the head of the predictor (where the momentum advection lives) is a
+  //     one-line move, and it moves to a velocity field — u^n — that is the same field it consumes
+  //     today, one step earlier in wall-clock and identical in content.
+  //   * the half-shifted colour field C^c is a new g=3 field on the SAME advector block, so it
+  //     needs no new bridge and no new halo: `vofFillGhosts` already carries any field on that
+  //     block, and the velocity is already embedded there (`bridgeVelocityToVof`).
+  // What WO-K must NOT do, and what this structure keeps honest: interpolate C to build C^c. The
+  // planes are here; clip them.
+  void advectVof() {
+    if (!vofEnabled_)
+      return;
+    if (hasSolid_)
+      throw std::runtime_error(
+          "VoF (enable_vof) with an immersed solid is not implemented at rung V2a: the geometric "
+          "fluxes are not openness-weighted yet (VOF_PLAN.md §3 rule 2 / rung V5), so colour would "
+          "leak into the solid. An ALL-FLUID set_pressure_geometry is supported.");
+    bridgeVelocityToVof();
+    bridgeColourToVof();
+    vofAdv_.advect(dt_, vofStep_++);
+    // Back to the G=2 registry mirror, then ITS ghost policy: the closures write inner cells only,
+    // but the property face means (rho_f in the momentum diagonal, the projection coefficient, the
+    // face body force) read the ghost ring, so C's ghosts must be filled with the SAME policy rho
+    // uses or the derived rho ghost is inconsistent with the interior at a boundary.
+    copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
+    fillPropGhosts(cField_);
   }
 
   // --- Property closures + per-cell body force ------------------------------------------------
@@ -5119,6 +5392,18 @@ class Solver {
   double varRotChi_ = 1.0;   // rotational coefficient scale chi
   bool varRho_ = false;      // variable density (momentum + projection); staggered only
   CCField rhoField_;         // per-cell density (when varRho_); rho_ is the reference rho0
+  // --- geometric VoF (rung V2a, WO-J) ---
+  bool vofEnabled_ = false;
+  bool rhoFaceHarmonic_ = false;  // harmonic instead of arithmetic rho_f in the projection (OFF)
+  CCField cField_;                // the G=2 registry mirror of the colour field ("C")
+  vof::WyAdvector vofAdv_;        // the g=3 working block: PLIC + Weymouth-Yue sweeps
+  C3 e3_{0, 0, 0};                // extended extents of that block (n + 2*kVofG)
+  double vofCflLimit_ = 0.25;     // Weymouth's proven 3D boundedness bound 1/(2(N-1))
+  long vofStep_ = 0;              // sweep-permutation counter (6-cycle)
+#ifdef PECLET_FLOW_MPI
+  std::shared_ptr<GridHaloTopology<3>> vofHalo_;  // the colour field's OWN g=3 topology
+  std::shared_ptr<GridHalo<double>> vofDev_;
+#endif
   CCField rho1_, cx1_, cy1_, cz1_;  // g=1 MG-block density bridge + projection face coefficients
   bool porous_ = false;             // volume-averaged continuity d(eps)/dt+div(eps u)=0 (CFD-DEM)
   double pressUnderRelax_ = 1.0;    // omega_p for the incremental pressure accumulation (1.0 = off)

@@ -329,6 +329,60 @@ Full background, measurements and open problems: [`../docs/DECOMPOSITION_AND_MUL
 - Validated against Zick & Homsy SC-sphere drag. Design + benchmarks:
   [`doc/flow_multigrid_plan.md`](doc/flow_multigrid_plan.md).
 
+### Geometric VoF — two-phase flow (rung V2a; `src/vof/`)
+
+Campaign plan: [`../docs/VOF_PLAN.md`](../docs/VOF_PLAN.md); work orders + findings:
+[`doc/vof_workorders.md`](doc/vof_workorders.md) (phase 0) and
+[`doc/vof_workorders_v2.md`](doc/vof_workorders_v2.md) (V2).
+
+- `src/vof/plic.hpp` (V0) — SZ2000/Lehmann–Gekle plane↔volume, MYC normals, slab flux volumes.
+  Container-free `KOKKOS_INLINE_FUNCTION`s only (no `View`, no indexing), so the V4 promotion to
+  `peclet::core::vof` is a file move.
+- `src/vof/advect_wy.hpp` (V1) — `WyAdvector`: Weymouth–Yue split geometric advection on its **own
+  g=3 block** with its own ghost callback. CFL cap 0.25 (Weymouth's proven **3D** bound
+  1/(2(N−1)); the familiar 0.5 is the 2D value). The dilation flag is frozen once per step —
+  recompute it per sweep and exact conservation silently dies (measured 2.3e-15 → 1.5e-2).
+- `src/vof/colour_field.hpp` (V2a) — the `G=2` ↔ `g=3` bridge and the colour ghost policy.
+
+**Python:** `enable_vof()`, `set_vof(C)` / `get_vof()`, `vof_max_courant()` / `vof_last_courant()`,
+`set_vof_cfl_limit()`, `vof_diagnostics()`, `set_rho_face_harmonic()`. `"C"` is an ordinary
+registered `G=2` cell field, so ρ(C)/μ(C) go through the existing `LinearMix` closures
+(`set_property_model("rho","linear","C",[rho_g, rho_l-rho_g])`, which enables the varRho path) and
+`get_field`/`set_field`/`field_view`/`redistribute` work on it unchanged. The **g=3 working block**
+is the advector's, with its own `GridHaloTopology` under MPI — flow's global `G=2` is untouched.
+
+**Scope of V2a — say this to users:** no surface tension (V4) and **no momentum-consistent
+transport** (V2b/WO-K), so mass and momentum are advected by different fluxes and a mixed cell
+carries a spurious interfacial momentum source of order Δρ. **Valid only at modest density ratios
+for cases with motion**; a high-ratio case at REST (the hydrostatic acid test) is exact.
+**Staggered only** (collocated is V8 — `enable_vof` throws) and **no immersed solid** (the fluxes
+are not openness-weighted yet — `advectVof` throws; an all-fluid `set_pressure_geometry` is fine).
+
+Three traps this rung paid for, all in `doc/vof_workorders_v2.md` (WO-J findings):
+- **The face index conventions differ by one cell.** flow's `u(i)` is the **low** (−x) face of cell
+  `i`; `WyAdvector`'s `uf(i)` is the **high** (+x) face. The bridge shifts along each component's
+  own axis. Omitting it is invisible in a uniform flow, invisible in each axis' own divergence and
+  invisible in `max|div(open·u)|` — and cost **35 % of the colour volume** over 1000 steps, because
+  the advector sums the three axes at ONE cell. Gate A of `tests/kokkos/test_vof_twophase.cpp`
+  (solver vs a standalone advector on the same physical LeVeque field) exists for this.
+- **The VoF dt limit is interface-LOCAL** (mixed cells and their neighbours, `maxCourantInterface`),
+  not a global max — measured 22× over-throttling on a jet-plus-quiescent-interface scene. The band
+  predicate is a colour *difference*, not `mixed`: a grid-aligned sharp interface has no mixed cell.
+- **The colour conservation floor is the projection's divergence residual**, not the advection
+  (measured: dV/V bounded at 5.6e-13 with `max|div|` 1e-12…1e-11; V1's standalone floor at
+  `max|div| ~ 1e-15` was 5.7e-14 over 3200 steps).
+
+`set_rho_face_harmonic(True)` switches the projection's ρ_f (coefficient **and** correction) to the
+harmonic mean. Default OFF and it should stay off: arithmetic ρ_f is the harmonic mean of the
+mobility 1/ρ — the series-correct choice for a normal flux — and it is what makes hydrostatic
+balance exact, since the momentum time term and the face body force keep the arithmetic mean.
+Measured with it on: ∂P/∂z relative error **0.34** instead of 1e-15. It ships as a measured knob for
+the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
+
+Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`;
+`tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`, `vof_twophase_mpi_np{1,2,4}`;
+`tests/study/rayleigh_taylor.py` (diffuse and sharp records side by side).
+
 ### Domain boundary conditions
 
 Beyond periodic + IBM no-slip on immersed solids, flow has **native per-face domain BCs** (`mac_bc.hpp`):

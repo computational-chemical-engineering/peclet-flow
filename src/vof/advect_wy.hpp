@@ -207,6 +207,10 @@ class WyAdvector {
   /// 1/(2(N-1)) = 0.25 (thesis eq. A.33); the familiar 0.5 is the 2D value. Raise it only
   /// deliberately (2D work, or probing the gap) — see the file header.
   double cflLimit = 0.25;
+  /// Take the CFL over INTERFACE-ADJACENT cells only (mixed cells and their face neighbours)
+  /// instead of over every owned face — see `maxCourantInterface()`. Default OFF so the V1
+  /// standalone battery is byte-identical; `IbmSolver` turns it on (WO-J item 4).
+  bool interfaceLocalCfl = false;
   /// DIAGNOSTIC ONLY — recompute the dilation flag before every sweep instead of freezing it once.
   /// This is the #1 documented trap of the method, kept switchable so the damage is a measured
   /// number rather than folklore (`tests/kokkos/test_vof_advect.cpp` gate G). Never enable it in
@@ -225,7 +229,7 @@ class WyAdvector {
   void advect(double dt, long step) {
     requireExchange();
     const double dth = dt / h_;
-    const double cflLocal = maxCourant(dth);
+    const double cflLocal = interfaceLocalCfl ? maxCourantInterface(dth) : maxCourant(dth);
     const double cfl = globalMax ? globalMax(cflLocal) : cflLocal;
     lastCfl_ = cfl;
     // Weymouth's bound is INCLUSIVE (thesis eq. A.33: |a| <= 1/(2(N-1))), so a step exactly at
@@ -318,6 +322,60 @@ class WyAdvector {
         Kokkos::Max<double>(m));
     Kokkos::fence();
     return m * dth;
+  }
+
+  /// Max |uf| dt/h over the faces of INTERFACE-ADJACENT cells only. A cell is interface-adjacent
+  /// when its colour is not locally constant: it is mixed (`wyIsMixed` — the same predicate the V1
+  /// worklist compacts on), or one of its six face neighbours carries a different colour.
+  ///
+  /// Why not the global max (`maxCourant`). Weymouth's bound is a bound on each individual FLUX,
+  /// and a flux only has something to bound where boundedness can be lost. A cell whose whole 1D
+  /// neighbourhood is full (or empty) is EXACTLY stationary in floating point whatever its face
+  /// Courant numbers are — the algebraic flux branch and the dilation term cancel bit for bit (see
+  /// the file header) — so its faces cannot make it leave [0,1] and are irrelevant to the proof.
+  /// Measured in V1: on Zalesak the domain-corner faces run at 0.314 while the interface never
+  /// exceeds 0.157, so a global max throttles the step by 2x for nothing (`VOF_PLAN.md` §6).
+  ///
+  /// The predicate is a colour DIFFERENCE, not merely `mixed`, and that difference matters: a
+  /// perfectly sharp grid-aligned interface (…1,1,0,0…) has NO mixed cell at all, so a
+  /// mixed-only band would be empty and the limiter toothless on exactly the configuration the
+  /// hydrostatic acid test starts from. With the difference test that face is in the band, and for
+  /// a resolved PLIC interface (which always has mixed cells) the two definitions coincide.
+  ///
+  /// A pure reduction over inner cells with a ±1 predicate, so it is decomposition-independent
+  /// under the global max the caller applies. Returns 0 for a uniform colour field (no interface,
+  /// no constraint). Reads C at ±1, so the colour ghosts must be valid on entry (`advect()`
+  /// requires that anyway).
+  double maxCourantInterface(double dth) const {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    const long sx = 1, sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
+    SField c = c_, u = uf_, v = vf_, w = wf_;
+    double m = 0.0;
+    Kokkos::parallel_reduce(
+        "vof::wy::cfl_interface",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                      {g + n.x, g + n.y, g + n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          const long i = L3(x, y, z, e);
+          const double ci = c(i);
+          const bool band = wyIsMixed(ci) || c(i - sx) != ci || c(i + sx) != ci ||
+                            c(i - sy) != ci || c(i + sy) != ci || c(i - sz) != ci ||
+                            c(i + sz) != ci;
+          if (!band)
+            return;
+          acc = Kokkos::fmax(acc, Kokkos::fabs(u(i)));
+          acc = Kokkos::fmax(acc, Kokkos::fabs(u(i - sx)));
+          acc = Kokkos::fmax(acc, Kokkos::fabs(v(i)));
+          acc = Kokkos::fmax(acc, Kokkos::fabs(v(i - sy)));
+          acc = Kokkos::fmax(acc, Kokkos::fabs(w(i)));
+          acc = Kokkos::fmax(acc, Kokkos::fabs(w(i - sz)));
+        },
+        Kokkos::Max<double>(m));
+    Kokkos::fence();
+    // Max's identity is -inf; an empty band (a uniform colour field) means no constraint, not an
+    // unconstrained step. Clamp so the reported CFL is a number and the cap test is meaningful.
+    return Kokkos::fmax(m, 0.0) * dth;
   }
 
   /// Max |discrete face divergence| * dt/h over inner cells — the exact quantity the conservation

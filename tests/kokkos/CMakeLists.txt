@@ -147,6 +147,15 @@ target_include_directories(test_poiseuille PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.
 target_link_libraries(test_poiseuille PRIVATE Kokkos::kokkos)
 add_test(NAME poiseuille COMMAND test_poiseuille)
 
+# VoF rung V2a (WO-J): the colour field wired into the NS solver — bridge, hydrostatic acid test
+# through C, conservation, C==const reductions, harmonic rho_f ablation, interface-local CFL.
+# PECLET_VOF_TWOPHASE_LONG=1 runs the conservation gate for 1000 steps instead of 200.
+add_executable(test_vof_twophase test_vof_twophase.cpp)
+target_include_directories(test_vof_twophase PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_twophase PRIVATE Kokkos::kokkos)
+add_test(NAME vof_twophase COMMAND test_vof_twophase)
+
 add_executable(test_poiseuille_ibm test_poiseuille_ibm.cpp)
 target_include_directories(test_poiseuille_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_poiseuille_ibm PRIVATE Kokkos::kokkos)

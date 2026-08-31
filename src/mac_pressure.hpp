@@ -263,6 +263,66 @@ inline void buildRhoCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCCons
       });
 }
 
+// --- Harmonic rho_f face mean (VoF rung V2a / WO-J item 5; the flagged coarsening trap of
+// MULTIPHYSICS_PLAN.md:474) -------------------------------------------------------------------
+//
+// SIBLINGS of buildRhoCoeff / projectCorrectVar with rho_f = 2*rho_a*rho_b/(rho_a+rho_b) instead of
+// the arithmetic mean. Default OFF (set_rho_face_harmonic); the validated arithmetic kernels above
+// are untouched and stay the default.
+//
+// Read this before turning it on. The two means are NOT interchangeable, and the arithmetic one is
+// the correct fine-level choice for THIS discretization, for two independent reasons:
+//   1. The face coefficient is c_f = open_f * rho0/rho_f, i.e. proportional to the mobility
+//      beta = 1/rho. The ARITHMETIC mean of rho is exactly the HARMONIC mean of beta — the
+//      series-resistance / homogenization-correct choice for a flux crossing two half-cells
+//      (VOF_PLAN.md §5). Taking rho harmonic makes beta arithmetic, i.e. the parallel rule, which
+//      is the wrong one for a normal flux.
+//   2. Discrete hydrostatic balance is EXACT only because the momentum time term, the
+//      face-interpolated body force, and the projection coefficient use the SAME rho_f
+//      (doc/variable_density_projection.md §1/§3). The momentum side interpolates rho
+//      arithmetically (mass is volume-additive on the staggered control volume) and is not part of
+//      this switch, so switching only the projection breaks that three-way consistency and leaves
+//      a permanent spurious velocity at the interface. This is measured, not asserted — see the
+//      WO-J findings entry.
+// The knob exists because arithmetic COARSENING of the coefficient is what makes the V-cycle
+// preconditioner indefinite past ratio ~1e3 (doc/variable_density_projection.md §2), so the
+// question "does a harmonic face mean help the solver" needs to be answerable by measurement
+// rather than by argument. It ships measured.
+//
+// The projection stays an EXACT projection either way: the operator coefficient and the velocity
+// correction must use the same rho_f or the corrected open flux no longer telescopes to A*phi, so
+// the flag switches BOTH kernels together (IbmSolver::project / projectVelocities).
+inline void buildRhoCoeffHarm(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy,
+                              CCConst oz, CCConst rho, double rho0, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::rho_coeff_harm", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        // 2 a b/(a+b) written as rho0*(a+b)/(2ab) for the coefficient rho0/rho_f.
+        cx(i) = ox(i) * rho0 * (rho(i) + rho(i - sx)) / (2.0 * rho(i) * rho(i - sx));
+        cy(i) = oy(i) * rho0 * (rho(i) + rho(i - sy)) / (2.0 * rho(i) * rho(i - sy));
+        cz(i) = oz(i) * rho0 * (rho(i) + rho(i - sz)) / (2.0 * rho(i) * rho(i - sz));
+      });
+}
+
+inline void projectCorrectVarHarm(CCField u, CCField v, CCField w, CCConst phi, CCConst rho,
+                                  double rho0, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::correct_var_harm", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        u(i) -= rho0 * (rho(i) + rho(i - sx)) / (2.0 * rho(i) * rho(i - sx)) * (phi(i) - phi(i - sx));
+        v(i) -= rho0 * (rho(i) + rho(i - sy)) / (2.0 * rho(i) * rho(i - sy)) * (phi(i) - phi(i - sy));
+        w(i) -= rho0 * (rho(i) + rho(i - sz)) / (2.0 * rho(i) * rho(i - sz)) * (phi(i) - phi(i - sz));
+      });
+}
+
 // --- Volume-averaged (porous) continuity for unresolved CFD-DEM
 // ----------------------------------- The proper continuity is d(eps)/dt + div(eps u) = 0 (eps =
 // void fraction from the particles), so the velocity is NOT solenoidal: div(eps u) = -d(eps)/dt.

@@ -684,6 +684,80 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "advance_scalars", [](S& s) { s.advanceScalars(); },
           "Advance all registered scalars one dt with the current velocity (also done by step()).")
+      // --- Geometric VoF colour field (rung V2a) -----------------------------------------------
+      .def(
+          "enable_vof", [](S& s) { s.enableVof(); },
+          "Enable the geometric (PLIC + Weymouth-Yue) VoF colour field 'C'. Registers 'C' as an "
+          "ordinary cell field (get_field/set_field/field_view/closure input) and allocates the "
+          "colour field's OWN g=3 working block + halo; the solver's G=2 is untouched. C is "
+          "advected at the end of every step() with the just-projected face velocities.\n\n"
+          "RUNG V2a SCOPE — read before using: there is NO surface tension (rung V4) and NO "
+          "momentum-consistent transport (rung V2b). Mass and momentum are advected by different "
+          "fluxes, so a mixed cell carries a spurious interfacial momentum source of order "
+          "delta-rho; the literature (Rudman 1998, Arrufat 2021) is unambiguous that this breaks "
+          "down around density ratio 1000 unless the resolution is absurd. **V2a is valid only at "
+          "MODEST density ratios** for cases with motion. A high-ratio case AT REST (the "
+          "hydrostatic acid test) is exact, because there is no momentum to mis-advect. "
+          "STAGGERED ONLY (collocated is rung V8 — throws), and no immersed solid yet (the "
+          "geometric fluxes are not openness-weighted; an all-fluid set_pressure_geometry is "
+          "fine).")
+      .def(
+          "set_vof",
+          [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setVof(grid_in(a)); }, nb::arg("array"),
+          "Set the colour field from a Fortran-order (nx,ny,nz) float64 array: C = the LIQUID "
+          "volume fraction of the cell, in [0,1]. Enables VoF if it is not on yet. Initialise it "
+          "SHARP (0/1 with the exact fraction in the interface cells) — geometric VoF keeps a "
+          "sharp interface and a diffuse initial profile is simply a different problem.")
+      .def(
+          "get_vof", [](S& s) { return field_out(s, s.getVof()); },
+          "The colour field's inner region as a Fortran-order (nx,ny,nz) float64 array "
+          "(== get_field('C')).")
+      .def(
+          "vof_max_courant", [](S& s) { return s.vofMaxCourant(); },
+          "INTERFACE-LOCAL Courant number max|uf|*dt/h over the faces of mixed cells and their "
+          "face neighbours, with the current velocity and dt (all-reduce max under MPI). This — "
+          "not the global max — is the number Weymouth's boundedness bound applies to: a global "
+          "max over-throttles badly (measured on Zalesak: 0.314 at a quiescent domain corner while "
+          "the interface never exceeded 0.157). Pick dt as dt*cfl_target/vof_max_courant().")
+      .def(
+          "vof_last_courant", [](S& s) { return s.vofLastCourant(); },
+          "The interface-local Courant number of the step just taken (0 before the first step).")
+      .def(
+          "set_vof_cfl_limit", [](S& s, double v) { s.setVofCflLimit(v); }, nb::arg("value"),
+          "Weymouth-Yue boundedness cap on the interface-local Courant number. Default 0.25 — the "
+          "PROVEN 3D bound 1/(2(N-1)) from Weymouth's thesis eq. A.33; the widely-quoted 0.5 is "
+          "the 2D value. step() throws when it is exceeded. Conservation is INDEPENDENT of "
+          "boundedness (the telescoping is algebraic), so an over-CFL run loses 0<=C<=1, not "
+          "volume.")
+      .def(
+          "vof_cfl_limit", [](S& s) { return s.vofCflLimit(); },
+          "The Weymouth-Yue boundedness cap currently in force.")
+      .def(
+          "vof_diagnostics",
+          [](S& s) {
+            const auto d = s.vofDiagnostics();
+            nb::dict r;
+            r["sum"] = d.sumC;
+            r["min"] = d.minC;
+            r["max"] = d.maxC;
+            r["mixed"] = d.mixed;
+            r["wisps"] = d.wisps;
+            return r;
+          },
+          "Colour census over THIS RANK's inner cells: sum (cell-volume units), min, max, the "
+          "number of mixed cells (0<C<1) and of wisps (C within 1e-8 of 0 or 1). No clipping is "
+          "applied at this rung, so min/max may leave [0,1] if the CFL cap is raised.")
+      .def(
+          "set_rho_face_harmonic", [](S& s, bool on) { s.setRhoFaceHarmonic(on); },
+          nb::arg("on") = true,
+          "Use the HARMONIC instead of the arithmetic face mean of rho in the pressure projection "
+          "(both the operator coefficient and the velocity correction, so the projection stays "
+          "exact). DEFAULT OFF, and it should stay off: the arithmetic mean of rho IS the harmonic "
+          "mean of the mobility 1/rho — the series-correct choice for a normal flux — and it is "
+          "what makes the discrete hydrostatic balance EXACT, because the momentum time term and "
+          "the face body force interpolate rho arithmetically and are not switched by this flag. "
+          "Shipped as a measured knob for the coefficient-coarsening question (VOF_PLAN S3), not "
+          "as an alternative scheme.")
       // --- Property closures + Boussinesq body force -------------------------------------------
       .def(
           "set_property_model",
