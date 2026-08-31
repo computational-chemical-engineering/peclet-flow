@@ -3607,7 +3607,7 @@ class Solver {
             const double back =
                 sgn * u(i);  // > 0 exactly where the outflow reverses (|min(u.n,0)|)
             if (back > 0.0)
-              AC(i) += (float)(beta * rho * back);  // dissipative diagonal (u_ext = 0)
+              AC(i) += (MReal)(beta * rho * back);  // dissipative diagonal (u_ext = 0)
           });
     }
   }

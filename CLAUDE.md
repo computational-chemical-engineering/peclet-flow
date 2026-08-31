@@ -267,6 +267,29 @@ operator. Four outer drivers wrap that V-cycle — **select one per solver**:
   item (VOF_PLAN S3), not a boundary-treatment one, and it is why **Chebyshev stays the varRho/porous
   default**. Measurements: WO-B/WO-C/WO-H in [`doc/vof_workorders.md`](doc/vof_workorders.md);
   reproduce with `tests/study/vardensity_solver_probe.py --drivers pcg,fcg`.
+  **WO-M (2026-08-31) re-ran that dense probe on a `-DPECLET_FLOW_MREAL_DOUBLE` hierarchy and the
+  negative pivot SURVIVES, unchanged to 3-4 significant figures** — so the indefiniteness is the
+  coarsening, not the float storage, and S3 stands. (Two corrections to the method: `sym(M)` is
+  singular by construction, so an unpivoted LDL's 1e-12 pivot is sign noise and the *mean-free
+  restricted spectrum* is the reliable read-out. Instrument: `tests/study/mg_precond/`.)
+- **Operator STORAGE precision (`MReal`) is a separate, measured axis.** `mac_cutcell_mg.hpp`'s
+  `MReal` types the pressure hierarchy AND (via `IbmSolver::FV`) the momentum stencil;
+  `-DPECLET_FLOW_MREAL_DOUBLE` switches both to double. Float rounding breaks the singular row-sum
+  identity `A·1 = 0` at ~eps_f32 per row, which is amplified to ~1e-4 relative to the *small*
+  couplings under three decades of aperture/density contrast. Measured (WO-M,
+  `tests/study/precision_ab.py`, RCP bed φ=0.63): **the residual floors at 5e-9…6e-8 and then
+  REBOUNDS by 1e4…5e5**, resolution- AND depth-independent, so MG-PCG burns its cap on any
+  high-contrast bed above ~96³ — a run that is INVALID, not degraded. In double the same solves
+  converge in 21-55 iterations to 5e-15. It also floors the V2b uniform-velocity identity at 1.3e-7
+  (double: 9e-16) and the porous CFD-DEM drag balance at 4.8e-8 (double: 2.8e-16). It is
+  **irrelevant** to every approximation-limited metric: Z&H drag, the converged permeability and the
+  hydrostatic acid test agree between the two builds to 6 digits or better. **Cost of full fp64,
+  measured on the same GPU at identical iteration counts: +12 % step time, +120 B/cell (+10 % GPU
+  memory).** The recommended production fix is the **double-diagonal** (faces float, diagonal stored
+  and resummed in double so `A·1 = 0` holds exactly — the fix already proven at the agglomerated
+  bottom, generalised); `PECLET_FLOW_MG_DIAGRESUM=1` **on a double build** emulates exactly its
+  arithmetic and matches full double at every grid measured. Full findings + policy:
+  `doc/vof_workorders_v34.md` (WO-M).
 - Coarse-operator mode: `set_solid(..., pressure_coarse="rediscretized")` (default; also `"galerkin"` /
   `"const"`). `set_pressure_multigrid(on, levels)` sets the multigrid depth (`levels=1` == pure RB-GS).
 - `set_pressure_warmstart(True)` seeds each solve from the previous step's φ (opt-in, off by default).

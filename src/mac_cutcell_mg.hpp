@@ -55,6 +55,14 @@ using peclet::core::halo::GridHaloTopology;
 // CG-family drivers near r/r0 ~ 1e-6 (see doc/collocated_paper_plan.md row 55). The bottom AMG
 // already re-sums its diagonal in double for exactly this reason. -DPECLET_FLOW_MREAL_DOUBLE
 // switches the whole hierarchy to double (A/B instrument; ~2x operator memory).
+//
+// EVERY store into an FPV/FV must go through MReal, or the switch is silently partial. WO-M found
+// three families of hard `(float)` casts that survived the templating and clamped their operator to
+// float even in a double build: `IbmSolver::buildAdvStencil` / `buildAdvStencilVar` (the implicit-
+// FOU momentum stencil), `IbmSolver::addDragDiagonal` (the CFD-DEM face drag — its symptom was a
+// porous steady drag balance stuck at 4.8e-8 in BOTH builds), and five sites in `mac_velocity_mg.hpp`
+// (the velocity-MG staircase / upwind-coarse / const-aniso operators and the no-slip fold). They now
+// cast to MReal, which is byte-identical when MReal is float.
 #ifdef PECLET_FLOW_MREAL_DOUBLE
 using MReal = double;
 #else
@@ -200,6 +208,33 @@ inline int mgDebugSolves() {
     return e ? std::atoi(e) : 3;
   }();
   return n;
+}
+
+// PECLET_FLOW_MG_DIAGRESUM=1 — the WO-M "double-diagonal" MEASUREMENT ABLATION, off by default.
+//
+// The candidate production policy WO-M was asked to evaluate is: keep the six face coefficients in
+// float (+0 B/cell) and store/resum the diagonal in double, so the singular row-sum identity
+// A*1 = 0 holds EXACTLY per row despite float faces. That is the fix already proven at the
+// agglomerated bottom (buildAmg, ~line 1411), generalised to every level; it costs +4 B/cell where
+// a full fp64 hierarchy costs +28.
+//
+// Shipping it means giving AC a different view type from AW..AT through the smoother, residual,
+// matvec, restriction, CA ring and AMG assembly. Before paying for that type surgery, the NUMERICS
+// can be measured on their own: in a -DPECLET_FLOW_MREAL_DOUBLE build, round each stored face
+// coefficient back to float and recompute the diagonal as the exact double sum of those rounded
+// faces. That is bit-for-bit the arithmetic a double-diagonal hierarchy would do — it merely pays
+// fp64 storage for it. If the high-contrast failure survives THAT, the diagonal is not the whole
+// story and double-diagonal cannot be the answer.
+//
+// In a default (float) build the flag is a no-op by construction: the faces are already float and
+// the resummed diagonal is rounded straight back to float, so it is not a valid emulation there and
+// resumDiagonal refuses to run. Never a production path.
+inline bool mgDiagResum() {
+  static const bool v = [] {
+    const char* e = std::getenv("PECLET_FLOW_MG_DIAGRESUM");
+    return e && std::atoi(e) != 0;
+  }();
+  return v;
 }
 
 // Communication-avoiding smoothing (PECLET_FLOW_CA): exchange a 2-deep ghost layer once per
@@ -663,6 +698,7 @@ class CutcellMG {
         f);  // re-impose non-periodic wall/inflow faces the periodic fill clobbered
     buildCutcellOp(f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT, CCConst(f.ox), CCConst(f.oy),
                    CCConst(f.oz), f.ext, G, idx2, idy2, idz2);
+    resumDiagonal(f, G);
     for (int L = 1; L < (int)lv_.size(); ++L) {
       Level& c = lv_[L];
       Level& fin = lv_[L - 1];
@@ -681,6 +717,7 @@ class CutcellMG {
       buildCutcellOp(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.ox), CCConst(c.oy),
                      CCConst(c.oz), c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy,
                      idz2 * sz);
+      resumDiagonal(c, c.g == 2 ? c.g - 1 : c.g);
     }
     // The operator (all levels, including the bottom) just changed: invalidate the agglomerated
     // GraphAMG bottom solve so the next solve rebuilds it from the CURRENT coefficients. The porous
@@ -691,6 +728,36 @@ class CutcellMG {
     // bottom level is tiny, so the per-step rebuild is negligible next to the V-cycles.
     amg_.reset();
     amgGlobalN_ = 0;
+  }
+
+  // WO-M double-diagonal MEASUREMENT ABLATION (PECLET_FLOW_MG_DIAGRESUM=1, off by default and a
+  // no-op in a float build — see mgDiagResum()). Round each stored face coefficient back to float
+  // and recompute the diagonal as the EXACT double sum of those rounded faces, i.e. exactly the
+  // arithmetic a "float faces + double diagonal" hierarchy would perform, on fp64 storage. Makes
+  // A*1 = 0 hold per row to double precision while every off-diagonal still carries only float
+  // information, which is the discrimination step 3 of WO-M needs.
+  void resumDiagonal(Level& lv, int g) {
+    if (!mgDiagResum() || sizeof(MReal) == sizeof(float))
+      return;  // float storage cannot represent the exact diagonal, so the emulation is invalid
+    CCExec space;
+    const C3 e = lv.ext;
+    FPV AC = lv.AC, AW = lv.AW, AE = lv.AE, AS = lv.AS, AN = lv.AN, AB = lv.AB, AT = lv.AT;
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "peclet::flow::mg_diag_resum", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+          const double aw = (double)(float)AW(i), ae = (double)(float)AE(i);
+          const double as = (double)(float)AS(i), an = (double)(float)AN(i);
+          const double ab = (double)(float)AB(i), at = (double)(float)AT(i);
+          AW(i) = (MReal)aw;
+          AE(i) = (MReal)ae;
+          AS(i) = (MReal)as;
+          AN(i) = (MReal)an;
+          AB(i) = (MReal)ab;
+          AT(i) = (MReal)at;
+          AC(i) = (MReal)(-(aw + ae + as + an + ab + at));
+        });
   }
 
   // CG preconditioned by one symmetric V-cycle (solve_pcg port). rhs on level 0; solution left in

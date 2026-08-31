@@ -54,6 +54,28 @@ def ldl_pivots(S):
     return d
 
 
+def analyse_operator(path):
+    """kappa(A) of the FINE operator on the mean-free subspace, and the attainable-accuracy floor it
+    implies. Classical result (Greenbaum; Higham NLA ch.19): a CG-type iteration cannot drive the
+    TRUE relative residual below O(eps * kappa(A)) whatever the preconditioner, because round-off in
+    the recurrence enters at that level. So this column says what a solve on this operator could
+    ever reach in each storage precision — the ceiling any precision policy is measured against, and
+    the reason a fixed rtol of 1e-8 stops being meaningful once kappa exceeds ~1e8 in fp64."""
+    A = load(path)
+    n = A.shape[0]
+    S = 0.5 * (A + A.T)
+    one = np.ones(n) / np.sqrt(n)
+    e1 = np.zeros(n)
+    e1[0] = 1.0
+    w = one - e1
+    nw = np.linalg.norm(w)
+    H = np.eye(n) - 2.0 * np.outer(w, w) / (nw * nw) if nw > 1e-14 else np.eye(n)
+    Q = H[:, 1:]
+    ev = np.abs(np.linalg.eigvalsh(Q.T @ S @ Q))
+    kappa = float(ev.max() / max(ev.min(), 1e-300))
+    return dict(kappa=kappa, floor_f32=2.0 ** -24 * kappa, floor_f64=2.0 ** -53 * kappa)
+
+
 def analyse(path):
     M = load(path)
     n = M.shape[0]
@@ -108,6 +130,9 @@ def main(dirs):
             continue
         prec, geom, nn, lv, ratio = m.groups()
         r = analyse(p)
+        ap = os.path.join(os.path.dirname(p), "A" + os.path.basename(p)[1:])
+        r.update(analyse_operator(ap) if os.path.exists(ap) else
+                 dict(kappa=float("nan"), floor_f32=float("nan"), floor_f64=float("nan")))
         r.update(prec=prec, geom=geom, grid=int(nn), levels=int(lv), ratio=float(ratio))
         rows.append(r)
 
@@ -117,18 +142,22 @@ def main(dirs):
         f"{'geom':<9}{'ratio':>8}  {'prec':<7}{'skew':>10}"
         f"{'LDL neg':>9}{'(raw)':>7}{'min pivot':>12}"
         f"{'lambda_min':>13}{'lambda_max':>12}{'neg eig':>9}"
+        f"{'kappa(A)':>11}{'floor f32':>11}{'floor f64':>11}"
     )
-    print("-" * 96)
+    print("-" * 129)
     for r in rows:
         print(
             f"{r['geom']:<9}{r['ratio']:>8.0e}  {r['prec']:<7}{r['skew']:>10.2e}"
             f"{r['real_neg']:>9}{r['any_neg']:>7}{r['min_piv']:>12.2e}"
             f"{r['lmin']:>13.3e}{r['lmax']:>12.3e}{r['neg_ev']:>9}"
+            f"{r['kappa']:>11.2e}{r['floor_f32']:>11.2e}{r['floor_f64']:>11.2e}"
         )
     print()
     print("LDL neg = pivots below -1e-10*max|pivot| (real indefiniteness);")
     print("(raw)   = every negative pivot including the round-off/null-direction sign noise;")
-    print("neg eig = negative eigenvalues of sym(M) on the mean-free subspace (the verdict column).")
+    print("neg eig = negative eigenvalues of sym(M) on the mean-free subspace (the verdict column);")
+    print("kappa(A), floor = the FINE operator's condition number on the mean-free subspace and the")
+    print("          O(eps*kappa) attainable relative residual it implies in each storage precision.")
     return 0
 
 

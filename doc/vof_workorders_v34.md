@@ -405,3 +405,228 @@ once the volume fractions carry transport error — which is exactly the regime 
 parent function ... cannot have private or protected access within its class"). `VofCurvature`'s
 four passes are public for that reason alone, as `WyAdvector`'s are. The host-openmp build compiles
 it happily, so this only shows up on the CUDA leg.
+
+### WO-M steps 2 + 3 — what float storage costs, and the precision policy that follows
+
+All numbers below are one A/B: the **same commit** built twice against `nvidia-cuda`, the second time
+with `-DPECLET_FLOW_MREAL_DOUBLE`, run on one RTX 5080. Harness: `tests/study/precision_ab.py`
+(+ `mg_trace_parse.py` for the residual traces). Because the shared checkout was mid-flight with
+WO-O's V3 work, every number here was produced in a **`git worktree` at HEAD + this WO's diff only**,
+so none of it is contaminated by concurrent work.
+
+#### 0. The A/B switch was incomplete — three families of hard `(float)` casts (fixed, byte-identical)
+
+`MReal` types the operator views, but nine assignment sites cast to `float` *literally*, so their
+operator stayed fp32 even in a double build. Found by the porous case below reading **4.768e-08 in
+both builds**:
+
+| site | what it clamps |
+|---|---|
+| `IbmSolver::buildAdvStencil` / `buildAdvStencilVar` (`flow_ibm.hpp`) | the implicit-FOU momentum stencil, all 7 coefficients, both the constant and the varRho path |
+| `IbmSolver::addDragDiagonal` | the CFD-DEM face-drag momentum diagonal |
+| `mac_velocity_mg.hpp` × 5 | the velocity-MG staircase / upwind-coarse / const-aniso operators, the identity row, and the no-slip boundary fold |
+
+All now cast to `MReal`, which is **byte-identical when `MReal` is float** (verified: the float
+build reproduces every pre-change digit of the hydrostatic, porous, Z&H and contrast cases). Without
+this the whole step-2 table would have been wrong in the momentum half.
+
+#### 1. Accuracy — float vs double on cases we ship
+
+| case | metric | float (default) | double | verdict |
+|---|---|---|---|---|
+| **varRho hydrostatic acid test**, ρ ratio 1e1…1e6 | steady max\|u\| | 1.8e-17 … 6.2e-17 | 1.2e-17 … 4.5e-17 | **no gain** — both at machine zero |
+| " | ∂P/∂z rel err | 3.4e-16 … 9.1e-16 | 2.2e-16 … 9.1e-16 | **no gain** |
+| " | pressure its (ratio 1e1→1e6) | 10,12,13,14,15,**22** | 10,11,12,13,14,**15** | −7 its at ratio 1e6 |
+| **V2b uniform-velocity identity**, ratio 1e1…1e4 | max\|u−U\|/\|U\| | 1.32e-7 … 1.68e-7 | 8.9e-16 … 2.4e-15 | **8 orders** |
+| " | max\|div(open·u)\| | 1.8e-14 … 9.8e-12 | **3.3e-16, flat in ratio** | 2–4 orders |
+| **porous drag balance** f = β·u (exact reference) | rel err | **4.768e-08** | **2.776e-16** | **8 orders** |
+| **Zick & Homsy** SC drag φ=0.125, N=32/48/64 | K (ref 4.292) | 4.277001 / 4.288006 / 4.291023 (−0.35 / −0.09 / −0.02 %) | 4.277003 / 4.288012 / 4.291033 | **no gain** — the two agree to the 6th digit; the discretization error is 4 orders larger |
+| **RCP permeability** (φ=0.63) Ng=44 / 56 | k | 1.00352402e-3 / 1.00879970e-3 | 1.00344076e-3 / **1.00879970e-3** | 8e-5 relative / **identical** |
+| **RCP bed, PCG rtol 1e-8 cap 300**, Ng=48/64/96 | its per step | 24 / 33 / **300 — CAPPED, INVALID** | 14 / 14 / **28** | **the solve is valid instead of invalid** |
+| " | max\|div(open·u)\| | 4.5e-6 / 6.5e-7 / 4.4e-6 | 9.5e-12 / 9.5e-12 / 3.2e-11 | **5 orders** |
+
+The pattern is sharp and it is not "double is better everywhere". **Every case that only needs an
+approximation is unchanged** (Z&H drag, the converged permeability, the hydrostatic rest state —
+which is exact in float because it never divides by a stencil). **Every case that depends on a
+discrete identity moves by eight orders**: the uniform-velocity identity, the exact drag balance,
+and the singular pressure operator's deflation.
+
+#### 2. Cost — measured, at identical iteration counts
+
+RCP bed, `rtol` 1e-6 so neither build caps, 12 timed steps after 4 warm-up, three interleaved
+repeats each (spread ≤ 5 %):
+
+| grid | cells | its/step | float ms/step | double ms/step | Δt | float GPU | double GPU | ΔB/cell |
+|---|---|---|---|---|---|---|---|---|
+| 128³ | 2.10 M | 14 | **171.1** | **192.8** | **+12.7 %** | 2532 MiB | 2774 MiB | **+121 B** |
+| 160³ | 4.10 M | 21 | **350.1** | **390.3** | **+11.5 %** | 4442 MiB | 4908 MiB | **+119 B** |
+
+So a full fp64 hierarchy + momentum stencil costs **+12 % wall time and +120 B/cell (+10 % of total
+solver memory)**. On the high-contrast beds it is nonetheless *faster to solution* (28 iterations
+instead of a burnt 300).
+
+#### 3. The attainable floor, and why a fixed rtol of 1e-8 is not a meaningful target
+
+Driving PCG with an unreachable `rtol` = 1e-14 and letting it run to 400–500 iterations shows where
+each build's residual actually stops, and whether it then walks back up (`min` vs `final`):
+
+| Ng | float floor → final | double floor → final | double + **diagresum** floor → final |
+|---|---|---|---|
+| 48 | 5.5e-09 → 8.7e-04 (**×7.8e4**) | 4.0e-15 → 4.0e-15 | 4.0e-15 → 4.0e-15 |
+| 64 | 4.3e-09 → 6.2e-04 (**×7.6e4**) | 5.0e-15 → 5.0e-15 | 5.0e-15 → 5.0e-15 |
+| 96 | 2.4e-08 → 3.8e-03 (**×1.6e5**) | 5.9e-15 → 5.9e-15 | 9.9e-15 → 9.9e-15 |
+| 128 | 4.9e-09 → 2.4e-03 (**×4.9e5**) | 5.0e-15 → 5.0e-15 | 4.8e-15 → 4.8e-15 |
+| 160 | 3.8e-08 → 6.9e-04 (**×1.8e4**) | 1.7e-14 → **6.0e-08** (×3.5e6) | 6.4e-15 → 6.4e-15 (solve 0); 1.5e-14 → 5.3e-07 (solve 1) |
+
+Three readings.
+- **The float floor is ~5e-9…6e-8 and is resolution-independent**, and it is *always* followed by a
+  rebound of 1e4–5e5. That is the eps_f32 signature: the residual reaches the level at which the
+  stored operator no longer satisfies `A·1 = 0`, then the CG recurrence loses conjugacy against a
+  right-hand side it can no longer represent.
+- **It is also depth-independent.** Ng=96 at levels 3/4/5/6: float 2.49e-8 / 2.43e-8 / 2.43e-8 /
+  2.39e-8; double 9.0e-15 / 9.6e-15 / 5.9e-15 / 4.4e-15. So this is a **fine-level storage** defect,
+  not a coarsening one — the discriminator the coordinator asked for, applied.
+- **At Ng=160 the double build starts to rebound too** (floor 1.7e-14, final 6.0e-8), which is the
+  same phenomenon the collocated session records at 384³/R=24 (their "double floors at 4e-8"). One
+  precision level up, same shape.
+
+**Condition numbers**, from the dense probe (`mg_precond_analyze.py` now reports κ(A) on the
+mean-free subspace and the O(eps·κ) attainable residual it implies):
+
+| grid | contrast | κ(A) | O(eps·κ) f32 | O(eps·κ) f64 |
+|---|---|---|---|---|
+| 8³ periodic | 1 | 2.05e+01 | 1.2e-06 | 2.3e-15 |
+| 8³ periodic | 1e2 / 1e3 / 1e4 / 1e6 | 1.15e3 / 1.14e4 / 1.14e5 / 1.14e7 | 6.8e-5 … 6.8e-1 | 1.3e-13 … 1.3e-9 |
+| 16³ periodic | 1e3 / 1e4 | 4.64e4 / 4.64e5 | 2.8e-3 / 2.8e-2 | 5.2e-12 / 5.2e-11 |
+| 8³ / 16³ walls ±z | 1e3 | 4.47e4 / 1.85e5 | 2.7e-3 / 1.1e-2 | 5.0e-12 / 2.1e-11 |
+
+κ is **exactly linear in the contrast and quadratic in N** (8³→16³ at ratio 1e3: 1.14e4 → 4.64e4, a
+factor 4.07). So a usable design rule for this operator:
+
+> **κ ≈ 0.18 · N² · contrast** (periodic; ×4 for wall-bounded), and the attainable relative residual
+> is **O(eps · κ)** — no preconditioner and no storage policy crosses it.
+
+Consequences worth acting on:
+- At **ratio 1000 on a 256³ grid**, κ ≈ 1.2e7, so the fp64 attainable residual is ~1e-9 *before* the
+  O(1)–O(10) constant. **A VoF gate demanding `rtol` 1e-8 there is asking for something within a
+  factor of a few of the arithmetic limit**, and at 512³ or ratio 1e4 it is asking for the
+  impossible. V3/V4 should adopt a **resolution- and contrast-aware tolerance**, e.g.
+  `rtol = max(1e-8, C · eps · 0.18 N² · Δρ/ρ)` with C ~ 1e2, rather than a fixed number — which is
+  the same conclusion the collocated session reached empirically when it moved its ladder to
+  `PRTOL = 2e-7` at 384³.
+- The eps·κ bound is an **order-of-magnitude ceiling, not a predictor**: the measured float floors
+  (5e-9) sit well below the bound's 1e-6 for the same operator. Use it to decide whether a target is
+  *impossible*, not to predict where a solve will stop.
+
+#### 4. Does the cheap fix work? — the double-diagonal ablation, against a matched full-double control
+
+`PECLET_FLOW_MG_DIAGRESUM=1` (new, off by default, `mac_cutcell_mg.hpp`) rounds every stored face
+coefficient back to float and recomputes the diagonal as the **exact double sum of those rounded
+faces** — bit-for-bit the arithmetic a "float faces + double diagonal" hierarchy performs, on fp64
+storage, so it isolates the numerics from the storage saving. Judged the way the coordinator
+specified: **does it recover the matched full-double control**, not does it reach 1e-8.
+
+**It does, at every configuration measured** (the third column of the floor table): identical to
+full double at Ng=48 and 64, within 3 % at Ng=96 and 128, and at Ng=160 — the one grid where full
+double itself becomes marginal — it converged solve 0 in 81 iterations with no rebound where full
+double rebounded, and matched full double on solve 1. Iteration counts likewise: 22/24, 21/23,
+43/54, 41/47, 81/… — the same numbers as full double.
+
+**So the six off-diagonals carry only float information and it does not matter. The diagonal's
+exactness is the entire story.**
+
+#### 5. THE POLICY (step 3)
+
+The same root cause has now surfaced **three times in unrelated code**, which is the real argument:
+it is not three bugs, it is one missing rule.
+
+| # | where | the identity that was broken | how it was cured |
+|---|---|---|---|
+| 1 | pressure hierarchy, every level | `A·1 = 0` per row (the operator is singular *by construction*; mean-removal deflates exactly the constant) | open — this WO |
+| 2 | momentum / velocity stencil | `rowsum(A) = ρ_f/dt (+β_f)` — the *same* coefficient `buildRhsVar*` forms in double, so `u* = b/diag` must return `u` | open — this WO |
+| 3 | agglomerated bottom AMG (`buildAmg`) | `A·1 = 0` on the bottom operator | **already cured, 2026-08-13, by a targeted double resum of the fluid diagonals** — and it has held since |
+
+**The rule, stated once:**
+
+> **A quantity that an algorithm requires to satisfy an exact discrete identity must be stored in the
+> precision in which that identity is asserted. A quantity that only carries an approximation may
+> stay float.**
+
+Applied to this solver, the identity-bearing quantity is in both cases the operator **diagonal**, and
+the approximation-bearing quantities are the six **face couplings**. The measurement in §4 is the
+direct test of that split and it passes: perturb the faces at eps_f32 and nothing happens; perturb
+the diagonal at eps_f32 and the solve dies.
+
+**Recommendation, in priority order.**
+
+1. **Ship the double-diagonal in both operators.** Store `AC` in double while `AW…AT` stay float, and
+   *define* `AC` as the resum of what was stored: for the pressure operator `AC = −Σ(stored faces)`;
+   for the momentum operator `AC = (ρ_f/dt + β_f) + Σ(−stored faces)` with the time term at the RHS's
+   own precision. **Measured gain**: everything in §1's identity rows (8 orders on the uniform-velocity
+   identity and the drag balance) plus §3's floor (5e-9 → 5e-15) and §1's 300-iteration cap.
+   **Cost**: +4 B/cell per diagonal → **≈ +17 B/cell** (pressure hierarchy ≈ 4.6, three momentum
+   components 12) against the **measured +120 B/cell** of full fp64, i.e. **14 % of the memory** and,
+   since the diagonal is one of seven coefficient arrays, ≈ **+1.7 % of the measured +12 % time**.
+   This is a generalisation of a fix already proven in-tree (row 3 above), not a new idea.
+   *Implementation cost is the honest objection*: `AC` needs a view type distinct from `AW…AT`
+   through the smoother, residual, matvec, CA ring and AMG assembly. That is a follow-on work order,
+   not a line edit — which is exactly why it was worth proving the numerics first with `DIAGRESUM`.
+2. **Until then, `-DPECLET_FLOW_MREAL_DOUBLE` is a validated escape hatch**, not a science project:
+   it is the only way to get a *valid* solve on a high-contrast bed above ~Ng 96 today, and it costs
+   a measured +12 % time / +10 % memory. Document it for high-contrast porous and high-ratio VoF work.
+3. **Do NOT make fp64 the default.** It buys nothing on the accuracy metrics anyone quotes (Z&H drag,
+   permeability, the hydrostatic acid test — §1), and +12 % time / +10 % memory on every run to fix a
+   problem that a +1.7 % / +1.4 % change fixes as completely (§4).
+4. **Adopt a resolution- and contrast-aware pressure tolerance** in place of the fixed 1e-8 (§3). A
+   fixed 1e-8 is already within a small factor of the fp64 arithmetic limit at ratio 1000 on 256³.
+5. **Next thing to measure (not this WO):** the *geometry* is still float and `MReal` does not reach
+   it — `IbmOverlay`'s `K/M/X/Nbc` and `D_rescale`, and `mac_ibm.hpp`'s `(float)ccSampleExt` θ
+   sampling. That is a third storage locus and the leading suspect for the residual floor the
+   collocated session sees in a *double* build at 384³ (§3, Ng=160 here).
+
+**And what the policy explicitly does NOT buy** — so that nobody expects it to:
+- **S3 stands.** The V-cycle preconditioner goes indefinite at contrast ≳1e3 wall-bounded / 1e4
+  periodic in *both* precisions (step 1). No storage policy touches it; Chebyshev remains the
+  varRho/porous default for that reason.
+- **The attainable floor O(eps·κ) stands.** A perfect `A·1 = 0` repair still cannot cross it.
+
+#### 6. What this WO actually shipped (and what it deliberately did not)
+
+**Shipped** (all inert in the default build):
+- the three families of missing `MReal` casts (§0) — plus a fourth found while auditing, the
+  backflow-stabilization diagonal `AC(i) += (float)(beta*rho*back)`;
+- `CutcellMG::resumDiagonal` + `PECLET_FLOW_MG_DIAGRESUM`, the double-diagonal ablation;
+- `tests/study/mg_precond/` (dense `M` and `A`, LDL + mean-free spectrum + κ(A) + attainable floor);
+- `tests/study/precision_ab.py` + `mg_trace_parse.py`, the whole step-2 battery, reproducible in
+  one command per build.
+
+**Not shipped, deliberately: the production double-diagonal itself.** Its numerics are proven (§4)
+but the change is type surgery, not a line edit — `AC` must become a view type distinct from
+`AW…AT` through `buildCutcellOp`, `cutcellSmoothColor`, `residualCutcell(Box)`, the matvec,
+`removeMean`, `maskSolid`, `estimateEigenvalues`, `buildAmg`, the CA operator ring and its
+`GridHalo<MReal>` twin, and the whole momentum half in `cut_cell_ibm.hpp` / `flow_ibm.hpp` /
+`mac_velocity_mg.hpp`. That is a work order of its own, with the full ctest + MPI + regression
+battery behind it, and WO-M's charter was to decide the policy from measurement — which it now has,
+with the decisive experiment already in the tree so the implementer can re-run it after every step.
+
+#### 7. Process note — three of this WO's hunks were swept into someone else's commit
+
+The `(float)` → `(MReal)` hunks in `src/flow_ibm.hpp` were staged and committed by the concurrent
+WO-O session in `9047e1b` ("VoF V3 (WO-O): height-function curvature…"), which staged
+`src/flow_ibm.hpp` by name while this WO's edit to that file was in the working tree. The code is
+correct and complete on main (verified line by line against this WO's own worktree copy), and history
+was **not** rewritten — main is shared with two other live sessions. Recording it here because the
+commit message attributes the change to curvature work, and because it is the third time in two days
+that named-path staging in a shared checkout has crossed sessions. The mitigation this WO used for
+everything downstream of it — a `git worktree` at HEAD carrying only its own diff — is the one that
+actually works, and is worth making the default for any measurement campaign run beside another agent.
+
+#### 8. Gates
+
+| gate | result |
+|---|---|
+| **Default build byte-identical** — single-phase regression | **PASS, +0.00 %** on every metric and **identical** `p_iter_tot`, iterations/step, step count and divergence on all 13 grid points of `zh_sphere` / `random_spheres` / `hollow_rings`. Structurally guaranteed too: `(float)x` → `(MReal)x` is the same cast when `MReal` is float, and `resumDiagonal` returns on `!mgDiagResum()` (env-gated, default off) *and* refuses to run at all when `sizeof(MReal) == sizeof(float)` |
+| `tests/kokkos` ctests | **PASS 24/24 on nvidia-cuda AND host-openmp** |
+| `tests/kokkos_mpi` ctests | in flight at the time of writing under a 3-way GPU/CPU contention with the concurrent WO-O battery (load average ~19): **no failure on any leg reached**; the np=4 legs are running at 4–40× their normal wall time, which is the load-triggered slowness WO-L documents. Re-run on an idle machine to close |
+| The float A/B is unchanged by the cast completion | **PASS** — every float number in §1 (hydrostatic, porous, Z&H, contrast) reproduces its pre-change digits exactly |
+| Measurements isolated from concurrent work | **PASS** — every number produced in a `git worktree` at HEAD + this WO's diff only |

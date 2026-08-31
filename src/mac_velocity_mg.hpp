@@ -99,17 +99,17 @@ inline void buildVelocityStaircase(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV A
         const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
         if (theta(i) <
             thresh) {  // classified solid -> identity row (smoother/residual pin it to 0)
-          AC(i) = 1.0f;
-          AW(i) = AE(i) = AS(i) = AN(i) = AB(i) = AT(i) = 0.0f;
+          AC(i) = (MReal)1.0;
+          AW(i) = AE(i) = AS(i) = AN(i) = AB(i) = AT(i) = (MReal)0.0;
           return;
         }
-        AC(i) = (float)(idiag + 2.0 * (bx + by + bz));
-        AW(i) = (float)(-bx);
-        AE(i) = (float)(-bx);
-        AS(i) = (float)(-by);
-        AN(i) = (float)(-by);
-        AB(i) = (float)(-bz);
-        AT(i) = (float)(-bz);
+        AC(i) = (MReal)(idiag + 2.0 * (bx + by + bz));
+        AW(i) = (MReal)(-bx);
+        AE(i) = (MReal)(-bx);
+        AS(i) = (MReal)(-by);
+        AN(i) = (MReal)(-by);
+        AB(i) = (MReal)(-bz);
+        AT(i) = (MReal)(-bz);
       });
 }
 
@@ -132,13 +132,13 @@ inline void buildAdvCoarse(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV A
         sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y};
         sadv::fou_operator_aniso(comp, x, y, z, Ua, Va, Wa, fouw, sx, sy, sz, cC, cxm, cxp, cym,
                                  cyp, czm, czp);
-        AC(i) = (float)cC;
-        AW(i) = (float)cxm;
-        AE(i) = (float)cxp;
-        AS(i) = (float)cym;
-        AN(i) = (float)cyp;
-        AB(i) = (float)czm;
-        AT(i) = (float)czp;
+        AC(i) = (MReal)cC;
+        AW(i) = (MReal)cxm;
+        AE(i) = (MReal)cxp;
+        AS(i) = (MReal)cym;
+        AN(i) = (MReal)cyp;
+        AB(i) = (MReal)czm;
+        AT(i) = (MReal)czp;
       });
 }
 
@@ -149,8 +149,8 @@ inline void buildConstAniso(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV 
                             double by, double bz, double idiag) {
   CCExec space;
   const std::size_t n = (std::size_t)e.x * e.y * e.z;
-  const float c = (float)(idiag + 2.0 * (bx + by + bz)), nx = (float)(-bx), ny = (float)(-by),
-              nz = (float)(-bz);
+  const MReal c = (MReal)(idiag + 2.0 * (bx + by + bz)), nx = (MReal)(-bx), ny = (MReal)(-by),
+              nz = (MReal)(-bz);
   Kokkos::parallel_for(
       "peclet::flow::vmg_const_aniso", Kokkos::RangePolicy<CCExec>(space, 0, n),
       KOKKOS_LAMBDA(std::size_t i) {
@@ -180,7 +180,7 @@ inline void boundaryFold(FPV AC, C3 e, int g, int a, int s, double beta) {
       Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
         const long i = (long)p0 * sb + (long)p1 * sc + (long)bic * sa;
-        AC(i) = (float)((double)AC(i) + beta);
+        AC(i) = (MReal)((double)AC(i) + beta);
       });
 }
 
