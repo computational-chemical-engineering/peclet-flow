@@ -339,3 +339,234 @@ np = 1/2/4 to within 1.6e-14: the pressure driver's first solve on a fresh field
 max|u| ≈ 8.6e-6 (the documented varRho transient) and VoF faithfully advects it once. The test gates
 that it is decomposition-independent. (d) `vof_twophase` runs 48 s on host-openmp and 119 s on CUDA;
 `PECLET_VOF_TWOPHASE_LONG=1` extends the conservation gate from 200 to 1000 steps.
+
+### WO-K (rung V2b) — momentum-consistent transport — **DONE 2026-08-31**, four findings + one escalation
+
+Delivered: `src/vof/momentum_advect.hpp` (`peclet::flow::vof::MomentumConsistentAdvector` — the
+half-shifted control volumes, the shared-flux driver, the recovery), `plicBoxVolume` in
+`src/vof/plic.hpp` (the two-axis generalization of `plicSlabVolume`; single-axis and full-cell
+restrictions bitwise equal to the existing entry points), the plane/flag accessors and
+`checkCourant` in `src/vof/advect_wy.hpp` (additive — `advect()` is untouched), `enableVofMomentum`
++ `buildRhsVarMom` + the head-of-step call in `src/flow_ibm.hpp`,
+`tests/kokkos/test_vof_momentum.cpp` (ctest `vof_momentum`),
+`tests/kokkos_mpi/test_vof_momentum_mpi.cpp` (ctests `vof_momentum_mpi_np{1,2,4}`) and
+`tests/study/vof_momentum_consistency.py` (the ratio sweep, the falling drop, the RT
+near-Nyquist check). Python: `enable_vof_momentum / vof_momentum_enabled / vof_advected_velocity /
+vof_momentum_diagnostics / set_vof_rho_floor / vof_rho_floor / set_vof_momentum_muscl /
+set_vof_momentum_cell_flag / set_vof_flux_clamp`.
+
+**The construction as built.** The momentum control volume of component `e` is indexed in `flow`'s
+own **low-face** convention — `CV_e(i)` is centred on the `-e` face of cell `i`, where the solver's
+`u_e(i)` lives. That is not cosmetic: it makes the owned control volumes exactly the advector
+block's inner region, so `C^e` and the transported velocity are ordinary cell fields that
+`WyAdvector::exchange` carries, and the bridge back to the solver is a plain `copyInner` with no
+shift to get wrong (the `+e`-shifted alternative puts an owned value inside the halo's ghost band,
+where the exchange overwrites it).
+
+1. `C^e(i) = slab(cell i-s_e, e, [1/2,1]) + slab(cell i, e, [0,1/2])` — the PLIC polyhedra of the
+   two overlapping pressure cells clipped into the shifted box. Rebuilt from the planes of `C^n`
+   once per step. **No interpolation of C anywhere.**
+2. Per sweep direction `d`, the flux slab is a slab of ONE pressure cell when `d == e` (the CV face
+   sits at that cell's centre and `|a| < 1/2` keeps the slab in its upwind half) and the union of
+   two HALF cells when `d != e` — two axes at once, which is why `plicBoxVolume` exists. The face
+   Courant number is the `e`-average of the two staggered faces, which sums over the three sweeps to
+   `1/2 (div_{i-s_e} + div_i)`: the dilation term vanishes with the projection's own divergence
+   residual, the colour's conservation floor.
+3. The momentum sweeps are **interleaved** with the colour sweeps, between `computeFluxes` and
+   `applySweep`, and read that sweep's planes.
+4. Recovery `u_e = (rho^e u_e)/max(rho^e, floor)`, implemented in the algebraically identical
+   incremental form `u_new = u_old + dev/rho_new` (see finding 5).
+
+**What is deliberately NOT changed.** The momentum time-term face density, the face body force and
+the projection coefficient all keep the arithmetic face mean `1/2(rho(i)+rho(i-s_c))`. That
+three-way agreement is what makes hydrostatic balance exact (`variable_density_projection.md` §1);
+momentum consistency enters as the advective base velocity, `rho_f (u* - u^adv)/dt = -grad p +
+visc + f`, which IS the conservative update divided through by the face density. Swapping the time
+term to the clipped `rho^e` would make this rung break the WO-J acid test at `O(d rho)`.
+
+**Gate results** (host-openmp unless noted; `vof_momentum` runs 42 s, `vof_momentum_mpi` 25/60/95 s
+at np 1/2/4). **No pressure solve came within a factor 10 of its cap in any run reported here** —
+the study battery records `max_iters/cap` and `max|div(open u)|` per run and marks a capped run
+INVALID; the worst observed was 21/300 with `max|div(open u)| <= 2e-11`.
+
+| gate | result |
+|---|---|
+| **K1 uniform-velocity identity, on the advection** — slab / tilted plane / sphere x ratios 1e1..1e4 | `max|u_adv - U| = 0` **BITWISE, 12/12**, no tolerance |
+| K1 the same identity at np = 1/2/4 (walls-z, walled axis CUT) | **BITWISE 0 on every rank at every decomposition** |
+| K2 `C^e` bounds, ratio 1e3, 20 coupled steps | `C^e in [-2.8e-17, 1.0]`, `min rho^e = 1.0` (= rho_g), floored CVs **0** |
+| K2 ablation `set_vof_flux_clamp(False)` | `C^e in [-5.0e-3, 1.0131]`, `min rho^e = **-4.03**`, run **diverges at step 2** |
+| K3 `C == const`: consistent advection vs density ratio 1 | ratio 1e2 and 1e4 both **bitwise 0.0** for `C == 1` and `C == 0` |
+| K4 momentum conservation, periodic box, worst per-step `|d sum(rho^e u)|/|sum|` over 100 steps | **2.2e-13 / 2.7e-13 / 2.3e-13** (the projection's divergence floor) |
+| K4 with the dilation coefficient NOT frozen (finding 3) | **1.4e-7** — six orders worse |
+| K5 feature OFF, ablation knobs touched | `du = dp = dC = **0.0**` — the rung is inert when not enabled |
+| MPI np=1 vs single-rank | `du = du_adv = dp = dC = **0.0**` bitwise, both configurations |
+| MPI np=2/4 `walls-z` (walled axis cut) | du 8.7e-13, du_adv 5.3e-13, dp 5.0e-10 on `|P| = 1.46e+04` (rel 3e-14), dC 1.4e-14 |
+| MPI np=2/4 `shear-per` | du 5.0e-13, du_adv 4.5e-13, dp 2.0e-13, dC 2.4e-13, dV/V +2.8e-12 |
+
+**The uniform-velocity sweep, consistent vs inconsistent, 200 coupled steps, 32^3, mu = 0, g = 0.**
+The left half is the shipped (default) build; the right half is the same code in a
+`-DPECLET_FLOW_MREAL_DOUBLE` build — the existing A/B instrument, no source change — and it is the
+half that answers the work order's question, for the reason in finding 6.
+
+| scene | ratio | default build: consistent | default: inconsistent | MReal=double: consistent | MReal=double: inconsistent |
+|---|---|---|---|---|---|
+| tilted | 1e1 | 1.15e-07 | 8.07e-07 | **8.9e-16** | 1.6e-15 |
+| tilted | 1e2 | 1.19e-07 | 8.53e-07 | **2.4e-15** | 3.1e-15 |
+| tilted | 1e3 | 1.49e-07 | 8.88e-07 | **1.2e-15** | 2.4e-15 |
+| tilted | 1e4 | 1.45e-07 | 9.45e-07 | **1.2e-15** | 2.4e-15 |
+| droplet | 1e1 | 1.04e-07 | 4.28e-07 | **6.7e-16** | 1.1e-15 |
+| droplet | 1e2 | 1.09e-07 | 4.97e-07 | **1.6e-15** | 1.8e-15 |
+| droplet | 1e3 | 1.31e-07 | 4.93e-07 | **1.2e-15** | 1.6e-15 |
+| droplet | 1e4 | 1.43e-07 | 5.66e-07 | **1.4e-15** | 1.7e-15 |
+
+The consistent scheme is **flat in the density ratio** across four decades. So is the inconsistent
+one — which is finding 1.
+
+---
+
+**Finding 1 — the uniform-velocity gate does not discriminate against the V2a baseline ON THIS
+SOLVER, and the reason is structural. It is still the sharpest gate in the rung.**
+
+The work order predicts the inconsistent scheme is `O(d rho)` wrong here. It is not: it is flat in
+the ratio at 1e-15 too. The mechanism is not subtle once stated. `flow`'s momentum advection is in
+**advective (non-conservative) form** — `rho_f * adv(u)` with `adv` the Koren/SOU flux operator —
+and the discrete advection of a CONSTANT by a discretely divergence-free field is exactly zero,
+whatever `rho_f` is. A uniform velocity is therefore a fixed point of the V2a momentum equation by
+construction. The `O(d rho)` failure the test is designed to expose belongs to codes that advect
+`rho u` CONSERVATIVELY with a mass flux inconsistent with the VoF flux (Rudman's setup): there the
+two fluxes disagree and the disagreement is weighted by `d rho`.
+
+This is the fourth time in this campaign a gate as written measured a different quantity than
+intended, and as before the right response is to say so rather than to weaken or to oversell it.
+Two things follow, and the second matters more than the first:
+
+* **the contrast this rung needs must come from a case where the momentum actually transports** —
+  the falling drop and Rayleigh-Taylor below, not the uniform test;
+* **the uniform test is nevertheless the gate that built this rung.** It is decisive for the
+  CONSISTENT scheme, because that scheme *is* conservative, and it caught three real defects in
+  succession, each at a different order of magnitude and each invisible to the other gates:
+  `1.5e+06` (the rho^e floor firing on a colour that had left [0,1] — finding 2), `1.2e-13`
+  (floating-point conditioning — finding 5) and `2.2e-10` (the MUSCL amplifier — finding 4). A gate
+  that goes from 1e6 to bitwise zero as three separate mechanisms are removed is doing exactly the
+  job the work order wanted it to do; it just is not a comparison against V2a.
+
+**Finding 2 — the geometric flux is bounded by what the CURRENT cell planes see in the donor, not
+by the ADVECTED `C^e`, and at high ratio that gap is fatal rather than cosmetic.**
+
+`WyAdvector` re-reconstructs before every sweep, so from sweep 2 on the planes describe the updated
+cell colour while `C^e` is the independently advected shifted colour. `F <= clip(donor CV)` still
+holds; `F <= C^e(donor)` — the hypothesis of Weymouth's boundedness proof (thesis Appendix A) — does
+not. The gap is `O(a^2)` and does not accumulate; measured on a tilted plane after one step at CFL
+0.20 / 0.10 / 0.05 / 0.025, `C^e` reached `-2.56e-2 / -6.0e-3 / -1.0e-3 / -3.1e-5` and stayed there
+over 10 steps. In colour units that is a wisp. In density units at ratio 1e4 it is
+`rho^e = 1 + 1e4 * (-2.56e-2) = -255`, and the recovery divides by it: the first working version of
+this rung returned `max|u_adv - U| = 1.5e+06` at ratio 1e2 and `2.6e+08` at 1e4 while ratio 10 was
+clean at 5.6e-16 — i.e. it looked exactly like an `O(d rho)` consistency failure and was not one.
+
+The shipped flux is clamped into Weymouth's own interval `max(0, |a| - (1 - C^e_don)) <= |F| <=
+min(|a|, C^e_don)`, evaluated on the donor control volume's own colour (which is why `C^e` is
+exchanged before every sweep). The clamp is free with respect to everything else the rung needs: it
+is applied to the ONE face value both neighbours share, so conservation still telescopes bit
+exactly, and BEFORE the momentum flux is formed, so the two updates keep sharing one `F` and the
+consistency identity is untouched. For `C^e_don` exactly 0 or 1 the interval collapses to the
+algebraic value, so full and empty control volumes stay exactly stationary. `set_vof_flux_clamp(False)`
+keeps this a measured number: `rho^e = -4.03` and divergence at step 2, gated in `vof_momentum` K2.
+
+**Finding 3 — the dilation COEFFICIENT `rho^ u` must be frozen across the three sweeps, exactly as
+Weymouth-Yue freeze `H(C^n - 1/2)`, and the damage from not doing so is the same shape as WO-E's.**
+
+The momentum dilation term is `rho^_i u_i (a_+ - a_-)` and its sum over the three sweeps is
+`rho^_i u_i * div`, which vanishes for a projected field — **but only if the coefficient factors out
+of the sum**, i.e. only if it is a constant of the step. With the running (partially swept) velocity
+in that slot the three sweeps carry three different `u_i` and the cancellation is lost.
+**Measured, 100 coupled steps, ratio 1e3: worst per-step momentum drift 1.4e-7 relative with the
+running velocity, 2.2e-13 with `u^n` frozen — a factor 6e5**, while the colour, whose flag IS frozen,
+was exact throughout. This is WO-E's #1 trap wearing a different hat (there: `2.3e-15 -> 1.5e-2`
+from recomputing the flag), and it is worth stating as the general rule: *in a Weymouth-Yue sweep,
+every coefficient that multiplies the divergence must be frozen at the start of the step.* Note the
+flux velocity is deliberately NOT frozen — only the dilation coefficient is; the two roles are
+different and conflating them costs either conservation (freeze neither) or the splitting order
+(freeze both, see finding 5's closing note).
+
+**Finding 4 — a MUSCL slope in the momentum flux is a density-ratio amplifier on any control volume
+a sweep empties; plain donor-cell upwind is the shipped default.**
+
+The velocity update is `u_new = u_old + [rho_g (a_- dv_- - a_+ dv_+) + drho (F_- dv_- - F_+ dv_+)]
+/ rho_new` with `dv = u^ - u_old`. When the control volume is itself the donor of its outgoing face,
+plain upwind gives `u^_+ = u_old` and `dv_+ = 0` **exactly**. A limited slope makes
+`dv_+ = (1/2 - |a|/2) * slope`, whose coefficient `drho F_+ / rho_new` is unbounded in the ratio
+precisely when the sweep empties the volume (`F_+ -> C^e`, `rho_new -> rho_g`) — physically, the
+residual velocity of a volume that has just lost 99.95 % of its mass is a difference of two
+liquid-scale momenta. Measured on the uniform-velocity gate at ratio 1e4, 50 steps, in the
+double-storage build so the solver's own floor is out of the picture:
+
+| steps | 10 | 20 | 30 | 40 | 50 |
+|---|---|---|---|---|---|
+| MinMod slope | 3.3e-16 | 6.1e-16 | 4.3e-14 | 5.1e-13 | **2.2e-10** |
+| donor-cell upwind | 3.3e-16 | 4.4e-16 | 4.4e-16 | 5.6e-16 | **6.7e-16** |
+
+At ratio 1e3 the slope is harmless (6.1e-15 at 50 steps), so this is a high-ratio robustness
+verdict, not an accuracy one. `set_vof_momentum_muscl(True)` keeps it available with the caveat in
+its docstring; re-run the ratio sweep if you turn it on.
+
+**Finding 5 — the consistency identity is exact in EXACT arithmetic for any correct implementation,
+and that is not enough: two separate floating-point conditioning defects each degraded the gate
+linearly in the density ratio, i.e. each wore the exact signature of the defect this rung removes.**
+
+Both were found by the gate and both are now designed out rather than tolerated.
+
+* *Storing `rho^e u_e`.* The increment is a sum of `rho_l`-scaled flux terms whose result is only
+  `rho_g`-scaled in a gas control volume, and a volume that one directional sweep fills and the next
+  empties passes through an intermediate `rho^e` a factor `ratio` larger than where it starts and
+  ends. Measured: `6.7e-16` at ratio 1e2 rising to `3.2e-14` at 1e4. The fix is to evolve the
+  algebraically identical `u_new = u_old + dev/rho_new`, in which every term is a DIFFERENCE OF
+  VELOCITIES and therefore exactly zero for a uniform field. It remains the conservative scheme —
+  `rho_new` is the advected colour's own density — only the arithmetic is conditioned.
+* *Fluxing the frozen `u^n` instead of the current velocity.* The term
+  `drho dC (u^n_i - u_old_i)/rho_new` that then survives has gain `ratio` on a volume a sweep
+  empties, which amplified the solver's own 1e-7 noise to 1e-7 at ratio 1e4 while ratio 1e3 stayed
+  clean. Transporting the CURRENT state removes the term identically AND is the faithful directional
+  split; it costs three more halo exchanges per sweep, alongside the three `C^e` already needed by
+  finding 2's clamp.
+
+The lesson to carry: for a gate whose whole value is that it is pass/fail at 1e-15, "algebraically
+exact" is not the property to verify — *arrange the arithmetic so the cancellation is exact*, then
+the gate has no tolerance to argue about. All three of this rung's exactness statements (K1, K3, K5)
+are now bitwise rather than tolerance-bounded.
+
+**Finding 6 — ESCALATED: the uniform-velocity gate cannot reach 1e-15 through the full step in the
+shipped build, and the floor is the solver's FLOAT momentum-operator storage, not this rung.**
+
+Through the coupled step the residual sits at `1.2e-7`, flat in ratio, for the consistent scheme and
+`5e-7 .. 9e-7` for the inconsistent one. That is float epsilon, and the mechanism is direct:
+`buildRhsVar` / `buildRhsVarMom` form `rho_f/dt * u` in **double**, while `ibmBuildDiffusionVar`
+stores the same `rho_f/dt` in the **float** velocity stencil (`Solver::FV`), so `u* = b/diag`
+differs from its input at float epsilon **whenever rho varies in space**. It is identically zero for
+uniform rho (measured: exactly 0.0, 0 pressure iterations) and it is present with momentum
+consistency OFF, so it is neither caused by nor curable within this rung.
+
+Confirmed by A/B with the existing `-DPECLET_FLOW_MREAL_DOUBLE` instrument in a separate build
+directory (no source change, shipped default untouched): the identical measurement returns
+**1.2e-15, flat across ratios 1e1..1e4** on both scenes. The pressure solve is NOT implicated —
+`max|div(open u)| = 3.3e-16` and 13..21 iterations against a cap of 300 in the double build, and
+`<= 2e-11` with 13..21 iterations in the float build; no solve in this rung came near its cap.
+
+Two consequences, filed rather than fixed here (the storage precision is shared solver code and
+belongs to whoever owns the `MReal` work, who has independently root-caused the same float storage
+as a high-contrast pressure-operator failure):
+- the shipped `vof_momentum` ctest gates the identity on the ADVECTION (bitwise, tolerance-free) and
+  records the coupled-loop number at 1e-4 with the mechanism named in the source, rather than
+  pretending 1e-7 is a VoF result;
+- at ratio 1e4 in the float build the 1e-7 injection is enough to destabilise a long two-phase run.
+  This rung is therefore honestly rated to **ratio ~1e3** on the shipped build and to 1e4 on a
+  double-storage build. Say so in the API docs rather than quoting the double-build number.
+
+**Finding 7 — the Arrufat raindrop gate cannot be run before V4, and the substitute is stated
+rather than smuggled in.** The specified case (ratio 831.8, 15 cells/diameter, terminal velocity
+within 15 %) is a drop held together by SURFACE TENSION, which is rung V4. Without it a raindrop at
+its terminal Weber number flattens and breaks up, and there is no terminal velocity to measure —
+the gate as written is not a property of this rung's code. The surface-tension-free case with the
+same payoff structure is a VISCOUS drop in the Stokes regime, whose terminal velocity is
+Hadamard-Rybczynski; that is what `gate_falling_drop` runs, at the same ratio and the same 15
+cells/diameter, with the periodic-array caveat stated. Numbers below.
+

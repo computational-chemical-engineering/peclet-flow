@@ -329,7 +329,7 @@ Full background, measurements and open problems: [`../docs/DECOMPOSITION_AND_MUL
 - Validated against Zick & Homsy SC-sphere drag. Design + benchmarks:
   [`doc/flow_multigrid_plan.md`](doc/flow_multigrid_plan.md).
 
-### Geometric VoF — two-phase flow (rung V2a; `src/vof/`)
+### Geometric VoF — two-phase flow (rungs V2a + V2b; `src/vof/`)
 
 Campaign plan: [`../docs/VOF_PLAN.md`](../docs/VOF_PLAN.md); work orders + findings:
 [`doc/vof_workorders.md`](doc/vof_workorders.md) (phase 0) and
@@ -343,20 +343,51 @@ Campaign plan: [`../docs/VOF_PLAN.md`](../docs/VOF_PLAN.md); work orders + findi
   1/(2(N−1)); the familiar 0.5 is the 2D value). The dilation flag is frozen once per step —
   recompute it per sweep and exact conservation silently dies (measured 2.3e-15 → 1.5e-2).
 - `src/vof/colour_field.hpp` (V2a) — the `G=2` ↔ `g=3` bridge and the colour ghost policy.
+- `src/vof/momentum_advect.hpp` (V2b) — `MomentumConsistentAdvector`: `rho^c u_c` on the
+  half-shifted MAC control volumes, driven by the SAME PLIC planes, sweep order and frozen state as
+  the colour advection of that step. Opt-in (`enable_vof_momentum(rho_gas, rho_liquid)`), and what
+  makes the scheme usable above density ratio ~100.
 
 **Python:** `enable_vof()`, `set_vof(C)` / `get_vof()`, `vof_max_courant()` / `vof_last_courant()`,
-`set_vof_cfl_limit()`, `vof_diagnostics()`, `set_rho_face_harmonic()`. `"C"` is an ordinary
+`set_vof_cfl_limit()`, `vof_diagnostics()`, `set_rho_face_harmonic()`; V2b adds
+`enable_vof_momentum(rho_gas, rho_liquid)`, `vof_advected_velocity(c)`,
+`vof_momentum_diagnostics()`, `set_vof_rho_floor()`, `set_vof_momentum_muscl()`,
+`set_vof_momentum_cell_flag()`, `set_vof_flux_clamp()`. `"C"` is an ordinary
 registered `G=2` cell field, so ρ(C)/μ(C) go through the existing `LinearMix` closures
 (`set_property_model("rho","linear","C",[rho_g, rho_l-rho_g])`, which enables the varRho path) and
 `get_field`/`set_field`/`field_view`/`redistribute` work on it unchanged. The **g=3 working block**
 is the advector's, with its own `GridHaloTopology` under MPI — flow's global `G=2` is untouched.
 
-**Scope of V2a — say this to users:** no surface tension (V4) and **no momentum-consistent
-transport** (V2b/WO-K), so mass and momentum are advected by different fluxes and a mixed cell
-carries a spurious interfacial momentum source of order Δρ. **Valid only at modest density ratios
-for cases with motion**; a high-ratio case at REST (the hydrostatic acid test) is exact.
-**Staggered only** (collocated is V8 — `enable_vof` throws) and **no immersed solid** (the fluxes
-are not openness-weighted yet — `advectVof` throws; an all-fluid `set_pressure_geometry` is fine).
+**Momentum consistency (V2b, opt-in).** `enable_vof_momentum(rho_gas, rho_liquid)` advects
+`rho^c u_c` on the half-shifted momentum control volumes with the same geometric fluxes as `C`,
+then recovers `u = (rho^c u)/rho^c`. Without it, mass and momentum are advected by different fluxes
+and a mixed cell carries a spurious interfacial momentum source of order Δρ — the literature is
+unambiguous that this breaks down around ratio 1000. Turning it on **moves the VoF advection from
+the end of `step()` to its head** (the momentum advection must precede the predictor that consumes
+it), so the advecting field is `u^n`, the previous step's projected output, and `u` at step 0 must
+be discretely divergence-free. Requires the variable-density path, staggered layout, explicit
+advection, no immersed solid, no porous continuity. The decisive gate — an arbitrary sharp `C` with
+a uniform velocity — is **bitwise** exact at ratios 1e1..1e4, single-rank and at np 1/2/4.
+Three things this construction paid for, all in `doc/vof_workorders_v2.md` (WO-K findings):
+- **the flux must be clamped into Weymouth's admissible interval on the shifted volume's own
+  colour.** The geometric flux is bounded by what the CURRENT cell planes see in the donor, not by
+  the ADVECTED `C^c`; the gap is O(a²) and at ratio 1e4 a 2.6e-2 undershoot drives `rho^c` to −255.
+  `set_vof_flux_clamp(False)` is the ablation: divergence at step 2.
+- **the dilation coefficient `rho^ u` must be frozen across the three sweeps**, exactly as WY freeze
+  `H(C^n−½)`. Measured: per-step momentum drift 1.4e-7 with the running velocity, 2.2e-13 frozen.
+- **a MUSCL slope in the momentum flux is a density-ratio amplifier** on any control volume a sweep
+  empties (gain `Δρ·F/rho^c`); plain donor-cell upwind is the default and
+  `set_vof_momentum_muscl(True)` the opt-in, measured 2.2e-10 vs 6.7e-16 at ratio 1e4.
+
+**Scope — say this to users:** no surface tension (V4). **Staggered only** (collocated is V8 —
+`enable_vof` throws) and **no immersed solid** (the fluxes are not openness-weighted yet —
+`advectVof` throws; an all-fluid `set_pressure_geometry` is fine). Without
+`enable_vof_momentum` the rung is **valid only at modest density ratios for cases with motion**; a
+high-ratio case at REST (the hydrostatic acid test) is exact either way. **With** it, the shipped
+build is honestly rated to ratio ~1e3: the uniform-velocity residual through the coupled step is
+floored at 1.2e-7 by the solver's FLOAT momentum-operator storage (`Solver::FV`, a pre-existing
+defect unrelated to VoF — a `-DPECLET_FLOW_MREAL_DOUBLE` build measures 1.2e-15, flat across four
+decades of ratio), and at ratio 1e4 that injection is enough to destabilise a long run.
 
 Three traps this rung paid for, all in `doc/vof_workorders_v2.md` (WO-J findings):
 - **The face index conventions differ by one cell.** flow's `u(i)` is the **low** (−x) face of cell
@@ -379,8 +410,11 @@ balance exact, since the momentum time term and the face body force keep the ari
 Measured with it on: ∂P/∂z relative error **0.34** instead of 1e-15. It ships as a measured knob for
 the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
-Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`;
-`tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`, `vof_twophase_mpi_np{1,2,4}`;
+Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`;
+`tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`, `vof_twophase_mpi_np{1,2,4}`,
+`vof_momentum_mpi_np{1,2,4}`; `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
+falling drop, the RT near-Nyquist check — every gate there records the pressure iteration count
+against its cap and treats a capped run as INVALID);
 `tests/study/rayleigh_taylor.py` (diffuse and sharp records side by side).
 
 ### Domain boundary conditions

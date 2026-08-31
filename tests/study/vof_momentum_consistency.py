@@ -317,7 +317,7 @@ def gate_rho_floor(n=32, steps=200, R=1000.0):
         del s
 
 
-def gate_falling_drop(n=60, D=15, R=800.0, mu_ratio=100.0, steps=1500, quiet=False):
+def gate_falling_drop(n=60, D=15, R=800.0, mu_ratio=100.0, steps=700, quiet=False):
     """A viscous drop falling under buoyancy at density ratio ~800 and 15 cells/diameter.
 
     WO-K asks for the Arrufat raindrop (ratio 831.8, 15 cells/D, terminal velocity within 15%).
@@ -342,9 +342,12 @@ def gate_falling_drop(n=60, D=15, R=800.0, mu_ratio=100.0, steps=1500, quiet=Fal
     vol = C.sum() / n**3
     rho_g, rho_l = 1.0, R
     rho_mean = rho_g + (rho_l - rho_g) * vol
-    mu_g = 1.0
+    # mu_g is chosen so the Stokes response time tau = 2 R^2 rho_l / (9 mu_g) is O(200) rather than
+    # O(1e4): the drop must actually REACH its plateau inside the step budget, and at Re ~ 0.02 the
+    # case stays in the Stokes regime the Hadamard-Rybczynski formula describes.
+    mu_g = 50.0
     mu_l = mu_g * mu_ratio
-    g = 2.0e-4
+    g = 2.5e-4
     # f_z = -(rho - rho_mean) g = -(rho_g - rho_mean) g - (rho_l - rho_g) g * C
     f0 = -(rho_g - rho_mean) * g
     f1 = -(rho_l - rho_g) * g
@@ -352,16 +355,21 @@ def gate_falling_drop(n=60, D=15, R=800.0, mu_ratio=100.0, steps=1500, quiet=Fal
         2 * mu_g + 3 * mu_l)
     print("\n=== GATE 5 — falling viscous drop, ratio %g, D/h = %d, mu_l/mu_g = %g ==="
           % (R, D, mu_ratio))
-    print("    Hadamard-Rybczynski U_t = %.5e (unbounded); box %d^3, drop volume fraction %.4f"
-          % (U_hr, n, vol))
+    tau = 2.0 * R_drop**2 * rho_l / (9.0 * mu_g)
+    # Periodic array: the drop feels its images. Sangani-Acrivos / Hasimoto to leading order,
+    # K = 1 + 1.76 phi^(1/3), so the expected plateau is U_HR / K, NOT U_HR.
+    K = 1.0 + 1.76 * vol ** (1.0 / 3.0)
+    print("    Hadamard-Rybczynski U_t = %.5e (unbounded), /K = %.5e with the periodic correction "
+          "K = %.3f at phi = %.4f;  tau = %.0f, box %d^3, Re = %.3f"
+          % (U_hr, U_hr / K, K, vol, tau, n, rho_g * (U_hr / K) * D / mu_g))
     print("    %-14s | %-12s | %-12s | %-9s | %s"
-          % ("scheme", "U_drop", "U/U_HR", "max|u|", "pressure"))
+          % ("scheme", "U_drop", "U/(U_HR/K)", "max|u|", "pressure"))
     out = {}
     for mom in (True, False):
         s = pf.Solver(n, n, n)
         s.set_rho(rho_l)
         s.set_mu(mu_g)
-        dt0 = 4.0
+        dt0 = 2.0
         dt = dt0
         s.set_dt(dt)
         s.set_pressure_geometry(all_fluid(n))
@@ -385,7 +393,7 @@ def gate_falling_drop(n=60, D=15, R=800.0, mu_ratio=100.0, steps=1500, quiet=Fal
                 blew = True
                 break
             w.sample(s)
-            if k % 25 == 24:
+            if k % 20 == 19:
                 c = s.get_vof()
                 uz = s.get_w()
                 m = c.sum()
@@ -404,7 +412,9 @@ def gate_falling_drop(n=60, D=15, R=800.0, mu_ratio=100.0, steps=1500, quiet=Fal
             mx = max(float(np.max(np.abs(s.get_u()))), float(np.max(np.abs(s.get_v()))),
                      float(np.max(np.abs(s.get_w()))))
             print("    %-14s | %-12.5e | %-12.4f | %-9.3e | %s"
-                  % ("consistent" if mom else "inconsistent", u_drop, u_drop / U_hr, mx, w))
+                  % ("consistent" if mom else "inconsistent", u_drop, u_drop / (U_hr / K), mx, w))
+            print("      plateau history (every 20 steps, last 10): %s"
+                  % " ".join("%.4e" % h for h in hist[-10:]))
             out["mom" if mom else "no"] = (u_drop, hist)
         del s
     return out
