@@ -167,3 +167,86 @@ np 1/2/4 bitwise; single-phase regression +0.00%.
 **Watch for**: at pore-scale Ca the capillary Δt, not the WY CFL, becomes the binding step
 limit — confirm that and record the resulting step-count economics, because it decides
 whether implicit surface tension ever needs revisiting (Popinet 2018 says not yet).
+
+---
+
+# Findings
+
+### WO-M step 1 — the S3 question, settled: **the negative pivot SURVIVES in double**
+
+**Verdict: S3 (coefficient-aware coarsening) stands as an independent mechanism.** The V-cycle
+preconditioner's indefiniteness under high coefficient contrast is *not* an artefact of the float
+operator storage. Float and double hierarchies produce the **same preconditioner spectrum to three
+or four significant figures** on every configuration measured.
+
+**Instrument** (committed, so this is reproducible rather than throwaway):
+`tests/study/mg_precond/` — `mg_dense_precond.cpp` assembles the preconditioner `M` densely, one
+mean-removed unit basis vector per column through the exact `precond` lambda `solvePCG` uses (a
+zero-iteration `solvePCG` first puts the V-cycle on the production `(pre, post, bottom) = (2, 2, 12)`
+schedule), plus the fine operator `A` via `matvecOverlap`; `mg_precond_analyze.py` reports the skew
+`||M−Mᵀ||_F/||M||_F`, the unpivoted LDLᵀ pivots (WO-H's instrument, for comparability) **and** the
+eigenvalues of `sym(M)` restricted to the mean-free subspace. Build it twice against the same
+prefix, the second time with `-DPECLET_FLOW_MREAL_DOUBLE`; nothing else differs.
+
+8³, 3 levels, sharp mid-height ρ-slab, `c_f = ρ₀/ρ_f` (`buildRhoCoeff`), host-openmp:
+
+| geom | ratio | prec | skew | LDL neg | λ_min(sym M) | λ_max | neg eigenvalues |
+|---|---|---|---|---|---|---|---|
+| periodic | 1 | float / double | 1.14e-02 / 1.14e-02 | 0 / 0 | 8.333e-02 | 1.534e+00 | 0 / 0 |
+| periodic | 1e2 | float / double | 2.82e-02 / 2.82e-02 | 0 / 0 | 8.750e-02 | 8.947e+01 | 0 / 0 |
+| periodic | 1e3 | float / double | 2.86e-02 / 2.86e-02 | 0 / 0 | 8.222e-02 | 8.907e+02 | 0 / 0 |
+| **periodic** | **1e4** | float / double | 2.87e-02 / 2.87e-02 | **6 / 6** | **−3.301e+00** | 8.903e+03 | **6 / 6** |
+| periodic | 1e5 | float / double | 2.87e-02 / 2.87e-02 | 14 / 14 | −4.627e+01 | 8.902e+04 | 14 / 14 |
+| periodic | 1e6 | float / double | 2.87e-02 / 2.87e-02 | 20 / 20 | −4.759e+02 | 8.902e+05 | 20 / 20 |
+| wallz | 1 | float / double | 9.38e-03 / 9.38e-03 | 0 / 0 | 8.431e-02 | 5.914e+00 | 0 / 0 |
+| wallz | 1e2 | float / double | 5.26e-02 / 5.26e-02 | 0 / 0 | 8.748e-02 | 3.499e+02 | 0 / 0 |
+| **wallz** | **1e3** | float / double | 5.35e-02 / 5.35e-02 | **1 / 1** | **−1.077e+00** | 3.485e+03 | **1 / 1** |
+| wallz | 1e4 | float / double | 5.35e-02 / 5.35e-02 | 5 / 5 | −2.375e+01 | 3.483e+04 | 5 / 5 |
+| wallz | 1e5 | float / double | 5.35e-02 / 5.35e-02 | 9 / 9 | −2.508e+02 | 3.483e+05 | 9 / 9 |
+| wallz | 1e6 | float / double | 5.35e-02 / 5.35e-02 | 12 / 12 | −2.521e+03 | 3.483e+06 | 12 / 12 |
+
+The onsets reproduce WO-H's: **first real negative at ratio ~1e3 wall-bounded and ~1e4 fully
+periodic**. Confirmed at 16³ / 4 levels (float and double again identical to every printed digit,
+periodic 1e3 now carrying **2** negative eigenvalues where 8³/3-levels carried 0 — the defect grows
+with hierarchy depth, exactly as the ladder's "degrades with depth" observation).
+
+**Two methodological corrections to the WO-H record, both of which strengthen it:**
+1. WO-H's "1 negative pivot (**−1.1e-12**), ratio 1e2" is **not** indefiniteness. `sym(M)` is
+   singular by construction (the constant is an exact null direction: the input is mean-removed and
+   the level-0 V-cycle mean-removes its output), so an unpivoted LDLᵀ produces one pivot at
+   round-off whose *sign is noise* — it flips between the float and double builds on the same
+   configuration in this battery. The real negatives (−1.08, −3.30, −23.8, …) are 12 orders of
+   magnitude larger and are unambiguous. Read the eigenvalue column, not the pivot count.
+2. Conversely, an unpivoted LDLᵀ **breaks down** near the transition: at wallz 1e3 with the (2,2,4)
+   schedule it reported a −1.25 pivot while `sym(M)` was still positive semi-definite. The
+   restricted spectrum is the reliable instrument.
+
+**The float row-sum defect is real, is contrast-amplified exactly as claimed, and is nevertheless
+not this failure.** The probe measures `A·1` per row directly:
+
+| ratio | float, abs | float, /max\|a\| | float, /min\|a\| | double, /min\|a\| |
+|---|---|---|---|---|
+| 1 | 0 (exact) | 0 | 0 | 0 |
+| 1e2 | 1.14e-07 | 1.14e-07 | 5.74e-06 | 1.39e-15 |
+| 1e3 | 5.43e-08 | 2.33e-07 | 2.72e-05 | 7.73e-14 |
+| 1e4 | 1.85e-07 | 4.37e-07 | 9.26e-04 | 1.66e-13 |
+| 1e6 | 9.27e-08 | 2.27e-07 | **4.63e-02** | 4.99e-11 |
+
+So the collocated session's mechanism is confirmed as a *fact about the stored operator* — at three
+decades of contrast the row-sum defect reaches ~1e-4 …1e-2 **relative to the small couplings**,
+which is what shifts the near-null vector off the constant that mean-removal deflates — but it does
+**not** move `M`'s spectrum. The two loci are therefore genuinely separate failures with separate
+signatures: **contrast ⇒ M indefinite (precision-independent, kills the CG-family β, Chebyshev
+survives)**, and **float storage ⇒ A·1 ≠ 0 (precision-dependent, floors/rebounds the residual near
+the deflation floor, hurts every driver including Chebyshev)**. S3 is not struck from the plan.
+
+Reproduce:
+```bash
+cmake -S tests/study/mg_precond -B build_wom_probe_f -DCMAKE_PREFIX_PATH=$PWD/../extern/install/host-openmp
+cmake -S tests/study/mg_precond -B build_wom_probe_d -DCMAKE_PREFIX_PATH=$PWD/../extern/install/host-openmp \
+      -DCMAKE_CXX_FLAGS=-DPECLET_FLOW_MREAL_DOUBLE
+cmake --build build_wom_probe_f -j && cmake --build build_wom_probe_d -j
+OMP_NUM_THREADS=8 OMP_PROC_BIND=false ./build_wom_probe_f/mg_dense_precond --sweep --outdir doc/data/wom
+OMP_NUM_THREADS=8 OMP_PROC_BIND=false ./build_wom_probe_d/mg_dense_precond --sweep --outdir doc/data/wom
+python tests/study/mg_precond/mg_precond_analyze.py doc/data/wom
+```
