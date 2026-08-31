@@ -4731,6 +4731,8 @@ class Solver {
   std::vector<double> getVof() { return gatherInner(cField_); }
   // Local (this rank's) colour census: sum / min / max / mixed-cell count / wisp count.
   vof::WyAdvector::Diagnostics vofDiagnostics() {
+    if (!vofEnabled_)
+      throw std::runtime_error("vof_diagnostics: VoF is not enabled (call enable_vof/set_vof)");
     bridgeColourToVof();
     return vofAdv_.diagnostics();
   }

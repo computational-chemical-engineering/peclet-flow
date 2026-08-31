@@ -319,9 +319,21 @@ case; the reduction is also clamped at 0 so a uniform colour field reports 0, no
 senses that are attainable (D2, D3). A bitwise reduction to the CONSTANT-density solver is not
 attainable and never was, independently of VoF: with `varRho_` on, the momentum RHS is a different
 kernel (`buildRhsVar`) and the default pressure driver is Chebyshev rather than MG-PCG. That
-pre-existing reduction is measured at 2e-14 by `test_vardensity_projection.cpp`. (b) Chebyshev
-re-estimates its bounds on every coefficient rebuild, which with a moving interface is every step
-(WO-B: 30 extra V-cycles, 67 % of the projection). Recorded, not addressed — that is S2. (c) The
+pre-existing reduction is measured at 2e-14 by `test_vardensity_projection.cpp`. (b) **The cost,
+recorded as the WO asks.** The trap flagged was that Chebyshev re-estimates its bounds on every
+coefficient rebuild and a moving interface makes that every step. Measured on CUDA, 48³ periodic
+sheared ratio-10 sphere, 30 steps, against the SAME coefficients held frozen (varRho, no VoF):
+
+| | step | projection | predictor | momentum | pressure its/step |
+|---|---|---|---|---|---|
+| frozen ρ (varRho only) | 47.40 ms | 27.42 ms (57.8 %) | 0.11 ms | 19.67 ms | 9.0 |
+| VoF, moving interface | 47.82 ms | 27.44 ms (57.4 %) | 0.11 ms | 19.67 ms | 9.0 |
+
+So the whole geometric VoF stage — three PLIC reconstructions, three sweeps, the worklist scan and
+the g=3 halo — is **0.42 ms of 47.8 ms (0.9 %)**, and the projection cost is **unchanged**: varRho
+already rebuilt the coefficients and re-estimated the bounds every step, interface or not. The
+flagged cost is therefore attributable to varRho, not to VoF, and S2 (bound amortization) keeps its
+value without VoF having added to it. Not addressed here. (c) The
 `walls-z` MPI configuration records a one-off colour displacement of 7.3016e-07, identical at
 np = 1/2/4 to within 1.6e-14: the pressure driver's first solve on a fresh field leaves
 max|u| ≈ 8.6e-6 (the documented varRho transient) and VoF faithfully advects it once. The test gates
