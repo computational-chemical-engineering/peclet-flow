@@ -4946,11 +4946,19 @@ class Solver {
   void setVofRhoFloorFrac(double f) { vofMom_.rhoFloorFrac = f; }
   double vofRhoFloorFrac() const { return vofMom_.rhoFloorFrac; }
   double vofRhoFloor() const { return vofMom_.lastRhoFloor(); }
-  // Ablations (measured, not tuning knobs): first-order donor velocity in the momentum flux, and
-  // the literal reading of "the same frozen dilation flag" (the PRESSURE-cell flag on the shifted
-  // control volume instead of its structural analogue). See vof/momentum_advect.hpp.
-  void setVofMomentumUpwind(bool on) { vofMom_.momentumUpwind = on; }
+  // MinMod-limited donor reconstruction in the momentum flux. OFF by default — on a control volume
+  // a sweep empties, the slope's deviation from the volume's own velocity is amplified by
+  // drho*F/rho^c, which is unbounded in the density ratio; measured, it grew the uniform-velocity
+  // residual to 2.2e-10 at ratio 1e4 over 50 steps while plain donor-cell upwind stayed flat at
+  // 6.7e-16. Harmless at ratio 1e3. See vof/momentum_advect.hpp.
+  void setVofMomentumMuscl(bool on) { vofMom_.momentumMuscl = on; }
+  // Ablation: the literal reading of "the same frozen dilation flag" (the PRESSURE-cell flag on the
+  // shifted control volume instead of its structural analogue).
   void setVofMomentumCellFlag(bool on) { vofMom_.useCellDilationFlag = on; }
+  // Ablation: drop the Weymouth flux clamp on the shifted control volume. With it off the
+  // half-shifted colour leaves [0,1] by O(a^2) and rho^c goes NEGATIVE at high ratio — the
+  // measurement that the clamp is a necessity, not a habit. See vof/momentum_advect.hpp point 3.
+  void setVofFluxClamp(bool on) { vofMom_.clampFluxes = on; }
   vof::MomentumConsistentAdvector::Diagnostics vofMomentumDiagnostics() {
     if (!vofMomEnabled_)
       throw std::runtime_error("vof_momentum_diagnostics: enable_vof_momentum was never called");

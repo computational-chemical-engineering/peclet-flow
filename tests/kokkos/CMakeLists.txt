@@ -156,6 +156,13 @@ target_include_directories(test_vof_twophase PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(test_vof_twophase PRIVATE Kokkos::kokkos)
 add_test(NAME vof_twophase COMMAND test_vof_twophase)
 
+# VoF rung V2b (WO-K): momentum-consistent transport of rho^c u_c on the half-shifted MAC CVs.
+add_executable(test_vof_momentum test_vof_momentum.cpp)
+target_include_directories(test_vof_momentum PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_momentum PRIVATE Kokkos::kokkos)
+add_test(NAME vof_momentum COMMAND test_vof_momentum)
+
 add_executable(test_poiseuille_ibm test_poiseuille_ibm.cpp)
 target_include_directories(test_poiseuille_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_poiseuille_ibm PRIVATE Kokkos::kokkos)

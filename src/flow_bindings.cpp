@@ -790,11 +790,16 @@ static void bind_solver(nb::module_& m, const char* name) {
           "vof_rho_floor", [](S& s) { return s.vofRhoFloor(); },
           "The absolute rho^c floor used by the last recovery.")
       .def(
-          "set_vof_momentum_upwind", [](S& s, bool on) { s.setVofMomentumUpwind(on); },
+          "set_vof_momentum_muscl", [](S& s, bool on) { s.setVofMomentumMuscl(on); },
           nb::arg("on") = true,
-          "ABLATION: first-order donor-cell velocity in the momentum flux instead of the "
-          "MinMod-limited linear reconstruction. Both preserve the uniform-velocity identity "
-          "exactly (a uniform field has a zero slope bit for bit).")
+          "MinMod-limited linear reconstruction of the donor velocity in the momentum flux, "
+          "instead of the DEFAULT plain donor-cell upwind. Both preserve the uniform-velocity "
+          "identity exactly (a uniform field has a zero slope bit for bit), but on a control volume "
+          "a sweep EMPTIES the slope's deviation from the volume's own velocity is amplified by "
+          "drho*F/rho^c, which is unbounded in the density ratio. Measured at ratio 1e4, 50 steps: "
+          "with the slope the uniform-velocity residual grows to 2.2e-10, without it it is flat at "
+          "6.7e-16; at ratio 1e3 the slope is harmless. Turn it on deliberately and re-run the "
+          "ratio sweep if you do.")
       .def(
           "set_vof_momentum_cell_flag", [](S& s, bool on) { s.setVofMomentumCellFlag(on); },
           nb::arg("on") = true,
@@ -802,6 +807,13 @@ static void bind_solver(nb::module_& m, const char* name) {
           "volume instead of its structural analogue H(C^c,n-1/2). The flag that must be shared is "
           "the one of the pair that telescopes, and both members of that pair live on the shifted "
           "volume — this switch is the literal reading of the work order, kept as a measurement.")
+      .def(
+          "set_vof_flux_clamp", [](S& s, bool on) { s.setVofFluxClamp(on); }, nb::arg("on") = true,
+          "ABLATION: drop the Weymouth flux clamp max(0,|a|-(1-C^c_don)) <= |F| <= min(|a|,C^c_don) "
+          "on the half-shifted control volume. The geometric flux is bounded by what the CURRENT "
+          "cell planes see in the donor, not by the ADVECTED C^c; the gap is O(a^2) and at density "
+          "ratio 1e4 a 2.6e-2 undershoot drives rho^c to -255, which the recovery would divide by. "
+          "Default ON; off is how that statement stays a measured number.")
       .def(
           "vof_momentum_diagnostics",
           [](S& s) {
@@ -812,6 +824,7 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["sum_momentum"] = nb::make_tuple(d.sumM[0], d.sumM[1], d.sumM[2]);
             r["min_rho_c"] = d.minRhoC;
             r["floored"] = d.floored;
+            r["clamped"] = d.clamped;
             return r;
           },
           "Census over THIS RANK's momentum control volumes: per-component min/max of the "

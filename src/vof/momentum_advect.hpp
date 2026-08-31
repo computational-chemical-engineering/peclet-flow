@@ -69,31 +69,33 @@
 ///
 /// ## The consistency identity (why the uniform-velocity gate is exact)
 ///
-/// Per sweep, with `Psi = rho_g (a - F) + rho_l F` the mass flux and `rho^ = rho_g` or `rho_l` by
-/// the frozen flag,
+/// Per sweep, with `Psi = rho_g a + (rho_l - rho_g) F` the mass flux and `rho^` the frozen-flag
+/// density, the conservative pair is
 ///
-///     C^e_i   += (F_-   - F_+  ) + flag_i (a_+ - a_-)
-///     M_i     += (Psi_- u^_-  - Psi_+ u^_+) + rho^_i u_i (a_+ - a_-)
+///     C^e_i   += dC = (F_- - F_+) + flag_i (a_+ - a_-)
+///     M_i     += (Psi_- u^_- - Psi_+ u^_+) + rho^_i u_i (a_+ - a_-)
 ///
-/// and `rho^e = rho_g (1 - C^e) + rho_l C^e`. If `u_e == U` everywhere then every `u^_+/-` and every
-/// `u_i` is `U`, and the two updates differ by exactly the factor `U`: the `rho_g` parts of the flux
-/// and the dilation term cancel, leaving `dM = U (rho_l - rho_g) dC^e = U d(rho^e)`. So
-/// `M = U rho^e` is preserved and `u = M/rho^e = U` — to round-off, with no tuning knob, at ANY
-/// density ratio. An inconsistent scheme is wrong at `O(d rho)`.
+/// with `rho^e = rho_g (1 - C^e) + rho_l C^e`, so `d(rho^e) = drho dC` — the SAME `dC`. If
+/// `u_e == U` everywhere then every `u^` and every `u_i` is `U` and the two updates differ by
+/// exactly the factor `U`: `dM = U d(rho^e)`, so `M = U rho^e` is preserved and `u = M/rho^e = U`
+/// at ANY density ratio, with no tuning knob. An inconsistent scheme is wrong at `O(d rho)`.
 ///
 /// The identity holds whatever the fluxes are, *provided the two updates use the same ones*. That
 /// is the whole point of driving both from one set of planes, and it is why the flux clamp of
-/// point 3 is free: it changes `F`, not the fact that there is one `F`.
+/// point 3 is free: it changes `F`, not the fact that there is one `F`. `momentumUpdate` evolves
+/// the algebraically identical `u_new = u_old + dev/rho_new` form so that the identity survives in
+/// FLOATING POINT too, not only in exact arithmetic — the note there explains why that matters.
 ///
 /// ## The transported velocity in the flux
 ///
-/// `u^` is a MinMod-limited linear reconstruction of the frozen `u^n_e` in the donor CV, evaluated
-/// at the centroid of the flux slab (distance `1/2 - |a|/2` from the donor centre). With a uniform
-/// field both MinMod arguments are exactly zero, so `u^ = U` bit for bit and the gate above is
-/// untouched. `momentumUpwind = true` drops the slope (first-order donor-cell) as an ablation.
-/// The three sweeps flux the SAME frozen `u^n` rather than the partially updated `M/rho^e`: the
-/// updated variant needs a ghost exchange of the recovered velocity after every sweep and changes
-/// the answer only at the splitting order. Recorded as a deviation in the WO-K findings.
+/// `u^` is the CURRENT transported velocity of the donor CV (plain donor-cell upwind by default;
+/// `momentumMuscl` adds a MinMod-limited slope to the flux slab's centroid, and the note on that
+/// flag says why it is NOT the default at high density ratio). With a uniform field `u^ = U` bit for
+/// bit either way, so the gate above is untouched.
+/// The velocity is exchanged between sweeps alongside `C^e` — fluxing the FROZEN `u^n`
+/// instead would be one exchange cheaper but leaves a term with gain `rho_l/rho_g` on any control
+/// volume a sweep empties (see the derivation in `momentumUpdate`), which is not something to carry
+/// into a high-ratio rung to save a halo exchange.
 #ifndef PECLET_FLOW_VOF_MOMENTUM_ADVECT_HPP
 #define PECLET_FLOW_VOF_MOMENTUM_ADVECT_HPP
 
@@ -141,7 +143,8 @@ class MomentumConsistentAdvector {
     double minRhoC = 0.0;         ///< min rho^e before the floor
     long floored = 0;             ///< inner CVs where the rho^e floor bit in the last recovery
     long clamped = 0;             ///< fluxes Weymouth's admissible interval had to clamp, last step
-    double sumM[3] = {0, 0, 0};   ///< sum of rho^e u_e over inner CVs (momentum census)
+    double sumM[3] = {0, 0, 0};   ///< sum of rho^e u_e over inner CVs AFTER the last advection
+    double sumM0[3] = {0, 0, 0};  ///< the same sum at the START of the last advection (seeding)
   };
 
   /// @param w      the colour advector whose block, planes and face velocities are shared
@@ -181,8 +184,23 @@ class MomentumConsistentAdvector {
   /// means "use `rhoFloorFrac * min(rho_g, rho_l)`".
   double rhoFloor = 0.0;
   double rhoFloorFrac = 1e-6;
-  /// Ablation: first-order donor-cell velocity in the momentum flux (no MinMod slope).
-  bool momentumUpwind = false;
+  /// Opt-in MinMod-limited linear reconstruction of the donor velocity in the momentum flux,
+  /// instead of the DEFAULT plain donor-cell (first-order upwind) value.
+  ///
+  /// **Off by default, and the reason is measured, not stylistic.** The velocity update is
+  /// `u_new = u_old + [rho_g (a_- dv_- - a_+ dv_+) + drho (F_- dv_- - F_+ dv_+)]/rho_new` with
+  /// `dv = u^ - u_old`. On a control volume whose OWN outgoing flux is the donor (`a_+ > 0`), plain
+  /// upwind gives `u^_+ = u_old` and hence `dv_+ = 0` EXACTLY. A slope makes
+  /// `dv_+ = (1/2 - |a|/2) * slope`, and its coefficient `drho F_+ / rho_new` is unbounded in the
+  /// density ratio precisely when the sweep empties the volume (`F_+ -> C^e`, `rho_new -> rho_g`) —
+  /// the volume's residual velocity is then a difference of two liquid-scale momenta. Measured on
+  /// the uniform-velocity gate at ratio 1e4, 50 steps, in a double-storage build (so the solver's
+  /// own float floor is out of the picture): with the slope the error grows
+  /// `3.3e-16 -> 6.1e-16 -> 4.3e-14 -> 5.1e-13 -> 2.2e-10` over steps 10..50; without it, it is
+  /// FLAT at `3.3e-16 ... 6.7e-16`. At ratio 1e3 the slope is harmless (6.1e-15 at 50 steps), so
+  /// this is a high-ratio robustness choice, not an accuracy verdict — turn it on deliberately and
+  /// re-run the ratio sweep if you do.
+  bool momentumMuscl = false;
   /// Ablation: use the PRESSURE-cell frozen dilation flag `H(C^n - 1/2)` on the shifted CV instead
   /// of the structural analogue `H(C^{e,n} - 1/2)`. See the file header, point 4.
   bool useCellDilationFlag = false;
@@ -286,6 +304,8 @@ class MomentumConsistentAdvector {
     dg.minRhoC = gmin;
     dg.floored = floored_;
     dg.clamped = clamped_;
+    for (int c = 0; c < 3; ++c)
+      dg.sumM0[c] = seedM_[c];
     return dg;
   }
 
@@ -327,6 +347,7 @@ class MomentumConsistentAdvector {
     const bool cellFlag = useCellDilationFlag;
     UCField ccFlag = w.dilationFlag();
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    const double rg = rhoG_, rl = rhoL_;
     for (int comp = 0; comp < 3; ++comp) {
       const long se = strideOf(comp);
       SField cf = cc_[comp], mf = vel_[comp], uf = w.faceVel(comp);
@@ -338,6 +359,20 @@ class MomentumConsistentAdvector {
             fl(i) = cellFlag ? ccFlag(i) : (cf(i) > 0.5 ? 1u : 0u);
             mf(i) = uf(i - se);  // uf_e(i-s_e) IS the velocity at control volume i
           });
+      // The momentum census at the START of this step's advection, so the conservation claim can be
+      // made about the ADVECTION rather than about the whole coupled step (the momentum solve and
+      // the projection both change u afterwards, and they conserve `rho_f u` — the arithmetic face
+      // mean — not `rho^e u`).
+      double sm = 0.0;
+      Kokkos::parallel_reduce(
+          "vof::mom::seedsum", MD(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
+          KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+            const long i = L3(x, y, z, e);
+            acc += vofPhaseRho(rg, rl, cf(i)) * mf(i);
+          },
+          sm);
+      Kokkos::fence();
+      seedM_[comp] = sm;
     }
     Kokkos::fence();
   }
@@ -352,7 +387,7 @@ class MomentumConsistentAdvector {
     const long sd = strideOf(d), se = strideOf(comp);
     const int dd = d, ec = comp;
     const double rg = rhoG_, rl = rhoL_;
-    const bool upw = momentumUpwind, clamp = clampFluxes;
+    const bool muscl = momentumMuscl, clamp = clampFluxes;
     SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
             al = w.planeAlpha();
     SField ud = w.faceVel(d), cvU = vel_[comp], cvC = cc_[comp];
@@ -430,7 +465,7 @@ class MomentumConsistentAdvector {
           // both MinMod arguments exactly 0, hence u^ = u bit for bit — the uniform-velocity gate.
           const long don = a > 0.0 ? p : p + sd;
           double slope = 0.0;
-          if (!upw)
+          if (muscl)
             slope = vofMinmod(cvU(don) - cvU(don - sd), cvU(don + sd) - cvU(don));
           const double sgn = a > 0.0 ? 1.0 : -1.0;
           // Only the FACE quantities are stored — the liquid flux, the Courant number and the
@@ -473,31 +508,50 @@ class MomentumConsistentAdvector {
           const double dC = (fc(i - sd) - fc(i)) + dil;
           const double cNew = cf(i) + dC;
           cf(i) = cNew;
-          // The conservative update is
-          //     rho_new u_new = rho_old u_old + drho dC u_i
-          //                   + rho_g [a_- (u^_- - u_i) - a_+ (u^_+ - u_i)]
-          //                   + drho  [F_- (u^_- - u_i) - F_+ (u^_+ - u_i)]
-          // with u_i the frozen u^n at this control volume. Stored and evolved as `rho^e u_e`, that
-          // is a sum of rho_l-scaled terms whose result is only rho_g-scaled in a gas control
-          // volume, and a volume that a directional sweep fills and the next one empties passes
-          // through an intermediate `rho^e` a factor `ratio` larger than where it starts and ends.
-          // The rounding of that excursion is eps*ratio*|a| and it does NOT cancel against the
-          // colour's own — measured, it degraded the uniform-velocity gate LINEARLY IN THE RATIO
-          // (6.7e-16 at 1e2 -> 3.2e-14 at 1e4), i.e. wearing exactly the signature of the defect
-          // this rung exists to remove, for a purely floating-point reason.
+          // The conservative update of this control volume is
+          //     rho_new u_new = rho_old u_old - (Psi_+ u^_+ - Psi_- u^_-) + rho^ u_old (a_+ - a_-)
+          // with `Psi = rho_g a + drho F` the mass flux and `u^` the donor reconstruction of the
+          // CURRENT velocity. Stored and evolved as `rho^e u_e`, that is a sum of rho_l-scaled terms
+          // whose result is only rho_g-scaled in a gas control volume, and a volume a directional
+          // sweep fills and the next one empties passes through an intermediate `rho^e` a factor
+          // `ratio` larger than where it starts and ends; the rounding of that excursion is
+          // eps*ratio*|a| and does NOT cancel against the colour's own. Measured, it degraded the
+          // uniform-velocity gate LINEARLY IN THE DENSITY RATIO (6.7e-16 at 1e2 -> 3.2e-14 at 1e4)
+          // — wearing exactly the signature of the defect this rung exists to remove, for a purely
+          // floating-point reason.
           //
-          // Subtracting `rho_new u_old` from both sides is algebraically free and removes it:
+          // Subtracting `rho_new u_old` from both sides is algebraically free (substitute
+          // `rho_old = rho_new - drho dC` and watch every `u_old` term cancel) and removes it:
           //
-          //     u_new = u_old + [ drho dC (u_i - u_old) + deviations ] / rho_new
+          //     u_new = u_old + [ rho_g (a_- dv_- - a_+ dv_+) + drho (F_- dv_- - F_+ dv_+) ]/rho_new
+          //     dv_+/- = u^_+/- - u_old
           //
-          // Every bracket term is a DIFFERENCE OF VELOCITIES. For a uniform field each is exactly
-          // zero (the same double, subtracted), so `u_new == u_old` bit for bit at ANY density
-          // ratio and for any dC — the gate is flat in the ratio by construction, not by tolerance.
-          // rho_new is still the advected colour's own density, so the scheme is the conservative
-          // one; only the arithmetic is conditioned.
+          // Every term is a DIFFERENCE OF VELOCITIES. For a uniform field each is exactly zero (the
+          // same double, subtracted), so `u_new == u_old` bit for bit at ANY density ratio and for
+          // any dC — the gate is flat in the ratio by construction, not by tolerance. This is still
+          // the conservative scheme, with `rho_new` the advected colour's own density; only the
+          // arithmetic is conditioned. (An earlier version fluxed the FROZEN u^n instead of the
+          // current velocity; the `drho dC (u^n_i - u_old)/rho_new` term that then survives has
+          // gain `ratio` on a control volume a sweep empties, and it amplified the solver's own
+          // 1e-7 float-storage noise to 1e-7 at ratio 1e4 while ratio 1e3 was clean — the gain, not
+          // a defect in the fluxes. Transporting the current state removes the term identically and
+          // is also the faithful directional split.)
           const double uo = vf(i);
           const double dvM = fu(i - sd) - uo, dvP = fu(i) - uo;
-          const double dev = rg * (aM * dvM - aP * dvP) + dr * (fc(i - sd) * dvM - fc(i) * dvP);
+          // The DILATION coefficient is `rho^ u^n`, with `u^n` the velocity FROZEN at the start of
+          // the step — the exact analogue of Weymouth-Yue freezing `H(C^n - 1/2)`, and required for
+          // the same reason. Summed over the three sweeps the dilation contributes
+          // `rho^ u (a_+ - a_-)` per sweep, and only a coefficient that is a CONSTANT OF THE STEP
+          // factors out of that sum to leave `rho^ u * div = 0`. With the running velocity there
+          // instead, the three sweeps see three different `u` and the cancellation is lost:
+          // MEASURED, per-step momentum conservation degraded to 1.4e-7 relative — first order in
+          // dt, not round-off — while the colour, whose flag IS frozen, stayed exact. Written as
+          // `rho^ (u^n - u_old)` because the `rho^ u_old` part has already been absorbed into the
+          // deviation form above; for a uniform field `u^n == u_old` and the term is exactly zero,
+          // so the consistency identity is untouched.
+          const double dilCoef = (k ? rl : rg) * (uf(i - se) - uo) * (aP - aM);
+          const double dev =
+              rg * (aM * dvM - aP * dvP) + dr * (fc(i - sd) * dvM - fc(i) * dvP) + dilCoef;
           const double rn = vofPhaseRho(rg, rl, cNew);
           if (rn < fl0)
             ++acc;
@@ -518,6 +572,7 @@ class MomentumConsistentAdvector {
   long len_ = 0;
   double rhoG_ = 1.0, rhoL_ = 1.0, floorUsed_ = 0.0;
   long floored_ = 0, clamped_ = 0;
+  double seedM_[3] = {0, 0, 0};
   SField cc_[3], vel_[3], fluxC_, fluxU_, aFace_;
   UCField flag_[3];
 };
