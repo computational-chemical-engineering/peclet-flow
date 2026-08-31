@@ -1623,7 +1623,8 @@ the selector — that is exactly why it makes a clean three-way signature.)
 | `pr` on wall-bounded configurations drops to the periodic level | **PASS** — 0.42-0.52 -> **0.008-0.086** against the periodic 0.062, on the same geometries |
 | Existing quasi-2D domain-BC verifications unchanged | **PASS** — lid cavity vs Ghia Re=100 N=128: u rms **0.0075**, v rms 0.0039, min centreline u **-0.2101** (Ghia -0.2058), max flux divergence **1.1e-16**, `result: PASS` — the recorded "~0.7 % rms". Channel + BFS below |
 | `tests/kokkos` full suite | **PASS 22/22** on host-openmp AND nvidia-cuda (the 21 pre-existing + `pressure_wallbounded`) |
-| All MPI ctests green, host + CUDA | see below |
+| All MPI ctests green, host + CUDA | **PASS 45/45 on both.** host-openmp: one clean `ctest` run, 45/45. nvidia-cuda: 45/45 across three runs on the same build tree (1-26, then 27-45, then a rerun of `ghost_projection_mpi_np4` alone, 97 s / green) — the np4 leg was killed by hand mid-run in the second pass when its 37-minute runtime under a load average of ~28 (two other agents' GPU batteries) was mistaken for the WO-L hang; it had already printed `u rel=0.000e+00` for both sub-cases. **No leg hit the WO-L `MPI_ERR_TRUNCATE` race in this session's runs** |
+| Existing quasi-2D BFS verification unchanged | **PASS on the physics, by direct A/B**: `verify_bfs_sdflow.run(100)` with and without `PECLET_FLOW_MG_BCGHOST=0`, run side by side on the same binary, gives the **identical** reattachment trajectory to every printed digit — `x_r/S` = 1.02, 1.87, 2.47, 2.94, 3.29 at iterations 100...500 — and the same wall time per 100 steps. (This script marches to a drift-free bubble over thousands of steps and took >2.5 h on a GPU shared with three other agents' batteries, so the A/B on the transient is the measurement, not the end-of-run banner.) |
 
 **Byte-identity of the periodic/IBM path, precisely.** `applyNeumannGhost` is `if (!hasBC_ || !bcGhost_) return;` and `hasBC_` is only set by `setBoundaryConditions` with a non-zero face type. The
 periodic + IBM hierarchy therefore never enters it — confirmed twice over: the dense `M` for the
@@ -1887,3 +1888,13 @@ why the HCS runs read 32–70 ms/step against the 18 ms/step recorded for this c
 unconditionally rather than gated on `porous_` so the field's ghost contract does not depend on which
 consumer reads it; on the non-porous drag path it is numerically inert, which the bit-identical
 incompressible Ergun bed and terminal-velocity rows above are the check of.
+
+**Commit-history note (2026-08-31).** Every WO-H change is on `main` but under three commit messages
+that describe other work: `032387e` (WO-I) swept the `src/flow_ibm.hpp` selector hunk, `a49923a`
+(WO-I) swept this findings entry, and `9b12dbc` (WO-L) swept `src/mac_cutcell_mg.hpp`,
+`src/flow_bindings.cpp`, `tests/kokkos/test_pressure_wallbounded.cpp`,
+`tests/kokkos/CMakeLists.txt`, `tests/study/vardensity_solver_probe.py`, `CLAUDE.md` and
+`doc/variable_density_projection.md` — a shared index plus concurrent agents. Nothing was lost and
+nothing was rewritten (other agents share the checkout); this note is the pointer for anyone
+bisecting the MG-PCG behaviour change, which lands at **9b12dbc**, not at any commit whose message
+mentions it.
