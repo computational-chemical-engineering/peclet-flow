@@ -1825,22 +1825,28 @@ What is established:
   of them is a decomposition that cuts **two axes into exactly two blocks** — 16×16×32 → 8×16×16,
   16×32×8 → 8×16×8 — so on those axes a rank's left and right neighbour are the *same rank*, and two
   exchanges to that one neighbour are in flight together.
-- **`PECLET_FLOW_CA=0` fixes it completely.** With the communication-avoiding smoother exchange off,
-  np = 4 CUDA runs green for both tests: `bodyforce_ghost_mpi` `PASS` on all three configurations,
-  and `dragbeta_ghost_mpi` `du = dp = 0.000e+00` with `diag = [4, 4]` on all three. CA is exactly the
-  path that exchanges a **2-deep** ghost layer where every other exchange sends 1-deep, and
-  `MPI_ERR_TRUNCATE` is by definition a receive buffer smaller than its matching send — a same-tag,
-  same-neighbour size mismatch, with the doubled neighbour of a 2-blocks-per-axis periodic
-  decomposition as the obvious trigger.
-- **It is LOAD-SENSITIVE, i.e. a race and not a fixed size bug.** The same binary and the same np
-  pass standalone and fail under concurrent load, on both backends: host `dragbeta_ghost_mpi_np4`
+- **`PECLET_FLOW_CA=0` suppresses it, and so does an IDLE MACHINE.** With the communication-avoiding
+  smoother exchange off, np = 4 CUDA runs green under load for both tests: `bodyforce_ghost_mpi`
+  `PASS` on all three configurations, and `dragbeta_ghost_mpi` `du = dp = 0.000e+00` with
+  `diag = [4, 4]` on all three. And with CA left at its **default (ON)** but the competing batteries
+  finished, `ctest -I 40,48` on nvidia-cuda is **9/9, 0 failed** — `bodyforce_ghost_mpi_np{1,2,4}`
+  80.05 s, `dragbeta_ghost_mpi_np{1,2,4}` 19.60 s, `vof_advect_mpi_np{1,2,4}` — i.e. the SAME two
+  np = 4 legs that had failed 5/5 an hour earlier. CA is exactly the path that exchanges a **2-deep**
+  ghost layer where every other exchange sends 1-deep, and `MPI_ERR_TRUNCATE` is by definition a
+  receive buffer smaller than its matching send — a same-tag, same-neighbour size mismatch, with the
+  doubled neighbour of a 2-blocks-per-axis decomposition as the obvious trigger and message
+  interleaving under load as the trigger's trigger.
+- **It is LOAD-SENSITIVE, i.e. a race and not a fixed size bug.** This is now the best-supported part
+  of the diagnosis: the same binary, the same np and the same CA setting pass on a quiet machine and
+  fail under concurrent load, on both backends. host `dragbeta_ghost_mpi_np4`
   passes standalone (measured repeatedly, including after rebasing onto WO-H's changes) and failed
   inside a loaded `ctest`; CUDA `ghost_projection_mpi_np4` failed inside the loaded `ctest` and then
   produced zero truncations standalone; and pristine host `varmu_mpi_np4`, after failing in **0.58 s**
   inside the loaded `ctest`, runs standalone to a clean **`VARMU MPI (np=4): PASS`** —
   `couette-y du=4.441e-16 dp=6.093e-17 analytic err 0.0003 %`, `per-y du=5.551e-16 dp=6.463e-17`,
-  i.e. the exact numbers §3.1 records, three runs for three runs. This session's machine sat at load ~28 with two
-  other agents' batteries running. A race between two in-flight exchanges of DIFFERENT ghost width
+  i.e. the exact numbers §3.1 records, three runs for three runs; and the CUDA `ctest -I 40,48` sweep
+  above, 9/9 at default CA once the machine was idle. This session's machine sat at load ~28 for most
+  of the work, with two other agents' batteries running. A race between two in-flight exchanges of DIFFERENT ghost width
   sharing a tag and a neighbour is the natural reading, and it is why the effect concentrates on the
   doubled-neighbour decompositions above.
 
@@ -1856,8 +1862,8 @@ pre-existing tests so the two are known to fail and pass together.
 | gate | result |
 |---|---|
 | New test **fails before** the fix (demonstrated, not asserted) | **PASS.** Pristine `98e2bb8` built in a separate `git worktree` with only the new test file + its CMake line added. host-openmp: at every np, `diag = [2.5, 4]` — the first inner plane's momentum diagonal is `idt + β/2 = 2.5` against `idt + β = 4` — and the velocity value gate fails: np=1 `per-z 0.33210449218750004`, `per-x 0.33217773437499998` (want `0.33203125`); np=2 all three configs `0.33217773…` with `du = 7.324e-05`; np=4 `per-x 0.33232421874999996`, `du = 1.465e-04`. Each rank boundary adds another half-plane, exactly as WO-G measured for the force. CUDA reproduces (`per-z np=4 diag [2.5, 4]`, `du = 7.324e-05`) |
-| New test **passes after** | **PASS.** host-openmp np = 1/2/4: `diag = [4, 4]` exactly, `u spread = 0.000e+00`, `value = 0.33203125` exactly, `cross = 0`, `max\|P\| = 0`, and **`du = dp = 0.000e+00` (bitwise vs the np=1 reference) at every np**. nvidia-cuda np = 1/2 identical; np = 4 identical **with `PECLET_FLOW_CA=0`** (escalation #2) |
-| np 2/4 vs np 1, host + CUDA, on all pre-existing tests | **PARTIAL — see escalation #2.** host-openmp, in two passes (1–37, then 38–48; the agent harness killed the first `ctest` at #38, not a test failure): **46 of 48 green**, the two failures being `varmu_mpi_np4` (**pre-existing**, registers no drag field, so `fillDragBetaGhosts` returns before doing anything) and `dragbeta_ghost_mpi_np4` — both `MPI_ERR_TRUNCATE` under machine load, both green standalone. nvidia-cuda, run in two passes for the same reason: green except the `*_np4` legs of `bodyforce_ghost_mpi` and `ghost_projection_mpi` (**both pre-existing**) and `dragbeta_ghost_mpi`, all the same truncation, all **green under `PECLET_FLOW_CA=0`**, and reproducing identically on the pristine tree — i.e. the failure tracks the CA exchange, the decomposition and the machine load, not this fix |
+| New test **passes after** | **PASS.** host-openmp np = 1/2/4: `diag = [4, 4]` exactly, `u spread = 0.000e+00`, `value = 0.33203125` exactly, `cross = 0`, `max\|P\| = 0`, and **`du = dp = 0.000e+00` (bitwise vs the np=1 reference) at every np**. nvidia-cuda np = 1/2 identical, and np = 4 too — green in `ctest` at default settings on a quiet machine (it needed `PECLET_FLOW_CA=0` only while the machine was loaded, escalation #2) |
+| np 2/4 vs np 1, host + CUDA, on all pre-existing tests | **PARTIAL — see escalation #2.** host-openmp, in two passes (1–37, then 38–48; the agent harness killed the first `ctest` at #38, not a test failure): **46 of 48 green**, the two failures being `varmu_mpi_np4` (**pre-existing**, registers no drag field, so `fillDragBetaGhosts` returns before doing anything) and `dragbeta_ghost_mpi_np4` — both `MPI_ERR_TRUNCATE` under machine load, both green standalone. nvidia-cuda, run in segments because the harness stopped the sweep twice: **tests 40–48 are 9/9, 0 failed, at DEFAULT `PECLET_FLOW_CA`** — that is `bodyforce_ghost_mpi_np{1,2,4}` and `dragbeta_ghost_mpi_np{1,2,4}` all green, np = 4 included, so **the new test's CUDA np-2/4 gate is met outright**. The only CUDA failure anywhere was `ghost_projection_mpi_np4` (**pre-existing**) during the loaded segment, the same truncation, which does not reproduce on a quiet machine. Every np = 4 truncation seen in this session tracks the CA exchange, the decomposition and the machine load — never this fix, and it reproduces on the pristine tree |
 | Single-rank `tests/kokkos` | **PASS — 21/21** on host-openmp |
 | **Single-phase regression bit-exact** (the WO's escalate-if) | **PASS — no movement at all.** All 13 grid points identical on `K` / `k*` / order `p` / `K_inf` / `k*_inf` / `p_iter_tot` / iters-per-step / step count / divergence, to every printed digit, before vs after; `=== regression: PASS ===`, `+0.00 %` against the recorded baseline on both sides |
 | Deltas measured and reported for every case in item 4 | **PASS** — the tables above, including an explicit list of what was not run |
