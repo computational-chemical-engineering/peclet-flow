@@ -994,7 +994,7 @@ the same sign and order in both oscillation benchmarks.
 | battery | result |
 |---|---|
 | `tests/kokkos` (26 ctests) | **26/26 on host-openmp AND nvidia-cuda**; `vof_surface_tension` is the new one (93 s host, 34 s CUDA) |
-| `tests/kokkos_mpi` (60 ctests) | **60/60 on host-openmp**; the three new `vof_surface_tension_mpi_np{1,2,4}` also run green standalone on nvidia-cuda, where **np = 1 AND np = 2 are bitwise** on every field |
+| `tests/kokkos_mpi` (60 ctests) | **60/60 on host-openmp (594 s) AND nvidia-cuda (1986 s)** — was 57; the three new ones are `vof_surface_tension_mpi_np{1,2,4}`. On CUDA **np = 1 AND np = 2 are bitwise** on u, P, C and kappa; np = 4 sits at the pressure driver's reduction floor (du 8.6e-16, dP 1.7e-15, dC 5.8e-15). No leg hit the load-triggered `MPI_ERR_TRUNCATE` race of WO-L on either backend |
 | V3 regression (`vof_curvature`) | reproduces WO-O's record **digit for digit** — order 2.26 / 1.86, PV-only 1.96 / 1.99, tier-2b ON 1.37 / 0.00 — i.e. `interfaceEps` defaulting to 0 is byte-identical, as designed |
 | single-phase regression | **+0.00 % on all 13 grid points**, identical `p_iter_tot`, iterations/step, step counts and flux divergence on `zh_sphere` / `random_spheres` / `hollow_rings`; order p and the Richardson extrapolate unchanged to every printed digit. Run in an **isolated `git worktree` at this WO's commit only** (the checkout is shared with two other sessions), so the +0.00 % is attributable |
 | the shipped build with surface tension OFF | bitwise inert (ctest P5), and structurally so: `csfActive()` gates the RHS kernel, `updateVofCurvature()` returns immediately, and `VofCurvature::interfaceEps` defaults to the V3 predicate |
