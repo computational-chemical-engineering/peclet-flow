@@ -170,6 +170,14 @@ target_include_directories(test_vof_curvature PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(test_vof_curvature PRIVATE Kokkos::kokkos)
 add_test(NAME vof_curvature COMMAND test_vof_curvature)
 
+# VoF rung V4 (WO-P): balanced-force CSF (src/vof/surface_tension.hpp) + the Brackbill capillary dt.
+# The loud gate is P1: a stationary droplet with a constant curvature must stay at machine zero.
+add_executable(test_vof_surface_tension test_vof_surface_tension.cpp)
+target_include_directories(test_vof_surface_tension PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_surface_tension PRIVATE Kokkos::kokkos)
+add_test(NAME vof_surface_tension COMMAND test_vof_surface_tension)
+
 add_executable(test_poiseuille_ibm test_poiseuille_ibm.cpp)
 target_include_directories(test_poiseuille_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_poiseuille_ibm PRIVATE Kokkos::kokkos)

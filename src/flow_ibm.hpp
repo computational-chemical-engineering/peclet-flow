@@ -49,6 +49,7 @@
 #include "vof/colour_field.hpp"  // VoF rung V2a: the G=2 <-> g=3 bridge + the colour ghost policy
 #include "vof/curvature_field.hpp"  // VoF rung V3: the HF curvature cascade + PV fallback
 #include "vof/momentum_advect.hpp"  // VoF rung V2b: momentum-consistent rho^c u_c transport
+#include "vof/surface_tension.hpp"  // VoF rung V4: balanced-force CSF + the capillary dt
 
 namespace peclet::flow {
 
@@ -1688,6 +1689,9 @@ class Solver {
     // Same call site, same justification: after BOTH writers, before the FIRST consumer (the
     // momentum stencil builds just below). See fillDragBetaGhosts().
     fillDragBetaGhosts();
+    // Rung V4 (WO-P): the interface curvature of the colour field this step will run with, and the
+    // explicit capillary stability check. No-op (byte-identical) unless set_surface_tension ran.
+    updateVofCurvature();
     // eps-conservative porous momentum: the volume-averaged time term is (eps_f rho/dt) u, i.e.
     // the variable-density machinery with the effective density rho_eff = eps*rho, refreshed from
     // the just-deposited eps every step (eps ghosts are already filled by the coupling driver, so
@@ -1738,6 +1742,13 @@ class Solver {
         vofMomEnabled_ ? buildRhsVarMom(c)
                        : (effVarRho() ? buildRhsVar(c)
                                       : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c)));
+      // Rung V4 (WO-P): the balanced-force CSF, ADDED to whichever RHS the configuration built --
+      // at the same place, and with the same face difference, as the incremental -grad(P^n) just
+      // above it. Independent of the time term and the advection form, hence additive rather than a
+      // fifth RHS kernel. Gated: byte-identical when surface tension is off.
+      if (csfActive())
+        for (int c = 0; c < 3; ++c)
+          csfMode_ == 0 ? addCsfRhs(c) : addCsfRhsCellInterp(c);
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
       // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies
       // to the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC
@@ -3484,6 +3495,131 @@ class Solver {
         });
   }
 
+  // --- balanced-force CSF (rung V4, WO-P) ------------------------------------------------------
+  //
+  // ADDITIVE to whichever RHS builder just ran (`buildRhs` / `buildRhsForced` / `buildRhsVar` /
+  // `buildRhsVarMom`), because the force is independent of which time term and which advection form
+  // the configuration selected — and because those four are validated kernel bodies (hard rule 1).
+  // It is applied at the same point in the RHS as the incremental `-(P(i) - P(i - s_c))` and
+  // carries the same `rs(i)` cut-cell rescale every other RHS term carries.
+  //
+  // WHY NOT THROUGH THE PER-CELL FORCE FIELD. `cellForce_` is the natural conduit for a body force
+  // and its ghosts are sound since WO-G, but its face rule is the ARITHMETIC INTERPOLATION
+  // `½(f(i) + f(i - s_c))` of a cell-centred force. That rule is exactly right for `ρg` (the pair
+  // `f_f/ρ_f` is then the intended acceleration) and exactly wrong for `σκ∇C`: an interpolated
+  // cell-centred `σκ∇C` is not in the range of the discrete gradient operator the projection
+  // inverts, so the projection cannot annihilate it and the residue is the classical spurious
+  // current. The face value here is instead formed BY the projection's own operator — the same
+  // difference `C(i) - C(i - s_c)` that `projectCorrectVar` applies to φ and `buildRhsVar` applies
+  // to P. See `vof/surface_tension.hpp` for the full argument; the stationary-droplet gate is what
+  // measures it, and it fails loudly on any other choice.
+  //
+  // `sigmaCsf_ == 0` (the default) never reaches here: `csfActive()` gates the call site, so every
+  // non-VoF path is byte-identical.
+  void addCsfRhs(int c) {
+    CCExec space;
+    C3 e = e_;
+    CCField bb = C[c].b;
+    CCConst rs = CCConst(C[c].rscale), cv = CCConst(cField_), kp = CCConst(kappaField_),
+            kb = CCConst(kappaBranch_);
+    const long strd = strideOf(c);
+    const double sig = sigmaCsf_, h = vofAdv_.h();
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "csf_rhs", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const double dC = cv(i) - cv(i - strd);
+          if (dC == 0.0)
+            return;  // no interface across this face -> no force, and no orphan either
+          double kf = 0.0;
+          vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
+          bb(i) += rs(i) * vof::csfFaceForce(sig, kf, dC, h);
+        });
+  }
+  // ABLATION (`set_csf_mode(1)`): the same physics discretized the OTHER plausible way — a
+  // cell-centred force `f(j) = sigma*kappa(j)*(C(j+s) - C(j-s))/2h` interpolated to the face with
+  // the arithmetic mean `1/2 (f(i) + f(i-s))`, exactly as the per-cell body-force machinery would
+  // carry a `rho*g` field. It is consistent, it converges, and it is WRONG for surface tension: the
+  // face value is no longer in the range of the projection's discrete gradient, so the projection
+  // cannot annihilate it. This kernel exists so the difference is a measured number in the ctest
+  // rather than an argument — the same role the harmonic-rho_f ablation plays for WO-J's
+  // hydrostatic gate. NEVER a production path.
+  void addCsfRhsCellInterp(int c) {
+    CCExec space;
+    C3 e = e_;
+    CCField bb = C[c].b;
+    CCConst rs = CCConst(C[c].rscale), cv = CCConst(cField_), kp = CCConst(kappaField_),
+            kb = CCConst(kappaBranch_);
+    const long strd = strideOf(c);
+    const double sig = sigmaCsf_, h = vofAdv_.h();
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "csf_rhs_cellinterp", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          double f[2] = {0.0, 0.0};
+          for (int q = 0; q < 2; ++q) {  // q = 0 -> cell i-s_c, q = 1 -> cell i
+            const long j = i - (1 - q) * strd;
+            if (!vof::csfKappaDefined(kb(j)))
+              continue;
+            f[q] = sig * kp(j) * 0.5 * (cv(j + strd) - cv(j - strd)) / h;
+          }
+          bb(i) += rs(i) * 0.5 * (f[0] + f[1]);
+        });
+  }
+  // Census of the CSF face force over this rank's inner region, on the CURRENT colour + curvature
+  // fields: the max |F| per component, and the number of ORPHAN faces — faces across which the
+  // colour jumps by more than the wisp threshold but neither cell carries a curvature estimate, so
+  // the force was silently dropped. An orphan is a defect (Basilisk's "this should not happen"); it
+  // is counted rather than hidden.
+  //
+  // The threshold matters: the FORCE is applied at every face with `dC != 0` exactly (dropping the
+  // round-off jumps would itself break the discrete-gradient identity by O(sigma*kappa*eps), which
+  // is 1e-9 and would be visible in the machine-zero gate), but a face whose colour jump is 1e-30
+  // is not a missing interface and counting it as one would bury the real thing.
+  struct CsfDiagnostics {
+    double maxForce[3] = {0.0, 0.0, 0.0};
+    long orphanFaces[3] = {0, 0, 0};
+    long forcedFaces[3] = {0, 0, 0};
+  };
+  CsfDiagnostics csfDiagnostics() {
+    if (!vofEnabled_ || !kappaField_.extent(0))
+      throw std::runtime_error(
+          "csf_diagnostics: needs VoF + a curvature field (call set_surface_tension and step, or "
+          "compute_vof_curvature)");
+    CsfDiagnostics d;
+    C3 e = e_;
+    CCConst cv = CCConst(cField_), kp = CCConst(kappaField_), kb = CCConst(kappaBranch_);
+    const double sig = sigmaCsf_, h = vofAdv_.h(), eps = csfInterfaceEps_;
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    for (int c = 0; c < 3; ++c) {
+      const long strd = strideOf(c);
+      double mx = 0.0;
+      long orph = 0, forced = 0;
+      Kokkos::parallel_reduce(
+          "csf_diag", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+          KOKKOS_LAMBDA(int x, int y, int z, double& m, long& o, long& f) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            const double dC = cv(i) - cv(i - strd);
+            if (dC == 0.0)
+              return;
+            double kf = 0.0;
+            const bool ok = vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
+            if (ok)
+              ++f;
+            else if (Kokkos::fabs(dC) > eps)
+              ++o;
+            m = Kokkos::fmax(m, Kokkos::fabs(vof::csfFaceForce(sig, kf, dC, h)));
+          },
+          Kokkos::Max<double>(mx), orph, forced);
+      d.maxForce[c] = mx;
+      d.orphanFaces[c] = orph;
+      d.forcedFaces[c] = forced;
+    }
+    return d;
+  }
+
   // Implicit-FOU velocity stencil (CUDA build_adv_stencil_k + ibm_modify_stencil): backward-Euler
   // diffusion (idiag+6beta diag, -beta off) + rho*FOU(u^k) upwind operator (diagonally dominant ->
   // stable at high Re), then the Robust-Scaled cut-cell bake. The advecting velocity u^k = the
@@ -4887,6 +5023,197 @@ class Solver {
   void setVofCurvatureMixedHeightFit(bool on) { vofCurv_.useMixedHeightFit = on; }
   bool vofCurvatureMixedHeightFit() const { return vofCurv_.useMixedHeightFit; }
 
+  // --- balanced-force surface tension (rung V4, WO-P) -------------------------------------------
+  //
+  // `set_surface_tension(sigma)` turns on the continuum surface force
+  //
+  //     F_c(i) = sigma * kappa_f(i) * ( C(i) - C(i - s_c) ) / h                                (1)
+  //
+  // at every staggered velocity unknown, added to the momentum RHS at the same place, in the same
+  // units and with the same cut-cell rescale as the incremental scheme's -(P(i) - P(i - s_c)).
+  // `kappa_f` is the arithmetic mean of the two cells' curvatures where both carry one, the single
+  // available one where only one does (`vof/surface_tension.hpp`).
+  //
+  // WHY (1) AND NOT AN INTERPOLATED CELL FORCE — the whole content of the rung. `C(i) - C(i - s_c)`
+  // is the projection's OWN face difference. With a constant kappa the force is therefore exactly
+  // the discrete gradient of `sigma*kappa*C`, i.e. it lies in the range of the operator the
+  // projection inverts, so the projection removes it completely and a static drop stays at machine
+  // zero. Face-interpolating a cell-centred `sigma*kappa*grad C` — the obvious way to reuse the
+  // per-cell body-force machinery — produces a field that is NOT a discrete gradient of anything,
+  // the projection cannot annihilate it, and what is left is the classical spurious current
+  // (Francois et al. 2006; Popinet 2009). This is the momentum analogue of the three-way rho_f
+  // consistency that makes the hydrostatic acid test exact.
+  //
+  // SIGN. `kappa` is positive for a convex blob of LIQUID (rung V3) and `C` is the liquid fraction,
+  // so (1) with a plus sign gives the Young-Laplace overpressure INSIDE the drop: at equilibrium
+  // `P = sigma*kappa*C + const`, the discrete solution of the projection, exactly.
+  //
+  // UNITS. `sigma` is in the solver's own units, in which the cell size is 1 (as are `rho`, `mu`
+  // and `set_body_force`). `kappa` is in 1/h and `C(i) - C(i-s)` is `h * dC/dx`, so (1) is a force
+  // per unit volume.
+  //
+  // REQUIREMENTS. VoF must be enabled (staggered only). The curvature cascade runs once per step,
+  // at the head, from the SAME colour field the density closure sees.
+  void setSurfaceTension(double sigma) {
+    if (!(sigma >= 0.0))
+      throw std::runtime_error("set_surface_tension: sigma must be >= 0");
+    if (sigma > 0.0) {
+      enableVof();
+      if (!kappaField_.extent(0)) {
+        kappaField_ = addField("kappa");
+        kappaBranch_ = addField("kappa_branch");
+      }
+      // Wisp guard on the curvature's interfacial predicate. NOT optional once the curvature feeds
+      // a force: Weymouth-Yue leaves round-off colour residue (measured down to -3e-35) in every
+      // cell its sweeps touch, those cells satisfy `0 < C < 1`, and the cascade returns |kappa| up
+      // to 1e8 for them off a zero-area PLIC polygon. A face between one of them and a real
+      // interfacial cell then carries a force eight orders too large. See
+      // `vof::VofCurvature::interfaceEps` for the measurement; the V3 default (0) is unchanged for
+      // anyone calling `compute_vof_curvature()` without surface tension.
+      vofCurv_.interfaceEps = csfInterfaceEps_;
+    }
+    sigmaCsf_ = sigma;
+  }
+  double surfaceTension() const { return sigmaCsf_; }
+  // The wisp threshold above, exposed so it can be swept/ablated. Default 1e-8; 0 restores the
+  // unguarded V3 predicate and, with surface tension on, reproduces the instability it exists for.
+  void setVofInterfaceEps(double eps) {
+    csfInterfaceEps_ = eps;
+    if (sigmaCsf_ > 0.0)
+      vofCurv_.interfaceEps = eps;
+  }
+  double vofInterfaceEps() const { return csfInterfaceEps_; }
+  // ABLATION: 0 = the balanced-force face difference (default, the only production mode);
+  // 1 = a cell-centred sigma*kappa*grad(C) face-interpolated like an ordinary body force. See
+  // `addCsfRhsCellInterp`. Kept so the ctest can measure what the operator pairing is worth.
+  void setCsfMode(int m) { csfMode_ = m; }
+  int csfMode() const { return csfMode_; }
+  bool csfActive() const { return vofEnabled_ && sigmaCsf_ > 0.0 && kappaField_.extent(0) != 0; }
+
+  // INSTRUMENT (not a configuration): stop recomputing the curvature at the head of each step and
+  // use whatever is in the "kappa" / "kappa_branch" fields. Together with `set_vof_kappa_constant`
+  // this isolates the BALANCED-FORCE identity from the curvature estimator — the exactness gate of
+  // this rung, which must hold at machine zero for a curvature that is merely constant, whether or
+  // not it is the right one.
+  void setVofKappaFrozen(bool on) { kappaFrozen_ = on; }
+  bool vofKappaFrozen() const { return kappaFrozen_; }
+  // INSTRUMENT: set kappa to a constant over the WHOLE block (inner + ghosts) and mark every cell's
+  // branch as a valid estimate, then freeze it. The force (1) is then exactly the discrete gradient
+  // of `sigma*kappa*C`, so the projection must annihilate it to round-off from ANY colour field.
+  void setVofKappaConstant(double kappa) {
+    enableVof();
+    if (!kappaField_.extent(0)) {
+      kappaField_ = addField("kappa");
+      kappaBranch_ = addField("kappa_branch");
+    }
+    Kokkos::deep_copy(kappaField_, kappa);
+    Kokkos::deep_copy(kappaBranch_, (double)vof::kCurvHf);
+    kappaFrozen_ = true;
+  }
+
+  // The Brackbill (1992) / Denner & van Wachem (2015) capillary time-step limit
+  // `sqrt((rho_1 + rho_2) h^3 / (4 pi sigma))`. +inf when surface tension is off.
+  //
+  // The density SUM is taken from the declared phase pair when momentum consistency is on
+  // (`enable_vof_momentum` validated it against the closure), and otherwise from `min(rho) +
+  // max(rho)` over the current density field — an MPI_MIN/MPI_MAX pair, so it is exact and
+  // decomposition-independent. It is the sum, not a mean: both phases oscillate.
+  double capillaryDt() {
+    if (!(sigmaCsf_ > 0.0))
+      return std::numeric_limits<double>::infinity();
+    return vof::capillaryDt(phaseDensitySum(), vofEnabled_ ? vofAdv_.h() : 1.0, sigmaCsf_);
+  }
+  // Safety factor on the capillary limit: `step()` throws when `dt > factor * capillaryDt()`.
+  // Default 1.0 — Denner & van Wachem measured the Brackbill prefactor to BE the stability
+  // boundary, so there is no margin built into the formula itself. Set it huge to disable the
+  // check, exactly as `set_vof_cfl_limit` is the escape hatch for the Weymouth-Yue cap.
+  void setCapillaryCfl(double f) { capillaryCfl_ = f; }
+  double capillaryCfl() const { return capillaryCfl_; }
+
+  // Both explicit two-phase step limits at the CURRENT state, and which one binds. This is the
+  // number WO-P asks for: at pore-scale capillary numbers the capillary dt, not the Weymouth-Yue
+  // CFL, is expected to be the binding constraint, and that decides whether implicit surface
+  // tension is ever worth revisiting.
+  struct VofStepLimits {
+    double courant = 0.0;      ///< the interface-local Courant number at the current dt
+    double cflDt = 0.0;        ///< the largest dt the WY boundedness cap admits
+    double capillaryDt = 0.0;  ///< the largest dt the Brackbill capillary constraint admits
+    double binding = 0.0;      ///< min(cflDt, capillaryCfl * capillaryDt)
+    bool capillaryBinds = false;
+  };
+  VofStepLimits vofStepLimits() {
+    VofStepLimits L;
+    L.courant = vofMaxCourant();
+    L.cflDt = (L.courant > 0.0) ? dt_ * vofCflLimit_ / L.courant
+                                : std::numeric_limits<double>::infinity();
+    L.capillaryDt = capillaryDt();
+    const double cap = capillaryCfl_ * L.capillaryDt;
+    L.capillaryBinds = cap < L.cflDt;
+    L.binding = L.capillaryBinds ? cap : L.cflDt;
+    return L;
+  }
+  // rho_1 + rho_2 for the capillary limit. Public because nvcc refuses an extended
+  // __host__ __device__ lambda inside a private member function (the WO-O build note).
+  double phaseDensitySum() {
+    if (vofMomEnabled_)
+      return vofRhoG_ + vofRhoL_;
+    if (!effVarRho())
+      return 2.0 * rho_;
+    CCExec space;
+    C3 e = e_;
+    double lo = 1e300, hi = -1e300;
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    // A closure-driven rho field is produced by updateProperties() at the head of the step, so
+    // before the FIRST step it is still all zeros and a naive min+max would report 0 — and this is
+    // a diagnostic users call while choosing dt, i.e. exactly then. Refresh and retry once in that
+    // case; the step's own call site runs after updateProperties() and never takes the branch.
+    for (int pass = 0; pass < 2; ++pass) {
+      CCConst f = CCConst(effRhoField());
+      lo = 1e300;
+      hi = -1e300;
+      Kokkos::parallel_reduce(
+          "rho_minmax", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+          KOKKOS_LAMBDA(int x, int y, int z, double& mn, double& mx) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            mn = Kokkos::fmin(mn, f(i));
+            mx = Kokkos::fmax(mx, f(i));
+          },
+          Kokkos::Min<double>(lo), Kokkos::Max<double>(hi));
+      if (hi > 0.0 || pass == 1)
+        break;
+      updateProperties();
+    }
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      double g[2] = {lo, -hi}, r[2];
+      MPI_Allreduce(g, r, 2, MPI_DOUBLE, MPI_MIN, comm_);
+      lo = r[0];
+      hi = -r[1];
+    }
+#endif
+    return lo + hi;
+  }
+  // Head-of-step curvature refresh + the capillary dt check. No-op unless surface tension is on.
+  //
+  // The curvature is taken from the colour field the step is ABOUT to run with — the same field
+  // `updateProperties()` just turned into rho(C) and mu(C), i.e. C^{n+1} under momentum consistency
+  // (the VoF stage ran at the head) and C^n without it (it runs at the tail). Either way kappa,
+  // rho and the colour in the force (1) are the same time level, which is what the balance needs.
+  void updateVofCurvature() {
+    if (!csfActive())
+      return;
+    if (!kappaFrozen_)
+      computeVofCurvature();
+    const double cap = capillaryCfl_ * capillaryDt();
+    if (!(dt_ <= cap))
+      throw std::runtime_error(
+          "surface tension: dt = " + std::to_string(dt_) + " exceeds the capillary limit " +
+          std::to_string(cap) + " (Brackbill sqrt((rho_1+rho_2) h^3/(4 pi sigma)) = " +
+          std::to_string(capillaryDt()) + " x safety factor " + std::to_string(capillaryCfl_) +
+          "). Surface tension is EXPLICIT: this is a hard stability boundary (Denner & van Wachem "
+          "2015), not a margin. Reduce dt, or raise set_capillary_cfl deliberately.");
+  }
+
   // Advance the colour field one dt with the just-projected face velocities. Called by step()
   // immediately before advanceScalars(); exposed so a test can drive it in isolation.
   //
@@ -5643,11 +5970,16 @@ class Solver {
   // --- geometric VoF (rung V2a, WO-J) ---
   bool vofEnabled_ = false;
   bool rhoFaceHarmonic_ = false;  // harmonic instead of arithmetic rho_f in the projection (OFF)
-  CCField cField_;                // the G=2 registry mirror of the colour field ("C")
-  vof::WyAdvector vofAdv_;        // the g=3 working block: PLIC + Weymouth-Yue sweeps
-  C3 e3_{0, 0, 0};                // extended extents of that block (n + 2*kVofG)
-  double vofCflLimit_ = 0.25;     // Weymouth's proven 3D boundedness bound 1/(2(N-1))
-  long vofStep_ = 0;              // sweep-permutation counter (6-cycle)
+  CCField cField_;                 // the G=2 registry mirror of the colour field ("C")
+  vof::WyAdvector vofAdv_;         // the g=3 working block: PLIC + Weymouth-Yue sweeps
+  C3 e3_{0, 0, 0};                 // extended extents of that block (n + 2*kVofG)
+  double vofCflLimit_ = 0.25;      // Weymouth's proven 3D boundedness bound 1/(2(N-1))
+  double sigmaCsf_ = 0.0;          // V4: surface-tension coefficient (0 = the force is off)
+  double capillaryCfl_ = 1.0;      // safety factor on the Brackbill capillary dt
+  double csfInterfaceEps_ = 1e-8;  // V4: wisp threshold on the curvature's interfacial predicate
+  int csfMode_ = 0;                // 0 = balanced-force (production), 1 = cell-interp ablation
+  bool kappaFrozen_ = false;       // V4 instrument: do not recompute kappa at the head of the step
+  long vofStep_ = 0;               // sweep-permutation counter (6-cycle)
   // --- curvature (rung V3, WO-O) ---
   vof::VofCurvature vofCurv_;         // the cascade, on the SAME g=3 block as the colour field
   CCField kappaField_, kappaBranch_;  // the G=2 registry mirrors ("kappa", "kappa_branch")

@@ -811,6 +811,117 @@ static void bind_solver(nb::module_& m, const char* name) {
           "error (order 0.00 vs 1.86 with the PLIC-volumetric fallback instead), because its data "
           "set is the columns that closed - a slope-selected, asymmetric subset whose lever-arm "
           "bias is scale invariant. Shipped as a re-measurable instrument, not a configuration.")
+      // --- VoF rung V4 (WO-P): balanced-force surface tension ----------------------------------
+      .def(
+          "set_surface_tension", [](S& s, double sigma) { s.setSurfaceTension(sigma); },
+          nb::arg("sigma"),
+          "VoF rung V4: turn on the BALANCED-FORCE continuum surface force with coefficient sigma "
+          "(0 = off, the default). Enables VoF and the curvature cascade, which then runs once per "
+          "step at the head, from the same colour field the density closure sees.\n\n"
+          "The force at the staggered velocity unknown u_c(i) is\n\n"
+          "    F = sigma * kappa_f * (C(i) - C(i - s_c)) / h\n\n"
+          "i.e. the colour difference is the projection's OWN face difference — the identical "
+          "discrete gradient operator the pressure uses (Francois et al. 2006; Popinet 2009). That "
+          "is the whole content of 'balanced force': with a constant kappa the force is exactly a "
+          "discrete gradient, so the projection annihilates it and a static drop stays at machine "
+          "zero. Face-interpolating a cell-centred sigma*kappa*grad(C) instead — the obvious way "
+          "to reuse the per-cell body force — is not a discrete gradient of anything and leaves "
+          "spurious currents of order sigma*kappa/mu that no curvature accuracy removes.\n\n"
+          "UNITS: sigma is in the solver's units, in which the cell size is 1 (like rho, mu and "
+          "set_body_force). SIGN: kappa is positive for a convex blob of liquid and C is the "
+          "liquid fraction, so the equilibrium pressure is P = sigma*kappa*C + const — the "
+          "Young-Laplace overpressure INSIDE the drop.\n\n"
+          "Surface tension is EXPLICIT, so step() enforces the Brackbill capillary time step "
+          "(see capillary_dt()).")
+      .def(
+          "surface_tension", [](S& s) { return s.surfaceTension(); },
+          "The surface-tension coefficient (0 when the CSF is off).")
+      .def(
+          "capillary_dt", [](S& s) { return s.capillaryDt(); },
+          "The Brackbill (1992) capillary time-step limit sqrt((rho_1+rho_2) h^3 / (4 pi sigma)), "
+          "+inf when surface tension is off. Denner & van Wachem (2015) verified this IS the "
+          "stability boundary of an explicit CSF — the prefactor 1/(4 pi), the h^{3/2} scaling and "
+          "the SUM of the phase densities (both phases oscillate). The density sum is the declared "
+          "phase pair under enable_vof_momentum, otherwise min(rho)+max(rho) over the field.")
+      .def(
+          "set_capillary_cfl", [](S& s, double f) { s.setCapillaryCfl(f); }, nb::arg("factor"),
+          "Safety factor on the capillary limit: step() raises when dt > factor * capillary_dt(). "
+          "Default 1.0 — the Brackbill formula was measured to be the boundary itself, so it "
+          "carries no built-in margin. Set it huge to disable the check, the same escape hatch "
+          "set_vof_cfl_limit is for the Weymouth-Yue cap.")
+      .def(
+          "vof_step_limits",
+          [](S& s) {
+            const auto L = s.vofStepLimits();
+            nb::dict r;
+            r["courant"] = L.courant;
+            r["cfl_dt"] = L.cflDt;
+            r["capillary_dt"] = L.capillaryDt;
+            r["binding"] = L.binding;
+            r["capillary_binds"] = L.capillaryBinds;
+            return r;
+          },
+          "Both explicit two-phase step limits at the current state, and which one binds: the "
+          "largest dt the interface-local Weymouth-Yue CFL cap admits ('cfl_dt'), the Brackbill "
+          "capillary limit ('capillary_dt'), and min(cfl_dt, capillary_cfl*capillary_dt) with a "
+          "'capillary_binds' flag. At pore-scale capillary numbers the capillary limit is expected "
+          "to bind first.")
+      .def(
+          "csf_diagnostics",
+          [](S& s) {
+            const auto d = s.csfDiagnostics();
+            nb::dict r;
+            r["max_force"] = nb::make_tuple(d.maxForce[0], d.maxForce[1], d.maxForce[2]);
+            r["orphan_faces"] =
+                nb::make_tuple(d.orphanFaces[0], d.orphanFaces[1], d.orphanFaces[2]);
+            r["forced_faces"] =
+                nb::make_tuple(d.forcedFaces[0], d.forcedFaces[1], d.forcedFaces[2]);
+            return r;
+          },
+          "Census of the CSF face force on THIS RANK: per component the max |F|, the number of "
+          "faces that carried a force, and the number of ORPHAN faces — faces the colour jumps "
+          "across but where neither cell has a curvature estimate, so the force was dropped. An "
+          "orphan is a defect and must be 0; it is counted rather than hidden.")
+      .def(
+          "set_csf_mode", [](S& s, int m) { s.setCsfMode(m); }, nb::arg("mode"),
+          "ABLATION. 0 (default, the only production mode) evaluates the surface-tension force as "
+          "sigma*kappa_f*(C(i)-C(i-s))/h at the face — the projection's own gradient operator. "
+          "1 evaluates a CELL-CENTRED sigma*kappa*grad(C) and face-interpolates it with the "
+          "arithmetic mean, exactly as the per-cell body-force machinery carries a rho*g field: "
+          "consistent, convergent, and wrong for surface tension, because the result is not in the "
+          "range of the operator the projection inverts. Shipped so the difference is a measured "
+          "number (see the vof_surface_tension ctest), not an argument.")
+      .def(
+          "set_vof_interface_eps", [](S& s, double eps) { s.setVofInterfaceEps(eps); },
+          nb::arg("eps"),
+          "Wisp threshold on the curvature cascade's interfacial predicate once surface tension is "
+          "on: a cell carries an interface only while eps < C < 1-eps. Default 1e-8.\n\n"
+          "This is NOT optional and it is not cosmetic. Weymouth-Yue leaves round-off colour "
+          "residue (measured down to -3e-35) in every cell its sweeps touch; those cells satisfy "
+          "0 < C < 1, so the cascade builds a PLIC polygon of area ~0 for them and returns "
+          "|kappa| up to 1e8 where the physical value is 0.125. A face between such a cell and a "
+          "REAL interfacial cell then carries a surface-tension force eight orders too large. "
+          "Measured on a 32^3 static droplet with eps = 0: max|u| 4.5e-4 at step 1 -> 2.7e-1 by "
+          "step 20, and at 96^3 the run trips the Weymouth-Yue CFL cap. Setting eps = 0 "
+          "reproduces that, which is the ablation. compute_vof_curvature() called WITHOUT surface "
+          "tension keeps the rung-V3 predicate (0 < C < 1) unchanged.")
+      .def(
+          "vof_interface_eps", [](S& s) { return s.vofInterfaceEps(); },
+          "The wisp threshold set by set_vof_interface_eps.")
+      .def(
+          "set_vof_kappa_frozen", [](S& s, bool on) { s.setVofKappaFrozen(on); },
+          nb::arg("on") = true,
+          "INSTRUMENT: stop recomputing the curvature at the head of each step and use whatever is "
+          "in the 'kappa'/'kappa_branch' fields. With set_vof_kappa_constant this isolates the "
+          "balanced-force identity from the curvature estimator.")
+      .def(
+          "set_vof_kappa_constant", [](S& s, double k) { s.setVofKappaConstant(k); },
+          nb::arg("kappa"),
+          "INSTRUMENT: set kappa to a constant everywhere (inner + ghosts), mark every cell as "
+          "carrying a valid estimate, and freeze it. The CSF force is then EXACTLY the discrete "
+          "gradient of sigma*kappa*C, so the projection must annihilate it to round-off from any "
+          "colour field whatsoever — the exactness gate of rung V4, independent of curvature "
+          "accuracy and of resolution.")
       .def(
           "set_rho_face_harmonic", [](S& s, bool on) { s.setRhoFaceHarmonic(on); },
           nb::arg("on") = true,

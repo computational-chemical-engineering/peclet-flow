@@ -36,13 +36,21 @@
 
 namespace peclet::flow::vof {
 
+/// `wyIsMixed` with a wisp threshold: the cell carries an interface only while `eps < C < 1 - eps`.
+/// `eps = 0` is `wyIsMixed` exactly (`C > 0 && C < 1`). See `VofCurvature::interfaceEps` for the
+/// measurement that put it there.
+KOKKOS_INLINE_FUNCTION bool vofIsInterface(double c, double eps) {
+  return c > eps && c < 1.0 - eps;
+}
+
 /// Curvature of the colour field on an extended (inner + ghost) block.
 class VofCurvature {
  public:
   /// Per-call census of the cascade over this block's inner region (LOCAL; a distributed caller
   /// sums them itself — the driver stays MPI-free, exactly as `WyAdvector` does).
   struct Stats {
-    long interfacial = 0;  ///< cells with 0 < C < 1 (the cells a curvature is asked for)
+    long interfacial = 0;  ///< cells carrying an interface (`vofIsInterface`, i.e. 0 < C < 1
+                           ///< unless `interfaceEps` was raised) — the cells a kappa is asked for
     long hf = 0;           ///< tier 1: HF in the preferred direction
     long hfMixed = 0;      ///< tier 2a: HF in one of the other two directions
     long hfFit = 0;        ///< tier 2b: mixed HF -- paraboloid through the consistent columns
@@ -88,6 +96,28 @@ class VofCurvature {
   double ptWeightWidth = kPtWeightWidth;
   /// Minimum `n_p . n` for a stencil polygon to enter the PV fit (`pvFitAdd`).
   double cosMin = 0.2;
+  /// **Wisp threshold on the interfacial predicate.** A cell counts as carrying an interface only
+  /// while `eps < C < 1 - eps`. DEFAULT 0, which is `wyIsMixed` verbatim (`C > 0 && C < 1`) and
+  /// therefore byte-identical to the V3 rung as gated.
+  ///
+  /// Why it exists (a V4 finding, WO-P). Weymouth-Yue leaves ROUND-OFF colour residue in cells the
+  /// sweeps touched — measured on a static droplet after 10 steps: `C` down to `-3e-35` and some
+  /// 5200 extra cells at `0 < C < 1e-30` on a 64^3 grid, i.e. more cells than the interface itself
+  /// has. Those cells satisfy `wyIsMixed` and the cascade dutifully produces a curvature for them,
+  /// **from a PLIC polygon of area ~0**: measured `|kappa|` up to **1.2e+08** where the physical
+  /// value is 0.125. On its own that is only a wrong number in a field nobody was reading. Under
+  /// V4 it is fatal: a face between such a cell and a REAL interfacial cell has `dC = O(1)` and a
+  /// face curvature `(kappa_real + 1e8)/2`, so the surface-tension force at that one face is eight
+  /// orders too large. Measured on a 32^3 static droplet, unguarded: `max|u|` 4.5e-4 at step 1 ->
+  /// **2.7e-1** by step 20, and at 96^3 the run trips the Weymouth-Yue CFL cap outright, while the
+  /// SAME run with the curvature frozen at its (clean) initial value stays bounded at 4e-3.
+  ///
+  /// `Solver::setSurfaceTension` therefore sets this to 1e-8 — the same wisp threshold
+  /// `WyAdvector::diagnostics` already reports against. It changes nothing on an exact colour field
+  /// (no cell of any gated V3 case lies in the band) and it is the guard the literature assumes
+  /// when it says wisp cleanup is unavoidable once surface tension is on (VOF_PLAN §6, after
+  /// Arrufat et al. 2021).
+  double interfaceEps = 0.0;
   /// DIAGNOSTIC ONLY — disable tiers 1 and 2 so every interfacial cell goes to the PV fit. Used by
   /// the ctest to measure the fallback branch on its own; never enable it in production.
   bool debugForceFallback = false;
@@ -143,13 +173,14 @@ class VofCurvature {
     const int g = g_, gr = kPvHalf;
     const long sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
     SField mx = mx_, my = my_, mz = mz_, al = alpha_;
+    const double ieps = interfaceEps;
     Kokkos::parallel_for(
         "vof::curv::planes",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g - gr, g - gr, g - gr},
                                                       {g + n.x + gr, g + n.y + gr, g + n.z + gr}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
-          if (!wyIsMixed(c(i))) {
+          if (!vofIsInterface(c(i), ieps)) {
             mx(i) = 0.0;
             my(i) = 0.0;
             mz(i) = 0.0;
@@ -168,7 +199,7 @@ class VofCurvature {
     const int g = g_;
     const long st[3] = {1, e_.x, static_cast<long>(e_.x) * e_.y};
     SField mx = mx_, my = my_, mz = mz_, al = alpha_, kap = kappa_, br = branch_;
-    const double mtol = monoTol, ptW = ptWeightWidth;
+    const double mtol = monoTol, ptW = ptWeightWidth, ieps = interfaceEps;
     const bool forceFb = debugForceFallback, oneDir = debugSingleDirection,
                useFit = useMixedHeightFit;
     Kokkos::parallel_for(
@@ -178,7 +209,7 @@ class VofCurvature {
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           kap(i) = 0.0;
-          if (!wyIsMixed(c(i))) {
+          if (!vofIsInterface(c(i), ieps)) {
             br(i) = static_cast<double>(kCurvNone);
             return;
           }
@@ -290,7 +321,7 @@ class VofCurvature {
     const I3 e = e_, n = n_;
     const int g = g_, gr = kPvHalf;
     SField mx = mx_, my = my_, mz = mz_, al = alpha_, kap = kappa_, br = branch_;
-    const double dW = weightWidth, cmin = cosMin;
+    const double dW = weightWidth, cmin = cosMin, ieps = interfaceEps;
     Kokkos::parallel_for(
         "vof::curv::pv",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
@@ -324,7 +355,7 @@ class VofCurvature {
             for (int oy = -gr; oy <= gr; ++oy)
               for (int ox = -gr; ox <= gr; ++ox) {
                 const long j = L3(x + ox, y + oy, z + oz, e);
-                if (!wyIsMixed(c(j)))
+                if (!vofIsInterface(c(j), ieps))
                   continue;
                 const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
                                        static_cast<double>(oz)};
