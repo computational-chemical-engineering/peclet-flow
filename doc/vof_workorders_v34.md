@@ -80,6 +80,15 @@ error to **~5e-8**, and identified the recorded "~3 % Ergun agreement" in
 `flow/doc/porous_drag_scheme.md` §5 as *that bug* rather than a closure residual. WO-I
 deliberately left every recorded number untouched pending this authorization.
 
+**⚠ PREMISE CORRECTED BY WO-M — do not record "~5e-8" as machine precision.** WO-M measured
+the same flow-side porous path against an *exact* reference and found the post-fix residual
+**4.768e-08 in float and 2.776e-16 in double**. So WO-I's post-fix Ergun figure is **the fp32
+operator-storage floor, not machine precision and not the closure's true accuracy**. Record it
+that way: the drag bug accounted for the 3.2258 %, and what remains is an arithmetic floor of
+the current storage precision, which a double build (or the recommended double-diagonal)
+removes by eight orders. Stating "~5e-8, machine precision" would bake a second wrong number
+into the docs in the act of fixing the first.
+
 **Do.** Re-run the porous verification set, update `porous_drag_scheme.md` §5 (and any other
 doc or `perf_baseline*.json` carrying a superseded porous number) with the post-fix values,
 and **keep the old number visible with its explanation** — a struck-through or "was 3.2258 %,

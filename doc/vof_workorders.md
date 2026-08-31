@@ -47,6 +47,14 @@ Hard rules (violating any of these is an automatic escalation):
    (2026-08-30). Staging a submodule pointer (`git add flow`) is a named path and is fine.
 5. Style: match `flow/src/*.hpp` (namespaces `peclet::flow`, x-fastest indexing per
    `suite/docs/CONVENTIONS.md`, doubles for geometry).
+6. **Run the attributable measurements in an isolated `git worktree` carrying only your own
+   diff.** Three live sessions share this checkout, and a shared index has now caused
+   **three** mis-attributed commits (2026-08-30/31) — twice sweeping another agent's
+   in-flight files into an unrelated commit. Beyond the `git diff --cached --stat` check,
+   any claim of the form "single-phase regression +0.00%" is only attributable if the tree
+   it ran in contained *your* changes and nobody else's. WO-O and WO-M both adopted this
+   after being bitten; make it the default for measurement campaigns run beside another
+   agent.
 
 Paper sources (all verified retrievable): Scardovelli & Zaleski JCP 164:228 (2000);
 Lehmann & Gekle, Computation 10:21 (2022) [open access — branch-reduced SZ for cubic
