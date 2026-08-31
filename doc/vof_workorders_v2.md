@@ -119,12 +119,22 @@ are not sharing fluxes, and the fix is structural, not a tolerance.
 
 ## WO-L — `MPI_ERR_TRUNCATE` at np=4 in the communication-avoiding halo path  [OPUS]
 
-**Why this outranks new physics.** Every rung of this campaign is gated on "np 2/4 bitwise vs
-np 1". WO-I established that four MPI tests — three of them **pre-existing and unrelated to any
-of our work** (`varmu_mpi_np4`, `bodyforce_ghost_mpi_np4`, `ghost_projection_mpi_np4`) — abort
-with `MPI_ERR_TRUNCATE` at np=4, that it **reproduces on a pristine tree**, and that
-`PECLET_FLOW_CA=0` cures all of them. A gate that fails intermittently for reasons unrelated to
-the code under test is not a gate. Fix this before trusting any further np=4 result.
+**Severity — corrected 2026-08-31, read this before planning around it.** WO-I first reported
+this as a hard blocker and then **re-ran and corrected itself**: the failure is
+**load-triggered, not deterministic**. On an idle machine every affected test passes at
+*default* settings (`ghost_projection_mpi_np4` 96.7 s, `varmu_mpi_np4` 249 s host,
+`dragbeta_ghost_mpi_np4` 4.2 s; final tally 48/48 MPI on host-openmp and 48/48 on CUDA). It
+surfaced only while two other agents' batteries were running. So the np-bitwise gate is **not**
+broken and this does **not** block new physics — but it is a real race, and **a CI runner is a
+loaded machine**, so it will appear there far more often than it does locally. Practical rule
+in the meantime: don't run three or more heavy batteries concurrently, and re-run a lone np=4
+`MPI_ERR_TRUNCATE` on an idle machine before believing it.
+
+**Why it is still worth fixing.** Every rung of this campaign is gated on "np 2/4 bitwise vs
+np 1", and a gate that can fail for reasons unrelated to the code under test erodes trust in
+exactly the instrument that has caught every defect so far (`varmu_mpi_np4`,
+`bodyforce_ghost_mpi_np4`, `ghost_projection_mpi_np4` are all pre-existing and unrelated to
+this campaign's changes). `PECLET_FLOW_CA=0` cures it, which localises the mechanism.
 
 **Evidence in hand** (do not re-derive):
 - Load-sensitive: the same binaries pass standalone and fail inside a loaded `ctest` run. WO-F
