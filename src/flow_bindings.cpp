@@ -27,6 +27,7 @@
 #include <Kokkos_Core.hpp>
 #include <string>
 #include <vector>
+#include <nanobind/stl/tuple.h>
 
 #ifdef PECLET_FLOW_MPI
 #include <mpi.h>
@@ -259,6 +260,20 @@ static void bind_solver(nb::module_& m, const char* name) {
           "winner of the multi-GPU ablation) or 'all' (legacy — every V-cycle level + after every "
           "matvec). Iteration counts are identical (A preserves mean-freeness); results equal "
           "within solver tolerance, not bit-identical.")
+      .def("set_pressure_telescope", &S::setPressureTelescope, nb::arg("on"),
+           "Coarse-level TELESCOPING of the pressure multigrid (multi-rank). The geometric "
+           "hierarchy coarsens a level in place, which needs every rank's block even on that axis; "
+           "once a block turns odd the hierarchy used to STOP, leaving a coarsest grid far too "
+           "large to solve (384^3 on 1536 ranks: blocks die at 3x6x4 with the coarsest extent "
+           "still 48, and the pressure iteration count grows 16.6 -> 38.7 across the ladder). With "
+           "this on, a blocked level instead merges ORB siblings onto fewer ranks (the merged "
+           "block's origin is its parent's split value, so parity is restored), moves the residual "
+           "down / correction up within rank groups, and the roots keep coarsening on a "
+           "sub-communicator to a tiny bottom. Idle ranks below the telescope point cost nothing "
+           "that matters; the iteration count becomes a property of the problem rather than the "
+           "rank count. OFF by default (byte-identical to before); env PECLET_FLOW_TELESCOPE=1 "
+           "is the no-rebuild switch. See docs/MG_TELESCOPING_PLAN.md.")
+      .def("pressure_telescope", &S::pressureTelescope)
       .def(
           "set_pressure_bottom",
           [](S& s, const std::string& m) {
@@ -1299,6 +1314,26 @@ NB_MODULE(_flow, m) {
       "length-3 list [x,y,z]. Use it to slice the global SDF into this rank's local block for a "
       "distributed Solver (see Solver.init_mpi). MPI_Init is called if needed.");
 
+  m.def(
+      "predict_hierarchy",
+      [](int gnx, int gny, int gnz, int np, int levels, bool telescope, int min_extent) {
+        std::vector<std::tuple<std::tuple<int, int, int>, int, std::tuple<int, int, int>,
+                               std::tuple<int, int, int>, bool>>
+            out;
+        for (const auto& r : peclet::flow::CutcellMG::predict(gnx, gny, gnz, np, levels, telescope,
+                                                              min_extent))
+          out.emplace_back(std::make_tuple(r.global.x, r.global.y, r.global.z), r.ranks,
+                           std::make_tuple(r.block.x, r.block.y, r.block.z),
+                           std::make_tuple(r.ratio.x, r.ratio.y, r.ratio.z), r.tele);
+        return out;
+      },
+      nb::arg("gnx"), nb::arg("gny"), nb::arg("gnz"), nb::arg("np"), nb::arg("levels"),
+      nb::arg("telescope") = false, nb::arg("min_extent") = 4,
+      "The pressure-multigrid hierarchy init_mpi WOULD build for this grid / rank count / level "
+      "request, under the current decomposition mode (set_decomposition_levels) and with or "
+      "without coarse-level telescoping -- a pure function, no MPI, no allocation, any rank "
+      "count. Returns one row per level: (global dims, ranks holding the level, block-0 dims, "
+      "ratio to the next level, telescopes-out). Pre-flight any job with it.");
   m.def(
       "set_decomposition_levels",
       [](int levels) { peclet::flow::CutcellMG::setDecompositionLevels(levels); },

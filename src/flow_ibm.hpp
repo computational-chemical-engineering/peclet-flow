@@ -211,7 +211,12 @@ class Solver {
     pressAgglomMode_ = mode;
     if (cutcellPressure_)
       mg_.setAgglomerationMode(mode);
-  }
+  }  // Coarse-level telescoping of the pressure multigrid (mac_cutcell_mg.hpp Telescope): when a
+  // per-rank block turns odd, merge ORB siblings onto fewer ranks and keep coarsening instead of
+  // stopping. Multi-rank only; a no-op single-rank. Takes effect at the next init_mpi/set_solid.
+  void setPressureTelescope(bool on) { mg_.setTelescope(on); }
+  bool pressureTelescope() const { return mg_.telescope(); }
+
   void setPressureGraphAmg(bool on) {
     pressGraphAmg_ = on;
     if (cutcellPressure_)
