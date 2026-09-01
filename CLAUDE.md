@@ -585,18 +585,18 @@ velocity over the face's perpendicular plane (sets the face to inflow). Used for
 or the **backward-facing step**, whose step is realized purely as the inlet condition — the developed
 parabola over the open upper half, zero over the step face (no immersed solid needed).
 
-**OPEN DEFECT — domain BCs + cut-cell IBM together (2026-09-01).** Every validation below is
-**all-fluid**; no test or script anywhere combines `set_domain_bc` with `set_solid`. That untested
-product is broken: an immersed bed with inflow/outflow boundaries caps MG-PCG at its iteration
-limit (`max|div|` 2.5e-3) and *diverges* at MG depth ≤ 2, while the same bed periodic (15 iters) or
-with six no-slip walls (17 iters), and the same BCs all-fluid (27 iters), are all healthy. Not the
-agglomerated bottom (`BOTTOM=smoother` also caps); FCG caps and Chebyshev NaNs. Evidence points at
-the Dirichlet/outflow half of the open-boundary openness split meeting the coarse-level cut-cell
-rediscretization — the cut-cell sibling of the WO-H Neumann-ghost bug. Full ablation table, the
-suspected mechanism and the suggested bisection: [`doc/cutcell_openbc_convergence.md`](doc/cutcell_openbc_convergence.md).
-Reproduce with `BCMODE=foxberry|walls|periodic` in peclet-examples'
-`benchmarks/foxberry-scaling/foxberry_bench.py`. **Treat any packed-bed-with-inlet/outlet result as
-invalid until fixed.**
+**OPEN DEFECT — solid intersecting an OPEN domain face (2026-09-01).** Every validation below is
+**all-fluid**; no test or script anywhere combines `set_domain_bc` with `set_solid`. Within that
+gap: when immersed solid **cuts an inflow/outflow face**, the cut-cell pressure solve runs to its
+iteration cap with `max|div|` 4e-3 and diverges outright at MG depth ≤ 2. Measured A/B at 128³, all
+else identical, only the bed moved: spheres clipped by the inlet/outlet planes give 260.8 iters
+(5 of 6 steps capped, `max|div|` 4.0e-3); the same bed pulled clear of those faces gives **32.7
+iters, no capping, `max|div|` 1.95e-06 over 42 steps**. Not the agglomerated bottom
+(`BOTTOM=smoother` also caps); FCG caps and Chebyshev NaNs. Suspected: how a cut cell on an open
+face reconciles the operator openness α (Dirichlet, mean-removal off) with the flux openness β.
+*A bed clear of the open faces — the normal case — is fine, so this is narrower than a blocker.*
+Full A/B, mechanism and a minimal-reproducer plan:
+[`doc/cutcell_openbc_convergence.md`](doc/cutcell_openbc_convergence.md).
 
 **Validated:** lid-driven cavity vs Ghia et al. Re=100 to ~0.7% rms (`scripts/verify_lid_cavity_sdflow.py`);
 developing plane channel (uniform inlet → parabolic Poiseuille outlet, `u_max/U_mean`→1.5, exact mass
