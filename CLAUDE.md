@@ -289,7 +289,14 @@ operator. Four outer drivers wrap that V-cycle — **select one per solver**:
   and resummed in double so `A·1 = 0` holds exactly — the fix already proven at the agglomerated
   bottom, generalised); `PECLET_FLOW_MG_DIAGRESUM=1` **on a double build** emulates exactly its
   arithmetic and matches full double at every grid measured. Full findings + policy:
-  `doc/vof_workorders_v34.md` (WO-M).
+  `doc/vof_workorders_v34.md` (WO-M). **Independently reproduced in the field (2026-09-01,
+  peclet-examples `benchmarks/foxberry-scaling`): a 5000-sphere φ=0.45 bed caps MG-PCG at 384³
+  (R = 10.7 cells) while the SAME bed converges in 11 iterations at 128³ and 20 at 256³, at np=1
+  as well as np≥24 — and the giveaway is that `<u>` and `max|div|` are identical to seven digits
+  between the capped rtol=1e-8 run and a converged rtol=1e-6 one (36.5 iters). Not dt (a 100×
+  sweep moves 9.5 → 11), not the bottom mode, not advection, not MPI. The fp64 build is 2×
+  FASTER in wall clock there (71 iters vs a 200 cap), so on high-contrast beds fp64 is the
+  performance choice, not a correctness tax.**
 - Coarse-operator mode: `set_solid(..., pressure_coarse="rediscretized")` (default; also `"galerkin"` /
   `"const"`). `set_pressure_multigrid(on, levels)` sets the multigrid depth (`levels=1` == pure RB-GS).
 - `set_pressure_warmstart(True)` seeds each solve from the previous step's φ (opt-in, off by default).
