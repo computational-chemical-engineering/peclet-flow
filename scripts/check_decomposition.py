@@ -102,6 +102,25 @@ def mode_spec(tok, levels):
     return (f"coarse-first({tok})", tok)
 
 
+def predict(args):
+    """Pure-function pre-flight: the hierarchy init_mpi would build, per rank count, with and
+    without telescoping. No mpirun -- this is what makes np=1536 answerable on a laptop."""
+    from peclet import flow
+
+    gx, gy, gz = args.grid
+    for np_ in args.np:
+        for tele in (False, True):
+            rows = flow.predict_hierarchy(gx, gy, gz, np_, args.levels, tele)
+            cg = rows[-1][0]
+            print(f"\n{gx}x{gy}x{gz} np={np_} levels={args.levels} telescope={'ON' if tele else 'off'}"
+                  f" -> {len(rows)} levels, coarsest {cg[0]}x{cg[1]}x{cg[2]}, "
+                  f"max extent {max(cg)}, bottom on {rows[-1][1]} rank(s)")
+            for L, (g, ranks, blk, rat, t) in enumerate(rows):
+                print(f"   L{L} global {g[0]:5d}x{g[1]:5d}x{g[2]:5d}  ranks {ranks:5d}  block0 "
+                      f"{blk[0]:4d}x{blk[1]:4d}x{blk[2]:4d}  ratio({rat[0]},{rat[1]},{rat[2]})"
+                      f"{'  -> TELESCOPE' if t else ''}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--grid", required=True, help="GNX,GNY,GNZ")
@@ -112,8 +131,23 @@ def main():
     ap.add_argument("--orb-only", action="store_true", help="partition only; no Solver, so any size")
     ap.add_argument("--verbose", action="store_true", help="also print the per-level dims/ratios")
     ap.add_argument("--mpirun", default="mpirun")
+    ap.add_argument("--predict", action="store_true",
+                    help="use flow.predict_hierarchy (pure function, no mpirun, any np): print the "
+                         "level ladder with and without coarse-level telescoping")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
+    if getattr(args, "predict", False):
+        if isinstance(args.grid, str):
+            args.grid = [int(v) for v in args.grid.split(",")]
+        if isinstance(args.np, str):
+            args.np = [int(v) for v in args.np.split(",")]
+        for spec in (args.mode if isinstance(args.mode, list) else str(args.mode).split(",")):
+            label, lv = mode_spec(spec, args.levels)
+            from peclet import flow
+            flow.set_decomposition_levels(int(lv))
+            print(f"=== decomposition mode {label} (set_decomposition_levels({int(lv)})) ===")
+            predict(args)
+        return
     args.grid = [int(v) for v in args.grid.split(",")]
     if args.child:
         return child(args)

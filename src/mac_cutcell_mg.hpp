@@ -262,6 +262,9 @@ inline int caSmoothingMode() {
 
 class CutcellMG {
  public:
+#ifdef PECLET_FLOW_MPI
+  struct Telescope;  // defined after Level
+#endif
   struct Level {
     C3 ext, inner, ratio{2, 2, 2}, cfac{1, 1, 1};
     C3 og{0, 0, 0};  // block inner origin in GLOBAL cells; {0,0,0} single-rank
@@ -278,8 +281,51 @@ class CutcellMG {
 #ifdef PECLET_FLOW_MPI
     std::shared_ptr<GridHaloTopology<3>> halo;  // per-level topology (decomposed)
     std::shared_ptr<GridHalo<double>> dev;      // per-level ghost exchange
+    // This level's communicator: comm_ above the first telescope point, the roots-only
+    // sub-communicator below it. Every collective a LEVEL performs (removeMean's Allreduce, the
+    // bottom's gather) must use this, not comm_ — see Telescope.
+    MPI_Comm comm = MPI_COMM_NULL;
+    // Set on level L when the transition L -> L+1 telescopes: L+1 lives on FEWER ranks (the ORB
+    // tree truncated one or more levels, BlockDecomposer::agglomerated), and the V-cycle moves
+    // this level's residual down / correction up through a gather / scatter within disjoint rank
+    // groups. Null on an ordinary in-place transition.
+    std::shared_ptr<Telescope> tele;
 #endif
   };
+#ifdef PECLET_FLOW_MPI
+  // Coarse-level telescoping (docs/MG_TELESCOPING_PLAN.md). When a per-rank block turns odd the
+  // in-place coarsening (coarsened(): coarse-local i <-> fine-local 2i on the SAME rank) is
+  // blocked, and without this the hierarchy simply stops -- at 384^3 on 1536 ranks it dies at a
+  // block of 3x6x4 with the coarsest global extent still 48, and the pressure iteration count
+  // grows 16.6 -> 38.7 across the ladder. Merging ORB siblings restores parity (the merged block's
+  // origin is its parent's split value), so: gather level L at ITS OWN resolution onto the group
+  // roots, and let the roots continue the geometric hierarchy on a sub-communicator. Ranks that
+  // are not roots idle below L (they join the gather and the scatter, on the parent comm, and skip
+  // the recursion). restrictAvg/prolongAdd/coarsenOpenAvg are untouched: they read fine INNER
+  // cells only / write fine INNER cells only, so the stage needs no halo of its own.
+  struct Telescope {
+    MPI_Comm groupComm = MPI_COMM_NULL;  // this rank's group (the ranks merged into one block)
+    MPI_Comm subComm = MPI_COMM_NULL;    // roots only (MPI_COMM_NULL on members)
+    bool root = false;
+    int nMembers = 1;
+    int g = 1;                 // ghost width of level L (the stage buffers use it)
+    C3 mInner{}, mOg{}, mExt{};  // merged block (root): inner dims, global origin, extent
+    // per-member fine block geometry in group-rank order (root first), root only
+    std::vector<C3> memO, memS;
+    std::vector<int> counts, displs;  // Gatherv/Scatterv layout (cells)
+    CCField res, x, ox, oy, oz;  // stage buffers at resolution L on the merged block (root)
+    ~Telescope() {
+      int fin = 0;
+      MPI_Finalized(&fin);
+      if (fin)
+        return;
+      if (groupComm != MPI_COMM_NULL)
+        MPI_Comm_free(&groupComm);
+      if (subComm != MPI_COMM_NULL)
+        MPI_Comm_free(&subComm);
+    }
+  };
+#endif
   static constexpr int G = 1;  // level-0 / single-rank ghost width (the flow_ibm g=1 bridge)
   // The red-black parity origin for a level's smoother: the parity convention is the single-rank
   // g=1 one (parity of og+local index INCLUDING a 1-cell ghost offset), so a level with g=2 must
@@ -503,6 +549,18 @@ class CutcellMG {
     } else {
       curDec = decomposition(static_cast<std::size_t>(size), gs.x, gs.y, gs.z);
     }
+    // Below a telescope point the hierarchy continues on a sub-communicator of the group roots:
+    // these track the communicator/rank a level is built on (rank == block index at every level,
+    // by construction of the sub-communicator's keys).
+    MPI_Comm curComm = comm;
+    int curRank = rank;
+    teleActive_ = true;
+    auto evenOn = [](const peclet::core::decomp::BlockDecomposer<3>& d, int ax) {
+      for (std::size_t b = 0; b < d.sizes().size(); ++b)
+        if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
+          return false;
+      return true;
+    };
     // Smallest block extent (any rank, any axis) — the same on every rank (the decomposition is
     // replicated), so the per-level ghost-width decision below is rank-uniform by construction.
     auto minBlockExtent = [](const peclet::core::decomp::BlockDecomposer<3>& d) {
@@ -525,7 +583,8 @@ class CutcellMG {
       // so that path is byte-identical to the pre-CA code.
       v.g = (L > 0 && !hasBC_ && (caSmoothingMode() & kCaMg) && minBlockExtent(dec) >= 4) ? 2 : 1;
       v.caOk = (v.g == 2);
-      v.halo->buildTopology(dec, rank, v.g, per, comm);
+      v.halo->buildTopology(dec, curRank, v.g, per, curComm);
+      v.comm = curComm;
       v.dev = std::make_shared<GridHalo<double>>();
       v.dev->init(*v.halo);
       const auto& idx = v.halo->indexer();
@@ -538,17 +597,98 @@ class CutcellMG {
       v.cfac = cf;
       v.n = idx.numCellsInclGhost();
       C3 next = gs, ratio{1, 1, 1};
+      bool idleBelow = false;
       if (L + 1 < nLevels) {
         // Coarsen an axis only if the GLOBAL dim can (can()) AND every rank's block is even on that
         // axis, so coarsened() nests exactly. Alignment (coarsenAlignment) makes this hold for the
-        // full natural depth; on an unaligned/awkward decomposition it simply stops coarsening that
-        // axis early (fewer geometric levels, GraphAMG bottom picks up the rest) — never OOB.
-        auto evenBlocks = [&](int ax) {
-          for (std::size_t b = 0; b < curDec.sizes().size(); ++b)
-            if ((curDec.origins()[b][ax] % 2) || (curDec.sizes()[b][ax] % 2))
-              return false;
-          return true;
+        // full natural depth; on an unaligned/awkward decomposition it used to simply stop
+        // coarsening that axis (fewer geometric levels) — with telescoping ON, a blocked axis
+        // instead merges ORB siblings onto fewer ranks and carries on (see Telescope).
+        const bool canAny = can(gs.x) || can(gs.y) || can(gs.z);
+        bool blocked = false;
+        for (int ax = 0; ax < 3; ++ax)
+          if (can(ax == 0 ? gs.x : ax == 1 ? gs.y : gs.z) && !evenOn(curDec, ax))
+            blocked = true;
+        auto minExtentOf = [](const peclet::core::decomp::BlockDecomposer<3>& d) {
+          long m = std::numeric_limits<long>::max();
+          for (const auto& sz : d.sizes())
+            for (int k = 0; k < 3; ++k)
+              m = std::min(m, (long)sz[k]);
+          return (int)m;
         };
+        const bool tooSmall = teleMinExtent_ > 0 && minExtentOf(curDec) < teleMinExtent_;
+        const bool doTele = canAny && curDec.numBlocks() > 1 &&
+                            ((telescope_ && (blocked || tooSmall)) || teleForce_ == L);
+        if (doTele) {
+          // Fewest merges (largest tree depth) at which EVERY still-coarsenable axis has even
+          // blocks — "any axis" would be wrong: it can unblock z and leave x frozen at the extent
+          // that matters. depth 0 (one block: origin 0, size gs, even by can()) always qualifies.
+          std::vector<int> groupOf, rootOf;
+          peclet::core::decomp::BlockDecomposer<3> cand;
+          int dSel = -1;
+          for (int d = curDec.treeDepth() - 1; d >= 0; --d) {
+            std::vector<int> go, ro;
+            cand = curDec.agglomerated(d, &go, &ro);
+            bool ok = true;
+            for (int ax = 0; ax < 3; ++ax)
+              if (can(ax == 0 ? gs.x : ax == 1 ? gs.y : gs.z) && !evenOn(cand, ax))
+                ok = false;
+            // and, with the economic trigger, fat enough to STAY above the threshold after the
+            // halving that follows (a single block always qualifies): merging to blocks of 4 that
+            // become 2 on the next level would merge again there, and again after that.
+            if (ok && teleMinExtent_ > 0 && cand.numBlocks() > 1 &&
+                minExtentOf(cand) < 2 * teleMinExtent_)
+              ok = false;
+            if (ok && cand.numBlocks() < curDec.numBlocks()) {
+              dSel = d;
+              groupOf = go;
+              rootOf = ro;
+              break;
+            }
+          }
+          if (dSel >= 0) {
+            auto T = std::make_shared<Telescope>();
+            const int myGroup = groupOf[(std::size_t)curRank];
+            T->root = (curRank == rootOf[(std::size_t)myGroup]);
+            MPI_Comm_split(curComm, myGroup, curRank, &T->groupComm);
+            MPI_Comm_split(curComm, T->root ? 0 : MPI_UNDEFINED, myGroup, &T->subComm);
+            T->g = v.g;
+            const auto mb = cand.block((std::size_t)myGroup);
+            T->mOg = C3{(int)mb.origin[0], (int)mb.origin[1], (int)mb.origin[2]};
+            T->mInner = C3{(int)mb.size[0], (int)mb.size[1], (int)mb.size[2]};
+            T->mExt = C3{T->mInner.x + 2 * T->g, T->mInner.y + 2 * T->g, T->mInner.z + 2 * T->g};
+            // members in group-comm rank order == ascending old block index (key = curRank)
+            int disp = 0;
+            for (std::size_t b = 0; b < curDec.numBlocks(); ++b)
+              if (groupOf[b] == myGroup) {
+                const auto fb = curDec.block(b);
+                T->memO.push_back(C3{(int)fb.origin[0], (int)fb.origin[1], (int)fb.origin[2]});
+                T->memS.push_back(C3{(int)fb.size[0], (int)fb.size[1], (int)fb.size[2]});
+                const int n = (int)(fb.size[0] * fb.size[1] * fb.size[2]);
+                T->counts.push_back(n);
+                T->displs.push_back(disp);
+                disp += n;
+              }
+            T->nMembers = (int)T->counts.size();
+            if (T->root) {
+              const std::size_t mn = (std::size_t)T->mExt.x * T->mExt.y * T->mExt.z;
+              T->res = CCField("tele_res", mn);
+              T->x = CCField("tele_x", mn);
+              T->ox = CCField("tele_ox", mn);
+              T->oy = CCField("tele_oy", mn);
+              T->oz = CCField("tele_oz", mn);
+            }
+            v.tele = T;
+            if (T->root) {
+              curDec = cand;
+              curComm = T->subComm;
+              MPI_Comm_rank(curComm, &curRank);
+            } else {
+              idleBelow = true;  // this rank holds levels 0..L only
+            }
+          }
+        }
+        auto evenBlocks = [&](int ax) { return evenOn(curDec, ax); };
         if (can(gs.x) && evenBlocks(0)) {
           ratio.x = 2;
           next.x = gs.x / 2;
@@ -572,6 +712,10 @@ class CutcellMG {
       for (FPV* p : {&v.AC, &v.AW, &v.AE, &v.AS, &v.AN, &v.AB, &v.AT})
         *p = FPV("mg_A", v.n);
       lv_.push_back(v);
+      if (idleBelow) {
+        teleActive_ = false;
+        break;
+      }
       if (next.x == gs.x && next.y == gs.y && next.z == gs.z)
         break;
       gs = next;
@@ -580,13 +724,20 @@ class CutcellMG {
       curDec = curDec.coarsened(peclet::core::IVec<3>{ratio.x, ratio.y, ratio.z});
     }
     if (mgDebugLevel() && rank == 0) {
-      printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %d)\n", gnx, gny, gnz, size,
-             (int)lv_.size(), nLevels);
+      printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %d)%s\n", gnx, gny, gnz, size,
+             (int)lv_.size(), nLevels, telescope_ ? "  [telescope ON]" : "");
       C3 g{gnx, gny, gnz};
+      int ranks = size;
       for (int L = 0; L < (int)lv_.size(); ++L) {
-        printf("[mg]  L%d global %4dx%4dx%4d  rank0 block %4dx%4dx%4d  ratio(%d,%d,%d)\n", L, g.x,
-               g.y, g.z, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z, lv_[L].ratio.x,
-               lv_[L].ratio.y, lv_[L].ratio.z);
+        printf("[mg]  L%d global %4dx%4dx%4d  ranks %5d  rank0 block %4dx%4dx%4d  ratio(%d,%d,%d)%s\n",
+               L, g.x, g.y, g.z, ranks, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z,
+               lv_[L].ratio.x, lv_[L].ratio.y, lv_[L].ratio.z,
+               lv_[L].tele ? "  -> TELESCOPE" : "");
+        if (lv_[L].tele) {
+          int sub = 1;
+          MPI_Comm_size(lv_[L].tele->subComm, &sub);
+          ranks = sub;
+        }
         g = C3{g.x / lv_[L].ratio.x, g.y / lv_[L].ratio.y, g.z / lv_[L].ratio.z};
       }
       fflush(stdout);
@@ -705,9 +856,26 @@ class CutcellMG {
     buildCutcellOp(f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT, CCConst(f.ox), CCConst(f.oy),
                    CCConst(f.oz), f.ext, G, idx2, idy2, idz2);
     resumDiagonal(f, G);
+#ifdef PECLET_FLOW_MPI
+    // A telescope point gathers this level's openness onto the group roots (all group ranks take
+    // part); the next level coarsens from that stage. A rank idling below holds no next level, so
+    // the loop simply ends for it after the gather.
+    if (lv_[0].tele) {
+      teleGather(lv_[0], lv_[0].ox, lv_[0].tele->ox);
+      teleGather(lv_[0], lv_[0].oy, lv_[0].tele->oy);
+      teleGather(lv_[0], lv_[0].oz, lv_[0].tele->oz);
+    }
+#endif
     for (int L = 1; L < (int)lv_.size(); ++L) {
       Level& c = lv_[L];
       Level& fin = lv_[L - 1];
+#ifdef PECLET_FLOW_MPI
+      if (fin.tele) {
+        Telescope& T = *fin.tele;
+        coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(T.ox), CCConst(T.oy), CCConst(T.oz), c.ext,
+                       T.mExt, c.g, T.g, c.inner, fin.ratio);
+      } else
+#endif
       coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(fin.ox), CCConst(fin.oy), CCConst(fin.oz), c.ext,
                      fin.ext, c.g, fin.g, c.inner, fin.ratio);
       fillOpenness(c);  // periodic ghost openness (operator build reads the + neighbour face)
@@ -724,6 +892,13 @@ class CutcellMG {
                      CCConst(c.oz), c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy,
                      idz2 * sz);
       resumDiagonal(c, c.g == 2 ? c.g - 1 : c.g);
+#ifdef PECLET_FLOW_MPI
+      if (c.tele) {
+        teleGather(c, c.ox, c.tele->ox);
+        teleGather(c, c.oy, c.tele->oy);
+        teleGather(c, c.oz, c.tele->oz);
+      }
+#endif
     }
     // The operator (all levels, including the bottom) just changed: invalidate the agglomerated
     // GraphAMG bottom solve so the next solve rebuilds it from the CURRENT coefficients. The porous
@@ -1097,6 +1272,80 @@ class CutcellMG {
   // Per-level V-cycle wall time (PECLET_FLOW_MG_DEBUG>=3; HOST backends only — no device fence, so
   // on CUDA the numbers are launch times, not kernel times). Answers "how much of the solve is
   // spent on the small coarse levels", i.e. whether coarse-level launch overhead is worth chasing.
+#ifdef PECLET_FLOW_MPI
+  // Telescope data movement (host-staged; the stage is a coarse level, i.e. small). Gather: every
+  // member packs its INNER cells x-fastest and the group root lands them in the merged block at
+  // (member origin - merged origin + g). Scatter-add: the inverse, each member adding the
+  // received box into `dst`'s inner cells (prolongAdd is additive). Pure data movement, bitwise.
+  void teleGather(const Level& lv, CCField src, CCField dst) {
+    Telescope& T = *lv.tele;
+    const int g = lv.g;
+    const std::size_t nIn = (std::size_t)lv.inner.x * lv.inner.y * lv.inner.z;
+    auto hs = Kokkos::create_mirror_view(src);
+    Kokkos::deep_copy(hs, src);
+    std::vector<double> sb(nIn);
+    for (int k = 0; k < lv.inner.z; ++k)
+      for (int j = 0; j < lv.inner.y; ++j)
+        for (int i = 0; i < lv.inner.x; ++i)
+          sb[(std::size_t)i + (std::size_t)j * lv.inner.x + (std::size_t)k * lv.inner.x * lv.inner.y] =
+              hs((long)(i + g) + (long)(j + g) * lv.ext.x + (long)(k + g) * (long)lv.ext.x * lv.ext.y);
+    std::vector<double> rb;
+    if (T.root)
+      rb.resize((std::size_t)T.displs.back() + (std::size_t)T.counts.back());
+    MPI_Gatherv(sb.data(), (int)nIn, MPI_DOUBLE, T.root ? rb.data() : nullptr, T.counts.data(),
+                T.displs.data(), MPI_DOUBLE, 0, T.groupComm);
+    if (!T.root)
+      return;
+    auto hd = Kokkos::create_mirror_view(dst);
+    for (int m = 0; m < T.nMembers; ++m) {
+      const C3 o = T.memO[m], sz = T.memS[m];
+      const double* q = rb.data() + T.displs[m];
+      for (int k = 0; k < sz.z; ++k)
+        for (int j = 0; j < sz.y; ++j)
+          for (int i = 0; i < sz.x; ++i) {
+            const int x = o.x - T.mOg.x + i + g, y = o.y - T.mOg.y + j + g,
+                      z = o.z - T.mOg.z + k + g;
+            hd((long)x + (long)y * T.mExt.x + (long)z * (long)T.mExt.x * T.mExt.y) =
+                q[(std::size_t)i + (std::size_t)j * sz.x + (std::size_t)k * sz.x * sz.y];
+          }
+    }
+    Kokkos::deep_copy(dst, hd);
+  }
+  void teleScatterAdd(const Level& lv, CCField src, CCField dst) {
+    Telescope& T = *lv.tele;
+    const int g = lv.g;
+    std::vector<double> sb;
+    if (T.root) {
+      auto hs = Kokkos::create_mirror_view(src);
+      Kokkos::deep_copy(hs, src);
+      sb.resize((std::size_t)T.displs.back() + (std::size_t)T.counts.back());
+      for (int m = 0; m < T.nMembers; ++m) {
+        const C3 o = T.memO[m], sz = T.memS[m];
+        double* q = sb.data() + T.displs[m];
+        for (int k = 0; k < sz.z; ++k)
+          for (int j = 0; j < sz.y; ++j)
+            for (int i = 0; i < sz.x; ++i) {
+              const int x = o.x - T.mOg.x + i + g, y = o.y - T.mOg.y + j + g,
+                        z = o.z - T.mOg.z + k + g;
+              q[(std::size_t)i + (std::size_t)j * sz.x + (std::size_t)k * sz.x * sz.y] =
+                  hs((long)x + (long)y * T.mExt.x + (long)z * (long)T.mExt.x * T.mExt.y);
+            }
+      }
+    }
+    const std::size_t nIn = (std::size_t)lv.inner.x * lv.inner.y * lv.inner.z;
+    std::vector<double> rb(nIn);
+    MPI_Scatterv(T.root ? sb.data() : nullptr, T.counts.data(), T.displs.data(), MPI_DOUBLE,
+                 rb.data(), (int)nIn, MPI_DOUBLE, 0, T.groupComm);
+    auto hd = Kokkos::create_mirror_view(dst);
+    Kokkos::deep_copy(hd, dst);
+    for (int k = 0; k < lv.inner.z; ++k)
+      for (int j = 0; j < lv.inner.y; ++j)
+        for (int i = 0; i < lv.inner.x; ++i)
+          hd((long)(i + g) + (long)(j + g) * lv.ext.x + (long)(k + g) * (long)lv.ext.x * lv.ext.y) +=
+              rb[(std::size_t)i + (std::size_t)j * lv.inner.x + (std::size_t)k * lv.inner.x * lv.inner.y];
+    Kokkos::deep_copy(dst, hd);
+  }
+#endif
   void vcycle(int L, bool sym) {
     if (mgDebugLevel() >= 3) {
       const auto t0 = std::chrono::steady_clock::now();
@@ -1121,7 +1370,15 @@ class CutcellMG {
   }
   void vcycleImpl(int L, bool sym) {
     Level& lv = lv_[L];
-    if (L + 1 == (int)lv_.size()) {
+    // The bottom is the last level THIS rank holds that is not a telescope point: a rank idling
+    // below a telescope point ends its lv_ at that point and must take the transition branch
+    // (gather, skip, scatter), never the bottom solve.
+    bool isBottom = (L + 1 == (int)lv_.size());
+#ifdef PECLET_FLOW_MPI
+    if (lv.tele)
+      isBottom = false;
+#endif
+    if (isBottom) {
       if (agglomerateBottom())
         graphAmgSolveBottom(
             lv);  // agglomerated mesh-agnostic coarse solve (decomposition-agnostic)
@@ -1168,17 +1425,40 @@ class CutcellMG {
       applyOutflowGhost(lv, lv.x, lv.g);
       fullResidual();
     }
-    Level& cs = lv_[L + 1];
-    restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
-    Kokkos::deep_copy(cs.x, 0.0);
-    vcycle(L + 1, sym);
-    fill(cs, cs.x);
-    applyOutflowGhost(cs, cs.x, cs.g);
-    // The trilinear prolongation reads the coarse ghost with weight 1/4 regardless of openness, so
-    // a domain-BC face needs its real ghost policy here (Dirichlet 0 above, Neumann zero-gradient
-    // below) instead of the periodic wrap fill() just wrote. See applyNeumannGhost.
-    applyNeumannGhost(cs, cs.x, cs.g);
-    prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+#ifdef PECLET_FLOW_MPI
+    if (lv.tele) {
+      // Telescoped transition: the residual goes DOWN at this level's own resolution onto the group
+      // root (the merged block is coarsenable; this rank's block is not), the roots restrict /
+      // recurse / prolong on the sub-communicator, and the correction comes back the same way.
+      Telescope& T = *lv.tele;
+      teleGather(lv, lv.res, T.res);
+      if (T.root) {
+        Level& cs = lv_[L + 1];
+        restrictAvg(cs.rhs, CCConst(T.res), cs.ext, T.mExt, cs.g, T.g, cs.inner, lv.ratio);
+        Kokkos::deep_copy(cs.x, 0.0);
+        vcycle(L + 1, sym);
+        fill(cs, cs.x);
+        applyOutflowGhost(cs, cs.x, cs.g);
+        applyNeumannGhost(cs, cs.x, cs.g);
+        Kokkos::deep_copy(T.x, 0.0);
+        prolongAdd(T.x, CCConst(cs.x), T.mExt, cs.ext, T.g, cs.g, T.mInner, lv.ratio);
+      }
+      teleScatterAdd(lv, T.x, lv.x);
+    } else
+#endif
+    {
+      Level& cs = lv_[L + 1];
+      restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
+      Kokkos::deep_copy(cs.x, 0.0);
+      vcycle(L + 1, sym);
+      fill(cs, cs.x);
+      applyOutflowGhost(cs, cs.x, cs.g);
+      // The trilinear prolongation reads the coarse ghost with weight 1/4 regardless of openness,
+      // so a domain-BC face needs its real ghost policy here (Dirichlet 0 above, Neumann
+      // zero-gradient below) instead of the periodic wrap fill() just wrote. See applyNeumannGhost.
+      applyNeumannGhost(cs, cs.x, cs.g);
+      prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+    }
     smooth(lv, post_, /*reverse=*/sym);
     if (meanRemovalAll_ || L == 0)
       removeMean(lv, lv.x);
@@ -1384,12 +1664,12 @@ class CutcellMG {
     std::vector<std::uint8_t> gsolid = lsolid;
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
-      gatherv(lgid, ggid);
-      gatherv(ldiag, gdiag);
-      gatherv(lrow, grow);
-      gatherv(lcol, gcol);
-      gatherv(lval, gval);
-      gatherv(lsolid, gsolid);
+      gatherv(lgid, ggid, lv.comm);
+      gatherv(ldiag, gdiag, lv.comm);
+      gatherv(lrow, grow, lv.comm);
+      gatherv(lcol, gcol, lv.comm);
+      gatherv(lval, gval, lv.comm);
+      gatherv(lsolid, gsolid, lv.comm);
     }
 #endif
     amgSolid_.assign((std::size_t)amgGlobalN_, 0);
@@ -1536,8 +1816,8 @@ class CutcellMG {
     if (distributed_) {
       std::vector<int> ggid;
       std::vector<double> gb;
-      gatherv(amgGlobalOfLocal_, ggid);
-      gatherv(lb, gb);
+      gatherv(amgGlobalOfLocal_, ggid, lv.comm);
+      gatherv(lb, gb, lv.comm);
       std::vector<double> b((std::size_t)amgGlobalN_, 0.0);
       for (std::size_t r = 0; r < ggid.size(); ++r)
         b[(std::size_t)ggid[r]] = gb[r];
@@ -1694,15 +1974,15 @@ class CutcellMG {
   }
 #ifdef PECLET_FLOW_MPI
   template <class T>
-  void gatherv(const std::vector<T>& local, std::vector<T>& all) {
+  void gatherv(const std::vector<T>& local, std::vector<T>& all, MPI_Comm c) {
     // REDUNDANT agglomeration: every rank receives the full concatenation (rank order, so the
     // assembled coarse problem is bit-identical on all ranks and each solves it locally with no
     // rank-0 bottleneck and no result broadcast).
     int size = 1;
-    MPI_Comm_size(comm_, &size);
+    MPI_Comm_size(c, &size);
     const int lbytes = (int)(local.size() * sizeof(T));
     std::vector<int> bc(size), bd(size, 0);
-    MPI_Allgather(&lbytes, 1, MPI_INT, bc.data(), 1, MPI_INT, comm_);
+    MPI_Allgather(&lbytes, 1, MPI_INT, bc.data(), 1, MPI_INT, c);
     int tot = 0;
     for (int r = 0; r < size; ++r) {
       bd[r] = tot;
@@ -1710,7 +1990,7 @@ class CutcellMG {
     }
     all.resize((std::size_t)tot / sizeof(T));
     MPI_Allgatherv(local.data(), lbytes, MPI_BYTE, all.data(), bc.data(), bd.data(), MPI_BYTE,
-                   comm_);
+                   c);
   }
 #endif
 
@@ -2000,7 +2280,11 @@ class CutcellMG {
             acc += aa(i) * bb(i);
         },
         s);
+#ifdef PECLET_FLOW_MPI
+    return allreduce(s, MPI_SUM_, lv.comm);
+#else
     return allreduce(s, MPI_SUM_);
+#endif
   }
   double maxabs(Level& lv, CCField a) {
     CCExec space;
@@ -2020,7 +2304,11 @@ class CutcellMG {
           }
         },
         Kokkos::Max<double>(m));
+#ifdef PECLET_FLOW_MPI
+    return allreduce(m, MPI_MAX_, lv.comm);
+#else
     return allreduce(m, MPI_MAX_);
+#endif
   }
   void removeMean(Level& lv, CCField f) {
     if (!removeMean_)
@@ -2045,7 +2333,11 @@ class CutcellMG {
         },
         sum, cnt);
     double dcnt = (double)cnt;
-    allreduceSum2(sum, dcnt);  // ONE latency hit for the {sum, count} pair (was two)
+    allreduceSum2(sum, dcnt
+#ifdef PECLET_FLOW_MPI
+                  , lv.comm
+#endif
+                  );  // ONE latency hit for the {sum, count} pair (was two)
     cnt = (long)dcnt;
     if (cnt == 0)
       return;
@@ -2082,14 +2374,22 @@ class CutcellMG {
 
  private:
   enum AllOp { kSum, kMax };
+#ifdef PECLET_FLOW_MPI
+  using MPI_Comm_or_void = MPI_Comm;
+  static MPI_Comm nullptr_comm() { return MPI_COMM_NULL; }
+#else
+  using MPI_Comm_or_void = void*;
+  static void* nullptr_comm() { return nullptr; }
+#endif
   // Global reduction over ranks (no-op single-rank / non-distributed -> byte-identical to the local
   // reduce).
-  double allreduce(double v, AllOp op) {
+  double allreduce(double v, AllOp op, MPI_Comm_or_void c = nullptr_comm()) {
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       const auto t0 = std::chrono::steady_clock::now();
       double g = 0;
-      MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, op == kSum ? MPI_SUM : MPI_MAX, comm_);
+      MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, op == kSum ? MPI_SUM : MPI_MAX,
+                    c == nullptr_comm() ? comm_ : c);
       allreduceTime_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       ++allreduceCount_;
       return g;
@@ -2100,12 +2400,12 @@ class CutcellMG {
   }
   // One MPI_Allreduce of a {sum, count} pair — elementwise MPI_SUM on a 2-vector is bit-identical
   // to two separate allreduces, at half the latency hits.
-  void allreduceSum2(double& a, double& b) {
+  void allreduceSum2(double& a, double& b, MPI_Comm_or_void c = nullptr_comm()) {
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       const auto t0 = std::chrono::steady_clock::now();
       double v[2] = {a, b}, g[2] = {0.0, 0.0};
-      MPI_Allreduce(v, g, 2, MPI_DOUBLE, MPI_SUM, comm_);
+      MPI_Allreduce(v, g, 2, MPI_DOUBLE, MPI_SUM, c == nullptr_comm() ? comm_ : c);
       allreduceTime_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       ++allreduceCount_;
       a = g[0];
@@ -2153,6 +2453,24 @@ class CutcellMG {
   // decomposition), and the solution scattered back. With nLevels==1 this makes the whole pressure
   // solve mesh-independent AND decomposition-agnostic.
   int agglomMode_ = 0;  // 0 smoothed bottom (default), -1 auto (see agglomerateBottom), 1 always
+  // Coarse-level telescoping (see Telescope). OFF by default: with it off every code path is
+  // byte-identical to before it existed. PECLET_FLOW_TELESCOPE=1 turns it on without a code
+  // change; the solver setter wins over the env. teleForce_ > 0 forces a telescope at that level
+  // even when in-place coarsening is legal (tests: compare the two hierarchies on one problem).
+  bool telescope_ = [] {
+    const char* e = std::getenv("PECLET_FLOW_TELESCOPE");
+    return e && std::atoi(e) != 0;
+  }();
+  int teleForce_ = -1;
+  bool teleActive_ = true;  // false on a rank that idles below a telescope point
+  // Economic trigger (MueLu's "min rows per proc", PETSc's reduction factor): once a level's
+  // smallest block extent drops below this, merge -- and merge far enough that the merged blocks
+  // clear it -- even if in-place coarsening is still legal. A 1x3x3 block on 1024 ranks is a
+  // halo exchange with nine cells of work behind it. 0 disables (merge only when blocked).
+  int teleMinExtent_ = [] {
+    const char* e = std::getenv("PECLET_FLOW_TELESCOPE_MIN_EXTENT");
+    return e ? std::atoi(e) : 4;
+  }();
   int gnxF_ = 0, gnyF_ = 0, gnzF_ = 0;  // GLOBAL fine dims (== local single-rank)
   // Fine-level 1/h^2 per axis, as handed to setOpenness. Only the exact (matrix-free) level-0
   // apply reads them; the bands carry gf already folded in.
@@ -2185,6 +2503,114 @@ class CutcellMG {
   // Enable the agglomerated GraphAMG bottom solve (decomposition-agnostic multigrid coarse solve).
   // Rebuilds lazily on the next solve. Safe single-rank (local assemble + serial AMG).
   void setAgglomerationMode(int mode) { agglomMode_ = mode; }  // -1 auto, 0 never, 1 always
+  void setTelescope(bool on) { telescope_ = on; }
+  // Diagnostics for the tests / the prediction tool: telescope points this rank passed through,
+  // and the coarsest GLOBAL grid of the hierarchy (valid on a rank that holds every level, e.g.
+  // rank 0, which is always a group root).
+  int telescopeCount() const {
+    int n = 0;
+#ifdef PECLET_FLOW_MPI
+    for (const Level& l : lv_)
+      n += l.tele ? 1 : 0;
+#endif
+    return n;
+  }
+  C3 coarsestGlobal() const {
+    C3 g{gnxF_, gnyF_, gnzF_};
+    for (std::size_t L = 0; L + 1 < lv_.size(); ++L)
+      g = C3{g.x / lv_[L].ratio.x, g.y / lv_[L].ratio.y, g.z / lv_[L].ratio.z};
+    return g;
+  }
+  // The hierarchy initMpi WOULD build, as a pure function of (grid, rank count, levels, telescope,
+  // decomposition mode) — no MPI, no allocation, so it runs on a laptop for any rank count. One row
+  // per level: global dims, ranks holding it, block dims (block 0), ratio to the next level, and
+  // whether the transition out of it telescopes. This is the pre-flight for a job (P1 of
+  // docs/MG_TELESCOPING_PLAN.md) and replaces launching `np` oversubscribed processes to find out.
+  struct PlanRow {
+    C3 global, block, ratio;
+    int ranks;
+    bool tele;
+  };
+  static std::vector<PlanRow> predict(int gnx, int gny, int gnz, int np, int nLevels,
+                                      bool telescope, int minExtent = 4) {
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    std::vector<PlanRow> rows;
+    auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
+    auto evenOn = [](const Dec& d, int ax) {
+      for (std::size_t b = 0; b < d.sizes().size(); ++b)
+        if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
+          return false;
+      return true;
+    };
+    Dec cur = decomposition(static_cast<std::size_t>(np), gnx, gny, gnz);
+    C3 gs{gnx, gny, gnz};
+    for (int L = 0; L < nLevels; ++L) {
+      PlanRow r;
+      r.global = gs;
+      r.ranks = (int)cur.numBlocks();
+      r.block = C3{(int)cur.sizes()[0][0], (int)cur.sizes()[0][1], (int)cur.sizes()[0][2]};
+      r.tele = false;
+      r.ratio = C3{1, 1, 1};
+      C3 next = gs;
+      if (L + 1 < nLevels) {
+        const int gsa[3] = {gs.x, gs.y, gs.z};
+        bool blocked = false, canAny = false;
+        for (int ax = 0; ax < 3; ++ax) {
+          canAny = canAny || can(gsa[ax]);
+          if (can(gsa[ax]) && !evenOn(cur, ax))
+            blocked = true;
+        }
+        auto minExtentOf = [](const Dec& d) {
+          long m = std::numeric_limits<long>::max();
+          for (const auto& sz : d.sizes())
+            for (int k = 0; k < 3; ++k)
+              m = std::min(m, (long)sz[k]);
+          return (int)m;
+        };
+        const bool tooSmall = minExtent > 0 && minExtentOf(cur) < minExtent;
+        if (telescope && (blocked || tooSmall) && canAny && cur.numBlocks() > 1) {
+          for (int d = cur.treeDepth() - 1; d >= 0; --d) {
+            Dec cand = cur.agglomerated(d);
+            bool ok = true;
+            for (int ax = 0; ax < 3; ++ax)
+              if (can(gsa[ax]) && !evenOn(cand, ax))
+                ok = false;
+            if (ok && minExtent > 0 && cand.numBlocks() > 1 && minExtentOf(cand) < 2 * minExtent)
+              ok = false;
+            if (ok && cand.numBlocks() < cur.numBlocks()) {
+              cur = cand;
+              r.tele = true;
+              break;
+            }
+          }
+        }
+        if (can(gs.x) && evenOn(cur, 0)) {
+          r.ratio.x = 2;
+          next.x = gs.x / 2;
+        }
+        if (can(gs.y) && evenOn(cur, 1)) {
+          r.ratio.y = 2;
+          next.y = gs.y / 2;
+        }
+        if (can(gs.z) && evenOn(cur, 2)) {
+          r.ratio.z = 2;
+          next.z = gs.z / 2;
+        }
+      }
+      rows.push_back(r);
+      if (next.x == gs.x && next.y == gs.y && next.z == gs.z)
+        break;
+      gs = next;
+      cur = cur.coarsened(peclet::core::IVec<3>{r.ratio.x, r.ratio.y, r.ratio.z});
+    }
+    return rows;
+  }
+  bool telescope() const { return telescope_; }
+  void setTelescopeForceLevel(int L) { teleForce_ = L; }  // tests only; -1 = never force
+  void setTelescopeMinExtent(int e) { teleMinExtent_ = e; }
+  // Number of levels THIS rank holds (fewer than the hierarchy's on a rank idling below a
+  // telescope point) and the hierarchy's rank count per level (replicated).
+  int localLevels() const { return (int)lv_.size(); }
   int agglomerationMode() const { return agglomMode_; }
   void setGraphAmgBottom(bool on) {
     agglomMode_ = on ? 1 : 0;
