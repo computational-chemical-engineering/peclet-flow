@@ -329,6 +329,18 @@ two, not its size. **An odd dimension never coarsens at all**: measured on one G
 MPI there is a second gate — a level coarsens an axis only if *every rank's block* is even on it, so
 the achievable depth is set by the per-rank block, not the global grid.
 
+**That second gate is an implementation limit and it is the top open item at scale.** Coarse levels
+are required to be the fine decomposition `coarsened()` in place (so restrict/prolong stay purely
+local), which is why the hierarchy simply stops when a block hits an odd extent. Measured cost
+(peclet-examples `benchmarks/foxberry-scaling`, 384³, 24→1536 ranks): pressure iterations rise
+16.6 → 38.7 and strong-scaling efficiency falls to 67 %, while time *per iteration* scales
+**super-linearly** (156 %) — i.e. the whole loss is the iteration count, not communication. The fix
+is to let a coarse level live on its own coarser partition and redistribute inside the transfer
+(PETSc `PCTELESCOPE`, MueLu `RepartitionFactory`, hypre's redundant coarse solve); the endpoint of
+this already exists as `set_pressure_bottom("auto")`, only the intermediate steps are missing. See
+[`../docs/DECOMPOSITION_AND_MULTIGRID.md`](../docs/DECOMPOSITION_AND_MULTIGRID.md) §2.8 and open
+problem 1.
+
 Two ways to build a decomposition that survives that, selected by
 `flow.set_decomposition_levels(L)` (or `PECLET_FLOW_DECOMP_LEVELS`), which **must be set before
 `mpi_block()` and `Solver.init_mpi()` — both derive the same partition from it**:
