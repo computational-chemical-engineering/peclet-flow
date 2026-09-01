@@ -99,7 +99,10 @@ target_link_libraries(test_transfer PRIVATE Kokkos::kokkos)
 add_test(NAME transfer COMMAND test_transfer)
 
 add_executable(test_cutcell test_cutcell.cpp)
-target_include_directories(test_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+# CORE_INC: the P1 exact-apply block includes mac_cutcell_mg.hpp for MReal/FPV (the operator
+# storage type it measures against), which pulls in the core GraphAMG/halo headers.
+target_include_directories(test_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
 target_link_libraries(test_cutcell PRIVATE Kokkos::kokkos)
 add_test(NAME cutcell COMMAND test_cutcell)
 

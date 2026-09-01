@@ -209,6 +209,68 @@ inline void applyCutcellOpBox(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV 
       });
 }
 
+// --- Exact (matrix-free, double) level-0 apply — the defect-correction residual/matvec ---------
+//
+// P1 of the suite-wide defect-correction campaign (docs/DEFECT_CORRECTION_PLAN.md). The band form
+// above reads the STORED coefficients, which are float by default (MReal), so the operator the
+// Krylov method actually inverts is the fp32-rounded one and its singular row-sum identity
+// A*1 = 0 holds only to eps_f32 (WO-M measured the consequence: a resolution-independent residual
+// floor at ~5e-9 followed by a 1e4-1e5 rebound). These two kernels apply the SAME operator
+// matrix-free from the double face openness that buildCutcellOp assembles the bands from
+// (Level::ox/oy/oz, CCField = View<double*>, ghost-filled and boundary-re-imposed by
+// setOpenness) — so they need no new storage, and they read 24 B/cell of coefficient instead of
+// 28.
+//
+// Written in FLUX (difference) form, y_i = sum_f t_f (x_i - x_nbr) with t_f = open_f * gf:
+//   * the diagonal is never formed, so it can never disagree with the faces;
+//   * a constant vector is annihilated BITWISE whatever the precision of t_f, because every
+//     difference vanishes identically. A stored double diagonal only gets A*1 = 0 to eps_f64.
+//   * a fully-closed (solid) cell has every t_f = 0, so y_i = 0 exactly, as with the bands
+//     (AC = 0 there). Where the openness is tiny-but-nonzero the two DISAGREE, and that is the
+//     point: the band AC is the float-rounded sum of the six faces, this is the exact one.
+// Sign convention matches buildCutcellOp exactly: AC = sum(t_f), A<face> = -t_f, hence
+// AC*x_i + sum(-t_f*x_nbr) == sum_f t_f (x_i - x_nbr).
+//
+// The hierarchy below level 0 is untouched — it is the preconditioner and may stay float.
+inline void applyCutcellOpExact(CCField y, CCConst x, CCConst ox, CCConst oy, CCConst oz, C3 e,
+                                int g, double gfx, double gfy, double gfz) {
+  ccFor3(
+      "peclet::flow::cc_apply_exact", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const double xi = x(i);
+        y(i) = ox(i) * gfx * (xi - x(i - sx)) + ox(i + sx) * gfx * (xi - x(i + sx)) +
+               oy(i) * gfy * (xi - x(i - sy)) + oy(i + sy) * gfy * (xi - x(i + sy)) +
+               oz(i) * gfz * (xi - x(i - sz)) + oz(i + sz) * gfz * (xi - x(i + sz));
+      });
+}
+
+// Box-restricted sibling of applyCutcellOpExact, for the distributed overlap matvec: rows in
+// [rlo,rhi) skipping [slo,shi). Same skip-box signature as applyCutcellOpBox, and the same
+// argument for bit-identity with the blocking form — it reads x and the openness, writes y, no
+// aliasing — so interior-then-shell ordering reproduces the blocking apply exactly.
+inline void applyCutcellOpExactBox(CCField y, CCConst x, CCConst ox, CCConst oy, CCConst oz, C3 e,
+                                   C3 rlo, C3 rhi, C3 slo, C3 shi, double gfx, double gfy,
+                                   double gfz) {
+  if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
+    return;
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::cc_apply_exact_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const double xi = x(i);
+        y(i) = ox(i) * gfx * (xi - x(i - sx)) + ox(i + sx) * gfx * (xi - x(i + sx)) +
+               oy(i) * gfy * (xi - x(i - sy)) + oy(i + sy) * gfy * (xi - x(i + sy)) +
+               oz(i) * gfz * (xi - x(i - sz)) + oz(i + sz) * gfz * (xi - x(i + sz));
+      });
+}
+
 // Projection correction u -= grad(phi) on the staggered faces (correct_k port). No openness here —
 // the openness lives in the operator + divergence; closed faces carry phi~0 on both sides so stay
 // unchanged.

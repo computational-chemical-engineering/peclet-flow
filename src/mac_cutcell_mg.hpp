@@ -237,6 +237,30 @@ inline bool mgDiagResum() {
   return v;
 }
 
+// PECLET_FLOW_EXACT_RESIDUAL=1 — P1 of the defect-correction campaign
+// (docs/DEFECT_CORRECTION_PLAN.md). Off by default; byte-identical when off.
+//
+// The rule: the residual and the Krylov matvec use the EXACT operator in double, in flux form;
+// everything below that line is a preconditioner and may stay float. With the gate on, the
+// level-0 matvec (matvecOverlap, the choke point for solvePCG and the flexible PCG) applies
+// applyCutcellOpExact -- matrix-free from the double face openness Level::ox/oy/oz that
+// buildCutcellOp assembles the float bands from -- so the Krylov fixed point becomes A_exact by
+// construction and the float hierarchy is demoted to a pure preconditioner, whose errors change
+// the convergence RATE and never the fixed point.
+//
+// Nothing inside vcycle() changes: residualCutcell, the smoother, restriction, the CA ring and
+// the AMG bottom all keep the float bands on purpose. This is strictly stronger than the
+// double-diagonal ablation (PECLET_FLOW_MG_DIAGRESUM) on the identity both exist to protect:
+// the flux form annihilates the constant vector BITWISE, a stored double diagonal only to
+// eps_f64. And it costs 0 B/cell where the double diagonal costs +17.
+inline bool exactResidual() {
+  static const bool v = [] {
+    const char* e = std::getenv("PECLET_FLOW_EXACT_RESIDUAL");
+    return e && std::atoi(e) != 0;
+  }();
+  return v;
+}
+
 // Communication-avoiding smoothing (PECLET_FLOW_CA): exchange a 2-deep ghost layer once per
 // red-black PAIR instead of 1-deep before every colour, redundantly re-smoothing the 1-deep ghost
 // ring of the first colour so the second colour reads exactly the values a per-colour exchange
@@ -688,6 +712,12 @@ class CutcellMG {
   // fine).
   void setOpenness(CCConst ox, CCConst oy, CCConst oz, double idx2, double idy2, double idz2) {
     Level& f = lv_[0];
+    // Retained for the exact (matrix-free) level-0 apply, which re-derives the face coefficient
+    // t_f = open_f * gf instead of reading the assembled band. All three call sites pass grid
+    // units (1.0) today; store them rather than assume it.
+    gfx_ = idx2;
+    gfy_ = idy2;
+    gfz_ = idz2;
     Kokkos::deep_copy(f.ox, ox);
     Kokkos::deep_copy(f.oy, oy);
     Kokkos::deep_copy(f.oz, oz);
@@ -1713,25 +1743,39 @@ class CutcellMG {
   // writes y (no aliasing) => bit-identical to the blocking fill-then-apply. Single-rank: the
   // blocking path.
   void matvecOverlap(Level& l0, CCField y, CCField v) {
+    const bool ex = exactResidual();  // P1: exact double flux-form apply instead of the bands
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       const C3 lo{G + 1, G + 1, G + 1};
       const C3 hi{l0.ext.x - G - 1, l0.ext.y - G - 1, l0.ext.z - G - 1};
       l0.dev->exchangeBegin(v);
-      applyCutcellOpBox(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                        FPC(l0.AB), FPC(l0.AT), l0.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
+      if (ex)
+        applyCutcellOpExactBox(y, CCConst(v), CCConst(l0.ox), CCConst(l0.oy), CCConst(l0.oz),
+                               l0.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0}, gfx_, gfy_, gfz_);
+      else
+        applyCutcellOpBox(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
+                          FPC(l0.AB), FPC(l0.AT), l0.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
       l0.dev->exchangeEnd(v);
       applyOutflowGhost(l0, v);
-      applyCutcellOpBox(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                        FPC(l0.AB), FPC(l0.AT), l0.ext, C3{G, G, G},
-                        C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G}, lo, hi);
+      if (ex)
+        applyCutcellOpExactBox(y, CCConst(v), CCConst(l0.ox), CCConst(l0.oy), CCConst(l0.oz),
+                               l0.ext, C3{G, G, G}, C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G},
+                               lo, hi, gfx_, gfy_, gfz_);
+      else
+        applyCutcellOpBox(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
+                          FPC(l0.AB), FPC(l0.AT), l0.ext, C3{G, G, G},
+                          C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G}, lo, hi);
       return;
     }
 #endif
     fill(l0, v);
     applyOutflowGhost(l0, v);
-    applyCutcellOp(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                   FPC(l0.AB), FPC(l0.AT), l0.ext, G);
+    if (ex)
+      applyCutcellOpExact(y, CCConst(v), CCConst(l0.ox), CCConst(l0.oy), CCConst(l0.oz), l0.ext, G,
+                          gfx_, gfy_, gfz_);
+    else
+      applyCutcellOp(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
+                     FPC(l0.AB), FPC(l0.AT), l0.ext, G);
   }
   // periodic ghost fill (3 axes) of a level-sized field / the openness triple. Distributed: the
   // per-level core halo (cross-rank + periodic in one call).
@@ -2134,6 +2178,9 @@ class CutcellMG {
   // solve mesh-independent AND decomposition-agnostic.
   int agglomMode_ = 0;  // 0 smoothed bottom (default), -1 auto (see agglomerateBottom), 1 always
   int gnxF_ = 0, gnyF_ = 0, gnzF_ = 0;  // GLOBAL fine dims (== local single-rank)
+  // Fine-level 1/h^2 per axis, as handed to setOpenness. Only the exact (matrix-free) level-0
+  // apply reads them; the bands carry gf already folded in.
+  double gfx_ = 1.0, gfy_ = 1.0, gfz_ = 1.0;
   mutable std::shared_ptr<peclet::core::solver::GraphAMG>
       amg_;  // built once from the bottom operator
   mutable peclet::core::solver::HostCsrOp
