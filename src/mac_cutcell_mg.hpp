@@ -657,9 +657,11 @@ class CutcellMG {
             for (int ax = 0; ax < 3; ++ax)
               if (can(ax == 0 ? gs.x : ax == 1 ? gs.y : gs.z) && !evenOn(cand, ax))
                 ok = false;
-            // and, with the economic trigger, fat enough (a single block always qualifies)
+            // and, with the economic trigger, fat enough to STAY above the threshold after the
+            // halving that follows (a single block always qualifies): merging to blocks of 4 that
+            // become 2 on the next level would merge again there, and again after that.
             if (ok && teleMinExtent_ > 0 && cand.numBlocks() > 1 &&
-                minExtentOf(cand) < teleMinExtent_)
+                minExtentOf(cand) < 2 * teleMinExtent_)
               ok = false;
             if (ok && cand.numBlocks() < curDec.numBlocks()) {
               dSel = d;
@@ -2597,7 +2599,7 @@ class CutcellMG {
             for (int ax = 0; ax < 3; ++ax)
               if (can(gsa[ax]) && !evenOn(cand, ax))
                 ok = false;
-            if (ok && minExtent > 0 && cand.numBlocks() > 1 && minExtentOf(cand) < minExtent)
+            if (ok && minExtent > 0 && cand.numBlocks() > 1 && minExtentOf(cand) < 2 * minExtent)
               ok = false;
             if (ok && cand.numBlocks() < cur.numBlocks()) {
               cur = cand;
