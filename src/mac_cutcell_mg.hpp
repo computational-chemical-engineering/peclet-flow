@@ -237,30 +237,6 @@ inline bool mgDiagResum() {
   return v;
 }
 
-// PECLET_FLOW_EXACT_RESIDUAL=1 — P1 of the defect-correction campaign
-// (docs/DEFECT_CORRECTION_PLAN.md). Off by default; byte-identical when off.
-//
-// The rule: the residual and the Krylov matvec use the EXACT operator in double, in flux form;
-// everything below that line is a preconditioner and may stay float. With the gate on, the
-// level-0 matvec (matvecOverlap, the choke point for solvePCG and the flexible PCG) applies
-// applyCutcellOpExact -- matrix-free from the double face openness Level::ox/oy/oz that
-// buildCutcellOp assembles the float bands from -- so the Krylov fixed point becomes A_exact by
-// construction and the float hierarchy is demoted to a pure preconditioner, whose errors change
-// the convergence RATE and never the fixed point.
-//
-// Nothing inside vcycle() changes: residualCutcell, the smoother, restriction, the CA ring and
-// the AMG bottom all keep the float bands on purpose. This is strictly stronger than the
-// double-diagonal ablation (PECLET_FLOW_MG_DIAGRESUM) on the identity both exist to protect:
-// the flux form annihilates the constant vector BITWISE, a stored double diagonal only to
-// eps_f64. And it costs 0 B/cell where the double diagonal costs +17.
-inline bool exactResidual() {
-  static const bool v = [] {
-    const char* e = std::getenv("PECLET_FLOW_EXACT_RESIDUAL");
-    return e && std::atoi(e) != 0;
-  }();
-  return v;
-}
-
 // Communication-avoiding smoothing (PECLET_FLOW_CA): exchange a 2-deep ghost layer once per
 // red-black PAIR instead of 1-deep before every colour, redundantly re-smoothing the 1-deep ghost
 // ring of the first colour so the second colour reads exactly the values a per-colour exchange

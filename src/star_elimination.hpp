@@ -34,14 +34,26 @@ namespace peclet::flow {
 /// construction — cells with no open fluid face are not entered).
 struct StarOverlay {
   Kokkos::View<int*, CCMem> cell;
-  Kokkos::View<float*, CCMem> a;  // [slot*6+k]
+  // [slot*6+k]. DOUBLE since P2: this is the masked face openness, and the openness source
+  // (Level::ox/oy/oz) is double — storing it float made the star row a float-rounded copy of a
+  // coefficient the solver already holds exactly. Gate-off reads it back through (float) so the
+  // default path is bitwise what it was; see starAval().
+  Kokkos::View<double*, CCMem> a;
 };
 
 inline StarOverlay starMakeOverlay(long n) {
   StarOverlay ov;
   ov.cell = Kokkos::View<int*, CCMem>("star_cell", n);
-  ov.a = Kokkos::View<float*, CCMem>("star_a", 6 * n);
+  ov.a = Kokkos::View<double*, CCMem>("star_a", 6 * n);
   return ov;
+}
+
+/// One stored aperture, at the precision the gate selects. Gate OFF returns the float-rounded
+/// value the overlay used to store, so the default path is bitwise unchanged by the widening;
+/// gate ON returns the exact double the openness actually carries.
+KOKKOS_INLINE_FUNCTION double starAval(const StarOverlay& ov, long k, bool exact) {
+  const double v = ov.a(k);
+  return exact ? v : (double)(float)v;
 }
 
 KOKKOS_INLINE_FUNCTION int starWrap(int v, int n) {
@@ -69,13 +81,13 @@ inline int buildStarOverlay(CCConst sdf, CCConst ox, CCConst oy, CCConst oz, C3 
         if (sdf(i) >= 0.0)
           return;  // fluid-centered: not eliminated
         CCConst oa[3] = {ox, oy, oz};
-        float av[6];
+        double av[6];
         double D = 0.0;
         for (int a2 = 0; a2 < 3; ++a2) {
           const double op = oa[a2](i + st[a2]), om = oa[a2](i);  // +side face / -side face
           const bool fp = sdf(i + st[a2]) >= 0.0, fm = sdf(i - st[a2]) >= 0.0;
-          av[2 * a2] = (fp && op > 0.0) ? (float)op : 0.0f;
-          av[2 * a2 + 1] = (fm && om > 0.0) ? (float)om : 0.0f;
+          av[2 * a2] = (fp && op > 0.0) ? op : 0.0;
+          av[2 * a2 + 1] = (fm && om > 0.0) ? om : 0.0;
           D += av[2 * a2] + av[2 * a2 + 1];
         }
         if (D <= 0.0)
@@ -101,6 +113,7 @@ inline void starApplyDelta(CCField y, CCConst x, const StarOverlay& ov, int nOv,
   if (nOv <= 0)
     return;
   CCExec space;
+  const bool exact = exactResidual();
   Kokkos::parallel_for(
       "peclet::flow::star_apply", Kokkos::RangePolicy<CCExec>(space, 0, nOv),
       KOKKOS_LAMBDA(int s) {
@@ -113,22 +126,42 @@ inline void starApplyDelta(CCField y, CCConst x, const StarOverlay& ov, int nOv,
         const int nb[6][3] = {{ix + 1, iy, iz}, {ix - 1, iy, iz}, {ix, iy + 1, iz},
                               {ix, iy - 1, iz}, {ix, iy, iz + 1}, {ix, iy, iz - 1}};
         double D = 0.0, num = 0.0;
-        double xv[6];
+        double av[6], xv[6];
         for (int k = 0; k < 6; ++k) {
-          const double a = ov.a(s * 6 + k);
-          if (a <= 0.0)
+          av[k] = starAval(ov, (long)s * 6 + k, exact);
+          if (av[k] <= 0.0)
             continue;
           xv[k] = x(idx(nb[k][0], nb[k][1], nb[k][2], extX, gX));
-          D += a;
-          num += a * xv[k];
+          D += av[k];
+          num += av[k] * xv[k];
+        }
+        if (exact) {
+          // FLUX FORM (P2, the P1 trick applied to the star row). Algebraically identical to the
+          // phibar form below --
+          //   a_k (x_k - phibar) = (a_k/D)(D x_k - sum_j a_j x_j) = (a_k/D) sum_j a_j (x_k - x_j)
+          // -- but every term is a coefficient times a DIFFERENCE, so a constant x is annihilated
+          // BITWISE. The phibar form is not: phibar = sum(a x)/sum(a) does not return x exactly
+          // for constant x even in double (the two sums round independently, then divide), so the
+          // star delta leaked a nonzero row contribution into A*1 that P1's exact 7-point apply
+          // could not cancel. Composing the two is the whole point of the rung: the level-0
+          // operator is the 7-point part PLUS this delta, and A*1 = 0 needs both halves exact.
+          for (int k = 0; k < 6; ++k) {
+            if (av[k] <= 0.0)
+              continue;
+            double acc = 0.0;
+            for (int j = 0; j < 6; ++j)
+              if (av[j] > 0.0)
+                acc += av[j] * (xv[k] - xv[j]);
+            Kokkos::atomic_add(&y(idx(nb[k][0], nb[k][1], nb[k][2], extY, gY)), (av[k] / D) * acc);
+          }
+          return;
         }
         const double phibar = num / D;
         for (int k = 0; k < 6; ++k) {
-          const double a = ov.a(s * 6 + k);
-          if (a <= 0.0)
+          if (av[k] <= 0.0)
             continue;
           Kokkos::atomic_add(&y(idx(nb[k][0], nb[k][1], nb[k][2], extY, gY)),
-                             a * (xv[k] - phibar));
+                             av[k] * (xv[k] - phibar));
         }
       });
 }
@@ -145,6 +178,7 @@ inline void starCorrectFaces(CCField uf, CCField vf, CCField wf, CCConst phi,
   if (nOv <= 0)
     return;
   CCExec space;
+  const bool exact = exactResidual();
   Kokkos::parallel_for(
       "peclet::flow::star_correct_faces", Kokkos::RangePolicy<CCExec>(space, 0, nOv),
       KOKKOS_LAMBDA(int s) {
@@ -162,16 +196,19 @@ inline void starCorrectFaces(CCField uf, CCField vf, CCField wf, CCConst phi,
                               {ix, iy - 1, iz}, {ix, iy, iz + 1}, {ix, iy, iz - 1}};
         double D = 0.0, num = 0.0;
         for (int k = 0; k < 6; ++k) {
-          const double a = ov.a(s * 6 + k);
+          const double a = starAval(ov, (long)s * 6 + k, exact);
           if (a <= 0.0)
             continue;
           D += a;
           num += a * phi(idxP(nb[k][0], nb[k][1], nb[k][2]));
         }
+        // phibar itself IS the wanted quantity here (the eliminated cell's reconstructed value),
+        // not an operator row, so there is no difference form to take -- only the aperture
+        // precision matters, and it must match the operator that was actually solved.
         const double phibar = num / D;
         CCField fa[3] = {uf, vf, wf};
         for (int k = 0; k < 6; ++k) {
-          if (ov.a(s * 6 + k) <= 0.0)
+          if (starAval(ov, (long)s * 6 + k, exact) <= 0.0)
             continue;
           const int a2 = k / 2;
           if ((k & 1) == 0) {
