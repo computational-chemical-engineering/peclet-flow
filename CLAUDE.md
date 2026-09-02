@@ -604,6 +604,20 @@ Four things this rung paid for, all measured (`doc/vof_workorders_v5.md`, WO-S f
   in the band; the band then under-extends and the equilibrium angle comes out **5 deg biased
   towards 90**. Where the anchor is pure phase the fill averages the theta-planes of the anchor's
   MIXED neighbours (branch `neighbour_cells`), which removes the bias.
+- **Accuracy, honestly rated.** Starting from the spherical cap of the prescribed angle on a flat
+  SDF wall (D/dx = 24, Oh = 0.1, 500 steps, ratio 1) the equilibrium angle comes back
+  **30.69 / 59.98 / 88.84 / 116.86 / 146.23** for theta = 30 / 60 / 90 / 120 / 150, i.e. within
+  **1.2 deg up to 90 deg** and **3.5-3.8 deg** above it — and the 120-degree row was run to rest
+  (`max|u|` down to 1.8e-4) to confirm that is a converged bias and not an unfinished transient. The
+  two failing rows are also the two whose CONTACT RADIUS is under ten cells (9.1 and 5.3 against
+  20.2 at theta = 30), and the same bias is *larger*, not smaller, with the wall on a cell face
+  where the cut-cell reconstruction is exactly absent — so it is a contact-line resolution effect,
+  not the cut-cell approximation. At ratio 100 the same protocol reads 29.92 at theta = 30. On an
+  SDF SPHERE (Rs = 12, drop of Rd = 8) the equilibrium CAP RADIUS is within **2.11 %** of the
+  two-sphere reference at theta = 60/90/120, while the angle inferred from the volume and the apex
+  height is off by 4.5 / -2.7 / -6.2 deg — that inversion carries `dtheta/dH ~ 10.5 deg per cell`,
+  so a half-cell error in a colour column is worth five degrees and the cap radius is the
+  well-conditioned reading. Full tables and the corrected gates: `doc/vof_workorders_v5.md`.
 - **Where the SDF wall sits INSIDE the cell decides whether the contact line can move at all**, and
   it is a property of the cut-cell IBM, not of this rung. At exactly `k + 1/2` — the placement WO-Q's
   G5 and WO-S's G1 both ask for — the tangential MAC faces of the wall-adjacent cell sit ON the SDF

@@ -570,6 +570,29 @@ Per-z-plane read-out at the half-integer wall (theta = 60, 200 steps, 48x48x32):
     4 | 3.392e-02 3.423e-02 4.440e-15 |  1.000  1.000  1.000 |  1.000   <- the first open fluid row
 ```
 
+### G4 — capillary rise / Jurin: NOT PASSED, and the run is not conclusive
+
+80x4x96 quasi-2D, two SDF plates 4 cells thick bounding a gap `w = 24` with a periodic OUTER
+channel `w_out = 48`, the plates spanning z in [16, 88] so the two channels are connected by an open
+reservoir below and above, ratio 10, `drho g = 2.4e-3` (Bond `drho g w^2/sigma` = **1.382**),
+theta = 30, ZERO-MEAN buoyancy (a non-zero-mean body force in a fully periodic box accelerates the
+whole fluid without bound — WO-Q finding 9 — and Jurin depends only on `drho`, so subtracting a
+constant is exact here). Both channels rise, so the reference is the LEVEL DIFFERENCE
+`2 sigma cos(theta)/(drho g) (1/w - 1/w_out)` = **15.035 cells**.
+
+Measured after 800 steps: inner level **39.883**, outer **37.378**, difference **2.505 cells** —
+**-83 %**, FAIL — with `dV/V` 1.5e-12, 17 pressure iterations (cap 300, none capped) and a
+**`max|u|` of 7.1e-1 whose trace over the run is 6.0e-1 / 5.8e-1 / 6.4e-1 / 8.4e-1 / 9.0e-1 /
+8.8e-1 / 7.4e-1 / 7.1e-1**, i.e. a large, non-decaying parasitic mode rather than a rise in
+progress. **The run is reported, not diagnosed**: the scene has two features this session could not
+separate from the rung — the plates are only 4 cells thick, so the wetting bands of their two faces
+overlap and the walk along `n_w` crosses the plate's medial surface where `grad(sdf)` is degenerate,
+and the plate ENDS are sharp 90-degree SDF corners where `|grad(sdf)| != 1`. Both are first-order
+suspects for a `max|u|` of that size and neither is what G4 is meant to measure. **The next step is
+to rerun G4 with thick plates (>= 8 cells) rounded at the ends, and to check the meniscus curvature
+`R = w/(2 cos theta)` directly from the shape before trusting a level difference** — a curvature
+read-out is local and does not depend on the reservoir bookkeeping the level difference needs.
+
 ### Findings
 
 **1. The work order's anchor is not on the interface plane, so the fill is not idempotent — and
