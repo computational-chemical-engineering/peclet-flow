@@ -1121,8 +1121,62 @@ class Solver {
           own(idx) = oi;
         });
     space.fence();
+    // PERIODIC IMAGES ARE A UNION. The query takes the minimum over an instance's 27 neighbour
+    // images -- right for a body straddling a periodic face, and a silent TRAP for a leaf WIDER
+    // than the box: its images overlap, and a cavity carved from it (a container wall built as
+    // slab-minus-cavity) is refilled wherever a neighbouring image's slab covers it. Measured: a
+    // 0.7 L slab minus a 53-cell cavity gave a 38-cell duct; the ten Cate tank ran 30 % narrow
+    // through two campaigns and read as "creeping-valued confinement". Detect it EXACTLY: when
+    // some instance's bounding sphere spans more than the box on a periodic axis, sample the
+    // primary image alone and count the cells whose solid/fluid sign the images changed.
+    imageOverlapCells_ = 0;
+    if (scenePeriodic_) {
+      namespace g = peclet::core::geom;
+      const auto hv = sceneB_->view();
+      const double lmin = std::fmin(sceneExtent_.x, std::fmin(sceneExtent_.y, sceneExtent_.z));
+      bool wide = false;
+      for (int i = 0; i < hv.instanceCount; ++i)
+        if (2.0 * g::instanceBound(hv, i).r > lmin)
+          wide = true;
+      if (wide) {
+        g::PeriodicBox<double> nobox{sceneExtent_.x, sceneExtent_.y, sceneExtent_.z, false};
+        auto qnp = g::SceneQueryDevice<double, CCMem>::build(*sceneB_, sceneOrigin_, sceneExtent_,
+                                                            nobox, /*accelerate=*/false);
+        const auto qv = qnp.view();
+        long cnt = 0;
+        Kokkos::parallel_reduce(
+            "peclet::flow::scene_image_overlap",
+            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+            KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+              const peclet::core::Vec3<double> p{(double)(x + og.x), (double)(y + og.y),
+                                                (double)(z + og.z)};
+              int oi = -1;
+              const std::size_t idx =
+                  (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny;
+              const double dp = qv.evalOwner(p, oi);
+              if ((dp < 0.0) != (din(idx) < 0.0))
+                ++acc;
+            },
+            cnt);
+        space.fence();
+        imageOverlapCells_ = cnt;
+        if (cnt > 0)
+          std::fprintf(stderr,
+                       "peclet.flow set_solid_from_scene WARNING: an instance is wider than the "
+                       "periodic box, and the UNION of its periodic images changes the solid at "
+                       "%ld cells on this rank. If it is a container wall (slab minus cavity), "
+                       "keep the slab's half-extent at half the box plus the wall thickness -- "
+                       "not more -- or the images refill the cavity. "
+                       "periodic_image_overlap_cells() returns this count.\n",
+                       cnt);
+      }
+    }
     setSolidDevice(din, cutcellPressure);
   }
+
+  /// Cells on this rank whose solid/fluid sign was set by a periodic IMAGE of an instance wider
+  /// than the box (see setSolidFromScene); 0 when no instance is that wide or the images agree.
+  long periodicImageOverlapCells() const { return imageOverlapCells_; }
 
   /// EXACT wall crossings straight from the scene, on device, on every rank -- the in-solver
   /// replacement for set_exact_crossings + scripts/exact_apertures_spheres.py.
@@ -1917,6 +1971,13 @@ class Solver {
 
   // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
   std::vector<double> getVelocity(int c) { return gatherInner(C[c].u); }
+  /// Write a component's inner velocity from a host vector (x-fastest, inner region) and
+  /// re-impose the solid mask. An initial-condition hook (e.g. a uniform stream around a fixed
+  /// body — the Galilean twin of a towed one); u^n is taken from the live field at step start.
+  void setVelocity(int c, const std::vector<double>& v) {
+    scatterInner(C[c].u, v);
+    maskVelocity(c);
+  }
   // The divergence-free FACE velocity component (collocated: the projected MAC face field
   // uf_/vf_/wf_, exactly div-free; staggered: C[c].u already lives on the faces). For a periodic
   // bed its mean is the momentum-balance superficial velocity, unperturbed by the openness-aware
@@ -7195,6 +7256,7 @@ class Solver {
   std::shared_ptr<peclet::core::geom::SceneBuilder<double>> sceneB_;
   peclet::core::Vec3<double> sceneOrigin_{0, 0, 0}, sceneExtent_{0, 0, 0};
   bool scenePeriodic_ = false;
+  long imageOverlapCells_ = 0;  // set_solid_from_scene's periodic-image overlap count
   bool sceneDirty_ = false;  // a transform changed; the device query must be rebuilt
   std::vector<double> oxOverride_, oyOverride_, ozOverride_;  // exact apertures (inner)
   bool hasOpenOverride_ = false;

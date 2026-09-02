@@ -1,4 +1,20 @@
-# Advective cut-wall flux — campaign plan (scoped 2026-08-31)
+# Advective cut-wall flux — campaign plan (scoped 2026-08-31; ten Cate CLOSED 2026-09-02)
+
+**RESOLUTION (2026-09-02): the remaining ten Cate deficit was not a solver defect at all.** The
+tank was built from a slab wider than the periodic box; the scene evaluates the UNION of an
+instance's periodic images, so the slab's images refilled the cavity and the tank ran **30 %
+narrow** (38 cells instead of 53 at d/h = 8, d/W = 0.21 instead of 0.15). With the slab fixed:
+E1 peak u/u∞ = **0.922 vs 0.947** (−2.6 %), E4 = **0.972 vs 0.955** (+1.8 %), both at d/h = 8 and
+both physical. The static duct twin gives K(Re 1.5) = 1.09 (creeping 1.11 relative to the
+periodic box; duct Cd/Abraham 1.30 → 1.08) — the solver screens confinement as the physics
+requires. A0 stands as a real fix (Blackburn 10.3 → 2.2 %, Newton leak closed). The three
+"live threads" below are closed by the same finding: (1) tow/free-fall disagreement at E4 was the
+narrow tank's return flow; (2) the unconfined control's +5 % shift is the d/h = 8 resolution
+class (the fixed sphere sits at 0.95–0.99 of Abraham there); (3) the −2 % Blackburn floor is the
+same resolution class. A1 (aperture weighting) remains NOT indicated. See
+`suite/docs/ANALYTIC_SDF_GEOMETRY.md` §7 item 11 for the trap, the detector now in
+`set_solid_from_scene`, and the finite-Re Galilean gate (towed vs fixed sphere agree to 0.03 %).
+
 
 **Status: RUNG A0 EXECUTED 2026-08-31 (flow `fb1a1a7`). H1 is HALF right — see
 "A0 results" below before doing anything else.** A0 closed the moving-wall momentum LEAK and
@@ -206,14 +222,68 @@ complete).
   there used to be a large resolution-dependent excess. (Measured with a standalone copy of the
   page's own `blackburn` / `fre` cells; the page itself was not edited.)
 
-### Gate 6 — static-bed `sum A`
-Not re-measurable: `force_gate.py FORCE_ADVECT=1` returns NaN at N = 32/48/64/128 with
-`CutcellMG::solvePCG: preconditioner produced non-finite z`. **This is PRE-EXISTING and unrelated
-to A0** — the pre-A0 module `build_wop_cuda` (built 12:44 the same day) NaNs identically, the
-ablation `PECLET_FLOW_ADV_WALLVEL=0` reproduces it bit for bit, and A0 is structurally inert on a
-static scene (`hasMotion_` is false, so `advVelView` returns `CCConst(C[c].u)`). `FORCE_ADVECT=0`
-passes at 2.2e-15 / 3.3e-15. **Someone should bisect the advective leg of `force_gate.py` against
-the WO-M/WO-O/WO-P landings of 2026-08-31.**
+### Gate 6 — static-bed `sum A`  (RESOLVED 2026-09-02: the gate was mis-parameterised, not broken)
+Was: not re-measurable — `force_gate.py FORCE_ADVECT=1` returned NaN at N = 32/48/64/128 with
+`CutcellMG::solvePCG: preconditioner produced non-finite z`. **PRE-EXISTING and unrelated to A0**
+— the pre-A0 module `build_wop_cuda` (built 12:44 the same day) NaNs identically, the ablation
+`PECLET_FLOW_ADV_WALLVEL=0` reproduces it bit for bit, and A0 is structurally inert on a static
+scene (`hasMotion_` is false, so `advVelView` returns `CCConst(C[c].u)`). `FORCE_ADVECT=0` passes
+at 2.2e-15 / 3.3e-15.
+
+**The bisect this section asked for was run, and it is NEGATIVE.** It is not the WO-M/WO-O/WO-P
+landings of 2026-08-31 and it is not a regression at all. `0706196` (2026-08-29, *scene layer
+retrofitted onto core SceneQueryDevice + native periodicity*) is the OLDEST commit whose bindings
+accept the probe's `set_scene(..., periodic=True)` call, and it goes non-finite at N=24 on **the
+very same step 78** as current main — as does `f61dfaa`, which predates every WO-M/O/P commit.
+Iteration counts are irrelevant (`set_pressure_solver_params(25 -> 400)` and
+`set_velocity_solver_params(100 -> 1000)` leave the blow-up on the identical step at N=32), so it
+is not a solver-convergence artefact either.
+
+**Mechanism — the semi-implicit stability limit, hit by the probe's own parameters.**
+`set_advection()` leaves the advective term EXPLICIT: it is assembled into the RHS lagged at the
+Picard iterate (`buildRhs`, `src/flow_ibm.hpp:3600-3620`, `const bool adv = advect_ && !pureFou`;
+`implicitAdv()` at `src/flow_ibm.hpp:2138` is false unless `set_implicit_advection` is called, and
+`hydro_force_torque_reaction` **refuses** that path at `src/flow_ibm.hpp:2998-3005`). The step is
+therefore the textbook semi-implicit one — implicit viscous, explicit advection — whose linear
+amplification for a mode `k` is `g = (1/dt - i u.k)/(1/dt + nu k^2)`, i.e. stable iff
+`|u.k|^2 <= 2 nu k^2/dt + (nu k^2)^2`; at large `dt` that is just the CELL REYNOLDS NUMBER
+`Re_h = rho |u| h / mu <~ pi`.
+
+The probe held `f = 1e-3`, `mu = 0.1`, `dt = 60` fixed while sweeping N — but this lattice's
+permeability in *cell* units grows like `N^2`, so `|u|` and `Re_h` grow like `N^2` with it. Measured
+Stokes `max|u|` (~ `0.079 (N/16)^2` to within 4 %): 0.0812 / 0.178 / 0.315 / 0.706 / 1.254 at
+N = 16/24/32/48/64, i.e. `Re_h` = **0.81 / 1.78 / 3.15 / 7.06 / 12.54**. N=16 sits a factor 4 below
+the limit (and is stable at every `dt` tried, up to 240); every N >= 24 is at or past it. The
+divergence is a bulk-pore mode, not a cut-cell one — at N=24 the fastest-growing cell sits at
+signed distance +5 h from the nearest grain — and the criterion is quantitatively confirmed by the
+`dt` scan: N=32 (`Re_h = 3.15 ~ pi`) is unstable at `dt` = 8/15/60 and stable at `dt` <= 1, exactly
+the small-`dt` branch `dt <= 2 nu k^2 / |u.k|^2 ~ 2` predicts; N=16 (`Re_h = 0.81 < pi`) is stable
+at every `dt`. Raising the Picard count makes it worse, not better (`set_outer_iterations(10)` at
+N=32/dt=15 moves the blow-up from step 67 to step 18) — the signature of a diverging lagged-
+advection fixed point. `set_implicit_advection(True)` removes the instability outright at
+N=24/32/64, but the reaction budget refuses that path, so it is not available to this gate.
+
+**No solver change is indicated** — the limit is a property of the scheme. The fix is in the probe:
+`force_gate.py` now scales the driving force as `f = FORCE_F * (16/N)^2` **on the advective leg
+only** (`FORCE_F_SCALE=0` restores the old, unstable f; `FORCE_ADVECT=0` is byte-unchanged, `f`
+stays `FORCE_F`). That pins `Re_h` at the N=16 value for every rung and lets `Re_d` grow like N, so
+the default ladder now lands near the plan's "Re ~ 30" target instead of diverging. The log line
+carries `f` and `Re_h` so the margin is visible.
+
+Gate 6 result with that scaling, `FORCE_ADVECT=1`, RTX 5080 / nvidia-cuda, flow `41997eb`:
+
+| N | f | Re_h | Re_d | reaction identity `ratio-1` |
+|---|---|---|---|---|
+| 16 | 1.0000e-03 | 0.80 | 3.01 | **2.220e-16** |
+| 24 | 4.4444e-04 | 0.78 | 4.29 | **1.332e-15** |
+| 32 | 2.5000e-04 | 0.77 | 5.58 | **8.882e-16** |
+| 64 | 6.2500e-05 | 0.74 | 10.31 | **6.661e-15** |
+| 128 | 1.5625e-05 | 0.69 | 18.61 | **9.770e-15** |
+
+`GATE PASS [reaction identity to solver residual at every N]` — the same 1e-15 class as the
+`FORCE_ADVECT=0` leg, so the R0 advective term IS in the budget and A0's `sum A` is now measurable
+on a static bed. (`tests/regression/sdflow_regression.py --build build_nan`: **PASS**, +0.00 % on
+every metric — no flow source was touched, only this doc.)
 
 ### Gate 7 — distributed
 The 60 MPI ctests are static/advection-off, and `mpi_scene_gate.py` sets `set_advection(False)`, so
@@ -281,3 +351,84 @@ moving cut-cell discretisation itself — D2 (apertures/wall closure at the movi
 continuity/pressure treatment of fresh and dying cells, or the coupling time-lag at high Re
 (thread 1). Builds kept for the next session: `flow/build_l3_cuda_head`, `flow/build_l3_cuda_dbl`,
 `tel/flow/build_l3_cuda_tel`.
+
+---
+
+## Gate 7 (distributed) — MEASURED 2026-09-02, and it FAILS: the A0 fill is not decomposition-independent
+
+Gate 7 above asked for "np=1 bit-exact, np=2/4 within the established 3e-7/5e-12-class tolerances
+of the existing MPI gates". Until now nothing measured it: **every ctest in `tests/kokkos_mpi` runs
+`setAdvection(false)` and none of them moves a scene instance**, so the A0 rung's MPI claim —
+"the scene is analytic, so ghost solid rows are computable pointwise and no extra exchange is
+needed" — was an argument, never a measurement. `tests/kokkos_mpi/test_movingscene_advect_mpi.cpp`
+(ctest `movingscene_advect_mpi_np{1,2,4}`) is the measurement.
+
+**The case.** Periodic 48^3 box, one analytic sphere d = 8 (off-lattice centre, +0.3), towed
+diagonally at U = 0.05 cells/time (Re = U d / nu = 20, nu = 0.02, dt = 4 => CFL 0.2), explicit SOU
+advection ON, `set_instance_transform` + `set_instance_motion` + `rebuild_geometry()` every step,
+60 steps. The path crosses the ORB cut planes (x = 32 at np = 2; x = 32 and y = 32 at np = 4).
+Compared against the full-grid single-rank reference built in the same executable: u, v, w and P
+cell by cell, plus the per-instance `hydroForceTorqueReaction()`.
+
+| np | max abs du (max abs u = 4.0334e-02) | max abs dP (max abs P = 2.1442e-03) | dF (abs F = 1.1367e-01) | dT | verdict |
+|---|---|---|---|---|---|
+| 1 | **0.000e+00** | **0.000e+00** | 1.332e-15 | 2.479e-15 | PASS (fields bit-exact) |
+| 2 | 1.452e-07 | 1.854e-08 | 9.999e-08 | 1.450e-07 | **FAIL** (tol 1.21e-08) |
+| 4 | 1.136e-05 | 2.839e-07 | 9.249e-06 | 2.476e-05 | **FAIL** (tol 1.21e-08) |
+
+The reaction force is held to 1e-12 relative at np = 1 rather than to zero, and not because of
+MPI: `hydroForceTorqueReaction` accumulates with `Kokkos::atomic_add` over an unordered device
+traversal, so it is tolerance-reproducible, not bitwise, even between two runs whose fields agree
+bit for bit (the same caveat `mpi_scene_gate.py` states).
+
+**The A0 fill is the cause, isolated by a 2x2 ablation at np = 2** (max abs du, same case):
+
+| configuration | max abs du |
+|---|---|
+| moving + advection ON (the shipped case) | **1.45e-07** |
+| moving + advection OFF (`GATE7_ADV=0`) | 5.99e-16 |
+| static + advection ON (`GATE7_MOVE=0`, body-force driven) | 3.47e-17 |
+| moving + advection ON, A0 fill disabled (`PECLET_FLOW_ADV_WALLVEL=0`) | 1.28e-16 |
+
+Neither the moving-geometry machinery nor the advection is decomposition-dependent on its own, and
+with the A0 fill off the moving + advective march is bit-clean across ranks. Note what the third
+row also says: this configuration carries **no measurable MG-PCG reduction-order floor at all**, so
+the 3e-7 tolerance is generous and the failure is unambiguous.
+
+**It is LOCAL to the rank boundary.** The identical case translated so the body never comes within
+the ghost ring of a cut plane (`GATE7_SHIFT=-8`) reads **2.57e-15** at np = 2.
+
+**Likely mechanism** (not yet fixed — this session's brief was to measure, not to repair).
+`buildWallVelocity` fills `uBc_` over the extended block from a CENTRED difference of the sampled
+SDF, `ccSampleExt(sd, e, sx +/- 1, ...)`. `ccSampleExt` **clamps** its indices to `[0, ext-1]`, so
+at the OUTERMOST ghost plane there is no neighbour to difference against and the gradient — hence
+`wallPoint`, hence `uBc_` — is wrong there; and `uBc_` is never halo-exchanged. Under MPI those
+planes sit at interior rank boundaries, at different global points than the single-rank run's, and
+`buildAdvInputs` writes them into the advection's scratch inputs where the SOU stencil (reach 2)
+carries them inward. The plan's claim is right about the SCENE and wrong about this fill, which
+reads the sampled SDF, not the scene. Two candidate repairs, in preference order: (1) evaluate the
+wall velocity from the scene analytically (`q.owner(p)` + `instanceVelocity` at the point, no SDF
+gradient) at the outermost planes, or (2) halo-exchange `uBc_` (three extra field exchanges per
+geometry/motion update — it is rebuilt once per step on this path, not per Picard iteration).
+
+**Magnitude depends on where the body is when the fields are compared.** An earlier variant of this
+case whose body ended with its wall band sitting IN rank 0's outer ghost planes (centre stopping at
+x = 27.54 against a cut at x = 32) measured **1.385e-03 at np = 2 and 1.703e-03 at np = 4** — 3.5 %
+of max abs u, with the reaction force off by 0.69 % (np = 2) and 0.44 % (np = 4). A body parked on
+a rank boundary is the worst case, and it is an entirely ordinary situation in a real run.
+
+**Reproduce** (nvidia-cuda prefix, `OMP_NUM_THREADS=8 OMP_PROC_BIND=false`):
+```bash
+cmake -S tests/kokkos_mpi -B build_kmpi -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
+  -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
+cmake --build build_kmpi --target test_movingscene_advect_mpi -j
+mpirun -np 2 ./build_kmpi/test_movingscene_advect_mpi          # and -np 1, -np 4
+PECLET_FLOW_ADV_WALLVEL=0 mpirun -np 2 ./build_kmpi/test_movingscene_advect_mpi   # ablation
+```
+Runtimes on one RTX 5080 (each run also builds the full-grid reference on rank 0): np = 1 95 s,
+np = 2 212 s, np = 4 332 s.
+
+**Also fixed on the way in:** `tests/kokkos_mpi/CMakeLists.txt` did not configure at all. Commit
+`86192ad` (V-BC, 2026-09-02) appended a duplicate tail to the gated `foreach` list, leaving an
+orphan line after the closing paren — a CMake parse error, and `vof_bc_mpi` was never registered.
+The list is now one list and carries `vof_bc_mpi`; the tree configures 78 tests.
