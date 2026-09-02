@@ -568,11 +568,13 @@ pressure solve never approaches its cap in any row.
 One angle (theta_set = 60), one initial condition (a hemisphere, so the contact line HAS to travel),
 one grid (64x64x40, D/dx = 24, Oh = 0.1), 1200 steps; only the wall's position inside the cell
 changes. `eps` / `ox` are the fluid fraction and the tangential face openness of the wall-adjacent
-cell, read from `vof_geometry(0)` and `get_ox()`.
+cell, read from `vof_geometry(0)` and `get_ox()`. The first row is reproduced by the shipped
+`tests/study/vof_wetting.py g1w` (58.076, `Ca(open)` 9.19e-3, band census 720/1264/30784, 11
+pressure iterations, no cap) and the other three by the same scene with `zw` changed.
 
 | wall z | eps of the wall cell | tangential ox/oy | theta after 1200 steps | raw max|u| | verdict |
 |---|---|---|---|---|---|
-| 4.00 (on a cell FACE) | 1.00 (uncut) | 1.000 | **58.08** (converged; 90 -> 77.3 -> 63.5 -> 59.9 -> 58.4 -> 58.05 -> 58.08) | 8.2e-2 | mobile |
+| 4.00 (on a cell FACE) | 1.00 (uncut) | 1.000 | **58.076** (converged; 90 -> 77.3 -> 63.5 -> 59.9 -> 58.4 -> 58.05 -> 58.08) | 8.2e-2 | mobile |
 | 4.25 | 0.75 | **0.750** | reaches 69.9 by step 400 and keeps going | 1.7e-2 | mobile, CUT |
 | 3.50 (the WORK ORDER's half-integer) | 0.50 | **0.000** | **83.26 — STALLED** (83.4 at 200, 81.2 at 400, then back up) | **1.04** | PINNED |
 | 3.75 | 0.25 | 0.000 | **89.65 — frozen** (nothing moves at all) | 2.4e-4 | PINNED |
