@@ -472,13 +472,14 @@ in solid cells and the working block's solid band carries the three-pass neutral
 
 | gate | measured | verdict |
 |---|---|---|
-| **G1** byte-identity | all six `vof_*` ctests (`vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`, `vof_curvature`, `vof_surface_tension`) reproduce their recorded output **digit for digit** (`diff` of the full stdout), host-openmp and nvidia-cuda | PASS |
+| **G1** byte-identity | all six `vof_*` ctests (`vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`, `vof_curvature`, `vof_surface_tension`) reproduce their recorded output **digit for digit** (`diff` of the full stdout against the same binaries built at `main`), host-openmp AND nvidia-cuda. The whole `tests/kokkos` battery is 25/25 green. The single-phase regression (`tests/regression/sdflow_regression.py`, CUDA) is **`+0.00 %` on every metric of all three cases with identical iteration counts and identical step counts** — `zh_sphere` K 7.3891/7.4162/7.4361/7.4404, `random_spheres` order 2.19 and `k*_inf` 0.0062362, `hollow_rings` order 1.38 and `k*_inf` 0.017184, all `[ok]` | PASS |
 | **G3a** openness embed | `max|o_advector - independent build with the shift written out|` = **0.0**; `max|eps - independent|` = **0.0** (24³ packing, `buildOpenness`/`buildCellFraction` re-run on a g=3 block) | PASS |
 | **G3b** solver vs standalone | 20 kinematic steps through the packing at interface CFL 0.2: `max|dC|` over fluid cells = **0.0 (bitwise)** | PASS |
 | **G2** conservation | 24³ packing, 200 kinematic steps at CFL 0.2 (dt 1.85): `sum eps_eff C` **6.110906250000000e3 -> 6.110906250046966e3, relative drift 7.686e-12** against a projection floor `max|div(open u)| = 3.048e-11` (9 pressure iterations, no cap). `sum C` over solid cells **exactly 0**; min/max C over uncut fluid cells **0.0 / 1.0 exactly**; clipped liquid volume over the whole run **5.42e-19** (8.9e-23 of the liquid volume); 991 solid cells, 1076 cut cells | PASS |
 | **G5** 90° neutral fill | cap on a flat SDF wall at z = 3.5, D/Δ = 24, σ = 1, µ = 0.05, 120 steps at 0.5 dt_σ: **θ = 89.935°** (target 90, tol 3°); cap radius 11.977 vs 12; Young–Laplace ΔP 0.166185 vs 2σ/R 0.166990, **rel 4.8e-3** (tol 1 %); volume drift **4.5e-15**; 16 pressure iterations, no cap; `sum C` over solid **0**; wall band max\|κ\| 0.2222 with branch census 3000/196/0/0/4/0/0 (**no branch-6**) | PASS |
-| **G6** MPI | np 1/2/4 on a 16×16×32 grid whose ORB cut goes through the spheres (cut axes z at np=2, xz at np=4): geometry **0.0**, band fill **0.0**, kinematic colour **0.0** — all three **bitwise**; kinematic drift 4.429e-13 (reference 4.433e-13); coupled 30-step run at the reduction floor, colour 4.4e-16 (np=2) / 3.3e-16 (np=4), velocity 5.9e-17 / 2.8e-17, drift 2.75e-12, `sum C` over solid **0**, 10 pressure iterations | PASS |
-| **G7** free-surface battery | see below | PASS |
+| **G6** MPI (host-openmp AND nvidia-cuda) | np 1/2/4 on a 16×16×32 grid whose ORB cut goes through the spheres (cut axes z at np=2, xz at np=4): geometry **0.0**, band fill **0.0**, kinematic colour **0.0** — all three **bitwise**; kinematic drift 4.429e-13 (reference 4.433e-13); coupled 30-step run at the reduction floor, colour 4.4e-16 (np=2) / 3.3e-16 (np=4), velocity 5.9e-17 / 2.8e-17, drift 2.75e-12, `sum C` over solid **0**, 10 pressure iterations. On CUDA the coupled case is bitwise at np=2 as well (colour 0.0) and 2.2e-16 at np=4. The pre-existing MPI VoF battery is unchanged: `vof_advect_mpi` drift 1.0e-15, `vof_twophase_mpi` dC 2.2e-16, `vof_momentum_mpi` du_adv 2.4e-13 (tol 4.6e-12), `vof_curvature_mpi` 0/8192 cells differ — both backends, np 1/2/4 | PASS |
+| **G7** free-surface battery | `tests/study/vof_surface_tension.py static hysing1`: static droplet **Ca = 5.898e-05 at D/Δ = 16** (WO-P recorded 5.90e-5) and 2.543e-4 / 2.649e-5 at D/Δ = 8 / 24; Hysing case 1 at nx = 64 **v_rise max 0.2497 at t = 0.886, y_c(3) = 1.0808** — WO-P's recorded numbers to every digit | PASS |
+| **study battery, full size** (`tests/study/vof_cutcell.py`, CUDA) | **G2** 48³, 500 kinematic steps at CFL 0.2 (dt 1.569): `sum eps_eff C` drift **−5.041e-12** against `max|div(open u)| = 3.920e-11`, 9868 solid + 4612 cut cells, clipped 2.30e-18, colour in solid 0, C ∈ [0,1] exactly. **G4** 48³ draining, ratio 10, 400 coupled steps with momentum consistency ON: drift **4.666e-14 per step**, 12 pressure iterations (cap 300, 0 capped), `max|u|` 1.13e-2, colour in solid 0. **G5** D/Δ = 24, 200 steps at 0.5 dt_σ: **θ = 89.650°**, cap radius 11.986 vs 12, Young–Laplace **rel 3.494e-3**, volume drift −3.9e-15, Ca (open fluid) 6.74e-4 | PASS |
 | **item 8a** consistency identity in cut cells | packing + uniform `U = (1, 0.6, -0.4)`, `enable_vof_momentum`, ratios 10/100/1000: `max|u_adv - U| = 0` — **bitwise, including in cut cells** (ρ^e floor never hit; 6252 flux clamps bind) | PASS |
 | **item 8b** coupled draining | 24³ packing, ratio 10, zero-mean buoyancy, 200 coupled steps: colour drift **6.02e-14 per step** with momentum consistency ON and 6.02e-14 OFF (tol 1e-10); `max|div(open u)|` 2.5e-14; 11 pressure iterations (cap 200); `max|u|` 2.15e-2; `sum C` over solid 0 | PASS |
 
@@ -526,8 +527,10 @@ while still owning an OPEN face (the face openness comes from a different quadra
 is FLUID by the work order's own classification and legitimately receives flux, so the update must
 divide by `eps_eff = max(eps, 1/64)`; the raw `sum eps C` then silently drops whatever enters those
 cells. Both are reported (`vof_diagnostics()['volume']` and `['raw_volume']`); on the shipped
-packings they agree to the last digit because no such cell carries colour, but the distinction is
-the difference between an identity and a coincidence.
+packings at 24³ they agree to the last digit, but at 48³ they do NOT: `sum eps_eff C` starts at
+4.876225e4 while `sum eps C` starts at 4.876175e4 — a 5.0e-1 gap that is exactly the colour sitting
+in `eps == 0`-with-an-open-face cells, and that the raw sum would have to lose. Both drift by the
+same −5.041e-12, i.e. the identity is on the eps_eff sum and the raw sum merely tracks it.
 
 **5. The classification at ghost DEPTH 3 must be the owner's, and the way to get it is to exchange
 it.** The work order says to embed `eps` "with the outermost layer set to 1". That layer is read:
@@ -577,6 +580,13 @@ consistency OFF completes 200 steps (drift −2.29e-13, `max|u|` 0.236). There i
 precursor in the trace, so it is reported rather than patched; reproduce with
 `PECLET_VOF_CUTCELL_NONZERO_FORCE=1 PECLET_VOF_CUTCELL_TRACE=1 ./test_vof_cutcell`. The shipped
 item-8 gate uses the well-posed zero-mean force, where both paths are clean.
+
+**11. G7 as written compares a coarse run against a fine recorded number.** `--quick` runs the
+Hysing gate at **nx = 32** while the numbers the work order asks it to reproduce (0.2497 / 1.0810)
+were recorded at **nx = 64**. At nx = 32 the same build reads v_rise max **0.2501**, y_c(3)
+**1.0844** — the same to 3 significant figures, but the 4th digit is the grid, not the change. Run
+without `--quick` for the gate as intended: it then returns 0.2497 / 1.0808, i.e. the recorded
+values to every digit. (The static-droplet rung is present in both, and matches at 5.898e-5.)
 
 **10. What the cut-cell flux approximates, stated for the record.** The PLIC polyhedron is
 reconstructed on the WHOLE unit cell (as if the cell were not cut) and its slab volume is multiplied
