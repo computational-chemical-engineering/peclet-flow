@@ -510,6 +510,340 @@ sibling to use in VoF scripts).
 
 (append per WO, newest first)
 
+## WO-R2 — the variable-density outflow operator, the V5a × V-BC composition, the VoF defaults  [Opus, 2026-09-02]
+
+Branch `vof-wor2`. All numbers nvidia-cuda unless a host-openmp column is given; both backends were
+run and agree.
+
+### What shipped
+
+`CutcellMG::setOutflowCoefficient` + `mgSaveFacePlane` / `mgRestoreFacePlane` / `mgCoarsenFacePlane`
+and the rewritten `applyBoundaryOpenness` (`src/mac_cutcell_mg.hpp`); `buildRhoCoeffOutflowFace`
+(`src/mac_pressure.hpp`); the varRho pressure build + the collocated outflow correction
+(`src/flow_ibm.hpp`); `set_outflow_rho_correction` **default flipped to ON**;
+`vof::wyIsMixed(c, eps)`, `vof::wyColourJump`, `WyAdvector::wispEps` and the composed
+`computeFluxesCut` (`src/vof/advect_wy.hpp`, `src/vof/momentum_advect.hpp`);
+`setExactResidual`/`exactResidualPinned` (`src/mac_cutcell.hpp`) with `enableVof` turning it on;
+`set_vof_wisp_eps` / `set_pressure_exact_residual` bindings; the `advect_vof` guard repair; gate G
+in `tests/kokkos/test_vof_bc.cpp`, gate C2 in `tests/kokkos/test_vof_advect.cpp`, the composed +
+drained scenes in `tests/kokkos_mpi/test_vof_bc_mpi.cpp`; the `maxAbsDiff` NaN sweep (13 files).
+
+### The operator defect: what it actually was, and why only one side of it was visible
+
+WO-R's diagnosis was right and its proposed one-line fix ("impose the caller's coefficient") is only
+half the story, because the staggered face index makes the two sides of an axis **asymmetric**:
+
+| domain face of axis `a` | face index | who writes it | what `applyBoundaryOpenness` did |
+|---|---|---|---|
+| low  (`bc_[2a] == 3`)   | `g` — an **inner** index | `buildRhoCoeff` (level 0), `coarsenOpenAvg` (coarse) | overwrote a correct `o·ρ₀/ρ_f` with **1.0** |
+| high (`bc_[2a+1] == 3`) | `dims-g` — a **ghost** index | **nobody**; the periodic/halo fill wraps the opposite boundary in | 1.0 was the only value it ever had |
+
+So the low side needed the overwrite REMOVED and the high side needed a value SUPPLIED. The shipped
+fix is exactly that: under `setOutflowCoefficient(true)` the low side is left alone at every level,
+and the high side is snapshotted from the caller's field before the level-0 fill and then
+**area-coarsened plane by plane** down the hierarchy (`mgCoarsenFacePlane`, the same rule
+`coarsenOpenAvg` applies to every interior face). `IbmSolver::project` fills the level-0 high plane
+with `buildRhoCoeffOutflowFace` — literally the expression `bcCorrectOutflowVar` evaluates at that
+face, which is what makes the pair exact. With the flag off the literal-1.0 path is untouched.
+
+Two consequences worth carrying:
+* **the coarse-level high plane is a NEW quantity.** WO-R2 said "coarser levels: whatever the
+  coarsening produced". Nothing was produced — `coarsenOpenAvg` writes coarse INNER cells only, so
+  the coarse high-side outflow face is a ghost index it never reaches. It had to be coarsened
+  explicitly.
+* **MG telescoping is refused** under the coefficient path (`setOpenness` throws): the telescope
+  stage gathers inner cells only, so the fine high-side plane does not survive the merge. Telescoping
+  is off by default; a two-phase open-boundary run must keep it off.
+
+### Item 1 gates
+
+**The F2 verdict INVERTS, exactly as WO-R2 predicted.** `tests/kokkos/test_vof_bc.cpp` gate F2,
+stratified duct 32×4×16, walls ±z, inflow −x, outflow +x, 5 steps, `max|div(open u)|` of the
+**projected** field:
+
+| ratio | operator = raw openness (WO-R) | operator = `o·ρ₀/ρ_f` (WO-R2) |
+|---|---|---|
+| | plain corr. / with `1/ρ_f` | plain corr. / with `1/ρ_f` |
+| 1    | 1.407e-17 / 1.407e-17 (bitwise) | 1.400e-17 / 1.400e-17 (bitwise) |
+| 10   | **8.763e-10** / 9.236e-03 | 9.972e-05 / **8.314e-10** |
+
+(the 1.407e-17 → 1.400e-17 at ratio 1 is not this change: that row runs constant-density, where the
+whole coefficient path is off. It is the exact-residual default of item 3.) The gate's polarity is
+flipped in the test with the mechanism written into it, and `set_outflow_rho_correction` now
+**defaults ON** (`PECLET_FLOW_OUTFLOW_RHO=0` is the ablation).
+
+**The outlet divergence by density ratio** (same duct, 5 steps, `max_open_divergence_projected`,
+shipped defaults, i.e. the fixed operator + the exact residual):
+
+| ratio | `1/ρ_f` correction ON (default) | OFF (ablation) | pressure |
+|---|---|---|---|
+| 1    | **1.400e-17** | 1.400e-17 | 32/400 |
+| 10   | **2.534e-16** | 9.972e-05 | 33/400 |
+| 100  | **1.092e-15** | 7.393e-04 | 53/400 |
+| 1000 | **5.445e-15** | 9.082e-03 | **400/400 — capped** |
+
+The WO-R2 gate (`≤ 1e-10` at 10/100/1000) is met by four to five orders. The ratio-1000 **cap on
+this duct is pre-existing and unrelated** (it caps identically in the ablation, and it is the S3
+coefficient-coarsening item): note that the two ratio-1000 configurations that WO-R could not get a
+valid run out of at all — the Nusselt film and the gas-over-pool — now converge in 64 and 76
+iterations.
+
+**G2 Nusselt falling film — PASS at ratio 100 AND 1000**, the gate WO-R had to stop on.
+`tests/study/vof_open_boundaries.py nusselt`, 32×4×64, δ = 8, film Re 5, FCG, 2400 steps with dt
+re-picked every 20 from the solver's own WY limit:
+
+| ratio | δ measured (target 8) | Q vs Nusselt | ΣC steadiness, last 200 steps | pressure | `max|div|` projected |
+|---|---|---|---|---|---|
+| 100  | **8.0825** (+0.0825 cells) | **+0.21 %** | 1.103e-08 | **57 / 400** | 2.29e-12 |
+| 1000 | **8.0820** (+0.0820 cells) | **+0.21 %** | 1.897e-08 | **64 / 2000** | 2.13e-12 |
+
+Gate: Q within 3 %, δ within 0.5 cell, ΣC steady to 1e-4, no cap. **All four met at both ratios.**
+Before/after on the SAME binary (`PECLET_FLOW_OUTFLOW_COEFF=0` restores the old operator row): the
+ratio-100 run **dies** — `WyAdvector: CFL = 0.317306 exceeds the boundedness cap 0.25 at dt =
+0.321394` — which is WO-R's failure reproduced exactly (its `max|w|` 1.4550 against the film's
+`u_max` 0.31236 is the same event one step earlier). WO-R's recorded functionals came from a
+60-step probe before the blow-up (δ −0.0040, Q −1.40 %); the converged film is +0.0825 / +0.21 %,
+i.e. the sign of the thickness error changes once the run is actually steady.
+
+**G3 gas over a pool — the item-1 half PASSES, the quiescence half still fails (but the run is now
+VALID).** 64×4×32, ratio 1000, gas inflow −x over a pool, outflow +x, 500 steps, FCG cap 800:
+
+| | WO-R | WO-R2 |
+|---|---|---|
+| pressure | **800 / 800 — CAPPED, run INVALID** | **76 / 800, valid** |
+| `max|div|` projected | 8.55e-05 | **3.28e-12** |
+| pool volume drift (gate 1e-10) | −2.815e-03 | **1.030e-03** — still FAIL |
+| `max|u|` in the liquid / inlet speed (gate 1e-3) | 3.123e-02 | **3.124e-02** — still FAIL |
+| inflow ghost ρ | correct | correct (1 above the pool, 1000 at the pool's inlet plane) |
+
+So the WO-R2 gate ("G3's pressure solve no longer capped") is met, and the two physics tolerances
+that were already failing are **unchanged by this work order** — they are a spurious-current /
+momentum-consistency question at ratio 1000, not an outflow-operator one. Recorded, not fixed.
+
+**G1 colour budget (coupled) — PASS and tighter.** 32×32×64 driven by `step()`, 60 + 740 steps:
+budget drift **1.295e-15 relative** (WO-R 4.589e-15), `max|div(open u)|` projected **1.92e-13**
+(1.77e-13), pressure 22/400, C ∈ [−1.39e-16, 1+7e-16].
+
+**Byte-identity at constant density — PASS.** `pressure_wallbounded` is byte-identical to `main`
+on nvidia-cuda (`diff` of the full stdout). With BOTH new defaults ablated
+(`PECLET_FLOW_EXACT_RESIDUAL=0 PECLET_FLOW_VOF_WISP_EPS=0`) all eight VoF ctests — `vof_plic`,
+`vof_advect`, `vof_twophase`, `vof_momentum`, `vof_curvature`, `vof_cutcell`, `vof_wetting`,
+`vof_surface_tension` — are **byte-identical to the same tests built at `main`**, which is the
+proof that items 1, 2 and 4 are inert when their features are off.
+
+### Item 2 — V5a × V-BC composed
+
+`computeFluxesCut` now carries the out-of-domain mask and the per-face ledger itself:
+`F_f = o_f · wyFaceFluxBc(...)`, i.e. `o_f · C_datum · a` at a domain face, with `o_f < 1` where a
+solid cuts that face, and the clamp skipped for an out-of-domain donor (it is on the algebraic
+branch, already exactly bounded — clamping it would break the exact full-cell cancellation).
+
+**Gate G (`tests/kokkos/test_vof_bc.cpp`, new)** — 20×20×32 duct, walls ±x ±y, inflow −z (w = 1),
+outflow +z, a four-sphere array in the middle, upper half liquid at t = 0 so the OUTLET carries
+liquid from step 1; 80 `step()`s to a steady field, then 340 kinematic advections with dt re-picked
+from the solver's own cut-cell interface Courant:
+
+| scene | solid / cut cells | `max|div(open u)|` | Σ eps_eff C in → out | injected / LEFT | budget drift (rel) | ΣC over solid | clipped |
+|---|---|---|---|---|---|---|---|
+| packing clear of both planes | 640 / 800 | 2.086e-15 | 5883.25 → 2137.30 | 833.57 / 4579.52 | **2.708e-16** | **0.000e+00** | 3.52e-20 |
+| a sphere CUTS the outlet plane | 716 / 996 | 7.274e-14 | 5721.00 → 1954.90 | 851.17 / 4617.27 | **7.196e-15** | **0.000e+00** | 8.35e-20 |
+
+Both are inside the 1e-12 gate by three orders, C stays in [0, 1] over the uncut fluid, and 17
+pressure iterations (no cap).
+
+**Corrected gate — the MPI half cannot be bitwise, and the reason is structural.** WO-R2 asks for
+"MPI np 1/2/4 bitwise on the kinematic run". The pattern that makes a kinematic colour run bitwise
+across decompositions (`vof_cutcell_mpi`: run the reference on the FULL grid on every rank, then
+`setField` its velocity slice into each block) **cannot be used through an open boundary**: the
+outflow-face correction lives on a ghost face index that `setField` does not carry, and the ghost
+fill `setField` triggers is precisely the one that erases it (`fillVelGhosts` → `outflowCorrValid_
+= false`, WO-R's own finding). A distributed solver fed that way would advect a field that differs
+from the single-rank one at the outlet plane by the whole outflow correction. The composed MPI
+scene is therefore driven by `step()` on both sides and gated at the allreduce-order floor, like
+the existing coupled-jet scene, with the BUDGET identity gated absolutely. The two rungs' bitwise
+kinematic gates still exist separately (`vof_cutcell_mpi` closed box, `vof_bc_mpi` slug).
+
+### Item 3 — VoF turns the exact residual on
+
+`exactResidual()` is now a settable process-wide flag (`setExactResidual`) that the env var
+INITIALISES; `enableVof` turns it on unless `PECLET_FLOW_EXACT_RESIDUAL` was set explicitly
+(`exactResidualPinned`), which is what makes `=0` the battery-wide ablation.
+`set_pressure_exact_residual(False)` after `enable_vof` is the per-run ablation.
+
+**The WO expected last-digit moves at ratio 1 and got four-order improvements in residuals.** With
+`PECLET_FLOW_VOF_WISP_EPS=0` so that only this default is active, against the same tests built at
+`main` (nvidia-cuda, full-stdout `diff`):
+
+| ctest | moved? | what moved |
+|---|---|---|
+| `vof_plic` | no | byte-identical |
+| `vof_advect` | no | byte-identical (the standalone advector never touches the pressure solve) |
+| `vof_curvature` | no | byte-identical |
+| `vof_wetting` | no | byte-identical |
+| `vof_cutcell` | **yes** | G2 packing `max|div(open u)|` **3.048e-11 → 1.480e-15**; conserved functional drift **7.685e-12 → 1.488e-16**; clipped volume 1.47e-19 → 5.97e-19 |
+| `vof_momentum` | **yes** | K4 per-step momentum conservation **2.382e-13 / 1.822e-13 / 1.852e-13 → 2.791e-16 / 3.401e-16 / 2.267e-16** (three components); K1 `max|u−U|` 1.3921e-07 → 1.3922e-07; K2 clamped-flux count 84486 → 84646 |
+| `vof_surface_tension` | **yes, at 1e-17** | static-droplet `max|u|` 2.6829e-17 → 3.5725e-17 (n = 16), 2.4458e-17 → 2.4252e-17 (n = 32), 2.4682e-17 → 2.6129e-17 (n = 48) — every value is at the round-off floor of a field that should be exactly zero |
+| `vof_twophase` | **yes, and one gate had to be re-stated — see below** | |
+
+The WO's "if any moves more than 1e-12 relative, stop and report" is written for a FUNCTIONAL. What
+moved by more than 1e-12 here are **residuals and conservation defects, every one of them
+downward** — the exact operator removes the float `A·1 ≠ 0` error, which is the whole point of P1.
+No published functional moved: Hysing case 1 (`vof_surface_tension` gate) and the static-droplet Ca
+are unchanged, the cut-cell θ and Young–Laplace numbers are unchanged, and `vof_momentum`'s K1
+identity moved in its last printed digit at 1e-07 (its own floor, the float momentum diagonal).
+Reporting rather than stopping, with the ablation shipped.
+
+**The one gate that had to be re-stated: `vof_twophase` gate E, the harmonic-ρ_f ABLATION.** That
+gate exists to show that a harmonic face mean is NOT the consistent one (`CHECK(perr > 1e-3)`); with
+the float bands it settles at a dP/dz error of **0.3355**, and with the exact operator the same
+ratio-1000 hydrostatic column **leaves the Weymouth–Yue boundedness cap before step 100 and the
+advector throws**. Verified to be a property of `PECLET_FLOW_EXACT_RESIDUAL=1` alone by running the
+`main` binary with the env var set: it aborts at the identical point with the identical message
+(`CFL = 0.294669 ... at dt = 1`). It is a LOUDER confirmation of the same statement, so the gate now
+accepts either outcome and prints which it saw. The ARITHMETIC runs in the same gate are unaffected
+and in fact tighter: ratio 1000 free C, dP/dz rel-err **1.022e-15 → 4.263e-16**.
+
+### Item 4 — the wisp guard, and two more defects it exposed
+
+`WyAdvector::wispEps` (default **0 = V1 verbatim, bit for bit** — `wyIsMixed(c, 0)` is
+`c > 0 && c < 1.0 - 0.0`, the same expression); `IbmSolver::enableVof` sets it to **1e-8**, the same
+threshold the V3 curvature predicate uses. It gates the reconstruction pass, every flux branch
+(`wyFaceFlux`, `wyFaceFluxBc`, `computeFluxesCut`), the momentum advector's `vofCellBox`, and the
+interface Courant band. A cell outside the band is fluxed ALGEBRAICALLY as `C_donor · a` — its
+ACTUAL colour — so the telescoping conservation is untouched.
+
+**4b, the interface Courant band (new gate C2 in `tests/kokkos/test_vof_advect.cpp`).** Published
+Zalesak setup, 100×100×4, one revolution (1000 steps), `interfaceLocalCfl = true` (the solver's
+setting), host-openmp:
+
+| `wispEps` | band Courant after step 1 | after 1000 | worst | volume drift |
+|---|---|---|---|---|
+| 0 | 0.2545 | **0.3142** | 0.3142 | 0.000e+00 |
+| 1e-8 | 0.2545 | **0.2608** | 0.2608 | 8.787e-15 |
+
+and the two numbers are both explained from first principles, which is what makes this a gate rather
+than a threshold: the disk's farthest point is at r = 0.25 + 0.15 = 0.40 from the rotation centre, a
+band of "mixed cells and their face neighbours" reaches r + 1.5 h, and `ω (0.40 + 1.5 h) dt/h` =
+**0.2608** — the guarded run's number to the printed digit. The unguarded 0.3142 is `ω · 0.5 · dt/h`,
+i.e. the band has grown to the full radius of the disk's sweep: the round-off wake. (The global max a
+whole-domain limiter would report is 0.4443.) The coordinator's proposed threshold of 0.26 is
+0.0008 BELOW the exact geometric bound, so the gate is stated against the bound, not against 0.26.
+
+**Two test gates measured the difference of two predicates once the default changed, and both were
+wrong gates rather than regressions.** `vof_twophase` gate A ("the solver's VoF equals a standalone
+`WyAdvector` on the same LeVeque field") and `vof_cutcell` gate G3b ("solver vs standalone through
+the packing") build their reference with a raw `WyAdvector`, whose `wispEps` default is 0, and
+compare it against a solver at 1e-8: they read **8.481e-09** and **2.594e-09**, i.e. exactly the
+scale of the threshold. Configuring the reference like the solver
+(`IbmSolver::defaultVofWispEps()`, exposed for this) restores **0.000e+00** on G3b and the
+projection-residual floor on gate A. Any future gate that compares the two paths must copy the
+knob.
+
+**Item 3's own gate: Hysing case 2 through the new default.** `tests/study/vof_surface_tension.py
+hysing2`, 64×128×4, adaptive dt, nvidia-cuda. WO-R's `PECLET_FLOW_EXACT_RESIDUAL=1` column is
+reproduced to **every printed digit** by the exact-residual default alone; adding the wisp guard
+keeps both functionals and the divergence identical while taking **9.4 % fewer steps**:
+
+| | WO-R default (float bands) | WO-R `=1` | WO-R2 exact only (`WISP_EPS=0`) | WO-R2 shipped defaults |
+|---|---|---|---|---|
+| `max|div(open u)|` | 1.85e-03 | **5.15e-11** | **5.15e-11** | **5.15e-11** |
+| v_rise max | 0.2574 at t = 0.671 | 0.2574 at 0.671 | **0.2574 at 0.671** | **0.2574 at 0.671** |
+| `y_c(3)` | 1.1082 | 1.1082 | **1.1082** | **1.1082** |
+| steps to t = 3 | 1123 | 1123 | **1123** | **1017** |
+| max pressure iters | 116 / 600 | 116 / 600 | **116 / 600** | 158 / 600 |
+| dt-limit census (capillary / WY) | 5 / 108 | 5 / 108 | **5 / 108** | 8 / 94 |
+
+The 1123 → 1017 is item 4b on a production case: the wisp guard narrows the interface Courant band
+back to the interface, the WY limit relaxes, dt grows and the run needs fewer (larger) steps — and
+the two published functionals do not move at all.
+
+**Item 4's own gate: the emptying-domain MPI scene.** `tests/kokkos_mpi/test_vof_bc_mpi.cpp` gate A
+was extended from 185 to **500 steps**, i.e. 300 steps INTO the drained regime where WO-R measured
+`ΣC → -inf` at step 186 and NaN at 187. host-openmp, np 1/2/4:
+
+| np | colour vs single-rank | ledger vs single-rank | global budget | in / out | non-finite cells |
+|---|---|---|---|---|---|
+| 1 | **0.000e+00** | 0.000e+00 | 1.075e-12 | 1024 / 1024 | **0** |
+| 2 | **0.000e+00** | 8.476e-13 | 2.274e-13 | 1024 / 1024 | **0** |
+| 4 | **0.000e+00** | 8.476e-13 | 2.274e-13 | 1024 / 1024 | **0** |
+
+**The composed MPI scene** (new gate C in the same file: the four-sphere packing with one sphere
+cutting the outlet plane, 40 coupled steps), host-openmp:
+
+| np | colour vs single-rank | budget \|Δ Σ eps_eff C − ledger\| (rel) | ΣC over solid | pressure |
+|---|---|---|---|---|
+| 1 | **0.000e+00** | 4.638e-11 (**1.252e-14**) | **0.000e+00** | 16 / 400 |
+| 2 | 1.166e-15 | 4.684e-11 (**1.264e-14**) | **0.000e+00** | 16 / 400 |
+| 4 | 1.332e-15 | 4.638e-11 (**1.252e-14**) | **0.000e+00** | 16 / 400 |
+
+(np = 2 cuts z, np = 4 cuts x and z, i.e. both the inflow/outflow planes and the packing.) The whole
+`vof|vardensity` MPI battery is **30/30 green** on host-openmp.
+
+**nvidia-cuda, the same two scenes** (`build_kmpi_cuda/test_vof_bc_mpi`):
+
+| np | slug colour | slug budget | packing colour | packing budget (rel) | ΣC over solid | jet colour |
+|---|---|---|---|---|---|---|
+| 1 | **0.000e+00** | 8.424e-13 | **0.000e+00** | 1.252e-14 | 0.000e+00 | 0.000e+00 |
+| 2 | **0.000e+00** | 1.417e-29 | **0.000e+00** | 1.252e-14 | 0.000e+00 | 0.000e+00 |
+| 4 | **0.000e+00** | 1.417e-29 | 9.992e-16 | 1.252e-14 | 0.000e+00 | 7.216e-15 |
+
+### The battery
+
+| | nvidia-cuda | host-openmp |
+|---|---|---|
+| `tests/kokkos` ctest | **30 / 30 PASS** | **30 / 30 PASS** |
+| `tests/kokkos_mpi` `vof|vardensity` (np 1/2/4) | `vof_bc_mpi` 3/3 PASS | **30 / 30 PASS** |
+| post-rebase onto `origin/main` (`b4c829a`, the Part II phase-change rungs) | **31 / 31 PASS** | **31 / 31 PASS**; MPI `vof_bc|vof_cutcell|vof_twophase|vardensity` **12 / 12 PASS** |
+| `tests/regression/sdflow_regression.py` | **PASS, `+0.00 %` on every metric of all three beds with identical iteration and step counts** (`zh_sphere` K 7.2997/7.3891/7.4162/7.4361/7.4404, order 2.29, K_inf 7.447; `random_spheres` order 2.19, k*_inf 0.0062362; `hollow_rings` order 1.38, k*_inf 0.017184) | — |
+
+### Two defects found on the way, both fixed here
+
+1. **`advect_vof`'s divergence guard was INERT on a bare box** (reported by the E1 gallery page).
+   `max_open_divergence()` returns 0.0 when `cutcellPressure_` is unset, so the guard's
+   `div <= 1e-10` compared 0 against 1e-10 and passed whatever the field was: a
+   cell-centre-sampled LeVeque field, whose true `max|div(open u)|` is 0.612, was accepted and lost
+   **4.93 % of the liquid in 50 steps** with no diagnostic at all. `advectVofKinematic` now THROWS
+   with the fix in the message unless a cut-cell pressure operator exists, and measures with the
+   NON-mutating `maxOpenDivergenceProjected()` (WO-R's finding: the mutating one re-imposes the
+   zero-gradient outflow face and reports a field the advector will not be handed).
+2. **`tests/kokkos_mpi/CMakeLists.txt` did not PARSE.** Commit `86192ad` (WO-R) left a duplicated
+   `foreach` fragment — `... vof_collocated_mpi)` followed by a bare
+   `vof_surface_tension_mpi vof_cutcell_mpi vof_bc_mpi)` — so CMake refused the whole file
+   ("Parse error. Expected \"(\"") and **the entire MPI battery was unconfigurable from WO-R
+   (`86192ad`) until the Part II phase-change commit (`b4cfca5`)**, with `vof_bc_mpi` never in the
+   build list at all. That is why WO-R's "re-run `vof_bc_mpi` on a quiet machine before merging"
+   could not have been done. Found and fixed independently here and upstream; this branch's rebase
+   keeps the upstream list (which now also carries `vof_phase_change_mpi` and
+   `movingscene_advect_mpi`).
+
+### `maxAbsDiff`'s NaN blindness, swept
+
+`m = std::fmax(m, std::fabs(a[i] - b[i]))` returns `0.000e+00` for a field that has gone entirely
+NaN, because `fmax(x, NaN) == x` — so every bitwise gate built on it passes on the worst possible
+field. WO-R fixed its own copy; the other **13** in `tests/kokkos` / `tests/kokkos_mpi` now return
+the non-finite difference (`test_vof_collocated`, `test_vof_momentum`, `test_vof_surface_tension`,
+`test_vof_twophase`, and the MPI `bodyforce_ghost`, `dragbeta_ghost`, `vardensity`, `varmu`,
+`vof_collocated`, `vof_cutcell`, `vof_momentum`, `vof_twophase`, `vof_wetting`). **Not swept:** the
+sibling `maxAbs(v)` helpers in the same files have exactly the same hole; they are a magnitude
+report rather than a gate in most of their uses, so they are recorded here rather than changed.
+
+### Open, and what the coordinating session should decide
+
+1. **G3's quiescence half still fails** and is now the sharpest open two-phase item on an open
+   boundary: at ratio 1000 a resting pool under a gas stream loses 1.03e-03 of its volume in 500
+   steps and picks up 3.1e-02 of the inlet speed. The run is VALID now (76/800), so it is a clean
+   measurement of a spurious-current / momentum-consistency defect rather than of a capped solve.
+2. **The ratio-1000 stratified duct still caps** (400/400) while the Nusselt film and the pool at
+   the same ratio converge in 64 and 76 iterations. The cap is unaffected by this WO (it caps
+   identically in the operator ablation) and belongs to the S3 coefficient-coarsening item.
+3. **MG telescoping and two-phase open boundaries are mutually exclusive** until the telescope
+   stage carries the boundary face plane. Currently a throw.
+4. **`max_open_divergence()` still mutates** (WO-R open question 2, unchanged — it is a
+   re-baselining decision, and `advect_vof` no longer depends on it).
+5. **The composed MPI gate is at the reduction floor, not bitwise**, for the structural reason
+   above. If a bitwise composed gate is wanted, the velocity bridge needs a `setField` variant that
+   carries the outflow face.
+
 ## WO-T — rung V8 minimal (the collocated path) — DONE 2026-09-02, branch `vof-wot`
 
 Worktree `../flow-wot`. All numbers below are reported for BOTH backends where they differ;

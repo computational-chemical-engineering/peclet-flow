@@ -150,10 +150,13 @@ KOKKOS_INLINE_FUNCTION double vofMinmod(double a, double b) {
 /// contract `wyFaceFlux` uses, which is what keeps full/empty cells exactly stationary.
 KOKKOS_INLINE_FUNCTION double vofCellBox(const SField& c, const SField& mx, const SField& my,
                                          const SField& mz, const SField& al, long q,
-                                         const double lo[3], const double hi[3]) {
+                                         const double lo[3], const double hi[3],
+                                         double eps = 0.0) {
   const double cq = c(q);
   const double vol = (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]);
-  if (!wyIsMixed(cq))
+  // WO-R2 item 4: the SAME wisp tolerance the colour reconstruction used, or this reads a plane
+  // the reconstruction pass never wrote for a wisp cell.
+  if (!wyIsMixed(cq, eps))
     return cq * vol;
   return plicBoxVolume(mx(q), my(q), mz(q), al(q), lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
 }
@@ -352,6 +355,7 @@ class MomentumConsistentAdvector {
     const int g = g_;
     SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
            al = w.planeAlpha();
+    const double weps = w.wispEps;  // WO-R2 item 4: the colour reconstruction's own tolerance
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
     for (int comp = 0; comp < 3; ++comp) {
       const long se = strideOf(comp);
@@ -364,10 +368,10 @@ class MomentumConsistentAdvector {
             double lo[3] = {0.0, 0.0, 0.0}, hi[3] = {1.0, 1.0, 1.0};
             lo[ec] = 0.5;
             hi[ec] = 1.0;
-            const double hiHalf = vofCellBox(c, mx, my, mz, al, i - se, lo, hi);
+            const double hiHalf = vofCellBox(c, mx, my, mz, al, i - se, lo, hi, weps);
             lo[ec] = 0.0;
             hi[ec] = 0.5;
-            const double loHalf = vofCellBox(c, mx, my, mz, al, i, lo, hi);
+            const double loHalf = vofCellBox(c, mx, my, mz, al, i, lo, hi, weps);
             out(i) = hiHalf + loHalf;
           });
     }
@@ -424,6 +428,7 @@ class MomentumConsistentAdvector {
     const bool muscl = momentumMuscl, clamp = clampFluxes;
     SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
            al = w.planeAlpha();
+    const double weps = w.wispEps;
     SField ud = w.faceVel(d), cvU = vel_[comp], cvC = cc_[comp];
     SField fc = fluxC_, fu = fluxU_, af = aFace_;
     int lo3[3] = {g, g, g};
@@ -458,7 +463,7 @@ class MomentumConsistentAdvector {
               lo[ec] = 0.5;
               hi[ec] = 0.5 + aa;
             }
-            F = vofCellBox(c, mx, my, mz, al, p, lo, hi);
+            F = vofCellBox(c, mx, my, mz, al, p, lo, hi, weps);
           } else {
             // Transverse sweep: the CV face is the pressure cells' own `d` face, and the donor slab
             // is the union of the `+e` half of one cell and the `-e` half of its `e` neighbour.
@@ -474,10 +479,10 @@ class MomentumConsistentAdvector {
             }
             lo[ec] = 0.5;
             hi[ec] = 1.0;
-            const double hiHalf = vofCellBox(c, mx, my, mz, al, q - se, lo, hi);
+            const double hiHalf = vofCellBox(c, mx, my, mz, al, q - se, lo, hi, weps);
             lo[ec] = 0.0;
             hi[ec] = 0.5;
-            const double loHalf = vofCellBox(c, mx, my, mz, al, q, lo, hi);
+            const double loHalf = vofCellBox(c, mx, my, mz, al, q, lo, hi, weps);
             F = hiHalf + loHalf;
           }
           // Weymouth's admissible interval on the DONOR control volume's own colour (thesis
@@ -609,6 +614,7 @@ class MomentumConsistentAdvector {
     SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
            al = w.planeAlpha(), ep = w.epsFraction();
     UCField kd = w.cellKind();
+    const double weps = w.wispEps;
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
     for (int comp = 0; comp < 3; ++comp) {
       const long se = strideOf(comp);
@@ -628,10 +634,10 @@ class MomentumConsistentAdvector {
             double lo[3] = {0.0, 0.0, 0.0}, hi[3] = {1.0, 1.0, 1.0};
             lo[ec] = 0.5;
             hi[ec] = 1.0;
-            const double hiHalf = vofCellBox(c, mx, my, mz, al, i - se, lo, hi);
+            const double hiHalf = vofCellBox(c, mx, my, mz, al, i - se, lo, hi, weps);
             lo[ec] = 0.0;
             hi[ec] = 0.5;
-            const double loHalf = vofCellBox(c, mx, my, mz, al, i, lo, hi);
+            const double loHalf = vofCellBox(c, mx, my, mz, al, i, lo, hi, weps);
             out(i) = (ea * hiHalf + eb * loHalf) / ecv;
           });
     }
@@ -656,6 +662,7 @@ class MomentumConsistentAdvector {
     SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
            al = w.planeAlpha(), ep = w.epsFraction(), od = w.faceOpenness(d);
     UCField kd = w.cellKind();
+    const double weps = w.wispEps;
     SField ud = w.faceVel(d), cvU = vel_[comp], cvC = cc_[comp];
     SField fc = fluxC_, fu = fluxU_, af = aFace_;
     int lo3[3] = {g, g, g};
@@ -691,7 +698,7 @@ class MomentumConsistentAdvector {
               lo[ec] = 0.5;
               hi[ec] = 0.5 + aa;
             }
-            F = vofCellBox(c, mx, my, mz, al, p, lo, hi);
+            F = vofCellBox(c, mx, my, mz, al, p, lo, hi, weps);
           } else {
             long q;
             if (a > 0.0) {
@@ -708,10 +715,10 @@ class MomentumConsistentAdvector {
             const double ea = vofEpsEff(ep(q - se), kd(q - se) == kVofSolid);
             const double eb = vofEpsEff(ep(q), kd(q) == kVofSolid);
             const double ecv = 0.5 * (ea + eb);
-            const double hiHalf = vofCellBox(c, mx, my, mz, al, q - se, lo, hi);
+            const double hiHalf = vofCellBox(c, mx, my, mz, al, q - se, lo, hi, weps);
             lo[ec] = 0.0;
             hi[ec] = 0.5;
-            const double loHalf = vofCellBox(c, mx, my, mz, al, q, lo, hi);
+            const double loHalf = vofCellBox(c, mx, my, mz, al, q, lo, hi, weps);
             // the same fluid-volume weighting as C^e, renormalized so a uniformly liquid field
             // gives F = |a| exactly (and hence, times `ofac`, the dilation's own `o|a|`)
             F = ecv > 0.0 ? (ea * hiHalf + eb * loHalf) / ecv : 0.0;

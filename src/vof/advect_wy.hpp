@@ -94,6 +94,35 @@ KOKKOS_INLINE_FUNCTION bool wyIsMixed(double c) {
   return c > 0.0 && c < 1.0;
 }
 
+/// WO-R2 item 4 — the same predicate with a WISP TOLERANCE. `eps == 0` is `wyIsMixed(c)` bit for
+/// bit (`1.0 - 0.0 == 1.0`), which is what makes `WyAdvector::wispEps = 0` the V1 scheme verbatim.
+///
+/// Why it exists. An open-boundary domain can DRAIN completely, and no earlier VoF configuration
+/// could. When it does, the colour field is nothing but Weymouth-Yue round-off residue — values of
+/// order 1e-18 — and `0 < c < 1` still calls those cells MIXED. The MYC normal of a stencil of
+/// +-1e-18 values is degenerate and `plicAlpha` divides by it; WO-R measured the consequence on a
+/// drained slug run (nvidia-cuda, np = 1): `sum C` -1.5e-17 at step 185, `-inf` at 186, NaN at 187.
+/// Above the threshold a cell is treated as PURE for reconstruction and for fluxing, and its flux
+/// is the ALGEBRAIC `C_donor * a` of its ACTUAL colour — so nothing is thrown away and the exact
+/// telescoping conservation is untouched. 1e-8 is the same threshold the V3 curvature predicate
+/// already uses under surface tension (`VofCurvature::interfaceEps`).
+KOKKOS_INLINE_FUNCTION bool wyIsMixed(double c, double eps) {
+  return c > eps && c < 1.0 - eps;
+}
+
+/// The interface-BAND jump test of `maxCourantInterface`: two neighbouring cells carry a
+/// DIFFERENT colour. WO-R2 item 4b — with an exact `!=` the Weymouth-Yue round-off residue
+/// (min C ~ -3.8e-17 in the wake of a passing interface) keeps the whole wake inside the band and
+/// the interface-local limiter degenerates towards the global max: measured on Zalesak,
+/// `vof_last_courant()` reads 0.2545 after step 1 and 0.3110 by step 1000 on a case whose
+/// interface never exceeds 0.255, which forces the caller to raise `set_vof_cfl_limit`. `eps == 0`
+/// is `a != b` bit for bit (`|a-b| > 0` is false exactly when `a == b`, NaN aside, and a NaN
+/// colour has already failed every other gate).
+KOKKOS_INLINE_FUNCTION bool wyColourJump(double a, double b, double eps) {
+  const double d = a - b;
+  return (d > eps) || (d < -eps);
+}
+
 /// The six permutations of (x, y, z), cycled by step index so no direction is systematically
 /// favoured (`perm[step % 6]`).
 inline constexpr int kWySweepPerm[6][3] = {{0, 1, 2}, {1, 2, 0}, {2, 0, 1},
@@ -121,16 +150,16 @@ KOKKOS_INLINE_FUNCTION void wyReconstructCell(const SField& c, long i, long sy, 
 /// as a fraction of a cell volume, positive along +dir. `a` is the face Courant number.
 KOKKOS_INLINE_FUNCTION double wyFaceFlux(double a, long p, long sd, int dir, const SField& c,
                                          const SField& mx, const SField& my, const SField& mz,
-                                         const SField& alpha) {
+                                         const SField& alpha, double eps = 0.0) {
   if (a > 0.0) {  // donor is p; the outflow slab is the |a|-thick layer at its + face
     const double cd = c(p);
-    return wyIsMixed(cd) ? plicSlabVolume(mx(p), my(p), mz(p), alpha(p), dir, 1.0 - a, 1.0)
-                         : cd * a;
+    return wyIsMixed(cd, eps) ? plicSlabVolume(mx(p), my(p), mz(p), alpha(p), dir, 1.0 - a, 1.0)
+                              : cd * a;
   }
   if (a < 0.0) {  // donor is p + sd; the outflow slab is the |a|-thick layer at its - face
     const long q = p + sd;
     const double cd = c(q), aa = -a;
-    return -(wyIsMixed(cd) ? faceFluxVolume(mx(q), my(q), mz(q), alpha(q), dir, aa) : cd * aa);
+    return -(wyIsMixed(cd, eps) ? faceFluxVolume(mx(q), my(q), mz(q), alpha(q), dir, aa) : cd * aa);
   }
   return 0.0;
 }
@@ -151,18 +180,20 @@ KOKKOS_INLINE_FUNCTION double wyFaceFlux(double a, long p, long sd, int dir, con
 /// expressions in the same order — which is what makes the mask branch inert (gate G5).
 KOKKOS_INLINE_FUNCTION double wyFaceFluxBc(double a, long p, long sd, int dir, const SField& c,
                                            const SField& mx, const SField& my, const SField& mz,
-                                           const SField& alpha, const UCField& outside) {
+                                           const SField& alpha, const UCField& outside,
+                                           double eps = 0.0) {
   if (a > 0.0) {  // donor is p
     const double cd = c(p);
-    return (wyIsMixed(cd) && !outside(p))
+    return (wyIsMixed(cd, eps) && !outside(p))
                ? plicSlabVolume(mx(p), my(p), mz(p), alpha(p), dir, 1.0 - a, 1.0)
                : cd * a;
   }
   if (a < 0.0) {  // donor is p + sd
     const long q = p + sd;
     const double cd = c(q), aa = -a;
-    return -((wyIsMixed(cd) && !outside(q)) ? faceFluxVolume(mx(q), my(q), mz(q), alpha(q), dir, aa)
-                                            : cd * aa);
+    return -((wyIsMixed(cd, eps) && !outside(q))
+                 ? faceFluxVolume(mx(q), my(q), mz(q), alpha(q), dir, aa)
+                 : cd * aa);
   }
   return 0.0;
 }
@@ -550,6 +581,12 @@ class WyAdvector {
   /// number rather than folklore (`tests/kokkos/test_vof_advect.cpp` gate G). Never enable it in
   /// production: it breaks the telescoping that gives exact conservation.
   bool debugRecomputeDilation = false;
+  /// WO-R2 item 4 — the wisp tolerance on the mixed-cell predicate (`wyIsMixed(c, wispEps)`), used
+  /// by the reconstruction pass, every flux branch and the interface Courant band. **Default 0 =
+  /// V1 verbatim, bit for bit**; `IbmSolver::enableVof` sets it to 1e-8. See `wyIsMixed(c, eps)`
+  /// for the drained-domain NaN it exists to stop, and `maxCourantInterface` for the second
+  /// symptom (the band creeping along the interface's round-off wake).
+  double wispEps = 0.0;
 
   /// Bring the colour ghosts up to date. `advect()` assumes valid ghosts on entry and leaves them
   /// valid on exit, so this is only needed once after initialization.
@@ -746,6 +783,7 @@ class WyAdvector {
     const int g = g_;
     const long sx = 1, sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
     SField c = c_, u = uf_, v = vf_, w = wf_;
+    const double weps = wispEps;
     double m = 0.0;
     Kokkos::parallel_reduce(
         "vof::wy::cfl_interface",
@@ -754,9 +792,10 @@ class WyAdvector {
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = L3(x, y, z, e);
           const double ci = c(i);
-          const bool band = wyIsMixed(ci) || c(i - sx) != ci || c(i + sx) != ci ||
-                            c(i - sy) != ci || c(i + sy) != ci || c(i - sz) != ci ||
-                            c(i + sz) != ci;
+          const bool band = wyIsMixed(ci, weps) || wyColourJump(c(i - sx), ci, weps) ||
+                            wyColourJump(c(i + sx), ci, weps) || wyColourJump(c(i - sy), ci, weps) ||
+                            wyColourJump(c(i + sy), ci, weps) || wyColourJump(c(i - sz), ci, weps) ||
+                            wyColourJump(c(i + sz), ci, weps);
           if (!band)
             return;
           acc = Kokkos::fmax(acc, Kokkos::fabs(u(i)));
@@ -832,6 +871,7 @@ class WyAdvector {
     const long region = static_cast<long>(rx) * ry * rz;
     const long sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
     SField c = c_, mx = mx_, my = my_, mz = mz_, al = alpha_;
+    const double weps = wispEps;  // WO-R2 item 4: the reconstruction and the flux share it
 
     if (useWorklist) {
       LField list = list_;
@@ -843,7 +883,7 @@ class WyAdvector {
             const int iy = static_cast<int>((r / rx) % ry);
             const int iz = static_cast<int>(r / (static_cast<long>(rx) * ry));
             const long i = L3(g - 1 + ix, g - 1 + iy, g - 1 + iz, e);
-            if (wyIsMixed(c(i))) {
+            if (wyIsMixed(c(i), weps)) {
               if (final)
                 list(upd) = i;
               ++upd;
@@ -863,7 +903,7 @@ class WyAdvector {
             const int iy = static_cast<int>((r / rx) % ry);
             const int iz = static_cast<int>(r / (static_cast<long>(rx) * ry));
             const long i = L3(g - 1 + ix, g - 1 + iy, g - 1 + iz, e);
-            if (wyIsMixed(c(i)))
+            if (wyIsMixed(c(i), weps))
               wyReconstructCell(c, i, sy, sz, mx, my, mz, al);
           });
     }
@@ -874,11 +914,9 @@ class WyAdvector {
   /// bit-exactly, in-rank and across a rank boundary alike.
   void computeFluxes(int d, double dth) {
     if (hasGeom_) {  // rung V5a: openness-weighted flux (`cutcell.hpp` eq. 1)
-      // NOT COMPOSED WITH THE V-BC BOUNDARY RULE YET: with an immersed solid the cut-cell flux
-      // path runs and the out-of-domain mask (and hence the algebraic boundary-donor flux and the
-      // per-face boundary ledger) is skipped. A packing that stands clear of the open faces is
-      // unaffected in the interior; a packing that CUTS an inflow/outflow face is out of scope for
-      // both rungs (see the open cut-cell/open-face pressure defect in CLAUDE.md).
+      // COMPOSED with the V-BC boundary rule since WO-R2 item 2: `computeFluxesCut` carries the
+      // out-of-domain mask and the per-face ledger itself, so `F = o_f * C_datum * a` at a domain
+      // face of a geometry-carrying block, including a domain face a solid cuts (o_f < 1).
       computeFluxesCut(d, dth);
       return;
     }
@@ -892,6 +930,7 @@ class WyAdvector {
     const int hi[3] = {g + n_.x, g + n_.y, g + n_.z};
     lo[d] -= 1;
     SField c = c_, mx = mx_, my = my_, mz = mz_, al = alpha_, fl = flux_, u = faceVel(d);
+    const double weps = wispEps;
     if (hasOutsideMask()) {  // WO-R: boundary donors are DATA, not a reconstructable interface
       UCField ob = outside_;
       Kokkos::parallel_for(
@@ -900,7 +939,7 @@ class WyAdvector {
                                                         {hi[0], hi[1], hi[2]}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long p = L3(x, y, z, e);
-            fl(p) = wyFaceFluxBc(u(p) * dth, p, sd, d, c, mx, my, mz, al, ob);
+            fl(p) = wyFaceFluxBc(u(p) * dth, p, sd, d, c, mx, my, mz, al, ob, weps);
           });
       accumulateBcFaceVolume(d);
       return;
@@ -911,7 +950,7 @@ class WyAdvector {
                                                       {hi[0], hi[1], hi[2]}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long p = L3(x, y, z, e);
-          fl(p) = wyFaceFlux(u(p) * dth, p, sd, d, c, mx, my, mz, al);
+          fl(p) = wyFaceFlux(u(p) * dth, p, sd, d, c, mx, my, mz, al, weps);
         });
   }
 
@@ -994,6 +1033,17 @@ class WyAdvector {
            o = of_[d], ep = eps_;
     UCField kd = kind_;
     const bool clamp = cutFluxClamp;
+    const double weps = wispEps;
+    // WO-R2 item 2 — V5a x V-BC. With BOTH rungs armed a domain-face flux in a geometry-carrying
+    // block is `o_f * C_datum * a`: the out-of-domain donor is fluxed ALGEBRAICALLY (it is a
+    // prescribed datum with no reconstructable interface — `wyFaceFluxBc`), and the openness
+    // weight `o_f` still applies, because a solid may cut the domain face itself (o_f < 1 there,
+    // 1 on the clear part). The per-face boundary ledger then accumulates the SAME `o_f`-weighted
+    // number the update telescopes on, so the WO-R budget identity holds unchanged in cut cells.
+    // The clamp keeps its contract: it applies only to a MIXED donor, and an out-of-domain donor
+    // has taken the algebraic branch, whose flux is already exactly bounded.
+    const bool bc = hasOutsideMask();
+    UCField ob = bc ? outside_ : UCField();
     long nclamp = 0;
     Kokkos::parallel_reduce(
         "vof::wy::flux_cut",
@@ -1007,15 +1057,19 @@ class WyAdvector {
             return;
           }
           const double a = u(p) * dth;
-          const double raw = vofCutFlux(op, wyFaceFlux(a, p, sd, d, c, mx, my, mz, al));
+          const double raw =
+              vofCutFlux(op, bc ? wyFaceFluxBc(a, p, sd, d, c, mx, my, mz, al, ob, weps)
+                                : wyFaceFlux(a, p, sd, d, c, mx, my, mz, al, weps));
           if (!clamp || a == 0.0) {
             fl(p) = raw;
             return;
           }
           const long q = a > 0.0 ? p : p + sd;
           const double cq = c(q);
-          if (!wyIsMixed(cq)) {  // algebraic branch: already exactly bounded, and clamping it
-            fl(p) = raw;         // would break the exact full-cell cancellation
+          // algebraic branch: already exactly bounded, and clamping it would break the exact
+          // full-cell cancellation. An out-of-domain donor is on that branch by construction.
+          if (!wyIsMixed(cq, weps) || (bc && ob(q))) {
+            fl(p) = raw;
             return;
           }
           const double aa = a > 0.0 ? a : -a;
@@ -1028,6 +1082,8 @@ class WyAdvector {
         nclamp);
     Kokkos::fence();
     clampedFaces_ += nclamp;
+    if (bc)
+      accumulateBcFaceVolume(d);
   }
 
   /// `eps_i C_i += (F_- - F_+) + c_i (o_+ a_+ - o_- a_-)`, then divide by `eps_eff`. Solid cells
@@ -1103,6 +1159,7 @@ class WyAdvector {
     const long sx = 1, sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
     SField c = c_, u = uf_, v = vf_, w = wf_, ox = of_[0], oy = of_[1], oz = of_[2], ep = eps_;
     UCField kd = kind_;
+    const double weps = wispEps;
     double m = 0.0;
     Kokkos::parallel_reduce(
         "vof::wy::cfl_interface_cut",
@@ -1113,9 +1170,10 @@ class WyAdvector {
           if (kd(i) == kVofSolid)
             return;
           const double ci = c(i);
-          const bool band = wyIsMixed(ci) || c(i - sx) != ci || c(i + sx) != ci ||
-                            c(i - sy) != ci || c(i + sy) != ci || c(i - sz) != ci ||
-                            c(i + sz) != ci;
+          const bool band = wyIsMixed(ci, weps) || wyColourJump(c(i - sx), ci, weps) ||
+                            wyColourJump(c(i + sx), ci, weps) || wyColourJump(c(i - sy), ci, weps) ||
+                            wyColourJump(c(i + sy), ci, weps) || wyColourJump(c(i - sz), ci, weps) ||
+                            wyColourJump(c(i + sz), ci, weps);
           if (!band)
             return;
           const double ei = ep(i);

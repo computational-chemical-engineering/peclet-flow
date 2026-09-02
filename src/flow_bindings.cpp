@@ -822,13 +822,17 @@ static void bind_solver(nb::module_& m, const char* name) {
           "(Zalesak, LeVeque, and the cut-cell conservation gates): a frozen projected velocity "
           "advecting a colour field is a pure statement about the transport scheme, with the "
           "momentum and pressure solves out of the picture.\\n\\n"
-          "It THROWS if the current velocity is not discretely divergence-free to 1e-10 "
-          "(max_open_divergence()). That is not a nicety: Weymouth-Yue's exact conservation is "
-          "CONDITIONAL on sum_f o_f u_f = 0 per cell, because the dilation term adds H(C-1/2) "
-          "times that residual to every full cell's volume budget. Run step() to a steady state "
-          "(or "
-          "project()) and advect with the solver's own output; never with an analytic sample, "
-          "which is solenoidal only to O(h^2).")
+          "It THROWS if the current velocity is not discretely divergence-free to 1e-10, measured "
+          "with max_open_divergence_projected() (the NON-mutating diagnostic). That is not a "
+          "nicety: Weymouth-Yue's exact conservation is CONDITIONAL on sum_f o_f u_f = 0 per cell, "
+          "because the dilation term adds H(C-1/2) times that residual to every full cell's volume "
+          "budget. Run step() to a steady state (or project()) and advect with the solver's own "
+          "output; never with an analytic sample, which is solenoidal only to O(h^2).\n\n"
+          "It ALSO throws when no cut-cell pressure operator exists (WO-R2): without one the "
+          "divergence guard measures nothing at all — max_open_divergence() returns 0.0 — and a "
+          "cell-centre-sampled LeVeque field (true max|div| 0.612) was silently accepted and lost "
+          "4.93 % of the liquid in 50 steps. Call set_pressure_geometry(sdf) on an all-fluid box, "
+          "or set_solid(sdf, cutcell_pressure=True).")
       .def(
           "set_vof_step_parity", [](S& s, long n) { s.setVofStepParity(n); }, nb::arg("n"),
           "Set the sweep-permutation counter of the NEXT colour advection: the Weymouth-Yue sweep "
@@ -838,6 +842,42 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "vof_step_parity", [](S& s) { return s.vofStepParity(); },
           "The sweep-permutation counter of the next colour advection.")
+      .def(
+          "set_vof_wisp_eps", [](S& s, double eps) { s.setVofWispEps(eps); }, nb::arg("eps"),
+          "Wisp tolerance on the Weymouth-Yue mixed-cell predicate: a cell counts as carrying an "
+          "interface only while eps < C < 1 - eps, and one outside that band is fluxed "
+          "ALGEBRAICALLY as C_donor * a — its ACTUAL colour, so the exact telescoping conservation "
+          "is untouched. The same threshold gates the interface-local Courant band "
+          "(|C_i - C_j| > eps instead of an exact !=).\n\n"
+          "DEFAULT 1e-8 (the same value the V3 curvature predicate uses under surface tension); "
+          "0 restores the V1 predicate bit for bit. Two measured reasons it is not 0 (WO-R2 item "
+          "4): (i) a domain that DRAINS through an open boundary leaves nothing but round-off "
+          "residue, ~1e-18, which `0 < C < 1` still calls mixed — the MYC normal of that stencil "
+          "is degenerate and plicAlpha divides by it (sum C -> -inf -> NaN within three steps on "
+          "one backend); (ii) the round-off wake behind a passing interface (min C ~ -3.8e-17) "
+          "kept the whole wake inside the Courant band, so vof_last_courant() on Zalesak read "
+          "0.3110 by step 1000 on a case whose interface never exceeds 0.255.")
+      .def(
+          "vof_wisp_eps", [](S& s) { return s.vofWispEps(); },
+          "The wisp tolerance currently in force (see set_vof_wisp_eps).")
+      .def(
+          "set_pressure_exact_residual",
+          [](S& s, bool on) { s.setPressureExactResidual(on); }, nb::arg("on") = true,
+          "Apply the level-0 pressure operator EXACTLY (matrix-free, double, flux form) in the "
+          "residual and the Krylov matvec instead of reading the float band storage. P1 of the "
+          "suite defect-correction campaign (docs/DEFECT_CORRECTION_PLAN.md); PROCESS-WIDE, and "
+          "PECLET_FLOW_EXACT_RESIDUAL initialises it.\n\n"
+          "enable_vof() turns it ON, because a two-phase coefficient contrast is exactly what "
+          "amplifies the float operator's broken row-sum identity A*1 = 0. Measured on Hysing "
+          "case 2 (64x128x4, adaptive dt, nvidia-cuda): max|div(open u)| 1.85e-03 -> 5.15e-11, "
+          "with 116/600 pressure iterations, 1123 steps, the dt-limit census and both published "
+          "functionals (v_rise max 0.2574 at t = 0.671, y_c(3) 1.1082) identical to every printed "
+          "digit. Everything below level 0 stays float on purpose: it is a preconditioner and its "
+          "errors change the convergence RATE, never the fixed point. Call it with False AFTER "
+          "enable_vof for the ablation.")
+      .def(
+          "pressure_exact_residual", [](S& s) { return s.pressureExactResidual(); },
+          "Whether the exact level-0 operator apply is in force (see set_pressure_exact_residual).")
       .def(
           "set_vof_cutcell_flux_clamp", [](S& s, bool on) { s.setVofCutFluxClamp(on); },
           nb::arg("on"),
@@ -920,6 +960,14 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["unfilled_cells"] = d.unfilledCells;
             r["mean_apparent_angle"] = d.meanApparentAngle;
             r["set_angle"] = d.setAngle;
+            r["dynamic_cells"] = d.dynamicCells;
+            r["pinned_cells"] = d.pinnedCells;
+            r["advancing_cells"] = d.advancingCells;
+            r["receding_cells"] = d.recedingCells;
+            r["mean_imposed_theta"] = d.meanImposedTheta;
+            r["mean_apparent_theta"] = d.meanApparentTheta;
+            r["max_Ca_cl"] = d.maxCaCl;
+            r["max_contact_speed"] = d.maxContactSpeed;
             return r;
           },
           "The solid-band census of the CURRENT colour field on this rank: how many band cells each "
@@ -931,7 +979,74 @@ static void bind_solver(nb::module_& m, const char* name) {
           "left untouched), plus 'mean_apparent_angle' — the mean angle the fluid-only normal "
           "reported at the contact cells BEFORE the rotation, in degrees. That last number is the "
           "direct read-out of how far the fluid-side interface still is from the prescribed angle, "
-          "measured on the fill's own data rather than on a post-processed shape.")
+          "measured on the fill's own data rather than on a post-processed shape.\n\n"
+          "Rung V6 (WO-V6) adds, all zero unless set_contact_angle_dynamic / "
+          "set_contact_angle_hysteresis is configured: 'dynamic_cells' (band cells the V6 pass "
+          "produced an angle for), 'pinned_cells' / 'advancing_cells' / 'receding_cells' (the "
+          "hysteresis branch census), 'mean_imposed_theta' and 'mean_apparent_theta' in degrees, "
+          "'max_Ca_cl' = max |mu_l U_cl / sigma| and 'max_contact_speed' = max |U_cl| in solver "
+          "velocity units.")
+      .def(
+          "set_contact_angle_dynamic",
+          [](S& s, double th, double slip, double mu, double sigma) {
+            s.setContactAngleDynamic(th, slip, mu, sigma);
+          },
+          nb::arg("theta_e"), nb::arg("slip_length_cells"), nb::arg("mu_liquid"),
+          nb::arg("sigma") = 0.0,
+          "Rung V6 (WO-V6). The DYNAMIC contact angle: the angle imposed at the grid scale is the "
+          "Cox-Voinov apparent angle of a contact line moving at speed U_cl, with the outer "
+          "cut-off at the CELL SIZE and an EXPLICIT slip length lambda (Afkhami, Zaleski & "
+          "Bussmann, JCP 228:5370, 2009):\n\n"
+          "    theta_Delta^3 = theta_e^3 + 9 Ca_cl ln(Delta/lambda),   Ca_cl = mu_l U_cl / sigma\n\n"
+          "angles in radians internally, arguments in DEGREES; Ca_cl > 0 advancing, < 0 receding; "
+          "theta_Delta is clamped into [1, 179] degrees (set_contact_angle_clamp).\n\n"
+          "`slip_length_cells` is lambda/Delta and must lie in (0, 1). It is not a tuning knob "
+          "you may omit from a report: a VoF contact line's NUMERICAL slip is proportional to the "
+          "cell size, so without an explicit lambda the imposed angle is silently grid-dependent "
+          "(VOF_PLAN section 6). ALWAYS state lambda alongside a dynamic-wetting result.\n\n"
+          "`mu_liquid` is the liquid dynamic viscosity entering Ca_cl (solver units); `sigma` "
+          "defaults to whatever set_surface_tension holds. theta_e also becomes the static base "
+          "angle, so this call replaces set_contact_angle. U_cl is measured as -u.t_hat at the "
+          "anchor fluid cell of each band cell, with t_hat the IN-WALL direction of the fluid-side "
+          "PLIC normal (m points into the gas, so the liquid advances along -t_hat), then smoothed "
+          "with a 3-point mean along t_hat. Needs set_solid(..., cutcell_pressure=True) + "
+          "enable_vof; with no call every V5b number is byte-identical.")
+      .def(
+          "set_contact_angle_hysteresis",
+          [](S& s, double a, double r) { s.setContactAngleHysteresis(a, r); },
+          nb::arg("theta_a"), nb::arg("theta_r"),
+          "Rung V6 (WO-V6). Advancing / receding contact-angle hysteresis, in DEGREES. While the "
+          "measured apparent angle lies in [theta_r, theta_a] the contact line is PINNED and the "
+          "fill imposes the APPARENT angle itself — which reproduces the current interface exactly, "
+          "because the V5b fill is idempotent (WO-S finding 1), so no Young force appears and the "
+          "line does not move. Above theta_a the advancing angle is imposed and below theta_r the "
+          "receding one, each with the Cox-Voinov correction of set_contact_angle_dynamic when "
+          "that is also configured. Sets the static base to (theta_a+theta_r)/2 if no angle was "
+          "set yet.")
+      .def(
+          "set_contact_angle_dynamic_off", [](S& s) { s.setContactAngleDynamicOff(); },
+          "Turn the V6 dynamic angle and hysteresis off; the static V5b angle stands again.")
+      .def(
+          "set_contact_angle_smoothing", [](S& s, bool on) { s.setContactAngleSmoothing(on); },
+          nb::arg("on"),
+          "ABLATION - the 3-point in-wall mean of U_cl (default ON). A MAC velocity next to a wall "
+          "is noisy cell to cell and the cube root of the Cox-Voinov relation puts that noise "
+          "straight into the imposed angle; off measures what the smoothing is worth.")
+      .def(
+          "set_contact_angle_clamp",
+          [](S& s, double lo, double hi) { s.setContactAngleClamp(lo, hi); }, nb::arg("lo"),
+          nb::arg("hi"),
+          "The clamp on the Cox-Voinov cube, in degrees (default 1 / 179). The cubic has no "
+          "solution beyond the maximum receding capillary number (film entrainment) and the fill's "
+          "plane construction degenerates at 0/180.")
+      .def(
+          "vof_dynamic_field", [](S& s, int w) { return field_out(s, s.getVofDynamicField(w)); },
+          nb::arg("which"),
+          "The V6 per-cell dynamic-wetting state on the inner region, as (nx,ny,nz): 0 the IMPOSED "
+          "angle in degrees, 1 the measured APPARENT angle in degrees, 2 the smoothed U_cl "
+          "(positive = the liquid ADVANCES), 3 Ca_cl, 4 the state (0 not a contact cell, 1 "
+          "Cox-Voinov on the static base, 2 PINNED, 3 advancing, 4 receding). Regenerates the fill, "
+          "so it is also the direct gate on the pass's decomposition independence.")
       .def(
           "vof_has_geometry", [](S& s) { return s.vofHasGeometry(); },
           "True when the colour advection is running the CUT-CELL (openness-weighted) kernels, "
@@ -1142,21 +1257,24 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "set_outflow_rho_correction", [](S& s, bool on) { s.setOutflowRhoCorrection(on); },
           nb::arg("on") = true,
-          "ABLATION (WO-R item 4), DEFAULT FALSE — the measurement refuted the item.\n\n"
-          "doc/variable_density_projection.md section 4 listed the missing 1/rho_f factor in "
-          "bcCorrectOutflow as a defect to fix with a two-phase outflow case. Measured on that "
-          "case (stratified duct, density ratio 10, max|div(open u)| of the PROJECTED field): "
-          "WITHOUT the factor 8.76e-10, WITH it 9.24e-03 — seven orders worse. A projection "
-          "correction cancels the divergence only if it uses the SAME face coefficient the "
-          "operator row used, and the outflow face's coefficient is the RAW openness (buildRhoCoeff "
-          "runs over inner cells only; the multigrid re-imposes the Dirichlet outflow face as "
-          "simply open), so the plain phi difference IS the consistent correction. Removing the "
-          "inconsistency would mean changing the OPERATOR, not this correction.\n\n"
-          "Bitwise inert at constant density (rho_f == rho0 makes the factor exactly 1). "
-          "PECLET_FLOW_OUTFLOW_RHO=1 turns it on process-wide.")
+          "The 1/rho_f mobility factor on the HIGH-side outflow face correction. DEFAULT TRUE "
+          "since WO-R2; pass False (or PECLET_FLOW_OUTFLOW_RHO=0) for the ablation.\n\n"
+          "A projection correction cancels the discrete divergence only if it uses the SAME face "
+          "coefficient the operator row used. Until WO-R2 the multigrid re-imposed the literal "
+          "openness 1.0 at every Dirichlet domain face, overwriting buildRhoCoeff's "
+          "open_f*rho0/rho_f, so the plain phi difference was the consistent partner and WO-R "
+          "measured this factor making things seven orders WORSE. WO-R2 fixed the operator "
+          "(CutcellMG::setOutflowCoefficient) and the verdict inverted. Stratified duct, ratio "
+          "10, 5 steps, max|div(open u)| of the PROJECTED field:\n"
+          "                              old operator   fixed operator\n"
+          "  without the factor            8.76e-10        9.97e-05\n"
+          "  with    the factor            9.24e-03        8.31e-10\n"
+          "(tests/kokkos/test_vof_bc.cpp gate F2.) Bitwise inert at constant density (rho_f == "
+          "rho0 makes the factor exactly 1) and gated on the variable-density path.")
       .def(
           "outflow_rho_correction", [](S& s) { return s.outflowRhoCorrection(); },
-          "Whether the 1/rho_f factor is applied to the outflow face correction (WO-R item 4).")
+          "Whether the 1/rho_f factor is applied to the outflow face correction (WO-R item 4, "
+          "reversed by WO-R2's operator fix; default True).")
       .def(
           "reset_vof_bc_volumes", [](S& s) { s.resetVofBcVolumes(); },
           "Zero the per-face boundary liquid ledger (both the per-step and the running totals).")

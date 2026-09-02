@@ -154,6 +154,54 @@ static void configureJet(IbmSolver& s, int lnx, int lny, int lnz) {
   s.setVofBackflow(5, 0.0);
 }
 
+// ---------------------------------------------- config C: V5a x V-BC composed (WO-R2 item 2)
+// A sphere array inside the open-boundary duct, one sphere CUTTING the outlet plane, so the
+// cut-cell flux path and the out-of-domain donor rule act on the same faces. The SDF is built from
+// GLOBAL cell centres, so every rank derives its own block's geometry from the same scene.
+static std::vector<double> packingSdf(int ox, int oy, int oz, int lnx, int lny, int lnz) {
+  const double sp[5][4] = {{4.5, 4.5, 11, 3.4},
+                           {11.5, 11.5, 11, 3.4},
+                           {4.5, 11.5, 20, 3.4},
+                           {11.5, 4.5, 20, 3.4},
+                           {8.0, 8.0, (double)NZ, 3.6}};  // the last one cuts the +z outlet plane
+  std::vector<double> f((std::size_t)lnx * lny * lnz, 1e30);
+  for (int z = 0; z < lnz; ++z)
+    for (int y = 0; y < lny; ++y)
+      for (int x = 0; x < lnx; ++x) {
+        double d = 1e30;
+        for (const auto& q : sp) {
+          const double dx = x + ox + 0.5 - q[0], dy = y + oy + 0.5 - q[1],
+                       dz = z + oz + 0.5 - q[2];
+          d = std::fmin(d, std::sqrt(dx * dx + dy * dy + dz * dz) - q[3]);
+        }
+        f[(std::size_t)x + (std::size_t)y * lnx + (std::size_t)z * lnx * lny] = d;
+      }
+  return f;
+}
+static void configurePacking(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz) {
+  s.setRho(1.0);
+  s.setMu(0.5);
+  s.setDt(0.1);
+  for (int f = 0; f < 4; ++f)
+    s.setDomainBc(f, 1, 0, 0, 0);
+  s.setDomainBc(4, 2, 0.0, 0.0, 0.5);  // inflow at -z
+  s.setDomainBc(5, 3, 0, 0, 0);        // outflow at +z
+  s.setVelocityIterations(60);
+  s.setPressureLevels(4);
+  s.setPressureIterations(400);
+  s.setSolid(packingSdf(ox, oy, oz, lnx, lny, lnz), true);
+  s.enableVof();
+  std::vector<double> c0((std::size_t)lnx * lny * lnz, 0.0);
+  for (int z = 0; z < lnz; ++z)
+    if (z + oz >= NZ / 2)
+      for (int y = 0; y < lny; ++y)
+        for (int x = 0; x < lnx; ++x)
+          c0[(std::size_t)x + (std::size_t)y * lnx + (std::size_t)z * lnx * lny] = 1.0;
+  s.setVof(c0);
+  s.setVofInflow(4, 1.0);
+  s.setVofBackflow(5, 0.0);
+}
+
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   Kokkos::initialize(argc, argv);
@@ -183,15 +231,16 @@ int main(int argc, char** argv) {
 
     // ---------------------------------------------------------------- A: kinematic slug budget
     {
-      // 20 slug steps then 165 more: at W = 1 and dt = 0.2 the slug's tail clears the 32-cell
-      // domain by step ~182, so the budget is fully exercised (in == out == 1024) and the run
-      // stops before the EMPTIED-DOMAIN WISP REGIME — see the WO-R findings entry: once C is
-      // nothing but +-1e-18 round-off, `wyIsMixed` still calls those cells mixed, the MYC normal
-      // of a ~1e-18 stencil is degenerate and `plicAlpha` divides by it. Measured on nvidia-cuda
-      // at np = 1 (`PECLET_VOF_BC_TRACE=1`, this file): C goes -inf at step 186 and NaN at 187.
-      // That is a V0/V1 wisp fragility, not a boundary one — the boundary machinery is what first
-      // creates a domain that empties completely.
-      const int nSlug = 20, nAfter = 165;
+      // 20 slug steps then 480 more: at W = 1 and dt = 0.2 the slug's tail clears the 32-cell
+      // domain by step ~182 (so the budget is fully exercised, in == out == 1024) and the run then
+      // continues 300 steps INTO THE EMPTIED-DOMAIN REGIME, which is the gate on WO-R2 item 4.
+      // WO-R stopped at 185 because it had to: once C is nothing but +-1e-18 round-off,
+      // `wyIsMixed` called those cells mixed, the MYC normal of a ~1e-18 stencil is degenerate and
+      // `plicAlpha` divided by it — measured on nvidia-cuda at np = 1 (`PECLET_VOF_BC_TRACE=1`,
+      // this file): C went -inf at step 186 and NaN at 187. With the wisp guard
+      // (`WyAdvector::wispEps`, 1e-8 once `enable_vof` is called) those cells are pure for
+      // reconstruction and fluxed algebraically, and the drain runs indefinitely.
+      const int nSlug = 20, nAfter = 480;
       IbmSolver sd(lnx, lny, lnz);
       sd.initMpi(dec, MPI_COMM_WORLD);
       configureSlug(sd, lnx, lny, lnz);
@@ -317,6 +366,73 @@ int main(int argc, char** argv) {
         }
         if (gItmax >= 400) {
           std::printf("  [jet-coupl np=%d] FAIL — the pressure solve CAPPED (run invalid)\n", size);
+          fail = 1;
+        }
+      }
+    }
+    // ------------------------------------------- C: V5a x V-BC composed (WO-R2 item 2), coupled
+    //
+    // WHY THIS ONE IS AT THE REDUCTION FLOOR AND NOT BITWISE. The kinematic pattern the two rungs
+    // use separately (`vof_cutcell_mpi`: run the reference on the full grid, slice its velocity
+    // into every decomposition with `setField`) cannot be used through an OPEN boundary: the
+    // outflow-face correction lives on a ghost face index that `setField` does not carry, and the
+    // ghost fill `setField` triggers is exactly the one that erases it (`outflowCorrValid_`,
+    // WO-R). So the composed scene is driven by `step()` on both sides and gated at the
+    // allreduce-order floor, like the coupled jet above. The BUDGET identity is gated absolutely.
+    {
+      const int steps = 40;
+      IbmSolver sd(lnx, lny, lnz);
+      sd.initMpi(dec, MPI_COMM_WORLD);
+      configurePacking(sd, ox, oy, oz, lnx, lny, lnz);
+      long itmax = 0;
+      double ledger = 0.0, solidSum = 0.0;
+      const double vol0loc = sd.vofDiagnostics().volume;
+      for (int i = 0; i < steps; ++i) {
+        sd.step();
+        itmax = std::max<long>(itmax, sd.lastPressureIterations());
+        const auto v = sd.vofBcVolumes();
+        for (int f = 0; f < 6; ++f)
+          ledger += v[f];
+        solidSum = std::fmax(solidSum, std::fabs(sd.vofDiagnostics().solidSumC));
+      }
+      const double vol1loc = sd.vofDiagnostics().volume;
+      double g0 = 0, g1 = 0, gLed = 0, gSolid = 0;
+      long gIt = 0;
+      MPI_Allreduce(&vol0loc, &g0, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(&vol1loc, &g1, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(&ledger, &gLed, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(&solidSum, &gSolid, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      MPI_Allreduce(&itmax, &gIt, 1, MPI_LONG, MPI_MAX, MPI_COMM_WORLD);
+      const std::vector<double> gc =
+          gatherGlobal(sd.getVof(), ox, oy, oz, lnx, lny, lnz, rank, size);
+      if (rank == 0) {
+        IbmSolver ref(NX, NY, NZ);
+        configurePacking(ref, 0, 0, 0, NX, NY, NZ);
+        for (int i = 0; i < steps; ++i)
+          ref.step();
+        const double dc = maxAbsDiff(gc, ref.getVof());
+        const double budget = std::fabs((g1 - g0) - gLed);
+        std::printf("  [packing   np=%d] colour vs single-rank %.3e; budget "
+                    "|d sum(eps_eff C) - ledger| %.3e (rel %.3e); solid colour %.3e; "
+                    "pressure %ld/400\n",
+                    size, dc, budget, budget / g0, gSolid, gIt);
+        const double tol = (size == 1) ? 0.0 : 1e-11;
+        if (!(dc <= tol)) {
+          std::printf("  [packing   np=%d] FAIL — colour beyond the reduction floor (tol %.1e)\n",
+                      size, tol);
+          fail = 1;
+        }
+        if (!(budget / g0 < 1e-10)) {
+          std::printf("  [packing   np=%d] FAIL — the composed budget does not close\n", size);
+          fail = 1;
+        }
+        if (!(gSolid == 0.0)) {
+          std::printf("  [packing   np=%d] FAIL — colour leaked into solid cells\n", size);
+          fail = 1;
+        }
+        if (gIt >= 400) {
+          std::printf("  [packing   np=%d] FAIL — the pressure solve CAPPED (run invalid)\n",
+                      size);
           fail = 1;
         }
       }

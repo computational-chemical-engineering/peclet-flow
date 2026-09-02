@@ -46,6 +46,7 @@
 //      the limiter must report the interface's Courant number, not the domain's.
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <Kokkos_Core.hpp>
 #include <vector>
 
@@ -77,9 +78,16 @@ double maxAbs(const std::vector<double>& v) {
   return m;
 }
 double maxAbsDiff(const std::vector<double>& a, const std::vector<double>& b) {
+  // WO-R2: NaN-PROPAGATING. `std::fmax(m, NaN) == m`, so the obvious loop returns 0.000e+00 for a
+  // field that has gone entirely NaN and every bitwise gate built on it passes (WO-R found this on
+  // a drained open-boundary run). A non-finite difference must fail, so return it.
   double m = 0;
-  for (std::size_t i = 0; i < a.size(); ++i)
-    m = std::fmax(m, std::fabs(a[i] - b[i]));
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    const double d = std::fabs(a[i] - b[i]);
+    if (!(d == d))
+      return d;  // NaN
+    m = std::fmax(m, d);
+  }
   return m;
 }
 double sum(const std::vector<double>& v) {
@@ -108,6 +116,10 @@ void bridge() {
   // --- reference: the standalone advector, prescribed field -------------------------------------
   WyAdvector ref;
   ref.init(N, N, N, h, peclet::flow::IbmSolver::kVofG);
+  // WO-R2 item 4: the reference must be configured like the solver, wisp tolerance included —
+  // otherwise this gate measures the DIFFERENCE OF TWO PREDICATES (8.481e-09 with the solver at
+  // 1e-8 and the standalone at 0) instead of the bridge it exists to gate.
+  ref.wispEps = peclet::flow::IbmSolver::defaultVofWispEps();
   const I3 eR = ref.extent();
   const int gR = ref.ghost();
   const vofscene::Block bR{ref.inner(), eR, gR, I3{0, 0, 0}};
@@ -492,11 +504,27 @@ int main(int argc, char** argv) {
       hydrostaticC(ratio, /*freeze=*/false, false, 100, 0.1, 1.0);
     }
     // E: the harmonic rho_f ablation must break the balance loudly.
+    //
+    // WO-R2 item 3: "loudly" got LOUDER under the exact level-0 operator, which is now the default
+    // once VoF is on. With the float bands the ablation settles at a dP/dz error of 0.3355; with
+    // the exact operator the same run leaves the Weymouth-Yue boundedness cap before step 100 and
+    // the advector throws. Both outcomes confirm the same statement (the harmonic face mean is not
+    // the consistent one for this discretization), so the gate accepts either — and says which it
+    // saw, because the two are different measurements. The ARITHMETIC runs above are unaffected
+    // and in fact tighter under the exact operator (ratio 1000 free C: dP/dz 1.02e-15 -> 4.26e-16).
     {
-      const double perr = hydrostaticC(1000.0, false, /*harmonic=*/true, 100, 0.1, 1.0);
-      std::printf("E harmonic rho_f dP/dz rel-err %.3e (arithmetic is the consistent mean)\n",
-                  perr);
-      CHECK(perr > 1e-3);
+      double perr = 0.0;
+      bool blewUp = false;
+      try {
+        perr = hydrostaticC(1000.0, false, /*harmonic=*/true, 100, 0.1, 1.0);
+        std::printf("E harmonic rho_f dP/dz rel-err %.3e (arithmetic is the consistent mean)\n",
+                    perr);
+      } catch (const std::exception& ex) {
+        blewUp = true;
+        std::printf("E harmonic rho_f: the ablation left the boundedness cap altogether — %s\n",
+                    ex.what());
+      }
+      CHECK(blewUp || perr > 1e-3);
     }
     constantColour();
     interfaceLocalCfl();

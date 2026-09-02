@@ -56,6 +56,7 @@
 #include "vof/momentum_advect.hpp"  // VoF rung V2b: momentum-consistent rho^c u_c transport
 #include "vof/surface_tension.hpp"  // VoF rung V4: balanced-force CSF + the capillary dt
 #include "vof/phase_change.hpp"    // VoF Part II rungs P0/P1: mass flux, plane-shift regression
+#include "vof/wetting_dynamic.hpp"  // VoF rung V6: dynamic contact angle + hysteresis
 
 namespace peclet::flow {
 
@@ -2636,6 +2637,27 @@ class Solver {
         vofAdv_.buildWettingNormals();
         for (int d = 0; d < 3; ++d)
           vofExchangeRaw(vofAdv_.wettingNormal(d));
+        // Rung V6 (WO-V6): produce the theta FIELD the pass is about to read. Pass A measures the
+        // apparent angle and the raw contact-line speed at ghost depth <= 2 from already-exchanged
+        // data; both are then exchanged so the 3-point in-wall smoothing of pass B, which reaches
+        // depth 3, reads the OWNER's values — the same argument that makes the V5b fill bitwise
+        // across np. Five extra exchanges per fill (three velocity components + two measurements),
+        // skipped entirely when no dynamic angle is configured.
+        if (vofDyn_.active() && vofDyn_.allocated()) {
+          buildVofCellVelocity();
+          vofDyn_.sigma = effectiveContactSigma();
+          if (!(vofDyn_.sigma > 0.0) && vofDyn_.dynamic && !contactSigmaWarned_) {
+            contactSigmaWarned_ = true;
+            std::fprintf(stderr,
+                         "peclet.flow: set_contact_angle_dynamic is active but sigma is 0 "
+                         "(no set_surface_tension and no explicit sigma) - Ca_cl is 0 and the "
+                         "Cox-Voinov correction is inert.\n");
+          }
+          vofDyn_.measure(vofAdv_);
+          vofExchangeRaw(vofDyn_.uclRaw());
+          vofExchangeRaw(vofDyn_.valid());
+          vofDyn_.impose(vofAdv_);
+        }
       }
       vofAdv_.solidBandFill();
       vofExchangeRaw(f);
@@ -5269,8 +5291,21 @@ class Solver {
       else
         buildRhoCoeff(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(rho1_),
                       rho_, e1_, 1);
+      // WO-R2 item 1: buildRhoCoeff covers the LOW domain face of each axis (an inner index) but
+      // not the HIGH one (a ghost index). Fill the high outflow planes here, and tell the MG to
+      // carry the caller's coefficient at every Dirichlet domain face instead of re-imposing the
+      // literal openness 1.0 (which used to overwrite `rho0/rho_f` with 1 on BOTH sides and made
+      // the low-side outlet inconsistent with projectCorrectVar by the full density ratio).
+      {
+        CCField cc[3] = {cx1_, cy1_, cz1_};
+        for (int a = 0; a < 3; ++a)
+          if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
+            buildRhoCoeffOutflowFace(cc[a], CCConst(rho1_), rho_, e1_, 1, a, rhoFaceHarmonic_);
+      }
       mg_.setBoundaryConditions(bc_);
+      mg_.setOutflowCoefficient(hasOutflow_ && outflowOperatorCoeff());
       mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), 1.0, 1.0, 1.0);
+      mg_.setOutflowCoefficient(false);
       chebBoundsSet_ = false;  // spectrum changed with the coefficients (re-estimated by the solve)
     }
     // Porous continuity: the Poisson operator is eps-weighted (c_f = open_f * eps_f), same rails as
@@ -5446,9 +5481,16 @@ class Solver {
                           // (phi=0 there)
         B3 e{e_.x, e_.y, e_.z};
         CCField fa[3] = {uf_, vf_, wf_};
+        // WO-R2 item 1: same rule as the staggered path below — with the operator's outflow row
+        // carrying rho0/rho_f (setOutflowCoefficient) the consistent correction carries it too.
+        const bool var = varRho_ && !porous_ && outflowRhoCorr_;
         for (int a = 0; a < 3; ++a)
-          if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
-            bcCorrectOutflow(fa[a], phi_, e, G, a);
+          if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
+            if (var)
+              bcCorrectOutflowVar(fa[a], phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_);
+            else
+              bcCorrectOutflow(fa[a], phi_, e, G, a);
+          }
       }
       if (colocatedFaceForce()) {
         // rung V8 (WO-T): the cell sees the AVERAGE of what its two faces saw — the force
@@ -5527,10 +5569,9 @@ class Solver {
         // validations never saw it. The porous branches keep the plain correction: their
         // coefficient is the drag/eps relaxation, not 1/rho, and a two-phase porous outlet is not
         // this rung. `!varRho_` is byte-identical.
-        // `set_outflow_rho_correction(True)` (or PECLET_FLOW_OUTFLOW_RHO=1) applies the
-        // 1/rho_f factor. DEFAULT OFF: measured, it makes the outflow divergence seven orders
-        // WORSE, because the operator's outflow-face coefficient is the raw openness — see
-        // setOutflowRhoCorrection for the numbers and the mechanism.
+        // `set_outflow_rho_correction(False)` (or PECLET_FLOW_OUTFLOW_RHO=0) drops the 1/rho_f
+        // factor. DEFAULT ON since WO-R2 fixed the operator's outflow-face coefficient — see
+        // setOutflowRhoCorrection for the before/after table and the mechanism.
         const bool var = varRho_ && !porous_ && outflowRhoCorr_;
         for (int a = 0; a < 3; ++a)
           if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
@@ -5904,7 +5945,42 @@ class Solver {
       return;
     cField_ = addField("C");  // the G=2 registry mirror (closure input / IO / redistribute)
     vofEnabled_ = true;
+    // WO-R2 item 3 — the EXACT (matrix-free, double, flux-form) level-0 residual/matvec becomes
+    // the default the moment there is an interface. Measured on Hysing case 2 (WO-R item 6,
+    // 64x128x4, adaptive dt): it removes 7.5 orders of the projected flux divergence
+    // (1.85e-03 -> 5.15e-11) and moves NOTHING else — 116/600 pressure iterations, 1123 steps, the
+    // dt-limit census and both published functionals identical to every printed digit. The defect
+    // it removes is the float operator's broken row-sum identity A*1 = 0, and a two-phase
+    // coefficient contrast is precisely what amplifies it. `set_pressure_exact_residual(False)`
+    // after `enable_vof` is the ablation.
+    if (!exactResidualPinned())  // an explicit PECLET_FLOW_EXACT_RESIDUAL wins (the ablation)
+      setExactResidual(true);
+    // WO-R2 item 4 — the wisp tolerance. 0 is V1 verbatim (and stays the standalone advector's
+    // default); an open-boundary domain that DRAINS reaches C ~ 1e-18 everywhere, where the MYC
+    // normal is degenerate and plicAlpha divides by it (measured: sum C -> -inf -> NaN in three
+    // steps). Same 1e-8 the curvature predicate uses under surface tension.
+    vofAdv_.wispEps = vofWispEps_;
     buildVofBlock();
+  }
+  /// WO-R2 item 4 — the wisp threshold on the advector's mixed-cell predicate and on the
+  /// interface Courant band. Default 1e-8 once VoF is enabled; 0 restores the V1 predicate bit
+  /// for bit. See `vof::wyIsMixed(c, eps)` and `vof::wyColourJump`.
+  void setVofWispEps(double eps) {
+    if (!(eps >= 0.0) || eps >= 0.5)
+      throw std::runtime_error("set_vof_wisp_eps: the threshold must be in [0, 0.5)");
+    vofWispEps_ = eps;
+    vofAdv_.wispEps = eps;
+  }
+  double vofWispEps() const { return vofWispEps_; }
+  /// The value `enableVof` starts from: 1e-8, or `PECLET_FLOW_VOF_WISP_EPS` when it is set (which
+  /// is how the "V1 verbatim" ablation is taken across a whole battery). A standalone
+  /// `WyAdvector` that a test compares the solver against must be given the SAME value.
+  static double defaultVofWispEps() {
+    static const double v = [] {
+      const char* e = std::getenv("PECLET_FLOW_VOF_WISP_EPS");
+      return e ? std::atof(e) : 1e-8;
+    }();
+    return v;
   }
   bool vofEnabled() const { return vofEnabled_; }
   // Initial / prescribed colour field on the inner cells (flat x-fastest, nx*ny*nz), C in [0,1]:
@@ -6093,6 +6169,107 @@ class Solver {
     vofAdv_.wettingPivot = mode;
   }
   int contactAnglePivot() const { return contactPivot_; }
+
+  // --- rung V6 (WO-V6): the DYNAMIC contact angle and hysteresis --------------------------------
+  //
+  // Nothing in the V5b fill changes; only the VALUE of theta per contact cell does. See
+  // `vof/wetting_dynamic.hpp` for the model (Afkhami, Zaleski & Bussmann, JCP 228:5370 (2009)):
+  //
+  //    theta_Delta^3 = theta_e^3 + 9 Ca_cl ln(Delta/lambda),   Ca_cl = mu_l U_cl / sigma
+  //
+  // with `Delta` the CELL SIZE and `lambda` an EXPLICIT slip length in cells. The explicit slip is
+  // the whole point: a VoF contact line's numerical slip is proportional to `Delta`, so without it
+  // the imposed angle is silently grid-dependent (VOF_PLAN §6). NEVER report a dynamic-wetting
+  // result without stating lambda.
+  //
+  // @param thetaEDeg   the equilibrium (static base) angle, degrees. Also becomes the static angle.
+  // @param slipCells   lambda / Delta, in CELLS. Must lie in (0, 1) — lambda >= Delta would make
+  //                    ln(Delta/lambda) <= 0 and REVERSE the correction.
+  // @param muLiquid    the LIQUID dynamic viscosity entering Ca_cl (solver units).
+  // @param sigma       the surface tension entering Ca_cl; <= 0 means "use set_surface_tension".
+  void setContactAngleDynamic(double thetaEDeg, double slipCells, double muLiquid,
+                              double sigma = 0.0) {
+    if (!(slipCells > 0.0 && slipCells < 1.0))
+      throw std::runtime_error(
+          "set_contact_angle_dynamic: slip_length_cells must lie in (0, 1) cell (lambda < Delta)");
+    if (!(muLiquid > 0.0))
+      throw std::runtime_error("set_contact_angle_dynamic: mu_liquid must be positive");
+    vofDyn_.dynamic = true;
+    vofDyn_.slip = slipCells;
+    vofDyn_.muLiquid = muLiquid;
+    contactSigmaOverride_ = sigma;
+    setContactAngle(thetaEDeg);  // sets the static base and (re)wires the theta field
+  }
+  // theta_a / theta_r, degrees. Composes with the dynamic correction when that is also set: the
+  // hysteresis selector picks the BASE angle and Cox-Voinov corrects it, except on the PINNED
+  // branch (theta_r <= theta_app <= theta_a), where the apparent angle itself is imposed and the
+  // idempotence of the V5b fill (WO-S finding 1) is what makes the contact line stand still.
+  void setContactAngleHysteresis(double thetaADeg, double thetaRDeg) {
+    if (!(thetaADeg >= thetaRDeg))
+      throw std::runtime_error("set_contact_angle_hysteresis: theta_a must be >= theta_r");
+    if (!(thetaRDeg >= 0.0 && thetaADeg <= 180.0))
+      throw std::runtime_error("set_contact_angle_hysteresis: angles must lie in [0, 180]");
+    const double toRad = 3.14159265358979323846 / 180.0;
+    vofDyn_.hysteresis = true;
+    vofDyn_.thetaA = thetaADeg * toRad;
+    vofDyn_.thetaR = thetaRDeg * toRad;
+    if (!contactAngleSet_)
+      setContactAngle(0.5 * (thetaADeg + thetaRDeg));  // a base is required; the mid angle
+    else
+      applyContactAngle();
+  }
+  // Back to the static V5b angle, byte-identically (the driver's views are kept but never read).
+  void setContactAngleDynamicOff() {
+    vofDyn_.dynamic = false;
+    vofDyn_.hysteresis = false;
+    applyContactAngle();
+  }
+  bool contactAngleDynamic() const { return vofDyn_.dynamic; }
+  bool contactAngleHysteresis() const { return vofDyn_.hysteresis; }
+  double contactAngleSlip() const { return vofDyn_.slip; }
+  // ABLATION: the 3-point in-wall mean of U_cl (default ON). Off = the raw per-cell MAC velocity.
+  void setContactAngleSmoothing(bool on) { vofDyn_.smooth = on; }
+  // The angle clamp of the Cox-Voinov cube, degrees (default 1 / 179).
+  void setContactAngleClamp(double loDeg, double hiDeg) {
+    if (!(loDeg > 0.0 && hiDeg < 180.0 && loDeg < hiDeg))
+      throw std::runtime_error("set_contact_angle_clamp: need 0 < lo < hi < 180");
+    const double toRad = 3.14159265358979323846 / 180.0;
+    vofDyn_.thetaMin = loDeg * toRad;
+    vofDyn_.thetaMax = hiDeg * toRad;
+  }
+  // The sigma the dynamic correction uses: the explicit override if one was given, else the CSF's.
+  double effectiveContactSigma() const {
+    return contactSigmaOverride_ > 0.0 ? contactSigmaOverride_ : sigmaCsf_;
+  }
+  // The per-cell dynamic-wetting state on the inner region: 0 the IMPOSED angle (degrees),
+  // 1 the measured APPARENT angle (degrees), 2 the smoothed U_cl, 3 Ca_cl, 4 the
+  // `vof::VofDynamicState`. Non-contact cells read 0 in 1..4 and the static base in 0.
+  std::vector<double> getVofDynamicField(int which) {
+    if (!vofEnabled_ || !vofDyn_.active() || !vofDyn_.allocated())
+      throw std::runtime_error(
+          "vof_dynamic_field: no dynamic contact angle (call set_contact_angle_dynamic / "
+          "set_contact_angle_hysteresis first)");
+    bridgeColourToVof();  // regenerates the fill, hence the dynamic pass
+    CCField t("vofDyn", n_);
+    const double toDeg = 180.0 / 3.14159265358979323846;
+    CCConst src;
+    if (which == 0)
+      src = CCConst(vofDyn_.imposed());
+    else if (which == 1)
+      src = CCConst(vofDyn_.apparent());
+    else if (which == 2)
+      src = CCConst(vofDyn_.speed());
+    else if (which == 3)
+      src = CCConst(vofDyn_.capillary());
+    else
+      src = CCConst(vofDyn_.stateField());
+    copyInner(t, e_, G, src, e3_, kVofG);
+    auto v = gatherInner(t);
+    if (which <= 1)
+      for (auto& q : v)
+        q *= toDeg;
+    return v;
+  }
   struct ContactAngleDiagnostics {
     long contactCells = 0;    ///< band cells written by the theta plane of their own anchor
     long neighbourCells = 0;  ///< band cells written by the mean of the anchor's MIXED neighbours
@@ -6102,6 +6279,15 @@ class Solver {
     long unfilledCells = 0;   ///< SOLID cells pass 1 left untouched (passes 2-3 then fill them)
     double meanApparentAngle = 0.0;  ///< mean measured apparent angle over `contactCells`, degrees
     double setAngle = 0.0;           ///< the prescribed angle, degrees (uniform case)
+    // --- rung V6 (WO-V6), all zero unless a dynamic angle / hysteresis is configured -----------
+    long dynamicCells = 0;    ///< band cells the V6 pass produced an angle for
+    long pinnedCells = 0;     ///< of those, cells whose contact line is PINNED
+    long advancingCells = 0;  ///< theta_app > theta_a
+    long recedingCells = 0;   ///< theta_app < theta_r
+    double meanImposedTheta = 0.0;    ///< mean IMPOSED angle over the V6 contact cells, degrees
+    double meanApparentTheta = 0.0;   ///< mean apparent angle over the same set, degrees
+    double maxCaCl = 0.0;             ///< max |Ca_cl| = |mu_l U_cl / sigma|
+    double maxContactSpeed = 0.0;     ///< max |U_cl| (smoothed), solver velocity units
   };
   // The band census of the CURRENT colour field: how many band cells each branch of the fill wrote
   // and the mean APPARENT angle the fluid-only normal reported at the contact cells (G1's
@@ -6123,6 +6309,17 @@ class Solver {
     d.pureCells = counts[vof::kVofWetPure];
     d.parallelCells = counts[vof::kVofWetParallel];
     d.neutralCells = counts[vof::kVofWetNeutral];
+    if (vofDyn_.active() && vofDyn_.allocated()) {
+      const auto cs = vofDyn_.census(vofAdv_);
+      d.dynamicCells = cs.contactCells;
+      d.pinnedCells = cs.cells[vof::kVofDynPinned];
+      d.advancingCells = cs.cells[vof::kVofDynAdvancing];
+      d.recedingCells = cs.cells[vof::kVofDynReceding];
+      d.meanImposedTheta = cs.meanImposedDeg;
+      d.meanApparentTheta = cs.meanApparentDeg;
+      d.maxCaCl = cs.maxCa;
+      d.maxContactSpeed = cs.maxSpeed;
+    }
     return d;
   }
   // Wire the theta field + the wall SDF onto the colour block. Idempotent; called by the setters
@@ -6149,6 +6346,50 @@ class Solver {
       scatterInner(t, rad);
       copyInner(vofAdv_.contactAngle(), e3_, kVofG, CCConst(t), e_, G);
       vofExchangeRaw(vofAdv_.contactAngle());
+    }
+    // (c) rung V6: the STATIC base the dynamic selector starts from. The V6 pass OVERWRITES
+    //     `contactAngle()` every fill, so it must never read back its own previous output.
+    if (vofDyn_.active()) {
+      vofDyn_.allocate(vofAdv_.size());
+      Kokkos::deep_copy(vofDyn_.base(), vofAdv_.contactAngle());
+    }
+  }
+  // Cell-centre velocity on the colour block, for the V6 contact-line speed. Built from the
+  // solver's own staggered faces (`0.5*(u(i) + u(i+s_c))`, both valid after `fillVelGhosts`) on
+  // the INNER region and then run through the colour field's ghost policy, exactly as the wall SDF
+  // and the fluid-only normals are — that is what keeps the imposed angle decomposition-
+  // independent (WO-S finding 9 applied to a third field).
+  void buildVofCellVelocity() {
+    if (!vofDyn_.allocated())
+      return;
+    if constexpr (Grid::collocated)
+      throw std::runtime_error("set_contact_angle_dynamic: SolverColocated has no immersed solid");
+    const long st[3] = {1, (long)e_.x, (long)e_.x * (long)e_.y};
+    for (int c = 0; c < 3; ++c) {
+      // The cell-centre mean reads the face ONE cell out on the component's own axis, so the
+      // velocity ghost ring has to be valid. Same rule as `bridgeVelocityToVof`: keep the
+      // projection's outflow-face correction when there is one, otherwise the full fill (the
+      // kinematic path, where the zero-gradient rule is what supplies the boundary face at all).
+      if (outflowCorrValid_)
+        fillVelGhostsKeepOutflow(c);
+      else
+        fillVelGhosts(c, 0);
+      if (vofDynVel_[c].extent(0) != n_)
+        vofDynVel_[c] = CCField("vofDynVel", n_);
+      CCField t = vofDynVel_[c];
+      CCConst u = CCConst(C[c].u);
+      const long sc = st[c];
+      const int ex = e_.x, ey = e_.y, g = G;
+      Kokkos::parallel_for(
+          "peclet::flow::vof_dyn_cellvel",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i = (long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey;
+            t(i) = 0.5 * (u(i) + u(i + sc));
+          });
+      CCExec().fence();
+      copyInner(vofDyn_.cellVel(c), e3_, kVofG, CCConst(t), e_, G);
+      vofExchangeRaw(vofDyn_.cellVel(c));
     }
   }
 
@@ -6177,7 +6418,23 @@ class Solver {
     if (!vofEnabled_)
       throw std::runtime_error("advect_vof: VoF is not enabled (call enable_vof / set_vof first)");
     requireVofGeometry("advect_vof");
-    const double div = maxOpenDivergence();
+    // WO-R2 item 4a (found by the E1 gallery page): the divergence guard below was INERT on a bare
+    // box. `maxOpenDivergence()` returns 0.0 when there is no cut-cell pressure operator, so a
+    // cell-centre-sampled analytic field — LeVeque, whose true max|div(open u)| is 0.612 — sailed
+    // through the check and lost 4.93 % of the liquid in 50 steps with no diagnostic at all.
+    // Refuse the configuration instead of measuring nothing.
+    if (!cutcellPressure_)
+      throw std::runtime_error(
+          "advect_vof: no cut-cell pressure operator, so the divergence guard cannot measure "
+          "anything (max_open_divergence() would return 0 whatever the field is). Build one with "
+          "set_pressure_geometry(sdf) on an all-fluid box, or set_solid(sdf, "
+          "cutcell_pressure=True) — Weymouth-Yue conservation is conditional on "
+          "sum_f o_f u_f = 0 per cell and a cell-centre-sampled analytic field does NOT satisfy "
+          "it (measured on LeVeque: max|div| 0.612, 4.93 % of the liquid lost in 50 steps).");
+    // and measure the field the caller actually has: max_open_divergence() re-imposes the
+    // zero-gradient outflow face before measuring, i.e. it MUTATES u and reports a field the
+    // advector will not be handed (WO-R). The projected sibling does neither.
+    const double div = maxOpenDivergenceProjected();
     if (!(div <= 1e-10)) {
       char msg[320];
       std::snprintf(msg, sizeof(msg),
@@ -6313,29 +6570,44 @@ class Solver {
   // the face body force interpolate rho arithmetically and are NOT switched by this flag. Shipped
   // as a measured knob for the coefficient-coarsening question, not as an alternative scheme.
   void setRhoFaceHarmonic(bool on) { rhoFaceHarmonic_ = on; }
+  /// WO-R2 item 3 — the exact (matrix-free, double, flux-form) level-0 operator apply in the
+  /// residual and the Krylov matvec. PROCESS-WIDE (it is a static flag, see mac_cutcell.hpp);
+  /// `enableVof` turns it on, and this is the ablation switch.
+  void setPressureExactResidual(bool on) { setExactResidual(on); }
+  /// WO-R2 item 1 ABLATION, env-only: `PECLET_FLOW_OUTFLOW_COEFF=0` restores the pre-WO-R2
+  /// operator, whose Dirichlet domain-face rows carried the literal openness 1.0 instead of the
+  /// variable-density coefficient `open_f*rho0/rho_f`. It exists so the before/after of the
+  /// Nusselt film and the outflow divergence stays measurable on one binary; there is no reason
+  /// to set it in production.
+  static bool outflowOperatorCoeff() {
+    static const bool v = [] {
+      const char* e = std::getenv("PECLET_FLOW_OUTFLOW_COEFF");
+      return !(e && e[0] == '0');
+    }();
+    return v;
+  }
+  bool pressureExactResidual() const { return exactResidual(); }
   bool rhoFaceHarmonic() const { return rhoFaceHarmonic_; }
-  // WO-R item 4 — and the measurement REFUTED the item. `doc/variable_density_projection.md` §4
-  // listed the missing `1/rho_f` in `bcCorrectOutflow` as a defect ("fine when the outflow region
-  // has rho ~ uniform; revisit with a two-phase outflow case"). This is that two-phase outflow
-  // case, and the factor makes things WORSE by seven orders of magnitude:
+  // WO-R item 4 asked for the `1/rho_f` factor on the high-side outflow correction;
+  // `doc/variable_density_projection.md` §4 listed its absence as a defect. WO-R measured the
+  // factor making the outflow divergence SEVEN ORDERS WORSE and recorded the item as refuted —
+  // correctly, for the operator as it then was. WO-R2 item 1 fixed that operator
+  // (`CutcellMG::setOutflowCoefficient`: the Dirichlet domain-face rows no longer overwrite
+  // `buildRhoCoeff`'s `open_f*rho0/rho_f` with the literal 1.0) and the verdict INVERTED:
   //
   //   stratified duct, ratio 10, 5 steps, max|div(open u)| of the PROJECTED field
-  //     without the factor (the shipped behaviour)   8.76e-10
-  //     with    the factor (`bcCorrectOutflowVar`)   9.24e-03
-  //   (tests/kokkos/test_vof_bc.cpp gate F2; at ratio 1 the two are bitwise equal, 1.41e-17.)
+  //                                    operator = raw openness   operator = rho0/rho_f (WO-R2)
+  //     without the factor                    8.76e-10                    9.97e-05
+  //     with    the factor (this knob)        9.24e-03                    8.31e-10
+  //   (tests/kokkos/test_vof_bc.cpp gate F2; at ratio 1 the two are bitwise equal, 1.40e-17.)
   //
-  // The mechanism, and why it is not a bug in the sibling kernel: a projection correction removes
-  // the discrete divergence only if it uses the SAME face coefficient the operator row used. The
-  // interior faces carry `open_f * rho0/rho_f` (`buildRhoCoeff`), but that kernel runs over INNER
-  // cells only — the outflow boundary face's coefficient is set by the multigrid's own boundary
-  // re-imposition (`bcSetOpenness`, Dirichlet outflow -> open) and is the RAW openness. So the
-  // consistent correction at that face is exactly the plain `phi` difference, which is what
-  // `bcCorrectOutflow` has always done. The real inconsistency, if one wants it removed, is on
-  // the OPERATOR side (give the outflow face the same `rho0/rho_f` the interior faces have, on
-  // every level) — a `CutcellMG` change, not a projection-correction one, and not this rung.
+  // The mechanism is one rule: a projection correction removes the discrete divergence only if it
+  // uses the SAME face coefficient the operator row used. Both table columns obey it; the fixed
+  // operator is the one whose coefficient is also the PHYSICALLY right mobility at the outlet
+  // (the low-side outlet had no consistent pairing at all before the fix — see the Nusselt film).
   //
-  // The sibling therefore ships as a measured ABLATION, DEFAULT OFF. It is bitwise inert at
-  // constant density either way (rho_f == rho0 makes the factor exactly 1).
+  // DEFAULT ON since WO-R2 (`PECLET_FLOW_OUTFLOW_RHO=0` is the ablation). Bitwise inert at
+  // constant density either way (rho_f == rho0 makes the factor exactly 1), and gated on varRho.
   void setOutflowRhoCorrection(bool on) { outflowRhoCorr_ = on; }
   bool outflowRhoCorrection() const { return outflowRhoCorr_; }
 
@@ -8216,13 +8488,17 @@ class Solver {
   CCField rhoField_;         // per-cell density (when varRho_); rho_ is the reference rho0
   // --- geometric VoF (rung V2a, WO-J) ---
   bool vofEnabled_ = false;
+  // WO-R2 item 4 — see setVofWispEps / defaultVofWispEps.
+  double vofWispEps_ = defaultVofWispEps();
   bool rhoFaceHarmonic_ = false;  // harmonic instead of arithmetic rho_f in the projection (OFF)
   bool outflowCorrValid_ = false;  // the projection's outflow-face correction is still in u
-  // WO-R item 4, and the answer is NO — see setOutflowRhoCorrection. Default OFF;
-  // PECLET_FLOW_OUTFLOW_RHO=1 turns the ablation on process-wide.
+  // WO-R item 4 measured NO against the DEFECTIVE operator; WO-R2 item 1 fixed the operator and
+  // the answer flipped to YES (measured: with the fix, the projected outflow divergence at ratio
+  // 10 is 8.31e-10 WITH the factor and 9.97e-05 without). DEFAULT ON;
+  // PECLET_FLOW_OUTFLOW_RHO=0 restores the plain correction as the ablation.
   bool outflowRhoCorr_ = [] {
     const char* e = std::getenv("PECLET_FLOW_OUTFLOW_RHO");
-    return e && e[0] != '0';
+    return !(e && e[0] == '0');
   }();
   CCField cField_;                 // the G=2 registry mirror of the colour field ("C")
   CCField vofCs_;                  // rung V5a: cell fluid fraction on the G=2 block (staggered)
@@ -8234,6 +8510,13 @@ class Solver {
   double contactAngleDeg_ = 90.0;
   int contactPivot_ = vof::kVofPivotVolume;
   std::vector<double> contactAngleField_;
+  // rung V6 (WO-V6): the dynamic angle / hysteresis producer for the theta field. Inert unless
+  // set_contact_angle_dynamic / _hysteresis is called (`vofDyn_.active()`), in which case the
+  // whole V5b battery is byte-identical.
+  vof::VofDynamicWetting vofDyn_;
+  double contactSigmaOverride_ = 0.0;
+  bool contactSigmaWarned_ = false;
+  CCField vofDynVel_[3];
   vof::WyAdvector vofAdv_;         // the g=3 working block: PLIC + Weymouth-Yue sweeps
   C3 e3_{0, 0, 0};                 // extended extents of that block (n + 2*kVofG)
   double vofCflLimit_ = 0.25;      // Weymouth's proven 3D boundedness bound 1/(2(N-1))
