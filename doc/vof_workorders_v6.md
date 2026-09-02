@@ -220,6 +220,53 @@ findings, CLAUDE.md.
 
 ---
 
+## WO-P23 — Part II, rungs P2 (sucking interface) and P3 (Scriven bubble growth)  [Fable spec → OPUS, after WO-P01]
+
+Build on WO-P01 as shipped (read its findings first: the ṁ sign convention with the PLIC normal
+into the gas, the analytic `plicArea`, the liquid-aware clip-and-redistribute, the fixed-order
+gathers, and the P1 order 1.07 → 1.50 mechanism: the energy solve pins the whole interfacial
+CELL at `T_sat` while the gradient is measured from the PLIC PLANE — an O(h) sign-oscillating
+mismatch).
+
+**P2 — the sucking interface** (Welch & Wilson, *JCP* 160:662, 2000): planar, the vapour at
+`T_sat` on one side, SUPERHEATED liquid on the other; the interface moves INTO the liquid and the
+liquid's superheat is "sucked" into the vapour production. Similarity solution with the two-phase
+Stefan condition (Welch & Wilson give it; Boyd & Ling 2023 §4.2 restate it and report order ≥ 1.4
+on the interface position). Needs the liquid side of the gradient fit to be live, i.e. the
+per-phase `k(C)` and `ρ c_p(C)` closures in the energy solve (VOF_PLAN §9 item 6: `ρ c_p T`
+advected with the same geometric fluxes, face heat capacities per sweep — implement the
+consistent transport here, it is what stops artificial heating at high `ρ c_p` ratio) AND the
+band-extended liquid velocity (§9 item 3): with the source in the gas, the liquid moves toward
+the interface; WY must advect `C` with the LIQUID velocity extended one band into the gas
+(constant extension along `n` from the nearest pure-liquid cells, then a band-local divergence
+cleanup — the plan names Palmore–Desjardins eq. 61; a cheap first version: extend, then subtract
+the band's mean normal divergence per interfacial cell so `Σ_f o_f u_f = 0` there to 1e-12;
+measure whether the full band Helmholtz projection is needed by the gate). Gate: interface
+position order ≥ 1.4 over 64/128/256 and the temperature profile within 1 % of the similarity
+solution at N = 256 (ratio 10 first, then the water/steam ratio ~1600 and report).
+**The P1 pinning mismatch is the first thing to fix** (it is what caps P1 at order 1.07 on the
+coarse pair): impose `T_sat` at the PLANE by a ghost-value (GFM-style) Dirichlet in the interfacial
+cell — the cell value that makes the one-sided linear profile from the pure neighbour hit `T_sat`
+at the plane distance — instead of pinning the cell centre; re-measure P1's order (expect ≥ 1.5 on
+both pairs) before P2.
+
+**P3 — Scriven bubble growth** (Scriven, *CES* 10:1, 1959): a spherical vapour bubble growing in
+uniformly superheated liquid, `R(t) = 2 β √(α_l t)` with β from Scriven's integral (tabulate it
+numerically in the test; Ja = ρ_l c_p ΔT/(ρ_g h_lv) = 0.5, 2, 10). 3-D, 128³ first (bubble from
+D/Δ ≈ 12 to ≈ 40), then 192³ if the GPU allows; state the resolution. Gate: `R(t)` within 1 %
+over the last half of the run at the finest resolution you ran (Malan/Boyd–Ling report ≲ 1 % at
+256³); if it misses, the named lever is Aslam quadratic extrapolation of `T` across the band
+(Tanguy 2014) — implement it only if the gate says so, as an option, and record before/after.
+Both: MPI np 1/2/4 at the reduction floor with the decomposition cutting the interface; every VoF
+and phase-change ctest of P01 bit-identical when the new options are off; every run records
+the pressure iterations vs cap and `max|div − S|`.
+
+Deliverables: the plane-anchored Dirichlet, `k(C)`/`ρc_p(C)` closures + consistent `ρ c_p T`
+transport, the band-extended velocity, `tests/kokkos/test_vof_phase_change.cpp` extended (P2 at
+64/128), `tests/study/vof_sucking.py`, `tests/study/vof_scriven.py`, findings, CLAUDE.md.
+
+---
+
 ## WO-V7 — the pore-scale campaign (after WO-R2)  [OPUS runs, Fable/user interpret]
 
 Three cases, each a script under `tests/study/pore_scale/` and together one gallery page
