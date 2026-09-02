@@ -612,7 +612,10 @@ Four things this rung paid for, all measured (`doc/vof_workorders_v5.md`, WO-S f
   two failing rows are also the two whose CONTACT RADIUS is under ten cells (9.1 and 5.3 against
   20.2 at theta = 30), and the same bias is *larger*, not smaller, with the wall on a cell face
   where the cut-cell reconstruction is exactly absent — so it is a contact-line resolution effect,
-  not the cut-cell approximation. At ratio 100 the same protocol reads 29.92 at theta = 30. On an
+  not the cut-cell approximation. At ratio 100 the same protocol reads 29.92 / 58.36 / 88.44 /
+  116.42 / 142.80, i.e. the equilibrium the fill selects is a property of the FILL and not of the
+  density contrast up to 120 deg, with only the (under-resolved, contact radius 5.8 cells)
+  150-degree row degrading further. On an
   SDF SPHERE (Rs = 12, drop of Rd = 8) the equilibrium CAP RADIUS is within **2.11 %** of the
   two-sphere reference at theta = 60/90/120, while the angle inferred from the volume and the apex
   height is off by 4.5 / -2.7 / -6.2 deg — that inversion carries `dtheta/dH ~ 10.5 deg per cell`,

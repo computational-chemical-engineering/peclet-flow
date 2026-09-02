@@ -480,7 +480,7 @@ even allocated.
 | **G0d** the wetting limits | with `C_f = 0.3063` at an 85 deg apparent angle: `C_band` = **1.000000** at theta = 0 and **0.000000** at theta = 180 (complete wetting fills the band, complete non-wetting empties it); 30 deg gives more liquid than `C_f` and 150 deg less | PASS |
 | **G0e** what the fluid-only estimator costs | on EXACT plane fractions next to the wall: the recovered normal's ANGLE TO THE WALL is wrong by **23.13 / 6.69 / 0.00 / 6.69 / 20.91 deg** at theta = 30/60/90/120/150, against **2.31 / 2.10 / 0.00 / 2.10 / 2.31** for the same Youngs stencil with the solid rows present. Its AZIMUTH — the only part the construction uses — is exact: **0.000 deg** worst over the sweep, and the END-TO-END band error of the fill driven by the fluid-only normal is **1.1e-15** | PASS (see finding 2) |
 | **G1** the prescribed angle is a fixed point (`test_vof_wetting`, 40x40x32, D/dx = 20, wall z = 4.25, sigma 1, mu 0.5, 150 steps) | theta 60 -> **60.121**, 90 -> **89.170**, 120 -> **118.719**; worst **1.281 deg** (gate 3.0). Volume drift 3.0e-15 / 5.0e-15 / 1.3e-14; `Ca(open)` 6.9e-4 / 1.2e-3 / 2.6e-3; raw `max|u|` 1.7e-3 / 2.4e-3 / 5.2e-3; 10-11 pressure iterations, cap 300, none capped | PASS |
-| **G1** the theta sweep (study, 64x64x40, D/dx = 24, wall z = 4.25, Oh = 0.1, ratio 1, 500 steps) | see the sweep table below | PASS |
+| **G1** the theta sweep (study, 64x64x40, D/dx = 24, wall z = 4.25, Oh = 0.1, ratio 1 and 100, 500 steps) | see the sweep tables below: within 1.2 deg up to theta = 90, 3.5-3.8 deg at 120/150 (ratio 1) and 7.2 deg at 150 (ratio 100) | **FAIL above 90 deg** — finding 6 |
 | **G1b** attraction (from a hemisphere) | see the sweep table below | see finding 4 |
 | **G1w** wall placement | see the wall-placement table below — the decisive measurement of this rung | (mechanism) |
 | **G3** volume | the liquid volume drift over every G1/G2 run is **<= 1.7e-14** relative and `sum C` over solid cells is **exactly 0** in all of them | PASS |
@@ -552,13 +552,16 @@ Identical scene and protocol, `rho_gas = rho_liquid/100`, `mu_gas = mu_liquid/10
 | 60 | **58.360** | -1.640 | 1.9e-11 | 2.57e-3 | 1.69e-2 | 11 |
 | 90 | **88.439** | -1.561 | 2.5e-11 | 3.02e-3 | 6.17e-3 | 11 |
 | 120 | **116.415** | -3.585 | 1.5e-12 | 4.48e-3 | 9.14e-3 | 12 |
-| 150 | (still running when the session closed) | | | | | |
+| 150 | **142.796** | -7.204 | 3.9e-11 | 1.47e-3 | 6.36e-3 | 11 |
 
-The ratio-100 column reproduces the ratio-1 column row for row to within a few tenths of a degree
-(29.92 vs 30.69, 58.36 vs 59.98, 88.44 vs 88.84, **116.42 vs 116.86**), i.e. the equilibrium the
-theta fill selects is a property of the FILL and not of the density contrast, and the 120-degree
-residual is the same -3.6 deg in both. Volume conservation stays at the projection floor and the
-pressure solve never approaches its cap.
+From 30 to 120 deg the ratio-100 column reproduces the ratio-1 column row for row to within a
+degree (29.92 vs 30.69, 58.36 vs 59.98, 88.44 vs 88.84, **116.42 vs 116.86**), i.e. the equilibrium
+the theta fill selects is a property of the FILL and not of the density contrast, and the
+120-degree residual is the same -3.6 deg in both. The 150-degree row is the exception and it gets
+WORSE with the density contrast (**-7.20 vs -3.77**) — it is also the row whose contact radius is
+5.8 cells, so the ratio only amplifies an already under-resolved contact line rather than
+introducing a new defect. Volume conservation stays at the projection floor (<= 3.9e-11) and the
+pressure solve never approaches its cap in any row.
 
 ### Where the SDF wall sits inside the cell (G1w) — the decisive measurement of this rung
 
