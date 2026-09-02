@@ -1314,6 +1314,7 @@ NB_MODULE(_flow, m) {
       "length-3 list [x,y,z]. Use it to slice the global SDF into this rank's local block for a "
       "distributed Solver (see Solver.init_mpi). MPI_Init is called if needed.");
 
+#ifdef PECLET_FLOW_MPI
   m.def(
       "predict_hierarchy",
       [](int gnx, int gny, int gnz, int np, int levels, bool telescope, int min_extent) {
@@ -1325,6 +1326,7 @@ NB_MODULE(_flow, m) {
           out.emplace_back(std::make_tuple(r.global.x, r.global.y, r.global.z), r.ranks,
                            std::make_tuple(r.block.x, r.block.y, r.block.z),
                            std::make_tuple(r.ratio.x, r.ratio.y, r.ratio.z), r.tele);
+#endif
         return out;
       },
       nb::arg("gnx"), nb::arg("gny"), nb::arg("gnz"), nb::arg("np"), nb::arg("levels"),

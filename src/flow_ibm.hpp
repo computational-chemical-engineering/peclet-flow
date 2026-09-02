@@ -629,6 +629,7 @@ class Solver {
     velHalo_ = std::make_shared<GridHaloTopology<3>>();
     velHalo_->buildTopology(dec, rank, G, per, comm);
     velDev_ = std::make_shared<GridHalo<double>>();
+    velDev_->setLabel("velocity g2");
     velDev_->init(*velHalo_);
     // Communication-avoiding momentum sweeps (see smoothComp): the velocity block is g=2 already,
     // so the CA pair needs no new topology — only this float exchange for the stencil ring
@@ -2194,6 +2195,7 @@ class Solver {
       vofHalo_ = std::make_shared<GridHaloTopology<3>>();
       vofHalo_->buildTopology(*dec_, rank, kVofG, per, comm_);
       vofDev_ = std::make_shared<GridHalo<double>>();
+    vofDev_->setLabel("vof g3");
       vofDev_->init(*vofHalo_);
       MPI_Comm cm = comm_;
       vofAdv_.globalMax = [cm](double v) {

@@ -587,6 +587,8 @@ class CutcellMG {
       v.comm = curComm;
       v.dev = std::make_shared<GridHalo<double>>();
       v.dev->init(*v.halo);
+      v.dev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " ranks" +
+                      std::to_string(curDec.numBlocks()));
       const auto& idx = v.halo->indexer();
       const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
       v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]};
@@ -2521,6 +2523,7 @@ class CutcellMG {
       g = C3{g.x / lv_[L].ratio.x, g.y / lv_[L].ratio.y, g.z / lv_[L].ratio.z};
     return g;
   }
+#ifdef PECLET_FLOW_MPI
   // The hierarchy initMpi WOULD build, as a pure function of (grid, rank count, levels, telescope,
   // decomposition mode) — no MPI, no allocation, so it runs on a laptop for any rank count. One row
   // per level: global dims, ranks holding it, block dims (block 0), ratio to the next level, and
@@ -2605,6 +2608,7 @@ class CutcellMG {
     }
     return rows;
   }
+#endif  // PECLET_FLOW_MPI (predict)
   bool telescope() const { return telescope_; }
   void setTelescopeForceLevel(int L) { teleForce_ = L; }  // tests only; -1 = never force
   void setTelescopeMinExtent(int e) { teleMinExtent_ = e; }
