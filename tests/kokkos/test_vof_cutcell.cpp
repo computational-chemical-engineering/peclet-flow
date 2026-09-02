@@ -196,6 +196,9 @@ void bridgeWithGeometry() {
 
   WyAdvector ref;
   ref.init(N, N, N, 1.0, g);
+  // WO-R2 item 4: configure the reference like the solver, wisp tolerance included, or this gate
+  // measures the difference of two mixed-cell predicates (2.594e-09) instead of the bridge.
+  ref.wispEps = peclet::flow::IbmSolver::defaultVofWispEps();
   ref.interfaceLocalCfl = true;
   ref.enableGeometry();
   // The reference's geometry: the INDEPENDENT fields above, embedded with the shift by hand.

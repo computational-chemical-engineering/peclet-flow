@@ -221,6 +221,63 @@ void gateZalesak() {
   CHECK(rel > 0.002 && rel < 0.2);
 }
 
+
+// ====================================================== gate C2: the interface Courant BAND (WO-R2)
+//
+// The band `maxCourantInterface` limits on is "this cell's colour differs from a neighbour's".
+// Written with an exact `!=` it has no wisp tolerance, so the Weymouth-Yue round-off residue the
+// interface leaves behind (min C ~ -3.8e-17 on this scene) keeps the whole WAKE inside the band and
+// the interface-local limiter creeps back towards the global max — which is the thing it exists to
+// avoid. Measured here on the published Zalesak setup, one revolution, `interfaceLocalCfl = true`
+// (the setting `IbmSolver` uses; `lastCfl()` is what `vof_last_courant()` reports).
+void gateZalesakBand() {
+  std::printf("\n=== C2 interface Courant band on Zalesak: the wisp tolerance (WO-R2 item 4b)\n");
+  const int nx = 100, nz = 4;
+  const double h = 1.0 / nx;
+  const long steps = 1000;
+  const double T = 1.0, omega = 2.0 * M_PI / T, dt = T / steps;
+  double first[2] = {0, 0}, last[2] = {0, 0}, worst[2] = {0, 0}, drift[2] = {0, 0};
+  for (int k = 0; k < 2; ++k) {
+    Case cs;
+    cs.setup(nx, nx, nz, h);
+    vofscene::initZalesak(cs.c(), cs.blk, h, 0.5, 0.75, 0.15, 0.025, 0.85);
+    cs.adv.syncGhosts();
+    const auto d0 = cs.adv.diagnostics();
+    cs.adv.cflLimit = 0.5;             // as in gate C: the corner faces run above the 3D bound
+    cs.adv.interfaceLocalCfl = true;   // the solver's setting
+    cs.adv.wispEps = (k == 0) ? 0.0 : 1e-8;
+    vofscene::fillRotation(cs.adv, cs.blk, h, 0.5, 0.5, omega);
+    for (long t = 0; t < steps; ++t) {
+      cs.adv.advect(dt, t);
+      const double c = cs.adv.lastCfl();
+      if (t == 0)
+        first[k] = c;
+      last[k] = c;
+      worst[k] = std::fmax(worst[k], c);
+    }
+    const auto d1 = cs.adv.diagnostics();
+    drift[k] = std::fabs(d1.sumC - d0.sumC) / d0.sumC;
+    std::printf("  wispEps %-6g : band Courant after step 1 %.4f, after %ld %.4f, worst %.4f, "
+                "volume drift %.3e\n",
+                cs.adv.wispEps, first[k], steps, last[k], worst[k], drift[k]);
+  }
+  // The a-priori bound on a band that is "mixed cells and their face neighbours": the disk's
+  // farthest point sits at r = 0.25 + 0.15 = 0.40 from the rotation centre, the band reaches one
+  // cell beyond it and the reduction takes the faces of those cells, i.e. r_max + 1.5 h. That is
+  // the number the guarded run must not exceed — and it is what it measures, to the printed digit.
+  const double bandBound = omega * (0.40 + 1.5 * h) * dt / h;
+  const double diskBound = omega * 0.40 * dt / h;
+  std::printf("  a-priori: the disk's own faces reach %.4f (r = 0.40) and the band's outermost "
+              "faces %.4f (r = 0.40 + 1.5h)\n",
+              diskBound, bandBound);
+  std::printf("  the global max (what a whole-domain limiter would report) is %.4f (corner "
+              "r = 0.7071)\n",
+              omega * 0.5 * M_SQRT2 * dt / h);
+  CHECK(worst[1] <= 1.002 * bandBound);  // with the guard the band stays ON the interface
+  CHECK(worst[0] > 1.15 * bandBound);    // without it the round-off wake widens the band
+  CHECK(drift[0] < 1e-13 && drift[1] < 1e-13);  // neither touches conservation
+}
+
 // ============================================================================ gate D: LeVeque
 struct LeVequeResult {
   double l1vol = 0, rel = 0, drift = 0, divmax = 0, minC = 0, maxC = 0;
@@ -416,6 +473,7 @@ int main(int argc, char** argv) {
     gateSlab();
     gateSphere();
     gateZalesak();
+    gateZalesakBand();
     gateLeVeque();
     gateCfl();
     gateWorklist();

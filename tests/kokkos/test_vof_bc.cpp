@@ -35,13 +35,22 @@
 //      reduce to `bcCorrectOutflow` BITWISE at uniform rho == rho0, and must differ from it by
 //      exactly the mobility factor rho0/rho_f otherwise.
 //
-//   F2 ... AND THE VERDICT ON USING IT, which is NO. The solver must reach the sibling kernel
-//      (that is what `set_outflow_rho_correction` switches), and the resulting divergence must be
-//      measured on the PROJECTED field — `max_open_divergence()` re-imposes the zero-gradient
-//      outflow face before measuring and so cannot see the difference at all (it reads 1.26e-02
-//      for both branches at ratio 10, and 1.26e-09 where the projected field is at 1.41e-17).
-//      Measured: at ratio 10 the plain correction leaves 8.8e-10 and the 1/rho_f one 9.2e-03,
-//      because the operator's outflow-face coefficient is the RAW openness. Default OFF.
+//   F2 ... AND THE VERDICT ON USING IT, which WO-R2 item 1 INVERTED to YES. The solver must reach
+//      the sibling kernel (that is what `set_outflow_rho_correction` switches), and the resulting
+//      divergence must be measured on the PROJECTED field — `max_open_divergence()` re-imposes the
+//      zero-gradient outflow face before measuring and so cannot see the difference at all (it
+//      reads 1.26e-02 for both branches at ratio 10, and 1.26e-09 where the projected field is at
+//      1.41e-17). WO-R measured 8.8e-10 plain / 9.2e-03 with the factor, because the multigrid
+//      overwrote the variable-density coefficient at the outflow row with the literal openness
+//      1.0. With that operator fixed (`CutcellMG::setOutflowCoefficient`) the same probe reads
+//      9.97e-05 plain / 8.31e-10 with the factor, and the factor is the DEFAULT.
+//
+//   G  V5a x V-BC COMPOSITION (WO-R2 item 2). The cut-cell flux path and the out-of-domain donor
+//      rule must act TOGETHER: a domain-face flux in a geometry-carrying block is
+//      `o_f * C_datum * a`, and the per-face ledger must count that same `o_f`-weighted number, so
+//      that the exact budget of gate C survives an immersed packing. Two scenes: a sphere array
+//      standing 3 cells clear of the inlet and outlet planes, and a second one where a sphere CUTS
+//      the outlet plane (o_f < 1 on a domain face).
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -445,14 +454,126 @@ void outflowReachedGate() {
     } else {
       CHECK(on != off);  // the solver must actually reach the sibling kernel
       CHECK(on != i0);
-      // THE ITEM-4 VERDICT. The shipped default (no 1/rho_f, d1) must be the CONSISTENT one and
-      // the ablation (d0) must be worse — the operator's outflow-face coefficient is the raw
-      // openness, so the plain phi difference is the matching correction. See
-      // IbmSolver::setOutflowRhoCorrection.
-      CHECK(d1 < 1e-8);
-      CHECK(d0 > 1e3 * d1);
+      // THE VERDICT, INVERTED BY WO-R2 ITEM 1. WO-R measured the plain correction (d1) as the
+      // consistent one because the multigrid overwrote the variable-density coefficient at the
+      // Dirichlet domain face with the literal openness 1.0. With the operator fixed
+      // (CutcellMG::setOutflowCoefficient) the outflow row carries open_f*rho0/rho_f, so the
+      // correction that matches it is the one WITH the factor (d0) — and it is now the DEFAULT.
+      // Measured here: d0 8.31e-10, d1 9.97e-05.
+      CHECK(d0 < 1e-8);
+      CHECK(d1 > 1e3 * d0);
     }
   }
+}
+
+
+// ------------------------------------------ G: the V5a cut-cell path composed with the V-BC rule
+struct Sph {
+  double x, y, z, r;
+};
+std::vector<double> sphereSdf(int nx, int ny, int nz, const std::vector<Sph>& sp) {
+  std::vector<double> f((std::size_t)nx * ny * nz, 1e30);
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < nx; ++x) {
+        double d = 1e30;
+        for (const Sph& q : sp) {
+          const double dx = x + 0.5 - q.x, dy = y + 0.5 - q.y, dz = z + 0.5 - q.z;
+          d = std::fmin(d, std::sqrt(dx * dx + dy * dy + dz * dz) - q.r);
+        }
+        f[idx(x, y, z, nx, ny)] = d;  // > 0 outside the spheres == fluid
+      }
+  return f;
+}
+
+// A slug of liquid injected at the -z inlet, carried through a packing by the solver's OWN
+// projected steady field, and out through the +z outlet. Kinematic: the field is frozen after the
+// Stokes solve, so the only thing moving is the colour.
+void composedGate(bool cutOutlet, int nSlug, int nAfter) {
+  const int nx = 20, ny = 20, nz = 32;
+  const double W = 1.0;
+  peclet::flow::IbmSolver s(nx, ny, nz);
+  s.setRho(1.0);
+  s.setMu(0.5);
+  s.setDt(0.25);
+  for (int f = 0; f < 4; ++f)
+    s.setDomainBc(f, 1, 0, 0, 0);
+  s.setDomainBc(4, 2, 0.0, 0.0, W);  // inflow at -z
+  s.setDomainBc(5, 3, 0, 0, 0);      // outflow at +z
+  // Four spheres in the middle third, every one of them >= 3 cells clear of z = 0 and z = nz.
+  std::vector<Sph> sp{{6, 6, 12, 4.0}, {14, 14, 12, 4.0}, {6, 14, 21, 4.0}, {14, 6, 21, 4.0}};
+  if (cutOutlet)
+    sp.push_back({10, 10, (double)nz, 4.5});  // centred ON the outlet plane: it cuts o_f there
+  s.setSolid(sphereSdf(nx, ny, nz, sp), true);
+  s.setVelocityIterations(60);
+  s.setPressureLevels(4);
+  s.setPressureIterations(400);
+  for (int i = 0; i < 80; ++i)  // to a steady duct flow through the packing
+    s.step();
+  const double div = s.maxOpenDivergenceProjected();
+  const long pit = s.lastPressureIterations();
+  s.enableVof();
+  // The upper half starts LIQUID so that liquid leaves through the outlet from step 1 — with an
+  // empty domain the slug never reaches the +z plane inside a test-sized run and the outflow half
+  // of the ledger (the half a solid CUTS in the second scene) would not be exercised at all.
+  std::vector<double> c0((std::size_t)nx * ny * nz, 0.0);
+  for (int z = nz / 2; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < nx; ++x)
+        c0[idx(x, y, z, nx, ny)] = 1.0;
+  s.setVof(c0);
+  s.setVofInflow(4, 1.0);
+  s.setVofBackflow(5, 0.0);
+  const double vol0 = s.vofDiagnostics().volume;
+  double budget0 = 0.0, drift = 0.0, solidSum = 0.0, ledger = 0.0, clip = 0.0;
+  double mnF = 1e30, mxF = -1e30;
+  // dt is re-picked from the solver's OWN interface-local CUT Courant number every step, the
+  // pattern the study scripts use: the cut-cell Courant is up to 6x the plain one (WO-Q finding 1)
+  // and it grows as the slug reaches the packing's constrictions, so a dt sized once at t = 0
+  // trips the Weymouth-Yue cap part-way through. Conservation is per-step algebraic, so a varying
+  // dt does not weaken the budget identity at all.
+  double dtA = 0.25;
+  for (int i = 0; i < nSlug + nAfter; ++i) {
+    const double c = s.vofMaxCourant();  // at the current dt
+    dtA = (c > 0.0) ? std::fmin(0.25, dtA * 0.12 / c) : 0.25;
+    s.setDt(dtA);
+    if (i == nSlug)
+      s.setVofInflow(4, 0.0);
+    s.advectVof();
+    const auto d = s.vofDiagnostics();
+    const auto v = s.vofBcVolumes();
+    for (int f = 0; f < 6; ++f)
+      ledger += v[f];
+    const double budget = d.volume - ledger;
+    if (i == 0)
+      budget0 = budget;
+    drift = std::fmax(drift, std::fabs(budget - budget0));
+    solidSum = std::fmax(solidSum, std::fabs(d.solidSumC));
+    clip += d.clippedVolume;
+    mnF = std::fmin(mnF, d.minCFluid);
+    mxF = std::fmax(mxF, d.maxCFluid);
+  }
+  const auto d1 = s.vofDiagnostics();
+  const auto tot = s.vofBcVolumesTotal();
+  const double injected = tot[4];
+  const double rel = drift / (vol0 + injected);
+  std::printf(
+      "G  %s: %d solid + %d cut cells, max|div(open u)| %.3e (pressure %ld), final dt %.4g\n"
+      "   sum(eps_eff C) %.10g -> %.10g;  injected %.10g, LEFT %.10g\n"
+      "   |budget drift| %.3e (rel %.3e), max|sum C over solid| %.3e, clipped %.3e,\n"
+      "   C over uncut fluid in [%.3e, %.17g]\n",
+      cutOutlet ? "a sphere CUTS the outlet plane" : "packing clear of both planes", d1.solidCells,
+      d1.cutCells, div, pit, dtA, vol0, d1.volume, injected, -tot[5], drift, rel, solidSum, clip,
+      mnF, mxF);
+  CHECK(div <= 1e-10);
+  CHECK(rel < 1e-12);
+  CHECK(solidSum == 0.0);
+  CHECK(injected > 0.0);
+  CHECK(-tot[5] > 0.1 * vol0);  // the outflow face really carried liquid out
+  CHECK(mnF >= -1e-12);
+  CHECK(mxF <= 1.0 + 1e-12);
+  if (cutOutlet)
+    CHECK(d1.cutCells > 0);
 }
 
 }  // namespace
@@ -468,6 +589,8 @@ int main(int argc, char** argv) {
     propGhostGate();
     const bool quick = std::getenv("PECLET_VOF_BC_QUICK") != nullptr;
     budgetGate(quick ? 32 : 64, quick ? 40 : 100, quick ? 200 : 400);
+    composedGate(false, quick ? 20 : 40, quick ? 120 : 300);
+    composedGate(true, quick ? 20 : 40, quick ? 120 : 300);
   }
   Kokkos::finalize();
   if (failures == 0) {

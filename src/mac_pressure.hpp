@@ -370,6 +370,42 @@ inline void buildRhoCoeffHarm(CCField cx, CCField cy, CCField cz, CCConst ox, CC
       });
 }
 
+// WO-R2 item 1 — the variable-density coefficient of the HIGH-side outflow domain face.
+//
+// `buildRhoCoeff` runs over the INNER cells, and the staggered face index of a cell is its LOW
+// face, so the low domain face of an axis (inner index `g`) is covered and the high one
+// (`dims-g`, a ghost index) is not. `CutcellMG::applyBoundaryOpenness` used to fill that gap with
+// the literal openness 1.0, which is right for the raw-openness operator and wrong by the density
+// ratio for the coefficient one. This writes the missing plane, `open_f * rho0/rho_f` with:
+//   * open_f = 1 — the same fully-open value the raw path imposed there (the g=1 coefficient
+//     block's ghost ring carries no geometric openness of its own; a solid cutting an OUTFLOW
+//     plane is a separate, pre-existing gap that the raw path has too);
+//   * rho_f = the arithmetic (or harmonic) face mean of the LAST INNER cell and the domain ghost,
+//     literally the expression `bcCorrectOutflowVar` applies at that face — which is what makes
+//     the projection there exact. Under the Neumann property ghost (`fillPropGhosts`) both
+//     evaluate to the last inner cell's own rho.
+// The whole transverse plane is written (ghost ring included) so that a distributed CA level's
+// ring rows coarsen from a valid fine plane; `rho`'s ghost ring must be filled first, which is
+// what the bridge in IbmSolver::project guarantees.
+inline void buildRhoCoeffOutflowFace(CCField ca, CCConst rho, double rho0, C3 e, int g, int a,
+                                     bool harmonic) {
+  CCExec space;
+  int dims[3] = {e.x, e.y, e.z};
+  long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = st[a], sb = st[b], sc = st[c];
+  const int bf = dims[a] - g;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::rho_coeff_outflow", MD(space, {0, 0}, {dims[b], dims[c]}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        const long i = (long)p0 * sb + (long)p1 * sc + (long)bf * sa;
+        const double ra = rho(i), rb = rho(i - sa);
+        const double rf = harmonic ? (2.0 * ra * rb / (ra + rb)) : (0.5 * (ra + rb));
+        ca(i) = rho0 / rf;
+      });
+}
+
 inline void projectCorrectVarHarm(CCField u, CCField v, CCField w, CCConst phi, CCConst rho,
                                   double rho0, C3 e, int g) {
   CCExec space;

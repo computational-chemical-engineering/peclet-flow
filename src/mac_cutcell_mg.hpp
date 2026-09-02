@@ -20,6 +20,7 @@
 #include <limits>
 #include <Kokkos_Core.hpp>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -103,6 +104,93 @@ inline void coarsenOpenAvg(CCField oxc, CCField oyc, CCField ozc, CCConst oxf, C
         oyc(ci) = sy / (double)(rx * rz);
         ozc(ci) = sz / (double)(rx * ry);
       });
+}
+
+// --- WO-R2 item 1: the OUTFLOW face coefficient on a variable-density operator ----------------
+//
+// `applyBoundaryOpenness` used to re-impose the literal 1.0 at a Dirichlet (outflow) domain face on
+// EVERY level, which under `varRho` overwrote `buildRhoCoeff`'s `open_f * rho0/rho_f` with 1 and
+// made the operator row disagree with the projection correction by the full density ratio (WO-R's
+// headline defect: the Nusselt film's low-side outlet, `max|w|` 1.455 against a film `u_max` of
+// 0.312). The face index convention makes the two sides ASYMMETRIC:
+//   * the LOW  domain face of an axis is the INNER index `g`      -> `buildRhoCoeff` (and, on a
+//     coarse level, `coarsenOpenAvg`) already wrote the right value there; the fix is simply not
+//     to overwrite it.
+//   * the HIGH domain face is the GHOST index `dims-g`            -> no kernel writes it, and the
+//     periodic/halo ghost fill wraps the opposite boundary's value into it. It must be saved
+//     before the fill and restored after (level 0, from the caller's field), and coarsened from
+//     the fine level's own restored plane (coarse levels).
+// These three helpers do the save / restore / coarsen of ONE domain-face plane. They are only
+// reached when the caller sets `setOutflowCoefficient(true)` (the varRho pressure build); with it
+// off the literal-1.0 path is untouched and byte-identical.
+inline void mgSaveFacePlane(CCField dst, CCConst src, C3 e, int g, int a, int s) {
+  CCExec space;
+  int dims[3] = {e.x, e.y, e.z};
+  long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = st[a], sb = st[b], sc = st[c];
+  const int bf = (s == 0) ? g : (dims[a] - g);
+  const int db = dims[b];
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::mg_save_face_plane", MD(space, {0, 0}, {dims[b], dims[c]}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        dst((long)p0 + (long)p1 * db) = src((long)p0 * sb + (long)p1 * sc + (long)bf * sa);
+      });
+}
+inline void mgRestoreFacePlane(CCField dst, CCConst src, C3 e, int g, int a, int s) {
+  CCExec space;
+  int dims[3] = {e.x, e.y, e.z};
+  long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = st[a], sb = st[b], sc = st[c];
+  const int bf = (s == 0) ? g : (dims[a] - g);
+  const int db = dims[b];
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::mg_restore_face_plane", MD(space, {0, 0}, {dims[b], dims[c]}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        dst((long)p0 * sb + (long)p1 * sc + (long)bf * sa) = src((long)p0 + (long)p1 * db);
+      });
+}
+// Coarse domain-face plane = the area average of the ratio_b*ratio_c fine sub-faces it spans —
+// the same rule `coarsenOpenAvg` applies to every interior face, restricted to the one plane the
+// coarsening loop cannot reach (the high side lives on a ghost index). The coarse plane's own
+// TRANSVERSE ghost ring is filled by clamping the fine transverse index into range: it is read
+// only by the redundant ring rows of a distributed CA (g=2) level's smoother, and it is exact
+// whenever the coefficient is constant along the outlet (every constant-density case, and every
+// ratio-1 case, so the byte-identity and MPI gates are unaffected).
+inline void mgCoarsenFacePlane(CCField oc, CCConst of, C3 cext, C3 fext, int gc, int gf, C3 cinner,
+                               C3 ratio, int a, int s) {
+  CCExec space;
+  int cd[3] = {cext.x, cext.y, cext.z}, fd[3] = {fext.x, fext.y, fext.z};
+  int ci[3] = {cinner.x, cinner.y, cinner.z}, rt[3] = {ratio.x, ratio.y, ratio.z};
+  long cst[3] = {1, (long)cext.x, (long)cext.x * cext.y};
+  long fst[3] = {1, (long)fext.x, (long)fext.x * fext.y};
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long csa = cst[a], csb = cst[b], csc = cst[c];
+  const long fsa = fst[a], fsb = fst[b], fsc = fst[c];
+  const int cbf = (s == 0) ? gc : (cd[a] - gc);
+  const int fbf = (s == 0) ? gf : (fd[a] - gf);
+  const int rb = rt[b], rc = rt[c];
+  const int fdb = fd[b], fdc = fd[c];
+  const double inv = 1.0 / (double)(rb * rc);
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::mg_coarsen_face_plane", MD(space, {0, 0}, {cd[b], cd[c]}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        const int ib = p0 - gc, ic = p1 - gc;  // coarse INNER indices (negative in the ghost ring)
+        double sum = 0.0;
+        for (int q0 = 0; q0 < rb; ++q0)
+          for (int q1 = 0; q1 < rc; ++q1) {
+            int fb = rb * ib + gf + q0, fc = rc * ic + gf + q1;
+            fb = fb < 0 ? 0 : (fb >= fdb ? fdb - 1 : fb);
+            fc = fc < 0 ? 0 : (fc >= fdc ? fdc - 1 : fc);
+            sum += of((long)fb * fsb + (long)fc * fsc + (long)fbf * fsa);
+          }
+        oc((long)p0 * csb + (long)p1 * csc + (long)cbf * csa) = sum * inv;
+      });
+  (void)ci;
 }
 
 // residual r = b - A x for the float operator (mg_residual_var_k port).
@@ -820,7 +908,8 @@ class CutcellMG {
   // re-impose the non-periodic boundary openness a periodic fill leaves wrong: Neumann wall/inflow
   // -> 0 (closed), Dirichlet outflow -> left open. Call after every (periodic) openness fill, per
   // level.
-  void applyBoundaryOpenness(Level& lv) {
+  // `fine` = the next FINER level (null on level 0). Only the outflow-coefficient path reads it.
+  void applyBoundaryOpenness(Level& lv, Level* fine = nullptr) {
     if (!hasBC_)
       return;
     B3 e{lv.ext.x, lv.ext.y, lv.ext.z};
@@ -830,11 +919,45 @@ class CutcellMG {
         const int t = bc_[2 * a + s];
         if (!touchesGlobalFace(lv, 2 * a + s))
           continue;  // interior rank boundary: the exchanged openness is the right value
-        if (t == 1 || t == 2)
+        if (t == 1 || t == 2) {
           bcSetOpenness(oa[a], e, lv.g, a, s, 0.0);  // wall/inflow Neumann -> closed
-        else if (t == 3)
-          bcSetOpenness(oa[a], e, lv.g, a, s, 1.0);  // outflow -> open (periodic fill wraps wrong)
+        } else if (t == 3) {
+          if (!outflowCoeff_) {
+            bcSetOpenness(oa[a], e, lv.g, a, s, 1.0);  // outflow -> open (periodic fill wraps)
+            continue;
+          }
+          // WO-R2 item 1: the caller handed a COEFFICIENT field (open_f*rho0/rho_f), so the
+          // literal 1.0 would overwrite it. Low side = an inner index the caller / the coarsening
+          // already wrote correctly -> leave it. High side = a ghost index the fill wrapped ->
+          // restore (level 0) or coarsen from the finer level's own restored plane.
+          if (s == 0)
+            continue;
+          if (fine == nullptr) {
+            mgRestoreFacePlane(oa[a], CCConst(bcPlane_[a]), lv.ext, lv.g, a, 1);
+          } else {
+            CCField fa[3] = {fine->ox, fine->oy, fine->oz};
+            mgCoarsenFacePlane(oa[a], CCConst(fa[a]), lv.ext, fine->ext, lv.g, fine->g, lv.inner,
+                               fine->ratio, a, 1);
+          }
+        }
       }
+  }
+  // Save the HIGH-side outflow face plane of a coefficient field before the (periodic/halo) ghost
+  // fill destroys it. Called on level 0 only; the coarse levels re-derive theirs by averaging.
+  void saveOutflowPlanes(Level& lv) {
+    CCField oa[3] = {lv.ox, lv.oy, lv.oz};
+    int dims[3] = {lv.ext.x, lv.ext.y, lv.ext.z};
+    for (int a = 0; a < 3; ++a) {
+      if (bc_[2 * a + 1] != 3 || !touchesGlobalFace(lv, 2 * a + 1))
+        continue;
+      const int b = (a + 1) % 3, c = (a + 2) % 3;
+      const std::size_t np = (std::size_t)dims[b] * dims[c];
+      if (bcPlane_[a].extent(0) != np)
+        bcPlane_[a] = CCField(Kokkos::view_alloc("peclet::flow::mg_bcplane",
+                                                 Kokkos::WithoutInitializing),
+                              np);
+      mgSaveFacePlane(bcPlane_[a], CCConst(oa[a]), lv.ext, lv.g, a, 1);
+    }
   }
 
   // rediscretized cut-cell operator on every level from the fine face openness (idx2 = 1/dx^2
@@ -850,6 +973,9 @@ class CutcellMG {
     Kokkos::deep_copy(f.ox, ox);
     Kokkos::deep_copy(f.oy, oy);
     Kokkos::deep_copy(f.oz, oz);
+    if (outflowCoeff_)
+      saveOutflowPlanes(f);  // WO-R2: the high-side outflow coefficient lives on a ghost index
+                             // that the fill below wraps over -- snapshot it first.
     fillOpenness(
         f);  // periodic fine-level openness ghosts (the operator reads the + neighbour face);
              // idempotent when the caller already filled them, required when it passed inner-only.
@@ -873,6 +999,14 @@ class CutcellMG {
       Level& fin = lv_[L - 1];
 #ifdef PECLET_FLOW_MPI
       if (fin.tele) {
+        // WO-R2: the telescope stage gathers INNER cells only, so the fine high-side outflow face
+        // plane (a ghost index) does not survive the merge and the coarse boundary coefficient
+        // cannot be formed. Refused loudly rather than silently re-imposing 1.0 there.
+        if (outflowCoeff_)
+          throw std::runtime_error(
+              "CutcellMG::setOpenness: variable-density outflow coefficients are not implemented "
+              "across an MG telescope point (PECLET_FLOW_TELESCOPE / set_telescope) -- turn "
+              "telescoping off for two-phase open-boundary runs");
         Telescope& T = *fin.tele;
         coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(T.ox), CCConst(T.oy), CCConst(T.oz), c.ext,
                        T.mExt, c.g, T.g, c.inner, fin.ratio);
@@ -881,7 +1015,7 @@ class CutcellMG {
       coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(fin.ox), CCConst(fin.oy), CCConst(fin.oz), c.ext,
                      fin.ext, c.g, fin.g, c.inner, fin.ratio);
       fillOpenness(c);  // periodic ghost openness (operator build reads the + neighbour face)
-      applyBoundaryOpenness(c);  // re-impose non-periodic boundary faces per coarse level
+      applyBoundaryOpenness(c, &fin);  // re-impose non-periodic boundary faces per coarse level
       const double sx = 1.0 / (double)(c.cfac.x * c.cfac.x),
                    sy = 1.0 / (double)(c.cfac.y * c.cfac.y),
                    sz = 1.0 / (double)(c.cfac.z * c.cfac.z);
@@ -2421,6 +2555,12 @@ class CutcellMG {
   int pre_ = 2, post_ = 2, bottom_ = 4;
   int bc_[6] = {0, 0, 0, 0, 0, 0};
   bool hasBC_ = false, removeMean_ = true, hasOutflow_ = false;
+  // WO-R2 item 1. OFF by default and then every path is byte-identical to before it existed: the
+  // outflow face keeps the literal 1.0 the raw-openness operator wants. The varRho pressure build
+  // (IbmSolver::project) turns it on for its own setOpenness call, because the field it hands over
+  // is the COEFFICIENT open_f*rho0/rho_f and the 1.0 would overwrite the boundary rows of it.
+  bool outflowCoeff_ = false;
+  CCField bcPlane_[3];  // level-0 high-side outflow coefficient plane, per axis (saveOutflowPlanes)
   // Default "fine" (measured winner of the at-scale ablation, Snellius H100 8+16 GPUs: 5.5%
   // faster than "all" with identical iteration counts; single-rank the reductions are free either
   // way). setMeanRemovalScope(true) restores the legacy every-level scope.
@@ -2506,6 +2646,11 @@ class CutcellMG {
   // Rebuilds lazily on the next solve. Safe single-rank (local assemble + serial AMG).
   void setAgglomerationMode(int mode) { agglomMode_ = mode; }  // -1 auto, 0 never, 1 always
   void setTelescope(bool on) { telescope_ = on; }
+  // WO-R2 item 1: the next setOpenness receives a variable-density COEFFICIENT field, so the
+  // Dirichlet (outflow) domain-face rows must carry the caller's coefficient rather than the
+  // literal openness 1.0. See applyBoundaryOpenness. Reset it for a raw-openness build.
+  void setOutflowCoefficient(bool on) { outflowCoeff_ = on; }
+  bool outflowCoefficient() const { return outflowCoeff_; }
   // Diagnostics for the tests / the prediction tool: telescope points this rank passed through,
   // and the coarsest GLOBAL grid of the hierarchy (valid on a rank that holds every level, e.g.
   // rank 0, which is always a group root).
