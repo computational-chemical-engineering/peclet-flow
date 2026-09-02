@@ -314,6 +314,45 @@ mode, bindings, `tests/kokkos/test_vof_blocks.cpp` extended, MPI twin, `tests/st
 
 ---
 
+## WO-V6b — the velocity half of the dynamic contact line: Navier slip in the cut-cell wall closure  [Fable design → OPUS; COORDINATE with the velocity-solve session first]
+
+**Why it is now on the critical path.** WO-V6 shipped the angle half of Afkhami–Zaleski–Bussmann
+and measured the contact line moving ~180× slower than Lucas–Washburn; WO-V7 then found every
+imbibition-side result inverted (pore doublet: narrow branch fills first only at Ca = 1e-2;
+packing: the more wetting case breaks through earlier and drier; micromodel: wetting gives the
+raggedest front) because cooperative pore filling needs the contact line to run ahead along the
+wall — which the no-slip IBM closure forbids except through its ~0.1 Δ numerical slip. Drainage
+results are right; imbibition results are qualitative until this lands.
+
+**Design.** In the RS cut-cell IBM closure (`cut_cell_ibm.hpp`: the Dirichlet wall value that
+`ibmModifyStencil`/`ibmBuildDiffusion` bake into the momentum operator), replace the no-slip
+Dirichlet on the TANGENTIAL velocity by a Navier condition with slip length λ:
+`u_t(wall) = λ ∂u_t/∂n`, i.e. with the first fluid value `u_t(d)` at wall distance `d` the wall
+value is `u_t(0) = λ u_t(d)/(d + λ)` — a Robin closure that reduces to no-slip at λ = 0 (bit-
+identical) and to free-slip as λ → ∞. The wall-NORMAL component stays Dirichlet (impermeable,
+moving-body velocity if any). `λ` is a solver parameter (`set_wall_slip_length(lambda_cells)`,
+default 0), the same λ the angle model uses (`set_contact_angle_dynamic` takes it — unify: one λ).
+Where the IBM closure is applied at the staggered face DOFs, decompose per component: the
+component parallel to the wall normal is normal, the other two are tangential (use `∇sdf` per DOF;
+for a DOF whose normal is oblique, project).
+
+**Gates.** (1) Couette flow over a flat SDF wall with λ: the analytic slip profile
+`u(y) = U (y + λ)/(H + 2λ)` to 1e-10 at every N (Poiseuille-type exactness on a quadratic-free
+profile); (2) λ = 0 bit-identical to today's single-phase regression, the Z&H drag and every VoF
+ctest; (3) WO-V6's G2 slope test: the macroscopic Cox–Voinov slope now responds to λ with the
+model's sensitivity (d(slope)/d ln λ within 25 % of −9); (4) capillary rise dynamics: the
+Lucas–Washburn early-time law `h² = (σ w cos θ/(3μ)) t` (slot of width w) within 20 % on the
+repaired WO-V6 plate scene with λ = 0.05–0.3 Δ (state the λ); (5) WO-V7's pore doublet at
+Ca = 1e-3, θ = 45°: the narrow branch fills first (the Chatzis–Dullien verdict flips back); (6) MPI
+np 1/2/4 bitwise on (1), floor on (4).
+
+**Coordination.** `cut_cell_ibm.hpp` and the momentum operator assembly are being edited by the
+velocity-solve session (momentum residual stop, velocity MG, telescoping — all on main since
+2026-09-02 evening). Before starting: `git fetch`, read their CLAUDE.md paragraphs, and keep the
+change to the closure VALUE (the Dirichlet datum) rather than the stencil structure so it merges.
+
+---
+
 ## WO-V7 — the pore-scale campaign (after WO-R2)  [OPUS runs, Fable/user interpret]
 
 Three cases, each a script under `tests/study/pore_scale/` and together one gallery page
