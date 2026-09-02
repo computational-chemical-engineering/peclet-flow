@@ -80,6 +80,7 @@
 #include "mac_stencils.hpp"  // peclet::flow::SExec, SField, SMem, I3, L3
 #include "vof/cutcell.hpp"
 #include "vof/plic.hpp"
+#include "vof/wetting.hpp"
 
 namespace peclet::flow::vof {
 
@@ -300,6 +301,136 @@ class WyAdvector {
     Kokkos::fence();
   }
 
+  // ---- rung V5b (WO-S): the theta-consistent band fill ---------------------------------------
+  //
+  // OFF by default: `hasWetting()` false runs WO-Q's neutral pass 1 verbatim, so the whole V5a
+  // battery stays byte-identical. When on, PASS 1 ONLY is replaced (passes 2-3 and the shrinking
+  // depth budget are untouched) by the theta-plane of `vof/wetting.hpp`.
+  //
+  // USAGE (the solver does exactly this):
+  //   a.enableWetting();
+  //   <fill wallSdf() and contactAngle() on the INNER region, then run the block's ghost policy>
+  //   ... per fill:  a.buildWettingNormals();  <exchange wettingNormal(0..2)>;  a.solidBandFill();
+  //
+  // Every read the theta pass makes is owner-correct out to ghost depth 3 (the exchanged sdf, the
+  // exchanged colour, the exchanged fluid-only normals), which is what keeps the INNER result
+  // decomposition-independent — the same argument WO-Q finding 5 makes for the classification.
+  bool hasWetting() const { return hasWet_; }
+  void enableWetting() {
+    if (!hasGeom_)
+      throw std::runtime_error("peclet::flow::vof::WyAdvector: enableWetting needs geometry");
+    if (!hasWet_) {
+      sdfB_ = SField("vof::wallSdf", len_);
+      thetaB_ = SField("vof::contactAngle", len_);
+      for (int d = 0; d < 3; ++d)
+        mfl_[d] = SField("vof::fluidNormal", len_);
+      appB_ = SField("vof::apparentAngle", len_);
+      wetB_ = UCField("vof::wetBranch", len_);
+      hasWet_ = true;
+    }
+  }
+  void disableWetting() { hasWet_ = false; }
+  /// The SDF on this block, in cells, `> 0` in fluid (the solver embeds + exchanges it). The wall
+  /// normal `n_w = grad(sdf)/|grad(sdf)|` is formed from it by central differences in the pass.
+  SField wallSdf() const { return sdfB_; }
+  /// The prescribed contact angle per cell, in RADIANS, measured through the liquid.
+  SField contactAngle() const { return thetaB_; }
+  /// The fluid-only Youngs normal of each fluid cell (`buildWettingNormals`, then exchanged).
+  SField wettingNormal(int d) const { return mfl_[d]; }
+  /// Which `VofWettingPivot` anchors the theta-plane (a measured ablation; see `wetting.hpp`).
+  int wettingPivot = kVofPivotVolume;
+  /// Below `|sin(theta_apparent)| = wettingTangentEps` the interface is parallel to the wall and no
+  /// rotation is defined.
+  double wettingTangentEps = 1e-6;
+  /// A donor with `C <= wettingPureEps` or `>= 1 - wettingPureEps` is pure phase: the band gets the
+  /// plain continuation `C_s = C_f` (there is no interface to make an angle with).
+  double wettingPureEps = 1e-8;
+
+  /// The fluid-only Youngs normal at every FLUID cell of the INNER region (the block's own ghost
+  /// policy then puts the owner's value in every ghost layer — see the usage note above).
+  void buildWettingNormals() {
+    if (!hasWet_)
+      return;
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    SField c = c_, mx = mfl_[0], my = mfl_[1], mz = mfl_[2];
+    UCField kk = kind_;
+    Kokkos::parallel_for(
+        "vof::wy::wetting_normals",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                     {g + n.x, g + n.y, g + n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = L3(x, y, z, e);
+          mx(i) = 0.0;
+          my(i) = 0.0;
+          mz(i) = 0.0;
+          if (kk(i) != kVofFluid)
+            return;
+          double c27[27];
+          unsigned char fl[27];
+          for (int kz = -1; kz <= 1; ++kz)
+            for (int ky = -1; ky <= 1; ++ky)
+              for (int kx = -1; kx <= 1; ++kx) {
+                const int q = plicSt(kx + 1, ky + 1, kz + 1);
+                const long j = L3(x + kx, y + ky, z + kz, e);
+                c27[q] = c(j);
+                fl[q] = kk(j) == kVofFluid ? 1u : 0u;
+              }
+          double m[3];
+          if (!youngsNormalFluidOnly(c27, fl, m))
+            return;
+          mx(i) = m[0];
+          my(i) = m[1];
+          mz(i) = m[2];
+        });
+    Kokkos::fence();
+  }
+
+  /// Band-fill branch census over the INNER region (`VofWettingBranch` counts) and the mean
+  /// APPARENT contact angle (degrees) over the cells that took the theta branch.
+  void wettingCensus(long counts[kVofWetCount], double& meanAppDeg, long& nApp) const {
+    for (int b = 0; b < kVofWetCount; ++b)
+      counts[b] = 0;
+    meanAppDeg = 0.0;
+    nApp = 0;
+    if (!hasWet_)
+      return;
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    UCField wb = wetB_, kk = kind_;
+    SField ap = appB_;
+    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    MD pol(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z});
+    for (int b = 0; b < kVofWetCount; ++b) {
+      long acc = 0;
+      const unsigned char bb = static_cast<unsigned char>(b);
+      Kokkos::parallel_reduce(
+          "vof::wy::wet_census", pol,
+          KOKKOS_LAMBDA(int x, int y, int z, long& a) {
+            const long i = L3(x, y, z, e);
+            if (kk(i) == kVofSolid && wb(i) == bb)  // SOLID cells only: the band is the write set
+              ++a;
+          },
+          acc);
+      counts[b] = acc;
+    }
+    double sum = 0.0;
+    long cnt = 0;
+    Kokkos::parallel_reduce(
+        "vof::wy::wet_apparent", pol,
+        KOKKOS_LAMBDA(int x, int y, int z, double& a, long& c2) {
+          const long i = L3(x, y, z, e);
+          if (wb(i) == static_cast<unsigned char>(kVofWetTheta)) {
+            a += ap(i);
+            ++c2;
+          }
+        },
+        sum, cnt);
+    Kokkos::fence();
+    nApp = cnt;
+    meanAppDeg = cnt ? sum / static_cast<double>(cnt) * (180.0 / 3.14159265358979323846) : 0.0;
+  }
+
   /// The three-pass neutral (90 deg) solid-band fill of `cutcell.hpp`. Call from the block's ghost
   /// policy AFTER the exchange + non-periodic clamp, and exchange once more afterwards so the
   /// outermost ghost layer holds its owner's filled value.
@@ -315,8 +446,18 @@ class WyAdvector {
             mk(i) = 0u;
           });
     }
-    for (int k = 1; k <= 3; ++k)
-      solidBandFillPass(k);
+    if (hasWet_) {
+      UCField wb = wetB_;
+      Kokkos::parallel_for(
+          "vof::wy::wet_reset", Kokkos::RangePolicy<SExec>(SExec(), 0, len_),
+          KOKKOS_LAMBDA(long i) { wb(i) = static_cast<unsigned char>(kVofWetNone); });
+    }
+    for (int k = 1; k <= 3; ++k) {
+      if (hasWet_ && k == 1)
+        solidBandFillPassWetting();
+      else
+        solidBandFillPass(k);
+    }
     Kokkos::fence();
   }
 
@@ -914,6 +1055,125 @@ class WyAdvector {
     Kokkos::fence();
   }
 
+  /// Pass 1 of the band fill with the theta-consistent rule (WO-S). Same write set and the same
+  /// depth budget as `solidBandFillPass(1)`; only the VALUE differs, and a cell for which the
+  /// theta rule has no data (no wall normal, no fluid cell along it, no usable fluid-only normal)
+  /// falls back to the neutral mean, so the pass is never worse-defined than WO-Q's.
+  void solidBandFillPassWetting() {
+    const I3 e = e_, n = n_;
+    const int g = g_, maxDepth = 2;  // pass k = 1
+    const long sx = 1, sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
+    SField c = c_, sdf = sdfB_, th = thetaB_, ap = appB_;
+    SField mx = mfl_[0], my = mfl_[1], mz = mfl_[2];
+    UCField fs = fill_, mk = mark_, kk = kind_, wb = wetB_;
+    const int pivot = wettingPivot;
+    const double tEps = wettingTangentEps, pureEps = wettingPureEps;
+    Kokkos::parallel_for(
+        "vof::wy::band_fill_theta",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          if (vofGhostDepth(x, y, z, g, n.x, n.y, n.z) > maxDepth)
+            return;
+          const long i = L3(x, y, z, e);
+          if (fs(i) != kVofFillNone)
+            return;  // fluid, or already carrying data
+          // The wall normal, solid -> fluid, from the exchanged SDF. Depth <= 2 guarantees the
+          // central difference stays inside the g = 3 block.
+          double nw[3] = {0.5 * (sdf(i + sx) - sdf(i - sx)), 0.5 * (sdf(i + sy) - sdf(i - sy)),
+                          0.5 * (sdf(i + sz) - sdf(i - sz))};
+          const double nn = Kokkos::sqrt(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]);
+          if (nn > 1e-12) {
+            nw[0] /= nn;
+            nw[1] /= nn;
+            nw[2] /= nn;
+            for (int step = 1; step <= 4; ++step) {
+              const int fx = x + static_cast<int>(Kokkos::round(step * nw[0]));
+              const int fy = y + static_cast<int>(Kokkos::round(step * nw[1]));
+              const int fz = z + static_cast<int>(Kokkos::round(step * nw[2]));
+              if (fx < 0 || fy < 0 || fz < 0 || fx >= e.x || fy >= e.y || fz >= e.z)
+                break;
+              const long fi = L3(fx, fy, fz, e);
+              if (kk(fi) != kVofFluid)
+                continue;  // still inside the solid: keep walking outward
+              const double cf = c(fi);
+              if (cf <= pureEps || cf >= 1.0 - pureEps) {
+                // The anchor column carries no interface, but the CONTINUED interface may still
+                // reach this band cell from the column next door (the wetting case: the contact
+                // line crosses the first fluid row one column in). Average the theta-planes of the
+                // anchor's MIXED fluid neighbours; with none, the pure continuation stands.
+                double acc2 = 0.0;
+                int cnt2 = 0;
+                const bool inner = fx >= 1 && fy >= 1 && fz >= 1 && fx + 1 < e.x && fy + 1 < e.y &&
+                                   fz + 1 < e.z;
+                if (inner)
+                  for (int kz = -1; kz <= 1; ++kz)
+                    for (int ky = -1; ky <= 1; ++ky)
+                      for (int kx = -1; kx <= 1; ++kx) {
+                        const long gi = L3(fx + kx, fy + ky, fz + kz, e);
+                        if (kk(gi) != kVofFluid)
+                          continue;
+                        const double cg = c(gi);
+                        if (cg <= pureEps || cg >= 1.0 - pureEps)
+                          continue;
+                        const double mg[3] = {mx(gi), my(gi), mz(gi)};
+                        if (Kokkos::fabs(mg[0]) + Kokkos::fabs(mg[1]) + Kokkos::fabs(mg[2]) <= 0.0)
+                          continue;
+                        double mt2[3], al2, ca2;
+                        const double t2 = th(i);
+                        vofWettingPlane(mg, cg, nw, Kokkos::cos(t2), Kokkos::sin(t2), sdf(gi),
+                                        pivot, tEps, mt2, al2, ca2);
+                        const int ds2[3] = {x - (fx + kx), y - (fy + ky), z - (fz + kz)};
+                        acc2 += vofWettingFraction(mt2, al2, ds2);
+                        ++cnt2;
+                      }
+                c(i) = cnt2 ? acc2 / cnt2 : cf;
+                mk(i) = 1u;
+                wb(i) = static_cast<unsigned char>(cnt2 ? kVofWetNeighbour : kVofWetPure);
+                return;
+              }
+              const double mf[3] = {mx(fi), my(fi), mz(fi)};
+              if (Kokkos::fabs(mf[0]) + Kokkos::fabs(mf[1]) + Kokkos::fabs(mf[2]) <= 0.0)
+                break;  // no usable fluid-only normal -> the neutral fallback below
+              double mth[3], alphaTh, cosApp;
+              const double t0 = th(i);
+              const int br =
+                  vofWettingPlane(mf, cf, nw, Kokkos::cos(t0), Kokkos::sin(t0), sdf(fi), pivot,
+                                  tEps, mth, alphaTh, cosApp);
+              const int ds[3] = {x - fx, y - fy, z - fz};
+              c(i) = vofWettingFraction(mth, alphaTh, ds);
+              ap(i) = Kokkos::acos(cosApp < -1.0 ? -1.0 : (cosApp > 1.0 ? 1.0 : cosApp));
+              mk(i) = 1u;
+              wb(i) = static_cast<unsigned char>(br);
+              return;
+            }
+          }
+          // Fallback: WO-Q's neutral pass-1 rule, verbatim.
+          const long nb[6] = {i - sx, i + sx, i - sy, i + sy, i - sz, i + sz};
+          double acc = 0.0;
+          int cnt = 0;
+          for (int q = 0; q < 6; ++q)
+            if (vofFillReadable(fs(nb[q]), 1)) {
+              acc += c(nb[q]);
+              ++cnt;
+            }
+          if (cnt == 0)
+            return;
+          c(i) = acc / cnt;
+          mk(i) = 1u;
+          wb(i) = static_cast<unsigned char>(kVofWetNeutral);
+        });
+    Kokkos::fence();
+    Kokkos::parallel_for(
+        "vof::wy::band_fill_theta_commit", Kokkos::RangePolicy<SExec>(SExec(), 0, len_),
+        KOKKOS_LAMBDA(long i) {
+          if (mk(i)) {
+            fs(i) = static_cast<unsigned char>(kVofFillPass0 + 1);
+            mk(i) = 0u;
+          }
+        });
+    Kokkos::fence();
+  }
+
   /// The cut-cell half of `diagnostics()` (zero-cost when no geometry is attached).
   void cutDiagnostics(Diagnostics& dg) const {
     const I3 e = e_, n = n_;
@@ -995,6 +1255,10 @@ class WyAdvector {
   bool hasGeom_ = false;
   SField of_[3], eps_, kindD_;
   UCField kind_, fill_, mark_;
+  // rung V5b (WO-S) wetting; `hasWet_` false => pass 1 is WO-Q's neutral rule, byte-identically.
+  bool hasWet_ = false;
+  SField sdfB_, thetaB_, mfl_[3], appB_;
+  UCField wetB_;
   double clippedVolume_ = 0.0, clippedSigned_ = 0.0;
   long clampedFaces_ = 0;
 };

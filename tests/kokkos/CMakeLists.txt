@@ -190,6 +190,14 @@ target_include_directories(test_vof_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(test_vof_cutcell PRIVATE Kokkos::kokkos)
 add_test(NAME vof_cutcell COMMAND test_vof_cutcell)
 
+# VoF rung V5b (WO-S): the theta-consistent solid-band fill as a PURE KERNEL test (G0) — the
+# flat-wall idempotence that makes the prescribed contact angle a fixed point of the fill.
+add_executable(test_vof_wetting test_vof_wetting.cpp)
+target_include_directories(test_vof_wetting PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_wetting PRIVATE Kokkos::kokkos)
+add_test(NAME vof_wetting COMMAND test_vof_wetting)
+
 add_executable(test_poiseuille_ibm test_poiseuille_ibm.cpp)
 target_include_directories(test_poiseuille_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_poiseuille_ibm PRIVATE Kokkos::kokkos)

@@ -388,6 +388,8 @@ work orders).
   1/(2(N−1)); the familiar 0.5 is the 2D value). The dilation flag is frozen once per step —
   recompute it per sweep and exact conservation silently dies (measured 2.3e-15 → 1.5e-2).
 - `src/vof/colour_field.hpp` (V2a) — the `G=2` ↔ `g=3` bridge and the colour ghost policy.
+- `src/vof/wetting.hpp` (V5b) — the theta-consistent band fill: the fluid-only Youngs normal,
+  the rotation to the prescribed angle and the plane->fraction rule, container-free like `plic.hpp`.
 - `src/vof/cutcell.hpp` (V5a) — the cut-cell rules of the colour transport, container-free like
   `plic.hpp`: the effective fluid volume `eps_eff = max(eps, 1/64)`, Weymouth's admissible flux
   interval generalized to a cut donor, the effective Courant number, the [0,1] clip and the
@@ -568,6 +570,51 @@ Five things this rung paid for, all measured (`doc/vof_workorders_v5.md`, WO-Q f
   the open fluid, ~20× the V4 free-droplet 2.6e-5 at the same D/Δ. WO-S replaces only the pass-1
   rule with the θ-consistent one.
 
+**Static contact angle on SDF solids (rung V5b, WO-S).** `set_contact_angle(theta_deg)` (or
+`set_contact_angle_field`) replaces **pass 1 only** of the V5a solid-band fill by the volume
+fractions of the plane that continues the fluid-side interface into the solid at the prescribed
+angle, measured **through the liquid**: with `n_w = grad(sdf)/|grad(sdf)|` (solid -> fluid) and the
+PLIC normal `m` (liquid -> gas), the contact-line condition is `m . n_w = cos(theta)`, so theta = 0
+fills the band with liquid and theta = 180 empties it. The unmodified V3 height-function/MYC cascade
+then returns the curvature of an interface meeting the wall at theta and the V4 balanced force does
+the rest — **no force is added at the wall**. With no call the neutral 90-degree fill runs and the
+whole V5a battery is **byte-identical**. Construction (`src/vof/wetting.hpp`, container-free like
+`plic.hpp`): walk from the band cell along `n_w` to the first fluid cell, take the AZIMUTH of its
+**fluid-only** Youngs normal (the 27-point weights restricted to non-solid cells, renormalized per
+half-plane), build `m_theta = cos(theta) n_w + sin(theta) t_hat`, and anchor the plane by matching
+that cell's own liquid volume (`plicAlpha`). New Python: `set_contact_angle`,
+`set_contact_angle_field`, `contact_angle`, `set_contact_angle_pivot` (ablation),
+`contact_angle_diagnostics`.
+
+Four things this rung paid for, all measured (`doc/vof_workorders_v5.md`, WO-S findings):
+- **The fill is exactly idempotent, and that is the whole design.** An interface that already meets
+  the wall at theta is reproduced to **1e-15** (`tests/kokkos/test_vof_wetting.cpp` G0a), so theta is
+  a fixed point of the discrete scheme. The work order's anchor — the PLIC centroid projected onto
+  the wall along `n_w` — is **not** idempotent: it shifts the plane by `-sdf(p_f) cos(theta)`, with
+  the wrong sign, measured **0.26 in cell fraction at theta = 60**. It ships as ablation mode 2 of
+  `set_contact_angle_pivot`.
+- **Only the IN-WALL half of the fluid-only normal is usable.** A fluid-restricted stencil cannot
+  measure the WALL-NORMAL component — there is no colour below the first fluid row and the one-sided
+  substitute reads a saturating profile over half the distance: **23 deg of error at theta = 30**
+  against 2.3 deg for the same stencil with the solid rows present. Its AZIMUTH is exact for a plane
+  (0.000 deg over the sweep), and since the rung OVERWRITES the angle anyway, using the azimuth and
+  discarding the rest makes the end-to-end band error **1.1e-15** instead of inheriting the defect.
+- **The anchor's own column is not enough.** Walking strictly along `n_w` gives a PURE-phase anchor
+  in every column just outside the contact circle, where the continued interface still puts liquid
+  in the band; the band then under-extends and the equilibrium angle comes out **5 deg biased
+  towards 90**. Where the anchor is pure phase the fill averages the theta-planes of the anchor's
+  MIXED neighbours (branch `neighbour_cells`), which removes the bias.
+- **Where the SDF wall sits INSIDE the cell decides whether the contact line can move at all**, and
+  it is a property of the cut-cell IBM, not of this rung. At exactly `k + 1/2` — the placement WO-Q's
+  G5 and WO-S's G1 both ask for — the tangential MAC faces of the wall-adjacent cell sit ON the SDF
+  zero level and `buildOpenness` (`sdf > 0` is fluid) closes them: measured `ox = oy = 0.000` on a
+  cell with `eps = 0.5`. That cell is tangentially isolated, the contact line **cannot move**, and
+  the unrelieved Young force appears as `max|u| ~ 1` on DOFs whose face openness is 0. At `k + 1/4`
+  the same wall gives `eps = ox = oy = 0.75`, the contact line is mobile and the raw `max|u|`
+  collapses from **7.9e-1 to 1.7e-3**. **This also answers WO-Q's open question 8**: the 0.788
+  "wall-band spurious current" of the V5a G5 cap was entirely on zero-openness DOFs and is an
+  artefact of the half-integer wall, not a surface-tension defect.
+
 **Momentum consistency in cut cells (V5a item 8).** `enable_vof_momentum` composes with a solid: the
 half-shifted CV gets fluid volume `½(eps(i−s_e) + eps(i))`, transverse face openness
 `½(o_d(i−s_e) + o_d(i))` and, on the axial (cell-centre) face, the cell fraction `eps` of the cell
@@ -613,9 +660,9 @@ Measured with it on: ∂P/∂z relative error **0.34** instead of 1e-15. It ship
 the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
 Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
-`vof_curvature`, `vof_surface_tension`, `vof_cutcell`; `tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`,
+`vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`; `tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`,
 `vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,
-`vof_surface_tension_mpi_np{1,2,4}`, `vof_cutcell_mpi_np{1,2,4}`;
+`vof_surface_tension_mpi_np{1,2,4}`, `vof_cutcell_mpi_np{1,2,4}`, `vof_wetting_mpi_np{1,2,4}`;
 `tests/study/vof_cutcell.py` (the V5a battery: conservation through a packing, coupled draining,
 the 90° cap on a cut wall); `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
 falling drop, the RT near-Nyquist check — every gate there records the pressure iteration count

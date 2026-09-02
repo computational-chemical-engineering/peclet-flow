@@ -2244,6 +2244,7 @@ class Solver {
       return;
     if (!hasSolid_ || !cutcellPressure_) {
       vofAdv_.disableGeometry();  // all-fluid: the V1 kernels run byte-identically
+      vofAdv_.disableWetting();
       vofSolidG2_ = CCField();
       return;
     }
@@ -2269,6 +2270,7 @@ class Solver {
     if (vofSolidG2_.extent(0) != n_)
       vofSolidG2_ = CCField("vofSolidG2", n_);
     copyInner(vofSolidG2_, e_, G, CCConst(vofAdv_.kindDouble()), e3_, kVofG);
+    applyContactAngle();  // rung V5b (WO-S): re-wire the theta field / wall SDF onto the new block
     zeroSolidColour();
   }
   // Zero the canonical G=2 colour field inside solid cells (see buildVofGeometry).
@@ -2309,6 +2311,17 @@ class Solver {
     // then a SECOND exchange so the outermost ghost layer holds its owner's filled value (the
     // passes only reach ghost depth 2, and the curvature cascade reads depth 3).
     if (vofAdv_.hasGeometry() && f.data() == vofAdv_.colour().data()) {
+      // Rung V5b (WO-S): the theta-consistent pass 1 reads the FLUID-ONLY Youngs normal of the
+      // anchor fluid cell, which the pass may reach at ghost depth 3 — one deeper than a 3^3
+      // stencil can be evaluated on this block. Build it on the INNER region and run it through
+      // the block's own ghost policy, exactly as the geometry classification is: every read the
+      // theta pass then makes is the OWNER's value, which is what keeps the inner fill
+      // decomposition-independent.
+      if (vofAdv_.hasWetting()) {
+        vofAdv_.buildWettingNormals();
+        for (int d = 0; d < 3; ++d)
+          vofExchangeRaw(vofAdv_.wettingNormal(d));
+      }
       vofAdv_.solidBandFill();
       vofExchangeRaw(f);
     }
@@ -5230,6 +5243,109 @@ class Solver {
     copyInner(t, e_, G, src, e3_, kVofG);
     return gatherInner(t);
   }
+  // --- rung V5b (WO-S): static contact angle on SDF solids --------------------------------------
+  //
+  // The band fill of rung V5a is a stencil device: it decides what the MYC 3^3 stencil and the V3
+  // height-function columns of a near-wall cell see INSIDE the solid, and WO-Q's neutral (mean of
+  // the fluid face neighbours) rule is the zero-slope continuation, i.e. the 90-degree
+  // Afkhami-Bussmann limit. `set_contact_angle` replaces PASS 1 of that fill by the fractions of
+  // the plane that continues the fluid-side interface into the solid at the prescribed angle
+  // theta, measured THROUGH THE LIQUID (`m . n_w = cos theta`, `vof/wetting.hpp`). Nothing else
+  // changes: no force is added at the wall, the V3 cascade and the V4 balanced force are the
+  // unmodified ones, and passes 2-3 of the fill are WO-Q's.
+  //
+  // theta is a per-cell FIELD so the dynamic-angle rung (V6) changes only what fills it. Setting
+  // it needs `set_solid(..., cutcell_pressure=True)` + `enable_vof` (there is no wall otherwise);
+  // with no call the neutral fill runs and every V5a number is byte-identical.
+  void setContactAngle(double thetaDeg) {
+    if (!(thetaDeg >= 0.0 && thetaDeg <= 180.0))
+      throw std::runtime_error("set_contact_angle: theta must be in [0, 180] degrees");
+    contactAngleDeg_ = thetaDeg;
+    contactAngleField_.clear();
+    contactAngleSet_ = true;
+    applyContactAngle();
+  }
+  // Per-cell contact angle in DEGREES on the inner region (flat x-fastest, nx*ny*nz). Only the
+  // value at the SOLID band cell being filled is read, so cells away from a wall are irrelevant.
+  void setContactAngleField(const std::vector<double>& thetaDeg) {
+    if (thetaDeg.size() != (std::size_t)nx_ * ny_ * nz_)
+      throw std::runtime_error("set_contact_angle_field: expected nx*ny*nz values");
+    contactAngleField_ = thetaDeg;
+    contactAngleSet_ = true;
+    applyContactAngle();
+  }
+  bool contactAngleSet() const { return contactAngleSet_; }
+  double contactAngle() const { return contactAngleDeg_; }
+  // Which anchor the theta-plane uses (`vof::VofWettingPivot`): 0 volume-consistent (DEFAULT,
+  // idempotent), 1 the PLIC centroid p_f (Afkhami-Bussmann), 2 the work order's
+  // `c = p_f - sdf(p_f) n_w` (NOT idempotent — measured to be off by 0.26 in cell fraction at
+  // theta = 60, gate G0), 3 the contact line on the wall. Ablation only.
+  void setContactAnglePivot(int mode) {
+    if (mode < 0 || mode > 3)
+      throw std::runtime_error("set_contact_angle_pivot: mode must be 0..3");
+    contactPivot_ = mode;
+    vofAdv_.wettingPivot = mode;
+  }
+  int contactAnglePivot() const { return contactPivot_; }
+  struct ContactAngleDiagnostics {
+    long contactCells = 0;    ///< band cells written by the theta plane of their own anchor
+    long neighbourCells = 0;  ///< band cells written by the mean of the anchor's MIXED neighbours
+    long pureCells = 0;       ///< band cells that took the pure-phase continuation
+    long parallelCells = 0;   ///< band cells whose interface was parallel to the wall
+    long neutralCells = 0;    ///< band cells that fell back to WO-Q's neutral mean
+    long unfilledCells = 0;   ///< SOLID cells pass 1 left untouched (passes 2-3 then fill them)
+    double meanApparentAngle = 0.0;  ///< mean measured apparent angle over `contactCells`, degrees
+    double setAngle = 0.0;           ///< the prescribed angle, degrees (uniform case)
+  };
+  // The band census of the CURRENT colour field: how many band cells each branch of the fill wrote
+  // and the mean APPARENT angle the fluid-only normal reported at the contact cells (G1's
+  // measurement, evaluated on the fill's own data rather than on a post-processed shape).
+  ContactAngleDiagnostics contactAngleDiagnostics() {
+    if (!vofEnabled_)
+      throw std::runtime_error("contact_angle_diagnostics: VoF is not enabled");
+    ContactAngleDiagnostics d;
+    d.setAngle = contactAngleDeg_;
+    if (!vofAdv_.hasWetting())
+      return d;
+    bridgeColourToVof();  // regenerates the fill, hence the census
+    long counts[vof::kVofWetCount];
+    long nApp = 0;
+    vofAdv_.wettingCensus(counts, d.meanApparentAngle, nApp);
+    d.unfilledCells = counts[vof::kVofWetNone];
+    d.contactCells = counts[vof::kVofWetTheta];
+    d.neighbourCells = counts[vof::kVofWetNeighbour];
+    d.pureCells = counts[vof::kVofWetPure];
+    d.parallelCells = counts[vof::kVofWetParallel];
+    d.neutralCells = counts[vof::kVofWetNeutral];
+    return d;
+  }
+  // Wire the theta field + the wall SDF onto the colour block. Idempotent; called by the setters
+  // and again by every geometry rebuild (`buildVofGeometry`), since the block can be re-sized.
+  void applyContactAngle() {
+    if (!contactAngleSet_ || !vofEnabled_ || !vofAdv_.hasGeometry())
+      return;  // remembered; buildVofGeometry calls back once the geometry exists
+    vofAdv_.enableWetting();
+    vofAdv_.wettingPivot = contactPivot_;
+    // (a) the SDF on the colour block: inner region from the solver's own sdf_, then the colour
+    //     field's ghost policy, so the central-difference wall normal at ghost depth <= 2 is the
+    //     OWNER's (the WO-Q finding-5 argument, applied to the wall normal).
+    copyInner(vofAdv_.wallSdf(), e3_, kVofG, CCConst(sdf_), e_, G);
+    vofExchangeRaw(vofAdv_.wallSdf());
+    // (b) theta, in radians.
+    const double toRad = 3.14159265358979323846 / 180.0;
+    if (contactAngleField_.empty()) {
+      Kokkos::deep_copy(vofAdv_.contactAngle(), contactAngleDeg_ * toRad);
+    } else {
+      CCField t("thetaG2", n_);
+      std::vector<double> rad(contactAngleField_.size());
+      for (std::size_t i = 0; i < rad.size(); ++i)
+        rad[i] = contactAngleField_[i] * toRad;
+      scatterInner(t, rad);
+      copyInner(vofAdv_.contactAngle(), e3_, kVofG, CCConst(t), e_, G);
+      vofExchangeRaw(vofAdv_.contactAngle());
+    }
+  }
+
   // The colour advector itself (its g=3 block, geometry views and planes). For TESTS: gate G3 of
   // `tests/kokkos/test_vof_cutcell.cpp` rebuilds the openness/fraction by an independent route and
   // compares against these.
@@ -6290,6 +6406,12 @@ class Solver {
   CCField vofCs_;                  // rung V5a: cell fluid fraction on the G=2 block (staggered)
   CCField vofSolidG2_;             // rung V5a: 1 where the cell is SOLID (G=2 mirror), else 0
   bool vofSolidZero_ = true;       // rung V5a: canonical "C" is 0 in solid cells (see setter)
+  // rung V5b (WO-S): the static contact angle. Unset => the neutral (90 deg) fill of WO-Q, and the
+  // whole V5a battery is byte-identical.
+  bool contactAngleSet_ = false;
+  double contactAngleDeg_ = 90.0;
+  int contactPivot_ = vof::kVofPivotVolume;
+  std::vector<double> contactAngleField_;
   vof::WyAdvector vofAdv_;         // the g=3 working block: PLIC + Weymouth-Yue sweeps
   C3 e3_{0, 0, 0};                 // extended extents of that block (n + 2*kVofG)
   double vofCflLimit_ = 0.25;      // Weymouth's proven 3D boundedness bound 1/(2(N-1))

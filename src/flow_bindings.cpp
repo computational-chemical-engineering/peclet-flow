@@ -804,6 +804,72 @@ static void bind_solver(nb::module_& m, const char* name) {
           "cell shifted from the solver's ox/oy/oz), 4 = the classification (1 = SOLID, i.e. "
           "eps == 0 AND all six faces closed).")
       .def(
+          "set_contact_angle", [](S& s, double deg) { s.setContactAngle(deg); }, nb::arg("theta"),
+          "Rung V5b (WO-S). Prescribe a STATIC contact angle, in DEGREES, measured THROUGH THE "
+          "LIQUID, on every immersed SDF wall. Needs set_solid(..., cutcell_pressure=True) + "
+          "enable_vof; with no call the wall stays at the neutral 90-degree fill of rung V5a and "
+          "every V5a number is byte-identical.\n\n"
+          "What it changes is PASS 1 of the solid-band fill and nothing else: the band cells "
+          "receive the volume fractions of the plane that continues the fluid-side interface into "
+          "the solid at angle theta (m . n_w = cos theta, with n_w = grad(sdf)/|grad(sdf)| the "
+          "solid->fluid wall normal and m the PLIC normal pointing into the gas). The unmodified V3 "
+          "height-function/MYC cascade then returns the curvature of an interface meeting the wall "
+          "at theta and the V4 balanced force does the rest — NO force is added at the wall. "
+          "theta = 0 fills the band with liquid (complete wetting), theta = 180 empties it.\n\n"
+          "Construction (src/vof/wetting.hpp): the anchor fluid cell is found by walking along n_w; "
+          "its fluid-only Youngs normal supplies the AZIMUTH of the contact line (its in-wall "
+          "component, which a fluid-restricted stencil measures to ~1e-14 on a plane) while the "
+          "angle to the wall is replaced by the prescribed one — the wall-normal component of a "
+          "fluid-only estimator is unusable (measured 23 deg of error at theta = 30 against 2.3 "
+          "for the full stencil, gate G0e). The plane is then anchored by matching the anchor "
+          "cell's own liquid volume, which makes the fill EXACTLY idempotent: an interface that "
+          "already meets the wall at theta is reproduced to 1e-15 (gate G0a), so theta is a fixed "
+          "point of the scheme.")
+      .def(
+          "set_contact_angle_field",
+          [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setContactAngleField(grid_in(a)); },
+          nb::arg("theta"),
+          "Per-cell static contact angle in DEGREES, as a Fortran-order (nx,ny,nz) array. Only the "
+          "value AT the solid band cell being filled is read, so cells away from a wall are "
+          "irrelevant. theta is a field so the dynamic-angle rung (V6) changes only what fills it.")
+      .def(
+          "contact_angle", [](S& s) { return s.contactAngle(); },
+          "The prescribed static contact angle in degrees (90 if none was set).")
+      .def(
+          "set_contact_angle_pivot", [](S& s, int m) { s.setContactAnglePivot(m); }, nb::arg("mode"),
+          "ABLATION — how the theta-plane is anchored in the fluid cell. 0 (DEFAULT) match the "
+          "anchor cell's liquid volume with plicAlpha; 1 pass through the PLIC centroid p_f (the "
+          "Afkhami-Bussmann / Basilisk contact.h rule); 2 the work order's c = p_f - sdf(p_f) n_w; "
+          "3 the contact line on the wall. Modes 0/1/3 are exactly idempotent (1e-15 on gate G0a); "
+          "mode 2 is NOT — projecting the centroid along n_w shifts the plane by -sdf(p_f) "
+          "cos(theta), measured 0.26 in cell fraction at theta = 60, with the wrong sign (it "
+          "removes liquid from the band for a wetting angle).")
+      .def(
+          "contact_angle_diagnostics",
+          [](S& s) {
+            const auto d = s.contactAngleDiagnostics();
+            nb::dict r;
+            r["contact_cells"] = d.contactCells;
+            r["neighbour_cells"] = d.neighbourCells;
+            r["pure_cells"] = d.pureCells;
+            r["parallel_cells"] = d.parallelCells;
+            r["neutral_cells"] = d.neutralCells;
+            r["unfilled_cells"] = d.unfilledCells;
+            r["mean_apparent_angle"] = d.meanApparentAngle;
+            r["set_angle"] = d.setAngle;
+            return r;
+          },
+          "The solid-band census of the CURRENT colour field on this rank: how many band cells each "
+          "branch of pass 1 wrote ('contact_cells' the theta plane of the cell's own anchor, "
+          "'neighbour_cells' the mean of the anchor's MIXED neighbours' planes where the anchor "
+          "itself is pure phase, 'pure_cells' the pure-phase "
+          "continuation C_s = C_f, 'parallel_cells' an interface parallel to the wall where no "
+          "rotation is defined, 'neutral_cells' the WO-Q neutral-mean fallback, 'unfilled_cells' "
+          "left untouched), plus 'mean_apparent_angle' — the mean angle the fluid-only normal "
+          "reported at the contact cells BEFORE the rotation, in degrees. That last number is the "
+          "direct read-out of how far the fluid-side interface still is from the prescribed angle, "
+          "measured on the fill's own data rather than on a post-processed shape.")
+      .def(
           "vof_has_geometry", [](S& s) { return s.vofHasGeometry(); },
           "True when the colour advection is running the CUT-CELL (openness-weighted) kernels, "
           "i.e. an immersed solid is present and set_solid ran with cutcell_pressure=True. False "
