@@ -905,6 +905,17 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["cut_cells"] = d.cutCells;
             r["clamped_faces"] = d.clampedFaces;
             r["solid_cells"] = d.solidCells;
+            // rung V-BC (WO-R): the boundary term of the exact colour budget
+            const auto v = s.vofBcVolumes();
+            double in = 0.0, out = 0.0;
+            for (int f = 0; f < 6; ++f) {
+              if (v[f] > 0.0)
+                in += v[f];
+              else
+                out -= v[f];
+            }
+            r["inflow_volume"] = in;
+            r["outflow_volume"] = out;
             return r;
           },
           "Colour census over THIS RANK's inner cells: sum (cell-volume units), min, max, the "
@@ -920,7 +931,84 @@ static void bind_solver(nb::module_& m, const char* name) {
           "UNCUT fluid cells (eps==1), where Weymouth's boundedness applies verbatim; "
           "'clipped_volume' / 'clipped_signed' = the liquid volume the cut-cell clip moved during "
           "the last advection (a TRIPWIRE on the flux approximation, not a mechanism: if it is not "
-          "negligible the fix is the solid-clipped flux polygon); 'cut_cells' / 'solid_cells'.")
+          "negligible the fix is the solid-clipped flux polygon); 'cut_cells' / 'solid_cells'.\n\n"
+          "'inflow_volume' / 'outflow_volume' are the liquid volume that ENTERED / LEFT through "
+          "the domain faces during the LAST colour advection, in the same cell-volume units as "
+          "'sum' (0 unless a VoF boundary colour is set — rung V-BC). They are the advector's OWN "
+          "face fluxes, so sum(C) - sum(C_0) = integral(inflow - outflow) holds to round-off "
+          "whatever the interface does; vof_bc_volumes() breaks them out per face.")
+      // --- two-phase open boundaries (rung V-BC, WO-R) ------------------------------------------
+      .def(
+          "set_vof_inflow", [](S& s, int face, double value) { s.setVofInflow(face, value); },
+          nb::arg("face"), nb::arg("value"),
+          "Colour of the fluid ENTERING through inflow face 'face' (0..5 = -x,+x,-y,+y,-z,+z); "
+          "1 = liquid, 0 = gas. The face must already be an inflow (set_domain_bc(face, 2, ...)) "
+          "or this raises.\n\n"
+          "The value may be FRACTIONAL, and it then means 'this fraction of the incoming flux is "
+          "liquid' — a flux statement, not a sub-cell interface position. That is exactly how it "
+          "is implemented: on a face whose donor is outside the domain the geometric flux is "
+          "replaced by the algebraic C_donor*a (wyFaceFluxBc), because a uniform prescribed ghost "
+          "band has no usable MYC normal and the inflow colour is boundary DATA.\n\n"
+          "Setting this also makes the property ghosts of that face follow the inflow colour "
+          "through the registered closures (rho_ghost = rho(C_inflow)) instead of copying the "
+          "interior — without it the inlet FACE density is the interior's, wrong by up to the "
+          "density ratio at a liquid inlet into a gas domain. Default (nothing set): the "
+          "zero-gradient copy, i.e. today's behaviour, bit for bit.")
+      .def(
+          "set_vof_inflow_profile",
+          [](S& s, int face, nb::ndarray<double, nb::c_contig> prof) {
+            if (prof.ndim() != 2)
+              throw std::runtime_error("vof inflow profile must be (Nb,Nc)");
+            const int nb_ = (int)prof.shape(0), nc = (int)prof.shape(1);
+            s.setVofInflowProfile(
+                face, peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_,
+                nc);
+          },
+          nb::arg("face"), nb::arg("profile"),
+          "Per-position inflow colour (Nb,Nc) on the INNER grid of the face's two perpendicular "
+          "axes, resampled with the same clamp rule set_domain_bc_profile uses for the velocity. "
+          "This is how a liquid distributor over part of an inlet is expressed: the colour "
+          "profile says WHERE liquid enters, the velocity profile says how fast.")
+      .def(
+          "set_vof_backflow", [](S& s, int face, double value) { s.setVofBackflow(face, value); },
+          nb::arg("face"), nb::arg("value") = 0.0,
+          "inletOutlet colour on OUTFLOW face 'face' (default 0 = gas): where the boundary face "
+          "velocity points back INTO the domain, the colour ghost carries this value instead of "
+          "the zero-gradient copy. This is OpenFOAM's inletOutletFvPatchField (Rusche 2002 thesis "
+          "section 4), the standard VoF outlet — an outlet is a place where you know what leaves "
+          "(whatever is inside) but must STATE what comes back. Zero-gradient on a reversing face "
+          "re-injects whatever happens to be sitting at the outlet, which for a draining film "
+          "feeds the film back into the domain. Where the fluid leaves, zero-gradient is kept.")
+      .def(
+          "vof_bc_volumes", [](S& s) { return s.vofBcVolumes(); },
+          "Signed liquid volume that crossed each of the six domain faces during the LAST colour "
+          "advection, in cell-volume units, POSITIVE for liquid ENTERING the domain. Local to this "
+          "rank. Six entries in face order (-x,+x,-y,+y,-z,+z); only faces carrying a domain BC "
+          "are meaningful.")
+      .def(
+          "vof_bc_volumes_total", [](S& s) { return s.vofBcVolumesTotal(); },
+          "The same, accumulated since enable_vof() or the last reset_vof_bc_volumes().")
+      .def(
+          "set_outflow_rho_correction", [](S& s, bool on) { s.setOutflowRhoCorrection(on); },
+          nb::arg("on") = true,
+          "ABLATION (WO-R item 4), DEFAULT FALSE — the measurement refuted the item.\n\n"
+          "doc/variable_density_projection.md section 4 listed the missing 1/rho_f factor in "
+          "bcCorrectOutflow as a defect to fix with a two-phase outflow case. Measured on that "
+          "case (stratified duct, density ratio 10, max|div(open u)| of the PROJECTED field): "
+          "WITHOUT the factor 8.76e-10, WITH it 9.24e-03 — seven orders worse. A projection "
+          "correction cancels the divergence only if it uses the SAME face coefficient the "
+          "operator row used, and the outflow face's coefficient is the RAW openness (buildRhoCoeff "
+          "runs over inner cells only; the multigrid re-imposes the Dirichlet outflow face as "
+          "simply open), so the plain phi difference IS the consistent correction. Removing the "
+          "inconsistency would mean changing the OPERATOR, not this correction.\n\n"
+          "Bitwise inert at constant density (rho_f == rho0 makes the factor exactly 1). "
+          "PECLET_FLOW_OUTFLOW_RHO=1 turns it on process-wide.")
+      .def(
+          "outflow_rho_correction", [](S& s) { return s.outflowRhoCorrection(); },
+          "Whether the 1/rho_f factor is applied to the outflow face correction (WO-R item 4).")
+      .def(
+          "reset_vof_bc_volumes", [](S& s) { s.resetVofBcVolumes(); },
+          "Zero the per-face boundary liquid ledger (both the per-step and the running totals).")
       .def(
           "compute_vof_curvature",
           [](S& s) {
@@ -1309,6 +1397,20 @@ static void bind_solver(nb::module_& m, const char* name) {
           "absent; the coupling writes it each step BEFORE step()). eps=1 everywhere reduces "
           "exactly "
           "to div(u)=0. Pair with max_porous_residual() for the meaningful convergence check.")
+      .def(
+          "max_open_divergence_projected", [](S& s) { return s.maxOpenDivergenceProjected(); },
+          "max|div(open*u)| of the field the projection ACTUALLY produced — the outflow-face "
+          "correction included, and WITHOUT mutating the velocity.\n\n"
+          "Use this instead of max_open_divergence() on any domain with an OUTFLOW face. "
+          "max_open_divergence() re-imposes the zero-gradient outflow velocity before measuring "
+          "(its own comment says so), which (a) DESTROYS bcCorrectOutflow's correction — the "
+          "mechanism by which mass leaves — as a side effect, so calling it once per step inside a "
+          "time loop changes the run, and (b) reports the divergence of a field the solver never "
+          "used. Measured on a stratified ratio-1000 outflow box: 5e-3 from the mutating "
+          "diagnostic, flat in the iteration count, flat in the density ratio and bit-identical in "
+          "a -DPECLET_FLOW_MREAL_DOUBLE build (i.e. not a solver residual), against the projected "
+          "field's own residual from this call. Identical to max_open_divergence() when there is "
+          "no outflow face, and on the collocated grid (which already measures the face field).")
       .def("max_open_divergence", &S::maxOpenDivergence,
            "Return the max cut-cell velocity-flux divergence max|div(open*u)|. With porous "
            "continuity this is NOT ~0 -- it equals -d(eps)/dt (the bed expanding). Use "

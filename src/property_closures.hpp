@@ -92,6 +92,82 @@ inline void applyClosure(const Closure& cl, C3 e, int g) {
       });
 }
 
+
+// Apply one closure on the GHOST BAND of a single domain face (axis `a`, side `side`), i.e. on the
+// `g` ghost layers outside the boundary — the cells `applyClosure` above deliberately leaves alone.
+//
+// WHY THIS EXISTS (WO-R item 5). The property ghost policy is a Neumann copy of the inner cell
+// (`IbmSolver::fillPropGhosts`). At a wall that is right: the ghost's job is to make the
+// wall-normal derivative vanish. At an INFLOW carrying a different phase it is wrong by up to the
+// density ratio: the face density in the momentum time term and in the projection coefficient at
+// the inlet face is the arithmetic mean of the inner cell and the ghost, so a liquid inlet next to
+// a gas interior would be given a face density half-way between the two phases *of the interior*,
+// not of the incoming fluid. Since rho and mu are CLOSURES of the colour field and the colour
+// ghost now carries the prescribed inflow value, the consistent fix is not a second BC rule but
+// the same closure evaluated at the ghost: rho_ghost = rho(C_inflow), by construction.
+//
+// This is a sibling kernel, not a widened `applyClosure`: the interior kernel is validated and its
+// range is what makes VoF/varRho/porous bit-identical when no VoF inflow colour is set. The caller
+// runs this only on faces that have one (`IbmSolver::vofBcPropGhosts`).
+inline void applyClosureFaceGhost(const Closure& cl, C3 e, int g, int a, int side) {
+  CCExec space;
+  const ClosureKind kind = cl.kind;
+  CCField out = cl.out;
+  CCConst in0 = cl.in0, in1 = cl.in1;
+  const double p0c = cl.p[0], p1c = cl.p[1], p2c = cl.p[2], p3c = cl.p[3];
+  const bool haveIn1 = (in1.data() != nullptr) && (in1.extent(0) == out.extent(0));
+  CCConst tx = cl.tabX, ty = cl.tabY;
+  const int nTab = cl.nTab;
+  const int dims[3] = {e.x, e.y, e.z};
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = st[a], sb = st[b], sc = st[c];
+  const int lo = (side == 0) ? 0 : (dims[a] - g);
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::apply_closure_face_ghost", MD(space, {0, 0}, {dims[b], dims[c]}),
+      KOKKOS_LAMBDA(int j0, int j1) {
+        const long base = (long)j0 * sb + (long)j1 * sc;
+        for (int k = 0; k < g; ++k) {
+          const long i = base + (long)(lo + k) * sa;
+          double v;
+          switch (kind) {
+            case ClosureKind::LinearMix:
+              v = p0c + p1c * in0(i) + (haveIn1 ? p2c * in1(i) : 0.0);
+              break;
+            case ClosureKind::BoussinesqForce:
+              v = p0c * p1c * p2c * (in0(i) - p3c);
+              break;
+            case ClosureKind::ArrheniusMu:
+              v = p0c * Kokkos::exp(p1c * (1.0 / in0(i) - 1.0 / p2c));
+              break;
+            default: {  // Table1D, same clamped piecewise-linear rule as applyClosure
+              const double sv = in0(i);
+              if (nTab <= 0) {
+                v = 0.0;
+              } else if (sv <= tx(0)) {
+                v = ty(0);
+              } else if (sv >= tx(nTab - 1)) {
+                v = ty(nTab - 1);
+              } else {
+                int l = 0, h = nTab - 1;
+                while (h - l > 1) {
+                  const int mid = (l + h) / 2;
+                  if (tx(mid) <= sv)
+                    l = mid;
+                  else
+                    h = mid;
+                }
+                const double t = (sv - tx(l)) / (tx(h) - tx(l));
+                v = ty(l) + t * (ty(h) - ty(l));
+              }
+            }
+          }
+          out(i) = v;
+        }
+      });
+}
+
 }  // namespace peclet::flow
 
 #endif  // PECLET_FLOW_PROPERTY_CLOSURES_HPP

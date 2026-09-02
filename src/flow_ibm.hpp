@@ -22,6 +22,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <Kokkos_Core.hpp>
 #include <limits>
@@ -48,6 +49,7 @@
 #include "staggered_advection.hpp"
 #include "vof/advect_wy.hpp"    // VoF rung V1: the Weymouth-Yue colour advector (its own g=3 block)
 #include "vof/colour_field.hpp"  // VoF rung V2a: the G=2 <-> g=3 bridge + the colour ghost policy
+#include "vof/colour_bc.hpp"  // VoF rung V-BC: inflow/outflow/backflow colour + the outside mask
 #include "vof/curvature_field.hpp"  // VoF rung V3: the HF curvature cascade + PV fallback
 #include "vof/momentum_advect.hpp"  // VoF rung V2b: momentum-consistent rho^c u_c transport
 #include "vof/surface_tension.hpp"  // VoF rung V4: balanced-force CSF + the capillary dt
@@ -1917,6 +1919,37 @@ class Solver {
       x *= ct;
     return out;
   }
+  // WO-R: the divergence of the field the projection ACTUALLY produced, outflow correction
+  // included. `maxOpenDivergence()` below re-imposes the zero-gradient outflow face before
+  // measuring (its own comment says so) — which both destroys `bcCorrectOutflow`'s correction as a
+  // side effect and reports the divergence of a field the solver never used. On an open-boundary
+  // two-phase box that artefact is the dominant number: measured 5e-3, flat in the iteration
+  // count, flat in the density ratio and bit-identical in a `-DPECLET_FLOW_MREAL_DOUBLE` build —
+  // i.e. not a solver residual at all. This sibling fills the ghosts with `doOutflow = false`,
+  // exactly as `step()` does after `project()`, and leaves the velocity field alone.
+  //
+  // Kept as a SIBLING rather than a change of default: every recorded open-boundary number in the
+  // repo was taken with the mutating one, and re-baselining them is not this work order's call.
+  double maxOpenDivergenceProjected() {
+    if (!cutcellPressure_)
+      return 0.0;
+    if constexpr (Grid::collocated)
+      return maxOpenDivergence();  // the collocated branch already measures the face field
+    for (int c = 0; c < 3; ++c)
+      fillVelGhostsKeepOutflow(c);
+    divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
+               CCConst(oz_), div_, e_, G);
+    addWallFluxDivergence(div_);
+    double m = reduceMaxAbsInner(CCConst(div_));
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      double g = 0;
+      MPI_Allreduce(&m, &g, 1, MPI_DOUBLE, MPI_MAX, comm_);
+      return g;
+    }
+#endif
+    return m;
+  }
   double maxOpenDivergence() {
     if (!cutcellPressure_)
       return 0.0;
@@ -2070,6 +2103,7 @@ class Solver {
     for (int face = 0; face < 6; ++face)
       if (bc_[face] != 0 && touchesGlobalFace(face))
         applyScalarBcFace(f, face / 2, face % 2, 1, 0.0);  // type 1 = Neumann copy
+    vofBcPropGhosts(f);  // WO-R item 5; a no-op unless a VoF inflow colour is set
   }
   void fillMuGhosts() { fillPropGhosts(muField_); }
   // Ghost ring of the per-cell body-force fields ("force_x/y/z") — WO-G.
@@ -2220,6 +2254,11 @@ class Solver {
     }
 #endif
     buildVofGeometry();  // rung V5a (WO-Q): openness + fluid fraction on the colour block
+    // WO-R: the out-of-domain mask and the resampled boundary-colour profiles are properties of
+    // THIS block, so they are (re)built with it — and the mask is only INSTALLED on the advector
+    // when a VoF boundary colour has actually been set, which is what keeps the V1 flux path
+    // bit-identical otherwise (gate G5).
+    vofRebuildBcBlock();
     // The half-shifted momentum CVs live on this same block, so they are rebuilt with it.
     vofCurv_.init(nx_, ny_, nz_, kVofG);
     if (vofMomEnabled_) {
@@ -2346,6 +2385,7 @@ class Solver {
       return;
     const I3 gs = vofGlobalSize(), org = vofOrigin();
     vof::clampFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, org, gs, px, py, pz);
+    vofApplyColourBc(f);  // WO-R: inflow / inletOutlet backflow; a no-op unless one is set
   }
   I3 vofGlobalSize() const {
 #ifdef PECLET_FLOW_MPI
@@ -2377,7 +2417,17 @@ class Solver {
       return;
     }
     for (int c = 0; c < 3; ++c) {
-      fillVelGhosts(c, 0);
+      // KEEP the projection's outflow-face correction when there IS one (see
+      // fillVelGhostsKeepOutflow): the full fill would overwrite it with the zero-gradient copy
+      // and hand the advector a field that is not divergence-free at the outlet. When no
+      // projection has run since the last full fill — the KINEMATIC path, where the caller
+      // prescribes the velocity on the inner cells and the boundary face has never been set —
+      // the zero-gradient fill is exactly what supplies that face, so run the full one.
+      // With no outflow face at all the two are identical.
+      if (outflowCorrValid_)
+        fillVelGhostsKeepOutflow(c);
+      else
+        fillVelGhosts(c, 0);
       // The uniform face-velocity seam (getFaceVelocity): staggered C[c].u already lives on the
       // faces. copyFaceVelocity carries the low-face -> high-face index shift; see
       // colour_field.hpp.
@@ -4419,7 +4469,13 @@ class Solver {
   }
   // domain-BC velocity ghosts: periodic-fill periodic axes, then apply per-face BCs (fold=0
   // explicit/1 implicit).
-  void fillVelGhosts(int comp, int fold) { fillVelGhostsTo(C[comp].u, comp, fold); }
+  void fillVelGhosts(int comp, int fold) {
+    // This is the fill that RE-IMPOSES the zero-gradient outflow face, i.e. the one that erases
+    // `bcCorrectOutflow`'s correction (WO-R; see fillVelGhostsKeepOutflow). Record that so the
+    // VoF bridge knows whether there is a correction left to preserve.
+    outflowCorrValid_ = false;
+    fillVelGhostsTo(C[comp].u, comp, fold);
+  }
   void applyVelocityBcComp(int comp, int fold, bool doOutflow) {
     applyVelocityBcCompTo(C[comp].u, comp, fold, doOutflow);
   }
@@ -4437,6 +4493,44 @@ class Solver {
       if (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0)
         fillAxis(f, a);
     applyVelocityBcCompTo(f, comp, fold, true);
+  }
+  // SIBLING of fillVelGhostsTo that does NOT re-impose the zero-gradient OUTFLOW face
+  // (`doOutflow = false`, exactly what `step()` already passes after `project()` — "keep
+  // outflow"). Used ONLY by `bridgeVelocityToVof`.
+  //
+  // WHY IT EXISTS (WO-R; a defect found by gate F2). The projection corrects the high-side
+  // OUTFLOW normal face separately from every other face (`bcCorrectOutflow`) — that correction
+  // IS how mass leaves the domain, and `step()` deliberately re-imposes the domain BCs afterwards
+  // with `doOutflow = false` so it survives. `bridgeVelocityToVof` then called the FULL
+  // `fillVelGhosts` (`doOutflow = true`), whose `bcOutflowComp` overwrites the boundary face with
+  // the zero-gradient copy of the last inner cell — erasing the correction immediately after the
+  // projection made it, on every step, whenever VoF is enabled.
+  //
+  // Two measured consequences, both of which vanish with this sibling
+  // (`tests/kokkos/test_vof_bc.cpp` gate F2):
+  //   * the field the colour advector is handed is NOT discretely divergence-free at the outflow,
+  //     which is precisely the hypothesis Weymouth-Yue's exact conservation rests on;
+  //   * `max_open_divergence()`, evaluated after `step()` returns, reports the ERASED field —
+  //     measured 4.0 on a stratified outflow box that the projection had actually solved.
+  // The outer ghost layers beyond the boundary face are left as the exchange/periodic fill wrote
+  // them, and the advector never reads them: its flux sweep along axis d reaches exactly the
+  // domain boundary face and no further.
+  //
+  // Inert for everything that existed: `bridgeVelocityToVof` runs only under `enable_vof`, and no
+  // VoF configuration before this rung combined VoF with an outflow face.
+  void fillVelGhostsKeepOutflow(int comp) {
+    CCField f = C[comp].u;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      velDev_->exchange(f);
+      applyVelocityBcCompTo(f, comp, 0, false);
+      return;
+    }
+#endif
+    for (int a = 0; a < 3; ++a)
+      if (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0)
+        fillAxis(f, a);
+    applyVelocityBcCompTo(f, comp, 0, false);
   }
   // Distributed: a rank applies a face's BC iff its block TOUCHES that global face
   // (`touchesGlobalFace`, the same rule the scalar path uses in `applyScalarBc`). Without the test
@@ -4950,9 +5044,25 @@ class Solver {
       if (hasOutflow_) {  // correct the high-side outflow normal face that projectCorrect misses
                           // (mass leaves)
         B3 e{e_.x, e_.y, e_.z};
+        // WO-R item 4: with variable density every OTHER corrected face carries the mobility
+        // factor rho0/rho_f (projectCorrectVar) and this one did not — a ratio-sized error on the
+        // outflow face, invisible at constant density (rho_f == rho0) which is why the channel/BFS
+        // validations never saw it. The porous branches keep the plain correction: their
+        // coefficient is the drag/eps relaxation, not 1/rho, and a two-phase porous outlet is not
+        // this rung. `!varRho_` is byte-identical.
+        // `set_outflow_rho_correction(True)` (or PECLET_FLOW_OUTFLOW_RHO=1) applies the
+        // 1/rho_f factor. DEFAULT OFF: measured, it makes the outflow divergence seven orders
+        // WORSE, because the operator's outflow-face coefficient is the raw openness — see
+        // setOutflowRhoCorrection for the numbers and the mechanism.
+        const bool var = varRho_ && !porous_ && outflowRhoCorr_;
         for (int a = 0; a < 3; ++a)
-          if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
-            bcCorrectOutflow(C[a].u, phi_, e, G, a);
+          if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
+            if (var)
+              bcCorrectOutflowVar(C[a].u, phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_);
+            else
+              bcCorrectOutflow(C[a].u, phi_, e, G, a);
+          }
+        outflowCorrValid_ = true;  // the outflow face now carries the mass that leaves
       }
     }
     // the grad(phi) correction also touches solid faces; re-impose no-slip there so the decoupled
@@ -5607,6 +5717,267 @@ class Solver {
   // as a measured knob for the coefficient-coarsening question, not as an alternative scheme.
   void setRhoFaceHarmonic(bool on) { rhoFaceHarmonic_ = on; }
   bool rhoFaceHarmonic() const { return rhoFaceHarmonic_; }
+  // WO-R item 4 — and the measurement REFUTED the item. `doc/variable_density_projection.md` §4
+  // listed the missing `1/rho_f` in `bcCorrectOutflow` as a defect ("fine when the outflow region
+  // has rho ~ uniform; revisit with a two-phase outflow case"). This is that two-phase outflow
+  // case, and the factor makes things WORSE by seven orders of magnitude:
+  //
+  //   stratified duct, ratio 10, 5 steps, max|div(open u)| of the PROJECTED field
+  //     without the factor (the shipped behaviour)   8.76e-10
+  //     with    the factor (`bcCorrectOutflowVar`)   9.24e-03
+  //   (tests/kokkos/test_vof_bc.cpp gate F2; at ratio 1 the two are bitwise equal, 1.41e-17.)
+  //
+  // The mechanism, and why it is not a bug in the sibling kernel: a projection correction removes
+  // the discrete divergence only if it uses the SAME face coefficient the operator row used. The
+  // interior faces carry `open_f * rho0/rho_f` (`buildRhoCoeff`), but that kernel runs over INNER
+  // cells only — the outflow boundary face's coefficient is set by the multigrid's own boundary
+  // re-imposition (`bcSetOpenness`, Dirichlet outflow -> open) and is the RAW openness. So the
+  // consistent correction at that face is exactly the plain `phi` difference, which is what
+  // `bcCorrectOutflow` has always done. The real inconsistency, if one wants it removed, is on
+  // the OPERATOR side (give the outflow face the same `rho0/rho_f` the interior faces have, on
+  // every level) — a `CutcellMG` change, not a projection-correction one, and not this rung.
+  //
+  // The sibling therefore ships as a measured ABLATION, DEFAULT OFF. It is bitwise inert at
+  // constant density either way (rho_f == rho0 makes the factor exactly 1).
+  void setOutflowRhoCorrection(bool on) { outflowRhoCorr_ = on; }
+  bool outflowRhoCorrection() const { return outflowRhoCorr_; }
+
+  // --- two-phase open boundaries (rung V-BC, WO-R) ---------------------------------------------
+  //
+  // Rung V2a gave the colour field one non-periodic ghost rule, `clampFill` (globally-clamped
+  // zero-gradient). It is the right rule for a WALL and the wrong one for an INFLOW, where the
+  // colour of the incoming fluid is a prescribed datum. Three API calls cover the three domain-BC
+  // types; `src/vof/colour_bc.hpp` carries the rules and the reasoning, and this is the plumbing:
+  //
+  //   set_vof_inflow(face, C)            type-2 face: the colour of the incoming fluid
+  //   set_vof_inflow_profile(face, C2d)  the same, per position on the face
+  //   set_vof_backflow(face, C)          type-3 face: the colour of fluid that flows back IN
+  //   (a type-1 wall keeps `clampFill` = the 90 deg neutral continuation; WO-S replaces it)
+  //
+  // Setting any of them ARMS the rung: the advector gets the out-of-domain mask (so a boundary
+  // donor is fluxed algebraically as `C_donor * a` rather than as a reconstructed PLIC slab — see
+  // `wyFaceFluxBc`), the per-face boundary liquid volumes start being accumulated
+  // (`vof_diagnostics()['inflow_volume'] / ['outflow_volume']`, and `vof_bc_volumes()` per face),
+  // and the property ghosts of an inflow face follow the inflow colour through the closures
+  // instead of copying the interior (item 5 below). With none of them set NOTHING changes.
+  //
+  // The colour of the incoming fluid may be FRACTIONAL and it then means "this fraction of the
+  // incoming flux is liquid" — a flux statement, not a sub-cell interface position. That is
+  // exactly what the algebraic boundary flux implements.
+
+  /// Colour of the fluid entering through inflow face `f` (0..5 = -x,+x,-y,+y,-z,+z), in [0,1].
+  /// The face must already be an inflow (`set_domain_bc(f, 2, ...)`).
+  void setVofInflow(int f, double value) {
+    checkVofBcFace(f, 2, "set_vof_inflow");
+    vofInflowSet_[f] = true;
+    vofInflowC_[f] = value;
+    vofInflowProfRaw_[f].clear();
+    vofBcArm();
+  }
+  /// Per-position inflow colour on face `f`: `prof` is (nb, nc) on the INNER grid of the face's two
+  /// perpendicular axes (the same layout and the same clamp resampling `set_domain_bc_profile`
+  /// uses for the velocity).
+  void setVofInflowProfile(int f, const std::vector<double>& prof, int nb, int nc) {
+    checkVofBcFace(f, 2, "set_vof_inflow_profile");
+    if ((int)prof.size() != nb * nc)
+      throw std::runtime_error("set_vof_inflow_profile: profile size != nb*nc");
+    vofInflowSet_[f] = true;
+    vofInflowProfRaw_[f] = prof;
+    vofInflowProfNb_[f] = nb;
+    vofInflowProfNc_[f] = nc;
+    vofBcArm();
+  }
+  /// `inletOutlet` backflow colour on outflow face `f` (default 0 = gas): where the boundary face
+  /// velocity points back INTO the domain, the colour ghost carries this value instead of the
+  /// zero-gradient copy (Rusche 2002 thesis section 4; OpenFOAM `inletOutletFvPatchField`). Where
+  /// the fluid leaves, zero-gradient is kept and what leaves is what is inside.
+  void setVofBackflow(int f, double value) {
+    checkVofBcFace(f, 3, "set_vof_backflow");
+    vofBackflowSet_[f] = true;
+    vofBackflowC_[f] = value;
+    vofBcArm();
+  }
+  bool vofBcActive() const { return vofBcActive_; }
+  /// Signed liquid volume that crossed each of the six domain faces during the LAST colour
+  /// advection, in cell-volume units, POSITIVE for liquid entering the domain. Local to this rank
+  /// (a distributed caller sums them, as it does for every other VoF diagnostic).
+  std::vector<double> vofBcVolumes() const {
+    return std::vector<double>(vofBcVol_, vofBcVol_ + 6);
+  }
+  /// The same, accumulated since `enable_vof()` (or the last `resetVofBcVolumes()`). Changing a
+  /// boundary colour mid-run deliberately does NOT reset it — a slug injection is exactly the case
+  /// where the running total is the quantity of interest.
+  std::vector<double> vofBcVolumesTotal() const {
+    return std::vector<double>(vofBcVolTotal_, vofBcVolTotal_ + 6);
+  }
+  void resetVofBcVolumes() {
+    for (int f = 0; f < 6; ++f)
+      vofBcVol_[f] = vofBcVolTotal_[f] = 0.0;
+  }
+
+  // nvcc requires the enclosing member of an extended device lambda to be public; these are
+  // implementation detail (see the same note above `patchScalarDirichletFace`).
+
+  /// The colour field's boundary rules, applied at the END of `vofFillGhosts` — i.e. after the
+  /// halo/periodic exchange and after `clampFill`, so the BC overwrite wins exactly as the
+  /// property/velocity BCs win over the halo fill (WO-F's fill-then-BC order).
+  ///
+  /// TWO GUARDS, both load-bearing:
+  ///  * `vofBcActive_` — with no VoF BC set this returns before touching anything, which is what
+  ///    makes gate G5 (every existing VoF ctest bit-identical) hold by construction.
+  ///  * the identity test against `vofAdv_.colour()` — `vofFillGhosts` is the advector's generic
+  ///    `exchange` hook and rung V2b calls it on the half-shifted colour and on the momentum
+  ///    velocity fields too (`momentum_advect.hpp`). A colour BC applied to those would be
+  ///    nonsense. (Consequence, recorded rather than hidden: under `enable_vof_momentum` the
+  ///    half-shifted colour keeps the zero-gradient band at an inflow face. It matters only when
+  ///    the inflow colour differs from the colour of the fluid already at the boundary.)
+  void vofApplyColourBc(CCField f) {
+    if (!vofBcActive_ || !vofEnabled_)
+      return;
+    if (f.data() != vofAdv_.colour().data())
+      return;
+    const I3 e3{e3_.x, e3_.y, e3_.z};
+    for (int face = 0; face < 6; ++face) {
+      if (!touchesGlobalFace(face))
+        continue;  // rank-owned global faces only (the WO-F rule)
+      const int a = face / 2, sd = face % 2;
+      if (bc_[face] == 2 && vofInflowSet_[face]) {
+        if (vofInflowProf3_[face].extent(0))
+          vof::bcColourProfile(f, e3, kVofG, a, sd, vofInflowProf3_[face], vofProf3Nc_[face]);
+        else
+          vof::bcColourConst(f, e3, kVofG, a, sd, vofInflowC_[face]);
+      } else if (bc_[face] == 3 && vofBackflowSet_[face]) {
+        // reads the face velocity the advector is about to flux with, so it must run after
+        // bridgeVelocityToVof() — which it does: advectVof bridges the velocity first.
+        vof::bcColourBackflow(f, e3, kVofG, a, sd, vofAdv_.faceVel(a), vofBackflowC_[face]);
+      }
+    }
+  }
+
+  /// WO-R item 5 — the Neumann property policy at an inflow face.
+  ///
+  /// `fillPropGhosts` copies the inner cell's value into the ghost. At a liquid inlet next to a gas
+  /// interior that makes the inlet FACE density (the arithmetic mean of inner and ghost, used by
+  /// the momentum time term and by the projection coefficient alike) the interior's density, wrong
+  /// by up to the full ratio. rho and mu are closures of C and the colour ghost now carries the
+  /// inflow value, so the consistent repair is not a second BC rule but the SAME closure evaluated
+  /// on the ghost band: `rho_ghost = rho(C_inflow)` by construction.
+  ///
+  /// Two cases, both keyed on the field identity:
+  ///  * `f` IS the G=2 colour mirror -> put the inflow colour in its ghost band (the Neumann copy
+  ///    just overwrote it). This has to happen first, and it does: `advectVof` fills C's ghosts and
+  ///    `project()` fills rho's later in the step.
+  ///  * `f` is a closure OUTPUT -> re-evaluate that closure on the ghost band.
+  /// Anything else (a field with no closure, a hand-set rho) keeps the Neumann copy — there is no
+  /// C to derive it from and inventing one would be a silent model.
+  void vofBcPropGhosts(CCField f) {
+    if (!vofBcActive_ || !vofEnabled_)
+      return;
+    const bool isColour = cField_.extent(0) && f.data() == cField_.data();
+    const I3 e2{e_.x, e_.y, e_.z};
+    for (int face = 0; face < 6; ++face) {
+      if (bc_[face] != 2 || !vofInflowSet_[face] || !touchesGlobalFace(face))
+        continue;
+      const int a = face / 2, sd = face % 2;
+      if (isColour) {
+        if (vofInflowProfG2_[face].extent(0))
+          vof::bcColourProfile(f, e2, G, a, sd, vofInflowProfG2_[face], vofProfG2Nc_[face]);
+        else
+          vof::bcColourConst(f, e2, G, a, sd, vofInflowC_[face]);
+      } else {
+        for (const auto& cl : closures_)
+          if (cl.out.data() == f.data())
+            applyClosureFaceGhost(cl, e_, G, a, sd);
+      }
+    }
+  }
+
+  /// (Re)build everything that lives on the g=3 block for this rung: the out-of-domain mask and the
+  /// resampled boundary-colour profiles. Called from `buildVofBlock` (so a redistribute/initMpi
+  /// re-derives them) and from `vofBcArm` (so a setter takes effect immediately).
+  void vofRebuildBcBlock() {
+    if (!vofEnabled_)
+      return;
+    const I3 e3{e3_.x, e3_.y, e3_.z};
+    const bool px = vofAxisPeriodic(0), py = vofAxisPeriodic(1), pz = vofAxisPeriodic(2);
+    if (vofBcActive_) {
+      vofOutside_ = vof::UCField("vof::outside", vofAdv_.size());
+      vof::buildOutsideMask(vofOutside_, e3, kVofG, vofOrigin(), vofGlobalSize(), px, py, pz);
+      vofAdv_.setOutsideMask(vofOutside_);
+    } else {
+      vofAdv_.setOutsideMask(vof::UCField());
+    }
+    // the boundary-flux ledger counts only the GLOBAL domain faces this rank owns
+    for (int face = 0; face < 6; ++face)
+      vofAdv_.setBcFaceOwned(face, vofBcActive_ && bc_[face] != 0 && touchesGlobalFace(face));
+    for (int face = 0; face < 6; ++face) {
+      vofInflowProf3_[face] = CCField();
+      vofInflowProfG2_[face] = CCField();
+      if (vofInflowProfRaw_[face].empty())
+        continue;
+      vofInflowProf3_[face] =
+          resampleFaceScalar(vofInflowProfRaw_[face], vofInflowProfNb_[face],
+                             vofInflowProfNc_[face], face, e3_, kVofG, vofProf3Nc_[face]);
+      vofInflowProfG2_[face] =
+          resampleFaceScalar(vofInflowProfRaw_[face], vofInflowProfNb_[face],
+                             vofInflowProfNc_[face], face, e_, G, vofProfG2Nc_[face]);
+    }
+  }
+
+  /// Clamp-resample a per-position face scalar from the user's (nb, nc) INNER grid onto the
+  /// ghost-inclusive (b, c) plane of an extended block, so the fill kernel indexes it directly by
+  /// face position. Same rule as `setDomainBcProfile`, one component instead of three.
+  CCField resampleFaceScalar(const std::vector<double>& prof, int nb, int nc, int face, C3 ext,
+                             int g, int& outNc) {
+    const int a = face / 2;
+    const int dims[3] = {ext.x, ext.y, ext.z};
+    const int bax = (a + 1) % 3, cax = (a + 2) % 3;
+    const int Lb = dims[bax], Lc = dims[cax];
+    CCField pf("vof::bcprof", (std::size_t)Lb * Lc);
+    auto h = Kokkos::create_mirror_view(pf);
+    auto cl = [](int v, int n) { return v < 0 ? 0 : (v >= n ? n - 1 : v); };
+    for (int p0 = 0; p0 < Lb; ++p0)
+      for (int p1 = 0; p1 < Lc; ++p1)
+        h((long)p0 * Lc + p1) = prof[(std::size_t)cl(p0 - g, nb) * nc + cl(p1 - g, nc)];
+    Kokkos::deep_copy(pf, h);
+    outNc = Lc;
+    return pf;
+  }
+
+  /// A VoF boundary colour is only meaningful on a face that already carries the matching domain
+  /// BC, and getting that wrong is silent (the ghost band would be written and then never read as
+  /// boundary data). Fail loudly instead.
+  void checkVofBcFace(int f, int wantType, const char* who) {
+    if (f < 0 || f > 5)
+      throw std::runtime_error(std::string(who) + ": face must be 0..5 (-x,+x,-y,+y,-z,+z)");
+    enableVof();
+    if (bc_[f] != wantType)
+      throw std::runtime_error(
+          std::string(who) + ": face " + std::to_string(f) + " has domain BC type " +
+          std::to_string(bc_[f]) + ", not " + std::to_string(wantType) +
+          " — call set_domain_bc(face, " + std::to_string(wantType) + ", ...) first (2 = inflow, "
+          "3 = outflow).");
+  }
+  /// Arm the rung: install the mask, rebuild the profiles, and zero the boundary volume ledger.
+  void vofBcArm() {
+    vofBcActive_ = true;
+    vofRebuildBcBlock();
+    // Refresh C's G=2 ghost band NOW. The property ghosts derive from it (vofBcPropGhosts) and the
+    // first step's `project()` fills rho's ghosts BEFORE the colour advection refills C's, so
+    // without this the first step would evaluate rho(C) at the inflow ghost on the pre-BC (Neumann
+    // copy) colour — i.e. on the interior's phase.
+    if (vofEnabled_ && cField_.extent(0))
+      fillPropGhosts(cField_);
+  }
+  /// Move the advector's per-face boundary volume ledger into the solver's, once per advection.
+  void vofHarvestBcVolumes() {
+    if (!vofBcActive_)
+      return;
+    for (int f = 0; f < 6; ++f) {
+      vofBcVol_[f] = vofAdv_.bcFaceVolume(f);
+      vofBcVolTotal_[f] += vofBcVol_[f];
+    }
+  }
 
   // --- interface curvature (rung V3, WO-O) -----------------------------------------------------
   //
@@ -5898,7 +6269,9 @@ class Solver {
     requireVofGeometry("enable_vof");
     bridgeVelocityToVof();
     bridgeColourToVof();
+    vofAdv_.resetBcFaceVolume();  // WO-R: the per-step boundary liquid ledger
     vofAdv_.advect(dt_, vofStep_++);
+    vofHarvestBcVolumes();
     // Back to the G=2 registry mirror, then ITS ghost policy: the closures write inner cells only,
     // but the property face means (rho_f in the momentum diagonal, the projection coefficient, the
     // face body force) read the ghost ring, so C's ghosts must be filled with the SAME policy rho
@@ -6020,7 +6393,9 @@ class Solver {
       vofMom_.setPhaseDensities(vofRhoG_, vofRhoL_);
     bridgeVelocityToVof();
     bridgeColourToVof();
+    vofAdv_.resetBcFaceVolume();  // WO-R: the per-step boundary liquid ledger
     vofMom_.advect(vofAdv_, dt_, vofStep_++);
+    vofHarvestBcVolumes();
     // Colour back to the G=2 registry mirror (same contract as advectVof), and the advected
     // velocity back onto the solver's velocity index convention.
     copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
@@ -6625,6 +7000,13 @@ class Solver {
   // --- geometric VoF (rung V2a, WO-J) ---
   bool vofEnabled_ = false;
   bool rhoFaceHarmonic_ = false;  // harmonic instead of arithmetic rho_f in the projection (OFF)
+  bool outflowCorrValid_ = false;  // the projection's outflow-face correction is still in u
+  // WO-R item 4, and the answer is NO — see setOutflowRhoCorrection. Default OFF;
+  // PECLET_FLOW_OUTFLOW_RHO=1 turns the ablation on process-wide.
+  bool outflowRhoCorr_ = [] {
+    const char* e = std::getenv("PECLET_FLOW_OUTFLOW_RHO");
+    return e && e[0] != '0';
+  }();
   CCField cField_;                 // the G=2 registry mirror of the colour field ("C")
   CCField vofCs_;                  // rung V5a: cell fluid fraction on the G=2 block (staggered)
   CCField vofSolidG2_;             // rung V5a: 1 where the cell is SOLID (G=2 mirror), else 0
@@ -6644,6 +7026,21 @@ class Solver {
   int csfMode_ = 0;                // 0 = balanced-force (production), 1 = cell-interp ablation
   bool kappaFrozen_ = false;       // V4 instrument: do not recompute kappa at the head of the step
   long vofStep_ = 0;               // sweep-permutation counter (6-cycle)
+  // --- two-phase open boundaries (rung V-BC, WO-R) ---
+  bool vofBcActive_ = false;             // any inflow colour / backflow colour set: arms the whole
+                                         // rung (the mask, the ghost rules, the property ghosts)
+  bool vofInflowSet_[6] = {false, false, false, false, false, false};
+  bool vofBackflowSet_[6] = {false, false, false, false, false, false};
+  double vofInflowC_[6] = {0, 0, 0, 0, 0, 0};    // uniform inflow colour per face
+  double vofBackflowC_[6] = {0, 0, 0, 0, 0, 0};  // inletOutlet backflow colour per face
+  std::vector<double> vofInflowProfRaw_[6];      // the user's (nb, nc) profile, kept so the device
+  int vofInflowProfNb_[6] = {0, 0, 0, 0, 0, 0};  // views can be rebuilt when the block is rebuilt
+  int vofInflowProfNc_[6] = {0, 0, 0, 0, 0, 0};
+  CCField vofInflowProf3_[6], vofInflowProfG2_[6];  // resampled onto the g=3 / G=2 face planes
+  int vofProf3Nc_[6] = {0, 0, 0, 0, 0, 0}, vofProfG2Nc_[6] = {0, 0, 0, 0, 0, 0};
+  vof::UCField vofOutside_;              // the out-of-domain mask on the g=3 block
+  double vofBcVol_[6] = {0, 0, 0, 0, 0, 0};       // signed liquid volume of the LAST step, + = in
+  double vofBcVolTotal_[6] = {0, 0, 0, 0, 0, 0};  // running total since enable_vof
   // --- curvature (rung V3, WO-O) ---
   vof::VofCurvature vofCurv_;         // the cascade, on the SAME g=3 block as the colour field
   CCField kappaField_, kappaBranch_;  // the G=2 registry mirrors ("kappa", "kappa_branch")

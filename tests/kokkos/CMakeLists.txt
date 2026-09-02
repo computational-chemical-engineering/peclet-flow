@@ -198,6 +198,15 @@ target_include_directories(test_vof_wetting PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(test_vof_wetting PRIVATE Kokkos::kokkos)
 add_test(NAME vof_wetting COMMAND test_vof_wetting)
 
+# VoF rung V-BC (WO-R): two-phase open boundaries — the out-of-domain flux rule, the inflow/
+# backflow colour ghost, the inflow property ghost, the exact colour budget and the
+# variable-density outflow correction. PECLET_VOF_BC_QUICK=1 shortens the budget run.
+add_executable(test_vof_bc test_vof_bc.cpp)
+target_include_directories(test_vof_bc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_bc PRIVATE Kokkos::kokkos)
+add_test(NAME vof_bc COMMAND test_vof_bc)
+
 add_executable(test_poiseuille_ibm test_poiseuille_ibm.cpp)
 target_include_directories(test_poiseuille_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_poiseuille_ibm PRIVATE Kokkos::kokkos)

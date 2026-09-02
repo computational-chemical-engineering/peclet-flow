@@ -135,6 +135,38 @@ KOKKOS_INLINE_FUNCTION double wyFaceFlux(double a, long p, long sd, int dir, con
   return 0.0;
 }
 
+/// **WO-R sibling of `wyFaceFlux`** for a face whose DONOR lies outside the global domain.
+/// Identical in every branch except one: when the donor is marked `outside`, the flux is the
+/// ALGEBRAIC `C_donor * a` instead of the PLIC slab volume of a reconstructed plane.
+///
+/// Why the donor's reconstruction must not be used there (see `vof/colour_bc.hpp` for the long
+/// version): the ghost band on an inflow face is a uniform, prescribed DATUM — it has no MYC
+/// normal worth the name, and a fractional inflow colour states what fraction of the incoming
+/// FLUX is liquid, not where a sub-cell interface sits. `C_donor * a` is exactly that statement.
+/// At a wall the two rules agree trivially (the normal face velocity is zero, so `a == 0`), and at
+/// an outflow face the donor is the inner cell unless the flow reverses, so this branch is the
+/// backflow rule and nothing else.
+///
+/// With `outside(donor) == 0` this returns `wyFaceFlux`'s value BIT FOR BIT — the same
+/// expressions in the same order — which is what makes the mask branch inert (gate G5).
+KOKKOS_INLINE_FUNCTION double wyFaceFluxBc(double a, long p, long sd, int dir, const SField& c,
+                                           const SField& mx, const SField& my, const SField& mz,
+                                           const SField& alpha, const UCField& outside) {
+  if (a > 0.0) {  // donor is p
+    const double cd = c(p);
+    return (wyIsMixed(cd) && !outside(p))
+               ? plicSlabVolume(mx(p), my(p), mz(p), alpha(p), dir, 1.0 - a, 1.0)
+               : cd * a;
+  }
+  if (a < 0.0) {  // donor is p + sd
+    const long q = p + sd;
+    const double cd = c(q), aa = -a;
+    return -((wyIsMixed(cd) && !outside(q)) ? faceFluxVolume(mx(q), my(q), mz(q), alpha(q), dir, aa)
+                                            : cd * aa);
+  }
+  return 0.0;
+}
+
 /// Weymouth-Yue split advection of a colour field on an extended (inner + ghost) block.
 class WyAdvector {
  public:
@@ -466,6 +498,41 @@ class WyAdvector {
   std::function<void(SField)> exchange;
   /// All-reduce max across ranks; identity when unset (single block).
   std::function<double(double)> globalMax;
+
+  // ---- rung V-BC (WO-R) hooks ----------------------------------------------------------------
+  /// Install the OUT-OF-DOMAIN mask (`vof/colour_bc.hpp::buildOutsideMask`): 1 on every ghost cell
+  /// outside the global domain on a non-periodic axis. While it is installed, `computeFluxes`
+  /// takes `wyFaceFluxBc` — the algebraic `C_donor·a` for a donor that IS boundary data — and
+  /// accumulates the per-face boundary liquid volume (`bcFaceVolume`). Pass an empty view to
+  /// remove it and return to the validated V1 path bit for bit.
+  ///
+  /// The mask is a property of the BLOCK, not of the step: the caller builds it once with the
+  /// block (`IbmSolver::buildVofBlock`) and only installs it when a VoF boundary colour is
+  /// actually set, so nothing changes for a periodic or a purely-wall configuration (gate G5).
+  void setOutsideMask(UCField m) { outside_ = m; }
+  UCField outsideMask() const { return outside_; }
+  bool hasOutsideMask() const { return outside_.extent(0) == static_cast<std::size_t>(len_); }
+
+  /// Signed liquid volume that crossed domain face `f` (0..5 = −x,+x,−y,+y,−z,+z) since the last
+  /// `resetBcFaceVolume()`, in cell-volume units, POSITIVE for liquid entering the domain. Only
+  /// accumulated while the outside mask is installed; the value on an axis with no domain BC is
+  /// the block-boundary flux and is meaningless (the caller reports only BC faces).
+  ///
+  /// This is the boundary term of the exact colour budget: WY's flux is computed ONCE per face and
+  /// enters exactly one inner cell's update with one sign, so
+  /// `Σ C(t) − Σ C(0) = Σ_faces bcFaceVolume` holds to round-off whatever the interface does —
+  /// which is what WO-R gate G1 measures.
+  double bcFaceVolume(int f) const { return bcVol_[f]; }
+  void resetBcFaceVolume() {
+    for (int f = 0; f < 6; ++f)
+      bcVol_[f] = 0.0;
+  }
+  /// Which of the six BLOCK boundary faces are GLOBAL domain faces this block owns. Default: none.
+  /// This is not cosmetic — a rank in the middle of a decomposition has a perfectly real flux
+  /// through its own block boundary, and counting it would make the ledger a sum of interior
+  /// fluxes that happen to cancel pairwise instead of the boundary term of the budget. The solver
+  /// sets it from `bc_[f] != 0 && touchesGlobalFace(f)`.
+  void setBcFaceOwned(int f, bool on) { bcOwn_[f] = on ? 1u : 0u; }
 
   /// Compaction of the reconstruction pass onto the mixed cells. Pure optimization — switching it
   /// off must reproduce the same field bit for bit (gated in `tests/kokkos/test_vof_advect.cpp`).
@@ -820,6 +887,19 @@ class WyAdvector {
     const int hi[3] = {g + n_.x, g + n_.y, g + n_.z};
     lo[d] -= 1;
     SField c = c_, mx = mx_, my = my_, mz = mz_, al = alpha_, fl = flux_, u = faceVel(d);
+    if (hasOutsideMask()) {  // WO-R: boundary donors are DATA, not a reconstructable interface
+      UCField ob = outside_;
+      Kokkos::parallel_for(
+          "vof::wy::flux_bc",
+          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {lo[0], lo[1], lo[2]},
+                                                        {hi[0], hi[1], hi[2]}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long p = L3(x, y, z, e);
+            fl(p) = wyFaceFluxBc(u(p) * dth, p, sd, d, c, mx, my, mz, al, ob);
+          });
+      accumulateBcFaceVolume(d);
+      return;
+    }
     Kokkos::parallel_for(
         "vof::wy::flux",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {lo[0], lo[1], lo[2]},
@@ -828,6 +908,40 @@ class WyAdvector {
           const long p = L3(x, y, z, e);
           fl(p) = wyFaceFlux(u(p) * dth, p, sd, d, c, mx, my, mz, al);
         });
+  }
+
+  /// Sum the just-computed `d`-fluxes on the two block-boundary `d`-faces into `bcVol_`, signed so
+  /// that POSITIVE means liquid entering the domain. Storage convention (`computeFluxes`): the
+  /// flux of a `d`-face is stored at the cell on the face's `−` side, so the low boundary face of
+  /// the block sits at `d`-index `g-1` and the high one at `g + n_d - 1`. Two reductions per
+  /// sweep, and only on the WO-R path.
+  void accumulateBcFaceVolume(int d) {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    const int b = (d + 1) % 3, c2 = (d + 2) % 3;
+    const long st[3] = {1, e_.x, static_cast<long>(e_.x) * e_.y};
+    const long sd = st[d], sb = st[b], sc = st[c2];
+    const int nb = (b == 0) ? n.x : (b == 1) ? n.y : n.z;
+    const int nc = (c2 == 0) ? n.x : (c2 == 1) ? n.y : n.z;
+    const int nd = (d == 0) ? n.x : (d == 1) ? n.y : n.z;
+    SField fl = flux_;
+    for (int s = 0; s < 2; ++s) {
+      if (!bcOwn_[2 * d + s])
+        continue;  // not a global domain face this block owns: nothing to account for
+      const int fa = (s == 0) ? (g - 1) : (g + nd - 1);
+      double acc = 0.0;
+      Kokkos::parallel_reduce(
+          "vof::wy::bcvol",
+          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>(SExec(), {g, g}, {g + nb, g + nc}),
+          KOKKOS_LAMBDA(int p0, int p1, double& r) {
+            r += fl(static_cast<long>(p0) * sb + static_cast<long>(p1) * sc +
+                    static_cast<long>(fa) * sd);
+          },
+          acc);
+      Kokkos::fence();
+      if (bcOwn_[2 * d + s])
+        bcVol_[2 * d + s] += (s == 0) ? acc : -acc;
+    }
   }
 
   /// `C_i += (F_{i-} - F_{i+}) + c_i (a_{i+} - a_{i-})`, over inner cells.
@@ -1247,7 +1361,9 @@ class WyAdvector {
   double h_ = 1.0;
   long len_ = 0, listCap_ = 0;
   SField c_, mx_, my_, mz_, alpha_, flux_, uf_, vf_, wf_;
-  UCField cc_;
+  UCField cc_, outside_;  // outside_: the WO-R out-of-domain mask (empty = the V1 path)
+  double bcVol_[6] = {0, 0, 0, 0, 0, 0};
+  unsigned char bcOwn_[6] = {0, 0, 0, 0, 0, 0};
   LField list_;
   long mixedCount_ = 0, steps_ = 0;
   double lastCfl_ = 0.0;
