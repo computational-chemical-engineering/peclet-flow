@@ -432,3 +432,25 @@ np = 2 212 s, np = 4 332 s.
 `86192ad` (V-BC, 2026-09-02) appended a duplicate tail to the gated `foreach` list, leaving an
 orphan line after the closing paren — a CMake parse error, and `vof_bc_mpi` was never registered.
 The list is now one list and carries `vof_bc_mpi`; the tree configures 78 tests.
+
+## Gate 7 CLOSED (2026-09-02) — the ghost-plane MASK, not the wall velocity
+
+The agent's diagnosis (uBc_ from the clamping sampler on the outermost ghost plane) was half
+right: `ibmSolidMask` samples the sdf at the staggered offset through the SAME clamping
+`ccSampleExt`, so the ghost-plane MASK can disagree with the neighbour's interior mask, and it is
+the mask that decides which ghost rows of the advection scratch receive the wall velocity.
+Ablations at np=2 (`test_movingscene_advect_mpi`, body towed across the ORB cut), max|du|:
+
+| change | np=2 max\|du\| |
+|---|---|
+| shipped A0 | 1.452e-07 |
+| + uBc_/uwCell_ ghost exchange (`exchangeExtRaw`) | 1.452e-07 (unchanged) |
+| fill inner rows only / ghost rows only | 1.44e-03 / 1.38e-03 (both must be filled) |
+| A0 off | 2.2e-15 |
+| **+ mask ghost exchange under motion** | **4.1e-16** |
+
+Fix: `if (hasMotion_) exchangeExtRaw(C[c].mask)` after `ibmSolidMask` (static scenes never
+consume ghost masks — byte-identical by construction), plus the uBc_/uwCell_ exchange (correct on
+its own terms: those planes were wrong too, they just were not what the SOU read first). np=1
+stays bit-exact. The `PECLET_FLOW_UBC_EXCHANGE` / `PECLET_FLOW_ADV_FILL_MODE` ablation knobs are
+left in as documented instrumentation.

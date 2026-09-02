@@ -1173,7 +1173,120 @@ class Solver {
       }
     }
     setSolidDevice(din, cutcellPressure);
+    if (hasMotion_)
+      checkMovingInstancesAreCut();
   }
+
+  /// A MOVING instance whose surface produces no fractional face aperture has no path for its
+  /// wall velocity into the momentum operator: the no-slip datum enters ONLY through the cut-cell
+  /// fold, so a box face sitting exactly on a grid plane (or a body smaller than a cell) behaves
+  /// as a STATIONARY wall and `set_instance_motion` is silently inert -- the shear-driving plates
+  /// of the Jeffery-orbit page at y = 16.0 produced max|u| = 0 (peclet-examples ISSUES.md). Count,
+  /// per moving instance, the inner cells it owns that touch a fractional aperture; warn on zero.
+  void checkMovingInstancesAreCut() {
+    const int nI = nInst_;
+    if (nI <= 0 || cutOwner_.extent(0) != (std::size_t)nx_ * ny_ * nz_)
+      return;
+    // The datum enters the momentum operator only through the IBM overlay's CUT ROWS (staggered
+    // points whose stencil crosses the wall, `idMap >= 0`), not through face apertures: a plane
+    // cutting faces parallel to itself leaves every aperture 0 or 1 and still has cut rows.
+    Kokkos::View<long*, CCMem> cnt("peclet::flow::movingCut", nI);  // zero-initialised
+    auto own = cutOwner_;
+    const C3 e = e_;
+    const int nx = nx_, ny = ny_, nz = nz_;
+    CCExec space;
+    for (int c = 0; c < 3; ++c) {
+      if (C[c].idMap.extent(0) != n_)
+        continue;
+      Kokkos::View<const int*, CCMem> idm = C[c].idMap;
+      Kokkos::parallel_for(
+          "peclet::flow::moving_cut_count",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long ie = (long)(x + G) + (long)(y + G) * e.x + (long)(z + G) * (long)e.x * e.y;
+            if (idm(ie) < 0)
+              return;
+            const int o = own((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny);
+            if (o >= 0 && o < nI)
+              Kokkos::atomic_add(&cnt(o), (long)1);
+          });
+    }
+    // DEGENERATE points: a staggered point where the sampled sdf is EXACTLY zero is fluid to the
+    // mask (strict < 0) and not a ghost to its neighbours' folds (strict < 0 too), so a wall face
+    // on a lattice plane never folds its datum -- the body is inert. Count them per owner.
+    Kokkos::View<long*, CCMem> deg("peclet::flow::movingDegenerate", nI);
+    {
+      CCConst sd = CCConst(sdf_);
+      for (int c = 0; c < 3; ++c) {
+        const auto po = Grid::offset(c);
+        const double ox = po.x, oy = po.y, oz = po.z;
+        Kokkos::parallel_for(
+            "peclet::flow::moving_degenerate_count",
+            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+            KOKKOS_LAMBDA(int x, int y, int z) {
+              const double sv = ccSampleExt(sd, e, x + G + ox, y + G + oy, z + G + oz);
+              if (sv != 0.0)
+                return;
+              const int o = own((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny);
+              if (o >= 0 && o < nI)
+                Kokkos::atomic_add(&deg(o), (long)1);
+            });
+      }
+    }
+    space.fence();
+    auto h = Kokkos::create_mirror_view(cnt);
+    Kokkos::deep_copy(h, cnt);
+    auto hd = Kokkos::create_mirror_view(deg);
+    Kokkos::deep_copy(hd, deg);
+    movingCutCells_.assign((std::size_t)nI, 0);
+    movingDegenerate_.assign((std::size_t)nI, 0);
+    for (int i = 0; i < nI; ++i) {
+      movingCutCells_[(std::size_t)i] = h(i);
+      movingDegenerate_[(std::size_t)i] = hd(i);
+    }
+#ifdef PECLET_FLOW_MPI
+    // A body lives on SOME rank: the count is global, and only rank 0 speaks.
+    if (distributed_) {
+      std::vector<long> g((std::size_t)nI, 0);
+      MPI_Allreduce(movingCutCells_.data(), g.data(), nI, MPI_LONG, MPI_SUM, comm_);
+      movingCutCells_ = g;
+      MPI_Allreduce(movingDegenerate_.data(), g.data(), nI, MPI_LONG, MPI_SUM, comm_);
+      movingDegenerate_ = g;
+      int rank = 0;
+      MPI_Comm_rank(comm_, &rank);
+      if (rank != 0)
+        return;
+    }
+#endif
+    for (int i = 0; i < nI; ++i) {
+      const bool moves = instLin_[3 * (std::size_t)i] != 0.0 || instLin_[3 * (std::size_t)i + 1] != 0.0 ||
+                         instLin_[3 * (std::size_t)i + 2] != 0.0 || instAng_[3 * (std::size_t)i] != 0.0 ||
+                         instAng_[3 * (std::size_t)i + 1] != 0.0 || instAng_[3 * (std::size_t)i + 2] != 0.0;
+      if (moves && movingCutCells_[(std::size_t)i] == 0)
+        std::fprintf(stderr,
+                     "peclet.flow set_solid_from_scene WARNING: instance %d has a velocity but owns "
+                     "NO cut row of the momentum operator (sub-cell body?): the wall velocity "
+                     "cannot enter and the body behaves as a STATIONARY wall. "
+                     "moving_instance_cut_cells() returns the counts.\n",
+                     i);
+      if (moves && movingDegenerate_[(std::size_t)i] > 0)
+        std::fprintf(stderr,
+                     "peclet.flow set_solid_from_scene WARNING: instance %d has a velocity and its "
+                     "surface passes EXACTLY through %ld staggered velocity points (a face on a "
+                     "lattice plane). Such points are fluid to the mask and not ghosts to the "
+                     "cut-cell fold, so the wall datum never enters there and the face acts as a "
+                     "STATIONARY wall. Shift the body off the lattice (any fractional offset). "
+                     "moving_instance_degenerate_points() returns the counts.\n",
+                     i, movingDegenerate_[(std::size_t)i]);
+    }
+  }
+  /// Per instance: cut rows of the momentum operator (all three components) at inner points this
+  /// rank owns for it, recounted by set_solid_from_scene / rebuild_geometry when any instance
+  /// moves (global under MPI; empty when nothing moves). Zero for a moving instance = its wall
+  /// velocity is silently inert.
+  std::vector<long> movingInstanceCutCells() const { return movingCutCells_; }
+  /// Per instance: staggered points where the sampled sdf is exactly zero (see the warning).
+  std::vector<long> movingInstanceDegeneratePoints() const { return movingDegenerate_; }
 
   /// Cells on this rank whose solid/fluid sign was set by a periodic IMAGE of an instance wider
   /// than the box (see setSolidFromScene); 0 when no instance is that wide or the images agree.
@@ -1378,6 +1491,13 @@ class Solver {
           useEx ? CCConst(tEx_[c][2]) : CCConst(),
           C3{nx_, ny_, nz_});  // SCHEME 0 = point-value (matches CUDA ibm_geometry_ext_k<0>)
       ibmSolidMask(C[c].mask, CCConst(sdf_), e_, off);
+      // Gate 7: ibmSolidMask samples the sdf at the staggered offset through the CLAMPING
+      // sampler, so on the outermost ghost plane the mask can disagree with the neighbour's
+      // interior value. The moving-geometry advection fill reads the ghost mask (it decides
+      // which ghost rows carry the wall velocity), so take the owner's mask there. Static
+      // scenes never consume ghost masks: keep them byte-identical by gating on motion.
+      if (hasMotion_)
+        exchangeExtRaw(C[c].mask);
       Kokkos::deep_copy(C[c].u, 0.0);
     }
     // MOVING GEOMETRY (rung 2): the wall-velocity fields must exist BEFORE the momentum operator
@@ -2815,6 +2935,39 @@ class Solver {
           });
     }
     space.fence();
+    // GHOST PLANES (gate 7, 2026-09-02). Both kernels above take a centred difference of the
+    // SAMPLED sdf through ccSampleExt, which CLAMPS its indices: on the outermost ghost plane the
+    // gradient is wrong, and buildAdvInputs then writes that plane into the advection scratch
+    // where the SOU stencil (reach 2) carries it inward. Under MPI that plane is a neighbour's
+    // interior, computed there with a full stencil; single-rank periodic it is the wrapped
+    // interior plane. Either way the exchange is exact: fill the ghosts from the owner. Measured
+    // before the fix: np=2/4 max|du| 1.45e-07 / 1.14e-05 against 3e-7 (bit-exact at np=1), up to
+    // 3.5 % of max|u| with a body parked on a rank cut. Static scenes never reach this code.
+    static const bool doExchange = [] {
+      const char* e = std::getenv("PECLET_FLOW_UBC_EXCHANGE");  // ablation knob (gate 7)
+      return !(e && e[0] == '0');
+    }();
+    if (doExchange)
+      for (int c = 0; c < 3; ++c) {
+        exchangeExtRaw(uBc_[c]);
+        exchangeExtRaw(uwCell_[c]);
+      }
+  }
+
+  /// Raw ghost fill of an extended-block field: the rank halo exchange under MPI, the periodic
+  /// wrap single-rank. No boundary-condition fold is applied (this is for GEOMETRIC data such as
+  /// the wall velocity, not a velocity iterate); non-periodic single-rank ghosts are left as the
+  /// kernel computed them.
+  void exchangeExtRaw(CCField f) {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      velDev_->exchange(f);
+      return;
+    }
+#endif
+    for (int a = 0; a < 3; ++a)
+      if (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0)
+        fillAxis(f, a);
   }
 
   // MOVING GEOMETRY rung 3: the wall's own volume flux, folded into the cell divergence.
@@ -3642,11 +3795,25 @@ class Solver {
       Kokkos::deep_copy(uwAdv_[c], C[c].u);
       CCField a = uwAdv_[c];
       CCConst m = CCConst(C[c].mask), w = CCConst(uBc_[c]);
+      // gate-7 ablation knob: 0 = fill all rows (shipped), 1 = inner rows only, 2 = ghost rows only
+      static const int mode = [] {
+        const char* e = std::getenv("PECLET_FLOW_ADV_FILL_MODE");
+        return e ? std::atoi(e) : 0;
+      }();
+      const C3 e = e_;
+      const int fillMode = mode;  // device lambdas capture locals, not function statics
       Kokkos::parallel_for(
           "peclet::flow::adv_wall_inputs", Kokkos::RangePolicy<CCExec>(space, 0, (long)n_),
           KOKKOS_LAMBDA(long i) {
-            if (m(i) > 0.5)
-              a(i) = w(i);
+            if (m(i) <= 0.5)
+              return;
+            if (fillMode != 0) {
+              const int x = (int)(i % e.x), y = (int)((i / e.x) % e.y), z = (int)(i / ((long)e.x * e.y));
+              const bool inner = x >= G && x < e.x - G && y >= G && y < e.y - G && z >= G && z < e.z - G;
+              if ((fillMode == 1) != inner)
+                return;
+            }
+            a(i) = w(i);
           });
     }
     space.fence();
@@ -7866,6 +8033,8 @@ class Solver {
   peclet::core::Vec3<double> sceneOrigin_{0, 0, 0}, sceneExtent_{0, 0, 0};
   bool scenePeriodic_ = false;
   long imageOverlapCells_ = 0;  // set_solid_from_scene's periodic-image overlap count
+  std::vector<long> movingCutCells_;  // per-instance cut-cell counts (moving scenes only)
+  std::vector<long> movingDegenerate_;  // per-instance exactly-on-lattice staggered points
   bool sceneDirty_ = false;  // a transform changed; the device query must be rebuilt
   std::vector<double> oxOverride_, oyOverride_, ozOverride_;  // exact apertures (inner)
   bool hasOpenOverride_ = false;
