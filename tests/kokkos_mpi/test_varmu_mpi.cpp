@@ -153,9 +153,16 @@ static std::vector<double> gatherGlobal(const std::vector<double>& local, int ox
 }
 
 static double maxAbsDiff(const std::vector<double>& a, const std::vector<double>& b) {
+  // WO-R2: NaN-PROPAGATING. `std::fmax(m, NaN) == m`, so the obvious loop returns 0.000e+00 for a
+  // field that has gone entirely NaN and every bitwise gate built on it passes (WO-R found this on
+  // a drained open-boundary run). A non-finite difference must fail, so return it.
   double m = 0;
-  for (std::size_t i = 0; i < b.size(); ++i)
-    m = std::fmax(m, std::fabs(a[i] - b[i]));
+  for (std::size_t i = 0; i < b.size(); ++i) {
+    const double d = std::fabs(a[i] - b[i]);
+    if (!(d == d))
+      return d;  // NaN
+    m = std::fmax(m, d);
+  }
   return m;
 }
 static double maxAbs(const std::vector<double>& a) {
