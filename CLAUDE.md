@@ -428,7 +428,9 @@ curvatures where both carry one, the single available one where only one does. *
 whole rung.** With a constant κ the force is *exactly* the discrete gradient of `σκC`, so it lies in
 the range of the operator the projection inverts, the projection annihilates it, and a stationary
 droplet stays at machine zero — measured **max|u| = 3.6e-17 / 1.9e-17 / 2.4e-17 at 16³/32³/48³** and
-**9.4e-17 … 4.3e-18 over μ = 1e-3 … 1** (Francois et al. 2006; Popinet 2009). The ablation
+**9.4e-17 … 4.3e-18 over μ = 1e-3 … 1** (Francois et al. 2006; Popinet 2009) — with the momentum
+solve at machine precision; under the default residual stop (1e-5, since 2026-09-02) the static
+droplet reads 5e-12, so exactness gates pin `set_velocity_residual_tolerance(0)`. The ablation
 `set_csf_mode(1)` — a *cell-centred* `σκ∇C` face-interpolated exactly as the per-cell body-force
 machinery carries `ρg` — is the same physics with one wrong operator pairing and reads **5.8e-2,
 i.e. Ca = 5.8e-3 and 3.0e+15× the balanced-force value**: that is the literature's "naive CSF gives

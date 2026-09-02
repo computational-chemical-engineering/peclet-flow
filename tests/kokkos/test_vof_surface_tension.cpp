@@ -133,6 +133,9 @@ std::unique_ptr<IbmSolver> makeDroplet(const Cfg& c) {
   s->setRho(c.rhoL);
   s->setMu(c.mu);
   s->setDt(1.0);
+  // bitwise / machine-precision gates: keep the legacy fixed-sweep momentum loop (the default
+  // residual stop, 1e-5 since 2026-09-02, leaves an O(1e-12) momentum residual)
+  s->setVelocityResidualTolerance(0.0);
   s->setPressureGeometry(std::vector<double>((std::size_t)c.n * c.n * c.n, 10.0));
   s->setPressureChebyshev(true, 500, 1e-14);
   s->enableVof();

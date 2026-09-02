@@ -129,6 +129,9 @@ void bridge() {
   s.setRho(1.0);
   s.setMu(0.0);
   s.setDt(dtSolver);
+  // bitwise / machine-precision gates: keep the legacy fixed-sweep momentum loop (the default
+  // residual stop, 1e-5 since 2026-09-02, leaves an O(1e-12) momentum residual)
+  s.setVelocityResidualTolerance(0.0);
   s.setPressureGeometry(std::vector<double>((std::size_t)N * N * N, 10.0));
   s.enableVof();
   {  // the same sphere, sampled by the same helper on a throwaway advector block
@@ -228,6 +231,9 @@ double hydrostaticC(double ratio, bool freeze, bool harmonic, int steps, double 
   peclet::flow::IbmSolver s(N, N, NZ);
   s.setRho(1.0);
   s.setMu(0.0);  // inviscid: the balance is exact (no viscous wall layer in the predictor)
+  // bitwise / machine-precision gates: keep the legacy fixed-sweep momentum loop (the default
+  // residual stop, 1e-5 since 2026-09-02, leaves an O(1e-12) momentum residual)
+  s.setVelocityResidualTolerance(0.0);
   s.setDt(dt);
   s.setDomainBc(4, 1, 0, 0, 0);
   s.setDomainBc(5, 1, 0, 0, 0);  // walls +-z, periodic x,y
@@ -369,6 +375,7 @@ void constantColour() {
     s.setRho(2.0);
     s.setMu(0.1);
     s.setDt(2.0);
+    s.setVelocityResidualTolerance(0.0);  // bitwise gates: legacy fixed-sweep momentum loop
     s.setAdvection(true);
     s.setPressureGeometry(std::vector<double>(n, 10.0));
     s.enableCellForce();

@@ -86,6 +86,10 @@ static void configure(IbmSolver& s, const Config& c, int ox, int oy, int oz, int
   s.setRho(rl);
   s.setMu(MU);
   s.setDt(1.0);
+  // The balanced-force exactness gates (max|u| < 1e-13) need the momentum solve at machine
+  // precision: the default residual stop (1e-5, 2026-09-02) leaves a 5e-12 spurious current, so
+  // these tests keep the legacy fixed-sweep loop.
+  s.setVelocityResidualTolerance(0.0);
   if (c.walls) {
     s.setDomainBc(4, 1, 0, 0, 0);
     s.setDomainBc(5, 1, 0, 0, 0);  // walls +-z (the CUT axis)

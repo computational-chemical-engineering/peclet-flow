@@ -3992,6 +3992,13 @@ class Solver {
     lastMomentumSweeps_ += used;
   }
 
+  VelocityMG::Comm vmgComm() const {
+#ifdef PECLET_FLOW_MPI
+    return comm_;
+#else
+    return nullptr;
+#endif
+  }
   // residual functor + max|b| for the stencil paths of component c (see velSweepLoop)
   // Common tail of a residual evaluation: the held normal-Dirichlet face is imposed, not solved
   // (excluded), remember max|A u| for the convergence scale, return max|r|.
@@ -4082,7 +4089,7 @@ class Solver {
       fillVelGhosts(c, 0);
       vmg_.setBcApplyL0([this, c](CCField x) { applyVelocityBcCompTo(x, c, 0, true); });
       lastMomentumSweeps_ +=
-          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, comm_, velResTol_);
+          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, vmgComm(), velResTol_);
       lastMomentumResid_ = std::max(lastMomentumResid_, vmg_.lastResidualRatio());
       maskVelocity(c);
       return;
@@ -4123,7 +4130,7 @@ class Solver {
       // (the hook applies the BC only: VelocityMG::fill owns the periodic wrap / halo exchange)
       vmg_.setBcApplyL0([this, c](CCField x) { applyVelocityBcCompTo(x, c, 1, true); });
       lastMomentumSweeps_ +=
-          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, comm_, velResTol_);
+          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, vmgComm(), velResTol_);
       lastMomentumResid_ = std::max(lastMomentumResid_, vmg_.lastResidualRatio());
       return;
     }
@@ -4165,7 +4172,7 @@ class Solver {
                           rho_ / dt_, 0.5);
       }
       lastMomentumSweeps_ +=
-          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, comm_, velResTol_);
+          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, vmgComm(), velResTol_);
       lastMomentumResid_ = std::max(lastMomentumResid_, vmg_.lastResidualRatio());
       maskVelocity(
           c);  // re-impose no-slip at solid (the masked solve leaves them at the pin value)

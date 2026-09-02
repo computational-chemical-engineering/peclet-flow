@@ -300,6 +300,13 @@ inline void mulMask(CCField r, CCConst m) {  // r *= m (clean-fluid residual fil
 class VelocityMG {
  public:
   static constexpr int G = 2;
+#ifdef PECLET_FLOW_MPI
+  using Comm = MPI_Comm;
+  static MPI_Comm nullComm() { return MPI_COMM_NULL; }
+#else
+  using Comm = void*;  // non-MPI build: solve()'s communicator argument is inert
+  static void* nullComm() { return nullptr; }
+#endif
   struct Level {
     C3 ext, inner, ratio{2, 2, 2}, cfac{1, 1, 1};
     C3 og{0, 0, 0};  // block inner origin (global red-black parity); {0,0,0} single-rank
@@ -669,7 +676,7 @@ class VelocityMG {
   //               solves the equation stops at once. resTol takes precedence when both are set.
   // Returns the cycles run; lastResidualRatio() is max|r|/max|b| at exit (resTol mode only).
   int solve(CCConst b, CCField x, int nvc, int pre, int post, int bottom, double tol = 0.0,
-            MPI_Comm comm = MPI_COMM_NULL, double resTol = 0.0) {
+            Comm comm = nullComm(), double resTol = 0.0) {
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -683,8 +690,6 @@ class VelocityMG {
         MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, MPI_MAX, comm);
         return g;
       }
-#else
-      (void)comm;
 #endif
       return v;
     };
