@@ -1031,6 +1031,46 @@ static void bind_solver(nb::module_& m, const char* name) {
           "that is also configured. Sets the static base to (theta_a+theta_r)/2 if no angle was "
           "set yet.")
       .def(
+          "set_wall_slip_length", [](S& s, double lam) { s.setWallSlipLength(lam); },
+          nb::arg("lambda_cells"),
+          "Rung V6b (WO-V6b) - the VELOCITY half of the dynamic contact line. In the Robust-Scaled "
+          "cut-cell IBM closure the TANGENTIAL wall datum stops being no-slip and becomes the "
+          "NAVIER condition\n\n"
+          "    u_t(wall) - u_body = lambda * d(u_t)/dn\n\n"
+          "with `lambda_cells` = lambda/Delta (cell size 1, so this is the slip length in CELLS). "
+          "The wall-NORMAL component is untouched: the wall stays impermeable, with the moving-body "
+          "velocity as its datum. 0 (the default) restores the validated no-slip closure "
+          "BIT-IDENTICALLY - the closure polynomials are the lambda = 0 members of the same "
+          "family, and the lambda > 0 branch is never entered.\n\n"
+          "It is ONE lambda with set_contact_angle_dynamic: either call overwrites the shared "
+          "value (last call wins), so the Cox-Voinov inner cut-off and the momentum wall closure "
+          "cannot disagree. Only this call switches the MOMENTUM half on, so every WO-V6 result "
+          "taken with the angle half alone is unchanged.\n\n"
+          "Why it exists, measured: with no-slip the contact line advances only at the scheme's "
+          "own numerical slip, ~1/180 of Lucas-Washburn (WO-V6 finding 6), and WO-V7's pore-scale "
+          "campaign found every IMBIBITION verdict inverted below the capillary number at which "
+          "the imposed velocity crosses that numerical slip velocity. Typical values are 0.01-0.5 "
+          "cells; state lambda with every dynamic-wetting result. Staggered grids only; needs "
+          "set_solid(..., cutcell_pressure=True). Changing it rebuilds the three cut-cell overlays "
+          "and the momentum operator in place (the velocity field is NOT reset).\n\n"
+          "APPROXIMATIONS, both stated because they are invisible from the call: the tangential "
+          "projector is taken DIAGONAL (the cross terms -n_c n_j u_j are dropped; they vanish "
+          "exactly for an axis-aligned wall and are O(n_c n_j) otherwise), and an axis whose BOTH "
+          "neighbours are solid (a one-cell fluid gap) keeps the no-slip closure - counted by "
+          "wall_slip_sandwich_cells().")
+      .def(
+          "wall_slip_length", [](S& s) { return s.wallSlipLength(); },
+          "The Navier slip length in force, in cells (0 = no-slip).")
+      .def(
+          "wall_slip_sandwich_cells",
+          [](S& s) {
+            auto a = s.wallSlipSandwichCells();
+            return nb::make_tuple(a[0], a[1], a[2]);
+          },
+          "Per velocity component, the number of cut-cell AXES at which a one-cell fluid gap made "
+          "the Navier closure inapplicable and the no-slip one was kept. Nonzero means part of the "
+          "wall is silently no-slip; report it.")
+      .def(
           "set_contact_angle_dynamic_off", [](S& s) { s.setContactAngleDynamicOff(); },
           "Turn the V6 dynamic angle and hysteresis off; the static V5b angle stands again.")
       .def(

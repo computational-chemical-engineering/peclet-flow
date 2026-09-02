@@ -1407,6 +1407,47 @@ class Solver {
     setSolidDevice(din, cutcellPressure);
   }
 
+  /// Build the three per-component Robust-Scaled cut-cell overlays + solid masks from the CURRENT
+  /// `sdf_` (extracted verbatim from setSolidDevice so that a wall-slip change can rebuild the
+  /// closure without re-running the whole geometry setup). `resetU` zeroes the velocity, which the
+  /// geometry path wants and a pure closure change must NOT do.
+  void buildVelocityOverlays(bool resetU) {
+    const bool useEx = hasExactCross_ && !Grid::collocated;  // exact-theta arrays are for the
+                                                             // staggered point placement
+    const float lam = (float)(wallSlip_ ? slipLambda_ : 0.0);
+    if (lam > 0.0f && slipSkipDev_.data() == nullptr)
+      slipSkipDev_ = Kokkos::View<int, CCMem>("peclet::flow::slipSkip");
+    for (int c = 0; c < 3; ++c) {
+      const Off3 off =
+          Grid::offset(c);  // velocity-unknown placement (staggered: -1/2 face; collocated: 0)
+      C[c].nCut = buildIbmOverlay<0>(
+          CCConst(sdf_), e_, G, off, /*Dirichlet*/ 0, C[c].ov, C[c].idMap, C[c].counter,
+          useEx ? CCConst(tEx_[c][0]) : CCConst(), useEx ? CCConst(tEx_[c][1]) : CCConst(),
+          useEx ? CCConst(tEx_[c][2]) : CCConst(), C3{nx_, ny_, nz_}, lam,
+          lam > 0.0f ? c : -1,
+          lam > 0.0f ? slipSkipDev_
+                     : Kokkos::View<int, CCMem>());  // SCHEME 0 = point-value (matches CUDA
+                                                     // ibm_geometry_ext_k<0>)
+      if (lam > 0.0f) {
+        int sk = 0;
+        Kokkos::deep_copy(sk, slipSkipDev_);
+        slipSandwich_[(std::size_t)c] = sk;
+      } else {
+        slipSandwich_[(std::size_t)c] = 0;
+      }
+      ibmSolidMask(C[c].mask, CCConst(sdf_), e_, off);
+      // Gate 7: ibmSolidMask samples the sdf at the staggered offset through the CLAMPING
+      // sampler, so on the outermost ghost plane the mask can disagree with the neighbour's
+      // interior value. The moving-geometry advection fill reads the ghost mask (it decides
+      // which ghost rows carry the wall velocity), so take the owner's mask there. Static
+      // scenes never consume ghost masks: keep them byte-identical by gating on motion.
+      if (hasMotion_)
+        exchangeExtRaw(C[c].mask);
+      if (resetU)
+        Kokkos::deep_copy(C[c].u, 0.0);
+    }
+  }
+
   /// Device entry point (Layer 2): the inner SDF is ALREADY on device, so geometry never
   /// round-trips through the host. This is the body every set_solid path shares.
   void setSolidDevice(CCField din, bool cutcellPressure) {
@@ -1515,26 +1556,7 @@ class Solver {
           });
       space.fence();
     }
-    const bool useEx = hasExactCross_ && !Grid::collocated;  // exact-theta arrays are for the
-                                                             // staggered point placement
-    for (int c = 0; c < 3; ++c) {
-      const Off3 off =
-          Grid::offset(c);  // velocity-unknown placement (staggered: -1/2 face; collocated: 0)
-      C[c].nCut = buildIbmOverlay<0>(
-          CCConst(sdf_), e_, G, off, /*Dirichlet*/ 0, C[c].ov, C[c].idMap, C[c].counter,
-          useEx ? CCConst(tEx_[c][0]) : CCConst(), useEx ? CCConst(tEx_[c][1]) : CCConst(),
-          useEx ? CCConst(tEx_[c][2]) : CCConst(),
-          C3{nx_, ny_, nz_});  // SCHEME 0 = point-value (matches CUDA ibm_geometry_ext_k<0>)
-      ibmSolidMask(C[c].mask, CCConst(sdf_), e_, off);
-      // Gate 7: ibmSolidMask samples the sdf at the staggered offset through the CLAMPING
-      // sampler, so on the outermost ghost plane the mask can disagree with the neighbour's
-      // interior value. The moving-geometry advection fill reads the ghost mask (it decides
-      // which ghost rows carry the wall velocity), so take the owner's mask there. Static
-      // scenes never consume ghost masks: keep them byte-identical by gating on motion.
-      if (hasMotion_)
-        exchangeExtRaw(C[c].mask);
-      Kokkos::deep_copy(C[c].u, 0.0);
-    }
+    buildVelocityOverlays(/*resetU=*/true);
     // MOVING GEOMETRY (rung 2): the wall-velocity fields must exist BEFORE the momentum operator
     // is assembled -- rebuildStencils folds them into the inhomogeneous term. sdf_ and its ghosts
     // are final at this point, which is what the central-difference normals read.
@@ -6230,8 +6252,42 @@ class Solver {
     vofDyn_.slip = slipCells;
     vofDyn_.muLiquid = muLiquid;
     contactSigmaOverride_ = sigma;
+    // ONE lambda across the two halves of Afkhami-Zaleski-Bussmann (WO-V6b): this call and
+    // set_wall_slip_length write the SAME stored value, so the angle model's inner cut-off and
+    // the momentum wall closure can never disagree (last call wins). Whether the MOMENTUM half is
+    // active is a separate switch, set only by set_wall_slip_length -- so every result WO-V6
+    // validated with the angle half alone stays exactly what it was.
+    slipLambda_ = slipCells;
+    if (wallSlip_ && hasSolid_ && !Grid::collocated) {
+      buildVelocityOverlays(/*resetU=*/false);
+      rebuildStencils();
+    }
     setContactAngle(thetaEDeg);  // sets the static base and (re)wires the theta field
   }
+  /// WO-V6b -- the VELOCITY half of the dynamic contact line. Replaces the TANGENTIAL no-slip
+  /// Dirichlet datum of the Robust-Scaled cut-cell closure by the Navier condition
+  /// `u_t(wall) = lambda du_t/dn`; the wall-NORMAL component stays impermeable (the moving-body
+  /// datum if any). `lambdaCells` is lambda/Delta; 0 restores the validated no-slip closure
+  /// bit-identically. Shares its value with set_contact_angle_dynamic's cut-off.
+  void setWallSlipLength(double lambdaCells) {
+    if (!(lambdaCells >= 0.0))
+      throw std::runtime_error("set_wall_slip_length: lambda must be >= 0 cells");
+    if (lambdaCells > 0.0 && Grid::collocated)
+      throw std::runtime_error(
+          "set_wall_slip_length: the Navier wall closure is a staggered-grid feature (the "
+          "collocated scheme carries its own wall treatment)");
+    slipLambda_ = lambdaCells;
+    wallSlip_ = lambdaCells > 0.0;
+    if (vofDyn_.dynamic && lambdaCells > 0.0)
+      vofDyn_.slip = lambdaCells;
+    if (hasSolid_) {
+      buildVelocityOverlays(/*resetU=*/false);
+      rebuildStencils();
+    }
+  }
+  double wallSlipLength() const { return wallSlip_ ? slipLambda_ : 0.0; }
+  /// Cut-cell axes at which a one-cell fluid gap kept the no-slip closure (per component).
+  std::array<int, 3> wallSlipSandwichCells() const { return slipSandwich_; }
   // theta_a / theta_r, degrees. Composes with the dynamic correction when that is also set: the
   // hysteresis selector picks the BASE angle and Cox-Voinov corrects it, except on the PINNED
   // branch (theta_r <= theta_app <= theta_a), where the apparent angle itself is imposed and the
@@ -8429,6 +8485,12 @@ class Solver {
   int gpMatrixOrder_ = 2, gpRhsOrder_ = 2;  // closure order: implicit phi couplings / RHS
   CCField tEx_[3][3];             // exact crossings t[c][k] (inner grid; setExactCrossings)
   bool hasExactCross_ = false;
+  // WO-V6b: the Navier slip length (in cells) shared with the dynamic-wetting cut-off, and the
+  // switch that makes the MOMENTUM wall closure use it.
+  double slipLambda_ = 0.0;
+  bool wallSlip_ = false;
+  Kokkos::View<int, CCMem> slipSkipDev_;
+  std::array<int, 3> slipSandwich_{0, 0, 0};
   bool sceneCrossings_ = false;   // crossings came from the analytic scene (per-rank, no override)
   std::shared_ptr<peclet::core::geom::SceneQueryDevice<double, CCMem>> sceneQ_;
   bool hasScene_ = false;

@@ -41,15 +41,39 @@ KOKKOS_INLINE_FUNCTION bool ibmIsCut(float sc, const float sn[6]) {
 // claim a slot, set idMap[cell]=slot, and fill the overlay. counter/idMap are reset here. Returns
 // the cut count (overlay arrays must be sized >= number of inner cells). bc_type 0=Dirichlet,
 // 1=Neumann.
+/// `slipLambda` (WO-V6b, in CELLS, 0 = the validated no-slip closure) + `comp` (which velocity
+/// component this overlay carries: 0/1/2, -1 = none) turn the tangential wall Dirichlet datum into
+/// a NAVIER condition `u_t(wall) = lambda du_t/dn`. Per cut cell the unit normal comes from the
+/// central difference of the SAME seven SDF samples the closure uses (`grad sdf` points into the
+/// fluid); the component's TANGENTIAL weight is `s = 1 - n_comp^2` (0 for the component parallel to
+/// the wall normal -- that one stays a pure impermeability Dirichlet -- 1 for a purely tangential
+/// one), and the slip length measured along axis `a` is `s*lambda/|n_a|`, because the wall distance
+/// along that axis is the normal distance divided by `|n_a|`. The closure then depends only on
+/// `lam_a/theta_a = s*lambda/d`, the physically meaningful ratio, so the |n_a| division is
+/// self-consistent rather than a fudge.
+///
+/// APPROXIMATION, stated because it is not visible from the call: the projector is taken DIAGONAL,
+/// `u_t,comp ~ (1 - n_comp^2) u_comp`; the cross terms `-n_comp n_j u_j (j != comp)` are dropped.
+/// They are EXACTLY zero for an axis-aligned wall (every gate scene), and O(n_c n_j) elsewhere;
+/// carrying them would couple the three segregated component solves.
+/// `sandwichSkipped` (optional) counts the axes where a one-cell fluid gap made the slip closure
+/// inapplicable and the no-slip one was kept.
 template <int SCHEME>
 inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, const IbmOverlay& ov,
                            Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter,
                            CCConst tx = CCConst(), CCConst ty = CCConst(), CCConst tz = CCConst(),
-                           C3 nn = C3{0, 0, 0}) {
+                           C3 nn = C3{0, 0, 0}, float slipLambda = 0.0f, int comp = -1,
+                           Kokkos::View<int, CCMem> sandwichSkipped = Kokkos::View<int, CCMem>()) {
   CCExec space;
   Kokkos::deep_copy(space, counter, 0);
   Kokkos::deep_copy(space, idMap, -1);
   const bool hasEx = tx.size() > 0;
+  const bool hasSlip = (slipLambda > 0.0f) && (comp >= 0) && (SCHEME == 0);
+  const float lamBase = slipLambda;
+  const int slipComp = comp;
+  int* skipPtr = sandwichSkipped.data();
+  if (sandwichSkipped.data() != nullptr)
+    Kokkos::deep_copy(space, sandwichSkipped, 0);
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "peclet::flow::ibm_build_overlay", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
@@ -84,7 +108,28 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
             thEx[2 * a + 1] = 1.0f - (float)(*ta[a])(im);  // NaN propagates -> fallback
           }
         }
-        ibmFillEntry<SCHEME>(ov, slot, (int)idx, sc, sn, bc_type, hasEx ? thEx : nullptr);
+        float lamAxis[3];
+        if (hasSlip) {
+          // grad(sdf) from the same 7 samples; k = 0/2/4 are the +a neighbours, 1/3/5 the -a ones.
+          const float gx = 0.5f * (sn[0] - sn[1]), gy = 0.5f * (sn[2] - sn[3]),
+                      gz = 0.5f * (sn[4] - sn[5]);
+          float gm = Kokkos::sqrt(gx * gx + gy * gy + gz * gz);
+          if (gm < 1e-6f)
+            gm = 1e-6f;
+          const float nrm[3] = {gx / gm, gy / gm, gz / gm};
+          float tang = 1.0f - nrm[slipComp] * nrm[slipComp];
+          if (tang < 0.0f)
+            tang = 0.0f;
+          const float lamEff = lamBase * tang;
+          for (int a = 0; a < 3; ++a) {
+            float na = Kokkos::fabs(nrm[a]);
+            if (na < 1e-3f)
+              na = 1e-3f;  // wall nearly parallel to this axis: cap at 1000x (still finite)
+            lamAxis[a] = lamEff / na;
+          }
+        }
+        ibmFillEntry<SCHEME>(ov, slot, (int)idx, sc, sn, bc_type, hasEx ? thEx : nullptr,
+                             hasSlip ? lamAxis : nullptr, skipPtr);
       });
 
   int cnt = 0;
@@ -106,7 +151,21 @@ inline void ibmVolfrac(CCField theta, CCConst sdf, C3 ext, Off3 off) {
       });
 }
 
-// Solid mask: 1 where the staggered SDF point is inside the solid (sd<0), else 0.
+// Solid mask: 1 where the staggered SDF point is inside the solid OR exactly ON the wall
+// (sd<=0), else 0.
+//
+// WHY `<=` AND NOT `<` (WO-V6b part A). `sdf == 0` at a velocity DOF happens exactly when a flat
+// wall sits on a cell FACE (an integer coordinate): the staggered sample is the mean of the two
+// cell-centre values +-1/2. Every other consumer of the same field calls that point NON-fluid --
+// `ibmIsCut` (`sc <= 0` => not a cut cell, so no Dirichlet closure is built), `ibmCleanFluidMask`
+// (`sc <= 0` => solid), `ccFractionCore`/`ccFaceOpen` (`sd <= 0` => the face is CLOSED). With `<`
+// this mask alone called it fluid, so the DOF was left unpinned AND unclosed: an unconstrained
+// normal velocity sitting on the wall, invisible to the projection (its face is closed, so it
+// never enters the divergence) but read by the advection operator of its fluid neighbours. A
+// driven two-phase slit then diverges geometrically while every diagnostic stays healthy
+// (WO-V7 finding 1). With `<=` the DOF is pinned to the wall datum, which for a DOF lying exactly
+// ON the wall is the exact Dirichlet value, and the neighbouring fluid DOF's plain interior
+// stencil becomes a wall-resolved discretization.
 inline void ibmSolidMask(CCField mask, CCConst sdf, C3 ext, Off3 off) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
@@ -115,7 +174,7 @@ inline void ibmSolidMask(CCField mask, CCConst sdf, C3 ext, Off3 off) {
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long i = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
         const double sd = ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
-        mask(i) = (sd < 0.0) ? 1.0 : 0.0;
+        mask(i) = (sd <= 0.0) ? 1.0 : 0.0;
       });
 }
 

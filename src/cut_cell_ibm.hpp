@@ -43,6 +43,42 @@ KOKKOS_INLINE_FUNCTION float poly_Nc_avg(float xi) {
 KOKKOS_INLINE_FUNCTION float poly_Nbc_avg(float) {
   return 2.0f;
 }
+// ---- Navier-slip generalization of the one-sided Dirichlet polynomials (WO-V6b) ----
+//
+// The shipped closure builds the quadratic p through (u_m at -1, u_c at 0, u_g at +1) and imposes
+// the DIRICHLET condition p(theta) = u_b at the wall crossing. The Navier condition on the
+// TANGENTIAL velocity is the Robin condition
+//
+//     u_t(wall) - u_body = lambda * d(u_t)/dn        (n = the INWARD, fluid-side normal)
+//
+// which along the axis (solid on the +x side, so n = -x) reads  p(theta) + lam*p'(theta) = u_b,
+// with `lam` the slip length measured ALONG THIS AXIS (see ibmBuildOverlay: lam = s*lambda/|n_a|,
+// s = 1 - n_c^2 the tangential weight of the component this DOF carries). Solving for u_g with
+//     P = theta + lam,   Q = theta^2 + 2*lam*theta
+// gives  (P+Q) u_g = 2 u_b - 2 u_c (1-Q) + u_m (P-Q), i.e. exactly the shipped polynomials with
+// three additive lam-terms and an UNCHANGED Nbc = 2:
+//
+//     D   = theta(1+theta)   + lam(1+2 theta)
+//     X   = theta(1-theta)   + lam(1-2 theta)
+//     K   = 2(theta^2-1)     + 4 lam theta
+//
+// lam = 0 reproduces poly_D / poly_N_nb / poly_Nc identically (the call sites branch on lam > 0 so
+// that no extra rounding is introduced at all). lam -> infinity gives the free-slip (zero
+// normal-derivative) closure: at theta = 1/2, u_g -> u_c.
+//
+// NOTE the closure is stored in FLOAT: the Robin datum is indistinguishable from no-slip once
+// lam*(1+2 theta) drops below eps_f32 * D(theta) ~ 1e-7, i.e. below lam ~ 3e-8 cells (measured
+// floor in the findings). Every physically meaningful lambda is orders of magnitude above it.
+KOKKOS_INLINE_FUNCTION float poly_D_slip(float xi, float lam) {
+  return poly_D(xi) + lam * (1.0f + 2.0f * xi);
+}
+KOKKOS_INLINE_FUNCTION float poly_N_nb_slip(float xi, float lam) {
+  return poly_N_nb(xi) + lam * (1.0f - 2.0f * xi);
+}
+KOKKOS_INLINE_FUNCTION float poly_Nc_slip(float xi, float lam) {
+  return poly_Nc(xi) + 4.0f * lam * xi;
+}
+
 KOKKOS_INLINE_FUNCTION float poly_D_sandwich(float xi_m, float xi_p) {
   return xi_m * xi_p;
 }
@@ -88,7 +124,8 @@ using IbmOverlay = IbmOverlayT<IMem>;
 template <int SCHEME, class OV>
 KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, float sdf_c,
                                          const float sdf_n[6], int bc_type,
-                                         const float* thEx) {
+                                         const float* thEx, const float* lamAxis = nullptr,
+                                         int* sandwichSkipped = nullptr) {
   o.cell_index(list_idx) = c_idx;
   o.num_boundaries(list_idx) = 6;
   bool is_ghost[6];
@@ -105,7 +142,9 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
         if (theta > 1.0f)
           theta = 1.0f;
         xi_vals[k] = theta;
-        D_vals[k] = (SCHEME == 0) ? poly_D(theta) : poly_D_avg(theta);
+        const float lam = (lamAxis != nullptr && SCHEME == 0) ? lamAxis[k >> 1] : 0.0f;
+        D_vals[k] = lam > 0.0f ? poly_D_slip(theta, lam)
+                               : ((SCHEME == 0) ? poly_D(theta) : poly_D_avg(theta));
       } else {
         xi_vals[k] = 0.5f;
         D_vals[k] = 1.0f;
@@ -147,6 +186,12 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
     for (int axis = 0; axis < 3; ++axis) {
       int km = 2 * axis + 1, kp = 2 * axis;
       bool sandwich = is_sandwich[axis], g_p = is_ghost[kp], g_m = is_ghost[km];
+      // SANDWICHED axis (both neighbours solid = a one-cell fluid gap): the Navier closure is NOT
+      // applied. A slip length is a sub-cell wall model and a gap that a single cell spans does
+      // not resolve one; the axis keeps its validated no-slip Dirichlet closure. Counted (not
+      // silent) through sandwichSkipped so a geometry where it matters is visible.
+      if (sandwich && lamAxis != nullptr && lamAxis[axis] > 0.0f && sandwichSkipped != nullptr)
+        Kokkos::atomic_fetch_add(sandwichSkipped, 1);
       float D_axis =
           sandwich ? D_sandwich[axis] : (g_p ? D_vals[kp] : (g_m ? D_vals[km] : D_rescale));
       float R = D_rescale / D_axis;
@@ -182,7 +227,12 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
         for (int side = 0; side < 2; ++side) {
           int kk = side == 0 ? kp : km;
           if (is_ghost[kk]) {
-            if (SCHEME == 0) {
+            const float lam = (lamAxis != nullptr && SCHEME == 0) ? lamAxis[axis] : 0.0f;
+            if (lam > 0.0f) {
+              o.K_val(list_idx * 6 + kk) = poly_Nc_slip(xi_vals[kk], lam) * R;
+              o.X_val(list_idx * 6 + kk) = poly_N_nb_slip(xi_vals[kk], lam) * R;
+              o.Nbc_val(list_idx * 6 + kk) = poly_Nbc(xi_vals[kk]) * R;
+            } else if (SCHEME == 0) {
               o.K_val(list_idx * 6 + kk) = poly_Nc(xi_vals[kk]) * R;
               o.X_val(list_idx * 6 + kk) = poly_N_nb(xi_vals[kk]) * R;
               o.Nbc_val(list_idx * 6 + kk) = poly_Nbc(xi_vals[kk]) * R;
@@ -220,7 +270,7 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
 template <int SCHEME, class OV>
 KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, float sdf_c,
                                          const float sdf_n[6], int bc_type) {
-  ibmFillEntry<SCHEME>(o, list_idx, c_idx, sdf_c, sdf_n, bc_type, nullptr);
+  ibmFillEntry<SCHEME>(o, list_idx, c_idx, sdf_c, sdf_n, bc_type, nullptr, nullptr, nullptr);
 }
 
 // Build the backward-Euler velocity diffusion stencil over the extended block (divided convention):
