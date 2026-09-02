@@ -146,22 +146,22 @@ class WyAdvector {
     long mixed = 0;     ///< cells with 0 < C < 1
     long wisps = 0;     ///< cells with 0 < C < 1e-8 or 1-1e-8 < C < 1
     // --- rung V5a (WO-Q), all zero unless cut-cell geometry is attached -----------------------
-    double volume = 0.0;      ///< sum of eps_eff*C over inner FLUID cells: the EXACTLY conserved
-                              ///< functional of the cut-cell scheme (`cutcell.hpp` rule 1)
-    double rawVolume = 0.0;   ///< sum of eps*C (raw buildCellFraction eps) over the same cells;
-                              ///< differs from `volume` only on eps == 0 cells with an open face
-    double solidFillSum = 0.0;  ///< sum of C over inner SOLID cells ON THE WORKING BLOCK, i.e. the
-                                ///< neutral band fill. NOT the canonical colour: `IbmSolver` reports
-                                ///< `solidSumC`, the sum over solid cells of the "C" field, which is
-                                ///< 0 by construction.
-    double solidSumC = 0.0;   ///< filled by the SOLVER from the canonical G=2 colour field
-    double minCFluid = 0.0;   ///< min C over inner fluid cells with eps == 1 (uncut fluid)
-    double maxCFluid = 0.0;   ///< max C over the same set
+    double volume = 0.0;     ///< sum of eps_eff*C over inner FLUID cells: the EXACTLY conserved
+                             ///< functional of the cut-cell scheme (`cutcell.hpp` rule 1)
+    double rawVolume = 0.0;  ///< sum of eps*C (raw buildCellFraction eps) over the same cells;
+                             ///< differs from `volume` only on eps == 0 cells with an open face
+    /// Sum of C over inner SOLID cells ON THE WORKING BLOCK, i.e. the neutral band fill. NOT the
+    /// canonical colour: `IbmSolver` fills `solidSumC` with the sum over solid cells of the "C"
+    /// field, which is 0 by construction.
+    double solidFillSum = 0.0;
+    double solidSumC = 0.0;      ///< filled by the SOLVER from the canonical G=2 colour field
+    double minCFluid = 0.0;      ///< min C over inner fluid cells with eps == 1 (uncut fluid)
+    double maxCFluid = 0.0;      ///< max C over the same set
     double clippedVolume = 0.0;  ///< |liquid volume| the cut-cell clip moved during the last step
     double clippedSigned = 0.0;  ///< the same, signed (created positive, destroyed negative)
-    long cutCells = 0;        ///< inner cells with 0 < eps_eff < 1
-    long solidCells = 0;      ///< inner cells classified SOLID
-    long clampedFaces = 0;    ///< faces Weymouth's admissible interval had to clamp, last step
+    long cutCells = 0;           ///< inner cells with 0 < eps_eff < 1
+    long solidCells = 0;         ///< inner cells classified SOLID
+    long clampedFaces = 0;       ///< faces Weymouth's admissible interval had to clamp, last step
   };
 
   /// @param nx,ny,nz  inner cell counts of this block
@@ -320,7 +320,6 @@ class WyAdvector {
     Kokkos::fence();
   }
 
-
   // ---- hooks -------------------------------------------------------------------------------
   /// Refresh EVERY ghost layer of the given cell field (MPI exchange + domain BC fill). Required.
   std::function<void(SField)> exchange;
@@ -357,9 +356,8 @@ class WyAdvector {
     requireExchange();
     const double dth = dt / h_;
     const double cflLocal =
-        interfaceLocalCfl
-            ? (hasGeom_ ? maxCourantInterfaceCut(dth) : maxCourantInterface(dth))
-            : maxCourant(dth);
+        interfaceLocalCfl ? (hasGeom_ ? maxCourantInterfaceCut(dth) : maxCourantInterface(dth))
+                          : maxCourant(dth);
     const double cfl = globalMax ? globalMax(cflLocal) : cflLocal;
     lastCfl_ = cfl;
     // Weymouth's bound is INCLUSIVE (thesis eq. A.33: |a| <= 1/(2(N-1))), so a step exactly at
@@ -429,9 +427,8 @@ class WyAdvector {
   double checkCourant(double dt) {
     const double dth = dt / h_;
     const double cflLocal =
-        interfaceLocalCfl
-            ? (hasGeom_ ? maxCourantInterfaceCut(dth) : maxCourantInterface(dth))
-            : maxCourant(dth);
+        interfaceLocalCfl ? (hasGeom_ ? maxCourantInterfaceCut(dth) : maxCourantInterface(dth))
+                          : maxCourant(dth);
     const double cfl = globalMax ? globalMax(cflLocal) : cflLocal;
     lastCfl_ = cfl;
     if (!(cfl <= cflLimit)) {

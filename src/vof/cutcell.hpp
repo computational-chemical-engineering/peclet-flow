@@ -37,12 +37,12 @@
 ///
 /// 1. **Effective fluid volume.** `buildCellFraction` subsamples 4³, so its output is a multiple of
 ///    1/64 and a cell can read `eps == 0` while still owning an OPEN face (the face openness comes
-///    from a different quadrature, `buildOpenness`). Dividing the update by such an `eps` would be a
-///    division by zero on a cell that legitimately receives flux, so the scheme uses
-///    `eps_eff = max(eps, kVofEpsFloor)` with `kVofEpsFloor = 1/64` — the subsampling resolution,
-///    i.e. the smallest fluid volume the quadrature can resolve at all. A cell that is `eps == 0`
-///    AND has six closed faces is SOLID: it is excluded from the update entirely and its colour is
-///    supplied by the band fill below.
+///    from a different quadrature, `buildOpenness`). Dividing the update by such an `eps` would be
+///    a division by zero on a cell that legitimately receives flux, so the scheme uses `eps_eff =
+///    max(eps, kVofEpsFloor)` with `kVofEpsFloor = 1/64` — the subsampling resolution, i.e. the
+///    smallest fluid volume the quadrature can resolve at all. A cell that is `eps == 0` AND has
+///    six closed faces is SOLID: it is excluded from the update entirely and its colour is supplied
+///    by the band fill below.
 ///    **Consequence for the conservation gate:** the exactly conserved functional is
 ///    `sum_i eps_eff_i C_i`, not `sum_i eps_i C_i` — they differ only on `eps == 0` cells with an
 ///    open face, where the raw sum silently drops whatever flux enters. Both are reported.
@@ -60,11 +60,11 @@
 ///
 /// The MYC 3³ stencil and the V3 height-function columns of a cell next to a wall reach INTO the
 /// solid. Leaving those cells at 0 makes every wall look perfectly non-wetting; the neutral rule is
-/// a **zero-slope continuation** of the colour into the wall, which is exactly the 90° contact angle
-/// boundary condition of Afkhami & Bussmann (*IJNMF* 57:453, 2008) written as fractions. Three
-/// passes with a SHRINKING depth budget (pass k writes solid cells at ghost depth ≤ 3−k and reads
-/// only fluid cells or cells filled in an EARLIER pass) walk the value up to three cells into the
-/// solid while keeping every read inside the halo the exchange has already made
+/// a **zero-slope continuation** of the colour into the wall, which is exactly the 90° contact
+/// angle boundary condition of Afkhami & Bussmann (*IJNMF* 57:453, 2008) written as fractions.
+/// Three passes with a SHRINKING depth budget (pass k writes solid cells at ghost depth ≤ 3−k and
+/// reads only fluid cells or cells filled in an EARLIER pass) walk the value up to three cells into
+/// the solid while keeping every read inside the halo the exchange has already made
 /// decomposition-independent. WO-S replaces the pass-1 rule with the θ-consistent one and keeps
 /// passes 2–3 and the depth budget unchanged.
 #ifndef PECLET_FLOW_VOF_CUTCELL_HPP
@@ -127,8 +127,8 @@ KOKKOS_INLINE_FUNCTION double vofCutFlux(double openness, double rawFlux) {
 ///
 /// It is applied to the ONE face value both neighbours share, so conservation still telescopes
 /// bit-exactly; it is inactive wherever the geometry is self-consistent; and it is applied ONLY
-/// when the donor is MIXED — a pure-phase donor takes `wyFaceFlux`'s algebraic branch, whose flux is
-/// `o C_don |a|` and therefore already exactly bounded, and clamping it would break the exact
+/// when the donor is MIXED — a pure-phase donor takes `wyFaceFlux`'s algebraic branch, whose flux
+/// is `o C_don |a|` and therefore already exactly bounded, and clamping it would break the exact
 /// full-cell cancellation (`o|a|` vs `min(o|a|, eps)`) that makes an interior full cell stationary
 /// to the last bit.
 ///
@@ -150,16 +150,17 @@ KOKKOS_INLINE_FUNCTION double vofCutFluxClamp(double fluxMag, double sweep, doub
 
 /// The boundedness-relevant Courant number of a face against a cell (rule 2).
 ///
-/// **Two constraints, and the max of them is the answer.** WO-Q specifies `o_f |a_f| / max(eps,0.1)`
-/// — the flux volume against the cell's FLUID volume — and that is the second term. On its own it
-/// is WRONG, and loudly: it is *smaller* than `|a_f|` wherever `o_f < eps`, so a nearly-closed face
-/// (`o = 0.02`) inside an open cell would license `|a| = 10`. But `|a|` is the thickness of the slab
-/// the geometric flux clips out of the DONOR CELL, and a slab thicker than the cell is not a flux at
-/// all — `plicSlabVolume` is only a flux for `|a| <= 1`, and Weymouth's proof needs `|a| <= 1/4` in
-/// 3D whatever the geometry is. MEASURED with the second term alone: a 24^3 sphere packing at
-/// "CFL 0.2" ran at `dt = 1.85` and lost **70 % of the liquid volume in 200 steps** while the flux
-/// sum still telescoped — the classic signature of an over-CFL Weymouth-Yue run (conservation is
-/// algebraic and survives; boundedness does not).
+/// **Two constraints, and the max of them is the answer.** WO-Q specifies `o_f |a_f| /
+/// max(eps,0.1)` — the flux volume against the cell's FLUID volume — and that is the second term.
+/// On its own it is WRONG, and loudly: it is *smaller* than `|a_f|` wherever `o_f < eps`, so a
+/// nearly-closed face
+/// (`o = 0.02`) inside an open cell would license `|a| = 10`. But `|a|` is the thickness of the
+/// slab the geometric flux clips out of the DONOR CELL, and a slab thicker than the cell is not a
+/// flux at all — `plicSlabVolume` is only a flux for `|a| <= 1`, and Weymouth's proof needs `|a| <=
+/// 1/4` in 3D whatever the geometry is. MEASURED with the second term alone: a 24^3 sphere packing
+/// at "CFL 0.2" ran at `dt = 1.85` and lost **70 % of the liquid volume in 200 steps** while the
+/// flux sum still telescoped — the classic signature of an over-CFL Weymouth-Yue run (conservation
+/// is algebraic and survives; boundedness does not).
 ///
 /// So: `max( |a_f| , o_f |a_f| / max(eps_i, 0.1) )`. It reduces EXACTLY to the uncut `|a_f|` in
 /// clear fluid (`o = eps = 1`), it throttles by `1/eps` in a genuinely cut cell, and the 0.1 floor

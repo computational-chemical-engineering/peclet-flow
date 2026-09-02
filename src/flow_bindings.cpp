@@ -761,10 +761,11 @@ static void bind_solver(nb::module_& m, const char* name) {
           "momentum and pressure solves out of the picture.\\n\\n"
           "It THROWS if the current velocity is not discretely divergence-free to 1e-10 "
           "(max_open_divergence()). That is not a nicety: Weymouth-Yue's exact conservation is "
-          "CONDITIONAL on sum_f o_f u_f = 0 per cell, because the dilation term adds H(C-1/2) times "
-          "that residual to every full cell's volume budget. Run step() to a steady state (or "
-          "project()) and advect with the solver's own output; never with an analytic sample, which "
-          "is solenoidal only to O(h^2).")
+          "CONDITIONAL on sum_f o_f u_f = 0 per cell, because the dilation term adds H(C-1/2) "
+          "times that residual to every full cell's volume budget. Run step() to a steady state "
+          "(or "
+          "project()) and advect with the solver's own output; never with an analytic sample, "
+          "which is solenoidal only to O(h^2).")
       .def(
           "set_vof_step_parity", [](S& s, long n) { s.setVofStepParity(n); }, nb::arg("n"),
           "Set the sweep-permutation counter of the NEXT colour advection: the Weymouth-Yue sweep "
@@ -789,8 +790,9 @@ static void bind_solver(nb::module_& m, const char* name) {
           "vof_filled_colour", [](S& s) { return field_out(s, s.getVofFilledColour()); },
           "The colour field INCLUDING the neutral solid-band fill — what the MYC and "
           "height-function stencils actually read — as a Fortran-order (nx,ny,nz) array. "
-          "get_vof()/'C' is the canonical field and carries EXACTLY 0 in solid cells; the fill is a "
-          "stencil device regenerated at every ghost exchange (three passes with a shrinking depth "
+          "get_vof()/'C' is the canonical field and carries EXACTLY 0 in solid cells; the fill is "
+          "a stencil device regenerated at every ghost exchange (three passes with a shrinking "
+          "depth "
           "budget, src/vof/cutcell.hpp), and it is what makes the wall look 90-degree neutral "
           "instead of perfectly non-wetting.")
       .def(
@@ -803,8 +805,9 @@ static void bind_solver(nb::module_& m, const char* name) {
           "eps == 0 AND all six faces closed).")
       .def(
           "vof_has_geometry", [](S& s) { return s.vofHasGeometry(); },
-          "True when the colour advection is running the CUT-CELL (openness-weighted) kernels, i.e. "
-          "an immersed solid is present and set_solid ran with cutcell_pressure=True. False means "
+          "True when the colour advection is running the CUT-CELL (openness-weighted) kernels, "
+          "i.e. an immersed solid is present and set_solid ran with cutcell_pressure=True. False "
+          "means "
           "the uncut rung-V1 kernels are running, byte-identically to a solid-free build.")
       .def(
           "vof_diagnostics",

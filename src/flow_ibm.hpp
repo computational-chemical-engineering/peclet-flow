@@ -5220,9 +5220,13 @@ class Solver {
     if (!vofEnabled_ || !vofAdv_.hasGeometry())
       throw std::runtime_error("vof_geometry: no cut-cell geometry (needs set_solid + enable_vof)");
     CCField t("vofGeom", n_);
-    CCConst src = which == 0   ? CCConst(vofAdv_.epsFraction())
-                  : which < 4 ? CCConst(vofAdv_.faceOpenness(which - 1))
-                              : CCConst(vofAdv_.kindDouble());
+    CCConst src;
+    if (which == 0)
+      src = CCConst(vofAdv_.epsFraction());
+    else if (which < 4)
+      src = CCConst(vofAdv_.faceOpenness(which - 1));
+    else
+      src = CCConst(vofAdv_.kindDouble());
     copyInner(t, e_, G, src, e3_, kVofG);
     return gatherInner(t);
   }

@@ -221,15 +221,13 @@ int main(int argc, char** argv) {
         r2.setSolid(gSdf, true);
         r2.enableVof();
         for (int w = 0; w < 5; ++w) {
-          const auto g =
-              gatherGlobal(sd.getVofGeometry(w), ox, oy, oz, lnx, lny, lnz, rank, size);
+          const auto g = gatherGlobal(sd.getVofGeometry(w), ox, oy, oz, lnx, lny, lnz, rank, size);
           if (rank == 0)
             dg = std::fmax(dg, maxAbsDiff(g, r2.getVofGeometry(w)));
         }
       }
       for (int c = 0; c < 3; ++c)
-        sd.setField(c == 0 ? "u" : (c == 1 ? "v" : "w"),
-                    sliceOf(gU[c], ox, oy, oz, lnx, lny, lnz));
+        sd.setField(c == 0 ? "u" : (c == 1 ? "v" : "w"), sliceOf(gU[c], ox, oy, oz, lnx, lny, lnz));
       sd.setVof(blockOf(colourAt, ox, oy, oz, lnx, lny, lnz));
       // the solid-band fill, pointwise
       double dfill = 0.0;
@@ -290,7 +288,8 @@ int main(int argc, char** argv) {
         s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "",
                            {1.0, ratio - 1.0});
         s.setPropertyModel("mu", peclet::flow::ClosureKind::LinearMix, "C", "", {0.05, 0.45});
-        s.setPropertyModel("force_z", peclet::flow::ClosureKind::LinearMix, "rho", "", {0.0, -grav});
+        s.setPropertyModel("force_z", peclet::flow::ClosureKind::LinearMix, "rho", "",
+                           {0.0, -grav});
       };
       IbmSolver sd(lnx, lny, lnz);
       sd.initMpi(dec, MPI_COMM_WORLD);

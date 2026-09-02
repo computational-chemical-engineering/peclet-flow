@@ -640,8 +640,8 @@ class MomentumConsistentAdvector {
 
   /// The CV's fluid volume `eps^e(i)` (0 when the whole CV is solid).
   KOKKOS_INLINE_FUNCTION static double cvEps(const SField& ep, const UCField& kd, long i, long se) {
-    return 0.5 * (vofEpsEff(ep(i - se), kd(i - se) == kVofSolid) +
-                  vofEpsEff(ep(i), kd(i) == kVofSolid));
+    return 0.5 *
+           (vofEpsEff(ep(i - se), kd(i - se) == kVofSolid) + vofEpsEff(ep(i), kd(i) == kVofSolid));
   }
 
   /// Face Courant number, geometric liquid flux and momentum flux on a CUT shifted CV. `af(p)` is

@@ -23,8 +23,8 @@
 //      neutral fill, and the apparent contact angle measured from the cap volume, its height and
 //      its contact radius must come back at 90 deg.
 #include <cmath>
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <Kokkos_Core.hpp>
 #include <vector>
 
@@ -150,7 +150,7 @@ void bridgeWithGeometry() {
       cs3("t::cs3", len);
   arraySdfBlock(arr, sdf3, e3, g);
   peclet::flow::buildOpenness(ox3, oy3, oz3, CCConst(sdf3), C3{e3.x, e3.y, e3.z}, 1.0, 1.0, 1.0,
-                            s.apertureOrder());
+                              s.apertureOrder());
   peclet::flow::buildCellFraction(cs3, CCConst(sdf3), C3{e3.x, e3.y, e3.z}, 1);
   const std::vector<double> refO[3] = {hostOf(ox3), hostOf(oy3), hostOf(oz3)};
   const auto refE = hostOf(cs3);
@@ -179,8 +179,9 @@ void bridgeWithGeometry() {
           dEps = std::fmax(dEps, std::fabs(got[i] - refE[i]));
         }
   }
-  std::printf("G3a geometry embed: max|openness - independent| %.3e   max|eps - independent| %.3e\n",
-              dOpen, dEps);
+  std::printf(
+      "G3a geometry embed: max|openness - independent| %.3e   max|eps - independent| %.3e\n", dOpen,
+      dEps);
   CHECK(dOpen == 0.0);
   CHECK(dEps == 0.0);
 
@@ -354,8 +355,8 @@ void conservationThroughPacking(int N, int nAdv) {
 // staircase and would not exercise the cut-cell path at all.
 void neutralFillCap(int steps, bool zeroSolid = true) {
   const int NX = 40, NY = 40, NZ = 28;
-  const double zw = 3.5;   // the wall surface, in cell units (cell k spans [k, k+1])
-  const double R = 12.0;   // D/dx = 24
+  const double zw = 3.5;  // the wall surface, in cell units (cell k spans [k, k+1])
+  const double R = 12.0;  // D/dx = 24
   const double sigma = 1.0;
   std::vector<double> sd((std::size_t)NX * NY * NZ);
   for (int z = 0; z < NZ; ++z)
@@ -502,9 +503,9 @@ void neutralFillCap(int steps, bool zeroSolid = true) {
       2 * R, steps, 0.5 * dtSig, zeroSolid ? "ZERO" : "band fill", maxIt, V00, V,
       std::fabs(V - V00) / V00, V0, h, a, theta, Rc, R, dP, 2.0 * sigma / Rc,
       std::fabs(dP - 2.0 * sigma / Rc) / (2.0 * sigma / Rc), umax, Ca, umaxAll, uTrace[0],
-      uTrace[1],
-      uTrace[2], uTrace[3], kmaxWall, brWall[0], brWall[1], brWall[2], brWall[3], brWall[4],
-      brWall[5], brWall[6], cens.noEstimate, d.clippedVolume, d.clampedFaces, d.solidSumC);
+      uTrace[1], uTrace[2], uTrace[3], kmaxWall, brWall[0], brWall[1], brWall[2], brWall[3],
+      brWall[4], brWall[5], brWall[6], cens.noEstimate, d.clippedVolume, d.clampedFaces,
+      d.solidSumC);
   CHECK(std::fabs(theta - 90.0) <= 3.0);
   CHECK(std::fabs(dP - 2.0 * sigma / Rc) / (2.0 * sigma / Rc) <= 0.01);
   if (zeroSolid)
@@ -544,8 +545,8 @@ void momentumCutCells() {
     for (int z = 0; z < N; ++z)
       for (int y = 0; y < N; ++y)
         for (int x = 0; x < N; ++x)
-          c0[idx(x, y, z, N, N)] = peclet::flow::vof::sphereCellFraction(
-              0.5 * N, 0.5 * N, 0.5 * N, 0.28 * N, x, y, z, 1.0, 4);
+          c0[idx(x, y, z, N, N)] = peclet::flow::vof::sphereCellFraction(0.5 * N, 0.5 * N, 0.5 * N,
+                                                                         0.28 * N, x, y, z, 1.0, 4);
     s.setVof(c0);
     s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {1.0, R - 1.0});
     s.enableVofMomentum(1.0, R);
@@ -645,8 +646,8 @@ void momentumCutCells() {
         "   colour drift %.3e (%.3e per step), max|div(open u)| %.3e, pressure iters max %ld\n"
         "   min/max C over uncut fluid %.3e / %.15f, clipped volume total %.3e, max|u| %.3e, "
         "solid sum C %.3e\n",
-        R, steps, momentumOn ? "ON" : "off", drift, drift / steps, s.maxOpenDivergence(), maxIt,
-        mn, mx, clip, umax, d1.solidSumC);
+        R, steps, momentumOn ? "ON" : "off", drift, drift / steps, s.maxOpenDivergence(), maxIt, mn,
+        mx, clip, umax, d1.solidSumC);
     CHECK(!std::isnan(umax) && !std::isnan(drift));
     CHECK(std::fabs(drift) / steps <= 1e-10);
     CHECK(d1.solidSumC == 0.0);
@@ -666,14 +667,14 @@ int main(int argc, char** argv) {
     bridgeWithGeometry();
     conservationThroughPacking(quick ? 24 : 48, quick ? 200 : 500);
     if (!std::getenv("PECLET_VOF_CUTCELL_SKIP_G5")) {
-    neutralFillCap(quick ? 120 : 200);
-    // The measured ablation on what the CANONICAL colour carries inside the solid (the working
-    // block always carries the neutral fill): 0 is the WO-Q contract, but the CSF and the property
-    // closures read the canonical field, so a wall face then sees a full colour jump.
-    if (std::getenv("PECLET_VOF_CUTCELL_FILL_ABLATION"))
-      neutralFillCap(quick ? 120 : 200, false);
-  }
-  momentumCutCells();
+      neutralFillCap(quick ? 120 : 200);
+      // The measured ablation on what the CANONICAL colour carries inside the solid (the working
+      // block always carries the neutral fill): 0 is the WO-Q contract, but the CSF and the
+      // property closures read the canonical field, so a wall face then sees a full colour jump.
+      if (std::getenv("PECLET_VOF_CUTCELL_FILL_ABLATION"))
+        neutralFillCap(quick ? 120 : 200, false);
+    }
+    momentumCutCells();
   }
   Kokkos::finalize();
   if (failures)
