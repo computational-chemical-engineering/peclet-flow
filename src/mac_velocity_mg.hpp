@@ -114,6 +114,23 @@ inline void buildVelocityStaircase(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV A
       });
 }
 
+// classified-solid rows (theta < thresh) -> identity, over the inner cells (the staircase pin
+// applied after an operator builder that wrote every row).
+inline void pinSolidRows(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV AT, CCConst theta,
+                         C3 e, int g, double thresh) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::vmg_pin_rows", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+        if (theta(i) < thresh) {
+          AC(i) = (MReal)1.0;
+          AW(i) = AE(i) = AS(i) = AN(i) = AB(i) = AT(i) = (MReal)0.0;
+        }
+      });
+}
+
 // UPWIND-CONVECTIVE coarse operator (build_adv_coarse_stencil_k): anisotropic const-coeff
 // backward-Euler diffusion (per-axis beta bx/by/bz) PLUS first-order-upwind advection from the
 // restricted coarse advecting velocity (scaled by s_a=1/cfac_a per face axis). M-matrix on every
@@ -499,10 +516,24 @@ class VelocityMG {
   // (tangential wall/inflow +beta, outflow -beta) on the owning rank. The non-periodic correction
   // ghosts are zero (fill() / the smoother keep them so), which is the Dirichlet-0 the fold
   // assumes. Needs setBC() first. comp = velocity component (the fold is component-dependent).
+  // upwind: the fine stencil carries implicit first-order-upwind advection, so the coarse
+  // operator adds the FOU part from the restricted advecting velocity (restrictAdvVelocities must
+  // have run this step) on the fluid rows, the classified-solid rows staying pinned.
   void setStaircaseBc(int comp, CCConst theta0, CCConst solid0, CCConst resmask0, double nu_dt,
-                      double idiag, double thresh) {
+                      double idiag, double thresh, bool upwind = false, double fouw = 0.0) {
     heldComp_ = comp;
     setStaircase(theta0, solid0, resmask0, nu_dt, idiag, thresh);
+    if (upwind)
+      for (int L = 1; L < (int)lv_.size(); ++L) {
+        Level& c = lv_[L];
+        const double bx = nu_dt / (double)(c.cfac.x * c.cfac.x),
+                     by = nu_dt / (double)(c.cfac.y * c.cfac.y),
+                     bz = nu_dt / (double)(c.cfac.z * c.cfac.z);
+        buildAdvCoarse(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.advU), CCConst(c.advV),
+                       CCConst(c.advW), comp, c.ext, G, bx, by, bz, fouw, 1.0 / c.cfac.x,
+                       1.0 / c.cfac.y, 1.0 / c.cfac.z, idiag);
+        pinSolidRows(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.theta), c.ext, G, thresh);
+      }
     Level& f = lv_[0];
     {
       const int t = bc_[2 * comp];  // the -side face of the normal component lands at index G

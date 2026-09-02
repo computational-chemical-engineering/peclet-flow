@@ -1775,7 +1775,7 @@ class Solver {
       // to the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC
       // stencil path (inflow/outflow) -- implicitAdv() -> fully-implicit upwind advection (stable
       // at large dt). The velocity-MG BC path keeps its own FOU coarse operator.
-      if (implicitAdv() && (!hasBc_ || !useVelocityMg_))
+      if (implicitAdv() && (!hasBc_ || !useVelocityMg_ || mixedVelocityMg()))
         for (int c = 0; c < 3; ++c)
           (varProps_ || effVarRho()) ? buildAdvStencilVar(c) : buildAdvStencil(c);
       // Outflow backflow stabilization: dissipate reverse flow at the outlet in the momentum
@@ -1787,7 +1787,8 @@ class Solver {
       // upwind-convective velocity-MG: restrict the (frozen u^k) advecting velocity to the coarse
       // levels ONCE, before the per-component solves update it (shared across the 3 momentum
       // components).
-      if (useVelocityMg_ && implicitFou_ && advect_ && !hasBc_)
+      if (useVelocityMg_ && advect_ &&
+          ((implicitFou_ && !hasBc_) || (mixedVelocityMg() && implicitAdv())))
         vmg_.restrictAdvVelocities(advVelView(0), advVelView(1),
                                    advVelView(2));  // A0: same inputs as the fine operator
       const double tp1 = phaseTick();
@@ -2037,7 +2038,14 @@ class Solver {
   // (set_implicit_advection) on any path, OR the DEFAULT on the domain-BC path (inflow/outflow),
   // where explicit advection is unstable. The velocity-MG BC path carries its own FOU coarse
   // operator, so the default does not apply there (it still honours the explicit opt-in).
-  bool implicitAdv() const { return advect_ && (implicitFou_ || (hasBc_ && !useVelocityMg_)); }
+  // Advection is implicit (first-order upwind in the stencil, stable at large dt) when the user
+  // asks for it, and ALWAYS on the domain-BC stencil path -- which includes the mixed velocity MG
+  // (solid + domain BCs), so switching that solver on does not silently change the momentum
+  // discretization. The all-fluid domain-BC velocity MG (folded const-coefficient operator) keeps
+  // explicit advection, as before.
+  bool implicitAdv() const {
+    return advect_ && (implicitFou_ || (hasBc_ && (!useVelocityMg_ || hasSolid_)));
+  }
   // Domain-BC momentum solved via the Robust-Scaled cut-cell / FOU stencil smoother
   // (ibmRbgsStencilColor
   // + reflection-ghost BCs), not the all-fluid const-coeff fold. Needed when (a) an immersed solid
@@ -2063,8 +2071,7 @@ class Solver {
   // (implicit advection / variable properties / drag stay on RB-GS: their fine stencils are not
   // approximated by the staircase Helmholtz).
   bool mixedVelocityMg() const {
-    return hasBc_ && useVelocityMg_ && hasSolid_ && !implicitAdv() && !varProps_ && !varRho_ &&
-           !hasDrag_;
+    return hasBc_ && useVelocityMg_ && hasSolid_ && !varProps_ && !varRho_ && !hasDrag_;
   }
   // Fill a property field's ghosts for the face means: periodic/halo base, then zero-gradient
   // (copy) on domain-BC (wall/inflow/outflow) faces — a periodic wrap there would bring the wrong
@@ -4011,8 +4018,10 @@ class Solver {
       ibmCleanFluidMask(vmgClean_, CCConst(sdf_), e_, off);
       vmg_.setFineStencil(FPC(C[c].AC), FPC(C[c].AW), FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
                           FPC(C[c].AB), FPC(C[c].AT));
+      // coarse = staircase Helmholtz (+ FOU from the restricted advecting velocity when the fine
+      // stencil carries implicit advection) + domain-face folds
       vmg_.setStaircaseBc(c, CCConst(vmgTheta_), CCConst(C[c].mask), CCConst(vmgClean_), mu_,
-                          rho_ / dt_, 0.5);
+                          rho_ / dt_, 0.5, /*upwind=*/implicitAdv(), rho_);
       // fold=0: level 0 is the UNFOLDED cut-cell stencil, so its wall ghosts are reflections
       // (exactly the bcStencilPath RB-GS convention); the folded coarse levels hold theirs at 0.
       fillVelGhosts(c, 0);

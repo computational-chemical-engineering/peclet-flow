@@ -683,11 +683,44 @@ path) at all three drive levels. Gate: `tests/kokkos_mpi/test_dragbeta_ghost_mpi
 gating the assembled diagonal directly via `getMomentumDiagonal`). **Nothing was re-baselined** — the
 full before/after table is in `doc/vof_workorders.md`, WO-I findings.
 
-Two related MPI restrictions remain, both now explicit rather than silent: the solver's **velocity
-multigrid is single-rank** (`IbmSolver` never calls `VelocityMG::initMpi`; `set_velocity_multigrid`
-is disabled with a stderr notice under MPI), and a **multi-rank inlet profile** must be handed to
-each rank as its own block's slice — `set_domain_bc_profile` resamples onto the local face plane and
-there is no scatter helper.
+One MPI restriction remains, explicit rather than silent: a **multi-rank inlet profile** must be
+handed to each rank as its own block's slice — `set_domain_bc_profile` resamples onto the local
+face plane and there is no scatter helper.
+
+**The velocity multigrid runs under MPI since 2026-09-02** (it used to be disabled with a notice):
+`IbmSolver` builds `VelocityMG::initMpi(dec, levels, comm)` on its own decomposition, coarsened in
+place with the even-block gate (no telescoping — measured unnecessary, see below), every
+domain-face operation rank-owned (`VelocityMG::touches`). Three operator modes, chosen by the
+case: IBM-periodic (staircase), all-fluid domain-BC (folded const-coefficient), and the new
+**mixed** one for an immersed solid WITH domain BCs (`setStaircaseBc`: level 0 = the unfolded
+cut-cell stencil with reflection ghosts, solid pin, clean-fluid + held-inflow-face exclude; coarse
+= staircase Helmholtz + domain-face folds). `bcStencilPath()` must agree with the solver in use
+(it decides the RHS treatment), which `mixedVelocityMg()` guarantees — and so must
+`implicitAdv()`: the domain-BC stencil path always solves advection implicitly (first-order
+upwind in the stencil), and the mixed V-cycle carries that same stencil with the upwind coarse
+operator (`buildAdvCoarse` + staircase pin + folds), so switching the solver does not change the
+discretization. Before this was enforced, turning velocity MG on silently made advection explicit,
+and two solves converged to 1e-11 residual sat 3e-4 apart — the classic "different equation, not a
+different solver" trap; with the same stencil they agree to 2e-11. Gate:
+`tests/kokkos_mpi/test_velocitymg_bc_mpi.cpp` (np 1/2/4, bit-exact / 1.7e-14, V-cycle == RB-GS
+fixed point to 4e-9).
+
+**Stop the momentum solve on the residual, not the update.** `set_velocity_residual_tolerance(rtol)`
+(opt-in, 0 = legacy) ends a component's solve once max|b − A u| ≤ rtol · max(max|b|, max|A u|)
+over the solved unknowns. The legacy criterion — update ≤ rtol × the *first sweep's* update — is
+relative to a quantity that is already noise on a warm-started near-steady step, so RB-GS burns its
+whole sweep cap shrinking noise by 10³ (the FoxBerry bed: 600 sweeps/step at 384³, every step),
+while the V-cycle, whose first cycle moves a lot, stops too early. Measured at 96³ on that bed:
+RB-GS 468 → 24 sweeps/step at rtol 1e-3 (momentum phase 0.47 → 0.06 s), the mixed V-cycle 1.6
+cycles/component. Two things to know when reading the residual: the forcing can enter through a
+Dirichlet ghost (an inflow) rather than through `b`, hence the max(|b|, |A u|) scale; and the
+momentum operator's rows span ~5·10⁴ (μ/Δx² against ρ/Δt), so a max-residual of 1e-8 relative to
+the row scale pins the solution only to ~5e-4 — RB-GS and the V-cycle both satisfy it while
+differing by 3e-4, and it is the Gauss–Seidel one that stalls on smooth error (its update
+criterion cannot see that stall either). **The V-cycle needs no depth on a pore-confined bed**: 2,
+3, 4 and 5 levels give identical cycle counts at 96³ (the coarse grid only serves the clean fluid
+interior; the exclude mask hands the band to the smoother), so the velocity hierarchy does NOT
+need telescoping where the pressure one did.
 
 Build/test the multi-rank ctests:
 ```bash
