@@ -874,6 +874,11 @@ class WyAdvector {
   /// bit-exactly, in-rank and across a rank boundary alike.
   void computeFluxes(int d, double dth) {
     if (hasGeom_) {  // rung V5a: openness-weighted flux (`cutcell.hpp` eq. 1)
+      // NOT COMPOSED WITH THE V-BC BOUNDARY RULE YET: with an immersed solid the cut-cell flux
+      // path runs and the out-of-domain mask (and hence the algebraic boundary-donor flux and the
+      // per-face boundary ledger) is skipped. A packing that stands clear of the open faces is
+      // unaffected in the interior; a packing that CUTS an inflow/outflow face is out of scope for
+      // both rungs (see the open cut-cell/open-face pressure defect in CLAUDE.md).
       computeFluxesCut(d, dth);
       return;
     }
