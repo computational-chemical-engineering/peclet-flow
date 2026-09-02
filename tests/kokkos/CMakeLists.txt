@@ -206,6 +206,15 @@ target_include_directories(test_vof_wetting PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(test_vof_wetting PRIVATE Kokkos::kokkos)
 add_test(NAME vof_wetting COMMAND test_vof_wetting)
 
+# VoF rung V6 (WO-V6): the DYNAMIC contact angle (Cox-Voinov with an explicit slip length) and
+# advancing/receding hysteresis — the model as arithmetic, the U_cl sign convention as geometry,
+# and the two through the solver on a kinematic advancing/receding pair.
+add_executable(test_vof_wetting_dynamic test_vof_wetting_dynamic.cpp)
+target_include_directories(test_vof_wetting_dynamic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_wetting_dynamic PRIVATE Kokkos::kokkos)
+add_test(NAME vof_wetting_dynamic COMMAND test_vof_wetting_dynamic)
+
 # VoF rung V-BC (WO-R): two-phase open boundaries — the out-of-domain flux rule, the inflow/
 # backflow colour ghost, the inflow property ghost, the exact colour budget and the
 # variable-density outflow correction. PECLET_VOF_BC_QUICK=1 shortens the budget run.
