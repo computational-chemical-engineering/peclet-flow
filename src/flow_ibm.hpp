@@ -1893,6 +1893,20 @@ class Solver {
                                        // periodic); BEFORE initMpi — the per-level ghost width
                                        // (CA smoothing) is chosen for the periodic operator only
 #ifdef PECLET_FLOW_MPI
+      // The variable-density OUTFLOW coefficient path (WO-R2) is not implemented across a
+      // telescope point (CutcellMG::setOpenness throws there), so a case that will take it gets
+      // the in-place hierarchy instead of an abort at the first projection. Decided here, where
+      // the hierarchy is built; a density mode switched on AFTER geometry still meets that guard.
+      if (distributed_ && mg_.telescope() && hasOutflow_ && outflowOperatorCoeff() && effVarRho()) {
+        mg_.setTelescope(false);
+        int r0 = 0;
+        MPI_Comm_rank(comm_, &r0);
+        if (r0 == 0)
+          std::fprintf(stderr,
+                       "[flow] pressure-MG telescoping OFF for this run: the variable-density "
+                       "outflow coefficient is not implemented across a telescope point "
+                       "(set PECLET_FLOW_OUTFLOW_COEFF=0 to keep telescoping).\n");
+      }
       if (distributed_)  // share the level-0 decomposition so the MG block matches this rank's
                          // block
         mg_.initMpi(gnx_, gny_, gnz_, nLevels_, comm_, dec_.get());
@@ -5303,6 +5317,25 @@ class Solver {
             buildRhoCoeffOutflowFace(cc[a], CCConst(rho1_), rho_, e1_, 1, a, rhoFaceHarmonic_);
       }
       mg_.setBoundaryConditions(bc_);
+#ifdef PECLET_FLOW_MPI
+      // The WO-R2 outflow COEFFICIENT path is not implemented across a telescope point
+      // (setOpenness throws). A run that only became variable-density after its geometry
+      // (enable_vof / a density closure) built a telescoped hierarchy: rebuild it in place, once,
+      // rather than abort. (A run known to be variable-density at geometry time never telescoped.)
+      if (distributed_ && hasOutflow_ && outflowOperatorCoeff() && mg_.telescopeCount() > 0) {
+        mg_.setTelescope(false);
+        mg_.setBoundaryConditions(bc_);
+        mg_.initMpi(gnx_, gny_, gnz_, nLevels_, comm_, dec_.get());
+        mg_.setAgglomerationMode(pressGraphAmg_ ? 1 : pressAgglomMode_);
+        int r0 = 0;
+        MPI_Comm_rank(comm_, &r0);
+        if (r0 == 0)
+          std::fprintf(stderr,
+                       "[flow] pressure-MG hierarchy rebuilt WITHOUT telescoping: the "
+                       "variable-density outflow coefficient is not implemented across a "
+                       "telescope point (PECLET_FLOW_OUTFLOW_COEFF=0 keeps telescoping).\n");
+      }
+#endif
       mg_.setOutflowCoefficient(hasOutflow_ && outflowOperatorCoeff());
       mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), 1.0, 1.0, 1.0);
       mg_.setOutflowCoefficient(false);

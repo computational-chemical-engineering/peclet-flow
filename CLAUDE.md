@@ -329,6 +329,13 @@ two, not its size. **An odd dimension never coarsens at all**: measured on one G
 MPI there is a second gate — a level coarsens an axis only if *every rank's block* is even on it, so
 the achievable depth is set by the per-rank block, not the global grid.
 
+**Telescoping is the DEFAULT since 2026-09-02** (`PECLET_FLOW_TELESCOPE=0` / `set_pressure_telescope(False)`
+disables): when a level cannot coarsen in place, ORB siblings are merged onto fewer ranks and the
+hierarchy continues to 3³ on one rank (`docs/MG_TELESCOPING_PLAN.md`). One exception decided at
+hierarchy construction: a distributed variable-density run with an OUTFLOW takes the WO-R2 outflow
+*coefficient* path, which is not implemented across a telescope point (`setOpenness` throws), so such
+a run gets the in-place hierarchy with a stderr notice.
+
 **That second gate is an implementation limit and it is the top open item at scale.** Coarse levels
 are required to be the fine decomposition `coarsened()` in place (so restrict/prolong stay purely
 local), which is why the hierarchy simply stops when a block hits an odd extent. Measured cost
