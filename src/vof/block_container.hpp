@@ -419,6 +419,15 @@ class VofBlockSet {
   /// -force rule on the block's faces) and SUM it into the caller's global face-force fields.
   bool csfEnabled = false;
   double sigma = 0.0;  ///< surface-tension coefficient of the block CSF (cell units)
+  /// The curvature cascade's TUNABLES for every block, copied into each block's own
+  /// `VofCurvature` when it is allocated.  This is not decoration: `interfaceEps` (the wisp guard
+  /// on the interfacial predicate) is what makes a block's curvature a function of the INTERFACE
+  /// rather than of the Weymouth-Yue round-off residue, and without it a 1e-16 colour difference
+  /// between two decompositions flips a cascade branch and moves the CSF face force by O(1e-3)
+  /// -- measured, on the rung-W2 MPI gate, before this was propagated.  The solver sets it from
+  /// its own `set_vof_interface_eps` / `set_surface_tension`, so the block and structured paths
+  /// run the SAME estimator.
+  VofCurvature curvProto;
   /// The colour threshold that defines the BUBBLE EXTENT (and hence the box). Weymouth-Yue leaves
   /// round-off residue in every cell its sweeps touch — measured down to 1e-35 and of either sign
   /// (the same residue that made the V4 curvature cascade need `interfaceEps = 1e-8`) — so a
@@ -426,6 +435,14 @@ class VofBlockSet {
   /// the global field. `1e-12` is 12 orders below any physical colour and ~5 orders above the
   /// residue; what it drops is accumulated into `VofBlockStats::discarded`.
   double bubbleEps = 1e-12;
+  /// Wisp guard on the INTERFACE-AREA predicate (`VofBlockStats::area`), the same threshold and
+  /// the same reason as the curvature's `interfaceEps`. A Weymouth-Yue round-off wisp satisfies
+  /// `0 < C < 1`, its MYC normal is degenerate (the stencil is all zeros, so the kernel returns
+  /// (1,0,0)) and `plicAlpha(1,0,0,1e-15)` puts a plane just inside the face: the polygon is the
+  /// FULL unit square and the cell contributes an area of 1. Measured: three such cells made the
+  /// reported area of a marker differ by 3.0 cells^2 between np = 1 and np = 4, off a colour that
+  /// agreed to 1e-14.
+  double areaEps = 1e-8;
   /// Let a block SHRINK when it has grown much larger than the bubble needs. Off gives a block
   /// that only ever grows — the G3 reference (a block large enough that it never has to move).
   bool allowShrink = true;
@@ -566,6 +583,12 @@ class VofBlockSet {
     VofBlock& b = blocks_[idx];
     const I3 n = b.adv_.inner();
     b.curv_.init(n.x, n.y, n.z, ghost_);
+    b.curv_.weightWidth = curvProto.weightWidth;
+    b.curv_.monoTol = curvProto.monoTol;
+    b.curv_.ptWeightWidth = curvProto.ptWeightWidth;
+    b.curv_.cosMin = curvProto.cosMin;
+    b.curv_.interfaceEps = curvProto.interfaceEps;
+    b.curv_.useMixedHeightFit = curvProto.useMixedHeightFit;
     const long len = static_cast<long>(b.adv_.extent().x) * b.adv_.extent().y * b.adv_.extent().z;
     for (int c = 0; c < 3; ++c)
       b.f_[c] = SField("vof::block::csf", len);
@@ -776,10 +799,23 @@ class VofBlockSet {
 
   /// Per-bubble census on the master (empty entries on a non-master).
   std::vector<VofBlockStats> statsAll() const {
+    // `id`, `master` and the box come from the REPLICATED table, so they are reported on every
+    // rank; only the measured entries (volume, centroid, velocity, moments, area) are the
+    // master's.  Filling them here rather than in `measure()` is what makes that promise true on
+    // a rank that masters nothing.
     std::vector<VofBlockStats> v;
     v.reserve(blocks_.size());
-    for (const auto& b : blocks_)
-      v.push_back(b.st_);
+    for (const auto& b : blocks_) {
+      VofBlockStats q = b.st_;
+      q.id = b.id;
+      q.master = b.master;
+      for (int d = 0; d < 3; ++d) {
+        q.lo[d] = b.box.lo[d];
+        q.hi[d] = b.box.hi[d];
+      }
+      q.cells = b.box.cells();
+      v.push_back(q);
+    }
     return v;
   }
 
@@ -1058,7 +1094,7 @@ class VofBlockSet {
   double interfaceArea(const VofBlock& b) const {
     const I3 e = b.adv_.extent(), n = b.adv_.inner();
     const int g = ghost_;
-    const double hh = h_;
+    const double hh = h_, aeps = areaEps;
     SField c = b.adv_.colour();
     const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
     double a = 0.0;
@@ -1069,7 +1105,7 @@ class VofBlockSet {
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = L3(x, y, z, e);
           const double ci = c(i);
-          if (!(ci > 0.0) || !(ci < 1.0))
+          if (!(ci > aeps) || !(ci < 1.0 - aeps))
             return;
           double st[27];
           for (int dz = -1; dz <= 1; ++dz)

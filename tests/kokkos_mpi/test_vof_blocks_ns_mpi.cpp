@@ -22,6 +22,7 @@
 #include <mpi.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <Kokkos_Core.hpp>
@@ -194,7 +195,7 @@ int main(int argc, char** argv) {
       fail = 1;
     }
 
-    const int STEPS = 12;
+    const int STEPS = (argc > 1) ? std::atoi(argv[1]) : 12;
     for (int cfg = 0; cfg < 2; ++cfg) {
     const bool csf = (cfg == 1);
     if (rank == 0)
@@ -208,6 +209,10 @@ int main(int argc, char** argv) {
 
     // per-marker volumes: only the master carries them, so a SUM over ranks is the census
     const auto stats = sd.vofBlockStats();
+    if (rank == 0)
+      for (const auto& q : stats)
+        std::printf("    dist block %ld master %d box [%d,%d)x[%d,%d)x[%d,%d)\n", q.id, q.master,
+                    q.lo[0], q.hi[0], q.lo[1], q.hi[1], q.lo[2], q.hi[2]);
     std::vector<double> vLoc(stats.size(), 0.0), vAll(stats.size(), 0.0);
     std::vector<double> aLoc(stats.size(), 0.0), aAll(stats.size(), 0.0);
     for (std::size_t i = 0; i < stats.size(); ++i) {
@@ -217,6 +222,10 @@ int main(int argc, char** argv) {
     MPI_Allreduce(vLoc.data(), vAll.data(), (int)vLoc.size(), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(aLoc.data(), aAll.data(), (int)aLoc.size(), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
+    std::vector<double> gf[3];
+    if (csf)
+      for (int c = 0; c < 3; ++c)
+        gf[c] = gatherGlobal(sd.getVofBlockForce(c), ox, oy, oz, lnx, lny, lnz, rank, size);
     std::vector<double> g[5];
     g[0] = gatherGlobal(sd.getVelocity(0), ox, oy, oz, lnx, lny, lnz, rank, size);
     g[1] = gatherGlobal(sd.getVelocity(1), ox, oy, oz, lnx, lny, lnz, rank, size);
@@ -247,6 +256,21 @@ int main(int argc, char** argv) {
       for (int i = 0; i < 5; ++i)
         std::printf("  %s %ld", fn[i], nb[i]);
       std::printf("\n");
+      if (csf) {
+        double df = 0.0;
+        long nf = 0;
+        for (int c = 0; c < 3; ++c) {
+          const std::vector<double> rf = ref.getVofBlockForce(c);
+          double m = 0.0;
+          nf += countBitDiff(gf[c], rf, m);
+          df = std::fmax(df, maxDiff(gf[c], rf));
+        }
+        std::printf("  scattered CSF face force vs np=1: max|d| %.3e over %ld bit-differing "
+                    "cells\n", df, nf);
+      }
+      for (const auto& q : ref.vofBlockStats())
+        std::printf("    ref block %ld box [%d,%d)x[%d,%d)x[%d,%d)\n", q.id, q.lo[0], q.hi[0],
+                    q.lo[1], q.hi[1], q.lo[2], q.hi[2]);
       const auto rs = ref.vofBlockStats();
       double dv = 0.0, da = 0.0, sumMark = 0.0, sumUnion = 0.0;
       for (std::size_t i = 0; i < rs.size(); ++i) {
