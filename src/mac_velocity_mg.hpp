@@ -714,15 +714,11 @@ class VelocityMG {
     double du0 = 0.0, bnorm = 0.0;
     int used = nvc;
     lastResRatio_ = -1.0;
-    if (useRes) {
+    if (useRes) {  // scale only; at least one cycle always runs (see IbmSolver::velSweepLoop)
       const double r0 = residual();
       bnorm = std::max(gmax(maxAbsInner(CCConst(l0.rhs), l0.ext, G)),
                        gmax(maxAbsDiffInner(CCConst(l0.rhs), CCConst(l0.res), l0.ext, G)));
       lastResRatio_ = bnorm > 0.0 ? r0 / bnorm : 0.0;
-      if (r0 <= resTol * bnorm) {  // the warm start already solves it
-        Kokkos::deep_copy(x, l0.x);
-        return 0;
-      }
     }
     for (int v = 0; v < nvc; ++v) {
       if (useDu)

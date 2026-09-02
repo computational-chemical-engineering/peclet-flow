@@ -3944,14 +3944,14 @@ class Solver {
     };
     double scale = 0.0;
     if (useRes) {
+      // The convergence scale from the initial residual: forcing may enter through a Dirichlet
+      // ghost (inflow), not b, hence max(|b|, |A u|). NO early return on a converged warm start:
+      // the projection needs u* to carry the O(rtol) response of the momentum equation (the
+      // hydrostatic acid test drifts by 1e-8 in dP/dz if the solve is skipped), so at least one
+      // sweep always runs -- a negligible cost against the 8-9 the solve typically takes.
       fill();
-      const double r0 = gmax(resid());
-      // forcing may enter through a Dirichlet ghost (inflow), not b: scale = max(|b|, |A u|)
+      (void)gmax(resid());
       scale = std::max(gmax(bnorm), gmax(lastAxNorm_));
-      if (r0 <= velResTol_ * scale) {  // the warm start already solves this component's equation
-        lastMomentumResid_ = std::max(lastMomentumResid_, scale > 0 ? r0 / scale : 0.0);
-        return;
-      }
     }
     for (int it = 0; it < velIters_; ++it) {
       fill();
@@ -6063,7 +6063,10 @@ class Solver {
   double velTol_ = 0.0;         // momentum tolerance stop (0 = legacy fixed-count loop)
   int velMinIters_ = 2;
   long lastMomentumSweeps_ = 0;  // sweeps actually run last step (summed over components/Picard)
-  double velResTol_ = 1e-5;        // residual-based momentum stop, DEFAULT since 2026-09-02 (0 = update criterion)
+  double velResTol_ = [] {  // residual-based momentum stop, DEFAULT 1e-5 since 2026-09-02 (0 = update criterion)
+    const char* e = std::getenv("PECLET_FLOW_VRES");  // env override for experiments / bisection
+    return e ? std::atof(e) : 1e-5;
+  }();
   double lastMomentumResid_ = -1.0;  // max_c max|r|/max|b| at exit (residual mode)
   CCField velRes_;                 // scratch for the stencil-path residual
   double lastAxNorm_ = 0.0;        // max|A u| of the last residual evaluation (scale)

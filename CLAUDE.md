@@ -709,7 +709,10 @@ fixed point to 4e-9).
 `set_velocity_residual_tolerance(rtol)` (0 = the legacy update criterion) ends a component's solve
 once max|b − A u| ≤ rtol · max(max|b|, max|A u|) over the solved unknowns, on every path (cut-cell /
 IBM stencils, the folded constant-coefficient domain-BC smoother via `diffResidual`, every
-velocity-MG mode). The single-GPU regression suite passes unchanged on the default (every metric
+velocity-MG mode). At least one sweep / V-cycle always runs: skipping a solve whose warm start
+already meets the tolerance leaves u* without the O(rtol) response the projection needs, and the
+hydrostatic acid test (`vardensity_mpi`) drifts by 1e-8 in dP/dz — measured, and the reason there
+is no early return. The single-GPU regression suite passes unchanged on the default (every metric
 +0.00 %, pressure iterations/step identical); steady-state runs need 5–20 % more *steps* to meet
 their convergence check, because the over-converged update-criterion solve made the per-step
 metric drift smoother — if a study is step-count-sensitive, tighten to 1e-6. The legacy criterion — update ≤ rtol × the *first sweep's* update — is
