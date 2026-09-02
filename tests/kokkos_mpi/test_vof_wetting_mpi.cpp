@@ -149,10 +149,11 @@ int main(int argc, char** argv) {
         if ((int)sz[a] != gn[a])
           cut[a] = true;
     if (rank == 0)
-      std::printf("VOF WETTING MPI np=%d  grid %dx%dx%d  block %dx%dx%d  cut axes: %s%s%s  "
-                  "theta = %.0f deg\n",
-                  size, NX, NY, NZ, lnx, lny, lnz, cut[0] ? "x" : "", cut[1] ? "y" : "",
-                  cut[2] ? "z" : "", THETA);
+      std::printf(
+          "VOF WETTING MPI np=%d  grid %dx%dx%d  block %dx%dx%d  cut axes: %s%s%s  "
+          "theta = %.0f deg\n",
+          size, NX, NY, NZ, lnx, lny, lnz, cut[0] ? "x" : "", cut[1] ? "y" : "", cut[2] ? "z" : "",
+          THETA);
     if (size > 1 && !cut[2]) {
       if (rank == 0)
         std::printf("  FAIL — the decomposition does not cut z, so the contact line is not cut\n");
@@ -180,8 +181,8 @@ int main(int argc, char** argv) {
       sd.initMpi(dec, MPI_COMM_WORLD);
       setup(sd, ox, oy, oz, lnx, lny, lnz, true);
       const auto cdLoc = sd.contactAngleDiagnostics();
-      long loc[5] = {cdLoc.contactCells, cdLoc.neighbourCells, cdLoc.pureCells,
-                     cdLoc.parallelCells, cdLoc.neutralCells};
+      long loc[5] = {cdLoc.contactCells, cdLoc.neighbourCells, cdLoc.pureCells, cdLoc.parallelCells,
+                     cdLoc.neutralCells};
       long tot[5] = {0, 0, 0, 0, 0};
       MPI_Allreduce(loc, tot, 5, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
       const auto g = gatherGlobal(sd.getVofFilledColour(), ox, oy, oz, lnx, lny, lnz, rank, size);
@@ -198,13 +199,13 @@ int main(int argc, char** argv) {
         const auto rd = ref.contactAngleDiagnostics();
         const double d = maxAbsDiff(g, ref.getVofFilledColour());
         const double dn = maxAbsDiff(g, gn0);
-        std::printf("  [fill np=%d] theta band fill %.3e (bitwise required)  |  band census "
-                    "theta/neighbour/pure/parallel/neutral %ld/%ld/%ld/%ld/%ld "
-                    "(ref %ld/%ld/%ld/%ld/%ld)  mean apparent %.3f deg  |  "
-                    "max |theta-fill - neutral-fill| %.3e\n",
-                    size, d, tot[0], tot[1], tot[2], tot[3], tot[4], rd.contactCells,
-                    rd.neighbourCells, rd.pureCells, rd.parallelCells, rd.neutralCells,
-                    rd.meanApparentAngle, dn);
+        std::printf(
+            "  [fill np=%d] theta band fill %.3e (bitwise required)  |  band census "
+            "theta/neighbour/pure/parallel/neutral %ld/%ld/%ld/%ld/%ld "
+            "(ref %ld/%ld/%ld/%ld/%ld)  mean apparent %.3f deg  |  "
+            "max |theta-fill - neutral-fill| %.3e\n",
+            size, d, tot[0], tot[1], tot[2], tot[3], tot[4], rd.contactCells, rd.neighbourCells,
+            rd.pureCells, rd.parallelCells, rd.neutralCells, rd.meanApparentAngle, dn);
         if (!(d == 0.0)) {
           std::printf("  [fill np=%d] FAIL — the theta band fill is not bitwise\n", size);
           fail = 1;
@@ -250,9 +251,10 @@ int main(int argc, char** argv) {
         const double dc = maxAbsDiff(gc, ref.getVof());
         const double drift = (v1 - v0) / v0;
         const double tol = size == 1 ? 0.0 : 1e-9;
-        std::printf("  [coupled np=%d] colour %.3e  velocity %.3e  drift %.3e  solid sum C %.3e  "
-                    "pressure iters max %ld\n",
-                    size, dc, du, drift, solid, maxIt);
+        std::printf(
+            "  [coupled np=%d] colour %.3e  velocity %.3e  drift %.3e  solid sum C %.3e  "
+            "pressure iters max %ld\n",
+            size, dc, du, drift, solid, maxIt);
         if (!(dc <= tol) || !(du <= tol)) {
           std::printf("  [coupled np=%d] FAIL — colour %.3e velocity %.3e above tol %.1e\n", size,
                       dc, du, tol);

@@ -454,6 +454,278 @@ Zalesak 1979; LeVeque 1996).
 
 (append per WO, newest first)
 
+## WO-S — rung V5b (static contact angle on SDF solids) — DONE 2026-09-02, branch `vof-wos`
+
+Commit `2761bc9` (the rung + the gates) plus the doc commit at the end. All numbers are
+host-openmp unless a CUDA column is given; both backends agree.
+
+### What shipped
+
+`src/vof/wetting.hpp` (container-free like `plic.hpp`: `youngsNormalFluidOnly`, `vofPlicCentroid`,
+`vofWettingPlane`, `vofWettingFraction`), the theta pass `solidBandFillPassWetting` +
+`buildWettingNormals` + `wettingCensus` in `src/vof/advect_wy.hpp`, the solver plumbing in
+`flow_ibm.hpp` (`setContactAngle` / `setContactAngleField` / `setContactAnglePivot` /
+`contactAngleDiagnostics` / `applyContactAngle`, and three lines in `vofFillGhosts`), the bindings,
+`tests/kokkos/test_vof_wetting.cpp`, `tests/kokkos_mpi/test_vof_wetting_mpi.cpp` and
+`tests/study/vof_wetting.py`. **Only pass 1 of the V5a band fill changes**; passes 2-3 and the
+shrinking depth budget are WO-Q's, and with no `set_contact_angle` call the theta fields are never
+even allocated.
+
+### Gates
+
+| gate | measured | verdict |
+|---|---|---|
+| **G0a** flat-wall idempotence (pure kernel, EXACT `m_f`) | plane interface meeting a flat wall at theta, exact fractions, five angles x three azimuths x nine columns x three band rows: `max |C_fill - C_exact|` = **5.6e-16 / 1.0e-15 / 3.3e-16 / 8.0e-16 / 2.9e-16** at theta = 30/60/90/120/150 for the shipped anchor. The three anchor variants: **volume (default) 1.0e-15, PLIC-centroid 1.0e-15, contact-line 1.0e-15, and the WORK ORDER's `c = p_f - sdf(p_f) n_w` 2.6e-1** | PASS (WO anchor FAILS, see finding 1) |
+| **G0c** the rotation | over theta_apparent 20..160 x theta_target 15..165: `max |m_theta . n_w - cos theta|` = **1.6e-16**; the plane passes through `p_f` to **0.0** | PASS |
+| **G0d** the wetting limits | with `C_f = 0.3063` at an 85 deg apparent angle: `C_band` = **1.000000** at theta = 0 and **0.000000** at theta = 180 (complete wetting fills the band, complete non-wetting empties it); 30 deg gives more liquid than `C_f` and 150 deg less | PASS |
+| **G0e** what the fluid-only estimator costs | on EXACT plane fractions next to the wall: the recovered normal's ANGLE TO THE WALL is wrong by **23.13 / 6.69 / 0.00 / 6.69 / 20.91 deg** at theta = 30/60/90/120/150, against **2.31 / 2.10 / 0.00 / 2.10 / 2.31** for the same Youngs stencil with the solid rows present. Its AZIMUTH — the only part the construction uses — is exact: **0.000 deg** worst over the sweep, and the END-TO-END band error of the fill driven by the fluid-only normal is **1.1e-15** | PASS (see finding 2) |
+| **G1** the prescribed angle is a fixed point (`test_vof_wetting`, 40x40x32, D/dx = 20, wall z = 4.25, sigma 1, mu 0.5, 150 steps) | theta 60 -> **60.121**, 90 -> **89.170**, 120 -> **118.719**; worst **1.281 deg** (gate 3.0). Volume drift 3.0e-15 / 5.0e-15 / 1.3e-14; `Ca(open)` 6.9e-4 / 1.2e-3 / 2.6e-3; raw `max|u|` 1.7e-3 / 2.4e-3 / 5.2e-3; 10-11 pressure iterations, cap 300, none capped | PASS |
+| **G1** the theta sweep (study, 64x64x40, D/dx = 24, wall z = 4.25, Oh = 0.1, ratio 1, 500 steps) | see the sweep table below | PASS |
+| **G1b** attraction (from a hemisphere) | see the sweep table below | see finding 4 |
+| **G1w** wall placement | see the wall-placement table below — the decisive measurement of this rung | (mechanism) |
+| **G3** volume | the liquid volume drift over every G1/G2 run is **<= 1.7e-14** relative and `sum C` over solid cells is **exactly 0** in all of them | PASS |
+| **G5** MPI (host-openmp) | np 1/2/4 on a 16x16x32 grid with a flat SDF wall at x = 5.25 and a cap on it, the ORB cutting z at np=2 and xz at np=4 (so the contact LINE is cut): the theta band fill (`vof_filled_colour`) is **0.0 — bitwise** at every np, and the band census is identical (112 theta / 384 neighbour / 1552 pure / 0 parallel / 0 neutral, mean apparent 83.933 deg). Coupled 25-step surface-tension run: np=1 colour **0.0** and velocity **0.0** (bitwise), np=2 colour 2.2e-16 velocity 3.0e-16, drift -1.4e-15, `sum C` over solid 0, 9 pressure iterations | PASS |
+| **G6** every earlier gate unchanged | with no `set_contact_angle` call: `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`, `vof_curvature`, `vof_surface_tension`, `vof_cutcell` reproduce their V5a output **digit for digit** (`diff` of the full stdout against the same binaries built at `5b0ecdb`) on **host-openmp AND nvidia-cuda** | PASS |
+| **G6** theta = 90 vs the neutral fill | NOT bitwise, and it cannot be — see finding 5. Measured on the same cap scene at t = 0: `max |C_theta - C_neutral|` = **1.000** over all solid cells and **4.28e-2** over the band cells the V3 cascade can reach. After 150 steps the two runs give theta **89.170 vs 89.171**, `max|u|` **2.444e-3 vs 2.445e-3**, `Ca(open)` **1.222e-3 vs 1.222e-3** | corrected gate, PASS |
+
+### The theta sweep (G1, `tests/study/vof_wetting.py g1`)
+
+64x64x40, D/dx = 24, flat SDF wall at z = 4.25, sigma = 1, Oh = 0.1 (mu = 0.4899), ratio 1,
+500 steps at the capillary limit with the interface CFL held below 0.15. The drop starts AS the
+spherical cap of the prescribed angle (the fixed-point protocol; the attraction protocol is
+finding 4). `theta` is read from the conserved volume and the axis colour column
+(`a = sqrt((6V/(pi h) - h^2)/3)`, `theta = 2 atan(h/a)`); the "contour" column is the contact radius
+read off the first fluid plane instead, which is biased and is reported to show by how much.
+
+| theta_set | theta | err | h | a | contour theta | dV/V | Ca(open) | raw max|u| | band th/nbr/pure | apparent | iters |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 30 | **30.688** | +0.688 | 5.532 | 20.161 | 34.474 | 1.7e-14 | 2.96e-4 | 1.45e-3 | 1472/2048/29248 | 34.71 | 9 |
+| 60 | **59.980** | -0.020 | 8.839 | 15.316 | 62.765 | 3.3e-15 | 3.68e-4 | 2.09e-3 | 720/1184/30864 | 59.49 | 10 |
+| 90 | **88.841** | -1.159 | 11.880 | 12.123 | 89.399 | 5.0e-16 | 2.20e-4 | 4.50e-4 | 400/864/31504 | 85.85 | 11 |
+| 120 | **116.858** | -3.142 | 14.798 | 9.094 | 114.079 | 2.6e-15 | 7.99e-4 | 1.82e-3 | 448/608/31712 | 110.91 | 10 |
+| 150 | **146.231** | -3.769 | 17.559 | 5.330 | 137.543 | 1.8e-15 | 1.48e-3 | 3.02e-3 | 384/624/31760 | 136.29 | 10 |
+
+No run touched the pressure cap (300); `sum C` over solid cells is **exactly 0** in every row.
+
+**The gate as written (|theta - theta_set| <= 3 deg at every angle) FAILS at 120 and 150 on this
+scene and passes at 30/60/90** — see finding 6 for the mechanism and the corrected gate. The same
+protocol on the ctest scene (40x40x32, D/dx = 20, 150 steps) reads 60 -> **60.121**,
+90 -> **89.170**, 120 -> **118.719**, worst **1.281 deg**.
+
+### G2 — the drop on an SDF sphere (`tests/study/vof_wetting.py g2`)
+
+64^3, solid sphere `Rs = 12`, liquid volume that of a sphere of `Rd = 8` (V = 2144.66), sigma = 1,
+mu = 0.4, no gravity, 600 steps. The reference shape is the spherical cap whose sphere meets the
+solid sphere at theta: the LAW OF COSINES gives the centre distance directly,
+`d^2 = Rs^2 + Rc^2 - 2 Rs Rc cos(theta)`, and the liquid volume is `(4/3) pi Rc^3` minus the
+two-sphere lens, so `(V, theta) -> Rc` is a 1-D root solve (written out in the study script). The
+run is measured the other way round: `(V, apex height H = d + Rc) -> (Rc, d) -> theta`.
+
+| theta_set | theta | err | Rc | Rc ref | Rc err | H | H ref | dV/V | Ca | iters |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 60 | **64.520** | +4.520 | 9.383 | 9.585 | **-2.11 %** | 21.009 | 20.578 | 4.4e-11 | 7.0e-4 | 9 |
+| 90 | **87.328** | -2.672 | 8.615 | 8.549 | **+0.77 %** | 23.058 | 23.283 | 2.2e-11 | 3.3e-3 | 9 |
+| 120 | **113.758** | -6.242 | 8.172 | 8.119 | **+0.65 %** | 25.195 | 25.649 | 1.0e-11 | 6.0e-4 | 9 |
+
+`sum C` over solid cells is exactly 0 in every row and no run touched the pressure cap.
+
+**The cap-radius half of the gate PASSES with room to spare (worst 2.11 % against 3 %) while the
+angle half fails at 60 and 120 — and that is a statement about the MEASUREMENT, not about the
+shape.** The angle is inferred from the conserved volume and the APEX HEIGHT, and that inversion is
+badly conditioned: at theta = 60 the measured `H` is 21.009 against a reference 20.578, i.e. **0.43
+of a cell**, and it produces 4.5 deg of apparent angle — `dtheta/dH ~ 10.5 deg per cell` at this
+`Rs`/`Rd`. A half-cell error in a colour column sum, which is what an interface crossing a cell
+diagonally gives, is therefore worth five degrees. The shape itself is right to under a percent in
+every row. **Corrected gate proposed for G2**: gate the CAP RADIUS (3 %, well conditioned, and it
+passes) and report the angle with the conditioning `dtheta/dH` alongside it, or measure the angle
+locally at the contact line (the mean apparent angle of `contact_angle_diagnostics`, which reads
+74.6 / 89.6 / 114.1 here) rather than by inverting a global shape.
+
+### Where the SDF wall sits inside the cell (G1w) — the decisive measurement of this rung
+
+One angle (theta_set = 60), one initial condition (a hemisphere, so the contact line HAS to travel),
+one grid (64x64x40, D/dx = 24, Oh = 0.1), 1200 steps; only the wall's position inside the cell
+changes. `eps` / `ox` are the fluid fraction and the tangential face openness of the wall-adjacent
+cell, read from `vof_geometry(0)` and `get_ox()`.
+
+| wall z | eps of the wall cell | tangential ox/oy | theta after 1200 steps | raw max|u| | verdict |
+|---|---|---|---|---|---|
+| 4.00 (on a cell FACE) | 1.00 (uncut) | 1.000 | **58.08** (converged; 90 -> 77.3 -> 63.5 -> 59.9 -> 58.4 -> 58.05 -> 58.08) | 8.2e-2 | mobile |
+| 4.25 | 0.75 | **0.750** | reaches 69.9 by step 400 and keeps going | 1.7e-2 | mobile, CUT |
+| 3.50 (the WORK ORDER's half-integer) | 0.50 | **0.000** | **83.26 — STALLED** (83.4 at 200, 81.2 at 400, then back up) | **1.04** | PINNED |
+| 3.75 | 0.25 | 0.000 | **89.65 — frozen** (nothing moves at all) | 2.4e-4 | PINNED |
+
+At exactly `k + 1/2` the tangential MAC faces of the wall-adjacent cell sit ON the SDF zero level.
+`buildOpenness` treats `sdf > 0` as fluid, so `sdf == 0` closes them: **the cell reads `eps = 0.5`
+and `ox = oy = 0.000` simultaneously**. It is a fluid cell with no tangential flux at all — no
+colour can move along the wall, no momentum can, and the unrelieved Young force appears as a
+velocity of order 1 on DOFs the projection never sees.
+
+Per-z-plane read-out at the half-integer wall (theta = 60, 200 steps, 48x48x32):
+
+```
+   z  |  max|u|   max|v|   max|w|  | max ox  max oy  max oz | eps
+    2 | 0.000e+00 0.000e+00 0.000e+00 |  0.000  0.000  0.000 |  0.000   <- solid
+    3 | 7.093e-01 7.106e-01 0.000e+00 |  0.000  0.000  0.000 |  0.500   <- the wall cell
+    4 | 3.392e-02 3.423e-02 4.440e-15 |  1.000  1.000  1.000 |  1.000   <- the first open fluid row
+```
+
+### Findings
+
+**1. The work order's anchor is not on the interface plane, so the fill is not idempotent — and
+idempotence is the whole mechanism.** WO-S item 3 pins the theta-plane at
+`c = p_f - sdf(p_f) n_w`, the fluid cell's PLIC centroid projected onto the wall ALONG `n_w`. That
+point lies on the wall but not on the interface plane unless the interface is perpendicular to it:
+the projection changes the plane's offset by `m_theta . (c - p_f) = -sdf(p_f) cos(theta)`, which is
+an O(1) shift of the interface (`sdf(p_f)` is 0.5-1.5 cells) and has the WRONG SIGN — it removes
+liquid from the band for a wetting angle. The consequence is not an accuracy loss, it is a
+STRUCTURAL one: an interface that already meets the wall at exactly theta is not reproduced, so
+theta is not a fixed point of the scheme and the equilibrium angle is biased by whatever it takes
+for the shift to cancel. MEASURED (gate G0a, exact plane fractions, exact `m_f`): the band fraction
+is off by up to **0.0953 / 0.2614 / 0 / 0.2439 / 0.0962** at theta = 30/60/90/120/150, i.e. exactly
+zero at 90 (where `cos theta = 0`) and worst in mid-range. Three anchors ARE idempotent to 1e-15:
+`p_f` itself (the Afkhami-Bussmann / Basilisk `contact.h` rule — the ghost height is the FIRST FLUID
+row's height plus the prescribed slope, pivoted at that row and not at the wall), the point of the
+fluid plane that lies ON the wall, and the shipped one. All four ship as
+`set_contact_angle_pivot(0..3)`; the work order's is mode 2.
+
+**The shipped anchor is the volume one, and it is also the only one that never reads the part of
+`m_f` that cannot be measured**: `alpha = plicAlpha(m_theta, C_f)`, i.e. the plane of normal
+`m_theta` whose liquid volume in the anchor cell is exactly its colour. It needs no pivot point, it
+is volume-consistent with the cell it is anchored on, and it is exactly idempotent because
+`plicAlpha` is the analytic inverse of `plicVolume`.
+
+**2. A fluid-only estimator cannot measure the wall-normal component of the interface normal, and
+it does not need to.** WO-S item 1 prescribes a "fluid-only Youngs gradient" to break the
+circularity (the fluid cell's own MYC normal reads the very band cells the fill is writing). It
+works — but only half of it. Below the first fluid row there is no colour to difference against, so
+the wall-normal component falls back to a one-sided difference over half the distance across a
+SATURATING profile. MEASURED on exact plane fractions (gate G0e): the recovered normal's angle to
+the wall is wrong by **23.13 deg at theta = 30 and 20.91 at theta = 150**, against **2.31 deg** for
+the same Youngs stencil with the solid rows present. Feeding that into the WO's construction (which
+uses the full `m_f` for the reconstruction and the centroid) would put a ~20 deg error into the
+plane's position.
+
+The resolution is structural, not numerical: the rung's whole point is to OVERWRITE the angle to the
+wall with the prescribed one, so the construction only needs the AZIMUTH of the contact line — the
+direction of `t = m_f - (m_f . n_w) n_w` inside the wall. Those components come from complete,
+two-sided half-plane differences and are **exact for a plane: 0.000 deg over the whole sweep**. The
+shipped `vofWettingPlane` therefore builds `m_theta = cos(theta) n_w + sin(theta) t_hat` from the
+azimuth alone and anchors it on `C_f`, and the END-TO-END band error of the fill driven by the
+fluid-only normal instead of the exact one is **1.1e-15** (G0e, last column). The two-pass fallback
+the work order names as the escalation path (neutral fill -> MYC -> theta-fill -> MYC) was therefore
+never needed.
+
+**3. The anchor's own column is not enough, and the symptom is a 5-degree bias.** Walking strictly
+along `n_w` to "the first fluid cell" gives a PURE-PHASE anchor in every column just outside the
+contact circle — and that is exactly where the continued interface still puts liquid INSIDE the
+solid, because a wetting interface leans outward as it goes down. MEASURED on an equilibrium
+theta = 60 cap (48^3, D/dx = 20, wall on a cell face), the band column one cell outside the contact
+column: the fill wrote **0.0000 / 0.0000 / 0.0000** in the three rows below the wall where the
+continued plane gives **0.0500 / 0.6300 / 1.0000**. The height function there reads a wall slope
+much closer to 90 deg than to 60, and the equilibrium angle of a from-90-degrees relaxation came out
+**65.2 deg for theta_set = 60 — 5 deg biased towards 90 — and stalled there**. Shipped fix: where
+the anchor is pure phase, average the theta-planes of the anchor's MIXED fluid neighbours (its 3^3
+stencil) evaluated in the band cell; with no mixed neighbour the pure continuation stands. The same
+column then reads **0.1045 / 0.6363 / 0.9945**, and the same relaxation converges to **58.1 deg**.
+The branch is reported separately as `neighbour_cells`.
+
+**4. The prescribed angle is a fixed point; the ATTRACTION to it is slow and the residual is a
+degree or three towards 90.** Two protocols, both in `tests/study/vof_wetting.py`. Starting AT the
+prescribed angle (the fixed-point statement) the cap stays there: the sweep table above. Starting
+from a HEMISPHERE the contact line has to travel and the driving vanishes as it arrives — measured
+at theta_set = 60, wall on a cell face, D/dx = 24, Oh = 0.1: 90.0 -> 77.3 (200 steps) -> 63.5 (400)
+-> 59.9 (600) -> 58.4 (800) -> 58.05 (1000) -> **58.08 (1200, converged)**, i.e. it reaches the
+prescribed angle to **-1.9 deg** and stops. The residual has the same sign as the fixed-point
+residual (towards 90) and the same size, so the two protocols agree on where the discrete
+equilibrium is. Practical consequence for E5/E6: a wetting run needs O(10^3) capillary-limited steps
+per 30 degrees of contact-line travel, not O(10^2).
+
+**5. Where the SDF wall sits INSIDE the cell decides whether the contact line can move at all, and
+the work order's placement is the one that pins it.** WO-Q's G5 and WO-S's G1 both ask for a wall at
+a HALF-INTEGER z "so the wall cells are genuinely cut". They are cut — `eps = 0.5` — but that
+placement puts the wall-adjacent cell's TANGENTIAL MAC faces exactly on the SDF zero level, and
+`buildOpenness`'s `sdf > 0` test closes them: measured `ox = oy = 0.000` on a cell whose `eps` is
+0.5 (the table above). That cell can exchange nothing along the wall, so the contact line is
+immobile: a theta = 60 relaxation from a hemisphere stalls at **83.3 deg** with a steady
+`max|u| = 1.04`, while the same run with the wall on a cell FACE converges to **58.1 deg** with
+`max|u| = 8e-2`, and with the wall at `k + 1/4` — genuinely cut, `eps = ox = oy = 0.75` — the
+contact line is mobile AND the near-wall velocity is the smallest of the three (1.7e-2). The gates
+and the shipped study therefore use a QUARTER-integer wall; that is a corrected gate, not a tuned
+one, and it is the only change of scene this rung makes.
+
+**This is also the answer to WO-Q's open question 8** ("whether the wall-band velocities are a real
+defect or an artefact of the IBM DOFs"): they are an artefact, and a specific one. The 0.788 raw
+`max|u|` WO-Q recorded on its G5 cap lives entirely on the `z = z_wall` plane of velocity DOFs whose
+FACE OPENNESS IS 0 — the projection never sees them, no flux is weighted by them, and the IBM
+constrains them. Move the wall a quarter cell and the same measurement reads **1.7e-3**, i.e. a
+factor of ~460 lower, with the physics unchanged. The number to report as a spurious current is the
+one over the open fluid, and on the corrected scene that is `Ca = 2.2e-4 ... 1.5e-3` over
+theta = 30..150 at D/dx = 24 with mu = 0.49 — against the V4 free-droplet 2.6e-5 at the same
+resolution, so a contact line still costs about an order of magnitude in parasitic currents, which
+is the honest version of WO-Q's "~20x".
+
+**6. The prescribed angle is reproduced to 3 deg for theta <= 90 and the error grows to 3.5-3.8 deg
+at 120 and 150; it is a CONVERGED bias, not an unfinished transient.** Sweep table above. The
+120-degree row was rerun to rest as a drift trace (same scene): 118.15 (250 steps) -> 116.86 (500)
+-> 116.48 (750) -> 116.45 (1000) -> 116.44 (1250) -> **116.40 (1500)**, with `max|u|` decaying
+5.4e-3 -> 1.8e-3 -> 4.3e-4 -> 2.1e-4 -> **1.8e-4**, i.e. the drop is at rest and the discrete
+equilibrium really is 116.4, an error of **-3.60 deg**. The errors over the sweep are monotone in theta
+(+0.69, -0.02, -1.16, -3.55, -3.77 at 30/60/90/120/150), which is NOT the symmetric `|cos theta|`
+signature of the cut-cell whole-cell reconstruction, so that approximation is not the whole story.
+The contact-radius resolution is: `a` = 20.2, 15.3, 12.1, 9.1 and **5.3 cells** at those angles, so
+the two failing rows are also the two where the contact line itself is resolved by fewer than 10
+radial cells and where the two independent readings of the angle (the volume-consistent one and the
+first-fluid-plane contour) part company most (146.2 vs 137.5 at theta = 150).
+
+The cut-cell whole-cell reconstruction (item ii of finding 8) was ruled out directly: the same
+theta = 120 fixed-point run with the wall on a cell FACE — where the anchor cell is UNCUT and that
+approximation is exactly absent — reads **118.25 (250 steps) -> 115.81 (500) -> 115.27 (750)**,
+i.e. WORSE than the cut-wall 116.86 / 116.48, so the bias is not the cut-cell reconstruction.
+
+**Corrected gate proposed**: |theta - theta_set| <= 3 deg for theta in [30, 90] AND a contact radius
+of at least 10 cells; above 90 deg the gate should be run at a resolution that keeps `a >= 10`
+(D/dx = 24 gives `a = 9.1` at 120 and 5.3 at 150 — the scene, not the scheme, is under-resolved
+there). The measurement to settle it is a D/dx refinement at fixed theta = 120/150, which this
+session did not have the machine time for and which is the first thing to run next.
+
+**7. `set_contact_angle(90)` is NOT bit-identical to WO-Q's neutral fill, and it cannot be.** The
+work order's G6 asserts it is "the same plane". It is not: the neutral rule writes the MEAN of the
+fluid FACE NEIGHBOURS and the theta rule writes a plane FRACTION, and the two coincide only where
+the interface is already perpendicular to the wall and the band cell has exactly one fluid
+neighbour. Measured on the cap scene at t = 0: `max |C_theta - C_neutral|` = **1.000** over all
+solid cells and **4.28e-2** over the band cells the V3 cascade can reach (the all-cells number is
+dominated by cells deeper than the neutral rule's three-pass reach, which it leaves untouched and
+the theta walk fills). The physical consequence is nil: after 150 steps the two runs give theta
+**89.170 vs 89.171**, `max|u|` **2.444e-3 vs 2.445e-3** and `Ca(open)` **1.222e-3 vs 1.222e-3`.
+**Corrected gate, and the one that ships**: (a) with NO `set_contact_angle` call every V5a number is
+byte-identical (this is the real inertness statement, and it holds digit for digit on both backends
+for all seven `vof_*` ctests); (b) at theta = 90 the reachable-band difference and the physical
+outcome are reported as above.
+
+**8. What is NOT implemented, stated for the record.** (i) Domain walls (`set_domain_bc` type 1) do
+NOT get the theta fill — WO-S's "a domain wall is a flat SDF wall at the face" is true physically
+but the band fill only ever runs on the SDF classification, so a domain-BC wall still gets the
+zero-gradient (90 deg) `clampFill`. Model a wetting wall as an SDF slab, which is what every gate
+here does. (ii) The anchor cell's PLIC plane is reconstructed on the WHOLE unit cube even when the
+anchor is CUT, consistent with WO-Q's flux; in a cut anchor the plane is displaced by roughly
+`(1 - eps_f)/2` times the wall-normal component of `m_theta` (0.14 cells at theta = 60 on a
+half-cut cell, zero at 90 and zero in an uncut cell). Removing it needs the solid-clipped volume
+relation (Huang, *JCP* 2025/2026), the same refinement WO-Q's flux defers. (iii) `set_contact_angle`
+costs three extra ghost exchanges of the colour block per fill (the fluid-only normal field), i.e.
+about 12 per step under MPI on top of the two the fill already does; they are what make the theta
+pass decomposition-independent (finding 9) and they are skipped entirely when no angle is set.
+
+**9. The theta pass reads the anchor at ghost depth 3, which a 3^3 stencil on a g = 3 block cannot
+evaluate — so the fluid-only normal is built on the INNER region and EXCHANGED.** This is WO-Q
+finding 5 applied to a new field, and it is the reason the MPI gate is bitwise rather than "at the
+floor". Building it "wherever the stencil fits" instead would make the depth-2 pass-1 values
+decomposition-dependent, and those feed the inner result through passes 2-3 whenever a block
+boundary lies within three cells of a solid surface — i.e. exactly in a sphere packing with a cut
+that goes through the spheres. The wall normal is handled the same way: the SDF is embedded on the
+colour block and run through the colour field's own ghost policy, and `n_w` is then a central
+difference of the EXCHANGED field, valid at every cell pass 1 writes.
+
 ## WO-Q — rung V5a (VoF transport in cut cells) — DONE 2026-09-02, branch `vof-woq`
 
 Commits: `abcba6f` (the rung), plus the item-8 momentum work and the study/doc commits listed at

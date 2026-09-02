@@ -15,9 +15,8 @@
 //        error it injects (a number; it is the accuracy ceiling of the whole rung).
 #include <cmath>
 #include <cstdio>
-#include <Kokkos_Core.hpp>
-
 #include <cstdlib>
+#include <Kokkos_Core.hpp>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -84,8 +83,9 @@ void idempotence() {
   const double thetas[5] = {30.0, 60.0, 90.0, 120.0, 150.0};
   const double psis[3] = {0.0, 37.0, 90.0};
   std::printf("G0a/G0b flat-wall idempotence (EXACT m_f): max |C_fill - C_exact| over the band\n");
-  std::printf("   theta |    pivot 0 volume |  pivot 1 interface | pivot 2 wall-normal |"
-              " pivot 3 contact-line\n");
+  std::printf(
+      "   theta |    pivot 0 volume |  pivot 1 interface | pivot 2 wall-normal |"
+      " pivot 3 contact-line\n");
   double worst[4] = {0.0, 0.0, 0.0, 0.0};
   for (int ti = 0; ti < 5; ++ti) {
     double e[4] = {0.0, 0.0, 0.0, 0.0};
@@ -140,13 +140,14 @@ void rotation() {
       plicNormalizeL1(mf);
       double pf[3];
       vofPlicCentroid(mf, plicAlpha(mf[0], mf[1], mf[2], cf), pf);
-      worstPivot = std::fmax(
-          worstPivot, std::fabs(mth[0] * pf[0] + mth[1] * pf[1] + mth[2] * pf[2] - alphaTh));
+      worstPivot = std::fmax(worstPivot,
+                             std::fabs(mth[0] * pf[0] + mth[1] * pf[1] + mth[2] * pf[2] - alphaTh));
       // the measured apparent angle is the input angle
       worstAng = std::fmax(worstAng, std::fabs(std::acos(ca) / kDeg - thA) / 180.0);
     }
-  std::printf("G0c rotation: max |m_theta . n_w - cos(theta)| %.3e ; max |plane(p_f) - alpha| %.3e\n",
-              worstAng, worstPivot);
+  std::printf(
+      "G0c rotation: max |m_theta . n_w - cos(theta)| %.3e ; max |plane(p_f) - alpha| %.3e\n",
+      worstAng, worstPivot);
   CHECK(worstAng <= 1e-12);
   CHECK(worstPivot <= 1e-12);
 }
@@ -162,9 +163,10 @@ void limits() {
   const double c180 = fillOnce(pl.m, cf, 180.0, kVofPivotInterface, f, s);
   const double c30 = fillOnce(pl.m, cf, 30.0, kVofPivotInterface, f, s);
   const double c150 = fillOnce(pl.m, cf, 150.0, kVofPivotInterface, f, s);
-  std::printf("G0d wetting limits (C_f = %.4f at theta_a = 85 deg): C_band = %.6f (theta 0), "
-              "%.6f (30), %.6f (150), %.6f (180)\n",
-              cf, c0, c30, c150, c180);
+  std::printf(
+      "G0d wetting limits (C_f = %.4f at theta_a = 85 deg): C_band = %.6f (theta 0), "
+      "%.6f (30), %.6f (150), %.6f (180)\n",
+      cf, c0, c30, c150, c180);
   CHECK(c0 == 1.0);
   CHECK(c180 == 0.0);
   CHECK(c30 > cf && c150 < cf);  // wetting adds liquid to the band, non-wetting removes it
@@ -179,8 +181,9 @@ void limits() {
 // followed by the end-to-end band error of the fill driven by the fluid-only normal instead of the
 // exact one, which is the accuracy of the rung as shipped.
 void fluidOnlyYoungs() {
-  std::printf("G0e fluid-only Youngs next to a flat wall, from EXACT plane fractions:\n"
-              "   theta | angle-to-wall err | full-stencil err |  azimuth err | fill err (band)\n");
+  std::printf(
+      "G0e fluid-only Youngs next to a flat wall, from EXACT plane fractions:\n"
+      "   theta | angle-to-wall err | full-stencil err |  azimuth err | fill err (band)\n");
   double worstAz = 0.0, worstFill = 0.0;
   for (double th = 30.0; th <= 150.0; th += 30.0) {
     double eAng = 0.0, eFull = 0.0, eAz = 0.0, eFill = 0.0;
@@ -206,8 +209,8 @@ void fluidOnlyYoungs() {
         youngsNormalFluidOnly(c27, flAll, mAll);
         const double mn = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
         const double an = std::sqrt(mAll[0] * mAll[0] + mAll[1] * mAll[1] + mAll[2] * mAll[2]);
-        eAng = std::fmax(eAng,
-                         std::fabs(std::acos(std::fmax(-1.0, std::fmin(1.0, m[2] / mn))) / kDeg - th));
+        eAng = std::fmax(
+            eAng, std::fabs(std::acos(std::fmax(-1.0, std::fmin(1.0, m[2] / mn))) / kDeg - th));
         eFull = std::fmax(
             eFull, std::fabs(std::acos(std::fmax(-1.0, std::fmin(1.0, mAll[2] / an))) / kDeg - th));
         // azimuth of the in-wall component against the true one
@@ -341,8 +344,8 @@ CapResult relaxCap(double thetaSet, int steps, bool setAngle = true) {
   const auto eps = s.getVofGeometry(0);
   const int ix = sc.nx / 2;
   for (int z = 0; z < sc.nz; ++z) {
-    const std::size_t i = (std::size_t)ix + (std::size_t)ix * sc.nx +
-                          (std::size_t)z * (std::size_t)sc.nx * sc.nx;
+    const std::size_t i =
+        (std::size_t)ix + (std::size_t)ix * sc.nx + (std::size_t)z * (std::size_t)sc.nx * sc.nx;
     r.h += cc[i] * eps[i];
   }
   r.a = std::sqrt(std::fmax((6.0 * d.volume / (M_PI * r.h) - r.h * r.h) / 3.0, 1e-12));
@@ -377,16 +380,19 @@ CapResult relaxCap(double thetaSet, int steps, bool setAngle = true) {
 void solverGates() {
   const double thetas[3] = {60.0, 90.0, 120.0};
   const int steps = std::getenv("PECLET_VOF_WETTING_LONG") ? 600 : 150;
-  std::printf("G1 the prescribed angle is a fixed point (cap of the SET angle on a flat SDF wall "
-              "at z = 4.25 — CUT wall cells, D/dx = 20, sigma 1, mu 0.5, %d steps):\n", steps);
+  std::printf(
+      "G1 the prescribed angle is a fixed point (cap of the SET angle on a flat SDF wall "
+      "at z = 4.25 — CUT wall cells, D/dx = 20, sigma 1, mu 0.5, %d steps):\n",
+      steps);
   double worst = 0.0;
   for (double th : thetas) {
     const CapResult r = relaxCap(th, steps);
-    std::printf("   theta_set %5.1f -> %7.3f (err %+6.3f)  h %6.3f a %6.3f  apparent %6.2f  "
-                "dV/V %.2e  Ca(open) %.3e  max|u| all %.3e  band th/nbr/pure/neu "
-                "%ld/%ld/%ld/%ld  iters %ld\n",
-                th, r.theta, r.theta - th, r.h, r.a, r.apparent, r.drift, r.ca, r.umaxAll,
-                r.contact, r.neighbour, r.pure, r.neutral, r.iters);
+    std::printf(
+        "   theta_set %5.1f -> %7.3f (err %+6.3f)  h %6.3f a %6.3f  apparent %6.2f  "
+        "dV/V %.2e  Ca(open) %.3e  max|u| all %.3e  band th/nbr/pure/neu "
+        "%ld/%ld/%ld/%ld  iters %ld\n",
+        th, r.theta, r.theta - th, r.h, r.a, r.apparent, r.drift, r.ca, r.umaxAll, r.contact,
+        r.neighbour, r.pure, r.neutral, r.iters);
     CHECK(r.drift <= 1e-9);
     worst = std::fmax(worst, std::fabs(r.theta - th));
   }
@@ -423,16 +429,17 @@ void solverGates() {
           dmReach = std::fmax(dmReach, d);
       }
   const CapResult a1 = relaxCap(90.0, steps, true), b1 = relaxCap(90.0, steps, false);
-  std::printf("G6 theta = 90 vs WO-Q's neutral fill on the same scene, at t = 0: "
-              "max |C_theta - C_neutral| over ALL solid cells %.3e, and over the solid cells the V3 "
-              "cascade can reach (a fluid cell within +/-3) %.3e. NOT bitwise, and it cannot be — "
-              "the neutral rule is the MEAN of the fluid face neighbours, the theta rule is a plane "
-              "FRACTION, and the two coincide only where the interface is already perpendicular to "
-              "the wall; the all-cells number is dominated by band cells deeper than the neutral "
-              "rule's 3-pass reach, which it leaves untouched and the theta walk fills.\n"
-              "   after %d steps: theta %.3f (theta-fill) vs %.3f (neutral), max|u| %.3e vs %.3e, "
-              "Ca(open) %.3e vs %.3e\n",
-              dm, dmReach, steps, a1.theta, b1.theta, a1.umaxAll, b1.umaxAll, a1.ca, b1.ca);
+  std::printf(
+      "G6 theta = 90 vs WO-Q's neutral fill on the same scene, at t = 0: "
+      "max |C_theta - C_neutral| over ALL solid cells %.3e, and over the solid cells the V3 "
+      "cascade can reach (a fluid cell within +/-3) %.3e. NOT bitwise, and it cannot be — "
+      "the neutral rule is the MEAN of the fluid face neighbours, the theta rule is a plane "
+      "FRACTION, and the two coincide only where the interface is already perpendicular to "
+      "the wall; the all-cells number is dominated by band cells deeper than the neutral "
+      "rule's 3-pass reach, which it leaves untouched and the theta walk fills.\n"
+      "   after %d steps: theta %.3f (theta-fill) vs %.3f (neutral), max|u| %.3e vs %.3e, "
+      "Ca(open) %.3e vs %.3e\n",
+      dm, dmReach, steps, a1.theta, b1.theta, a1.umaxAll, b1.umaxAll, a1.ca, b1.ca);
   CHECK(std::fabs(a1.theta - b1.theta) <= 1.0);
 }
 

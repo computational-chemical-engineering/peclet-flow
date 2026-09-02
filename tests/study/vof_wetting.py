@@ -275,7 +275,7 @@ def g2(thetas=(60.0, 90.0, 120.0), steps=600, Rs=12.0, Rd=8.0, n=64, sigma=1.0, 
         H = float(col[int(cz):].sum()) + Rs  # apex height above the solid centre
         Vm = d["volume"]
         Rc, dd, theta = theta_from_volume_apex(Rs, Vm, H)
-        print(f"  theta_set {th:5.1f} (init {th0:5.1f}) -> theta {theta:7.3f} (err {theta-th:+6.3f})  "
+        print(f"  theta_set {th:5.1f} -> theta {theta:7.3f} (err {theta-th:+6.3f})  "
               f"Rc {Rc:6.3f} vs ref {Rc0:6.3f} ({100*(Rc-Rc0)/Rc0:+5.2f} %)  H {H:6.3f} "
               f"(ref {d0+Rc0:6.3f}) | dV/V {abs(Vm-v0)/v0:.2e} "
               f"Ca {mu*max_u(s)/sigma:.3e} | band th/nbr/pure/par/neu {cd['contact_cells']}/"
