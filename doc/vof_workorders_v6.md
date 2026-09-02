@@ -542,6 +542,163 @@ breakthrough is only tested every 118 steps; the times differ because the dt his
 θ = 30° run spends 81 % of its steps on the Weymouth–Yue cap rather than the capillary one, the
 θ = 60° run only 40 %).
 
+
+### Case 3 — a Zhao-2019-style micromodel (`micromodel_2d.py`)
+
+**Scene, and a geometry the work order asked for that does not exist.** WO-V7 asks for ~60
+cylinders at porosity ~0.6 on 128×128×4. Those three are not simultaneously available: a square
+array at porosity 0.6 has throats of 0.286 × the lattice spacing, which at 56 posts on this grid is
+**3.08 cells**. That array was built and run first, and at 0.121 pore volumes injected it emitted
+```
+peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z; returning zero correction
+```
+four times in a row, with `max|u|` at 93× the inlet velocity. The array was therefore traded from
+post COUNT to throat WIDTH: **30 posts of radius 6.5 on a jittered staggered lattice (spacing
+21.5 × 21.3, jitter ±1.5), narrowest throat 6.375 cells, porosity 0.712**, which survives. Two
+candidate mechanisms for the 3-cell failure, **not separated by this campaign**: (a) the θ-fill
+writes a three-cell band into the solid on each side of a throat, so at 3.1 cells the two posts'
+bands meet in its middle — the overlap WO-S recorded as making its 4-cell-plate Jurin scene
+inconclusive; (b) a Haines jump through a throat whose meniscus radius is ≈1.5 cells is simply
+unresolved (a real pore-filling event's local velocity runs up towards σ/μ_l = 25, a thousand times
+the inlet velocity here). Separating them wants a θ-sweep at fixed throat width.
+
+**The failure MODE is itself the reportable defect**, independently of the mechanism: the message
+goes to stdout, the correction is silently replaced by zero, and the run continues — so a caller's
+rule-3b "no capped solve" check passes on a pressure solve that has been returning nothing. Logged
+in the examples repo's `ISSUES.md`.
+
+**Runs.** θ = 45° / 90° / 135° at Ca = 1e-3, one process at a time, `OMP_NUM_THREADS=4`,
+host-openmp. None reached breakthrough inside a 2400 s budget (that needs ≈18 000 steps; see the
+cost section), so all three were stopped at the **same injected volume, 0.10 pore volumes of the
+array**, which makes the patterns directly comparable — and the pattern, not the saturation, is
+what Zhao's experiment is about. Saturation is then equal by construction (0.1006 / 0.1043 /
+0.1043) and carries no information; the discriminators are the box dimension and the front
+roughness.
+
+| θ | PV injected | S | D_box | rows reached | front mean | front **std** | deepest finger | clusters | pressure | max\|div\|_proj | ms/step |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 45° | 0.1000 | 0.1006 | 1.582 | **111 / 128** | 10.22 | **7.58** | **22** | **4** | 167/400 | 1.01e-05 | 392 |
+| 90° | 0.1043 | 0.1043 | 1.610 | 128 / 128 | 7.62 | 5.35 | 18 | 1 | 179/400 | 8.58e-09 | 423 |
+| 135° | 0.1044 | 0.1043 | 1.644 | 128 / 128 | 7.34 | **4.78** | 15 | 1 | 170/400 | 1.53e-09 | 364 |
+
+(Front statistics: for every transverse row the liquid reached, the front is the furthest x it
+reached; the table gives the mean, the standard deviation and the maximum of that over rows, plus
+how many rows were reached at all and how many connected invaded clusters there are. The script
+prints them and `front_stats` is the function.)
+
+**The trend is monotone, it is large, and it is INVERTED against Zhao et al.** Their result is that
+strong imbibition displaces *compactly* (cooperative pore filling) and drainage *fingers*. Measured
+here at a common injected volume, the **wetting** case has the raggedest front (std 7.58 against
+4.78 at θ = 135°, i.e. **59 % rougher**), the deepest finger (22 cells against 15), four
+disconnected invaded clusters against one, and **17 of 128 transverse rows never reached at all**,
+while the **drainage** case advances as a nearly flat front that reaches every row. The figure on
+the gallery page shows it without any statistic being needed.
+
+That is the same mechanism as cases 1 and 2, and this is the case that names it most directly:
+**cooperative pore filling requires the contact line to run ahead along the post walls, which is
+exactly the motion V6b's Navier slip would enable and which the wall's numerical slip currently
+forbids.** With the line effectively pinned, the extra capillary suction at low θ acts only on
+the menisci already at the front and accelerates whichever finger is furthest — it *destabilises*
+the front instead of stabilising it. The sign of the wettability effect on the pattern is therefore
+wrong at rung V6a, and the campaign's three cases fail in the same direction for the same reason.
+
+Two health caveats on this case, both recorded rather than smoothed: the θ = 45° run's
+`max|div(open u)|_projected` is **1.01e-05**, three to four orders worse than the other two, and it
+spent 29 % of its steps on the Weymouth–Yue cap against 0.4 % and 0.0 % — i.e. the wetting run is
+the violent one, consistent with the fingering. And the trajectory is **chaotic**: the same θ = 45°
+scene run with 12 OpenMP threads instead of 4 reached `max|u| = 4.12` at step 2268 where the
+4-thread run reads 0.632, because reduction order differs at 1e-16 and invasion percolation in a
+disordered array amplifies it. The pattern STATISTICS are the reportable quantity here; a
+trajectory is not.
+
+### The dt census and the cost, for WO-V9
+
+The capillary limit `0.5 * sqrt((rho_l + rho_g) h^3 / 4 pi sigma) = 0.14175 s` is the ceiling in
+every run; the Weymouth–Yue interface CFL displaces it only where the front is fast. Measured
+fraction of steps on which the WY cap was the binding one (`dt` re-picked from
+`vof_step_limits()` every step):
+
+| case | Ca | WY CFL binds | capillary binds | steps | ms/step (SHARED) |
+|---|---|---|---|---|---|
+| doublet θ = 45° | 1e-2 | **98.2 %** | 1.8 % | 1056 | 473 |
+| doublet θ = 45° | 1e-3 | 1.1 % | **98.9 %** | 6900 | 159 |
+| doublet θ = 45° | 1e-4 | 12.9 % | **87.1 %** | 14963 | 121 |
+| doublet θ = 135° | 1e-2 | 46.8 % | 53.2 % | 803 | 525 |
+| doublet θ = 135° | 1e-3 | 31.8 % | **68.2 %** | 13815 | 149 |
+| doublet θ = 135° | 1e-4 | **0.0 %** | **100 %** | 13812 | 137 |
+| packing θ = 30° | 1e-3 | 80.9 % | 19.1 % | 8024 | 280 |
+| packing θ = 60° | 1e-3 | 40.3 % | 59.7 % | 8024 | 154 |
+
+So the plan's "the capillary limit binds 18 of 18" is **not** what a *driven* pore-scale run looks
+like: at the high-Ca end and inside a packing (where a throat manufactures a local jet) the
+advective cap is the binding one for most of the run, and only the low-Ca doublet is purely
+capillary-bound. **Both limits have to be re-picked every step** — the ten-step re-pick pattern
+the earlier VoF pages established is not safe here (E7 recorded the same thing) and the *first*
+pick is wrong by 7.1× (finding 2).
+
+**Cost arithmetic, and the one lever there is.** Eliminating the properties in favour of the two
+dimensionless groups, the number of steps to advance a front a distance `L` through a channel of
+width `w` is
+
+```
+    N = L/(U dt)  with  U = Ca sigma/mu_l  and  dt = f sqrt((rho_l+rho_g) h^3/(4 pi sigma))
+      ~ L * sqrt(w / (Re * Ca))          (Re = rho_l U w / mu_l)
+```
+
+— **independent of sigma, rho and mu separately**. There is no choice of fluid properties that
+makes a pore-scale VoF run cheaper at a given (geometry, Re, Ca); the only levers are shortening
+the path, accepting a larger Reynolds number, or raising Ca. That is why the doublet at Ca = 1e-4
+costs ~1.5e5 steps for a 48-cell branch and was budgeted rather than completed, and it is the
+arithmetic behind VOF_PLAN §4's warning. On an idle GPU the doublet ran at **43 ms/step**
+(88×4×80, 41 FCG iterations); on the shared machine the same configuration ranged 80–525 ms/step.
+
+**Solver settings that mattered, measured on the doublet:** FCG rtol 1e-11 → 1e-8 costs nothing
+in the functionals and takes the iteration count 60 → 41 and the step 54 → 43 ms; the MG level
+count has a shallow optimum (3 levels: 81 iterations, 43 ms; 4: 55, 43; **5: 42, 44**; 8: 41, 50)
+— the deep hierarchy is launch-latency-bound on a grid this small. Pressure warm-starting moved
+nothing (the incremental-rotational `phi` is already small). For grids of this size the
+**host-OpenMP build is competitive with and often faster than a contended GPU**: 80 ms/step
+(8 threads) against 43 ms idle / 251 ms contended on the doublet, and 307 ms/step (12 threads)
+against 1529 ms/step on a 95 %-busy GPU for the 128×128×4 micromodel.
+
+### The campaign's verdict, in one paragraph
+
+Three independent pore-scale problems, three published expectations, and the **same** answer.
+The wettability effect is present, large and unambiguous everywhere — a factor of 70 (in fact
+0.79 against 0.000) in the doublet's narrow-branch saturation, 59 % in the micromodel's front
+roughness, 16 % in the packing's breakthrough time — so the static θ-fill is doing real physics
+on real geometry, through cut cells, at density ratio 100, driven by an inflow/outflow pair, with
+no capped pressure solve anywhere. But wherever the published result depends on the contact line
+advancing **under its own capillary suction** rather than being pushed by the imposed flux, the
+sign is wrong: the doublet does not hand the narrow branch the lead as Ca falls, the packing
+breaks through *earlier and drier* at the more wetting angle, and the micromodel fingers *more*
+under imbibition than under drainage. One mechanism accounts for all three, and WO-V6 already
+measured it: contact-line mobility is set by the wall's numerical slip and is ~1/180 of
+Lucas–Washburn. **V7 therefore turns V6b from a loose end into the blocking item for every
+quantitative pore-scale claim**, and it supplies the number that says where the boundary is: in
+the doublet the measured branch ordering flips between Ca = 1e-3 and 1e-2, i.e. where the imposed
+velocity crosses the solver's numerical slip velocity, not at the physical Chatzis–Dullien
+crossover (Ca ≈ 5e-2 for that geometry).
+
+### What could not be run, and why
+
+* **Ca = 1e-4 in the doublet was budgeted, not completed** (1800 s each, 14 000–15 000 steps,
+  12.9 % and 0.0 % of the branch filled). It needs ≈1.5e5 steps per angle; the ordering it reports
+  is unambiguous but its breakthrough times are not measured. Both are reported as PARTIAL.
+* **No micromodel run reached breakthrough**, so "saturation at breakthrough" is not measured for
+  case 3. The comparison was moved to a common injected volume (0.10 PV), which is the right
+  comparison for a *pattern* anyway; the breakthrough saturation needs ≈18 000 steps per angle
+  (≈2 h each at the rates measured on this machine).
+* **Ca = 1e-4 in the packing was not attempted.** At the measured 154–280 ms/step it is ≈8e4 steps
+  ≈ 3.5–6 h per angle, and the machine was shared six ways. The work order allowed exactly this
+  judgement ("measure ms/step first and state the budget").
+* **The ~60-post / porosity-0.6 micromodel is not runnable at all** at this grid (case 3 above).
+* **The 3.1-cell-throat failure mechanism was not isolated** (θ-fill band overlap vs unresolved
+  Haines jump). Named, not guessed.
+* **No MPI runs.** Nothing in this campaign is an MPI gate; the underlying rungs (V5a, V5b, V-BC,
+  R2) carry theirs.
+
+
 ## WO-W0 findings (2026-09-02, Opus) — Part III rung W0: the block container + the L1 promotion
 
 Branches `vof-w0` in **flow** and in **core** (the move touches both repos). Backends: CUDA

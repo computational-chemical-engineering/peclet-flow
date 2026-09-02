@@ -38,15 +38,19 @@ import peclet.flow as pf
 
 # ------------------------------------------------------------------------------------- the scene
 NX, NY, NZ = 128, 128, 4
-# The work order asks for ~60 posts at porosity ~0.6 on a 128^2 grid.  Those three are mutually
-# inconsistent with the wetting model, and the inconsistency is MEASURED rather than assumed: a
-# square array at porosity 0.6 has throats of 0.286 x the lattice spacing, which at 56 posts is
-# 3.1 cells -- and the theta-fill writes a THREE-cell band into the solid on each side of a throat,
-# so the two posts' bands meet in the middle of it.  That configuration ran to PV = 0.121 and then
-# produced `CutcellMG::solveFCG: preconditioner produced non-finite z` with max|u| at 93 x the inlet
-# velocity.  (It is the same overlapping-band mechanism WO-S recorded as making its 4-cell-plate
-# Jurin scene inconclusive.)  The array below keeps the disorder and the Zhao geometry class but
-# trades post COUNT for throat WIDTH: 30 posts, minimum throat 6 cells, porosity ~0.71.
+# The work order asks for ~60 posts at porosity ~0.6 on a 128^2 grid.  MEASURED: that array (56
+# posts, R = 5.7, narrowest throat 3.08 cells -- a square array at porosity 0.6 has throats of
+# 0.286 x the lattice spacing) ran to PV = 0.121 and then emitted
+# `CutcellMG::solveFCG: preconditioner produced non-finite z` with max|u| at 93 x the inlet
+# velocity.  The array below trades post COUNT for throat WIDTH -- 30 posts, narrowest throat 6.4
+# cells, porosity 0.712 -- and survives further.  Two candidate mechanisms for the 3-cell failure,
+# NOT separated by this campaign: (a) the theta-fill writes a three-cell band into the solid on
+# each side of a throat, so at 3 cells the two posts' bands meet in the middle of it (the same
+# overlap WO-S recorded as making its 4-cell-plate Jurin scene inconclusive); (b) a Haines jump
+# through a throat whose meniscus radius is ~1.5 cells is simply unresolved -- the local velocity
+# of a real pore-filling event runs up towards the capillary velocity sigma/mu_l = 25, which is
+# 1000 x the inlet velocity here, and a wider throat resolves it better.  Separating them needs a
+# theta-sweep at fixed throat width and is left for V9/V6b.
 NCOL, NROW = 5, 6                    # 30 posts on a staggered, jittered lattice
 X0, DX = 20.0, 21.5                  # first post column centre and the column spacing
 DY = NY / NROW                       # 21.33
@@ -136,6 +140,26 @@ def box_dimension(mask, sizes=(1, 2, 4, 8, 16, 32)):
     return float(np.polyfit(x, y, 1)[0]), pts
 
 
+def front_stats(inv):
+    """Roughness of the invasion front, the discriminator Zhao's experiment is really about.
+
+    `inv` is the boolean invaded set of the array region in the mid-plane, indexed (x, y).  For
+    every transverse row y that the liquid reached, the front is the furthest x it reached; the
+    MEAN of that is how far the displacement has got and its STANDARD DEVIATION is how ragged it
+    is.  A compact (cooperative-filling) displacement has a small std and reaches every row; a
+    fingered one has a large std, a large max/mean ratio, and leaves rows untouched.
+    """
+    from scipy import ndimage
+    reach = np.array([np.max(np.nonzero(inv[:, j])[0]) if inv[:, j].any() else -1
+                      for j in range(inv.shape[1])])
+    ok = reach >= 0
+    lab, n = ndimage.label(inv)
+    return dict(cells=int(inv.sum()), rows=int(ok.sum()), nrows=int(inv.shape[1]),
+                mean=float(reach[ok].mean()) if ok.any() else 0.0,
+                std=float(reach[ok].std()) if ok.any() else 0.0,
+                max=int(reach.max()), clusters=int(n))
+
+
 def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     U = ca * SIGMA / MU_L
     Re = RHO_L * U * 2 * R_POST / MU_L
@@ -190,7 +214,7 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     Cbt = None
     # the injected liquid volume in PORE VOLUMES of the array: the comparable clock when a run
     # cannot afford to reach breakthrough
-    pv_stop = 0.35
+    pv_stop = 0.10
     for i in range(steps):
         L = s.vof_step_limits()
         dtc = CAP_CFL * L["capillary_dt"]
@@ -207,7 +231,7 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
             front = float(C[int(X_BT) - 1, :, :].max())
             pv = U * NY * NZ * t / pore
             hist.append((t, S, front, pv))
-            if len(hist) % 20 == 1:
+            if len(hist) % 5 == 1:
                 um = max(float(np.abs(np.asarray(f())).max())
                          for f in (s.get_u, s.get_v, s.get_w))
                 print(f"    step {i+1:7d}  t {t:10.4g}  dt {dt:9.3g}  PV {pv:.3f}  S {S:.4f}  "
@@ -237,6 +261,7 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     fluid2 = eps[:, :, mid] > 0.0
     inv = (C[:, :, mid] > 0.5) & fluid2
     D, pts = box_dimension(inv[arr])
+    fs = front_stats(inv[arr])
     frac_pore_area = float((eps[arr][:, :, mid] > 0).mean())
     print(f"\n  ran {n} steps to t = {t:.5g} s in {wall:.0f} s "
           f"({1000*wall/max(n,1):.2f} ms/step, SHARED GPU)")
@@ -249,6 +274,11 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     print("    " + "  ".join(f"eps={e}:N={m}" for e, m in pts))
     print(f"    (a compact invasion of this pore space would read D -> 2; the pore area itself "
           f"is {frac_pore_area:.3f} of the array)")
+    print(f"  front roughness: reached {fs['rows']}/{fs['nrows']} transverse rows; front position "
+          f"mean {fs['mean']:.2f} cells, std {fs['std']:.2f}, deepest finger {fs['max']}; "
+          f"{fs['clusters']} connected invaded cluster(s)")
+    print("    (a COMPACT displacement reaches every row with a small std; a FINGERED one has a "
+          "large std, a deep max and leaves rows untouched)")
     d = s.vof_diagnostics()
     print(f"  colour: solid_sum {d['solid_sum']:.3e}, min/max over uncut fluid "
           f"{d['min_fluid']:.3e}/{d['max_fluid']:.6f}, clipped {d['clipped_volume']:.3e}")
@@ -260,7 +290,7 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     return dict(theta=theta_deg, ca=ca, U=U, Re=Re, steps=n, t=t, wall=wall,
                 ms_per_step=1000 * wall / max(n, 1),
                 t_bt=bt[0] if bt else None, S_bt=bt[2] if bt else None, S=S, D=D,
-                boxes=pts, iters=h.iters, capped=h.capped, div=h.div, valid=h.valid,
+                boxes=pts, front=fs, iters=h.iters, capped=h.capped, div=h.div, valid=h.valid,
                 pv=U * NY * NZ * t / pore,
                 partial=partial, cfl_fraction=ncfl / max(n, 1), hist=hist)
 
@@ -300,12 +330,13 @@ def main():
     print("\n" + "=" * 100)
     print("SUMMARY — micromodel")
     print("=" * 100)
-    print(f"{'theta':>6} {'Ca':>8} {'t_bt':>10} {'S_bt':>8} {'D_box':>8} {'iters':>6} "
-          f"{'ms/step':>8} {'valid':>6}")
+    print(f"{'theta':>6} {'Ca':>8} {'t_bt':>10} {'S_bt':>8} {'D_box':>8} {'front std':>10} "
+          f"{'iters':>6} {'ms/step':>8} {'valid':>6}")
     for r in rows:
         tb = f"{r['t_bt']:.4g}" if r["t_bt"] else "-"
         sb = f"{r['S_bt']:.4f}" if r["S_bt"] else f"({r['S']:.4f})"
-        print(f"{r['theta']:6g} {r['ca']:8g} {tb:>10} {sb:>8} {r['D']:8.4f} {r['iters']:6d} "
+        print(f"{r['theta']:6g} {r['ca']:8g} {tb:>10} {sb:>8} {r['D']:8.4f} "
+              f"{r['front']['std']:10.2f} {r['iters']:6d} "
               f"{r['ms_per_step']:8.2f} {'yes' if r['valid'] else 'NO':>6}")
     if a.out:
         with open(a.out, "w") as fh:
