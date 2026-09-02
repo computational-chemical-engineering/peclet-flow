@@ -255,7 +255,7 @@ def main():
     accC = np.zeros(NY)
     nacc = 0
     t, wall0 = 0.0, time.time()
-    maxit, maxdiv = 0, 0.0
+    maxit, maxdiv, dt = 0, 0.0, 0.0
     for i in range(NSTEP):
         if i % 10 == 0:
             L = s.vof_step_limits() if not SINGLE else None
@@ -264,18 +264,18 @@ def main():
             if L is not None:
                 dt = min(dt, 0.4 * L["cfl_dt"], 0.4 * L["capillary_dt"])
             s.set_dt(dt)
-        t += s.dt()
+        t += dt
         s.step()
         maxit = max(maxit, s.last_pressure_iterations())
         maxdiv = max(maxdiv, s.max_open_divergence())
-        if i >= NSTEP // 2:                   # average over the second half
+        if i >= NSTEP // 2:                   # average over the second half of the window
             accU += s.get_u().mean(axis=(0, 2))
             if not SINGLE:
                 accC += s.get_vof().mean(axis=(0, 2))
             nacc += 1
         if i % 100 == 0:
             um = s.get_u().mean() / S
-            print(f"    step {i:6d}  t = {t/S:8.3f} h/u  dt = {s.dt():.3e}  U_b = {um:.4f}  "
+            print(f"    step {i:6d}  t u_tau/h = {t*UTAU:7.4f}  dt = {dt:.3e}  U_b = {um:.4f}  "
                   f"press {s.last_pressure_iterations():3d}/800  ({time.time()-wall0:.0f} s)")
             if not SINGLE:
                 st = s.vof_block_stats()
@@ -285,7 +285,8 @@ def main():
                       f"{sum(b['area'] for b in st):.0f} cells^2")
     U = accU / max(nacc, 1) / S
     Cp = accC / max(nacc, 1)
-    print(f"\n  {NSTEP} steps in {time.time()-wall0:.0f} s; pressure {maxit}/800 "
+    print(f"\n  {NSTEP} steps to t u_tau/h = {t*UTAU:.4f} in {time.time()-wall0:.0f} s; "
+        f"pressure {maxit}/800 "
           f"{'OK' if maxit < 800 else '*** CAPPED -> RUN INVALID ***'}, "
           f"max|div(open u)| {maxdiv:.2e}")
     utau_m = math.sqrt(MU * abs(U[0]) / (yq[0]))

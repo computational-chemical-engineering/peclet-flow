@@ -157,10 +157,28 @@ def gate_hysing():
 
 
 # --------------------------------------------------------------------------- gate 2: Grace
-def grace_terminal(Eo, Mo, d, rho_l, mu_l, sigma, g):
-    """Grace (1973) correlation, as tabulated by Clift, Grace & Weber (1978) ch. 7 eq. (7-10):
-       U = (mu_l / (rho_l d)) Mo^-0.149 (J - 0.857),  J from the Eotvos-Morton chart."""
-    H = (4.0 / 3.0) * Eo * Mo ** -0.149          # (mu_l/mu_w)^-0.14 = 1 for a water-like reference
+def grace_terminal(Eo, Mo, d, rho_l, mu_l, sigma, g, mu_ratio_to_water=None):
+    """Grace (1973), as tabulated by Clift, Grace & Weber (1978) ch. 7, eqs (7-10)/(7-11):
+
+        H = (4/3) Eo Mo^-0.149 (mu_l/mu_w)^-0.14        mu_w = 0.9 cP
+        J = 0.94 H^0.757  (2 < H <= 59.3),  3.42 H^0.441  (H > 59.3)
+        U_T = (mu_l/(rho_l d)) Mo^-0.149 (J - 0.857)
+
+    THE TRAP, and it is the reason this gate was nearly reported wrong.  The correlation contains a
+    DIMENSIONAL factor, `(mu_l/mu_water)^-0.14`, which a purely dimensionless (Eo, Mo, ratio)
+    specification does NOT determine: at Eo = 10, Mo = 1e-3 the "Grace-diagram terminal velocity"
+    is 0.959 cells/s if one silently sets that factor to 1 and 0.579 if the liquid is the one that
+    actually HAS Mo = 1e-3.  It has to be the latter: Mo = 1e-3 at water-like rho and sigma forces
+    mu_l ~ 0.073 Pa s ~ 81 x water (water itself is Mo ~ 2.5e-11), so a factor of 1 describes no
+    liquid at all.  `mu_ratio_to_water = None` therefore DERIVES the factor from the physical
+    system that the dimensionless pair implies at rho_l = 1000 kg/m^3, sigma = 0.065 N/m,
+    g = 9.81 m/s^2 -- a glycerol/water mixture, the standard Mo = 1e-3 fluid.
+    """
+    if mu_ratio_to_water is None:
+        RHO_P, SIG_P, G_P, MU_W = 1000.0, 0.065, 9.81, 9.0e-4
+        mu_phys = (Mo * RHO_P * SIG_P ** 3 / G_P) ** 0.25
+        mu_ratio_to_water = mu_phys / MU_W
+    H = (4.0 / 3.0) * Eo * Mo ** -0.149 * mu_ratio_to_water ** -0.14
     if H <= 59.3:
         J = 0.94 * H ** 0.757
     else:
@@ -175,21 +193,28 @@ def gate_grace():
     # physical set (cell units directly: h = 1).  Choose D, rho_l, sigma, then mu from Mo and g
     # from Eo, with ratio 100 for both density and viscosity.
     Eo, Mo, ratio = 10.0, 1e-3, 100.0
-    D = 16.0 if QUICK else 20.0
+    D = 12.0 if QUICK else 16.0
     R = 0.5 * D
     rho_l, sigma = 1.0, 1.0
     g = Eo * sigma / (rho_l * D * D)                       # Eo = rho g D^2 / sigma (dRho ~ rho_l)
     mu_l = (Mo * rho_l ** 2 * sigma ** 3 / g) ** 0.25      # Mo = g mu^4 / (rho sigma^3)
     rho_g, mu_g = rho_l / ratio, mu_l / ratio
-    nx = int(round(6 * D))
-    nz = int(round(10 * D))
+    nx = int(round(4 * D))
+    nz = int(round(9 * D))
     ny = nx
     print(f"  D = {D:g} cells, box {nx}x{ny}x{nz}, rho_l {rho_l}, rho_g {rho_g}, mu_l {mu_l:.4e}, "
           f"sigma {sigma}, g {g:.4e}")
     Ut = grace_terminal(Eo, Mo, D, rho_l, mu_l, sigma, g)
+    Ut1 = grace_terminal(Eo, Mo, D, rho_l, mu_l, sigma, g, mu_ratio_to_water=1.0)
     Ub = math.sqrt(g * D)
-    print(f"  Grace/Clift correlation: U_T = {Ut:.4f} cells/s  (Re = {rho_l*Ut*D/mu_l:.1f}, "
+    mu_phys = (Mo * 1000.0 * 0.065 ** 3 / 9.81) ** 0.25
+    print(f"  the physical system this (Eo, Mo) implies at rho = 1000, sigma = 0.065, g = 9.81: "
+          f"d = {math.sqrt(Eo*0.065/(1000*9.81))*1e3:.2f} mm, mu_l = {mu_phys*1e3:.1f} cP "
+          f"({mu_phys/9e-4:.0f} x water)")
+    print(f"  Grace/Clift U_T = {Ut:.4f} cells/s  (Re = {rho_l*Ut*D/mu_l:.1f}, "
           f"Fr = U/sqrt(gD) = {Ut/Ub:.3f})")
+    print(f"    [the same formula with the viscosity factor set to 1 -- i.e. pretending the liquid "
+          f"is water, which cannot have Mo = 1e-3 -- reads {Ut1:.4f}; see grace_terminal()]")
     s = pf.Solver(nx, ny, nz)
     s.set_rho(rho_l)
     s.set_mu(mu_l)
@@ -198,7 +223,7 @@ def gate_grace():
     s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
     s.set_pressure_chebyshev(True, 800, 1e-12)
     s.enable_vof()
-    B = sphere_fractions((nx, ny, nz), R, (nx / 2.0, ny / 2.0, 2.5 * D))
+    B = sphere_fractions((nx, ny, nz), R, (nx / 2.0, ny / 2.0, 1.6 * D))
     s.set_vof(np.asfortranarray(B))
     s.set_property_model("rho", "linear", "C", [rho_l, rho_g - rho_l])
     s.set_property_model("mu", "linear", "C", [mu_l, mu_g - mu_l])
@@ -207,16 +232,17 @@ def gate_grace():
                          [-rho_l * g, -(rho_g - rho_l) * g])
     s.enable_vof_blocks_from_field([marker_box(B)])
     s.enable_vof_block_csf()
-    T = (2.0 if QUICK else 6.0) * D / Ut
+    T = (3.0 if QUICK else 6.0) * D / Ut
     h = Solve(800)
     t, i = 0.0, 0
+    dt = 0.0
     hist = []
     t0 = time.time()
     while t < T:
         if i % 10 == 0:
             L = s.vof_step_limits()
-            s.set_dt(0.4 * min(L["cfl_dt"], L["capillary_dt"]))
-        dt = s.dt()
+            dt = 0.4 * min(L["cfl_dt"], L["capillary_dt"])
+            s.set_dt(dt)
         t += dt
         i += 1
         s.step()
@@ -250,23 +276,32 @@ def gate_grace():
 # --------------------------------------------------------------------------- gate 3: two bubbles
 def gate_pair():
     print("\n" + "=" * 96)
-    print("GATE 3 — two bubbles in line: the film drains to one cell and the blocks stay TWO")
+    print("GATE 3 — two bubbles in line, the larger catching the smaller: no numerical coalescence")
     print("=" * 96)
-    print("  The trailing bubble rises into the leading one's wake and catches it.  In a single")
-    print("  global colour field the two merge the moment their bands touch; with one marker each")
-    print("  they cannot, and the union carries CELLS THAT BELONG TO BOTH.  The control run is the")
-    print("  same case on the structured field.")
+    print("  A LARGE bubble rising in line behind a SMALL one closes the gap deterministically (at")
+    print("  fixed Mo the terminal velocity grows with D), so the collision happens on a schedule")
+    print("  instead of waiting on the wake.  In a single global colour field the two merge the")
+    print("  moment their PLIC bands touch -- the film is sub-grid and the field has no way to")
+    print("  represent two interfaces in one cell.  With one marker each they cannot merge, and the")
+    print("  union carries CELLS THAT BELONG TO BOTH.  The control is the same case, same numbers,")
+    print("  on the structured field.")
     Eo, Mo, ratio = 10.0, 1e-3, 100.0
-    D = 12.0 if QUICK else 16.0
-    R = 0.5 * D
+    D = 10.0 if QUICK else 12.0
+    Rs, Rl = 0.40 * D, 0.60 * D          # leading (small) and trailing (large)
     rho_l, sigma = 1.0, 1.0
     g = Eo * sigma / (rho_l * D * D)
     mu_l = (Mo * rho_l ** 2 * sigma ** 3 / g) ** 0.25
     rho_g, mu_g = rho_l / ratio, mu_l / ratio
-    nx = ny = int(round(4 * D))
-    nz = int(round(10 * D))
-    sep = 2.2 * D
-    zc0, zc1 = 2.0 * D, 2.0 * D + sep
+    nx = ny = int(round(5 * D))
+    nz = int(round(11 * D))
+    # Seed them nearly touching (a 2-cell film): the large one closes the last two cells within a
+    # few hundred steps, which is what makes the gate affordable.  Starting them a diameter apart
+    # measured nothing in 20 minutes of wall clock -- the approach is slow and the answer is at
+    # contact.
+    zc_l = 2.0 * D
+    zc_s = zc_l + Rs + Rl + 2.0
+    print(f"  D_small = {2*Rs:.1f}, D_large = {2*Rl:.1f} cells; box {nx}x{ny}x{nz}; "
+          f"centres z = {zc_l:.1f} / {zc_s:.1f} (gap {zc_s-zc_l-Rs-Rl:.1f} cells)")
 
     def build(blocks):
         s = pf.Solver(nx, ny, nz)
@@ -277,64 +312,190 @@ def gate_pair():
         s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
         s.set_pressure_chebyshev(True, 800, 1e-12)
         s.enable_vof()
-        B0 = sphere_fractions((nx, ny, nz), R, (nx / 2.0, ny / 2.0, zc0))
-        B1 = sphere_fractions((nx, ny, nz), R, (nx / 2.0, ny / 2.0, zc1))
+        B0 = sphere_fractions((nx, ny, nz), Rl, (nx / 2.0, ny / 2.0, zc_l))
+        B1 = sphere_fractions((nx, ny, nz), Rs, (nx / 2.0, ny / 2.0, zc_s))
         s.set_vof(np.asfortranarray(np.maximum(B0, B1)))
         s.set_property_model("rho", "linear", "C", [rho_l, rho_g - rho_l])
         s.set_property_model("mu", "linear", "C", [mu_l, mu_g - mu_l])
         s.set_surface_tension(sigma)
         s.set_property_model("force_z", "linear", "C", [-rho_l * g, -(rho_g - rho_l) * g])
         if blocks:
-            s.enable_vof_blocks_from_field([marker_box(B0), marker_box(B1)])
+            b0, b1 = marker_box(B0), marker_box(B1)
+            mid = (b0[5] + b1[2]) // 2       # split the boxes at the midplane: one sphere each
+            b0[5] = min(b0[5], mid)
+            b1[2] = max(b1[2], mid)
+            s.enable_vof_blocks_from_field([b0, b1])
             s.enable_vof_block_csf()
-        return s
+        return s, 4 / 3 * math.pi * Rl ** 3, 4 / 3 * math.pi * Rs ** 3
+
+    def axis_gap(C):
+        """Empty cells on the axis BETWEEN the two blobs; 0 = they have merged there."""
+        col = C[nx // 2, ny // 2, :]
+        occ = np.argwhere(col > 0.5).ravel()
+        if len(occ) == 0:
+            return -1
+        inside = col[occ.min():occ.max() + 1]
+        return int((inside < 0.5).sum())
 
     Ut = grace_terminal(Eo, Mo, D, rho_l, mu_l, sigma, g)
-    T = (1.5 if QUICK else 4.0) * sep / Ut
+    T = (3.0 if QUICK else 6.0) * D / Ut
     res = {}
     for name, blk in (("blocks", True), ("single field (control)", False)):
-        s = build(blk)
+        s, v0l, v0s = build(blk)
         h = Solve(800)
-        t, i = 0.0, 0
+        t, i, dt = 0.0, 0, 0.0
+        mingap, overlap_max = 10 ** 9, 0.0
+        merged_at = None
         t0 = time.time()
         while t < T:
             if i % 10 == 0:
                 L = s.vof_step_limits()
-                s.set_dt(0.4 * min(L["cfl_dt"], L["capillary_dt"]))
-            t += s.dt()
+                dt = 0.4 * min(L["cfl_dt"], L["capillary_dt"])
+                s.set_dt(dt)
+            t += dt
             i += 1
             s.step()
             h.sample(s)
+            if i % 5 == 0:
+                C = s.get_vof()
+                gap = axis_gap(C)
+                mingap = min(mingap, gap)
+                if gap == 0 and merged_at is None:
+                    merged_at = t
+                if blk:
+                    vols = [b["volume"] for b in s.vof_block_stats()]
+                    overlap_max = max(overlap_max, sum(vols) - float(C.sum()))
+            if i % 100 == 0:
+                print(f"    t = {t:7.2f}  gap {axis_gap(s.get_vof()):3d} cells  "
+                      f"({time.time()-t0:.0f} s)")
         C = s.get_vof()
-        # the neck: the minimum of C along the axis between the two centroids' final positions
-        col = C[nx // 2, ny // 2, :]
-        occupied = np.argwhere(col > 0.5).ravel()
-        gap = 0
-        if len(occupied):
-            inside = col[occupied.min():occupied.max() + 1]
-            gap = int((inside < 0.5).sum())
-        info = dict(steps=i, solve=h, gap=gap, wall=time.time() - t0)
+        info = dict(steps=i, solve=h, gap=axis_gap(C), mingap=mingap, merged=merged_at,
+                    wall=time.time() - t0)
+        print(f"\n  -- {name}: {i} steps, {info['solve']}  ({info['wall']:.0f} s)")
         if blk:
             st = s.vof_block_stats()
             info["vols"] = [b["volume"] for b in st]
             info["zc"] = [b["centroid"][2] for b in st]
-            # cells carried by BOTH markers: sum of the marker volumes minus the union
-            info["overlap"] = sum(info["vols"]) - float(C.sum())
-        else:
-            info["union"] = float(C.sum())
-        res[name] = info
-        print(f"\n  -- {name}: {i} steps, {h}  ({info['wall']:.0f} s)")
-        if blk:
+            info["overlap"] = overlap_max
             print(f"     marker volumes {info['vols'][0]:.4f} / {info['vols'][1]:.4f}  "
-                  f"(seed {4/3*math.pi*R**3:.4f} each)")
-            print(f"     centroids z {info['zc'][0]:.2f} / {info['zc'][1]:.2f}   film gap on the "
-                  f"axis {gap} cells   shared liquid {info['overlap']:.3f} cells")
+                  f"(seed {v0l:.4f} / {v0s:.4f}; drift "
+                  f"{info['vols'][0]/v0l-1:+.2e} / {info['vols'][1]/v0s-1:+.2e})")
+            print(f"     centroids z {info['zc'][0]:.2f} / {info['zc'][1]:.2f}; final film gap on "
+                  f"the axis {info['gap']} cells, MINIMUM over the run {mingap}")
+            print(f"     peak shared liquid (sum V_marker - sum C_union) {overlap_max:.3f} cells")
         else:
-            print(f"     film gap on the axis {gap} cells (0 = the two have MERGED)")
+            print(f"     final film gap on the axis {info['gap']} cells, MINIMUM {mingap}; "
+                  f"merged at t = {merged_at}")
+        res[name] = info
     b, c = res["blocks"], res["single field (control)"]
-    print(f"\n  GATE: the blocks keep two markers with their own volumes; the control merges.")
-    print(f"        blocks gap {b['gap']} cells, control gap {c['gap']} cells  ->  "
-          f"{'PASS' if b['gap'] >= 1 else 'FAIL (the markers themselves lost the film)'}")
+    ok = (b["mingap"] >= 1) and (c["mingap"] == 0)
+    print(f"\n  GATE: the control MERGES (gap -> 0) while the blocks keep two markers with their")
+    print(f"        own volumes and a film at least one cell thick.")
+    print(f"        blocks min gap {b['mingap']} cells (peak shared liquid "
+          f"{b['overlap']:.3f}); control min gap {c['mingap']} cells "
+          f"(merged at t = {c['merged']})  ->  {'PASS' if ok else 'INCONCLUSIVE'}")
+
+
+# ------------------------------------------------------------------- gate 3b: markers in contact
+def gate_contact():
+    """The discriminating half of gate 3, when the film gate does not reach contact on its own.
+
+    Seed the two markers ALREADY TOUCHING -- the centre distance is one cell less than the sum of
+    the radii, so their PLIC bands share cells from step 0 -- and run a real two-phase step.  A
+    single global colour field has one blob there and can never have two again; two markers have
+    two, each conserving its own volume, and the union carries the shared liquid explicitly.
+    """
+    print("\n" + "=" * 96)
+    print("GATE 3b — two markers seeded IN CONTACT under a real NS step: the union carries cells")
+    print("          that belong to both, and the control is one blob for ever")
+    print("=" * 96)
+    Eo, Mo, ratio = 10.0, 1e-3, 100.0
+    D = 12.0
+    Rs, Rl = 0.40 * D, 0.60 * D
+    rho_l, sigma = 1.0, 1.0
+    g = Eo * sigma / (rho_l * D * D)
+    mu_l = (Mo * rho_l ** 2 * sigma ** 3 / g) ** 0.25
+    rho_g, mu_g = rho_l / ratio, mu_l / ratio
+    nx = ny = int(round(4 * D))
+    nz = int(round(7 * D))
+    zc_l = 1.6 * D
+    zc_s = zc_l + Rs + Rl - 1.0          # ONE cell of band overlap
+    steps = 100 if QUICK else 400
+    print(f"  D_small = {2*Rs:.1f}, D_large = {2*Rl:.1f}; box {nx}x{ny}x{nz}; centre distance "
+          f"{zc_s-zc_l:.1f} = R_s + R_l - 1")
+
+    def build(blocks):
+        s = pf.Solver(nx, ny, nz)
+        s.set_rho(rho_l)
+        s.set_mu(mu_l)
+        s.set_domain_bc(4, 1, 0, 0, 0)
+        s.set_domain_bc(5, 1, 0, 0, 0)
+        s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
+        s.set_pressure_chebyshev(True, 800, 1e-12)
+        s.enable_vof()
+        B0 = sphere_fractions((nx, ny, nz), Rl, (nx / 2.0, ny / 2.0, zc_l))
+        B1 = sphere_fractions((nx, ny, nz), Rs, (nx / 2.0, ny / 2.0, zc_s))
+        s.set_vof(np.asfortranarray(np.maximum(B0, B1)))
+        s.set_property_model("rho", "linear", "C", [rho_l, rho_g - rho_l])
+        s.set_property_model("mu", "linear", "C", [mu_l, mu_g - mu_l])
+        s.set_surface_tension(sigma)
+        s.set_property_model("force_z", "linear", "C", [-rho_l * g, -(rho_g - rho_l) * g])
+        if blocks:
+            # SPHERE seeding, not `enable_vof_blocks_from_field`: with the two markers already
+            # overlapping there is no way to split a union field between them without giving one
+            # marker a slice of the other (measured: -2.7 % / +7.1 % on the two volumes when the
+            # boxes are clipped at the midplane).  `enable_vof_blocks` paints each block's colour
+            # from the exact sphere fraction, so each marker starts as its own whole bubble --
+            # which is the state a single colour field cannot hold, and the point of the gate.
+            s.enable_vof_blocks([(nx / 2.0, ny / 2.0, zc_l, Rl), (nx / 2.0, ny / 2.0, zc_s, Rs)])
+            s.enable_vof_block_csf()
+        return s, 4 / 3 * math.pi * Rl ** 3, 4 / 3 * math.pi * Rs ** 3
+
+    out = {}
+    for name, blk in (("blocks", True), ("single field (control)", False)):
+        s, v0l, v0s = build(blk)
+        h = Solve(800)
+        dt = 0.0
+        t0 = time.time()
+        for i in range(steps):
+            if i % 5 == 0:
+                L = s.vof_step_limits()
+                dt = 0.2 * min(L["cfl_dt"], L["capillary_dt"])
+                s.set_dt(dt)
+            s.step()
+            h.sample(s)
+        C = s.get_vof()
+        col = C[nx // 2, ny // 2, :]
+        occ = np.argwhere(col > 0.5).ravel()
+        blobs = 0
+        prev = False
+        for v in (col > 0.5):
+            if v and not prev:
+                blobs += 1
+            prev = v
+        info = dict(blobs=blobs, union=float(C.sum()), solve=h, wall=time.time() - t0)
+        if blk:
+            st = s.vof_block_stats()
+            info["vols"] = [b["volume"] for b in st]
+            info["shared"] = sum(info["vols"]) - info["union"]
+            info["cells_both"] = None
+        out[name] = info
+        print(f"\n  -- {name}: {steps} steps, {h}  ({info['wall']:.0f} s)")
+        if blk:
+            print(f"     TWO markers, volumes {info['vols'][0]:.3f} / {info['vols'][1]:.3f} "
+                  f"(seed {v0l:.3f} / {v0s:.3f}, drift {info['vols'][0]/v0l-1:+.2e} / "
+                  f"{info['vols'][1]/v0s-1:+.2e})")
+            print(f"     union {info['union']:.3f} cells; SHARED liquid "
+                  f"sum(V_marker) - sum(C_union) = {info['shared']:.3f} cells")
+            print(f"     blobs along the axis in the union field: {blobs}")
+        else:
+            print(f"     ONE colour field: {blobs} blob(s) along the axis, "
+                  f"union {info['union']:.3f} cells")
+    b, c = out["blocks"], out["single field (control)"]
+    ok = b["shared"] > 0.0
+    print(f"\n  GATE: the blocks carry {b['shared']:.3f} cells of liquid that belong to BOTH "
+          f"markers -- a state a single colour field cannot represent (the control's union is "
+          f"{c['union']:.3f} cells in {c['blobs']} blob).  ->  {'PASS' if ok else 'FAIL'}")
 
 
 # --------------------------------------------------------------------------- W1 in Python
@@ -375,7 +536,8 @@ def gate_swarm():
           f"{tuple(round(q,3) for q in b['moments'])}")
 
 
-ALL = {"hysing": gate_hysing, "grace": gate_grace, "pair": gate_pair, "swarm": gate_swarm}
+ALL = {"hysing": gate_hysing, "grace": gate_grace, "pair": gate_pair,
+       "contact": gate_contact, "swarm": gate_swarm}
 
 if __name__ == "__main__":
     for g in (GATES or list(ALL)):

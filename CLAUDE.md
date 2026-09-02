@@ -835,6 +835,70 @@ np=4 for 2 blocks**, **1.337 / 1.559 for 3 blocks** — i.e. with fewer blocks t
 ranks are simply idle. The weighted-ORB assignment is rung W1 and those are the numbers to beat.
 `vof_block_census()` gives the per-rank breakdown.
 
+**Rungs W1 + W2 (WO-W12) — the block container in production.** Four additions, all measured in
+`doc/vof_workorders_v6.md` (WO-W12 findings):
+
+- **Master assignment: `set_vof_block_assign(mode, every)`** — 0 round robin (the container
+  default, so every W0 number reproduces), **1 LPT** (greedy longest-processing-time on the block
+  cell counts; what production should use), 2 weighted ORB over a 1-D block space (core's
+  `BlockDecomposer<1>`). All three are pure functions of the REPLICATED table, so no rank
+  communicates to agree — which is what lets a re-assignment happen mid-run without breaking a
+  bitwise gate. On a 64-bubble swarm whose block cell counts span 10.2×: round robin **1.142 /
+  1.453 / 2.182** at np 2/4/8, **LPT and ORB 1.0000 everywhere**. LPT wins the tie-break because
+  the ORB's blocks must be CONTIGUOUS in block id, which LPT is free of. `every > 0` re-assigns
+  periodically and MIGRATES the block — colour plus the previous centroid, four extra doubles, the
+  only state a block carries. Gated **bitwise at np 1/2/4/8** with 48 / 98 / 120 master changes
+  actually migrated (`test_vof_blocks_mpi`, 64-bubble LeVeque scene).
+- **Device-resident packing** (`set_vof_block_device_staging`, default on): the four transfers
+  (gather face velocity / gather colour / scatter colour MAX / scatter force SUM) are one
+  templated pattern whose pack/unpack kernels run in the block's memory space, with a host staging
+  copy only per MPI MESSAGE and none at all for the master's own cells. Bitwise inert.
+  **1.69× on a quiet GPU; 0.80× on one saturated by five other jobs** — the ordering inverts under
+  contention because the per-piece kernels are launch-latency bound. Batching them is WO-V9's.
+- **The block pool** (`set_vof_block_pool`, default on): advectors retired by a re-centring are
+  recycled by exact extent, handed back zeroed, bitwise inert (gated). Hit rate is scene-dependent
+  — ~100 % for a translating bubble, 4/60 on the strongly deforming LeVeque field.
+- **`vof_block_stats()['area']`**: the marker's PLIC interface area, **−0.15 %** against 4πR² at
+  R = 9 cells. It needs the SAME wisp guard the curvature does (`areaEps`, default 1e-8): a
+  round-off wisp's degenerate MYC normal makes `plicPolygon` return the FULL unit square, and three
+  such cells moved a reported area by 3.0 cells² between decompositions.
+
+**NS coupling (rung W2): `enable_vof_block_csf()`.** Each master block runs its own curvature
+cascade on its own box and forms the V4 balanced-force face force there; the three face fields are
+scattered **UNPACK_SUM** into the RHS (a sibling branch, `addCsfRhsBlocks`; the global-field mode is
+byte-identical when blocks are off). Once on, `step()` drives the whole two-phase stage through the
+blocks — the union `C` feeds the closures exactly as before and the colour is advected by the blocks
+in the `advectVof` slot. **The force, not the curvature, is what is scattered**: κ is not additive
+and the union is a `max`, so a face between two overlapping markers has no single (κ, ΔC) pair;
+forming the force where each marker's own colour still exists is the only place the balanced-force
+pairing survives.
+
+*Measured:* **Hysing case 1 through the blocks equals the global-field run to −0.00 % on both the
+peak rise velocity (0.2827) and y_c(3) (1.2086)** at 64×4×128, 2032 steps, pressure 23/600
+(uncapped) — the gate's 1 % is not stressed. A single 3-D bubble at Eo = 10, Mo = 1e-3, ratio 100
+reaches **U_T = 0.5439 cells/s, −6.2 % of the Grace/Clift correlation** (aspect ratio 2.256,
+Re 21.8, volume drift 6.5e-11) — but read the findings before quoting a Grace number: the
+correlation carries a DIMENSIONAL `(μ_l/μ_water)^−0.14` factor that (Eo, Mo) alone does not fix, and
+setting it to 1 (which describes no real liquid: Mo = 1e-3 needs μ ≈ 81× water) moves the reference
+from 0.5796 to 0.9587. Two markers seeded IN CONTACT keep **two markers with 10.4 cells of shared
+liquid** through 400 NS steps while the control is one blob — as colour fields the two states are
+indistinguishable. Distributed (`tests/kokkos_mpi/test_vof_blocks_ns_mpi`, np 1/2/4, walls on the
+cut axis): **bitwise at np = 1**, and du 1.3e-15 / dP 3.6e-15 / dC 1.1e-14 at np > 1, the pressure
+driver's own reduction floor.
+
+**A trap this rung paid for, and the general rule behind it.** A container that instantiates
+`VofCurvature` itself must be handed the cascade's CONFIGURATION, not just its code: the blocks
+ran with the V3 default `interfaceEps = 0` while the structured path had the V4 wisp guard at 1e-8,
+and a **3e-16 colour difference between two decompositions flipped a cascade branch and moved the
+CSF face force by 6.7e-3 in one step** (bitwise after step 1, 13 orders worse after step 2).
+`VofBlockSet::curvProto` now carries it.
+
+**Scope of the block container:** ALL-FLUID (an immersed solid still raises — the cut-cell block is
+a later rung), STAGGERED only for the block CSF, no momentum consistency (so, like V2a, rated to
+ratio ≈ 100 with motion), and the film between two markers is resolved only down to the grid: at
+D/Δ ≈ 10 and Eo = 10 an in-line pair holds a 2-cell film for as long as it was run, in BOTH
+containers.
+
 **Scope — say this to users:** **Staggered is the reference**; the collocated path is rung V8 (the
 paragraph above) and is all-fluid, ratio ≲ 100 with motion. An **immersed solid is supported since
 rung V5a** — `set_solid(...,
