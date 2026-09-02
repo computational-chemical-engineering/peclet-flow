@@ -431,7 +431,8 @@ static void bind_solver(nb::module_& m, const char* name) {
           nb::arg("node_ints"), nb::arg("node_reals"), nb::arg("instance_ints"),
           nb::arg("instance_reals"), nb::arg("periodic") = false,
           "Install an analytic geometry scene from core's flat encoding (3 ints + 16 reals per "
-          "node, 2 ints + 17 reals per instance). Geometry is in CELL UNITS on the GLOBAL inner "
+          "node, 2 ints + 18 reals per instance -- reals[17] is the centre-pinned flag; legacy 17-real "
+          "records are accepted, reading an all-zero centre as 'follows the body'). Geometry is in CELL UNITS on the GLOBAL inner "
           "grid. The scene is replicated on every rank, so scene-derived geometry needs no "
           "communication and -- unlike set_exact_crossings -- is NOT single-rank only. "
           "periodic=True treats the scene as min-image periodic over the global grid (one "
@@ -581,6 +582,12 @@ static void bind_solver(nb::module_& m, const char* name) {
           "on a lattice plane. Those points are fluid to the mask and not ghosts to the cut-cell "
           "fold, so a moving body's datum never enters there (set_solid_from_scene warns). Empty "
           "when no instance moves.")
+      .def("instance_center", &S::instanceCenter, nb::arg("i"),
+           "The resolved centre of rotation of instance i (world coordinates).")
+      .def("instance_center_pinned", &S::instanceCenterPinned, nb::arg("i"),
+           "True if instance i's centre of rotation is PINNED (an explicit finite centre in the "
+           "encoding, or set_instance_motion(center=...)); False if it follows the body's "
+           "translation (NaN in the encoding, the builder's default; legacy all-zero raw arrays).")
       .def("periodic_image_overlap_cells", &S::periodicImageOverlapCells,
            "Cells on this rank whose solid/fluid sign was decided by a periodic IMAGE of an "
            "instance wider than the box (set_solid_from_scene warns when nonzero): the scene "

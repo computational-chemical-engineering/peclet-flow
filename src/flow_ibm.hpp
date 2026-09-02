@@ -888,10 +888,22 @@ class Solver {
     instCen_.assign((std::size_t)nInst_ * 3, 0.0);
     instLin_.assign((std::size_t)nInst_ * 3, 0.0);
     instAng_.assign((std::size_t)nInst_ * 3, 0.0);
+    instCenPinned_.assign((std::size_t)nInst_, 0);
     for (int i = 0; i < nInst_; ++i) {
-      const auto& in = sceneB_->instances()[(std::size_t)i];
-      const bool haveCen = in.center.x != 0.0 || in.center.y != 0.0 || in.center.z != 0.0;
-      const auto c = haveCen ? in.center : in.transform.translation;
+      auto& in = sceneB_->instanceRef(i);
+      // CENTRE OF ROTATION (§7 item 3, resolved 2026-09-02): NaN = follows the body (the
+      // builder's default); any other finite point = PINNED there, the world origin included.
+      // An all-zero centre from a RAW instance array is the legacy 'follows the body' (every
+      // producer wrote zeros before NaN existed); a world-origin pin from a raw array goes
+      // through set_instance_motion(center=...). The decision is an explicit per-instance flag
+      // from here on, never re-inferred from the numbers.
+      // The decoder already resolved the record: an 18-real record carries the flag, a legacy
+      // 17-real record pins only a finite non-zero centre.
+      const bool pinned = in.centerPinned && std::isfinite(in.center.x) &&
+                          std::isfinite(in.center.y) && std::isfinite(in.center.z);
+      instCenPinned_[(std::size_t)i] = pinned ? 1 : 0;
+      const auto c = pinned ? in.center : in.transform.translation;
+      in.center = c;  // the resolved centre, so no consumer ever reads the NaN sentinel
       instCen_[3 * (std::size_t)i + 0] = c.x;
       instCen_[3 * (std::size_t)i + 1] = c.y;
       instCen_[3 * (std::size_t)i + 2] = c.z;
@@ -904,6 +916,20 @@ class Solver {
     }
     refreshMotionFlag();
     uploadMotion();
+  }
+
+  /// The resolved centre of rotation of instance i and whether it is pinned (explicit) or
+  /// follows the body's translation.
+  std::array<double, 3> instanceCenter(int i) const {
+    if (i < 0 || i >= nInst_)
+      throw std::runtime_error("instance_center: instance index out of range");
+    return {instCen_[3 * (std::size_t)i], instCen_[3 * (std::size_t)i + 1],
+            instCen_[3 * (std::size_t)i + 2]};
+  }
+  bool instanceCenterPinned(int i) const {
+    if (i < 0 || i >= nInst_)
+      throw std::runtime_error("instance_center_pinned: instance index out of range");
+    return instCenPinned_[(std::size_t)i] != 0;
   }
 
   /// Rigid-body motion of one scene instance (Layer 3 rung 2). `lin` is the body's linear
@@ -927,6 +953,8 @@ class Solver {
       if (center)
         instCen_[3 * (std::size_t)i + k] = center[k];
     }
+    if (center)
+      instCenPinned_[(std::size_t)i] = 1;  // an explicit centre is pinned, whatever its value
     in.linVel = peclet::core::Vec3<double>{lin[0], lin[1], lin[2]};
     in.angVel = peclet::core::Vec3<double>{ang[0], ang[1], ang[2]};
     in.center = peclet::core::Vec3<double>{instCen_[3 * (std::size_t)i + 0],
@@ -950,10 +978,10 @@ class Solver {
     if (i < 0 || i >= nInst_)
       throw std::runtime_error("set_instance_transform: instance index out of range");
     auto& in = sceneB_->instanceRef(i);
-    const bool centreTracked =
-        instCen_[3 * (std::size_t)i + 0] == in.transform.translation.x &&
-        instCen_[3 * (std::size_t)i + 1] == in.transform.translation.y &&
-        instCen_[3 * (std::size_t)i + 2] == in.transform.translation.z;
+    // Follows-the-body vs pinned is the explicit flag, not a coincidence of the numbers (the old
+    // float comparison turned a pinned centre into a tracked one whenever the body passed
+    // through it).
+    const bool centreTracked = instCenPinned_[(std::size_t)i] == 0;
     in.transform.translation =
         peclet::core::Vec3<double>{translation[0], translation[1], translation[2]};
     in.transform.rotation = peclet::core::Quat<double>{quat[0], quat[1], quat[2], quat[3]};
@@ -8451,6 +8479,7 @@ class Solver {
   bool scenePeriodic_ = false;
   long imageOverlapCells_ = 0;  // set_solid_from_scene's periodic-image overlap count
   std::vector<long> movingCutCells_;  // per-instance cut-cell counts (moving scenes only)
+  std::vector<int> instCenPinned_;   // 1 = centre of rotation pinned (explicit), 0 = follows the body
   std::vector<long> movingDegenerate_;  // per-instance exactly-on-lattice staggered points
   bool sceneDirty_ = false;  // a transform changed; the device query must be rebuilt
   std::vector<double> oxOverride_, oyOverride_, ozOverride_;  // exact apertures (inner)
