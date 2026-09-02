@@ -808,10 +808,12 @@ cutting the outlet plane, 40 coupled steps), host-openmp:
 2. **`tests/kokkos_mpi/CMakeLists.txt` did not PARSE.** Commit `86192ad` (WO-R) left a duplicated
    `foreach` fragment — `... vof_collocated_mpi)` followed by a bare
    `vof_surface_tension_mpi vof_cutcell_mpi vof_bc_mpi)` — so CMake refused the whole file
-   ("Parse error. Expected \"(\"") and **the entire MPI battery has been unconfigurable since WO-R
-   landed**, with `vof_bc_mpi` never in the build list at all. That is why WO-R's "re-run
-   `vof_bc_mpi` on a quiet machine before merging" could not have been done. Merged into one
-   `foreach` here; the battery is green again.
+   ("Parse error. Expected \"(\"") and **the entire MPI battery was unconfigurable from WO-R
+   (`86192ad`) until the Part II phase-change commit (`b4cfca5`)**, with `vof_bc_mpi` never in the
+   build list at all. That is why WO-R's "re-run `vof_bc_mpi` on a quiet machine before merging"
+   could not have been done. Found and fixed independently here and upstream; this branch's rebase
+   keeps the upstream list (which now also carries `vof_phase_change_mpi` and
+   `movingscene_advect_mpi`).
 
 ### `maxAbsDiff`'s NaN blindness, swept
 
