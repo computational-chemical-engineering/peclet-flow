@@ -25,6 +25,7 @@
 
 #include "mac_cutcell.hpp"
 #include "staggered_advection.hpp"
+#include "vof/phase_change.hpp"
 
 namespace peclet::flow {
 
@@ -50,7 +51,73 @@ struct ScalarField {
   // scalar that never asks for it runs the validated operator bit-for-bit. This is what pins
   // interfacial cells at the saturation temperature in the phase-change energy solve.
   CCField dmask, dval;
+  // Optional CONSISTENT-ENERGY mode (WO-P23): the scalar is a temperature whose transport is done
+  // GEOMETRICALLY (with the colour advection's own fluxes, `vof/energy_advect.hpp`) and whose
+  // diffusion operator carries per-cell `k(C)` and a `rho c_p(C)` time term instead of the constant
+  // `D`. Off, and both fields unallocated, unless `set_phase_change_energy` ran — every consumer
+  // branches on that, so a scalar that never asks for it runs the validated operator bit-for-bit.
+  bool energy = false;
+  CCField kcell, rcp;  // k(C) and (rho c_p)(C) on the cells, refreshed by the solver each step
+  CCField gfmB;        // WO-P23: the plane-anchored Dirichlet RHS contribution (allocated with it)
 };
+
+// Variable-coefficient sibling of `scalarBuildDiffusionOpen` (WO-P23):
+//
+//   A_C = rcp(i)*idt + sum_f k_f open_f ,   A_off = -k_f open_f
+//
+// with the face conductivity `k_f = pcFaceConductivity(k(i), k(j), mask(i), mask(j))` — the
+// arithmetic mean of the two cells' `k(C)` EXCEPT where one of the two carries the per-cell
+// Dirichlet condition, in which case the OTHER cell's `k` is used (see the derivation in
+// `vof/phase_change.hpp`: a Dirichlet row is an identity row, so this coefficient's only job is to
+// set the conductance with which the pure neighbour reaches a boundary condition that already sits
+// at the interface).
+//
+// `mask` is the per-cell Dirichlet mask (all zeros if there is none).
+inline void scalarBuildDiffusionVarK(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN,
+                                     CCField AB, CCField AT, CCConst ox, CCConst oy, CCConst oz,
+                                     CCConst kc, CCConst rcp, CCConst mask, double idt, C3 e,
+                                     int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::scalar_build_diff_vark", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const double ki = kc(i);
+        const bool mi = mask(i) > 0.5;
+        const double tw = vof::pcFaceConductivity(ki, kc(i - sx), mi, mask(i - sx) > 0.5) * ox(i);
+        const double te = vof::pcFaceConductivity(ki, kc(i + sx), mi, mask(i + sx) > 0.5) *
+                          ox(i + sx);
+        const double ts = vof::pcFaceConductivity(ki, kc(i - sy), mi, mask(i - sy) > 0.5) * oy(i);
+        const double tn = vof::pcFaceConductivity(ki, kc(i + sy), mi, mask(i + sy) > 0.5) *
+                          oy(i + sy);
+        const double tb = vof::pcFaceConductivity(ki, kc(i - sz), mi, mask(i - sz) > 0.5) * oz(i);
+        const double tt = vof::pcFaceConductivity(ki, kc(i + sz), mi, mask(i + sz) > 0.5) *
+                          oz(i + sz);
+        AW(i) = -tw;
+        AE(i) = -te;
+        AS(i) = -ts;
+        AN(i) = -tn;
+        AB(i) = -tb;
+        AT(i) = -tt;
+        AC(i) = rcp(i) * idt + te + tw + tn + ts + tt + tb;
+      });
+}
+
+// RHS of the consistent-energy solve: `b = rcp(i) * idt * T*`, with `T*` the GEOMETRICALLY advected
+// temperature (the advective term is already in it, so there is none here). Together with the
+// `rcp*idt` diagonal above this is `rho c_p (T^{n+1} - T*)/dt = div(k grad T^{n+1})`.
+inline void scalarBuildRhsHeat(CCField b, CCConst cOld, CCConst rcp, double idt, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::scalar_build_rhs_heat", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+        b(i) = rcp(i) * idt * cOld(i);
+      });
+}
 
 // Replace the rows of the per-cell Dirichlet set by the identity: A_C = 1, all off-diagonals 0.
 // Run AFTER scalarBuildDiffusionOpen (and after applyScalarBcStencil, which may have reopened a
@@ -88,6 +155,80 @@ inline void scalarMaskRhs(CCField b, CCField c, CCConst mask, CCConst val, C3 e,
           return;
         b(i) = val(i);
         c(i) = val(i);
+      });
+}
+
+// WO-P23: the PLANE-ANCHORED (ghost-fluid) form of the per-cell Dirichlet set. Rewrites the rows
+// of the PURE cells that touch a masked (interfacial) cell so the Dirichlet value is imposed at the
+// PLIC PLANE rather than at the masked cell's centre:
+//
+//   ... - k open (T_j - T_i)/1   ->   ... - k open (T_G - T_i)/theta ,
+//
+// with theta the distance (in cells) from cell i's centre to cell j's plane along the face's own
+// axis (`pcGfmTheta`). The band toward the masked cell is zeroed and the Dirichlet contribution
+// goes into `gfmB`, which the RHS build adds — the masked cell's own value is then never read by
+// any neighbour, which is exactly what makes the condition one-sided-correct on BOTH sides. The
+// Dirichlet value is `tgam` (the INTERFACE temperature `T_G`), NOT the masked cell's carried value
+// `dval`: those are different numbers under the plane-anchored scheme (`pcCarriedValue`).
+//
+// Runs AFTER the base diffusion build (it consumes that build's band value to avoid
+// double-counting, the same trick `patchScalarDirichletFace` uses) and touches only unmasked rows,
+// so it commutes with `scalarMaskStencil`. `useK` selects the per-cell k(C) over the constant D.
+inline void scalarMaskGfm(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN, CCField AB,
+                          CCField AT, CCField gfmB, CCConst ox, CCConst oy, CCConst oz,
+                          CCConst mask, CCConst tgam, CCConst gnx, CCConst gny, CCConst gnz,
+                          CCConst gphi, CCConst kc, double Dconst, bool useK, double thMin,
+                          double thMax, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::scalar_mask_gfm", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        gfmB(i) = 0.0;
+        if (mask(i) > 0.5)
+          return;  // masked rows are the identity (scalarMaskStencil); nothing to do
+        const long st[3] = {sx, sy, sz};
+        const double kd = useK ? kc(i) : Dconst;
+        double acc = 0.0, dac = 0.0;
+        for (int d = 0; d < 3; ++d)
+          for (int sgn = -1; sgn <= 1; sgn += 2) {
+            const long j = i + (long)sgn * st[d];
+            if (!(mask(j) > 0.5))
+              continue;
+            // face openness: the `-` face of the higher-indexed cell of the pair
+            const double of = (d == 0)   ? ((sgn < 0) ? ox(i) : ox(i + sx))
+                              : (d == 1) ? ((sgn < 0) ? oy(i) : oy(i + sy))
+                                         : ((sgn < 0) ? oz(i) : oz(i + sz));
+            const double nd = (d == 0) ? gnx(j) : (d == 1) ? gny(j) : gnz(j);
+            const double th = vof::pcGfmTheta(gphi(j), nd, (double)sgn, thMin, thMax);
+            const double coef = kd * of / th;
+            // replace this face's interior coupling (band = -k_f of, AC += k_f of) by the Dirichlet
+            // one, without double counting: AC += coef + band, band = 0.
+            CCField band = (d == 0)   ? ((sgn < 0) ? AW : AE)
+                           : (d == 1) ? ((sgn < 0) ? AS : AN)
+                                      : ((sgn < 0) ? AB : AT);
+            acc += coef + band(i);
+            band(i) = 0.0;
+            dac += coef * tgam(j);
+          }
+        AC(i) += acc;
+        gfmB(i) = dac;
+      });
+}
+
+// Add the plane-anchored Dirichlet contribution to the RHS of the unmasked rows.
+inline void scalarAddGfmRhs(CCField b, CCConst gfmB, CCConst mask, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::scalar_gfm_rhs", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+        if (mask(i) > 0.5)
+          return;
+        b(i) += gfmB(i);
       });
 }
 

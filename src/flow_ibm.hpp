@@ -57,6 +57,7 @@
 #include "vof/surface_tension.hpp"  // VoF rung V4: balanced-force CSF + the capillary dt
 #include "vof/phase_change.hpp"    // VoF Part II rungs P0/P1: mass flux, plane-shift regression
 #include "vof/wetting_dynamic.hpp"  // VoF rung V6: dynamic contact angle + hysteresis
+#include "vof/energy_advect.hpp"   // VoF Part II rung P2/P3: consistent rho c_p T transport
 
 namespace peclet::flow {
 
@@ -2145,6 +2146,9 @@ class Solver {
     // together with the momentum it shares its fluxes with — see advectVofMomentum().
     if (!vofMomEnabled_)
       advectVof();
+    // WO-P23: refresh k(C) / (rho c_p)(C) from the colour the energy solve is about to see. No-op
+    // unless the consistent-energy transport is on.
+    pcUpdateEnergyProps();
     // WO-P01: refresh the energy scalar's per-cell Dirichlet set from the colour the energy solve
     // is about to see. No-op unless the thermal mass flux is on.
     pcUpdateThermalMask();
@@ -5937,19 +5941,44 @@ class Solver {
     fillGhosts(Vf);
     fillGhosts(Wf);  // face velocities need the ±2 advection reach
     for (auto& sc : scalars_) {
-      scalarBuildDiffusionOpen(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(ox_),
-                               CCConst(oy_), CCConst(oz_), sc.D, idt, e_, G);
-      applyScalarBcStencil(sc);  // re-open Dirichlet domain faces (set_domain_bc closes openness)
+      // WO-P23: the CONSISTENT-ENERGY branch — per-cell k(C) in the bands, a rho c_p(C) time term,
+      // and NO advective term (the transport was already done geometrically with the colour's own
+      // fluxes in advectVof). Taken OUTSIDE the kernels, so a scalar without `energy` executes the
+      // validated constant-D bodies verbatim.
+      const bool energy = sc.energy && sc.kcell.extent(0) == n_;
+      const bool hasMask = sc.dmask.extent(0) == n_;
+      if (energy) {
+        scalarBuildDiffusionVarK(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(ox_),
+                                 CCConst(oy_), CCConst(oz_), CCConst(sc.kcell), CCConst(sc.rcp),
+                                 CCConst(sc.dmask), idt, e_, G);
+        applyScalarBcStencilVar(sc);
+      } else {
+        scalarBuildDiffusionOpen(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(ox_),
+                                 CCConst(oy_), CCConst(oz_), sc.D, idt, e_, G);
+        applyScalarBcStencil(sc);  // re-open Dirichlet domain faces (set_domain_bc closes openness)
+      }
+      // WO-P23: the PLANE-ANCHORED (ghost-fluid) form of that Dirichlet set — the pure cells'
+      // rows carry the condition at the PLIC plane and never read the interfacial cell's value.
+      const bool gfm = hasMask && pcPlaneDir_ && sc.gfmB.extent(0) == n_ && pcGphi_.extent(0) == n_;
+      if (gfm)
+        scalarMaskGfm(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, sc.gfmB, CCConst(ox_),
+                      CCConst(oy_), CCConst(oz_), CCConst(sc.dmask), CCConst(pcTgam_),
+                      CCConst(pcGn_[0]), CCConst(pcGn_[1]), CCConst(pcGn_[2]), CCConst(pcGphi_),
+                      CCConst(sc.kcell), sc.D, energy, pcGfmThMin_, pcGfmThMax_, e_, G);
       // WO-P01: the optional PER-CELL Dirichlet set (interfacial cells at T_sat). Inert — and the
       // operator therefore bit-identical — until a caller allocates the mask.
-      const bool hasMask = sc.dmask.extent(0) == n_;
       if (hasMask)
         scalarMaskStencil(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(sc.dmask), e_,
                           G);
       Kokkos::deep_copy(sc.cOld, sc.c);
       scalarFillGhosts(sc);
-      scalarBuildRhs(sc.b, CCConst(sc.cOld), CCConst(Uf), CCConst(Vf), CCConst(Wf), CCConst(ox_),
-                     CCConst(oy_), CCConst(oz_), idt, sc.scheme, e_, G);
+      if (energy)
+        scalarBuildRhsHeat(sc.b, CCConst(sc.cOld), CCConst(sc.rcp), idt, e_, G);
+      else
+        scalarBuildRhs(sc.b, CCConst(sc.cOld), CCConst(Uf), CCConst(Vf), CCConst(Wf), CCConst(ox_),
+                       CCConst(oy_), CCConst(oz_), idt, sc.scheme, e_, G);
+      if (gfm)
+        scalarAddGfmRhs(sc.b, CCConst(sc.gfmB), CCConst(sc.dmask), e_, G);
       if (hasMask)
         scalarMaskRhs(sc.b, sc.c, CCConst(sc.dmask), CCConst(sc.dval), e_, G);
       // implicit diffusion: red-black Gauss-Seidel with a ghost fill before each color sweep.
@@ -6566,10 +6595,19 @@ class Solver {
     }
     bridgeVelocityToVof();
     bridgeColourToVof();
-    vofAdv_.advect(dt, vofStep_++);
+    if (pcEnergy_) {  // WO-P23: the temperature rides the same sweeps here too
+      ScalarField& sc = scalarField(pcTName_);
+      copyInner(vofEnergy_.temperature(), e3_, kVofG, CCConst(sc.c), e_, G);
+      vofEnergy_.advect(vofAdv_, dt, vofStep_++);
+      copyInner(sc.c, e_, G, CCConst(vofEnergy_.temperature()), e3_, kVofG);
+      scalarFillGhosts(sc);
+    } else {
+      vofAdv_.advect(dt, vofStep_++);
+    }
     copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
     zeroSolidColour();
     fillPropGhosts(cField_);
+    pcUpdateEnergyProps();
   }
   // --- Part III rung W0 (WO-W0): the per-bubble VoF BLOCK container -----------------------------
   //
@@ -7432,7 +7470,19 @@ class Solver {
     bridgeVelocityToVof();
     bridgeColourToVof();
     vofAdv_.resetBcFaceVolume();  // WO-R: the per-step boundary liquid ledger
-    vofAdv_.advect(dt_, vofStep_++);
+    if (pcEnergy_) {
+      // WO-P23: the CONSISTENT rho c_p T transport. The temperature rides the SAME sweeps, planes
+      // and fluxes as the colour (`vof/energy_advect.hpp`), so it has to be bridged onto the g=3
+      // block first and taken off it after; the scalar module then does diffusion ONLY (its
+      // `energy` flag switches off the Koren advective term and the constant-D operator).
+      ScalarField& sc = scalarField(pcTName_);
+      copyInner(vofEnergy_.temperature(), e3_, kVofG, CCConst(sc.c), e_, G);
+      vofEnergy_.advect(vofAdv_, dt_, vofStep_++);
+      copyInner(sc.c, e_, G, CCConst(vofEnergy_.temperature()), e3_, kVofG);
+      scalarFillGhosts(sc);
+    } else {
+      vofAdv_.advect(dt_, vofStep_++);
+    }
     vofHarvestBcVolumes();
     // Back to the G=2 registry mirror, then ITS ghost policy: the closures write inner cells only,
     // but the property face means (rho_f in the momentum diagonal, the projection coefficient, the
@@ -7608,7 +7658,9 @@ class Solver {
     long fallbackCells = 0;      ///< interfacial cells whose +n walk found no pure gas cell
     double unresolved = 0.0;     ///< clip residue no neighbour could absorb (pushed anyway)
     double minC = 0.0, maxC = 0.0;
-    double area = 0.0;  ///< sum of the PLIC polygon areas over interfacial cells (h^2)
+    double area = 0.0;    ///< sum of the PLIC polygon areas over interfacial cells (h^2)
+    double bandDiv = 0.0; ///< max |div(open u)| over interfacial cells (WO-P23; see pcBandDivergence)
+    double Tmin = 0.0, Tmax = 0.0;  ///< energy-scalar extrema (consistent transport only)
   };
 
   /// Turn on phase change. `rhoG`/`rhoL` are the phase densities used by the regression
@@ -7690,6 +7742,148 @@ class Solver {
   }
   void setPhaseChangeThermalOff() { pcThermal_ = false; }
 
+  // --- WO-P23 (rungs P2/P3) --------------------------------------------------------------------
+
+  /// The PLANE-ANCHORED (ghost-fluid) Dirichlet condition, ON by default.
+  ///
+  /// Rungs P0/P1 pinned the whole interfacial CELL at `T_G`, so the numerical thermal boundary sat
+  /// at the cell CENTRE while the mass-flux gradient is fitted from the PLIC PLANE — an O(h)
+  /// mismatch that changes sign as the interface sweeps through a cell, and the first-order
+  /// component of the P1 Stefan error (WO-P01 finding 6). With this on, the interfacial cell is
+  /// instead given the value the one-sided linear profile takes at the cell centre,
+  /// `T_cell = T_G + (dT/dn) phi_c`, with `phi_c` the signed normal distance from the plane to the
+  /// centre and `dT/dn` the SAME weighted least-squares one-sided fit the mass flux uses, refitted
+  /// on the CURRENT colour and temperature. On a saturated side the fit returns 0 and the condition
+  /// degenerates to the hard Dirichlet exactly, so it is inert wherever the old form was right.
+  /// `set_phase_change_plane_dirichlet(False)` restores the P0/P1 behaviour bit-for-bit.
+  void setPhaseChangePlaneDirichlet(bool on) { pcPlaneDir_ = on; }
+  bool phaseChangePlaneDirichlet() const { return pcPlaneDir_; }
+
+  /// The QUADRATIC one-sided gradient fit (`T - T_G = G phi + Q phi^2`) instead of the linear one.
+  /// This is VOF_PLAN §9 item 1's Aslam quadratic extrapolation in least-squares form: the same
+  /// samples and the same stencil reach, one more basis function. Once the plane-anchored Dirichlet
+  /// has removed the cell-centre mismatch, the linear fit's `O(T'' h)` curvature bias is the
+  /// leading error of the rung.
+  void setPhaseChangeQuadraticFit(bool on) { pcQuadFit_ = on; }
+  bool phaseChangeQuadraticFit() const { return pcQuadFit_; }
+
+  /// Turn on the CONSISTENT energy transport (VOF_PLAN §9 item 6) for the scalar
+  /// `set_phase_change_thermal` names: `rho c_p T` is advected with the colour advection's OWN
+  /// geometric fluxes (`vof/energy_advect.hpp`) instead of the scalar module's Koren TVD flux, and
+  /// the implicit solve carries per-cell `k(C)` (the `k_gas`/`k_liquid` of
+  /// `set_phase_change_thermal`) and a `rho c_p(C)` time term instead of a constant diffusivity.
+  ///
+  /// This is what stops artificial heating at a high `rho c_p` ratio: with two different fluxes the
+  /// heat content carried into a mixed cell is divided by a heat capacity built from another flux,
+  /// an error of order `d(rho c_p)` — 2000x at water/steam. Requires the thermal mass flux.
+  void setPhaseChangeEnergy(double rcpGas, double rcpLiquid) {
+    requirePhaseChange("set_phase_change_energy");
+    if (!pcThermal_)
+      throw std::runtime_error(
+          "set_phase_change_energy: call set_phase_change_thermal first (the consistent transport "
+          "is for the energy scalar it names)");
+    if (!(rcpGas > 0.0) || !(rcpLiquid > 0.0))
+      throw std::runtime_error("set_phase_change_energy: both phase rho*c_p must be > 0");
+    pcRcpG_ = rcpGas;
+    pcRcpL_ = rcpLiquid;
+    if (pcKcell_.extent(0) != n_) {
+      pcKcell_ = CCField("pc_k", n_);
+      pcRcp_ = CCField("pc_rcp", n_);
+    }
+    ScalarField& sc = scalarField(pcTName_);
+    sc.energy = true;
+    sc.kcell = pcKcell_;
+    sc.rcp = pcRcp_;
+    if (!vofEnergy_.initialized())
+      vofEnergy_.init(vofAdv_, pcRcpG_, pcRcpL_);
+    else
+      vofEnergy_.setPhaseRcp(pcRcpG_, pcRcpL_);
+    vofEnergy_.exchange = [this](CCField f) { this->vofExchangeScalar(f); };
+    pcEnergy_ = true;
+    pcUpdateEnergyProps();
+  }
+  void setPhaseChangeEnergyOff() {
+    pcEnergy_ = false;
+    if (!pcTName_.empty() && hasScalar(pcTName_))
+      scalarField(pcTName_).energy = false;
+  }
+  bool phaseChangeEnergy() const { return pcEnergy_; }
+
+  /// The BAND-EXTENDED LIQUID VELOCITY of VOF_PLAN §9 item 3, as a MEASUREMENT rather than a
+  /// switch. What that item exists to guarantee is that the field Weymouth-Yue advects the colour
+  /// with is the LIQUID velocity at every interfacial cell — which the source deposit already
+  /// delivers when it lands in the compact pure-gas layer behind the interface (WO-P01's P0b row
+  /// measured the interfacial cell's own faces at the liquid velocity to 1e-19). The quantity that
+  /// decides whether an extension is needed is therefore the discrete divergence of the ADVECTING
+  /// field at the interfacial cells: it is exactly zero iff no deposit sits on a face WY reads.
+  /// `phase_change_diagnostics()['band_div']` reports `max |div(open u)|` over interfacial cells;
+  /// a nonzero value there, times the frozen dilation flag, is the volume the colour update
+  /// creates, so it is the direct read-out and not a proxy.
+  double pcBandDivergence() {
+    const C3 e = e_;
+    const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
+    CCConst c = CCConst(cField_), U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u);
+    CCConst ox = CCConst(ox_), oy = CCConst(oy_), oz = CCConst(oz_);
+    const double eps = pcInterfaceEps_;
+    double m = 0.0;
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_band_div",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          const long i = (long)x + (long)y * sy + (long)z * sz;
+          if (!vof::pcIsInterfacial(c(i), eps))
+            return;
+          const double d = (ox(i + sx) * U(i + sx) - ox(i) * U(i)) +
+                           (oy(i + sy) * V(i + sy) - oy(i) * V(i)) +
+                           (oz(i + sz) * W(i + sz) - oz(i) * W(i));
+          acc = Kokkos::fmax(acc, Kokkos::fabs(d));
+        },
+        Kokkos::Max<double>(m));
+    Kokkos::fence();
+    return Kokkos::fmax(m, 0.0);
+  }
+
+  /// Refresh `k(C)` and `(rho c_p)(C)` on the G=2 block from the current colour.
+  void pcUpdateEnergyProps() {
+    if (!pcEnergy_)
+      return;
+    const C3 e = e_;
+    CCField kf = pcKcell_, rf = pcRcp_;
+    CCConst c = CCConst(cField_);
+    const double kg = pcKg_, kl = pcKl_, rg = pcRcpG_, rl = pcRcpL_;
+    Kokkos::parallel_for(
+        "peclet::flow::pc_energy_props",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const double cl = Kokkos::fmin(Kokkos::fmax(c(i), 0.0), 1.0);
+          kf(i) = vof::pcPhaseMix(kg, kl, cl);
+          rf(i) = vof::pcPhaseMix(rg, rl, cl);
+        });
+    Kokkos::fence();
+    fillPropGhosts(pcKcell_);
+    fillPropGhosts(pcRcp_);
+  }
+
+  /// The colour block's ghost policy WITHOUT the colour-specific rules (no solid-band fill, no VoF
+  /// boundary colour): the halo/periodic exchange plus the non-periodic zero-gradient clamp. This
+  /// is the temperature's policy on the g=3 block.
+  void vofExchangeScalar(CCField f) {
+    const bool px = vofAxisPeriodic(0), py = vofAxisPeriodic(1), pz = vofAxisPeriodic(2);
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && vofDev_)
+      vofDev_->exchange(f);
+    else
+#endif
+      vof::periodicFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, px, py, pz);
+    if (px && py && pz)
+      return;
+    const I3 gs = vofGlobalSize(), org = vofOrigin();
+    vof::clampFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, org, gs, px, py, pz);
+  }
+
   /// A PRESCRIBED extra divergence source (1/s), x-fastest over the inner region, added to the
   /// Poisson RHS exactly like the phase-change deposit: the projection then solves for
   /// `div(open u) = S_pc + S_user`. This is how a CLOSED (periodic) box is made compatible with a
@@ -7704,6 +7898,46 @@ class Solver {
   }
   void clearDivergenceSource() { pcHasUser_ = false; }
 
+  /// WO-P23: an AUTO-BALANCED sink region for the phase-change divergence source. `w` is a
+  /// non-negative weight per inner cell (x-fastest); after every deposit the solver subtracts
+  /// `(global sum of the phase-change source) * w(i) / (global sum of w)` from the source field, so
+  /// the Poisson RHS is EXACTLY compatible in a closed domain, every step, with no user
+  /// bookkeeping. This is the generalisation of WO-P01's hand-set sink plane, and it is what makes
+  /// a closed-box phase-change run possible without the variable-density OUTFLOW operator (whose
+  /// density-ratio inconsistency is WO-R2's subject): the sink is a region of the LIQUID far from
+  /// the interface, where the exact solution simply has the liquid leaving.
+  void setDivergenceSink(const std::vector<double>& w) {
+    requirePhaseChange("set_divergence_sink");
+    if (pcSink_.extent(0) != n_)
+      pcSink_ = addField("div_sink");
+    scatterInner(pcSink_, w);
+    fillPropGhosts(pcSink_);
+    const C3 e = e_;
+    CCConst wv = CCConst(pcSink_);
+    double acc = 0.0;
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_sink_weight",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& a) {
+          a += wv((long)x + (long)y * e.x + (long)z * (long)e.x * e.y);
+        },
+        acc);
+    Kokkos::fence();
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      double g = 0;
+      MPI_Allreduce(&acc, &g, 1, MPI_DOUBLE, MPI_SUM, comm_);
+      acc = g;
+    }
+#endif
+    if (!(acc > 0.0))
+      throw std::runtime_error("set_divergence_sink: the weights must have a positive global sum");
+    pcSinkW_ = acc;
+    pcHasSink_ = true;
+  }
+  void clearDivergenceSink() { pcHasSink_ = false; }
+
   /// Kinematic entry point (the P0a/P1 driver): build `mdot`/`A_G`/`n` from the current colour and
   /// temperature, deposit the divergence source (for the census only — nothing is projected here)
   /// and apply the interface regression. No Navier-Stokes step, no advection.
@@ -7712,6 +7946,7 @@ class Solver {
     pcBuildInterface();
     pcScatterSource();
     pcRegress(dt);
+    pcUpdateEnergyProps();
     pcUpdateThermalMask();
   }
 
@@ -7745,6 +7980,9 @@ class Solver {
     Kokkos::fence();
     d.minC = mn;
     d.maxC = mx;
+    d.bandDiv = pcBandDivergence();
+    if (pcEnergy_ && vofEnergy_.initialized())
+      vofEnergy_.extrema(d.Tmin, d.Tmax);
     return d;
   }
 
@@ -7757,6 +7995,17 @@ class Solver {
   /// the OWNER's values — which is what makes both decomposition-independent WITHOUT any
   /// reverse/add halo and without an atomic scatter (bitwise MPI, not a reduction floor).
   void pcBuildInterface() {
+    // WO-P23 (a defect found in the P0/P1 code): the gradient fit reads the temperature at +-2, so
+    // the energy scalar's ghost band has to be VALID here. `set_field` and the coupling drivers
+    // write inner cells only, and `advanceScalars` fills the ghosts at its END — so the FIRST
+    // `apply_phase_change` / `step` of every run fitted its one-sided gradients against a band of
+    // zeros. Measured on the P2 sucking-interface kernel probe (an exact analytic state, no time
+    // stepping, quasi-2D so the y/z ghosts are inside the 5^3 stencil): mdot came out
+    // **8.16 against the exact 18.48**, a 56 % error that did NOT converge under refinement,
+    // because the transverse ghost samples are counted as pure liquid at T = 0 and pull the fit
+    // towards zero. One line, and it is a correctness fix, not a tolerance.
+    if (pcThermal_)
+      scalarFillGhosts(scalarField(pcTName_));
     const C3 e = e_;
     const long sy = e_.x, sz = (long)e_.x * e_.y;
     CCField mdot = pcMdot_, area = pcArea_, dep = pcDep_, tgt = pcTgt_;
@@ -7765,6 +8014,7 @@ class Solver {
     const bool thermal = pcThermal_;
     CCConst T = thermal ? CCConst(scalarField(pcTName_).c) : CCConst(cField_);
     const double eps = pcInterfaceEps_, pureEps = pcPureEps_;
+    const bool quad = pcQuadFit_;
     const double Tsat = pcTsat_, kg = pcKg_, kl = pcKl_, hlv = pcHlv_, Rint = pcRint_;
     const double rhoG = pcRhoG_, rhoL = pcRhoL_;
     long nIface = 0, nFallback = 0;
@@ -7819,7 +8069,8 @@ class Solver {
                   else if (cj >= 1.0 - pureEps && phi < 0.0)
                     vof::pcGradAdd(fl, w, phi, T(j), Tg);
                 }
-            md = vof::pcMassFlux(kg, vof::pcGradSolve(fg), kl, vof::pcGradSolve(fl), hlv);
+            md = quad ? vof::pcMassFlux(kg, vof::pcGradSolve2(fg), kl, vof::pcGradSolve2(fl), hlv)
+                      : vof::pcMassFlux(kg, vof::pcGradSolve(fg), kl, vof::pcGradSolve(fl), hlv);
             mdot(i) = md;
           }
           area(i) = A;
@@ -7936,6 +8187,28 @@ class Solver {
         },
         sum, ncell);
     Kokkos::fence();
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      double g = 0;
+      MPI_Allreduce(&sum, &g, 1, MPI_DOUBLE, MPI_SUM, comm_);
+      sum = g;
+    }
+#endif
+    // WO-P23: the auto-balanced sink. Subtract the GLOBAL deposited source, spread over the sink
+    // weights, so a closed domain's Poisson RHS is compatible by construction.
+    if (pcHasSink_) {
+      const double f = sum / pcSinkW_;
+      CCConst wv = CCConst(pcSink_);
+      Kokkos::parallel_for(
+          "peclet::flow::pc_sink_apply",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                         {e.x - G, e.y - G, e.z - G}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i = (long)x + (long)y * e.x + (long)z * sz;
+            src(i) -= f * wv(i);
+          });
+      Kokkos::fence();
+    }
     pcDiag_.sourceSum = sum;
     pcDiag_.sourceCells = ncell;
     fillPropGhosts(pcSrc_);
@@ -8068,21 +8341,97 @@ class Solver {
     if (!pcThermal_)
       return;
     ScalarField& sc = scalarField(pcTName_);
+    scalarFillGhosts(sc);  // the carried-value refit reads T at +-2 (see pcBuildInterface)
     const C3 e = e_;
-    CCField mk = sc.dmask, dv = sc.dval;
-    CCConst c = CCConst(cField_), md = CCConst(pcMdot_);
-    const double eps = pcInterfaceEps_, Tsat = pcTsat_, Rint = pcRint_;
+    const long sy = e_.x, sz = (long)e_.x * e_.y;
+    CCField mk = sc.dmask, dv = sc.dval, tg = pcTgam_;
+    CCField gn0 = pcGn_[0], gn1 = pcGn_[1], gn2 = pcGn_[2], gph = pcGphi_;
+    CCConst c = CCConst(cField_), md = CCConst(pcMdot_), T = CCConst(sc.c);
+    const double eps = pcInterfaceEps_, pureEps = pcPureEps_, Tsat = pcTsat_, Rint = pcRint_;
+    const bool carry = pcPlaneDir_, quad = pcQuadFit_;
+    const long syl = sy, szl = sz;
     Kokkos::parallel_for(
         "peclet::flow::pc_thermal_mask",
         Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
                                                        {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const long i = (long)x + (long)y * e.x + (long)z * sz;
           const bool on = vof::pcIsInterfacial(c(i), eps);
+          const double Tgam = vof::pcInterfaceTemperature(Tsat, md(i), Rint);
           mk(i) = on ? 1.0 : 0.0;
-          dv(i) = vof::pcInterfaceTemperature(Tsat, md(i), Rint);
+          tg(i) = Tgam;
+          dv(i) = Tgam;
+          gn0(i) = 0.0;
+          gn1(i) = 0.0;
+          gn2(i) = 0.0;
+          gph(i) = 0.0;
+          if (!on)
+            return;
+          // WO-P23: the plane geometry the PLANE-ANCHORED (ghost-fluid) Dirichlet rows need — the
+          // unit normal and the signed centre distance of THIS cell's PLIC plane, rebuilt from the
+          // colour the energy solve is about to run with (the head-of-step values belong to C^n and
+          // the interface has moved since).
+          double st[27];
+          for (int kk = -1; kk <= 1; ++kk)
+            for (int jj = -1; jj <= 1; ++jj)
+              for (int ii = -1; ii <= 1; ++ii)
+                st[vof::plicSt(ii + 1, jj + 1, kk + 1)] = c(i + ii + jj * sy + kk * sz);
+          double m[3];
+          vof::mycNormal(st, m);
+          double n[3] = {0.0, 0.0, 0.0};
+          if (!(vof::pcUnitNormal(m[0], m[1], m[2], n) > 0.0))
+            return;
+          const double al = vof::plicAlpha(m[0], m[1], m[2], c(i));
+          gn0(i) = n[0];
+          gn1(i) = n[1];
+          gn2(i) = n[2];
+          const double phic = vof::pcCentreDistance(m[0], m[1], m[2], al);
+          gph(i) = phic;
+          if (!carry)
+            return;
+          // The value this cell CARRIES until the interface sweeps past it and it becomes pure.
+          // Nothing reads it across a face (the plane-anchored rows use `tg`), so it is free to be
+          // the one-sided extrapolation of the profile on the side the cell CENTRE lies on.
+          const bool gasSide = phic > 0.0;
+          vof::PcGradFit f;
+          for (int dz = -2; dz <= 2; ++dz)
+            for (int dy = -2; dy <= 2; ++dy)
+              for (int dx = -2; dx <= 2; ++dx) {
+                if (dx == 0 && dy == 0 && dz == 0)
+                  continue;
+                const double w = vof::pcGradWeight(dx, dy, dz, n);
+                if (!(w > 0.0))
+                  continue;
+                const long j = i + dx + dy * syl + dz * szl;
+                const double cj = c(j);
+                const double phi = vof::pcOffsetDistance(phic, n, dx, dy, dz);
+                if (gasSide) {
+                  if (cj <= pureEps && phi > 0.0)
+                    vof::pcGradAdd(f, w, phi, T(j), Tgam);
+                } else if (cj >= 1.0 - pureEps && phi < 0.0) {
+                  vof::pcGradAdd(f, w, phi, T(j), Tgam);
+                }
+              }
+          dv(i) = vof::pcCarriedValue(Tgam, quad ? vof::pcGradSolve2(f) : vof::pcGradSolve(f), phic);
         });
     Kokkos::fence();
+    // The GFM rows read mask / dval / n / phi of a FACE NEIGHBOUR, i.e. at depth 1: exchange, then
+    // kill the periodic wrap on non-periodic domain faces (a wrapped "interfacial" ghost would turn
+    // a domain-boundary face into a phantom Dirichlet).
+    fillGhosts(sc.dmask);
+    fillGhosts(sc.dval);
+    fillGhosts(pcTgam_);
+    fillGhosts(pcGn_[0]);
+    fillGhosts(pcGn_[1]);
+    fillGhosts(pcGn_[2]);
+    fillGhosts(pcGphi_);
+    pcZeroDomainGhosts(sc.dmask);
+    pcZeroDomainGhosts(sc.dval);
+    pcZeroDomainGhosts(pcTgam_);
+    pcZeroDomainGhosts(pcGn_[0]);
+    pcZeroDomainGhosts(pcGn_[1]);
+    pcZeroDomainGhosts(pcGn_[2]);
+    pcZeroDomainGhosts(pcGphi_);
   }
 
   /// Zero the two ghost layers on every NON-periodic domain face this rank owns. Used for the
@@ -8156,6 +8505,14 @@ class Solver {
     if (sc.dmask.extent(0) != n_) {
       sc.dmask = CCField(name + "_dmask", n_);
       sc.dval = CCField(name + "_dval", n_);
+      sc.gfmB = CCField(name + "_gfmb", n_);
+    }
+    if (pcGphi_.extent(0) != n_) {
+      pcTgam_ = CCField("pc_tgam", n_);
+      pcGn_[0] = CCField("pc_gnx", n_);
+      pcGn_[1] = CCField("pc_gny", n_);
+      pcGn_[2] = CCField("pc_gnz", n_);
+      pcGphi_ = CCField("pc_gphi", n_);
     }
   }
 
@@ -8490,6 +8847,19 @@ class Solver {
   // openness (ox_=0), which correctly makes Neumann/adiabatic walls zero-flux but would also cut a
   // Dirichlet wall's heat path. For each Dirichlet face, restore the face coefficient (band = -D,
   // A_C += D); the ghost carries 2*value - inner so the row is the standard Dirichlet operator.
+  /// Variable-k sibling: at a Dirichlet domain face the reopened band takes the boundary CELL's
+  /// own `k(C)` instead of the constant `D`. Same rule, same rows; only the coefficient differs.
+  void applyScalarBcStencilVar(ScalarField& sc) {
+    for (int f = 0; f < 6; ++f) {
+      if (sc.bc[f] != 2 || !touchesGlobalFace(f))
+        continue;
+      const int a = f / 2, side = f % 2;
+      CCField band = (a == 0)   ? (side == 0 ? sc.AW : sc.AE)
+                     : (a == 1) ? (side == 0 ? sc.AS : sc.AN)
+                                : (side == 0 ? sc.AB : sc.AT);
+      patchScalarDirichletFaceVar(sc.AC, band, sc.kcell, a, side);
+    }
+  }
   void applyScalarBcStencil(ScalarField& sc) {
     for (int f = 0; f < 6; ++f) {
       if (sc.bc[f] != 2 || !touchesGlobalFace(f))
@@ -8504,6 +8874,27 @@ class Solver {
   // nvcc requires member functions that contain extended (device) lambdas to be PUBLIC — the
   // OpenMP/host build accepts them private, so the breakage only shows on the CUDA backend.
  public:
+  void patchScalarDirichletFaceVar(CCField AC, CCField band, CCField kc, int a, int side) {
+    const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
+    const int nt1 = (t1 == 0) ? nx_ : (t1 == 1) ? ny_ : nz_;
+    const int nt2 = (t2 == 0) ? nx_ : (t2 == 1) ? ny_ : nz_;
+    const int na = (a == 0) ? nx_ : (a == 1) ? ny_ : nz_;
+    const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
+    const long sa = (a == 0) ? sx : (a == 1) ? sy : sz;
+    const long st1 = (t1 == 0) ? sx : (t1 == 1) ? sy : sz;
+    const long st2 = (t2 == 0) ? sx : (t2 == 1) ? sy : sz;
+    const int aInner = (side == 0) ? G : (G + na - 1);
+    CCExec space;
+    Kokkos::parallel_for(
+        "peclet::flow::scalar_bc_stencil_var",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {G, G}, {G + nt1, G + nt2}),
+        KOKKOS_LAMBDA(int j1, int j2) {
+          const long i = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
+          const double D = kc(i);
+          AC(i) += D + band(i);
+          band(i) = -D;
+        });
+  }
   void patchScalarDirichletFace(CCField AC, CCField band, double D, int a, int side) {
     const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
     const int nt1 = (t1 == 0) ? nx_ : (t1 == 1) ? ny_ : nz_;
@@ -8780,6 +9171,19 @@ class Solver {
   std::string pcTName_;
   CCField pcMdot_, pcSrc_, pcUser_, pcArea_, pcNrm_[3], pcDep_, pcTgt_, pcCnew_, pcDefic_;
   PhaseChangeDiagnostics pcDiag_;
+  // --- WO-P23 (rungs P2/P3) --------------------------------------------------------------------
+  bool pcPlaneDir_ = true;   // plane-anchored (GFM) Dirichlet rows instead of pinning the cell
+  double pcGfmThMin_ = 0.1, pcGfmThMax_ = 1.9;  // the GFM distance clamp (cells)
+  bool pcQuadFit_ = true;    // quadratic (Aslam) one-sided gradient fit (WO-P23 default)
+  bool pcEnergy_ = false;    // consistent rho c_p T transport + variable k(C)/rho c_p(C) operator
+  double pcRcpG_ = 1.0, pcRcpL_ = 1.0;
+  CCField pcKcell_, pcRcp_;  // k(C) and (rho c_p)(C) on the G=2 block, refreshed per step
+  vof::VofEnergyAdvector vofEnergy_;
+  double pcBandDiv_ = 0.0;   // max |div(open u)| over interfacial cells, last diagnostics call
+  CCField pcGn_[3], pcGphi_, pcTgam_;  // plane normal, centre distance, T_Gamma (WO-P23)
+  CCField pcSink_;           // auto-balanced sink weights (WO-P23)
+  bool pcHasSink_ = false;
+  double pcSinkW_ = 0.0;
   std::vector<Closure> closures_;     // property/body-force closures (applied at top of step())
   CCField cellForce_[3];  // per-cell momentum body force (Boussinesq / CFD-DEM feedback)
   bool hasCellForce_ = false;

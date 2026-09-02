@@ -1621,6 +1621,67 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "set_phase_change_thermal_off", [](S& s) { s.setPhaseChangeThermalOff(); },
           "Stop computing mdot from the temperature (back to the prescribed field).")
+      // --- Phase change, Part II rungs P2/P3 (WO-P23) ------------------------------------------
+      .def(
+          "set_phase_change_plane_dirichlet",
+          [](S& s, bool on) { s.setPhaseChangePlaneDirichlet(on); }, nb::arg("on"),
+          "The PLANE-ANCHORED (ghost-fluid) interfacial Dirichlet condition. ON by default.\n\n"
+          "Rungs P0/P1 pinned the whole interfacial CELL at T_G, so the numerical thermal boundary "
+          "sat at the cell CENTRE while the mass-flux gradient is fitted from the PLIC PLANE — a "
+          "mismatch of up to half a cell that CHANGES SIGN as the interface sweeps through a cell, "
+          "and the first-order component of the P1 Stefan error (WO-P01 finding 6). With this on, "
+          "the condition becomes PER FACE: for a pure cell i whose neighbour j is interfacial, that "
+          "face's row carries k*open*(T_i - T_G)/theta with theta the distance in cells from i's "
+          "centre to j's PLIC plane along the face's own axis, and the interfacial cell's own value "
+          "is never read by any neighbour.\n\n"
+          "A per-CELL value (the literal reading of the work order) does NOT work and the "
+          "measurement is in the findings: giving the interfacial cell the value the one-sided "
+          "profile takes at its centre is right for the side the fit came from and wrong for the "
+          "other side — on the P1 Stefan ladder it heats the saturated liquid through the "
+          "interfacial cell's liquid-side face, which gives the liquid a spurious gradient that "
+          "feeds straight back into mdot: +6.20/+5.62/+5.42 % at N = 64/128/256, order 0.10, "
+          "against +1.31/+0.59/+0.20 % and order 1.37 for the cell-centre pinning it was meant to "
+          "improve on. The per-face form has no such asymmetry (the liquid-side face reads T_G at "
+          "its own theta, i.e. exactly zero flux for a saturated liquid).\n\n"
+          "False restores the rung P0/P1 behaviour bit-for-bit.")
+      .def(
+          "set_phase_change_quadratic_fit",
+          [](S& s, bool on) { s.setPhaseChangeQuadraticFit(on); }, nb::arg("on"),
+          "Fit the one-sided interfacial temperature gradients QUADRATICALLY through the interface "
+          "value (T - T_G = G phi + Q phi^2) instead of linearly. This is VOF_PLAN section 9 item "
+          "1's Aslam quadratic extrapolation in least-squares form — the same 5^3 pure-cell "
+          "samples, the same Malan collinearity weights, one more basis function, no PDE sweeps. "
+          "Once the plane-anchored Dirichlet has removed the cell-centre mismatch, the linear fit's "
+          "O(T'' h) curvature bias is the leading error of the rung: its samples start about one "
+          "cell from the plane and reach two and a half, so a curved profile tilts the straight "
+          "line through the origin. ON by default (WO-P23): with the plane-anchored Dirichlet it takes "
+          "the P1 Stefan interface position from +0.195 % to +0.003 % at N = 256, and the mdot "
+          "kernel itself from order 1.1 to order 2.0. set(False) is the ablation.")
+      .def(
+          "set_phase_change_energy",
+          [](S& s, double rcp_gas, double rcp_liquid) {
+            s.setPhaseChangeEnergy(rcp_gas, rcp_liquid);
+          },
+          nb::arg("rho_cp_gas"), nb::arg("rho_cp_liquid"),
+          "CONSISTENT rho*c_p*T transport (VOF_PLAN section 9 item 6) for the scalar named by "
+          "set_phase_change_thermal. Two things change together:\n"
+          " (1) TRANSPORT: H = (rho c_p) T is advected with the colour advection's OWN geometric "
+          "fluxes, sweep order and frozen dilation flag (vof/energy_advect.hpp), and T is recovered "
+          "as H / (rho c_p)(C^{n+1}) — so a uniform temperature is preserved EXACTLY at any heat "
+          "capacity ratio. With two different fluxes the heat carried into a mixed cell is divided "
+          "by a capacity built from another flux: an error of order d(rho c_p), i.e. ~2000x at "
+          "water/steam, which is the artificial interfacial heating this removes.\n"
+          " (2) DIFFUSION: the implicit operator becomes A_C = rho c_p(C)/dt + sum_f k_f open_f "
+          "with k_f the arithmetic mean of the cells' k(C) (the k_gas/k_liquid of "
+          "set_phase_change_thermal) EXCEPT at a face touching a per-cell Dirichlet (interfacial) "
+          "cell, where the pure neighbour's own k is used — a Dirichlet row is an identity row, so "
+          "that coefficient's only job is the conductance with which the pure cell reaches a "
+          "boundary condition that already sits at the interface.\n"
+          "Units: rho*c_p in J/(cell^3 K), k in W/(cell K). Requires set_phase_change_thermal.")
+      .def(
+          "set_phase_change_energy_off", [](S& s) { s.setPhaseChangeEnergyOff(); },
+          "Back to the constant-diffusivity scalar operator and the Koren TVD advective term "
+          "(the rung P0/P1 energy path).")
       .def(
           "set_divergence_source",
           [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setDivergenceSource(grid_in(a)); },
@@ -1633,6 +1694,21 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "clear_divergence_source", [](S& s) { s.clearDivergenceSource(); },
           "Drop the prescribed divergence source (the field stays registered).")
+      .def(
+          "set_divergence_sink",
+          [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setDivergenceSink(grid_in(a)); },
+          nb::arg("weights"),
+          "WO-P23: an AUTO-BALANCED sink region for the phase-change divergence source. Give a "
+          "non-negative weight per cell (Fortran-order (nx,ny,nz)); after each deposit the solver "
+          "subtracts (global sum of the phase-change source) * w / (global sum of w), so a CLOSED "
+          "domain's Poisson RHS is exactly compatible every step with no user bookkeeping. Put the "
+          "weights in the LIQUID far from the interface, where the exact solution simply has the "
+          "liquid leaving. This is what makes a closed-box phase-change run possible without the "
+          "variable-density outflow operator (whose density-ratio inconsistency is WO-R2's "
+          "subject). Registered as the field 'div_sink'.")
+      .def(
+          "clear_divergence_sink", [](S& s) { s.clearDivergenceSink(); },
+          "Drop the auto-balanced sink region.")
       .def(
           "apply_phase_change", [](S& s, double dt) { s.applyPhaseChange(dt); }, nb::arg("dt"),
           "KINEMATIC phase-change step: build mdot / the PLIC areas / the normals, deposit the "
@@ -1660,6 +1736,9 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["unresolved"] = d.unresolved;
             r["min_C"] = d.minC;
             r["max_C"] = d.maxC;
+            r["band_div"] = d.bandDiv;
+            r["T_min"] = d.Tmin;
+            r["T_max"] = d.Tmax;
             return r;
           },
           "Per-rank phase-change census of the LAST step: mdot extrema/mean and the interfacial "
@@ -1667,7 +1746,11 @@ static void bind_solver(nb::module_& m, const char* name) {
           "the clip-and-redistribute ledger (|deficit| moved, and how many cells clipped at 0 / "
           "1), the deposited divergence source (its sum and how many cells received it), how many "
           "interfacial cells found NO pure gas cell within two cells along +n (the source then "
-          "stays put — a fallback that must be 0 on a resolved interface), and the colour extrema.")
+          "stays put — a fallback that must be 0 on a resolved interface), the colour extrema, "
+          "'band_div' = max|div(open u)| over the INTERFACIAL cells (WO-P23: the direct read-out of "
+          "whether the field Weymouth-Yue advects with is the liquid velocity there — the "
+          "band-extended velocity of VOF_PLAN section 9 item 3 is needed iff this is not at the "
+          "projection floor), and the energy-scalar extrema under the consistent transport.")
       .def(
           "set_csf_mode", [](S& s, int m) { s.setCsfMode(m); }, nb::arg("mode"),
           "ABLATION. 0 (default, the only production mode) evaluates the surface-tension force as "

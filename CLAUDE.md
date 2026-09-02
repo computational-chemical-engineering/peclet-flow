@@ -1191,14 +1191,65 @@ Four things this rung paid for, all measured (`doc/vof_workorders_v6.md`, WO-P01
   `div(open u) = S`, so it reports `max|S|`. Gate `max|div(u) − S|` instead.
 
 Scope, each enforced with a message: STAGGERED only, no immersed solid, and not composable with
-`enable_vof_momentum`. The energy scalar keeps `add_scalar`'s CONSTANT diffusivity — per-cell
-`k(C)` and the consistent `ρ c_p T` geometric transport (VOF_PLAN §9 item 6) are the P3 upgrade,
-and they cost nothing at the Stefan gate because the saturated liquid is pinned at `T_sat`. The
-band-extended liquid velocity (§9 item 3) is likewise P3. New Python: `enable_phase_change`,
+`enable_vof_momentum`. New Python: `enable_phase_change`,
 `set_mass_flux_uniform` / `set_mass_flux`, `set_phase_change_thermal` /
 `set_phase_change_thermal_off`, `set_divergence_source` / `clear_divergence_source`,
 `apply_phase_change(dt)` (the kinematic driver), `phase_change_diagnostics()`; the fields `"mdot"`,
 `"pc_source"` and `"div_source"` are ordinary registered fields.
+
+**Phase change — the thermal rungs P2 + P3 (WO-P23).** Three things change, and together they take
+the P1 Stefan interface position from **0.195 % to 0.003 %** at N = 256:
+
+- **The interfacial Dirichlet is PLANE-ANCHORED** (`set_phase_change_plane_dirichlet`, ON by
+  default). P0/P1 pinned the whole interfacial CELL at `T_Γ`, so the numerical thermal boundary sat
+  at the cell CENTRE while the mass-flux gradient is fitted from the PLIC PLANE — an O(h) mismatch
+  that changes sign as the interface sweeps through a cell. Now the condition is imposed PER FACE:
+  a pure cell whose neighbour is interfacial carries `k open (T_i − T_Γ)/θ` with `θ` the distance in
+  cells from its own centre to the neighbour's plane along that face's axis
+  (`vof::pcGfmTheta`, ghost-fluid). The interfacial cell's own value is never read by a neighbour,
+  which frees it to CARRY the one-sided extrapolation `T_Γ + (dT/dn) φ_c` — what it will need a few
+  steps later when the interface sweeps past and it becomes pure.
+- **The one-sided gradient fit is QUADRATIC** (`set_phase_change_quadratic_fit`, ON by default):
+  `T − T_Γ = G φ + Q φ²` on the same 5³ pure-cell samples with the same Malan weights. This is
+  VOF_PLAN §9 item 1's Aslam quadratic extrapolation in least-squares form — no PDE sweeps, no
+  extra stencil reach. It makes the `mdot` kernel itself **second order** (measured on an exact
+  analytic sucking-interface state, N = 64…512: linear order 1.07–1.24, quadratic **1.99**, error
+  **0.0024 %** at N = 512).
+- **`ρ c_p T` is transported CONSISTENTLY** (`set_phase_change_energy(rho_cp_gas, rho_cp_liquid)`,
+  `src/vof/energy_advect.hpp`): `H = (ρ c_p) T` rides the colour advection's OWN geometric fluxes,
+  sweep order and frozen dilation flag, and `T = H/(ρ c_p)(C^{n+1})` is recovered after each sweep;
+  the implicit solve then carries `A_C = ρ c_p(C)/dt + Σ_f k_f open_f` with `k_f` the arithmetic
+  mean of `k(C)` **except at a face touching a Dirichlet (interfacial) cell, where the pure
+  neighbour's own `k` is used** (a Dirichlet row is an identity row, so that coefficient's only job
+  is the conductance with which the pure cell reaches a boundary condition already sitting at the
+  interface). The decisive identity is the energy twin of WO-K's: a UNIFORM temperature survives an
+  arbitrary sharp colour advected by a uniform velocity at ANY heat-capacity ratio — measured
+  `max|T − T₀| =` **0** (bitwise) at `ρc_p` ratio 1e4 over 20 kinematic steps.
+
+Measured: **P1** (kinematic Stefan, St = 1, Fo = 0.5) **−0.014 / −0.002 / +0.003 %** at
+N = 64/128/256 with both switches on, against **+1.310 / +0.594 / +0.195 %** (order 1.14/1.61) with
+both off — the ablations show why BOTH are needed: plane-anchored alone reads +1.70/+0.84/+0.42 %
+(clean order 1.00 — the oscillation is gone but the fit's curvature bias remains) and the quadratic
+fit alone reads −2.53/−2.90/−2.79 % (order 0 — a correct gradient imposed at the wrong place).
+**P2** the Welch & Wilson (2000) sucking interface at ratio 10, Ja = 1 (`tests/study/vof_sucking.py`).
+`set_divergence_sink(weights)` is the new auto-balanced sink: the solver subtracts the GLOBAL
+deposited source spread over the given weights, so a closed domain's Poisson RHS is compatible every
+step with no user bookkeeping.
+
+Two defects found and fixed here, both in code that shipped with P0/P1:
+- **The gradient fit read the energy scalar's ghost band before anything had filled it.**
+  `set_field` and the coupling drivers write inner cells only and `advanceScalars` fills the ghosts
+  at its END, so the FIRST `apply_phase_change` of every run fitted its one-sided gradients against
+  a band of zeros. On the exact-state kernel probe (quasi-2D, so the y/z ghosts are inside the 5³
+  stencil) `mdot` came out **8.16 against the exact 18.48** — a 56 % error that did NOT converge
+  under refinement, because the ghost samples are counted as pure phase at `T = 0` and pull the fit
+  towards zero. `pcBuildInterface` now fills them. It moves the recorded P1 numbers
+  (+1.158 → +1.310 % at N = 64).
+- **A per-CELL plane-anchored value is not a boundary condition** (the literal reading of the work
+  order): it is right for the neighbour on the side the fit came from and wrong for the other side.
+  On P1 it heats the saturated liquid through the interfacial cell's liquid-side face, which gives
+  the liquid a spurious gradient that feeds straight back into `mdot`: **+6.20 / +5.62 / +5.42 %**,
+  observed order **0.10** — it does not converge. The per-face form has no such asymmetry.
 
 ### Domain boundary conditions
 

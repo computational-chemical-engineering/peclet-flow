@@ -661,6 +661,12 @@ class WyAdvector {
   SField planeAlpha() const { return alpha_; }
   /// The frozen dilation indicator `H(C^n - 1/2)` of the current step (pressure cells).
   UCField dilationFlag() const { return cc_; }
+  /// The geometric LIQUID volume flux of the sweep `computeFluxes` last ran, stored at the face's
+  /// `-` side (so face `i` is the one between cells `i` and `i + s_d`). Read by the consistent
+  /// `rho c_p T` transport (`vof/energy_advect.hpp`) between `computeFluxes` and `applySweep`,
+  /// exactly as `MomentumConsistentAdvector` reads the planes: an accessor only, nothing here
+  /// changes `advect()`.
+  SField faceFlux() const { return flux_; }
 
   /// The interface-local (or global) Courant number for this dt, all-reduced, with the
   /// Weymouth-Yue boundedness cap enforced exactly as `advect()` enforces it — `lastCfl_` is set

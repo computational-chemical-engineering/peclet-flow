@@ -165,9 +165,12 @@ KOKKOS_INLINE_FUNCTION double pcOffsetDistance(double phic, const double n[3], d
 /// intercept) is what makes the Dirichlet condition part of the estimator instead of a separate
 /// constraint.
 struct PcGradFit {
-  double num = 0.0;  ///< sum w phi (T - T_G)
-  double den = 0.0;  ///< sum w phi^2
-  int n = 0;         ///< samples used
+  double num = 0.0;   ///< b1 = sum w phi (T - T_G)
+  double den = 0.0;   ///< S2 = sum w phi^2
+  double num2 = 0.0;  ///< b2 = sum w phi^2 (T - T_G)   (quadratic fit only)
+  double s3 = 0.0;    ///< S3 = sum w phi^3             (quadratic fit only)
+  double s4 = 0.0;    ///< S4 = sum w phi^4             (quadratic fit only)
+  int n = 0;          ///< samples used
 };
 
 /// Malan's collinearity weight for a sample at cell offset `d`: `w = xi / |d|` with
@@ -183,14 +186,39 @@ KOKKOS_INLINE_FUNCTION double pcGradWeight(double dx, double dy, double dz, cons
 
 /// Add one pure-phase sample at normal distance `phi` with temperature `T`.
 KOKKOS_INLINE_FUNCTION void pcGradAdd(PcGradFit& f, double w, double phi, double T, double Tg) {
-  f.num += w * phi * (T - Tg);
-  f.den += w * phi * phi;
+  const double dT = T - Tg, p2 = phi * phi;
+  f.num += w * phi * dT;
+  f.den += w * p2;
+  f.num2 += w * p2 * dT;
+  f.s3 += w * p2 * phi;
+  f.s4 += w * p2 * p2;
   ++f.n;
 }
 
 /// The fitted normal derivative `dT/dn` (0 if the side carried no usable sample).
 KOKKOS_INLINE_FUNCTION double pcGradSolve(const PcGradFit& f) {
   return (f.den > 0.0) ? (f.num / f.den) : 0.0;
+}
+
+/// **The QUADRATIC one-sided fit** (WO-P23): `T - T_G = G phi + Q phi^2`, returning `G`.
+///
+/// The linear fit above is a straight line through the interface value fitted to samples that
+/// start ~1 cell away and reach ~2.5, so a profile with curvature `T''` biases it by
+/// `O(T'' h)` — a clean FIRST-ORDER error in `mdot`, and (once the plane-anchored Dirichlet has
+/// removed the cell-centre mismatch) the leading error of the whole rung. This is the
+/// Aslam-quadratic lever VOF_PLAN §9 item 1 names, in its least-squares rather than PDE form:
+/// the same samples, one more basis function, no extra stencil reach and no sweeps.
+///
+/// Normal equations of the 2-parameter weighted fit:
+///     [S2 S3; S3 S4] [G; Q] = [b1; b2] ,   S_k = sum w phi^k ,  b_k = sum w phi^k (T - T_G).
+/// Falls back to the linear solve when the system is ill-conditioned (fewer than two distinct
+/// normal distances — the determinant is then zero to round-off), so a side that carries a single
+/// usable sample still returns something rather than a division by noise.
+KOKKOS_INLINE_FUNCTION double pcGradSolve2(const PcGradFit& f) {
+  const double det = f.den * f.s4 - f.s3 * f.s3;
+  if (f.n < 2 || !(Kokkos::fabs(det) > 1e-12 * f.den * f.s4))
+    return pcGradSolve(f);
+  return (f.num * f.s4 - f.num2 * f.s3) / det;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -220,6 +248,93 @@ KOKKOS_INLINE_FUNCTION double pcDivSource(double mdot, double area, double rhoG,
 /// (Bureš & Sato): `T_G = T_sat + mdot R_int`. `R_int = 0` is the hard Dirichlet.
 KOKKOS_INLINE_FUNCTION double pcInterfaceTemperature(double Tsat, double mdot, double Rint) {
   return Tsat + mdot * Rint;
+}
+
+/// **The plane-anchored (ghost-fluid) interfacial Dirichlet condition** (WO-P23, the first item).
+///
+/// Rungs P0/P1 pinned the whole interfacial CELL at `T_G`, so the numerical thermal boundary sat at
+/// the CELL CENTRE while the mass-flux gradient is fitted from the PLIC PLANE. The mismatch is up
+/// to half a cell and it CHANGES SIGN as the interface sweeps through a cell — the first-order,
+/// oscillating error component WO-P01 measured (P1 orders 1.07 on 64->128 and 1.50 on 128->256).
+///
+/// The repair is a PER-FACE condition, not a per-cell value. For a PURE cell `i` whose neighbour
+/// `j` across the face in direction `d` is interfacial, the plane of cell `j` sits at signed
+/// normal distance `phi_i = phi_c(j) - s n_d(j)` from cell `i`'s centre (`s` the face step from
+/// `i` to `j`), so along the grid line it is `theta = |phi_i| / |n_d|` cells away. That face's row
+/// therefore becomes the DIRICHLET row `k open (T_i - T_G)/theta` instead of the interior coupling
+/// `k open (T_i - T_j)`, and the interfacial cell's own value is never read.
+///
+/// **Why the per-CELL value the work order describes does NOT work, measured.** Giving the
+/// interfacial cell the value the one-sided profile takes at its centre is right for the neighbour
+/// on the side the fit was taken from and WRONG for the neighbour on the other side: on the P1
+/// Stefan ladder it heats the saturated LIQUID through the interfacial cell's liquid-side face,
+/// which gives the liquid a spurious gradient, which feeds straight back into
+/// `mdot = (k_g G_g - k_l G_l)/h_lv`. The error saturates instead of converging — measured
+/// +6.20 / +5.62 / +5.42 % at N = 64/128/256, observed order 0.10, against +1.31 / +0.59 / +0.20 %
+/// and order 1.37 for the cell-centre pinning it was meant to improve on. One cell-centred value
+/// cannot serve two sides; the per-face form below can, and does (the liquid-side face then reads
+/// `T_G` at its own theta, i.e. exactly zero flux for a saturated liquid).
+///
+/// The value to CARRY in an interfacial cell (WO-P23). With the plane-anchored rows above, no
+/// neighbour reads it — the solve's only use for it is that the cell becomes PURE a few steps later
+/// as the interface sweeps past, and then it IS read, both by the energy operator and by the
+/// one-sided gradient fit. Leaving it at `T_G` makes every newly exposed cell start at the
+/// saturation temperature, i.e. a cold spot that the diffusion then has to remove: measured on the
+/// P1 Stefan ladder it holds the interface back by a clean first order (-1.31 / -0.72 / -0.36 % at
+/// N = 64/128/256, order 0.93). The value the one-sided linear profile takes at the cell centre,
+/// `T_G + G phi_c`, removes it. (This is the per-cell value the work order describes; it is right
+/// HERE, where nothing reads it across a face, and wrong as a boundary condition — see above.)
+KOKKOS_INLINE_FUNCTION double pcCarriedValue(double Tg, double grad, double phic) {
+  return Tg + grad * phic;
+}
+
+/// `thetaMin` keeps the coefficient finite when the plane grazes the cell centre (the standard GFM
+/// clamp); `thetaMax` bounds it when the plane sits deep inside the far cell (`|phi_c| <=
+/// sqrt(3)/2`, so `theta <= 1 + sqrt(3)/2`) AND when the interface is nearly PARALLEL to this
+/// face's axis, where `|phi_i|/|n_d|` diverges and the honest statement is "the interface is far
+/// along this line".
+///
+/// **The `n_d -> 0` limit has to be `thetaMax`, and it has to be reached CONTINUOUSLY.** The first
+/// version fell back to `theta = 1` below `|n_d| = 1e-6`, i.e. a JUMP of 1 -> 1.9 in that face's
+/// coefficient across a threshold that a transverse MYC normal component crosses on ROUND-OFF: in a
+/// quasi-1D scene the energy solve's red-black parity asymmetry gives symmetric columns ~1e-16
+/// differences in T and hence ~1e-8 transverse normal components (WO-P01 finding 3), so the
+/// transverse faces of every interfacial cell sit on that threshold. Measured on the P2
+/// sucking-interface MPI gate at np = 1 — where the two solvers differ only by round-off —
+/// `max|C_dist - C_ref|` went 3.3e-16 at 3 steps -> 2.4e-4 at 12 -> 4.5e-4 at 55 (a plateau) with
+/// the jump, against 4.1e-14 / 7.4e-14 for the rung P0/P1 treatment on the same scene. A
+/// discontinuous coefficient is a round-off amplifier even when the jump itself is bounded.
+KOKKOS_INLINE_FUNCTION double pcGfmTheta(double phiC, double nd, double s, double thetaMin,
+                                         double thetaMax) {
+  const double den = Kokkos::fabs(nd);
+  const double num = Kokkos::fabs(phiC - s * nd);
+  if (!(num < thetaMax * den))  // includes den == 0: the limit, reached continuously
+    return thetaMax;
+  return Kokkos::fmax(num / den, thetaMin);
+}
+
+/// Face conductivity of the variable-coefficient energy operator, `k(C)` arithmetic in the colour
+/// with ONE exception: where one of the two cells carries the per-cell Dirichlet condition
+/// (an interfacial cell pinned at the plane-anchored `T_G`) the face takes the OTHER cell's `k`.
+///
+/// The exception is not cosmetic. A Dirichlet row is an identity row, so the only thing this face
+/// coefficient does is set the conductance with which the PURE neighbour draws heat to the
+/// interface. That conductance must be the pure neighbour's own phase conductivity — an arithmetic
+/// mean with `k(C_iface)` puts a slab of the WRONG phase between the pure cell and a boundary
+/// condition that already sits (plane-anchored) at the interface, and at the water/steam ratio
+/// `k_l/k_g ~ 26` that is a 50 % error in the wall heat flux of every interfacial face.
+KOKKOS_INLINE_FUNCTION double pcFaceConductivity(double ki, double kj, bool mi, bool mj) {
+  if (mi && !mj)
+    return kj;
+  if (mj && !mi)
+    return ki;
+  return 0.5 * (ki + kj);
+}
+
+/// Linear-in-C phase property (`k`, `rho c_p`), written so that `C = 0` and `C = 1` return the
+/// endpoint EXACTLY — the same construction as `vofPhaseRho` in `momentum_advect.hpp`.
+KOKKOS_INLINE_FUNCTION double pcPhaseMix(double vg, double vl, double c) {
+  return vg * (1.0 - c) + vl * c;
 }
 
 /// The clip-and-redistribute allocation: which face neighbours a clipped cell's residue is pushed
