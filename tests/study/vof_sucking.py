@@ -53,10 +53,13 @@ def exact_b(ja, rr):
     return b
 
 
-def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, ny=4, nz=4,
+def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, nt=4,
         kratio=None, rcpratio=None, consistent=True, plane=True, quad=False, muscl=False, verbose=True):
     """One resolution.  The PHYSICAL problem is fixed (domain length 1, alpha_l = 1, the vapour
-    layer growing from x0p to xep of the domain) and only h = 1/n changes."""
+    layer growing from x0p to xep of the domain) and only h = 1/n changes.  `nt` is the transverse
+    extent: the problem is 1-D so 4 is enough physically, but it decides how far the pressure
+    multigrid can coarsen (see the findings)."""
+    ny = nz = nt
     rr = 1.0 / ratio                      # rho_v / rho_l
     b = exact_b(ja, rr)
     t0 = (x0p / (2 * b)) ** 2 / alpha_l
@@ -178,6 +181,7 @@ def main():
     ap.add_argument("--no-quad", action="store_true")
     ap.add_argument("--fo", type=float, default=0.5)
     ap.add_argument("--muscl", action="store_true")
+    ap.add_argument("--nt", type=int, default=4)
     a = ap.parse_args()
     ns = [int(x) for x in a.ns.split(",")]
     print(f"P2 sucking interface: rho_l/rho_v = {a.ratio:g}, Ja = {a.ja:g}, "
@@ -188,7 +192,7 @@ def main():
     for n in ns:
         e, te_, capped, itmax = run(n, a.ratio, a.ja, kratio=a.kratio, rcpratio=a.rcpratio,
                                     consistent=not a.no_consistent, plane=not a.no_plane,
-                                    quad=not a.no_quad, fo=a.fo, muscl=a.muscl)
+                                    quad=not a.no_quad, fo=a.fo, muscl=a.muscl, nt=a.nt)
         errs.append(e)
         terrs.append(te_)
         if capped:

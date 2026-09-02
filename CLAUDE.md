@@ -1231,10 +1231,25 @@ N = 64/128/256 with both switches on, against **+1.310 / +0.594 / +0.195 %** (or
 both off — the ablations show why BOTH are needed: plane-anchored alone reads +1.70/+0.84/+0.42 %
 (clean order 1.00 — the oscillation is gone but the fit's curvature bias remains) and the quadratic
 fit alone reads −2.53/−2.90/−2.79 % (order 0 — a correct gradient imposed at the wrong place).
-**P2** the Welch & Wilson (2000) sucking interface at ratio 10, Ja = 1 (`tests/study/vof_sucking.py`).
-`set_divergence_sink(weights)` is the new auto-balanced sink: the solver subtracts the GLOBAL
-deposited source spread over the given weights, so a closed domain's Poisson RHS is compatible every
-step with no user bookkeeping.
+**P2** the Welch & Wilson (2000) sucking interface at ratio 10, Ja = 1
+(`tests/study/vof_sucking.py`): **+0.193 % / +0.034 %** at N = 64/128, i.e. observed order **2.52**
+(the gate asked ≥ 1.4), with the temperature profile within **0.31 %** of the similarity solution.
+The N = 256 point of that ladder is limited by the PRESSURE SOLVE, not by the scheme — 297 → 1003 →
+3645 iterations on a 256×4×4 grid whose transverse extent the multigrid cannot coarsen — and is not
+quoted. **P3** the Scriven bubble (`tests/study/vof_scriven.py`) does NOT meet its 1 % gate:
+**2.0 / 2.6 / 40 %** at Ja = 0.5/2/10 (128³, ratio 100, with the limited-donor energy flux), and
+neither refinement closes it — 192³ at the same cells-per-radius gives 2.001 % against 128³'s
+2.002 % (confinement excluded to three digits) and 192³ at 1.5× the resolution gives 2.589 % against
+2.235 %. At Ja = 10 the thermal boundary layer is SUB-CELL for the whole run at 128³, which no
+interfacial gradient fit survives.
+
+Two more things this rung ships. `set_divergence_sink(weights)` is an auto-balanced sink: the solver
+subtracts the GLOBAL deposited source spread over the given weights, so a closed domain's Poisson
+RHS is compatible every step with no user bookkeeping. `set_phase_change_energy_muscl` (OFF by
+default) puts a MinMod-limited donor reconstruction in the consistent energy flux — the geometric
+flux's plain donor-cell temperature carries first-order upwind diffusion that thickens the thermal
+layer and so LOWERS the interfacial gradient, which is exactly `mdot`: on Scriven it takes Ja = 2
+from 5.96 % to 2.64 %.
 
 Two defects found and fixed here, both in code that shipped with P0/P1:
 - **The gradient fit read the energy scalar's ghost band before anything had filled it.**
@@ -1249,7 +1264,25 @@ Two defects found and fixed here, both in code that shipped with P0/P1:
   order): it is right for the neighbour on the side the fit came from and wrong for the other side.
   On P1 it heats the saturated liquid through the interfacial cell's liquid-side face, which gives
   the liquid a spurious gradient that feeds straight back into `mdot`: **+6.20 / +5.62 / +5.42 %**,
-  observed order **0.10** — it does not converge. The per-face form has no such asymmetry.
+  observed order **0.10** — it does not converge. The per-face form has no such asymmetry. (The
+  same expression IS right as the value the interfacial cell CARRIES until it becomes pure, where
+  nothing reads it across a face; leaving that at `T_Γ` costs a clean first order, −1.31/−0.72/−0.36 %.)
+- **The divergence-source deposit failed on a curved interface.** The P0/P1 rule tried exactly two
+  candidate cells (`round(k n)`, k = 1, 2) and left the source IN the interfacial cell otherwise —
+  48…262 cells on the Scriven runs, each of which then carries `div(open u) = S` on its own faces,
+  i.e. Weymouth–Yue advecting the colour with a field that is not the liquid velocity. The deposit
+  now searches the whole `+n` half of the 5³ box by Malan's collinearity weight. This is what
+  VOF_PLAN §9 item 3's band-extended velocity exists to guarantee, and
+  `phase_change_diagnostics()['band_div']` (max |div(open u)| over interfacial cells) is the direct
+  read-out: **3.8e-4 / 1.2e-4** on the planar P2 scene against liquid velocities of order 10², i.e.
+  a relative 1e-6 — no extension needed there, exactly as WO-P01's P0b row predicted.
+
+**MPI**: P0a and P1 are **bitwise** at np 1/2/4 with the decomposition cutting the interface. The
+P2 coupled case is decomposition-independent to **1e-13** on nvidia-cuda (np 1 and 2); on
+host-OpenMP the reduction order differs at round-off between the two solvers and that seed is
+amplified by the interface crossing a cell boundary (the `pcIsInterfacial` threshold switches a pure
+cell's whole energy row), so the pointwise colour differs by ~1e-3 while the interface POSITION —
+what the gate is on — moves by 5e-5…1.4e-4.
 
 ### Domain boundary conditions
 

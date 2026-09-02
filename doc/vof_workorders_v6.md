@@ -387,6 +387,241 @@ pressure iterations vs cap; a capped run is not a data point. Report ms/step and
 
 (append per WO, newest first)
 
+## WO-P23 findings (Part II, rungs P2 + P3) — 2026-09-02/03, Opus
+
+Branch `vof-p23`, worktree `../flow-p23`, from `origin/main` at `b4c829a`. Backends: host
+**OpenMP** (`build_omp` / `build_ktest_omp` / `build_kmpi_omp`, `OMP_PROC_BIND=false`) and **CUDA**
+(`build_cuda` / `build_ktest_cuda` / `build_kmpi_cuda`). New files: `src/vof/energy_advect.hpp`,
+`tests/study/vof_sucking.py`, `tests/study/vof_scriven.py`; extended:
+`src/vof/phase_change.hpp`, `src/scalar_transport.hpp`, the phase-change section of
+`src/flow_ibm.hpp`, `tests/kokkos/test_vof_phase_change.cpp`,
+`tests/kokkos_mpi/test_vof_phase_change_mpi.cpp`. `src/vof/advect_wy.hpp` gains ONE accessor
+(`faceFlux()`); no validated kernel body was touched.
+
+### What shipped, and what the work order asked for that did not survive contact
+
+| WO-P23 item | shipped as | verdict |
+|---|---|---|
+| plane-anchored Dirichlet, "the cell value that makes the one-sided linear profile from the pure neighbour hit `T_sat` at the plane distance" | **a PER-FACE ghost-fluid row** (`pcGfmTheta` + `scalarMaskGfm`), plus the work order's per-cell value as the CARRIED value of the interfacial cell (`pcCarriedValue`), which no neighbour reads | the literal per-cell BOUNDARY condition is **refuted, measured** — see mechanisms 1 and 2 |
+| `k(C)` / `rho c_p(C)` closures + consistent `rho c_p T` transport | `src/vof/energy_advect.hpp` + `scalarBuildDiffusionVarK` / `scalarBuildRhsHeat`; `set_phase_change_energy(rho_cp_gas, rho_cp_liquid)` | shipped; uniform-T identity **bitwise** at ratio 1e4 — but see mechanism 4 |
+| band-extended liquid velocity (VOF_PLAN §9 item 3) | **NOT implemented; the DEPOSIT was fixed instead** — `phase_change_diagnostics()['band_div']` is the direct read-out of the property it exists to guarantee | see mechanism 5 |
+| "Aslam quadratic extrapolation of `T` across the band … only if the gate says so" | `set_phase_change_quadratic_fit`, **ON by default** — least-squares rather than PDE form; the gate said so twice over | mdot order 1.1 -> 2.0 |
+| P2 order >= 1.4 over 64/128/256 | 64->128 order **2.52** at ratio 10 | PASS on the pair measured |
+| P3 `R(t)` within 1 % | **FAILS at every Ja** (2.2 / 6.0 / 40 % at Ja 0.5 / 2 / 10, 128^3) | see the P3 table and open question 1 |
+
+### Gate numbers
+
+All P1/P2 numbers are host-OpenMP; the CUDA column agrees to the digits printed unless stated.
+
+#### The P1 Stefan ladder — the four-way ablation that decides the two new defaults
+
+Same problem as WO-P01 (St = 1, `rho_g = rho_l`, Fo = 0.5 so `dt ~ h^2`, 280 / 1119 / 4474 steps),
+`tests/study/vof_stefan.py`-equivalent driver, relative error of the vapour-layer thickness:
+
+| plane-anchored | quadratic fit | N = 64 | N = 128 | N = 256 | order 64->128 | 128->256 |
+|---|---|---|---|---|---|---|
+| off | off (**= rung P0/P1**) | +1.3099 % | +0.5943 % | +0.1952 % | 1.140 | 1.606 |
+| **on** | off | +1.7044 % | +0.8375 % | +0.4191 % | 1.025 | 0.999 |
+| off | **on** | -2.5284 % | -2.8994 % | -2.7924 % | -0.197 | 0.054 |
+| **on** | **on** (**shipped default**) | **-0.0139 %** | **-0.0023 %** | **+0.0031 %** | (noise floor: the error changes sign between 128 and 256) |
+| per-CELL value (the WO's literal reading) | off | +6.2030 % | +5.6164 % | +5.4165 % | 0.143 | 0.052 |
+
+Read the table as one statement: **each half alone is worse than neither, and the pair is two orders
+of magnitude better than both.** The plane-anchored rows alone remove the sign-oscillating component
+(1.14/1.61, a non-monotone pair, becomes a clean 1.03/1.00) and expose the fit's curvature bias; the
+quadratic fit alone corrects a gradient that is then imposed in the wrong place. `C in [0, 1]`
+exactly, `unresolved = 0`, `fallback = 0` at every N and every variant.
+
+#### The `mdot` kernel itself (the decisive, time-stepping-free probe)
+
+An EXACT analytic sucking-interface state (ratio 10, Ja 1) is imposed — the colour by exact planar
+fractions, the temperature by the similarity solution — and `apply_phase_change(0.0)` is called once,
+so the number below is the one-sided fit plus the interfacial Dirichlet and nothing else. Interface
+at `0.25 N + 0.37` cells (the sub-cell offset is swept over 0.13 / 0.37 / 0.50 / 0.87; the orders
+below vary by less than 0.02 across it):
+
+| fit | N = 64 | N = 128 | N = 256 | N = 512 | orders |
+|---|---|---|---|---|---|
+| linear (rung P0/P1) | -0.6079 % | -0.2638 % | -0.1214 % | -0.0580 % | 1.204 / 1.119 / 1.065 |
+| **quadratic** | +0.1066 % | +0.0275 % | +0.0070 % | +0.0018 % | **1.956 / 1.979 / 1.989** |
+
+The linear fit is a straight line through the interface value fitted to samples that start ~1 cell
+from the plane and reach ~2.5, so a curved profile tilts it by `O(T'' h)` — a clean FIRST-order
+error in `mdot`. One more basis function on the same samples makes it second order.
+
+#### P2 — the Welch & Wilson sucking interface (`tests/study/vof_sucking.py`)
+
+Ratio 10, Ja = 1, wall at the vapour end, OUTFLOW at the liquid end, `Fo = 0.5`, the far-field
+Dirichlet refreshed to the exact similarity value every step:
+
+| N | steps | layer | exact | rel | `\|T - T_exact\|_inf` (liquid) | pressure iters | `band_div` |
+|---|---|---|---|---|---|---|---|
+| 64 | 296 | 16.03090 | 16.00000 | **+0.1931 %** | 6.34e-03 (0.634 % of dT) | 297 / 4000 | 3.80e-04 |
+| 128 | 1183 | 32.01079 | 32.00000 | **+0.0337 %** | 3.06e-03 (0.306 % of dT) | 1003 / 4000 | 1.16e-04 |
+
+**Observed order 2.52** on the interface position (the gate asked for >= 1.4; Boyd & Ling 2023 §4.2
+report >= 1.4) and 1.05 on the temperature profile, which is within 0.31 % of the similarity solution
+at N = 128 (the gate asked for 1 %). No capped solve at either resolution (rule 3b).
+
+#### P3 — Scriven bubble growth (`tests/study/vof_scriven.py`), and why it misses
+
+3-D, density ratio 100 (Ja is bounded above by `rho_l/rho_v`, so Ja = 10 does not exist at ratio 10),
+outflow on all six faces with `set_rho(rho_l)` so the boundary coefficient IS the varRho one, `T_inf`
+Dirichlet on all six, `sigma = 0`, `R(t)` read from the LIQUID VOLUME DEFICIT
+`R = (3 sum(1-C)/4pi)^(1/3)`. Gate: `max |R_num - R_exact| / R_exact` over the LAST HALF of the run.
+
+| Ja | beta | `delta_T` at R = 6 / 20 (cells) | 128^3, R 6->20 | + MUSCL | 192^3, R 9->30 (same R/L) |
+|---|---|---|---|---|---|
+| 0.5 | 0.7845 | 8.8 / 29.5 | **2.235 %** | **2.002 %** | **2.589 %** |
+| 2 | 2.3574 | 2.8 / 9.5 | **5.958 %** | **2.636 %** | **4.713 %** |
+| 10 | 10.8587 | 0.63 / 2.09 | **40.09 %** | — | — |
+
+Ablations at 128^3, Ja = 0.5: **quadratic fit OFF: 12.893 %** (and `mdot` -25.7 % at the first
+sample — on a CURVED interface the linear fit is not a small correction, it is the answer);
+**consistent energy transport OFF: 1.455 %** (better than with it — finding 4). Pressure iterations
+30-45 against a cap of 600 on every run, none capped; `C in [0,1]` to round-off, `unresolved = 0`.
+
+`delta_T` is the radius at which the exact profile reaches 99 % of `T_inf`, minus `R`. It is the
+number that explains the table: at Ja = 10 the thermal boundary layer is **sub-cell** for the whole
+run at 128^3, which no interfacial gradient fit can survive; at Ja = 2 it is 2.8 cells at the START,
+and the error accumulated there is what the last-half gate then measures (the Ja = 2 growth RATE
+recovers — `mdot` is within 0.2-1.7 % over the second half with MUSCL while `R` stays 2.6 % behind).
+
+### Mechanisms and corrections
+
+**1. A per-CELL plane-anchored value is not a boundary condition — it is right on one side and wrong
+on the other, and the P1 ladder says so.** The work order asks for "the cell value that makes the
+one-sided linear profile from the pure neighbour hit `T_sat` at the plane distance". Implemented
+literally (`T_cell = T_G + G phi_c`, `G` the one-sided fit of the side the CENTRE lies on), it reads
+**+6.20 / +5.62 / +5.42 %** at N = 64/128/256 with observed order **0.10**: it does not converge.
+The mechanism is not subtle once seen — the interfacial cell has BOTH neighbours, and the value that
+is correct for the side the fit came from is an over-heat for the other. On the Stefan ladder that
+other side is the saturated liquid, so the interfacial cell drives a spurious heat flux into it, the
+liquid acquires a gradient, and `mdot = (k_g G_g - k_l G_l)/h_lv` picks it straight back up: a
+positive feedback with a biased fixed point, which is exactly what a saturating, non-converging error
+looks like. **One cell-centred value cannot serve two faces.** The shipped form is therefore PER
+FACE: the pure cell's own row carries `k open (T_i - T_G)/theta` with `theta` the distance in cells
+from ITS centre to the neighbour's PLIC plane along that face's axis, and the interfacial cell's
+value is never read across a face. The liquid-side face then reads `T_G` at its own `theta` — exactly
+zero flux for a saturated liquid, as it must be.
+
+**2. …and then the per-cell value IS needed, for a different job.** With the plane-anchored rows the
+interfacial cell is decoupled from the solve, so what it holds only matters when the interface sweeps
+past and it becomes PURE — at which point the energy operator and the gradient fit both read it.
+Leaving it at `T_G` makes every newly exposed cell start at the saturation temperature, i.e. a cold
+spot the diffusion then has to remove: measured **-1.31 / -0.72 / -0.36 %**, a clean order 0.93, with
+the sign of "the interface is held back". Giving it the one-sided extrapolation (`pcCarriedValue`)
+removes it. So the work order's expression is right and its PLACE was wrong.
+
+**3. The energy scalar's ghost band was never filled before the gradient fit read it — a 56 % error
+in `mdot` that did not converge.** `pcBuildInterface` samples `T` over a 5^3 stencil, i.e. at ±2,
+and `set_field` / the coupling drivers write inner cells only while `advanceScalars` fills the ghosts
+at its END. The FIRST `apply_phase_change` (or `step`) of every run therefore fitted its one-sided
+gradients partly against a band of zeros. It is invisible on the P0/P1 gates because their interface
+is far from every boundary in x and the y/z ghosts are refilled after step 1 — but on the exact-state
+kernel probe, which is quasi-2D so the y/z ghosts sit INSIDE the stencil, `mdot` came out **8.16
+against the exact 18.48** and stayed there under refinement (the ghost samples are counted as pure
+phase at `T = 0` and pull the fit towards zero). One line in `pcBuildInterface`. It moves WO-P01's
+recorded P1 numbers: **+1.158 -> +1.310 %** at N = 64 and **+0.552 -> +0.594 %** at N = 128
+(N = 256 is unchanged at +0.195 %, and the recorded orders 1.069/1.500 become 1.140/1.606).
+
+**4. The consistent `rho c_p T` transport is a correctness statement, and at moderate Jakob number it
+COSTS accuracy unless the donor is reconstructed.** The identity it buys is exact and bitwise: a
+uniform temperature survives an arbitrary sharp colour advected by a uniform velocity at `rho c_p`
+ratio 1e4 with `max|T - T_0| = 0.0` over 20 kinematic steps (the energy twin of WO-K's
+uniform-velocity gate; it is bitwise rather than "small" because the update is evolved in the
+DEVIATION form `T + [Phi_-(That_- - T) - Phi_+(That_+ - T)]/rcp(C^{new})`, in which the three terms
+that must cancel do so in exact arithmetic). But the geometric flux carries a plain donor-cell
+temperature, whose first-order numerical diffusion `|u| h (1 - CFL)/2` thickens the thermal boundary
+layer and therefore LOWERS the interfacial gradient — which is what `mdot` is. Measured on Scriven at
+128^3: **Ja = 0.5, 2.235 % with the consistent transport against 1.455 % with the scalar module's
+(inconsistent) Koren TVD**. `set_phase_change_energy_muscl(True)` adds a MinMod-limited donor
+reconstruction and buys it back: **Ja = 0.5 -> 2.002 %, Ja = 2 -> 2.636 % from 5.958 %**. It ships
+OFF by default, as the energy twin of `set_vof_momentum_muscl`, and every P3 number above says which
+setting it was taken with.
+
+**5. The band-extended liquid velocity (VOF_PLAN §9 item 3) is not needed in 1-D and IS the residual
+in 3-D — but the cure is the DEPOSIT, not an extension.** What §9 item 3 exists to guarantee is that
+Weymouth-Yue advects the colour with the LIQUID velocity at interfacial cells, and the direct
+read-out of that is `max |div(open u)|` over the interfacial cells — it is zero iff no deposit sits
+on a face WY reads. That is `phase_change_diagnostics()['band_div']`, added here. On the planar P2
+scene it is **3.8e-4 / 1.2e-4** at N = 64/128 against liquid velocities of order 200-400 cells/s, i.e.
+a relative 1e-6: no extension needed, exactly as WO-P01's P0b row predicted. On the CURVED Scriven
+bubble it is **2e-3 … 2e-1** and it correlates one-for-one with `fallback`, the census of interfacial
+cells whose deposit found no pure gas cell. The rung P0/P1 deposit rule tried exactly two candidates
+(`round(k n)`, k = 1, 2) and left the source IN the interfacial cell otherwise — 48 to 262 cells on
+these runs. The fix is to search the whole `+n` half of the 5^3 box and take the best cell by Malan's
+own collinearity weight; it is deterministic, it returns the old cell whenever the old rule succeeded
+(so P0/P1/P2 are unmoved), and it is what an extension would have been papering over.
+
+#### MPI, and a round-off sensitivity that is NOT a distribution defect
+
+`tests/kokkos_mpi/test_vof_phase_change_mpi`, 64x4x4, the ORB cutting x at np 2 and 4 so the
+interface crosses a rank boundary during every run:
+
+| case | np = 1 | np = 2 | np = 4 |
+|---|---|---|---|
+| **P0a** planar regression, 1000 kinematic steps | **0.000e+00** | **0.000e+00** | **0.000e+00** |
+| **P1** Stefan, 280 steps with the energy solve | **0.000e+00** | **0.000e+00** | **0.000e+00** |
+| **P2** sucking, 55 COUPLED steps — interface position | 8.5e-05 | 5.2e-05 | 1.4e-04 |
+| **P2** — pointwise `max\|C_dist - C_ref\|` | 1.5e-03 | 8.7e-04 | 1.7e-03 |
+
+P0a and P1 are **bitwise**, as WO-P01 left them: the exchange, the gather-based source deposit and
+the gather-based deficit redistribution are all exact, and the plane-anchored rows' new depth-1 data
+(`n`, `phi_c`, `T_G`, the mask) is exchanged and domain-zeroed on the same footing.
+
+The P2 row is a property of the COUPLED scene, not of the decomposition, and the **nvidia-cuda
+column is the proof**: there the same test reads `layer` **8.7e-15 (np 1) / 7.9e-15 (np 2)** and
+pointwise **1.1e-13** on both, i.e. decomposition-independent to 1e-13 across a cut that the
+interface crosses. The host-OpenMP numbers above therefore measure a SEED, not a defect: at np = 1
+the distributed and reference solvers run the same block and differ only in the arithmetic path
+`initMpi` selects, which on OpenMP means a different reduction order. The same np = 1 host run reads
+0.0 at 1 step,
+3.3e-16 at 3, 2.4e-4 at 12 and then PLATEAUS. Bisected with `PECLET_P23_OFF` at 12 steps: all three
+WO-P23 options off gives **4.1e-14**, and ANY ONE of them on gives **1.2e-4 … 2.8e-4**. The
+amplifier is the interface CROSSING a cell boundary — the classification threshold
+`pcIsInterfacial` switches a pure cell's whole energy row on and off, and the sharper interfacial
+treatment makes that switch bigger. The INTEGRAL (the interface position) moves by 5e-5 … 1.4e-4,
+which is what the gate is on. **Open**: a smooth blend of the interfacial row over the last decade
+of `C` would remove the switch; it is a change to the classification, not to this rung, and it
+should be measured against the P0a/P1 bitwise gates before it ships.
+
+#### Inertness and byte-identity
+
+- **INERT** (`mdot == 0`, every phase-change kernel runs): `max |C_pc - C_ref| = 0.000e+00`.
+- **Byte-identity against `main` (b4c829a).** Every `tests/kokkos` binary built from both trees and
+  run at 4 threads: **30 of 31 byte-identical** (`diff` of the full stdout). The one that differs is
+  `test_vof_phase_change` — this WO's own file, extended with K3/K4/P1'/ENERGY/P2, and whose P1 row
+  moves because of the ghost-fill defect (mechanism 3). Its P1 gate reads `+1.3099 %` against
+  `+1.158 %` at `main`, still inside its own 2 % tolerance; `stefanRun` now pins
+  `set_phase_change_plane_dirichlet(false)` / `set_phase_change_quadratic_fit(false)` explicitly so
+  it stays the rung P0/P1 ablation next to `stefanRunP23`.
+- **CUDA**: the whole single-rank battery reproduces the host numbers to the digits printed
+  (P1 `+1.3099 %`, P1' `-0.0139 %`, ENERGY identity `0.000e+00`, INERT `0.000e+00`; P0b's
+  `u_gas` relative error is 1.752e-16 there against 0.0 on host, and P2 reads `+0.1912 %` against
+  `+0.1928 %`).
+
+### Open, and what a follow-on should measure
+
+1. **P3 misses the 1 % gate at every Jakob number and grid refinement does not close it.** Both
+   refinements were run: 192^3 with the same bubble in CELLS (R 6 -> 20, so 1.5x the clearance at
+   FIXED resolution) gives **2.001 %** against 128^3's **2.002 %** at Ja = 0.5 — domain confinement
+   is excluded to three digits — and 192^3 with the same PHYSICAL bubble (R 9 -> 30, so 1.5x the
+   resolution at fixed clearance) gives **2.589 %** against **2.235 %**, i.e. no convergence either.
+   The error is therefore neither the box nor the mesh spacing on its own. The `mdot` column says
+   where it sits: `mdot` is +9.5 % at the first sample, crosses zero, and ends -2.7 %, so the
+   deficit is accumulated early and never repaid. The two levers this WO added move it in the right
+   direction (MUSCL: Ja = 2 from 5.958 to 2.636 %) and the deposit search removes its most likely
+   remaining source, but the rung is NOT closed and should not be reported as validated.
+2. **The `pcIsInterfacial` switch** (see the MPI section).
+3. **The P2 ladder's N = 256 point is limited by the PRESSURE SOLVE, not by the scheme.** Pressure
+   iterations grow 297 -> 1003 -> 3645 on 64/128/256 of a 256x4x4 grid — the transverse extent
+   cannot coarsen, so the multigrid degenerates (`suite/docs/DECOMPOSITION_AND_MULTIGRID.md`), and
+   at N = 256 the interface error jumps from +0.034 % to +1.590 % with the first colour wisp of the
+   ladder (-2e-11). The 64 -> 128 order is **2.518**; the 128 -> 256 point should be re-taken on a
+   grid whose transverse extent the multigrid can coarsen before it is quoted.
+
+---
 ## WO-V6b findings — the velocity half of the dynamic contact line (Navier slip in the cut-cell wall closure), plus the integer-coordinate wall defect — 2026-09-03, Opus
 
 Branch `vof-v6b`, worktree `../flow-v6b`, from `origin/main` at `9ad0646`. Commits: `fa1e346`
