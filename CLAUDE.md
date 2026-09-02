@@ -705,9 +705,11 @@ different solver" trap; with the same stencil they agree to 2e-11. Gate:
 `tests/kokkos_mpi/test_velocitymg_bc_mpi.cpp` (np 1/2/4, bit-exact / 1.7e-14, V-cycle == RB-GS
 fixed point to 4e-9).
 
-**Stop the momentum solve on the residual, not the update.** `set_velocity_residual_tolerance(rtol)`
-(opt-in, 0 = legacy) ends a component's solve once max|b − A u| ≤ rtol · max(max|b|, max|A u|)
-over the solved unknowns. The legacy criterion — update ≤ rtol × the *first sweep's* update — is
+**The momentum solve stops on the residual, not the update — DEFAULT 1e-5 since 2026-09-02.**
+`set_velocity_residual_tolerance(rtol)` (0 = the legacy update criterion) ends a component's solve
+once max|b − A u| ≤ rtol · max(max|b|, max|A u|) over the solved unknowns, on every path (cut-cell /
+IBM stencils, the folded constant-coefficient domain-BC smoother via `diffResidual`, every
+velocity-MG mode). The legacy criterion — update ≤ rtol × the *first sweep's* update — is
 relative to a quantity that is already noise on a warm-started near-steady step, so RB-GS burns its
 whole sweep cap shrinking noise by 10³ (the FoxBerry bed: 600 sweeps/step at 384³, every step),
 while the V-cycle, whose first cycle moves a lot, stops too early. Measured at 96³ on that bed:
@@ -720,7 +722,11 @@ differing by 3e-4, and it is the Gauss–Seidel one that stalls on smooth error 
 criterion cannot see that stall either). **The V-cycle needs no depth on a pore-confined bed**: 2,
 3, 4 and 5 levels give identical cycle counts at 96³ (the coarse grid only serves the clean fluid
 interior; the exclude mask hands the band to the smoother), so the velocity hierarchy does NOT
-need telescoping where the pressure one did.
+need telescoping where the pressure one did. **AUTO rule**: when `set_velocity_multigrid` was never
+called, a distributed run takes the 3-level V-cycle once global cells / ranks fall below
+`PECLET_FLOW_VMG_AUTO_CELLS` (65536; `set_velocity_multigrid_auto`, 0 = never) on an eligible
+operator mode — the measured crossover on the FoxBerry bed (RB-GS 2.91 vs MG 3.32 s/step at 147 k
+cells/rank; 0.844 vs 0.834 at 37 k). Above it RB-GS with the residual stop is the cheaper solver.
 
 Build/test the multi-rank ctests:
 ```bash
