@@ -38,12 +38,22 @@ import peclet.flow as pf
 
 # ------------------------------------------------------------------------------------- the scene
 NX, NY, NZ = 128, 128, 4
-NCOL, NROW = 7, 8                    # 56 posts on a staggered, jittered lattice
-X0, DX = 16.0, 16.0                  # first post column centre and the column spacing
-DY = NY / NROW                       # 16
-R_POST = 5.7                         # -> pi R^2 / (DX*DY) = 0.399 solid, porosity 0.60
+# The work order asks for ~60 posts at porosity ~0.6 on a 128^2 grid.  Those three are mutually
+# inconsistent with the wetting model, and the inconsistency is MEASURED rather than assumed: a
+# square array at porosity 0.6 has throats of 0.286 x the lattice spacing, which at 56 posts is
+# 3.1 cells -- and the theta-fill writes a THREE-cell band into the solid on each side of a throat,
+# so the two posts' bands meet in the middle of it.  That configuration ran to PV = 0.121 and then
+# produced `CutcellMG::solveFCG: preconditioner produced non-finite z` with max|u| at 93 x the inlet
+# velocity.  (It is the same overlapping-band mechanism WO-S recorded as making its 4-cell-plate
+# Jurin scene inconclusive.)  The array below keeps the disorder and the Zhao geometry class but
+# trades post COUNT for throat WIDTH: 30 posts, minimum throat 6 cells, porosity ~0.71.
+NCOL, NROW = 5, 6                    # 30 posts on a staggered, jittered lattice
+X0, DX = 20.0, 21.5                  # first post column centre and the column spacing
+DY = NY / NROW                       # 21.33
+R_POST = 6.5                         # -> pi R^2 / (DX*DY) = 0.289 solid, porosity ~0.71
 JITTER = 1.5
-MIN_GAP = 3.0                        # surface-to-surface, enforced by rejection
+MIN_GAP = 6.0                        # surface-to-surface, enforced by rejection: TWO wetting
+                                     # bands of three cells each must fit inside a throat
 X_IN = 10.0                          # prefill: liquid up to here at t = 0 (clear of every post)
 X_BT = 118.0                         # breakthrough plane
 
@@ -174,13 +184,13 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     ncfl = 0
     t = 0.0
     n = 0
-    every = max(steps // 200, 5)
+    every = max(steps // 600, 5)
     t0 = time.time()
     partial = False
     Cbt = None
     # the injected liquid volume in PORE VOLUMES of the array: the comparable clock when a run
     # cannot afford to reach breakthrough
-    pv_stop = 0.60
+    pv_stop = 0.35
     for i in range(steps):
         L = s.vof_step_limits()
         dtc = CAP_CFL * L["capillary_dt"]
@@ -197,7 +207,7 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
             front = float(C[int(X_BT) - 1, :, :].max())
             pv = U * NY * NZ * t / pore
             hist.append((t, S, front, pv))
-            if len(hist) % 10 == 1:
+            if len(hist) % 20 == 1:
                 um = max(float(np.abs(np.asarray(f())).max())
                          for f in (s.get_u, s.get_v, s.get_w))
                 print(f"    step {i+1:7d}  t {t:10.4g}  dt {dt:9.3g}  PV {pv:.3f}  S {S:.4f}  "

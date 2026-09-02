@@ -348,6 +348,200 @@ pressure iterations vs cap; a capped run is not a data point. Report ms/step and
 
 (append per WO, newest first)
 
+## WO-V7 findings — the pore-scale campaign (doublet, packing imbibition, micromodel) — 2026-09-02, Opus
+
+Branch `vof-v7`, worktree `../flow-v7`, built from `origin/main` at `2b55edb` (WO-R2 landed).
+Deliverables: `tests/study/pore_scale/{pore_doublet,imbibition_packing,micromodel_2d}.py`, this
+entry, and the draft gallery page `examples/pore-scale-imbibition/index.qmd` on the
+`peclet-examples` branch `vof-examples-6` (not pushed, per the work order).
+
+**Every number below was taken on a SHARED machine** — four other sessions (WO-P23, WO-W12, the E6
+and E7 gallery pages) were on the same GPU and the same 48-core host throughout. The `ms/step`
+figures are an upper bound and are quoted only because WO-V9 asked for them: the same doublet
+configuration measured **43 ms/step on a briefly idle GPU** and 80–525 ms/step over the campaign
+depending on who else was running. Nothing else here is timing-dependent.
+
+### Common configuration, and why each piece is what it is
+
+One set of fluids for all three cases: `sigma = 100`, `rho_l/rho_g = 100/1`, `mu_l/mu_g = 4/0.04`
+(density **and** viscosity ratio 100), no gravity and no body force of any kind. The drive is always
+an inflow face at a prescribed uniform superficial velocity `U` against an outflow face
+(`set_vof_inflow(in, 1.0)` + `set_vof_backflow(out, 0.0)`), never a periodic net force (VOF_PLAN
+§13.2 item 6). Static contact angle, `enable_vof_momentum` on, the exact residual on by its new
+default under `enable_vof`, `set_outflow_rho_correction` at its new ON default, the solid clear of
+both open faces, FCG selected LAST (a `set_property_model("rho", …)` fires `set_density_mode`,
+which reselects Chebyshev and silently discards an earlier driver choice).
+
+* **Ratio 100 and not 1000**, as the work order specifies: V2b's uniform-velocity momentum identity
+  is floored at 1.2e-7 by the FLOAT momentum-operator storage, and WO-R's G3 gas-over-pool caveat
+  (a resting pool at ratio 1000 picks up 3.1e-2 of the inlet speed, unchanged by WO-R2) is open.
+* **The capillary numbers are APPARENT**: `Ca = mu_l U_inlet / sigma`, from the prescribed inlet
+  velocity, not from a measured contact-line speed. The angle is the STATIC V5b one and the
+  velocity-side Navier slip (V6b) does not exist, so contact-line mobility is set by the wall's
+  numerical slip — WO-V6 measured that at ~1/180 of Lucas–Washburn. That is not an ornamental
+  caveat; it is the mechanism behind finding 3.
+* **The property values are not free, but they are not arbitrary either.** Eliminating `sigma`,
+  `rho` and `mu` in favour of the two dimensionless groups gives the step count of a pore-scale VoF
+  run as `N ~ L sqrt(w / (Re Ca))` — **independent of sigma, rho and mu separately**. The only
+  levers on cost are the geometry and the Reynolds number one is willing to accept. The values above
+  put `Re = rho_l U w / mu_l` at 1 / 10 / 100 for `Ca = 1e-4 / 1e-3 / 1e-2` in the doublet, so the
+  capillary-dominated end of the sweep is properly creeping and the viscous end is not.
+
+### Finding 1 (the expensive one): a flat SDF wall on an INTEGER coordinate makes a driven two-phase run diverge geometrically, and none of its own diagnostics says so
+
+The doublet's channel walls are boxes. With their faces at integer `z` — exactly on a cell face, so
+`sdf` at every cell centre is ±1/2 and **no wall cell is cut at all** — the whole campaign was
+unrunnable. The ladder that isolated it (88×4×80 doublet, 250–300 steps each, host-openmp, `dt`
+re-picked every step from `vof_step_limits()`):
+
+| variant | step 50 | step 150 | step 300 | verdict |
+|---|---|---|---|---|
+| base (integer walls, θ 45, ratio 100, ST + momentum) | max\|u\| 1.106e+03, dt 1.9e-04 | 1.271e+05, dt 1.7e-06 | **1.522e+08**, dt 1.4e-09 | diverges |
+| neutral 90° fill (no `set_contact_angle`) | 9.421e+02 | 1.100e+05 | 1.518e+08 | diverges — **not the contact angle** |
+| ratio 10 | 2.300e+01 | 1.875e+03 | 1.700e+06 | diverges — **not the density ratio** |
+| ratio 1 | 2.296e+00 | 3.259e+01 | 3.603e+03 | diverges, more slowly — **not the ratio at all** |
+| no septum (a plain slit, same walls) | 1.122e+03 | 1.313e+05 | 1.497e+07 | diverges — **not the corners** |
+| surface tension OFF, fixed dt 0.05 | — | — | — | throws on step 1 at CFL 5.63, i.e. `max\|uf\|` = 112 already — **not surface tension** |
+| **no solid at all** (same inflow/outflow, ratio 100, ST, momentum) | 2.626e-01 | 2.714e-01 | 2.773e-01 | **flat and stable** |
+| **walls shifted a QUARTER cell**, all else identical | 3.56 at step 1, **decaying to 1.21 by step 12**, dt at the capillary limit | | | **stable** |
+
+So it is the flat SDF wall, and specifically where it sits inside its cell — WO-S finding 5 again
+(quarter-integer, not half-integer, placement), but with a far worse symptom than a biased angle.
+The corner where a channel mouth meets the slab front reads `max|u| = 1.125e+02` on the **first**
+step against a physical scale of 0.42, and thereafter grows ~5 % per step while the interface-local
+`dt` limiter shrinks by the same factor. The Weymouth–Yue cap therefore **never fires**, `step()`
+never raises, the pressure solve reports a healthy 25–33 iterations out of 400 at every step, and
+the only tell is that simulated time stops advancing: `t` frozen at 0.1868 s after 1381 steps with
+`max_open_divergence_projected()` at 2.4e+20.
+
+Two things to carry:
+
+1. **The scene rule is campaign-level, not gate-level**: every flat SDF wall in a two-phase run
+   must sit at a quarter-integer coordinate. `WALL_SHIFT = 0.25` in `pore_doublet.py` carries the
+   measurement in its comment. Curved solids (the packing's spheres, the micromodel's cylinders)
+   are generically off-grid and were never affected — which is why E6/E7 never saw this.
+2. **A driver-side divergence guard is missing and would be nearly free.** A run whose `dt` has
+   fallen ten orders below its initial capillary limit is diverging; nothing in `flow` says so,
+   because every individual diagnostic is locally correct. Recorded in the examples repo's
+   `ISSUES.md` too.
+
+### Finding 2: `capillary_dt` is a function of the CURRENT density field, so the first dt of a gas-filled domain is 7.1× too large
+
+`vof_step_limits()['capillary_dt']` evaluates Brackbill from the density field as it stands. Called
+immediately after `enable_vof` on a domain that is entirely gas, the closures have not run and it
+returns the *base* `set_rho` value, 0.2835 s; one `step()` later it returns 0.0399 s. A driver that
+sizes its first `dt` from the pre-step call starts 7.1× over the limit and the advector throws on
+step 1 (`surface tension: dt = 0.141700 exceeds the capillary limit 0.019947`). All three scripts
+re-pick `dt` from the solver's own limiter **every step**, which costs one device reduction and
+removes this and the stale-limit trap the E7 page recorded, at once.
+
+### Case 1 — the pore doublet (`pore_doublet.py`)
+
+**Scene.** Quasi-2D, 88×4×80, periodic in y. Inflow at −x at a uniform superficial `U`, outflow at
++x, walls at ±z (buried inside the solid). Three SDF slabs occupy 20 ≤ x < 68 (**offset by a
+quarter cell**, finding 1) and leave a narrow channel `w = 16` at z ∈ [48, 64) and a wide one
+`2w = 32` at z ∈ [8, 40); the open fraction of the cross-section is 0.60. Both channels leave a
+common inlet plenum and rejoin in a common outlet plenum, and the slabs are clear of both open
+faces. The inlet plenum is liquid-filled at t = 0, so t = 0 is the front **at the branch
+entrances**; filling the plenum from the inlet costs as many steps again and carries no physics.
+
+**Two front metrics, and why both are reported.** The **tip** is the leading edge — the last x,
+contiguous from the entrance, at which *any* cell of the cross-section is more than half liquid.
+The **mean** front is the last x at which the openness-weighted mean colour of the cross-section
+exceeds ½. They differ by the length of the meniscus, and that length scales with the CHANNEL
+WIDTH, so the mean front carries a systematic bias of order `w/2` in favour of the narrow branch —
+about 8 cells out of 48 here. The first pass of this campaign used the mean front only and it
+reversed the verdict at θ = 135°, Ca = 1e-2 (mean: narrow 20 / wide 17 at the same instant at
+which the tip read narrow 21 / wide 22). **Breakthrough is declared on the tip**, and both are
+printed.
+
+**The classical criterion, evaluated on this scene.** `|ΔP_c(narrow) − ΔP_c(wide)| = 2σ|cos θ|/w −
+2σ|cos θ|/2w` against `ΔP_μ = 12 μ_l ū L/(2w)²` at the mean branch velocity gives
+**471 / 47.1 / 4.71** at Ca = 1e-4 / 1e-3 / 1e-2. All three points are therefore
+**capillary-dominated**, and Chatzis & Dullien's criterion predicts *narrow first at every Ca for
+θ = 45°* and *wide first at every Ca for θ = 135°*; the viscous-dominated crossover for this
+geometry sits at Ca ≈ 4.7e-2, above the whole sweep. (Lengthening the branch is the cheapest way to
+bring it into range: `ΔP_μ` is linear in L, `ΔP_c` independent of it.)
+
+| θ | Ca | Re | t_bt narrow | t_bt wide | fills first | tip n/w | S_narrow | S_wide | pressure | max\|div\|_proj | ms/step |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 45° | 1e-2 | 100 | **69.65 s** | 85.91 s | **narrow** ✔ | 48 / 47 | 0.775 | 0.730 | 63/400 | 5.7e-08 | 473 |
+| 45° | 1e-3 | 10 | 973.4 s | **696.2 s** | **wide** ✘ | 47 / 48 | 0.793 | 0.906 | 128/400 | 7.2e-09 | 159 |
+| 45° | 1e-4 | 1 | — (partial) | — (partial) | wide ✘ | mean 5 / 10 | 0.115 | 0.228 | 106/400 | 1.1e-06 | 121 |
+| 135° | 1e-2 | 100 | 101.6 s | 103.0 s | tied (narrow by 1.4 %) | 48 / 47 | 0.937 | 0.885 | 69/400 | 5.7e-08 | 525 |
+| 135° | 1e-3 | 10 | — never | **749.1 s** | **wide only** ✔ | 0 / 48 | **0.000** | 0.936 | 86/400 | 7.2e-09 | 153 |
+| 135° | 1e-4 | 1 | — (partial) | — (partial) | wide ✔ | mean 2 / 12 | 0.043 | 0.235 | 80/400 | 5.6e-10 | 137 |
+
+(The Ca = 1e-4 rows are the FIRST pass, stopped by a 1800 s wall-clock budget after 13 800–15 000
+steps at 12.9 % and 0.0 % of the branch filled; they are reported as partial fills, on the mean
+metric, and their ordering is unambiguous — the wide front is 2–6× ahead. Every row is valid: no
+capped solve anywhere, colour exactly 0 in solid cells, clipped volume 0.000e+00.)
+
+**Verdict, in two halves.**
+
+* **The wettability contrast is right, and it is enormous.** At Ca = 1e-3, everything identical but
+  the angle, the narrow branch ends at S = 0.793 for θ = 45° and at S = **0.000** for θ = 135° —
+  the non-wetting liquid enters the narrow branch briefly (tip 3–4 cells early in the run) and is
+  then **expelled** from it as the wide branch takes the flux. That is the drainage half of
+  Chatzis–Dullien reproduced without qualification, and it is the same at Ca = 1e-4 (S 0.043 vs
+  0.115 at θ = 45°) and at 1e-2 (narrow leads by 19 % at θ = 45°, ties at θ = 135°). @eq-pc is
+  doing exactly what it should.
+* **The imbibition half is reproduced only at the HIGHEST capillary number, and the Ca dependence
+  runs backwards.** For θ = 45° the criterion predicts narrow-first at all three Ca; measured, the
+  narrow branch leads at Ca = 1e-2 and *loses* at 1e-3 and 1e-4. The mechanism is the one the
+  preamble names. Writing the doublet's flow split with a fixed total flux Q,
+  `Q_narrow = [ΔΔP_c + R_wide Q] / (R_narrow + R_wide)`, so as Q → 0 the wetting doublet must reach
+  `Q_narrow → ΔΔP_c/(R_n+R_w) > 0` with `Q_wide < 0` — the narrow branch imbibes *while drawing
+  liquid back out of the wide one*. That limit needs the contact line to advance under its own
+  suction, and this solver's contact line advances at whatever the wall's numerical slip permits
+  (WO-V6: ~1/180 of Lucas–Washburn). When the imposed velocity is well above that slip velocity
+  (Ca = 1e-2) the wetting condition acts and the narrow branch wins; below it (Ca ≤ 1e-3) the
+  capillary term cannot be delivered, the split degenerates to the pure viscous one
+  `Q_n ≈ R_w Q/(R_n+R_w)`, and the wide branch (conductance ∝ w³) wins at every lower Ca.
+  **So the Ca at which the measured ordering flips is not a physical crossover at all: it is where
+  the imposed velocity crosses the solver's numerical slip velocity.** That is a quantitative
+  argument for V6b, and it is the campaign's main verdict on case 1.
+
+### Case 2 — imbibition into an SDF sphere packing (`imbibition_packing.py`)
+
+**Scene.** 36 grains of contact radius 8 settled by a deterministic NumPy soft-sphere relaxation in
+a laterally periodic 48×48 column (no `dem` dependency), sampled at an SDF radius of 0.85 × the
+contact radius so the throats are resolvable. Grid 48×48×96, x/y periodic, liquid inflow at −z,
+outflow at +z, the bed clear of both. Bed surfaces span z = 17.2 … 67.0 (3.7 SDF grain diameters);
+bed core z = 24 … 60 with **porosity 0.5984**. The **percolation throat radius** (the max–min path
+from the bed bottom to its top, computed exactly by a Dijkstra sweep on the SDF) is **2.198 cells**
+— i.e. the bottleneck's meniscus lives at or below the ~2.5-cell floor where V3 measured the
+height-function cascade to be permanently in its PLIC-volumetric paraboloid fallback. The inlet
+plenum is liquid-filled at t = 0 (filling it from the inlet costs more steps than the bed and
+carries no physics). Breakthrough = the first sample at which the openness-weighted colour anywhere
+on the bed's top plane exceeds ½; each run then continues for a further 25 % of its breakthrough
+step count. Trapped gas = gas in the bed core that is NOT connected (6-connected, with the x and y
+periodic seams stitched by a union–find) to the outlet plenum.
+
+| θ | Ca | Re_grain | t_breakthrough | S at breakthrough | S final | trapped gas | pressure | max\|div\|_proj | ms/step | capillary dt binds |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 30° | 1e-3 | 8.5 | **690.7 s** (step 6372) | **0.7257** | 0.9134 | **0.0103** | 27/400 | 2.26e-08 | 280 | 19 % |
+| 60° | 1e-3 | 8.5 | **800.9 s** (step 6372) | **0.8521** | 0.9834 | **0.0112** | 27/400 | 1.68e-09 | 154 | 60 % |
+
+Both runs valid (no capped solve), colour exactly 0 in solid cells, clipped volume 0.000e+00,
+C ∈ [1e-31, 1] over the uncut fluid.
+
+**The result, and it is not the textbook one.** The MORE strongly wetting case breaks through
+**16 % earlier and 15 % drier** (S_bt 0.726 vs 0.852). The textbook expectation for strong
+imbibition is the opposite — a flatter, more compact front and a *higher* saturation at
+breakthrough. The mechanism is the same one that shows up in case 1: with the contact line's own
+mobility suppressed by the wall's numerical slip, a lower θ cannot fill *behind* the front any
+faster; what it does buy is a larger capillary suction into the throats the front has already
+reached, which accelerates the leading fingers. Read as a wettability *trend* the sign is
+therefore inverted relative to the experiment, and V6b is the named fix. The trapped-gas fractions
+(1.0 % vs 1.1 %) are equal within the measurement, i.e. at this Ca and this small a bed the
+trapping is set by the geometry, not by the angle.
+
+Note also that the two runs report the same *step* number for breakthrough (6372) purely because
+breakthrough is only tested every 118 steps; the times differ because the dt histories differ (the
+θ = 30° run spends 81 % of its steps on the Weymouth–Yue cap rather than the capillary one, the
+θ = 60° run only 40 %).
+
 ## WO-W0 findings (2026-09-02, Opus) — Part III rung W0: the block container + the L1 promotion
 
 Branches `vof-w0` in **flow** and in **core** (the move touches both repos). Backends: CUDA
