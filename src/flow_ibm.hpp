@@ -7802,6 +7802,10 @@ class Solver {
     pcEnergy_ = true;
     pcUpdateEnergyProps();
   }
+  /// MinMod-limited donor reconstruction of the face temperature in the consistent energy flux
+  /// (`vof/energy_advect.hpp`). OFF by default — see the note there for the measurement.
+  void setPhaseChangeEnergyMuscl(bool on) { vofEnergy_.energyMuscl = on; }
+  bool phaseChangeEnergyMuscl() const { return vofEnergy_.energyMuscl; }
   void setPhaseChangeEnergyOff() {
     pcEnergy_ = false;
     if (!pcTName_.empty() && hasScalar(pcTName_))
@@ -8083,23 +8087,39 @@ class Solver {
           // the divergence source and the pure-gas cell that will carry it
           const double S = vof::pcDivSource(md, A, rhoG, rhoL);
           if (S != 0.0) {
+            // WO-P23: the receiving PURE GAS cell is the BEST cell of the 5^3 neighbourhood on
+            // the `+n` side, scored by Malan's own collinearity weight `(d.n)^2/|d|^3` — closest
+            // and most nearly along the normal wins, so it returns the `d = round(n)` cell whenever
+            // that one is pure and degrades gracefully when it is not. The rung P0/P1 rule tried
+            // exactly two candidates (`round(k n)`, k = 1, 2) and left the source IN the
+            // interfacial cell when both were still interfacial — which is what happens on a
+            // CURVED interface: measured 48 … 262 such cells on the P3 Scriven bubble, and each of
+            // them then carries `div(open u) = S` on its OWN faces, i.e. Weymouth-Yue advects it
+            // with a field that is not the liquid velocity (that is exactly what
+            // `phase_change_diagnostics()['band_div']` reports). The search order is fixed and the
+            // comparison strict, so the choice is deterministic and decomposition-independent.
             int tx = 0, ty = 0, tz = 0;
-            bool found = false;
-            for (int k = 1; k <= 2 && !found; ++k) {
-              const int ox = (int)Kokkos::round(k * n[0]);
-              const int oy = (int)Kokkos::round(k * n[1]);
-              const int oz = (int)Kokkos::round(k * n[2]);
-              if (ox == 0 && oy == 0 && oz == 0)
-                continue;
-              if (c(i + ox + oy * sy + oz * sz) <= pureEps) {
-                tx = ox;
-                ty = oy;
-                tz = oz;
-                found = true;
-              }
-            }
-            if (!found)
-              ++nfb;  // no pure gas cell within two cells: the source stays in this cell
+            double best = 0.0;
+            for (int dz = -2; dz <= 2; ++dz)
+              for (int dy = -2; dy <= 2; ++dy)
+                for (int dx = -2; dx <= 2; ++dx) {
+                  if (dx == 0 && dy == 0 && dz == 0)
+                    continue;
+                  const double dn = dx * n[0] + dy * n[1] + dz * n[2];
+                  if (!(dn > 0.0))
+                    continue;  // the deposit goes BEHIND the interface, into the gas
+                  const double w = vof::pcGradWeight(dx, dy, dz, n);
+                  if (!(w > best))
+                    continue;
+                  if (c(i + dx + dy * sy + dz * sz) > pureEps)
+                    continue;
+                  best = w;
+                  tx = dx;
+                  ty = dy;
+                  tz = dz;
+                }
+            if (!(best > 0.0))
+              ++nfb;  // no pure gas cell in the 5^3 box on the +n side: the source stays put
             dep(i) = S;
             tgt(i) = (double)((tx + 2) + 5 * (ty + 2) + 25 * (tz + 2));
           }

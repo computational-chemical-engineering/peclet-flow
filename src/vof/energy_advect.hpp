@@ -50,6 +50,7 @@
 #include <stdexcept>
 
 #include "vof/advect_wy.hpp"
+#include "vof/momentum_advect.hpp"  // vofMinmod
 #include "vof/phase_change.hpp"
 
 namespace peclet::flow::vof {
@@ -81,6 +82,24 @@ class VofEnergyAdvector {
   double phaseRcpL() const { return rcpL_; }
   /// The transported temperature on the advector's block (inner cells mirror the solver's scalar).
   SField temperature() const { return T_; }
+
+  /// MinMod-limited donor reconstruction of the face temperature, instead of the DEFAULT plain
+  /// donor-cell (first-order upwind) value. OFF by default; turn it on deliberately and record it.
+  ///
+  /// Why it exists, measured: the geometric energy flux is what makes the transport CONSISTENT with
+  /// the colour, but its donor-cell temperature carries the first-order upwind numerical diffusion
+  /// `|u| h (1 - CFL)/2`, which thickens the thermal boundary layer and therefore LOWERS the
+  /// interfacial gradient — exactly the quantity `mdot` is. On the P3 Scriven bubble at Ja = 0.5 the
+  /// consistent transport with plain upwind reads -2.24 % on R(t) against -1.46 % for the scalar
+  /// module's Koren TVD advection, i.e. the consistency is bought with accuracy at that Jakob
+  /// number. The limited reconstruction buys it back.
+  ///
+  /// Why it is not the default: this is the energy twin of `momentumMuscl`, and there the slope's
+  /// coefficient is unbounded in the density ratio on a control volume the sweep empties. The
+  /// temperature has no such amplification (the recovery divides by `rho c_p(C^{new})`, which the
+  /// flux is consistent with), but the boundedness statement is weaker than plain upwind's and the
+  /// campaign's rule is that a scheme change ships as a measured switch.
+  bool energyMuscl = false;
 
   /// Ghost policy for the temperature — the halo/periodic exchange plus the block's non-periodic
   /// zero-gradient clamp. Set by the solver; NOT the colour's own hook, because that one also runs
@@ -159,6 +178,7 @@ class VofEnergyAdvector {
     SField T = T_, Tw = Tw_, fl = w.faceFlux(), u = w.faceVel(d), c = w.colour();
     const double rg = rcpG_, rl = rcpL_;
     const double floor = 1e-12 * (rg < rl ? rg : rl);
+    const bool muscl = energyMuscl;
     Kokkos::parallel_for(
         "vof::energy::update",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
@@ -170,8 +190,23 @@ class VofEnergyAdvector {
           const double phiP = rg * (aP - FP) + rl * FP;
           const double phiM = rg * (aM - FM) + rl * FM;
           const double ti = T(i);
-          const double tP = (aP > 0.0) ? ti : T(i + sd);
-          const double tM = (aM > 0.0) ? T(i - sd) : ti;
+          double tP, tM;
+          if (!muscl) {
+            tP = (aP > 0.0) ? ti : T(i + sd);
+            tM = (aM > 0.0) ? T(i - sd) : ti;
+          } else {
+            // the flux slab of a face occupies the fraction |a| of the DONOR next to that face, so
+            // its centroid sits (1/2 - |a|/2) from the donor centre TOWARDS the face
+            const double wP = 0.5 - 0.5 * Kokkos::fabs(aP), wM = 0.5 - 0.5 * Kokkos::fabs(aM);
+            if (aP > 0.0)
+              tP = ti + wP * vofMinmod(ti - T(i - sd), T(i + sd) - ti);
+            else
+              tP = T(i + sd) - wP * vofMinmod(T(i + sd) - ti, T(i + 2 * sd) - T(i + sd));
+            if (aM > 0.0)
+              tM = T(i - sd) + wM * vofMinmod(T(i - sd) - T(i - 2 * sd), ti - T(i - sd));
+            else
+              tM = ti - wM * vofMinmod(ti - T(i - sd), T(i + sd) - ti);
+          }
           const double cl = Kokkos::fmin(Kokkos::fmax(c(i), 0.0), 1.0);  // C AFTER this sweep
           const double r = pcPhaseMix(rg, rl, cl);
           Tw(i) = ti + (phiM * (tM - ti) - phiP * (tP - ti)) / (r > floor ? r : floor);

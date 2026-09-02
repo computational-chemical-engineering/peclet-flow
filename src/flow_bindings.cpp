@@ -1679,6 +1679,17 @@ static void bind_solver(nb::module_& m, const char* name) {
           "boundary condition that already sits at the interface.\n"
           "Units: rho*c_p in J/(cell^3 K), k in W/(cell K). Requires set_phase_change_thermal.")
       .def(
+          "set_phase_change_energy_muscl",
+          [](S& s, bool on) { s.setPhaseChangeEnergyMuscl(on); }, nb::arg("on"),
+          "MinMod-limited donor reconstruction of the face temperature in the CONSISTENT energy "
+          "flux, instead of the default plain donor-cell (first-order upwind) value. OFF by "
+          "default. The consistency is what the geometric flux buys; its first-order upwind "
+          "numerical diffusion |u| h (1 - CFL)/2 thickens the thermal boundary layer and therefore "
+          "LOWERS the interfacial gradient, which is exactly what mdot is — measured on the P3 "
+          "Scriven bubble at Ja = 0.5: -2.24 % on R(t) with plain upwind against -1.46 % for the "
+          "scalar module's Koren TVD (which is NOT consistent). This buys the accuracy back; it is "
+          "a switch and not a default because it is the energy twin of set_vof_momentum_muscl.")
+      .def(
           "set_phase_change_energy_off", [](S& s) { s.setPhaseChangeEnergyOff(); },
           "Back to the constant-diffusivity scalar operator and the Koren TVD advective term "
           "(the rung P0/P1 energy path).")

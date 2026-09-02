@@ -88,7 +88,7 @@ def sphere_colour(n, cx, cy, cz, R, sub=4):
 
 
 def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, consistent=True,
-        quad=True, verbose=True):
+        quad=True, muscl=False, verbose=True):
     rr = 1.0 / ratio
     beta = scriven_beta(ja, rr)
     t0 = (r0 / (2 * beta)) ** 2 / alpha_l          # cells^2 / (cells^2/s) = s
@@ -125,6 +125,7 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     s.set_phase_change_plane_dirichlet(plane)
     if consistent:
         s.set_phase_change_energy(rcp_v, rcp_l)
+        s.set_phase_change_energy_muscl(muscl)
     s.set_phase_change_quadratic_fit(quad)
 
     # ADAPTIVE dt on the solver's OWN interface-local Courant number. The a-priori estimate
@@ -193,12 +194,14 @@ def main():
     ap.add_argument("--no-plane", action="store_true")
     ap.add_argument("--no-consistent", action="store_true")
     ap.add_argument("--no-quad", action="store_true")
+    ap.add_argument("--muscl", action="store_true")
     a = ap.parse_args()
     print(f"P3 Scriven bubble growth, {a.n}^3, plane Dirichlet {not a.no_plane}, "
-          f"consistent energy {not a.no_consistent}, quadratic fit {not a.no_quad}")
+          f"consistent energy {not a.no_consistent}, quadratic fit {not a.no_quad}, "
+          f"energy MUSCL {a.muscl}")
     for ja in [float(x) for x in a.ja.split(",")]:
         run(a.n, ja, a.ratio, a.r0, a.r1, sweeps=a.sweeps, plane=not a.no_plane,
-            consistent=not a.no_consistent, quad=not a.no_quad)
+            consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl)
     return 0
 
 

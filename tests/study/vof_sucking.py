@@ -54,7 +54,7 @@ def exact_b(ja, rr):
 
 
 def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, ny=4, nz=4,
-        kratio=None, rcpratio=None, consistent=True, plane=True, quad=False, verbose=True):
+        kratio=None, rcpratio=None, consistent=True, plane=True, quad=False, muscl=False, verbose=True):
     """One resolution.  The PHYSICAL problem is fixed (domain length 1, alpha_l = 1, the vapour
     layer growing from x0p to xep of the domain) and only h = 1/n changes."""
     rr = 1.0 / ratio                      # rho_v / rho_l
@@ -115,6 +115,7 @@ def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, ny=4, nz
     s.set_phase_change_quadratic_fit(quad)
     if consistent:
         s.set_phase_change_energy(rcp_v, rcp_l)
+        s.set_phase_change_energy_muscl(muscl)
 
     # initial liquid velocity (the projection would find it anyway; this removes a startup transient)
     Xdot = b * math.sqrt(alpha_l / t0) * n           # cells/s
@@ -176,6 +177,7 @@ def main():
     ap.add_argument("--no-plane", action="store_true")
     ap.add_argument("--no-quad", action="store_true")
     ap.add_argument("--fo", type=float, default=0.5)
+    ap.add_argument("--muscl", action="store_true")
     a = ap.parse_args()
     ns = [int(x) for x in a.ns.split(",")]
     print(f"P2 sucking interface: rho_l/rho_v = {a.ratio:g}, Ja = {a.ja:g}, "
@@ -186,7 +188,7 @@ def main():
     for n in ns:
         e, te_, capped, itmax = run(n, a.ratio, a.ja, kratio=a.kratio, rcpratio=a.rcpratio,
                                     consistent=not a.no_consistent, plane=not a.no_plane,
-                                    quad=not a.no_quad, fo=a.fo)
+                                    quad=not a.no_quad, fo=a.fo, muscl=a.muscl)
         errs.append(e)
         terrs.append(te_)
         if capped:
