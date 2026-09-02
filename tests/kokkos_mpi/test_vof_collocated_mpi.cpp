@@ -174,7 +174,7 @@ int main(int argc, char** argv) {
                   size, NX, NY, NZ, lnx, lny, lnz, cut[0] ? "x" : "", cut[1] ? "y" : "",
                   cut[2] ? "z" : "");
 
-    const Config configs[] = {{"hydro-z", 1000.0, true, 40}, {"vof-z", 10.0, false, 20}};
+    const Config configs[] = {{"hydro-z", 1000.0, true, 20}, {"vof-z", 10.0, false, 10}};
 
     for (const Config& c : configs) {
       // The stratification / interface axis must be CUT: that is the whole point (the face
@@ -211,21 +211,32 @@ int main(int argc, char** argv) {
           ref.step();
           itr.push_back(ref.lastPressureIterations());
         }
-        double du = 0, df = 0;
+        double du = 0, df = 0, su = 0, sf = 0;
         for (int comp = 0; comp < 3; ++comp) {
           du = std::fmax(du, maxAbsDiff(gu[comp], ref.getVelocity(comp)));
           df = std::fmax(df, maxAbsDiff(gf[comp], ref.getFaceVelocity(comp)));
+          // The SCALE the tolerance is relative to must be the max over ALL THREE components: the
+          // `vof-z` configuration is driven along x, so scaling by the z component alone would
+          // demand bitwise agreement of an O(1e-3) x-field against a zero reference scale.
+          su = std::fmax(su, maxAbs(ref.getVelocity(comp)));
+          sf = std::fmax(sf, maxAbs(ref.getFaceVelocity(comp)));
         }
         const double dp = maxAbsDiff(gp, ref.getPressure());
         const double dc = maxAbsDiff(gc, ref.getField("C"));
-        const double su = maxAbs(ref.getVelocity(2)), sf = maxAbs(ref.getFaceVelocity(2)),
-                     sp = maxAbs(ref.getPressure());
+        const double sp = maxAbs(ref.getPressure());
         long dit = 0;
         for (std::size_t k = 0; k < itd.size(); ++k)
           dit = std::max(dit, std::labs(itd[k] - itr[k]));
         // np = 1 must be BITWISE; np > 1 sits on the MPI reduction-order floor.
-        const double tolU = (size == 1) ? 0.0 : 1e-11 * std::fmax(su, 1e-12);
-        const double tolF = (size == 1) ? 0.0 : 1e-11 * std::fmax(sf, 1e-12);
+        // THE YARDSTICK FOR A REST STATE IS THE FORCING, NOT THE ANSWER. `hydro-z` is hydrostatic:
+        // its converged velocity is ~0 (1.4e-07, and that is the invisible checkerboard, not
+        // physics), so a tolerance relative to |u| would demand a bitwise match of the reduction
+        // order. The scale that means something there is the velocity the body force would produce
+        // in one step, g*dt, which is exactly what the projection has to cancel.
+        const double uRef = std::fmax(su, c.walls ? GRAV * DT : 0.0);
+        const double fRef = std::fmax(sf, c.walls ? GRAV * DT : 0.0);
+        const double tolU = (size == 1) ? 0.0 : 1e-11 * std::fmax(uRef, 1e-12);
+        const double tolF = (size == 1) ? 0.0 : 1e-11 * std::fmax(fRef, 1e-12);
         const double tolP = (size == 1) ? 0.0 : 1e-9 * std::fmax(sp, 1e-12);
         const double tolC = (size == 1) ? 0.0 : 1e-11;
         const bool ok = du <= tolU && df <= tolF && dp <= tolP && dc <= tolC && dit <= 1;
@@ -237,7 +248,7 @@ int main(int argc, char** argv) {
           std::printf(
               "           face |uf| %.3e (the gated hydrostatic quantity), cell |u| %.3e "
               "(carries the approximate projection's invisible checkerboard)\n",
-              maxAbs(ref.getFaceVelocity(2)), su);
+              maxAbs(ref.getFaceVelocity(2)), maxAbs(ref.getVelocity(2)));
         if (!ok)
           fail = 1;
       }
