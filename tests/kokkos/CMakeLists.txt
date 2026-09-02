@@ -19,6 +19,10 @@ message(STATUS "cfd/kokkos: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES})")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake")
 include(PecletDeps)
 peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../../../core" CORE_INC)
+# WO-W0: the container-free VoF kernels moved to core (peclet::core::vof) and flow's src/vof/*.hpp
+# are thin includes of them, so ANY target that compiles a src/ header needs the core include path,
+# not only the ones that reach for the field registry. Directory-wide (the headers are header-only).
+include_directories("${CORE_INC}")
 
 enable_testing()
 add_executable(test_reductions test_reductions.cpp)
