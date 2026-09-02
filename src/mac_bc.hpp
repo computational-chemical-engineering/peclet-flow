@@ -228,6 +228,42 @@ inline void bcCorrectOutflow(BField f, BField phi, B3 ext, int g, int a) {
       });
 }
 
+// VARIABLE-DENSITY sibling of bcCorrectOutflow (WO-R item 4; the gap
+// doc/variable_density_projection.md section 4 listed as "revisit with a two-phase outflow case").
+//
+// Every other face of the staggered correction carries the mobility factor rho0/rho_f
+// (projectCorrectVar); the outflow face did not, so at a density ratio r the outflow face was
+// corrected by a factor r too much or too little relative to its neighbours. Constant density
+// hides it exactly (rho_f == rho0 makes the factor 1), which is why the channel/BFS validations
+// never saw it.
+//
+// rho_f is the SAME arithmetic face mean the operator coefficient and every other corrected face
+// use (buildRhoCoeff / projectCorrectVar). At the outflow face the outer cell is a ghost whose rho
+// the Neumann property policy (fillPropGhosts) set to the inner cell's rho, so this evaluates to
+// the inner cell's rho — the statement WO-R makes — while remaining literally the same expression
+// as the interior kernel, which is what keeps the two consistent if the ghost policy ever changes.
+inline void bcCorrectOutflowVar(BField f, BField phi, BField rho, double rho0, B3 ext, int g, int a,
+                                bool harmonic) {
+  BExec space;
+  int dims[3];
+  long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::bc_correct_outflow_var", MD(space, {0, 0}, {dims[b], dims[c]}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        const long bf = (long)p0 * sb + (long)p1 * sc + (long)(dims[a] - g) * sa;
+        const double ra = rho(bf), rb = rho(bf - sa);
+        // matched to projectCorrectVar / projectCorrectVarHarm (the harmonic knob is a measured
+        // ablation, set_rho_face_harmonic; it must switch BOTH or the outflow face disagrees with
+        // the interior it is continuing)
+        const double rf = harmonic ? (2.0 * ra * rb / (ra + rb)) : (0.5 * (ra + rb));
+        f(bf) -= rho0 / rf * (phi(bf) - phi(bf - sa));
+      });
+}
+
 // Set the a-component face openness on a domain face to `val` (Neumann wall/inflow -> 0; the
 // periodic fill would otherwise wrap the wrong value into an outflow face from the opposite
 // boundary -> set it open = 1).

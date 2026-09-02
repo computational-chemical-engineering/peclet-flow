@@ -243,3 +243,41 @@ H1 said "D1 dominates every moving-body symptom". The measurements split it:
 these measurements do not implicate in any of the remaining symptoms. The next work is diagnostic:
 the tow ↔ free-fall split at E3/E4, the unconfined control's 5 % shift, and the −2 % Blackburn
 floor.
+
+## Solver-campaign cross-check (2026-09-02) — the deficit is orthogonal to all of it
+
+Between A0 (`fb1a1a7`) and 2026-09-02 the suite landed the VoF V5a/V5b rungs, P1/P2 exact
+residuals (opt-in), CutcellMG telescoping (opt-in), and — on the `telescope` branch, not yet in
+main — the momentum residual stop (default 1e-5) with velocity MG under MPI. Every ten-cate probe
+was re-run on three fresh builds against the A0 baselines (same machine, same probe scripts,
+`.sdf-campaign-probes/cutwall_*.py`):
+
+| probe (d/h=8) | A0 | main `a89417c` | main + `MREAL_DOUBLE` | telescope `496ec13` (res-stop 1e-5) |
+|---|---|---|---|---|
+| E1 free-fall peak u/u∞ | 0.8030 | 0.8030 | 0.8030 | 0.8030 |
+| Newton audit, towed E4, ΣF/W | −0.0329 | −0.0329 | −0.0329 | −0.0329 |
+| tow drag E4 / E1, F/W | 1.0866 / 1.2046 | 1.0866 / 1.2046 | 1.0866 / 1.2046 | 1.0866 / 1.2047 |
+| unconfined control | 1.0843 | 1.0843 | 1.0843 | 1.0844 |
+
+Readings: (1) nothing merged into main since A0 touches moving geometry (bit-identical); (2)
+**double pressure-operator storage changes nothing** — the float `MReal` floor (SCALING_ISSUES
+#1) is not the confined-drag cause (the momentum IBM overlay `K_val/M_val/…` is hard-float
+regardless of `MReal`, so that half is still untested — a separate build flag would be needed);
+(3) the residual-stop default is physically inert here (4th digit).
+
+**One real impact of the telescope default, on a different gate:** `rotation_gate.py` (Stokes,
+100 fixed sweeps on main) FAILS on telescope — torque within 0.3% (1.02118 vs 1.02424 at N=96) but
+the spinning sphere's net force rises from round-off (5e-13) to **1e-6…1e-5**. Telescope with
+`set_velocity_residual_tolerance(0)` reproduces main **bit-for-bit**; with 1e-10 the torque
+returns to 5 digits and the net force to 1e-9…1e-8. So the gate's "net force at round-off"
+criterion is satisfiable only by the fixed-count loop; the physics is unaffected. The gate needs an
+explicit tolerance policy before the telescope default reaches main. Also: the telescope branch
+does not build without `PECLET_FLOW_MPI=ON` (`MPI_Comm`/`comm_` undefined in
+`mac_velocity_mg.hpp:672`, `flow_ibm.hpp:4075`).
+
+**Consequence for the three live threads:** precision and momentum convergence are now excluded
+as causes along with dt, sweeps, limiter and advection scheme. What remains is structural in the
+moving cut-cell discretisation itself — D2 (apertures/wall closure at the moving wall), the
+continuity/pressure treatment of fresh and dying cells, or the coupling time-lag at high Re
+(thread 1). Builds kept for the next session: `flow/build_l3_cuda_head`, `flow/build_l3_cuda_dbl`,
+`tel/flow/build_l3_cuda_tel`.

@@ -12,7 +12,8 @@ a number somebody else has already published.
                 relation omega^2 = sigma k^3 / (rho1 + rho2) and the 2 nu k^2 viscous decay rate
                 (Prosperetti 1981; Popinet 2009 section 4.2).
     lamb        a droplet oscillating in mode n = 2 against Lamb's (1932, art. 275) frequency
-                omega^2 = n(n-1)(n+1)(n+2) sigma / (R^3 ((n+1) rho_in + n rho_out)).
+                omega^2 = n(n-1)(n+1)(n+2) sigma / (R^3 ((n+1) rho_in + n rho_out)), AND (2026-09-02)
+                the exact viscous mode of vof_capillary_references.py.
     hysing      the Hysing et al. (IJNMF 60:1259, 2009) rising-bubble benchmark, both cases,
                 against the published reference quantities. READ THE CAVEAT it prints.
     falling     the falling-drop terminal velocity WO-K had to defer, re-run WITH surface tension
@@ -41,6 +42,9 @@ import time
 import numpy as np
 
 import peclet.flow as pf
+
+sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
+from vof_capillary_references import wave_mode, drop_mode  # noqa: E402
 
 QUICK = "--quick" in sys.argv
 GATES = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -223,6 +227,11 @@ def gate_wave():
         a0 = lam / 100.0
         omega_th = math.sqrt(sigma * k ** 3 / (2 * rho))
         gamma_th = 2 * nu * k * k
+        # 2026-09-02: the inviscid omega_th and the free-surface 2 nu k^2 are the WRONG references
+        # for a two-fluid interface (VOF_NEXT_SESSION Item 2) -- the exact viscous normal mode is
+        # in vof_capillary_references.py and is what the gate reports against.
+        s_ex, _ = wave_mode(k, nu, sigma, rho, H=nz / 2.0)
+        omega_ex, gamma_ex = s_ex.imag, -s_ex.real
 
         s = pf.Solver(nx, ny, nz)
         s.set_rho(rho)
@@ -274,6 +283,8 @@ def gate_wave():
         print(f"  {nx:>4} {lam:>7.0f} {nu:>8.4g} {omega_num:>11.5f} {omega_th:>11.5f}"
               f" {100*(omega_num/omega_th-1):>7.2f}% {gamma_num:>10.3e} {gamma_th:>10.3e}"
               f" {100*(gamma_num/gamma_th-1):>7.1f}%")
+        print(f"       EXACT viscous two-fluid mode: omega {omega_ex:.5f} (sim {100*(omega_num/omega_ex-1):+.2f}%), "
+              f"gamma {gamma_ex:.3e} (sim {100*(gamma_num/gamma_ex-1):+.1f}%)")
         print(f"       a0 = {a0:.3f} cells, {nsteps} steps over 2.5 periods; {h}")
 
 
@@ -354,6 +365,13 @@ def gate_lamb():
         phi = (4 / 3) * math.pi * R ** 3 / n ** 3
         print(f"  {n:>4} {R:>5.1f} {100*phi:>6.2f}% {ratio:>7.0f} {omega_num:>11.5f}"
               f" {omega_th:>11.5f} {100*(omega_num/omega_th-1):>7.2f}%")
+        if ratio == 1.0:  # 2026-09-02: the exact viscous mode (equal fluids); see Item 2 addendum
+            try:
+                s_ex, _ = drop_mode(nn, R, mu / rho_in, sigma, rho_in)
+                print(f"       EXACT viscous mode: omega {s_ex.imag:.5f} (sim {100*(omega_num/s_ex.imag-1):+.2f}%), "
+                      f"gamma {-s_ex.real:.3e}; the residual after the viscous shift is the OPEN inviscid deficit")
+            except ImportError:
+                print("       (mpmath missing: exact viscous drop mode not computed)")
         print(f"       {nsteps} steps over 2.5 periods, dt = {dt:.4g}; {h}")
 
 

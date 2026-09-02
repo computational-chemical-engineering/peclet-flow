@@ -374,8 +374,11 @@ Full background, measurements and open problems: [`../docs/DECOMPOSITION_AND_MUL
 ### Geometric VoF — two-phase flow (rungs V2a + V2b; `src/vof/`)
 
 Campaign plan: [`../docs/VOF_PLAN.md`](../docs/VOF_PLAN.md); work orders + findings:
-[`doc/vof_workorders.md`](doc/vof_workorders.md) (phase 0) and
-[`doc/vof_workorders_v2.md`](doc/vof_workorders_v2.md) (V2).
+[`doc/vof_workorders.md`](doc/vof_workorders.md) (phase 0),
+[`doc/vof_workorders_v2.md`](doc/vof_workorders_v2.md) (V2),
+[`doc/vof_workorders_v34.md`](doc/vof_workorders_v34.md) (V3/V4) and
+[`doc/vof_workorders_v5.md`](doc/vof_workorders_v5.md) (V5a cut cells, and the open V-BC/V5b/V8
+work orders).
 
 - `src/vof/plic.hpp` (V0) — SZ2000/Lehmann–Gekle plane↔volume, MYC normals, slab flux volumes.
   Container-free `KOKKOS_INLINE_FUNCTION`s only (no `View`, no indexing), so the V4 promotion to
@@ -385,6 +388,12 @@ Campaign plan: [`../docs/VOF_PLAN.md`](../docs/VOF_PLAN.md); work orders + findi
   1/(2(N−1)); the familiar 0.5 is the 2D value). The dilation flag is frozen once per step —
   recompute it per sweep and exact conservation silently dies (measured 2.3e-15 → 1.5e-2).
 - `src/vof/colour_field.hpp` (V2a) — the `G=2` ↔ `g=3` bridge and the colour ghost policy.
+- `src/vof/wetting.hpp` (V5b) — the theta-consistent band fill: the fluid-only Youngs normal,
+  the rotation to the prescribed angle and the plane->fraction rule, container-free like `plic.hpp`.
+- `src/vof/cutcell.hpp` (V5a) — the cut-cell rules of the colour transport, container-free like
+  `plic.hpp`: the effective fluid volume `eps_eff = max(eps, 1/64)`, Weymouth's admissible flux
+  interval generalized to a cut donor, the effective Courant number, the [0,1] clip and the
+  solid-band fill state machine.
 - `src/vof/momentum_advect.hpp` (V2b) — `MomentumConsistentAdvector`: `rho^c u_c` on the
   half-shifted MAC control volumes, driven by the SAME PLIC planes, sweep order and frozen state as
   the colour advection of that step. Opt-in (`enable_vof_momentum(rho_gas, rho_liquid)`), and what
@@ -483,7 +492,10 @@ implicit surface tension is ever worth revisiting.
 `set_vof_curvature_mixed_height_fit()`; V4 adds
 `set_surface_tension()` / `surface_tension()`, `capillary_dt()`, `set_capillary_cfl()`,
 `vof_step_limits()`, `csf_diagnostics()`, `set_vof_interface_eps()` / `vof_interface_eps()`,
-`set_vof_kappa_frozen()`, `set_vof_kappa_constant()`, `set_csf_mode()`. `"C"` is an ordinary
+`set_vof_kappa_frozen()`, `set_vof_kappa_constant()`, `set_csf_mode()`; V-BC adds
+`set_vof_inflow()`, `set_vof_inflow_profile()`, `set_vof_backflow()`, `vof_bc_volumes()` /
+`vof_bc_volumes_total()` / `reset_vof_bc_volumes()`, `set_outflow_rho_correction()` and
+`max_open_divergence_projected()`. `"C"` is an ordinary
 registered `G=2` cell field, so ρ(C)/μ(C) go through the existing `LinearMix` closures
 (`set_property_model("rho","linear","C",[rho_g, rho_l-rho_g])`, which enables the varRho path) and
 `get_field`/`set_field`/`field_view`/`redistribute` work on it unchanged. The **g=3 working block**
@@ -510,9 +522,188 @@ Three things this construction paid for, all in `doc/vof_workorders_v2.md` (WO-K
   empties (gain `Δρ·F/rho^c`); plain donor-cell upwind is the default and
   `set_vof_momentum_muscl(True)` the opt-in, measured 2.2e-10 vs 6.7e-16 at ratio 1e4.
 
-**Scope — say this to users:** **Staggered only** (collocated is V8 —
-`enable_vof` throws) and **no immersed solid** (the fluxes are not openness-weighted yet —
-`advectVof` throws; an all-fluid `set_pressure_geometry` is fine). Without
+**Cut cells — VoF through an immersed solid (rung V5a, WO-Q).** `advectVof`'s `hasSolid_` throw is
+LIFTED: the colour field is transported through an SDF solid with **openness-weighted geometric
+fluxes**. `C` is the liquid fraction of the **fluid** volume of a cell (VOF_PLAN §3 rule 2), the
+transported quantity is `eps_i C_i`, every flux is `F_f = o_f · wyFaceFlux(a_f, …)` and the dilation
+term uses the **same** `o_f a_f` — so the flux sum telescopes and the dilation sum is `H(C−½)` times
+the projection's own openness-weighted divergence, i.e. `Σ_i eps_eff_i C_i` is conserved **exactly**
+to the projection's residual. Measured (24³ periodic sphere array, 200 kinematic steps at interface
+CFL 0.2): drift **7.7e-12** against a `max|div(open·u)|` floor of **3.0e-11**, colour in solid cells
+**exactly 0**, `C ∈ [0,1]` in uncut fluid cells to the last bit, clipped volume **5.4e-19**. Needs
+`set_solid(..., cutcell_pressure=True)` (the staircase operator has no face openness to weight
+with) and it throws otherwise. New Python: `advect_vof(dt)` (kinematic advection with the current
+face velocity, no NS step — it **throws** unless the field is discretely divergence-free to 1e-10,
+because WY conservation is conditional on that), `set_vof_step_parity()`, `vof_has_geometry()`,
+`vof_filled_colour()`, `vof_geometry(which)`, `set_vof_cutcell_flux_clamp()`,
+`set_vof_solid_colour_zero()`; `vof_diagnostics()` gains `volume` / `raw_volume` / `solid_sum` /
+`min_fluid` / `max_fluid` / `clipped_volume` / `cut_cells` / `solid_cells` / `clamped_faces`.
+`src/vof/cutcell.hpp` holds the container-free rules; the geometry branch in `advect_wy.hpp` and
+`momentum_advect.hpp` is taken **outside** the lambda, so a solid-free run executes the V1 kernel
+bodies verbatim and the whole V1/V2a/V3/V4 battery is byte-identical.
+
+Five things this rung paid for, all measured (`doc/vof_workorders_v5.md`, WO-Q findings):
+- **What it approximates.** The PLIC polyhedron is reconstructed on the WHOLE unit cell and its slab
+  volume multiplied by the open area, rather than clipped against the solid as well (Huang, *JCP*
+  2025/2026 solid-clipped flux polygons). Conservative either way, exact where interface and wall
+  are parallel or the cell is whole, O(1) wrong in the *distribution* inside a cell whose interface
+  crosses its wall. `vof_diagnostics()['clipped_volume']` is the tripwire.
+- **The cut-cell Courant number is `max(|a_f|, o_f |a_f| / max(eps_i, 0.1))`.** The second term
+  alone (the work order's rule) is *smaller* than `|a_f|` wherever `o_f < eps_i` and licensed
+  `dt = 1.85` on the packing gate, which lost **70 % of the liquid volume** in 200 steps while the
+  flux sum still telescoped — over-CFL WY loses boundedness, not volume, which is why it is quiet.
+  Consequence: in a packing the cut-cell limiter is up to **6×** tighter than the plain one.
+- **Boundedness comes from clamping the FLUX, not from clipping C.** With the [0,1] clip as the only
+  bound it fired at 3.2e-5 liquid volume per step and the drift reached 1.3e-8 in 30 steps.
+  `vofCutFluxClamp` bounds `|F|` by what the donor holds (`o|a|` swept fluid volume, of which at
+  most `eps·C` liquid and `eps·(1−C)` gas), applied to the one value both neighbours share — so
+  conservation still telescopes bit-exactly — and **only for a MIXED donor**, because a pure-phase
+  donor's algebraic flux is already exactly bounded and clamping it would break the exact full-cell
+  cancellation. `set_vof_cutcell_flux_clamp(False)` is the ablation.
+- **The conserved functional is `Σ eps_eff C` with `eps_eff = max(eps, 1/64)`, not `Σ eps C`.**
+  `buildCellFraction` subsamples 4³, so a cell can read `eps == 0` while owning an open face; it is
+  fluid, it receives flux, and the raw sum silently drops it. Both are reported.
+- **The solid-band fill is a stencil device, and the canonical `"C"` is 0 in the solid.** Three
+  passes with a *shrinking* depth budget (pass k writes solid cells at ghost depth ≤ 3−k, reads only
+  fluid cells or cells filled in an earlier pass) plus a second exchange give a zero-slope
+  continuation of the colour into the wall — the 90° Afkhami–Bussmann limit — so the MYC and
+  height-function stencils see a consistent interface. Measured on a liquid cap resting on a flat
+  SDF wall at a **half-integer** z (D/Δ = 24, σ = 1): apparent contact angle **89.94°**,
+  Young–Laplace to **4.8e-3**, volume drift 4.5e-15. Writing the fill into `"C"` instead of 0 is
+  **bitwise identical** in every measured quantity (the faces onto a solid cell have openness 0), so
+  the "no colour in the solid" contract is free. Near-wall spurious currents are **Ca = 4.9e-4** in
+  the open fluid, ~20× the V4 free-droplet 2.6e-5 at the same D/Δ. WO-S replaces only the pass-1
+  rule with the θ-consistent one.
+
+**Static contact angle on SDF solids (rung V5b, WO-S).** `set_contact_angle(theta_deg)` (or
+`set_contact_angle_field`) replaces **pass 1 only** of the V5a solid-band fill by the volume
+fractions of the plane that continues the fluid-side interface into the solid at the prescribed
+angle, measured **through the liquid**: with `n_w = grad(sdf)/|grad(sdf)|` (solid -> fluid) and the
+PLIC normal `m` (liquid -> gas), the contact-line condition is `m . n_w = cos(theta)`, so theta = 0
+fills the band with liquid and theta = 180 empties it. The unmodified V3 height-function/MYC cascade
+then returns the curvature of an interface meeting the wall at theta and the V4 balanced force does
+the rest — **no force is added at the wall**. With no call the neutral 90-degree fill runs and the
+whole V5a battery is **byte-identical**. Construction (`src/vof/wetting.hpp`, container-free like
+`plic.hpp`): walk from the band cell along `n_w` to the first fluid cell, take the AZIMUTH of its
+**fluid-only** Youngs normal (the 27-point weights restricted to non-solid cells, renormalized per
+half-plane), build `m_theta = cos(theta) n_w + sin(theta) t_hat`, and anchor the plane by matching
+that cell's own liquid volume (`plicAlpha`). New Python: `set_contact_angle`,
+`set_contact_angle_field`, `contact_angle`, `set_contact_angle_pivot` (ablation),
+`contact_angle_diagnostics`.
+
+Four things this rung paid for, all measured (`doc/vof_workorders_v5.md`, WO-S findings):
+- **The fill is exactly idempotent, and that is the whole design.** An interface that already meets
+  the wall at theta is reproduced to **1e-15** (`tests/kokkos/test_vof_wetting.cpp` G0a), so theta is
+  a fixed point of the discrete scheme. The work order's anchor — the PLIC centroid projected onto
+  the wall along `n_w` — is **not** idempotent: it shifts the plane by `-sdf(p_f) cos(theta)`, with
+  the wrong sign, measured **0.26 in cell fraction at theta = 60**. It ships as ablation mode 2 of
+  `set_contact_angle_pivot`.
+- **Only the IN-WALL half of the fluid-only normal is usable.** A fluid-restricted stencil cannot
+  measure the WALL-NORMAL component — there is no colour below the first fluid row and the one-sided
+  substitute reads a saturating profile over half the distance: **23 deg of error at theta = 30**
+  against 2.3 deg for the same stencil with the solid rows present. Its AZIMUTH is exact for a plane
+  (0.000 deg over the sweep), and since the rung OVERWRITES the angle anyway, using the azimuth and
+  discarding the rest makes the end-to-end band error **1.1e-15** instead of inheriting the defect.
+- **The anchor's own column is not enough.** Walking strictly along `n_w` gives a PURE-phase anchor
+  in every column just outside the contact circle, where the continued interface still puts liquid
+  in the band; the band then under-extends and the equilibrium angle comes out **5 deg biased
+  towards 90**. Where the anchor is pure phase the fill averages the theta-planes of the anchor's
+  MIXED neighbours (branch `neighbour_cells`), which removes the bias.
+- **Accuracy, honestly rated.** Starting from the spherical cap of the prescribed angle on a flat
+  SDF wall (D/dx = 24, Oh = 0.1, 500 steps, ratio 1) the equilibrium angle comes back
+  **30.69 / 59.98 / 88.84 / 116.86 / 146.23** for theta = 30 / 60 / 90 / 120 / 150, i.e. within
+  **1.2 deg up to 90 deg** and **3.5-3.8 deg** above it — and the 120-degree row was run to rest
+  (`max|u|` down to 1.8e-4) to confirm that is a converged bias and not an unfinished transient. The
+  two failing rows are also the two whose CONTACT RADIUS is under ten cells (9.1 and 5.3 against
+  20.2 at theta = 30), and the same bias is *larger*, not smaller, with the wall on a cell face
+  where the cut-cell reconstruction is exactly absent — so it is a contact-line resolution effect,
+  not the cut-cell approximation. At ratio 100 the same protocol reads 29.92 / 58.36 / 88.44 /
+  116.42 / 142.80, i.e. the equilibrium the fill selects is a property of the FILL and not of the
+  density contrast up to 120 deg, with only the (under-resolved, contact radius 5.8 cells)
+  150-degree row degrading further. On an
+  SDF SPHERE (Rs = 12, drop of Rd = 8) the equilibrium CAP RADIUS is within **2.11 %** of the
+  two-sphere reference at theta = 60/90/120, while the angle inferred from the volume and the apex
+  height is off by 4.5 / -2.7 / -6.2 deg — that inversion carries `dtheta/dH ~ 10.5 deg per cell`,
+  so a half-cell error in a colour column is worth five degrees and the cap radius is the
+  well-conditioned reading. Full tables and the corrected gates: `doc/vof_workorders_v5.md`.
+- **Where the SDF wall sits INSIDE the cell decides whether the contact line can move at all**, and
+  it is a property of the cut-cell IBM, not of this rung. At exactly `k + 1/2` — the placement WO-Q's
+  G5 and WO-S's G1 both ask for — the tangential MAC faces of the wall-adjacent cell sit ON the SDF
+  zero level and `buildOpenness` (`sdf > 0` is fluid) closes them: measured `ox = oy = 0.000` on a
+  cell with `eps = 0.5`. That cell is tangentially isolated, the contact line **cannot move**, and
+  the unrelieved Young force appears as `max|u| ~ 1` on DOFs whose face openness is 0. At `k + 1/4`
+  the same wall gives `eps = ox = oy = 0.75`, the contact line is mobile and the raw `max|u|`
+  collapses from **7.9e-1 to 1.7e-3**. **This also answers WO-Q's open question 8**: the 0.788
+  "wall-band spurious current" of the V5a G5 cap was entirely on zero-openness DOFs and is an
+  artefact of the half-integer wall, not a surface-tension defect.
+
+**Momentum consistency in cut cells (V5a item 8).** `enable_vof_momentum` composes with a solid: the
+half-shifted CV gets fluid volume `½(eps(i−s_e) + eps(i))`, transverse face openness
+`½(o_d(i−s_e) + o_d(i))` and, on the axial (cell-centre) face, the cell fraction `eps` of the cell
+whose centre it sits on; both updates are done in fluid-volume units. Because every term of the
+deviation form is a *difference of velocities*, WO-K's uniform-velocity identity is **bitwise in cut
+cells too** — measured `max|u_adv − U| = 0` at ratios 10/100/1000 on a packing. Coupled draining
+through the packing at ratio 10 (zero-mean buoyancy, 200 steps): colour drift **6.0e-14 per step**,
+11 pressure iterations. **Open**: with a NON-zero-mean body force (an unbounded acceleration in a
+periodic box) the momentum-consistent path runs clean for ~155 steps and then takes `C^e` to `+inf`
+inside the advection, while the colour-only path completes; no bounded-quantity precursor was found
+(WO-Q finding 9).
+
+**The collocated path — `SolverColocated` (rung V8, WO-T).** `enable_vof` and
+`set_density_mode("variable")` no longer throw on the collocated grid. That grid's pressure coupling
+is the **ABC approximate projection** (average the cell velocities onto a MAC face field, project
+THAT exactly, correct the cell field), and two facts follow:
+
+- the **transport** half was already right — `uf_/vf_/wf_` is exactly discretely divergence-free,
+  which is precisely what Weymouth–Yue's conservation proof needs — so `bridgeVelocityToVof` reads
+  the FACE field (`uf_(i)` sits at i−1/2, the same low-face convention as flow's staggered `u(i)`,
+  so it is the identical `copyFaceVelocity` shift on a different source view);
+- the **force** half was not. A cell-centred `g_c − ∇_c P/ρ_c` is O(1) wrong at an interface cell
+  even when every face is exactly balanced, so on this path the predictor carries **no force at
+  all** (`buildRhsColoFF`) and every body/interfacial force enters as a **face acceleration**
+  `a_f = dt (f_f − (P(i) − P(i−s)))/ρ_f` added after `centerToFace` (`src/collocated_varrho.hpp`),
+  with the cell taking the **average of its two faces' TOTAL increment** `a_f − (ρ₀/ρ_f)Δφ` — the
+  same averaging operator `projectCorrectCenter` applies to φ differences, a closed face (openness
+  0) contributing 0. Basilisk's `centered.h` pattern (Popinet JCP 2009 §3). The face coefficient
+  `c_f = o_f ρ₀/ρ_f` and `projectCorrectVar` on the face field are the staggered kernels unchanged.
+
+Measured (`tests/kokkos/test_vof_collocated.cpp`, both backends): hydrostatic at **ratio 1000** with
+the interface frozen — face `max|uf|` **8.1e-15** (host) / **9.2e-15** (CUDA) in the walled column,
+`dP/dz = −ρ_f g` to **2.3e-8** relative, *independent of μ* over 0…0.1 (the force never passes
+through `A = ρ_f/dt − μ∇²`, so the μ·dt² non-commutation of the staggered predictor does not exist
+here); static droplet with a **constant curvature**, face `max|uf|` **2.8e-17** — the V4 exactness
+identity, reproduced at the face.
+
+**Read the FACE field, not the cell field, for a spurious-current number on this grid.** A cell
+checkerboard is exactly annihilated by `centerToFace` (`½(U(i)+U(i−1))` kills the odd-even mode), so
+the approximate projection is structurally blind to it — the invisible subspace of
+`doc/collocated_invisible_subspace.md`. It is a property of the grid, not of this rung: the CONTROL
+(the validated **constant-density** collocated path with a plain body force, where every V8 branch
+is inert) reads cell `max|u|` **3.1e-2** at μ=0 / **8.7e-4** at μ=0.01 on the same walled column
+while its face field sits at 5.1e-13; the V8 ratio-1000 run reads **2.8e-8**, six orders better, and
+it **decays** (2.8e-8 at 100 steps → 8.0e-9 at 400). The accumulated pressure inherits it through
+the `centerToFace` leak of the checkerboard's envelope, which is the 2.3e-8 above.
+
+Scope of the collocated rung: **all-fluid only** (`set_pressure_geometry`); an immersed solid, the
+ghost projection and `set_rho_face_harmonic` throw with a message naming the reason.
+`enable_vof_momentum` stays staggered-only (the collocated construction needs Favre face states,
+AMR-Wind's pattern), so the collocated path is rated to density ratio **≲ 100 for cases with
+motion**; a high-ratio case at REST is exact. Under `set_density_mode` on this grid the AUTO scheme
+falls back from the ghost projection to gauge-exact (which, all-fluid, IS the plain central
+difference). Known gap, recorded not guarded: an OUTFLOW face's `bcCorrectOutflow` adjustment of
+`uf_` is not mirrored into the stored face increment, so open boundaries on this path are untested.
+Gates: `tests/kokkos` `vof_collocated`, `tests/kokkos_mpi` `vof_collocated_mpi_np{1,2,4}`,
+`tests/study/vof_collocated.py` (the staggered/collocated columns of the V4 physics battery).
+
+**Scope — say this to users:** **Staggered is the reference**; the collocated path is rung V8 (the
+paragraph above) and is all-fluid, ratio ≲ 100 with motion. An **immersed solid is supported since
+rung V5a** — `set_solid(...,
+cutcell_pressure=True)` — with the openness-weighted flux above (STAGGERED only); an all-fluid
+`set_pressure_geometry` is of course also fine.
+**Open boundaries are supported since rung V-BC** (WO-R) — see "Two-phase open boundaries"
+under "Domain boundary conditions" — with the operator caveat recorded there (a variable-density
+outflow is inconsistent by the density ratio until `applyBoundaryOpenness` imposes the caller's
+coefficient; WO-R2). Without
 `enable_vof_momentum` the rung is **valid only at modest density ratios for cases with motion**; a
 high-ratio case at REST (the hydrostatic acid test) is exact either way. **With** it, the shipped
 build is honestly rated to ratio ~1e3: the uniform-velocity residual through the coupled step is
@@ -542,9 +733,15 @@ Measured with it on: ∂P/∂z relative error **0.34** instead of 1e-15. It ship
 the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
 Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
-`vof_curvature`, `vof_surface_tension`; `tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`,
+`vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`, `vof_collocated`;
+`vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_bc`; `tests/kokkos_mpi`
+`vof_bc_mpi_np{1,2,4}`, `vof_advect_mpi_np{1,2,4}`,
 `vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,
-`vof_surface_tension_mpi_np{1,2,4}`; `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
+`vof_surface_tension_mpi_np{1,2,4}`, `vof_cutcell_mpi_np{1,2,4}`, `vof_wetting_mpi_np{1,2,4}`,
+`vof_collocated_mpi_np{1,2,4}`;
+`tests/study/vof_collocated.py` (the V8 staggered/collocated columns);
+`tests/study/vof_cutcell.py` (the V5a battery: conservation through a packing, coupled draining,
+the 90° cap on a cut wall); `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
 falling drop, the RT near-Nyquist check — every gate there records the pressure iteration count
 against its cap and treats a capped run as INVALID); `tests/study/vof_surface_tension.py` (the V4
 physics battery: `static`, `wave`, `lamb`, `hysing1`, `hysing2`, `falling`, `limits`);
@@ -565,6 +762,73 @@ relative velocity reaches **0.786 / 0.828 / 0.869 of the Hasimoto-corrected Hada
 D/h = 10 / 15 / 20**, and is **insensitive to the momentum-sweep count to four digits** (0.826 at 60
 sweeps/step, 0.828 at 2649) — so WO-K's suspected under-resolved momentum solve is refuted. At 15
 cells/diameter it is 17 % low, just outside Arrufat's "within 15 %"; at 20 it is 13 % low, inside.
+
+**Two-phase open boundaries (rung V-BC, WO-R).** `enable_vof` now works on a domain with inflow
+and outflow faces. Three rules, one per domain-BC type (`src/vof/colour_bc.hpp`):
+
+- **inflow (type 2)** — `set_vof_inflow(face, C)` / `set_vof_inflow_profile(face, C2d)` overwrite
+  **all three** colour ghost layers of that face after `clampFill`, on the rank that
+  `touchesGlobalFace`. The flux through a face whose donor lies outside the domain is the
+  **algebraic `C_donor·a`** (`wyFaceFluxBc`), never a reconstructed PLIC slab: a uniform prescribed
+  ghost band has no usable MYC normal, and a *fractional* inflow colour is a statement about the
+  incoming FLUX ("this fraction of what enters is liquid"), not a sub-cell interface position.
+  The selecting `outside` mask is built on **global** indices (like `clampFill`) and is installed
+  only when a VoF boundary colour is set, so with none set the V1 flux path is bit-identical.
+- **outflow (type 3)** — zero-gradient stays; `set_vof_backflow(face, C)` (default 0 = gas) gives
+  the `inletOutlet` behaviour (Rusche 2002 §4; OpenFOAM `inletOutletFvPatchField`): where the
+  boundary face velocity points back INTO the domain the ghost band carries the backflow colour.
+- **wall (type 1)** — unchanged; `clampFill` IS the 90° neutral continuation (WO-S replaces it).
+
+`vof_diagnostics()` gains `inflow_volume` / `outflow_volume` and `vof_bc_volumes()` breaks them out
+per face (signed, + = entering, counted only on the global faces a rank owns). They are the
+advector's OWN boundary face fluxes, so **`Σ C(t) − ∫in + ∫out = const` closes to round-off**:
+measured **4.8e-15 relative** over a 500-step slug injection/flush (kinematic, 32×32×64) and
+**2.7e-12** through the fully coupled step, where the floor is the projection's divergence residual.
+
+**The inflow PROPERTY ghost follows the inflow colour.** `fillPropGhosts` copies the inner value
+outward, which at a liquid inlet into a gas domain makes the inlet FACE density (the arithmetic mean
+of inner and ghost, used by both the momentum time term and the projection coefficient) the
+*interior's*, wrong by up to the full ratio. ρ and μ are closures of C, so the repair is the same
+closure re-evaluated on the ghost band (`applyClosureFaceGhost`): measured at ratio 1000, ρ_face
+**500.5 instead of 1**. Only closure outputs are repaired — a hand-set ρ keeps the Neumann copy,
+and a closure chained on ρ rather than on C sees whatever ρ's ghost held at that moment.
+
+**Two defects this rung found in the existing open-boundary machinery, both measured:**
+
+- **`max_open_divergence()` MUTATES the velocity field on the staggered path.** It re-imposes the
+  zero-gradient outflow face before measuring (its own comment says so), which destroys
+  `bcCorrectOutflow`'s correction — the mechanism by which mass leaves — and then reports the
+  divergence of a field the solver never used. Calling it once per step inside a time loop
+  therefore *changes the run*. Measured on a constant-density duct: **1.26e-09 from the mutating
+  diagnostic against 1.41e-17 for the projected field**. Use **`max_open_divergence_projected()`**
+  (new, non-mutating) on any domain with an outflow face. The default was left alone because every
+  recorded open-boundary number in the repo was taken with the mutating one.
+- **`bridgeVelocityToVof` erased the same correction**, so the colour advector was handed a field
+  that is not discretely divergence-free at the outlet — precisely the hypothesis Weymouth–Yue's
+  exact conservation rests on. It now keeps it (`fillVelGhostsKeepOutflow`) when a projection has
+  run since the last full velocity ghost fill, and takes the full fill otherwise (the kinematic
+  path, where the zero-gradient rule is what supplies the boundary face at all).
+
+**WO-R item 4 was REFUTED by its own gate: the outflow correction must NOT carry `1/ρ_f`.**
+`doc/variable_density_projection.md` §4 listed the missing factor in `bcCorrectOutflow` as a defect
+to fix with a two-phase outflow case. Measured on that case (stratified duct, ratio 10, `max|div|`
+of the projected field): **without the factor 8.8e-10, with it 9.2e-03** — seven orders worse. A
+projection correction cancels the divergence only if it uses the same face coefficient the operator
+row used, and the outflow face's coefficient is the RAW openness (`buildRhoCoeff` runs over inner
+cells only; the multigrid re-imposes a Dirichlet outflow face as simply open). So the plain `phi`
+difference IS the consistent correction, and the inconsistency, if anyone wants it removed, is on
+the **operator** side (`CutcellMG`), not here. `bcCorrectOutflowVar` ships as
+`set_outflow_rho_correction(...)`, **default OFF**, with those numbers in its docstring.
+
+**Scope.** Gates: `tests/kokkos` ctest `vof_bc`; `tests/kokkos_mpi` `vof_bc_mpi_np{1,2,4}` (the
+decomposition cutting the inflow and outflow faces); `tests/study/vof_open_boundaries.py`
+(`budget`, `nusselt`, `pool`). With no VoF boundary colour set every existing VoF ctest is
+byte-identical on both backends. **The pressure solve, not the boundary machinery, is what limits
+this rung at high contrast**: a wall-bounded open-boundary box at ratio ≥ 100 needs the **FCG**
+driver (Chebyshev diverges, MG-PCG burns any cap) and still leaves a real residual — the
+coefficient-contrast item (VOF_PLAN S3). Selecting the driver **before** a `rho` closure is
+silently discarded (`set_property_model("rho", …)` fires `set_density_mode`, which reselects
+Chebyshev): call `set_pressure_fcg` LAST.
 
 ### Domain boundary conditions
 

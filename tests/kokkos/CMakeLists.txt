@@ -181,7 +181,44 @@ target_include_directories(test_vof_surface_tension PRIVATE ${CMAKE_CURRENT_SOUR
 target_link_libraries(test_vof_surface_tension PRIVATE Kokkos::kokkos)
 add_test(NAME vof_surface_tension COMMAND test_vof_surface_tension)
 
+# VoF rung V5a (WO-Q): the colour field transported THROUGH an immersed solid — the openness
+# embed (G3), conservation of sum eps_eff*C through a sphere packing (G2), and the neutral 90-degree
+# solid-band fill measured as a contact angle (G5). PECLET_VOF_CUTCELL_LONG=0 runs the full sizes.
+add_executable(test_vof_cutcell test_vof_cutcell.cpp)
+target_include_directories(test_vof_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR} ${CORE_INC})
+target_link_libraries(test_vof_cutcell PRIVATE Kokkos::kokkos)
+add_test(NAME vof_cutcell COMMAND test_vof_cutcell)
+
+# VoF rung V5b (WO-S): the theta-consistent solid-band fill as a PURE KERNEL test (G0) — the
+# flat-wall idempotence that makes the prescribed contact angle a fixed point of the fill.
+add_executable(test_vof_wetting test_vof_wetting.cpp)
+target_include_directories(test_vof_wetting PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_wetting PRIVATE Kokkos::kokkos)
+add_test(NAME vof_wetting COMMAND test_vof_wetting)
+
+# VoF rung V-BC (WO-R): two-phase open boundaries — the out-of-domain flux rule, the inflow/
+# backflow colour ghost, the inflow property ghost, the exact colour budget and the
+# variable-density outflow correction. PECLET_VOF_BC_QUICK=1 shortens the budget run.
+add_executable(test_vof_bc test_vof_bc.cpp)
+target_include_directories(test_vof_bc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_bc PRIVATE Kokkos::kokkos)
+add_test(NAME vof_bc COMMAND test_vof_bc)
+
 add_executable(test_poiseuille_ibm test_poiseuille_ibm.cpp)
 target_include_directories(test_poiseuille_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_poiseuille_ibm PRIVATE Kokkos::kokkos)
 add_test(NAME poiseuille_ibm COMMAND test_poiseuille_ibm)
+
+# VoF rung V8 (WO-T): the COLLOCATED path — variable density in the ABC approximate projection,
+# forces as face accelerations with the averaged cell counterpart, colour advection from the
+# projected face field. The gated quantity on this grid is the FACE field (the cell field carries
+# the approximate projection's invisible checkerboard, measured here against its constant-density
+# control).
+add_executable(test_vof_collocated test_vof_collocated.cpp)
+target_include_directories(test_vof_collocated PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR} ${CORE_INC})
+target_link_libraries(test_vof_collocated PRIVATE Kokkos::kokkos)
+add_test(NAME vof_collocated COMMAND test_vof_collocated)

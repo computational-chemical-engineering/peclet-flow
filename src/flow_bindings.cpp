@@ -731,9 +731,22 @@ static void bind_solver(nb::module_& m, const char* name) {
           "down around density ratio 1000 unless the resolution is absurd. **V2a is valid only at "
           "MODEST density ratios** for cases with motion. A high-ratio case AT REST (the "
           "hydrostatic acid test) is exact, because there is no momentum to mis-advect. "
-          "STAGGERED ONLY (collocated is rung V8 — throws), and no immersed solid yet (the "
-          "geometric fluxes are not openness-weighted; an all-fluid set_pressure_geometry is "
-          "fine).")
+          "COLLOCATED (SolverColocated) is supported since rung V8 (2026-09-02), ALL-FLUID only: "
+          "the colour is advected by the PROJECTED face field uf_/vf_/wf_ (the field the ABC "
+          "approximate projection makes exactly divergence-free, which is what Weymouth-Yue's "
+          "conservation proof needs), and every interfacial/body force is a FACE acceleration with "
+          "the cell taking the average of its two faces. An immersed solid on that grid THROWS "
+          "(the cut-cell colour transport of rung V5a is staggered-only), and so does "
+          "enable_vof_momentum. On the collocated grid the SPURIOUS-CURRENT number to read is the "
+          "FACE field (get_uf/get_vf/get_wf): the CELL field additionally carries the approximate "
+          "projection's invisible odd-even mode, which centerToFace annihilates and the projection "
+          "therefore cannot remove. An IMMERSED SOLID is supported since "
+          "rung V5a: the geometric fluxes are openness-weighted and the update is done in "
+          "fluid-volume units, so sum eps_eff*C is conserved exactly against the projection's own "
+          "openness-weighted divergence; it needs set_solid(..., cutcell_pressure=True) (the "
+          "staircase operator has no face openness to weight with) and it approximates the "
+          "solid-clipped flux polygon by (whole-cell PLIC slab) x (open area) — see "
+          "vof_diagnostics()['clipped_volume'].")
       .def(
           "set_vof",
           [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setVof(grid_in(a)); }, nb::arg("array"),
@@ -765,6 +778,130 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "vof_cfl_limit", [](S& s) { return s.vofCflLimit(); },
           "The Weymouth-Yue boundedness cap currently in force.")
+      // --- rung V5a (WO-Q): transport through an immersed solid --------------------------------
+      .def(
+          "advect_vof", [](S& s, double dt) { s.advectVofKinematic(dt); }, nb::arg("dt"),
+          "KINEMATIC colour advection: advance C ONCE with the solver's CURRENT face velocity over "
+          "`dt` (seconds), with NO Navier-Stokes step. This is the advection-benchmark entry point "
+          "(Zalesak, LeVeque, and the cut-cell conservation gates): a frozen projected velocity "
+          "advecting a colour field is a pure statement about the transport scheme, with the "
+          "momentum and pressure solves out of the picture.\\n\\n"
+          "It THROWS if the current velocity is not discretely divergence-free to 1e-10 "
+          "(max_open_divergence()). That is not a nicety: Weymouth-Yue's exact conservation is "
+          "CONDITIONAL on sum_f o_f u_f = 0 per cell, because the dilation term adds H(C-1/2) "
+          "times that residual to every full cell's volume budget. Run step() to a steady state "
+          "(or "
+          "project()) and advect with the solver's own output; never with an analytic sample, "
+          "which is solenoidal only to O(h^2).")
+      .def(
+          "set_vof_step_parity", [](S& s, long n) { s.setVofStepParity(n); }, nb::arg("n"),
+          "Set the sweep-permutation counter of the NEXT colour advection: the Weymouth-Yue sweep "
+          "order is kWySweepPerm[n % 6], cycled so no axis is systematically favoured. Exposed so "
+          "a benchmark can hold the permutation fixed (n constant) or resume a run across a "
+          "restart. Default: it increments once per advection from 0.")
+      .def(
+          "vof_step_parity", [](S& s) { return s.vofStepParity(); },
+          "The sweep-permutation counter of the next colour advection.")
+      .def(
+          "set_vof_cutcell_flux_clamp", [](S& s, bool on) { s.setVofCutFluxClamp(on); },
+          nb::arg("on"),
+          "Ablation: Weymouth's admissible-interval clamp on the openness-weighted cut-cell flux "
+          "(ON by default). The clamp bounds |F| by what the DONOR actually holds — at most "
+          "eps*C liquid and at most eps*(1-C) gas of the fluid volume o*|a| swept through the face "
+          "— applied to the one value both neighbours share, so conservation still telescopes "
+          "bit-exactly. It is what makes the whole-cell-PLIC-times-open-area flux approximation "
+          "BOUNDED. Measured with it off on a 24^3 packing at CFL 0.2: the [0,1] clip fires at "
+          "3.2e-5 liquid volume per step and the conserved functional drifts 1.3e-8 in 30 steps; "
+          "with it on the clip stops firing.")
+      .def(
+          "vof_filled_colour", [](S& s) { return field_out(s, s.getVofFilledColour()); },
+          "The colour field INCLUDING the neutral solid-band fill — what the MYC and "
+          "height-function stencils actually read — as a Fortran-order (nx,ny,nz) array. "
+          "get_vof()/'C' is the canonical field and carries EXACTLY 0 in solid cells; the fill is "
+          "a stencil device regenerated at every ghost exchange (three passes with a shrinking "
+          "depth "
+          "budget, src/vof/cutcell.hpp), and it is what makes the wall look 90-degree neutral "
+          "instead of perfectly non-wetting.")
+      .def(
+          "vof_geometry", [](S& s, int which) { return field_out(s, s.getVofGeometry(which)); },
+          nb::arg("which"),
+          "The cut-cell geometry the colour block runs on, as a Fortran-order (nx,ny,nz) array: "
+          "0 = the cell fluid fraction eps (4^3-subsampled, a multiple of 1/64), 1/2/3 = the "
+          "openness of the +x/+y/+z face of each cell (the ADVECTOR's high-face convention, one "
+          "cell shifted from the solver's ox/oy/oz), 4 = the classification (1 = SOLID, i.e. "
+          "eps == 0 AND all six faces closed).")
+      .def(
+          "set_contact_angle", [](S& s, double deg) { s.setContactAngle(deg); }, nb::arg("theta"),
+          "Rung V5b (WO-S). Prescribe a STATIC contact angle, in DEGREES, measured THROUGH THE "
+          "LIQUID, on every immersed SDF wall. Needs set_solid(..., cutcell_pressure=True) + "
+          "enable_vof; with no call the wall stays at the neutral 90-degree fill of rung V5a and "
+          "every V5a number is byte-identical.\n\n"
+          "What it changes is PASS 1 of the solid-band fill and nothing else: the band cells "
+          "receive the volume fractions of the plane that continues the fluid-side interface into "
+          "the solid at angle theta (m . n_w = cos theta, with n_w = grad(sdf)/|grad(sdf)| the "
+          "solid->fluid wall normal and m the PLIC normal pointing into the gas). The unmodified V3 "
+          "height-function/MYC cascade then returns the curvature of an interface meeting the wall "
+          "at theta and the V4 balanced force does the rest — NO force is added at the wall. "
+          "theta = 0 fills the band with liquid (complete wetting), theta = 180 empties it.\n\n"
+          "Construction (src/vof/wetting.hpp): the anchor fluid cell is found by walking along n_w; "
+          "its fluid-only Youngs normal supplies the AZIMUTH of the contact line (its in-wall "
+          "component, which a fluid-restricted stencil measures to ~1e-14 on a plane) while the "
+          "angle to the wall is replaced by the prescribed one — the wall-normal component of a "
+          "fluid-only estimator is unusable (measured 23 deg of error at theta = 30 against 2.3 "
+          "for the full stencil, gate G0e). The plane is then anchored by matching the anchor "
+          "cell's own liquid volume, which makes the fill EXACTLY idempotent: an interface that "
+          "already meets the wall at theta is reproduced to 1e-15 (gate G0a), so theta is a fixed "
+          "point of the scheme.")
+      .def(
+          "set_contact_angle_field",
+          [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setContactAngleField(grid_in(a)); },
+          nb::arg("theta"),
+          "Per-cell static contact angle in DEGREES, as a Fortran-order (nx,ny,nz) array. Only the "
+          "value AT the solid band cell being filled is read, so cells away from a wall are "
+          "irrelevant. theta is a field so the dynamic-angle rung (V6) changes only what fills it.")
+      .def(
+          "contact_angle", [](S& s) { return s.contactAngle(); },
+          "The prescribed static contact angle in degrees (90 if none was set).")
+      .def(
+          "set_contact_angle_pivot", [](S& s, int m) { s.setContactAnglePivot(m); }, nb::arg("mode"),
+          "ABLATION — how the theta-plane is anchored in the fluid cell. 0 (DEFAULT) match the "
+          "anchor cell's liquid volume with plicAlpha; 1 pass through the PLIC centroid p_f (the "
+          "Afkhami-Bussmann / Basilisk contact.h rule); 2 the work order's c = p_f - sdf(p_f) n_w; "
+          "3 the contact line on the wall. Modes 0/1/3 are exactly idempotent (1e-15 on gate G0a); "
+          "mode 2 is NOT — projecting the centroid along n_w shifts the plane by -sdf(p_f) "
+          "cos(theta), measured 0.26 in cell fraction at theta = 60, with the wrong sign (it "
+          "removes liquid from the band for a wetting angle).")
+      .def(
+          "contact_angle_diagnostics",
+          [](S& s) {
+            const auto d = s.contactAngleDiagnostics();
+            nb::dict r;
+            r["contact_cells"] = d.contactCells;
+            r["neighbour_cells"] = d.neighbourCells;
+            r["pure_cells"] = d.pureCells;
+            r["parallel_cells"] = d.parallelCells;
+            r["neutral_cells"] = d.neutralCells;
+            r["unfilled_cells"] = d.unfilledCells;
+            r["mean_apparent_angle"] = d.meanApparentAngle;
+            r["set_angle"] = d.setAngle;
+            return r;
+          },
+          "The solid-band census of the CURRENT colour field on this rank: how many band cells each "
+          "branch of pass 1 wrote ('contact_cells' the theta plane of the cell's own anchor, "
+          "'neighbour_cells' the mean of the anchor's MIXED neighbours' planes where the anchor "
+          "itself is pure phase, 'pure_cells' the pure-phase "
+          "continuation C_s = C_f, 'parallel_cells' an interface parallel to the wall where no "
+          "rotation is defined, 'neutral_cells' the WO-Q neutral-mean fallback, 'unfilled_cells' "
+          "left untouched), plus 'mean_apparent_angle' — the mean angle the fluid-only normal "
+          "reported at the contact cells BEFORE the rotation, in degrees. That last number is the "
+          "direct read-out of how far the fluid-side interface still is from the prescribed angle, "
+          "measured on the fill's own data rather than on a post-processed shape.")
+      .def(
+          "vof_has_geometry", [](S& s) { return s.vofHasGeometry(); },
+          "True when the colour advection is running the CUT-CELL (openness-weighted) kernels, "
+          "i.e. an immersed solid is present and set_solid ran with cutcell_pressure=True. False "
+          "means "
+          "the uncut rung-V1 kernels are running, byte-identically to a solid-free build.")
       .def(
           "vof_diagnostics",
           [](S& s) {
@@ -775,11 +912,121 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["max"] = d.maxC;
             r["mixed"] = d.mixed;
             r["wisps"] = d.wisps;
+            r["volume"] = d.volume;
+            r["raw_volume"] = d.rawVolume;
+            r["solid_sum"] = d.solidSumC;
+            r["solid_fill_sum"] = d.solidFillSum;
+            r["min_fluid"] = d.minCFluid;
+            r["max_fluid"] = d.maxCFluid;
+            r["clipped_volume"] = d.clippedVolume;
+            r["clipped_signed"] = d.clippedSigned;
+            r["cut_cells"] = d.cutCells;
+            r["clamped_faces"] = d.clampedFaces;
+            r["solid_cells"] = d.solidCells;
+            // rung V-BC (WO-R): the boundary term of the exact colour budget
+            const auto v = s.vofBcVolumes();
+            double in = 0.0, out = 0.0;
+            for (int f = 0; f < 6; ++f) {
+              if (v[f] > 0.0)
+                in += v[f];
+              else
+                out -= v[f];
+            }
+            r["inflow_volume"] = in;
+            r["outflow_volume"] = out;
             return r;
           },
           "Colour census over THIS RANK's inner cells: sum (cell-volume units), min, max, the "
           "number of mixed cells (0<C<1) and of wisps (C within 1e-8 of 0 or 1). No clipping is "
-          "applied at this rung, so min/max may leave [0,1] if the CFL cap is raised.")
+          "applied at this rung, so min/max may leave [0,1] if the CFL cap is raised.\n\n"
+          "With an immersed solid (rung V5a) the dict also carries the cut-cell quantities, all "
+          "zero without one: 'volume' = sum eps_eff*C over fluid cells, the functional the "
+          "openness-weighted scheme conserves EXACTLY (eps_eff = max(eps, 1/64), the 4^3 "
+          "subsampling resolution — see src/vof/cutcell.hpp rule 1); 'raw_volume' = sum eps*C, "
+          "which differs only on eps==0 cells that still own an open face and is therefore NOT the "
+          "conserved functional; 'solid_sum' = sum of C over solid cells (0 by construction — the "
+          "neutral band fill lives on the working block, not on 'C'); 'min_fluid'/'max_fluid' over "
+          "UNCUT fluid cells (eps==1), where Weymouth's boundedness applies verbatim; "
+          "'clipped_volume' / 'clipped_signed' = the liquid volume the cut-cell clip moved during "
+          "the last advection (a TRIPWIRE on the flux approximation, not a mechanism: if it is not "
+          "negligible the fix is the solid-clipped flux polygon); 'cut_cells' / 'solid_cells'.\n\n"
+          "'inflow_volume' / 'outflow_volume' are the liquid volume that ENTERED / LEFT through "
+          "the domain faces during the LAST colour advection, in the same cell-volume units as "
+          "'sum' (0 unless a VoF boundary colour is set — rung V-BC). They are the advector's OWN "
+          "face fluxes, so sum(C) - sum(C_0) = integral(inflow - outflow) holds to round-off "
+          "whatever the interface does; vof_bc_volumes() breaks them out per face.")
+      // --- two-phase open boundaries (rung V-BC, WO-R) ------------------------------------------
+      .def(
+          "set_vof_inflow", [](S& s, int face, double value) { s.setVofInflow(face, value); },
+          nb::arg("face"), nb::arg("value"),
+          "Colour of the fluid ENTERING through inflow face 'face' (0..5 = -x,+x,-y,+y,-z,+z); "
+          "1 = liquid, 0 = gas. The face must already be an inflow (set_domain_bc(face, 2, ...)) "
+          "or this raises.\n\n"
+          "The value may be FRACTIONAL, and it then means 'this fraction of the incoming flux is "
+          "liquid' — a flux statement, not a sub-cell interface position. That is exactly how it "
+          "is implemented: on a face whose donor is outside the domain the geometric flux is "
+          "replaced by the algebraic C_donor*a (wyFaceFluxBc), because a uniform prescribed ghost "
+          "band has no usable MYC normal and the inflow colour is boundary DATA.\n\n"
+          "Setting this also makes the property ghosts of that face follow the inflow colour "
+          "through the registered closures (rho_ghost = rho(C_inflow)) instead of copying the "
+          "interior — without it the inlet FACE density is the interior's, wrong by up to the "
+          "density ratio at a liquid inlet into a gas domain. Default (nothing set): the "
+          "zero-gradient copy, i.e. today's behaviour, bit for bit.")
+      .def(
+          "set_vof_inflow_profile",
+          [](S& s, int face, nb::ndarray<double, nb::c_contig> prof) {
+            if (prof.ndim() != 2)
+              throw std::runtime_error("vof inflow profile must be (Nb,Nc)");
+            const int nb_ = (int)prof.shape(0), nc = (int)prof.shape(1);
+            s.setVofInflowProfile(
+                face, peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_,
+                nc);
+          },
+          nb::arg("face"), nb::arg("profile"),
+          "Per-position inflow colour (Nb,Nc) on the INNER grid of the face's two perpendicular "
+          "axes, resampled with the same clamp rule set_domain_bc_profile uses for the velocity. "
+          "This is how a liquid distributor over part of an inlet is expressed: the colour "
+          "profile says WHERE liquid enters, the velocity profile says how fast.")
+      .def(
+          "set_vof_backflow", [](S& s, int face, double value) { s.setVofBackflow(face, value); },
+          nb::arg("face"), nb::arg("value") = 0.0,
+          "inletOutlet colour on OUTFLOW face 'face' (default 0 = gas): where the boundary face "
+          "velocity points back INTO the domain, the colour ghost carries this value instead of "
+          "the zero-gradient copy. This is OpenFOAM's inletOutletFvPatchField (Rusche 2002 thesis "
+          "section 4), the standard VoF outlet — an outlet is a place where you know what leaves "
+          "(whatever is inside) but must STATE what comes back. Zero-gradient on a reversing face "
+          "re-injects whatever happens to be sitting at the outlet, which for a draining film "
+          "feeds the film back into the domain. Where the fluid leaves, zero-gradient is kept.")
+      .def(
+          "vof_bc_volumes", [](S& s) { return s.vofBcVolumes(); },
+          "Signed liquid volume that crossed each of the six domain faces during the LAST colour "
+          "advection, in cell-volume units, POSITIVE for liquid ENTERING the domain. Local to this "
+          "rank. Six entries in face order (-x,+x,-y,+y,-z,+z); only faces carrying a domain BC "
+          "are meaningful.")
+      .def(
+          "vof_bc_volumes_total", [](S& s) { return s.vofBcVolumesTotal(); },
+          "The same, accumulated since enable_vof() or the last reset_vof_bc_volumes().")
+      .def(
+          "set_outflow_rho_correction", [](S& s, bool on) { s.setOutflowRhoCorrection(on); },
+          nb::arg("on") = true,
+          "ABLATION (WO-R item 4), DEFAULT FALSE — the measurement refuted the item.\n\n"
+          "doc/variable_density_projection.md section 4 listed the missing 1/rho_f factor in "
+          "bcCorrectOutflow as a defect to fix with a two-phase outflow case. Measured on that "
+          "case (stratified duct, density ratio 10, max|div(open u)| of the PROJECTED field): "
+          "WITHOUT the factor 8.76e-10, WITH it 9.24e-03 — seven orders worse. A projection "
+          "correction cancels the divergence only if it uses the SAME face coefficient the "
+          "operator row used, and the outflow face's coefficient is the RAW openness (buildRhoCoeff "
+          "runs over inner cells only; the multigrid re-imposes the Dirichlet outflow face as "
+          "simply open), so the plain phi difference IS the consistent correction. Removing the "
+          "inconsistency would mean changing the OPERATOR, not this correction.\n\n"
+          "Bitwise inert at constant density (rho_f == rho0 makes the factor exactly 1). "
+          "PECLET_FLOW_OUTFLOW_RHO=1 turns it on process-wide.")
+      .def(
+          "outflow_rho_correction", [](S& s) { return s.outflowRhoCorrection(); },
+          "Whether the 1/rho_f factor is applied to the outflow face correction (WO-R item 4).")
+      .def(
+          "reset_vof_bc_volumes", [](S& s) { s.resetVofBcVolumes(); },
+          "Zero the per-face boundary liquid ledger (both the per-step and the running totals).")
       .def(
           "compute_vof_curvature",
           [](S& s) {
@@ -1131,14 +1378,25 @@ static void bind_solver(nb::module_& m, const char* name) {
           "set_density_mode",
           [](S& s, const std::string& mode) { s.setDensityMode(mode == "variable"); },
           nb::arg("mode") = "variable",
-          "Enable variable density (staggered solver only): binds the 'rho' field "
+          "Enable variable density: binds the 'rho' field "
           "(get/set_field('rho'), created seeded with set_rho's value if absent) into the momentum "
           "time term, the advection weight, the per-cell body force (face-interpolated), and the "
           "pressure projection (face coefficient openness*rho0/rho_f with the matching 1/rho_f "
           "velocity correction; rho0 = set_rho's value, so a uniform field reduces exactly to the "
           "constant solver). A closure targeting 'rho' (e.g. a linear mixture of a transported "
           "phase fraction) enables this automatically. For gravity, register a closure "
-          "force_z = linear(rho, params=[0, -g]).")
+          "force_z = linear(rho, params=[0, -g]).\n\n"
+          "COLLOCATED (SolverColocated, rung V8): supported since 2026-09-02, ALL-FLUID only "
+          "(set_pressure_geometry; an immersed solid, the ghost projection and "
+          "set_rho_face_harmonic throw). The face coefficient and the face correction are the same "
+          "as on the staggered grid, applied to the ABC projection's MAC face field; the CELL "
+          "correction is the AVERAGE OF THE TWO FACE CORRECTIONS of each axis (never a cell-centred "
+          "grad(phi)/rho_c), and every body/interfacial force is likewise a FACE acceleration "
+          "dt*(f_f - (P(i)-P(i-s)))/rho_f added after centerToFace, with the cell taking the average "
+          "of the two faces' total increment. Rated to density ratio ~100 for cases WITH MOTION "
+          "(momentum consistency needs Favre face states and is not in this rung); a high-ratio case "
+          "at REST is exact - measured 0.0 spurious velocity and an exact dP/dz = -rho_f g at ratio "
+          "1000.")
       .def(
           "ghost_width", [](S& s) { return s.ghostWidth(); },
           "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")
@@ -1157,6 +1415,20 @@ static void bind_solver(nb::module_& m, const char* name) {
           "absent; the coupling writes it each step BEFORE step()). eps=1 everywhere reduces "
           "exactly "
           "to div(u)=0. Pair with max_porous_residual() for the meaningful convergence check.")
+      .def(
+          "max_open_divergence_projected", [](S& s) { return s.maxOpenDivergenceProjected(); },
+          "max|div(open*u)| of the field the projection ACTUALLY produced — the outflow-face "
+          "correction included, and WITHOUT mutating the velocity.\n\n"
+          "Use this instead of max_open_divergence() on any domain with an OUTFLOW face. "
+          "max_open_divergence() re-imposes the zero-gradient outflow velocity before measuring "
+          "(its own comment says so), which (a) DESTROYS bcCorrectOutflow's correction — the "
+          "mechanism by which mass leaves — as a side effect, so calling it once per step inside a "
+          "time loop changes the run, and (b) reports the divergence of a field the solver never "
+          "used. Measured on a stratified ratio-1000 outflow box: 5e-3 from the mutating "
+          "diagnostic, flat in the iteration count, flat in the density ratio and bit-identical in "
+          "a -DPECLET_FLOW_MREAL_DOUBLE build (i.e. not a solver residual), against the projected "
+          "field's own residual from this call. Identical to max_open_divergence() when there is "
+          "no outflow face, and on the collocated grid (which already measures the face field).")
       .def("max_open_divergence", &S::maxOpenDivergence,
            "Return the max cut-cell velocity-flux divergence max|div(open*u)|. With porous "
            "continuity this is NOT ~0 -- it equals -d(eps)/dt (the bed expanding). Use "

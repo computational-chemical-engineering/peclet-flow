@@ -90,6 +90,29 @@
 ///
 /// ## The transported velocity in the flux
 ///
+/// ## Cut cells (rung V5a, WO-Q item 8)
+///
+/// With an immersed solid the half-shifted control volume gets a fluid volume and open face areas
+/// of its own, by the same half-cell averaging that defines it:
+/// - fluid volume `eps^e(i) = 1/2 (eps(i - s_e) + eps(i))`;
+/// - transverse face (`d != e`) openness `1/2 (o_d(i - s_e) + o_d(i))` — the average is what makes
+///   the dilation sum reproduce `1/2 (div_open(i - s_e) + div_open(i))`, i.e. the same
+///   half-and-half of the projection's own constraint the uncut construction relies on;
+/// - AXIAL face (`d == e`) openness `eps(p)`, the CELL fraction of the pressure cell whose CENTRE
+///   the face sits on — the axial CV face IS that cell-centre plane, and its fluid area fraction is
+///   the cell's fluid volume fraction to the same (uniform-solid-in-cell) accuracy as everything
+///   else here.
+/// The liquid content of the CV is `eps(i - s_e) slabHi(i - s_e) + eps(i) slabLo(i)` and
+/// `C^e = that / eps^e`: each half cell's PLIC slab fraction weighted by ITS OWN fluid volume,
+/// which is the same "spread the solid uniformly over the cell" approximation the colour flux
+/// makes, and which returns `C^e = 1` exactly for a uniformly liquid field whatever the geometry.
+/// Both updates are then done in fluid-volume units (divide by `eps^e`), exactly as the colour is.
+///
+/// **The consistency identity survives all of it verbatim**, and that is the point: every term of
+/// `dev` is a DIFFERENCE OF VELOCITIES, so a uniform field gives `dev = 0` bit for bit whatever
+/// `eps^e` and the openness are, and `u_new = u_old` exactly — in cut cells too, not only away from
+/// them. Measured on a sphere packing at ratio 1e3: 0.0.
+///
 /// `u^` is the CURRENT transported velocity of the donor CV (plain donor-cell upwind by default;
 /// `momentumMuscl` adds a MinMod-limited slope to the flux slab's centroid, and the note on that
 /// flag says why it is NOT the default at high density ratio). With a uniform field `u^ = U` bit
@@ -105,6 +128,7 @@
 #include <stdexcept>
 
 #include "vof/advect_wy.hpp"
+#include "vof/cutcell.hpp"
 
 namespace peclet::flow::vof {
 
@@ -237,7 +261,10 @@ class MomentumConsistentAdvector {
 
     w.freezeDilationFlag();  // the pressure-cell flag, for the colour update
     w.reconstruct();         // planes of C^n: what C^e is clipped out of
-    buildShiftedColour(w);
+    if (w.hasGeometry())
+      buildShiftedColourCut(w);
+    else
+      buildShiftedColour(w);
     freezeShiftedState(w);
 
     const int* perm = kWySweepPerm[static_cast<int>(step % 6)];
@@ -253,8 +280,13 @@ class MomentumConsistentAdvector {
       w.reconstruct();  // idempotent for s = 0; re-reconstructs after each applied sweep
       w.computeFluxes(d, dth);
       for (int e = 0; e < 3; ++e) {
-        momentumFluxes(w, d, e, dth);
-        momentumUpdate(w, d, e);
+        if (w.hasGeometry()) {  // rung V5a: openness-weighted, in fluid-volume units
+          momentumFluxesCut(w, d, e, dth);
+          momentumUpdateCut(w, d, e);
+        } else {
+          momentumFluxes(w, d, e, dth);
+          momentumUpdate(w, d, e);
+        }
       }
       w.applySweep(d, dth);
       w.exchange(w.colour());
@@ -558,6 +590,198 @@ class MomentumConsistentAdvector {
           if (rn < fl0)
             ++acc;
           vf(i) = uo + dev / (rn < fl0 ? fl0 : rn);
+        },
+        nfloor);
+    Kokkos::fence();
+    floored_ += nfloor;
+  }
+
+  // ---- rung V5a (WO-Q item 8): the same construction on a CUT control volume -------------------
+  // Siblings of the three kernels above, reached only through `w.hasGeometry()`. The uncut bodies
+  // are untouched, so a solid-free run is byte-identical by construction.
+
+  /// `C^e = [eps(i-s_e) slabHi(i-s_e) + eps(i) slabLo(i)] / eps^e(i)` — each half cell's PLIC slab
+  /// weighted by its OWN fluid volume, then divided by the CV's fluid volume. Returns exactly 1 for
+  /// a uniformly liquid field whatever the geometry.
+  void buildShiftedColourCut(const WyAdvector& w) {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
+           al = w.planeAlpha(), ep = w.epsFraction();
+    UCField kd = w.cellKind();
+    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    for (int comp = 0; comp < 3; ++comp) {
+      const long se = strideOf(comp);
+      const int ec = comp;
+      SField out = cc_[comp];
+      Kokkos::parallel_for(
+          "vof::mom::shifted_colour_cut", MD(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i = L3(x, y, z, e);
+            const double ea = vofEpsEff(ep(i - se), kd(i - se) == kVofSolid);
+            const double eb = vofEpsEff(ep(i), kd(i) == kVofSolid);
+            const double ecv = 0.5 * (ea + eb);
+            if (!(ecv > 0.0)) {
+              out(i) = 0.0;  // the whole control volume is inside the solid
+              return;
+            }
+            double lo[3] = {0.0, 0.0, 0.0}, hi[3] = {1.0, 1.0, 1.0};
+            lo[ec] = 0.5;
+            hi[ec] = 1.0;
+            const double hiHalf = vofCellBox(c, mx, my, mz, al, i - se, lo, hi);
+            lo[ec] = 0.0;
+            hi[ec] = 0.5;
+            const double loHalf = vofCellBox(c, mx, my, mz, al, i, lo, hi);
+            out(i) = (ea * hiHalf + eb * loHalf) / ecv;
+          });
+    }
+    Kokkos::fence();
+  }
+
+  /// The CV's fluid volume `eps^e(i)` (0 when the whole CV is solid).
+  KOKKOS_INLINE_FUNCTION static double cvEps(const SField& ep, const UCField& kd, long i, long se) {
+    return 0.5 *
+           (vofEpsEff(ep(i - se), kd(i - se) == kVofSolid) + vofEpsEff(ep(i), kd(i) == kVofSolid));
+  }
+
+  /// Face Courant number, geometric liquid flux and momentum flux on a CUT shifted CV. `af(p)` is
+  /// stored ALREADY openness-weighted (it is the `o a` the dilation term needs); the slab thickness
+  /// used for the PLIC clipping is the UNWEIGHTED `|a|`, because that is a geometric length.
+  void momentumFluxesCut(const WyAdvector& w, int d, int comp, double dth) {
+    const I3 e = e_;
+    const int g = g_;
+    const long sd = strideOf(d), se = strideOf(comp);
+    const int dd = d, ec = comp;
+    const bool muscl = momentumMuscl, clamp = clampFluxes;
+    SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
+           al = w.planeAlpha(), ep = w.epsFraction(), od = w.faceOpenness(d);
+    UCField kd = w.cellKind();
+    SField ud = w.faceVel(d), cvU = vel_[comp], cvC = cc_[comp];
+    SField fc = fluxC_, fu = fluxU_, af = aFace_;
+    int lo3[3] = {g, g, g};
+    const int hi3[3] = {g + n_.x, g + n_.y, g + n_.z};
+    lo3[d] -= 1;
+    long nclamp = 0;
+    Kokkos::parallel_reduce(
+        "vof::mom::flux_cut",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {lo3[0], lo3[1], lo3[2]},
+                                                      {hi3[0], hi3[1], hi3[2]}),
+        KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+          const long p = L3(x, y, z, e);
+          // The CV's face open area: the AXIAL face is the cell-centre plane of cell p, so its
+          // fluid area fraction is that cell's fluid VOLUME fraction; a transverse face is the two
+          // half faces of cells p - s_e and p, so it is their average.
+          const double ofac =
+              (dd == ec) ? vofEpsEff(ep(p), kd(p) == kVofSolid) : 0.5 * (od(p - se) + od(p));
+          const double a = 0.5 * (ud(p - se) + ud(p)) * dth;
+          af(p) = ofac * a;
+          if (a == 0.0 || ofac == 0.0) {
+            fc(p) = 0.0;
+            fu(p) = cvU(p);
+            return;
+          }
+          const double aa = a > 0.0 ? a : -a;
+          double lo[3] = {0.0, 0.0, 0.0}, hi[3] = {1.0, 1.0, 1.0};
+          double F;
+          if (dd == ec) {
+            if (a > 0.0) {
+              lo[ec] = 0.5 - aa;
+              hi[ec] = 0.5;
+            } else {
+              lo[ec] = 0.5;
+              hi[ec] = 0.5 + aa;
+            }
+            F = vofCellBox(c, mx, my, mz, al, p, lo, hi);
+          } else {
+            long q;
+            if (a > 0.0) {
+              q = p;
+              lo[dd] = 1.0 - aa;
+              hi[dd] = 1.0;
+            } else {
+              q = p + sd;
+              lo[dd] = 0.0;
+              hi[dd] = aa;
+            }
+            lo[ec] = 0.5;
+            hi[ec] = 1.0;
+            const double ea = vofEpsEff(ep(q - se), kd(q - se) == kVofSolid);
+            const double eb = vofEpsEff(ep(q), kd(q) == kVofSolid);
+            const double ecv = 0.5 * (ea + eb);
+            const double hiHalf = vofCellBox(c, mx, my, mz, al, q - se, lo, hi);
+            lo[ec] = 0.0;
+            hi[ec] = 0.5;
+            const double loHalf = vofCellBox(c, mx, my, mz, al, q, lo, hi);
+            // the same fluid-volume weighting as C^e, renormalized so a uniformly liquid field
+            // gives F = |a| exactly (and hence, times `ofac`, the dilation's own `o|a|`)
+            F = ecv > 0.0 ? (ea * hiHalf + eb * loHalf) / ecv : 0.0;
+          }
+          F *= ofac;
+          if (clamp) {
+            const long don = a > 0.0 ? p : p + sd;
+            const double cd = cvC(don);
+            const double sweep = ofac * aa;
+            const double ecvDon = cvEps(ep, kd, don, se);
+            const double Fc = vofCutFluxClamp(F, sweep, ecvDon, cd);
+            if (Fc != F)
+              ++acc;
+            F = Fc;
+          }
+          if (a < 0.0)
+            F = -F;
+          const long don = a > 0.0 ? p : p + sd;
+          double slope = 0.0;
+          if (muscl)
+            slope = vofMinmod(cvU(don) - cvU(don - sd), cvU(don + sd) - cvU(don));
+          const double sgn = a > 0.0 ? 1.0 : -1.0;
+          fc(p) = F;
+          fu(p) = cvU(don) + sgn * (0.5 - 0.5 * aa) * slope;
+        },
+        nclamp);
+    Kokkos::fence();
+    clamped_ += nclamp;
+  }
+
+  /// The cut update: both increments divided by the CV's fluid volume, everything else identical —
+  /// in particular `dev` is still a sum of velocity DIFFERENCES, so a uniform field is stationary
+  /// bit for bit in cut cells too.
+  void momentumUpdateCut(const WyAdvector& w, int d, int comp) {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    const long sd = strideOf(d), se = strideOf(comp);
+    const double rg = rhoG_, rl = rhoL_, dr = rhoL_ - rhoG_;
+    const double rmin = rhoG_ < rhoL_ ? rhoG_ : rhoL_;
+    const double fl0 = rhoFloor > 0.0 ? rhoFloor : rhoFloorFrac * rmin;
+    floorUsed_ = fl0;
+    SField cf = cc_[comp], vf = vel_[comp], uf = w.faceVel(comp), ep = w.epsFraction();
+    UCField kd = w.cellKind();
+    SField fc = fluxC_, fu = fluxU_, af = aFace_;
+    UCField fl = flag_[comp];
+    long nfloor = 0;
+    Kokkos::parallel_reduce(
+        "vof::mom::update_cut",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                      {g + n.x, g + n.y, g + n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+          const long i = L3(x, y, z, e);
+          const double ecv = cvEps(ep, kd, i, se);
+          if (!(ecv > 0.0))
+            return;  // the control volume is entirely inside the solid
+          const double aP = af(i), aM = af(i - sd);
+          const unsigned char k = fl(i);
+          const double dil = k ? (aP - aM) : 0.0;
+          const double dC = ((fc(i - sd) - fc(i)) + dil) / ecv;
+          const double cNew = cf(i) + dC;
+          cf(i) = cNew;
+          const double uo = vf(i);
+          const double dvM = fu(i - sd) - uo, dvP = fu(i) - uo;
+          const double dilCoef = (k ? rl : rg) * (uf(i - se) - uo) * (aP - aM);
+          const double dev =
+              rg * (aM * dvM - aP * dvP) + dr * (fc(i - sd) * dvM - fc(i) * dvP) + dilCoef;
+          const double rn = vofPhaseRho(rg, rl, cNew);
+          if (rn < fl0)
+            ++acc;
+          vf(i) = uo + dev / (ecv * (rn < fl0 ? fl0 : rn));
         },
         nfloor);
     Kokkos::fence();
