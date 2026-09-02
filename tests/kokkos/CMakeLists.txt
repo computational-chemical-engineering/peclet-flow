@@ -181,6 +181,15 @@ target_include_directories(test_vof_surface_tension PRIVATE ${CMAKE_CURRENT_SOUR
 target_link_libraries(test_vof_surface_tension PRIVATE Kokkos::kokkos)
 add_test(NAME vof_surface_tension COMMAND test_vof_surface_tension)
 
+# VoF rung V5a (WO-Q): the colour field transported THROUGH an immersed solid — the openness
+# embed (G3), conservation of sum eps_eff*C through a sphere packing (G2), and the neutral 90-degree
+# solid-band fill measured as a contact angle (G5). PECLET_VOF_CUTCELL_LONG=0 runs the full sizes.
+add_executable(test_vof_cutcell test_vof_cutcell.cpp)
+target_include_directories(test_vof_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR} ${CORE_INC})
+target_link_libraries(test_vof_cutcell PRIVATE Kokkos::kokkos)
+add_test(NAME vof_cutcell COMMAND test_vof_cutcell)
+
 add_executable(test_poiseuille_ibm test_poiseuille_ibm.cpp)
 target_include_directories(test_poiseuille_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_poiseuille_ibm PRIVATE Kokkos::kokkos)

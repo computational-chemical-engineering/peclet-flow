@@ -713,9 +713,13 @@ static void bind_solver(nb::module_& m, const char* name) {
           "down around density ratio 1000 unless the resolution is absurd. **V2a is valid only at "
           "MODEST density ratios** for cases with motion. A high-ratio case AT REST (the "
           "hydrostatic acid test) is exact, because there is no momentum to mis-advect. "
-          "STAGGERED ONLY (collocated is rung V8 — throws), and no immersed solid yet (the "
-          "geometric fluxes are not openness-weighted; an all-fluid set_pressure_geometry is "
-          "fine).")
+          "STAGGERED ONLY (collocated is rung V8 — throws). An IMMERSED SOLID is supported since "
+          "rung V5a: the geometric fluxes are openness-weighted and the update is done in "
+          "fluid-volume units, so sum eps_eff*C is conserved exactly against the projection's own "
+          "openness-weighted divergence; it needs set_solid(..., cutcell_pressure=True) (the "
+          "staircase operator has no face openness to weight with) and it approximates the "
+          "solid-clipped flux polygon by (whole-cell PLIC slab) x (open area) — see "
+          "vof_diagnostics()['clipped_volume'].")
       .def(
           "set_vof",
           [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setVof(grid_in(a)); }, nb::arg("array"),
@@ -747,6 +751,61 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "vof_cfl_limit", [](S& s) { return s.vofCflLimit(); },
           "The Weymouth-Yue boundedness cap currently in force.")
+      // --- rung V5a (WO-Q): transport through an immersed solid --------------------------------
+      .def(
+          "advect_vof", [](S& s, double dt) { s.advectVofKinematic(dt); }, nb::arg("dt"),
+          "KINEMATIC colour advection: advance C ONCE with the solver's CURRENT face velocity over "
+          "`dt` (seconds), with NO Navier-Stokes step. This is the advection-benchmark entry point "
+          "(Zalesak, LeVeque, and the cut-cell conservation gates): a frozen projected velocity "
+          "advecting a colour field is a pure statement about the transport scheme, with the "
+          "momentum and pressure solves out of the picture.\\n\\n"
+          "It THROWS if the current velocity is not discretely divergence-free to 1e-10 "
+          "(max_open_divergence()). That is not a nicety: Weymouth-Yue's exact conservation is "
+          "CONDITIONAL on sum_f o_f u_f = 0 per cell, because the dilation term adds H(C-1/2) times "
+          "that residual to every full cell's volume budget. Run step() to a steady state (or "
+          "project()) and advect with the solver's own output; never with an analytic sample, which "
+          "is solenoidal only to O(h^2).")
+      .def(
+          "set_vof_step_parity", [](S& s, long n) { s.setVofStepParity(n); }, nb::arg("n"),
+          "Set the sweep-permutation counter of the NEXT colour advection: the Weymouth-Yue sweep "
+          "order is kWySweepPerm[n % 6], cycled so no axis is systematically favoured. Exposed so "
+          "a benchmark can hold the permutation fixed (n constant) or resume a run across a "
+          "restart. Default: it increments once per advection from 0.")
+      .def(
+          "vof_step_parity", [](S& s) { return s.vofStepParity(); },
+          "The sweep-permutation counter of the next colour advection.")
+      .def(
+          "set_vof_cutcell_flux_clamp", [](S& s, bool on) { s.setVofCutFluxClamp(on); },
+          nb::arg("on"),
+          "Ablation: Weymouth's admissible-interval clamp on the openness-weighted cut-cell flux "
+          "(ON by default). The clamp bounds |F| by what the DONOR actually holds — at most "
+          "eps*C liquid and at most eps*(1-C) gas of the fluid volume o*|a| swept through the face "
+          "— applied to the one value both neighbours share, so conservation still telescopes "
+          "bit-exactly. It is what makes the whole-cell-PLIC-times-open-area flux approximation "
+          "BOUNDED. Measured with it off on a 24^3 packing at CFL 0.2: the [0,1] clip fires at "
+          "3.2e-5 liquid volume per step and the conserved functional drifts 1.3e-8 in 30 steps; "
+          "with it on the clip stops firing.")
+      .def(
+          "vof_filled_colour", [](S& s) { return field_out(s, s.getVofFilledColour()); },
+          "The colour field INCLUDING the neutral solid-band fill — what the MYC and "
+          "height-function stencils actually read — as a Fortran-order (nx,ny,nz) array. "
+          "get_vof()/'C' is the canonical field and carries EXACTLY 0 in solid cells; the fill is a "
+          "stencil device regenerated at every ghost exchange (three passes with a shrinking depth "
+          "budget, src/vof/cutcell.hpp), and it is what makes the wall look 90-degree neutral "
+          "instead of perfectly non-wetting.")
+      .def(
+          "vof_geometry", [](S& s, int which) { return field_out(s, s.getVofGeometry(which)); },
+          nb::arg("which"),
+          "The cut-cell geometry the colour block runs on, as a Fortran-order (nx,ny,nz) array: "
+          "0 = the cell fluid fraction eps (4^3-subsampled, a multiple of 1/64), 1/2/3 = the "
+          "openness of the +x/+y/+z face of each cell (the ADVECTOR's high-face convention, one "
+          "cell shifted from the solver's ox/oy/oz), 4 = the classification (1 = SOLID, i.e. "
+          "eps == 0 AND all six faces closed).")
+      .def(
+          "vof_has_geometry", [](S& s) { return s.vofHasGeometry(); },
+          "True when the colour advection is running the CUT-CELL (openness-weighted) kernels, i.e. "
+          "an immersed solid is present and set_solid ran with cutcell_pressure=True. False means "
+          "the uncut rung-V1 kernels are running, byte-identically to a solid-free build.")
       .def(
           "vof_diagnostics",
           [](S& s) {
@@ -757,11 +816,33 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["max"] = d.maxC;
             r["mixed"] = d.mixed;
             r["wisps"] = d.wisps;
+            r["volume"] = d.volume;
+            r["raw_volume"] = d.rawVolume;
+            r["solid_sum"] = d.solidSumC;
+            r["solid_fill_sum"] = d.solidFillSum;
+            r["min_fluid"] = d.minCFluid;
+            r["max_fluid"] = d.maxCFluid;
+            r["clipped_volume"] = d.clippedVolume;
+            r["clipped_signed"] = d.clippedSigned;
+            r["cut_cells"] = d.cutCells;
+            r["clamped_faces"] = d.clampedFaces;
+            r["solid_cells"] = d.solidCells;
             return r;
           },
           "Colour census over THIS RANK's inner cells: sum (cell-volume units), min, max, the "
           "number of mixed cells (0<C<1) and of wisps (C within 1e-8 of 0 or 1). No clipping is "
-          "applied at this rung, so min/max may leave [0,1] if the CFL cap is raised.")
+          "applied at this rung, so min/max may leave [0,1] if the CFL cap is raised.\n\n"
+          "With an immersed solid (rung V5a) the dict also carries the cut-cell quantities, all "
+          "zero without one: 'volume' = sum eps_eff*C over fluid cells, the functional the "
+          "openness-weighted scheme conserves EXACTLY (eps_eff = max(eps, 1/64), the 4^3 "
+          "subsampling resolution — see src/vof/cutcell.hpp rule 1); 'raw_volume' = sum eps*C, "
+          "which differs only on eps==0 cells that still own an open face and is therefore NOT the "
+          "conserved functional; 'solid_sum' = sum of C over solid cells (0 by construction — the "
+          "neutral band fill lives on the working block, not on 'C'); 'min_fluid'/'max_fluid' over "
+          "UNCUT fluid cells (eps==1), where Weymouth's boundedness applies verbatim; "
+          "'clipped_volume' / 'clipped_signed' = the liquid volume the cut-cell clip moved during "
+          "the last advection (a TRIPWIRE on the flux approximation, not a mechanism: if it is not "
+          "negligible the fix is the solid-clipped flux polygon); 'cut_cells' / 'solid_cells'.")
       .def(
           "compute_vof_curvature",
           [](S& s) {

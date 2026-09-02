@@ -547,6 +547,7 @@ class Solver {
       throw std::runtime_error("set_aperture_order: order must be 1 or 2");
     apertureOrder_ = order;
   }
+  int apertureOrder() const { return apertureOrder_; }
   void setFluidOnlyConstraint(int mode) {
     if (mode < 0 || mode > 2)
       throw std::runtime_error("set_fluid_only_constraint: mode must be 0, 1 or 2");
@@ -1669,6 +1670,11 @@ class Solver {
       Kokkos::deep_copy(phi_, 0.0);
       Kokkos::deep_copy(P_, 0.0);
     }
+    // Rung V5a (WO-Q): the colour block's cut-cell geometry is derived from the openness and the
+    // SDF that were just rebuilt, so set_solid AFTER enable_vof must rebuild it — the same reason
+    // initMpi rebuilds the block. Inert (and byte-identical) when VoF is off.
+    if (vofEnabled_)
+      buildVofBlock();
   }
 
   void step() {
@@ -2205,6 +2211,7 @@ class Solver {
       };
     }
 #endif
+    buildVofGeometry();  // rung V5a (WO-Q): openness + fluid fraction on the colour block
     // The half-shifted momentum CVs live on this same block, so they are rebuilt with it.
     vofCurv_.init(nx_, ny_, nz_, kVofG);
     if (vofMomEnabled_) {
@@ -2213,6 +2220,76 @@ class Solver {
         if (uAdv_[c].extent(0) != n_)
           uAdv_[c] = CCField("uAdv", n_);
     }
+  }
+  // --- rung V5a (WO-Q): the cut-cell geometry of the colour block ------------------------------
+  //
+  // The advector needs, on ITS g=3 block and in ITS high-face index convention, the face openness
+  // `o_d` and the cell fluid fraction `eps`. Both are built here and both are then run through the
+  // colour field's OWN ghost policy (`vofFillGhosts`), which is what makes the classification at
+  // the outermost ghost layer the owner's classification rather than a locally-guessed one — the
+  // solid-band fill of `cutcell.hpp` reads fluid neighbours at ghost depth 3, so a wrong
+  // classification there would be a decomposition dependence in the INNER result.
+  //
+  // `eps` comes from `buildCellFraction` (mac_approx_projection.hpp: 4^3-subsampled trilinear SDF),
+  // which the collocated path already uses for `cs_`. `cs_` is allocated only on the collocated
+  // grid, so the staggered path gets its own `vofCs_` here.
+  //
+  // The openness embed is `vof::copyFaceVelocity`, i.e. THE SAME shifted embed the face velocity
+  // uses — because it is the same face. `ox_(i)` is the openness of the `-x` face of cell `i` and
+  // the advector wants the `+x` face of cell `i`, exactly the low-face -> high-face shift of
+  // `colour_field.hpp`. Using a concentric embed here instead is the openness twin of WO-J's 35 %
+  // conservation defect and is what gate G3 exists to catch.
+  void buildVofGeometry() {
+    if (!vofEnabled_)
+      return;
+    if (!hasSolid_ || !cutcellPressure_) {
+      vofAdv_.disableGeometry();  // all-fluid: the V1 kernels run byte-identically
+      vofSolidG2_ = CCField();
+      return;
+    }
+    vofAdv_.enableGeometry();
+    if (vofCs_.extent(0) != n_)
+      vofCs_ = CCField("vofCs", n_);
+    buildCellFraction(vofCs_, CCConst(sdf_), e_, G);  // inner region; ghosts come from the exchange
+    copyInner(vofAdv_.epsFraction(), e3_, kVofG, CCConst(vofCs_), e_, G);
+    vofExchangeRaw(vofAdv_.epsFraction());
+    CCField oa[3] = {ox_, oy_, oz_};
+    for (int d = 0; d < 3; ++d) {
+      vof::copyFaceVelocity(vofAdv_.faceOpenness(d), I3{e3_.x, e3_.y, e3_.z}, kVofG, oa[d],
+                            I3{e_.x, e_.y, e_.z}, G, d);
+      vofExchangeRaw(vofAdv_.faceOpenness(d));
+    }
+    vofAdv_.classifyGeometry();
+    vofExchangeRaw(vofAdv_.kindDouble());  // the owner's classification into every ghost layer
+    vofAdv_.finalizeGeometry();
+    // The G=2 mirror of the classification: the canonical "C" field reports EXACTLY 0 in solid
+    // cells (gate G2), while the g=3 working block carries the neutral band fill that the MYC and
+    // height-function stencils need. The fill is regenerated deterministically by every
+    // `vofFillGhosts`, so nothing is lost by not persisting it.
+    if (vofSolidG2_.extent(0) != n_)
+      vofSolidG2_ = CCField("vofSolidG2", n_);
+    copyInner(vofSolidG2_, e_, G, CCConst(vofAdv_.kindDouble()), e3_, kVofG);
+    zeroSolidColour();
+  }
+  // Zero the canonical G=2 colour field inside solid cells (see buildVofGeometry).
+  void zeroSolidColour() {
+    if (!vofEnabled_ || !vofAdv_.hasGeometry() || !vofSolidG2_.extent(0) || !vofSolidZero_)
+      return;
+    // `vofSolidG2_` lives on the EXTENDED G=2 block (copyInner wrote it at (x+G, y+G, z+G)), so it
+    // is indexed exactly like cField_ — indexing it as an inner-sized array reads the wrong cells
+    // and silently zeroes live fluid colour (measured: 0.5 % of the liquid volume lost per step).
+    CCField c = cField_;
+    CCConst sl = CCConst(vofSolidG2_);
+    const int ex = e_.x, ey = e_.y, g = G;
+    Kokkos::parallel_for(
+        "peclet::flow::vof_zero_solid",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey;
+          if (sl(i) > 0.5)
+            c(i) = 0.0;
+        });
+    CCExec().fence();
   }
   // Is axis `a` periodic for the colour field? flow's per-face bc_ is 0 (periodic) on BOTH ends of
   // a periodic axis, so an axis is periodic iff neither of its faces carries a domain BC.
@@ -2224,6 +2301,19 @@ class Solver {
   // far side of the domain. Prescribing C at an inflow face is a V5+ concern (it needs a flux BC,
   // not a ghost value) and is not offered here.
   void vofFillGhosts(CCField f) {
+    vofExchangeRaw(f);
+    // Rung V5a (WO-Q): the neutral (90 deg) solid-band fill, for the COLOUR field only. It is a
+    // stencil device, not transported data — the MYC 3^3 stencil and the V3 height-function
+    // columns of a near-wall cell reach into the solid, and leaving those cells at 0 makes every
+    // wall perfectly non-wetting. Three passes with a shrinking depth budget (`vof/cutcell.hpp`),
+    // then a SECOND exchange so the outermost ghost layer holds its owner's filled value (the
+    // passes only reach ghost depth 2, and the curvature cascade reads depth 3).
+    if (vofAdv_.hasGeometry() && f.data() == vofAdv_.colour().data()) {
+      vofAdv_.solidBandFill();
+      vofExchangeRaw(f);
+    }
+  }
+  void vofExchangeRaw(CCField f) {
     const bool px = vofAxisPeriodic(0), py = vofAxisPeriodic(1), pz = vofAxisPeriodic(2);
 #ifdef PECLET_FLOW_MPI
     if (distributed_ && vofDev_)
@@ -5012,6 +5102,7 @@ class Solver {
   void setVof(const std::vector<double>& c) {
     enableVof();
     scatterInner(cField_, c);
+    zeroSolidColour();  // rung V5a: solid cells carry no colour (the band fill is regenerated)
     fillPropGhosts(cField_);
   }
   std::vector<double> getVof() { return gatherInner(cField_); }
@@ -5020,7 +5111,31 @@ class Solver {
     if (!vofEnabled_)
       throw std::runtime_error("vof_diagnostics: VoF is not enabled (call enable_vof/set_vof)");
     bridgeColourToVof();
-    return vofAdv_.diagnostics();
+    auto d = vofAdv_.diagnostics();
+    // `solidSumC` is the census of the CANONICAL field: the working block's solid cells carry the
+    // neutral band fill (reported as `solidFillSum`), while "C" itself is 0 there — that is the
+    // quantity gate G2 of WO-Q asks for.
+    d.solidSumC = vofSolidColourSum();
+    return d;
+  }
+  // sum of the canonical colour field "C" over SOLID cells of this rank (0 by construction).
+  double vofSolidColourSum() {
+    if (!vofEnabled_ || !vofAdv_.hasGeometry() || !vofSolidG2_.extent(0))
+      return 0.0;
+    CCConst c = CCConst(cField_), sl = CCConst(vofSolidG2_);
+    const int ex = e_.x, ey = e_.y, g = G;
+    double acc = 0.0;
+    Kokkos::parallel_reduce(
+        "peclet::flow::vof_solid_sum",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& a) {
+          const long i = (long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey;
+          if (sl(i) > 0.5)
+            a += c(i);
+        },
+        acc);
+    Kokkos::fence();
+    return acc;
   }
   // Interface-local Courant number max|uf|*dt/h over the faces of mixed cells and their face
   // neighbours, with the CURRENT velocity and dt (an all-reduce max under MPI). This is the number
@@ -5032,7 +5147,7 @@ class Solver {
       return 0.0;
     bridgeVelocityToVof();
     bridgeColourToVof();
-    const double loc = vofAdv_.maxCourantInterface(dt_ / vofAdv_.h());
+    const double loc = vofAdv_.maxCourantInterfaceAuto(dt_ / vofAdv_.h());
     return vofAdv_.globalMax ? vofAdv_.globalMax(loc) : loc;
   }
   // The interface-local Courant number of the step just taken (0 before the first step).
@@ -5045,6 +5160,114 @@ class Solver {
       vofAdv_.cflLimit = v;
   }
   double vofCflLimit() const { return vofCflLimit_; }
+
+  // --- rung V5a (WO-Q): VoF transport through an immersed solid ---------------------------------
+  //
+  // The colour advection is openness-weighted (`vof/cutcell.hpp`): the geometric flux of every face
+  // is multiplied by the face openness `o_f`, the update is done in FLUID-VOLUME units
+  // (`eps_i C_i`), and the dilation term uses the same `o_f a_f` — so the conserved functional
+  // `sum_i eps_eff_i C_i` telescopes against the projection's own openness-weighted divergence,
+  // exactly as in the uncut case. Solid cells carry no colour (the canonical "C" reads 0 there) and
+  // the working block's solid band carries the neutral 90-degree fill for the MYC / height-function
+  // stencils.
+  //
+  // WHAT IT APPROXIMATES: the PLIC polyhedron is reconstructed on the WHOLE unit cell and its slab
+  // volume is multiplied by the open area, instead of being clipped against the solid as well
+  // (Huang, JCP 2025/2026). Conservative and exact where interface and wall are parallel or the
+  // cell is whole; O(1) wrong in the distribution INSIDE a cell whose interface crosses its wall.
+  // `vof_diagnostics().clipped_volume` is the tripwire.
+  void requireVofGeometry(const char* who) {
+    if (!hasSolid_ || vofAdv_.hasGeometry())
+      return;
+    std::string m(who);
+    m += ": an immersed solid is present but the colour block has no cut-cell geometry. Rung V5a "
+         "needs the cut-cell openness, i.e. set_solid(sdf, cutcell_pressure=True) (the staircase "
+         "pressure operator has no face openness to weight the geometric fluxes with).";
+    throw std::runtime_error(m);
+  }
+  // Does the colour advection run the cut-cell (openness-weighted) kernels?
+  bool vofHasGeometry() const { return vofAdv_.hasGeometry(); }
+  // Ablation: drop Weymouth's admissible-interval clamp on the openness-weighted flux
+  // (`vof/cutcell.hpp` vofCutFluxClamp). ON by default — the measurement that put it there is in
+  // that header. With it off the [0,1] clip becomes the mechanism instead of a tripwire and the
+  // conserved functional drifts.
+  void setVofCutFluxClamp(bool on) { vofAdv_.cutFluxClamp = on; }
+  bool vofCutFluxClamp() const { return vofAdv_.cutFluxClamp; }
+  // What the CANONICAL "C" field carries in SOLID cells (the working block always carries the
+  // neutral band fill, which is what the MYC / height-function stencils need):
+  //   true  (default) 0 — "no colour in the solid", the WO-Q gate. The closures then see gas
+  //                   density there and the CSF sees a full colour jump across a wall face.
+  //   false           the band fill — a zero-slope continuation of the liquid into the wall.
+  // Measured on the G5 cap (D/dx = 24, sigma = 1, mu = 0.05): see the WO-Q findings entry.
+  void setVofSolidColourZero(bool on) { vofSolidZero_ = on; }
+  bool vofSolidColourZero() const { return vofSolidZero_; }
+  // The colour field INCLUDING the neutral solid-band fill, on the inner region — i.e. what the
+  // MYC / height-function stencils actually read, as opposed to the canonical "C" (0 in solid).
+  // The fill is regenerated here, so this is also the direct gate on its decomposition
+  // independence: it must be pointwise BITWISE across np (`tests/kokkos_mpi/test_vof_cutcell_mpi`).
+  std::vector<double> getVofFilledColour() {
+    if (!vofEnabled_)
+      throw std::runtime_error("vof_filled_colour: VoF is not enabled");
+    bridgeColourToVof();
+    CCField t("vofFilled", n_);
+    copyInner(t, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
+    return gatherInner(t);
+  }
+  // The cut-cell geometry the colour block runs on, on the inner region: 0 = the cell fluid
+  // fraction eps, 1/2/3 = the openness of the +x/+y/+z face of each cell (the ADVECTOR's high-face
+  // convention), 4 = the cell classification (1 = solid). All must be bitwise across np.
+  std::vector<double> getVofGeometry(int which) {
+    if (!vofEnabled_ || !vofAdv_.hasGeometry())
+      throw std::runtime_error("vof_geometry: no cut-cell geometry (needs set_solid + enable_vof)");
+    CCField t("vofGeom", n_);
+    CCConst src = which == 0   ? CCConst(vofAdv_.epsFraction())
+                  : which < 4 ? CCConst(vofAdv_.faceOpenness(which - 1))
+                              : CCConst(vofAdv_.kindDouble());
+    copyInner(t, e_, G, src, e3_, kVofG);
+    return gatherInner(t);
+  }
+  // The colour advector itself (its g=3 block, geometry views and planes). For TESTS: gate G3 of
+  // `tests/kokkos/test_vof_cutcell.cpp` rebuilds the openness/fraction by an independent route and
+  // compares against these.
+  const vof::WyAdvector& vofAdvector() const { return vofAdv_; }
+  // The sweep permutation index of the NEXT colour advection (`kWySweepPerm[n % 6]`). Exposed so a
+  // benchmark can hold the permutation fixed, or resume one, across a restart.
+  void setVofStepParity(long n) { vofStep_ = n; }
+  long vofStepParity() const { return vofStep_; }
+
+  // KINEMATIC colour advection: advance C ONCE with the solver's CURRENT face velocity and the
+  // given dt, with no Navier-Stokes step at all. This is the entry point the advection benchmarks
+  // (Zalesak, LeVeque) and the cut-cell conservation gates use — a frozen Stokes field advecting a
+  // colour slab is a pure statement about the advection scheme, with the momentum solve and the
+  // pressure solve out of the picture.
+  //
+  // It REFUSES a velocity field that is not discretely divergence-free to 1e-10: Weymouth-Yue's
+  // exact conservation is conditional on `sum_f o_f u_f = 0` per cell (the dilation term adds
+  // `H(C-1/2)` times that residual to EVERY full cell's budget), so a run on a non-solenoidal field
+  // would report a conservation "defect" that is really the caller's velocity. Use the solver's own
+  // projected output (run `step()` to a steady state, or call `project()`), never an analytic
+  // sample.
+  void advectVofKinematic(double dt) {
+    if (!vofEnabled_)
+      throw std::runtime_error("advect_vof: VoF is not enabled (call enable_vof / set_vof first)");
+    requireVofGeometry("advect_vof");
+    const double div = maxOpenDivergence();
+    if (!(div <= 1e-10)) {
+      char msg[320];
+      std::snprintf(msg, sizeof(msg),
+                    "advect_vof: the current face velocity is not discretely divergence-free "
+                    "(max|div(open*u)| = %.6g > 1e-10). Weymouth-Yue conservation is conditional "
+                    "on it; project the field first (step() / project()).",
+                    div);
+      throw std::runtime_error(msg);
+    }
+    bridgeVelocityToVof();
+    bridgeColourToVof();
+    vofAdv_.advect(dt, vofStep_++);
+    copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
+    zeroSolidColour();
+    fillPropGhosts(cField_);
+  }
   // Harmonic instead of arithmetic rho_f in the pressure projection (WO-J item 5). DEFAULT OFF and
   // it should stay off — read the long note in mac_pressure.hpp before turning it on: arithmetic
   // rho_f IS the harmonic mean of the mobility 1/rho (the series-correct choice for a normal flux)
@@ -5341,11 +5564,7 @@ class Solver {
   void advectVof() {
     if (!vofEnabled_)
       return;
-    if (hasSolid_)
-      throw std::runtime_error(
-          "VoF (enable_vof) with an immersed solid is not implemented at rung V2a: the geometric "
-          "fluxes are not openness-weighted yet (VOF_PLAN.md §3 rule 2 / rung V5), so colour would "
-          "leak into the solid. An ALL-FLUID set_pressure_geometry is supported.");
+    requireVofGeometry("enable_vof");
     bridgeVelocityToVof();
     bridgeColourToVof();
     vofAdv_.advect(dt_, vofStep_++);
@@ -5354,6 +5573,7 @@ class Solver {
     // face body force) read the ghost ring, so C's ghosts must be filled with the SAME policy rho
     // uses or the derived rho ghost is inconsistent with the interior at a boundary.
     copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
+    zeroSolidColour();  // rung V5a: the canonical field carries 0 in solid cells, not the fill
     fillPropGhosts(cField_);
   }
 
@@ -5454,10 +5674,7 @@ class Solver {
   void advectVofMomentum() {
     if (!vofMomEnabled_)
       return;
-    if (hasSolid_)
-      throw std::runtime_error(
-          "VoF with an immersed solid is not implemented at rung V2b (the geometric fluxes are not "
-          "openness-weighted yet — VOF_PLAN.md §3 rule 2 / rung V5).");
+    requireVofGeometry("enable_vof_momentum");
     if (implicitAdv())
       throw std::runtime_error(
           "enable_vof_momentum is incompatible with implicit advection (set_implicit_advection / a "
@@ -5476,6 +5693,7 @@ class Solver {
     // Colour back to the G=2 registry mirror (same contract as advectVof), and the advected
     // velocity back onto the solver's velocity index convention.
     copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
+    zeroSolidColour();
     fillPropGhosts(cField_);
     // A plain inner-to-inner copy: the momentum control volumes are indexed in the solver's own
     // low-face convention (vof/momentum_advect.hpp "Indexing"), so CV_c(i) IS the solver's u_c(i)
@@ -6065,6 +6283,9 @@ class Solver {
   bool vofEnabled_ = false;
   bool rhoFaceHarmonic_ = false;  // harmonic instead of arithmetic rho_f in the projection (OFF)
   CCField cField_;                 // the G=2 registry mirror of the colour field ("C")
+  CCField vofCs_;                  // rung V5a: cell fluid fraction on the G=2 block (staggered)
+  CCField vofSolidG2_;             // rung V5a: 1 where the cell is SOLID (G=2 mirror), else 0
+  bool vofSolidZero_ = true;       // rung V5a: canonical "C" is 0 in solid cells (see setter)
   vof::WyAdvector vofAdv_;         // the g=3 working block: PLIC + Weymouth-Yue sweeps
   C3 e3_{0, 0, 0};                 // extended extents of that block (n + 2*kVofG)
   double vofCflLimit_ = 0.25;      // Weymouth's proven 3D boundedness bound 1/(2(N-1))

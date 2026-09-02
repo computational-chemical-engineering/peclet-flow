@@ -78,6 +78,7 @@
 #include <stdexcept>
 
 #include "mac_stencils.hpp"  // peclet::flow::SExec, SField, SMem, I3, L3
+#include "vof/cutcell.hpp"
 #include "vof/plic.hpp"
 
 namespace peclet::flow::vof {
@@ -144,6 +145,23 @@ class WyAdvector {
     double maxC = 0.0;  ///< max C over inner cells (may be > 1)
     long mixed = 0;     ///< cells with 0 < C < 1
     long wisps = 0;     ///< cells with 0 < C < 1e-8 or 1-1e-8 < C < 1
+    // --- rung V5a (WO-Q), all zero unless cut-cell geometry is attached -----------------------
+    double volume = 0.0;      ///< sum of eps_eff*C over inner FLUID cells: the EXACTLY conserved
+                              ///< functional of the cut-cell scheme (`cutcell.hpp` rule 1)
+    double rawVolume = 0.0;   ///< sum of eps*C (raw buildCellFraction eps) over the same cells;
+                              ///< differs from `volume` only on eps == 0 cells with an open face
+    double solidFillSum = 0.0;  ///< sum of C over inner SOLID cells ON THE WORKING BLOCK, i.e. the
+                                ///< neutral band fill. NOT the canonical colour: `IbmSolver` reports
+                                ///< `solidSumC`, the sum over solid cells of the "C" field, which is
+                                ///< 0 by construction.
+    double solidSumC = 0.0;   ///< filled by the SOLVER from the canonical G=2 colour field
+    double minCFluid = 0.0;   ///< min C over inner fluid cells with eps == 1 (uncut fluid)
+    double maxCFluid = 0.0;   ///< max C over the same set
+    double clippedVolume = 0.0;  ///< |liquid volume| the cut-cell clip moved during the last step
+    double clippedSigned = 0.0;  ///< the same, signed (created positive, destroyed negative)
+    long cutCells = 0;        ///< inner cells with 0 < eps_eff < 1
+    long solidCells = 0;      ///< inner cells classified SOLID
+    long clampedFaces = 0;    ///< faces Weymouth's admissible interval had to clamp, last step
   };
 
   /// @param nx,ny,nz  inner cell counts of this block
@@ -194,6 +212,115 @@ class WyAdvector {
   SField faceW() const { return wf_; }
   SField faceVel(int d) const { return d == 0 ? uf_ : (d == 1 ? vf_ : wf_); }
 
+  // ---- rung V5a (WO-Q): optional cut-cell geometry ------------------------------------------
+  //
+  // OFF by default and EVERY kernel branches on `hasGeometry()` OUTSIDE its lambda, so with no
+  // geometry attached the arithmetic executed is literally the V1 expression (not a multiplication
+  // by 1.0) and the whole V1/V2a/V3/V4 battery stays byte-identical. See `vof/cutcell.hpp` for the
+  // three rules the geometry branch adds and why the conserved functional is `sum eps_eff C`.
+  //
+  // USAGE (the solver does exactly this in `buildVofBlock`):
+  //   a.enableGeometry();
+  //   <fill faceOpenness(d) with the +d face openness and epsFraction() with buildCellFraction,
+  //    on the INNER region, then run the block's own ghost policy on each of them>
+  //   a.classifyGeometry();            // writes kindDouble() over every index except the low plane
+  //   <run the block's ghost policy on kindDouble()>   // makes the low plane / ghosts the owner's
+  //   a.finalizeGeometry();            // kindDouble() -> the unsigned-char classification
+  bool hasGeometry() const { return hasGeom_; }
+  /// Allocate the geometry views. Idempotent; does not classify.
+  void enableGeometry() {
+    if (len_ <= 0)
+      throw std::runtime_error("peclet::flow::vof::WyAdvector: enableGeometry before init()");
+    if (!hasGeom_) {
+      for (int d = 0; d < 3; ++d)
+        of_[d] = SField("vof::openness", len_);
+      eps_ = SField("vof::eps", len_);
+      kindD_ = SField("vof::kindD", len_);
+      kind_ = UCField("vof::kind", len_);
+      fill_ = UCField("vof::fillState", len_);
+      mark_ = UCField("vof::fillMark", len_);
+      hasGeom_ = true;
+    }
+  }
+  /// Drop the geometry (back to the uncut kernels, byte-identically).
+  void disableGeometry() { hasGeom_ = false; }
+  /// Face openness of the `+d` face of each cell (the advector's own high-face convention — the
+  /// SAME convention and the SAME one-cell shift the face velocity uses, `colour_field.hpp`).
+  SField faceOpenness(int d) const { return of_[d]; }
+  /// Fluid volume fraction of each cell (`buildCellFraction`, a multiple of 1/64).
+  SField epsFraction() const { return eps_; }
+  /// The cell classification as a DOUBLE (1 = solid), so it can ride the block's own halo exchange.
+  SField kindDouble() const { return kindD_; }
+  /// The cell classification (`VofCellKind`).
+  UCField cellKind() const { return kind_; }
+  /// Weymouth's admissible-interval clamp on the openness-weighted flux (`cutcell.hpp`
+  /// `vofCutFluxClamp`). ON by default; the ablation measures what the whole-cell-PLIC-times-open-
+  /// area approximation costs in boundedness and hence in clipped volume.
+  bool cutFluxClamp = true;
+  /// Faces the clamp had to bind, last `advect()`.
+  long clampedFaces() const { return clampedFaces_; }
+  /// |liquid volume| the cut-cell clip moved during the last `advect()` (0 without geometry).
+  double clippedVolume() const { return clippedVolume_; }
+  double clippedSigned() const { return clippedSigned_; }
+
+  /// Classify every cell from `eps` and the six face openness values (`cutcell.hpp` rule 1) into
+  /// `kindDouble()`. The `-d` face of a cell at index 0 on axis d lies outside the block, so the
+  /// low plane of each axis is left FLUID here and is meant to be overwritten by the block's own
+  /// ghost exchange (which puts the owner's classification there) before `finalizeGeometry()`.
+  void classifyGeometry() {
+    if (!hasGeom_)
+      return;
+    const I3 e = e_;
+    const long sx = 1, sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
+    SField ox = of_[0], oy = of_[1], oz = of_[2], ep = eps_, kd = kindD_;
+    Kokkos::parallel_for(
+        "vof::wy::classify",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = L3(x, y, z, e);
+          if (x == 0 || y == 0 || z == 0) {
+            kd(i) = 0.0;  // the exchange owns this plane
+            return;
+          }
+          const double oLo[3] = {ox(i - sx), oy(i - sy), oz(i - sz)};
+          const double oHi[3] = {ox(i), oy(i), oz(i)};
+          kd(i) = vofIsSolidCell(ep(i), oLo, oHi) ? 1.0 : 0.0;
+        });
+    Kokkos::fence();
+  }
+  /// `kindDouble()` (ghost-exchanged) -> the unsigned-char classification every kernel reads.
+  void finalizeGeometry() {
+    if (!hasGeom_)
+      return;
+    SField kd = kindD_;
+    UCField kk = kind_;
+    Kokkos::parallel_for(
+        "vof::wy::finalize_geom", Kokkos::RangePolicy<SExec>(SExec(), 0, len_),
+        KOKKOS_LAMBDA(long i) { kk(i) = kd(i) > 0.5 ? kVofSolid : kVofFluid; });
+    Kokkos::fence();
+  }
+
+  /// The three-pass neutral (90 deg) solid-band fill of `cutcell.hpp`. Call from the block's ghost
+  /// policy AFTER the exchange + non-periodic clamp, and exchange once more afterwards so the
+  /// outermost ghost layer holds its owner's filled value.
+  void solidBandFill() {
+    if (!hasGeom_)
+      return;
+    {
+      UCField fs = fill_, mk = mark_, kk = kind_;
+      Kokkos::parallel_for(
+          "vof::wy::fill_reset", Kokkos::RangePolicy<SExec>(SExec(), 0, len_),
+          KOKKOS_LAMBDA(long i) {
+            fs(i) = kk(i) == kVofSolid ? kVofFillNone : kVofFillFluid;
+            mk(i) = 0u;
+          });
+    }
+    for (int k = 1; k <= 3; ++k)
+      solidBandFillPass(k);
+    Kokkos::fence();
+  }
+
+
   // ---- hooks -------------------------------------------------------------------------------
   /// Refresh EVERY ghost layer of the given cell field (MPI exchange + domain BC fill). Required.
   std::function<void(SField)> exchange;
@@ -229,7 +356,10 @@ class WyAdvector {
   void advect(double dt, long step) {
     requireExchange();
     const double dth = dt / h_;
-    const double cflLocal = interfaceLocalCfl ? maxCourantInterface(dth) : maxCourant(dth);
+    const double cflLocal =
+        interfaceLocalCfl
+            ? (hasGeom_ ? maxCourantInterfaceCut(dth) : maxCourantInterface(dth))
+            : maxCourant(dth);
     const double cfl = globalMax ? globalMax(cflLocal) : cflLocal;
     lastCfl_ = cfl;
     // Weymouth's bound is INCLUSIVE (thesis eq. A.33: |a| <= 1/(2(N-1))), so a step exactly at
@@ -245,6 +375,11 @@ class WyAdvector {
 
     // (1) THE dilation flag: frozen ONCE from C^n, used unchanged by all three sweeps.
     freezeDilationFlag();
+    if (hasGeom_) {  // rung V5a: the clip / clamp census is per STEP, not per sweep
+      clippedVolume_ = 0.0;
+      clippedSigned_ = 0.0;
+      clampedFaces_ = 0;
+    }
 
     // (2) three directional sweeps
     const int* perm = kWySweepPerm[static_cast<int>(step % 6)];
@@ -255,6 +390,8 @@ class WyAdvector {
       reconstruct();
       computeFluxes(d, dth);
       applySweep(d, dth);
+      if (hasGeom_)
+        clipCutCells();  // rung V5a rule 3 (diagnostic clip, cut cells only)
       exchange(c_);
     }
     ++steps_;
@@ -291,7 +428,10 @@ class WyAdvector {
   /// two in step if the cap ever changes.
   double checkCourant(double dt) {
     const double dth = dt / h_;
-    const double cflLocal = interfaceLocalCfl ? maxCourantInterface(dth) : maxCourant(dth);
+    const double cflLocal =
+        interfaceLocalCfl
+            ? (hasGeom_ ? maxCourantInterfaceCut(dth) : maxCourantInterface(dth))
+            : maxCourant(dth);
     const double cfl = globalMax ? globalMax(cflLocal) : cflLocal;
     lastCfl_ = cfl;
     if (!(cfl <= cflLimit)) {
@@ -341,7 +481,15 @@ class WyAdvector {
         },
         mixed, wisps);
     Kokkos::fence();
-    return Diagnostics{sum, mn, mx, mixed, wisps};
+    Diagnostics dg;
+    dg.sumC = sum;
+    dg.minC = mn;
+    dg.maxC = mx;
+    dg.mixed = mixed;
+    dg.wisps = wisps;
+    if (hasGeom_)
+      cutDiagnostics(dg);
+    return dg;
   }
 
   /// Max |uf| dt / h over this block's owned faces (the `+` face of every inner cell; the `-` face
@@ -418,6 +566,13 @@ class WyAdvector {
     // Max's identity is -inf; an empty band (a uniform colour field) means no constraint, not an
     // unconstrained step. Clamp so the reported CFL is a number and the cap test is meaningful.
     return Kokkos::fmax(m, 0.0) * dth;
+  }
+
+  /// The interface-local Courant number for this dt/h, using the CUT-CELL rule when geometry is
+  /// attached (`o_f |a_f| / max(eps_i, 0.1)`, `cutcell.hpp` rule 2) and the uncut one otherwise.
+  /// This is what `advect()` gates on, so a caller sizing dt sees the same number.
+  double maxCourantInterfaceAuto(double dth) const {
+    return hasGeom_ ? maxCourantInterfaceCut(dth) : maxCourantInterface(dth);
   }
 
   /// Max |discrete face divergence| * dt/h over inner cells — the exact quantity the conservation
@@ -513,6 +668,10 @@ class WyAdvector {
   /// Computing the face once (rather than once per adjacent cell) is what makes the flux telescope
   /// bit-exactly, in-rank and across a rank boundary alike.
   void computeFluxes(int d, double dth) {
+    if (hasGeom_) {  // rung V5a: openness-weighted flux (`cutcell.hpp` eq. 1)
+      computeFluxesCut(d, dth);
+      return;
+    }
     const I3 e = e_;
     const int g = g_;
     const long sd =
@@ -535,6 +694,10 @@ class WyAdvector {
 
   /// `C_i += (F_{i-} - F_{i+}) + c_i (a_{i+} - a_{i-})`, over inner cells.
   void applySweep(int d, double dth) {
+    if (hasGeom_) {  // rung V5a: the update in FLUID-VOLUME units
+      applySweepCut(d, dth);
+      return;
+    }
     const I3 e = e_, n = n_;
     const int g = g_;
     const long sd =
@@ -555,6 +718,272 @@ class WyAdvector {
         });
   }
 
+  // ---- rung V5a (WO-Q) kernel bodies ---------------------------------------------------------
+  // Siblings of the V1 kernels above, reached only through the `hasGeom_` branch at the top of
+  // each. The V1 bodies are untouched, so "no geometry" is byte-identical by construction rather
+  // than by a tolerance.
+
+  /// `F_f = o_f * wyFaceFlux(a_f, ...)`. One number per face, stored at the face's `-` side exactly
+  /// as the uncut kernel stores it, so the flux sum telescopes bit-exactly whatever `o` is.
+  void computeFluxesCut(int d, double dth) {
+    const I3 e = e_;
+    const int g = g_;
+    const long sd =
+        d == 0 ? 1 : (d == 1 ? static_cast<long>(e_.x) : static_cast<long>(e_.x) * e_.y);
+    int lo[3] = {g, g, g};
+    const int hi[3] = {g + n_.x, g + n_.y, g + n_.z};
+    lo[d] -= 1;
+    SField c = c_, mx = mx_, my = my_, mz = mz_, al = alpha_, fl = flux_, u = faceVel(d),
+           o = of_[d], ep = eps_;
+    UCField kd = kind_;
+    const bool clamp = cutFluxClamp;
+    long nclamp = 0;
+    Kokkos::parallel_reduce(
+        "vof::wy::flux_cut",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {lo[0], lo[1], lo[2]},
+                                                      {hi[0], hi[1], hi[2]}),
+        KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+          const long p = L3(x, y, z, e);
+          const double op = o(p);
+          if (op == 0.0) {
+            fl(p) = 0.0;
+            return;
+          }
+          const double a = u(p) * dth;
+          const double raw = vofCutFlux(op, wyFaceFlux(a, p, sd, d, c, mx, my, mz, al));
+          if (!clamp || a == 0.0) {
+            fl(p) = raw;
+            return;
+          }
+          const long q = a > 0.0 ? p : p + sd;
+          const double cq = c(q);
+          if (!wyIsMixed(cq)) {  // algebraic branch: already exactly bounded, and clamping it
+            fl(p) = raw;         // would break the exact full-cell cancellation
+            return;
+          }
+          const double aa = a > 0.0 ? a : -a;
+          const double mag = raw > 0.0 ? raw : -raw;
+          const double cl = vofCutFluxClamp(mag, op * aa, vofEpsEff(ep(q), kd(q) == kVofSolid), cq);
+          if (cl != mag)
+            ++acc;
+          fl(p) = a > 0.0 ? cl : -cl;
+        },
+        nclamp);
+    Kokkos::fence();
+    clampedFaces_ += nclamp;
+  }
+
+  /// `eps_i C_i += (F_- - F_+) + c_i (o_+ a_+ - o_- a_-)`, then divide by `eps_eff`. Solid cells
+  /// (`kVofSolid`) are skipped entirely — their colour comes from `solidBandFill()`.
+  void applySweepCut(int d, double dth) {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    const long sd =
+        d == 0 ? 1 : (d == 1 ? static_cast<long>(e_.x) : static_cast<long>(e_.x) * e_.y);
+    SField c = c_, fl = flux_, u = faceVel(d), o = of_[d], ep = eps_;
+    UCField cc = cc_, kd = kind_;
+    Kokkos::parallel_for(
+        "vof::wy::update_cut",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                      {g + n.x, g + n.y, g + n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = L3(x, y, z, e);
+          if (kd(i) == kVofSolid)
+            return;
+          const double epsEff = vofEpsEff(ep(i), false);
+          // Same `o_f a_f` in the flux and in the dilation term — that shared factor is what makes
+          // the two contributions telescope against the projection's openness-weighted divergence.
+          // `o * (u * dth)` and NOT `(o * u) * dth`: the flux forms the Courant number FIRST
+          // (`wyFaceFlux(u(p) * dth, ...)`), so only this association makes the two cancel to the
+          // last bit in a full cell — the property that keeps the conservation floor on the
+          // interface area rather than on the domain volume (see the file header).
+          const double aP = o(i) * (u(i) * dth), aM = o(i - sd) * (u(i - sd) * dth);
+          const double dil = cc(i) ? (aP - aM) : 0.0;
+          c(i) = c(i) + ((fl(i - sd) - fl(i)) + dil) / epsEff;
+        });
+  }
+
+  /// Rule 3: clip C into [0,1] in CUT cells only (`eps_eff < 1`), accumulating the liquid volume
+  /// the clip moved. A diagnostic first — if it is not negligible the flux approximation, not the
+  /// clip, is what needs fixing.
+  void clipCutCells() {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    SField c = c_, ep = eps_;
+    UCField kd = kind_;
+    double acc = 0.0, sgn = 0.0;
+    Kokkos::parallel_reduce(
+        "vof::wy::clip_cut",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                      {g + n.x, g + n.y, g + n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& a, double& b) {
+          const long i = L3(x, y, z, e);
+          if (kd(i) == kVofSolid)
+            return;
+          const double epsEff = vofEpsEff(ep(i), false);
+          if (!(epsEff < 1.0))
+            return;  // whole fluid cell: V1 boundedness applies verbatim, do not touch it
+          const double cv = c(i);
+          if (cv >= 0.0 && cv <= 1.0)
+            return;
+          double moved = 0.0;
+          c(i) = vofClipCut(cv, epsEff, moved);
+          a += Kokkos::fabs(moved);
+          b += moved;
+        },
+        acc, sgn);
+    Kokkos::fence();
+    clippedVolume_ += acc;
+    clippedSigned_ += sgn;
+  }
+
+  /// Rule 2: the interface-local Courant number in cut cells is `o_f |a_f| / max(eps_i, 0.1)`.
+  /// Same interface band predicate as `maxCourantInterface` (a colour DIFFERENCE, not merely
+  /// "mixed"), and solid cells are outside it by construction.
+  double maxCourantInterfaceCut(double dth) const {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    const long sx = 1, sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
+    SField c = c_, u = uf_, v = vf_, w = wf_, ox = of_[0], oy = of_[1], oz = of_[2], ep = eps_;
+    UCField kd = kind_;
+    double m = 0.0;
+    Kokkos::parallel_reduce(
+        "vof::wy::cfl_interface_cut",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                      {g + n.x, g + n.y, g + n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          const long i = L3(x, y, z, e);
+          if (kd(i) == kVofSolid)
+            return;
+          const double ci = c(i);
+          const bool band = wyIsMixed(ci) || c(i - sx) != ci || c(i + sx) != ci ||
+                            c(i - sy) != ci || c(i + sy) != ci || c(i - sz) != ci ||
+                            c(i + sz) != ci;
+          if (!band)
+            return;
+          const double ei = ep(i);
+          acc = Kokkos::fmax(acc, vofCutCourant(ox(i), u(i) * dth, ei));
+          acc = Kokkos::fmax(acc, vofCutCourant(ox(i - sx), u(i - sx) * dth, ei));
+          acc = Kokkos::fmax(acc, vofCutCourant(oy(i), v(i) * dth, ei));
+          acc = Kokkos::fmax(acc, vofCutCourant(oy(i - sy), v(i - sy) * dth, ei));
+          acc = Kokkos::fmax(acc, vofCutCourant(oz(i), w(i) * dth, ei));
+          acc = Kokkos::fmax(acc, vofCutCourant(oz(i - sz), w(i - sz) * dth, ei));
+        },
+        Kokkos::Max<double>(m));
+    Kokkos::fence();
+    return Kokkos::fmax(m, 0.0);
+  }
+
+  /// One pass of the neutral solid-band fill. Writes solid cells at ghost depth <= 3-k, reading
+  /// only fluid cells and cells filled in an EARLIER pass — a cell being written in THIS pass still
+  /// carries `kVofFillNone`, so it is never read and the pass is race-free without a second buffer.
+  void solidBandFillPass(int k) {
+    const I3 e = e_, n = n_;
+    const int g = g_, maxDepth = 3 - k;
+    const long sx = 1, sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
+    SField c = c_;
+    UCField fs = fill_, mk = mark_;
+    Kokkos::parallel_for(
+        "vof::wy::band_fill",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          if (vofGhostDepth(x, y, z, g, n.x, n.y, n.z) > maxDepth)
+            return;
+          const long i = L3(x, y, z, e);
+          if (fs(i) != kVofFillNone)
+            return;
+          const long nb[6] = {i - sx, i + sx, i - sy, i + sy, i - sz, i + sz};
+          double acc = 0.0;
+          int cnt = 0;
+          for (int q = 0; q < 6; ++q)
+            if (vofFillReadable(fs(nb[q]), k)) {
+              acc += c(nb[q]);
+              ++cnt;
+            }
+          if (cnt == 0)
+            return;  // no donor yet — a later pass may reach it, or it stays as it was
+          c(i) = acc / cnt;
+          mk(i) = 1u;
+        });
+    Kokkos::fence();
+    Kokkos::parallel_for(
+        "vof::wy::band_fill_commit", Kokkos::RangePolicy<SExec>(SExec(), 0, len_),
+        KOKKOS_LAMBDA(long i) {
+          if (mk(i)) {
+            fs(i) = static_cast<unsigned char>(kVofFillPass0 + k);
+            mk(i) = 0u;
+          }
+        });
+    Kokkos::fence();
+  }
+
+  /// The cut-cell half of `diagnostics()` (zero-cost when no geometry is attached).
+  void cutDiagnostics(Diagnostics& dg) const {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    SField c = c_, ep = eps_;
+    UCField kd = kind_;
+    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    MD pol(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z});
+    double vol = 0.0, raw = 0.0, solidC = 0.0;
+    long ncut = 0, nsolid = 0;
+    Kokkos::parallel_reduce(
+        "vof::wy::cut_sums", pol,
+        KOKKOS_LAMBDA(int x, int y, int z, double& v, double& r, double& sc) {
+          const long i = L3(x, y, z, e);
+          if (kd(i) == kVofSolid) {
+            sc += c(i);
+            return;
+          }
+          v += vofEpsEff(ep(i), false) * c(i);
+          r += ep(i) * c(i);
+        },
+        vol, raw, solidC);
+    Kokkos::parallel_reduce(
+        "vof::wy::cut_counts", pol,
+        KOKKOS_LAMBDA(int x, int y, int z, long& nc, long& ns) {
+          const long i = L3(x, y, z, e);
+          if (kd(i) == kVofSolid) {
+            ++ns;
+            return;
+          }
+          const double ee = vofEpsEff(ep(i), false);
+          if (ee < 1.0)
+            ++nc;
+        },
+        ncut, nsolid);
+    double mn = 1e300, mx = -1e300;
+    Kokkos::parallel_reduce(
+        "vof::wy::cut_minfluid", pol,
+        KOKKOS_LAMBDA(int x, int y, int z, double& a) {
+          const long i = L3(x, y, z, e);
+          if (kd(i) == kVofSolid || ep(i) < 1.0)
+            return;
+          a = Kokkos::fmin(a, c(i));
+        },
+        Kokkos::Min<double>(mn));
+    Kokkos::parallel_reduce(
+        "vof::wy::cut_maxfluid", pol,
+        KOKKOS_LAMBDA(int x, int y, int z, double& a) {
+          const long i = L3(x, y, z, e);
+          if (kd(i) == kVofSolid || ep(i) < 1.0)
+            return;
+          a = Kokkos::fmax(a, c(i));
+        },
+        Kokkos::Max<double>(mx));
+    Kokkos::fence();
+    dg.volume = vol;
+    dg.rawVolume = raw;
+    dg.solidFillSum = solidC;
+    dg.cutCells = ncut;
+    dg.solidCells = nsolid;
+    dg.minCFluid = mn > 1e299 ? 0.0 : mn;
+    dg.maxCFluid = mx < -1e299 ? 0.0 : mx;
+    dg.clippedVolume = clippedVolume_;
+    dg.clippedSigned = clippedSigned_;
+    dg.clampedFaces = clampedFaces_;
+  }
+
  private:
   I3 n_{0, 0, 0}, e_{0, 0, 0};
   int g_ = 3;
@@ -565,6 +994,12 @@ class WyAdvector {
   LField list_;
   long mixedCount_ = 0, steps_ = 0;
   double lastCfl_ = 0.0;
+  // rung V5a (WO-Q) cut-cell geometry; `hasGeom_` false => every V1 kernel runs unchanged.
+  bool hasGeom_ = false;
+  SField of_[3], eps_, kindD_;
+  UCField kind_, fill_, mark_;
+  double clippedVolume_ = 0.0, clippedSigned_ = 0.0;
+  long clampedFaces_ = 0;
 };
 
 }  // namespace peclet::flow::vof
