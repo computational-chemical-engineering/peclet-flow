@@ -1324,7 +1324,9 @@ class Solver {
       const double perRank = (double)gnx_ * gny_ * gnz_ / (double)np;
       const bool eligible = !varProps_ && !varRho_ && !hasDrag_ && !porous_ && !Grid::collocated &&
                             (!hasBc_ || hasSolid_ || !implicitFou_);
-      useVelocityMg_ = eligible && perRank < (double)vmgAutoCells_;
+      // np > 1: a single rank has no halo latency to hide (RB-GS is the cheaper solver there) and
+      // a distributed np=1 run must stay bit-identical to the single-rank path.
+      useVelocityMg_ = eligible && np > 1 && perRank < (double)vmgAutoCells_;
       if (useVelocityMg_) {
         vmgLevels_ = 3;
         vmgVcycles_ = 40;
