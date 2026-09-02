@@ -230,9 +230,11 @@ static void bind_solver(nb::module_& m, const char* name) {
            "smoother keeps the update criterion.")
       .def("velocity_residual_tolerance", &S::velocityResidualTolerance)
       .def("set_velocity_multigrid_auto", &S::setVelocityMultigridAuto, nb::arg("cells_per_rank"),
-           "AUTO velocity-MG rule (when set_velocity_multigrid was never called): under MPI use the "
-           "V-cycle once the global cells per rank fall below this (default 65536; 0 = never). Env "
-           "PECLET_FLOW_VMG_AUTO_CELLS.")
+           nb::arg("min_global_cells") = -1,
+           "AUTO velocity-MG rule (when set_velocity_multigrid was never called): under MPI (np > 1) "
+           "use the V-cycle once the global cells per rank fall below cells_per_rank (default 65536; "
+           "0 = never), for global problems of at least min_global_cells (default 8M). Env "
+           "PECLET_FLOW_VMG_AUTO_CELLS / PECLET_FLOW_VMG_AUTO_MIN_GLOBAL.")
       .def("velocity_multigrid_active", &S::velocityMultigridActive)
       .def("last_momentum_residual", &S::lastMomentumResidual,
            "max over components of max|r|/max|b| at exit of the last step's momentum solves "

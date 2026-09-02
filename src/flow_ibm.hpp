@@ -181,8 +181,14 @@ class Solver {
   // the block is small enough that the momentum RB-GS is halo-latency-bound, take the V-cycle
   // instead (1-2 cycles/component == 2-4 exchanges against 8-9 sweeps x 2). Measured crossover on
   // the FoxBerry bed: RB-GS 2.91 s vs MG 3.32 s/step at 147k cells/rank, MG 0.834 vs 0.844 at
-  // 37k; threshold PECLET_FLOW_VMG_AUTO_CELLS (default 65536 cells per rank, 0 = never).
-  void setVelocityMultigridAuto(long cellsPerRank) { vmgAutoCells_ = cellsPerRank; }
+  // 37k; threshold PECLET_FLOW_VMG_AUTO_CELLS (default 65536 cells per rank, 0 = never), and only
+  // for global problems of at least PECLET_FLOW_VMG_AUTO_MIN_GLOBAL cells (8M) -- small grids split
+  // across ranks keep RB-GS so a distributed run stays exactly the single-rank one.
+  void setVelocityMultigridAuto(long cellsPerRank, long minGlobalCells = -1) {
+    vmgAutoCells_ = cellsPerRank;
+    if (minGlobalCells >= 0)
+      vmgAutoMinGlobal_ = minGlobalCells;
+  }
   double velocityResidualTolerance() const { return velResTol_; }
   // max over components of max|r|/max|b| at exit of the last step's momentum solves (residual
   // mode only; -1 otherwise).
@@ -1325,8 +1331,12 @@ class Solver {
       const bool eligible = !varProps_ && !varRho_ && !hasDrag_ && !porous_ && !Grid::collocated &&
                             (!hasBc_ || hasSolid_ || !implicitFou_);
       // np > 1: a single rank has no halo latency to hide (RB-GS is the cheaper solver there) and
-      // a distributed np=1 run must stay bit-identical to the single-rank path.
-      useVelocityMg_ = eligible && np > 1 && perRank < (double)vmgAutoCells_;
+      // a distributed np=1 run must stay bit-identical to the single-rank path. Global size floor:
+      // the rule is about latency-bound LARGE runs; a small global problem split across ranks
+      // (every ctest, every quick check) keeps RB-GS so distributed == single-rank stays exact.
+      const double global = (double)gnx_ * gny_ * gnz_;
+      useVelocityMg_ = eligible && np > 1 && global >= (double)vmgAutoMinGlobal_ &&
+                       perRank < (double)vmgAutoCells_;
       if (useVelocityMg_) {
         vmgLevels_ = 3;
         vmgVcycles_ = 40;
@@ -6143,6 +6153,10 @@ class Solver {
   long vmgAutoCells_ = [] {   // AUTO threshold, cells per rank (0 = never)
     const char* e = std::getenv("PECLET_FLOW_VMG_AUTO_CELLS");
     return e ? std::atol(e) : 65536L;
+  }();
+  long vmgAutoMinGlobal_ = [] {  // AUTO applies only to global problems at least this large
+    const char* e = std::getenv("PECLET_FLOW_VMG_AUTO_MIN_GLOBAL");
+    return e ? std::atol(e) : (1L << 23);  // 8M cells
   }();
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
   VelocityMG vmg_;

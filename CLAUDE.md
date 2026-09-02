@@ -726,9 +726,10 @@ criterion cannot see that stall either). **The V-cycle needs no depth on a pore-
 3, 4 and 5 levels give identical cycle counts at 96³ (the coarse grid only serves the clean fluid
 interior; the exclude mask hands the band to the smoother), so the velocity hierarchy does NOT
 need telescoping where the pressure one did. **AUTO rule**: when `set_velocity_multigrid` was never
-called, a distributed run takes the 3-level V-cycle once global cells / ranks fall below
-`PECLET_FLOW_VMG_AUTO_CELLS` (65536; `set_velocity_multigrid_auto`, 0 = never) on an eligible
-operator mode — the measured crossover on the FoxBerry bed (RB-GS 2.91 vs MG 3.32 s/step at 147 k
+called, a distributed run (np > 1) of at least `PECLET_FLOW_VMG_AUTO_MIN_GLOBAL` = 8M cells takes
+the 3-level V-cycle once global cells / ranks fall below `PECLET_FLOW_VMG_AUTO_CELLS` (65536;
+`set_velocity_multigrid_auto(cells, min_global)`, 0 = never) on an eligible operator mode — the
+size floor keeps every test-sized distributed run exactly equal to its single-rank reference — the measured crossover on the FoxBerry bed (RB-GS 2.91 vs MG 3.32 s/step at 147 k
 cells/rank; 0.844 vs 0.834 at 37 k). Above it RB-GS with the residual stop is the cheaper solver.
 
 Build/test the multi-rank ctests:
