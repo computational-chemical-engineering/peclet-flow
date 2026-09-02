@@ -709,7 +709,10 @@ fixed point to 4e-9).
 `set_velocity_residual_tolerance(rtol)` (0 = the legacy update criterion) ends a component's solve
 once max|b − A u| ≤ rtol · max(max|b|, max|A u|) over the solved unknowns, on every path (cut-cell /
 IBM stencils, the folded constant-coefficient domain-BC smoother via `diffResidual`, every
-velocity-MG mode). The legacy criterion — update ≤ rtol × the *first sweep's* update — is
+velocity-MG mode). The single-GPU regression suite passes unchanged on the default (every metric
++0.00 %, pressure iterations/step identical); steady-state runs need 5–20 % more *steps* to meet
+their convergence check, because the over-converged update-criterion solve made the per-step
+metric drift smoother — if a study is step-count-sensitive, tighten to 1e-6. The legacy criterion — update ≤ rtol × the *first sweep's* update — is
 relative to a quantity that is already noise on a warm-started near-steady step, so RB-GS burns its
 whole sweep cap shrinking noise by 10³ (the FoxBerry bed: 600 sweeps/step at 384³, every step),
 while the V-cycle, whose first cycle moves a lot, stops too early. Measured at 96³ on that bed:
