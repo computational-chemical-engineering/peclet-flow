@@ -127,6 +127,7 @@ HydroResult hydrostatic(double ratio, double mu, int steps, bool periodic, bool 
   s.setRho(1.0);
   s.setMu(mu);
   s.setDt(1.0);
+  s.setVelocityResidualTolerance(0.0);  // machine-precision gates: legacy fixed-sweep momentum loop
   if (!periodic) {
     s.setDomainBc(4, 1, 0, 0, 0);
     s.setDomainBc(5, 1, 0, 0, 0);
@@ -242,6 +243,7 @@ void gateInvisibleSubspace() {
     s.setRho(1.0);
     s.setMu(mu);
     s.setDt(1.0);
+    s.setVelocityResidualTolerance(0.0);
     s.setDomainBc(4, 1, 0, 0, 0);
     s.setDomainBc(5, 1, 0, 0, 0);
     s.setPressureGeometry(std::vector<double>((std::size_t)N * N * NZ, 10.0));
@@ -296,6 +298,7 @@ std::unique_ptr<S> makeDroplet(int n, double R, double sigma, double mu, double 
   s->setRho(rhoL);
   s->setMu(mu);
   s->setDt(1.0);
+  s->setVelocityResidualTolerance(0.0);
   s->setPressureGeometry(std::vector<double>((std::size_t)n * n * n, 10.0));
   s->setPressureChebyshev(true, 500, 1e-14);
   s->enableVof();
