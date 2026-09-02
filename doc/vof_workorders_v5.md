@@ -779,6 +779,22 @@ cutting the outlet plane, 40 coupled steps), host-openmp:
 (np = 2 cuts z, np = 4 cuts x and z, i.e. both the inflow/outflow planes and the packing.) The whole
 `vof|vardensity` MPI battery is **30/30 green** on host-openmp.
 
+**nvidia-cuda, the same two scenes** (`build_kmpi_cuda/test_vof_bc_mpi`):
+
+| np | slug colour | slug budget | packing colour | packing budget (rel) | ΣC over solid | jet colour |
+|---|---|---|---|---|---|---|
+| 1 | **0.000e+00** | 8.424e-13 | **0.000e+00** | 1.252e-14 | 0.000e+00 | 0.000e+00 |
+| 2 | **0.000e+00** | 1.417e-29 | **0.000e+00** | 1.252e-14 | 0.000e+00 | 0.000e+00 |
+| 4 | **0.000e+00** | 1.417e-29 | 9.992e-16 | 1.252e-14 | 0.000e+00 | 7.216e-15 |
+
+### The battery
+
+| | nvidia-cuda | host-openmp |
+|---|---|---|
+| `tests/kokkos` ctest | **30 / 30 PASS** | **30 / 30 PASS** |
+| `tests/kokkos_mpi` `vof|vardensity` (np 1/2/4) | `vof_bc_mpi` 3/3 PASS | **30 / 30 PASS** |
+| `tests/regression/sdflow_regression.py` | **PASS, `+0.00 %` on every metric of all three beds with identical iteration and step counts** (`zh_sphere` K 7.2997/7.3891/7.4162/7.4361/7.4404, order 2.29, K_inf 7.447; `random_spheres` order 2.19, k*_inf 0.0062362; `hollow_rings` order 1.38, k*_inf 0.017184) | — |
+
 ### Two defects found on the way, both fixed here
 
 1. **`advect_vof`'s divergence guard was INERT on a bare box** (reported by the E1 gallery page).
