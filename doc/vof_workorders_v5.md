@@ -430,6 +430,18 @@ that, a note that the collocated path is rung V8). Frozen outputs are rendered b
 - **E8** a table page or a section in `benchmarks/staggered-vs-collocated` with the collocated
   column for E2–E4 (WO-T).
 
+Open-boundary literature for E6/WO-R (checked 2026-09-02): the `inletOutlet` switch
+(zero-gradient on outflow, prescribed value on backflow) is OpenFOAM's `inletOutletFvPatchField`
+(Rusche 2002; OpenFOAM user guide §6.4); Dong & Wang, *PLoS One* 11(5):e0154565 (2016) and Dong,
+*JCP* 266:47 (2014) give the energy-stable two-phase open boundary condition whose backflow term
+`½ρ|u|²n − (n·u)u` is active only where `n·u < 0` and validate it with a capillary wave at ratio
+1000 and bubbles leaving through the open face — WO-R's backflow colour is the VoF-side half of
+that recipe, and `set_backflow_stabilization` is the velocity-side half already in `flow`. The
+TU/e IBM–VoF line (Baltussen, Deen, Kuipers: coupled IBM + VoF with a static contact angle on
+resolved particles, liquid coverage in gas–liquid–solid packed beds) is the direct precedent for
+E6; cite the specific paper after checking it (search "Numerical study of liquid coverage in a
+gas–liquid–solid packed bed", Deen & Kuipers).
+
 Gallery plumbing: add a "Two-phase flow (VoF)" section to `index.qmd` between "Flow through
 packings" and "Resolved particles", a navbar menu in `_quarto.yml`, a gallery card image per
 page, and `references.bib` entries (Weymouth & Yue 2010; Popinet 2009; Francois 2006; Hysing
