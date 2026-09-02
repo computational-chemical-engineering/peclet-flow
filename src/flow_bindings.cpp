@@ -949,6 +949,103 @@ static void bind_solver(nb::module_& m, const char* name) {
           "'sum' (0 unless a VoF boundary colour is set — rung V-BC). They are the advector's OWN "
           "face fluxes, so sum(C) - sum(C_0) = integral(inflow - outflow) holds to round-off "
           "whatever the interface does; vof_bc_volumes() breaks them out per face.")
+      // --- Part III rung W0 (WO-W0): the per-bubble block container ----------------------------
+      .def(
+          "enable_vof_blocks",
+          [](S& s, const std::vector<std::array<double, 4>>& seeds) { s.enableVofBlocks(seeds); },
+          nb::arg("seeds"),
+          "Carry each bubble on its OWN VoF block (the TBFsolver vofBlock pattern, VOF_PLAN §10): "
+          "one Weymouth-Yue advector per marker on a small moving global index box (bubble extent "
+          "+ 3 cells, its own g = 3 halo on top) with a master rank of its own, and the registered "
+          "'C' the closures see is the UNION C = max_blocks C_block.\n\n"
+          "WHY: two bubbles that touch CANNOT coalesce numerically — colliding markers overlap in "
+          "space but never merge, so coalescence becomes an explicit model decision (rung W4) "
+          "instead of a numerical accident of a single global colour field. Measured on the gate: "
+          "236 cells carry BOTH markers at closest approach (30.0 cells of shared liquid) while "
+          "each marker's own volume is conserved to 2.6e-15, and the single-field control merges "
+          "them irreversibly (neck colour 0.77 against the blocks' 0.00 after the reversal).\n\n"
+          "'seeds' is a list of (cx, cy, cz, radius) spheres in CELL units, global indices. The "
+          "colour is the same exact sphere fraction set_vof would take.\n\n"
+          "SCOPE at W0: ALL-FLUID (an immersed solid raises — the cut-cell block is rung W12) and "
+          "KINEMATIC (advect_vof_blocks(dt); NS coupling is W12). Masters are assigned round robin "
+          "by block id, deliberately independent of where the bubble's cells live — the weighted-"
+          "ORB assignment is rung W1; vof_block_imbalance() is the number to beat.")
+      .def(
+          "disable_vof_blocks", [](S& s) { s.disableVofBlocks(); },
+          "Drop the block container; the structured colour field ('C', advect_vof) is unaffected.")
+      .def(
+          "vof_blocks_enabled", [](S& s) { return s.vofBlocksEnabled(); },
+          "True after enable_vof_blocks.")
+      .def(
+          "advect_vof_blocks", [](S& s, double dt) { s.advectVofBlocks(dt); }, nb::arg("dt"),
+          "Advance every block by dt with the CURRENT (projected) face velocity and union the "
+          "result into 'C' — the block twin of advect_vof(dt), and it carries the same "
+          "precondition: it RAISES unless the face field is discretely divergence-free to 1e-10, "
+          "because Weymouth-Yue's exact conservation is conditional on it.\n\n"
+          "Per step: gather the face velocity from the ranks that own each block's cells to its "
+          "master (plain Isend/Irecv — the block table and the decomposition are both replicated, "
+          "so every rank knows every message size and an NBX handshake would only rediscover it), "
+          "run the three sweeps on the dense block, re-centre the box, replicate the table, and "
+          "scatter the inner colour back with UNPACK_MAX.\n\n"
+          "NOTE on the union: max() from an empty union CLIPS the negative Weymouth-Yue round-off "
+          "residue to an exact 0 — measured up to 6.2e-17 on the LeVeque gate, and every measured "
+          "union/global-field difference was exactly that and nothing else.")
+      .def(
+          "vof_block_stats",
+          [](S& s) {
+            nb::list out;
+            for (const auto& b : s.vofBlockStats()) {
+              nb::dict r;
+              r["id"] = b.id;
+              r["master"] = b.master;
+              r["lo"] = nb::make_tuple(b.lo[0], b.lo[1], b.lo[2]);
+              r["hi"] = nb::make_tuple(b.hi[0], b.hi[1], b.hi[2]);
+              r["cells"] = b.cells;
+              r["volume"] = b.volume;
+              r["centroid"] = nb::make_tuple(b.centroid[0], b.centroid[1], b.centroid[2]);
+              r["velocity"] = nb::make_tuple(b.velocity[0], b.velocity[1], b.velocity[2]);
+              r["moments"] = nb::make_tuple(b.moment[0], b.moment[1], b.moment[2], b.moment[3],
+                                            b.moment[4], b.moment[5]);
+              r["recentred"] = b.recentred;
+              r["discarded"] = b.discarded;
+              out.append(r);
+            }
+            return out;
+          },
+          "Per-bubble Lagrangian census, one dict per block, in block-id order. 'lo'/'hi' (the "
+          "global index box) and 'master' are replicated on every rank; the MEASURED entries — "
+          "'volume' (sum of C over the box, cell volumes), 'centroid', 'velocity' (d(centroid)/dt "
+          "of the last advection), 'moments' (the central second moments xx, yy, zz, xy, xz, yz "
+          "divided by the volume, i.e. the deformation) — are filled only on the block's MASTER "
+          "and are zero elsewhere.\n\n"
+          "'discarded' is the colour a re-centring dropped, cumulatively: Weymouth-Yue leaves "
+          "round-off residue in every cell its sweeps touch and the box tracks the BUBBLE, not "
+          "that wake, so the residue falling outside the new box is discarded. Never physical "
+          "liquid (measured -9.5e-17 over a 20-cell translation, against a bubble volume of 524), "
+          "but it is reported rather than hidden — a container that silently loses mass is not "
+          "acceptable.")
+      .def(
+          "vof_block_imbalance", [](S& s) { return s.vofBlockImbalance(); },
+          "max/mean of the per-rank block-cell load under the CURRENT master assignment "
+          "(round robin by block id at rung W0). 1.0 is perfect; the weighted-ORB assignment of "
+          "rung W1 is what this number is here to grade.")
+      .def(
+          "vof_block_census",
+          [](S& s) {
+            std::vector<long> m, c;
+            s.vofBlockCensus(m, c);
+            nb::dict r;
+            nb::list lm, lc;
+            for (long v : m)
+              lm.append(v);
+            for (long v : c)
+              lc.append(v);
+            r["masters"] = lm;
+            r["cells"] = lc;
+            return r;
+          },
+          "Per-rank load census of the block container: 'masters'[r] = blocks rank r masters, "
+          "'cells'[r] = the inner cells those blocks carry (the actual VoF work).")
       // --- two-phase open boundaries (rung V-BC, WO-R) ------------------------------------------
       .def(
           "set_vof_inflow", [](S& s, int face, double value) { s.setVofInflow(face, value); },
