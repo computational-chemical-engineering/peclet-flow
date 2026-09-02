@@ -45,7 +45,51 @@ struct ScalarField {
   int bc[6] = {0, 0, 0, 0, 0, 0};      // -x,+x,-y,+y,-z,+z (ScalarBc)
   double bcVal[6] = {0, 0, 0, 0, 0, 0};
   bool stencilBuilt = false;
+  // Optional PER-CELL Dirichlet condition (WO-P01): where `dmask > 1/2` the cell's row is replaced
+  // by `c = dval`. Unallocated (extent 0) by default and every consumer branches on that, so a
+  // scalar that never asks for it runs the validated operator bit-for-bit. This is what pins
+  // interfacial cells at the saturation temperature in the phase-change energy solve.
+  CCField dmask, dval;
 };
+
+// Replace the rows of the per-cell Dirichlet set by the identity: A_C = 1, all off-diagonals 0.
+// Run AFTER scalarBuildDiffusionOpen (and after applyScalarBcStencil, which may have reopened a
+// domain face on the same row).
+inline void scalarMaskStencil(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN,
+                              CCField AB, CCField AT, CCConst mask, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::scalar_mask_stencil", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+        if (!(mask(i) > 0.5))
+          return;
+        AC(i) = 1.0;
+        AW(i) = 0.0;
+        AE(i) = 0.0;
+        AS(i) = 0.0;
+        AN(i) = 0.0;
+        AB(i) = 0.0;
+        AT(i) = 0.0;
+      });
+}
+
+// RHS + solution seed of the per-cell Dirichlet set: b = value, and the field itself is set so the
+// neighbours' first smoothing sweep already reads the imposed value.
+inline void scalarMaskRhs(CCField b, CCField c, CCConst mask, CCConst val, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::scalar_mask_rhs", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+        if (!(mask(i) > 0.5))
+          return;
+        b(i) = val(i);
+        c(i) = val(i);
+      });
+}
 
 // Build the implicit diffusion+time 7-band operator over inner cells:
 //   A_C = idt + D*(ox(i)+ox(i+sx)+oy(i)+oy(i+sy)+oz(i)+oz(i+sz)),  A_off = -D*open_face.

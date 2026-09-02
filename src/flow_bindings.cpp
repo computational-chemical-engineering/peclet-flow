@@ -1156,6 +1156,115 @@ static void bind_solver(nb::module_& m, const char* name) {
           "faces that carried a force, and the number of ORPHAN faces — faces the colour jumps "
           "across but where neither cell has a curvature estimate, so the force was dropped. An "
           "orphan is a defect and must be 0; it is counted rather than hidden.")
+      // --- Phase change, Part II rungs P0/P1 (WO-P01) ------------------------------------------
+      .def(
+          "enable_phase_change",
+          [](S& s, double rho_g, double rho_l, double h_lv) {
+            s.enablePhaseChange(rho_g, rho_l, h_lv);
+          },
+          nb::arg("rho_gas"), nb::arg("rho_liquid"), nb::arg("h_lv") = 1.0,
+          "Enable VoF phase change (VOF_PLAN section 9, rungs P0/P1; the Boyd & Ling 2023 / Malan "
+          "2021 pattern). Registers 'mdot' (the interfacial mass flux, kg m^-2 s^-1 in solver "
+          "units, POSITIVE = evaporation) and 'pc_source' (the deposited divergence source, 1/s).\n"
+          "\nWhat it does per step, at the HEAD of step(): (1) reconstruct the PLIC plane of every "
+          "interfacial cell and take its POLYGON AREA A analytically (A = |m|_2 dV/dalpha, not a "
+          "finite difference); (2) evaluate mdot (prescribed by set_mass_flux*, or computed by "
+          "set_phase_change_thermal); (3) deposit S = mdot A (1/rho_g - 1/rho_l) into the nearest "
+          "PURE GAS cell along +n, so the interfacial cell's own face velocity stays the LIQUID "
+          "velocity and Weymouth-Yue keeps a field its conservation proof is entitled to; (4) "
+          "regress the interface by a PLIC PLANE SHIFT, C -> C - mdot A dt/rho_l, with "
+          "clip-and-redistribute along -n when a cell empties. There is NEVER a volume source in "
+          "the C equation (the Hardt-Wondra smeared source leaves unresolvable residue and breaks "
+          "the WY bounds).\n"
+          "\nThe densities are given explicitly rather than read off a closure (the same contract "
+          "as enable_vof_momentum). SCOPE at this rung: staggered grid, NO immersed solid, not "
+          "composable with enable_vof_momentum; all three throw with a message. A CLOSED domain "
+          "needs the net vapour production to leave somewhere: use an outflow face, or "
+          "set_divergence_source() with a balancing sink, or rho_g = rho_l (then S == 0).")
+      .def(
+          "set_mass_flux_uniform", [](S& s, double v) { s.setMassFluxUniform(v); },
+          nb::arg("mdot"),
+          "P0: prescribe a UNIFORM interfacial mass flux (kg m^-2 s^-1, solver units; positive = "
+          "evaporation, liquid consumed). Turns the thermal mass flux OFF.")
+      .def(
+          "set_mass_flux",
+          [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setMassFlux(grid_in(a)); },
+          nb::arg("array"),
+          "P0: prescribe a per-cell interfacial mass flux from a Fortran-order (nx,ny,nz) float64 "
+          "array (== set_field('mdot') plus the ghost fill). Turns the thermal mass flux OFF.")
+      .def(
+          "set_phase_change_thermal",
+          [](S& s, const std::string& name, double t_sat, double k_gas, double k_liquid,
+             double r_int) { s.setPhaseChangeThermal(name, t_sat, k_gas, k_liquid, r_int); },
+          nb::arg("scalar"), nb::arg("t_sat"), nb::arg("k_gas"), nb::arg("k_liquid"),
+          nb::arg("r_int") = 0.0,
+          "P1: compute mdot each step from a registered scalar (the temperature) instead of "
+          "prescribing it:\n\n"
+          "    mdot = ( k_g dT_g/dn - k_l dT_l/dn ) / h_lv ,   n = m/|m|_2 (LIQUID -> GAS)\n\n"
+          "Each one-sided derivative is a weighted least-squares fit THROUGH the interface value "
+          "over the PURE-PHASE cells of a 5^3 stencil on that side, with Malan's collinearity "
+          "weight w = (d.n)^2/|d|^3 and the exact normal distance from the PLIC plane. Interfacial "
+          "cells are pinned at T_G = t_sat + mdot*r_int in the energy solve through a per-cell "
+          "Dirichlet mask on the scalar (r_int = 0 is the hard Dirichlet; a nonzero r_int is the "
+          "Schrage/IHTR Robin condition of Bures & Sato 2021).\n\n"
+          "SIGN CONVENTION — the interfacial energy balance is mdot*h_lv = (q_l - q_g).n with "
+          "q = -k grad T and n pointing OUT OF THE LIQUID, which is the form above. Check it on "
+          "the Stefan problem: superheated vapour behind the interface gives grad(T_g).n > 0 and "
+          "mdot > 0, i.e. evaporation. The opposite pairing (k_l grad T_l - k_g grad T_g) with the "
+          "SAME n would condense a superheated vapour.\n\n"
+          "The energy scalar's diffusivity is whatever add_scalar was given (a CONSTANT); per-cell "
+          "k(C) and the consistent rho c_p T geometric transport are the P3 upgrade. That is not a "
+          "limitation for the Stefan gate, where the liquid is saturated and pinned at T_sat.")
+      .def(
+          "set_phase_change_thermal_off", [](S& s) { s.setPhaseChangeThermalOff(); },
+          "Stop computing mdot from the temperature (back to the prescribed field).")
+      .def(
+          "set_divergence_source",
+          [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setDivergenceSource(grid_in(a)); },
+          nb::arg("array"),
+          "A PRESCRIBED extra divergence source (1/s) on the inner cells, added to the Poisson RHS "
+          "beside the phase-change deposit, so the projection solves div(open u) = S. Registered "
+          "as the field 'div_source'. Its use is to make a CLOSED (periodic) domain compatible "
+          "with a net vapour production by carrying a balancing sink; with an outflow face the "
+          "outflow does that job and this is unnecessary.")
+      .def(
+          "clear_divergence_source", [](S& s) { s.clearDivergenceSource(); },
+          "Drop the prescribed divergence source (the field stays registered).")
+      .def(
+          "apply_phase_change", [](S& s, double dt) { s.applyPhaseChange(dt); }, nb::arg("dt"),
+          "KINEMATIC phase-change step: build mdot / the PLIC areas / the normals, deposit the "
+          "divergence source (census only — nothing is projected) and apply the interface "
+          "regression over `dt`. No Navier-Stokes step, no advection. This is the P0a / P1 driver: "
+          "an interface regressing under a prescribed or thermally-computed flux, with the "
+          "momentum and pressure solves out of the picture.")
+      .def(
+          "phase_change_diagnostics",
+          [](S& s) {
+            const auto d = s.phaseChangeDiagnostics();
+            nb::dict r;
+            r["mdot_min"] = d.mdotMin;
+            r["mdot_max"] = d.mdotMax;
+            r["mdot_mean"] = d.mdotMean;
+            r["interface_cells"] = d.interfaceCells;
+            r["interface_area"] = d.area;
+            r["removed_volume"] = d.removedVolume;
+            r["redistributed"] = d.redistributed;
+            r["deficit_cells"] = d.deficitCells;
+            r["excess_cells"] = d.excessCells;
+            r["source_sum"] = d.sourceSum;
+            r["source_cells"] = d.sourceCells;
+            r["fallback_cells"] = d.fallbackCells;
+            r["unresolved"] = d.unresolved;
+            r["min_C"] = d.minC;
+            r["max_C"] = d.maxC;
+            return r;
+          },
+          "Per-rank phase-change census of the LAST step: mdot extrema/mean and the interfacial "
+          "cell count, the total PLIC interface area, the liquid volume the regression removed, "
+          "the clip-and-redistribute ledger (|deficit| moved, and how many cells clipped at 0 / "
+          "1), the deposited divergence source (its sum and how many cells received it), how many "
+          "interfacial cells found NO pure gas cell within two cells along +n (the source then "
+          "stays put — a fallback that must be 0 on a resolved interface), and the colour extrema.")
       .def(
           "set_csf_mode", [](S& s, int m) { s.setCsfMode(m); }, nb::arg("mode"),
           "ABLATION. 0 (default, the only production mode) evaluates the surface-tension force as "

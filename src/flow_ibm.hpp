@@ -53,6 +53,7 @@
 #include "vof/curvature_field.hpp"  // VoF rung V3: the HF curvature cascade + PV fallback
 #include "vof/momentum_advect.hpp"  // VoF rung V2b: momentum-consistent rho^c u_c transport
 #include "vof/surface_tension.hpp"  // VoF rung V4: balanced-force CSF + the capillary dt
+#include "vof/phase_change.hpp"    // VoF Part II rungs P0/P1: mass flux, plane-shift regression
 
 namespace peclet::flow {
 
@@ -1746,6 +1747,10 @@ class Solver {
     // has NOT, the colour advection keeps WO-J's slot at the bottom of the step and this path is
     // byte-identical to V2a. See enableVofMomentum().
     advectVofMomentum();
+    // Phase change (rungs P0/P1, WO-P01): mdot + the PLIC areas/normals from (C^n, T^n), the
+    // divergence source deposit read by project(), and the interface regression applied to the
+    // SAME C^n the planes came from. No-op (byte-identical) unless enable_phase_change ran.
+    phaseChangeStep();
     // Multiphysics: refresh material properties / body forces from the current fields (frozen over
     // the step). No-op (byte-identical) when no closure is registered.
     updateProperties();
@@ -1904,6 +1909,9 @@ class Solver {
     // together with the momentum it shares its fluxes with — see advectVofMomentum().
     if (!vofMomEnabled_)
       advectVof();
+    // WO-P01: refresh the energy scalar's per-cell Dirichlet set from the colour the energy solve
+    // is about to see. No-op unless the thermal mass flux is on.
+    pcUpdateThermalMask();
     // Segregated multiphysics: advance any transported scalars with the just-projected
     // divergence-free velocity (properties frozen over the step). No-op (byte-identical) when no
     // scalar is registered.
@@ -4784,6 +4792,10 @@ class Solver {
     }
     // MOVING GEOMETRY (rung 3): the wall's own volume flux. Inert without a moving instance.
     addWallFluxDivergence(div_);
+    // WO-P01: the phase-change (and any prescribed) divergence source, so the deflated solve
+    // delivers div(open u) = S instead of 0. Inert unless enable_phase_change /
+    // set_divergence_source ran.
+    pcApplyDivergenceSource(div_);
     // Porous continuity source: fold d(eps)/dt into the divergence so the Poisson solves for
     // div(eps u) = -d(eps)/dt (not 0). d(eps)/dt = (eps^{n+1}-eps^n)/dt from the deposited void
     // fraction; stored in depsdt_ (epsPrev_ is overwritten at step end, so the residual reuses
@@ -5397,10 +5409,18 @@ class Solver {
       scalarBuildDiffusionOpen(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(ox_),
                                CCConst(oy_), CCConst(oz_), sc.D, idt, e_, G);
       applyScalarBcStencil(sc);  // re-open Dirichlet domain faces (set_domain_bc closes openness)
+      // WO-P01: the optional PER-CELL Dirichlet set (interfacial cells at T_sat). Inert — and the
+      // operator therefore bit-identical — until a caller allocates the mask.
+      const bool hasMask = sc.dmask.extent(0) == n_;
+      if (hasMask)
+        scalarMaskStencil(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(sc.dmask), e_,
+                          G);
       Kokkos::deep_copy(sc.cOld, sc.c);
       scalarFillGhosts(sc);
       scalarBuildRhs(sc.b, CCConst(sc.cOld), CCConst(Uf), CCConst(Vf), CCConst(Wf), CCConst(ox_),
                      CCConst(oy_), CCConst(oz_), idt, sc.scheme, e_, G);
+      if (hasMask)
+        scalarMaskRhs(sc.b, sc.c, CCConst(sc.dmask), CCConst(sc.dval), e_, G);
       // implicit diffusion: red-black Gauss-Seidel with a ghost fill before each color sweep.
       for (int it = 0; it < sc.iters; ++it) {
         scalarFillGhosts(sc);
@@ -6469,6 +6489,595 @@ class Solver {
       copyInner(uAdv_[c], e_, G, CCConst(vofMom_.advectedVelocity(c)), e3_, kVofG);
   }
 
+
+  // --- Phase change (Part II, rungs P0/P1 — WO-P01) --------------------------------------------
+  //
+  // The kernel set of `suite/docs/VOF_PLAN.md` §9 in its planar form, following Boyd & Ling (2023)
+  // and Malan et al. (2021): a mass flux `mdot` on interfacial cells (prescribed at P0, from
+  // one-sided pure-cell temperature gradients at P1), interface regression by a PLIC PLANE SHIFT
+  // with exact clip-and-redistribute, and the volumetric divergence source shifted into the
+  // compact pure-gas layer behind the interface so the interfacial cell's own face velocity stays
+  // the LIQUID velocity and Weymouth-Yue advects the colour with a field it is entitled to.
+  // Container-free geometry/physics lives in `vof/phase_change.hpp`; this is the block walk.
+  //
+  // ORDER WITHIN step() (and why). `phaseChangeStep()` runs at the HEAD of the step, before
+  // `updateProperties()`:
+  //   1. `mdot`, the PLIC area `A_G` and the unit normal `n` are built from (C^n, T^n);
+  //   2. the divergence source is deposited into pure gas cells (read by `project()`);
+  //   3. the regression is applied to the SAME C^n the planes were reconstructed from.
+  // Doing the regression here rather than after the advection is what keeps the plane, the area
+  // and the colour it is subtracted from at ONE time level; `updateProperties()` then sees the
+  // post-regression colour, so rho(C) and the momentum/projection coefficients are consistent with
+  // the interface the step actually runs with. The colour advection keeps its WO-J slot at the
+  // bottom of the step (it needs the projected, discretely divergence-free face field).
+  //
+  // SCOPE at this rung, all enforced with a message: staggered grid, no immersed solid (the
+  // solid-clipped flux polygons and the cut-cell source deposit are a later rung), and not
+  // composable with `enable_vof_momentum` (both own the head of the step and the momentum flux
+  // would have to carry the phase-change mass transfer as well).
+  struct PhaseChangeDiagnostics {
+    double mdotMin = 0.0, mdotMax = 0.0, mdotMean = 0.0;
+    long interfaceCells = 0;
+    double removedVolume = 0.0;  ///< sum of dV actually subtracted this step (+ = evaporated)
+    double redistributed = 0.0;  ///< |clip deficit| pushed into neighbours this step
+    long deficitCells = 0;       ///< cells that clipped at C = 0
+    long excessCells = 0;        ///< cells that clipped at C = 1
+    double sourceSum = 0.0;      ///< sum of the deposited divergence source over inner cells (1/s)
+    long sourceCells = 0;        ///< cells that RECEIVED a deposit
+    long fallbackCells = 0;      ///< interfacial cells whose +n walk found no pure gas cell
+    double unresolved = 0.0;     ///< clip residue no neighbour could absorb (pushed anyway)
+    double minC = 0.0, maxC = 0.0;
+    double area = 0.0;  ///< sum of the PLIC polygon areas over interfacial cells (h^2)
+  };
+
+  /// Turn on phase change. `rhoG`/`rhoL` are the phase densities used by the regression
+  /// (`dV = mdot A dt / rho_l`) and by the divergence source (`S = mdot A (1/rho_g - 1/rho_l)`);
+  /// they are given EXPLICITLY rather than read off a closure, exactly as `enable_vof_momentum`
+  /// does and for the same reason. `hlv` is the latent heat (J/kg) and is only used by the thermal
+  /// mass flux. Registers "mdot" (kg m^-2 s^-1, solver units) and "pc_source" (1/s).
+  void enablePhaseChange(double rhoG, double rhoL, double hlv) {
+    if constexpr (Grid::collocated)
+      throw std::runtime_error(
+          "enable_phase_change: rungs P0/P1 are STAGGERED-ONLY (the collocated grid carries every "
+          "force as a face acceleration and the source deposit has not been composed with it).");
+    enableVof();
+    if (hasSolid_)
+      throw std::runtime_error(
+          "enable_phase_change: an immersed solid is out of scope at rungs P0/P1 (the source "
+          "deposit and the regression would need the solid-clipped flux polygons of rung V5a's "
+          "follow-on). Use an all-fluid set_pressure_geometry.");
+    if (vofMomEnabled_)
+      throw std::runtime_error(
+          "enable_phase_change is not composable with enable_vof_momentum at this rung: both own "
+          "the head of the step, and momentum consistency would have to carry the interfacial mass "
+          "transfer in its own fluxes.");
+    if (!(rhoG > 0.0) || !(rhoL > 0.0))
+      throw std::runtime_error("enable_phase_change: both phase densities must be > 0");
+    if (!(hlv > 0.0))
+      throw std::runtime_error("enable_phase_change: the latent heat h_lv must be > 0");
+    pcRhoG_ = rhoG;
+    pcRhoL_ = rhoL;
+    pcHlv_ = hlv;
+    pcMdot_ = addField("mdot");
+    pcSrc_ = addField("pc_source");
+    if (pcArea_.extent(0) != n_) {
+      pcArea_ = CCField("pc_area", n_);
+      pcNrm_[0] = CCField("pc_nx", n_);
+      pcNrm_[1] = CCField("pc_ny", n_);
+      pcNrm_[2] = CCField("pc_nz", n_);
+      pcDep_ = CCField("pc_dep", n_);
+      pcTgt_ = CCField("pc_tgt", n_);
+      pcCnew_ = CCField("pc_cnew", n_);
+      pcDefic_ = CCField("pc_defic", n_);
+    }
+    pcEnabled_ = true;
+  }
+  bool phaseChangeEnabled() const { return pcEnabled_; }
+
+  /// Prescribe a UNIFORM mass flux (P0). Overwrites "mdot" on the inner cells and its ghosts.
+  void setMassFluxUniform(double v) {
+    requirePhaseChange("set_mass_flux_uniform");
+    Kokkos::deep_copy(pcMdot_, v);
+    pcThermal_ = false;
+  }
+  /// Prescribe a per-cell mass flux (P0), x-fastest over the inner region.
+  void setMassFlux(const std::vector<double>& v) {
+    requirePhaseChange("set_mass_flux");
+    scatterInner(pcMdot_, v);
+    fillPropGhosts(pcMdot_);
+    pcThermal_ = false;
+  }
+  /// P1: compute `mdot` each step from the registered scalar `tname` by the one-sided pure-cell
+  /// weighted least-squares gradients of `vof/phase_change.hpp`. `Tsat` is the saturation
+  /// temperature, `kg`/`kl` the phase conductivities (W/(cell K)) and `Rint` the interfacial
+  /// heat-transfer resistance of the Schrage/IHTR Robin condition `T_G = T_sat + mdot R_int`
+  /// (Bureš & Sato 2021); `Rint = 0` is the hard Dirichlet and is the default.
+  void setPhaseChangeThermal(const std::string& tname, double Tsat, double kg, double kl,
+                             double Rint) {
+    requirePhaseChange("set_phase_change_thermal");
+    if (!hasScalar(tname))
+      throw std::runtime_error("set_phase_change_thermal: no scalar named '" + tname +
+                               "' (call add_scalar first)");
+    pcTName_ = tname;
+    pcTsat_ = Tsat;
+    pcKg_ = kg;
+    pcKl_ = kl;
+    pcRint_ = Rint;
+    pcThermal_ = true;
+    scalarDirichletMask(tname);  // allocate the per-cell Dirichlet mask + value fields
+    pcUpdateThermalMask();
+  }
+  void setPhaseChangeThermalOff() { pcThermal_ = false; }
+
+  /// A PRESCRIBED extra divergence source (1/s), x-fastest over the inner region, added to the
+  /// Poisson RHS exactly like the phase-change deposit: the projection then solves for
+  /// `div(open u) = S_pc + S_user`. This is how a CLOSED (periodic) box is made compatible with a
+  /// net vapour production: put a balancing sink somewhere the exact solution can absorb it. In a
+  /// domain with an outflow face the outflow carries the imbalance and this is not needed.
+  void setDivergenceSource(const std::vector<double>& v) {
+    if (pcUser_.extent(0) != n_)
+      pcUser_ = addField("div_source");
+    scatterInner(pcUser_, v);
+    fillPropGhosts(pcUser_);
+    pcHasUser_ = true;
+  }
+  void clearDivergenceSource() { pcHasUser_ = false; }
+
+  /// Kinematic entry point (the P0a/P1 driver): build `mdot`/`A_G`/`n` from the current colour and
+  /// temperature, deposit the divergence source (for the census only — nothing is projected here)
+  /// and apply the interface regression. No Navier-Stokes step, no advection.
+  void applyPhaseChange(double dt) {
+    requirePhaseChange("apply_phase_change");
+    pcBuildInterface();
+    pcScatterSource();
+    pcRegress(dt);
+    pcUpdateThermalMask();
+  }
+
+  /// The in-step driver: everything `applyPhaseChange` does, at the head of `step()`.
+  /// Byte-identical no-op when phase change is off.
+  void phaseChangeStep() {
+    if (!pcEnabled_)
+      return;
+    pcBuildInterface();
+    pcScatterSource();
+    pcRegress(dt_);
+  }
+
+  PhaseChangeDiagnostics phaseChangeDiagnostics() {
+    requirePhaseChange("phase_change_diagnostics");
+    PhaseChangeDiagnostics d = pcDiag_;
+    // colour extrema of the CURRENT field (the regression's own boundedness read-out)
+    CCConst c = CCConst(cField_);
+    const C3 e = e_;
+    double mn = 1e300, mx = -1e300;
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_extrema",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& lo, double& hi) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          lo = Kokkos::fmin(lo, c(i));
+          hi = Kokkos::fmax(hi, c(i));
+        },
+        Kokkos::Min<double>(mn), Kokkos::Max<double>(mx));
+    Kokkos::fence();
+    d.minC = mn;
+    d.maxC = mx;
+    return d;
+  }
+
+  // nvcc requires members holding extended device lambdas to be public.
+
+  /// (1) The interface build: for every inner interfacial cell reconstruct the PLIC plane from the
+  /// canonical G=2 colour, store its area and unit normal, evaluate `mdot` (thermal or prescribed),
+  /// and decide which pure gas cell will receive the divergence source. Then exchange those
+  /// per-cell quantities so the regression's depth-1 ring and the source gather's depth-2 ring see
+  /// the OWNER's values — which is what makes both decomposition-independent WITHOUT any
+  /// reverse/add halo and without an atomic scatter (bitwise MPI, not a reduction floor).
+  void pcBuildInterface() {
+    const C3 e = e_;
+    const long sy = e_.x, sz = (long)e_.x * e_.y;
+    CCField mdot = pcMdot_, area = pcArea_, dep = pcDep_, tgt = pcTgt_;
+    CCField nx = pcNrm_[0], ny = pcNrm_[1], nz = pcNrm_[2];
+    CCConst c = CCConst(cField_);
+    const bool thermal = pcThermal_;
+    CCConst T = thermal ? CCConst(scalarField(pcTName_).c) : CCConst(cField_);
+    const double eps = pcInterfaceEps_, pureEps = pcPureEps_;
+    const double Tsat = pcTsat_, kg = pcKg_, kl = pcKl_, hlv = pcHlv_, Rint = pcRint_;
+    const double rhoG = pcRhoG_, rhoL = pcRhoL_;
+    long nIface = 0, nFallback = 0;
+    double sumArea = 0.0, sumMdot = 0.0;
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_build",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, long& nif, long& nfb, double& aacc, double& macc) {
+          const long i = (long)x + (long)y * e.x + (long)z * sz;
+          area(i) = 0.0;
+          dep(i) = 0.0;
+          tgt(i) = 0.0;
+          nx(i) = 0.0;
+          ny(i) = 0.0;
+          nz(i) = 0.0;
+          if (!vof::pcIsInterfacial(c(i), eps)) {
+            if (thermal)
+              mdot(i) = 0.0;
+            return;
+          }
+          double st[27];
+          for (int kk = -1; kk <= 1; ++kk)
+            for (int jj = -1; jj <= 1; ++jj)
+              for (int ii = -1; ii <= 1; ++ii)
+                st[vof::plicSt(ii + 1, jj + 1, kk + 1)] = c(i + ii + jj * sy + kk * sz);
+          double m[3];
+          vof::mycNormal(st, m);
+          const double al = vof::plicAlpha(m[0], m[1], m[2], c(i));
+          const double A = vof::plicArea(m[0], m[1], m[2], al);
+          double n[3] = {1.0, 0.0, 0.0};
+          if (!(vof::pcUnitNormal(m[0], m[1], m[2], n) > 0.0))
+            return;
+          const double phic = vof::pcCentreDistance(m[0], m[1], m[2], al);
+          double md = mdot(i);
+          if (thermal) {
+            const double Tg = vof::pcInterfaceTemperature(Tsat, md, Rint);
+            vof::PcGradFit fg, fl;
+            for (int dz = -2; dz <= 2; ++dz)
+              for (int dy = -2; dy <= 2; ++dy)
+                for (int dx = -2; dx <= 2; ++dx) {
+                  if (dx == 0 && dy == 0 && dz == 0)
+                    continue;
+                  const double w = vof::pcGradWeight(dx, dy, dz, n);
+                  if (!(w > 0.0))
+                    continue;
+                  const long j = i + dx + dy * sy + dz * sz;
+                  const double cj = c(j);
+                  const double phi = vof::pcOffsetDistance(phic, n, dx, dy, dz);
+                  if (cj <= pureEps && phi > 0.0)
+                    vof::pcGradAdd(fg, w, phi, T(j), Tg);
+                  else if (cj >= 1.0 - pureEps && phi < 0.0)
+                    vof::pcGradAdd(fl, w, phi, T(j), Tg);
+                }
+            md = vof::pcMassFlux(kg, vof::pcGradSolve(fg), kl, vof::pcGradSolve(fl), hlv);
+            mdot(i) = md;
+          }
+          area(i) = A;
+          nx(i) = n[0];
+          ny(i) = n[1];
+          nz(i) = n[2];
+          ++nif;
+          aacc += A;
+          macc += md;
+          // the divergence source and the pure-gas cell that will carry it
+          const double S = vof::pcDivSource(md, A, rhoG, rhoL);
+          if (S != 0.0) {
+            int tx = 0, ty = 0, tz = 0;
+            bool found = false;
+            for (int k = 1; k <= 2 && !found; ++k) {
+              const int ox = (int)Kokkos::round(k * n[0]);
+              const int oy = (int)Kokkos::round(k * n[1]);
+              const int oz = (int)Kokkos::round(k * n[2]);
+              if (ox == 0 && oy == 0 && oz == 0)
+                continue;
+              if (c(i + ox + oy * sy + oz * sz) <= pureEps) {
+                tx = ox;
+                ty = oy;
+                tz = oz;
+                found = true;
+              }
+            }
+            if (!found)
+              ++nfb;  // no pure gas cell within two cells: the source stays in this cell
+            dep(i) = S;
+            tgt(i) = (double)((tx + 2) + 5 * (ty + 2) + 25 * (tz + 2));
+          }
+        },
+        nIface, nFallback, sumArea, sumMdot);
+    Kokkos::fence();
+    pcDiag_.interfaceCells = nIface;
+    pcDiag_.fallbackCells = nFallback;
+    pcDiag_.area = sumArea;
+    pcDiag_.mdotMean = nIface > 0 ? sumMdot / (double)nIface : 0.0;
+    // extrema of mdot over interfacial cells
+    double mn = 0.0, mx = 0.0;
+    if (nIface > 0) {
+      mn = 1e300;
+      mx = -1e300;
+      CCConst md = CCConst(pcMdot_), ar = CCConst(pcArea_);
+      Kokkos::parallel_reduce(
+          "peclet::flow::pc_mdot_extrema",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                         {e.x - G, e.y - G, e.z - G}),
+          KOKKOS_LAMBDA(int x, int y, int z, double& lo, double& hi) {
+            const long i = (long)x + (long)y * e.x + (long)z * sz;
+            if (ar(i) > 0.0) {
+              lo = Kokkos::fmin(lo, md(i));
+              hi = Kokkos::fmax(hi, md(i));
+            }
+          },
+          Kokkos::Min<double>(mn), Kokkos::Max<double>(mx));
+      Kokkos::fence();
+    }
+    pcDiag_.mdotMin = mn;
+    pcDiag_.mdotMax = mx;
+    // The exchange that makes the two consumers decomposition-independent. `fillGhosts` is the
+    // halo/periodic base; on a NON-periodic domain face the periodic wrap would import the far
+    // side's interface as a phantom source/deficit donor, so those ghosts are zeroed.
+    fillGhosts(pcMdot_);
+    fillGhosts(pcArea_);
+    fillGhosts(pcDep_);
+    fillGhosts(pcTgt_);
+    for (int d = 0; d < 3; ++d)
+      fillGhosts(pcNrm_[d]);
+    pcZeroDomainGhosts(pcMdot_);
+    pcZeroDomainGhosts(pcArea_);
+    pcZeroDomainGhosts(pcDep_);
+    pcZeroDomainGhosts(pcTgt_);
+    for (int d = 0; d < 3; ++d)
+      pcZeroDomainGhosts(pcNrm_[d]);
+  }
+
+  /// (2) Deposit each interfacial cell's source into its chosen pure-gas cell, as a GATHER (each
+  /// receiving cell scans the 5^3 box for donors that named it). A gather rather than an atomic
+  /// scatter because the sum then has a fixed order and the result is bitwise reproducible across
+  /// decompositions; the donors' `dep`/`tgt` are valid two cells deep thanks to `pcBuildInterface`'s
+  /// exchange.
+  void pcScatterSource() {
+    const C3 e = e_;
+    const long sy = e_.x, sz = (long)e_.x * e_.y;
+    CCField src = pcSrc_;
+    CCConst dep = CCConst(pcDep_), tgt = CCConst(pcTgt_);
+    double sum = 0.0;
+    long ncell = 0;
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_source_gather",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc, long& nc) {
+          const long i = (long)x + (long)y * e.x + (long)z * sz;
+          double s = 0.0;
+          for (int dz = -2; dz <= 2; ++dz)
+            for (int dy = -2; dy <= 2; ++dy)
+              for (int dx = -2; dx <= 2; ++dx) {
+                const long j = i + dx + dy * sy + dz * sz;
+                const double dj = dep(j);
+                if (dj == 0.0)
+                  continue;
+                const int code = (int)tgt(j);
+                const int tx = code % 5 - 2, ty = (code / 5) % 5 - 2, tz = code / 25 - 2;
+                if (tx + dx == 0 && ty + dy == 0 && tz + dz == 0)
+                  s += dj;
+              }
+          src(i) = s;
+          acc += s;
+          if (s != 0.0)
+            ++nc;
+        },
+        sum, ncell);
+    Kokkos::fence();
+    pcDiag_.sourceSum = sum;
+    pcDiag_.sourceCells = ncell;
+    fillPropGhosts(pcSrc_);
+  }
+
+  /// (3) The regression: two Jacobi passes over the exchanged per-cell data, so the clip deficit is
+  /// redistributed with a FIXED summation order (bitwise across decompositions).
+  ///   pass 1 (inner region grown by one, reading only exchanged fields): the raw plane shift
+  ///          `C - mdot A dt/rho_l`, clipped into [0,1], with the residue stored;
+  ///   pass 2 (inner region): add the clipped colour to the shares of the six face neighbours'
+  ///          residues, pushed along `-n` (a liquid deficit) or `+n` (a condensation excess) with
+  ///          weights `n_d^2`.
+  void pcRegress(double dt) {
+    const C3 e = e_;
+    const long sy = e_.x, sz = (long)e_.x * e_.y;
+    CCField Cf = cField_, cnew = pcCnew_, defic = pcDefic_;
+    CCConst md = CCConst(pcMdot_), ar = CCConst(pcArea_);
+    const double rhoL = pcRhoL_;
+    double removed = 0.0;
+    long ndef = 0, nexc = 0;
+    double redist = 0.0;
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_regress_raw",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& rem, long& nd, long& ne, double& rd) {
+          const long i = (long)x + (long)y * e.x + (long)z * sz;
+          const double A = ar(i);
+          if (!(A > 0.0)) {
+            cnew(i) = Cf(i);
+            defic(i) = 0.0;
+            return;
+          }
+          const double dV = vof::pcRegressVolume(md(i), A, dt, rhoL);
+          const double raw = Cf(i) - dV;
+          const double cl = Kokkos::fmin(Kokkos::fmax(raw, 0.0), 1.0);
+          cnew(i) = cl;
+          defic(i) = raw - cl;
+          const bool inner = (x >= G && x < e.x - G && y >= G && y < e.y - G && z >= G &&
+                              z < e.z - G);
+          if (inner) {
+            rem += dV;
+            if (raw < 0.0)
+              ++nd;
+            if (raw > 1.0)
+              ++ne;
+            rd += Kokkos::fabs(raw - cl);
+          }
+        },
+        removed, ndef, nexc, redist);
+    Kokkos::fence();
+    CCConst cn = CCConst(pcCnew_), df = CCConst(pcDefic_);
+    CCConst nxv = CCConst(pcNrm_[0]), nyv = CCConst(pcNrm_[1]), nzv = CCConst(pcNrm_[2]);
+    Kokkos::parallel_for(
+        "peclet::flow::pc_regress_apply",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * sz;
+          double v = cn(i);
+          const long st[3] = {1, sy, sz};
+          for (int d = 0; d < 3; ++d)
+            for (int s = -1; s <= 1; s += 2) {
+              const long j = i + (long)s * st[d];  // the neighbour that might push into i
+              const double dj = df(j);
+              if (dj == 0.0)
+                continue;
+              // Recompute j's WHOLE allocation here (not just i's share): every receiver runs the
+              // identical arithmetic on the identical inputs, so the sum each cell forms has a
+              // fixed order and is bitwise independent of the decomposition.
+              const double sgn = dj < 0.0 ? -1.0 : 1.0;
+              double n[3] = {nxv(j), nyv(j), nzv(j)};
+              int step[3];
+              double w[3];
+              bool avail[3];
+              for (int q = 0; q < 3; ++q) {
+                const double p = sgn * n[q];
+                const int sq = (p > 0.0) ? 1 : ((p < 0.0) ? -1 : 0);
+                const double ct = sq == 0 ? 0.0 : cn(j + (long)sq * st[q]);
+                avail[q] = sq != 0 && (dj < 0.0 ? (ct > 0.0) : (ct < 1.0));
+              }
+              vof::pcPushWeights(n, sgn, avail, step, w);
+              // j pushes into j + step[d]*e_d; that is i iff step[d] == -s
+              if (step[d] == -s)
+                v += dj * w[d];
+            }
+          Cf(i) = v;
+        });
+    Kokkos::fence();
+    pcDiag_.removedVolume = removed;
+    pcDiag_.deficitCells = ndef;
+    pcDiag_.excessCells = nexc;
+    pcDiag_.redistributed = redist;
+    // How much residue found no neighbour able to absorb it (pushed anyway, on the unrestricted
+    // weights, so conservation holds and the colour goes slightly out of [0,1] instead).
+    double unres = 0.0;
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_unresolved",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          const long i = (long)x + (long)y * e.x + (long)z * sz;
+          const double dj = df(i);
+          if (dj == 0.0)
+            return;
+          const double sgn = dj < 0.0 ? -1.0 : 1.0;
+          const long st[3] = {1, sy, sz};
+          double n[3] = {nxv(i), nyv(i), nzv(i)};
+          bool avail[3];
+          for (int q = 0; q < 3; ++q) {
+            const double p = sgn * n[q];
+            const int sq = (p > 0.0) ? 1 : ((p < 0.0) ? -1 : 0);
+            const double ct = sq == 0 ? 0.0 : cn(i + (long)sq * st[q]);
+            avail[q] = sq != 0 && (dj < 0.0 ? (ct > 0.0) : (ct < 1.0));
+          }
+          int step[3];
+          double w[3];
+          if (!vof::pcPushWeights(n, sgn, avail, step, w))
+            acc += Kokkos::fabs(dj);
+        },
+        unres);
+    Kokkos::fence();
+    pcDiag_.unresolved = unres;
+    fillPropGhosts(cField_);
+  }
+
+  /// The per-cell Dirichlet mask of the energy scalar: `T = T_sat + mdot R_int` in every
+  /// interfacial cell, released everywhere else. Rebuilt from the CURRENT colour, so a call after
+  /// the colour advection is what the energy solve at the bottom of the step sees.
+  void pcUpdateThermalMask() {
+    if (!pcThermal_)
+      return;
+    ScalarField& sc = scalarField(pcTName_);
+    const C3 e = e_;
+    CCField mk = sc.dmask, dv = sc.dval;
+    CCConst c = CCConst(cField_), md = CCConst(pcMdot_);
+    const double eps = pcInterfaceEps_, Tsat = pcTsat_, Rint = pcRint_;
+    Kokkos::parallel_for(
+        "peclet::flow::pc_thermal_mask",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const bool on = vof::pcIsInterfacial(c(i), eps);
+          mk(i) = on ? 1.0 : 0.0;
+          dv(i) = vof::pcInterfaceTemperature(Tsat, md(i), Rint);
+        });
+    Kokkos::fence();
+  }
+
+  /// Zero the two ghost layers on every NON-periodic domain face this rank owns. Used for the
+  /// per-cell phase-change data, whose consumers treat a nonzero ghost as a real donor.
+  void pcZeroDomainGhosts(CCField f) {
+    for (int face = 0; face < 6; ++face) {
+      if (bc_[face] == 0 || !touchesGlobalFace(face))
+        continue;
+      const int a = face / 2, side = face % 2;
+      const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
+      const int nt1 = (t1 == 0) ? nx_ : (t1 == 1) ? ny_ : nz_;
+      const int nt2 = (t2 == 0) ? nx_ : (t2 == 1) ? ny_ : nz_;
+      const int na = (a == 0) ? nx_ : (a == 1) ? ny_ : nz_;
+      const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
+      const long sa = (a == 0) ? sx : (a == 1) ? sy : sz;
+      const long st1 = (t1 == 0) ? sx : (t1 == 1) ? sy : sz;
+      const long st2 = (t2 == 0) ? sx : (t2 == 1) ? sy : sz;
+      const int aInner = (side == 0) ? G : (G + na - 1);
+      const int dir = (side == 0) ? -1 : +1;
+      Kokkos::parallel_for(
+          "peclet::flow::pc_zero_ghosts",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(CCExec(), {G, G}, {G + nt1, G + nt2}),
+          KOKKOS_LAMBDA(int j1, int j2) {
+            const long base = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
+            for (int L = 1; L <= 2; ++L)
+              f(base + (long)dir * L * sa) = 0.0;
+          });
+    }
+    Kokkos::fence();
+  }
+
+  /// Subtract the phase-change (and any prescribed) divergence source from `div_` so the deflated
+  /// pressure solve delivers `div(open u) = S`. One branch in `project()`, inert when off.
+  void pcApplyDivergenceSource(CCField div) {
+    if (!pcEnabled_ && !pcHasUser_)
+      return;
+    const C3 e = e_;
+    const bool hasPc = pcEnabled_, hasUser = pcHasUser_;
+    CCConst sp = hasPc ? CCConst(pcSrc_) : CCConst(div);
+    CCConst su = hasUser ? CCConst(pcUser_) : CCConst(div);
+    Kokkos::parallel_for(
+        "peclet::flow::pc_div_source",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          double s = 0.0;
+          if (hasPc)
+            s += sp(i);
+          if (hasUser)
+            s += su(i);
+          div(i) -= s;
+        });
+  }
+
+  void requirePhaseChange(const char* who) const {
+    if (!pcEnabled_)
+      throw std::runtime_error(std::string(who) + ": phase change is not enabled (call "
+                                                  "enable_phase_change first)");
+  }
+  ScalarField& scalarField(const std::string& name) {
+    for (auto& sc : scalars_)
+      if (sc.name == name)
+        return sc;
+    throw std::runtime_error("no scalar named '" + name + "'");
+  }
+  /// Allocate (idempotently) the per-cell Dirichlet mask + value of a registered scalar. Inert
+  /// until allocated: `advanceScalars` branches on `dmask.extent(0)`.
+  void scalarDirichletMask(const std::string& name) {
+    ScalarField& sc = scalarField(name);
+    if (sc.dmask.extent(0) != n_) {
+      sc.dmask = CCField(name + "_dmask", n_);
+      sc.dval = CCField(name + "_dval", n_);
+    }
+  }
+
   // --- Property closures + per-cell body force ------------------------------------------------
   // Register a property/force closure. target: a registered field name — a material property
   // ("mu"/"rho"/…) or a body-force component ("force_x"/"force_y"/"force_z"). kind: LinearMix /
@@ -7049,6 +7658,14 @@ class Solver {
   Comp C[3];
   peclet::core::FieldSet fields_;     // named directory of all cell fields (velocity/p/sdf + user)
   std::vector<ScalarField> scalars_;  // transported scalars (advection-diffusion)
+  // --- phase change (WO-P01) -------------------------------------------------------------------
+  bool pcEnabled_ = false, pcThermal_ = false, pcHasUser_ = false;
+  double pcRhoG_ = 1.0, pcRhoL_ = 1.0, pcHlv_ = 1.0;
+  double pcTsat_ = 0.0, pcKg_ = 0.0, pcKl_ = 0.0, pcRint_ = 0.0;
+  double pcInterfaceEps_ = 1e-12, pcPureEps_ = 1e-12;
+  std::string pcTName_;
+  CCField pcMdot_, pcSrc_, pcUser_, pcArea_, pcNrm_[3], pcDep_, pcTgt_, pcCnew_, pcDefic_;
+  PhaseChangeDiagnostics pcDiag_;
   std::vector<Closure> closures_;     // property/body-force closures (applied at top of step())
   CCField cellForce_[3];  // per-cell momentum body force (Boussinesq / CFD-DEM feedback)
   bool hasCellForce_ = false;
