@@ -1238,7 +1238,10 @@ operator defect, not the boundary machinery.
 
 (The host-openmp rows above are from the 20 + 200-step version; the shipped test runs 20 + 165, and
 its host-openmp rerun reproduces the np = 1 row exactly. See the wisp finding below for why the
-length changed.)
+length changed. All six rows were taken BEFORE the rebase onto WO-Q; after the rebase the
+host-openmp np = 1 and np = 2 rows reproduce to every digit and `vof_bc` + WO-Q's `vof_cutcell`
+both pass, but the np = 4 rerun was still queued behind other sessions' MPI batteries when this
+branch was pushed — re-run `ctest -R vof_bc_mpi` on a quiet machine before merging.)
 
 The colour is **bitwise** at every np on the kinematic slug (no reduction in the update); the
 coupled jet sits at the usual allreduce-order floor. The ledger is a per-rank partial sum over the
