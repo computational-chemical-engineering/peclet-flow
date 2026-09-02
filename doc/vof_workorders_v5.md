@@ -453,3 +453,135 @@ Zalesak 1979; LeVeque 1996).
 # Findings log (v5 work orders)
 
 (append per WO, newest first)
+
+## WO-Q — rung V5a (VoF transport in cut cells) — DONE 2026-09-02, branch `vof-woq`
+
+Commits: `abcba6f` (the rung), plus the item-8 momentum work and the study/doc commits listed at
+the end. All numbers below are host-openmp unless a CUDA column is given; both backends agree.
+
+### What shipped
+
+`src/vof/cutcell.hpp` (container-free rules), the geometry branch in `src/vof/advect_wy.hpp` and
+`src/vof/momentum_advect.hpp`, the solver plumbing in `flow_ibm.hpp`, the bindings,
+`tests/kokkos/test_vof_cutcell.cpp`, `tests/kokkos_mpi/test_vof_cutcell_mpi.cpp` and
+`tests/study/vof_cutcell.py`. The transported quantity is `eps_i C_i`; every flux is
+`F_f = o_f * wyFaceFlux(a_f, ...)`; the dilation uses the SAME `o_f a_f`; the canonical `"C"` is 0
+in solid cells and the working block's solid band carries the three-pass neutral fill.
+
+### Gates
+
+| gate | measured | verdict |
+|---|---|---|
+| **G1** byte-identity | all six `vof_*` ctests (`vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`, `vof_curvature`, `vof_surface_tension`) reproduce their recorded output **digit for digit** (`diff` of the full stdout), host-openmp and nvidia-cuda | PASS |
+| **G3a** openness embed | `max|o_advector - independent build with the shift written out|` = **0.0**; `max|eps - independent|` = **0.0** (24³ packing, `buildOpenness`/`buildCellFraction` re-run on a g=3 block) | PASS |
+| **G3b** solver vs standalone | 20 kinematic steps through the packing at interface CFL 0.2: `max|dC|` over fluid cells = **0.0 (bitwise)** | PASS |
+| **G2** conservation | 24³ packing, 200 kinematic steps at CFL 0.2 (dt 1.85): `sum eps_eff C` **6.110906250000000e3 -> 6.110906250046966e3, relative drift 7.686e-12** against a projection floor `max|div(open u)| = 3.048e-11` (9 pressure iterations, no cap). `sum C` over solid cells **exactly 0**; min/max C over uncut fluid cells **0.0 / 1.0 exactly**; clipped liquid volume over the whole run **5.42e-19** (8.9e-23 of the liquid volume); 991 solid cells, 1076 cut cells | PASS |
+| **G5** 90° neutral fill | cap on a flat SDF wall at z = 3.5, D/Δ = 24, σ = 1, µ = 0.05, 120 steps at 0.5 dt_σ: **θ = 89.935°** (target 90, tol 3°); cap radius 11.977 vs 12; Young–Laplace ΔP 0.166185 vs 2σ/R 0.166990, **rel 4.8e-3** (tol 1 %); volume drift **4.5e-15**; 16 pressure iterations, no cap; `sum C` over solid **0**; wall band max\|κ\| 0.2222 with branch census 3000/196/0/0/4/0/0 (**no branch-6**) | PASS |
+| **G6** MPI | np 1/2/4 on a 16×16×32 grid whose ORB cut goes through the spheres (cut axes z at np=2, xz at np=4): geometry **0.0**, band fill **0.0**, kinematic colour **0.0** — all three **bitwise**; kinematic drift 4.429e-13 (reference 4.433e-13); coupled 30-step run at the reduction floor, colour 4.4e-16 (np=2) / 3.3e-16 (np=4), velocity 5.9e-17 / 2.8e-17, drift 2.75e-12, `sum C` over solid **0**, 10 pressure iterations | PASS |
+| **G7** free-surface battery | see below | PASS |
+| **item 8a** consistency identity in cut cells | packing + uniform `U = (1, 0.6, -0.4)`, `enable_vof_momentum`, ratios 10/100/1000: `max|u_adv - U| = 0` — **bitwise, including in cut cells** (ρ^e floor never hit; 6252 flux clamps bind) | PASS |
+| **item 8b** coupled draining | 24³ packing, ratio 10, zero-mean buoyancy, 200 coupled steps: colour drift **6.02e-14 per step** with momentum consistency ON and 6.02e-14 OFF (tol 1e-10); `max|div(open u)|` 2.5e-14; 11 pressure iterations (cap 200); `max|u|` 2.15e-2; `sum C` over solid 0 | PASS |
+
+### Findings
+
+**1. The work order's effective-Courant rule (item 6a) is wrong on its own, and it fails loudly.**
+`o_f |a_f| / max(eps_i, 0.1)` is *smaller* than `|a_f|` wherever `o_f < eps_i`, so a nearly-closed
+face inside an open cell licenses an arbitrarily large slab thickness — and `|a_f|` is the thickness
+of the slab the geometric flux clips out of the donor CELL, which is only a flux for `|a| <= 1`.
+Measured with the rule as written: a 24³ packing at nominal "CFL 0.2" ran at **dt = 1.85** and lost
+**70 % of the liquid volume in 200 steps** while the flux sum still telescoped — the textbook
+signature of an over-CFL Weymouth–Yue run (conservation is algebraic and survives; boundedness does
+not). The corrected rule, shipped, is
+**`max( |a_f| , o_f |a_f| / max(eps_i, 0.1) )`** — it reduces exactly to the uncut `|a_f|` in clear
+fluid and throttles by `1/eps` in a cut cell. Consequence worth carrying: in the 24³ packing the
+cut-cell Courant number is up to **6×** the plain one (at dt = 0.2 and `|U| = 1` the plain CFL is
+0.2 and the cut one 1.24), so a cut-cell VoF run takes correspondingly smaller steps.
+
+**2. The clip is NOT the mechanism; Weymouth's admissible interval on the flux is.** With the
+whole-cell-PLIC-times-open-area flux and the [0,1] clip of item 6b as the only bound, the clip fired
+at up to **3.2e-5 liquid volume per step** on the 24³ packing (5.2e-9 of the total, i.e. just under
+the work order's 1e-8 trigger) and the conserved functional drifted **1.3e-8 in 30 steps** — the
+1e-11 gate was unreachable. The remedy the work order names (redistribution to the fluid face
+neighbours) needs an extra halo exchange per sweep and a rule for out-of-domain ghosts. The cheaper
+and exactly conservative remedy, shipped instead, is the cut-cell generalization of the clamp WO-K
+already uses on the momentum control volumes (`vofCutFluxClamp`): through a face of open area `o`
+and slab thickness `|a|` the scheme sweeps a FLUID volume `o|a|`, of which at most `eps_don C_don`
+can be liquid and at most `eps_don (1 - C_don)` gas, so
+`max(0, o|a| - eps_don(1 - C_don)) <= |F| <= min(o|a|, eps_don C_don)`. It is applied to the ONE
+value both neighbours share, so conservation still telescopes bit-exactly, and it is applied **only
+when the donor is MIXED** — a pure-phase donor takes `wyFaceFlux`'s algebraic branch, whose flux is
+already exactly bounded, and clamping it would break the exact full-cell cancellation. With it the
+clip stops firing (5.4e-19 over 200 steps) and the drift is the projection floor. `set_vof_cutcell_flux_clamp(False)`
+is the measured ablation.
+
+**3. The exact full-cell cancellation needs the same PARENTHESISATION in the flux and the
+dilation.** `wyFaceFlux` forms the Courant number first (`u * dth`) and the flux is `o * (that)`, so
+the dilation term must be `o * (u * dth)` and NOT `(o * u) * dth` — the two differ by an ulp and the
+difference does not cancel. Written the wrong way the drift after one step was 3.7e-14 instead of
+the ~1e-15 it is now.
+
+**4. A conserved functional has to be named, and it is `sum eps_eff C`, not `sum eps C`.**
+`buildCellFraction` subsamples 4³, so `eps` is a multiple of 1/64 and a cell can read `eps == 0`
+while still owning an OPEN face (the face openness comes from a different quadrature). Such a cell
+is FLUID by the work order's own classification and legitimately receives flux, so the update must
+divide by `eps_eff = max(eps, 1/64)`; the raw `sum eps C` then silently drops whatever enters those
+cells. Both are reported (`vof_diagnostics()['volume']` and `['raw_volume']`); on the shipped
+packings they agree to the last digit because no such cell carries colour, but the distinction is
+the difference between an identity and a coincidence.
+
+**5. The classification at ghost DEPTH 3 must be the owner's, and the way to get it is to exchange
+it.** The work order says to embed `eps` "with the outermost layer set to 1". That layer is read:
+pass 1 of the band fill runs over solid cells at depth ≤ 2 and reads their face neighbours at depth
+3, so a locally-guessed classification there is a decomposition dependence in the INNER result.
+Shipped instead: `eps`, the three openness fields and the classification (as a double, `kindDouble`)
+all go through the colour field's OWN ghost policy after they are built, which puts the owner's
+value in every ghost layer under MPI and the periodic wrap single-rank. That is what makes the
+`geometry 0.0 / band fill 0.0` bitwise MPI gate hold. The `-d` face of a cell on the low plane of
+each axis lies outside the block, so `classifyGeometry` leaves that plane provisionally fluid and
+the exchange overwrites it.
+
+**6. The canonical `"C"` carrying 0 in solid cells is free — measured, not assumed.** The working
+block always carries the neutral fill; the question is what the closures and the CSF see. The G5 cap
+run with `set_vof_solid_colour_zero(True)` (the WO-Q contract) and with the band fill written into
+`"C"` instead is **bitwise identical in every reported quantity** (θ, ΔP, volume, max\|u\|, the
+curvature census) and differs only in `sum C` over solid cells (0 vs 452). Mechanism: the faces
+whose neighbour is a SOLID cell have openness 0, so the CSF force and the projection coefficient
+there are multiplied by zero and the IBM masks the velocity. So the gate ("colour in solid cells
+exactly 0") costs nothing. The knob ships as `set_vof_solid_colour_zero`.
+
+**7. A hidden index-convention bug this campaign nearly shipped, kept here because the symptom is
+so generic.** The new G=2 solid mask was allocated on the EXTENDED block (`CCField(..., n_)`, which
+is the extended size) and written by `copyInner` at `(x+G, y+G, z+G)`, but read with INNER strides.
+It silently zeroed live fluid colour and cost **0.5 % of the liquid volume per step** with no
+boundedness violation, no clip activity and no NaN — a perfectly smooth, physically plausible loss.
+It was found by asking "which cells are not 1 when the whole fluid is 1", not by any gate.
+
+**8. The spurious currents at a contact line are ~20× the free-droplet value, and the near-wall
+band is worse.** G5, D/Δ = 24, σ = 1, µ = 0.05: `max|u|` in the OPEN fluid (z ≥ ⌈z_wall⌉+1) is
+**9.82e-3**, i.e. **Ca = 4.91e-4** against the V4 free-droplet 2.6e-5 at the same resolution.
+Including the wall band the raw `max|u|` is **0.788** (Ca 3.9e-2), and that number is on the
+IBM-constrained velocity DOFs on and inside the wall — reporting it as a spurious current would
+measure the immersed boundary rather than the surface-tension balance, which is why the shipped
+number excludes them. It is still growing slowly at 120 steps (0.53 / 0.69 / 0.76 / 0.79 over the
+run) while the shape and the volume are exact, so it is a saturating near-wall parasitic mode, not a
+drift of the interface. **Open question for WO-S**: whether the θ-consistent fill changes it, and
+whether the wall-band velocities are a real defect or an artefact of the IBM DOFs.
+
+**9. OPEN — the momentum-consistent cut-cell path fails on an unbounded-acceleration case while the
+colour-only path does not.** With a NON-zero-mean buoyancy `-g rho` in a fully periodic box (so the
+whole fluid accelerates without bound), the 24³ packing at ratio 10 with `enable_vof_momentum` runs
+clean and conservative to 1e-12 for **155 steps** — `C^e` inside [0,1] to the last bit, `rho^e`
+never floored, 9–10 pressure iterations — and then at step ~160, with `max|u|` ≈ 0.19, `C^e` goes to
+`+inf` **inside the advection** and the velocity follows. The identical case with momentum
+consistency OFF completes 200 steps (drift −2.29e-13, `max|u|` 0.236). There is no bounded-quantity
+precursor in the trace, so it is reported rather than patched; reproduce with
+`PECLET_VOF_CUTCELL_NONZERO_FORCE=1 PECLET_VOF_CUTCELL_TRACE=1 ./test_vof_cutcell`. The shipped
+item-8 gate uses the well-posed zero-mean force, where both paths are clean.
+
+**10. What the cut-cell flux approximates, stated for the record.** The PLIC polyhedron is
+reconstructed on the WHOLE unit cell (as if the cell were not cut) and its slab volume is multiplied
+by the open area, instead of being clipped against the SOLID polygon as well (Huang, *JCP*
+2025/2026). It is conservative either way (one number per face), exact wherever the interface and
+the wall are parallel or the cell is whole, and O(1) wrong in the DISTRIBUTION inside a cell whose
+interface crosses its wall. `vof_diagnostics()['clipped_volume']` is the tripwire, and it reads
+5.4e-19 over 200 steps on the shipped packing gate.

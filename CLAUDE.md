@@ -374,8 +374,11 @@ Full background, measurements and open problems: [`../docs/DECOMPOSITION_AND_MUL
 ### Geometric VoF — two-phase flow (rungs V2a + V2b; `src/vof/`)
 
 Campaign plan: [`../docs/VOF_PLAN.md`](../docs/VOF_PLAN.md); work orders + findings:
-[`doc/vof_workorders.md`](doc/vof_workorders.md) (phase 0) and
-[`doc/vof_workorders_v2.md`](doc/vof_workorders_v2.md) (V2).
+[`doc/vof_workorders.md`](doc/vof_workorders.md) (phase 0),
+[`doc/vof_workorders_v2.md`](doc/vof_workorders_v2.md) (V2),
+[`doc/vof_workorders_v34.md`](doc/vof_workorders_v34.md) (V3/V4) and
+[`doc/vof_workorders_v5.md`](doc/vof_workorders_v5.md) (V5a cut cells, and the open V-BC/V5b/V8
+work orders).
 
 - `src/vof/plic.hpp` (V0) — SZ2000/Lehmann–Gekle plane↔volume, MYC normals, slab flux volumes.
   Container-free `KOKKOS_INLINE_FUNCTION`s only (no `View`, no indexing), so the V4 promotion to
@@ -385,6 +388,10 @@ Campaign plan: [`../docs/VOF_PLAN.md`](../docs/VOF_PLAN.md); work orders + findi
   1/(2(N−1)); the familiar 0.5 is the 2D value). The dilation flag is frozen once per step —
   recompute it per sweep and exact conservation silently dies (measured 2.3e-15 → 1.5e-2).
 - `src/vof/colour_field.hpp` (V2a) — the `G=2` ↔ `g=3` bridge and the colour ghost policy.
+- `src/vof/cutcell.hpp` (V5a) — the cut-cell rules of the colour transport, container-free like
+  `plic.hpp`: the effective fluid volume `eps_eff = max(eps, 1/64)`, Weymouth's admissible flux
+  interval generalized to a cut donor, the effective Courant number, the [0,1] clip and the
+  solid-band fill state machine.
 - `src/vof/momentum_advect.hpp` (V2b) — `MomentumConsistentAdvector`: `rho^c u_c` on the
   half-shifted MAC control volumes, driven by the SAME PLIC planes, sweep order and frozen state as
   the colour advection of that step. Opt-in (`enable_vof_momentum(rho_gas, rho_liquid)`), and what
@@ -508,9 +515,75 @@ Three things this construction paid for, all in `doc/vof_workorders_v2.md` (WO-K
   empties (gain `Δρ·F/rho^c`); plain donor-cell upwind is the default and
   `set_vof_momentum_muscl(True)` the opt-in, measured 2.2e-10 vs 6.7e-16 at ratio 1e4.
 
+**Cut cells — VoF through an immersed solid (rung V5a, WO-Q).** `advectVof`'s `hasSolid_` throw is
+LIFTED: the colour field is transported through an SDF solid with **openness-weighted geometric
+fluxes**. `C` is the liquid fraction of the **fluid** volume of a cell (VOF_PLAN §3 rule 2), the
+transported quantity is `eps_i C_i`, every flux is `F_f = o_f · wyFaceFlux(a_f, …)` and the dilation
+term uses the **same** `o_f a_f` — so the flux sum telescopes and the dilation sum is `H(C−½)` times
+the projection's own openness-weighted divergence, i.e. `Σ_i eps_eff_i C_i` is conserved **exactly**
+to the projection's residual. Measured (24³ periodic sphere array, 200 kinematic steps at interface
+CFL 0.2): drift **7.7e-12** against a `max|div(open·u)|` floor of **3.0e-11**, colour in solid cells
+**exactly 0**, `C ∈ [0,1]` in uncut fluid cells to the last bit, clipped volume **5.4e-19**. Needs
+`set_solid(..., cutcell_pressure=True)` (the staircase operator has no face openness to weight
+with) and it throws otherwise. New Python: `advect_vof(dt)` (kinematic advection with the current
+face velocity, no NS step — it **throws** unless the field is discretely divergence-free to 1e-10,
+because WY conservation is conditional on that), `set_vof_step_parity()`, `vof_has_geometry()`,
+`vof_filled_colour()`, `vof_geometry(which)`, `set_vof_cutcell_flux_clamp()`,
+`set_vof_solid_colour_zero()`; `vof_diagnostics()` gains `volume` / `raw_volume` / `solid_sum` /
+`min_fluid` / `max_fluid` / `clipped_volume` / `cut_cells` / `solid_cells` / `clamped_faces`.
+`src/vof/cutcell.hpp` holds the container-free rules; the geometry branch in `advect_wy.hpp` and
+`momentum_advect.hpp` is taken **outside** the lambda, so a solid-free run executes the V1 kernel
+bodies verbatim and the whole V1/V2a/V3/V4 battery is byte-identical.
+
+Five things this rung paid for, all measured (`doc/vof_workorders_v5.md`, WO-Q findings):
+- **What it approximates.** The PLIC polyhedron is reconstructed on the WHOLE unit cell and its slab
+  volume multiplied by the open area, rather than clipped against the solid as well (Huang, *JCP*
+  2025/2026 solid-clipped flux polygons). Conservative either way, exact where interface and wall
+  are parallel or the cell is whole, O(1) wrong in the *distribution* inside a cell whose interface
+  crosses its wall. `vof_diagnostics()['clipped_volume']` is the tripwire.
+- **The cut-cell Courant number is `max(|a_f|, o_f |a_f| / max(eps_i, 0.1))`.** The second term
+  alone (the work order's rule) is *smaller* than `|a_f|` wherever `o_f < eps_i` and licensed
+  `dt = 1.85` on the packing gate, which lost **70 % of the liquid volume** in 200 steps while the
+  flux sum still telescoped — over-CFL WY loses boundedness, not volume, which is why it is quiet.
+  Consequence: in a packing the cut-cell limiter is up to **6×** tighter than the plain one.
+- **Boundedness comes from clamping the FLUX, not from clipping C.** With the [0,1] clip as the only
+  bound it fired at 3.2e-5 liquid volume per step and the drift reached 1.3e-8 in 30 steps.
+  `vofCutFluxClamp` bounds `|F|` by what the donor holds (`o|a|` swept fluid volume, of which at
+  most `eps·C` liquid and `eps·(1−C)` gas), applied to the one value both neighbours share — so
+  conservation still telescopes bit-exactly — and **only for a MIXED donor**, because a pure-phase
+  donor's algebraic flux is already exactly bounded and clamping it would break the exact full-cell
+  cancellation. `set_vof_cutcell_flux_clamp(False)` is the ablation.
+- **The conserved functional is `Σ eps_eff C` with `eps_eff = max(eps, 1/64)`, not `Σ eps C`.**
+  `buildCellFraction` subsamples 4³, so a cell can read `eps == 0` while owning an open face; it is
+  fluid, it receives flux, and the raw sum silently drops it. Both are reported.
+- **The solid-band fill is a stencil device, and the canonical `"C"` is 0 in the solid.** Three
+  passes with a *shrinking* depth budget (pass k writes solid cells at ghost depth ≤ 3−k, reads only
+  fluid cells or cells filled in an earlier pass) plus a second exchange give a zero-slope
+  continuation of the colour into the wall — the 90° Afkhami–Bussmann limit — so the MYC and
+  height-function stencils see a consistent interface. Measured on a liquid cap resting on a flat
+  SDF wall at a **half-integer** z (D/Δ = 24, σ = 1): apparent contact angle **89.94°**,
+  Young–Laplace to **4.8e-3**, volume drift 4.5e-15. Writing the fill into `"C"` instead of 0 is
+  **bitwise identical** in every measured quantity (the faces onto a solid cell have openness 0), so
+  the "no colour in the solid" contract is free. Near-wall spurious currents are **Ca = 4.9e-4** in
+  the open fluid, ~20× the V4 free-droplet 2.6e-5 at the same D/Δ. WO-S replaces only the pass-1
+  rule with the θ-consistent one.
+
+**Momentum consistency in cut cells (V5a item 8).** `enable_vof_momentum` composes with a solid: the
+half-shifted CV gets fluid volume `½(eps(i−s_e) + eps(i))`, transverse face openness
+`½(o_d(i−s_e) + o_d(i))` and, on the axial (cell-centre) face, the cell fraction `eps` of the cell
+whose centre it sits on; both updates are done in fluid-volume units. Because every term of the
+deviation form is a *difference of velocities*, WO-K's uniform-velocity identity is **bitwise in cut
+cells too** — measured `max|u_adv − U| = 0` at ratios 10/100/1000 on a packing. Coupled draining
+through the packing at ratio 10 (zero-mean buoyancy, 200 steps): colour drift **6.0e-14 per step**,
+11 pressure iterations. **Open**: with a NON-zero-mean body force (an unbounded acceleration in a
+periodic box) the momentum-consistent path runs clean for ~155 steps and then takes `C^e` to `+inf`
+inside the advection, while the colour-only path completes; no bounded-quantity precursor was found
+(WO-Q finding 9).
+
 **Scope — say this to users:** **Staggered only** (collocated is V8 —
-`enable_vof` throws) and **no immersed solid** (the fluxes are not openness-weighted yet —
-`advectVof` throws; an all-fluid `set_pressure_geometry` is fine). Without
+`enable_vof` throws). An **immersed solid is supported since rung V5a** — `set_solid(...,
+cutcell_pressure=True)` — with the openness-weighted flux above; an all-fluid
+`set_pressure_geometry` is of course also fine. Without
 `enable_vof_momentum` the rung is **valid only at modest density ratios for cases with motion**; a
 high-ratio case at REST (the hydrostatic acid test) is exact either way. **With** it, the shipped
 build is honestly rated to ratio ~1e3: the uniform-velocity residual through the coupled step is
@@ -540,9 +613,11 @@ Measured with it on: ∂P/∂z relative error **0.34** instead of 1e-15. It ship
 the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
 Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
-`vof_curvature`, `vof_surface_tension`; `tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`,
+`vof_curvature`, `vof_surface_tension`, `vof_cutcell`; `tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`,
 `vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,
-`vof_surface_tension_mpi_np{1,2,4}`; `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
+`vof_surface_tension_mpi_np{1,2,4}`, `vof_cutcell_mpi_np{1,2,4}`;
+`tests/study/vof_cutcell.py` (the V5a battery: conservation through a packing, coupled draining,
+the 90° cap on a cut wall); `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
 falling drop, the RT near-Nyquist check — every gate there records the pressure iteration count
 against its cap and treats a capped run as INVALID); `tests/study/vof_surface_tension.py` (the V4
 physics battery: `static`, `wave`, `lamb`, `hysing1`, `hysing2`, `falling`, `limits`);

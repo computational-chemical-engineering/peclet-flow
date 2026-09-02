@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "flow_ibm.hpp"
+#include "vof/plic.hpp"
 #include "vof_advect_scenes.hpp"
 
 namespace {
@@ -511,6 +512,148 @@ void neutralFillCap(int steps, bool zeroSolid = true) {
   CHECK(std::fabs(V - V00) / V00 <= 1e-9);
 }
 
+// ================================================================ G8: momentum consistency in cut
+// cells (WO-Q item 8)
+//
+// G8a THE CONSISTENCY IDENTITY. `enable_vof_momentum` + a packing + a UNIFORM velocity: the
+//     advected velocity must come back as that same uniform value. Every term of the deviation form
+//     `u_new = u_old + dev/(eps^e rho_new)` is a DIFFERENCE OF VELOCITIES, so `dev` is exactly zero
+//     for a uniform field whatever `eps^e` and the face openness are — the identity is bitwise in
+//     CUT cells too, not only away from them, and there is no tolerance to choose.
+// G8b COUPLED DRAINING through the packing at ratio 10 with gravity and momentum consistency: the
+//     colour drift per step, boundedness, `max|u|`, and the pressure iteration count against its
+//     cap (rule 3b: a capped run is INVALID).
+void momentumCutCells() {
+  const int N = 24;
+  const SphereArray arr = makeArray(N);
+  const auto sdf = arraySdfInner(arr, N);
+  const double U[3] = {1.0, 0.6, -0.4};
+  // --- G8a ------------------------------------------------------------------------------------
+  for (double R : {10.0, 1e2, 1e3}) {
+    peclet::flow::IbmSolver s(N, N, N);
+    s.setRho(R);
+    s.setMu(0.0);
+    // The CUT-CELL Courant number (`o_f |a_f| / max(eps, 0.1)`) is up to 6x the plain one in this
+    // packing — at dt = 0.2, |U| = 1 the plain CFL is 0.2 but the cut one reads 1.24 and `advect()`
+    // aborts, which is the limiter doing exactly its job. dt = 0.04 puts the cut number at 0.25.
+    s.setDt(0.04);
+    s.setSolid(sdf, true);
+    s.setPressureChebyshev(true, 300, 1e-13);
+    s.enableVof();
+    std::vector<double> c0((std::size_t)N * N * N);
+    for (int z = 0; z < N; ++z)
+      for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x)
+          c0[idx(x, y, z, N, N)] = peclet::flow::vof::sphereCellFraction(
+              0.5 * N, 0.5 * N, 0.5 * N, 0.28 * N, x, y, z, 1.0, 4);
+    s.setVof(c0);
+    s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {1.0, R - 1.0});
+    s.enableVofMomentum(1.0, R);
+    const std::size_t nc = (std::size_t)N * N * N;
+    s.uploadVelocity(std::vector<double>(nc, U[0]), std::vector<double>(nc, U[1]),
+                     std::vector<double>(nc, U[2]));
+    s.advectVofMomentum();
+    double dev = 0.0;
+    for (int c = 0; c < 3; ++c)
+      for (double v : s.getVofAdvectedVelocity(c))
+        dev = std::fmax(dev, std::fabs(v - U[c]));
+    const auto md = s.vofMomentumDiagnostics();
+    std::printf(
+        "G8a packing + uniform U, ratio %-6g: max|u_adv - U| = %.17g%s   (rho^e floor hit %ld, "
+        "flux clamps %ld)\n",
+        R, dev, dev == 0.0 ? "   BITWISE" : "", md.floored, md.clamped);
+    CHECK(dev == 0.0);
+    CHECK(md.floored == 0);
+  }
+  // --- G8b ------------------------------------------------------------------------------------
+  // The body force is the ZERO-MEAN buoyancy `f_z = -g (rho - <rho>)`, not `-g rho`: in a fully
+  // periodic box the projection removes only GRADIENTS, so a force with a non-zero mean accelerates
+  // the whole fluid without bound and the case has no steady state to measure a drift against.
+  //
+  // MEASURED with the non-zero-mean force (`PECLET_VOF_CUTCELL_NONZERO_FORCE=1`), and RECORDED as
+  // an open question rather than explained: with momentum consistency ON the run is clean and
+  // conservative to 1e-12 for 155 steps — `C^e` inside [0,1] to the last bit, `rho^e` never
+  // floored, 9-10 pressure iterations — and then at step ~160, with `max|u|` around 0.19, `C^e`
+  // goes to +inf inside the ADVECTION and the velocity follows. With momentum consistency OFF the
+  // identical case runs the full 200 steps (drift -2.3e-13, max|u| 0.236). So it is the
+  // momentum-consistent cut-cell path, not the colour transport and not the unbounded acceleration
+  // on its own; the trace shows no bounded-quantity precursor at all, which is why it is reported
+  // instead of patched.
+  for (int momentumOn = 1; momentumOn >= 0; --momentumOn) {
+    const double R = 10.0, grav = 2e-3;
+    const double liq = 0.25, rhoMean = liq * R + (1.0 - liq);
+    peclet::flow::IbmSolver s(N, N, N);
+    s.setRho(1.0);
+    s.setMu(0.05);
+    s.setDt(0.5);
+    s.setSolid(sdf, true);
+    s.enableVof();
+    std::vector<double> c0((std::size_t)N * N * N, 0.0);
+    for (int z = 0; z < N; ++z)
+      for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x)
+          c0[idx(x, y, z, N, N)] = (z >= 3 * N / 4) ? 1.0 : 0.0;  // a liquid layer on top
+    s.setVof(c0);
+    s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {1.0, R - 1.0});
+    s.setPropertyModel("mu", peclet::flow::ClosureKind::LinearMix, "C", "", {0.05, 0.45});
+    const bool nonZeroMean = std::getenv("PECLET_VOF_CUTCELL_NONZERO_FORCE") != nullptr;
+    s.setPropertyModel("force_z", peclet::flow::ClosureKind::LinearMix, "rho", "",
+                       {nonZeroMean ? 0.0 : grav * rhoMean, -grav});
+    if (momentumOn)
+      s.enableVofMomentum(1.0, R);
+    const double v0 = s.vofDiagnostics().volume;
+    long maxIt = 0;
+    const int steps = 200;
+    double umax = 0.0, clip = 0.0, mn = 1e30, mx = -1e30;
+    for (int i = 0; i < steps; ++i) {
+      s.step();
+      maxIt = std::max(maxIt, s.lastPressureIterations());
+      const auto d = s.vofDiagnostics();
+      clip += d.clippedVolume;
+      mn = std::fmin(mn, d.minCFluid);
+      mx = std::fmax(mx, d.maxCFluid);
+      if (std::getenv("PECLET_VOF_CUTCELL_TRACE") && (i % 5) == 0) {
+        double um = 0;
+        for (int c = 0; c < 3; ++c)
+          for (double v : s.getVelocity(c))
+            um = um > std::fabs(v) ? um : std::fabs(v);
+        double mnCc = 0, mxCc = 0, mnRho = 0;
+        long floored = 0;
+        if (momentumOn) {
+          const auto md = s.vofMomentumDiagnostics();
+          for (int c = 0; c < 3; ++c) {
+            mnCc = std::fmin(mnCc, md.minCc[c]);
+            mxCc = std::fmax(mxCc, md.maxCc[c]);
+          }
+          mnRho = md.minRhoC;
+          floored = md.floored;
+        }
+        std::printf(
+            "   trace %3d vol %.12e minC %.3e maxC %.6f max|u| %.4e cfl %.4f iters %ld  "
+            "C^e [%.3e, %.6f] minRho^e %.4e floored %ld\n",
+            i, d.volume, d.minCFluid, d.maxCFluid, um, s.vofLastCourant(),
+            s.lastPressureIterations(), mnCc, mxCc, mnRho, floored);
+      }
+    }
+    for (int c = 0; c < 3; ++c)
+      for (double v : s.getVelocity(c))
+        umax = std::fmax(umax, std::fabs(v));
+    const auto d1 = s.vofDiagnostics();
+    const double drift = (d1.volume - v0) / v0;
+    std::printf(
+        "G8b packing draining, ratio %g, %d coupled steps, momentum consistency %s:\n"
+        "   colour drift %.3e (%.3e per step), max|div(open u)| %.3e, pressure iters max %ld\n"
+        "   min/max C over uncut fluid %.3e / %.15f, clipped volume total %.3e, max|u| %.3e, "
+        "solid sum C %.3e\n",
+        R, steps, momentumOn ? "ON" : "off", drift, drift / steps, s.maxOpenDivergence(), maxIt,
+        mn, mx, clip, umax, d1.solidSumC);
+    CHECK(!std::isnan(umax) && !std::isnan(drift));
+    CHECK(std::fabs(drift) / steps <= 1e-10);
+    CHECK(d1.solidSumC == 0.0);
+    CHECK(maxIt < 200);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -530,6 +673,7 @@ int main(int argc, char** argv) {
     if (std::getenv("PECLET_VOF_CUTCELL_FILL_ABLATION"))
       neutralFillCap(quick ? 120 : 200, false);
   }
+  momentumCutCells();
   }
   Kokkos::finalize();
   if (failures)
