@@ -697,12 +697,11 @@ Gates: `tests/kokkos` `vof_collocated`, `tests/kokkos_mpi` `vof_collocated_mpi_n
 paragraph above) and is all-fluid, ratio ≲ 100 with motion. An **immersed solid is supported since
 rung V5a** — `set_solid(...,
 cutcell_pressure=True)` — with the openness-weighted flux above (STAGGERED only); an all-fluid
-`set_pressure_geometry` is of course also fine. Without
-**Scope — say this to users:** **Staggered only** (collocated is V8 —
-`enable_vof` throws). An **immersed solid is supported since rung V5a** — `set_solid(...,
-cutcell_pressure=True)` — with the openness-weighted flux above; an all-fluid
-`set_pressure_geometry` is of course also fine. **Open boundaries are supported since rung V-BC**
-(WO-R) — see "Two-phase open boundaries" under "Domain boundary conditions". Without
+`set_pressure_geometry` is of course also fine.
+**Open boundaries are supported since rung V-BC** (WO-R) — see "Two-phase open boundaries"
+under "Domain boundary conditions" — with the operator caveat recorded there (a variable-density
+outflow is inconsistent by the density ratio until `applyBoundaryOpenness` imposes the caller's
+coefficient; WO-R2). Without
 `enable_vof_momentum` the rung is **valid only at modest density ratios for cases with motion**; a
 high-ratio case at REST (the hydrostatic acid test) is exact either way. **With** it, the shipped
 build is honestly rated to ratio ~1e3: the uniform-velocity residual through the coupled step is
@@ -733,7 +732,6 @@ the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
 Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
 `vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`, `vof_collocated`;
-`tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`,
 `vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_bc`; `tests/kokkos_mpi`
 `vof_bc_mpi_np{1,2,4}`, `vof_advect_mpi_np{1,2,4}`,
 `vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,

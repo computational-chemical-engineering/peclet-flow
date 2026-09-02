@@ -450,6 +450,62 @@ Zalesak 1979; LeVeque 1996).
 
 ---
 
+## WO-R2 — the variable-density outflow operator, the cut-cell × boundary composition, and the VoF defaults  [OPUS]
+
+Written 2026-09-02 after WO-R's findings (read them first: "item 4 refuted, and the varRho
+open-boundary operator defect"). Four items, each small, each gated; together they are what E6
+(liquid over a packing with a liquid inlet at the top and an outlet at the bottom, ratio ~800)
+needs.
+
+1. **The operator.** `CutcellMG::applyBoundaryOpenness` (`mac_cutcell_mg.hpp`) re-imposes the
+   boundary face value as the literal `1.0` on every level including level 0, overwriting the
+   `open·ρ₀/ρ_f` coefficient `buildRhoCoeff` put there under varRho. Fix: at an outflow face
+   impose the CALLER's coefficient (level 0: the varRho coefficient already computed; coarser
+   levels: whatever the coarsening produced, i.e. do not overwrite), and keep the literal 1.0
+   only where the coefficient path is not in use (constant density — must stay bit-identical:
+   the `pressure_wallbounded` ctest, the single-phase regression's open-boundary points, the
+   examples' developing-channel/BFS numbers are the tripwires). Then WO-R's
+   `set_outflow_rho_correction(...)` (the `1/ρ_f` high-side correction) becomes the consistent
+   choice — flip its default to ON under varRho and re-measure; the low side goes through
+   `projectCorrectVar` and needs nothing. Gate: WO-R's G2 Nusselt film at ratio 100 and 1000
+   (the −z outlet), film flow rate within 3 % and no capped solve; WO-R's G3 gas-over-pool
+   pressure solve no longer capped; `max|div|` of the projected field at the outlet ≤ 1e-10 at
+   ratio 10/100/1000 on the WO-R budget box.
+2. **Compose V5a with V-BC.** The out-of-domain donor rule (`wyFaceFluxBc`, algebraic
+   `C_datum · a`) and the cut-cell path (`F = o_f · flux`, the flux clamp, the `eps_eff` update)
+   must act together: a domain-face flux in a geometry-carrying block is `o_f · C_datum · a`
+   (o_f = 1 on the open part of a domain face that no solid cuts; where a solid DOES cut the
+   domain face, o_f < 1). Gate: the WO-R G1 colour budget with a sphere array inside the box
+   (packing kept 3 cells clear of the inlet/outlet planes AND a second scene where one sphere
+   cuts the outlet plane): budget to 1e-12, solid colour exactly 0, MPI np 1/2/4 bitwise on the
+   kinematic run.
+3. **VoF turns the exact residual on.** WO-R item 6 measured `PECLET_FLOW_EXACT_RESIDUAL=1`
+   removing 7.5 orders of flux divergence on Hysing case 2 and moving nothing else. Add
+   `set_pressure_exact_residual(bool)` (`mac_cutcell.hpp`: a process-wide flag the env var
+   initialises; the setter overrides it) and have `enableVof` set it ON, with a docstring saying
+   why; `set_pressure_exact_residual(False)` after `enable_vof` is the ablation. Gate: Hysing 2
+   reproduces WO-R's `=1` column through the new default; every VoF ctest at ratio 1 is
+   bit-identical (the exact residual only differs where the float rounding of the bands differs
+   from the double flux form — measure and record which VoF ctests move at the last digit and
+   by how much; if any moves more than 1e-12 relative, stop and report).
+4. **Wisp guard on the advector's mixed predicate** (WO-R's V0/V1 fragility: an emptied domain
+   reaches `C → −inf`). `WyAdvector::wispEps` (default 0 = V1 verbatim); `enable_vof` sets it to
+   1e-8 (the same threshold the curvature already uses under surface tension). Cells with
+   `C ≤ eps` or `≥ 1 − eps` are treated as pure for reconstruction and flux (algebraic flux of
+   their actual C, so conservation is untouched). Gate: WO-R's emptying-domain MPI scene runs to
+   completion with no NaN; the V1 ctests' recorded numbers with `wispEps = 0` unchanged; with
+   1e-8 record the digit-level differences.
+
+Also fix `maxAbsDiff`'s NaN blindness in `tests/kokkos*` helpers (`fmax(m, NaN) == m`): a NaN
+field must fail every bitwise gate (WO-R found it, fixed it in its own test only).
+
+Deliverables: the operator fix, the composition, the two defaults, `tests/kokkos/test_vof_bc.cpp`
+extended, findings, CLAUDE.md. Do not change `max_open_divergence()`'s mutating behaviour (WO-R
+open question 2 is a user decision — `max_open_divergence_projected()` is the non-mutating
+sibling to use in VoF scripts).
+
+---
+
 # Findings log (v5 work orders)
 
 (append per WO, newest first)
