@@ -1212,6 +1212,7 @@ static void bind_solver(nb::module_& m, const char* name) {
                                             b.moment[4], b.moment[5]);
               r["recentred"] = b.recentred;
               r["discarded"] = b.discarded;
+              r["area"] = b.area;
               out.append(r);
             }
             return out;
@@ -1250,6 +1251,104 @@ static void bind_solver(nb::module_& m, const char* name) {
           },
           "Per-rank load census of the block container: 'masters'[r] = blocks rank r masters, "
           "'cells'[r] = the inner cells those blocks carry (the actual VoF work).")
+      // --- Part III rungs W1/W2 (WO-W12) --------------------------------------------------------
+      .def(
+          "enable_vof_blocks_from_field",
+          [](S& s, const std::vector<std::array<int, 6>>& boxes) {
+            s.enableVofBlocksFromField(boxes);
+          },
+          nb::arg("boxes"),
+          "Seed the block container from the CURRENT colour field: one marker per given global "
+          "index box (lo_x, lo_y, lo_z, hi_x, hi_y, hi_z; half-open), its colour copied out of the "
+          "field set_vof installed. The general seeding path — enable_vof_blocks(spheres) is a "
+          "convenience over it — and the way a marker of any shape enters (a quasi-2-D Hysing "
+          "cylinder, a scanned bubble, an arbitrary blob found with a host connected-component "
+          "labelling).\n\n"
+          "The boxes are the BUBBLE extents; the container grows each by its own 3-cell margin. "
+          "They must not share a cell: the seeding gather is a copy, not a union, so a cell inside "
+          "two boxes would be handed to both markers.")
+      .def(
+          "set_vof_block_assign",
+          [](S& s, int mode, long every) { s.setVofBlockAssign(mode, every); }, nb::arg("mode"),
+          nb::arg("every") = 0,
+          "Master assignment of the block container (rung W1). mode 0 = round robin by block id "
+          "(rung W0's, blind to block SIZE), 1 = LONGEST-PROCESSING-TIME greedy on the block cell "
+          "counts, 2 = weighted ORB over a 1-D block space (core's BlockDecomposer<1> with the "
+          "cell counts as weights). 'every' > 0 re-runs the assignment every 'every' block steps "
+          "and MIGRATES the colour of any block that changed master (nothing else in a block is "
+          "state, so the migration is exact and the bitwise gates hold across it).\n\n"
+          "All three are pure functions of the REPLICATED block table, so every rank computes the "
+          "same assignment without an exchange — which is what lets a re-assignment happen "
+          "mid-run without breaking a bitwise gate. LPT is the measured winner (see the WO-W12 "
+          "findings): the ORB's blocks must be CONTIGUOUS in block id, which LPT is free of.")
+      .def(
+          "vof_block_assign", [](S& s) { return s.vofBlockAssign(); },
+          "The current master-assignment mode (see set_vof_block_assign).")
+      .def(
+          "vof_block_imbalance_of", [](S& s, int mode) { return s.vofBlockImbalanceOf(mode); },
+          nb::arg("mode"),
+          "The max/mean per-rank block-cell load the given assignment mode WOULD give on the "
+          "current blocks, without applying it — so a study can put the three modes side by side "
+          "on one swarm without perturbing the run.")
+      .def(
+          "set_vof_block_device_staging",
+          [](S& s, bool on) { s.setVofBlockDeviceStaging(on); }, nb::arg("on"),
+          "Pack/unpack the block gather and scatter in the block's own MEMORY SPACE (rung W1 item "
+          "b, default True), with a host staging copy only per MPI MESSAGE — and none at all for "
+          "the master's own cells, which are a device-to-device copy. False selects rung W0's "
+          "host-staged path (a full mirror of the local patch per step), which is what the "
+          "device-vs-host measurement compares against. Every step is a copy of a double, so the "
+          "two paths are BITWISE identical; the ctest gates that rather than asserting it.")
+      .def(
+          "set_vof_block_pool", [](S& s, bool on) { s.setVofBlockPool(on); }, nb::arg("on"),
+          "Recycle the advectors a re-centring retires, keyed by the exact box extent (rung W1 "
+          "item c, default True). A translating bubble keeps its box SIZE and only moves its "
+          "origin, so the hit rate is ~100 % and the ten Views of the new box are not allocated. "
+          "A recycled advector is handed back in the state a freshly initialised one is in "
+          "(colour and the three face-velocity fields zeroed), so the pool is bitwise inert.")
+      .def(
+          "vof_block_pool_stats",
+          [](S& s) {
+            const auto q = s.vofBlockPoolStats();
+            nb::dict r;
+            r["hits"] = q[0];
+            r["misses"] = q[1];
+            return r;
+          },
+          "Block-pool census: 'hits' = advectors recycled, 'misses' = advectors allocated.")
+      .def(
+          "enable_vof_block_csf", [](S& s) { s.enableVofBlockCsf(); },
+          "Form the surface-tension force PER BLOCK (rung W2): each marker runs its own curvature "
+          "cascade on its own dense box and forms the V4 balanced-force face force there "
+          "(sigma kappa_f (C(i) - C(i-s))/h with the same selective face-curvature rule "
+          "addCsfRhs uses), and the three face fields are scattered into the global RHS with "
+          "UNPACK_SUM — TBFsolver's VOF.f90::computeSurfaceTension structure on the suite's "
+          "kernels.\n\n"
+          "WHY THE FORCE AND NOT THE CURVATURE IS SCATTERED: kappa is not additive and the union "
+          "colour is a max, so a face between two OVERLAPPING markers has no single (kappa, dC) "
+          "pair to build a force from. The force is the additive quantity, and forming it where "
+          "each marker's own colour still exists is the only place the balanced-force pairing (the "
+          "same face difference the projection's gradient uses) is available per marker.\n\n"
+          "Requires set_surface_tension(sigma) and the block container; STAGGERED only. Once on, "
+          "step() drives the whole two-phase stage through the blocks: the union C feeds the "
+          "closures exactly as before, and the colour is advected by the blocks in the "
+          "advect_vof slot.")
+      .def(
+          "vof_block_curvature_stats",
+          [](S& s) {
+            const auto st = s.vofBlockCurvatureStats();
+            nb::dict r;
+            r["interfacial"] = st.interfacial;
+            r["hf"] = st.hf;
+            r["hf_mixed"] = st.hfMixed;
+            r["hf_fit"] = st.hfFit;
+            r["pv"] = st.pv;
+            r["pv_reduced"] = st.pvReduced;
+            r["no_estimate"] = st.noEstimate;
+            return r;
+          },
+          "Branch census of the last block-CSF curvature pass, SUMMED over this rank's blocks "
+          "(local to the rank). 'no_estimate' must be 0 on any gated case.")
       // --- two-phase open boundaries (rung V-BC, WO-R) ------------------------------------------
       .def(
           "set_vof_inflow", [](S& s, int face, double value) { s.setVofInflow(face, value); },

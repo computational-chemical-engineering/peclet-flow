@@ -42,6 +42,8 @@ foreach(t cutcellmg_mpi telescope_mpi telescope_varrho_mpi velocitymg_mpi veloci
         dragbeta_ghost_mpi vof_twophase_mpi vof_momentum_mpi vof_curvature_mpi
         vof_surface_tension_mpi vof_cutcell_mpi vof_wetting_mpi vof_wetting_dynamic_mpi
         vof_collocated_mpi vof_bc_mpi vof_phase_change_mpi movingscene_advect_mpi wall_slip_mpi)
+        vof_collocated_mpi vof_bc_mpi vof_phase_change_mpi movingscene_advect_mpi
+        vof_blocks_ns_mpi)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${TPX_DIR}/include)
@@ -63,7 +65,9 @@ target_include_directories(test_vof_blocks_mpi PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${TPX_DIR}/include)
 target_compile_definitions(test_vof_blocks_mpi PRIVATE PECLET_FLOW_MPI)
 target_link_libraries(test_vof_blocks_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX)
-foreach(np 1 2 4)
+# np 8 as well since rung W1 (WO-W12): the 64-bubble swarm's LPT assignment and its migration are
+# only exercised once there are more ranks than the few blocks the W0 scenes carry.
+foreach(np 1 2 4 8)
   add_test(NAME vof_blocks_mpi_np${np}
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_vof_blocks_mpi>)
 endforeach()

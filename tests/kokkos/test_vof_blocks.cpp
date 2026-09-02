@@ -626,6 +626,165 @@ void gateRecentre() {
   }
 }
 
+// ================================================= W1: assignment, pool, device pack, area
+//
+//   W1a  master assignment : round robin vs LPT vs weighted ORB on a 64-bubble swarm of MIXED
+//                            sizes, at np 1/2/4/8 (the assignment is a pure function of the
+//                            replicated table, so it is measurable without MPI).
+//   W1b  device packing    : the device-resident pack/unpack produces the same union BITWISE as
+//                            the W0 host-staged path, and the packing time of both is reported.
+//   W1c  block pool        : `usePool` is bitwise inert, and the allocation census.
+//   W1d  interface area    : a seeded sphere's PLIC area against 4 pi R^2.
+void gateAssignment() {
+  std::printf("\n=== W1a master assignment: round robin vs LPT vs weighted ORB (64 bubbles)\n");
+  // 64 bubbles on a 4x4x4 lattice with radii spanning 2.2x, so the block SIZES differ by ~10x in
+  // cell count -- exactly the regime round robin is blind to.
+  const int gn = 64;
+  const double h = 1.0 / gn;
+  VofBlockSet set;
+  set.init(I3{gn, gn, gn}, {true, true, true}, 0, 1, h);
+  Patch patch;
+  patch.init(gn, h);
+  serialExchange(set, patch);
+  int k = 0;
+  for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 4; ++j)
+      for (int m = 0; m < 4; ++m, ++k) {
+        // radii 2 .. 9 cells: the block box is the extent + 3 margin + 3 ghost, so the cell
+        // counts span ~10x -- the regime a round robin by block id is blind to.
+        const double r = (2.0 + 7.0 * ((k % 8) / 7.0)) / gn;
+        set.seedSphere((i + 0.5) / 4, (j + 0.5) / 4, (m + 0.5) / 4, r);
+      }
+  CHECK(set.count() == 64);
+  std::vector<long> w(set.count());
+  long tot = 0, wmin = 1L << 60, wmax = 0;
+  for (std::size_t b = 0; b < set.count(); ++b) {
+    w[b] = set.blocks()[b].box.cells();
+    tot += w[b];
+    wmin = std::min(wmin, w[b]);
+    wmax = std::max(wmax, w[b]);
+  }
+  std::printf("  block cell counts: min %ld  max %ld  (ratio %.1fx)  total %ld\n", wmin, wmax,
+              double(wmax) / wmin, tot);
+  std::printf("  %-4s %-14s %-14s %-14s\n", "np", "round robin", "LPT", "weighted ORB");
+  const int nps[4] = {1, 2, 4, 8};
+  for (int q = 0; q < 4; ++q) {
+    const int np = nps[q];
+    double imb[3];
+    for (int mode = 0; mode < 3; ++mode) {
+      std::vector<int> m;
+      if (mode == 0) {
+        m.assign(w.size(), 0);
+        for (std::size_t b = 0; b < w.size(); ++b)
+          m[b] = static_cast<int>(b % np);
+      } else if (mode == 1) {
+        peclet::flow::vof::vofAssignLpt(w, np, m);
+      } else {
+        peclet::flow::vof::vofAssignOrb(w, np, m);
+      }
+      std::vector<long> load(np, 0);
+      for (std::size_t b = 0; b < w.size(); ++b)
+        load[m[b]] += w[b];
+      long mx = 0;
+      for (long v : load)
+        mx = std::max(mx, v);
+      imb[mode] = double(mx) * np / double(tot);
+    }
+    std::printf("  %-4d %-14.4f %-14.4f %-14.4f\n", np, imb[0], imb[1], imb[2]);
+    // LPT must never be worse than the round robin, and it must be within 4/3 of perfect
+    CHECK(imb[1] <= imb[0] + 1e-12);
+    CHECK(imb[1] <= 4.0 / 3.0 + 1e-12);
+  }
+  // W1d: the interface area of the biggest marker against the sphere formula
+  std::size_t big = 0;
+  for (std::size_t b = 1; b < set.count(); ++b)
+    if (set.blocks()[b].stats().volume > set.blocks()[big].stats().volume)
+      big = b;
+  const auto& st = set.blocks()[big].stats();
+  const double R = std::cbrt(st.volume * 3.0 / (4.0 * M_PI));
+  const double exact = 4.0 * M_PI * R * R;
+  std::printf("  W1d interface area of marker %zu: V %.6e -> R %.5f (%.2f cells), area %.6e vs "
+              "4 pi R^2 %.6e (%+.2f %%)\n",
+              big, st.volume, R, R / h, st.area, exact, 100.0 * (st.area / exact - 1.0));
+  CHECK(std::fabs(st.area / exact - 1.0) < 0.05);
+}
+
+// The whole W1 machinery must not move a single bit: run the SAME 8-bubble LeVeque scene four
+// ways -- (host packing, no pool), (device packing, no pool), (host, pool), (device, pool) -- and
+// demand the four unions and the 8 marker volumes are bitwise identical.
+void gateInert() {
+  std::printf("\n=== W1b/W1c device-resident packing and the block pool are BITWISE inert\n");
+  const int gn = 48;
+  const double h = 1.0 / gn, T = 0.75;
+  const long steps = 360;  // CFL 0.2 for the LeVeque field at 48^3
+  const double dt = T / steps;
+  struct Cfg {
+    bool dev, pool;
+    const char* name;
+  };
+  const Cfg cfgs[4] = {{false, false, "host, no pool"},
+                       {true, false, "device, no pool"},
+                       {false, true, "host, pool"},
+                       {true, true, "device, pool"}};
+  std::vector<double> ref;
+  std::vector<double> refVol;
+  double packMs[4] = {0, 0, 0, 0};
+  for (int q = 0; q < 4; ++q) {
+    Patch patch;
+    patch.init(gn, h);
+    VofBlockSet set;
+    set.init(I3{gn, gn, gn}, {true, true, true}, 0, 1, h);
+    auto ex = serialExchange(set, patch);
+    ex->deviceStaging = cfgs[q].dev;
+    set.usePool = cfgs[q].pool;
+    for (int i = 0; i < 2; ++i)
+      for (int j = 0; j < 2; ++j)
+        for (int m = 0; m < 2; ++m)
+          set.seedSphere(0.25 + 0.5 * i, 0.25 + 0.5 * j, 0.25 + 0.5 * m, 0.09);
+    set.scatter(patch.adv.colour());
+    Kokkos::Timer timer;
+    double tPack = 0.0;
+    for (long s = 0; s < steps; ++s) {
+      const double phase = std::cos(M_PI * (s + 0.5) * dt / T);
+      vofscene::fillLeVeque(patch.adv, patch.blk, h, phase);
+      vofscene::periodicFill(patch.adv.faceU(), patch.adv.extent(), G, true, true, true);
+      vofscene::periodicFill(patch.adv.faceV(), patch.adv.extent(), G, true, true, true);
+      vofscene::periodicFill(patch.adv.faceW(), patch.adv.extent(), G, true, true, true);
+      Kokkos::fence();
+      const double t0 = timer.seconds();
+      set.advect(dt, patch.adv.colour());
+      Kokkos::fence();
+      tPack += timer.seconds() - t0;
+    }
+    packMs[q] = 1e3 * tPack / steps;
+    const std::vector<double> got = fieldOnGrid(patch.adv.colour(), patch.adv.extent(), gn, G);
+    std::vector<double> vol(set.count());
+    for (std::size_t b = 0; b < set.count(); ++b)
+      vol[b] = set.blocks()[b].stats().volume;
+    if (q == 0) {
+      ref = got;
+      refVol = vol;
+    } else {
+      double worst = 0.0;
+      const long d = gridDiff(got, ref, &worst);
+      double dv = 0.0;
+      for (std::size_t b = 0; b < vol.size(); ++b)
+        dv = std::fmax(dv, std::fabs(vol[b] - refVol[b]));
+      std::printf("  %-18s vs (host, no pool): %ld cells differ, max|dV| %.3e\n", cfgs[q].name, d,
+                  dv);
+      CHECK(d == 0);
+      CHECK(dv == 0.0);
+    }
+    const auto ps = std::array<long, 2>{set.poolHits(), set.poolMisses()};
+    std::printf("  %-18s block-step %.3f ms   pool hits %ld misses %ld\n", cfgs[q].name, packMs[q],
+                ps[0], ps[1]);
+    if (cfgs[q].pool)
+      CHECK(ps[0] > 0);  // the pool must actually be recycling on a moving swarm
+  }
+  std::printf("  device vs host block step: %.3f ms vs %.3f ms  (ratio %.2fx)\n", packMs[1],
+              packMs[0], packMs[0] / packMs[1]);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -636,6 +795,8 @@ int main(int argc, char** argv) {
     gateOneBubble();
     gateTwoBubbles();
     gateRecentre();
+    gateAssignment();
+    gateInert();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
                 failures == 1 ? "" : "s");
   }
