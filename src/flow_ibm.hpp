@@ -48,6 +48,8 @@
 #include "scalar_transport.hpp"
 #include "staggered_advection.hpp"
 #include "vof/advect_wy.hpp"    // VoF rung V1: the Weymouth-Yue colour advector (its own g=3 block)
+#include "vof/block_container.hpp"  // VoF Part III rung W0: the per-bubble block container
+#include "vof/block_exchange.hpp"   // VoF Part III rung W0: the block gather / scatter
 #include "vof/colour_field.hpp"  // VoF rung V2a: the G=2 <-> g=3 bridge + the colour ghost policy
 #include "vof/colour_bc.hpp"  // VoF rung V-BC: inflow/outflow/backflow colour + the outside mask
 #include "vof/curvature_field.hpp"  // VoF rung V3: the HF curvature cascade + PV fallback
@@ -2456,6 +2458,7 @@ class Solver {
         if (uAdv_[c].extent(0) != n_)
           uAdv_[c] = CCField("uAdv", n_);
     }
+    bindVofBlockPatch();  // rung W0: the block exchange's Views were just reallocated
   }
   // --- rung V5a (WO-Q): the cut-cell geometry of the colour block ------------------------------
   //
@@ -2624,6 +2627,28 @@ class Solver {
                             I3{e_.x, e_.y, e_.z}, G, c);
     }
   }
+  // --- rung W0: the block container's view of this rank's patch --------------------------------
+  // The gather reads the face velocity in the ADVECTOR's high-face convention on the g=3 block,
+  // i.e. exactly what `bridgeVelocityToVof` writes, and the scatter writes the union into that
+  // same block's colour. `buildVofBlock` reallocates those Views, so the binding is refreshed
+  // there — a stale View here would silently gather from freed memory.
+  void bindVofBlockPatch() {
+    if (!vofBlockExch_)
+      return;
+    vof::VofBlockExchange::Patch pp;
+    pp.e = I3{e3_.x, e3_.y, e3_.z};
+    pp.n = I3{nx_, ny_, nz_};
+    pp.o = vofOrigin();
+    pp.g = kVofG;
+    vofBlockExch_->setPatch(pp, vofAdv_.faceVel(0), vofAdv_.faceVel(1), vofAdv_.faceVel(2));
+  }
+  // The union colour on the g=3 block -> the canonical registered "C" (+ its ghost policy, the
+  // same `fillPropGhosts` rho and mu are derived through).
+  void harvestVofBlockUnion() {
+    copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
+    fillPropGhosts(cField_);
+  }
+
   // Colour: G=2 registry mirror -> the g=3 working block, then the colour field's own ghost policy.
   // Inner cells only in the copy — the two blocks have different ghost extents and each fills its
   // own (the one bridge; see the enableVof note).
@@ -5957,6 +5982,118 @@ class Solver {
     zeroSolidColour();
     fillPropGhosts(cField_);
   }
+  // --- Part III rung W0 (WO-W0): the per-bubble VoF BLOCK container -----------------------------
+  //
+  // A THIRD container over the same L1 kernels (`suite/docs/VOF_PLAN.md` §10, the TBFsolver
+  // `vofBlock` pattern): one bubble = one `WyAdvector` on a small moving global index box with a
+  // master rank of its own, and the registered `"C"` the closures see is the UNION
+  // `C = max_blocks C_block`, never the source. Two bubbles that touch therefore CANNOT coalesce
+  // numerically — coalescence becomes an explicit model decision (rung W4) instead of a numerical
+  // accident. See `vof/block_container.hpp` for the three index boxes and the ghost policy, and
+  // `vof/block_exchange.hpp` for why the gather is plain Isend/Irecv and not an NBX handshake.
+  //
+  // W0 stops at KINEMATIC transport: `advect_vof_blocks(dt)` is the block twin of `advect_vof(dt)`
+  // and carries the same divergence-free precondition. NS coupling (union -> closures -> varRho
+  // projection, per-block curvature + CSF scattered UNPACK_SUM) is rung W12.
+  //
+  // Scope at W0: all-fluid (no immersed solid — the cut-cell block is W12), and the seeds are
+  // spheres given in CELL units.
+  void enableVofBlocks(const std::vector<std::array<double, 4>>& seeds) {
+    if (!vofEnabled_)
+      throw std::runtime_error("enable_vof_blocks: VoF is not enabled (call enable_vof first)");
+    if (hasSolid_)
+      throw std::runtime_error(
+          "enable_vof_blocks: the block container is ALL-FLUID at rung W0 (the cut-cell block is "
+          "rung W12). Drop set_solid, or use the structured colour field (advect_vof).");
+    int rank = 0, size = 1;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      MPI_Comm_rank(comm_, &rank);
+      MPI_Comm_size(comm_, &size);
+    }
+#endif
+    vofBlocks_ = std::make_shared<vof::VofBlockSet>();
+    const std::array<bool, 3> per{vofAxisPeriodic(0), vofAxisPeriodic(1), vofAxisPeriodic(2)};
+    vofBlocks_->init(vofGlobalSize(), per, rank, size, 1.0);  // flow works in cell units
+    vofBlocks_->cflLimit = vofCflLimit_;
+    vofBlockExch_ = std::make_shared<vof::VofBlockExchange>();
+    std::vector<vof::VofBox> rb(static_cast<std::size_t>(size));
+    const I3 gs = vofGlobalSize();
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && dec_) {
+      for (int r = 0; r < size; ++r) {
+        const auto b = dec_->block(static_cast<std::size_t>(r));
+        for (int d = 0; d < 3; ++d) {
+          rb[r].lo[d] = static_cast<int>(b.origin[d]);
+          rb[r].hi[d] = static_cast<int>(b.origin[d] + b.size[d]);
+        }
+      }
+    } else
+#endif
+    {
+      rb[0].hi[0] = gs.x;
+      rb[0].hi[1] = gs.y;
+      rb[0].hi[2] = gs.z;
+    }
+    vofBlockExch_->init(gs, per, rb, rank);
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      vofBlockExch_->setComm(comm_);
+#endif
+    bindVofBlockPatch();
+    vofBlocks_->setExchange(vofBlockExch_);
+    for (const auto& s : seeds)
+      vofBlocks_->seedSphere(s[0], s[1], s[2], s[3]);
+    vofBlocks_->scatter(vofAdv_.colour());
+    harvestVofBlockUnion();
+  }
+  bool vofBlocksEnabled() const { return static_cast<bool>(vofBlocks_); }
+  void disableVofBlocks() {
+    vofBlocks_.reset();
+    vofBlockExch_.reset();
+  }
+  // Kinematic block advection with the CURRENT (projected) face velocity — the block twin of
+  // `advect_vof`. Same precondition: Weymouth-Yue conservation is conditional on the face field
+  // being discretely divergence-free, so a field that is not is refused rather than silently
+  // reported as a conservation defect.
+  void advectVofBlocks(double dt) {
+    if (!vofBlocks_)
+      throw std::runtime_error("advect_vof_blocks: call enable_vof_blocks first");
+    const double div = maxOpenDivergence();
+    if (!(div <= 1e-10)) {
+      char msg[320];
+      std::snprintf(msg, sizeof(msg),
+                    "advect_vof_blocks: the current face velocity is not discretely "
+                    "divergence-free (max|div(open*u)| = %.6g > 1e-10). Weymouth-Yue conservation "
+                    "is conditional on it; project the field first (step() / project()).",
+                    div);
+      throw std::runtime_error(msg);
+    }
+    bridgeVelocityToVof();  // the block exchange reads THESE views (advector high-face convention)
+    vofBlocks_->advect(dt, vofAdv_.colour());
+    harvestVofBlockUnion();
+  }
+  // Per-bubble Lagrangian census. Only this rank's MASTER blocks carry numbers (volume, centroid,
+  // centroid velocity, the central second moments); the box and the master are replicated.
+  std::vector<vof::VofBlockStats> vofBlockStats() const {
+    if (!vofBlocks_)
+      throw std::runtime_error("vof_block_stats: call enable_vof_blocks first");
+    return vofBlocks_->statsAll();
+  }
+  // max/mean of the per-rank block-cell load under the CURRENT master assignment (round robin at
+  // W0; the weighted-ORB assignment is W1 and these are the numbers to beat). 1.0 = perfect.
+  double vofBlockImbalance() const {
+    if (!vofBlocks_)
+      throw std::runtime_error("vof_block_imbalance: call enable_vof_blocks first");
+    return vofBlocks_->cellImbalance();
+  }
+  // Blocks mastered by each rank, and the inner cells those blocks carry.
+  void vofBlockCensus(std::vector<long>& masters, std::vector<long>& cells) const {
+    if (!vofBlocks_)
+      throw std::runtime_error("vof_block_census: call enable_vof_blocks first");
+    vofBlocks_->masterCensus(masters, cells);
+  }
+
   // Harmonic instead of arithmetic rho_f in the pressure projection (WO-J item 5). DEFAULT OFF and
   // it should stay off — read the long note in mac_pressure.hpp before turning it on: arithmetic
   // rho_f IS the harmonic mean of the mobility 1/rho (the series-correct choice for a normal flux)
@@ -7667,6 +7804,10 @@ class Solver {
   CutcellMG mg_;
   // --- multi-rank (MPI) state, gated (single-GPU module never links MPI -> byte-identical when
   // off) ---
+  // rung W0 (WO-W0): the per-bubble block container. Null unless enable_vof_blocks ran, so
+  // every existing VoF path is byte-identical.
+  std::shared_ptr<vof::VofBlockSet> vofBlocks_;
+  std::shared_ptr<vof::VofBlockExchange> vofBlockExch_;
   bool distributed_ = false;
   C3 og_{0, 0, 0};  // velocity-block inner origin (global red-black parity); {0,0,0} single-rank
 #ifdef PECLET_FLOW_MPI

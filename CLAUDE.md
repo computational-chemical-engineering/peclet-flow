@@ -380,9 +380,16 @@ Campaign plan: [`../docs/VOF_PLAN.md`](../docs/VOF_PLAN.md); work orders + findi
 [`doc/vof_workorders_v5.md`](doc/vof_workorders_v5.md) (V5a cut cells, and the open V-BC/V5b/V8
 work orders).
 
+- **The container-free kernels now live in `core`** (`peclet::core::vof`, layer L1 of VOF_PLAN §11;
+  promoted by WO-W0, 2026-09-02). `src/vof/{plic,curvature,cutcell,wetting}.hpp` are **thin includes
+  + a using-directive**, so every `peclet::flow::vof::` spelling still resolves and every file that
+  included them is unchanged; the bodies are `core/include/peclet/core/vof/`. The gate on the move
+  was every VoF ctest **bit-identical** on both backends (415 lines of measured output, CUDA and
+  OpenMP), and it is a file move and nothing else. New container-free VoF math belongs in `core`;
+  the drivers (`WyAdvector`, `VofCurvature`, `VofBlockSet`) stay here.
 - `src/vof/plic.hpp` (V0) — SZ2000/Lehmann–Gekle plane↔volume, MYC normals, slab flux volumes.
-  Container-free `KOKKOS_INLINE_FUNCTION`s only (no `View`, no indexing), so the V4 promotion to
-  `peclet::core::vof` is a file move.
+  Container-free `KOKKOS_INLINE_FUNCTION`s only (no `View`, no indexing) — which is what made the
+  L1 promotion a plain file move.
 - `src/vof/advect_wy.hpp` (V1) — `WyAdvector`: Weymouth–Yue split geometric advection on its **own
   g=3 block** with its own ghost callback. CFL cap 0.25 (Weymouth's proven **3D** bound
   1/(2(N−1)); the familiar 0.5 is the 2D value). The dilation flag is frozen once per step —
@@ -394,6 +401,9 @@ work orders).
   `plic.hpp`: the effective fluid volume `eps_eff = max(eps, 1/64)`, Weymouth's admissible flux
   interval generalized to a cut donor, the effective Courant number, the [0,1] clip and the
   solid-band fill state machine.
+- `src/vof/block_container.hpp` + `block_exchange.hpp` (W0) — the per-bubble BLOCK container: one
+  `WyAdvector` per marker on a small moving global index box with its own master rank, and the
+  union `C = max_blocks C_block` into the registered `"C"`. See the block-VoF section below.
 - `src/vof/momentum_advect.hpp` (V2b) — `MomentumConsistentAdvector`: `rho^c u_c` on the
   half-shifted MAC control volumes, driven by the SAME PLIC planes, sweep order and frozen state as
   the colour advection of that step. Opt-in (`enable_vof_momentum(rho_gas, rho_liquid)`), and what
@@ -693,6 +703,73 @@ difference). Known gap, recorded not guarded: an OUTFLOW face's `bcCorrectOutflo
 Gates: `tests/kokkos` `vof_collocated`, `tests/kokkos_mpi` `vof_collocated_mpi_np{1,2,4}`,
 `tests/study/vof_collocated.py` (the staggered/collocated columns of the V4 physics battery).
 
+**Per-bubble block VoF — the multiple-marker container (Part III rung W0, WO-W0).** A THIRD
+container over the same kernels (`suite/docs/VOF_PLAN.md` §10, the TBFsolver `vofBlock` pattern):
+`enable_vof_blocks([(cx, cy, cz, r), ...])` gives each bubble its own `WyAdvector` on a small moving
+GLOBAL index box with a master rank of its own, and the registered `"C"` the closures see is the
+**union** `C = max_blocks C_block` — never the source. `advect_vof_blocks(dt)` is the block twin of
+`advect_vof(dt)` (kinematic, same divergence-free precondition); NS coupling is rung W12.
+`src/vof/block_container.hpp` (`VofBox`, `VofBlock`, `VofBlockSet`) is MPI-free index math +
+orchestration, `src/vof/block_exchange.hpp` the gather/scatter. **Nothing is allocated unless
+`enable_vof_blocks` runs, so every existing VoF path is byte-identical.**
+
+*Why it exists:* two markers that touch **cannot coalesce numerically**. Measured on the gate (two
+spheres pushed together by a solenoidal cellular field, 48³, 216 steps): **236 cells carry BOTH
+markers** at closest approach (**30.0 cells of shared liquid**, i.e. `ΣV_marker − ΣC_union`) while
+each marker conserves its own volume to **1.7e-15 / 2.6e-15**; after the reversal the blocks recover
+two separated bubbles (neck colour **0.000**) and the single-field control has merged them
+irreversibly (neck **0.770**, recovery L1 **65.2** against the blocks' **50.7**).
+
+Four things this rung measured, all in `doc/vof_workorders_v6.md` (WO-W0 findings):
+- **Three boxes, and margin 3 is what makes a block conservative.** bubble box → INNER box (bubble
+  + `margin` = 3, TBFsolver's offset, the advector's inner region) → EXTENDED box (+ `g` = 3). One
+  `advect()` runs one sweep per axis, so colour moves at most ONE cell per axis per step; with the
+  colour ≥ 3 cells from the inner-box boundary at the start of a step nothing can be fluxed across
+  it, and re-centring restores the margin every time it is spent. Volume drift over the LeVeque
+  reversal: **5.9e-15**.
+- **`bubbleEps` (default 1e-12) is not cosmetic: at `C != 0` the block degenerates into the global
+  field.** Weymouth–Yue leaves round-off residue in every cell its sweeps touch (down to 1e-300 and
+  signed zeros — the same residue the V4 curvature cascade needed `interfaceEps` for), so a literal
+  support grows along the bubble's whole WAKE: measured on the 32³ LeVeque reversal the box reaches
+  **100 % of the grid** at `bubbleEps = 0` against **79.6 %** at 1e-12 (and **9261 cells vs 18081**
+  on the translating-sphere gate, where the production block genuinely translates, `lo_x` 1 → 20,
+  while the exact-support one only grows). What the threshold drops is reported, not hidden
+  (`vof_block_stats()['discarded']`, measured **-9.5e-17** over a 20-cell translation of a
+  524-cell bubble).
+- **A marker block is bitwise the global field only until that residue leaves its box** — and the
+  work order's G1 ("bitwise at every step" over T = 3) is therefore unattainable for any block
+  smaller than the domain, for reasons that have nothing to do with the container. Measured: bitwise
+  for the first **8 steps** (eps = 0) / **5 steps** (production), and thereafter **max|d| 1.2e-63
+  and 4.3e-19** over the full 768 steps, against a colour of order 1. Where the residue does NOT
+  escape — a sphere translated 20 cells — the agreement is **exactly bitwise over 100 steps
+  (max|d| = 0)**, which is the real container gate. The block's ghost policy ("outside my box it is
+  pure gas") is the marker model; ghosting from the UNION instead would reproduce the global field
+  bit for bit and let a neighbouring marker's colour flux in, i.e. coalesce.
+- **UNPACK_MAX clips the negative residue, and that is the only way the union differs from a global
+  field.** `C = max_blocks C_block` from an empty union turns a −1e-17 wisp into an exact 0:
+  measured 32036 cells differing at up to **6.2e-17** over the LeVeque reversal, of which **0** were
+  anything other than that clip.
+
+*Distributed* (`tests/kokkos_mpi/test_vof_blocks_mpi.cpp`, np 1/2/4, **bitwise**, `|dV| = 0.0`): the
+block table (id, box, master) and the flow decomposition are BOTH replicated, so every rank computes
+every message size as a pure function of the two — plain `MPI_Isend/Irecv` with precomputed counts,
+no NBX handshake (core's `NbxEngine` stays for the genuinely dynamic case, rung W1's redistribution).
+A block's box is cut per axis into contiguous global runs (one on a non-periodic axis, two across a
+periodic seam), the runs partition the box in BLOCK-LOCAL index, and intersecting them with each
+rank's owned box gives the pieces — so every block-local cell is written by exactly one owner and
+arrival order cannot matter. Masters are round-robin by block id, deliberately independent of where
+the cells live: at np ≥ 2 on the three-bubble scene **one block's master owns none of its own cells**
+and its whole state arrives by message. Measured per step on rank 0 (three bubbles, 32³):
+np=2 **551 kB gather / 82 kB scatter in 3 + 3 messages**, np=4 **399 kB / 49 kB in 5 + 5**. Packing
+is host-staged (`create_mirror_view_and_copy`) — W0 is a correctness rung; the device-resident
+packing kernel is the W1/W2 optimisation, the same order `core`'s grid halo grew in.
+
+**Load balance, W0's known weakness:** round-robin master assignment measures
+`vof_block_imbalance()` (max/mean of the per-rank block-cell load) = **1.000 at np=2 / 2.000 at
+np=4 for 2 blocks**, **1.337 / 1.559 for 3 blocks** — i.e. with fewer blocks than ranks the extra
+ranks are simply idle. The weighted-ORB assignment is rung W1 and those are the numbers to beat.
+`vof_block_census()` gives the per-rank breakdown.
+
 **Scope — say this to users:** **Staggered is the reference**; the collocated path is rung V8 (the
 paragraph above) and is all-fluid, ratio ≲ 100 with motion. An **immersed solid is supported since
 rung V5a** — `set_solid(...,
@@ -732,12 +809,12 @@ the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
 Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
 `vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`, `vof_collocated`,
-`vof_phase_change`;
+`vof_phase_change`, `vof_blocks`;
 `vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_bc`; `tests/kokkos_mpi`
 `vof_phase_change_mpi_np{1,2,4}`, `vof_bc_mpi_np{1,2,4}`, `vof_advect_mpi_np{1,2,4}`,
 `vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,
 `vof_surface_tension_mpi_np{1,2,4}`, `vof_cutcell_mpi_np{1,2,4}`, `vof_wetting_mpi_np{1,2,4}`,
-`vof_collocated_mpi_np{1,2,4}`;
+`vof_collocated_mpi_np{1,2,4}`, `vof_blocks_mpi_np{1,2,4}`;
 `tests/study/vof_collocated.py` (the V8 staggered/collocated columns);
 `tests/study/vof_stefan.py` (the P0/P1 phase-change battery: `p0a`, `p0b`, `p1` + the 64/128/256
 Stefan ladder);
