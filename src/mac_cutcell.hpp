@@ -38,11 +38,28 @@ using CCConst = Kokkos::View<const double*, CCMem>;
 // double-diagonal ablation (PECLET_FLOW_MG_DIAGRESUM) on the identity both exist to protect:
 // the flux form annihilates the constant vector BITWISE, a stored double diagonal only to
 // eps_f64. And it costs 0 B/cell where the double diagonal costs +17.
-inline bool exactResidual() {
-  static const bool v = [] {
+//
+// WO-R2 item 3: the env var only INITIALISES the flag; `setExactResidual` overrides it
+// process-wide, and `IbmSolver::enableVof` turns it ON (measured: on Hysing case 2 it removes 7.5
+// orders of the projected flux divergence, 1.85e-03 -> 5.15e-11, and moves the iteration count,
+// the step count, the dt-limit census and both published functionals by nothing at all — the
+// float `A*1 != 0` defect is exactly what a moving interface's coefficient contrast amplifies).
+// `set_pressure_exact_residual(False)` after `enable_vof` is the ablation.
+inline bool& exactResidualFlag() {
+  static bool v = [] {
     const char* e = std::getenv("PECLET_FLOW_EXACT_RESIDUAL");
     return e && std::atoi(e) != 0;
   }();
+  return v;
+}
+inline bool exactResidual() { return exactResidualFlag(); }
+inline void setExactResidual(bool on) { exactResidualFlag() = on; }
+/// True when PECLET_FLOW_EXACT_RESIDUAL was set explicitly. `IbmSolver::enableVof` does NOT
+/// override an explicit environment request, which is what makes `PECLET_FLOW_EXACT_RESIDUAL=0`
+/// the process-wide ablation of WO-R2 item 3 (used to measure which VoF ctests move under the
+/// new default, and by how much).
+inline bool exactResidualPinned() {
+  static const bool v = std::getenv("PECLET_FLOW_EXACT_RESIDUAL") != nullptr;
   return v;
 }
 
