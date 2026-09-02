@@ -900,6 +900,14 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["unfilled_cells"] = d.unfilledCells;
             r["mean_apparent_angle"] = d.meanApparentAngle;
             r["set_angle"] = d.setAngle;
+            r["dynamic_cells"] = d.dynamicCells;
+            r["pinned_cells"] = d.pinnedCells;
+            r["advancing_cells"] = d.advancingCells;
+            r["receding_cells"] = d.recedingCells;
+            r["mean_imposed_theta"] = d.meanImposedTheta;
+            r["mean_apparent_theta"] = d.meanApparentTheta;
+            r["max_Ca_cl"] = d.maxCaCl;
+            r["max_contact_speed"] = d.maxContactSpeed;
             return r;
           },
           "The solid-band census of the CURRENT colour field on this rank: how many band cells each "
@@ -911,7 +919,74 @@ static void bind_solver(nb::module_& m, const char* name) {
           "left untouched), plus 'mean_apparent_angle' — the mean angle the fluid-only normal "
           "reported at the contact cells BEFORE the rotation, in degrees. That last number is the "
           "direct read-out of how far the fluid-side interface still is from the prescribed angle, "
-          "measured on the fill's own data rather than on a post-processed shape.")
+          "measured on the fill's own data rather than on a post-processed shape.\n\n"
+          "Rung V6 (WO-V6) adds, all zero unless set_contact_angle_dynamic / "
+          "set_contact_angle_hysteresis is configured: 'dynamic_cells' (band cells the V6 pass "
+          "produced an angle for), 'pinned_cells' / 'advancing_cells' / 'receding_cells' (the "
+          "hysteresis branch census), 'mean_imposed_theta' and 'mean_apparent_theta' in degrees, "
+          "'max_Ca_cl' = max |mu_l U_cl / sigma| and 'max_contact_speed' = max |U_cl| in solver "
+          "velocity units.")
+      .def(
+          "set_contact_angle_dynamic",
+          [](S& s, double th, double slip, double mu, double sigma) {
+            s.setContactAngleDynamic(th, slip, mu, sigma);
+          },
+          nb::arg("theta_e"), nb::arg("slip_length_cells"), nb::arg("mu_liquid"),
+          nb::arg("sigma") = 0.0,
+          "Rung V6 (WO-V6). The DYNAMIC contact angle: the angle imposed at the grid scale is the "
+          "Cox-Voinov apparent angle of a contact line moving at speed U_cl, with the outer "
+          "cut-off at the CELL SIZE and an EXPLICIT slip length lambda (Afkhami, Zaleski & "
+          "Bussmann, JCP 228:5370, 2009):\n\n"
+          "    theta_Delta^3 = theta_e^3 + 9 Ca_cl ln(Delta/lambda),   Ca_cl = mu_l U_cl / sigma\n\n"
+          "angles in radians internally, arguments in DEGREES; Ca_cl > 0 advancing, < 0 receding; "
+          "theta_Delta is clamped into [1, 179] degrees (set_contact_angle_clamp).\n\n"
+          "`slip_length_cells` is lambda/Delta and must lie in (0, 1). It is not a tuning knob "
+          "you may omit from a report: a VoF contact line's NUMERICAL slip is proportional to the "
+          "cell size, so without an explicit lambda the imposed angle is silently grid-dependent "
+          "(VOF_PLAN section 6). ALWAYS state lambda alongside a dynamic-wetting result.\n\n"
+          "`mu_liquid` is the liquid dynamic viscosity entering Ca_cl (solver units); `sigma` "
+          "defaults to whatever set_surface_tension holds. theta_e also becomes the static base "
+          "angle, so this call replaces set_contact_angle. U_cl is measured as -u.t_hat at the "
+          "anchor fluid cell of each band cell, with t_hat the IN-WALL direction of the fluid-side "
+          "PLIC normal (m points into the gas, so the liquid advances along -t_hat), then smoothed "
+          "with a 3-point mean along t_hat. Needs set_solid(..., cutcell_pressure=True) + "
+          "enable_vof; with no call every V5b number is byte-identical.")
+      .def(
+          "set_contact_angle_hysteresis",
+          [](S& s, double a, double r) { s.setContactAngleHysteresis(a, r); },
+          nb::arg("theta_a"), nb::arg("theta_r"),
+          "Rung V6 (WO-V6). Advancing / receding contact-angle hysteresis, in DEGREES. While the "
+          "measured apparent angle lies in [theta_r, theta_a] the contact line is PINNED and the "
+          "fill imposes the APPARENT angle itself — which reproduces the current interface exactly, "
+          "because the V5b fill is idempotent (WO-S finding 1), so no Young force appears and the "
+          "line does not move. Above theta_a the advancing angle is imposed and below theta_r the "
+          "receding one, each with the Cox-Voinov correction of set_contact_angle_dynamic when "
+          "that is also configured. Sets the static base to (theta_a+theta_r)/2 if no angle was "
+          "set yet.")
+      .def(
+          "set_contact_angle_dynamic_off", [](S& s) { s.setContactAngleDynamicOff(); },
+          "Turn the V6 dynamic angle and hysteresis off; the static V5b angle stands again.")
+      .def(
+          "set_contact_angle_smoothing", [](S& s, bool on) { s.setContactAngleSmoothing(on); },
+          nb::arg("on"),
+          "ABLATION - the 3-point in-wall mean of U_cl (default ON). A MAC velocity next to a wall "
+          "is noisy cell to cell and the cube root of the Cox-Voinov relation puts that noise "
+          "straight into the imposed angle; off measures what the smoothing is worth.")
+      .def(
+          "set_contact_angle_clamp",
+          [](S& s, double lo, double hi) { s.setContactAngleClamp(lo, hi); }, nb::arg("lo"),
+          nb::arg("hi"),
+          "The clamp on the Cox-Voinov cube, in degrees (default 1 / 179). The cubic has no "
+          "solution beyond the maximum receding capillary number (film entrainment) and the fill's "
+          "plane construction degenerates at 0/180.")
+      .def(
+          "vof_dynamic_field", [](S& s, int w) { return field_out(s, s.getVofDynamicField(w)); },
+          nb::arg("which"),
+          "The V6 per-cell dynamic-wetting state on the inner region, as (nx,ny,nz): 0 the IMPOSED "
+          "angle in degrees, 1 the measured APPARENT angle in degrees, 2 the smoothed U_cl "
+          "(positive = the liquid ADVANCES), 3 Ca_cl, 4 the state (0 not a contact cell, 1 "
+          "Cox-Voinov on the static base, 2 PINNED, 3 advancing, 4 receding). Regenerates the fill, "
+          "so it is also the direct gate on the pass's decomposition independence.")
       .def(
           "vof_has_geometry", [](S& s) { return s.vofHasGeometry(); },
           "True when the colour advection is running the CUT-CELL (openness-weighted) kernels, "

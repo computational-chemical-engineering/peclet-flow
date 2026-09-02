@@ -56,6 +56,7 @@
 #include "vof/momentum_advect.hpp"  // VoF rung V2b: momentum-consistent rho^c u_c transport
 #include "vof/surface_tension.hpp"  // VoF rung V4: balanced-force CSF + the capillary dt
 #include "vof/phase_change.hpp"    // VoF Part II rungs P0/P1: mass flux, plane-shift regression
+#include "vof/wetting_dynamic.hpp"  // VoF rung V6: dynamic contact angle + hysteresis
 
 namespace peclet::flow {
 
@@ -2560,6 +2561,27 @@ class Solver {
         vofAdv_.buildWettingNormals();
         for (int d = 0; d < 3; ++d)
           vofExchangeRaw(vofAdv_.wettingNormal(d));
+        // Rung V6 (WO-V6): produce the theta FIELD the pass is about to read. Pass A measures the
+        // apparent angle and the raw contact-line speed at ghost depth <= 2 from already-exchanged
+        // data; both are then exchanged so the 3-point in-wall smoothing of pass B, which reaches
+        // depth 3, reads the OWNER's values — the same argument that makes the V5b fill bitwise
+        // across np. Five extra exchanges per fill (three velocity components + two measurements),
+        // skipped entirely when no dynamic angle is configured.
+        if (vofDyn_.active() && vofDyn_.allocated()) {
+          buildVofCellVelocity();
+          vofDyn_.sigma = effectiveContactSigma();
+          if (!(vofDyn_.sigma > 0.0) && vofDyn_.dynamic && !contactSigmaWarned_) {
+            contactSigmaWarned_ = true;
+            std::fprintf(stderr,
+                         "peclet.flow: set_contact_angle_dynamic is active but sigma is 0 "
+                         "(no set_surface_tension and no explicit sigma) - Ca_cl is 0 and the "
+                         "Cox-Voinov correction is inert.\n");
+          }
+          vofDyn_.measure(vofAdv_);
+          vofExchangeRaw(vofDyn_.uclRaw());
+          vofExchangeRaw(vofDyn_.valid());
+          vofDyn_.impose(vofAdv_);
+        }
       }
       vofAdv_.solidBandFill();
       vofExchangeRaw(f);
@@ -5881,6 +5903,107 @@ class Solver {
     vofAdv_.wettingPivot = mode;
   }
   int contactAnglePivot() const { return contactPivot_; }
+
+  // --- rung V6 (WO-V6): the DYNAMIC contact angle and hysteresis --------------------------------
+  //
+  // Nothing in the V5b fill changes; only the VALUE of theta per contact cell does. See
+  // `vof/wetting_dynamic.hpp` for the model (Afkhami, Zaleski & Bussmann, JCP 228:5370 (2009)):
+  //
+  //    theta_Delta^3 = theta_e^3 + 9 Ca_cl ln(Delta/lambda),   Ca_cl = mu_l U_cl / sigma
+  //
+  // with `Delta` the CELL SIZE and `lambda` an EXPLICIT slip length in cells. The explicit slip is
+  // the whole point: a VoF contact line's numerical slip is proportional to `Delta`, so without it
+  // the imposed angle is silently grid-dependent (VOF_PLAN §6). NEVER report a dynamic-wetting
+  // result without stating lambda.
+  //
+  // @param thetaEDeg   the equilibrium (static base) angle, degrees. Also becomes the static angle.
+  // @param slipCells   lambda / Delta, in CELLS. Must lie in (0, 1) — lambda >= Delta would make
+  //                    ln(Delta/lambda) <= 0 and REVERSE the correction.
+  // @param muLiquid    the LIQUID dynamic viscosity entering Ca_cl (solver units).
+  // @param sigma       the surface tension entering Ca_cl; <= 0 means "use set_surface_tension".
+  void setContactAngleDynamic(double thetaEDeg, double slipCells, double muLiquid,
+                              double sigma = 0.0) {
+    if (!(slipCells > 0.0 && slipCells < 1.0))
+      throw std::runtime_error(
+          "set_contact_angle_dynamic: slip_length_cells must lie in (0, 1) cell (lambda < Delta)");
+    if (!(muLiquid > 0.0))
+      throw std::runtime_error("set_contact_angle_dynamic: mu_liquid must be positive");
+    vofDyn_.dynamic = true;
+    vofDyn_.slip = slipCells;
+    vofDyn_.muLiquid = muLiquid;
+    contactSigmaOverride_ = sigma;
+    setContactAngle(thetaEDeg);  // sets the static base and (re)wires the theta field
+  }
+  // theta_a / theta_r, degrees. Composes with the dynamic correction when that is also set: the
+  // hysteresis selector picks the BASE angle and Cox-Voinov corrects it, except on the PINNED
+  // branch (theta_r <= theta_app <= theta_a), where the apparent angle itself is imposed and the
+  // idempotence of the V5b fill (WO-S finding 1) is what makes the contact line stand still.
+  void setContactAngleHysteresis(double thetaADeg, double thetaRDeg) {
+    if (!(thetaADeg >= thetaRDeg))
+      throw std::runtime_error("set_contact_angle_hysteresis: theta_a must be >= theta_r");
+    if (!(thetaRDeg >= 0.0 && thetaADeg <= 180.0))
+      throw std::runtime_error("set_contact_angle_hysteresis: angles must lie in [0, 180]");
+    const double toRad = 3.14159265358979323846 / 180.0;
+    vofDyn_.hysteresis = true;
+    vofDyn_.thetaA = thetaADeg * toRad;
+    vofDyn_.thetaR = thetaRDeg * toRad;
+    if (!contactAngleSet_)
+      setContactAngle(0.5 * (thetaADeg + thetaRDeg));  // a base is required; the mid angle
+    else
+      applyContactAngle();
+  }
+  // Back to the static V5b angle, byte-identically (the driver's views are kept but never read).
+  void setContactAngleDynamicOff() {
+    vofDyn_.dynamic = false;
+    vofDyn_.hysteresis = false;
+    applyContactAngle();
+  }
+  bool contactAngleDynamic() const { return vofDyn_.dynamic; }
+  bool contactAngleHysteresis() const { return vofDyn_.hysteresis; }
+  double contactAngleSlip() const { return vofDyn_.slip; }
+  // ABLATION: the 3-point in-wall mean of U_cl (default ON). Off = the raw per-cell MAC velocity.
+  void setContactAngleSmoothing(bool on) { vofDyn_.smooth = on; }
+  // The angle clamp of the Cox-Voinov cube, degrees (default 1 / 179).
+  void setContactAngleClamp(double loDeg, double hiDeg) {
+    if (!(loDeg > 0.0 && hiDeg < 180.0 && loDeg < hiDeg))
+      throw std::runtime_error("set_contact_angle_clamp: need 0 < lo < hi < 180");
+    const double toRad = 3.14159265358979323846 / 180.0;
+    vofDyn_.thetaMin = loDeg * toRad;
+    vofDyn_.thetaMax = hiDeg * toRad;
+  }
+  // The sigma the dynamic correction uses: the explicit override if one was given, else the CSF's.
+  double effectiveContactSigma() const {
+    return contactSigmaOverride_ > 0.0 ? contactSigmaOverride_ : sigmaCsf_;
+  }
+  // The per-cell dynamic-wetting state on the inner region: 0 the IMPOSED angle (degrees),
+  // 1 the measured APPARENT angle (degrees), 2 the smoothed U_cl, 3 Ca_cl, 4 the
+  // `vof::VofDynamicState`. Non-contact cells read 0 in 1..4 and the static base in 0.
+  std::vector<double> getVofDynamicField(int which) {
+    if (!vofEnabled_ || !vofDyn_.active() || !vofDyn_.allocated())
+      throw std::runtime_error(
+          "vof_dynamic_field: no dynamic contact angle (call set_contact_angle_dynamic / "
+          "set_contact_angle_hysteresis first)");
+    bridgeColourToVof();  // regenerates the fill, hence the dynamic pass
+    CCField t("vofDyn", n_);
+    const double toDeg = 180.0 / 3.14159265358979323846;
+    CCConst src;
+    if (which == 0)
+      src = CCConst(vofDyn_.imposed());
+    else if (which == 1)
+      src = CCConst(vofDyn_.apparent());
+    else if (which == 2)
+      src = CCConst(vofDyn_.speed());
+    else if (which == 3)
+      src = CCConst(vofDyn_.capillary());
+    else
+      src = CCConst(vofDyn_.stateField());
+    copyInner(t, e_, G, src, e3_, kVofG);
+    auto v = gatherInner(t);
+    if (which <= 1)
+      for (auto& q : v)
+        q *= toDeg;
+    return v;
+  }
   struct ContactAngleDiagnostics {
     long contactCells = 0;    ///< band cells written by the theta plane of their own anchor
     long neighbourCells = 0;  ///< band cells written by the mean of the anchor's MIXED neighbours
@@ -5890,6 +6013,15 @@ class Solver {
     long unfilledCells = 0;   ///< SOLID cells pass 1 left untouched (passes 2-3 then fill them)
     double meanApparentAngle = 0.0;  ///< mean measured apparent angle over `contactCells`, degrees
     double setAngle = 0.0;           ///< the prescribed angle, degrees (uniform case)
+    // --- rung V6 (WO-V6), all zero unless a dynamic angle / hysteresis is configured -----------
+    long dynamicCells = 0;    ///< band cells the V6 pass produced an angle for
+    long pinnedCells = 0;     ///< of those, cells whose contact line is PINNED
+    long advancingCells = 0;  ///< theta_app > theta_a
+    long recedingCells = 0;   ///< theta_app < theta_r
+    double meanImposedTheta = 0.0;    ///< mean IMPOSED angle over the V6 contact cells, degrees
+    double meanApparentTheta = 0.0;   ///< mean apparent angle over the same set, degrees
+    double maxCaCl = 0.0;             ///< max |Ca_cl| = |mu_l U_cl / sigma|
+    double maxContactSpeed = 0.0;     ///< max |U_cl| (smoothed), solver velocity units
   };
   // The band census of the CURRENT colour field: how many band cells each branch of the fill wrote
   // and the mean APPARENT angle the fluid-only normal reported at the contact cells (G1's
@@ -5911,6 +6043,17 @@ class Solver {
     d.pureCells = counts[vof::kVofWetPure];
     d.parallelCells = counts[vof::kVofWetParallel];
     d.neutralCells = counts[vof::kVofWetNeutral];
+    if (vofDyn_.active() && vofDyn_.allocated()) {
+      const auto cs = vofDyn_.census(vofAdv_);
+      d.dynamicCells = cs.contactCells;
+      d.pinnedCells = cs.cells[vof::kVofDynPinned];
+      d.advancingCells = cs.cells[vof::kVofDynAdvancing];
+      d.recedingCells = cs.cells[vof::kVofDynReceding];
+      d.meanImposedTheta = cs.meanImposedDeg;
+      d.meanApparentTheta = cs.meanApparentDeg;
+      d.maxCaCl = cs.maxCa;
+      d.maxContactSpeed = cs.maxSpeed;
+    }
     return d;
   }
   // Wire the theta field + the wall SDF onto the colour block. Idempotent; called by the setters
@@ -5937,6 +6080,50 @@ class Solver {
       scatterInner(t, rad);
       copyInner(vofAdv_.contactAngle(), e3_, kVofG, CCConst(t), e_, G);
       vofExchangeRaw(vofAdv_.contactAngle());
+    }
+    // (c) rung V6: the STATIC base the dynamic selector starts from. The V6 pass OVERWRITES
+    //     `contactAngle()` every fill, so it must never read back its own previous output.
+    if (vofDyn_.active()) {
+      vofDyn_.allocate(vofAdv_.size());
+      Kokkos::deep_copy(vofDyn_.base(), vofAdv_.contactAngle());
+    }
+  }
+  // Cell-centre velocity on the colour block, for the V6 contact-line speed. Built from the
+  // solver's own staggered faces (`0.5*(u(i) + u(i+s_c))`, both valid after `fillVelGhosts`) on
+  // the INNER region and then run through the colour field's ghost policy, exactly as the wall SDF
+  // and the fluid-only normals are — that is what keeps the imposed angle decomposition-
+  // independent (WO-S finding 9 applied to a third field).
+  void buildVofCellVelocity() {
+    if (!vofDyn_.allocated())
+      return;
+    if constexpr (Grid::collocated)
+      throw std::runtime_error("set_contact_angle_dynamic: SolverColocated has no immersed solid");
+    const long st[3] = {1, (long)e_.x, (long)e_.x * (long)e_.y};
+    for (int c = 0; c < 3; ++c) {
+      // The cell-centre mean reads the face ONE cell out on the component's own axis, so the
+      // velocity ghost ring has to be valid. Same rule as `bridgeVelocityToVof`: keep the
+      // projection's outflow-face correction when there is one, otherwise the full fill (the
+      // kinematic path, where the zero-gradient rule is what supplies the boundary face at all).
+      if (outflowCorrValid_)
+        fillVelGhostsKeepOutflow(c);
+      else
+        fillVelGhosts(c, 0);
+      if (vofDynVel_[c].extent(0) != n_)
+        vofDynVel_[c] = CCField("vofDynVel", n_);
+      CCField t = vofDynVel_[c];
+      CCConst u = CCConst(C[c].u);
+      const long sc = st[c];
+      const int ex = e_.x, ey = e_.y, g = G;
+      Kokkos::parallel_for(
+          "peclet::flow::vof_dyn_cellvel",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i = (long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey;
+            t(i) = 0.5 * (u(i) + u(i + sc));
+          });
+      CCExec().fence();
+      copyInner(vofDyn_.cellVel(c), e3_, kVofG, CCConst(t), e_, G);
+      vofExchangeRaw(vofDyn_.cellVel(c));
     }
   }
 
@@ -8006,6 +8193,13 @@ class Solver {
   double contactAngleDeg_ = 90.0;
   int contactPivot_ = vof::kVofPivotVolume;
   std::vector<double> contactAngleField_;
+  // rung V6 (WO-V6): the dynamic angle / hysteresis producer for the theta field. Inert unless
+  // set_contact_angle_dynamic / _hysteresis is called (`vofDyn_.active()`), in which case the
+  // whole V5b battery is byte-identical.
+  vof::VofDynamicWetting vofDyn_;
+  double contactSigmaOverride_ = 0.0;
+  bool contactSigmaWarned_ = false;
+  CCField vofDynVel_[3];
   vof::WyAdvector vofAdv_;         // the g=3 working block: PLIC + Weymouth-Yue sweeps
   C3 e3_{0, 0, 0};                 // extended extents of that block (n + 2*kVofG)
   double vofCflLimit_ = 0.25;      // Weymouth's proven 3D boundedness bound 1/(2(N-1))
