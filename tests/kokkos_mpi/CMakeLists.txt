@@ -55,6 +55,19 @@ endforeach()
 # VoF rung V1: distributed Weymouth-Yue advection. Standalone (its own g=3 colour halo, no
 # CutcellMG), so it does NOT need PECLET_FLOW_MPI; it shares the scene builders with the
 # single-rank battery in tests/kokkos.
+# VoF Part III rung W0 (WO-W0): the distributed per-bubble BLOCK container. Standalone (its own
+# block advectors + the block gather/scatter over the core BlockDecomposer), so it does NOT need
+# PECLET_FLOW_MPI; it shares the scene builders with the single-rank battery in tests/kokkos.
+add_executable(test_vof_blocks_mpi test_vof_blocks_mpi.cpp)
+target_include_directories(test_vof_blocks_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${TPX_DIR}/include)
+target_compile_definitions(test_vof_blocks_mpi PRIVATE PECLET_FLOW_MPI)
+target_link_libraries(test_vof_blocks_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX)
+foreach(np 1 2 4)
+  add_test(NAME vof_blocks_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_vof_blocks_mpi>)
+endforeach()
+
 add_executable(test_vof_advect_mpi test_vof_advect_mpi.cpp)
 target_include_directories(test_vof_advect_mpi PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${TPX_DIR}/include)

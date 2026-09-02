@@ -267,6 +267,53 @@ transport, the band-extended velocity, `tests/kokkos/test_vof_phase_change.cpp` 
 
 ---
 
+## WO-W12 — Part III, rungs W1 (many bubbles, redistribution, statistics) and W2 (NS coupling, channel_18)  [OPUS, after WO-W0]
+
+Build on WO-W0 as shipped (read its findings: the partitioned gather/scatter, the bitwise horizon
+and `bubbleEps`, the round-robin master imbalance 1.3–2.0, host-staged packing, the re-centring
+reallocation, all-fluid only).
+
+**W1.** (a) Master assignment by the weighted ORB: weights = block cell counts, through
+`BlockDecomposer::init(…, weights)` on a 1-D "block space", or simply a greedy longest-processing-
+time assignment over ranks (measure both; ship the one with the better max/mean on a 64-bubble
+swarm at np 4/8 — LPT is deterministic and needs no communication, which the bitwise gate likes);
+periodic re-assignment every N steps with block state migrated (the colour box is a contiguous
+buffer — send it). (b) Device-resident packing (the pack/unpack kernels run on the block's
+memory space; host staging only at the MPI boundary if the MPI is not CUDA-aware — check how
+`GridHalo`'s device-resident variant does it). (c) A block pool so re-centring does not reallocate.
+(d) Per-bubble Lagrangian outputs through Python: `vof_block_stats()` → id, volume, centroid,
+velocity, the 3×3 second-moment tensor (deformation), and a per-bubble `interface_area` from the
+PLIC polygons (the gallery asked for one). Gates: 64 bubbles in the LeVeque field at np 1/2/4/8
+**bitwise** across np and across re-assignment events; every marker's volume to 1e-14; measured
+imbalance before/after (report); packing time device vs host (report, not gated).
+
+**W2.** NS coupling: the union `C` drives the closures as today; curvature per block
+(`VofCurvature` on the block, the same cascade) and the CSF face force formed ON THE BLOCK
+(`σ κ_f ΔC/h` with the V4 rule on the block's faces) scattered **UNPACK_SUM** into three global
+face-force fields that `addCsfRhs` consumes in "block mode" (a sibling branch; the global-field
+mode is byte-identical when blocks are off). The face velocity gathered to the block is the
+projected `u^{n+1}` exactly as `advectVof` uses it. Momentum consistency is NOT in W2 (blocks are
+rated to ratio ~100 with motion, like V2a; W2b = the design for the union-field momentum
+sweeps). Gates: (1) **Hysing case 1 through the block path equals the global-field run** within
+1 % on max rise velocity and `y_c(3)` (both without `enable_vof_momentum`, quasi-2D 64×128×4);
+(2) a single 3-D rising bubble at Eo = 10, Mo = 1e-3 (ratio 100) against the Grace-diagram terminal
+velocity / Duineveld-class shape within 10 %; (3) **two bubbles head-on** (one rising, one held
+by a counter-flow or two rising in line): no numerical coalescence, film drains to one cell and
+the blocks stay two; (4) **`channel_18`**: transcribe TBFsolver's `channel_18` case
+(`/home/frankp/Codes/TBFsolver/channel_18`: read its input files for the domain, the 18 bubble
+seeds, Eo/Re/ratio, the wall BCs and the body force) to the block path at TBFsolver's resolution
+or the nearest power of two; run to a statistically steady state as far as the GPU allows; report
+the void-fraction profile across the channel and the mean liquid velocity profile against
+whatever TBFsolver's case directory ships (if it ships no reference data, report ours as the
+first datum and say so); (5) MPI np 1/2/4 at the reduction floor with bubbles cut by the ORB;
+(6) every existing VoF ctest bit-identical.
+
+Deliverables: the W1 pieces in `src/vof/block_container.hpp`/`block_exchange.hpp`, the block CSF
+mode, bindings, `tests/kokkos/test_vof_blocks.cpp` extended, MPI twin, `tests/study/vof_blocks_swarm.py`,
+`tests/study/vof_channel_18.py`, findings, CLAUDE.md.
+
+---
+
 ## WO-V7 — the pore-scale campaign (after WO-R2)  [OPUS runs, Fable/user interpret]
 
 Three cases, each a script under `tests/study/pore_scale/` and together one gallery page
@@ -300,6 +347,213 @@ pressure iterations vs cap; a capped run is not a data point. Report ms/step and
 # Findings log (v6 work orders)
 
 (append per WO, newest first)
+
+## WO-W0 findings (2026-09-02, Opus) — Part III rung W0: the block container + the L1 promotion
+
+Branches `vof-w0` in **flow** and in **core** (the move touches both repos). Backends: CUDA
+(RTX 5080, `nvidia-cuda` prefix) and OpenMP (`host-openmp`), both for every gate. MPI np 1/2/4.
+`OMP_NUM_THREADS=8 OMP_PROC_BIND=false` throughout. No timings are quoted: the host was carrying
+several other agents' jobs (load average ~30) for the whole session.
+
+### Item 6 first, alone — the L1 promotion (gate G5)
+
+`plic.hpp`, `curvature.hpp`, `cutcell.hpp`, `wetting.hpp` moved verbatim to
+`core/include/peclet/core/vof/` under `peclet::core::vof`; flow's four headers became **thin
+includes + one using-DIRECTIVE**. A directive rather than a list of using-declarations because
+qualified lookup into a namespace follows its using-directives ([namespace.qual]) — so both
+`peclet::flow::vof::plicVolume` and an unqualified call from inside `peclet::flow::vof` resolve, and
+a kernel added in core later needs no edit in flow. That is what keeps the concurrent WO-R2 / WO-V6 /
+WO-P01 edits to `advect_wy.hpp` / `cutcell.hpp` / `wetting.hpp` applying unchanged.
+
+**G5: BIT-IDENTICAL, both backends.** The whole VoF ctest battery (`vof_plic`, `vof_advect`,
+`vof_twophase`, `vof_momentum`, `vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`,
+`vof_bc`, `vof_collocated`) was run under `ctest -V` before and after the move on each backend, and
+the two logs are **identical line for line** after stripping only the build-directory paths: 415
+lines of measured output on OpenMP, 416 on CUDA. 10/10 pass either side.
+
+Two build facts the move exposed, both fixed here:
+- `tests/kokkos/CMakeLists.txt` handed `${CORE_INC}` to only some targets (not `test_vof_plic`,
+  `test_vof_advect`, `test_vof_curvature`). Since `src/vof/*.hpp` now include `peclet/core/vof/…`,
+  **any** target that compiles a `src/` header needs the path; the fix is one directory-wide
+  `include_directories("${CORE_INC}")` next to `peclet_sibling_include`, not per-target patching.
+- `peclet_sibling_include()` resolved the sibling only as `<source>/../core`, which cannot be
+  pointed at a git WORKTREE — and worktrees are how this suite runs concurrent agents. It now
+  honours `-DPECLET_SIBLING_PECLET_CORE=<repo root>` (unset ⇒ byte-identical behaviour). Every
+  build in this WO used `-DPECLET_SIBLING_PECLET_CORE=…/core-w0` / `-DTPX_DIR=…/core-w0`.
+- **A pre-existing merge artefact on `main`** (`tests/kokkos_mpi/CMakeLists.txt`, since before
+  `518c2a5`): the gated `foreach` list closed with `vof_collocated_mpi)` and was followed by a
+  DANGLING argument line `vof_surface_tension_mpi vof_cutcell_mpi vof_bc_mpi)`. CMake cannot parse
+  it, so **the whole `tests/kokkos_mpi` project failed to configure** and `vof_bc_mpi` had silently
+  been dropped from the build. Repaired on this branch (its own commit) — the MPI battery could not
+  be built at all otherwise — and independently on `main` by the concurrent WO-P01 session
+  (`9f59d54`) while this WO ran, so the commit was dropped in the rebase. Corroborates that
+  session's finding: anyone's MPI numbers taken from `main` between `86192ad` and `9f59d54` came
+  from a build that could not have been configured.
+
+### The container (items 1–5)
+
+`src/vof/block_container.hpp` (`VofBox`, `VofRun`/`vofAxisRuns`, `VofBlock`, `VofBlockStats`,
+`VofBlockSet`) is MPI-free index math + orchestration; `src/vof/block_exchange.hpp` (`VofPiece`,
+`vofBuildPieces`, `VofBlockExchange`) is the gather/scatter, MPI-guarded and a strided copy at
+`size == 1`. Solver plumbing: `enable_vof_blocks(seeds)` / `disable_vof_blocks()` /
+`advect_vof_blocks(dt)` / `vof_block_stats()` / `vof_block_imbalance()` / `vof_block_census()`,
+all bound. Nothing is allocated unless `enable_vof_blocks` runs (**gate G6**: the container is
+additive, and the G5 battery above is the same battery, so every existing VoF ctest is
+bit-identical with the container in the build).
+
+**Gate P (added — the plan self-check the work order did not ask for and should have).** The
+gather/scatter pieces must PARTITION a block's box: every block-local cell written by exactly one
+owner's piece. Verified against a 4-way ORB of a 32³ grid for an interior box, a box crossing the
+−x seam, one crossing the +x seam, one hanging outside a WALLED axis, and one spanning the whole
+grid: **4 / 4 / 4 / 2 / 4 pieces, 4096 / 4096 / 4096 / 3328 / 32768 cells, written-once =
+cells, multiply-written = 0** in every case. This is what makes arrival order irrelevant, and hence
+the bitwise gates possible; it is cheap and it caught the axis-run enumeration bug (a box longer
+than a periodic axis — the extended box of a block that spans the axis — must produce THREE runs,
+not throw: the runs partition the range in block-LOCAL index, and revisiting the same global cells
+is exactly the periodic ghost).
+
+**Gate G1 — one bubble vs the global field. The work order's gate as written is unattainable, and
+the reason is not the container (hard rule 4).** The V1 LeVeque scene (32³, T = 3, 768 steps, CFL
+0.25), one sphere as a block, compared against a plain whole-grid `WyAdvector` driven by the same
+face field:
+
+| `bubbleEps` | bitwise horizon | max\|d\| over 768 steps | re-centrings | largest box | union volume drift |
+|---|---|---|---|---|---|
+| 0 (exact support) | **8 steps** | 1.215e-63 | 4 | 32768 cells = **100 %** of the grid | 5.890e-15 |
+| 1e-12 (production) | **5 steps** | 4.337e-19 | 12 | 26071 cells = **79.6 %** | 5.890e-15 |
+
+Mechanism: Weymouth–Yue leaves round-off residue in every cell its sweeps touch (documented at V4
+down to −3e-35; here down to ±1e-300 and to signed zeros). That residue is part of the global
+field's state and is deliberately **not** part of a marker's — the block's ghost policy is "outside
+my box it is pure gas", which is the marker model. Once the residue has left the block's box the
+global field fluxes it back across the block boundary and the block does not, so the two differ by
+the residue and by nothing else (1.2e-63 and 4.3e-19 against a colour of order 1). The alternative
+ghost policy — ghosting from the UNION — WOULD reproduce the global field bit for bit, and would let
+a neighbouring marker's colour flux in, i.e. coalesce. So the gate is a choice between "bitwise" and
+"the whole point of the container".
+
+**Corrected G1**, and it passes: (a) bitwise while the block's box still holds the global field's
+support, (b) thereafter max|d| bounded by the residue (measured above), (c) union volume conserved
+to 5.9e-15, (d) the union differs from the global field ONLY by the UNPACK_MAX clip (below), and
+(e) an exactly bitwise case where the residue does not escape — the G3 translating sphere, **max|d|
+= 0.000e+00 over 100 steps**. (e) is the real container gate and is where the "same kernels,
+different container" claim is actually tested.
+
+**`bubbleEps` is load-bearing, not cosmetic.** With the extent defined by `C != 0` the box grows
+along the bubble's whole WAKE and the block degenerates into the global field: 100 % of a 32³ grid
+after 768 LeVeque steps, and on the translating sphere 18081 cells (a box that only ever grows,
+`lo_x` pinned at its start) against **9261 cells and a box that genuinely translates, `lo_x` 1 → 20**
+at 1e-12. 1e-12 sits 12 orders below any physical colour and ~5 above the residue. What it drops is
+accumulated and reported (`vof_block_stats()['discarded']`, measured **−9.5e-17** over the 20-cell
+translation of a 524-cell bubble) — measured as the colour of old-box cells falling outside the new
+box, NOT as `sum(old) − sum(new)`, which at |sum| ~ 1e2 is 1e-13 of summation rounding and says
+nothing (that naive version read −5.7e-14 and was meaningless).
+
+**UNPACK_MAX clips the negative residue.** `C = max_blocks C_block` starting from an empty union
+turns a −1e-17 wisp into an exact 0. Over the LeVeque reversal, 32036 union cells differ from the
+global field, max|d| **6.245e-17**, and **0 of them** were anything other than that clip (checked
+cell by cell: `ref < 0 && union == 0`). This is inherent to TBFsolver's UNPACK_MAX and is recorded
+rather than worked around; it is also why the union is compared to the global field separately from
+the block.
+
+**Gate G2 — two bubbles, no coalescence. PASS, and it is the rung's raison d'être.** Two spheres
+(r = 0.10, 48³) either side of the attracting plane of a solenoidal cellular field sampled as a
+DISCRETE CURL of a stream function (so the discrete face divergence telescopes), 216 steps at
+CFL 0.20, with the flow reversing at T/2:
+- **236 cells carry BOTH markers** at closest approach, and the union DEFICIT `ΣV_marker − ΣC_union`
+  peaks at **30.014 cells of shared liquid** — an overlap that is structurally impossible in a
+  single colour field;
+- per-marker volume drift **1.718e-15** and **2.577e-15**; union volume drift 1.718e-15;
+- after the reversal the blocks recover two separated bubbles (**neck colour 0.000e+00**) while the
+  single-field control has merged them irreversibly (**neck 7.697e-01**); recovery L1 against the
+  initial field **50.72 (blocks)** vs **65.22 (control)**, ratio 1.29.
+
+*One scene fact worth keeping*: put the attracting plane on a cell **face** and the gate is
+structurally impossible — each marker stays on its own side of the face and no cell can carry both.
+Measured 0 shared cells with the plane at x = 1/2 on a 48³ grid; shifting it to a cell CENTRE gives
+the 236 above. The gate is about a cell, so the geometry has to put a cell there.
+
+**Gate G3 — re-centring. PASS.** A sphere translated 20 cells (48³, CFL 0.2, 100 steps), moving
+block (margin 3 + pad 2) against a block large enough never to move (`allowShrink = false`, box =
+the whole grid):
+
+| `bubbleEps` | moving box | re-centrings (moving / fixed) | first differing step | max\|d\| | volume drift | centroid x |
+|---|---|---|---|---|---|---|
+| 0 | [0,41)×[14,35)×[14,35), lo_x 1 → 0 | 7 / 0 | none | **0.000e+00** | 2.171e-16 | 0.63579 (exact 0.63542) |
+| 1e-12 | [20,41)×[14,35)×[14,35), lo_x 1 → **20** | 7 / 0 | 38 | 3.860e-18 | 4.342e-16 | 0.63579 |
+
+The re-centring copy is by GLOBAL index and therefore exact; at `bubbleEps = 0` nothing is dropped
+and the moving block is **bitwise** the fixed one for all 100 steps.
+
+**Gate G4 — distributed, np 1/2/4. PASS, BITWISE.** `tests/kokkos_mpi/test_vof_blocks_mpi.cpp`
+runs each scene distributed AND as the same container on one rank on every rank, and compares this
+rank's slice of the union bitwise: **first differing step −1 (none) in all three scenes at np 1, 2
+and 4**, and the per-marker volumes agree with the single-rank run to **0.000e+00**. The
+decomposition cuts the bubbles by construction (the ORB of 2/4 ranks splits the grid across the
+seeds), and masters are round-robin by block id, so on the three-bubble scene at np ≥ 2 **one
+block's master owns none of its own cells** and its entire state arrives by message.
+
+*The exchange.* The block table (id, box, master) and the flow decomposition are both replicated, so
+every rank computes every message size as a pure function of the two — plain `MPI_Isend/Irecv` with
+precomputed counts, **no NBX handshake** (it would pay a full round of unexpected-message discovery
+to learn what both sides already know; `core::NbxEngine` stays for W1's redistribution, where the
+*assignment* changes). Measured per step on rank 0:
+
+| scene | np | gather | scatter |
+|---|---|---|---|
+| 1 bubble / LeVeque 32³ | 2 | 259 584 B in 1 msg | 41 600 B in 1 msg |
+| | 4 | 346 944 B in 3 msgs | 48 640 B in 3 msgs |
+| 2 bubbles / cellular 48³ | 2 | 479 232 B in 2 msgs | 67 200 B in 2 msgs |
+| | 4 | 539 136 B in 4 msgs | 80 640 B in 4 msgs |
+| 3 bubbles / translation 32³ | 2 | 551 376 B in 3 msgs | 82 280 B in 3 msgs |
+| | 4 | 399 336 B in 5 msgs | 49 008 B in 5 msgs |
+
+(The gather carries three doubles per EXTENDED-box cell, the scatter one per INNER-box cell, hence
+the ~6.5× ratio.) Packing is host-staged (`create_mirror_view_and_copy` per call): W0 is a
+correctness rung and a 20³ extended block is ~190 kB; the device-resident packing kernel and the
+CUDA-aware path are the W1/W2 optimisation, in the same order `core`'s grid halo grew.
+
+**Load balance (item 5) — the measured imbalance, and W0's known weakness.** Round-robin master
+assignment, `vof_block_imbalance()` = max/mean of the per-rank block-cell load:
+
+| blocks | np=1 | np=2 | np=4 |
+|---|---|---|---|
+| 1 | 1.000 | 2.000 (masters 1,0) | 4.000 (masters 1,0,0,0) |
+| 2 | 1.000 | 1.000 (1,1) | 2.000 (1,1,0,0) |
+| 3 | 1.000 | **1.337** (2,1 — 11772 vs 5832 cells) | **1.559** (1,1,1,0 — 6859/5832/4913/0) |
+
+So with fewer blocks than ranks the surplus ranks are simply idle, and even with blocks ≥ ranks the
+round robin is blind to block SIZE (the np=2 three-bubble case is 1.337 purely because ids 0 and 2
+are the two large bubbles). Both are exactly what the weighted-ORB assignment of rung W1 is for;
+`vof_block_census()` reports the per-rank breakdown these numbers come from.
+
+### After the rebase onto `main`
+
+The branch was rebased onto `b4c829a` (which had meanwhile taken WO-P01's phase-change rung and the
+`movingscene_advect_mpi` gate). Rebuilt and re-run there: **`tests/kokkos` 12/12 pass** (the ten VoF
+ctests plus `vof_phase_change` and the new `vof_blocks`), `test_vof_blocks_mpi` **PASSED at np 1, 2
+and 4**, and the flow Python module builds. The bit-identity measurement above was taken against the
+tree the move was made on (`518c2a5`); the rebase touched no file the move touched, and `plic.hpp` /
+`curvature.hpp` / `cutcell.hpp` / `wetting.hpp` came through the rebase without a conflict, which is
+the direct evidence that nothing upstream had edited them.
+
+### Open / deferred
+
+1. **The block ghost policy discards the global field's round-off wake** — measured above, bounded
+   by the residue, and it is the marker model rather than a defect; but it does mean a block run and
+   a global-field run of the same physical problem are not bit-comparable beyond the wake horizon.
+   Worth stating in any W1–W3 cross-check.
+2. **`bubbleEps` has no fragment/satellite policy behind it yet.** TBFsolver culls fragments
+   explicitly; W0 only thresholds the EXTENT and reports what that drops. A real breakup (a detached
+   ligament above the threshold) would grow the box instead of becoming its own block — that is W4.
+3. **Host-staged packing** (above) — the W1/W2 lever, with no measurement yet because the host was
+   loaded all session.
+4. **The block container is all-fluid.** `enable_vof_blocks` raises on `set_solid`; the cut-cell
+   block (openness-weighted fluxes on the block's own geometry) is W12 together with the NS
+   coupling.
+5. **Re-centring reallocates a `WyAdvector`.** Deterministic and exact, but a translating bubble at
+   `recentrePad = 2` re-centres every ~3 steps and each one allocates 10 fields of the new box. A
+   pool, or growing in place, is the obvious W1 cleanup.
 
 ## WO-P01 findings (Part II, rungs P0 + P1) — 2026-09-02, Opus
 
@@ -437,4 +691,3 @@ that commit added and which therefore has never been registered. Fixed on this b
 same way in `9f59d54` while this WO ran, and the rebase merged the two lists. Anyone's MPI numbers
 taken from `main` between 86192ad and 9f59d54 came from a build that could not have been
 configured.
-

@@ -19,6 +19,10 @@ message(STATUS "cfd/kokkos: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES})")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake")
 include(PecletDeps)
 peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../../../core" CORE_INC)
+# WO-W0: the container-free VoF kernels moved to core (peclet::core::vof) and flow's src/vof/*.hpp
+# are thin includes of them, so ANY target that compiles a src/ header needs the core include path,
+# not only the ones that reach for the field registry. Directory-wide (the headers are header-only).
+include_directories("${CORE_INC}")
 
 enable_testing()
 add_executable(test_reductions test_reductions.cpp)
@@ -225,6 +229,14 @@ add_test(NAME poiseuille_ibm COMMAND test_poiseuille_ibm)
 # projected face field. The gated quantity on this grid is the FACE field (the cell field carries
 # the approximate projection's invisible checkerboard, measured here against its constant-density
 # control).
+# VoF Part III rung W0 (WO-W0): the per-bubble BLOCK container (block_container.hpp +
+# block_exchange.hpp). Standalone -- its own advectors and its own serial exchange, no Solver.
+add_executable(test_vof_blocks test_vof_blocks.cpp)
+target_include_directories(test_vof_blocks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_blocks PRIVATE Kokkos::kokkos)
+add_test(NAME vof_blocks COMMAND test_vof_blocks)
+
 add_executable(test_vof_collocated test_vof_collocated.cpp)
 target_include_directories(test_vof_collocated PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
                            ${CMAKE_CURRENT_SOURCE_DIR} ${CORE_INC})
