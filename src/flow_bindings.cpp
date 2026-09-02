@@ -539,6 +539,28 @@ static void bind_solver(nb::module_& m, const char* name) {
           "f_c*N_c + sum fb + [1]_c - [0]_c; the Stokes form drops both because they vanish at "
           "steady state with advection off. sum_i A_i is the advection operator's net momentum "
           "flux through the cut walls -- an O(h) property of that operator, not of the budget.")
+      .def(
+          "moving_instance_cut_cells",
+          [](S& s) {
+            std::vector<long> v = s.movingInstanceCutCells();
+            std::vector<double> d(v.begin(), v.end());
+            return peclet::core::python::vector_to_ndarray(std::move(d), {v.size()}, {1});
+          },
+          "Per instance: inner cells on this rank it owns that touch a fractional face aperture, "
+          "recounted whenever any instance moves. ZERO for a moving instance means its surface "
+          "sits on grid planes (or is sub-cell) and its wall velocity is silently inert "
+          "(set_solid_from_scene warns). Empty when no instance moves.")
+      .def(
+          "moving_instance_degenerate_points",
+          [](S& s) {
+            std::vector<long> v = s.movingInstanceDegeneratePoints();
+            std::vector<double> d(v.begin(), v.end());
+            return peclet::core::python::vector_to_ndarray(std::move(d), {v.size()}, {1});
+          },
+          "Per instance: staggered velocity points where the sampled SDF is EXACTLY zero -- a face "
+          "on a lattice plane. Those points are fluid to the mask and not ghosts to the cut-cell "
+          "fold, so a moving body's datum never enters there (set_solid_from_scene warns). Empty "
+          "when no instance moves.")
       .def("periodic_image_overlap_cells", &S::periodicImageOverlapCells,
            "Cells on this rank whose solid/fluid sign was decided by a periodic IMAGE of an "
            "instance wider than the box (set_solid_from_scene warns when nonzero): the scene "
