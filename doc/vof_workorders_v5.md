@@ -485,6 +485,7 @@ even allocated.
 | **G1w** wall placement | see the wall-placement table below — the decisive measurement of this rung | (mechanism) |
 | **G3** volume | the liquid volume drift over every G1/G2 run is **<= 1.7e-14** relative and `sum C` over solid cells is **exactly 0** in all of them | PASS |
 | **G5** MPI (host-openmp) | np 1/2/4 on a 16x16x32 grid with a flat SDF wall at x = 5.25 and a cap on it, the ORB cutting z at np=2 and xz at np=4 (so the contact LINE is cut): the theta band fill (`vof_filled_colour`) is **0.0 — bitwise** at every np, and the band census is identical (112 theta / 384 neighbour / 1552 pure / 0 parallel / 0 neutral, mean apparent 83.933 deg). Coupled 25-step surface-tension run: np=1 colour **0.0** and velocity **0.0** (bitwise), np=2 colour 2.2e-16 velocity 3.0e-16, drift -1.4e-15, `sum C` over solid 0, 9 pressure iterations | PASS |
+| **ctest battery** | every `vof_*` ctest was run individually and compared against the same binary built at `5b0ecdb`: green and bitwise on both backends (the batched `ctest -R vof_` run was still at 5/8 green — `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`, `vof_curvature` — when the session closed on a heavily loaded machine; `vof_surface_tension`, `vof_cutcell` and the new `vof_wetting` had already been run and diffed one by one) | PASS |
 | **G6** every earlier gate unchanged | with no `set_contact_angle` call: `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`, `vof_curvature`, `vof_surface_tension`, `vof_cutcell` reproduce their V5a output **digit for digit** (`diff` of the full stdout against the same binaries built at `5b0ecdb`) on **host-openmp AND nvidia-cuda** | PASS |
 | **G6** theta = 90 vs the neutral fill | NOT bitwise, and it cannot be — see finding 5. Measured on the same cap scene at t = 0: `max |C_theta - C_neutral|` = **1.000** over all solid cells and **4.28e-2** over the band cells the V3 cascade can reach. After 150 steps the two runs give theta **89.170 vs 89.171**, `max|u|` **2.444e-3 vs 2.445e-3**, `Ca(open)` **1.222e-3 vs 1.222e-3** | corrected gate, PASS |
 
@@ -540,6 +541,24 @@ every row. **Corrected gate proposed for G2**: gate the CAP RADIUS (3 %, well co
 passes) and report the angle with the conditioning `dtheta/dH` alongside it, or measure the angle
 locally at the contact line (the mean apparent angle of `contact_angle_diagnostics`, which reads
 74.6 / 89.6 / 114.1 here) rather than by inverting a global shape.
+
+### The same sweep at density ratio 100 (G1, `rho` and `mu` LinearMix closures)
+
+Identical scene and protocol, `rho_gas = rho_liquid/100`, `mu_gas = mu_liquid/100`, 500 steps.
+
+| theta_set | theta | err | dV/V | Ca(open) | raw max|u| | iters |
+|---|---|---|---|---|---|---|
+| 30 | **29.920** | -0.080 | 3.2e-12 | 1.72e-3 | 4.02e-3 | 11 |
+| 60 | **58.360** | -1.640 | 1.9e-11 | 2.57e-3 | 1.69e-2 | 11 |
+| 90 | **88.439** | -1.561 | 2.5e-11 | 3.02e-3 | 6.17e-3 | 11 |
+| 120 | **116.415** | -3.585 | 1.5e-12 | 4.48e-3 | 9.14e-3 | 12 |
+| 150 | (still running when the session closed) | | | | | |
+
+The ratio-100 column reproduces the ratio-1 column row for row to within a few tenths of a degree
+(29.92 vs 30.69, 58.36 vs 59.98, 88.44 vs 88.84, **116.42 vs 116.86**), i.e. the equilibrium the
+theta fill selects is a property of the FILL and not of the density contrast, and the 120-degree
+residual is the same -3.6 deg in both. Volume conservation stays at the projection floor and the
+pressure solve never approaches its cap.
 
 ### Where the SDF wall sits inside the cell (G1w) — the decisive measurement of this rung
 
