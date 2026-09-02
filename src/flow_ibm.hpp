@@ -6739,6 +6739,18 @@ class Solver {
       throw std::runtime_error(
           "enable_vof_block_csf: the block CSF is STAGGERED-only at rung W2 (the collocated face "
           "-acceleration form is V8's, and composing the two is not this rung).");
+    // The block cascade must be the SAME estimator as the structured one -- above all the wisp
+    // guard: without `interfaceEps` a Weymouth-Yue round-off wisp is an "interfacial" cell whose
+    // zero-area PLIC polygon returns |kappa| ~ 1e8, and the face between it and a real interface
+    // carries a force eight orders too large.  Measured consequence when it was missing: the
+    // distributed run's CSF force differed from the single-rank one by 6.7e-3 after two steps,
+    // amplified from a 3e-16 colour difference by a flipped cascade branch.
+    vofBlocks_->curvProto.interfaceEps = csfInterfaceEps_;
+    vofBlocks_->curvProto.weightWidth = vofCurv_.weightWidth;
+    vofBlocks_->curvProto.monoTol = vofCurv_.monoTol;
+    vofBlocks_->curvProto.ptWeightWidth = vofCurv_.ptWeightWidth;
+    vofBlocks_->curvProto.cosMin = vofCurv_.cosMin;
+    vofBlocks_->curvProto.useMixedHeightFit = vofCurv_.useMixedHeightFit;
     vofBlocks_->enableCsf(sigmaCsf_);
     const long len3 = static_cast<long>(e3_.x) * e3_.y * e3_.z;
     for (int c = 0; c < 3; ++c) {
@@ -6755,6 +6767,14 @@ class Solver {
     vofBlocks_->computeCsf(vofBlkF_[0], vofBlkF_[1], vofBlkF_[2]);
     for (int c = 0; c < 3; ++c)
       copyInner(csfBlkF_[c], e_, G, CCConst(vofBlkF_[c]), e3_, kVofG);
+  }
+  // DIAGNOSTIC: the scattered block CSF face force on this rank's inner cells, component c (the
+  // low face of each cell, the same convention `addCsfRhs` uses). This is the field the block mode
+  // adds to the RHS; comparing it across decompositions is how a scatter defect is localised.
+  std::vector<double> getVofBlockForce(int c) {
+    if (!csfBlkF_[c].extent(0))
+      throw std::runtime_error("vof_block_force: call enable_vof_block_csf() first");
+    return gatherInner(csfBlkF_[c]);
   }
   // The summed branch census of the last block CSF (LOCAL to this rank).
   vof::VofCurvature::Stats vofBlockCurvatureStats() const {
