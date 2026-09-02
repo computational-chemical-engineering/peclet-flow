@@ -76,6 +76,14 @@ target_include_directories(test_vof_plic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../
 target_link_libraries(test_vof_plic PRIVATE Kokkos::kokkos)
 add_test(NAME vof_plic COMMAND test_vof_plic)
 
+# VoF Part II rungs P0/P1 (WO-P01): the PLIC polygon area, the one-sided gradient fit, planar
+# regression, the divergence source at ratio 100, and the 1-D Stefan problem.
+add_executable(test_vof_phase_change test_vof_phase_change.cpp)
+target_include_directories(test_vof_phase_change PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_phase_change PRIVATE Kokkos::kokkos)
+add_test(NAME vof_phase_change COMMAND test_vof_phase_change)
+
 # VoF rung V1: Weymouth-Yue split geometric advection on prescribed velocity fields.
 add_executable(test_vof_advect test_vof_advect.cpp)
 target_include_directories(test_vof_advect PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src

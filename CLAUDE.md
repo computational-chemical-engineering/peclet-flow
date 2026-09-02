@@ -733,13 +733,16 @@ Measured with it on: ∂P/∂z relative error **0.34** instead of 1e-15. It ship
 the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
 Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
-`vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`, `vof_collocated`;
+`vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`, `vof_collocated`,
+`vof_phase_change`;
 `vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_bc`; `tests/kokkos_mpi`
-`vof_bc_mpi_np{1,2,4}`, `vof_advect_mpi_np{1,2,4}`,
+`vof_phase_change_mpi_np{1,2,4}`, `vof_bc_mpi_np{1,2,4}`, `vof_advect_mpi_np{1,2,4}`,
 `vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,
 `vof_surface_tension_mpi_np{1,2,4}`, `vof_cutcell_mpi_np{1,2,4}`, `vof_wetting_mpi_np{1,2,4}`,
 `vof_collocated_mpi_np{1,2,4}`;
 `tests/study/vof_collocated.py` (the V8 staggered/collocated columns);
+`tests/study/vof_stefan.py` (the P0/P1 phase-change battery: `p0a`, `p0b`, `p1` + the 64/128/256
+Stefan ladder);
 `tests/study/vof_cutcell.py` (the V5a battery: conservation through a packing, coupled draining,
 the 90° cap on a cut wall); `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
 falling drop, the RT near-Nyquist check — every gate there records the pressure iteration count
@@ -829,6 +832,72 @@ driver (Chebyshev diverges, MG-PCG burns any cap) and still leaves a real residu
 coefficient-contrast item (VOF_PLAN S3). Selecting the driver **before** a `rho` closure is
 silently discarded (`set_property_model("rho", …)` fires `set_density_mode`, which reselects
 Chebyshev): call `set_pressure_fcg` LAST.
+
+**Phase change — the planar rungs P0 + P1 (`src/vof/phase_change.hpp`, WO-P01).**
+`enable_phase_change(rho_gas, rho_liquid, h_lv)` turns on the VOF_PLAN §9 kernel set (Boyd & Ling
+2023 / Malan et al. 2021): a mass flux on interfacial cells, **interface regression by a PLIC PLANE
+SHIFT** with clip-and-redistribute, and the volumetric divergence source **shifted into the compact
+pure-gas layer** behind the interface. There is never a volume source in the C equation (the
+Hardt–Wondra smeared source leaves unresolvable liquid residue and breaks the WY bounds). Per step,
+at the HEAD of `step()` — before `updateProperties()`, so ρ(C) and the interface the step runs with
+are the same time level — the driver (1) reconstructs each interfacial cell's plane from the
+canonical `"C"`, (2) takes its **polygon area** `A_Γ` analytically, (3) evaluates `mdot`
+(`set_mass_flux_uniform` / `set_mass_flux` at P0, `set_phase_change_thermal` at P1), (4) deposits
+`S = mdot A_Γ (1/ρ_g − 1/ρ_l)` into the nearest PURE GAS cell along `+n` so the interfacial cell's
+own faces keep the LIQUID velocity, and (5) applies `C ← C − mdot A_Γ dt/ρ_l`. `project()` then
+solves `div(open u) = S` through the existing deflated solve (one extra compatible RHS array, no
+solver change); `set_divergence_source` adds a prescribed source/sink beside it, which is how a
+CLOSED domain is made compatible with a net vapour production without an outflow face.
+The energy equation is an ordinary `add_scalar` with a new **per-cell Dirichlet mask** on
+`ScalarField` (inert until allocated), pinning interfacial cells at `T_Γ = T_sat + mdot R_int`
+(`R_int = 0` is the hard Dirichlet; nonzero is the Schrage/IHTR Robin of Bureš & Sato 2021).
+
+Measured (`tests/kokkos/test_vof_phase_change.cpp`, `tests/study/vof_stefan.py`, both backends):
+**P0a** planar regression under a uniform `mdot`, 1000 steps — `x_Γ(t) = x_0 − mdot t/ρ_l` to
+**1.2e-14** (gate 1e-12), `C ∈ [0,1]` exactly, 320 cell-crossing clips redistributed conservatively.
+**P0b** at density ratio 100 in a CLOSED column (walls on ±x + a prescribed balancing sink — NOT an
+outflow, whose varRho operator is the WO-R2 defect) — the gas plateau equals
+`mdot(1/ρ_g − 1/ρ_l)` **bitwise**, the liquid sits at **5.4e-20**, the interfacial cell's two faces
+at 6e-20 and 9e-20 (the liquid velocity), `max|div(u) − S| =` **1.7e-18**, 20/400 pressure
+iterations. **P1** the 1-D Stefan problem (St = 1, `ρ_g = ρ_l`, `Fo = 0.5` so `dt ∼ h²`):
+**+1.158 % / +0.552 % / +0.195 %** at N = 64/128/256, i.e. **0.195 % where the vapour layer is 64
+cells thick** against the 0.5 % gate (Malan reports 0.23 %), observed order **1.07** on 64→128 and
+**1.50** on 128→256. **MPI np 1/2/4 is BITWISE** on both P0a and P1 with the decomposition cutting
+the interface — the source deposit and the deficit redistribution are GATHERS with a fixed
+summation order, never an atomic scatter, and the per-cell `mdot`/`A_Γ`/`n` are halo-exchanged so
+the depth-1 and depth-2 consumers read the owner's values.
+
+Four things this rung paid for, all measured (`doc/vof_workorders_v6.md`, WO-P01 findings):
+- **The mass-flux sign.** With the PLIC normal `n` (which points into the GAS), the interfacial
+  energy balance `mdot h_lv = (q_l − q_g)·n` gives `mdot = (k_g ∇T_g·n − k_l ∇T_l·n)/h_lv`. The
+  work order's opposite pairing with the same `n` would *condense* a superheated vapour; the Stefan
+  problem is the one-line check (`∇T_g·n > 0` behind the interface ⇒ `mdot > 0`).
+- **`A_Γ` is analytic, not a finite difference of `plicVolume` in α.** `V(α)` is the SZ piecewise
+  CUBIC, so a central difference is exact only in its linear branches — which a grid-aligned planar
+  gate happens to sit in, so the shortcut would have passed P0a and been wrong on every tilted
+  interface. `plicArea` ships `A = |m|₂ dV/dα` with the analytic piecewise quadratic, rearranged to
+  be cancellation-free as the smallest normal component → 0 (the nearly-axis-aligned case these
+  rungs run on).
+- **Clip-and-redistribute must be LIQUID-AWARE.** Pushing the `n_d²` share into an already-empty
+  transverse neighbour leaves a permanent **negative colour wisp** (measured −2.5e-6 on the P1
+  ladder). The transverse tilt is not avoidable upstream: the energy solve's red-black smoother
+  updates the two parities in different sweeps, so symmetric columns differ at ~1e-16 in T and the
+  MYC normal picks up a ~1e-8 transverse component. `pcPushWeights` restricts the push to
+  neighbours that can absorb it and renormalizes, falling back to the unrestricted weights (and
+  counting the event in `phase_change_diagnostics()['unresolved']`) if none can — so conservation
+  is never traded for boundedness.
+- **`max_open_divergence_projected()` is the wrong read-out once a source exists**: by design
+  `div(open u) = S`, so it reports `max|S|`. Gate `max|div(u) − S|` instead.
+
+Scope, each enforced with a message: STAGGERED only, no immersed solid, and not composable with
+`enable_vof_momentum`. The energy scalar keeps `add_scalar`'s CONSTANT diffusivity — per-cell
+`k(C)` and the consistent `ρ c_p T` geometric transport (VOF_PLAN §9 item 6) are the P3 upgrade,
+and they cost nothing at the Stefan gate because the saturated liquid is pinned at `T_sat`. The
+band-extended liquid velocity (§9 item 3) is likewise P3. New Python: `enable_phase_change`,
+`set_mass_flux_uniform` / `set_mass_flux`, `set_phase_change_thermal` /
+`set_phase_change_thermal_off`, `set_divergence_source` / `clear_divergence_source`,
+`apply_phase_change(dt)` (the kinematic driver), `phase_change_diagnostics()`; the fields `"mdot"`,
+`"pc_source"` and `"div_source"` are ordinary registered fields.
 
 ### Domain boundary conditions
 

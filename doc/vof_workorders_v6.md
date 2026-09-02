@@ -220,6 +220,53 @@ findings, CLAUDE.md.
 
 ---
 
+## WO-P23 — Part II, rungs P2 (sucking interface) and P3 (Scriven bubble growth)  [Fable spec → OPUS, after WO-P01]
+
+Build on WO-P01 as shipped (read its findings first: the ṁ sign convention with the PLIC normal
+into the gas, the analytic `plicArea`, the liquid-aware clip-and-redistribute, the fixed-order
+gathers, and the P1 order 1.07 → 1.50 mechanism: the energy solve pins the whole interfacial
+CELL at `T_sat` while the gradient is measured from the PLIC PLANE — an O(h) sign-oscillating
+mismatch).
+
+**P2 — the sucking interface** (Welch & Wilson, *JCP* 160:662, 2000): planar, the vapour at
+`T_sat` on one side, SUPERHEATED liquid on the other; the interface moves INTO the liquid and the
+liquid's superheat is "sucked" into the vapour production. Similarity solution with the two-phase
+Stefan condition (Welch & Wilson give it; Boyd & Ling 2023 §4.2 restate it and report order ≥ 1.4
+on the interface position). Needs the liquid side of the gradient fit to be live, i.e. the
+per-phase `k(C)` and `ρ c_p(C)` closures in the energy solve (VOF_PLAN §9 item 6: `ρ c_p T`
+advected with the same geometric fluxes, face heat capacities per sweep — implement the
+consistent transport here, it is what stops artificial heating at high `ρ c_p` ratio) AND the
+band-extended liquid velocity (§9 item 3): with the source in the gas, the liquid moves toward
+the interface; WY must advect `C` with the LIQUID velocity extended one band into the gas
+(constant extension along `n` from the nearest pure-liquid cells, then a band-local divergence
+cleanup — the plan names Palmore–Desjardins eq. 61; a cheap first version: extend, then subtract
+the band's mean normal divergence per interfacial cell so `Σ_f o_f u_f = 0` there to 1e-12;
+measure whether the full band Helmholtz projection is needed by the gate). Gate: interface
+position order ≥ 1.4 over 64/128/256 and the temperature profile within 1 % of the similarity
+solution at N = 256 (ratio 10 first, then the water/steam ratio ~1600 and report).
+**The P1 pinning mismatch is the first thing to fix** (it is what caps P1 at order 1.07 on the
+coarse pair): impose `T_sat` at the PLANE by a ghost-value (GFM-style) Dirichlet in the interfacial
+cell — the cell value that makes the one-sided linear profile from the pure neighbour hit `T_sat`
+at the plane distance — instead of pinning the cell centre; re-measure P1's order (expect ≥ 1.5 on
+both pairs) before P2.
+
+**P3 — Scriven bubble growth** (Scriven, *CES* 10:1, 1959): a spherical vapour bubble growing in
+uniformly superheated liquid, `R(t) = 2 β √(α_l t)` with β from Scriven's integral (tabulate it
+numerically in the test; Ja = ρ_l c_p ΔT/(ρ_g h_lv) = 0.5, 2, 10). 3-D, 128³ first (bubble from
+D/Δ ≈ 12 to ≈ 40), then 192³ if the GPU allows; state the resolution. Gate: `R(t)` within 1 %
+over the last half of the run at the finest resolution you ran (Malan/Boyd–Ling report ≲ 1 % at
+256³); if it misses, the named lever is Aslam quadratic extrapolation of `T` across the band
+(Tanguy 2014) — implement it only if the gate says so, as an option, and record before/after.
+Both: MPI np 1/2/4 at the reduction floor with the decomposition cutting the interface; every VoF
+and phase-change ctest of P01 bit-identical when the new options are off; every run records
+the pressure iterations vs cap and `max|div − S|`.
+
+Deliverables: the plane-anchored Dirichlet, `k(C)`/`ρc_p(C)` closures + consistent `ρ c_p T`
+transport, the band-extended velocity, `tests/kokkos/test_vof_phase_change.cpp` extended (P2 at
+64/128), `tests/study/vof_sucking.py`, `tests/study/vof_scriven.py`, findings, CLAUDE.md.
+
+---
+
 ## WO-V7 — the pore-scale campaign (after WO-R2)  [OPUS runs, Fable/user interpret]
 
 Three cases, each a script under `tests/study/pore_scale/` and together one gallery page
@@ -253,3 +300,141 @@ pressure iterations vs cap; a capped run is not a data point. Report ms/step and
 # Findings log (v6 work orders)
 
 (append per WO, newest first)
+
+## WO-P01 findings (Part II, rungs P0 + P1) — 2026-09-02, Opus
+
+Branch `vof-p01`. Backends: host **OpenMP** (`build_ktest_omp`, `OMP_NUM_THREADS=8
+OMP_PROC_BIND=false`) and **CUDA** (`build_ktest_cuda`). New files: `src/vof/phase_change.hpp`
+(container-free), `tests/kokkos/test_vof_phase_change.cpp`,
+`tests/kokkos_mpi/test_vof_phase_change_mpi.cpp`, `tests/study/vof_stefan.py`. `flow_ibm.hpp` gains
+one public phase-change section + three inert one-line hooks (`step()` head, `project()` RHS, the
+mask refresh before `advanceScalars()`); `scalar_transport.hpp` gains the optional per-cell
+Dirichlet mask as two NEW sibling kernels (`scalarMaskStencil`, `scalarMaskRhs`) — no validated
+kernel body was touched.
+
+### Gate numbers
+
+| gate | measured | reference / gate |
+|---|---|---|
+| **K1** `plicArea` vs closed forms | axis-aligned **1** (bitwise), face diagonal **1.4142135623730951** (= √2 bitwise), centred hexagon **1.299038105676658** (= 3√3/4 bitwise) | the three classic unit-cube cross-sections |
+| **K1** `plicArea` vs `\|m\|₂ dV/dα` (central FD, 9 normals × 49 volumes) | max abs deviation **1.414e-06** | the FD's own O(δ²) truncation at δ = 1e-6 |
+| **K2** one-sided WLS gradient, non-axis-aligned n = (0.5366, −0.7397, 0.4061), 65 samples | **2.1900163572290023** vs exact **2.190016357229001** | rel **6e-16** |
+| **P0a** planar regression, 64×4×4, ṁ = 0.02, ρ_l = 1, dt = 1, **1000** kinematic steps | max \|x_Γ − (x₀ − ṁt/ρ_l)\| = **1.243e-14** (4 threads) / **1.776e-14** (8 threads) | gate **1e-12** ✅ |
+| **P0a** boundedness / ledger | `C ∈ [0, 1]` exactly (min **0.0**, max **1.0**); **320** cell-crossing clips (20 crossings × 16 columns), \|redistributed\| = **3.2**; interface area **16.0** exactly (A_Γ = 1 per cell to the last bit) | — |
+| **P0b** ratio **100**, closed column + balanced sink, 20 COUPLED steps, FCG(400, 1e-12) | u_gas = **0.0099000000000000008**, exact **0.0099000000000000008**, rel **0.0** (bitwise; 1.75e-16 at 8 threads) | gate **1e-10** ✅ |
+| **P0b** plateau spread / liquid frame | spread **5.20e-18**; max\|u_liquid\| **5.44e-20**; the interfacial cell's own two faces **−6.13e-20** and **−8.56e-20** (= the liquid velocity) | 1-D exact solution |
+| **P0b** source consistency | max\|div(u) − S\| = **1.735e-18**; Σ S = **0.1584** into **16** cells (= ṁ·A·(1/ρ_g − 1/ρ_l)·n_y n_z exactly), fallback cells **0** | projection floor |
+| **P0b** solver health | pressure iterations **20 / 400** — NOT capped (rule 3b) | — |
+| **P1** Stefan N = 64 (280 steps) | layer **16.18535** cells, exact **16.00000**, **+1.1584 %** | — |
+| **P1** Stefan N = 128 (1119 steps) | layer **32.17670**, exact **32.00000**, **+0.5522 %** | — |
+| **P1** Stefan N = 256 (4474 steps, layer 64 cells thick) | layer **64.12492**, exact **64.00000**, **+0.1952 %** | gate **0.5 %** ✅ (Malan et al. 2021 report 0.23 %) |
+| **P1** observed order | 64→128 **1.069**, 128→256 **1.500**, three-point fit **1.285** | WO expected ~1.5–2 |
+| **P1** census, all three N | `C ∈ [0, 1]` exactly, unresolved residue **0**, fallback cells **0**, deficit/excess **0** at the final step | — |
+| **MPI P0a** np 1/2/4 (x cut at np 2 and 4; the interface crosses both cut planes during the run) | max\|C_dist − C_ref\| = **0.000e+00** | **bitwise** ✅ |
+| **MPI P1** np 1/2/4, walls on ±x, 280 steps with the energy solve | max\|C_dist − C_ref\| = **0.000e+00** | **bitwise** — better than the reduction floor the gate allowed |
+| **INERT** ṁ ≡ 0 (every phase-change kernel runs) | max\|C_pc − C_ref\| = **0.0** | bitwise ✅ |
+| **INERT** whole `tests/kokkos` battery, phase change never called | the STDOUT of **16** test binaries (`vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`, `vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`, `vof_bc`, `vof_collocated`, `scalar_transport`, `poiseuille`, `poiseuille_ibm`, `cutcell`, `mg`, `ibm`) run from a `main` (518c2a5) worktree and from this branch is **byte-identical** (`diff -rq`, only the marker file differs) | every number, not just pass/fail |
+| ctest batteries | `main` **30/30**, this branch **31/31** (host OpenMP) | — |
+| CUDA backend | the whole single-rank gate battery passes on `build_ktest_cuda`; MPI np 1/2/4 on `build_kmpi_cuda` is **0.000e+00** on both P0a and P1 | — |
+
+### Which P0b variant, and why
+
+**A CLOSED column: walls on ±x, periodic in y/z, with a prescribed balancing sink plane six cells
+from the far wall** (`set_divergence_source`, the new generic RHS hook). Not an outflow — the
+variable-density outflow OPERATOR is inconsistent by the density ratio until WO-R2 lands, so an
+outlet at ratio 100 would have measured that defect instead of this one. Not the work order's
+"periodic box with a balanced sink" either, and the reason is a measurement, not taste: **a periodic
+box has nothing to anchor the frame**, the projection's only constraint there is zero net momentum
+(`∮ u ρ_f dx = 0`), so the liquid recoils at `u_l = −u_g ρ_g L_g/(ρ_l L_l + ρ_g L_g)` — about
+−0.8 % of u_g on this scene. The physics is right and the RELATIVE velocity is still exact, but the
+gate "u_gas = ṁ(1/ρ_g − 1/ρ_l) to 1e-10" would then be a statement about a near-cancellation rather
+than about the source. With walls the liquid is genuinely at rest (5.4e-20) and all three halves of
+the gate — liquid velocity, interfacial-cell velocity, gas plateau — are separate, exact statements.
+
+### Mechanisms and corrections
+
+1. **The work order's `ṁ` sign is inconsistent with its own normal convention, and it is the sign
+   that decides evaporation from condensation.** WO-P01 item 1 writes
+   `ṁ = (k_l ∇T_l·n − k_g ∇T_g·n)/h_lv` and, two lines later, `n = m/|m|₂` — the PLIC normal, which
+   points **into the gas**. The interfacial energy balance is `ṁ h_lv = (q_l − q_g)·n̂` with
+   `q = −k∇T` and `n̂` out of the liquid, i.e.
+   **`ṁ = (k_g ∇T_g·n − k_l ∇T_l·n)/h_lv`**. Check on the Stefan problem: superheated vapour behind
+   the interface gives `∇T_g·n > 0` and `ṁ > 0`. The work order's pairing with the same `n` would
+   *condense* a superheated vapour. The shipped kernel (`pcMassFlux`) and the binding docstring
+   carry the corrected form and the derivation.
+
+2. **The PLIC polygon area is analytic here, not a finite difference — and the work order's claim
+   that the FD "is exact to round-off for a plane" is false.** `V(α)` is the Scardovelli–Zaleski
+   **piecewise cubic** in α, so a central difference is exact only inside its linear branches
+   (which the grid-aligned planar rung happens to sit in — the trap is that it would have passed
+   P0a and then been wrong on every tilted interface). `plicArea` uses
+   `A = |m|₂ dV/dα` with `dV/dα` the analytic piecewise quadratic, rearranged to be
+   **cancellation-free as n₁ → 0**: `w² − ⟨w−n₁⟩²` is evaluated as the product `n₁(2w−n₁)`, the two
+   O(1) terms that differ by O(n₁) are paired in closed form, and the term `⟨w−(n₂+n₃)⟩²` is proved
+   identically zero for `w ≤ ½` (since `n₁ ≤ ⅓`). A nearly axis-aligned plane is exactly the
+   configuration these rungs run on, so the naive form would have lost `log₁₀ n₁` digits there.
+
+3. **Clip-and-redistribute must be LIQUID-AWARE.** The work order's rule — push the deficit into the
+   `−n` face neighbours weighted by `n_d²` — leaves a **permanent negative colour wisp** wherever a
+   push target is already empty: measured **−2.476e-6** at N = 64 on the P1 ladder, in a cell that
+   had just been emptied and then received the `n_t²` transverse share of a *neighbouring column's*
+   deficit. The transverse tilt is not a modelling error: the energy solve's red-black
+   Gauss–Seidel updates the two parities in different sweeps, so columns that are identical by
+   symmetry differ at ~1e-16 in T, which gives the MYC normal a ~1e-8 transverse component — i.e.
+   this is unavoidable upstream and has to be handled in the rule. `pcPushWeights` now takes an
+   availability flag per direction (a liquid deficit may only go where liquid remains; a
+   condensation excess only where there is room) and renormalizes; if NOTHING can absorb the
+   residue it falls back to the unrestricted weights, so **conservation is never traded away** and
+   the event is counted (`phase_change_diagnostics()['unresolved']`, 0 everywhere measured). With
+   the restriction, `C ∈ [0,1]` exactly and the interface position is **bit-identical** to before.
+
+4. **Everything is a GATHER, never an atomic scatter — that is what buys the bitwise MPI gate.**
+   Both the divergence-source deposit (each pure-gas cell scans a 5³ box for donors that named it)
+   and the deficit redistribution (each receiver recomputes the donor's WHOLE allocation) run with
+   a fixed summation order. The per-cell interface data (`mdot`, `A_Γ`, `n`) is computed on inner
+   cells and then halo-exchanged, so the depth-1 and depth-2 consumers read the owner's values;
+   `pcZeroDomainGhosts` kills the halo's periodic wrap on non-periodic domain faces, which would
+   otherwise import the far side's interface as a phantom donor. Result: **np 1/2/4 bitwise on
+   both P0a and P1**, not "at the reduction floor".
+
+5. **`max_open_divergence_projected()` is the wrong diagnostic once a source exists.** By design
+   `div(open u) = S`, so it reports `max|S|` (0.0099 on the P0b scene) and looks like a catastrophe.
+   The quantity to gate is **`max|div(u) − S|`** (1.7e-18 here). Recorded rather than changed: the
+   diagnostic is correct for every run without a source and every recorded number in the repo was
+   taken with that meaning.
+
+6. **The first-order component of the P1 error is the Dirichlet-at-the-cell-centre approximation,
+   not the gradient fit.** The energy solve pins the WHOLE interfacial cell at `T_sat`, so the
+   numerical thermal boundary sits at that cell's centre while the gradient fit measures the normal
+   distance from the PLIC **plane** — a mismatch of up to half a cell that changes sign as the
+   interface sweeps through a cell. That is consistent with the measured pair of orders (1.07 on
+   64→128, 1.50 on 128→256: the oscillating part averages out faster than it refines). The plan
+   already names the levers — Aslam quadratic extrapolation (VOF_PLAN §9 item 1) and IHTR — and
+   `set_phase_change_thermal(..., r_int=)` ships the Robin form now (default 0 = hard Dirichlet).
+
+7. **Deferred on purpose, with the reason:** per-cell `k(C)` and the consistent `ρ c_p T` geometric
+   transport (VOF_PLAN §9 item 6) are the **P3** upgrade, so the energy scalar keeps `add_scalar`'s
+   CONSTANT diffusivity. This costs nothing at the Stefan gate — the liquid is saturated and every
+   liquid cell is either pinned at `T_sat` by the Dirichlet mask or surrounded by cells that are, so
+   `k_l` never enters the energy solve (it does enter `ṁ`, where it is a parameter of
+   `set_phase_change_thermal`). It WILL bind at P2 (the sucking interface) and P3.
+
+8. **Scope, enforced with messages rather than assumed:** the collocated grid, an immersed solid,
+   and `enable_vof_momentum` each throw from `enable_phase_change` with the reason. The band-extended
+   liquid velocity (VOF_PLAN §9 item 3) is not implemented — it is the P3 lever if Scriven needs it;
+   at P0/P1 the source sits in pure gas cells and the interfacial cell's face velocity IS the liquid
+   velocity, which is the measurement in the P0b row above.
+
+### A defect found in `main`, outside this WO but blocking its MPI gate
+
+`tests/kokkos_mpi/CMakeLists.txt` at `main` (518c2a5) **does not parse**: the WO-R commit
+`86192ad` left a duplicated, orphaned continuation line after the `foreach(t …)` list
+(`vof_surface_tension_mpi vof_cutcell_mpi vof_bc_mpi)`), so `cmake -S tests/kokkos_mpi` fails with
+*"Parse error. Expected \"(\", got identifier with text \"vof_cutcell_mpi\""* and **the entire
+multi-rank ctest suite has been unbuildable since that commit** — including `vof_bc_mpi`, which
+that commit added and which therefore has never been registered. Fixed on this branch by folding
+`vof_bc_mpi` into the list (and adding `vof_phase_change_mpi`); a concurrent session fixed it the
+same way in `9f59d54` while this WO ran, and the rebase merged the two lists. Anyone's MPI numbers
+taken from `main` between 86192ad and 9f59d54 came from a build that could not have been
+configured.
+
