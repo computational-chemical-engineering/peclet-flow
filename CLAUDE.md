@@ -942,16 +942,93 @@ and a closure chained on ρ rather than on C sees whatever ρ's ghost held at th
   run since the last full velocity ghost fill, and takes the full fill otherwise (the kinematic
   path, where the zero-gradient rule is what supplies the boundary face at all).
 
-**WO-R item 4 was REFUTED by its own gate: the outflow correction must NOT carry `1/ρ_f`.**
-`doc/variable_density_projection.md` §4 listed the missing factor in `bcCorrectOutflow` as a defect
-to fix with a two-phase outflow case. Measured on that case (stratified duct, ratio 10, `max|div|`
-of the projected field): **without the factor 8.8e-10, with it 9.2e-03** — seven orders worse. A
-projection correction cancels the divergence only if it uses the same face coefficient the operator
-row used, and the outflow face's coefficient is the RAW openness (`buildRhoCoeff` runs over inner
-cells only; the multigrid re-imposes a Dirichlet outflow face as simply open). So the plain `phi`
-difference IS the consistent correction, and the inconsistency, if anyone wants it removed, is on
-the **operator** side (`CutcellMG`), not here. `bcCorrectOutflowVar` ships as
-`set_outflow_rho_correction(...)`, **default OFF**, with those numbers in its docstring.
+**WO-R item 4 was REFUTED by its own gate, and WO-R2 then INVERTED the verdict by fixing the
+operator.** `doc/variable_density_projection.md` §4 listed the missing `1/ρ_f` in
+`bcCorrectOutflow` as a defect. WO-R measured the factor making the outflow divergence seven orders
+WORSE — correctly, for the operator as it then was, because a projection correction cancels the
+discrete divergence only if it uses the SAME face coefficient the operator row used, and
+`CutcellMG::applyBoundaryOpenness` re-imposed the literal openness **1.0** at every Dirichlet domain
+face on every level, overwriting `buildRhoCoeff`'s `o_f·ρ₀/ρ_f`. WO-R2 fixed that (below) and the
+table flipped, so `set_outflow_rho_correction` is now **default ON**
+(`PECLET_FLOW_OUTFLOW_RHO=0` is the ablation):
+
+| stratified duct, ratio 10, `max\|div(open u)\|` projected | old operator | fixed operator |
+|---|---|---|
+| plain `phi` difference | **8.76e-10** | 9.97e-05 |
+| with the `1/ρ_f` factor | 9.24e-03 | **8.31e-10** (2.5e-16 with the exact residual) |
+
+**The variable-density OUTFLOW OPERATOR ROW (rung V-BC follow-up, WO-R2).** Under `varRho` the
+field `IbmSolver::project` hands `CutcellMG::setOpenness` is the *coefficient* `o_f·ρ₀/ρ_f`, and the
+boundary re-imposition used to overwrite it with the literal openness 1.0. The staggered face index
+makes the two sides of an axis asymmetric, and the fix is different on each: the **low** domain face
+is an INNER index that `buildRhoCoeff` (level 0) and `coarsenOpenAvg` (coarse levels) already wrote
+correctly — it is simply no longer overwritten; the **high** domain face is a GHOST index that
+nothing writes and the periodic/halo fill wraps the opposite boundary into — it is filled by
+`buildRhoCoeffOutflowFace` (literally the expression `bcCorrectOutflowVar` evaluates there),
+snapshotted before the level-0 fill and **area-coarsened plane by plane** down the hierarchy
+(`mgCoarsenFacePlane`). Gated by `CutcellMG::setOutflowCoefficient`, so the raw-openness path is
+byte-identical (`pressure_wallbounded` and the single-phase regression are the tripwires);
+`PECLET_FLOW_OUTFLOW_COEFF=0` restores the old row as a measured ablation. **MG telescoping is
+refused** on this path (the telescope stage gathers inner cells only, so the fine high-side plane
+does not survive the merge) — keep `PECLET_FLOW_TELESCOPE` off for two-phase open boundaries.
+
+What it bought, all previously unreachable: the **Nusselt falling film converges at ratio 100 AND
+1000** (δ 8.0825 / 8.0820 against 8, flow rate **+0.21 %** against the analytical Nusselt Q,
+ΣC steady to 1.1e-08 / 1.9e-08 over the last 200 of 2400 steps, pressure 57/400 and 64/2000, no
+cap) where before the ratio-100 run left the Weymouth–Yue cap within 20 steps and ratio 1000 capped
+every driver; the **gas-over-a-pool** case at ratio 1000 goes from 800/800 CAPPED to **76/800** with
+`max|div|` 8.55e-05 → **3.28e-12**; and the outlet divergence of the projected field is
+**1.4e-17 / 2.5e-16 / 1.1e-15 / 5.4e-15** at ratio 1 / 10 / 100 / 1000 against 9.97e-05 / 7.39e-04 /
+9.08e-03 without the matching correction. Still failing on that pool case, and NOT an outflow
+question: its volume drift (1.03e-03 against a 1e-10 gate) and the velocity the pool picks up
+(3.1e-02 of the inlet speed against 1e-3).
+
+**V5a × V-BC compose (WO-R2).** `computeFluxesCut` carries the out-of-domain mask and the per-face
+ledger itself, so a domain-face flux in a geometry-carrying block is `o_f · C_datum · a` — including
+a domain face a solid CUTS (`o_f < 1` there). The flux clamp skips an out-of-domain donor: it is on
+the algebraic branch, which is already exactly bounded. Measured (`vof_bc` gate G, 20×20×32 duct
+with a four-sphere packing, upper half liquid, 340 kinematic steps on the solver's own projected
+field): budget drift **2.7e-16** relative with the packing clear of both planes and **7.2e-15** with
+a sphere cutting the outlet plane, `ΣC` over solid cells exactly **0** in both.
+
+**Two VoF defaults changed (WO-R2).** `enable_vof()` now turns ON:
+- **the exact level-0 pressure operator** (`set_pressure_exact_residual`, P1 of
+  `suite/docs/DEFECT_CORRECTION_PLAN.md`; `PECLET_FLOW_EXACT_RESIDUAL` still initialises it and an
+  explicit setting wins). A two-phase coefficient contrast is exactly what amplifies the float
+  operator's broken `A·1 = 0`. Measured: Hysing 2 flux divergence 1.85e-03 → 5.15e-11 with every
+  functional identical; the cut-cell packing gate's `max|div|` **3.05e-11 → 1.48e-15** and its
+  conserved-functional drift **7.69e-12 → 1.49e-16**; `vof_momentum`'s per-step momentum
+  conservation **~2e-13 → ~3e-16**. The one gate it re-states is `vof_twophase`'s harmonic-ρ_f
+  ABLATION, which now leaves the boundedness cap instead of settling at a 0.3355 dP/dz error — a
+  louder confirmation of the same statement (verified to be a property of the env var alone on a
+  `main` binary).
+- **the wisp guard** `set_vof_wisp_eps`, default **1e-8** (0 = the V1 predicate bit for bit, and
+  still the standalone `WyAdvector`'s default). A cell outside `eps < C < 1-eps` is PURE for
+  reconstruction and fluxed algebraically as its actual `C·a`, so conservation is untouched. Two
+  measured reasons: a domain that DRAINS through an open boundary leaves nothing but ±1e-18
+  round-off, whose MYC normal is degenerate and whose `plicAlpha` divides by it (WO-R measured
+  `ΣC → -inf → NaN` in three steps on nvidia-cuda); and the round-off wake behind a passing
+  interface kept the whole wake inside the interface Courant band, so `vof_last_courant()` on
+  Zalesak read **0.3142** after one revolution — the global sweep radius — against **0.2608** with
+  the guard, which is `ω(r_max + 1.5h)dt/h` exactly, i.e. the band's own geometric bound. **Any gate
+  that compares the solver against a standalone `WyAdvector` must copy the knob**
+  (`IbmSolver::defaultVofWispEps()`); two did not and read 8.5e-09 / 2.6e-09, the scale of the
+  threshold, until they did.
+
+**`advect_vof`'s divergence guard was INERT on a bare box (WO-R2, found by the E1 gallery page).**
+`max_open_divergence()` returns 0.0 when no cut-cell pressure operator exists, so a
+cell-centre-sampled LeVeque field (true `max|div|` 0.612) was accepted and lost **4.93 % of the
+liquid in 50 steps** with no diagnostic. It now THROWS unless `cutcell_pressure` is set, and
+measures with the non-mutating `max_open_divergence_projected()`.
+
+**`maxAbsDiff`'s NaN blindness is fixed repo-wide in the tests (WO-R2).** `std::fmax(m, NaN) == m`,
+so the standard loop returns `0.000e+00` for a field that has gone entirely NaN and every bitwise
+gate built on it passes. 13 `tests/kokkos*` files now propagate the non-finite difference. (The
+sibling `maxAbs` helpers have the same hole and were left alone — noted, not swept.)
+
+**`tests/kokkos_mpi/CMakeLists.txt` did not PARSE between WO-R and WO-R2**: a bad merge in
+`86192ad` left a duplicated `foreach` fragment, so the whole MPI battery was unconfigurable and
+`vof_bc_mpi` was never in the build list. Fixed here.
 
 **Scope.** Gates: `tests/kokkos` ctest `vof_bc`; `tests/kokkos_mpi` `vof_bc_mpi_np{1,2,4}` (the
 decomposition cutting the inflow and outflow faces); `tests/study/vof_open_boundaries.py`
