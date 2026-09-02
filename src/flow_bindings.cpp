@@ -221,6 +221,16 @@ static void bind_solver(nb::module_& m, const char* name) {
           "to rtol of the first sweep's (iters becomes the cap, min_iters the floor). Easy "
           "regimes (small nu*dt/dx^2) exit after ~3-5 sweeps; stiff regimes run to the cap "
           "unchanged. rtol = 0 (default) is the legacy fixed count, byte-identical.")
+      .def("set_velocity_residual_tolerance", &S::setVelocityResidualTolerance, nb::arg("rtol"),
+           "Residual-based momentum stop (0 = off): a component's implicit solve ends once "
+           "max|b - A u| <= rtol * max|b| over the fluid unknowns. Measures convergence itself "
+           "(the update criterion is relative to the FIRST sweep's update, which on a warm-started "
+           "near-steady step is already noise and then costs the whole sweep cap to shrink by "
+           "1e-3). Stencil paths and every velocity-MG mode; the const-coefficient domain-BC "
+           "smoother keeps the update criterion.")
+      .def("last_momentum_residual", &S::lastMomentumResidual,
+           "max over components of max|r|/max|b| at exit of the last step's momentum solves "
+           "(residual mode only; -1 otherwise).")
       .def("set_deferred_correction", &S::setDeferredCorrection, nb::arg("on"),
            "Deferred-correction advection: True (default) = 2nd order (implicit FOU + explicit "
            "high-order correction, the high-order scheme being SOU by default or Koren TVD via "

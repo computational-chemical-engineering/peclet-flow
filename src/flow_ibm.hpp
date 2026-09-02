@@ -169,6 +169,18 @@ class Solver {
     velMinIters_ = minIters < 1 ? 1 : minIters;
   }
   long lastMomentumSweeps() const { return lastMomentumSweeps_; }
+  // Residual-based momentum stop (opt-in, 0 = off): a component's implicit solve ends once
+  // max|b - A u| <= rtol * max|b| over the fluid unknowns (global under MPI). Unlike the update
+  // criterion (relative to the FIRST sweep's update, which on a warm-started near-steady step is
+  // already at noise level and then costs hundreds of sweeps to shrink by 1e-3) this measures the
+  // equation's own convergence, and a converged warm start stops at sweep 1. Available on the
+  // stencil paths (IBM / cut-cell domain-BC RB-GS, every velocity-MG mode); the const-coefficient
+  // domain-BC smoother keeps the update criterion.
+  void setVelocityResidualTolerance(double rtol) { velResTol_ = rtol > 0.0 ? rtol : 0.0; }
+  double velocityResidualTolerance() const { return velResTol_; }
+  // max over components of max|r|/max|b| at exit of the last step's momentum solves (residual
+  // mode only; -1 otherwise).
+  double lastMomentumResidual() const { return lastMomentumResid_; }
   // Pressure-solve mean-removal scope: "fine" (default — drops the interior-level / post-matvec
   // nullspace projections, ~3x fewer global-reduction latency hits per Krylov iteration; measured
   // winner of the at-scale ablation, iteration counts identical) or "all" (legacy). See CutcellMG.
@@ -1294,23 +1306,20 @@ class Solver {
     // explicit reflection ghosts (refreshed each smoother sweep), so it needs no fold.
     if (hasBc_ && !Grid::collocated)
       setupBcDiffusion();
-    // The solver's velocity multigrid is SINGLE-RANK: IbmSolver only ever calls `vmg_.init` (never
-    // `VelocityMG::initMpi`, which the standalone `velocitymg_mpi` ctest does exercise), so under a
-    // decomposition its `fill()` would periodic-wrap this rank's BLOCK instead of exchanging —
-    // silently solving the momentum equation on a torus per rank. Disable it with a notice rather
-    // than run it wrong. (Wiring the distributed hierarchy is separate work; see the WO-F audit.)
-    if (useVelocityMg_ && distributed_) {
-      std::fprintf(stderr,
-                   "[flow] set_velocity_multigrid is single-rank only (the solver's VelocityMG is "
-                   "not wired to the halo) — disabled for this distributed run.\n");
-      useVelocityMg_ = false;
-    }
-    if (useVelocityMg_) {  // velocity-MG hierarchy: IBM (staircase/upwind) or domain-BC
-                           // (const-coeff) mode
-      vmg_.init(nx_, ny_, nz_, vmgLevels_);
+    if (useVelocityMg_) {  // velocity-MG hierarchy: IBM (staircase/upwind), domain-BC
+                           // (const-coeff) or mixed (staircase + folds) mode
+#ifdef PECLET_FLOW_MPI
+      // Distributed: level 0 on the solver's own decomposition (the g=2 velocity block), coarse
+      // levels coarsened in place with the even-block gate (no telescoping here yet -- measured
+      // first, see docs/SCALING_ISSUES.md issue 5).
+      if (distributed_)
+        vmg_.initMpi(*dec_, vmgLevels_, comm_);
+      else
+#endif
+        vmg_.init(nx_, ny_, nz_, vmgLevels_);
       if (hasBc_)
         vmg_.setBC(bc_);
-      else {
+      if (!hasBc_ || hasSolid_) {  // the staircase (IBM / mixed) paths classify by volume fraction
         vmgTheta_ = CCField("vmgTheta", n_);
         vmgClean_ = CCField("vmgClean", n_);
       }
@@ -1675,6 +1684,7 @@ class Solver {
     const double ts0 = phaseTick();
     tPredictor_ = tMomentum_ = tProjection_ = 0.0;
     lastMomentumSweeps_ = 0;
+    lastMomentumResid_ = -1.0;
     mg_.resetAllreduceCounters();
     // Momentum-consistent geometric VoF (rung V2b, WO-K): the colour field and rho^c u_c are
     // advanced TOGETHER, by the same fluxes, at the head of the step — the momentum advection has
@@ -2040,9 +2050,21 @@ class Solver {
   // w_f=idt/(idt+beta_f) assumed it did, an inconsistency with pressure-loop gain beta*dt/rho (a
   // fixed bed diverged whenever beta > rho/dt; measured gain 3.84 vs predicted 3.85 at beta=77,
   // idt=20).
+  // Domain BCs solved with the (unfolded) cut-cell / FOU stencil and reflection ghosts, as
+  // opposed to the folded const-coefficient smoother. Decides the RHS treatment too (the fold's
+  // RHS correction applies only off this path), so it must agree with the solver actually used:
+  // the MIXED velocity MG (solid + domain BCs) runs on this stencil and is therefore ON this path,
+  // while the all-fluid domain-BC velocity MG is the folded operator and is not.
   bool bcStencilPath() const {
-    return hasBc_ && !useVelocityMg_ &&
-           (hasSolid_ || implicitAdv() || varProps_ || varRho_ || hasDrag_);
+    return hasBc_ && (hasSolid_ || (!useVelocityMg_ &&
+                                    (implicitAdv() || varProps_ || varRho_ || hasDrag_)));
+  }
+  // The mixed velocity MG: solid + domain BCs, diffusion-dominated constant-property momentum
+  // (implicit advection / variable properties / drag stay on RB-GS: their fine stencils are not
+  // approximated by the staircase Helmholtz).
+  bool mixedVelocityMg() const {
+    return hasBc_ && useVelocityMg_ && hasSolid_ && !implicitAdv() && !varProps_ && !varRho_ &&
+           !hasDrag_;
   }
   // Fill a property field's ghosts for the face means: periodic/halo base, then zero-gradient
   // (copy) on domain-BC (wall/inflow/outflow) faces — a periodic wrap there would bring the wrong
@@ -3858,15 +3880,53 @@ class Solver {
   // colour 0 plain, colour 1 via the fused max-increment kernel, stop once the increment has
   // contracted to velTol_ of the first sweep's. The decision is rank-uniform under MPI (all ranks
   // see the same global max), so per-sweep halo exchanges stay in lockstep.
+  // Stencil paths supply `resid` (returns max|b - A u| over this rank's inner fluid cells after
+  // a fresh ghost fill) and `bnorm` (max|b|), enabling the residual stop when velResTol_ > 0.
   template <class Fill, class Color, class ColorDu>
-  void velSweepLoop(Fill&& fill, Color&& sweepColor, ColorDu&& sweepColorDu) {
+  void velSweepLoop(Fill&& fill, Color&& sweepColor, ColorDu&& sweepColorDu,
+                    std::function<double()> resid = nullptr, double bnorm = 0.0) {
     double du0 = 0.0;
     int used = velIters_;
+    const bool useRes = velResTol_ > 0.0 && resid;
+    auto gmax = [&](double v) {
+#ifdef PECLET_FLOW_MPI
+      if (distributed_) {
+        double g = 0.0;
+        MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, MPI_MAX, comm_);
+        return g;
+      }
+#endif
+      return v;
+    };
+    double scale = 0.0;
+    if (useRes) {
+      fill();
+      const double r0 = gmax(resid());
+      // forcing may enter through a Dirichlet ghost (inflow), not b: scale = max(|b|, |A u|)
+      scale = std::max(gmax(bnorm), gmax(lastAxNorm_));
+      if (r0 <= velResTol_ * scale) {  // the warm start already solves this component's equation
+        lastMomentumResid_ = std::max(lastMomentumResid_, scale > 0 ? r0 / scale : 0.0);
+        return;
+      }
+    }
     for (int it = 0; it < velIters_; ++it) {
       fill();
       sweepColor(0);
       fill();
-      if (velTol_ > 0.0) {
+      if (useRes) {
+        sweepColor(1);
+        // check on the first sweep, then every 4th (a residual costs about half a sweep)
+        if (it == 0 || (it + 1) % 4 == 0 || it + 1 == velIters_) {
+          fill();
+          const double r = gmax(resid());
+          const double ratio = scale > 0 ? r / scale : 0.0;
+          if (r <= velResTol_ * scale || it + 1 == velIters_) {
+            lastMomentumResid_ = std::max(lastMomentumResid_, ratio);  // EXIT ratio per component
+            used = it + 1;
+            break;
+          }
+        }
+      } else if (velTol_ > 0.0) {
         double du = sweepColorDu(1);
 #ifdef PECLET_FLOW_MPI
         if (distributed_) {
@@ -3888,6 +3948,35 @@ class Solver {
     lastMomentumSweeps_ += used;
   }
 
+  // residual functor + max|b| for the stencil paths of component c (see velSweepLoop)
+  std::function<double()> stencilResidual(int c, bool exchange = false) {
+    if (velResTol_ <= 0.0)
+      return nullptr;
+    if (velRes_.extent(0) != n_)
+      velRes_ = CCField("velRes", n_);
+    return [this, c, exchange]() {
+#ifdef PECLET_FLOW_MPI
+      if (exchange && distributed_)
+        velDev_->exchange(C[c].u);
+#else
+      (void)exchange;
+#endif
+      residualVarPin(velRes_, CCConst(C[c].u), CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                     FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT),
+                     CCConst(C[c].mask), e_, G);
+      if (hasBc_) {  // the held normal-Dirichlet face is imposed, not solved
+        const int t = bc_[2 * c];
+        if ((t == 1 || t == 2) && touchesGlobalFace(2 * c))
+          zeroPlane(velRes_, e_, c, G);
+      }
+      lastAxNorm_ = peclet::flow::maxAbsDiffInner(CCConst(C[c].b), CCConst(velRes_), e_, G);
+      return maxAbsInner(CCConst(velRes_), e_, G);
+    };
+  }
+  double stencilBnorm(int c) {
+    return velResTol_ > 0.0 ? maxAbsInner(CCConst(C[c].b), e_, G) : 0.0;
+  }
+
   void smoothComp(int c) {
     if constexpr (Grid::collocated) {
       if (hasBc_) {  // collocated domain BC: the (all-fluid) IBM diffusion stencil + cell-centered
@@ -3907,9 +3996,32 @@ class Solver {
                                            FPC(C[c].AW), FPC(C[c].AE), FPC(C[c].AS),
                                            FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT),
                                            CCConst(C[c].mask), e_, og_, G, col);
-            });
+            },
+          stencilResidual(c, /*exchange=*/false), stencilBnorm(c));
         return;
       }
+    }
+    if (mixedVelocityMg()) {
+      // MIXED: immersed solid + domain BCs (the packed bed with an inlet/outlet). Fine = the sharp
+      // cut-cell stencil, solid pin, clean-fluid exclude + held-face exclude; coarse = staircase
+      // Helmholtz + domain-face folds (VelocityMG::setStaircaseBc). The BC hook re-imposes the
+      // level-0 velocity BC after every ghost fill, exactly as the RB-GS path's fillVelGhosts(c,1).
+      const Off3 off = Grid::offset(c);
+      ibmVolfrac(vmgTheta_, CCConst(sdf_), e_, off);
+      ibmCleanFluidMask(vmgClean_, CCConst(sdf_), e_, off);
+      vmg_.setFineStencil(FPC(C[c].AC), FPC(C[c].AW), FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                          FPC(C[c].AB), FPC(C[c].AT));
+      vmg_.setStaircaseBc(c, CCConst(vmgTheta_), CCConst(C[c].mask), CCConst(vmgClean_), mu_,
+                          rho_ / dt_, 0.5);
+      // fold=0: level 0 is the UNFOLDED cut-cell stencil, so its wall ghosts are reflections
+      // (exactly the bcStencilPath RB-GS convention); the folded coarse levels hold theirs at 0.
+      fillVelGhosts(c, 0);
+      vmg_.setBcApplyL0([this, c](CCField x) { applyVelocityBcCompTo(x, c, 0, true); });
+      lastMomentumSweeps_ +=
+          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, comm_, velResTol_);
+      lastMomentumResid_ = std::max(lastMomentumResid_, vmg_.lastResidualRatio());
+      maskVelocity(c);
+      return;
     }
     if (bcStencilPath()) {
       // Domain BCs solved with the Robust-Scaled cut-cell / FOU stencil (built by setSolid /
@@ -3930,7 +4042,8 @@ class Solver {
                                          FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
                                          FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_,
                                          og_, G, col);
-          });
+          },
+          stencilResidual(c), stencilBnorm(c));
       return;
     }
     if (hasBc_ &&
@@ -3943,8 +4056,11 @@ class Solver {
       // Re-impose the velocity BC on the vel-MG's level-0 iterate each colour/residual (the
       // const-coeff smoother updates the held Dirichlet faces) -> the vel-MG converges to the RB-GS
       // fixed point (not the ~2% drift CUDA's vmg leaves at the boundary corners).
-      vmg_.setBcApplyL0([this, c](CCField x) { fillVelGhostsTo(x, c, 1); });
-      vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8);
+      // (the hook applies the BC only: VelocityMG::fill owns the periodic wrap / halo exchange)
+      vmg_.setBcApplyL0([this, c](CCField x) { applyVelocityBcCompTo(x, c, 1, true); });
+      lastMomentumSweeps_ +=
+          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, comm_, velResTol_);
+      lastMomentumResid_ = std::max(lastMomentumResid_, vmg_.lastResidualRatio());
       return;
     }
     if (hasBc_) {  // domain-BC (no immersed solid): CUDA's double const-coeff diff_k + dcorr fold
@@ -3983,7 +4099,9 @@ class Solver {
         vmg_.setStaircase(CCConst(vmgTheta_), CCConst(C[c].mask), CCConst(vmgClean_), mu_,
                           rho_ / dt_, 0.5);
       }
-      vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8);
+      lastMomentumSweeps_ +=
+          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, comm_, velResTol_);
+      lastMomentumResid_ = std::max(lastMomentumResid_, vmg_.lastResidualRatio());
       maskVelocity(
           c);  // re-impose no-slip at solid (the masked solve leaves them at the pin value)
       return;
@@ -4045,7 +4163,8 @@ class Solver {
                                          FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
                                          FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_,
                                          og_, G, col);
-          });
+          },
+          stencilResidual(c, /*exchange=*/true), stencilBnorm(c));
       return;
     }
     if (distributed_) {
@@ -4087,7 +4206,8 @@ class Solver {
                 FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT),
                 CCConst(C[c].mask), e_, og_, col, ilo, ihi, lo, hi);
             return di > ds ? di : ds;
-          });
+          },
+          stencilResidual(c, /*exchange=*/true), stencilBnorm(c));
       return;
     }
 #endif
@@ -4103,7 +4223,8 @@ class Solver {
                                        FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
                                        FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_,
                                        og_, G, col);
-        });
+        },
+          stencilResidual(c, /*exchange=*/false), stencilBnorm(c));
   }
   // pressure ghost at domain faces for the incremental predictor's grad(P): zero-gradient (Neumann)
   // at every non-periodic face so grad(P) carries no spurious force there (the periodic fill
@@ -5877,6 +5998,10 @@ class Solver {
   double velTol_ = 0.0;         // momentum tolerance stop (0 = legacy fixed-count loop)
   int velMinIters_ = 2;
   long lastMomentumSweeps_ = 0;  // sweeps actually run last step (summed over components/Picard)
+  double velResTol_ = 0.0;         // residual-based momentum stop (0 = off, update criterion)
+  double lastMomentumResid_ = -1.0;  // max_c max|r|/max|b| at exit (residual mode)
+  CCField velRes_;                 // scratch for the stencil-path residual
+  double lastAxNorm_ = 0.0;        // max|A u| of the last residual evaluation (scale)
   int pcgMaxit_ = 500;
   double pcgRtol_ = 1e-10;  // cut-cell pressure MG-PCG
   bool useChebyshev_ = false,

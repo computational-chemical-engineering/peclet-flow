@@ -2459,9 +2459,9 @@ class CutcellMG {
   // byte-identical to before it existed. PECLET_FLOW_TELESCOPE=1 turns it on without a code
   // change; the solver setter wins over the env. teleForce_ > 0 forces a telescope at that level
   // even when in-place coarsening is legal (tests: compare the two hierarchies on one problem).
-  bool telescope_ = [] {
+  bool telescope_ = [] {  // DEFAULT ON since 2026-09-02 (FoxBerry ladder); PECLET_FLOW_TELESCOPE=0 disables
     const char* e = std::getenv("PECLET_FLOW_TELESCOPE");
-    return e && std::atoi(e) != 0;
+    return !e || std::atoi(e) != 0;
   }();
   int teleForce_ = -1;
   bool teleActive_ = true;  // false on a rank that idles below a telescope point
