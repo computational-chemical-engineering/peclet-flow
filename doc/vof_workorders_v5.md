@@ -454,6 +454,134 @@ Zalesak 1979; LeVeque 1996).
 
 (append per WO, newest first)
 
+## WO-T — rung V8 minimal (the collocated path) — DONE 2026-09-02, branch `vof-wot`
+
+Worktree `../flow-wot`. All numbers below are reported for BOTH backends where they differ;
+`host-openmp` and `nvidia-cuda` agree to the digits shown unless a column says otherwise.
+
+### What shipped
+
+`src/collocated_varrho.hpp` (five sibling kernels: the face acceleration, its CSF addend, the
+`uf += af` apply, the `af -= (rho0/rho_f) grad(phi)` completion, and the openness-gated cell
+average), the collocated branches in `flow_ibm.hpp` (`buildRhsColoFF`, `applyFaceAcceleration`,
+`applyCellFaceAverageCorrection`, `colocatedFaceForce`, `requireCollocatedFaceForceScope`,
+`collocatedV8AutoFallback`, the `Grid::collocated ? 0 : strideOf(c)` placement in `makeFaceProps`,
+the collocated branch of `bridgeVelocityToVof`), the lifted throws in `setDensityMode` / `enableVof`,
+the binding docstrings, `tests/kokkos/test_vof_collocated.cpp`,
+`tests/kokkos_mpi/test_vof_collocated_mpi.cpp` and `tests/study/vof_collocated.py`.
+
+Design items 1-3 and 5 are implemented as written. Item 4 (`enable_vof_momentum`) stays a throw, as
+the work order specifies.
+
+### Gates
+
+| gate | measured | verdict |
+|---|---|---|
+| **G1 hydrostatic** (ratio 1000, mu = 0, 100 steps, frozen interface, 8x8x24) | walled column, hand-set rho AND through C, identical numbers: face `max|uf|` **8.131e-15** (host) / **9.228e-15** (CUDA), `dP/dz = -rho_f g` to **2.341e-8** relative, 13 Chebyshev iterations (cap 120, none capped). Staggered column on the same problem: face 2.176e-17 / 1.821e-17, dP/dz 3.411e-16, 10 iterations. Triply periodic box with the zero-mean force: collocated face **3.343e-10**, dP/dz 6.149e-9, 11 iterations (staggered 1.767e-14 / 4.263e-16). **The CELL field is 2.821e-08 — see finding 1; the gate as written ("cell max|u| <= 1e-12") measures a quantity the ABC projection is structurally blind to, and the corrected gate is the FACE field** | PASS on the corrected quantity |
+| **G1b mu independence** (the collocated bonus) | walled, ratio 1000, mu = 0 / 1e-3 / 1e-2 / 1e-1: collocated face **8.1e-15 / 3.4e-15 / 1.7e-15 / 5.1e-15**, dP/dz 2.34e-8 / 2.01e-8 / 2.29e-8 / 4.19e-8 — flat. The force never passes through `A = rho_f/dt - mu*Lap`, so the mu*dt^2 non-commutation WO-P measured on the staggered predictor does not exist on this path | PASS |
+| **G2 static droplet, constant kappa** (32^3, R = 8, sigma = 1, mu = 0.1, dt = 0.5 dt_sigma, 30 steps) | ratio 1: staggered cell/face **1.9291e-17**, COLLOCATED cell **2.2565e-17** face **2.1751e-17** — the V4 exactness identity, reproduced at the face AND at the cell. ratio 10: staggered 2.0374e-05, COLLOCATED **1.6316e-11 cell / 1.2100e-11 face** (6 orders better). ratio 100: staggered 1.8377e-05, COLLOCATED **1.5901e-06 / 2.4928e-06**. ratio 1000: staggered 1.0485e-05, **COLLOCATED UNSTABLE** (see finding 2) | PASS at ratio <= 100 |
+| **G3 static droplet, computed kappa** (`tests/study/vof_collocated.py static`, 60 steps, mu = 0.1, sigma = 1) | `Ca = mu max|u|/sigma`: D/dx = 8 staggered **2.543e-04**, COLLOCATED **2.018e-04** cell / 1.942e-04 face (**0.79x** the staggered); D/dx = 16 staggered **5.898e-05** (WO-P's recorded number to four digits), COLLOCATED **4.834e-05** cell / 4.706e-05 face (**0.82x**). 12-13 Chebyshev iterations (cap 500, none capped), `max|div(open u)|` 1.6e-15 / 2.4e-16. The gate asked for "within 2x of the staggered 5.9e-5" — it is 0.82x, i.e. slightly BETTER | PASS |
+| **G4 Hysing case 1** | see the study table below | |
+| **G5 capillary wave** | see the study table below | |
+| **G6 advection bit-identity** (24^3, an ABC cell velocity projected once, then 20 kinematic `advect_vof` steps on the frozen face field) | the collocated `max|div(open uf)|` after the seeding step is **0.000e+00**; the colour after 20 steps is **bitwise identical** to a STAGGERED solver handed the same `uf/vf/wf` through `set_field("u"/"v"/"w")` — `max|dC| = 0.0`, `sum C` 9.110000000000001e+02 on both — while the colour genuinely moved (`max|C - C0| = 1.0`). This is the gate on the collocated bridge: `uf_(i)` sits at i-1/2, exactly where flow's staggered `u(i)` sits, so it is the same `copyFaceVelocity` shift on a different source view | PASS (bitwise) |
+| **T3 uniform-rho equivalence** (16x16x8, mu = 0, body force, 30 steps) | the V8 face-force predictor vs the VALIDATED constant-density collocated path: `max|du| = 0.000e+00`, `max|dP| = 0.000e+00` — **bitwise**. With uniform rho and mu = 0, `avg_f(P(i) - P(i-s))` IS the central difference, and the two schemes coincide to the last bit | PASS (bitwise) |
+| **G7a MPI np = 1** (`tests/kokkos_mpi/test_vof_collocated_mpi`, 16x16x32, host-openmp) | `hydro-z` (walled ratio 1000 through a frozen colour, 40 steps): `du`, `duf`, `dP` and `dC` against the single-rank reference are all **0.000e+00 — bitwise**, iteration counts identical; the reference's face `|uf|` is 7.430e-14 and its cell `|u|` 6.675e-08 (the checkerboard again) | PASS |
+| **G7b byte-identity of everything existing** | `tests/regression/sdflow_regression.py` (CUDA, staggered): **`+0.00 %` on every metric of all three cases, identical iteration counts AND identical step counts** — `zh_sphere` K 7.2997/7.3891/7.4162/7.4361/7.4404 with order 2.29 and K_inf 7.447, `random_spheres` order 2.19 and k*_inf 0.0062362, `hollow_rings` order 1.38 and k*_inf 0.017184, every row `[ok]`. **The COLLOCATED regression (`--solver colocated --scheme ghost`, the constant-density path this rung must not disturb) is likewise `+0.00 %` on every metric with identical iteration counts** — `zh_sphere` order 1.59 / K_inf 7.445, `random_spheres` order 1.46 / k*_inf 0.0062399, `hollow_rings` order 1.75 / k*_inf 0.017201, `=== regression: PASS ===`. All **27** pre-existing `tests/kokkos` binaries reproduce their `main` output **digit for digit** on host-openmp (`diff` of the full stdout against the same tests built at `main` in a second worktree: *27 identical, 0 differing*) | PASS |
+| **T5 scope** | `enable_vof` + immersed solid, `set_density_mode` + immersed solid, `enable_vof_momentum`, `set_rho_face_harmonic` — all four throw on `SolverColocated` with a message naming the reason | PASS |
+
+### Findings
+
+**1. The invisible subspace showed up exactly where the plan said it would, and this rung makes it
+six orders SMALLER than the collocated status quo.** A cell-field checkerboard is annihilated by
+`centerToFace` (`½(U(i)+U(i-1))` kills the odd-even mode), so the approximate projection cannot see
+it and cannot remove it. Signature, measured on the walled hydrostatic column at ratio 1000, mu = 0:
+the FACE field is at machine zero (8.1e-15) while the CELL `w` alternates sign cell by cell along z
+with an envelope peaking at the density interface — `[-1.8e-11, +2.7e-11, -4.6e-11, ...]` at ratio
+2 — i.e. precisely "a growing checkerboard in the CELL field while the FACE field stays clean",
+except that it **decays**: 2.821e-08 at 100 steps -> 8.006e-09 at 400 (3.52x), roughly as 1/n.
+It is a property of the GRID, not of this rung, and the control says so: the VALIDATED
+constant-density collocated path with a plain body force on the same walled column reads cell
+`max|u|` **3.092e-02** (mu = 0) and **8.709e-04** (mu = 0.01) with its face field at 5.1e-13, so
+the V8 ratio-1000 number (2.8e-08) is **six orders better than the constant-density collocated
+baseline** on the same problem. Nothing damps the mode in the heavy phase (its kinematic viscosity
+is mu/rho = 1e-4 there), which is why the decay is algebraic rather than geometric.
+The accumulated pressure inherits it: `centerToFace` does not annihilate a MODULATED checkerboard,
+it leaves the envelope's gradient, so every step injects a small potential into `P +=
+(rho/dt) phi`; that leak, not the face balance, is the 2.3e-8 relative `dP/dz` error (the
+two-face-averaged pressure statement does NOT remove it — 1.24e-6 absolute vs 2.34e-6 raw — so it
+is not a pure odd-even artefact of the read-out).
+**The corrected G1 gate** is therefore: FACE `max|uf|` at machine zero, cell `max|u|` reported with
+its decay rate and against the constant-density control. Gating the cell field at 1e-12 on an ABC
+grid asks the projection for something it structurally cannot deliver.
+
+**2. The collocated rung's real ceiling is not the density ratio, it is `mu*dt/(rho_min h^2)` — and
+it is the price of the face force being explicit.** Static droplet, constant kappa, ratio 1000,
+dt = 0.5 dt_sigma = 4.46, 40 steps:
+
+| mu | mu*dt/(rho_gas h^2) | staggered face | COLLOCATED face |
+|---|---|---|---|
+| 0     | 0     | 1.3483e-10 | **4.2335e-11** |
+| 0.01  | 0.045 | 3.9129e-06 | **5.4329e-11** |
+| 0.1   | 0.45  | 6.7815e-06 | **UNSTABLE** — 7.2e-09 at step 0, flat to step 5, then ~4x per step: 1.2e-05 at step 10, 3.3e-02 at step 15, trips the Weymouth-Yue CFL cap at step 16 |
+
+Mechanism: on the staggered path the force enters the RHS of the momentum solve, so `A^-1` (with
+`A = rho_f/dt - mu*Lap`) DAMPS its high-wavenumber content — that damping is exactly what makes the
+staggered balance inexact at variable rho (WO-P's mu*dt^2 residue), and it is also what stabilises
+it. Applying the force at the face, outside `A`, removes both: the balance becomes exact (the
+mu-flat G1b row, and the 4-6 orders of accuracy at mu <= 0.01 above), and the face and the cell are
+then advanced by different operators — the face by the raw increment, the cell by `A^-1` followed by
+the AVERAGED increment — whose mismatch grows once the per-step viscous smoothing stops being small.
+`advect_` is OFF by default and was off here, so this is not an advective instability. **Rating:
+the collocated rung is honest to density ratio ~100** (measured stable and better than staggered
+there), or ratio 1000 with `mu*dt/(rho_min h^2) <~ 0.05`. The obvious next move, NOT taken here
+because it is a design change rather than an implementation one, is a viscous-augmented explicit-force
+time-step limit (Galusinski & Vigneaux's combined capillary/viscous criterion) exposed alongside
+`capillary_dt()`.
+
+**3. The AUTO collocated scheme has to be re-decided when `set_density_mode` / `enable_vof` runs
+after the geometry.** `setSolid`/`setPressureGeometry` picks GHOST vs gauge-exact from the
+configuration it sees, and the ghost projection v1 supports neither. Calling `set_density_mode`
+after `set_pressure_geometry` — the natural order, and the one every gate here uses — left
+`ghostProjection_` on and produced a runtime throw from inside `project()` on the first step.
+`collocatedV8AutoFallback` re-runs the same fallback (with the same stderr notice) from
+`setDensityMode(true)` and from `enableVof` on the collocated grid. All-fluid, gauge-exact IS the
+plain central difference, so nothing else changes.
+
+**4. A closed face must contribute ZERO to both the face field and the cell average, and the two
+have to be pinned together.** Written without the openness gate, the wall face of the hydrostatic
+column carried `af = dt*g = 0.1` forever (its flux is multiplied by openness 0, so the projection
+never touches it) — harmless for the pressure solve, fatal for anything that READS the face field,
+which after item 3 of this work order includes the colour transport. `buildFaceAccelVar`,
+`addFaceAccelCsf` and `faceAccelSubGradPhi` all skip `o <= 1e-12` and pin `af = 0` there, and the
+cell average uses `projectCorrectCenter`'s identical predicate. The consequence worth stating: the
+near-wall cell sees HALF of its open face's increment, exactly as `projectCorrectCenter` already
+halves the near-wall pressure gradient — and at equilibrium the open face's total increment is zero,
+so the wall cell stays at rest.
+
+**5. `VarFaceProps::idiag` needed the velocity-unknown placement, not the staggered stride.** The
+accessor's `sc` is the component face stride, so `idiag(i) = 0.5*(rho(i)+rho(i-sc))/dt` — right for
+a face-placed unknown, wrong for a cell-placed one. `Grid::collocated ? 0 : strideOf(c)` gives
+`0.5*(rho(i)+rho(i)) == rho(i)` exactly in floating point. It was unreachable before this rung
+(`haveRho` required varRho or porous, both of which threw on the collocated grid), which is why it
+had never been wrong in practice.
+
+**6. The periodic hydrostatic box is NOT a free extra gate — with a free interface it is
+Rayleigh-Taylor unstable by construction.** A periodic two-layer column always has exactly one
+unstably stratified interface, so the "periodic, through C" case that the first draft of the gate
+ran measured an RT mode, not a balance (it read 2.4e-09 on the STAGGERED grid, where the walled
+version reads 1.8e-17). The shipped periodic case uses a FROZEN hand-set rho, where the density is
+not a degree of freedom; the through-C case is walled, heavy below, and frozen the way
+`test_vof_twophase.cpp` gate B2 freezes it.
+
+**7. MG-PCG diverges outright on the collocated ratio-1000 coefficient operator.** Not a V8 defect —
+it is the known high-contrast indefinite-preconditioner item (`CLAUDE.md`, VOF_PLAN S3) — but it is
+worth the line because `set_density_mode` installs Chebyshev by default and a reader may be tempted
+to override it: `set_pressure_pcg(True, 800, 1e-15)` on the ratio-1000 walled column reaches
+`max|u| = 5.2e+03` after 800 iterations, while Chebyshev at the same tolerance is at 1e-15 in 16.
+The solver tolerance is NOT what limits any number in this rung: at rtol 1e-9 (the default) and
+1e-15 the hydrostatic numbers agree to three digits.
+
+
 ## WO-S — rung V5b (static contact angle on SDF solids) — DONE 2026-09-02, branch `vof-wos`
 
 Commit `2761bc9` (the rung + the gates) plus the doc commit at the end. All numbers are

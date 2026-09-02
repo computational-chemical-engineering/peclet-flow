@@ -202,3 +202,14 @@ add_executable(test_poiseuille_ibm test_poiseuille_ibm.cpp)
 target_include_directories(test_poiseuille_ibm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_poiseuille_ibm PRIVATE Kokkos::kokkos)
 add_test(NAME poiseuille_ibm COMMAND test_poiseuille_ibm)
+
+# VoF rung V8 (WO-T): the COLLOCATED path — variable density in the ABC approximate projection,
+# forces as face accelerations with the averaged cell counterpart, colour advection from the
+# projected face field. The gated quantity on this grid is the FACE field (the cell field carries
+# the approximate projection's invisible checkerboard, measured here against its constant-density
+# control).
+add_executable(test_vof_collocated test_vof_collocated.cpp)
+target_include_directories(test_vof_collocated PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR} ${CORE_INC})
+target_link_libraries(test_vof_collocated PRIVATE Kokkos::kokkos)
+add_test(NAME vof_collocated COMMAND test_vof_collocated)

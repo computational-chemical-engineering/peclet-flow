@@ -713,7 +713,16 @@ static void bind_solver(nb::module_& m, const char* name) {
           "down around density ratio 1000 unless the resolution is absurd. **V2a is valid only at "
           "MODEST density ratios** for cases with motion. A high-ratio case AT REST (the "
           "hydrostatic acid test) is exact, because there is no momentum to mis-advect. "
-          "STAGGERED ONLY (collocated is rung V8 — throws). An IMMERSED SOLID is supported since "
+          "COLLOCATED (SolverColocated) is supported since rung V8 (2026-09-02), ALL-FLUID only: "
+          "the colour is advected by the PROJECTED face field uf_/vf_/wf_ (the field the ABC "
+          "approximate projection makes exactly divergence-free, which is what Weymouth-Yue's "
+          "conservation proof needs), and every interfacial/body force is a FACE acceleration with "
+          "the cell taking the average of its two faces. An immersed solid on that grid THROWS "
+          "(the cut-cell colour transport of rung V5a is staggered-only), and so does "
+          "enable_vof_momentum. On the collocated grid the SPURIOUS-CURRENT number to read is the "
+          "FACE field (get_uf/get_vf/get_wf): the CELL field additionally carries the approximate "
+          "projection's invisible odd-even mode, which centerToFace annihilates and the projection "
+          "therefore cannot remove. An IMMERSED SOLID is supported since "
           "rung V5a: the geometric fluxes are openness-weighted and the update is done in "
           "fluid-volume units, so sum eps_eff*C is conserved exactly against the projection's own "
           "openness-weighted divergence; it needs set_solid(..., cutcell_pressure=True) (the "
@@ -1263,14 +1272,25 @@ static void bind_solver(nb::module_& m, const char* name) {
           "set_density_mode",
           [](S& s, const std::string& mode) { s.setDensityMode(mode == "variable"); },
           nb::arg("mode") = "variable",
-          "Enable variable density (staggered solver only): binds the 'rho' field "
+          "Enable variable density: binds the 'rho' field "
           "(get/set_field('rho'), created seeded with set_rho's value if absent) into the momentum "
           "time term, the advection weight, the per-cell body force (face-interpolated), and the "
           "pressure projection (face coefficient openness*rho0/rho_f with the matching 1/rho_f "
           "velocity correction; rho0 = set_rho's value, so a uniform field reduces exactly to the "
           "constant solver). A closure targeting 'rho' (e.g. a linear mixture of a transported "
           "phase fraction) enables this automatically. For gravity, register a closure "
-          "force_z = linear(rho, params=[0, -g]).")
+          "force_z = linear(rho, params=[0, -g]).\n\n"
+          "COLLOCATED (SolverColocated, rung V8): supported since 2026-09-02, ALL-FLUID only "
+          "(set_pressure_geometry; an immersed solid, the ghost projection and "
+          "set_rho_face_harmonic throw). The face coefficient and the face correction are the same "
+          "as on the staggered grid, applied to the ABC projection's MAC face field; the CELL "
+          "correction is the AVERAGE OF THE TWO FACE CORRECTIONS of each axis (never a cell-centred "
+          "grad(phi)/rho_c), and every body/interfacial force is likewise a FACE acceleration "
+          "dt*(f_f - (P(i)-P(i-s)))/rho_f added after centerToFace, with the cell taking the average "
+          "of the two faces' total increment. Rated to density ratio ~100 for cases WITH MOTION "
+          "(momentum consistency needs Favre face states and is not in this rung); a high-ratio case "
+          "at REST is exact - measured 0.0 spurious velocity and an exact dP/dz = -rho_f g at ratio "
+          "1000.")
       .def(
           "ghost_width", [](S& s) { return s.ghostWidth(); },
           "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")

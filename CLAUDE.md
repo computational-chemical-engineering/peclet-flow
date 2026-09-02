@@ -644,9 +644,56 @@ periodic box) the momentum-consistent path runs clean for ~155 steps and then ta
 inside the advection, while the colour-only path completes; no bounded-quantity precursor was found
 (WO-Q finding 9).
 
-**Scope — say this to users:** **Staggered only** (collocated is V8 —
-`enable_vof` throws). An **immersed solid is supported since rung V5a** — `set_solid(...,
-cutcell_pressure=True)` — with the openness-weighted flux above; an all-fluid
+**The collocated path — `SolverColocated` (rung V8, WO-T).** `enable_vof` and
+`set_density_mode("variable")` no longer throw on the collocated grid. That grid's pressure coupling
+is the **ABC approximate projection** (average the cell velocities onto a MAC face field, project
+THAT exactly, correct the cell field), and two facts follow:
+
+- the **transport** half was already right — `uf_/vf_/wf_` is exactly discretely divergence-free,
+  which is precisely what Weymouth–Yue's conservation proof needs — so `bridgeVelocityToVof` reads
+  the FACE field (`uf_(i)` sits at i−1/2, the same low-face convention as flow's staggered `u(i)`,
+  so it is the identical `copyFaceVelocity` shift on a different source view);
+- the **force** half was not. A cell-centred `g_c − ∇_c P/ρ_c` is O(1) wrong at an interface cell
+  even when every face is exactly balanced, so on this path the predictor carries **no force at
+  all** (`buildRhsColoFF`) and every body/interfacial force enters as a **face acceleration**
+  `a_f = dt (f_f − (P(i) − P(i−s)))/ρ_f` added after `centerToFace` (`src/collocated_varrho.hpp`),
+  with the cell taking the **average of its two faces' TOTAL increment** `a_f − (ρ₀/ρ_f)Δφ` — the
+  same averaging operator `projectCorrectCenter` applies to φ differences, a closed face (openness
+  0) contributing 0. Basilisk's `centered.h` pattern (Popinet JCP 2009 §3). The face coefficient
+  `c_f = o_f ρ₀/ρ_f` and `projectCorrectVar` on the face field are the staggered kernels unchanged.
+
+Measured (`tests/kokkos/test_vof_collocated.cpp`, both backends): hydrostatic at **ratio 1000** with
+the interface frozen — face `max|uf|` **8.1e-15** (host) / **9.2e-15** (CUDA) in the walled column,
+`dP/dz = −ρ_f g` to **2.3e-8** relative, *independent of μ* over 0…0.1 (the force never passes
+through `A = ρ_f/dt − μ∇²`, so the μ·dt² non-commutation of the staggered predictor does not exist
+here); static droplet with a **constant curvature**, face `max|uf|` **2.8e-17** — the V4 exactness
+identity, reproduced at the face.
+
+**Read the FACE field, not the cell field, for a spurious-current number on this grid.** A cell
+checkerboard is exactly annihilated by `centerToFace` (`½(U(i)+U(i−1))` kills the odd-even mode), so
+the approximate projection is structurally blind to it — the invisible subspace of
+`doc/collocated_invisible_subspace.md`. It is a property of the grid, not of this rung: the CONTROL
+(the validated **constant-density** collocated path with a plain body force, where every V8 branch
+is inert) reads cell `max|u|` **3.1e-2** at μ=0 / **8.7e-4** at μ=0.01 on the same walled column
+while its face field sits at 5.1e-13; the V8 ratio-1000 run reads **2.8e-8**, six orders better, and
+it **decays** (2.8e-8 at 100 steps → 8.0e-9 at 400). The accumulated pressure inherits it through
+the `centerToFace` leak of the checkerboard's envelope, which is the 2.3e-8 above.
+
+Scope of the collocated rung: **all-fluid only** (`set_pressure_geometry`); an immersed solid, the
+ghost projection and `set_rho_face_harmonic` throw with a message naming the reason.
+`enable_vof_momentum` stays staggered-only (the collocated construction needs Favre face states,
+AMR-Wind's pattern), so the collocated path is rated to density ratio **≲ 100 for cases with
+motion**; a high-ratio case at REST is exact. Under `set_density_mode` on this grid the AUTO scheme
+falls back from the ghost projection to gauge-exact (which, all-fluid, IS the plain central
+difference). Known gap, recorded not guarded: an OUTFLOW face's `bcCorrectOutflow` adjustment of
+`uf_` is not mirrored into the stored face increment, so open boundaries on this path are untested.
+Gates: `tests/kokkos` `vof_collocated`, `tests/kokkos_mpi` `vof_collocated_mpi_np{1,2,4}`,
+`tests/study/vof_collocated.py` (the staggered/collocated columns of the V4 physics battery).
+
+**Scope — say this to users:** **Staggered is the reference**; the collocated path is rung V8 (the
+paragraph above) and is all-fluid, ratio ≲ 100 with motion. An **immersed solid is supported since
+rung V5a** — `set_solid(...,
+cutcell_pressure=True)` — with the openness-weighted flux above (STAGGERED only); an all-fluid
 `set_pressure_geometry` is of course also fine. Without
 `enable_vof_momentum` the rung is **valid only at modest density ratios for cases with motion**; a
 high-ratio case at REST (the hydrostatic acid test) is exact either way. **With** it, the shipped
@@ -677,9 +724,12 @@ Measured with it on: ∂P/∂z relative error **0.34** instead of 1e-15. It ship
 the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
 Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
-`vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`; `tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`,
+`vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`, `vof_collocated`;
+`tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`,
 `vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,
-`vof_surface_tension_mpi_np{1,2,4}`, `vof_cutcell_mpi_np{1,2,4}`, `vof_wetting_mpi_np{1,2,4}`;
+`vof_surface_tension_mpi_np{1,2,4}`, `vof_cutcell_mpi_np{1,2,4}`, `vof_wetting_mpi_np{1,2,4}`,
+`vof_collocated_mpi_np{1,2,4}`;
+`tests/study/vof_collocated.py` (the V8 staggered/collocated columns);
 `tests/study/vof_cutcell.py` (the V5a battery: conservation through a packing, coupled draining,
 the 90° cap on a cut wall); `tests/study/vof_momentum_consistency.py` (the ratio sweep, the
 falling drop, the RT near-Nyquist check — every gate there records the pressure iteration count

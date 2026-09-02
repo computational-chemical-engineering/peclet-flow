@@ -31,6 +31,7 @@
 
 #include "peclet/core/geom/device_scene.hpp"
 
+#include "collocated_varrho.hpp"  // rung V8 (WO-T): collocated varRho + face-acceleration kernels
 #include "face_props.hpp"
 #include "gauge_exact_gradient.hpp"
 #include "ghost_projection_debug.hpp"  // opt-in gp row forensics (PECLET_FLOW_GP_DEBUG), no-op off
@@ -1755,15 +1756,22 @@ class Solver {
       // divergences). Gated on porous_ so every other path is byte-identical.
       if (porous_ && advect_)
         computeDivAdv();
+      // rung V8 (WO-T): on the collocated grid with variable density and/or surface tension the
+      // predictor carries NO force at all — every force is a face acceleration added after
+      // centerToFace (collocated_varrho.hpp). `colocatedFaceForce()` is false on the staggered path
+      // and on every validated constant-density collocated path, so this dispatch is inert there.
+      const bool coloFF = colocatedFaceForce();
       for (int c = 0; c < 3; ++c)  // RHS from u^n base + advection lagged at u^k
-        vofMomEnabled_ ? buildRhsVarMom(c)
-                       : (effVarRho() ? buildRhsVar(c)
-                                      : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c)));
+        coloFF ? buildRhsColoFF(c)
+               : (vofMomEnabled_
+                      ? buildRhsVarMom(c)
+                      : (effVarRho() ? buildRhsVar(c)
+                                     : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c))));
       // Rung V4 (WO-P): the balanced-force CSF, ADDED to whichever RHS the configuration built --
       // at the same place, and with the same face difference, as the incremental -grad(P^n) just
       // above it. Independent of the time term and the advection form, hence additive rather than a
       // fifth RHS kernel. Gated: byte-identical when surface tension is off.
-      if (csfActive())
+      if (csfActive() && !coloFF)
         for (int c = 0; c < 3; ++c)
           csfMode_ == 0 ? addCsfRhs(c) : addCsfRhsCellInterp(c);
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
@@ -2354,11 +2362,25 @@ class Solver {
   // halo+domain-BC fill and is exactly what the Picard loop does at the top of every iteration, so
   // calling it here leaves the velocity ghosts in the state the next consumer would have produced.
   void bridgeVelocityToVof() {
+    // Rung V8 (WO-T): on the collocated grid the divergence-free field is the PROJECTED MAC face
+    // field uf_/vf_/wf_, not the cell field — and it is in flow's own low-face convention
+    // (`uf(i) = 1/2(U(i)+U(i-1))` sits at i-1/2, the -x face of cell i), the SAME convention
+    // `getFaceVelocity` reports and `copyFaceVelocity` shifts. So the bridge is the identical call
+    // on a different source view; the cell field never enters the colour transport.
+    if constexpr (Grid::collocated) {
+      CCField fa[3] = {uf_, vf_, wf_};
+      for (int c = 0; c < 3; ++c) {
+        fillGhosts(fa[c]);  // the face field's own ghost policy (project() does exactly this)
+        vof::copyFaceVelocity(vofAdv_.faceVel(c), I3{e3_.x, e3_.y, e3_.z}, kVofG, fa[c],
+                              I3{e_.x, e_.y, e_.z}, G, c);
+      }
+      return;
+    }
     for (int c = 0; c < 3; ++c) {
       fillVelGhosts(c, 0);
       // The uniform face-velocity seam (getFaceVelocity): staggered C[c].u already lives on the
-      // faces. The collocated branch (uf_/vf_/wf_) is unreachable — enableVof throws there.
-      // copyFaceVelocity carries the low-face -> high-face index shift; see colour_field.hpp.
+      // faces. copyFaceVelocity carries the low-face -> high-face index shift; see
+      // colour_field.hpp.
       vof::copyFaceVelocity(vofAdv_.faceVel(c), I3{e3_.x, e3_.y, e3_.z}, kVofG, C[c].u,
                             I3{e_.x, e_.y, e_.z}, G, c);
     }
@@ -2380,6 +2402,64 @@ class Solver {
   // eps*rho in epsRho_, refreshed per step by updateEpsRho).
   bool effVarRho() const { return varRho_ || (porous_ && porousCons_); }
   CCField effRhoField() { return varRho_ ? rhoField_ : epsRho_; }
+  // --- rung V8 (WO-T): the collocated face-acceleration predictor --------------------------------
+  //
+  // TRUE exactly on the configurations that used to throw outright on this grid — variable density
+  // (`set_density_mode`) and surface tension (which needs `enable_vof`) on `SolverColocated` — so
+  // every validated collocated path (constant density, no VoF: `benchmarks/staggered-vs-collocated`,
+  // the colocated regression baselines) and the whole staggered solver take the same branches they
+  // always did, byte for byte.
+  //
+  // When it is on, the predictor drops the pressure gradient and EVERY body/interfacial force, and
+  // they are re-introduced as a face acceleration on `uf_/vf_/wf_` after `centerToFace` — see
+  // `collocated_varrho.hpp` for why the cell balance is not an option here.
+  bool colocatedFaceForce() const { return Grid::collocated && (varRho_ || csfActive()); }
+  // The AUTO collocated scheme (set in setSolid/setPressureGeometry) picks the GHOST projection when
+  // the configuration allows it, and the ghost v1 supports neither variable density nor the V8 face
+  // force. `set_density_mode` / `enable_vof` can be called AFTER the geometry, so re-run the same
+  // fallback here rather than failing later inside project(). An explicit scheme selection has
+  // already cleared colSchemeAuto_ and is left alone (it will hit the loud throw instead).
+  void collocatedV8AutoFallback(const char* why) {
+    if constexpr (Grid::collocated) {
+      if (colSchemeAuto_ && ghostProjection_) {
+        ghostProjection_ = false;
+        gpNRows_ = -1;
+        faceInterp_ = 9;
+        fprintf(stderr,
+                "peclet::flow SolverColocated: AUTO scheme fell back to gauge-exact (%s is rung V8 "
+                "and the ghost projection v1 does not support it). Select explicitly with "
+                "set_collocated_scheme to silence this notice.\n",
+                why);
+      }
+    }
+  }
+  void ensureFaceAcc() {
+    for (int c = 0; c < 3; ++c)
+      if (faceAcc_[c].extent(0) != n_)
+        faceAcc_[c] = CCField("faceAcc", n_);
+  }
+  // Guard rail for rung V8's scope. The collocated variable-density / face-force path is validated
+  // ALL-FLUID (`set_pressure_geometry`); an immersed solid on it would need the cut-cell face
+  // acceleration AND the one-sided (gauge-exact / ghost) closures to agree with the face averaging
+  // operator, which is a separate derivation. Fail loudly instead of half-supporting it.
+  void requireCollocatedFaceForceScope(const char* who) {
+    if (!colocatedFaceForce())
+      return;
+    std::string m(who);
+    if (hasSolid_)
+      throw std::runtime_error(
+          m + ": variable density / surface tension on SolverColocated is rung V8 and is ALL-FLUID "
+              "only (set_pressure_geometry). An immersed solid needs the cut-cell face acceleration "
+              "and the matching one-sided closures — not this rung.");
+    if (ghostProjection_)
+      throw std::runtime_error(
+          m + ": the ghost projection (v1) does not support variable density; select "
+              "set_collocated_scheme(\"gauge-exact\") (the AUTO fallback already does).");
+    if (rhoFaceHarmonic_)
+      throw std::runtime_error(
+          m + ": set_rho_face_harmonic is not wired into the collocated face acceleration (the "
+              "face force and the face coefficient would use different rho_f). Staggered only.");
+  }
   void updateEpsRho() {
     CCExec space;
     CCField er = epsRho_;
@@ -2401,7 +2481,12 @@ class Solver {
     if (effVarRho()) {
       fp.rho = CCConst(effRhoField());
       fp.idt = 1.0 / dt_;
-      fp.sc = strideOf(c);
+      // Placement of the velocity unknown: the staggered unknown sits on the -c FACE, so its time
+      // diagonal is the arithmetic face mean of rho; the COLLOCATED unknown sits at the cell CENTRE
+      // (Grid::offset == 0), so it is rho(i) itself — which is what stride 0 gives,
+      // 0.5*(rho(i)+rho(i)) == rho(i) exactly in floating point. Inert until rung V8: `haveRho` was
+      // unreachable on the collocated grid (set_density_mode and set_porous_continuity both threw).
+      fp.sc = Grid::collocated ? 0 : strideOf(c);
     } else
       fp.rhoIdtC = rho_ / dt_;
     return fp;
@@ -3687,6 +3772,100 @@ class Solver {
         });
   }
 
+  // --- rung V8 (WO-T): the collocated predictor when the forces live on the faces ----------------
+  //
+  // SIBLING of buildRhsVar, reached only when `colocatedFaceForce()` — i.e. only on `SolverColocated`
+  // with variable density and/or surface tension, both of which used to throw. It differs from
+  // buildRhsVar in exactly three ways, and every one of them is the point of the rung:
+  //
+  //   * the density weight of the time term and of the advection is the CELL density `rho(i)`, not a
+  //     face mean: the collocated velocity unknown IS the cell (`Grid::offset(c) == 0`), and this is
+  //     the same placement `VarFaceProps::idiag` now uses for the operator diagonal;
+  //   * the incremental `-grad(P^n)` is DROPPED — it is re-applied at the faces, where the pressure
+  //     difference `P(i) - P(i-s)` is the projection's own operator;
+  //   * the constant body force, the per-cell body force and the CSF are DROPPED for the same
+  //     reason. The predictor solves `A u* = (rho/dt) u^n - rho*adv(u^k)` and nothing else.
+  //
+  // What survives verbatim: the cut-cell rescale `rs`, the domain-BC fold / IBM inhomogeneity, the
+  // Koren/SOU advection and its implicit-FOU deferred correction.
+  void buildRhsColoFF(int c) {
+    CCExec space;
+    const double idt = 1.0 / dt_, rhoIdtC = rho_ / dt_, rhoK = rho_;
+    C3 e = e_;
+    CCField bb = C[c].b, rs = C[c].rscale, brhs = bcBrhs_[c], inh = C[c].inhom;
+    const bool haveRho = effVarRho();
+    // Unread placeholder when the density is constant (a Kokkos View must still be a live handle).
+    CCConst rf = CCConst(haveRho ? effRhoField() : C[c].rscale);
+    CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2), aP = advVelView(c),
+            un = CCConst(old_[c]);
+    const bool pureFou = implicitAdv() && !deferredCorr_;
+    const bool adv = advect_ && !pureFou, bc = hasBc_ && !bcStencilPath();
+    const bool ifou = implicitAdv() && deferredCorr_;
+    const int sch = advScheme_;
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "rhs_colo_ff", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const double rhoC = haveRho ? rf(i) : rhoK;
+          const double dg = haveRho ? rhoC * idt : rhoIdtC;
+          double aK = 0.0, aF = 0.0;
+          if (adv) {
+            sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{aP, e.x, e.y};
+            aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa)
+                            : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa);
+            if (ifou)
+              aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa);
+          }
+          bb(i) = rs(i) * (dg * un(i) - rhoC * aK + rhoC * aF) + (bc ? brhs(i) : -inh(i));
+        });
+  }
+
+  // Add the face acceleration a_f = dt*(f_f - grad_f(P^n))/rho_f to the just-averaged face field,
+  // and REMEMBER it in faceAcc_ so the cell counterpart can average exactly the same numbers.
+  // Called from project() immediately after centerToFace, before the divergence. See
+  // collocated_varrho.hpp.
+  void applyFaceAcceleration() {
+    requireCollocatedFaceForceScope("project");
+    ensureFaceAcc();
+    const bool haveRho = effVarRho();
+    const bool incr = cutcellPressure_ && incremental_;
+    CCField fa[3] = {uf_, vf_, wf_};
+    CCField oax[3] = {ox_, oy_, oz_};
+    CCConst rho = CCConst(haveRho ? effRhoField() : C[0].rscale);
+    for (int c = 0; c < 3; ++c) {
+      const long sc = strideOf(c);
+      buildFaceAccelVar(faceAcc_[c], CCConst(P_), rho,
+                        CCConst(hasCellForce_ ? cellForce_[c] : C[c].rscale), hasCellForce_,
+                        CCConst(oax[c]), haveRho, rho_, f_[c], incr, dt_, sc, e_, G);
+      if (csfActive())
+        addFaceAccelCsf(faceAcc_[c], CCConst(cField_), CCConst(kappaField_), CCConst(kappaBranch_),
+                        rho, CCConst(oax[c]), haveRho, rho_, sigmaCsf_, vofAdv_.h(), dt_, sc, e_, G);
+      addFaceIncrement(fa[c], CCConst(faceAcc_[c]), e_, G);
+    }
+  }
+
+  // The cell counterpart of the face path: turn faceAcc_ into the TOTAL face velocity increment of
+  // this step (force acceleration minus the projection's own face correction) and give each cell the
+  // openness-gated average of its two faces. Called from project() in place of the constant-density
+  // cell-correction chain.
+  // KNOWN GAP (recorded, not guarded): at an OUTFLOW face `bcCorrectOutflow` adjusts `uf_` after
+  // `projectCorrectVar`, and that adjustment is NOT mirrored into faceAcc_, so the cell average at
+  // the last row before an outflow face would miss it. Every rung-V8 gate is periodic or walled;
+  // an open boundary on the collocated variable-density path is untested (WO-R owns the staggered
+  // `bcCorrectOutflowVar`).
+  void applyCellFaceAverageCorrection() {
+    CCField oax[3] = {ox_, oy_, oz_};
+    const bool haveRho = effVarRho();
+    CCConst rho = CCConst(haveRho ? effRhoField() : C[0].rscale);
+    for (int c = 0; c < 3; ++c) {
+      const long sc = strideOf(c);
+      faceAccelSubGradPhi(faceAcc_[c], CCConst(phi_), rho, CCConst(oax[c]), haveRho, rho_, sc, e_,
+                          G);
+      applyCellFaceAverage(C[c].u, CCConst(faceAcc_[c]), CCConst(oax[c]), sc, e_, G);
+    }
+  }
+
   // --- balanced-force CSF (rung V4, WO-P) ------------------------------------------------------
   //
   // ADDITIVE to whichever RHS builder just ran (`buildRhs` / `buildRhsForced` / `buildRhsVar` /
@@ -4399,6 +4578,11 @@ class Solver {
                               faceInterp_ >= 3, e_, G);  // faces (modes 1-5,7,10; mode 6/9 = plain)
       else
         centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
+      // rung V8 (WO-T): the body / interfacial forces the predictor deliberately did NOT apply, put
+      // on the FACES where the pressure difference lives — the collocated form of the V4 balanced
+      // force (Basilisk centered.h). Inert on every constant-density collocated configuration.
+      if (colocatedFaceForce())
+        applyFaceAcceleration();
       if (ghostProjection_) {
         // Collocated ghost divergence: the SAME binary-openness + closure-delta pair as the
         // staggered path, applied to the 1/2-1/2 face-averaged field (the closures only ever read
@@ -4675,7 +4859,12 @@ class Solver {
       }
       // Correct the face field (-> discretely divergence-free; transient this step) and the cell
       // field (central-difference cell gradient).
-      projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G);
+      // rung V8: per-face 1/rho_f on the gradient, matching the operator coefficient
+      // c_f = o_f*rho0/rho_f — the SAME exact-adjoint face correction the staggered path uses.
+      if (varRho_)
+        projectCorrectVar(uf_, vf_, wf_, CCConst(phi_), CCConst(rhoField_), rho_, e_, G);
+      else
+        projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G);
       if (fluidOnlyMode_ == 2)  // Design B: replace the solid side's phi=0 by phibar_s at
         starCorrectFaces(uf_, vf_, wf_, CCConst(phi_), starOv_, nStar_,  // fluid|solid faces
                          C3{nx_, ny_, nz_}, e_, G, e_, G);
@@ -4690,7 +4879,14 @@ class Solver {
           if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
             bcCorrectOutflow(fa[a], phi_, e, G, a);
       }
-      if (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) {
+      if (colocatedFaceForce()) {
+        // rung V8 (WO-T): the cell sees the AVERAGE of what its two faces saw — the force
+        // acceleration minus the projection's own rho-weighted face correction — through the same
+        // averaging operator projectCorrectCenter applies to phi differences. A hydrostatic column
+        // and a stationary droplet are exactly balanced on the faces, so the cell averages an exact
+        // zero. This replaces the whole constant-density cell-correction chain below.
+        applyCellFaceAverageCorrection();
+      } else if (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) {
         // Ghost cell correction (also the mode-9/10 cutcell-ghost hybrids): the directional
         // gpCenterGrad gradient of phi — 2nd-order one-sided at cut cells, never reads a
         // decoupled (solid/pocket) phi. The same operator supplies the momentum's -grad(P^n)
@@ -5097,11 +5293,18 @@ class Solver {
   static constexpr int kVofG = 3;  // the colour field's ghost width (VOF_PLAN §3 rule 1)
 
   void enableVof() {
-    if constexpr (Grid::collocated)
-      throw std::runtime_error(
-          "enable_vof: geometric VoF is STAGGERED-ONLY at rung V2a. The collocated path is rung V8 "
-          "and needs the collocated variable-density projection (set_density_mode currently throws "
-          "there) plus face-placed balanced forcing first.");
+    if constexpr (Grid::collocated) {
+      // Rung V8 (WO-T): allowed. The colour is advected by the PROJECTED face field uf_/vf_/wf_ —
+      // which is what the ABC approximate projection makes exactly divergence-free, i.e. precisely
+      // the field Weymouth-Yue's conservation proof needs — and every interfacial force is a face
+      // acceleration (collocated_varrho.hpp). ALL-FLUID only at this rung.
+      if (hasSolid_)
+        throw std::runtime_error(
+            "enable_vof: geometric VoF on SolverColocated (rung V8) is ALL-FLUID only — an immersed "
+            "solid needs the cut-cell face acceleration and the matching one-sided closures, which "
+            "is a later rung. Use the staggered Solver (rung V5a supports cut cells).");
+      collocatedV8AutoFallback("geometric VoF on the collocated grid");
+    }
     if (vofEnabled_)
       return;
     cField_ = addField("C");  // the G=2 registry mirror (closure input / IO / redistribute)
@@ -5190,6 +5393,14 @@ class Solver {
   // cell is whole; O(1) wrong in the distribution INSIDE a cell whose interface crosses its wall.
   // `vof_diagnostics().clipped_volume` is the tripwire.
   void requireVofGeometry(const char* who) {
+    if constexpr (Grid::collocated) {
+      // Rung V8 scope, re-checked here because `set_solid` can follow `enable_vof`.
+      if (hasSolid_)
+        throw std::runtime_error(
+            std::string(who) +
+            ": geometric VoF on SolverColocated (rung V8) is ALL-FLUID only. The cut-cell colour "
+            "transport (rung V5a) is validated on the STAGGERED solver.");
+    }
     if (!hasSolid_ || vofAdv_.hasGeometry())
       return;
     std::string m(who);
@@ -5852,11 +6063,20 @@ class Solver {
   // targeting "rho" (e.g. rho = LinearMix of a transported phase fraction) enables it
   // automatically. Staggered grid only (v1); the velocity multigrid (scalar-coefficient) is
   // disabled.
+  // Rung V8 (WO-T) lifted the collocated throw. On `SolverColocated` the variable-density path is
+  // the ABC approximate projection with the face coefficient `c_f = o_f rho0/rho_f`,
+  // `projectCorrectVar` on the FACE field, and a cell correction that is the AVERAGE OF THE TWO FACE
+  // CORRECTIONS (never a cell-centred grad(phi)/rho_c); every body / interfacial force becomes a
+  // face acceleration added after `centerToFace`. Scope: ALL-FLUID
+  // (`set_pressure_geometry`) — an immersed solid still throws, at the first `project()`, and so do
+  // the ghost projection and `set_rho_face_harmonic` (see requireCollocatedFaceForceScope).
+  // Momentum consistency (`enable_vof_momentum`) is NOT in this rung: the collocated construction
+  // needs Favre face states, so the collocated two-phase path is rated to density ratio <= ~100 for
+  // cases WITH MOTION (a high-ratio case at REST — hydrostatic, stationary droplet — is exact
+  // either way, and is measured at ratio 1000).
   void setDensityMode(bool variable) {
-    if constexpr (Grid::collocated) {
-      if (variable)
-        throw std::runtime_error("set_density_mode: variable density is staggered-only (v1)");
-    }
+    if (variable)
+      collocatedV8AutoFallback("variable density on the collocated grid");
     varRho_ = variable;
     if (variable) {
       if (fields_.has("rho"))
@@ -6381,6 +6601,9 @@ class Solver {
   CCField gpRh_, gpT_, gpZ2_;  // extra BiCGStab scratch (g=1 block)
   CCField gpX2_;  // distributed BiCGStab matvec staging (g=2 solver block; overlay +/-2 halo)
   CCField uf_, vf_, wf_;    // collocated: transient face (MAC) field (approx projection)
+  CCField faceAcc_[3];      // rung V8 (WO-T): the collocated face velocity increment of
+                            // this step (force acceleration, then minus the projection's
+                            // own face correction). Allocated only on that path.
   CCField tgp_;             // collocated: transpose-gradient scratch (setFaceInterp(2/3))
   CCField wdef_;            // collocated: FV wall viscous-flux defect scratch (setFaceInterp(4))
   CCField fvM_, fvL_, cs_;  // collocated: mode-4 defect scratch (M·u, L_FV·u) + cell fluid fraction
