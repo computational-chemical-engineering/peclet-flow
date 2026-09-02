@@ -725,6 +725,7 @@ class VelocityMG {
                        gmax(maxAbsDiffInner(CCConst(l0.rhs), CCConst(l0.res), l0.ext, G)));
       lastResRatio_ = bnorm > 0.0 ? r0 / bnorm : 0.0;
     }
+    double rPrev = -1.0;
     for (int v = 0; v < nvc; ++v) {
       if (useDu)
         Kokkos::deep_copy(prev_, l0.x);
@@ -732,7 +733,10 @@ class VelocityMG {
       if (useRes) {
         const double r = residual();
         lastResRatio_ = bnorm > 0.0 ? r / bnorm : 0.0;
-        if (r <= resTol * bnorm) {
+        // round-off floor / stagnation guard (see IbmSolver::velSweepLoop)
+        const bool floor = r <= 1e-14 * bnorm || (rPrev >= 0.0 && r >= rPrev);
+        rPrev = r;
+        if (r <= resTol * bnorm || floor) {
           used = v + 1;
           break;
         }

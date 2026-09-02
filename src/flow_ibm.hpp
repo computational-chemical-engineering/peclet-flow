@@ -179,7 +179,11 @@ class Solver {
   // equation's own convergence, and a converged warm start stops at sweep 1. Available on the
   // stencil paths (IBM / cut-cell domain-BC RB-GS, every velocity-MG mode); the const-coefficient
   // domain-BC smoother keeps the update criterion.
-  void setVelocityResidualTolerance(double rtol) { velResTol_ = rtol > 0.0 ? rtol : 0.0; }
+  // rtol > 0: fixed; rtol == 0: the legacy update criterion; rtol < 0 (DEFAULT): FOLLOW THE
+  // PRESSURE SOLVER'S TOLERANCE -- the projection is what consumes u*, and it resolves the
+  // divergence the momentum residual leaves to its own rtol, so "solve momentum no less
+  // accurately than pressure" is the self-consistent choice with no free constant.
+  void setVelocityResidualTolerance(double rtol) { velResTol_ = rtol; }
   // Velocity-MG AUTO rule (applies when set_velocity_multigrid was never called): under MPI, once
   // the block is small enough that the momentum RB-GS is halo-latency-bound, take the V-cycle
   // instead (1-2 cycles/component == 2-4 exchanges against 8-9 sweeps x 2). Measured crossover on
@@ -192,7 +196,13 @@ class Solver {
     if (minGlobalCells >= 0)
       vmgAutoMinGlobal_ = minGlobalCells;
   }
-  double velocityResidualTolerance() const { return velResTol_; }
+  // The tolerance actually in force (resolves the follow-the-pressure default).
+  double velocityResidualTolerance() const {
+    if (velResTol_ >= 0.0)
+      return velResTol_;
+    return useChebyshev_ ? chebRtol_ : pcgRtol_;  // FCG shares pcgRtol_; the plain V-cycle driver
+                                                  // has no tolerance and takes the PCG default
+  }
   // max over components of max|r|/max|b| at exit of the last step's momentum solves (residual
   // mode only; -1 otherwise).
   double lastMomentumResidual() const { return lastMomentumResid_; }
@@ -4263,7 +4273,8 @@ class Solver {
                     std::function<double()> resid = nullptr, double bnorm = 0.0) {
     double du0 = 0.0;
     int used = velIters_;
-    const bool useRes = velResTol_ > 0.0 && resid;
+    const double vtol = velocityResidualTolerance();
+    const bool useRes = vtol > 0.0 && resid;
     auto gmax = [&](double v) {
 #ifdef PECLET_FLOW_MPI
       if (distributed_) {
@@ -4274,7 +4285,7 @@ class Solver {
 #endif
       return v;
     };
-    double scale = 0.0;
+    double scale = 0.0, rPrev = -1.0;
     if (useRes) {
       // The convergence scale from the initial residual: forcing may enter through a Dirichlet
       // ghost (inflow), not b, hence max(|b|, |A u|). NO early return on a converged warm start:
@@ -4296,7 +4307,12 @@ class Solver {
           fill();
           const double r = gmax(resid());
           const double ratio = scale > 0 ? r / scale : 0.0;
-          if (r <= velResTol_ * scale || it + 1 == velIters_) {
+          // Round-off floor / stagnation guard: a residual at ~1e-14 of the scale, or one that no
+          // longer decreases between checks, cannot be improved by more sweeps -- stop rather than
+          // chase noise to the cap (an exact case such as the hydrostatic column lands here).
+          const bool floor = r <= 1e-14 * scale || (rPrev >= 0.0 && r >= rPrev);
+          rPrev = r;
+          if (r <= vtol * scale || floor || it + 1 == velIters_) {
             lastMomentumResid_ = std::max(lastMomentumResid_, ratio);  // EXIT ratio per component
             used = it + 1;
             break;
@@ -4344,7 +4360,7 @@ class Solver {
     return maxAbsInner(CCConst(velRes_), e_, G);
   }
   std::function<double()> stencilResidual(int c, bool exchange = false) {
-    if (velResTol_ <= 0.0)
+    if (velocityResidualTolerance() <= 0.0)
       return nullptr;
     if (velRes_.extent(0) != n_)
       velRes_ = CCField("velRes", n_);
@@ -4363,7 +4379,7 @@ class Solver {
   }
   // The all-fluid domain-BC smoother's operator (constant coefficients + the boundary fold).
   std::function<double()> constCoeffResidual(int c, double beta, double Ac) {
-    if (velResTol_ <= 0.0)
+    if (velocityResidualTolerance() <= 0.0)
       return nullptr;
     if (velRes_.extent(0) != n_)
       velRes_ = CCField("velRes", n_);
@@ -4375,7 +4391,7 @@ class Solver {
     };
   }
   double stencilBnorm(int c) {
-    return velResTol_ > 0.0 ? maxAbsInner(CCConst(C[c].b), e_, G) : 0.0;
+    return velocityResidualTolerance() > 0.0 ? maxAbsInner(CCConst(C[c].b), e_, G) : 0.0;
   }
 
   void smoothComp(int c) {
@@ -4421,7 +4437,8 @@ class Solver {
       fillVelGhosts(c, 0);
       vmg_.setBcApplyL0([this, c](CCField x) { applyVelocityBcCompTo(x, c, 0, true); });
       lastMomentumSweeps_ +=
-          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, vmgComm(), velResTol_);
+          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, vmgComm(),
+                     velocityResidualTolerance());
       lastMomentumResid_ = std::max(lastMomentumResid_, vmg_.lastResidualRatio());
       maskVelocity(c);
       return;
@@ -4462,7 +4479,8 @@ class Solver {
       // (the hook applies the BC only: VelocityMG::fill owns the periodic wrap / halo exchange)
       vmg_.setBcApplyL0([this, c](CCField x) { applyVelocityBcCompTo(x, c, 1, true); });
       lastMomentumSweeps_ +=
-          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, vmgComm(), velResTol_);
+          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, vmgComm(),
+                     velocityResidualTolerance());
       lastMomentumResid_ = std::max(lastMomentumResid_, vmg_.lastResidualRatio());
       return;
     }
@@ -4504,7 +4522,8 @@ class Solver {
                           rho_ / dt_, 0.5);
       }
       lastMomentumSweeps_ +=
-          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, vmgComm(), velResTol_);
+          vmg_.solve(CCConst(C[c].b), C[c].u, vmgVcycles_, 2, 2, 8, velTol_, vmgComm(),
+                     velocityResidualTolerance());
       lastMomentumResid_ = std::max(lastMomentumResid_, vmg_.lastResidualRatio());
       maskVelocity(
           c);  // re-impose no-slip at solid (the masked solve leaves them at the pin value)
@@ -7003,9 +7022,9 @@ class Solver {
   double velTol_ = 0.0;         // momentum tolerance stop (0 = legacy fixed-count loop)
   int velMinIters_ = 2;
   long lastMomentumSweeps_ = 0;  // sweeps actually run last step (summed over components/Picard)
-  double velResTol_ = [] {  // residual-based momentum stop, DEFAULT 1e-5 since 2026-09-02 (0 = update criterion)
-    const char* e = std::getenv("PECLET_FLOW_VRES");  // env override for experiments / bisection
-    return e ? std::atof(e) : 1e-5;
+  double velResTol_ = [] {  // residual-based momentum stop: < 0 follows the pressure rtol (DEFAULT
+    const char* e = std::getenv("PECLET_FLOW_VRES");  // since 2026-09-02), 0 = update criterion,
+    return e ? std::atof(e) : -1.0;                   // > 0 fixed; env override for bisection
   }();
   double lastMomentumResid_ = -1.0;  // max_c max|r|/max|b| at exit (residual mode)
   CCField velRes_;                 // scratch for the stencil-path residual

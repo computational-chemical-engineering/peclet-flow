@@ -222,13 +222,15 @@ static void bind_solver(nb::module_& m, const char* name) {
           "regimes (small nu*dt/dx^2) exit after ~3-5 sweeps; stiff regimes run to the cap "
           "unchanged. rtol = 0 (default) is the legacy fixed count, byte-identical.")
       .def("set_velocity_residual_tolerance", &S::setVelocityResidualTolerance, nb::arg("rtol"),
-           "Residual-based momentum stop (0 = off): a component's implicit solve ends once "
-           "max|b - A u| <= rtol * max|b| over the fluid unknowns. Measures convergence itself "
-           "(the update criterion is relative to the FIRST sweep's update, which on a warm-started "
-           "near-steady step is already noise and then costs the whole sweep cap to shrink by "
-           "1e-3). Stencil paths and every velocity-MG mode; the const-coefficient domain-BC "
-           "smoother keeps the update criterion.")
-      .def("velocity_residual_tolerance", &S::velocityResidualTolerance)
+           "Residual-based momentum stop: a component's implicit solve ends once max|b - A u| <= "
+           "rtol * max(max|b|, max|A u|) over the solved unknowns (at least one sweep always runs; "
+           "a round-off floor stops a solve that cannot improve). rtol < 0 (DEFAULT) FOLLOWS THE "
+           "PRESSURE SOLVER'S rtol -- the projection consumes u* and resolves the divergence the "
+           "momentum residual leaves to its own tolerance; rtol > 0 fixes it; rtol == 0 restores "
+           "the legacy update criterion (relative to the FIRST sweep's update, which on a "
+           "warm-started near-steady step is noise and cost the whole sweep cap). Every path.")
+      .def("velocity_residual_tolerance", &S::velocityResidualTolerance,
+           "The momentum residual tolerance in force (resolves the follow-the-pressure default).")
       .def("set_velocity_multigrid_auto", &S::setVelocityMultigridAuto, nb::arg("cells_per_rank"),
            nb::arg("min_global_cells") = -1,
            "AUTO velocity-MG rule (when set_velocity_multigrid was never called): under MPI (np > 1) "

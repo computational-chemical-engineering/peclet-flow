@@ -438,8 +438,8 @@ whole rung.** With a constant κ the force is *exactly* the discrete gradient of
 the range of the operator the projection inverts, the projection annihilates it, and a stationary
 droplet stays at machine zero — measured **max|u| = 3.6e-17 / 1.9e-17 / 2.4e-17 at 16³/32³/48³** and
 **9.4e-17 … 4.3e-18 over μ = 1e-3 … 1** (Francois et al. 2006; Popinet 2009) — with the momentum
-solve at machine precision; under the default residual stop (1e-5, since 2026-09-02) the static
-droplet reads 5e-12, so exactness gates pin `set_velocity_residual_tolerance(0)`. The ablation
+solve at machine precision; under a fixed 1e-5 residual stop the static droplet reads 5e-12 (~5e-15 at the
+follow-the-pressure default of 1e-8…1e-10), so exactness gates pin `set_velocity_residual_tolerance(0)`. The ablation
 `set_csf_mode(1)` — a *cell-centred* `σκ∇C` face-interpolated exactly as the per-cell body-force
 machinery carries `ρg` — is the same physics with one wrong operator pairing and reads **5.8e-2,
 i.e. Ca = 5.8e-3 and 3.0e+15× the balanced-force value**: that is the literature's "naive CSF gives
@@ -971,17 +971,24 @@ different solver" trap; with the same stencil they agree to 2e-11. Gate:
 `tests/kokkos_mpi/test_velocitymg_bc_mpi.cpp` (np 1/2/4, bit-exact / 1.7e-14, V-cycle == RB-GS
 fixed point to 4e-9).
 
-**The momentum solve stops on the residual, not the update — DEFAULT 1e-5 since 2026-09-02.**
-`set_velocity_residual_tolerance(rtol)` (0 = the legacy update criterion) ends a component's solve
-once max|b − A u| ≤ rtol · max(max|b|, max|A u|) over the solved unknowns, on every path (cut-cell /
-IBM stencils, the folded constant-coefficient domain-BC smoother via `diffResidual`, every
-velocity-MG mode). At least one sweep / V-cycle always runs: skipping a solve whose warm start
-already meets the tolerance leaves u* without the O(rtol) response the projection needs, and the
-hydrostatic acid test (`vardensity_mpi`) drifts by 1e-8 in dP/dz — measured, and the reason there
-is no early return. The single-GPU regression suite passes unchanged on the default (every metric
-+0.00 %, pressure iterations/step identical); steady-state runs need 5–20 % more *steps* to meet
-their convergence check, because the over-converged update-criterion solve made the per-step
-metric drift smoother — if a study is step-count-sensitive, tighten to 1e-6. The legacy criterion — update ≤ rtol × the *first sweep's* update — is
+**The momentum solve stops on the residual, not the update — and by DEFAULT it follows the
+pressure solver's tolerance (2026-09-02).** `set_velocity_residual_tolerance(rtol)` ends a
+component's solve once max|b − A u| ≤ rtol · max(max|b|, max|A u|) over the solved unknowns, on
+every path (cut-cell / IBM stencils, the folded constant-coefficient domain-BC smoother via
+`diffResidual`, every velocity-MG mode). `rtol < 0` (the default) resolves to the active pressure
+driver's rtol (`pcgRtol_`, or `chebRtol_` under Chebyshev): the projection is what consumes u* and
+it resolves the divergence the momentum residual leaves to *its* tolerance, so "solve momentum no
+less accurately than pressure" is the self-consistent rule with no free constant. `rtol > 0` fixes
+it, `0` restores the legacy update criterion. Two guards: at least one sweep / V-cycle always runs,
+and a round-off floor (residual ≤ 1e-14 × scale, or no longer decreasing between checks) stops a
+solve that cannot improve. Cost on the FoxBerry bed at the benchmark's 1e-8: ~50 sweeps/step at 96³
+against 24 at a fixed 1e-5 and 468 under the update criterion. `velocity_residual_tolerance()`
+returns the value in force. Skipping a solve whose warm start already meets the tolerance leaves u* without the O(rtol)
+response the projection needs, and the hydrostatic acid test (`vardensity_mpi`) drifts by 1e-8 in
+dP/dz — measured, and the reason there is no early return. The single-GPU regression suite is
+identical to its baseline on the default (every metric +0.00 %, pressure iterations and step
+counts equal); a fixed 1e-5 had cost steady-state runs 5–20 % more steps to meet their
+convergence check, which is one reason the coupled default won. The legacy criterion — update ≤ rtol × the *first sweep's* update — is
 relative to a quantity that is already noise on a warm-started near-steady step, so RB-GS burns its
 whole sweep cap shrinking noise by 10³ (the FoxBerry bed: 600 sweeps/step at 384³, every step),
 while the V-cycle, whose first cycle moves a lot, stops too early. Measured at 96³ on that bed:
