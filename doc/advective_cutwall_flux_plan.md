@@ -1,4 +1,20 @@
-# Advective cut-wall flux — campaign plan (scoped 2026-08-31)
+# Advective cut-wall flux — campaign plan (scoped 2026-08-31; ten Cate CLOSED 2026-09-02)
+
+**RESOLUTION (2026-09-02): the remaining ten Cate deficit was not a solver defect at all.** The
+tank was built from a slab wider than the periodic box; the scene evaluates the UNION of an
+instance's periodic images, so the slab's images refilled the cavity and the tank ran **30 %
+narrow** (38 cells instead of 53 at d/h = 8, d/W = 0.21 instead of 0.15). With the slab fixed:
+E1 peak u/u∞ = **0.922 vs 0.947** (−2.6 %), E4 = **0.972 vs 0.955** (+1.8 %), both at d/h = 8 and
+both physical. The static duct twin gives K(Re 1.5) = 1.09 (creeping 1.11 relative to the
+periodic box; duct Cd/Abraham 1.30 → 1.08) — the solver screens confinement as the physics
+requires. A0 stands as a real fix (Blackburn 10.3 → 2.2 %, Newton leak closed). The three
+"live threads" below are closed by the same finding: (1) tow/free-fall disagreement at E4 was the
+narrow tank's return flow; (2) the unconfined control's +5 % shift is the d/h = 8 resolution
+class (the fixed sphere sits at 0.95–0.99 of Abraham there); (3) the −2 % Blackburn floor is the
+same resolution class. A1 (aperture weighting) remains NOT indicated. See
+`suite/docs/ANALYTIC_SDF_GEOMETRY.md` §7 item 11 for the trap, the detector now in
+`set_solid_from_scene`, and the finite-Re Galilean gate (towed vs fixed sphere agree to 0.03 %).
+
 
 **Status: RUNG A0 EXECUTED 2026-08-31 (flow `fb1a1a7`). H1 is HALF right — see
 "A0 results" below before doing anything else.** A0 closed the moving-wall momentum LEAK and

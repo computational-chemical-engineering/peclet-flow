@@ -539,6 +539,11 @@ static void bind_solver(nb::module_& m, const char* name) {
           "f_c*N_c + sum fb + [1]_c - [0]_c; the Stokes form drops both because they vanish at "
           "steady state with advection off. sum_i A_i is the advection operator's net momentum "
           "flux through the cut walls -- an O(h) property of that operator, not of the budget.")
+      .def("periodic_image_overlap_cells", &S::periodicImageOverlapCells,
+           "Cells on this rank whose solid/fluid sign was decided by a periodic IMAGE of an "
+           "instance wider than the box (set_solid_from_scene warns when nonzero): the scene "
+           "evaluates the UNION of images, so a slab wider than the box refills any cavity carved "
+           "from it. 0 when no instance is that wide or the images agree.")
       .def("wall_area_probe", &S::wallAreaProbe,
            "Diagnostic: [sum_c x_c*A_wall_x, sum_c y_c*A_wall_y, sum_c z_c*A_wall_z] over all cut "
            "cells. Must equal -V_solid componentwise if the aperture wall-area vectors are right, "
@@ -583,6 +588,13 @@ static void bind_solver(nb::module_& m, const char* name) {
           "Upload an initial velocity field (u,v,w each a Fortran-order (nx,ny,nz) float64 array).")
       .def("step", &S::step,
            "Advance the solver one time step (semi-implicit: diffusion + projection).")
+      .def(
+          "set_velocity",
+          [](S& s, int c, nb::ndarray<double, nb::f_contig> a) { s.setVelocity(c, grid_in(a)); },
+          nb::arg("c"), nb::arg("array"),
+          "Write component c's inner velocity from a Fortran-order (nx,ny,nz) float64 array "
+          "(solid rows re-masked). Initial-condition hook: a uniform stream around a fixed body "
+          "is the Galilean twin of the same body towed through fluid at rest.")
       .def(
           "get_u", [](S& s) { return field_out(s, s.getVelocity(0)); },
           "Return the x-velocity component as a Fortran-order (nx,ny,nz) float64 array (index "
