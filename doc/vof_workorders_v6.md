@@ -387,6 +387,240 @@ pressure iterations vs cap; a capped run is not a data point. Report ms/step and
 
 (append per WO, newest first)
 
+## WO-W12 findings (2026-09-03, Opus) — Part III rungs W1 + W2
+
+Branch `vof-w12` in **flow** (nothing in `core` needed changing). Backend: CUDA (RTX 5080,
+`nvidia-cuda`), MPI np 1/2/4/8. `OMP_NUM_THREADS` 2–8, `OMP_PROC_BIND=false` throughout. **The
+host and the GPU carried five other agents' jobs for the whole session** (GPU utilisation pinned at
+95 %, six compute processes), so the only timing quoted as a finding is the device-vs-host packing
+ratio, and even that is qualified below.
+
+### W1 (a) — master assignment: LPT wins, and the ORB's contiguity constraint is why
+
+Three modes, all pure functions of the REPLICATED block table (so every rank computes the same
+assignment with no communication — which is what lets a re-assignment happen mid-run without
+breaking a bitwise gate): `RoundRobin` (W0's), `Lpt` (greedy longest-processing-time on the block
+cell counts) and `WeightedOrb` (core's `BlockDecomposer<1>` over a 1-D block space, the work
+order's route). Measured on a 64-bubble lattice with radii 2 … 9 cells, i.e. block cell counts
+spanning **10.2×** (1728 … 17576, total 515 584) — the regime a round robin by block id is blind to:
+
+| np | round robin | LPT | weighted ORB |
+|---|---|---|---|
+| 1 | 1.0000 | 1.0000 | 1.0000 |
+| 2 | **1.1420** | **1.0000** | **1.0000** |
+| 4 | **1.4528** | **1.0000** | **1.0000** |
+| 8 | **2.1817** | **1.0000** | **1.0000** |
+
+Both replacements are perfect on this swarm, so the tie-break is structural, and it goes to LPT:
+**the ORB's blocks must be CONTIGUOUS in block id.** On a lattice ordered by id the sizes happen to
+be well mixed; order the same 64 blocks so the big ones are adjacent and the ORB cannot do better
+than the coarsest contiguous cut, while LPT is unaffected. LPT is also 4/3-competitive by Graham's
+bound (asserted in the ctest) and needs no dependency. **`Lpt` is what `set_vof_block_assign(1, N)`
+ships**; `RoundRobin` stays the container default so every W0 number reproduces.
+
+**Re-assignment is exact.** Only two things in a block are state — the colour and the previous
+centroid — so a master change is one contiguous message plus four doubles (`VofBlock::serializeAux`;
+without the centroid a migrated marker's reported *velocity* would blank for one step). Gated in
+`test_vof_blocks_mpi` by a 64-bubble LeVeque scene with `assignMode = Lpt, reassignEvery = 8`
+compared against the SAME container on one rank (which has one rank and therefore never migrates):
+**first differing step −1 (none) at np 1, 2, 4 and 8**, per-marker volumes agreeing with the
+single-rank run to **0.000e+00**, with **48 / 98 / 120 master changes actually migrated** at
+np 2 / 4 / 8 (3.7 MB in 44 msgs on rank 0 at the last np=2 event). Dynamic imbalance under LPT on
+that scene: **1.002 / 1.003 / 1.012** at np 2 / 4 / 8, against the round robin's 1.337 / 1.559 /
+3.117 on W0's three-bubble scene. At np ≥ 2 **16 / 27 / 34 of the 64 blocks have a master that owns
+none of their cells**, so the whole state arrives by message.
+
+### W1 (b) — device-resident packing
+
+The four block transfers are now ONE templated pattern with four instantiations (gather face
+velocity: extended box, 3 components; gather colour: inner box, 1; scatter colour MAX: inner box, 1;
+scatter force SUM: inner box, 3), whose pack/unpack kernels run in the block's own memory space.
+Host traffic is one staging copy **per MPI message** instead of one mirror of the whole local patch
+per step, and **none at all** for the master's own cells (a device-to-device kernel). That is the
+order `core`'s grid halo grew in, and the staging survives because the MPI here is not
+CUDA-aware.
+
+**Bitwise inert** (it is a copy of a double at every step), gated four ways on an 8-bubble LeVeque
+scene — (host, no pool), (device, no pool), (host, pool), (device, pool) — **0 cells differ,
+max|dV| = 0.000e+00** in all three comparisons.
+
+**The ratio, with its caveat.** On a comparatively quiet GPU the whole block step read
+**2.731 ms (device) vs 4.626 ms (host) = 1.69×**. Re-measured later the same session with the GPU
+saturated by five other agents: **79.4 vs 63.4 ms = 0.80×**, i.e. the ordering INVERTS under
+contention — the device path issues ~4 small kernels per piece where the host path issues three
+big mirror copies, and kernel-launch latency is what a contended GPU serialises. Both numbers are
+reported because the second is not evidence against the design, it is evidence that this
+measurement needs a quiet machine (WO-V9's remit) and that the per-piece kernels want batching.
+
+### W1 (c) — the block pool
+
+Advectors retired by a re-centring are recycled by EXACT extent and handed back with their colour
+and three face-velocity fields zeroed, which is the state a freshly `init`ed one is in — so the
+pool is bitwise inert, and the ctest gates that rather than asserting it. Hit rate is entirely a
+property of the scene: on the strongly deforming LeVeque field the boxes change size almost every
+re-centring (**4 hits / 56 misses** on 8 bubbles over 360 steps), while a translating bubble keeps
+its box SIZE and only moves its origin, which is the case the pool was written for.
+`vof_block_pool_stats()` reports both.
+
+### W1 (d) — per-bubble Lagrangian outputs
+
+`vof_block_stats()` now also carries **`area`**, the marker's interface area in cell units squared:
+the sum over the inner box of the PLIC polygon area on the MYC normal (`mycNormal` → `plicAlpha` →
+`plicPolygon` → `polygonAreaCentroid`, the same planes the curvature cascade reconstructs).
+Measured on a seeded sphere of R = 9.00 cells: **1016.36 against 4πR² = 1017.88, −0.15 %**.
+`id`, `master` and the box are now filled for EVERY block from the replicated table (they were only
+being written on the master, so a rank mastering nothing reported a zero box — a W0 reporting bug
+the docstring already contradicted).
+
+**A wisp guard is required here too, and finding out why was the session's second bug.** A
+Weymouth–Yue round-off wisp satisfies `0 < C < 1`; its MYC normal is degenerate (an all-zero
+stencil returns `(1,0,0)`) and `plicAlpha(1,0,0,1e-15)` puts the plane just inside the face, so the
+**polygon is the FULL unit square and the cell contributes an area of 1**. Three such cells made a
+marker's reported area differ by **3.0 cells²** between np = 1 and np = 4 off a colour that agreed
+to 1e-14. With `areaEps = 1e-8` the same comparison reads **1.7e-13**.
+
+### W2 — the NS coupling
+
+Each master block runs its OWN `VofCurvature` cascade on its own dense box and forms the V4
+balanced-force face force there (`σ κ_f (C(i) − C(i−s_c))/h`, the same `csfFaceCurvature` +
+`csfFaceForce` pair `addCsfRhs` applies to the global field); the three face fields are scattered
+**UNPACK_SUM** into the RHS through a sibling branch, `addCsfRhsBlocks`. **Why the force and not
+the curvature is scattered:** κ is not additive and the union colour is a `max`, so a face between
+two OVERLAPPING markers has no single (κ, ΔC) pair to build a force from. The force is the additive
+quantity, and forming it where each marker's own colour still exists is the only place the
+balanced-force pairing — the same face difference the projection's gradient uses — is available per
+marker. This is TBFsolver's `VOF.f90::computeSurfaceTension` structure (block `stx/sty/stz` →
+`boxes_2_grid_vf(…, UNPACK_SUM)`) on the suite's own kernels.
+
+Inertness: `vofBlockCsf()` is false whenever `vofBlocks_` is null, so `csfActive()`, the `step()`
+CSF dispatch and the `advectVof()` dispatch all reduce to their W0 text character for character.
+
+**A defect the gate found, and it is the one worth remembering.** `set_surface_tension` sets the
+STRUCTURED cascade's wisp guard `interfaceEps = 1e-8` (V4/WO-P: a wisp's zero-area PLIC polygon
+returns |κ| up to 1e8 and the face between it and a real interfacial cell then carries a force
+eight orders too large), but each block allocated its own `VofCurvature` with the V3 default of 0.
+Measured consequence: the distributed run's scattered CSF face force was **bitwise identical to the
+single-rank one after ONE step and differed by 6.7e-3 after TWO** — a 13-order amplification of a
+3e-16 colour difference through a flipped cascade branch — and the coupled state then diverged to
+du 3.3e-3, dP 3.7e-3 at 12 steps. `VofBlockSet::curvProto` now carries the cascade's tunables and
+the solver sets them from its own. **A per-container copy of a shared estimator must copy its
+configuration, not just its code**; the general rule this instance teaches is that any container
+that instantiates `VofCurvature` itself has to be handed `interfaceEps`.
+
+**Also fixed here (not a defect, a scope correction):** the kinematic entry point
+`advect_vof_blocks(dt)` refuses a face field whose discrete divergence exceeds 1e-10, which is
+right for a prescribed velocity but wrong inside `step()`, where the advecting field is the
+projection's own output and its residual divergence IS the conservation floor — exactly as for the
+structured `advectVof()`, which never carried such a check. Measured projected residual at ratio 10
+without `PECLET_FLOW_EXACT_RESIDUAL`: 1.8e-7 … 1.1e-5, i.e. the check would refuse every coupled
+step. `advectVofBlocks(dt, requireSolenoidal)` — true from Python, false from `step()`.
+
+#### Gate 1 — Hysing case 1, block path vs global-field path. **PASS**
+
+Same physics, same discretisation, same adaptive-dt schedule, both **without**
+`enable_vof_momentum`; the only difference is which container carries the colour and where the CSF
+face force is formed. Quasi-2-D 64 × 4 × 128, T = 3, 2032 steps each:
+
+| | v_rise max | at t | y_c(3) | volume drift | pressure | max\|div(open u)\| |
+|---|---|---|---|---|---|---|
+| global colour field | 0.2827 | 1.050 | 1.2086 | −3.84e-12 | 23/600 | 9.08e-06 |
+| **blocks** | **0.2827** | **1.050** | **1.2086** | **−2.78e-12** | 23/600 | 9.08e-06 |
+| block − global | **−0.00 %** | | **−0.00 %** | | | |
+
+(Gate: both within 1 %.) Neither run touched the pressure cap (rule 3b). Both sit +17.0 % / +11.8 %
+off Hysing's published 0.2417 / 1.081 — that is the documented cost of running WITHOUT momentum
+consistency at ratio 10 (WO-P measured 15 % on the peak rise velocity for exactly this case) and is
+identical in the two containers, which is what the gate is about.
+
+**The colour convention flips, and it does not matter.** With blocks the union `C` is the DISPERSED
+phase (UNPACK_MAX starts from an empty union, so a cell no marker covers must read 0), whereas the
+structured script has `C = 1` in the heavy liquid. The property models are written mirrored. The CSF
+is invariant under the flip — κ(1−C) = −κ(C) and ∇(1−C) = −∇C, so σκ∇C is unchanged — which is what
+makes the comparison meaningful rather than a coincidence.
+
+#### Gate 2 — a 3-D bubble at Eo = 10, Mo = 1e-3, ratio 100 vs the Grace diagram. **PASS (−6.2 %)**
+
+D = 16 cells, box 64 × 64 × 144 (periodic laterally, walls top and bottom), 1018 steps, pressure
+21/800, max|div| 7.07e-6. Measured terminal velocity from a linear fit of the marker centroid over
+the last third of the trajectory: **0.5439 cells/s** (instantaneous plateau 0.5526 from t ≈ 37 on),
+Re = 21.8, aspect ratio √(m_xx/m_zz) = **2.256** (ellipsoidal, as the Grace diagram requires at this
+(Eo, Re)), volume drift **+6.5e-11**, interface area 928.7 against the seed sphere's 804.2 cells².
+
+**The gate as the work order states it measures an ill-posed reference, and this is a rule-4
+correction rather than a failure.** Clift, Grace & Weber's correlation contains a **dimensional**
+factor `(μ_l/μ_water)^−0.14` that a purely dimensionless (Eo, Mo, ratio) specification does not
+determine:
+
+  * silently setting it to 1 gives U_T = **0.9587** cells/s, and our result would read −43.3 %;
+  * but **Mo = 1e-3 at water-like ρ and σ forces μ_l ≈ 0.0727 Pa·s ≈ 81 × water** (water itself is
+    Mo ≈ 2.5e-11, twelve orders away), so a factor of 1 describes no liquid at all. The physical
+    system this (Eo, Mo) implies at ρ = 1000 kg/m³, σ = 0.065 N/m, g = 9.81 m/s² is a
+    **d = 8.14 mm bubble in a 72.7 cP glycerol/water mixture** — the standard Mo = 1e-3 fluid —
+    giving H = 20.18, J = 9.140 and **U_T = 0.5796 cells/s** (Re 23.2, Fr 0.733).
+
+Against that: **−6.2 %** (trajectory fit) / −4.7 % (plateau), inside the 10 % gate.
+`grace_terminal()` now derives the factor and prints both readings, with the argument in its
+docstring, so nobody repeats the mistake.
+
+#### Gate 3 — two bubbles in line. **INCONCLUSIVE as written; PASS on the corrected gate (3b)**
+
+*As written* (a large bubble, D = 14.4 cells, rising in line behind a small one, D = 9.6, seeded
+with a 2-cell film, Eo = 10, ratio 100, box 60 × 60 × 132, 1120 steps each):
+**the film never drains below 2 cells and NEITHER container merges.** Blocks: minimum axial gap
+**2 cells**, peak shared liquid **0.000**, marker volumes drifting +5.5e-6 / −3.8e-6 relative (the
+coupled-run conservation floor set by the projection's own 1.1e-5 divergence residual, not by the
+container). Control: minimum gap **2 cells**, never merged. So the gate does not reach the regime in
+which the two containers can differ — at D/Δ ≈ 10–14 and Eo = 10 the lubrication + capillary
+resistance holds the film at the grid scale for as long as we can afford to run, and the gate's
+discriminating question is never asked. **Recorded, not tuned.**
+
+*The corrected gate*, **3b**, asks it directly and passes. Seed the two markers ALREADY TOUCHING
+(centre distance = R_s + R_l − 1, so their bands share cells from step 0) and run 400 real
+two-phase steps at Eo = 10, ratio 100, box 48 × 48 × 84:
+
+| | markers | volumes | drift vs the exact spheres | union | shared liquid | blobs on the axis |
+|---|---|---|---|---|---|---|
+| **blocks** | **2** | 1563.487 / 463.266 | **+1.9e-5 / +4.2e-5** | 2016.309 | **10.444 cells** | 1 |
+| control (one field) | 1 | — | — | 2017.956 | 0 by construction | 1 |
+
+pressure 28/800 and 20/800 (uncapped), max\|div(open u)\| 2.8e-6 in both. **As a colour field the
+two states are indistinguishable — one blob, the same 2016/2018 cells of liquid — and only the
+block container still has two markers, each carrying its own whole bubble.** That is the rung's
+raison d'être through a real NS step rather than a kinematic one.
+
+*One seeding fact this gate paid for.* `enable_vof_blocks_from_field` gathers each marker's colour
+out of the global union restricted to its box, and when two markers OVERLAP at seed time there is
+no way to split that union between them: clipping the boxes at the midplane gave the two markers
+**−2.7 % and +7.1 %** of their intended volumes (each adopting a slice of the other). For markers in
+contact the sphere seeder (`enable_vof_blocks`, which paints each block from the exact analytic
+fraction) is the only correct entry point — and the general lesson for W4's coalescence/breakup work
+is that a per-marker colour SOURCE, not a union plus a box, is what a marker needs at birth.
+
+#### Gate 5 — MPI. **PASS at np 1 / 2 / 4**
+
+`tests/kokkos_mpi/test_vof_blocks_ns_mpi.cpp`: 24 × 24 × 48, two markers stacked along the CUT
+axis, walls on ±z, ratio 10, gravity, 12 steps of a real `IbmSolver::step()`, run twice — with the
+block CSF and with surface tension off — against a full-grid single-rank reference gathered on
+rank 0.
+
+| config | np | du | dv | dw | dP | dC | CSF face force |
+|---|---|---|---|---|---|---|---|
+| blocks, σ = 0 | 1 | 0 | 0 | 0 | 0 | 0 | — |
+| | 2 | 8.4e-19 | 5.8e-19 | 2.2e-18 | 5.6e-17 | 1.1e-16 | — |
+| | 4 | 5.5e-19 | 5.7e-19 | 2.6e-18 | 5.6e-17 | 1.1e-16 | — |
+| blocks + block CSF | 1 | **0** | **0** | **0** | **0** | **0** | **0** |
+| | 2 | 1.3e-15 | 1.4e-15 | 1.1e-15 | 3.6e-15 | 1.1e-14 | 1.4e-14 |
+| | 4 | 9.4e-16 | 1.1e-15 | 8.6e-16 | 3.2e-15 | 1.1e-14 | 1.3e-14 |
+
+np = 1 is **bitwise**; np > 1 sits at the pressure driver's documented reduction-order floor (the
+same tolerances `test_vof_surface_tension_mpi` uses: u 1e-12, P 1e-9, C 1e-12). Per-marker volumes
+agree with the single-rank run to **0.000e+00** and the areas to 1.7e-13. The two markers carry
+**0.175 cells of SHARED liquid** — a state a single colour field cannot represent — through a
+distributed NS step.
+
+#### Gate 6 — inertness
+
+Every existing VoF ctest bit-identical: see the battery run recorded at the end of this entry.
 ## WO-V7 findings — the pore-scale campaign (doublet, packing imbibition, micromodel) — 2026-09-02, Opus
 
 Branch `vof-v7`, worktree `../flow-v7`, built from `origin/main` at `2b55edb` (WO-R2 landed).
