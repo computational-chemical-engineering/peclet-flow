@@ -2046,7 +2046,8 @@ class Solver {
       // fifth RHS kernel. Gated: byte-identical when surface tension is off.
       if (csfActive() && !coloFF)
         for (int c = 0; c < 3; ++c)
-          csfMode_ == 0 ? addCsfRhs(c) : addCsfRhsCellInterp(c);
+          vofBlockCsf() ? addCsfRhsBlocks(c)
+                        : (csfMode_ == 0 ? addCsfRhs(c) : addCsfRhsCellInterp(c));
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
       // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies
       // to the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC
@@ -4380,6 +4381,37 @@ class Solver {
           bb(i) += rs(i) * 0.5 * (f[0] + f[1]);
         });
   }
+  // --- rung W2 (WO-W12): the BLOCK CSF, a sibling of `addCsfRhs` ------------------------------
+  //
+  // Same force, same place in the RHS, same `rs(i)` cut-cell rescale — but the face value was
+  // formed ON THE BLOCKS (each marker's own curvature cascade on its own dense box, the same
+  // `csfFaceCurvature` + `csfFaceForce` pair this file's `addCsfRhs` applies to the global field)
+  // and scattered into `csfBlkF_` with UNPACK_SUM, so two markers whose bands overlap ADD their
+  // forces instead of one of them being lost to the union's `max`. This is TBFsolver's
+  // `VOF.f90::computeSurfaceTension` structure (block `stx/sty/stz` -> `boxes_2_grid_vf(...,
+  // UNPACK_SUM)`), on the suite's own kernels.
+  //
+  // WHY THE FORCE AND NOT THE CURVATURE IS SCATTERED. kappa is not additive and the union colour
+  // is a `max`, so a face between two overlapping markers has no single (kappa, dC) pair to build
+  // a force from; the force is the additive quantity, and forming it where the marker's own colour
+  // still exists is the only place the balanced-force pairing (the SAME face difference the
+  // projection's gradient uses) is available per marker.
+  //
+  // Gated on `vofBlockCsf()`, which is false whenever the block container is absent.
+  void addCsfRhsBlocks(int c) {
+    CCExec space;
+    C3 e = e_;
+    CCField bb = C[c].b;
+    CCConst rs = CCConst(C[c].rscale), fb = CCConst(csfBlkF_[c]);
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_for(
+        "csf_rhs_blocks", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          bb(i) += rs(i) * fb(i);
+        });
+  }
+
   // Census of the CSF face force over this rank's inner region, on the CURRENT colour + curvature
   // fields: the max |F| per component, and the number of ORPHAN faces — faces across which the
   // colour jumps by more than the wisp threshold but neither cell carries a curvature estimate, so
@@ -6500,6 +6532,15 @@ class Solver {
   // Scope at W0: all-fluid (no immersed solid — the cut-cell block is W12), and the seeds are
   // spheres given in CELL units.
   void enableVofBlocks(const std::vector<std::array<double, 4>>& seeds) {
+    prepareVofBlocks();
+    for (const auto& sd : seeds)
+      vofBlocks_->seedSphere(sd[0], sd[1], sd[2], sd[3]);
+    vofBlocks_->scatter(vofAdv_.colour());
+    finishVofBlocks();
+  }
+  // Everything `enable_vof_blocks` does EXCEPT the seeding, so the sphere seeds and the
+  // general (`enable_vof_blocks_from_field`) seeds share one code path.
+  void prepareVofBlocks() {
     if (!vofEnabled_)
       throw std::runtime_error("enable_vof_blocks: VoF is not enabled (call enable_vof first)");
     if (hasSolid_)
@@ -6543,8 +6584,10 @@ class Solver {
 #endif
     bindVofBlockPatch();
     vofBlocks_->setExchange(vofBlockExch_);
-    for (const auto& s : seeds)
-      vofBlocks_->seedSphere(s[0], s[1], s[2], s[3]);
+  }
+  // The union the closures see, plus the rung-W1 master assignment on the seeded boxes.
+  void finishVofBlocks() {
+    vofBlocks_->assignMasters();
     vofBlocks_->scatter(vofAdv_.colour());
     harvestVofBlockUnion();
   }
@@ -6557,10 +6600,17 @@ class Solver {
   // `advect_vof`. Same precondition: Weymouth-Yue conservation is conditional on the face field
   // being discretely divergence-free, so a field that is not is refused rather than silently
   // reported as a conservation defect.
-  void advectVofBlocks(double dt) {
+  // `requireSolenoidal` is the KINEMATIC precondition: the Python entry point prescribes the
+  // velocity itself, so a field that is not discretely divergence-free is a user error and is
+  // refused rather than silently reported as a conservation defect. Inside `step()` the advecting
+  // field is the projection's own output and its residual divergence IS the conservation floor --
+  // exactly as for the structured `advectVof()`, which has never carried a check here -- so the
+  // in-step call passes false. (Rung W2: with variable density the projected residual sits at
+  // ~1e-7 without `PECLET_FLOW_EXACT_RESIDUAL`, which would refuse every coupled step.)
+  void advectVofBlocks(double dt, bool requireSolenoidal = true) {
     if (!vofBlocks_)
       throw std::runtime_error("advect_vof_blocks: call enable_vof_blocks first");
-    const double div = maxOpenDivergence();
+    const double div = requireSolenoidal ? maxOpenDivergence() : 0.0;
     if (!(div <= 1e-10)) {
       char msg[320];
       std::snprintf(msg, sizeof(msg),
@@ -6593,6 +6643,124 @@ class Solver {
     if (!vofBlocks_)
       throw std::runtime_error("vof_block_census: call enable_vof_blocks first");
     vofBlocks_->masterCensus(masters, cells);
+  }
+
+  // --- Part III rung W1 (WO-W12) ----------------------------------------------------------------
+  //
+  // (a) Master assignment. `mode` 0 = round robin (W0), 1 = LPT greedy on the block cell counts,
+  //     2 = weighted ORB over a 1-D block space (core's `BlockDecomposer<1>`). `every` re-runs the
+  //     assignment every `every` block steps, MIGRATING the colour of any block that changed
+  //     master (nothing else in a block is state). Applied immediately.
+  void setVofBlockAssign(int mode, long every) {
+    if (!vofBlocks_)
+      throw std::runtime_error("set_vof_block_assign: call enable_vof_blocks first");
+    vofBlocks_->assignMode = static_cast<vof::VofMasterAssign>(mode);
+    vofBlocks_->reassignEvery = every;
+    vofBlocks_->assignMasters();
+  }
+  int vofBlockAssign() const {
+    if (!vofBlocks_)
+      throw std::runtime_error("vof_block_assign: call enable_vof_blocks first");
+    return static_cast<int>(vofBlocks_->assignMode);
+  }
+  // The imbalance the CURRENT `assignMode` would give without applying it — so a study can put the
+  // three modes side by side on one swarm without perturbing the run.
+  double vofBlockImbalanceOf(int mode) const {
+    if (!vofBlocks_)
+      throw std::runtime_error("vof_block_imbalance_of: call enable_vof_blocks first");
+    const auto save = vofBlocks_->assignMode;
+    vofBlocks_->assignMode = static_cast<vof::VofMasterAssign>(mode);
+    const std::vector<int> m = vofBlocks_->plannedMasters();
+    vofBlocks_->assignMode = save;
+    const int np = vofBlocks_->size();
+    std::vector<long> load(static_cast<std::size_t>(np), 0);
+    long tot = 0, mx = 0;
+    for (std::size_t i = 0; i < m.size(); ++i) {
+      const long w = vofBlocks_->blocks()[i].box.cells();
+      load[static_cast<std::size_t>(m[i])] += w;
+      tot += w;
+    }
+    for (long v : load)
+      mx = std::max(mx, v);
+    return tot == 0 ? 1.0 : static_cast<double>(mx) * np / static_cast<double>(tot);
+  }
+  // (b)/(c) instrumentation: device-resident packing on/off, and the block-pool hit census.
+  void setVofBlockDeviceStaging(bool on) {
+    if (!vofBlockExch_)
+      throw std::runtime_error("set_vof_block_device_staging: call enable_vof_blocks first");
+    vofBlockExch_->deviceStaging = on;
+  }
+  void setVofBlockPool(bool on) {
+    if (!vofBlocks_)
+      throw std::runtime_error("set_vof_block_pool: call enable_vof_blocks first");
+    vofBlocks_->usePool = on;
+    if (!on)
+      vofBlocks_->clearPool();
+  }
+  std::array<long, 2> vofBlockPoolStats() const {
+    if (!vofBlocks_)
+      throw std::runtime_error("vof_block_pool_stats: call enable_vof_blocks first");
+    return {vofBlocks_->poolHits(), vofBlocks_->poolMisses()};
+  }
+
+  // General seeding (rung W1): one block per given GLOBAL index box, with the colour taken from
+  // the field `set_vof` installed. A sphere seed is a convenience over this; a Hysing bubble, a
+  // quasi-2-D cylinder or any scanned marker enters here. The boxes are the BUBBLE extents (the
+  // container grows them by the 3-cell margin itself) and must not overlap in a way that makes a
+  // cell belong to two markers at seed time -- the gather is a copy, not a union, so a cell inside
+  // two boxes would be given to both markers.
+  void enableVofBlocksFromField(const std::vector<std::array<int, 6>>& boxes) {
+    prepareVofBlocks();
+    for (const auto& q : boxes) {
+      vof::VofBox bb;
+      for (int d = 0; d < 3; ++d) {
+        bb.lo[d] = q[d];
+        bb.hi[d] = q[3 + d];
+      }
+      vofBlocks_->seedBox(bb);
+    }
+    bridgeColourToVof();  // the caller's `set_vof` field -> the g=3 patch the gather reads
+    vofBlocks_->finishSeeding(vofAdv_.colour());
+    finishVofBlocks();
+  }
+
+  // --- rung W2: the block CSF ------------------------------------------------------------------
+  //
+  // Turn the surface tension of `set_surface_tension` into a PER-BLOCK force: each marker runs its
+  // own curvature cascade on its own box and forms the V4 balanced-force face force there, and the
+  // three face fields are summed into the local patch (UNPACK_SUM). Requires the block container.
+  void enableVofBlockCsf() {
+    if (!vofBlocks_)
+      throw std::runtime_error("enable_vof_block_csf: call enable_vof_blocks first");
+    if (!(sigmaCsf_ > 0.0))
+      throw std::runtime_error(
+          "enable_vof_block_csf: set_surface_tension(sigma) first (sigma > 0)");
+    if constexpr (Grid::collocated)
+      throw std::runtime_error(
+          "enable_vof_block_csf: the block CSF is STAGGERED-only at rung W2 (the collocated face "
+          "-acceleration form is V8's, and composing the two is not this rung).");
+    vofBlocks_->enableCsf(sigmaCsf_);
+    const long len3 = static_cast<long>(e3_.x) * e3_.y * e3_.z;
+    for (int c = 0; c < 3; ++c) {
+      vofBlkF_[c] = SField("vof::blockcsf::patch", len3);
+      csfBlkF_[c] = CCField("vof::blockcsf", n_);
+    }
+    computeVofBlockCsf();
+  }
+  // Per-block curvature + CSF face force, scattered SUM into the registered face-force fields the
+  // RHS reads. Called at the head of every step by `updateVofCurvature()`.
+  void computeVofBlockCsf() {
+    if (!vofBlocks_ || !vofBlocks_->csfEnabled)
+      return;
+    vofBlocks_->computeCsf(vofBlkF_[0], vofBlkF_[1], vofBlkF_[2]);
+    for (int c = 0; c < 3; ++c)
+      copyInner(csfBlkF_[c], e_, G, CCConst(vofBlkF_[c]), e3_, kVofG);
+  }
+  // The summed branch census of the last block CSF (LOCAL to this rank).
+  vof::VofCurvature::Stats vofBlockCurvatureStats() const {
+    if (!vofBlocks_)
+      throw std::runtime_error("vof_block_curvature_stats: call enable_vof_blocks first");
+    return vofBlocks_->csfCurvatureStats();
   }
 
   // Harmonic instead of arithmetic rho_f in the pressure projection (WO-J item 5). DEFAULT OFF and
@@ -7003,7 +7171,14 @@ class Solver {
   // `addCsfRhsCellInterp`. Kept so the ctest can measure what the operator pairing is worth.
   void setCsfMode(int m) { csfMode_ = m; }
   int csfMode() const { return csfMode_; }
-  bool csfActive() const { return vofEnabled_ && sigmaCsf_ > 0.0 && kappaField_.extent(0) != 0; }
+  // Rung W2: the CSF may be formed on the BLOCKS instead of the global colour+kappa fields, in
+  // which case there is no `kappaField_` at all. `vofBlockCsf()` is false whenever the block
+  // container is absent (`vofBlocks_` is null unless `enable_vof_blocks` ran), so the expression
+  // below reduces to W0's character for character on every non-block path.
+  bool vofBlockCsf() const { return static_cast<bool>(vofBlocks_) && vofBlocks_->csfEnabled; }
+  bool csfActive() const {
+    return vofEnabled_ && sigmaCsf_ > 0.0 && (kappaField_.extent(0) != 0 || vofBlockCsf());
+  }
 
   // INSTRUMENT (not a configuration): stop recomputing the curvature at the head of each step and
   // use whatever is in the "kappa" / "kappa_branch" fields. Together with `set_vof_kappa_constant`
@@ -7117,7 +7292,9 @@ class Solver {
   void updateVofCurvature() {
     if (!csfActive())
       return;
-    if (!kappaFrozen_)
+    if (vofBlockCsf())
+      computeVofBlockCsf();  // rung W2: per-block cascade + the CSF face force, scattered SUM
+    else if (!kappaFrozen_)
       computeVofCurvature();
     const double cap = capillaryCfl_ * capillaryDt();
     if (!(dt_ <= cap))
@@ -7167,6 +7344,14 @@ class Solver {
   void advectVof() {
     if (!vofEnabled_)
       return;
+    // Rung W2: with the block container on, the colour is the BLOCKS' state and the registered
+    // "C" is the union derived from it — so the step's colour stage is the block advection, in
+    // exactly this slot and for exactly the same reason (the face field has just been projected).
+    // `vofBlocks_` is null unless `enable_vof_blocks` ran, so every other path is unchanged.
+    if (vofBlocks_) {
+      advectVofBlocks(dt_, /*requireSolenoidal=*/false);
+      return;
+    }
     requireVofGeometry("enable_vof");
     bridgeVelocityToVof();
     bridgeColourToVof();
@@ -8331,6 +8516,10 @@ class Solver {
   // every existing VoF path is byte-identical.
   std::shared_ptr<vof::VofBlockSet> vofBlocks_;
   std::shared_ptr<vof::VofBlockExchange> vofBlockExch_;
+  // rung W2: the block CSF face force -- on the g=3 patch (the scatter's target) and mirrored onto
+  // the G=2 registry block the RHS reads. Allocated only by `enable_vof_block_csf`.
+  SField vofBlkF_[3];
+  CCField csfBlkF_[3];
   bool distributed_ = false;
   C3 og_{0, 0, 0};  // velocity-block inner origin (global red-black parity); {0,0,0} single-rank
 #ifdef PECLET_FLOW_MPI

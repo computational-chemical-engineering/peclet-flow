@@ -60,13 +60,17 @@
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <vector>
 
 #include "mac_stencils.hpp"  // peclet::flow::SExec, SField, I3, L3
+#include "peclet/core/decomp/block_decomposer.hpp"
 #include "vof/advect_wy.hpp"
 #include "vof/colour_field.hpp"
+#include "vof/curvature_field.hpp"
+#include "vof/surface_tension.hpp"
 
 namespace peclet::flow::vof {
 
@@ -185,6 +189,71 @@ inline VofBox vofClampBox(VofBox b, I3 gs, const std::array<bool, 3>& per) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// master assignment (rung W1 item a)
+// ---------------------------------------------------------------------------------------------
+
+/// How a block's MASTER rank is chosen. The assignment is deliberately independent of where the
+/// bubble's cells live (that is the whole point of the container: bubble work is load-balanced
+/// separately from the flow decomposition), so it is a pure function of the REPLICATED block
+/// table and needs no communication in any of the three modes.
+enum class VofMasterAssign {
+  RoundRobin = 0,  ///< `id % size` — rung W0's assignment; blind to block SIZE
+  Lpt = 1,         ///< longest-processing-time greedy on the block cell counts (rung W1 default)
+  WeightedOrb = 2  ///< weighted ORB over a 1-D "block space" (`core::decomp::BlockDecomposer<1>`)
+};
+
+/// Longest-processing-time greedy (Graham 1969): heaviest block first onto the currently
+/// least-loaded rank, ties to the LOWEST rank id. `4/3 − 1/(3p)` of optimal in the worst case,
+/// and — the property the bitwise gates need — a deterministic pure function of the replicated
+/// weights, identical on every rank without an exchange.
+inline void vofAssignLpt(const std::vector<long>& w, int size, std::vector<int>& master) {
+  const std::size_t n = w.size();
+  master.assign(n, 0);
+  if (n == 0 || size <= 1)
+    return;
+  std::vector<std::size_t> ord(n);
+  for (std::size_t i = 0; i < n; ++i)
+    ord[i] = i;
+  // stable, and the comparator is a strict weak ordering on the weight alone, so equal weights
+  // keep block-id order -> with equal blocks LPT reproduces the round robin exactly.
+  std::stable_sort(ord.begin(), ord.end(),
+                   [&](std::size_t a, std::size_t b) { return w[a] > w[b]; });
+  std::vector<long> load(static_cast<std::size_t>(size), 0);
+  for (std::size_t k = 0; k < n; ++k) {
+    int best = 0;
+    for (int r = 1; r < size; ++r)
+      if (load[static_cast<std::size_t>(r)] < load[static_cast<std::size_t>(best)])
+        best = r;
+    master[ord[k]] = best;
+    load[static_cast<std::size_t>(best)] += w[ord[k]];
+  }
+}
+
+/// Weighted ORB over a 1-D block space: the blocks are laid out as a 1-D "grid" of `N` cells in
+/// block-id order carrying their weights, and `core::decomp::BlockDecomposer<1>` recursively
+/// bisects it into `size` CONTIGUOUS runs of balanced weight. This is the work order's
+/// `BlockDecomposer::init(…, weights)` route, using the same partitioner the flow decomposition
+/// uses. Its constraint (and its weakness here) is that a rank's blocks must be contiguous in id,
+/// which LPT is free of.
+inline void vofAssignOrb(const std::vector<long>& w, int size, std::vector<int>& master) {
+  const std::size_t n = w.size();
+  master.assign(n, 0);
+  if (n == 0 || size <= 1)
+    return;
+  std::vector<peclet::core::Real> wr(n);
+  for (std::size_t i = 0; i < n; ++i)
+    wr[i] = static_cast<peclet::core::Real>(w[i]);
+  peclet::core::decomp::BlockDecomposer<1> dec(
+      static_cast<std::size_t>(size),
+      peclet::core::IVec<1>{static_cast<peclet::core::Index>(n)}, wr);
+  for (int r = 0; r < size; ++r) {
+    const auto b = dec.block(static_cast<std::size_t>(r));
+    for (auto i = b.origin[0]; i < b.origin[0] + b.size[0]; ++i)
+      master[static_cast<std::size_t>(i)] = r;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // one block
 // ---------------------------------------------------------------------------------------------
 
@@ -205,6 +274,12 @@ struct VofBlockStats {
   /// bubble's wake that fell below `VofBlockSet::bubbleEps`. Never physical liquid (see the
   /// `bubbleEps` note); reported because a container that silently loses mass is not acceptable.
   double discarded = 0.0;
+  /// Interface area of the marker, in cell-size units squared: the sum of the PLIC polygon areas
+  /// over the inner box (`plicPolygon` + `polygonAreaCentroid` on the MYC normal, i.e. exactly the
+  /// planes the curvature cascade reconstructs). Rung W1 item (d) — the gallery's per-bubble
+  /// Lagrangian output. A sphere of radius R reads 4 pi R^2 to the PLIC discretization error
+  /// (~1 % at R/h = 8), NOT exactly; it is a measure of the reconstructed surface, not of a fit.
+  double area = 0.0;
 };
 
 /// One bubble's block. Every rank holds the (id, box, master) triple — the replicated table — and
@@ -214,12 +289,35 @@ class VofBlock {
   long id = 0;
   int master = 0;
   VofBox box;  ///< the INNER box, global
+  /// The BUBBLE extent this block was seeded from (empty for a sphere seed, which paints its own
+  /// colour). Used once, at seeding, to clip a neighbour's liquid out of the margin ring.
+  VofBox seed_{};
 
   bool mine() const { return mine_; }
   WyAdvector& advector() { return adv_; }
   const WyAdvector& advector() const { return adv_; }
   VofBox extended(int ghost) const { return VofBox::grown(box, ghost); }
   const VofBlockStats& stats() const { return st_; }
+  /// Rung W2: the block's own curvature cascade and the CSF face force it forms. Allocated only
+  /// when `VofBlockSet::csfEnabled` is on and only on the master. `csfForce(c)` holds the force at
+  /// the LOW face of each cell of the block's own extended array (flow's face convention), i.e.
+  /// `sigma kappa_f (C(i) - C(i - s_c)) / h`, and is what the scatter sums into the global field.
+  VofCurvature& curvature() { return curv_; }
+  const VofCurvature& curvature() const { return curv_; }
+  SField csfForce(int c) const { return f_[c]; }
+  /// The non-colour state a master carries between steps: the previous centroid (so a migrated
+  /// block's reported velocity has no gap) and whether it is valid. Four doubles; everything else
+  /// in a block is either replicated (the table) or recomputed every step.
+  void serializeAux(double out[4]) const {
+    for (int d = 0; d < 3; ++d)
+      out[d] = prevCentroid_[d];
+    out[3] = hasPrev_ ? 1.0 : 0.0;
+  }
+  void deserializeAux(const double in[4]) {
+    for (int d = 0; d < 3; ++d)
+      prevCentroid_[d] = in[d];
+    hasPrev_ = (in[3] != 0.0);
+  }
 
   friend class VofBlockSet;
 
@@ -227,6 +325,8 @@ class VofBlock {
   bool mine_ = false;
   bool allocated_ = false;
   WyAdvector adv_;
+  VofCurvature curv_;
+  SField f_[3];
   VofBlockStats st_;
   double prevCentroid_[3]{0, 0, 0};
   bool hasPrev_ = false;
@@ -251,6 +351,18 @@ struct VofBlockExchangeBase {
   virtual void scatterColourMax(std::vector<VofBlock>& blocks, SField cLocal) = 0;
   /// Replicate the (possibly re-centred) boxes so every rank's table agrees again.
   virtual void syncTable(std::vector<VofBlock>& blocks) = 0;
+  /// Fill every MASTER block's INNER colour from the caller's colour patch (the mirror of
+  /// `scatterColourMax`). Used to seed a block from an arbitrary global colour field — the general
+  /// seeding path, which a sphere seed is only a convenience over.
+  virtual void gatherColour(std::vector<VofBlock>& blocks, SField cLocal) = 0;
+  /// SUM every master block's CSF face force into the caller's three face-force patches
+  /// (TBFsolver's UNPACK_SUM, `VOF.f90::computeSurfaceTension`): overlapping markers ADD their
+  /// forces, which is what makes two touching bubbles push on the fluid twice and not once.
+  virtual void scatterForceSum(std::vector<VofBlock>& blocks, SField fx, SField fy, SField fz) = 0;
+  /// Move a block's state from `oldMaster[i]` to `blocks[i].master` after a re-assignment. The
+  /// gaining rank has ALREADY allocated the (zeroed) advector; only the colour travels — everything
+  /// else in a block is either replicated (the table) or recomputed per step.
+  virtual void migrateColour(std::vector<VofBlock>& blocks, const std::vector<int>& oldMaster) = 0;
   /// Bytes moved by the last gather / scatter on THIS rank (sent + received).
   virtual long gatherBytes() const { return 0; }
   virtual long scatterBytes() const { return 0; }
@@ -289,6 +401,24 @@ class VofBlockSet {
   /// colour is copied by GLOBAL index and is therefore bit-exact whatever the padding.
   int recentrePad = 2;
   double cflLimit = 0.25;
+  /// Rung W1 item (a): how masters are chosen, and how often the choice is revisited.
+  /// `reassignEvery = 0` never re-assigns (W0's behaviour). A re-assignment MIGRATES the block's
+  /// colour to the new master — nothing else in a block is state — so it is exact by construction
+  /// and the bitwise gate holds ACROSS re-assignment events.
+  VofMasterAssign assignMode = VofMasterAssign::RoundRobin;
+  long reassignEvery = 0;
+  /// Rung W1 item (c): recycle the advectors a re-centring retires, keyed by the EXACT extent.
+  /// A translating bubble keeps its box SIZE and only moves its origin, so the hit rate is ~100 %
+  /// and the ten Views of the new box are not allocated at all. A recycled advector has its colour
+  /// and its three face-velocity fields zeroed on acquisition, which is exactly the state a freshly
+  /// `init`ed one is in (Kokkos value-initializes), so `usePool` is BITWISE inert — the ctest gates
+  /// that rather than asserting it.
+  bool usePool = true;
+  int poolCapacity = 8;  ///< advectors kept per extent; beyond it the retired one is freed
+  /// Rung W2: form the CSF face force on each block (its own curvature cascade, the V4 balanced
+  /// -force rule on the block's faces) and SUM it into the caller's global face-force fields.
+  bool csfEnabled = false;
+  double sigma = 0.0;  ///< surface-tension coefficient of the block CSF (cell units)
   /// The colour threshold that defines the BUBBLE EXTENT (and hence the box). Weymouth-Yue leaves
   /// round-off residue in every cell its sweeps touch — measured down to 1e-35 and of either sign
   /// (the same residue that made the V4 curvature cascade need `interfaceEps = 1e-8`) — so a
@@ -380,11 +510,98 @@ class VofBlockSet {
     exch_->syncTable(blocks_);
     for (auto& b : blocks_)
       b.mine_ = (b.master == rank_);
+    // Rung W1: re-balance the master assignment on the CURRENT boxes, before the scatter, so the
+    // step's union is produced by the new owners and there is no half-migrated state anywhere.
+    // The boxes have just been replicated, so `plannedMasters()` is the same on every rank.
+    lastReassigned_ = 0;
+    if (reassignEvery > 0 && ((step_ + 1) % reassignEvery) == 0)
+      lastReassigned_ = assignMasters();
     exch_->scatterColourMax(blocks_, cLocal);
     for (auto& b : blocks_)
       if (b.mine_)
         measure(b, dt);
     ++step_;
+  }
+
+  /// Blocks that changed master at the last `advect()` (rung W1 item a).
+  long lastReassigned() const { return lastReassigned_; }
+
+  // ---- rung W2: per-block curvature + the CSF face force ---------------------------------------
+
+  /// Turn on the block CSF. Each master block then carries its OWN `VofCurvature` on its own
+  /// extended box and forms the V4 balanced-force face force there; `computeCsf` scatters the
+  /// three face fields into the caller's patches with UNPACK_SUM.
+  void enableCsf(double sigmaValue) {
+    csfEnabled = true;
+    sigma = sigmaValue;
+    for (std::size_t i = 0; i < blocks_.size(); ++i)
+      if (blocks_[i].mine_ && blocks_[i].allocated_)
+        allocateCsf(i);
+  }
+
+  /// Per-block curvature cascade + the CSF face force, summed into the caller's three face-force
+  /// patches. `fx/fy/fz` are ZEROED first (the force is a per-step quantity, never accumulated).
+  void computeCsf(SField fx, SField fy, SField fz) {
+    if (!exch_)
+      throw std::runtime_error("peclet::flow::vof::VofBlockSet: no exchange installed");
+    curvStats_ = VofCurvature::Stats{};
+    for (auto& b : blocks_) {
+      if (!b.mine_)
+        continue;
+      const VofCurvature::Stats st = b.curv_.compute(b.adv_.colour());
+      curvStats_.interfacial += st.interfacial;
+      curvStats_.hf += st.hf;
+      curvStats_.hfMixed += st.hfMixed;
+      curvStats_.hfFit += st.hfFit;
+      curvStats_.pv += st.pv;
+      curvStats_.pvReduced += st.pvReduced;
+      curvStats_.noEstimate += st.noEstimate;
+      buildCsfForce(b);
+    }
+    exch_->scatterForceSum(blocks_, fx, fy, fz);
+  }
+  VofCurvature::Stats csfCurvatureStats() const { return curvStats_; }
+
+  void allocateCsf(std::size_t idx) {
+    VofBlock& b = blocks_[idx];
+    const I3 n = b.adv_.inner();
+    b.curv_.init(n.x, n.y, n.z, ghost_);
+    const long len = static_cast<long>(b.adv_.extent().x) * b.adv_.extent().y * b.adv_.extent().z;
+    for (int c = 0; c < 3; ++c)
+      b.f_[c] = SField("vof::block::csf", len);
+  }
+
+  /// The V4 balanced-force CSF on the BLOCK's faces — the same `csfFaceCurvature` +
+  /// `csfFaceForce` pair `Solver::addCsfRhs` applies to the global field, on the block's own
+  /// colour and curvature. Formed over the inner box; the low face of an inner cell at local index
+  /// 0 reads the block's ghost, which the margin guarantees is pure gas, so the force is exactly
+  /// zero there and the block's force has compact support inside its own box.
+  void buildCsfForce(VofBlock& b) {
+    const I3 e = b.adv_.extent(), n = b.adv_.inner();
+    const int g = ghost_;
+    const double sig = sigma, hh = h_;
+    SField cv = b.adv_.colour(), kp = b.curv_.kappa(), kb = b.curv_.branch();
+    const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
+    for (int c = 0; c < 3; ++c) {
+      SField ff = b.f_[c];
+      const long strd = (c == 0) ? 1 : (c == 1 ? sy : sz);
+      Kokkos::parallel_for(
+          "vof::block::csf_force",
+          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                        {g + n.x, g + n.y, g + n.z}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i = L3(x, y, z, e);
+            const double dC = cv(i) - cv(i - strd);
+            double f = 0.0;
+            if (dC != 0.0) {
+              double kf = 0.0;
+              vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
+              f = vof::csfFaceForce(sig, kf, dC, hh);
+            }
+            ff(i) = f;
+          });
+    }
+    Kokkos::fence();
   }
 
   /// Union the current colour into `cLocal` without advecting (used right after seeding).
@@ -393,6 +610,140 @@ class VofBlockSet {
       throw std::runtime_error("peclet::flow::vof::VofBlockSet: no exchange installed");
     exch_->syncTable(blocks_);
     exch_->scatterColourMax(blocks_, cLocal);
+  }
+
+  // ---- rung W1 item (a): master assignment and re-assignment ---------------------------------
+
+  /// The master each block WOULD get under `assignMode`, from the current block cell counts. A
+  /// pure function of the replicated table, so every rank computes the same vector without an
+  /// exchange — which is what lets a re-assignment happen mid-run without breaking a bitwise gate.
+  std::vector<int> plannedMasters() const {
+    std::vector<long> w(blocks_.size());
+    for (std::size_t i = 0; i < blocks_.size(); ++i)
+      w[i] = blocks_[i].box.cells();
+    std::vector<int> m;
+    switch (assignMode) {
+      case VofMasterAssign::Lpt:
+        vofAssignLpt(w, size_, m);
+        break;
+      case VofMasterAssign::WeightedOrb:
+        vofAssignOrb(w, size_, m);
+        break;
+      case VofMasterAssign::RoundRobin:
+      default:
+        m.assign(blocks_.size(), 0);
+        for (std::size_t i = 0; i < blocks_.size(); ++i)
+          m[i] = static_cast<int>(blocks_[i].id % size_);
+        break;
+    }
+    return m;
+  }
+
+  /// Apply `plannedMasters()`: allocate on the gaining ranks, migrate the colour, free on the
+  /// losing ranks. Returns the number of blocks that changed master. A no-op — and no message —
+  /// when the assignment is unchanged, which is the common case once the swarm has settled.
+  long assignMasters() {
+    if (blocks_.empty() || size_ <= 1)
+      return 0;
+    const std::vector<int> want = plannedMasters();
+    std::vector<int> old(blocks_.size());
+    long moved = 0;
+    for (std::size_t i = 0; i < blocks_.size(); ++i) {
+      old[i] = blocks_[i].master;
+      if (old[i] != want[i])
+        ++moved;
+    }
+    if (moved == 0)
+      return 0;
+    for (std::size_t i = 0; i < blocks_.size(); ++i) {
+      blocks_[i].master = want[i];
+      blocks_[i].st_.master = want[i];
+    }
+    // gaining ranks allocate FIRST (zeroed), so the migration has somewhere to land
+    for (std::size_t i = 0; i < blocks_.size(); ++i)
+      if (want[i] == rank_ && old[i] != rank_) {
+        blocks_[i].mine_ = true;
+        allocate(i);
+      }
+    if (exch_)
+      exch_->migrateColour(blocks_, old);
+    for (std::size_t i = 0; i < blocks_.size(); ++i) {
+      if (old[i] == rank_ && want[i] != rank_) {
+        release(i);
+        blocks_[i].mine_ = false;
+      } else if (want[i] == rank_ && old[i] != rank_) {
+        // A GAINED block only. A block this rank keeps is left completely alone -- `measure` would
+        // reset its previous centroid and blank one step of its reported velocity.
+        blocks_[i].mine_ = true;
+        fillBlockGhosts(blocks_[i]);
+        double aux[4];
+        blocks_[i].serializeAux(aux);  // the migrated previous centroid survives the re-measure
+        measure(blocks_[i], 0.0);
+        blocks_[i].deserializeAux(aux);
+      }
+    }
+    return moved;
+  }
+
+  // ---- general seeding: a block from an arbitrary global colour field -------------------------
+
+  /// Seed one block on the global index box `bb` (the BUBBLE extent; the inner box is `bb` grown by
+  /// `margin`), with the colour gathered from the caller's colour patch. This is the general
+  /// seeding path — a sphere seed is only a convenience over it — and it is how a marker of any
+  /// shape (a quasi-2-D cylinder, a Hysing bubble, a scanned geometry) enters the container.
+  /// Call `finishSeeding(cLocal)` once after the last `seedBox` to perform the gather.
+  void seedBox(const VofBox& bb, int extraPad = 0) {
+    VofBlock b;
+    b.id = static_cast<long>(blocks_.size());
+    b.master = static_cast<int>(b.id % size_);
+    b.box = vofClampBox(VofBox::grown(bb, margin_ + extraPad), gs_, per_);
+    b.seed_ = bb;
+    b.mine_ = (b.master == rank_);
+    blocks_.push_back(std::move(b));
+    const std::size_t idx = blocks_.size() - 1;
+    for (std::size_t k = 0; k + 1 < blocks_.size(); ++k)
+      if (blocks_[k].mine_ && blocks_[k].allocated_)
+        installHook(k);
+    if (blocks_[idx].mine_)
+      allocate(idx);
+  }
+
+  /// Gather the colour of every `seedBox`-seeded block from `cLocal`, fill its ghosts and measure.
+  void finishSeeding(SField cLocal) {
+    if (!exch_)
+      throw std::runtime_error("peclet::flow::vof::VofBlockSet: no exchange installed");
+    exch_->gatherColour(blocks_, cLocal);
+    for (auto& b : blocks_)
+      if (b.mine_) {
+        clipToSeed(b);
+        fillBlockGhosts(b);
+        measure(b, 0.0);
+      }
+  }
+
+  /// A seeded block's colour is its OWN bubble's: the gather copies the whole INNER box (bubble
+  /// extent + margin) out of the global field, and the margin ring belongs to no marker by the
+  /// margin contract (it is what makes the block conservative), so anything the gather picked up
+  /// there is a NEIGHBOURING marker's liquid and must not be adopted. Without this clip two
+  /// bubbles closer than `2 * margin` would each seed with a slice of the other -- measured on the
+  /// rung-W2 MPI gate as marker volumes 491 and 528 against a seed volume of 382.
+  void clipToSeed(VofBlock& b) {
+    const I3 e = b.adv_.extent(), n = b.adv_.inner(), o = b.box.origin();
+    const int g = ghost_;
+    const int lx = b.seed_.lo[0], hx = b.seed_.hi[0], ly = b.seed_.lo[1], hy = b.seed_.hi[1],
+              lz = b.seed_.lo[2], hz = b.seed_.hi[2];
+    if (hx <= lx || hy <= ly || hz <= lz)
+      return;  // no seed box recorded (a sphere seed): nothing to clip
+    SField c = b.adv_.colour();
+    Kokkos::parallel_for(
+        "vof::block::clip_seed",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const int gx = x + o.x, gy = y + o.y, gz = z + o.z;
+          if (gx < lx || gx >= hx || gy < ly || gy >= hy || gz < lz || gz >= hz)
+            c(L3(x + g, y + g, z + g, e)) = 0.0;
+        });
+    Kokkos::fence();
   }
 
   /// The block's own colour ghost policy — see the file header. Installed as the advector's
@@ -473,14 +824,78 @@ class VofBlockSet {
 
   void allocate(std::size_t idx) {
     VofBlock& b = blocks_[idx];
-    b.adv_.init(b.box.n(0), b.box.n(1), b.box.n(2), h_, ghost_);
-    b.adv_.cflLimit = cflLimit;
-    b.adv_.globalMax = nullptr;  // the block IS the whole domain of its own advector
+    b.adv_ = acquireAdvector(b.box.n(0), b.box.n(1), b.box.n(2));
     installHook(idx);
     b.allocated_ = true;
     b.st_.id = b.id;
     b.st_.master = b.master;
+    if (csfEnabled)
+      allocateCsf(idx);
   }
+
+  /// Give a block's advector back (a master that lost the block on a re-assignment). The block's
+  /// table row survives — only the state is released.
+  void release(std::size_t idx) {
+    VofBlock& b = blocks_[idx];
+    retireAdvector(std::move(b.adv_));
+    b.adv_ = WyAdvector();
+    b.curv_ = VofCurvature();
+    for (int c = 0; c < 3; ++c)
+      b.f_[c] = SField();
+    b.allocated_ = false;
+    b.hasPrev_ = false;
+  }
+
+  /// Rung W1 item (c): the block pool. Keyed by the EXACT extent, so a translating bubble (whose
+  /// box keeps its size and only moves its origin) never allocates after the first re-centring.
+  /// A recycled advector is handed back in the state a freshly `init`ed one is in — colour and the
+  /// three face-velocity fields zeroed — so the pool is bitwise inert. Everything else a
+  /// `WyAdvector` holds (the frozen dilation flag, the per-sweep PLIC planes, the face Courant
+  /// numbers and the fluxes) is written before it is read inside `advect()`.
+  WyAdvector acquireAdvector(int nx, int ny, int nz) {
+    const std::array<int, 3> key{nx, ny, nz};
+    if (usePool) {
+      auto it = pool_.find(key);
+      if (it != pool_.end() && !it->second.empty()) {
+        WyAdvector a = std::move(it->second.back());
+        it->second.pop_back();
+        ++poolHits_;
+        Kokkos::deep_copy(a.colour(), 0.0);
+        for (int d = 0; d < 3; ++d)
+          Kokkos::deep_copy(a.faceVel(d), 0.0);
+        Kokkos::fence();
+        a.cflLimit = cflLimit;
+        a.globalMax = nullptr;
+        a.exchange = nullptr;  // re-installed by installHook
+        return a;
+      }
+    }
+    ++poolMisses_;
+    WyAdvector a;
+    a.init(nx, ny, nz, h_, ghost_);
+    a.cflLimit = cflLimit;
+    a.globalMax = nullptr;  // the block IS the whole domain of its own advector
+    return a;
+  }
+
+  void retireAdvector(WyAdvector&& a) {
+    if (!usePool || a.colour().extent(0) == 0)
+      return;
+    const I3 n = a.inner();
+    const std::array<int, 3> key{n.x, n.y, n.z};
+    auto& v = pool_[key];
+    if (static_cast<int>(v.size()) >= poolCapacity)
+      return;
+    a.exchange = nullptr;  // the hook captures a block index; never carry it into the pool
+    v.push_back(std::move(a));
+  }
+
+ public:
+  long poolHits() const { return poolHits_; }
+  long poolMisses() const { return poolMisses_; }
+  void clearPool() { pool_.clear(); }
+
+ private:
 
   /// Face velocity outside a non-periodic domain: the gather leaves it untouched, so continue it
   /// with the same globally clamped rule the colour uses. Inside the domain every extended-box cell
@@ -563,8 +978,7 @@ class VofBlockSet {
     // rounding and says nothing about the wisps (measured -5.7e-14 that way on the G1 scene).
     const double dropped = outOfBoxSum(b, nb);
     // exact copy by global index (both boxes are in the same unwrapped global frame)
-    WyAdvector fresh;
-    fresh.init(nb.n(0), nb.n(1), nb.n(2), h_, ghost_);
+    WyAdvector fresh = acquireAdvector(nb.n(0), nb.n(1), nb.n(2));
     const I3 se = b.adv_.extent(), de = fresh.extent();
     const I3 dn = fresh.inner();
     const int g = ghost_;
@@ -585,10 +999,13 @@ class VofBlockSet {
         });
     Kokkos::fence();
     b.box = nb;
+    retireAdvector(std::move(b.adv_));
     b.adv_ = std::move(fresh);
     b.adv_.cflLimit = cflLimit;
     b.adv_.globalMax = nullptr;
     installHook(idx);
+    if (csfEnabled)
+      allocateCsf(idx);
     fillBlockGhosts(blocks_[idx]);
     blocks_[idx].st_.recentred = true;
     blocks_[idx].st_.discarded += dropped;
@@ -632,6 +1049,47 @@ class VofBlockSet {
     return v;
   }
 
+  /// Rung W1 item (d): the marker's interface area, in CELL units squared (the same convention
+  /// `volume` uses: cell volumes, NOT the physical length units `centroid` carries) — the sum
+  /// over the inner box
+  /// of the PLIC polygon area of every mixed cell, reconstructed from the MYC normal exactly as the
+  /// curvature cascade does (`mycNormal` -> `plicAlpha` -> `plicPolygon` -> `polygonAreaCentroid`).
+  /// A reconstructed area, not a fit: a sphere reads 4 pi R^2 to the PLIC discretization error.
+  double interfaceArea(const VofBlock& b) const {
+    const I3 e = b.adv_.extent(), n = b.adv_.inner();
+    const int g = ghost_;
+    const double hh = h_;
+    SField c = b.adv_.colour();
+    const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
+    double a = 0.0;
+    Kokkos::parallel_reduce(
+        "vof::block::area",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                      {g + n.x, g + n.y, g + n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          const long i = L3(x, y, z, e);
+          const double ci = c(i);
+          if (!(ci > 0.0) || !(ci < 1.0))
+            return;
+          double st[27];
+          for (int dz = -1; dz <= 1; ++dz)
+            for (int dy = -1; dy <= 1; ++dy)
+              for (int dx = -1; dx <= 1; ++dx)
+                st[vof::plicSt(dx + 1, dy + 1, dz + 1)] = c(i + dx + dy * sy + dz * sz);
+          double m[3];
+          vof::mycNormal(st, m);
+          const double al = vof::plicAlpha(m[0], m[1], m[2], ci);
+          double v[8][3], ctr[3], ar = 0.0;
+          const int nv = vof::plicPolygon(m[0], m[1], m[2], al, v);
+          vof::polygonAreaCentroid(v, nv, ctr, ar);
+          acc += ar;
+        },
+        a);
+    Kokkos::fence();
+    (void)hh;
+    return a;  // CELL units squared, matching `volume`'s cell volumes
+  }
+
   /// Volume, centroid, centroid velocity and the central second moments over the inner box.
   void measure(VofBlock& b, double dt) {
     const I3 e = b.adv_.extent(), n = b.adv_.inner(), o = b.box.origin();
@@ -661,6 +1119,7 @@ class VofBlockSet {
     b.st_.cells = b.box.cells();
     b.st_.volume = v;
     if (v <= 0.0) {
+      b.st_.area = 0.0;
       for (int d = 0; d < 3; ++d)
         b.st_.centroid[d] = b.st_.velocity[d] = 0.0;
       for (int d = 0; d < 6; ++d)
@@ -692,6 +1151,7 @@ class VofBlockSet {
       b.st_.centroid[d] = nc[d];
     }
     b.hasPrev_ = true;
+    b.st_.area = interfaceArea(b);
     const double iv = 1.0 / v;
     b.st_.moment[0] = sxx * iv;
     b.st_.moment[1] = syy * iv;
@@ -712,6 +1172,10 @@ class VofBlockSet {
   long step_ = 0;
   std::vector<VofBlock> blocks_;
   std::shared_ptr<VofBlockExchangeBase> exch_;
+  std::map<std::array<int, 3>, std::vector<WyAdvector>> pool_;
+  long poolHits_ = 0, poolMisses_ = 0;
+  long lastReassigned_ = 0;
+  VofCurvature::Stats curvStats_{};
 };
 
 }  // namespace peclet::flow::vof

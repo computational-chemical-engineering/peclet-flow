@@ -98,7 +98,26 @@ struct SceneSpec {
   /// least one block's master owning NONE of its own cells? (Only then is it a gate rather than an
   /// accident of where the seeds landed.)
   bool orphanMaster = false;
+  /// Rung W1 (WO-W12): the master-assignment mode and the re-assignment interval. `reassign > 0`
+  /// makes masters CHANGE mid-run and the block colour MIGRATE; the bitwise comparison against the
+  /// single-rank container (which has one rank and therefore never migrates) is then a gate on the
+  /// migration being exact as well as on the exchange.
+  int assign = 0;
+  long reassign = 0;
 };
+
+/// A lattice of `n^3` bubbles with radii spanning ~4x, so the block cell counts span ~10x and the
+/// round robin is measurably worse than LPT.
+std::vector<Seed> lattice(int n, double rmin, double rmax) {
+  std::vector<Seed> v;
+  int k = 0;
+  for (int i = 0; i < n; ++i)
+    for (int j = 0; j < n; ++j)
+      for (int m = 0; m < n; ++m, ++k)
+        v.push_back(Seed{(i + 0.5) / n, (j + 0.5) / n, (m + 0.5) / n,
+                         rmin + (rmax - rmin) * ((k % 8) / 7.0)});
+  return v;
+}
 
 void runScene(const SceneSpec& sp, int rank, int size) {
   const int gn = sp.gn;
@@ -136,8 +155,11 @@ void runScene(const SceneSpec& sp, int rank, int size) {
   ex->setPatch(pp, patch.faceU(), patch.faceV(), patch.faceW());
   ex->setComm(MPI_COMM_WORLD);
   set.setExchange(ex);
+  set.assignMode = static_cast<peclet::flow::vof::VofMasterAssign>(sp.assign);
+  set.reassignEvery = sp.reassign;
   for (const auto& s : sp.seeds)
     set.seedSphere(s.x, s.y, s.z, s.r);
+  set.assignMasters();
   set.scatter(patch.colour());
 
   // --------------- the whole-grid reference, on every rank --------------------------------
@@ -165,8 +187,11 @@ void runScene(const SceneSpec& sp, int rank, int size) {
     rex->setPatch(rp, rpatch.faceU(), rpatch.faceV(), rpatch.faceW());
     rset.setExchange(rex);
   }
+  rset.assignMode = static_cast<peclet::flow::vof::VofMasterAssign>(sp.assign);
+  rset.reassignEvery = sp.reassign;
   for (const auto& s : sp.seeds)
     rset.seedSphere(s.x, s.y, s.z, s.r);
+  rset.assignMasters();
   rset.scatter(rpatch.colour());
 
   auto compare = [&](const char* when) {
@@ -196,12 +221,14 @@ void runScene(const SceneSpec& sp, int rank, int size) {
   CHECK(bad == 0);
 
   long firstBad = -1;
+  long nMigrated = 0;
   for (long s = 0; s < sp.steps; ++s) {
     const double phase = std::cos(M_PI * (s + 0.5) * sp.dt / sp.T);
     fillFlow(sp.flow, patch, pblk, h, phase);
     fillFlow(sp.flow, rpatch, rpblk, h, phase);
     set.advect(sp.dt, patch.colour());
     rset.advect(sp.dt, rpatch.colour());
+    nMigrated += set.lastReassigned();
     if (compare("step") != 0) {
       firstBad = s;
       break;
@@ -249,6 +276,11 @@ void runScene(const SceneSpec& sp, int rank, int size) {
     std::printf("   cell imbalance %.3f\n", set.cellImbalance());
     std::printf("      blocks whose master owns NONE of their cells: %ld / %zu\n",
                 blocksWithNoLocalCells, nb);
+    if (sp.reassign > 0)
+      std::printf(
+          "      assignment mode %d, re-assigned every %ld steps: %ld master CHANGES migrated "
+          "(%ld B in %ld msgs on rank 0 at the last one)\n",
+          sp.assign, sp.reassign, nMigrated, ex->migrateBytes(), ex->migrateMessages());
     std::printf("      exchange: gather %ld B in %ld msgs, scatter %ld B in %ld msgs (rank 0)\n",
                 ex->gatherBytes(), ex->gatherMessages(), ex->scatterBytes(), ex->scatterMessages());
   }
@@ -301,6 +333,23 @@ int main(int argc, char** argv) {
                        {{0.30, 0.30, 0.30, 0.12}, {0.70, 0.65, 0.35, 0.10}, {0.5, 0.2, 0.8, 0.09}},
                        "G3 three bubbles / translation",
                        true},
+             rank, size);
+
+    // W1 (WO-W12): 64 bubbles of MIXED size in the LeVeque field, LPT masters re-assigned every
+    // 8 steps. The single-rank reference container never migrates (size 1), so a bitwise match
+    // here is simultaneously (a) decomposition independence, (b) assignment independence and
+    // (c) exactness of the migration -- the colour and the previous centroid are the only state a
+    // block carries, and they travel as a contiguous message.
+    runScene(SceneSpec{Flow::LeVeque,
+                       48,
+                       0.08 / 48,  // the LeVeque field peaks near |uf| = 2, so CFL ~ 0.16
+                       1.5,
+                       24,
+                       lattice(4, 2.0 / 48, 8.0 / 48),
+                       "W1 64 bubbles / LeVeque / LPT + re-assignment",
+                       true,
+                       /*assign=*/1,
+                       /*reassign=*/8},
              rank, size);
 
     int total = 0;
