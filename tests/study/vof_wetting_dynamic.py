@@ -413,6 +413,7 @@ def g2_spread(theta_e=30.0, slip=0.1, steps=1500, probe=50, nx=64, nz=40, R=12.0
         rows.append((ca_meas, th1, a1))
     # the fit over the window Ca in [1e-3, 1e-1]
     sel = [(c, th, a) for c, th, a in rows if 1e-3 <= c <= 1e-1]
+    slope = want = am = float("nan")
     if len(sel) >= 3:
         x = np.array([c for c, _, _ in sel])
         y = np.array([(th * DEG) ** 3 - (theta_e * DEG) ** 3 for _, th, _ in sel])
@@ -423,6 +424,9 @@ def g2_spread(theta_e=30.0, slip=0.1, steps=1500, probe=50, nx=64, nz=40, R=12.0
               f"slope {slope:.3f} vs 9 ln(a/lambda) = {want:.3f}  "
               f"({100*(slope/want-1):+.1f} %, gate 25 %)  "
               f"{'PASS' if abs(slope/want - 1) <= 0.25 else 'FAIL'}")
+        print(f"  effective inner cut-off implied by the measured slope: "
+              f"lambda_eff = a exp(-slope/9) = {am*math.exp(-slope/9.0):.4f} cells "
+              f"(prescribed lambda = {slip} cells)")
     else:
         print(f"  fit: only {len(sel)} points fell in the Ca window — inconclusive")
     # Tanner
@@ -434,11 +438,11 @@ def g2_spread(theta_e=30.0, slip=0.1, steps=1500, probe=50, nx=64, nz=40, R=12.0
         print(f"  Tanner: fitted a ~ t^{n_t:.4f} over the late half (the law is 1/10 = 0.1)")
     print(f"  pressure iters max {maxit} (capped {capped}); final theta_app "
           f"{hist[-1][3]:.3f} vs theta_e {theta_e}")
-    return hist
+    return slope, want, am
 
 
 # ---------------------------------------------------------------------------------- G3 dynamics
-def g3_rise(theta_e=30.0, slips=(0.05, 0.1, 0.3), steps=1500, nx=96, ny=4, nz=112, w=16.0,
+def g3_rise(theta_e=30.0, slips=(0.05, 0.3), steps=1500, nx=96, ny=4, nz=112, w=16.0,
             plate=8.0, dg=3.0e-3, sigma=1.0, mu=0.2, ratio=10.0, datum=28.0, zp=(12.0, 100.0),
             static_control=True):
     """G3-dynamics: the same plate scene from a FLAT interface, so the contact line has to travel.
@@ -495,8 +499,8 @@ def g3_rise(theta_e=30.0, slips=(0.05, 0.1, 0.3), steps=1500, nx=96, ny=4, nz=11
 
 
 # ------------------------------------------------------------------------------------- G4 incline
-def g4_incline(theta_a=70.0, theta_r=50.0, bo_fracs=(0.5, 0.7, 1.5, 2.5), steps=1200, nx=64, nz=40,
-               R=10.0, zw=4.25, sigma=1.0, oh=0.2, slip=0.1):
+def g4_incline(theta_a=70.0, theta_r=50.0, bo_fracs=(0.5, 0.7, 1.5, 2.5), steps=1200, nx=48, nz=32,
+               R=8.0, zw=4.25, sigma=1.0, oh=0.2, slip=0.1):
     """The wall is kept axis-aligned and GRAVITY is tilted — the same problem, an exact SDF.
     Bo = drho g V^(2/3) sin(alpha) / sigma against Bo_c = cos(theta_r) - cos(theta_a)
     (ElSherbini & Jacobi 2006's retention relation in its simplest form)."""
@@ -523,11 +527,13 @@ def g4_incline(theta_a=70.0, theta_r=50.0, bo_fracs=(0.5, 0.7, 1.5, 2.5), steps=
         s.set_contact_angle(0.5 * (theta_a + theta_r))
         s.set_contact_angle_dynamic(0.5 * (theta_a + theta_r), slip, mu, sigma)
         s.set_contact_angle_hysteresis(theta_a, theta_r)
-        # zero-mean tangential force on the LIQUID only (a periodic box: a non-zero-mean force
-        # accelerates everything without bound, WO-Q finding 9)
-        s.set_property_model("force_x", "linear", "C", [-g_t * 0.0, g_t])
+        # ZERO-MEAN tangential force: `g_t (C - Cbar)`. A non-zero-mean body force in a fully
+        # periodic box accelerates the whole fluid without bound (WO-Q finding 9), and the
+        # accelerating frame then cancels part of the very force this gate is measuring.
         cc = s.get_vof()
         eps = s.vof_geometry(0)
+        cbar = float((cc * eps).sum()) / float(eps.sum())
+        s.set_property_model("force_x", "linear", "C", [-g_t * cbar, g_t])
         xg = (np.arange(nx) + 0.5)[:, None, None]
         w0 = float((cc * eps).sum())
         x0 = float((cc * eps * xg).sum()) / w0
@@ -557,12 +563,30 @@ if __name__ == "__main__":
         g3_static(theta=30.0, steps=200 if quick else 600)
         if not quick:
             g3_static(theta=60.0, steps=600)
-            g3_static(theta=30.0, steps=1500, flat_start=True)
+            g3_static(theta=30.0, steps=1200, flat_start=True)
     if "jurin_wos" in which:
         g3_static(theta=30.0, steps=600, wos=True)
     if "spread" in which:
-        g2_spread(steps=400 if quick else 2000, probe=50)
+        g2_spread(steps=1200 if quick else 2000, probe=50)
+    if "slipsweep" in which:
+        # THE gate on the MODEL rather than on the scheme's own inner cut-off: the Cox-Voinov
+        # slope must move by exactly 9 dln(1/lambda) when lambda changes, whatever the scheme's
+        # residual sub-grid slip adds on top of it.
+        print("\n=== G2b  the SLIP SENSITIVITY of the fitted Cox-Voinov slope")
+        res = []
+        for sl in (0.02, 0.1, 0.5):
+            sp, wt, am = g2_spread(slip=sl, steps=800, probe=50)
+            res.append((sl, sp, wt, am))
+        print("\n  lambda   fitted slope   9 ln(a/lambda)   difference")
+        for sl, sp, wt, am in res:
+            print(f"  {sl:6.2f}   {sp:12.3f}   {wt:14.3f}   {sp-wt:+10.3f}")
+        for i in range(1, len(res)):
+            d_meas = res[i][1] - res[i - 1][1]
+            d_pred = 9.0 * math.log(res[i - 1][0] / res[i][0])
+            print(f"  lambda {res[i-1][0]} -> {res[i][0]}: d(slope) measured {d_meas:+.3f} vs "
+                  f"9 dln(1/lambda) = {d_pred:+.3f}  ({100*(d_meas/d_pred-1):+.1f} %, gate 25 %)  "
+                  f"{'PASS' if abs(d_meas/d_pred - 1) <= 0.25 else 'FAIL'}")
     if "rise" in which:
-        g3_rise(steps=400 if quick else 1500)
+        g3_rise(steps=800 if quick else 1500)
     if "incline" in which:
-        g4_incline(steps=400 if quick else 1500)
+        g4_incline(steps=800 if quick else 1500)

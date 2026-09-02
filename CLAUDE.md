@@ -645,6 +645,61 @@ Four things this rung paid for, all measured (`doc/vof_workorders_v5.md`, WO-S f
   "wall-band spurious current" of the V5a G5 cap was entirely on zero-openness DOFs and is an
   artefact of the half-integer wall, not a surface-tension defect.
 
+**Dynamic contact angle and hysteresis (rung V6, WO-V6).** `set_contact_angle_dynamic(theta_e,
+slip_length_cells, mu_liquid, sigma=0)` replaces the STATIC theta of V5b by the grid-scale
+Cox-Voinov angle of a MOVING contact line (Afkhami, Zaleski & Bussmann, *JCP* 228:5370, 2009):
+
+```
+theta_Delta^3 = theta_e^3 + 9 Ca_cl ln(Delta/lambda),   Ca_cl = mu_l U_cl / sigma
+```
+
+with `Delta` the cell size and `lambda` an **explicit slip length in cells**, clamped into
+[1, 179] deg (`set_contact_angle_clamp`). Nothing in the fill changes — only the VALUE of theta per
+contact cell, which V5b already carries as a per-cell field — so `wetting.hpp` and `advect_wy.hpp`
+are untouched and the producer lives in `src/vof/wetting_dynamic.hpp` (container-free like
+`plic.hpp`) plus a two-pass driver that reads the advector through its public accessors only.
+`set_contact_angle_hysteresis(theta_a, theta_r)` adds advancing/receding hysteresis: while
+`theta_r <= theta_app <= theta_a` the contact line is **PINNED** and the fill imposes the APPARENT
+angle, which reproduces the current interface exactly *because the V5b fill is idempotent* (WO-S
+finding 1) — a fill that were not idempotent could not express pinning at all. `U_cl` is measured at
+the anchor fluid cell as `+u . t_hat` with `t_hat` the in-wall part of the fluid-only PLIC normal,
+then smoothed with a 3-point mean along `t_hat`. New Python: `set_contact_angle_dynamic`,
+`set_contact_angle_hysteresis`, `set_contact_angle_dynamic_off`, `set_contact_angle_smoothing`
+(ablation), `set_contact_angle_clamp`, `vof_dynamic_field(0..4)`; `contact_angle_diagnostics()`
+gains `dynamic_cells` / `pinned_cells` / `advancing_cells` / `receding_cells` /
+`mean_imposed_theta` / `mean_apparent_theta` / `max_Ca_cl` / `max_contact_speed`. With no call the
+static V5b angle stands and every V5a/V5b number is byte-identical.
+
+**Never report a dynamic-wetting result without stating lambda** (VOF_PLAN section 6): a VoF contact
+line's *numerical* slip is proportional to the cell size, so the imposed angle without an explicit
+`lambda` is silently grid-dependent. That is what the explicit slip buys, and it is the whole reason
+the model has a parameter at all.
+
+Three things this rung paid for, all measured (`doc/vof_workorders_v6.md`, WO-V6 findings):
+- **The work order's `U_cl` sign is wrong and the gate catches it.** `t_hat` is the in-wall part of
+  `m`, and `m` points into the GAS, so `t_hat` points from the liquid towards the DRY wall and the
+  liquid ADVANCES along `+t_hat`: `U_cl = +u . t_hat`, not the work order's `-u . t_hat`. With the
+  sign flipped a spreading drop reports a receding line and Cox-Voinov ACCELERATES the spreading
+  instead of retarding it. Gate: a periodic liquid slab in a uniform wall-tangential flow has TWO
+  contact lines with opposite `t_hat`, one advancing and one receding in the same field
+  (`tests/kokkos/test_vof_wetting_dynamic.cpp` G1c).
+- **Jurin's law is EXACT for the eps-weighted level integral, at ANY Bond number.** Integrating the
+  static meniscus ODE `sigma d/dx[z'/sqrt(1+z'^2)] = drho g (z - z_ref)` across the slot gives
+  `2 sigma cos(theta)` on the left and `drho g w zbar` on the right, i.e. `zbar = 2 sigma
+  cos(theta)/(drho g w)` with NO low-Bond assumption — so the mean level, which is exactly what the
+  colour integral measures, is the right read-out and needs no meniscus correction. (Verified
+  numerically against a shooting solution of the same ODE, agreeing to every digit printed.)
+- **WO-S's G4 Jurin failure was the SCENE, not the rung, and the dominant term was the body force.**
+  A body force with a non-zero volume mean in a fully periodic box accelerates the whole fluid
+  without bound (WO-Q finding 9) and the accelerating frame contributes its own `-rho a`, which
+  cancels part of gravity — so the menisci relax towards a SMALLER level difference the longer the
+  run goes. The V6 scene uses `force_z = g (rho_bar - rho)` (exactly zero mean), 8-cell plates with
+  semicircular ends (a capsule SDF: no sharp corner where `|grad sdf| != 1`, and the two faces'
+  wetting bands no longer overlap) and quarter-integer faces, and the static Jurin check then
+  passes. Gates: `tests/kokkos` ctest `vof_wetting_dynamic`; `tests/kokkos_mpi`
+  `vof_wetting_dynamic_mpi_np{1,2,4}`; `tests/study/vof_wetting_dynamic.py`
+  (`jurin`, `jurin_wos`, `spread`, `rise`, `incline`).
+
 **Momentum consistency in cut cells (V5a item 8).** `enable_vof_momentum` composes with a solid: the
 half-shifted CV gets fluid volume `½(eps(i−s_e) + eps(i))`, transverse face openness
 `½(o_d(i−s_e) + o_d(i))` and, on the axial (cell-centre) face, the cell fraction `eps` of the cell

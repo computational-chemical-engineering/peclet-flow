@@ -554,6 +554,250 @@ the direct evidence that nothing upstream had edited them.
 5. **Re-centring reallocates a `WyAdvector`.** Deterministic and exact, but a translating bubble at
    `recentrePad = 2` re-centres every ~3 steps and each one allocates 10 fields of the new box. A
    pool, or growing in place, is the obvious W1 cleanup.
+## WO-V6 — rung V6 (dynamic contact angle + hysteresis) — DONE 2026-09-02, branch `vof-v6`
+
+Worktree `../flow-v6`, on `main` = `518c2a5`. Commit `91c5e6b` (the rung + the gates) plus the doc
+commit at the end. Numbers are given for BOTH backends where they differ; `host-openmp` and
+`nvidia-cuda` reproduce each other **digit for digit** on every kernel gate below unless a column
+says otherwise.
+
+**Always state the slip length.** Every number below carries its `lambda`; a dynamic-wetting result
+without it is not a result (VOF_PLAN §6 — a VoF contact line's numerical slip is proportional to the
+cell size, so the imposed angle without an explicit `lambda` is silently grid-dependent).
+
+### What shipped
+
+`src/vof/wetting_dynamic.hpp` — container-free kernels (`coxVoinovAngle`, `vofHysteresisBase`,
+`vofDynamicContactAngle`, `vofWallTangent`, `vofContactLineSpeed`) plus the `VofDynamicWetting`
+driver (its own scratch views, a `measure` pass and an `impose` pass, and the census). The solver
+plumbing in `flow_ibm.hpp` (`setContactAngleDynamic` / `setContactAngleHysteresis` /
+`setContactAngleDynamicOff` / `setContactAngleSmoothing` / `setContactAngleClamp` /
+`effectiveContactSigma` / `getVofDynamicField` / `buildVofCellVelocity`, the V6 block in
+`vofFillGhosts`, the base-angle copy in `applyContactAngle`, and eight new
+`ContactAngleDiagnostics` fields), the bindings, `tests/kokkos/test_vof_wetting_dynamic.cpp`,
+`tests/kokkos_mpi/test_vof_wetting_dynamic_mpi.cpp` and `tests/study/vof_wetting_dynamic.py`.
+
+**`advect_wy.hpp` and `wetting.hpp` are NOT touched by this rung.** The driver reads the advector
+through its public accessors (`colour`, `wallSdf`, `contactAngle`, `wettingNormal`, `cellKind`,
+`extent`, `inner`, `ghost`, `size`) and writes only `contactAngle()`, so V5b's fill, its branch
+census and passes 2-3 are byte-for-byte the code WO-S shipped. That was deliberate: WO-R2 and WO-W0
+are editing `advect_wy.hpp` and `wetting.hpp` concurrently.
+
+Cost when the rung is ON: five extra ghost exchanges of the colour block per band fill (the three
+cell-velocity components, then the raw `U_cl` and its validity flag), on top of the three WO-S
+already adds for the fluid-only normal. Skipped entirely when no dynamic angle is configured.
+
+### Gates
+
+| gate | measured | verdict |
+|---|---|---|
+| **G1a the model as arithmetic** (`tests/kokkos/test_vof_wetting_dynamic`, host-openmp AND nvidia-cuda, digit for digit) | `coxVoinovAngle` reproduces `theta^3 = theta_e^3 + 9 Ca ln(1/lambda)` to **4.441e-16** worst over `theta_e` in {30, 60, 90, 120} x `Ca` in {-2e-2, -5e-3, 0, 5e-3, 2e-2, 5e-2} at `lambda = 0.1`, and the identity residual `theta^3 - theta_e^3 - 9 Ca ln(1/lambda)` is <= 1e-14 wherever the clamp does not fire. Monotone in the right direction at every angle: `theta_e = 30/60/90/120` go to **40.408 / 63.411 / 91.576 / 120.896** at `Ca = +1e-2` (advancing RAISES) and **1.000 / 56.149 / 88.366 / 119.091** at `Ca = -1e-2` (receding LOWERS; the 30-degree row is the film-entrainment branch, where the cube goes non-positive and the clamp returns 1 deg) | PASS |
+| **G1b the sign convention as geometry** | `vofWallTangent` recovers `theta_app` from `m_f . n_w` to **2.220e-16 rad** and `t_hat` to **1e-14** over 3 apparent angles x 4 azimuths; `vofContactLineSpeed` returns `+0.3` for a flow along `+t_hat` and `-0.3` along `-t_hat`, to 1e-15. An interface parallel to the wall correctly reports "no contact-line direction" | PASS |
+| **G1c the model through the solver, KINEMATIC** (32x8x24, flat SDF wall at a QUARTER-integer z = 4.25, liquid slab `x` in [0.5, 16.5) in a periodic box, uniform `u = 0.02`, `theta_e = 60`, **`lambda = 0.1` cells**, `mu_l = 1`, `sigma = 1`) | the slab's two contact lines have opposite `t_hat`, so one advances and one recedes in the SAME field: `U_cl = **+0.020000** / **-0.020000**` (exactly `+/-U`, to 1e-12), `theta_app = 90.0000` on both, imposed **66.4908** (advancing) and **51.6818** (receding) against the host-computed Cox-Voinov 66.4908 / 51.6818. Over all **384** contact cells `max |theta_imposed - CoxVoinov(U_cl)| = **7.105e-15 deg** (gate 1e-10). Diagnostics: dynamic 384, mean imposed 59.0863, mean apparent 90.0000, `max|Ca_cl| = 2.0000e-02`, `max|U_cl| = 2.0000e-02`. Identical to the last digit on nvidia-cuda | PASS |
+| **G4a the hysteresis selector as a truth table** (`theta_a = 70`, `theta_r = 50`) | `theta_app = 80 -> advancing, 70.000`; `60 -> PINNED, 60.000` (the apparent angle itself, to 1e-15 — the fill is idempotent, so nothing moves); `40 -> receding, 50.000`; with `Ca = +1e-2`, `80 -> advancing, 72.557`; with `Ca = -1e-2`, `40 -> receding, 44.144`. With hysteresis OFF the base is always `theta_e` | PASS |
+| **G4b hysteresis through the solver** (same scene, `Ca_cl = 0`) | `theta_a/theta_r = 120/60` (90 inside the window): all **384** contact cells PINNED, imposed **90.0000** = the apparent angle; `70/50`: all 384 **advancing**, imposed **70.0000**; `130/110`: all 384 **receding**, imposed **110.0000** | PASS |
+| **G3-static Jurin on the FIXED scene** (`tests/study/vof_wetting_dynamic.py jurin`; 96x4x112, two 8-cell plates with SEMICIRCULAR ends (a capsule SDF) at QUARTER-integer faces, gap `w = 16`, periodic outer channel `w_out = 64`, `sigma = 1`, `drho g = 3e-3`, ratio 10, `mu_l = 0.2`, Bond 0.768 (gap) / 12.288 (outer), 600 steps to `t = 84.3`, started AT the exact meniscus-ODE equilibrium — the fixed-point protocol) | `theta = 30`: Jurin difference **27.0633**, measured **26.7086** -> **-1.31 %**; `theta = 60`: Jurin **15.6250**, measured **15.4843** -> **-0.90 %**. `dV/V` 5.5e-13 / 3.7e-15, `max|u|` 9.7e-2 / 6.5e-2, 14 / 16 pressure iterations against a cap of 300, none capped, colour in solid cells exactly 0. Both drift slowly DOWNWARD over the run (27.058 -> 26.709 and 15.636 -> 15.484), the sign the V5b angle bias predicts | **PASS** (gate 5 %) |
+| **G3-static, the WO-S buoyancy ABLATION** (`jurin_wos`: the same scene with WO-S's `force_z = [dg/(ratio-1), -dg/(1-1/ratio)]`, i.e. zero in the gas and `-dg` in the liquid, which has a NON-zero volume mean) | measured **27.5200** -> **+1.69 %**, and the trace drifts UPWARD (27.059 -> 27.520) exactly as the accelerating-frame mechanism predicts (the frame's `-rho a` cancels part of gravity, so the equilibrium the run relaxes to RISES). 19 pressure iterations. So the non-zero-mean force IS a real perturbation with the predicted sign, but at this horizon it is a **1.7 %** effect, not the -83 % WO-S measured — see finding 3 | (mechanism; both still inside the 5 % gate) |
+| **G3-static, ATTRACTION from a FLAT interface** (the same scene, 1500 steps to `t = 217.4`) | level difference **3.7418** against 27.0633, i.e. **-86.2 %** — WO-S's G4 result reproduced (they measured 2.5 against 15.0 in 800 steps). The trace is 0.068 / 0.472 / 1.162 / 1.888 / 2.567 / 3.143 / 3.555 / 3.772 / 3.814 / 3.742 — still rising and decelerating, NOT converged. `dV/V` 1.1e-13, 13 iterations, no cap. The Lucas-Washburn rate for this slot (`dh/dt = w^2 (2 sigma cos(theta)/w - drho g h)/(12 mu h)`) is **4.3 cells per unit time** at `h = 2.7`; the measured rate is **0.024**, i.e. **~180x slower** — see finding 6 | **FAIL as a gate, and the failure is the diagnosis** |
+| **G2 spreading drop vs Cox-Voinov** (`spread`; 64x64x40, `D/dx = 24`, wall at a quarter-integer `z = 4.25`, `theta_e = 30`, **`lambda = 0.1` cells**, Oh 0.1 (`mu = 0.4899`), `sigma = 1`, 1200 steps to `t = 239`, released as a HEMISPHERE) | the drop spreads 90 deg -> **44.7 deg** with the contact radius going 12.20 -> 17.44 cells and `Ca_cl = mu (da/dt)/sigma` falling 1.8e-2 -> 4.4e-3. Fit of `theta_app^3 - theta_e^3` against `Ca_cl` over the work order's window `Ca in [1e-3, 1e-1]` (23 points, mean `a` 15.64): slope **64.309** against `9 ln(a/lambda) = 45.471`, i.e. **+41.4 %** (gate 25 %). Restricting to `theta_app < 70 / 60 / 50` gives +47.5 / +89.0 / +41.4 %, so it is not a windowing artefact of the ANGLE; using the EXACT Cox function `g(theta) = int_0^theta (x - sin x cos x)/(2 sin x) dx` instead of `theta^3/9` moves it only to **+36.9 %** (the cube law is 3.5 % off at 90 deg and 1.2 % at 45 deg), so it is not the small-angle approximation either. Tanner: fitted `a ~ t^0.1375` over the late half and `t^0.1282` over the late third, against the law's 0.1. 10 pressure iterations, no cap | **FAIL** — finding 7 |
+| **G2b the SLIP SENSITIVITY** (`slipsweep`: the same run at `lambda = 0.02 / 0.1 / 0.5` cells, 800 steps each, IDENTICAL fit window — 15 points — so the windowing enters all three equally. This is the corrected gate: it tests the MODEL, not the scheme's own inner cut-off, because whatever fixed sub-grid contribution the scheme adds cancels in a difference) | slope **47.377 / 43.788 / 39.853** against `9 ln(a/lambda) = 59.372 / 45.016 / 30.699` (-20.2 % / -2.7 % / +29.8 %). The implied effective inner cut-off `lambda_eff = a exp(-slope/9)` is **0.0758 / 0.1146 / 0.1808** cells while the PRESCRIBED `lambda` moves 0.02 -> 0.5, a factor 25 against a factor 2.4. Sensitivity: `d(slope) = -3.588` and `-3.936` where the model prescribes `9 dln(1/lambda) = -14.485`, i.e. **the macroscopic apparent angle responds with 25 % of the prescribed sensitivity** (-75.2 % / -72.8 %, gate 25 %) | **FAIL** — finding 7, and this is the number that names the mechanism |
+| **G3-dynamics capillary rise** (`rise`: the G3 scene from a FLAT interface, 800 steps to `t = 113.9`, `theta_e = 30`, Oh 0.05) | final level difference **2.754** (static control) / **2.550** (`lambda = 0.3`) / **2.329** (`lambda = 0.05`) against the equilibrium 27.063 — all **-90 %**, all ASYMPTOTIC (zero overshoot), all limited by the same contact-line mobility as the attraction run above. **The MODEL's effect is nonetheless clean and monotone in the right direction**: the mean IMPOSED angle is 30.00 (static) / **35.48** (`lambda = 0.3`) / **40.86** (`lambda = 0.05`) — a smaller slip means a larger Cox-Voinov correction — and the rise is correspondingly RETARDED, **2.754 > 2.550 > 2.329** (-7.4 % and -15.4 % against the static control). 12 pressure iterations, no cap, `dV/V <= 1.9e-13` | **FAIL on the final height** (the run is not converged, not wrong — see finding 6); the slip ORDERING is the reportable result |
+| **G4 hysteresis, drop on an incline** (`incline`: 48x48x32, `D/dx = 16`, wall at `z = 4.25`, `theta_a = 70`, `theta_r = 50`, **`lambda = 0.1` cells**, Oh 0.2 (`mu = 0.8`), the wall kept axis-aligned and GRAVITY tilted, zero-mean tangential force, `Bo_c = cos(theta_r) - cos(theta_a) = 0.3008`, 800 steps to `t = 153.5`) | centroid displacement **+0.228 / +0.307 / +0.650 / +1.104** cells at `Bo/Bo_c = 0.50 / 0.70 / 1.50 / 2.50`, with the pinned fraction of contact cells **90 / 90 / 82 / 74 %** and `advancing = 0` in every row. By the gate's own criterion (a 0.5-cell displacement) that is "pinned below 0.7 Bo_c, sliding above 1.5" — the letter of the gate. **But the mechanism is not reproduced**: displacement/Bo is **0.456 / 0.439 / 0.433 / 0.442**, i.e. the response is EXACTLY LINEAR in the driving with no threshold at all, so the "pinned" rows are creeping, not pinned, and the verdict is an artefact of the fixed observation window. 10 pressure iterations, no cap | letter PASS, **mechanism FAIL** — finding 6 |
+| **G5 MPI np 1 / 2 / 4** (`tests/kokkos_mpi/test_vof_wetting_dynamic_mpi`, host-openmp; 16x8x32, a flat SDF wall at a quarter-integer `x = 4.25`, a liquid slab in z whose two contact lines have opposite `t_hat`, uniform `w = 0.02`; the ORB cuts z at np = 2 and xz at np = 4, so both contact lines are cut) | all FIVE dynamic fields — imposed angle, apparent angle, `U_cl`, `Ca_cl`, state — and the theta band fill are **0.000e+00, BITWISE, at np = 1, 2 AND 4**, for both the dynamic-only and the hysteresis configuration, and the state census matches the single-rank reference exactly (144/0/0/0 and 144/144/0/0). Coupled 20-step surface-tension run: np=1 colour and velocity **0.000e+00**; np=2 colour 1.110e-16, velocity 3.123e-17, imposed theta 1.421e-14; np=4 colour 1.110e-16, velocity 2.689e-17, imposed theta **0.000e+00**. Volume drift <= 4.4e-16, colour in solid cells exactly 0, 10 pressure iterations at every np | **PASS** |
+| **G6 inertness** (every `tests/kokkos` binary built at this commit vs the same binary built at `main` = `518c2a5`, full stdout `diff`) | host-openmp: **30 identical, 0 differing** (all 30, not just the VoF ones) | **PASS** |
+
+### Findings
+
+**1. The work order's `U_cl` sign is wrong, and with it the model is an unstable feedback rather
+than a stabilising one.** WO-V6 writes "`U_cl`: … projected on the wall-tangential direction of
+`m_f`'s in-wall component `t̂` …, sign positive when the liquid advances (velocity along `−t̂`,
+since `m` points into the gas)". The parenthetical is a slip, and it is the load-bearing half.
+`m` points into the GAS, so its in-wall part `t̂` points from the LIQUID side towards the DRY side
+along the wall, and the liquid advancing over dry wall is motion along **`+t̂`**:
+
+```
+U_cl = + u_anchor . t_hat        (shipped)
+U_cl = - u_anchor . t_hat        (the work order)
+```
+
+The concrete case is gate G1c: a vertical interface with liquid at `x < x0` has `m = +x̂` and
+`t̂ = +x̂`, and a flow `u = +U x̂` pushes the liquid onto the dry wall. With the shipped sign that is
+`Ca_cl > 0`, Cox–Voinov gives `θ_D > θ_e` (66.49° against 60° at `Ca_cl = 0.02`,
+`λ = 0.1 Δ`), and the Young force `cos θ_e − cos θ_D < 0` OPPOSES the motion — viscous bending
+retarding the spreading, which is the physics the model exists to represent. With the work order's
+sign the same flow reports a receding line, `θ_D = 51.68° < θ_e`, and the Young force ACCELERATES
+the advancing line: a positive feedback. The gate that discriminates them is cheap and is what
+G1c is built around — a periodic liquid slab in a uniform wall-tangential flow has TWO contact
+lines whose `t̂` are opposite, so one must come out advancing and one receding in the SAME field,
+and their imposed angles must straddle `θ_e`. Measured: `U_cl = +0.020000 / −0.020000` (exactly
+`±U`, to 1e-12), imposed `66.4908° / 51.6818°`, `θ_e = 60°`.
+
+**2. Jurin's law is EXACT for the eps-weighted level integral, at ANY Bond number — it is not a
+low-Bond asymptote, and WO-S's G4 was therefore a well-posed gate that genuinely failed.** The
+static 2-D meniscus in a slot of width `w` obeys
+
+```
+sigma d/dx [ z' / sqrt(1 + z'^2) ] = drho g (z - z_ref),     z'(±w/2) = ± cot(theta)
+```
+
+Integrate across the slot: the left side telescopes to `sigma [ z'/sqrt(1+z'^2) ]` evaluated at the
+two walls, and `z' = cot θ` gives `z'/sqrt(1+z'^2) = cos θ`, so the left side is `2 sigma cos θ`
+exactly. The right side is `drho g w z̄` with `z̄` the MEAN interface height. Hence
+
+```
+zbar = 2 sigma cos(theta) / (drho g w)      — Jurin, with no assumption on Bond.
+```
+
+The colour-integral read-out `Σ_z (Σ_x C eps)/(Σ_x eps)` **is** that mean, provided every fluid
+column of the channel is included (cut wall columns too, which the eps weighting handles). So no
+meniscus correction is needed and the gate as WO-S stated it was the right one. Verified
+numerically: a shooting solution of the same ODE reproduces `2 sigma cos θ/(drho g w)` to every
+digit printed, at Bond 0.768 (the gap) and Bond 12.288 (the outer channel), for θ = 30° and 60°.
+
+**3. WO-S's G4 Jurin failure (−83 %) was an UNCONVERGED ATTRACTION RUN, not a defect and not the
+body force — and the fixed-point protocol on the same physics passes to ~1 %.** Two measurements
+separate the candidates.
+
+(a) The *fixed-point* protocol — start the run AT the exact static equilibrium (the meniscus ODE
+profiles at a common datum, which by construction is the equilibrium for that liquid volume) and
+ask whether it holds — gives **−1.31 %** at θ = 30° and **−0.90 %** at θ = 60° over 600 steps.
+So the wetting condition, the cut-cell transport and the balanced force reproduce Jurin's law on
+this scene.
+
+(b) The *attraction* protocol — start FLAT, the protocol WO-S used — gives **3.74 cells against
+27.06 after 1500 steps (−86 %)**, i.e. WO-S's number reproduced on a scene with none of the
+features they suspected (8-cell plates instead of 4, rounded ends instead of sharp, quarter-integer
+faces, a zero-mean body force). The trace is still rising and decelerating at the end of the run.
+The rise is limited by the contact line, not by the scene: see finding 6.
+
+The non-zero-mean body force WO-S used *is* a real defect and its sign is the one the mechanism
+predicts (an accelerating frame contributes `−rho a`, which cancels part of gravity, so the
+equilibrium the run relaxes towards RISES), but it is **worth +1.69 % over this horizon**, not
+−83 %. Ablation, same scene, same fixed-point protocol, 600 steps: zero-mean **26.709** (−1.31 %,
+drifting DOWN), WO-S's form **27.520** (+1.69 %, drifting UP). The V6 scene keeps the zero-mean form
+(`set_zero_mean_buoyancy`, `force_z = g (rho_bar − rho)`) because it is the correct one and because
+the frame velocity grows without bound on a longer run — but the record must say that it is a
+second-order term here, and `jurin_wos` is the ablation that says so.
+
+The other two scene changes are kept for the reasons they were made, both of which remain sound:
+8-cell plates so the two faces' 3-cell wetting bands no longer overlap and the walk along `n_w`
+never crosses the plate's medial surface, and **semicircular ends** (a capsule SDF — the distance
+to a segment minus a radius — so `|grad sdf| = 1` everywhere and there is no 90° corner).
+
+**4. A cut-cell initial condition that samples the colour over the WHOLE cell instead of its FLUID
+part puts a fake interface down the middle of the liquid, and the curvature cascade turns it into
+`|kappa| ~ 3e6`.** Found while building the scene, recorded because it is a trap any cut-cell VoF
+initial condition can fall into. `C` is the liquid fraction of the cell's **fluid** volume
+(VOF_PLAN §3 rule 2), so a sub-cell sample that lies inside the solid must be excluded from BOTH
+the numerator and the denominator. Sampling the whole cell instead gives `C = eps` in a fully
+submerged cut column (measured `C = 0.7500` where the answer is 1, in a column with `eps = 0.75`),
+which is `0 < C < 1`, hence "mixed", hence a PLIC polygon and a curvature — branch 5 (the
+volumetric-paraboloid fallback) returned `|kappa| = 3.23e+06` at that cell against a physical
+value of ~0.1, and the run reached `max|u_f| = 788` twelve steps later. The tell is that the bogus
+`C` equals the cell's `eps` exactly.
+
+**5. The Gründing et al. (2020) reference curve could not be obtained in this environment, so G3's
+dynamic half is gated against the analytic equilibrium and the damping class instead.** The paper
+(*AMM* 86:142) is paywalled and its benchmark dataset (TUdatalib) is behind an access wall; both
+returned HTTP 403 here. What their comparison actually pins is (i) the final rise height, which is
+Jurin's and is available analytically and EXACTLY for this read-out (finding 2), and (ii) whether
+the approach is asymptotic or oscillatory, which is a function of the Ohnesorge number and is a
+qualitative classification, not a digitised curve. The corrected G3-dynamics gate is therefore:
+the final level difference within 10 % of the exact static equilibrium, and the overshoot class
+reported and required to be consistent across the slip sweep. The slip SENSITIVITY (their second
+axis) is reported as the spread of the rise curve over `lambda`.
+
+**6. THE contact line of this scheme has an anomalously low mobility, and it is what fails G3's
+dynamic half and G4's mechanism.** Three independent measurements, all on quarter-integer walls
+where WO-S finding 5's pinning artefact is absent:
+
+- *Capillary rise, flat start.* The Lucas–Washburn rate for the G3 slot,
+  `dh/dt = w^2 (2 sigma cos(theta)/w − drho g h)/(12 mu h)`, is **4.3 cells per unit time** at
+  `h = 2.7` with `w = 16`, `mu = 0.2`, `sigma = 1`. Measured: **0.024**. A factor **~180**.
+- *Drop on an incline, below the retention threshold.* The centroid displacement over a fixed time
+  is **0.456 / 0.439 / 0.433 / 0.442** cells per unit `Bo/Bo_c` at `Bo/Bo_c = 0.5 / 0.7 / 1.5 /
+  2.5` — exactly linear in the driving, with **no threshold**, while 90 % of the contact cells
+  correctly report `PINNED`. A pinned contact line creeps anyway, at a rate proportional to the
+  force.
+- *WO-S finding 4, re-read.* "O(10^3) capillary-limited steps per 30 degrees of contact-line
+  travel" is the same number in different units.
+
+The three are consistent with a single cause: the interface slides through the wall band at a rate
+set by the scheme's own near-wall velocity, and neither the imposed angle nor the hysteresis
+selector controls that rate. **The rung supplies the ANGLE half of Afkhami–Zaleski–Bussmann; the
+VELOCITY half — a Navier slip length in the momentum wall condition — is not implemented**, and
+these are the measurements of what that costs. Practical consequence, and it must be stated
+wherever a dynamic-wetting number from this build is reported: **a case whose answer depends on how
+FAR the contact line travels (capillary rise to Jurin, a drop sliding down an incline, imbibition
+breakthrough) is not affordable at this mobility** — the G3 scene needs O(1e4) capillary-limited
+steps to reach Jurin from flat. A case whose answer depends on the ANGLE at a given contact-line
+speed (the G1/G2 measurements, and every quasi-static shape) is fine.
+
+**7. The imposed angle tracks the model to 7e-15; the drop's MACROSCOPIC angle responds to the slip
+length with only 25 % of the prescribed sensitivity — because the scheme carries its own inner
+cut-off near 0.1 cells that does not move with `lambda`.** This is the honest rating of the rung and
+it is the same mechanism as finding 6, measured from the other side.
+
+The composition property of Cox–Voinov says the macroscopic slope should be
+`9 ln(a/lambda) = 9 ln(a/Delta) + 9 ln(Delta/lambda)`: the fill supplies the second term exactly
+(gate G1c: **7.105e-15 deg** over 384 contact cells), and the resolved hydrodynamics between the
+cell size and the contact radius must supply the first. Measured with `lambda` swept over a factor
+**25** (0.02 → 0.5 cells) on identical fits:
+
+| `lambda` (cells) | fitted slope | `9 ln(a/lambda)` | implied `lambda_eff` |
+|---|---|---|---|
+| 0.02 | 47.377 | 59.372 | 0.0758 |
+| 0.1  | 43.788 | 45.016 | 0.1146 |
+| 0.5  | 39.853 | 30.699 | 0.1808 |
+
+`d(slope)` is **−3.588** and **−3.936** where the model prescribes **−14.485**. So `lambda_eff`
+moves by a factor 2.4 while `lambda` moves by 25, and it stays pinned near **0.1 Δ** — an order of
+magnitude BELOW the cell size, which is exactly the "grid-dependent mobility" trap VOF_PLAN §6
+names, measured. Two candidate explanations were ruled out directly: the small-angle cube law
+(replacing `theta^3/9` by the exact Cox function `g(theta)` moves the discrepancy only from +41.4 %
+to +36.9 %) and the fit window on the ANGLE (restricting to `theta_app < 70 / 60 / 50` gives
++47.5 / +89.0 / +41.4 %). What is NOT ruled out, and is the first thing to run next, is a grid
+refinement at fixed `lambda`: if `lambda_eff` scales with `Delta` the cause is the scheme's
+numerical slip and the fix is the momentum-side Navier condition; if it does not, the cause is the
+band fill's reach.
+
+Note also that the ABSOLUTE slope is not a well-conditioned gate: the same `lambda = 0.1` run gives
+**43.788** over 15 points (800 steps) and **64.309** over 23 points (1200 steps), because
+`theta_app^3` against `Ca_cl` is not linear over the whole spreading. **Corrected G2 gate**: gate
+the SLIP SENSITIVITY `d(slope)/d ln(1/lambda)` on identical windows (which is what G2b measures and
+is insensitive to any fixed sub-grid contribution), and report the absolute slope with its window.
+
+**8. Two smaller things, for the record.**
+(i) `tests/kokkos_mpi/CMakeLists.txt` **does not configure at all on `main`** (`518c2a5`): a merge
+artefact between the concurrent V5 work orders left a stray argument list after the `foreach`'s
+closing paren, and CMake reports `Parse error. Expected "(", got identifier with text
+"vof_cutcell_mpi"` at line 45. `vof_bc_mpi` (WO-R's MPI test) was also never registered. Repaired in
+this branch's first commit — and INDEPENDENTLY found and repaired by WO-P01 while this WO ran (their
+findings entry below traces it to WO-R's `86192ad` and their fix to `9f59d54`); the rebase merged
+the two test lists. Recorded twice on purpose: two concurrent sessions each spent time on a
+`main` whose MPI test suite could not be configured at all.
+(ii) `vof_dynamic_field()` and `contact_angle_diagnostics()` regenerate the band fill, which under
+V6 also refreshes the velocity ghost ring (`buildVofCellVelocity` runs the same
+`fillVelGhostsKeepOutflow` / `fillVelGhosts` the colour bridge uses). That is a ghost-only side
+effect of a diagnostic, in the same family as the `max_open_divergence()` mutation WO-R recorded —
+it does not change an inner value, but it is not free and it is not nothing.
+
+### Corrected gates proposed
+
+- **G2** — gate the slip SENSITIVITY `d(slope)/d ln(1/lambda)` over identical fit windows (G2b),
+  not the absolute slope; report the absolute slope with its `Ca` window and its `lambda_eff`.
+  On the shipped build the sensitivity is 25 % of the model's, and finding 7 says why.
+- **G3-dynamics** — the Gründing et al. curve is not obtainable here (finding 5); gate the final
+  height against the exact static equilibrium **only on a run long enough for the contact line to
+  travel the required distance** (O(1e4) steps for this scene at the measured mobility), and gate
+  the slip ORDERING (a smaller `lambda` must retard the rise) on the affordable run, which it does:
+  2.754 (static) > 2.550 (`lambda = 0.3`) > 2.329 (`lambda = 0.05`).
+- **G4** — gate the creep RATE normalized by `Bo`, which must vanish below `Bo_c`; a displacement
+  threshold over a fixed window cannot tell pinning from creep. On the shipped build the normalized
+  rate is flat (0.456 / 0.439 / 0.433 / 0.442), so there is no threshold.
+- **G3-static** — keep it as written (5 % on the level difference); it passes on the fixed scene
+  with the **fixed-point** protocol, and the attraction protocol is a contact-line-mobility gate,
+  not a wetting gate.
 
 ## WO-P01 findings (Part II, rungs P0 + P1) — 2026-09-02, Opus
 
