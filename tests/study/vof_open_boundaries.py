@@ -225,7 +225,18 @@ def gate_nusselt(ratio=100, steps=None, outflow_rho=True):
     h = Solve(p["cap"])
     hist = []
     t0 = time.time()
+    # ADAPTIVE dt, re-picked every 20 steps from the solver's own interface-local Weymouth-Yue
+    # limit — the same pattern `vof_surface_tension.py::gate_hysing` uses, and necessary rather
+    # than cosmetic: the film's free surface speeds up as it develops and a fixed dt sized on the
+    # ANALYTICAL u_max trips the WY boundedness cap part-way through the run.
+    dt = p["dt"]
+    ncap = 0
     for i in range(steps):
+        if i % 20 == 0:
+            L = s.vof_step_limits()
+            dt = min(p["dt"], 0.4 * L["cfl_dt"]) if L["cfl_dt"] > 0 else p["dt"]
+            s.set_dt(dt)
+            ncap += int(dt < p["dt"])
         s.step()
         h.sample(s)
         hist.append(s.vof_diagnostics()["sum"])
@@ -241,6 +252,8 @@ def gate_nusselt(ratio=100, steps=None, outflow_rho=True):
     print(f"                flow rate      {qmeas:.6g} (Nusselt {Q:.6g})  "
           f"[{100*(qmeas/Q-1):+.2f} %]")
     print(f"  sum(C) steadiness over the last 200 steps: {steady:.3e} relative")
+    print(f"  dt: nominal {p['dt']}, throttled by the WY cap on {ncap} of the "
+          f"{(steps + 19)//20} re-picks; final {dt:.4g}")
     print(f"  {h}   ({time.time()-t0:.0f} s)")
     ok = (abs(qmeas / Q - 1) < 0.03 and abs(dmeas - delta) < 0.5 and steady < 1e-4 and h.valid)
     print(f"  GATE: {'PASS' if ok else 'FAIL'} (Q within 3 %, delta within 0.5 cell, "

@@ -490,7 +490,10 @@ implicit surface tension is ever worth revisiting.
 `set_vof_curvature_mixed_height_fit()`; V4 adds
 `set_surface_tension()` / `surface_tension()`, `capillary_dt()`, `set_capillary_cfl()`,
 `vof_step_limits()`, `csf_diagnostics()`, `set_vof_interface_eps()` / `vof_interface_eps()`,
-`set_vof_kappa_frozen()`, `set_vof_kappa_constant()`, `set_csf_mode()`. `"C"` is an ordinary
+`set_vof_kappa_frozen()`, `set_vof_kappa_constant()`, `set_csf_mode()`; V-BC adds
+`set_vof_inflow()`, `set_vof_inflow_profile()`, `set_vof_backflow()`, `vof_bc_volumes()` /
+`vof_bc_volumes_total()` / `reset_vof_bc_volumes()`, `set_outflow_rho_correction()` and
+`max_open_divergence_projected()`. `"C"` is an ordinary
 registered `G=2` cell field, so ρ(C)/μ(C) go through the existing `LinearMix` closures
 (`set_property_model("rho","linear","C",[rho_g, rho_l-rho_g])`, which enables the varRho path) and
 `get_field`/`set_field`/`field_view`/`redistribute` work on it unchanged. The **g=3 working block**
@@ -695,6 +698,11 @@ paragraph above) and is all-fluid, ratio ≲ 100 with motion. An **immersed soli
 rung V5a** — `set_solid(...,
 cutcell_pressure=True)` — with the openness-weighted flux above (STAGGERED only); an all-fluid
 `set_pressure_geometry` is of course also fine. Without
+**Scope — say this to users:** **Staggered only** (collocated is V8 —
+`enable_vof` throws). An **immersed solid is supported since rung V5a** — `set_solid(...,
+cutcell_pressure=True)` — with the openness-weighted flux above; an all-fluid
+`set_pressure_geometry` is of course also fine. **Open boundaries are supported since rung V-BC**
+(WO-R) — see "Two-phase open boundaries" under "Domain boundary conditions". Without
 `enable_vof_momentum` the rung is **valid only at modest density ratios for cases with motion**; a
 high-ratio case at REST (the hydrostatic acid test) is exact either way. **With** it, the shipped
 build is honestly rated to ratio ~1e3: the uniform-velocity residual through the coupled step is
@@ -726,6 +734,8 @@ the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
 `vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`, `vof_collocated`;
 `tests/kokkos_mpi` `vof_advect_mpi_np{1,2,4}`,
+`vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_bc`; `tests/kokkos_mpi`
+`vof_bc_mpi_np{1,2,4}`, `vof_advect_mpi_np{1,2,4}`,
 `vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,
 `vof_surface_tension_mpi_np{1,2,4}`, `vof_cutcell_mpi_np{1,2,4}`, `vof_wetting_mpi_np{1,2,4}`,
 `vof_collocated_mpi_np{1,2,4}`;
@@ -752,6 +762,73 @@ relative velocity reaches **0.786 / 0.828 / 0.869 of the Hasimoto-corrected Hada
 D/h = 10 / 15 / 20**, and is **insensitive to the momentum-sweep count to four digits** (0.826 at 60
 sweeps/step, 0.828 at 2649) — so WO-K's suspected under-resolved momentum solve is refuted. At 15
 cells/diameter it is 17 % low, just outside Arrufat's "within 15 %"; at 20 it is 13 % low, inside.
+
+**Two-phase open boundaries (rung V-BC, WO-R).** `enable_vof` now works on a domain with inflow
+and outflow faces. Three rules, one per domain-BC type (`src/vof/colour_bc.hpp`):
+
+- **inflow (type 2)** — `set_vof_inflow(face, C)` / `set_vof_inflow_profile(face, C2d)` overwrite
+  **all three** colour ghost layers of that face after `clampFill`, on the rank that
+  `touchesGlobalFace`. The flux through a face whose donor lies outside the domain is the
+  **algebraic `C_donor·a`** (`wyFaceFluxBc`), never a reconstructed PLIC slab: a uniform prescribed
+  ghost band has no usable MYC normal, and a *fractional* inflow colour is a statement about the
+  incoming FLUX ("this fraction of what enters is liquid"), not a sub-cell interface position.
+  The selecting `outside` mask is built on **global** indices (like `clampFill`) and is installed
+  only when a VoF boundary colour is set, so with none set the V1 flux path is bit-identical.
+- **outflow (type 3)** — zero-gradient stays; `set_vof_backflow(face, C)` (default 0 = gas) gives
+  the `inletOutlet` behaviour (Rusche 2002 §4; OpenFOAM `inletOutletFvPatchField`): where the
+  boundary face velocity points back INTO the domain the ghost band carries the backflow colour.
+- **wall (type 1)** — unchanged; `clampFill` IS the 90° neutral continuation (WO-S replaces it).
+
+`vof_diagnostics()` gains `inflow_volume` / `outflow_volume` and `vof_bc_volumes()` breaks them out
+per face (signed, + = entering, counted only on the global faces a rank owns). They are the
+advector's OWN boundary face fluxes, so **`Σ C(t) − ∫in + ∫out = const` closes to round-off**:
+measured **4.8e-15 relative** over a 500-step slug injection/flush (kinematic, 32×32×64) and
+**2.7e-12** through the fully coupled step, where the floor is the projection's divergence residual.
+
+**The inflow PROPERTY ghost follows the inflow colour.** `fillPropGhosts` copies the inner value
+outward, which at a liquid inlet into a gas domain makes the inlet FACE density (the arithmetic mean
+of inner and ghost, used by both the momentum time term and the projection coefficient) the
+*interior's*, wrong by up to the full ratio. ρ and μ are closures of C, so the repair is the same
+closure re-evaluated on the ghost band (`applyClosureFaceGhost`): measured at ratio 1000, ρ_face
+**500.5 instead of 1**. Only closure outputs are repaired — a hand-set ρ keeps the Neumann copy,
+and a closure chained on ρ rather than on C sees whatever ρ's ghost held at that moment.
+
+**Two defects this rung found in the existing open-boundary machinery, both measured:**
+
+- **`max_open_divergence()` MUTATES the velocity field on the staggered path.** It re-imposes the
+  zero-gradient outflow face before measuring (its own comment says so), which destroys
+  `bcCorrectOutflow`'s correction — the mechanism by which mass leaves — and then reports the
+  divergence of a field the solver never used. Calling it once per step inside a time loop
+  therefore *changes the run*. Measured on a constant-density duct: **1.26e-09 from the mutating
+  diagnostic against 1.41e-17 for the projected field**. Use **`max_open_divergence_projected()`**
+  (new, non-mutating) on any domain with an outflow face. The default was left alone because every
+  recorded open-boundary number in the repo was taken with the mutating one.
+- **`bridgeVelocityToVof` erased the same correction**, so the colour advector was handed a field
+  that is not discretely divergence-free at the outlet — precisely the hypothesis Weymouth–Yue's
+  exact conservation rests on. It now keeps it (`fillVelGhostsKeepOutflow`) when a projection has
+  run since the last full velocity ghost fill, and takes the full fill otherwise (the kinematic
+  path, where the zero-gradient rule is what supplies the boundary face at all).
+
+**WO-R item 4 was REFUTED by its own gate: the outflow correction must NOT carry `1/ρ_f`.**
+`doc/variable_density_projection.md` §4 listed the missing factor in `bcCorrectOutflow` as a defect
+to fix with a two-phase outflow case. Measured on that case (stratified duct, ratio 10, `max|div|`
+of the projected field): **without the factor 8.8e-10, with it 9.2e-03** — seven orders worse. A
+projection correction cancels the divergence only if it uses the same face coefficient the operator
+row used, and the outflow face's coefficient is the RAW openness (`buildRhoCoeff` runs over inner
+cells only; the multigrid re-imposes a Dirichlet outflow face as simply open). So the plain `phi`
+difference IS the consistent correction, and the inconsistency, if anyone wants it removed, is on
+the **operator** side (`CutcellMG`), not here. `bcCorrectOutflowVar` ships as
+`set_outflow_rho_correction(...)`, **default OFF**, with those numbers in its docstring.
+
+**Scope.** Gates: `tests/kokkos` ctest `vof_bc`; `tests/kokkos_mpi` `vof_bc_mpi_np{1,2,4}` (the
+decomposition cutting the inflow and outflow faces); `tests/study/vof_open_boundaries.py`
+(`budget`, `nusselt`, `pool`). With no VoF boundary colour set every existing VoF ctest is
+byte-identical on both backends. **The pressure solve, not the boundary machinery, is what limits
+this rung at high contrast**: a wall-bounded open-boundary box at ratio ≥ 100 needs the **FCG**
+driver (Chebyshev diverges, MG-PCG burns any cap) and still leaves a real residual — the
+coefficient-contrast item (VOF_PLAN S3). Selecting the driver **before** a `rho` closure is
+silently discarded (`set_property_model("rho", …)` fires `set_density_mode`, which reselects
+Chebyshev): call `set_pressure_fcg` LAST.
 
 ### Domain boundary conditions
 

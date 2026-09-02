@@ -1061,3 +1061,267 @@ by the open area, instead of being clipped against the SOLID polygon as well (Hu
 the wall are parallel or the cell is whole, and O(1) wrong in the DISTRIBUTION inside a cell whose
 interface crosses its wall. `vof_diagnostics()['clipped_volume']` is the tripwire, and it reads
 5.4e-19 over 200 steps on the shipped packing gate.
+## WO-R — rung V-BC: two-phase open boundaries  [Opus, 2026-09-02]
+
+Branch `vof-wor`. Deliverables shipped: `src/vof/colour_bc.hpp`, `wyFaceFluxBc` + the `outside`
+mask + the per-face boundary ledger in `src/vof/advect_wy.hpp`, `bcCorrectOutflowVar` in
+`src/mac_bc.hpp`, `applyClosureFaceGhost` in `src/property_closures.hpp`, the solver plumbing +
+bindings, `tests/kokkos/test_vof_bc.cpp`, `tests/kokkos_mpi/test_vof_bc_mpi.cpp`,
+`tests/study/vof_open_boundaries.py`, the CLAUDE.md paragraph.
+
+### The headline: the varRho pressure operator's DOMAIN-BOUNDARY face coefficient is 1, and the projection's correction at that face is not
+
+This is the real answer to `doc/variable_density_projection.md` §4, and it is not the one item 4
+assumed. `CutcellMG::applyBoundaryOpenness` re-imposes the boundary face value on **every level,
+level 0 included**: `bcSetOpenness(..., 1.0)` at an outflow face. Under `varRho` the field handed to
+`setOpenness` is the *coefficient* `cx1_ = open·ρ₀/ρ_f` (`buildRhoCoeff`), so that line overwrites a
+correct `ρ₀/ρ_f` with **1**. The two projection corrections then disagree with it in opposite ways:
+
+| outflow face | operator coefficient | correction applied | consistent? |
+|---|---|---|---|
+| **high** side (`bc_[2a+1]==3`) | 1 (`bcSetOpenness`) | 1 (`bcCorrectOutflow`, plain φ difference) | **yes** |
+| **low** side (`bc_[2a]==3`) | 1 (`bcSetOpenness`) | `ρ₀/ρ_f` (`projectCorrectVar`, the face is an inner index) | **no — by the full ratio** |
+
+Measured, both halves:
+
+* **high side** (stratified duct, walls ±z, inflow −x, outflow +x, 5 steps, `max|div(open u)|` of the
+  **projected** field, `tests/kokkos/test_vof_bc.cpp` gate F2):
+
+  | density ratio | plain correction (shipped) | with `1/ρ_f` (`bcCorrectOutflowVar`) |
+  |---|---|---|
+  | 1    | 1.407e-17 | 1.407e-17 (bitwise equal) |
+  | 10   | **8.763e-10** | **9.236e-03** |
+
+  So **WO-R item 4 is REFUTED**: adding the `1/ρ_f` factor to `bcCorrectOutflow` makes the outflow
+  divergence seven orders worse, because it breaks the accidental consistency with the
+  coefficient-1 operator row. `bcCorrectOutflowVar` ships as `set_outflow_rho_correction(...)`,
+  **default OFF**, with these numbers in its docstring. The corrected item is: *fix the operator*.
+
+* **low side** (Nusselt falling film, outflow at −z, ratio 100, one step from the exactly developed
+  state): `max|w|` **1.4550** against the film's own `u_max` 0.3124 — a 4.7× velocity in the GAS,
+  where `ρ₀/ρ_f = 100`, and `max|div|` (projected) **1.44**. The run trips the Weymouth–Yue cap
+  within 20 steps. The `set_outflow_rho_correction` knob is *inert* here (it only touches the high
+  side), which is the cross-check that this is a second, independent instance of the same
+  inconsistency.
+
+**Proposed fix (NOT implemented — out of this rung's deliverables, and it deserves its own WO):**
+in `CutcellMG::applyBoundaryOpenness`, impose at an outflow face the *coefficient* the caller
+supplied rather than the literal 1 (level 0 already has the right value from `buildRhoCoeff`; the
+coarse levels need the coarsened one). Then both corrections are the `ρ₀/ρ_f` one and
+`bcCorrectOutflowVar` becomes correct rather than harmful — i.e. item 4's design is right *after*
+the operator is fixed and wrong before it. Gate for that WO: F2's table must read ~1e-10 in the
+`with 1/ρ_f` column and the Nusselt film must run to steady state.
+
+### Two more defects found, both fixed here
+
+1. **`max_open_divergence()` MUTATES the velocity field on the staggered path.** It calls
+   `fillVelGhosts(c, 0)` before measuring, which re-imposes the zero-gradient outflow face and so
+   **destroys `bcCorrectOutflow`'s correction** — the mechanism by which mass leaves. Calling it
+   once per step inside a time loop therefore changes the run. Measured:
+   * constant-density duct: the mutating diagnostic reads **1.262e-09**, the projected field's own
+     residual is **1.407e-17**;
+   * the coupled colour-budget study (32×32×64, 800 steps) with the mutating diagnostic in the loop:
+     budget drift **2.7e-12** relative, `max|div|` 1.8e-08; with the non-mutating one:
+     **4.589e-15** and **1.77e-13**. Three to four orders, purely from the diagnostic.
+   * and it is what made the Nusselt film look stable in the first probes: resetting the
+     inconsistent outflow correction every step suppressed the blow-up above (`max|w|` 0.3078 with
+     the mutating diagnostic in the loop against 1.4550 without).
+   Fix: **`max_open_divergence_projected()`**, a non-mutating sibling. The default was left alone —
+   every recorded open-boundary number in the repo was taken with the mutating one and
+   re-baselining them is not this rung's call.
+2. **`bridgeVelocityToVof` erased the same correction**, so the colour advector was handed a field
+   that is not discretely divergence-free at the outlet — exactly the hypothesis Weymouth–Yue's
+   exact conservation rests on. Fixed with `fillVelGhostsKeepOutflow`, selected by a
+   `outflowCorrValid_` flag so the KINEMATIC path (no projection since the last full fill, the
+   boundary face never set) still gets the zero-gradient fill that supplies that face at all.
+
+### Gates
+
+**G1 colour budget — PASS.**
+*Kinematic* (`tests/kokkos/test_vof_bc.cpp` gate C, 32×32×64, uniform inflow −z / outflow +z, walls
+elsewhere, `set_vof_inflow(4,1)` for 100 steps then 0 for 400, advecting field the exactly
+divergence-free uniform w):
+
+| backend | injected | left | remaining ΣC | budget drift (rel) | in/out closure | C range |
+|---|---|---|---|---|---|---|
+| nvidia-cuda | 20480 | 20480 | −7.3e-25 | **2.487e-15** | 8.882e-16 | [−6.9e-18, 1] |
+| host-openmp (quick, nz=32) | 8192 | 8192 | −8.4e-20 | **4.774e-15** | 8.882e-16 | [−6.1e-18, 1] |
+
+The slug leaves with its length intact: at its fullest, ΣC = 20480 over **19 full planes + 2
+partial** for an injected length of 20 cells. `max|div(open u)|` of the prescribed field 0.000e+00.
+
+*Coupled* (`tests/study/vof_open_boundaries.py budget`, the same box driven by `step()`, 60 + 740
+steps, μ = 0.5, Chebyshev): injected 6144, budget drift **2.819e-11 absolute = 4.589e-15 relative**,
+`max|div(open u)|` (projected) **1.77e-13**, pressure **22/400** (not capped), C ∈ [−2.29e-16,
+1+1.3e-15].
+
+*Corrected gate.* WO-R's "nothing is left behind (ΣC → 0 to 1e-12)" is only meaningful with a
+**uniform** advecting field. In the no-slip duct the near-wall liquid never leaves (the coupled run
+ends with 1177 of 6144 still inside), so that half belongs to the kinematic twin — where it reads
+−7.3e-25 — and the coupled gate should keep only the budget identity. Also: WO-R's 1e-12 relative
+tolerance is *looser* than what the advection achieves; the measured floor is the projection's
+divergence residual and it is 2.5e-15.
+
+**G2 Nusselt falling film — FAILED TWICE, STOPPED per rule 4.**
+Quasi-2D 32×4×64, δ = 8 cells against the −x wall, walls ±x, prescribed Nusselt inlet at +z,
+outflow at −z, reduced gravity `−(ρ_l−ρ_g) g C` (so the gas is exactly force-free and hydrostatic,
+which is what the similarity solution assumes; with gravity on the gas the Dirichlet p = 0 outlet
+accelerates the gas column instead of supporting it — a different problem). Film Reynolds 5,
+`u_max` 0.31236, Nusselt `Q` 1.66595.
+
+*What was measured before the failure* — 60 steps from the exactly developed state, at z = nz/2:
+
+| ratio | μ ratio | momentum consistency | δ measured | Q measured | vs Nusselt | pressure | max\|div\| (projected) |
+|---|---|---|---|---|---|---|---|
+| 100  | 50 | on | **7.9960** (−0.0040 cells) | 1.6426 | **−1.40 %** | 66–154 / 400, valid | 2.13e-05 |
+| 1000 | 50 | on | **8.0000** | 1.6604 | **−0.34 %** | 400/400 and 953/2000 — **CAPPED, run INVALID** | 2.96e-04 |
+
+So the film physics is well inside the 3 % / 0.5-cell gate at both ratios, and neither run reaches
+"steady state to 1e-4 over the last 200 steps": at ratio 100 the run trips the Weymouth–Yue cap
+(the low-side outflow inconsistency above), at ratio 1000 the pressure solve caps.
+
+*Attempts, both recorded rather than retried further:* (i) fixed dt = 0.5 sized on the analytical
+`u_max` → CFL 0.571 at step ~20; (ii) adaptive dt re-picked every 20 steps from
+`vof_step_limits()['cfl_dt']` (the `gate_hysing` pattern) → dt 0.321, CFL 0.317 at step ≤ 20. The
+mechanism is not dt: `max|w|` is already 1.4550 after the FIRST step.
+
+*The 1/ρ_f before/after at ratio 1000, explicitly, as asked.* It cannot be taken on this case: the
+film's outlet is on the **low** side of z and `bcCorrectOutflowVar` only touches the high side, so
+the knob is measurably inert there (`max|w|` 1.4550 and `max|div|` 1.44 after one step with the knob
+both on and off, to every printed digit). The before/after that does exist is the high-side one in
+the table at the top of this entry (ratio 10: **8.763e-10 off / 9.236e-03 on**), and at ratio 1000
+the same high-side comparison is unavailable for a different reason: every ratio-1000 wall-bounded
+open-boundary configuration tried caps its pressure solve, so no valid run exists to compare.
+**Corrected gate for G2:** it must wait for the operator fix above; as written it measures the
+operator defect, not the boundary machinery.
+
+*Pressure-driver facts G2 established and every later open-boundary case needs:*
+* on a wall-bounded open-boundary box at ratio ≥ 100, **Chebyshev DIVERGES** (the film accelerates
+  until the WY cap throws), **MG-PCG burns any cap** (600/600, 2000/2000) and **FCG converges**
+  (98–154 iterations at ratio 100). Ratio 1000 caps every driver.
+* **the driver must be selected AFTER the `rho` closure.** `set_property_model("rho", …)` fires
+  `set_density_mode`, which reselects Chebyshev and silently discards an earlier
+  `set_pressure_pcg/fcg`. This is WO-H's "capped at 120" tell, alive and well, and it cost two
+  probe runs here.
+* the ratio-1000 cap is **not** WO-M's float `A·1 = 0` defect. Measured on the G3 pool
+  configuration (32×4×16, ratio 1000, FCG cap 800, 40 steps) against a
+  `-DPECLET_FLOW_MREAL_DOUBLE` build of the same tree: the per-step iteration counts and
+  divergences agree to **every printed digit** from step 1 onward (step 0 reads 112 float / 120
+  double), e.g. step 39 = 634 iterations and 4.821e-03 in both builds. So it is the coarsening /
+  boundary-coefficient side, i.e. the S3 family, not the operator storage precision.
+
+**G3 gas over a pool — item-5 half PASS, quiescence half FAIL (run INVALID).**
+64×4×32, gas inflow at −x above a liquid pool filling the lower half, outflow at +x, ratio 1000,
+`enable_vof_momentum`, 500 steps, FCG cap 800.
+* **the inflow ghost density is exactly the inlet fluid's**: 1 above the pool (want 1), **1000 at
+  the pool's own inlet plane** (want 1000). That is WO-R item 5, and it is the half of G3 that
+  measures the boundary machinery.
+* pool volume 4096 → 4084.47 (**−2.815e-03** relative, gate 1e-10); `max|u|` in the liquid
+  1.2494e-02 = **3.123e-02 of the gas inlet speed** (gate 1e-3); pressure **800/800 CAPPED → run
+  INVALID** (rule 3b); `max|div|` (projected) 8.55e-05.
+* *Corrected gate.* WO-R asks for the ghost density "through `get_field('rho')` on the first inner
+  plane". That measures the wrong quantity — `get_field` returns the INNER cells, whose ρ is
+  ρ(C_inner) whatever the ghost policy does. The ghost is what the inlet FACE density is built
+  from and is reachable only through `field_view('rho')` (the padded buffer). The script gates that.
+
+**G4 MPI — PASS at np 1/2/4 on BOTH backends** (16×16×32; the aligned ORB cuts z at np = 2 and
+**x and z** at np = 4, i.e. the inflow and outflow faces are cut):
+
+| backend | np | slug colour vs single-rank | ledger vs single-rank | global budget \|ΣC − ledger\| | in / out | coupled-jet colour | inflow ρ ghost | pressure |
+|---|---|---|---|---|---|---|---|---|
+| host-openmp | 1 | **0.000e+00** | 0.000e+00 | 1.845e-12 | 1024 / 1024 | **0.000e+00** | correct on all owners | 42/400 |
+| host-openmp | 2 | **0.000e+00** | 8.810e-14 | 1.933e-12 | 1024 / 1024 | 6.173e-14 | correct | 42/400 |
+| host-openmp | 4 | **0.000e+00** | 3.155e-13 | 2.160e-12 | 1024 / 1024 | 5.473e-14 | correct | 42/400 |
+| nvidia-cuda | 1 | **0.000e+00** | 0.000e+00 | 1.768e-12 | 1024 / 1024 | **0.000e+00** | correct | 42/400 |
+| nvidia-cuda | 2 | **0.000e+00** | 5.112e-14 | 1.819e-12 | 1024 / 1024 | **0.000e+00** | correct | 42/400 |
+| nvidia-cuda | 4 | **0.000e+00** | 5.112e-14 | 1.819e-12 | 1024 / 1024 | 5.751e-14 | correct | 42/400 |
+
+(The host-openmp rows above are from the 20 + 200-step version; the shipped test runs 20 + 165, and
+its host-openmp rerun reproduces the np = 1 row exactly. See the wisp finding below for why the
+length changed.)
+
+The colour is **bitwise** at every np on the kinematic slug (no reduction in the update); the
+coupled jet sits at the usual allreduce-order floor. The ledger is a per-rank partial sum over the
+global faces a rank OWNS — without that test a rank in the middle of the decomposition counts its
+own block-boundary flux and the per-face totals are meaningless (measured: np = 2 reported an
+inflow of 2048 instead of 1024 before the ownership gate).
+
+**G5 inert — PASS.** With no VoF boundary colour set, all six VoF ctests (`vof_plic`, `vof_advect`,
+`vof_twophase`, `vof_momentum`, `vof_curvature`, `vof_surface_tension`) are **byte-identical** to
+their pre-change output on **both** host-openmp and nvidia-cuda (`diff` on the full stdout, 12 of
+12 identical). The single-phase regression is **PASS with +0.00 % on every metric and identical
+iteration counts** on all three beds (`zick_homsy`, `random_spheres`, `hollow_rings`).
+
+### A latent V0/V1 fragility this rung was the first to reach: WY wisps in an EMPTIED domain
+
+An open-boundary domain can drain completely; no earlier VoF configuration could. When it does, the
+colour field is nothing but Weymouth-Yue round-off residue, and `wyIsMixed(c)` — `0 < c < 1`, with
+**no wisp guard**, unlike the V3 curvature predicate's `interfaceEps` — still calls those cells
+mixed. The MYC normal of a stencil of ±1e-18 values is degenerate and `plicAlpha` divides by it.
+
+Measured, nvidia-cuda, np = 1, the kinematic slug run continued past the drain
+(`PECLET_VOF_BC_TRACE=1` in `tests/kokkos_mpi/test_vof_bc_mpi.cpp`):
+
+```
+step 181  outflow flux -0.191507   ΣC  5.047e-04   min -5.6e-18  max  6.3e-05
+step 185  outflow flux  3.891e-18  ΣC -1.460e-17   min -2.3e-18  max  4.3e-19
+step 186  outflow flux  -inf       ΣC -inf
+step 187  outflow flux  +inf       ΣC  NaN         1 non-finite cell
+```
+
+Not caused by this rung: `wyFaceFluxBc` is bitwise `wyFaceFlux` wherever the mask is 0, and the
+mask only covers out-of-domain ghosts, while the degenerate donor here is an inner cell. It is
+also round-off-luck: the single-rank nvidia-cuda run of the SAME drain (the `vof_bc` ctest, 500
+steps) ends at ΣC = −7.3e-25 with no non-finite cell, and host-openmp never trips it — the
+difference is the colour ghost fill (`GridHalo` vs `periodicFill`) perturbing the wisps.
+
+**A gate defect it exposed, fixed here:** the standard `maxAbsDiff` loop uses `std::fmax(m, |a−b|)`,
+and `fmax(x, NaN)` returns `x` — so a field that has gone entirely NaN compares **0.000e+00** to its
+reference and every bitwise gate passes. `tests/kokkos_mpi/test_vof_bc_mpi.cpp` now propagates NaN
+and counts non-finite cells explicitly. **Every `maxAbsDiff` in `tests/kokkos*` has this hole.**
+
+The shipped MPI test stops at step 185, just after the slug has fully left (in == out == 1024), so
+it exercises the budget without entering the wisp regime. The proposed repair — a wisp guard on
+`wyIsMixed`, or clipping |C| below ~1e-12 to 0 after each sweep — changes a validated V1 predicate
+that reconstruction and fluxing must share, so it belongs in its own work order with its own
+byte-identity argument.
+
+### Item 6 (measurement only, no default changed): Hysing case 2 with and without `PECLET_FLOW_EXACT_RESIDUAL=1`
+
+`tests/study/vof_surface_tension.py hysing2`, 64×128×4, adaptive dt, nvidia-cuda, identical in every
+other respect.
+
+| | default | `PECLET_FLOW_EXACT_RESIDUAL=1` |
+|---|---|---|
+| max pressure iterations | **116 / 600** | **116 / 600** |
+| `max\|div(open u)\|` | **1.85e-03** | **5.15e-11** |
+| max rise velocity | 0.2574 at t = 0.671 (+2.9 % vs 0.2502) | 0.2574 at t = 0.671 (+2.9 %) |
+| `y_c(3)` | 1.1082 (−2.6 % vs 1.1376) | 1.1082 (−2.6 %) |
+| steps to t = 3 | 1123 | 1123 |
+| binding limit | capillary on 5 of 113 dt re-picks, WY CFL on 108 | identical |
+
+**P1 removes 7.5 orders of the flux divergence (1.85e-03 → 5.15e-11) and moves nothing else** — the
+iteration count, the step count, the dt-limit census and both published functionals are identical to
+every printed digit. That confirms WO-P's attribution of the 1.85e-3 to the float `A·1 ≠ 0` defect,
+and it also says the defect does **not** contaminate this benchmark's reported numbers. No default
+was changed.
+
+### Open questions for the coordinating session
+
+1. **The operator fix above.** It is the blocker for every two-phase open-boundary case at
+   ratio ≥ 10 with a low-side outlet, and it turns item 4 from harmful into correct. Own WO?
+2. **Should `max_open_divergence()` stop mutating?** The non-mutating sibling exists; making it the
+   default would move every recorded open-boundary divergence number in the repo (the channel/BFS
+   verifies included) — in the right direction, but it is a re-baselining decision.
+3. **`advect_vof(dt)`** is WO-Q's deliverable and was deliberately NOT added here to keep
+   `flow_bindings.cpp` mergeable; this rung's kinematic gates call `IbmSolver::advectVof()` from
+   C++ and the study script drives `step()`. WO-Q's `advect_vof` should route through the same
+   `outflowCorrValid_` logic (it will, automatically).
+4. **The half-shifted colour under `enable_vof_momentum` keeps the zero-gradient band at an inflow
+   face** (the BC fill is guarded on the colour field's identity, because the same `exchange` hook
+   carries the momentum fields). It matters only when the inflow colour differs from the colour
+   already at the boundary; G3's pool inlet is profiled precisely so that it does not.
+5. **The wisp guard on `wyIsMixed`.** Own WO — it changes a validated predicate. Until then, any
+   VoF configuration that can empty its domain is a NaN risk on some backend.
+6. **`maxAbsDiff`'s NaN blindness** is repo-wide in `tests/kokkos*`; the pattern
+   `m = fmax(m, fabs(a-b))` cannot fail on a NaN field. Worth a sweep.

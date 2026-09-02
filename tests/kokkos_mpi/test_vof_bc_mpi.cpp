@@ -33,6 +33,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <Kokkos_Core.hpp>
 #include <vector>
@@ -84,11 +85,24 @@ static std::vector<double> gatherGlobal(const std::vector<double>& local, int ox
   return global;
 }
 
+// NaN-AWARE. `std::fmax(m, NaN)` returns m, so the obvious loop silently reports 0.000e+00 for a
+// field that has gone NaN — a gate that cannot fail. Propagate instead.
 static double maxAbsDiff(const std::vector<double>& a, const std::vector<double>& b) {
   double m = 0;
-  for (std::size_t i = 0; i < b.size(); ++i)
-    m = std::fmax(m, std::fabs(a[i] - b[i]));
+  for (std::size_t i = 0; i < b.size(); ++i) {
+    const double d = std::fabs(a[i] - b[i]);
+    if (!(d == d))
+      return d;  // NaN
+    m = std::fmax(m, d);
+  }
   return m;
+}
+static long countNonFinite(const std::vector<double>& a) {
+  long n = 0;
+  for (double v : a)
+    if (!(v - v == 0.0))
+      ++n;
+  return n;
 }
 static double sumOf(const std::vector<double>& a) {
   double s = 0;
@@ -169,7 +183,15 @@ int main(int argc, char** argv) {
 
     // ---------------------------------------------------------------- A: kinematic slug budget
     {
-      const int nSlug = 20, nAfter = 200;
+      // 20 slug steps then 165 more: at W = 1 and dt = 0.2 the slug's tail clears the 32-cell
+      // domain by step ~182, so the budget is fully exercised (in == out == 1024) and the run
+      // stops before the EMPTIED-DOMAIN WISP REGIME — see the WO-R findings entry: once C is
+      // nothing but +-1e-18 round-off, `wyIsMixed` still calls those cells mixed, the MYC normal
+      // of a ~1e-18 stencil is degenerate and `plicAlpha` divides by it. Measured on nvidia-cuda
+      // at np = 1 (`PECLET_VOF_BC_TRACE=1`, this file): C goes -inf at step 186 and NaN at 187.
+      // That is a V0/V1 wisp fragility, not a boundary one — the boundary machinery is what first
+      // creates a domain that empties completely.
+      const int nSlug = 20, nAfter = 165;
       IbmSolver sd(lnx, lny, lnz);
       sd.initMpi(dec, MPI_COMM_WORLD);
       configureSlug(sd, lnx, lny, lnz);
@@ -179,6 +201,14 @@ int main(int argc, char** argv) {
           sd.setVofInflow(4, 0.0);
         sd.advectVof();
         const auto v = sd.vofBcVolumes();
+        if (std::getenv("PECLET_VOF_BC_TRACE") && rank == 0) {
+          const auto cc = sd.getVof();
+          double sm = 0;
+          for (double q : cc)
+            sm += q;
+          std::printf("    trace step %3d: face %.6g %.6g | C sum %.6g nonfinite %ld\n", i, v[4],
+                      v[5], sm, countNonFinite(cc));
+        }
         for (int f = 0; f < 6; ++f)
           ledger += v[f];
       }
@@ -206,7 +236,16 @@ int main(int argc, char** argv) {
             rLedger += v[f];
         }
         const double dc = maxAbsDiff(gc, ref.getVof());
+        const long nbad = countNonFinite(gc) + countNonFinite(ref.getVof());
         const double dl = std::fabs(gLedger - rLedger);
+        if (nbad != 0) {
+          std::printf("  [slug-kin  np=%d] FAIL — %ld non-finite colour cells\n", size, nbad);
+          fail = 1;
+        }
+        if (!(gLedger == gLedger) || !(gIn == gIn) || !(gOut == gOut)) {
+          std::printf("  [slug-kin  np=%d] FAIL — the boundary ledger is not finite\n", size);
+          fail = 1;
+        }
         const double budget = std::fabs(gSum - gLedger);
         std::printf("  [slug-kin  np=%d] colour vs single-rank %.3e (BITWISE required)\n", size,
                     dc);
