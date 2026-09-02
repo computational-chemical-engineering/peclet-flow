@@ -267,6 +267,53 @@ transport, the band-extended velocity, `tests/kokkos/test_vof_phase_change.cpp` 
 
 ---
 
+## WO-W12 — Part III, rungs W1 (many bubbles, redistribution, statistics) and W2 (NS coupling, channel_18)  [OPUS, after WO-W0]
+
+Build on WO-W0 as shipped (read its findings: the partitioned gather/scatter, the bitwise horizon
+and `bubbleEps`, the round-robin master imbalance 1.3–2.0, host-staged packing, the re-centring
+reallocation, all-fluid only).
+
+**W1.** (a) Master assignment by the weighted ORB: weights = block cell counts, through
+`BlockDecomposer::init(…, weights)` on a 1-D "block space", or simply a greedy longest-processing-
+time assignment over ranks (measure both; ship the one with the better max/mean on a 64-bubble
+swarm at np 4/8 — LPT is deterministic and needs no communication, which the bitwise gate likes);
+periodic re-assignment every N steps with block state migrated (the colour box is a contiguous
+buffer — send it). (b) Device-resident packing (the pack/unpack kernels run on the block's
+memory space; host staging only at the MPI boundary if the MPI is not CUDA-aware — check how
+`GridHalo`'s device-resident variant does it). (c) A block pool so re-centring does not reallocate.
+(d) Per-bubble Lagrangian outputs through Python: `vof_block_stats()` → id, volume, centroid,
+velocity, the 3×3 second-moment tensor (deformation), and a per-bubble `interface_area` from the
+PLIC polygons (the gallery asked for one). Gates: 64 bubbles in the LeVeque field at np 1/2/4/8
+**bitwise** across np and across re-assignment events; every marker's volume to 1e-14; measured
+imbalance before/after (report); packing time device vs host (report, not gated).
+
+**W2.** NS coupling: the union `C` drives the closures as today; curvature per block
+(`VofCurvature` on the block, the same cascade) and the CSF face force formed ON THE BLOCK
+(`σ κ_f ΔC/h` with the V4 rule on the block's faces) scattered **UNPACK_SUM** into three global
+face-force fields that `addCsfRhs` consumes in "block mode" (a sibling branch; the global-field
+mode is byte-identical when blocks are off). The face velocity gathered to the block is the
+projected `u^{n+1}` exactly as `advectVof` uses it. Momentum consistency is NOT in W2 (blocks are
+rated to ratio ~100 with motion, like V2a; W2b = the design for the union-field momentum
+sweeps). Gates: (1) **Hysing case 1 through the block path equals the global-field run** within
+1 % on max rise velocity and `y_c(3)` (both without `enable_vof_momentum`, quasi-2D 64×128×4);
+(2) a single 3-D rising bubble at Eo = 10, Mo = 1e-3 (ratio 100) against the Grace-diagram terminal
+velocity / Duineveld-class shape within 10 %; (3) **two bubbles head-on** (one rising, one held
+by a counter-flow or two rising in line): no numerical coalescence, film drains to one cell and
+the blocks stay two; (4) **`channel_18`**: transcribe TBFsolver's `channel_18` case
+(`/home/frankp/Codes/TBFsolver/channel_18`: read its input files for the domain, the 18 bubble
+seeds, Eo/Re/ratio, the wall BCs and the body force) to the block path at TBFsolver's resolution
+or the nearest power of two; run to a statistically steady state as far as the GPU allows; report
+the void-fraction profile across the channel and the mean liquid velocity profile against
+whatever TBFsolver's case directory ships (if it ships no reference data, report ours as the
+first datum and say so); (5) MPI np 1/2/4 at the reduction floor with bubbles cut by the ORB;
+(6) every existing VoF ctest bit-identical.
+
+Deliverables: the W1 pieces in `src/vof/block_container.hpp`/`block_exchange.hpp`, the block CSF
+mode, bindings, `tests/kokkos/test_vof_blocks.cpp` extended, MPI twin, `tests/study/vof_blocks_swarm.py`,
+`tests/study/vof_channel_18.py`, findings, CLAUDE.md.
+
+---
+
 ## WO-V7 — the pore-scale campaign (after WO-R2)  [OPUS runs, Fable/user interpret]
 
 Three cases, each a script under `tests/study/pore_scale/` and together one gallery page
