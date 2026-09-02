@@ -793,6 +793,7 @@ cutting the outlet plane, 40 coupled steps), host-openmp:
 |---|---|---|
 | `tests/kokkos` ctest | **30 / 30 PASS** | **30 / 30 PASS** |
 | `tests/kokkos_mpi` `vof|vardensity` (np 1/2/4) | `vof_bc_mpi` 3/3 PASS | **30 / 30 PASS** |
+| post-rebase onto `origin/main` (`b4c829a`, the Part II phase-change rungs) | **31 / 31 PASS** | **31 / 31 PASS**; MPI `vof_bc|vof_cutcell|vof_twophase|vardensity` **12 / 12 PASS** |
 | `tests/regression/sdflow_regression.py` | **PASS, `+0.00 %` on every metric of all three beds with identical iteration and step counts** (`zh_sphere` K 7.2997/7.3891/7.4162/7.4361/7.4404, order 2.29, K_inf 7.447; `random_spheres` order 2.19, k*_inf 0.0062362; `hollow_rings` order 1.38, k*_inf 0.017184) | — |
 
 ### Two defects found on the way, both fixed here
