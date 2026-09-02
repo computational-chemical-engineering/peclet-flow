@@ -40,9 +40,8 @@ endforeach()
 foreach(t cutcellmg_mpi telescope_mpi velocitymg_mpi sdflow_mpi sdflow_colocated_mpi redistribute_mpi graphamg_mpi
         multiphysics_mpi ghost_projection_mpi vardensity_mpi varmu_mpi bodyforce_ghost_mpi
         dragbeta_ghost_mpi vof_twophase_mpi vof_momentum_mpi vof_curvature_mpi
-        vof_surface_tension_mpi vof_cutcell_mpi vof_wetting_mpi vof_collocated_mpi)
-
-        vof_surface_tension_mpi vof_cutcell_mpi vof_bc_mpi)
+        vof_surface_tension_mpi vof_cutcell_mpi vof_wetting_mpi vof_collocated_mpi vof_bc_mpi
+        movingscene_advect_mpi)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${TPX_DIR}/include)
