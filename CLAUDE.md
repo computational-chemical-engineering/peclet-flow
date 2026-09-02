@@ -331,10 +331,11 @@ the achievable depth is set by the per-rank block, not the global grid.
 
 **Telescoping is the DEFAULT since 2026-09-02** (`PECLET_FLOW_TELESCOPE=0` / `set_pressure_telescope(False)`
 disables): when a level cannot coarsen in place, ORB siblings are merged onto fewer ranks and the
-hierarchy continues to 3³ on one rank (`docs/MG_TELESCOPING_PLAN.md`). One exception decided at
-hierarchy construction: a distributed variable-density run with an OUTFLOW takes the WO-R2 outflow
-*coefficient* path, which is not implemented across a telescope point (`setOpenness` throws), so such
-a run gets the in-place hierarchy with a stderr notice.
+hierarchy continues to 3³ on one rank (`docs/MG_TELESCOPING_PLAN.md`). The WO-R2 variable-density
+outflow *coefficient* (which lives on a ghost plane of each level) crosses a telescope point too:
+`teleGatherPlane` carries the high-side outflow plane into the merged stage with the inner cells and
+the coarse boundary coefficient is coarsened from the stage — gate `test_telescope_varrho_mpi`
+(telescope forced at level 1 vs in place: identical to the last digit, np 1/2/4).
 
 **That second gate is an implementation limit and it is the top open item at scale.** Coarse levels
 are required to be the fine decomposition `coarsened()` in place (so restrict/prolong stay purely

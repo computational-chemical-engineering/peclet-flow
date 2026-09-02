@@ -910,6 +910,18 @@ class CutcellMG {
   // level.
   // `fine` = the next FINER level (null on level 0). Only the outflow-coefficient path reads it.
   void applyBoundaryOpenness(Level& lv, Level* fine = nullptr) {
+    if (fine) {
+      CCField fo[3] = {fine->ox, fine->oy, fine->oz};
+      applyBoundaryOpennessFrom(lv, fo, fine->ext, fine->g, fine->ratio);
+    } else {
+      applyBoundaryOpennessFrom(lv, nullptr, C3{0, 0, 0}, 0, C3{1, 1, 1});
+    }
+  }
+  // `fo`/`fext`/`fg`/`fratio` describe the FINE openness this level coarsens its outflow
+  // coefficient plane from: the finer Level in place, or -- across a telescope point -- the merged
+  // stage buffers (Telescope::ox/oy/oz on T.mExt with T.g), whose high-side outflow plane
+  // teleGatherPlane carried over with the inner cells.
+  void applyBoundaryOpennessFrom(Level& lv, const CCField* fo, C3 fext, int fg, C3 fratio) {
     if (!hasBC_)
       return;
     B3 e{lv.ext.x, lv.ext.y, lv.ext.z};
@@ -932,12 +944,11 @@ class CutcellMG {
           // restore (level 0) or coarsen from the finer level's own restored plane.
           if (s == 0)
             continue;
-          if (fine == nullptr) {
+          if (fo == nullptr) {
             mgRestoreFacePlane(oa[a], CCConst(bcPlane_[a]), lv.ext, lv.g, a, 1);
           } else {
-            CCField fa[3] = {fine->ox, fine->oy, fine->oz};
-            mgCoarsenFacePlane(oa[a], CCConst(fa[a]), lv.ext, fine->ext, lv.g, fine->g, lv.inner,
-                               fine->ratio, a, 1);
+            mgCoarsenFacePlane(oa[a], CCConst(fo[a]), lv.ext, fext, lv.g, fg, lv.inner, fratio, a,
+                               1);
           }
         }
       }
@@ -992,6 +1003,7 @@ class CutcellMG {
       teleGather(lv_[0], lv_[0].ox, lv_[0].tele->ox);
       teleGather(lv_[0], lv_[0].oy, lv_[0].tele->oy);
       teleGather(lv_[0], lv_[0].oz, lv_[0].tele->oz);
+      teleGatherOutflowPlanes(lv_[0]);
     }
 #endif
     for (int L = 1; L < (int)lv_.size(); ++L) {
@@ -999,23 +1011,25 @@ class CutcellMG {
       Level& fin = lv_[L - 1];
 #ifdef PECLET_FLOW_MPI
       if (fin.tele) {
-        // WO-R2: the telescope stage gathers INNER cells only, so the fine high-side outflow face
-        // plane (a ghost index) does not survive the merge and the coarse boundary coefficient
-        // cannot be formed. Refused loudly rather than silently re-imposing 1.0 there.
-        if (outflowCoeff_)
-          throw std::runtime_error(
-              "CutcellMG::setOpenness: variable-density outflow coefficients are not implemented "
-              "across an MG telescope point (PECLET_FLOW_TELESCOPE / set_telescope) -- turn "
-              "telescoping off for two-phase open-boundary runs");
+        // Across a telescope point the fine openness is the merged STAGE (inner cells gathered by
+        // teleGather; the WO-R2 high-side outflow coefficient plane, a ghost index, gathered by
+        // teleGatherPlane), so the coarse boundary coefficient is coarsened from the stage exactly
+        // as the in-place path coarsens it from the finer level.
         Telescope& T = *fin.tele;
         coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(T.ox), CCConst(T.oy), CCConst(T.oz), c.ext,
                        T.mExt, c.g, T.g, c.inner, fin.ratio);
-      } else
+        fillOpenness(c);
+        CCField so[3] = {T.ox, T.oy, T.oz};
+        applyBoundaryOpennessFrom(c, so, T.mExt, T.g, fin.ratio);
+      } else {
 #endif
-      coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(fin.ox), CCConst(fin.oy), CCConst(fin.oz), c.ext,
-                     fin.ext, c.g, fin.g, c.inner, fin.ratio);
-      fillOpenness(c);  // periodic ghost openness (operator build reads the + neighbour face)
-      applyBoundaryOpenness(c, &fin);  // re-impose non-periodic boundary faces per coarse level
+        coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(fin.ox), CCConst(fin.oy), CCConst(fin.oz), c.ext,
+                       fin.ext, c.g, fin.g, c.inner, fin.ratio);
+        fillOpenness(c);  // periodic ghost openness (operator build reads the + neighbour face)
+        applyBoundaryOpenness(c, &fin);  // re-impose non-periodic boundary faces per coarse level
+#ifdef PECLET_FLOW_MPI
+      }
+#endif
       const double sx = 1.0 / (double)(c.cfac.x * c.cfac.x),
                    sy = 1.0 / (double)(c.cfac.y * c.cfac.y),
                    sz = 1.0 / (double)(c.cfac.z * c.cfac.z);
@@ -1033,6 +1047,7 @@ class CutcellMG {
         teleGather(c, c.ox, c.tele->ox);
         teleGather(c, c.oy, c.tele->oy);
         teleGather(c, c.oz, c.tele->oz);
+        teleGatherOutflowPlanes(c);
       }
 #endif
     }
@@ -1444,6 +1459,78 @@ class CutcellMG {
             hd((long)x + (long)y * T.mExt.x + (long)z * (long)T.mExt.x * T.mExt.y) =
                 q[(std::size_t)i + (std::size_t)j * sz.x + (std::size_t)k * sz.x * sz.y];
           }
+    }
+    Kokkos::deep_copy(dst, hd);
+  }
+  // WO-R2 outflow coefficient across a telescope point: the HIGH-side outflow coefficient of a
+  // level lives on the first ghost index beyond the inner block along the outflow axis (a plane
+  // teleGather's inner-only pack leaves behind). Gather that plane from the members touching the
+  // global +face into the merged stage buffer's own ghost plane, so the coarse level coarsens its
+  // boundary coefficient from the stage exactly as it would from a finer level in place.
+  void teleGatherOutflowPlanes(const Level& lv) {
+    if (!outflowCoeff_)
+      return;
+    CCField src[3] = {lv.ox, lv.oy, lv.oz};
+    CCField dst[3] = {lv.tele->ox, lv.tele->oy, lv.tele->oz};
+    for (int a = 0; a < 3; ++a)
+      if (bc_[2 * a + 1] == 3)
+        teleGatherPlane(lv, src[a], dst[a], a);
+  }
+  void teleGatherPlane(const Level& lv, CCField src, CCField dst, int a) {
+    Telescope& T = *lv.tele;
+    const int g = lv.g, b = (a + 1) % 3, c = (a + 2) % 3;
+    const int ext[3] = {lv.ext.x, lv.ext.y, lv.ext.z}, inn[3] = {lv.inner.x, lv.inner.y, lv.inner.z};
+    const long st[3] = {1, (long)lv.ext.x, (long)lv.ext.x * lv.ext.y};
+    const bool mine = touchesGlobalFace(lv, 2 * a + 1);
+    // pack my plane (ghost index ext[a]-g along a; inner ranges along b, c) if I touch the +face
+    std::vector<double> sb;
+    if (mine) {
+      auto hs = Kokkos::create_mirror_view(src);
+      Kokkos::deep_copy(hs, src);
+      sb.resize((std::size_t)inn[b] * inn[c]);
+      const long pa = (long)(ext[a] - g) * st[a];
+      for (int k = 0; k < inn[c]; ++k)
+        for (int j = 0; j < inn[b]; ++j)
+          sb[(std::size_t)j + (std::size_t)k * inn[b]] =
+              hs(pa + (long)(j + g) * st[b] + (long)(k + g) * st[c]);
+    }
+    // the root knows which members touch the face from their block boxes (replicated)
+    std::vector<int> counts, displs;
+    std::vector<double> rb;
+    const int gd[3] = {lv.gdim.x, lv.gdim.y, lv.gdim.z};
+    if (T.root) {
+      int disp = 0;
+      for (int m = 0; m < T.nMembers; ++m) {
+        const int mo[3] = {T.memO[m].x, T.memO[m].y, T.memO[m].z};
+        const int ms[3] = {T.memS[m].x, T.memS[m].y, T.memS[m].z};
+        const int n = (mo[a] + ms[a] == gd[a]) ? ms[b] * ms[c] : 0;
+        counts.push_back(n);
+        displs.push_back(disp);
+        disp += n;
+      }
+      rb.resize((std::size_t)disp);
+    }
+    MPI_Gatherv(sb.data(), (int)sb.size(), MPI_DOUBLE, T.root ? rb.data() : nullptr,
+                T.root ? counts.data() : nullptr, T.root ? displs.data() : nullptr, MPI_DOUBLE, 0,
+                T.groupComm);
+    if (!T.root)
+      return;
+    const int mext[3] = {T.mExt.x, T.mExt.y, T.mExt.z};
+    const long mst[3] = {1, (long)T.mExt.x, (long)T.mExt.x * T.mExt.y};
+    const int mog[3] = {T.mOg.x, T.mOg.y, T.mOg.z};
+    auto hd = Kokkos::create_mirror_view(dst);
+    Kokkos::deep_copy(hd, dst);
+    const long pa = (long)(mext[a] - T.g) * mst[a];
+    for (int m = 0; m < T.nMembers; ++m) {
+      if (counts[m] == 0)
+        continue;
+      const int mo[3] = {T.memO[m].x, T.memO[m].y, T.memO[m].z};
+      const int ms[3] = {T.memS[m].x, T.memS[m].y, T.memS[m].z};
+      const double* q = rb.data() + displs[m];
+      for (int k = 0; k < ms[c]; ++k)
+        for (int j = 0; j < ms[b]; ++j)
+          hd(pa + (long)(mo[b] - mog[b] + j + T.g) * mst[b] +
+             (long)(mo[c] - mog[c] + k + T.g) * mst[c]) = q[(std::size_t)j + (std::size_t)k * ms[b]];
     }
     Kokkos::deep_copy(dst, hd);
   }
