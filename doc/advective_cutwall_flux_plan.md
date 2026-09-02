@@ -222,14 +222,68 @@ complete).
   there used to be a large resolution-dependent excess. (Measured with a standalone copy of the
   page's own `blackburn` / `fre` cells; the page itself was not edited.)
 
-### Gate 6 — static-bed `sum A`
-Not re-measurable: `force_gate.py FORCE_ADVECT=1` returns NaN at N = 32/48/64/128 with
-`CutcellMG::solvePCG: preconditioner produced non-finite z`. **This is PRE-EXISTING and unrelated
-to A0** — the pre-A0 module `build_wop_cuda` (built 12:44 the same day) NaNs identically, the
-ablation `PECLET_FLOW_ADV_WALLVEL=0` reproduces it bit for bit, and A0 is structurally inert on a
-static scene (`hasMotion_` is false, so `advVelView` returns `CCConst(C[c].u)`). `FORCE_ADVECT=0`
-passes at 2.2e-15 / 3.3e-15. **Someone should bisect the advective leg of `force_gate.py` against
-the WO-M/WO-O/WO-P landings of 2026-08-31.**
+### Gate 6 — static-bed `sum A`  (RESOLVED 2026-09-02: the gate was mis-parameterised, not broken)
+Was: not re-measurable — `force_gate.py FORCE_ADVECT=1` returned NaN at N = 32/48/64/128 with
+`CutcellMG::solvePCG: preconditioner produced non-finite z`. **PRE-EXISTING and unrelated to A0**
+— the pre-A0 module `build_wop_cuda` (built 12:44 the same day) NaNs identically, the ablation
+`PECLET_FLOW_ADV_WALLVEL=0` reproduces it bit for bit, and A0 is structurally inert on a static
+scene (`hasMotion_` is false, so `advVelView` returns `CCConst(C[c].u)`). `FORCE_ADVECT=0` passes
+at 2.2e-15 / 3.3e-15.
+
+**The bisect this section asked for was run, and it is NEGATIVE.** It is not the WO-M/WO-O/WO-P
+landings of 2026-08-31 and it is not a regression at all. `0706196` (2026-08-29, *scene layer
+retrofitted onto core SceneQueryDevice + native periodicity*) is the OLDEST commit whose bindings
+accept the probe's `set_scene(..., periodic=True)` call, and it goes non-finite at N=24 on **the
+very same step 78** as current main — as does `f61dfaa`, which predates every WO-M/O/P commit.
+Iteration counts are irrelevant (`set_pressure_solver_params(25 -> 400)` and
+`set_velocity_solver_params(100 -> 1000)` leave the blow-up on the identical step at N=32), so it
+is not a solver-convergence artefact either.
+
+**Mechanism — the semi-implicit stability limit, hit by the probe's own parameters.**
+`set_advection()` leaves the advective term EXPLICIT: it is assembled into the RHS lagged at the
+Picard iterate (`buildRhs`, `src/flow_ibm.hpp:3600-3620`, `const bool adv = advect_ && !pureFou`;
+`implicitAdv()` at `src/flow_ibm.hpp:2138` is false unless `set_implicit_advection` is called, and
+`hydro_force_torque_reaction` **refuses** that path at `src/flow_ibm.hpp:2998-3005`). The step is
+therefore the textbook semi-implicit one — implicit viscous, explicit advection — whose linear
+amplification for a mode `k` is `g = (1/dt - i u.k)/(1/dt + nu k^2)`, i.e. stable iff
+`|u.k|^2 <= 2 nu k^2/dt + (nu k^2)^2`; at large `dt` that is just the CELL REYNOLDS NUMBER
+`Re_h = rho |u| h / mu <~ pi`.
+
+The probe held `f = 1e-3`, `mu = 0.1`, `dt = 60` fixed while sweeping N — but this lattice's
+permeability in *cell* units grows like `N^2`, so `|u|` and `Re_h` grow like `N^2` with it. Measured
+Stokes `max|u|` (~ `0.079 (N/16)^2` to within 4 %): 0.0812 / 0.178 / 0.315 / 0.706 / 1.254 at
+N = 16/24/32/48/64, i.e. `Re_h` = **0.81 / 1.78 / 3.15 / 7.06 / 12.54**. N=16 sits a factor 4 below
+the limit (and is stable at every `dt` tried, up to 240); every N >= 24 is at or past it. The
+divergence is a bulk-pore mode, not a cut-cell one — at N=24 the fastest-growing cell sits at
+signed distance +5 h from the nearest grain — and the criterion is quantitatively confirmed by the
+`dt` scan: N=32 (`Re_h = 3.15 ~ pi`) is unstable at `dt` = 8/15/60 and stable at `dt` <= 1, exactly
+the small-`dt` branch `dt <= 2 nu k^2 / |u.k|^2 ~ 2` predicts; N=16 (`Re_h = 0.81 < pi`) is stable
+at every `dt`. Raising the Picard count makes it worse, not better (`set_outer_iterations(10)` at
+N=32/dt=15 moves the blow-up from step 67 to step 18) — the signature of a diverging lagged-
+advection fixed point. `set_implicit_advection(True)` removes the instability outright at
+N=24/32/64, but the reaction budget refuses that path, so it is not available to this gate.
+
+**No solver change is indicated** — the limit is a property of the scheme. The fix is in the probe:
+`force_gate.py` now scales the driving force as `f = FORCE_F * (16/N)^2` **on the advective leg
+only** (`FORCE_F_SCALE=0` restores the old, unstable f; `FORCE_ADVECT=0` is byte-unchanged, `f`
+stays `FORCE_F`). That pins `Re_h` at the N=16 value for every rung and lets `Re_d` grow like N, so
+the default ladder now lands near the plan's "Re ~ 30" target instead of diverging. The log line
+carries `f` and `Re_h` so the margin is visible.
+
+Gate 6 result with that scaling, `FORCE_ADVECT=1`, RTX 5080 / nvidia-cuda, flow `41997eb`:
+
+| N | f | Re_h | Re_d | reaction identity `ratio-1` |
+|---|---|---|---|---|
+| 16 | 1.0000e-03 | 0.80 | 3.01 | **2.220e-16** |
+| 24 | 4.4444e-04 | 0.78 | 4.29 | **1.332e-15** |
+| 32 | 2.5000e-04 | 0.77 | 5.58 | **8.882e-16** |
+| 64 | 6.2500e-05 | 0.74 | 10.31 | **6.661e-15** |
+| 128 | 1.5625e-05 | 0.69 | 18.61 | **9.770e-15** |
+
+`GATE PASS [reaction identity to solver residual at every N]` — the same 1e-15 class as the
+`FORCE_ADVECT=0` leg, so the R0 advective term IS in the budget and A0's `sum A` is now measurable
+on a static bed. (`tests/regression/sdflow_regression.py --build build_nan`: **PASS**, +0.00 % on
+every metric — no flow source was touched, only this doc.)
 
 ### Gate 7 — distributed
 The 60 MPI ctests are static/advection-off, and `mpi_scene_gate.py` sets `set_advection(False)`, so
