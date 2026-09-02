@@ -105,6 +105,18 @@ endmacro()
 # Sibling header include dir (core / morton). Returns the sibling checkout if present, else a
 # FetchContent-fetched source tree's include/ (header-only — declared but not built).
 function(peclet_sibling_include repo tag sibling_reldir outvar)
+  # Dev override for a sibling checked out somewhere else than `../<repo>` -- in particular a git
+  # WORKTREE, which is how the suite runs concurrent agents (`git worktree add ../core-w0`). Pass
+  # the repo ROOT (`/include` is appended):
+  #   -DPECLET_SIBLING_PECLET_CORE=/path/to/suite/core-w0
+  # Unset (the default) it resolves exactly as before, so every existing build is unchanged.
+  string(TOUPPER "${repo}" _ovr)
+  string(REPLACE "-" "_" _ovr "${_ovr}")
+  if(PECLET_SIBLING_${_ovr})
+    set(${outvar} "${PECLET_SIBLING_${_ovr}}/include" PARENT_SCOPE)
+    message(STATUS "[peclet] ${repo} headers from PECLET_SIBLING_${_ovr} -> ${PECLET_SIBLING_${_ovr}}/include")
+    return()
+  endif()
   set(_local "${CMAKE_CURRENT_SOURCE_DIR}/${sibling_reldir}/include")
   if(EXISTS "${_local}" AND NOT PECLET_VENDOR_DEPS)
     set(${outvar} "${_local}" PARENT_SCOPE)
