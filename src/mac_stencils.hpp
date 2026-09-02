@@ -67,6 +67,23 @@ inline void diffSmoothColor(SField c, SConst b, I3 e, I3 og, int g, double beta,
       });
 }
 
+// Residual r = b - A c of the constant-coefficient folded diffusion operator over the inner
+// cells (both colours): A c = (Ac + dcorr) c - beta * sum(neighbours). The residual-based
+// momentum stop for the all-fluid domain-BC path (velSweepLoop's `resid` functor).
+inline void diffResidual(SField r, SConst c, SConst b, I3 e, int g, double beta, double Ac,
+                         SConst dcorr) {
+  SExec space;
+  const bool hasD = (dcorr.extent(0) != 0);
+  using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::diff_resid", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
+        const double sum = c(i + sx) + c(i - sx) + c(i + sy) + c(i - sy) + c(i + sz) + c(i - sz);
+        r(i) = b(i) - ((Ac + (hasD ? dcorr(i) : 0.0)) * c(i) - beta * sum);
+      });
+}
+
 // diffSmoothColor + fused max|Δ| reduction over the swept colour (see ibmRbgsStencilColorDu):
 // runs as the second colour of a sweep when the momentum tolerance stop is active.
 inline double diffSmoothColorDu(SField c, SConst b, I3 e, I3 og, int g, double beta, double Ac,

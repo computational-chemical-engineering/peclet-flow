@@ -228,6 +228,12 @@ static void bind_solver(nb::module_& m, const char* name) {
            "near-steady step is already noise and then costs the whole sweep cap to shrink by "
            "1e-3). Stencil paths and every velocity-MG mode; the const-coefficient domain-BC "
            "smoother keeps the update criterion.")
+      .def("velocity_residual_tolerance", &S::velocityResidualTolerance)
+      .def("set_velocity_multigrid_auto", &S::setVelocityMultigridAuto, nb::arg("cells_per_rank"),
+           "AUTO velocity-MG rule (when set_velocity_multigrid was never called): under MPI use the "
+           "V-cycle once the global cells per rank fall below this (default 65536; 0 = never). Env "
+           "PECLET_FLOW_VMG_AUTO_CELLS.")
+      .def("velocity_multigrid_active", &S::velocityMultigridActive)
       .def("last_momentum_residual", &S::lastMomentumResidual,
            "max over components of max|r|/max|b| at exit of the last step's momentum solves "
            "(residual mode only; -1 otherwise).")

@@ -52,12 +52,13 @@ static void configure(IbmSolver& s, bool vmg) {
     s.setDomainBc(f, 1, 0, 0, 0);  // walls
   s.setPressureLevels(4);
   s.setPressurePcg(true, 300, 1e-10);
+  // Both solvers to the same TIGHT residual (the solver default, 1e-5, would pin the solution
+  // only to ~5e-4 on this operator -- rows span 1e3 -- and the fixed-point gate needs better).
+  s.setVelocityResidualTolerance(1e-10);
   if (vmg) {
-    s.setVelocityMultigrid(true, 4, 40);    // up to 40 V-cycles
-    s.setVelocityTolerance(1e-9, 1);        // update tolerance shared by RB-GS and the V-cycles
+    s.setVelocityMultigrid(true, 4, 60);    // up to 60 V-cycles
   } else {
     s.setVelocityIterations(20000);         // RB-GS to the same tolerance
-    s.setVelocityTolerance(1e-9, 1);
   }
 }
 

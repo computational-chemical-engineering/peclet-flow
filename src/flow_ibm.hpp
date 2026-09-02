@@ -177,6 +177,12 @@ class Solver {
   // stencil paths (IBM / cut-cell domain-BC RB-GS, every velocity-MG mode); the const-coefficient
   // domain-BC smoother keeps the update criterion.
   void setVelocityResidualTolerance(double rtol) { velResTol_ = rtol > 0.0 ? rtol : 0.0; }
+  // Velocity-MG AUTO rule (applies when set_velocity_multigrid was never called): under MPI, once
+  // the block is small enough that the momentum RB-GS is halo-latency-bound, take the V-cycle
+  // instead (1-2 cycles/component == 2-4 exchanges against 8-9 sweeps x 2). Measured crossover on
+  // the FoxBerry bed: RB-GS 2.91 s vs MG 3.32 s/step at 147k cells/rank, MG 0.834 vs 0.844 at
+  // 37k; threshold PECLET_FLOW_VMG_AUTO_CELLS (default 65536 cells per rank, 0 = never).
+  void setVelocityMultigridAuto(long cellsPerRank) { vmgAutoCells_ = cellsPerRank; }
   double velocityResidualTolerance() const { return velResTol_; }
   // max over components of max|r|/max|b| at exit of the last step's momentum solves (residual
   // mode only; -1 otherwise).
@@ -209,9 +215,11 @@ class Solver {
   // built at geometry time.
   void setVelocityMultigrid(bool on, int levels, int vcycles) {
     useVelocityMg_ = on;
+    vmgExplicit_ = true;  // an explicit choice disables the AUTO rule
     vmgLevels_ = levels < 1 ? 1 : levels;
     vmgVcycles_ = vcycles < 1 ? 1 : vcycles;
   }
+  bool velocityMultigridActive() const { return useVelocityMg_; }
   // Enable the agglomerated GraphAMG bottom solve in the pressure MG: the coarsest level is solved
   // by a mesh-agnostic algebraic multigrid on the operator gathered to rank 0 --
   // decomposition-agnostic, so multilevel convergence works under a WEIGHTED ORB (where the
@@ -1306,6 +1314,23 @@ class Solver {
     // explicit reflection ghosts (refreshed each smoother sweep), so it needs no fold.
     if (hasBc_ && !Grid::collocated)
       setupBcDiffusion();
+#ifdef PECLET_FLOW_MPI
+    // AUTO: pick the V-cycle when the per-rank block is small (see setVelocityMultigridAuto). The
+    // decision uses the GLOBAL cells / ranks, so every rank agrees without communication. Only on
+    // the validated operator modes: IBM-periodic, all-fluid domain-BC (explicit advection), mixed.
+    if (!vmgExplicit_ && distributed_ && vmgAutoCells_ > 0) {
+      int np = 1;
+      MPI_Comm_size(comm_, &np);
+      const double perRank = (double)gnx_ * gny_ * gnz_ / (double)np;
+      const bool eligible = !varProps_ && !varRho_ && !hasDrag_ && !porous_ && !Grid::collocated &&
+                            (!hasBc_ || hasSolid_ || !implicitFou_);
+      useVelocityMg_ = eligible && perRank < (double)vmgAutoCells_;
+      if (useVelocityMg_) {
+        vmgLevels_ = 3;
+        vmgVcycles_ = 40;
+      }
+    }
+#endif
     if (useVelocityMg_) {  // velocity-MG hierarchy: IBM (staircase/upwind), domain-BC
                            // (const-coeff) or mixed (staircase + folds) mode
 #ifdef PECLET_FLOW_MPI
@@ -3956,6 +3981,17 @@ class Solver {
   }
 
   // residual functor + max|b| for the stencil paths of component c (see velSweepLoop)
+  // Common tail of a residual evaluation: the held normal-Dirichlet face is imposed, not solved
+  // (excluded), remember max|A u| for the convergence scale, return max|r|.
+  double finishResidual(int c) {
+    if (hasBc_) {
+      const int t = bc_[2 * c];
+      if ((t == 1 || t == 2) && touchesGlobalFace(2 * c))
+        zeroPlane(velRes_, e_, c, G);
+    }
+    lastAxNorm_ = peclet::flow::maxAbsDiffInner(CCConst(C[c].b), CCConst(velRes_), e_, G);
+    return maxAbsInner(CCConst(velRes_), e_, G);
+  }
   std::function<double()> stencilResidual(int c, bool exchange = false) {
     if (velResTol_ <= 0.0)
       return nullptr;
@@ -3971,13 +4007,20 @@ class Solver {
       residualVarPin(velRes_, CCConst(C[c].u), CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
                      FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT),
                      CCConst(C[c].mask), e_, G);
-      if (hasBc_) {  // the held normal-Dirichlet face is imposed, not solved
-        const int t = bc_[2 * c];
-        if ((t == 1 || t == 2) && touchesGlobalFace(2 * c))
-          zeroPlane(velRes_, e_, c, G);
-      }
-      lastAxNorm_ = peclet::flow::maxAbsDiffInner(CCConst(C[c].b), CCConst(velRes_), e_, G);
-      return maxAbsInner(CCConst(velRes_), e_, G);
+      return finishResidual(c);
+    };
+  }
+  // The all-fluid domain-BC smoother's operator (constant coefficients + the boundary fold).
+  std::function<double()> constCoeffResidual(int c, double beta, double Ac) {
+    if (velResTol_ <= 0.0)
+      return nullptr;
+    if (velRes_.extent(0) != n_)
+      velRes_ = CCField("velRes", n_);
+    return [this, c, beta, Ac]() {
+      const I3 e{e_.x, e_.y, e_.z};
+      diffResidual(velRes_, CCConst(C[c].u), CCConst(C[c].b), e, G, beta, Ac,
+                   CCConst(bcDcorr_[c]));
+      return finishResidual(c);
     };
   }
   double stencilBnorm(int c) {
@@ -4086,7 +4129,8 @@ class Solver {
           [&](int col) {
             return diffSmoothColorDu(C[c].u, CCConst(C[c].b), e, og, G, beta, Ac, col,
                                      CCConst(bcDcorr_[c]));
-          });
+          },
+          constCoeffResidual(c, beta, Ac), stencilBnorm(c));
       return;
     }
     if (useVelocityMg_) {  // IBM velocity multigrid: fine = sharp As_[c]; coarse op depends on the
@@ -6007,7 +6051,7 @@ class Solver {
   double velTol_ = 0.0;         // momentum tolerance stop (0 = legacy fixed-count loop)
   int velMinIters_ = 2;
   long lastMomentumSweeps_ = 0;  // sweeps actually run last step (summed over components/Picard)
-  double velResTol_ = 0.0;         // residual-based momentum stop (0 = off, update criterion)
+  double velResTol_ = 1e-5;        // residual-based momentum stop, DEFAULT since 2026-09-02 (0 = update criterion)
   double lastMomentumResid_ = -1.0;  // max_c max|r|/max|b| at exit (residual mode)
   CCField velRes_;                 // scratch for the stencil-path residual
   double lastAxNorm_ = 0.0;        // max|A u| of the last residual evaluation (scale)
@@ -6093,6 +6137,11 @@ class Solver {
   int nStar_ = 0;
   double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
+  bool vmgExplicit_ = false;  // set_velocity_multigrid was called (AUTO rule off)
+  long vmgAutoCells_ = [] {   // AUTO threshold, cells per rank (0 = never)
+    const char* e = std::getenv("PECLET_FLOW_VMG_AUTO_CELLS");
+    return e ? std::atol(e) : 65536L;
+  }();
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
   VelocityMG vmg_;
   CCField vmgTheta_, vmgClean_;
