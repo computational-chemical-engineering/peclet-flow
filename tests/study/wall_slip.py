@@ -10,16 +10,10 @@ Two analytically exact steady profiles over FLAT SDF walls, both driven without 
                 closure (which fits a quadratic through u_m, u_c, u_g and imposes the Robin
                 condition at the crossing) must reproduce it to the storage floor.
 
-  `couette`     the work order's linear profile, and the reason it is NOT the gate here: it needs
-                a MOVING wall, and this solver has none that is both static-geometry and
-                tangential. Measured (this script, `couette`): a type-1 domain-BC wall given
-                `set_domain_bc(5, 1, U, 0, 0)` and a type-2 inflow face given a purely TANGENTIAL
-                velocity both leave the field at exactly 0 -- the tangential component of a
-                domain-face velocity is not imposed. The alternative, a translating IBM body,
-                changes the geometry every step and would confound the closure it is meant to
-                test. The slip Poiseuille above is strictly STRONGER: it is exact on a quadratic
-                (hence on any linear profile), and it exercises the slip at TWO walls with
-                different crossing fractions (theta = 0.25 and 0.75) at once.
+  `couette`     the work order's own gate: an SDF wall with slip at z0 and the +z domain face
+                driven at U (as an INFLOW face -- a type-1 domain WALL ignores its tangential
+                velocity, measured), giving the linear profile
+                    u(z) = U (z - z0 + lambda) / (H + lambda),   H = nz - z0.
 
   `floor`       the poiseuille case over a lambda ladder down to 1e-10, to MEASURE the float
                 storage floor below which the Robin datum is indistinguishable from no-slip
@@ -93,24 +87,29 @@ def poiseuille(nz, z0, z1, lam, steps=4000, verbose=True):
                 div=s.max_open_divergence_projected(), u_slip=us, steps=n)
 
 
-def couette(nz, z0, lam, U=1e-2, steps=6000):
-    """SDF wall (slip) at z0, domain-BC wall moving at U on the +z face.
+def couette(nz, z0, lam, U=1.0, steps=200):
+    """The work order's gate 1: plane COUETTE over a flat SDF wall carrying the Navier slip.
 
-    KEEPS FAILING BY CONSTRUCTION: the tangential velocity of a domain-face BC is not imposed by
-    this solver (a plain channel with `set_domain_bc(4, 1, 0,0,0)` / `set_domain_bc(5, 1, U,0,0)`
-    and no solid at all stays identically 0 after 400 steps, and so does the same face set to
-    inflow type 2 with a purely tangential velocity). Kept as the RECORD of that measurement.
+    The bottom boundary is an SDF wall at `z0` with slip lambda; the top is the +z DOMAIN face
+    driven at U.  A type-1 domain wall IGNORES its tangential velocity (measured: a plain channel
+    with `set_domain_bc(5, 1, U, 0, 0)` stays identically 0 after 400 steps) -- the moving lid has
+    to be an INFLOW face (type 2) whose velocity is purely tangential, which is what
+    `tests/kokkos_mpi/test_varmu_mpi.cpp` uses.  Exact steady Stokes profile:
+
+        u(z) = U (z - z0 + lambda) / (H + lambda),    H = nz - z0
+
+    (no-slip at the lid, Navier slip at the SDF wall), a LINEAR profile, so the closure has to be
+    exact on it.
     """
-    z1 = float(nz)                      # the +z domain face IS the moving wall
-    H = z1 - z0
+    H = float(nz) - z0
     s = pf.Solver(NX, NY, nz)
     s.set_rho(1.0)
     s.set_mu(MU)
-    s.set_dt(50.0)
+    s.set_dt(100.0)
     s.set_advection(False)
-    s.set_domain_bc(5, 1, U, 0.0, 0.0)      # +z: wall moving at U in x
-    s.set_pressure_multigrid(True, levels=3)
-    s.set_pressure_solver_params(400)
+    s.set_domain_bc(4, 1, 0.0, 0.0, 0.0)          # -z: wall, buried in the solid
+    s.set_domain_bc(5, 2, U, 0.0, 0.0)            # +z: the moving lid
+    s.set_pressure_pcg(True, 400, 1e-12)
     s.set_velocity_solver_params(400)
     z = (np.arange(nz) + 0.5)[None, None, :]
     d = np.broadcast_to(z - z0, (NX, NY, nz)).astype(float).copy()
@@ -125,7 +124,8 @@ def couette(nz, z0, lam, U=1e-2, steps=6000):
     err = np.abs(u[fluid] - ue[fluid]).max()
     print(f"  lambda {lam:<10.4g} H {H:g}  steps {n:5d} (dU {dd:.2e})  "
           f"max|u - u_exact| {err:.4e}  rel {err/U:.4e}   "
-          f"u(wall,exact) {U*lam/(H+lam):.6e}")
+          f"u(wall,exact) {U*lam/(H+lam):.6e}  u(first fluid cell) {u[fluid][0]:.8e} "
+          f"vs exact {ue[fluid][0]:.8e}   press {s.last_pressure_iterations()}")
     return dict(lam=lam, err=err, rel=err / U)
 
 
@@ -146,11 +146,11 @@ def main():
                 base = r
         print(f"  sandwich cells (must be 0,0,0): {base['sandwich']}, "
               f"max|div| {base['div']:.2e}, pressure iterations {base['iters']}")
-    if which == "couette":   # not part of `all`: see the docstring — it cannot be driven
+    if which in ("couette", "all"):
         print("\n" + "=" * 96)
         print(f"GATE 1b  slip COUETTE, SDF wall at z = {z0}, +z domain wall moving at U")
         print("=" * 96)
-        for lam in (0.0, 0.05, 0.1, 0.3):
+        for lam in (0.0, 0.02, 0.05, 0.1, 0.3, 0.5):
             couette(nz, z0, lam)
     if which in ("floor", "all"):
         print("\n" + "=" * 96)

@@ -350,11 +350,12 @@ def cap_colour(nx, ny, nz, cx, cy, zw, R, theta_deg=90.0):
 
 
 def g2_spread(theta_e=30.0, slip=0.1, steps=1500, probe=50, nx=64, nz=40, R=12.0, zw=4.25,
-              sigma=1.0, oh=0.1, dynamic=True):
+              sigma=1.0, oh=0.1, dynamic=True, wall_slip=False):
     mu = oh * math.sqrt(1.0 * sigma * 2.0 * R)
     print(f"\n=== G2  SPREADING DROP vs Cox-Voinov — D/dx {2*R:.0f}, grid {nx}x{nx}x{nz}, wall "
           f"z = {zw}, theta_e = {theta_e}, lambda = {slip} cells, sigma {sigma}, mu {mu:.4f} "
-          f"(Oh {oh}), {steps} steps, dynamic angle {'ON' if dynamic else 'OFF (static control)'}")
+          f"(Oh {oh}), {steps} steps, dynamic angle {'ON' if dynamic else 'OFF (static control)'}"
+          f", momentum Navier slip {'ON (WO-V6b)' if wall_slip else 'OFF'}")
     z = (np.arange(nz) + 0.5)[None, None, :]
     sdf = np.asfortranarray(
         np.broadcast_to(np.minimum(z - zw, (nz - zw) - z), (nx, nx, nz)).astype(float))
@@ -370,6 +371,8 @@ def g2_spread(theta_e=30.0, slip=0.1, steps=1500, probe=50, nx=64, nz=40, R=12.0
         s.set_contact_angle_dynamic(theta_e, slip, mu, sigma)
     else:
         s.set_contact_angle(theta_e)
+    if wall_slip:                    # WO-V6b: the SAME lambda in the momentum wall closure
+        s.set_wall_slip_length(slip)
     eps = s.vof_geometry(0)
     ix = nx // 2
     hist = []
@@ -444,7 +447,7 @@ def g2_spread(theta_e=30.0, slip=0.1, steps=1500, probe=50, nx=64, nz=40, R=12.0
 # ---------------------------------------------------------------------------------- G3 dynamics
 def g3_rise(theta_e=30.0, slips=(0.05, 0.3), steps=1500, nx=96, ny=4, nz=112, w=16.0,
             plate=8.0, dg=3.0e-3, sigma=1.0, mu=0.2, ratio=10.0, datum=28.0, zp=(12.0, 100.0),
-            static_control=True):
+            static_control=True, wall_slip=False, probe=None, lw=False):
     """G3-dynamics: the same plate scene from a FLAT interface, so the contact line has to travel.
     The static equilibrium level difference is Jurin's, EXACTLY (see g3_static), so the gate is the
     final height against it; the damping class (asymptotic vs oscillatory) is the second half of
@@ -475,10 +478,12 @@ def g3_rise(theta_e=30.0, slips=(0.05, 0.3), steps=1500, nx=96, ny=4, nz=112, w=
             s.set_contact_angle(theta_e)
         else:
             s.set_contact_angle_dynamic(theta_e, sl, mu, sigma)
+        if wall_slip and sl is not None:      # WO-V6b: the SAME lambda in the momentum closure
+            s.set_wall_slip_length(sl)
         eps = s.vof_geometry(0)
         v0 = s.vof_diagnostics()["volume"]
         dt, maxit, capped, trace, tend = relax(
-            s, steps, probe=max(1, steps // 15),
+            s, steps, probe=probe if probe else max(1, steps // 15),
             cb=lambda q: level_of(q.get_vof(), eps, xin) - level_of(q.get_vof(), eps, xout))
         h = [v for _, _, v in trace]
         final, peak = h[-1], max(h)
@@ -496,6 +501,26 @@ def g3_rise(theta_e=30.0, slips=(0.05, 0.3), steps=1500, nx=96, ny=4, nz=112, w=
         print(f"     dV/V {abs(d['volume']-v0)/v0:.2e}  iters {maxit} (capped {capped})  "
               f"t_end {tend:.1f}  max|u| {max_u(s):.2e}")
         print("     h(t): " + " ".join(f"{t:.0f}:{v:.2f}" for _, t, v in trace))
+        if lw:
+            # GATE 4 (WO-V6b): the Lucas-Washburn early-time law h^2 = (sigma w cos(theta)/(3 mu)) t
+            # for a slot of width w.  Gravity is neglected in that law, so the fit window is the
+            # part of the trace with h <= 0.4 * the Jurin equilibrium (where the hydrostatic term
+            # is <= 40 % of the capillary drive) and h >= 2 cells (below that the meniscus is not
+            # yet formed).  The slope of h^2 against t is the measured coefficient.
+            k_lw = sigma * w * math.cos(math.radians(theta_e)) / (3.0 * mu)
+            pts = [(t, v) for _, t, v in trace if 2.0 <= v <= 0.4 * ref]
+            if len(pts) >= 3:
+                tt = np.array([t for t, _ in pts])
+                hh = np.array([v for _, v in pts]) ** 2
+                k = float(np.polyfit(tt, hh, 1)[0])
+                print(f"     LUCAS-WASHBURN: d(h^2)/dt measured {k:.4g} vs "
+                      f"sigma w cos(theta)/(3 mu) = {k_lw:.4g}  "
+                      f"({100*(k/k_lw-1):+.1f} %, gate 20 %)  "
+                      f"{'PASS' if abs(k/k_lw - 1) <= 0.20 else 'FAIL'}   "
+                      f"[{len(pts)} points, h in {pts[0][1]:.2f}..{pts[-1][1]:.2f} cells]")
+            else:
+                print(f"     LUCAS-WASHBURN: only {len(pts)} trace points in the window "
+                      f"h in [2, {0.4*ref:.1f}] cells — the rise never got there")
 
 
 # ------------------------------------------------------------------------------------- G4 incline
@@ -586,6 +611,30 @@ if __name__ == "__main__":
             print(f"  lambda {res[i-1][0]} -> {res[i][0]}: d(slope) measured {d_meas:+.3f} vs "
                   f"9 dln(1/lambda) = {d_pred:+.3f}  ({100*(d_meas/d_pred-1):+.1f} %, gate 25 %)  "
                   f"{'PASS' if abs(d_meas/d_pred - 1) <= 0.25 else 'FAIL'}")
+    if "slipsweep_v6b" in which:
+        # WO-V6b gate 3: the SAME sweep with the momentum-side Navier slip ON, so the resolved
+        # hydrodynamics between the cell size and the contact radius can supply the part of
+        # 9 ln(a/lambda) that the band fill alone could not (WO-V6 finding 7).
+        print("\n=== G2b/V6b  the SLIP SENSITIVITY with the MOMENTUM Navier closure ON")
+        res = []
+        for sl in (0.02, 0.1, 0.5):
+            sp, wt, am = g2_spread(slip=sl, steps=800, probe=50, wall_slip=True)
+            res.append((sl, sp, wt, am))
+        print("\n  lambda   fitted slope   9 ln(a/lambda)   difference")
+        for sl, sp, wt, am in res:
+            print(f"  {sl:6.2f}   {sp:12.3f}   {wt:14.3f}   {sp-wt:+10.3f}")
+        for i in range(1, len(res)):
+            d_meas = res[i][1] - res[i - 1][1]
+            d_pred = 9.0 * math.log(res[i - 1][0] / res[i][0])
+            print(f"  lambda {res[i-1][0]} -> {res[i][0]}: d(slope) measured {d_meas:+.3f} vs "
+                  f"9 dln(1/lambda) = {d_pred:+.3f}  ({100*(d_meas/d_pred-1):+.1f} %, gate 25 %)  "
+                  f"{'PASS' if abs(d_meas/d_pred - 1) <= 0.25 else 'FAIL'}")
+    if "lw" in which:
+        # WO-V6b gate 4: Lucas-Washburn on the repaired plate scene, momentum slip ON vs OFF.
+        g3_rise(steps=400 if quick else 1200, slips=(0.05, 0.3), probe=20, lw=True,
+                wall_slip=False, static_control=True)
+        g3_rise(steps=400 if quick else 1200, slips=(0.05, 0.3), probe=20, lw=True,
+                wall_slip=True, static_control=False)
     if "rise" in which:
         g3_rise(steps=800 if quick else 1500)
     if "incline" in which:
