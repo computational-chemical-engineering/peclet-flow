@@ -1363,7 +1363,9 @@ the round-off of the SUM.
 
 P0a and P1 are **bitwise at every area mode** — the sheet is a pure local stencil on the colour
 block with a fixed-order gather and no atomic scatter, so it is decomposition-independent by
-construction. **The P2 row improves by eleven orders**, which is a second thing worth recording: that
+construction. (The wider `tests/kokkos_mpi` regression battery at the shipped default was still
+running when this entry was written; nothing in it can reach the new code, which is unreachable
+below `set_phase_change_area(4)`.) **The P2 row improves by eleven orders**, which is a second thing worth recording: that
 scene's known distributed sensitivity comes from the red–black energy solve giving the MYC normal a
 ~1e-8 transverse component, and a per-cell area is LINEAR in that normal while the joined sheet —
 built from `C = ½` crossings — is not. So mode 6/7 makes the sucking interface bitwise across np as
