@@ -593,6 +593,23 @@ Five things this rung paid for, all measured (`doc/vof_workorders_v5.md`, WO-Q f
   the open fluid, ~20× the V4 free-droplet 2.6e-5 at the same D/Δ. WO-S replaces only the pass-1
   rule with the θ-consistent one.
 
+**Navier slip in the cut-cell wall closure (WO-V6b).** `set_wall_slip_length(lambda_cells)`
+(default 0 = no-slip, a guarded early-out that is bit-identical) replaces the tangential Dirichlet
+datum of the RS cut-cell closure by the Robin datum `u_t(0) = λ u_t(d)/(d + λ)` — the same
+quadratic closure polynomials with `D += λ(1+2θ)`, `X += λ(1−2θ)`, `K += 4λθ`, no stencil change;
+the wall-normal component stays Dirichlet. Measured: the slip Poiseuille profile exact to the
+closure's float floor (+2.8e-6 on the slip increment; the closure computes in float, so λ below
+~1e-7 cells is indistinguishable from no-slip); MPI np 1/2/4 bitwise at np 1. It is the velocity
+half of the dynamic contact line (`set_contact_angle_dynamic` shares the λ value): the
+macroscopic Cox–Voinov slope now responds to λ within 22 % of the model, but the contact-line
+MOBILITY in a slot is still ~175× below Lucas–Washburn — the bottleneck is in the wetting band,
+not the wall condition (VOF_PLAN §13 item 7, V6c). Same commit: `ibmSolidMask` now classifies a
+velocity DOF with `sdf == 0` as WALL (`<= 0`, consistent with `ibmIsCut`, `ibmCleanFluidMask` and
+the face openness) — a wall exactly on a cell face or on a cell-centre plane used to leave an
+unconstrained velocity unknown on the wall and made driven two-phase runs diverge silently
+(WO-V7); the only shipped test whose output moved is `vof_cutcell` (its wall-band spurious
+current 0.788 → 0.005).
+
 **Static contact angle on SDF solids (rung V5b, WO-S).** `set_contact_angle(theta_deg)` (or
 `set_contact_angle_field`) replaces **pass 1 only** of the V5a solid-band fill by the volume
 fractions of the plane that continues the fluid-side interface into the solid at the prescribed
