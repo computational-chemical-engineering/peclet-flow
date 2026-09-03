@@ -1361,8 +1361,9 @@ Scriven scene moves the interface ~0.18 cells per step at R = 6…20 — so the 
 = 2.2 %. Recomputed on the same field at the same time (`vof_interface_area()` after the step, now
 printed as `A_end` beside it), the run's sheet reads **+0.043 % (Ja 0.5) / +0.041 % (Ja 2)** of
 4πR², and the radius it implies tracks the liquid-volume radius to 0.02 pp. The tell was already in
-WO-P3d's printed table: the last row of every run, whose `dt` is the leftover `t_e − t`, reads
-−0.03 %. **Any diagnostic filled at the head of a step must be quoted against a state from the head
+WO-P3d's printed table: the ratio is proportional to `dt`, so the last row of a run — whose `dt` is
+the leftover `t_e − t` — reads −0.03 % at Ja 0.5 (dt 0.107 against a typical 2.4) and −0.66 % at
+Ja 2 (dt about a third of typical). **Any diagnostic filled at the head of a step must be quoted against a state from the head
 of that step.**
 
 With the area exonerated, the a-priori regression probe (`--regress-probe`, an exact sphere, one
@@ -1403,7 +1404,7 @@ now that the −3.4 % area is not masking it.
 population is the **wisp guard's**, not the sheet's: on the identical 100-step field mode 6 reads
 +0.020 % under `enable_vof` (wispEps = 1e-8, the configuration gate (b) ran) and **+0.412 %** under
 `enable_phase_change`, which sets `set_vof_wisp_eps(0)` (WO-P23 mechanism 5b) so the interfacial
-predicate is 1e-12 and ~4800 more round-off cells contribute a crossing. Mode 0 reads +0.013 %
+predicate is 1e-12 and the round-off wisp cells between the two thresholds contribute a crossing. Mode 0 reads +0.013 %
 either way. It does not move P3 (the coupled run's wisp density is 1.48 interfacial cells per h²
 against 7.6 there, and its sheet does read +0.04 %), but it is a live trap for anything that reads
 `vof_interface_area()` on the phase-change path after a long advection.

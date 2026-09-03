@@ -1434,7 +1434,9 @@ under rule 3b (max pressure iterations **30** against the 600 cap, none capped).
    **end** — one whole `dR` apart. Recomputed on the same field at the same time
    (`vof_interface_area()` after the step), the run's sheet reads **+0.043 %** (Ja 0.5) and
    **+0.041 %** (Ja 2) of `4 pi R^2`, not −2.15 %. The tell was already in WO-P3d's own table and
-   nobody read it: the last row of every run, whose `dt` is the leftover `te - t`, reads −0.03 %.
+   nobody read it: the ratio is proportional to `dt`, so the LAST row of a run — whose `dt` is the
+   leftover `te - t` — reads **−0.03 %** at Ja 0.5 (`dt` 0.107 against a typical 2.4) and −0.66 %
+   at Ja 2 (`dt` about a third of typical).
 2. **The regression's plane shift is not the mechanism either, by four orders of magnitude.** The
    probe measures its error as *exactly* `delta/R` — the linearization `dV = mdot A dt/rho_l` of
    the swept volume `int_0^delta A(s) ds` — reproduced to two digits at every radius and every
@@ -1592,8 +1594,8 @@ has only `enable_vof` (WO-P3d gate (b), reproduced here to the digit) and **+0.4
 `enable_phase_change`. The difference is one number: `enable_phase_change` sets
 `set_vof_wisp_eps(0)` (WO-P23 mechanism 5b — the guard and phase change are incompatible on a curved
 interface), so the interfacial predicate on the phase-change path is `pcInterfaceEps_ = 1e-12`
-instead of the advector's `1e-8`, and 4 800 more round-off wisp cells get a PLIC plane and
-contribute a spurious crossing to the sheet. Mode 0 reads `+0.013 %` either way, because a wisp
+instead of the advector's `1e-8`, so the round-off wisp cells between those two thresholds get a PLIC plane
+and contribute a spurious crossing to the sheet. Mode 0 reads `+0.013 %` either way, because a wisp
 cell's PLIC polygon has essentially zero area while its *plane* is what the sheet interpolates
 between. **WO-P3d's gate (b) is therefore not a statement about the configuration the phase change
 runs in**, and the honest version of "the joined sheet does not drift with the wisp population" is
@@ -1616,8 +1618,9 @@ FIELD the coupled phase-change run carries"). Recomputing on the current field:
 | 0.5 | 6 | −2.151 % | **+0.043 %** |
 | 2 | 6 | −2.190 % | **+0.041 %** |
 
-and the tell that was already in WO-P3d's printed table: the LAST row of every run, whose `dt` is
-the leftover `te - t` (here 0.107 against a typical 2.4), reads **−0.03 %**. A quantity that
+and the tell that was already in WO-P3d's printed table: the ratio is **proportional to `dt`**, so
+the LAST row of a run — whose `dt` is the leftover `te - t` — reads **−0.03 %** at Ja 0.5 (`dt`
+0.107 against a typical 2.4) and −0.66 % at Ja 2 (`dt` about a third of typical). A quantity that
 collapses by two orders when one step is made short is a per-step bookkeeping artefact, not a
 property of the field.
 
@@ -1681,6 +1684,82 @@ dominated both.
 
 ### Gate (d) — the planar rungs, inertness, and MPI
 
+**Byte-identity against `origin/main` (`ee7e7e6`), the decisive one.** `test_vof_phase_change` built
+from both trees and run at 4 threads on nvidia-cuda: the full stdout — K1…K6, **P0a, P0b, P1, P1',
+ENERGY, INERT, P2** — is **BYTE-IDENTICAL** (`diff` empty). The default path's only change is that
+`pcBuildInterface` now carries `dt` and takes a `swept && A > 0` branch that is false.
+
+`tests/kokkos` at the shipped default: **33/33 passed** (nvidia-cuda, `OMP_NUM_THREADS=4`).
+
+**With the option ON** (`PECLET_P3E_SWEPT=1`, the same env hook `PECLET_P3C_AREA` uses, added to
+both phase-change test files):
+
+| scene | default | `PECLET_P3E_SWEPT=1` |
+|---|---|---|
+| K1…K6 (kernels) | — | **byte-identical** |
+| **P0a** planar regression, 1000 steps | 1.776e-14 | **byte-identical** |
+| **P1 / P1'** Stefan N = 64 | +1.3099 % / −0.0139 % | **byte-identical** |
+| **ENERGY** uniform-T at rcp ratio 1e4 | 0.000e+00 | **byte-identical** |
+| **INERT** mdot == 0 | 0.000e+00 | **byte-identical** |
+| **P0b** ratio 100, closed column | u_gas rel **0.000e+00** | rel **−3.3e-14** |
+| **P2** sucking N = 64 | +0.1929 % | +0.1579 % |
+
+On an axis-aligned plane `V(alpha)` is linear, so the swept factor is exactly 1 and the correction is
+algebraically zero — which is why P0a/P1/P1'/ENERGY/INERT are byte-identical rather than merely
+close. P0b and P2 are the two scenes whose MYC normal carries the ~1e-8 transverse component of the
+energy solve's red-black parity asymmetry (WO-P01 finding 3): there `f = 1` only in exact arithmetic
+and the two expressions differ at round-off. P0b shows that directly (3.3e-14 relative). P2's
+0.035 pp is that round-off run through the scene's documented amplifier — the `pcIsInterfacial`
+switch as the interface crosses a cell boundary, which WO-P23 measured turning 1e-16 into 1e-4 —
+and it is 2.5x the 0.014 pp the AREA MODES move the same scene by. **With the option off (the
+shipped default) there is nothing to discuss: the binary is byte-identical to `main`.**
+
+**MPI, np 1/2/4** (`test_vof_phase_change_mpi`, 64x4x4, the ORB cutting x so the interface crosses a
+rank boundary during every run), nvidia-cuda:
+
+| case | default, np 1/2/4 | `PECLET_P3E_SWEPT=1`, np 1/2/4 |
+|---|---|---|
+| **P0a** 1000 kinematic steps | **0 / 0 / 0** | **0 / 0 / 0** |
+| **P1** Stefan, 280 coupled steps | **0 / 0 / 0** | **0 / 0 / 0** |
+| P2 sucking, 55 coupled steps (interface position) | 0.0 / 7.9e-16 / 7.9e-16 | 4.573e-06 / 4.573e-06 / 4.573e-06 |
+| P2 pointwise `max\|C_dist - C_ref\|` | 1.30e-14 / 1.30e-14 / 1.33e-14 | 1.182e-04 / 1.182e-04 / — |
+
+`ctest -R vof_phase_change_mpi`: **3/3 passed**. P0a and P1 are bitwise with the option on as well —
+nothing in the swept factor is a reduction; it is a per-cell function of that cell's own plane. The
+P2 row is again np-INDEPENDENT to every digit (np 1 and np 2 identical), i.e. the scene's coupled
+sensitivity and not a distribution defect; the option enlarges it because it perturbs `A` at
+round-off and P2 amplifies round-off.
+
+### Open, and the corrected gates this WO proposes
+
+1. **P3 remains NOT closed** at 1.036 % (Ja 0.5) / 1.481 % (Ja 2), mode 6, 128^3 — the FIFTH
+   failure, stopped under rule 4. Ja = 10 not run.
+2. **A diagnostic filled at the HEAD of a step must be quoted against a state from the head of that
+   step.** `phase_change_diagnostics()` is a census of the *last* `pcBuildInterface`, and this
+   campaign built two work orders on a ratio of one of its entries to a quantity read after the
+   step. The driver now prints `A_end` beside it and labels the old one `[STALE]`; the same caution
+   applies to `removed_volume`, `interface_cells` and `mdot_mean`, all of which are pre-step
+   quantities. **WO-P3c's and WO-P3d's `A/(4 pi R^2) = -2.15 %` rows should be read with this
+   correction**, and with them the inference "the deficit is in the colour field the coupled run
+   carries".
+3. **WO-P3d's gate (b) is a statement at `wispEps = 1e-8`, not at the phase change's own 1e-12.**
+   Either re-take it inside `enable_phase_change`, or state the guard beside the number.
+4. **The regression is closed as a mechanism at any `delta/R <= 1e-3`**, which covers every
+   density-ratio >> 1 boiling case, because there `delta = (rho_v/rho_l) x (interface motion)`. It
+   is NOT closed for a ratio near 1 (P1's own Stefan regime, and any bubble in a liquid-liquid
+   system), where `delta` IS the whole motion — there `set_phase_change_swept(True)` is the
+   correction and the probe table above is its gate. Nothing in this campaign runs that case on a
+   CURVED interface yet.
+5. **A P3f should not repeat the mesh study** until the flux is instrumented: WO-P3b's 64/128/192
+   ladder and WO-P3c's confinement rows were both taken on mode 0, whose area error dominated them.
+   Re-taking them on mode 6 is item (c) above — cheap — but the two a-priori instruments named in
+   (a) and (b) are what decide it.
+6. **The swept option's residual at large `delta` is the clip-and-redistribute**, not the shift: at
+   `delta = 0.5` on an R = 20 sphere it moves 731 of 2513 units of removed volume and takes `min C`
+   to −0.196, and the corrected shift is then WORSE than the linear one (−6.47 % against −2.45 %).
+   If a future rung ever needs a half-cell regression step, that is the piece to redesign — the
+   push along `-n` with `n_d^2` weights is a first-order transport of the residue, not a geometric
+   continuation of the swept region into the neighbour cell.
 
 ---
 
