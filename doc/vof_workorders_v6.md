@@ -1112,9 +1112,120 @@ agree with the single-rank run to **0.000e+00** and the areas to 1.7e-13. The tw
 **0.175 cells of SHARED liquid** — a state a single colour field cannot represent — through a
 distributed NS step.
 
-#### Gate 6 — inertness
+#### Gate 4 — TBFsolver's `channel_18`. **TRANSCRIBED AND RUN; no reference exists to compare to**
 
-Every existing VoF ctest bit-identical: see the battery run recorded at the end of this entry.
+`tests/study/vof_channel_18.py`. Every number was read off the Fortran that consumes the specs, not
+off the file names, and three of them are not what the spec file suggests:
+
+* **`gCH = 0.1` is a streamwise GRAVITY, not the driving pressure gradient.** With `flowCtrl 1` the
+  applied mean gradient is `fs = tau_w − <rho> gCH` and the x-momentum source is
+  `fs + rho gCH = tau_w + (rho − <rho>) gCH`, so `gCH` contributes only BUOYANCY and drops out of
+  the mean balance. `tau_w = (Re_tau/Re)^2 = 1.800588e-3` with `Re = 1/nu_l = 3000`, hence
+  `u_tau = Re_tau nu_l/h = 0.0424333` **exactly, by construction** — Re_tau is imposed, not
+  measured. (`g 0.d0` in the specs is the WALL-NORMAL gravity and is off.)
+* The bubbles are therefore driven AGAINST the mean flow: **this is a downflow channel**, and the
+  gas phase carries a negative streamwise force.
+* `initBubbles method 2, nbx 6, nby 1, nbz 3` puts the 18 bubbles on the **centreline** y = h at
+  `x0 = (i−½)Lx/6`, `z0 = (k−½)Lz/3`; x is streamwise (periodic), **y wall-normal (walls)**,
+  z spanwise (periodic). Groups: ratio 10, viscosity ratio 1, D/h = 0.25, void fraction 1.49 %,
+  Eo = rho gCH D²/sigma = 1.25, Mo = 9.9e-9, D+ = 31.8.
+
+**The transcription and what it costs.** flow's cells are cubic and TBFsolver's grid is not
+(dx+ 2.08 / dy+ 1.59 / dz+ 2.08 on 192 × 160 × 96), so the case is mapped onto an ISOTROPIC
+**128 × 80 × 64** grid: h = 40 cells, **Delta+ = 3.18** (coarser than the reference in every
+direction), D = 10 cells, and the box aspect rounds to 3.20 × 2 × 1.60 h against 3.1416 × 2 ×
+1.5708 (**+1.9 % in x and z**; ny = 80 was chosen over the exact 81.5 because the pressure
+multigrid's depth lives on the factors of two). Measured void fraction **1.438 %** against the
+case's 1.492 %, the same +1.9 % × +1.9 % of box.
+
+**The initial condition is TBFsolver's own.** `channel_18/0/{ux,uy,uz}` is a converged single-phase
+turbulent snapshot in raw Fortran STREAM (one `int32` count, then the internal field x-fastest with
+no ghosts, staggered sizes 193×160×96 / 192×161×96 / 192×160×97, plus a 96-byte trailer the reader
+ignores; `psi` and `phi0*` are identically zero). The script reads it and trilinearly resamples each
+staggered component onto our grid — the nearest thing to the same start a different grid admits.
+Verified: the resampled bulk velocity is **U_b = 0.6113**, i.e. TBFsolver's own snapshot mean to
+four figures (Re_b = 1834, U_b+ = 14.41).
+
+**Run.** 6000 steps to **t u_tau/h = 0.841** in 5272 s on the shared GPU; **pressure 13/800
+(uncapped, rule 3b satisfied)**, max|div(open u)| **1.15e-6**; all 18 markers held their volume to
+the printed 523.60/523.61 against a seed of 523.60 for the whole run, total interface area drifting
+5649 → 5758 cells² as the bubbles deform. Profiles averaged over the second half of the window
+(`--out` writes y/h, <u>/u_tau, void fraction).
+
+| | measured |
+|---|---|
+| peak `<u>/u_tau` | **17.58 at y/h = 0.74** (not at the centreline) |
+| `<u>/u_tau` at the centreline | **11.99** |
+| void fraction at the centreline | **0.181** |
+| void fraction at y/h < 0.81 | **0** (the bubbles have not left the core) |
+| wall-gradient u_tau (first cell) | **0.03730**, −12.1 % of the imposed 0.042433 |
+
+Both features are the expected signature of the case rather than convergence: the bubbles sit in the
+core carrying a NEGATIVE streamwise force, so they flatten and then invert the centreline velocity
+(the peak moves off-axis), and the fixed pressure gradient meets the extra drag by decelerating —
+`u_tau` measured at the wall falls below the imposed one while the flow is still adjusting.
+
+**What this is NOT.** One eddy turnover is `h/u_tau = 23.6 s = 7.7 k steps` at the capillary/CFL dt
+this case admits, so 6000 steps is **0.84 turnovers**: a transient from TBFsolver's single-phase
+snapshot with bubbles inserted, not a statistically steady state (which needs ~20 turnovers ≈ 44 h
+of exclusive GPU). The void-fraction profile in particular is still essentially the initial
+condition — the bubbles have migrated by less than one diameter.
+
+**And there is nothing to compare it to.** The repository ships **no reference statistics for
+`channel_18`**: 60 tracked files, no profiles, no post-processing, no data directory; the only
+published artefact is a qualitative streamwise-velocity contour in `user_guide.pdf`. So the numbers
+above are reported as **our first datum**, exactly as the work order instructed for that case, and
+the cross-code comparison the rung was aiming at needs TBFsolver to be BUILT AND RUN (it is a
+Fortran+MPI code with no shipped output). That is the honest scope of gate 4 as delivered:
+the case is transcribed, the physics runs, the solver is healthy, and the comparison is open.
+
+#### Gate 6 — inertness. **PASS**
+
+`tests/kokkos` on the nvidia-cuda backend at the final commit: **100 % tests passed, 0 failed out
+of 32** (2486 s), the ten VoF ctests plus `vof_phase_change` and `vof_blocks` among them. The block
+container, the block CSF and the W1 machinery allocate nothing and change no branch unless
+`enable_vof_blocks` runs: `vofBlockCsf()` is false whenever `vofBlocks_` is null, so `csfActive()`,
+the `step()` CSF dispatch and the `advectVof()` dispatch reduce to their previous text exactly.
+
+### Summary of the gates
+
+| gate | verdict | headline number |
+|---|---|---|
+| W1a assignment | PASS | round robin 1.142/1.453/2.182 → **LPT 1.0000** at np 2/4/8 (10.2× size spread) |
+| W1a re-assignment | PASS | **bitwise at np 1/2/4/8**, 48/98/120 master changes migrated |
+| W1b device packing | PASS (bitwise) | **1.69× quiet / 0.80× contended** — see the caveat |
+| W1c block pool | PASS (bitwise) | 4/60 hits on LeVeque, ~100 % on translation |
+| W1d per-bubble area | PASS | **−0.15 %** vs 4πR² at R = 9 cells |
+| W2-1 Hysing block vs global | **PASS** | **−0.00 % / −0.00 %** on v_rise max and y_c(3) |
+| W2-2 Grace | **PASS** | **−6.2 %** vs the correctly-conditioned correlation (gate rewritten) |
+| W2-3 two bubbles in line | **INCONCLUSIVE** | film holds at 2 cells; neither container merges |
+| W2-3b markers in contact | **PASS** | **10.4 cells of shared liquid**, volumes to 4e-5 |
+| W2-4 channel_18 | transcribed, run, **no reference exists** | 0.84 eddy turnovers, uncapped |
+| W2-5 MPI | **PASS** | bitwise at np 1; 1.3e-15 / 3.6e-15 / 1.1e-14 at np 2/4 |
+| W2-6 inertness | **PASS** | 32/32 ctests |
+
+### Open / deferred
+
+1. **The block container is still ALL-FLUID.** `enable_vof_blocks` raises on `set_solid`; the
+   cut-cell block (openness-weighted fluxes on the block's own geometry) was in W0's deferred list
+   and is still there — W2 was NS coupling, not geometry.
+2. **No momentum consistency on the block path** (deliberate, per the work order), so the rung is
+   rated to ratio ≈ 100 with motion, exactly like V2a. W2b (union-field momentum sweeps) is
+   unwritten.
+3. **The film between two markers is only ever resolved to the grid.** Gate 3 measured 2 cells at
+   D/Δ ≈ 10 and neither container merged; nothing here says what happens at D/Δ = 30, and the
+   sub-grid drainage model that would make the answer physical is rung W4's.
+4. **Per-piece pack kernels are launch-latency bound.** The device path issues ~4 small kernels per
+   (block, rank) piece; on a saturated GPU that loses to three big mirror copies. Batching the
+   pieces of one message into one kernel (a small index View) is the obvious fix and belongs with
+   WO-V9's profile.
+5. **`enable_vof_blocks_from_field` cannot seed OVERLAPPING markers.** It gathers each marker's
+   colour from the union restricted to its box, so two markers in contact each adopt a slice of the
+   other (−2.7 % / +7.1 % measured). Markers at birth need a per-marker colour SOURCE; the sphere
+   seeder has one, an arbitrary shape does not. W4 (breakup → split a block) will hit this first.
+6. **channel_18 has no cross-code comparison yet** (item above): it needs TBFsolver built and run,
+   and a statistically steady window (~20 eddy turnovers ≈ 44 h of exclusive GPU at this grid).
+
 ## WO-V7 findings — the pore-scale campaign (doublet, packing imbibition, micromodel) — 2026-09-02, Opus
 
 Branch `vof-v7`, worktree `../flow-v7`, built from `origin/main` at `2b55edb` (WO-R2 landed).

@@ -893,11 +893,31 @@ and a **3e-16 colour difference between two decompositions flipped a cascade bra
 CSF face force by 6.7e-3 in one step** (bitwise after step 1, 13 orders worse after step 2).
 `VofBlockSet::curvProto` now carries it.
 
+**`tests/study/vof_channel_18.py` — TBFsolver's own bubbly-channel case, transcribed.** 18 bubbles
+in a minimal channel at Re_τ = 127.3, ratio 10, read off the Fortran rather than the spec file
+names, which matters in three places: **`gCH = 0.1` is a streamwise GRAVITY, not the driving
+gradient** (the x-momentum source is `τ_w + (ρ − ⟨ρ⟩) gCH`, so `gCH` contributes only buoyancy and
+`u_τ = Re_τ ν/h` is imposed exactly), the bubbles are therefore driven AGAINST the flow (a DOWNFLOW
+channel), and y — not z — is the wall-normal axis. flow's cubic cells force an isotropic
+128 × 80 × 64 mapping (Δ+ = 3.18 against TBFsolver's 2.08/1.59, box +1.9 % in x and z, void
+fraction 1.438 % vs 1.492 %). The script reads `channel_18/0/{ux,uy,uz}` — raw Fortran STREAM,
+`int32` count then the internal field — and resamples that converged single-phase snapshot onto our
+grid (bulk velocity reproduces TBFsolver's 0.6113 to four figures). Measured over 6000 steps
+(**0.84 eddy turnovers**, pressure 13/800 uncapped, max|div| 1.2e-6, all 18 marker volumes flat):
+peak `⟨u⟩/u_τ` **17.58 at y/h = 0.74** (off-axis — the core bubbles carry a negative streamwise
+force), centreline void fraction **0.181**, wall-gradient `u_τ` 0.0373 (−12.1 % of the imposed one,
+the flow still decelerating against the added drag). **This is a transient, not a statistically
+steady state, and TBFsolver ships NO reference statistics for the case** (60 tracked files, no
+profiles, only a qualitative contour in `user_guide.pdf`) — so these are our first datum and the
+cross-code comparison needs TBFsolver built and run.
+
 **Scope of the block container:** ALL-FLUID (an immersed solid still raises — the cut-cell block is
 a later rung), STAGGERED only for the block CSF, no momentum consistency (so, like V2a, rated to
 ratio ≈ 100 with motion), and the film between two markers is resolved only down to the grid: at
 D/Δ ≈ 10 and Eo = 10 an in-line pair holds a 2-cell film for as long as it was run, in BOTH
-containers.
+containers. `enable_vof_blocks_from_field` also cannot seed markers that already OVERLAP (it splits
+a union field between boxes, so each takes a slice of the other — measured −2.7 % / +7.1 %); use the
+sphere seeder for those.
 
 **Scope — say this to users:** **Staggered is the reference**; the collocated path is rung V8 (the
 paragraph above) and is all-fluid, ratio ≲ 100 with motion. An **immersed solid is supported since
