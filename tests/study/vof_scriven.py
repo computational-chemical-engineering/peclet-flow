@@ -158,7 +158,8 @@ def sphere_colour(n, cx, cy, cz, R, sub=4):
 
 
 def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, consistent=True,
-        quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True):
+        quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True,
+        swept=False):
     rr = 1.0 / ratio
     beta = scriven_beta(ja, rr)
     t0 = (r0 / (2 * beta)) ** 2 / alpha_l          # cells^2 / (cells^2/s) = s
@@ -212,6 +213,8 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     s.set_phase_change_quadratic_fit(quad)
     if area_mode is not None:
         s.set_phase_change_area(area_mode)
+    if swept:
+        s.set_phase_change_swept(True)
 
     # ADAPTIVE dt on the solver's OWN interface-local Courant number. The a-priori estimate
     # u = (1 - rho_v/rho_l) Rdot is the CONTINUUM interface speed and the discrete field overshoots
@@ -266,10 +269,25 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         # the AREA-AVERAGED mdot; comparing the area itself against 4 pi R^2 separates a flux
         # error from a geometry error.
         area = dg['interface_area']
+        # WO-P3e.  `dg['interface_area']` is the area `pcBuildInterface` measured at the HEAD of
+        # this step, i.e. on the colour field BEFORE this step's regression and advection, while
+        # `rnum` below is read AFTER them -- so `area/(4 pi rnum^2)` compares two different times
+        # and is low by 2 dR/R, which at this scene's ~0.2 cells/step is 2.2 %.  That is the whole
+        # of the "-2.15 % run area deficit" of WO-P3c/WO-P3d.  `vof_interface_area()` recomputes on
+        # the CURRENT field, so `area_end` is the one that may be compared with `rnum`.
+        area_end = s.vof_interface_area()
         meff = rho_l * dg['removed_volume'] / (dt_used * area) if area > 0 else float("nan")
         arel = area / (4.0 * math.pi * rnum * rnum) - 1.0
+        arel_end = area_end / (4.0 * math.pi * rnum * rnum) - 1.0
+        # WO-P3e: the REGRESSION's own step size.  `delta = mdot dt / rho_l` is the normal
+        # displacement the plane shift applies, and it is the number that decides whether the
+        # shift's O(delta/R) linearization can matter at all; `R_A = sqrt(A/4pi)` is the radius
+        # the interface SHEET carries, next to the radius the liquid-volume deficit carries.
+        delta = dg['removed_volume'] / area if area > 0 else float('nan')
+        r_a = math.sqrt(area / (4.0 * math.pi))
         rows.append((tcur, rnum, rex, it, dg['mdot_mean'], mex, meff, arel,
-                     dg['interface_cells']))
+                     dg['interface_cells'], delta, r_a, dg['deficit_cells'],
+                     dg['redistributed'], arel_end, area_end))
     d = s.phase_change_diagnostics()
     # thickness of the thermal boundary layer at t0: where the exact profile reaches 99 % of dT
     lo_, hi_ = r0, 200.0 * r0
@@ -301,12 +319,16 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
               f"R0/(2 beta^2) = {r0/(2*beta*beta):.3f} cells;  R0 from the colour field "
               f"{r0meas:.5f} vs exact {r0:.5f} ({100*(r0meas-r0)/r0:+.4f} %)")
         for k in list(range(0, len(rows), max(1, len(rows) // 8))) + [len(rows) - 1]:
-            t_, a, b_, it, mn_, mx_, me_, ar_, nc_ = rows[k]
+            t_, a, b_, it, mn_, mx_, me_, ar_, nc_, de_, ra_, dc_, rd_, ae_, aa_ = rows[k]
             print(f"      t {t_:10.4f}  R_num {a:8.4f}  R_exact {b_:8.4f}  "
                   f"rel {100*(a-b_)/b_:+7.3f} %  mdot {mn_:.5e} vs {mx_:.5e} "
                   f"({100*(mn_-mx_)/mx_:+7.3f} %)  mdot_area {100*(me_-mx_)/mx_:+7.3f} %  "
                   f"A/4piR^2 {100*ar_:+6.2f} %  cells {nc_:6d} ({nc_/(4*math.pi*a*a):.3f}/h^2)"
                   f"  iters {it}")
+            print(f"                 REGRESSION delta {de_:.5e} cells/step (delta/R "
+                  f"{de_/a:.3e}), R_area {ra_:8.4f} ({100*(ra_-b_)/b_:+7.3f} % vs exact), "
+                  f"clipped {dc_}, residue moved {rd_:.3e};  A_end/4piR^2 {100*ae_:+6.2f} % "
+                  f"(R from A_end {math.sqrt(aa_/(4*math.pi)):8.4f}, {100*(math.sqrt(aa_/(4*math.pi))-b_)/b_:+7.3f} % vs exact)")
         early = ", ".join(f"{100*(r[4]-r[5])/r[5]:+.2f}" for r in rows[:6])
         print(f"      EARLY mdot rel error, steps 1..6: {early} %   "
               f"(last {100*(rows[-1][4]-rows[-1][5])/rows[-1][5]:+.2f} %)")
@@ -314,7 +336,8 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         print(f"      AREA-AVERAGED mdot rel error, last half: mean "
               f"{100*np.mean([(r[6]-r[5])/r[5] for r in _h]):+.3f} %, first {100*(_h[0][6]-_h[0][5])/_h[0][5]:+.3f} %, "
               f"last {100*(_h[-1][6]-_h[-1][5])/_h[-1][5]:+.3f} %;  A/(4 pi R^2) - 1 mean "
-              f"{100*np.mean([r[7] for r in _h]):+.3f} %")
+              f"{100*np.mean([r[7] for r in _h]):+.3f} %  [STALE, WO-P3e];  "
+              f"A_end/(4 pi R^2) - 1 mean {100*np.mean([r[13] for r in _h]):+.3f} %")
         print(f"      R rel error at step 1 {100*(rows[0][1]-rows[0][2])/rows[0][2]:+.4f} %, "
               f"at the half point {100*(half[0][1]-half[0][2])/half[0][2]:+.4f} %, "
               f"at the end {100*(rows[-1][1]-rows[-1][2])/rows[-1][2]:+.4f} %")
@@ -566,6 +589,180 @@ def area_probe(n, radii, ratio=100.0, sub=4, mode=None, shape="sphere"):
         prev = (R, rel)
 
 
+
+def _sph_moments(w, ax, ctr, lmax=4):
+    """Real spherical-harmonic moments of a signed cell weight `w` (a removal density), returned
+    as the per-l RMS coefficient normalised by |sum w|.
+
+    The regression shifts each cell's plane along that cell's OWN normal, so a systematic
+    under-shift on (say) the octant diagonals would leave the bubble faceted.  A cubic lattice can
+    only produce CUBIC-harmonic anisotropy, whose leading term is l = 4 (l = 2 vanishes by the
+    three mirror symmetries), so the l = 2 row is the control and the l = 4 row is the signal.
+    """
+    import numpy as np
+    x = (ax - ctr)
+    X = x[:, None, None] * np.ones((1, len(ax), len(ax)))
+    Y = x[None, :, None] * np.ones((len(ax), 1, len(ax)))
+    Z = x[None, None, :] * np.ones((len(ax), len(ax), 1))
+    r = np.sqrt(X * X + Y * Y + Z * Z)
+    r = np.where(r > 0, r, 1.0)
+    u, v, t = X / r, Y / r, Z / r
+    tot = float(w.sum())
+    out = {}
+    # l = 2: the five real components of the traceless quadrupole
+    q = [u * v, v * t, t * u, u * u - v * v, (3.0 * t * t - 1.0) / math.sqrt(3.0)]
+    out[2] = math.sqrt(sum(float((w * c).sum()) ** 2 for c in q) / 5.0)
+    # l = 4: the cubic invariant (the only l = 4 combination a cubic lattice can excite) plus the
+    # remaining independent components, measured as the RMS of the nine real l = 4 harmonics
+    # written in cartesian form (unnormalised — the RATIO to the isotropic reference is what is
+    # read, and both fields go through the identical expressions).
+    u2, v2, t2 = u * u, v * v, t * t
+    k = [u2 * u2 + v2 * v2 + t2 * t2 - 3.0 / 5.0,
+         u * v * (u2 - v2), v * t * (v2 - t2), t * u * (t2 - u2),
+         u * v * (7.0 * t2 - 1.0), v * t * (7.0 * u2 - 1.0), t * u * (7.0 * v2 - 1.0),
+         (u2 - v2) * (7.0 * t2 - 1.0), (35.0 * t2 * t2 - 30.0 * t2 + 3.0)]
+    out[4] = math.sqrt(sum(float((w * c).sum()) ** 2 for c in k) / 9.0)
+    return tot, out
+
+
+def _cubic_bins(n, ctr, nb=4):
+    """Direction classes by the cubic invariant s = u_x^4 + u_y^4 + u_z^4, which runs from 1/3 on
+    the BODY DIAGONAL (111) through 1/2 on a FACE diagonal (110) to 1 on an AXIS (100).  Binning
+    the removed volume by s and dividing by the same bins of the EXACT removal is a direct,
+    reference-free read-out of whether the regression is isotropic."""
+    import numpy as np
+    x = (np.arange(n) + 0.5) - ctr
+    r2 = x[:, None, None] ** 2 + x[None, :, None] ** 2 + x[None, None, :] ** 2
+    r2 = np.where(r2 > 0, r2, 1.0)
+    s = (x[:, None, None] ** 4 + x[None, :, None] ** 4 + x[None, None, :] ** 4) / (r2 * r2)
+    edges = np.linspace(1.0 / 3.0, 1.0, nb + 1)
+    edges[-1] = 1.0 + 1e-9
+    return np.digitize(s, edges) - 1, edges
+
+
+def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(0, 6),
+                  ratio=100.0, advect_steps=0, drift=(0.5, 0.25, 0.125), cfl=0.2, nbin=4,
+                  swept=False):
+    """WO-P3e — the a-priori INTERFACE REGRESSION probe.  No time stepping, no energy solve, no
+    velocity: an exact sphere goes in, ONE `apply_phase_change(dt)` with a uniform prescribed mdot
+    runs the plane shift + clip-and-redistribute, and the colour field that comes out is compared
+    against the analytically known answer.
+
+    With `rho_l = 1` and `mdot = 1` the step's normal displacement is exactly `delta = dt`, so the
+    exact liquid volume removed from a sphere of radius R is the shell
+
+        dV = 4/3 pi ((R+delta)^3 - R^3) = 4 pi R^2 delta (1 + delta/R + delta^2/(3 R^2))
+
+    (the bubble is the GAS, so evaporation GROWS it: R -> R + delta), the new radius from the
+    volume deficit is R + delta exactly, and the new interfacial area is 4 pi (R+delta)^2.  Those
+    three are the gate.  The fourth read-out is ISOTROPY: the shift acts along each cell's own
+    normal with the cell's own area, so an under-shift on the octant diagonals would leave the
+    bubble faceted -- measured both as the ratio of the removed volume to the exact removed volume
+    in bins of the cubic invariant `u_x^4 + u_y^4 + u_z^4`, and as the l = 2 / l = 4 spherical
+    harmonic moments of the removal density.
+
+    `--regress-advect N` runs the sphere through N Weymouth-Yue steps of the PURE TRANSLATION field
+    of gate (b) first, so the fractions are the ones a running solver actually carries (WY re-creates
+    the sliver/wisp population within ten steps) while the exact reference stays a sphere.
+    """
+    ctr0 = 0.5 * n
+    rho_l, rho_v = 1.0, 1.0 / ratio
+    print(f"  a-priori REGRESSION probe, {n}^3, exact sphere fractions (sub = {sub}^3), "
+          f"ratio {ratio:g}, {advect_steps} WY pre-steps, swept shift {swept}")
+    for R in radii:
+        c0 = sphere_colour_chunked(n, ctr0, R, sub)
+        cstart, ctr = c0, (ctr0, ctr0, ctr0)
+        if advect_steps:
+            s = pf.Solver(n, n, n)
+            s.set_rho(1.0)
+            s.set_mu(1e-3)
+            s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
+            s.enable_vof()
+            s.set_vof(c0)
+            u, v, w = solenoidal_faces(n, 0.0, drift)
+            s.set_velocity(0, u)
+            s.set_velocity(1, v)
+            s.set_velocity(2, w)
+            dta = cfl / max(s.vof_max_courant(), 1e-30)
+            for _ in range(advect_steps):
+                s.advect_vof(dta)
+            cstart = s.get_vof()
+            ctr = tuple(ctr0 + d * dta * advect_steps for d in drift)
+            del s
+        vg0 = float(n) ** 3 - cstart.sum()
+        R0 = (3.0 * vg0 / (4.0 * math.pi)) ** (1.0 / 3.0)
+        mixed0 = int(np.count_nonzero((cstart > 0.0) & (cstart < 1.0)))
+        # the exact colour field the pre-steps SHOULD have produced (a translated sphere), as the
+        # control on how far the advected fractions are from exact
+        cex0 = (sphere_colour(n, ctr[0], ctr[1], ctr[2], R, sub=sub) if advect_steps else c0)
+        l1 = float(np.abs(cstart - cex0).sum())
+        print(f"    R {R:g}: R0 from the volume {R0:.5f} ({100*(R0-R)/R:+.4f} %), mixed cells "
+              f"{mixed0}, |C - C_exact|_1 {l1:.4e}")
+        bins, edges = _cubic_bins(n, ctr[0], nbin) if not advect_steps else (None, None)
+        for mode in modes:
+            for delta in deltas:
+                s = pf.Solver(n, n, n)
+                s.set_rho(rho_l)
+                s.set_mu(1e-3)
+                s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
+                s.enable_vof()
+                s.set_vof(cstart)
+                s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
+                s.enable_phase_change(rho_v, rho_l, 1.0)
+                s.set_phase_change_area(mode)
+                s.set_phase_change_swept(swept)
+                s.set_mass_flux_uniform(1.0)
+                a_bef = s.vof_interface_area()
+                s.apply_phase_change(delta)
+                d = s.phase_change_diagnostics()
+                c1 = s.get_vof()
+                a_aft = s.vof_interface_area()
+                del s
+                vg1 = float(n) ** 3 - c1.sum()
+                R1 = (3.0 * vg1 / (4.0 * math.pi)) ** (1.0 / 3.0)
+                rem = cstart - c1
+                removed = float(rem.sum())
+                rex = 4.0 * math.pi * R0 * R0 * delta * (1.0 + delta / R0
+                                                         + delta * delta / (3.0 * R0 * R0))
+                R1x = R0 + delta
+                print(f"      mode {mode}  delta {delta:6.3f}   "
+                      f"dV {removed:12.6f} vs exact {rex:12.6f} ({100*(removed/rex-1):+8.4f} %)   "
+                      f"R1 {R1:9.5f} vs {R1x:9.5f} ({100*(R1-R1x)/R1x:+8.5f} %)")
+                print(f"                            A_before {a_bef:11.4f} "
+                      f"({100*(a_bef/(4*math.pi*R0*R0)-1):+7.3f} %)  "
+                      f"A_after {a_aft:11.4f} ({100*(a_aft/(4*math.pi*R1x*R1x)-1):+7.3f} %)  "
+                      f"A_regr_used {d['interface_area']:11.4f}  removed_vol(diag) "
+                      f"{d['removed_volume']:.6f}")
+                pure_l = int(np.count_nonzero((cstart >= 1.0) & (c1 < 1.0)))
+                pure_g = int(np.count_nonzero((cstart <= 0.0) & (c1 > 0.0)))
+                emptied = int(np.count_nonzero((cstart > 0.0) & (c1 <= 0.0)))
+                print(f"                            CENSUS clipped at 0 {d['deficit_cells']:6d}, "
+                      f"at 1 {d['excess_cells']:5d}, |residue| moved {d['redistributed']:.6e}, "
+                      f"unresolved {d['unresolved']:.2e}; cells emptied {emptied}, pure LIQUID "
+                      f"cells touched {pure_l}, pure GAS cells touched {pure_g}; "
+                      f"C in [{d['min_C']:.3e}, {d['max_C']:.6f}]")
+                if bins is None:
+                    continue
+                cex1 = sphere_colour_chunked(n, ctr0, R + delta, sub)
+                ex = c0 - cex1
+                rat = []
+                for b in range(nbin):
+                    m = bins == b
+                    se, sa = float(ex[m].sum()), float(rem[m].sum())
+                    rat.append(sa / se if se != 0 else float("nan"))
+                lbl = "  ".join(f"s<{edges[b+1]:.3f} {100*(rat[b]-1):+7.3f} %" for b in range(nbin))
+                print(f"                            ISOTROPY (removed/exact by cubic bin, "
+                      f"axis=1 body-diag=1/3): {lbl}")
+                ax = np.arange(n) + 0.5
+                t_a, m_a = _sph_moments(rem, ax, ctr0)
+                t_e, m_e = _sph_moments(ex, ax, ctr0)
+                t_d, m_d = _sph_moments(rem - ex, ax, ctr0)
+                print(f"                            MOMENTS  l2/l0: actual {m_a[2]/abs(t_a):.3e} "
+                      f"exact {m_e[2]/abs(t_e):.3e};  l4/l0: actual {m_a[4]/abs(t_a):.3e} exact "
+                      f"{m_e[4]/abs(t_e):.3e};  residual l0 {t_d/t_e:+.3e} l2 "
+                      f"{m_d[2]/abs(t_e):.3e} l4 {m_d[4]/abs(t_e):.3e}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=128)
@@ -610,10 +807,32 @@ def main():
     ap.add_argument("--advect-amp", type=float, default=0.0)
     ap.add_argument("--advect-steps", type=int, default=100)
     ap.add_argument("--advect-r", type=float, default=16.0)
+    ap.add_argument("--regress-probe", type=str, default="",
+                    help="WO-P3e: comma-separated radii in cells — run the a-priori INTERFACE "
+                         "REGRESSION probe (one apply_phase_change at a uniform mdot on an exact "
+                         "sphere, against the analytic shell volume / radius / area / isotropy) "
+                         "instead of the growth run, and exit")
+    ap.add_argument("--regress-delta", type=str, default="0.05,0.1,0.2",
+                    help="WO-P3e: comma-separated normal displacements per step, in cells")
+    ap.add_argument("--regress-modes", type=str, default="0,6",
+                    help="WO-P3e: comma-separated set_phase_change_area modes to run the probe on")
+    ap.add_argument("--regress-swept", action="store_true",
+                    help="WO-P3e: run the probe with the EXACT swept-volume plane shift "
+                         "(set_phase_change_swept) instead of the shipped linearization")
+    ap.add_argument("--regress-advect", type=int, default=0,
+                    help="WO-P3e: Weymouth-Yue pre-steps (pure translation) before the regression "
+                         "step, so the fractions are advection-realistic")
     a = ap.parse_args()
     if a.area_advect:
         area_advect(a.n, R=a.advect_r, sub=a.area_sub, steps=a.advect_steps, cfl=a.cfl,
                     amp=a.advect_amp)
+        return 0
+    if a.regress_probe:
+        regress_probe(a.n, [float(x) for x in a.regress_probe.split(",")],
+                      deltas=[float(x) for x in a.regress_delta.split(",")],
+                      sub=a.area_sub, modes=[int(x) for x in a.regress_modes.split(",")],
+                      ratio=a.ratio, advect_steps=a.regress_advect, cfl=a.cfl,
+                      swept=a.regress_swept)
         return 0
     if a.area_probe:
         area_probe(a.n, [float(x) for x in a.area_probe.split(",")], ratio=a.ratio,
@@ -626,7 +845,7 @@ def main():
     for ja in [float(x) for x in a.ja.split(",")]:
         run(a.n, ja, a.ratio, a.r0, a.r1, cfl=a.cfl, sweeps=a.sweeps, plane=not a.no_plane,
             consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl, init=a.init,
-            sub=a.sub, area_mode=a.area_mode)
+            sub=a.sub, area_mode=a.area_mode, swept=a.regress_swept)
     return 0
 
 
