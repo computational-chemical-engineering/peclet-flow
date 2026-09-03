@@ -353,6 +353,67 @@ change to the closure VALUE (the Dirichlet datum) rather than the stencil struct
 
 ---
 
+## WO-P3g — a second-order interfacial energy operator (the P3 closure)  [Fable design → OPUS]
+
+Six attempts at the Scriven 1 % gate (WO-P23 … P3f) each retired one candidate; P3f's verdict
+is that the remaining 1.0–1.5 % is the RESIDUE OF A CANCELLATION between three first-order
+errors — (F1) the GFM Dirichlet row is a two-point flux (first order in the row; −17 % at a
+2.4-cell thermal layer, −5 % at 8 cells on a FLAT interface), (F2) the one-sided fit measures
+distance to the tangent PLANE, not the sphere (+6 % at R = 20, order 0.98), and (F3) the
+Dirichlet overwrite destroys −0.7 % (Ja 0.5) / −4.3 % (Ja 2) of the latent heat, one-signed —
+so fixing any one alone makes the gate worse (measured), and the mesh ladder is anti-convergent
+(the compensating term is the O(h/R) one). This rung fixes all three together, in the ENERGY
+OPERATOR, gated by P3f's own instruments.
+
+**Design.**
+1. *ṁ from the operator's own flux, not from a separate fit.* Define
+   `ṁ A_Γ h_lv = Q_liq − Q_gas`, where `Q_liq` is the discrete heat flux the energy operator
+   actually transfers from the liquid cells into the interfacial cell's Dirichlet row (the sum
+   of the row's off-diagonal contributions, evaluated with the converged T of the step) and
+   `Q_gas` likewise. Energy removed and mass produced are then the SAME discrete quantity, so
+   F3 disappears by construction (the enthalpy budget's residual is zero to round-off). The
+   quadratic-fit ṁ stays as a diagnostic (`phase_change_diagnostics()['mdot_fit']`).
+2. *A second-order GFM row.* Replace the two-point ghost-fluid row (cell value + `T_sat` at
+   distance `θ h`) by the Gibou–Fedkiw (JCP 176:205, 2002) quadratic form: for a liquid cell `i`
+   whose neighbour `i+1` across the face is interfacial, use `T_{i-1}`, `T_i` and `T_sat` at
+   `θ h` to build a second-order one-sided Laplacian row (the coefficients are the standard
+   `2/((1+θ)θ h²)`-type family; write them out and gate with a 1-D quadratic profile that must
+   be reproduced EXACTLY). The row is non-symmetric — the scalar solver's RB-GS smoother does
+   not need symmetry; verify convergence on the planar rungs. Where `θ` is tiny (< 0.1), fall
+   back to the neighbour-behind (`i-1`) row so the coefficients stay bounded (Gibou's rule).
+3. *Curvature-consistent distances.* The distance from a cell centre to the interface along a
+   grid axis is the plane distance corrected by the interface curvature at the lateral offset:
+   `θ_c h = θ h + κ ρ²/2` (sign with `κ` positive for a gas bubble seen from the liquid), with
+   `κ` from the V3 cascade (`kappa` field; PV fallback where HF fails), `ρ` the lateral offset of
+   the axis line from the cell's interface centroid. Use it in the GFM row (item 2) and in the
+   diagnostic fit (P3f's `fit_curvature` option, now fed by the cascade instead of a prescribed
+   κ).
+4. *Interfacial cells that are almost pure.* Keep P01's per-face GFM formulation for which
+   faces get a row; a cell with `C` within `pcEffPureEps` of 0/1 is pure for the operator, and
+   its enthalpy is carried (P3f's `carry_conserve` deposit, which is bitwise conservative on the
+   planar scene) — with item 1 in place the carry no longer double-counts, which is what made it
+   worse in P3f.
+
+**Gates (P3f's instruments, in this order).** (a) 1-D: a linear and a quadratic temperature
+profile against a fixed plane at every `θ ∈ {0.05…0.95}` — the new row reproduces the
+quadratic EXACTLY (round-off) and the flux `Q_liq` equals the analytic one to 1e-12; (b) the
+2×2 probe of P3f (`{sphere, plane} × {Scriven, linear}`), 128³, R = 6/10/14/20: the area-averaged
+ṁ from item 1 within 0.5 % at R ≥ 10 and **order ≥ 1.8 in h/R** (P3f: +19…+6 %, order 0.9), and
+`−q_gfm/E_lat` within 0.5 % at an 8-cell thermal layer (P3f: −5.1 %); (c) the enthalpy budget on
+Scriven: residual ≤ 1e-10 of `E_lat` per step, both Ja; (d) **Scriven 128³ Ja 0.5 and 2**:
+`max|ΔR|/R` < 1 % over the last half AND `|β_eff/β − 1|` < 1 %, then Ja 10 once, then the
+96³/128³/192³ ladder at fixed R/L must now CONVERGE (order ≥ 1); (e) planar rungs: P1 and P1′ at
+the noise floor, P2 order ≥ 2 retained (record every digit that moves; P0a/P0b are
+ṁ-prescribed and must be byte-identical); (f) MPI np 1/2/4 bitwise on P0a/P1; `tests/kokkos`
+green; every VoF ctest bit-identical with phase change off; the new operator behind an option
+that becomes the default on a passed (d).
+
+**Deliverables.** The row family + flux bookkeeping in `src/vof/phase_change.hpp` /
+`scalar_transport.hpp` siblings, the κ plumbing, `tests/kokkos/test_vof_phase_change.cpp` gates
+(a)/(b)-planar, `tests/study/vof_scriven.py` (b)/(c)/(d), findings, CLAUDE.md.
+
+---
+
 ## WO-V7 — the pore-scale campaign (after WO-R2)  [OPUS runs, Fable/user interpret]
 
 Three cases, each a script under `tests/study/pore_scale/` and together one gallery page
