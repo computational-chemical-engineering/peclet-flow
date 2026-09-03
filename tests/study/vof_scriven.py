@@ -268,7 +268,8 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         area = dg['interface_area']
         meff = rho_l * dg['removed_volume'] / (dt_used * area) if area > 0 else float("nan")
         arel = area / (4.0 * math.pi * rnum * rnum) - 1.0
-        rows.append((tcur, rnum, rex, it, dg['mdot_mean'], mex, meff, arel))
+        rows.append((tcur, rnum, rex, it, dg['mdot_mean'], mex, meff, arel,
+                     dg['interface_cells']))
     d = s.phase_change_diagnostics()
     # thickness of the thermal boundary layer at t0: where the exact profile reaches 99 % of dT
     lo_, hi_ = r0, 200.0 * r0
@@ -300,11 +301,12 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
               f"R0/(2 beta^2) = {r0/(2*beta*beta):.3f} cells;  R0 from the colour field "
               f"{r0meas:.5f} vs exact {r0:.5f} ({100*(r0meas-r0)/r0:+.4f} %)")
         for k in list(range(0, len(rows), max(1, len(rows) // 8))) + [len(rows) - 1]:
-            t_, a, b_, it, mn_, mx_, me_, ar_ = rows[k]
+            t_, a, b_, it, mn_, mx_, me_, ar_, nc_ = rows[k]
             print(f"      t {t_:10.4f}  R_num {a:8.4f}  R_exact {b_:8.4f}  "
                   f"rel {100*(a-b_)/b_:+7.3f} %  mdot {mn_:.5e} vs {mx_:.5e} "
                   f"({100*(mn_-mx_)/mx_:+7.3f} %)  mdot_area {100*(me_-mx_)/mx_:+7.3f} %  "
-                  f"A/4piR^2 {100*ar_:+6.2f} %  iters {it}")
+                  f"A/4piR^2 {100*ar_:+6.2f} %  cells {nc_:6d} ({nc_/(4*math.pi*a*a):.3f}/h^2)"
+                  f"  iters {it}")
         early = ", ".join(f"{100*(r[4]-r[5])/r[5]:+.2f}" for r in rows[:6])
         print(f"      EARLY mdot rel error, steps 1..6: {early} %   "
               f"(last {100*(rows[-1][4]-rows[-1][5])/rows[-1][5]:+.2f} %)")
@@ -343,6 +345,22 @@ def plane_colour(n, nrm, sub=8, shift=0.37):
     return np.asfortranarray(frac)
 
 
+def cylinder_colour_chunked(n, ctr, R, sub):
+    """Liquid fraction of an INFINITE cylinder of radius R along z (a curved interface with ONE
+    non-zero principal curvature — the control that separates a metric error from a curvature
+    error), by sub^2 subsampling of the transverse plane. Exact in z by construction, so its
+    reference area 2 pi R n_z carries no z discretisation at all."""
+    off = (np.arange(sub) + 0.5) / sub
+    lo = max(0, int(math.floor(ctr - R - 2)))
+    hi = min(n, int(math.ceil(ctr + R + 2)))
+    q = (np.arange(lo, hi)[:, None] + off[None, :]).ravel() - ctr
+    d2 = q[:, None] ** 2 + q[None, :] ** 2
+    frac = (d2 < R * R).reshape(hi - lo, sub, hi - lo, sub).mean(axis=(1, 3))
+    c = np.ones((n, n, n), order="F")
+    c[lo:hi, lo:hi, :] = (1.0 - frac)[:, :, None]
+    return np.asfortranarray(c)
+
+
 def _mc_area(c):
     """Marching-cubes area of the C = 1/2 level set — an INDEPENDENT geometric reference for the
     summed PLIC area (it agrees with 4 pi R^2 to 0.5 % on the exact spheres below)."""
@@ -354,7 +372,7 @@ def _mc_area(c):
     return float(measure.mesh_surface_area(v, f))
 
 
-def area_probe(n, radii, ratio=100.0, sub=4, mode=None):
+def area_probe(n, radii, ratio=100.0, sub=4, mode=None, shape="sphere"):
     """A-PRIORI probe (WO-P3b): the summed PLIC interface area of an EXACT sphere, against 4 pi R^2.
 
     No time stepping, no energy solve, no velocity — the exact sphere fractions are set, one
@@ -373,7 +391,12 @@ def area_probe(n, radii, ratio=100.0, sub=4, mode=None):
         s.set_mu(1e-3)
         s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
         s.enable_vof()
-        if R > 0:
+        if R > 0 and shape == "cylinder":
+            c0 = cylinder_colour_chunked(n, ctr, R, sub)
+            # R from the volume deficit, exactly as the sphere row does: V = pi R^2 n_z
+            rm = math.sqrt((float(n) ** 3 - c0.sum()) / (math.pi * float(n)))
+            ref, lbl = 2.0 * math.pi * rm * float(n), "2 pi R n_z"
+        elif R > 0:
             c0 = sphere_colour_chunked(n, ctr, R, sub)
             ref, lbl = 4.0 * math.pi * ((3.0 * (float(n) ** 3 - c0.sum()) / (4.0 * math.pi))
                                         ** (1.0 / 3.0)) ** 2, "4 pi R^2  "
@@ -429,6 +452,9 @@ def main():
                          "sub = 4 drops a quarter of the interfacial cells and 6 % of the area)")
     ap.add_argument("--area-mode", type=int, default=None,
                     help="0 = PLIC/MYC area (rung P0/P1), 1 = cascade metric, 2 = cascade normal")
+    ap.add_argument("--area-shape", choices=("sphere", "cylinder"), default="sphere",
+                    help="what the area probe puts in the box (the cylinder has one zero "
+                         "principal curvature and an exact z direction)")
     ap.add_argument("--area-sub", type=int, default=4,
                     help="sub^3 subsampling of the area probe's EXACT sphere fractions (WO-P3c: "
                          "the sliver cells a coarse sub drops are what WO-P3b measured)")
@@ -438,7 +464,7 @@ def main():
     a = ap.parse_args()
     if a.area_probe:
         area_probe(a.n, [float(x) for x in a.area_probe.split(",")], ratio=a.ratio,
-                   sub=a.area_sub, mode=a.area_mode)
+                   sub=a.area_sub, mode=a.area_mode, shape=a.area_shape)
         return 0
     print(f"P3 Scriven bubble growth, {a.n}^3, cfl {a.cfl:g}, sweeps {a.sweeps}, "
           f"plane Dirichlet {not a.no_plane}, "

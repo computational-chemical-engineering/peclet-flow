@@ -40,6 +40,7 @@
 //      BITWISE unchanged — the branch-level statement that the machinery adds nothing of itself.
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <Kokkos_Core.hpp>
 #include <vector>
 
@@ -49,6 +50,13 @@ namespace {
 using peclet::flow::vof::plicAlpha;
 using peclet::flow::vof::plicArea;
 using peclet::flow::vof::plicVolume;
+using peclet::flow::vof::hfAreaElement;          // WO-P3c
+using peclet::flow::vof::hfSurfaceNormal;
+using peclet::flow::vof::pvSurfaceNormal;
+using peclet::flow::vof::interfaceAreaFromNormal;
+using peclet::flow::vof::kAreaPlic;
+using peclet::flow::vof::kAreaMetric;
+using peclet::flow::vof::kAreaNormal;
 
 int failures = 0;
 #define CHECK(cond)                                                                      \
@@ -61,6 +69,15 @@ int failures = 0;
 
 std::size_t idx(int x, int y, int z, int nx, int ny) {
   return (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny;
+}
+
+// WO-P3c: run every scene below with a non-default interfacial-AREA geometry
+// (`set_phase_change_area`) when `PECLET_P3C_AREA` is set, so the planar rungs can be re-taken on
+// the cascade area without a second binary. Inert (and byte-identical) when the variable is unset.
+template <class S>
+void applyAreaModeEnv(S& s) {
+  if (const char* e = std::getenv("PECLET_P3C_AREA"))
+    s.setPhaseChangeArea(std::atoi(e));
 }
 
 // ============================================================ K1: the PLIC polygon area
@@ -91,6 +108,77 @@ void areaGate() {
     }
   std::printf("K1 plicArea: max |analytic - |m|2 dV/dalpha (FD)| = %.3e\n", worst);
   CHECK(worst < 1e-5);  // the FD's own truncation, not the kernel's error
+}
+
+// ============================================================ K5: the WO-P3c area constructions
+//
+// A_Gamma may now come from the V3 curvature cascade's geometry instead of the MYC PLIC polygon
+// (`set_phase_change_area`). The gate is that on a PLANE the three modes are the SAME number —
+// which is what keeps every planar rung (P0a, P0b, P1, P2) where it was — and that the two new
+// kernels are the exact objects they claim to be:
+//
+//   * `hfAreaElement` on the height patch a plane with normal n produces = |m|_2/|m_d| = 1/|n_d|,
+//     the metric factor of the graph x_d = f(x_d1, x_d2);
+//   * `hfSurfaceNormal` on the same patch returns +-n (the sign is free: `plicArea` is invariant
+//     under m -> -m with alpha re-solved from the same colour, the two planes being point
+//     reflections through the cell centre);
+//   * `pvSurfaceNormal` of a paraboloid with no linear terms is the frame's own normal.
+void areaModeGate() {
+  const double ms[][3] = {{1, 0, 0},        {0, -1, 0},       {0.5, 0.5, 0},   {0.02, 0.98, 0},
+                          {0.2, 0.3, 0.5},  {-0.2, 0.3, -0.5}, {0.1, 0.1, 0.8}, {0.45, 0.45, 0.1}};
+  double worst1 = 0.0, worst2 = 0.0, worstMetric = 0.0, worstNrm = 0.0;
+  int exactAxis = 0;
+  for (const auto& m : ms) {
+    const double q = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+    // the column direction the cascade would pick: the largest |m_d|
+    int d = 0;
+    for (int k = 1; k < 3; ++k)
+      if (std::fabs(m[k]) > std::fabs(m[d]))
+        d = k;
+    const int d1 = (d + 1) % 3, d2 = (d + 2) % 3;
+    for (double v = 0.05; v < 0.999; v += 0.05) {
+      const double al = plicAlpha(m[0], m[1], m[2], v);
+      // the 3x3 height patch of the SAME plane: x_d = (alpha - m_d1 x1 - m_d2 x2)/m_d
+      double hh[9];
+      for (int qq = 0; qq < 3; ++qq)
+        for (int pp = 0; pp < 3; ++pp)
+          hh[pp + 3 * qq] = -(m[d1] * (pp - 1) + m[d2] * (qq - 1)) / m[d];
+      const double metric = hfAreaElement(hh);
+      worstMetric = std::fmax(worstMetric, std::fabs(metric - q / std::fabs(m[d])));
+      double ns[3];
+      hfSurfaceNormal(hh, d, ns);
+      const double dot = (ns[0] * m[0] + ns[1] * m[1] + ns[2] * m[2]) / q;
+      worstNrm = std::fmax(worstNrm, std::fabs(std::fabs(dot) - 1.0));
+      const double a0 = interfaceAreaFromNormal(kAreaPlic, m[0], m[1], m[2], al, v, ns);
+      const double a1 = interfaceAreaFromNormal(kAreaMetric, m[0], m[1], m[2], al, v, ns);
+      const double a2 = interfaceAreaFromNormal(kAreaNormal, m[0], m[1], m[2], al, v, ns);
+      CHECK(a0 == plicArea(m[0], m[1], m[2], al));
+      worst1 = std::fmax(worst1, std::fabs(a1 - a0) / a0);
+      worst2 = std::fmax(worst2, std::fabs(a2 - a0) / a0);
+      if (std::fabs(m[d]) == q) {  // axis-aligned: every factor is an exact 1.0
+        if (a1 == a0 && a2 == a0)
+          ++exactAxis;
+        else
+          CHECK(false);
+      }
+    }
+  }
+  std::printf("K5 area modes on a PLANE: max rel |metric - 1| %.3e, |normal| %.3e, "
+              "mode1 vs mode0 %.3e, mode2 vs mode0 %.3e (%d axis-aligned rows BITWISE)\n",
+              worstMetric, worstNrm, worst1, worst2, exactAxis);
+  CHECK(worstMetric < 1e-15);
+  CHECK(worstNrm < 1e-15);
+  CHECK(worst1 < 1e-14);
+  CHECK(worst2 < 1e-14);
+
+  // the paraboloid branch: no linear terms => the frame normal itself
+  const double t1[3] = {0.0, 1.0, 0.0}, t2[3] = {0.0, 0.0, 1.0}, nn[3] = {1.0, 0.0, 0.0};
+  double a[6] = {0.1, 0.0, 0.0, 0.05, 0.0, 0.05}, ns[3];
+  pvSurfaceNormal(a, t1, t2, nn, ns);
+  CHECK(ns[0] == 1.0 && ns[1] == 0.0 && ns[2] == 0.0);
+  a[1] = 0.3;  // a slope in t1 tilts it by exactly that much
+  pvSurfaceNormal(a, t1, t2, nn, ns);
+  CHECK(std::fabs(ns[1] + 0.3 / std::sqrt(1.09)) < 1e-15);
 }
 
 // ============================================================ K2: the one-sided gradient fit
@@ -207,6 +295,7 @@ void p0a() {
   s.enableVof();
   s.setVof(C);
   s.enablePhaseChange(1.0, 1.0, 1.0);
+  applyAreaModeEnv(s);
   s.setMassFluxUniform(mdot);
   auto pos = [&]() {
     const auto c = s.getVof();
@@ -257,6 +346,7 @@ void p0b() {
   s.setVof(C);
   s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {rg, rl - rg});
   s.enablePhaseChange(rg, rl, 1.0);
+  applyAreaModeEnv(s);
   s.setMassFluxUniform(mdot);
   const double Sc = mdot * (1.0 / rg - 1.0 / rl);  // per interfacial cell (A = 1 here)
   std::vector<double> sink((std::size_t)nx * ny * nz, 0.0);
@@ -348,6 +438,7 @@ double stefanRun(int N, double& exact) {
   s.setScalarBc("T", 1, 2, 0.0);  // saturated far field
   s.setField("T", T);
   s.enablePhaseChange(1.0, 1.0, 1.0);
+  applyAreaModeEnv(s);
   s.setPhaseChangeThermal("T", 0.0, D, D, 0.0);
   // The rung P0/P1 treatment, pinned explicitly: WO-P23 makes the plane-anchored Dirichlet and the
   // quadratic fit the DEFAULTS, and this function is kept as the ablation that reproduces the P01
@@ -417,6 +508,7 @@ double stefanRunP23(int N, double& exact) {
   s.setScalarBc("T", 1, 2, 0.0);
   s.setField("T", T);
   s.enablePhaseChange(1.0, 1.0, 1.0);
+  applyAreaModeEnv(s);
   s.setPhaseChangeThermal("T", 0.0, D, D, 0.0);
   s.setPhaseChangePlaneDirichlet(true);
   s.setPhaseChangeQuadraticFit(true);
@@ -471,6 +563,7 @@ void energyIdentity(double rcpRatio) {
   s.setField("T", T);
   s.setVelocity(0, std::vector<double>((std::size_t)nx * ny * nz, U));
   s.enablePhaseChange(1.0, 1.0, 1.0);
+  applyAreaModeEnv(s);
   s.setPhaseChangeThermal("T", T0, 1.0, 1.0, 0.0);  // T_sat = T0: a uniform field has zero mdot
   s.setPhaseChangeEnergy(1.0, rcpRatio);
   double worst = 0.0;
@@ -540,6 +633,7 @@ void p2(int N) {
   s.setScalarBc("T", 1, 2, farT(t0));
   s.setField("T", T);
   s.enablePhaseChange(rho_v, rho_l, h_lv);
+  applyAreaModeEnv(s);
   s.setPhaseChangeThermal("T", 0.0, k_v, k_l, 0.0);
   s.setPhaseChangeEnergy(rho_v * cpl, rho_l * cpl);
   double tcur = t0;
@@ -589,6 +683,7 @@ void inert() {
   b.enableVof();
   b.setVof(C);
   b.enablePhaseChange(1.0, 1.0, 1.0);
+  applyAreaModeEnv(b);
   b.setMassFluxUniform(0.0);
   for (int k = 0; k < 10; ++k)
     b.applyPhaseChange(1.0);
@@ -606,6 +701,7 @@ int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
     areaGate();
+    areaModeGate();
     gradientGate();
     quadraticGradientGate();
     gfmThetaGate();

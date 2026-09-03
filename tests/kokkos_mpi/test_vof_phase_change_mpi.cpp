@@ -92,6 +92,16 @@ static double stefanLambda(double St) {
   return 0.5 * (a + b);
 }
 
+
+// WO-P3c: run every scene below with a non-default interfacial-AREA geometry
+// (`set_phase_change_area`) when `PECLET_P3C_AREA` is set, so the planar rungs can be re-taken on
+// the cascade area without a second binary. Inert (and byte-identical) when the variable is unset.
+template <class S>
+void applyAreaModeEnv(S& s) {
+  if (const char* e = std::getenv("PECLET_P3C_AREA"))
+    s.setPhaseChangeArea(std::atoi(e));
+}
+
 int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   MPI_Init(&argc, &argv);
@@ -127,6 +137,7 @@ int main(int argc, char** argv) {
         ref.enableVof();
         ref.setVof(blockOf(colour, 0, 0, 0, NX, NY, NZ));
         ref.enablePhaseChange(1.0, 1.0, 1.0);
+        applyAreaModeEnv(ref);
         ref.setMassFluxUniform(mdot);
         for (int k = 0; k < 1000; ++k)
           ref.applyPhaseChange(dt);
@@ -140,6 +151,7 @@ int main(int argc, char** argv) {
       sd.enableVof();
       sd.setVof(blockOf(colour, ox, oy, oz, lnx, lny, lnz));
       sd.enablePhaseChange(1.0, 1.0, 1.0);
+      applyAreaModeEnv(sd);
       sd.setMassFluxUniform(mdot);
       for (int k = 0; k < 1000; ++k)
         sd.applyPhaseChange(dt);
@@ -184,6 +196,7 @@ int main(int argc, char** argv) {
         s.setScalarBc("T", 1, 2, 0.0);
         s.setField("T", blockOf(temp, Ox, Oy, Oz, nx, ny, nz));
         s.enablePhaseChange(1.0, 1.0, 1.0);
+        applyAreaModeEnv(s);
         s.setPhaseChangeThermal("T", 0.0, D, D, 0.0);
       };
       std::vector<double> refC;
@@ -268,6 +281,7 @@ int main(int argc, char** argv) {
         s.setScalarBc("T", 1, 2, farT(t0));
         s.setField("T", blockOf(temp, Ox, Oy, Oz, nx, ny, nz));
         s.enablePhaseChange(rho_v, rho_l, h_lv);
+        applyAreaModeEnv(s);
         s.setPhaseChangeThermal("T", 0.0, k_v, k_l, 0.0);
         // Probe switches (findings only): PECLET_P23_OFF is a subset of "pqe" to disable —
         // p = the plane-anchored Dirichlet, q = the quadratic fit, e = the consistent rho c_p T.
