@@ -1204,6 +1204,21 @@ the `step()` CSF dispatch and the `advectVof()` dispatch reduce to their previou
 | W2-5 MPI | **PASS** | bitwise at np 1; 1.3e-15 / 3.6e-15 / 1.1e-14 at np 2/4 |
 | W2-6 inertness | **PASS** | 32/32 ctests |
 
+### After the rebase onto `origin/main`
+
+Rebased onto `9ad0646` (which had meanwhile taken WO-V6's dynamic contact angle, WO-V6b's design
+and WO-V7's pore-scale campaign). Two textual conflicts, both "two sessions appended a section at
+the same anchor": `tests/kokkos_mpi/CMakeLists.txt`'s gated target list (`vof_wetting_dynamic_mpi`
+against `vof_blocks_ns_mpi` — both kept) and the findings log's newest-first head (WO-V7's entry
+against this one — both kept, this one first by date). Nothing in `src/vof/block_*.hpp` conflicted,
+which is the direct evidence that no concurrent session touched the block files.
+
+Rebuilt and re-run at the rebased head: **`tests/kokkos` 33/33 pass** (1175 s; 33 now, the extra one
+being WO-V6's `vof_wetting_dynamic`), **`test_vof_blocks_mpi` PASSED at np 1/2/4/8** with the same
+48/98/120 master migrations, and **`test_vof_blocks_ns_mpi` PASSED at np 1/2/4** — bitwise at np 1,
+du 8.0e-16 … 1.3e-15, dP 4.0e-15 … 8.0e-15, dC 7.1e-15 … 1.0e-14 at np 2/4 (the last bits of the
+reduction floor move with the upstream solver changes, as they must).
+
 ### Open / deferred
 
 1. **The block container is still ALL-FLUID.** `enable_vof_blocks` raises on `set_solid`; the
