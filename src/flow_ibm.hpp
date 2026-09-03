@@ -5973,6 +5973,9 @@ class Solver {
         scalarMaskStencil(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(sc.dmask), e_,
                           G);
       Kokkos::deep_copy(sc.cOld, sc.c);
+      // WO-P3f: add the enthalpy the interfacial cells' overwrite gave back (option, inert off).
+      if (hasMask && pcCarryConserve_ && pcCarrySrc_.extent(0) == n_)
+        pcCarryApply(sc);
       scalarFillGhosts(sc);
       if (energy)
         scalarBuildRhsHeat(sc.b, CCConst(sc.cOld), CCConst(sc.rcp), idt, e_, G);
@@ -8004,6 +8007,31 @@ class Solver {
     }
   }
   bool phaseChangeBudget() const { return pcBudgetOn_; }
+
+  /// WO-P3f: make the per-cell Dirichlet overwrite ENTHALPY-CONSERVING. See `pcCarryDeposit` for
+  /// the mechanism and the measurement. OFF by default (the shipped scheme is unchanged).
+  void setPhaseChangeCarryConserve(bool on) {
+    requirePhaseChange("set_phase_change_carry_conserve");
+    pcCarryConserve_ = on;
+    if (on && pcCarrySrc_.extent(0) != n_) {
+      pcCarrySrc_ = CCField("pc_carry_src", n_);
+      Kokkos::deep_copy(pcCarrySrc_, 0.0);
+    }
+  }
+  bool phaseChangeCarryConserve() const { return pcCarryConserve_; }
+
+  /// WO-P3f INSTRUMENT: prescribe the interface curvature `kappa = div(n)` the one-sided fits use
+  /// to correct their sample distances (`vof::pcCurvedDistance`). 0 (the default) is the shipped
+  /// tangent-plane distance and is bitwise inert. This is a PRESCRIBED number, not an estimator:
+  /// it exists so the O(h/R) curvature bias of the fit can be measured against a known geometry
+  /// before anyone builds a curvature estimator for it.
+  void setPhaseChangeFitCurvature(double kappa) {
+    requirePhaseChange("set_phase_change_fit_curvature");
+    pcFitKappa_ = kappa;
+  }
+  double phaseChangeFitCurvature() const { return pcFitKappa_; }
+  double phaseChangeCarryDeposited() const { return pcCarryDeposited_; }
+  double phaseChangeCarryLost() const { return pcCarryLost_; }
   PhaseChangeBudget phaseChangeBudgetValues() const { return pcBudget_; }
 
   /// The BAND-EXTENDED LIQUID VELOCITY of VOF_PLAN §9 item 3, as a MEASUREMENT rather than a
@@ -8241,6 +8269,7 @@ class Solver {
     const bool quad = pcQuadFit_;
     const bool depFallback = pcDepositFallback_;
     const double Tsat = pcTsat_, kg = pcKg_, kl = pcKl_, hlv = pcHlv_, Rint = pcRint_;
+    const double kapFit = pcFitKappa_;  // WO-P3f, 0 = the shipped (tangent-plane) distance
     const double rhoG = pcRhoG_, rhoL = pcRhoL_;
     long nIface = 0, nFallback = 0;
     double sumArea = 0.0, sumMdot = 0.0;
@@ -8288,7 +8317,10 @@ class Solver {
                     continue;
                   const long j = i + dx + dy * sy + dz * sz;
                   const double cj = c(j);
-                  const double phi = vof::pcOffsetDistance(phic, n, dx, dy, dz);
+                  double phi = vof::pcOffsetDistance(phic, n, dx, dy, dz);
+                  // WO-P3f: bitwise unchanged at kappaFit == 0 (the shipped default)
+                  if (kapFit != 0.0)
+                    phi = vof::pcCurvedDistance(phi, dx, dy, dz, n, kapFit);
                   if (cj <= pureEps && phi > 0.0)
                     vof::pcGradAdd(fg, w, phi, T(j), Tg);
                   else if (cj >= 1.0 - pureEps && phi < 0.0)
@@ -8619,6 +8651,7 @@ class Solver {
     CCField gn0 = pcGn_[0], gn1 = pcGn_[1], gn2 = pcGn_[2], gph = pcGphi_;
     CCConst c = CCConst(cField_), md = CCConst(pcMdot_), T = CCConst(sc.c);
     const double eps = pcEffInterfaceEps(), pureEps = pcEffPureEps(), Tsat = pcTsat_, Rint = pcRint_;
+    const double kapFit = pcFitKappa_;  // WO-P3f
     const bool carry = pcPlaneDir_, quad = pcQuadFit_;
     const long syl = sy, szl = sz;
     Kokkos::parallel_for(
@@ -8675,7 +8708,9 @@ class Solver {
                   continue;
                 const long j = i + dx + dy * syl + dz * szl;
                 const double cj = c(j);
-                const double phi = vof::pcOffsetDistance(phic, n, dx, dy, dz);
+                double phi = vof::pcOffsetDistance(phic, n, dx, dy, dz);
+                if (kapFit != 0.0)  // WO-P3f, bitwise unchanged at 0
+                  phi = vof::pcCurvedDistance(phi, dx, dy, dz, n, kapFit);
                 if (gasSide) {
                   if (cj <= pureEps && phi > 0.0)
                     vof::pcGradAdd(f, w, phi, T(j), Tgam);
@@ -8703,6 +8738,12 @@ class Solver {
     pcZeroDomainGhosts(pcGn_[1]);
     pcZeroDomainGhosts(pcGn_[2]);
     pcZeroDomainGhosts(pcGphi_);
+    // WO-P3f: the enthalpy the overwrite is about to destroy, returned to the phase it came from.
+    // Runs AFTER the exchanges above (it reads the donor's mask/normal/T_Gamma at depth 1 and the
+    // donor's own neighbours at depth 2). Inert -- no kernel, no allocation -- when the option
+    // is off.
+    if (pcCarryConserve_ && pcCarrySrc_.extent(0) == n_)
+      pcCarryDeposit(sc);
   }
 
   /// Zero the two ghost layers on every NON-periodic domain face this rank owns. Used for the
@@ -8731,6 +8772,134 @@ class Solver {
               f(base + (long)dir * L * sa) = 0.0;
           });
     }
+    Kokkos::fence();
+  }
+
+  /// **WO-P3f — the enthalpy the per-cell Dirichlet overwrite destroys, returned to the phase it
+  /// came from.** An OPTION (`set_phase_change_carry_conserve`), OFF by default.
+  ///
+  /// The leak. An interfacial cell's row is the identity `T = dval` (`scalarMaskRhs`), so whatever
+  /// the geometric energy transport left in that cell is DISCARDED every step and replaced by the
+  /// carried value `pcCarriedValue`. Over a cell's whole interfacial lifetime that telescopes to
+  /// `rho c_p (T_entry - dval_exit)`: a liquid cell that the interface sweeps enters with its
+  /// superheat and leaves as vapour at `T_sat`, and the difference goes nowhere. It is one-signed
+  /// on a growing bubble and it scales with the cells swept per step, i.e. with `R^2 dR/dt` —
+  /// exactly the shape of the P3 flux deficit. **Measured** by `phase_change_budget()`'s
+  /// `d_overwrite` on the Scriven scene at 128^3: `-0.7 %` of `mdot h_lv A_Gamma` at Ja = 0.5 and
+  /// `-4.3 %` at Ja = 2 (a destruction), against a growth deficit of 1.0 / 1.5 %.
+  ///
+  /// (What is NOT a leak, and the instrument says so: a cell CHANGING CLASS. `e_enter` is the
+  /// enthalpy of the cells that became interfacial this step, but those cells do not move and
+  /// their temperature is still in the field — the relabelling transfers nothing. The `e_enter`
+  /// column is a flux between two BOOKS, not an energy sink, and the two genuine
+  /// non-conservations of the rung are this overwrite and the `q_gfm` / `mdot h_lv A` mismatch.)
+  ///
+  /// The repair. Before the overwrite, hand `dE_j = rho c_p(C_j) (T_j - dval_j)` to cell `j`'s
+  /// face neighbours that are still IN the solve, weighted by `n_d^2` — the same allocation the
+  /// clip-and-redistribute uses, and a fixed-order GATHER (each receiving cell recomputes its
+  /// donors' decision) so it is decomposition-independent with no reverse-add halo, the WO-P01
+  /// pattern. Which SIDE of the interface receives is decided per axis and locally: of the two
+  /// pure neighbours along that axis, the one whose deviation from `T_Gamma` has the same sign as
+  /// the interfacial cell's own. That is the phase the discarded enthalpy came from — the
+  /// superheated LIQUID on an evaporating bubble (P3), the superheated VAPOUR on the Stefan
+  /// problem (P1) — with no scene-specific rule anywhere.
+  ///
+  /// Reads: the donor at depth 1 and the donor's own neighbours at depth 2, all inside the G = 2
+  /// halo and all exchanged before this runs. Writes: inner unmasked cells only.
+  void pcCarryDeposit(ScalarField& sc) {
+    const C3 e = e_;
+    const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
+    CCConst c = CCConst(cField_), T = CCConst(sc.c), dv = CCConst(sc.dval), mk = CCConst(sc.dmask),
+            tg = CCConst(pcTgam_), gn0 = CCConst(pcGn_[0]), gn1 = CCConst(pcGn_[1]),
+            gn2 = CCConst(pcGn_[2]);
+    CCField srcF = pcCarrySrc_;
+    const bool useRcp = pcEnergy_;
+    const double rcpG = pcRcpG_, rcpL = pcRcpL_;
+    double dep = 0.0, lost = 0.0;
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_carry_deposit", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          const long st[3] = {sx, sy, sz};
+          const long i = (long)x + (long)y * sy + (long)z * sz;
+          if (mk(i) > 0.5)
+            return;  // masked cells are the identity rows; they receive nothing
+          double add = 0.0;
+          for (int d = 0; d < 3; ++d)
+            for (int sg = -1; sg <= 1; sg += 2) {
+              const long j = i + (long)sg * st[d];
+              if (!(mk(j) > 0.5))
+                continue;
+              const double rj = useRcp ? vof::pcPhaseMix(rcpG, rcpL, c(j)) : 1.0;
+              const double dE = rj * (T(j) - dv(j));
+              if (!(dE != 0.0))
+                continue;
+              const double nn[3] = {gn0(j), gn1(j), gn2(j)};
+              const double devj = T(j) - tg(j);
+              int chosen[3] = {0, 0, 0};
+              double w[3] = {0.0, 0.0, 0.0}, wsum = 0.0;
+              for (int dd = 0; dd < 3; ++dd) {
+                if (nn[dd] == 0.0)
+                  continue;
+                const int sL = (nn[dd] > 0.0) ? -1 : +1;  // n points into the GAS
+                const double dl = T(j + (long)sL * st[dd]) - tg(j);
+                const double dg = T(j - (long)sL * st[dd]) - tg(j);
+                const int s = (dl * devj >= dg * devj) ? sL : -sL;
+                if (mk(j + (long)s * st[dd]) > 0.5)
+                  continue;  // that neighbour is itself an identity row: it cannot absorb
+                chosen[dd] = s;
+                w[dd] = nn[dd] * nn[dd];
+                wsum += w[dd];
+              }
+              if (!(wsum > 0.0))
+                continue;  // no neighbour left in the solve; the residual is booked below
+              if (chosen[d] != -sg)
+                continue;
+              add += (w[d] / wsum) * dE;
+            }
+          if (add == 0.0)
+            return;
+          const double ri = useRcp ? vof::pcPhaseMix(rcpG, rcpL, c(i)) : 1.0;
+          srcF(i) += add / ri;  // stored as a TEMPERATURE increment for cell i
+          acc += add;
+        },
+        dep);
+    // The donor total, so `lost` is the EXACT unplaced remainder rather than a census of one
+    // failure mode: an interfacial cell whose whole `n_d^2` allocation lands on cells that are
+    // themselves identity rows keeps its discarded enthalpy, and on a curved interface the band is
+    // thicker than one cell, so that is not a rare event. Report it, never hide it.
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_carry_total", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& tot) {
+          const long i = (long)x + (long)y * sy + (long)z * sz;
+          if (!(mk(i) > 0.5))
+            return;
+          const double ri = useRcp ? vof::pcPhaseMix(rcpG, rcpL, c(i)) : 1.0;
+          tot += ri * (T(i) - dv(i));
+        },
+        lost);
+    Kokkos::fence();
+    pcCarryDeposited_ = dep;
+    pcCarryLost_ = lost - dep;
+  }
+
+  /// WO-P3f: consume `pcCarrySrc_` into the energy solve's time base. Called from
+  /// `advanceScalars` right after `cOld` is taken, so the deposit enters that step's RHS.
+  void pcCarryApply(ScalarField& sc) {
+    const C3 e = e_;
+    const long sy = e_.x, sz = (long)e_.x * e_.y;
+    CCField cOld = sc.cOld, srcF = pcCarrySrc_;
+    CCConst mk = CCConst(sc.dmask);
+    Kokkos::parallel_for(
+        "peclet::flow::pc_carry_apply",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * sy + (long)z * sz;
+          if (!(mk(i) > 0.5))
+            cOld(i) += srcF(i);
+          srcF(i) = 0.0;
+        });
     Kokkos::fence();
   }
 
@@ -9638,6 +9807,14 @@ class Solver {
   bool pcBudgetOn_ = false;
   PhaseChangeBudget pcBudget_;
   CCField pcClsPrev_;
+  // WO-P3f: conserve the enthalpy the per-cell Dirichlet OVERWRITE destroys (see
+  // `pcCarryDeposit`). Off by default; `pcCarrySrc_` is unallocated until it is turned on.
+  // WO-P3f: the PRESCRIBED interface curvature `div(n)` used to correct the one-sided fit's
+  // sample distances (`vof::pcCurvedDistance`). 0 = the shipped tangent-plane distance, bitwise.
+  double pcFitKappa_ = 0.0;
+  bool pcCarryConserve_ = false;
+  CCField pcCarrySrc_;
+  double pcCarryDeposited_ = 0.0, pcCarryLost_ = 0.0;
   bool pcHasSink_ = false;
   double pcSinkW_ = 0.0;
   std::vector<Closure> closures_;     // property/body-force closures (applied at top of step())

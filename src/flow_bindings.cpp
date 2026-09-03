@@ -1807,6 +1807,48 @@ static void bind_solver(nb::module_& m, const char* name) {
           "band-extended velocity of VOF_PLAN section 9 item 3 is needed iff this is not at the "
           "projection floor), and the energy-scalar extrema under the consistent transport.")
       .def(
+          "set_phase_change_fit_curvature",
+          [](S& s, double k) { s.setPhaseChangeFitCurvature(k); }, nb::arg("kappa"),
+          "WO-P3f INSTRUMENT (default 0, bitwise inert): prescribe the interface curvature "
+          "`kappa = div(n)` that the one-sided temperature fits use to measure a sample's distance "
+          "to the CURVED interface instead of to the interfacial cell's tangent plane "
+          "(`vof::pcCurvedDistance`). For a spherical GAS bubble of radius R, whose PLIC normal "
+          "points inward, kappa = -2/R.\n\n"
+          "Why it exists: the tangent-plane distance makes the fit FIRST ORDER in h/R on a curved "
+          "interface, and every off-axis sample is hotter than the plane model expects, so the "
+          "fitted dT/dn and with it mdot come out HIGH. Measured a priori on an exact sphere with "
+          "an exactly linear profile: +19.2 / +12.1 / +8.8 / +6.2 % at R = 6 / 10 / 14 / 20, "
+          "observed order 0.91-0.98 in h/R. This entry point takes a PRESCRIBED kappa so that bias "
+          "can be measured against a known geometry; it is not a curvature estimator.")
+      .def(
+          "set_phase_change_carry_conserve",
+          [](S& s, bool on) { s.setPhaseChangeCarryConserve(on); }, nb::arg("on") = true,
+          "WO-P3f OPTION (default OFF): make the interfacial cells' per-cell Dirichlet OVERWRITE "
+          "enthalpy-conserving.\n\n"
+          "An interfacial cell's row is the identity `T = dval`, so whatever the geometric energy "
+          "transport left there is discarded every step. Over a cell's interfacial lifetime that "
+          "telescopes to rho c_p (T_entry - dval_exit): a liquid cell the interface sweeps enters "
+          "with its superheat and leaves as vapour at T_sat, and the difference goes nowhere. "
+          "Measured on Scriven 128^3 by `phase_change_budget()['d_overwrite']`: -0.7 % of "
+          "mdot h_lv A_Gamma at Ja = 0.5 and -4.3 % at Ja = 2, one-signed.\n\n"
+          "With this on, that enthalpy is handed to the interfacial cell's face neighbours that "
+          "are still in the solve, weighted by n_d^2 (the clip-and-redistribute allocation), as a "
+          "fixed-order gather so it is decomposition-independent. Which side receives is decided "
+          "per axis by which pure neighbour deviates from T_Gamma in the same direction as the "
+          "interfacial cell itself, i.e. the phase the enthalpy came from -- the superheated "
+          "liquid on an evaporating bubble, the superheated vapour on the Stefan problem.")
+      .def(
+          "phase_change_carry_ledger",
+          [](S& s) {
+            nb::dict r;
+            r["deposited"] = s.phaseChangeCarryDeposited();
+            r["lost"] = s.phaseChangeCarryLost();
+            return r;
+          },
+          "WO-P3f: the last `set_phase_change_carry_conserve` pass — the enthalpy actually handed "
+          "back ('deposited') and the enthalpy of the interfacial cells that had NO neighbour left "
+          "in the solve ('lost', which stays destroyed). Both 0 when the option is off.")
+      .def(
           "set_phase_change_budget", [](S& s, bool on) { s.setPhaseChangeBudget(on); },
           nb::arg("on") = true,
           "WO-P3f INSTRUMENT: turn on the energy budget of the phase-change energy solve. Costs "

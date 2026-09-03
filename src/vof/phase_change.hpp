@@ -200,6 +200,33 @@ KOKKOS_INLINE_FUNCTION double pcGradSolve(const PcGradFit& f) {
   return (f.den > 0.0) ? (f.num / f.den) : 0.0;
 }
 
+/// **WO-P3f — the sample's distance to the CURVED interface, not to the tangent plane.**
+///
+/// `pcOffsetDistance` returns the distance to the interfacial cell's PLIC PLANE. The one-sided fit
+/// then models `T` as a function of that, which is exact for a plane and FIRST ORDER in `h/R` for
+/// anything curved: a sample at lateral offset `rho` from the normal line sits `rho^2/(2R)` further
+/// from a sphere than from its tangent plane, and since `T` grows away from the interface every
+/// off-axis sample is HOTTER than the plane model expects, so the fitted `dT/dn` — and with it
+/// `mdot` — comes out systematically HIGH. Measured a priori on an exact sphere carrying an exactly
+/// linear profile (`vof_scriven.py --mdot-probe --mdot-prof linear`), 128^3, sub = 16:
+/// **+19.2 / +12.1 / +8.8 / +6.2 %** at R = 6 / 10 / 14 / 20 with observed order
+/// **0.91 / 0.93 / 0.98** in `h/R` — a clean first-order curvature bias, and the largest single
+/// error in the P3 rung.
+///
+/// The correction. With `kappa = div(n)` (the mean curvature of the level sets of the
+/// gas-positive distance function; `-2/R` for a spherical gas bubble, whose `n` points inward),
+/// the signed distance to the SURFACE of a point at plane distance `phi` and lateral offset `rho`
+/// is `phi + kappa rho^2/4` to second order. Derivation, for a gas sphere of radius `R` with the
+/// foot point at `R z_hat`: a point displaced `zeta` along `n = -z_hat` and `rho` tangentially sits
+/// at radius `sqrt((R-zeta)^2 + rho^2) ~ R - zeta + rho^2/(2R)`, so the gas-positive distance
+/// `R - r` is `zeta - rho^2/(2R)` where the plane says `zeta`; and `kappa/4 = -1/(2R)`.
+KOKKOS_INLINE_FUNCTION double pcCurvedDistance(double phi, double dx, double dy, double dz,
+                                               const double n[3], double kappa) {
+  const double dn = dx * n[0] + dy * n[1] + dz * n[2];
+  const double rho2 = Kokkos::fmax(dx * dx + dy * dy + dz * dz - dn * dn, 0.0);
+  return phi + 0.25 * kappa * rho2;
+}
+
 /// **The QUADRATIC one-sided fit** (WO-P23): `T - T_G = G phi + Q phi^2`, returning `G`.
 ///
 /// The linear fit above is a straight line through the interface value fitted to samples that

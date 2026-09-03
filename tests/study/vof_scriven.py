@@ -159,7 +159,7 @@ def sphere_colour(n, cx, cy, cz, R, sub=4):
 
 def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, consistent=True,
         quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True,
-        budget=0):
+        budget=0, carry=False, fitkap=False):
     rr = 1.0 / ratio
     beta = scriven_beta(ja, rr)
     t0 = (r0 / (2 * beta)) ** 2 / alpha_l          # cells^2 / (cells^2/s) = s
@@ -213,6 +213,11 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     s.set_phase_change_quadratic_fit(quad)
     if area_mode is not None:
         s.set_phase_change_area(area_mode)
+    if fitkap:
+        s.set_phase_change_fit_curvature(-2.0 / r0)
+    if carry:
+        # WO-P3f: conserve the enthalpy the interfacial cells' Dirichlet overwrite destroys.
+        s.set_phase_change_carry_conserve(True)
     if budget:
         # WO-P3f instrument (a): the energy budget of the energy solve, printed every `budget`
         # steps.  Off by default and inert in the solver when off.
@@ -234,6 +239,10 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     dtmin = 1e-4 * dt0
     while tcur < te:
         dt = min(dt, te - tcur)
+        if fitkap and rows:
+            # WO-P3f: the PRESCRIBED curvature of the bubble the run currently carries, from the
+            # liquid-volume deficit.  An instrument (a known geometry), not an estimator.
+            s.set_phase_change_fit_curvature(-2.0 / rows[-1][1])
         while True:
             s.set_dt(dt)
             try:
@@ -303,6 +312,13 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
             print(f"                     H_liq {b['h_liquid']:12.5e}  H_open {b['h_open']:12.5e}  "
                   f"dH_open/dt {dH:12.5e} W  |  class change: enter {b['e_enter']:11.4e} J "
                   f"leave {b['e_leave']:11.4e} J  net {dcls:12.5e} W ({100*dcls/e_lat if e_lat else float('nan'):+7.3f} % of E_lat)")
+            led = s.phase_change_carry_ledger()
+            # the CONSERVATION identity of the option: what the deposit hands back plus what it
+            # could not place must equal what the overwrite destroys, exactly.
+            idn = (led['deposited'] + led['lost'] + b['d_overwrite'])
+            print(f"                     carry ledger: deposited {led['deposited']:12.5e} J  "
+                  f"lost {led['lost']:11.4e} J  identity residual {idn:.3e} "
+                  f"(rel {idn/b['d_overwrite'] if b['d_overwrite'] else 0.0:.2e})")
             print(f"                     overwrite {dovw:12.5e} W (new cells {dovn:12.5e} W, "
                   f"{100*dovn/e_lat if e_lat else float('nan'):+7.3f} % of E_lat)  |  "
                   f"L->I {b['n_enter_liquid']:5d} G->I {b['n_enter_gas']:5d} "
@@ -785,7 +801,7 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
                       f"{m_d[2]/abs(t_e):.3e} l4 {m_d[4]/abs(t_e):.3e}")
 
 
-def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt, prof):
+def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt, prof, kap=False):
     """One a-priori mdot evaluation: `geom` x `prof`, the 2x2 that separates the two curvatures.
 
     `geom` = 'sphere' (the exact sphere, sub^3 fractions) or 'plane' (a flat interface normal to x
@@ -856,6 +872,10 @@ def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt,
     s.set_phase_change_quadratic_fit(quad)
     if area_mode is not None:
         s.set_phase_change_area(area_mode)
+    if kap:
+        # WO-P3f: the curvature-corrected sample distance, with kappa = div(n) PRESCRIBED from the
+        # known geometry (-2/R for a gas sphere; 0 for the flat control).
+        s.set_phase_change_fit_curvature(-2.0 / R if geom == "sphere" else 0.0)
     s.set_phase_change_budget(True)     # WO-P3f: also read the GFM heat the SAME fields draw
     s.apply_phase_change(dt)
     dg = s.phase_change_diagnostics()
@@ -879,7 +899,7 @@ def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt,
 
 
 def mdot_probe(n, radii, ja=0.5, ratio=100.0, sub=16, alpha_l=1.0, area_mode=None, quad=True,
-               plane=True, dt=None, geoms=("sphere", "plane"), profs=("scriven",)):
+               plane=True, dt=None, geoms=("sphere", "plane"), profs=("scriven",), kap=False):
     """WO-P3f gate (b): the a-priori CURVATURE BIAS of the one-sided mdot fit.
 
     For each radius the exact sphere carries Scriven's similarity profile at the matching time and
@@ -888,7 +908,7 @@ def mdot_probe(n, radii, ja=0.5, ratio=100.0, sub=16, alpha_l=1.0, area_mode=Non
     """
     print(f"  a-priori MDOT probe, {n}^3, Ja {ja:g}, ratio {ratio:g}, exact fractions "
           f"(sub = {sub}^3), area mode {0 if area_mode is None else area_mode}, "
-          f"quadratic fit {quad}, plane Dirichlet {plane}")
+          f"quadratic fit {quad}, plane Dirichlet {plane}, curvature-corrected distance {kap}")
     for prof in profs:
       for geom in geoms:
         prev = None
@@ -901,7 +921,7 @@ def mdot_probe(n, radii, ja=0.5, ratio=100.0, sub=16, alpha_l=1.0, area_mode=Non
                 t_ = (R / (2 * b_)) ** 2 / alpha_l
                 step = 1e-3 / max(rr * b_ * math.sqrt(alpha_l / t_), 1e-300)
             r = _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, step,
-                            prof)
+                            prof, kap=kap)
             rel = r['m_area'] / r['mdot_ex'] - 1.0
             relA = r['area'] / r['ref_area'] - 1.0
             mc = r['m_cell']
@@ -923,6 +943,81 @@ def mdot_probe(n, radii, ja=0.5, ratio=100.0, sub=16, alpha_l=1.0, area_mode=Non
                   f"p50 {100*np.percentile(cell_rel,50):+7.3f} p95 "
                   f"{100*np.percentile(cell_rel,95):+7.3f} %")
             prev = (R, rel)
+
+
+def carry_probe(n, steps, ratio=100.0, carry=False, sub=16, grad=0.05, mdot=2.0e-3):
+    """WO-P3f, the a-priori gate of `--carry`: a PLANAR interface swept through cells at a
+    PRESCRIBED mass flux, with a linear superheat profile in the liquid.
+
+    Everything about the scene is chosen so the ONLY enthalpy book-keeping under test is the
+    interfacial cells' Dirichlet overwrite: `mdot` is prescribed (no gradient fit), the phase
+    conductivities are ~0 (no diffusion), the interface is flat (no curvature) and the profile is
+    linear (no profile curvature). Per step the instrument prints the identity the option must
+    satisfy exactly -- what the deposit hands back plus what it could not place equals what the
+    overwrite destroys -- and the trajectory of the total enthalpy `sum rho c_p(C) (T - T_sat)`
+    over the inner cells, which is the quantity the option exists to stop leaking.
+    """
+    rho_l, rho_v = 1.0, 1.0 / ratio
+    rcp_l, rcp_v = 1.0, rho_v
+    k_l, k_v = 1.0, 1.0 / ratio
+    h_lv = k_l * grad / mdot          # so the FITTED mass flux is exactly `mdot`
+    ctr = 0.5 * n
+    shift = round(0.37 * sub) / sub
+    off = (np.arange(sub) + 0.5) / sub
+    q = (np.arange(n)[:, None] + off[None, :]).ravel() - ctr - shift
+    frac = (q > 0.0).reshape(n, sub).mean(axis=1)
+    c0 = np.asfortranarray(np.repeat(frac, n * n).reshape(n, n, n))
+    ax = (np.arange(n) + 0.5) - ctr - shift
+    d = ax[:, None, None] * np.ones((1, n, n))
+    tprof = np.asfortranarray(np.where(d > 0.0, grad * d, 0.0))
+
+    s = pf.Solver(n, n, n)
+    s.set_rho(rho_l)
+    s.set_mu(1e-3)
+    for f in range(6):
+        s.set_domain_bc(f, 3)
+    s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
+    s.enable_vof()
+    s.set_vof(c0)
+    s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
+    s.set_pressure_fcg(True, 600, 1e-10)
+    s.add_scalar("T", k_l / rcp_l, 1, 50)
+    for f in range(6):
+        s.set_scalar_bc("T", f, 1, 0.0)
+    s.set_field("T", tprof)
+    s.enable_phase_change(rho_v, rho_l, h_lv)
+    # thermal mdot, but on a FLAT interface with an exactly LINEAR profile, which is the one
+    # configuration in which the one-sided fit is exact (WO-P3f's `plane x linear` control): the
+    # mass flux is then `mdot` by construction and nothing but the enthalpy book-keeping is under
+    # test.  A PRESCRIBED mdot cannot be used here -- `set_mass_flux_uniform` turns the thermal
+    # path (and with it the per-cell Dirichlet set) OFF.
+    s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
+    s.set_phase_change_energy(rcp_v, rcp_l)
+    s.set_phase_change_area(6)
+    s.set_phase_change_budget(True)
+    if carry:
+        s.set_phase_change_carry_conserve(True)
+    print(f"  WO-P3f CARRY probe, {n}^3, planar interface, prescribed mdot {mdot:g}, linear "
+          f"superheat grad {grad:g}/cell, k_l = {k_l:g}, h_lv = {h_lv:g}, carry {carry}")
+    # keep the interface-local Courant number well under the Weymouth-Yue cap: the deposit
+    # drives |u| ~ mdot (1/rho_v - 1/rho_l).
+    dt = 0.1 / (mdot * (1.0 / rho_v - 1.0 / rho_l))
+    hprev = None
+    for k in range(steps):
+        s.set_dt(dt)
+        s.step()
+        b = s.phase_change_budget()
+        led = s.phase_change_carry_ledger()
+        idn = led['deposited'] + led['lost'] + b['d_overwrite']
+        T = np.asarray(s.get_field("T"))
+        C = np.asarray(s.get_vof())
+        H = float(np.sum((rcp_v * (1.0 - C) + rcp_l * C) * T))
+        dH = float("nan") if hprev is None else H - hprev
+        hprev = H
+        print(f"      step {k+1:3d}  overwrite {b['d_overwrite']:12.5e} J  deposited "
+              f"{led['deposited']:12.5e}  lost {led['lost']:11.4e}  IDENTITY {idn:.3e} "
+              f"(rel {idn/b['d_overwrite'] if b['d_overwrite'] else 0.0:.2e})  "
+              f"H {H:.10e}  dH {dH:+.5e}  q_gfm {b['q_gfm']:.3e}")
 
 
 def main():
@@ -981,6 +1076,17 @@ def main():
     ap.add_argument("--regress-advect", type=int, default=0,
                     help="WO-P3e: Weymouth-Yue pre-steps (pure translation) before the regression "
                          "step, so the fractions are advection-realistic")
+    ap.add_argument("--fit-curvature", action="store_true",
+                    help="WO-P3f: correct the one-sided fits' sample distances for the interface "
+                         "curvature, with kappa = -2/R PRESCRIBED from the known geometry")
+    ap.add_argument("--carry", action="store_true",
+                    help="WO-P3f: turn on set_phase_change_carry_conserve (the enthalpy the "
+                         "interfacial cells' Dirichlet overwrite destroys is returned to the "
+                         "phase it came from)")
+    ap.add_argument("--carry-probe", type=int, default=0,
+                    help="WO-P3f a-priori gate for --carry: N steps of a PLANAR interface swept "
+                         "at a prescribed mdot through a linear superheat profile, checking the "
+                         "conservation identity per step; then exit")
     ap.add_argument("--budget", type=int, default=0,
                     help="WO-P3f instrument (a): print the ENERGY BUDGET of the energy solve every "
                          "N steps (0 = off, the shipped behaviour)")
@@ -1008,13 +1114,16 @@ def main():
                       sub=a.area_sub, modes=[int(x) for x in a.regress_modes.split(",")],
                       ratio=a.ratio, advect_steps=a.regress_advect, cfl=a.cfl)
         return 0
+    if a.carry_probe:
+        carry_probe(a.n, a.carry_probe, ratio=a.ratio, carry=a.carry)
+        return 0
     if a.mdot_probe:
         mdot_probe(a.n, [float(x) for x in a.mdot_probe.split(",")],
                    ja=float(a.ja.split(",")[0]), ratio=a.ratio, sub=a.area_sub,
                    area_mode=a.area_mode, quad=not a.no_quad, plane=not a.no_plane,
                    dt=(a.mdot_dt if a.mdot_dt > 0 else None),
                    geoms=tuple(a.mdot_geom.split(",")),
-                   profs=tuple(a.mdot_prof.split(",")))
+                   profs=tuple(a.mdot_prof.split(",")), kap=a.fit_curvature)
         return 0
     if a.area_probe:
         area_probe(a.n, [float(x) for x in a.area_probe.split(",")], ratio=a.ratio,
@@ -1027,7 +1136,8 @@ def main():
     for ja in [float(x) for x in a.ja.split(",")]:
         run(a.n, ja, a.ratio, a.r0, a.r1, cfl=a.cfl, sweeps=a.sweeps, plane=not a.no_plane,
             consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl, init=a.init,
-            sub=a.sub, area_mode=a.area_mode, budget=a.budget)
+            sub=a.sub, area_mode=a.area_mode, budget=a.budget, carry=a.carry,
+            fitkap=a.fit_curvature)
     return 0
 
 
