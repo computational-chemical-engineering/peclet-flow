@@ -1467,6 +1467,8 @@ under rule 3b (max pressure iterations **30** against the 600 cap, none capped).
   read-outs added to the coupled run: **`delta` per step** (`removed_volume/area`, with `delta/R`)
   and **`A_end`** (`vof_interface_area()` recomputed after the step) beside the stale
   `interface_area`, plus the radius each of them implies.
+* one one-line defect fix in the same driver (`--help` crashed; see below).
+
 **`src/` is UNTOUCHED by this work order.** `git diff origin/main -- src tests/kokkos
 tests/kokkos_mpi` is empty: only `tests/study/vof_scriven.py`, this file and `CLAUDE.md` change. A
 corrected plane shift WAS implemented, measured and then removed — see "the corrected shift, and why
