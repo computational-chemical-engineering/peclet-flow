@@ -158,8 +158,7 @@ def sphere_colour(n, cx, cy, cz, R, sub=4):
 
 
 def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, consistent=True,
-        quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True,
-        swept=False):
+        quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True):
     rr = 1.0 / ratio
     beta = scriven_beta(ja, rr)
     t0 = (r0 / (2 * beta)) ** 2 / alpha_l          # cells^2 / (cells^2/s) = s
@@ -213,8 +212,6 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     s.set_phase_change_quadratic_fit(quad)
     if area_mode is not None:
         s.set_phase_change_area(area_mode)
-    if swept:
-        s.set_phase_change_swept(True)
 
     # ADAPTIVE dt on the solver's OWN interface-local Courant number. The a-priori estimate
     # u = (1 - rho_v/rho_l) Rdot is the CONTINUUM interface speed and the discrete field overshoots
@@ -642,8 +639,7 @@ def _cubic_bins(n, ctr, nb=4):
 
 
 def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(0, 6),
-                  ratio=100.0, advect_steps=0, drift=(0.5, 0.25, 0.125), cfl=0.2, nbin=4,
-                  swept=False):
+                  ratio=100.0, advect_steps=0, drift=(0.5, 0.25, 0.125), cfl=0.2, nbin=4):
     """WO-P3e — the a-priori INTERFACE REGRESSION probe.  No time stepping, no energy solve, no
     velocity: an exact sphere goes in, ONE `apply_phase_change(dt)` with a uniform prescribed mdot
     runs the plane shift + clip-and-redistribute, and the colour field that comes out is compared
@@ -669,7 +665,7 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
     ctr0 = 0.5 * n
     rho_l, rho_v = 1.0, 1.0 / ratio
     print(f"  a-priori REGRESSION probe, {n}^3, exact sphere fractions (sub = {sub}^3), "
-          f"ratio {ratio:g}, {advect_steps} WY pre-steps, swept shift {swept}")
+          f"ratio {ratio:g}, {advect_steps} WY pre-steps")
     for R in radii:
         c0 = sphere_colour_chunked(n, ctr0, R, sub)
         cstart, ctr = c0, (ctr0, ctr0, ctr0)
@@ -711,7 +707,6 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
                 s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
                 s.enable_phase_change(rho_v, rho_l, 1.0)
                 s.set_phase_change_area(mode)
-                s.set_phase_change_swept(swept)
                 s.set_mass_flux_uniform(1.0)
                 a_bef = s.vof_interface_area()
                 s.apply_phase_change(delta)
@@ -818,9 +813,6 @@ def main():
                     help="WO-P3e: comma-separated normal displacements per step, in cells")
     ap.add_argument("--regress-modes", type=str, default="0,6",
                     help="WO-P3e: comma-separated set_phase_change_area modes to run the probe on")
-    ap.add_argument("--regress-swept", action="store_true",
-                    help="WO-P3e: run the probe with the EXACT swept-volume plane shift "
-                         "(set_phase_change_swept) instead of the shipped linearization")
     ap.add_argument("--regress-advect", type=int, default=0,
                     help="WO-P3e: Weymouth-Yue pre-steps (pure translation) before the regression "
                          "step, so the fractions are advection-realistic")
@@ -833,8 +825,7 @@ def main():
         regress_probe(a.n, [float(x) for x in a.regress_probe.split(",")],
                       deltas=[float(x) for x in a.regress_delta.split(",")],
                       sub=a.area_sub, modes=[int(x) for x in a.regress_modes.split(",")],
-                      ratio=a.ratio, advect_steps=a.regress_advect, cfl=a.cfl,
-                      swept=a.regress_swept)
+                      ratio=a.ratio, advect_steps=a.regress_advect, cfl=a.cfl)
         return 0
     if a.area_probe:
         area_probe(a.n, [float(x) for x in a.area_probe.split(",")], ratio=a.ratio,
@@ -847,7 +838,7 @@ def main():
     for ja in [float(x) for x in a.ja.split(",")]:
         run(a.n, ja, a.ratio, a.r0, a.r1, cfl=a.cfl, sweeps=a.sweeps, plane=not a.no_plane,
             consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl, init=a.init,
-            sub=a.sub, area_mode=a.area_mode, swept=a.regress_swept)
+            sub=a.sub, area_mode=a.area_mode)
     return 0
 
 

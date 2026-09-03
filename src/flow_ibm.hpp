@@ -7787,13 +7787,6 @@ class Solver {
   void setPhaseChangeQuadraticFit(bool on) { pcQuadFit_ = on; }
   bool phaseChangeQuadraticFit() const { return pcQuadFit_; }
 
-  /// WO-P3e: use the EXACT swept volume of the plane shift instead of its linearization
-  /// `dV = mdot A dt / rho_l` (see `vof::pcSweptFactor`). Off by default: it is exactly the
-  /// `delta/R` term, it is zero on every planar gate, and on the Scriven bubble the regression's
-  /// own step is `delta = 1.8e-3` cells so it moves the gate by less than its last digit.
-  void setPhaseChangeSwept(bool on) { pcSwept_ = on; }
-  bool phaseChangeSwept() const { return pcSwept_; }
-
   /// **WO-P3c — which geometry the interfacial AREA comes from.** `A_Gamma` enters the plane shift
   /// (`dV = mdot A dt / rho_l`) and the divergence source (`S = mdot A (1/rho_g - 1/rho_l)`), so the
   /// bubble grows as `int mdot dA` and a biased area is a biased growth rate.
@@ -8086,7 +8079,7 @@ class Solver {
   /// and apply the interface regression. No Navier-Stokes step, no advection.
   void applyPhaseChange(double dt) {
     requirePhaseChange("apply_phase_change");
-    pcBuildInterface(dt);
+    pcBuildInterface();
     pcScatterSource();
     pcRegress(dt);
     pcUpdateEnergyProps();
@@ -8098,7 +8091,7 @@ class Solver {
   void phaseChangeStep() {
     if (!pcEnabled_)
       return;
-    pcBuildInterface(dt_);
+    pcBuildInterface();
     pcScatterSource();
     pcRegress(dt_);
   }
@@ -8137,7 +8130,7 @@ class Solver {
   /// per-cell quantities so the regression's depth-1 ring and the source gather's depth-2 ring see
   /// the OWNER's values — which is what makes both decomposition-independent WITHOUT any
   /// reverse/add halo and without an atomic scatter (bitwise MPI, not a reduction floor).
-  void pcBuildInterface(double dt = 0.0) {
+  void pcBuildInterface() {
     // WO-P23 (a defect found in the P0/P1 code): the gradient fit reads the temperature at +-2, so
     // the energy scalar's ghost band has to be VALID here. `set_field` and the coupling drivers
     // write inner cells only, and `advanceScalars` fills the ghosts at its END — so the FIRST
@@ -8178,8 +8171,6 @@ class Solver {
     const bool depFallback = pcDepositFallback_;
     const double Tsat = pcTsat_, kg = pcKg_, kl = pcKl_, hlv = pcHlv_, Rint = pcRint_;
     const double rhoG = pcRhoG_, rhoL = pcRhoL_;
-    const bool swept = pcSwept_ && dt != 0.0;  // WO-P3e, inert (and unreachable) when off
-    const double pcDt = dt;
     long nIface = 0, nFallback = 0;
     double sumArea = 0.0, sumMdot = 0.0;
     Kokkos::parallel_reduce(
@@ -8207,7 +8198,7 @@ class Solver {
           double m[3];
           vof::mycNormal(st, m);
           const double al = vof::plicAlpha(m[0], m[1], m[2], c(i));
-          double A = cascadeArea ? areaCasc(i) : vof::plicArea(m[0], m[1], m[2], al);
+          const double A = cascadeArea ? areaCasc(i) : vof::plicArea(m[0], m[1], m[2], al);
           double n[3] = {1.0, 0.0, 0.0};
           if (!(vof::pcUnitNormal(m[0], m[1], m[2], n) > 0.0))
             return;
@@ -8235,28 +8226,6 @@ class Solver {
             md = quad ? vof::pcMassFlux(kg, vof::pcGradSolve2(fg), kl, vof::pcGradSolve2(fl), hlv)
                       : vof::pcMassFlux(kg, vof::pcGradSolve(fg), kl, vof::pcGradSolve(fl), hlv);
             mdot(i) = md;
-          }
-          if (swept && A > 0.0) {
-            // WO-P3e: replace the linearized plane shift `A delta` by the exact swept volume
-            // `int_0^delta A(s) ds`. The correction is ADDITIVE, not a factor: the per-cell factor
-            // of a cell's OWN PLIC polygon has a large variance that is uncorrelated with the
-            // SHEET's per-cell share (the polygon area of a plane sweeping through a cube rises
-            // and falls; only the SUM tracks `4 pi (R+s)^2`), so multiplying a mode-6 share by it
-            // is measurably WORSE than not correcting at all (-0.96 % against -0.77 % on the
-            // R = 12, delta = 0.1 probe). The DIFFERENCE `swept/delta - A_plic` is the curvature
-            // term itself and sums correctly whatever the area mode; for mode 0 (A == A_plic) the
-            // two forms coincide exactly.
-            const double aplic = vof::plicArea(m[0], m[1], m[2], al);
-            const double f = vof::pcSweptFactor(m[0], m[1], m[2], al, c(i), aplic,
-                                                md * pcDt / rhoL);
-            // `A == 0` is the "no surface booked to this cell" sentinel of `pcRegress` and of the
-            // deposit (mode 6 books nothing to the 48 cells of a Scriven bubble whose `+n` walk
-            // finds no pure gas cell, which is exactly why it has no deposit fallback -- WO-P3d),
-            // so the correction is applied only where the sheet booked something, and never drives
-            // `A` through zero in either direction.
-            const double corr = aplic * (f - 1.0);
-            if (A + corr > 0.0)
-              A += corr;
           }
           area(i) = A;
           nx(i) = n[0];
@@ -9426,7 +9395,6 @@ class Solver {
   bool pcPlaneDir_ = true;   // plane-anchored (GFM) Dirichlet rows instead of pinning the cell
   double pcGfmThMin_ = 0.1, pcGfmThMax_ = 1.9;  // the GFM distance clamp (cells)
   bool pcQuadFit_ = true;    // quadratic (Aslam) one-sided gradient fit (WO-P23 default)
-  bool pcSwept_ = false;     // WO-P3e: exact swept-volume plane shift (option, measured inert)
   // WO-P3d (2026-09-03, coordinator's decision): the DEFAULT is the joined sheet (marching
   // tetrahedra on the PLIC signed-distance level set, centroid deposit). Gate re-derived: it is at
   // the floor on every a-priori geometry (sphere 1e-4, tilted planes 2e-6, cylinder order 2.04),

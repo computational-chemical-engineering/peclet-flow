@@ -100,10 +100,6 @@ template <class S>
 void applyAreaModeEnv(S& s) {
   if (const char* e = std::getenv("PECLET_P3C_AREA"))
     s.setPhaseChangeArea(std::atoi(e));
-  // WO-P3e: the same hook for `set_phase_change_swept` (the exact swept-volume plane shift), so the
-  // bitwise-across-np statement can be re-taken with the option on. Inert when the variable is unset.
-  if (const char* e = std::getenv("PECLET_P3E_SWEPT"))
-    s.setPhaseChangeSwept(std::atoi(e) != 0);
 }
 
 int main(int argc, char** argv) {

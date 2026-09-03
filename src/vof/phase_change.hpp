@@ -373,55 +373,6 @@ KOKKOS_INLINE_FUNCTION bool pcPushWeights(const double n[3], double sgn, const b
   return ok;
 }
 
-/// **The SWEPT-VOLUME factor of the plane shift (WO-P3e).**
-///
-/// The shipped regression removes `dV = mdot A dt / rho_l` of liquid from an interfacial cell,
-/// i.e. it linearizes the plane shift: the volume swept by a plane moving a normal distance
-/// `delta = mdot dt / rho_l` through a cell is `int_0^delta A(s) ds`, and `A delta` is its first
-/// term. On a PLANE `A(s)` is constant along the sweep in the axis-aligned case and, in general,
-/// the per-cell variations cancel in the SUM (the total area of a plane is independent of where
-/// it sits), so every planar gate of rungs P0/P1/P2 is exact either way. On a CURVED interface it
-/// is not: for a sphere `sum A(s) = 4 pi (R+s)^2`, so the exact shell is
-/// `4 pi R^2 delta (1 + delta/R + delta^2/(3R^2))` and the linearization is low by `delta/R`.
-///
-/// This returns the correction FACTOR `f = (int_0^delta A_plic(s) ds) / (delta A_plic(0))`,
-/// computed exactly from the cell's own PLIC plane (`A_plic = |m|_2 dV/dalpha`, so the integral is
-/// just the volume difference `V(alpha) - V(alpha - delta |m|_2)`) and applied to whatever area
-/// `set_phase_change_area` selected — the factor is a property of the cell's geometry and the
-/// SHEET area is a property of the surface, and multiplying them keeps both statements.
-///
-/// Once the shifted plane leaves the cell the sweep is continued LINEARLY with the cell's own
-/// polygon area, which is exactly the shipped rule — so the excess that clip-and-redistribute
-/// pushes into the neighbour is unchanged in form, and the option only ever changes the part of
-/// the shift that happens INSIDE the cell.
-///
-/// **Measured (WO-P3e, the a-priori regression probe): it is the delta/R term and nothing else,
-/// and at the Scriven bubble's own step it is irrelevant.** On an exact sphere at R = 12 with
-/// delta = 0.1 cells the shipped rule removes 0.771 % too little liquid and the exact shift
-/// removes 0.004 % too little; but the Scriven run's regression step is
-/// `delta = mdot dt / rho_l = 1.8e-3` cells (the interface moves 0.2 cells per step, of which
-/// 99 % is ADVECTION by the liquid velocity — at density ratio 100 the regression supplies only
-/// `rho_v/rho_l` of it), so `delta/R ~ 1e-4` and the correction moves nothing.
-KOKKOS_INLINE_FUNCTION double pcSweptFactor(double mx, double my, double mz, double alpha,
-                                            double c, double aplic, double delta) {
-  if (!(aplic > 0.0) || !(Kokkos::fabs(delta) > 0.0))
-    return 1.0;
-  const double a2 = Kokkos::sqrt(mx * mx + my * my + mz * mz);
-  if (!(a2 > 0.0))
-    return 1.0;
-  const double an = alpha - delta * a2;
-  double dv;
-  if (delta > 0.0) {
-    const double alo = plicAlpha(mx, my, mz, 0.0);  // the offset at which the cell empties
-    dv = (an > alo) ? (c - plicVolume(mx, my, mz, an)) : (c + (alo - an) / a2 * aplic);
-  } else {
-    const double ahi = plicAlpha(mx, my, mz, 1.0);  // ... and at which it fills
-    dv = (an < ahi) ? (c - plicVolume(mx, my, mz, an)) : (c - 1.0 - (an - ahi) / a2 * aplic);
-  }
-  const double f = dv / (delta * aplic);
-  return (f > 0.0 && f < 8.0) ? f : 1.0;  // degenerate slivers keep the linear rule
-}
-
 /// Is this a cell the regression acts on? The PLIC contract of `advect_wy.hpp` (`wyIsMixed`) with
 /// an explicit wisp guard: a cell whose colour is round-off residue has no meaningful plane, and
 /// giving it an area would inject an unbounded `mdot` into the census.

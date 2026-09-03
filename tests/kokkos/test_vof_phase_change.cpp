@@ -85,12 +85,6 @@ template <class S>
 void applyAreaModeEnv(S& s) {
   if (const char* e = std::getenv("PECLET_P3C_AREA"))
     s.setPhaseChangeArea(std::atoi(e));
-  // WO-P3e: the same hook for the EXACT swept-volume plane shift (`set_phase_change_swept`). On an
-  // axis-aligned plane `V(alpha)` is linear, so the swept factor is exactly 1 and the correction is
-  // exactly 0 -- the planar scenes below must therefore stay BYTE-identical with it on, which is
-  // what `PECLET_P3E_SWEPT=1` measures.
-  if (const char* e = std::getenv("PECLET_P3E_SWEPT"))
-    s.setPhaseChangeSwept(std::atoi(e) != 0);
 }
 
 // ============================================================ K1: the PLIC polygon area

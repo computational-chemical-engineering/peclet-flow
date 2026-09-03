@@ -1210,7 +1210,7 @@ Four things this rung paid for, all measured (`doc/vof_workorders_v6.md`, WO-P01
 Scope, each enforced with a message: STAGGERED only, no immersed solid, and not composable with
 `enable_vof_momentum`. New Python: `enable_phase_change`,
 `set_mass_flux_uniform` / `set_mass_flux`, `set_phase_change_thermal` /
-`set_phase_change_thermal_off`, `set_divergence_source` / `clear_divergence_source`, `set_phase_change_swept`,
+`set_phase_change_thermal_off`, `set_divergence_source` / `clear_divergence_source`,
 `apply_phase_change(dt)` (the kinematic driver), `phase_change_diagnostics()`; the fields `"mdot"`,
 `"pc_source"` and `"div_source"` are ordinary registered fields.
 
@@ -1381,11 +1381,14 @@ there: 0–12 cells clipped per step out of ~7000 interfacial, residue ≤ 4e-3 
 5.8, `unresolved = 0`. And the shift is isotropic on that field — the removed volume per cubic-
 harmonic direction bin is within ±0.2 % and the l = 4 moment is *below* that of the exact removal
 computed on the same fractions (a faceting bias would be one-signed and would survive advection).
-`set_phase_change_swept(True)` ships the exact swept volume as a measured option (default OFF): it
-removes the δ/R term wherever the shift stays inside the cells (R = 20: −0.24 → +0.06 % at δ = 0.05)
-and **moves the Scriven gate by 0.002–0.005 pp**, as `δ/R ≈ 1e-4` requires. Use it for a curved
-interface at a density ratio near 1, where δ is the whole interface motion; it is identically zero
-on a plane, so every P0/P1/P2 gate is unmoved.
+A corrected (exact swept-volume) plane shift was implemented, measured and **not shipped**: it moves
+the Scriven gate by ≤ 0.02 pp (as `δ/R ≈ 1e-4` requires), the only booking that reaches the a-priori
+1e-3 gate does it by giving area to cells the mode-6 sheet booked none to (resurrecting the deposit
+fallback, 0 → 48), and what limits it at larger δ is the clip-and-redistribute, not the shift. **The
+solver is unchanged by WO-P3e** (`git diff` over `src/` and both test trees is empty). Where δ IS
+the whole interface motion — a curved interface at density ratio ≈ 1 — the shipped shift is low by
+δ/R (6 % at δ/R = 6 %), and the correction to reach for is the sheet-consistent
+`A(1 + κδ/2 + Kδ²/3)` with κ from the V3 cascade, not the per-cell PLIC sweep.
 
 **So P3 is a FLUX problem, and that is where a P3f starts.** With the area right (+0.04 %), the
 shift right (1e-4 of δ), the redistribute quiet and the deposit at the floor (`band_div` 6e-12,

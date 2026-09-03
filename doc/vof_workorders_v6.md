@@ -1463,19 +1463,14 @@ under rule 3b (max pressure iterations **30** against the 600 cap, none capped).
 ### What shipped
 
 * `tests/study/vof_scriven.py --regress-probe R1,R2,... [--regress-delta ...] [--regress-modes ...]
-  [--regress-advect N] [--regress-swept]` — the a-priori regression instrument (below), and two
+  [--regress-advect N]` — the a-priori regression instrument (below), and two
   read-outs added to the coupled run: **`delta` per step** (`removed_volume/area`, with `delta/R`)
   and **`A_end`** (`vof_interface_area()` recomputed after the step) beside the stale
   `interface_area`, plus the radius each of them implies.
-* `set_phase_change_swept(bool)` (default **OFF**) — the exact swept volume of the plane shift, as
-  the ADDITIVE curvature term `A_plic (f - 1)` on whichever area `set_phase_change_area` selects,
-  with `f = (V(alpha) - V(alpha - delta |m|_2)) / (delta A_plic)` from the cell's own PLIC plane
-  (`vof::pcSweptFactor`, container-free). `pcBuildInterface` now takes the step's `dt` (0 from the
-  probes, so an area probe is unmoved). Two guards the measurements forced: the correction is
-  applied **only where the area mode booked something** (`A > 0` is mode 6's "no surface here"
-  sentinel — the 48 cells whose `+n` walk finds no pure gas cell, which is exactly why mode 6 has
-  no deposit fallback; correcting them turns `fallback` 0 -> 48 and `band_div` 1e-11 -> 1.6e-04),
-  and it never drives `A` through zero.
+**`src/` is UNTOUCHED by this work order.** `git diff origin/main -- src tests/kokkos
+tests/kokkos_mpi` is empty: only `tests/study/vof_scriven.py`, this file and `CLAUDE.md` change. A
+corrected plane shift WAS implemented, measured and then removed — see "the corrected shift, and why
+it is not shipped" below.
 
 ### Gate (i)/(ii)/(iii) — the EXACT sphere, no time stepping
 
@@ -1485,34 +1480,35 @@ under rule 3b (max pressure iterations **30** against the 600 cap, none capped).
 volume removed is the shell `4 pi R^2 delta (1 + delta/R + delta^2/3R^2)` and the exact new radius
 from the volume deficit is `R + delta`.
 
-`dV/dV_exact - 1` and `(R1 - (R0+delta))/(R0+delta)`, shipped (linear) shift and `--regress-swept`:
+`dV/dV_exact - 1` and `(R1 - (R0+delta))/(R0+delta)`, for the SHIPPED (linearized) shift and for
+the corrected swept-volume shift that was implemented and then removed (below):
 
-| R | mode | delta | **dV lin** | dV swept | **R1 lin** | R1 swept | `delta/R` |
+| R | mode | delta | **dV shipped** | dV corrected | **R1 shipped** | R1 corrected | `delta/R` |
 |---|---|---|---|---|---|---|---|
-| 8 | 0 | 0.05 | −0.8452 % | −0.8971 % | −0.0052 % | −0.0055 % | 0.625 % |
-| 8 | 0 | 0.10 | −1.4611 % | −1.9306 % | −0.0178 % | −0.0236 % | 1.250 % |
-| 8 | 0 | 0.20 | −2.6776 % | −2.3419 % | −0.0638 % | −0.0558 % | 2.500 % |
-| 8 | 0 | 0.50 | −6.2084 % | −6.0648 % | −0.3453 % | −0.3373 % | 6.250 % |
-| 8 | **6** | 0.05 | **−0.6115 %** | **−0.3536 %** | −0.0038 % | −0.0022 % | 0.625 % |
-| 8 | **6** | 0.10 | **−1.2288 %** | −1.2159 % | −0.0150 % | −0.0148 % | 1.250 % |
-| 8 | **6** | 0.20 | **−2.4482 %** | −1.6495 % | −0.0583 % | −0.0393 % | 2.500 % |
-| 8 | **6** | 0.50 | **−5.9873 %** | −5.6393 % | −0.3330 % | −0.3136 % | 6.250 % |
-| 12 | 0 | 0.05 | −0.6376 % | −0.7537 % | −0.0026 % | −0.0031 % | 0.417 % |
-| 12 | 0 | 0.10 | −1.0499 % | −0.9314 % | −0.0086 % | −0.0076 % | 0.833 % |
-| 12 | 0 | 0.20 | −1.8676 % | −1.8423 % | −0.0301 % | −0.0297 % | 1.667 % |
-| 12 | 0 | 0.50 | −4.2672 % | −6.4484 % | −0.1642 % | −0.2484 % | 4.167 % |
-| 12 | **6** | 0.05 | **−0.4047 %** | **−0.1898 %** | −0.0017 % | −0.0008 % | 0.417 % |
-| 12 | **6** | 0.10 | **−0.8180 %** | **−0.2598 %** | −0.0067 % | −0.0021 % | 0.833 % |
-| 12 | **6** | 0.20 | **−1.6376 %** | **−1.0775 %** | −0.0264 % | −0.0174 % | 1.667 % |
-| 12 | **6** | 0.50 | **−4.0428 %** | −6.0015 % | −0.1556 % | −0.2311 % | 4.167 % |
-| 20 | 0 | 0.05 | −0.6917 % | −0.6398 % | −0.0017 % | −0.0016 % | 0.250 % |
-| 20 | 0 | 0.10 | −0.9393 % | −0.9224 % | −0.0047 % | −0.0046 % | 0.500 % |
-| 20 | 0 | 0.20 | −1.4322 % | −1.7675 % | −0.0140 % | −0.0173 % | 1.000 % |
-| 20 | 0 | 0.50 | −2.8912 % | −7.1195 % | −0.0689 % | −0.1697 % | 2.500 % |
-| 20 | **6** | 0.05 | **−0.2405 %** | **+0.0628 %** | −0.0006 % | **+0.0002 %** | 0.250 % |
-| 20 | **6** | 0.10 | **−0.4893 %** | **−0.0832 %** | −0.0024 % | **−0.0004 %** | 0.500 % |
-| 20 | **6** | 0.20 | **−0.9843 %** | **−0.8657 %** | −0.0097 % | −0.0085 % | 1.000 % |
-| 20 | **6** | 0.50 | **−2.4499 %** | −6.4675 % | −0.0583 % | −0.1542 % | 2.500 % |
+| 8 | 0 | 0.05 | -0.8452 % | -0.8971 % | -0.0052 % | -0.0055 % | 0.625 % |
+| 8 | 0 | 0.10 | -1.4611 % | -1.9306 % | -0.0178 % | -0.0236 % | 1.250 % |
+| 8 | 0 | 0.20 | -2.6776 % | -2.3419 % | -0.0638 % | -0.0558 % | 2.500 % |
+| 8 | 0 | 0.50 | -6.2084 % | -6.0648 % | -0.3453 % | -0.3373 % | 6.250 % |
+| 8 | **6** | 0.05 | **-0.6115 %** | -0.7908 % | -0.0038 % | -0.0049 % | 0.625 % |
+| 8 | **6** | 0.10 | **-1.2288 %** | -2.1595 % | -0.0150 % | -0.0263 % | 1.250 % |
+| 8 | **6** | 0.20 | **-2.4482 %** | -3.6993 % | -0.0583 % | -0.0881 % | 2.500 % |
+| 8 | **6** | 0.50 | **-5.9873 %** | -10.7928 % | -0.3330 % | -0.6019 % | 6.250 % |
+| 12 | 0 | 0.05 | -0.6376 % | -0.7537 % | -0.0026 % | -0.0031 % | 0.417 % |
+| 12 | 0 | 0.10 | -1.0499 % | -0.9314 % | -0.0086 % | -0.0076 % | 0.833 % |
+| 12 | 0 | 0.20 | -1.8676 % | -1.8423 % | -0.0301 % | -0.0297 % | 1.667 % |
+| 12 | 0 | 0.50 | -4.2672 % | -6.4484 % | -0.1642 % | -0.2484 % | 4.167 % |
+| 12 | **6** | 0.05 | **-0.4047 %** | -0.5939 % | -0.0017 % | -0.0024 % | 0.417 % |
+| 12 | **6** | 0.10 | **-0.8180 %** | -1.0669 % | -0.0067 % | -0.0088 % | 0.833 % |
+| 12 | **6** | 0.20 | **-1.6376 %** | -2.5846 % | -0.0264 % | -0.0417 % | 1.667 % |
+| 12 | **6** | 0.50 | **-4.0428 %** | -9.3714 % | -0.1556 % | -0.3614 % | 4.167 % |
+| 20 | 0 | 0.05 | -0.6917 % | -0.6398 % | -0.0017 % | -0.0016 % | 0.250 % |
+| 20 | 0 | 0.10 | -0.9393 % | -0.9224 % | -0.0046 % | -0.0046 % | 0.500 % |
+| 20 | 0 | 0.20 | -1.4322 % | -1.7675 % | -0.0140 % | -0.0173 % | 1.000 % |
+| 20 | 0 | 0.50 | -2.8912 % | -7.1195 % | -0.0689 % | -0.1697 % | 2.500 % |
+| 20 | **6** | 0.05 | **-0.2405 %** | -0.4465 % | -0.0006 % | -0.0011 % | 0.250 % |
+| 20 | **6** | 0.10 | **-0.4893 %** | -1.1455 % | -0.0024 % | -0.0057 % | 0.500 % |
+| 20 | **6** | 0.20 | **-0.9843 %** | -2.8083 % | -0.0097 % | -0.0275 % | 1.000 % |
+| 20 | **6** | 0.50 | **-2.4499 %** | -9.3318 % | -0.0583 % | -0.2226 % | 2.500 % |
 
 Read the mode-6 rows against the last column: **the shipped regression's volume error IS
 `-delta/R`, to two digits, at every radius and every step size.** That is the linearization and
@@ -1521,19 +1517,51 @@ nothing else — `A delta` is the first term of `int_0^delta A(s) ds`, and for a
 term PLUS mode 0's own `-0.22 ... -0.48 %` per-cell area deficit, WO-P3c, which is why they do not
 read the last column.)
 
-`--regress-swept` removes it wherever the shift stays INSIDE the cells (R = 20: −0.24 → +0.06 % and
-−0.49 → −0.08 % at `delta` = 0.05 / 0.10; the WO's 1e-3-relative gate on (i) and (ii) then passes)
-and stops helping once many cells empty in one step — the `delta = 0.5` rows, where the clip and
-redistribute moves 731 of 2513 units of removed volume and `min C` reaches −0.196. **The residual at
-large `delta` is the redistribute, not the shift.**
+### The corrected shift, and why it is not shipped
+
+The work order's first candidate — "the shift should conserve the NORMAL displacement `delta` per
+cell" — was implemented (`vof::pcSweptFactor`: `f = (V(alpha) - V(alpha - delta |m|_2))/(delta
+A_plic)` from the cell's own PLIC plane, continued linearly with `A_plic` once the plane leaves the
+cell, applied as a correction on whichever area `set_phase_change_area` selects), measured in two
+bookings, and then REMOVED. The measurements are why.
+
+* **Booking A** — the correction `A_plic (f - 1)` added to EVERY interfacial cell. This is the only
+  variant that reaches the work order's 1e-3 gate on (i)/(ii): R = 20, mode 6, `dV` **−0.2405 →
+  +0.0628 %** at `delta` = 0.05 and **−0.4893 → −0.0832 %** at 0.10, with `R1` at +2e-6 and −4e-6.
+  It reaches it by giving area to cells the mode-6 sheet booked NONE to — and those are exactly the
+  cells whose `+n` walk finds no pure gas cell, so the deposit fallback comes back:
+  `fallback` **0 → 48** and `band_div` **1.1e-11 → 1.6e-04** on the Ja = 2 Scriven run, undoing
+  WO-P3d's own side benefit.
+* **Booking B** — the same correction, applied only where the area mode booked surface (`A > 0` is
+  mode 6's "no surface here" sentinel). No side effect, and it is the column in the table above:
+  on mode 0, where the area IS the cell's own polygon, it removes 20 % of the `delta/R` term at
+  `delta` = 0.05 and is WORSE beyond `delta` = 0.2; on mode 6 it is worse than doing nothing at
+  every `delta`, because the PLIC polygon's per-cell curvature factor and the sheet's per-cell share
+  are different distributions over the same cells.
+* **Both move the Scriven gate by ≤ 0.02 pp** (booking A: 1.036 → 1.025 % at Ja 0.5 and
+  1.486 → 1.470 % at Ja 2; booking B: 1.034 % and 1.481 %), which is what `delta/R ~ 1e-4` requires.
+
+Two things this closes. **What limits a corrected shift is not the shift**: once any cell empties in
+a step, the continuation of the swept region into the neighbour is carried by the
+clip-and-redistribute — a `n_d^2`-weighted transport of the residue along `-n`, not a geometric
+continuation — and it is what the `delta >= 0.2` rows measure (at `delta` = 0.5 on R = 20 it moves
+731 of 2513 units of removed volume and takes `min C` to −0.196). **And a SHEET-consistent
+correction does not go through the cell's own polygon at all**: the exact statement for a surface
+moving along its normal is `A(s) = A(0)(1 + kappa s + K s^2)`, so the factor is
+`1 + kappa delta/2 + K delta^2/3` with `kappa` the mean curvature the V3 cascade already computes —
+low-noise, sheet-consistent, and a rung of its own. Since the term it corrects is 1e-4 of the
+Scriven gate, that rung is not indicated by anything measured here.
+
+**So nothing was shipped into `src/`**, and the campaign rule holds: a default (or an option) changes
+on a passed gate, not on a better number in one corner of a ladder.
 
 **(iii) the area, before and after.** Mode 6 reads `+0.011 %` of `4 pi R_0^2` before the step at
 every radius (WO-P3d's floor, reproduced). After it, against `4 pi (R_0+delta)^2`:
 
 | R = 20, mode 6 | delta 0.05 | 0.10 | 0.20 | 0.50 |
 |---|---|---|---|---|
-| linear shift | +0.067 % | +0.470 % | +3.303 % | +11.981 % |
-| swept shift | +0.052 % | +0.121 % | +1.056 % | +9.9 % |
+| shipped (linearized) shift | +0.067 % | +0.470 % | +3.303 % | +11.981 % |
+| corrected shift (booking B) | +0.060 % | +0.361 % | +2.058 % | +16.227 % |
 
 **A linearized plane shift ROUGHENS the surface**, monotonically in `delta` — each cell's plane
 moves by `dV/A(0)` rather than by `delta`, and the discrepancy is per-cell. At the run's
@@ -1571,16 +1599,16 @@ WO-P3d gate (b) (`max|div(open u)| = 0.0`), so the fractions are the ones a runn
 **24 458 mixed cells against the exact sphere's 7 184**, `|C - C_exact|_1 = 5.25`, volume moved by
 `0.0004 %`. Then one regression step.
 
-| mode | delta | dV lin | dV swept | R1 lin | R1 swept | clipped at 0 | residue moved |
-|---|---|---|---|---|---|---|---|
-| 0 | **0.0018 (the RUN's own)** | **+0.0016 %** | +0.0150 % | **+0.00000 %** | +0.00000 % | 1059 | 3.6e-06 |
-| 0 | 0.05 | −0.2990 % | +0.0426 % | −0.0009 % | +0.0001 % | 1461 | 4.3e-01 |
-| 0 | 0.10 | −0.6096 % | −0.0401 % | −0.0038 % | −0.0003 % | 1818 | 4.6e+00 |
-| 0 | 0.20 | −1.2269 % | −0.6859 % | −0.0150 % | −0.0084 % | 2438 | 3.9e+01 |
-| **6** | **0.0018** | **+0.4008 %** | +0.4276 % | **+0.00005 %** | +0.00005 % | **1** | **1.6e-05** |
-| **6** | 0.05 | +0.0990 % | +0.7179 % | +0.0003 % | +0.0022 % | 146 | 9.7e-01 |
-| **6** | 0.10 | −0.2129 % | +0.7755 % | −0.0013 % | +0.0048 % | 368 | 7.0e+00 |
-| **6** | 0.20 | −0.8326 % | +0.1929 % | −0.0102 % | +0.0024 % | 922 | 4.6e+01 |
+| mode | delta | dV (shipped shift) | R1 (shipped shift) | clipped at 0 | residue moved | pure-LIQUID cells touched |
+|---|---|---|---|---|---|---|
+| 0 | **0.0018 (the RUN's own)** | **+0.0016 %** | **+0.00000 %** | 1059 | 3.6e-06 | 0 |
+| 0 | 0.05 | −0.2990 % | −0.0009 % | 1461 | 4.3e-01 | 0 |
+| 0 | 0.10 | −0.6096 % | −0.0038 % | 1818 | 4.6e+00 | 1 |
+| 0 | 0.20 | −1.2269 % | −0.0150 % | 2438 | 3.9e+01 | 20 |
+| **6** | **0.0018** | **+0.4008 %** | **+0.00005 %** | **1** | **1.6e-05** | 0 |
+| **6** | 0.05 | +0.0990 % | +0.0003 % | 146 | 9.7e-01 | 0 |
+| **6** | 0.10 | −0.2129 % | −0.0013 % | 368 | 7.0e+00 | 1 |
+| **6** | 0.20 | −0.8326 % | −0.0102 % | 922 | 4.6e+01 | 20 |
 
 **At the run's own step size the regression is exact to 1e-5 in the radius and to 1e-4 … 4e-3 in the
 volume, on an advection-realistic field.** (The mode-6 `+0.40 %` is not the shift: it is that mode's
@@ -1635,15 +1663,18 @@ bubble's size, and there is no "the field is smeared" residual to explain. And t
 
 | Ja | shift | **max \|dR\|/R** | **beta_eff/beta − 1** | `A_end/(4 pi R^2)` | area-avg `mdot`, last half | `band_div` | fallback | iters |
 |---|---|---|---|---|---|---|---|---|
-| 0.5 | **linear (shipped)** | **1.036 %** | **−1.655 %** | +0.043 % | −0.926 % | 6.0e-12 | 0 | 30/600 |
-| 0.5 | swept | 1.034 % | −1.652 % | +0.043 % | −0.929 % | 5.6e-12 | 0 | 30/600 |
-| 2 | **linear (shipped)** | **1.486 %** | **−1.475 %** | +0.041 % | +0.145 % | 1.1e-11 | 0 | 30/600 |
-| 2 | swept | 1.481 % | −1.469 % | +0.041 % | +0.146 % | 1.8e-11 | 0 | 30/600 |
+| 0.5 | **shipped** | **1.036 %** | **−1.655 %** | +0.043 % | −0.926 % | 6.0e-12 | 0 | 30/600 |
+| 0.5 | corrected (A) | 1.025 % | −1.641 % | +0.043 % | −0.931 % | 3.8e-12 | 0 | 30/600 |
+| 0.5 | corrected (B) | 1.034 % | −1.652 % | +0.043 % | −0.929 % | 5.6e-12 | 0 | 30/600 |
+| 2 | **shipped** | **1.486 %** | **−1.475 %** | +0.041 % | +0.145 % | 1.1e-11 | 0 | 30/600 |
+| 2 | corrected (A) | 1.470 % | −1.455 % | +0.041 % | +0.146 % | 1.6e-04 | **48** | 30/600 |
+| 2 | corrected (B) | 1.481 % | −1.469 % | +0.041 % | +0.146 % | 1.8e-11 | 0 | 30/600 |
 
-The mode-6 linear rows reproduce WO-P3d to the digit (1.036 / −1.655 and 1.486 / −1.475), so the
-harness is faithful. **The exact swept shift moves the gate by 0.002 … 0.005 pp** — which is what
+The shipped rows reproduce WO-P3d to the digit (1.036 / −1.655 and 1.486 / −1.475), so the harness
+is faithful. **A corrected plane shift moves the gate by 0.002 … 0.016 pp** — which is what
 `delta/R ~ 1e-4` predicts, and it is the quantitative close of the work order's first named
-candidate.
+candidate. (The Ja = 2 `fallback 48` / `band_div 1.6e-04` row is booking A's side effect, described
+above; it is the reason neither booking shipped.)
 
 The regression's own census in the coupled run, printed per step: `delta` **8.8e-04 … 1.9e-03**
 cells (Ja 0.5) and **6.8e-04 … 1.9e-03** (Ja 2), `delta/R` **9.6e-05 … 2.2e-04**; **0 to 12 cells
@@ -1684,53 +1715,36 @@ dominated both.
 
 ### Gate (d) — the planar rungs, inertness, and MPI
 
-**Byte-identity against `origin/main` (`ee7e7e6`), the decisive one.** `test_vof_phase_change` built
-from both trees and run at 4 threads on nvidia-cuda: the full stdout — K1…K6, **P0a, P0b, P1, P1',
-ENERGY, INERT, P2** — is **BYTE-IDENTICAL** (`diff` empty). The default path's only change is that
-`pcBuildInterface` now carries `dt` and takes a `swept && A > 0` branch that is false.
+**`src/`, `tests/kokkos` and `tests/kokkos_mpi` are byte-for-byte `origin/main`** (`git diff
+origin/main --` over those three trees is empty), so every gate below is `main`'s own number, taken
+here as the check that this worktree is measuring what it thinks it is.
 
-`tests/kokkos` at the shipped default: **33/33 passed** (nvidia-cuda, `OMP_NUM_THREADS=4`).
+* **Byte-identity, run rather than argued.** `test_vof_phase_change` built from this worktree and
+  from a separate `origin/main` (`ee7e7e6`) checkout and run at 4 threads on nvidia-cuda: the full
+  stdout — K1…K6, **P0a, P0b, P1, P1', ENERGY, INERT, P2** — is **BYTE-IDENTICAL** (`diff` empty).
+  This was taken while the corrected shift WAS in the tree (as a default-off option) and is the
+  measurement that it was inert; it is trivially still true now that it is gone.
+* `tests/kokkos` at the shipped default: **33/33 passed** (nvidia-cuda, `OMP_NUM_THREADS=4`,
+  1735 s).
+* **MPI, np 1/2/4** (`test_vof_phase_change_mpi`, 64x4x4, the ORB cutting x so the interface crosses
+  a rank boundary during every run), nvidia-cuda — `ctest -R vof_phase_change_mpi` **3/3 passed**:
 
-**With the option ON** (`PECLET_P3E_SWEPT=1`, the same env hook `PECLET_P3C_AREA` uses, added to
-both phase-change test files):
+| case | np = 1 | np = 2 | np = 4 |
+|---|---|---|---|
+| **P0a** 1000 kinematic steps | **0.000e+00** | **0.000e+00** | **0.000e+00** |
+| **P1** Stefan, 280 coupled steps | **0.000e+00** | **0.000e+00** | **0.000e+00** |
+| P2 sucking, 55 coupled steps (interface position) | 0.0 | 7.901e-16 | 7.901e-16 |
+| P2 pointwise `max\|C_dist - C_ref\|` | 1.299e-14 | 1.299e-14 | 1.331e-14 |
 
-| scene | default | `PECLET_P3E_SWEPT=1` |
-|---|---|---|
-| K1…K6 (kernels) | — | **byte-identical** |
-| **P0a** planar regression, 1000 steps | 1.776e-14 | **byte-identical** |
-| **P1 / P1'** Stefan N = 64 | +1.3099 % / −0.0139 % | **byte-identical** |
-| **ENERGY** uniform-T at rcp ratio 1e4 | 0.000e+00 | **byte-identical** |
-| **INERT** mdot == 0 | 0.000e+00 | **byte-identical** |
-| **P0b** ratio 100, closed column | u_gas rel **0.000e+00** | rel **−3.3e-14** |
-| **P2** sucking N = 64 | +0.1929 % | +0.1579 % |
-
-On an axis-aligned plane `V(alpha)` is linear, so the swept factor is exactly 1 and the correction is
-algebraically zero — which is why P0a/P1/P1'/ENERGY/INERT are byte-identical rather than merely
-close. P0b and P2 are the two scenes whose MYC normal carries the ~1e-8 transverse component of the
-energy solve's red-black parity asymmetry (WO-P01 finding 3): there `f = 1` only in exact arithmetic
-and the two expressions differ at round-off. P0b shows that directly (3.3e-14 relative). P2's
-0.035 pp is that round-off run through the scene's documented amplifier — the `pcIsInterfacial`
-switch as the interface crosses a cell boundary, which WO-P23 measured turning 1e-16 into 1e-4 —
-and it is 2.5x the 0.014 pp the AREA MODES move the same scene by. **With the option off (the
-shipped default) there is nothing to discuss: the binary is byte-identical to `main`.**
-
-**MPI, np 1/2/4** (`test_vof_phase_change_mpi`, 64x4x4, the ORB cutting x so the interface crosses a
-rank boundary during every run), nvidia-cuda:
-
-| case | default, np 1/2/4 | `PECLET_P3E_SWEPT=1`, np 1/2/4 |
-|---|---|---|
-| **P0a** 1000 kinematic steps | **0 / 0 / 0** | **0 / 0 / 0** |
-| **P1** Stefan, 280 coupled steps | **0 / 0 / 0** | **0 / 0 / 0** |
-| P2 sucking, 55 coupled steps (interface position) | 0.0 / 7.9e-16 / 7.9e-16 | 4.573e-06 / 4.573e-06 / 1.294e-04 |
-| P2 pointwise `max\|C_dist - C_ref\|` | 1.30e-14 / 1.30e-14 / 1.33e-14 | 1.182e-04 / 1.182e-04 / 1.476e-03 |
-
-`ctest -R vof_phase_change_mpi`: **3/3 passed**. P0a and P1 are bitwise with the option on as well —
-nothing in the swept factor is a reduction; it is a per-cell function of that cell's own plane. The
-P2 row is identical to every digit at np 1 and np 2 with the option on — the decomposition
-statement — and grows by one decade at np 4, exactly the pattern WO-P23 recorded for the same scene
-with its own options (2.3e-05 / 7.3e-05 / 1.1e-04): the option perturbs `A` at round-off and P2
-amplifies round-off through the `pcIsInterfacial` switch. Both rows are far inside that scene's own
-+0.19 %-vs-exact accuracy, and the option is off by default.
+For the record, the corrected shift was ALSO taken through this gate while it existed
+(`PECLET_P3E_SWEPT=1`, the hook `PECLET_P3C_AREA` uses): **P0a and P1 bitwise at np 1/2/4** — the
+swept factor is a per-cell function of that cell's own plane, with no reduction in it — while P2
+moved to 4.573e-06 / 4.573e-06 / 1.294e-04, np-independent at np 1 and 2 and one decade larger at
+np 4, the same pattern WO-P23 recorded for that scene with its own options (2.3e-05 / 7.3e-05 /
+1.1e-04). On the single-rank battery with the option on, K1…K6 / P0a / P1 / P1' / ENERGY / INERT
+were **byte-identical** (on an axis-aligned plane `V(alpha)` is linear, so the correction is
+algebraically zero), P0b moved by 3.3e-14 relative and P2 by 0.035 pp (+0.1929 → +0.1579 %) — that
+scene's documented round-off amplifier, and 2.5x what the AREA MODES move it by.
 
 ### Open, and the corrected gates this WO proposes
 
@@ -1749,19 +1763,21 @@ amplifies round-off through the `pcIsInterfacial` switch. Both rows are far insi
 4. **The regression is closed as a mechanism at any `delta/R <= 1e-3`**, which covers every
    density-ratio >> 1 boiling case, because there `delta = (rho_v/rho_l) x (interface motion)`. It
    is NOT closed for a ratio near 1 (P1's own Stefan regime, and any bubble in a liquid-liquid
-   system), where `delta` IS the whole motion — there `set_phase_change_swept(True)` is the
-   correction and the probe table above is its gate. Nothing in this campaign runs that case on a
-   CURVED interface yet.
+   system), where `delta` IS the whole motion — the probe table above IS the gate for that case, and
+   at `delta/R = 6 %` the shipped shift is 6 % low on the removed volume. Nothing in this campaign
+   runs that case on a CURVED interface yet; when something does, the correction to reach for is the
+   SHEET-consistent `A(1 + kappa delta/2 + K delta^2/3)` with `kappa` from the V3 cascade, not the
+   per-cell PLIC sweep measured here.
 5. **A P3f should not repeat the mesh study** until the flux is instrumented: WO-P3b's 64/128/192
    ladder and WO-P3c's confinement rows were both taken on mode 0, whose area error dominated them.
    Re-taking them on mode 6 is item (c) above — cheap — but the two a-priori instruments named in
    (a) and (b) are what decide it.
-6. **The swept option's residual at large `delta` is the clip-and-redistribute**, not the shift: at
+6. **What limits the regression at large `delta` is the clip-and-redistribute**, not the shift: at
    `delta = 0.5` on an R = 20 sphere it moves 731 of 2513 units of removed volume and takes `min C`
-   to −0.196, and the corrected shift is then WORSE than the linear one (−6.47 % against −2.45 %).
-   If a future rung ever needs a half-cell regression step, that is the piece to redesign — the
-   push along `-n` with `n_d^2` weights is a first-order transport of the residue, not a geometric
-   continuation of the swept region into the neighbour cell.
+   to −0.196, and a corrected shift is then WORSE than the linear one. If a future rung ever needs a
+   half-cell regression step, that is the piece to redesign — the push along `-n` with `n_d^2`
+   weights is a first-order transport of the residue, not a geometric continuation of the swept
+   region into the neighbour cell.
 
 ---
 

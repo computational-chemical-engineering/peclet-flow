@@ -1658,21 +1658,6 @@ static void bind_solver(nb::module_& m, const char* name) {
           "the P1 Stefan interface position from +0.195 % to +0.003 % at N = 256, and the mdot "
           "kernel itself from order 1.1 to order 2.0. set(False) is the ablation.")
       .def(
-          "set_phase_change_swept", [](S& s, bool on) { s.setPhaseChangeSwept(on); },
-          nb::arg("on"),
-          "WO-P3e. Replace the interface regression's LINEARIZED plane shift "
-          "(dV = mdot A_G dt / rho_l) by the EXACT volume the plane sweeps over the normal "
-          "displacement delta = mdot dt / rho_l, applied as a per-cell factor on whichever area "
-          "set_phase_change_area selects. Default OFF, and the default is a measurement: the "
-          "correction is identically the delta/R curvature term, it is ZERO on a plane (so every "
-          "P0/P1/P2 gate is unmoved), and the Scriven bubble's own regression step is "
-          "delta = 1.8e-3 cells against R = 6..20, i.e. delta/R ~ 1e-4 — because at density ratio "
-          "100 the interface moves 0.2 cells per step of which the regression supplies only "
-          "rho_v/rho_l. Measured on the a-priori probe at R = 12, delta = 0.1: the removed volume "
-          "goes from -0.771 % to -0.004 % of the exact shell. Turn it on for a curved interface "
-          "at a density ratio near 1, where delta is the WHOLE interface motion."
-          )
-      .def(
           "set_phase_change_area", [](S& s, int mode) { s.setPhaseChangeArea(mode); },
           nb::arg("mode"),
           "WO-P3c: WHICH GEOMETRY the interfacial area A_Gamma comes from. A_Gamma sets the plane "
