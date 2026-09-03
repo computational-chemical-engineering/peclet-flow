@@ -1766,6 +1766,9 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["mdot_mean"] = d.mdotMean;
             r["interface_cells"] = d.interfaceCells;
             r["interface_area"] = d.area;
+            r["area_hf_cells"] = d.areaHf;    // WO-P3c: the area cascade's branch census
+            r["area_pv_cells"] = d.areaPv;
+            r["area_no_cascade_cells"] = d.areaNone;
             r["removed_volume"] = d.removedVolume;
             r["redistributed"] = d.redistributed;
             r["deficit_cells"] = d.deficitCells;

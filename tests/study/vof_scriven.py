@@ -421,7 +421,9 @@ def area_probe(n, radii, ratio=100.0, sub=4, mode=None, shape="sphere"):
         ordr = ""
         if prev is not None and R > 0 and prev[0] > 0:
             ordr = f"   order vs R = {prev[0]:g}: {math.log(abs(prev[1]) / abs(rel)) / math.log(R / prev[0]):.3f}"
-        print(f"      R {R:6.2f} {lbl}  ({d['interface_cells']:6d} interfacial cells)  "
+        print(f"      R {R:6.2f} {lbl}  ({d['interface_cells']:6d} cells"
+              + (f", HF {d['area_hf_cells']:6d} PV {d['area_pv_cells']:5d} "
+                 f"none {d['area_no_cascade_cells']}" if mode else "") + ")  "
               f"A_sum  {d['interface_area']:12.4f}  ref {ref:12.4f}  "
               f"marching cubes {mc:12.4f} ({100*(mc/ref-1):+6.3f} %)  "
               f"A_sum rel {100*rel:+7.3f} %{ordr}")

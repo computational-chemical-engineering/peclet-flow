@@ -7662,6 +7662,9 @@ class Solver {
     double area = 0.0;    ///< sum of the PLIC polygon areas over interfacial cells (h^2)
     double bandDiv = 0.0; ///< max |div(open u)| over interfacial cells (WO-P23; see pcBandDivergence)
     double Tmin = 0.0, Tmax = 0.0;  ///< energy-scalar extrema (consistent transport only)
+    long areaHf = 0;   ///< WO-P3c: cells whose area came from a height function (tiers 1/2a)
+    long areaPv = 0;   ///< WO-P3c: cells whose area came from the PV paraboloid (tier 3)
+    long areaNone = 0; ///< WO-P3c: cells with NO cascade geometry (kept their MYC PLIC area)
   };
 
   /// Turn on phase change. `rhoG`/`rhoL` are the phase densities used by the regression
@@ -7791,6 +7794,8 @@ class Solver {
   ///    tier 3, applied to the PLIC polygon's projected FOOTPRINT (see `vof/interface_area.hpp`).
   ///  * `2 = vof::kAreaNormal` — the same normals, but the plane is rebuilt on them
   ///    (`plicArea(n*, plicAlpha(n*, C))`) instead of keeping the PLIC footprint.
+  ///  * `3 = vof::kAreaFootprint` — the height function's OWN footprint times its own metric, the
+  ///    only variant whose cell pieces TILE (see `vof/interface_area.hpp`).
   ///
   /// Modes 1 and 2 are EXACT on a plane (the height function's differences are exact there and the
   /// cascade normal is the MYC one), so every planar gate is unmoved. The default is `0`: on a
@@ -7798,10 +7803,10 @@ class Solver {
   /// the cascade buys nothing measurable — see the WO-P3c findings, which also record that
   /// WO-P3b's 5.5-9.3 % deficit was its probe's own 4^3 sub-sampled initialisation.
   void setPhaseChangeArea(int mode) {
-    if (mode < 0 || mode > 2)
+    if (mode < 0 || mode > 3)
       throw std::runtime_error(
-          "set_phase_change_area: mode must be 0 (PLIC/MYC), 1 (cascade metric) or 2 (cascade "
-          "normal)");
+          "set_phase_change_area: mode must be 0 (PLIC/MYC), 1 (cascade metric), 2 (cascade "
+          "normal) or 3 (cascade footprint)");
     pcAreaMode_ = mode;
   }
   int phaseChangeArea() const { return pcAreaMode_; }
@@ -8114,7 +8119,10 @@ class Solver {
       if (pcAreaCg2_.extent(0) != n_)
         pcAreaCg2_ = CCField("pc_area_cascade", n_);
       bridgeColourToVof();
-      pcAreaCascadeCompute();
+      const auto as = pcAreaCascadeCompute();
+      pcDiag_.areaHf = as.hf + as.hfMixed;
+      pcDiag_.areaPv = as.pv;
+      pcDiag_.areaNone = as.noEstimate;
       copyInner(pcAreaCg2_, e_, G, CCConst(pcAreaC_.area()), e3_, kVofG);
     }
     CCConst areaCasc = CCConst(cascadeArea ? pcAreaCg2_ : pcMdot_);

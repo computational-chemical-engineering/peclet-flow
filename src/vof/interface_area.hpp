@@ -66,6 +66,7 @@ enum InterfaceAreaMode : int {
   kAreaPlic = 0,    ///< rung P0/P1: `plicArea` on the MYC normal. The old numbers.
   kAreaMetric = 1,  ///< variant A: the PLIC footprint x the cascade's slope. DEFAULT.
   kAreaNormal = 2,  ///< variant B: `plicArea` rebuilt on the cascade's normal.
+  kAreaFootprint = 3,  ///< variant C: the height function's OWN footprint x its own metric.
 };
 
 /// The height function's area element `sqrt(1 + h_x^2 + h_y^2)`, with **the same central
@@ -80,6 +81,40 @@ KOKKOS_INLINE_FUNCTION double hfAreaElement(const double h[9]) {
   const double hx = 0.5 * (h[2 + 3 * 1] - h[0 + 3 * 1]);
   const double hy = 0.5 * (h[1 + 3 * 2] - h[1 + 3 * 0]);
   return Kokkos::sqrt(1.0 + hx * hx + hy * hy);
+}
+
+/// **Variant C — the height function's own footprint times its own metric** (`kAreaFootprint`).
+///
+/// This is the one construction whose cell pieces TILE, and the measurement says that is the whole
+/// question. Write the interface as the graph `x_d = f(x_d1, x_d2)` linearized on the patch,
+/// `f = h_0 + h_x x + h_y y` in cell-centred coordinates. The piece of it that belongs to THIS cell
+/// projects on the transverse square to `R = {(x,y) in [-1/2,1/2]^2 : |f| <= 1/2}`, and the pieces
+/// of the cells of one column partition that square EXACTLY — which is what makes the column sums
+/// telescope and the total converge:
+///
+///     A = |R| sqrt(1 + h_x^2 + h_y^2) ,   |R| = F(+1/2) - F(-1/2) ,
+///     F(t) = fraction of the square with f <= t = plicVolume(h_x, h_y, 0, t - h_0 + (h_x+h_y)/2)
+///
+/// (the 2-D PLIC volume fraction, which `plicVolume` returns for a zero third component).
+///
+/// **Why the other two variants cannot converge, measured.** They both take the FOOTPRINT from the
+/// cell's own PLIC polygon, and on a CURVED interface the neighbouring cells' planes are different
+/// planes, so their projections overlap or leave a gap and the column's footprints do not sum to
+/// one. The resulting deficit is FIRST order in `h/R` and it is not a normal error: an exact-
+/// fraction circle, with the EXACT radial normal and an analytic chord, sums to **-2.86 / -1.47 /
+/// -1.42 / -0.84 %** of `2 pi R` at R = 8/12/20/28 (the code's cylinder probe reads -1.42 % at
+/// R = 20 on the same footing). Replacing the slope changes that by 0.02 pp; replacing the
+/// FOOTPRINT is what removes it.
+///
+/// On a plane it is exact, and for an axis-aligned plane it is exact BITWISE: `h_x = h_y = 0` makes
+/// `plicVolume` take its degenerate-normal branch (1 and 0), so `|R| = 1` and the metric is 1.
+KOKKOS_INLINE_FUNCTION double hfFootprintArea(const double h[9]) {
+  const double hx = 0.5 * (h[2 + 3 * 1] - h[0 + 3 * 1]);
+  const double hy = 0.5 * (h[1 + 3 * 2] - h[1 + 3 * 0]);
+  const double h0 = h[1 + 3 * 1];
+  const double off = 0.5 * (hx + hy) - h0;
+  const double f = plicVolume(hx, hy, 0.0, 0.5 + off) - plicVolume(hx, hy, 0.0, -0.5 + off);
+  return f * Kokkos::sqrt(1.0 + hx * hx + hy * hy);
 }
 
 /// The unit surface normal implied by the SAME 3x3 patch of heights, in world components.

@@ -170,9 +170,13 @@ class VofInterfaceArea {
               }
             if (!ok)
               continue;
-            double ns[3];
-            hfSurfaceNormal(hh, d, ns);
-            ar(i) = interfaceAreaFromNormal(md, mx(i), my(i), mz(i), al(i), c(i), ns);
+            if (md == kAreaFootprint) {
+              ar(i) = hfFootprintArea(hh);
+            } else {
+              double ns[3];
+              hfSurfaceNormal(hh, d, ns);
+              ar(i) = interfaceAreaFromNormal(md, mx(i), my(i), mz(i), al(i), c(i), ns);
+            }
             br(i) = static_cast<double>(t == 0 ? kCurvHf : kCurvHfMixed);
             return;
           }
@@ -235,7 +239,12 @@ class VofInterfaceArea {
           }
           double ns[3];
           pvSurfaceNormal(a, t1, t2, nn, ns);
-          ar(i) = interfaceAreaFromNormal(md, m0, m1, m2, al(i), c(i), ns);
+          // The PV branch has no column and therefore no tiling footprint of its own; under
+          // `kAreaFootprint` it takes variant B (the plane rebuilt on the paraboloid's normal),
+          // which is the closest thing to it that a single cell can supply. The branch census
+          // says how much of the total that is.
+          ar(i) = interfaceAreaFromNormal(md == kAreaFootprint ? kAreaNormal : md, m0, m1, m2,
+                                          al(i), c(i), ns);
           br(i) = static_cast<double>(red ? kCurvPvReduced : kCurvPv);
         });
     Kokkos::fence();
