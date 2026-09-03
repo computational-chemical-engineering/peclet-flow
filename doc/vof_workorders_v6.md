@@ -606,25 +606,23 @@ interface crosses a rank boundary during every run:
 |---|---|---|---|
 | **P0a** planar regression, 1000 kinematic steps | **0.000e+00** | **0.000e+00** | **0.000e+00** |
 | **P1** Stefan, 280 steps with the energy solve | **0.000e+00** | **0.000e+00** | **0.000e+00** |
-| **P2** sucking, 55 COUPLED steps — interface position | 8.5e-05 | 5.2e-05 | 1.4e-04 |
-| **P2** — pointwise `max\|C_dist - C_ref\|` | 1.5e-03 | 8.7e-04 | 1.7e-03 |
+| **P2** sucking, 55 COUPLED steps — interface position | 2.3e-05 | 7.3e-05 | 1.1e-04 |
+| **P2** — pointwise `max\|C_dist - C_ref\|` | 3.6e-04 | 8.3e-04 | 1.1e-03 |
 
 P0a and P1 are **bitwise**, as WO-P01 left them: the exchange, the gather-based source deposit and
 the gather-based deficit redistribution are all exact, and the plane-anchored rows' new depth-1 data
-(`n`, `phi_c`, `T_G`, the mask) is exchanged and domain-zeroed on the same footing.
+(`n`, `phi_c`, `T_G`, the mask) is exchanged and domain-zeroed on the same footing. On
+**nvidia-cuda** the P2 row reads `layer` **1.516e-05** and pointwise **4.729e-04** at np = 1 AND at
+np = 2 — the two are identical to every digit, which is the decomposition statement.
 
-The P2 row is a property of the COUPLED scene, not of the decomposition, and the **nvidia-cuda
-column is the proof**: there the same test reads `layer` **8.7e-15 (np 1) / 7.9e-15 (np 2)** and
-pointwise **1.1e-13** on both, i.e. decomposition-independent to 1e-13 across a cut that the
-interface crosses. The host-OpenMP numbers above therefore measure a SEED, not a defect: at np = 1
-the distributed and reference solvers run the same block and differ only in the arithmetic path
-`initMpi` selects, which on OpenMP means a different reduction order. The same np = 1 host run reads
-0.0 at 1 step,
+The P2 row is a property of the COUPLED scene, not of the decomposition, and the np = 1 column is
+where that is visible: there the distributed and reference solvers run the SAME block and differ
+only in the arithmetic path `initMpi` selects. The same np = 1 host run reads 0.0 at 1 step,
 3.3e-16 at 3, 2.4e-4 at 12 and then PLATEAUS. Bisected with `PECLET_P23_OFF` at 12 steps: all three
 WO-P23 options off gives **4.1e-14**, and ANY ONE of them on gives **1.2e-4 … 2.8e-4**. The
 amplifier is the interface CROSSING a cell boundary — the classification threshold
 `pcIsInterfacial` switches a pure cell's whole energy row on and off, and the sharper interfacial
-treatment makes that switch bigger. The INTEGRAL (the interface position) moves by 5e-5 … 1.4e-4,
+treatment makes that switch bigger. The INTEGRAL (the interface position) moves by 1.5e-5 … 1.1e-4,
 which is what the gate is on. **Open**: a smooth blend of the interfacial row over the last decade
 of `C` would remove the switch; it is a change to the classification, not to this rung, and it
 should be measured against the P0a/P1 bitwise gates before it ships.
@@ -640,9 +638,9 @@ should be measured against the P0a/P1 bitwise gates before it ships.
   `set_phase_change_plane_dirichlet(false)` / `set_phase_change_quadratic_fit(false)` explicitly so
   it stays the rung P0/P1 ablation next to `stefanRunP23`.
 - **CUDA**: the whole single-rank battery reproduces the host numbers to the digits printed
-  (P1 `+1.3099 %`, P1' `-0.0139 %`, ENERGY identity `0.000e+00`, INERT `0.000e+00`; P0b's
-  `u_gas` relative error is 1.752e-16 there against 0.0 on host, and P2 reads `+0.1912 %` against
-  `+0.1928 %`).
+  (P1 `+1.3099 %`, P1' `-0.0139 %`, ENERGY identity `0.000e+00`, INERT `0.000e+00`, P0b `u_gas` exact;
+  P2 reads `+0.1791 %` there against `+0.1706 %` on host, inside that scene's own sensitivity).
+- **The whole `tests/kokkos` battery on the rebased tree: 33/33 passed** (host-openmp).
 
 ### Open, and what a follow-on should measure
 
