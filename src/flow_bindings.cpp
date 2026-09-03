@@ -1658,6 +1658,35 @@ static void bind_solver(nb::module_& m, const char* name) {
           "the P1 Stefan interface position from +0.195 % to +0.003 % at N = 256, and the mdot "
           "kernel itself from order 1.1 to order 2.0. set(False) is the ablation.")
       .def(
+          "set_phase_change_area", [](S& s, int mode) { s.setPhaseChangeArea(mode); },
+          nb::arg("mode"),
+          "WO-P3c: WHICH GEOMETRY the interfacial area A_Gamma comes from. A_Gamma sets the plane "
+          "shift dV = mdot A dt / rho_l and the divergence source S = mdot A (1/rho_g - 1/rho_l), "
+          "so a bubble grows as int mdot dA and a biased area is a biased growth rate.\n"
+          "  0 = PLIC (DEFAULT, rungs P0/P1): plicArea = |m|_2 dV/dalpha on the MYC normal.\n"
+          "  1 = cascade metric: the V3 curvature cascade's own geometry — the height function's "
+          "area element sqrt(1 + h_x^2 + h_y^2) from the SAME central differences the curvature "
+          "differentiates once more (tiers 1/2), the PV paraboloid's gradient (tier 3) — applied "
+          "to the PLIC polygon's projected footprint, so the cells of a column still tile.\n"
+          "  2 = cascade normal: the same normals, but the plane is rebuilt on them, "
+          "plicArea(n*, plicAlpha(n*, C)).\n"
+          "All three are EXACT on a plane, so every planar gate (P0a/P0b/P1/P2) is unmoved. The "
+          "default is 0 because the measurement says so: on a sphere whose colour field is "
+          "resolved (16^3 sub-sampling), summed plicArea is within 0.5 % of 4 pi R^2 and the "
+          "cascade does not improve it. WO-P3b's 5.5-9.3 % 'PLIC area deficit' was its probe's own "
+          "4^3 sub-sampling, which quantizes C to 1/64 and drops a QUARTER of the interfacial "
+          "cells (their volume is 1e-4 %, their area 6 %).")
+      .def("phase_change_area", [](S& s) { return s.phaseChangeArea(); },
+           "The set_phase_change_area mode in force (0 PLIC, 1 cascade metric, 2 cascade normal).")
+      .def(
+          "vof_interface_area", [](S& s) { return s.vofInterfaceArea(); },
+          "Total interfacial area of the colour field, in cell units squared (h^2), summed over "
+          "the inner region and globally reduced under MPI. Uses the geometry "
+          "set_phase_change_area selects, so the number a page quotes and the number the phase "
+          "change integrates are the same one. Needs enable_vof; phase change need not be on. "
+          "A sphere of radius R cells reads 4 pi R^2 to about 0.2-0.8 % once its colour field is "
+          "resolved (WO-P3c).")
+      .def(
           "set_phase_change_energy",
           [](S& s, double rcp_gas, double rcp_liquid) {
             s.setPhaseChangeEnergy(rcp_gas, rcp_liquid);

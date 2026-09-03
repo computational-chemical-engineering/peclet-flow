@@ -58,6 +58,7 @@
 #include "vof/phase_change.hpp"    // VoF Part II rungs P0/P1: mass flux, plane-shift regression
 #include "vof/wetting_dynamic.hpp"  // VoF rung V6: dynamic contact angle + hysteresis
 #include "vof/energy_advect.hpp"   // VoF Part II rung P2/P3: consistent rho c_p T transport
+#include "vof/interface_area_field.hpp"  // VoF Part II rung P3c: the cascade-consistent A_Gamma
 
 namespace peclet::flow {
 
@@ -7780,6 +7781,87 @@ class Solver {
   void setPhaseChangeQuadraticFit(bool on) { pcQuadFit_ = on; }
   bool phaseChangeQuadraticFit() const { return pcQuadFit_; }
 
+  /// **WO-P3c — which geometry the interfacial AREA comes from.** `A_Gamma` enters the plane shift
+  /// (`dV = mdot A dt / rho_l`) and the divergence source (`S = mdot A (1/rho_g - 1/rho_l)`), so the
+  /// bubble grows as `int mdot dA` and a biased area is a biased growth rate.
+  ///
+  ///  * `0 = vof::kAreaPlic`   — rungs P0/P1: `plicArea` on the MYC normal. The recorded numbers.
+  ///  * `1 = vof::kAreaMetric` — the V3 curvature cascade's own geometry: the height function's
+  ///    area element `sqrt(1 + h_x^2 + h_y^2)` on tiers 1/2 and the PV paraboloid's gradient on
+  ///    tier 3, applied to the PLIC polygon's projected FOOTPRINT (see `vof/interface_area.hpp`).
+  ///  * `2 = vof::kAreaNormal` — the same normals, but the plane is rebuilt on them
+  ///    (`plicArea(n*, plicAlpha(n*, C))`) instead of keeping the PLIC footprint.
+  ///
+  /// Modes 1 and 2 are EXACT on a plane (the height function's differences are exact there and the
+  /// cascade normal is the MYC one), so every planar gate is unmoved. The default is `0`: on a
+  /// well-resolved colour field the MYC area is already within 0.5 % of `4 pi R^2` on a sphere and
+  /// the cascade buys nothing measurable — see the WO-P3c findings, which also record that
+  /// WO-P3b's 5.5-9.3 % deficit was its probe's own 4^3 sub-sampled initialisation.
+  void setPhaseChangeArea(int mode) {
+    if (mode < 0 || mode > 2)
+      throw std::runtime_error(
+          "set_phase_change_area: mode must be 0 (PLIC/MYC), 1 (cascade metric) or 2 (cascade "
+          "normal)");
+    pcAreaMode_ = mode;
+  }
+  int phaseChangeArea() const { return pcAreaMode_; }
+
+  /// The summed interfacial area over the inner region, in h^2 (globally reduced under MPI) —
+  /// the E7 gallery's `vof_interface_area()`. Uses the CURRENT `set_phase_change_area` geometry,
+  /// so the number a page quotes and the number the phase change integrates are the same one.
+  /// Needs `enable_vof`; does not need phase change.
+  double vofInterfaceArea() {
+    if (!vofEnabled_)
+      throw std::runtime_error("vof_interface_area: VoF is not enabled (call enable_vof first)");
+    bridgeColourToVof();
+    double a = 0.0;
+    if (pcAreaMode_ == vof::kAreaPlic) {
+      const I3 e3 = I3{e3_.x, e3_.y, e3_.z};
+      const int g = kVofG;
+      const long sy = e3.x, sz = (long)e3.x * e3.y;
+      CCConst c = CCConst(vofAdv_.colour());
+      const double eps = pcEffInterfaceEps();
+      Kokkos::parallel_reduce(
+          "peclet::flow::vof_area_plic",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {g, g, g},
+                                                         {g + nx_, g + ny_, g + nz_}),
+          KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+            const long i = (long)x + (long)y * e3.x + (long)z * sz;
+            if (!vof::pcIsInterfacial(c(i), eps))
+              return;
+            double st[27];
+            for (int kk = -1; kk <= 1; ++kk)
+              for (int jj = -1; jj <= 1; ++jj)
+                for (int ii = -1; ii <= 1; ++ii)
+                  st[vof::plicSt(ii + 1, jj + 1, kk + 1)] = c(i + ii + jj * sy + kk * sz);
+            double m[3];
+            vof::mycNormal(st, m);
+            acc += vof::plicArea(m[0], m[1], m[2], vof::plicAlpha(m[0], m[1], m[2], c(i)));
+          },
+          a);
+      Kokkos::fence();
+    } else {
+      a = pcAreaCascadeCompute().area;
+    }
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      double gsum = 0.0;
+      MPI_Allreduce(&a, &gsum, 1, MPI_DOUBLE, MPI_SUM, comm_);
+      a = gsum;
+    }
+#endif
+    return a;
+  }
+
+  /// Run the cascade area driver on the (already bridged) g = 3 colour block. Returns the LOCAL
+  /// census; the area field stays on the driver for `copyInner`.
+  vof::VofInterfaceArea::Stats pcAreaCascadeCompute() {
+    if (!pcAreaC_.ready())
+      pcAreaC_.init(nx_, ny_, nz_, kVofG);
+    pcAreaC_.interfaceEps = pcEffInterfaceEps();
+    return pcAreaC_.compute(vofAdv_.colour(), pcAreaMode_);
+  }
+
   /// Turn on the CONSISTENT energy transport (VOF_PLAN §9 item 6) for the scalar
   /// `set_phase_change_thermal` names: `rho c_p T` is advected with the colour advection's OWN
   /// geometric fluxes (`vof/energy_advect.hpp`) instead of the scalar module's Koren TVD flux, and
@@ -8023,6 +8105,19 @@ class Solver {
     // towards zero. One line, and it is a correctness fix, not a tolerance.
     if (pcThermal_)
       scalarFillGhosts(scalarField(pcTName_));
+    // WO-P3c: the cascade-consistent interfacial area, computed on the colour field's OWN g = 3
+    // block (the height columns reach +-3, which the G = 2 phase-change block does not carry) and
+    // copied back onto the inner region. Inert at `pcAreaMode_ == kAreaPlic`: the kernel below then
+    // takes the branch it always took, and `pcAreaCg2_` is never even allocated.
+    const bool cascadeArea = (pcAreaMode_ != vof::kAreaPlic);
+    if (cascadeArea) {
+      if (pcAreaCg2_.extent(0) != n_)
+        pcAreaCg2_ = CCField("pc_area_cascade", n_);
+      bridgeColourToVof();
+      pcAreaCascadeCompute();
+      copyInner(pcAreaCg2_, e_, G, CCConst(pcAreaC_.area()), e3_, kVofG);
+    }
+    CCConst areaCasc = CCConst(cascadeArea ? pcAreaCg2_ : pcMdot_);
     const C3 e = e_;
     const long sy = e_.x, sz = (long)e_.x * e_.y;
     CCField mdot = pcMdot_, area = pcArea_, dep = pcDep_, tgt = pcTgt_;
@@ -8062,7 +8157,7 @@ class Solver {
           double m[3];
           vof::mycNormal(st, m);
           const double al = vof::plicAlpha(m[0], m[1], m[2], c(i));
-          const double A = vof::plicArea(m[0], m[1], m[2], al);
+          const double A = cascadeArea ? areaCasc(i) : vof::plicArea(m[0], m[1], m[2], al);
           double n[3] = {1.0, 0.0, 0.0};
           if (!(vof::pcUnitNormal(m[0], m[1], m[2], n) > 0.0))
             return;
@@ -9259,6 +9354,9 @@ class Solver {
   bool pcPlaneDir_ = true;   // plane-anchored (GFM) Dirichlet rows instead of pinning the cell
   double pcGfmThMin_ = 0.1, pcGfmThMax_ = 1.9;  // the GFM distance clamp (cells)
   bool pcQuadFit_ = true;    // quadratic (Aslam) one-sided gradient fit (WO-P23 default)
+  int pcAreaMode_ = vof::kAreaPlic;  // WO-P3c: which geometry A_Gamma comes from
+  vof::VofInterfaceArea pcAreaC_;    // the cascade area driver (g = 3 block; lazily initialised)
+  CCField pcAreaCg2_;                // its inner values on the G = 2 phase-change block
   // WO-P23 ablation, process-wide (the `PECLET_FLOW_OUTFLOW_RHO` pattern): give the interfacial
   // cells whose along-the-normal deposit candidates are BOTH still interfacial a target from the
   // 5^3 box instead of leaving the source in place. Default OFF — see the findings.

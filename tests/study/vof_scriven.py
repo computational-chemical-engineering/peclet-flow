@@ -114,6 +114,31 @@ def initial_temperature(n, ctr, R, beta, rr, dT, mode="similarity", sub=4):
     return np.asfortranarray(out)
 
 
+def sphere_colour_chunked(n, ctr, R, sub):
+    """Liquid fraction of a sphere by sub^3 subsampling, one cell-plane at a time.
+
+    WO-P3c: the AREA probe needs a colour field whose SLIVER cells survive.  `sub^3` subsampling
+    quantizes C to multiples of 1/sub^3, so every cell whose true liquid fraction is below
+    1/(2 sub^3) is rounded to exactly 0 or 1 and DROPS OUT of the interface entirely — at sub = 4
+    that is a quarter of the interfacial cells of a sphere and 5-9 % of its area, while the VOLUME
+    (and hence R0) moves by 1e-4 %.  That is the whole of WO-P3b's "the PLIC area of a sphere is
+    5-9 % low": see the WO-P3c findings.  The chunked loop is what makes sub = 32 affordable
+    (sub = 32 on R = 28 would otherwise materialise a 2000^3 sample cloud).
+    """
+    off = (np.arange(sub) + 0.5) / sub
+    lo = max(0, int(math.floor(ctr - R - 2)))
+    hi = min(n, int(math.ceil(ctr + R + 2)))
+    q = (np.arange(lo, hi)[:, None] + off[None, :]).ravel() - ctr
+    c = np.ones((n, n, n), order="F")
+    m = hi - lo
+    for i in range(m):
+        xi = q[i * sub:(i + 1) * sub]
+        d2 = xi[:, None, None] ** 2 + q[None, :, None] ** 2 + q[None, None, :] ** 2
+        frac = (d2 < R * R).reshape(sub, m, sub, m, sub).mean(axis=(0, 2, 4))
+        c[lo + i, lo:hi, lo:hi] = 1.0 - frac
+    return np.asfortranarray(c)
+
+
 def sphere_colour(n, cx, cy, cz, R, sub=4):
     """Liquid fraction (C = 1 liquid, 0 vapour) of a sphere of radius R, by sub^3 subsampling."""
     off = (np.arange(sub) + 0.5) / sub
@@ -133,7 +158,7 @@ def sphere_colour(n, cx, cy, cz, R, sub=4):
 
 
 def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, consistent=True,
-        quad=True, muscl=False, init="similarity", verbose=True):
+        quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True):
     rr = 1.0 / ratio
     beta = scriven_beta(ja, rr)
     t0 = (r0 / (2 * beta)) ** 2 / alpha_l          # cells^2 / (cells^2/s) = s
@@ -154,7 +179,7 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         s.set_domain_bc(f, 3)              # outflow everywhere: the vapour production must leave
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
     s.enable_vof()
-    c0 = sphere_colour(n, ctr, ctr, ctr, r0)
+    c0 = sphere_colour_chunked(n, ctr, r0, sub)
     s.set_vof(c0)
     # R0 CONSISTENCY (WO-P3b): the gate's read-out is the liquid volume deficit, so the number
     # that has to match 2 beta sqrt(alpha_l t0) is the one the SUB-SAMPLED colour field carries,
@@ -185,6 +210,8 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         s.set_phase_change_energy(rcp_v, rcp_l)
         s.set_phase_change_energy_muscl(muscl)
     s.set_phase_change_quadratic_fit(quad)
+    if area_mode is not None:
+        s.set_phase_change_area(area_mode)
 
     # ADAPTIVE dt on the solver's OWN interface-local Courant number. The a-priori estimate
     # u = (1 - rho_v/rho_l) Rdot is the CONTINUUM interface speed and the discrete field overshoots
@@ -267,7 +294,8 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     R_off = rows[-1][1] - 2 * beta_eff * math.sqrt(alpha_l * rows[-1][0])
     if verbose:
         print(f"  N = {n}^3  Ja = {ja:g}  ratio {ratio:g}  beta = {beta:.6f}  "
-              f"R {r0:g} -> {r1:g} cells  steps {nst}  init {init}")
+              f"R {r0:g} -> {r1:g} cells  steps {nst}  init {init} sub {sub}^3"
+              + (f"  area mode {area_mode}" if area_mode is not None else ""))
         print(f"      init: thermal BL (99 % of dT) {dt99:.3f} cells, "
               f"R0/(2 beta^2) = {r0/(2*beta*beta):.3f} cells;  R0 from the colour field "
               f"{r0meas:.5f} vs exact {r0:.5f} ({100*(r0meas-r0)/r0:+.4f} %)")
@@ -326,7 +354,7 @@ def _mc_area(c):
     return float(measure.mesh_surface_area(v, f))
 
 
-def area_probe(n, radii, ratio=100.0, sub=4):
+def area_probe(n, radii, ratio=100.0, sub=4, mode=None):
     """A-PRIORI probe (WO-P3b): the summed PLIC interface area of an EXACT sphere, against 4 pi R^2.
 
     No time stepping, no energy solve, no velocity — the exact sphere fractions are set, one
@@ -335,7 +363,8 @@ def area_probe(n, radii, ratio=100.0, sub=4):
     the rung, and it is the quantity the R(t) gate integrates: the bubble grows as int mdot dA.
     """
     rho_l, rho_v = 1.0, 1.0 / ratio
-    print(f"  a-priori PLIC AREA probe, {n}^3, exact sphere fractions (sub = {sub}^3)")
+    print(f"  a-priori INTERFACE AREA probe, {n}^3, exact sphere fractions (sub = {sub}^3), "
+          f"area mode {0 if mode is None else mode}")
     prev = None
     for R in radii:
         ctr = 0.5 * n
@@ -345,7 +374,7 @@ def area_probe(n, radii, ratio=100.0, sub=4):
         s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
         s.enable_vof()
         if R > 0:
-            c0 = sphere_colour(n, ctr, ctr, ctr, R, sub=sub)
+            c0 = sphere_colour_chunked(n, ctr, R, sub)
             ref, lbl = 4.0 * math.pi * ((3.0 * (float(n) ** 3 - c0.sum()) / (4.0 * math.pi))
                                         ** (1.0 / 3.0)) ** 2, "4 pi R^2  "
         else:  # R < 0 selects a PLANE: -1 = (0,0,1), -2 = (1,1,0), -3 = (1,1,1), -4 = (1,2,3).
@@ -358,6 +387,8 @@ def area_probe(n, radii, ratio=100.0, sub=4):
         s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
         s.enable_phase_change(rho_v, rho_l, 1.0)
         s.set_mass_flux_uniform(0.0)
+        if mode is not None:
+            s.set_phase_change_area(mode)
         s.apply_phase_change(0.0)
         d = s.phase_change_diagnostics()
         mc = _mc_area(c0)
@@ -368,9 +399,9 @@ def area_probe(n, radii, ratio=100.0, sub=4):
         if prev is not None and R > 0 and prev[0] > 0:
             ordr = f"   order vs R = {prev[0]:g}: {math.log(abs(prev[1]) / abs(rel)) / math.log(R / prev[0]):.3f}"
         print(f"      R {R:6.2f} {lbl}  ({d['interface_cells']:6d} interfacial cells)  "
-              f"A_PLIC {d['interface_area']:12.4f}  ref {ref:12.4f}  "
+              f"A_sum  {d['interface_area']:12.4f}  ref {ref:12.4f}  "
               f"marching cubes {mc:12.4f} ({100*(mc/ref-1):+6.3f} %)  "
-              f"A_PLIC rel {100*rel:+7.3f} %{ordr}")
+              f"A_sum rel {100*rel:+7.3f} %{ordr}")
         prev = (R, rel)
 
 
@@ -393,20 +424,30 @@ def main():
                     help="initial T(r, t0): Scriven's similarity profile at the cell centre "
                          "(default, = the shipped behaviour), the same profile cell-averaged, or "
                          "a uniform superheat with a sharp bubble (the classic trap; control)")
+    ap.add_argument("--sub", type=int, default=4,
+                    help="sub^3 subsampling of the RUN's initial sphere colour field (WO-P3c: "
+                         "sub = 4 drops a quarter of the interfacial cells and 6 % of the area)")
+    ap.add_argument("--area-mode", type=int, default=None,
+                    help="0 = PLIC/MYC area (rung P0/P1), 1 = cascade metric, 2 = cascade normal")
+    ap.add_argument("--area-sub", type=int, default=4,
+                    help="sub^3 subsampling of the area probe's EXACT sphere fractions (WO-P3c: "
+                         "the sliver cells a coarse sub drops are what WO-P3b measured)")
     ap.add_argument("--area-probe", type=str, default="",
                     help="comma-separated radii in cells: run the a-priori PLIC-area probe on an "
                          "exact sphere instead of the growth run, and exit")
     a = ap.parse_args()
     if a.area_probe:
-        area_probe(a.n, [float(x) for x in a.area_probe.split(",")], ratio=a.ratio)
+        area_probe(a.n, [float(x) for x in a.area_probe.split(",")], ratio=a.ratio,
+                   sub=a.area_sub, mode=a.area_mode)
         return 0
     print(f"P3 Scriven bubble growth, {a.n}^3, cfl {a.cfl:g}, sweeps {a.sweeps}, "
           f"plane Dirichlet {not a.no_plane}, "
           f"consistent energy {not a.no_consistent}, quadratic fit {not a.no_quad}, "
-          f"energy MUSCL {a.muscl}, init {a.init}")
+          f"energy MUSCL {a.muscl}, init {a.init}, sub {a.sub}^3, area mode {a.area_mode}")
     for ja in [float(x) for x in a.ja.split(",")]:
         run(a.n, ja, a.ratio, a.r0, a.r1, cfl=a.cfl, sweeps=a.sweeps, plane=not a.no_plane,
-            consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl, init=a.init)
+            consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl, init=a.init,
+            sub=a.sub, area_mode=a.area_mode)
     return 0
 
 
