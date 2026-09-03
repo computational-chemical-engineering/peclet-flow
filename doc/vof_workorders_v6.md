@@ -1721,14 +1721,16 @@ rank boundary during every run), nvidia-cuda:
 |---|---|---|
 | **P0a** 1000 kinematic steps | **0 / 0 / 0** | **0 / 0 / 0** |
 | **P1** Stefan, 280 coupled steps | **0 / 0 / 0** | **0 / 0 / 0** |
-| P2 sucking, 55 coupled steps (interface position) | 0.0 / 7.9e-16 / 7.9e-16 | 4.573e-06 / 4.573e-06 / 4.573e-06 |
-| P2 pointwise `max\|C_dist - C_ref\|` | 1.30e-14 / 1.30e-14 / 1.33e-14 | 1.182e-04 / 1.182e-04 / — |
+| P2 sucking, 55 coupled steps (interface position) | 0.0 / 7.9e-16 / 7.9e-16 | 4.573e-06 / 4.573e-06 / 1.294e-04 |
+| P2 pointwise `max\|C_dist - C_ref\|` | 1.30e-14 / 1.30e-14 / 1.33e-14 | 1.182e-04 / 1.182e-04 / 1.476e-03 |
 
 `ctest -R vof_phase_change_mpi`: **3/3 passed**. P0a and P1 are bitwise with the option on as well —
 nothing in the swept factor is a reduction; it is a per-cell function of that cell's own plane. The
-P2 row is again np-INDEPENDENT to every digit (np 1 and np 2 identical), i.e. the scene's coupled
-sensitivity and not a distribution defect; the option enlarges it because it perturbs `A` at
-round-off and P2 amplifies round-off.
+P2 row is identical to every digit at np 1 and np 2 with the option on — the decomposition
+statement — and grows by one decade at np 4, exactly the pattern WO-P23 recorded for the same scene
+with its own options (2.3e-05 / 7.3e-05 / 1.1e-04): the option perturbs `A` at round-off and P2
+amplifies round-off through the `pcIsInterfacial` switch. Both rows are far inside that scene's own
++0.19 %-vs-exact accuracy, and the option is off by default.
 
 ### Open, and the corrected gates this WO proposes
 
