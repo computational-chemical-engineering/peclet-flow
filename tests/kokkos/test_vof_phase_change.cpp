@@ -224,10 +224,13 @@ void mcSheetGate() {
               "|colour-source axis - exact| %.3e\n",
               rows, axisRows, worstPlic, worstSplit, worstPart, worstColourAxis);
   CHECK(rows > 100);
-  CHECK(worstPlic < 1e-14);
-  CHECK(worstSplit < 1e-14);
-  CHECK(worstPart < 1e-14);
-  CHECK(worstColourAxis < 1e-14);
+  // ~1.7e-14 relative, i.e. about 75 eps: the sheet's total is a sum of a dozen triangle areas,
+  // each a square root of a cross product, so this is the round-off of the SUM and not an error of
+  // the construction. The axis-aligned rows, where every factor is an exact 1, are BITWISE.
+  CHECK(worstPlic < 1e-13);
+  CHECK(worstSplit < 1e-13);
+  CHECK(worstPart < 1e-13);
+  CHECK(worstColourAxis == 0.0);
 }
 
 // ============================================================ K5: the WO-P3c area constructions

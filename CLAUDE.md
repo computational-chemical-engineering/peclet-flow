@@ -1309,6 +1309,49 @@ JOINED surface (marching-cubes / partition-of-unity paraboloid), not a better pe
 `vof_block_stats()['area']` is mode 0 and was deliberately NOT switched (the bias it was to be
 switched for does not exist). Tables: `doc/vof_workorders_v6.md`, WO-P3c.
 
+**The JOINED area — `set_phase_change_area(4..7)`, and the DEFAULT since WO-P3d.** WO-P3c's
+conclusion was that no PER-CELL area can converge because the pieces do not join across cells. So
+this one is not a per-cell piece: **marching tetrahedra** (Kuhn's translation-invariant 6-tet split,
+hence watertight with no ambiguous-face rule) on the **dual cube whose 8 corners are cell centres**,
+cut once into a single closed sheet whose triangles are then booked to cells. Reach `±2` on the
+colour block, so **no new halo**; and the booking is a **GATHER** — a cell walks the 8 cubes it is a
+corner of and keeps its own share — so there is no atomic scatter and np 1/2/4 is bitwise by
+construction. Two axes, both settled by measurement, not taste: what is interpolated along an edge
+(`4/5` the raw `C = ½` level set, `6/7` the zero of the PLIC-reconstructed signed distance) and
+which cell a piece belongs to (`4/6` the whole triangle to the cell holding its centroid, `5/7` the
+triangle clipped to each cell's cube — the same SUM, a different distribution).
+`Σ A/4πR² − 1` on the sub = 16 sphere at R = 8/12/20/28: **mode 6/7 +0.011 / +0.011 / +0.009 /
++0.008 %**, mode 0 −0.22 / −0.22 / −0.44 / −0.48 %, mode 3 −0.08 / −0.01 / −0.20 / −0.21 %, mode 4/5
++4.6 / +5.4 / +5.5 / +5.8 %. On the CYLINDER, whose reference `2πR n_z` is exact, mode 6/7 is
+**−0.007 / −0.003 %** at R = 12/20 (order **2.04**) against −1.59 / −1.42 % and −1.65 / −1.18 %.
+Under **advection** — 100 WY steps, the wisp population reaching 738 439 cells — the joined area
+moves by **0.01 pp** while the per-cell PLIC area drifts **0.45 pp**: half a percentage point of
+mode 0's number is round-off wisps, which only a running gate can see.
+Four things this paid for, all measured (`doc/vof_workorders_v6.md`, WO-P3d):
+- **The raw `C = ½` source (mode 4/5, the work order's primary design) is REFUTED**: +4.2…+5.8 % on
+  a sphere with no convergence, +20.7 % on a 45° plane. `C(d)` is the SZ piecewise CUBIC and the
+  tets interpolate along `√2` face diagonals and the `√3` body diagonal, so long-edge vertices are
+  misplaced along the normal, the sheet wrinkles, and a wrinkle only ADDS area. Marching CUBES
+  (unit edges only) reads −0.2…+0.4 % on the same fields, so the defect is the COMBINATION — and
+  the cure is to interpolate a quantity that IS linear over a `√3`-cell step. It ships as the
+  ablation.
+- **How the two endpoint planes are combined is worth three decades.** Averaging the two ROOTS reads
+  +0.504 % at R = 8; blending the two signed-distance FUNCTIONS,
+  `Φ(s) = (1−s)φ_a(s) + s φ_b(s)`, reads **+0.011 %**. Both are exact on a plane, so no planar gate
+  could choose between them.
+- **A piece landing in a cell the wisp predicate calls PURE is RETARGETED to the nearest cell that
+  carries an interface, never dropped** — measured, exactly the 12 axis-tangent pole cells of a
+  sphere, 0.19 % of the area at R = 8, and dropping it happened to CANCEL against the sheet's own
+  error (+0.32 % usable against +0.50 % of sheet).
+- **A tilted plane needed a different SCENE, not a better reference** (WO-P3c's open item 3). A
+  half-space in a PERIODIC box is not one plane — the wrap makes the domain faces a second
+  interface, which a joined reconstruction reports and a per-cell one misses. With an integer normal
+  the level sets of `f = n·x (mod L)` are closed flat torus surfaces and the co-area formula gives
+  `2|n|₂L²` exactly (`--area-probe=-5..-8`): (0,0,1) **18432.0000, i.e. 96² to ten digits, in every
+  mode**; (1,1,0) mode 6 **+0.0002 %** (mode 0 −0.217 %, mode 4 +20.7 %); (1,1,1) mode 6 +0.001 %.
+  `tests/kokkos` gate **K6** proves the same at kernel level (one dual cube, exact plane distances →
+  the plane's cross-section of the cube, `< 1e-14`, both deposits and the retarget included).
+
 Two more things this rung ships. `set_divergence_sink(weights)` is an auto-balanced sink: the solver
 subtracts the GLOBAL deposited source spread over the given weights, so a closed domain's Poisson
 RHS is compatible every step with no user bookkeeping. `set_phase_change_energy_muscl` (OFF by

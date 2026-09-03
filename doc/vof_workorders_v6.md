@@ -1075,6 +1075,347 @@ for no defensible gain.
   anyone reads their percentages as accuracy.
 
 ---
+## WO-P3d findings (follow-up of WO-P3c) — the JOINED interfacial area: marching tetrahedra on the cell-centre lattice — 2026-09-03, Opus
+
+Branch `vof-p3d`, worktree `../flow-p3d`, from `origin/main` at `59e9afa`. Backend **nvidia-cuda**
+(`build_cuda`, `build_ktest_cuda`, `build_kmpi_cuda`), `OMP_NUM_THREADS=4 OMP_PROC_BIND=false`, one
+solver process at a time on the shared GPU. No run printed `preconditioner produced non-finite z`.
+
+**Verdict up front, in four statements.**
+
+1. **The joined surface closes the area question.** `Sigma A / 4 pi R^2 - 1` on the corrected
+   (sub = 16) sphere probe is **+0.011 % at R = 8** and **+0.008 % at R = 28**, against mode 0's
+   −0.22 … −0.48 % and mode 3's −0.08 … −0.21 %, and on the CYLINDER — the control whose reference
+   `2 pi R n_z` is exact — **−0.007 / −0.003 %** at R = 12/20 against **−1.59 / −1.42 %** (mode 0)
+   and **−1.65 / −1.18 %** (mode 3), observed order **2.04**. WO-P3c's first-order per-cell floor
+   is gone, which is what "the pieces JOIN" means quantitatively.
+2. **The work order's primary design is REFUTED and its named follow-on is what works.** Marching
+   tetrahedra on the raw `C = 1/2` level set (`set_phase_change_area(4)`) reads **+4.2 … +5.8 %** on
+   the sphere with no convergence and **+20.7 %** on a tilted plane. The same sheet built on the
+   zero of the PLIC-reconstructed signed distance (mode 6) reads +0.011 % and +0.0002 %. Mechanism
+   in §"why the colour source fails".
+3. **How the two endpoint planes are combined is worth three decades**, and it is a second thing the
+   work order could not have known: averaging the two ROOTS gives +0.504 % at R = 8, blending the
+   two signed-distance FUNCTIONS gives **+0.011 %**. The blend ships.
+4. **P3 is now the ENERGY rung's problem, not the area's.** (Scriven table below.)
+
+### What shipped
+
+`src/vof/marching_cubes.hpp` (container-free) and `src/vof/marching_cubes_field.hpp` (the g = 3
+block driver — a SIBLING of `VofInterfaceArea`, not an edit to WO-P3c's gated passes, hard rule 1);
+four new `set_phase_change_area` modes; `phase_change_diagnostics()['area_orphan']`; the study
+driver's `--area-probe=-5..-8` (the PERIODIC plane family) and `--area-advect`; the ctest gate
+**K6**. `pcAreaCascadeCompute` dispatches on the mode; nothing else in `pcBuildInterface` moved.
+
+| mode | sheet | edge crossing | deposit |
+|---|---|---|---|
+| **4 `kAreaMcColour`** | marching tets, `C = 1/2` | linear in `psi = 1/2 - C` | whole triangle to the centroid's cell |
+| **5 `kAreaMcColourSplit`** | the same | the same | clipped to each cell's cube |
+| **6 `kAreaMcPlic`** | marching tets, PLIC signed distance | the blend of the two cells' own planes | centroid |
+| **7 `kAreaMcPlicSplit`** | the same | the same | clipped |
+
+Three design points, each of which is the answer to a measurement:
+
+* **Marching TETRAHEDRA (Kuhn's 6-tet split of the dual cube), not the 256-case cube table.** Four
+  corner signs give one of three topologies, so the case analysis is a `popcount` and the kernel is
+  table-free; and the Kuhn decomposition is **translation invariant**, so two neighbouring dual
+  cubes split their shared face on the SAME diagonal and the sheet is watertight with no
+  ambiguous-face rule. The dual cube's 8 corners are 8 CELL CENTRES, so the g = 3 colour block
+  carries the whole stencil (`+-1` for the cubes, `+-2` counting the MYC normals) and there is **no
+  new halo**.
+* **The deposit is a GATHER.** A triangle born inside a dual cube can land in any of that cube's 8
+  corner cells, which as a scatter means atomics and an arrival-order-dependent sum. So a cell walks
+  the **8 cubes it is a corner of**, re-derives every triangle of each, and keeps its own share. The
+  8x redundancy buys bitwise decomposition-independence by construction — the WO-P01 lesson applied
+  to a quantity that is naturally a scatter.
+* **A piece landing in a cell the wisp predicate calls PURE is RETARGETED**, not dropped. Measured:
+  exactly the **12 axis-tangent pole cells** of a sphere, where the cell outside the interface is
+  exactly `C = 1` while the `C = 1/2` sheet still crosses its cube — 1.51 h^2, i.e. **0.19 % of the
+  area at R = 8**. The phase-change consumer reads `A` only on interfacial cells, so that area
+  would have been silently dropped from `int mdot dA`; worse, the drop CANCELS against the sheet's
+  own error (the usable sum reads +0.32 % where the sheet reads +0.50 % — flattering by
+  coincidence). The retarget is a permutation of the booking: K6 gates that the 8 corners' total is
+  unchanged by it, to 1e-14.
+
+### Gate (a) — the a-priori probe
+
+**The sphere** (`--area-probe … --area-sub 16`, 128^3, exact fractions, no time stepping),
+`Sigma A/4 pi R^2 - 1`:
+
+| R | 4 | 6 | **8** | 12 | 16 | 20 | 28 |
+|---|---|---|---|---|---|---|---|
+| mode 0 (P3c) | −0.730 | −0.800 | **−0.224** | −0.223 | −0.439 | −0.443 | −0.484 % |
+| mode 3 (P3c) | −0.512 | −0.613 | **−0.082** | −0.006 | −0.175 | −0.199 | −0.214 % |
+| **mode 4/5** | +4.180 | +5.197 | **+4.588** | +5.432 | +5.607 | +5.452 | +5.783 % |
+| **mode 6/7** | +0.217 | +0.051 | **+0.011** | +0.011 | +0.022 | +0.009 | +0.008 % |
+
+Modes 4 and 5 (and 6 and 7) are equal to the last digit, as they must be: the 8 corner octants
+partition the dual cube, so the two deposit rules differ only in the per-cell DISTRIBUTION.
+Mode 6/7 converges at order **4.3 over R = 4 -> 8** and then sits on a **0.01 % floor** — it is
+already below the probe's own reference uncertainty (the reference is `4 pi R^2` with R from the
+sampled volume). The honest statement of the convergence half of the gate is therefore the CYLINDER,
+whose reference carries no z discretisation: **order 2.04** over R = 12 -> 20.
+
+**The planes.** WO-P3c's open item 3 asked for an analytic reference for the tilted rows. There is
+one, and it needed a different SCENE rather than a better reference: a single half-space in a
+PERIODIC box is not a single plane — the wrap turns the domain faces into a second interface, which
+a joined reconstruction reports and a per-cell one misses (the old `--area-probe=-2` row reads
++5.2 % for mode 6 for that reason alone). With an INTEGER normal, the level sets of
+`f = n.x (mod L)` are closed flat surfaces of the torus and the co-area formula gives their total
+area in closed form: `integral |grad f| dV = |n|_2 L^3 = L * A` hence `A = |n|_2 L^2` per level, so
+the two levels bounding `f < L/2` carry **exactly `2 |n|_2 L^2`**. No edge convention, no seam, no
+reference uncertainty. `--area-probe=-5,-6,-7,-8` (96^3, sub = 16):
+
+| normal | exact | mode 0 | mode 3 | mode 4 | **mode 6/7** |
+|---|---|---|---|---|---|
+| (0,0,1) | 18432.0000 | **0.000 %** | **0.000 %** | **0.000 %** | **0.000 %** (18432.0000) |
+| (1,1,0) | 26066.7844 | −0.217 % | −0.000 % | +20.677 % | **+0.0002 %** |
+| (1,1,1) | 31925.1605 | −0.267 % | −0.267 % | +21.884 % | **+0.001 %** |
+
+The axis-aligned row is 96^2 to ten digits in every mode. The tilted rows are the gate the work
+order asked for (0.1 %) and mode 6 passes it by a factor of 400. **K6** proves the same statement at
+kernel level, where it needs no box and no ghost policy: given one dual cube the exact signed
+distance of a plane, the sheet inside it is that plane's cross-section of the cube (whose area is
+`plicArea` of the same plane on the unit cube) to **< 1e-14** over 10 normals x 25 offsets, both
+deposits agreeing to 1e-14 and the retarget changing the total by 1e-14.
+
+**The cylinder** (`--area-shape cylinder`, exact in z, reference `2 pi R n_z`):
+
+| R | sub | mode 0 | mode 3 | mode 4 | **mode 6/7** |
+|---|---|---|---|---|---|
+| 12 | 128 | −1.587 % | −1.648 % | +3.198 % | **−0.007 %** |
+| 20 | 128 | −1.415 % | −1.179 % | +3.374 % | **−0.003 %** |
+
+and the sub ladder for mode 6 at R = 20: −3.180 / −0.002 / −0.002 / −0.003 % at S = 16/32/64/128.
+(The S = 16 row is WO-P3c's corrected-gate item 1 biting the joined area too, though at R = 12 it is
+already at +0.025 %: a probe still has to show its own colour field converged.)
+
+### Why the colour source fails, and why that is not "marching cubes fails"
+
+`C(d)` — the liquid fraction of a cell as a function of its centre's distance from the plane — is
+the Scardovelli-Zaleski piecewise CUBIC, so linear interpolation of it locates the crossing well
+only over a step short compared with a cell. Kuhn's tets interpolate along the cube's 12 unit edges
+but also along 6 `sqrt(2)` face diagonals and the `sqrt(3)` body diagonal. Every vertex on a long
+edge is misplaced ALONG THE NORMAL, the sheet wrinkles, and a wrinkle only ever ADDS area — hence a
+one-signed +5 % that does not converge, and +21 % on a 45-degree plane where the cubic is at its
+most curved. Marching CUBES, which interpolates only the unit edges, reads −0.2 … +0.4 % on the very
+same fields (the probe prints `skimage.measure.marching_cubes` as the external cross-check). So the
+defect is the COMBINATION, and the fix is to interpolate a quantity that is linear over a
+`sqrt(3)`-cell step: the signed distance. That is mode 6, and it recovers the exactness on the plane
+that the tets otherwise lose.
+
+The same reasoning explains the blend. With `phi_a(s) = d_a + s (n_a . dv)` the crossing each
+endpoint cell's own plane predicts is exact on a plane but extrapolates a TANGENT plane up to
+`sqrt(3)/2` cells on a curved interface, where it is wrong by `s^2/(2R)`. Averaging the two roots
+leaves that error; blending the two distance FUNCTIONS,
+`Phi(s) = (1-s) phi_a(s) + s phi_b(s)` (a quadratic in `s`, solved exactly), weights each plane by
+how NEAR the crossing is to it. Measured on the sphere ladder, `Sigma A/4 pi R^2 - 1`:
+
+| R | 4 | 6 | 8 | 12 | 16 | 20 | 28 |
+|---|---|---|---|---|---|---|---|
+| average of the two roots | +0.892 | +1.162 | +0.504 | +0.421 | +0.163 | +0.138 | +0.079 % |
+| **blend of the two distances** | +0.217 | +0.051 | **+0.011** | +0.011 | +0.022 | +0.009 | +0.008 % |
+
+Both are exact on a plane, so no planar gate could have chosen between them; the sphere probe is the
+only instrument that separates them, and it separates them by three decades.
+
+### Gate (b) — under ADVECTION: does the area drift with the wisp population?
+
+`--area-advect`: a sphere carried 100 Weymouth-Yue steps (`advect_vof`) through a field that is
+EXACTLY discretely divergence-free — two Taylor-Green cellular pairs plus a uniform drift, sampled
+on the staggered faces, where the identity
+`sin(k(x+h)) - sin(k x) = 2 sin(kh/2) cos(k(x+h/2))` makes the two axes' differences cancel term by
+term because `x + h/2` of a face IS the cell centre the transverse factor is evaluated at. Measured
+`max|div(open u)|` **0.0** (pure drift) and **1.9e-15** (with the cellular field), against
+`advect_vof`'s own 1e-10 refusal threshold. Every area mode is read on the SAME field at the same
+step. 128^3, sphere R = 16, sub = 16, cfl 0.2:
+
+| scene | wisp cells, 0 -> 100 steps | mode 0 span | mode 3 span | mode 4 span | **mode 6/7 span** |
+|---|---|---|---|---|---|
+| pure translation | 0 -> **19 634** | **0.452 pp** (−0.439 -> +0.013 %) | 0.280 pp | 0.150 pp | **0.008 pp** (+0.022 -> +0.020 %) |
+| + cellular deformation | 0 -> **738 439** (57 % of the domain) | **0.388 pp** (−0.439 -> −0.052 %) | 0.261 pp | 0.035 pp | **0.012 pp** (+0.022 -> +0.029 %) |
+
+Read the first column first: Weymouth-Yue re-creates round-off colour residue in every cell its
+sweeps touch, and after 100 steps of a cellular field **738 439 cells** satisfy the interfacial
+predicate while the liquid volume has moved by 8e-14. **The per-cell PLIC area drifts by half a
+percentage point with that population** — it is summing over those cells — and the joined sheet,
+which is built from the `C = 1/2` crossing and never enumerates them, moves by 0.01 pp. That is
+gate (b), and it also says something about mode 0 that no static probe could: 0.45 pp of its number
+is wisps.
+
+### Gate (c) — Scriven, 128^3, ratio 100, similarity start, MUSCL, `R 6 -> 20`
+
+Both mode-0 rows reproduce WO-P3b/WO-P3c **to the digit** (2.002 / −2.517 / −3.380 and
+2.636 / −2.568 / −3.375), so the harness is faithful. No run capped (30–34 of 600).
+
+| Ja | area mode | last-half max \|ΔR\|/R | **β_eff/β − 1** | `A/(4πR²) − 1`, last half | area-avg ṁ | `band_div` | deposit fallback | iters |
+|---|---|---|---|---|---|---|---|---|
+| 0.5 | **0** | 2.002 % | −2.517 % | −3.380 % | −0.450 % | 2.40e-03 | 48 | 34/600 |
+| 0.5 | 3 (P3c) | 1.307 % | −1.863 % | −2.498 % | −0.694 % | — | — | — |
+| 0.5 | **6** | **1.036 %** | **−1.655 %** | −2.151 % | −0.926 % | **6.01e-12** | **0** | 30/600 |
+| 0.5 | 7 | 1.083 % | −1.621 % | −2.206 % | −0.754 % | 4.27e-03 | 48 | 34/600 |
+| 2 | **0** | 2.636 % | −2.568 % | −3.375 % | +0.310 % | 1.06e-02 | 48 | 31/600 |
+| 2 | 3 (P3c) | 1.830 % | −1.766 % | −2.496 % | +0.251 % | — | — | — |
+| 2 | **6** | **1.486 %** | **−1.475 %** | −2.190 % | +0.145 % | **1.08e-11** | **0** | 30/600 |
+| 2 | 7 | 1.500 % | −1.482 % | −2.218 % | +0.214 % | 5.67e-03 | 48 | 31/600 |
+
+**The gate is MISSED** (1.036 / 1.486 % against 1 %; β_eff 1.66 / 1.48 % against 1 %), and mode 6 is
+nevertheless the best P3 the campaign has produced — it halves mode 0's radius error at both Ja and
+takes `β_eff` from −2.5 % to −1.5 %. **Rule 4: this is the FOURTH failure of the P3 1 % gate
+(WO-P23, WO-P3b, WO-P3c, WO-P3d) and the run stops here with the mechanism.** Ja = 10 was NOT run:
+it is indicated only after Ja 0.5 and 2 pass, and its thermal boundary layer is sub-cell at 128^3
+(WO-P23).
+
+Three things to read out of it.
+
+* **The mechanism has MOVED, and that is the finding.** The area estimator is no longer the
+  limiter: on a resolved sphere it is +0.011 %, on the cylinder −0.007 %, on a tilted plane
+  +0.0002 %, and under 100 WY steps it moves by 0.01 pp. Yet **the RUN's area is still −2.15 %**
+  below `4πR²`. Whatever is missing is now in the COLOUR FIELD the coupled phase-change run
+  carries, not in the geometry read off it — the deficit survives an estimator that measures an
+  exact sphere to one part in 10⁴. `Δβ_eff ≈ ε/2` still holds across the change: −1.23 pp of area
+  (−3.38 → −2.15) predicts +0.62 pp of β_eff and +0.86 pp is observed.
+* **It is not the initialisation.** On the sub = 4 sphere the run starts from — the field whose
+  quantization produced WO-P3b's whole table — the joined sheet reads **+0.507 / −0.223 / +0.006 /
+  −0.245 %** at R = 6/10/14/20 while `Σ A_PLIC` reads **−9.304 / −6.369 / −4.739 / −6.487 %**. The
+  sheet is essentially IMMUNE to the sliver quantization: it is built from the `C = ½` crossing and
+  a cell that rounds to pure simply has no crossing in it, while its neighbours' crossings still
+  bound the same surface. So WO-P3c's corrected-gate item 1 ("any area probe must show its own
+  colour field converged") applies to a per-cell area and NOT to this one, and the `--sub 16` run
+  ablation is the direct confirmation (below).
+* **Mode 6 removes the deposit failure as a side effect, and mode 7 does not.** `band_div` goes
+  2.4e-03 → **6.0e-12** and the deposit fallback 48 → **0** under the CENTROID deposit, because a
+  cell the sheet books nothing to has `A = 0`, hence `S = 0`, hence never needs a pure-gas donor at
+  all — precisely the 48 cells on a curved interface whose `+n` walk fails (WO-P23 mechanism 5).
+  The SPLIT deposit gives every touched cell some area and keeps the 48. That, plus the marginally
+  better gate, is why **mode 6 is the recommended one of the four** even though 6 and 7 carry
+  identical total area.
+
+### Where the remaining 2 % of area is, and where it is NOT
+
+Two ablations, both on the Ja = 0.5 / mode 6 run.
+
+**D1 — the sub = 4 sphere the run starts from** (`--area-probe 6,10,14,20 --area-sub 4`):
+
+| R | 6 | 10 | 14 | 20 |
+|---|---|---|---|---|
+| mode 0 `Σ A_PLIC` | −9.304 % | −6.369 % | −4.739 % | −6.487 % |
+| **mode 6, the joined sheet** | **+0.507 %** | **−0.223 %** | **+0.006 %** | **−0.245 %** |
+
+The joined sheet is **essentially immune to the sliver quantization** that produced WO-P3b's entire
+table and that WO-P3c had to fix by refining the probe. The reason is structural: the sheet is built
+from the `C = ½` crossing, and a cell whose true fraction rounds to pure simply has no crossing in
+it while its neighbours' crossings still bound the same surface — where a per-cell area, which
+enumerates mixed cells, loses that cell's whole polygon. **WO-P3c's corrected-gate item 1 therefore
+applies to a per-cell area and NOT to this one.**
+
+**D2 — the same run started from a sub = 16 colour field** (P3c's ablation, repeated on mode 6):
+`max |ΔR|/R` **1.036 → 1.124 %**, `β_eff` −1.655 → −1.630 %, `A/(4πR²)` −2.151 → −2.192 %, `R₀` from
+the colour field +0.0017 % instead of −0.0287 %. **The initialisation moves nothing** (as it did not
+for mode 0).
+
+So the −2.15 % is a property of the colour field a COUPLED phase-change run carries, and neither the
+estimator nor the start. What distinguishes that field from the advection gate's (where the same
+estimator holds +0.02 % over 100 WY steps with 738 k wisp cells) is the **plane-shift regression
+with clip-and-redistribute**: every step moves each interfacial cell's plane by `mdot A dt/ρ_l` and
+pushes the part that will not fit into neighbours, which is a colour update no reconstruction
+generated. That is the next instrument, and it is a rung of its own — the same shape of finding
+WO-P3c made one level up.
+
+### Gate (d) — the planar rungs, and gate (e) — inertness
+
+`PECLET_P3C_AREA=<mode>` re-runs every scene of both phase-change binaries on a non-default area.
+Printed values, `tests/kokkos/test_vof_phase_change`:
+
+| gate | mode 0 (default) | mode 3 | mode 4 | **mode 6** | **mode 7** |
+|---|---|---|---|---|---|
+| **K5** (the P3c kernel gate) | metric 0.0, normal 2.2e-16, m1 2.2e-16, m2 1.1e-15, 38 rows bitwise | identical | identical | identical | identical |
+| **P0a** planar regression, 1000 steps | 1.776e-14 | **byte-identical** | **byte-identical** | **byte-identical** | **byte-identical** |
+| **P0b** ratio 100, closed column | u_gas rel **0.000e+00** | 0.000e+00 | −1.752e-16 | **0.000e+00** | **0.000e+00** |
+| **P1 / P1'** Stefan N = 64 | +1.3099 % / −0.0139 % | identical | identical | **identical** | **identical** |
+| **ENERGY** uniform-T at rcp ratio 1e4 | 0.000e+00 | identical | identical | **identical** | **identical** |
+| **INERT** ṁ ≡ 0 | 0.000e+00 | identical | identical | **identical** | **identical** |
+| **P2** sucking N = 64 | +0.1791 % | +0.1929 % | +0.1929 % | +0.1929 % | +0.1929 % |
+
+**P0a, P0b, P1, P1', ENERGY and INERT are BYTE-IDENTICAL on the joined sheet**, which is a stronger
+statement than "digit-level" and it is not an accident: on an axis-aligned plane the sheet's
+cross-section of every dual cube is an exact unit square and the crossing lands in exactly the cell
+whose colour is mixed, so `A = 1.0` on exactly the cells `plicArea` gives 1.0 to. K6's
+`|colour-source axis − exact|` is **0.000e+00** — bitwise at kernel level, over 22 axis-aligned rows.
+The only scene that moves is P2 (+0.0138 pp), which is the same 0.0138 pp modes 1/3/4 move it by and
+is the scene's own red–black parity asymmetry (WO-P01 finding 3), smaller than its host-vs-CUDA
+spread.
+
+**K6** (new): 199 rows over 10 normals x 25 offsets — `|PLIC-source sum − exact|` **1.68e-14**,
+`|split − centroid|` **1.59e-14**, `|retargeted − plain|` **1.59e-14**, `|colour-source axis −
+exact|` **0.000e+00**. The 1.7e-14 is ~75 eps on a sum of a dozen square-rooted cross products, i.e.
+the round-off of the SUM.
+
+`tests/kokkos` at the shipped default: **33/33**.
+
+### Gate — MPI, np 1/2/4 (`test_vof_phase_change_mpi`, 64x4x4, the ORB cutting the interface)
+
+| case | mode 0 | **mode 6** | **mode 7** |
+|---|---|---|---|
+| **P0a** 1000 kinematic steps | **0 / 0 / 0** | **0 / 0 / 0** | **0 / 0 / 0** |
+| **P1** Stefan, 280 coupled steps | **0 / 0 / 0** | **0 / 0 / 0** | **0 / 0 / 0** |
+| P2 sucking, 55 coupled steps (interface position) | 1.5e-05 / 1.5e-05 / 5.6e-05 | **0.0 / 7.9e-16 / 7.9e-16** | **0.0 / 0.0 / 0.0** |
+
+P0a and P1 are **bitwise at every area mode** — the sheet is a pure local stencil on the colour
+block with a fixed-order gather and no atomic scatter, so it is decomposition-independent by
+construction. **The P2 row improves by eleven orders**, which is a second thing worth recording: that
+scene's known distributed sensitivity comes from the red–black energy solve giving the MYC normal a
+~1e-8 transverse component, and a per-cell area is LINEAR in that normal while the joined sheet —
+built from `C = ½` crossings — is not. So mode 6/7 makes the sucking interface bitwise across np as
+well.
+
+### The verdict, and what shipped as the default
+
+Gate (a) **PASSES** with room: 0.011 % on a sub = 16 sphere at R = 8 (gate 0.5 %), 0.0002 % on the
+tilted plane (gate 0.1 %), 0.007 % on the cylinder (gate 0.5 %), bitwise on an axis-aligned plane,
+converging (cylinder order 2.04; sphere order 4.3 from R = 4 to 8 and then a 0.01 % floor). Gate (b)
+**PASSES** (0.008–0.012 pp over 100 WY steps against the per-cell area's 0.39–0.45 pp). Gate (d)
+**PASSES** byte-identically and the MPI gate is bitwise. Gate (c) **FAILS** at 1.036 % / 1.486 %.
+
+The work order's rule is explicit: *"If (a) and (c) pass, make it the default … otherwise leave
+mode 0 and ship it as an instrument with the mechanism recorded."* **(c) does not pass, so the
+default stays mode 0** and modes 4–7 ship as instruments. This is also the campaign's standing rule
+(a default changes on a passed gate, not on a better number) and the same call WO-P3c made for
+mode 3.
+
+**But the recommendation attached to it is different from WO-P3c's**, and it should be recorded as
+such: mode 3's case for the default rested on being better on the gates that moved; **mode 6's rests
+on the gate having been re-derived**. It is the only construction measured in this campaign that is
+at the floor on every a-priori geometry (sphere, cylinder, axis-aligned plane, tilted plane), the
+only one that does not drift with the wisp population, the only one that makes P2 bitwise across np,
+and it removes the deposit fallback entirely. What it does not do is close P3 — because P3 is no
+longer area-limited. **If Fable wants a default change, the honest gate to change it on is gate (a)
+plus (b) plus (d), all of which it passes, with P3 quoted as the open rung it no longer explains.**
+
+### Open
+
+* **P3 remains NOT closed** at 1.036 % (Ja 0.5) / 1.486 % (Ja 2), mode 6, 128^3 — the best the
+  campaign has produced and still outside 1 %. **Rule 4: fourth failure, stopped.** Ja = 10 not run.
+* **The next instrument is the PLANE-SHIFT REGRESSION, not the area.** The area estimator measures
+  an exact sphere to 1e-4 and an advected one to 1e-4, and the run's interface still carries 2.15 %
+  more `4πR²` than area. The one operation in the coupled loop that no reconstruction generated is
+  `C ← C − ṁ A dt/ρ_l` with clip-and-redistribute. The a-priori instrument is the analogue of
+  `--area-advect`: apply `apply_phase_change(dt)` with a UNIFORM ṁ to an exact sphere with no energy
+  solve and no velocity, and watch `Σ A` against `4πR²(t)` — the exact answer is known
+  (`R(t) = R₀ − ṁ t/ρ_l`), and any drift is the regression's.
+* **Mode 6 vs mode 7.** Identical totals by construction; mode 6 is marginally better on both
+  Scriven rows and removes the deposit fallback, mode 7 spreads the area over every touched cell.
+  Mode 6 is the recommended one; mode 7 is kept because the split IS the physically-distributed
+  answer and the difference between them is a measurement of how much the per-cell DISTRIBUTION
+  matters (here: 0.05 pp of `max|ΔR|/R`, and the whole of the `band_div` improvement).
+* **The tilted-plane rows −2/−3/−4 of the old probe** should be read with the periodic-seam
+  correction above; the new `-5..-8` rows are the ones with an exact reference. WO-P3c's open
+  item 3 is thereby closed for (1,1,0) and (1,1,1) and superseded for the rest.
+* `W12`'s `vof_block_stats()['area']` still uses the PLIC polygon (mode 0). It is now measurably
+  0.2–0.5 % low on a resolved sphere and drifts ~0.4 pp with the wisp population; switching it is a
+  one-line change to a shipped, gated number and is left to whoever re-validates W12.
+
+---
 ## WO-V6b findings — the velocity half of the dynamic contact line (Navier slip in the cut-cell wall closure), plus the integer-coordinate wall defect — 2026-09-03, Opus
 
 Branch `vof-v6b`, worktree `../flow-v6b`, from `origin/main` at `9ad0646`. Commits: `fa1e346`

@@ -142,11 +142,12 @@ class VofMcArea {
           for (int kk = -1; kk <= 1; ++kk)
             for (int jj = -1; jj <= 1; ++jj)
               for (int ii = -1; ii <= 1; ++ii) {
-                const double cv = c(L3(x + ii, y + jj, z + kk, e));
-                if (cv < 0.5)
-                  anyLo = true;
-                else
+                // the SAME predicate the tets use (`psi = 1/2 - C < 0` is liquid), so a cell at
+                // exactly C = 1/2 is classified identically in the early-out and in the kernel.
+                if (c(L3(x + ii, y + jj, z + kk, e)) > 0.5)
                   anyHi = true;
+                else
+                  anyLo = true;
               }
           if (!(anyLo && anyHi))
             return;
