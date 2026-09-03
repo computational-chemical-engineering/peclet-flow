@@ -1418,6 +1418,272 @@ plus (b) plus (d), all of which it passes, with P3 quoted as the open rung it no
   one-line change to a shipped, gated number and is left to whoever re-validates W12.
 
 ---
+## WO-P3e findings (follow-up of WO-P3d) — the interface REGRESSION: an a-priori probe, and the defect that produced the number the last two work orders chased — 2026-09-03, Opus
+
+Branch `vof-p3e`, worktree `../flow-p3e`, from `origin/main` at `ee7e7e6` (the commit that made
+`set_phase_change_area(6)` the default). Backend **nvidia-cuda** (`build_cuda`, `build_ktest_cuda`,
+`build_kmpi_cuda`), `OMP_NUM_THREADS=4 OMP_PROC_BIND=false`, one solver process at a time on the
+shared GPU. No run printed `preconditioner produced non-finite z`. Every Scriven run below is clean
+under rule 3b (max pressure iterations **30** against the 600 cap, none capped).
+
+**Verdict up front, in four statements.**
+
+1. **The `-2.15 %` "run area deficit" that WO-P3d handed to this work order does not exist.** It is
+   the study driver comparing `phase_change_diagnostics()['interface_area']`, which
+   `pcBuildInterface` measures at the **head** of the step, with `R` read from `get_vof()` at its
+   **end** — one whole `dR` apart. Recomputed on the same field at the same time
+   (`vof_interface_area()` after the step), the run's sheet reads **+0.043 %** (Ja 0.5) and
+   **+0.041 %** (Ja 2) of `4 pi R^2`, not −2.15 %. The tell was already in WO-P3d's own table and
+   nobody read it: the last row of every run, whose `dt` is the leftover `te - t`, reads −0.03 %.
+2. **The regression's plane shift is not the mechanism either, by four orders of magnitude.** The
+   probe measures its error as *exactly* `delta/R` — the linearization `dV = mdot A dt/rho_l` of
+   the swept volume `int_0^delta A(s) ds` — reproduced to two digits at every radius and every
+   step size measured. And the Scriven run's own regression step is
+   **`delta = mdot dt/rho_l = 0.7 ... 1.9e-3` cells**, i.e. `delta/R ~ 1e-4`: at density ratio 100
+   the regression supplies only `rho_v/rho_l` of the interface motion and Weymouth-Yue advection
+   by the liquid velocity supplies the other 99 %, while the time step is set by the CFL on the
+   latter. Measured directly on an advection-realistic field at the run's own `delta`: removed
+   volume **+0.0016 %**, new radius **+0.00000 %**.
+3. **The clip-and-redistribute is quiet at the run's step and is what limits the probe at large
+   `delta`** — 0 to 12 cells clipped per step in the run against ~7000 interfacial cells, residue
+   moved `<= 4e-3` of a removed volume of 5.8 (7e-4 relative), `unresolved = 0` everywhere. On the
+   probe it is the *only* error left once the shift is exact, and it is what the `delta >= 0.2`
+   rows measure.
+4. **The gate is still missed and the mechanism has moved again — to the FLUX.** 1.036 % (Ja 0.5)
+   and 1.486 % (Ja 2), `beta_eff` −1.655 / −1.475 %, with the area now measured right, the
+   regression exonerated and the redistribute quiet. What is left is `mdot` from the energy solve
+   on a moving, curved interface: the area-weighted `mdot` drifts from **+10.4 %** at the first
+   sample to **−2.7 %** at the last (Ja 0.5) and from **+1.3 %** to **−1.8 %** over the last half
+   (Ja 2). **Rule 4: this is the FIFTH failure of the P3 1 % gate (WO-P23, P3b, P3c, P3d, P3e) and
+   the run stops here with the mechanism.** Ja = 10 was NOT run (indicated only after 0.5 and 2
+   pass; its thermal boundary layer is sub-cell at 128^3).
+
+### What shipped
+
+* `tests/study/vof_scriven.py --regress-probe R1,R2,... [--regress-delta ...] [--regress-modes ...]
+  [--regress-advect N] [--regress-swept]` — the a-priori regression instrument (below), and two
+  read-outs added to the coupled run: **`delta` per step** (`removed_volume/area`, with `delta/R`)
+  and **`A_end`** (`vof_interface_area()` recomputed after the step) beside the stale
+  `interface_area`, plus the radius each of them implies.
+* `set_phase_change_swept(bool)` (default **OFF**) — the exact swept volume of the plane shift, as
+  the ADDITIVE curvature term `A_plic (f - 1)` on whichever area `set_phase_change_area` selects,
+  with `f = (V(alpha) - V(alpha - delta |m|_2)) / (delta A_plic)` from the cell's own PLIC plane
+  (`vof::pcSweptFactor`, container-free). `pcBuildInterface` now takes the step's `dt` (0 from the
+  probes, so an area probe is unmoved). Two guards the measurements forced: the correction is
+  applied **only where the area mode booked something** (`A > 0` is mode 6's "no surface here"
+  sentinel — the 48 cells whose `+n` walk finds no pure gas cell, which is exactly why mode 6 has
+  no deposit fallback; correcting them turns `fallback` 0 -> 48 and `band_div` 1e-11 -> 1.6e-04),
+  and it never drives `A` through zero.
+
+### Gate (i)/(ii)/(iii) — the EXACT sphere, no time stepping
+
+128^3, exact fractions at `sub = 16` (WO-P3c's corrected probe resolution), uniform prescribed
+`mdot = 1` with `rho_l = 1` so the normal displacement is exactly `delta = dt`, ONE
+`apply_phase_change(delta)`. The bubble is the GAS, so evaporation grows it: the exact liquid
+volume removed is the shell `4 pi R^2 delta (1 + delta/R + delta^2/3R^2)` and the exact new radius
+from the volume deficit is `R + delta`.
+
+`dV/dV_exact - 1` and `(R1 - (R0+delta))/(R0+delta)`, shipped (linear) shift and `--regress-swept`:
+
+| R | mode | delta | **dV lin** | dV swept | **R1 lin** | R1 swept | `delta/R` |
+|---|---|---|---|---|---|---|---|
+| 8 | 0 | 0.05 | −0.8452 % | −0.8971 % | −0.0052 % | −0.0055 % | 0.625 % |
+| 8 | 0 | 0.10 | −1.4611 % | −1.9306 % | −0.0178 % | −0.0236 % | 1.250 % |
+| 8 | 0 | 0.20 | −2.6776 % | −2.3419 % | −0.0638 % | −0.0558 % | 2.500 % |
+| 8 | 0 | 0.50 | −6.2084 % | −6.0648 % | −0.3453 % | −0.3373 % | 6.250 % |
+| 8 | **6** | 0.05 | **−0.6115 %** | **−0.3536 %** | −0.0038 % | −0.0022 % | 0.625 % |
+| 8 | **6** | 0.10 | **−1.2288 %** | −1.2159 % | −0.0150 % | −0.0148 % | 1.250 % |
+| 8 | **6** | 0.20 | **−2.4482 %** | −1.6495 % | −0.0583 % | −0.0393 % | 2.500 % |
+| 8 | **6** | 0.50 | **−5.9873 %** | −5.6393 % | −0.3330 % | −0.3136 % | 6.250 % |
+| 12 | 0 | 0.05 | −0.6376 % | −0.7537 % | −0.0026 % | −0.0031 % | 0.417 % |
+| 12 | 0 | 0.10 | −1.0499 % | −0.9314 % | −0.0086 % | −0.0076 % | 0.833 % |
+| 12 | 0 | 0.20 | −1.8676 % | −1.8423 % | −0.0301 % | −0.0297 % | 1.667 % |
+| 12 | 0 | 0.50 | −4.2672 % | −6.4484 % | −0.1642 % | −0.2484 % | 4.167 % |
+| 12 | **6** | 0.05 | **−0.4047 %** | **−0.1898 %** | −0.0017 % | −0.0008 % | 0.417 % |
+| 12 | **6** | 0.10 | **−0.8180 %** | **−0.2598 %** | −0.0067 % | −0.0021 % | 0.833 % |
+| 12 | **6** | 0.20 | **−1.6376 %** | **−1.0775 %** | −0.0264 % | −0.0174 % | 1.667 % |
+| 12 | **6** | 0.50 | **−4.0428 %** | −6.0015 % | −0.1556 % | −0.2311 % | 4.167 % |
+| 20 | 0 | 0.05 | −0.6917 % | −0.6398 % | −0.0017 % | −0.0016 % | 0.250 % |
+| 20 | 0 | 0.10 | −0.9393 % | −0.9224 % | −0.0047 % | −0.0046 % | 0.500 % |
+| 20 | 0 | 0.20 | −1.4322 % | −1.7675 % | −0.0140 % | −0.0173 % | 1.000 % |
+| 20 | 0 | 0.50 | −2.8912 % | −7.1195 % | −0.0689 % | −0.1697 % | 2.500 % |
+| 20 | **6** | 0.05 | **−0.2405 %** | **+0.0628 %** | −0.0006 % | **+0.0002 %** | 0.250 % |
+| 20 | **6** | 0.10 | **−0.4893 %** | **−0.0832 %** | −0.0024 % | **−0.0004 %** | 0.500 % |
+| 20 | **6** | 0.20 | **−0.9843 %** | **−0.8657 %** | −0.0097 % | −0.0085 % | 1.000 % |
+| 20 | **6** | 0.50 | **−2.4499 %** | −6.4675 % | −0.0583 % | −0.1542 % | 2.500 % |
+
+Read the mode-6 rows against the last column: **the shipped regression's volume error IS
+`-delta/R`, to two digits, at every radius and every step size.** That is the linearization and
+nothing else — `A delta` is the first term of `int_0^delta A(s) ds`, and for a sphere
+`sum A(s) = 4 pi (R+s)^2`, so the missing term is exactly `delta/R`. (The mode-0 rows carry that
+term PLUS mode 0's own `-0.22 ... -0.48 %` per-cell area deficit, WO-P3c, which is why they do not
+read the last column.)
+
+`--regress-swept` removes it wherever the shift stays INSIDE the cells (R = 20: −0.24 → +0.06 % and
+−0.49 → −0.08 % at `delta` = 0.05 / 0.10; the WO's 1e-3-relative gate on (i) and (ii) then passes)
+and stops helping once many cells empty in one step — the `delta = 0.5` rows, where the clip and
+redistribute moves 731 of 2513 units of removed volume and `min C` reaches −0.196. **The residual at
+large `delta` is the redistribute, not the shift.**
+
+**(iii) the area, before and after.** Mode 6 reads `+0.011 %` of `4 pi R_0^2` before the step at
+every radius (WO-P3d's floor, reproduced). After it, against `4 pi (R_0+delta)^2`:
+
+| R = 20, mode 6 | delta 0.05 | 0.10 | 0.20 | 0.50 |
+|---|---|---|---|---|
+| linear shift | +0.067 % | +0.470 % | +3.303 % | +11.981 % |
+| swept shift | +0.052 % | +0.121 % | +1.056 % | +9.9 % |
+
+**A linearized plane shift ROUGHENS the surface**, monotonically in `delta` — each cell's plane
+moves by `dV/A(0)` rather than by `delta`, and the discrepancy is per-cell. At the run's
+`delta = 1.8e-3` it is unmeasurable (below), which is why this shows up only on the ladder.
+
+### Gate (iv) — isotropy: is the shift faceting the bubble?
+
+Two read-outs on the same fields: the removed volume in bins of the cubic invariant
+`s = u_x^4 + u_y^4 + u_z^4` (1/3 on the body diagonal, 1/2 on a face diagonal, 1 on an axis)
+divided by the EXACT removal in the same bins; and the `l = 2` / `l = 4` real spherical-harmonic
+moments of the removal density, normalised by its total. A cubic lattice can only excite `l = 4`
+(the three mirror symmetries kill `l = 2`), so the `l = 2` row is the control.
+
+| field | mode | delta | bins (body-diag → axis) | `l4/l0` actual | `l4/l0` of the EXACT removal |
+|---|---|---|---|---|---|
+| exact sphere R = 12 | 0 | 0.10 | +0.36 / −0.03 / −0.16 / −5.96 % | 3.3e-03 | 7.2e-04 |
+| exact sphere R = 12 | **6** | 0.10 | +0.21 / −2.42 / −3.10 / +3.57 % | 3.5e-03 | 6.6e-04 |
+| exact sphere R = 20 | **6** | 0.05 | +1.96 / +0.34 / −2.02 / +0.01 % | 7.0e-04 | 7.1e-04 |
+| **advected R = 16** | 0 | 0.0018 | +0.52 / −1.05 / −0.85 / −0.50 % | 2.1e-04 | 2.2e-03 |
+| **advected R = 16** | **6** | 0.0018 | +0.88 / −0.51 / −0.52 / −0.23 % | 4.8e-04 | 2.2e-03 |
+| **advected R = 16** | **6** | 0.05 | +0.09 / +0.19 / −0.05 / −0.03 % | 2.6e-04 | 2.4e-04 |
+
+`l = 2` is at round-off on every exact-sphere row (1e-17) and at 1e-4 on the advected ones, i.e. the
+field's own asymmetry, not the shift's. **On the advection-realistic field the removal is isotropic
+within the fractions' own noise** — the `l = 4` moment of the actual removal is *below* that of the
+exact removal computed on the same sub-sampled fields. The few-percent bin structure on the pristine
+exact sphere is the sliver-quantization pattern of the sub-sampled initialisation (WO-P3c's
+corrected-gate item 1), not a directional bias of the shift: it does not survive one hundred
+Weymouth-Yue steps, and a directional bias would.
+
+### The ADVECTED sphere — the row that decides the work order
+
+128^3, R = 16, `sub = 16`, then 100 Weymouth-Yue steps of the pure-translation solenoidal field of
+WO-P3d gate (b) (`max|div(open u)| = 0.0`), so the fractions are the ones a running solver carries:
+**24 458 mixed cells against the exact sphere's 7 184**, `|C - C_exact|_1 = 5.25`, volume moved by
+`0.0004 %`. Then one regression step.
+
+| mode | delta | dV lin | dV swept | R1 lin | R1 swept | clipped at 0 | residue moved |
+|---|---|---|---|---|---|---|---|
+| 0 | **0.0018 (the RUN's own)** | **+0.0016 %** | +0.0150 % | **+0.00000 %** | +0.00000 % | 1059 | 3.6e-06 |
+| 0 | 0.05 | −0.2990 % | +0.0426 % | −0.0009 % | +0.0001 % | 1461 | 4.3e-01 |
+| 0 | 0.10 | −0.6096 % | −0.0401 % | −0.0038 % | −0.0003 % | 1818 | 4.6e+00 |
+| 0 | 0.20 | −1.2269 % | −0.6859 % | −0.0150 % | −0.0084 % | 2438 | 3.9e+01 |
+| **6** | **0.0018** | **+0.4008 %** | +0.4276 % | **+0.00005 %** | +0.00005 % | **1** | **1.6e-05** |
+| **6** | 0.05 | +0.0990 % | +0.7179 % | +0.0003 % | +0.0022 % | 146 | 9.7e-01 |
+| **6** | 0.10 | −0.2129 % | +0.7755 % | −0.0013 % | +0.0048 % | 368 | 7.0e+00 |
+| **6** | 0.20 | −0.8326 % | +0.1929 % | −0.0102 % | +0.0024 % | 922 | 4.6e+01 |
+
+**At the run's own step size the regression is exact to 1e-5 in the radius and to 1e-4 … 4e-3 in the
+volume, on an advection-realistic field.** (The mode-6 `+0.40 %` is not the shift: it is that mode's
+AREA on this particular field — see the next section — and it enters `dV` because `dV = mdot A dt`.
+The RADIUS, which is what the gate reads, is right at 5e-7.)
+
+### A correction to WO-P3d's gate (b): the joined sheet's wisp immunity is the WISP GUARD's
+
+On the *identical* 100-step field, the mode-6 sheet reads **+0.020 %** of `4 pi R^2` when the solver
+has only `enable_vof` (WO-P3d gate (b), reproduced here to the digit) and **+0.412 %** when it has
+`enable_phase_change`. The difference is one number: `enable_phase_change` sets
+`set_vof_wisp_eps(0)` (WO-P23 mechanism 5b — the guard and phase change are incompatible on a curved
+interface), so the interfacial predicate on the phase-change path is `pcInterfaceEps_ = 1e-12`
+instead of the advector's `1e-8`, and 4 800 more round-off wisp cells get a PLIC plane and
+contribute a spurious crossing to the sheet. Mode 0 reads `+0.013 %` either way, because a wisp
+cell's PLIC polygon has essentially zero area while its *plane* is what the sheet interpolates
+between. **WO-P3d's gate (b) is therefore not a statement about the configuration the phase change
+runs in**, and the honest version of "the joined sheet does not drift with the wisp population" is
+"…at `wispEps = 1e-8`". In the coupled Scriven run the wisp population is far smaller
+(1.48 interfacial cells per `h^2`, against 7.6 on the 100-step translation) and the run's sheet does
+read `+0.04 %` — so this does not move P3, but it is a live trap for any future consumer that reads
+`vof_interface_area()` on the phase-change path after a long advection.
+
+### The stale-area defect, and what it cost
+
+`phase_change_diagnostics()['interface_area']` is filled by `pcBuildInterface`, which runs at the
+**head** of `step()`; `R` is read from `get_vof()` after the step. The two are one `dR` apart, so
+`A/(4 pi R^2)` is low by `2 dR/R`, and this scene runs at `dR ~ 0.18` cells per step against
+`R = 6 ... 20` — i.e. **2.2 %**, which is the number WO-P3c and WO-P3d built a mechanism on ("the
+run's interfacial area is still −2.15 % below `4 pi R^2` … whatever is missing is now in the COLOUR
+FIELD the coupled phase-change run carries"). Recomputing on the current field:
+
+| Ja | area mode | stale `A/(4 pi R^2) - 1` | **`A_end/(4 pi R^2) - 1`** |
+|---|---|---|---|
+| 0.5 | 6 | −2.151 % | **+0.043 %** |
+| 2 | 6 | −2.190 % | **+0.041 %** |
+
+and the tell that was already in WO-P3d's printed table: the LAST row of every run, whose `dt` is
+the leftover `te - t` (here 0.107 against a typical 2.4), reads **−0.03 %**. A quantity that
+collapses by two orders when one step is made short is a per-step bookkeeping artefact, not a
+property of the field.
+
+Two consequences beyond this WO. `R_area = sqrt(A/4pi)` (added by this WO alongside) reads
+−1.5 … −2.0 % against the exact radius when built on the stale area and **tracks `R_num` to
+0.02 pp** when built on `A_end` — so the *sheet* and the *liquid-volume deficit* agree on the
+bubble's size, and there is no "the field is smeared" residual to explain. And the WO-P3d inference
+`Delta beta_eff ~ epsilon/2` applied to the stale number was coincidence: the area is right and
+`beta_eff` is still −1.65 %.
+
+### Gate (c) — Scriven, 128^3, ratio 100, similarity start, MUSCL, `R 6 -> 20`, area mode 6
+
+| Ja | shift | **max \|dR\|/R** | **beta_eff/beta − 1** | `A_end/(4 pi R^2)` | area-avg `mdot`, last half | `band_div` | fallback | iters |
+|---|---|---|---|---|---|---|---|---|
+| 0.5 | **linear (shipped)** | **1.036 %** | **−1.655 %** | +0.043 % | −0.926 % | 6.0e-12 | 0 | 30/600 |
+| 0.5 | swept | 1.034 % | −1.652 % | +0.043 % | −0.929 % | 5.6e-12 | 0 | 30/600 |
+| 2 | **linear (shipped)** | **1.486 %** | **−1.475 %** | +0.041 % | +0.145 % | 1.1e-11 | 0 | 30/600 |
+| 2 | swept | 1.481 % | −1.469 % | +0.041 % | +0.146 % | 1.8e-11 | 0 | 30/600 |
+
+The mode-6 linear rows reproduce WO-P3d to the digit (1.036 / −1.655 and 1.486 / −1.475), so the
+harness is faithful. **The exact swept shift moves the gate by 0.002 … 0.005 pp** — which is what
+`delta/R ~ 1e-4` predicts, and it is the quantitative close of the work order's first named
+candidate.
+
+The regression's own census in the coupled run, printed per step: `delta` **8.8e-04 … 1.9e-03**
+cells (Ja 0.5) and **6.8e-04 … 1.9e-03** (Ja 2), `delta/R` **9.6e-05 … 2.2e-04**; **0 to 12 cells
+clipped** per step out of ~7000 interfacial; residue moved `<= 3.9e-03` against a removed volume of
+~5.8 per step; `unresolved = 0.0` in every run.
+
+### Where the deficit is now
+
+The area is right (+0.04 %), the shift is right (1e-4 of `delta`), the redistribute is quiet
+(7e-4 of the removed volume) and the deposit is at the floor (`band_div` 6e-12, `fallback` 0). What
+remains is the **flux**, and its signature is a drift in time rather than an offset:
+
+| Ja | `mdot_area` rel. error: first sample | mid | last | R rel. error: step 1 | half | end |
+|---|---|---|---|---|---|---|
+| 0.5 | **+10.4 %** | +0.5 % (t = 64) | **−2.7 %** | +0.086 % | −0.166 % | −1.036 % |
+| 2 | +1.3 % (first of the last half) | — | **−1.8 %** | −0.034 % | −1.465 % | −1.486 % |
+
+Ja = 2 acquires its whole deficit in the first ~40 steps (its thermal boundary layer is 2.8 cells at
+`t_0`) and then carries it at a constant *relative* size — the fitted radius offset at the end is
+−0.003 cells, i.e. it is a pure scale error and `beta_eff` reads it as a rate. Ja = 0.5 starts
+correct and loses the radius steadily as `mdot_area` crosses from +10 % to −2.7 %. Neither is an
+initialisation offset (WO-P3b) and neither is the area (this WO).
+
+**What a P3f should measure, in this order.** (a) An ENERGY BUDGET: a liquid cell that becomes
+interfacial has its superheat replaced by the plane-anchored `T_sat` condition, and the enthalpy
+that disappears is enthalpy that should have evaporated liquid — on a growing bubble that is a
+one-signed sink whose size scales with the number of cells the interface sweeps per step, which is
+exactly a `mdot` deficit that grows with `R^2 dR/dt`. Instrument: `sum rho c_p T` plus
+`h_lv sum(removed volume) rho_l` against the boundary heat flux, per step. (b) The `mdot`
+one-sided fit's stencil on a CURVED interface: the 5^3 quadratic fit is taken along the PLIC normal
+of the *cell*, and its samples straddle a curved isotherm, so the fitted `dT/dn` carries an
+`O(h/R)` curvature bias of the same sign and size as what is measured — the a-priori instrument is
+WO-P23's exact-analytic-state probe (`mdot` on an imposed Scriven profile at fixed `R`), run at
+`R = 6, 10, 14, 20` instead of on a plane, which no work order in this campaign has done.
+(c) Confinement, now that the area is not masking it: 192^3 at `R 6 -> 20` (1.5x clearance) and
+`R 9 -> 30` (1.5x resolution) on **mode 6** — WO-P3b's rows were mode 0, where the −3.4 % area
+dominated both.
+
+### Gate (d) — the planar rungs, inertness, and MPI
+
+
+---
+
 ## WO-V6b findings — the velocity half of the dynamic contact line (Navier slip in the cut-cell wall closure), plus the integer-coordinate wall defect — 2026-09-03, Opus
 
 Branch `vof-v6b`, worktree `../flow-v6b`, from `origin/main` at `9ad0646`. Commits: `fa1e346`

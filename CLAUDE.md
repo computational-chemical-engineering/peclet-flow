@@ -1210,7 +1210,7 @@ Four things this rung paid for, all measured (`doc/vof_workorders_v6.md`, WO-P01
 Scope, each enforced with a message: STAGGERED only, no immersed solid, and not composable with
 `enable_vof_momentum`. New Python: `enable_phase_change`,
 `set_mass_flux_uniform` / `set_mass_flux`, `set_phase_change_thermal` /
-`set_phase_change_thermal_off`, `set_divergence_source` / `clear_divergence_source`,
+`set_phase_change_thermal_off`, `set_divergence_source` / `clear_divergence_source`, `set_phase_change_swept`,
 `apply_phase_change(dt)` (the kinematic driver), `phase_change_diagnostics()`; the fields `"mdot"`,
 `"pc_source"` and `"div_source"` are ordinary registered fields.
 
@@ -1351,6 +1351,62 @@ Four things this paid for, all measured (`doc/vof_workorders_v6.md`, WO-P3d):
   mode**; (1,1,0) mode 6 **+0.0002 %** (mode 0 −0.217 %, mode 4 +20.7 %); (1,1,1) mode 6 +0.001 %.
   `tests/kokkos` gate **K6** proves the same at kernel level (one dual cube, exact plane distances →
   the plane's cross-section of the cube, `< 1e-14`, both deposits and the retarget included).
+
+**The interface REGRESSION, and the number the whole P3 story was built on (WO-P3e).** WO-P3c and
+WO-P3d both closed on "the RUN's interfacial area is still −2.15 % below 4πR², so what is missing is
+in the colour field the coupled run carries". **It is not: that −2.15 % is the study driver
+comparing two different times.** `phase_change_diagnostics()['interface_area']` is filled by
+`pcBuildInterface` at the **head** of `step()`, `R` is read from `get_vof()` at its **end**, and the
+Scriven scene moves the interface ~0.18 cells per step at R = 6…20 — so the ratio is low by `2dR/R`
+= 2.2 %. Recomputed on the same field at the same time (`vof_interface_area()` after the step, now
+printed as `A_end` beside it), the run's sheet reads **+0.043 % (Ja 0.5) / +0.041 % (Ja 2)** of
+4πR², and the radius it implies tracks the liquid-volume radius to 0.02 pp. The tell was already in
+WO-P3d's printed table: the last row of every run, whose `dt` is the leftover `t_e − t`, reads
+−0.03 %. **Any diagnostic filled at the head of a step must be quoted against a state from the head
+of that step.**
+
+With the area exonerated, the a-priori regression probe (`--regress-probe`, an exact sphere, one
+`apply_phase_change` at a uniform ṁ, no energy solve and no velocity, against the analytic shell
+`4πR²δ(1 + δ/R + δ²/3R²)`) closes the plane shift too. **The shipped `dV = ṁ A_Γ Δt/ρ_l` is the
+linearization of the swept volume `∫₀^δ A(s)ds`, and its error is exactly `−δ/R`** — reproduced to
+two digits at R = 8/12/20 and δ = 0.05…0.5 (mode 6: −0.61/−1.23/−2.45/−5.99 % at R = 8 against
+δ/R = 0.63/1.25/2.50/6.25 %). **And the Scriven run's own regression step is
+`δ = ṁΔt/ρ_l = 0.7…1.9e-3` cells, i.e. `δ/R ≈ 1e-4**: at density ratio 100 the regression supplies
+only ρ_v/ρ_l of the interface motion — Weymouth–Yue advection by the liquid velocity supplies the
+other 99 % — while the time step is set by the CFL on the latter. On an advection-realistic field
+(100 WY steps, 24 458 mixed cells against the exact sphere's 7 184) at that δ the removed volume is
+**+0.0016 %** and the new radius **+0.00000 %** of exact. The clip-and-redistribute is equally quiet
+there: 0–12 cells clipped per step out of ~7000 interfacial, residue ≤ 4e-3 of a removed volume of
+5.8, `unresolved = 0`. And the shift is isotropic on that field — the removed volume per cubic-
+harmonic direction bin is within ±0.2 % and the l = 4 moment is *below* that of the exact removal
+computed on the same fractions (a faceting bias would be one-signed and would survive advection).
+`set_phase_change_swept(True)` ships the exact swept volume as a measured option (default OFF): it
+removes the δ/R term wherever the shift stays inside the cells (R = 20: −0.24 → +0.06 % at δ = 0.05)
+and **moves the Scriven gate by 0.002–0.005 pp**, as `δ/R ≈ 1e-4` requires. Use it for a curved
+interface at a density ratio near 1, where δ is the whole interface motion; it is identically zero
+on a plane, so every P0/P1/P2 gate is unmoved.
+
+**So P3 is a FLUX problem, and that is where a P3f starts.** With the area right (+0.04 %), the
+shift right (1e-4 of δ), the redistribute quiet and the deposit at the floor (`band_div` 6e-12,
+`fallback` 0), the gate still reads **1.036 % (Ja 0.5) / 1.486 % (Ja 2)** with `β_eff` −1.655 /
+−1.475 % — **the fifth failure of the 1 % gate, and the run stops (rule 4)**. What is left is ṁ
+from the energy solve on a moving, curved interface: the area-weighted ṁ drifts +10.4 % → −2.7 %
+over the Ja = 0.5 run and +1.3 % → −1.8 % over the last half at Ja = 2, while Ja = 2 acquires its
+whole (constant-relative, hence rate-valued) deficit in the first ~40 steps. Named candidates, in
+order: the enthalpy a liquid cell loses when it becomes interfacial and is replaced by the
+plane-anchored `T_sat` row (a one-signed sink that scales with the cells the interface sweeps per
+step); the `O(h/R)` curvature bias of the 5³ one-sided fit, whose samples straddle a curved isotherm
+and which no gate in this campaign has ever measured off a plane; and confinement, re-run on mode 6
+now that the −3.4 % area is not masking it.
+
+**One correction this WO makes to WO-P3d's gate (b).** The joined sheet's immunity to the wisp
+population is the **wisp guard's**, not the sheet's: on the identical 100-step field mode 6 reads
++0.020 % under `enable_vof` (wispEps = 1e-8, the configuration gate (b) ran) and **+0.412 %** under
+`enable_phase_change`, which sets `set_vof_wisp_eps(0)` (WO-P23 mechanism 5b) so the interfacial
+predicate is 1e-12 and ~4800 more round-off cells contribute a crossing. Mode 0 reads +0.013 %
+either way. It does not move P3 (the coupled run's wisp density is 1.48 interfacial cells per h²
+against 7.6 there, and its sheet does read +0.04 %), but it is a live trap for anything that reads
+`vof_interface_area()` on the phase-change path after a long advection.
 
 Two more things this rung ships. `set_divergence_sink(weights)` is an auto-balanced sink: the solver
 subtracts the GLOBAL deposited source spread over the given weights, so a closed domain's Poisson
