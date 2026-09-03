@@ -119,7 +119,7 @@ class Health:
                 f"max|div(open u)|_projected {self.div:.3e}")
 
 
-def build(theta_deg, U, momentum=True):
+def build(theta_deg, U, momentum=True, slip=0.0):
     s = pf.Solver(NX, NY, NZ)
     s.set_rho(RHO_L)
     s.set_mu(MU_L)
@@ -133,6 +133,13 @@ def build(theta_deg, U, momentum=True):
     s.set_pressure_multigrid(True, levels=MG_LEVELS)
     s.set_pressure_solver_params(80)
     s.set_solid(doublet_sdf(), cutcell_pressure=True)
+    if slip > 0.0:
+        # WO-V6b gate 5: the VELOCITY half of the dynamic contact line.  The tangential wall datum
+        # of the cut-cell closure becomes the Navier condition u_t(wall) = lambda du_t/dn, so the
+        # contact line can run ahead ALONG the wall instead of only at the scheme's own numerical
+        # slip.  WO-V7's verdict on this case was that the imbibition ordering flips where the
+        # imposed velocity crosses that numerical slip velocity, not at a physical crossover.
+        s.set_wall_slip_length(slip)
     s.enable_vof()
     # t = 0 is the front AT the branch entrances: the inlet plenum is already liquid-filled.  This
     # is not a shortcut for its own sake — filling the plenum from the inlet at Ca = 1e-4 costs as
@@ -188,7 +195,7 @@ def fronts(C, eps):
     return out
 
 
-def run(theta_deg, ca, steps, sample_every, label, momentum=True, budget=None):
+def run(theta_deg, ca, steps, sample_every, label, momentum=True, budget=None, slip=0.0):
     U = ca * SIGMA / MU_L
     Re = RHO_L * U * W_NARROW / MU_L
     print("\n" + "=" * 100)
@@ -212,7 +219,12 @@ def run(theta_deg, ca, steps, sample_every, label, momentum=True, budget=None):
           f"|dPc| / dPvisc = {abs(pc_n - pc_w)/dpv:.4g}  "
           f"({'CAPILLARY' if abs(pc_n-pc_w) > dpv else 'VISCOUS'}-dominated by this estimate)")
 
-    s = build(theta_deg, U, momentum)
+    print(f"  wall Navier slip lambda = {slip:g} cells "
+          f"({'ON (WO-V6b)' if slip > 0 else 'OFF — no-slip wall, WO-V7 configuration'})")
+    s = build(theta_deg, U, momentum, slip)
+    if slip > 0.0:
+        print(f"  wall_slip_length() = {s.wall_slip_length():g}; one-cell-gap axes kept no-slip "
+              f"{s.wall_slip_sandwich_cells()}")
     L = s.vof_step_limits()
     print(f"  dt census at t = 0: capillary_dt {L['capillary_dt']:.5g} (x{CAP_CFL} = "
           f"{CAP_CFL*L['capillary_dt']:.5g}), WY cfl_dt {L['cfl_dt']:.5g}, binding "
@@ -328,6 +340,8 @@ def main():
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--theta", default="45,135")
     ap.add_argument("--ca", default="1e-4,1e-3,1e-2")
+    ap.add_argument("--slip", type=float, default=0.0,
+                    help="WO-V6b Navier slip length in cells (0 = the WO-V7 no-slip wall)")
     ap.add_argument("--no-momentum", action="store_true")
     ap.add_argument("--budget", type=float, default=0.0,
                     help="wall-clock seconds per (theta, Ca); 0 = no limit")
@@ -354,7 +368,7 @@ def main():
             rows.append(run(th, ca, steps, max(steps // 120, 5),
                             "quick" if a.quick else "full",
                             momentum=not a.no_momentum,
-                            budget=a.budget or None))
+                            budget=a.budget or None, slip=a.slip))
     print("\n" + "=" * 100)
     print("SUMMARY — pore doublet")
     print("=" * 100)
