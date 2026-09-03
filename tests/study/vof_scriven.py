@@ -16,6 +16,15 @@ WHAT THE RUN MEASURES.  R(t) from the LIQUID VOLUME DEFICIT, R = (3 sum(1-C) / 4
 conserved-quantity read-out, not a contour, so it does not depend on any interface post-processing.
 The gate is |R_num - R_exact| / R_exact over the last half of the run.
 
+INITIALISATION (`--init`, WO-P3b).  Scriven's solution carries a thermal boundary layer of
+thickness ~R0/(2 beta^2) at t0, and the classic trap in this benchmark is to start from a UNIFORM
+superheat with a sharp bubble, so that the first steps evaporate the superheat sitting AT the
+interface and the radius keeps a permanent offset.  `--init similarity` (the DEFAULT, and what
+this driver has always done) samples T(r, t0) from the profile above at the cell centres, with
+R0 = 2 beta sqrt(alpha_l t0) by construction (t0 is derived from R0);  `--init cellavg` is the
+same profile CELL-AVERAGED by 4^3 subsampling;  `--init uniform` is the trap itself, kept as the
+CONTROL that shows what it costs.
+
 BOUNDARIES.  Outflow on all six faces (the net vapour production is a real volume flux and has to
 leave; with pure liquid at every face and the reference density set to rho_l the boundary
 coefficient `applyBoundaryOpenness` re-imposes IS the variable-density one, so WO-R2 item 1 is
@@ -69,6 +78,42 @@ def scriven_T(r, R, beta, rr, dT):
     return dT - dT * part / full
 
 
+def initial_temperature(n, ctr, R, beta, rr, dT, mode="similarity", sub=4):
+    """T(r, t0) - T_sat on the cell centres, for the three initialisations of `--init`.
+
+    'similarity' : Scriven's similarity profile sampled AT the cell centre.  This is what the
+                   driver has always done and what Sato & Niceno (JCP 2013) and Malan et al.
+                   (2021) do; it is the shipped default and this branch is byte-identical to the
+                   pre-WO-P3b code.
+    'cellavg'    : the same profile, CELL-AVERAGED by sub^3 subsampling (a finite-volume initial
+                   state rather than a point sample -- the O(h^2 T'') half of the same question).
+    'uniform'    : uniform superheat T_inf in the liquid, T_sat inside the bubble, i.e. NO thermal
+                   boundary layer at t0.  The classic trap, kept as the control.
+    """
+    ax = (np.arange(n) + 0.5) - ctr
+    rad = np.sqrt(ax[:, None, None] ** 2 + ax[None, :, None] ** 2 + ax[None, None, :] ** 2)
+    if mode == "similarity":
+        return np.asfortranarray(np.vectorize(lambda r: scriven_T(r, R, beta, rr, dT))(rad))
+    if mode == "uniform":
+        return np.asfortranarray(np.where(rad > R, dT, 0.0))
+    if mode != "cellavg":
+        raise ValueError(f"unknown --init mode {mode!r}")
+    # cell average: a fine RADIAL table (the profile is a function of r alone) + sub^3 subsampling,
+    # done one cell-plane at a time so the 512^3 sample cloud is never materialised.
+    rmax = math.sqrt(3.0) * n
+    rt = np.linspace(0.0, rmax, 200001)
+    tt = np.array([scriven_T(r, R, beta, rr, dT) for r in rt])
+    off = (np.arange(sub) + 0.5) / sub
+    qs = (np.arange(n)[:, None] + off[None, :]).ravel() - ctr
+    out = np.empty((n, n, n))
+    for i in range(n):
+        xi = qs[i * sub:(i + 1) * sub]
+        d2 = xi[:, None, None] ** 2 + qs[None, :, None] ** 2 + qs[None, None, :] ** 2
+        t = np.interp(np.sqrt(d2), rt, tt)
+        out[i] = t.reshape(sub, n, sub, n, sub).mean(axis=(0, 2, 4))
+    return np.asfortranarray(out)
+
+
 def sphere_colour(n, cx, cy, cz, R, sub=4):
     """Liquid fraction (C = 1 liquid, 0 vapour) of a sphere of radius R, by sub^3 subsampling."""
     off = (np.arange(sub) + 0.5) / sub
@@ -88,7 +133,7 @@ def sphere_colour(n, cx, cy, cz, R, sub=4):
 
 
 def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, consistent=True,
-        quad=True, muscl=False, verbose=True):
+        quad=True, muscl=False, init="similarity", verbose=True):
     rr = 1.0 / ratio
     beta = scriven_beta(ja, rr)
     t0 = (r0 / (2 * beta)) ** 2 / alpha_l          # cells^2 / (cells^2/s) = s
@@ -109,13 +154,16 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         s.set_domain_bc(f, 3)              # outflow everywhere: the vapour production must leave
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
     s.enable_vof()
-    s.set_vof(sphere_colour(n, ctr, ctr, ctr, r0))
+    c0 = sphere_colour(n, ctr, ctr, ctr, r0)
+    s.set_vof(c0)
+    # R0 CONSISTENCY (WO-P3b): the gate's read-out is the liquid volume deficit, so the number
+    # that has to match 2 beta sqrt(alpha_l t0) is the one the SUB-SAMPLED colour field carries,
+    # not the nominal r0.  Reported, not corrected.
+    r0meas = (3.0 * (float(n) ** 3 - c0.sum()) / (4.0 * math.pi)) ** (1.0 / 3.0)
     s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
     s.set_pressure_fcg(True, 600, 1e-10)
 
-    ax = (np.arange(n) + 0.5) - ctr
-    rad = np.sqrt(ax[:, None, None] ** 2 + ax[None, :, None] ** 2 + ax[None, None, :] ** 2)
-    tprof = np.vectorize(lambda r: scriven_T(r, r0, beta, rr, dT))(rad)
+    tprof = initial_temperature(n, ctr, r0, beta, rr, dT, mode=init)
     s.add_scalar("T", k_l / rcp_l, 1, sweeps)
     for f in range(6):
         s.set_scalar_bc("T", f, 2, dT)
@@ -186,16 +234,48 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         mex = rho_v * beta * math.sqrt(alpha_l / tcur)
         rows.append((tcur, rnum, rex, it, dg['mdot_mean'], mex))
     d = s.phase_change_diagnostics()
+    # thickness of the thermal boundary layer at t0: where the exact profile reaches 99 % of dT
+    lo_, hi_ = r0, 200.0 * r0
+    for _ in range(200):
+        mid_ = 0.5 * (lo_ + hi_)
+        if scriven_T(mid_, r0, beta, rr, dT) > 0.99 * dT:
+            hi_ = mid_
+        else:
+            lo_ = mid_
+    dt99 = hi_ - r0
     half = rows[len(rows) // 2:]
     errs = [abs(r[1] - r[2]) / r[2] for r in half]
+    # GROWTH RATE vs OFFSET (WO-P3b).  R = 2 beta sqrt(alpha t)  <=>  R^2 = 4 beta^2 alpha t, a
+    # STRAIGHT LINE through the origin.  Fitting R_num^2 against t over the last half separates the
+    # two ways this gate can fail: a wrong growth RATE shows up in the slope (beta_eff != beta,
+    # i.e. the method), a deficit acquired in the first steps and then carried shows up as a
+    # negative INTERCEPT at the same slope (an effective time/radius offset, i.e. the start).
+    _t = np.array([r[0] for r in half])
+    _R2 = np.array([r[1] for r in half]) ** 2
+    _sl, _ic = np.polyfit(_t, _R2, 1)
+    beta_eff = math.sqrt(max(_sl, 0.0) / (4.0 * alpha_l))
+    t_off = -_ic / _sl if _sl > 0 else float("nan")          # R^2 = 4 b^2 a (t - t_off)
+    R_off = rows[-1][1] - 2 * beta_eff * math.sqrt(alpha_l * rows[-1][0])
     if verbose:
         print(f"  N = {n}^3  Ja = {ja:g}  ratio {ratio:g}  beta = {beta:.6f}  "
-              f"R {r0:g} -> {r1:g} cells  steps {nst}")
+              f"R {r0:g} -> {r1:g} cells  steps {nst}  init {init}")
+        print(f"      init: thermal BL (99 % of dT) {dt99:.3f} cells, "
+              f"R0/(2 beta^2) = {r0/(2*beta*beta):.3f} cells;  R0 from the colour field "
+              f"{r0meas:.5f} vs exact {r0:.5f} ({100*(r0meas-r0)/r0:+.4f} %)")
         for k in list(range(0, len(rows), max(1, len(rows) // 8))) + [len(rows) - 1]:
             t_, a, b_, it, mn_, mx_ = rows[k]
             print(f"      t {t_:10.4f}  R_num {a:8.4f}  R_exact {b_:8.4f}  "
                   f"rel {100*(a-b_)/b_:+7.3f} %  mdot {mn_:.5e} vs {mx_:.5e} "
                   f"({100*(mn_-mx_)/mx_:+7.3f} %)  iters {it}")
+        early = ", ".join(f"{100*(r[4]-r[5])/r[5]:+.2f}" for r in rows[:6])
+        print(f"      EARLY mdot rel error, steps 1..6: {early} %   "
+              f"(last {100*(rows[-1][4]-rows[-1][5])/rows[-1][5]:+.2f} %)")
+        print(f"      R rel error at step 1 {100*(rows[0][1]-rows[0][2])/rows[0][2]:+.4f} %, "
+              f"at the half point {100*(half[0][1]-half[0][2])/half[0][2]:+.4f} %, "
+              f"at the end {100*(rows[-1][1]-rows[-1][2])/rows[-1][2]:+.4f} %")
+        print(f"      GROWTH over the last half: beta_eff {beta_eff:.6f} vs beta {beta:.6f} "
+              f"({100*(beta_eff-beta)/beta:+.3f} %), implied time offset {t_off:+.5f} of t0 "
+              f"{t0:.5f} ({100*t_off/t0:+.2f} %), radius offset at the end {R_off:+.4f} cells")
         print(f"      max |dR|/R over the LAST HALF = {100*max(errs):.3f} %   [gate 1 %]")
         print(f"      pressure iters max {itmax}/600 (capped {capped}), band_div "
               f"{d['band_div']:.3e}, C in [{d['min_C']:.2e}, {d['max_C']:.6f}], "
@@ -218,13 +298,17 @@ def main():
     ap.add_argument("--no-consistent", action="store_true")
     ap.add_argument("--no-quad", action="store_true")
     ap.add_argument("--muscl", action="store_true")
+    ap.add_argument("--init", choices=("similarity", "cellavg", "uniform"), default="similarity",
+                    help="initial T(r, t0): Scriven's similarity profile at the cell centre "
+                         "(default, = the shipped behaviour), the same profile cell-averaged, or "
+                         "a uniform superheat with a sharp bubble (the classic trap; control)")
     a = ap.parse_args()
     print(f"P3 Scriven bubble growth, {a.n}^3, plane Dirichlet {not a.no_plane}, "
           f"consistent energy {not a.no_consistent}, quadratic fit {not a.no_quad}, "
-          f"energy MUSCL {a.muscl}")
+          f"energy MUSCL {a.muscl}, init {a.init}")
     for ja in [float(x) for x in a.ja.split(",")]:
         run(a.n, ja, a.ratio, a.r0, a.r1, sweeps=a.sweeps, plane=not a.no_plane,
-            consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl)
+            consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl, init=a.init)
     return 0
 
 
