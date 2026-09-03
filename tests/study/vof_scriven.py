@@ -781,7 +781,7 @@ def main():
                          "a uniform superheat with a sharp bubble (the classic trap; control)")
     ap.add_argument("--sub", type=int, default=4,
                     help="sub^3 subsampling of the RUN's initial sphere colour field (WO-P3c: "
-                         "sub = 4 drops a quarter of the interfacial cells and 6 % of the area)")
+                         "sub = 4 drops a quarter of the interfacial cells and 6 %% of the area)")
     ap.add_argument("--area-mode", type=int, default=None,
                     help="0 = PLIC/MYC area (rung P0/P1), 1 = cascade metric, 2 = cascade normal, "
                          "3 = cascade footprint; WO-P3d 4..7 = the JOINED marching-tetrahedra "

@@ -1746,6 +1746,11 @@ were **byte-identical** (on an axis-aligned plane `V(alpha)` is linear, so the c
 algebraically zero), P0b moved by 3.3e-14 relative and P2 by 0.035 pp (+0.1929 → +0.1579 %) — that
 scene's documented round-off amplifier, and 2.5x what the AREA MODES move it by.
 
+### One-line defect fixed on the way
+
+`tests/study/vof_scriven.py --help` CRASHED (`TypeError: %o format: an integer is required`) since
+WO-P3c: argparse `%`-expands every help string, and `--area-sub`'s says "6 % of the area". Escaped.
+
 ### Open, and the corrected gates this WO proposes
 
 1. **P3 remains NOT closed** at 1.036 % (Ja 0.5) / 1.481 % (Ja 2), mode 6, 128^3 — the FIFTH
