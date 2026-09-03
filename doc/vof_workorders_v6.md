@@ -387,6 +387,500 @@ pressure iterations vs cap; a capped run is not a data point. Report ms/step and
 
 (append per WO, newest first)
 
+## WO-V6b findings — the velocity half of the dynamic contact line (Navier slip in the cut-cell wall closure), plus the integer-coordinate wall defect — 2026-09-03, Opus
+
+Branch `vof-v6b`, worktree `../flow-v6b`, from `origin/main` at `9ad0646`. Commits: `fa1e346`
+(part A's tie-break + the Navier closure + the bindings), `ef6c58e` (the gate scripts + the MPI
+ctest), plus this entry. Backend **host-openmp** throughout (`build_omp`, `OMP_NUM_THREADS=4`,
+`OMP_PROC_BIND=false`); the machine was shared with three other sessions, so no number here is a
+timing.
+
+Everything ran with the velocity-solve session's new defaults in force (momentum residual stop at
+the pressure driver's rtol, velocity-MG AUTO, telescoping ON) — they are on `origin/main` at the
+branch point.
+
+---
+
+### PART A — a velocity DOF with `sdf` EXACTLY 0 was classified as fluid by ONE consumer and as solid by every other
+
+**The survey.** Every classification of the same SDF field in the cut-cell/IBM/projection stack,
+and what each one does at exact zero (worktree line numbers):
+
+| site | predicate | "fluid" means | a point with `sdf == 0` is |
+|---|---|---|---|
+| `mac_ibm.hpp:31` `ibmIsCut` (centre) | `sc <= 0` ⇒ NOT a cut cell | `sdf > 0` | **non-fluid** — no wall closure is built |
+| `mac_ibm.hpp:34` `ibmIsCut` (neighbour) | `sn[k] < 0` ⇒ solid neighbour | `sdf >= 0` | fluid |
+| `cut_cell_ibm.hpp:134` `ibmFillEntry` | `sdf_n[k] < 0` ⇒ ghost/solid | `sdf >= 0` | fluid |
+| `mac_ibm.hpp:195` `ibmCleanFluidMask` | `sc <= 0` ⇒ solid | `sdf > 0` | **non-fluid** |
+| `mac_ibm.hpp:177` `ibmSolidMask` | **was** `sd < 0` ⇒ pinned | `sdf >= 0` | **fluid — the odd one out** |
+| `mac_cutcell.hpp:79` `ccFractionCore` | `sd <= 0` ⇒ area fraction 0 | `sdf > 0` | **closed** |
+| `mac_cutcell.hpp:124` `ccFaceOpen` | `sd <= 0` ⇒ face closed | `sdf > 0` | **closed** |
+| `mac_cutcell.hpp:138` `ccTriFrac` | `a >= 0` ⇒ fluid vertex | `sdf >= 0` | fluid |
+| `mac_approx_projection.hpp:98/104` ghost-projection donors | `sdf >= 0` | `sdf >= 0` | fluid |
+| `mac_approx_projection.hpp:174/292` sub-sample | `> 0.0` | `sdf > 0` | solid |
+| `mac_approx_projection.hpp:278/283` `buildCellFraction` centre | `sc >= 0` | `sdf >= 0` | fluid |
+| `mac_approx_projection.hpp:423` | `sdf >= 0` | `sdf >= 0` | fluid |
+| `star_elimination.hpp:81/89` star overlay | `sdf >= 0` ⇒ not eliminated | `sdf >= 0` | fluid |
+
+The file owner's lead was right in substance and inverted in direction: `star_elimination.hpp`'s
+`>= 0` is one of NINE cell-centred sites that agree with each other, and the cell-centred sites are
+not where the damage is — a cell CENTRE lands on `sdf == 0` only for a wall on a cell-centre plane.
+The single genuine disagreement is at the **velocity DOF**: `ibmSolidMask` (the mask that PINS a
+DOF to the wall datum, `maskVelocity`) called an exactly-on-wall DOF FLUID, while `ibmIsCut` (which
+decides whether a Robust-Scaled wall closure is built for it), `ibmCleanFluidMask` and the face
+openness all called it non-fluid. So such a DOF was
+
+* **not pinned** (`ibmSolidMask` → 0), and
+* **not closed** (`ibmIsCut` returns false at `sc <= 0`, so no overlay row, so no Dirichlet datum),
+* while its FACE was **closed** to the projection (`ccFaceOpen` → 0, so it never enters the
+  divergence and the pressure solve never sees it),
+* yet it **is** read by the FOU advection operator of its fluid neighbours (`advVelView`) and by
+  the diffusion stencil of the first fluid DOF.
+
+An unconstrained velocity unknown sitting on the wall, invisible to every diagnostic. That is the
+whole of WO-V7 finding 1.
+
+**When does `sdf == 0` happen at a DOF?** Exactly when a flat wall sits on a grid plane. The
+staggered sample is `ccSampleExt` at the component's `-1/2` offset, i.e. the MEAN of the two
+adjacent cell-centre values, so a wall on an INTEGER coordinate (a cell face) puts the NORMAL
+component's DOF exactly on it (centres at `±1/2` → mean `0.0`, exactly, in IEEE), and a wall on a
+cell-CENTRE plane (a half-integer, `zw = k + 1/2`) puts the two TANGENTIAL components' DOFs exactly
+on it. Both occur in the shipped tree: the WO-V7 doublet is the first, `tests/kokkos`'s
+`test_vof_cutcell` G5 cap is the second.
+
+**The fix.** `ibmSolidMask` now uses `sd <= 0`, which is the convention the other four DOF-level
+consumers already use. For a DOF lying exactly ON the wall the pin is not an approximation: it IS
+the Dirichlet datum (0 for a static wall), and the neighbouring fluid DOF's plain interior stencil
+then becomes a wall-resolved discretization. One character plus its reason, in `src/mac_ibm.hpp`.
+
+**The reproducer, before and after.** WO-V7's "no septum (a plain slit, same walls)" ladder row,
+reproduced here as a standalone script (88×4×80, walls on INTEGER `z`, θ = 45°, Ca = 1e-2, ratio
+100, surface tension + momentum consistency on, `dt` re-picked from `vof_step_limits()` every step):
+
+| step | `t` | `dt` | max\|u\| BEFORE | max\|u\| AFTER |
+|---|---|---|---|---|
+| 1 | 0.1418 | 1.4e-01 | 1.2835e+02 | **1.6865e+00** |
+| 10 | 0.1577 / 1.3884 | 1.5e-03 / 1.4e-01 | 1.3924e+02 | **9.5137e-01** |
+| 50 | 0.1825 / 7.0584 | 2.0e-04 / 1.4e-01 | 1.0408e+03 | **7.7146e-01** |
+| 150 | 0.1867 / 21.234 | 2.0e-06 / 1.4e-01 | 1.0721e+05 | **6.7951e-01** |
+| 300 | 0.1867 / 42.496 | 2.0e-09 / 1.4e-01 | **1.0347e+08** | **6.7767e-01** |
+
+Before: the geometric divergence, with `t` frozen at 0.1867 s and `dt` chased down nine orders
+while the pressure solve reported a healthy 21/400 iterations at every step. After: `dt` never
+leaves the capillary limit 0.1418, `t` reaches 42.5 s in the same 300 steps, `max|u|` DECAYS to
+0.68 and `max|div(open u)|_projected` stays at 1e-10. The exact-zero DOF census for that scene is
+**256 u-DOFs** (the slabs' vertical faces at integer `x`) and **384 w-DOFs** (the horizontal faces
+at integer `z`).
+
+**Independent confirmation from a SHIPPED test.** `tests/kokkos/test_vof_cutcell` is the one
+binary of 33 whose output changes, and it changes because its G5 scene ("a liquid cap on a flat SDF
+wall at a HALF-INTEGER `z`", `zw = 3.5`, so `sdf` at the cell centres is `…,-1,0,+1,…` and the u/v
+DOFs at `z = 3` sit exactly on the wall) was carrying the defect all along. Same binary, same
+scene, only the tie-break:
+
+| G5 metric | before | after |
+|---|---|---|
+| max\|u\| including the wall band | 7.879e-01 | **5.053e-03** (156× smaller) |
+| max\|u\| over the open fluid | 9.821e-03 | **5.053e-03** |
+| trace of max\|u\| over the run | 5.26e-01 → 7.88e-01 (growing) | 2.87e-02 → 5.05e-03 (decaying) |
+| wall-band max\|kappa\| | 0.2222 | 0.1722 |
+| apparent θ (target 90°) | 89.935 | 90.068 |
+| G8b packing draining, max\|u\| | 2.151e-02 | **7.119e-06** |
+| G8b `max\|div(open u)\|` | 4.497e-17 | **2.534e-18** |
+| colour drift / volume drift | 5.95e-16 | **0.000e+00** |
+
+The test still prints "all vof cut-cell checks passed" and exits 0. Its own comment — "so the cells
+straddling it are genuinely cut (eps = 1/2) — a wall on a cell face would be a degenerate case" — is
+right about the CELL fraction and wrong about the velocity DOF, which is the case it was trying to
+avoid.
+
+**Verdict: FIXED, not escalated.** It is a one-convention tie-break, the intent is unambiguous (four
+of the five DOF-level consumers already say `<= 0`), the change is inert wherever no DOF sample is
+exactly zero, and the only shipped test it touches gets strictly better on every metric it prints.
+The escalation clause did not trigger: there are not two consumers disagreeing about semantics,
+there is one consumer disagreeing with four.
+
+**Two things it does NOT fix, and one it costs.**
+1. A wall on a cell-centre plane pins the TANGENTIAL DOFs that lie on it, so no wall model —
+   including the Navier slip below — can act there: the slip velocity at such a wall is
+   structurally 0. **Quarter-integer placement (WO-S finding 5, WO-V7 finding 1) remains the
+   scene rule**, and it is now also the rule that makes part B expressible.
+2. The driver-side divergence guard WO-V7 asked for (a run whose `dt` has fallen orders below its
+   initial capillary limit is diverging) is still missing. This fix removes the cause it found, not
+   the class.
+
+---
+
+### PART B — WO-V6b: the Navier condition in the Robust-Scaled cut-cell closure
+
+**What shipped.** `set_wall_slip_length(lambda_cells)` (+ `wall_slip_length()`,
+`wall_slip_sandwich_cells()`). The tangential wall Dirichlet datum of the RS closure becomes
+`u_t(wall) - u_body = lambda du_t/dn`. Files: `src/cut_cell_ibm.hpp` (three new polynomials + two
+new optional arguments to `ibmFillEntry`), `src/mac_ibm.hpp` (the per-cut-cell normal and the
+per-axis slip length in `buildIbmOverlay`, plus part A's tie-break), `src/flow_ibm.hpp`
+(`buildVelocityOverlays` extracted verbatim from `setSolidDevice` so a closure change can rebuild
+without re-running the geometry setup, `setWallSlipLength`, the shared lambda), the bindings, the
+study `tests/study/wall_slip.py`, the MPI ctest `tests/kokkos_mpi/test_wall_slip_mpi.cpp`, and the
+`wall_slip` / `slipsweep_v6b` / `lw` options in `tests/study/vof_wetting_dynamic.py` and the
+`--slip` option in `tests/study/pore_scale/pore_doublet.py`.
+
+**The design is NOT a modified datum — it is a one-parameter family of the SAME polynomials, and
+that is what makes lambda = 0 free.** The shipped closure fits the quadratic `p` through
+(`u_m` at −1, `u_c` at 0, `u_g` at +1) and imposes `p(theta) = u_b` at the wall crossing; the Robin
+condition along the axis (solid on the +x side, so the inward fluid normal is −x) is
+`p(theta) + lam p'(theta) = u_b`. Solving for the ghost with `P = theta + lam`,
+`Q = theta^2 + 2 lam theta` gives `(P+Q) u_g = 2 u_b - 2 u_c (1-Q) + u_m (P-Q)`, i.e.
+
+```
+D   = theta(1+theta) + lam(1 + 2 theta)        (poly_D   + lam(1+2theta))
+X   = theta(1-theta) + lam(1 - 2 theta)        (poly_N_nb + lam(1-2theta))
+K   = 2(theta^2 - 1) + 4 lam theta             (poly_Nc  + 4 lam theta)
+Nbc = 2                                        (UNCHANGED)
+```
+
+so `lam = 0` is literally the shipped polynomial and `lam -> infinity` is the free-slip
+(zero-normal-derivative) closure — checked by hand at `theta = 1/2`, where it gives `u_g = u_c`,
+which is what `p'(1/2) = 0` requires. Consequences worth recording: the stencil STRUCTURE is
+untouched (same 7-point row, same overlay layout, same `ibmModifyStencil`, which was not edited at
+all), so the change merges with anything the velocity-solve session does to the operator assembly;
+the closure stays fully IMPLICIT (no lagged slip term); and `D` is now bounded below by `lam`, so
+the row scaling `D_rescale` is BETTER conditioned at small `theta`, not worse.
+
+**Per-DOF geometry.** At each cut cell the unit normal comes from the central difference of the
+same seven SDF samples the closure already gathers (`grad sdf` points into the fluid). The
+component's tangential weight is `s = 1 - n_c^2` — 0 for the component parallel to the wall normal,
+which therefore keeps a pure impermeability Dirichlet, 1 for a purely tangential one — and the slip
+length measured along axis `a` is `lam_a = s lambda / |n_a|`, because the wall distance along that
+axis is the normal distance divided by `|n_a|`. That division is not a fudge: the closure depends
+only on `lam_a/theta_a = s lambda / d` with `d` the NORMAL wall distance, so `|n_a|` cancels.
+`|n_a|` is floored at 1e-3 (a wall nearly parallel to the axis).
+
+**Two approximations, both stated because they are invisible from the call.**
+1. *The tangential projector is taken DIAGONAL*: `u_t,c ~ (1 - n_c^2) u_c`, the cross terms
+   `-n_c n_j u_j (j != c)` are dropped. They are EXACTLY zero for an axis-aligned wall — every gate
+   scene here, the doublet's slabs, the Jurin plates, the spreading drop's floor — and O(n_c n_j)
+   on a curved solid (a packing). Carrying them would couple the three segregated component solves,
+   which is a different piece of work.
+2. *A SANDWICHED axis (both neighbours solid — a one-cell fluid gap) keeps the no-slip closure.* A
+   slip length is a sub-cell wall model and a gap a single cell spans does not resolve one. It is
+   COUNTED, not silent: `wall_slip_sandwich_cells()` returns the per-component count, and it is
+   `(0, 0, 0)` on every scene in this entry.
+
+**One lambda, two switches.** `set_wall_slip_length` and `set_contact_angle_dynamic` write the same
+stored value (last call wins), so the Cox–Voinov inner cut-off and the momentum closure can never
+disagree — that is the unification the work order asked for. Only `set_wall_slip_length` switches
+the MOMENTUM half on. **This is a deviation from the literal reading and it is deliberate**: making
+`set_contact_angle_dynamic` turn the momentum closure on as well would have changed every number
+`tests/kokkos/test_vof_wetting_dynamic` and `test_vof_wetting_dynamic_mpi` record (they configure
+`lambda = 0.1`), i.e. it would have re-baselined a validated ctest, which rule 1 forbids. The two
+switches keep WO-V6's angle-half results exactly what they were and make the velocity half an
+explicit opt-in.
+
+Order-independent: `set_wall_slip_length` before or after `set_solid` gives a **bitwise identical**
+field (measured, 0.0). That is worth stating because the domain BCs are NOT (see the defects below).
+
+#### The six gates at a glance
+
+| gate | verdict | the number |
+|---|---|---|
+| 1 analytic slip profile | **PASS at the float storage floor** (the work order's 1e-10 is unreachable — the `lambda = 0` no-slip parabola already misses by 1.15e-06) | slip increment 1.2000033e-03 vs the exact 1.2e-03, **+2.8e-06 relative**; host-openmp and nvidia-cuda digit for digit |
+| 2 `lambda = 0` bit-identical | **PASS** | 32 of 33 `tests/kokkos` binaries byte-identical to `origin/main`; the 33rd is part A's fix and improves every metric it prints; the whole single-phase regression (Z&H drag, both permeabilities, iteration and step counts, divergence) identical to the last digit |
+| 3 Cox–Voinov slip sensitivity | **PASS** on the swept range (per-interval reported, not uniform) | `d(slope)/d ln(1/lambda)` = **6.98** vs the model's 9 (**−22.4 %**, gate 25 %), against WO-V6's 2.34 (−74 %) |
+| 4 Lucas–Washburn | **FAIL** — first attempt, four configurations, nothing tuned | `d(h²)/dt` 0.1322 vs 23.09 (−99.4 %); the slip is worth **+26 %** of the rate at `lambda = 0.3`; the gap-width probe shows the limiter is band-local, not the wall closure |
+| 5 pore doublet, Ca = 1e-3, theta = 45° | **FAIL** — the verdict does not flip back | wide first at `lambda` = 0, 0.1 and 0.5; the narrow branch's breakthrough moves 1.8 % over that range |
+| 6 MPI np 1/2/4 | **PASS** | np = 1 **bitwise** (0.000e+00); np = 2/4 ~1e-27 against a 3.3e-13 tolerance, with BOTH walls' Robin closures straddling a rank boundary |
+
+**One-line verdict.** The velocity half is implemented, exact where it can be checked exactly,
+free when off, and distributed — and it is NOT the dominant term in this scheme's contact-line
+mobility. It buys a factor 3 of Cox–Voinov sensitivity on a FREE interface and ~26 % of the speed
+of a CONFINED one; the remaining factor ~175 is a resistance local to the wetting band, which gate
+4's gap-width probe isolates and which is the next rung.
+
+
+#### Gate 1 — the analytic slip profile
+
+The work order's gate is a Couette profile. **It could not be driven, and that is itself a
+measurement** (three obstructions, all recorded in `tests/study/wall_slip.py`):
+
+* a type-1 domain-BC WALL ignores its tangential velocity — a plain channel (8×32×8, no solid,
+  Stokes, `dt = 100`) with `set_domain_bc(2, 1, 0,0,0)` / `set_domain_bc(3, 1, U,0,0)` stays
+  identically 0 after 400 steps;
+* a type-2 INFLOW face given a purely tangential velocity DOES drive it (that is what
+  `tests/kokkos_mpi/test_varmu_mpi.cpp` uses, and it reproduces `u(y) = U y/H` exactly) — **but not
+  when an immersed solid is present**: the same scene with `set_solid(..., cutcell_pressure=True)`
+  leaves the field at exactly 0 with 0 pressure iterations, at any BC ordering;
+* and domain BCs set AFTER the geometry are silently ignored altogether (the all-fluid channel
+  drives at 10 pressure iterations with the BCs set first and returns exactly 0 with them set last).
+
+The last two are defects outside this WO; the second is what blocks the literal gate. So gate 1 is
+taken on a **slip POISEUILLE**, which is strictly stronger: exact on a QUADRATIC (hence on any
+linear profile), and it exercises the slip at TWO walls with different crossing fractions at once.
+Slit of width `H` between two flat SDF walls at QUARTER-INTEGER `z`, uniform body force `G`:
+`u(z) = (G/2mu)((z-z0)(z1-z) + lambda H)` satisfies the Robin condition exactly, so the closure
+must reproduce it.
+
+8×8×40, walls at `z = 8.25 / 32.25` (`H = 24`, `theta = 0.25` at the low wall and `0.75` at the
+high one), `mu = 1`, `G = 1e-3`, Stokes, run to a relative change < 1e-13 per step:
+
+| lambda (cells) | steps | max\|u − u_exact\| | relative | u at z = 20.5 |
+|---|---|---|---|---|
+| 0 | 94 | 8.2722e-08 | 1.1494e-06 | 7.19688327e-02 |
+| 0.02 | 96 | 8.2172e-08 | 1.1380e-06 | 7.22088322e-02 |
+| 0.05 | 97 | 8.4181e-08 | 1.1600e-06 | 7.25688342e-02 |
+| 0.1 | 100 | 8.5989e-08 | 1.1752e-06 | 7.31688360e-02 |
+| 0.3 | 111 | 9.1259e-08 | 1.2076e-06 | 7.55688413e-02 |
+| 0.5 | 115 | 9.9019e-08 | 1.2700e-06 | 7.79688490e-02 |
+| 1.0 | 124 | 1.1135e-07 | 1.3261e-06 | 8.39688613e-02 |
+
+`wall_slip_sandwich_cells() = (0,0,0)`, `max|div(open u)| = 1.21e-17`, 8 pressure iterations of 400,
+never capped. **`nvidia-cuda` reproduces every column of that table digit for digit** (the only
+differences in the whole printout are `max|div|` 1.24e-17 against 1.21e-17 and the last digit of two
+of the convergence deltas), so the closure arithmetic is backend-independent.
+
+**The work order's 1e-10 is not reachable and the reason is not the slip.** The `lambda = 0` row —
+the SHIPPED no-slip closure on the exact no-slip parabola — already misses by **1.15e-06 relative**,
+and that is the FLOAT momentum-operator storage (`IbmOverlay` rows are `float`, `D_axis` and
+`R = D_rescale/D_axis` are `float`). The slip adds essentially nothing to it: the error grows only
+from 1.1494e-06 to 1.3261e-06 while `lambda` goes 0 → 1 cell. Read as an increment instead, the
+measured slip is exact: at `lambda = 0.1` the profile rises by **1.2000033e-03** against the
+analytic `G lambda H / 2mu = 1.2e-03`, i.e. **+2.8e-06 relative**. **PASS at the storage floor**;
+the corrected gate is "the slip INCREMENT to the float floor", and the honest constant is 1.2e-06,
+not 1e-10.
+
+#### The float floor of `lambda` (the work order asked for it, and it is where predicted)
+
+The closure is stored in float, so `lambda` disappears from `D = theta(1+theta) + lambda(1+2 theta)`
+once `lambda(1+2 theta) < eps_f32 * D`. At the low wall (`theta = 0.25`, `D = 0.3125`) that predicts
+`lambda_floor ~ eps_f32 * 0.3125 / 1.5 = 2.5e-08`. Measured on the same scene as
+`max |u(lambda) - u(0)|` against the analytic increment `G lambda H / 2mu`:
+
+| lambda | measured Δu | expected | ratio |
+|---|---|---|---|
+| 1e-2 | 1.200012e-04 | 1.2e-04 | 1.0000 |
+| 1e-3 | 1.199963e-05 | 1.2e-05 | 1.0000 |
+| 1e-4 | 1.199773e-06 | 1.2e-06 | 0.9998 |
+| 1e-5 | 1.200428e-07 | 1.2e-07 | 1.0004 |
+| 1e-6 | 1.199916e-08 | 1.2e-08 | 0.9999 |
+| 1e-7 | 2.409558e-09 | 1.2e-09 | 2.008 |
+| 1e-8 | 1.594867e-10 | 1.2e-10 | 1.329 |
+| **1e-9** | **0.000000e+00** | 1.2e-11 | **0** |
+| 1e-10 | 0.000000e+00 | 1.2e-12 | 0 |
+
+So the closure is faithful to four digits down to `lambda = 1e-6` cells, quantized between 1e-7 and
+1e-8, and **exactly indistinguishable from no-slip at and below 1e-9 cells** — within a factor 25
+of the predicted 2.5e-08. Every physically interesting `lambda` (1e-2 … 1) is six to eight orders
+above the floor, so float storage is not a constraint on this rung. The `lambda = 0` early-out is a
+guarded branch, not a reliance on that floor.
+
+#### Gate 6 — MPI np 1 / 2 / 4 (`tests/kokkos_mpi/test_wall_slip_mpi`)
+
+The same slip Poiseuille, 8×8×40, walls moved to `z = 16.25 / 32.25` so that **both** Robin closures
+straddle a rank boundary at np = 4: the ORB gives z-blocks `[0,16) [16,24) [24,32) [32,40)`, the low
+wall's cut cell `k = 16` (theta = 0.25) is the first cell of block 1 with its solid neighbour
+`k = 15` in block 0, and the high wall's cut cell `k = 31` (theta = 0.75) is the last cell of block 2
+with its solid neighbour `k = 32` in block 3. The test asserts that z is cut and prints the blocks.
+Pointwise against a full-grid single-rank reference on rank 0, 200 steps, at BOTH `lambda = 0` (the
+inertness control under MPI) and `lambda = 0.1`:
+
+| np | lambda = 0: max\|du\| | lambda = 0.1: max\|du\| | analytic rel err (0 / 0.1) |
+|---|---|---|---|
+| 1 | **0.000e+00** (bitwise) | **0.000e+00** (bitwise) | 5.154e-07 / 5.379e-07 |
+| 2 | 5.017e-28 | 1.668e-27 | 5.154e-07 / 5.379e-07 |
+| 4 | 8.463e-28 | 1.922e-27 | 5.154e-07 / 5.379e-07 |
+
+(`|u| = 3.2e-02`, so np > 1 agrees to ~1e-26 absolute against a 3.3e-13 tolerance — well below the
+reduction-order floor, and the analytic error is decomposition-INDEPENDENT to all printed digits.)
+**PASS.**
+
+#### Gate 3 — the Cox–Voinov slip sensitivity (WO-V6's corrected G2b, re-run with the momentum half ON)
+
+`tests/study/vof_wetting_dynamic.py slipsweep_v6b`: the spreading drop (64×64×40, `D/dx = 24`, wall
+at a quarter-integer `z = 4.25`, `theta_e = 30`, Oh 0.1, `sigma = 1`), 800 steps, identical 15-point
+fit windows, `lambda` swept over a factor 25 — with `set_wall_slip_length(lambda)` on.
+
+| lambda | fitted slope | 9 ln(a/lambda) | mean a | implied lambda_eff | WO-V6 slope (angle half only) |
+|---|---|---|---|---|---|
+| 0.02 | **46.194** | 59.416 | 14.73 | 0.0869 | 47.377 |
+| 0.10 | **39.445** | 45.206 | 15.19 | 0.1897 | 43.788 |
+| 0.50 | **23.712** | 31.369 | 16.32 | 1.1708 | 39.853 |
+
+| interval | d(slope) measured | model `9 dln(1/lambda)` | this rung | WO-V6 |
+|---|---|---|---|---|
+| 0.02 → 0.1 | −6.749 | −14.485 | −53.4 % | −75.2 % |
+| 0.1 → 0.5 | **−15.733** | −14.485 | **+8.6 %** | −72.8 % |
+| **0.02 → 0.5 (the full sweep)** | **−22.482** | −28.970 | **−22.4 %** | −74.0 % |
+
+i.e. `d(slope)/d ln(1/lambda) = 22.482/ln 25 = **6.98** against the model's **9**` — **−22.4 %,
+inside the 25 % gate**, where WO-V6 measured 2.34 (−74 %). **PASS on the quantity the gate names**
+(the sensitivity over the swept range), with the per-interval breakdown reported because it is not
+uniform: the large-`lambda` interval is within 9 % of the model and the small-`lambda` one is still
+only half of it. `lambda_eff` now moves by a factor **13.5** (0.0869 → 1.1708) while `lambda` moves
+by 25 — against WO-V6's factor **2.4**, i.e. the pinning near 0.1 cells that finding 7 named is
+largely gone, and what is left of it sits at the small-`lambda` end, where the prescribed slip is
+below the scheme's own residual numerical slip and cannot dominate it. The absolute slopes are
+reported with their window, per WO-V6's corrected gate; Tanner exponents 0.1451 / 0.1441 / 0.1207
+against the law's 0.1. 10 pressure iterations, never capped.
+
+#### Gate 2 — inertness at `lambda = 0`
+
+Every `tests/kokkos` binary built at this branch, run against the SAME binary built from
+`origin/main` = `9ad0646` in a second worktree, full stdout `diff`, host-openmp,
+`OMP_NUM_THREADS=8`:
+
+**32 of 33 identical, 1 differing, every exit code 0.** The one that differs is
+`test_vof_cutcell`, and it differs because of PART A, not because of the slip: its G5 scene puts a
+wall on a cell-centre plane, so its tangential velocity DOFs sit exactly on the wall. The table in
+part A is that diff; the test still prints "all vof cut-cell checks passed". Nothing that does not
+contain an exactly-zero DOF sample moved by a bit — including all seven other VoF binaries,
+`test_vof_wetting_dynamic` (which configures `lambda = 0.1` for the ANGLE half, and is unchanged
+precisely because the momentum half is a separate switch), `test_ibm`, `test_ibm_overlay`,
+`test_ibm_apply`, `test_cutcell`, `test_poiseuille_ibm`, `test_mg` and `test_sdflow_tg`.
+
+Structurally so: `ibmModifyStencil` was not edited at all, the `lambda > 0` polynomial branch is
+guarded by `lamAxis != nullptr` which `buildIbmOverlay` passes only when
+`slipLambda > 0 && comp >= 0 && SCHEME == 0`, and `wallSlip_` is false unless
+`set_wall_slip_length` is called.
+
+#### Gate 4 — Lucas–Washburn on the repaired WO-V6 plate scene — **FAIL, and the failure names the NEXT limiter**
+
+`tests/study/vof_wetting_dynamic.py lw`: the WO-V6 G3 capillary-rise scene (96×4×112, gap `w = 16`,
+outer channel 64, capsule plates at quarter-integer faces, `theta_e = 30`, `sigma = 1`,
+`mu_l = 0.2`, `drho g = 3e-3`, ratio 10, zero-mean buoyancy), FLAT start, 1200 steps to `t = 173`,
+the trace probed every 20 steps. The early-time law `h^2 = (sigma w cos(theta)/(3 mu)) t` gives
+`d(h^2)/dt = 23.09`; the fit window is `2 <= h <= 0.4 * Jurin` (so the hydrostatic term is at most
+40 % of the capillary drive) — 25–30 points per run.
+
+| configuration | d(h²)/dt | vs 23.09 | final h at t = 173 | mean apparent theta |
+|---|---|---|---|---|
+| static angle, no momentum slip (control) | 0.1263 | −99.45 % | 3.772 | — |
+| dynamic angle, `lambda = 0.05`, momentum slip OFF | 0.08233 | −99.64 % | 3.143 | 75.60 → n/a |
+| dynamic angle, `lambda = 0.30`, momentum slip OFF | 0.1049 | −99.55 % | 3.465 | 73.64 |
+| dynamic angle, `lambda = 0.05`, **momentum slip ON** | 0.08717 | −99.62 % | 3.209 | 74.29 |
+| dynamic angle, `lambda = 0.30`, **momentum slip ON** | **0.1322** | −99.43 % | **3.858** | **70.76** |
+
+All runs asymptotic (0.0 % overshoot), `dV/V <= 2.8e-14`, 12 pressure iterations of 300, none
+capped, no non-finite-z notice on any stdout.
+
+**The momentum Navier slip helps, and by nothing like enough**: at `lambda = 0.3` it lifts the
+Lucas–Washburn rate by **+26.0 %** (0.1049 → 0.1322) and the height reached in a fixed time by
+**+11.3 %** (3.465 → 3.858); at `lambda = 0.05` by +5.9 % and +2.1 %. Monotone in `lambda` and in
+the right direction — but the rate is still **175× below Lucas–Washburn**, against WO-V6's 180×.
+Gate 4 FAILS on its first attempt in all four configurations, and per rule 4 nothing was tuned.
+
+**The mechanism, from the numbers already taken.** The census says the imposed angle is 35–39°
+(`theta_e = 30` plus the Cox–Voinov correction) while the interface's own **apparent** angle stays
+at **70.8–75.6°**. The interface is not adopting the angle it is being given, so only
+`cos(71°)/cos(35°) ~ 0.40` of the intended Young force is ever delivered — and adding wall slip
+moves the apparent angle by only 75.6 → 70.8, i.e. it lets the near-wall fluid MOVE without making
+the interface BEND. That is a different limiter from the one V6b addresses, and it is consistent
+with gate 3, where the same closure produced a 3× improvement: the spreading drop's interface is
+free to deform over a 15-cell contact radius, whereas the meniscus in a 16-cell slot is a 3-cell
+wetting band at each wall plus ten flat cells in the middle, so its curvature — the thing that
+delivers the capillary pressure — is set by the band's reach, not by the wall's velocity condition.
+
+**The gap-width probe settles what the resistance is, and it is not the slot.** The same scene with
+the gap DOUBLED (`w = 32`, `w_out = 48`) and `drho g` retuned to `6.667e-4` so the Jurin equilibrium
+is the SAME 27.06 cells — i.e. only the gap moves — over the same 1200 steps to `t = 173`:
+
+| gap `w` | LW coefficient `sigma w cos(theta)/(3 mu)` | h reached at t = 173 (static / `lambda = 0.3` + slip) | mean apparent theta |
+|---|---|---|---|
+| 16 | 23.09 | 3.772 / 3.858 | 73.6–75.6 |
+| 32 | 46.19 (**2× larger**) | **1.520 / 1.558** (**2.48× SMALLER**) | 70.66 |
+
+Lucas–Washburn requires `dh/dt ∝ w`: doubling the gap must make the rise TWICE as fast. Measured, it
+makes it **2.5× slower** — the front speed goes as **1/w**, which is the capillary driving
+`2 sigma cos(theta)/w` divided by a resistance that **does not scale with the gap at all**. A
+Poiseuille-limited rise would give `dh/dt ∝ w^2 Δp ∝ w`; a rise limited by a resistance local to the
+wall band gives exactly the measured `1/w`. And the apparent-angle deficit is the same at both gaps
+(70.7 vs 70.8–75.6), i.e. it is a band-local property, not a confinement one.
+
+**So the honest verdict on the campaign question.** V6b supplies the velocity half and it is
+measurably worth ~26 % of the contact-line speed at `lambda = 0.3` on a confined meniscus and a
+factor ~3 of the Cox–Voinov sensitivity on a free one. It does NOT recover Lucas–Washburn, and the
+remaining factor is **not** in the momentum wall condition: the rise rate is set by a resistance
+LOCAL TO THE WETTING BAND (the colour's motion through the near-wall cells and the curvature that
+band produces), which is independent of the gap and which neither the imposed angle nor the wall
+velocity closure controls. That is the next rung, and the two numbers that define it are the `1/w`
+scaling above and the 70°-vs-37° apparent-versus-imposed angle.
+
+#### Gate 5 — WO-V7's pore doublet at Ca = 1e-3, theta = 45° — **FAIL: the verdict does NOT flip back**
+
+`tests/study/pore_scale/pore_doublet.py --theta 45 --ca 1e-3 --slip <lambda>`, the WO-V7 scene
+unchanged (88×4×80, quarter-integer walls, `sigma = 100`, ratio 100/100, inflow/outflow drive,
+static angle, momentum consistency on, FCG selected last, `dt` re-picked every step). The no-slip
+CONTROL was re-run on THIS build and backend rather than compared against WO-V7's numbers, because
+the two differ materially (see below).
+
+| lambda (cells) | t_bt narrow | t_bt wide | fills first | tip n/w | S_narrow | S_wide | pressure | max\|div\|_proj | steps |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 (control) | 929.18 | **456.44** | **wide** ✘ | 47 / 48 | 0.7971 | 0.8487 | 116/400 | 1.54e-09 | 6555 |
+| 0.1 | 929.18 | **456.44** | **wide** ✘ | 47 / 48 | 0.7932 | 0.8582 | 142/400 | 2.32e-09 | 6555 |
+| 0.5 | **912.88** | **456.44** | **wide** ✘ | 47 / 47 | 0.7932 | 0.8193 | 130/400 | 1.94e-09 | 6440 |
+
+All runs valid: no capped solve, no `non-finite z` notice on any stdout, colour exactly 0 in solid
+cells, clipped volume 0. The breakthrough times are quantised by the 115-step sampling interval, so identical entries mean
+"within one sample" — the runs DO differ in detail (the saturations, the pressure iteration counts
+and `max|u|` in the gas all move; `wall_slip_length()` reads back 0.1 / 0.5 and
+`wall_slip_sandwich_cells()` is `(0,0,0)` in both), they simply do not differ in the answer. The
+narrow branch's breakthrough moves by **1.8 %** (929.2 → 912.9) as `lambda` goes 0 → 0.5, the wide
+branch's not at all, and the wide branch wins by a factor 2.0 in every row. Two `lambda` were tried
+and nothing else was; per rule 4 the gate stops here.
+
+**So the Chatzis–Dullien verdict does not flip, and gate 4 already says why.** The doublet's
+imbibition ordering is set by whether the capillary term can be DELIVERED, and gate 4's gap-width
+probe shows that what limits delivery is a resistance local to the wetting band, independent of the
+channel width and unaffected by the wall velocity condition. WO-V7's diagnosis — "the Ca at which
+the measured ordering flips is where the imposed velocity crosses the solver's numerical slip
+velocity" — is right that the contact-line mobility is the mechanism and, on this evidence, wrong
+about which term of the mobility is the bottleneck: it is not the momentum wall closure.
+
+**A separate observation, for whoever re-reads WO-V7's table.** This branch's no-slip control gives
+`t_bt` wide **456.4** where WO-V7 recorded **696.2** on the same scene (narrow 929.2 vs 973.4);
+the verdict is the same but the numbers are not. WO-V7 built from `2b55edb`, i.e. BEFORE the
+velocity-solve session's momentum-residual-stop default landed on `main`, and ran the CUDA backend;
+this control is host-openmp at `9ad0646`. Either difference is enough to explain it, and neither is
+this WO's, but the WO-V7 table should not be compared digit-for-digit against anything built after
+2026-09-02.
+
+### Defects found on the way, outside this WO
+
+1. **A type-1 domain-BC wall ignores its tangential velocity.** `set_domain_bc(face, 1, U, 0, 0)`
+   on a plain channel (no solid, Stokes, 400 steps) leaves the field identically 0. There is no
+   moving no-slip wall on the domain-BC path; the only way to drive a Couette is a type-2 INFLOW
+   face whose velocity is purely tangential.
+2. **That inflow workaround stops working as soon as an immersed solid is present.** The same
+   channel with `set_solid(..., cutcell_pressure=True)` and a tangential type-2 inflow face returns
+   exactly 0 with **0 pressure iterations** — the forcing never enters `u*` at all. This is what
+   makes the work order's literal Couette gate unrunnable, and it means **no wall-driven shear case
+   can currently be built over an immersed body**.
+3. **Domain BCs set AFTER the geometry are silently ignored.** All-fluid channel, BCs first:
+   drives, 10 pressure iterations, exact linear profile. Same calls, BCs after
+   `set_pressure_geometry` / `set_solid`: exactly 0, 0 iterations, no warning. (`set_wall_slip_length`
+   is order-INDEPENDENT by construction — measured bitwise — but the BC ordering trap is real and
+   undocumented.)
+4. **The driver-side divergence guard is still missing** (WO-V7's second carry): a run whose `dt`
+   has fallen orders below its initial capillary limit while `t` stops advancing is diverging, and
+   nothing says so. Part A removes the cause WO-V7 found, not the class.
+
+### Open / deferred
+
+* **The cross terms of the tangential projector** (`-n_c n_j u_j`, `j != c`). Zero on every
+  axis-aligned wall, O(n_c n_j) on a packing. Needs the other two components interpolated at this
+  DOF and therefore couples the segregated component solves — a separate rung. Until then a
+  curved-solid slip result carries this approximation; say so when reporting one.
+* **A sandwiched axis keeps no-slip** (counted, `(0,0,0)` everywhere here). The Robin closure
+  generalizes to the sandwich case in closed form — with `P_a = theta_a + lam`,
+  `Q_a = theta_a^2 + 2 lam theta_a` the determinant is `P_p Q_m + P_m Q_p` and the `lambda = 0`
+  limit reproduces `poly_D_sandwich * (theta_m + theta_p)` exactly (verified algebraically) — but it
+  was not implemented, because a one-cell fluid gap does not resolve a slip length and no gate
+  exercises it.
+* **SCHEME 1 (cell-average) has no slip branch.** `flow` builds `buildIbmOverlay<0>` everywhere, so
+  this is unreachable today; the `lamAxis` argument is ignored for SCHEME != 0 rather than silently
+  mixing point-value slip terms into cell-average polynomials.
+* **The float storage floor is 1.15e-06 relative on the wall rows**, which is what caps gate 1. If a
+  sharper wall gate is ever wanted, it is the `MReal`/overlay precision that has to move, not the
+  closure (and see the memory note that `MREAL_DOUBLE=ON` silently builds FLOAT).
+
 ## WO-V7 findings — the pore-scale campaign (doublet, packing imbibition, micromodel) — 2026-09-02, Opus
 
 Branch `vof-v7`, worktree `../flow-v7`, built from `origin/main` at `2b55edb` (WO-R2 landed).
