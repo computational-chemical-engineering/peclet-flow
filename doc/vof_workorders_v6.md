@@ -817,6 +817,264 @@ case where the MYC normal is exact — which is why P0–P2 are second order and
    quoted with `β_eff` beside it: `max |ΔR|/R` alone rewarded the WRONG initialisation at Ja = 2.
 
 ---
+## WO-P3c findings (follow-up of WO-P3b) — the interfacial AREA: what the deficit is, and what no per-cell construction can do about it — 2026-09-03, Opus
+
+Branch `vof-p3c`, worktree `../flow-p3c`, from `origin/main` at `4d4c95d`. Backend **nvidia-cuda**
+(`build_cuda`, `build_ktest_cuda`, `build_kmpi_cuda`), `OMP_NUM_THREADS=4/8 OMP_PROC_BIND=false`,
+one solver process at a time on the shared GPU. Every run below is clean under rule 3b (Scriven:
+max pressure iterations 18–34 against the 600 cap, **none capped**; P2: 297/4000).
+
+**Verdict up front, in three statements.**
+
+1. **WO-P3b's headline is an artefact of its own probe.** The "summed PLIC area of a sphere is
+   5.5–9.3 % low with no convergence" is a property of the **4³ sub-sampled colour field the probe
+   builds**, not of `plicArea` and not of the MYC normal. Sub-sampling quantizes `C` to multiples
+   of 1/64, so every cell whose true liquid fraction is below 1/128 is rounded to exactly 0 or 1
+   and **drops out of the interface** — a quarter of the interfacial cells of a sphere, carrying
+   6 % of its area, while the VOLUME moves by 1e-4 % (which is why WO-P3b's `R₀` control passed).
+   Refine the probe's colour field and the deficit collapses: at R = 20, `Σ A` goes
+   **−6.49 → −1.77 → −0.44 %** at sub = 4/8/16 with the shipped kernel.
+2. **The first P3c task — re-evaluate the area with the EXACT sphere normal — is done and it
+   REFUTES the normal hypothesis.** On the same sub = 4 field, the exact radial normal gives
+   −5.57 / −9.31 / −8.51 / −5.42 / −6.58 % at R = 4/6/8/12/20 against MYC's
+   −5.46 / −9.30 / −8.61 / −5.45 / −6.49 %. The MYC normal is not the culprit; nothing about the
+   estimator is.
+3. **The residual, once the colour field is resolved, is FIRST ORDER in `h/R` and is common to
+   every per-cell construction** — PLIC plane, height-function metric, height-function footprint,
+   paraboloid normal. Two analytic controls with no code in them (below) put it at
+   −2.9 / −1.5 / −1.4 / −0.8 % at R = 8/12/20/28 and order ≈ 1.0 over R = 20 → 40. **It is not the
+   normal, not the fractions, not the metric and not the footprint: it is that per-cell surface
+   pieces do not JOIN across cells.** The WO's design (a) is implemented and gated, it is the best
+   of the four variants, and it does not reach the 0.5 %-and-converging gate because no per-cell
+   area can.
+
+### What shipped
+
+`set_phase_change_area(mode)` (default **0**, the rung P0/P1 behaviour), `phase_change_area()`,
+`vof_interface_area()`, the diagnostics `area_hf_cells` / `area_pv_cells` /
+`area_no_cascade_cells`. New files `src/vof/interface_area.hpp` (container-free) and
+`src/vof/interface_area_field.hpp` (the g = 3 block driver — a SIBLING of `VofCurvature`, not an
+edit to its validated passes, hard rule 1; same tiers, same tolerances, same reach, no new halo,
+no reduction but the census). `pcBuildInterface` gains one branch on a bool. Study driver:
+`--sub`, `--area-sub` (chunked, so sub = 128 is affordable), `--area-mode`, `--area-shape
+cylinder`, and the interfacial-cell density per unit area. Test: **K5** and `PECLET_P3C_AREA`.
+
+| mode | construction | where the FOOTPRINT comes from |
+|---|---|---|
+| **0 `kAreaPlic`** | `plicArea = \|m\|₂ dV/dα` on the MYC normal (rungs P0/P1) | the cell's own PLIC polygon |
+| **1 `kAreaMetric`** | the PLIC footprint × the cascade's slope `√(1+h_x²+h_y²)` (HF) or the paraboloid's gradient (PV) | the cell's own PLIC polygon |
+| **2 `kAreaNormal`** | `plicArea(n*, plicAlpha(n*, C))` — the plane rebuilt on the cascade normal | the rebuilt plane |
+| **3 `kAreaFootprint`** | the height function's own footprint × its own metric | the linearized height patch — **the only one that TILES** |
+
+Mode 3 is the WO's design (a) taken literally ("the area element integrated over the cell's
+footprint in the column direction"). Its footprint is `|R| = F(+½) − F(−½)` with `F(t)` the 2-D
+PLIC fraction of the linearized graph (`plicVolume(h_x, h_y, 0, ·)`), and the cells of one column
+partition the transverse square **exactly**, because they share `h_x, h_y` (the neighbouring
+columns' heights shift with the cell) and their `h₀` differ by exactly 1. The PV branch has no
+column, so mode 3 falls back to mode 2 there and the census says how much that is (17.5 % of the
+cells of an R = 20 sphere; **100 %** on a (1,1,1) plane, where no height column closes).
+
+### Gate (b) — the a-priori probe, corrected
+
+**The sphere, `--area-probe … --area-sub S`, 128³, exact fractions, no time stepping.** `Σ A/4πR² − 1`:
+
+| R | cells (S=4 / S=16) | **mode 0**, S=4 (= WO-P3b) | mode 0, S=8 | **mode 0, S=16** | mode 1, S=16 | mode 2, S=16 | **mode 3, S=16** |
+|---|---|---|---|---|---|---|---|
+| 4 | 248 / 272 | −5.458 % | −1.200 % | −0.730 % | −1.700 % | −0.559 % | **−0.512 %** |
+| 6 | 464 / 632 | −9.304 % | −1.673 % | −0.800 % | −1.336 % | −0.712 % | **−0.613 %** |
+| 8 | 848 / 1160 | −8.609 % | −1.871 % | −0.224 % | −0.619 % | −0.142 % | **−0.082 %** |
+| 12 | 2088 / 2552 | −5.448 % | −1.659 % | −0.223 % | −0.401 % | −0.218 % | **−0.006 %** |
+| 16 | 3728 / 4592 | −6.105 % | — | −0.439 % | −0.423 % | −0.459 % | **−0.175 %** |
+| 20 | 5576 / 7184 | −6.487 % | −1.771 % | −0.443 % | −0.404 % | −0.471 % | **−0.199 %** |
+| 28 | 11072 / 14048 | −6.083 % | — | −0.484 % | −0.376 % | −0.514 % | **−0.214 %** |
+
+Read the **cells** column first: the S = 4 field has a QUARTER fewer interfacial cells than the
+S = 16 one at every radius. That is the whole of WO-P3b's table. The independent numpy ladder with
+the exact radial normal continues it to S = 32: at R = 20, **−6.575 / −1.819 / −0.451 / −0.111 %**
+for S = 4/8/16/32, with the volume moving by −0.0036 / +0.0027 / +0.0006 / −0.0001 %.
+
+**Gate verdict.** `≤ 0.5 % at R ≥ 8`: mode 0 **passes** (−0.22…−0.48 %), mode 3 passes with room
+(−0.006…−0.21 %), modes 1 and 2 pass at R ≥ 12. `CONVERGING with order ≥ 1.5`: **nothing passes**,
+and §"where the residual is" says why that half of the gate cannot be met by a per-cell area.
+
+**The plane (96³, `--area-probe=-1,-2,-3,-4`).** The axis-aligned row returns
+`Σ A = 9216.0000` — 96² to ten digits — in **every mode** (K5 proves the bitwise statement at
+kernel level). The tilted (1,1,0) plane has an analytic answer too, `√2 × 95.477 × 96 = 12962.5`:
+mode 3 reads **12965.4 (+0.02 %)** while modes 0/1/2 read 12877.1 / 12878.1 / 12866.3
+(**−0.66 / −0.65 / −0.74 %**) — on an EXACT PLANE, where the geometry is exact by construction.
+The difference is the same sliver quantization (`plane_colour` sub-samples at 8³): a cell the
+colour field has rounded to pure loses its PLIC footprint, while mode 3's footprint comes from the
+column and its neighbour's footprint simply extends to cover it. **Mode 3 is structurally immune
+to the defect that produced WO-P3b's table**; modes 0/1/2 are not.
+
+**The cylinder (`--area-shape cylinder`) — the clean curved control**, exact in z, so its
+reference `2πR n_z` carries no z discretisation and its interfacial cells are the same 148 per
+layer that an analytic circle crosses:
+
+| R | S = 16 | S = 32 | S = 64 | **S = 128**, mode 0 | mode 1 | mode 2 | **mode 3** | marching cubes |
+|---|---|---|---|---|---|---|---|---|
+| 12 | −5.004 % | −2.533 % | −1.833 % | **−1.587 %** | −1.684 % | −1.584 % | **−1.648 %** | −0.590 % |
+| 20 | −6.992 % | −1.899 % | −1.659 % | **−1.415 %** | −1.404 % | −1.420 % | **−1.179 %** | −0.493 % |
+
+The sub-ladder is the quantization again; the S = 128 column is the residual, and **the four
+constructions agree to 0.24 pp**.
+
+### Where the residual IS: a per-cell area is FIRST order on a curved interface
+
+Two controls, both analytic, neither of which contains any of the code under test.
+
+**(a) The PLIC chord of an exact circle.** Exact cell fractions (adaptive quadrature), the exact
+radial normal, `α` from the fraction and the analytic 2-D chord `|m|₂ dV/dα`:
+
+| R | 8 | 12 | 20 | 28 |
+|---|---|---|---|---|
+| `Σ chord / 2πR − 1` | **−2.861 %** | **−1.474 %** | **−1.424 %** | **−0.843 %** |
+
+It reproduces the code's cylinder row (−1.415 % at R = 20) to two digits **with no reconstruction
+error of any kind in it**. So even a perfect PLIC — exact normal, exact volume — is a few percent
+low on a curved interface.
+
+**(b) The mode-3 footprint construction with EXACT heights** (same circle, the cascade's per-cell
+column direction, the linearized graph, the exact partition):
+
+| R | 8 | 12 | 20 | 28 | 40 |
+|---|---|---|---|---|---|
+| `Σ (footprint × metric)/2πR − 1` | −3.497 % | −2.423 % | −1.655 % | −1.105 % | −0.813 % |
+
+**Observed order 1.03 over R = 20 → 40.** So the construction the work order specifies is
+first order, and its coefficient is the same as PLIC's. The mechanism both share: a cell's piece
+of the surface is chosen INDEPENDENTLY of its neighbours' (its own plane; its own column
+direction, which switches around |slope| = 1), so the pieces overlap and gap at every cell face
+instead of joining, and the mismatch is `O(h²κ)` per face over `O(L/h)` faces — a relative
+`O(hκ) = O(h/R)`. Marching cubes, whose triangles join by construction, is 3–10× closer on the
+identical fields (−0.59 / −0.49 % on the cylinder rows above).
+
+That number is not academic: the Scriven bubble runs at `R = 6 → 20`, i.e. `h/R = 1/6 … 1/20`,
+which is exactly where this term is 2–4 %.
+
+### Gate (c) — Scriven, 128³, ratio 100, similarity start, MUSCL, `R 6 → 20`
+
+`max |ΔR|/R` over the last half **and** `β_eff/β − 1` (the WO-P3b discriminator), Ja 0.5 and 2:
+
+| Ja | area mode | last-half max \|ΔR\|/R | **β_eff/β − 1** | `A/(4πR²) − 1`, last half | area-avg ṁ, last half |
+|---|---|---|---|---|---|
+| 0.5 | **0** (= WO-P3b) | **2.002 %** | **−2.517 %** | −3.380 % | −0.450 % |
+| 0.5 | 1 | 2.035 % | −2.515 % | −3.356 % | −0.419 % |
+| 0.5 | **3** | **1.307 %** | **−1.863 %** | −2.498 % | −0.694 % |
+| 0.5 | 0, initial colour at sub = 16³ | 2.005 % | −2.540 % | −3.333 % | −0.470 % |
+| 2 | **0** (= WO-P3b) | **2.636 %** | **−2.568 %** | −3.375 % | +0.310 % |
+| 2 | **3** | **1.830 %** | **−1.766 %** | −2.496 % | +0.251 % |
+
+Both mode-0 rows reproduce WO-P3b **to the digit** (2.002 / −2.517 / −3.380 and 2.636 / −2.568 /
+−3.375), so the harness is faithful.
+
+Three things to read out of it.
+
+* **Mode 3 buys a third of the gap, and it buys it exactly where the theory says.** The area
+  deficit goes −3.38 → −2.50 % and `β_eff` goes −2.52 → −1.86 % (Ja 0.5), −2.57 → −1.77 % (Ja 2).
+  A uniform flux deficit `ε` gives `R ∝ √(1−ε)` for a thermally controlled bubble
+  (`3R²Ṙ = (1−ε) C R` ⇒ `R² = 2(1−ε)Ct/3`), i.e. `Δβ_eff ≈ ε/2`: predicted +0.44 pp for the
+  measured +0.88 pp of area, observed +0.65 / +0.80 pp. **The area deficit IS the growth deficit**,
+  which is WO-P3b's inference confirmed — with a different cause than it named.
+* **The gate is still missed** (1.31 % and 1.83 % against 1 %), because 2.5 % of area is still
+  missing and no per-cell construction removes it. **Rule 4: this is the third failure of the P3
+  1 % gate (WO-P23, WO-P3b, WO-P3c) and the run stops here with the mechanism.** Ja = 10 was NOT
+  run: it is indicated only after Ja 0.5 and 2 pass, and its thermal boundary layer is sub-cell at
+  128³ anyway (WO-P23).
+* **The run's colour field is NOT the initialisation.** Starting from a 16³ sub-sampled sphere
+  (area −0.80 % at t₀ instead of −9.30 %) changes the last half by 0.003 pp. The interfacial-cell
+  density confirms it: the run starts at **1.000 cells per h²** (the sub = 4 field) and is at
+  **1.435 within ten steps** and **1.476** at the end, against the ideal `⟨|n|₁⟩ = 1.5` — Weymouth–Yue
+  re-creates the sliver cells within a few steps. What it cannot re-create is a joined surface.
+
+### Inertness, the planar rungs and MPI
+
+`PECLET_P3C_AREA=<mode>` re-runs every scene of both phase-change binaries on a non-default area.
+
+| gate | mode 0 | mode 1 | mode 2 | mode 3 |
+|---|---|---|---|---|
+| K1, K2, K3, K4 | (kernels, area-independent) | identical | identical | identical |
+| **P0a** planar regression, 1000 steps | 1.776e-14 | **byte-identical** | **byte-identical** | **byte-identical** |
+| **P0b** ratio 100, closed column | u_gas rel 0.000e+00 | **byte-identical** | **byte-identical** | **byte-identical** |
+| **P1 / P1'** Stefan N = 64 | +1.3099 % / −0.0139 % | **byte-identical** | **byte-identical** | **byte-identical** |
+| **ENERGY** uniform-T identity at rcp ratio 1e4 | 0.000e+00 | **byte-identical** | **byte-identical** | **byte-identical** |
+| **INERT** ṁ ≡ 0 | 0.000e+00 | **byte-identical** | **byte-identical** | **byte-identical** |
+| **P2** sucking N = 64 | +0.1791 % | +0.2099 % | +0.1803 % | +0.1929 % |
+
+Only P2 moves, and it is the one planar scene whose interface is not exactly grid-aligned in the
+arithmetic: the energy solve's red–black parity asymmetry gives the MYC normal a ~1e-8 transverse
+component (WO-P01 finding 3), so the height patch and the PLIC polygon differ in the last digits.
+The 0.03 pp is smaller than that scene's own host-vs-CUDA spread (+0.1706 vs +0.1791 %).
+
+**K5** (new, container-free): on a plane the metric `√(1+h_x²+h_y²)` equals `|m|₂/|m_d|` to
+**0.0**, `hfSurfaceNormal` returns ±n to **2.2e-16**, mode 1 and mode 2 agree with mode 0 to
+**2.2e-16 / 1.1e-15** relative, and the **38 axis-aligned rows are BITWISE** equal.
+
+**MPI** (`test_vof_phase_change_mpi`, 64×4×4, the ORB cutting x so the interface crosses a rank
+boundary during every run):
+
+| case | mode 0, np 1/2/4 | mode 1, np 1/2/4 |
+|---|---|---|
+| **P0a** 1000 kinematic steps | **0 / 0 / 0** | **0 / 0 / 0** |
+| **P1** Stefan, 280 coupled steps | **0 / 0 / 0** | **0 / 0 / 0** |
+| P2 sucking, 55 coupled steps (interface position) | 1.5e-05 / 1.5e-05 / 5.6e-05 | 1.0e-04 / 1.0e-04 / 8.1e-05 |
+
+P0a and P1 are **bitwise at both area modes** — the area driver is a pure local stencil on the
+colour field's own g = 3 block with no reduction in it, so it is decomposition-independent by
+construction. The P2 row is that scene's known coupled sensitivity (WO-P23), not a distribution
+defect: np 1 and np 2 are identical to every digit in both modes.
+
+### `vof_interface_area()` and W12's `vof_block_stats()['area']`
+
+`vof_interface_area()` is added (the E7 gallery's request): the same sum, over the inner region,
+MPI-reduced, **in whichever geometry `set_phase_change_area` selects**, so a page and the phase
+change quote one number. It needs `enable_vof` only.
+
+W12's `VofBlockSet::interfaceArea` does use `mycNormal → plicAlpha → plicPolygon →
+polygonAreaCentroid`, which is `plicArea` by another route, i.e. **mode 0**. It has NOT been
+switched, and that is a measurement rather than an omission: the premise for switching it was a
+MYC bias, and there is none (§verdict 2). What its number carries is the first-order term of
+§"where the residual is" — on a resolved sphere it reads about **0.2–0.5 % low** at R = 8…28 (mode
+0, S = 16 column above), and a caller who wants the better number can set mode 3 and read
+`vof_interface_area()`. Switching W12's kernel would have moved a shipped, gated number by 0.3 pp
+for no defensible gain.
+
+### Corrected gates proposed
+
+1. **Any a-priori area probe must state, and show converged, the resolution of its OWN colour
+   field.** `Σ A` is dominated by the sliver cells that a sub-sampled initialisation deletes;
+   `Σ (1−C)` is not. Quote the interfacial-cell count beside the area (it is the tell: 464 vs 632
+   at R = 6), and run the sub ladder. WO-P3b's table, and the "5.5–9.3 %, non-convergent" claim in
+   `VOF_PLAN.md` §13 item 8 that it produced, should be read with this correction.
+2. **Do not gate a per-cell interfacial area on second-order convergence.** It is first order in
+   `h/R` for every construction measured, with the analytic controls above as the reference. The
+   honest gate is a stated tolerance at a stated `h/R`, plus the requirement that the estimator not
+   ADD to the floor (mode 3: −0.006…−0.21 % on the sphere at S = 16, i.e. at the floor).
+3. **If a rung needs an area whose SUM converges, the lever is a JOINED surface, not a better
+   per-cell normal.** Candidates, in order: the marching-cubes area of the `C = ½` level set
+   (already 3–10× better on every field measured here, and cheap), or a partition-of-unity
+   paraboloid area over the band. Both are new geometry, i.e. a rung of their own — call it P3d —
+   and both should be gated on the corrected probe of item 1 and on the cylinder, whose reference
+   is exact.
+4. **Quote `β_eff` and `A/(4πR²)` beside every P3 number** (WO-P3b item 4 stands), and now also the
+   **area mode**: the two Scriven tables above differ by 0.7 pp of `β_eff` on nothing else.
+
+### Open
+
+* **P3 remains NOT closed** at 1.31 % (Ja 0.5) / 1.83 % (Ja 2), mode 3, 128³. The remaining
+  deficit is `−2.5 %` of area and it is quantitatively the first-order term; a P3d joined-surface
+  area is the named lever and it is a Fable decision whether the rung is worth it.
+* **Mode 3 is not the default.** It is better on every gate that moves and byte-identical on every
+  gate that does not, but it fails the "converging" half of the WO's a-priori gate — which nothing
+  can — and the campaign's rule is that a default changes on a passed gate, not on a better number.
+  The recommendation is to make it the default TOGETHER with the corrected gate of item 2, in the
+  same commit that records the P3d verdict.
+* **The tilted-plane rows of the probe** are still quoted against marching cubes, which carries a
+  domain-edge convention (it reads 95² where the exact answer is 96²). The (1,1,0) row now has an
+  analytic reference in this entry; the (1,1,1) and (1,2,3) rows do not, and should get one before
+  anyone reads their percentages as accuracy.
+
+---
 ## WO-V6b findings — the velocity half of the dynamic contact line (Navier slip in the cut-cell wall closure), plus the integer-coordinate wall defect — 2026-09-03, Opus
 
 Branch `vof-v6b`, worktree `../flow-v6b`, from `origin/main` at `9ad0646`. Commits: `fa1e346`

@@ -1272,14 +1272,42 @@ and flat across 64/128/192³ — and it survives halving the time step, quadrupl
 starting at R = 12, and the deposit-search fallback (which removes `band_div` entirely, 2.4e-03 →
 4.5e-12, and moves β_eff by 0.03 pp). What it does NOT survive is the area: over the last half the
 flux **per unit area** is within ±0.5 % of exact while `A_Γ/(4πR²) − 1 = −3.4 %`, and the bubble
-grows as `∫ mdot dA`. The a-priori probe (`--area-probe`, no time stepping, exact sphere fractions)
-reads Σ`A_PLIC` **5.5 – 9.3 % LOW at R = 4 … 28 with no convergence**, while marching cubes on the
-same field returns 4πR² to 0.4 % and the interfacial-cell census equals the exact mixed-cell count —
-and `plicArea` is **exact on a plane** (96² to ten digits). `plicArea = |m|₂ dV/dα` is linear in the
-MYC normal, whose error V0 measured as NON-convergent (order 0.83), and every other phase-change
-gate (P0a/P0b/P1/P2) is planar, where that normal is exact. **Quote `β_eff` beside any P3 number**:
+grows as `∫ mdot dA`. The a-priori probe (`--area-probe`, no time stepping) reads Σ`A_PLIC`
+**5.5 – 9.3 % LOW at R = 4 … 28** — but **that number is the PROBE's own initialisation, not the
+area kernel, and WO-P3c refutes the MYC-normal explanation it was given**; read the paragraph below
+before quoting it. **Quote `β_eff` beside any P3 number**:
 `max |ΔR|/R` alone rewarded the uniform start at Ja = 2 (1.50 % against 2.64 %) purely by
 cancelling its offset against the rate deficit. Full tables: `doc/vof_workorders_v6.md`, WO-P3b.
+
+**The interfacial AREA: what it really costs, and `set_phase_change_area` (WO-P3c).** Three
+statements, each measured. (1) **WO-P3b's 5.5–9.3 % is its probe's 4³ sub-sampling.** Sub-sampling
+quantizes `C` to 1/64, so every cell whose true fraction is below 1/128 rounds to exactly 0 or 1 and
+LEAVES the interface: a quarter of a sphere's interfacial cells (464 vs 632 at R = 6) carrying 6 %
+of its area, while the volume moves by 1e-4 % — which is why the `R₀` control passed. Refine it
+(`--area-sub`) and at R = 20 the deficit goes **−6.49 → −1.77 → −0.44 %** at sub = 4/8/16, and
+−0.11 % at sub = 32. **Any area probe must show its own colour field converged, and must quote the
+interfacial-cell count beside the area.** (2) **It is not the MYC normal**: re-evaluated with the
+EXACT radial normal, the same field gives −5.6 / −9.3 / −8.5 / −5.4 / −6.6 % at R = 4/6/8/12/20,
+i.e. MYC's numbers. (3) The residual, on a resolved field, is **first order in `h/R` and common to
+every per-cell construction** — an exact-fraction circle with the exact normal and an analytic chord
+sums to −2.9 / −1.5 / −1.4 / −0.8 % of 2πR at R = 8/12/20/28, and the height-function construction
+with exact heights to −3.5 / −2.4 / −1.7 / −1.1 / −0.8 % at R = 8…40 (order 1.03 over 20 → 40).
+Per-cell pieces do not JOIN across cells; marching cubes, whose triangles do, is 3–10× closer on the
+same fields. `set_phase_change_area(mode)` ships the cascade-consistent alternatives — `0` PLIC/MYC
+(**default**, the recorded numbers), `1` the V3 cascade's slope on the PLIC footprint, `2` the plane
+rebuilt on the cascade normal, `3` the height function's own footprint × its own metric, the only
+variant whose cells tile — all four EXACT on a plane, all four leaving P0a/P0b/P1/P1'/ENERGY/INERT
+**byte-identical** (only P2 moves, +0.1791 → +0.2099/+0.1803/+0.1929 %) and P0a/P1 **bitwise at
+np 1/2/4**. Mode 3 is the best of them (sphere at sub = 16: −0.006 … −0.21 % at R ≥ 8 against mode
+0's −0.22 … −0.48 %; immune to the sliver quantization — on a tilted EXACT plane it reads +0.02 %
+against the analytic area where modes 0/1/2 read −0.7 %) and it moves Scriven: Ja 0.5
+**2.002 → 1.307 %** with `β_eff` −2.517 → −1.863 %, Ja 2 **2.636 → 1.830 %** with `β_eff` −2.568 →
+−1.766 %, exactly the `Δβ_eff ≈ ε/2` a −0.9 pp area change predicts. **P3 is still NOT closed**
+(1.3 / 1.8 % against 1 %), the default stays `0`, and the named lever for a convergent area is a
+JOINED surface (marching-cubes / partition-of-unity paraboloid), not a better per-cell normal.
+`vof_interface_area()` returns the same sum in the selected geometry, MPI-reduced; W12's
+`vof_block_stats()['area']` is mode 0 and was deliberately NOT switched (the bias it was to be
+switched for does not exist). Tables: `doc/vof_workorders_v6.md`, WO-P3c.
 
 Two more things this rung ships. `set_divergence_sink(weights)` is an auto-balanced sink: the solver
 subtracts the GLOBAL deposited source spread over the given weights, so a closed domain's Poisson
