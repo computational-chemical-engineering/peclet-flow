@@ -1260,6 +1260,27 @@ neither refinement closes it — 192³ at the same cells-per-radius gives 2.001 
 2.235 %. At Ja = 10 the thermal boundary layer is SUB-CELL for the whole run at 128³, which no
 interfacial gradient fit survives.
 
+**And the P3 miss is NOT the initialisation — it is the summed PLIC AREA of a curved interface
+(WO-P3b).** `tests/study/vof_scriven.py` already initialised `T(r, t₀)` from Scriven's similarity
+profile (the `--init` switch now makes that explicit, with `uniform` — a uniform superheat and a
+sharp bubble — as the control and `cellavg` as the finite-volume variant). Measured at 128³: the
+similarity start removes 95 % of the initial `mdot` transient (**+205 % → +9.5 %** at Ja = 0.5) and
+moves the gate by nothing, and cell-averaging the profile moves the fourth digit. Fitting `R_num²`
+against `t` (`R² = 4β²α t` is a straight line through the origin) separates a growth RATE from an
+early offset and shows the residual is a **rate** deficit, `β_eff/β − 1 = −2.5 %`, under BOTH starts
+and flat across 64/128/192³ — and it survives halving the time step, quadrupling the energy sweeps,
+starting at R = 12, and the deposit-search fallback (which removes `band_div` entirely, 2.4e-03 →
+4.5e-12, and moves β_eff by 0.03 pp). What it does NOT survive is the area: over the last half the
+flux **per unit area** is within ±0.5 % of exact while `A_Γ/(4πR²) − 1 = −3.4 %`, and the bubble
+grows as `∫ mdot dA`. The a-priori probe (`--area-probe`, no time stepping, exact sphere fractions)
+reads Σ`A_PLIC` **5.5 – 9.3 % LOW at R = 4 … 28 with no convergence**, while marching cubes on the
+same field returns 4πR² to 0.4 % and the interfacial-cell census equals the exact mixed-cell count —
+and `plicArea` is **exact on a plane** (96² to ten digits). `plicArea = |m|₂ dV/dα` is linear in the
+MYC normal, whose error V0 measured as NON-convergent (order 0.83), and every other phase-change
+gate (P0a/P0b/P1/P2) is planar, where that normal is exact. **Quote `β_eff` beside any P3 number**:
+`max |ΔR|/R` alone rewarded the uniform start at Ja = 2 (1.50 % against 2.64 %) purely by
+cancelling its offset against the rate deficit. Full tables: `doc/vof_workorders_v6.md`, WO-P3b.
+
 Two more things this rung ships. `set_divergence_sink(weights)` is an auto-balanced sink: the solver
 subtracts the GLOBAL deposited source spread over the given weights, so a closed domain's Poisson
 RHS is compatible every step with no user bookkeeping. `set_phase_change_energy_muscl` (OFF by

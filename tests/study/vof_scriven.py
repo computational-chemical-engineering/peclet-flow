@@ -216,6 +216,7 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
                         f"vof_scriven: dt COLLAPSED below {dtmin:.3e} (initial {dt0:.3e}) at step "
                         f"{nst}, t = {tcur:.4f} of {te:.4f}, last CFL {s.vof_last_courant():.4g} — "
                         f"the interface velocity is running away, not the time step being small")
+        dt_used = dt
         tcur += dt
         nst += 1
         if verbose and nst % 200 == 0:
@@ -232,7 +233,15 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         dg = s.phase_change_diagnostics()
         # exact mdot = rho_v Rdot = rho_v beta sqrt(alpha_l/t)
         mex = rho_v * beta * math.sqrt(alpha_l / tcur)
-        rows.append((tcur, rnum, rex, it, dg['mdot_mean'], mex))
+        # WHERE the growth deficit sits (WO-P3b).  `mdot_mean` is an unweighted mean over the
+        # interfacial CELLS, so it does not measure the integrated flux.  The integral is
+        # `removed_volume` = sum mdot A dt / rho_l, and dividing it by the total PLIC area gives
+        # the AREA-AVERAGED mdot; comparing the area itself against 4 pi R^2 separates a flux
+        # error from a geometry error.
+        area = dg['interface_area']
+        meff = rho_l * dg['removed_volume'] / (dt_used * area) if area > 0 else float("nan")
+        arel = area / (4.0 * math.pi * rnum * rnum) - 1.0
+        rows.append((tcur, rnum, rex, it, dg['mdot_mean'], mex, meff, arel))
     d = s.phase_change_diagnostics()
     # thickness of the thermal boundary layer at t0: where the exact profile reaches 99 % of dT
     lo_, hi_ = r0, 200.0 * r0
@@ -263,13 +272,19 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
               f"R0/(2 beta^2) = {r0/(2*beta*beta):.3f} cells;  R0 from the colour field "
               f"{r0meas:.5f} vs exact {r0:.5f} ({100*(r0meas-r0)/r0:+.4f} %)")
         for k in list(range(0, len(rows), max(1, len(rows) // 8))) + [len(rows) - 1]:
-            t_, a, b_, it, mn_, mx_ = rows[k]
+            t_, a, b_, it, mn_, mx_, me_, ar_ = rows[k]
             print(f"      t {t_:10.4f}  R_num {a:8.4f}  R_exact {b_:8.4f}  "
                   f"rel {100*(a-b_)/b_:+7.3f} %  mdot {mn_:.5e} vs {mx_:.5e} "
-                  f"({100*(mn_-mx_)/mx_:+7.3f} %)  iters {it}")
+                  f"({100*(mn_-mx_)/mx_:+7.3f} %)  mdot_area {100*(me_-mx_)/mx_:+7.3f} %  "
+                  f"A/4piR^2 {100*ar_:+6.2f} %  iters {it}")
         early = ", ".join(f"{100*(r[4]-r[5])/r[5]:+.2f}" for r in rows[:6])
         print(f"      EARLY mdot rel error, steps 1..6: {early} %   "
               f"(last {100*(rows[-1][4]-rows[-1][5])/rows[-1][5]:+.2f} %)")
+        _h = half
+        print(f"      AREA-AVERAGED mdot rel error, last half: mean "
+              f"{100*np.mean([(r[6]-r[5])/r[5] for r in _h]):+.3f} %, first {100*(_h[0][6]-_h[0][5])/_h[0][5]:+.3f} %, "
+              f"last {100*(_h[-1][6]-_h[-1][5])/_h[-1][5]:+.3f} %;  A/(4 pi R^2) - 1 mean "
+              f"{100*np.mean([r[7] for r in _h]):+.3f} %")
         print(f"      R rel error at step 1 {100*(rows[0][1]-rows[0][2])/rows[0][2]:+.4f} %, "
               f"at the half point {100*(half[0][1]-half[0][2])/half[0][2]:+.4f} %, "
               f"at the end {100*(rows[-1][1]-rows[-1][2])/rows[-1][2]:+.4f} %")
@@ -286,6 +301,79 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     return max(errs), capped
 
 
+def plane_colour(n, nrm, sub=8, shift=0.37):
+    """Liquid fraction (C = 1 liquid) of the half space n.(x - centre) < shift, by sub^3
+    subsampling.  The sub-cell shift matters: a grid-aligned plane placed exactly on a cell face
+    has NO mixed cell at all (CLAUDE.md, the VoF dt-limiter note), so the probe would read zero
+    interfacial cells and no area."""
+    nrm = np.asarray(nrm, dtype=float)
+    nrm = nrm / np.linalg.norm(nrm)
+    off = (np.arange(sub) + 0.5) / sub
+    q = (np.arange(n)[:, None] + off[None, :]).ravel() - 0.5 * n
+    d = nrm[0] * q[:, None, None] + nrm[1] * q[None, :, None] + nrm[2] * q[None, None, :] - shift
+    frac = (d < 0.0).reshape(n, sub, n, sub, n, sub).mean(axis=(1, 3, 5))
+    return np.asfortranarray(frac)
+
+
+def _mc_area(c):
+    """Marching-cubes area of the C = 1/2 level set — an INDEPENDENT geometric reference for the
+    summed PLIC area (it agrees with 4 pi R^2 to 0.5 % on the exact spheres below)."""
+    try:
+        from skimage import measure
+    except ImportError:
+        return float("nan")
+    v, f, _, _ = measure.marching_cubes(np.ascontiguousarray(1.0 - c), level=0.5)
+    return float(measure.mesh_surface_area(v, f))
+
+
+def area_probe(n, radii, ratio=100.0, sub=4):
+    """A-PRIORI probe (WO-P3b): the summed PLIC interface area of an EXACT sphere, against 4 pi R^2.
+
+    No time stepping, no energy solve, no velocity — the exact sphere fractions are set, one
+    `apply_phase_change(0.0)` builds the interface, and `phase_change_diagnostics()['interface_area']`
+    is read.  This isolates the geometry of `plicArea` + the MYC normals from every other part of
+    the rung, and it is the quantity the R(t) gate integrates: the bubble grows as int mdot dA.
+    """
+    rho_l, rho_v = 1.0, 1.0 / ratio
+    print(f"  a-priori PLIC AREA probe, {n}^3, exact sphere fractions (sub = {sub}^3)")
+    prev = None
+    for R in radii:
+        ctr = 0.5 * n
+        s = pf.Solver(n, n, n)
+        s.set_rho(rho_l)
+        s.set_mu(1e-3)
+        s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
+        s.enable_vof()
+        if R > 0:
+            c0 = sphere_colour(n, ctr, ctr, ctr, R, sub=sub)
+            ref, lbl = 4.0 * math.pi * ((3.0 * (float(n) ** 3 - c0.sum()) / (4.0 * math.pi))
+                                        ** (1.0 / 3.0)) ** 2, "4 pi R^2  "
+        else:  # R < 0 selects a PLANE: -1 = (0,0,1), -2 = (1,1,0), -3 = (1,1,1), -4 = (1,2,3).
+            # INDICATIVE ONLY: a plane meets the domain faces, so both the PLIC sum and the
+            # marching-cubes reference carry an edge effect.  The SPHERE rows are the clean ones.
+            nrm = {-1: (0, 0, 1), -2: (1, 1, 0), -3: (1, 1, 1), -4: (1, 2, 3)}[int(R)]
+            c0 = plane_colour(n, nrm)
+            ref, lbl = float("nan"), f"plane {nrm}"
+        s.set_vof(c0)
+        s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
+        s.enable_phase_change(rho_v, rho_l, 1.0)
+        s.set_mass_flux_uniform(0.0)
+        s.apply_phase_change(0.0)
+        d = s.phase_change_diagnostics()
+        mc = _mc_area(c0)
+        if not (ref == ref):
+            ref = mc
+        rel = d['interface_area'] / ref - 1.0
+        ordr = ""
+        if prev is not None and R > 0 and prev[0] > 0:
+            ordr = f"   order vs R = {prev[0]:g}: {math.log(abs(prev[1]) / abs(rel)) / math.log(R / prev[0]):.3f}"
+        print(f"      R {R:6.2f} {lbl}  ({d['interface_cells']:6d} interfacial cells)  "
+              f"A_PLIC {d['interface_area']:12.4f}  ref {ref:12.4f}  "
+              f"marching cubes {mc:12.4f} ({100*(mc/ref-1):+6.3f} %)  "
+              f"A_PLIC rel {100*rel:+7.3f} %{ordr}")
+        prev = (R, rel)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=128)
@@ -294,6 +382,9 @@ def main():
     ap.add_argument("--r0", type=float, default=6.0)
     ap.add_argument("--r1", type=float, default=20.0)
     ap.add_argument("--sweeps", type=int, default=200)
+    ap.add_argument("--cfl", type=float, default=0.2,
+                    help="target interface-local Courant number of the adaptive dt (WO-P3b uses "
+                         "it as the temporal-refinement ablation of the growth-rate deficit)")
     ap.add_argument("--no-plane", action="store_true")
     ap.add_argument("--no-consistent", action="store_true")
     ap.add_argument("--no-quad", action="store_true")
@@ -302,12 +393,19 @@ def main():
                     help="initial T(r, t0): Scriven's similarity profile at the cell centre "
                          "(default, = the shipped behaviour), the same profile cell-averaged, or "
                          "a uniform superheat with a sharp bubble (the classic trap; control)")
+    ap.add_argument("--area-probe", type=str, default="",
+                    help="comma-separated radii in cells: run the a-priori PLIC-area probe on an "
+                         "exact sphere instead of the growth run, and exit")
     a = ap.parse_args()
-    print(f"P3 Scriven bubble growth, {a.n}^3, plane Dirichlet {not a.no_plane}, "
+    if a.area_probe:
+        area_probe(a.n, [float(x) for x in a.area_probe.split(",")], ratio=a.ratio)
+        return 0
+    print(f"P3 Scriven bubble growth, {a.n}^3, cfl {a.cfl:g}, sweeps {a.sweeps}, "
+          f"plane Dirichlet {not a.no_plane}, "
           f"consistent energy {not a.no_consistent}, quadratic fit {not a.no_quad}, "
           f"energy MUSCL {a.muscl}, init {a.init}")
     for ja in [float(x) for x in a.ja.split(",")]:
-        run(a.n, ja, a.ratio, a.r0, a.r1, sweeps=a.sweeps, plane=not a.no_plane,
+        run(a.n, ja, a.ratio, a.r0, a.r1, cfl=a.cfl, sweeps=a.sweeps, plane=not a.no_plane,
             consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl, init=a.init)
     return 0
 

@@ -663,6 +663,160 @@ should be measured against the P0a/P1 bitwise gates before it ships.
    grid whose transverse extent the multigrid can coarsen before it is quoted.
 
 ---
+
+## WO-P3b findings (follow-up of WO-P23 item 1) — is the 2 % Scriven deficit the INITIALISATION? — 2026-09-03, Opus
+
+Branch `vof-p3b`, worktree `../flow-p3b`, from `origin/main` at `94d73bc`. Backend **nvidia-cuda**
+(`build_cuda`), `OMP_NUM_THREADS=4 OMP_PROC_BIND=false`, one solver process at a time on a shared
+GPU. Only `tests/study/vof_scriven.py` was touched — **no kernel, no solver file**. Every run below
+is clean under rule 3b (max pressure iterations 23–45 against the 600 cap, **none capped**) and no
+run printed `preconditioner produced non-finite z`.
+
+**Verdict up front: the hypothesis is REFUTED, and it was refuted before the first run.**
+`VOF_PLAN.md` §13 item 8 asks for T(r, t₀) to be initialised from Scriven's similarity profile with
+`R₀ = 2β√(α_l t₀)` instead of a uniform superheat. **`tests/study/vof_scriven.py` has done exactly
+that since WO-P23 shipped it** — `scriven_T(r, r0, beta, rr, dT)` evaluated on the cell-centre radius,
+with `t0 = (r0/(2β))²/α_l` by construction, i.e. R₀ and t₀ are consistent by definition and the
+boundary layer is present at t = t₀. So the 2.002 / 2.636 / 36.6 % of WO-P23 were *already* the
+similarity-start numbers. This WO makes that explicit (`--init`), adds the missing control
+(`--init uniform`) and the finite-volume variant (`--init cellavg`), and then measures what the
+deficit actually is.
+
+### What shipped (study script only)
+
+`--init {similarity | cellavg | uniform}` (default `similarity`, byte-identical to the shipped
+expression), `--cfl`, `--area-probe`, and four read-outs the verdict needs:
+
+* the **thermal boundary layer** at t₀ (radius where the exact profile reaches 99 % of ΔT) and
+  `R₀/(2β²)` beside it;
+* **R₀ as the sub-sampled colour field actually carries it** — the gate reads R from the liquid
+  volume deficit, so that is the R₀ that has to be consistent (measured **−0.029 %** at R₀ = 6 on
+  128³, **−0.139 %** at R₀ = 3 on 64³; 8³/16³ subsampling moves it to +0.011 / +0.002 %, i.e. it is
+  three decades below the gate and is NOT the story);
+* the **early ṁ transient**, steps 1–6;
+* **the growth RATE against an early OFFSET.** `R = 2β√(α t)` ⇔ `R² = 4β²α t`, a straight line
+  through the origin, so fitting `R_num²` against `t` over the last half gives `β_eff` (the rate —
+  the method) and an intercept (a deficit acquired in the first steps and then carried — the start).
+  **This is the discriminator the hypothesis needed and WO-P23 did not have.**
+* the **area-averaged ṁ** (`removed_volume·ρ_l/(dt·A_Γ)`) and **`A_Γ/(4πR²)`**. `mdot_mean` is an
+  unweighted mean over interfacial CELLS and does not measure the integrated flux — which is why
+  WO-P23 could read ṁ +9.5 % while R fell behind.
+
+### The gate, both ways (128³, ratio 100, MUSCL on, R 6 → 20, FCG 600/1e-10)
+
+| Ja | `--init` | last-half max \|ΔR\|/R | **β_eff/β − 1** | R offset at the end | ṁ rel, steps 1–3 | area-avg ṁ, last half | `A_Γ/4πR² − 1` |
+|---|---|---|---|---|---|---|---|
+| 0.5 | **similarity** (shipped) | **2.002 %** | **−2.517 %** | +0.103 cells | +9.5, +6.1, +4.2 % | −0.450 % | −3.380 % |
+| 0.5 | cellavg | 2.008 % | −2.513 % | +0.101 cells | +9.2, +5.8, +4.0 % | — | — |
+| 0.5 | **uniform** (the trap) | 4.735 % | −1.700 % | +0.492 cells | **+205, +140, +123 %** | −2.629 % | −3.316 % |
+| 2 | **similarity** | **2.636 %** | **−2.568 %** | −0.009 cells | −0.6, −3.9, −5.0 % | +0.310 % | −3.375 % |
+| 2 | cellavg | 2.807 % | −2.613 % | −0.019 cells | −2.3, −5.2, −6.3 % | — | — |
+| 2 | **uniform** | 1.499 % | −2.150 % | +0.130 cells | +35.9, +17.9, +15.8 % | — | — |
+
+Read it in three statements.
+
+1. **The similarity start does everything item 8 said it would do to the transient, and nothing to
+   the gate.** It removes 95 % of the initial ṁ error (+205 % → +9.5 % at Ja 0.5; +36 % → −0.6 % at
+   Ja 2) and it removes the early radius offset (+1.14 % → −0.06 % at step 1). The last-half error
+   is unchanged, because the last-half error is not an offset.
+2. **The uniform control can look BETTER, and that is a cancellation, not accuracy** (Ja = 2:
+   1.499 % against the similarity start's 2.636 %). The uniform start over-evaporates the superheat
+   sitting at the interface, which buys a POSITIVE radius offset (+0.49 cells at Ja 0.5, +0.13 at
+   Ja 2) that then partly cancels a negative growth-rate deficit as the run proceeds; its R error
+   crosses zero mid-run. Reading only `max |ΔR|/R` hides this — **`β_eff` is the invariant**, and it
+   is −2.5 % under BOTH starts.
+3. **Cell-averaging the profile instead of point-sampling it changes the fourth digit** (2.002 →
+   2.008 %, 2.636 → 2.807 %), so the O(h²T'') half of the initialisation question is settled too.
+
+### The residual is a growth-RATE deficit, and it survives everything except the mesh — barely
+
+Mesh ladder under the similarity start, same clearance at every rung (R₀ = n/21.3, R₁ = n/6.4):
+
+| grid | R | Ja = 0.5 last half | β_eff/β − 1 | Ja = 2 last half | β_eff/β − 1 |
+|---|---|---|---|---|---|
+| 64³ | 3 → 10 | 4.188 % | −2.683 % | 15.781 % | −10.432 % |
+| 128³ | 6 → 20 | **2.002 %** | **−2.517 %** | **2.636 %** | **−2.568 %** |
+| 192³ | 9 → 30 | 2.495 % | −3.212 % | 2.509 % | −3.665 % |
+
+`β_eff` is flat at −2.5 … −3.2 % across a factor of three in mesh at Ja = 0.5 — **it does not
+converge**, which is WO-P23's conclusion re-derived on a quantity that separates rate from offset.
+(The Ja = 2 64³ row is a different failure: its thermal boundary layer is 1.4 cells at t₀.)
+
+Ablations at 128³, Ja = 0.5, similarity start — each one kills a candidate:
+
+| ablation | last half | β_eff/β − 1 | what it excludes |
+|---|---|---|---|
+| baseline | 2.002 % | −2.517 % | `band_div` 2.4e-03, fallback 48 |
+| `--cfl 0.1` (half the time step) | 1.930 % | −2.458 % | **the temporal splitting** |
+| `--sweeps 800` (energy solve, vs 200) | 2.002 % | −2.517 % | **the energy solve** — every digit identical |
+| start at R 12 → 20 instead of 6 → 20 | 1.255 % | −2.371 % | **the start state** (a 2× better-resolved interface at t₀) |
+| `PECLET_PC_DEPOSIT_FALLBACK=1` | 1.978 % | −2.485 % | **the deposit / band divergence**: `band_div` 2.4e-03 → **4.5e-12**, fallback 48 → **0**, and β_eff moves 0.03 pp |
+
+The last row matters beyond this WO: WO-P23 mechanism 5 named the deposit search as "the most likely
+remaining source" of the P3 miss. It is not. Turning it on removes the band divergence *entirely*
+(eleven orders) and leaves the gate where it was. Also note 64³ Ja = 0.5 runs with `band_div`
+**3.6e-12** and `fallback = 0` unaided, and carries the same −2.7 % rate deficit.
+
+### Where the deficit IS: the summed PLIC interface area of a SPHERE is 5–9 % low, and it does not converge
+
+The area-averaged ṁ column above is the tell: over the last half the flux **per unit area** is
+within **±0.5 %** of Scriven's exact ṁ (Ja 0.5: −0.450 %; Ja 2: +0.310 %) — the thermal half of the
+rung (the one-sided quadratic fit, the plane-anchored Dirichlet, the initialisation) is right — while
+`A_Γ/(4πR²) − 1` sits at **−3.4 %** and the bubble grows as `∫ ṁ dA`. Multiplying the two reproduces
+the growth deficit: at 64³ Ja 0.5 `(1+0.0348)(1−0.0605) = −2.8 %` against a measured β_eff of
+**−2.68 %**; at 128³ Ja 2 `(1+0.0031)(1−0.0338) = −3.1 %` against **−2.57 %**.
+
+`--area-probe` isolates it with **no time stepping at all**: exact sphere fractions in, one
+`apply_phase_change(0.0)`, `phase_change_diagnostics()['interface_area']` out.
+
+| R (cells), 128³ | interfacial cells | Σ A_PLIC | 4πR² | marching cubes | Σ A_PLIC rel |
+|---|---|---|---|---|---|
+| 4 | 248 | 190.82 | 201.83 | — | **−5.458 %** |
+| 6 | 464 | 410.07 | 452.13 | 449.86 (−0.50 %) | **−9.304 %** |
+| 8 | 848 | 735.43 | 804.71 | — | **−8.609 %** |
+| 12 | 2088 | 1711.35 | 1809.96 | 1810.74 (+0.04 %) | **−5.448 %** |
+| 16 | 3728 | 3022.57 | 3219.08 | — | **−6.105 %** |
+| 20 | 5576 | 4700.16 | 5026.19 | 5044.64 (+0.37 %) | **−6.487 %** |
+| 28 | 11072 | 9252.98 | 9852.29 | 9891.41 (+0.40 %) | **−6.083 %** |
+
+Three controls, so that this is not read as a classification or a reference artefact:
+
+* **No interfacial cell is lost.** The census (464 / 2088 / 5576 / 11072) equals the exact count of
+  cells with `0 < C < 1` in the same field, computed independently in numpy — and equals it again
+  with a `1e-12` guard, so `pcIsInterfacial` is not dropping slivers.
+* **The reference is not the suspect.** Marching cubes on the SAME colour field returns the sphere
+  area to **−0.50 / +0.04 / +0.37 / +0.40 %** of 4πR² at R = 6/12/20/28.
+* **`plicArea` itself is exact on a PLANE.** `--area-probe=-1,-2,-3,-4` puts an exact half-space at
+  a 0.37-cell offset (a plane exactly on a cell face has no mixed cell at all) into a 96³ box:
+  the axis-aligned row returns Σ A_PLIC = **9216.0000**, which is 96² to ten digits, i.e. the exact
+  plane area — while marching cubes reads 95² there, the edge convention. The tilted planes
+  (1,1,0) / (1,1,1) / (1,2,3) read +1.5 / +1.2 / +0.6 % against that same edge-affected MC
+  reference. So the area kernel is right, and only a CURVED interface loses 6 %.
+
+Which points at the one quantity the campaign has already measured as **non-convergent**: the MYC
+normal (V0: normal error order **0.83**, reconstruction error order 1.98 — the reason V3 takes
+curvature from column sums and never from ∇C). `plicArea` returns `|m|₂ dV/dα`, which is **linear**
+in that normal, so a normal error that does not converge produces an area error that does not
+converge. Every earlier phase-change gate is planar (P0a, P0b, P1 Stefan, P2 sucking) — exactly the
+case where the MYC normal is exact — which is why P0–P2 are second order and P3 is not.
+
+### What a follow-on should do (P3c)
+
+1. **Measure the per-cell area error against the exact sphere normal**, i.e. re-evaluate
+   `plicArea` with `n = (x − c)/|x − c|` and the cell's own α, and confirm the 6 % is the normal.
+   The instrument is small and needs no time stepping (`--area-probe` is the harness).
+2. **If it is:** the fix is an area that does not go through the MYC normal — the interface area
+   from the same height-function/paraboloid cascade V3 already runs for curvature (it is the
+   consistent choice: κ and A_Γ are the same geometry), or a Youngs-normal-free
+   `Σ |∇C|` -type estimator gated on the sphere probe. Gate it on the probe table above (target
+   ≤ 1 % at R ≥ 8, converging), then re-run P3; P0a/P1/P2 must stay bit-identical, and they will,
+   because on a plane the MYC normal and the fix agree.
+3. **Do not re-run P3 as a mesh study before that.** The rate deficit is flat at −2.5…−3.2 % over
+   64/128/192³ and the gate will not move.
+4. The **`--init uniform`** row should stay in the driver as the control, and any P3 number must be
+   quoted with `β_eff` beside it: `max |ΔR|/R` alone rewarded the WRONG initialisation at Ja = 2.
+
+---
 ## WO-V6b findings — the velocity half of the dynamic contact line (Navier slip in the cut-cell wall closure), plus the integer-coordinate wall defect — 2026-09-03, Opus
 
 Branch `vof-v6b`, worktree `../flow-v6b`, from `origin/main` at `9ad0646`. Commits: `fa1e346`
