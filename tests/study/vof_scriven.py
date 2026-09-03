@@ -345,6 +345,35 @@ def plane_colour(n, nrm, sub=8, shift=0.37):
     return np.asfortranarray(frac)
 
 
+def plane_colour_periodic(n, nrm, sub=8, shift=0.37):
+    """Liquid fraction of the PERIODIC tilted-plane family `0 <= (nrm . x) mod n < n/2`.
+
+    WO-P3d.  A single half-space in a PERIODIC box is not a single plane: the wrap turns the
+    domain faces into a second interface, and a JOINED surface reconstruction reports it (measured:
+    the (1,1,0) row of `--area-probe=-2` comes out +5 % against the one-plane reference purely
+    because of the seam, while a per-cell area misses it since the seam has no mixed cell).  The
+    repair is a scene that is periodic BY CONSTRUCTION: with an INTEGER normal `nrm`, the level
+    sets of `f = nrm . x  (mod n)` are closed flat surfaces of the torus, and the co-area formula
+    gives their total area in closed form,
+
+        integral |grad f| dV = |nrm|_2 n^3 = n * A(one level)   =>   A(one level) = |nrm|_2 n^2 ,
+
+    so the two level sets bounding `f < n/2` carry EXACTLY `2 |nrm|_2 n^2`.  No edge convention, no
+    seam, no reference uncertainty — for (0,0,1) it is 2 n^2, for (1,1,0) it is 2 sqrt(2) n^2.
+    """
+    nrm = np.asarray(nrm, dtype=float)
+    off = (np.arange(sub) + 0.5) / sub
+    q = (np.arange(n)[:, None] + off[None, :]).ravel()
+    # the sub-cell shift is not cosmetic: with shift = 0 an integer normal puts the level set
+    # exactly THROUGH the cell centres of a 45 deg plane (x + y is an integer at a half-integer
+    # centre pair), which is a degenerate placement, and for (0,0,1) it puts it exactly on a cell
+    # FACE, where there is no mixed cell at all and every per-cell area is 0 by construction.
+    f = (nrm[0] * q[:, None, None] + nrm[1] * q[None, :, None] + nrm[2] * q[None, None, :]
+         - shift) % n
+    frac = (f < 0.5 * n).reshape(n, sub, n, sub, n, sub).mean(axis=(1, 3, 5))
+    return np.asfortranarray(frac)
+
+
 def cylinder_colour_chunked(n, ctr, R, sub):
     """Liquid fraction of an INFINITE cylinder of radius R along z (a curved interface with ONE
     non-zero principal curvature — the control that separates a metric error from a curvature
@@ -359,6 +388,99 @@ def cylinder_colour_chunked(n, ctr, R, sub):
     c = np.ones((n, n, n), order="F")
     c[lo:hi, lo:hi, :] = (1.0 - frac)[:, :, None]
     return np.asfortranarray(c)
+
+
+def solenoidal_faces(n, amp, drift):
+    """A face velocity field that is EXACTLY discretely divergence-free on the staggered grid.
+
+    Two cellular (Taylor-Green) cells plus a uniform drift:
+
+        u = A sin(k x_f) cos(k y_c) ,   v = -A cos(k x_c) sin(k y_f) + A sin(k y_f) cos(k z_c) ,
+        w = -A cos(k y_c) sin(k z_f) ,   k = 2 pi / n ,   plus the constant `drift`.
+
+    The discrete divergence vanishes to the LAST BIT, not to O(h^2), and that matters: `advect_vof`
+    refuses a field whose `max_open_divergence_projected()` exceeds 1e-10 because Weymouth-Yue's
+    exact conservation is conditional on it.  The identity is
+    `sin(k(x+h)) - sin(k x) = 2 sin(kh/2) cos(k(x + h/2))`, and `x + h/2` of a FACE is exactly the
+    CELL CENTRE the transverse factor is evaluated at — so the two axes' differences cancel term by
+    term for each cellular pair.
+    """
+    k = 2.0 * math.pi / n
+    f = np.arange(n, dtype=float)          # face coordinate of the LOW face of cell i
+    c = np.arange(n, dtype=float) + 0.5    # cell centre
+    u = amp * (np.sin(k * f)[:, None, None] * np.cos(k * c)[None, :, None]
+               * np.ones(n)[None, None, :]) + drift[0]
+    v = (-amp * np.cos(k * c)[:, None, None] * np.sin(k * f)[None, :, None] * np.ones(n)[None, None, :]
+         + amp * np.ones(n)[:, None, None] * np.sin(k * f)[None, :, None] * np.cos(k * c)[None, None, :]
+         + drift[1])
+    w = (-amp * np.ones(n)[:, None, None] * np.cos(k * c)[None, :, None] * np.sin(k * f)[None, None, :]
+         + drift[2])
+    return (np.asfortranarray(u), np.asfortranarray(v), np.asfortranarray(w))
+
+
+def area_advect(n=128, R=16.0, sub=16, steps=100, cfl=0.2, amp=0.0, drift=(0.5, 0.25, 0.125),
+                modes=(0, 3, 4, 6, 7)):
+    """WO-P3d gate (b): is the JOINED area BOUNDED under Weymouth-Yue advection?
+
+    An a-priori probe measures a construction on an EXACT colour field.  A running one never sees
+    one: WY leaves round-off residue in every cell its sweeps touch (down to 1e-300 -- the residue
+    the V4 curvature needed `interfaceEps` for and the W0 block container needed `bubbleEps` for),
+    and the interfacial-cell density climbs from the initialisation's value to ~1.5/h^2 within ten
+    steps.  A per-cell area sums over those cells, so the question "does the area drift with the
+    WISP population" is a real one; a joined sheet is built from the C = 1/2 crossing and should be
+    blind to them.  Both are measured here, on the SAME field, step by step.
+
+    `amp = 0` is the pure TRANSLATION control, where the exact answer stays `4 pi R^2` for ever.
+    """
+    ctr = 0.5 * n
+    s = pf.Solver(n, n, n)
+    s.set_rho(1.0)
+    s.set_mu(1e-3)
+    s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
+    s.enable_vof()
+    c0 = sphere_colour_chunked(n, ctr, R, sub)
+    s.set_vof(c0)
+    vol0 = float(n) ** 3 - c0.sum()
+    ref = 4.0 * math.pi * (3.0 * vol0 / (4.0 * math.pi)) ** (2.0 / 3.0)
+    u, v, w = solenoidal_faces(n, amp, drift)
+    s.set_velocity(0, u)
+    s.set_velocity(1, v)
+    s.set_velocity(2, w)
+    div = s.max_open_divergence_projected()
+    dt = cfl / max(s.vof_max_courant(), 1e-30)
+    print(f"  ADVECTION area gate: {n}^3, sphere R = {R:g} (sub {sub}^3), {steps} WY steps at "
+          f"cfl {cfl:g} (dt {dt:.4g}), amp {amp:g}, drift {drift}")
+    print(f"      max|div(open u)| of the prescribed field {div:.3e}  (advect_vof gate 1e-10);  "
+          f"reference 4 pi R^2 = {ref:.4f}")
+
+    def sample(tag):
+        row = {}
+        for m in modes:
+            s.set_phase_change_area(m)
+            row[m] = s.vof_interface_area()
+        cc = s.get_vof()
+        mixed = int(np.count_nonzero((cc > 0.0) & (cc < 1.0)))
+        wisp = int(np.count_nonzero(((cc > 0.0) & (cc < 1e-8)) | ((cc < 1.0) & (cc > 1 - 1e-8))))
+        vol = float(n) ** 3 - cc.sum()
+        print(f"      {tag:>6}  mixed {mixed:7d}  wisps {wisp:7d}  dV/V {(vol-vol0)/vol0:+.3e}  "
+              + "  ".join(f"m{m} {100*(row[m]/ref-1):+8.3f} %" for m in modes))
+        return row
+
+    hist = {m: [] for m in modes}
+    r = sample("0")
+    for m in modes:
+        hist[m].append(r[m])
+    for i in range(1, steps + 1):
+        s.advect_vof(dt)
+        if i % 10 == 0 or i == steps:
+            r = sample(str(i))
+            for m in modes:
+                hist[m].append(r[m])
+    print("      DRIFT over the run (max-min)/ref, and the last value:")
+    for m in modes:
+        h = np.array(hist[m])
+        print(f"        mode {m}: span {100*(h.max()-h.min())/ref:7.3f} %   "
+              f"last {100*(h[-1]/ref-1):+8.3f} %   first {100*(h[0]/ref-1):+8.3f} %")
 
 
 def _mc_area(c):
@@ -400,6 +522,11 @@ def area_probe(n, radii, ratio=100.0, sub=4, mode=None, shape="sphere"):
             c0 = sphere_colour_chunked(n, ctr, R, sub)
             ref, lbl = 4.0 * math.pi * ((3.0 * (float(n) ** 3 - c0.sum()) / (4.0 * math.pi))
                                         ** (1.0 / 3.0)) ** 2, "4 pi R^2  "
+        elif R <= -5:  # WO-P3d: the PERIODIC tilted-plane family, with an EXACT analytic area.
+            nrm = {-5: (0, 0, 1), -6: (1, 1, 0), -7: (1, 1, 1), -8: (1, 2, 3)}[int(R)]
+            c0 = plane_colour_periodic(n, nrm, sub=sub)
+            ref = 2.0 * math.sqrt(float(nrm[0] ** 2 + nrm[1] ** 2 + nrm[2] ** 2)) * float(n) ** 2
+            lbl = f"periodic {nrm}"
         else:  # R < 0 selects a PLANE: -1 = (0,0,1), -2 = (1,1,0), -3 = (1,1,1), -4 = (1,2,3).
             # INDICATIVE ONLY: a plane meets the domain faces, so both the PLIC sum and the
             # marching-cubes reference carry an edge effect.  The SPHERE rows are the clean ones.
@@ -414,7 +541,7 @@ def area_probe(n, radii, ratio=100.0, sub=4, mode=None, shape="sphere"):
             s.set_phase_change_area(mode)
         s.apply_phase_change(0.0)
         d = s.phase_change_diagnostics()
-        mc = _mc_area(c0)
+        mc = _mc_area(c0) if R > -5 else float("nan")   # the periodic rows have an EXACT ref
         if not (ref == ref):
             ref = mc
         rel = d['interface_area'] / ref - 1.0
@@ -475,7 +602,19 @@ def main():
     ap.add_argument("--area-probe", type=str, default="",
                     help="comma-separated radii in cells: run the a-priori PLIC-area probe on an "
                          "exact sphere instead of the growth run, and exit")
+    ap.add_argument("--area-advect", action="store_true",
+                    help="WO-P3d gate (b): is the area BOUNDED under Weymouth-Yue advection? "
+                         "Runs a sphere through a solenoidal field (or a pure translation with "
+                         "--advect-amp 0) and prints every area mode on the SAME field beside the "
+                         "mixed-cell and wisp census")
+    ap.add_argument("--advect-amp", type=float, default=0.0)
+    ap.add_argument("--advect-steps", type=int, default=100)
+    ap.add_argument("--advect-r", type=float, default=16.0)
     a = ap.parse_args()
+    if a.area_advect:
+        area_advect(a.n, R=a.advect_r, sub=a.area_sub, steps=a.advect_steps, cfl=a.cfl,
+                    amp=a.advect_amp)
+        return 0
     if a.area_probe:
         area_probe(a.n, [float(x) for x in a.area_probe.split(",")], ratio=a.ratio,
                    sub=a.area_sub, mode=a.area_mode, shape=a.area_shape)

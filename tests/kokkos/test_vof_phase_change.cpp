@@ -57,6 +57,13 @@ using peclet::flow::vof::interfaceAreaFromNormal;
 using peclet::flow::vof::kAreaPlic;
 using peclet::flow::vof::kAreaMetric;
 using peclet::flow::vof::kAreaNormal;
+using peclet::flow::vof::McVertex;                // WO-P3d
+using peclet::flow::vof::mcCubeCornerArea;
+using peclet::flow::vof::kMcSrcColour;
+using peclet::flow::vof::kMcSrcPlic;
+using peclet::flow::vof::kMcDepositCentroid;
+using peclet::flow::vof::kMcDepositSplit;
+using peclet::flow::vof::plicNormalizeL1;
 
 int failures = 0;
 #define CHECK(cond)                                                                      \
@@ -108,6 +115,119 @@ void areaGate() {
     }
   std::printf("K1 plicArea: max |analytic - |m|2 dV/dalpha (FD)| = %.3e\n", worst);
   CHECK(worst < 1e-5);  // the FD's own truncation, not the kernel's error
+}
+
+// ============================================================ K6: the WO-P3d joined sheet
+//
+// `set_phase_change_area` 4..7 replaces the sum of per-cell pieces by ONE watertight sheet:
+// marching tetrahedra (Kuhn's 6-tet split) on the dual cube whose 8 corners are cell centres. Two
+// statements are gated here, both of which are what the construction is FOR:
+//
+//   (a) EXACT ON A PLANE, TILTED OR NOT. Give the 8 corners the exact signed distance of a plane
+//       and that plane as their PLIC normal; the sheet inside the dual cube must then be exactly
+//       the plane's cross-section of that cube, whose area is `plicArea` of the same plane on the
+//       unit cube. This is the tilted-plane gate of the work order at kernel level, where it needs
+//       no box, no ghost policy and no edge convention. (The C = 1/2 source cannot pass it and is
+//       not asked to: `C(d)` is the SZ piecewise cubic, so linear interpolation of it along the
+//       tets' sqrt(2) and sqrt(3) edges misplaces the vertex. It is asked for the axis-aligned
+//       case, where `C` IS linear.)
+//
+//   (b) THE DEPOSIT IS A PARTITION. Summed over the 8 corners, both deposit rules return the same
+//       total, and they still do when some corners are non-interfacial and their pieces are
+//       RETARGETED — the retarget moves area between cells, never loses it. That identity is what
+//       makes `Sigma_cells A` a property of the sheet and not of the booking rule.
+void mcSheetGate() {
+  const double ns[][3] = {{1, 0, 0},          {0, 0, -1},      {1, 1, 0},        {1, -1, 0},
+                          {1, 1, 1},          {1, 2, 3},       {0.2, 0.3, 0.5},  {3, 1, -2},
+                          {0.05, 1.0, 0.02},  {1, 0.5, 0.25}};
+  double worstPlic = 0.0, worstSplit = 0.0, worstPart = 0.0, worstColourAxis = 0.0;
+  int rows = 0, axisRows = 0;
+  for (const auto& nn : ns) {
+    const double q = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
+    const double u[3] = {nn[0] / q, nn[1] / q, nn[2] / q};   // unit, gas-ward
+    const bool axis = (std::fabs(u[0]) == 1.0 || std::fabs(u[1]) == 1.0 || std::fabs(u[2]) == 1.0);
+    for (double off = -0.86; off < 0.87; off += 0.07) {
+      // gas-positive distance at the dual cube's corner k, for the plane through the cube centre
+      // displaced by `off` along u:  phi(x) = u . (x - (1/2,1/2,1/2)) - off
+      McVertex v[8];
+      bool crossed = false;
+      for (int k = 0; k < 8; ++k) {
+        double p[3];
+        peclet::flow::vof::mcCornerPos(k, p);
+        const double phi = u[0] * (p[0] - 0.5) + u[1] * (p[1] - 0.5) + u[2] * (p[2] - 0.5) - off;
+        v[k].psi = phi;
+        v[k].d = phi;
+        v[k].n[0] = u[0];
+        v[k].n[1] = u[1];
+        v[k].n[2] = u[2];
+        v[k].has = true;
+        if (k && ((v[k].psi < 0.0) != (v[0].psi < 0.0)))
+          crossed = true;
+      }
+      if (!crossed)
+        continue;
+      // the exact cross-section area: the same plane on the unit cube, L1-normalized for plicArea
+      double m[3] = {u[0], u[1], u[2]};
+      const double l1 = plicNormalizeL1(m);
+      const double alpha = (0.5 * (m[0] + m[1] + m[2])) + off / l1;
+      const double exact = plicArea(m[0], m[1], m[2], alpha);
+      if (!(exact > 1e-6))
+        continue;
+      ++rows;
+      double sumC = 0.0, sumS = 0.0;
+      for (int lc = 0; lc < 8; ++lc) {
+        sumC += mcCubeCornerArea(v, lc, kMcSrcPlic, kMcDepositCentroid);
+        sumS += mcCubeCornerArea(v, lc, kMcSrcPlic, kMcDepositSplit);
+      }
+      worstPlic = std::fmax(worstPlic, std::fabs(sumC - exact) / exact);
+      worstSplit = std::fmax(worstSplit, std::fabs(sumS - sumC) / exact);
+      // the retarget is a permutation of the booking, not a loss: clear a few corners' `has`
+      for (int drop = 1; drop < 8; drop += 3) {
+        McVertex w[8];
+        for (int k = 0; k < 8; ++k) {
+          w[k] = v[k];
+          if ((k & drop) == drop && k != 0)
+            w[k].has = false;
+        }
+        double sc = 0.0, ss = 0.0;
+        for (int lc = 0; lc < 8; ++lc) {
+          sc += mcCubeCornerArea(w, lc, kMcSrcPlic, kMcDepositCentroid);
+          ss += mcCubeCornerArea(w, lc, kMcSrcPlic, kMcDepositSplit);
+        }
+        worstPart = std::fmax(worstPart, std::fabs(sc - sumC) / exact);
+        worstPart = std::fmax(worstPart, std::fabs(ss - sumC) / exact);
+      }
+      // the raw-C source, where it is licensed: an AXIS-ALIGNED plane, whose colour is linear in
+      // the centre distance, so the interpolated crossing is the plane and the sheet is flat.
+      if (axis && std::fabs(off) < 0.4) {
+        ++axisRows;
+        // for a unit normal along an axis the liquid fraction of a unit cell at gas-distance phi
+        // is exactly clamp(1/2 - phi, 0, 1), so psi = 1/2 - C is the distance itself inside the
+        // band and the linear interpolation of it IS the plane. (Outside the band C saturates,
+        // which is why the sweep is restricted to a crossing well inside the cube.)
+        for (int k = 0; k < 8; ++k) {
+          double p[3];
+          peclet::flow::vof::mcCornerPos(k, p);
+          const double phi = u[0] * (p[0] - 0.5) + u[1] * (p[1] - 0.5) + u[2] * (p[2] - 0.5) - off;
+          const double cc = std::fmin(1.0, std::fmax(0.0, 0.5 - phi));
+          v[k].psi = 0.5 - cc;
+        }
+        double sa = 0.0;
+        for (int lc = 0; lc < 8; ++lc)
+          sa += mcCubeCornerArea(v, lc, kMcSrcColour, kMcDepositCentroid);
+        worstColourAxis = std::fmax(worstColourAxis, std::fabs(sa - exact) / exact);
+      }
+    }
+  }
+  std::printf("K6 joined sheet on a PLANE (%d rows, %d axis-aligned): max rel |PLIC-source sum - "
+              "exact| %.3e, |split - centroid| %.3e, |retargeted - plain| %.3e, "
+              "|colour-source axis - exact| %.3e\n",
+              rows, axisRows, worstPlic, worstSplit, worstPart, worstColourAxis);
+  CHECK(rows > 100);
+  CHECK(worstPlic < 1e-14);
+  CHECK(worstSplit < 1e-14);
+  CHECK(worstPart < 1e-14);
+  CHECK(worstColourAxis < 1e-14);
 }
 
 // ============================================================ K5: the WO-P3c area constructions
@@ -702,6 +822,7 @@ int main(int argc, char** argv) {
   {
     areaGate();
     areaModeGate();
+    mcSheetGate();
     gradientGate();
     quadraticGradientGate();
     gfmThetaGate();
