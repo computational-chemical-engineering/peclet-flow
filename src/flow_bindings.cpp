@@ -1807,6 +1807,55 @@ static void bind_solver(nb::module_& m, const char* name) {
           "band-extended velocity of VOF_PLAN section 9 item 3 is needed iff this is not at the "
           "projection floor), and the energy-scalar extrema under the consistent transport.")
       .def(
+          "set_phase_change_budget", [](S& s, bool on) { s.setPhaseChangeBudget(on); },
+          nb::arg("on") = true,
+          "WO-P3f INSTRUMENT: turn on the energy budget of the phase-change energy solve. Costs "
+          "one extra cell field and two reductions per energy solve, and is skipped entirely when "
+          "off (the solve is then bit-identical). Read it with `phase_change_budget()`.\n\n"
+          "What it exists for: interfacial cells are Dirichlet rows, i.e. they are OUTSIDE the "
+          "energy solve, so the set over which enthalpy is conserved changes membership every step "
+          "as the interface sweeps. A liquid cell that becomes interfacial LEAVES that set carrying "
+          "its superheat rho c_p (T - T_sat) and an interfacial cell that becomes pure RE-ENTERS it "
+          "carrying `pcCarriedValue`; neither transfer appears in the latent-heat book-keeping.")
+      .def(
+          "phase_change_budget",
+          [](S& s) {
+            const auto b = s.phaseChangeBudgetValues();
+            nb::dict r;
+            r["h_open"] = b.hOpen;
+            r["h_open_new"] = b.hOpenNew;
+            r["h_liquid"] = b.hLiquid;
+            r["h_masked"] = b.hMasked;
+            r["d_overwrite"] = b.dEoverwrite;
+            r["d_overwrite_new"] = b.dEoverwriteNew;
+            r["e_enter"] = b.eEnter;
+            r["e_leave"] = b.eLeave;
+            r["q_gfm"] = b.qGfm;
+            r["n_enter_liquid"] = b.nEnterLiquid;
+            r["n_enter_gas"] = b.nEnterGas;
+            r["n_leave_liquid"] = b.nLeaveLiquid;
+            r["n_leave_gas"] = b.nLeaveGas;
+            r["n_masked"] = b.nMasked;
+            r["calls"] = b.calls;
+            return r;
+          },
+          "WO-P3f: the ENERGY BUDGET of the LAST energy solve (units: J for the enthalpies, W for "
+          "`q_gfm`; cell volume = 1).\n"
+          "  h_open / h_open_new  sum rho c_p (T - T_sat) over the UNMASKED cells, before / after "
+          "the solve\n"
+          "  h_liquid, h_masked   the same over the pure-liquid and the interfacial cells\n"
+          "  d_overwrite          sum rho c_p (dval - T) over masked cells: what the Dirichlet "
+          "rows inject when they overwrite the transported temperature (negative = destroyed)\n"
+          "  d_overwrite_new      the part of it on cells that were NOT masked last step\n"
+          "  e_enter / e_leave    the enthalpy carried OUT of / INTO the solved set by the cells "
+          "that changed class this step\n"
+          "  q_gfm                the heat the plane-anchored rows deliver INTO the unmasked set "
+          "(negative while a bubble grows); the energy equation's own interfacial flux, to be "
+          "compared with the regression's `mdot h_lv A_Gamma`\n"
+          "  n_enter_*/n_leave_*  the class-change census\n"
+          "The discrete balance the entries close over one solve is "
+          "`sum rho c_p (T^{n+1} - T*)/dt = q_gfm + (domain boundary flux) + (solve residual)`.")
+      .def(
           "set_csf_mode", [](S& s, int m) { s.setCsfMode(m); }, nb::arg("mode"),
           "ABLATION. 0 (default, the only production mode) evaluates the surface-tension force as "
           "sigma*kappa_f*(C(i)-C(i-s))/h at the face — the projection's own gradient operator. "

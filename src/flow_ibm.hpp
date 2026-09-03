@@ -5981,6 +5981,11 @@ class Solver {
                        CCConst(oy_), CCConst(oz_), idt, sc.scheme, e_, G);
       if (gfm)
         scalarAddGfmRhs(sc.b, CCConst(sc.gfmB), CCConst(sc.dmask), e_, G);
+      // WO-P3f: the energy budget's PRE snapshot — taken here because `scalarMaskRhs` on the
+      // next line is where a newly interfacial cell's transported temperature is discarded.
+      // Inert (no kernel, no allocation) unless `set_phase_change_budget(true)` ran.
+      if (hasMask && pcBudgetOn_ && pcClsPrev_.extent(0) == n_)
+        pcBudgetPre(sc);
       if (hasMask)
         scalarMaskRhs(sc.b, sc.c, CCConst(sc.dmask), CCConst(sc.dval), e_, G);
       // implicit diffusion: red-black Gauss-Seidel with a ghost fill before each color sweep.
@@ -5993,6 +5998,8 @@ class Solver {
                            og_, G, 1);
       }
       scalarFillGhosts(sc);
+      if (hasMask && pcBudgetOn_ && pcClsPrev_.extent(0) == n_)
+        pcBudgetPost(sc);  // WO-P3f, inert when the instrument is off
     }
   }
 
@@ -7670,6 +7677,46 @@ class Solver {
                               ///< interfacial, i.e. the part of the sum the flux integral drops
   };
 
+  /// **WO-P3f — the ENERGY BUDGET of the phase-change energy solve.** An INSTRUMENT: allocated and
+  /// evaluated only under `set_phase_change_budget(true)`, and every number below is a measurement
+  /// of the shipped scheme, not a change to it.
+  ///
+  /// The question it answers. The interfacial cells are Dirichlet rows, so they are OUTSIDE the
+  /// energy solve: the "fluid" the energy equation conserves enthalpy over is the UNMASKED set,
+  /// and that set changes membership every step as the interface sweeps. A liquid cell that becomes
+  /// interfacial LEAVES the solve carrying its superheat `rcp (T - T_sat)`, and an interfacial cell
+  /// that becomes pure RE-ENTERS it carrying whatever `pcCarriedValue` left there. Neither transfer
+  /// appears anywhere in the latent-heat book-keeping, so on a growing bubble they are a one-signed
+  /// enthalpy source/sink of size (cells swept per step) x (superheat one cell from the interface).
+  ///
+  /// The discrete balance the entries close, over the UNMASKED set and over one `advanceScalars`:
+  ///
+  ///     sum rcp (T^{n+1} - T*) / dt  =  qGfm + (domain boundary flux) + (solve residual)
+  ///
+  /// with `qGfm` the heat the plane-anchored (GFM) rows actually deliver ACROSS the interface —
+  /// negative when the interface draws heat out of the liquid. `qGfm` is the flux the ENERGY
+  /// equation loses; `mdot h_lv A_Gamma` (from the diagnostics' `removed_volume`) is the flux the
+  /// REGRESSION books as evaporation. **They are computed by two different discretizations and are
+  /// not equal**; their ratio is the scheme's own flux consistency and is the first thing to read.
+  struct PhaseChangeBudget {
+    double hOpen = 0.0;      ///< sum rcp (T - T_sat) over UNMASKED cells, before the solve
+    double hOpenNew = 0.0;   ///< the same, after the solve
+    double hLiquid = 0.0;    ///< sum rcp (T - T_sat) over PURE LIQUID cells, before the solve
+    double hMasked = 0.0;    ///< the same over MASKED (interfacial) cells
+    double dEoverwrite = 0.0;     ///< sum rcp (dval - T) over masked cells: what the Dirichlet
+                                  ///< rows inject when they overwrite the transported temperature
+    double dEoverwriteNew = 0.0;  ///< the part of it on cells that were NOT masked last step
+    double eEnter = 0.0;     ///< sum rcp (T - T_sat) of the cells that JOINED the masked set
+    double eLeave = 0.0;     ///< ... and of the cells that LEFT it (carrying `pcCarriedValue`)
+    double qGfm = 0.0;       ///< heat INTO the unmasked set across the plane-anchored rows (W)
+    long nEnterLiquid = 0;   ///< liquid -> interfacial transitions this step
+    long nEnterGas = 0;      ///< gas    -> interfacial
+    long nLeaveLiquid = 0;   ///< interfacial -> liquid
+    long nLeaveGas = 0;      ///< interfacial -> gas   (the bubble swallowing a cell)
+    long nMasked = 0;        ///< size of the masked set
+    long calls = 0;          ///< how many energy solves have been instrumented
+  };
+
   /// Turn on phase change. `rhoG`/`rhoL` are the phase densities used by the regression
   /// (`dV = mdot A dt / rho_l`) and by the divergence source (`S = mdot A (1/rho_g - 1/rho_l)`);
   /// they are given EXPLICITLY rather than read off a closure, exactly as `enable_vof_momentum`
@@ -7945,6 +7992,20 @@ class Solver {
   }
   bool phaseChangeEnergy() const { return pcEnergy_; }
 
+  /// WO-P3f: turn the ENERGY BUDGET instrument on. Allocates one extra cell field and runs two
+  /// reductions per energy solve; OFF by default and every kernel is skipped when off, so the
+  /// solve is bit-identical. Read with `phase_change_budget()`.
+  void setPhaseChangeBudget(bool on) {
+    requirePhaseChange("set_phase_change_budget");
+    pcBudgetOn_ = on;
+    if (on && pcClsPrev_.extent(0) != n_) {
+      pcClsPrev_ = CCField("pc_cls_prev", n_);
+      Kokkos::deep_copy(pcClsPrev_, -1.0);  // "no previous step": the first call counts no changes
+    }
+  }
+  bool phaseChangeBudget() const { return pcBudgetOn_; }
+  PhaseChangeBudget phaseChangeBudgetValues() const { return pcBudget_; }
+
   /// The BAND-EXTENDED LIQUID VELOCITY of VOF_PLAN §9 item 3, as a MEASUREMENT rather than a
   /// switch. What that item exists to guarantee is that the field Weymouth-Yue advects the colour
   /// with is the LIQUID velocity at every interfacial cell — which the source deposit already
@@ -8084,6 +8145,16 @@ class Solver {
     pcRegress(dt);
     pcUpdateEnergyProps();
     pcUpdateThermalMask();
+    // WO-P3f: the a-priori half of the energy-budget instrument. With no energy solve to bracket,
+    // `pcBudgetPost` on the CURRENT temperature and the just-rebuilt plane geometry answers the
+    // one question an exact-state probe can ask of the energy side: how much heat do the
+    // plane-anchored rows draw across this interface, against the `mdot h_lv A_Gamma` the SAME
+    // fields make the regression book? Inert unless `set_phase_change_budget(true)` ran.
+    if (pcBudgetOn_ && pcThermal_ && pcClsPrev_.extent(0) == n_) {
+      ScalarField& sc = scalarField(pcTName_);
+      if (sc.dmask.extent(0) == n_)
+        pcBudgetPost(sc);
+    }
   }
 
   /// The in-step driver: everything `applyPhaseChange` does, at the head of `step()`.
@@ -8661,6 +8732,146 @@ class Solver {
           });
     }
     Kokkos::fence();
+  }
+
+  /// WO-P3f, the energy-budget instrument, part 1: the state BEFORE the energy solve, and the
+  /// class-change accounting against the previous step. Called from `advanceScalars` after the time
+  /// base `cOld` is taken and BEFORE `scalarMaskRhs` overwrites the masked cells with `dval`, which
+  /// is the exact moment the transported temperature of a newly interfacial cell is discarded.
+  void pcBudgetPre(ScalarField& sc) {
+    const C3 e = e_;
+    const long sy = e_.x, sz = (long)e_.x * e_.y;
+    CCConst c = CCConst(cField_), T = CCConst(sc.cOld), dvl = CCConst(sc.dval),
+            mk = CCConst(sc.dmask), cls = CCConst(pcClsPrev_);
+    const bool useRcp = sc.energy && sc.rcp.extent(0) == n_;
+    CCConst rcp = useRcp ? CCConst(sc.rcp) : CCConst(sc.c);
+    const double Tsat = pcTsat_;
+    double hOpen = 0, hLiq = 0, hMask = 0, dEo = 0, dEoN = 0, eEnt = 0, eLev = 0;
+    long nEL = 0, nEG = 0, nLL = 0, nLG = 0, nM = 0;
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_budget_pre", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& a1, double& a2, double& a3, double& a4,
+                      double& a5, double& a6, double& a7) {
+          const long i = (long)x + (long)y * sy + (long)z * sz;
+          const double r = useRcp ? rcp(i) : 1.0;
+          const double h = r * (T(i) - Tsat);
+          const bool msk = mk(i) > 0.5;
+          if (msk) {
+            a3 += h;
+            a4 += r * (dvl(i) - T(i));
+          } else {
+            a1 += h;
+            if (c(i) >= 0.5)
+              a2 += h;
+          }
+          const double cp = cls(i);
+          if (!(cp >= 0.0))
+            return;  // the first instrumented step has no previous class
+          const bool wasMsk = (cp > 0.5 && cp < 1.5);
+          if (msk && !wasMsk) {
+            a6 += h;
+            a5 += r * (dvl(i) - T(i));
+          } else if (!msk && wasMsk) {
+            a7 += h;
+          }
+        },
+        hOpen, hLiq, hMask, dEo, dEoN, eEnt, eLev);
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_budget_counts", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, long& c1, long& c2, long& c3, long& c4, long& c5) {
+          const long i = (long)x + (long)y * sy + (long)z * sz;
+          const bool msk = mk(i) > 0.5;
+          if (msk)
+            c5 += 1;
+          const double cp = cls(i);
+          if (!(cp >= 0.0))
+            return;
+          const bool wasMsk = (cp > 0.5 && cp < 1.5);
+          if (msk && !wasMsk) {
+            if (cp > 1.5)
+              c1 += 1;
+            else
+              c2 += 1;
+          } else if (!msk && wasMsk) {
+            if (c(i) >= 0.5)
+              c3 += 1;
+            else
+              c4 += 1;
+          }
+        },
+        nEL, nEG, nLL, nLG, nM);
+    Kokkos::fence();
+    pcBudget_.hOpen = hOpen;
+    pcBudget_.hLiquid = hLiq;
+    pcBudget_.hMasked = hMask;
+    pcBudget_.dEoverwrite = dEo;
+    pcBudget_.dEoverwriteNew = dEoN;
+    pcBudget_.eEnter = eEnt;
+    pcBudget_.eLeave = eLev;
+    pcBudget_.nEnterLiquid = nEL;
+    pcBudget_.nEnterGas = nEG;
+    pcBudget_.nLeaveLiquid = nLL;
+    pcBudget_.nLeaveGas = nLG;
+    pcBudget_.nMasked = nM;
+  }
+
+  /// WO-P3f, part 2: the state AFTER the energy solve, the heat the plane-anchored rows actually
+  /// delivered across the interface, and the class snapshot the NEXT step compares against.
+  ///
+  /// `qGfm` mirrors `scalarMaskGfm` exactly (same `theta`, same face conductivity choice, same
+  /// openness) and accumulates `k open (T_Gamma - T_i)/theta` — the heat flowing INTO the unmasked
+  /// set, i.e. NEGATIVE while a bubble grows into superheated liquid. It is the energy equation's
+  /// own interfacial flux, and `mdot h_lv A_Gamma` is the regression's; the instrument exists to
+  /// compare them.
+  void pcBudgetPost(ScalarField& sc) {
+    const C3 e = e_;
+    const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
+    CCConst c = CCConst(cField_), T = CCConst(sc.c), mk = CCConst(sc.dmask),
+            tg = CCConst(pcTgam_), gnx = CCConst(pcGn_[0]), gny = CCConst(pcGn_[1]),
+            gnz = CCConst(pcGn_[2]), gph = CCConst(pcGphi_);
+    CCConst ox = CCConst(ox_), oy = CCConst(oy_), oz = CCConst(oz_);
+    const bool useRcp = sc.energy && sc.rcp.extent(0) == n_;
+    const bool useK = sc.energy && sc.kcell.extent(0) == n_;
+    CCConst rcp = useRcp ? CCConst(sc.rcp) : CCConst(sc.c);
+    CCConst kc = useK ? CCConst(sc.kcell) : CCConst(sc.c);
+    const double Tsat = pcTsat_, Dc = sc.D, thMin = pcGfmThMin_, thMax = pcGfmThMax_;
+    const bool gfm = pcPlaneDir_ && pcGphi_.extent(0) == n_;
+    CCField clsOut = pcClsPrev_;
+    double hOpen = 0, q = 0;
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_budget_post", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& a1, double& a2) {
+          const long i = (long)x + (long)y * sy + (long)z * sz;
+          const double r = useRcp ? rcp(i) : 1.0;
+          const bool msk = mk(i) > 0.5;
+          clsOut(i) = msk ? 1.0 : (c(i) >= 0.5 ? 2.0 : 0.0);
+          if (msk)
+            return;
+          a1 += r * (T(i) - Tsat);
+          if (!gfm)
+            return;
+          const long st[3] = {sx, sy, sz};
+          const double kd = useK ? kc(i) : Dc;
+          for (int d = 0; d < 3; ++d)
+            for (int sgn = -1; sgn <= 1; sgn += 2) {
+              const long j = i + (long)sgn * st[d];
+              if (!(mk(j) > 0.5))
+                continue;
+              const double of = (d == 0)   ? ((sgn < 0) ? ox(i) : ox(i + sx))
+                                : (d == 1) ? ((sgn < 0) ? oy(i) : oy(i + sy))
+                                           : ((sgn < 0) ? oz(i) : oz(i + sz));
+              const double nd = (d == 0) ? gnx(j) : (d == 1) ? gny(j) : gnz(j);
+              const double th = vof::pcGfmTheta(gph(j), nd, (double)sgn, thMin, thMax);
+              a2 += kd * of / th * (tg(j) - T(i));
+            }
+        },
+        hOpen, q);
+    Kokkos::fence();
+    pcBudget_.hOpenNew = hOpen;
+    pcBudget_.qGfm = q;
+    pcBudget_.calls += 1;
   }
 
   /// Subtract the phase-change (and any prescribed) divergence source from `div_` so the deflated
@@ -9421,6 +9632,12 @@ class Solver {
   double pcBandDiv_ = 0.0;   // max |div(open u)| over interfacial cells, last diagnostics call
   CCField pcGn_[3], pcGphi_, pcTgam_;  // plane normal, centre distance, T_Gamma (WO-P23)
   CCField pcSink_;           // auto-balanced sink weights (WO-P23)
+  // WO-P3f: the energy-budget instrument. `pcClsPrev_` holds the PREVIOUS step's class of every
+  // cell (0 gas, 1 interfacial/masked, 2 liquid) so the class CHANGES can be counted and their
+  // enthalpy accounted; both are unallocated and every kernel is skipped unless the flag is on.
+  bool pcBudgetOn_ = false;
+  PhaseChangeBudget pcBudget_;
+  CCField pcClsPrev_;
   bool pcHasSink_ = false;
   double pcSinkW_ = 0.0;
   std::vector<Closure> closures_;     // property/body-force closures (applied at top of step())

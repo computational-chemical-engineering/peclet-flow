@@ -158,7 +158,8 @@ def sphere_colour(n, cx, cy, cz, R, sub=4):
 
 
 def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, consistent=True,
-        quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True):
+        quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True,
+        budget=0):
     rr = 1.0 / ratio
     beta = scriven_beta(ja, rr)
     t0 = (r0 / (2 * beta)) ** 2 / alpha_l          # cells^2 / (cells^2/s) = s
@@ -212,6 +213,10 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     s.set_phase_change_quadratic_fit(quad)
     if area_mode is not None:
         s.set_phase_change_area(area_mode)
+    if budget:
+        # WO-P3f instrument (a): the energy budget of the energy solve, printed every `budget`
+        # steps.  Off by default and inert in the solver when off.
+        s.set_phase_change_budget(True)
 
     # ADAPTIVE dt on the solver's OWN interface-local Courant number. The a-priori estimate
     # u = (1 - rho_v/rho_l) Rdot is the CONTINUUM interface speed and the discrete field overshoots
@@ -282,6 +287,26 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         # the interface SHEET carries, next to the radius the liquid-volume deficit carries.
         delta = dg['removed_volume'] / area if area > 0 else float('nan')
         r_a = math.sqrt(area / (4.0 * math.pi))
+        if budget and (nst % budget == 0 or nst == 1) and verbose:
+            b = s.phase_change_budget()
+            # E_lat: the latent heat the REGRESSION booked this step (W).  removed_volume is
+            # sum mdot A dt / rho_l, so rho_l removed_volume h_lv / dt = sum mdot A h_lv.
+            e_lat = rho_l * dg['removed_volume'] * h_lv / dt_used
+            q = b['q_gfm']                       # W, < 0 = heat drawn OUT of the liquid
+            dcls = (b['e_enter'] - b['e_leave']) / dt_used      # W lost at the class changes
+            dovw = b['d_overwrite'] / dt_used                   # W injected by the Dirichlet rows
+            dovn = b['d_overwrite_new'] / dt_used
+            dH = (b['h_open_new'] - b['h_open']) / dt_used
+            print(f"      [BUDGET step {nst:4d} t {tcur:9.4f} dt {dt_used:.3e}]  "
+                  f"E_lat {e_lat:12.5e} W   q_gfm {q:12.5e} W  (-q_gfm/E_lat "
+                  f"{-q/e_lat if e_lat else float('nan'):8.5f})")
+            print(f"                     H_liq {b['h_liquid']:12.5e}  H_open {b['h_open']:12.5e}  "
+                  f"dH_open/dt {dH:12.5e} W  |  class change: enter {b['e_enter']:11.4e} J "
+                  f"leave {b['e_leave']:11.4e} J  net {dcls:12.5e} W ({100*dcls/e_lat if e_lat else float('nan'):+7.3f} % of E_lat)")
+            print(f"                     overwrite {dovw:12.5e} W (new cells {dovn:12.5e} W, "
+                  f"{100*dovn/e_lat if e_lat else float('nan'):+7.3f} % of E_lat)  |  "
+                  f"L->I {b['n_enter_liquid']:5d} G->I {b['n_enter_gas']:5d} "
+                  f"I->L {b['n_leave_liquid']:5d} I->G {b['n_leave_gas']:5d}  masked {b['n_masked']:6d}")
         rows.append((tcur, rnum, rex, it, dg['mdot_mean'], mex, meff, arel,
                      dg['interface_cells'], delta, r_a, dg['deficit_cells'],
                      dg['redistributed'], arel_end, area_end))
@@ -760,6 +785,146 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
                       f"{m_d[2]/abs(t_e):.3e} l4 {m_d[4]/abs(t_e):.3e}")
 
 
+def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt, prof):
+    """One a-priori mdot evaluation: `geom` x `prof`, the 2x2 that separates the two curvatures.
+
+    `geom` = 'sphere' (the exact sphere, sub^3 fractions) or 'plane' (a flat interface normal to x
+    at a sub-cell offset, the same sub^3 fractions).  `prof` = 'scriven' (Scriven's similarity
+    profile of a bubble of radius R at the matching time, as a function of the signed distance to
+    the interface -- so the sphere and plane rows carry IDENTICAL T', T'' at the interface) or
+    'linear' (T = T'(R) d exactly, zero profile curvature).
+
+    ONE `apply_phase_change(dt)` evaluates the shipped estimator: no energy solve, no velocity, no
+    time stepping.  The only things measured are the one-sided gradient fit and the area on that
+    field.  `plane x linear` is the exactness control (the fit's model is the exact state);
+    `sphere x linear` isolates the INTERFACE's curvature; `plane x scriven` isolates the PROFILE's
+    curvature and its resolution; `sphere x scriven` is the run's own configuration.
+    """
+    rr = 1.0 / ratio
+    beta = scriven_beta(ja, rr)
+    t = (R / (2 * beta)) ** 2 / alpha_l
+    rho_l, rho_v = 1.0, rr
+    cpl = 1.0
+    k_l = alpha_l * rho_l * cpl
+    rcp_l, rcp_v = rho_l * cpl, rho_v * cpl
+    k_v = k_l / ratio
+    dT = 1.0
+    h_lv = rho_l * cpl * dT / (rho_v * ja)
+    ctr = 0.5 * n
+    Rdot = beta * math.sqrt(alpha_l / t)
+    mdot_ex = rho_v * Rdot
+    gradT = mdot_ex * h_lv / k_l                       # dT/dr at the interface, K/cell
+
+    ax = (np.arange(n) + 0.5) - ctr
+    shift = 0.37
+    if geom == "sphere":
+        c0 = sphere_colour_chunked(n, ctr, R, sub)
+        rad = np.sqrt(ax[:, None, None] ** 2 + ax[None, :, None] ** 2 + ax[None, None, :] ** 2)
+        Rmeas = (3.0 * (float(n) ** 3 - c0.sum()) / (4.0 * math.pi)) ** (1.0 / 3.0)
+        ref_area = 4.0 * math.pi * Rmeas * Rmeas
+        d = rad - R                                    # signed distance, + into the LIQUID
+    else:
+        # a flat interface normal to x at x = ctr + shift, LIQUID on the +x side (C = 1 liquid).
+        off = (np.arange(sub) + 0.5) / sub
+        q = (np.arange(n)[:, None] + off[None, :]).ravel() - ctr - shift
+        frac = (q > 0.0).reshape(n, sub).mean(axis=1)
+        c0 = np.asfortranarray(np.repeat(frac, n * n).reshape(n, n, n))
+        d = (ax - shift)[:, None, None] * np.ones((1, n, n))
+        Rmeas = R
+        ref_area = float(n) ** 2
+    if prof == "linear":
+        tprof = np.asfortranarray(np.where(d > 0.0, gradT * d, 0.0))
+    else:
+        tprof = np.asfortranarray(np.vectorize(lambda x: scriven_T(R + x, R, beta, rr, dT))(
+            np.maximum(d, 0.0)))
+
+    s = pf.Solver(n, n, n)
+    s.set_rho(rho_l)
+    s.set_mu(1e-3)
+    s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
+    s.enable_vof()
+    s.set_vof(c0)
+    s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
+    s.add_scalar("T", k_l / rcp_l, 1, 1)
+    for f in range(6):
+        s.set_scalar_bc("T", f, 1, 0.0)                # Neumann: the fit reads +-2 cells only
+    s.set_field("T", tprof)
+    s.enable_phase_change(rho_v, rho_l, h_lv)
+    s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
+    s.set_phase_change_plane_dirichlet(plane)
+    s.set_phase_change_energy(rcp_v, rcp_l)
+    s.set_phase_change_quadratic_fit(quad)
+    if area_mode is not None:
+        s.set_phase_change_area(area_mode)
+    s.set_phase_change_budget(True)     # WO-P3f: also read the GFM heat the SAME fields draw
+    s.apply_phase_change(dt)
+    dg = s.phase_change_diagnostics()
+    bud = s.phase_change_budget()
+    md = np.asarray(s.get_field("mdot"))
+    cc = np.asarray(c0)
+    iface = (cc > 1e-12) & (cc < 1.0 - 1e-12)
+    A = dg['interface_area']
+    m_area = rho_l * dg['removed_volume'] / (dt * A) if A > 0 else float('nan')
+    # the two interfacial FLUXES on the same fields: the one the regression books
+    # (`mdot h_lv A_Gamma`, from the least-squares one-sided fit) and the one the energy solve's
+    # plane-anchored rows would actually draw (`q_gfm`), against the EXACT `mdot_ex h_lv A_exact`.
+    e_lat = rho_l * dg['removed_volume'] * h_lv / dt
+    q_ex = mdot_ex * h_lv * ref_area
+    return dict(beta=beta, t=t, Rdot=Rdot, mdot_ex=mdot_ex, area=A, ref_area=ref_area,
+                m_area=m_area, cells=int(dg['interface_cells']), m_cell=md[iface],
+                Rmeas=Rmeas, gradT=gradT, bl=dT / gradT, e_lat=e_lat, q_gfm=bud['q_gfm'],
+                q_ex=q_ex,
+                delta=dg['removed_volume'] / A if A > 0 else float('nan'),
+                clipped=int(dg['deficit_cells']))
+
+
+def mdot_probe(n, radii, ja=0.5, ratio=100.0, sub=16, alpha_l=1.0, area_mode=None, quad=True,
+               plane=True, dt=None, geoms=("sphere", "plane"), profs=("scriven",)):
+    """WO-P3f gate (b): the a-priori CURVATURE BIAS of the one-sided mdot fit.
+
+    For each radius the exact sphere carries Scriven's similarity profile at the matching time and
+    the shipped estimator is evaluated ONCE.  The area-weighted mdot is compared with the analytic
+    `mdot = rho_v beta sqrt(alpha/t)`; the flat-interface row with the SAME profile is the control.
+    """
+    print(f"  a-priori MDOT probe, {n}^3, Ja {ja:g}, ratio {ratio:g}, exact fractions "
+          f"(sub = {sub}^3), area mode {0 if area_mode is None else area_mode}, "
+          f"quadratic fit {quad}, plane Dirichlet {plane}")
+    for prof in profs:
+      for geom in geoms:
+        prev = None
+        for R in radii:
+            step = dt
+            if step is None:
+                # the RUN's own regression step: delta = mdot dt / rho_l ~ 1e-3 cells
+                rr = 1.0 / ratio
+                b_ = scriven_beta(ja, rr)
+                t_ = (R / (2 * b_)) ** 2 / alpha_l
+                step = 1e-3 / max(rr * b_ * math.sqrt(alpha_l / t_), 1e-300)
+            r = _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, step,
+                            prof)
+            rel = r['m_area'] / r['mdot_ex'] - 1.0
+            relA = r['area'] / r['ref_area'] - 1.0
+            mc = r['m_cell']
+            cell_rel = mc / r['mdot_ex'] - 1.0
+            ordr = ""
+            if prev is not None:
+                ordr = (f"   order in h/R vs R = {prev[0]:g}: "
+                        f"{math.log(abs(prev[1]) / abs(rel)) / math.log(R / prev[0]):.3f}")
+            print(f"      {prof:7s} {geom:6s} R {R:6.2f}  t {r['t']:10.4f}  "
+                  f"cells {r['cells']:6d}  A/A_ref {100*relA:+7.3f} %  BL {r['bl']:6.3f} cells  "
+                  f"delta {r['delta']:.3e}  clipped {r['clipped']}")
+            print(f"                     mdot_area {r['m_area']:.6e} vs exact {r['mdot_ex']:.6e}  "
+                  f"rel {100*rel:+7.3f} %{ordr}")
+            print(f"                     GFM heat -q_gfm {-r['q_gfm']:.6e} vs exact "
+                  f"{r['q_ex']:.6e} (rel {100*(-r['q_gfm']/r['q_ex']-1):+7.3f} %), "
+                  f"-q_gfm/E_lat {-r['q_gfm']/r['e_lat']:8.5f}")
+            print(f"                     per-CELL mdot/exact - 1: mean {100*cell_rel.mean():+7.3f} "
+                  f"% sd {100*cell_rel.std():6.3f} %  p05 {100*np.percentile(cell_rel,5):+7.3f} "
+                  f"p50 {100*np.percentile(cell_rel,50):+7.3f} p95 "
+                  f"{100*np.percentile(cell_rel,95):+7.3f} %")
+            prev = (R, rel)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=128)
@@ -816,6 +981,22 @@ def main():
     ap.add_argument("--regress-advect", type=int, default=0,
                     help="WO-P3e: Weymouth-Yue pre-steps (pure translation) before the regression "
                          "step, so the fractions are advection-realistic")
+    ap.add_argument("--budget", type=int, default=0,
+                    help="WO-P3f instrument (a): print the ENERGY BUDGET of the energy solve every "
+                         "N steps (0 = off, the shipped behaviour)")
+    ap.add_argument("--mdot-probe", type=str, default="",
+                    help="WO-P3f gate (b): comma-separated radii in cells - run the a-priori MDOT "
+                         "probe (Scriven's similarity profile on an EXACT sphere, one "
+                         "apply_phase_change, no energy solve) against the analytic mdot, with a "
+                         "flat-interface control carrying the same profile; then exit")
+    ap.add_argument("--mdot-geom", type=str, default="sphere,plane",
+                    help="WO-P3f: which scenes the mdot probe runs (sphere and/or plane)")
+    ap.add_argument("--mdot-prof", type=str, default="scriven",
+                    help="WO-P3f: which temperature profiles the mdot probe runs "
+                         "('scriven' and/or 'linear'; linear x plane is the exactness control)")
+    ap.add_argument("--mdot-dt", type=float, default=0.0,
+                    help="WO-P3f: fixed regression dt for the mdot probe (0 = pick it so the "
+                         "normal displacement is the run's own 1e-3 cells)")
     a = ap.parse_args()
     if a.area_advect:
         area_advect(a.n, R=a.advect_r, sub=a.area_sub, steps=a.advect_steps, cfl=a.cfl,
@@ -826,6 +1007,14 @@ def main():
                       deltas=[float(x) for x in a.regress_delta.split(",")],
                       sub=a.area_sub, modes=[int(x) for x in a.regress_modes.split(",")],
                       ratio=a.ratio, advect_steps=a.regress_advect, cfl=a.cfl)
+        return 0
+    if a.mdot_probe:
+        mdot_probe(a.n, [float(x) for x in a.mdot_probe.split(",")],
+                   ja=float(a.ja.split(",")[0]), ratio=a.ratio, sub=a.area_sub,
+                   area_mode=a.area_mode, quad=not a.no_quad, plane=not a.no_plane,
+                   dt=(a.mdot_dt if a.mdot_dt > 0 else None),
+                   geoms=tuple(a.mdot_geom.split(",")),
+                   profs=tuple(a.mdot_prof.split(",")))
         return 0
     if a.area_probe:
         area_probe(a.n, [float(x) for x in a.area_probe.split(",")], ratio=a.ratio,
@@ -838,7 +1027,7 @@ def main():
     for ja in [float(x) for x in a.ja.split(",")]:
         run(a.n, ja, a.ratio, a.r0, a.r1, cfl=a.cfl, sweeps=a.sweeps, plane=not a.no_plane,
             consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl, init=a.init,
-            sub=a.sub, area_mode=a.area_mode)
+            sub=a.sub, area_mode=a.area_mode, budget=a.budget)
     return 0
 
 
