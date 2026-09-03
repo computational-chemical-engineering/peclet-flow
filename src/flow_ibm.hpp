@@ -59,6 +59,7 @@
 #include "vof/wetting_dynamic.hpp"  // VoF rung V6: dynamic contact angle + hysteresis
 #include "vof/energy_advect.hpp"   // VoF Part II rung P2/P3: consistent rho c_p T transport
 #include "vof/interface_area_field.hpp"  // VoF Part II rung P3c: the cascade-consistent A_Gamma
+#include "vof/marching_cubes_field.hpp"  // VoF Part II rung P3d: the JOINED (marching-tet) A_Gamma
 
 namespace peclet::flow {
 
@@ -7665,6 +7666,8 @@ class Solver {
     long areaHf = 0;   ///< WO-P3c: cells whose area came from a height function (tiers 1/2a)
     long areaPv = 0;   ///< WO-P3c: cells whose area came from the PV paraboloid (tier 3)
     long areaNone = 0; ///< WO-P3c: cells with NO cascade geometry (kept their MYC PLIC area)
+    double areaOrphan = 0.0;  ///< WO-P3d: area the JOINED sheet booked to cells that are not
+                              ///< interfacial, i.e. the part of the sum the flux integral drops
   };
 
   /// Turn on phase change. `rhoG`/`rhoL` are the phase densities used by the regression
@@ -7796,6 +7799,13 @@ class Solver {
   ///    (`plicArea(n*, plicAlpha(n*, C))`) instead of keeping the PLIC footprint.
   ///  * `3 = vof::kAreaFootprint` — the height function's OWN footprint times its own metric, the
   ///    only variant whose cell pieces TILE (see `vof/interface_area.hpp`).
+  ///  * `4..7` — **WO-P3d, the JOINED surface**: marching tetrahedra on the cell-centre lattice,
+  ///    one watertight sheet whose triangles are booked to cells, so the SUM converges where no
+  ///    per-cell construction can (`vof/marching_cubes.hpp`). `4 = kAreaMcColour` (the `C = 1/2`
+  ///    level set, whole triangles to the cell holding the centroid), `5 = kAreaMcColourSplit`
+  ///    (the same sheet, triangles clipped to each cell's cube), `6 = kAreaMcPlic` and
+  ///    `7 = kAreaMcPlicSplit` (the same two deposits on the zero of the PLIC-reconstructed signed
+  ///    distance, which is exact on a TILTED plane where the raw `C = 1/2` interpolation is not).
   ///
   /// Modes 1 and 2 are EXACT on a plane (the height function's differences are exact there and the
   /// cascade normal is the MYC one), so every planar gate is unmoved. The default is `0`: on a
@@ -7803,10 +7813,11 @@ class Solver {
   /// the cascade buys nothing measurable — see the WO-P3c findings, which also record that
   /// WO-P3b's 5.5-9.3 % deficit was its probe's own 4^3 sub-sampled initialisation.
   void setPhaseChangeArea(int mode) {
-    if (mode < 0 || mode > 3)
+    if (mode < 0 || mode > 7)
       throw std::runtime_error(
           "set_phase_change_area: mode must be 0 (PLIC/MYC), 1 (cascade metric), 2 (cascade "
-          "normal) or 3 (cascade footprint)");
+          "normal), 3 (cascade footprint) or 4-7 (the joined marching-tetrahedra sheet: 4 colour/"
+          "centroid, 5 colour/split, 6 PLIC-distance/centroid, 7 PLIC-distance/split)");
     pcAreaMode_ = mode;
   }
   int phaseChangeArea() const { return pcAreaMode_; }
@@ -7861,10 +7872,31 @@ class Solver {
   /// Run the cascade area driver on the (already bridged) g = 3 colour block. Returns the LOCAL
   /// census; the area field stays on the driver for `copyInner`.
   vof::VofInterfaceArea::Stats pcAreaCascadeCompute() {
+    if (pcAreaMode_ >= vof::kAreaMcColour) {
+      if (!pcAreaMc_.ready())
+        pcAreaMc_.init(nx_, ny_, nz_, kVofG);
+      pcAreaMc_.interfaceEps = pcEffInterfaceEps();
+      const auto m = pcAreaMc_.compute(vofAdv_.colour(), pcAreaMode_);
+      vof::VofInterfaceArea::Stats s;
+      s.interfacial = m.cells;
+      s.hf = m.cells - m.orphanCells;  // the cells the flux integral can actually use
+      s.hfMixed = 0;
+      s.pv = 0;
+      s.noEstimate = m.orphanCells;
+      s.area = m.area;
+      pcMcOrphanArea_ = m.orphanArea;
+      return s;
+    }
+    pcMcOrphanArea_ = 0.0;
     if (!pcAreaC_.ready())
       pcAreaC_.init(nx_, ny_, nz_, kVofG);
     pcAreaC_.interfaceEps = pcEffInterfaceEps();
     return pcAreaC_.compute(vofAdv_.colour(), pcAreaMode_);
+  }
+
+  /// The area field the last `pcAreaCascadeCompute` filled (either driver).
+  SField pcAreaCascadeField() const {
+    return (pcAreaMode_ >= vof::kAreaMcColour) ? pcAreaMc_.area() : pcAreaC_.area();
   }
 
   /// Turn on the CONSISTENT energy transport (VOF_PLAN §9 item 6) for the scalar
@@ -8123,7 +8155,8 @@ class Solver {
       pcDiag_.areaHf = as.hf + as.hfMixed;
       pcDiag_.areaPv = as.pv;
       pcDiag_.areaNone = as.noEstimate;
-      copyInner(pcAreaCg2_, e_, G, CCConst(pcAreaC_.area()), e3_, kVofG);
+      pcDiag_.areaOrphan = pcMcOrphanArea_;
+      copyInner(pcAreaCg2_, e_, G, CCConst(pcAreaCascadeField()), e3_, kVofG);
     }
     CCConst areaCasc = CCConst(cascadeArea ? pcAreaCg2_ : pcMdot_);
     const C3 e = e_;
@@ -9364,6 +9397,8 @@ class Solver {
   bool pcQuadFit_ = true;    // quadratic (Aslam) one-sided gradient fit (WO-P23 default)
   int pcAreaMode_ = vof::kAreaPlic;  // WO-P3c: which geometry A_Gamma comes from
   vof::VofInterfaceArea pcAreaC_;    // the cascade area driver (g = 3 block; lazily initialised)
+  vof::VofMcArea pcAreaMc_;          // WO-P3d: the joined marching-tet area driver
+  double pcMcOrphanArea_ = 0.0;      // WO-P3d: area booked to non-interfacial cells
   CCField pcAreaCg2_;                // its inner values on the G = 2 phase-change block
   // WO-P23 ablation, process-wide (the `PECLET_FLOW_OUTFLOW_RHO` pattern): give the interfacial
   // cells whose along-the-normal deposit candidates are BOTH still interfacial a target from the

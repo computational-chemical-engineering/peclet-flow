@@ -1670,14 +1670,25 @@ static void bind_solver(nb::module_& m, const char* name) {
           "to the PLIC polygon's projected footprint, so the cells of a column still tile.\n"
           "  2 = cascade normal: the same normals, but the plane is rebuilt on them, "
           "plicArea(n*, plicAlpha(n*, C)).\n"
-          "All three are EXACT on a plane, so every planar gate (P0a/P0b/P1/P2) is unmoved. The "
+          "  3 = cascade footprint: the height function's OWN footprint times its own metric, the "
+          "only per-cell variant whose pieces tile.\n"
+          "  4..7 = WO-P3d, the JOINED sheet: marching tetrahedra on the cell-centre lattice, one "
+          "watertight surface whose triangles are booked to cells — 4 the C = 1/2 level set with "
+          "whole triangles to the cell holding the centroid, 5 the same sheet clipped to each "
+          "cell's cube, 6 and 7 the same two deposits on the zero of the PLIC-reconstructed signed "
+          "distance (exact on a TILTED plane, where interpolating C is not, because C(d) is the SZ "
+          "piecewise cubic). Modes 4-7 are the only ones whose SUM converges on a curved "
+          "interface: WO-P3c proved with two analytic controls that every PER-CELL area is first "
+          "order in h/R because the pieces do not JOIN across cells.\n"
+          "All of 0-3 are EXACT on a plane, so every planar gate (P0a/P0b/P1/P2) is unmoved. The "
           "default is 0 because the measurement says so: on a sphere whose colour field is "
           "resolved (16^3 sub-sampling), summed plicArea is within 0.5 % of 4 pi R^2 and the "
           "cascade does not improve it. WO-P3b's 5.5-9.3 % 'PLIC area deficit' was its probe's own "
           "4^3 sub-sampling, which quantizes C to 1/64 and drops a QUARTER of the interfacial "
           "cells (their volume is 1e-4 %, their area 6 %).")
       .def("phase_change_area", [](S& s) { return s.phaseChangeArea(); },
-           "The set_phase_change_area mode in force (0 PLIC, 1 cascade metric, 2 cascade normal).")
+           "The set_phase_change_area mode in force (0 PLIC, 1 cascade metric, 2 cascade normal, "
+           "3 cascade footprint, 4-7 the joined marching-tetrahedra sheet).")
       .def(
           "vof_interface_area", [](S& s) { return s.vofInterfaceArea(); },
           "Total interfacial area of the colour field, in cell units squared (h^2), summed over "
@@ -1769,6 +1780,7 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["area_hf_cells"] = d.areaHf;    // WO-P3c: the area cascade's branch census
             r["area_pv_cells"] = d.areaPv;
             r["area_no_cascade_cells"] = d.areaNone;
+            r["area_orphan"] = d.areaOrphan;  // WO-P3d: area on cells the flux integral drops
             r["removed_volume"] = d.removedVolume;
             r["redistributed"] = d.redistributed;
             r["deficit_cells"] = d.deficitCells;

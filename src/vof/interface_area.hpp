@@ -67,6 +67,13 @@ enum InterfaceAreaMode : int {
   kAreaMetric = 1,  ///< variant A: the PLIC footprint x the cascade's slope. DEFAULT.
   kAreaNormal = 2,  ///< variant B: `plicArea` rebuilt on the cascade's normal.
   kAreaFootprint = 3,  ///< variant C: the height function's OWN footprint x its own metric.
+  // ---- WO-P3d: a JOINED surface (marching tetrahedra on the cell-centre lattice). No per-cell
+  // construction converges (see `vof/marching_cubes.hpp`); these four do not build a per-cell
+  // piece at all, they cut ONE watertight sheet and book each triangle to a cell.
+  kAreaMcColour = 4,       ///< the C = 1/2 level set, whole triangles to the centroid's cell
+  kAreaMcColourSplit = 5,  ///< the same sheet, triangles CLIPPED to each cell's cube
+  kAreaMcPlic = 6,         ///< the PLIC signed-distance level set, centroid deposit
+  kAreaMcPlicSplit = 7,    ///< the PLIC signed-distance level set, clipped deposit
 };
 
 /// The height function's area element `sqrt(1 + h_x^2 + h_y^2)`, with **the same central

@@ -421,9 +421,18 @@ def area_probe(n, radii, ratio=100.0, sub=4, mode=None, shape="sphere"):
         ordr = ""
         if prev is not None and R > 0 and prev[0] > 0:
             ordr = f"   order vs R = {prev[0]:g}: {math.log(abs(prev[1]) / abs(rel)) / math.log(R / prev[0]):.3f}"
+        # WO-P3d: `interface_area` is the sum over cells `pcIsInterfacial` accepts, i.e. what the
+        # flux integral can USE; the joined sheet also books area to cells the wisp predicate calls
+        # pure, and that part is dropped.  Report both, and never quote the usable sum alone: the
+        # drop is a CANCELLATION against the sheet's own error, not accuracy.
+        orph = ""
+        if (mode or 0) >= 4:
+            tot = d['interface_area'] + d['area_orphan']
+            orph = (f" orphan {d['area_no_cascade_cells']} cells / {d['area_orphan']:.4f} h^2"
+                    f" -> SHEET {tot:.4f} ({100*(tot/ref-1):+7.3f} %)")
         print(f"      R {R:6.2f} {lbl}  ({d['interface_cells']:6d} cells"
               + (f", HF {d['area_hf_cells']:6d} PV {d['area_pv_cells']:5d} "
-                 f"none {d['area_no_cascade_cells']}" if mode else "") + ")  "
+                 f"none {d['area_no_cascade_cells']}" if mode else "") + orph + ")  "
               f"A_sum  {d['interface_area']:12.4f}  ref {ref:12.4f}  "
               f"marching cubes {mc:12.4f} ({100*(mc/ref-1):+6.3f} %)  "
               f"A_sum rel {100*rel:+7.3f} %{ordr}")
@@ -453,7 +462,10 @@ def main():
                     help="sub^3 subsampling of the RUN's initial sphere colour field (WO-P3c: "
                          "sub = 4 drops a quarter of the interfacial cells and 6 % of the area)")
     ap.add_argument("--area-mode", type=int, default=None,
-                    help="0 = PLIC/MYC area (rung P0/P1), 1 = cascade metric, 2 = cascade normal")
+                    help="0 = PLIC/MYC area (rung P0/P1), 1 = cascade metric, 2 = cascade normal, "
+                         "3 = cascade footprint; WO-P3d 4..7 = the JOINED marching-tetrahedra "
+                         "sheet (4 C=1/2 centroid, 5 C=1/2 split, 6 PLIC-distance centroid, "
+                         "7 PLIC-distance split)")
     ap.add_argument("--area-shape", choices=("sphere", "cylinder"), default="sphere",
                     help="what the area probe puts in the box (the cylinder has one zero "
                          "principal curvature and an exact z direction)")
