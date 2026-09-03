@@ -87,6 +87,21 @@ void applyAreaModeEnv(S& s) {
     s.setPhaseChangeArea(std::atoi(e));
 }
 
+// WO-P3f: the same hook for this work order's two OPTIONS, so the planar rungs and the MPI
+// decomposition gate can be re-taken with them on without a second binary. Both are inert (and
+// byte-identical) when the variables are unset. `PECLET_P3F_CARRY=1` turns on the
+// enthalpy-conserving Dirichlet overwrite (a fixed-order gather over face neighbours: the piece
+// with a real neighbour dependency, hence the one the decomposition gate is about);
+// `PECLET_P3F_KAPPA=<k>` prescribes the curvature the one-sided fits correct their sample
+// distances with (a purely per-cell function of the existing stencil, no reduction).
+template <class S>
+void applyP3fEnv(S& s) {
+  if (const char* e = std::getenv("PECLET_P3F_CARRY"))
+    s.setPhaseChangeCarryConserve(e[0] != '0');
+  if (const char* e = std::getenv("PECLET_P3F_KAPPA"))
+    s.setPhaseChangeFitCurvature(std::atof(e));
+}
+
 // ============================================================ K1: the PLIC polygon area
 void areaGate() {
   const double s2 = std::sqrt(2.0), hex = 3.0 * std::sqrt(3.0) / 4.0;
@@ -419,6 +434,7 @@ void p0a() {
   s.setVof(C);
   s.enablePhaseChange(1.0, 1.0, 1.0);
   applyAreaModeEnv(s);
+  applyP3fEnv(s);
   s.setMassFluxUniform(mdot);
   auto pos = [&]() {
     const auto c = s.getVof();
@@ -470,6 +486,7 @@ void p0b() {
   s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {rg, rl - rg});
   s.enablePhaseChange(rg, rl, 1.0);
   applyAreaModeEnv(s);
+  applyP3fEnv(s);
   s.setMassFluxUniform(mdot);
   const double Sc = mdot * (1.0 / rg - 1.0 / rl);  // per interfacial cell (A = 1 here)
   std::vector<double> sink((std::size_t)nx * ny * nz, 0.0);
@@ -562,6 +579,7 @@ double stefanRun(int N, double& exact) {
   s.setField("T", T);
   s.enablePhaseChange(1.0, 1.0, 1.0);
   applyAreaModeEnv(s);
+  applyP3fEnv(s);
   s.setPhaseChangeThermal("T", 0.0, D, D, 0.0);
   // The rung P0/P1 treatment, pinned explicitly: WO-P23 makes the plane-anchored Dirichlet and the
   // quadratic fit the DEFAULTS, and this function is kept as the ablation that reproduces the P01
@@ -632,6 +650,7 @@ double stefanRunP23(int N, double& exact) {
   s.setField("T", T);
   s.enablePhaseChange(1.0, 1.0, 1.0);
   applyAreaModeEnv(s);
+  applyP3fEnv(s);
   s.setPhaseChangeThermal("T", 0.0, D, D, 0.0);
   s.setPhaseChangePlaneDirichlet(true);
   s.setPhaseChangeQuadraticFit(true);
@@ -687,6 +706,7 @@ void energyIdentity(double rcpRatio) {
   s.setVelocity(0, std::vector<double>((std::size_t)nx * ny * nz, U));
   s.enablePhaseChange(1.0, 1.0, 1.0);
   applyAreaModeEnv(s);
+  applyP3fEnv(s);
   s.setPhaseChangeThermal("T", T0, 1.0, 1.0, 0.0);  // T_sat = T0: a uniform field has zero mdot
   s.setPhaseChangeEnergy(1.0, rcpRatio);
   double worst = 0.0;
@@ -757,6 +777,7 @@ void p2(int N) {
   s.setField("T", T);
   s.enablePhaseChange(rho_v, rho_l, h_lv);
   applyAreaModeEnv(s);
+  applyP3fEnv(s);
   s.setPhaseChangeThermal("T", 0.0, k_v, k_l, 0.0);
   s.setPhaseChangeEnergy(rho_v * cpl, rho_l * cpl);
   double tcur = t0;

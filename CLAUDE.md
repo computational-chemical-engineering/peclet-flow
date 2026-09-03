@@ -1403,6 +1403,57 @@ step); the `O(h/R)` curvature bias of the 5³ one-sided fit, whose samples strad
 and which no gate in this campaign has ever measured off a plane; and confinement, re-run on mode 6
 now that the −3.4 % area is not masking it.
 
+**And the flux problem is a CANCELLATION of three first-order errors — WO-P3f measured all three,
+and P3 stops there (rule 4, the sixth failure).** Two instruments, both default-off and both
+bitwise inert (`test_vof_phase_change` is byte-identical to `origin/main`). (1)
+`set_phase_change_budget(True)` / `phase_change_budget()`: the energy budget of the energy solve.
+(2) `vof_scriven.py --mdot-probe R1,R2,… --mdot-prof scriven,linear --mdot-geom sphere,plane`: the
+a-priori mass-flux probe, the 2×2 that separates the PROFILE's curvature from the INTERFACE's.
+What they say, in three numbers:
+
+- **F1 — the one-sided ṁ fit carries an `O(h/R)` INTERFACE-curvature bias, and it is POSITIVE.**
+  On an exact sphere with an exactly linear profile (so the only error is geometric):
+  **+19.2 / +12.1 / +8.8 / +6.2 %** at R = 6/10/14/20, observed order **0.91/0.93/0.98** in `h/R`.
+  The fit models T against the distance to the interfacial cell's tangent PLANE, and a sample at
+  lateral offset ρ sits `ρ²/2R` further from a sphere than from that plane, so every off-axis
+  sample is hotter than the model expects. In the run's own configuration (Scriven profile) it is
+  **+8.0 % → +5.2 %** over R = 6 → 20. No gate in this campaign had ever run the estimator off a
+  plane.
+- **F2 — the plane-anchored (GFM) Dirichlet row's flux is FIRST ORDER, and it is NEGATIVE.** The
+  same probe reads `q_gfm`, the heat the rows actually draw: on a FLAT interface where the fit is
+  right to 0.4 %, it is **−17.0 % at a 2.4-cell thermal layer and −5.1 % at 8.1 cells** — it is a
+  two-point difference `k open (T_i − T_Γ)/θ` over θ ≈ 1.4 cells. It ALSO carries the
+  interface-curvature bias, about 2× the fit's (+12.4 % against +6.2 % at R = 20). **The energy
+  sink and the mass source are two different discretizations of the same flux**: in the coupled run
+  `−q_gfm/E_lat` runs 0.985 → 1.039 (Ja 0.5) and 0.947 → 1.009 (Ja 2), i.e. heat leaves the liquid
+  without evaporating anything. Put that ratio in every future P-rung's gate list — the planar
+  rungs cannot see it, because there both discretizations are accurate.
+- **F3 — the per-cell Dirichlet OVERWRITE destroys enthalpy**, `Σ ρc_p(dval − T)` over the
+  interfacial cells: **−0.7 % of the latent heat at Ja 0.5 and −4.3 % at Ja 2**, one-signed.
+  (A cell CHANGING CLASS is *not* an energy sink and the instrument says so: the cell does not
+  move and its temperature is still in the field, so the `e_enter`/`e_leave` columns are a flux
+  between two books. Quote `d_overwrite`, never them.)
+
+To leading order the growth error is `F1 − (F2+F3)/2`, i.e. `+5 % − 5 %`, and the two repairs prove
+it by breaking the balance in both directions. `set_phase_change_carry_conserve(True)` returns F3's
+enthalpy to the phase it came from by a fixed-order n_d² gather; its a-priori gate PASSES bitwise
+(planar interface, linear superheat: `deposited + lost + d_overwrite = 0.000e+00` every step, `lost`
+4e-10 of the deposit) and Scriven goes **1.036 → 0.486 %** at Ja 0.5 and **1.486 → 3.183 %** at
+Ja 2 (β_eff −1.475 → **+2.975 %**). `set_phase_change_fit_curvature(κ)` gives the fits the distance
+to the CURVED interface (`vof::pcCurvedDistance`, κ = div n = −2/R, PRESCRIBED); its a-priori gate
+PASSES (bias +6.2 → **−0.74 %** at R = 20, order 0.98 → 1.33) and Scriven goes **1.036 → 6.977 %**
+and **1.486 → 7.903 %**. Both ship OFF.
+
+**The mesh ladder is the independent confirmation, and it retires "refine it".** Ja 0.5, mode 6, at
+FIXED R/L and fixed physics: β_eff/β − 1 = **−1.073 / −1.655 / −2.557 %** at 96³/128³/192³ — the
+error grows like `(R/h)^1.1`, because the term that cancels is the one that is O(h/R). Confinement
+is excluded to three digits (192³ with the same bubble in cells reads −1.652 % against 128³'s
+−1.655 %). **Closing P3 needs F1 and F2 repaired together** — the curvature-corrected distance in
+the GFM row's θ as well as in the fit, and the GFM row raised to second order (a three-point
+ghost-fluid row, or ṁ taken from the discretely conservative interfacial balance instead of a
+separate least-squares fit). Those are changes to the energy OPERATOR; the four options and two
+probes above are the instruments to gate them with.
+
 **One correction this WO makes to WO-P3d's gate (b).** The joined sheet's immunity to the wisp
 population is the **wisp guard's**, not the sheet's: on the identical 100-step field mode 6 reads
 +0.020 % under `enable_vof` (wispEps = 1e-8, the configuration gate (b) ran) and **+0.412 %** under

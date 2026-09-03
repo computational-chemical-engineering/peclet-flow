@@ -1788,6 +1788,377 @@ WO-P3c: argparse `%`-expands every help string, and `--area-sub`'s says "6 % of 
 
 ---
 
+## WO-P3f findings (follow-up of WO-P3e) — the FLUX: two first-order errors of opposite sign, measured a priori, and why P3's 1 % is their cancellation — 2026-09-03, Opus
+
+Branch `vof-p3f`, worktree `../flow-p3f`, from `origin/main` at `22b4f62`. Backend **nvidia-cuda**
+(`build_cuda`, `build_ktest_cuda`, `build_kmpi_cuda`), `OMP_NUM_THREADS=4 OMP_PROC_BIND=false`, one
+solver process at a time. No run printed `preconditioner produced non-finite z`. Every Scriven run
+below is clean under rule 3b (max pressure iterations **27–44** against the 600 cap, none capped).
+
+**Verdict up front, in five statements.**
+
+1. **The shipped `mdot` estimator is +5 … +8 % HIGH a priori** on the run's own configuration —
+   exact sphere, exact Scriven similarity profile, one evaluation, no time stepping. Split by the
+   new 2×2 probe: the INTERFACE's curvature contributes **+19.2 / +12.1 / +8.8 / +6.2 %** at
+   R = 6/10/14/20 with observed order **0.91 / 0.93 / 0.98** in `h/R` — a clean first-order bias,
+   and the largest single error in the rung. Nobody had ever run this estimator off a plane.
+2. **The energy solve's own interfacial flux is a DIFFERENT number.** `q_gfm`, the heat the
+   plane-anchored (GFM) rows actually draw, is not `mdot h_lv A_Gamma`: in the coupled run
+   `-q_gfm/E_lat` runs **0.985 → 1.039** (Ja 0.5) and **0.947 → 1.009** (Ja 2). That mismatch is a
+   genuine non-conservation — heat that leaves the liquid without evaporating anything — and so is
+   the per-cell Dirichlet **overwrite**, at **−0.5 … −2.2 %** of `E_lat` (Ja 0.5) and
+   **−3.7 … −29.5 %** (Ja 2).
+3. **The work order's candidate (a) as stated is half right and the instrument says which half.**
+   A cell CHANGING CLASS is not an energy sink: it does not move and its temperature is still in
+   the field, so `e_enter` (measured at +3.5 … +8 % of `E_lat` at Ja 0.5 and +37 … +95 % at Ja 2)
+   is a flux between two BOOKS, not a leak. The leak is the OVERWRITE, and conserving it is a
+   real repair whose a-priori gate passes bitwise.
+4. **Every repair that improves an a-priori gate makes the coupled gate WORSE.** Correcting the
+   fit's curvature bias (a-priori bias `+6.2 % → −0.74 %` at R = 20, order `0.98 → 1.33`) takes
+   Scriven from **1.036 % to 6.977 %** at Ja 0.5. Conserving the overwrite (a-priori identity
+   residual **0.000e+00**, bitwise, every step) takes Ja 2 from **1.486 % to 3.183 %** and flips
+   `beta_eff` from −1.475 % to **+2.975 %**.
+5. **P3's 1–1.5 % is therefore not a residual to be closed; it is what is left when a `+5 %`
+   estimator bias cancels a `≈ −5 %` energy leak.** The mesh ladder confirms it independently:
+   refining at FIXED `R/L` makes the answer worse, **−1.073 → −1.655 → −2.557 %** in `beta_eff` at
+   96³/128³/192³, because the cancelling term is the one that is O(h/R). **Rule 4: this is the
+   SIXTH failure of the P3 1 % gate and the run stops here with the mechanism.** Ja = 10 was NOT
+   run. Both repairs ship as options, both **default OFF**.
+
+### What shipped
+
+* `set_phase_change_budget(bool)` + `phase_change_budget()` — instrument (a), the energy budget of
+  the energy solve (below). Two reductions and one extra cell field per solve; no kernel and no
+  allocation when off. `apply_phase_change` also evaluates its `q_gfm` half, so an exact-state
+  probe can ask the same question with no time stepping.
+* `vof_scriven.py --mdot-probe R1,R2,… [--mdot-prof scriven,linear] [--mdot-geom sphere,plane]
+  [--fit-curvature]` — instrument (b), the a-priori mass-flux probe.
+* `set_phase_change_carry_conserve(bool)` — repair 1 (the overwrite's enthalpy, returned), and
+  `phase_change_carry_ledger()`; `vof_scriven.py --carry`, `--carry-probe N` (its a-priori gate).
+* `set_phase_change_fit_curvature(kappa)` + `vof::pcCurvedDistance` — repair 2 (the one-sided fits
+  measure the distance to the CURVED interface), with `kappa = div(n)` PRESCRIBED; `--fit-curvature`.
+* `vof_scriven.py --budget N` prints the budget every N steps of the coupled run.
+
+**Byte-identity, run rather than argued.** `test_vof_phase_change` built from this worktree and
+from a separate `origin/main` (`22b4f62`) checkout, run at 4 threads on nvidia-cuda: the full
+stdout — K1…K6, **P0a, P0b, P1, P1', ENERGY, P2, INERT** — is **BYTE-IDENTICAL** (`diff` empty).
+Both defaults are inert inside the kernels (`kappa == 0.0` skips the correction; the carry deposit
+allocates nothing and launches nothing).
+
+### Instrument (b) — the a-priori mass-flux probe, and the 2×2 that decides it
+
+128³, exact fractions at `sub = 16`, one `apply_phase_change` at the run's own regression step
+(`delta ≈ 1e-3` cells), energy solve OFF, area mode 6, quadratic fit, plane-anchored Dirichlet.
+`geom` ∈ {exact sphere, flat interface}; `prof` ∈ {Scriven's similarity profile at the matching
+time, an exactly LINEAR profile with the same interfacial slope}. The flat rows carry the profile as
+a function of the signed distance, so sphere and plane have IDENTICAL `T'`, `T''` at the interface
+and differ only in the interface's curvature. `plane × linear` is the exactness control.
+
+Area-weighted `mdot` against the analytic `mdot = rho_v beta sqrt(alpha/t)`, **Ja = 0.5**:
+
+| R | BL (cells) | plane × linear | **sphere × linear** | order in h/R | plane × scriven | **sphere × scriven** |
+|---|---|---|---|---|---|---|
+| 6 | 2.44 | +0.680 % | **+19.160 %** | — | −2.385 % | **+8.002 %** |
+| 10 | 4.06 | +0.680 % | **+12.062 %** | 0.906 | −0.462 % | **+7.820 %** |
+| 14 | 5.69 | +0.680 % | **+8.822 %** | 0.930 | +0.083 % | **+6.647 %** |
+| 20 | 8.12 | +0.680 % | **+6.231 %** | 0.975 | +0.376 % | **+5.160 %** |
+
+and **Ja = 2** (whose thermal boundary layer is 1.1 → 3.6 cells at 128³):
+
+| R | BL | plane × linear | sphere × linear | plane × scriven | **sphere × scriven** |
+|---|---|---|---|---|---|
+| 6 | 1.08 | +0.680 % | +19.160 % | −1.974 % | **−1.661 %** |
+| 10 | 1.80 | +0.680 % | +12.062 % | +3.024 % | **+8.615 %** |
+| 14 | 2.52 | +0.680 % | +8.822 % | +2.921 % | **+9.051 %** |
+| 20 | 3.60 | +0.680 % | +6.231 % | +2.205 % | **+7.297 %** |
+
+Read the `sphere × linear` column against its order: **the estimator carries a clean FIRST-ORDER
+`h/R` bias of +6 % at R = 20 and +19 % at R = 6, and it is positive.** The mechanism is geometric
+and needs no numerics: the fit models `T` as a function of the distance to the interfacial cell's
+tangent PLANE, and a sample at lateral offset `rho` sits `rho^2/(2R)` further from a sphere than
+from its tangent plane, so every off-axis sample is hotter than the model expects and the fitted
+`dT/dn` comes out high. The `plane × scriven` column is the profile's own contribution (the 5³
+stencil straddles a boundary layer 1–8 cells thick) and it is the one that CONVERGES.
+
+`plane × linear` reads `+0.680 %` at every radius and with zero spread over 16384 cells: that is
+the probe's own sub-sampling quantum, not the solver. With `sub = 16` a flat interface at
+`shift = 0.37` is represented as `C = 0.625`, i.e. a plane at `0.375`, and the analytic profile is
+anchored at `0.370` — a 0.005-cell offset against a ~1.1-cell nearest sample. It is a constant
+that all four columns carry and it cancels out of every comparison; the `--carry-probe` scene
+places the plane on the sub-sampling grid and is exact.
+
+**The same probe reads the ENERGY side.** `-q_gfm`, the heat the plane-anchored rows draw on the
+same fields, against the exact `mdot_ex h_lv A_exact` (Ja = 0.5):
+
+| R | plane × linear | sphere × linear | plane × scriven | sphere × scriven | `-q_gfm/E_lat` (sphere × scriven) |
+|---|---|---|---|---|---|
+| 6 | +0.534 % | +28.094 % | **−17.009 %** | +6.507 % | 0.98566 |
+| 10 | +0.534 % | +18.036 % | −10.363 % | +6.048 % | 0.98325 |
+| 14 | +0.534 % | +15.129 % | −7.361 % | +6.575 % | 0.99907 |
+| 20 | +0.534 % | +12.406 % | **−5.050 %** | +6.440 % | 1.01209 |
+
+Two facts nobody had measured. **The GFM row's flux is FIRST ORDER and under-draws by O(h/delta_T)**
+— `−17 %` at a 2.4-cell boundary layer, `−5 %` at 8.1 cells, on a FLAT interface where the fit is
+right to 0.4 % — because it is a two-point difference `k open (T_i - T_Gamma)/theta` over
+`theta ≈ 1.4` cells. And **it carries the interface-curvature bias too, about twice as large as the
+fit's** (`+12.4 %` against `+6.2 %` at R = 20 on `sphere × linear`). The two cancel on
+`sphere × scriven`, which is why `-q_gfm/E_lat` sits within 1.5 % of 1 there — an accident of the
+scene, not a property of the scheme.
+
+### Instrument (a) — the energy budget of the energy solve
+
+Interfacial cells are Dirichlet rows, i.e. they are OUTSIDE the energy solve, so the set over which
+the energy equation conserves enthalpy changes membership every step. The instrument books, per
+solve: the enthalpy of the unmasked / pure-liquid / masked sets; what the identity rows INJECT when
+they overwrite the transported temperature (`d_overwrite`, and its part on cells that were not
+masked last step); the enthalpy the class changes move between the two books (`e_enter`/`e_leave`);
+`q_gfm`; and the class-change census. The discrete balance closes:
+`sum rho c_p (T^{n+1} - T*)/dt` equals `q_gfm` to **0.35 %** at step 80 (the difference is the
+domain-boundary flux plus the RB-GS residual), which is the check that the instrument measures what
+it claims.
+
+Scriven 128³, mode 6, MUSCL, similarity start, `R 6 → 20`, `E_lat = sum mdot A_Gamma h_lv`:
+
+| step | Ja 0.5 `E_lat` (W) | `-q_gfm/E_lat` | `d_overwrite` (% of `E_lat`) | `e_enter` (J) | L→I | I→G | masked |
+|---|---|---|---|---|---|---|---|
+| 1 | 2.032e2 | 0.98451 | +7.52 % | 0 | 0 | 0 | 658 |
+| 10 | 2.271e2 | 1.04424 | −0.51 % | 46.0 | 232 | 144 | 1056 |
+| 20 | 2.738e2 | 1.01569 | −2.19 % | 22.9 | 152 | 96 | 1456 |
+| 30 | 3.220e2 | 1.01301 | −2.02 % | 22.5 | 168 | 120 | 2048 |
+| 40 | 3.764e2 | 1.02279 | −0.94 % | 53.1 | 472 | 290 | 2856 |
+| 50 | 4.237e2 | 1.02778 | −1.29 % | 35.8 | 376 | 368 | 3684 |
+| 60 | 4.760e2 | 1.03573 | −0.78 % | 61.5 | 686 | 456 | 4798 |
+| 70 | 5.259e2 | 1.03851 | −0.89 % | 57.3 | 696 | 618 | 5830 |
+| 80 | 5.773e2 | **1.03903** | **−0.74 %** | 62.0 | 862 | 652 | 7228 |
+
+| step | Ja 2 `E_lat` (W) | `-q_gfm/E_lat` | `d_overwrite` (% of `E_lat`) | `e_enter` (J) | L→I | I→G | masked |
+|---|---|---|---|---|---|---|---|
+| 1 | 4.197e2 | 0.94747 | −19.98 % | 0 | 0 | 0 | 680 |
+| 10 | 4.719e2 | 0.96127 | **−29.45 %** | 43.8 | 104 | 24 | 1008 |
+| 20 | 5.834e2 | 0.95874 | −12.81 % | 71.6 | 192 | 144 | 1448 |
+| 30 | 7.047e2 | 0.96589 | −8.52 % | 84.4 | 296 | 200 | 2048 |
+| 40 | 8.311e2 | 0.95809 | −8.39 % | 92.1 | 396 | 320 | 2728 |
+| 50 | 9.492e2 | 0.98724 | −3.69 % | 130.2 | 584 | 416 | 3728 |
+| 60 | 1.069e3 | 0.98806 | −3.91 % | 146.3 | 730 | 612 | 4606 |
+| 70 | 1.184e3 | 0.99834 | −5.21 % | 147.0 | 834 | 756 | 5784 |
+| 80 | 1.296e3 | 1.00858 | **−4.30 %** | 164.9 | 1060 | 938 | 7064 |
+
+`e_leave` is **0.000e+00** on every row of both runs, and that is right: the cells that leave the
+masked set leave as VAPOUR at `T_sat`, so they carry no superheat. `I→L` is 0 throughout — a growing
+bubble only sweeps liquid → interfacial → vapour.
+
+**The correction to the work order's hypothesis (a), and it matters.** `e_enter` is large and
+one-signed and scales exactly as the work order predicted (with the cells swept per step) — and it
+is NOT an energy sink. A cell that changes class does not move; its temperature is still in the
+field, and the geometric `rho c_p T` transport carries it out of the cell conservatively as the
+colour drains. Booking `e_enter` as "energy that disappears" would have been the sixth gate in this
+campaign to measure the wrong quantity. What DOES disappear is (i) `d_overwrite`, the identity rows
+replacing the transported temperature by `pcCarriedValue` — one-signed, and 6× larger at Ja 2 than
+at Ja 0.5, which is the Jakob number's definition — and (ii) the `q_gfm` / `E_lat` mismatch. Their
+sum at step 80 is **4.6 %** of the latent heat at Ja 0.5 and **5.2 %** at Ja 2: the same size as
+the estimator's positive bias, and of the opposite sign.
+
+### Repair 1 — conserve the overwrite (`set_phase_change_carry_conserve`), and its a-priori gate
+
+Before the overwrite, `rho c_p(C_j) (T_j - dval_j)` is handed to cell `j`'s face neighbours that are
+still IN the solve, weighted by `n_d^2` (the clip-and-redistribute allocation) as a fixed-order
+GATHER — each receiving cell recomputes its donors' decision — so it is decomposition-independent
+with no reverse-add halo. Which SIDE receives is decided per axis and locally: of the two neighbours
+along that axis, the one whose deviation from `T_Gamma` has the same sign as the interfacial cell's
+own, i.e. the phase the enthalpy came from (the superheated liquid on an evaporating bubble, the
+superheated vapour on the Stefan problem) with no scene-specific rule.
+
+**A-priori gate** (`--carry-probe`): 64³, a PLANAR interface on the sub-sampling grid, an exactly
+LINEAR superheat, `h_lv` chosen so the fitted `mdot` is exactly 2e-3 — the one configuration in
+which the one-sided fit is exact, so nothing but the book-keeping is under test.
+
+| step | `d_overwrite` (J) | deposited | lost | **identity residual** | `dH` OFF | `dH` ON |
+|---|---|---|---|---|---|---|
+| 2 | −0.240431 | +0.224108 | 1.97e-10 | **0.000e+00** | −2.20404 | −2.20404 |
+| 3 | −0.246880 | +0.238940 | 1.89e-10 | **0.000e+00** | −2.26648 | −2.26648 |
+| 4 | −0.250161 | +0.245062 | 1.74e-10 | **0.000e+00** | −2.34112 | −2.34112 |
+| 5 | −0.251748 | +0.248771 | 2.16e-10 | **0.000e+00** | −2.42572 | −2.42572 |
+| 6 | −0.252552 | +0.250918 | 3.27e-10 | **0.000e+00** | −2.51887 | −2.51887 |
+
+(The `d_overwrite` column is the OFF run's; with the option on the two states diverge, so the
+identity is checked against the ON run's own overwrite.) `deposited + lost + d_overwrite` is
+**0.000e+00 bitwise at every step**, and `lost` — the interfacial cells whose whole `n_d^2`
+allocation lands on cells that are themselves identity rows — is **4e-10 of the deposit** on a
+planar interface. **The gate passes.** On the CURVED Scriven interface `lost` is **18 … 25 %** of
+the total, because the interfacial band there is 1.5 cells per `h^2` thick and an interfacial cell's
+liquid-side neighbour is often interfacial itself; the identity residual is still exactly
+`0.000e+00`, i.e. the option is exactly conservative over what it can place and reports the rest.
+
+### Repair 2 — the curvature-corrected fit distance (`set_phase_change_fit_curvature`)
+
+`vof::pcCurvedDistance(phi, d, n, kappa) = phi + kappa |d_perp|^2 / 4` with `kappa = div(n)`
+(`-2/R` for a gas sphere). The curvature is PRESCRIBED, from the known geometry — an instrument, not
+an estimator; building an estimator is only worth doing if the coupled gate ever wants it.
+
+**A-priori gate** (128³, `sub = 16`, exact sphere), `mdot_area` relative bias, before → after:
+
+| R | `sphere × linear` before | after | order in h/R (after) | `sphere × scriven` before | after |
+|---|---|---|---|---|---|
+| 6 | +19.160 % | **−3.396 %** | — | +8.002 % | −7.882 % |
+| 10 | +12.062 % | **−1.834 %** | 1.206 | +7.820 % | −3.427 % |
+| 14 | +8.822 % | **−1.193 %** | 1.276 | +6.647 % | −1.978 % |
+| 20 | +6.231 % | **−0.744 %** | 1.325 | +5.160 % | −1.124 % |
+
+**The gate passes**: an order-1 bias becomes an order-1.3 one an order of magnitude smaller, and the
+residual `sphere × scriven` error is the profile's own (which the `plane × scriven` column shows).
+`q_gfm` is unchanged to four digits, as it must be — the correction is in the fit, not in the GFM
+row's `theta`, and that asymmetry is why `-q_gfm/E_lat` moves to **1.076 … 1.155** with it on.
+
+### Gate (c) — confinement and mesh, re-taken on mode 6
+
+Ja = 0.5, ratio 100, MUSCL, similarity start, area mode 6, `sub = 4`:
+
+| grid | R (cells) | `L/R_end` | **max \|dR\|/R** | **beta_eff/beta − 1** | area-avg `mdot`, last half | band_div | fallback | iters |
+|---|---|---|---|---|---|---|---|---|
+| 128³ | 6 → 20 | 6.4 | **1.036 %** | **−1.655 %** | −0.926 % | 6.0e-12 | 0 | 30/600 |
+| 192³ | 6 → 20 | 9.6 | **1.034 %** | **−1.652 %** | −0.921 % | 8.1e-12 | 0 | 39/600 |
+| 128³ | 4 → 13.33 | 9.6 | 0.669 % | −0.810 % | +1.306 % | 5.9e-12 | 0 | 27/600 |
+| 96³ | 4.5 → 15 | 6.4 | 0.805 % | −1.073 % | +0.623 % | 9.1e-13 | 0 | 28/600 |
+| 192³ | 9 → 30 | 6.4 | 1.825 % | −2.557 % | −2.506 % | 1.6e-02 | 24 | 44/600 |
+
+**Confinement is excluded to three digits**: the same bubble in cells at 1.5× the clearance reads
+−1.652 % against −1.655 %. **The mesh ladder is ANTI-CONVERGENT**: at fixed `R/L` and fixed physics,
+96³ → 128³ → 192³ gives −1.073 → −1.655 → −2.557 %, i.e. the error grows like `(R/h)^1.1` (the
+consecutive ratios are 1.54 and 1.545 against grid ratios 1.333 and 1.5). At FIXED `h` the same
+scaling holds: `R_end = 13.3` reads −0.810 % and `R_end = 20` reads −1.655 %. That is exactly what a
+cancellation predicts — the compensating term is the `O(h/R)` curvature bias, and refining removes
+it — and it closes the question WO-P23 item 1 and WO-P3b left open ("grid refinement does not close
+it"): refinement CANNOT close it, it opens it.
+
+(The 192³ `R 9 → 30` row carries `band_div 1.6e-02` and `fallback 24`, i.e. that scene's deposit
+walk fails on 24 interfacial cells; it is the only row of the ladder that is not at the deposit
+floor and its number should be read with that caveat. The two clean 192³/128³ rows carry the
+confinement statement.)
+
+### The gate — Scriven, 128³, ratio 100, similarity start, MUSCL, `R 6 → 20`, area mode 6
+
+| configuration | Ja 0.5 **max \|dR\|/R** | **beta_eff/beta − 1** | Ja 2 **max \|dR\|/R** | **beta_eff/beta − 1** |
+|---|---|---|---|---|
+| **shipped** (both options off) | **1.036 %** | **−1.655 %** | **1.486 %** | **−1.475 %** |
+| + `carry_conserve` | **0.486 %** | −1.132 % | **3.183 %** | **+2.975 %** |
+| + `fit_curvature` | 6.977 % | −7.435 % | 7.903 % | −8.295 % |
+| + both | 6.264 % | −6.757 % | 3.058 % | −3.249 % |
+
+Every row reproduces the shipped baseline to the digit (1.036 / −1.655 and 1.486 / −1.475, WO-P3e),
+so the harness is faithful. `A_end/(4 pi R^2)` is +0.04 … +0.05 % on every row, `band_div` ≤ 2.5e-11
+except the `both` Ja 2 row (1.1e-01, fallback 6), `unresolved` 0 everywhere, no capped solve.
+
+**The gate is missed on every row and the two repairs pull in opposite directions.** `carry_conserve`
+alone would pass the `max|dR|/R` half at Ja 0.5 (0.486 %) and fails `beta_eff` (−1.132 %); it is
+2.1× WORSE at Ja 2, with the sign of the error flipped, which is the direct measurement that Ja 2's
+whole deficit WAS this leak cancelling the estimator's bias. `fit_curvature` — the repair with the
+cleanest a-priori gate in this work order — is 5–7× worse on both. **Under rule 4 the run stops
+here; neither option becomes a default, and `origin/main`'s behaviour is unchanged.**
+
+### The mechanism, stated once
+
+Three first-order errors, all measured, two of them for the first time:
+
+* **F1** the one-sided `mdot` fit's `O(h/R)` interface-curvature bias, **+6 % at R = 20**, positive
+  (it over-predicts evaporation);
+* **F2** the plane-anchored Dirichlet row's `O(h/delta_T)` two-point flux, **−5 % at a 8-cell
+  boundary layer** and **−17 % at 2.4 cells** on a flat interface, negative, PLUS its own
+  curvature bias of about `+2 x F1` — so on a sphere the two partly cancel and `q_gfm` lands within
+  a few percent of `mdot h_lv A`;
+* **F3** the enthalpy the per-cell Dirichlet overwrite destroys, **−0.7 % of the latent heat at
+  Ja 0.5 and −4.3 % at Ja 2**, one-signed.
+
+The coupled system is a feedback loop: `R` integrates the fit's `mdot`, while the thermal boundary
+layer thickens at the rate the SINK drains it. To leading order `dR/R ≈ F1 − (F2 + F3)/2`, which is
+`+5 % − 5 %` at Ja 0.5 — and the measurement is −1.0 %. Removing any one term breaks the balance by
+its own size, which is exactly what the four-row gate table shows. **Closing P3 needs F1 and F2
+repaired TOGETHER**, i.e. the curvature-corrected distance applied to the GFM row's `theta` as well
+as to the fit, and the GFM row raised to second order (a three-point ghost-fluid row, or the
+`mdot` taken from the discretely conservative interfacial balance rather than from a separate
+least-squares fit). Both are changes to the energy OPERATOR, not to the phase-change driver, and
+neither is a tuning knob; that is the rung this campaign has to build next, and this work order's
+four options and two probes are the instruments to gate it with.
+
+### Gate (d) — the planar rungs, inertness, and MPI
+
+* **Byte-identity against `origin/main` (`22b4f62`), run:** `test_vof_phase_change` from both trees,
+  4 threads, nvidia-cuda — the whole stdout is **BYTE-IDENTICAL** (`diff` empty). For the record the
+  planar gates it prints: P0a `1.776e-14`, P0b `u_gas` exact / `max|div - S| 3.469e-18`,
+  P1 `+1.3099 %`, P1' `−0.0139 %`, ENERGY identity `0.000e+00`, P2 `+0.1929 %`,
+  INERT `0.000e+00`.
+* `tests/kokkos` at the shipped defaults: **33/33 passed** (nvidia-cuda, `OMP_NUM_THREADS=4`,
+  311 s).
+* **MPI** (`tests/kokkos_mpi`, nvidia-cuda, `OMP_NUM_THREADS=4`): the whole VoF subset
+  **40/40 passed** (`ctest -R vof_`), and the full 100-test battery ran 89 of 100 with **0
+  failures** before the session's shell was killed by an unrelated agent on the shared box; the 11
+  not reached are the non-VoF tail (`wall_slip_mpi_np4` onward). `vof_phase_change_mpi` np 1/2/4
+  (64x4x4, the ORB cutting x so the interface crosses a rank boundary during every run), verbose:
+
+| case | np = 1 | np = 2 | np = 4 |
+|---|---|---|---|
+| **P0a** 1000 kinematic steps | **0.000e+00** | **0.000e+00** | **0.000e+00** |
+| **P1** Stefan, 280 coupled steps | **0.000e+00** | **0.000e+00** | **0.000e+00** |
+| P2 sucking, 55 coupled steps (interface position) | 0.000e+00 | 7.901e-16 | 7.901e-16 |
+| P2 pointwise `max\|C_dist - C_ref\|` | 1.299e-14 | 1.299e-14 | 1.331e-14 |
+| P2 pointwise `max\|T_dist - T_ref\|` | 8.882e-16 | 8.882e-16 | 9.992e-16 |
+
+  — identical to WO-P3e's table to every digit, which is the statement that this work order's
+  `src/` changes are inert at their defaults on the distributed path too.
+
+* **The OPTIONS through the same gate.** Both test files gained `PECLET_P3F_CARRY` /
+  `PECLET_P3F_KAPPA` (the hook `PECLET_P3C_AREA` uses), applied to BOTH the reference and the
+  distributed solver. `PECLET_P3F_CARRY=1`, np 1/2/4 — **3/3 passed**, and the enthalpy gather is
+  decomposition-independent at the same floor as everything else in the rung:
+
+| case (carry ON) | np = 1 | np = 2 | np = 4 |
+|---|---|---|---|
+| **P0a** 1000 kinematic steps | **0.000e+00** | **0.000e+00** | **0.000e+00** |
+| **P1** Stefan, 280 coupled steps | **0.000e+00** | **0.000e+00** | **0.000e+00** |
+| P2 sucking (interface position) | 1.560e-15 | 7.798e-16 | 1.560e-15 |
+| P2 pointwise `max\|C_dist - C_ref\|` | 2.776e-14 | 2.776e-14 | 3.175e-14 |
+
+  (that scene's own answer moves with the option — P1 layer −1.4167 %, P2 +1.6885 % — which is the
+  measurement, not the gate; the gate is the three columns being equal). The curvature correction
+  needs no such gate argued separately — it is a per-cell function of the existing 5^3 stencil with
+  no reduction and no new neighbour dependency — but the hook is there to take it.
+
+* **What the options do to the PLANAR rungs, single rank** (they are OFF by default, so this is a
+  measurement, not a regression): `PECLET_P3F_CARRY=1` moves **P1' −0.0139 % -> −1.4167 %** and
+  **P2 +0.1929 % -> +2.7033 %** (both outside those scenes' own tolerances, so the binary reports 2
+  failed CHECKs); `PECLET_P3F_KAPPA=0.05` — a deliberately FICTITIOUS curvature on a flat interface,
+  i.e. a decomposition/inertness probe rather than physics — moves P1 +1.3099 -> +0.5693 %,
+  P1' −0.0139 -> −0.9704 % and P2 +0.1929 -> +2.6686 %. K1…K6, P0a, P0b, ENERGY and INERT are
+  unmoved by both. **So the overwrite leak is compensating on the PLANAR rungs too**: P1' and P2 are
+  as accurate as they are partly because of it, which is the same statement the Scriven table makes
+  and it is why neither option can become a default on anything measured here.
+
+### Open, and the corrected gates this WO proposes
+
+1. **P3 remains NOT closed** at 1.036 % (Ja 0.5) / 1.486 % (Ja 2), mode 6, 128³ — the SIXTH failure,
+   stopped under rule 4. Ja = 10 not run.
+2. **A class change is not an energy transfer.** `e_enter` / `e_leave` are a flux between the masked
+   and unmasked BOOKS; the cell does not move. Quote `d_overwrite` (and the `q_gfm` / `E_lat`
+   mismatch) when asking where enthalpy goes, never the class-change columns.
+3. **`-q_gfm/E_lat` should be a standing gate on every phase-change rung.** A scheme whose energy
+   sink and whose mass source are two different discretizations of the same flux is non-conservative
+   by construction, and the planar rungs P0/P1/P2 cannot see it (there both are accurate). It is one
+   line of the budget; put it in the P-rung gate list.
+4. **The GFM row is FIRST ORDER** and no work order had measured it. Its `−17 %` at a 2.4-cell
+   boundary layer is the reason Ja = 2 (BL 1.1 → 3.6 cells at 128³) is the harder case, and it caps
+   any repair to the fit alone. Repairing it is the next rung's item 1.
+5. **Refinement makes P3 worse, measured** (−1.073 → −1.655 → −2.557 % at 96³/128³/192³, fixed
+   `R/L`). WO-P23 item 1 and WO-P3b's ladder should be read with this: the rung is not
+   under-resolved, it is cancelling.
+6. **The 192³ `R 9 → 30` deposit fails on 24 cells** (`band_div` 1.6e-02) and the `fit_curvature +
+   carry` Ja 2 run on 6 (`band_div` 1.1e-01). `PECLET_PC_DEPOSIT_FALLBACK=1` exists for exactly
+   this and is still OFF by default (WO-P23 mechanism 5); a rung that runs bubbles at `R/h ≥ 30`
+   has to settle it.
+7. **`set_phase_change_fit_curvature` takes a PRESCRIBED curvature.** If a future rung wants it as
+   a default it needs an estimator; the V3 cascade already computes a low-noise mean curvature for
+   surface tension and is the obvious source, but nothing here measured that path.
+
+---
+
 ## WO-V6b findings — the velocity half of the dynamic contact line (Navier slip in the cut-cell wall closure), plus the integer-coordinate wall defect — 2026-09-03, Opus
 
 Branch `vof-v6b`, worktree `../flow-v6b`, from `origin/main` at `9ad0646`. Commits: `fa1e346`

@@ -102,6 +102,21 @@ void applyAreaModeEnv(S& s) {
     s.setPhaseChangeArea(std::atoi(e));
 }
 
+// WO-P3f: the same hook for this work order's two OPTIONS, so the planar rungs and the MPI
+// decomposition gate can be re-taken with them on without a second binary. Both are inert (and
+// byte-identical) when the variables are unset. `PECLET_P3F_CARRY=1` turns on the
+// enthalpy-conserving Dirichlet overwrite (a fixed-order gather over face neighbours: the piece
+// with a real neighbour dependency, hence the one the decomposition gate is about);
+// `PECLET_P3F_KAPPA=<k>` prescribes the curvature the one-sided fits correct their sample
+// distances with (a purely per-cell function of the existing stencil, no reduction).
+template <class S>
+void applyP3fEnv(S& s) {
+  if (const char* e = std::getenv("PECLET_P3F_CARRY"))
+    s.setPhaseChangeCarryConserve(e[0] != '0');
+  if (const char* e = std::getenv("PECLET_P3F_KAPPA"))
+    s.setPhaseChangeFitCurvature(std::atof(e));
+}
+
 int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   MPI_Init(&argc, &argv);
@@ -138,6 +153,7 @@ int main(int argc, char** argv) {
         ref.setVof(blockOf(colour, 0, 0, 0, NX, NY, NZ));
         ref.enablePhaseChange(1.0, 1.0, 1.0);
         applyAreaModeEnv(ref);
+        applyP3fEnv(ref);
         ref.setMassFluxUniform(mdot);
         for (int k = 0; k < 1000; ++k)
           ref.applyPhaseChange(dt);
@@ -152,6 +168,7 @@ int main(int argc, char** argv) {
       sd.setVof(blockOf(colour, ox, oy, oz, lnx, lny, lnz));
       sd.enablePhaseChange(1.0, 1.0, 1.0);
       applyAreaModeEnv(sd);
+      applyP3fEnv(sd);
       sd.setMassFluxUniform(mdot);
       for (int k = 0; k < 1000; ++k)
         sd.applyPhaseChange(dt);
@@ -197,6 +214,7 @@ int main(int argc, char** argv) {
         s.setField("T", blockOf(temp, Ox, Oy, Oz, nx, ny, nz));
         s.enablePhaseChange(1.0, 1.0, 1.0);
         applyAreaModeEnv(s);
+  applyP3fEnv(s);
         s.setPhaseChangeThermal("T", 0.0, D, D, 0.0);
       };
       std::vector<double> refC;
@@ -282,6 +300,7 @@ int main(int argc, char** argv) {
         s.setField("T", blockOf(temp, Ox, Oy, Oz, nx, ny, nz));
         s.enablePhaseChange(rho_v, rho_l, h_lv);
         applyAreaModeEnv(s);
+  applyP3fEnv(s);
         s.setPhaseChangeThermal("T", 0.0, k_v, k_l, 0.0);
         // Probe switches (findings only): PECLET_P23_OFF is a subset of "pqe" to disable —
         // p = the plane-anchored Dirichlet, q = the quadratic fit, e = the consistent rho c_p T.
