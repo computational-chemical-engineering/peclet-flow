@@ -470,16 +470,25 @@ outflow on all six faces with `set_rho(rho_l)` so the boundary coefficient IS th
 Dirichlet on all six, `sigma = 0`, `R(t)` read from the LIQUID VOLUME DEFICIT
 `R = (3 sum(1-C)/4pi)^(1/3)`. Gate: `max |R_num - R_exact| / R_exact` over the LAST HALF of the run.
 
-| Ja | beta | `delta_T` at R = 6 / 20 (cells) | 128^3, R 6->20 | + MUSCL | 192^3, R 9->30 (same R/L) |
-|---|---|---|---|---|---|
-| 0.5 | 0.7845 | 8.8 / 29.5 | **2.235 %** | **2.002 %** | **2.589 %** |
-| 2 | 2.3574 | 2.8 / 9.5 | **5.958 %** | **2.636 %** | **4.713 %** |
-| 10 | 10.8587 | 0.63 / 2.09 | **40.09 %** | — | — |
+| Ja | beta | `delta_T` at R = 6 / 20 (cells) | 128^3, R 6->20 | + MUSCL | 192^3, R 9->30 (1.5x resolution) | 192^3, R 6->20 (1.5x clearance) |
+|---|---|---|---|---|---|---|
+| 0.5 | 0.7845 | 8.8 / 29.5 | **2.235 %** | **2.002 %** | 2.589 % | **2.001 %** |
+| 2 | 2.3574 | 2.8 / 9.5 | **5.958 %** | **2.636 %** | 4.713 % | — |
+| 10 | 10.8587 | 0.63 / 2.09 | **36.62 %** | — | — | — |
+
+**Neither refinement closes it, and the two say different things.** 192^3 with the same bubble in
+CELLS (R 6 -> 20) is the SAME grid resolution with 1.5x the clearance: **2.001 % against 2.002 %**,
+so domain confinement is excluded to three digits. 192^3 with the same PHYSICAL bubble (R 9 -> 30)
+is 1.5x the resolution at fixed clearance: **2.589 % against 2.235 %**, i.e. no convergence either.
+The error is therefore neither the box nor the mesh spacing on its own. The `mdot` column locates
+it in time rather than in space: `mdot` is **+9.5 %** at the first sample, crosses zero, and ends
+**-2.7 %**, so the deficit is accumulated in the first few steps out of a sub-sampled sphere and
+never repaid. Every run is clean (`C in [0,1]`, `unresolved = 0`, 30-45 pressure iterations against
+a cap of 600, none capped).
 
 Ablations at 128^3, Ja = 0.5: **quadratic fit OFF: 12.893 %** (and `mdot` -25.7 % at the first
 sample — on a CURVED interface the linear fit is not a small correction, it is the answer);
-**consistent energy transport OFF: 1.455 %** (better than with it — finding 4). Pressure iterations
-30-45 against a cap of 600 on every run, none capped; `C in [0,1]` to round-off, `unresolved = 0`.
+**consistent energy transport OFF: 1.455 %** (better than with it — mechanism 4).
 
 `delta_T` is the radius at which the exact profile reaches 99 % of `T_inf`, minus `R`. It is the
 number that explains the table: at Ja = 10 the thermal boundary layer is **sub-cell** for the whole
@@ -540,6 +549,34 @@ reconstruction and buys it back: **Ja = 0.5 -> 2.002 %, Ja = 2 -> 2.636 % from 5
 OFF by default, as the energy twin of `set_vof_momentum_muscl`, and every P3 number above says which
 setting it was taken with.
 
+**5b. WO-R2's WISP GUARD AND PHASE CHANGE ARE INCOMPATIBLE ON A CURVED INTERFACE, and the rebase is
+where it showed.** This rung was developed against `origin/main` at `b4c829a` and rebased onto
+`2b55edb` at the end. After the rebase the P3 Scriven bubble — which had been running clean —
+DIVERGED: `R(t)` error **48.0 %**, 34 steps, `C` up to 1.0018, `T` in [-9.4, +1.3], and the study's
+dt-collapse guard tripping. Bisected against the three defaults the rebase brought in
+(`set_outflow_rho_correction`, `set_pressure_exact_residual`, `set_vof_wisp_eps`), it is the wisp
+guard and only the wisp guard: `set_vof_wisp_eps(0)` restored **2.002 %** and 80 clean steps, the
+pre-rebase number to four digits, while ablating the other two changed nothing (48.1 % / 50.7 %).
+
+The mechanism is a disagreement about what an interface IS. WO-R2 item 4 makes `enable_vof` set
+`WyAdvector::wispEps = 1e-8`, so the ADVECTOR treats a cell with `C <= 1e-8` as a pure phase for
+reconstruction and flux. Phase change used its own `1e-12`, so over the band `1e-12 < C < 1e-8` the
+driver reconstructed a plane, gave the cell an area, an `mdot`, a plane-anchored Dirichlet row and a
+divergence-source deposit, while Weymouth-Yue moved that cell's colour algebraically as a pure
+phase. The planar P0/P1/P2 gates never see it — their interface has no wisps — which is exactly why
+it had to be found on the curved case.
+
+Two changes, both shipped. (a) The tolerances are now READ from the advector:
+`pcEffInterfaceEps() = max(pcInterfaceEps_, wispEps)` and `pcEffPureEps() = max(pcPureEps_,
+wispEps)`. Both halves are needed and the second is not cosmetic — with only the interfacial
+tolerance raised, the deposit's "find a pure gas cell" walk rejects exactly the cells the colour
+field has already emptied, the source is left in interfacial cells, and `band_div` on the P2 gate
+reads **2.2e+02**. (b) `enable_phase_change` then sets `wispEps = 0` outright. (a) alone is not
+enough: with the tolerances shared and the guard at 1e-8 the Scriven run is MARGINAL — it completed
+once at 1.973 % and diverged once at t = 126 of 162 with the Courant number pinned at its cap — so
+the rung takes the deterministic option and `set_vof_wisp_eps` after `enable_phase_change` is the
+deliberate override (`PECLET_P23_WISP=1e-8` in `tests/study/vof_scriven.py` reproduces the row).
+
 **5. The band-extended liquid velocity (VOF_PLAN §9 item 3) is not needed in 1-D and IS the residual
 in 3-D — but the cure is the DEPOSIT, not an extension.** What §9 item 3 exists to guarantee is that
 Weymouth-Yue advects the colour with the LIQUID velocity at interfacial cells, and the direct
@@ -550,9 +587,15 @@ a relative 1e-6: no extension needed, exactly as WO-P01's P0b row predicted. On 
 bubble it is **2e-3 … 2e-1** and it correlates one-for-one with `fallback`, the census of interfacial
 cells whose deposit found no pure gas cell. The rung P0/P1 deposit rule tried exactly two candidates
 (`round(k n)`, k = 1, 2) and left the source IN the interfacial cell otherwise — 48 to 262 cells on
-these runs. The fix is to search the whole `+n` half of the 5^3 box and take the best cell by Malan's
-own collinearity weight; it is deterministic, it returns the old cell whenever the old rule succeeded
-(so P0/P1/P2 are unmoved), and it is what an extension would have been papering over.
+these runs. A 5^3 best-by-collinearity search fills those holes, but **the ORDER matters and the
+measurement says so**: making the search the PRIMARY rule diverges the Scriven bubble (`max|uf|`
+runs away, the dt-collapse guard trips at step 316 of the Ja = 0.5 run with the Weymouth-Yue Courant
+number pinned at 0.38 however small dt is), because it re-targets deposits the along-the-normal rule
+was placing correctly. It therefore ships as a FALLBACK behind the P0/P1 candidates and OFF by
+default (`PECLET_PC_DEPOSIT_FALLBACK=1`), so the validated behaviour is unmoved wherever it existed.
+With the wisp-tolerance fix of 5b the fallback changes the Scriven result by 0.8 percentage points
+(48.048 -> 48.828 % on the broken configuration; both are diverged runs), so it is recorded as a
+measured option rather than promoted.
 
 #### MPI, and a round-off sensitivity that is NOT a distribution defect
 

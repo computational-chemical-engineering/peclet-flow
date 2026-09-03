@@ -7691,6 +7691,19 @@ class Solver {
     pcRhoG_ = rhoG;
     pcRhoL_ = rhoL;
     pcHlv_ = hlv;
+    // WO-P23: phase change and WO-R2 item 4's wisp guard are NOT compatible, and the measurement
+    // is in the findings. `enable_vof` sets `WyAdvector::wispEps = 1e-8`, which makes the advector
+    // treat a cell with `C <= 1e-8` as a PURE phase for reconstruction and flux. The phase-change
+    // driver needs the colour it reconstructs a plane from, deposits a source behind and pins a
+    // Dirichlet row in to be the colour that is actually advected; over the band
+    // `1e-12 < C < 1e-8` the two disagree, and on a CURVED interface that diverges the run — the
+    // P3 Scriven bubble at Ja = 0.5 reads `R(t)` error 48 % and trips the study's dt-collapse guard
+    // at step 34, against 2.002 % and 80 clean steps with the guard off. Sharing the tolerance
+    // (`pcEffInterfaceEps` / `pcEffPureEps`) is necessary but not sufficient: it fixes the planar
+    // gates and moves the Scriven blow-up from step 34 to step ~200 of 80-worth of physical time,
+    // and only `wispEps = 0` removes it. So phase change turns the guard off, loudly, and
+    // `set_vof_wisp_eps` after `enable_phase_change` is the deliberate override.
+    setVofWispEps(0.0);
     pcMdot_ = addField("mdot");
     pcSrc_ = addField("pc_source");
     if (pcArea_.extent(0) != n_) {
@@ -7828,7 +7841,7 @@ class Solver {
     const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
     CCConst c = CCConst(cField_), U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u);
     CCConst ox = CCConst(ox_), oy = CCConst(oy_), oz = CCConst(oz_);
-    const double eps = pcInterfaceEps_;
+    const double eps = pcEffInterfaceEps();
     double m = 0.0;
     Kokkos::parallel_reduce(
         "peclet::flow::pc_band_div",
@@ -8017,8 +8030,9 @@ class Solver {
     CCConst c = CCConst(cField_);
     const bool thermal = pcThermal_;
     CCConst T = thermal ? CCConst(scalarField(pcTName_).c) : CCConst(cField_);
-    const double eps = pcInterfaceEps_, pureEps = pcPureEps_;
+    const double eps = pcEffInterfaceEps(), pureEps = pcEffPureEps();
     const bool quad = pcQuadFit_;
+    const bool depFallback = pcDepositFallback_;
     const double Tsat = pcTsat_, kg = pcKg_, kl = pcKl_, hlv = pcHlv_, Rint = pcRint_;
     const double rhoG = pcRhoG_, rhoL = pcRhoL_;
     long nIface = 0, nFallback = 0;
@@ -8099,27 +8113,57 @@ class Solver {
             // `phase_change_diagnostics()['band_div']` reports). The search order is fixed and the
             // comparison strict, so the choice is deterministic and decomposition-independent.
             int tx = 0, ty = 0, tz = 0;
-            double best = 0.0;
-            for (int dz = -2; dz <= 2; ++dz)
-              for (int dy = -2; dy <= 2; ++dy)
-                for (int dx = -2; dx <= 2; ++dx) {
-                  if (dx == 0 && dy == 0 && dz == 0)
-                    continue;
-                  const double dn = dx * n[0] + dy * n[1] + dz * n[2];
-                  if (!(dn > 0.0))
-                    continue;  // the deposit goes BEHIND the interface, into the gas
-                  const double w = vof::pcGradWeight(dx, dy, dz, n);
-                  if (!(w > best))
-                    continue;
-                  if (c(i + dx + dy * sy + dz * sz) > pureEps)
-                    continue;
-                  best = w;
-                  tx = dx;
-                  ty = dy;
-                  tz = dz;
-                }
-            if (!(best > 0.0))
-              ++nfb;  // no pure gas cell in the 5^3 box on the +n side: the source stays put
+            bool found = false;
+            for (int k = 1; k <= 2 && !found; ++k) {  // the rung P0/P1 rule, FIRST and unchanged
+              const int ox = (int)Kokkos::round(k * n[0]);
+              const int oy = (int)Kokkos::round(k * n[1]);
+              const int oz = (int)Kokkos::round(k * n[2]);
+              if (ox == 0 && oy == 0 && oz == 0)
+                continue;
+              if (c(i + ox + oy * sy + oz * sz) <= pureEps) {
+                tx = ox;
+                ty = oy;
+                tz = oz;
+                found = true;
+              }
+            }
+            if (!found && depFallback) {
+              // Only where that rule FAILS does the deposit fall back to the best cell of the `+n`
+              // half of the 5^3 box, scored by Malan's collinearity weight. Those are the cells the
+              // P0/P1 code left the source in (48 … 262 of them on the Scriven bubble), and each
+              // one then carries `div(open u) = S` on its OWN faces, i.e. Weymouth-Yue advecting
+              // the colour with a field that is not the liquid velocity.
+              //
+              // The order matters and the measurement says so: making the search the PRIMARY rule
+              // (best-`w` over the whole box) DIVERGES the Scriven bubble — `max|uf|` runs away and
+              // the study's dt-collapse guard trips at step 316 of the Ja = 0.5 run with the
+              // Weymouth-Yue Courant number pinned at 0.38 however small dt is. The planar gates
+              // (P0a/P0b/P1/P2) never saw it, because there the two rules choose the same cell.
+              // Preferring the along-the-normal candidates keeps the validated behaviour wherever
+              // it existed and only fills the holes.
+              double best = 0.0;
+              for (int dz = -2; dz <= 2; ++dz)
+                for (int dy = -2; dy <= 2; ++dy)
+                  for (int dx = -2; dx <= 2; ++dx) {
+                    if (dx == 0 && dy == 0 && dz == 0)
+                      continue;
+                    if (!(dx * n[0] + dy * n[1] + dz * n[2] > 0.0))
+                      continue;  // the deposit goes BEHIND the interface, into the gas
+                    const double w = vof::pcGradWeight(dx, dy, dz, n);
+                    if (!(w > best))
+                      continue;
+                    if (c(i + dx + dy * sy + dz * sz) > pureEps)
+                      continue;
+                    best = w;
+                    tx = dx;
+                    ty = dy;
+                    tz = dz;
+                  }
+              if (!(best > 0.0))
+                ++nfb;  // no pure gas cell in the 5^3 box on the +n side: the source stays put
+            } else if (!found) {
+              ++nfb;  // the default: no pure gas cell within two cells, the source stays put
+            }
             dep(i) = S;
             tgt(i) = (double)((tx + 2) + 5 * (ty + 2) + 25 * (tz + 2));
           }
@@ -8367,7 +8411,7 @@ class Solver {
     CCField mk = sc.dmask, dv = sc.dval, tg = pcTgam_;
     CCField gn0 = pcGn_[0], gn1 = pcGn_[1], gn2 = pcGn_[2], gph = pcGphi_;
     CCConst c = CCConst(cField_), md = CCConst(pcMdot_), T = CCConst(sc.c);
-    const double eps = pcInterfaceEps_, pureEps = pcPureEps_, Tsat = pcTsat_, Rint = pcRint_;
+    const double eps = pcEffInterfaceEps(), pureEps = pcEffPureEps(), Tsat = pcTsat_, Rint = pcRint_;
     const bool carry = pcPlaneDir_, quad = pcQuadFit_;
     const long syl = sy, szl = sz;
     Kokkos::parallel_for(
@@ -8506,6 +8550,26 @@ class Solver {
           div(i) -= s;
         });
   }
+
+  /// The colour tolerance that decides which cells are INTERFACIAL, and it has to be at least the
+  /// colour advector's own wisp tolerance.
+  ///
+  /// **This is a real interaction bug and the measurement is in the findings.** WO-R2 item 4 made
+  /// `enable_vof` set `WyAdvector::wispEps = 1e-8`, so the advector treats a cell with
+  /// `C <= 1e-8` (or `>= 1 - 1e-8`) as PURE for reconstruction and flux. Phase change used its own
+  /// `1e-12`, so over the band `1e-12 < C < 1e-8` the two disagreed about what an interface IS:
+  /// the phase-change driver reconstructed a plane, gave the cell an area, an `mdot`, a Dirichlet
+  /// row and a divergence-source deposit, while Weymouth-Yue moved that cell's colour
+  /// algebraically as a pure phase. On the P3 Scriven bubble the disagreement DIVERGES the run —
+  /// `R(t)` error 48 % and the study's dt-collapse guard trips at step 34, against **2.002 %** and
+  /// 80 clean steps with `set_vof_wisp_eps(0.0)`. The planar P0/P1/P2 gates never saw it (their
+  /// interface has no wisps), which is exactly why it had to be found on the curved case.
+  double pcEffInterfaceEps() const { return Kokkos::fmax(pcInterfaceEps_, vofAdv_.wispEps); }
+  /// …and the mirror statement: a cell the ADVECTOR treats as a pure phase is a pure phase here
+  /// too, or the source deposit's "find a pure gas cell" walk rejects exactly the cells the colour
+  /// field has already emptied and the source is left in an interfacial cell (measured:
+  /// `band_div` 2.2e+02 on the P2 sucking gate with only the interfacial tolerance raised).
+  double pcEffPureEps() const { return Kokkos::fmax(pcPureEps_, vofAdv_.wispEps); }
 
   void requirePhaseChange(const char* who) const {
     if (!pcEnabled_)
@@ -9195,6 +9259,13 @@ class Solver {
   bool pcPlaneDir_ = true;   // plane-anchored (GFM) Dirichlet rows instead of pinning the cell
   double pcGfmThMin_ = 0.1, pcGfmThMax_ = 1.9;  // the GFM distance clamp (cells)
   bool pcQuadFit_ = true;    // quadratic (Aslam) one-sided gradient fit (WO-P23 default)
+  // WO-P23 ablation, process-wide (the `PECLET_FLOW_OUTFLOW_RHO` pattern): give the interfacial
+  // cells whose along-the-normal deposit candidates are BOTH still interfacial a target from the
+  // 5^3 box instead of leaving the source in place. Default OFF — see the findings.
+  bool pcDepositFallback_ = [] {
+    const char* e = std::getenv("PECLET_PC_DEPOSIT_FALLBACK");
+    return e && e[0] != '0';
+  }();
   bool pcEnergy_ = false;    // consistent rho c_p T transport + variable k(C)/rho c_p(C) operator
   double pcRcpG_ = 1.0, pcRcpL_ = 1.0;
   CCField pcKcell_, pcRcp_;  // k(C) and (rho c_p)(C) on the G=2 block, refreshed per step

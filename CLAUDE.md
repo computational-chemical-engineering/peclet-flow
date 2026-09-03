@@ -1267,15 +1267,24 @@ Two defects found and fixed here, both in code that shipped with P0/P1:
   observed order **0.10** — it does not converge. The per-face form has no such asymmetry. (The
   same expression IS right as the value the interfacial cell CARRIES until it becomes pure, where
   nothing reads it across a face; leaving that at `T_Γ` costs a clean first order, −1.31/−0.72/−0.36 %.)
-- **The divergence-source deposit failed on a curved interface.** The P0/P1 rule tried exactly two
-  candidate cells (`round(k n)`, k = 1, 2) and left the source IN the interfacial cell otherwise —
-  48…262 cells on the Scriven runs, each of which then carries `div(open u) = S` on its own faces,
-  i.e. Weymouth–Yue advecting the colour with a field that is not the liquid velocity. The deposit
-  now searches the whole `+n` half of the 5³ box by Malan's collinearity weight. This is what
-  VOF_PLAN §9 item 3's band-extended velocity exists to guarantee, and
-  `phase_change_diagnostics()['band_div']` (max |div(open u)| over interfacial cells) is the direct
-  read-out: **3.8e-4 / 1.2e-4** on the planar P2 scene against liquid velocities of order 10², i.e.
-  a relative 1e-6 — no extension needed there, exactly as WO-P01's P0b row predicted.
+- **The divergence-source deposit fails on a curved interface, but re-targeting it is worse.** The
+  P0/P1 rule tries exactly two candidate cells (`round(k n)`, k = 1, 2) and leaves the source IN the
+  interfacial cell otherwise — 48…262 cells on the Scriven runs, each of which then carries
+  `div(open u) = S` on its own faces. A 5³ best-by-collinearity search fills those holes, but as the
+  PRIMARY rule it diverges Scriven, so it ships as a fallback behind the P0/P1 candidates and OFF by
+  default (`PECLET_PC_DEPOSIT_FALLBACK=1`). This is what VOF_PLAN §9 item 3's band-extended velocity
+  exists to guarantee, and `phase_change_diagnostics()['band_div']` (max |div(open u)| over
+  interfacial cells) is the direct read-out: **1.3e-9** on the planar P2 scene against liquid
+  velocities of order 10² — no extension needed there, exactly as WO-P01's P0b row predicted.
+- **WO-R2's wisp guard and phase change are incompatible on a curved interface.** `enable_vof` sets
+  `WyAdvector::wispEps = 1e-8`, so the advector treats `C ≤ 1e-8` as a pure phase while phase change
+  (at `1e-12`) still gave that cell a plane, an `mdot`, a Dirichlet row and a source deposit. On the
+  Scriven bubble that diverges the run (**48 %** and a collapsing dt against **2.002 %** with the
+  guard off); the planar gates never see it. The tolerances are now read from the advector
+  (`max(pc eps, wispEps)`, both the interfacial AND the pure one — with only the first raised the
+  deposit walk rejects the cells the colour field has emptied and `band_div` on P2 reads 2.2e+02),
+  and `enable_phase_change` then sets `wispEps = 0` outright, because with the guard on the case is
+  only marginally stable. `set_vof_wisp_eps` after `enable_phase_change` is the deliberate override.
 
 **MPI**: P0a and P1 are **bitwise** at np 1/2/4 with the decomposition cutting the interface. The
 P2 coupled case is decomposition-independent to **1e-13** on nvidia-cuda (np 1 and 2); on

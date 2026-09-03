@@ -121,6 +121,16 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         s.set_scalar_bc("T", f, 2, dT)
     s.set_field("T", np.asfortranarray(tprof))
     s.enable_phase_change(rho_v, rho_l, h_lv)
+    # Ablations kept because they are the findings' evidence. enable_phase_change turns WO-R2's
+    # wisp guard OFF (the two are incompatible on a curved interface); PECLET_P23_WISP=1 puts it
+    # back, which is how the 48 % / dt-collapse row of the findings is reproduced.
+    import os
+    if os.environ.get("PECLET_P23_WISP"):
+        s.set_vof_wisp_eps(float(os.environ["PECLET_P23_WISP"]))
+    if os.environ.get("PECLET_P23_NO_EXACTRES"):
+        s.set_pressure_exact_residual(False)
+    if os.environ.get("PECLET_P23_NO_OUTFLOWRHO"):
+        s.set_outflow_rho_correction(False)
     s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
     s.set_phase_change_plane_dirichlet(plane)
     if consistent:
@@ -136,7 +146,12 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     rows = []
     tcur, nst, itmax, capped = t0, 0, 0, 0
     Rd = beta * math.sqrt(alpha_l / tcur)
-    dt = 0.4 * cfl / max(Rd * (1.0 - rr), 1e-30)
+    dt0 = 0.4 * cfl / max(Rd * (1.0 - rr), 1e-30)
+    dt = dt0
+    # dt-COLLAPSE GUARD. Without it a run whose interface velocity runs away halves dt forever and
+    # the outer loop never terminates (it cost this campaign an 8-hour silent hang). A step that
+    # needs less than 1e-4 of the initial dt is not a slow run, it is a diverged one; say so.
+    dtmin = 1e-4 * dt0
     while tcur < te:
         dt = min(dt, te - tcur)
         while True:
@@ -148,8 +163,16 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
                 if "Weymouth-Yue boundedness cap" not in str(ex):
                     raise
                 dt *= 0.5
+                if dt < dtmin:
+                    raise RuntimeError(
+                        f"vof_scriven: dt COLLAPSED below {dtmin:.3e} (initial {dt0:.3e}) at step "
+                        f"{nst}, t = {tcur:.4f} of {te:.4f}, last CFL {s.vof_last_courant():.4g} — "
+                        f"the interface velocity is running away, not the time step being small")
         tcur += dt
         nst += 1
+        if verbose and nst % 200 == 0:
+            print(f"      [step {nst}: t {tcur:.4f}/{te:.4f}, dt {dt:.4e}, "
+                  f"cfl {s.vof_last_courant():.4f}]", flush=True)
         c_ = s.vof_last_courant()
         dt *= min(1.3, max(0.5, cfl / max(c_, 1e-30)))
         it = s.last_pressure_iterations()
