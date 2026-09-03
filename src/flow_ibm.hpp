@@ -9395,7 +9395,14 @@ class Solver {
   bool pcPlaneDir_ = true;   // plane-anchored (GFM) Dirichlet rows instead of pinning the cell
   double pcGfmThMin_ = 0.1, pcGfmThMax_ = 1.9;  // the GFM distance clamp (cells)
   bool pcQuadFit_ = true;    // quadratic (Aslam) one-sided gradient fit (WO-P23 default)
-  int pcAreaMode_ = vof::kAreaPlic;  // WO-P3c: which geometry A_Gamma comes from
+  // WO-P3d (2026-09-03, coordinator's decision): the DEFAULT is the joined sheet (marching
+  // tetrahedra on the PLIC signed-distance level set, centroid deposit). Gate re-derived: it is at
+  // the floor on every a-priori geometry (sphere 1e-4, tilted planes 2e-6, cylinder order 2.04),
+  // does not drift with wisps under advection, is byte-identical on every planar phase-change gate,
+  // makes the P2 MPI gate bitwise, and removes the pure-gas deposit fallback (band_div 2e-3 ->
+  // 6e-12). The P3 (Scriven) 1 % gate is still open at 1.0-1.5 % and is no longer explained by
+  // the area (WO-P3e). `set_phase_change_area(0)` reproduces the P0-P3c numbers.
+  int pcAreaMode_ = vof::kAreaMcPlic;  // WO-P3c/P3d: which geometry A_Gamma comes from
   vof::VofInterfaceArea pcAreaC_;    // the cascade area driver (g = 3 block; lazily initialised)
   vof::VofMcArea pcAreaMc_;          // WO-P3d: the joined marching-tet area driver
   double pcMcOrphanArea_ = 0.0;      // WO-P3d: area booked to non-interfacial cells
