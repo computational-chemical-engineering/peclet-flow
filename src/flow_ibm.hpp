@@ -8236,7 +8236,7 @@ class Solver {
                       : vof::pcMassFlux(kg, vof::pcGradSolve(fg), kl, vof::pcGradSolve(fl), hlv);
             mdot(i) = md;
           }
-          if (swept) {
+          if (swept && A > 0.0) {
             // WO-P3e: replace the linearized plane shift `A delta` by the exact swept volume
             // `int_0^delta A(s) ds`. The correction is ADDITIVE, not a factor: the per-cell factor
             // of a cell's OWN PLIC polygon has a large variance that is uncorrelated with the
@@ -8249,9 +8249,14 @@ class Solver {
             const double aplic = vof::plicArea(m[0], m[1], m[2], al);
             const double f = vof::pcSweptFactor(m[0], m[1], m[2], al, c(i), aplic,
                                                 md * pcDt / rhoL);
-            A += aplic * (f - 1.0);
-            if (!(A > 0.0))
-              A = 0.0;
+            // `A == 0` is the "no surface booked to this cell" sentinel of `pcRegress` and of the
+            // deposit (mode 6 books nothing to the 48 cells of a Scriven bubble whose `+n` walk
+            // finds no pure gas cell, which is exactly why it has no deposit fallback -- WO-P3d),
+            // so the correction is applied only where the sheet booked something, and never drives
+            // `A` through zero in either direction.
+            const double corr = aplic * (f - 1.0);
+            if (A + corr > 0.0)
+              A += corr;
           }
           area(i) = A;
           nx(i) = n[0];

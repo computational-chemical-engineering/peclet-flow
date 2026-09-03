@@ -600,10 +600,9 @@ def _sph_moments(w, ax, ctr, lmax=4):
     three mirror symmetries), so the l = 2 row is the control and the l = 4 row is the signal.
     """
     import numpy as np
-    x = (ax - ctr)
-    X = x[:, None, None] * np.ones((1, len(ax), len(ax)))
-    Y = x[None, :, None] * np.ones((len(ax), 1, len(ax)))
-    Z = x[None, None, :] * np.ones((len(ax), len(ax), 1))
+    X = (ax - ctr[0])[:, None, None] * np.ones((1, len(ax), len(ax)))
+    Y = (ax - ctr[1])[None, :, None] * np.ones((len(ax), 1, len(ax)))
+    Z = (ax - ctr[2])[None, None, :] * np.ones((len(ax), len(ax), 1))
     r = np.sqrt(X * X + Y * Y + Z * Z)
     r = np.where(r > 0, r, 1.0)
     u, v, t = X / r, Y / r, Z / r
@@ -626,15 +625,17 @@ def _sph_moments(w, ax, ctr, lmax=4):
 
 
 def _cubic_bins(n, ctr, nb=4):
+    """(ctr is a 3-tuple of cell-index centres.)"""
     """Direction classes by the cubic invariant s = u_x^4 + u_y^4 + u_z^4, which runs from 1/3 on
     the BODY DIAGONAL (111) through 1/2 on a FACE diagonal (110) to 1 on an AXIS (100).  Binning
     the removed volume by s and dividing by the same bins of the EXACT removal is a direct,
     reference-free read-out of whether the regression is isotropic."""
     import numpy as np
-    x = (np.arange(n) + 0.5) - ctr
-    r2 = x[:, None, None] ** 2 + x[None, :, None] ** 2 + x[None, None, :] ** 2
+    a = np.arange(n) + 0.5
+    x, y, z = a - ctr[0], a - ctr[1], a - ctr[2]
+    r2 = x[:, None, None] ** 2 + y[None, :, None] ** 2 + z[None, None, :] ** 2
     r2 = np.where(r2 > 0, r2, 1.0)
-    s = (x[:, None, None] ** 4 + x[None, :, None] ** 4 + x[None, None, :] ** 4) / (r2 * r2)
+    s = (x[:, None, None] ** 4 + y[None, :, None] ** 4 + z[None, None, :] ** 4) / (r2 * r2)
     edges = np.linspace(1.0 / 3.0, 1.0, nb + 1)
     edges[-1] = 1.0 + 1e-9
     return np.digitize(s, edges) - 1, edges
@@ -698,7 +699,7 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
         l1 = float(np.abs(cstart - cex0).sum())
         print(f"    R {R:g}: R0 from the volume {R0:.5f} ({100*(R0-R)/R:+.4f} %), mixed cells "
               f"{mixed0}, |C - C_exact|_1 {l1:.4e}")
-        bins, edges = _cubic_bins(n, ctr[0], nbin) if not advect_steps else (None, None)
+        bins, edges = _cubic_bins(n, ctr, nbin)
         for mode in modes:
             for delta in deltas:
                 s = pf.Solver(n, n, n)
@@ -743,8 +744,9 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
                       f"C in [{d['min_C']:.3e}, {d['max_C']:.6f}]")
                 if bins is None:
                     continue
-                cex1 = sphere_colour_chunked(n, ctr0, R + delta, sub)
-                ex = c0 - cex1
+                cex1 = (sphere_colour_chunked(n, ctr0, R + delta, sub) if not advect_steps
+                        else sphere_colour(n, ctr[0], ctr[1], ctr[2], R + delta, sub=sub))
+                ex = cex0 - cex1
                 rat = []
                 for b in range(nbin):
                     m = bins == b
@@ -754,9 +756,9 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
                 print(f"                            ISOTROPY (removed/exact by cubic bin, "
                       f"axis=1 body-diag=1/3): {lbl}")
                 ax = np.arange(n) + 0.5
-                t_a, m_a = _sph_moments(rem, ax, ctr0)
-                t_e, m_e = _sph_moments(ex, ax, ctr0)
-                t_d, m_d = _sph_moments(rem - ex, ax, ctr0)
+                t_a, m_a = _sph_moments(rem, ax, ctr)
+                t_e, m_e = _sph_moments(ex, ax, ctr)
+                t_d, m_d = _sph_moments(rem - ex, ax, ctr)
                 print(f"                            MOMENTS  l2/l0: actual {m_a[2]/abs(t_a):.3e} "
                       f"exact {m_e[2]/abs(t_e):.3e};  l4/l0: actual {m_a[4]/abs(t_a):.3e} exact "
                       f"{m_e[4]/abs(t_e):.3e};  residual l0 {t_d/t_e:+.3e} l2 "
