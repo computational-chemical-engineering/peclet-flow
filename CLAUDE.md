@@ -1454,6 +1454,72 @@ ghost-fluid row, or ṁ taken from the discretely conservative interfacial balan
 separate least-squares fit). Those are changes to the energy OPERATOR; the four options and two
 probes above are the instruments to gate them with.
 
+
+**The SECOND-ORDER interfacial energy operator, and what it cost (WO-P3g).** P3f named the repair
+"F1 and F2 together, in the energy OPERATOR". It is implemented, it is behind
+`set_phase_change_energy_order(2)`, and **it does not become the default** — `origin/main`'s
+behaviour is unchanged. Four pieces, each its own option so the ablation is measurable:
+`set_phase_change_mdot_operator` (ṁ from the operator's own flux), `set_phase_change_gfm_order(2)`
+(the Gibou–Fedkiw three-point row), `set_phase_change_curvature_distance` (θ and the fit distances
+measured to the CURVED interface, κ per cell from the V3 cascade) and WO-P3f's
+`set_phase_change_carry_conserve`. What it establishes, in five statements:
+
+- **The row family, and it is exact.** `a_Γ = 2/((1+θ)θ)`, `a_behind = 2/(1+θ)` against the shipped
+  `(1/θ, 1)` — the non-uniform three-point second difference through `(T_behind, T_i, T_Γ)`. Gate
+  **K5** in `test_vof_phase_change`: on a 1-D quadratic against a fixed plane it reproduces `T''` to
+  **1.1e-15** and the interfacial flux to **1.0e-15** at every θ ∈ [0.05, 0.95], where the shipped
+  two-point row's flux error reaches **0.589 of an exact 0.85** at θ = 0.05. It reduces to the
+  interior row BITWISE at θ = 1 and falls back to the shipped row where there is no third point.
+- **Defining ṁ as the operator's own flux closes the enthalpy books EXACTLY.** `|E_lat − q_op|/E_lat`
+  and the lagged `|q_op(n) + q_solve(n−1)|/q_op` are both at **round-off (3e-16)** on the planar
+  rung and on Scriven at both Ja. F3 cannot exist any more: the mass balance IS the energy balance.
+- **But the flux a conservative ṁ can see is the CELL-FACE flux, not the interfacial one**, and that
+  is a first-order error no row order removes. Derived and measured: for `T = a + bx + cx²` with the
+  interface at θ, the second-order row's total transfer is exactly `−T'(1/2)` at every θ, while ṁ
+  needs `−T'(θ)`. The difference is the sensible heat of the material between the face and the
+  interface, which the scheme cannot carry because the interfacial cell is an identity row with no
+  energy equation. On the a-priori probe the `plane × scriven` column therefore stays at
+  **−5.7 % at an 8-cell layer** against the shipped −5.1 %. **Conservation and consistency are in
+  direct opposition at the interfacial cell, and this is the fact the next rung has to design
+  around** — the interfacial cell needs its OWN energy equation (a Robin row carrying `ρc_p dT/dt`),
+  not a Dirichlet identity row.
+- **Two real defects it exposed.** (1) An interfacial cell at a NON-PERIODIC domain face drew heat
+  from ghosts that carry no row (`pcZeroDomainGhosts` makes them look pure): +5.8 % on those cells'
+  ṁ. `pcBuildInDomain` separates "another rank's ghost" from "outside the global domain".
+  (2) **27–29 % of the operator's interfacial heat sits on interfacial cells the mode-6 joined sheet
+  gives ZERO area.** Under the shipped ṁ they produce no mass either; under the operator flux the
+  area cancels, so they must — and giving them `A_eff = 1` is what makes
+  `set_phase_change_deposit_fallback` (WO-P3f open item 6, now a proper entry point) load-bearing.
+- **The gate closes at Ja 0.5 — the first time in seven work orders — once the DEPOSIT is fixed,
+  and the new VOLUME AUDIT is what found that.** `--energy-order 2` alone reads **3.489 %** at
+  Ja 0.5 (worse than the shipped 1.036 %), and the audit —
+  `d(gas volume)/d(gas volume the regression BOOKED)`, one line of Python, **1.000000** for a
+  healthy run — reads **0.935**: ṁ is right (area-averaged +0.30 %) and 6.5 % of the vapour never
+  materialises, because `fallback` went 0 → 208 and `band_div` 6e-12 → 1e-1. Add
+  `set_phase_change_deposit_fallback(True)` and Ja 0.5 reads **0.027 % / β_eff +0.027 %** against
+  the shipped **1.036 % / −1.655 %**, with the audit at 1.000000 and `band_div` 9.5e-13. **The
+  fallback alone changes nothing** (order 1 + fallback reproduces 1.036 % / −1.655 % to the digit,
+  because `fallback` is already 0 there) — it is what the operator NEEDS.
+  **Ja 2 does not close** (3.644 %, β_eff −1.321 % against −1.475 %): its error is bought in the
+  first ~15 steps and then recovers monotonically (−4.00 → −2.32 %), which is a start-up transient
+  of a scene whose thermal layer is 2.8 cells at `t0`. **The default therefore stays
+  `energy_order = 1`** (the work order's rule: default only on a PASSED (d)), and `origin/main` is
+  byte-identical.
+- **The mesh ladder is no longer anti-convergent, and that retires WO-P3f's strongest statement.**
+  At fixed `R/L` and fixed physics, `β_eff/β − 1` was **−1.073 → −1.655 → −2.557 %** at 96³/128³/192³
+  (the error growing like `(R/h)^1.1`, because the cancelling term was the `O(h/R)` one). With the
+  new operator it is **−0.015 % (96³) → +0.027 % (128³)** — the sign flips and the magnitude stays
+  under 0.03 %, i.e. a noise floor. There is no cancellation left to break. (The 192³ `R 9 → 30`
+  rung is the one WO-P3f already flagged as not at the deposit floor; it DIVERGES here at cfl 0.2 —
+  see the findings, and treat it as the rung's sharpest open item.) And the Ja 2 transient is confirmed directly: the same grid and `R/L` from a
+  LATER start (`R 10 → 20`) reads **1.078 % / β_eff −0.809 %** against 3.644 % / −1.321 % — but the
+  SHIPPED scheme passes that scene too (**0.626 % / −0.889 %**), so at Ja = 2 the new operator buys
+  a better growth rate and pays in the offset. **The rung's case rests on Ja 0.5 and on the
+  ladder.** Everything is behind options and everything is inert at the defaults:
+  `test_vof_phase_change` is identical to `origin/main` apart from the new K5 block,
+  `tests/kokkos` is 33/33 and `ctest -R vof_` on the MPI tree 40/40; with the WHOLE operator ON,
+  `vof_phase_change_mpi` is 3/3 at np 1/2/4 with P0a and P1 **bitwise** across ranks.
+
 **One correction this WO makes to WO-P3d's gate (b).** The joined sheet's immunity to the wisp
 population is the **wisp guard's**, not the sheet's: on the identical 100-step field mode 6 reads
 +0.020 % under `enable_vof` (wispEps = 1e-8, the configuration gate (b) ran) and **+0.412 %** under

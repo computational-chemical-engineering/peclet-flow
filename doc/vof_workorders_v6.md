@@ -447,6 +447,496 @@ pressure iterations vs cap; a capped run is not a data point. Report ms/step and
 # Findings log (v6 work orders)
 
 (append per WO, newest first)
+## WO-P3g findings — the second-order interfacial energy operator: gates (a) and (c) PASS at round-off, gate (d) CLOSES at Ja 0.5 (0.027 %) and the mesh ladder stops being anti-convergent, gate (b) and Ja 2 do not — 2026-09-04, Opus
+
+Branch `vof-p3g`, worktree `../flow-p3g`, from `origin/main` at `23900eb`. Backend **nvidia-cuda**
+(`build_cuda`, `build_ktest_cuda`, `build_kmpi_cuda`), `OMP_NUM_THREADS=4 OMP_PROC_BIND=false`, one
+solver process at a time. No run printed `preconditioner produced non-finite z`; every Scriven run
+below is clean under rule 3b (max pressure iterations **22–44** against the 600 cap, none capped).
+
+**Verdict up front, in six statements.**
+
+1. **Gate (a) PASSES exactly.** The Gibou–Fedkiw row family is
+   `a_Gamma = 2/((1+theta) theta)`, `a_behind = 2/(1+theta)` against the shipped `(1/theta, 1)`.
+   On a 1-D quadratic against a fixed plane it reproduces `T''` to **1.11e-15** and the
+   interfacial flux to **9.99e-16** at every `theta in {0.05 … 0.95}`; the shipped two-point row's
+   flux error reaches **0.589** of an exact 0.85 at `theta = 0.05`. It reduces to the interior row
+   BITWISE at `theta = 1` (`2/2 = 1` both).
+2. **Gate (c) PASSES to round-off, and it is by construction.** With `mdot` defined as the
+   operator's own flux, `|E_lat − q_op|/E_lat` is **3.6e-16** (Ja 0.5) / **2.9e-16** (Ja 2) on
+   Scriven, and the LAGGED half — the heat the previous energy solve actually removed against the
+   latent heat this step books — is **2.6e-16** / **3.8e-16**. F3 is gone.
+3. **The flux the operator conserves is the flux through the CELL FACE, not the flux at the
+   interface**, and that is a structural first-order error the second-order row cannot remove.
+   Derived and measured: for `T = a + bx + cx²` with the interface at `theta`, the second-order
+   row's total interfacial transfer is exactly `−(b + c) = −T'(1/2)` — the face flux — at every
+   `theta`, while the interfacial flux is `−(b + 2c theta)`. On the a-priori 2×2 probe the
+   `plane × scriven` column therefore stays at `−18.7 / −11.6 / −8.3 / −5.7 %` (order 1.02),
+   essentially the shipped row's `−17.0 / −10.4 / −7.4 / −5.1 %`. **Conservation and consistency
+   are in direct opposition here, and item 1 chose conservation.**
+4. **Two defects the operator flux exposed, both fixed here, both real:** an interfacial cell at a
+   NON-PERIODIC domain face drew heat from a ghost that carries no row (+5.8 % on those cells'
+   `mdot`), and **27–29 % of the operator's interfacial heat sits on interfacial cells the joined
+   marching-tetrahedra sheet gives ZERO area** — which under the shipped `mdot` produced no mass
+   either, and under the operator flux would simply destroy that heat.
+5. **Gate (b) improves and still does not converge.** `sphere × scriven` goes
+   `+8.0/+7.8/+6.6/+5.2 %` (shipped) → `+(-0.3)/+1.6/+3.0/+3.4 %` at R = 6/10/14/20, but the order
+   in `h/R` is **negative** — the error grows with R, because the operator's own `sphere × linear`
+   geometric bias is **+27.4/+16.8/+13.8/+11.0 %**, roughly TWICE the fit's, and first order.
+6. **Gate (d) CLOSES at Ja 0.5 for the first time in seven work orders — 0.027 % and
+   beta_eff +0.027 % against the shipped 1.036 % / −1.655 % — and the MESH LADDER stops being
+   anti-convergent** (`beta_eff/beta − 1` = −0.015 % at 96³ and +0.027 % at 128³, sign-changing at
+   the noise floor, against WO-P3f's −1.073 → −1.655 → −2.557 %). **It does not close at Ja 2**
+   (3.644 % / −1.321 % against 1.486 % / −1.475 %), whose error is bought in the first ~15 steps of
+   a scene with a 2.8-cell thermal layer and then recovers. **The default therefore stays
+   `energy_order = 1`**, per the work order's rule.
+7. **The single most consequential finding is not in the operator at all**: it is that item 1 makes
+   the DIVERGENCE-SOURCE DEPOSIT load-bearing, and a new one-line VOLUME AUDIT
+   (`d(gas)/d(gas booked)`, 1.000000 for a healthy run, **0.935** here) found it in one run after
+   six work orders had been arguing about the flux. With `set_phase_change_deposit_fallback(True)`
+   Ja 0.5 goes from 3.489 % to 0.027 %; the fallback ALONE changes nothing (order 1 + fallback
+   reproduces 1.036 % / −1.655 % to the digit).
+
+### What shipped (all four pieces are OPTIONS; the default is unchanged)
+
+* `set_phase_change_energy_order(order)` — the package. `order = 2` turns on all four items
+  below; `order = 1` is `origin/main`, bitwise.
+* `set_phase_change_mdot_operator(bool)` — item 1. `mdot = q/(h_lv A)` with `q` the sum, over the
+  interfacial cell's PURE face neighbours, of `a_Gamma k_p o_p (T_p − T_Gamma)` PLUS the
+  second-order row's one-sided rescaling of the band behind, `(a_behind − 1) k_b o_b (T_p − T_b)`
+  — the whole heat the operator transfers, not just the Dirichlet coupling. `vof::pcOperatorMassFlux`
+  closes the Schrage/IHTR relation `mdot (h_lv A + R_int sum a_Gamma k o) = sum a_Gamma k o (T_p − T_sat)`
+  in one step. The least-squares estimator stays as `phase_change_diagnostics()['mdot_fit']`.
+* `set_phase_change_gfm_order(1|2)` — item 2, `vof::pcGfmRow` + `scalarMaskGfm2` (a SIBLING kernel;
+  `scalarMaskGfm` is untouched and still what the default runs).
+* `set_phase_change_curvature_distance(bool)` — item 3, `vof::pcGfmThetaK` + `pcUpdateCurvature`
+  (the V3 cascade's `kappa` on the G = 2 block, exchanged at depth 1). It feeds the row's `theta`
+  AND the one-sided fits, replacing WO-P3f's prescribed `set_phase_change_fit_curvature`.
+* `set_phase_change_deposit_fallback(bool)` — WO-P3f open item 6, promoted from the
+  `PECLET_PC_DEPOSIT_FALLBACK` environment variable to an entry point, because item 1 makes it
+  load-bearing (below).
+* Diagnostics: `phase_change_diagnostics()` gains `mdot_fit`, `q_operator`, `q_orphan`;
+  `phase_change_budget()` gains `q_behind`. `tests/kokkos/test_vof_phase_change.cpp` gains **K5**
+  (gate (a)); both test binaries gain the `PECLET_P3G_*` hooks; `tests/study/vof_scriven.py` gains
+  `--energy-order/--op-mdot/--gfm-order/--curv-dist/--carry-opt/--deposit-fallback`, the gate-(c)
+  identity read-out and a VOLUME AUDIT (`d(gas)/d(gas booked)`).
+
+### Gate (a) — the coefficient family, and the exactness proof (`test_vof_phase_change` K5)
+
+Geometry in the row's own terms: the pure cell at `x = 0`, the interfacial cell at `x = +1`, the
+interface plane at `x = theta`, the third point (the cell BEHIND) at `x = -1`. The non-uniform
+three-point second difference through `(T_behind, T_0, T_Gamma)` at spacings `(1, theta)` is
+
+    d2T/dx2 = 2/(h_L + h_R) [ (T_R - T_0)/h_R - (T_0 - T_L)/h_L ]
+            = 2/((1 + theta) theta) (T_Gamma - T_0)  +  2/(1 + theta) (T_behind - T_0)
+
+so **`a_Gamma = 2/((1+theta) theta)`, `a_behind = 2/(1+theta)`**, against the shipped
+`(1/theta, 1)`. Bounded over the shipped clamp `theta in [0.1, 1.9]`:
+`a_Gamma in [0.363, 18.18]`, `a_behind in [0.690, 1.818]`, so no additional `theta < 0.1` fallback
+is needed and none is used — the WO's "fall back to the neighbour-behind row" is implemented as the
+geometric fallback instead (no third point => the shipped two-point row, bitwise). The row is
+non-symmetric but strictly diagonally dominant, and the RB-GS smoother converged on every scene
+below (pressure and energy residuals unchanged; P2 reaches its noise floor as before).
+
+`T = 0.83 - 1.47 x + 0.62 x^2`, exact `T'' = 1.24`, exact face flux `-(b+c) = 0.85`:
+
+| theta | a_Gamma | a_behind | row's `T''` | err | row's flux `Q` | err | SHIPPED row's `Q` err |
+|---|---|---|---|---|---|---|---|
+| 0.05 | 38.0952 | 1.9048 | 1.2400000000000011 | 1.11e-15 | 0.84999999999999898 | 9.99e-16 | **+5.890e-01** |
+| 0.25 | 6.4000 | 1.6000 | 1.2399999999999998 | 2.22e-16 | 0.85000000000000009 | 1.11e-16 | +4.650e-01 |
+| 0.45 | 3.0651 | 1.3793 | 1.2400000000000002 | 2.22e-16 | 0.84999999999999964 | 3.33e-16 | +3.410e-01 |
+| 0.65 | 1.8648 | 1.2121 | 1.24 | 0.00e+00 | 0.84999999999999987 | 1.11e-16 | +2.170e-01 |
+| 0.85 | 1.2719 | 1.0811 | 1.2399999999999998 | 2.22e-16 | 0.85000000000000009 | 1.11e-16 | +9.300e-02 |
+
+worst over `theta in [0.05, 0.95]`: `|T''_row - T''|` **1.110e-15**, `|Q - Q_exact|` **9.992e-16**
+(and **4.441e-16** on a linear profile, where both orders are exact). **The gate passes.**
+
+**The flux `Q` has to carry BOTH halves of the row**, and this is where the work order's text needed
+a correction. `Q = a_Gamma (T_0 - T_Gamma) + (a_behind - 1)(T_0 - T_behind)`: the Dirichlet coupling
+PLUS the one-sided rescaling of the band behind, which cell `-1`'s own row does not mirror and which
+is therefore part of what the interface removes from the solved set. With the Dirichlet coupling
+alone `Q` is off by a factor `2/(1+theta)` — a factor 2 as `theta -> 0`.
+
+**And this is where the second-order row's ceiling is.** `Q` evaluates to `-(b + c) = -T'(1/2)`
+identically in `theta`: **the exact conductive flux through the CELL FACE.** The flux `mdot` needs is
+`-T'(theta)`, at the interface. The two differ by `T'' (1/2 - theta)`, i.e. by `O(h) T''` — first
+order, and exactly the sensible heat of the material between the face and the interface, which the
+scheme does not carry because the interfacial cell is an identity row with no energy equation. A
+conservative `mdot` (item 1) is therefore a FACE flux and cannot be second-order consistent as an
+interfacial flux. That is not a defect of the row; it is the price of item 1, and it is why gate (b)'s
+`plane x scriven` column barely moves.
+
+### Gate (b) — the a-priori 2x2 probe, 128^3, `sub = 16`, area mode 6, Ja 0.5
+
+`--mdot-probe 6,10,14,20 --mdot-geom sphere,plane --mdot-prof linear,scriven --energy-order 2`.
+Area-weighted `mdot` against the analytic `mdot = rho_v beta sqrt(alpha/t)` (WO-P3f's shipped
+column is quoted from its findings, same scene, same seeds):
+
+| R | BL | plane x linear | **sphere x linear** | order | plane x scriven | **sphere x scriven** | SHIPPED sphere x scriven |
+|---|---|---|---|---|---|---|---|
+| 6 | 2.44 | +0.418 % | **+27.356 %** | — | −18.714 % | **−0.268 %** | +8.002 % |
+| 10 | 4.06 | +0.418 % | **+16.758 %** | 0.959 | −11.551 % (0.945) | **+1.609 %** | +7.820 % |
+| 14 | 5.69 | +0.418 % | **+13.837 %** | 0.569 | −8.280 % (0.990) | **+2.996 %** | +6.647 % |
+| 20 | 8.12 | +0.418 % | **+11.014 %** | 0.640 | −5.747 % (1.024) | **+3.417 %** | +5.160 % |
+
+`(E_lat − q_op)/E_lat` is **0 to round-off on every row** (max 8.6e-16), and `−q_gfm/E_lat`
+(the budget instrument's own pairing, which counts (inner unmasked cell, any masked neighbour) where
+the operator counts (inner masked cell, any neighbour that carries a row)) reads **1.0008 … 1.0020**.
+`plane x linear` reads +0.418 % at every radius — the probe's own sub-sampling quantum (WO-P3f), a
+constant that cancels out of every comparison.
+
+**The gate is MISSED on both halves.** `sphere x scriven` is inside 0.5 % only at R = 6 and grows to
++3.4 % at R = 20 — better than the shipped +5.2 % but with a NEGATIVE order, i.e. anti-convergent
+again. The reason is the `sphere x linear` column: the operator's own geometric bias is
+**+11.0 % at R = 20 against the fit's +6.2 %**, first order (0.57–0.96), and it is the largest single
+error in the rung now. Its mechanism is the row's `theta` CLAMP: `theta = |phi_i|/|n_d|` diverges on
+a face whose axis is nearly TANGENT to the interface, `pcGfmTheta` clamps it at `thetaMax = 1.9`, and
+the clamp therefore over-draws on exactly the near-tangential faces, which on a sphere are numerous.
+Neither the second-order row nor the curvature-consistent distance touches it (ablation below).
+
+Ablation of the three items on `sphere`, R = 10 / 20 (Ja 0.5, 128^3, mode 6):
+
+| configuration | linear R 10 | linear R 20 | scriven R 10 | scriven R 20 |
+|---|---|---|---|---|
+| shipped (least-squares fit) | +12.06 % | +6.23 % | +7.82 % | +5.16 % |
+| item 1 only (op flux, row 1, no kappa) | +17.89 % | +12.31 % | +5.92 % | +6.35 % |
+| item 1 + item 3 (kappa from the cascade) | +16.35 % | +11.69 % | +4.53 % | +5.76 % |
+| item 1 + item 2 (second-order row) | +17.98 % | +11.52 % | +2.84 % | +3.93 % |
+| **items 1+2+3 (`--energy-order 2`)** | **+16.76 %** | **+11.01 %** | **+1.61 %** | **+3.42 %** |
+
+Read it as: item 2 buys the profile half (`scriven` improves by ~2.4 points), item 3 buys ~1.4
+points of the geometry half, and neither dents the `linear` column's +11–12 %.
+
+### Gate (c) — the enthalpy budget, on the planar rungs first and then on Scriven
+
+The gate has two halves and both are new instruments in `vof_scriven.py`:
+
+* the BY-CONSTRUCTION half, `|E_lat − q_op| / E_lat`, where `E_lat = rho_l removed_volume h_lv/dt`
+  is the latent heat the regression books and `q_op = phase_change_diagnostics()['q_operator']` is
+  the heat the operator's rows draw on the fields the build read;
+* the LAGGED half, `|q_op(n) + q_solve(n−1)| / q_op(n)`, where `q_solve = q_gfm + q_behind` from
+  `phase_change_budget()` is the heat the PREVIOUS energy solve actually removed. `mdot` is
+  evaluated at the head of step `n` from the converged `T` of step `n−1`, so this is the identity
+  that says the energy the solve took out and the mass the next step makes are one number.
+
+Planar rung first (`--carry-probe`, 64^3, a planar interface on the sub-sampling grid, an exactly
+linear superheat, `mdot` fixed by construction at 2.000e-3, ratio 100, `--energy-order 2`):
+
+| step | `E_lat` (W) | `q_op` (W) | `(E_lat − q_op)/E_lat` | `q_solve(n−1)` (W) | `(q_op + q_solve(n−1))/q_op` |
+|---|---|---|---|---|---|
+| 1 | 2.04800e+02 | 2.04800e+02 | **−1.388e-16** | — | — |
+| 2 | 2.05055e+02 | 2.05055e+02 | **+0.000e+00** | −2.05055e+02 | **+0.000e+00** |
+| 3 | 2.05247e+02 | 2.05247e+02 | **+1.385e-16** | −2.05247e+02 | **+0.000e+00** |
+| 4 | 2.05406e+02 | 2.05406e+02 | **+1.384e-16** | −2.05406e+02 | **−1.384e-16** |
+| 5 | 2.05541e+02 | 2.05541e+02 | **+1.383e-16** | −2.05541e+02 | **+0.000e+00** |
+
+`E_lat` at step 1 is 204.800 W, i.e. exactly `2.000e-3 x 4096 x 25`. Scriven 128^3, mode 6, MUSCL,
+similarity start, `R 6 -> 20`: worst over the run
+
+| | by construction | lagged |
+|---|---|---|
+| Ja 0.5 | **3.606e-16** | **2.634e-16** |
+| Ja 2 | **2.858e-16** | **3.787e-16** |
+
+**Gate (c) passes at round-off, on both rungs and both Ja.** F3 is gone by construction: the
+Dirichlet overwrite can no longer change the mass balance, because the mass balance is now the
+energy balance.
+
+**A defect the gate found on the way, and it is not cosmetic.** An interfacial cell at a
+NON-PERIODIC domain face has ghost neighbours that `pcZeroDomainGhosts` marks unmasked — they look
+like pure cells — but no row is ever built there, so gathering their Dirichlet coupling invents
+heat. On the planar probe (whose interface spans the whole y–z cross-section) the edge cells' `mdot`
+read **2.115e-3 against the exact 2.000e-3, +5.8 %**, and the lagged identity sat at 5.3e-4 instead
+of 0. `pcBuildInDomain` separates "a ghost owned by another rank" (a row exists there) from "outside
+the global domain" (none does) with the same fill-then-zero construction the rest of the rung uses,
+so it is decomposition-independent by the same argument. With it the lagged identity is **bitwise**.
+
+### Gate (d) — Scriven, 128^3, ratio 100, similarity start, MUSCL, `R 6 -> 20`, area mode 6
+
+**Attempt 1, the package as the work order specifies it.** The baseline row is this session's own
+re-run and it reproduces WO-P3e/P3f to the digit, so the harness is faithful.
+
+| configuration | Ja 0.5 max\|dR\|/R | beta_eff/beta − 1 | Ja 2 max\|dR\|/R | beta_eff/beta − 1 | band_div | fallback | VOLUME AUDIT |
+|---|---|---|---|---|---|---|---|
+| **shipped** (order 1) | **1.036 %** | **−1.655 %** | 1.486 % | −1.475 % | 6.0e-12 | 0 | **1.000000** |
+| `--energy-order 2` | **3.489 %** | **−5.444 %** | **5.836 %** | **−6.725 %** | 1.0e-01 | 208 | — |
+| item 1 ALONE (`--op-mdot 1`, row 1, no kappa, no carry) | **3.517 %** | **−5.316 %** | — | — | 1.0e-01 | 176 | **0.934650** |
+
+**Item 1 alone reproduces the whole failure** (3.517 % against the package's 3.489 %), so items 2, 3
+and 4 are together worth 0.03 pp in the coupled run and the mechanism is item 1's.
+
+**The mechanism, and the instrument that names it.** The new VOLUME AUDIT prints
+`d(gas volume) / d(gas volume the regression BOOKED)` per step — the gas volume can only change by
+the regression plus the net liquid flux through the outflow faces, so it separates "the books are
+wrong" from "the books are right and the colour field does not follow". The shipped scheme reads
+**1.000000 (min 1.000000, max 1.000000)** over the last half. Item 1 reads **0.934650
+(0.896570 … 0.981961)**: **6.5 % of the vapour the regression books never materialises.**
+
+And `fallback` says why. Item 1 makes the interfacial AREA cancel out of the mass balance, so the
+27 % of the operator's heat that sits on ZERO-AREA interfacial cells has to evaporate somewhere —
+`Aeff = 1` gives those cells `dV = q dt/(h_lv rho_l)` and a divergence source
+`S = q (1/rho_g − 1/rho_l)/h_lv`. But those are exactly the cells DEEP in the band, whose
+along-the-normal deposit walk (`round(k n)`, k = 1, 2) finds no pure gas cell: **`fallback` goes
+0 -> 176…208 and `band_div` 6.0e-12 -> 1.0e-01 (Ja 0.5) / 9.7e-01 (Ja 2)**, i.e. `div(open u) = S`
+on those cells' OWN faces and Weymouth–Yue advects the colour with a field that is not the liquid
+velocity. `mdot` is right (area-averaged +0.30 % over the last half, against the shipped −0.93 %) and
+the bubble still grows 5 % too slowly, which is exactly what an audit of 0.935 with a correct flux
+means. **WO-P3f's open item 6 was not a loose end; item 1 makes it load-bearing.**
+
+**Attempt 2 — the same package with the deposit fallback the mechanism demands.** One change:
+`--deposit-fallback 1`, i.e. an interfacial cell whose two along-the-normal candidates are both
+still interfacial takes the best cell of the `+n` half of the 5^3 box (WO-P23's rule, which has
+always existed as a fallback and has always been default-OFF).
+
+| configuration | Ja 0.5 max\|dR\|/R | beta_eff/beta − 1 | Ja 2 max\|dR\|/R | beta_eff/beta − 1 |
+|---|---|---|---|---|
+| shipped (order 1) | 1.036 % | −1.655 % | 1.486 % | −1.475 % |
+| `--energy-order 2` (attempt 1) | 3.489 % | −5.444 % | 5.836 % | −6.725 % |
+| **`--energy-order 2 --deposit-fallback 1`** | **0.027 %** | **+0.027 %** | 3.644 % | **−1.321 %** |
+| order 1 + `--deposit-fallback 1` (the control) | **1.036 %** | **−1.655 %** | — | — |
+
+**The control matters: the deposit fallback ALONE changes nothing.** On the shipped scheme
+`fallback` is already 0 (WO-P3e), so turning the rule on reproduces 1.036 % / −1.655 % to the digit.
+The improvement is the P3g operator; the fallback is what the P3g operator NEEDS.
+
+At **Ja 0.5 the P3 gate CLOSES on both halves for the first time in seven work orders**: 0.027 % and
++0.027 %, a 40x improvement on the shipped 1.036 % / −1.655 %, with `band_div` **9.5e-13**,
+`fallback` 0, `unresolved` 0, `C in [-7.6e-17, 1]`, max pressure iterations 30/600 and the volume
+audit at **1.000000**.
+
+**Ja 2 does not**, and its trace says where: the error is acquired in the first ~15 steps and then
+RECOVERS monotonically — `R` rel error −0.24 → −3.04 → −4.00 → −3.98 → −3.68 → −3.30 → −2.93 →
+−2.60 → **−2.32 %** at the end, and `beta_eff` is −1.321 % against the shipped −1.475 %. That is a
+START-UP transient, not a rate error: at Ja = 2, 128^3, the thermal boundary layer at `t0` is
+**2.82 cells (99 % of dT)** and `R0/(2 beta^2) = 0.54 cells`, i.e. the scene is under-resolved where
+it begins. The `max|dR|/R` half of the gate measures the LAST half of the run, but the offset it
+carries was bought at the start. This is what the mesh ladder is for.
+
+**The mesh ladder at fixed `R/L` (Ja 0.5, mode 6), which is what WO-P3f's anti-convergence claim
+rests on:**
+
+| grid | R (cells) | `L/R_end` | shipped `beta_eff/beta − 1` | **`--energy-order 2 --deposit-fallback 1`** | max\|dR\|/R | band_div | fallback |
+|---|---|---|---|---|---|---|---|
+| 96³ | 4.5 → 15 | 6.4 | −1.073 % | **−0.015 %** | 0.155 % | 7.0e-12 | 0 |
+| 128³ | 6 → 20 | 6.4 | −1.655 % | **+0.027 %** | 0.027 % | 9.5e-13 | 0 |
+| 192³ | 9 → 30 | 6.4 | −2.557 % | **DIVERGES** (see below) | — | — | — |
+
+**The 192³ `R 9 → 30` rung DIVERGES with the new operator** at the study's default `cfl = 0.2`:
+the Weymouth–Yue Courant number runs away and the dt-collapse guard trips at **step 199 of ~250**
+(`t = 299.94` of 365.58, last CFL **0.9079** at `dt = 9.17e-05` against an initial 5.91e-01). That
+is the one row of WO-P3f's own ladder that was already NOT at the deposit floor (`band_div`
+1.6e-02, `fallback` 24) — at `R/h = 30` the interfacial band is thick enough that the `+n` walk
+fails on a real population of cells, and item 1 hands every one of them a source. A `cfl = 0.1`
+re-run was queued and not completed within this session; **the third rung is owed and the divergence
+is the rung's sharpest open item** (WO-P3f open item 6 again, at the resolution where it bites).
+
+**96³ → 128³ the error changes SIGN and stays under 0.03 %** — that is a noise floor, not an order,
+and it is the direct retirement of WO-P3f's `−1.073 → −1.655 → −2.557 %` (which grew like
+`(R/h)^1.1` because the cancelling term was the `O(h/R)` one). There is no cancellation left to
+break.
+
+**Ja 10, 128³, `R 6 → 20`** (run for information; the work order asks for it only once both other
+Ja pass): `max|dR|/R` **34.174 %**, `beta_eff` **−34.952 %**, against WO-P23's shipped **~40 %**.
+The volume audit is 1.000000 and `band_div` 8.6e-11, so the scheme is healthy and the scene is not:
+at Ja 10 the thermal layer at `t0` is a fraction of a cell.
+
+### Gate (e) — the planar rungs, and inertness
+
+**Byte-identity against `origin/main` (`23900eb`), run.** `test_vof_phase_change` built from this
+worktree and from a separate `origin/main` checkout (`../flow-p3g-ref`), 4 threads, nvidia-cuda:
+the whole stdout is **IDENTICAL apart from the new K5 block** (`diff` empty after removing K5).
+For the record: P0a `1.776e-14`, P0b `u_gas` exact / `max|div − S| 3.469e-18`, P1 `+1.3099 %`,
+P1' `−0.0139 %`, ENERGY identity `0.000e+00`, P2 `+0.1929 %`, INERT `0.000e+00`.
+
+**What the OPTIONS do to the planar rungs** (they are OFF by default, so this is a measurement, not
+a regression; the binary reports the two CHECKs that fail their own scenes' tolerances):
+
+| | P0a | P0b | P1 | P1' | ENERGY | P2 | INERT |
+|---|---|---|---|---|---|---|---|
+| shipped | 1.776e-14 | exact / 3.469e-18 | +1.3099 % | **−0.0139 %** | 0.000e+00 | **+0.1929 %** | 0.000e+00 |
+| `PECLET_P3G_ORDER=2` | 1.776e-14 | identical | +1.2631 % | **+0.2074 %** | 0.000e+00 | **+1.1160 %** | 0.000e+00 |
+| `PECLET_P3G_ORDER=2` + `PECLET_PC_DEPOSIT_FALLBACK=1` | 1.776e-14 | identical | +1.2631 % | +0.2074 % | 0.000e+00 | +1.1160 % | 0.000e+00 |
+| `PECLET_P3G_OPMDOT=1` alone | 1.776e-14 | identical | **+0.1520 %** | +1.0965 % | 0.000e+00 | −0.4192 % | 0.000e+00 |
+
+**P0a and P0b are `mdot`-PRESCRIBED and are byte-identical at every configuration**, as the work
+order requires; so are the ENERGY uniform-`T` identity (`0.000e+00` at `rho c_p` ratio 1e4) and the
+INERT gate. The deposit fallback is exactly inert on the planar rungs (`fallback` is 0 there).
+
+`P1'`'s −0.0139 % was never a converged number: WO-P23's four-way ablation table shows it is the
+noise floor of a CANCELLATION between the plane-anchored rows and the quadratic fit (the error
+changes sign between N = 128 and 256). Item 1 moves P1 from +1.3099 % to **+0.1520 %** — a factor
+8.6 — and P1' to +1.0965 %, i.e. it replaces that cancellation with a single, one-signed error.
+`P2` moves +0.1929 % → +1.1160 % (package) / −0.4192 % (item 1 alone); its `band_div` stays at
+2.3e-13 … 1.8e-12 and no solve is capped. **The P2 order ladder at `--energy-order 2` was NOT run
+(64/128/256 at Fo = 0.5 is ~4500 steps at N = 256) and is the one gate-(e) digit this WO owes.**
+
+### Gate (f) — MPI, and the batteries
+
+* **`tests/kokkos_mpi`, `vof_phase_change_mpi` np 1/2/4** (64x4x4, the ORB cutting x so the interface
+  crosses a rank boundary during every run), nvidia-cuda, `OMP_NUM_THREADS=4`:
+
+  | configuration | np = 1 | np = 2 | np = 4 |
+  |---|---|---|---|
+  | the DEFAULTS | **Passed** (53.3 s) | **Passed** (186.3 s) | **Passed** (363.2 s) |
+  | `PECLET_P3G_ORDER=2` + `PECLET_PC_DEPOSIT_FALLBACK=1` | **Passed** (23.1 s) | **Passed** (176.5 s) | **Passed** (342.9 s) |
+
+  **3/3 and 3/3**, i.e. the whole new operator — the operator-flux `mdot` (a fixed-order gather over
+  an interfacial cell's face neighbours), the second-order row (which rescales a band the neighbour
+  cell's own row does not mirror), the per-cell cascade `kappa` (exchanged at depth 1), the
+  `pcBuildInDomain` mask and the 5^3 deposit fallback — is decomposition-independent at the same
+  floor the rung has always held. The test asserts np-to-np agreement itself; its per-case digits
+  are below.
+
+  Run directly (`mpirun -np N ./build_kmpi_cuda/test_vof_phase_change_mpi`) with
+  `PECLET_P3G_ORDER=2 PECLET_PC_DEPOSIT_FALLBACK=1`, i.e. with EVERY piece of the new operator on,
+  the ORB cutting x at np 2/4:
+
+  | case (the whole P3g operator ON) | np = 1 | np = 2 | np = 4 |
+  |---|---|---|---|
+  | **P0a** 1000 kinematic steps, `max\|C_dist − C_ref\|` | **0.000e+00** | **0.000e+00** | **0.000e+00** |
+  | **P1** Stefan, 280 coupled steps | **0.000e+00** | **0.000e+00** | **0.000e+00** |
+  | P2 sucking, 55 coupled steps (interface position, rel) | 7.873e-16 | 2.362e-15 | 2.362e-15 |
+  | P2 pointwise `max\|C_dist − C_ref\|` | 1.199e-14 | 1.199e-14 | 1.532e-14 |
+  | P2 pointwise `max\|T_dist − T_ref\|` | 1.735e-15 | 1.735e-15 | 3.303e-15 |
+
+  **P0a and P1 are BITWISE at every rank count with the new operator**, and P2 is at the same
+  RB-GS reduction floor the rung has held since WO-P01 — the identical table WO-P3e and WO-P3f
+  printed for the shipped scheme. That scene's own answer moves with the option (P1 layer
+  +0.2074 % against the shipped −0.0139 %, P2 +0.7301 %), which is the measurement; the gate is the
+  three columns being equal.
+
+* **`tests/kokkos`, the FULL battery at the shipped defaults: 33/33 passed** (nvidia-cuda,
+  `OMP_NUM_THREADS=4`). Every VoF ctest is green with phase change off, and
+  `test_vof_phase_change`'s own stdout is identical to `origin/main`'s (gate (e)).
+* **`tests/kokkos_mpi`, the whole VoF subset at the shipped defaults (`ctest -R vof_`):
+  40/40 passed.**
+
+
+### Gate (d), continued — the Ja 2 start-up transient, isolated
+
+The Ja 2 gate fails on `max|dR|/R` from `R 6 -> 20` and its trace recovers monotonically, so the
+error is bought where the scene is under-resolved. The direct probe is the SAME grid and the same
+`R/L` from a LATER start, `R 10 -> 20` (the thermal layer at `t0` scales with `R`, so it is 1.7x
+thicker there):
+
+| Ja 2, 128^3 | max\|dR\|/R | beta_eff/beta − 1 | area-avg mdot, last half | band_div | fallback |
+|---|---|---|---|---|---|
+| `R 6 -> 20`, shipped | 1.486 % | −1.475 % | — | 2.5e-11 | 0 |
+| `R 6 -> 20`, `--energy-order 2 --deposit-fallback 1` | 3.644 % | −1.321 % | +1.78 % | 5.1e-11 | 0 |
+| **`R 10 -> 20`, `--energy-order 2 --deposit-fallback 1`** | **1.078 %** | **−0.809 %** | +0.88 % | 5.5e-11 | 0 |
+| **`R 10 -> 20`, shipped (the control)** | **0.626 %** | **−0.889 %** | — | 1.6e-11 | 0 |
+
+From the later start the growth-rate half of the gate PASSES (**−0.809 %**) and the `max|dR|/R`
+half misses by 0.078 pp, against 3.644 % from the early start — and the `R` trace is flat
+(−0.076 % at step 1, −1.078 % at the half point, −0.967 % at the end) rather than diverging. **The
+Ja 2 residual is largely a start-up transient of an under-resolved scene, measured.**
+
+**But the control is the honest half of that statement: the SHIPPED scheme passes the later-start
+Ja 2 scene too** (0.626 % / −0.889 %), and passes `max|dR|/R` more comfortably than the new operator
+does. So at Ja = 2 the new operator buys a slightly better growth RATE (−0.809 against −0.889 %) and
+pays for it in the offset. **The rung's case rests on Ja 0.5 and on the ladder, not on Ja 2.** (The
+shipped control's own volume audit is 0.999934 with a minimum of 0.999248 — it is not exactly at the
+floor on this scene either, which is worth knowing before anything reads that audit as a pass/fail.)
+
+### The mechanism, stated once
+
+WO-P3f's three first-order errors and what this rung did to each:
+
+* **F3 (the Dirichlet overwrite destroys enthalpy) is GONE BY CONSTRUCTION.** Defining ṁ as the
+  operator's own flux makes the mass balance the energy balance; the identity holds at round-off
+  (gate (c)) whatever the overwrite does. `carry_conserve` is still on in the package, but with
+  item 1 in place it is worth 0.03 pp coupled (the item-1-alone ablation).
+* **F2 (the two-point row's `O(h/delta_T)` flux deficit) is HALF gone.** The row is now exact on a
+  quadratic (gate (a)), which is what buys `sphere x scriven` its 2.4 points in gate (b). What is
+  NOT gone, and cannot be while item 1 holds, is that a conserved flux is a CELL-FACE flux: the
+  second-order row transfers exactly `−T'(1/2)` where ṁ needs `−T'(theta)`, and the difference is
+  the sensible heat of the material between the face and the interface, which the scheme has no
+  equation for. `plane x scriven` therefore stays at −5.7 % at an 8-cell layer.
+* **F1 (the fit's `O(h/R)` interface-curvature bias) is REPLACED, not removed.** The operator's own
+  geometric bias on `sphere x linear` is **+11.0 % at R = 20** against the fit's +6.2 % — larger,
+  and still first order. Its mechanism is the row's `theta` CLAMP: on a face whose axis is nearly
+  TANGENT to the interface `theta = |phi_i|/|n_d|` diverges, `thetaMax = 1.9` truncates it, and the
+  row therefore over-draws on exactly the faces a sphere has most of. The curvature-consistent
+  distance (item 3) is worth 1.4 of those 11 points.
+
+And one error nobody had booked, which item 1 turned from harmless into fatal and then into the
+gate's key: **the divergence-source deposit.** Under the shipped ṁ, an interfacial cell the joined
+sheet gives no area produces no mass and needs no deposit. Under the operator flux the area cancels,
+so those cells — **27–29 % of the total interfacial heat** — must evaporate, and they are precisely
+the cells deep in the band whose along-the-normal deposit walk fails. Leaving the source in place
+puts `div(open u) = S` on their own faces and Weymouth–Yue then advects the colour with a field that
+is not the liquid velocity: the VOLUME AUDIT reads **0.935** instead of 1.000000 and the bubble grows
+5 % too slowly with a correct ṁ. With `set_phase_change_deposit_fallback(True)` the audit is
+1.000000, `band_div` is back at 9.5e-13 and Ja 0.5 closes at 0.027 %.
+
+### Open, and the corrected gates this WO proposes
+
+1. **P3 is CLOSED at Ja 0.5 (0.027 % / +0.027 %) and OPEN at Ja 2 (3.644 % / −1.321 %)**, and the
+   Ja 2 residual is a START-UP transient of an under-resolved scene (thermal layer 2.82 cells at
+   `t0`, `R0/(2 beta^2) = 0.54 cells`), not a rate error — the trace recovers monotonically from
+   −4.00 % to −2.32 % and `beta_eff` is already better than the shipped scheme's. The clean next
+   probe is a LATER start (`--r0 10` at Ja 2 keeps `R/L` and doubles the initial layer) rather than
+   another operator change.
+2. **A conserved `mdot` is a CELL-FACE flux.** The interfacial cell is a Dirichlet identity row, so
+   it has no `rho c_p dT/dt` and the heat stored between the cell face and the interface is
+   unbooked. That is the last first-order term in the rung and no row order removes it. The design
+   that does: give the interfacial cell its OWN energy equation — a Robin/mixed row carrying its
+   heat capacity, with the interface condition as a source — instead of an identity row. Then the
+   operator's flux IS the interfacial flux and item 1 and item 2 stop pulling against each other.
+3. **The `theta` clamp is now the largest single a-priori error** (`sphere x linear` +11.0 % at
+   R = 20, first order). `thetaMax = 1.9` was chosen for a plane-anchored row on a PLANE; on a
+   sphere it over-draws on every near-tangential face. Raising it is not obviously right (a
+   near-tangential face's pure cell is one cell from the interface even though the interface is far
+   along that grid line) and the WO-P01 continuity requirement constrains any change. **Sweep
+   `thetaMax` on the `sphere x linear` probe before touching anything else** — it is one parameter
+   and one probe, and no work order has ever varied it.
+4. **The 192³ `R 9 → 30` rung DIVERGES** (dt-collapse guard at step 199, CFL 0.9079). It is the
+   rung's sharpest open item and it is WO-P3f's open item 6 at the resolution where it bites: at
+   `R/h = 30` the `+n` deposit walk fails on a real population of cells and item 1 gives every one
+   of them a source. The 5³ fallback fixes it at `R/h ≤ 20`; whether it is enough at 30, or whether
+   the deposit needs a genuine band-extended velocity (VOF_PLAN §9 item 3, still not implemented),
+   is the question a P3h has to answer, and it is the same question a bubble swarm will ask.
+5. **`set_phase_change_deposit_fallback` should probably become the default**, independently of
+   this rung: it is provably inert wherever the along-the-normal rule succeeds (`fallback` 0 =>
+   byte-identical, measured), and it is the difference between 0.027 % and 3.489 % here. WO-P3f's
+   open item 6 asked for exactly this and it is now settled on the Scriven scene; what it still
+   needs is the planar and MPI batteries at `deposit_fallback = 1` (this WO ran them at the
+   shipped default).
+6. **`-q_gfm/E_lat` should be read from `q_operator`, not from the budget.** The budget instrument
+   pairs (inner unmasked cell, any masked neighbour) while the operator pairs (inner masked cell,
+   any neighbour that carries a row); on a curved interface those two sets differ by 0.08–0.2 % and
+   on a plane that cuts the domain boundary by 5e-4. `phase_change_diagnostics()['q_operator']` is
+   the one that is exactly the mass balance.
+7. **The VOLUME AUDIT belongs in every P-rung gate list.** `d(gas)/d(gas booked)` is one line of
+   Python, it reads 1.000000 for a healthy run, and it is what separated "the flux is wrong" from
+   "the flux is right and the colour field does not follow" in twenty minutes after six work orders
+   had been arguing about the flux.
+
+### Which default shipped, and why
+
+**`set_phase_change_energy_order(1)` — the shipped scheme — remains the default, and
+`origin/main`'s behaviour is unchanged** (`test_vof_phase_change` is identical to `origin/main`
+apart from the new K5 block; the whole `tests/kokkos` battery and the MPI battery are green at the
+defaults). The work order's rule is explicit — the new operator becomes the default only on a
+PASSED gate (d) — and gate (d) is passed at Ja 0.5 and not at Ja 2.
+
+That is a deliberately conservative call, and the coordinator should read it against what the rung
+actually established, because this is the first time in seven work orders that the P3 gate has
+closed at all:
+
+* Ja 0.5, 128^3: **0.027 % / +0.027 %** against the shipped **1.036 % / −1.655 %** — a factor 40,
+  with the volume audit at 1.000000 and `band_div` at 9.5e-13;
+* the mesh ladder at fixed `R/L` is no longer anti-convergent (below), which retires the single
+  strongest statement WO-P3f made;
+* the enthalpy books close at round-off, which no previous rung could say;
+* Ja 2's residual is a start-up transient of a scene whose thermal layer is 2.8 cells where it
+  begins, and its `beta_eff` is already better than the shipped scheme's.
+
+**What would settle it in one run each:** Ja 2 from a later start (`--r0 10`, same `R/L`), and the
+P2 order ladder at `--energy-order 2`. If both hold, flipping the default is a one-line change in
+`enablePhaseChange` and the four options collapse into it.
+
+---
 
 ## WO-P23 findings (Part II, rungs P2 + P3) — 2026-09-02/03, Opus
 
