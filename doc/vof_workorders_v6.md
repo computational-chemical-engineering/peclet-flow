@@ -952,6 +952,48 @@ window** — quoted here because it already settles the transcription, not as co
    measurement of what "0.84 turnovers is a transient" cost, and it is the reason W3 exists.
 
 
+### 7. The run's own finding: `channel_18` loses Weymouth–Yue boundedness at ~1.6 turnovers, and the first thing anyone hears is `capillary limit = -nan`
+
+The first production chunk ran **10 826 steps at a flat 106 ms/step, pressure 12–13/800, U_b steady
+at 0.604**, and then died at `t u_tau/h = 1.592` with
+
+```
+RuntimeError: surface tension: dt = 0.003088 exceeds the capillary limit -nan
+             (Brackbill sqrt((rho_1+rho_2) h^3/(4 pi sigma)) = -nan ...)
+```
+
+**That message is a symptom three steps downstream of the cause.** `phaseDensitySum()` is
+`rho_min + rho_max` over the field and this case's closure is `rho = 1 − 0.9 C`, so the Brackbill
+expression can only go `-nan` once the colour is past **≈ 1.11** somewhere: the failure is
+Weymouth–Yue **boundedness**, and boundedness is exactly the property WY does not have
+unconditionally (conservation does — the flux sum telescopes whatever C does, which is why volume
+was still perfect on the way down). The last checkpoint, step 10 000 at 1.476 turnovers, is
+completely healthy: every marker's volume `523.6007 … 523.6105` against a seed of 523.599, colour
+in `[−2.3e-18, 1.000000]`, `max|u| = 0.86` physical, pressure 12/800 — **and two markers 8.66 cells
+apart at D = 10 cells**, i.e. in contact, with their CSF forces ADDING through UNPACK_SUM.
+
+Three separate things made this a crash instead of a warning, and all three are fixed:
+
+1. **dt was re-picked every 10 steps.** VOF_PLAN §13.2 item 9 says every ten is not enough and this
+   is the case that proves it: a colliding pair's interface-local velocity only has to grow 2.5x
+   inside ten steps to take the Courant from the targeted 0.1 to the proven 3-D cap of 0.25. Now
+   **every step**, at safety **0.25** (Courant 0.0625, a 4x margin) — which costs ~1.6x in step
+   count, i.e. ~7.6 GPU-hours for the 20 turnovers instead of 4.3.
+2. **`min(x, nan)` is `x` in Python.** A non-finite limit passed straight through the driver's
+   `dt = min(dt, f*cfl_dt, f*capillary_dt)` and the solver's own throw was the first sign. Both
+   limits are now checked for finiteness and positivity before they are used, and a non-finite one
+   is reported as "the state is already broken" rather than as a dt choice.
+3. **Nothing was watching the colour.** The progress line now carries `max C` with a hard stop at
+   `1 + 1e-6`, so the run ends while its checkpoint is still good.
+
+**The general statement, and it belongs in the block container's rating:** a marker PAIR IN CONTACT
+is the block path's stiffest configuration, because the two markers' CSF forces sum on the same
+faces while the film between them is resolved only to the grid (W2 gate 3 measured 2 cells at
+D/Δ ≈ 10, and this case is D/Δ = 10). W2 gated that pair *kinematically* and at rest; a turbulent
+channel drives them together at Re_tau 127 and the resulting interface-local Courant is what
+selects the time step for the whole run.
+
+
 ## WO-V9 findings — the VoF performance profile, and the one lever the numbers justify — 2026-09-04, Opus
 
 Branch `vof-v9`, worktree `../flow-v9`, from `origin/main` at `40fc1b7`.
