@@ -106,20 +106,28 @@ def post_sdf(P):
 class Health:
     def __init__(self, cap=PRESS_CAP):
         self.cap, self.iters, self.div, self.capped = cap, 0, 0.0, 0
+        self.failed = 0          # ISSUES sweep item 6: preconditioner breakdowns
 
     def sample(self, s):
         it = s.last_pressure_iterations()
         self.iters = max(self.iters, it)
         self.capped += int(it >= self.cap)
+        # ISSUES sweep item 6. A solve that gives up on a non-finite preconditioner output used to
+        # print one line to stdout, zero the correction and report 0 iterations -- so this very
+        # check said "no capped solve, run valid" while the projection had been handed NOTHING.
+        # It now reports the CAP (so `capped` sees it) and raises this flag, which is the one that
+        # names the mechanism.
+        self.failed += int(s.pressure_solve_failed())
         self.div = max(self.div, s.max_open_divergence_projected())
 
     @property
     def valid(self):
-        return self.capped == 0
+        return self.capped == 0 and self.failed == 0
 
     def __str__(self):
-        return (f"pressure {self.iters}/{self.cap} ({self.capped} capped) "
-                f"{'OK' if self.valid else '*** CAPPED -> RUN INVALID ***'}, "
+        return (f"pressure {self.iters}/{self.cap} ({self.capped} capped, "
+                f"{self.failed} preconditioner breakdowns) "
+                f"{'OK' if self.valid else '*** INVALID RUN ***'}, "
                 f"max|div(open u)|_projected {self.div:.3e}")
 
 
@@ -303,7 +311,19 @@ def main():
     ap.add_argument("--budget", type=float, default=0.0)
     ap.add_argument("--npy", default="")
     ap.add_argument("--out", default="")
+    # ISSUES sweep item 6: restore the ORIGINAL 56-post array (narrowest throat 3.08 cells) that
+    # emitted `CutcellMG::solveFCG: preconditioner produced non-finite z` four times in a row and
+    # then kept running. It is the reproducer for the visibility gate, not a scene to publish.
+    ap.add_argument("--reproduce-wov7", action="store_true")
     a = ap.parse_args()
+    if a.reproduce_wov7:
+        global NCOL, NROW, X0, DX, DY, R_POST, MIN_GAP
+        NCOL, NROW = 7, 8
+        X0, DX = 16.0, 16.0
+        DY = NY / NROW
+        R_POST = 5.7
+        MIN_GAP = 3.0
+        print("*** --reproduce-wov7: the 56-post / 3.08-cell-throat array (ISSUES item 6) ***")
     print("WO-V7 case 3 — a Zhao-2019-style 2-D micromodel.  Static contact angle (V5b); the")
     print("capillary number is APPARENT (mu_l U_inlet / sigma).")
     P, gmin, gmean = posts()

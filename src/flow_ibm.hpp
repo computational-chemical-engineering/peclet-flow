@@ -2446,6 +2446,10 @@ class Solver {
     return m;
   }
   long lastPressureIterations() const { return lastPressureIters_; }
+  // ISSUES sweep item 6: did the last pressure solve break down (non-finite
+  // preconditioner output / recurrence scalar)? A failing solve also reports the
+  // iteration cap through `lastPressureIterations()`.
+  bool pressureSolveFailed() const { return lastPressureFailed_; }
   // Per-phase wall times of the last step() in seconds, THIS RANK (device-fenced at each phase
   // boundary): predictor = ghost fills + RHS/advection/stencil builds, momentum = the per-component
   // implicit-diffusion solves, projection = the cut-cell pressure projection; step = the whole
@@ -5698,6 +5702,11 @@ class Solver {
           mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
                        fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_});
     }
+    // ISSUES sweep item 6: a solve that gave up on a non-finite recurrence scalar reports the
+    // iteration CAP (see CutcellMG::solvePCG) and raises this flag, so `pressure_solve_failed()`
+    // and the usual rule-3b "no capped solve" check both catch it. It used to print one line to
+    // stdout, silently zero the correction and report 0 iterations.
+    lastPressureFailed_ = mg_.lastSolveFailed();
     if (fluidOnlyMode_ == 2) {
       // Pin phi at solid-centered cells to 0 (their rows are unconstrained; the smoother must not
       // leave garbage there -- projectCorrect reads phi_s at fluid|solid faces and the
@@ -10398,6 +10407,7 @@ class Solver {
   // fixed (per-fluid-component null-space projection; see ../docs/DECOMPOSITION_AND_MULTIGRID.md).
   int pressAgglomMode_ = -1;
   long lastPressureIters_ = 0;
+  bool lastPressureFailed_ = false;  // ISSUES sweep item 6
   // ISSUES sweep item 5: has the collocated MAC face field ever been built (by a projection
   // or by `seedFaceFieldFromCells`)? Meaningless on the staggered grid.
   bool faceFieldValid_ = false;
