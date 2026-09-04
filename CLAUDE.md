@@ -654,7 +654,9 @@ Findings and every measured number: `doc/vof_workorders_v6.md` § "ISSUES sweep"
   equivalent-and-wider one from branch `rel-issues` (another session), which is what main now
   carries — `set_domain_bc(face, 4)` on both grids, gated by `tests/kokkos/test_freeslip.cpp` and
   the free-slip pass of `test_velocitymg_bc_mpi`. `vof_issues_sweep.py freeslip` was written
-  against the dropped implementation's gates and has not been re-run against this one.
+  against the dropped implementation's gates and passes unchanged against this one (re-run
+  2026-09-04 on OpenMP and CUDA: half channel == the scheme's discrete parabola to 1.2e-10,
+  == the symmetry plane of the full no-slip channel to 9.7e-13).
 
 **Static contact angle on SDF solids (rung V5b, WO-S).** `set_contact_angle(theta_deg)` (or
 `set_contact_angle_field`) replaces **pass 1 only** of the V5a solid-band fill by the volume
