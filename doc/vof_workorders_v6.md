@@ -867,8 +867,15 @@ Both at their OWN operating point, both on Snellius, both to the same 20 eddy tu
 | grid | 192 x 160 x 96 = 2.95 M cells (anisotropic, `D+ = 2.08/1.59`) | 128 x 80 x 64 = 0.66 M cells (isotropic, `D+ = 3.18`) |
 | dt | adaptive at `CFL 0.1`, ~1.7e-3 | adaptive at `0.4 x min(CFL, capillary)`, ~3.3e-3 |
 | steps to 20 turnovers | ~280 000 | ~143 000 |
-| measured | **0.069 s/step** (VOF 0.016, U 0.019, P 0.011, stats 0.008) | see the run below |
-| 20 turnovers | **~6.0 h wall, ~430 core-hours** | see the run below |
+| measured | **0.069 s/step** (VOF 0.016, U 0.019, P 0.011, stats 0.008) | **0.106 s/step**, flat over the first 5600 steps, pressure 12/800 |
+| 20 turnovers | **~6.0 h wall, ~430 core-hours** | **~4.3 h wall, ~4.3 GPU-hours** (762 s per turnover measured) |
+
+The H100 number is **8.3x** WO-W12's 0.879 s/step on a *shared* RTX 5080 — most of which is the
+contention that finding already flagged, not the hardware. In wall clock the two codes land within a
+factor 1.4 of each other for the same physical window, on hardware whose SBU cost differs by more
+than that; per cell-step the GPU is ~1.5 us against 64 cores' ~0.023 us wall (a factor ~57 in the
+CPU code's favour), and the case is simply small for an H100 — WO-V9 measured that at these sizes
+the pressure projection is 43-88 % of a step and launch-latency bound.
 
 TBFsolver's rate is **45.8 s per unit of `t`**, flat over the first 24 units (the probe and the
 production run agree). Its Poisson solve is a constant-coefficient FFT with the Dodd–Ferrante
