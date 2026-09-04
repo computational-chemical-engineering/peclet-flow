@@ -494,6 +494,74 @@ table as the a-priori gate.
 
 ---
 
+## WO-W4 — Part III: overlapping markers, collision and coalescence as models  [Fable design → OPUS]
+
+**Why now.** W3 (Snellius, `channel_18`) dies at ~1.5 eddy turnovers, independent of dt, the
+moment two markers interpenetrate: the block CSF scatters each marker's face force with
+UNPACK_SUM while the projection sees the union `max` colour, so on a face inside the overlap two
+forces act against one colour jump and the balanced-force pairing (V4's whole point) is broken —
+the post-projection face velocity jumps 10–90× within one step. This is W4 arriving early: the
+container's *raison d'être* (no numerical coalescence) has to be paid for with an explicit
+force rule and explicit collision/merge/breakup models.
+
+**Design.**
+1. *One force per face, from the union.* Where markers overlap, the physical interface is the
+   union's; the force on a face must be `σ κ_f ΔC_union/h` with ONE curvature. Rule: each block
+   computes its own κ on its own colour (as now); the scatter carries per-face `(κ_marker, ΔC_marker)`
+   pairs; the owner forms the face force ONCE from `ΔC_union` (the union colour's own face
+   difference, i.e. the projection's operator) with `κ_f` = the ΔC-weighted mean of the markers'
+   κ_f on that face. Faces with a single marker reduce bitwise to today's rule (gate). Faces
+   where two markers' ΔC have opposite sign (the film between two bubbles) get the union's ΔC,
+   which is what a single-field VoF would apply — the film then drains or not by the physics of
+   the union, and the markers keep their identities regardless.
+2. *Collision model.* Per pair with overlapping boxes: the film thickness `h_f` (minimum
+   distance between the two markers' PLIC planes along the line of centres — measured in the
+   overlap band), the approach velocity, and the collision Weber number
+   `We_c = ρ_l U_rel² D_eq/σ`. Default: **no merge** (the physically correct default for
+   bubbly flows; TBFsolver's choice); reported per pair in `vof_block_stats()`.
+3. *Coalescence as a model.* `set_block_coalescence(model, params)`: (i) `"film"` — merge when
+   `h_f < h_crit` for longer than a film-drainage time `t_d = C·μ_l D_eq/σ` (Prince & Blanch
+   1990 form; `C` explicit), (ii) `"weber"` — merge when `We_c < We_crit` at contact, (iii)
+   `"never"`. Merge = deliberate block union: a new block whose box is the bounding box of both
+   and whose colour is the union `max` (the only place `max` is used to CREATE colour), the two
+   old blocks retired; volumes add exactly.
+4. *Breakup.* In-block connected-component labelling of `C > ½` on the block (a Kokkos
+   union-find or iterative label propagation on the small box); when a block holds two components
+   for `N_split` consecutive steps (default 3, to ignore transient necks) it is split into two
+   blocks (each with its component's colour; the other component's colour zeroed), volumes exact;
+   satellites below `V_min` cells are either kept as tiny blocks or absorbed (policy explicit,
+   default keep, counted).
+5. *Statistics.* Per-pair events (approach, contact, merge, split) with times and the
+   quantities above, so a bubbly-flow run yields a collision census.
+
+**Gates.**
+- **G1 single-marker bit-identity**: with one marker per bubble and no overlaps, the new force
+  rule is bitwise the W2 rule on Hysing-blocks and the W2 pair scene (colour, u, P).
+- **G2 the W3 blow-up scene**: the two-marker interpenetration checkpoint from W3
+  (`tests/study/channel_18/` checkpoints on the vof-w3 branch; the pair at `dmin ≈ 8` cells) runs
+  100 steps past the old failure point with `max|uf|` bounded by 3× its pre-contact value and
+  both volumes conserved to 1e-12; then the full `channel_18` chain on Snellius (1 GPU, ≤ 8 GPU-h,
+  state the cost first) reaches ≥ 5 eddy turnovers or reports the next failure mode.
+- **G3 head-on pair, no merge** (`"never"`): two equal bubbles rising in line at Eo = 10 collide,
+  the film drains to ≤ 1 cell, they bounce or slide, both markers keep their volumes to 1e-12 and
+  the union colour never exceeds 1 (report the film thickness history).
+- **G4 merge model**: the same pair with `"weber"` at a permissive `We_crit` merges into one
+  block whose volume is the sum to 1e-12; the merged bubble's rise velocity approaches the
+  Grace value for the doubled volume within 10 %.
+- **G5 breakup**: a single elongated bubble (a capsule seed of aspect 4 at Eo = 40) breaks; the
+  container reports the split within `N_split` steps, the two child volumes sum to the parent
+  to 1e-12, and the single-field control gives the same child volumes within 1 % at the split.
+- **G6 MPI** np 1/2/4 at the reduction floor on G3/G5 with the ORB cutting the pair; the
+  event census identical across np.
+- **G7** every existing block ctest and every VoF ctest bit-identical when no overlap occurs.
+
+**Deliverables.** The force rule in the block CSF scatter/owner assembly, the pair census,
+`set_block_coalescence`, the split/merge machinery in `src/vof/block_container.hpp`, bindings,
+`tests/kokkos/test_vof_blocks.cpp` extended (G1, G3, G5 small), MPI twin, `tests/study/vof_blocks_collide.py`,
+findings, CLAUDE.md.
+
+---
+
 ## WO-V7 — the pore-scale campaign (after WO-R2)  [OPUS runs, Fable/user interpret]
 
 Three cases, each a script under `tests/study/pore_scale/` and together one gallery page
