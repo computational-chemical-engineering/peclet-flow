@@ -863,7 +863,7 @@ Both at their OWN operating point, both on Snellius, both to the same 20 eddy tu
 
 | | TBFsolver | peclet block VoF |
 |---|---|---|
-| hardware | 64 genoa cores (1 node, `px 8, py 1, pz 8`) | 1 H100 |
+| hardware | 64 genoa cores (1 node, `px 8, py 1, pz 8`; SLURM billing 72/h) | 1 H100 (SLURM billing **192 SBU/h**) |
 | grid | 192 x 160 x 96 = 2.95 M cells (anisotropic, `D+ = 2.08/1.59`) | 128 x 80 x 64 = 0.66 M cells (isotropic, `D+ = 3.18`) |
 | dt | adaptive at `CFL 0.1`, ~1.7e-3 | adaptive at `0.4 x min(CFL, capillary)`, ~3.3e-3 |
 | steps to 20 turnovers | ~280 000 | ~143 000 |
