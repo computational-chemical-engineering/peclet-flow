@@ -22,7 +22,7 @@ rsync -av "$HOST:$CH18/runs/prod/stats.npz" "$HOST:$CH18/runs/prod/chunks.jsonl"
 rsync -av --include='ch18w3-*.out' --exclude='*' "$HOST:$CH18/" "$DST/logs/" || true
 
 echo "== TBFsolver: the LAST written output folder =="
-LAST=$(ssh "$HOST" "ls -d $TBF/[0-9]* 2>/dev/null | sort -t/ -k+0 -n | tail -1")
+LAST=$(ssh "$HOST" "cd $TBF 2>/dev/null && ls -d [0-9]* 2>/dev/null | sort -n | tail -1 | sed 's|^|$TBF/|'")
 echo "  $LAST"
 if [ -n "$LAST" ]; then
   mkdir -p "$DST/tbf"
