@@ -75,7 +75,8 @@ TARGET = float(arg("--turnovers", 20.0))
 STATS_START = float(arg("--stats-start", 4.0))
 SAMPLE = int(arg("--sample", 10, int))
 CKEVERY = int(arg("--ckpt-every", 2000, int))
-DTEVERY = int(arg("--dt-every", 10, int))
+DTEVERY = int(arg("--dt-every", 1, int))
+DTSAFE = float(arg("--dt-safety", 0.25))
 QUICK = "--quick" in sys.argv
 
 if QUICK:                                    # build/plumbing validation, not physics
@@ -444,7 +445,21 @@ def main():
             L = s.vof_step_limits()
             dt = 0.2 / max(np.abs(s.get_u()).max(), np.abs(s.get_v()).max(),
                            np.abs(s.get_w()).max(), 1e-30)
-            dt = min(dt, 0.4 * L["cfl_dt"], 0.4 * L["capillary_dt"])
+            # A NON-FINITE limit is a state failure, not a large dt, and Python's min() would let
+            # it through silently (min(x, nan) == x): the capillary limit is
+            # sqrt((rho_min + rho_max) h^3 / 4 pi sigma), so it goes -nan the moment the colour
+            # leaves [0,1] far enough to make a density negative.  Refuse to step on it.
+            for nm in ("cfl_dt", "capillary_dt"):
+                if not (L[nm] > 0.0 and math.isfinite(L[nm])):
+                    with open(CKPT + ".failed", "w") as f:
+                        f.write(json.dumps({"step": i, "t": t, "turnovers": t * UTAU,
+                                            "limit": nm, "value": L[nm],
+                                            "vof": s.vof_diagnostics()}, default=float) + "\n")
+                    raise SystemExit(
+                        f"  *** step {i}: {nm} = {L[nm]} at t u_tau/h = {t*UTAU:.4f} — the state "
+                        f"is already broken (the colour has left [0,1]); the last checkpoint is "
+                        f"untouched.")
+            dt = min(dt, DTSAFE * L["cfl_dt"], DTSAFE * L["capillary_dt"])
             s.set_dt(dt)
         t += dt
         try:
@@ -470,9 +485,21 @@ def main():
             sample(acc, s, t)
         if i % 200 == 0:
             el = time.time() - wall0
+            D = s.vof_diagnostics()
+            cmx = max(float(D.get("max", 0.0)), float(D.get("max_fluid", 0.0)))
             print(f"    step {i:7d}  t u_tau/h = {t*UTAU:8.4f}  dt = {dt:.3e}  "
-                  f"U_b = {s.get_u().mean()/S:.4f}  press {it:3d}/800  "
+                  f"U_b = {s.get_u().mean()/S:.4f}  press {it:3d}/800  maxC {cmx:.6f}  "
                   f"{1000*el/max(stepped,1):.0f} ms/step  ({el:.0f} s)", flush=True)
+            # The colour leaving [0,1] is the Weymouth-Yue boundedness cap being exceeded, and it
+            # is QUIET: volume still telescopes exactly, so nothing else notices until a density
+            # goes negative and the capillary limit returns -nan.  Stop while the checkpoint is
+            # still good.
+            if not (cmx <= 1.0 + 1e-6):
+                with open(CKPT + ".failed", "w") as f:
+                    f.write(json.dumps({"step": i, "t": t, "turnovers": t * UTAU,
+                                        "max_C": cmx, "dt": dt}, default=float) + "\n")
+                raise SystemExit(f"  *** step {i}: max C = {cmx} > 1 — Weymouth-Yue boundedness "
+                                 f"lost.  Reduce --dt-safety and restart from the checkpoint.")
         done_t = t * UTAU >= TARGET
         done_w = (time.time() - wall0) > WALL
         if done_t or done_w or (i % CKEVERY == 0) or stepped >= NSTEP:
