@@ -865,6 +865,24 @@ every rule and `35d951c` goes further (it also mirrors the SDF ghost band about 
 **Take `35d951c` and drop this branch's `5a453f3`**; what is additive and worth keeping on top is
 `tests/kokkos_mpi/test_freeslip_bc_mpi.cpp` and the `vof_issues_sweep.py freeslip` gate.
 
+### The batteries
+
+| battery | result |
+|---|---|
+| `tests/kokkos` on this branch (nvidia-cuda) | **34/34 passed** |
+| `tests/kokkos` on `origin/main` at `fd1621d`, same machine | **34/34 passed** (the control) |
+| `tests/kokkos_mpi`: `vof_twophase_mpi`, `vof_cutcell_mpi`, `vof_wetting_mpi`, `vof_bc_mpi`, np 1/2/4 | **12/12 passed** |
+| `tests/kokkos_mpi`: the new `freeslip_bc_mpi`, np 1/2/4 | **3/3 passed** (np = 1 bitwise: du = dP = 0.000e+00) |
+
+The ctests in this repo ASSERT their recorded numbers, so "all pass" IS the bit-identity
+statement for every quantity they record; the two batteries were run without `-V`, so this is a
+pass/fail comparison and not a digit-level diff of the printed output.
+
+`contact_angle_diagnostics()` on a domain wall after the census widening (48x48x32, theta = 60,
+20 steps): `contact_cells` **280**, `neighbour_cells` 464, `mean_apparent_angle` **57.85**
+(0 before). `set_contact_angle` on a solver with no wetting wall raises with the message naming
+`set_solid` and `set_domain_bc(face, 1|4)`.
+
 ### What was NOT done
 
 - The **item-6 reproducer was not run to the failure**: `micromodel_2d.py --reproduce-wov7`
