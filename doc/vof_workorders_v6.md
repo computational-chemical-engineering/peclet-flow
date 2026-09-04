@@ -693,6 +693,195 @@ the same NPZ keys, so the two codes overlay with no further arithmetic. WO-W12's
 ships no reference statistics" stands as written — it ships no reference *data* — but the case is
 instrumented to produce exactly the comparison the rung wanted, which is the practical correction.
 
+---
+
+## ISSUES sweep — the seven fixable solver-side entries the gallery logged — 2026-09-04, Opus
+
+Branch `vof-issues`, worktree `../flow-issues`, from `origin/main` at `fd1621d`. Backend
+`nvidia-cuda` throughout (the machine's OpenMP prefix was used only for the per-commit
+syntax check). Source: the open, non-research entries of `~/Codes/peclet-examples/ISSUES.md`,
+plus `suite/docs/VOF_PLAN.md` §13 items 6 and 9. One commit per item; every item is inert when
+its feature is unused, and the whole `tests/kokkos` battery (34 ctests) is green.
+
+Gate script for the small items: `tests/study/vof_issues_sweep.py`
+(`atomic | adaptive | geometry | collocated | freeslip`). Item 3's gate is
+`tests/study/vof_wetting.py g1d`; item 6's reproducer is
+`tests/study/pore_scale/micromodel_2d.py --reproduce-wov7`; item 7's MPI gate is the new
+`tests/kokkos_mpi/test_freeslip_bc_mpi.cpp`.
+
+### Item 1 — `step()` is now ATOMIC across both explicit two-phase throws
+
+`step()` ran momentum + the projection first and the colour advection second, so a rejected
+Weymouth-Yue step left the colour untouched and the VELOCITY advanced by the rejected dt
+(ISSUES measured `max|w|` moving by exactly `g_z dt`). `vofStepPrecheck()` now evaluates BOTH
+caps at the head of the call, before the first mutator.
+
+| after the throw | `max|du|` | `max|dv|` | `max|dw|` | `max|dC|` | `max|dP|` |
+|---|---|---|---|---|---|
+| WY cap, dt = 0.4 (CFL 0.40 > 0.25) | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| capillary cap, dt = 10 dt_sigma | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+
+and a retry at the smaller dt runs. **What it can and cannot pre-empt, stated because it is a
+real limit**: the capillary hoist is exact (the cap is a function of dt, sigma, h and rho). The
+WY hoist reads the field the call STARTS from — under `enable_vof_momentum` that IS the
+advecting field, so it is exact there; without it the advection sits at the TAIL and rides
+THIS step's projected output, which does not exist yet. So the hoist pre-empts every case where
+the cap or the dt moved and not the case where the projection accelerates the field inside the
+step. Item 2 is what removes that residual, and the two were designed as a pair.
+
+### Item 2 — `step_adaptive(cfl_target, capillary_cfl, dt_max)`
+
+Two ISSUES entries (a ten-step-stale re-pick is unsafe in a packing; `capillary_dt` is
+state-dependent) have one shape: both limits are INSTANTANEOUS. The new entry point takes
+`dt = min(cfl_target*cfl_dt, capillary_cfl*capillary_dt, dt_max)` from the state as it stands,
+steps, and returns the dt.
+
+Gate: a quasi-2D 32x4x64 rising bubble (ratio 10, FCG, 200 steps) against the hand-written
+gallery loop, in two configurations so both branches of the `min` bind:
+
+| configuration | binding limit | dt range | `max|d dt|` | state difference |
+|---|---|---|---|---|
+| cfl 0.4, cap 0.4, sigma 0.02, dt_max inf | CFL, 200/200 steps | 0.334946 … 0.337512 | 0.000e+00 | u,v,w,C,P all 0.0 |
+| cfl 0.2, cap 0.4, sigma 0, dt_max 1.0 | CFL, 200/200 steps | 0.167473 … 0.168618 | 0.000e+00 | u,v,w,C,P all 0.0 |
+
+The equality is exact rather than lucky: IEEE multiplication is monotone, so
+`f*min(a,b) == min(f*a, f*b)` for positive finite arguments, which is why a C++ `min` of the
+scaled limits reproduces the Python `scale * min(limits)` bit for bit.
+
+**A `dt_max` is not optional on a scene starting from rest.** With no surface tension and a
+quiescent field both limits are `+inf`, and the hand-written loop happily calls
+`set_dt(inf)`; `step_adaptive` refuses with a message naming both limits.
+
+### Item 4 — `vof_geometry()` on an all-fluid solver
+
+Returns the trivial geometry (eps = 1, openness = 1, classification 0) instead of raising.
+Measured on a 32^3 all-fluid VoF solver: `vof_has_geometry()` False, `vof_geometry(0..3)`
+exactly 1.0 and `vof_geometry(4)` exactly 0.0 over all 32768 cells, and E7's
+`vof_geometry(0)*(1 - get_vof())` runs against the packed scene and its control unchanged.
+
+### Item 5 — `SolverColocated`: `set_state` seeds the face field
+
+The collocated colour rides `uf_/vf_/wf_`, which only a projection built; `set_state` wrote the
+CELL field, so on a fresh solver the advecting field was zero — and perfectly divergence-free,
+which is why the guard passed and the advection was a silent no-op.
+
+| 32^3 LeVeque, cell-centre sampled | before | after |
+|---|---|---|
+| `max|u|` after `set_state` | 63.23 | 63.23 |
+| `max|uf|` after `set_state` | **0.0** | **63.23** |
+| `max_open_divergence_projected()` of that face field | 0.0 (of nothing) | **2.487e-14** |
+| `max|C - C0|` after 10 kinematic steps at CFL 0.2 | **0.0** | 1.0 |
+| `sum C` before / after | — | 468.631570673 / **468.631570673** |
+| vs a staggered `Solver` handed the same face field | — | **max|dC| = 0.0 (bitwise)** |
+
+The 2.487e-14 is worth keeping: it confirms the ISSUES entry "the LeVeque field sampled on the
+FACES is already discretely solenoidal" — the cell-centre samples averaged to faces by
+`centerToFace` are solenoidal to round-off, so the guard now *measures* something instead of
+certifying a zero field. A collocated solver whose face field was never built at all is
+refused with a message naming `set_state`/`step()`.
+
+### Item 6 — a preconditioner breakdown is VISIBLE
+
+`solvePCG`/`solveFCG` printed one line, zeroed the correction and returned **0 iterations**, so
+a rule-3b "no capped solve" check passed while the projection had been handed nothing. Now:
+`CutcellMG::lastSolveFailed()` -> `Solver.pressure_solve_failed()`, the return value is the
+iteration CAP, and `PECLET_FLOW_PRESSURE_STRICT=1` raises instead. The mid-iteration non-finite
+guards (rz, rzcross, pAp) set the same flag; `pAp <= 1e-300` deliberately does not — that is a
+converged direction, not a breakdown.
+
+### Item 7 — domain BC type 4 = FREE SLIP
+
+Impermeable + zero tangential gradient = the WALL's normal rule plus the OUTFLOW face's
+tangential rule, at every site, which is why the change is a dispatch and not new physics.
+
+| 32-cell half channel, no-slip -z / free-slip +z, Stokes, F = 1e-3, mu = 0.05 | value |
+|---|---|
+| `u_max` | 10.24000000 |
+| the scheme's own discrete parabola `F/(2mu)(H^2-(H-z)^2 + h^2/4)` | 10.24000000, rel err **1.194e-10** |
+| the CONTINUUM parabola | 10.23750000, rel err **2.442e-04** |
+| vs the lower half of a 64-cell channel with no-slip BOTH sides | **1.131e-12** |
+
+The 2.442e-04 is exactly `h^2/4 * F/(2 mu) / u_max` and belongs to the NO-SLIP wall's mirror
+ghost (`u(-h/2) = -u(h/2)` is exact only for an odd function, and `z^2` is even), not to the
+free-slip face — which contributes no error at all. The second row is the decisive one: free
+slip IS a symmetry plane and the half channel reproduces the full channel's lower half to the
+solver's own floor.
+
+### Item 3 — `set_contact_angle` on a DOMAIN-BC wall
+
+A domain wall IS a flat SDF wall on the boundary face, so the repair is a SYNTHESISED cut-cell
+geometry for the impermeable faces (type 1 and 4) rather than a new fill rule: WO-S's theta
+pass, WO-Q's passes 2-3, the census and V6's dynamic angle all run unchanged.
+
+| theta_set | SDF wall (z = 4.25, WO-S G1) | DOMAIN wall (bc type 1 at z = 0) | difference |
+|---|---|---|---|
+| 60  | 59.988 (err -0.012) | 59.507 (err **-0.493**) | -0.481 |
+| 90  | 88.846 (err -1.154) | 89.688 (err **-0.312**) | +0.842 |
+| 120 | 116.808 (err -3.192) | 117.976 (err **-2.024**) | +1.169 |
+
+Volume drift 2.5e-16 / 4.5e-15 / 1.8e-15, pressure 8-9 iterations (uncapped), max|u| 2e-4 .. 1e-3,
+500 steps, D/dx = 24, Oh = 0.1, ratio 1.
+
+**The work order's gate ("within 1 deg of the SDF-wall result at 60/90/120") FAILS at theta = 120
+(1.169 deg), and it is measuring the wrong quantity — rule 4, the sixth gate in this campaign to
+do so.** The SDF reference carries WO-S's own documented **-3.6 deg bias above 90 deg**, which
+that rung traced to CONTACT-LINE RESOLUTION (its two failing rows are the two whose contact
+radius is under ten cells) and not to the cut cell. Asking a different discretisation to agree
+with that reference to 1 deg is asking it to be wrong in the same way. Against the PRESCRIBED
+angle — the quantity the rung is actually rated on — the domain wall reads
+**-0.49 / -0.31 / -2.02** against the SDF wall's **-0.01 / -1.15 / -3.19**: equal or BETTER at
+two of the three angles, and inside WO-S's published "within 1.2 deg up to 90 deg" everywhere.
+**Proposed corrected gate: |theta - theta_set| no worse than the SDF wall's own error at the same
+angle, plus 0.5 deg** (which the measured rows pass: 0.49 vs 0.01+0.5, 0.31 vs 1.15+0.5,
+2.02 vs 3.19+0.5). Nothing was tuned.
+
+Two construction facts worth carrying:
+
+- **The classification exchange UNDOES the synthesised band, and that is what made the first
+  attempt silently inert.** `buildVofGeometry` runs `vofExchangeRaw(kindDouble())` so every ghost
+  layer holds its OWNER's classification — and that call ends in `clampFill`, whose zero-gradient
+  copy sets an out-of-domain ghost back to the first INNER cell's value, i.e. FLUID. The band is
+  the one region with no owner, so it has to be re-imposed after the exchange
+  (`imposeDomainWallKind`). Symptom of the version without it: contact census 0 and an
+  equilibrium of **141 deg at every prescribed angle** — the perfectly non-wetting empty band,
+  which is exactly what the ISSUES entry reported for the unfixed solver.
+- **The DEPTH-3 band layer cannot be written by any fill pass** — the passes stop at ghost depth
+  `3-k` and their 6-point stencil would index outside the g = 3 block there — so it takes the
+  zero-slope continuation of the theta band (`vofExtendWallBand`) instead of a theta plane. For an
+  SDF wall inside the domain the band is made of INNER cells and all three layers get the plane.
+  That asymmetry is the named lever if the theta = 120 row is ever pushed further.
+- `contact_angle_diagnostics()['contact_cells']` needed widening too: a domain wall's band is
+  entirely in the GHOST layers, so the inner-region census read 0 — the exact tell the ISSUES
+  entry named. `wettingCensusGhost` counts the band (`wettingCensus`, the 3-argument spelling, is
+  unchanged **including its function-pointer type**, which `test_vof_wetting_mpi` takes the
+  address of — a default argument there breaks the nvcc device-lambda stub).
+
+### One collision to resolve before merging
+
+**Item 7 duplicates flow `35d951c`** ("feat(bc): free-slip / symmetry domain BC ... both grids,
+MPI", branch `rel-issues`, committed the same afternoon by a concurrent session), and
+peclet-examples `main` already closes that ISSUES entry against it. The two designs AGREE in
+every rule and `35d951c` goes further (it also mirrors the SDF ghost band about a type-4 face).
+**Take `35d951c` and drop this branch's `5a453f3`**; what is additive and worth keeping on top is
+`tests/kokkos_mpi/test_freeslip_bc_mpi.cpp` and the `vof_issues_sweep.py freeslip` gate.
+
+### What was NOT done
+
+- The **item-6 reproducer was not run to the failure**: `micromodel_2d.py --reproduce-wov7`
+  rebuilds the 56-post / 3.08-cell-throat array and its `Health` tracker now counts breakdowns,
+  but the run itself (it took ~0.12 pore volumes before the first breakdown) was not executed on
+  a machine carrying five other GPU jobs. The visibility change is gated by construction
+  instead: a breakdown returns `maxit` and sets the flag, and every pressure ctest is unchanged
+  because the flag is false and the return value untouched on a healthy solve.
+- The item-1 pre-check adds one `vof_max_courant()` (a velocity bridge + a colour bridge with its
+  g = 3 fill) per step on the non-momentum path. **Its cost was not measured** — the machine was
+  carrying five other jobs for the whole session, and WO-V9's own lesson is that a contended GPU
+  inverts these numbers. WO-V9 puts the g = 3 fill at 6.2 % of a step on CUDA and 15.9 % on host,
+  so the upper bound is that; the obvious mitigation, if it matters, is to bridge only the
+  velocity in the pre-check and reuse the block colour the previous step's advection left there.
+
+---
+
 ## `rebalance_by_weights` findings — the WO-V9 item 4b defect: TWO root causes, both fixed — 2026-09-04, Opus
 
 Branch `vof-rebalance`, worktree `../flow-rebalance`, from `origin/main` at `a16d9a1`. Backends:
