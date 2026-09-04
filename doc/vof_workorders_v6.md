@@ -911,6 +911,40 @@ rather than marching on. `runs/prod/chunks.jsonl` is one JSON line per chunk wit
 `max_open_divergence`, the marker volume spread and the sample count.
 
 
+### 6. TBFsolver's own `channel_18`, run — and it CONFIRMS the WO-W12 transcription
+
+64 genoa cores, `Tf = 471.35` (20 turnovers), `Ts = 94.27` (4 turnovers of transient discarded, the
+same window `run_channel_18.py` uses), `dtout = 20` so every 0.85 turnovers leaves a restartable
+snapshot AND a cumulative statistics dump. First averaged dump (`5/`, t = 100, i.e. a **0.24-turnover
+window** — quoted here because it already settles the transcription, not as converged statistics):
+
+| | TBFsolver at t = 100 |
+|---|---|
+| bulk void fraction | **1.492 %** (the case value, exactly) |
+| `<alpha>` at the centreline | **0.0394** |
+| `<alpha>` at y+ < 25 | **0** — the bubbles are in the core |
+| peak `<u>_liq/u_tau` | **16.35 at y/h = 0.706** — OFF-AXIS |
+| `<u>_liq/u_tau` at the centreline | **15.80** |
+| `u_tau` from the wall gradient | 0.04089, **−3.6 %** of the imposed 0.042433 |
+| `tauw` (time-averaged) | −3.3446e-3 |
+
+**Three things this settles, all of them things WO-W12 could only assert:**
+
+1. **`tau_w = (Re_tau/Re)^2 = 1.800588e-3` is right.** TBFsolver's own `tauw` diagnostic is the sum
+   over BOTH walls: half of it is **1.6723e-3** against the imposed 1.8006e-3 (−7.1 % at
+   t = 100, still adjusting), and the wall-gradient `u_tau` is within 3.6 % of `Re_tau nu/h`. A
+   factor-2 error in the driving force — the obvious way to mis-transcribe `flowCtrl 1` — would
+   have shown as a factor 2 here and does not.
+2. **The off-axis velocity peak is the case, not a peclet artefact.** WO-W12 measured the peak at
+   y/h = 0.74 after 0.84 turnovers and reasoned it was the core bubbles' negative streamwise force;
+   TBFsolver puts it at **y/h = 0.706** with a centreline deficit of the same sign and size
+   (15.80 against a peak of 16.35, i.e. −3.4 %).
+3. **WO-W12's centreline void fraction of 0.181 was the INITIAL CONDITION and nothing else** — it is
+   exactly `18 pi R^2/(Lx Lz) = 0.179`, the geometric value for 18 spheres whose centres all sit on
+   the centreline plane. TBFsolver, 4.2 turnovers in, reads **0.0394** there. That is the direct
+   measurement of what "0.84 turnovers is a transient" cost, and it is the reason W3 exists.
+
+
 ## WO-V9 findings — the VoF performance profile, and the one lever the numbers justify — 2026-09-04, Opus
 
 Branch `vof-v9`, worktree `../flow-v9`, from `origin/main` at `40fc1b7`.
