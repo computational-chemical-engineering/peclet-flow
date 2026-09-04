@@ -400,6 +400,100 @@ KOKKOS_INLINE_FUNCTION bool pcPushWeights(const double n[3], double sgn, const b
   return ok;
 }
 
+// ---------------------------------------------------------------------------------------------
+// (5) WO-P3g — the SECOND-ORDER interfacial energy operator
+// ---------------------------------------------------------------------------------------------
+
+/// **WO-P3g item 3 — the curvature-consistent GFM distance.**
+///
+/// `pcGfmTheta` measures cell `i`'s distance to the interfacial neighbour `j`'s PLIC PLANE. On a
+/// curved interface that is first order in `h/R`, exactly as it is for the one-sided fit
+/// (`pcCurvedDistance`), and WO-P3f measured the consequence on the row: the GFM flux carries an
+/// interface-curvature bias about TWICE the fit's (`+12.4 %` against `+6.2 %` at `R = 20`).
+///
+/// The correction is the same one, and it is exact to second order for a sphere. Cell `i` sits at
+/// integer offset `d = -s e_d` from the interfacial cell `j`, so its plane distance is
+/// `phi_i = phi_c(j) - s n_d` and its LATERAL offset from the plane's foot point is
+/// `rho^2 = |d|^2 - (d.n)^2 = 1 - n_d^2` (the foot point differs from `j`'s centre by a purely
+/// NORMAL displacement, so the tangential part of the offset is unchanged). The signed distance to
+/// the surface is then `phi_i + kappa rho^2 / 4` with `kappa = div(n)` (`-2/R` for a gas sphere),
+/// and the distance ALONG the grid line is that divided by `|n_d|` to the same order.
+///
+/// `kappa == 0` returns `pcGfmTheta` bitwise — that is the shipped default and the inertness
+/// contract of this rung.
+KOKKOS_INLINE_FUNCTION double pcGfmThetaK(double phiC, double nd, double s, double kappa,
+                                          double thetaMin, double thetaMax) {
+  if (kappa == 0.0)
+    return pcGfmTheta(phiC, nd, s, thetaMin, thetaMax);
+  const double den = Kokkos::fabs(nd);
+  const double num = Kokkos::fabs(phiC - s * nd + 0.25 * kappa * (1.0 - nd * nd));
+  if (!(num < thetaMax * den))
+    return thetaMax;
+  return Kokkos::fmax(num / den, thetaMin);
+}
+
+/// **WO-P3g item 2 — the Gibou–Fedkiw second-order one-sided (ghost-fluid) row.**
+///
+/// The shipped row is a TWO-POINT difference: for a pure cell `i` whose neighbour across the face
+/// is interfacial, the face's interior coupling `k o (T_j - T_i)` is replaced by
+/// `k o (T_Gamma - T_i)/theta`, i.e. the whole axis contributes
+///
+///     (1/theta)(T_Gamma - T_i)  +  1 * (T_behind - T_i)
+///
+/// with `T_behind` the cell one step AWAY from the interface along the same axis. That is a
+/// first-order approximation of `d2T/dx2` unless `theta = 1`, and WO-P3f measured its cost on a
+/// FLAT interface where nothing else is wrong: the flux the rows draw is **−17 %** at a 2.4-cell
+/// thermal layer and **−5 %** at 8 cells.
+///
+/// The repair is the standard non-uniform three-point second difference through
+/// `(T_behind, T_i, T_Gamma)` at spacings `(h, theta h)` — Gibou et al., JCP 176:205 (2002):
+///
+///     d2T/dx2 = 2/(h_L + h_R) [ (T_R - T_i)/h_R - (T_i - T_L)/h_L ]
+///             = 2/((1 + theta) theta) (T_Gamma - T_i)  +  2/(1 + theta) (T_behind - T_i)   (h = 1)
+///
+/// so the COEFFICIENT FAMILY is `a_Gamma = 2/((1+theta) theta)`, `a_behind = 2/(1+theta)`, against
+/// the shipped `(1/theta, 1)`. It reproduces a QUADRATIC profile EXACTLY (the three-point divided
+/// difference `2 f[x_L, x_i, x_R]` is exact for quadratics at any spacing), it reduces to the
+/// interior row at `theta = 1` bitwise (`2/2 = 1` both), and it is bounded over the shipped clamp
+/// `theta in [0.1, 1.9]`: `a_Gamma in [0.363, 18.18]`, `a_behind in [0.690, 1.818]`. The row is
+/// NON-SYMMETRIC (cell `behind` does not carry the mirror coefficient) but remains strictly
+/// diagonally dominant, which is all the red–black Gauss–Seidel smoother needs.
+///
+/// `behind == false` — the cell one step away is itself interfacial, or that face is CLOSED, so
+/// there is no third point — falls back to the shipped two-point row. This is Gibou's own rule for
+/// a stencil that cannot reach a second usable node, and it is also what the `theta -> 0` clamp
+/// leaves bounded.
+struct PcGfmRow {
+  double aGamma;   ///< coefficient of `(T_Gamma - T_i)`, times `k_f o_f`
+  double aBehind;  ///< coefficient of `(T_behind - T_i)`, times that face's own `k_f o_f`
+};
+KOKKOS_INLINE_FUNCTION PcGfmRow pcGfmRow(double theta, bool behind, int order) {
+  if (order < 2 || !behind)
+    return PcGfmRow{1.0 / theta, 1.0};
+  return PcGfmRow{2.0 / ((1.0 + theta) * theta), 2.0 / (1.0 + theta)};
+}
+
+/// **WO-P3g item 1 — `mdot` from the ENERGY OPERATOR's own interfacial flux.**
+///
+/// `q` is the heat the operator's Dirichlet rows actually draw INTO the interface from its pure
+/// face neighbours, `q = sum_p a_Gamma(p) k_p o_p (T_p - T_Gamma)` (positive = the surrounding
+/// phases are superheated and feed evaporation), `coefSum = sum_p a_Gamma(p) k_p o_p`, `area` the
+/// interfacial area of the cell and `Rint` the Schrage/IHTR resistance of `T_Gamma = T_sat +
+/// mdot R_int`. The interfacial energy balance `mdot h_lv A = q` then closes in ONE step:
+///
+///     mdot (h_lv A + R_int coefSum) = sum_p a_Gamma(p) k_p o_p (T_p - T_sat) .
+///
+/// Why this and not the least-squares fit: the heat the energy equation LOSES and the mass the
+/// regression PRODUCES become the same discrete number, so the flux consistency
+/// `-q_gfm / (mdot h_lv A)` is 1 by construction instead of the measured 0.95…1.04 (WO-P3f), and
+/// the `mdot A` products that drive the regression and the divergence source no longer contain the
+/// interfacial AREA at all — it cancels, `dV = q dt/(h_lv rho_l)`.
+KOKKOS_INLINE_FUNCTION double pcOperatorMassFlux(double q, double coefSum, double area, double hlv,
+                                                 double Rint) {
+  const double den = hlv * area + Rint * coefSum;
+  return (den > 0.0) ? q / den : 0.0;
+}
+
 /// Is this a cell the regression acts on? The PLIC contract of `advect_wy.hpp` (`wyIsMixed`) with
 /// an explicit wisp guard: a cell whose colour is round-off residue has no meaningful plane, and
 /// giving it an area would inject an unbounded `mdot` into the census.

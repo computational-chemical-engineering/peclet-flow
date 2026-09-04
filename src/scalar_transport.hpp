@@ -218,6 +218,76 @@ inline void scalarMaskGfm(CCField AC, CCField AW, CCField AE, CCField AS, CCFiel
       });
 }
 
+// **WO-P3g — the SECOND-ORDER sibling of `scalarMaskGfm`.** Same contract, same inputs plus a
+// per-cell curvature field `kap` and the row `order`; `order == 1 && !useKappa` reproduces
+// `scalarMaskGfm` line for line (it is not called then — `advanceScalars` branches outside the
+// kernel — but the two bodies are kept side by side so the difference is readable).
+//
+// What changes, and only this: the axis that carries the Dirichlet row is discretized by the
+// non-uniform THREE-point second difference through `(T_behind, T_i, T_Gamma)` instead of the
+// two-point `(T_i, T_Gamma)` one (`vof::pcGfmRow`, which writes the coefficient family out), and
+// the distance `theta` is measured to the CURVED interface rather than to the interfacial cell's
+// tangent plane (`vof::pcGfmThetaK`). `T_behind` is the cell one step AWAY from the interface along
+// the same axis; where it is itself an identity row or its face is closed there is no third point
+// and the row falls back to the shipped two-point form.
+//
+// The `behind` band is SCALED in place (`band *= a_behind`, `AC += (a_behind - 1) k_f o_f`), which
+// is why this kernel must run after the base diffusion build and before `scalarMaskStencil`, in
+// exactly the slot `scalarMaskGfm` occupies. Each axis touches only its own two bands and a masked
+// pair on the same axis takes the two-point branch on both sides, so no band is written twice.
+inline void scalarMaskGfm2(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN, CCField AB,
+                           CCField AT, CCField gfmB, CCConst ox, CCConst oy, CCConst oz,
+                           CCConst mask, CCConst tgam, CCConst gnx, CCConst gny, CCConst gnz,
+                           CCConst gphi, CCConst kap, CCConst kc, double Dconst, bool useK,
+                           double thMin, double thMax, int order, bool useKappa, C3 e, int g) {
+  CCExec space;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::scalar_mask_gfm2", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        gfmB(i) = 0.0;
+        if (mask(i) > 0.5)
+          return;
+        const long st[3] = {sx, sy, sz};
+        const double kd = useK ? kc(i) : Dconst;
+        double acc = 0.0, dac = 0.0;
+        for (int d = 0; d < 3; ++d)
+          for (int sgn = -1; sgn <= 1; sgn += 2) {
+            const long j = i + (long)sgn * st[d];
+            if (!(mask(j) > 0.5))
+              continue;
+            const double of = (d == 0)   ? ((sgn < 0) ? ox(i) : ox(i + sx))
+                              : (d == 1) ? ((sgn < 0) ? oy(i) : oy(i + sy))
+                                         : ((sgn < 0) ? oz(i) : oz(i + sz));
+            const double nd = (d == 0) ? gnx(j) : (d == 1) ? gny(j) : gnz(j);
+            const double kj = useKappa ? kap(j) : 0.0;
+            const double th = vof::pcGfmThetaK(gphi(j), nd, (double)sgn, kj, thMin, thMax);
+            CCField band = (d == 0)   ? ((sgn < 0) ? AW : AE)
+                           : (d == 1) ? ((sgn < 0) ? AS : AN)
+                                      : ((sgn < 0) ? AB : AT);
+            CCField bandB = (d == 0)   ? ((sgn < 0) ? AE : AW)
+                            : (d == 1) ? ((sgn < 0) ? AN : AS)
+                                       : ((sgn < 0) ? AT : AB);
+            const long jb = i - (long)sgn * st[d];
+            const double bb = bandB(i);  // -k_f o_f of the face AWAY from the interface
+            const bool behind = !(mask(jb) > 0.5) && (bb != 0.0);
+            const vof::PcGfmRow row = vof::pcGfmRow(th, behind, order);
+            const double coef = kd * of * row.aGamma;
+            acc += coef + band(i);
+            band(i) = 0.0;
+            dac += coef * tgam(j);
+            if (behind && row.aBehind != 1.0) {
+              acc += -(row.aBehind - 1.0) * bb;  // bb = -k_f o_f, so this is +(a-1) k_f o_f
+              bandB(i) = row.aBehind * bb;
+            }
+          }
+        AC(i) += acc;
+        gfmB(i) = dac;
+      });
+}
+
 // Add the plane-anchored Dirichlet contribution to the RHS of the unmasked rows.
 inline void scalarAddGfmRhs(CCField b, CCConst gfmB, CCConst mask, C3 e, int g) {
   CCExec space;

@@ -1781,6 +1781,9 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["area_pv_cells"] = d.areaPv;
             r["area_no_cascade_cells"] = d.areaNone;
             r["area_orphan"] = d.areaOrphan;  // WO-P3d: area on cells the flux integral drops
+            r["mdot_fit"] = d.mdotFit;        // WO-P3g: the least-squares estimator, diagnostic
+            r["q_operator"] = d.qOperator;    // WO-P3g: the operator's own interfacial heat (W)
+            r["q_orphan"] = d.qOrphan;        // ... on interfacial cells with no area
             r["removed_volume"] = d.removedVolume;
             r["redistributed"] = d.redistributed;
             r["deficit_cells"] = d.deficitCells;
@@ -1820,6 +1823,50 @@ static void bind_solver(nb::module_& m, const char* name) {
           "an exactly linear profile: +19.2 / +12.1 / +8.8 / +6.2 % at R = 6 / 10 / 14 / 20, "
           "observed order 0.91-0.98 in h/R. This entry point takes a PRESCRIBED kappa so that bias "
           "can be measured against a known geometry; it is not a curvature estimator.")
+      .def(
+          "set_phase_change_energy_order",
+          [](S& s, int order) { s.setPhaseChangeEnergyOrder(order); }, nb::arg("order"),
+          "WO-P3g: the ORDER of the interfacial energy operator. 1 (the shipped WO-P23...P3f "
+          "scheme) or 2.\n\n"
+          "`order = 2` turns on, TOGETHER, the four pieces WO-P3f's instruments indicated:\n"
+          "  1. `set_phase_change_mdot_operator(True)` -- mdot is the energy operator's OWN "
+          "interfacial flux q/(h_lv A) instead of a separate least-squares fit, so the heat the "
+          "energy equation loses and the mass the regression produces are one discrete quantity "
+          "(and the interfacial AREA cancels out of the mass balance entirely);\n"
+          "  2. `set_phase_change_gfm_order(2)` -- the Gibou-Fedkiw three-point ghost-fluid row "
+          "(2/((1+theta) theta), 2/(1+theta)) instead of the two-point (1/theta, 1), which is "
+          "exact on a quadratic profile at every theta;\n"
+          "  3. `set_phase_change_curvature_distance(True)` -- the row's theta and the one-sided "
+          "fits' sample distances are measured to the CURVED interface, with kappa taken per cell "
+          "from the V3 curvature cascade;\n"
+          "  4. `set_phase_change_carry_conserve(True)` -- WO-P3f's enthalpy-conserving Dirichlet "
+          "overwrite.\n\n"
+          "Why together and not one at a time: WO-P3f measured the shipped scheme's 1 % Scriven "
+          "error to be the residue of a CANCELLATION between the fit's +6 % curvature bias, the "
+          "two-point row's -5 % flux deficit and the overwrite's -0.7...-4.3 % enthalpy "
+          "destruction, so repairing any ONE alone makes the gate worse.")
+      .def(
+          "set_phase_change_mdot_operator",
+          [](S& s, bool on) { s.setPhaseChangeMdotOperator(on); }, nb::arg("on") = true,
+          "WO-P3g item 1 (default OFF): take mdot from the energy operator's own interfacial flux "
+          "-- the sum of the ghost-fluid rows' Dirichlet couplings evaluated with the converged T "
+          "-- instead of the one-sided least-squares fit, which stays as "
+          "`phase_change_diagnostics()['mdot_fit']`.")
+      .def(
+          "set_phase_change_gfm_order", [](S& s, int o) { s.setPhaseChangeGfmOrder(o); },
+          nb::arg("order"),
+          "WO-P3g item 2 (default 1): the order of the one-sided (ghost-fluid) Dirichlet row. "
+          "1 = the shipped two-point form k o (T_Gamma - T_i)/theta; 2 = Gibou-Fedkiw's "
+          "three-point form through (T_behind, T_i, T_Gamma), which reproduces a quadratic "
+          "temperature profile exactly at every theta.")
+      .def(
+          "set_phase_change_curvature_distance",
+          [](S& s, bool on) { s.setPhaseChangeCurvatureDistance(on); }, nb::arg("on") = true,
+          "WO-P3g item 3 (default OFF): measure the GFM row's theta and the one-sided fits' sample "
+          "distances to the CURVED interface, with the mean curvature taken PER CELL from the V3 "
+          "curvature cascade (the same kappa surface tension uses; positive for a convex blob of "
+          "liquid, i.e. -2/R for a gas bubble). Supersedes `set_phase_change_fit_curvature`, which "
+          "prescribes one curvature for the whole field; where both are set the cascade wins.")
       .def(
           "set_phase_change_carry_conserve",
           [](S& s, bool on) { s.setPhaseChangeCarryConserve(on); }, nb::arg("on") = true,
@@ -1873,6 +1920,7 @@ static void bind_solver(nb::module_& m, const char* name) {
             r["e_enter"] = b.eEnter;
             r["e_leave"] = b.eLeave;
             r["q_gfm"] = b.qGfm;
+            r["q_behind"] = b.qBehind;  // WO-P3g: the second-order row's one-sided band rescaling
             r["n_enter_liquid"] = b.nEnterLiquid;
             r["n_enter_gas"] = b.nEnterGas;
             r["n_leave_liquid"] = b.nLeaveLiquid;

@@ -5962,7 +5962,18 @@ class Solver {
       // WO-P23: the PLANE-ANCHORED (ghost-fluid) form of that Dirichlet set — the pure cells'
       // rows carry the condition at the PLIC plane and never read the interfacial cell's value.
       const bool gfm = hasMask && pcPlaneDir_ && sc.gfmB.extent(0) == n_ && pcGphi_.extent(0) == n_;
-      if (gfm)
+      // WO-P3g items 2 + 3: the second-order (Gibou-Fedkiw) row and/or the curvature-consistent
+      // `theta`. The branch is OUTSIDE the kernel, so the shipped configuration executes the
+      // validated `scalarMaskGfm` body verbatim.
+      const bool gfm2 = gfm && (pcGfmOrder_ >= 2 || (pcCurvDist_ && pcKappa_.extent(0) == n_));
+      if (gfm2)
+        scalarMaskGfm2(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, sc.gfmB, CCConst(ox_),
+                       CCConst(oy_), CCConst(oz_), CCConst(sc.dmask), CCConst(pcTgam_),
+                       CCConst(pcGn_[0]), CCConst(pcGn_[1]), CCConst(pcGn_[2]), CCConst(pcGphi_),
+                       CCConst(pcCurvDist_ && pcKappa_.extent(0) == n_ ? pcKappa_ : pcGphi_),
+                       CCConst(sc.kcell), sc.D, energy, pcGfmThMin_, pcGfmThMax_, pcGfmOrder_,
+                       pcCurvDist_ && pcKappa_.extent(0) == n_, e_, G);
+      else if (gfm)
         scalarMaskGfm(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, sc.gfmB, CCConst(ox_),
                       CCConst(oy_), CCConst(oz_), CCConst(sc.dmask), CCConst(pcTgam_),
                       CCConst(pcGn_[0]), CCConst(pcGn_[1]), CCConst(pcGn_[2]), CCConst(pcGphi_),
@@ -6118,6 +6129,7 @@ class Solver {
     scatterInner(cField_, c);
     zeroSolidColour();  // rung V5a: solid cells carry no colour (the band fill is regenerated)
     fillPropGhosts(cField_);
+    pcMaskFresh_ = false;  // WO-P3g: the Dirichlet/plane geometry no longer describes this colour
   }
   std::vector<double> getVof() { return gatherInner(cField_); }
   // Local (this rank's) colour census: sum / min / max / mixed-cell count / wisp count.
@@ -7678,6 +7690,12 @@ class Solver {
     long areaNone = 0; ///< WO-P3c: cells with NO cascade geometry (kept their MYC PLIC area)
     double areaOrphan = 0.0;  ///< WO-P3d: area the JOINED sheet booked to cells that are not
                               ///< interfacial, i.e. the part of the sum the flux integral drops
+    double mdotFit = 0.0;     ///< WO-P3g: the AREA-WEIGHTED one-sided-fit mdot, kept as the
+                              ///< diagnostic that item 1 replaced (0 unless the operator flux is on)
+    double qOperator = 0.0;   ///< WO-P3g: the heat (W) the operator's Dirichlet rows draw across
+                              ///< the interface, i.e. `sum mdot A h_lv` by construction
+    double qOrphan = 0.0;     ///< ... the part of it on interfacial cells with NO area, which the
+                              ///< regression drops: the ONE non-conservation item 1 cannot remove
   };
 
   /// **WO-P3f — the ENERGY BUDGET of the phase-change energy solve.** An INSTRUMENT: allocated and
@@ -7712,6 +7730,9 @@ class Solver {
     double eEnter = 0.0;     ///< sum rcp (T - T_sat) of the cells that JOINED the masked set
     double eLeave = 0.0;     ///< ... and of the cells that LEFT it (carrying `pcCarriedValue`)
     double qGfm = 0.0;       ///< heat INTO the unmasked set across the plane-anchored rows (W)
+    double qBehind = 0.0;    ///< WO-P3g: the second-order row's one-sided rescaling of the band
+                             ///< BEHIND each interfacial face, which is the rest of the heat the
+                             ///< operator transfers across the interface (0 at row order 1)
     long nEnterLiquid = 0;   ///< liquid -> interfacial transitions this step
     long nEnterGas = 0;      ///< gas    -> interfacial
     long nLeaveLiquid = 0;   ///< interfacial -> liquid
@@ -8030,6 +8051,74 @@ class Solver {
     pcFitKappa_ = kappa;
   }
   double phaseChangeFitCurvature() const { return pcFitKappa_; }
+
+  /// **WO-P3g — the SECOND-ORDER interfacial energy operator, as one package.**
+  ///
+  /// `order = 1` is the shipped WO-P23…P3f scheme, bitwise. `order = 2` turns on, together:
+  ///
+  ///  1. `set_phase_change_mdot_operator(True)` — `mdot` is the energy operator's OWN interfacial
+  ///     flux `q/(h_lv A)` rather than a separate least-squares fit, so the heat the energy
+  ///     equation loses and the mass the regression produces are the same discrete number;
+  ///  2. `set_phase_change_gfm_order(2)` — the Gibou–Fedkiw three-point row
+  ///     (`2/((1+theta) theta)`, `2/(1+theta)`) instead of the two-point `(1/theta, 1)`;
+  ///  3. `set_phase_change_curvature_distance(True)` — the row's `theta` and the one-sided fits'
+  ///     sample distances are measured to the CURVED interface, with `kappa` from the V3 curvature
+  ///     cascade (the same field surface tension uses), not to the tangent plane;
+  ///  4. `set_phase_change_carry_conserve(True)` — WO-P3f's enthalpy-conserving Dirichlet
+  ///     overwrite, which double-counted before item 1 removed the flux mismatch.
+  ///
+  /// WO-P3f measured why they only work together: the shipped scheme's 1 % Scriven error is the
+  /// residue of a CANCELLATION between (F1) the fit's `O(h/R)` curvature bias `+6 %`, (F2) the
+  /// two-point row's `O(h/delta_T)` flux deficit `−5 %`, and (F3) the overwrite's `−0.7 … −4.3 %`
+  /// enthalpy destruction — so repairing any ONE of them alone makes the gate worse, measured.
+  void setPhaseChangeEnergyOrder(int order) {
+    requirePhaseChange("set_phase_change_energy_order");
+    if (order != 1 && order != 2)
+      throw std::runtime_error("set_phase_change_energy_order: order must be 1 or 2");
+    setPhaseChangeMdotOperator(order == 2);
+    setPhaseChangeGfmOrder(order);
+    setPhaseChangeCurvatureDistance(order == 2);
+    setPhaseChangeCarryConserve(order == 2);
+  }
+  int phaseChangeEnergyOrder() const {
+    return (pcMdotOperator_ && pcGfmOrder_ == 2 && pcCurvDist_ && pcCarryConserve_) ? 2 : 1;
+  }
+
+  /// WO-P3g item 1: take `mdot` from the energy operator's own interfacial flux instead of the
+  /// one-sided least-squares fit. The fit stays as `phase_change_diagnostics()['mdot_fit']`.
+  void setPhaseChangeMdotOperator(bool on) {
+    requirePhaseChange("set_phase_change_mdot_operator");
+    if (on && pcRint_ != 0.0 && !pcThermal_)
+      throw std::runtime_error("set_phase_change_mdot_operator: needs the thermal mass flux");
+    pcMdotOperator_ = on;
+    if (on && pcMdotFit_.extent(0) != n_)
+      pcMdotFit_ = CCField("pc_mdot_fit", n_);
+  }
+  bool phaseChangeMdotOperator() const { return pcMdotOperator_; }
+
+  /// WO-P3g item 2: the order of the one-sided (ghost-fluid) Dirichlet row. 1 = the shipped
+  /// two-point form; 2 = Gibou–Fedkiw's three-point form (`vof::pcGfmRow`).
+  void setPhaseChangeGfmOrder(int order) {
+    requirePhaseChange("set_phase_change_gfm_order");
+    if (order != 1 && order != 2)
+      throw std::runtime_error("set_phase_change_gfm_order: order must be 1 or 2");
+    pcGfmOrder_ = order;
+  }
+  int phaseChangeGfmOrder() const { return pcGfmOrder_; }
+
+  /// WO-P3g item 3: measure the GFM row's `theta` and the one-sided fits' sample distances to the
+  /// CURVED interface, with the mean curvature taken per cell from the V3 cascade. Supersedes
+  /// `set_phase_change_fit_curvature`, which prescribes ONE curvature for the whole field; where
+  /// both are on the cascade wins.
+  void setPhaseChangeCurvatureDistance(bool on) {
+    requirePhaseChange("set_phase_change_curvature_distance");
+    pcCurvDist_ = on;
+    if (on && pcKappa_.extent(0) != n_)
+      pcKappa_ = CCField("pc_kappa", n_);
+  }
+  bool phaseChangeCurvatureDistance() const { return pcCurvDist_; }
+  double phaseChangeQOperator() const { return pcQOperator_; }
+  double phaseChangeQOrphan() const { return pcQOrphan_; }
   double phaseChangeCarryDeposited() const { return pcCarryDeposited_; }
   double phaseChangeCarryLost() const { return pcCarryLost_; }
   PhaseChangeBudget phaseChangeBudgetValues() const { return pcBudget_; }
@@ -8241,6 +8330,17 @@ class Solver {
     // towards zero. One line, and it is a correctness fix, not a tolerance.
     if (pcThermal_)
       scalarFillGhosts(scalarField(pcTName_));
+    // WO-P3g item 1: the operator-flux `mdot` reads the very rows the energy solve uses, so the
+    // Dirichlet mask, the plane geometry and (item 3) the curvature must belong to the colour this
+    // build reconstructs from. In the COUPLED step they already do — `pcUpdateThermalMask` runs at
+    // the bottom of `step()` on exactly this colour, and nothing has touched it since — so this
+    // costs nothing there. After `set_vof` / `set_field`, i.e. in the one-shot `apply_phase_change`
+    // probe, they do not, and rebuilding here is what makes the probe measure the same operator the
+    // run does.
+    if (pcMdotOperator_ && pcThermal_ && !pcMaskFresh_) {
+      pcUpdateEnergyProps();
+      pcUpdateThermalMask();
+    }
     // WO-P3c: the cascade-consistent interfacial area, computed on the colour field's OWN g = 3
     // block (the height columns reach +-3, which the G = 2 phase-change block does not carry) and
     // copied back onto the inner region. Inert at `pcAreaMode_ == kAreaPlic`: the kernel below then
@@ -8269,15 +8369,31 @@ class Solver {
     const bool quad = pcQuadFit_;
     const bool depFallback = pcDepositFallback_;
     const double Tsat = pcTsat_, kg = pcKg_, kl = pcKl_, hlv = pcHlv_, Rint = pcRint_;
-    const double kapFit = pcFitKappa_;  // WO-P3f, 0 = the shipped (tangent-plane) distance
+    const double kapPresc = pcFitKappa_;  // WO-P3f, 0 = the shipped (tangent-plane) distance
     const double rhoG = pcRhoG_, rhoL = pcRhoL_;
+    // WO-P3g. `curvDist` (item 3) replaces the prescribed curvature by the V3 cascade's per-cell
+    // one; `opMode` (item 1) replaces the least-squares fit by the energy operator's own flux, for
+    // which the whole Dirichlet row set has to be readable inside the kernel.
+    const bool curvDist = pcCurvDist_ && pcKappa_.extent(0) == n_;
+    CCConst kapF = CCConst(curvDist ? pcKappa_ : pcMdot_);
+    ScalarField* scT = thermal ? &scalarField(pcTName_) : nullptr;
+    const bool opMode = pcMdotOperator_ && thermal && pcGphi_.extent(0) == n_ &&
+                        scT->dmask.extent(0) == n_;
+    const bool opEnergy = opMode && scT->energy && scT->kcell.extent(0) == n_;
+    CCConst mkF = CCConst(opMode ? scT->dmask : pcMdot_);
+    CCConst kcF = CCConst(opEnergy ? scT->kcell : pcMdot_);
+    CCConst oxF = CCConst(ox_), oyF = CCConst(oy_), ozF = CCConst(oz_);
+    const double Dconst = thermal ? scT->D : 0.0, thMin = pcGfmThMin_, thMax = pcGfmThMax_;
+    const int gfmOrder = pcGfmOrder_;
+    CCField mdotFit = opMode ? pcMdotFit_ : pcMdot_;
     long nIface = 0, nFallback = 0;
-    double sumArea = 0.0, sumMdot = 0.0;
+    double sumArea = 0.0, sumMdot = 0.0, sumQ = 0.0, sumQorph = 0.0, sumMdotFitA = 0.0;
     Kokkos::parallel_reduce(
         "peclet::flow::pc_build",
         Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
                                                        {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, long& nif, long& nfb, double& aacc, double& macc) {
+        KOKKOS_LAMBDA(int x, int y, int z, long& nif, long& nfb, double& aacc, double& macc,
+                      double& qacc, double& qorph, double& mfacc) {
           const long i = (long)x + (long)y * e.x + (long)z * sz;
           area(i) = 0.0;
           dep(i) = 0.0;
@@ -8306,6 +8422,10 @@ class Solver {
           double md = mdot(i);
           if (thermal) {
             const double Tg = vof::pcInterfaceTemperature(Tsat, md, Rint);
+            // WO-P3g item 3: the sample distance is measured to the CURVED interface, with the
+            // curvature taken per cell from the V3 cascade (`curvDist`) or, as WO-P3f shipped it,
+            // prescribed for the whole field. Bitwise unchanged when both are 0.
+            const double kapFit = curvDist ? kapF(i) : kapPresc;
             vof::PcGradFit fg, fl;
             for (int dz = -2; dz <= 2; ++dz)
               for (int dy = -2; dy <= 2; ++dy)
@@ -8328,6 +8448,65 @@ class Solver {
                 }
             md = quad ? vof::pcMassFlux(kg, vof::pcGradSolve2(fg), kl, vof::pcGradSolve2(fl), hlv)
                       : vof::pcMassFlux(kg, vof::pcGradSolve(fg), kl, vof::pcGradSolve(fl), hlv);
+            // **WO-P3g item 1 — `mdot` from the ENERGY OPERATOR's own interfacial flux.**
+            //
+            // The rows the energy solve runs are `scalarMaskGfm2`'s, one per (pure cell, masked
+            // neighbour) face; this gathers the SAME rows from the masked side and asks how much
+            // heat they draw. Every ingredient is read from the state that solve used — the
+            // Dirichlet mask, the face openness, `k(C)` and the plane geometry — and the plane this
+            // kernel just reconstructed is bitwise the plane `pcUpdateThermalMask` stored (same
+            // colour, same `mycNormal`/`plicAlpha`), so `theta` is identical to the row's own.
+            //
+            // What it buys: `mdot h_lv A = q` makes the heat the energy equation loses and the mass
+            // the regression produces ONE discrete quantity (WO-P3f measured the shipped pair
+            // disagreeing by 0.95…1.04), and `A` then cancels out of both the plane shift
+            // `dV = mdot A dt/rho_l` and the divergence source — the interfacial area stops being a
+            // term in the mass balance at all.
+            if (opMode) {
+              const long stq[3] = {1, sy, sz};
+              double qsum = 0.0, csum = 0.0;
+              for (int d = 0; d < 3; ++d)
+                for (int sg = -1; sg <= 1; sg += 2) {
+                  const long pc = i + (long)sg * stq[d];
+                  if (mkF(pc) > 0.5)
+                    continue;  // an identity row: it carries no Dirichlet coupling
+                  const double of = (d == 0)   ? ((sg > 0) ? oxF(i + 1) : oxF(i))
+                                    : (d == 1) ? ((sg > 0) ? oyF(i + sy) : oyF(i))
+                                               : ((sg > 0) ? ozF(i + sz) : ozF(i));
+                  if (!(of > 0.0))
+                    continue;
+                  const double ofB = (d == 0)   ? ((sg > 0) ? oxF(pc + 1) : oxF(pc))
+                                     : (d == 1) ? ((sg > 0) ? oyF(pc + sy) : oyF(pc))
+                                                : ((sg > 0) ? ozF(pc + sz) : ozF(pc));
+                  const long jb = pc + (long)sg * stq[d];
+                  const bool behind = !(mkF(jb) > 0.5) && ofB > 0.0;
+                  // the step from the PURE cell `pc` to this (masked) cell is -sg
+                  const double th = vof::pcGfmThetaK(phic, n[d], (double)(-sg),
+                                                     curvDist ? kapF(i) : 0.0, thMin, thMax);
+                  const vof::PcGfmRow row = vof::pcGfmRow(th, behind, gfmOrder);
+                  const double cf = (opEnergy ? kcF(pc) : Dconst) * of * row.aGamma;
+                  qsum += cf * (T(pc) - Tsat);
+                  csum += cf;
+                  // The three-point row also RESCALES `pc`'s band toward the cell BEHIND it, and
+                  // that rescaling is one-sided (cell `jb`'s own row does not mirror it), so it is
+                  // part of the heat the interface removes from the solved set. Booking it here is
+                  // what makes `sum_j Q_j` the EXACT total the operator transfers -- and, on a
+                  // 1-D quadratic, the exact conductive flux through the interfacial face at every
+                  // theta (gate (a); with the Dirichlet coupling alone it is a factor 2/(1+theta)
+                  // off, which is the whole point of the second-order row).
+                  if (behind && row.aBehind != 1.0) {
+                    const double kb = opEnergy ? 0.5 * (kcF(pc) + kcF(jb)) : Dconst;
+                    qsum += (row.aBehind - 1.0) * kb * ofB * (T(pc) - T(jb));
+                  }
+                }
+              mdotFit(i) = md;  // the least-squares estimator, kept as a diagnostic
+              md = vof::pcOperatorMassFlux(qsum, csum, A, hlv, Rint);
+              if (A > 0.0)
+                qacc += qsum;
+              else
+                qorph += qsum;
+              mfacc += mdotFit(i) * A;
+            }
             mdot(i) = md;
           }
           area(i) = A;
@@ -8407,8 +8586,14 @@ class Solver {
             tgt(i) = (double)((tx + 2) + 5 * (ty + 2) + 25 * (tz + 2));
           }
         },
-        nIface, nFallback, sumArea, sumMdot);
+        nIface, nFallback, sumArea, sumMdot, sumQ, sumQorph, sumMdotFitA);
     Kokkos::fence();
+    pcQOperator_ = sumQ;
+    pcQOrphan_ = sumQorph;
+    pcMdotFitMean_ = sumArea > 0.0 ? sumMdotFitA / sumArea : 0.0;
+    pcDiag_.qOperator = sumQ;
+    pcDiag_.qOrphan = sumQorph;
+    pcDiag_.mdotFit = pcMdotFitMean_;
     pcDiag_.interfaceCells = nIface;
     pcDiag_.fallbackCells = nFallback;
     pcDiag_.area = sumArea;
@@ -8640,9 +8825,29 @@ class Solver {
   /// The per-cell Dirichlet mask of the energy scalar: `T = T_sat + mdot R_int` in every
   /// interfacial cell, released everywhere else. Rebuilt from the CURRENT colour, so a call after
   /// the colour advection is what the energy solve at the bottom of the step sees.
+  /// **WO-P3g item 3** — the V3 curvature cascade's `kappa` on the G = 2 phase-change block, from
+  /// the CURRENT colour. Same driver, same g = 3 block and the same sign convention as surface
+  /// tension: `kappa = 2H` in 1/h, positive for a convex blob of LIQUID, i.e. `-2/R` for a gas
+  /// bubble — which is exactly `div(n)` for the PLIC normal, the convention `pcCurvedDistance` and
+  /// `pcGfmThetaK` are derived in. Where the cascade produces no estimate it leaves 0, and both
+  /// consumers then fall back to the tangent-plane distance, which is the shipped behaviour.
+  void pcUpdateCurvature() {
+    if (pcKappa_.extent(0) != n_)
+      pcKappa_ = CCField("pc_kappa", n_);
+    bridgeColourToVof();
+    vofCurv_.compute(vofAdv_.colour());
+    copyInner(pcKappa_, e_, G, CCConst(vofCurv_.kappa()), e3_, kVofG);
+    // read at depth 1 (the GFM row asks for the INTERFACIAL neighbour's curvature), so exchange;
+    // a periodic wrap on a non-periodic domain face would import a phantom curvature, so zero it.
+    fillGhosts(pcKappa_);
+    pcZeroDomainGhosts(pcKappa_);
+  }
+
   void pcUpdateThermalMask() {
     if (!pcThermal_)
       return;
+    if (pcCurvDist_)
+      pcUpdateCurvature();  // WO-P3g item 3: kappa for the row's theta and for the carried-value fit
     ScalarField& sc = scalarField(pcTName_);
     scalarFillGhosts(sc);  // the carried-value refit reads T at +-2 (see pcBuildInterface)
     const C3 e = e_;
@@ -8651,7 +8856,9 @@ class Solver {
     CCField gn0 = pcGn_[0], gn1 = pcGn_[1], gn2 = pcGn_[2], gph = pcGphi_;
     CCConst c = CCConst(cField_), md = CCConst(pcMdot_), T = CCConst(sc.c);
     const double eps = pcEffInterfaceEps(), pureEps = pcEffPureEps(), Tsat = pcTsat_, Rint = pcRint_;
-    const double kapFit = pcFitKappa_;  // WO-P3f
+    const double kapPresc = pcFitKappa_;  // WO-P3f
+    const bool curvDist = pcCurvDist_ && pcKappa_.extent(0) == n_;  // WO-P3g item 3
+    CCConst kapF = CCConst(curvDist ? pcKappa_ : pcMdot_);
     const bool carry = pcPlaneDir_, quad = pcQuadFit_;
     const long syl = sy, szl = sz;
     Kokkos::parallel_for(
@@ -8697,6 +8904,7 @@ class Solver {
           // Nothing reads it across a face (the plane-anchored rows use `tg`), so it is free to be
           // the one-sided extrapolation of the profile on the side the cell CENTRE lies on.
           const bool gasSide = phic > 0.0;
+          const double kapFit = curvDist ? kapF(i) : kapPresc;  // WO-P3g item 3
           vof::PcGradFit f;
           for (int dz = -2; dz <= 2; ++dz)
             for (int dy = -2; dy <= 2; ++dy)
@@ -8744,6 +8952,9 @@ class Solver {
     // is off.
     if (pcCarryConserve_ && pcCarrySrc_.extent(0) == n_)
       pcCarryDeposit(sc);
+    // WO-P3g item 1: the Dirichlet rows now describe THIS colour field, which is what the
+    // operator-flux `mdot` needs before it may read them (see the note in `pcBuildInterface`).
+    pcMaskFresh_ = true;
   }
 
   /// Zero the two ghost layers on every NON-periodic domain face this rank owns. Used for the
@@ -9006,12 +9217,16 @@ class Solver {
     CCConst kc = useK ? CCConst(sc.kcell) : CCConst(sc.c);
     const double Tsat = pcTsat_, Dc = sc.D, thMin = pcGfmThMin_, thMax = pcGfmThMax_;
     const bool gfm = pcPlaneDir_ && pcGphi_.extent(0) == n_;
+    // WO-P3g: the instrument has to mirror the ROW, or it measures a scheme nobody ran.
+    const int gfmOrder = pcGfmOrder_;
+    const bool curvDist = pcCurvDist_ && pcKappa_.extent(0) == n_;
+    CCConst kapF = CCConst(curvDist ? pcKappa_ : pcGphi_);
     CCField clsOut = pcClsPrev_;
-    double hOpen = 0, q = 0;
+    double hOpen = 0, q = 0, qb = 0;
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_reduce(
         "peclet::flow::pc_budget_post", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& a1, double& a2) {
+        KOKKOS_LAMBDA(int x, int y, int z, double& a1, double& a2, double& a3) {
           const long i = (long)x + (long)y * sy + (long)z * sz;
           const double r = useRcp ? rcp(i) : 1.0;
           const bool msk = mk(i) > 0.5;
@@ -9032,14 +9247,26 @@ class Solver {
                                 : (d == 1) ? ((sgn < 0) ? oy(i) : oy(i + sy))
                                            : ((sgn < 0) ? oz(i) : oz(i + sz));
               const double nd = (d == 0) ? gnx(j) : (d == 1) ? gny(j) : gnz(j);
-              const double th = vof::pcGfmTheta(gph(j), nd, (double)sgn, thMin, thMax);
-              a2 += kd * of / th * (tg(j) - T(i));
+              const double th =
+                  vof::pcGfmThetaK(gph(j), nd, (double)sgn, curvDist ? kapF(j) : 0.0, thMin, thMax);
+              const long jb = i - (long)sgn * st[d];
+              const double ofB = (d == 0)   ? ((sgn < 0) ? ox(i + sx) : ox(i))
+                                 : (d == 1) ? ((sgn < 0) ? oy(i + sy) : oy(i))
+                                            : ((sgn < 0) ? oz(i + sz) : oz(i));
+              const bool behind = !(mk(jb) > 0.5) && ofB > 0.0;
+              const vof::PcGfmRow row = vof::pcGfmRow(th, behind, gfmOrder);
+              a2 += kd * of * row.aGamma * (tg(j) - T(i));
+              if (behind && row.aBehind != 1.0) {
+                const double kb = useK ? 0.5 * (kc(i) + kc(jb)) : Dc;
+                a3 += (row.aBehind - 1.0) * kb * ofB * (T(jb) - T(i));
+              }
             }
         },
-        hOpen, q);
+        hOpen, q, qb);
     Kokkos::fence();
     pcBudget_.hOpenNew = hOpen;
     pcBudget_.qGfm = q;
+    pcBudget_.qBehind = qb;
     pcBudget_.calls += 1;
   }
 
@@ -9815,6 +10042,19 @@ class Solver {
   bool pcCarryConserve_ = false;
   CCField pcCarrySrc_;
   double pcCarryDeposited_ = 0.0, pcCarryLost_ = 0.0;
+  // --- WO-P3g: the second-order interfacial energy operator -----------------------------------
+  // Three independent pieces, each an option so the ablation can be measured, and one package
+  // switch (`set_phase_change_energy_order`) that turns all of them plus WO-P3f's `carry_conserve`
+  // on together. Every one is bitwise inert at its default.
+  bool pcMdotOperator_ = false;  // item 1: mdot from the energy operator's OWN interfacial flux
+  int pcGfmOrder_ = 1;           // item 2: 2 = the Gibou-Fedkiw three-point row
+  bool pcCurvDist_ = false;      // item 3: curvature-consistent distances, kappa from the cascade
+  CCField pcKappa_;              // the V3 cascade's kappa on the G = 2 block (item 3)
+  CCField pcMdotFit_;            // the one-sided-fit mdot, kept as a DIAGNOSTIC under item 1
+  bool pcMaskFresh_ = false;     // is the Dirichlet/plane geometry current for THIS colour field?
+  double pcQOperator_ = 0.0;     // sum of the operator's interfacial heat (W), last build
+  double pcQOrphan_ = 0.0;       // ... the part on cells with no interfacial AREA (dropped)
+  double pcMdotFitMean_ = 0.0;   // area-weighted mean of the diagnostic fit mdot
   bool pcHasSink_ = false;
   double pcSinkW_ = 0.0;
   std::vector<Closure> closures_;     // property/body-force closures (applied at top of step())

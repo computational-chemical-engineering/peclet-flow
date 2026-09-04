@@ -417,6 +417,85 @@ void gfmThetaGate() {
   std::printf("K4 GFM theta continuity to n_d -> 0: limit %.17g (thetaMax 1.9)\n", prev);
 }
 
+// ============================================================ K5 (WO-P3g gate (a)):
+// the Gibou-Fedkiw second-order row, on a 1-D profile against a FIXED plane at every theta.
+//
+// Geometry, in the row's own terms: the pure cell sits at x = 0, the interfacial cell at x = +1,
+// the interface plane at x = theta (0 < theta <= 1 + sqrt(3)/2), and the third point -- the cell
+// BEHIND -- at x = -1. `pcGfmRow(theta, true, order)` returns the pair (a_Gamma, a_behind) so the
+// axis contributes `a_Gamma (T_Gamma - T_0) + a_behind (T_-1 - T_0)`.
+//
+// Two statements, both exact and both first measured here:
+//
+//  (a1) the row REPRODUCES d2T/dx2 of a quadratic exactly at every theta -- it is the non-uniform
+//       three-point second difference, so the divided difference 2 f[x_L, x_0, x_R] is the leading
+//       coefficient of the interpolant and hence exactly T''. The shipped two-point row is exact
+//       only for a LINEAR profile;
+//  (a2) the total heat the row transfers across the interfacial face,
+//       `Q = a_Gamma (T_0 - T_Gamma) + (a_behind - 1) (T_0 - T_-1)` -- the Dirichlet coupling PLUS
+//       the one-sided rescaling of the band behind, which is the part cell -1's own row does not
+//       mirror -- equals the exact conductive flux `-dT/dx` through that face at every theta.
+//       With the Dirichlet coupling alone it is off by a factor `2/(1+theta)`, i.e. a factor 2 as
+//       theta -> 0, which is why item 1's flux has to carry both halves.
+//
+// The corresponding failure of the shipped row is printed next to each pass, because it is the
+// measurement WO-P3f's -17 % / -5 % GFM flux deficit predicted.
+void gfmSecondOrderGate() {
+  const double a = 0.83, b = -1.47, c = 0.62;  // T(x) = a + b x + c x^2
+  double worstLap = 0.0, worstFlux = 0.0, worstLin = 0.0, worst1 = 0.0;
+  std::printf("K5 second-order GFM row (T = %.2f %+.2f x %+.2f x^2, exact T'' = %.4f):\n", a, b, c,
+              2 * c);
+  for (int i = 1; i <= 19; ++i) {
+    const double th = 0.05 * i;  // theta in {0.05 ... 0.95}
+    const double Tg = a + b * th + c * th * th, T0 = a, Tm = a - b + c;
+    const auto r2 = peclet::flow::vof::pcGfmRow(th, true, 2);
+    const auto r1 = peclet::flow::vof::pcGfmRow(th, true, 1);
+    // (a1) the Laplacian on the quadratic
+    const double lap = r2.aGamma * (Tg - T0) + r2.aBehind * (Tm - T0);
+    // (a2) the flux through the face at x = 1/2, exact value -dT/dx(1/2) = -(b + c)
+    const double q2 = r2.aGamma * (T0 - Tg) + (r2.aBehind - 1.0) * (T0 - Tm);
+    const double q1 = r1.aGamma * (T0 - Tg) + (r1.aBehind - 1.0) * (T0 - Tm);
+    // the same row on a LINEAR profile (c = 0): both orders must be exact there
+    const double qlin = r2.aGamma * (0.0 - b * th) + (r2.aBehind - 1.0) * (0.0 - (-b));
+    worstLap = std::fmax(worstLap, std::fabs(lap - 2 * c));
+    worstFlux = std::fmax(worstFlux, std::fabs(q2 + (b + c)));
+    worstLin = std::fmax(worstLin, std::fabs(qlin + b));
+    worst1 = std::fmax(worst1, std::fabs(q1 + (b + c)));
+    if (i % 4 == 1)
+      std::printf("   theta %.2f  a_G %8.4f a_B %6.4f | T'' %.17g (err %.2e)  Q %.17g "
+                  "(err %.2e)  |  order-1 Q err %+.3e\n",
+                  th, r2.aGamma, r2.aBehind, lap, std::fabs(lap - 2 * c), q2,
+                  std::fabs(q2 + (b + c)), q1 + (b + c));
+  }
+  std::printf("K5 worst over theta in [0.05, 0.95]: |T''_row - T''| %.3e, |Q - Q_exact| %.3e "
+              "(linear profile %.3e); the SHIPPED two-point row: %.3e\n",
+              worstLap, worstFlux, worstLin, worst1);
+  CHECK(worstLap < 1e-14);
+  CHECK(worstFlux < 1e-14);
+  CHECK(worstLin < 1e-14);
+  CHECK(worst1 > 0.1);  // the shipped row is genuinely first order here
+  // theta = 1 must reduce to the interior row BITWISE (2/2 = 1 both ways)
+  const auto r = peclet::flow::vof::pcGfmRow(1.0, true, 2);
+  CHECK(r.aGamma == 1.0 && r.aBehind == 1.0);
+  // no third point (the cell behind is itself an identity row, or that face is closed): the row
+  // falls back to the shipped two-point form, bitwise.
+  for (double th : {0.1, 0.5, 1.3, 1.9}) {
+    const auto rf = peclet::flow::vof::pcGfmRow(th, false, 2);
+    CHECK(rf.aGamma == 1.0 / th && rf.aBehind == 1.0);
+  }
+  // the curvature-consistent distance is bitwise inert at kappa == 0 and matches the closed form
+  // otherwise (a gas sphere of radius R, kappa = -2/R, cell at lateral offset rho^2 = 1 - n_d^2)
+  for (double nd : {-1.0, -0.8, -0.5, 0.6, 0.9}) {
+    CHECK(peclet::flow::vof::pcGfmThetaK(0.3, nd, 1.0, 0.0, 0.1, 1.9) ==
+          peclet::flow::vof::pcGfmTheta(0.3, nd, 1.0, 0.1, 1.9));
+    const double kap = -2.0 / 12.0;
+    const double want = std::fabs(0.3 - 1.0 * nd + 0.25 * kap * (1.0 - nd * nd)) / std::fabs(nd);
+    const double got = peclet::flow::vof::pcGfmThetaK(0.3, nd, 1.0, kap, 0.1, 1.9);
+    CHECK(std::fabs(got - std::fmin(std::fmax(want, 0.1), 1.9)) < 1e-15);
+  }
+  std::printf("K5 curvature-consistent theta: inert at kappa = 0, closed form otherwise\n");
+}
+
 // ============================================================ P0a: regression only
 void p0a() {
   const int nx = 64, ny = 4, nz = 4;
@@ -850,6 +929,7 @@ int main(int argc, char** argv) {
     gradientGate();
     quadraticGradientGate();
     gfmThetaGate();
+    gfmSecondOrderGate();
     p0a();
     p0b();
     p1();
