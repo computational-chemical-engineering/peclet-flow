@@ -649,7 +649,10 @@ Findings and every measured number: `doc/vof_workorders_v6.md` § "ISSUES sweep"
   nothing (measured: a two-phase post array with 3.08-cell throats, four times in a row).
 - **`set_contact_angle` binds to a DOMAIN-BC wall** (type 1 no-slip or type 4 free-slip) — see
   the V5b paragraph below — and RAISES when there is no wetting wall at all.
-- **Domain BC type 4 = free slip** — see "Domain boundary conditions".
+- **Domain BC type 4 = free slip** — see "Domain boundary conditions". NOTE (2026-09-04): the
+  sweep's own implementation (`84a59fa`) was DROPPED at merge in favour of the concurrent,
+  equivalent-and-wider `35d951c` (branch `rel-issues`, another session); until that branch lands
+  on main, type 4 is not available and `vof_issues_sweep.py freeslip` will refuse.
 
 **Static contact angle on SDF solids (rung V5b, WO-S).** `set_contact_angle(theta_deg)` (or
 `set_contact_angle_field`) replaces **pass 1 only** of the V5a solid-band fill by the volume
@@ -1726,7 +1729,8 @@ what the gate is on — moves by 5e-5…1.4e-4.
 
 Beyond periodic + IBM no-slip on immersed solids, flow has **native per-face domain BCs** (`mac_bc.hpp`):
 `set_domain_bc(face, type, vx, vy, vz)` for the 6 faces (0=−x,1=+x,2=−y,3=+y,4=−z,5=+z); `type` 0=periodic
-(default), 1=no-slip wall, 2=Dirichlet velocity / inflow, 3=outflow, **4=free slip (symmetry)**.
+(default), 1=no-slip wall, 2=Dirichlet velocity / inflow, 3=outflow, **4=free slip (symmetry) — landing
+with branch `rel-issues` (`35d951c`), not yet on main**.
 Velocity ghosts are filled in the
 MAC-staggered convention. Tangential walls use a **face-fold** in the implicit diffusion (drop the wall
 face, fold its β into the diagonal + RHS) so `u_inner` stays implicit — no Gauss–Seidel lag; explicit
