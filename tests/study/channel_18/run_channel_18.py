@@ -426,7 +426,20 @@ def main():
             dt = min(dt, 0.4 * L["cfl_dt"], 0.4 * L["capillary_dt"])
             s.set_dt(dt)
         t += dt
-        s.step()
+        try:
+            s.step()
+        except Exception as exc:               # a Weymouth-Yue boundedness throw, or worse
+            # step() is NOT atomic across that throw (VOF_PLAN 13.2 item 9: the momentum half has
+            # already advanced by the rejected dt), so catch-and-halve would desynchronise colour
+            # and momentum.  Leave the LAST GOOD checkpoint untouched, record what happened, and
+            # fail the chunk so `--dependency=afterok` stops the chain instead of marching on.
+            with open(CKPT + ".failed", "w") as f:
+                f.write(json.dumps({"step": i, "t": t, "turnovers": t * UTAU, "dt": dt,
+                                    "error": repr(exc)}) + "\n")
+            print(f"\n  *** step {i} FAILED at t u_tau/h = {t*UTAU:.4f}, dt = {dt:.3e}: {exc}")
+            print(f"  the last checkpoint ({CKPT}) is untouched; restart from it with a smaller "
+                  f"dt safety factor.  Chain stopped.")
+            raise
         i += 1
         stepped += 1
         it = s.last_pressure_iterations()
