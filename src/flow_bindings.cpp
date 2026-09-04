@@ -6,10 +6,16 @@
 /// IBM no-slip
 /// + optional cut-cell pressure projection), step, read back the velocity/pressure, and query the
 /// cut-cell flux divergence. Exercised by verify_poiseuille_sdflow (IBM channel) and
-/// verify_periodic_spheres_sdflow (cut-cell Stokes through a sphere packing). Kokkos is initialized
-/// at import and finalized via Python atexit (the solver holds Kokkos Views, so callers must
-/// release the Solver before exit -- del + gc.collect()). rank()/bcast_from_root() are single-rank
-/// stubs (the multi-rank path lives in tests/kokkos_mpi).
+/// verify_periodic_spheres_sdflow (cut-cell Stokes through a sphere packing). rank()/bcast_from_root()
+/// are single-rank stubs (the multi-rank path lives in tests/kokkos_mpi).
+///
+/// Kokkos teardown follows the suite-wide pattern of peclet/core/python/kokkos_teardown.hpp: Kokkos
+/// is initialized at import; every bound Solver is a `Releasable` (registered on construction) and
+/// every zero-copy array (`field_view`) is a Releasable capsule; the module's single atexit hook
+/// (also `flow.finalize()`) releases all of them and THEN calls Kokkos::finalize, so a Solver or
+/// array still referenced at interpreter exit (script globals, a Jupyter/Quarto kernel) can no
+/// longer be destroyed after finalize -- which is a Kokkos::abort (SIGABRT / exit 134, on OpenMP
+/// as on CUDA), not a warning. Nothing needs to be `del`eted before exit any more.
 ///
 /// Arrays cross the boundary through the shared zero-copy bridge (peclet::core::python, in core):
 /// fields come back as Fortran-order (nx,ny,nz) float64 NumPy arrays referencing the field buffer,
@@ -37,6 +43,7 @@
 #endif
 
 #include "flow_ibm.hpp"
+#include "peclet/core/python/kokkos_teardown.hpp"
 #include "peclet/core/python/ndarray_interop.hpp"
 
 #ifdef PECLET_FLOW_MPI
@@ -75,38 +82,38 @@ static std::vector<double> grid_in(nb::ndarray<double, nb::f_contig> a) {
 
 // Zero-copy export of a registered field's padded device buffer as a Fortran-order 3-D array of the
 // full block shape (ex,ey,ez) = (nx+2G, ny+2G, nz+2G), x-fastest strides {1,ex,ex*ey}. Includes the
-// ghost band (the flat buffer is contiguous; a ghost-stripped view would not be). The capsule owns
-// a copy of the managed CCField, so the allocation outlives the array — host → NumPy referencing
-// the buffer, device → DLPack for CuPy/torch. Mirrors peclet::core::python::view_to_ndarray but
-// with an explicit 3-D reshape of the flat 1-D field.
+// ghost band (the flat buffer is contiguous; a ghost-stripped view would not be). The shared bridge
+// makes the capsule a Releasable holding the managed CCField, so the allocation outlives the array
+// (host → NumPy referencing the buffer, device → DLPack for CuPy/torch) and is dropped by the
+// module's shutdown before Kokkos::finalize.
 template <class S>
 static auto field3d_out(S& s, peclet::flow::CCField f) {
-  namespace pcp = peclet::core::python;
-  using Mem = peclet::flow::CCMem;
   const auto bs = s.blockShape();
-  std::array<std::size_t, 3> shape{static_cast<std::size_t>(bs[0]), static_cast<std::size_t>(bs[1]),
-                                   static_cast<std::size_t>(bs[2])};
-  std::array<std::int64_t, 3> strides{1, static_cast<std::int64_t>(bs[0]),
-                                      static_cast<std::int64_t>(bs[0]) * bs[1]};
-  auto* held = new peclet::flow::CCField(f);
-  nb::capsule owner(held, [](void* p) noexcept { delete static_cast<peclet::flow::CCField*>(p); });
-  double* data = f.data();
-  if constexpr (pcp::is_host_space_v<Mem>) {
-    return nb::ndarray<nb::numpy, double>(data, 3, shape.data(), owner, strides.data(),
-                                          nb::dtype<double>(), nb::device::cpu::value, 0);
-  } else {
-    auto dev = pcp::dlpack_device<Mem>();
-    return nb::ndarray<double>(data, 3, shape.data(), owner, strides.data(), nb::dtype<double>(),
-                               dev.first, dev.second);
-  }
+  const std::array<std::size_t, 3> shape{static_cast<std::size_t>(bs[0]),
+                                         static_cast<std::size_t>(bs[1]),
+                                         static_cast<std::size_t>(bs[2])};
+  const std::array<std::int64_t, 3> strides{1, static_cast<std::int64_t>(bs[0]),
+                                            static_cast<std::int64_t>(bs[0]) * bs[1]};
+  return peclet::core::python::view_to_ndarray(f, shape, strides);
 }
+
+// The bound solver: Solver<Grid> plus the suite's teardown registration. Solver<Grid> owns its
+// Kokkos Views all over (fields, MG hierarchy, IBM overlays, ...) with no piecemeal reset, so
+// release() destroys the bound instance outright (kokkos_teardown.hpp: nanobind marks the Python
+// object uninitialized; later calls raise, dealloc skips the destructor). Only reached for a Solver
+// still alive when the module shuts down.
+template <class Grid>
+struct BoundSolver final : peclet::flow::Solver<Grid>, peclet::core::python::Releasable {
+  using peclet::flow::Solver<Grid>::Solver;
+  void release() noexcept override { peclet::core::python::destruct_bound_instance(this); }
+};
 
 // Register a solver class for the given GridLayout policy (Staggered -> "Solver", Colocated ->
 // "SolverColocated"). The Python API is identical across grids; only the velocity-unknown placement
 // and the advection control volume differ inside Solver<Grid>.
 template <class Grid>
 static void bind_solver(nb::module_& m, const char* name) {
-  using S = peclet::flow::Solver<Grid>;
+  using S = BoundSolver<Grid>;
   nb::class_<S>(m, name)
       .def(nb::init<int, int, int>(), nb::arg("nx"), nb::arg("ny"), nb::arg("nz"),
            "Create a solver on an nx x ny x nz unit-spacing grid (x-fastest, I = x + y*nx + "
@@ -2477,24 +2484,13 @@ NB_MODULE(_flow, m) {
       "This is\n"
       "the single-rank module — the multi-rank MPI path is exercised by the tests/kokkos_mpi "
       "suite.\n\n"
-      "Kokkos is initialized at import and finalized via a Python atexit hook. Release every "
-      "Solver "
-      "before interpreter exit (it goes out of scope, or `del s; gc.collect()`) so no Kokkos View "
-      "outlives finalize.";
-  if (!Kokkos::is_initialized())
-    Kokkos::initialize();
-  // Register Kokkos::finalize via Python atexit. This is REQUIRED on CUDA: without it, Kokkos's
-  // internal device state is torn down by static destructors AFTER the CUDA runtime unloads,
-  // aborting with cudaErrorCudartUnloading at every exit. atexit runs the hook while the driver is
-  // still up. (Returned fields are backed by host std::vectors, not device Views, so they never
-  // block finalize; a live Solver still holding Views at exit must be released first — hence the
-  // docstring note.)
-  nb::module_::import_("atexit").attr("register")(nb::cpp_function([]() {
-    if (Kokkos::is_initialized() && !Kokkos::is_finalized())
-      Kokkos::finalize();
-  }));
-  // The active Kokkos backend ("OpenMP", "Cuda", "HIP"), chosen by the build's install prefix.
-  m.attr("execution_space") = nb::str(Kokkos::DefaultExecutionSpace::name());
+      "Kokkos is initialized at import and finalized via a Python atexit hook that first releases "
+      "every live Solver and zero-copy field view (flow.finalize() does the same on demand); "
+      "nothing needs to be released before interpreter exit. execution_space names the active "
+      "Kokkos backend (\"OpenMP\", \"Cuda\", \"HIP\"), chosen by the build's install prefix.";
+  // Kokkos init + the release-then-finalize atexit hook + finalize() + execution_space: the
+  // suite-wide pattern (see the file comment and peclet/core/python/kokkos_teardown.hpp).
+  peclet::core::python::install(m);
 
   // Staggered MAC grid (THE flow solver) + the collocated/cell-centered variant. Same Python API.
   bind_solver<peclet::flow::Staggered>(m, "Solver");
