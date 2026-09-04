@@ -736,6 +736,17 @@ while the packed column loses at 1817, and the packed column has 2.7× the inter
 the trickle bed and loses by the same margin — so an AUTO rule would have been fitted to two points
 and was not written. The honest statement is the table.
 
+### Gates
+
+| gate | result |
+|---|---|
+| `tests/kokkos` ctest battery, **nvidia-cuda** | **34/34 passed** (317 s), including the new `vof_timing` |
+| `tests/kokkos` ctest battery, **host-openmp** (8 threads) | **34/34 passed** (422 s) |
+| `tests/kokkos_mpi` `-R vof`, np 1/2/4, nvidia-cuda | **40/40 passed** (1361 s) |
+| `vof_timing` T1/T2: timers OFF vs ON, 30 steps, all-fluid + cut-cell | `max\|d\| = 0.000e+00` on C, u, v, w, P |
+| `vof_timing` T3: both worklists ON vs OFF, same | `max\|d\| = 0.000e+00` |
+| `tests/regression/sdflow_regression.py` (single-phase) | **PASS**, every metric `+0.00 %`, every `p_iter_tot` `+0.0 %`, identical step counts on `zh_sphere`, `random_spheres`, `hollow_rings` |
+
 ### What could NOT be measured, and why
 
 * **Real MPI scaling of the g = 3 halo.** One node, one GPU. Every CUDA np > 1 number in this entry
