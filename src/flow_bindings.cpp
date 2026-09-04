@@ -379,7 +379,19 @@ static void bind_solver(nb::module_& m, const char* name) {
            nb::arg("vcycles") = 8,
            "Enable velocity (momentum) multigrid for the implicit diffusion solve.")
       .def("last_pressure_iterations", &S::lastPressureIterations,
-           "Return the pressure-solver iteration count from the last step().")
+           "Return the pressure-solver iteration count from the last step().\n\n"
+           "A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration "
+           "CAP, so the usual rule-3b 'a capped pressure solve invalidates the run' check sees "
+           "it; pressure_solve_failed() distinguishes the two.")
+      .def("pressure_solve_failed", &S::pressureSolveFailed,
+           "Did the last pressure solve break down on a non-finite recurrence scalar (a "
+           "preconditioner or operator that produced NaN/Inf)?\n\n"
+           "The driver then zeroes the correction and continues -- so the projection was handed "
+           "NOTHING for that step and the run is invalid. Until 2026-09-04 the only trace was one "
+           "line on stdout ('preconditioner produced non-finite z') while "
+           "last_pressure_iterations() reported 0, i.e. a perfectly healthy-looking solve "
+           "(measured: examples/pore-scale-imbibition, a 3.1-cell throat). Set "
+           "PECLET_FLOW_PRESSURE_STRICT=1 to raise instead.")
       .def(
           "last_step_timers",
           [](S& s) {

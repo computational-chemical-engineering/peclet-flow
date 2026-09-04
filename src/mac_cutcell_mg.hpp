@@ -290,6 +290,17 @@ inline int mgDebugLevel() {
   }();
   return lv;
 }
+// ISSUES sweep item 6. PECLET_FLOW_PRESSURE_STRICT=1 turns a non-finite preconditioner output
+// into a throw instead of a printed line + a zero correction. Off by default: the shipped
+// behaviour is to report the cap through `last_pressure_iterations()` and raise the
+// `pressure_solve_failed()` flag, so a rule-3b check catches it without changing control flow.
+inline bool strictPressure() {
+  static const bool on = [] {
+    const char* e = std::getenv("PECLET_FLOW_PRESSURE_STRICT");
+    return e && std::atoi(e) != 0;
+  }();
+  return on;
+}
 inline int mgDebugSolves() {
   static const int n = [] {
     const char* e = std::getenv("PECLET_FLOW_MG_DEBUG_SOLVES");
@@ -1101,6 +1112,7 @@ class CutcellMG {
   int solvePCG(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                double rtol, int pre, int post, int bottom, const StarOverlay* star = nullptr,
                int nStar = 0, C3 nnStar = C3{0, 0, 0}) {
+    solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -1144,19 +1156,32 @@ class CutcellMG {
       Kokkos::deep_copy(p, z);
       double rz = dot(l0, r, z);
       if (!std::isfinite(rz)) {
+        // ISSUES sweep item 6: this is a FAILED solve, not a converged one. It used to print to
+        // stdout, zero the correction and return 0 iterations, so a caller's rule-3b "no capped
+        // pressure solve" check passed while the projection had been handed nothing. Report the
+        // cap and raise the flag; PECLET_FLOW_PRESSURE_STRICT=1 turns it into a throw.
+        solveFailed_ = true;
         printf("peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
-               "returning zero correction\n");
+               "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
+               maxit, maxit);
         Kokkos::deep_copy(x, 0.0);
         Kokkos::deep_copy(l0.x, x);
-        return 0;
+        if (strictPressure())
+          throw std::runtime_error(
+              "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z "
+              "(PECLET_FLOW_PRESSURE_STRICT=1)");
+        return maxit;
       }
       for (; it < maxit; ++it) {
         matvec(Ap, p);
         if (meanRemovalAll_)
           removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
         const double pAp = dot(l0, p, Ap);
-        if (!std::isfinite(pAp) || pAp <= 1e-300)
-          break;  // breakdown/converged direction: keep the last finite iterate
+        if (!std::isfinite(pAp) || pAp <= 1e-300) {
+          if (!std::isfinite(pAp))
+            solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
+          break;                  // keep the last finite iterate
+        }
         const double alpha = rz / pAp;
         axpy(x, alpha, p);
         axpy(r, -alpha, Ap);
@@ -1170,8 +1195,10 @@ class CutcellMG {
         }
         precond(z, r);
         const double rznew = dot(l0, r, z), beta = rznew / rz;
-        if (!std::isfinite(rznew))
-          break;  // preconditioner breakdown: keep the last finite iterate
+        if (!std::isfinite(rznew)) {
+          solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
+          break;                // preconditioner breakdown: keep the last finite iterate
+        }
         aypx(p, beta, z);
         rz = rznew;
       }
@@ -1205,6 +1232,7 @@ class CutcellMG {
   int solveFCG(CCField b, CCField x, CCField r, CCField p, CCField z, CCField zp, CCField Ap,
                int maxit, double rtol, int pre, int post, int bottom,
                const StarOverlay* star = nullptr, int nStar = 0, C3 nnStar = C3{0, 0, 0}) {
+    solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -1242,19 +1270,28 @@ class CutcellMG {
       Kokkos::deep_copy(p, z);
       double rz = dot(l0, r, z);
       if (!std::isfinite(rz)) {
+        solveFailed_ = true;  // ISSUES sweep item 6 -- see solvePCG for the mechanism
         printf("peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z; "
-               "returning zero correction\n");
+               "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
+               maxit, maxit);
         Kokkos::deep_copy(x, 0.0);
         Kokkos::deep_copy(l0.x, x);
-        return 0;
+        if (strictPressure())
+          throw std::runtime_error(
+              "peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z "
+              "(PECLET_FLOW_PRESSURE_STRICT=1)");
+        return maxit;
       }
       for (; it < maxit; ++it) {
         matvec(Ap, p);
         if (meanRemovalAll_)
           removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
         const double pAp = dot(l0, p, Ap);
-        if (!std::isfinite(pAp) || pAp <= 1e-300)
-          break;  // breakdown/converged direction: keep the last finite iterate
+        if (!std::isfinite(pAp) || pAp <= 1e-300) {
+          if (!std::isfinite(pAp))
+            solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
+          break;                  // keep the last finite iterate
+        }
         const double alpha = rz / pAp;
         axpy(x, alpha, p);
         axpy(r, -alpha, Ap);
@@ -1269,8 +1306,10 @@ class CutcellMG {
         Kokkos::deep_copy(zp, z);  // z_k, before the preconditioner overwrites it
         precond(z, r);
         const double rznew = dot(l0, r, z), rzcross = dot(l0, r, zp);
-        if (!std::isfinite(rznew) || !std::isfinite(rzcross))
-          break;  // preconditioner breakdown: keep the last finite iterate
+        if (!std::isfinite(rznew) || !std::isfinite(rzcross)) {
+          solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
+          break;                // preconditioner breakdown: keep the last finite iterate
+        }
         const double beta = (rznew - rzcross) / rz;  // Polak-Ribiere: r^T (z_{k+1} - z_k) / r^T z
         // DIAGNOSTIC (PECLET_FLOW_MG_DEBUG>=2): `pr` is |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| --
         // the term Fletcher-Reeves keeps and Polak-Ribiere removes. With a preconditioner that is
@@ -1313,6 +1352,7 @@ class CutcellMG {
                     CCField xg2 = CCField(), GridHalo<double>* h2 = nullptr, C3 ext2 = C3{0, 0, 0}
 #endif
   ) {
+    solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -2378,6 +2418,7 @@ class CutcellMG {
   // estimate_eigenvalues.
   void estimateEigenvalues(CCConst seed, double& lmin, double& lmax, int iters, int pre, int post,
                            int bottom) {
+    solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -2437,6 +2478,7 @@ class CutcellMG {
   // `x`. Returns the V-cycle count. Port of solve_chebyshev.
   int solveChebyshev(CCField b, CCField x, int maxit, double rtol, int pre, int post, int bottom,
                      double a, double bnd) {
+    solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -2590,6 +2632,10 @@ class CutcellMG {
   // distributed pressure solve; the solver resets it per step and exposes it to Python.
   double allreduceSeconds() const { return allreduceTime_; }
   long allreduceCount() const { return allreduceCount_; }
+  // ISSUES sweep item 6: did the LAST solve driver give up on a non-finite recurrence scalar?
+  // A failing solve returns the ITERATION CAP (so a rule-3b "no capped solve" check sees it) and
+  // sets this; it used to print to stdout, zero the correction and report 0 iterations.
+  bool lastSolveFailed() const { return solveFailed_; }
   void resetAllreduceCounters() {
     allreduceTime_ = 0.0;
     allreduceCount_ = 0;
@@ -2654,6 +2700,10 @@ class CutcellMG {
   bool meanRemovalAll_ = false;
   bool distributed_ = false;
   int dbgSolve_ = 0;  // solve counter for the env-gated convergence trace (mgDebugLevel() >= 2)
+  // ISSUES sweep item 6: did the LAST Krylov solve give up on a non-finite recurrence
+  // scalar (a preconditioner or operator that produced NaN/Inf)? Reset at the head of
+  // every solve. See `lastSolveFailed()`.
+  bool solveFailed_ = false;
   std::vector<double> lvTime_;  // per-level V-cycle wall time (mgDebugLevel() >= 3)
   int lvCycles_ = 0;
   // Halo refresh before the V-cycle's residual (see vcycle). ON by default — the legacy
