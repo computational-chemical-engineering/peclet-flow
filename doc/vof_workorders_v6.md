@@ -528,6 +528,212 @@ pressure iterations vs cap; a capped run is not a data point. Report ms/step and
 
 (append per WO, newest first)
 
+## `rebalance_by_weights` findings — the WO-V9 item 4b defect: TWO root causes, both fixed — 2026-09-04, Opus
+
+Branch `vof-rebalance`, worktree `../flow-rebalance`, from `origin/main` at `a16d9a1`. Backends:
+`host-openmp` (every gate, including the byte-level before/after diff) and `nvidia-cuda` (the new
+ctest at np 1/2/4 and the whole single-rank battery). The local GPU was carrying a gallery render
+throughout, so no timing on it is quoted except the ones WO-V9 itself asked for (measured on the
+host).
+
+### The reproducer, minimised
+
+WO-V9's own command reproduces on the first try:
+
+```
+PYTHONPATH=<build_mpi_omp> OMP_NUM_THREADS=1 mpirun -np 4 --bind-to core \
+  python tests/study/vof_orb_weights.py --n 48 --steps 8 --warm 3 --w 8 --layout plume
+```
+
+→ `malloc(): unaligned tcache chunk detected` + `Kokkos::Impl::SharedAllocationRecord failed
+increment` + `malloc(): unsorted double linked list corrupted`, immediately after the
+`rebalance_by_weights` call, on the two ranks whose block GROWS (cells/rank
+`[49152, 24576, 24576, 12288]` before the move, `[27648]×4` after).
+
+**It is not a VoF defect.** A 32³ four-rank minimal case (`Solver` + `init_mpi` +
+`set_pressure_geometry` + a weight field that moves the ORB) shows:
+
+| what the solver owns | result |
+|---|---|
+| nothing but u/v/w/p/sdf | **survives** |
+| `+ add_scalar("T")` | `Fatal glibc error: _int_malloc: assertion failed` |
+| `+ enable_vof()` + surface tension | `corrupted double-linked list` / `free(): invalid pointer` |
+
+i.e. the trigger is **owning any field the FieldSet ALLOCATED** (`FieldSet::add`), and u/v/w/p/sdf
+escape because they are `adopt`ed and `allocateBlock` re-`adopt`s them. That is the whole
+discriminator, and it is what makes the defect equally a CFD-DEM one ("eps", "drag_beta",
+"force_*").
+
+### The ASan stack
+
+`cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer"
+-DCMAKE_CXX_FLAGS_DEBUG="-g -O1" -DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=address
+-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address -DPECLET_FLOW_MPI=ON` against the `host-openmp`
+prefix, run as `ASAN_OPTIONS=detect_leaks=0 LD_PRELOAD=$(gcc -print-file-name=libasan.so)
+mpirun -np 4 --bind-to core python …` (the `LD_PRELOAD` is required because the sanitizer is not
+the first library the interpreter loads; `detect_leaks=0` because Kokkos + MPI leak at exit by
+design). Two practical notes for anyone repeating it: put a `del solver` before the script exits or
+the Kokkos `atexit` finalize aborts on the halo buffers ("Kokkos allocation
+`peclet::core::halo::recvBuf` is being deallocated after Kokkos::finalize was called"), and expect
+`AddressSanitizer: CHECK failed: asan_interceptors.cpp:458 real___cxa_throw != 0` if any C++
+exception is thrown under `LD_PRELOAD` — that is ASan's own interceptor bootstrap, not a memory
+error.
+
+```
+==1635105==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x53400049ca80
+WRITE of size 184320 at 0x53400049ca80 thread T0
+    #0 memcpy
+    #1 peclet::flow::Solver<Staggered>::redistribute(...)::{lambda(...)#1}::operator()   flow_ibm.hpp:755
+    #2 peclet::flow::Solver<Staggered>::redistribute(BlockDecomposer<3> const&)          flow_ibm.hpp:760
+    #3 peclet::flow::Solver<Staggered>::rebalanceByWeights(std::vector<double> const&)   flow_ibm.hpp:780
+    #4 flow_bindings.cpp:2387  (rebalance_by_weights)
+0x53400049ca80 is located 0 bytes after 115328-byte region [0x534000480800,0x53400049ca80)
+allocated by thread T0 here:
+    #1 Kokkos::HostSpace::impl_allocate(...)
+```
+
+184320 bytes = 23040 doubles = the NEW padded block; 115328 bytes = 14416 doubles = the OLD one.
+`scatterPadded`'s `std::memcpy` wrote one block into the other.
+
+### Root cause 1 — nothing the solver grew after construction followed the new block
+
+`allocateBlock` re-creates the buffers it names explicitly and re-`adopt`s "u"/"v"/"w"/"p"/"sdf".
+Three other populations do not follow it:
+
+1. **the FieldSet's own storage** (`add`): every transported scalar, every property/body-force
+   closure target, VoF's "C"/"kappa"/"kappa_branch", the phase-change fields. `core`'s
+   `field_set.hpp` even documents the intent — *"`ownStorage` distinguishes a FieldSet-allocated
+   buffer (add) from an aliased solver member (adopt) — redistribution reallocates the former and
+   rebinds the latter"* — but no code did either;
+2. **the member handles that ALIAS those records** — `cField_`, `kappaField_`, `rhoField_`,
+   `muField_`, `epsField_`, `dragBeta_`, `cellForce_[]`, `ScalarField::c`, and every `Closure`'s
+   `out`/`in0`/`in1` (which did not even keep the registry key needed to re-resolve them —
+   `property_closures.hpp`'s comment says a redistribution "must re-resolve them");
+3. **the lazily-allocated per-block scratch** — `vofCs_`, `vofSolidG2_`, `uAdv_`, `vofDynVel_`,
+   `csfBlkF_`, the whole phase-change set, the porous/`varRho` set, the g=1 MG-bridge coefficients,
+   `bcProf_` — each sized at the `n_`/`n1_` of whichever block was current when its feature was
+   first switched on.
+
+Plus the block container's **per-rank box table**: `VofBlockExchange::init` was handed
+`dec_->block(r)` for every rank at `enable_vof_blocks` and never again, so after a move every
+gather/scatter piece would have been cut against the previous partition (the WO-W0 suspect; it
+never got the chance to corrupt anything because the heap died first).
+
+**Fix.** `Solver::resizeForBlock()`, called between `allocateBlock` and `initMpi` in
+`redistribute` — the order matters, because `initMpi` → `buildVofBlock` → `zeroSolidColour`
+already writes through `cField_`. Three passes: `reallocOwnedFields()` (every `ownStorage`
+record whose extent ≠ `n_`), `rebindFieldAliases()` (every alias re-resolved BY NAME; `Closure`
+gained `outName`/`in0Name`/`in1Name`), `resizeBlockScratch()` (every lazily-allocated view, with
+the invariant that a view which was never allocated STAYS unallocated — "inert until its feature is
+enabled" is load-bearing all over this class, so resizing an empty view would switch a feature on).
+The rank-box table is rebuilt in `bindVofBlockPatch()` (new
+`VofBlockExchange::setRankBoxes`), which `buildVofBlock` already calls on every re-decomposition.
+Two deliberate judgements recorded there: `epsPrev_` is re-seeded from the migrated `eps` so
+`d(eps)/dt = 0` across the move (a re-partition is not a time step, and the CFD-DEM projection RHS
+must not see a porosity jump), and `cutOwner_` is deliberately NOT resized because every consumer
+already guards on `extent(0) == nx_*ny_*nz_` and skips — a freshly-zeroed one would silently name
+instance 0 the owner of every cut cell. `set_domain_bc_profile` now keeps the user's raw
+`(nb, nc, 3)` profile so the local face-plane resampling can be redone.
+
+### Root cause 2 — the migration never refilled the ghosts, and it is worth 1e-1 in u
+
+Found only because the new ctest measures the right thing. `core`'s
+`grid_redistribute.hpp` says in its header: *"Pure data movement of the INNER cells … the caller
+refills ghosts with a halo exchange afterwards."* Nothing did, and the destination buffers are
+zero-initialised, so every migrated field entered the next step with a **zero halo** on the new
+partition.
+
+| np = 4, one step after the move, vs the single-rank reference | before | after |
+|---|---|---|
+| du | **1.01e-01** | 6.03e-17 |
+| dv / dw | 3.95e-02 / 4.68e-02 | 7.38e-17 / 4.86e-17 |
+| dP | **5.62e-01** | 1.55e-15 |
+| dC | 7.28e-04 | 2.22e-16 |
+| dT (scalar) | 6.91e-03 | 4.60e-05 (= the never-rebalanced control's own value) |
+
+It is invisible at np = 1 and np = 2 on this scene (the new neighbour set reproduces the old one)
+and shows up the moment the partition changes SHAPE — which is exactly what an
+interface-weighted ORB does. That it is the ghosts and not the move was settled by running a
+solver **constructed directly on the weighted partition D2**: it reproduces the single-rank
+reference to 6.5e-17, so D2 is a perfectly good partition and the divergence was introduced by
+`redistribute`. `redistribute` step 6 now exchanges every registered field and re-applies each
+scalar's domain BCs.
+
+### Gates
+
+**(a) The reproducer runs to completion, and the ASan build is clean.** The WO-V9 command above now
+finishes, and it produces the "after" column WO-V9 could not:
+
+| np = 4, 48³, plume swarm | mixed cells / rank | imbalance (mixed) | imbalance (cells) | ms/step |
+|---|---|---|---|---|
+| plain ORB | 3788 / 1718 / 2204 / 773 | 1.7862 | 1.7778 | 279.6 |
+| interface-weighted (W = 8) | 2023 / 2168 / 2259 / 2229 | **1.0411** | 1.0000 | **215.0** |
+
+**−23.2 % on the step**, pressure 34→35 of 600 (no cap touched, rule 3b). ASan: **0 errors** on the
+32³ np = 4 VoF and scalar reproducers (`ASAN_OPTIONS=detect_leaks=0`, exit 0, no Kokkos-teardown
+warning with `del solver`).
+
+**(b) + (d) `tests/kokkos_mpi` and `tests/kokkos` bit-identical.** `host-openmp`, both trees built
+and run side by side (`origin/main` in `../flow-rebal-base`), `ctest -V`, compared per test after
+stripping only build paths and timings:
+
+* `tests/kokkos`: **34/34 pass either side**, and the two logs are **identical except for four
+  timing lines** (`vof_timing`'s own stage report and `vof_blocks`'s block-step ms).
+* `tests/kokkos_mpi`: **100/100 pass on `main`, 103/103 on the branch**; of the 100 shared tests,
+  **97 are byte-identical** and the three that differ are `movingscene_advect_mpi_np{1,2,4}`, whose
+  last two digits of the hydrodynamic force move **between two runs of the unmodified baseline
+  binary** (`F_ref` = −0.11367215421887425 and −0.11367215421887442 on consecutive runs) — a
+  pre-existing run-to-run OpenMP reduction-order nondeterminism, unrelated to this branch.
+* `nvidia-cuda` `tests/kokkos`: **34/34 pass**.
+
+**(c) The new ctest `vof_redistribute_mpi` (np 1/2/4, both backends).** 24×24×48, two bubbles on the
+long axis, VoF + surface tension + three property closures + a transported scalar, in two
+configurations (with and without the block container), rebalanced onto a weight field that moves
+the partition (at np = 4 from a z-split into a 2×1×2 split — the test FAILS if the two partitions
+coincide, so it can never pass vacuously). Three gates:
+
+* **R1 the move is exact data movement**: C, u, v, w, P and T gathered globally immediately before
+  and after the rebalance — **0 differing cells, max|d| = 0.000e+00** on all six fields, at
+  np = 1/2/4, both backends, both configurations. R3: the two markers' volumes across the move,
+  **max|dV| = 0.000e+00**.
+* **R2 the run afterwards is still the same solver**, calibrated against a **never-rebalanced
+  control** in the same binary rather than an absolute number (the scalar's fixed-sweep RB-GS is
+  decomposition-dependent by construction, so an absolute tolerance would have measured the
+  decomposition and blamed the redistribute). host np = 4, 12 steps, rebalanced | control:
+  `dC 7.77e-16|7.77e-16  du 6.44e-16|6.36e-16  dP 3.66e-15|3.66e-15  dT 4.17e-05|4.17e-05`.
+  np = 1 (where the control IS the reference) is bit-exact to 1e-13: `dT 5.55e-17`.
+
+**(e) The single-phase regression: +0.00 %.** `tests/regression/sdflow_regression.py` on the CUDA
+build, all three cases, all 13 grids: **every metric +0.00 %, every pressure-iteration total
++0.0 %, every step count identical, orders and Richardson extrapolants unchanged** (zh_sphere
+p = 2.29, K_inf = 7.447; random_spheres p = 2.19, k*_inf = 0.0062362; hollow_rings p = 1.38,
+k*_inf = 0.017184). `=== regression: PASS ===`.
+
+### What is NOT resolved
+
+1. **A redistribute is still not bit-neutral at np = 1**, by ~1 ULP: `dC 2.22e-16`, `du 1.59e-16`,
+   `dP 9.99e-16` after 12 steps. This is **pre-existing and unchanged by this branch** — the
+   baseline binary (built from `origin/main`'s `src/`) produces the *same digits*. The mechanism is
+   `redistribute`'s documented contract, "per-step scratch is rebuilt": `phi_` is not a registered
+   field, so the pressure driver loses its warm start across the move and takes a marginally
+   different iteration path. Making the move bitwise would mean registering (or otherwise
+   migrating) `phi_`; it is a design decision, not a bug, and is left to the coordinator.
+2. **`movingscene_advect_mpi` is run-to-run nondeterministic** in the last two digits of the
+   hydrodynamic force (shown above on an unmodified baseline binary). It passes, but its "np = 1
+   tolerance 0.0e+00" claim is only true of `du`/`dp`, not of `dF`/`dT`. Worth a separate look.
+3. **The block container + a solid is still refused** (`enable_vof_blocks` throws on `hasSolid_`,
+   rung W12), so the new ctest's block configuration is necessarily all-fluid; a cut-cell block
+   rebalance is untested because it is unbuildable.
+4. **Moving-scene geometry across a rebalance is untested.** `cutOwner_` is left stale-sized and
+   inert on purpose (above), which is safe but means a moving-scene run silently loses per-instance
+   cut ownership after a rebalance. Re-sampling the scene inside `redistribute` is the fix if that
+   combination is ever wanted.
+5. **The ASan build's own numerics.** At `-O1` the WO-V9 plume study throws the Weymouth–Yue CFL
+   cap inside `advect` where the `-O3` build with identical settings does not; it does so with
+   `--w 0` (a partition that does NOT move) too, so it is the build's FP contraction on a marginal
+   adaptive-dt case, not the rebalance. The ASan verdict above therefore rests on the 32³
+   reproducers, which run clean end to end.
+
 ## WO-V9 findings — the VoF performance profile, and the one lever the numbers justify — 2026-09-04, Opus
 
 Branch `vof-v9`, worktree `../flow-v9`, from `origin/main` at `40fc1b7`.

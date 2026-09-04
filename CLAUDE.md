@@ -1011,10 +1011,23 @@ droplet, a 96³ Scriven bubble):
   is flat in the rank count (12.93 / 12.86 / 12.34 % at np = 1 / 2 / 4 on the packed column), and a
   stage that costs the same fraction at np = 1 — where there is no message at all — is not paying
   for halo depth.
-- **`rebalance_by_weights` corrupts the heap on a VoF run whenever the new partition actually
-  differs from the old one** (`free(): invalid pointer` / SIGSEGV inside `redistribute`), which is
-  why the interface-weighted ORB could be measured only before and not after. Pre-existing, not a
-  VoF-side defect; reproducer and suspects in `doc/vof_workorders_v6.md`, WO-V9 item 4b.
+- **`rebalance_by_weights` / `redistribute` carried TWO defects, both fixed (2026-09-04, branch
+  `vof-rebalance`; findings in `doc/vof_workorders_v6.md`).** (1) *The heap corruption.* Only the
+  buffers `allocateBlock` names, plus the five `adopt`ed registry entries, followed the new block.
+  The FieldSet's OWN storage (`add`: "C", "kappa", every closure target, every transported scalar),
+  the member handles that alias those records, the lazily-allocated per-block scratch and the block
+  container's per-rank box table did not — so the scatter memcpy'd the NEW padded extent into the
+  OLD allocation (ASan: a 184320-byte write into a 115328-byte region → `free(): invalid pointer`).
+  `Solver::resizeForBlock()` (three passes: reallocate owned records, rebind aliases by NAME, resize
+  scratch) now runs between `allocateBlock` and `initMpi`. **Any new registry-alias member or
+  lazily-`n_`-sized View must be added to it.** (2) *The zero halo.*
+  `redistributeGridFields` moves INNER cells only and says the caller must refill the ghosts;
+  nothing did, so every migrated field entered the next step with a zero halo — invisible at
+  np = 1/2, worth `du = 1.01e-01` after ONE step at np = 4. `redistribute` step 6 now exchanges
+  every registered field and re-applies the scalar BCs. Gate: `vof_redistribute_mpi_np{1,2,4}`
+  (state bitwise across a MOVING rebalance; the run afterwards at the never-rebalanced control's
+  own floor). The measurement the defect had blocked: interface-weighted ORB on the 48³ plume swarm
+  at np = 4, imbalance **1.786 → 1.041**, **280.0 → 215.0 ms/step (−23.2 %)**.
 - MPI numbers on a single-GPU node are meaningless unless taken with **one pinned thread per rank**
   (`OMP_NUM_THREADS=1 mpirun --bind-to core`): CUDA ranks time-slice one device, and on
   host-openmp `--bind-to none` with `OMP_PROC_BIND=spread` makes np = 2 twelve times slower than
@@ -1027,7 +1040,8 @@ Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_mome
 `vof_phase_change_mpi_np{1,2,4}`, `vof_bc_mpi_np{1,2,4}`, `vof_advect_mpi_np{1,2,4}`,
 `vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,
 `vof_surface_tension_mpi_np{1,2,4}`, `vof_cutcell_mpi_np{1,2,4}`, `vof_wetting_mpi_np{1,2,4}`,
-`vof_collocated_mpi_np{1,2,4}`, `vof_blocks_mpi_np{1,2,4}`;
+`vof_collocated_mpi_np{1,2,4}`, `vof_blocks_mpi_np{1,2,4}`,
+`vof_redistribute_mpi_np{1,2,4}`;
 `tests/study/vof_collocated.py` (the V8 staggered/collocated columns);
 `tests/study/vof_stefan.py` (the P0/P1 phase-change battery: `p0a`, `p0b`, `p1` + the 64/128/256
 Stefan ladder);
