@@ -413,8 +413,15 @@ static void bind_solver(nb::module_& m, const char* name) {
           "solve (0 on a single rank).")
       .def("set_domain_bc", &S::setDomainBc, nb::arg("face"), nb::arg("type"), nb::arg("vx") = 0.0,
            nb::arg("vy") = 0.0, nb::arg("vz") = 0.0,
-           "Set a per-face domain BC (face 0..5 = -x,+x,-y,+y,-z,+z; type 0 periodic/1 wall/2 "
-           "inflow/3 outflow).")
+           "Set a per-face domain BC (face 0..5 = -x,+x,-y,+y,-z,+z; type 0 periodic / 1 no-slip "
+           "wall / 2 Dirichlet inflow / 3 outflow / 4 FREE SLIP (symmetry)).\n\n"
+           "Type 4 is impermeable (normal velocity 0 ON the boundary face, exactly as a wall) "
+           "with a ZERO NORMAL GRADIENT of the tangential components, i.e. no wall shear. It is "
+           "the standard companion of no-slip in a benchmark suite -- Hysing et al. (IJNMF "
+           "60:1259, 2009) prescribe free-slip lateral walls for the rising bubble, which could "
+           "only be approximated by PERIODIC sides before. The pressure treats it exactly as a "
+           "wall (face openness 0, Neumann ghost); the property, scalar and VoF colour ghosts are "
+           "the zero-gradient copy every non-periodic face already gets. vx/vy/vz are ignored.")
       .def(
           "set_domain_bc_profile",
           [](S& s, int face, nb::ndarray<double, nb::c_contig> prof) {

@@ -544,7 +544,7 @@ class VelocityMG {
     Level& f = lv_[0];
     {
       const int t = bc_[2 * comp];  // the -side face of the normal component lands at index G
-      if ((t == 1 || t == 2) && touches(f, 2 * comp))
+      if ((t == 1 || t == 2 || t == 4) && touches(f, 2 * comp))  // item 7: free slip holds it too
         zeroPlane(f.resMask, f.ext, comp, G);
     }
     for (int L = 1; L < (int)lv_.size(); ++L) {
@@ -556,8 +556,8 @@ class VelocityMG {
         const int a = ff / 2, sd = ff % 2;
         const double ba = (a == 0) ? bx : (a == 1) ? by : bz;
         double dval;
-        if (bc_[ff] == 3)
-          dval = -ba;
+        if (bc_[ff] == 3 || (bc_[ff] == 4 && a != comp))
+          dval = -ba;  // outflow / free-slip tangential: the face leaves the operator (item 7)
         else if ((bc_[ff] == 1 || bc_[ff] == 2) && a != comp)
           dval = ba;
         else
@@ -639,7 +639,7 @@ class VelocityMG {
     for (int s = 0; s < 1;
          ++s) {  // only the -side face index G lands inside the smoother range [G, ext-G)
       const int t = bc_[2 * comp + s];
-      if (t == 1 || t == 2) {
+      if (t == 1 || t == 2 || t == 4) {  // item 7: a free-slip face holds the normal comp too
         if (touches(f, 2 * comp + s))
           zeroPlane(f.resMask, f.ext, comp, G);
         useResMask_ = true;  // rank-uniform (the masked transfers must agree across ranks)
@@ -655,8 +655,8 @@ class VelocityMG {
         const int a = f / 2, s = f % 2;
         const double ba = (a == 0) ? bx : (a == 1) ? by : bz;
         double dval;
-        if (bc_[f] == 3)
-          dval = -ba;  // outflow zero-gradient: every component
+        if (bc_[f] == 3 || (bc_[f] == 4 && a != comp))
+          dval = -ba;  // outflow (every comp) / free-slip tangential: face out of the operator
         else if ((bc_[f] == 1 || bc_[f] == 2) && a != comp)
           dval = ba;  // wall/inflow: tangential fold
         else
@@ -704,7 +704,7 @@ class VelocityMG {
       // of the convergence measure
       if (bcMode_ && heldComp_ >= 0) {
         const int t = bc_[2 * heldComp_];
-        if ((t == 1 || t == 2) && touches(l0, 2 * heldComp_))
+        if ((t == 1 || t == 2 || t == 4) && touches(l0, 2 * heldComp_))  // item 7
           zeroPlane(l0.res, l0.ext, heldComp_, G);
       }
       return gmax(maxAbsInner(CCConst(l0.res), l0.ext, G));

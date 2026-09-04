@@ -79,6 +79,33 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
       });
 }
 
+// FREE-SLIP (symmetry) tangential ghost for the COLLOCATED grid: an EVEN reflection about the
+// boundary face, i.e. zero normal gradient of a tangential component. The odd reflection
+// `bcVelocityColocated` applies is the no-slip/Dirichlet rule and is what the NORMAL component of
+// a free-slip face still wants (impermeability, wall value 0).
+inline void bcMirrorColocated(BField f, B3 ext, int g, int a, int s) {
+  BExec space;
+  int dims[3];
+  long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int na = dims[a];
+  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::bc_mirror_coloc", MD(space, {0, 0}, {dims[b], dims[c]}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
+        auto at = [&](int ia) -> double& { return f(base + static_cast<long>(ia) * sa); };
+        if (s == 0)
+          for (int ia = 0; ia < g; ++ia)
+            at(ia) = at(2 * g - 1 - ia);  // mirror about g-1/2
+        else
+          for (int ia = na - g; ia < na; ++ia)
+            at(ia) = at(2 * (na - g) - 1 - ia);  // about na-g-1/2
+      });
+}
+
 // Collocated (cell-centered) velocity Dirichlet / no-slip ghost on one domain face. The wall sits
 // at the boundary FACE (between the last inner cell and the first ghost), so EVERY component is
 // reflected about it

@@ -826,8 +826,27 @@ class Solver {
   }
 #endif
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip
-  // wall,2=Dirichlet/inflow,3=outflow.
+  // wall,2=Dirichlet/inflow,3=outflow,4=FREE SLIP (symmetry).
+  //
+  // ISSUES sweep item 7. Type 4 is the standard companion of no-slip in every benchmark suite and
+  // was missing: impermeable (normal velocity 0 ON the boundary face, exactly as a wall) with a
+  // ZERO NORMAL GRADIENT of the tangential components (no wall shear). Discretely that is the
+  // wall's normal treatment plus the OUTFLOW face's tangential treatment, which is why every site
+  // below is one of the two existing rules and not a new kernel: the tangential ghost is the
+  // zero-gradient copy (`bcOutflowComp`; an EVEN reflection, `bcMirrorColocated`, on the
+  // collocated grid) and the implicit-diffusion fold is `-beta` (the face is REMOVED from the
+  // operator) instead of the no-slip wall's `+beta` with `2 beta u_wall` on the RHS. For the
+  // pressure the face is closed exactly like a wall (openness 0, Neumann ghost), and every scalar
+  // / property / colour ghost policy already keys on "non-periodic" and so needs nothing.
+  //
+  // Hysing et al. (IJNMF 60:1259, 2009) prescribe free-slip lateral walls for the rising-bubble
+  // benchmark; the gallery page had to substitute PERIODIC sides, which is exact only while the
+  // bubble stays laterally symmetric (case 1) and an approximation once it does not (case 2).
   void setDomainBc(int face, int type, double vx, double vy, double vz) {
+    if (type < 0 || type > 4)
+      throw std::runtime_error(
+          "set_domain_bc: type must be 0 periodic / 1 no-slip wall / 2 inflow / 3 outflow / "
+          "4 free slip (symmetry)");
     // WO-P3g: the "does this cell carry a row" mask depends on which domain faces are periodic.
     pcInDomain_ = CCField();
     bc_[face] = type;
@@ -4916,7 +4935,7 @@ class Solver {
   double finishResidual(int c) {
     if (hasBc_) {
       const int t = bc_[2 * c];
-      if ((t == 1 || t == 2) && touchesGlobalFace(2 * c))
+      if ((t == 1 || t == 2 || t == 4) && touchesGlobalFace(2 * c))  // item 7: free slip too
         zeroPlane(velRes_, e_, c, G);
     }
     lastAxNorm_ = peclet::flow::maxAbsDiffInner(CCConst(C[c].b), CCConst(velRes_), e_, G);
@@ -5333,6 +5352,13 @@ class Solver {
               bcNeumannGhost(f, e, G, a, s);
             continue;
           }  // outflow: zero-gradient ghost
+          if (t == 4) {  // ISSUES sweep item 7: free slip on the cell-centred grid
+            if (comp == a)
+              bcVelocityColocated(f, e, G, a, s, 0.0);  // impermeable: odd reflection about 0
+            else
+              bcMirrorColocated(f, e, G, a, s);  // symmetry: even reflection
+            continue;
+          }
           if (bcProf_[ff].extent(0) >
               0)  // per-position inlet profile (e.g. the BFS partial parabola)
             bcVelocityColocated(f, e, G, a, s, 0.0, comp, bcProf_[ff], bcProfNc_[ff]);
@@ -5351,6 +5377,13 @@ class Solver {
         if (t == 3) {
           if (doOutflow)
             bcOutflowComp(f, e, G, a, s, comp, fold);
+          continue;
+        }
+        if (t == 4) {  // ISSUES sweep item 7: free slip = wall normal + outflow tangential
+          if (comp == a)
+            bcVelocityComp(f, e, G, a, s, comp, 0.0, fold);  // impermeable: u_n = 0 on the face
+          else
+            bcOutflowComp(f, e, G, a, s, comp, fold);  // zero tangential gradient (no wall shear)
           continue;
         }
         if (bcProf_[ff].extent(0) > 0)
@@ -5374,10 +5407,13 @@ class Solver {
           if (!touchesGlobalFace(2 * a + s))
             continue;  // the implicit wall fold belongs to the rank owning that global face
           double dval, bval;
-          if (t == 3) {
+          // ISSUES sweep item 7: a free-slip face carries NO tangential stress, so its tangential
+          // face is removed from the operator exactly as an outflow face is (dval = -beta, no RHS
+          // term); its normal component is held by the Dirichlet face and takes the `continue`.
+          if (t == 3 || (t == 4 && c != a)) {
             dval = -beta;
             bval = 0.0;
-          } else if (t != 0 && c != a) {
+          } else if (t != 0 && t != 4 && c != a) {
             dval = beta;
             bval = 2.0 * beta * bcVel_[2 * a + s][c];
           } else

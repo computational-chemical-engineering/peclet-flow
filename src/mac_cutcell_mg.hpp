@@ -903,7 +903,9 @@ class CutcellMG {
     for (int a = 0; a < 3; ++a)
       for (int s = 0; s < 2; ++s) {
         const int t = bc_[2 * a + s];
-        if ((t == 1 || t == 2) && touchesGlobalFace(lv, 2 * a + s))
+        // ISSUES sweep item 7: a free-slip face (type 4) is impermeable, so its pressure ghost is
+        // the same zero-gradient one a wall gets.
+        if ((t == 1 || t == 2 || t == 4) && touchesGlobalFace(lv, 2 * a + s))
           bcNeumannGhost(x, e, g, a, s);
       }
   }
@@ -942,8 +944,9 @@ class CutcellMG {
         const int t = bc_[2 * a + s];
         if (!touchesGlobalFace(lv, 2 * a + s))
           continue;  // interior rank boundary: the exchanged openness is the right value
-        if (t == 1 || t == 2) {
-          bcSetOpenness(oa[a], e, lv.g, a, s, 0.0);  // wall/inflow Neumann -> closed
+        if (t == 1 || t == 2 || t == 4) {
+          // item 7: free slip is impermeable, i.e. closed to the projection exactly like a wall
+          bcSetOpenness(oa[a], e, lv.g, a, s, 0.0);  // wall/inflow/free-slip Neumann -> closed
         } else if (t == 3) {
           if (!outflowCoeff_) {
             bcSetOpenness(oa[a], e, lv.g, a, s, 1.0);  // outflow -> open (periodic fill wraps)
