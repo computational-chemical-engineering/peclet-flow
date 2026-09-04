@@ -1356,6 +1356,48 @@ static void bind_solver(nb::module_& m, const char* name) {
           "The boxes are the BUBBLE extents; the container grows each by its own 3-cell margin. "
           "They must not share a cell: the seeding gather is a copy, not a union, so a cell inside "
           "two boxes would be handed to both markers.")
+      // --- Part III rung W3: checkpoint / restart of the block container ----------------------
+      .def(
+          "vof_block_colour",
+          [](S& s, long id) {
+            std::vector<double> v = s.vofBlockColour(id);
+            const auto st = s.vofBlockStats();
+            std::size_t nx = 0, ny = 0, nz = 0;
+            for (const auto& b : st)
+              if (b.id == id) {
+                nx = static_cast<std::size_t>(b.hi[0] - b.lo[0]);
+                ny = static_cast<std::size_t>(b.hi[1] - b.lo[1]);
+                nz = static_cast<std::size_t>(b.hi[2] - b.lo[2]);
+              }
+            if (v.size() != nx * ny * nz)
+              return peclet::core::python::vector_to_ndarray(std::move(v), {v.size()}, {1});
+            return peclet::core::python::vector_to_ndarray(
+                std::move(v), {nx, ny, nz},
+                {1, static_cast<std::int64_t>(nx), static_cast<std::int64_t>(nx * ny)});
+          },
+          nb::arg("id"),
+          "One marker's OWN inner colour as a Fortran-order (nx,ny,nz) float64 array over its "
+          "block box (vof_block_stats()['lo'/'hi']); empty on a rank that does not master it.\n\n"
+          "This is the block's ONLY state, so {box, colour} per marker is a COMPLETE checkpoint "
+          "of the container -- and it is the only exact one: re-seeding from the union colour "
+          "field (enable_vof_blocks_from_field) hands each of two TOUCHING markers a slice of the "
+          "other, because that gather is a copy of the union clipped to the seed extent.")
+      .def(
+          "enable_vof_blocks_from_colours",
+          [](S& s, const std::vector<std::array<int, 6>>& boxes, nb::list colours) {
+            std::vector<std::vector<double>> c;
+            c.reserve(nb::len(colours));
+            for (std::size_t i = 0; i < nb::len(colours); ++i) {
+              auto a = nb::cast<nb::ndarray<double, nb::f_contig>>(colours[i]);
+              c.push_back(peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(a)));
+            }
+            s.enableVofBlocksFromColours(boxes, c);
+          },
+          nb::arg("boxes"), nb::arg("colours"),
+          "Restart the block container from a vof_block_colour() checkpoint: one marker per "
+          "(lo_x, lo_y, lo_z, hi_x, hi_y, hi_z) INNER box (exactly the 'lo'/'hi' of "
+          "vof_block_stats(), NOT grown by the margin again) with its colour written directly. "
+          "Exact whatever the markers are doing -- nothing is gathered out of the union field.")
       .def(
           "set_vof_block_assign",
           [](S& s, int mode, long every) { s.setVofBlockAssign(mode, every); }, nb::arg("mode"),

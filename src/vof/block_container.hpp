@@ -745,6 +745,74 @@ class VofBlockSet {
       }
   }
 
+  // ---- rung W3: checkpoint / restart of the block state ---------------------------------------
+  //
+  // A run longer than one job's wall clock has to write its markers out and read them back. The
+  // union colour field is NOT enough to do that: `seedBox`/`finishSeeding` gather each marker out
+  // of the UNION and clip to the seed extent, so two markers that touch each adopt a slice of the
+  // other (WO-W12 open item 5, measured -2.7 % / +7.1 %). A block's ONLY state is its own inner
+  // colour (everything else is either replicated -- the table -- or recomputed every step), so a
+  // checkpoint is exactly {box, colour} per block and the restart below is EXACT whatever the
+  // markers are doing.
+
+  /// One block's INNER colour, copied to the host in x-fastest order over `blocks_[idx].box`.
+  /// Empty on a rank that does not master the block (its state lives on the master).
+  std::vector<double> blockColourHost(std::size_t idx) {
+    VofBlock& b = blocks_.at(idx);
+    if (!b.mine_ || !b.allocated_)
+      return {};
+    const I3 n = b.adv_.inner();
+    SField c = b.adv_.colour();
+    auto hc = Kokkos::create_mirror_view(c);
+    Kokkos::deep_copy(hc, c);
+    std::vector<double> out(static_cast<std::size_t>(n.x) * static_cast<std::size_t>(n.y) *
+                            static_cast<std::size_t>(n.z));
+    std::size_t q = 0;
+    for (int z = 0; z < n.z; ++z)
+      for (int y = 0; y < n.y; ++y)
+        for (int x = 0; x < n.x; ++x)
+          out[q++] = hc(b.adv_.index(x, y, z));
+    return out;
+  }
+
+  /// Seed a block whose INNER box is EXACTLY `bb` (not grown by the margin: `bb` is what
+  /// `blockColourHost` was paired with) and whose colour is the given host array, x-fastest over
+  /// `bb`. No seed clip runs -- the colour is given, not gathered out of a union.
+  void seedBoxWithColour(const VofBox& bb, const std::vector<double>& colour) {
+    VofBlock b;
+    b.id = static_cast<long>(blocks_.size());
+    b.master = masterOf(b.id);
+    b.box = vofClampBox(bb, gs_, per_);
+    b.mine_ = (b.master == rank_);
+    blocks_.push_back(std::move(b));
+    const std::size_t idx = blocks_.size() - 1;
+    for (std::size_t k = 0; k + 1 < blocks_.size(); ++k)
+      if (blocks_[k].mine_ && blocks_[k].allocated_)
+        installHook(k);
+    if (!blocks_[idx].mine_)
+      return;
+    allocate(idx);
+    VofBlock& nb = blocks_[idx];
+    const I3 n = nb.adv_.inner();
+    const std::size_t want = static_cast<std::size_t>(n.x) * static_cast<std::size_t>(n.y) *
+                             static_cast<std::size_t>(n.z);
+    if (colour.size() != want)
+      throw std::runtime_error(
+          "peclet::flow::vof::VofBlockSet::seedBoxWithColour: colour size does not match the box");
+    SField c = nb.adv_.colour();
+    auto hc = Kokkos::create_mirror_view(c);
+    Kokkos::deep_copy(hc, c);  // ghosts as allocated (zero); the fill below re-does them anyway
+    std::size_t q = 0;
+    for (int z = 0; z < n.z; ++z)
+      for (int y = 0; y < n.y; ++y)
+        for (int x = 0; x < n.x; ++x)
+          hc(nb.adv_.index(x, y, z)) = colour[q++];
+    Kokkos::deep_copy(c, hc);
+    Kokkos::fence();
+    fillBlockGhosts(nb);
+    measure(nb, 0.0);
+  }
+
   /// A seeded block's colour is its OWN bubble's: the gather copies the whole INNER box (bubble
   /// extent + margin) out of the global field, and the margin ring belongs to no marker by the
   /// margin contract (it is what makes the block conservative), so anything the gather picked up

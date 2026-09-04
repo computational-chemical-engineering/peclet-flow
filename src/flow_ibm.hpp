@@ -6968,6 +6968,35 @@ class Solver {
     finishVofBlocks();
   }
 
+  // --- rung W3: checkpoint / restart of the block container ------------------------------------
+  //
+  // The block's own inner colour is a block's ONLY state, so {box, colour} per block is a complete
+  // checkpoint -- and unlike `enableVofBlocksFromField` it is exact when two markers touch (the
+  // seeding gather out of the UNION would give each a slice of the other; WO-W12 open item 5).
+  std::vector<double> vofBlockColour(long id) {
+    if (!vofBlocks_)
+      throw std::runtime_error("vof_block_colour: call enable_vof_blocks first");
+    if (id < 0 || static_cast<std::size_t>(id) >= vofBlocks_->count())
+      throw std::runtime_error("vof_block_colour: no such block id");
+    return vofBlocks_->blockColourHost(static_cast<std::size_t>(id));
+  }
+  void enableVofBlocksFromColours(const std::vector<std::array<int, 6>>& boxes,
+                                  const std::vector<std::vector<double>>& colours) {
+    if (boxes.size() != colours.size())
+      throw std::runtime_error(
+          "enable_vof_blocks_from_colours: one colour array per box is required");
+    prepareVofBlocks();
+    for (std::size_t i = 0; i < boxes.size(); ++i) {
+      vof::VofBox bb;
+      for (int d = 0; d < 3; ++d) {
+        bb.lo[d] = boxes[i][d];
+        bb.hi[d] = boxes[i][3 + d];
+      }
+      vofBlocks_->seedBoxWithColour(bb, colours[i]);
+    }
+    finishVofBlocks();
+  }
+
   // --- rung W2: the block CSF ------------------------------------------------------------------
   //
   // Turn the surface tension of `set_surface_tension` into a PER-BLOCK force: each marker runs its
