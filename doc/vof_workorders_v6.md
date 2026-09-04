@@ -528,6 +528,103 @@ pressure iterations vs cap; a capped run is not a data point. Report ms/step and
 
 (append per WO, newest first)
 
+## WO-W3 findings (2026-09-04, Opus) — `channel_18` to a statistically steady state, on Snellius, with TBFsolver alongside
+
+Branch `vof-w3` (worktree `../flow-w3`), from `origin/main` at `a16d9a1`. Everything ran on
+**Snellius**: the peclet side on **one H100** (`gpu_h100`, `--gpus-per-node=1` — the case fits one
+GPU and Snellius bills per ALLOCATED GPU), TBFsolver on **64 genoa cores**. Remote working copies
+are this session's own — `$SUITE/flow-w3` (branch `vof-w3`) against `$SUITE/core-w3` (core `0a7605d`),
+built into `$SUITE/flow-w3/build_cuda`; the shared `$SUITE/flow` tree and its `build_cuda_mpi` were
+never touched.
+
+### 1. The block container could not be checkpointed, and that is what a 20-turnover run needs
+
+WO-W12's `tests/study/vof_channel_18.py` runs one window and prints; a statistically steady state
+is ~20 eddy turnovers (`h/u_tau` each) and no job's wall clock holds it. The container had no
+serialisation, and the seeding path cannot substitute for one: `enable_vof_blocks_from_field`
+gathers each marker out of the **union** colour field and clips it to the seed extent, so two
+markers in contact each adopt a slice of the other (WO-W12 open item 5, measured −2.7 % / +7.1 %) —
+and in a bubbly channel markers DO come into contact.
+
+A block's only state is its own inner colour (everything else is either replicated — the table —
+or recomputed every step), so `{box, colour}` per marker is a complete and exact checkpoint:
+
+```python
+c   = s.vof_block_colour(id)                       # the marker's OWN (nx,ny,nz) inner colour
+s.enable_vof_blocks_from_colours(boxes, colours)   # restart the container from those
+```
+
+(`VofBlockSet::blockColourHost` / `seedBoxWithColour`, which seeds an INNER box directly — not the
+bubble extent grown by the margin again — and runs **no** seed clip, because the colour is given
+rather than gathered.) Nothing else changes: no existing call site is touched and no other path
+allocates anything new.
+
+### 2. A chunked run is BITWISE the continuous one — after two pieces of state the restart was dropping
+
+The gate is the one that matters for a chunked campaign: **40 steps in one go against 20 + a resumed
+20**, on the quick `channel_18` scene (48-cell half-height, 80 × 48 × 32, 18 markers). Run it on
+**host-openmp**, which is bit-reproducible run to run (two identical 40-step runs agree to
+`0.000e+00` in u, v, w, p and t to the last bit — measured first, because without that control the
+gate cannot distinguish a restart defect from solver noise).
+
+First reading: **u 1.6e-3 relative, C 1.8e-3, and `t` differing in the 8th digit**. Two causes, and
+the one-step isolation (restore, take ONE step, compare against the fresh run's 21st) is what
+separated them — because after that single step the velocity was **bitwise identical** while the
+colour was not, which rules out everything on the momentum side at once:
+
+1. **The accumulated pressure.** The incremental-rotational scheme carries `P` between steps and the
+   momentum RHS reads `−(P(i) − P(i−s))`. It needs no new API — `fields_.adopt("p", P_, …)` means
+   `get_field("p")` / `set_field("p")` already reach it — but it must be restored **after** the
+   geometry, since `set_pressure_geometry` zeroes `P` and `phi` when it rebuilds the operator.
+2. **The Weymouth–Yue sweep permutation, which the BLOCK container keeps its own counter for.** The
+   order is `kWySweepPerm[n % 6]` and `VofBlockSet::step_` drives `WyAdvector::advect(dt, step_)`
+   for every marker; a fresh container starts it at 0, so a resumed chunk takes the wrong
+   permutation. That is worth **6.2e-4 in the colour after ONE step off a bitwise-identical
+   velocity** — the splitting error, exactly. `setVofStepParity` now sets the block container's
+   counter as well as the solver's, which is what its own docstring ("resume a run across a
+   restart") always promised; the container's counter equals the step index, so the driver passes
+   `step0`.
+
+With both restored the chunked run is **bitwise**: `u, v, w, p` and every marker's own colour agree
+to `0.000e+00`, the block boxes are identical, and `t` matches to the last bit.
+
+**The general rule this is an instance of:** a container that carries a *counter* carries state.
+`VofBlockSet` has three (the step/permutation counter, the pool, the assignment cadence) and only
+the first is load-bearing for a restart — but nothing in the container's API said so, and the
+symptom (a 1e-3 colour difference off an identical velocity) looks exactly like a bad checkpoint of
+the colour itself.
+
+### 3. TBFsolver BUILDS AND RUNS on Snellius — the recipe, and it took well under the hour budget
+
+This is the half WO-W12 had to leave open ("the cross-code comparison needs TBFsolver built and
+run"). It is a Fortran+MPI code whose `INSTALL` asks for LAPACK, FFTW3 (multi-threaded) and MUMPS,
+and whose `Makefile` is written for the Intel compiler. With `POIS_OPT = FAST_MODE` (the shipped
+default, the FFT Poisson solver) **MUMPS is not needed at all** — only FFTW3, OpenBLAS and
+ScaLAPACK, every one of them an EasyBuild module:
+
+```bash
+module load 2024 foss/2024a FFTW/3.3.10-GCC-13.3.0
+cd TBFsolver/src && make COMPILER=mpif90 OMP_FLAG=-fopenmp \
+     FLAGS="-O2 -fbacktrace -ffree-line-length-none -fallow-argument-mismatch"
+```
+
+Three overrides and nothing else: `mpif90` for the empty `COMPILER`, `-fopenmp` for the Intel
+`-qopenmp`, and gfortran's `-fallow-argument-mismatch` for the code's many `MPI_Reduce` calls whose
+buffer types differ between call sites (warnings only, the classic pre-F2008 MPI interface). It
+compiles and links clean and the binary runs.
+
+**And TBFsolver ships the cross-code statistics after all — as CODE, not as data.**
+`src/statistics/statistics.f90` accumulates, per wall-normal plane and in time, `<c>` and the mean
+and second moments of velocity, pressure, vorticity and `grad u`, each in three regions —
+**whole (`_W`), gas (`_G`) and liquid (`_L`)**, weighted by `1`, `c` and `1 − c` — and writes them
+as ASCII `stats_c`, `stats_u_{W,G,L}`, … into the output folder, plus the time-averaged wall shear
+in `tauw`. They are volume-weighted plane integrals divided by the SLICE volume, so the conditioned
+liquid mean is `<(1−c)u>/<1−c>`, exactly the quantity `run_channel_18.py` forms from its own
+`L`-weighted sums. `tests/study/channel_18/tbf_profiles.py` converts a TBFsolver output folder into
+the same NPZ keys, so the two codes overlay with no further arithmetic. WO-W12's "the repository
+ships no reference statistics" stands as written — it ships no reference *data* — but the case is
+instrumented to produce exactly the comparison the rung wanted, which is the practical correction.
+
 ## `rebalance_by_weights` findings — the WO-V9 item 4b defect: TWO root causes, both fixed — 2026-09-04, Opus
 
 Branch `vof-rebalance`, worktree `../flow-rebalance`, from `origin/main` at `a16d9a1`. Backends:
