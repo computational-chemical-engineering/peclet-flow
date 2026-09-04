@@ -948,6 +948,8 @@ def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt,
                 m_area=m_area, cells=int(dg['interface_cells']), m_cell=md[iface],
                 Rmeas=Rmeas, gradT=gradT, bl=dT / gradT, e_lat=e_lat,
                 q_gfm=bud['q_gfm'] + bud['q_behind'], q_ex=q_ex, mdot_fit=dg['mdot_fit'],
+                q_op=dg['q_operator'], q_orphan=dg['q_orphan'],
+                a_orphan=dg['area_orphan'], n_noc=dg['area_no_cascade_cells'],
                 delta=dg['removed_volume'] / A if A > 0 else float('nan'),
                 clipped=int(dg['deficit_cells']))
 
@@ -991,6 +993,10 @@ def mdot_probe(n, radii, ja=0.5, ratio=100.0, sub=16, alpha_l=1.0, area_mode=Non
                   f"delta {r['delta']:.3e}  clipped {r['clipped']}")
             print(f"                     mdot_area {r['m_area']:.6e} vs exact {r['mdot_ex']:.6e}  "
                   f"rel {100*rel:+7.3f} %{ordr}")
+            print(f"                     q_op {r['q_op']:.6e}  E_lat {r['e_lat']:.6e} "
+                  f"(E_lat-q_op)/E_lat {(r['e_lat']-r['q_op'])/r['e_lat'] if r['e_lat'] else float('nan'):+.3e}"
+                  f"  q_orphan/q_op {r['q_orphan']/r['q_op'] if r['q_op'] else 0.0:+.3e}"
+                  f"  no-cascade cells {r['n_noc']}  orphan area {r['a_orphan']:.4e}")
             print(f"                     GFM heat -q_gfm {-r['q_gfm']:.6e} vs exact "
                   f"{r['q_ex']:.6e} (rel {100*(-r['q_gfm']/r['q_ex']-1):+7.3f} %), "
                   f"-q_gfm/E_lat {-r['q_gfm']/r['e_lat']:8.5f}")

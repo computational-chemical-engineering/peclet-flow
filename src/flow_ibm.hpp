@@ -8115,6 +8115,7 @@ class Solver {
     pcCurvDist_ = on;
     if (on && pcKappa_.extent(0) != n_)
       pcKappa_ = CCField("pc_kappa", n_);
+    pcMaskFresh_ = false;  // the row geometry has to be rebuilt with (or without) the curvature
   }
   bool phaseChangeCurvatureDistance() const { return pcCurvDist_; }
   double phaseChangeQOperator() const { return pcQOperator_; }
@@ -8422,6 +8423,18 @@ class Solver {
           if (!(vof::pcUnitNormal(m[0], m[1], m[2], n) > 0.0))
             return;
           const double phic = vof::pcCentreDistance(m[0], m[1], m[2], al);
+          // **WO-P3g item 1 — the area is a UNIT CONVERSION, not a term in the mass balance.**
+          // The regression removes `dV = mdot A dt/rho_l` and the source deposits
+          // `S = mdot A (1/rho_g - 1/rho_l)`, and with `mdot = q/(h_lv A)` BOTH are `A`-free:
+          // `dV = q dt/(h_lv rho_l)`, `S = q (1/rho_g - 1/rho_l)/h_lv`. So a cell the AREA
+          // ESTIMATOR gave nothing still has to evaporate the heat its Dirichlet rows draw, or
+          // that heat is simply destroyed. Measured on the a-priori probe (exact sphere, R = 20,
+          // Ja 0.5, area mode 6): **27.6 % of the operator's total interfacial heat sits on
+          // interfacial cells with A = 0** -- the joined marching-tetrahedra sheet deposits each
+          // triangle to the cell holding its centroid, so a band cell can carry an interface and
+          // no area. `Aeff` is the unit conversion those cells use; the DIAGNOSTIC area
+          // (`interface_area`) stays the geometric one, so `mdot_area` is unaffected.
+          double Aeff = A;
           double md = mdot(i);
           if (thermal) {
             const double Tg = vof::pcInterfaceTemperature(Tsat, md, Rint);
@@ -8505,24 +8518,24 @@ class Solver {
                   }
                 }
               mdotFit(i) = md;  // the least-squares estimator, kept as a diagnostic
-              md = vof::pcOperatorMassFlux(qsum, csum, A, hlv, Rint);
-              if (A > 0.0)
-                qacc += qsum;
-              else
-                qorph += qsum;
+              Aeff = (A > 0.0) ? A : 1.0;
+              md = vof::pcOperatorMassFlux(qsum, csum, Aeff, hlv, Rint);
+              qacc += qsum;
+              if (!(A > 0.0))
+                qorph += qsum;  // reported, but no longer dropped
               mfacc += mdotFit(i) * A;
             }
             mdot(i) = md;
           }
-          area(i) = A;
+          area(i) = Aeff;
           nx(i) = n[0];
           ny(i) = n[1];
           nz(i) = n[2];
           ++nif;
-          aacc += A;
+          aacc += A;  // the GEOMETRIC area, for the diagnostics; `Aeff` is the unit conversion
           macc += md;
           // the divergence source and the pure-gas cell that will carry it
-          const double S = vof::pcDivSource(md, A, rhoG, rhoL);
+          const double S = vof::pcDivSource(md, Aeff, rhoG, rhoL);
           if (S != 0.0) {
             // WO-P23: the receiving PURE GAS cell is the BEST cell of the 5^3 neighbourhood on
             // the `+n` side, scored by Malan's own collinearity weight `(d.n)^2/|d|^3` — closest
