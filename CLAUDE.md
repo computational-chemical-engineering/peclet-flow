@@ -610,6 +610,47 @@ unconstrained velocity unknown on the wall and made driven two-phase runs diverg
 (WO-V7); the only shipped test whose output moved is `vof_cutcell` (its wall-band spurious
 current 0.788 → 0.005).
 
+**The ISSUES sweep (2026-09-04) — seven gallery-logged defects, each inert when unused.**
+Findings and every measured number: `doc/vof_workorders_v6.md` § "ISSUES sweep"; gates
+`tests/study/vof_issues_sweep.py` (`atomic | adaptive | geometry | collocated | freeslip`).
+
+- **`step()` is ATOMIC across both explicit two-phase throws.** The Weymouth–Yue boundedness cap
+  and the Brackbill capillary cap are evaluated at the HEAD of the call, before the first mutator,
+  so a rejected `dt` leaves `get_u/get_v/get_w/get_vof/get_p` **bitwise** as they were and a retry
+  is exact. Before this the colour survived but the momentum half had already advanced by the
+  rejected `dt` (`max|w|` moved by exactly `g·dt`), so catch-and-halve DESYNCHRONISED the two
+  fields. One limit, stated because it is real: without `enable_vof_momentum` the advection sits
+  at the TAIL of the step, so the pre-check reads the field the call STARTS from and cannot see
+  the projection accelerating it inside the step — which is what `step_adaptive` removes.
+- **`step_adaptive(cfl_target=0.4, capillary_cfl=0.4, dt_max=inf)`** takes one step at
+  `dt = min(cfl_target·cfl_dt, capillary_cfl·capillary_dt, dt_max)` from the CURRENT state and
+  returns the `dt` used. Both limits `vof_step_limits()` reports are INSTANTANEOUS: re-picking
+  every ten steps is safe for a free bubble and is NOT safe in a packing (a throat jet grew
+  `max|uf|` by >50 % inside ten steps and killed a 2600-step run), and `capillary_dt` reads the
+  density field, so a value taken before the closures have run can be 7.1× too large. It is
+  **bitwise** the hand-written gallery loop (200 Hysing-1 steps, identical `dt` sequence and
+  identical u/v/w/C/P) — exactly, because IEEE multiplication is monotone, so
+  `f·min(a,b) == min(f·a, f·b)`. `set_dt`/`step()` semantics are unchanged; pass a finite
+  `dt_max` on a scene starting from rest, where both limits are `+inf`.
+- **`vof_geometry()` returns the TRIVIAL geometry on an all-fluid solver** (eps = 1, openness = 1,
+  classification 0 — what the V1 kernels execute) instead of raising, so one diagnostic serves a
+  packed scene and its all-fluid control.
+- **`SolverColocated`: `set_state`/`set_velocity` seed the MAC face field** through the same
+  `centerToFace` map `project()` uses. The colour rides `uf_/vf_/wf_` there, which only a
+  projection built, so a fresh solver advected with a field that was all zeros — and perfectly
+  divergence-free, which is why the guard passed and the advection was a SILENT no-op (measured on
+  LeVeque 32³: `max|u|` 63.3, `max|uf|` 0.0, `max|C−C0|` 0.0). Seeded, the same field reads
+  `max|div(open uf)| = 2.5e-14` and 10 kinematic steps give a colour **bitwise** equal to a
+  staggered `Solver` handed the same faces. A face field that was never built at all is refused.
+- **A pressure preconditioner breakdown is VISIBLE**: `pressure_solve_failed()`, and
+  `last_pressure_iterations()` reports the CAP, so the usual rule-3b check catches it;
+  `PECLET_FLOW_PRESSURE_STRICT=1` raises instead. It used to print one line to stdout, zero the
+  correction and report **0 iterations** — a perfectly healthy-looking solve that had been handed
+  nothing (measured: a two-phase post array with 3.08-cell throats, four times in a row).
+- **`set_contact_angle` binds to a DOMAIN-BC wall** (type 1 no-slip or type 4 free-slip) — see
+  the V5b paragraph below — and RAISES when there is no wetting wall at all.
+- **Domain BC type 4 = free slip** — see "Domain boundary conditions".
+
 **Static contact angle on SDF solids (rung V5b, WO-S).** `set_contact_angle(theta_deg)` (or
 `set_contact_angle_field`) replaces **pass 1 only** of the V5a solid-band fill by the volume
 fractions of the plane that continues the fluid-side interface into the solid at the prescribed
@@ -625,6 +666,25 @@ half-plane), build `m_theta = cos(theta) n_w + sin(theta) t_hat`, and anchor the
 that cell's own liquid volume (`plicAlpha`). New Python: `set_contact_angle`,
 `set_contact_angle_field`, `contact_angle`, `set_contact_angle_pivot` (ablation),
 `contact_angle_diagnostics`.
+
+**A DOMAIN-BC wall wets too, since the ISSUES sweep (2026-09-04).** `set_domain_bc(face, 1)` (or
+the new type 4) is a flat SDF wall sitting exactly on the boundary face, but the band fill
+classifies cells from the colour block's cut-cell GEOMETRY and an all-fluid solver has none — so
+`set_contact_angle` was a **silent no-op** there (no error, no warning, and
+`contact_angle_diagnostics()['contact_cells']` reading 0 was the only tell). The repair is a
+SYNTHESISED geometry for the impermeable faces, not a new fill rule: the out-of-domain ghost band
+is classified SOLID (`applyDomainWallGeometry`, re-imposed after the classification exchange
+because `clampFill` would set it back to fluid), the wall PLANES are folded into the same
+`wallSdf` by `min` on the whole g = 3 block (so the θ pass's central difference IS the inward face
+normal), `clampFill` gains a per-face SKIP mask so the closing exchange does not wipe the band,
+and the depth-3 layer — the one cell no fill pass can reach — takes the zero-slope continuation of
+the band. WO-S's θ pass, WO-Q's passes 2–3, the census and V6's dynamic angle are unchanged.
+Measured (`tests/study/vof_wetting.py g1d`, the G1 drop with the wall as bc type 1 at z = 0,
+500 steps): **59.507 / 89.688 / 117.976** for θ = 60/90/120, i.e. errors **−0.49 / −0.31 / −2.02**
+against the SDF wall's own −0.01 / −1.15 / −3.19 — equal or better at two of three angles.
+`set_contact_angle` now RAISES when there is no wetting wall, and when a wetting domain wall has
+no cut-cell pressure operator to weight the colour fluxes with. Byte-identical with no contact
+angle set.
 
 Four things this rung paid for, all measured (`doc/vof_workorders_v5.md`, WO-S findings):
 - **The fill is exactly idempotent, and that is the whole design.** An interface that already meets
@@ -1666,11 +1726,31 @@ what the gate is on — moves by 5e-5…1.4e-4.
 
 Beyond periodic + IBM no-slip on immersed solids, flow has **native per-face domain BCs** (`mac_bc.hpp`):
 `set_domain_bc(face, type, vx, vy, vz)` for the 6 faces (0=−x,1=+x,2=−y,3=+y,4=−z,5=+z); `type` 0=periodic
-(default), 1=no-slip wall, 2=Dirichlet velocity / inflow, 3=outflow. Velocity ghosts are filled in the
+(default), 1=no-slip wall, 2=Dirichlet velocity / inflow, 3=outflow, **4=free slip (symmetry)**.
+Velocity ghosts are filled in the
 MAC-staggered convention. Tangential walls use a **face-fold** in the implicit diffusion (drop the wall
 face, fold its β into the diagonal + RHS) so `u_inner` stays implicit — no Gauss–Seidel lag; explicit
 advection keeps the reflection ghost. Call **before** geometry/first step. For a domain-BC problem with no
 immersed solid, use `set_pressure_geometry(all_fluid_sdf)` (the cut-cell pressure operator without the IBM).
+
+**Type 4 = FREE SLIP (symmetry), added 2026-09-04 (ISSUES sweep item 7).** Impermeable (normal
+velocity 0 ON the boundary face) with a ZERO NORMAL GRADIENT of the tangential components.
+Discretely it is the WALL's normal rule plus the OUTFLOW face's tangential rule at every site —
+the tangential ghost is the zero-gradient copy (an EVEN reflection, `bcMirrorColocated`, on the
+collocated grid) and the implicit fold is `-β` (the face LEAVES the operator) instead of the
+no-slip `+β` with `2βu_wall` on the RHS; the pressure closes the face exactly as a wall (openness
+0, Neumann ghost) and every property / scalar / VoF colour ghost already keys on "non-periodic".
+`set_domain_bc` now range-checks `face` and `type`. It is the standard companion of no-slip in a
+benchmark suite — Hysing et al. (IJNMF 60:1259, 2009) prescribe free-slip lateral walls for the
+rising bubble, which the gallery could previously only approximate with PERIODIC sides (exact
+while the bubble stays laterally symmetric, an approximation once it does not). Measured on a
+32-cell half channel (no-slip −z, free-slip +z, Stokes): the scheme's own discrete parabola
+`F/(2μ)(H²−(H−z)²+h²/4)` to **1.2e-10**, the CONTINUUM parabola to 2.44e-04 — which is exactly
+`h²/4·F/(2μ)`, the NO-SLIP wall's mirror ghost, not the free-slip face's — and **free slip IS
+symmetry**: the half channel equals the lower half of a 64-cell channel with no-slip on both
+sides to **1.13e-12**. MPI np 1/2/4 with the ORB cutting the free-slip face, bitwise at np = 1 on
+u AND P (`tests/kokkos_mpi/test_freeslip_bc_mpi.cpp`); byte-identical when type 4 is unused.
+Study gate: `tests/study/vof_issues_sweep.py freeslip`.
 
 **Open boundaries** (outflow, or inflow with a non-zero normal velocity) split the face openness into two
 roles: the **operator** openness α (pressure matrix) is 0 at walls + inflow (Neumann) and open at outflow
