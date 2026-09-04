@@ -2005,6 +2005,16 @@ class Solver {
   }
 
   void step() {
+    // ISSUES sweep item 1 (VOF_PLAN section 13 item 9): make `step()` ATOMIC across the two
+    // explicit two-phase stability throws. Both used to fire AFTER the momentum half had already
+    // advanced by the rejected dt -- the Weymouth-Yue boundedness cap from inside `advectVof`
+    // (which runs at the TAIL of the step without momentum consistency) and the Brackbill
+    // capillary cap from `updateVofCurvature` (which runs after `advectVofMomentum`). So the
+    // obvious driver pattern -- catch, halve dt, retry -- gave the momentum equation one extra
+    // over-long step the colour never saw, i.e. it DESYNCHRONISED the two fields instead of
+    // retrying. Both checks are now evaluated here, at the head of `step()` and before the first
+    // mutator, so a throw leaves every field bitwise as it was on entry. No-op unless VoF is on.
+    vofStepPrecheck();
     const double ts0 = phaseTick();
     tPredictor_ = tMomentum_ = tProjection_ = 0.0;
     lastMomentumSweeps_ = 0;
@@ -7592,6 +7602,53 @@ class Solver {
   // `updateProperties()` just turned into rho(C) and mu(C), i.e. C^{n+1} under momentum consistency
   // (the VoF stage ran at the head) and C^n without it (it runs at the tail). Either way kappa,
   // rho and the colour in the force (1) are the same time level, which is what the balance needs.
+  // ISSUES sweep item 1: the two explicit two-phase stability caps, evaluated at the head of
+  // `step()` on the state the call STARTS from, so a rejected dt costs nothing.
+  //
+  // What this can and cannot pre-empt, measured rather than assumed:
+  //  * the CAPILLARY cap is a function of dt, sigma, h and the density field only, so hoisting it
+  //    is exact -- it fires here for every dt that would have made `updateVofCurvature` throw
+  //    (the one difference is that rho is the PREVIOUS step's; the authoritative check inside
+  //    `updateVofCurvature`, on this step's rho, is deliberately left in place).
+  //  * the Weymouth-Yue cap is a function of the ADVECTING face field. Under
+  //    `enable_vof_momentum` the colour rides at the head of the step, so the field checked here
+  //    IS the field the advection will use and the pre-check is exact. Without it the advection
+  //    sits at the TAIL and rides THIS step's projected output, which does not exist yet -- so the
+  //    pre-check runs on u^n (the previous step's projected field, i.e. exactly what the previous
+  //    step's advection used) and pre-empts every case where the CAP or the DT moved, but not the
+  //    case where the projection itself accelerates the field inside the step. That residual is
+  //    what `step_adaptive` (item 2) removes, by re-picking dt from the same limits every step.
+  void vofStepPrecheck() {
+    const bool skip = vofPrecheckDone_;
+    vofPrecheckDone_ = false;
+    if (!vofEnabled_ || skip)
+      return;
+    if (csfActive()) {
+      const double cap = capillaryCfl_ * capillaryDt();
+      if (!(dt_ <= cap))
+        throw std::runtime_error(capillaryThrowMessage(cap));
+    }
+    // The block container carries one advector per marker with its own colour support; the union
+    // field on `vofAdv_` is a derived quantity there, so the cap is left to the blocks themselves.
+    if (vofBlocks_)
+      return;
+    const double cfl = vofMaxCourant();
+    if (!(cfl <= vofCflLimit_))
+      throw std::runtime_error(
+          "peclet::flow::vof::WyAdvector: CFL = max|uf| dt/h = " + std::to_string(cfl) +
+          " exceeds the Weymouth-Yue boundedness cap " + std::to_string(vofCflLimit_) +
+          " (dt = " + std::to_string(dt_) + ", h = " + std::to_string(vofAdv_.h()) +
+          ") - reduce dt. Rejected at the HEAD of step(): no field has been advanced, so a retry "
+          "at a smaller dt is exact (see set_vof_cfl_limit / step_adaptive).");
+  }
+  std::string capillaryThrowMessage(double cap) const {
+    return "surface tension: dt = " + std::to_string(dt_) + " exceeds the capillary limit " +
+           std::to_string(cap) + " (Brackbill sqrt((rho_1+rho_2) h^3/(4 pi sigma)) = " +
+           std::to_string(cap / (capillaryCfl_ > 0.0 ? capillaryCfl_ : 1.0)) +
+           " x safety factor " + std::to_string(capillaryCfl_) +
+           "). Surface tension is EXPLICIT: this is a hard stability boundary (Denner & van "
+           "Wachem 2015), not a margin. Reduce dt, or raise set_capillary_cfl deliberately.";
+  }
   void updateVofCurvature() {
     if (!csfActive())
       return;
@@ -10242,6 +10299,9 @@ class Solver {
   // fixed (per-fluid-component null-space projection; see ../docs/DECOMPOSITION_AND_MULTIGRID.md).
   int pressAgglomMode_ = -1;
   long lastPressureIters_ = 0;
+  // ISSUES sweep items 1+2: `step_adaptive` has just evaluated the two limits on this state, so
+  // `step()`'s head-of-step pre-check can skip its own (identical) evaluation. One-shot.
+  bool vofPrecheckDone_ = false;
   CutcellMG mg_;
   // --- multi-rank (MPI) state, gated (single-GPU module never links MPI -> byte-identical when
   // off) ---
