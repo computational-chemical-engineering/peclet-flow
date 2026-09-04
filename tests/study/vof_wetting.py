@@ -171,6 +171,76 @@ def g1(thetas=(30.0, 60.0, 90.0, 120.0, 150.0), ratio=1.0, steps=600, R=12.0, nx
 
 
 
+# ---------------------------------------------------- G1D: the same drop on a DOMAIN-BC wall
+def g1_domain(thetas=(60.0, 90.0, 120.0), ratio=1.0, steps=500, R=12.0, nx=64, nz=40,
+              sigma=1.0, oh=0.1):
+    """ISSUES sweep item 3. The G1 scene with the wall as a DOMAIN FACE (bc type 1) instead of an
+    SDF slab: the wall plane is z = 0 exactly, the wall-adjacent cell is WHOLE (no cut cell at
+    all), and the theta band is the colour block's three ghost layers below z = 0.
+
+    Reference: `g1` on the same drop against an SDF wall at a quarter-integer z. The two are
+    different discretisations of the same physics -- one cuts the wall cell, the other does not --
+    so the gate is agreement, not identity."""
+    mu = oh * math.sqrt(1.0 * sigma * 2.0 * R)
+    print(f"\n=== G1D drop on a DOMAIN-BC wall (bc type 1 at z = 0) — D/dx {2*R:.0f}, grid "
+          f"{nx}x{nx}x{nz}, sigma {sigma}, mu {mu:.4f} (Oh {oh}), rho ratio {ratio:g}, "
+          f"{steps} steps")
+    rows = []
+    for th in thetas:
+        c0 = cap_colour(nx, nx, nz, nx * 0.5, nx * 0.5, 0.0, R, th)
+        s = pf.Solver(nx, nx, nz)
+        s.set_rho(1.0)
+        s.set_mu(mu)
+        s.set_domain_bc(4, 1)    # -z: the wetting wall
+        s.set_domain_bc(5, 1)    # +z: a lid, far from the drop
+        s.set_pressure_geometry(np.full((nx, nx, nz), 1e30, order="F"))
+        s.enable_vof()
+        if ratio != 1.0:
+            s.set_property_model("rho", "linear", "C", [1.0 / ratio, 1.0 - 1.0 / ratio])
+            s.set_property_model("mu", "linear", "C", [mu / ratio, mu - mu / ratio])
+        s.set_vof(c0)
+        s.set_surface_tension(sigma)
+        s.set_contact_angle(th)
+        v0 = s.vof_diagnostics()["volume"]
+        dt, maxit, capped, _ = relax(s, steps)
+        d = s.vof_diagnostics()
+        cd = s.contact_angle_diagnostics()
+        cc = s.get_vof()
+        eps = s.vof_geometry(0)
+        ix = iy = nx // 2
+        h = float((cc[ix, iy, :] * eps[ix, iy, :]).sum())
+        V = d["volume"]
+        a = math.sqrt(max((6.0 * V / (math.pi * h) - h * h) / 3.0, 1e-12))
+        theta = 2.0 * math.degrees(math.atan2(h, a))
+        a_dir = math.sqrt(float(cc[:, :, 0].sum()) / math.pi)
+        th_dir = 2.0 * math.degrees(math.atan2(h, a_dir))
+        print(f"  theta_set {th:5.1f} -> theta {theta:7.3f} (err {theta-th:+6.3f})  "
+              f"h {h:7.3f}  a {a:7.3f} | contour a {a_dir:7.3f} -> theta {th_dir:7.3f} | "
+              f"dV/V {abs(V-v0)/v0:.2e}  max|u| {max_u(s):.3e} | "
+              f"band th/nbr/pure/par/neu/unf {cd['contact_cells']}/{cd['neighbour_cells']}/"
+              f"{cd['pure_cells']}/{cd['parallel_cells']}/{cd['neutral_cells']}/"
+              f"{cd['unfilled_cells']}  apparent {cd['mean_apparent_angle']:6.2f}"
+              f" | iters {maxit} (capped {capped})  dt {dt:.4f}")
+        rows.append((th, theta))
+    return rows
+
+
+def g1_domain_vs_sdf(thetas=(60.0, 90.0, 120.0), steps=500, gate=1.0):
+    """The ISSUES-sweep item-3 gate: the domain-wall equilibrium against the SDF-wall one."""
+    ref = {t: v for t, v in ((r[0], r[1]) for r in g1(thetas=thetas, steps=steps))}
+    dom = {t: v for t, v in g1_domain(thetas=thetas, steps=steps)}
+    print(f"\n  --- item 3 gate: DOMAIN wall vs SDF wall, {steps} steps")
+    worst = 0.0
+    for t in thetas:
+        d = dom[t] - ref[t]
+        worst = max(worst, abs(d))
+        print(f"    theta_set {t:5.1f}:  SDF {ref[t]:7.3f}   DOMAIN {dom[t]:7.3f}   "
+              f"difference {d:+6.3f} deg")
+    print(f"  worst |domain - SDF| = {worst:.3f} deg (gate {gate})  "
+          f"{'PASS' if worst <= gate else 'FAIL'}")
+    return worst
+
+
 # --------------------------------------------------------------------- the wall-placement sweep
 def g1_wall_placement(theta=60.0, steps=1200, fracs=(0.0, 0.25, 0.5, 0.75)):
     """WHERE the SDF wall sits inside the cell decides whether the contact line can move at all.
@@ -374,6 +444,8 @@ if __name__ == "__main__":
         #     angle. Slow — the driving vanishes as the angle approaches its target — so only the
         #     two mid angles are run to convergence.
         g1(thetas=(60.0, 120.0), steps=1000 if quick else 3000, init_abs=90.0)
+    if "g1d" in which:
+        g1_domain_vs_sdf(steps=200 if quick else 500)
     if "g1w" in which:
         g1_wall_placement(steps=400 if quick else 1200)
     if "g2" in which:

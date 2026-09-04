@@ -842,6 +842,11 @@ class Solver {
       if (bc_[i] == 3)
         hasOutflow_ = true;
     }
+    // ISSUES sweep item 3: which faces are WETTING walls is part of the colour block's geometry,
+    // so a BC changed after `enable_vof` has to rebuild it. Inert (and byte-identical) without a
+    // contact angle: `buildVofGeometry` then takes exactly the branch it took before.
+    if (vofEnabled_)
+      buildVofGeometry();
   }
   // per-position inlet velocity profile on `face` (CUDA set_domain_bc_profile): prof is (nb,nc,3)
   // on the inner grid of the face's two perpendicular axes; sets the face to inflow (type 2).
@@ -2772,29 +2777,91 @@ class Solver {
   // the advector wants the `+x` face of cell `i`, exactly the low-face -> high-face shift of
   // `colour_field.hpp`. Using a concentric embed here instead is the openness twin of WO-J's 35 %
   // conservation defect and is what gate G3 exists to catch.
+  // ISSUES sweep item 3. Which domain faces are WETTING WALLS for the colour band fill: a
+  // type-1 no-slip or type-4 free-slip face, i.e. an impermeable one, and only while a contact
+  // angle is actually set. Returned as a per-face bitmask (bit 2a+s), 0 when the feature is unused
+  // -- which is what keeps every existing path byte-identical.
+  //
+  // A domain wall IS a flat SDF wall sitting exactly on the boundary face; the only reason
+  // `set_contact_angle` used to be silently ignored there is that the band fill classifies cells
+  // from the colour block's cut-cell GEOMETRY, and an all-fluid solver has none. So the repair is
+  // not a new fill rule -- it is a SYNTHESISED geometry for those faces (`applyDomainWallGeometry`)
+  // plus the matching wall SDF (`applyContactAngle`), after which WO-S's theta pass, WO-Q's
+  // passes 2-3, the branch census and the V6 dynamic angle all run unchanged, with `n_w` coming
+  // out of the same central difference and equalling the inward face normal by construction.
+  int vofWetWallMask() const {
+    if (!vofEnabled_ || !contactAngleSet_)
+      return 0;
+    int m = 0;
+    for (int f = 0; f < 6; ++f)
+      if (bc_[f] == 1 || bc_[f] == 4)
+        m |= (1 << f);
+    return m;
+  }
+  // Signed distance (cell units, POSITIVE inside the domain) from a cell centre at GLOBAL index
+  // (gx,gy,gz) to the nearest wetting domain wall plane. Container-free so a device lambda can
+  // call it. `+inf` when no face is a wetting wall.
+  KOKKOS_INLINE_FUNCTION static double vofWallPlaneSdf(int gx, int gy, int gz, I3 gs, int mask) {
+    const int gi[3] = {gx, gy, gz};
+    const int q[3] = {gs.x, gs.y, gs.z};
+    double d = 1e30;
+    for (int a = 0; a < 3; ++a) {
+      const double c = (double)gi[a] + 0.5;
+      if (mask & (1 << (2 * a)))
+        d = Kokkos::fmin(d, c);
+      if (mask & (1 << (2 * a + 1)))
+        d = Kokkos::fmin(d, (double)q[a] - c);
+    }
+    return d;
+  }
   void buildVofGeometry() {
     if (!vofEnabled_)
       return;
-    if (!hasSolid_ || !cutcellPressure_) {
+    const int wet = vofWetWallMask();
+    if ((!hasSolid_ || !cutcellPressure_) && !wet) {
       vofAdv_.disableGeometry();  // all-fluid: the V1 kernels run byte-identically
       vofAdv_.disableWetting();
       vofSolidG2_ = CCField();
       return;
     }
+    if (wet && !cutcellPressure_)
+      throw std::runtime_error(
+          "set_contact_angle: a wetting DOMAIN wall (bc type 1/4) needs a cut-cell pressure "
+          "operator, because the colour transport weights its geometric fluxes with the face "
+          "openness. Build one with set_pressure_geometry(all_fluid_sdf) (all-fluid) or "
+          "set_solid(sdf, cutcell_pressure=True).");
     vofAdv_.enableGeometry();
-    if (vofCs_.extent(0) != n_)
-      vofCs_ = CCField("vofCs", n_);
-    buildCellFraction(vofCs_, CCConst(sdf_), e_, G);  // inner region; ghosts come from the exchange
-    copyInner(vofAdv_.epsFraction(), e3_, kVofG, CCConst(vofCs_), e_, G);
-    vofExchangeRaw(vofAdv_.epsFraction());
-    CCField oa[3] = {ox_, oy_, oz_};
-    for (int d = 0; d < 3; ++d) {
-      vof::copyFaceVelocity(vofAdv_.faceOpenness(d), I3{e3_.x, e3_.y, e3_.z}, kVofG, oa[d],
-                            I3{e_.x, e_.y, e_.z}, G, d);
-      vofExchangeRaw(vofAdv_.faceOpenness(d));
+    if (hasSolid_ && cutcellPressure_) {
+      if (vofCs_.extent(0) != n_)
+        vofCs_ = CCField("vofCs", n_);
+      buildCellFraction(vofCs_, CCConst(sdf_), e_,
+                        G);  // inner region; ghosts come from the exchange
+      copyInner(vofAdv_.epsFraction(), e3_, kVofG, CCConst(vofCs_), e_, G);
+      vofExchangeRaw(vofAdv_.epsFraction());
+      CCField oa[3] = {ox_, oy_, oz_};
+      for (int d = 0; d < 3; ++d) {
+        vof::copyFaceVelocity(vofAdv_.faceOpenness(d), I3{e3_.x, e3_.y, e3_.z}, kVofG, oa[d],
+                              I3{e_.x, e_.y, e_.z}, G, d);
+        vofExchangeRaw(vofAdv_.faceOpenness(d));
+      }
+    } else {
+      // Domain walls only: the trivial geometry (every cell whole, every face open) is exactly
+      // what the uncut kernels compute, and `applyDomainWallGeometry` then closes the band.
+      Kokkos::deep_copy(vofAdv_.epsFraction(), 1.0);
+      for (int d = 0; d < 3; ++d)
+        Kokkos::deep_copy(vofAdv_.faceOpenness(d), 1.0);
     }
+    if (wet)
+      applyDomainWallGeometry(wet);
     vofAdv_.classifyGeometry();
     vofExchangeRaw(vofAdv_.kindDouble());  // the owner's classification into every ghost layer
+    // ISSUES sweep item 3: that exchange ends in `clampFill`, whose zero-gradient copy would set
+    // the out-of-domain band back to the first INNER cell's classification (fluid) -- the band
+    // is the one region with no owner, so it has to be re-imposed here. Without this the whole
+    // domain-wall fill is silently inert (measured: contact census 0, equilibrium ~141 deg at
+    // every prescribed angle, i.e. the perfectly non-wetting empty band).
+    if (wet)
+      imposeDomainWallKind(wet);
     vofAdv_.finalizeGeometry();
     // The G=2 mirror of the classification: the canonical "C" field reports EXACTLY 0 in solid
     // cells (gate G2), while the g=3 working block carries the neutral band fill that the MYC and
@@ -2805,6 +2872,113 @@ class Solver {
     copyInner(vofSolidG2_, e_, G, CCConst(vofAdv_.kindDouble()), e3_, kVofG);
     applyContactAngle();  // rung V5b (WO-S): re-wire the theta field / wall SDF onto the new block
     zeroSolidColour();
+  }
+  // ISSUES sweep item 3: close the colour block's out-of-domain band across every wetting domain
+  // wall, so `classifyGeometry` calls those ghost cells SOLID and WO-S's theta pass owns them.
+  //
+  // The rule is the one the SDF path uses, evaluated on an exact plane: a cell whose centre lies
+  // outside the wall has fluid fraction 0, and a face is open only if BOTH of its cells are
+  // inside. That closes the boundary face itself (which the flux openness already closes, so
+  // nothing in the projection moves) AND all six faces of every band cell, which is what
+  // `vofIsSolidCell` requires. Composes with an SDF solid: the solid's eps/openness are simply
+  // masked to zero outside the wall.
+  void applyDomainWallGeometry(int mask) {
+    const I3 gs = vofGlobalSize(), org = vofOrigin();
+    const C3 e = e3_;
+    const int g = kVofG, mk = mask;
+    CCField ep = vofAdv_.epsFraction();
+    CCField of[3] = {vofAdv_.faceOpenness(0), vofAdv_.faceOpenness(1), vofAdv_.faceOpenness(2)};
+    CCField ofx = of[0], ofy = of[1], ofz = of[2];
+    Kokkos::parallel_for(
+        "peclet::flow::vof_domain_wall_geom",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const int gx = x - g + org.x, gy = y - g + org.y, gz = z - g + org.z;
+          auto inside = [&](int ax, int ay, int az) {
+            const int gi[3] = {ax, ay, az};
+            const int q[3] = {gs.x, gs.y, gs.z};
+            for (int a = 0; a < 3; ++a) {
+              if ((mk & (1 << (2 * a))) && gi[a] < 0)
+                return false;
+              if ((mk & (1 << (2 * a + 1))) && gi[a] >= q[a])
+                return false;
+            }
+            return true;
+          };
+          const bool in0 = inside(gx, gy, gz);
+          if (!in0)
+            ep(i) = 0.0;
+          // the advector's HIGH-face convention: of[d](i) is the +d face of cell i
+          if (!in0 || !inside(gx + 1, gy, gz))
+            ofx(i) = 0.0;
+          if (!in0 || !inside(gx, gy + 1, gz))
+            ofy(i) = 0.0;
+          if (!in0 || !inside(gx, gy, gz + 1))
+            ofz(i) = 0.0;
+        });
+    CCExec().fence();
+  }
+  // ISSUES sweep item 3: mark the out-of-domain band SOLID after the classification exchange
+  // (see the call site for why the exchange undoes it).
+  void imposeDomainWallKind(int mask) {
+    const I3 gs = vofGlobalSize(), org = vofOrigin();
+    const C3 e = e3_;
+    const int g = kVofG, mk = mask;
+    CCField kd = vofAdv_.kindDouble();
+    Kokkos::parallel_for(
+        "peclet::flow::vof_domain_wall_kind",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const int gi[3] = {x - g + org.x, y - g + org.y, z - g + org.z};
+          const int q[3] = {gs.x, gs.y, gs.z};
+          for (int a = 0; a < 3; ++a) {
+            if (((mk & (1 << (2 * a))) && gi[a] < 0) ||
+                ((mk & (1 << (2 * a + 1))) && gi[a] >= q[a])) {
+              kd(i) = 1.0;
+              return;
+            }
+          }
+        });
+    CCExec().fence();
+  }
+  // ISSUES sweep item 3: the outermost (depth-3) band layer of a wetting DOMAIN wall is the one
+  // cell no fill pass can write -- the passes stop at ghost depth 3-k and their 6-point stencil
+  // would index outside the g=3 block there -- and the zero-gradient clamp that used to supply it
+  // is now skipped (it would wipe the theta band). Continue the band outward instead: depth 3
+  // takes depth 2's value, the zero-slope continuation of the theta plane rather than of the first
+  // INNER cell's colour. For an SDF wall this cell is an ordinary solid cell and nothing here
+  // applies.
+  void vofExtendWallBand(CCField f, int mask) {
+    const I3 gs = vofGlobalSize(), org = vofOrigin();
+    const C3 e = e3_;
+    const int g = kVofG;
+    for (int a = 0; a < 3; ++a)
+      for (int sd = 0; sd < 2; ++sd) {
+        if (!(mask & (1 << (2 * a + sd))))
+          continue;
+        const int q = (a == 0) ? gs.x : (a == 1) ? gs.y : gs.z;
+        const int o = (a == 0) ? org.x : (a == 1) ? org.y : org.z;
+        // block-local index of the depth-3 and depth-2 layers on this face
+        const int i3 = (sd == 0) ? (-3 - o + g) : (q - o + g + 2);
+        const int i2 = (sd == 0) ? (-2 - o + g) : (q - o + g + 1);
+        const int dims[3] = {e.x, e.y, e.z};
+        if (i3 < 0 || i3 >= dims[a] || i2 < 0 || i2 >= dims[a])
+          continue;  // this rank's block does not own that face
+        const long st[3] = {1, (long)e.x, (long)e.x * (long)e.y};
+        const int b = (a + 1) % 3, c = (a + 2) % 3;
+        const long sa = st[a], sb = st[b], sc = st[c];
+        CCField ff = f;
+        Kokkos::parallel_for(
+            "peclet::flow::vof_extend_wall_band",
+            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(CCExec(), {0, 0}, {dims[b], dims[c]}),
+            KOKKOS_LAMBDA(int p0, int p1) {
+              const long base = (long)p0 * sb + (long)p1 * sc;
+              ff(base + (long)i3 * sa) = ff(base + (long)i2 * sa);
+            });
+      }
+    CCExec().fence();
   }
   // Zero the canonical G=2 colour field inside solid cells (see buildVofGeometry).
   void zeroSolidColour() {
@@ -2877,6 +3051,8 @@ class Solver {
         }
       }
       vofAdv_.solidBandFill();
+      if (const int wet = vofWetWallMask())
+        vofExtendWallBand(f, wet);  // ISSUES sweep item 3: the depth-3 layer no pass can write
       vofExchangeRaw(f);
     }
   }
@@ -2891,7 +3067,12 @@ class Solver {
     if (px && py && pz)
       return;
     const I3 gs = vofGlobalSize(), org = vofOrigin();
-    vof::clampFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, org, gs, px, py, pz);
+    // ISSUES sweep item 3: the theta band of a wetting DOMAIN wall lives in exactly the ghost
+    // cells `clampFill` would overwrite with the zero-gradient copy, so the colour field skips
+    // the clamp there and `vofFillGhosts` owns that band instead. 0 for every other field and
+    // for every configuration without a domain-wall contact angle -> byte-identical.
+    const int skip = (f.data() == vofAdv_.colour().data()) ? vofWetWallMask() : 0;
+    vof::clampFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, org, gs, px, py, pz, skip);
     vofApplyColourBc(f);  // WO-R: inflow / inletOutlet backflow; a no-op unless one is set
   }
   I3 vofGlobalSize() const {
@@ -6489,7 +6670,20 @@ class Solver {
     contactAngleDeg_ = thetaDeg;
     contactAngleField_.clear();
     contactAngleSet_ = true;
+    requireWettingWall();
+    buildVofGeometry();  // item 3: a wetting DOMAIN wall changes the colour block's geometry
     applyContactAngle();
+  }
+  // ISSUES sweep item 3: `set_contact_angle` used to be a silent no-op whenever there was nothing
+  // for it to bind to -- the theta field simply was never consulted, and
+  // `contact_angle_diagnostics()['contact_cells']` reading 0 was the only tell. Say so instead.
+  void requireWettingWall() const {
+    if (!vofEnabled_ || hasSolid_ || vofWetWallMask() != 0)
+      return;
+    throw std::runtime_error(
+        "set_contact_angle: this solver has no wetting wall - no immersed SDF solid (set_solid) "
+        "and no impermeable domain face (set_domain_bc(face, 1) no-slip or 4 free-slip). The "
+        "angle would be imposed nowhere. (Inflow/outflow faces carry no contact line.)");
   }
   // Per-cell contact angle in DEGREES on the inner region (flat x-fastest, nx*ny*nz). Only the
   // value at the SOLID band cell being filled is read, so cells away from a wall are irrelevant.
@@ -6498,6 +6692,8 @@ class Solver {
       throw std::runtime_error("set_contact_angle_field: expected nx*ny*nz values");
     contactAngleField_ = thetaDeg;
     contactAngleSet_ = true;
+    requireWettingWall();
+    buildVofGeometry();  // item 3
     applyContactAngle();
   }
   bool contactAngleSet() const { return contactAngleSet_; }
@@ -6680,7 +6876,11 @@ class Solver {
     bridgeColourToVof();  // regenerates the fill, hence the census
     long counts[vof::kVofWetCount];
     long nApp = 0;
-    vofAdv_.wettingCensus(counts, d.meanApparentAngle, nApp);
+    // ISSUES sweep item 3: a wetting DOMAIN wall's band lives in the GHOST layers, so the
+    // census has to reach them or `contact_cells` reads 0 -- the very symptom the item was
+    // reported for. 0 (the inner region) when no domain wall is wetting.
+    vofAdv_.wettingCensusGhost(counts, d.meanApparentAngle, nApp,
+                               vofWetWallMask() ? kVofG : 0);
     d.unfilledCells = counts[vof::kVofWetNone];
     d.contactCells = counts[vof::kVofWetTheta];
     d.neighbourCells = counts[vof::kVofWetNeighbour];
@@ -6710,8 +6910,31 @@ class Solver {
     // (a) the SDF on the colour block: inner region from the solver's own sdf_, then the colour
     //     field's ghost policy, so the central-difference wall normal at ghost depth <= 2 is the
     //     OWNER's (the WO-Q finding-5 argument, applied to the wall normal).
-    copyInner(vofAdv_.wallSdf(), e3_, kVofG, CCConst(sdf_), e_, G);
+    if (hasSolid_)
+      copyInner(vofAdv_.wallSdf(), e3_, kVofG, CCConst(sdf_), e_, G);
+    else
+      Kokkos::deep_copy(vofAdv_.wallSdf(), 1e30);
     vofExchangeRaw(vofAdv_.wallSdf());
+    // ISSUES sweep item 3: fold the wetting DOMAIN wall planes into the same field, on the WHOLE
+    // block (the plane distance is a closed form of the global index, so no exchange is needed and
+    // the out-of-domain band gets the value the clamp cannot produce). `min` is the SDF of the
+    // union of the solids, so an SDF body and a domain wall compose; and the central difference
+    // the theta pass takes of this field is exactly the inward face normal in the band.
+    if (const int wet = vofWetWallMask()) {
+      const I3 gs = vofGlobalSize(), org = vofOrigin();
+      const C3 e = e3_;
+      const int g = kVofG;
+      CCField sd = vofAdv_.wallSdf();
+      Kokkos::parallel_for(
+          "peclet::flow::vof_wall_sdf_domain",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            const double d = vofWallPlaneSdf(x - g + org.x, y - g + org.y, z - g + org.z, gs, wet);
+            sd(i) = Kokkos::fmin(sd(i), d);
+          });
+      CCExec().fence();
+    }
     // (b) theta, in radians.
     const double toRad = 3.14159265358979323846 / 180.0;
     if (contactAngleField_.empty()) {

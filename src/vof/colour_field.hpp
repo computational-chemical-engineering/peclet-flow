@@ -132,16 +132,35 @@ inline void periodicFill(SField f, I3 e, int g, bool px, bool py, bool pz) {
 /// decomposition, and that difference reaches C through the MYC stencil of the inner corner cell).
 /// The clamped source is provably inside the block's extended range and is either an inner cell or
 /// a ghost the exchange has already filled, so call this AFTER the halo exchange / periodic fill.
-inline void clampFill(SField f, I3 e, int g, I3 o, I3 gs, bool px, bool py, bool pz) {
+/// `skip` (ISSUES sweep item 3) is a per-FACE bitmask (bit 2a+s = face -x,+x,-y,+y,-z,+z): a
+/// ghost cell that lies outside the global domain across a SKIPPED face is left ALONE instead of
+/// receiving the zero-gradient copy. That band is owned by something else — the theta-consistent
+/// solid-band fill, when a contact angle is imposed on a DOMAIN wall, whose write set is exactly
+/// those cells and which would otherwise be overwritten by the fill's own closing exchange.
+/// `skip = 0` (the default) is the shipped rule bit for bit.
+inline void clampFill(SField f, I3 e, int g, I3 o, I3 gs, bool px, bool py, bool pz, int skip = 0) {
   if (px && py && pz)
     return;
   const bool p0 = px, p1 = py, p2 = pz;
   const int q0 = gs.x, q1 = gs.y, q2 = gs.z;
+  const int sk = skip;
   Kokkos::parallel_for(
       "vof::clampFill",
       Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const int gx = x - g + o.x, gy = y - g + o.y, gz = z - g + o.z;
+        if (sk) {
+          const int gi[3] = {gx, gy, gz}, qq[3] = {q0, q1, q2};
+          const bool pp[3] = {p0, p1, p2};
+          for (int a = 0; a < 3; ++a) {
+            if (pp[a])
+              continue;
+            if (gi[a] < 0 && (sk & (1 << (2 * a))))
+              return;
+            if (gi[a] >= qq[a] && (sk & (1 << (2 * a + 1))))
+              return;
+          }
+        }
         const int cx = p0 ? gx : (gx < 0 ? 0 : (gx >= q0 ? q0 - 1 : gx));
         const int cy = p1 ? gy : (gy < 0 ? 0 : (gy >= q1 ? q1 - 1 : gy));
         const int cz = p2 ? gz : (gz < 0 ? 0 : (gz >= q2 ? q2 - 1 : gz));
