@@ -61,6 +61,11 @@ target_link_libraries(sdflow PRIVATE Kokkos::kokkos)
 # it only later finds referenced -> "undefined hidden symbol: vtable". Keep sections on HIP (nvcc/ld is lenient).
 if(Kokkos_ENABLE_HIP)
   target_link_options(sdflow PRIVATE -Wl,--no-gc-sections)
+  # HIP/lld experiment 1 (docs/RELEASE.md §8): nanobind sets CXX_VISIBILITY_PRESET hidden, and under hipcc
+  # the host objects then reference the Kokkos SharedAllocationRecord / shared_ptr control-block vtables
+  # as hidden symbols that nothing defines ("undefined hidden symbol: vtable for ..."). Default visibility
+  # on the HIP path only; CUDA/OpenMP builds are untouched.
+  set_target_properties(sdflow PROPERTIES CXX_VISIBILITY_PRESET default)
 endif()
 
 # Distributed (MPI) flow: compile the binding TU with the halo-gating flag + link MPI (the core grid
