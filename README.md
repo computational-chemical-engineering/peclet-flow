@@ -35,8 +35,9 @@ cut-cell IBM primitives now live in `src/cut_cell_ibm.hpp`; the operator headers
 - **Geometry:** SDF solids (negative inside); the cut-cell IBM applies a Robust-Scaled no-slip / moving-wall
   condition and a matching cut-cell pressure operator (face openness from the SDF).
 - **Native domain boundary conditions** (`flow`): per-face periodic / no-slip wall / Dirichlet velocity
-  (inflow) / outflow, plus per-position **inlet velocity profiles**. Validated on the lid-driven cavity
-  (Ghia et al.), the developing plane channel (Poiseuille), and the backward-facing step (Armaly/Gartling).
+  (inflow) / outflow / free-slip (symmetry plane), plus per-position **inlet velocity profiles**. Validated
+  on the lid-driven cavity (Ghia et al.), the developing plane channel (Poiseuille), the backward-facing
+  step (Armaly/Gartling), and a half channel closed by a symmetry plane (pointwise equal to the full one).
 - **Pressure multigrid:** rediscretized geometric V-cycle, grid-independent, with MG-PCG and Chebyshev
   outer accelerators. Works on periodic, IBM, and non-periodic (BC) domains, including **semi-coarsening**
   for thin (quasi-2D) grids.

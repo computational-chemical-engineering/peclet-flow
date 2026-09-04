@@ -79,6 +79,68 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
       });
 }
 
+// FREE-SLIP / SYMMETRY face (BC type 4) for component comp on one domain face (staggered).
+//   * normal component (comp == a): impermeable -- the boundary face is held at 0 and the ghosts
+//     are the odd reflection about it, exactly the no-slip wall with wall velocity 0;
+//   * tangential components: zero normal derivative. Explicit (fold=0): the EVEN reflection about
+//     the face, ghost(ia) = inner(mirror) -- exact for any profile symmetric about the face, so a
+//     half-channel with this face reproduces the full channel pointwise. Implicit (fold=1): the
+//     face is dropped (ghost = 0) and setupBcDiffusion folds -beta onto the diagonal (the mirror
+//     neighbour equals the cell itself, so the face's beta*(ghost - inner) vanishes) -- the same
+//     fold the outflow's zero-gradient tangential treatment uses.
+inline void bcSlipComp(BField f, B3 ext, int g, int a, int s, int comp, int fold) {
+  if (comp == a) {
+    bcVelocityComp(f, ext, g, a, s, comp, 0.0, fold);
+    return;
+  }
+  BExec space;
+  int dims[3];
+  long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int na = dims[a];
+  const int bf = (s == 0) ? g : (na - g);
+  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::bc_slip", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+        const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
+        auto at = [&](int ia) -> double& { return f(base + static_cast<long>(ia) * sa); };
+        if (s == 0)
+          for (int ia = 0; ia < g; ++ia)
+            at(ia) = fold ? 0.0 : at(2 * bf - 1 - ia);  // even reflection about bf-0.5
+        else
+          for (int ia = na - g; ia < na; ++ia)
+            at(ia) = fold ? 0.0 : at(2 * bf - 1 - ia);
+      });
+}
+
+// Even (mirror) reflection of a cell-centered field about one domain face: ghost(ia) =
+// inner(mirror). The collocated tangential free-slip ghost (a symmetric profile is reproduced
+// exactly, which bcNeumannGhost's copy of the boundary cell into every layer is not).
+inline void bcMirrorGhost(BField f, B3 ext, int g, int a, int s) {
+  BExec space;
+  int dims[3];
+  long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int na = dims[a];
+  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::bc_mirror_ghost", MD(space, {0, 0}, {dims[b], dims[c]}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
+        auto at = [&](int ia) -> double& { return f(base + static_cast<long>(ia) * sa); };
+        if (s == 0)
+          for (int ia = 0; ia < g; ++ia)
+            at(ia) = at(2 * g - 1 - ia);  // mirror about g-1/2
+        else
+          for (int ia = na - g; ia < na; ++ia)
+            at(ia) = at(2 * (na - g) - 1 - ia);  // about na-g-1/2
+      });
+}
+
 // Collocated (cell-centered) velocity Dirichlet / no-slip ghost on one domain face. The wall sits
 // at the boundary FACE (between the last inner cell and the first ghost), so EVERY component is
 // reflected about it

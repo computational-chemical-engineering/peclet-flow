@@ -8,6 +8,9 @@
 //       except the update-norm stop, which is a max and therefore order-independent);
 //   (c) single-rank, RB-GS to a tight update tolerance -- the accuracy gate: the V-cycle must
 //       converge to the SAME fixed point (the fine operator is the sharp cut-cell stencil in both).
+// Run twice: with four no-slip walls, and with the +-z walls replaced by FREE-SLIP (symmetry,
+// set_domain_bc type 4) faces -- the same three-way gate exercises the type-4 velocity ghosts,
+// the mixed V-cycle's slip fold and the pressure MG's Neumann rows on a slip face, distributed.
 #include <mpi.h>
 
 #include <cmath>
@@ -41,7 +44,7 @@ static std::vector<double> sphereSdf() {
   return sdf;
 }
 
-static void configure(IbmSolver& s, bool vmg) {
+static void configure(IbmSolver& s, bool vmg, bool slipZ) {
   s.setRho(RHO);
   s.setMu(MU);
   s.setDt(DT);
@@ -49,7 +52,7 @@ static void configure(IbmSolver& s, bool vmg) {
   s.setDomainBc(0, 2, UIN, 0, 0);  // -x inflow
   s.setDomainBc(1, 3, 0, 0, 0);    // +x outflow
   for (int f = 2; f < 6; ++f)
-    s.setDomainBc(f, 1, 0, 0, 0);  // walls
+    s.setDomainBc(f, (slipZ && f >= 4) ? 4 : 1, 0, 0, 0);  // walls (+-z free-slip in pass 2)
   s.setPressureLevels(4);
   s.setPressurePcg(true, 300, 1e-10);
   // Both solvers to the same TIGHT residual (the solver default, 1e-5, would pin the solution
@@ -66,9 +69,12 @@ int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   Kokkos::initialize(argc, argv);
   int fail = 0, size = 1, rank = 0;
-  {
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  for (int pass = 0; pass < 2; ++pass) {
+    const bool slipZ = (pass == 1);
+    if (rank == 0)
+      std::printf("[velocitymg_bc] pass %d: +-z %s\n", pass, slipZ ? "FREE-SLIP (type 4)" : "no-slip walls");
     const std::vector<double> gsdf = sphereSdf();
 
     // (a) distributed, velocity MG
@@ -85,7 +91,7 @@ int main(int argc, char** argv) {
               gsdf[(std::size_t)(x + ox) + (std::size_t)(y + oy) * N + (std::size_t)(z + oz) * N * N];
     IbmSolver sd(lnx, lny, lnz);
     sd.initMpi(N, N, N, MPI_COMM_WORLD);
-    configure(sd, true);
+    configure(sd, true, slipZ);
     sd.setSolid(lsdf, true);
     long cycles = 0;
     for (int it = 0; it < STEPS; ++it) {
@@ -100,7 +106,7 @@ int main(int argc, char** argv) {
     long cyclesRef = 0, sweepsRef = 0;
     if (rank == 0) {
       IbmSolver rb(N, N, N);
-      configure(rb, true);
+      configure(rb, true, slipZ);
       rb.setSolid(gsdf, true);
       for (int it = 0; it < STEPS; ++it) {
         rb.step();
@@ -108,7 +114,7 @@ int main(int argc, char** argv) {
       }
       ub = rb.getVelocity(0);
       IbmSolver rc(N, N, N);
-      configure(rc, false);
+      configure(rc, false, slipZ);
       rc.setSolid(gsdf, true);
       for (int it = 0; it < STEPS; ++it) {
         rc.step();
@@ -144,12 +150,30 @@ int main(int argc, char** argv) {
                   cyclesRef / (double)STEPS, sweepsRef / (double)STEPS, size);
     if (!(relAB <= tolAB) || !(relBC <= tolBC) || !(divd < 1e-3))  // div: sanity (open-boundary level)
       fail = 1;
+    if (slipZ) {
+      // the slip faces are impermeable: the wall-normal component on the +-z boundary planes
+      // must be exactly 0 on every rank that owns them (w(k = 0) is the -z face; the +z face is
+      // the ghost plane the gather does not return, so the inner check covers the -z side)
+      const std::vector<double> wd = sd.getVelocity(2);
+      double wmax = 0.0;
+      if (oz == 0)
+        for (int y = 0; y < lny; ++y)
+          for (int x = 0; x < lnx; ++x)
+            wmax = std::max(wmax, std::fabs(wd[(std::size_t)x + (std::size_t)y * lnx]));
+      double wg = 0.0;
+      MPI_Allreduce(&wmax, &wg, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      if (rank == 0)
+        std::printf("  slip face -z: max|w| on the boundary plane %.2e (impermeable)\n", wg);
+      if (!(wg == 0.0))
+        fail = 1;
+    }
   }
   int totalFail = 0;
   MPI_Allreduce(&fail, &totalFail, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   if (rank == 0) {
     if (totalFail == 0)
-      std::printf("OK (np=%d): mixed (solid + domain-BC) velocity MG distributed == single-rank == RB-GS\n", size);
+      std::printf("OK (np=%d): mixed (solid + domain-BC) velocity MG distributed == single-rank == RB-GS "
+                  "(walls, and +-z free-slip)\n", size);
     else
       std::fprintf(stderr, "FAILED (np=%d)\n", size);
   }

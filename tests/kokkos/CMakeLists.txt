@@ -162,6 +162,15 @@ target_include_directories(test_poiseuille PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.
 target_link_libraries(test_poiseuille PRIVATE Kokkos::kokkos)
 add_test(NAME poiseuille COMMAND test_poiseuille)
 
+# Free-slip / symmetry domain BC (set_domain_bc type 4): half Poiseuille channel == full channel
+# pointwise (both grids, both sides), uniform flow along slip faces, sphere in a slip box == its
+# mirror-periodic twin (the pressure solve).
+add_executable(test_freeslip test_freeslip.cpp)
+target_include_directories(test_freeslip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_freeslip PRIVATE Kokkos::kokkos)
+add_test(NAME freeslip COMMAND test_freeslip)
+
 # VoF rung V2a (WO-J): the colour field wired into the NS solver — bridge, hydrostatic acid test
 # through C, conservation, C==const reductions, harmonic rho_f ablation, interface-local CFL.
 # PECLET_VOF_TWOPHASE_LONG=1 runs the conservation gate for 1000 steps instead of 200.

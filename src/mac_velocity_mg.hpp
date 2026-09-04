@@ -544,7 +544,7 @@ class VelocityMG {
     Level& f = lv_[0];
     {
       const int t = bc_[2 * comp];  // the -side face of the normal component lands at index G
-      if ((t == 1 || t == 2) && touches(f, 2 * comp))
+      if ((t == 1 || t == 2 || t == 4) && touches(f, 2 * comp))
         zeroPlane(f.resMask, f.ext, comp, G);
     }
     for (int L = 1; L < (int)lv_.size(); ++L) {
@@ -561,7 +561,9 @@ class VelocityMG {
         else if ((bc_[ff] == 1 || bc_[ff] == 2) && a != comp)
           dval = ba;
         else
-          continue;
+          continue;  // periodic, the normal comp at a wall / free-slip face, or a FREE-SLIP
+                     // tangential face -- see the note in setDomainBcOp: the coarse levels keep
+                     // the Dirichlet-at-ghost surrogate there, deliberately
         if (touches(c, ff))
           boundaryFold(c.AC, c.ext, G, a, sd, dval);
       }
@@ -606,7 +608,7 @@ class VelocityMG {
   }
 
   // DOMAIN-BC const-coeff path (cavity/BFS): per-face BC types {-x,+x,-y,+y,-z,+z}
-  // (0=periodic,1=wall, 2=inflow,3=outflow). Enables the non-periodic fill (periodic axes wrap;
+  // (0=periodic,1=wall, 2=inflow,3=outflow,4=free-slip). Enables the non-periodic fill (periodic axes wrap;
   // non-periodic ghosts left as the caller / correction set them) + the Dirichlet/Neumann
   // prolongation ghosts.
   void setBC(const int bc[6]) {
@@ -639,7 +641,7 @@ class VelocityMG {
     for (int s = 0; s < 1;
          ++s) {  // only the -side face index G lands inside the smoother range [G, ext-G)
       const int t = bc_[2 * comp + s];
-      if (t == 1 || t == 2) {
+      if (t == 1 || t == 2 || t == 4) {
         if (touches(f, 2 * comp + s))
           zeroPlane(f.resMask, f.ext, comp, G);
         useResMask_ = true;  // rank-uniform (the masked transfers must agree across ranks)
@@ -659,8 +661,22 @@ class VelocityMG {
           dval = -ba;  // outflow zero-gradient: every component
         else if ((bc_[f] == 1 || bc_[f] == 2) && a != comp)
           dval = ba;  // wall/inflow: tangential fold
+        else if (bc_[f] == 4 && a != comp && L == 0)
+          dval = -ba;  // free-slip: zero-gradient tangential fold -- LEVEL 0 ONLY. On the
+                       // coarse levels the exact Neumann row (-ba, ghost 0) is what the fine
+                       // operator has, but with rho/dt -> 0 it leaves the coarse tangential
+                       // operator nearly singular (slip on two opposite faces removes its
+                       // Dirichlet anchor in that direction), and the V-cycle's few-sweep
+                       // coarse solves then return noise instead of a correction. Measured,
+                       // sphere in an inflow/outflow channel at nu dt/h^2 = 1e3, residual
+                       // after 32 V-cycles: -ba on every level 1.2e-3 (+-z slip) and a
+                       // stagnation at 0.89 (all four faces slip); coarse fold dropped 2.5e-7
+                       // and 3.3e-4 (walls: 7.5e-8). The coarse levels therefore keep the
+                       // Dirichlet-at-ghost-centre surrogate, which is exactly what the
+                       // normal component at any Dirichlet face already uses; the fixed point
+                       // is set by level 0 alone.
         else
-          continue;  // periodic, or the normal comp at a wall
+          continue;  // periodic, the normal comp at a wall / free-slip face, or a coarse slip face
         if (touches(c, f))
           boundaryFold(c.AC, c.ext, G, a, s, dval);
       }
@@ -704,7 +720,7 @@ class VelocityMG {
       // of the convergence measure
       if (bcMode_ && heldComp_ >= 0) {
         const int t = bc_[2 * heldComp_];
-        if ((t == 1 || t == 2) && touches(l0, 2 * heldComp_))
+        if ((t == 1 || t == 2 || t == 4) && touches(l0, 2 * heldComp_))
           zeroPlane(l0.res, l0.ext, heldComp_, G);
       }
       return gmax(maxAbsInner(CCConst(l0.res), l0.ext, G));

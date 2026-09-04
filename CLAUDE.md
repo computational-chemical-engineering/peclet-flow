@@ -1729,32 +1729,47 @@ what the gate is on — moves by 5e-5…1.4e-4.
 
 Beyond periodic + IBM no-slip on immersed solids, flow has **native per-face domain BCs** (`mac_bc.hpp`):
 `set_domain_bc(face, type, vx, vy, vz)` for the 6 faces (0=−x,1=+x,2=−y,3=+y,4=−z,5=+z); `type` 0=periodic
-(default), 1=no-slip wall, 2=Dirichlet velocity / inflow, 3=outflow, **4=free slip (symmetry) — landing
-with branch `rel-issues` (`35d951c`), not yet on main**.
+(default), 1=no-slip wall, 2=Dirichlet velocity / inflow, 3=outflow, **4=free-slip / symmetry** (below).
 Velocity ghosts are filled in the
 MAC-staggered convention. Tangential walls use a **face-fold** in the implicit diffusion (drop the wall
 face, fold its β into the diagonal + RHS) so `u_inner` stays implicit — no Gauss–Seidel lag; explicit
 advection keeps the reflection ghost. Call **before** geometry/first step. For a domain-BC problem with no
 immersed solid, use `set_pressure_geometry(all_fluid_sdf)` (the cut-cell pressure operator without the IBM).
 
-**Type 4 = FREE SLIP (symmetry), added 2026-09-04 (ISSUES sweep item 7).** Impermeable (normal
-velocity 0 ON the boundary face) with a ZERO NORMAL GRADIENT of the tangential components.
-Discretely it is the WALL's normal rule plus the OUTFLOW face's tangential rule at every site —
-the tangential ghost is the zero-gradient copy (an EVEN reflection, `bcMirrorColocated`, on the
-collocated grid) and the implicit fold is `-β` (the face LEAVES the operator) instead of the
-no-slip `+β` with `2βu_wall` on the RHS; the pressure closes the face exactly as a wall (openness
-0, Neumann ghost) and every property / scalar / VoF colour ghost already keys on "non-periodic".
-`set_domain_bc` now range-checks `face` and `type`. It is the standard companion of no-slip in a
-benchmark suite — Hysing et al. (IJNMF 60:1259, 2009) prescribe free-slip lateral walls for the
-rising bubble, which the gallery could previously only approximate with PERIODIC sides (exact
-while the bubble stays laterally symmetric, an approximation once it does not). Measured on a
-32-cell half channel (no-slip −z, free-slip +z, Stokes): the scheme's own discrete parabola
-`F/(2μ)(H²−(H−z)²+h²/4)` to **1.2e-10**, the CONTINUUM parabola to 2.44e-04 — which is exactly
-`h²/4·F/(2μ)`, the NO-SLIP wall's mirror ghost, not the free-slip face's — and **free slip IS
-symmetry**: the half channel equals the lower half of a 64-cell channel with no-slip on both
-sides to **1.13e-12**. MPI np 1/2/4 with the ORB cutting the free-slip face, bitwise at np = 1 on
-u AND P (`tests/kokkos_mpi/test_freeslip_bc_mpi.cpp`); byte-identical when type 4 is unused.
-Study gate: `tests/study/vof_issues_sweep.py freeslip`.
+**Free-slip / symmetry (type 4, 2026-09-04).** Zero normal velocity, zero normal derivative of the
+tangential components, pressure Neumann — a wall for the pressure and the normal velocity, a
+mirror for the tangential ones. Staggered: the normal component is the no-slip treatment with
+wall velocity 0 (Dirichlet face + odd reflection); the tangential ghost is the **even** reflection
+(`bcSlipComp`), or, on the implicit fold path, a dropped face with **−β** on the diagonal (the
+mirror neighbour is the cell itself — the same fold the outflow's zero-gradient uses). Collocated:
+odd reflection of the normal component, `bcMirrorGhost` for the tangential ones. The flux openness
+is closed and the pressure MG treats it as Neumann (`t == 4` beside 1/2 in `CutcellMG`). Both
+grids, all momentum paths (const-coefficient fold, cut-cell/FOU stencil, mixed velocity MG),
+rank-owned under MPI like every other face. Two things it paid for, both measured
+(`tests/kokkos/test_freeslip.cpp`, `test_velocitymg_bc_mpi` pass 2):
+- **The SDF ghost band is mirrored about a type-4 face** (`mirrorSdfSlipFaces`). The geometry fill
+  wraps the OPPOSITE side of the domain into the ghosts on every non-periodic axis (it always
+  did — harmless for walls, where a phantom solid beyond a wall changes nothing), so a half
+  channel closed by a symmetry plane saw the far wall AS a solid on the plane and read
+  `u ≈ 0.4` instead of 7.2. The other face types keep the wrap they always had (byte-identical).
+- **The velocity multigrid's coarse levels do NOT fold a slip face** (`VelocityMG`, level 0 keeps
+  the exact −β). With ρ/Δt → 0 the exact Neumann coarse row leaves the coarse tangential operator
+  nearly singular — slip on two opposite faces removes its Dirichlet anchor — and the few-sweep
+  coarse solves return noise: residual after 32 V-cycles on the sphere-in-a-channel at
+  νΔt/h² = 10³ was **1.2e-3** (±z slip) and a stagnation at **0.89** (all four faces) against
+  walls' 7.5e-8; with the Dirichlet-at-ghost surrogate (what the normal component already uses)
+  **2.5e-7** and 3.3e-4, and the full solve matches RB-GS to 2.0e-9 (was 6.4e-3). The fixed
+  point is set by level 0 alone, so this changes the rate, never the answer.
+
+Gates: a half Poiseuille channel (cut-cell SDF wall at a half-integer + type-4 face) equals the
+full channel **pointwise to 3e-13 (staggered) / 7e-13 (collocated)** on both sides of the axis,
+both at the float-closure floor against the parabola (2.5e-6 relative, exactly what
+`verify_poiseuille_flow.py` reads); a body-force-driven flow along four slip faces stays uniform
+(4.6e-12 on the double fold path, ~1e-7 relative on the float stencil paths — the WO-M storage
+axis, not the BC) with v = w = 0; and a Stokes sphere in a ±y slip box equals its mirror-periodic
+twin (sphere + image in a box of twice the height) to **6.1e-13** relative through the projection.
+Under MPI the mixed velocity-MG gate runs a second pass with ±z free-slip: np=1 bit-exact to
+single-rank, np=2/4 at the pressure PCG's reduction floor, V-cycle == RB-GS fixed point.
 
 **Open boundaries** (outflow, or inflow with a non-zero normal velocity) split the face openness into two
 roles: the **operator** openness α (pressure matrix) is 0 at walls + inflow (Neumann) and open at outflow

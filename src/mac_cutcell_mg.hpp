@@ -848,8 +848,8 @@ class CutcellMG {
   int nLevels() const { return (int)lv_.size(); }
   Level& level(int L) { return lv_[L]; }
 
-  // per-face domain BC types {-x,+x,-y,+y,-z,+z}: 0=periodic, 1/2=Neumann (wall/inflow),
-  // 3=Dirichlet (outflow). Default all-periodic -> applyBoundaryOpenness is a no-op (periodic/IBM
+  // per-face domain BC types {-x,+x,-y,+y,-z,+z}: 0=periodic, 1/2/4=Neumann (wall/inflow/
+  // free-slip), 3=Dirichlet (outflow). Default all-periodic -> applyBoundaryOpenness is a no-op (periodic/IBM
   // path byte-identical).
   void setBoundaryConditions(const int bc[6]) {
     hasBC_ = false;
@@ -903,7 +903,7 @@ class CutcellMG {
     for (int a = 0; a < 3; ++a)
       for (int s = 0; s < 2; ++s) {
         const int t = bc_[2 * a + s];
-        if ((t == 1 || t == 2) && touchesGlobalFace(lv, 2 * a + s))
+        if ((t == 1 || t == 2 || t == 4) && touchesGlobalFace(lv, 2 * a + s))
           bcNeumannGhost(x, e, g, a, s);
       }
   }
@@ -942,8 +942,8 @@ class CutcellMG {
         const int t = bc_[2 * a + s];
         if (!touchesGlobalFace(lv, 2 * a + s))
           continue;  // interior rank boundary: the exchanged openness is the right value
-        if (t == 1 || t == 2) {
-          bcSetOpenness(oa[a], e, lv.g, a, s, 0.0);  // wall/inflow Neumann -> closed
+        if (t == 1 || t == 2 || t == 4) {
+          bcSetOpenness(oa[a], e, lv.g, a, s, 0.0);  // wall/inflow/free-slip Neumann -> closed
         } else if (t == 3) {
           if (!outflowCoeff_) {
             bcSetOpenness(oa[a], e, lv.g, a, s, 1.0);  // outflow -> open (periodic fill wraps)

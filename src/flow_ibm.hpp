@@ -826,8 +826,14 @@ class Solver {
   }
 #endif
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip
-  // wall,2=Dirichlet/inflow,3=outflow.
+  // wall,2=Dirichlet/inflow,3=outflow,4=free-slip/symmetry (zero normal velocity, zero normal
+  // derivative of the tangential components, pressure Neumann like a wall; vx/vy/vz ignored).
   void setDomainBc(int face, int type, double vx, double vy, double vz) {
+    if (face < 0 || face > 5)
+      throw std::invalid_argument("set_domain_bc: face must be 0..5 (-x,+x,-y,+y,-z,+z)");
+    if (type < 0 || type > 4)
+      throw std::invalid_argument(
+          "set_domain_bc: type must be 0 periodic / 1 wall / 2 inflow / 3 outflow / 4 free-slip");
     // WO-P3g: the "does this cell carry a row" mask depends on which domain faces are periodic.
     pcInDomain_ = CCField();
     bc_[face] = type;
@@ -1518,6 +1524,16 @@ class Solver {
     }
   }
 
+  /// Mirror a cell-centred geometry field about every rank-owned FREE-SLIP (type 4) domain face
+  /// (the symmetric extension the BC asserts). No-op without a type-4 face.
+  void mirrorSdfSlipFaces(CCField f) {
+    if (!hasBc_)
+      return;
+    B3 e{e_.x, e_.y, e_.z};
+    for (int face = 0; face < 6; ++face)
+      if (bc_[face] == 4 && touchesGlobalFace(face))
+        bcMirrorGhost(f, e, G, face / 2, face % 2);
+  }
   /// Device entry point (Layer 2): the inner SDF is ALREADY on device, so geometry never
   /// round-trips through the host. This is the body every set_solid path shares.
   void setSolidDevice(CCField din, bool cutcellPressure) {
@@ -1626,6 +1642,13 @@ class Solver {
           });
       space.fence();
     }
+    // FREE-SLIP / symmetry faces (type 4): the periodic/halo fill above wrapped the OPPOSITE side
+    // of the domain into the ghost band, so a wall at the far side becomes a phantom solid ON the
+    // symmetry plane (measured: a half Poiseuille channel closed by a type-4 face read u ~ 0
+    // there). The symmetric extension is the mirror of the interior about the face, which is
+    // exactly what the BC asserts about the geometry. Rank-owned faces only (touchesGlobalFace);
+    // the other face types keep the wrap they always had (byte-identical).
+    mirrorSdfSlipFaces(sdf_);
     buildVelocityOverlays(/*resetU=*/true);
     // MOVING GEOMETRY (rung 2): the wall-velocity fields must exist BEFORE the momentum operator
     // is assembled -- rebuildStencils folds them into the inhomogeneous term. sdf_ and its ghosts
@@ -5097,7 +5120,7 @@ class Solver {
   double finishResidual(int c) {
     if (hasBc_) {
       const int t = bc_[2 * c];
-      if ((t == 1 || t == 2) && touchesGlobalFace(2 * c))
+      if ((t == 1 || t == 2 || t == 4) && touchesGlobalFace(2 * c))
         zeroPlane(velRes_, e_, c, G);
     }
     lastAxNorm_ = peclet::flow::maxAbsDiffInner(CCConst(C[c].b), CCConst(velRes_), e_, G);
@@ -5514,6 +5537,15 @@ class Solver {
               bcNeumannGhost(f, e, G, a, s);
             continue;
           }  // outflow: zero-gradient ghost
+          if (t == 4) {  // free-slip / symmetry: the normal component is odd-reflected about the
+                         // face (face value 0, as a wall), the tangential ones mirrored (zero
+                         // normal derivative)
+            if (comp == a)
+              bcVelocityColocated(f, e, G, a, s, 0.0);
+            else
+              bcMirrorGhost(f, e, G, a, s);
+            continue;
+          }
           if (bcProf_[ff].extent(0) >
               0)  // per-position inlet profile (e.g. the BFS partial parabola)
             bcVelocityColocated(f, e, G, a, s, 0.0, comp, bcProf_[ff], bcProfNc_[ff]);
@@ -5532,6 +5564,10 @@ class Solver {
         if (t == 3) {
           if (doOutflow)
             bcOutflowComp(f, e, G, a, s, comp, fold);
+          continue;
+        }
+        if (t == 4) {  // free-slip / symmetry (mac_bc.hpp bcSlipComp)
+          bcSlipComp(f, e, G, a, s, comp, fold);
           continue;
         }
         if (bcProf_[ff].extent(0) > 0)
@@ -5558,6 +5594,9 @@ class Solver {
           if (t == 3) {
             dval = -beta;
             bval = 0.0;
+          } else if (t == 4 && c != a) {  // free-slip: zero-gradient tangential (the mirror
+            dval = -beta;                 // neighbour IS the cell -> the face's beta drops out);
+            bval = 0.0;                   // the normal component is held at 0 like a wall
           } else if (t != 0 && c != a) {
             dval = beta;
             bval = 2.0 * beta * bcVel_[2 * a + s][c];

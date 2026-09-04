@@ -413,8 +413,13 @@ static void bind_solver(nb::module_& m, const char* name) {
           "solve (0 on a single rank).")
       .def("set_domain_bc", &S::setDomainBc, nb::arg("face"), nb::arg("type"), nb::arg("vx") = 0.0,
            nb::arg("vy") = 0.0, nb::arg("vz") = 0.0,
-           "Set a per-face domain BC (face 0..5 = -x,+x,-y,+y,-z,+z; type 0 periodic/1 wall/2 "
-           "inflow/3 outflow).")
+           "Set a per-face domain BC (face 0..5 = -x,+x,-y,+y,-z,+z; type 0 periodic / 1 no-slip "
+           "wall / 2 Dirichlet velocity (inflow, or a lid with a tangential vx,vy,vz) / 3 outflow "
+           "(zero-gradient velocity, p = 0) / 4 free-slip = symmetry plane: zero normal velocity, "
+           "zero normal derivative of the tangential components, pressure Neumann like a wall; "
+           "vx/vy/vz are ignored). Call before the geometry / first step. A half-domain closed by a "
+           "type-4 face reproduces the full symmetric domain pointwise (tests/kokkos/test_freeslip). "
+           "Both grids (Solver and SolverColocated).")
       .def(
           "set_domain_bc_profile",
           [](S& s, int face, nb::ndarray<double, nb::c_contig> prof) {
