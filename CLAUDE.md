@@ -651,8 +651,10 @@ Findings and every measured number: `doc/vof_workorders_v6.md` § "ISSUES sweep"
   the V5b paragraph below — and RAISES when there is no wetting wall at all.
 - **Domain BC type 4 = free slip** — see "Domain boundary conditions". NOTE (2026-09-04): the
   sweep's own implementation (`84a59fa`) was DROPPED at merge in favour of the concurrent,
-  equivalent-and-wider `35d951c` (branch `rel-issues`, another session); until that branch lands
-  on main, type 4 is not available and `vof_issues_sweep.py freeslip` will refuse.
+  equivalent-and-wider one from branch `rel-issues` (another session), which is what main now
+  carries — `set_domain_bc(face, 4)` on both grids, gated by `tests/kokkos/test_freeslip.cpp` and
+  the free-slip pass of `test_velocitymg_bc_mpi`. `vof_issues_sweep.py freeslip` was written
+  against the dropped implementation's gates and has not been re-run against this one.
 
 **Static contact angle on SDF solids (rung V5b, WO-S).** `set_contact_angle(theta_deg)` (or
 `set_contact_angle_field`) replaces **pass 1 only** of the V5a solid-band fill by the volume
