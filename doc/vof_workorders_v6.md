@@ -986,6 +986,40 @@ Three separate things made this a crash instead of a warning, and all three are 
 3. **Nothing was watching the colour.** The progress line now carries `max C` with a hard stop at
    `1 + 1e-6`, so the run ends while its checkpoint is still good.
 
+**And it is NOT a time-step margin — the decisive experiment.** The same restart was run at three
+safety factors on the interface-local Courant, from the same healthy checkpoint (step 10 000,
+1.476 turnovers):
+
+| dt safety (target Courant) | dt at failure | failed at | reported |
+|---|---|---|---|
+| 0.40, re-picked every 10 steps (0.100) | 3.09e-3 | **t u_tau/h = 1.592** | capillary limit `-nan` (the colour was already past 1.11) |
+| 0.25, every step (0.0625) | 2.14e-3 | **1.546** | WY CFL **6.94** against the cap 0.25 |
+| 0.10, every step (0.025) | 7.36e-4 | **1.587** | WY CFL **0.278** against the cap 0.25 |
+
+A 4x reduction in dt moves the failure by **nothing** (1.59 → 1.55 → 1.59 turnovers). And the state
+one print before the last of them is spotless: `max|u| = 34.63` cells/time, `max C = 1.000000`,
+pressure 11/800, marker volumes flat — and then, **inside a single step**, the post-projection face
+velocity reaches `0.278/7.36e-4 = 377` cells/time, i.e. **11x the max|u| the limiter measured at the
+head of that step** (at safety 0.25 it was 3240, a factor 94). The time step cannot be chosen from a
+state that the step itself destroys: this is a force-driven local blow-up, not an under-resolved
+advection.
+
+**Where.** The closest marker pair sits at `dmin = 8.0…8.2` cells with `D = 10` — i.e. the two
+markers INTERPENETRATE by ~2 cells, which is the block container's designed-for "no numerical
+coalescence" state and is exactly where the two markers' CSF forces land on the SAME faces through
+UNPACK_SUM while the union colour the projection sees is a single `max`. The balanced-force property
+that makes V4 exact — the force being the discrete gradient of `sigma kappa C` with the SAME
+difference operator the projection inverts — cannot hold for a sum of two markers' `sigma kappa_f
+dC_f` against one union `C`. W2 gate 3 tested that configuration KINEMATICALLY and at rest and
+measured a stable 2-cell film; a turbulent channel at Re_tau 127 drives the pair through it, and
+that is where the run ends.
+
+**This is rung W4's problem arriving early.** A collision/coalescence model (VOF_PLAN §10 W4) is
+what decides what two markers at `dmin < D` do; without one the container carries them
+interpenetrating and the summed CSF has no balanced-force partner. Until W4, **`channel_18` on the
+block path is rated to ~1.5 eddy turnovers at D/Delta = 10**, and a statistically steady state on
+this path is out of reach at this resolution.
+
 **The general statement, and it belongs in the block container's rating:** a marker PAIR IN CONTACT
 is the block path's stiffest configuration, because the two markers' CSF forces sum on the same
 faces while the film between them is resolved only to the grid (W2 gate 3 measured 2 cells at
