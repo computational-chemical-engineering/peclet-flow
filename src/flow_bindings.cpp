@@ -30,6 +30,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <Kokkos_Core.hpp>
 #include <string>
 #include <vector>
@@ -643,7 +644,34 @@ static void bind_solver(nb::module_& m, const char* name) {
           nb::arg("u"), nb::arg("v"), nb::arg("w"),
           "Upload an initial velocity field (u,v,w each a Fortran-order (nx,ny,nz) float64 array).")
       .def("step", &S::step,
-           "Advance the solver one time step (semi-implicit: diffusion + projection).")
+           "Advance the solver one time step (semi-implicit: diffusion + projection).\n\n"
+           "ATOMIC across the two explicit two-phase stability caps: the Weymouth-Yue "
+           "boundedness cap and the Brackbill capillary limit are evaluated at the HEAD of the "
+           "call, so a rejected dt leaves every field bitwise as it was and a retry at a smaller "
+           "dt is exact. (Before 2026-09-04 the momentum half had already advanced by the "
+           "rejected dt, so catch-and-halve desynchronised colour and momentum.) The WY "
+           "pre-check reads the field the call starts from; where the projection itself "
+           "accelerates the field inside the step, use step_adaptive().")
+      .def(
+          "step_adaptive",
+          [](S& s, double cfl, double capCfl, double dtMax) {
+            return s.stepAdaptive(cfl, capCfl, dtMax);
+          },
+          nb::arg("cfl_target") = 0.4, nb::arg("capillary_cfl") = 0.4,
+          nb::arg("dt_max") = std::numeric_limits<double>::infinity(),
+          "One step at a dt re-picked from the CURRENT state; returns the dt used.\n\n"
+          "dt = min(cfl_target * cfl_dt, capillary_cfl * capillary_dt, dt_max) with both limits "
+          "taken from vof_step_limits() at the moment of the call, then set_dt(dt) + step(). "
+          "Needs enable_vof().\n\n"
+          "WHY: both limits are INSTANTANEOUS. Re-picking every ten steps is safe for a free "
+          "bubble or a falling film and is NOT safe in a packing -- a throat jet can grow "
+          "max|uf| by more than 50 %% inside ten steps (measured, examples/bubble-through-packing) "
+          "and the WY cap is a hard throw; and capillary_dt itself reads the density field, so a "
+          "value taken before the closures have run can be 7x too large (measured, "
+          "examples/pore-scale-imbibition). This is bitwise the "
+          "`dt = 0.4*min(L['cfl_dt'], L['capillary_dt']); s.set_dt(dt); s.step()` loop the "
+          "gallery drivers write by hand (IEEE multiplication is monotone, so "
+          "f*min(a,b) == min(f*a,f*b)). set_dt/step semantics are unchanged.")
       .def(
           "set_velocity",
           [](S& s, int c, nb::ndarray<double, nb::f_contig> a) { s.setVelocity(c, grid_in(a)); },

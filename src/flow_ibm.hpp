@@ -7602,6 +7602,48 @@ class Solver {
   // `updateProperties()` just turned into rho(C) and mu(C), i.e. C^{n+1} under momentum consistency
   // (the VoF stage ran at the head) and C^n without it (it runs at the tail). Either way kappa,
   // rho and the colour in the force (1) are the same time level, which is what the balance needs.
+  // ISSUES sweep item 2. One step at a dt re-picked from the CURRENT state, returning the dt used.
+  //
+  // Why this exists as an entry point rather than as a recipe in every driver: both limits
+  // `vof_step_limits()` reports are INSTANTANEOUS. Re-picking every ten steps -- what the free
+  // bubble and falling film studies do, and what the gallery's rising-bubble driver copied -- is
+  // safe only where the face field changes slowly. In a packing it is not: a throat jet can grow
+  // max|uf| by more than 50 % inside ten steps (measured, examples/bubble-through-packing), and
+  // the Weymouth-Yue cap is a hard throw. And `capillary_dt` is itself STATE-dependent (it reads
+  // the density field, so the first call on a domain whose closures have not run reports the base
+  // `set_rho` value -- measured 7.1x too large on a gas-filled pore-scale domain).
+  //
+  // dt = min(cfl_target * cfl_dt, capillary_cfl * capillary_dt, dt_max), from the state as it
+  // stands at the call, then `set_dt` + `step()`. This is EXACTLY what the three gallery drivers
+  // (rising-bubble, bubble-through-packing, trickle-flow-packing) do in Python -- and bitwise so,
+  // because IEEE multiplication is monotone, hence `f*min(a,b) == min(f*a,f*b)`.
+  //
+  // `set_dt` / `step()` semantics are untouched: this is a wrapper, not a mode.
+  double stepAdaptive(double cflTarget, double capillaryCflTarget, double dtMax) {
+    if (!vofEnabled_)
+      throw std::runtime_error("step_adaptive: needs enable_vof() (it picks dt from the two "
+                               "explicit two-phase limits vof_step_limits() reports)");
+    if (!(cflTarget > 0.0) || !(capillaryCflTarget > 0.0) || !(dtMax > 0.0))
+      throw std::runtime_error("step_adaptive: cfl_target, capillary_cfl and dt_max must be > 0");
+    const VofStepLimits L = vofStepLimits();
+    double dt = cflTarget * L.cflDt;
+    const double dc = capillaryCflTarget * L.capillaryDt;
+    if (dc < dt)
+      dt = dc;
+    if (dtMax < dt)
+      dt = dtMax;
+    if (!(dt > 0.0) || !std::isfinite(dt))
+      throw std::runtime_error(
+          "step_adaptive: no finite dt (cfl_dt = " + std::to_string(L.cflDt) +
+          ", capillary_dt = " + std::to_string(L.capillaryDt) +
+          ") - pass a finite dt_max when neither limit is active");
+    setDt(dt);
+    // The limits were just evaluated on this exact state, so `step()`'s own head-of-step
+    // pre-check (item 1) would repeat the interface-local reduction and the g=3 fill for nothing.
+    vofPrecheckDone_ = true;
+    step();
+    return dt;
+  }
   // ISSUES sweep item 1: the two explicit two-phase stability caps, evaluated at the head of
   // `step()` on the state the call STARTS from, so a rejected dt costs nothing.
   //
