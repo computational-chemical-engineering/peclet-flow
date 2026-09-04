@@ -623,6 +623,34 @@ class Solver {
   // Seed/restore the velocity state (CUDA set_state / upload_velocity): u/v/w are inner-cell fields
   // (flat x-fastest, size nx*ny*nz); written into the velocity block + ghosts refreshed (periodic
   // wrap).
+  // ISSUES sweep item 5. On the COLLOCATED grid the colour transport rides the MAC face field
+  // `uf_/vf_/wf_` (the only discretely divergence-free field on that grid), which only exists
+  // after a projection. `set_state` / `set_velocity` write the CELL field and used to leave the
+  // face field untouched — all zeros on a fresh solver — and `advect_vof` then ran happily:
+  // its guard measures the FACE field's divergence and a zero field is perfectly solenoidal. So a
+  // benchmark loop written the staggered way produced a "conservative" run in which nothing ever
+  // moved (measured on LeVeque 32^3: max|u| = 63.3, max|uf| = 0.0, max|C - C0| = 0.0 after
+  // `advect_vof`, no throw and no warning).
+  //
+  // Seeding the face field from the cell field with the SAME `centerToFace` map `project()` uses
+  // makes the kinematic entry point mean the same thing on both grids — and it makes the existing
+  // divergence guard MEASURE something: an analytic cell field that is not discretely solenoidal
+  // on the faces is now rejected instead of silently accepted. It does not make the face field
+  // divergence-free (only a projection does), and it is overwritten by the next `project()`, so
+  // nothing downstream changes. Staggered: a no-op (the cell field IS the face field).
+  void seedFaceFieldFromCells() {
+    if constexpr (Grid::collocated) {
+      for (int c = 0; c < 3; ++c)
+        fillVelGhosts(c, 0);
+      if ((faceInterp_ >= 1 && faceInterp_ <= 5) || faceInterp_ == 7 || faceInterp_ == 10)
+        centerToFaceWallAware(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u),
+                              CCConst(sdf_), CCConst(xcx_), CCConst(xcy_), CCConst(xcz_),
+                              faceInterp_ >= 3, e_, G);
+      else
+        centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
+      faceFieldValid_ = true;
+    }
+  }
   void uploadVelocity(const std::vector<double>& uu, const std::vector<double>& vv,
                       const std::vector<double>& ww) {
     const std::vector<double>* src[3] = {&uu, &vv, &ww};
@@ -647,6 +675,7 @@ class Solver {
           });
       fillGhosts(C[c].u);
     }
+    seedFaceFieldFromCells();  // ISSUES sweep item 5 (collocated only; a no-op staggered)
   }
 #ifdef PECLET_FLOW_MPI
   // Multi-rank: this rank's IbmSolver is constructed with its LOCAL block dims (= the
@@ -2230,6 +2259,7 @@ class Solver {
   void setVelocity(int c, const std::vector<double>& v) {
     scatterInner(C[c].u, v);
     maskVelocity(c);
+    seedFaceFieldFromCells();  // ISSUES sweep item 5 (collocated only; a no-op staggered)
   }
   // The divergence-free FACE velocity component (collocated: the projected MAC face field
   // uf_/vf_/wf_, exactly div-free; staggered: C[c].u already lives on the faces). For a periodic
@@ -5413,6 +5443,7 @@ class Solver {
                               faceInterp_ >= 3, e_, G);  // faces (modes 1-5,7,10; mode 6/9 = plain)
       else
         centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
+      faceFieldValid_ = true;  // ISSUES sweep item 5
       // rung V8 (WO-T): the body / interfacial forces the predictor deliberately did NOT apply, put
       // on the FACES where the pressure difference lives — the collocated form of the V4 balanced
       // force (Basilisk centered.h). Inert on every constant-density collocated configuration.
@@ -6765,6 +6796,21 @@ class Solver {
     if (!vofEnabled_)
       throw std::runtime_error("advect_vof: VoF is not enabled (call enable_vof / set_vof first)");
     requireVofGeometry("advect_vof");
+    // ISSUES sweep item 5: on the collocated grid the advecting field is the MAC FACE field, and
+    // a face field that was never built is all zeros — which the divergence guard below happily
+    // certifies as solenoidal, so the whole advection became a silent no-op. `set_state` /
+    // `set_velocity` now seed it (seedFaceFieldFromCells) and a projection builds it; refuse the
+    // one remaining way to reach the trap.
+    if constexpr (Grid::collocated) {
+      if (!faceFieldValid_)
+        throw std::runtime_error(
+            "advect_vof: SolverColocated advects the colour with the MAC FACE field uf_/vf_/wf_ "
+            "(the only discretely divergence-free field on this grid), and it has never been "
+            "built — it is all zeros, which the divergence guard would certify as solenoidal and "
+            "the advection would be a silent no-op. Call set_state()/set_velocity() (which now "
+            "seed the face field through the same centerToFace map project() uses) or step() "
+            "first.");
+    }
     // WO-R2 item 4a (found by the E1 gallery page): the divergence guard below was INERT on a bare
     // box. `maxOpenDivergence()` returns 0.0 when there is no cut-cell pressure operator, so a
     // cell-centre-sampled analytic field — LeVeque, whose true max|div(open u)| is 0.612 — sailed
@@ -10352,6 +10398,9 @@ class Solver {
   // fixed (per-fluid-component null-space projection; see ../docs/DECOMPOSITION_AND_MULTIGRID.md).
   int pressAgglomMode_ = -1;
   long lastPressureIters_ = 0;
+  // ISSUES sweep item 5: has the collocated MAC face field ever been built (by a projection
+  // or by `seedFaceFieldFromCells`)? Meaningless on the staggered grid.
+  bool faceFieldValid_ = false;
   // ISSUES sweep items 1+2: `step_adaptive` has just evaluated the two limits on this state, so
   // `step()`'s head-of-step pre-check can skip its own (identical) evaluation. One-shot.
   bool vofPrecheckDone_ = false;
