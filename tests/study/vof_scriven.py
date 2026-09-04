@@ -157,9 +157,30 @@ def sphere_colour(n, cx, cy, cz, R, sub=4):
     return np.asfortranarray(c)
 
 
+
+def apply_p3g(s, order=1, op_mdot=None, gfm_order=None, curv_dist=None, carry=None):
+    """WO-P3g: the second-order interfacial energy operator, as a package and as an ablation.
+
+    `order = 2` turns on all four pieces (operator-flux mdot, the Gibou-Fedkiw three-point row,
+    curvature-consistent distances from the V3 cascade, and WO-P3f's enthalpy-conserving Dirichlet
+    overwrite); the four keyword overrides then switch individual pieces back off or on, which is
+    how the ablation rows of the findings are produced.  `order = 1` with all overrides None is the
+    shipped scheme, bitwise.
+    """
+    if order == 2:
+        s.set_phase_change_energy_order(2)
+    if op_mdot is not None:
+        s.set_phase_change_mdot_operator(bool(op_mdot))
+    if gfm_order is not None:
+        s.set_phase_change_gfm_order(int(gfm_order))
+    if curv_dist is not None:
+        s.set_phase_change_curvature_distance(bool(curv_dist))
+    if carry is not None:
+        s.set_phase_change_carry_conserve(bool(carry))
+
 def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, consistent=True,
         quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True,
-        budget=0, carry=False, fitkap=False):
+        budget=0, carry=False, fitkap=False, p3g=None):
     rr = 1.0 / ratio
     beta = scriven_beta(ja, rr)
     t0 = (r0 / (2 * beta)) ** 2 / alpha_l          # cells^2 / (cells^2/s) = s
@@ -218,6 +239,9 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     if carry:
         # WO-P3f: conserve the enthalpy the interfacial cells' Dirichlet overwrite destroys.
         s.set_phase_change_carry_conserve(True)
+    if p3g:
+        apply_p3g(s, **p3g)
+        budget = budget or 10        # the flux identity IS gate (c); never run item 1 blind
     if budget:
         # WO-P3f instrument (a): the energy budget of the energy solve, printed every `budget`
         # steps.  Off by default and inert in the solver when off.
@@ -229,6 +253,9 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     # areas of a freshly sub-sampled sphere are uneven), so a predicted dt trips the Weymouth-Yue
     # cap. Predict, then correct from `vof_last_courant()`, and halve on a rejected step.
     rows = []
+    qprev = None          # WO-P3g gate (c): the operator flux the LAST energy solve drew
+    worst_id = 0.0        # ... the worst |E_lat - q_op| / E_lat over the run (by construction)
+    worst_lag = 0.0       # ... and the worst |q_op + q_solve(n-1)| / q_op (the one-step lag)
     tcur, nst, itmax, capped = t0, 0, 0, 0
     Rd = beta * math.sqrt(alpha_l / tcur)
     dt0 = 0.4 * cfl / max(Rd * (1.0 - rr), 1e-30)
@@ -296,12 +323,29 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         # the interface SHEET carries, next to the radius the liquid-volume deficit carries.
         delta = dg['removed_volume'] / area if area > 0 else float('nan')
         r_a = math.sqrt(area / (4.0 * math.pi))
+        # WO-P3g gate (c). Item 1 defines mdot as the flux the energy operator itself transferred,
+        # so the latent heat this step BOOKS must equal the heat the LAST energy solve DREW, to
+        # round-off.  `q_gfm + q_behind` is that heat (the Dirichlet couplings plus the
+        # second-order row's one-sided band rescaling); the one-step lag is the scheme's own --
+        # mdot is evaluated at the head of the step from the converged T of the step before.
+        e_lat_n = rho_l * dg['removed_volume'] * h_lv / dt_used
+        if p3g is not None and budget:
+            b_ = s.phase_change_budget()
+            if e_lat_n != 0.0:
+                # the BY-CONSTRUCTION half: the latent heat this step books IS the heat the
+                # operator's own rows draw on the fields it read.
+                worst_id = max(worst_id, abs(e_lat_n - dg['q_operator']) / abs(e_lat_n))
+            if qprev is not None and dg['q_operator'] != 0.0:
+                # the LAGGED half: the heat the LAST energy solve actually removed, against the
+                # latent heat this step books from the same converged T.
+                worst_lag = max(worst_lag, abs(dg['q_operator'] + qprev) / abs(dg['q_operator']))
+            qprev = b_['q_gfm'] + b_['q_behind']
         if budget and (nst % budget == 0 or nst == 1) and verbose:
             b = s.phase_change_budget()
             # E_lat: the latent heat the REGRESSION booked this step (W).  removed_volume is
             # sum mdot A dt / rho_l, so rho_l removed_volume h_lv / dt = sum mdot A h_lv.
             e_lat = rho_l * dg['removed_volume'] * h_lv / dt_used
-            q = b['q_gfm']                       # W, < 0 = heat drawn OUT of the liquid
+            q = b['q_gfm'] + b['q_behind']       # W, < 0 = heat drawn OUT of the liquid
             dcls = (b['e_enter'] - b['e_leave']) / dt_used      # W lost at the class changes
             dovw = b['d_overwrite'] / dt_used                   # W injected by the Dirichlet rows
             dovn = b['d_overwrite_new'] / dt_used
@@ -383,6 +427,13 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
               f"({100*(beta_eff-beta)/beta:+.3f} %), implied time offset {t_off:+.5f} of t0 "
               f"{t0:.5f} ({100*t_off/t0:+.2f} %), radius offset at the end {R_off:+.4f} cells")
         print(f"      max |dR|/R over the LAST HALF = {100*max(errs):.3f} %   [gate 1 %]")
+        if p3g is not None and budget:
+            print(f"      WO-P3g gate (c): worst |E_lat - q_op| / E_lat = {worst_id:.3e} "
+                  f"[gate 1e-10], worst |q_op(n) + q_solve(n-1)| / q_op = {worst_lag:.3e};  "
+                  f"q_orphan/q_op last step "
+                  f"{dg['q_orphan']/dg['q_operator'] if dg['q_operator'] else 0.0:.3e}, "
+                  f"mdot_fit/mdot_op last step "
+                  f"{dg['mdot_fit']/(rho_l*dg['removed_volume']/(dt_used*area)) if area > 0 and dg['removed_volume'] else float('nan'):.6f}")
         print(f"      pressure iters max {itmax}/600 (capped {capped}), band_div "
               f"{d['band_div']:.3e}, C in [{d['min_C']:.2e}, {d['max_C']:.6f}], "
               f"T in [{d['T_min']:.3e}, {d['T_max']:.6f}], fallback {d['fallback_cells']}, "
@@ -801,7 +852,8 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
                       f"{m_d[2]/abs(t_e):.3e} l4 {m_d[4]/abs(t_e):.3e}")
 
 
-def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt, prof, kap=False):
+def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt, prof, kap=False,
+                p3g=None):
     """One a-priori mdot evaluation: `geom` x `prof`, the 2x2 that separates the two curvatures.
 
     `geom` = 'sphere' (the exact sphere, sub^3 fractions) or 'plane' (a flat interface normal to x
@@ -877,6 +929,8 @@ def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt,
         # known geometry (-2/R for a gas sphere; 0 for the flat control).
         s.set_phase_change_fit_curvature(-2.0 / R if geom == "sphere" else 0.0)
     s.set_phase_change_budget(True)     # WO-P3f: also read the GFM heat the SAME fields draw
+    if p3g:
+        apply_p3g(s, **p3g)
     s.apply_phase_change(dt)
     dg = s.phase_change_diagnostics()
     bud = s.phase_change_budget()
@@ -892,14 +946,15 @@ def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt,
     q_ex = mdot_ex * h_lv * ref_area
     return dict(beta=beta, t=t, Rdot=Rdot, mdot_ex=mdot_ex, area=A, ref_area=ref_area,
                 m_area=m_area, cells=int(dg['interface_cells']), m_cell=md[iface],
-                Rmeas=Rmeas, gradT=gradT, bl=dT / gradT, e_lat=e_lat, q_gfm=bud['q_gfm'],
-                q_ex=q_ex,
+                Rmeas=Rmeas, gradT=gradT, bl=dT / gradT, e_lat=e_lat,
+                q_gfm=bud['q_gfm'] + bud['q_behind'], q_ex=q_ex, mdot_fit=dg['mdot_fit'],
                 delta=dg['removed_volume'] / A if A > 0 else float('nan'),
                 clipped=int(dg['deficit_cells']))
 
 
 def mdot_probe(n, radii, ja=0.5, ratio=100.0, sub=16, alpha_l=1.0, area_mode=None, quad=True,
-               plane=True, dt=None, geoms=("sphere", "plane"), profs=("scriven",), kap=False):
+               plane=True, dt=None, geoms=("sphere", "plane"), profs=("scriven",), kap=False,
+               p3g=None):
     """WO-P3f gate (b): the a-priori CURVATURE BIAS of the one-sided mdot fit.
 
     For each radius the exact sphere carries Scriven's similarity profile at the matching time and
@@ -908,7 +963,8 @@ def mdot_probe(n, radii, ja=0.5, ratio=100.0, sub=16, alpha_l=1.0, area_mode=Non
     """
     print(f"  a-priori MDOT probe, {n}^3, Ja {ja:g}, ratio {ratio:g}, exact fractions "
           f"(sub = {sub}^3), area mode {0 if area_mode is None else area_mode}, "
-          f"quadratic fit {quad}, plane Dirichlet {plane}, curvature-corrected distance {kap}")
+          f"quadratic fit {quad}, plane Dirichlet {plane}, curvature-corrected distance {kap}"
+          f", P3g {p3g}")
     for prof in profs:
       for geom in geoms:
         prev = None
@@ -921,7 +977,7 @@ def mdot_probe(n, radii, ja=0.5, ratio=100.0, sub=16, alpha_l=1.0, area_mode=Non
                 t_ = (R / (2 * b_)) ** 2 / alpha_l
                 step = 1e-3 / max(rr * b_ * math.sqrt(alpha_l / t_), 1e-300)
             r = _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, step,
-                            prof, kap=kap)
+                            prof, kap=kap, p3g=p3g)
             rel = r['m_area'] / r['mdot_ex'] - 1.0
             relA = r['area'] / r['ref_area'] - 1.0
             mc = r['m_cell']
@@ -945,7 +1001,7 @@ def mdot_probe(n, radii, ja=0.5, ratio=100.0, sub=16, alpha_l=1.0, area_mode=Non
             prev = (R, rel)
 
 
-def carry_probe(n, steps, ratio=100.0, carry=False, sub=16, grad=0.05, mdot=2.0e-3):
+def carry_probe(n, steps, ratio=100.0, carry=False, sub=16, grad=0.05, mdot=2.0e-3, p3g=None):
     """WO-P3f, the a-priori gate of `--carry`: a PLANAR interface swept through cells at a
     PRESCRIBED mass flux, with a linear superheat profile in the liquid.
 
@@ -997,12 +1053,15 @@ def carry_probe(n, steps, ratio=100.0, carry=False, sub=16, grad=0.05, mdot=2.0e
     s.set_phase_change_budget(True)
     if carry:
         s.set_phase_change_carry_conserve(True)
+    if p3g:
+        apply_p3g(s, **p3g)
     print(f"  WO-P3f CARRY probe, {n}^3, planar interface, prescribed mdot {mdot:g}, linear "
           f"superheat grad {grad:g}/cell, k_l = {k_l:g}, h_lv = {h_lv:g}, carry {carry}")
     # keep the interface-local Courant number well under the Weymouth-Yue cap: the deposit
     # drives |u| ~ mdot (1/rho_v - 1/rho_l).
     dt = 0.1 / (mdot * (1.0 / rho_v - 1.0 / rho_l))
     hprev = None
+    qpr = None
     for k in range(steps):
         s.set_dt(dt)
         s.step()
@@ -1014,6 +1073,15 @@ def carry_probe(n, steps, ratio=100.0, carry=False, sub=16, grad=0.05, mdot=2.0e
         H = float(np.sum((rcp_v * (1.0 - C) + rcp_l * C) * T))
         dH = float("nan") if hprev is None else H - hprev
         hprev = H
+        dgp = s.phase_change_diagnostics()
+        e_lat_p = rho_l * dgp['removed_volume'] * h_lv / dt
+        qop = b['q_gfm'] + b['q_behind']
+        print(f"      step {k+1:3d}  E_lat {e_lat_p:12.5e} W  q_op(build) "
+              f"{dgp['q_operator']:12.5e} W  IDENTITY (E_lat - q_op)/E_lat "
+              f"{(e_lat_p - dgp['q_operator'])/e_lat_p if e_lat_p else float('nan'):+.3e}  |  "
+              f"solve q_gfm+q_behind {qop:12.5e} W, vs the build's flux "
+              f"{(dgp['q_operator'] + qpr)/dgp['q_operator'] if (qpr is not None and dgp['q_operator']) else float('nan'):+.3e}")
+        qpr = qop
         print(f"      step {k+1:3d}  overwrite {b['d_overwrite']:12.5e} J  deposited "
               f"{led['deposited']:12.5e}  lost {led['lost']:11.4e}  IDENTITY {idn:.3e} "
               f"(rel {idn/b['d_overwrite'] if b['d_overwrite'] else 0.0:.2e})  "
@@ -1103,7 +1171,24 @@ def main():
     ap.add_argument("--mdot-dt", type=float, default=0.0,
                     help="WO-P3f: fixed regression dt for the mdot probe (0 = pick it so the "
                          "normal displacement is the run's own 1e-3 cells)")
+    ap.add_argument("--energy-order", type=int, default=1,
+                    help="WO-P3g: 1 = the shipped interfacial energy operator; 2 = the "
+                         "second-order package (operator-flux mdot + Gibou-Fedkiw row + "
+                         "curvature-consistent distances + the conserving Dirichlet overwrite)")
+    ap.add_argument("--op-mdot", type=int, default=None,
+                    help="WO-P3g item 1 override (0/1): mdot from the energy operator's own flux")
+    ap.add_argument("--gfm-order", type=int, default=None,
+                    help="WO-P3g item 2 override (1/2): the ghost-fluid row's order")
+    ap.add_argument("--curv-dist", type=int, default=None,
+                    help="WO-P3g item 3 override (0/1): curvature-consistent distances")
+    ap.add_argument("--carry-opt", type=int, default=None,
+                    help="WO-P3g item 4 override (0/1): the conserving Dirichlet overwrite")
     a = ap.parse_args()
+    p3g = None
+    if a.energy_order != 1 or a.op_mdot is not None or a.gfm_order is not None or \
+            a.curv_dist is not None or a.carry_opt is not None:
+        p3g = dict(order=a.energy_order, op_mdot=a.op_mdot, gfm_order=a.gfm_order,
+                   curv_dist=a.curv_dist, carry=a.carry_opt)
     if a.area_advect:
         area_advect(a.n, R=a.advect_r, sub=a.area_sub, steps=a.advect_steps, cfl=a.cfl,
                     amp=a.advect_amp)
@@ -1115,7 +1200,7 @@ def main():
                       ratio=a.ratio, advect_steps=a.regress_advect, cfl=a.cfl)
         return 0
     if a.carry_probe:
-        carry_probe(a.n, a.carry_probe, ratio=a.ratio, carry=a.carry)
+        carry_probe(a.n, a.carry_probe, ratio=a.ratio, carry=a.carry, p3g=p3g)
         return 0
     if a.mdot_probe:
         mdot_probe(a.n, [float(x) for x in a.mdot_probe.split(",")],
@@ -1123,7 +1208,7 @@ def main():
                    area_mode=a.area_mode, quad=not a.no_quad, plane=not a.no_plane,
                    dt=(a.mdot_dt if a.mdot_dt > 0 else None),
                    geoms=tuple(a.mdot_geom.split(",")),
-                   profs=tuple(a.mdot_prof.split(",")), kap=a.fit_curvature)
+                   profs=tuple(a.mdot_prof.split(",")), kap=a.fit_curvature, p3g=p3g)
         return 0
     if a.area_probe:
         area_probe(a.n, [float(x) for x in a.area_probe.split(",")], ratio=a.ratio,
@@ -1132,12 +1217,13 @@ def main():
     print(f"P3 Scriven bubble growth, {a.n}^3, cfl {a.cfl:g}, sweeps {a.sweeps}, "
           f"plane Dirichlet {not a.no_plane}, "
           f"consistent energy {not a.no_consistent}, quadratic fit {not a.no_quad}, "
-          f"energy MUSCL {a.muscl}, init {a.init}, sub {a.sub}^3, area mode {a.area_mode}")
+          f"energy MUSCL {a.muscl}, init {a.init}, sub {a.sub}^3, area mode {a.area_mode}, "
+          f"WO-P3g {p3g}")
     for ja in [float(x) for x in a.ja.split(",")]:
         run(a.n, ja, a.ratio, a.r0, a.r1, cfl=a.cfl, sweeps=a.sweeps, plane=not a.no_plane,
             consistent=not a.no_consistent, quad=not a.no_quad, muscl=a.muscl, init=a.init,
             sub=a.sub, area_mode=a.area_mode, budget=a.budget, carry=a.carry,
-            fitkap=a.fit_curvature)
+            fitkap=a.fit_curvature, p3g=p3g)
     return 0
 
 

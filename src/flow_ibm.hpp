@@ -8380,7 +8380,10 @@ class Solver {
     const bool opMode = pcMdotOperator_ && thermal && pcGphi_.extent(0) == n_ &&
                         scT->dmask.extent(0) == n_;
     const bool opEnergy = opMode && scT->energy && scT->kcell.extent(0) == n_;
+    if (opMode)
+      pcBuildInDomain();
     CCConst mkF = CCConst(opMode ? scT->dmask : pcMdot_);
+    CCConst inD = CCConst(opMode ? pcInDomain_ : pcMdot_);
     CCConst kcF = CCConst(opEnergy ? scT->kcell : pcMdot_);
     CCConst oxF = CCConst(ox_), oyF = CCConst(oy_), ozF = CCConst(oz_);
     const double Dconst = thermal ? scT->D : 0.0, thMin = pcGfmThMin_, thMax = pcGfmThMax_;
@@ -8470,6 +8473,8 @@ class Solver {
                   const long pc = i + (long)sg * stq[d];
                   if (mkF(pc) > 0.5)
                     continue;  // an identity row: it carries no Dirichlet coupling
+                  if (!(inD(pc) > 0.5))
+                    continue;  // outside the global domain: no row exists there at all
                   const double of = (d == 0)   ? ((sg > 0) ? oxF(i + 1) : oxF(i))
                                     : (d == 1) ? ((sg > 0) ? oyF(i + sy) : oyF(i))
                                                : ((sg > 0) ? ozF(i + sz) : ozF(i));
@@ -8841,6 +8846,39 @@ class Solver {
     // a periodic wrap on a non-periodic domain face would import a phantom curvature, so zero it.
     fillGhosts(pcKappa_);
     pcZeroDomainGhosts(pcKappa_);
+  }
+
+  /// **WO-P3g** — 1 on every cell that CARRIES A ROW in the energy solve, 0 otherwise.
+  ///
+  /// The operator-flux `mdot` gathers, from the interfacial side, the Dirichlet couplings of its
+  /// PURE face neighbours. A neighbour that is a ghost belonging to another RANK does carry a row
+  /// (that rank builds it), and dropping it would make `mdot` decomposition-dependent; a ghost
+  /// beyond a NON-PERIODIC domain face carries none, and counting it invents heat. `dmask` cannot
+  /// tell the two apart — `pcZeroDomainGhosts` makes both look pure — so this field does, by the
+  /// same construction: 1 on the inner region, exchanged (so a rank's ghosts inherit the owner's 1
+  /// and a periodic wrap keeps it), then zeroed on the non-periodic domain ghosts.
+  ///
+  /// Measured on the planar carry probe (64^3, an interface that spans the whole y-z
+  /// cross-section, so its edge cells sit ON the domain boundary): without it those cells' `mdot`
+  /// reads 2.115e-3 against the exact 2.000e-3, +5.8 %, and the operator flux exceeds the energy
+  /// solve's own by 5.3e-4 of the total.
+  void pcBuildInDomain() {
+    if (pcInDomain_.extent(0) == n_)
+      return;
+    pcInDomain_ = CCField("pc_indomain", n_);
+    Kokkos::deep_copy(pcInDomain_, 0.0);
+    const C3 e = e_;
+    CCField f = pcInDomain_;
+    Kokkos::parallel_for(
+        "peclet::flow::pc_indomain",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
+                                                       {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          f((long)x + (long)y * e.x + (long)z * (long)e.x * e.y) = 1.0;
+        });
+    Kokkos::fence();
+    fillGhosts(pcInDomain_);
+    pcZeroDomainGhosts(pcInDomain_);
   }
 
   void pcUpdateThermalMask() {
@@ -10051,6 +10089,7 @@ class Solver {
   bool pcCurvDist_ = false;      // item 3: curvature-consistent distances, kappa from the cascade
   CCField pcKappa_;              // the V3 cascade's kappa on the G = 2 block (item 3)
   CCField pcMdotFit_;            // the one-sided-fit mdot, kept as a DIAGNOSTIC under item 1
+  CCField pcInDomain_;           // 1 where a cell CARRIES A ROW (inside the global domain), else 0
   bool pcMaskFresh_ = false;     // is the Dirichlet/plane geometry current for THIS colour field?
   double pcQOperator_ = 0.0;     // sum of the operator's interfacial heat (W), last build
   double pcQOrphan_ = 0.0;       // ... the part on cells with no interfacial AREA (dropped)

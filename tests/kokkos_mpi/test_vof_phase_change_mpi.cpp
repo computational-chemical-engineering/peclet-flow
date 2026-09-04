@@ -115,6 +115,17 @@ void applyP3fEnv(S& s) {
     s.setPhaseChangeCarryConserve(e[0] != '0');
   if (const char* e = std::getenv("PECLET_P3F_KAPPA"))
     s.setPhaseChangeFitCurvature(std::atof(e));
+  // WO-P3g: the second-order interfacial energy operator through the SAME hook, applied to both
+  // the reference and the distributed solver. `PECLET_P3G_ORDER=2` is the package; the three
+  // singles are the ablation. Inert (byte-identical) when unset.
+  if (const char* e = std::getenv("PECLET_P3G_ORDER"))
+    s.setPhaseChangeEnergyOrder(std::atoi(e));
+  if (const char* e = std::getenv("PECLET_P3G_OPMDOT"))
+    s.setPhaseChangeMdotOperator(e[0] != '0');
+  if (const char* e = std::getenv("PECLET_P3G_GFMORDER"))
+    s.setPhaseChangeGfmOrder(std::atoi(e));
+  if (const char* e = std::getenv("PECLET_P3G_CURVDIST"))
+    s.setPhaseChangeCurvatureDistance(e[0] != '0');
 }
 
 int main(int argc, char** argv) {

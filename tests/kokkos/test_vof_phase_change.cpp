@@ -100,6 +100,18 @@ void applyP3fEnv(S& s) {
     s.setPhaseChangeCarryConserve(e[0] != '0');
   if (const char* e = std::getenv("PECLET_P3F_KAPPA"))
     s.setPhaseChangeFitCurvature(std::atof(e));
+  // WO-P3g: the same hook for the second-order interfacial energy operator, so the planar rungs
+  // and the MPI decomposition gate can be re-taken on it without a second binary. Inert (and
+  // byte-identical) when the variables are unset. `PECLET_P3G_ORDER=2` is the package;
+  // the three `PECLET_P3G_*` singles are the ablation.
+  if (const char* e = std::getenv("PECLET_P3G_ORDER"))
+    s.setPhaseChangeEnergyOrder(std::atoi(e));
+  if (const char* e = std::getenv("PECLET_P3G_OPMDOT"))
+    s.setPhaseChangeMdotOperator(e[0] != '0');
+  if (const char* e = std::getenv("PECLET_P3G_GFMORDER"))
+    s.setPhaseChangeGfmOrder(std::atoi(e));
+  if (const char* e = std::getenv("PECLET_P3G_CURVDIST"))
+    s.setPhaseChangeCurvatureDistance(e[0] != '0');
 }
 
 // ============================================================ K1: the PLIC polygon area
