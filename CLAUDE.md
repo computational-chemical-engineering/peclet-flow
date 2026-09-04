@@ -1020,7 +1020,11 @@ droplet, a 96³ Scriven bubble):
   OLD allocation (ASan: a 184320-byte write into a 115328-byte region → `free(): invalid pointer`).
   `Solver::resizeForBlock()` (three passes: reallocate owned records, rebind aliases by NAME, resize
   scratch) now runs between `allocateBlock` and `initMpi`. **Any new registry-alias member or
-  lazily-`n_`-sized View must be added to it.** (2) *The zero halo.*
+  lazily-`n_`-sized View must be added to it** — and note that a member `CCField` here is either
+  STORAGE or an ALIAS and the two need opposite treatment (`ScalarField::kcell`/`rcp` alias
+  `pcKcell_`/`pcRcp_`; resizing them instead of re-aliasing cost `dP 3.09e-04`). The g = 3 drivers
+  behind a size-blind `ready()`/`initialized()` (`pcAreaC_`, `pcAreaMc_`, `vofEnergy_`) are re-init'd
+  by `buildVofBlock` when the block length changes. (2) *The zero halo.*
   `redistributeGridFields` moves INNER cells only and says the caller must refill the ghosts;
   nothing did, so every migrated field entered the next step with a zero halo — invisible at
   np = 1/2, worth `du = 1.01e-01` after ONE step at np = 4. `redistribute` step 6 now exchanges

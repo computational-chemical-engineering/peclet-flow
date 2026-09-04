@@ -2697,6 +2697,17 @@ class Solver {
         if (uAdv_[c].extent(0) != n_)
           uAdv_[c] = CCField("uAdv", n_);
     }
+    // The other drivers that live on THIS block and are initialised lazily: their own `ready()` /
+    // `initialized()` predicates ask "has init run", not "is it the right size", so a
+    // re-decomposition has to re-init them here or they keep the previous block's allocations
+    // while every kernel indexes them with the new `e3_`.
+    const std::size_t blockLen = (std::size_t)e3_.x * e3_.y * e3_.z;
+    if (pcAreaC_.ready() && pcAreaC_.area().extent(0) != blockLen)
+      pcAreaC_.init(nx_, ny_, nz_, kVofG);
+    if (pcAreaMc_.ready() && pcAreaMc_.area().extent(0) != blockLen)
+      pcAreaMc_.init(nx_, ny_, nz_, kVofG);
+    if (vofEnergy_.initialized() && vofEnergy_.temperature().extent(0) != blockLen)
+      vofEnergy_.init(vofAdv_, pcRcpG_, pcRcpL_);
     bindVofBlockPatch();  // rung W0: the block exchange's Views were just reallocated
   }
   // --- rung V5a (WO-Q): the cut-cell geometry of the colour block ------------------------------
@@ -9978,9 +9989,16 @@ class Solver {
       resizeIfAllocated(sc.dmask, "scalar_dmask", n);
       resizeIfAllocated(sc.dval, "scalar_dval", n);
       resizeIfAllocated(sc.gfmB, "scalar_gfmb", n);
-      resizeIfAllocated(sc.kcell, "scalar_kcell", n);
-      resizeIfAllocated(sc.rcp, "scalar_rcp", n);
       sc.stencilBuilt = false;  // the operator is a property of the block
+    }
+    // `ScalarField::kcell`/`rcp` are NOT the scalar's own storage: they ALIAS `pcKcell_`/`pcRcp_`
+    // (set at `set_phase_change_energy`). Resizing them independently would give the energy
+    // operator a different buffer from the one `pcUpdateEnergyProps` fills every step — measured
+    // as dP 3.09e-04 against the never-rebalanced control at np = 4. Re-alias instead.
+    if (pcEnergy_ && !pcTName_.empty() && hasScalar(pcTName_)) {
+      ScalarField& sc = scalarField(pcTName_);
+      sc.kcell = pcKcell_;
+      sc.rcp = pcRcp_;
     }
     // --- variable density / porous (CFD-DEM) -------------------------------------------------
     resizeIfAllocated(rho1_, "rho1", n1);

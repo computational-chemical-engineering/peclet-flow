@@ -80,8 +80,12 @@ static double bubbleAt(int b, int x, int y, int z) {
 // The whole feature surface the defect lived on: VoF ("C" + the curvature mirrors), three property
 // closures (registry targets "rho"/"mu"/"force_z" resolved by NAME), a transported scalar (its own
 // registry buffer + its own per-block operator), and optionally the block container.
-static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz,
-                      bool blocks) {
+// cfg 0: VoF + closures + scalar; 1: + the block container; 2: VoF + scalar + PHASE CHANGE with
+// the consistent-energy transport — the configuration that owns the g = 3 area drivers
+// (`pcAreaC_`/`pcAreaMc_`) and `vofEnergy_`, whose own `ready()`/`initialized()` predicates ask
+// "has init run", not "is it the right size".
+static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz, int cfg) {
+  const bool blocks = (cfg == 1), pc = (cfg == 2);
   s.setRho(RHO_L);
   s.setMu(MU_L);
   s.setDomainBc(4, 1, 0, 0, 0);
@@ -107,9 +111,15 @@ static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, in
   s.setPropertyModel("mu", ClosureKind::LinearMix, "C", "", {MU_L, MU_G - MU_L});
   s.setPropertyModel("force_z", ClosureKind::LinearMix, "C", "",
                      {-RHO_L * GRAV, -(RHO_G - RHO_L) * GRAV});
-  s.setSurfaceTension(SIGMA);
+  if (!pc)
+    s.setSurfaceTension(SIGMA);
   s.addScalar("T", 0.02, 1, 30);
   s.setField("T", t);
+  if (pc) {
+    s.enablePhaseChange(RHO_G, RHO_L, 10.0);
+    s.setPhaseChangeThermal("T", 0.5, 0.02, 0.02, 0.0);
+    s.setPhaseChangeEnergy(1.0, 2.0);
+  }
   if (blocks) {
     std::vector<std::array<int, 6>> boxes;
     for (int b = 0; b < 2; ++b) {
@@ -127,7 +137,9 @@ static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, in
     }
     s.enableVofBlocksFromField(boxes);
   }
-  s.setDt(0.25 * s.capillaryDt());
+  // cfg 2 has no surface tension, so `capillaryDt()` is infinite there: a fixed dt well inside the
+  // Weymouth-Yue cap instead.
+  s.setDt(pc ? 0.02 : 0.25 * s.capillaryDt());
 }
 
 static std::vector<double> gatherGlobal(const std::vector<double>& local, int ox, int oy, int oz,
@@ -237,14 +249,16 @@ int main(int argc, char** argv) {
       fail = 1;
     }
 
-    for (int cfg = 0; cfg < 2; ++cfg) {
+    static const char* CFGNAME[3] = {"VoF + closures + scalar",
+                                     "VoF + closures + scalar + the BLOCK container",
+                                     "VoF + scalar + PHASE CHANGE (consistent energy)"};
+    for (int cfg = 0; cfg < 3; ++cfg) {
       const bool blocks = (cfg == 1);
       if (rank == 0)
-        std::printf("  --- configuration: VoF + closures + scalar%s\n",
-                    blocks ? " + the BLOCK container" : "");
+        std::printf("  --- configuration: %s\n", CFGNAME[cfg]);
       IbmSolver sd(lnx, lny, lnz);
       sd.initMpi(D1, MPI_COMM_WORLD);
-      configure(sd, ox, oy, oz, lnx, lny, lnz, blocks);
+      configure(sd, ox, oy, oz, lnx, lny, lnz, cfg);
       for (int k = 0; k < MOVE_AT; ++k)
         sd.step();
 
@@ -315,7 +329,7 @@ int main(int argc, char** argv) {
       // own decomposition floor is 4.17e-05 with no rebalance at all and 4.20e-05 with one.
       IbmSolver sc(lnx, lny, lnz);
       sc.initMpi(D1, MPI_COMM_WORLD);
-      configure(sc, ox, oy, oz, lnx, lny, lnz, blocks);
+      configure(sc, ox, oy, oz, lnx, lny, lnz, cfg);
       for (int k = 0; k < STEPS; ++k)
         sc.step();
       std::vector<double> gc[6];
@@ -327,7 +341,7 @@ int main(int argc, char** argv) {
 
       if (rank == 0) {
         IbmSolver ref(NX, NY, NZ);
-        configure(ref, 0, 0, 0, NX, NY, NZ, blocks);
+        configure(ref, 0, 0, 0, NX, NY, NZ, cfg);
         for (int k = 0; k < STEPS; ++k)
           ref.step();
         std::vector<double> r[6] = {ref.getVof(),      ref.getVelocity(0), ref.getVelocity(1),

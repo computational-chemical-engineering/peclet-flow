@@ -635,6 +635,24 @@ already guards on `extent(0) == nx_*ny_*nz_` and skips — a freshly-zeroed one 
 instance 0 the owner of every cut cell. `set_domain_bc_profile` now keeps the user's raw
 `(nb, nc, 3)` profile so the local face-plane resampling can be redone.
 
+**1b — two more of the same, found only because the new ctest grew a PHASE-CHANGE configuration.**
+Adding it turned the gate red at `dP 3.09e-04` (against a control at 7.49e-16), and the two
+mechanisms were both "an allocation that does not follow the block":
+
+* `pcAreaC_` / `pcAreaMc_` (the g = 3 interfacial-area drivers) and `vofEnergy_` are initialised
+  lazily behind `ready()` / `initialized()`, which ask *has init run*, not *is it the right size* —
+  so after a move they kept the previous block's Views while every kernel indexed them with the new
+  `e3_`. `buildVofBlock` now re-inits each one whose length no longer matches the block (guarded, so
+  nothing moves when nothing moved).
+* `ScalarField::kcell` / `::rcp` are not the scalar's own storage: they **alias** `pcKcell_` /
+  `pcRcp_`. Resizing them in the scratch pass gave the energy operator a different buffer from the
+  one `pcUpdateEnergyProps` refills every step. They are re-aliased instead. This is the trap the
+  whole fix has to be read against: **a member CCField in this class is either storage or an alias,
+  and the two need opposite treatment** — which is why pass 2 rebinds by NAME rather than resizing.
+
+With both, the phase-change configuration lands exactly on its control:
+`dC 1.11e-16|1.11e-16  dP 7.49e-16|7.49e-16  dT 5.00e-16|5.00e-16` at np = 4.
+
 ### Root cause 2 — the migration never refilled the ghosts, and it is worth 1e-1 in u
 
 Found only because the new ctest measures the right thing. `core`'s
@@ -669,9 +687,13 @@ finishes, and it produces the "after" column WO-V9 could not:
 | plain ORB | 3788 / 1718 / 2204 / 773 | 1.7862 | 1.7778 | 279.6 |
 | interface-weighted (W = 8) | 2023 / 2168 / 2259 / 2229 | **1.0411** | 1.0000 | **215.0** |
 
-**−23.2 % on the step**, pressure 34→35 of 600 (no cap touched, rule 3b). ASan: **0 errors** on the
-32³ np = 4 VoF and scalar reproducers (`ASAN_OPTIONS=detect_leaks=0`, exit 0, no Kokkos-teardown
-warning with `del solver`).
+**−23.2 % on the step**, pressure 34→35 of 600 (no cap touched, rule 3b) — measured on an
+otherwise idle host; a repeat while the ctest batteries were running reads 505.0 → 307.0 ms/step
+(−39.2 %) with the identical imbalance figures, i.e. contention amplifies what the imbalance costs.
+ASan: **0 errors, exit 0** on the 32³ np = 4 reproducers (bare / `+ add_scalar` / `+ enable_vof`)
+AND on the whole new ctest compiled with `-fsanitize=address` (all three configurations, np = 4),
+`ASAN_OPTIONS=detect_leaks=0`; no Kokkos-teardown warning once the Python driver does `del solver`
+before exit.
 
 **(b) + (d) `tests/kokkos_mpi` and `tests/kokkos` bit-identical.** `host-openmp`, both trees built
 and run side by side (`origin/main` in `../flow-rebal-base`), `ctest -V`, compared per test after
@@ -684,24 +706,27 @@ stripping only build paths and timings:
   last two digits of the hydrodynamic force move **between two runs of the unmodified baseline
   binary** (`F_ref` = −0.11367215421887425 and −0.11367215421887442 on consecutive runs) — a
   pre-existing run-to-run OpenMP reduction-order nondeterminism, unrelated to this branch.
-* `nvidia-cuda` `tests/kokkos`: **34/34 pass**.
+* `nvidia-cuda` `tests/kokkos`: **34/34 pass**; `nvidia-cuda` `tests/kokkos_mpi` VoF +
+  redistribute subset (`-R "vof_.*_mpi|redistribute_mpi"`): **46/46 pass**.
 
 **(c) The new ctest `vof_redistribute_mpi` (np 1/2/4, both backends).** 24×24×48, two bubbles on the
 long axis, VoF + surface tension + three property closures + a transported scalar, in two
-configurations (with and without the block container), rebalanced onto a weight field that moves
+configurations (plain; + the block container; + phase change with consistent-energy transport,
+which replaces the surface tension), rebalanced onto a weight field that moves
 the partition (at np = 4 from a z-split into a 2×1×2 split — the test FAILS if the two partitions
 coincide, so it can never pass vacuously). Three gates:
 
 * **R1 the move is exact data movement**: C, u, v, w, P and T gathered globally immediately before
   and after the rebalance — **0 differing cells, max|d| = 0.000e+00** on all six fields, at
-  np = 1/2/4, both backends, both configurations. R3: the two markers' volumes across the move,
-  **max|dV| = 0.000e+00**.
+  np = 1/2/4, both backends, all THREE configurations. R3: the two markers' volumes across the
+  move, **max|dV| = 0.000e+00**.
 * **R2 the run afterwards is still the same solver**, calibrated against a **never-rebalanced
   control** in the same binary rather than an absolute number (the scalar's fixed-sweep RB-GS is
   decomposition-dependent by construction, so an absolute tolerance would have measured the
   decomposition and blamed the redistribute). host np = 4, 12 steps, rebalanced | control:
   `dC 7.77e-16|7.77e-16  du 6.44e-16|6.36e-16  dP 3.66e-15|3.66e-15  dT 4.17e-05|4.17e-05`.
-  np = 1 (where the control IS the reference) is bit-exact to 1e-13: `dT 5.55e-17`.
+  np = 1 (where the control IS the reference) is bit-exact to 1e-13: `dT 5.55e-17`. The
+  phase-change configuration at np = 4: `dC 1.11e-16|1.11e-16  dP 7.49e-16|7.49e-16`.
 
 **(e) The single-phase regression: +0.00 %.** `tests/regression/sdflow_regression.py` on the CUDA
 build, all three cases, all 13 grids: **every metric +0.00 %, every pressure-iteration total
