@@ -1846,6 +1846,15 @@ static void bind_solver(nb::module_& m, const char* name) {
           "two-point row's -5 % flux deficit and the overwrite's -0.7...-4.3 % enthalpy "
           "destruction, so repairing any ONE alone makes the gate worse.")
       .def(
+          "set_phase_change_deposit_fallback",
+          [](S& s, bool on) { s.setPhaseChangeDepositFallback(on); }, nb::arg("on") = true,
+          "WO-P3f open item 6 / WO-P3g (default from PECLET_PC_DEPOSIT_FALLBACK, i.e. OFF): give "
+          "an interfacial cell whose two along-the-normal deposit candidates are BOTH still "
+          "interfacial a target from the 5^3 box instead of leaving the divergence source in "
+          "place. A cell that keeps its source carries div(open u) = S on its own faces, so "
+          "Weymouth-Yue advects the colour with a field that is not the liquid velocity -- read it "
+          "out with `phase_change_diagnostics()['band_div']` and the 'fallback_cells' count.")
+      .def(
           "set_phase_change_mdot_operator",
           [](S& s, bool on) { s.setPhaseChangeMdotOperator(on); }, nb::arg("on") = true,
           "WO-P3g item 1 (default OFF): take mdot from the energy operator's own interfacial flux "

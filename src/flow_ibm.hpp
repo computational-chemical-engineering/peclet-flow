@@ -8118,6 +8118,20 @@ class Solver {
     pcMaskFresh_ = false;  // the row geometry has to be rebuilt with (or without) the curvature
   }
   bool phaseChangeCurvatureDistance() const { return pcCurvDist_; }
+  /// **WO-P3f open item 6 / WO-P3g** — the divergence source's 5^3 fallback target, as a setter
+  /// (it was only reachable through `PECLET_PC_DEPOSIT_FALLBACK`). An interfacial cell whose two
+  /// along-the-normal candidates (`round(k n)`, k = 1, 2) are BOTH still interfacial keeps its
+  /// source, and then carries `div(open u) = S` on its OWN faces — i.e. Weymouth-Yue advects the
+  /// colour with a field that is not the liquid velocity, which
+  /// `phase_change_diagnostics()['band_div']` reads out directly. With this on, those cells fall
+  /// back to the best cell of the `+n` half of the 5^3 box (Malan's collinearity weight). The
+  /// order matters: making that search the PRIMARY rule DIVERGES the Scriven bubble (WO-P23), so
+  /// it only ever fills holes.
+  void setPhaseChangeDepositFallback(bool on) {
+    requirePhaseChange("set_phase_change_deposit_fallback");
+    pcDepositFallback_ = on;
+  }
+  bool phaseChangeDepositFallback() const { return pcDepositFallback_; }
   double phaseChangeQOperator() const { return pcQOperator_; }
   double phaseChangeQOrphan() const { return pcQOrphan_; }
   double phaseChangeCarryDeposited() const { return pcCarryDeposited_; }

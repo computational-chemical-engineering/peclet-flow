@@ -158,7 +158,7 @@ def sphere_colour(n, cx, cy, cz, R, sub=4):
 
 
 
-def apply_p3g(s, order=1, op_mdot=None, gfm_order=None, curv_dist=None, carry=None):
+def apply_p3g(s, order=1, op_mdot=None, gfm_order=None, curv_dist=None, carry=None, deposit=None):
     """WO-P3g: the second-order interfacial energy operator, as a package and as an ablation.
 
     `order = 2` turns on all four pieces (operator-flux mdot, the Gibou-Fedkiw three-point row,
@@ -177,6 +177,8 @@ def apply_p3g(s, order=1, op_mdot=None, gfm_order=None, curv_dist=None, carry=No
         s.set_phase_change_curvature_distance(bool(curv_dist))
     if carry is not None:
         s.set_phase_change_carry_conserve(bool(carry))
+    if deposit is not None:
+        s.set_phase_change_deposit_fallback(bool(deposit))
 
 def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, consistent=True,
         quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True,
@@ -253,6 +255,8 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     # areas of a freshly sub-sampled sphere are uneven), so a predicted dt trips the Weymouth-Yue
     # cap. Predict, then correct from `vof_last_courant()`, and halve on a rejected step.
     rows = []
+    vol_prev = None
+    vol_ratio = []
     qprev = None          # WO-P3g gate (c): the operator flux the LAST energy solve drew
     worst_id = 0.0        # ... the worst |E_lat - q_op| / E_lat over the run (by construction)
     worst_lag = 0.0       # ... and the worst |q_op + q_solve(n-1)| / q_op (the one-step lag)
@@ -367,6 +371,19 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
                   f"{100*dovn/e_lat if e_lat else float('nan'):+7.3f} % of E_lat)  |  "
                   f"L->I {b['n_enter_liquid']:5d} G->I {b['n_enter_gas']:5d} "
                   f"I->L {b['n_leave_liquid']:5d} I->G {b['n_leave_gas']:5d}  masked {b['n_masked']:6d}")
+        # WO-P3g audit: does the COLOUR FIELD deliver the volume the regression BOOKED?
+        # The gas volume can only change by the regression (sum dV, liquid removed) plus the net
+        # liquid flux through the outflow faces, so `dGas_measured / dGas_booked` separates a flux
+        # error (the books are wrong) from a transport error (the books are right and the field
+        # does not follow). `dGas_booked = removed_volume * rho_l/rho_g` -- the regression removes
+        # liquid at mdot A dt/rho_l and the divergence source expands the vapour to
+        # mdot A dt/rho_g.
+        gas_now = float(n) ** 3 - s.get_vof().sum()
+        if vol_prev is not None:
+            booked = dg['removed_volume'] * rho_l / rho_v
+            if booked != 0.0:
+                vol_ratio.append((gas_now - vol_prev) / booked)
+        vol_prev = gas_now
         rows.append((tcur, rnum, rex, it, dg['mdot_mean'], mex, meff, arel,
                      dg['interface_cells'], delta, r_a, dg['deficit_cells'],
                      dg['redistributed'], arel_end, area_end))
@@ -427,6 +444,11 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
               f"({100*(beta_eff-beta)/beta:+.3f} %), implied time offset {t_off:+.5f} of t0 "
               f"{t0:.5f} ({100*t_off/t0:+.2f} %), radius offset at the end {R_off:+.4f} cells")
         print(f"      max |dR|/R over the LAST HALF = {100*max(errs):.3f} %   [gate 1 %]")
+        if vol_ratio:
+            _v = np.array(vol_ratio[len(vol_ratio) // 2:])
+            print(f"      VOLUME AUDIT d(gas)/d(gas booked by the regression), last half: mean "
+                  f"{_v.mean():.6f}, min {_v.min():.6f}, max {_v.max():.6f}  "
+                  f"[1 = the colour field delivers exactly what mdot booked]")
         if p3g is not None and budget:
             print(f"      WO-P3g gate (c): worst |E_lat - q_op| / E_lat = {worst_id:.3e} "
                   f"[gate 1e-10], worst |q_op(n) + q_solve(n-1)| / q_op = {worst_lag:.3e};  "
@@ -1189,12 +1211,16 @@ def main():
                     help="WO-P3g item 3 override (0/1): curvature-consistent distances")
     ap.add_argument("--carry-opt", type=int, default=None,
                     help="WO-P3g item 4 override (0/1): the conserving Dirichlet overwrite")
+    ap.add_argument("--deposit-fallback", type=int, default=None,
+                    help="WO-P3f open item 6 (0/1): give an interfacial cell whose two "
+                         "along-the-normal deposit candidates are both interfacial a target from "
+                         "the 5^3 box, instead of leaving the divergence source in place")
     a = ap.parse_args()
     p3g = None
     if a.energy_order != 1 or a.op_mdot is not None or a.gfm_order is not None or \
-            a.curv_dist is not None or a.carry_opt is not None:
+            a.curv_dist is not None or a.carry_opt is not None or a.deposit_fallback is not None:
         p3g = dict(order=a.energy_order, op_mdot=a.op_mdot, gfm_order=a.gfm_order,
-                   curv_dist=a.curv_dist, carry=a.carry_opt)
+                   curv_dist=a.curv_dist, carry=a.carry_opt, deposit=a.deposit_fallback)
     if a.area_advect:
         area_advect(a.n, R=a.advect_r, sub=a.area_sub, steps=a.advect_steps, cfl=a.cfl,
                     amp=a.advect_amp)
