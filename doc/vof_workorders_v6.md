@@ -856,6 +856,61 @@ k*_inf = 0.017184). `=== regression: PASS ===`.
    adaptive-dt case, not the rebalance. The ASan verdict above therefore rests on the 32³
    reproducers, which run clean end to end.
 
+### 4. What the two codes cost, measured — and the number is not flattering to the GPU
+
+Both at their OWN operating point, both on Snellius, both to the same 20 eddy turnovers
+(`h/u_tau = 23.568` time units each, so `t_end = 471.35`):
+
+| | TBFsolver | peclet block VoF |
+|---|---|---|
+| hardware | 64 genoa cores (1 node, `px 8, py 1, pz 8`) | 1 H100 |
+| grid | 192 x 160 x 96 = 2.95 M cells (anisotropic, `D+ = 2.08/1.59`) | 128 x 80 x 64 = 0.66 M cells (isotropic, `D+ = 3.18`) |
+| dt | adaptive at `CFL 0.1`, ~1.7e-3 | adaptive at `0.4 x min(CFL, capillary)`, ~3.3e-3 |
+| steps to 20 turnovers | ~280 000 | ~143 000 |
+| measured | **0.069 s/step** (VOF 0.016, U 0.019, P 0.011, stats 0.008) | see the run below |
+| 20 turnovers | **~6.0 h wall, ~430 core-hours** | see the run below |
+
+TBFsolver's rate is **45.8 s per unit of `t`**, flat over the first 24 units (the probe and the
+production run agree). Its Poisson solve is a constant-coefficient FFT with the Dodd–Ferrante
+splitting and its continuity error is 3e-16 per step — it is a *cheaper equation*, not just a
+different implementation, and that has to be said whenever the two step times are put side by side:
+peclet solves a variable-coefficient cut-cell multigrid projection that TBFsolver's case does not
+need. The other structural difference is in peclet's favour — a 2x larger `dt`, because the
+Weymouth–Yue + capillary limiter is less restrictive here than TBFsolver's global CFL 0.1.
+
+
+### 5. How the campaign is laid out on Snellius, and how to collect it
+
+Everything is in `tests/study/channel_18/` on branch `vof-w3`:
+
+| file | what |
+|---|---|
+| `run_channel_18.py` | the driver: WO-W12's transcription + checkpoint/restart + cross-chunk statistics + a wall-clock stop. `--quick` is the plumbing mode, `--steps 0` the state round-trip diagnostic |
+| `snellius_build.sh` | the CUDA (HOPPER90) build, on the CPU partition — no GPU is needed to compile |
+| `snellius_validate.sh` | 1 H100, ≤30 min: `--quick` plus the chunked-vs-continuous restart gate |
+| `snellius_channel_18.sh` | 1 H100 per chunk (`--gpus-per-node=1`; Snellius bills per ALLOCATED GPU and this case fits one), positional args `<tag> <wall_s> <steps_cap> <turnovers>` |
+| `tbf_profiles.py` | TBFsolver's ASCII statistics -> the same NPZ keys |
+| `plot_channel_18.py`, `collect.sh` | the overlay, and the one command that pulls both codes' results back |
+
+Remote layout (this session's OWN directories — the shared `$SUITE/flow` tree and its
+`build_cuda_mpi` were never touched):
+
+```
+$SUITE/flow-w3            branch vof-w3, built into build_cuda   ($SUITE = /projects/0/prjs1022/peclet/suite)
+$SUITE/core-w3            core 0a7605d, via -DPECLET_SIBLING_PECLET_CORE
+$SUITE/flow-w3/tests/study/channel_18/{tbf_ic/,runs/prod/}       IC + checkpoints + stats.npz + chunks.jsonl
+/projects/0/prjs1022/peclet/TBFsolver/{src,run_prod}
+```
+
+The chunks chain with `--dependency=afterok`; each resumes `runs/prod/ckpt.npz`, and when the
+turnover target is reached the driver writes `ckpt.npz.done`, which every later chunk in the chain
+checks and exits on — so the chain can be over-provisioned safely. A failed step writes
+`ckpt.npz.failed`, leaves the last checkpoint untouched and fails the chunk, which stops the chain
+rather than marching on. `runs/prod/chunks.jsonl` is one JSON line per chunk with `ms_per_step`,
+`max_pressure_iterations` against the 800 cap (**rule 3b: a capped chunk is not a data point**),
+`max_open_divergence`, the marker volume spread and the sample count.
+
+
 ## WO-V9 findings — the VoF performance profile, and the one lever the numbers justify — 2026-09-04, Opus
 
 Branch `vof-v9`, worktree `../flow-v9`, from `origin/main` at `40fc1b7`.
