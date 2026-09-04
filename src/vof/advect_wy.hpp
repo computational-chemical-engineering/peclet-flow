@@ -452,7 +452,15 @@ class WyAdvector {
 
   /// Band-fill branch census over the INNER region (`VofWettingBranch` counts) and the mean
   /// APPARENT contact angle (degrees) over the cells that took the theta branch.
+  /// `ghost` widens the counted region by that many ghost layers (default 0 = the INNER region,
+  /// which is where an immersed SDF solid's band lives). A wetting DOMAIN wall's band is entirely
+  /// in the GHOST layers -- the wall sits ON the boundary face -- so the solver passes `g` there,
+  /// or the census reads 0 and is exactly the tell the user is looking for (ISSUES sweep item 3).
   void wettingCensus(long counts[kVofWetCount], double& meanAppDeg, long& nApp) const {
+    wettingCensusGhost(counts, meanAppDeg, nApp, 0);
+  }
+  void wettingCensusGhost(long counts[kVofWetCount], double& meanAppDeg, long& nApp,
+                          int ghost) const {
     for (int b = 0; b < kVofWetCount; ++b)
       counts[b] = 0;
     meanAppDeg = 0.0;
@@ -464,7 +472,8 @@ class WyAdvector {
     UCField wb = wetB_, kk = kind_;
     SField ap = appB_;
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
-    MD pol(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z});
+    const int gw = ghost < 0 ? 0 : (ghost > g ? g : ghost);
+    MD pol(SExec(), {g - gw, g - gw, g - gw}, {g + n.x + gw, g + n.y + gw, g + n.z + gw});
     for (int b = 0; b < kVofWetCount; ++b) {
       long acc = 0;
       const unsigned char bb = static_cast<unsigned char>(b);
