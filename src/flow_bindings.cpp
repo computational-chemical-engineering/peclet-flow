@@ -947,7 +947,11 @@ static void bind_solver(nb::module_& m, const char* name) {
           "0 = the cell fluid fraction eps (4^3-subsampled, a multiple of 1/64), 1/2/3 = the "
           "openness of the +x/+y/+z face of each cell (the ADVECTOR's high-face convention, one "
           "cell shifted from the solver's ox/oy/oz), 4 = the classification (1 = SOLID, i.e. "
-          "eps == 0 AND all six faces closed).")
+          "eps == 0 AND all six faces closed).\n\n"
+          "On an ALL-FLUID solver (set_pressure_geometry, or no cut-cell pressure operator) there "
+          "is no geometry block and this returns the TRIVIAL geometry the V1 transport kernels "
+          "actually execute: eps = 1, openness = 1, classification = 0. It used to raise, which "
+          "meant one diagnostic could not serve a packed scene and its all-fluid control.")
       .def(
           "set_contact_angle", [](S& s, double deg) { s.setContactAngle(deg); }, nb::arg("theta"),
           "Rung V5b (WO-S). Prescribe a STATIC contact angle, in DEGREES, measured THROUGH THE "

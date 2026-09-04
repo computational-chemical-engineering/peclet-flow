@@ -6405,8 +6405,19 @@ class Solver {
   // fraction eps, 1/2/3 = the openness of the +x/+y/+z face of each cell (the ADVECTOR's high-face
   // convention), 4 = the cell classification (1 = solid). All must be bitwise across np.
   std::vector<double> getVofGeometry(int which) {
-    if (!vofEnabled_ || !vofAdv_.hasGeometry())
-      throw std::runtime_error("vof_geometry: no cut-cell geometry (needs set_solid + enable_vof)");
+    if (!vofEnabled_)
+      throw std::runtime_error("vof_geometry: VoF is not enabled (needs enable_vof)");
+    if (which < 0 || which > 4)
+      throw std::runtime_error("vof_geometry: `which` must be 0..4");
+    // ISSUES sweep item 4. An ALL-FLUID VoF solver has no cut-cell geometry block, but the
+    // geometry it would carry is not undefined -- it is the trivial one, and it is exactly what
+    // the V1 transport kernels execute: every cell fully fluid (eps = 1), every face fully open
+    // (o = 1), no solid (kind = 0). Returning it lets ONE diagnostic --
+    // `vof_geometry(0) * (1 - get_vof())` for the gas volume, say -- serve a packed scene and its
+    // all-fluid control, instead of forcing the caller to branch on `vof_has_geometry()` and
+    // synthesise the ones itself (which is what examples/bubble-through-packing had to do).
+    if (!vofAdv_.hasGeometry())
+      return std::vector<double>((std::size_t)nx_ * ny_ * nz_, which == 4 ? 0.0 : 1.0);
     CCField t("vofGeom", n_);
     CCConst src;
     if (which == 0)
