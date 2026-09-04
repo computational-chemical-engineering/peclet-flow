@@ -931,6 +931,24 @@ steady state, and TBFsolver ships NO reference statistics for the case** (60 tra
 profiles, only a qualitative contour in `user_guide.pdf`) — so these are our first datum and the
 cross-code comparison needs TBFsolver built and run.
 
+**Checkpoint/restart of the block container (rung W3).** `vof_block_colour(id)` returns one
+marker's OWN inner colour as a Fortran-order `(nx,ny,nz)` array over its block box
+(`vof_block_stats()['lo'/'hi']`), and `enable_vof_blocks_from_colours(boxes, colours)` restarts the
+container from those. That colour is a block's ONLY state, so `{box, colour}` per marker is a
+COMPLETE checkpoint — and the only exact one: `enable_vof_blocks_from_field` gathers each marker out
+of the UNION field and clips it to the seed extent, so two markers in contact each take a slice of
+the other. **A restart must also carry two things that are easy to miss**, both measured on the
+`channel_18` gate (a chunked run against the continuous one, host-openmp, which is bit-reproducible):
+the **accumulated pressure** `P` (the incremental scheme's own state — `get_field("p")` /
+`set_field("p")`, restored AFTER `set_pressure_geometry`, which zeroes it when it rebuilds the
+operator) and the **Weymouth–Yue sweep-permutation counter** (the order is `kWySweepPerm[n % 6]` and
+the block container keeps its OWN counter, one increment per marker advection, i.e. the step index;
+`set_vof_step_parity(n)` now sets both it and the solver's). Without the parity the colour differs
+by **6.2e-4 after ONE step off a bitwise-identical velocity**; with both, a chunked run is
+**bitwise** the continuous one in `u, v, w, p`, every marker's colour and `t`. The chunked
+`channel_18` driver is `tests/study/channel_18/run_channel_18.py` (Snellius sbatch + collection +
+plotting beside it).
+
 **Scope of the block container:** ALL-FLUID (an immersed solid still raises — the cut-cell block is
 a later rung), STAGGERED only for the block CSF, no momentum consistency (so, like V2a, rated to
 ratio ≈ 100 with motion), and the film between two markers is resolved only down to the grid: at
