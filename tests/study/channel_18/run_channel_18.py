@@ -77,6 +77,7 @@ SAMPLE = int(arg("--sample", 10, int))
 CKEVERY = int(arg("--ckpt-every", 2000, int))
 DTEVERY = int(arg("--dt-every", 1, int))
 DTSAFE = float(arg("--dt-safety", 0.25))
+PRINTEVERY = int(arg("--print-every", 200, int))
 QUICK = "--quick" in sys.argv
 
 if QUICK:                                    # build/plumbing validation, not physics
@@ -483,12 +484,24 @@ def main():
         maxdiv = max(maxdiv, s.max_open_divergence())
         if t * UTAU >= STATS_START and (i % SAMPLE == 0):
             sample(acc, s, t)
-        if i % 200 == 0:
+        if i % PRINTEVERY == 0:
             el = time.time() - wall0
             D = s.vof_diagnostics()
             cmx = max(float(D.get("max", 0.0)), float(D.get("max_fluid", 0.0)))
+            umx = max(np.abs(s.get_u()).max(), np.abs(s.get_v()).max(), np.abs(s.get_w()).max())
+            st = s.vof_block_stats()
+            cen = np.array([b["centroid"] for b in st])
+            box = np.array([NX, NY, NZ], dtype=float)
+            dmin = 1e30
+            for a in range(len(cen)):
+                for b2 in range(a + 1, len(cen)):
+                    q = cen[a] - cen[b2]
+                    q[0] -= box[0] * round(q[0] / box[0])
+                    q[2] -= box[2] * round(q[2] / box[2])
+                    dmin = min(dmin, float(np.hypot(np.hypot(q[0], q[1]), q[2])))
             print(f"    step {i:7d}  t u_tau/h = {t*UTAU:8.4f}  dt = {dt:.3e}  "
                   f"U_b = {s.get_u().mean()/S:.4f}  press {it:3d}/800  maxC {cmx:.6f}  "
+                  f"max|u| {umx:8.2f}  dmin {dmin:6.2f}  "
                   f"{1000*el/max(stepped,1):.0f} ms/step  ({el:.0f} s)", flush=True)
             # The colour leaving [0,1] is the Weymouth-Yue boundedness cap being exceeded, and it
             # is QUIET: volume still telescopes exactly, so nothing else notices until a density
