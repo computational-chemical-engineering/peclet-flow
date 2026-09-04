@@ -2269,6 +2269,33 @@ class Solver {
     // divergence-free velocity (properties frozen over the step). No-op (byte-identical) when no
     // scalar is registered.
     advanceScalars();
+    // The UNSTABLE outflow regime, detected rather than guessed (peclet-examples ISSUES.md
+    // "Inflow/outflow diverges to NaN"): reversed flow on an outflow face with the backflow
+    // stabilization switched OFF. Checked only in that configuration (beta <= 0 is not the
+    // default), once per solver; see outflowBackflow() for the mechanism.
+    if (hasOutflow_ && backflowBeta_ <= 0.0 && !backflowWarned_) {
+      const OutflowBackflow ob = outflowBackflow();
+      if (ob.reversed > 0) {
+        backflowWarned_ = true;
+        int r = 0;
+#ifdef PECLET_FLOW_MPI
+        if (distributed_)
+          MPI_Comm_rank(comm_, &r);
+#endif
+        if (r == 0)
+          std::fprintf(stderr,
+                       "peclet::flow WARNING: reversed flow on an OUTFLOW face (max u.n = -%.3e, "
+                       "%.1f%% of the outlet area, kinetic-energy influx %.3e) with the backflow "
+                       "stabilization OFF. The zero-gradient outflow is only conditionally "
+                       "energy-stable under reversal (the re-entering flux carries the boundary "
+                       "cell's own velocity back in with no sink); this is the configuration in "
+                       "which the literature's backflow divergence occurs. Call "
+                       "set_backflow_stabilization(beta) (default 0.2; beta >= 0.5 is the "
+                       "unconditional bound), or lengthen the domain so the recirculation closes "
+                       "before the outlet. Monitor with outflow_backflow().\n",
+                       ob.maxReverse, 100.0 * ob.fraction, ob.energyInflux);
+      }
+    }
     tStep_ = phaseTick() - ts0;
     if (vofTiming_) {  // WO-V9: the coarse phases, summed over the profiled window
       tStepSum_ += tStep_;
@@ -2279,6 +2306,85 @@ class Solver {
     }
   }
 
+  /// OUTFLOW REVERSAL CENSUS -- the regime in which the zero-gradient (do-nothing) outflow is
+  /// only conditionally energy-stable. Over every rank-owned outflow face plane (the boundary
+  /// normal-velocity plane; the tangential components are the boundary-adjacent inner cell's):
+  ///   maxReverse   = max(0, -u.n)                        the largest reversed normal velocity,
+  ///   fraction     = reversed faces / outlet faces,
+  ///   energyInflux = sum_reversed rho |u.n| |u|^2 / 2    (per unit area; h = 1).
+  /// The last is the kinetic-energy production the do-nothing outlet admits where the flow
+  /// re-enters (Esmaily-Moghadam, Bazilevs & Marsden 2011): a reversed face advects the ghost
+  /// value -- with the zero-gradient ghost, the boundary cell's own -- back in, so the
+  /// outlet-adjacent momentum row has an advective source with no sink. The backflow
+  /// stabilization (applyBackflowStab) adds beta rho |u.n| to that row's diagonal, i.e. removes
+  /// beta rho |u.n| |u_n|^2 of it; the analysis' unconditional bound is beta >= 1/2. Measured
+  /// on the BFS whose bubble reaches the outlet (S = 16, Re_S = 800, x_r = L, 6000 steps): a
+  /// transient excursion of max|u| to 1.28x the inlet peak ON the outlet column, bounded and
+  /// finite with beta = 0 (1.909) and with the default 0.2 (1.897) alike -- so at that Re the
+  /// stabilization does not decide boundedness; the census is what tells you the regime is
+  /// active. Distributed: reduced over the communicator (every rank must call it).
+  struct OutflowBackflow {
+    double maxReverse = 0.0, fraction = 0.0, energyInflux = 0.0;
+    long reversed = 0, total = 0;
+  };
+  OutflowBackflow outflowBackflow() {
+    OutflowBackflow ob;
+    if (!hasOutflow_)
+      return ob;
+    CCExec space;
+    const C3 e = e_;
+    const int dims[3] = {e.x, e.y, e.z};
+    const long st[3] = {1, e.x, (long)e.x * e.y};
+    const double rho = rho_;
+    for (int a = 0; a < 3; ++a)
+      for (int s = 0; s < 2; ++s) {
+        if (bc_[2 * a + s] != 3 || !touchesGlobalFace(2 * a + s))
+          continue;
+        const int b = (a + 1) % 3, c = (a + 2) % 3;
+        const long sa = st[a], sb = st[b], sc = st[c];
+        const int bf = (s == 0) ? G : (dims[a] - G);        // the boundary normal-velocity plane
+        const int bic = (s == 0) ? G : (dims[a] - G - 1);   // the outlet-adjacent inner cell
+        const double sgn = (s == 0) ? 1.0 : -1.0;           // u.n < 0 <-> sgn*u > 0
+        CCConst un = Grid::collocated ? CCConst(a == 0 ? uf_ : a == 1 ? vf_ : wf_) : CCConst(C[a].u);
+        CCConst ub = CCConst(C[b].u), uc = CCConst(C[c].u);
+        using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+        double mx = 0.0, en = 0.0;
+        long nrev = 0;
+        Kokkos::parallel_reduce(
+            "peclet::flow::backflow_census", MD(space, {G, G}, {dims[b] - G, dims[c] - G}),
+            KOKKOS_LAMBDA(int p0, int p1, double& lmx, double& len, long& lnr) {
+              const long base = (long)p0 * sb + (long)p1 * sc;
+              const double back = sgn * un(base + (long)bf * sa);
+              if (back > 0.0) {
+                const long ic = base + (long)bic * sa;
+                const double tb = ub(ic), tc = uc(ic);
+                lmx = Kokkos::fmax(lmx, back);
+                len += rho * back * 0.5 * (back * back + tb * tb + tc * tc);
+                lnr += 1;
+              }
+            },
+            Kokkos::Max<double>(mx), Kokkos::Sum<double>(en), Kokkos::Sum<long>(nrev));
+        ob.maxReverse = std::max(ob.maxReverse, mx);
+        ob.energyInflux += en;
+        ob.reversed += nrev;
+        ob.total += (long)(dims[b] - 2 * G) * (dims[c] - 2 * G);
+      }
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      double d[2] = {ob.energyInflux, 0.0}, dg[2];
+      MPI_Allreduce(&ob.maxReverse, &d[1], 1, MPI_DOUBLE, MPI_MAX, comm_);
+      MPI_Allreduce(&d[0], &dg[0], 1, MPI_DOUBLE, MPI_SUM, comm_);
+      long l[2] = {ob.reversed, ob.total}, lg[2];
+      MPI_Allreduce(l, lg, 2, MPI_LONG, MPI_SUM, comm_);
+      ob.maxReverse = d[1];
+      ob.energyInflux = dg[0];
+      ob.reversed = lg[0];
+      ob.total = lg[1];
+    }
+#endif
+    ob.fraction = ob.total > 0 ? (double)ob.reversed / (double)ob.total : 0.0;
+    return ob;
+  }
   // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
   std::vector<double> getVelocity(int c) { return gatherInner(C[c].u); }
   /// Write a component's inner velocity from a host vector (x-fastest, inner region) and
@@ -10706,6 +10812,7 @@ class Solver {
   bool hasSolid_ =
       false;  // an immersed solid is present (any inner SDF < 0) -- with domain BCs, the
               // momentum solve must use the cut-cell IBM stencil, not the all-fluid fold
+  bool backflowWarned_ = false;  // the reversed-outflow-without-stabilization warning, once
   double backflowBeta_ =
       0.2;  // outflow backflow-stabilization coefficient (0 = off; inert unless the
             // outflow reverses, so purely-outgoing outlets stay byte-identical)

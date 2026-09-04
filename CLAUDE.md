@@ -1777,6 +1777,26 @@ roles: the **operator** openness α (pressure matrix) is 0 at walls + inflow (Ne
 (divergence/correction) stays open at inflow + outflow so their flux is counted. Outflow velocity is
 zero-gradient (∂/∂n=0); the projection corrects the outflow face so mass leaves.
 
+**Outlet reversal is the one conditionally-stable open-boundary regime, and it is detected
+(2026-09-04).** The zero-gradient outflow re-enters the boundary cell's own velocity wherever
+`u·n < 0`, an advective source with no sink (the do-nothing outlet's energy production
+Σ ρ (u·n)₋ |u|²/2, Esmaily-Moghadam, Bazilevs & Marsden 2011); the backflow stabilization
+(`set_backflow_stabilization`, default β = 0.2, `applyBackflowStab`) adds β ρ |u·n| to that
+row's diagonal, β ≥ ½ being the unconditional bound. Measured on today's main (OpenMP + CUDA):
+the peclet-examples ISSUES.md "diverges to NaN" configurations — the uniform-inlet channel
+and the S = 16 BFS at dt 0.4 / 0.8 / 1.6 (Re_S 100), Re_S 200 and 800 — are all finite and
+steady over 6000 steps, the Re_S 200 run bit-identical with and without the stabilization (no
+reversal to act on), and the only energy-injecting case is Re_S 800, where the bubble reaches
+the outlet (x_r = L) and the outlet reverses over part of its height: a transient excursion of
+max|u| to 1.28× the inlet peak ON the outlet column — **with β = 0 (1.909) and with the default
+β = 0.2 (1.897) alike**, both bounded, both finite and steady-ish over 6000 steps (KE bounded,
+u_out,min −0.61 / −0.58 at the end). So no divergence was reproduced anywhere on main; the
+entry's NaN belonged to the explicit advection the domain-BC path ran before flow `4e53522`.
+What remains is the literature's conditionally-stable regime, now *instrumented* rather than
+guessed at: `outflow_backflow()` returns the census (max reversed normal velocity, reversed
+area fraction, energy influx; collective under MPI) and `step()` warns once on stderr when
+reversal appears with β = 0. Gate: `tests/kokkos/test_outflow_backflow.cpp`.
+
 **Non-uniform inlets:** `set_domain_bc_profile(face, profile[Nb,Nc,3])` prescribes a per-position inlet
 velocity over the face's perpendicular plane (sets the face to inflow). Used for a parabolic channel inlet
 or the **backward-facing step**, whose step is realized purely as the inlet condition — the developed

@@ -171,6 +171,14 @@ target_include_directories(test_freeslip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../
 target_link_libraries(test_freeslip PRIVATE Kokkos::kokkos)
 add_test(NAME freeslip COMMAND test_freeslip)
 
+# Outflow reversal census (outflow_backflow) -- the detector of the conditionally-stable
+# zero-gradient-outflow regime (reversed outlet with the backflow stabilization off).
+add_executable(test_outflow_backflow test_outflow_backflow.cpp)
+target_include_directories(test_outflow_backflow PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_outflow_backflow PRIVATE Kokkos::kokkos)
+add_test(NAME outflow_backflow COMMAND test_outflow_backflow)
+
 # VoF rung V2a (WO-J): the colour field wired into the NS solver — bridge, hydrostatic acid test
 # through C, conservation, C==const reductions, harmonic rho_f ablation, interface-local CFL.
 # PECLET_VOF_TWOPHASE_LONG=1 runs the conservation gate for 1000 steps instead of 200.

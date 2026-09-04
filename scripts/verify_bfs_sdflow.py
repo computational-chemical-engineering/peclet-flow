@@ -56,11 +56,19 @@ def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.2, max_steps=24000):
     Returns None off root.
     """
     # dt=0.2 (was 0.4): the step-lip shear layer is stiff for the explicit (SOU) deferred-correction
-    # advection -- at dt=0.4 the anti-diffusive correction is marginally unstable (a roundoff-sensitive
-    # transient divergence spike that can tip to NaN, worse on finer grids). Halving dt keeps it well
+    # advection -- at dt=0.4 the anti-diffusive correction was marginally unstable (a roundoff-sensitive
+    # transient divergence spike that could tip to NaN, worse on finer grids). Halving dt keeps it well
     # under that explicit stability limit while retaining full 2nd-order accuracy (x_r/S unchanged).
     # (Alternatives if speed matters: set_deferred_correction(False) for robust 1st-order, or
     #  set_outer_iterations(>1) to converge the correction -- both leave the SOU default intact.)
+    # Re-measured 2026-09-04 on main (implicit FOU + deferred correction + backflow stabilization,
+    # OpenMP 4 threads and CUDA): S=16 at dt = 0.4, 0.8 and 1.6 (Re_S = 100), dt = 0.4 at Re_S = 200
+    # and 800, all finite and steady over 6000 steps (x_r/S 5.31 / 8.1 / 12 = L), divergence ~1e-16.
+    # The only energy-injecting configuration is a REVERSED outlet (Re_S = 800, x_r = L): a bounded
+    # transient excursion of max|u| to 1.28x the inlet peak on the outlet column, with beta = 0 and
+    # with the default 0.2 alike, finite over 6000 steps. step() warns when reversal appears with
+    # the stabilization off and outflow_backflow() monitors it. dt = 0.2 is kept for the script's
+    # recorded numbers, not for stability.
     H = 2 * S
     L = Lr * S
     nu = U_in * S / Re

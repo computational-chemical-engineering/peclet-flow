@@ -246,6 +246,28 @@ static void bind_solver(nb::module_& m, const char* name) {
            "0 = never), for global problems of at least min_global_cells (default 8M). Env "
            "PECLET_FLOW_VMG_AUTO_CELLS / PECLET_FLOW_VMG_AUTO_MIN_GLOBAL.")
       .def("velocity_multigrid_active", &S::velocityMultigridActive)
+      .def(
+          "outflow_backflow",
+          [](S& s) {
+            const auto ob = s.outflowBackflow();
+            nb::dict d;
+            d["max_reverse"] = ob.maxReverse;
+            d["fraction"] = ob.fraction;
+            d["energy_influx"] = ob.energyInflux;
+            d["reversed_faces"] = ob.reversed;
+            d["outlet_faces"] = ob.total;
+            return d;
+          },
+          "Outflow REVERSAL census over the outflow faces (collective under MPI): 'max_reverse' = "
+          "the largest reversed normal velocity max(0, -u.n), 'fraction' = reversed / all outlet "
+          "faces, 'energy_influx' = sum over the reversed faces of rho |u.n| |u|^2 / 2 -- the "
+          "kinetic-energy production the zero-gradient (do-nothing) outflow admits where the flow "
+          "re-enters, which is the mechanism that diverges an inflow/outflow run whose "
+          "recirculation reaches the outlet (a BFS bubble at x_r ~ L, a shed vortex). The "
+          "backflow stabilization (set_backflow_stabilization, default beta 0.2) removes beta rho "
+          "|u.n| |u_n|^2 of it; beta >= 0.5 is the unconditional energy bound. All zeros without "
+          "an outflow face or without reversal. step() warns once, on stderr, when reversal "
+          "appears while the stabilization is switched off.")
       .def("last_momentum_residual", &S::lastMomentumResidual,
            "max over components of max|r|/max|b| at exit of the last step's momentum solves "
            "(residual mode only; -1 otherwise).")
