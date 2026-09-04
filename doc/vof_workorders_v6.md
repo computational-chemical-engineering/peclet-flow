@@ -1079,6 +1079,52 @@ Results are committed in `tests/study/channel_18/results/` (`peclet_early_*.npz`
 `tbfsolver_early_*.npz`, the chunk log and the overlay plot).
 
 
+### 9. TBFsolver's converged reference, and W3's verdict
+
+The 20-turnover TBFsolver run (`Ts = 94.27`, i.e. 4 turnovers discarded) accumulates cumulatively,
+so every `dtout` snapshot is a longer window on the same average. Over `t u_tau/h in [4, 11.9]`
+(the state at the time of writing; the run continues to 20 and the final dump is one `collect.sh`
+away):
+
+| | TBFsolver, window [4, 11.9] turnovers |
+|---|---|
+| bulk void fraction | 0.01492 |
+| `<alpha>` at the centreline | 0.0337 |
+| peak `<u>_liq/u_tau` | **16.33 at y/h = 0.806** |
+| `<u>_liq/u_tau` at the centreline | 16.25 |
+| `u_tau` from the wall gradient | 0.04142, **−2.4 %** of the imposed 0.042433 |
+
+It is converged for practical purposes — against the [4, 4.24]-turnover window of section 6 the
+centreline void fraction moved 0.0328 → 0.0337 and the peak 16.56 → 16.33 — and it is committed as
+`tests/study/channel_18/results/tbfsolver_cumulative_4-11.9turnovers.npz`. **This is the first
+reference statistics set that exists for `channel_18`**: the repository ships none (WO-W12), and
+producing it needed nothing more than building the code with three Makefile overrides and letting
+it run for six hours on one CPU node.
+
+**Verdict on W3, gate by gate:**
+
+| | verdict |
+|---|---|
+| the block container survives a chunked campaign | **PASS** — restart bitwise, on both backends, once the accumulated pressure and the sweep-permutation counter are carried (section 2) |
+| `channel_18` to a statistically steady state on the block path | **FAIL, and characterised**: the run ends at **~1.5 eddy turnovers** when two markers interpenetrate, independently of dt over a 4x range (section 7). Not a solver defect and not a transcription error — the multiple-marker CSF has no balanced-force partner for a summed force against a union colour, which is rung W4's problem |
+| cross-code statistics | **DELIVERED on a matched window** (section 8) and, separately, TBFsolver's own converged reference (this section). The two codes agree on the driving force, the void fraction and the profile shape; they differ in the near-wall turbulence (`u'` peak 1.00 vs 3.28) and hence in bubble dispersion, which is the measured cost of flow's cubic cells at `Re_tau = 127` |
+| cost | peclet **109.6 ms/step** on one H100 (192 SBU/h), ~0.96 GPU-hours consumed; TBFsolver ~6 h on 64 genoa cores (~470 core-hours). The 20-turnover peclet run would have been **~7.5 GPU-hours / ~1440 SBU** at the hardened dt |
+
+**What W3 leaves for whoever picks this up, in order:**
+
+1. **W4 (collision/coalescence) is now on the critical path for bubbly flows**, not an optional
+   later rung: without it the container cannot run a case in which bubbles collide, which is every
+   bubbly flow. The minimum is a rule for what two markers at `dmin < D` do; the cheapest
+   defensible version is a repulsion/merge criterion on the film thickness.
+2. **A balanced-force block CSF for OVERLAPPING markers.** If two markers are to stay separate
+   while interpenetrating, the force they exert must be the discrete gradient of something the
+   projection can annihilate. The union colour is a `max`; the summed force is not its gradient.
+   This is a design question, and it is what section 7 measures the cost of.
+3. **Anisotropic cells, or a much finer grid, before any wall-bounded turbulence case.** `dy+ = 3.18`
+   does not sustain a minimal channel at `Re_tau = 127`. This is a `flow` limitation, not a VoF one,
+   and it will bite every future wall-turbulence case the suite runs.
+
+
 ## WO-V9 findings — the VoF performance profile, and the one lever the numbers justify — 2026-09-04, Opus
 
 Branch `vof-v9`, worktree `../flow-v9`, from `origin/main` at `40fc1b7`.
