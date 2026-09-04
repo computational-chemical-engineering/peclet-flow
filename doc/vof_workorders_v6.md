@@ -414,6 +414,86 @@ that becomes the default on a passed (d).
 
 ---
 
+## WO-P3h — the Scriven gate at Ja 2: state of the problem, what is proven, what remains  [Fable dossier → OPUS when resumed]
+
+**Status 2026-09-04.** Part II's P3 gate (Scriven bubble growth, `R(t) = 2β√(α_l t)`, 1 % on
+`max|ΔR|/R` over the last half AND on `β_eff/β − 1`, 128³, ratio 100, similarity start, MUSCL)
+**passes at Ja 0.5 (0.027 % / +0.027 %, mesh ladder 96³ → 128³ converged at the noise floor)
+and fails at Ja 2 (3.64 % / −1.32 %)**, with the second-order energy operator ON
+(`set_phase_change_energy_order(2)` + `set_phase_change_deposit_fallback(True)`; both default
+OFF by the "default on a passed gate" rule). Seven work orders (P23, P3b, P3c, P3d, P3e, P3f,
+P3g) each retired one mechanism; this dossier is the hand-over so the eighth does not repeat any
+of them. Every number below is in the corresponding findings entry with its script.
+
+**What is PROVEN (do not re-measure):**
+1. *Initialisation* (P3b): the driver already starts from Scriven's similarity profile; the
+   uniform-superheat control is worse in the transient and only looks better at Ja 2 by
+   cancellation. Read the growth RATE `β_eff` (fit of `R²` vs `t` through the origin), never
+   `max|ΔR|/R` alone.
+2. *Interfacial area* (P3c/P3d): no per-cell area construction converges (first order in h/R —
+   the pieces do not join); the joined marching-tetrahedra sheet on the PLIC signed-distance
+   level set (mode 6, now the default) is exact to 1e-4 on spheres, order 2 on cylinders, exact
+   on planes (periodic-torus co-area identity), and wisp-immune. The raw `C = ½` level set is
+   refuted (+5 % on a sphere, +21 % on a 45° plane: the SZ cubic interpolated along √3
+   diagonals wrinkles the sheet). Blend the two endpoint distance functions, not the roots.
+3. *Regression step and deposit* (P3e): the plane shift's volume error is exactly the
+   linearisation `−δ/R`; the run's δ/R is 1e-4 (at ratio 100 the regression supplies ρ_v/ρ_l
+   of the motion, WY advection 99 %); redistribute quiet and isotropic; the deposit at the
+   floor with mode 6. The "−2.15 % run area" was a STALE diagnostic (area at the head of
+   `step()`, radius at its end).
+4. *The flux* (P3f): the residue at order 1 is a CANCELLATION of three first-order errors —
+   (F1) the two-point GFM Dirichlet row (−17 % of the flux at a 2.4-cell thermal layer, −5 % at
+   8 cells, on a FLAT interface); (F2) the one-sided fit's plane-distance bias on a curved
+   interface (+19/+12/+9/+6 % at R = 6/10/14/20, order 0.9); (F3) the Dirichlet overwrite
+   destroying −0.7 % (Ja 0.5) / −4.3 % (Ja 2) of the latent heat. Fixing any one alone makes the
+   gate worse; the mesh ladder is anti-convergent. A cell changing class is a flux between two
+   books, not a sink.
+5. *The second-order operator* (P3g): ṁ defined as the operator's own discrete flux (F3 gone by
+   construction: enthalpy residual 3e-16), the Gibou–Fedkiw three-point row
+   `a_Γ = 2/((1+θ)θ)`, `a_behind = 2/(1+θ)` (exact on quadratics at every θ; the flux must
+   carry the one-sided rescaling of the band behind, or it is off by `2/(1+θ)`), and
+   curvature-consistent distances. Plus the VOLUME AUDIT (`d(gas)/d(gas booked)`): 6.5 % of the
+   vapour never materialised on zero-area interfacial cells whose `+n` deposit walk fails →
+   `set_phase_change_deposit_fallback(True)` is REQUIRED with the operator (the fallback alone
+   changes nothing). Ja 0.5 closes only with all of it.
+
+**What REMAINS (the eighth work order), in order of the a-priori evidence:**
+- **(R1) The θ-clamp bias on near-tangential faces** — now the largest a-priori error and never
+  swept: `sphere×linear` reads +27/+17/+14/+11 % at R = 6/10/14/20 with the new operator (order
+  0.6–1.0). A face whose axis is nearly tangent to the interface has `θ → 0` or `> 1`; the
+  clamp pins it and the row then sees a wrong distance. Sweep the clamp bounds and the
+  fallback-to-`i−1` threshold on the P3f 2×2 probe; consider dropping near-tangential faces from
+  the flux (their true normal flux is ~0) and letting the normal-direction faces carry it.
+- **(R2) A conserved ṁ is a cell-FACE flux where the physics wants the flux AT the interface.**
+  `plane×scriven` stays at −5.7 % (order 1.0) even with the exact row because the interfacial
+  cell's sensible heat between the face and the plane is unbooked. Fix: give the interfacial
+  cell its own **Robin energy row** (unknown `T_i` with the interface condition
+  `−k ∂T/∂n = ṁ h_lv` folded in through the GFM distances) instead of the Dirichlet identity
+  row, so the flux is evaluated at the plane; IHTR (`r_int`) then enters naturally.
+- **(R3) Ja 2's verdict at a second resolution.** With the operator ON the later start (R 10→20)
+  reads 1.08 % / −0.81 % while the shipped scheme reads 0.63 % / −0.89 % there — the two are
+  within each other's noise at that start; the early-time transient at Ja 2 (thermal layer
+  ~2 cells at R = 6) is the difference. Run Ja 2 at 192³ from R = 9 (the layer resolved) once
+  (R4) is fixed.
+- **(R4) The 192³ R 9→30 divergence** (dt collapse at step 199, CFL 0.908; the deposit walk
+  trips, `band_div` 1.6e-2, fallback 24) — WO-P3f's open item 6 at the resolution where it
+  bites. Instrument: dump the cell where the CFL first exceeds 0.5 and its neighbourhood
+  (C, T, ṁ, source, the deposit target).
+- **(R5) The P2 order ladder with the new row** (P3g owes it: P2 moved +0.19 → +1.12 % at one
+  resolution; the order must stay ≥ 2 or the row is wrong on the sucking interface too).
+- **(R6) Ja 10**: the thermal layer is sub-cell for the whole run at 128³ (34 % vs 40 %
+  shipped); it is a resolution statement, not a gate — report at 192³ once R1–R4 are in.
+
+**Acceptance for closing P3:** Ja 0.5 AND Ja 2 within 1 % on both measures at 128³ with a
+converging 96/128/192 ladder; P0a/P0b byte-identical (ṁ-prescribed); P1/P1′ at the noise
+floor; P2 order ≥ 2; enthalpy residual ≤ 1e-12; volume audit 1.000000; MPI np 1/2/4 bitwise on
+P0a/P1; then `energy_order = 2` + the fallback become the defaults in the same commit as the
+verdict. Instruments to reuse: `vof_scriven.py --area-probe/--regress-probe/--fit-probe/
+--energy-budget/--audit` (names per the P3e/P3f/P3g entries), `PECLET_P3F_*` hooks, the P3f 2×2
+table as the a-priori gate.
+
+---
+
 ## WO-V7 — the pore-scale campaign (after WO-R2)  [OPUS runs, Fable/user interpret]
 
 Three cases, each a script under `tests/study/pore_scale/` and together one gallery page
