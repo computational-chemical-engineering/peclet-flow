@@ -1028,6 +1028,57 @@ channel drives them together at Re_tau 127 and the resulting interface-local Cou
 selects the time step for the whole run.
 
 
+### 8. The cross-code comparison, on a MATCHED window — and what it says
+
+Since the block path cannot reach a statistically steady state on this case (section 7), the
+comparison was made where both codes CAN be compared: the **same physical window from the same
+initial condition**, `t u_tau/h in [0.5, 1.5]` (`t in [11.784, 35.352]`), TBFsolver re-run with
+`Ts = 11.784, Tf = 35.35` for exactly that. peclet: 16 235 steps, 2066 samples, **109.6 ms/step**,
+pressure **13/800 (uncapped)**, `max|div(open u)| 6.0e-11`, every marker's volume within
+**2.2e-5** of its seed. Both are transients — but they are the SAME transient, which is what a
+cross-code check needs.
+
+| | peclet (128x80x64 isotropic) | TBFsolver (192x160x96) |
+|---|---|---|
+| bulk void fraction | 0.01438 | **0.01492** (the case value) |
+| `u_tau` from the wall gradient | 0.03643, **−14.2 %** | 0.04376, **+3.1 %** |
+| peak `<u>_liq/u_tau` | 17.99 at y/h 0.662 | 16.56 at y/h 0.881 |
+| `<u>_liq/u_tau` at the centreline | 12.56 | 16.33 |
+| `<alpha>` at the centreline | **0.1729** | **0.0328** |
+| `<alpha>` at y/h = 0.3 / 0.5 / 0.7 | 0 / 0 / 0 | 0.0122 / 0.0122 / 0.0279 |
+| `u'_liq/u_tau` at y+ = 12.7 | **1.00** | **3.28** |
+
+**Two discrepancies, and they are the same discrepancy.**
+
+1. **peclet's bubbles have not dispersed.** `<alpha>` is still 0.173 at the centreline — the
+   INITIAL value is `18 pi R^2/(Lx Lz) = 0.179` — and identically 0 everywhere below y/h = 0.8,
+   while TBFsolver has spread them across the channel (0.033 at the centreline, 0.012 already at
+   y/h = 0.3) in the same physical time.
+2. **peclet's near-wall turbulence has largely decayed.** `u'_liq/u_tau` at the buffer-layer peak is
+   **1.00 against TBFsolver's 3.28** (the canonical value is ~2.7-3.0), and the wall-gradient
+   `u_tau` is 14 % below the imposed one while TBFsolver's is within 3 %.
+
+(2) causes (1): bubble dispersion in a channel is driven by the turbulence and the lift it exerts,
+so a run whose near-wall turbulence is dying disperses nothing. And (2) is the **cost of the
+isotropic grid**, which is the one thing the transcription could not avoid: TBFsolver's mesh is
+`dx+ 2.08 / dy+ 1.59 / dz+ 2.08` and flow's cubic cells force `3.18` on every axis, so the
+wall-normal resolution is **halved** at Re_tau = 127 where the whole channel is 127 wall units
+across. A minimal channel is the least forgiving case for that: it has exactly one pair of
+streaks, and losing them loses the flow.
+
+**So the honest verdict on the cross-code half of W3:** the two codes agree on everything the
+transcription controls — the driving force (section 6), the void fraction, the off-axis velocity
+peak, the qualitative profile shape — and disagree on the two quantities that depend on the
+resolved near-wall turbulence, for a reason that is measured rather than inferred. Closing that
+needs either **anisotropic cells** (which `flow` does not have) or a grid fine enough to give
+`dy+ ~ 1.6` isotropically — 256 x 160 x 128 = 5.2 M cells, 8x the work per step and ~4x the steps
+(the WY limit scales with h), i.e. **~30x this run**, and the block path would still stop at
+~1.5 turnovers for the reason in section 7.
+
+Results are committed in `tests/study/channel_18/results/` (`peclet_early_*.npz`,
+`tbfsolver_early_*.npz`, the chunk log and the overlay plot).
+
+
 ## WO-V9 findings — the VoF performance profile, and the one lever the numbers justify — 2026-09-04, Opus
 
 Branch `vof-v9`, worktree `../flow-v9`, from `origin/main` at `40fc1b7`.
