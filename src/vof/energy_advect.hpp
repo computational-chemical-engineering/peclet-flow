@@ -121,7 +121,7 @@ class VofEnergyAdvector {
     w.checkCourant(dt);
     const double dth = dt / w.h();
     w.freezeDilationFlag();
-    exchange(T_);
+    w.timedExchange([&] { exchange(T_); });
     const int* perm = kWySweepPerm[static_cast<int>(step % 6)];
     for (int s = 0; s < 3; ++s) {
       const int d = perm[s];
@@ -129,8 +129,8 @@ class VofEnergyAdvector {
       w.computeFluxes(d, dth);
       w.applySweep(d, dth);     // C^{(s+1)}: the capacity the recovery divides by
       energyUpdate(w, d, dth);  // T from the pre-sweep T, the fluxes, and that new C (swaps T_)
-      w.exchange(w.colour());
-      exchange(T_);             // regenerates every ghost of the freshly swapped-in buffer
+      w.exchangeTimed(w.colour());
+      w.timedExchange([&] { exchange(T_); });  // regenerates every ghost of the swapped-in buffer
     }
   }
 

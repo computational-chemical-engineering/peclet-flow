@@ -277,8 +277,8 @@ class MomentumConsistentAdvector {
       // needs a valid ghost ring for the clamp of point 3. C^e is an ordinary cell field on this
       // block (see the Indexing note), so the colour field's own exchange carries it.
       for (int e = 0; e < 3; ++e) {
-        w.exchange(cc_[e]);
-        w.exchange(vel_[e]);
+        w.exchangeTimed(cc_[e]);
+        w.exchangeTimed(vel_[e]);
       }
       w.reconstruct();  // idempotent for s = 0; re-reconstructs after each applied sweep
       w.computeFluxes(d, dth);
@@ -292,7 +292,7 @@ class MomentumConsistentAdvector {
         }
       }
       w.applySweep(d, dth);
-      w.exchange(w.colour());
+      w.exchangeTimed(w.colour());
     }
   }
 

@@ -75,3 +75,6 @@ doc/continuation_force_sweep_*.md
 doc/pressure_from_phi_plan.md
 doc/pymrm_ghost_cell_ibm_transfer.md
 
+
+# WO-V9: the profiling study's cached beds/colour fields (regenerated on demand)
+tests/study/.vof_profile_cache/

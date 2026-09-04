@@ -72,6 +72,7 @@
 #ifndef PECLET_FLOW_VOF_ADVECT_WY_HPP
 #define PECLET_FLOW_VOF_ADVECT_WY_HPP
 
+#include <chrono>
 #include <cstdio>
 #include <functional>
 #include <Kokkos_Core.hpp>
@@ -565,6 +566,59 @@ class WyAdvector {
   /// sets it from `bc_[f] != 0 && touchesGlobalFace(f)`.
   void setBcFaceOwned(int f, bool on) { bcOwn_[f] = on ? 1u : 0u; }
 
+  // ---- WO-V9: per-kernel timing (OFF by default, and inert when off) ------------------------
+  //
+  // A phase boundary on a device backend is meaningless without a fence — queued kernels would be
+  // billed to whichever phase happens to call the clock next — so every boundary here fences,
+  // exactly as `IbmSolver::phaseTick` already does for the step's three coarse phases. That fence
+  // is a synchronisation, not a computation: it changes WHEN work happens, never WHAT it computes,
+  // and the gate on this instrument is that a run with `timingOn` true and one with it false agree
+  // bit for bit. When it is false, `tick_()` returns 0.0 without fencing and `addT_` returns
+  // without reading the clock, so the instrumented build is the uninstrumented one plus a
+  // predictable branch.
+  struct Timing {
+    double freeze = 0.0;       ///< the frozen dilation flag (once per step)
+    double reconstruct = 0.0;  ///< the MYC normal + plicAlpha pass (once per sweep)
+    double fluxes = 0.0;       ///< the per-face geometric flux pass (once per sweep)
+    double sweep = 0.0;        ///< the colour/momentum update pass (once per sweep)
+    double clip = 0.0;         ///< the cut-cell [0,1] clip + census (once per sweep, V5a only)
+    double exchange = 0.0;     ///< the g = 3 ghost exchange (once per sweep, plus the sibling
+                               ///< fields of the momentum/energy advectors)
+    long sweeps = 0;           ///< sweeps counted (3 per advect() call)
+  };
+  bool timingOn = false;
+  Timing tm;
+  void resetTiming() { tm = Timing(); }
+  const Timing& timing() const { return tm; }
+  static double wallSeconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+  double tick_() const {
+    if (!timingOn)
+      return 0.0;
+    Kokkos::fence();
+    return wallSeconds();
+  }
+  void addT_(double& acc, double t0) {
+    if (!timingOn)
+      return;
+    Kokkos::fence();
+    acc += wallSeconds() - t0;
+  }
+  /// Run `fn` (a ghost exchange) under the exchange accumulator. The sibling advectors
+  /// (`MomentumConsistentAdvector`, `VofEnergyAdvector`) exchange their own fields through this so
+  /// the g = 3 halo cost is one number whichever driver is running.
+  template <class F>
+  void timedExchange(F&& fn) {
+    const double t0 = tick_();
+    fn();
+    addT_(tm.exchange, t0);
+  }
+  void exchangeTimed(SField f) {
+    timedExchange([&] { exchange(f); });
+  }
+
   /// Compaction of the reconstruction pass onto the mixed cells. Pure optimization — switching it
   /// off must reproduce the same field bit for bit (gated in `tests/kokkos/test_vof_advect.cpp`).
   bool useWorklist = true;
@@ -635,7 +689,7 @@ class WyAdvector {
       applySweep(d, dth);
       if (hasGeom_)
         clipCutCells();  // rung V5a rule 3 (diagnostic clip, cut cells only)
-      exchange(c_);
+      exchangeTimed(c_);
     }
     ++steps_;
   }
@@ -858,6 +912,7 @@ class WyAdvector {
   }
 
   void freezeDilationFlag() {
+    const double _t0 = tick_();
     SField c = c_;
     UCField cc = cc_;
     Kokkos::parallel_for(
@@ -865,12 +920,18 @@ class WyAdvector {
         // thesis eq. A.28: g = 1 if C^n > 1/2, else 0. Strict `>` (the tie is measure zero and the
         // proof only needs the flag to be a constant of the step).
         KOKKOS_LAMBDA(long i) { cc(i) = c(i) > 0.5 ? 1u : 0u; });
+    addT_(tm.freeze, _t0);
   }
 
   /// PLIC over the inner region grown by one cell in every direction: the donor of a face of an
   /// inner cell is at most one cell outside it. Non-mixed cells are left untouched — the flux never
   /// reads their (m, alpha), which is what keeps `useWorklist` bit-neutral.
   void reconstruct() {
+    const double _t0 = tick_();
+    reconstructImpl();
+    addT_(tm.reconstruct, _t0);
+  }
+  void reconstructImpl() {
     const I3 e = e_;
     const int g = g_;
     const int rx = n_.x + 2, ry = n_.y + 2, rz = n_.z + 2;
@@ -919,6 +980,11 @@ class WyAdvector {
   /// Computing the face once (rather than once per adjacent cell) is what makes the flux telescope
   /// bit-exactly, in-rank and across a rank boundary alike.
   void computeFluxes(int d, double dth) {
+    const double _t0 = tick_();
+    computeFluxesImpl(d, dth);
+    addT_(tm.fluxes, _t0);
+  }
+  void computeFluxesImpl(int d, double dth) {
     if (hasGeom_) {  // rung V5a: openness-weighted flux (`cutcell.hpp` eq. 1)
       // COMPOSED with the V-BC boundary rule since WO-R2 item 2: `computeFluxesCut` carries the
       // out-of-domain mask and the per-face ledger itself, so `F = o_f * C_datum * a` at a domain
@@ -996,6 +1062,12 @@ class WyAdvector {
 
   /// `C_i += (F_{i-} - F_{i+}) + c_i (a_{i+} - a_{i-})`, over inner cells.
   void applySweep(int d, double dth) {
+    const double _t0 = tick_();
+    applySweepImpl(d, dth);
+    addT_(tm.sweep, _t0);
+    ++tm.sweeps;
+  }
+  void applySweepImpl(int d, double dth) {
     if (hasGeom_) {  // rung V5a: the update in FLUID-VOLUME units
       applySweepCut(d, dth);
       return;
@@ -1126,6 +1198,11 @@ class WyAdvector {
   /// the clip moved. A diagnostic first — if it is not negligible the flux approximation, not the
   /// clip, is what needs fixing.
   void clipCutCells() {
+    const double _t0 = tick_();
+    clipCutCellsImpl();
+    addT_(tm.clip, _t0);
+  }
+  void clipCutCellsImpl() {
     const I3 e = e_, n = n_;
     const int g = g_;
     SField c = c_, ep = eps_;

@@ -1101,6 +1101,95 @@ static void bind_solver(nb::module_& m, const char* name) {
           "means "
           "the uncut rung-V1 kernels are running, byte-identically to a solid-free build.")
       .def(
+          "set_vof_timing", [](S& s, bool on) { s.setVofTiming(on); }, nb::arg("on"),
+          "WO-V9: arm (or disarm) the VoF pipeline's per-stage timers, and reset them. OFF by "
+          "default. When armed, every stage boundary calls Kokkos::fence() before reading the "
+          "clock -- the same rule the step's three coarse phase timers already follow, because on "
+          "a device backend queued work would otherwise be billed to whichever stage next reads "
+          "the clock. A fence changes WHEN work happens, never WHAT it computes: a run with the "
+          "timers armed is bit-identical to the same run without them (gated in "
+          "tests/kokkos/test_vof_timing.cpp). When disarmed the cost is one branch per stage and "
+          "no fence at all.")
+      .def(
+          "reset_vof_timing", [](S& s) { s.resetVofTiming(); },
+          "Zero the VoF stage timers and the step counter without disarming them.")
+      .def(
+          "vof_timing",
+          [](S& s) {
+            const auto& v = s.vofTimingReport();
+            const auto& k = s.vofKernelTiming();
+            nb::dict r;
+            r["steps"] = v.steps;
+            // the step's three coarse phases, summed over the same window (seconds)
+            r["step"] = s.vofTimingStepSeconds();
+            r["predictor"] = s.vofTimingPredictorSeconds();
+            r["momentum_solve"] = s.vofTimingMomentumSeconds();
+            r["projection"] = s.vofTimingProjectionSeconds();
+            // the VoF stages
+            r["vof_advect"] = v.advect;
+            r["vof_bridge"] = v.bridge;
+            r["vof_momentum_advect"] = v.momAdvect;
+            r["vof_momentum_bridge"] = v.momBridge;
+            r["curvature"] = v.curvature;
+            r["csf"] = v.csf;
+            r["phase_change"] = v.phaseChange;
+            // the advector's own kernels (shared by the colour, momentum and energy drivers)
+            r["k_freeze"] = k.freeze;
+            r["k_reconstruct"] = k.reconstruct;
+            r["k_fluxes"] = k.fluxes;
+            r["k_sweep"] = k.sweep;
+            r["k_clip"] = k.clip;
+            r["k_exchange"] = k.exchange;
+            r["k_sweeps"] = k.sweeps;
+            // the V3 curvature cascade's own passes
+            const auto& q = s.vofCurvatureTiming();
+            r["kc_calls"] = q.calls;
+            r["kc_compact"] = q.compact;
+            r["kc_planes"] = q.planes;
+            r["kc_height"] = q.height;
+            r["kc_fallback"] = q.fallback;
+            r["kc_census"] = q.census;
+            return r;
+          },
+          "WO-V9: cumulative VoF stage times in SECONDS since the last set_vof_timing/"
+          "reset_vof_timing, on this rank. `steps` is the number of step() calls in the window, so "
+          "every entry divides down to a per-step cost. `step`/`predictor`/`momentum_solve`/"
+          "`projection` are the step's three coarse phases summed over the SAME window (the "
+          "remainder of `step` is BC re-imposition, Picard bookkeeping and the scalars). "
+          "`vof_advect` is the whole colour stage and `vof_bridge` the part of it spent in the "
+          "G=2 <-> g=3 bridges and the C ghost policy; `vof_momentum_advect` is its V2b twin. "
+          "`k_*` are the advector's own kernels, shared by the colour, momentum-consistent and "
+          "consistent-energy drivers, so they are the per-KERNEL breakdown of whichever of the two "
+          "stages is running: `k_reconstruct` the MYC + plicAlpha pass, `k_fluxes` the geometric "
+          "face fluxes, `k_sweep` the update, `k_clip` the V5a cut-cell clip, `k_exchange` the "
+          "g = 3 ghost exchange, `k_sweeps` the number of sweeps (3 per advect call). Returns "
+          "zeros unless the timers are armed.")
+      .def(
+          "set_vof_worklist", [](S& s, bool on) { s.setVofWorklist(on); }, nb::arg("on"),
+          "WyAdvector::useWorklist -- compact the PLIC reconstruction pass onto the mixed cells "
+          "(a parallel_scan over the reconstruction region, then a dense parallel_for over the "
+          "compacted list) instead of a guarded parallel_for over the whole region. Default ON. "
+          "Pure optimization: the flux never reads a non-mixed cell's plane, so the two paths "
+          "produce the same field BIT FOR BIT (gated in tests/kokkos/test_vof_advect.cpp and "
+          "measured in WO-V9).")
+      .def(
+          "vof_worklist", [](S& s) { return s.vofWorklist(); },
+          "Whether the reconstruction-pass compaction is on.")
+      .def(
+          "set_vof_curvature_worklist", [](S& s, bool on) { s.setVofCurvatureWorklist(on); },
+          nb::arg("on"),
+          "WO-V9: run the V3 curvature cascade (the PLIC plane pass, the height functions and the "
+          "PV fallback) over a COMPACTED list of the interfacial cells instead of over the whole "
+          "inner region. Default ON. The cascade is the most divergent kernel in the pipeline -- "
+          "on a resolved droplet the interfacial cells are well under 1 % of the block, so a dense "
+          "parallel_for puts one or two active lanes in a warp and the other thirty run the guard "
+          "and then idle for the whole height function. Compaction is a pure re-ordering (each "
+          "cell reads the same neighbours and writes the same value), so the two paths are "
+          "BIT-IDENTICAL; tests/kokkos/test_vof_timing.cpp gates that and WO-V9 records the gain.")
+      .def(
+          "vof_curvature_worklist", [](S& s) { return s.vofCurvatureWorklist(); },
+          "Whether the curvature-cascade compaction is on.")
+      .def(
           "vof_diagnostics",
           [](S& s) {
             const auto d = s.vofDiagnostics();

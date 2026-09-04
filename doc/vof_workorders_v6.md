@@ -447,6 +447,311 @@ pressure iterations vs cap; a capped run is not a data point. Report ms/step and
 # Findings log (v6 work orders)
 
 (append per WO, newest first)
+
+## WO-V9 findings — the VoF performance profile, and the one lever the numbers justify — 2026-09-04, Opus
+
+Branch `vof-v9`, worktree `../flow-v9`, from `origin/main` at `40fc1b7`.
+
+**Machine state: IDLE.** GPU 0 % utilisation, 15 MiB of 16303 MiB in use, no other compute process,
+load average 0.5 at the start of the session; every build finished before the first timing run and
+none ran during one. This is the measurement window WO-W12 and WO-V7 both asked for, and it
+**inverts two of their conclusions** (below). Backend rows marked *CUDA* are the RTX 5080
+(`nvidia-cuda`), rows marked *host* are `host-openmp`. Timing runs used the full
+`OMP_NUM_THREADS=8 OMP_PROC_BIND=spread OMP_PLACES=threads` as the work order specifies; the MPI
+runs used **one pinned thread per rank** (`OMP_NUM_THREADS=1`, `mpirun --bind-to core`) for the
+reason in item 3. Every case records its max pressure iterations against its cap; **no run in this
+entry touched a cap** (rule 3b).
+
+### What shipped
+
+* **`set_vof_timing(True)` / `vof_timing()` / `reset_vof_timing()`** — per-stage and per-kernel
+  timers around the whole VoF pipeline (`src/vof/advect_wy.hpp` `WyAdvector::Timing`,
+  `src/vof/curvature_field.hpp` `VofCurvature::Timing`, `src/flow_ibm.hpp`
+  `IbmSolver::VofTiming`). Every stage boundary calls `Kokkos::fence()` **only when armed** — the
+  rule `phaseTick()` already applies to the step's three coarse phases, because on a device backend
+  a boundary that does not fence bills queued work to whichever stage next reads the clock. Off,
+  the cost is one predictable branch per stage and no fence.
+* **`set_vof_worklist(bool)`** — the advector's reconstruction-pass compaction, which had no
+  binding at all (item 2 could not otherwise be measured from Python).
+* **`set_vof_curvature_worklist(bool)`, default ON** — the lever (see item 5): the V3 cascade over
+  a compacted list of the interfacial cells instead of over the whole inner region. The per-cell
+  bodies of tier 1/2 and tier 3 were lifted VERBATIM out of their kernels into
+  `curvHeightCell` / `curvFallbackCell` (`src/vof/curvature_field.hpp`) so the dense and the
+  compacted kernel share one body; the only substitution is `i` as a parameter instead of
+  `L3(x,y,z,e)`, and tier 3's `L3(x+ox,y+oy,z+oz,e)` → the identical `i + ox + oy*sy + oz*sz`.
+* **`tests/kokkos/test_vof_timing.cpp`** (ctest `vof_timing`, both backends) — gates that the
+  instrument and both compactions are inert: timers OFF vs ON and worklists ON vs OFF are
+  `max|d| = 0.000e+00` on C, u, v, w and P over 30 steps of a surface-tension + momentum-consistent
+  run, on the all-fluid path AND on the cut-cell path.
+* Study scripts `tests/study/vof_profile.py` (the five-case profile, both compaction ablations),
+  `tests/study/vof_profile_mpi.py` (item 3), `tests/study/vof_orb_weights.py` (item 4),
+  `tests/study/vof_block_packing.py` (item 4b).
+
+### Item 1 — the profile. The answer is that VoF is not where the time goes; the PRESSURE SOLVE is.
+
+Percentages are of the timed step. 20 timed steps after 5 warm on CUDA; 10–15 on host. The packing
+scenes reuse the gallery drivers' physics, grids, closures and solver settings verbatim; their beds
+are a deterministic RSA packing of the same grain radius and count rather than the pages' DEM
+deposit, because importing `dem` and `flow` into one interpreter mixes two Kokkos backends
+(`suite/CLAUDE.md`) — the profile depends on the cut-cell count, not on which loose packing it is.
+
+**CUDA (idle GPU):**
+
+| case | grid | ms/step | press | **VoF total** | colour adv | mom adv | curvature | CSF | phase ch. | recon | fluxes | sweeps | **g=3 fill** | predictor | mom solve | **projection** | remainder |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Hysing 1 | 64×4×128 | **31.2** | 15/600 | **4.67 %** | – | 4.07 | 0.54 | 0.07 | – | 0.45 | 0.14 | 0.07 | 1.55 | 0.23 | 6.22 | **88.20** | 0.67 |
+| E6 trickle | 48×48×96 | **34.3** | 20/400 | **18.45 %** | – | 13.91 | 4.48 | 0.07 | – | 0.53 | 0.35 | 0.25 | **6.24** | 0.32 | 8.98 | **71.22** | 1.03 |
+| E7 packed | 64×64×160 | **98.7** | 18/600 | **13.13 %** | – | 7.91 | 5.16 | 0.06 | – | 0.30 | 0.19 | 0.17 | 3.05 | 0.23 | 5.25 | **80.91** | 0.49 |
+| droplet | 128³ | **212.9** | 13/500 | **8.68 %** | 0.78 | – | **7.82** | 0.09 | – | 0.30 | 0.15 | 0.05 | 0.04 | 0.30 | 4.67 | **85.99** | 0.36 |
+| Scriven | 96³ | **69.7** | 15/600 | **8.86 %** | 3.79 | – | 0.00 | 0.00 | 5.07 | 1.54 | 1.23 | 0.09 | 0.15 | 0.35 | 5.73 | 43.48 | **41.58** |
+
+**host-openmp (8 threads):**
+
+| case | ms/step | **VoF total** | colour/mom adv | curvature | phase ch. | recon | fluxes | sweeps | **g=3 fill** | predictor | mom solve | **projection** | remainder |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Hysing 1 | **86.4** | **8.16 %** | 6.99 | 0.93 | – | 0.40 | 0.32 | 0.35 | 1.14 | 0.78 | 7.87 | **80.83** | 2.36 |
+| E6 trickle | **168.6** | **40.19 %** | 33.87 | 6.23 | – | 0.75 | 0.55 | 0.33 | **15.91** | 0.72 | 10.13 | 47.25 | 1.71 |
+| E7 packed | **694.9** | **26.48 %** | 22.09 | 4.32 | – | 0.54 | 0.39 | 0.39 | **10.48** | 0.46 | 6.40 | **65.81** | 0.86 |
+| droplet | **1501.6** | **3.78 %** | 2.14 | 1.52 | – | 0.60 | 0.33 | 0.25 | 0.05 | 0.76 | 11.57 | **83.23** | 0.65 |
+| Scriven | **526.4** | **12.52 %** | 8.59 | 0.00 | 3.93 | 3.77 | 1.51 | 0.35 | 0.47 | 0.89 | 6.37 | 35.44 | **44.79** |
+
+Five things this table says, in order of how much they change what to do next:
+
+1. **The pressure projection is 43–88 % of every step, and VoF is 4.7–18.5 % (CUDA).** Every
+   candidate VoF lever in the work order is therefore competing for at most a fifth of the step,
+   and on the two flagship free-surface cases (Hysing, droplet) for less than a tenth. *The
+   optimisation target of the VoF campaign is the pressure solve, not the VoF kernels.* On Hysing 1
+   the projection is 27.4 ms of a 31.2 ms step on a **32 768-cell grid** — that is 14 Chebyshev
+   iterations' worth of launch latency, not arithmetic, and it is the same launch-latency floor
+   WO-V7 found in its MG-depth sweep.
+2. **Inside VoF, the two big items are the curvature cascade and the g = 3 FILL — never the
+   advection arithmetic.** Reconstruct + fluxes + sweeps together are 0.3–2.9 % of the step in
+   every case. The curvature is up to 7.8 % (droplet) and the fill up to 6.2 % (trickle, CUDA) /
+   15.9 % (trickle, host).
+3. **What `k_exchange` measures on a packing is not communication — it is the WETTING BAND FILL.**
+   `vofFillGhosts` on the colour field is one raw exchange, then (with a solid) the fluid-only
+   Youngs normals + three more raw exchanges + the θ pass + the three-pass solid-band fill + a
+   second raw exchange — five raw exchanges and two kernel passes, three times a step (once per
+   sweep), plus the momentum advector's 18 raw sibling exchanges. That is why the number is 0.04 %
+   on the all-fluid droplet and 6.2 % on the trickle bed at a THIRD of the grid size.
+4. **The Scriven step is 42–45 % "remainder", and that is the energy scalar** (`add_scalar("T")` at
+   200 sweeps in `advanceScalars`), not the phase-change kernels, which are 5.1 % (CUDA). Anyone
+   optimising the phase-change ladder should start at the temperature solve.
+5. **The dt census is not the plan's.** Every surface-tension case here is capillary-bound in
+   **100 %** of its steps (Hysing, trickle, packed) and the Scriven case is WY-CFL-bound in 100 %
+   of its steps. WO-V7's driven pore-scale runs were 0–98 % WY-bound depending on Ca; VOF_PLAN §4's
+   "capillary binds 18 of 18" holds for the *undriven* cases and the WY cap takes over as soon as
+   the run manufactures a local jet (a throat, or a phase-change interface velocity).
+
+**The host-vs-CUDA verdict INVERTS WO-V7's.** WO-V7 recorded "host-OpenMP is competitive with and
+often faster than a contended GPU" (80 ms/step at 8 threads against 43 idle / 251 contended). On an
+idle GPU there is no contest at any of these sizes:
+
+| case | CUDA ms/step | host-openmp (8 thr) ms/step | CUDA speedup |
+|---|---|---|---|
+| Hysing 1 64×4×128 | 31.2 | 86.4 | **2.8×** |
+| E6 trickle 48×48×96 | 34.3 | 168.6 | **4.9×** |
+| E7 packed 64×64×160 | 98.7 | 694.9 | **7.0×** |
+| droplet 128³ | 212.9 | 1501.6 | **7.1×** |
+| Scriven 96³ | 69.7 | 526.4 | **7.6×** |
+
+WO-V7's statement should be read as what it was: a measurement of a GPU carrying five other jobs.
+The smallest, most launch-latency-bound case (Hysing, 32 k cells) is where the host comes closest,
+which is the expected direction.
+
+### Item 2 — `useWorklist` on the ADVECTOR is bit-neutral, and it is a PESSIMISATION on 9 of the 10 (case, backend) pairs measured
+
+Bit-neutral: gated in `test_vof_timing` (`max|d| = 0.000e+00`, all-fluid and cut-cell). The gain
+(`k_reconstruct`, ms/step):
+
+| case | CUDA ON | CUDA OFF | CUDA gain | host ON | host OFF | host gain |
+|---|---|---|---|---|---|---|
+| Hysing 1 | 0.139 | **0.091** | −53 % | 0.342 | **0.269** | −27 % |
+| E6 trickle | 0.177 | **0.075** | −136 % | 1.195 | **0.664** | −80 % |
+| E7 packed | 0.292 | **0.166** | −76 % | 3.612 | **2.097** | −72 % |
+| droplet 128³ | 0.647 | **0.589** | −10 % | 8.996 | **5.625** | −60 % |
+| Scriven 96³ | **1.074** | 2.181 | **+103 %** | 19.821 | **16.395** | −21 % |
+
+(negative = the compaction is slower than the guarded dense pass). The one win is Scriven on CUDA,
+and it is the one case whose mixed set is *scattered*: `enable_phase_change` turns the wisp guard
+OFF, so `wyIsMixed(c, 0)` accepts the round-off residue the deposit leaves through the whole
+domain, and a dense warp then carries one or two diverging lanes. Everywhere else the mixed cells
+lie in coherent runs on a surface, the guarded dense pass is already coherent, and the compaction
+only adds a `parallel_scan` + a host-visible fence per sweep.
+
+**Whole-step effect: ≤ 1.6 % anywhere** (Scriven 70.7 → 69.4 ms with it on; everything else inside
+the case's own repeat spread). **The default was left ON**, because flipping it would change nothing
+measurable on four cases and cost 1.6 % on the fifth; the switch now exists and the table above is
+the reason to use it. The finding worth carrying is the *mechanism*: compaction pays for warp
+coherence, not for skipped cells, so the predictor is how SCATTERED the interfacial set is, and
+neither the mixed-cell count nor the mixed fraction predicts it (Scriven and the droplet have the
+same order of both and behave oppositely).
+
+### Item 3 — the g = 3 halo under MPI: its share of the step is FLAT in np, and the PARIS trick is not indicated
+
+**First, the trap that makes any np > 1 number on this machine meaningless unless it is avoided.**
+A single-GPU node cannot measure MPI scaling: at np = 2 and 4 on CUDA *every* timer scales up by
+the same factor (Hysing 36.5 → 516 → 1035 ms/step; the exchange share 0.89 → 1.88 → 1.89 %), which
+is the signature of the CUDA contexts time-slicing one device, not of communication. And on
+host-openmp, `mpirun --bind-to none` with `OMP_PROC_BIND=spread` makes np = 2 **twelve times
+SLOWER** than np = 1 (packed 1.42 → 17.3 s/step at identical pressure iterations), because both
+ranks' OpenMP pools spread over the same 48 cores. **One pinned thread per rank
+(`OMP_NUM_THREADS=1 mpirun --bind-to core`) is the only configuration on this host that measures
+anything**, and it scales properly:
+
+| case | np | ms/step | speedup | **g=3 fill ms/step** | **share of step** | pressure |
+|---|---|---|---|---|---|---|
+| Hysing 1 64×4×128 | 1 | 131.9 | 1.00 | 2.343 | 1.78 % | 15/600 |
+| | 2 | 74.1 | 1.78 | 1.468 | 1.98 % | 15/600 |
+| | 4 | 46.7 | 2.83 | 1.035 | 2.22 % | 15/600 |
+| E7 packed 64×64×160 | 1 | 4043 | 1.00 | 522.9 | **12.93 %** | 17/600 |
+| | 2 | 2161 | 1.87 | 277.8 | **12.86 %** | 17/600 |
+| | 4 | 1374 | 2.94 | 169.5 | **12.34 %** | 17/600 |
+
+**The verdict is unambiguous and it is a NEGATIVE result for the PARIS trick.** On the case where
+the g = 3 stage is expensive (the packing, 12.9 % of the step) its share does not move at all from
+np = 1 to np = 4 — it *falls* slightly. A stage whose cost is the same fraction at np = 1, where
+there is no message at all, is not paying for message depth: it is paying for the per-cell FILL
+work (item 1 point 3 — the wetting normals, the θ pass and the three-pass band fill, run three
+times a step). PARIS's partial-column-sum halo-2 construction halves the DEPTH of the exchanged
+band; here that would attack a term that is at most the 1.8–2.2 % the all-fluid case shows, and
+would leave the 12.9 % untouched. **Not worth it.** The cheap lever on that 12.9 %, if anyone wants
+it, is to notice that the wall geometry (`n_w`, the θ field, the fluid-only Youngs normals of the
+*wall* rows) is a property of the SOLID and not of C, and is being rebuilt three times per step for
+the three sweeps.
+
+### Item 4 — the interface-weighted ORB. The W12 swarm has nothing to rebalance, and `rebalance_by_weights` CRASHES on the one that does
+
+(a) **The W12 64-bubble swarm is a 4×4×4 lattice**, i.e. exactly the configuration a cell-count ORB
+already balances perfectly. Measured at np = 4, 64³, that swarm's interfacial load is
+`[4574, 4574, 4574, 4574]`, **imbalance 1.0000 before and 1.0000 after** the interface-weighted
+redistribution, and ms/step 377.6 → 380.7 (+0.8 %, i.e. the migration's cost and nothing else). *The
+lever cannot be measured on the scene the work order names.* The scene it is for is a swarm that has
+not spread — 64 markers in the bottom half (`--layout plume` in `tests/study/vof_orb_weights.py`),
+where the plain ORB reads:
+
+| scene (np = 4) | mixed cells per rank | imbalance (mixed) | imbalance (cells) |
+|---|---|---|---|
+| W12 lattice, 64³ | 4574 / 4574 / 4574 / 4574 | **1.0000** | 1.0000 |
+| plume, 64³ | 2652 / 2785 / 3162 / 3106 | **1.0806** | 1.0000 |
+| plume, 48³ | 3788 / 1718 / 2204 / 773 | **1.7862** | **1.7778** |
+
+(the 48³ row is also a reminder that the *cell-count* ORB is itself 1.78 out of balance on a grid
+whose axis is 16·3 — the aligned-ORB power-of-two snapping of `docs/DECOMPOSITION_AND_MULTIGRID.md`
+§2, not a VoF matter.)
+
+(b) **OPEN DEFECT, and it is why there is no "after" column: `rebalance_by_weights` corrupts the
+heap when the weighted ORB actually MOVES the partition on a VoF run.** Reproducer:
+
+```
+PYTHONPATH=<build_mpi_omp> OMP_NUM_THREADS=1 mpirun -np 4 --bind-to core \
+  python tests/study/vof_orb_weights.py --n 48 --steps 8 --warm 3 --w 8 --layout plume
+```
+
+fails immediately after the `rebalance_by_weights` call with `free(): invalid pointer` /
+`malloc(): unsorted double linked list corrupted` inside `_flow…so`, or SIGSEGV at address 0x20,
+on 2 of 4 ranks. It is **pre-existing**, not a WO-V9 regression: it reproduces identically on a
+binary built before this branch's curvature change. It is conditional on the partition MOVING —
+the same call with the same weights on the *lattice* swarm (whose weighted and unweighted
+partitions coincide) completes, and a minimal 32³ VoF + surface-tension reproducer with a
+half-domain or a spherical-shell weight field completes too. Suspects, in the order worth checking:
+`IbmSolver::redistribute`'s `scatterPadded` memcpy is sized from `newDec.block(rank)` while the
+field it writes was reallocated by `allocateBlock`, and step 5 re-runs `setSolid` (which rebuilds
+the VoF block) *after* the fields have already been scattered once.
+
+(c) **The block gather/scatter packing, device vs host, on the QUIET machine — W12's open number.**
+64-marker swarm, 48³, kinematic `advect_vof_blocks`, min of 3 alternated repetitions:
+
+| staging | ms/step (min of 3) | mean ± sd |
+|---|---|---|
+| **device** | **20.205** | 20.379 ± 0.173 |
+| host | 37.351 | 37.518 ± 0.207 |
+
+**1.849×**, with the marker volumes agreeing to `|d| = 0.000e+00`. This **confirms W12's quiet 1.69×
+and refutes its contended 0.80×**: the device-resident packing is the right design and the
+inversion W12 saw was the contention it said it was.
+
+### Item 5 — the lever that IS justified, and what it measured
+
+Of the work order's four candidates, the profile rules out three: batching the per-piece block
+kernels (the block path is not in any of the five cases, and its packing is already 1.85× ahead —
+item 4c), a fused reconstruct+flux kernel (reconstruct + fluxes together are 0.3–2.9 % of the
+step), and the PARIS halo trick (item 3). The fourth — **the curvature cascade over a worklist
+instead of the band** — is the one the numbers justify, and it is what shipped.
+
+The instrument first: the cascade's own passes, CUDA, ms/step.
+
+| case | pass | dense | compacted |
+|---|---|---|---|
+| droplet 128³ | compaction scans | – | 0.323 |
+| | PLIC planes | 0.230 | 0.149 |
+| | tier 1/2 height functions | 0.384 | 0.164 |
+| | **tier 3 PV paraboloid** | **15.588** | **7.800** |
+| | branch census | 0.036 | 0.037 |
+| | **curvature total** | **16.440** | **8.659** |
+
+**The whole curvature stage is the tier-3 PLIC-volumetric fallback** (95 % of it on the droplet,
+80 % on the packed column, 96 % on the ctest's 24³ blob) — not the height functions, not the plane
+pass. That is the V3 rung's own documented behaviour (the fallback fires on 19 % of interfacial
+cells at D/Δ ≈ 40 and on 100 % below 5 cells/diameter) meeting the fact that the fallback is a 5³
+Wendland-weighted 6-parameter fit and everything else is a column sum.
+
+Measured gain, CUDA, `set_vof_curvature_worklist(True)` (the new default) against `False`:
+
+| case | curvature dense | curvature compacted | **curvature gain** | step OFF | step ON | **step gain** |
+|---|---|---|---|---|---|---|
+| droplet 48³ | 7.353 | 5.300 | **1.39×** | 38.15 | 36.14 | **−5.3 %** |
+| droplet 64³ | 7.160 | 5.355 | **1.34×** | 48.16 | 46.33 | **−3.8 %** |
+| droplet 80³ | 9.788 | 5.495 | **1.78×** | 74.35 | 69.75 | **−6.2 %** |
+| droplet 96³ | 12.788 | 5.579 | **2.29×** | 101.29 | 93.96 | **−7.2 %** |
+| droplet 112³ | 13.164 | 8.581 | **1.53×** | 152.57 | 148.04 | −3.0 % |
+| droplet 128³ | 16.424 | 8.648 | **1.90×** | 212.60 | 204.78 | **−3.7 %** |
+| E7 packed 64×64×160 | 5.023 | 5.937 | 0.85× | 98.95 | 99.92 | +1.0 % |
+| E6 trickle 48×48×96 | 1.510 | 1.819 | 0.83× | 34.37 | 34.69 | +0.9 % |
+
+and on **host-openmp** it is a small loss everywhere (droplet 128³ curvature 33.4 → 40.7 ms, of
+which 5.4 ms is the two scans), invisible at the step level (1845.9 vs 1800.2 ms, inside that
+case's own spread).
+
+**Bit-identity**: `max|d| = 0.000e+00` on C, u, v, w, P over 30 steps, all-fluid and cut-cell,
+both backends (ctest `vof_timing` T3). It is a re-ordering of independent per-cell work and nothing
+else — which is exactly why the two kernels were made to share one lifted body rather than being
+written twice.
+
+**Why the default is ON despite two losing rows.** The wins are 1.3–2.3× on the curvature and
+−3.0 to −7.2 % on the STEP across six resolutions of the free-surface family, reproducible and
+monotone in the amount of fallback work. The losses are +0.9 % and +1.0 % of the step on the two
+packings — at or inside those cases' own repeat spread (the packed case's five independent 20-step
+repeats in this session span 98.7…99.9 ms, 1.2 %), while the *curvature-stage* loss (15–18 %) is
+real but is 15–18 % of a 4.5–6 % item. A packing run that wants that 1 % back has
+`set_vof_curvature_worklist(False)`.
+
+**What decides the sign, measured but not turned into an AUTO rule.** The compacted cascade has a
+floor of ~5.1–5.4 ms/step on this GPU that is independent of grid size from 24³ to 96³, i.e. it is
+launch-and-occupancy bound on the few hundred to few thousand cells the fallback actually serves;
+the dense cascade instead grows with the region. Compaction therefore wins wherever the dense
+region sweep would cost more than that floor. Neither the interfacial-cell count nor the
+interfacial fraction predicts the crossover on its own — droplet 40³ wins at 1879 interfacial cells
+while the packed column loses at 1817, and the packed column has 2.7× the interfacial fraction of
+the trickle bed and loses by the same margin — so an AUTO rule would have been fitted to two points
+and was not written. The honest statement is the table.
+
+### What could NOT be measured, and why
+
+* **Real MPI scaling of the g = 3 halo.** One node, one GPU. Every CUDA np > 1 number in this entry
+  is device time-slicing (item 3); the host-openmp pinned ladder is a genuine measurement of the
+  *fraction* but of a CPU code, and it goes only to np = 4 on a single socket. The conclusion that
+  the PARIS trick is not indicated rests on the *np-independence of the fraction*, which is robust
+  to that (a stage that is 12.9 % of the step at np = 1, where no message exists, cannot be
+  message-bound), not on the absolute numbers.
+* **The interface-weighted ORB's "after".** Blocked by the `rebalance_by_weights` heap corruption
+  (item 4b). The before-imbalances are recorded so the fix has a target.
+* **The np = 4 host-openmp packed run at `--bind-to none`** was abandoned after np = 2 measured
+  17.3 s/step; it would have taken the whole budget to measure a binding artefact.
+* **Whether the ~5 ms compacted-cascade floor is the fallback kernel's occupancy or a fence.** The
+  breakdown attributes it to `vof::curv::pv_list`, but no profiler run (nsys/ncu) was made.
+
+---
 ## WO-P3g findings — the second-order interfacial energy operator: gates (a) and (c) PASS at round-off, gate (d) CLOSES at Ja 0.5 (0.027 %) and the mesh ladder stops being anti-convergent, gate (b) and Ja 2 do not — 2026-09-04, Opus
 
 Branch `vof-p3g`, worktree `../flow-p3g`, from `origin/main` at `23900eb`. Backend **nvidia-cuda**

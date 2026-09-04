@@ -1990,7 +1990,11 @@ class Solver {
     // Phase change (rungs P0/P1, WO-P01): mdot + the PLIC areas/normals from (C^n, T^n), the
     // divergence source deposit read by project(), and the interface regression applied to the
     // SAME C^n the planes came from. No-op (byte-identical) unless enable_phase_change ran.
-    phaseChangeStep();
+    {
+      const double _t0 = vofTick();  // WO-V9
+      phaseChangeStep();
+      vofAdd(vt_.phaseChange, _t0);
+    }
     // Multiphysics: refresh material properties / body forces from the current fields (frozen over
     // the step). No-op (byte-identical) when no closure is registered.
     updateProperties();
@@ -2005,7 +2009,11 @@ class Solver {
     fillDragBetaGhosts();
     // Rung V4 (WO-P): the interface curvature of the colour field this step will run with, and the
     // explicit capillary stability check. No-op (byte-identical) unless set_surface_tension ran.
-    updateVofCurvature();
+    {
+      const double _t0 = vofTick();  // WO-V9
+      updateVofCurvature();
+      vofAdd(vt_.curvature, _t0);
+    }
     // eps-conservative porous momentum: the volume-averaged time term is (eps_f rho/dt) u, i.e.
     // the variable-density machinery with the effective density rho_eff = eps*rho, refreshed from
     // the just-deposited eps every step (eps ghosts are already filled by the coupling driver, so
@@ -2072,10 +2080,13 @@ class Solver {
       // at the same place, and with the same face difference, as the incremental -grad(P^n) just
       // above it. Independent of the time term and the advection form, hence additive rather than a
       // fifth RHS kernel. Gated: byte-identical when surface tension is off.
-      if (csfActive() && !coloFF)
+      if (csfActive() && !coloFF) {
+        const double _t0 = vofTick();  // WO-V9
         for (int c = 0; c < 3; ++c)
           vofBlockCsf() ? addCsfRhsBlocks(c)
                         : (csfMode_ == 0 ? addCsfRhs(c) : addCsfRhsCellInterp(c));
+        vofAdd(vt_.csf, _t0);
+      }
       // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
       // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies
       // to the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC
@@ -2162,6 +2173,13 @@ class Solver {
     // scalar is registered.
     advanceScalars();
     tStep_ = phaseTick() - ts0;
+    if (vofTiming_) {  // WO-V9: the coarse phases, summed over the profiled window
+      tStepSum_ += tStep_;
+      tPredSum_ += tPredictor_;
+      tMomSum_ += tMomentum_;
+      tProjSum_ += tProjection_;
+      ++vt_.steps;
+    }
   }
 
   // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
@@ -2367,6 +2385,56 @@ class Solver {
   double lastPredictorSeconds() const { return tPredictor_; }
   double lastMomentumSeconds() const { return tMomentum_; }
   double lastProjectionSeconds() const { return tProjection_; }
+  // ---- WO-V9: the VoF pipeline's own per-stage timers ----------------------------------------
+  //
+  // `set_vof_timing(True)` arms them; they are OFF by default and, when off, cost one predictable
+  // branch per stage and no fence. A phase boundary on a device backend has to fence or the
+  // queued work of one stage is billed to the next — the same rule `phaseTick()` already applies
+  // to the step's three coarse phases — so the boundaries fence WHEN ARMED and only then. A fence
+  // reorders nothing and computes nothing: the gate is that the same run with timing on and off
+  // produces bit-identical fields (`tests/kokkos/test_vof_timing.cpp`).
+  //
+  // The stages are cumulative over steps since the last reset; `steps` counts step() calls with
+  // the instrument armed, so every number divides down to a per-step cost.
+  struct VofTiming {
+    double advect = 0.0;      ///< the colour advection stage as a whole (advectVof)
+    double bridge = 0.0;      ///< ... of which: the G=2 <-> g=3 bridges + the C ghost policy
+    double momAdvect = 0.0;   ///< the momentum-consistent colour+rho^c u stage (advectVofMomentum)
+    double momBridge = 0.0;   ///< ... of which: its bridges
+    double curvature = 0.0;   ///< the V3 height-function cascade + the capillary dt check
+    double csf = 0.0;         ///< the V4 balanced-force CSF added to the three momentum RHSs
+    double phaseChange = 0.0; ///< the Part II phase-change stage (mdot, deposit, regression)
+    long steps = 0;
+  };
+  void setVofTiming(bool on) {
+    vofTiming_ = on;
+    vofAdv_.timingOn = on;
+    vofCurv_.timingOn = on;
+    resetVofTiming();
+  }
+  bool vofTiming() const { return vofTiming_; }
+  void resetVofTiming() {
+    vt_ = VofTiming();
+    vofAdv_.resetTiming();
+    vofCurv_.resetTiming();
+    tStepSum_ = tPredSum_ = tMomSum_ = tProjSum_ = 0.0;
+  }
+  const VofTiming& vofTimingReport() const { return vt_; }
+  const vof::WyAdvector::Timing& vofKernelTiming() const { return vofAdv_.timing(); }
+  const vof::VofCurvature::Timing& vofCurvatureTiming() const { return vofCurv_.timing(); }
+  /// `VofCurvature::useWorklist` — run the height-function cascade and the PV fallback over a
+  /// COMPACTED list of the interfacial cells instead of over the whole inner region. See the
+  /// binding docstring and the WO-V9 findings for what it is worth and why.
+  void setVofCurvatureWorklist(bool on) { vofCurv_.useWorklist = on; }
+  bool vofCurvatureWorklist() const { return vofCurv_.useWorklist; }
+  double vofTimingStepSeconds() const { return tStepSum_; }
+  double vofTimingPredictorSeconds() const { return tPredSum_; }
+  double vofTimingMomentumSeconds() const { return tMomSum_; }
+  double vofTimingProjectionSeconds() const { return tProjSum_; }
+  /// `WyAdvector::useWorklist` — the compaction of the PLIC reconstruction pass onto the mixed
+  /// cells. Pure optimization: off must reproduce the same field bit for bit.
+  void setVofWorklist(bool on) { vofAdv_.useWorklist = on; }
+  bool vofWorklist() const { return vofAdv_.useWorklist; }
   double lastPressureAllreduceSeconds() const { return mg_.allreduceSeconds(); }
   long lastPressureAllreduceCount() const { return mg_.allreduceCount(); }
   int nx() const { return nx_; }
@@ -6872,6 +6940,7 @@ class Solver {
     vofBlocks_->curvProto.ptWeightWidth = vofCurv_.ptWeightWidth;
     vofBlocks_->curvProto.cosMin = vofCurv_.cosMin;
     vofBlocks_->curvProto.useMixedHeightFit = vofCurv_.useMixedHeightFit;
+    vofBlocks_->curvProto.useWorklist = vofCurv_.useWorklist;
     vofBlocks_->enableCsf(sigmaCsf_);
     const long len3 = static_cast<long>(e3_.x) * e3_.y * e3_.z;
     for (int c = 0; c < 3; ++c) {
@@ -7494,8 +7563,12 @@ class Solver {
       return;
     }
     requireVofGeometry("enable_vof");
+    const double _tv0 = vofTick();  // WO-V9: the whole colour stage
+    double _tb = 0.0;               // ... of which the G=2 <-> g=3 bridges
+    const double _tb0 = vofTick();
     bridgeVelocityToVof();
     bridgeColourToVof();
+    vofAdd(_tb, _tb0);
     vofAdv_.resetBcFaceVolume();  // WO-R: the per-step boundary liquid ledger
     if (pcEnergy_) {
       // WO-P23: the CONSISTENT rho c_p T transport. The temperature rides the SAME sweeps, planes
@@ -7515,9 +7588,13 @@ class Solver {
     // but the property face means (rho_f in the momentum diagonal, the projection coefficient, the
     // face body force) read the ghost ring, so C's ghosts must be filled with the SAME policy rho
     // uses or the derived rho ghost is inconsistent with the interior at a boundary.
+    const double _tb1 = vofTick();
     copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
     zeroSolidColour();  // rung V5a: the canonical field carries 0 in solid cells, not the fill
     fillPropGhosts(cField_);
+    vofAdd(_tb, _tb1);
+    vofAdd(vt_.advect, _tv0);
+    vt_.bridge += _tb;
   }
 
   // --- momentum-consistent transport (rung V2b, WO-K) ------------------------------------------
@@ -7630,13 +7707,18 @@ class Solver {
           "call set_density_mode('variable').");
     if (vofMom_.phaseRhoG() != vofRhoG_ || vofMom_.phaseRhoL() != vofRhoL_)
       vofMom_.setPhaseDensities(vofRhoG_, vofRhoL_);
+    const double _tv0 = vofTick();  // WO-V9: the whole colour + momentum stage
+    double _tb = 0.0;
+    const double _tb0 = vofTick();
     bridgeVelocityToVof();
     bridgeColourToVof();
+    vofAdd(_tb, _tb0);
     vofAdv_.resetBcFaceVolume();  // WO-R: the per-step boundary liquid ledger
     vofMom_.advect(vofAdv_, dt_, vofStep_++);
     vofHarvestBcVolumes();
     // Colour back to the G=2 registry mirror (same contract as advectVof), and the advected
     // velocity back onto the solver's velocity index convention.
+    const double _tb1 = vofTick();
     copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
     zeroSolidColour();
     fillPropGhosts(cField_);
@@ -7645,6 +7727,9 @@ class Solver {
     // and there is no shift here to get wrong.
     for (int c = 0; c < 3; ++c)
       copyInner(uAdv_[c], e_, G, CCConst(vofMom_.advectedVelocity(c)), e3_, kVofG);
+    vofAdd(_tb, _tb1);
+    vofAdd(vt_.momAdvect, _tv0);
+    vt_.momBridge += _tb;
   }
 
 
@@ -9962,6 +10047,22 @@ class Solver {
   double lastOuterCorr_ = 0.0;
   // per-step phase timers (seconds, this rank; see lastStepSeconds)
   double tStep_ = 0.0, tPredictor_ = 0.0, tMomentum_ = 0.0, tProjection_ = 0.0;
+  // WO-V9: cumulative VoF-stage timers (armed by set_vof_timing; inert and unfenced when off)
+  bool vofTiming_ = false;
+  VofTiming vt_;
+  double tStepSum_ = 0.0, tPredSum_ = 0.0, tMomSum_ = 0.0, tProjSum_ = 0.0;
+  double vofTick() const {
+    if (!vofTiming_)
+      return 0.0;
+    Kokkos::fence();
+    return vof::WyAdvector::wallSeconds();
+  }
+  void vofAdd(double& acc, double t0) {
+    if (!vofTiming_)
+      return;
+    Kokkos::fence();
+    acc += vof::WyAdvector::wallSeconds() - t0;
+  }
   // fence-then-read wall clock: phase boundaries must not attribute queued device work to the
   // next phase
   static double phaseTick() {

@@ -29,6 +29,7 @@
 
 #include <Kokkos_Core.hpp>
 #include <stdexcept>
+#include <chrono>
 
 #include "mac_stencils.hpp"  // peclet::flow::SExec, SField, I3, L3
 #include "vof/advect_wy.hpp"  // wyIsMixed, wyReconstructCell
@@ -42,6 +43,172 @@ namespace peclet::flow::vof {
 KOKKOS_INLINE_FUNCTION bool vofIsInterface(double c, double eps) {
   return c > eps && c < 1.0 - eps;
 }
+
+/// WO-V9 — the per-cell bodies of the two cascade tiers, lifted VERBATIM out of the kernels they
+/// used to be written inline in, so the dense (whole-region) and the compacted (interfacial-cell
+/// list) kernels below can share ONE body instead of two copies that could drift apart. The only
+/// substitution is the cell index: `i` is a parameter instead of `L3(x, y, z, e)`, and tier 3's
+/// neighbour index `L3(x+ox, y+oy, z+oz, e)` becomes the identical `i + ox + oy*sy + oz*sz` (the
+/// same integers, by the definition of L3). Nothing else changed, which is what lets the ctest
+/// gate the compaction as bitwise.
+template <class SF>
+KOKKOS_INLINE_FUNCTION void curvHeightCell(long i, SF c, SF mx, SF my, SF mz, SF al, SF kap, SF br,
+                                           long s0, long s1, long s2, double mtol, double ptW,
+                                           double ieps, bool forceFb, bool oneDir, bool useFit) {
+  const long st[3] = {s0, s1, s2};
+        kap(i) = 0.0;
+        if (!vofIsInterface(c(i), ieps)) {
+          br(i) = static_cast<double>(kCurvNone);
+          return;
+        }
+        if (forceFb) {
+          br(i) = -1.0;
+          return;
+        }
+        // Order the three column directions by the cell's own |n_d|. The normal is used as a
+        // CATEGORICAL selector only — it is never differenced (see curvature.hpp).
+        const double am[3] = {Kokkos::fabs(mx(i)), Kokkos::fabs(my(i)), Kokkos::fabs(mz(i))};
+        int ord[3] = {0, 1, 2};
+        for (int p = 1; p < 3; ++p)  // insertion sort, descending
+          for (int q = p; q > 0 && am[ord[q]] > am[ord[q - 1]]; --q) {
+            const int t = ord[q];
+            ord[q] = ord[q - 1];
+            ord[q - 1] = t;
+          }
+        const int ntry = oneDir ? 1 : 3;
+        for (int t = 0; t < ntry; ++t) {
+          const int d = ord[t];
+          const int d1 = (d + 1) % 3, d2 = (d + 2) % 3;
+          const long sd = st[d], s1 = st[d1], s2 = st[d2];
+          double hh[9];
+          int orient0 = 0;
+          bool ok = true;
+          for (int q = 0; q < 3 && ok; ++q)
+            for (int p = 0; p < 3 && ok; ++p) {
+              const long base = i + (p - 1) * s1 + (q - 1) * s2;
+              double col[kHfColumn];
+              for (int k = 0; k < kHfColumn; ++k)
+                col[k] = c(base + (k - kHfColumn / 2) * sd);
+              double h;
+              int orient;
+              if (!hfColumnHeight(col, kHfColumn, h, orient, mtol)) {
+                ok = false;
+                break;
+              }
+              if (orient0 == 0)
+                orient0 = orient;
+              else if (orient != orient0) {
+                ok = false;  // the nine columns do not describe one single-valued surface
+                break;
+              }
+              hh[p + 3 * q] = h;
+            }
+          if (!ok)
+            continue;
+          kap(i) = hfPatchKappa(hh);
+          br(i) = static_cast<double>(t == 0 ? kCurvHf : kCurvHfMixed);
+          return;
+        }
+
+        // Tier 2b — the MIXED height function. No direction gives nine consistent columns; pool
+        // the interface positions of whichever of the 27 columns DO close and fit a paraboloid
+        // through them in the target's own frame. Every cell it reads is inside the same
+        // 3x3x7-per-direction footprint tier 1 already used, so it costs no extra halo.
+        if (useFit) {
+          const double m0 = mx(i), m1 = my(i), m2 = mz(i);
+          const double nsq = m0 * m0 + m1 * m1 + m2 * m2;
+          if (nsq > 0.0) {
+            const double invn = 1.0 / Kokkos::sqrt(nsq);
+            const double nn[3] = {m0 * invn, m1 * invn, m2 * invn};
+            double t1[3], t2[3];
+            curvFrame(nn, t1, t2);
+            double vtx[8][3], ctr[3], area;
+            const int nvt = plicPolygon(m0, m1, m2, al(i), vtx);
+            polygonAreaCentroid(vtx, nvt, ctr, area);
+            const double org[3] = {ctr[0] - 0.5, ctr[1] - 0.5, ctr[2] - 0.5};
+            PtFit pf;
+            ptFitInit(pf);
+            for (int d = 0; d < 3; ++d) {
+              const int d1 = (d + 1) % 3, d2 = (d + 2) % 3;
+              const long sd = st[d], s1 = st[d1], s2 = st[d2];
+              for (int q = -1; q <= 1; ++q)
+                for (int p = -1; p <= 1; ++p) {
+                  const long base = i + p * s1 + q * s2;
+                  double col[kHfColumn];
+                  for (int k = 0; k < kHfColumn; ++k)
+                    col[k] = c(base + (k - kHfColumn / 2) * sd);
+                  double hv;
+                  int orient;
+                  if (!hfColumnHeight(col, kHfColumn, hv, orient, mtol))
+                    continue;
+                  double X[3];
+                  X[d1] = static_cast<double>(p);
+                  X[d2] = static_cast<double>(q);
+                  X[d] = orient * hv;  // the interface POSITION along d (h is the signed height)
+                  ptFitAdd(pf, X, org, t1, t2, nn, ptW);
+                }
+            }
+            double a[6];
+            bool red = false;
+            if (pf.npt >= 6 && ptFitSolve(pf, a, red) && !red) {
+              kap(i) = paraboloidKappa(a);
+              br(i) = static_cast<double>(kCurvHfFit);
+              return;
+            }
+          }
+        }
+        br(i) = -1.0;  // to the fallback
+}
+
+template <class SF>
+KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, SF c, SF mx, SF my, SF mz, SF al, SF kap,
+                                             SF br, long sy, long sz, int gr, double dW,
+                                             double cmin, double ieps) {
+        if (br(i) >= 0.0)
+          return;
+
+        const double m0 = mx(i), m1 = my(i), m2 = mz(i);
+        const double n2 = m0 * m0 + m1 * m1 + m2 * m2;
+        if (!(n2 > 0.0)) {
+          kap(i) = 0.0;
+          br(i) = static_cast<double>(kCurvNoEstimate);
+          return;
+        }
+        const double invn = 1.0 / Kokkos::sqrt(n2);
+        const double nn[3] = {m0 * invn, m1 * invn, m2 * invn};
+        double t1[3], t2[3];
+        curvFrame(nn, t1, t2);
+
+        // Frame origin: the target cell's own PLIC centroid, in target-centred cell units.
+        double v[8][3], ctr[3], area;
+        const int nv = plicPolygon(m0, m1, m2, al(i), v);
+        polygonAreaCentroid(v, nv, ctr, area);
+        const double org[3] = {ctr[0] - 0.5, ctr[1] - 0.5, ctr[2] - 0.5};
+
+        PvFit fit;
+        pvFitInit(fit);
+        for (int oz = -gr; oz <= gr; ++oz)
+          for (int oy = -gr; oy <= gr; ++oy)
+            for (int ox = -gr; ox <= gr; ++ox) {
+              const long j = i + (long)ox + (long)oy * sy + (long)oz * sz;
+              if (!vofIsInterface(c(j), ieps))
+                continue;
+              const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
+                                     static_cast<double>(oz)};
+              pvFitAdd(fit, mx(j), my(j), mz(j), al(j), off, org, t1, t2, nn, dW, cmin);
+            }
+
+        double a[6];
+        bool red = false;
+        if (!pvFitSolve(fit, a, red)) {
+          kap(i) = 0.0;
+          br(i) = static_cast<double>(kCurvNoEstimate);
+          return;
+        }
+        kap(i) = paraboloidKappa(a);
+        br(i) = static_cast<double>(red ? kCurvPvReduced : kCurvPv);
+}
+
 
 /// Curvature of the colour field on an extended (inner + ghost) block.
 class VofCurvature {
@@ -77,9 +244,54 @@ class VofCurvature {
     alpha_ = SField("vof::curv::alpha", len_);
     kappa_ = SField("vof::curv::kappa", len_);
     branch_ = SField("vof::curv::branch", len_);
+    // WO-V9: the compaction lists. The grown one covers every cell `reconstructPlanes` writes; the
+    // inner one every cell the cascade runs on. Sized at the full region (worst case: an entirely
+    // interfacial block) so a scan can never overflow them.
+    const long grown = (long)(n_.x + 2 * kPvHalf) * (n_.y + 2 * kPvHalf) * (n_.z + 2 * kPvHalf);
+    listG_ = LField("vof::curv::listG", grown);
+    listI_ = LField("vof::curv::listI", (long)n_.x * n_.y * n_.z);
   }
 
   bool ready() const { return kappa_.extent(0) != 0; }
+
+  // ---- WO-V9: compaction, and the per-pass timers --------------------------------------------
+  //
+  // The cascade is the most divergent kernel in the VoF pipeline: on a resolved droplet the
+  // interfacial cells are ~0.5 % of the block, so a dense `parallel_for` puts at most one or two
+  // active lanes in a warp and the other thirty run the guard and idle for the whole height
+  // function.  Compacting the interfacial cells into a contiguous list first makes those warps
+  // full.  It is a pure re-ordering — every cell reads the same neighbours and writes the same
+  // value — so the two paths are BIT-IDENTICAL and the ctest gates that.
+  //
+  // The timers follow `WyAdvector`'s rule exactly: fence at the boundaries only when armed.
+  struct Timing {
+    double planes = 0.0;    ///< the PLIC pass over the grown region
+    double height = 0.0;    ///< tiers 1/2, the height-function cascade
+    double fallback = 0.0;  ///< tier 3, the PLIC-volumetric paraboloid
+    double census = 0.0;    ///< the branch census reduction
+    double compact = 0.0;   ///< the two parallel_scans (0 when the compaction is off)
+    long calls = 0;
+  };
+  bool useWorklist = true;
+  bool timingOn = false;
+  Timing tm;
+  void resetTiming() { tm = Timing(); }
+  const Timing& timing() const { return tm; }
+  double tick_() const {
+    if (!timingOn)
+      return 0.0;
+    Kokkos::fence();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+  void addT_(double& acc, double t0) {
+    if (!timingOn)
+      return;
+    Kokkos::fence();
+    acc += std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+               .count() -
+           t0;
+  }
   I3 inner() const { return n_; }
   I3 extent() const { return e_; }
   int ghost() const { return g_; }
@@ -155,10 +367,78 @@ class VofCurvature {
   Stats compute(SField c) {
     if (!ready())
       throw std::runtime_error("peclet::flow::vof::VofCurvature::compute: init() not called");
+    const double t0 = tick_();
+    if (useWorklist)
+      compact(c);
+    addT_(tm.compact, t0);
+    const double t1 = tick_();
     reconstructPlanes(c);
+    addT_(tm.planes, t1);
+    const double t2 = tick_();
     heightPass(c);
+    addT_(tm.height, t2);
+    const double t3 = tick_();
     fallbackPass(c);
-    return census();
+    addT_(tm.fallback, t3);
+    const double t4 = tick_();
+    const Stats s = census();
+    addT_(tm.census, t4);
+    ++tm.calls;
+    return s;
+  }
+
+  /// The two compaction scans: `listG_` = every interfacial cell of the GROWN region (what
+  /// `reconstructPlanes` reconstructs), `listI_` = every interfacial cell of the INNER region
+  /// (what the cascade runs on).  Same predicate as the passes, so the compacted and dense paths
+  /// visit exactly the same cells.
+  void compact(SField c) {
+    const I3 e = e_, n = n_;
+    const int g = g_, gr = kPvHalf;
+    const double ieps = interfaceEps;
+    {
+      const int rx = n.x + 2 * gr, ry = n.y + 2 * gr, rz = n.z + 2 * gr;
+      const long region = (long)rx * ry * rz;
+      LField list = listG_;
+      long cnt = 0;
+      Kokkos::parallel_scan(
+          "vof::curv::compactG", Kokkos::RangePolicy<SExec>(SExec(), 0, region),
+          KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
+            const int ix = (int)(r % rx);
+            const int iy = (int)((r / rx) % ry);
+            const int iz = (int)(r / ((long)rx * ry));
+            const long i = L3(g - gr + ix, g - gr + iy, g - gr + iz, e);
+            if (vofIsInterface(c(i), ieps)) {
+              if (final)
+                list(upd) = i;
+              ++upd;
+            }
+          },
+          cnt);
+      Kokkos::fence();
+      nG_ = cnt;
+    }
+    {
+      const long region = (long)n.x * n.y * n.z;
+      const int nx = n.x, ny = n.y;
+      LField list = listI_;
+      long cnt = 0;
+      Kokkos::parallel_scan(
+          "vof::curv::compactI", Kokkos::RangePolicy<SExec>(SExec(), 0, region),
+          KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
+            const int ix = (int)(r % nx);
+            const int iy = (int)((r / nx) % ny);
+            const int iz = (int)(r / ((long)nx * ny));
+            const long i = L3(g + ix, g + iy, g + iz, e);
+            if (vofIsInterface(c(i), ieps)) {
+              if (final)
+                list(upd) = i;
+              ++upd;
+            }
+          },
+          cnt);
+      Kokkos::fence();
+      nI_ = cnt;
+    }
   }
 
   // The four passes below are PUBLIC only because nvcc forbids an extended __host__ __device__
@@ -174,6 +454,29 @@ class VofCurvature {
     const long sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
     SField mx = mx_, my = my_, mz = mz_, al = alpha_;
     const double ieps = interfaceEps;
+    if (useWorklist) {
+      // The same two things the dense kernel does, as two coherent kernels: a branchless zeroing
+      // sweep (a pure store, bandwidth-bound) and the MYC reconstruction over the compacted list.
+      // Every cell ends with exactly the value the dense kernel would have written.
+      Kokkos::parallel_for(
+          "vof::curv::planes_zero",
+          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(
+              SExec(), {g - gr, g - gr, g - gr},
+              {g + n.x + gr, g + n.y + gr, g + n.z + gr}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i = L3(x, y, z, e);
+            mx(i) = 0.0;
+            my(i) = 0.0;
+            mz(i) = 0.0;
+            al(i) = 0.0;
+          });
+      LField list = listG_;
+      Kokkos::parallel_for(
+          "vof::curv::planes_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nG_),
+          KOKKOS_LAMBDA(long t) { wyReconstructCell(c, list(t), sy, sz, mx, my, mz, al); });
+      Kokkos::fence();
+      return;
+    }
     Kokkos::parallel_for(
         "vof::curv::planes",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g - gr, g - gr, g - gr},
@@ -202,114 +505,38 @@ class VofCurvature {
     const double mtol = monoTol, ptW = ptWeightWidth, ieps = interfaceEps;
     const bool forceFb = debugForceFallback, oneDir = debugSingleDirection,
                useFit = useMixedHeightFit;
+    const long s0 = st[0], s1 = st[1], s2 = st[2];
+    if (useWorklist) {
+      // Reset every inner cell (branchless: a pure pair of stores), then run the cascade over the
+      // compacted interfacial list.  A non-interfacial cell ends at kappa = 0, branch = kCurvNone
+      // and an interfacial one at whatever the shared body writes -- the dense kernel's outcome,
+      // cell for cell.
+      Kokkos::parallel_for(
+          "vof::curv::hf_reset",
+          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                        {g + n.x, g + n.y, g + n.z}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i = L3(x, y, z, e);
+            kap(i) = 0.0;
+            br(i) = static_cast<double>(kCurvNone);
+          });
+      LField list = listI_;
+      Kokkos::parallel_for(
+          "vof::curv::hf_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nI_),
+          KOKKOS_LAMBDA(long t) {
+            curvHeightCell(list(t), c, mx, my, mz, al, kap, br, s0, s1, s2, mtol, ptW, ieps,
+                           forceFb, oneDir, useFit);
+          });
+      Kokkos::fence();
+      return;
+    }
     Kokkos::parallel_for(
         "vof::curv::hf",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
                                                       {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = L3(x, y, z, e);
-          kap(i) = 0.0;
-          if (!vofIsInterface(c(i), ieps)) {
-            br(i) = static_cast<double>(kCurvNone);
-            return;
-          }
-          if (forceFb) {
-            br(i) = -1.0;
-            return;
-          }
-          // Order the three column directions by the cell's own |n_d|. The normal is used as a
-          // CATEGORICAL selector only — it is never differenced (see curvature.hpp).
-          const double am[3] = {Kokkos::fabs(mx(i)), Kokkos::fabs(my(i)), Kokkos::fabs(mz(i))};
-          int ord[3] = {0, 1, 2};
-          for (int p = 1; p < 3; ++p)  // insertion sort, descending
-            for (int q = p; q > 0 && am[ord[q]] > am[ord[q - 1]]; --q) {
-              const int t = ord[q];
-              ord[q] = ord[q - 1];
-              ord[q - 1] = t;
-            }
-          const int ntry = oneDir ? 1 : 3;
-          for (int t = 0; t < ntry; ++t) {
-            const int d = ord[t];
-            const int d1 = (d + 1) % 3, d2 = (d + 2) % 3;
-            const long sd = st[d], s1 = st[d1], s2 = st[d2];
-            double hh[9];
-            int orient0 = 0;
-            bool ok = true;
-            for (int q = 0; q < 3 && ok; ++q)
-              for (int p = 0; p < 3 && ok; ++p) {
-                const long base = i + (p - 1) * s1 + (q - 1) * s2;
-                double col[kHfColumn];
-                for (int k = 0; k < kHfColumn; ++k)
-                  col[k] = c(base + (k - kHfColumn / 2) * sd);
-                double h;
-                int orient;
-                if (!hfColumnHeight(col, kHfColumn, h, orient, mtol)) {
-                  ok = false;
-                  break;
-                }
-                if (orient0 == 0)
-                  orient0 = orient;
-                else if (orient != orient0) {
-                  ok = false;  // the nine columns do not describe one single-valued surface
-                  break;
-                }
-                hh[p + 3 * q] = h;
-              }
-            if (!ok)
-              continue;
-            kap(i) = hfPatchKappa(hh);
-            br(i) = static_cast<double>(t == 0 ? kCurvHf : kCurvHfMixed);
-            return;
-          }
-
-          // Tier 2b — the MIXED height function. No direction gives nine consistent columns; pool
-          // the interface positions of whichever of the 27 columns DO close and fit a paraboloid
-          // through them in the target's own frame. Every cell it reads is inside the same
-          // 3x3x7-per-direction footprint tier 1 already used, so it costs no extra halo.
-          if (useFit) {
-            const double m0 = mx(i), m1 = my(i), m2 = mz(i);
-            const double nsq = m0 * m0 + m1 * m1 + m2 * m2;
-            if (nsq > 0.0) {
-              const double invn = 1.0 / Kokkos::sqrt(nsq);
-              const double nn[3] = {m0 * invn, m1 * invn, m2 * invn};
-              double t1[3], t2[3];
-              curvFrame(nn, t1, t2);
-              double vtx[8][3], ctr[3], area;
-              const int nvt = plicPolygon(m0, m1, m2, al(i), vtx);
-              polygonAreaCentroid(vtx, nvt, ctr, area);
-              const double org[3] = {ctr[0] - 0.5, ctr[1] - 0.5, ctr[2] - 0.5};
-              PtFit pf;
-              ptFitInit(pf);
-              for (int d = 0; d < 3; ++d) {
-                const int d1 = (d + 1) % 3, d2 = (d + 2) % 3;
-                const long sd = st[d], s1 = st[d1], s2 = st[d2];
-                for (int q = -1; q <= 1; ++q)
-                  for (int p = -1; p <= 1; ++p) {
-                    const long base = i + p * s1 + q * s2;
-                    double col[kHfColumn];
-                    for (int k = 0; k < kHfColumn; ++k)
-                      col[k] = c(base + (k - kHfColumn / 2) * sd);
-                    double hv;
-                    int orient;
-                    if (!hfColumnHeight(col, kHfColumn, hv, orient, mtol))
-                      continue;
-                    double X[3];
-                    X[d1] = static_cast<double>(p);
-                    X[d2] = static_cast<double>(q);
-                    X[d] = orient * hv;  // the interface POSITION along d (h is the signed height)
-                    ptFitAdd(pf, X, org, t1, t2, nn, ptW);
-                  }
-              }
-              double a[6];
-              bool red = false;
-              if (pf.npt >= 6 && ptFitSolve(pf, a, red) && !red) {
-                kap(i) = paraboloidKappa(a);
-                br(i) = static_cast<double>(kCurvHfFit);
-                return;
-              }
-            }
-          }
-          br(i) = -1.0;  // to the fallback
+          curvHeightCell(L3(x, y, z, e), c, mx, my, mz, al, kap, br, s0, s1, s2, mtol, ptW, ieps,
+                         forceFb, oneDir, useFit);
         });
     Kokkos::fence();
   }
@@ -322,55 +549,26 @@ class VofCurvature {
     const int g = g_, gr = kPvHalf;
     SField mx = mx_, my = my_, mz = mz_, al = alpha_, kap = kappa_, br = branch_;
     const double dW = weightWidth, cmin = cosMin, ieps = interfaceEps;
+    const long sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
+    if (useWorklist) {
+      // Tier 3 is a SUBSET of the interfacial cells (those tier 1/2 could not serve), so the
+      // interfacial list already removes the whole empty domain; the branch guard inside the body
+      // removes the rest.
+      LField list = listI_;
+      Kokkos::parallel_for(
+          "vof::curv::pv_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nI_),
+          KOKKOS_LAMBDA(long t) {
+            curvFallbackCell(list(t), c, mx, my, mz, al, kap, br, sy, sz, gr, dW, cmin, ieps);
+          });
+      Kokkos::fence();
+      return;
+    }
     Kokkos::parallel_for(
         "vof::curv::pv",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
                                                       {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = L3(x, y, z, e);
-          if (br(i) >= 0.0)
-            return;
-
-          const double m0 = mx(i), m1 = my(i), m2 = mz(i);
-          const double n2 = m0 * m0 + m1 * m1 + m2 * m2;
-          if (!(n2 > 0.0)) {
-            kap(i) = 0.0;
-            br(i) = static_cast<double>(kCurvNoEstimate);
-            return;
-          }
-          const double invn = 1.0 / Kokkos::sqrt(n2);
-          const double nn[3] = {m0 * invn, m1 * invn, m2 * invn};
-          double t1[3], t2[3];
-          curvFrame(nn, t1, t2);
-
-          // Frame origin: the target cell's own PLIC centroid, in target-centred cell units.
-          double v[8][3], ctr[3], area;
-          const int nv = plicPolygon(m0, m1, m2, al(i), v);
-          polygonAreaCentroid(v, nv, ctr, area);
-          const double org[3] = {ctr[0] - 0.5, ctr[1] - 0.5, ctr[2] - 0.5};
-
-          PvFit fit;
-          pvFitInit(fit);
-          for (int oz = -gr; oz <= gr; ++oz)
-            for (int oy = -gr; oy <= gr; ++oy)
-              for (int ox = -gr; ox <= gr; ++ox) {
-                const long j = L3(x + ox, y + oy, z + oz, e);
-                if (!vofIsInterface(c(j), ieps))
-                  continue;
-                const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
-                                       static_cast<double>(oz)};
-                pvFitAdd(fit, mx(j), my(j), mz(j), al(j), off, org, t1, t2, nn, dW, cmin);
-              }
-
-          double a[6];
-          bool red = false;
-          if (!pvFitSolve(fit, a, red)) {
-            kap(i) = 0.0;
-            br(i) = static_cast<double>(kCurvNoEstimate);
-            return;
-          }
-          kap(i) = paraboloidKappa(a);
-          br(i) = static_cast<double>(red ? kCurvPvReduced : kCurvPv);
+          curvFallbackCell(L3(x, y, z, e), c, mx, my, mz, al, kap, br, sy, sz, gr, dW, cmin, ieps);
         });
     Kokkos::fence();
   }
@@ -413,6 +611,8 @@ class VofCurvature {
   int g_ = 0;
   long len_ = 0;
   SField mx_, my_, mz_, alpha_, kappa_, branch_;
+  LField listG_, listI_;   // WO-V9: the compacted interfacial-cell lists
+  long nG_ = 0, nI_ = 0;   // ... and their lengths from the last compact()
 };
 
 }  // namespace peclet::flow::vof

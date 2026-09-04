@@ -196,6 +196,13 @@ add_test(NAME vof_surface_tension COMMAND test_vof_surface_tension)
 # VoF rung V5a (WO-Q): the colour field transported THROUGH an immersed solid — the openness
 # embed (G3), conservation of sum eps_eff*C through a sphere packing (G2), and the neutral 90-degree
 # solid-band fill measured as a contact angle (G5). PECLET_VOF_CUTCELL_LONG=0 runs the full sizes.
+# WO-V9: the profiling instrument is inert (timers on/off and worklist on/off bitwise).
+add_executable(test_vof_timing test_vof_timing.cpp)
+target_include_directories(test_vof_timing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_vof_timing PRIVATE Kokkos::kokkos)
+add_test(NAME vof_timing COMMAND test_vof_timing)
+
 add_executable(test_vof_cutcell test_vof_cutcell.cpp)
 target_include_directories(test_vof_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
                            ${CMAKE_CURRENT_SOURCE_DIR} ${CORE_INC})

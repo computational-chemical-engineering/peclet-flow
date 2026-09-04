@@ -589,6 +589,7 @@ class VofBlockSet {
     b.curv_.cosMin = curvProto.cosMin;
     b.curv_.interfaceEps = curvProto.interfaceEps;
     b.curv_.useMixedHeightFit = curvProto.useMixedHeightFit;
+    b.curv_.useWorklist = curvProto.useWorklist;  // WO-V9: the compaction follows the prototype
     const long len = static_cast<long>(b.adv_.extent().x) * b.adv_.extent().y * b.adv_.extent().z;
     for (int c = 0; c < 3; ++c)
       b.f_[c] = SField("vof::block::csf", len);

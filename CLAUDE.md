@@ -871,7 +871,10 @@ ranks are simply idle. The weighted-ORB assignment is rung W1 and those are the 
   templated pattern whose pack/unpack kernels run in the block's memory space, with a host staging
   copy only per MPI MESSAGE and none at all for the master's own cells. Bitwise inert.
   **1.69× on a quiet GPU; 0.80× on one saturated by five other jobs** — the ordering inverts under
-  contention because the per-piece kernels are launch-latency bound. Batching them is WO-V9's.
+  contention because the per-piece kernels are launch-latency bound. **Re-measured on a genuinely
+  idle machine (WO-V9): 20.21 vs 37.35 ms/step = 1.849×**, marker volumes identical to
+  `|d| = 0.000e+00`, which confirms the quiet number and settles that the inversion was the
+  contention and not the design.
 - **The block pool** (`set_vof_block_pool`, default on): advectors retired by a re-centring are
   recycled by exact extent, handed back zeroed, bitwise inert (gated). Hit rate is scene-dependent
   — ~100 % for a translating bubble, 4/60 on the strongly deforming LeVeque field.
@@ -973,9 +976,53 @@ balance exact, since the momentum time term and the face body force keep the ari
 Measured with it on: ∂P/∂z relative error **0.34** instead of 1e-15. It ships as a measured knob for
 the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
 
+**Where a two-phase step actually goes, and the one lever that was worth taking (WO-V9).**
+`set_vof_timing(True)` arms per-stage and per-kernel timers over the whole VoF pipeline and
+`vof_timing()` reports them in seconds since the last reset (the colour/momentum advection with its
+G=2↔g=3 bridges split out, the curvature cascade with its four passes, the CSF, the phase-change
+stage, and the advector's own reconstruct / fluxes / sweeps / clip / g=3 fill), alongside the
+step's three coarse phases over the same window. Stage boundaries fence **only when armed** — the
+rule `phaseTick()` already follows — and a run with the timers on is **bit-identical** to the same
+run with them off (ctest `vof_timing`). Profiled idle on an RTX 5080 over the five gallery cases
+(Hysing 1 64×4×128, the E7 packed column 64×64×160, the E6 trickle bed 48×48×96, a 128³ static
+droplet, a 96³ Scriven bubble):
+
+- **the pressure projection is 43–88 % of every step and the whole VoF pipeline is 4.7–18.5 %** —
+  so the VoF campaign's optimisation target is the pressure solve, not these kernels. On Hysing 1
+  the projection is 27.4 ms of a 31.2 ms step on 32 768 cells: launch latency, not arithmetic.
+- inside VoF the two big items are the **curvature cascade** (up to 7.8 % of the step) and the
+  **g = 3 colour FILL** (up to 6.2 % on CUDA, 15.9 % on host) — never the advection arithmetic,
+  which is 0.3–2.9 % everywhere. On a packing that "exchange" number is not communication: it is
+  the wetting-normal build, the θ pass and the three-pass solid-band fill, run once per sweep.
+- **on an idle GPU the CUDA backend is 2.8–7.6× faster than host-openmp at 8 threads** on these
+  cases, which inverts WO-V7's "host is competitive" — that was measured against a GPU carrying
+  five other jobs.
+- **`set_vof_curvature_worklist(bool)` (default ON) is the lever the numbers justified.** The
+  cascade's cost is 80–96 % the tier-3 PLIC-volumetric fallback, and running it (with the height
+  functions and the plane pass) over a compacted list of the interfacial cells instead of over the
+  whole inner region is **1.34–2.29× on the curvature and −3.0 to −7.2 % on the STEP** across six
+  resolutions of the static droplet, **bit-identical** (it is a re-ordering; the dense and compacted
+  kernels share one lifted per-cell body). It costs ~1 % of the step on the two packing cases,
+  where the fallback set is small enough that the compacted kernel is launch-bound — turn it off
+  there. `set_vof_worklist(bool)` is the same switch for the advector's reconstruction pass, which
+  is bit-neutral too and measured a *pessimisation* on 9 of 10 (case, backend) pairs, worth ≤1.6 %
+  of the step either way.
+- **the PARIS partial-column-sum halo trick is NOT indicated**: the g = 3 stage's share of the step
+  is flat in the rank count (12.93 / 12.86 / 12.34 % at np = 1 / 2 / 4 on the packed column), and a
+  stage that costs the same fraction at np = 1 — where there is no message at all — is not paying
+  for halo depth.
+- **`rebalance_by_weights` corrupts the heap on a VoF run whenever the new partition actually
+  differs from the old one** (`free(): invalid pointer` / SIGSEGV inside `redistribute`), which is
+  why the interface-weighted ORB could be measured only before and not after. Pre-existing, not a
+  VoF-side defect; reproducer and suspects in `doc/vof_workorders_v6.md`, WO-V9 item 4b.
+- MPI numbers on a single-GPU node are meaningless unless taken with **one pinned thread per rank**
+  (`OMP_NUM_THREADS=1 mpirun --bind-to core`): CUDA ranks time-slice one device, and on
+  host-openmp `--bind-to none` with `OMP_PROC_BIND=spread` makes np = 2 twelve times slower than
+  np = 1.
+
 Gates: `tests/kokkos` ctests `vof_plic`, `vof_advect`, `vof_twophase`, `vof_momentum`,
 `vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_wetting`, `vof_collocated`,
-`vof_phase_change`, `vof_blocks`;
+`vof_phase_change`, `vof_blocks`, `vof_timing`;
 `vof_curvature`, `vof_surface_tension`, `vof_cutcell`, `vof_bc`; `tests/kokkos_mpi`
 `vof_phase_change_mpi_np{1,2,4}`, `vof_bc_mpi_np{1,2,4}`, `vof_advect_mpi_np{1,2,4}`,
 `vof_twophase_mpi_np{1,2,4}`, `vof_momentum_mpi_np{1,2,4}`, `vof_curvature_mpi_np{1,2,4}`,
