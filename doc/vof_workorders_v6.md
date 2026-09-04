@@ -1193,6 +1193,47 @@ it run for six hours on one CPU node.
    and it will bite every future wall-turbulence case the suite runs.
 
 
+### W3 addendum — the 20-turnover TBFsolver reference, landed
+
+Job 26367537 finished: `t = 471.35` (20.0 eddy turnovers) in **6 h 25 min** on 64 genoa cores,
+COMPLETED, 24 output dumps. Statistics averaged over `t u_tau/h in [4, 20]` — a **16-turnover
+window**, which is the converged reference this rung set out to obtain and which no published
+source and no file in the TBFsolver repository provides.
+
+| | TBFsolver, `channel_18`, window [4, 20] turnovers |
+|---|---|
+| bulk `<alpha>` | **0.014920** (the case value to 5 figures) |
+| `<alpha>` at the centreline | **0.03260** |
+| peak `<u>_liq/u_tau` | **16.467 at y/h = 0.794** |
+| `<u>_liq/u_tau` at the centreline | **16.419** |
+| `u_tau` from the wall gradient | **0.040285, −5.1 %** of the imposed 0.042433 (walls 0.040792 / 0.039778, a 2.5 % asymmetry) |
+| `tauw` (time-averaged, both walls) | −3.2463e-3, i.e. **1.6232e-3 per wall** against the imposed 1.8006e-3 |
+| `u'_liq/u_tau` at y+ = 13.5 | **2.384** (peak **2.423** at y+ = 16.7) |
+
+**Two things the converged window says that the short ones could not.**
+
+1. **It is converged where it matters and drifting where it should.** Against the cumulative
+   windows of sections 6 and 9 (`[4, 4.24]` and `[4, 11.9]` turnovers) the centreline void fraction
+   ran 0.0328 → 0.0337 → **0.0326** and the velocity peak 16.56 → 16.33 → **16.47**, i.e. ±1.5 %
+   about the final value from the very first dump. The **off-axis peak position** tightened
+   monotonically, 0.881 → 0.806 → **0.794**, which is the bubble distribution still settling.
+2. **The turbulence is damped by the bubbles, not by the numerics.** `u'` at the buffer peak falls
+   from **3.28** over `[0.5, 1.5]` turnovers (section 8, before the bubbles have dispersed) to
+   **2.42** over `[4, 20]`, and `u_tau` at the wall falls with it, from +3.1 % to **−5.1 %** of the
+   imposed value. That is the physical signature of the case — core gas carrying a negative
+   streamwise force, extra drag met by a decelerating flow at fixed pressure gradient — and it is
+   the same sign and the same order as the deficit WO-W12 measured in peclet (−12.1 %) and this
+   campaign measured over the matched window (−14.2 %). **So peclet's `u_tau` deficit is not purely
+   an artefact: part of it is the case.** The remainder is the resolution finding of section 8 —
+   TBFsolver reaches −5.1 % with `u'` at 2.42, peclet reaches −14.2 % with `u'` at 1.00.
+
+Committed: `tests/study/channel_18/results/tbfsolver_final_4-20turnovers.npz` and the overlay
+`channel_18_peclet_vs_tbfsolver_converged.png` (peclet's `[0.5, 1.5]`-turnover window against this
+reference — the windows are NOT the same, which is why section 8's matched-window comparison stays
+the one to quote for cross-code agreement; this plot is peclet against the converged datum).
+Reproduced end to end by `bash collect.sh <dir>`, which located the final dump, converted it and
+plotted it without arguments.
+
 ## WO-V9 findings — the VoF performance profile, and the one lever the numbers justify — 2026-09-04, Opus
 
 Branch `vof-v9`, worktree `../flow-v9`, from `origin/main` at `40fc1b7`.
