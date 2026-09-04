@@ -746,7 +746,12 @@ class Solver {
     peclet::core::decomp::redistributeGridFields<double>(*dec_, newDec, rank, G, op, np, comm_);
 
     // 3. reallocate every buffer to the new block; re-init the halo + MG on the new partition.
+    //    `resizeForBlock` must run BETWEEN the two: `allocateBlock` only re-creates the buffers it
+    //    owns by name, and `initMpi` -> `buildVofBlock` already writes through `cField_`, which is
+    //    a registry alias. Without it the scatter below memcpy's the new padded extent into the
+    //    old allocation (ASan heap-buffer-overflow -> `free(): invalid pointer`).
     allocateBlock((int)nb.size[0], (int)nb.size[1], (int)nb.size[2]);
+    resizeForBlock();
     initMpi(newDec, comm_);
     // scatter a padded host buffer into a registered field's device buffer.
     auto scatterPadded = [&](const std::string& name, const std::vector<double>& src) {
@@ -765,6 +770,17 @@ class Solver {
     for (std::size_t k = 0; k < names.size(); ++k)
       if (names[k] != "sdf")
         scatterPadded(names[k], newHost[k]);
+    // 6. REFILL THE GHOSTS. `redistributeGridFields` moves the INNER cells only and says so
+    //    ("the caller refills ghosts with a halo exchange afterwards"); the padded destination
+    //    buffers were zero-initialised in step 1, so without this every migrated field enters the
+    //    next step with a zero halo on the new partition. Measured at np = 4 on the VoF gate: one
+    //    step after the move, du = 1.01e-01 against the single-rank reference (a run started
+    //    directly on the SAME weighted partition reproduces it to 6.5e-17), and 0.00e+00 with the
+    //    refill. np = 1/2 hid it because the new neighbour set happened to reproduce the old one.
+    for (std::size_t k = 0; k < names.size(); ++k)
+      fillGhosts(fields_.at(names[k]).data);
+    for (auto& sc : scalars_)
+      applyScalarBc(sc);  // a scalar's own domain BCs override the halo/periodic base
   }
   // Redistribute onto the weighted ORB of per-cell weights `w` (global x-fastest, gnx*gny*gnz). The
   // ergonomic Python entry point for load balancing: the caller passes a weight field (e.g. fluid
@@ -803,6 +819,22 @@ class Solver {
   // Resampled (clamp) to the ghost-inclusive face grid so the BC kernel indexes it directly by face
   // position.
   void setDomainBcProfile(int face, const std::vector<double>& prof, int nb, int nc) {
+    // The user's (nb, nc, 3) profile is KEPT so the resampling can be redone when the block
+    // changes size — the resampled buffer is indexed by LOCAL face position, so a redistribute
+    // that changes this rank's face grid invalidates it (see resampleBcProfile).
+    bcProfRaw_[face] = prof;
+    bcProfNb_[face] = nb;
+    bcProfRawNc_[face] = nc;
+    resampleBcProfile(face);
+    bc_[face] = 2;
+    hasBc_ = true;  // a profiled face is an inflow
+  }
+  // Resample the stored raw inlet profile of `face` onto THIS block's ghost-inclusive face grid.
+  void resampleBcProfile(int face) {
+    if (bcProfRaw_[face].empty())
+      return;
+    const std::vector<double>& prof = bcProfRaw_[face];
+    const int nb = bcProfNb_[face], nc = bcProfRawNc_[face];
     const int a = face / 2;
     const int dims[3] = {e_.x, e_.y, e_.z};
     const int bax = (a + 1) % 3, cax = (a + 2) % 3;
@@ -819,8 +851,6 @@ class Solver {
     Kokkos::deep_copy(pf, h);
     bcProf_[face] = pf;
     bcProfNc_[face] = Lc;
-    bc_[face] = 2;
-    hasBc_ = true;  // a profiled face is an inflow
   }
   // all-fluid + domain-BC pressure (CUDA set_pressure_geometry): same path as set_solid with an
   // open SDF.
@@ -2858,6 +2888,30 @@ class Solver {
     }
   }
   // --- rung W0: the block container's view of this rank's patch --------------------------------
+  // The owned inner box of every rank, in global cells — the table the block gather/scatter pieces
+  // are cut against. It is a function of the CURRENT decomposition, so it is built here rather
+  // than inlined at `enable_vof_blocks`: a redistribute has to push the new one through
+  // `bindVofBlockPatch` or every piece keeps addressing the previous partition.
+  std::vector<vof::VofBox> vofBlockRankBoxes(int size) const {
+    std::vector<vof::VofBox> rb(static_cast<std::size_t>(size));
+    const I3 gs = vofGlobalSize();
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && dec_) {
+      for (int r = 0; r < size; ++r) {
+        const auto b = dec_->block(static_cast<std::size_t>(r));
+        for (int d = 0; d < 3; ++d) {
+          rb[r].lo[d] = static_cast<int>(b.origin[d]);
+          rb[r].hi[d] = static_cast<int>(b.origin[d] + b.size[d]);
+        }
+      }
+      return rb;
+    }
+#endif
+    rb[0].hi[0] = gs.x;
+    rb[0].hi[1] = gs.y;
+    rb[0].hi[2] = gs.z;
+    return rb;
+  }
   // The gather reads the face velocity in the ADVECTOR's high-face convention on the g=3 block,
   // i.e. exactly what `bridgeVelocityToVof` writes, and the scatter writes the union into that
   // same block's colour. `buildVofBlock` reallocates those Views, so the binding is refreshed
@@ -2865,6 +2919,14 @@ class Solver {
   void bindVofBlockPatch() {
     if (!vofBlockExch_)
       return;
+    // The rank table first, for the same reason: `buildVofBlock` runs on every re-decomposition
+    // (redistribute -> initMpi), and the pieces are meaningless against the old boxes.
+    int size = 1;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      MPI_Comm_size(comm_, &size);
+#endif
+    vofBlockExch_->setRankBoxes(vofBlockRankBoxes(size));
     vof::VofBlockExchange::Patch pp;
     pp.e = I3{e3_.x, e3_.y, e3_.z};
     pp.n = I3{nx_, ny_, nz_};
@@ -6748,25 +6810,7 @@ class Solver {
     vofBlocks_->init(vofGlobalSize(), per, rank, size, 1.0);  // flow works in cell units
     vofBlocks_->cflLimit = vofCflLimit_;
     vofBlockExch_ = std::make_shared<vof::VofBlockExchange>();
-    std::vector<vof::VofBox> rb(static_cast<std::size_t>(size));
-    const I3 gs = vofGlobalSize();
-#ifdef PECLET_FLOW_MPI
-    if (distributed_ && dec_) {
-      for (int r = 0; r < size; ++r) {
-        const auto b = dec_->block(static_cast<std::size_t>(r));
-        for (int d = 0; d < 3; ++d) {
-          rb[r].lo[d] = static_cast<int>(b.origin[d]);
-          rb[r].hi[d] = static_cast<int>(b.origin[d] + b.size[d]);
-        }
-      }
-    } else
-#endif
-    {
-      rb[0].hi[0] = gs.x;
-      rb[0].hi[1] = gs.y;
-      rb[0].hi[2] = gs.z;
-    }
-    vofBlockExch_->init(gs, per, rb, rank);
+    vofBlockExch_->init(vofGlobalSize(), per, vofBlockRankBoxes(size), rank);
 #ifdef PECLET_FLOW_MPI
     if (distributed_)
       vofBlockExch_->setComm(comm_);
@@ -9510,6 +9554,9 @@ class Solver {
     cl.in0 = CCConst(fields_.at(in0).data);
     if (!in1.empty())
       cl.in1 = CCConst(fields_.at(in1).data);
+    cl.outName = target;  // kept so a redistribute can re-resolve the handles (rebindFieldAliases)
+    cl.in0Name = in0;
+    cl.in1Name = in1;
     for (int k = 0; k < 4 && k < (int)params.size(); ++k)
       cl.p[k] = params[k];
     closures_.push_back(cl);
@@ -9696,6 +9743,8 @@ class Solver {
     cl.kind = ClosureKind::Table1D;
     cl.out = ensureTarget(target);
     cl.in0 = CCConst(fields_.at(in0).data);
+    cl.outName = target;  // see setPropertyModel
+    cl.in0Name = in0;
     cl.nTab = (int)std::min(xs.size(), ys.size());
     cl.tabX = CCField(target + "_tabx", cl.nTab);
     cl.tabY = CCField(target + "_taby", cl.nTab);
@@ -9779,6 +9828,187 @@ class Solver {
   }
 
  private:
+  // === dynamic load balancing: making EVERY per-block allocation follow the new block ===========
+  //
+  // `allocateBlock` re-creates the buffers it names explicitly and re-`adopt`s the five aliased
+  // registry entries ("u"/"v"/"w"/"p"/"sdf"). Everything the solver has grown SINCE construction
+  // does not follow it:
+  //
+  //   1. the FieldSet's OWN storage (`FieldSet::add` — every transported scalar, every property /
+  //      body-force closure target, VoF's "C" / "kappa" / "kappa_branch", the phase-change fields);
+  //   2. the member handles that ALIAS one of those records (`cField_`, `rhoField_`, `muField_`,
+  //      `epsField_`, `cellForce_[]`, `ScalarField::c`, every `Closure`'s in/out views);
+  //   3. the lazily-allocated per-block scratch (`vofCs_`, `uAdv_`, the phase-change and porous
+  //      work arrays, the g=1 MG-bridge coefficients, …), each allocated at the `n_` / `n1_` of
+  //      whichever block was current when its feature was first switched on.
+  //
+  // `redistribute` then memcpy'd the NEW block's padded extent into (1)'s OLD allocation: measured
+  // by AddressSanitizer as a 184320-byte WRITE into a 115328-byte Kokkos HostSpace region at
+  // `scatterPadded`, i.e. exactly the `free(): invalid pointer` /
+  // `malloc(): unsorted double linked list corrupted` that made `rebalance_by_weights` unusable on
+  // any run owning a registry field. (2) and (3) are the same defect one step later — a stale view
+  // indexed with the NEW `nx_`/`ny_`/`nz_`.
+  //
+  // `resizeForBlock()` is the root fix and runs the three passes in this order, immediately after
+  // `allocateBlock` and BEFORE `initMpi` (which rebuilds the VoF block and writes `cField_`).
+  void resizeForBlock() {
+    reallocOwnedFields();
+    rebindFieldAliases();
+    resizeBlockScratch();
+    for (int f = 0; f < 6; ++f)
+      resampleBcProfile(f);  // the resampled inlet profile is indexed by LOCAL face position
+  }
+  // Pass 1: the FieldSet's own storage. Fresh, zero-initialised, same name/ghost/centering; the
+  // migrated data is scattered back into it by `redistribute` step 4. Aliased records
+  // (`ownStorage == false`) are left alone — `allocateBlock` has just re-adopted them.
+  void reallocOwnedFields() {
+    for (const auto& nm : fields_.names()) {
+      auto& rec = fields_.at(nm);
+      if (!rec.ownStorage || rec.data.extent(0) == n_)
+        continue;
+      rec.data = CCField(nm, n_);
+    }
+  }
+  // Pass 2: re-resolve every member handle that aliases a registry record. A handle whose record
+  // does not exist is left as it is (the feature was never switched on, so the handle is empty).
+  void rebindFieldAliases() {
+    auto bind = [this](CCField& f, const std::string& nm) {
+      if (fields_.has(nm))
+        f = fields_.at(nm).data;
+    };
+    bind(cField_, "C");                 // VoF: the canonical G=2 colour mirror
+    bind(kappaField_, "kappa");         // VoF: the curvature mirrors
+    bind(kappaBranch_, "kappa_branch");
+    bind(rhoField_, "rho");             // property closures
+    bind(muField_, "mu");
+    bind(epsField_, "eps");             // CFD-DEM: porosity + drag
+    bind(dragBeta_, "drag_beta");
+    bind(pcMdot_, "mdot");              // phase change
+    bind(pcSrc_, "pc_source");
+    bind(pcUser_, "div_source");
+    bind(pcSink_, "div_sink");
+    static const char* fn[3] = {"force_x", "force_y", "force_z"};
+    for (int c = 0; c < 3; ++c)
+      bind(cellForce_[c], fn[c]);
+    for (auto& sc : scalars_)
+      bind(sc.c, sc.name);
+    for (auto& cl : closures_) {  // property_closures.hpp keeps the registry keys for exactly this
+      if (fields_.has(cl.outName))
+        cl.out = fields_.at(cl.outName).data;
+      if (fields_.has(cl.in0Name))
+        cl.in0 = CCConst(fields_.at(cl.in0Name).data);
+      if (!cl.in1Name.empty() && fields_.has(cl.in1Name))
+        cl.in1 = CCConst(fields_.at(cl.in1Name).data);
+    }
+  }
+  // Pass 3: the lazily-allocated per-block scratch. A view that was never allocated (extent 0)
+  // STAYS unallocated — "inert until its feature is enabled" is load-bearing all over this class
+  // (every consumer branches on `extent(0)`), so resizing an empty view would switch a feature on.
+  // Views that carry state across a step are re-derived below rather than left zeroed.
+  static void resizeIfAllocated(CCField& f, const char* label, std::size_t n) {
+    if (f.extent(0) != 0 && f.extent(0) != n)
+      f = CCField(label, n);
+  }
+  void resizeBlockScratch() {
+    const std::size_t n = n_, n1 = n1_;
+    // --- velocity / pressure scratch --------------------------------------------------------
+    resizeIfAllocated(velRes_, "velRes", n);
+    resizeIfAllocated(zp1_, "zp1", n1);
+    resizeIfAllocated(vmgTheta_, "vmgTheta", n);
+    resizeIfAllocated(vmgClean_, "vmgClean", n);
+    for (int c = 0; c < 3; ++c) {
+      resizeIfAllocated(uStar_[c], "uStar", n);
+      resizeIfAllocated(advRhs_[c], "advRhs", n);
+      resizeIfAllocated(uBc_[c], "uBc", n);
+      resizeIfAllocated(uwCell_[c], "uwCell", n);
+      resizeIfAllocated(uwAdv_[c], "uwAdv", n);
+      resizeIfAllocated(faceAcc_[c], "faceAcc", n);
+    }
+    haveUStar_ = false;  // u* belonged to the old block's last momentum solve
+    haveAdvRhs_ = false;
+    // --- ghost projection (its overlay is rebuilt by setSolid) ------------------------------
+    resizeIfAllocated(oxb_, "oxb", n);
+    resizeIfAllocated(oyb_, "oyb", n);
+    resizeIfAllocated(ozb_, "ozb", n);
+    resizeIfAllocated(sdfGp_, "peclet::flow::sdfGp", n);
+    resizeIfAllocated(gpRh_, "gpRh", n1);
+    resizeIfAllocated(gpT_, "gpT", n1);
+    resizeIfAllocated(gpZ2_, "gpZ2", n1);
+    resizeIfAllocated(gpX2_, "gpXg2", n);
+    // --- VoF (the g=3 block itself is rebuilt by buildVofBlock) -----------------------------
+    resizeIfAllocated(vofCs_, "vofCs", n);
+    resizeIfAllocated(vofSolidG2_, "vofSolidG2", n);
+    for (int c = 0; c < 3; ++c) {
+      resizeIfAllocated(uAdv_[c], "uAdv", n);
+      resizeIfAllocated(vofDynVel_[c], "vofDynVel", n);
+      resizeIfAllocated(csfBlkF_[c], "vof::blockcsf", n);
+    }
+    // --- phase change -----------------------------------------------------------------------
+    resizeIfAllocated(pcArea_, "pc_area", n);
+    for (int c = 0; c < 3; ++c) {
+      resizeIfAllocated(pcNrm_[c], "pc_nrm", n);
+      resizeIfAllocated(pcGn_[c], "pc_gn", n);
+    }
+    resizeIfAllocated(pcDep_, "pc_dep", n);
+    resizeIfAllocated(pcTgt_, "pc_tgt", n);
+    resizeIfAllocated(pcCnew_, "pc_cnew", n);
+    resizeIfAllocated(pcDefic_, "pc_defic", n);
+    resizeIfAllocated(pcKcell_, "pc_k", n);
+    resizeIfAllocated(pcRcp_, "pc_rcp", n);
+    resizeIfAllocated(pcClsPrev_, "pc_cls_prev", n);
+    resizeIfAllocated(pcCarrySrc_, "pc_carry_src", n);
+    resizeIfAllocated(pcMdotFit_, "pc_mdot_fit", n);
+    resizeIfAllocated(pcKappa_, "pc_kappa", n);
+    resizeIfAllocated(pcAreaCg2_, "pc_area_cascade", n);
+    resizeIfAllocated(pcTgam_, "pc_tgam", n);
+    resizeIfAllocated(pcGphi_, "pc_gphi", n);
+    pcInDomain_ = CCField();  // which ghosts carry a row depends on the decomposition (WO-P3g)
+    pcMaskFresh_ = false;
+    // --- transported scalars (their operator is rebuilt; the solution rides the registry) -----
+    for (auto& sc : scalars_) {
+      resizeIfAllocated(sc.cOld, "scalar_old", n);
+      resizeIfAllocated(sc.b, "scalar_b", n);
+      resizeIfAllocated(sc.AC, "scalar_AC", n);
+      resizeIfAllocated(sc.AW, "scalar_AW", n);
+      resizeIfAllocated(sc.AE, "scalar_AE", n);
+      resizeIfAllocated(sc.AS, "scalar_AS", n);
+      resizeIfAllocated(sc.AN, "scalar_AN", n);
+      resizeIfAllocated(sc.AB, "scalar_AB", n);
+      resizeIfAllocated(sc.AT, "scalar_AT", n);
+      resizeIfAllocated(sc.dmask, "scalar_dmask", n);
+      resizeIfAllocated(sc.dval, "scalar_dval", n);
+      resizeIfAllocated(sc.gfmB, "scalar_gfmb", n);
+      resizeIfAllocated(sc.kcell, "scalar_kcell", n);
+      resizeIfAllocated(sc.rcp, "scalar_rcp", n);
+      sc.stencilBuilt = false;  // the operator is a property of the block
+    }
+    // --- variable density / porous (CFD-DEM) -------------------------------------------------
+    resizeIfAllocated(rho1_, "rho1", n1);
+    resizeIfAllocated(cx1_, "cx1", n1);
+    resizeIfAllocated(cy1_, "cy1", n1);
+    resizeIfAllocated(cz1_, "cz1", n1);
+    resizeIfAllocated(eps1_, "eps1", n1);
+    resizeIfAllocated(beta1_, "beta1", n1);
+    resizeIfAllocated(depsdt_, "depsdt", n);
+    resizeIfAllocated(divAdv_, "divAdv", n);
+    resizeIfAllocated(epsRho_, "epsRho", n);
+    resizeIfAllocated(epsPrev_, "epsPrev", n);
+    // eps^n is STATE, not scratch: a re-partition is not a time step, so the porosity must not
+    // appear to have jumped across it. Seed it from the migrated eps^{n+1} => d(eps)/dt = 0 over
+    // the redistribute, which is the only choice that leaves the projection RHS unchanged.
+    if (epsPrev_.extent(0) == n && epsField_.extent(0) == n)
+      Kokkos::deep_copy(epsPrev_, epsField_);
+    for (int c = 0; c < 3; ++c)
+      for (int k = 0; k < 3; ++k)
+        if (tEx_[c][k].extent(0) != 0 &&
+            tEx_[c][k].extent(0) != (std::size_t)nx_ * ny_ * nz_) {
+          tEx_[c][k] = CCField();  // exact crossings are single-rank only; drop the stale set
+          hasExactCross_ = false;
+        }
+    // `cutOwner_` is deliberately NOT resized: every consumer guards on
+    // `extent(0) == nx_*ny_*nz_` and skips, so a stale-sized owner map is inert, while a
+    // freshly-zeroed one would silently name instance 0 as the owner of every cut cell.
+  }
   // Resolve a closure target to a registered buffer. A force component allocates ALL three
   // cellForce_ slots (buildRhsForced reads every component) and enables the body-force RHS path.
   CCField ensureTarget(const std::string& name) {
@@ -9991,6 +10221,9 @@ class Solver {
             // outflow reverses, so purely-outgoing outlets stay byte-identical)
   CCField bcProf_[6];
   int bcProfNc_[6] = {0, 0, 0, 0, 0, 0};  // per-position inlet profiles (face grid [Lb*Lc*3])
+  std::vector<double> bcProfRaw_[6];      // the user's (nb, nc, 3) profile, kept so the resampled
+  int bcProfNb_[6] = {0, 0, 0, 0, 0, 0};  // buffer above can be rebuilt when the block is resized
+  int bcProfRawNc_[6] = {0, 0, 0, 0, 0, 0};
   CCField bcDcorr_[3], bcBrhs_[3];        // implicit-diffusion face fold (per component)
   bool advect_ = false, cutcellPressure_ = false, implicitFou_ = false;
   bool deferredCorr_ = true;  // deferred-correction advection (off = pure implicit FOU, 1st order)

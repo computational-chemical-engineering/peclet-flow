@@ -16,6 +16,8 @@
 #define PECLET_FLOW_PROPERTY_CLOSURES_HPP
 
 #include <array>
+#include <string>
+
 #include <Kokkos_Core.hpp>
 
 #include "mac_cutcell.hpp"
@@ -30,11 +32,15 @@ enum class ClosureKind {
 };
 
 // A registered closure. `out`/`in0`/`in1` are resolved from the field registry at registration; a
-// later redistribution that reallocates fields must re-resolve them.
+// later redistribution that reallocates fields must re-resolve them — which is why the three
+// registry NAMES are kept alongside the resolved handles. Without them a rebalance leaves a
+// closure writing into (and reading from) the previous block's allocation; see
+// `Solver::rebindFieldAliases`.
 struct Closure {
   ClosureKind kind;
   CCField out;
   CCConst in0, in1;
+  std::string outName, in0Name, in1Name;  // registry keys, for re-resolution after a redistribute
   std::array<double, 4> p{{0, 0, 0, 0}};
   CCField tabX, tabY;  // Table1D nodes (ascending tabX)
   int nTab = 0;

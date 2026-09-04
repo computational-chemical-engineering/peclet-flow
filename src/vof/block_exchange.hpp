@@ -118,6 +118,17 @@ class VofBlockExchange : public VofBlockExchangeBase {
       throw std::runtime_error("peclet::flow::vof::VofBlockExchange: rank out of range");
   }
 
+  /// Re-bind the owned inner box of every rank WITHOUT disturbing the communicator or the local
+  /// patch. The gather/scatter pieces are computed from these boxes, so a decomposition that
+  /// MOVES (dynamic load balancing: `Solver::redistribute`) must push the new ones through here —
+  /// otherwise every piece still addresses the previous partition's rank blocks.
+  void setRankBoxes(std::vector<VofBox> rankBox) {
+    if (rankBox.size() != rankBox_.size())
+      throw std::runtime_error(
+          "peclet::flow::vof::VofBlockExchange::setRankBoxes: rank count changed");
+    rankBox_ = std::move(rankBox);
+  }
+
   /// The local face velocity, in the ADVECTOR's high-face convention (i.e. already bridged with
   /// `vof::copyFaceVelocity`), on the local patch.
   void setPatch(Patch p, SField uf, SField vf, SField wf) {
