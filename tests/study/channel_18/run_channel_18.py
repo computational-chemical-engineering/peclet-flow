@@ -419,7 +419,7 @@ def main():
     stop = "steps"
     i = step0
     while stepped < NSTEP:
-        if (i - step0) % DTEVERY == 0:
+        if i % DTEVERY == 0:   # ABSOLUTE cadence: a restart must not shift it
             L = s.vof_step_limits()
             dt = 0.2 / max(np.abs(s.get_u()).max(), np.abs(s.get_v()).max(),
                            np.abs(s.get_w()).max(), 1e-30)
