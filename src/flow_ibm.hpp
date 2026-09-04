@@ -668,6 +668,7 @@ class Solver {
   // onto a re-decomposed partition). The local block size must already match dec.block(rank).size
   // (set via the constructor / allocateBlock).
   void initMpi(const peclet::core::decomp::BlockDecomposer<3>& dec, MPI_Comm comm) {
+    pcInDomain_ = CCField();  // WO-P3g: which ghosts carry a row depends on the decomposition
     distributed_ = true;
     comm_ = comm;
     const auto& gs = dec.globalSize();
@@ -782,6 +783,8 @@ class Solver {
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip
   // wall,2=Dirichlet/inflow,3=outflow.
   void setDomainBc(int face, int type, double vx, double vy, double vz) {
+    // WO-P3g: the "does this cell carry a row" mask depends on which domain faces are periodic.
+    pcInDomain_ = CCField();
     bc_[face] = type;
     bcVel_[face][0] = vx;
     bcVel_[face][1] = vy;
