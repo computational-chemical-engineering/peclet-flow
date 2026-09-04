@@ -293,6 +293,11 @@ def save_ckpt(path, s, step, t, acc, blocks, alpha0):
     d["u"] = s.get_u()
     d["v"] = s.get_v()
     d["w"] = s.get_w()
+    # The ACCUMULATED physical pressure is state, not a diagnostic: the incremental-rotational
+    # scheme carries P from step to step and the momentum RHS reads -(P(i) - P(i-s)).  Dropping it
+    # at a chunk boundary costs a restart transient (measured: 1.6e-3 relative in u after 20 steps
+    # of a quick run, against 3e-14 with it restored).  "p" is the registered name of that field.
+    d["p"] = s.get_field("p")
     for k in KEYS:
         d["acc_" + k] = acc[k]
     d["acc_n"] = np.float64(acc["_n"])
@@ -319,9 +324,10 @@ def load_ckpt(path):
     nb = int(z["nblocks"])
     blocks = [(np.array(z[f"box{i}"]).tolist(), np.asfortranarray(z[f"col{i}"]))
               for i in range(nb)]
+    pres = np.asfortranarray(z["p"]) if "p" in z.files else None
     return int(z["step"]), float(z["t"]), acc, blocks, \
         (np.asfortranarray(z["u"]), np.asfortranarray(z["v"]), np.asfortranarray(z["w"])), \
-        float(z["alpha0"])
+        float(z["alpha0"]), pres
 
 
 def block_state(s):
@@ -358,9 +364,9 @@ def main():
     s.set_pressure_chebyshev(True, 800, 1e-10)
 
     step0, t, acc = 0, 0.0, new_acc()
-    alpha0 = None
+    alpha0, pres = None, None
     if resume:
-        step0, t, acc, blocks, (u, v, w), alpha0 = load_ckpt(CKPT)
+        step0, t, acc, blocks, (u, v, w), alpha0, pres = load_ckpt(CKPT)
         print(f"  resumed at step {step0}, t u_tau/h = {t*UTAU:.4f}, "
               f"{int(acc['_n'])} samples already accumulated, {len(blocks)} markers")
     else:
@@ -412,7 +418,22 @@ def main():
           f"{len(st0)} markers, V in [{min(vol0):.3f}, {max(vol0):.3f}] "
           f"(sphere seed {4/3*math.pi*Rc**3:.3f})")
 
+    # AFTER the geometry (set_pressure_geometry zeroes P and phi when it rebuilds the operator).
+    if pres is not None:
+        s.set_field("p", pres)
+        print("  accumulated pressure restored from the checkpoint")
+    # The Weymouth-Yue SWEEP PERMUTATION is state too: the order is kWySweepPerm[n % 6] and the
+    # block container's counter runs from 0, one increment per block advection — i.e. it equals the
+    # step index.  Resuming with it reset changes the colour at the splitting error (measured
+    # 6.2e-4 after ONE step, off a bitwise-identical velocity).  set_vof_step_parity sets the
+    # solver's counter AND the block container's.
+    s.set_vof_step_parity(step0)
+
     seedV = 4.0 / 3.0 * math.pi * Rc ** 3
+    if NSTEP == 0:      # state round-trip diagnostic: checkpoint the restored state and stop
+        save_ckpt(CKPT + ".roundtrip.npz", s, step0, t, acc, block_state(s), alpha0)
+        print(f"  --steps 0: wrote {CKPT}.roundtrip.npz and stopped")
+        return
     maxit, maxdiv, dt = 0, 0.0, 0.0
     wall0 = time.time()
     stepped = 0

@@ -6716,7 +6716,16 @@ class Solver {
   const vof::WyAdvector& vofAdvector() const { return vofAdv_; }
   // The sweep permutation index of the NEXT colour advection (`kWySweepPerm[n % 6]`). Exposed so a
   // benchmark can hold the permutation fixed, or resume one, across a restart.
-  void setVofStepParity(long n) { vofStep_ = n; }
+  // The sweep permutation is `kWySweepPerm[n % 6]`, so this counter is STATE: a run resumed with
+  // it reset takes a different sweep order and its colour differs at the splitting error (measured
+  // 6.2e-4 after ONE step of `channel_18`, off a bitwise-identical velocity). The BLOCK container
+  // keeps its own counter — `VofBlockSet::step_`, which drives `WyAdvector::advect(dt, step_)` for
+  // every marker — so a restart has to set both, and this is the one call that does it.
+  void setVofStepParity(long n) {
+    vofStep_ = n;
+    if (vofBlocks_)
+      vofBlocks_->setStep(n);
+  }
   long vofStepParity() const { return vofStep_; }
 
   // KINEMATIC colour advection: advance C ONCE with the solver's CURRENT face velocity and the
