@@ -2531,10 +2531,11 @@ static void bind_solver(nb::module_& m, const char* name) {
 #else
       .def(
           "rank", [](S&) { return 0; },
-          "MPI rank (always 0 in the single-rank Python module; the multi-rank path is the "
-          "tests/kokkos_mpi suite).")
+          "MPI rank (always 0: this module was built without PECLET_FLOW_MPI; a build with it "
+          "exposes init_mpi / mpi_block and the real rank).")
       .def(
-          "size", [](S&) { return 1; }, "MPI size (1 in the single-rank Python module).")
+          "size", [](S&) { return 1; },
+          "MPI size (always 1: this module was built without PECLET_FLOW_MPI).")
 #endif
       .def(
           "bcast_from_root", [](S&, nb::object v) { return v; }, nb::arg("value"),
