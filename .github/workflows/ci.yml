@@ -49,8 +49,11 @@ jobs:
 
       - name: Build the sdflow module
         run: |
+          # main builds against core's main (the vendored default PECLET_TPX_TAG is the last core
+          # release, which lags the headers main already uses; the release repins it).
           cmake -S . -B build \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install" \
+            -DPECLET_TPX_TAG=main
           cmake --build build -j
 
       - name: Import smoke test
@@ -61,6 +64,7 @@ jobs:
           # Kokkos-only unit suite (no MPI / core): the ported cut-cell IBM, advection,
           # multigrid-transfer, BC and reduction kernels, each checked against a serial reference.
           cmake -S tests/kokkos -B build_kokkos \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install" \
+            -DPECLET_TPX_TAG=main
           cmake --build build_kokkos -j
           ctest --test-dir build_kokkos --output-on-failure
