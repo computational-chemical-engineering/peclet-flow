@@ -17,7 +17,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "peclet-flow-cu13"
-version = "0.4.0"
+version = "0.5.0"
 description = "peclet.flow (CUDA / single-GPU) — Kokkos cut-cell IBM incompressible Navier-Stokes solver"
 readme = "README.md"
 requires-python = ">=3.10"
