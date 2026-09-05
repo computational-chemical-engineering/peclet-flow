@@ -291,7 +291,7 @@ def gate_momentum_conservation(n=32, steps=200, R=1000.0):
         m1 = total()
         print("  %-14s sum(rho_f u): %.16e -> %.16e   rel %.3e   %s"
               % ("consistent" if mom else "inconsistent", m0, m1, abs(m1 - m0) / abs(m0), w))
-        del s
+        s = None  # not `del`: the closure `total` binds this cell (ruff F821)
 
 
 def gate_rho_floor(n=32, steps=200, R=1000.0):
