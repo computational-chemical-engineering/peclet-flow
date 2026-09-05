@@ -1024,6 +1024,20 @@ containers. `enable_vof_blocks_from_field` also cannot seed markers that already
 a union field between boxes, so each takes a slice of the other — measured −2.7 % / +7.1 %); use the
 sphere seeder for those.
 
+**Rating for COLLIDING bubbles (W3, 2026-09-04) — say this to users too.** A marker pair in
+contact is the block path's stiffest configuration: each marker's CSF is scattered with UNPACK_SUM
+onto faces where the projection sees ONE union `max` colour, so the balanced-force pairing that
+makes V4 exact cannot hold for the summed force, and a turbulent channel (`channel_18`, Re_τ = 127,
+D/Δ = 10) drives the pair through the 2-cell film: the run ends at **~1.5 eddy turnovers**,
+independent of dt over a 4× range (WO-W3 findings §7, `doc/vof_workorders_v6.md`). Bubbly flows in
+which markers collide are therefore OUTSIDE the rating of the 0.7.0 release. Rung W4 (union-colour
+CSF on the overlap faces, pair census, `set_block_coalescence` never/film/weber, breakup by component
+labelling) is **PARKED as a WIP commit on branch `vof-w4`** (f29c8e7; last battery 32/33 with
+`vof_blocks` failing, gate G2 not met) and continues after the release. The datum it will be measured
+against exists: TBFsolver's own `channel_18` statistics over a 16-turnover window
+(`tests/study/channel_18/results/tbfsolver_final_4-20turnovers.npz`), the first reference for the
+case, produced by W3 on Snellius.
+
 **Scope — say this to users:** **Staggered is the reference**; the collocated path is rung V8 (the
 paragraph above) and is all-fluid, ratio ≲ 100 with motion. An **immersed solid is supported since
 rung V5a** — `set_solid(...,
