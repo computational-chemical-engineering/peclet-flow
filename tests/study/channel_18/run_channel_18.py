@@ -79,6 +79,17 @@ DTEVERY = int(arg("--dt-every", 1, int))
 DTSAFE = float(arg("--dt-safety", 0.25))
 PRINTEVERY = int(arg("--print-every", 200, int))
 QUICK = "--quick" in sys.argv
+# --- rung W4 (WO-W4): the collision / coalescence model this run uses ---------------------------
+# 'never' is the container's default and the physically right one for a bubbly flow, but it is a
+# statement about a RESOLVED film, and this case has none: D/Delta = 10 and the closest pair sits
+# at dmin = 8.5 cells, i.e. INTERPENETRATING by 1.5 cells.  See the WO-W4 findings.
+COALESCE = str(arg("--coalesce", "never", str))
+WECRIT = float(arg("--we-crit", 1e9))
+HCRIT = float(arg("--h-crit", 1.0))
+DRAINC = float(arg("--drain-c", 1.0))
+CONTACTF = float(arg("--contact-film", 1.0))
+UNIONK = int(arg("--union-kappa", 0, int))
+CSFUNION = int(arg("--csf-union", 1, int))
 
 if QUICK:                                    # build/plumbing validation, not physics
     NY = int(arg("--ny", 32, int))
@@ -413,7 +424,14 @@ def main():
         s.enable_vof_blocks_from_field(boxes)
     else:
         s.enable_vof_blocks_from_colours([b for b, _ in blocks], [c for _, c in blocks])
+    s.set_block_csf_union(bool(CSFUNION))
+    s.set_block_csf_union_kappa(UNIONK)
+    s.set_block_liquid(RHO_L, S * S * MU)
+    s.set_block_coalescence(COALESCE, h_crit=HCRIT, we_crit=WECRIT, drain_c=DRAINC,
+                            contact_film=CONTACTF)
     s.enable_vof_block_csf()
+    print(f"  W4: csf_union={bool(CSFUNION)}, union_kappa={UNIONK}, coalescence='{COALESCE}' "
+          f"(h_crit {HCRIT}, We_crit {WECRIT:g}, drain_c {DRAINC}, contact_film {CONTACTF})")
     st0 = s.vof_block_stats()
     vol0 = [b["volume"] for b in st0]
     print(f"  void fraction {100*alpha0:.3f} % (case: 1.492 %), <rho> = {rho_av:.6f}; "
@@ -499,9 +517,13 @@ def main():
                     q[0] -= box[0] * round(q[0] / box[0])
                     q[2] -= box[2] * round(q[2] / box[2])
                     dmin = min(dmin, float(np.hypot(np.hypot(q[0], q[1]), q[2])))
+            pr = s.vof_block_pairs()
+            fmin = min((p["film"] for p in pr), default=float("nan"))
+            top = s.vof_block_topology()
             print(f"    step {i:7d}  t u_tau/h = {t*UTAU:8.4f}  dt = {dt:.3e}  "
                   f"U_b = {s.get_u().mean()/S:.4f}  press {it:3d}/800  maxC {cmx:.6f}  "
-                  f"max|u| {umx:8.2f}  dmin {dmin:6.2f}  "
+                  f"max|u| {umx:8.2f}  dmin {dmin:6.2f}  film {fmin:6.2f}  "
+                  f"n {int(top['markers']):2d}/m{int(top['merges']):d}/s{int(top['splits']):d}  "
                   f"{1000*el/max(stepped,1):.0f} ms/step  ({el:.0f} s)", flush=True)
             # The colour leaving [0,1] is the Weymouth-Yue boundedness cap being exceeded, and it
             # is QUIET: volume still telescopes exactly, so nothing else notices until a density
@@ -534,6 +556,10 @@ def main():
         "volume_rel_err": max(abs(v / seedV - 1.0) for v in vols),
         "area_total": sum(b["area"] for b in st),
         "samples": acc["_n"], "grid": [NX, NY, NZ],
+        # rung W4: the topology census of the chunk
+        "coalescence": COALESCE, "union_kappa": UNIONK, "csf_union": bool(CSFUNION),
+        "topology": s.vof_block_topology(),
+        "events": s.vof_block_events()[-50:],
     }
     print("\n  " + json.dumps(rec))
     with open(LOGJ, "a") as f:

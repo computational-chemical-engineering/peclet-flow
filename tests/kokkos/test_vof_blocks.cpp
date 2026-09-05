@@ -785,6 +785,235 @@ void gateInert() {
               packMs[0], packMs[0] / packMs[1]);
 }
 
+
+// =============================================================================================
+// rung W4 (WO-W4): the union force rule, the collision census, coalescence and breakup
+// =============================================================================================
+
+/// W4-a: the per-marker CSF accumulators, on two spheres whose bands overlap.
+///   (i)   `N` is exactly the number of markers claiming each face, and it reaches 2;
+///   (ii)  where one marker claims the face, `KS` IS that marker's own face curvature, so the
+///         owner's assembled force there is `sigma KS dC_union / h` — the rung-W2 force whenever
+///         the union's colour jump is that marker's (the container half of gate G1; the solver
+///         half is `tests/study/vof_blocks_collide.py bitwise`);
+///   (iii) the weighted curvature `KW/W` never leaves the range of the curvatures it averages.
+void gateW4Force() {
+  std::printf("\n=== W4-a  the CSF accumulators: N counts the markers, KW/W stays in range\n");
+  const int gn = 48;
+  const double h = 1.0;
+  Patch patch;
+  patch.init(gn, h);
+  const long len = static_cast<long>(patch.adv.extent().x) * patch.adv.extent().y *
+                   patch.adv.extent().z;
+  VofBlockSet set;
+  set.init(I3{gn, gn, gn}, {true, true, true}, 0, 1, h);
+  serialExchange(set, patch);
+  set.seedSphere(20.0, 24.0, 24.0, 6.0);
+  set.seedSphere(31.0, 24.0, 24.0, 6.0);
+  set.curvProto.interfaceEps = 1e-8;
+  set.enableCsf(0.5);
+  set.scatter(patch.adv.colour());
+  std::vector<SField> loc(12);
+  for (int i = 0; i < 12; ++i)
+    loc[static_cast<std::size_t>(i)] = SField("w4::acc", static_cast<std::size_t>(len));
+  set.computeCsf(loc.data(), 12);
+  long nTwo = 0, nOne = 0;
+  double kmin = 1e300, kmax = -1e300, kwMin = 1e300, kwMax = -1e300;
+  for (int c = 0; c < 3; ++c) {
+    const std::vector<double> KS =
+        fieldOnGrid(loc[static_cast<std::size_t>(4 * c + 0)], patch.adv.extent(), gn, G);
+    const std::vector<double> W =
+        fieldOnGrid(loc[static_cast<std::size_t>(4 * c + 1)], patch.adv.extent(), gn, G);
+    const std::vector<double> KW =
+        fieldOnGrid(loc[static_cast<std::size_t>(4 * c + 2)], patch.adv.extent(), gn, G);
+    const std::vector<double> N =
+        fieldOnGrid(loc[static_cast<std::size_t>(4 * c + 3)], patch.adv.extent(), gn, G);
+    for (std::size_t i = 0; i < N.size(); ++i) {
+      CHECK(N[i] == 0.0 || N[i] == 1.0 || N[i] == 2.0);
+      if (N[i] < 0.5)
+        continue;
+      const double kf = KW[i] / W[i];
+      if (N[i] < 1.5) {
+        ++nOne;
+        CHECK(std::fabs(KS[i] - kf) < 1e-9 * (1.0 + std::fabs(kf)));  // one claimant: KS == KW/W
+        kmin = std::fmin(kmin, KS[i]);
+        kmax = std::fmax(kmax, KS[i]);
+      } else {
+        ++nTwo;
+        kwMin = std::fmin(kwMin, kf);
+        kwMax = std::fmax(kwMax, kf);
+      }
+    }
+  }
+  std::printf("  faces with ONE claimant %ld (kappa in [%.4f, %.4f]), with TWO %ld "
+              "(weighted kappa in [%.4f, %.4f])\n", nOne, kmin, kmax, nTwo, kwMin, kwMax);
+  CHECK(nTwo > 0);               // the scene must actually overlap, or the gate proves nothing
+  CHECK(kwMin >= kmin - 1e-9);   // a weighted MEAN cannot leave the range of its inputs
+  CHECK(kwMax <= kmax + 1e-9);
+}
+
+/// W4-b: the collision census. Two spheres of known radius at a known separation: the film is the
+/// gap between their surfaces along the line of centres, to the ray march's h/8.
+void gateW4Census() {
+  std::printf("\n=== W4-b  the collision census: film thickness along the line of centres\n");
+  const int gn = 48;
+  const double h = 1.0, R = 6.0;
+  Patch patch;
+  patch.init(gn, h);
+  for (int k = 0; k < 2; ++k) {
+    const double sep = (k == 0) ? 14.0 : 10.0;  // gap +2 cells, then -2 (interpenetrating)
+    VofBlockSet set;
+    set.init(I3{gn, gn, gn}, {true, true, true}, 0, 1, h);
+    serialExchange(set, patch);
+    set.seedSphere(24.0 - 0.5 * sep, 24.0, 24.0, R);
+    set.seedSphere(24.0 + 0.5 * sep, 24.0, 24.0, R);
+    set.scatter(patch.adv.colour());
+    Kokkos::deep_copy(patch.adv.faceU(), 0.0);
+    Kokkos::deep_copy(patch.adv.faceV(), 0.0);
+    Kokkos::deep_copy(patch.adv.faceW(), 0.0);
+    set.advect(0.01, patch.adv.colour());  // a zero-velocity step: the census runs, nothing moves
+    CHECK(set.pairs().size() == 1);
+    if (set.pairs().empty())
+      continue;
+    const auto& p = set.pairs()[0];
+    const double want = sep - 2.0 * R;
+    std::printf("  centres %.1f apart, R = %.1f: dist %.4f, d_a %.4f, d_b %.4f, film %.4f "
+                "(exact %.4f), We %.3e, D_eq %.3f\n", sep, R, p.dist, p.dA, p.dB, p.film, want,
+                p.weber, p.dEq);
+    CHECK(std::fabs(p.film - want) < 0.4);   // the PLIC 1/2-crossing of a sphere, to the ray step
+    CHECK(std::fabs(p.dEq - 2.0 * R) < 0.4);
+  }
+}
+
+/// W4-c: coalescence. The same touching pair with the 'weber' model at a permissive threshold
+/// merges into ONE marker whose volume is the sum (the two supports are disjoint, so the union
+/// max IS the sum) and whose box contains both.
+void gateW4Merge() {
+  std::printf("\n=== W4-c  coalescence: 'weber' merges the pair, volume = the sum\n");
+  const int gn = 48;
+  const double h = 1.0, R = 6.0;
+  Patch patch;
+  patch.init(gn, h);
+  VofBlockSet set;
+  set.init(I3{gn, gn, gn}, {true, true, true}, 0, 1, h);
+  serialExchange(set, patch);
+  set.sigma = 1.0;
+  set.coalescence.model = peclet::flow::vof::VofCoalescence::Weber;
+  set.coalescence.weCrit = 1e9;
+  set.coalescence.contactFilm = 2.0;
+  set.seedSphere(17.0, 24.0, 24.0, R);
+  set.seedSphere(30.0, 24.0, 24.0, R);
+  set.scatter(patch.adv.colour());
+  const double v0 = set.blocks()[0].stats().volume, v1 = set.blocks()[1].stats().volume;
+  Kokkos::deep_copy(patch.adv.faceU(), 0.0);
+  Kokkos::deep_copy(patch.adv.faceV(), 0.0);
+  Kokkos::deep_copy(patch.adv.faceW(), 0.0);
+  // the same HOST sum the merge transport uses, before the merge: this separates "colour was
+  // dropped" from "the two sums were accumulated in different orders"
+  double hostPair = 0.0;
+  for (std::size_t q = 0; q < 2; ++q)
+    for (double v : set.blockColourHost(q))
+      hostPair += v;
+  set.advect(0.01, patch.adv.colour());
+  std::printf("  markers %zu -> %zu, merges %ld;  host sum of the two colours before the merge "
+              "%.10f\n", static_cast<std::size_t>(2), set.aliveCount(), set.mergeCount(),
+              hostPair);
+  CHECK(set.aliveCount() == 1);
+  CHECK(set.mergeCount() == 1);
+  double vm = 0.0;
+  for (const auto& b : set.blocks())
+    if (b.alive())
+      vm = b.stats().volume;
+  // Two numbers, and the difference between them is the point. `volume_new` on the event is the
+  // HOST sum of the transported buffer, i.e. the colour that actually arrived: against `v0 + v1`
+  // it measures whether any colour was LOST, and it must be exact to round-off. `vm` is the
+  // merged block's own device `parallel_reduce` over a box a third larger than either parent's,
+  // so it differs from `v0 + v1` by the REDUCTION ORDER and nothing else.
+  double vEvent = 0.0, vPair = 0.0;
+  bool sawMerge = false;
+  for (const auto& e : set.events())
+    if (e.type == 2) {
+      sawMerge = true;
+      vEvent = e.volNew;
+      vPair = e.volA + e.volB;  // the two markers AT the merge, not at the seed
+    }
+  CHECK(sawMerge);
+  std::printf("  seeded %.10f + %.10f = %.10f;  at the merge %.10f -> transported %.10f\n", v0,
+              v1, v0 + v1, vPair, vEvent);
+  std::printf("  merged / (V_a + V_b) - 1 = %.3e (transported, host sums) and %.3e (the merged "
+              "block's own device reduction)\n", std::fabs(vEvent / vPair - 1.0),
+              std::fabs(vm / vPair - 1.0));
+  std::printf("  transported / (host sum of the parts) - 1 = %.3e;  shared liquid the union max "
+              "did not carry = %.6e\n", std::fabs(vEvent / hostPair - 1.0), set.transportLost());
+  // The merged volume is the sum of the two MINUS the shared liquid -- exactly, to round-off.
+  // For markers whose supports are disjoint the shared liquid is 0 and the merge is the sum.
+  // ... to the round-off of a 1.8e3 sum accumulated three different ways (1e-9 absolute is
+  // 6e-13 relative), which is the floor of any statement about a sum of 13 200 doubles.
+  CHECK(std::fabs(hostPair - set.transportLost() - vEvent) < 1e-9);
+  CHECK(std::fabs(vm - vEvent) < 1e-9);
+}
+
+/// W4-d: breakup. ONE block holding two disjoint spheres is split into two, and the children's
+/// volumes sum to the parent's EXACTLY.
+void gateW4Split() {
+  std::printf("\n=== W4-d  breakup: one block holding two components is split, volume exact\n");
+  const int gn = 48;
+  const double h = 1.0, R = 5.0;
+  Patch patch;
+  patch.init(gn, h);
+  // paint two disjoint spheres into ONE global field, then seed a SINGLE block over both
+  WyAdvector two;
+  two.init(gn, gn, gn, h, G);
+  vofscene::Block tb = vofscene::blockOf(two, I3{0, 0, 0});
+  vofscene::initSphere(two.colour(), tb, h, 15.0, 24.0, 24.0, R);
+  WyAdvector tmp;
+  tmp.init(gn, gn, gn, h, G);
+  vofscene::initSphere(tmp.colour(), tb, h, 33.0, 24.0, 24.0, R);
+  {
+    SField a = two.colour(), b = tmp.colour();
+    Kokkos::parallel_for(
+        "w4::union", Kokkos::RangePolicy<SExec>(SExec(), 0, a.extent(0)),
+        KOKKOS_LAMBDA(int i) { a(i) = a(i) > b(i) ? a(i) : b(i); });
+    Kokkos::fence();
+  }
+  Kokkos::deep_copy(patch.adv.colour(), two.colour());
+  VofBlockSet set;
+  set.init(I3{gn, gn, gn}, {true, true, true}, 0, 1, h);
+  serialExchange(set, patch);
+  set.breakup = true;
+  set.breakupSteps = 1;
+  VofBox seed;
+  seed.lo[0] = 8;  seed.lo[1] = 17; seed.lo[2] = 17;
+  seed.hi[0] = 40; seed.hi[1] = 32; seed.hi[2] = 32;
+  set.seedBox(seed);
+  set.finishSeeding(patch.adv.colour());
+  const double vp = set.blocks()[0].stats().volume;
+  Kokkos::deep_copy(patch.adv.faceU(), 0.0);
+  Kokkos::deep_copy(patch.adv.faceV(), 0.0);
+  Kokkos::deep_copy(patch.adv.faceW(), 0.0);
+  set.advect(0.01, patch.adv.colour());
+  std::printf("  markers %zu, splits %ld, orphan colour %.3e\n", set.aliveCount(),
+              set.splitCount(), set.orphanColour());
+  CHECK(set.aliveCount() == 2);
+  CHECK(set.splitCount() == 1);
+  double vs = 0.0;
+  for (const auto& b : set.blocks())
+    if (b.alive())
+      vs += b.stats().volume;
+  std::printf("  parent %.12f -> children sum %.12f (relative %.3e)\n", vp, vs,
+              std::fabs(vs / vp - 1.0));
+  CHECK(std::fabs(vs / vp - 1.0) < 1e-12);
+  // and the union field is UNCHANGED by the split
+  set.scatter(patch.adv.colour());
+  double worst = 0.0, wm = 0.0;
+  const int lo[3] = {0, 0, 0}, hi[3] = {gn, gn, gn};
+  const long d = bitwiseDiffBox(patch.adv.colour(), two.colour(), patch.adv.extent(), gn, G, lo,
+                                hi, &worst, &wm);
+  std::printf("  union after the split vs the painted field: %ld cells differ (max %.3e)\n", d,
+              worst);
+  CHECK(worst < 1e-15);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -797,6 +1026,10 @@ int main(int argc, char** argv) {
     gateRecentre();
     gateAssignment();
     gateInert();
+    gateW4Force();
+    gateW4Census();
+    gateW4Merge();
+    gateW4Split();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
                 failures == 1 ? "" : "s");
   }

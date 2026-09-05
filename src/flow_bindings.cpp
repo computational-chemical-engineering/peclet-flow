@@ -1480,6 +1480,210 @@ static void bind_solver(nb::module_& m, const char* name) {
           },
           "Branch census of the last block-CSF curvature pass, SUMMED over this rank's blocks "
           "(local to the rank). 'no_estimate' must be 0 on any gated case.")
+      // --- rung W4 (WO-W4): overlapping markers, collision, coalescence, breakup ---------------
+      .def(
+          "set_block_csf_union", [](S& s, bool on) { s.vofBlockSet().csfUnion = on; },
+          nb::arg("on"),
+          "Rung W4 item 1. TRUE (the default): the owner forms ONE force per face from the UNION "
+          "colour's own face difference, sigma * kappa_f * (C_union(i) - C_union(i-s)) / h, with "
+          "kappa_f the |dC|-weighted mean of the markers' face curvatures; a face claimed by a "
+          "single marker takes that marker's own force BIT for bit, so a scene without overlaps is "
+          "byte-identical to rung W2.\n\n"
+          "FALSE is rung W2's rule (each marker's force scattered with UNPACK_SUM). It is kept "
+          "only as the ablation: where two markers overlap it applies two forces against the ONE "
+          "colour jump the projection sees, so the balanced-force pairing that makes V4 exact is "
+          "broken exactly where two bubbles meet. Measured consequence: channel_18 blows up inside "
+          "a single step at ~1.5 eddy turnovers, at a time step 4x below the one that fails "
+          "(WO-W3 finding 7). Must be set BEFORE enable_vof_block_csf().")
+      .def(
+          "set_block_csf_union_kappa", [](S& s, int mode) { s.setCsfUnionKappa(mode); },
+          nb::arg("mode"),
+          "Rung W4: which curvature the SHARED faces (two or more markers) get.\n\n"
+          "  0 (DEFAULT) — the |dC|-weighted mean of the markers' own face curvatures (the WO-W4 "
+          "design's rule as written).\n"
+          "  1 — the UNION colour field's own curvature cascade (the same estimator the non-block "
+          "path uses, run on the field the projection's density is built from), falling back to "
+          "(0) where the cascade has no estimate.\n\n"
+          "MEASURED on the WO-W3 channel_18 checkpoint, and NEITHER mode saves it: a pair that "
+          "INTERPENETRATES at D/Delta = 10 makes a union whose geometry is a lens with a concave "
+          "crevice, and no face force on that geometry is well posed. Mode 0 applies the markers' "
+          "convex ~ +2/R to that concave interface and drives the pair together monotonically "
+          "(dmin 8.69 -> 7.20 cells; failure at 1.537 turnovers); mode 1 asks the cascade for the "
+          "crevice's own curvature, which the grid cannot resolve, and fails at 1.485 turnovers, "
+          "102 steps after the restart. Rung W2's summed forces fail at 1.605. What resolves it is "
+          "a TOPOLOGICAL decision -- set_block_coalescence -- which is why rung W4 carries the "
+          "collision models and not only the force rule.")
+      .def(
+          "vof_block_overlap_faces",
+          [](S& s) {
+            const auto q = s.vofBlockOverlapFaces();
+            return nb::make_tuple(q[0], q[1], q[2]);
+          },
+          "Faces (x, y, z) at which TWO OR MORE markers claimed the same face at the last block "
+          "CSF, i.e. how often the W4 union rule fired. Zero whenever no two markers overlap.")
+      .def(
+          "set_block_pair_census", [](S& s, bool on) { s.vofBlockSet().pairCensus = on; },
+          nb::arg("on"),
+          "Rung W4 item 2: the per-pair collision census (film thickness, approach velocity, "
+          "collision Weber number) for every pair of markers whose boxes overlap. On by default; "
+          "it changes no field and costs two small MPI_Allreduces per step.")
+      .def(
+          "set_block_liquid",
+          [](S& s, double rho, double mu) {
+            s.vofBlockSet().rhoLiquid = rho;
+            s.vofBlockSet().muLiquid = mu;
+          },
+          nb::arg("rho"), nb::arg("mu"),
+          "The LIQUID (continuous-phase) density and viscosity the collision census and the "
+          "coalescence models use, in the solver's cell units. Defaults to the solver's constant "
+          "rho/mu at enable_vof_block_csf(); with a property closure, pass the C = 0 branch.")
+      .def(
+          "set_block_coalescence",
+          [](S& s, const std::string& model, double h_crit, double we_crit, double drain_c,
+             double contact_film) {
+            auto& c = s.vofBlockSet().coalescence;
+            if (model == "never")
+              c.model = peclet::flow::vof::VofCoalescence::Never;
+            else if (model == "film")
+              c.model = peclet::flow::vof::VofCoalescence::Film;
+            else if (model == "weber")
+              c.model = peclet::flow::vof::VofCoalescence::Weber;
+            else
+              throw std::runtime_error("set_block_coalescence: model must be one of 'never', "
+                                       "'film', 'weber'");
+            c.hCrit = h_crit;
+            c.weCrit = we_crit;
+            c.drainC = drain_c;
+            c.contactFilm = contact_film;
+          },
+          nb::arg("model"), nb::arg("h_crit") = 1.0, nb::arg("we_crit") = 1.0,
+          nb::arg("drain_c") = 1.0, nb::arg("contact_film") = 1.0,
+          "Rung W4 item 3: what a pair of markers IN CONTACT does.\n\n"
+          "  'never' (DEFAULT) — they never merge. This is the physically right default for a "
+          "bubbly flow (coalescence is the exception in a contaminated or high-Weber system) and "
+          "it is TBFsolver's choice; it is also the only setting under which the container's "
+          "promise — that the numerics never decides a topology change — holds unconditionally.\n"
+          "  'film'  — merge once the film has been thinner than h_crit (CELLS) for a drainage "
+          "time t_d = drain_c * mu_l * D_eq / sigma (Prince & Blanch 1990; drain_c is the "
+          "coefficient their model leaves to the flow, so it is explicit here).\n"
+          "  'weber' — merge AT CONTACT (film <= contact_film cells) when the collision Weber "
+          "number rho_l U_n^2 D_eq / sigma is below we_crit. Bubble-pair experiments put the "
+          "bounce/coalesce transition near We ~ 1 (Duineveld 1998).\n\n"
+          "A merge is a deliberate block UNION: one new block on the bounding box of the two, with "
+          "the union max colour (the only place a max CREATES colour), the two old markers "
+          "retired. At most one merge per marker per step; a triple merges over two steps.")
+      .def(
+          "set_block_breakup",
+          [](S& s, bool on, long n_split, double satellite_volume, bool absorb_satellites,
+             int max_children) {
+            auto& B = s.vofBlockSet();
+            B.breakup = on;
+            B.breakupSteps = n_split;
+            B.satelliteVolume = satellite_volume;
+            B.absorbSatellites = absorb_satellites;
+            B.maxSplitChildren = max_children;
+          },
+          nb::arg("on"), nb::arg("n_split") = 3, nb::arg("satellite_volume") = 0.0,
+          nb::arg("absorb_satellites") = false, nb::arg("max_children") = 4,
+          "Rung W4 item 4: in-block connected-component labelling of C > 1/2; a marker that holds "
+          "more than one component for n_split CONSECUTIVE steps (default 3, so a transient neck "
+          "is ignored) is SPLIT into one block per component. The children's volumes sum to the "
+          "parent's EXACTLY — every cell of the parent, interface cells included, is adopted by "
+          "exactly one child — and the union colour is unchanged bit for bit.\n\n"
+          "OFF by default: the labelling is an iterative propagation costing O(box diameter) "
+          "kernel launches per marker per step, which is not a cost to pay silently.\n\n"
+          "A component smaller than satellite_volume (cell volumes) is a SATELLITE: kept as its "
+          "own tiny block (the default) and counted, or folded into the largest child with "
+          "absorb_satellites=True. Components beyond max_children are folded into the largest, "
+          "which preserves volume exactly.")
+      .def(
+          "vof_block_pairs",
+          [](S& s) {
+            nb::list out;
+            for (const auto& p : s.vofBlockPairs()) {
+              nb::dict r;
+              r["id_a"] = p.idA;
+              r["id_b"] = p.idB;
+              r["dist"] = p.dist;
+              r["d_a"] = p.dA;
+              r["d_b"] = p.dB;
+              r["film"] = p.film;
+              r["approach"] = p.approach;
+              r["weber"] = p.weber;
+              r["d_eq"] = p.dEq;
+              r["volume_a"] = p.volA;
+              r["volume_b"] = p.volB;
+              r["contact_steps"] = p.contactSteps;
+              r["film_time"] = p.filmTime;
+              r["state"] = p.state;
+              out.append(r);
+            }
+            return out;
+          },
+          "The collision census: one dict per pair of markers whose boxes overlap, REPLICATED on "
+          "every rank (the two masters compute their own halves and one MPI_Allreduce over "
+          "disjoint contributions shares them, so the census is identical whatever the "
+          "decomposition).\n\n"
+          "'film' is the gap between the two markers' interfaces along the line of centres, in "
+          "CELLS: |c_B - c_A| - d_A - d_B, where d_X is the distance from marker X's centroid to "
+          "the last point along that line at which its OWN colour is still >= 1/2 (a ray march at "
+          "h/8 on the marker's own block). It is NEGATIVE when the two markers interpenetrate — "
+          "the state the container is designed to carry, and the one that broke rung W2's force "
+          "rule. 'approach' > 0 means closing; 'weber' is rho_l U_n^2 D_eq / sigma with D_eq the "
+          "harmonic-mean equivalent diameter 2 D_A D_B/(D_A + D_B).")
+      .def(
+          "vof_block_events",
+          [](S& s) {
+            static const char* kind[4] = {"approach", "contact", "merge", "split"};
+            nb::list out;
+            for (const auto& e : s.vofBlockEvents()) {
+              nb::dict r;
+              r["type"] = kind[e.type < 0 || e.type > 3 ? 0 : e.type];
+              r["step"] = e.step;
+              r["time"] = e.time;
+              r["id_a"] = e.idA;
+              r["id_b"] = e.idB;
+              r["film"] = e.film;
+              r["approach"] = e.approach;
+              r["weber"] = e.weber;
+              r["d_eq"] = e.dEq;
+              r["volume_a"] = e.volA;
+              r["volume_b"] = e.volB;
+              r["volume_new"] = e.volNew;
+              r["children"] = e.children;
+              out.append(r);
+            }
+            return out;
+          },
+          "The event log of the collision census: 'approach' (the pair entered the census), "
+          "'contact' (its film reached contact_film), 'merge' and 'split', each with the step, the "
+          "time and the pair quantities at the event. For a 'split', 'id_a' is the parent, 'id_b' "
+          "the first child and 'children' how many blocks it became. Kept as a ring of the last "
+          "8192 events; vof_clear_block_events() empties it.")
+      .def(
+          "vof_clear_block_events", [](S& s) { s.clearVofBlockEvents(); },
+          "Empty the event log (the census itself is unaffected).")
+      .def(
+          "vof_block_topology",
+          [](S& s) {
+            auto& B = s.vofBlockSet();
+            nb::dict r;
+            r["markers"] = static_cast<long>(B.aliveCount());
+            r["merges"] = B.mergeCount();
+            r["splits"] = B.splitCount();
+            r["satellites"] = B.satelliteCount();
+            r["orphan_colour"] = B.orphanColour();
+            r["shared_liquid"] = B.transportLost();
+            r["time"] = B.time();
+            return r;
+          },
+          "Cumulative topology census: live markers, merges and splits performed, satellite "
+          "components kept, 'orphan_colour' — colour that a split found in no component's "
+          "6-connected neighbourhood and gave to the largest child (never dropped) — and "
+          "'shared_liquid', the colour a MERGE did not carry because both markers claimed the same "
+          "cell and the union max keeps one value. The merged volume is the sum of the two minus "
+          "exactly that, which is why a merge of two OVERLAPPING markers is not the sum: reported "
+          "because a container that silently loses mass is not acceptable.")
       // --- two-phase open boundaries (rung V-BC, WO-R) ------------------------------------------
       .def(
           "set_vof_inflow", [](S& s, int face, double value) { s.setVofInflow(face, value); },

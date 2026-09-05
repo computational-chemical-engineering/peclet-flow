@@ -282,6 +282,72 @@ struct VofBlockStats {
   double area = 0.0;
 };
 
+// ---------------------------------------------------------------------------------------------
+// rung W4: pairs, events, and the two explicit models
+// ---------------------------------------------------------------------------------------------
+
+/// Rung W4 item 2: the state of one marker PAIR whose inner boxes overlap.
+///
+/// `film` is the design's film thickness: the gap between the two markers' interfaces **along the
+/// line of centres**, measured as `|c_B - c_A| - d_A - d_B` where `d_X` is the distance from
+/// marker X's centroid to the last point along that line at which its OWN colour is still >= 1/2
+/// (a ray march with trilinear interpolation on the marker's own block — the PLIC plane's own
+/// crossing to within the sampling step, which is `h/8`). It is NEGATIVE when the two markers
+/// interpenetrate, which is the state the block container is designed to carry and the state that
+/// broke rung W2's force rule (WO-W3 finding 7 measured `dmin = 8.0` cells at `D = 10`).
+///
+/// Everything here is in CELL units and is REPLICATED on every rank: the masters compute their own
+/// halves and one `MPI_Allreduce` over disjoint contributions makes the census identical
+/// everywhere, whatever the decomposition (gate G6).
+struct VofPairStats {
+  long idA = 0, idB = 0;
+  double dist = 0.0;      ///< centroid separation, minimum image
+  double dA = 0.0, dB = 0.0;  ///< the two markers' interface radii along the line of centres
+  double film = 0.0;      ///< `dist - dA - dB`; < 0 = interpenetration
+  double approach = 0.0;  ///< normal approach velocity, `-(v_B - v_A) . n`; > 0 = closing
+  double weber = 0.0;     ///< `rho_l U_n^2 D_eq / sigma`, the collision Weber number
+  double dEq = 0.0;       ///< `2 D_A D_B / (D_A + D_B)`, the equivalent diameter
+  double volA = 0.0, volB = 0.0;
+  long contactSteps = 0;  ///< consecutive steps with `film <= contactFilm`
+  double filmTime = 0.0;  ///< time accumulated with `film < hCrit` (the drainage clock)
+  int state = 0;          ///< 1 = in the census, 2 = in contact
+};
+
+/// Which coalescence model decides what a pair in contact does. `Never` is the DEFAULT and it is
+/// the physically right default for a bubbly flow: coalescence in a contaminated or high-Weber
+/// system is the exception, and the whole point of the container is that the numerics does not
+/// decide it (TBFsolver makes the same choice).
+enum class VofCoalescence { Never = 0, Film = 1, Weber = 2 };
+
+/// The model's parameters, all explicit, all in the solver's units (cells and seconds).
+struct VofCoalescenceModel {
+  VofCoalescence model = VofCoalescence::Never;
+  /// "film": merge once the film has been thinner than `hCrit` for a drainage time
+  /// `t_d = drainC * mu_l * D_eq / sigma` (the Prince & Blanch 1990 form; `drainC` is the
+  /// coefficient their model leaves to the flow, so it is a parameter here and not a constant).
+  double hCrit = 1.0;
+  double drainC = 1.0;
+  /// "weber": merge AT CONTACT when the collision Weber number is below this. Bubble-pair
+  /// experiments put the bouncing/coalescence transition near We ~ 1 (Duineveld 1998), so 1.0 is
+  /// the documented starting point and not a tuned number.
+  double weCrit = 1.0;
+  /// A pair is IN CONTACT when the film is at or below this many cells. One cell is the thinnest
+  /// film this grid resolves, which is what makes it the natural threshold.
+  double contactFilm = 1.0;
+};
+
+/// One census line. `type`: 0 approach (the pair entered the census), 1 contact (the film reached
+/// `contactFilm`), 2 merge, 3 split. For a split, `idA` is the parent and `idB` the first child.
+struct VofEvent {
+  int type = 0;
+  long step = 0;
+  double time = 0.0;
+  long idA = 0, idB = 0;
+  double film = 0.0, approach = 0.0, weber = 0.0, dEq = 0.0;
+  double volA = 0.0, volB = 0.0, volNew = 0.0;
+  long children = 0;  ///< split only: how many blocks the parent became
+};
+
 /// One bubble's block. Every rank holds the (id, box, master) triple — the replicated table — and
 /// ONLY the master allocates the advector and the colour.
 class VofBlock {
@@ -294,6 +360,7 @@ class VofBlock {
   VofBox seed_{};
 
   bool mine() const { return mine_; }
+  bool alive() const { return alive_; }
   WyAdvector& advector() { return adv_; }
   const WyAdvector& advector() const { return adv_; }
   VofBox extended(int ghost) const { return VofBox::grown(box, ghost); }
@@ -305,6 +372,27 @@ class VofBlock {
   VofCurvature& curvature() { return curv_; }
   const VofCurvature& curvature() const { return curv_; }
   SField csfForce(int c) const { return f_[c]; }
+  /// Rung W4 item 1: the four per-face ACCUMULATORS this marker contributes to the owner, in the
+  /// scatter's component order `i = 4 c + k`:
+  ///
+  ///   k = 0  `KS` = `kappa_f`                       — used as-is when this marker is ALONE on
+  ///                 the face, so a single-marker face gets its own curvature bit for bit
+  ///   k = 1  `W`  = `|dC_marker|`                   — the weight of this marker's curvature
+  ///   k = 2  `KW` = `kappa_f |dC_marker|`
+  ///   k = 3  `N`  = 1                               — how many markers claim the face
+  ///
+  /// A marker contributes at all only where its curvature is DEFINED (`csfFaceCurvature` true);
+  /// an orphan face contributes nothing, so it can never drag the union curvature towards zero.
+  ///
+  /// What is NOT scattered is the FORCE, and that is the whole of rung W4. A marker's own
+  /// `sigma kappa dC_marker / h` is the right force only where the union's colour jump IS that
+  /// marker's; on the film between two interpenetrating markers one marker has a jump and the
+  /// union has none, and applying that marker's force there is an unbalanced force that the
+  /// projection cannot remove. Measured, on the W3 `channel_18` checkpoint: keeping the marker's
+  /// own force wherever `N == 1` (which is bitwise-safest, and was tried first) fails at 1.524
+  /// eddy turnovers — EARLIER than rung W2's own 1.605 — while the rule below, which never uses
+  /// anything but the union's own difference, runs past it. See `Solver::assembleBlockCsf`.
+  SField csfAcc(int c, int k) const { return (k == 0) ? f_[c] : a_[c][k - 1]; }
   /// The non-colour state a master carries between steps: the previous centroid (so a migrated
   /// block's reported velocity has no gap) and whether it is valid. Four doubles; everything else
   /// in a block is either replicated (the table) or recomputed every step.
@@ -324,9 +412,22 @@ class VofBlock {
  private:
   bool mine_ = false;
   bool allocated_ = false;
+  /// Rung W4: a block RETIRED by a merge or a split keeps its table row (block id == table index
+  /// is an invariant every lookup relies on) but has an empty box, no state, and is skipped by
+  /// every loop and every transfer.
+  bool alive_ = true;
+  long splitSteps_ = 0;  ///< consecutive steps this block held more than one component
+  /// Is this block ELIGIBLE to be split? A block a MERGE just created holds two components by
+  /// construction — that is what it was made from — so breakup would undo the merge on its third
+  /// step and the container would oscillate (measured: merge@1, split@3, merge@4, split@6, ... on
+  /// the W2 MPI pair scene with `contactFilm = 4`). A merged block is therefore not armed until it
+  /// has been a SINGLE component once, i.e. until its two markers have actually joined; from then
+  /// on it splits by the ordinary rule.
+  bool splitArmed_ = true;
   WyAdvector adv_;
   VofCurvature curv_;
   SField f_[3];
+  SField a_[3][3];  ///< W4: {W, KW, N} per component (see `csfAcc`)
   VofBlockStats st_;
   double prevCentroid_[3]{0, 0, 0};
   bool hasPrev_ = false;
@@ -355,10 +456,22 @@ struct VofBlockExchangeBase {
   /// `scatterColourMax`). Used to seed a block from an arbitrary global colour field — the general
   /// seeding path, which a sphere seed is only a convenience over.
   virtual void gatherColour(std::vector<VofBlock>& blocks, SField cLocal) = 0;
-  /// SUM every master block's CSF face force into the caller's three face-force patches
-  /// (TBFsolver's UNPACK_SUM, `VOF.f90::computeSurfaceTension`): overlapping markers ADD their
-  /// forces, which is what makes two touching bubbles push on the fluid twice and not once.
-  virtual void scatterForceSum(std::vector<VofBlock>& blocks, SField fx, SField fy, SField fz) = 0;
+  /// SUM every master block's CSF accumulators into the caller's patches (TBFsolver's UNPACK_SUM,
+  /// `VOF.f90::computeSurfaceTension`). `nc == 3` scatters the rung-W2 FORCE alone (`loc` is
+  /// fx/fy/fz) — overlapping markers then ADD their forces, which is the pairing defect rung W4
+  /// exists to repair; `nc == 12` scatters the four W4 accumulators of `VofBlock::csfAcc` in the
+  /// order `i = 4 c + k`, and the owner forms ONE force per face from the union colour.
+  virtual void scatterCsfSum(std::vector<VofBlock>& blocks, SField* loc, int nc) = 0;
+  /// Sum `n` doubles across the ranks that share the block table, in place. Every entry is written
+  /// by exactly ONE rank (the block's master) and read by all, so the sum is a broadcast that
+  /// happens to be spelled as a reduction: exact, and identical on every rank whatever the
+  /// decomposition — which is what lets the collision census, the merge decision and the split
+  /// decision be taken redundantly and consistently everywhere (gate G6).
+  virtual void allreduceSum(double* v, int n) { (void)v; (void)n; }
+  /// Elementwise MAX of `n` doubles across the ranks. The transport used by a MERGE and a SPLIT:
+  /// the source master writes its own colour into the buffer and every other rank writes zero, so
+  /// the result is the union `max` on the destination's box, on every rank at once.
+  virtual void allreduceMax(double* v, int n) { (void)v; (void)n; }
   /// Move a block's state from `oldMaster[i]` to `blocks[i].master` after a re-assignment. The
   /// gaining rank has ALREADY allocated the (zeroed) advector; only the colour travels — everything
   /// else in a block is either replicated (the table) or recomputed per step.
@@ -418,6 +531,10 @@ class VofBlockSet {
   /// Rung W2: form the CSF face force on each block (its own curvature cascade, the V4 balanced
   /// -force rule on the block's faces) and SUM it into the caller's global face-force fields.
   bool csfEnabled = false;
+  /// Rung W4 item 1: form ONE force per face from the UNION colour instead of summing the markers'
+  /// forces. `false` is rung W2's rule, kept ONLY as the ablation that reproduces the `channel_18`
+  /// blow-up; it is not a production path. See `buildCsfForce` and `Solver::assembleBlockCsf`.
+  bool csfUnion = true;
   double sigma = 0.0;  ///< surface-tension coefficient of the block CSF (cell units)
   /// The curvature cascade's TUNABLES for every block, copied into each block's own
   /// `VofCurvature` when it is allocated.  This is not decoration: `interfaceEps` (the wisp guard
@@ -515,18 +632,18 @@ class VofBlockSet {
       throw std::runtime_error("peclet::flow::vof::VofBlockSet: no exchange installed");
     exch_->gatherFaceVel(blocks_, ghost_);
     for (auto& b : blocks_) {
-      if (!b.mine_)
+      if (!b.mine_ || !b.alive_)
         continue;
       clampFaceVelocity(b);
       b.adv_.advect(dt, step_);
       b.st_.recentred = false;
     }
     for (std::size_t k = 0; k < blocks_.size(); ++k)
-      if (blocks_[k].mine_)
+      if (blocks_[k].mine_ && blocks_[k].alive_)
         recentre(k);
     exch_->syncTable(blocks_);
     for (auto& b : blocks_)
-      b.mine_ = (b.master == rank_);
+      b.mine_ = b.alive_ && (b.master == rank_);  // a RETIRED block belongs to nobody
     // Rung W1: re-balance the master assignment on the CURRENT boxes, before the scatter, so the
     // step's union is produced by the new owners and there is no half-migrated state anywhere.
     // The boxes have just been replicated, so `plannedMasters()` is the same on every rank.
@@ -535,9 +652,14 @@ class VofBlockSet {
       lastReassigned_ = assignMasters();
     exch_->scatterColourMax(blocks_, cLocal);
     for (auto& b : blocks_)
-      if (b.mine_)
+      if (b.mine_ && b.alive_)
         measure(b, dt);
     ++step_;
+    t_ += dt;
+    // Rung W4: the census, then the two models. A merge or a split leaves the UNION colour
+    // unchanged bit for bit (a merge unions the same support; a split partitions the parent's
+    // cells), so `cLocal` is still the field the closures must see and nothing is re-scattered.
+    updateInteractions(dt);
   }
 
   /// Blocks that changed master at the last `advect()` (rung W1 item a).
@@ -556,14 +678,18 @@ class VofBlockSet {
         allocateCsf(i);
   }
 
-  /// Per-block curvature cascade + the CSF face force, summed into the caller's three face-force
-  /// patches. `fx/fy/fz` are ZEROED first (the force is a per-step quantity, never accumulated).
-  void computeCsf(SField fx, SField fy, SField fz) {
+  /// Per-block curvature cascade + the CSF face accumulators, summed into the caller's patches.
+  /// `loc` is ZEROED first (the force is a per-step quantity, never accumulated). `nc` is 12 with
+  /// `csfUnion` (the W4 accumulators, `VofBlock::csfAcc` order) and 3 without it (the W2 force).
+  void computeCsf(SField* loc, int nc) {
     if (!exch_)
       throw std::runtime_error("peclet::flow::vof::VofBlockSet: no exchange installed");
+    if (nc != (csfUnion ? 12 : 3))
+      throw std::runtime_error("peclet::flow::vof::VofBlockSet::computeCsf: component count does "
+                               "not match csfUnion");
     curvStats_ = VofCurvature::Stats{};
     for (auto& b : blocks_) {
-      if (!b.mine_)
+      if (!b.mine_ || !b.alive_)
         continue;
       const VofCurvature::Stats st = b.curv_.compute(b.adv_.colour());
       curvStats_.interfacial += st.interfacial;
@@ -575,7 +701,7 @@ class VofBlockSet {
       curvStats_.noEstimate += st.noEstimate;
       buildCsfForce(b);
     }
-    exch_->scatterForceSum(blocks_, fx, fy, fz);
+    exch_->scatterCsfSum(blocks_, loc, nc);
   }
   VofCurvature::Stats csfCurvatureStats() const { return curvStats_; }
 
@@ -591,8 +717,12 @@ class VofBlockSet {
     b.curv_.useMixedHeightFit = curvProto.useMixedHeightFit;
     b.curv_.useWorklist = curvProto.useWorklist;  // WO-V9: the compaction follows the prototype
     const long len = static_cast<long>(b.adv_.extent().x) * b.adv_.extent().y * b.adv_.extent().z;
-    for (int c = 0; c < 3; ++c)
+    for (int c = 0; c < 3; ++c) {
       b.f_[c] = SField("vof::block::csf", len);
+      if (csfUnion)
+        for (int k = 0; k < 3; ++k)
+          b.a_[c][k] = SField("vof::block::csf_acc", len);
+    }
   }
 
   /// The V4 balanced-force CSF on the BLOCK's faces — the same `csfFaceCurvature` +
@@ -600,29 +730,65 @@ class VofBlockSet {
   /// colour and curvature. Formed over the inner box; the low face of an inner cell at local index
   /// 0 reads the block's ghost, which the margin guarantees is pure gas, so the force is exactly
   /// zero there and the block's force has compact support inside its own box.
+  ///
+  /// RUNG W4. What is scattered is no longer only the force. A face inside the OVERLAP of two
+  /// markers receives two forces through UNPACK_SUM while the projection — which reads the UNION
+  /// colour `max_blocks C` — sees a single colour jump there, so the balanced-force pairing that
+  /// makes V4 exact (the force being the discrete gradient of `sigma kappa C` under the SAME
+  /// difference operator the projection inverts) is broken exactly where two bubbles meet. Measured
+  /// consequence: `channel_18` blows up inside one step at ~1.5 eddy turnovers, at a dt that is 4x
+  /// below the one that fails, the moment two markers interpenetrate (WO-W3 finding 7).
+  ///
+  /// So each marker contributes what the owner needs to form ONE force from the UNION's own face
+  /// difference: `A` (its W2 force, which IS the answer where it is alone), `W = |dC|`,
+  /// `KW = kappa_f |dC|` and `N = 1`. The owner's rule is in `Solver::assembleBlockCsf`.
   void buildCsfForce(VofBlock& b) {
     const I3 e = b.adv_.extent(), n = b.adv_.inner();
     const int g = ghost_;
     const double sig = sigma, hh = h_;
+    const bool uni = csfUnion;
     SField cv = b.adv_.colour(), kp = b.curv_.kappa(), kb = b.curv_.branch();
     const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
     for (int c = 0; c < 3; ++c) {
       SField ff = b.f_[c];
       const long strd = (c == 0) ? 1 : (c == 1 ? sy : sz);
+      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>> pol(SExec(), {g, g, g},
+                                                        {g + n.x, g + n.y, g + n.z});
+      if (!uni) {
+        Kokkos::parallel_for(
+            "vof::block::csf_force", pol, KOKKOS_LAMBDA(int x, int y, int z) {
+              const long i = L3(x, y, z, e);
+              const double dC = cv(i) - cv(i - strd);
+              double f = 0.0;
+              if (dC != 0.0) {
+                double kf = 0.0;
+                vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
+                f = vof::csfFaceForce(sig, kf, dC, hh);
+              }
+              ff(i) = f;
+            });
+        continue;
+      }
+      SField fw = b.a_[c][0], fkw = b.a_[c][1], fn = b.a_[c][2];
       Kokkos::parallel_for(
-          "vof::block::csf_force",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                        {g + n.x, g + n.y, g + n.z}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
+          "vof::block::csf_acc", pol, KOKKOS_LAMBDA(int x, int y, int z) {
             const long i = L3(x, y, z, e);
             const double dC = cv(i) - cv(i - strd);
-            double f = 0.0;
+            double ks = 0.0, w = 0.0, kw = 0.0, nn = 0.0;
             if (dC != 0.0) {
               double kf = 0.0;
-              vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
-              f = vof::csfFaceForce(sig, kf, dC, hh);
+              // an ORPHAN face carries no weight: it must not pull kappa_union towards 0
+              if (vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf)) {
+                w = Kokkos::fabs(dC);
+                ks = kf;
+                kw = kf * w;
+                nn = 1.0;
+              }
             }
-            ff(i) = f;
+            ff(i) = ks;
+            fw(i) = w;
+            fkw(i) = kw;
+            fn(i) = nn;
           });
     }
     Kokkos::fence();
@@ -669,11 +835,13 @@ class VofBlockSet {
   long assignMasters() {
     if (blocks_.empty() || size_ <= 1)
       return 0;
-    const std::vector<int> want = plannedMasters();
+    std::vector<int> want = plannedMasters();
     std::vector<int> old(blocks_.size());
     long moved = 0;
     for (std::size_t i = 0; i < blocks_.size(); ++i) {
       old[i] = blocks_[i].master;
+      if (!blocks_[i].alive_)
+        want[i] = old[i];  // a retired block has no state to move and no work to balance
       if (old[i] != want[i])
         ++moved;
     }
@@ -875,6 +1043,8 @@ class VofBlockSet {
     std::vector<VofBlockStats> v;
     v.reserve(blocks_.size());
     for (const auto& b : blocks_) {
+      if (!b.alive_)
+        continue;  // rung W4: a merged / split marker keeps its row but is no longer a marker
       VofBlockStats q = b.st_;
       q.id = b.id;
       q.master = b.master;
@@ -895,6 +1065,8 @@ class VofBlockSet {
     masters.assign(size_, 0);
     cells.assign(size_, 0);
     for (const auto& b : blocks_) {
+      if (!b.alive_)
+        continue;
       masters[b.master] += 1;
       cells[b.master] += VofBox::grown(b.box, 0).cells();
     }
@@ -945,8 +1117,11 @@ class VofBlockSet {
     retireAdvector(std::move(b.adv_));
     b.adv_ = WyAdvector();
     b.curv_ = VofCurvature();
-    for (int c = 0; c < 3; ++c)
+    for (int c = 0; c < 3; ++c) {
       b.f_[c] = SField();
+      for (int k = 0; k < 3; ++k)
+        b.a_[c][k] = SField();
+    }
     b.allocated_ = false;
     b.hasPrev_ = false;
   }
@@ -1266,6 +1441,707 @@ class VofBlockSet {
     b.st_.moment[5] = syz * iv;
   }
 
+  // =============================================================================================
+  // rung W4 (WO-W4) items 2-5: the pair census, coalescence and breakup as EXPLICIT models
+  // =============================================================================================
+  //
+  // The container's promise is that two markers never coalesce numerically. The price of that
+  // promise is that something else has to decide what a pair in contact does, and that something
+  // is here: a census of every pair whose boxes overlap (film thickness, approach velocity,
+  // collision Weber number), a coalescence model that may merge them, and a breakup model that may
+  // split one marker into two. All three are OFF by default except the census, which changes no
+  // number anywhere; `Never` is the coalescence default because it is the physically right one for
+  // a bubbly flow and because the alternative would smuggle a numerical decision back in.
+
+  /// Marker-pair census (item 2). Costs two small `MPI_Allreduce`s per step and changes no field.
+  bool pairCensus = true;
+  VofCoalescenceModel coalescence;
+  /// Breakup (item 4): in-block connected-component labelling of `C > 1/2`; a block that holds
+  /// more than one component for `breakupSteps` CONSECUTIVE steps is split. OFF by default — the
+  /// labelling is an iterative propagation and costs O(box diameter) kernel launches per block per
+  /// step, which is a real cost to pay silently (measured in the findings).
+  bool breakup = false;
+  long breakupSteps = 3;  ///< the design's `N_split`: ignore transient necks
+  /// Satellite policy: a component smaller than `satelliteVolume` cell volumes is still made into
+  /// its own (tiny) block — the design's "default keep" — and counted. Set it to a volume and
+  /// `absorbSatellites = true` to fold such components into the largest child instead.
+  double satelliteVolume = 0.0;
+  bool absorbSatellites = false;
+  int maxSplitChildren = 4;  ///< components beyond this are folded into the largest child
+  /// The liquid properties the collision model needs (cell units, like `sigma`).
+  double rhoLiquid = 1.0;
+  double muLiquid = 1.0;
+
+  const std::vector<VofPairStats>& pairs() const { return pairs_; }
+  const std::vector<VofEvent>& events() const { return events_; }
+  void clearEvents() { events_.clear(); }
+  double time() const { return t_; }
+  void setTime(double t) { t_ = t; }
+  long mergeCount() const { return nMerge_; }
+  long splitCount() const { return nSplit_; }
+  long satelliteCount() const { return nSatellite_; }
+  double orphanColour() const { return orphanColour_; }
+  /// Colour the last merge did NOT put into the merged block: the SHARED liquid, i.e. cells both
+  /// markers claimed, where the union `max` keeps one value and the sum of the two is larger. It
+  /// is the exact accounting of why a merged volume is not always the sum, and it is zero for two
+  /// markers whose supports are disjoint.
+  double transportLost() const { return transportLost_; }
+  /// Live (non-retired) blocks.
+  std::size_t aliveCount() const {
+    std::size_t k = 0;
+    for (const auto& b : blocks_)
+      if (b.alive_)
+        ++k;
+    return k;
+  }
+
+  /// The census + the two models, run once per `advect()` after the statistics are in.
+  void updateInteractions(double dt) {
+    if (!pairCensus && coalescence.model == VofCoalescence::Never && !breakup)
+      return;
+    if (pairCensus || coalescence.model != VofCoalescence::Never)
+      censusPairs(dt);
+    if (coalescence.model != VofCoalescence::Never)
+      applyCoalescence();
+    if (breakup)
+      applyBreakup();
+  }
+
+  // ---- item 2: the census ----------------------------------------------------------------------
+
+  /// Minimum-image displacement `b - a` on the periodic axes, in the caller's units.
+  void minImage(const double a[3], const double b[3], double out[3]) const {
+    const int g[3] = {gs_.x, gs_.y, gs_.z};
+    for (int d = 0; d < 3; ++d) {
+      double q = b[d] - a[d];
+      const double L = g[d] * h_;
+      if (per_[d] && L > 0.0)
+        q -= L * std::round(q / L);
+      out[d] = q;
+    }
+  }
+
+  /// Do the two blocks' INNER boxes overlap (with the periodic wrap)? The inner box already
+  /// carries the 3-cell margin, so an overlap means the two markers' colour supports are within
+  /// ~6 cells — which is exactly the range over which their CSF bands can share a face.
+  bool boxesOverlap(const VofBox& a, const VofBox& b) const {
+    const int g[3] = {gs_.x, gs_.y, gs_.z};
+    for (int d = 0; d < 3; ++d) {
+      bool any = false;
+      for (int k = -1; k <= 1 && !any; ++k) {
+        if (k != 0 && !per_[d])
+          continue;
+        const int lo = b.lo[d] + k * g[d], hi = b.hi[d] + k * g[d];
+        any = (lo < a.hi[d] && a.lo[d] < hi);
+      }
+      if (!any)
+        return false;
+    }
+    return true;
+  }
+
+  void censusPairs(double dt) {
+    const std::size_t nb = blocks_.size();
+    // 1. replicate {alive, volume, centroid, velocity} -- the master writes, everyone else zero.
+    std::vector<double> tab(nb * 8, 0.0);
+    for (std::size_t i = 0; i < nb; ++i) {
+      const VofBlock& b = blocks_[i];
+      if (!b.alive_ || !b.mine_)
+        continue;
+      tab[8 * i + 0] = 1.0;
+      tab[8 * i + 1] = b.st_.volume;
+      for (int d = 0; d < 3; ++d) {
+        tab[8 * i + 2 + d] = b.st_.centroid[d];
+        tab[8 * i + 5 + d] = b.st_.velocity[d];
+      }
+    }
+    if (exch_)
+      exch_->allreduceSum(tab.data(), static_cast<int>(tab.size()));
+    // 2. the pair list, from the REPLICATED boxes -- identical on every rank by construction.
+    std::vector<std::pair<std::size_t, std::size_t>> pl;
+    for (std::size_t i = 0; i < nb; ++i) {
+      if (!blocks_[i].alive_ || tab[8 * i] <= 0.0 || !(tab[8 * i + 1] > 0.0))
+        continue;
+      for (std::size_t j = i + 1; j < nb; ++j) {
+        if (!blocks_[j].alive_ || tab[8 * j] <= 0.0 || !(tab[8 * j + 1] > 0.0))
+          continue;
+        if (boxesOverlap(blocks_[i].box, blocks_[j].box))
+          pl.emplace_back(i, j);
+      }
+    }
+    // 3. each master ray-marches its OWN marker along the line of centres; one allreduce shares
+    //    both halves. Two doubles per pair, so this is a handful of bytes.
+    std::vector<double> ray(pl.size() * 2, 0.0);
+    for (std::size_t k = 0; k < pl.size(); ++k) {
+      const std::size_t i = pl[k].first, j = pl[k].second;
+      double ci[3], cj[3], n[3];
+      for (int d = 0; d < 3; ++d) {
+        ci[d] = tab[8 * i + 2 + d];
+        cj[d] = tab[8 * j + 2 + d];
+      }
+      minImage(ci, cj, n);
+      const double L = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+      if (!(L > 0.0))
+        continue;
+      for (int d = 0; d < 3; ++d)
+        n[d] /= L;
+      if (blocks_[i].mine_ && blocks_[i].allocated_)
+        ray[2 * k + 0] = rayRadius(blocks_[i], ci, n, L);
+      if (blocks_[j].mine_ && blocks_[j].allocated_) {
+        const double m[3] = {-n[0], -n[1], -n[2]};
+        ray[2 * k + 1] = rayRadius(blocks_[j], cj, m, L);
+      }
+    }
+    if (exch_ && !ray.empty())
+      exch_->allreduceSum(ray.data(), static_cast<int>(ray.size()));
+    // 4. assemble, carry the per-pair state forward, and emit the events.
+    std::vector<VofPairStats> out;
+    out.reserve(pl.size());
+    for (std::size_t k = 0; k < pl.size(); ++k) {
+      const std::size_t i = pl[k].first, j = pl[k].second;
+      VofPairStats p;
+      p.idA = blocks_[i].id;
+      p.idB = blocks_[j].id;
+      p.volA = tab[8 * i + 1];
+      p.volB = tab[8 * j + 1];
+      double ci[3], cj[3], n[3], dv[3];
+      for (int d = 0; d < 3; ++d) {
+        ci[d] = tab[8 * i + 2 + d];
+        cj[d] = tab[8 * j + 2 + d];
+        dv[d] = tab[8 * j + 5 + d] - tab[8 * i + 5 + d];
+      }
+      minImage(ci, cj, n);
+      const double L = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+      if (L > 0.0)
+        for (int d = 0; d < 3; ++d)
+          n[d] /= L;
+      p.dist = L / h_;
+      p.dA = ray[2 * k + 0] / h_;
+      p.dB = ray[2 * k + 1] / h_;
+      p.film = p.dist - p.dA - p.dB;
+      const double un = dv[0] * n[0] + dv[1] * n[1] + dv[2] * n[2];  // > 0 = separating
+      p.approach = -un / h_;
+      const double dA = 2.0 * std::cbrt(3.0 * p.volA / (4.0 * M_PI));
+      const double dB = 2.0 * std::cbrt(3.0 * p.volB / (4.0 * M_PI));
+      p.dEq = (dA + dB > 0.0) ? 2.0 * dA * dB / (dA + dB) : 0.0;
+      p.weber = (sigma > 0.0) ? rhoLiquid * (un / h_) * (un / h_) * p.dEq / sigma : 0.0;
+      // carry the history of this pair (keyed by the two ids, which never change under us)
+      const VofPairStats* old = findPair(p.idA, p.idB);
+      const bool contact = p.film <= coalescence.contactFilm;
+      p.contactSteps = (old && contact) ? old->contactSteps + 1 : (contact ? 1 : 0);
+      const bool draining = p.film < coalescence.hCrit;
+      p.filmTime = (old && draining) ? old->filmTime + dt : (draining ? dt : 0.0);
+      p.state = contact ? 2 : 1;
+      if (!old)
+        emit(VofEvent{0, step_, t_, p.idA, p.idB, p.film, p.approach, p.weber, p.dEq, p.volA,
+                      p.volB, 0.0, 0});
+      if (contact && (!old || old->state != 2))
+        emit(VofEvent{1, step_, t_, p.idA, p.idB, p.film, p.approach, p.weber, p.dEq, p.volA,
+                      p.volB, 0.0, 0});
+      out.push_back(p);
+    }
+    pairs_.swap(out);
+  }
+
+  const VofPairStats* findPair(long a, long b) const {
+    for (const auto& p : pairs_)
+      if (p.idA == a && p.idB == b)
+        return &p;
+    return nullptr;
+  }
+
+  /// March along `n` from `c0` (both in the block's own unwrapped global frame, physical units)
+  /// and return the LARGEST `s <= L` at which this marker's own colour, trilinearly interpolated,
+  /// is still >= 1/2. That is the marker's interface radius in the direction of its partner. The
+  /// step is `h/8`, so the film thickness is resolved to an eighth of a cell.
+  double rayRadius(const VofBlock& b, const double c0[3], const double n[3], double L) const {
+    const I3 e = b.adv_.extent();
+    const int g = ghost_;
+    const double hh = h_;
+    const int ox = b.box.lo[0], oy = b.box.lo[1], oz = b.box.lo[2];
+    const double x0 = c0[0], y0 = c0[1], z0 = c0[2];
+    const double nx = n[0], ny = n[1], nz = n[2];
+    int ns = static_cast<int>(L / (0.125 * hh)) + 1;
+    if (ns < 2)
+      ns = 2;
+    if (ns > 4096)
+      ns = 4096;
+    const double ds = L / ns;
+    SField c = b.adv_.colour();
+    double r = 0.0;
+    Kokkos::parallel_reduce(
+        "vof::block::ray", Kokkos::RangePolicy<SExec>(SExec(), 0, ns + 1),
+        KOKKOS_LAMBDA(int k, double& m) {
+          const double s = k * ds;
+          const double px = (x0 + s * nx) / hh - ox - 0.5, py = (y0 + s * ny) / hh - oy - 0.5,
+                       pz = (z0 + s * nz) / hh - oz - 0.5;
+          const int i0 = static_cast<int>(Kokkos::floor(px)),
+                    j0 = static_cast<int>(Kokkos::floor(py)),
+                    k0 = static_cast<int>(Kokkos::floor(pz));
+          if (i0 < -g || j0 < -g || k0 < -g || i0 + 1 >= e.x - g || j0 + 1 >= e.y - g ||
+              k0 + 1 >= e.z - g)
+            return;  // outside the block: pure gas by the block's ghost policy
+          const double tx = px - i0, ty = py - j0, tz = pz - k0;
+          double v = 0.0;
+          for (int dz = 0; dz < 2; ++dz)
+            for (int dy = 0; dy < 2; ++dy)
+              for (int dx = 0; dx < 2; ++dx) {
+                const double w = (dx ? tx : 1.0 - tx) * (dy ? ty : 1.0 - ty) *
+                                 (dz ? tz : 1.0 - tz);
+                v += w * c(L3(i0 + dx + g, j0 + dy + g, k0 + dz + g, e));
+              }
+          if (v >= 0.5 && s > m)
+            m = s;
+        },
+        Kokkos::Max<double>(r));
+    Kokkos::fence();
+    return r;
+  }
+
+  void emit(const VofEvent& ev) {
+    events_.push_back(ev);
+    if (events_.size() > 8192)
+      events_.erase(events_.begin(), events_.begin() + 4096);
+  }
+
+  // ---- item 3: coalescence as a MODEL ----------------------------------------------------------
+
+  void applyCoalescence() {
+    std::vector<std::pair<std::size_t, std::size_t>> todo;
+    for (const auto& p : pairs_) {
+      bool go = false;
+      if (coalescence.model == VofCoalescence::Weber) {
+        go = (p.film <= coalescence.contactFilm) && (p.weber < coalescence.weCrit);
+      } else if (coalescence.model == VofCoalescence::Film) {
+        // Prince & Blanch (1990): the film drains in t_d = C mu_l D_eq / sigma. The clock only
+        // runs while the film is thinner than h_crit, and it is RESET the moment it is not.
+        const double td = coalescence.drainC * muLiquid * p.dEq / (sigma > 0.0 ? sigma : 1.0);
+        go = (p.film < coalescence.hCrit) && (p.filmTime >= td);
+      }
+      if (go)
+        todo.emplace_back(static_cast<std::size_t>(p.idA), static_cast<std::size_t>(p.idB));
+    }
+    std::vector<char> used(blocks_.size(), 0);
+    for (const auto& q : todo) {
+      if (q.first >= used.size() || q.second >= used.size())
+        continue;
+      if (used[q.first] || used[q.second])
+        continue;  // one merge per marker per step; a triple merges over two steps
+      used[q.first] = used[q.second] = 1;
+      mergePair(q.first, q.second);
+    }
+  }
+
+  /// Merge two markers into one. The new block's box is the bounding box of the two (in a common
+  /// unwrapped frame) and its colour is the union `max` — the ONLY place in the container where a
+  /// `max` CREATES colour rather than deriving the field the closures read. The two old blocks are
+  /// retired; their table rows survive because `id == table index` is an invariant.
+  ///
+  /// The transport is one `allreduceMax` over the new box: each old master writes its own colour
+  /// into the buffer and every other rank writes zero, so the union lands on every rank at once
+  /// and the merge needs no point-to-point code and no ordering assumption (gate G6).
+  long mergePair(std::size_t i, std::size_t j) {
+    const int g[3] = {gs_.x, gs_.y, gs_.z};
+    VofBox bi = blocks_[i].box, bj = blocks_[j].box;
+    int shift[3] = {0, 0, 0};
+    for (int d = 0; d < 3; ++d) {
+      if (!per_[d] || g[d] <= 0)
+        continue;
+      const double ca = 0.5 * (bi.lo[d] + bi.hi[d]), cb = 0.5 * (bj.lo[d] + bj.hi[d]);
+      const int k = static_cast<int>(std::round((cb - ca) / g[d]));
+      shift[d] = -k * g[d];
+      bj.lo[d] += shift[d];
+      bj.hi[d] += shift[d];
+    }
+    VofBox nbx;
+    for (int d = 0; d < 3; ++d) {
+      nbx.lo[d] = std::min(bi.lo[d], bj.lo[d]);
+      nbx.hi[d] = std::max(bi.hi[d], bj.hi[d]);
+    }
+    nbx = vofClampBox(nbx, gs_, per_);
+    const double vA = blocks_[i].st_.volume, vB = blocks_[j].st_.volume;
+    const std::size_t k = addBlock(nbx);
+    std::vector<double> buf(static_cast<std::size_t>(nbx.cells()), 0.0);
+    const int z3[3] = {0, 0, 0};
+    placeColour(i, nbx, z3, buf);
+    placeColour(j, nbx, shift, buf);
+    if (exch_)
+      exch_->allreduceMax(buf.data(), static_cast<int>(buf.size()));
+    installColour(k, buf);
+    blocks_[k].splitArmed_ = false;  // it holds two components BY CONSTRUCTION; see `splitArmed_`
+    double vNew = 0.0;
+    for (double q : buf)
+      vNew += q;
+    retire(i);
+    retire(j);
+    ++nMerge_;
+    const VofPairStats* p = findPair(blocks_[i].id, blocks_[j].id);
+    emit(VofEvent{2, step_, t_, blocks_[i].id, blocks_[j].id, p ? p->film : 0.0,
+                  p ? p->approach : 0.0, p ? p->weber : 0.0, p ? p->dEq : 0.0, vA, vB, vNew, 0});
+    return blocks_[k].id;
+  }
+
+  // ---- item 4: breakup -------------------------------------------------------------------------
+
+  void applyBreakup() {
+    const std::size_t nb0 = blocks_.size();
+    std::vector<double> flag(nb0 * 2, 0.0);
+    std::vector<std::vector<int>> comp(nb0);
+    for (std::size_t i = 0; i < nb0; ++i) {
+      VofBlock& b = blocks_[i];
+      if (!b.alive_ || !b.mine_ || !b.allocated_)
+        continue;
+      const int nc = labelComponents(b, comp[i]);
+      if (!b.splitArmed_) {  // a freshly merged block: wait until its components have joined
+        if (nc <= 1)
+          b.splitArmed_ = true;
+        b.splitSteps_ = 0;
+        continue;
+      }
+      b.splitSteps_ = (nc > 1) ? b.splitSteps_ + 1 : 0;
+      flag[2 * i + 0] = nc;
+      flag[2 * i + 1] = static_cast<double>(b.splitSteps_);
+    }
+    if (exch_)
+      exch_->allreduceSum(flag.data(), static_cast<int>(flag.size()));
+    for (std::size_t i = 0; i < nb0; ++i)
+      if (flag[2 * i + 0] > 1.5 && flag[2 * i + 1] >= static_cast<double>(breakupSteps))
+        splitBlock(i, comp[i], static_cast<int>(flag[2 * i + 0] + 0.5));
+  }
+
+  /// Connected components of `C > 1/2` on the block's INNER box, by iterative min-label
+  /// propagation on the device (6-connectivity), then a host pass that (a) adopts every remaining
+  /// cell with `C > bubbleEps` into the component of a labelled neighbour, so no colour is
+  /// orphaned and the child volumes sum EXACTLY to the parent's, (b) orders the components by
+  /// volume (ties by lowest label: deterministic), and (c) folds satellites and any components
+  /// beyond `maxSplitChildren` into the largest.
+  ///
+  /// `comp` comes back with one entry per INNER cell in x-fastest order: the component index, or
+  /// -1 for a cell with no colour. The return value is the component count.
+  int labelComponents(VofBlock& b, std::vector<int>& comp) {
+    const I3 e = b.adv_.extent(), n = b.adv_.inner();
+    const int g = ghost_;
+    const long ncell = static_cast<long>(n.x) * n.y * n.z;
+    SField lab("vof::block::label", static_cast<std::size_t>(ncell));
+    SField nxt("vof::block::label2", static_cast<std::size_t>(ncell));
+    SField c = b.adv_.colour();
+    const int nx = n.x, ny = n.y, nz = n.z;
+    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    MD pol(SExec(), {0, 0, 0}, {nx, ny, nz});
+    Kokkos::parallel_for(
+        "vof::block::label_init", pol, KOKKOS_LAMBDA(int x, int y, int z) {
+          const long q = x + static_cast<long>(y) * nx + static_cast<long>(z) * nx * ny;
+          lab(q) = (c(L3(x + g, y + g, z + g, e)) > 0.5) ? static_cast<double>(q) : -1.0;
+        });
+    Kokkos::fence();
+    const int maxIt = 4 * (nx + ny + nz) + 8;
+    for (int it = 0; it < maxIt; ++it) {
+      long changed = 0;
+      Kokkos::parallel_reduce(
+          "vof::block::label_prop", pol,
+          KOKKOS_LAMBDA(int x, int y, int z, long& ch) {
+            const long q = x + static_cast<long>(y) * nx + static_cast<long>(z) * nx * ny;
+            double v = lab(q);
+            if (v < 0.0) {
+              nxt(q) = v;
+              return;
+            }
+            const int dx[6] = {-1, 1, 0, 0, 0, 0}, dy[6] = {0, 0, -1, 1, 0, 0},
+                      dz[6] = {0, 0, 0, 0, -1, 1};
+            for (int d = 0; d < 6; ++d) {
+              const int ax = x + dx[d], ay = y + dy[d], az = z + dz[d];
+              if (ax < 0 || ay < 0 || az < 0 || ax >= nx || ay >= ny || az >= nz)
+                continue;
+              const double w =
+                  lab(ax + static_cast<long>(ay) * nx + static_cast<long>(az) * nx * ny);
+              if (w >= 0.0 && w < v)
+                v = w;
+            }
+            if (v != lab(q))
+              ++ch;
+            nxt(q) = v;
+          },
+          changed);
+      Kokkos::fence();
+      Kokkos::deep_copy(lab, nxt);
+      if (changed == 0)
+        break;
+    }
+    // host bookkeeping: the O(#components) part, and the buffers the transport needs anyway
+    auto hl = Kokkos::create_mirror_view(lab);
+    Kokkos::deep_copy(hl, lab);
+    const std::vector<double> col = blockColourHost(static_cast<std::size_t>(&b - blocks_.data()));
+    std::vector<long> root(static_cast<std::size_t>(ncell));
+    for (long q = 0; q < ncell; ++q)
+      root[static_cast<std::size_t>(q)] = (hl(q) < 0.0) ? -1 : static_cast<long>(hl(q) + 0.5);
+    // (a) adopt the leftover colour: repeat until nothing changes (bounded by the box diameter)
+    const double eps = bubbleEps;
+    for (int it = 0; it < nx + ny + nz + 4; ++it) {
+      long moved = 0;
+      for (int z = 0; z < nz; ++z)
+        for (int y = 0; y < ny; ++y)
+          for (int x = 0; x < nx; ++x) {
+            const long q = x + static_cast<long>(y) * nx + static_cast<long>(z) * nx * ny;
+            if (root[static_cast<std::size_t>(q)] >= 0)
+              continue;
+            if (!(std::fabs(col[static_cast<std::size_t>(q)]) > eps))
+              continue;
+            long best = -1;
+            const int dx[6] = {-1, 1, 0, 0, 0, 0}, dy[6] = {0, 0, -1, 1, 0, 0},
+                      dz[6] = {0, 0, 0, 0, -1, 1};
+            for (int d = 0; d < 6; ++d) {
+              const int ax = x + dx[d], ay = y + dy[d], az = z + dz[d];
+              if (ax < 0 || ay < 0 || az < 0 || ax >= nx || ay >= ny || az >= nz)
+                continue;
+              const long w = root[static_cast<std::size_t>(
+                  ax + static_cast<long>(ay) * nx + static_cast<long>(az) * nx * ny)];
+              if (w >= 0 && (best < 0 || w < best))
+                best = w;
+            }
+            if (best >= 0) {
+              root[static_cast<std::size_t>(q)] = best;
+              ++moved;
+            }
+          }
+      if (moved == 0)
+        break;
+    }
+    // (b) order by volume
+    std::map<long, double> vol;
+    for (long q = 0; q < ncell; ++q) {
+      const long r = root[static_cast<std::size_t>(q)];
+      if (r >= 0)
+        vol[r] += col[static_cast<std::size_t>(q)];
+    }
+    std::vector<std::pair<long, double>> ord(vol.begin(), vol.end());
+    std::stable_sort(ord.begin(), ord.end(),
+                     [](const std::pair<long, double>& a, const std::pair<long, double>& b2) {
+                       return a.second > b2.second;
+                     });
+    std::map<long, int> idx;
+    int nc = 0;
+    for (const auto& q : ord) {
+      const bool satellite = (satelliteVolume > 0.0 && q.second < satelliteVolume);
+      if (nc == 0 || (!(satellite && absorbSatellites) && nc < maxSplitChildren))
+        idx[q.first] = nc++;
+      else
+        idx[q.first] = 0;  // folded into the largest child; volume is preserved exactly
+      if (satellite && !absorbSatellites && idx[q.first] > 0)
+        ++nSatellite_;
+    }
+    comp.assign(static_cast<std::size_t>(ncell), -1);
+    double orphan = 0.0;
+    for (long q = 0; q < ncell; ++q) {
+      const long r = root[static_cast<std::size_t>(q)];
+      if (r >= 0)
+        comp[static_cast<std::size_t>(q)] = idx[r];
+      else if (col[static_cast<std::size_t>(q)] != 0.0) {
+        comp[static_cast<std::size_t>(q)] = 0;  // never DROP colour: the largest child adopts it
+        orphan += col[static_cast<std::size_t>(q)];
+      }
+    }
+    orphanColour_ += orphan;
+    return nc;
+  }
+
+  /// Split one block into its `nc` components. Each child is a new block whose box is its
+  /// component's extent grown by the margin and whose colour is the parent's WHERE that component
+  /// is and zero elsewhere — so the children's volumes sum to the parent's EXACTLY (every cell of
+  /// the parent belongs to exactly one child) and the union colour is unchanged, bit for bit.
+  void splitBlock(std::size_t i, const std::vector<int>& comp, int nc) {
+    if (nc < 2)
+      return;
+    const VofBlock& b = blocks_[i];
+    const VofBox pbox = b.box;
+    const long pid = b.id;
+    const double pvol = b.st_.volume;
+    const int nx = pbox.n(0), ny = pbox.n(1), nz = pbox.n(2);
+    if (nc > maxSplitChildren)
+      nc = maxSplitChildren;
+    // 1. the children's boxes, replicated (the master computes, one allreduce broadcasts)
+    std::vector<double> meta(static_cast<std::size_t>(nc) * 8, 0.0);
+    const bool mine = b.mine_ && b.allocated_ && !comp.empty();
+    if (mine) {
+      for (int k = 0; k < nc; ++k) {
+        int lo[3] = {nx, ny, nz}, hi[3] = {-1, -1, -1};
+        double v = 0.0;
+        for (int z = 0; z < nz; ++z)
+          for (int y = 0; y < ny; ++y)
+            for (int x = 0; x < nx; ++x) {
+              const long q = x + static_cast<long>(y) * nx + static_cast<long>(z) * nx * ny;
+              if (comp[static_cast<std::size_t>(q)] != k)
+                continue;
+              const int p[3] = {x, y, z};
+              for (int d = 0; d < 3; ++d) {
+                lo[d] = p[d] < lo[d] ? p[d] : lo[d];
+                hi[d] = p[d] > hi[d] ? p[d] : hi[d];
+              }
+              v += 1.0;  // extent only; the volume is measured after the child is built
+            }
+        if (hi[0] < lo[0])
+          continue;
+        for (int d = 0; d < 3; ++d) {
+          meta[8 * k + d] = lo[d] + pbox.lo[d];
+          meta[8 * k + 3 + d] = hi[d] + 1 + pbox.lo[d];
+        }
+        meta[8 * k + 6] = 1.0;
+        meta[8 * k + 7] = v;
+      }
+    }
+    if (exch_)
+      exch_->allreduceSum(meta.data(), static_cast<int>(meta.size()));
+    // 2. create the children and transport their colour
+    long firstChild = -1;
+    int made = 0;
+    for (int k = 0; k < nc; ++k) {
+      if (meta[8 * k + 6] < 0.5)
+        continue;
+      VofBox cb;
+      for (int d = 0; d < 3; ++d) {
+        cb.lo[d] = static_cast<int>(std::lround(meta[8 * k + d]));
+        cb.hi[d] = static_cast<int>(std::lround(meta[8 * k + 3 + d]));
+      }
+      cb = vofClampBox(VofBox::grown(cb, margin_), gs_, per_);
+      const std::size_t ci = addBlock(cb);
+      std::vector<double> buf(static_cast<std::size_t>(cb.cells()), 0.0);
+      if (mine)
+        placeComponent(i, comp, k, cb, buf);
+      if (exch_)
+        exch_->allreduceMax(buf.data(), static_cast<int>(buf.size()));
+      installColour(ci, buf);
+      if (firstChild < 0)
+        firstChild = blocks_[ci].id;
+      ++made;
+    }
+    retire(i);
+    ++nSplit_;
+    emit(VofEvent{3, step_, t_, pid, firstChild, 0.0, 0.0, 0.0, 0.0, pvol, 0.0, 0.0, made});
+  }
+
+  // ---- the plumbing the two models share -------------------------------------------------------
+
+  /// Append a table row (on EVERY rank) for a new block on `bx`, allocated (zeroed) on its master.
+  std::size_t addBlock(const VofBox& bx) {
+    VofBlock nb;
+    nb.id = static_cast<long>(blocks_.size());
+    nb.master = masterOf(nb.id);
+    nb.box = bx;
+    nb.mine_ = (nb.master == rank_);
+    blocks_.push_back(std::move(nb));
+    const std::size_t k = blocks_.size() - 1;
+    for (std::size_t q = 0; q + 1 < blocks_.size(); ++q)
+      if (blocks_[q].mine_ && blocks_[q].allocated_)
+        installHook(q);  // push_back may have moved the advectors
+    if (blocks_[k].mine_)
+      allocate(k);
+    return k;
+  }
+
+  /// Retire a block: free its state, empty its box, keep its row.
+  void retire(std::size_t idx) {
+    VofBlock& b = blocks_[idx];
+    if (b.mine_ && b.allocated_)
+      release(idx);
+    const long id = b.id;
+    b.alive_ = false;
+    b.mine_ = false;
+    b.box = VofBox{};
+    b.st_ = VofBlockStats{};
+    b.st_.id = id;
+  }
+
+  /// Write block `src`'s inner colour into `buf` (indexed over `bx`, x-fastest), offset by
+  /// `shift` global cells; cells outside `bx` are dropped (there are none by construction).
+  void placeColour(std::size_t src, const VofBox& bx, const int shift[3], std::vector<double>& buf) {
+    if (!blocks_[src].mine_ || !blocks_[src].allocated_)
+      return;
+    const std::vector<double> col = blockColourHost(src);
+    const VofBox sb = blocks_[src].box;
+    const int nx = sb.n(0), ny = sb.n(1), nz = sb.n(2);
+    for (int z = 0; z < nz; ++z)
+      for (int y = 0; y < ny; ++y)
+        for (int x = 0; x < nx; ++x) {
+          const int gq[3] = {x + sb.lo[0] + shift[0], y + sb.lo[1] + shift[1],
+                             z + sb.lo[2] + shift[2]};
+          const double v = col[static_cast<std::size_t>(
+              x + static_cast<long>(y) * nx + static_cast<long>(z) * nx * ny)];
+          long t[3];
+          if (!targetIndex(gq, bx, t)) {
+            transportLost_ += v;  // a cell of the source that the target box does not hold
+            continue;
+          }
+          const long o = t[0] + t[1] * bx.n(0) + t[2] * static_cast<long>(bx.n(0)) * bx.n(1);
+          double& d = buf[static_cast<std::size_t>(o)];
+          // The union `max` keeps ONE value where both markers claim a cell; the smaller one is
+          // the SHARED liquid, and it is exactly the amount by which a merged volume falls short
+          // of the sum of the two. Accounted, never silent.
+          transportLost_ += (v < d) ? v : d;
+          if (v > d)
+            d = v;
+        }
+  }
+
+  /// The same, restricted to the cells of one component (the split's transport).
+  void placeComponent(std::size_t src, const std::vector<int>& comp, int k, const VofBox& bx,
+                      std::vector<double>& buf) {
+    const std::vector<double> col = blockColourHost(src);
+    const VofBox sb = blocks_[src].box;
+    const int nx = sb.n(0), ny = sb.n(1), nz = sb.n(2);
+    for (int z = 0; z < nz; ++z)
+      for (int y = 0; y < ny; ++y)
+        for (int x = 0; x < nx; ++x) {
+          const long q = x + static_cast<long>(y) * nx + static_cast<long>(z) * nx * ny;
+          if (comp[static_cast<std::size_t>(q)] != k)
+            continue;
+          const int gq[3] = {x + sb.lo[0], y + sb.lo[1], z + sb.lo[2]};
+          long t[3];
+          if (!targetIndex(gq, bx, t))
+            continue;
+          const long o = t[0] + t[1] * bx.n(0) + t[2] * static_cast<long>(bx.n(0)) * bx.n(1);
+          const double v = col[static_cast<std::size_t>(q)];
+          if (v > buf[static_cast<std::size_t>(o)])
+            buf[static_cast<std::size_t>(o)] = v;
+        }
+  }
+
+  /// Global cell `gq` -> index inside `bx`, trying the periodic images. False if it is not in.
+  bool targetIndex(const int gq[3], const VofBox& bx, long t[3]) const {
+    const int g[3] = {gs_.x, gs_.y, gs_.z};
+    for (int d = 0; d < 3; ++d) {
+      long q = gq[d] - bx.lo[d];
+      if ((q < 0 || q >= bx.n(d)) && per_[d] && g[d] > 0) {
+        if (q < 0)
+          q += g[d];
+        else
+          q -= g[d];
+      }
+      if (q < 0 || q >= bx.n(d))
+        return false;
+      t[d] = q;
+    }
+    return true;
+  }
+
+  /// Install a transported host colour into block `idx` (its master only), then fill and measure.
+  void installColour(std::size_t idx, const std::vector<double>& buf) {
+    VofBlock& b = blocks_[idx];
+    if (!b.mine_ || !b.allocated_)
+      return;
+    const I3 n = b.adv_.inner();
+    SField c = b.adv_.colour();
+    auto hc = Kokkos::create_mirror_view(c);
+    Kokkos::deep_copy(hc, c);
+    std::size_t q = 0;
+    for (int z = 0; z < n.z; ++z)
+      for (int y = 0; y < n.y; ++y)
+        for (int x = 0; x < n.x; ++x)
+          hc(b.adv_.index(x, y, z)) = buf[q++];
+    Kokkos::deep_copy(c, hc);
+    Kokkos::fence();
+    fillBlockGhosts(b);
+    measure(b, 0.0);
+  }
+
  private:
   double h_ = 1.0;
   I3 gs_{0, 0, 0};
@@ -1281,6 +2157,13 @@ class VofBlockSet {
   long poolHits_ = 0, poolMisses_ = 0;
   long lastReassigned_ = 0;
   VofCurvature::Stats curvStats_{};
+  // rung W4
+  std::vector<VofPairStats> pairs_;
+  std::vector<VofEvent> events_;
+  double t_ = 0.0;
+  long nMerge_ = 0, nSplit_ = 0, nSatellite_ = 0;
+  double orphanColour_ = 0.0;
+  double transportLost_ = 0.0;
 };
 
 }  // namespace peclet::flow::vof

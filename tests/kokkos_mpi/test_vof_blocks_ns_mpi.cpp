@@ -64,8 +64,11 @@ static double bubbleAt(int b, int x, int y, int z) {
   return acc / (NS * NS);
 }
 
+// `mode`: 0 = block advection only, 1 = + the block CSF (rung W2/W4's force rule),
+//         2 = + rung W4's collision models (coalescence 'weber' at a permissive threshold and
+//             breakup on), which is what gate G6 measures across np.
 static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz,
-                      bool csf) {
+                      bool csf, int mode = 0) {
   s.setRho(RHO_L);
   s.setMu(MU_L);
   s.setDomainBc(4, 1, 0, 0, 0);
@@ -104,6 +107,18 @@ static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, in
     boxes.push_back(q);
   }
   s.enableVofBlocksFromField(boxes);
+  if (mode >= 2) {
+    // Rung W4 items 2-4, distributed: the census is replicated by one allreduce over disjoint
+    // contributions and the merge / split transports are an allreduceMax over the child's box, so
+    // every rank takes the SAME decision and lands the same colour -- which is what makes the
+    // event census a function of the markers and not of the decomposition.
+    auto& B = s.vofBlockSet();
+    B.coalescence.model = peclet::flow::vof::VofCoalescence::Weber;
+    B.coalescence.weCrit = 1e9;
+    B.coalescence.contactFilm = 4.0;  // large enough that this short scene ACTUALLY merges
+    B.breakup = true;
+    B.breakupSteps = 3;
+  }
   if (csf) {
     s.enableVofBlockCsf();
     s.setDt(0.25 * s.capillaryDt());
@@ -196,14 +211,16 @@ int main(int argc, char** argv) {
     }
 
     const int STEPS = (argc > 1) ? std::atoi(argv[1]) : 12;
-    for (int cfg = 0; cfg < 2; ++cfg) {
-    const bool csf = (cfg == 1);
+    for (int cfg = 0; cfg < 3; ++cfg) {
+    const bool csf = (cfg >= 1);
     if (rank == 0)
       std::printf("  --- configuration: block advection + varRho%s\n",
-                  csf ? " + the BLOCK CSF" : " (surface tension OFF)");
+                  cfg == 0 ? " (surface tension OFF)"
+                           : (cfg == 1 ? " + the BLOCK CSF"
+                                       : " + the BLOCK CSF + W4 coalescence/breakup"));
     IbmSolver sd(lnx, lny, lnz);
     sd.initMpi(dec, MPI_COMM_WORLD);
-    configure(sd, ox, oy, oz, lnx, lny, lnz, csf);
+    configure(sd, ox, oy, oz, lnx, lny, lnz, csf, cfg);
     for (int k = 0; k < STEPS; ++k)
       sd.step();
 
@@ -235,7 +252,7 @@ int main(int argc, char** argv) {
 
     if (rank == 0) {
       IbmSolver ref(NX, NY, NZ);
-      configure(ref, 0, 0, 0, NX, NY, NZ, csf);
+      configure(ref, 0, 0, 0, NX, NY, NZ, csf, cfg);
       for (int k = 0; k < STEPS; ++k)
         ref.step();
       std::vector<double> r[5] = {ref.getVelocity(0), ref.getVelocity(1), ref.getVelocity(2),
@@ -299,6 +316,59 @@ int main(int argc, char** argv) {
       if (!(dv <= (size == 1 ? 0.0 : 1e-11))) {
         std::printf("  FAIL: marker volume drift %.3e\n", dv);
         fail = 1;
+      }
+      // --- rung W4 gate G6: the PAIR CENSUS and the EVENT LOG are the same object at every np.
+      const auto& pd = sd.vofBlockPairs();
+      const auto& pr = ref.vofBlockPairs();
+      std::printf("  W4 census: %zu pair(s) distributed, %zu single-rank\n", pd.size(),
+                  pr.size());
+      if (pd.size() != pr.size()) {
+        std::printf("  FAIL: the pair census has a different SIZE at np=%d\n", size);
+        fail = 1;
+      } else {
+        double dfilm = 0.0, dwe = 0.0;
+        for (std::size_t i = 0; i < pd.size(); ++i) {
+          if (pd[i].idA != pr[i].idA || pd[i].idB != pr[i].idB) {
+            std::printf("  FAIL: pair %zu is (%ld,%ld) distributed vs (%ld,%ld) single-rank\n", i,
+                        pd[i].idA, pd[i].idB, pr[i].idA, pr[i].idB);
+            fail = 1;
+          }
+          dfilm = std::fmax(dfilm, std::fabs(pd[i].film - pr[i].film));
+          dwe = std::fmax(dwe, std::fabs(pd[i].weber - pr[i].weber));
+          std::printf("    pair (%ld,%ld) film %.6f vs %.6f, We %.4e vs %.4e, contact %ld/%ld\n",
+                      pd[i].idA, pd[i].idB, pd[i].film, pr[i].film, pd[i].weber, pr[i].weber,
+                      pd[i].contactSteps, pr[i].contactSteps);
+        }
+        const double tolF = (size == 1) ? 0.0 : 1e-6;
+        if (!(dfilm <= tolF)) {
+          std::printf("  FAIL: film thickness differs by %.3e across np\n", dfilm);
+          fail = 1;
+        }
+        (void)dwe;
+      }
+      const auto& ed = sd.vofBlockEvents();
+      const auto& er = ref.vofBlockEvents();
+      std::printf("  W4 events: %zu distributed, %zu single-rank; markers %zu vs %zu\n",
+                  ed.size(), er.size(), stats.size(), rs.size());
+      {
+        static const char* kind[4] = {"approach", "contact", "merge", "split"};
+        std::printf("   ");
+        for (const auto& e : er)
+          std::printf("  %s@%ld(%ld,%ld)", kind[e.type & 3], e.step, e.idA, e.idB);
+        std::printf("\n");
+      }
+      if (ed.size() != er.size() || stats.size() != rs.size()) {
+        std::printf("  FAIL: the event census / marker count depends on np\n");
+        fail = 1;
+      } else {
+        for (std::size_t i = 0; i < ed.size(); ++i)
+          if (ed[i].type != er[i].type || ed[i].step != er[i].step || ed[i].idA != er[i].idA ||
+              ed[i].idB != er[i].idB) {
+            std::printf("  FAIL: event %zu differs: type %d step %ld (%ld,%ld) vs type %d step "
+                        "%ld (%ld,%ld)\n", i, ed[i].type, ed[i].step, ed[i].idA, ed[i].idB,
+                        er[i].type, er[i].step, er[i].idA, er[i].idB);
+            fail = 1;
+          }
       }
     }
     MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);

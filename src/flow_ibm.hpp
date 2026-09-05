@@ -7034,22 +7034,112 @@ class Solver {
     vofBlocks_->curvProto.cosMin = vofCurv_.cosMin;
     vofBlocks_->curvProto.useMixedHeightFit = vofCurv_.useMixedHeightFit;
     vofBlocks_->curvProto.useWorklist = vofCurv_.useWorklist;
+    // The collision model's liquid properties default to the solver's own constants; a variable
+    // -density case overrides them with `set_block_liquid` (the closure's C = 0 branch).
+    vofBlocks_->rhoLiquid = rho_;
+    vofBlocks_->muLiquid = mu_;
     vofBlocks_->enableCsf(sigmaCsf_);
     const long len3 = static_cast<long>(e3_.x) * e3_.y * e3_.z;
-    for (int c = 0; c < 3; ++c) {
-      vofBlkF_[c] = SField("vof::blockcsf::patch", len3);
+    for (int i = 0; i < vofBlkAccCount(); ++i)
+      vofBlkAcc_[i] = SField("vof::blockcsf::patch", len3);
+    for (int c = 0; c < 3; ++c)
       csfBlkF_[c] = CCField("vof::blockcsf", n_);
-    }
     computeVofBlockCsf();
   }
+  // 12 accumulators (rung W4's union rule) or 3 forces (rung W2's UNPACK_SUM ablation).
+  int vofBlkAccCount() const { return (vofBlocks_ && vofBlocks_->csfUnion) ? 12 : 3; }
   // Per-block curvature + CSF face force, scattered SUM into the registered face-force fields the
   // RHS reads. Called at the head of every step by `updateVofCurvature()`.
   void computeVofBlockCsf() {
     if (!vofBlocks_ || !vofBlocks_->csfEnabled)
       return;
-    vofBlocks_->computeCsf(vofBlkF_[0], vofBlkF_[1], vofBlkF_[2]);
+    vofBlocks_->computeCsf(vofBlkAcc_, vofBlkAccCount());
+    if (!vofBlocks_->csfUnion) {
+      for (int c = 0; c < 3; ++c)
+        copyInner(csfBlkF_[c], e_, G, CCConst(vofBlkAcc_[c]), e3_, kVofG);
+      return;
+    }
     for (int c = 0; c < 3; ++c)
-      copyInner(csfBlkF_[c], e_, G, CCConst(vofBlkF_[c]), e3_, kVofG);
+      assembleBlockCsf(c);
+  }
+  // --- rung W4 (WO-W4) item 1: ONE force per face, from the UNION colour ------------------------
+  //
+  // The markers' accumulators are on the g = 3 patch; the union colour is the registered `C` on the
+  // G = 2 patch WITH its ghosts filled (`harvestVofBlockUnion`), and it is the field the density
+  // closure and hence the projection see. The face force is
+  //
+  //     F(i) = sigma * kappa_f(i) * ( C_union(i) - C_union(i - s_c) ) / h ,
+  //     kappa_f = ( sum_m kappa_m |dC_m| ) / ( sum_m |dC_m| )                                   (*)
+  //
+  // i.e. the SAME difference operator the projection inverts, applied to the SAME colour field the
+  // projection's density is built from — which is the entire content of the balanced-force rule
+  // (`vof/surface_tension.hpp`). The curvature is a |dC|-weighted mean, weighted by the magnitude
+  // and not the signed jump: two markers facing each other across a film contribute jumps of
+  // OPPOSITE sign, and a signed weight would divide by ~0 there and manufacture a curvature of
+  // 1e16. A face where only one marker has a defined curvature (`N == 1`) does not go through (*)
+  // at all: it takes that marker's own W2 force verbatim, so a scene without overlaps is BITWISE
+  // rung W2 (gate G1) — `(kappa*w)/w` is NOT `kappa` in IEEE double, and a gate that is bitwise
+  // must not depend on it being.
+  //
+  // `nOverlapFaces_` counts the faces where two or more markers claim the same face: that count is
+  // the census of how often the rule fires, and it is 0 on every pre-W4 scene.
+  //
+  // WHY THE UNION'S dC AND NOTHING ELSE, EVEN WHERE N == 1. The obvious safety valve — take the
+  // marker's OWN force where it is the only claimant, which is bitwise-safest — is exactly what
+  // must not be done: on the film between two INTERPENETRATING markers one marker has a colour
+  // jump and the union has none, so that valve keeps applying a force at a face across which the
+  // projection sees no colour and no density jump. Measured on the WO-W3 `channel_18` checkpoint:
+  // the valve fails at 1.524 eddy turnovers, EARLIER than rung W2's own 1.605; the rule below runs
+  // past both. What N buys is only the CURVATURE: with one claimant it is that marker's own
+  // `kappa_f` verbatim, because `(kappa*w)/w` is not `kappa` in IEEE double and gate G1 is bitwise.
+  void assembleBlockCsf(int c) {
+    CCExec space;
+    C3 e = e_;
+    const C3 e3 = e3_;
+    CCField fb = csfBlkF_[c];
+    CCConst cv = CCConst(cField_);
+    SConst KS = SConst(vofBlkAcc_[4 * c + 0]), W = SConst(vofBlkAcc_[4 * c + 1]),
+           KW = SConst(vofBlkAcc_[4 * c + 2]), N = SConst(vofBlkAcc_[4 * c + 3]);
+    const long strd = strideOf(c);
+    const double sig = sigmaCsf_, h = vofAdv_.h();
+    const int gv = kVofG;
+    // Which curvature the SHARED faces get (`set_block_csf_union_kappa`): 1 = the union field's
+    // OWN cascade, 0 = the |dC|-weighted mean of the markers'. See the note on `csfUnionKappa_`.
+    const bool uk = (csfUnionKappa_ != 0) && kappaField_.extent(0) != 0;
+    CCConst kp = kappaField_.extent(0) ? CCConst(kappaField_) : CCConst(cField_);
+    CCConst kb = kappaBranch_.extent(0) ? CCConst(kappaBranch_) : CCConst(cField_);
+    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    long nov = 0;
+    Kokkos::parallel_reduce(
+        "csf_block_assemble", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, long& ov) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const long j = (long)(x - G + gv) + (long)(y - G + gv) * e3.x +
+                         (long)(z - G + gv) * (long)e3.x * e3.y;
+          const double n = N(j);
+          if (n < 0.5) {  // no marker carries a curvature here -> no force (and it is an orphan
+            fb(i) = 0.0;  // only if the union's colour jumps, which `csfDiagnostics` counts)
+            return;
+          }
+          const double dC = cv(i) - cv(i - strd);
+          double kf;
+          if (n < 1.5) {
+            kf = KS(j);  // the one claimant's own kappa_f, bit for bit
+          } else {
+            ++ov;
+            double ku = 0.0;
+            if (uk && vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), ku)) {
+              kf = ku;
+            } else {
+              const double w = W(j);
+              kf = (w > 0.0) ? KW(j) / w : 0.0;
+            }
+          }
+          fb(i) = vof::csfFaceForce(sig, kf, dC, h);
+        },
+        nov);
+    Kokkos::fence();
+    nOverlapFaces_[c] = nov;
   }
   // DIAGNOSTIC: the scattered block CSF face force on this rank's inner cells, component c (the
   // low face of each cell, the same convention `addCsfRhs` uses). This is the field the block mode
@@ -7058,6 +7148,20 @@ class Solver {
     if (!csfBlkF_[c].extent(0))
       throw std::runtime_error("vof_block_force: call enable_vof_block_csf() first");
     return gatherInner(csfBlkF_[c]);
+  }
+  // --- rung W4 (WO-W4): the pair census and the two explicit models -----------------------------
+  vof::VofBlockSet& vofBlockSet() {
+    if (!vofBlocks_)
+      throw std::runtime_error("the block container is not enabled (call enable_vof_blocks)");
+    return *vofBlocks_;
+  }
+  const std::vector<vof::VofPairStats>& vofBlockPairs() { return vofBlockSet().pairs(); }
+  const std::vector<vof::VofEvent>& vofBlockEvents() { return vofBlockSet().events(); }
+  void clearVofBlockEvents() { vofBlockSet().clearEvents(); }
+  // Faces at which two or more markers claimed the same face at the last block CSF, per component
+  // — the census of how often the W4 union rule actually fired. 0 on every scene without overlap.
+  std::array<long, 3> vofBlockOverlapFaces() const {
+    return {nOverlapFaces_[0], nOverlapFaces_[1], nOverlapFaces_[2]};
   }
   // The summed branch census of the last block CSF (LOCAL to this rank).
   vof::VofCurvature::Stats vofBlockCurvatureStats() const {
@@ -7479,6 +7583,26 @@ class Solver {
   // container is absent (`vofBlocks_` is null unless `enable_vof_blocks` ran), so the expression
   // below reduces to W0's character for character on every non-block path.
   bool vofBlockCsf() const { return static_cast<bool>(vofBlocks_) && vofBlocks_->csfEnabled; }
+  // Rung W4: the curvature the SHARED faces (two or more markers) get. 0 = the |dC|-weighted mean
+  // of the markers' own face curvatures (the WO-W4 design's rule); 1 = the UNION colour field's
+  // own curvature cascade, falling back to the weighted mean where the cascade has no estimate.
+  //
+  // Both are measured on the WO-W3 `channel_18` checkpoint and NEITHER saves it, which is the
+  // central finding of rung W4: a pair that INTERPENETRATES at D/Delta = 10 makes a union whose
+  // geometry is a lens with a concave crevice, and no face force on that geometry is well posed.
+  // The markers' own curvatures there are both ~ +2/R (each is still a sphere), so mode 0 applies
+  // a CONVEX curvature to a CONCAVE interface and drives the pair together monotonically
+  // (dmin 8.69 -> 7.20 cells, failure at 1.537 turnovers); mode 1 asks the cascade for the
+  // crevice's own curvature, which the grid cannot resolve, and it returns a number large enough
+  // to fail at 1.485 turnovers, within 102 steps of the restart. (Rung W2's summed forces fail at
+  // 1.605.) What DOES resolve it is a topological decision — `set_block_coalescence` — which is
+  // why rung W4 carries the collision models and not only the force rule.
+  //
+  // Mode 0 is the default: it is the work order's rule as written, it is the longer-lived of the
+  // two, and where markers only TOUCH (the state a coalescence model keeps them in) the two modes
+  // agree closely.
+  void setCsfUnionKappa(int m) { csfUnionKappa_ = m; }
+  int csfUnionKappa() const { return csfUnionKappa_; }
   bool csfActive() const {
     return vofEnabled_ && sigmaCsf_ > 0.0 && (kappaField_.extent(0) != 0 || vofBlockCsf());
   }
@@ -7595,8 +7719,15 @@ class Solver {
   void updateVofCurvature() {
     if (!csfActive())
       return;
-    if (vofBlockCsf())
-      computeVofBlockCsf();  // rung W2: per-block cascade + the CSF face force, scattered SUM
+    if (vofBlockCsf()) {
+      // Rung W4 `set_block_csf_union_kappa(1)`: the SHARED faces take the union field's own
+      // curvature, which needs the ordinary structured cascade on the union colour. It runs on
+      // `cField_` — the field the projection's density is built from — through the same
+      // `computeVofCurvature` the non-block path uses, so there is one estimator, not two.
+      if (csfUnionKappa_ != 0 && !kappaFrozen_)
+        computeVofCurvature();
+      computeVofBlockCsf();  // per-block cascade + the CSF face accumulators, scattered SUM
+    }
     else if (!kappaFrozen_)
       computeVofCurvature();
     const double cap = capillaryCfl_ * capillaryDt();
@@ -9992,6 +10123,9 @@ class Solver {
       resizeIfAllocated(vofDynVel_[c], "vofDynVel", n);
       resizeIfAllocated(csfBlkF_[c], "vof::blockcsf", n);
     }
+    const std::size_t n3 = static_cast<std::size_t>(e3_.x) * e3_.y * e3_.z;
+    for (int i = 0; i < 12; ++i)
+      resizeIfAllocated(vofBlkAcc_[i], "vof::blockcsf::patch", n3);
     // --- phase change -----------------------------------------------------------------------
     resizeIfAllocated(pcArea_, "pc_area", n);
     for (int c = 0; c < 3; ++c) {
@@ -10251,7 +10385,9 @@ class Solver {
   std::shared_ptr<vof::VofBlockExchange> vofBlockExch_;
   // rung W2: the block CSF face force -- on the g=3 patch (the scatter's target) and mirrored onto
   // the G=2 registry block the RHS reads. Allocated only by `enable_vof_block_csf`.
-  SField vofBlkF_[3];
+  SField vofBlkAcc_[12];
+  int csfUnionKappa_ = 0;
+  long nOverlapFaces_[3]{0, 0, 0};
   CCField csfBlkF_[3];
   bool distributed_ = false;
   C3 og_{0, 0, 0};  // velocity-block inner origin (global red-black parity); {0,0,0} single-rank

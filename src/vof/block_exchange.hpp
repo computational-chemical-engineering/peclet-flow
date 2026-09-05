@@ -196,6 +196,8 @@ class VofBlockExchange : public VofBlockExchangeBase {
 #endif
     for (std::size_t bi = 0; bi < blocks.size(); ++bi) {
       VofBlock& b = blocks[bi];
+      if (!b.alive())
+        continue;  // rung W4: a merged / split block has no state and its GROWN box is not empty
       const VofBox box = useExtended ? b.extended(ghost) : b.box;
       vofBuildPieces(box, gs_, per_, rankBox_, pieces_);
       const bool master = (b.master == rank_);
@@ -295,6 +297,8 @@ class VofBlockExchange : public VofBlockExchangeBase {
 #endif
     for (std::size_t bi = 0; bi < blocks.size(); ++bi) {
       VofBlock& b = blocks[bi];
+      if (!b.alive())
+        continue;  // rung W4: retired by a merge or a split
       vofBuildPieces(b.box, gs_, per_, rankBox_, pieces_);
       const bool master = (b.master == rank_);
       std::map<int, long> counts;
@@ -526,6 +530,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
     return b.advector().colour();
   }
   static SField forceViewOf(VofBlock& b, int c) { return b.csfForce(c); }
+  static SField csfAccViewOf(VofBlock& b, int i) { return b.csfAcc(i / 4, i % 4); }
 
   void gatherFaceVel(std::vector<VofBlock>& blocks, int ghost) override {
     if (!deviceStaging) {
@@ -550,10 +555,16 @@ class VofBlockExchange : public VofBlockExchangeBase {
     scatterImpl(blocks, 1, loc, &colourViewOf, ghostOf(blocks), /*op=*/0);
   }
 
-  void scatterForceSum(std::vector<VofBlock>& blocks, SField fx, SField fy, SField fz) override {
-    SField loc[3] = {fx, fy, fz};
-    scatterImpl(blocks, 3, loc, &forceViewOf, ghostOf(blocks), /*op=*/1);
+  /// Rung W4: `nc == 3` scatters the W2 force (`loc` = fx/fy/fz), `nc == 12` the four W4
+  /// accumulators in `VofBlock::csfAcc` order (`i = 4 c + k`). One pattern, two component counts.
+  void scatterCsfSum(std::vector<VofBlock>& blocks, SField* loc, int nc) override {
+    scatterImpl(blocks, nc, loc, nc == 3 ? &forceViewOf : &csfAccViewOf, ghostOf(blocks), /*op=*/1);
   }
+
+  /// Sum / max `n` doubles across the ranks (see the base class: this is how a decision taken from
+  /// one master's data becomes a decision every rank takes identically). Single rank: a no-op.
+  void allreduceSum(double* v, int n) override { allreduceImpl(v, n, /*isMax=*/false); }
+  void allreduceMax(double* v, int n) override { allreduceImpl(v, n, /*isMax=*/true); }
 
   /// Move a block's colour from its old master to its new one after a re-assignment (rung W1
   /// item a). The two boxes are identical (the table was replicated before the re-assignment) so
@@ -630,6 +641,22 @@ class VofBlockExchange : public VofBlockExchangeBase {
     return bufPool_[k];
   }
 
+  /// The one collective of the container. `MPI_Allreduce` over doubles is what the census, the
+  /// merge and the split use to turn one master's numbers into a decision every rank takes the
+  /// same way; on one rank it is a no-op, which is why the single-rank and distributed event
+  /// censuses are the same object and not two implementations (gate G6).
+  void allreduceImpl(double* v, int n, bool isMax) {
+    (void)v;
+    (void)n;
+    (void)isMax;
+#ifdef PECLET_FLOW_MPI
+    if (size_ <= 1 || n <= 0)
+      return;
+    requireComm();
+    MPI_Allreduce(MPI_IN_PLACE, v, n, MPI_DOUBLE, isMax ? MPI_MAX : MPI_SUM, comm_);
+#endif
+  }
+
   static int ghostOf(const std::vector<VofBlock>& blocks) {
     for (const auto& b : blocks)
       if (b.mine())
@@ -665,6 +692,8 @@ class VofBlockExchange : public VofBlockExchangeBase {
     // 1. post receives (master side) and pack+send (owner side); do the master's own cells locally.
     for (std::size_t bi = 0; bi < blocks.size(); ++bi) {
       VofBlock& b = blocks[bi];
+      if (!b.alive())
+        continue;  // rung W4: retired by a merge or a split
       const VofBox eb = b.extended(ghost);
       vofBuildPieces(eb, gs_, per_, rankBox_, pieces_);
       const bool master = (b.master == rank_);
@@ -745,7 +774,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
       }
     }
     for (std::size_t bi = 0; bi < blocks.size(); ++bi) {
-      if (blocks[bi].master != rank_)
+      if (blocks[bi].master != rank_ || !blocks[bi].alive())
         continue;
       Kokkos::deep_copy(blocks[bi].advector().faceU(), hbu[bi]);
       Kokkos::deep_copy(blocks[bi].advector().faceV(), hbv[bi]);
@@ -782,6 +811,8 @@ class VofBlockExchange : public VofBlockExchangeBase {
 
     for (std::size_t bi = 0; bi < blocks.size(); ++bi) {
       VofBlock& b = blocks[bi];
+      if (!b.alive())
+        continue;  // rung W4: retired by a merge or a split
       vofBuildPieces(b.box, gs_, per_, rankBox_, pieces_);
       const bool master = (b.master == rank_);
       if (master) {
