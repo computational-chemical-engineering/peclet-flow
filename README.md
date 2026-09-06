@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/peclet-flow.svg)](https://pypi.org/project/peclet-flow/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://pypi.org/project/peclet-flow/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/computational-chemical-engineering/peclet-flow/blob/main/LICENSE)
 [![CI](https://github.com/computational-chemical-engineering/peclet-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/computational-chemical-engineering/peclet-flow/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21132439.svg)](https://doi.org/10.5281/zenodo.21132439)
 
