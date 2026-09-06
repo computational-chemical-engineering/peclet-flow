@@ -75,6 +75,197 @@ class Solver {
 
   Solver(int nx, int ny, int nz) { allocateBlock(nx, ny, nz); }
 
+  // ==========================================================================================
+  // PHYSICAL UNITS — the solver takes the world in the caller's own units
+  // (suite/docs/PHYSICAL_UNITS_PLAN.md; Phase 1 = isotropic cells)
+  //
+  // DERIVATION.  The discrete algorithms in this file are index-native: red-black sweeps,
+  // cut-cell apertures, multigrid transfers, the halo, PLIC.  Rather than divide every finite
+  // difference by a cell size, the solver keeps computing on the UNIT LATTICE and folds the
+  // metric into constants at the API boundary (plan §3.2, option B).  Write
+  //
+  //     x_a = origin_a + h_a * xi_a      (physical position of the index coordinate xi)
+  //     t   = tRef * t'                  (tRef = the first dt the caller sets)
+  //     u_a = (h_a / tRef) * v_a         (v = index velocity: cells per tRef)
+  //     rho = rhoRef * rho'
+  //
+  // and substitute into  rho (du/dt + u.grad u) = -grad p + mu lap u + F.  Every term then
+  // carries the same factor rhoRef*hRef/tRef^2 when the cells are isotropic (h_a == hRef,
+  // Phase 1), and dividing it out leaves EXACTLY the equation this file already solves,
+  //
+  //     rho' (dv/dt' + v.grad_xi v) = -grad_xi p' + mu' lap_xi v + F'
+  //
+  // with the boundary conversions
+  //
+  //     rho'   = rho / rhoRef                       dt'    = dt / tRef
+  //     mu'    = mu * tRef / (rhoRef*hRef^2)        (the cell diffusion number)
+  //     p'     = p * tRef^2 / (rhoRef*hRef^2)       F'     = F * tRef^2 / (rhoRef*h_a)
+  //     v_a    = u_a * tRef / h_a                   (the Courant number)
+  //     sigma' = sigma * tRef^2 / (rhoRef*hRef^3)   so p' = sigma'*kappa' with kappa' = kappa*hRef
+  //     kappa' = kappa * hRef                       div'   = div * tRef
+  //     d'     = d / hRef                           (any length: SDF value, slip length)
+  //     xi_a   = (x_a - origin_a) / h_a             (any position)
+  //
+  // Advection is untouched in index space, so the Koren/TVD and implicit-FOU paths do not change;
+  // cut-cell apertures and wall crossings are ratios along an axis and are unit-free.
+  //
+  // WHY THE REFERENCE SCALES (plan decision D3).  They exist so the STORED float operator
+  // coefficients stay O(1) whatever unit system the caller uses: mu' is a diffusion number and
+  // rho'/dt' is 1 at the first dt, where dividing mu by a physical h^2 would put 1e7 next to 1e8
+  // in float storage (docs/SCALING_ISSUES.md #1).  hRef is fixed at construction, rhoRef at the
+  // first set_rho and tRef at the first set_dt, and never move again — no stored state is ever
+  // rescaled mid-run.  Because the order of those calls must not matter, the PHYSICAL inputs are
+  // kept verbatim (rhoPhys_ / muPhys_ / ...) and `refreshUnitDerived()` re-derives the internal
+  // ones whenever a scale is first pinned.
+  //
+  // IDENTITY.  With no extent at all (`extent=None`, the historical cell-unit API) the solver is
+  // never armed: hRef = rhoRef = tRef = 1 and every factor below evaluates to exactly 1.0,
+  // whatever rho and dt are.  Multiplying a double by 1.0 is the identity in IEEE-754, so every
+  // pre-existing script, test and gallery page is bit-identical (plan §5 gate 1).  With
+  // extent == cells, dt = 1 and rho = 1 the armed path reproduces the same 1.0 factors — that is
+  // the `units_identity` gate.
+  // ==========================================================================================
+  struct UnitScales {
+    bool physical = false;             ///< an extent was given (the scales are armed)
+    double h[3] = {1.0, 1.0, 1.0};     ///< cell size per axis = extent / cells
+    double org[3] = {0.0, 0.0, 0.0};   ///< physical lower corner of the GLOBAL inner grid
+    double ext[3] = {0.0, 0.0, 0.0};   ///< physical extent of the GLOBAL inner grid
+    long cells[3] = {0, 0, 0};         ///< the GLOBAL cell counts the extent spans
+    double hRef = 1.0;                 ///< reference length  = min_a h_a (== h_a, Phase 1)
+    double rhoRef = 1.0;               ///< reference density = the first set_rho
+    double tRef = 1.0;                 ///< reference time    = the first set_dt
+    bool rhoRefSet = false, tRefSet = false;
+
+    // Every factor below is exactly 1.0 while `physical` is false.
+    double lenToInt() const { return 1.0 / hRef; }
+    double lenToPhys() const { return hRef; }
+    double velToInt(int a) const { return tRef / h[a]; }
+    double velToPhys(int a) const { return h[a] / tRef; }
+    double timeToInt() const { return 1.0 / tRef; }
+    double rhoToInt() const { return 1.0 / rhoRef; }
+    double muToInt() const { return tRef / (rhoRef * hRef * hRef); }
+    double pToInt() const { return tRef * tRef / (rhoRef * hRef * hRef); }
+    double pToPhys() const { return rhoRef * hRef * hRef / (tRef * tRef); }
+    double forceToInt(int a) const { return tRef * tRef / (rhoRef * h[a]); }
+    double sigmaToInt() const { return tRef * tRef / (rhoRef * hRef * hRef * hRef); }
+    double curvToPhys() const { return 1.0 / hRef; }
+    double divToPhys() const { return 1.0 / tRef; }
+  };
+
+  /// Physical-domain constructor (plan §3.3).  `nx,ny,nz` is this rank's block exactly as in the
+  /// cell-unit constructor; `extent`/`origin` describe the GLOBAL domain and `globalCells` the
+  /// global cell counts the extent spans (equal to nx,ny,nz single-rank — pass the global grid
+  /// under MPI, the same numbers `init_mpi` gets).
+  Solver(int nx, int ny, int nz, const std::array<double, 3>& extent,
+         const std::array<double, 3>& origin, const std::array<long, 3>& globalCells) {
+    allocateBlock(nx, ny, nz);
+    setPhysicalDomain(extent, origin, globalCells);
+  }
+
+  /// Arm the physical domain.  Call before any property, geometry or field call — it fixes hRef,
+  /// which every conversion below is built on.
+  void setPhysicalDomain(const std::array<double, 3>& extent, const std::array<double, 3>& origin,
+                         const std::array<long, 3>& globalCells) {
+    const long c[3] = {globalCells[0] > 0 ? globalCells[0] : nx_,
+                       globalCells[1] > 0 ? globalCells[1] : ny_,
+                       globalCells[2] > 0 ? globalCells[2] : nz_};
+    for (int a = 0; a < 3; ++a) {
+      if (!(extent[a] > 0.0))
+        throw std::runtime_error("physical domain: every extent component must be > 0");
+      if (c[a] <= 0)
+        throw std::runtime_error("physical domain: every cell count must be > 0");
+    }
+    double hh[3];
+    for (int a = 0; a < 3; ++a)
+      hh[a] = extent[a] / (double)c[a];
+    // Phase 1 is isotropic: the momentum, pressure and VoF operators still assume one cell size.
+    // Anisotropic cells are Phase 2/3 of the plan (per-axis constants in every operator).
+    for (int a = 1; a < 3; ++a) {
+      if (std::fabs(hh[a] - hh[0]) > 1e-12 * std::fabs(hh[0])) {
+        char msg[320];
+        std::snprintf(msg, sizeof msg,
+                      "physical domain: Phase 1 supports ISOTROPIC cells only, but "
+                      "extent/cells gives dx=%.17g dy=%.17g dz=%.17g. Choose an extent "
+                      "proportional to the cell counts (anisotropic cells are Phase 2 of "
+                      "suite/docs/PHYSICAL_UNITS_PLAN.md).",
+                      hh[0], hh[1], hh[2]);
+        throw std::runtime_error(msg);
+      }
+    }
+    u_.physical = true;
+    for (int a = 0; a < 3; ++a) {
+      u_.h[a] = hh[a];
+      u_.ext[a] = extent[a];
+      u_.org[a] = origin[a];
+      u_.cells[a] = c[a];
+    }
+    u_.hRef = hh[0];
+    // rhoRef / tRef are pinned by the first set_rho / set_dt; whatever was set BEFORE the domain
+    // (nothing, in the documented order) is re-derived here.
+    refreshUnitDerived();
+  }
+
+  bool hasPhysicalDomain() const { return u_.physical; }
+  const UnitScales& unitScales() const { return u_; }
+  /// Cell size per axis (all equal in Phase 1). 1,1,1 without a physical domain.
+  std::array<double, 3> spacing() const { return {u_.h[0], u_.h[1], u_.h[2]}; }
+  /// Physical lower corner of the GLOBAL inner grid.
+  std::array<double, 3> domainOrigin() const { return {u_.org[0], u_.org[1], u_.org[2]}; }
+  /// Physical extent of the GLOBAL inner grid (cell counts without a physical domain).
+  std::array<double, 3> domainExtent() const {
+    if (u_.physical)
+      return {u_.ext[0], u_.ext[1], u_.ext[2]};
+    std::array<long, 3> gc = globalCells();
+    return {(double)gc[0], (double)gc[1], (double)gc[2]};
+  }
+  /// The GLOBAL cell counts (this rank's block single-rank).
+  std::array<long, 3> globalCells() const {
+    if (u_.physical && u_.cells[0] > 0)
+      return {u_.cells[0], u_.cells[1], u_.cells[2]};
+#ifdef PECLET_FLOW_MPI
+    if (gnx_ > 0)
+      return {gnx_, gny_, gnz_};
+#endif
+    return {nx_, ny_, nz_};
+  }
+  /// Physical cell-centre coordinates of THIS rank's inner block along `axis` (nx/ny/nz values).
+  /// The grid `set_solid` expects an SDF sampled on: meshgrid these three and evaluate.
+  std::vector<double> cellCentres(int axis) const {
+    if (axis < 0 || axis > 2)
+      throw std::runtime_error("cell_centres: axis must be 0, 1 or 2");
+    const int n[3] = {nx_, ny_, nz_};
+    const int og[3] = {og_.x, og_.y, og_.z};
+    std::vector<double> c((std::size_t)n[axis]);
+    for (int i = 0; i < n[axis]; ++i)
+      c[(std::size_t)i] = u_.org[axis] + ((double)(og[axis] + i) + 0.5) * u_.h[axis];
+    return c;
+  }
+
+  /// Re-derive every internal (index-unit) quantity from the stored physical inputs.  Idempotent
+  /// and order-free: it reads only the phys_ mirrors and writes only the internal members, so the
+  /// caller may set properties before or after the domain, and before or after each other.
+  void refreshUnitDerived() {
+    rho_ = rhoPhys_ * u_.rhoToInt();
+    mu_ = muPhys_ * u_.muToInt();
+    const double dtInt = dtPhys_ * u_.timeToInt();
+    if (dtInt != dt_)
+      dt_ = dtInt;
+    for (int a = 0; a < 3; ++a)
+      f_[a] = fPhys_[a] * u_.forceToInt(a);
+    sigmaCsf_ = sigmaPhys_ * u_.sigmaToInt();
+    slipLambda_ = slipPhys_ * u_.lenToInt();
+    for (int face = 0; face < 6; ++face) {
+      for (int a = 0; a < 3; ++a)
+        bcVel_[face][a] = bcVelPhys_[face][a] * u_.velToInt(a);
+      if (!bcProfRaw_[face].empty())
+        resampleBcProfile(face);
+    }
+    // rho/mu/dt all feed the momentum diagonal; a scale that moved after the operator was built
+    // must rebuild it. (Only reachable on the physical path — the cell-unit path never calls
+    // this, so no existing run gains a rebuild.)
+    dtDirty_ = true;
+  }
+
   // (Re)allocate every per-block buffer for a local inner block of nx*ny*nz. Called by the
   // constructor and by redistribute() after a re-decomposition changes this rank's block size.
   void allocateBlock(int nx, int ny, int nz) {
@@ -157,16 +348,48 @@ class Solver {
     fields_.adopt("sdf", sdf_, G, peclet::core::Centering::Cell);
   }
 
-  void setRho(double r) { rho_ = r; }
-  void setMu(double m) { mu_ = m; }
+  /// Fluid density, in the caller's units. The FIRST call pins the reference density rhoRef when
+  /// a physical domain is armed (the internal density is then exactly 1).
+  void setRho(double r) {
+    rhoPhys_ = r;
+    if (u_.physical && !u_.rhoRefSet) {
+      u_.rhoRef = r;
+      u_.rhoRefSet = true;
+      refreshUnitDerived();
+      return;
+    }
+    rho_ = r * u_.rhoToInt();
+  }
+  /// Dynamic viscosity, in the caller's units. Internally the cell diffusion number
+  /// mu*tRef/(rhoRef*hRef^2).
+  void setMu(double m) {
+    muPhys_ = m;
+    mu_ = m * u_.muToInt();
+  }
   void setDt(double d) {
-    if (d != dt_) {
-      dt_ = d;
+    dtPhys_ = d;
+    if (u_.physical && !u_.tRefSet) {
+      u_.tRef = d;
+      u_.tRefSet = true;
+      const double before = dt_;
+      refreshUnitDerived();  // pins tRef, so mu'/p'/F'/v all move with it
+      if (dt_ != before)
+        dtDirty_ = true;
+      return;
+    }
+    const double di = d * u_.timeToInt();
+    if (di != dt_) {
+      dt_ = di;
       dtDirty_ = true;  // the momentum stencil bakes rho/dt in its diagonal (rebuildStencils);
                         // a mid-run dt change must rebuild it or the operator and RHS disagree
     }
   }
-  void setBodyForce(double fx, double fy, double fz) { f_ = {fx, fy, fz}; }
+  /// Body force per unit volume, in the caller's units (e.g. a mean pressure gradient, or rho*g).
+  void setBodyForce(double fx, double fy, double fz) {
+    fPhys_ = {fx, fy, fz};
+    for (int a = 0; a < 3; ++a)
+      f_[a] = fPhys_[a] * u_.forceToInt(a);
+  }
   void setVelocityIterations(int it) { velIters_ = it; }
   // Momentum tolerance stop: end the RB-GS loop once the swept colour's max increment has dropped
   // to rtol of the first sweep's (GS contracts geometrically, so the increment tracks the error).
@@ -10745,7 +10968,15 @@ class Solver {
   int nx_, ny_, nz_;
   C3 e_, e1_;
   std::size_t n_, n1_;
-  double rho_ = 1.0, mu_ = 0.1, dt_ = 50.0;
+  double rho_ = 1.0, mu_ = 0.1, dt_ = 50.0;  // INTERNAL (index-unit) values; see UnitScales
+  UnitScales u_;                            // the metric + reference scales (all 1 in cell units)
+  // The caller's own values, kept verbatim so refreshUnitDerived() can re-derive the internal
+  // ones in any call order. Equal to the internal ones on the cell-unit path.
+  double rhoPhys_ = 1.0, muPhys_ = 0.1, dtPhys_ = 50.0;
+  std::array<double, 3> fPhys_{{0, 0, 0}};
+  double sigmaPhys_ = 0.0;
+  double slipPhys_ = 0.0;
+  double bcVelPhys_[6][3] = {};
   std::array<double, 3> f_{{0, 0, 0}};
   int velIters_ = 200, presIters_ = 20;
   double velTol_ = 0.0;         // momentum tolerance stop (0 = legacy fixed-count loop)

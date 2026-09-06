@@ -117,10 +117,72 @@ static void bind_solver(nb::module_& m, const char* name) {
   using S = BoundSolver<Grid>;
   nb::class_<S>(m, name)
       .def(nb::init<int, int, int>(), nb::arg("nx"), nb::arg("ny"), nb::arg("nz"),
-           "Create a solver on an nx x ny x nz unit-spacing grid (x-fastest, I = x + y*nx + "
-           "z*nx*ny). "
-           "Set physical parameters (rho/mu/dt) and any domain BCs before the geometry / first "
-           "step.")
+           "Create a solver on an nx x ny x nz grid of UNIT cells (x-fastest, I = x + y*nx + "
+           "z*nx*ny). Everything is then in cell units: the cell size is 1 and lengths, "
+           "velocities and the SDF are measured in cells. Prefer the physical form "
+           "Solver((nx,ny,nz), extent=(Lx,Ly,Lz)). Set rho/mu/dt and any domain BCs before the "
+           "geometry / first step.")
+      .def(
+          "__init__",
+          [](S* self, std::array<long, 3> cells, std::optional<std::array<double, 3>> extent,
+             std::array<double, 3> origin, std::optional<std::array<long, 3>> global_cells) {
+            for (int a = 0; a < 3; ++a)
+              if (cells[a] <= 0)
+                throw std::runtime_error("Solver: every cell count must be positive");
+            new (self) S((int)cells[0], (int)cells[1], (int)cells[2]);
+            if (extent)
+              self->setPhysicalDomain(*extent, origin, global_cells ? *global_cells : cells);
+          },
+          nb::arg("cells"), nb::arg("extent") = nb::none(),
+          nb::arg("origin") = std::array<double, 3>{0.0, 0.0, 0.0},
+          nb::arg("global_cells") = nb::none(),
+          "Create a solver on a PHYSICAL domain: `cells` = (nx, ny, nz), `extent` = the box side "
+          "lengths (Lx, Ly, Lz) and `origin` = its lower corner, all in the caller's own "
+          "consistent units. The cell size is extent/cells and is never written by the user: "
+          "rho, mu, dt, body forces, boundary velocities, surface tension, the SDF handed to "
+          "set_solid and the coordinates of set_scene are all physical, and the velocity, "
+          "pressure and curvature that come back are physical too.\n\n"
+          "extent=None (the default) keeps the historical CELL-UNIT behaviour, bit for bit: the "
+          "spacing is 1 and every quantity is in cells.\n\n"
+          "Phase 1 supports ISOTROPIC cells only - extent/cells must be the same on all three "
+          "axes (an anisotropic extent raises). Under MPI `cells` is this rank's block (from "
+          "mpi_block) while `extent`/`origin` describe the GLOBAL domain, so pass the global "
+          "grid as `global_cells` - the same numbers init_mpi gets.")
+      .def_prop_ro(
+          "cells",
+          [](S& s) {
+            return std::array<long, 3>{s.nx(), s.ny(), s.nz()};
+          },
+          "This rank's inner block resolution (nx, ny, nz).")
+      .def_prop_ro(
+          "global_cells", [](S& s) { return s.globalCells(); },
+          "The GLOBAL grid resolution (== `cells` single-rank).")
+      .def_prop_ro(
+          "extent", [](S& s) { return s.domainExtent(); },
+          "The GLOBAL domain side lengths. Equal to the cell counts without a physical domain.")
+      .def_prop_ro(
+          "origin", [](S& s) { return s.domainOrigin(); },
+          "The physical lower corner of the GLOBAL domain (0,0,0 by default).")
+      .def_prop_ro(
+          "spacing", [](S& s) { return s.spacing(); },
+          "The cell size (dx, dy, dz) = extent/cells. (1,1,1) without a physical domain.")
+      .def_prop_ro(
+          "physical_units", [](S& s) { return s.hasPhysicalDomain(); },
+          "True when the solver was given an extent, i.e. lengths are physical rather than cells.")
+      .def(
+          "cell_centres",
+          [](S& s) {
+            return nb::make_tuple(s.cellCentres(0), s.cellCentres(1), s.cellCentres(2));
+          },
+          "The physical cell-centre coordinates of THIS rank's inner block as three 1-D arrays "
+          "(x, y, z). np.meshgrid(*s.cell_centres(), indexing='ij') is the grid an SDF for "
+          "set_solid is sampled on.")
+      .def(
+          "cell_centers",
+          [](S& s) {
+            return nb::make_tuple(s.cellCentres(0), s.cellCentres(1), s.cellCentres(2));
+          },
+          "US spelling of cell_centres().")
       .def("set_rho", &S::setRho, nb::arg("rho"),
            "Set fluid density rho (physical units). Set before geometry/first step.")
       .def("set_mu", &S::setMu, nb::arg("mu"), "Set dynamic viscosity mu (physical units).")
@@ -2484,8 +2546,9 @@ static void bind_solver(nb::module_& m, const char* name) {
           "coupling "
           "deposit origin by this so particles in global coordinates land in the local block.")
       .def(
-          "get_spacing", [](S&) { return std::vector<double>{1.0, 1.0, 1.0}; },
-          "Return the grid spacing [dx, dy, dz] (always unit on this grid).")
+          "get_spacing", [](S& s) { auto h = s.spacing(); return std::vector<double>{h[0], h[1], h[2]}; },
+          "Return the grid spacing [dx, dy, dz] = extent/cells. [1, 1, 1] without a physical "
+          "domain (the cell-unit default). Same numbers as the `spacing` property.")
 #ifdef PECLET_FLOW_MPI
       // Distributed path (built with -DPECLET_FLOW_MPI): construct the Solver with this rank's
       // LOCAL block dims (see the module-level mpi_block()), then init_mpi with the GLOBAL grid
