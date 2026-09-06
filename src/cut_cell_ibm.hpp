@@ -274,28 +274,46 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
 }
 
 // Build the backward-Euler velocity diffusion stencil over the extended block (divided convention):
-// A_C = idiag + 6*beta, off-diagonals = -beta (dx=1). idiag = 1/dt, beta = nu.
+// A_C = idiag + 2*((bx+by)+bz), off-diagonals = -b_a per derivative axis a. idiag = rho/dt,
+// b_a = mu' * w_a with w_a = 1/h_a'^2 the per-axis metric weight (doc/anisotropic_metric.md §2).
+//
+// ASSOCIATION ORDER IS PART OF THE CONTRACT (note trap 3).  With bx == by == bz == beta:
+// (beta+beta) is exact, +beta rounds once to fl(3*beta), and the *2 is exact, so the diagonal is
+// fl(6*beta) == 6.0*beta to the last bit — the isotropic operator is BIT-IDENTICAL to the
+// pre-Phase-2 `idiag + 6.0*beta`.  Any other grouping breaks that.
+template <class MV>
+inline void ibmBuildDiffusion(MV AC, MV AW,
+                              MV AE, MV AS,
+                              MV AN, MV AB,
+                              MV AT, int ex, int ey, int ez, double bx, double by, double bz,
+                              double idiag) {
+  Kokkos::DefaultExecutionSpace space;
+  const std::size_t n = (std::size_t)ex * ey * ez;
+  using MVreal = typename MV::non_const_value_type;
+  const MVreal nbx = (MVreal)(-bx), nby = (MVreal)(-by), nbz = (MVreal)(-bz),
+               c = (MVreal)(idiag + 2.0 * ((bx + by) + bz));
+  Kokkos::parallel_for(
+      "peclet::flow::ibm_build_diff", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, n),
+      KOKKOS_LAMBDA(std::size_t i) {
+        AC(i) = c;
+        AW(i) = nbx;
+        AE(i) = nbx;
+        AS(i) = nby;
+        AN(i) = nby;
+        AB(i) = nbz;
+        AT(i) = nbz;
+      });
+}
+
+// Isotropic spelling (b_x = b_y = b_z = beta), kept for the kernel-level tests and any caller
+// with no metric: bit-identical to the pre-Phase-2 kernel by the association note above.
 template <class MV>
 inline void ibmBuildDiffusion(MV AC, MV AW,
                               MV AE, MV AS,
                               MV AN, MV AB,
                               MV AT, int ex, int ey, int ez, double beta,
                               double idiag) {
-  Kokkos::DefaultExecutionSpace space;
-  const std::size_t n = (std::size_t)ex * ey * ez;
-  using MVreal = typename MV::non_const_value_type;
-  const MVreal nb = (MVreal)(-beta), c = (MVreal)(idiag + 6.0 * beta);
-  Kokkos::parallel_for(
-      "peclet::flow::ibm_build_diff", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, n),
-      KOKKOS_LAMBDA(std::size_t i) {
-        AC(i) = c;
-        AW(i) = nb;
-        AE(i) = nb;
-        AS(i) = nb;
-        AN(i) = nb;
-        AB(i) = nb;
-        AT(i) = nb;
-      });
+  ibmBuildDiffusion(AC, AW, AE, AS, AN, AB, AT, ex, ey, ez, beta, beta, beta, idiag);
 }
 
 // Variable-viscosity backward-Euler diffusion stencil (sibling of ibmBuildDiffusion): the face
@@ -308,7 +326,8 @@ inline void ibmBuildDiffusionVar(MV AC, MV AW,
                                  MV AE, MV AS,
                                  MV AN, MV AB,
                                  MV AT, int ex, int ey, int ez, int g,
-                                 FaceProps fp) {
+                                 FaceProps fp, double wx = 1.0, double wy = 1.0,
+                                 double wz = 1.0) {
   Kokkos::DefaultExecutionSpace space;
   using MD = Kokkos::MDRangePolicy<Kokkos::DefaultExecutionSpace, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -316,9 +335,11 @@ inline void ibmBuildDiffusionVar(MV AC, MV AW,
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = ex, sz = (long)ex * ey;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double bw = fp.beta(i, i - sx), be = fp.beta(i, i + sx);
-        const double bs = fp.beta(i, i - sy), bn = fp.beta(i, i + sy);
-        const double bb = fp.beta(i, i - sz), bt = fp.beta(i, i + sz);
+        // The face viscosity times the metric weight w_a of the face's OWN axis
+        // (doc/anisotropic_metric.md §2); w == 1.0 exactly on the isotropic path.
+        const double bw = fp.beta(i, i - sx) * wx, be = fp.beta(i, i + sx) * wx;
+        const double bs = fp.beta(i, i - sy) * wy, bn = fp.beta(i, i + sy) * wy;
+        const double bb = fp.beta(i, i - sz) * wz, bt = fp.beta(i, i + sz) * wz;
         AW(i) = (typename MV::non_const_value_type)(-bw);
         AE(i) = (typename MV::non_const_value_type)(-be);
         AS(i) = (typename MV::non_const_value_type)(-bs);

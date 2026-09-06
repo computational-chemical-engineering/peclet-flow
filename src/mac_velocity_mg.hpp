@@ -321,6 +321,15 @@ class VelocityMG {
 #endif
   };
 
+  /// Per-axis metric weights w_a = 1/h_a'^2 of the physical domain (doc/anisotropic_metric.md
+  /// §1.1): every level operator carries b_a^L = nu_dt * w_a / cfac_a^2.  Call BEFORE init/initMpi
+  /// (the aspect-ratio level rule of commit C3 needs the metric at that point too).  The default
+  /// (1,1,1) is the isotropic / cell-unit path and multiplies every coefficient by exactly 1.0.
+  void setMetric(const double w[3]) {
+    for (int a = 0; a < 3; ++a)
+      w_[a] = w[a];
+  }
+
   // periodic uniform hierarchy (halve each axis while even and >=2, capped at nLevels).
   void init(int nx, int ny, int nz, int nLevels) {
     lv_.clear();
@@ -508,9 +517,9 @@ class VelocityMG {
       restrictAvg(c.theta, CCConst(fin.theta), c.ext, fin.ext, G, G, c.inner,
                   fin.ratio);  // coarse theta = avg
       thresholdMask(c.pin, CCConst(c.theta), thresh);
-      const double bx = nu_dt / (double)(c.cfac.x * c.cfac.x),
-                   by = nu_dt / (double)(c.cfac.y * c.cfac.y),
-                   bz = nu_dt / (double)(c.cfac.z * c.cfac.z);
+      const double bx = nu_dt * w_[0] / (double)(c.cfac.x * c.cfac.x),
+                   by = nu_dt * w_[1] / (double)(c.cfac.y * c.cfac.y),
+                   bz = nu_dt * w_[2] / (double)(c.cfac.z * c.cfac.z);
       buildVelocityStaircase(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.theta), c.ext, G,
                              bx, by, bz, thresh, idiag);
     }
@@ -533,9 +542,9 @@ class VelocityMG {
     if (upwind)
       for (int L = 1; L < (int)lv_.size(); ++L) {
         Level& c = lv_[L];
-        const double bx = nu_dt / (double)(c.cfac.x * c.cfac.x),
-                     by = nu_dt / (double)(c.cfac.y * c.cfac.y),
-                     bz = nu_dt / (double)(c.cfac.z * c.cfac.z);
+        const double bx = nu_dt * w_[0] / (double)(c.cfac.x * c.cfac.x),
+                     by = nu_dt * w_[1] / (double)(c.cfac.y * c.cfac.y),
+                     bz = nu_dt * w_[2] / (double)(c.cfac.z * c.cfac.z);
         buildAdvCoarse(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.advU), CCConst(c.advV),
                        CCConst(c.advW), comp, c.ext, G, bx, by, bz, fouw, 1.0 / c.cfac.x,
                        1.0 / c.cfac.y, 1.0 / c.cfac.z, idiag);
@@ -549,9 +558,9 @@ class VelocityMG {
     }
     for (int L = 1; L < (int)lv_.size(); ++L) {
       Level& c = lv_[L];
-      const double bx = nu_dt / (double)(c.cfac.x * c.cfac.x),
-                   by = nu_dt / (double)(c.cfac.y * c.cfac.y),
-                   bz = nu_dt / (double)(c.cfac.z * c.cfac.z);
+      const double bx = nu_dt * w_[0] / (double)(c.cfac.x * c.cfac.x),
+                   by = nu_dt * w_[1] / (double)(c.cfac.y * c.cfac.y),
+                   bz = nu_dt * w_[2] / (double)(c.cfac.z * c.cfac.z);
       for (int ff = 0; ff < 6; ++ff) {
         const int a = ff / 2, sd = ff % 2;
         const double ba = (a == 0) ? bx : (a == 1) ? by : bz;
@@ -597,9 +606,9 @@ class VelocityMG {
     useResMask_ = false;  // upwind path: pure variable-coeff MG (no pin/exclude)
     for (int L = 1; L < (int)lv_.size(); ++L) {
       Level& c = lv_[L];
-      const double bx = nu_dt / (double)(c.cfac.x * c.cfac.x),
-                   by = nu_dt / (double)(c.cfac.y * c.cfac.y),
-                   bz = nu_dt / (double)(c.cfac.z * c.cfac.z);
+      const double bx = nu_dt * w_[0] / (double)(c.cfac.x * c.cfac.x),
+                   by = nu_dt * w_[1] / (double)(c.cfac.y * c.cfac.y),
+                   bz = nu_dt * w_[2] / (double)(c.cfac.z * c.cfac.z);
       const double sx = 1.0 / (double)c.cfac.x, sy = 1.0 / (double)c.cfac.y,
                    sz = 1.0 / (double)c.cfac.z;
       buildAdvCoarse(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.advU), CCConst(c.advV),
@@ -649,9 +658,9 @@ class VelocityMG {
     }
     for (int L = 0; L < (int)lv_.size(); ++L) {
       Level& c = lv_[L];
-      const double bx = nu_dt / (double)(c.cfac.x * c.cfac.x),
-                   by = nu_dt / (double)(c.cfac.y * c.cfac.y),
-                   bz = nu_dt / (double)(c.cfac.z * c.cfac.z);
+      const double bx = nu_dt * w_[0] / (double)(c.cfac.x * c.cfac.x),
+                   by = nu_dt * w_[1] / (double)(c.cfac.y * c.cfac.y),
+                   bz = nu_dt * w_[2] / (double)(c.cfac.z * c.cfac.z);
       buildConstAniso(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, c.ext, bx, by, bz, idiag);
       for (int f = 0; f < 6; ++f) {
         const int a = f / 2, s = f % 2;
@@ -900,6 +909,7 @@ class VelocityMG {
 
  private:
   std::vector<Level> lv_;
+  double w_[3] = {1.0, 1.0, 1.0};  // per-axis metric weight (setMetric); 1.0 = isotropic lattice
   int pre_ = 2, post_ = 2, bottom_ = 8;
   bool usePin_ = true,
        useResMask_ = true;  // staircase: pin + clean-fluid exclude; upwind/domain-BC: neither

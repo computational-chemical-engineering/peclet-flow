@@ -303,22 +303,27 @@ inline void scalarAddGfmRhs(CCField b, CCConst gfmB, CCConst mask, C3 e, int g) 
 }
 
 // Build the implicit diffusion+time 7-band operator over inner cells:
-//   A_C = idt + D*(ox(i)+ox(i+sx)+oy(i)+oy(i+sy)+oz(i)+oz(i+sz)),  A_off = -D*open_face.
+//   A_C = idt + sum_f D_a*open_f,  A_off = -D_a*open_face,  D_a = D*w_a
+// with w_a = 1/h_a'^2 the per-axis metric weight (doc/anisotropic_metric.md §2; w == 1.0 exactly
+// on the isotropic path, so D_a == D there and the operator is bit-identical).  The advection is
+// index-native and unchanged.
 // Openness-weighted (closed faces drop out) — the scalar analog of buildCutcellOp with the 1/dt
 // diagonal. ox(i) is the -x face openness of cell i (== +x face of cell i-1), matching divergOpen.
 inline void scalarBuildDiffusionOpen(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN,
                                      CCField AB, CCField AT, CCConst ox, CCConst oy, CCConst oz,
-                                     double D, double idt, C3 e, int g) {
+                                     double D, double idt, C3 e, int g, double wx = 1.0,
+                                     double wy = 1.0, double wz = 1.0) {
   CCExec space;
+  const double Dx = D * wx, Dy = D * wy, Dz = D * wz;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "peclet::flow::scalar_build_diff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double tw = D * ox(i), te = D * ox(i + sx);
-        const double ts = D * oy(i), tn = D * oy(i + sy);
-        const double tb = D * oz(i), tt = D * oz(i + sz);
+        const double tw = Dx * ox(i), te = Dx * ox(i + sx);
+        const double ts = Dy * oy(i), tn = Dy * oy(i + sy);
+        const double tb = Dz * oz(i), tt = Dz * oz(i + sz);
         AW(i) = -tw;
         AE(i) = -te;
         AS(i) = -ts;

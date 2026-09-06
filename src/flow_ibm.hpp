@@ -159,6 +159,18 @@ class Solver {
       return rhoRef * h2 * h2 / (tRef * tRef);
     }
     double torqueToPhys() const { return forceTotalToPhys() * hRef; }
+
+    // ---- Phase 2 (anisotropic cells): the per-axis metric of the discrete operators ----------
+    // doc/anisotropic_metric.md §1.1.  h_a' = h_a/hRef >= 1 (exactly 1.0 on the finest axis),
+    // w_a = 1/h_a'^2 <= 1 the pressure-gradient / Laplacian weight of axis a, V' = h_x'h_y'h_z'
+    // the cell volume in hRef^3, and `aniso` true iff some h_a' != 1.  Every operator fold below
+    // is "today's expression times one of these", so on the isotropic path — where they are all
+    // EXACTLY 1.0 — the arithmetic is bit-identical (multiplying an IEEE-754 double by 1.0 is the
+    // identity).  APPEND new members here; never reorder the struct (Phase 3 appends too).
+    double hp[3] = {1.0, 1.0, 1.0};   ///< h_a' = h_a / hRef  (>= 1, exactly 1 on the finest axis)
+    double w[3] = {1.0, 1.0, 1.0};    ///< w_a  = 1 / h_a'^2  (<= 1)
+    double vol = 1.0;                 ///< V'   = h_x' h_y' h_z'  (cell volume in hRef^3)
+    bool aniso = false;               ///< some h_a' != 1 — kernels dispatch the per-axis body
   };
 
   /// The map between the solver's INDEX coordinates and the coordinate system the analytic scene
@@ -235,6 +247,19 @@ class Solver {
       u_.cells[a] = c[a];
     }
     u_.hRef = hh[0];
+    // Phase 2 C1 — the per-axis metric (doc/anisotropic_metric.md §1.1, §1.4).  The isotropy
+    // assert above is STILL IN FORCE (commit C2 replaces it by the snap of §1.4 and admits a
+    // genuinely anisotropic extent), so every path that reaches here has three spacings agreeing
+    // to 1e-12 relative and the metric is EXACTLY the identity: hp = w = (1,1,1), vol = 1,
+    // aniso = false.  That exactness is what keeps every operator fold bit-identical — writing
+    // hp[a] = hh[a]/hRef here would give 1 +- 1 ulp on the axes an extent like N_a*H rounds
+    // differently, which is precisely what the §1.4 snap exists to remove.
+    for (int a = 0; a < 3; ++a) {
+      u_.hp[a] = 1.0;
+      u_.w[a] = 1.0;
+    }
+    u_.vol = 1.0;
+    u_.aniso = false;
     // rhoRef / tRef are pinned by the first set_rho / set_dt; whatever was set BEFORE the domain
     // (nothing, in the documented order) is re-derived here.
     refreshUnitDerived();
@@ -1990,6 +2015,9 @@ class Solver {
 #endif
     if (useVelocityMg_) {  // velocity-MG hierarchy: IBM (staircase/upwind), domain-BC
                            // (const-coeff) or mixed (staircase + folds) mode
+      // The per-axis metric BEFORE the hierarchy is built (doc/anisotropic_metric.md trap 5):
+      // every level's b_a^L = mu' * w_a / cfac_a^2, and C3's aspect-ratio level rule reads it too.
+      vmg_.setMetric(u_.w);
 #ifdef PECLET_FLOW_MPI
       // Distributed: level 0 on the solver's own decomposition (the g=2 velocity block), coarse
       // levels coarsened in place with the even-block gate (no telescoping here yet -- measured
@@ -4586,7 +4614,9 @@ class Solver {
   }
 
   void rebuildStencils() {
-    const double idiag = rho_ / dt_, beta = mu_;
+    // Per-axis viscous coefficient b_a = mu' * w_a (doc/anisotropic_metric.md §2); w == 1.0 on
+    // the isotropic path, so this is literally `beta = mu_` there.
+    const double idiag = rho_ / dt_, bx = mu_ * u_.w[0], by = mu_ * u_.w[1], bz = mu_ * u_.w[2];
     if (varProps_)
       fillMuGhosts();  // face means read mu at i +- stride (boundary inner cells -> ghosts)
     if (varRho_)
@@ -4596,10 +4626,10 @@ class Solver {
       Kokkos::deep_copy(C[c].inhom, 0.0);
       if (varProps_ || effVarRho())
         ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x,
-                             e_.y, e_.z, G, makeFaceProps(c));
+                             e_.y, e_.z, G, makeFaceProps(c), u_.w[0], u_.w[1], u_.w[2]);
       else
         ibmBuildDiffusion(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x, e_.y,
-                          e_.z, beta, idiag);
+                          e_.z, bx, by, bz, idiag);
       ibmModifyStencil(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, C[c].inhom,
                        C[c].rscale, C[c].ov, C[c].nCut, 0.0f, wallVelView(c));
       if (hasDrag_)
@@ -4825,7 +4855,7 @@ class Solver {
 
   void buildRhs(int c) {
     CCExec space;
-    const double idiag = rho_ / dt_, fc = f_[c], rho = rho_;
+    const double idiag = rho_ / dt_, fc = f_[c], rho = rho_, wc = u_.w[c];
     C3 e = e_;
     CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
     // A0: U/V/W (the advecting velocities) and aP (the advected field) come from the wall-aware
@@ -4940,11 +4970,15 @@ class Solver {
           // incremental predictor's -grad(P^n): central-difference cell gradient on the collocated
           // grid (or the wall-aware transpose gradient, mode 2), one-sided face gradient (P at the
           // high cell of the staggered face) on the staggered grid.
+          // The pressure gradient of component c carries the metric weight w_c
+          // (doc/anisotropic_metric.md §1.2/§2); wc == 1.0 exactly on the isotropic path.  The
+          // gpw() kernels carry their own weight (§3), so they are not scaled again here.
           const double gp =
               !incr ? 0.0
               : Grid::collocated
-                  ? ((tg || wg || gg || ag) ? gpw(i) : 0.5 * (P((long)i + strd) - P((long)i - strd)))
-                  : (P(i) - P((long)i - strd));
+                  ? ((tg || wg || gg || ag) ? gpw(i)
+                                            : wc * (0.5 * (P((long)i + strd) - P((long)i - strd))))
+                  : wc * (P(i) - P((long)i - strd));
           if (wd) {  // FV defect-correction RHS  M·u − ω·rs·(L_FV·u − b_FV),  b_FV = idt·cs·u^n +
                      // cs·(f − grad P). ω<1 damps the (stiff, explicit-lagged) wall-flux
                      // correction; the fixed point L_FV·u* = b_FV is independent of ω.
@@ -4963,7 +4997,7 @@ class Solver {
   // hasCellForce_.
   void buildRhsForced(int c) {
     CCExec space;
-    const double idiag = rho_ / dt_, fc = f_[c], rho = rho_;
+    const double idiag = rho_ / dt_, fc = f_[c], rho = rho_, wc = u_.w[c];
     C3 e = e_;
     CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
     CCConst fb = CCConst(cellForce_[c]);
@@ -5027,9 +5061,10 @@ class Solver {
             ar(i) = rho * (aF - aK);
           const double gp = !incr ? 0.0
                             : Grid::collocated
-                                ? ((tg || gg || ag) ? gpw(i)
-                                                    : 0.5 * (P((long)i + strd) - P((long)i - strd)))
-                                : (P(i) - P((long)i - strd));
+                                ? ((tg || gg || ag)
+                                       ? gpw(i)
+                                       : wc * (0.5 * (P((long)i + strd) - P((long)i - strd))))
+                                : wc * (P(i) - P((long)i - strd));
           const double comp = pc ? rho * uu(i) * 0.5 * (dv(i) + dv((long)i - strd)) : 0.0;
           bb(i) = rs(i) * (idiag * un(i) + fc + fb(i) - rho * aK + rho * aF + comp - gp) +
                   (bc ? brhs(i) : -inh(i));
@@ -5043,7 +5078,7 @@ class Solver {
   // rho ghosts filled (rebuildStencils / buildAdvStencilVar did it this step).
   void buildRhsVar(int c) {
     CCExec space;
-    const double idt = 1.0 / dt_, fc = f_[c];
+    const double idt = 1.0 / dt_, fc = f_[c], wc = u_.w[c];
     C3 e = e_;
     CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
     CCConst fb = CCConst(cellForce_[c]);
@@ -5078,9 +5113,10 @@ class Solver {
             if (ifou)
               aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa);
           }
-          const double gp = !incr              ? 0.0
-                            : Grid::collocated ? 0.5 * (P((long)i + strd) - P((long)i - strd))
-                                               : (P(i) - P((long)i - strd));
+          const double gp = !incr ? 0.0
+                            : Grid::collocated
+                                ? wc * (0.5 * (P((long)i + strd) - P((long)i - strd)))
+                                : wc * (P(i) - P((long)i - strd));
           const double fbF = 0.5 * (fb(i) + fb(i - strd));
           const double comp = pc ? rhoF * uu(i) * 0.5 * (dv(i) + dv((long)i - strd)) : 0.0;
           bb(i) = rs(i) * (rhoF * idt * un(i) + fc + fbF - rhoF * aK + rhoF * aF + comp - gp) +
@@ -5102,7 +5138,7 @@ class Solver {
   // hydrostatic balance exact is untouched (see the enableVofMomentum note).
   void buildRhsVarMom(int c) {
     CCExec space;
-    const double idt = 1.0 / dt_, fc = f_[c];
+    const double idt = 1.0 / dt_, fc = f_[c], wc = u_.w[c];
     C3 e = e_;
     CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
     CCConst fb = CCConst(cellForce_[c]);
@@ -5117,9 +5153,10 @@ class Solver {
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           const double rhoF = 0.5 * (rf(i) + rf(i - strd));
-          const double gp = !incr              ? 0.0
-                            : Grid::collocated ? 0.5 * (P((long)i + strd) - P((long)i - strd))
-                                               : (P(i) - P((long)i - strd));
+          const double gp = !incr ? 0.0
+                            : Grid::collocated
+                                ? wc * (0.5 * (P((long)i + strd) - P((long)i - strd)))
+                                : wc * (P(i) - P((long)i - strd));
           const double fbF = 0.5 * (fb(i) + fb(i - strd));
           bb(i) = rs(i) * (rhoF * idt * ua(i) + fc + fbF - gp) + (bc ? brhs(i) : -inh(i));
         });
@@ -5380,10 +5417,12 @@ class Solver {
   // stable at high Re), then the Robust-Scaled cut-cell bake. The advecting velocity u^k = the
   // current C[*].u (ghosts filled).
   void buildAdvStencil(int c) {
-    const double idiag = rho_ / dt_, beta = mu_, fouw = rho_;
+    // b_a = mu' * w_a (doc/anisotropic_metric.md §2); the FOU part is index-native and unchanged.
+    const double idiag = rho_ / dt_, fouw = rho_, bx = mu_ * u_.w[0], by = mu_ * u_.w[1],
+                 bz = mu_ * u_.w[2];
     C3 e = e_;
     ibmBuildDiffusion(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y, e.z,
-                      beta, idiag);
+                      bx, by, bz, idiag);
     CCExec space;
     FV AC = C[c].AC, AW = C[c].AW, AE = C[c].AE, AS = C[c].AS, AN = C[c].AN, AB = C[c].AB,
        AT = C[c].AT;
@@ -5427,7 +5466,7 @@ class Solver {
         updateEpsRho();  // eps ghosts are driver-filled; whole-block product has valid ghosts
     }
     ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y,
-                         e.z, G, makeFaceProps(c));
+                         e.z, G, makeFaceProps(c), u_.w[0], u_.w[1], u_.w[2]);
     CCExec space;
     FV AC = C[c].AC, AW = C[c].AW, AE = C[c].AE, AS = C[c].AS, AN = C[c].AN, AB = C[c].AB,
        AT = C[c].AT;
@@ -5635,16 +5674,19 @@ class Solver {
       return finishResidual(c);
     };
   }
-  // The all-fluid domain-BC smoother's operator (constant coefficients + the boundary fold).
-  std::function<double()> constCoeffResidual(int c, double beta, double Ac) {
+  // The all-fluid domain-BC smoother's operator (per-axis constant coefficients + the boundary
+  // fold). `aniso` selects the per-axis body; the isotropic path runs the legacy kernel literally
+  // (doc/anisotropic_metric.md §2, trap 4).
+  std::function<double()> constCoeffResidual(int c, double bx, double by, double bz, double Ac) {
     if (velocityResidualTolerance() <= 0.0)
       return nullptr;
     if (velRes_.extent(0) != n_)
       velRes_ = CCField("velRes", n_);
-    return [this, c, beta, Ac]() {
+    const bool an = u_.aniso;
+    return [this, c, bx, by, bz, Ac, an]() {
       const I3 e{e_.x, e_.y, e_.z};
-      diffResidual(velRes_, CCConst(C[c].u), CCConst(C[c].b), e, G, beta, Ac,
-                   CCConst(bcDcorr_[c]));
+      diffResidual(velRes_, CCConst(C[c].u), CCConst(C[c].b), e, G, bx, by, bz, Ac,
+                   CCConst(bcDcorr_[c]), an);
       return finishResidual(c);
     };
   }
@@ -5747,17 +5789,22 @@ class Solver {
       // there. It was hard-coded {0,0,0} here, which swaps the colours on any rank whose block
       // origin has odd parity — the only smoother in the file that did not carry og_.
       const I3 e{e_.x, e_.y, e_.z}, og{og_.x, og_.y, og_.z};
-      const double beta = mu_, Ac = rho_ / dt_ + 6.0 * mu_;
+      // b_a = mu' * w_a; Ac = rho/dt + 2*((bx+by)+bz) in EXACTLY that association order, which is
+      // fl(6*mu_) at bx==by==bz (doc/anisotropic_metric.md §2, trap 3).
+      const double bx = mu_ * u_.w[0], by = mu_ * u_.w[1], bz = mu_ * u_.w[2];
+      const double Ac = rho_ / dt_ + 2.0 * ((bx + by) + bz);
+      const bool an = u_.aniso;
       velSweepLoop(
           [&] { fillVelGhosts(c, 1); },  // re-impose wall faces (fold) before each color
           [&](int col) {
-            diffSmoothColor(C[c].u, CCConst(C[c].b), e, og, G, beta, Ac, col, CCConst(bcDcorr_[c]));
+            diffSmoothColor(C[c].u, CCConst(C[c].b), e, og, G, bx, by, bz, Ac, col,
+                            CCConst(bcDcorr_[c]), an);
           },
           [&](int col) {
-            return diffSmoothColorDu(C[c].u, CCConst(C[c].b), e, og, G, beta, Ac, col,
-                                     CCConst(bcDcorr_[c]));
+            return diffSmoothColorDu(C[c].u, CCConst(C[c].b), e, og, G, bx, by, bz, Ac, col,
+                                     CCConst(bcDcorr_[c]), an);
           },
-          constCoeffResidual(c, beta, Ac), stencilBnorm(c));
+          constCoeffResidual(c, bx, by, bz, Ac), stencilBnorm(c));
       return;
     }
     if (useVelocityMg_) {  // IBM velocity multigrid: fine = sharp As_[c]; coarse op depends on the
@@ -6071,12 +6118,14 @@ class Solver {
   // outflow:-beta), brhs += 2*beta*wall (tangential Dirichlet); bake dcorr into the per-component
   // stencil diagonal.
   void setupBcDiffusion() {
-    const double beta = mu_;
     B3 e{e_.x, e_.y, e_.z};
     for (int c = 0; c < 3; ++c) {
       Kokkos::deep_copy(bcDcorr_[c], 0.0);
       Kokkos::deep_copy(bcBrhs_[c], 0.0);
-      for (int a = 0; a < 3; ++a)
+      for (int a = 0; a < 3; ++a) {
+        // The fold uses the beta of the FACE's own axis (doc/anisotropic_metric.md §2/§4.1);
+        // b_a == mu_ exactly on the isotropic path.
+        const double beta = mu_ * u_.w[a];
         for (int s = 0; s < 2; ++s) {
           const int t = bc_[2 * a + s];
           if (!touchesGlobalFace(2 * a + s))
@@ -6095,6 +6144,7 @@ class Solver {
             continue;  // periodic, or the normal component at a wall (held directly)
           bcDiffusionFold(bcDcorr_[c], bcBrhs_[c], e, G, a, s, dval, bval);
         }
+      }
       // dcorr is passed to the (double) const-coeff smoother diffSmoothColor each sweep -- matching
       // CUDA diff_k (Ac + dcorr in double), NOT baked into the float stencil.
     }
@@ -6861,7 +6911,8 @@ class Solver {
         applyScalarBcStencilVar(sc);
       } else {
         scalarBuildDiffusionOpen(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(ox_),
-                                 CCConst(oy_), CCConst(oz_), sc.D, idt, e_, G);
+                                 CCConst(oy_), CCConst(oz_), sc.D, idt, e_, G, u_.w[0], u_.w[1],
+                                 u_.w[2]);
         applyScalarBcStencil(sc);  // re-open Dirichlet domain faces (set_domain_bc closes openness)
       }
       // WO-P23: the PLANE-ANCHORED (ghost-fluid) form of that Dirichlet set — the pure cells'

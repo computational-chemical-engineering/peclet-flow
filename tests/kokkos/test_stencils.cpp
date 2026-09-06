@@ -9,7 +9,9 @@
 #include <random>
 #include <vector>
 
+#include "cut_cell_ibm.hpp"
 #include "mac_stencils.hpp"
+#include "mac_velocity_mg.hpp"
 
 using namespace peclet::flow;
 
@@ -123,6 +125,96 @@ int main(int argc, char** argv) {
           "%s)\n",
           r0, r1, SExec::name());
   }
+  // ------------------------------------------------------------------------------------------
+  // Phase 2 commit C1 (doc/anisotropic_metric.md §2, §9 row C1): the per-axis viscous fold.
+  //   A_C = idiag + 2*((bx + by) + bz),  AW = AE = -bx, AS = AN = -by, AB = AT = -bz
+  // in EXACTLY that association order, for BOTH assemblers of the constant-coefficient momentum
+  // operator: `ibmBuildDiffusion` (the fine stencil) and `buildConstAniso` (the velocity-MG
+  // levels).  Two statements are gated:
+  //   (a) an anisotropic metric w = (1, 4, 1/4) produces exactly those per-axis bands;
+  //   (b) at w = (1,1,1) the diagonal is BITWISE the pre-Phase-2 expression `idiag + 6.0*beta`
+  //       — (beta+beta) is exact, +beta rounds once, and the *2 is exact, so 2*fl(3 beta) ==
+  //       fl(6 beta).  That is the whole isotropic-identity argument, checked at kernel level.
+  {
+    using peclet::flow::buildConstAniso;
+    using peclet::flow::C3;
+    using peclet::flow::FPV;
+    using peclet::flow::ibmBuildDiffusion;
+    using peclet::flow::MReal;
+
+    const int ex = 6, ey = 5, ez = 4;
+    const std::size_t n = (std::size_t)ex * ey * ez;
+    const C3 e3{ex, ey, ez};
+    const double mu = 0.1, idiag = 1.0 / 50.0;
+
+    auto bands = [&](FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV AT, MReal out[7]) {
+      FPV all[7] = {AC, AW, AE, AS, AN, AB, AT};
+      for (int k = 0; k < 7; ++k) {
+        auto m = Kokkos::create_mirror_view(all[k]);
+        Kokkos::deep_copy(m, all[k]);
+        out[k] = m(n / 2);
+      }
+    };
+    FPV AC("AC", n), AW("AW", n), AE("AE", n), AS("AS", n), AN("AN", n), AB("AB", n), AT("AT", n);
+
+    // (a) anisotropic metric
+    {
+      const double w[3] = {1.0, 4.0, 0.25};
+      const double bx = mu * w[0], by = mu * w[1], bz = mu * w[2];
+      const MReal wantC = (MReal)(idiag + 2.0 * ((bx + by) + bz));
+      const MReal wantX = (MReal)(-bx), wantY = (MReal)(-by), wantZ = (MReal)(-bz);
+      const MReal want[7] = {wantC, wantX, wantX, wantY, wantY, wantZ, wantZ};
+      const char* nm[7] = {"AC", "AW", "AE", "AS", "AN", "AB", "AT"};
+      const char* who[2] = {"ibmBuildDiffusion", "buildConstAniso"};
+      for (int k = 0; k < 2; ++k) {
+        if (k == 0)
+          ibmBuildDiffusion(AC, AW, AE, AS, AN, AB, AT, ex, ey, ez, bx, by, bz, idiag);
+        else
+          buildConstAniso(AC, AW, AE, AS, AN, AB, AT, e3, bx, by, bz, idiag);
+        MReal got[7];
+        bands(AC, AW, AE, AS, AN, AB, AT, got);
+        for (int b = 0; b < 7; ++b)
+          if (!(got[b] == want[b])) {
+            std::fprintf(stderr, "FAIL: %s aniso %s = %.17g, want %.17g\n", who[k], nm[b],
+                         (double)got[b], (double)want[b]);
+            status = 1;
+          }
+        if (!status)
+          std::printf(
+              "[aniso_fold] %-17s w=(1,4,0.25): AC %.17g  AW/AE %.17g  AS/AN %.17g  AB/AT %.17g\n",
+              who[k], (double)got[0], (double)got[1], (double)got[3], (double)got[5]);
+      }
+    }
+
+    // (b) isotropic metric -> bitwise the pre-Phase-2 expression
+    {
+      const double beta = mu;
+      const MReal legacyC = (MReal)(idiag + 6.0 * beta), legacyO = (MReal)(-beta);
+      const MReal want[7] = {legacyC, legacyO, legacyO, legacyO, legacyO, legacyO, legacyO};
+      const char* nm[7] = {"AC", "AW", "AE", "AS", "AN", "AB", "AT"};
+      const char* who[2] = {"ibmBuildDiffusion", "buildConstAniso"};
+      for (int k = 0; k < 2; ++k) {
+        if (k == 0)
+          ibmBuildDiffusion(AC, AW, AE, AS, AN, AB, AT, ex, ey, ez, beta, beta, beta, idiag);
+        else
+          buildConstAniso(AC, AW, AE, AS, AN, AB, AT, e3, beta, beta, beta, idiag);
+        MReal got[7];
+        bands(AC, AW, AE, AS, AN, AB, AT, got);
+        for (int b = 0; b < 7; ++b)
+          if (!(got[b] == want[b])) {
+            std::fprintf(stderr, "FAIL: %s isotropic %s = %.17g, want (legacy) %.17g\n", who[k],
+                         nm[b], (double)got[b], (double)want[b]);
+            status = 1;
+          }
+        if (!status)
+          std::printf("[aniso_fold] %-17s w=(1,1,1):    AC %.17g == idiag+6*beta %.17g (bitwise)\n",
+                      who[k], (double)got[0], (double)legacyC);
+      }
+    }
+    if (!status)
+      std::printf("[aniso_fold] PASS: per-axis viscous fold; isotropic == legacy bitwise\n");
+  }
+
   Kokkos::finalize();
   return status;
 }
