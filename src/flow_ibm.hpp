@@ -874,9 +874,21 @@ class Solver {
       faceFieldValid_ = true;
     }
   }
+  /// Upload an initial velocity field in the caller's PHYSICAL units (converted per component to
+  /// the index velocity the kernels carry; the conversion is the identity in cell units).
   void uploadVelocity(const std::vector<double>& uu, const std::vector<double>& vv,
                       const std::vector<double>& ww) {
     const std::vector<double>* src[3] = {&uu, &vv, &ww};
+    std::vector<double> scaled[3];
+    for (int c = 0; c < 3; ++c) {
+      const double k = u_.velToInt(c);
+      if (k == 1.0)
+        continue;
+      scaled[c].resize(src[c]->size());
+      for (std::size_t i = 0; i < src[c]->size(); ++i)
+        scaled[c][i] = (*src[c])[i] * k;
+      src[c] = &scaled[c];
+    }
     CCExec space;
     const int ex = e_.x, ey = e_.y, nx = nx_, ny = ny_, nz = nz_, g = G;
     for (int c = 0; c < 3; ++c) {
@@ -1060,9 +1072,12 @@ class Solver {
     // WO-P3g: the "does this cell carry a row" mask depends on which domain faces are periodic.
     pcInDomain_ = CCField();
     bc_[face] = type;
-    bcVel_[face][0] = vx;
-    bcVel_[face][1] = vy;
-    bcVel_[face][2] = vz;
+    // Boundary velocities are PHYSICAL; the kernels read the index velocity v_a = u_a*tRef/h_a.
+    bcVelPhys_[face][0] = vx;
+    bcVelPhys_[face][1] = vy;
+    bcVelPhys_[face][2] = vz;
+    for (int a = 0; a < 3; ++a)
+      bcVel_[face][a] = bcVelPhys_[face][a] * u_.velToInt(a);
     hasBc_ = false;
     hasOutflow_ = false;
     for (int i = 0; i < 6; ++i) {
@@ -1108,8 +1123,11 @@ class Solver {
     for (int p0 = 0; p0 < Lb; ++p0)
       for (int p1 = 0; p1 < Lc; ++p1) {
         const int ib = cl(p0 - G, nb), ic = cl(p1 - G, nc);
+        // The raw profile is kept in the caller's PHYSICAL velocity; convert per component here,
+        // so a re-resample after a redistribute (or a reference-scale change) reconverts too.
         for (int k = 0; k < 3; ++k)
-          h(((long)p0 * Lc + p1) * 3 + k) = prof[((std::size_t)ib * nc + ic) * 3 + k];
+          h(((long)p0 * Lc + p1) * 3 + k) =
+              prof[((std::size_t)ib * nc + ic) * 3 + k] * u_.velToInt(k);
       }
     Kokkos::deep_copy(pf, h);
     bcProf_[face] = pf;
@@ -2609,12 +2627,27 @@ class Solver {
     return ob;
   }
   // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
-  std::vector<double> getVelocity(int c) { return gatherInner(C[c].u); }
+  std::vector<double> getVelocity(int c) {
+    std::vector<double> out = gatherInner(C[c].u);
+    const double k = u_.velToPhys(c);  // exactly 1.0 in cell units
+    if (k != 1.0)
+      for (double& x : out)
+        x *= k;
+    return out;
+  }
   /// Write a component's inner velocity from a host vector (x-fastest, inner region) and
   /// re-impose the solid mask. An initial-condition hook (e.g. a uniform stream around a fixed
   /// body — the Galilean twin of a towed one); u^n is taken from the live field at step start.
   void setVelocity(int c, const std::vector<double>& v) {
-    scatterInner(C[c].u, v);
+    const double k = u_.velToInt(c);
+    if (k != 1.0) {
+      std::vector<double> vi(v.size());
+      for (std::size_t i = 0; i < v.size(); ++i)
+        vi[i] = v[i] * k;
+      scatterInner(C[c].u, vi);
+    } else {
+      scatterInner(C[c].u, v);
+    }
     maskVelocity(c);
     seedFaceFieldFromCells();  // ISSUES sweep item 5 (collocated only; a no-op staggered)
   }
@@ -2623,12 +2656,18 @@ class Solver {
   // bed its mean is the momentum-balance superficial velocity, unperturbed by the openness-aware
   // cell gradient correction (projectCorrectCenter) that biases the cell-field mean at cut cells.
   std::vector<double> getFaceVelocity(int c) {
+    std::vector<double> out;
     if constexpr (Grid::collocated) {
       CCField fa[3] = {uf_, vf_, wf_};
-      return gatherInner(fa[c]);
+      out = gatherInner(fa[c]);
     } else {
-      return gatherInner(C[c].u);
+      out = gatherInner(C[c].u);
     }
+    const double k = u_.velToPhys(c);  // exactly 1.0 in cell units
+    if (k != 1.0)
+      for (double& x : out)
+        x *= k;
+    return out;
   }
   // TEMP DIAGNOSTIC: the face openness (fluid area fraction) used by the cut-cell projection.
   // component c: 0 -> ox_ (low -x face of each inner cell), 1 -> oy_, 2 -> oz_. Grid-independent
@@ -2670,12 +2709,12 @@ class Solver {
     // Incremental scheme: P_ accumulates the physical pressure. Classical Chorin (!incremental_):
     // derive it on demand from the last projection potential, p = (rho/dt)*phi (CUDA
     // press_from_phi_k).
-    if (incremental_)
-      return gatherInner(P_);
-    std::vector<double> out = gatherInner(phi_);
-    const double ct = rho_ / dt_;
-    for (double& x : out)
-      x *= ct;
+    std::vector<double> out = gatherInner(incremental_ ? P_ : phi_);
+    // Internal pressure -> the caller's units; the Chorin branch first derives p' = (rho'/dt')*phi.
+    const double ct = (incremental_ ? 1.0 : rho_ / dt_) * u_.pToPhys();
+    if (ct != 1.0)
+      for (double& x : out)
+        x *= ct;
     return out;
   }
   // WO-R: the divergence of the field the projection ACTUALLY produced, outflow correction
@@ -2690,10 +2729,15 @@ class Solver {
   // Kept as a SIBLING rather than a change of default: every recorded open-boundary number in the
   // repo was taken with the mutating one, and re-baselining them is not this work order's call.
   double maxOpenDivergenceProjected() {
+    return maxOpenDivergenceProjectedInternal() * u_.divToPhys();
+  }
+  /// The same diagnostic in INDEX units (per tRef), which is what the solver's own guards read.
+  double maxOpenDivergenceProjectedInternal() {
     if (!cutcellPressure_)
       return 0.0;
     if constexpr (Grid::collocated)
-      return maxOpenDivergence();  // the collocated branch already measures the face field
+      return maxOpenDivergenceInternal();  // the collocated branch already measures the face
+                                          // field
     for (int c = 0; c < 3; ++c)
       fillVelGhostsKeepOutflow(c);
     divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
@@ -2709,7 +2753,9 @@ class Solver {
 #endif
     return m;
   }
-  double maxOpenDivergence() {
+  double maxOpenDivergence() { return maxOpenDivergenceInternal() * u_.divToPhys(); }
+  /// The same diagnostic in INDEX units (per tRef), which is what the solver's own guards read.
+  double maxOpenDivergenceInternal() {
     if (!cutcellPressure_)
       return 0.0;
     if constexpr (Grid::collocated) {
@@ -7097,21 +7143,25 @@ class Solver {
   // @param sigma       the surface tension entering Ca_cl; <= 0 means "use set_surface_tension".
   void setContactAngleDynamic(double thetaEDeg, double slipCells, double muLiquid,
                               double sigma = 0.0) {
-    if (!(slipCells > 0.0 && slipCells < 1.0))
+    // `slipCells` is a LENGTH in the caller's units (cells when no physical domain is armed);
+    // the model needs lambda/Delta, which is what the internal value is.
+    const double slipInt = slipCells * u_.lenToInt();
+    if (!(slipInt > 0.0 && slipInt < 1.0))
       throw std::runtime_error(
-          "set_contact_angle_dynamic: slip_length_cells must lie in (0, 1) cell (lambda < Delta)");
+          "set_contact_angle_dynamic: the slip length must lie in (0, 1) cell (lambda < Delta)");
     if (!(muLiquid > 0.0))
       throw std::runtime_error("set_contact_angle_dynamic: mu_liquid must be positive");
     vofDyn_.dynamic = true;
-    vofDyn_.slip = slipCells;
-    vofDyn_.muLiquid = muLiquid;
+    vofDyn_.slip = slipInt;
+    vofDyn_.muLiquid = muLiquid * u_.muToInt();
     contactSigmaOverride_ = sigma;
     // ONE lambda across the two halves of Afkhami-Zaleski-Bussmann (WO-V6b): this call and
     // set_wall_slip_length write the SAME stored value, so the angle model's inner cut-off and
     // the momentum wall closure can never disagree (last call wins). Whether the MOMENTUM half is
     // active is a separate switch, set only by set_wall_slip_length -- so every result WO-V6
     // validated with the angle half alone stays exactly what it was.
-    slipLambda_ = slipCells;
+    slipPhys_ = slipCells;
+    slipLambda_ = slipInt;
     if (wallSlip_ && hasSolid_ && !Grid::collocated) {
       buildVelocityOverlays(/*resetU=*/false);
       rebuildStencils();
@@ -7125,21 +7175,24 @@ class Solver {
   /// bit-identically. Shares its value with set_contact_angle_dynamic's cut-off.
   void setWallSlipLength(double lambdaCells) {
     if (!(lambdaCells >= 0.0))
-      throw std::runtime_error("set_wall_slip_length: lambda must be >= 0 cells");
+      throw std::runtime_error("set_wall_slip_length: lambda must be >= 0");
+    const double lambdaInt = lambdaCells * u_.lenToInt();
     if (lambdaCells > 0.0 && Grid::collocated)
       throw std::runtime_error(
           "set_wall_slip_length: the Navier wall closure is a staggered-grid feature (the "
           "collocated scheme carries its own wall treatment)");
-    slipLambda_ = lambdaCells;
+    slipPhys_ = lambdaCells;
+    slipLambda_ = lambdaInt;
     wallSlip_ = lambdaCells > 0.0;
     if (vofDyn_.dynamic && lambdaCells > 0.0)
-      vofDyn_.slip = lambdaCells;
+      vofDyn_.slip = lambdaInt;
     if (hasSolid_) {
       buildVelocityOverlays(/*resetU=*/false);
       rebuildStencils();
     }
   }
-  double wallSlipLength() const { return wallSlip_ ? slipLambda_ : 0.0; }
+  /// The Navier slip length in the caller's units (0 = no-slip).
+  double wallSlipLength() const { return wallSlip_ ? slipPhys_ : 0.0; }
   /// Cut-cell axes at which a one-cell fluid gap kept the no-slip closure (per component).
   std::array<int, 3> wallSlipSandwichCells() const { return slipSandwich_; }
   // theta_a / theta_r, degrees. Composes with the dynamic correction when that is also set: the
@@ -7427,7 +7480,7 @@ class Solver {
     // and measure the field the caller actually has: max_open_divergence() re-imposes the
     // zero-gradient outflow face before measuring, i.e. it MUTATES u and reports a field the
     // advector will not be handed (WO-R). The projected sibling does neither.
-    const double div = maxOpenDivergenceProjected();
+    const double div = maxOpenDivergenceProjectedInternal();  // the 1e-10 gate is index-unit
     if (!(div <= 1e-10)) {
       char msg[320];
       std::snprintf(msg, sizeof(msg),
@@ -7530,7 +7583,7 @@ class Solver {
   void advectVofBlocks(double dt, bool requireSolenoidal = true) {
     if (!vofBlocks_)
       throw std::runtime_error("advect_vof_blocks: call enable_vof_blocks first");
-    const double div = requireSolenoidal ? maxOpenDivergence() : 0.0;
+    const double div = requireSolenoidal ? maxOpenDivergenceInternal() : 0.0;  // index-unit gate
     if (!(div <= 1e-10)) {
       char msg[320];
       std::snprintf(msg, sizeof(msg),
@@ -8056,10 +8109,17 @@ class Solver {
   // The branch census of the last `computeVofCurvature()` — LOCAL to this rank (the driver is
   // MPI-free; a distributed caller sums them).
   vof::VofCurvature::Stats vofCurvatureStats() const { return vofCurvStats_; }
+  /// The interface curvature kappa = 2H in the caller's units, i.e. 1/LENGTH (the internal field
+  /// is 1/h; kappa_phys = kappa'/hRef).
   std::vector<double> getVofCurvature() {
     if (!kappaField_.extent(0))
       throw std::runtime_error("vof_curvature: call compute_vof_curvature() first");
-    return gatherInner(kappaField_);
+    std::vector<double> out = gatherInner(kappaField_);
+    const double k = u_.curvToPhys();
+    if (k != 1.0)
+      for (double& x : out)
+        x *= k;
+    return out;
   }
   std::vector<double> getVofCurvatureBranch() {
     if (!kappaBranch_.extent(0))
@@ -8125,9 +8185,13 @@ class Solver {
       // anyone calling `compute_vof_curvature()` without surface tension.
       vofCurv_.interfaceEps = csfInterfaceEps_;
     }
-    sigmaCsf_ = sigma;
+    // sigma is PHYSICAL (force per unit length); internally sigma*tRef^2/(rhoRef*hRef^3), which is
+    // what makes p' = sigma'*kappa' hold with kappa' = kappa*hRef.
+    sigmaPhys_ = sigma;
+    sigmaCsf_ = sigma * u_.sigmaToInt();
   }
-  double surfaceTension() const { return sigmaCsf_; }
+  /// The surface tension in the caller's units (what set_surface_tension was given).
+  double surfaceTension() const { return sigmaPhys_; }
   // The wisp threshold above, exposed so it can be swept/ablated. Default 1e-8; 0 restores the
   // unguarded V3 predicate and, with surface tension on, reproduces the instability it exists for.
   void setVofInterfaceEps(double eps) {
