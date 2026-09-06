@@ -150,6 +150,7 @@ class Solver {
     double sigmaToInt() const { return tRef * tRef / (rhoRef * hRef * hRef * hRef); }
     double curvToPhys() const { return 1.0 / hRef; }
     double divToPhys() const { return 1.0 / tRef; }
+    double timeToPhys() const { return tRef; }
     double angVelToInt() const { return tRef; }  // omega' = omega*tRef (v = omega x r on both sides)
     // A TOTAL force F = int f dV: f' = f*tRef^2/(rhoRef*hRef) and dV' = dV/hRef^3, so
     // F' = F*tRef^2/(rhoRef*hRef^4); a torque carries one more length.
@@ -7560,7 +7561,9 @@ class Solver {
   // would report a conservation "defect" that is really the caller's velocity. Use the solver's own
   // projected output (run `step()` to a steady state, or call `project()`), never an analytic
   // sample.
-  void advectVofKinematic(double dt) {
+  /// `dt` is in the caller's time unit.
+  void advectVofKinematic(double dtPhysArg) {
+    const double dt = dtPhysArg * u_.timeToInt();
     if (!vofEnabled_)
       throw std::runtime_error("advect_vof: VoF is not enabled (call enable_vof / set_vof first)");
     requireVofGeometry("advect_vof");
@@ -7695,7 +7698,9 @@ class Solver {
   // exactly as for the structured `advectVof()`, which has never carried a check here -- so the
   // in-step call passes false. (Rung W2: with variable density the projected residual sits at
   // ~1e-7 without `PECLET_FLOW_EXACT_RESIDUAL`, which would refuse every coupled step.)
-  void advectVofBlocks(double dt, bool requireSolenoidal = true) {
+  /// `dt` is in the caller's time unit.
+  void advectVofBlocks(double dtPhysArg, bool requireSolenoidal = true) {
+    const double dt = dtPhysArg * u_.timeToInt();
     if (!vofBlocks_)
       throw std::runtime_error("advect_vof_blocks: call enable_vof_blocks first");
     const double div = requireSolenoidal ? maxOpenDivergenceInternal() : 0.0;  // index-unit gate
@@ -8357,7 +8362,17 @@ class Solver {
   // (`enable_vof_momentum` validated it against the closure), and otherwise from `min(rho) +
   // max(rho)` over the current density field — an MPI_MIN/MPI_MAX pair, so it is exact and
   // decomposition-independent. It is the sum, not a mean: both phases oscillate.
-  double capillaryDt() {
+  /// The Brackbill capillary limit in the CALLER's time unit.
+  ///
+  /// UNITS NOTE for the whole VoF stack. The colour advector runs on the UNIT LATTICE like every
+  /// other operator here (`WyAdvector::h()` stays 1 and its Courant number is the index
+  /// `v*dt'`, which IS the physical `u*dt/h`), so nothing inside it changes with the domain.
+  /// What crosses the boundary changes: sigma on the way in, kappa and every TIME on the way out.
+  /// Check: dt' = sqrt((rho1'+rho2')/(4 pi sigma')) with rho' = rho/rhoRef and
+  /// sigma' = sigma*tRef^2/(rhoRef*hRef^3) gives exactly sqrt((rho1+rho2)hRef^3/(4 pi sigma))/tRef.
+  double capillaryDt() { return capillaryDtInternal() * u_.timeToPhys(); }
+  /// The same limit in the solver's index time (per tRef) — what the step's own guards compare to.
+  double capillaryDtInternal() {
     if (!(sigmaCsf_ > 0.0))
       return std::numeric_limits<double>::infinity();
     return vof::capillaryDt(phaseDensitySum(), vofEnabled_ ? vofAdv_.h() : 1.0, sigmaCsf_);
@@ -8380,10 +8395,11 @@ class Solver {
     double binding = 0.0;      ///< min(cflDt, capillaryCfl * capillaryDt)
     bool capillaryBinds = false;
   };
+  /// Both limits at the current state, in the CALLER's time unit (`courant` is dimensionless).
   VofStepLimits vofStepLimits() {
     VofStepLimits L;
     L.courant = vofMaxCourant();
-    L.cflDt = (L.courant > 0.0) ? dt_ * vofCflLimit_ / L.courant
+    L.cflDt = (L.courant > 0.0) ? dtPhys_ * vofCflLimit_ / L.courant
                                 : std::numeric_limits<double>::infinity();
     L.capillaryDt = capillaryDt();
     const double cap = capillaryCfl_ * L.capillaryDt;
@@ -8502,7 +8518,7 @@ class Solver {
     if (!vofEnabled_ || skip)
       return;
     if (csfActive()) {
-      const double cap = capillaryCfl_ * capillaryDt();
+      const double cap = capillaryCfl_ * capillaryDtInternal();
       if (!(dt_ <= cap))
         throw std::runtime_error(capillaryThrowMessage(cap));
     }
@@ -8534,12 +8550,13 @@ class Solver {
       computeVofBlockCsf();  // rung W2: per-block cascade + the CSF face force, scattered SUM
     else if (!kappaFrozen_)
       computeVofCurvature();
-    const double cap = capillaryCfl_ * capillaryDt();
+    const double cap = capillaryCfl_ * capillaryDtInternal();
     if (!(dt_ <= cap))
       throw std::runtime_error(
           "surface tension: dt = " + std::to_string(dt_) + " exceeds the capillary limit " +
           std::to_string(cap) + " (Brackbill sqrt((rho_1+rho_2) h^3/(4 pi sigma)) = " +
-          std::to_string(capillaryDt()) + " x safety factor " + std::to_string(capillaryCfl_) +
+          std::to_string(capillaryDtInternal()) + " x safety factor " +
+          std::to_string(capillaryCfl_) +
           "). Surface tension is EXPLICIT: this is a hard stability boundary (Denner & van Wachem "
           "2015), not a margin. Reduce dt, or raise set_capillary_cfl deliberately.");
   }
@@ -9386,7 +9403,9 @@ class Solver {
   /// Kinematic entry point (the P0a/P1 driver): build `mdot`/`A_G`/`n` from the current colour and
   /// temperature, deposit the divergence source (for the census only — nothing is projected here)
   /// and apply the interface regression. No Navier-Stokes step, no advection.
-  void applyPhaseChange(double dt) {
+  /// `dt` is in the caller's time unit.
+  void applyPhaseChange(double dtPhysArg) {
+    const double dt = dtPhysArg * u_.timeToInt();
     requirePhaseChange("apply_phase_change");
     pcBuildInterface();
     pcScatterSource();
