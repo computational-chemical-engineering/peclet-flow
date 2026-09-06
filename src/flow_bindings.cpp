@@ -167,6 +167,35 @@ static void bind_solver(nb::module_& m, const char* name) {
           "spacing", [](S& s) { return s.spacing(); },
           "The cell size (dx, dy, dz) = extent/cells. (1,1,1) without a physical domain.")
       .def_prop_ro(
+          "unit_scales",
+          [](S& s) {
+            const auto& u = s.unitScales();
+            nb::dict d;
+            d["identity"] = !u.physical;
+            d["h_ref"] = u.hRef;
+            d["rho_ref"] = u.rhoRef;
+            d["t_ref"] = u.tRef;
+            d["length_to_internal"] = u.lenToInt();
+            d["velocity_to_internal"] = std::vector<double>{u.velToInt(0), u.velToInt(1),
+                                                            u.velToInt(2)};
+            d["time_to_internal"] = u.timeToInt();
+            d["density_to_internal"] = u.rhoToInt();
+            d["viscosity_to_internal"] = u.muToInt();
+            d["pressure_to_internal"] = u.pToInt();
+            d["force_density_to_internal"] = std::vector<double>{
+                u.forceToInt(0), u.forceToInt(1), u.forceToInt(2)};
+            d["force_to_physical"] = u.forceTotalToPhys();
+            d["torque_to_physical"] = u.torqueToPhys();
+            return d;
+          },
+          "The factors between the caller's units and the ones the solver computes in.\n\n"
+          "The solver keeps computing on the UNIT LATTICE and folds the metric into constants at "
+          "its API boundary, so every array reached through the RAW field registry "
+          "(field_view / get_field / set_field) is in those INTERNAL units, unlike get_u/get_p, "
+          "which convert. `identity` is True when no extent was given, and then every factor is "
+          "exactly 1.0 and internal == physical. Multiply a physical value by *_to_internal, and "
+          "an internal one by force_to_physical (a total force) to come back.")
+      .def_prop_ro(
           "physical_units", [](S& s) { return s.hasPhysicalDomain(); },
           "True when the solver was given an extent, i.e. lengths are physical rather than cells.")
       .def(
@@ -541,8 +570,10 @@ static void bind_solver(nb::module_& m, const char* name) {
           nb::arg("instance_reals"), nb::arg("periodic") = false,
           "Install an analytic geometry scene from core's flat encoding (3 ints + 16 reals per "
           "node, 2 ints + 18 reals per instance -- reals[17] is the centre-pinned flag; legacy 17-real "
-          "records are accepted, reading an all-zero centre as 'follows the body'). Geometry is in CELL UNITS on the GLOBAL inner "
-          "grid. The scene is replicated on every rank, so scene-derived geometry needs no "
+          "records are accepted, reading an all-zero centre as 'follows the body'). Coordinates are "
+          "the caller's own PHYSICAL ones when the solver was given an extent -- so ONE scene "
+          "serves flow, dem and voro unchanged -- and CELL UNITS on the global inner grid "
+          "otherwise (cell (i,j,k)'s centre at (i,j,k)). The scene is replicated on every rank, so scene-derived geometry needs no "
           "communication and -- unlike set_exact_crossings -- is NOT single-rank only. "
           "periodic=True treats the scene as min-image periodic over the global grid (one "
           "instance per body, no images); periodic=False leaves images to the caller.")
@@ -563,8 +594,9 @@ static void bind_solver(nb::module_& m, const char* name) {
           nb::arg("instance"), nb::arg("lin_vel") = std::array<double, 3>{0.0, 0.0, 0.0},
           nb::arg("ang_vel") = std::array<double, 3>{0.0, 0.0, 0.0},
           nb::arg("center") = nb::none(),
-          "Rigid-body motion of one scene instance, in CELL UNITS per time (the scene lives on the "
-          "global inner grid). Any nonzero component switches the solver onto the moving-geometry "
+          "Rigid-body motion of one scene instance, in the scene's own coordinates per time (the "
+          "caller's physical length with an extent, CELLS without one; the angular velocity is "
+          "1/time either way). Any nonzero component switches the solver onto the moving-geometry "
           "path: the momentum operator's no-slip datum becomes the local wall velocity and the "
           "cut-cell projection gains the wall's own volume flux. All-zero keeps the static path, "
           "bit for bit. Staggered grid only in v1 (no ghost projection / porous / variable rho).")
@@ -1177,7 +1209,8 @@ static void bind_solver(nb::module_& m, const char* name) {
           "cut-cell IBM closure the TANGENTIAL wall datum stops being no-slip and becomes the "
           "NAVIER condition\n\n"
           "    u_t(wall) - u_body = lambda * d(u_t)/dn\n\n"
-          "with `lambda_cells` = lambda/Delta (cell size 1, so this is the slip length in CELLS). "
+          "with `lambda_cells` the slip length in the caller's own units (CELLS without a physical "
+          "domain, where the cell size is 1); the model needs lambda < one cell. "
           "The wall-NORMAL component is untouched: the wall stays impermeable, with the moving-body "
           "velocity as its datum. 0 (the default) restores the validated no-slip closure "
           "BIT-IDENTICALLY - the closure polynomials are the lambda = 0 members of the same "
@@ -1200,7 +1233,7 @@ static void bind_solver(nb::module_& m, const char* name) {
           "wall_slip_sandwich_cells().")
       .def(
           "wall_slip_length", [](S& s) { return s.wallSlipLength(); },
-          "The Navier slip length in force, in cells (0 = no-slip).")
+          "The Navier slip length in force, in the caller's units (0 = no-slip).")
       .def(
           "wall_slip_sandwich_cells",
           [](S& s) {
@@ -1397,7 +1430,8 @@ static void bind_solver(nb::module_& m, const char* name) {
           "236 cells carry BOTH markers at closest approach (30.0 cells of shared liquid) while "
           "each marker's own volume is conserved to 2.6e-15, and the single-field control merges "
           "them irreversibly (neck colour 0.77 against the blocks' 0.00 after the reversal).\n\n"
-          "'seeds' is a list of (cx, cy, cz, radius) spheres in CELL units, global indices. The "
+          "'seeds' is a list of (cx, cy, cz, radius) spheres in CELL units, global indices -- these "
+          "are GRID coordinates and a physical domain does not convert them. The "
           "colour is the same exact sphere fraction set_vof would take.\n\n"
           "SCOPE at W0: ALL-FLUID (an immersed solid raises — the cut-cell block is rung W12) and "
           "KINEMATIC (advect_vof_blocks(dt); NS coupling is W12). Masters are assigned round robin "
@@ -1713,8 +1747,8 @@ static void bind_solver(nb::module_& m, const char* name) {
           "VoF rung V3: compute the interface curvature from the CURRENT colour field and store it "
           "in the registered cell fields 'kappa' and 'kappa_branch'. Returns THIS RANK's branch "
           "census as a dict.\n\n"
-          "'kappa' is kappa = 2H in units of 1/h (CELL units — multiply by 1/h for physical "
-          "units), POSITIVE for a convex blob of liquid: a sphere of liquid of radius R cells "
+          "'kappa' is the RAW registered field, kappa = 2H in 1/h (cell units); vof_curvature() "
+          "returns the same thing in 1/length. POSITIVE for a convex blob of liquid: a sphere of liquid of radius R cells "
           "reads +2/R, an infinite cylinder +1/R, a plane 0.\n\n"
           "The cascade is Popinet's (2009): a standard height function on 7-cell column sums of C "
           "over the 3x3 transverse patch in the direction of the largest |n| (branch 1), the same "
@@ -1733,7 +1767,8 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "vof_curvature", [](S& s) { return field_out(s, s.getVofCurvature()); },
           "The curvature field's inner region as a Fortran-order (nx,ny,nz) float64 array, in 1/h "
-          "(cell units). Call compute_vof_curvature() first. == get_field('kappa').")
+          "in 1/LENGTH. Call compute_vof_curvature() first; get_field('kappa') is the RAW "
+          "solver-internal field, which is 1/h.")
       .def(
           "vof_curvature_branch", [](S& s) { return field_out(s, s.getVofCurvatureBranch()); },
           "Which cascade branch produced each cell's curvature, as a Fortran-order (nx,ny,nz) "
@@ -1775,8 +1810,9 @@ static void bind_solver(nb::module_& m, const char* name) {
           "zero. Face-interpolating a cell-centred sigma*kappa*grad(C) instead — the obvious way "
           "to reuse the per-cell body force — is not a discrete gradient of anything and leaves "
           "spurious currents of order sigma*kappa/mu that no curvature accuracy removes.\n\n"
-          "UNITS: sigma is in the solver's units, in which the cell size is 1 (like rho, mu and "
-          "set_body_force). SIGN: kappa is positive for a convex blob of liquid and C is the "
+          "UNITS: sigma is a force per unit LENGTH in the caller's own units -- the system rho, mu "
+          "and set_body_force are stated in (so per CELL without a physical domain, where the "
+          "cell size is 1). SIGN: kappa is positive for a convex blob of liquid and C is the "
           "liquid fraction, so the equilibrium pressure is P = sigma*kappa*C + const — the "
           "Young-Laplace overpressure INSIDE the drop.\n\n"
           "Surface tension is EXPLICIT, so step() enforces the Brackbill capillary time step "
@@ -1962,7 +1998,7 @@ static void bind_solver(nb::module_& m, const char* name) {
            "3 cascade footprint, 4-7 the joined marching-tetrahedra sheet).")
       .def(
           "vof_interface_area", [](S& s) { return s.vofInterfaceArea(); },
-          "Total interfacial area of the colour field, in cell units squared (h^2), summed over "
+          "Total interfacial area of the colour field, in CELLS squared (h^2), summed over "
           "the inner region and globally reduced under MPI. Uses the geometry "
           "set_phase_change_area selects, so the number a page quotes and the number the phase "
           "change integrates are the same one. Needs enable_vof; phase change need not be on. "

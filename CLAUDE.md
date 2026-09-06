@@ -169,15 +169,50 @@ instruments (opt-in, single-rank).
 
 ```python
 import peclet.flow
-s = peclet.flow.Solver(nx, ny, nz)
+s = peclet.flow.Solver((nx, ny, nz), extent=(Lx, Ly, Lz))   # the PHYSICAL box; spacing is derived
 s.set_rho(1.0); s.set_mu(0.01); s.set_dt(60.0)   # physical units; fix before geometry
 s.set_body_force(1e-2, 0, 0)                       # force per unit volume
+x, y, z = s.cell_centres()                         # the grid the solver laid inside the box
 s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")  # SDF [x,y,z], <0 inside
 for _ in range(n_steps):
     s.step()
 u = s.get_u()   # 3-D numpy array [x,y,z];  p = s.get_p() is the physical pressure
 ```
 See the "Pressure solver options" table below and `scripts/*_sdflow.py` for the full API.
+
+### Physical domains and units (2026-09-06, `suite/docs/PHYSICAL_UNITS_PLAN.md` Phase 1)
+
+`Solver((nx,ny,nz), extent=(Lx,Ly,Lz), origin=(0,0,0))` gives the solver a **physical domain** and it
+derives its own cell size. Everything the user writes is then in one consistent system of their own
+choosing — `rho`, `mu`, `dt`, body forces, boundary velocities and profiles, `sigma`, the slip length,
+the SDF handed to `set_solid`, the coordinates of `set_scene` and the velocities of
+`set_instance_motion` — and everything that comes back is too: `get_u/v/w`, `get_p`, `get_uf`,
+`vof_curvature()` (1/length), `max_open_divergence()` (1/time), the hydro force and torque,
+`capillary_dt()` and `vof_step_limits()`. Read-only `cells`, `global_cells`, `extent`, `origin`,
+`spacing`, `physical_units`, and `cell_centres()` for the grid an SDF is sampled on. Under MPI the
+constructor still takes THIS RANK's block; pass the global grid as `global_cells` (the numbers
+`init_mpi` gets) and the global box as `extent`/`origin`.
+
+`extent=None` (the default, and every pre-2026-09 script) keeps **cell units** — spacing exactly 1,
+origin 0, every length in cells — and is **bit-identical**: the reference scales are only armed once an
+extent is given, so every conversion factor is literally 1.0 and multiplying a double by 1.0 is the
+identity.
+
+**How it works, and the one trap.** The solver keeps computing on the **unit lattice**: the metric is
+folded into constants at the API boundary (`Solver::UnitScales` in `src/flow_ibm.hpp`, with the full
+derivation as a comment block above it), with reference scales `hRef = min h`, `rhoRef` = the first
+`set_rho` and `tRef` = the first `set_dt` so every stored float operator coefficient stays O(1) whatever
+unit system the caller uses (`docs/SCALING_ISSUES.md` #1). **The RAW field registry —
+`field_view` / `get_field` / `set_field` / `exchange_field` — hands out those INTERNAL arrays**, unlike
+`get_u`/`get_p`, which convert. A driver that writes `force_x` or `drag_beta` directly (the CFD-DEM
+coupling does) must convert; `s.unit_scales` is the dict of factors for exactly that, and its
+`identity` entry is True on the cell-unit path where they are all 1.0.
+
+Phase 1 is **isotropic**: `extent/cells` must give the same spacing on all three axes or the
+constructor raises with the three numbers. Anisotropic cells are Phase 2 of the plan. Gates:
+`tests/kokkos` ctests `units_identity` (accessors, and BITWISE fields at `extent == cells, rho = dt = 1`)
+and `units_scale_invariance` (the same physical problem in two unit systems 1000x apart, sampled SDF and
+analytic scene, agreeing to ~1e-15 relative).
 
 ## Conventions
 

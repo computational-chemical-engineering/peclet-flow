@@ -275,3 +275,15 @@ target_include_directories(test_vof_collocated PRIVATE ${CMAKE_CURRENT_SOURCE_DI
                            ${CMAKE_CURRENT_SOURCE_DIR} ${CORE_INC})
 target_link_libraries(test_vof_collocated PRIVATE Kokkos::kokkos)
 add_test(NAME vof_collocated COMMAND test_vof_collocated)
+
+# PHYSICAL DOMAINS (suite/docs/PHYSICAL_UNITS_PLAN.md Phase 1). Two gates off one binary:
+#  units_identity        — the physical constructor at extent == cells reproduces the cell-unit
+#                          solver (accessors, and BITWISE fields at rho = dt = 1);
+#  units_scale_invariance — the same physical problem in two unit systems 1000x apart agrees to
+#                          1e-13 relative, on a sampled SDF and on an analytic scene.
+add_executable(test_units test_units.cpp)
+target_include_directories(test_units PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CORE_INC})
+target_link_libraries(test_units PRIVATE Kokkos::kokkos)
+add_test(NAME units_identity COMMAND test_units identity)
+add_test(NAME units_scale_invariance COMMAND test_units scale)
+add_test(NAME units_vof_sigma COMMAND test_units vof)
