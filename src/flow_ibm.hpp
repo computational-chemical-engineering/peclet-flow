@@ -8344,13 +8344,14 @@ class Solver {
   // INSTRUMENT: set kappa to a constant over the WHOLE block (inner + ghosts) and mark every cell's
   // branch as a valid estimate, then freeze it. The force (1) is then exactly the discrete gradient
   // of `sigma*kappa*C`, so the projection must annihilate it to round-off from ANY colour field.
+  /// `kappa` is a PHYSICAL curvature, 1/length (the internal field is 1/h; see vof_curvature()).
   void setVofKappaConstant(double kappa) {
     enableVof();
     if (!kappaField_.extent(0)) {
       kappaField_ = addField("kappa");
       kappaBranch_ = addField("kappa_branch");
     }
-    Kokkos::deep_copy(kappaField_, kappa);
+    Kokkos::deep_copy(kappaField_, kappa / u_.curvToPhys());
     Kokkos::deep_copy(kappaBranch_, (double)vof::kCurvHf);
     kappaFrozen_ = true;
   }
@@ -8679,7 +8680,9 @@ class Solver {
   // update divided through by the face density. Swapping the time term to the clipped `rho^c`
   // instead would break the hydrostatic acid test at O(d rho) — measured and recorded in the WO-K
   // findings.
-  void enableVofMomentum(double rhoGas, double rhoLiquid) {
+  /// `rhoGas` / `rhoLiquid` are PHYSICAL densities, the same numbers the rho closure is given.
+  void enableVofMomentum(double rhoGasPhys, double rhoLiquidPhys) {
+    const double rhoGas = rhoGasPhys * u_.rhoToInt(), rhoLiquid = rhoLiquidPhys * u_.rhoToInt();
     if constexpr (Grid::collocated)
       throw std::runtime_error(
           "enable_vof_momentum: momentum-consistent VoF transport is STAGGERED-ONLY (rung V2b); the "
@@ -9179,11 +9182,12 @@ class Solver {
   /// tangent-plane distance and is bitwise inert. This is a PRESCRIBED number, not an estimator:
   /// it exists so the O(h/R) curvature bias of the fit can be measured against a known geometry
   /// before anyone builds a curvature estimator for it.
+  /// `kappa` is a PHYSICAL curvature, 1/length (stored as the internal 1/h).
   void setPhaseChangeFitCurvature(double kappa) {
     requirePhaseChange("set_phase_change_fit_curvature");
-    pcFitKappa_ = kappa;
+    pcFitKappa_ = kappa / u_.curvToPhys();
   }
-  double phaseChangeFitCurvature() const { return pcFitKappa_; }
+  double phaseChangeFitCurvature() const { return pcFitKappa_ * u_.curvToPhys(); }
 
   /// **WO-P3g — the SECOND-ORDER interfacial energy operator, as one package.**
   ///
@@ -10560,8 +10564,29 @@ class Solver {
     cl.outName = target;  // kept so a redistribute can re-resolve the handles (rebindFieldAliases)
     cl.in0Name = in0;
     cl.in1Name = in1;
+    // UNITS. A closure writes a registered field, and registered fields carry the solver's
+    // INTERNAL units. LinearMix is `out = p0 + p1*in0 + p2*in1` with a dimensionless input (a
+    // phase fraction, a normalised scalar), so a target of "rho" or "mu" scales every parameter by
+    // that property's own factor — which is what makes the documented two-phase spelling
+    // set_property_model("rho", "linear", "C", [rho_gas, rho_liquid - rho_gas]) take the caller's
+    // PHYSICAL densities. Exactly the identity in cell units. The non-linear kinds mix
+    // dimensionally different parameters in one array and are NOT converted; they say so.
+    double kp = 1.0;
+    if (target == "rho")
+      kp = u_.rhoToInt();
+    else if (target == "mu")
+      kp = u_.muToInt();
+    if (kp != 1.0 && kind != ClosureKind::LinearMix) {
+      std::fprintf(stderr,
+                   "peclet.flow set_property_model NOTICE: a physical domain is armed, but only "
+                   "the 'linear' closure on 'rho'/'mu' converts its parameters. This closure's "
+                   "parameters are in the solver's INTERNAL units (see the `unit_scales` "
+                   "property); target '%s'.\n",
+                   target.c_str());
+      kp = 1.0;
+    }
     for (int k = 0; k < 4 && k < (int)params.size(); ++k)
-      cl.p[k] = params[k];
+      cl.p[k] = params[k] * kp;
     closures_.push_back(cl);
     if (target == "mu")  // a closure driving mu turns on variable viscosity
       setPropertyMode(true, harmonicMu_);
