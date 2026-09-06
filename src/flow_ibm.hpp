@@ -150,7 +150,41 @@ class Solver {
     double sigmaToInt() const { return tRef * tRef / (rhoRef * hRef * hRef * hRef); }
     double curvToPhys() const { return 1.0 / hRef; }
     double divToPhys() const { return 1.0 / tRef; }
+    double angVelToInt() const { return tRef; }  // omega' = omega*tRef (v = omega x r on both sides)
+    // A TOTAL force F = int f dV: f' = f*tRef^2/(rhoRef*hRef) and dV' = dV/hRef^3, so
+    // F' = F*tRef^2/(rhoRef*hRef^4); a torque carries one more length.
+    double forceTotalToPhys() const {
+      const double h2 = hRef * hRef;
+      return rhoRef * h2 * h2 / (tRef * tRef);
+    }
+    double torqueToPhys() const { return forceTotalToPhys() * hRef; }
   };
+
+  /// The map between the solver's INDEX coordinates and the coordinate system the analytic scene
+  /// is written in.  A scene is in the caller's PHYSICAL coordinates once a domain is armed, and
+  /// in the historical cell coordinates otherwise (cell centre (i,j,k) at exactly (i,j,k)) — hence
+  /// the half-cell in `a`.  Every field is exactly the identity in cell units, and the struct is
+  /// captured BY VALUE into device kernels (no Solver state on device).
+  struct SceneMap {
+    double a[3] = {0.0, 0.0, 0.0};        ///< scene_a = a[a] + b[a]*xi_a  (xi = global index)
+    double b[3] = {1.0, 1.0, 1.0};
+    double dToInt = 1.0;                  ///< scene signed distance -> index distance (1/hRef)
+    double velToInt[3] = {1.0, 1.0, 1.0}; ///< scene velocity -> index velocity
+    double angToInt = 1.0;                ///< scene angular velocity -> index (omega*tRef)
+  };
+  SceneMap sceneMap() const {
+    SceneMap m;
+    if (!u_.physical)
+      return m;
+    for (int a = 0; a < 3; ++a) {
+      m.a[a] = u_.org[a] + 0.5 * u_.h[a];
+      m.b[a] = u_.h[a];
+      m.velToInt[a] = u_.velToInt(a);
+    }
+    m.dToInt = u_.lenToInt();
+    m.angToInt = u_.angVelToInt();
+    return m;
+  }
 
   /// Physical-domain constructor (plan §3.3).  `nx,ny,nz` is this rank's block exactly as in the
   /// cell-unit constructor; `extent`/`origin` describe the GLOBAL domain and `globalCells` the
@@ -1189,10 +1223,21 @@ class Solver {
       GZ = gnz_;
     }
 #endif
-    g::PeriodicBox<double> box{GX, GY, GZ, periodic};
+    // The scene is in the caller's PHYSICAL coordinates when a domain is armed (so one scene
+    // serves flow, dem and voro unchanged), and in the historical cell coordinates otherwise.
+    peclet::core::Vec3<double> so{0, 0, 0}, se{GX, GY, GZ};
+    if (u_.physical) {
+      if (u_.cells[0] != (long)GX || u_.cells[1] != (long)GY || u_.cells[2] != (long)GZ)
+        throw std::runtime_error(
+            "set_scene: the physical domain was armed for a different global grid than the solver "
+            "has (pass global_cells = the grid init_mpi gets)");
+      so = peclet::core::Vec3<double>{u_.org[0], u_.org[1], u_.org[2]};
+      se = peclet::core::Vec3<double>{u_.ext[0], u_.ext[1], u_.ext[2]};
+    }
+    g::PeriodicBox<double> box{se.x, se.y, se.z, periodic};
     sceneB_ = std::make_shared<g::SceneBuilder<double>>(std::move(b));
-    sceneOrigin_ = peclet::core::Vec3<double>{0, 0, 0};
-    sceneExtent_ = peclet::core::Vec3<double>{GX, GY, GZ};
+    sceneOrigin_ = so;
+    sceneExtent_ = se;
     scenePeriodic_ = periodic;
     buildSceneQuery();
     hasScene_ = true;
@@ -1458,19 +1503,21 @@ class Solver {
     const auto q = sceneQ_->view();
     const int nx = nx_, ny = ny_, nz = nz_;
     const C3 og = og_;
+    const SceneMap sm = sceneMap();
     CCExec space;
     Kokkos::parallel_for(
         "peclet::flow::scene_sample",
         Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
         KOKKOS_LAMBDA(int x, int y, int z) {
-          const peclet::core::Vec3<double> p{(double)(x + og.x), (double)(y + og.y),
-                                            (double)(z + og.z)};
+          const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * (double)(x + og.x),
+                                             sm.a[1] + sm.b[1] * (double)(y + og.y),
+                                             sm.a[2] + sm.b[2] * (double)(z + og.z)};
           // evalOwner is ONE traversal returning bitwise eval's value plus the argmin instance, so
           // carrying the ownership field costs nothing over the sample it rides on.
           int oi = -1;
           const std::size_t idx =
               (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny;
-          din(idx) = q.evalOwner(p, oi);
+          din(idx) = q.evalOwner(p, oi) * sm.dToInt;
           own(idx) = oi;
         });
     space.fence();
@@ -1501,8 +1548,9 @@ class Solver {
             "peclet::flow::scene_image_overlap",
             Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
             KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
-              const peclet::core::Vec3<double> p{(double)(x + og.x), (double)(y + og.y),
-                                                (double)(z + og.z)};
+              const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * (double)(x + og.x),
+                                                 sm.a[1] + sm.b[1] * (double)(y + og.y),
+                                                 sm.a[2] + sm.b[2] * (double)(z + og.z)};
               int oi = -1;
               const std::size_t idx =
                   (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny;
@@ -1660,6 +1708,7 @@ class Solver {
     const auto q = sceneQ_->view();
     const int nx = nx_, ny = ny_, nz = nz_;
     const C3 og = og_;
+    const SceneMap sm = sceneMap();
     CCExec space;
     for (int c = 0; c < 3; ++c) {
       // Component c's sample placement comes from the GRID POLICY: staggered puts it on the low
@@ -1677,10 +1726,13 @@ class Solver {
             "peclet::flow::scene_crossings",
             Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
             KOKKOS_LAMBDA(int x, int y, int z) {
-              const double px = (double)(x + og.x) + ox, py = (double)(y + og.y) + oy,
-                           pz = (double)(z + og.z) + oz;
-              const double dx = aa == 0 ? 1.0 : 0.0, dy = aa == 1 ? 1.0 : 0.0,
-                           dz = aa == 2 ? 1.0 : 0.0;
+              // The segment is ONE CELL long along `aa`; `s` stays the dimensionless fraction in
+              // (0,1) the consumer expects, so only the endpoints and the step become physical.
+              const double px = sm.a[0] + sm.b[0] * ((double)(x + og.x) + ox),
+                           py = sm.a[1] + sm.b[1] * ((double)(y + og.y) + oy),
+                           pz = sm.a[2] + sm.b[2] * ((double)(z + og.z) + oz);
+              const double dx = aa == 0 ? sm.b[0] : 0.0, dy = aa == 1 ? sm.b[1] : 0.0,
+                           dz = aa == 2 ? sm.b[2] : 0.0;
               const auto f = [&](double s) {
                 return q.eval(peclet::core::Vec3<double>{px + s * dx, py + s * dy, pz + s * dz});
               };
@@ -1720,7 +1772,19 @@ class Solver {
     CCField din("peclet::flow::sdfInner_d", n);
     using HostConst = Kokkos::View<const double*, Kokkos::HostSpace,
                                    Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
-    Kokkos::deep_copy(din, HostConst(sdfInner.data(), n));
+    // The caller's SDF is a PHYSICAL signed distance sampled at cellCentres(); the solver's
+    // geometry lives on the unit lattice, where a distance is measured in cells. (Isotropic in
+    // Phase 1: one hRef divides all three axes. Anisotropic cells need the metric of Phase 2,
+    // because the level set's gradient then stops being the index-space normal.)
+    const double k = u_.lenToInt();  // exactly 1.0 in cell units
+    if (k != 1.0) {
+      std::vector<double> scaled(n);
+      for (std::size_t i = 0; i < n; ++i)
+        scaled[i] = sdfInner[i] * k;
+      Kokkos::deep_copy(din, HostConst(scaled.data(), n));
+    } else {
+      Kokkos::deep_copy(din, HostConst(sdfInner.data(), n));
+    }
     setSolidDevice(din, cutcellPressure);
   }
 
@@ -3762,6 +3826,7 @@ class Solver {
     const auto mv = motionView();
     CCConst sd = CCConst(sdf_);
     const C3 e = e_, og = og_;
+    const SceneMap sm = sceneMap();
     CCExec space;
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     // rung 2: component c's own staggered point, storing component c
@@ -3780,11 +3845,19 @@ class Solver {
                 0.5 * (ccSampleExt(sd, e, sx + 1, sy, sz) - ccSampleExt(sd, e, sx - 1, sy, sz)),
                 0.5 * (ccSampleExt(sd, e, sx, sy + 1, sz) - ccSampleExt(sd, e, sx, sy - 1, sz)),
                 0.5 * (ccSampleExt(sd, e, sx, sy, sz + 1) - ccSampleExt(sd, e, sx, sy, sz - 1))};
-            const peclet::core::Vec3<double> p{sx - G + og.x, sy - G + og.y, sz - G + og.z};
-            const peclet::core::Vec3<double> w = peclet::core::geom::wallPoint(p, s0, grad);
+            // wallPoint works on the INDEX level set (sd/grad are index-space); map the point and
+            // the wall foot into the scene's coordinates for the instance query, and the scene's
+            // physical wall velocity back into the index velocity the momentum datum carries.
+            const peclet::core::Vec3<double> pi{sx - G + og.x, sy - G + og.y, sz - G + og.z};
+            const peclet::core::Vec3<double> wi = peclet::core::geom::wallPoint(pi, s0, grad);
+            const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * pi.x, sm.a[1] + sm.b[1] * pi.y,
+                                               sm.a[2] + sm.b[2] * pi.z};
+            const peclet::core::Vec3<double> w{sm.a[0] + sm.b[0] * wi.x, sm.a[1] + sm.b[1] * wi.y,
+                                               sm.a[2] + sm.b[2] * wi.z};
             const peclet::core::Vec3<double> v =
                 peclet::core::geom::instanceVelocity(mv, q.owner(p), w, q.box);
-            out(i) = cc == 0 ? v.x : (cc == 1 ? v.y : v.z);
+            out(i) = cc == 0 ? v.x * sm.velToInt[0]
+                             : (cc == 1 ? v.y * sm.velToInt[1] : v.z * sm.velToInt[2]);
           });
     }
     // rung 3: the whole wall velocity at cell centres (the wall-flux divergence source)
@@ -3800,13 +3873,17 @@ class Solver {
                 0.5 * (ccSampleExt(sd, e, sx + 1, sy, sz) - ccSampleExt(sd, e, sx - 1, sy, sz)),
                 0.5 * (ccSampleExt(sd, e, sx, sy + 1, sz) - ccSampleExt(sd, e, sx, sy - 1, sz)),
                 0.5 * (ccSampleExt(sd, e, sx, sy, sz + 1) - ccSampleExt(sd, e, sx, sy, sz - 1))};
-            const peclet::core::Vec3<double> p{sx - G + og.x, sy - G + og.y, sz - G + og.z};
-            const peclet::core::Vec3<double> w = peclet::core::geom::wallPoint(p, s0, grad);
+            const peclet::core::Vec3<double> pi{sx - G + og.x, sy - G + og.y, sz - G + og.z};
+            const peclet::core::Vec3<double> wi = peclet::core::geom::wallPoint(pi, s0, grad);
+            const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * pi.x, sm.a[1] + sm.b[1] * pi.y,
+                                               sm.a[2] + sm.b[2] * pi.z};
+            const peclet::core::Vec3<double> w{sm.a[0] + sm.b[0] * wi.x, sm.a[1] + sm.b[1] * wi.y,
+                                               sm.a[2] + sm.b[2] * wi.z};
             const peclet::core::Vec3<double> v =
                 peclet::core::geom::instanceVelocity(mv, q.owner(p), w, q.box);
-            ux(i) = v.x;
-            uy(i) = v.y;
-            uz(i) = v.z;
+            ux(i) = v.x * sm.velToInt[0];
+            uy(i) = v.y * sm.velToInt[1];
+            uz(i) = v.z * sm.velToInt[2];
           });
     }
     space.fence();
@@ -3899,6 +3976,20 @@ class Solver {
   /// the traction is evaluated from a cell-centred pressure and a central-differenced velocity
   /// gradient whose stencil reaches into solid cells near the wall. Measure it (the Zick-Homsy
   /// self-consistency gate does) rather than assuming a tolerance.
+  /// Convert an interleaved result of 3*nInst blocks (force, TORQUE, then further force blocks —
+  /// the layout both hydro getters use) from the solver's index units to the caller's. Exactly the
+  /// identity in cell units.
+  void scaleForceTorque(std::vector<double>& out, std::size_t m) const {
+    const double kF = u_.forceTotalToPhys(), kT = u_.torqueToPhys();
+    if (kF == 1.0 && kT == 1.0)
+      return;
+    for (std::size_t b = 0; m > 0 && b * m < out.size(); ++b) {
+      const double k = (b == 1) ? kT : kF;
+      for (std::size_t i = b * m; i < (b + 1) * m && i < out.size(); ++i)
+        out[i] *= k;
+    }
+  }
+
   std::vector<double> hydroForceTorque() {
     std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 12, 0.0);
     if (!hasScene_ || nInst_ <= 0 || cutOwner_.extent(0) != (std::size_t)nx_ * ny_ * nz_)
@@ -3926,6 +4017,7 @@ class Solver {
     auto own = cutOwner_;
     auto cen = instCenD_;
     const auto box = sceneQ_->view().box;
+    const SceneMap sm = sceneMap();
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
         "peclet::flow::hydro_force", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
@@ -3986,11 +4078,15 @@ class Solver {
             dFv[a] = -t;
             dF[a] = dFp[a] + dFv[a];
           }
-          const peclet::core::Vec3<double> r = peclet::core::geom::minImage(
-              peclet::core::Vec3<double>{(double)(x - G + og.x) - cen[3 * oi + 0],
-                                         (double)(y - G + og.y) - cen[3 * oi + 1],
-                                         (double)(z - G + og.z) - cen[3 * oi + 2]},
+          // The instance centre and the min-image box live in the SCENE's coordinates; dF is an
+          // index-unit force, so the lever arm has to come back to index units (a uniform scale, so
+          // min-imaging in either system is the same shortening).
+          const peclet::core::Vec3<double> rp = peclet::core::geom::minImage(
+              peclet::core::Vec3<double>{sm.a[0] + sm.b[0] * (double)(x - G + og.x) - cen[3 * oi + 0],
+                                         sm.a[1] + sm.b[1] * (double)(y - G + og.y) - cen[3 * oi + 1],
+                                         sm.a[2] + sm.b[2] * (double)(z - G + og.z) - cen[3 * oi + 2]},
               box);
+          const peclet::core::Vec3<double> r{rp.x * sm.dToInt, rp.y * sm.dToInt, rp.z * sm.dToInt};
           for (int a = 0; a < 3; ++a) {
             Kokkos::atomic_add(&Fd(3 * oi + a), dF[a]);
             Kokkos::atomic_add(&Pd(3 * oi + a), dFp[a]);
@@ -4006,6 +4102,8 @@ class Solver {
     Kokkos::deep_copy(HostV(out.data() + m, m), Td);
     Kokkos::deep_copy(HostV(out.data() + 2 * m, m), Pd);
     Kokkos::deep_copy(HostV(out.data() + 3 * m, m), Vd);
+    scaleForceTorque(out, m);
+    scaleForceTorque(out, m);
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       // Instances are REPLICATED, so each rank integrates only the wall cells inside its own
@@ -4133,6 +4231,7 @@ class Solver {
     const auto q = sceneQ_->view();
     auto cen = instCenD_;
     const auto box = q.box;
+    const SceneMap sm = sceneMap();
     const bool hasFb = hasCellForce_;
     for (int c = 0; c < 3; ++c) {
       CCConst un = CCConst(old_[c]), uc = CCConst(C[c].u), us = CCConst(uStar_[c]),
@@ -4161,18 +4260,22 @@ class Solver {
               if (mk(jm) <= 0.5)
                 R -= mu * (us(jm) - us(i));
             }
-            const peclet::core::Vec3<double> p{(double)(x - G + og.x) + offx,
-                                              (double)(y - G + og.y) + offy,
-                                              (double)(z - G + og.z) + offz};
+            // The scene (owner query, instance centres, min-image box) is in the CALLER's
+            // coordinates; F is an index-unit force, so the lever arm comes back to index units.
+            const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * ((double)(x - G + og.x) + offx),
+                                               sm.a[1] + sm.b[1] * ((double)(y - G + og.y) + offy),
+                                               sm.a[2] + sm.b[2] * ((double)(z - G + og.z) + offz)};
             const int oi = q.owner(p);
             if (oi < 0)
               return;
             const double F = -R;  // force ON the body = minus the wall force on the fluid
             Kokkos::atomic_add(&Fd(3 * oi + cc), F);
-            const peclet::core::Vec3<double> r = peclet::core::geom::minImage(
+            const peclet::core::Vec3<double> rq = peclet::core::geom::minImage(
                 peclet::core::Vec3<double>{p.x - cen(3 * oi + 0), p.y - cen(3 * oi + 1),
                                            p.z - cen(3 * oi + 2)},
                 box);
+            const peclet::core::Vec3<double> r{rq.x * sm.dToInt, rq.y * sm.dToInt,
+                                               rq.z * sm.dToInt};
             // torque of the scalar force F e_c at lever r: r x (F e_c)
             if (cc == 0) {
               Kokkos::atomic_add(&Td(3 * oi + 1), r.z * F);
@@ -4209,22 +4312,28 @@ class Solver {
             const double az = ozv(i + sz) - ozv(i);
             if (ax == 0.0 && ay == 0.0 && az == 0.0)
               return;  // not a cut cell
-            const peclet::core::Vec3<double> p{(double)(x - G + og.x), (double)(y - G + og.y),
-                                              (double)(z - G + og.z)};
+            const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * (double)(x - G + og.x),
+                                               sm.a[1] + sm.b[1] * (double)(y - G + og.y),
+                                               sm.a[2] + sm.b[2] * (double)(z - G + og.z)};
             const int oi = q.owner(p);
             if (oi < 0)
               return;
-            const double wx = ang(3 * oi + 0), wy = ang(3 * oi + 1), wz = ang(3 * oi + 2);
+            // The scene's angular velocity is 1/time in the caller's units; the index one is
+            // omega*tRef (v = omega x r holds on both sides of the map).
+            const double wx = ang(3 * oi + 0) * sm.angToInt, wy = ang(3 * oi + 1) * sm.angToInt,
+                         wz = ang(3 * oi + 2) * sm.angToInt;
             if (wx == 0.0 && wy == 0.0 && wz == 0.0)
               return;
             // v = (n dA) x Omega  -- the missing traction integrated over this cell's wall patch
             const double vx = ay * wz - az * wy;
             const double vy = az * wx - ax * wz;
             const double vz = ax * wy - ay * wx;
-            const peclet::core::Vec3<double> r = peclet::core::geom::minImage(
+            const peclet::core::Vec3<double> rq = peclet::core::geom::minImage(
                 peclet::core::Vec3<double>{p.x - cen(3 * oi + 0), p.y - cen(3 * oi + 1),
                                            p.z - cen(3 * oi + 2)},
                 box);
+            const peclet::core::Vec3<double> r{rq.x * sm.dToInt, rq.y * sm.dToInt,
+                                               rq.z * sm.dToInt};
             Kokkos::atomic_add(&Td(3 * oi + 0), mu * (r.y * vz - r.z * vy));
             Kokkos::atomic_add(&Td(3 * oi + 1), mu * (r.z * vx - r.x * vz));
             Kokkos::atomic_add(&Td(3 * oi + 2), mu * (r.x * vy - r.y * vx));
@@ -4251,11 +4360,12 @@ class Solver {
               const long j = i + strd;                       // the +s neighbour: visit once
               if (mk(i) > 0.5 || mk(j) > 0.5)
                 return;                                      // wall faces stay in the wall force
-              const peclet::core::Vec3<double> pa{(double)(x - G + og.x) + offx,
-                                                 (double)(y - G + og.y) + offy,
-                                                 (double)(z - G + og.z) + offz};
-              peclet::core::Vec3<double> pb = pa;
-              (cc == 0 ? pb.x : cc == 1 ? pb.y : pb.z) += 1.0;
+              const peclet::core::Vec3<double> pa{
+                  sm.a[0] + sm.b[0] * ((double)(x - G + og.x) + offx),
+                  sm.a[1] + sm.b[1] * ((double)(y - G + og.y) + offy),
+                  sm.a[2] + sm.b[2] * ((double)(z - G + og.z) + offz)};
+              peclet::core::Vec3<double> pb = pa;  // one cell along cc, in scene coordinates
+              (cc == 0 ? pb.x : cc == 1 ? pb.y : pb.z) += sm.b[cc];
               const int oa = q.owner(pa), ob = q.owner(pb);
               if (oa == ob || oa < 0 || ob < 0)
                 return;
@@ -4269,14 +4379,18 @@ class Solver {
               const double flux = pf(i);
               Kokkos::atomic_add(&Fd(3 * oa + cc), -flux);
               Kokkos::atomic_add(&Fd(3 * ob + cc), +flux);
-              const peclet::core::Vec3<double> ra = peclet::core::geom::minImage(
+              const peclet::core::Vec3<double> raq = peclet::core::geom::minImage(
                   peclet::core::Vec3<double>{pa.x - cen(3 * oa + 0), pa.y - cen(3 * oa + 1),
                                              pa.z - cen(3 * oa + 2)},
                   box);
-              const peclet::core::Vec3<double> rb = peclet::core::geom::minImage(
+              const peclet::core::Vec3<double> rbq = peclet::core::geom::minImage(
                   peclet::core::Vec3<double>{pa.x - cen(3 * ob + 0), pa.y - cen(3 * ob + 1),
                                              pa.z - cen(3 * ob + 2)},
                   box);
+              const peclet::core::Vec3<double> ra{raq.x * sm.dToInt, raq.y * sm.dToInt,
+                                                  raq.z * sm.dToInt};
+              const peclet::core::Vec3<double> rb{rbq.x * sm.dToInt, rbq.y * sm.dToInt,
+                                                  rbq.z * sm.dToInt};
               if (cc == 0) {
                 Kokkos::atomic_add(&Td(3 * oa + 1), ra.z * -flux);
                 Kokkos::atomic_add(&Td(3 * oa + 2), -ra.y * -flux);
@@ -4300,6 +4414,7 @@ class Solver {
     using HostV = Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
     Kokkos::deep_copy(HostV(out.data(), m), Fd);
     Kokkos::deep_copy(HostV(out.data() + m, m), Td);
+    scaleForceTorque(out, m);
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       std::vector<double> g(out.size(), 0.0);
