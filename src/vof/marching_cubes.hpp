@@ -200,17 +200,26 @@ KOKKOS_INLINE_FUNCTION double mcEdgeT(const McVertex& a, const McVertex& b, cons
 
 /// Twice the area of the triangle `(p0, p1, p2)` — i.e. `|(p1-p0) x (p2-p0)|`.
 KOKKOS_INLINE_FUNCTION double mcTwiceArea(const double p0[3], const double p1[3],
-                                          const double p2[3]) {
-  const double ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
-  const double vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+                                          const double p2[3], const VofMetric& g) {
+  // Phase 3: the sheet is CUT in index space (every vertex sits on a lattice edge, which is what
+  // makes it watertight) and MEASURED in physical space — the two edge vectors are mapped through
+  // H before the cross product. `g.h = {1,1,1}` multiplies each by 1.0: today's numbers.
+  const double ux = (p1[0] - p0[0]) * g.h[0], uy = (p1[1] - p0[1]) * g.h[1],
+               uz = (p1[2] - p0[2]) * g.h[2];
+  const double vx = (p2[0] - p0[0]) * g.h[0], vy = (p2[1] - p0[1]) * g.h[1],
+               vz = (p2[2] - p0[2]) * g.h[2];
   const double cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
   return Kokkos::sqrt(cx * cx + cy * cy + cz * cz);
 }
 
 /// Area of a PLANAR polygon of `n` vertices, `1/2 |sum p_i x p_{i+1}|`.
-KOKKOS_INLINE_FUNCTION double mcPolygonArea(const double p[8][3], int n) {
+KOKKOS_INLINE_FUNCTION double mcPolygonArea(const double p[8][3], int n, const VofMetric& g) {
   if (n < 3)
     return 0.0;
+  // As `mcTwiceArea`: clipped in index space, measured in physical space. The shoelace vector of
+  // the mapped polygon is `det(H) H^-1` applied to the index one (the cofactor map), which for a
+  // diagonal H is the per-component product below — and exactly the identity at g.h = {1,1,1}.
+  const double c0 = g.h[1] * g.h[2], c1 = g.h[2] * g.h[0], c2 = g.h[0] * g.h[1];
   double sx = 0.0, sy = 0.0, sz = 0.0;
   for (int i = 0; i < n; ++i) {
     const int j = (i + 1 == n) ? 0 : i + 1;
@@ -218,6 +227,9 @@ KOKKOS_INLINE_FUNCTION double mcPolygonArea(const double p[8][3], int n) {
     sy += p[i][2] * p[j][0] - p[i][0] * p[j][2];
     sz += p[i][0] * p[j][1] - p[i][1] * p[j][0];
   }
+  sx *= c0;
+  sy *= c1;
+  sz *= c2;
   return 0.5 * Kokkos::sqrt(sx * sx + sy * sy + sz * sz);
 }
 
@@ -256,7 +268,7 @@ KOKKOS_INLINE_FUNCTION int mcClipHalf(double p[8][3], int n, int axis, double c,
 
 /// The area of the part of one triangle inside corner `k`'s octant of the dual cube.
 KOKKOS_INLINE_FUNCTION double mcClipToCorner(const double p0[3], const double p1[3],
-                                             const double p2[3], int k) {
+                                             const double p2[3], int k, const VofMetric& g) {
   double poly[8][3];
   for (int d = 0; d < 3; ++d) {
     poly[0][d] = p0[d];
@@ -266,7 +278,7 @@ KOKKOS_INLINE_FUNCTION double mcClipToCorner(const double p0[3], const double p1
   int n = 3;
   for (int d = 0; d < 3 && n >= 3; ++d)
     n = mcClipHalf(poly, n, d, 0.5, ((k >> d) & 1) != 0);
-  return mcPolygonArea(poly, n);
+  return mcPolygonArea(poly, n, g);
 }
 
 /// The corner in `mask` nearest the point `p`; the lowest index breaks a tie. `mask == 0` returns
@@ -316,8 +328,8 @@ KOKKOS_INLINE_FUNCTION int mcRetarget(int k, int mask) {
 /// 8 corners both rules return the triangle's own area exactly — including the retargeted pieces,
 /// which are moved between corners and never lost.
 KOKKOS_INLINE_FUNCTION double mcTriangleToCorner(const double p0[3], const double p1[3],
-                                                 const double p2[3], int lc, int deposit,
-                                                 int mask) {
+                                                 const double p2[3], int lc, int deposit, int mask,
+                                                 const VofMetric& g) {
   if (deposit == kMcDepositCentroid) {
     double ctr[3];
     for (int d = 0; d < 3; ++d)
@@ -331,15 +343,15 @@ KOKKOS_INLINE_FUNCTION double mcTriangleToCorner(const double p0[3], const doubl
       if (t >= 0)
         corner = t;
     }
-    return (corner == lc) ? 0.5 * mcTwiceArea(p0, p1, p2) : 0.0;
+    return (corner == lc) ? 0.5 * mcTwiceArea(p0, p1, p2, g) : 0.0;
   }
   double acc = 0.0;
   if (mask == 0 || ((mask >> lc) & 1))
-    acc += mcClipToCorner(p0, p1, p2, lc);
+    acc += mcClipToCorner(p0, p1, p2, lc, g);
   if (mask != 0 && mask != 255)
     for (int k = 0; k < 8; ++k)
       if (!((mask >> k) & 1) && mcRetarget(k, mask) == lc)
-        acc += mcClipToCorner(p0, p1, p2, k);
+        acc += mcClipToCorner(p0, p1, p2, k, g);
   return acc;
 }
 
@@ -349,7 +361,8 @@ KOKKOS_INLINE_FUNCTION double mcTriangleToCorner(const double p0[3], const doubl
 /// corner split) or a quad (2-vs-2, emitted as two triangles). Every vertex sits on a tet edge and
 /// therefore on a cube edge, a face diagonal or the body diagonal — all of which are shared with
 /// the neighbouring cubes in the same orientation, so the sheet is closed.
-KOKKOS_INLINE_FUNCTION double mcCubeCornerArea(const McVertex v[8], int lc, int src, int deposit) {
+KOKKOS_INLINE_FUNCTION double mcCubeCornerArea(const McVertex v[8], int lc, int src, int deposit,
+                                               const VofMetric& g) {
   // Kuhn's decomposition along the body diagonal 0 -> 7. Corner index = x + 2y + 4z.
   const int TET[6][4] = {{0, 1, 3, 7}, {0, 1, 5, 7}, {0, 2, 3, 7},
                          {0, 2, 6, 7}, {0, 4, 5, 7}, {0, 4, 6, 7}};
@@ -400,7 +413,7 @@ KOKKOS_INLINE_FUNCTION double mcCubeCornerArea(const McVertex v[8], int lc, int 
           tri[ntri][d] = pa[d] + s * dv[d];
         ++ntri;
       }
-      acc += mcTriangleToCorner(tri[0], tri[1], tri[2], lc, deposit, mask);
+      acc += mcTriangleToCorner(tri[0], tri[1], tri[2], lc, deposit, mask, g);
     } else {
       // 2 vs 2: the quad through the four edges that join the two pairs, in cyclic order
       int neg[2], pos[2], nn = 0, np = 0;
@@ -417,11 +430,16 @@ KOKKOS_INLINE_FUNCTION double mcCubeCornerArea(const McVertex v[8], int lc, int 
         for (int d = 0; d < 3; ++d)
           tri[q][d] = pa[d] + s * dv[d];
       }
-      acc += mcTriangleToCorner(tri[0], tri[1], tri[2], lc, deposit, mask);
-      acc += mcTriangleToCorner(tri[0], tri[2], tri[3], lc, deposit, mask);
+      acc += mcTriangleToCorner(tri[0], tri[1], tri[2], lc, deposit, mask, g);
+      acc += mcTriangleToCorner(tri[0], tri[2], tri[3], lc, deposit, mask, g);
     }
   }
   return acc;
+}
+
+/// Unit-metric overload (isotropic cells) — the pre-Phase-3 signature, unchanged arithmetic.
+KOKKOS_INLINE_FUNCTION double mcCubeCornerArea(const McVertex v[8], int lc, int src, int deposit) {
+  return mcCubeCornerArea(v, lc, src, deposit, VofMetric{});
 }
 
 }  // namespace peclet::flow::vof

@@ -73,10 +73,16 @@ struct ScalarField {
 // at the interface).
 //
 // `mask` is the per-cell Dirichlet mask (all zeros if there is none).
+// **Phase 3 (`flow/doc/anisotropic_vof.md` §7, V5.4).** `wx/wy/wz` are the per-axis Laplacian
+// weights `1/h_a'^2` — the same `w_a` Phase 2 put on `scalarBuildDiffusionOpen` above, on the
+// momentum fold's `beta_b` and on the pressure operator. A face normal to axis `a` carries
+// `k_f w_a o_f` and the diagonal is the sum of the six, exactly as before. Every `w_a` is EXACTLY
+// 1.0 in cell units and on the armed isotropic path, and `x * 1.0 == x` in IEEE-754, so the
+// isotropic operator is bit-identical.
 inline void scalarBuildDiffusionVarK(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN,
                                      CCField AB, CCField AT, CCConst ox, CCConst oy, CCConst oz,
                                      CCConst kc, CCConst rcp, CCConst mask, double idt, C3 e,
-                                     int g) {
+                                     int g, double wx = 1.0, double wy = 1.0, double wz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -86,15 +92,18 @@ inline void scalarBuildDiffusionVarK(CCField AC, CCField AW, CCField AE, CCField
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
         const double ki = kc(i);
         const bool mi = mask(i) > 0.5;
-        const double tw = vof::pcFaceConductivity(ki, kc(i - sx), mi, mask(i - sx) > 0.5) * ox(i);
-        const double te = vof::pcFaceConductivity(ki, kc(i + sx), mi, mask(i + sx) > 0.5) *
-                          ox(i + sx);
-        const double ts = vof::pcFaceConductivity(ki, kc(i - sy), mi, mask(i - sy) > 0.5) * oy(i);
-        const double tn = vof::pcFaceConductivity(ki, kc(i + sy), mi, mask(i + sy) > 0.5) *
-                          oy(i + sy);
-        const double tb = vof::pcFaceConductivity(ki, kc(i - sz), mi, mask(i - sz) > 0.5) * oz(i);
-        const double tt = vof::pcFaceConductivity(ki, kc(i + sz), mi, mask(i + sz) > 0.5) *
-                          oz(i + sz);
+        const double tw =
+            vof::pcFaceConductivity(ki, kc(i - sx), mi, mask(i - sx) > 0.5) * wx * ox(i);
+        const double te =
+            vof::pcFaceConductivity(ki, kc(i + sx), mi, mask(i + sx) > 0.5) * wx * ox(i + sx);
+        const double ts =
+            vof::pcFaceConductivity(ki, kc(i - sy), mi, mask(i - sy) > 0.5) * wy * oy(i);
+        const double tn =
+            vof::pcFaceConductivity(ki, kc(i + sy), mi, mask(i + sy) > 0.5) * wy * oy(i + sy);
+        const double tb =
+            vof::pcFaceConductivity(ki, kc(i - sz), mi, mask(i - sz) > 0.5) * wz * oz(i);
+        const double tt =
+            vof::pcFaceConductivity(ki, kc(i + sz), mi, mask(i + sz) > 0.5) * wz * oz(i + sz);
         AW(i) = -tw;
         AE(i) = -te;
         AS(i) = -ts;
@@ -178,7 +187,9 @@ inline void scalarMaskGfm(CCField AC, CCField AW, CCField AE, CCField AS, CCFiel
                           CCField AT, CCField gfmB, CCConst ox, CCConst oy, CCConst oz,
                           CCConst mask, CCConst tgam, CCConst gnx, CCConst gny, CCConst gnz,
                           CCConst gphi, CCConst kc, double Dconst, bool useK, double thMin,
-                          double thMax, C3 e, int g) {
+                          double thMax, C3 e, int g, double wx = 1.0, double wy = 1.0,
+                          double wz = 1.0, vof::VofMetric gm = vof::VofMetric{}) {
+  const double wa[3] = {wx, wy, wz};
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -201,9 +212,12 @@ inline void scalarMaskGfm(CCField AC, CCField AW, CCField AE, CCField AS, CCFiel
             const double of = (d == 0)   ? ((sgn < 0) ? ox(i) : ox(i + sx))
                               : (d == 1) ? ((sgn < 0) ? oy(i) : oy(i + sy))
                                          : ((sgn < 0) ? oz(i) : oz(i + sz));
-            const double nd = (d == 0) ? gnx(j) : (d == 1) ? gny(j) : gnz(j);
-            const double th = vof::pcGfmTheta(gphi(j), nd, (double)sgn, thMin, thMax);
-            const double coef = kd * of / th;
+            // V5.3/V5.4: the axis pullback of the PHYSICAL (plane distance, normal) pair, and
+            // this axis's Laplacian weight. Both are the identity at equal spacings.
+            const double nvec[3] = {gnx(j), gny(j), gnz(j)};
+            const double th = vof::pcGfmThetaKAniso(gphi(j), nvec, d, (double)sgn, 0.0, thMin,
+                                                    thMax, gm);
+            const double coef = kd * wa[d] * of / th;
             // replace this face's interior coupling (band = -k_f of, AC += k_f of) by the Dirichlet
             // one, without double counting: AC += coef + band, band = 0.
             CCField band = (d == 0)   ? ((sgn < 0) ? AW : AE)
@@ -239,7 +253,10 @@ inline void scalarMaskGfm2(CCField AC, CCField AW, CCField AE, CCField AS, CCFie
                            CCField AT, CCField gfmB, CCConst ox, CCConst oy, CCConst oz,
                            CCConst mask, CCConst tgam, CCConst gnx, CCConst gny, CCConst gnz,
                            CCConst gphi, CCConst kap, CCConst kc, double Dconst, bool useK,
-                           double thMin, double thMax, int order, bool useKappa, C3 e, int g) {
+                           double thMin, double thMax, int order, bool useKappa, C3 e, int g,
+                           double wx = 1.0, double wy = 1.0, double wz = 1.0,
+                           vof::VofMetric gm = vof::VofMetric{}) {
+  const double wa[3] = {wx, wy, wz};
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -261,9 +278,10 @@ inline void scalarMaskGfm2(CCField AC, CCField AW, CCField AE, CCField AS, CCFie
             const double of = (d == 0)   ? ((sgn < 0) ? ox(i) : ox(i + sx))
                               : (d == 1) ? ((sgn < 0) ? oy(i) : oy(i + sy))
                                          : ((sgn < 0) ? oz(i) : oz(i + sz));
-            const double nd = (d == 0) ? gnx(j) : (d == 1) ? gny(j) : gnz(j);
+            const double nvec[3] = {gnx(j), gny(j), gnz(j)};
             const double kj = useKappa ? kap(j) : 0.0;
-            const double th = vof::pcGfmThetaK(gphi(j), nd, (double)sgn, kj, thMin, thMax);
+            const double th =
+                vof::pcGfmThetaKAniso(gphi(j), nvec, d, (double)sgn, kj, thMin, thMax, gm);
             CCField band = (d == 0)   ? ((sgn < 0) ? AW : AE)
                            : (d == 1) ? ((sgn < 0) ? AS : AN)
                                       : ((sgn < 0) ? AB : AT);
@@ -274,7 +292,7 @@ inline void scalarMaskGfm2(CCField AC, CCField AW, CCField AE, CCField AS, CCFie
             const double bb = bandB(i);  // -k_f o_f of the face AWAY from the interface
             const bool behind = !(mask(jb) > 0.5) && (bb != 0.0);
             const vof::PcGfmRow row = vof::pcGfmRow(th, behind, order);
-            const double coef = kd * of * row.aGamma;
+            const double coef = kd * wa[d] * of * row.aGamma;
             acc += coef + band(i);
             band(i) = 0.0;
             dac += coef * tgam(j);

@@ -443,6 +443,116 @@ void solverGates() {
   CHECK(std::fabs(a1.theta - b1.theta) <= 1.0);
 }
 
+
+// ============================================================ PHASE 3 GATE K3: anisotropic cells
+//
+// `flow/doc/anisotropic_vof.md` §6 (decision V4.1) and §11 K3. The claim: theta is a PHYSICAL
+// angle, so the rotation happens in the physical frame (both inputs are index-space gradients and
+// are pulled back through `H^-1`), and the plane goes back to the unit cube as `m_idx = H m_theta`.
+// The gate is the same IDEMPOTENCE statement as G0a — a plane already meeting the wall at theta
+// must be reproduced exactly — on stretched cells, with the wall normal along the FINE and along
+// the COARSE axis.
+//
+// Everything is in units of hRef: `g.h[a] = h_a/hRef >= 1`.
+void anisoIdempotence() {
+  std::printf("\nK3 (Phase 3) anisotropic idempotence: max |C_fill - C_exact| over the band\n");
+  const double thetas[5] = {30.0, 60.0, 90.0, 120.0, 150.0};
+  const double psis[3] = {0.0, 37.0, 90.0};
+  // wall normal along z: h = (1,1,2) puts the COARSE axis across the wall, (2,1.5,1) a fine one.
+  const double hs[3][3] = {{1.0, 1.0, 1.0}, {1.0, 1.0, 2.0}, {2.0, 1.5, 1.0}};
+  double worstAll = 0.0, worstAng = 0.0;
+  for (int q = 0; q < 3; ++q) {
+    const VofMetric g{{hs[q][0], hs[q][1], hs[q][2]}};
+    double worst = 0.0, wang = 0.0;
+    for (int ti = 0; ti < 5; ++ti)
+      for (int pi = 0; pi < 3; ++pi) {
+        const double th = thetas[ti] * kDeg, ps = psis[pi] * kDeg;
+        // The PHYSICAL plane at angle theta to the wall normal (+z), azimuth psi.
+        const double nP[3] = {std::sin(th) * std::cos(ps), std::sin(th) * std::sin(ps),
+                              std::cos(th)};
+        // its INDEX normal, and a global offset through a point of the band
+        double mIdx[3];
+        vofIndexNormal(nP, g, mIdx);
+        const double p[3] = {3.35 * g.h[0], 3.6 * g.h[1], zw * g.h[2]};
+        const double A = nP[0] * p[0] + nP[1] * p[1] + nP[2] * p[2];
+        for (int dx = -1; dx <= 1; ++dx)
+          for (int dy = -1; dy <= 1; ++dy) {
+            const int f[3] = {3 + dx, 3 + dy, 3};
+            // exact fraction of the anisotropic cell f
+            const double cf = planeCellFractionAniso(nP[0], nP[1], nP[2], A, f[0] * g.h[0],
+                                                     f[1] * g.h[1], f[2] * g.h[2], g);
+            if (cf <= 1e-9 || cf >= 1.0 - 1e-9)
+              continue;
+            // the wall normal as the fill sees it: an INDEX-space gradient of the SDF, i.e.
+            // H * n_w for the physical +z wall (the central difference of a linear sdf on the
+            // index lattice picks up h_a per axis).
+            const double nwIdx[3] = {0.0, 0.0, g.h[2]};
+            const double sdfF = (f[2] + 0.5) * g.h[2] - zw * g.h[2];
+            for (int piv = 0; piv < 4; ++piv) {
+              double mth[3], alphaTh, ca;
+              const int br = vofWettingPlane(mIdx, cf, nwIdx, std::cos(th), std::sin(th), sdfF,
+                                             piv, 1e-6, mth, alphaTh, ca, g);
+              (void)br;
+              if (piv == 0)
+                wang = std::fmax(wang, std::fabs(std::acos(ca < -1.0 ? -1.0 : (ca > 1.0 ? 1.0 : ca))
+                                                 - th) / kDeg);
+              for (int ks = 0; ks <= 2; ++ks) {
+                const int sc[3] = {f[0], f[1], ks};
+                const int ds[3] = {sc[0] - f[0], sc[1] - f[1], sc[2] - f[2]};
+                const double got = vofWettingFraction(mth, alphaTh, ds);
+                const double ref = planeCellFractionAniso(nP[0], nP[1], nP[2], A, sc[0] * g.h[0],
+                                                          sc[1] * g.h[1], sc[2] * g.h[2], g);
+                // pivots 0/1/3 are the idempotent family (G0a); pivot 2 is the measured ablation.
+                if (piv != 2)
+                  worst = std::fmax(worst, std::fabs(got - ref));
+              }
+            }
+          }
+      }
+    std::printf("   h = (%.3g, %.3g, %.3g):  worst |C_fill - C_exact| %.3e   apparent-angle error"
+                " %.3e deg\n", hs[q][0], hs[q][1], hs[q][2], worst, wang);
+    CHECK(worst <= 1e-12);
+    CHECK(wang <= 1.0);
+    worstAll = std::fmax(worstAll, worst);
+    worstAng = std::fmax(worstAng, wang);
+  }
+  std::printf("   worst over all metrics: %.3e (gate 1e-12), angle %.3e deg (gate 1 deg)\n",
+              worstAll, worstAng);
+
+  // RULE B: the unit-metric overload is the pre-Phase-3 signature and must be BITWISE equal to the
+  // explicit {1,1,1} call — the claim the isotropic battery rests on.
+  {
+    long diff = 0, tot = 0;
+    const VofMetric one{{1.0, 1.0, 1.0}};
+    for (int ti = 0; ti < 5; ++ti)
+      for (int pi = 0; pi < 3; ++pi)
+        for (int piv = 0; piv < 4; ++piv) {
+          const double p[3] = {3.35, 3.6, zw};
+          const Plane pl = makePlane(thetas[ti], psis[pi], p);
+          for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy) {
+              const int f[3] = {3 + dx, 3 + dy, 3};
+              const double cf = frac(pl, f[0], f[1], f[2]);
+              if (cf <= 1e-9 || cf >= 1.0 - 1e-9)
+                continue;
+              const double nw[3] = {0.0, 0.0, 1.0};
+              const double sdfF = (f[2] + 0.5) - zw;
+              double m1[3], a1, c1, m2[3], a2, c2;
+              vofWettingPlane(pl.m, cf, nw, std::cos(thetas[ti] * kDeg),
+                              std::sin(thetas[ti] * kDeg), sdfF, piv, 1e-6, m1, a1, c1);
+              vofWettingPlane(pl.m, cf, nw, std::cos(thetas[ti] * kDeg),
+                              std::sin(thetas[ti] * kDeg), sdfF, piv, 1e-6, m2, a2, c2, one);
+              ++tot;
+              if (!(m1[0] == m2[0] && m1[1] == m2[1] && m1[2] == m2[2] && a1 == a2 && c1 == c2))
+                ++diff;
+            }
+        }
+    std::printf("   RULE B: unit-metric overload vs explicit {1,1,1}: %ld/%ld differing\n", diff,
+                tot);
+    CHECK(diff == 0);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -453,6 +563,7 @@ int main(int argc, char** argv) {
     rotation();
     limits();
     fluidOnlyYoungs();
+    anisoIdempotence();
     if (!std::getenv("PECLET_VOF_WETTING_KERNEL_ONLY"))
       solverGates();
   }

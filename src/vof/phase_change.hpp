@@ -123,6 +123,28 @@ KOKKOS_INLINE_FUNCTION double plicArea(double mx, double my, double mz, double a
   return nrm * (A1 + A2 + A3) / (2.0 * n1 * n2 * n3);
 }
 
+/// The PHYSICAL area of the PLIC polygon of an ANISOTROPIC cell, in `hRef^2`
+/// (`flow/doc/anisotropic_vof.md` §2, §7 V5.1).
+///
+/// The unit-cube polygon area `A_xi` and the physical one are related by the cofactor
+/// transformation of the area vector, `A n = det(H) H^-T (A_xi m_hat)`, i.e.
+///
+///     A_phys = A_xi * det(H) * s(m),      s(m) = |H^-1 m| / |m|
+///
+/// which is exactly `plicArea` times two factors that are both EXACTLY 1.0 at equal spacings
+/// (`det = 1*1*1`, and `s` is one L2 norm divided by the same L2 norm) — so the isotropic call is
+/// `plicArea(...) * 1.0 * 1.0`, bit for bit today's number.
+KOKKOS_INLINE_FUNCTION double plicAreaMetric(double mx, double my, double mz, double alpha,
+                                             const VofMetric& g) {
+  const double a = plicArea(mx, my, mz, alpha);
+  if (!(a > 0.0))
+    return a;
+  const double m[3] = {mx, my, mz};
+  double n[3];
+  const double sh = vofPhysNormal(m, g, n);
+  return a * g.det() * sh;
+}
+
 // ---------------------------------------------------------------------------------------------
 // (2) plane geometry in the cell frame
 // ---------------------------------------------------------------------------------------------
@@ -428,6 +450,39 @@ KOKKOS_INLINE_FUNCTION double pcGfmThetaK(double phiC, double nd, double s, doub
   const double den = Kokkos::fabs(nd);
   const double num = Kokkos::fabs(phiC - s * nd + 0.25 * kappa * (1.0 - nd * nd));
   if (!(num < thetaMax * den))
+    return thetaMax;
+  return Kokkos::fmax(num / den, thetaMin);
+}
+
+/// **The same on an ANISOTROPIC cell** (Phase 3, `flow/doc/anisotropic_vof.md` §7, V5.3).
+///
+/// `theta` is the distance to the interface ALONG a grid line, measured in CELLS of that axis —
+/// an axis ratio, hence metric-free in form. What changes is that the caller now carries the
+/// PHYSICAL centre distance `phiC` and the PHYSICAL unit normal `n`, so both are pulled back to
+/// the axis before the ratio is formed:
+///
+///     index centre distance along `d`   :  phiC / h_d      (phiC is a length in hRef)
+///     index normal component along `d`  :  n_d / h_d  ...  renormalized? NO — see below.
+///
+/// The clean way to see it: the plane's distance from cell `i`'s centre, measured along the grid
+/// line, is `|phi_i| / |n . e_d^phys|` where `phi_i` is the PHYSICAL plane distance of that centre
+/// and `e_d^phys` is the UNIT physical direction of the axis — which is just `e_d`. So the numerator
+/// is `|phiC - s h_d n_d|` (the physical distance of the neighbour's centre, one cell of size `h_d`
+/// away) and the denominator is `|n_d| h_d` (the physical step per cell along `d` projected on the
+/// normal). The curvature correction's lateral offset is likewise physical:
+/// `rho^2 = h_d^2 (1 - n_d^2)`.
+///
+/// At `g.h = {1,1,1}` every factor is 1.0 and the expression is `pcGfmThetaK` term for term.
+KOKKOS_INLINE_FUNCTION double pcGfmThetaKAniso(double phiC, const double n[3], int d, double s,
+                                               double kappa, double thetaMin, double thetaMax,
+                                               const VofMetric& g) {
+  const double hd = g.h[d];
+  const double nd = n[d];
+  const double den = Kokkos::fabs(nd) * hd;
+  double num = Kokkos::fabs(phiC - s * hd * nd);
+  if (kappa != 0.0)
+    num = Kokkos::fabs(phiC - s * hd * nd + 0.25 * kappa * hd * hd * (1.0 - nd * nd));
+  if (!(num < thetaMax * den))  // includes den == 0: the limit, reached continuously
     return thetaMax;
   return Kokkos::fmax(num / den, thetaMin);
 }

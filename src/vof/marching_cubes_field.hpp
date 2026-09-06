@@ -67,6 +67,8 @@ class VofMcArea {
   /// The interfacial predicate's wisp threshold — the phase-change driver passes ITS OWN
   /// (`pcEffInterfaceEps`), so a cell this driver calls pure is the same cell `pcIsInterfacial`
   /// calls pure.
+  /// The anisotropic cell metric (Phase 3); `{1,1,1}` == the pre-Phase-3 arithmetic.
+  VofMetric metric;
   double interfaceEps = 0.0;
 
   /// `mode` is an `InterfaceAreaMode` in [kAreaMcColour, kAreaMcPlicSplit].
@@ -129,6 +131,7 @@ class VofMcArea {
     const int g = g_;
     SField dd = dist_, mx = nx_, my = ny_, mz = nz_, ar = area_;
     const double ieps = interfaceEps;
+    const VofMetric gm = metric;  // `g` is the ghost width in this scope
     Kokkos::parallel_for(
         "vof::mc::area",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
@@ -169,7 +172,7 @@ class VofMcArea {
                   v[k].n[2] = mz(j);
                 }
                 const int lc = (-ox) | ((-oy) << 1) | ((-oz) << 2);
-                acc += mcCubeCornerArea(v, lc, src, dep);
+                acc += mcCubeCornerArea(v, lc, src, dep, gm);
               }
           ar(i0) = acc;
         });

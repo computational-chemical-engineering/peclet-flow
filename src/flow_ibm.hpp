@@ -166,11 +166,19 @@ class Solver {
     // the cell volume in hRef^3, and `aniso` true iff some h_a' != 1.  Every operator fold below
     // is "today's expression times one of these", so on the isotropic path — where they are all
     // EXACTLY 1.0 — the arithmetic is bit-identical (multiplying an IEEE-754 double by 1.0 is the
-    // identity).  APPEND new members here; never reorder the struct (Phase 3 appends too).
+    // identity).  APPEND new members here; never reorder the struct.
     double hp[3] = {1.0, 1.0, 1.0};   ///< h_a' = h_a / hRef  (>= 1, exactly 1 on the finest axis)
     double w[3] = {1.0, 1.0, 1.0};    ///< w_a  = 1 / h_a'^2  (<= 1)
     double vol = 1.0;                 ///< V'   = h_x' h_y' h_z'  (cell volume in hRef^3)
     bool aniso = false;               ///< some h_a' != 1 — kernels dispatch the per-axis body
+
+    // ---- Phase 3 (the VoF half; flow/doc/anisotropic_vof.md §9) appends TWO more, and reuses
+    // the four above verbatim — the two sessions derived the same metric and the rebase kept one
+    // copy.  `hpMax` is the Wendland support scale of the curvature/area fits; `vofMetric()` is
+    // the per-axis cell size the container-free VoF kernels take (`core/vof/plic.hpp`), which is
+    // `{1,1,1}` — hence the pre-Phase-3 arithmetic exactly — whenever the cells are cubes.
+    double hpMax = 1.0;               ///< max_a h_a'
+    vof::VofMetric vofMetric() const { return vof::VofMetric{{hp[0], hp[1], hp[2]}}; }
   };
 
   /// The map between the solver's INDEX coordinates and the coordinate system the analytic scene
@@ -276,8 +284,9 @@ class Solver {
   /// properties, variable density, porous continuity with or without implicit drag, every
   /// domain-BC type, every pressure driver and bottom, the velocity multigrid, scalar transport,
   /// the collocated face-interpolation modes, `hydro_force_torque`, `hydro_force_torque_reaction`
-  /// (moving geometry included, since C4b resolved E3), and MPI.  STILL REFUSED: `enable_vof`
-  /// (Phase 3).
+  /// (moving geometry included, since C4b resolved E3), and MPI.  Phase 3 then admitted
+  /// `enable_vof` too (flow/doc/anisotropic_vof.md), so nothing in the solver refuses an
+  /// anisotropic domain today; this helper stays for the next consumer that needs to.
   void requireIsotropic(const char* what) const {
     if (!u_.aniso)
       return;
@@ -330,6 +339,13 @@ class Solver {
   /// and order-free: it reads only the phys_ mirrors and writes only the internal members, so the
   /// caller may set properties before or after the domain, and before or after each other.
   void refreshUnitDerived() {
+    // Phase 3: `hp`, `w`, `vol` and `aniso` are set by `setPhysicalDomain` — including its SNAP,
+    // which forces them to the EXACT identity when the three spacings agree to 1e-12.  Recomputing
+    // them from `h[a]/hRef` here would undo that snap the moment the extents differ by an ulp
+    // across axes, so this only derives the one member Phase 3 added and hands the metric to the
+    // VoF drivers.
+    u_.hpMax = std::max(u_.hp[0], std::max(u_.hp[1], u_.hp[2]));
+    pushVofMetric();
     rho_ = rhoPhys_ * u_.rhoToInt();
     mu_ = muPhys_ * u_.muToInt();
     const double dtInt = dtPhys_ * u_.timeToInt();
@@ -349,6 +365,23 @@ class Solver {
     // must rebuild it. (Only reachable on the physical path — the cell-unit path never calls
     // this, so no existing run gains a rebuild.)
     dtDirty_ = true;
+  }
+
+  /// Hand the anisotropic cell metric to every VoF driver that exists (Phase 3).
+  ///
+  /// The drivers are created lazily (`enableVof`, `enableVofBlocks`, `setPhaseChangeArea`, ...),
+  /// so this is called BOTH from `refreshUnitDerived()` — whenever a scale moves — and at the end
+  /// of each driver's own set-up. Every driver defaults to the unit metric, so a driver that is
+  /// never reached behaves exactly as before.
+  void pushVofMetric() {
+    const vof::VofMetric g = u_.vofMetric();
+    vofAdv_.metric = g;
+    vofCurv_.metric = g;
+    vofDyn_.metric = g;
+    pcAreaC_.metric = g;
+    pcAreaMc_.metric = g;
+    if (vofBlocks_)
+      vofBlocks_->setMetric(g);
   }
 
   // (Re)allocate every per-block buffer for a local inner block of nx*ny*nz. Called by the
@@ -5348,7 +5381,8 @@ class Solver {
                         CCConst(oax[c]), haveRho, rho_, f_[c], incr, dt_, sc, e_, G, u_.w[c]);
       if (csfActive())
         addFaceAccelCsf(faceAcc_[c], CCConst(cField_), CCConst(kappaField_), CCConst(kappaBranch_),
-                        rho, CCConst(oax[c]), haveRho, rho_, sigmaCsf_, vofAdv_.h(), dt_, sc, e_, G);
+                        rho, CCConst(oax[c]), haveRho, rho_, sigmaCsf_, 1.0 / u_.w[c], dt_, sc,
+                        e_, G);
       addFaceIncrement(fa[c], CCConst(faceAcc_[c]), e_, G);
     }
   }
@@ -5402,7 +5436,10 @@ class Solver {
     CCConst rs = CCConst(C[c].rscale), cv = CCConst(cField_), kp = CCConst(kappaField_),
             kb = CCConst(kappaBranch_);
     const long strd = strideOf(c);
-    const double sig = sigmaCsf_, h = vofAdv_.h();
+    // Phase 3 (V3.1): the CSF carries the PRESSURE-GRADIENT WEIGHT of this component's axis,
+    // `w_a = 1/h_a'^2` — the same symbol Phase 2 puts on `-(P(i) - P(i - s_a))`. Exactly 1.0 on
+    // every isotropic run, so `x / 1.0 == x` keeps this kernel bit-identical.
+    const double sig = sigmaCsf_, h = 1.0 / u_.w[c];
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
         "csf_rhs", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
@@ -5431,7 +5468,7 @@ class Solver {
     CCConst rs = CCConst(C[c].rscale), cv = CCConst(cField_), kp = CCConst(kappaField_),
             kb = CCConst(kappaBranch_);
     const long strd = strideOf(c);
-    const double sig = sigmaCsf_, h = vofAdv_.h();
+    const double sig = sigmaCsf_, h = 1.0 / u_.w[c];  // the ablation takes the same weight (V3.1)
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     Kokkos::parallel_for(
         "csf_rhs_cellinterp", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
@@ -5501,9 +5538,10 @@ class Solver {
     CsfDiagnostics d;
     C3 e = e_;
     CCConst cv = CCConst(cField_), kp = CCConst(kappaField_), kb = CCConst(kappaBranch_);
-    const double sig = sigmaCsf_, h = vofAdv_.h(), eps = csfInterfaceEps_;
+    const double sig = sigmaCsf_, eps = csfInterfaceEps_;
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
     for (int c = 0; c < 3; ++c) {
+      const double h = 1.0 / u_.w[c];  // the V3.1 per-axis gradient weight of this component
       const long strd = strideOf(c);
       double mx = 0.0;
       long orph = 0, forced = 0;
@@ -7026,6 +7064,9 @@ class Solver {
     fillGhosts(Uf);
     fillGhosts(Vf);
     fillGhosts(Wf);  // face velocities need the ±2 advection reach
+    // Phase 3 (V5.4): the cell metric the scalar/energy GFM rows pull back through. The per-axis
+    // Laplacian weights are `u_.w[a]` — Phase 2's, passed at each call site in its own spelling.
+    const vof::VofMetric gmS = u_.vofMetric();
     for (auto& sc : scalars_) {
       // WO-P23: the CONSISTENT-ENERGY branch — per-cell k(C) in the bands, a rho c_p(C) time term,
       // and NO advective term (the transport was already done geometrically with the colour's own
@@ -7036,7 +7077,7 @@ class Solver {
       if (energy) {
         scalarBuildDiffusionVarK(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(ox_),
                                  CCConst(oy_), CCConst(oz_), CCConst(sc.kcell), CCConst(sc.rcp),
-                                 CCConst(sc.dmask), idt, e_, G);
+                                 CCConst(sc.dmask), idt, e_, G, u_.w[0], u_.w[1], u_.w[2]);
         applyScalarBcStencilVar(sc);
       } else {
         scalarBuildDiffusionOpen(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(ox_),
@@ -7057,12 +7098,14 @@ class Solver {
                        CCConst(pcGn_[0]), CCConst(pcGn_[1]), CCConst(pcGn_[2]), CCConst(pcGphi_),
                        CCConst(pcCurvDist_ && pcKappa_.extent(0) == n_ ? pcKappa_ : pcGphi_),
                        CCConst(sc.kcell), sc.D, energy, pcGfmThMin_, pcGfmThMax_, pcGfmOrder_,
-                       pcCurvDist_ && pcKappa_.extent(0) == n_, e_, G);
+                       pcCurvDist_ && pcKappa_.extent(0) == n_, e_, G, u_.w[0], u_.w[1],
+                       u_.w[2], gmS);
       else if (gfm)
         scalarMaskGfm(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, sc.gfmB, CCConst(ox_),
                       CCConst(oy_), CCConst(oz_), CCConst(sc.dmask), CCConst(pcTgam_),
                       CCConst(pcGn_[0]), CCConst(pcGn_[1]), CCConst(pcGn_[2]), CCConst(pcGphi_),
-                      CCConst(sc.kcell), sc.D, energy, pcGfmThMin_, pcGfmThMax_, e_, G);
+                      CCConst(sc.kcell), sc.D, energy, pcGfmThMin_, pcGfmThMax_, e_, G, u_.w[0],
+                      u_.w[1], u_.w[2], gmS);
       // WO-P01: the optional PER-CELL Dirichlet set (interfacial cells at T_sat). Inert — and the
       // operator therefore bit-identical — until a caller allocates the mask.
       if (hasMask)
@@ -7152,9 +7195,16 @@ class Solver {
   static constexpr int kVofG = 3;  // the colour field's ghost width (VOF_PLAN §3 rule 1)
 
   void enableVof() {
-    requireIsotropic("enable_vof: geometric VoF on anisotropic cells is PHASE 3 of "
-                     "suite/docs/PHYSICAL_UNITS_PLAN.md (the PLIC plane<->volume normalisation, "
-                     "the height-function columns and the CSF face force all need the metric)");
+    // PHASE 3 LIFTED Phase 2's `requireIsotropic` refusal here (flow/doc/anisotropic_vof.md).
+    // The colour transport itself needed nothing — a stretched cell IS the unit cube of the index
+    // coordinates, so every volume fraction, PLIC plane<->volume relation, slab flux and
+    // Weymouth-Yue sweep is metric-free (§3, decision V1). What took the metric is everything
+    // that reads a DIRECTION, a LENGTH or an AREA: the height-function curvature over physical
+    // column and transverse spacings, the two paraboloid fits in the physical frame (§4), the CSF
+    // face force carrying THIS axis's pressure-gradient weight `w_a` so the balanced-force
+    // identity survives (§5), the theta rotation of the wetting fill (§6), and the phase-change
+    // layer's normals, areas, sample distances and `V_cell` (§7).
+    
     if constexpr (Grid::collocated) {
       // Rung V8 (WO-T): allowed. The colour is advected by the PROJECTED face field uf_/vf_/wf_ —
       // which is what the ABC approximate projection makes exactly divergence-free, i.e. precisely
@@ -8559,7 +8609,12 @@ class Solver {
   double capillaryDtInternal() {
     if (!(sigmaCsf_ > 0.0))
       return std::numeric_limits<double>::infinity();
-    return vof::capillaryDt(phaseDensitySum(), vofEnabled_ ? vofAdv_.h() : 1.0, sigmaCsf_);
+    // Phase 3 (V3.2): the SMALLEST spacing sets the shortest resolvable capillary wave. `hpMin`
+    // is exactly 1.0 on every isotropic run, so the number is unchanged.
+    double hpMin = u_.hp[0];
+    for (int a = 1; a < 3; ++a)
+      hpMin = hpMin < u_.hp[a] ? hpMin : u_.hp[a];
+    return vof::capillaryDt(phaseDensitySum(), vofEnabled_ ? hpMin : 1.0, sigmaCsf_);
   }
   // Safety factor on the capillary limit: `step()` throws when `dt > factor * capillaryDt()`.
   // Default 1.0 — Denner & van Wachem measured the Brackbill prefactor to BE the stability
@@ -9725,6 +9780,11 @@ class Solver {
     CCConst oxF = CCConst(ox_), oyF = CCConst(oy_), ozF = CCConst(oz_);
     const double Dconst = thermal ? scT->D : 0.0, thMin = pcGfmThMin_, thMax = pcGfmThMax_;
     const int gfmOrder = pcGfmOrder_;
+    // Phase 3 (V5, `flow/doc/anisotropic_vof.md` §7): the phase-change layer is where lengths,
+    // areas and the cell VOLUME all enter at once.  `gme` is the per-axis metric; `vCell` the cell
+    // volume in hRef^3.  Both are exactly 1 on every isotropic run.
+    const vof::VofMetric gme = u_.vofMetric();
+    const double vCell = u_.vol;
     CCField mdotFit = opMode ? pcMdotFit_ : pcMdot_;
     long nIface = 0, nFallback = 0;
     double sumArea = 0.0, sumMdot = 0.0, sumQ = 0.0, sumQorph = 0.0, sumMdotFitA = 0.0;
@@ -9754,11 +9814,15 @@ class Solver {
           double m[3];
           vof::mycNormal(st, m);
           const double al = vof::plicAlpha(m[0], m[1], m[2], c(i));
-          const double A = cascadeArea ? areaCasc(i) : vof::plicArea(m[0], m[1], m[2], al);
+          // PHYSICAL area (V5.1) — `areaCasc` already carries the metric from its own driver.
+          const double A = cascadeArea ? areaCasc(i) : vof::plicAreaMetric(m[0], m[1], m[2], al, gme);
+          // The PHYSICAL unit normal and the PHYSICAL centre distance (V5.2): `s(m)` is the shape
+          // factor of §2, exactly 1.0 at equal spacings, so both are today's values there.
           double n[3] = {1.0, 0.0, 0.0};
-          if (!(vof::pcUnitNormal(m[0], m[1], m[2], n) > 0.0))
+          const double sMet = vof::vofPhysNormal(m, gme, n);
+          if (!(sMet > 0.0))
             return;
-          const double phic = vof::pcCentreDistance(m[0], m[1], m[2], al);
+          const double phic = vof::pcCentreDistance(m[0], m[1], m[2], al) / sMet;
           // **WO-P3g item 1 — the area is a UNIT CONVERSION, not a term in the mass balance.**
           // The regression removes `dV = mdot A dt/rho_l` and the source deposits
           // `S = mdot A (1/rho_g - 1/rho_l)`, and with `mdot = q/(h_lv A)` BOTH are `A`-free:
@@ -9784,15 +9848,22 @@ class Solver {
                 for (int dx = -2; dx <= 2; ++dx) {
                   if (dx == 0 && dy == 0 && dz == 0)
                     continue;
-                  const double w = vof::pcGradWeight(dx, dy, dz, n);
+                  // V5.2: the sample offset is PHYSICAL — `delta = H d` — because the fit models
+                  // T against the physical normal distance and returns a physical dT/dn.  With
+                  // index offsets the fitted gradient would be off by the shape factor `s(m)`.
+                  // `g.h = {1,1,1}` multiplies each component by 1.0.
+                  const double di[3] = {(double)dx, (double)dy, (double)dz};
+                  double dp[3];
+                  gme.toPhys(di, dp);
+                  const double w = vof::pcGradWeight(dp[0], dp[1], dp[2], n);
                   if (!(w > 0.0))
                     continue;
                   const long j = i + dx + dy * sy + dz * sz;
                   const double cj = c(j);
-                  double phi = vof::pcOffsetDistance(phic, n, dx, dy, dz);
+                  double phi = vof::pcOffsetDistance(phic, n, dp[0], dp[1], dp[2]);
                   // WO-P3f: bitwise unchanged at kappaFit == 0 (the shipped default)
                   if (kapFit != 0.0)
-                    phi = vof::pcCurvedDistance(phi, dx, dy, dz, n, kapFit);
+                    phi = vof::pcCurvedDistance(phi, dp[0], dp[1], dp[2], n, kapFit);
                   if (cj <= pureEps && phi > 0.0)
                     vof::pcGradAdd(fg, w, phi, T(j), Tg);
                   else if (cj >= 1.0 - pureEps && phi < 0.0)
@@ -9835,8 +9906,12 @@ class Solver {
                   const long jb = pc + (long)sg * stq[d];
                   const bool behind = !(mkF(jb) > 0.5) && ofB > 0.0;
                   // the step from the PURE cell `pc` to this (masked) cell is -sg
-                  const double th = vof::pcGfmThetaK(phic, n[d], (double)(-sg),
-                                                     curvDist ? kapF(i) : 0.0, thMin, thMax);
+                  // V5.3: `theta` is a distance ALONG a grid line, i.e. an axis ratio — it takes
+                  // the INDEX centre distance and the INDEX normal component, both of which the
+                  // metric-aware overload reconstructs from the physical pair.
+                  const double th = vof::pcGfmThetaKAniso(phic, n, d, (double)(-sg),
+                                                          curvDist ? kapF(i) : 0.0, thMin, thMax,
+                                                          gme);
                   const vof::PcGfmRow row = vof::pcGfmRow(th, behind, gfmOrder);
                   const double cf = (opEnergy ? kcF(pc) : Dconst) * of * row.aGamma;
                   qsum += cf * (T(pc) - Tsat);
@@ -9871,7 +9946,9 @@ class Solver {
           aacc += A;  // the GEOMETRIC area, for the diagnostics; `Aeff` is the unit conversion
           macc += md;
           // the divergence source and the pure-gas cell that will carry it
-          const double S = vof::pcDivSource(md, Aeff, rhoG, rhoL);
+          // V5.5: `S` is a volumetric source, so the interfacial flux is divided by the cell
+          // VOLUME `V' = hp_x hp_y hp_z` (exactly 1.0 isotropic: `x / 1.0 == x`).
+          const double S = vof::pcDivSource(md, Aeff, rhoG, rhoL) / vCell;
           if (S != 0.0) {
             // WO-P23: the receiving PURE GAS cell is the BEST cell of the 5^3 neighbourhood on
             // the `+n` side, scored by Malan's own collinearity weight `(d.n)^2/|d|^3` — closest
@@ -9919,9 +9996,15 @@ class Solver {
                   for (int dx = -2; dx <= 2; ++dx) {
                     if (dx == 0 && dy == 0 && dz == 0)
                       continue;
-                    if (!(dx * n[0] + dy * n[1] + dz * n[2] > 0.0))
+                    // V5.5: the candidate is scored on its PHYSICAL offset, so on a stretched
+                    // grid the search still prefers the cell that is nearest AND most along the
+                    // normal. `g.h = {1,1,1}` multiplies each component by 1.0.
+                    const double di[3] = {(double)dx, (double)dy, (double)dz};
+                    double dp[3];
+                    gme.toPhys(di, dp);
+                    if (!(dp[0] * n[0] + dp[1] * n[1] + dp[2] * n[2] > 0.0))
                       continue;  // the deposit goes BEHIND the interface, into the gas
-                    const double w = vof::pcGradWeight(dx, dy, dz, n);
+                    const double w = vof::pcGradWeight(dp[0], dp[1], dp[2], n);
                     if (!(w > best))
                       continue;
                     if (c(i + dx + dy * sy + dz * sz) > pureEps)
@@ -10069,6 +10152,9 @@ class Solver {
     CCField Cf = cField_, cnew = pcCnew_, defic = pcDefic_;
     CCConst md = CCConst(pcMdot_), ar = CCConst(pcArea_);
     const double rhoL = pcRhoL_;
+    // V5.5: `mdot A dt/rho_l` is a liquid VOLUME; the colour it removes is that volume divided by
+    // the CELL volume `V' = hp_x hp_y hp_z` (exactly 1.0 on every isotropic run).
+    const double vCell = u_.vol;
     double removed = 0.0;
     long ndef = 0, nexc = 0;
     double redist = 0.0;
@@ -10083,7 +10169,7 @@ class Solver {
             defic(i) = 0.0;
             return;
           }
-          const double dV = vof::pcRegressVolume(md(i), A, dt, rhoL);
+          const double dV = vof::pcRegressVolume(md(i), A, dt, rhoL) / vCell;
           const double raw = Cf(i) - dV;
           const double cl = Kokkos::fmin(Kokkos::fmax(raw, 0.0), 1.0);
           cnew(i) = cl;
@@ -10244,6 +10330,7 @@ class Solver {
     CCConst c = CCConst(cField_), md = CCConst(pcMdot_), T = CCConst(sc.c);
     const double eps = pcEffInterfaceEps(), pureEps = pcEffPureEps(), Tsat = pcTsat_, Rint = pcRint_;
     const double kapPresc = pcFitKappa_;  // WO-P3f
+    const vof::VofMetric gme = u_.vofMetric();  // Phase 3 (V5.2/V5.3)
     const bool curvDist = pcCurvDist_ && pcKappa_.extent(0) == n_;  // WO-P3g item 3
     CCConst kapF = CCConst(curvDist ? pcKappa_ : pcMdot_);
     const bool carry = pcPlaneDir_, quad = pcQuadFit_;
@@ -10276,14 +10363,18 @@ class Solver {
                 st[vof::plicSt(ii + 1, jj + 1, kk + 1)] = c(i + ii + jj * sy + kk * sz);
           double m[3];
           vof::mycNormal(st, m);
+          // V5.2/V5.3: the stored normal and centre distance are PHYSICAL — the plane-anchored
+          // rows and the one-sided fit both measure in physical lengths, and the axis pullback
+          // happens in `pcGfmThetaKAniso`. Identity at the unit metric.
           double n[3] = {0.0, 0.0, 0.0};
-          if (!(vof::pcUnitNormal(m[0], m[1], m[2], n) > 0.0))
+          const double sMet = vof::vofPhysNormal(m, gme, n);
+          if (!(sMet > 0.0))
             return;
           const double al = vof::plicAlpha(m[0], m[1], m[2], c(i));
           gn0(i) = n[0];
           gn1(i) = n[1];
           gn2(i) = n[2];
-          const double phic = vof::pcCentreDistance(m[0], m[1], m[2], al);
+          const double phic = vof::pcCentreDistance(m[0], m[1], m[2], al) / sMet;
           gph(i) = phic;
           if (!carry)
             return;
@@ -10298,14 +10389,17 @@ class Solver {
               for (int dx = -2; dx <= 2; ++dx) {
                 if (dx == 0 && dy == 0 && dz == 0)
                   continue;
-                const double w = vof::pcGradWeight(dx, dy, dz, n);
+                const double di[3] = {(double)dx, (double)dy, (double)dz};
+                double dp[3];
+                gme.toPhys(di, dp);  // V5.2: PHYSICAL sample offsets
+                const double w = vof::pcGradWeight(dp[0], dp[1], dp[2], n);
                 if (!(w > 0.0))
                   continue;
                 const long j = i + dx + dy * syl + dz * szl;
                 const double cj = c(j);
-                double phi = vof::pcOffsetDistance(phic, n, dx, dy, dz);
+                double phi = vof::pcOffsetDistance(phic, n, dp[0], dp[1], dp[2]);
                 if (kapFit != 0.0)  // WO-P3f, bitwise unchanged at 0
-                  phi = vof::pcCurvedDistance(phi, dx, dy, dz, n, kapFit);
+                  phi = vof::pcCurvedDistance(phi, dp[0], dp[1], dp[2], n, kapFit);
                 if (gasSide) {
                   if (cj <= pureEps && phi > 0.0)
                     vof::pcGradAdd(f, w, phi, T(j), Tgam);
@@ -10608,6 +10702,7 @@ class Solver {
     const int gfmOrder = pcGfmOrder_;
     const bool curvDist = pcCurvDist_ && pcKappa_.extent(0) == n_;
     CCConst kapF = CCConst(curvDist ? pcKappa_ : pcGphi_);
+    const vof::VofMetric gme = u_.vofMetric();  // Phase 3 (V5.3)
     CCField clsOut = pcClsPrev_;
     double hOpen = 0, q = 0, qb = 0;
     using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
@@ -10633,9 +10728,9 @@ class Solver {
               const double of = (d == 0)   ? ((sgn < 0) ? ox(i) : ox(i + sx))
                                 : (d == 1) ? ((sgn < 0) ? oy(i) : oy(i + sy))
                                            : ((sgn < 0) ? oz(i) : oz(i + sz));
-              const double nd = (d == 0) ? gnx(j) : (d == 1) ? gny(j) : gnz(j);
-              const double th =
-                  vof::pcGfmThetaK(gph(j), nd, (double)sgn, curvDist ? kapF(j) : 0.0, thMin, thMax);
+              const double nvec[3] = {gnx(j), gny(j), gnz(j)};
+              const double th = vof::pcGfmThetaKAniso(gph(j), nvec, d, (double)sgn,
+                                                      curvDist ? kapF(j) : 0.0, thMin, thMax, gme);
               const long jb = i - (long)sgn * st[d];
               const double ofB = (d == 0)   ? ((sgn < 0) ? ox(i + sx) : ox(i))
                                  : (d == 1) ? ((sgn < 0) ? oy(i + sy) : oy(i))
@@ -11303,6 +11398,7 @@ class Solver {
   // OpenMP/host build accepts them private, so the breakage only shows on the CUDA backend.
  public:
   void patchScalarDirichletFaceVar(CCField AC, CCField band, CCField kc, int a, int side) {
+    const double wa = u_.w[a];  // V5.4: this axis's Laplacian weight (exactly 1.0 isotropic)
     const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
     const int nt1 = (t1 == 0) ? nx_ : (t1 == 1) ? ny_ : nz_;
     const int nt2 = (t2 == 0) ? nx_ : (t2 == 1) ? ny_ : nz_;
@@ -11318,12 +11414,13 @@ class Solver {
         Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {G, G}, {G + nt1, G + nt2}),
         KOKKOS_LAMBDA(int j1, int j2) {
           const long i = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
-          const double D = kc(i);
+          const double D = kc(i) * wa;  // V5.4: this axis's Laplacian weight (1.0 isotropic)
           AC(i) += D + band(i);
           band(i) = -D;
         });
   }
-  void patchScalarDirichletFace(CCField AC, CCField band, double D, int a, int side) {
+  void patchScalarDirichletFace(CCField AC, CCField band, double Din, int a, int side) {
+    const double D = Din * u_.w[a];  // V5.4: this axis's Laplacian weight (exactly 1.0 isotropic)
     const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
     const int nt1 = (t1 == 0) ? nx_ : (t1 == 1) ? ny_ : nz_;
     const int nt2 = (t2 == 0) ? nx_ : (t2 == 1) ? ny_ : nz_;

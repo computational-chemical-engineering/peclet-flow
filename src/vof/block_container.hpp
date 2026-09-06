@@ -391,6 +391,19 @@ class VofBlockSet {
     step_ = 0;
   }
 
+  /// The anisotropic cell metric (Phase 3). Pushed into every block's advector and its curvature
+  /// cascade; `{1,1,1}` — the default and every isotropic run — is the pre-Phase-3 arithmetic.
+  /// `h_` above stays 1: a block's bounding box is index-space bookkeeping (V1).
+  void setMetric(const VofMetric& g) {
+    metric_ = g;
+    curvProto.metric = g;
+    for (auto& b : blocks_) {
+      b.adv_.metric = g;
+      b.curv_.metric = g;
+    }
+  }
+  const VofMetric& metric() const { return metric_; }
+
   void setExchange(std::shared_ptr<VofBlockExchangeBase> x) { exch_ = std::move(x); }
   VofBlockExchangeBase* exchange() const { return exch_.get(); }
 
@@ -603,11 +616,16 @@ class VofBlockSet {
   void buildCsfForce(VofBlock& b) {
     const I3 e = b.adv_.extent(), n = b.adv_.inner();
     const int g = ghost_;
-    const double sig = sigma, hh = h_;
+    // Phase 3 (V3.1): the same per-axis pressure-gradient weight `1/h_a'^2` the global
+    // `Solver::addCsfRhs` uses. `h_` stays the (index) block spacing and is not that weight.
+    const double sig = sigma;
+    const double wgt[3] = {metric_.h[0] * metric_.h[0], metric_.h[1] * metric_.h[1],
+                           metric_.h[2] * metric_.h[2]};
     SField cv = b.adv_.colour(), kp = b.curv_.kappa(), kb = b.curv_.branch();
     const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
     for (int c = 0; c < 3; ++c) {
       SField ff = b.f_[c];
+      const double wc = wgt[c];
       const long strd = (c == 0) ? 1 : (c == 1 ? sy : sz);
       Kokkos::parallel_for(
           "vof::block::csf_force",
@@ -620,7 +638,7 @@ class VofBlockSet {
             if (dC != 0.0) {
               double kf = 0.0;
               vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
-              f = vof::csfFaceForce(sig, kf, dC, hh);
+              f = vof::csfFaceForce(sig, kf, dC, wc);
             }
             ff(i) = f;
           });
@@ -1267,6 +1285,7 @@ class VofBlockSet {
   }
 
  private:
+  VofMetric metric_;  ///< Phase 3: the anisotropic cell metric (default = unit)
   double h_ = 1.0;
   I3 gs_{0, 0, 0};
   std::array<bool, 3> per_{true, true, true};

@@ -90,7 +90,10 @@ inline void buildFaceAccelVar(CCField af, CCConst P, CCConst rho, CCConst fb, bo
 
 // ADDITIVE balanced-force CSF at the same face, with the same `1/rho_f` and the same `dt`:
 //
-//   af(i) += dt * sigma * kappa_f * (C(i) - C(i-s)) / h / rho_f(i)
+//   af(i) += dt * sigma * kappa_f * (C(i) - C(i-s)) / hGrad / rho_f(i)
+//
+// `hGrad` is the axis's PRESSURE-GRADIENT WEIGHT denominator `h_a'^2` (Phase 3, V3.1 — the same
+// symbol the pressure face difference carries); 1.0 on every isotropic run.
 //
 // `kappa_f` is the V4 pairing (`vof::csfFaceCurvature`): the mean of the two cells' curvatures
 // where both carry one, the single available one where only one does.  The force is the
@@ -98,8 +101,8 @@ inline void buildFaceAccelVar(CCField af, CCConst P, CCConst rho, CCConst fb, bo
 // exactly in the range of the operator the projection inverts and the projection annihilates it —
 // the V4 rule, verbatim, moved from the staggered momentum RHS to the collocated face field.
 inline void addFaceAccelCsf(CCField af, CCConst cv, CCConst kp, CCConst kb, CCConst rho, CCConst o,
-                            bool haveRho, double rhoC, double sigma, double h, double dt, long s,
-                            C3 e, int g) {
+                            bool haveRho, double rhoC, double sigma, double hGrad, double dt,
+                            long s, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -114,7 +117,7 @@ inline void addFaceAccelCsf(CCField af, CCConst cv, CCConst kp, CCConst kb, CCCo
         double kf = 0.0;
         vof::csfFaceCurvature(kp((long)i - s), kb((long)i - s), kp(i), kb(i), kf);
         const double rf = haveRho ? 0.5 * (rho(i) + rho(i - s)) : rhoC;
-        af(i) += dt * vof::csfFaceForce(sigma, kf, dC, h) / rf;
+        af(i) += dt * vof::csfFaceForce(sigma, kf, dC, hGrad) / rf;
       });
 }
 

@@ -107,17 +107,38 @@ KOKKOS_INLINE_FUNCTION bool csfFaceCurvature(double k0, double b0, double k1, do
 /// the same units and at the same place as the incremental scheme's `-(P(i) - P(i - s_c))`.
 ///
 /// `dC = C(i) - C(i - s_c)` is formed by the caller from the SAME colour field the density closure
-/// reads, with the projection's own face difference. `h` is the grid spacing (1 in this solver's
-/// cell units) and enters as `1/h` because `kappa` is in `1/h` and `dC` is `h·∂C`: the product
-/// `σ κ ∂C` is a force per unit volume, so one power of `h` survives in the denominator.
-KOKKOS_INLINE_FUNCTION double csfFaceForce(double sigma, double kf, double dC, double h) {
-  return sigma * kf * dC / h;
+/// reads, with the projection's own face difference.
+///
+/// **`hGrad` is the PRESSURE-GRADIENT WEIGHT of this component's axis, and that is the whole
+/// point** (Phase 3, `flow/doc/anisotropic_vof.md` §5, decision V3.1). Substituting the Phase 1
+/// conversions into the physical force `sigma kappa dC/h_a` — `sigma' = sigma tRef^2/(rhoRef
+/// hRef^3)`, `kappa' = kappa hRef`, `F_a' = F_a tRef^2/(rhoRef h_a)` — gives
+///
+///     F_a'(i) = sigma' * kappa_f'(i) * (C(i) - C(i - s_a)) / h_a'^2,     h_a' = h_a/hRef
+///
+/// i.e. **exactly the weight `w_a = 1/h_a'^2` the momentum RHS applies to `-(P(i) - P(i - s_a))`**
+/// (Phase 2, `doc/anisotropic_metric.md` §1.3). That identity is what keeps the balanced-force
+/// property on a stretched grid: with a constant `kappa'` the force is again the discrete
+/// (axis-weighted) gradient of `sigma' kappa' C`, so it lies in the range of the operator the
+/// projection inverts, the projection annihilates it, and a static droplet stays at machine zero.
+/// A different weight here than in the pressure gradient would put a floor under the spurious
+/// currents no curvature accuracy could remove.
+///
+/// `hGrad` is 1.0 in cell units and on every isotropic run (`x / 1.0 == x`), which is why the name
+/// change is not a numerical change: the argument used to be the uniform spacing, always 1.0.
+KOKKOS_INLINE_FUNCTION double csfFaceForce(double sigma, double kf, double dC, double hGrad) {
+  return sigma * kf * dC / hGrad;
 }
 
 /// Brackbill capillary time-step limit `sqrt((ρ₁+ρ₂) h³ / (4πσ))`.
 ///
 /// Returns `+inf` for `σ <= 0` (no constraint). `rhoSum` is the SUM of the two phase densities —
 /// see the file header for why it is the sum and not a mean.
+///
+/// **`h` is the SMALLEST cell size** (Phase 3, decision V3.2): the constraint is the period of the
+/// shortest RESOLVABLE capillary wave, whose wavelength is `2 h_min` — the finest axis sets it, and
+/// `dt_sigma ~ h^{3/2}` makes that the binding one. Basilisk takes the same `min`. On an isotropic
+/// grid `min_a h_a` is the one spacing, so nothing moves.
 KOKKOS_INLINE_FUNCTION double capillaryDt(double rhoSum, double h, double sigma) {
   if (!(sigma > 0.0))
     return Kokkos::Experimental::infinity_v<double>;

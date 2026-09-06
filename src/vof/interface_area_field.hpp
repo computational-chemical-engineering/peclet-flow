@@ -69,6 +69,8 @@ class VofInterfaceArea {
   SField branch() const { return branch_; }
 
   // ---- tunables: the SAME knobs and defaults the curvature cascade runs with ----------------
+  /// The anisotropic cell metric (Phase 3); `{1,1,1}` == the pre-Phase-3 arithmetic.
+  VofMetric metric;
   double weightWidth = kPvWeightWidth;
   double monoTol = 1e-6;
   double cosMin = 0.2;
@@ -121,6 +123,7 @@ class VofInterfaceArea {
     const long st[3] = {1, e_.x, static_cast<long>(e_.x) * e_.y};
     SField mx = mx_, my = my_, mz = mz_, al = alpha_, ar = area_, br = branch_;
     const double mtol = monoTol, ieps = interfaceEps;
+    const VofMetric gm = metric;  // `g` is the ghost width in this scope
     const int md = mode;
     Kokkos::parallel_for(
         "vof::area::hf",
@@ -171,11 +174,11 @@ class VofInterfaceArea {
             if (!ok)
               continue;
             if (md == kAreaFootprint) {
-              ar(i) = hfFootprintArea(hh);
+              ar(i) = hfFootprintArea(hh, gm, d);
             } else {
               double ns[3];
-              hfSurfaceNormal(hh, d, ns);
-              ar(i) = interfaceAreaFromNormal(md, mx(i), my(i), mz(i), al(i), c(i), ns);
+              hfSurfaceNormal(hh, d, gm, ns);
+              ar(i) = interfaceAreaFromNormal(md, mx(i), my(i), mz(i), al(i), c(i), ns, gm);
             }
             br(i) = static_cast<double>(t == 0 ? kCurvHf : kCurvHfMixed);
             return;
@@ -191,7 +194,8 @@ class VofInterfaceArea {
     const I3 e = e_, n = n_;
     const int g = g_, gr = kPvHalf;
     SField mx = mx_, my = my_, mz = mz_, al = alpha_, ar = area_, br = branch_;
-    const double dW = weightWidth, cmin = cosMin, ieps = interfaceEps;
+    const double dW = weightWidth * metric.maxH(), cmin = cosMin, ieps = interfaceEps;
+    const VofMetric gm = metric;  // `g` is the ghost width in this scope
     const int md = mode;
     Kokkos::parallel_for(
         "vof::area::pv",
@@ -202,14 +206,14 @@ class VofInterfaceArea {
           if (br(i) >= 0.0)
             return;
           const double m0 = mx(i), m1 = my(i), m2 = mz(i);
-          const double n2 = m0 * m0 + m1 * m1 + m2 * m2;
-          if (!(n2 > 0.0)) {
+          const double mi[3] = {m0, m1, m2};
+          double nn[3] = {0.0, 0.0, 0.0};
+          // PHYSICAL frame (Phase 3, V2.4); identity at the unit metric.
+          if (!(vofPhysNormalInv(mi, gm, nn) > 0.0)) {
             ar(i) = 0.0;
             br(i) = static_cast<double>(kCurvNoEstimate);
             return;
           }
-          const double invn = 1.0 / Kokkos::sqrt(n2);
-          const double nn[3] = {m0 * invn, m1 * invn, m2 * invn};
           double t1[3], t2[3];
           curvFrame(nn, t1, t2);
           double v[8][3], ctr[3], area;
@@ -226,14 +230,14 @@ class VofInterfaceArea {
                   continue;
                 const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
                                        static_cast<double>(oz)};
-                pvFitAdd(fit, mx(j), my(j), mz(j), al(j), off, org, t1, t2, nn, dW, cmin);
+                pvFitAdd(fit, mx(j), my(j), mz(j), al(j), off, org, t1, t2, nn, dW, cmin, gm);
               }
           double a[6];
           bool red = false;
           if (!pvFitSolve(fit, a, red)) {
             // no cascade geometry at all: keep the MYC PLIC area rather than emit a zero. Loud in
             // the census, exactly as `kCurvNoEstimate` is in the curvature.
-            ar(i) = plicArea(m0, m1, m2, al(i));
+            ar(i) = plicAreaMetric(m0, m1, m2, al(i), gm);
             br(i) = static_cast<double>(kCurvNoEstimate);
             return;
           }
@@ -244,7 +248,7 @@ class VofInterfaceArea {
           // which is the closest thing to it that a single cell can supply. The branch census
           // says how much of the total that is.
           ar(i) = interfaceAreaFromNormal(md == kAreaFootprint ? kAreaNormal : md, m0, m1, m2,
-                                          al(i), c(i), ns);
+                                          al(i), c(i), ns, gm);
           br(i) = static_cast<double>(red ? kCurvPvReduced : kCurvPv);
         });
     Kokkos::fence();

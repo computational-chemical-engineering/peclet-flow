@@ -667,6 +667,223 @@ void gateMixedHeightFitAblation() {
   CHECK(mx[0][2] < 0.25 * mx[1][2]);
 }
 
+
+// ======================================================= PHASE 3 GATE K2: anisotropic cells
+//
+// `flow/doc/anisotropic_vof.md` §4 (decision V2) and §11 K2. The claim: the height-function
+// cascade needs the metric in exactly three places — the two transverse spacings and the column
+// spacing of `hfPatchKappa`, and the physical frame of the two paraboloid fits — and with those it
+// returns a PHYSICAL curvature (1/hRef) on a stretched grid.
+//
+// Everything below is stated in units of `hRef` (the smallest cell size), which is the unit the
+// solver's internal `kappa'` lives in: `metric.h[a] = h_a/hRef >= 1`, with 1.0 on the finest axis.
+
+/// Exact liquid fraction of the cell `[x0,x0+hx] x [y0,y0+hy] x [z0,z0+hz]` inside a sphere:
+/// midpoint-subsampled in x and y, integrated ANALYTICALLY in z. Independent of everything under
+/// test (it never calls a PLIC routine).
+double sphereFracAniso(double cx, double cy, double cz, double R, double x0, double y0, double z0,
+                       const double h[3], int sub = 24) {
+  const double wx = h[0] / sub, wy = h[1] / sub;
+  double acc = 0.0;
+  for (int b = 0; b < sub; ++b)
+    for (int a = 0; a < sub; ++a) {
+      const double px = x0 + (a + 0.5) * wx, py = y0 + (b + 0.5) * wy;
+      const double r2 = R * R - (px - cx) * (px - cx) - (py - cy) * (py - cy);
+      if (r2 <= 0.0)
+        continue;
+      const double hh = std::sqrt(r2);
+      const double lo = std::fmax(cz - hh, z0), hi = std::fmin(cz + hh, z0 + h[2]);
+      if (hi > lo)
+        acc += hi - lo;
+    }
+  return acc / (sub * sub * h[2]);
+}
+
+/// A stretched case: the colour of a sphere of PHYSICAL radius `R` (in hRef) on a grid whose cells
+/// are `h[3]` (in hRef). The advector's own `h_` stays 1 — the sweeps are index-space (V1); only
+/// the curvature driver takes the metric.
+void fillSphereAniso(Case& cs, const double h[3], double R, const double ctr[3], int sub = 24) {
+  const I3 e = cs.e();
+  const int g = cs.g();
+  auto host = Kokkos::create_mirror_view(cs.c());
+  for (int z = 0; z < e.z; ++z)
+    for (int y = 0; y < e.y; ++y)
+      for (int x = 0; x < e.x; ++x)
+        host(L3(x, y, z, e)) = sphereFracAniso(ctr[0], ctr[1], ctr[2], R, (x - g) * h[0],
+                                               (y - g) * h[1], (z - g) * h[2], h, sub);
+  Kokkos::deep_copy(cs.c(), host);
+}
+
+void gateAnisotropic() {
+  std::printf("\n=== K2 (Phase 3)  ANISOTROPIC cells: kappa in 1/hRef on a stretched grid\n");
+
+  // ---- (a) a PLANE through a stretched lattice: kappa must be 0 whatever the aspect ratio.
+  //
+  // Each stretched case is run TWICE: once on the metric, and once on a CUBIC grid carrying the
+  // plane whose INDEX normal is the same `H n`. The two see the same column geometry and the same
+  // branch mix, so the pair separates "the metric is wrong" from "this orientation lands in the PV
+  // fallback, whose normal-equations solve has its own floor" — the latter is a property of the
+  // V3 cascade that the anisotropic gate must not be blamed for.
+  {
+    double pmax[4] = {0, 0, 0, 0};
+    const double hs[4][3] = {
+        {1.0, 2.0, 4.0}, {1.0, 1.0, 1.0}, {2.5, 1.0, 1.7}, {1.0, 1.0, 1.0}};
+    for (int q = 0; q < 4; ++q) {
+      const double* h = hs[q];
+      const int N = 24;
+      Case cs;
+      cs.setup(N, N, N, 1.0);
+      const vf::VofMetric g{{h[0], h[1], h[2]}};
+      cs.adv.metric = g;
+      cs.curv.metric = g;
+      // an oblique plane n.x = d with a generic (non-lattice) normal, exact fractions. On the
+      // CUBIC control rungs (q odd) the normal is the index normal `H n` of the stretched rung
+      // just above, so the two runs present the cascade with the SAME index-space geometry.
+      double n[3] = {0.4243, -0.7071, 0.5657};
+      if (q & 1)
+        for (int d = 0; d < 3; ++d)
+          n[d] *= hs[q - 1][d];
+      const double ctr[3] = {0.5 * N * h[0], 0.5 * N * h[1], 0.5 * N * h[2]};
+      const double d = n[0] * ctr[0] + n[1] * ctr[1] + n[2] * ctr[2];
+      const I3 e = cs.e();
+      const int gg = cs.g();
+      auto host = Kokkos::create_mirror_view(cs.c());
+      for (int z = 0; z < e.z; ++z)
+        for (int y = 0; y < e.y; ++y)
+          for (int x = 0; x < e.x; ++x) {
+            const double x0 = (x - gg) * h[0], y0 = (y - gg) * h[1], z0 = (z - gg) * h[2];
+            host(L3(x, y, z, e)) =
+                vf::planeCellFractionAniso(n[0], n[1], n[2], d, x0, y0, z0, g);
+          }
+      Kokkos::deep_copy(cs.c(), host);
+      cs.adv.syncGhosts();
+      const auto st = cs.curv.compute(cs.c());
+      const Err er = curvError(cs, 0.0, 4);  // margin: the plane wraps
+      std::printf("  plane on h = (%.3g, %.3g, %.3g):  max |kappa| %.3e  L1 %.3e\n", h[0], h[1],
+                  h[2], er.max, er.l1);
+      printStats("        ", st);
+      CHECK(er.nan == 0);
+      CHECK(st.noEstimate == 0);
+      pmax[q] = er.max;
+    }
+    std::printf("  plane: stretched vs its CUBIC index-equivalent control -> %.3e vs %.3e, "
+                "%.3e vs %.3e\n", pmax[0], pmax[1], pmax[2], pmax[3]);
+    // A plane has zero curvature, so the metric must not introduce one BEYOND what the same
+    // index-space geometry already costs on a cubic grid.
+    CHECK(pmax[0] <= 4.0 * std::fmax(pmax[1], 1e-15));
+    CHECK(pmax[2] <= 4.0 * std::fmax(pmax[3], 1e-15));
+  }
+
+  // ---- (b) a SPHERE ladder at aspect ratio 2 — the convergence statement.
+  {
+    const double h[3] = {1.0, 1.0, 2.0};
+    const int base[3] = {16, 32, 64};  // cells along the FINEST axes
+    double l1[3], mx[3];
+    for (int q = 0; q < 3; ++q) {
+      const int nx = base[q], ny = base[q], nz = base[q] / 2;
+      const double R = 0.25 * nx * h[0];  // D/h_min = nx/2, D/h_z = nx/4
+      const double ctr[3] = {0.5 * nx * h[0] + 0.13, 0.5 * ny * h[1] + 0.27,
+                             0.5 * nz * h[2] + 0.11};
+      Case cs;
+      cs.setup(nx, ny, nz, 1.0);
+      const vf::VofMetric g{{h[0], h[1], h[2]}};
+      cs.adv.metric = g;
+      cs.curv.metric = g;
+      fillSphereAniso(cs, h, R, ctr);
+      cs.adv.syncGhosts();
+      const auto st = cs.curv.compute(cs.c());
+      const Err er = curvError(cs, 2.0 / R);
+      l1[q] = er.l1;
+      mx[q] = er.max;
+      std::printf("  sphere h = (1,1,2)  n = %dx%dx%d  D/h_min = %.0f\n", nx, ny, nz, 2.0 * R);
+      printStats("        ", st);
+      std::printf("    kappa rel error:  L1 %.4e   max %.4e   NaN %ld\n", er.l1, er.max, er.nan);
+      CHECK(er.nan == 0);
+      CHECK(st.noEstimate == 0);
+    }
+    const double oL1 = order(l1[0], l1[2]) / 2.0, oMx = order(mx[0], mx[2]) / 2.0;
+    std::printf("  fitted order over 16->64:  L1 %.2f   max %.2f   (cubic: 2.26 / 1.86)\n", oL1,
+                oMx);
+    CHECK(oL1 > 1.5);
+    CHECK(mx[2] < mx[0]);
+  }
+
+  // ---- (c) a CYLINDER along the LONG and along the SHORT axis: kappa = 1/R either way.
+  {
+    const double h[3] = {1.0, 1.0, 2.0};
+    for (int axis = 0; axis < 3; axis += 2) {  // x (fine) and z (coarse)
+      const int N = 48;
+      const int nx = (axis == 0) ? 16 : N, ny = N, nz = (axis == 2) ? 16 : N / 2;
+      const double R = 8.0;
+      Case cs;
+      cs.setup(nx, ny, nz, 1.0);
+      const vf::VofMetric g{{h[0], h[1], h[2]}};
+      cs.adv.metric = g;
+      cs.curv.metric = g;
+      const I3 e = cs.e();
+      const int gg = cs.g();
+      const int t1 = (axis + 1) % 3, t2 = (axis + 2) % 3;
+      const int nn[3] = {nx, ny, nz};
+      const double c1 = 0.5 * nn[t1] * h[t1] + 0.13, c2 = 0.5 * nn[t2] * h[t2] + 0.27;
+      auto host = Kokkos::create_mirror_view(cs.c());
+      const int sub = 32;
+      for (int z = 0; z < e.z; ++z)
+        for (int y = 0; y < e.y; ++y)
+          for (int x = 0; x < e.x; ++x) {
+            const int gi[3] = {x - gg, y - gg, z - gg};
+            const double a0 = gi[t1] * h[t1], b0 = gi[t2] * h[t2];
+            int in = 0;
+            for (int q = 0; q < sub; ++q)
+              for (int pp = 0; pp < sub; ++pp) {
+                const double pa = a0 + (pp + 0.5) * h[t1] / sub;
+                const double pb = b0 + (q + 0.5) * h[t2] / sub;
+                if ((pa - c1) * (pa - c1) + (pb - c2) * (pb - c2) < R * R)
+                  ++in;
+              }
+            host(L3(x, y, z, e)) = (double)in / (sub * sub);
+          }
+      Kokkos::deep_copy(cs.c(), host);
+      cs.adv.syncGhosts();
+      const auto st = cs.curv.compute(cs.c());
+      const Err er = curvError(cs, 1.0 / R);
+      std::printf("  cylinder along axis %d (h_axis = %.3g):  L1 %.3e  max %.3e  noEstimate %ld\n",
+                  axis, h[axis], er.l1, er.max, st.noEstimate);
+      CHECK(er.nan == 0);
+      CHECK(st.noEstimate == 0);
+      CHECK(er.l1 < 5e-2);
+    }
+  }
+
+  // ---- (d) RULE B: the unit metric is the pre-Phase-3 arithmetic, BITWISE. Same scene, the
+  // metric set explicitly to {1,1,1} against a default-constructed driver.
+  {
+    const int N = 32;
+    const double h = 1.0 / N, R = 0.3;
+    double kap[2][2] = {{0, 0}, {0, 0}};
+    std::vector<double> f[2];
+    for (int q = 0; q < 2; ++q) {
+      Case cs;
+      cs.setup(N, N, N, h);
+      if (q == 1)
+        cs.curv.metric = vf::VofMetric{{1.0, 1.0, 1.0}};
+      vofscene::initSphere(cs.c(), cs.blk, h, 0.5, 0.5, 0.5, R, 6);
+      cs.adv.syncGhosts();
+      cs.curv.compute(cs.c());
+      auto host = Kokkos::create_mirror_view(cs.curv.kappa());
+      Kokkos::deep_copy(host, cs.curv.kappa());
+      f[q].assign(host.data(), host.data() + host.extent(0));
+      (void)kap;
+    }
+    long diff = 0;
+    for (std::size_t i = 0; i < f[0].size(); ++i)
+      if (!(f[0][i] == f[1][i]))
+        ++diff;
+    std::printf("  RULE B: default vs explicit unit metric, differing kappa cells: %ld / %zu\n",
+                diff, f[0].size());
+    CHECK(diff == 0);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -682,6 +899,7 @@ int main(int argc, char** argv) {
     gateDeviceHost();
     gateFallbackAlone();
     gateMixedHeightFitAblation();
+    gateAnisotropic();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
                 failures == 1 ? "" : "s");
   }

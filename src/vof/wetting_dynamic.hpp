@@ -156,15 +156,24 @@ KOKKOS_INLINE_FUNCTION int vofDynamicContactAngle(double thetaApp, double uCl, d
 /// any scale. Returns false when the interface is parallel to the wall (`|t| < tEps`), in which
 /// case `that` is zeroed and no contact-line direction is defined.
 KOKKOS_INLINE_FUNCTION bool vofWallTangent(const double mfIn[3], const double nwIn[3], double tEps,
-                                           double that[3], double& cosApp) {
-  double mn = Kokkos::sqrt(mfIn[0] * mfIn[0] + mfIn[1] * mfIn[1] + mfIn[2] * mfIn[2]);
-  if (!(mn > 0.0))
-    mn = 1.0;
-  double wn = Kokkos::sqrt(nwIn[0] * nwIn[0] + nwIn[1] * nwIn[1] + nwIn[2] * nwIn[2]);
-  if (!(wn > 0.0))
-    wn = 1.0;
-  const double mh[3] = {mfIn[0] / mn, mfIn[1] / mn, mfIn[2] / mn};
-  const double nw[3] = {nwIn[0] / wn, nwIn[1] / wn, nwIn[2] / wn};
+                                           double that[3], double& cosApp, const VofMetric& g) {
+  // Phase 3 (V4.3): the apparent angle and the in-wall direction are PHYSICAL, and both inputs
+  // arrive as index-space gradients — `vofPhysNormal` is the pullback, exactly as in
+  // `vofWettingPlane`. At the unit metric it divides by 1.0 and returns `m/|m|`, so the two
+  // normalisations below are the ones this function always did, bit for bit. `that` comes back as
+  // a PHYSICAL unit direction; the caller that steps on the index lattice pulls it back itself.
+  double mh[3] = {mfIn[0], mfIn[1], mfIn[2]};
+  if (!(vofPhysNormal(mfIn, g, mh) > 0.0)) {
+    mh[0] = mfIn[0];
+    mh[1] = mfIn[1];
+    mh[2] = mfIn[2];
+  }
+  double nw[3] = {nwIn[0], nwIn[1], nwIn[2]};
+  if (!(vofPhysNormal(nwIn, g, nw) > 0.0)) {
+    nw[0] = nwIn[0];
+    nw[1] = nwIn[1];
+    nw[2] = nwIn[2];
+  }
   cosApp = mh[0] * nw[0] + mh[1] * nw[1] + mh[2] * nw[2];
   double t[3] = {mh[0] - cosApp * nw[0], mh[1] - cosApp * nw[1], mh[2] - cosApp * nw[2]};
   const double tn = Kokkos::sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
@@ -175,6 +184,12 @@ KOKKOS_INLINE_FUNCTION bool vofWallTangent(const double mfIn[3], const double nw
   for (int d = 0; d < 3; ++d)
     that[d] = t[d] / tn;
   return true;
+}
+
+/// Unit-metric overload (isotropic cells) — the pre-Phase-3 signature, unchanged arithmetic.
+KOKKOS_INLINE_FUNCTION bool vofWallTangent(const double mfIn[3], const double nwIn[3], double tEps,
+                                           double that[3], double& cosApp) {
+  return vofWallTangent(mfIn, nwIn, tEps, that, cosApp, VofMetric{});
 }
 
 /// `U_cl = +u . t_hat`: positive when the LIQUID ADVANCES.
@@ -206,6 +221,8 @@ struct VofDynamicWetting {
   bool dynamic = false;      ///< the Cox-Voinov correction is configured
   bool hysteresis = false;   ///< theta_a / theta_r are configured
   double thetaA = 0.0, thetaR = 0.0;
+  /// The anisotropic cell metric (Phase 3, V4.3); `{1,1,1}` == the pre-Phase-3 arithmetic.
+  VofMetric metric;
   double slip = 0.1;         ///< lambda, in CELLS (Delta = 1 cell), so logRatio = -ln(slip)
   double muLiquid = 0.0;     ///< the LIQUID dynamic viscosity used in Ca_cl
   double sigma = 0.0;        ///< the surface tension used in Ca_cl (the solver resolves it)
@@ -216,6 +233,9 @@ struct VofDynamicWetting {
   double tanEps = 1e-6;      ///< below this the interface is parallel to the wall
 
   bool active() const { return dynamic || hysteresis; }
+  /// `ln(Delta/lambda)` at `Delta = 1` cell. On an ANISOTROPIC grid `Delta` is the cell size
+  /// ACROSS the wall, which is a per-contact-cell quantity, so `impose()` adds `ln(Delta)` there;
+  /// `ln(1.0) == 0.0` exactly and `x + 0.0 == x`, so the isotropic value is untouched (V4.3).
   double logRatio() const { return dynamic ? -std::log(slip) : 0.0; }
 
   // ---- state ---------------------------------------------------------------------------------
@@ -263,6 +283,7 @@ struct VofDynamicWetting {
     SField ucl = ucl_, wg = wgt_, ap = app_, tx = th_[0], ty = th_[1], tz = th_[2];
     UCField kk = adv.cellKind();
     const double pe = pureEps, te = tanEps;
+    const VofMetric gme = metric;  // `g` is the ghost width in this scope
     Kokkos::parallel_for(
         "vof::dyn::measure",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
@@ -278,15 +299,20 @@ struct VofDynamicWetting {
             return;
           double nw[3] = {0.5 * (sdf(i + sx) - sdf(i - sx)), 0.5 * (sdf(i + sy) - sdf(i - sy)),
                           0.5 * (sdf(i + sz) - sdf(i - sz))};
-          const double nn = Kokkos::sqrt(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]);
+          // Phase 3 (V4.2): the WALK follows the physical wall normal expressed in index steps,
+          // `H^-1 n_w ~ H^-2 grad_xi(sdf)`, with ONE normalisation — identical to `nw/|nw|` at the
+          // unit metric. `nw` itself stays the raw index gradient: `vofWallTangent` pulls it back.
+          double wk[3] = {nw[0] / (gme.h[0] * gme.h[0]), nw[1] / (gme.h[1] * gme.h[1]),
+                          nw[2] / (gme.h[2] * gme.h[2])};
+          const double nn = Kokkos::sqrt(wk[0] * wk[0] + wk[1] * wk[1] + wk[2] * wk[2]);
           if (!(nn > 1e-12))
             return;
           for (int d = 0; d < 3; ++d)
-            nw[d] /= nn;
+            wk[d] /= nn;
           for (int step = 1; step <= 4; ++step) {
-            const int fx = x + static_cast<int>(Kokkos::round(step * nw[0]));
-            const int fy = y + static_cast<int>(Kokkos::round(step * nw[1]));
-            const int fz = z + static_cast<int>(Kokkos::round(step * nw[2]));
+            const int fx = x + static_cast<int>(Kokkos::round(step * wk[0]));
+            const int fy = y + static_cast<int>(Kokkos::round(step * wk[1]));
+            const int fz = z + static_cast<int>(Kokkos::round(step * wk[2]));
             if (fx < 0 || fy < 0 || fz < 0 || fx >= e.x || fy >= e.y || fz >= e.z)
               return;
             const long fi = L3(fx, fy, fz, e);
@@ -337,15 +363,35 @@ struct VofDynamicWetting {
             if (cnt == 0)
               return;
             const double inv = 1.0 / static_cast<double>(cnt);
-            const double uu[3] = {uAcc[0] * inv, uAcc[1] * inv, uAcc[2] * inv};
+            // `u_a = h_a v_a` (the index -> physical velocity map, Phase 1 `velToPhys(a)` without
+            // the tRef that cancels in `U_cl/|u|`): the contact-line speed is a PHYSICAL projection
+            // on a PHYSICAL direction. Identity at the unit metric.
+            const double uu[3] = {uAcc[0] * inv * gme.h[0], uAcc[1] * inv * gme.h[1],
+                                  uAcc[2] * inv * gme.h[2]};
             double that[3], cosApp;
-            const bool ok = vofWallTangent(mAcc, nw, te, that, cosApp);
+            const bool ok = vofWallTangent(mAcc, nw, te, that, cosApp, gme);
             ap(i) = Kokkos::acos(cosApp < -1.0 ? -1.0 : (cosApp > 1.0 ? 1.0 : cosApp));
             wg(i) = 1.0;
             if (ok) {
-              tx(i) = that[0];
-              ty(i) = that[1];
-              tz(i) = that[2];
+              // The stored tangent is what `impose()` STEPS along on the index lattice, so it is
+              // the index pullback `H^-1 t_hat`, renormalized once.
+              //
+              // RULE B(3) GUARD (`flow/doc/anisotropic_vof.md` §1) — the ONLY one on the VoF half.
+              // `that` is already an L2-unit vector, but its norm is 1.0 only to round-off, so a
+              // second normalisation would perturb the stored bits on the isotropic path. The
+              // pullback is the identity there, so it is skipped outright.
+              double ti[3] = {that[0], that[1], that[2]};
+              if (!gme.isotropic()) {
+                for (int d = 0; d < 3; ++d)
+                  ti[d] = that[d] / gme.h[d];
+                const double tin = Kokkos::sqrt(ti[0] * ti[0] + ti[1] * ti[1] + ti[2] * ti[2]);
+                if (tin > 0.0)
+                  for (int d = 0; d < 3; ++d)
+                    ti[d] /= tin;
+              }
+              tx(i) = ti[0];
+              ty(i) = ti[1];
+              tz(i) = ti[2];
               ucl(i) = vofContactLineSpeed(uu, that);
             }
             return;

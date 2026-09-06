@@ -64,6 +64,16 @@ using peclet::flow::vof::kMcSrcPlic;
 using peclet::flow::vof::kMcDepositCentroid;
 using peclet::flow::vof::kMcDepositSplit;
 using peclet::flow::vof::plicNormalizeL1;
+using peclet::flow::vof::VofMetric;               // Phase 3 (K4/K5)
+using peclet::flow::vof::vofIndexNormal;
+using peclet::flow::vof::vofPhysNormal;
+using peclet::flow::vof::plicAreaMetric;
+using peclet::flow::vof::PcGradFit;
+using peclet::flow::vof::pcGradWeight;
+using peclet::flow::vof::pcGradAdd;
+using peclet::flow::vof::pcGradSolve;
+using peclet::flow::vof::pcOffsetDistance;
+using peclet::flow::vof::pcCentreDistance;
 
 int failures = 0;
 #define CHECK(cond)                                                                      \
@@ -930,6 +940,191 @@ void inert() {
   CHECK(diff == 0.0);
 }
 
+
+// ============================================== PHASE 3 GATES K4 / K5: anisotropic cells
+//
+// `flow/doc/anisotropic_vof.md` §7 (decision V5) and §11 K4/K5.
+//
+// K4 — the interfacial AREA is a physical area: the unit-cube polygon area times `det(H) s(m)`
+//      (the cofactor transformation of the area vector), and the marching-tetrahedra sheet is CUT
+//      in index space and MEASURED in physical space.
+// K5 — the one-sided gradient fit must be fed PHYSICAL sample offsets. This is the discriminating
+//      gate of the whole phase-change half: with INDEX offsets the fitted `dT/dn` is wrong by the
+//      shape factor `s(m)`, which reaches a factor ~2 at the metrics below — so a fit that passes
+//      here cannot be reading index distances.
+void anisoAreaAndGradient() {
+  std::printf("\nK4/K5 (Phase 3): anisotropic area and one-sided gradient\n");
+  const double hs[3][3] = {{1.0, 1.0, 1.0}, {1.0, 1.0, 2.0}, {2.0, 1.5, 4.0}};
+  const double ns[4][3] = {{1.0, 0.0, 0.0},
+                           {0.6, -0.8, 0.0},
+                           {0.4243, -0.7071, 0.5657},
+                           {0.5774, 0.5774, 0.5774}};
+
+  // ---- K4a: plicAreaMetric against the analytic area of the plane's cross-section --------------
+  double worstA = 0.0;
+  long bitA = 0, totA = 0;
+  for (int q = 0; q < 3; ++q) {
+    const VofMetric g{{hs[q][0], hs[q][1], hs[q][2]}};
+    for (int p = 0; p < 4; ++p) {
+      const double* n = ns[p];
+      // the plane n.x = d through the cell centre: index normal m = H n
+      double m[3];
+      vofIndexNormal(n, g, m);
+      const double alpha = 0.5 * (m[0] + m[1] + m[2]);
+      const double got = plicAreaMetric(m[0], m[1], m[2], alpha, g);
+      // ORACLE: the area of the cross-section of the BOX [0,h0]x[0,h1]x[0,h2] by a plane through
+      // its centre with unit normal n, by direct 2-D quadrature of the projected footprint.
+      //   A = (footprint area on the plane most normal to n) / |n . e_d|
+      int d = 0;
+      for (int k = 1; k < 3; ++k)
+        if (std::fabs(n[k]) > std::fabs(n[d]))
+          d = k;
+      const int t1 = (d + 1) % 3, t2 = (d + 2) % 3;
+      const int sub = 2000;
+      const double w1 = g.h[t1] / sub, w2 = g.h[t2] / sub;
+      long inside = 0;
+      for (int b = 0; b < sub; ++b)
+        for (int a = 0; a < sub; ++a) {
+          double x[3];
+          x[t1] = (a + 0.5) * w1;
+          x[t2] = (b + 0.5) * w2;
+          // solve n.x = d_plane for x[d]
+          const double dPlane = 0.5 * (n[0] * g.h[0] + n[1] * g.h[1] + n[2] * g.h[2]);
+          x[d] = (dPlane - n[t1] * x[t1] - n[t2] * x[t2]) / n[d];
+          if (x[d] >= 0.0 && x[d] <= g.h[d])
+            ++inside;
+        }
+      const double proj = (double)inside * w1 * w2;
+      const double ref = proj / std::fabs(n[d]);
+      const double rel = std::fabs(got - ref) / std::fmax(ref, 1e-12);
+      worstA = std::fmax(worstA, rel);
+      // RULE B on the isotropic metric: exactly plicArea
+      if (q == 0) {
+        ++totA;
+        if (got == plicArea(m[0], m[1], m[2], alpha))
+          ++bitA;
+      }
+    }
+  }
+  std::printf("  K4a plicAreaMetric vs a 2000^2 footprint quadrature: max rel %.3e (gate 2e-3,\n"
+              "      the quadrature's own 1/sub floor); isotropic == plicArea bitwise %ld/%ld\n",
+              worstA, bitA, totA);
+  CHECK(worstA < 2e-3);
+  CHECK(bitA == totA);
+
+  // ---- K4b: the JOINED marching-tetrahedra sheet on a stretched dual cube -----------------------
+  double worstMc = 0.0;
+  long bitMc = 0, totMc = 0;
+  for (int q = 0; q < 3; ++q) {
+    const VofMetric g{{hs[q][0], hs[q][1], hs[q][2]}};
+    for (int p = 0; p < 4; ++p) {
+      const double* n = ns[p];
+      double m[3];
+      vofIndexNormal(n, g, m);
+      const double qn = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+      const double mu[3] = {m[0] / qn, m[1] / qn, m[2] / qn};  // L2-unit INDEX normal
+      for (double off = -0.3; off <= 0.31; off += 0.15) {
+        McVertex v[8];
+        bool crossed = false;
+        for (int k = 0; k < 8; ++k) {
+          double pc[3];
+          peclet::flow::vof::mcCornerPos(k, pc);
+          // an exact index-space signed distance to the plane through the cube centre + off
+          // The index-space distance to the plane, on the L2-unit index normal (so `psi` is a
+          // true distance and `kMcSrcPlic` interpolates it exactly, as the isotropic gate does).
+          const double phi = mu[0] * (pc[0] - 0.5) + mu[1] * (pc[1] - 0.5) + mu[2] * (pc[2] - 0.5) -
+                             off;
+          v[k].psi = phi;
+          v[k].d = phi;
+          v[k].n[0] = mu[0];
+          v[k].n[1] = mu[1];
+          v[k].n[2] = mu[2];
+          v[k].has = true;
+          if (k && ((v[k].psi < 0.0) != (v[0].psi < 0.0)))
+            crossed = true;
+        }
+        if (!crossed)
+          continue;
+        // exact: the unit-cube polygon area of the same plane, mapped by det(H) s(m)
+        const double alpha = 0.5 * (mu[0] + mu[1] + mu[2]) + off;
+        const double exact = plicAreaMetric(mu[0], mu[1], mu[2], alpha, g);
+        if (!(exact > 1e-6))
+          continue;
+        double sum = 0.0, sumIso = 0.0;
+        for (int lc = 0; lc < 8; ++lc) {
+          sum += mcCubeCornerArea(v, lc, kMcSrcPlic, kMcDepositCentroid, g);
+          sumIso += mcCubeCornerArea(v, lc, kMcSrcPlic, kMcDepositCentroid);
+        }
+        worstMc = std::fmax(worstMc, std::fabs(sum - exact) / exact);
+        if (q == 0) {
+          ++totMc;
+          if (sum == sumIso)
+            ++bitMc;
+        }
+      }
+    }
+  }
+  std::printf("  K4b joined sheet on a stretched plane: max rel |sum - exact| %.3e (gate 1e-13);"
+              "\n      isotropic == the unit-metric overload bitwise %ld/%ld\n", worstMc, bitMc,
+              totMc);
+  CHECK(worstMc < 1e-13);
+  CHECK(bitMc == totMc);
+
+  // ---- K5: the one-sided fit on PHYSICAL offsets ------------------------------------------------
+  //
+  // Manufactured: a plane interface through the centre cell, `T = T_G + G phi_phys` in the gas.
+  // The linear fit through the interface value is EXACT for a linear profile — but only if the
+  // sample distances are the physical ones. The `index` column is the same computation with the
+  // raw integer offsets: its error is the shape factor and is what this gate excludes.
+  double worstPhys = 0.0, worstIdx = 0.0;
+  for (int q = 1; q < 3; ++q) {  // q = 0 is isotropic, where the two agree by construction
+    const VofMetric g{{hs[q][0], hs[q][1], hs[q][2]}};
+    for (int p = 0; p < 4; ++p) {
+      const double* n = ns[p];
+      double m[3];
+      vofIndexNormal(n, g, m);
+      double np[3];
+      const double sMet = vofPhysNormal(m, g, np);
+      CHECK(sMet > 0.0);
+      const double alpha = 0.5 * (m[0] + m[1] + m[2]);  // plane through the centre cell's centre
+      const double phic = pcCentreDistance(m[0], m[1], m[2], alpha) / sMet;
+      const double Gtrue = 3.7, Tg = 1.5;
+      PcGradFit fp, fi;
+      for (int dz = -2; dz <= 2; ++dz)
+        for (int dy = -2; dy <= 2; ++dy)
+          for (int dx = -2; dx <= 2; ++dx) {
+            if (dx == 0 && dy == 0 && dz == 0)
+              continue;
+            const double di[3] = {(double)dx, (double)dy, (double)dz};
+            double dp[3];
+            g.toPhys(di, dp);
+            const double phiP = pcOffsetDistance(phic, np, dp[0], dp[1], dp[2]);
+            if (!(phiP > 0.0))
+              continue;  // gas side only
+            const double T = Tg + Gtrue * phiP;  // the manufactured PHYSICAL profile
+            const double wP = pcGradWeight(dp[0], dp[1], dp[2], np);
+            if (wP > 0.0)
+              pcGradAdd(fp, wP, phiP, T, Tg);
+            // the same samples read with INDEX distances (the pre-Phase-3 arithmetic)
+            const double phiI = pcOffsetDistance(pcCentreDistance(m[0], m[1], m[2], alpha), np,
+                                                 (double)dx, (double)dy, (double)dz);
+            const double wI = pcGradWeight(dx, dy, dz, np);
+            if (wI > 0.0)
+              pcGradAdd(fi, wI, phiI, T, Tg);
+          }
+      if (fp.n >= 3) {
+        worstPhys = std::fmax(worstPhys, std::fabs(pcGradSolve(fp) - Gtrue) / Gtrue);
+        worstIdx = std::fmax(worstIdx, std::fabs(pcGradSolve(fi) - Gtrue) / Gtrue);
+      }
+    }
+  }
+  std::printf("  K5 one-sided dT/dn on a linear profile:  PHYSICAL offsets rel err %.3e"
+              " (gate 1e-12)\n      the same fit on INDEX offsets: %.3e  <- what the metric"
+              " removes\n", worstPhys, worstIdx);
+  CHECK(worstPhys < 1e-12);
+  CHECK(worstIdx > 1e-2);  // the gate is only discriminating while the two genuinely differ
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -942,6 +1137,7 @@ int main(int argc, char** argv) {
     quadraticGradientGate();
     gfmThetaGate();
     gfmSecondOrderGate();
+    anisoAreaAndGradient();
     p0a();
     p0b();
     p1();

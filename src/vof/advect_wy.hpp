@@ -402,6 +402,14 @@ class WyAdvector {
   /// The fluid-only Youngs normal of each fluid cell (`buildWettingNormals`, then exchanged).
   SField wettingNormal(int d) const { return mfl_[d]; }
   /// Which `VofWettingPivot` anchors the theta-plane (a measured ablation; see `wetting.hpp`).
+
+  /// The anisotropic cell metric (Phase 3, `flow/doc/anisotropic_vof.md` §6). `{1,1,1}` — the
+  /// default and every isotropic run — reproduces the pre-Phase-3 arithmetic bit for bit.
+  /// `Solver::pushVofMetric()` sets it. NOTE `h_` above stays 1: the Weymouth-Yue sweeps run on
+  /// the unit lattice and their Courant number `v dt'` IS the physical `u dt/h_a`, per axis
+  /// (PHYSICAL_UNITS_PLAN deviation 1). Only the WETTING band fill, which rotates a normal and
+  /// walks along a physical direction, reads this metric.
+  VofMetric metric;
   int wettingPivot = kVofPivotVolume;
   /// Below `|sin(theta_apparent)| = wettingTangentEps` the interface is parallel to the wall and no
   /// rotation is defined.
@@ -1337,6 +1345,7 @@ class WyAdvector {
     UCField fs = fill_, mk = mark_, kk = kind_, wb = wetB_;
     const int pivot = wettingPivot;
     const double tEps = wettingTangentEps, pureEps = wettingPureEps;
+    const VofMetric gme = metric;  // `g` is the ghost width in this scope
     Kokkos::parallel_for(
         "vof::wy::band_fill_theta",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
@@ -1347,18 +1356,26 @@ class WyAdvector {
           if (fs(i) != kVofFillNone)
             return;  // fluid, or already carrying data
           // The wall normal, solid -> fluid, from the exchanged SDF. Depth <= 2 guarantees the
-          // central difference stays inside the g = 3 block.
+          // central difference stays inside the g = 3 block. The difference is taken on the INDEX
+          // lattice, so `gw` is an index-space gradient; `vofWettingPlane` pulls it back to the
+          // physical direction itself (V4.1).
           double nw[3] = {0.5 * (sdf(i + sx) - sdf(i - sx)), 0.5 * (sdf(i + sy) - sdf(i - sy)),
                           0.5 * (sdf(i + sz) - sdf(i - sz))};
-          const double nn = Kokkos::sqrt(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]);
+          // Phase 3 (V4.2): the WALK is an index walk along the PHYSICAL wall normal, i.e. along
+          // `H^-1 n_w ~ H^-2 grad_xi(sdf)`. Written as one division per axis followed by ONE L2
+          // normalisation, so at `metric.h = {1,1,1}` it is `gw/|gw|` — today's vector, bit for
+          // bit (a second normalisation of an already-unit vector would NOT be).
+          double wk[3] = {nw[0] / (gme.h[0] * gme.h[0]), nw[1] / (gme.h[1] * gme.h[1]),
+                          nw[2] / (gme.h[2] * gme.h[2])};
+          const double nn = Kokkos::sqrt(wk[0] * wk[0] + wk[1] * wk[1] + wk[2] * wk[2]);
           if (nn > 1e-12) {
-            nw[0] /= nn;
-            nw[1] /= nn;
-            nw[2] /= nn;
+            wk[0] /= nn;
+            wk[1] /= nn;
+            wk[2] /= nn;
             for (int step = 1; step <= 4; ++step) {
-              const int fx = x + static_cast<int>(Kokkos::round(step * nw[0]));
-              const int fy = y + static_cast<int>(Kokkos::round(step * nw[1]));
-              const int fz = z + static_cast<int>(Kokkos::round(step * nw[2]));
+              const int fx = x + static_cast<int>(Kokkos::round(step * wk[0]));
+              const int fy = y + static_cast<int>(Kokkos::round(step * wk[1]));
+              const int fz = z + static_cast<int>(Kokkos::round(step * wk[2]));
               if (fx < 0 || fy < 0 || fz < 0 || fx >= e.x || fy >= e.y || fz >= e.z)
                 break;
               const long fi = L3(fx, fy, fz, e);
@@ -1390,7 +1407,7 @@ class WyAdvector {
                         double mt2[3], al2, ca2;
                         const double t2 = th(i);
                         vofWettingPlane(mg, cg, nw, Kokkos::cos(t2), Kokkos::sin(t2), sdf(gi),
-                                        pivot, tEps, mt2, al2, ca2);
+                                        pivot, tEps, mt2, al2, ca2, gme);
                         const int ds2[3] = {x - (fx + kx), y - (fy + ky), z - (fz + kz)};
                         acc2 += vofWettingFraction(mt2, al2, ds2);
                         ++cnt2;
@@ -1407,7 +1424,7 @@ class WyAdvector {
               const double t0 = th(i);
               const int br =
                   vofWettingPlane(mf, cf, nw, Kokkos::cos(t0), Kokkos::sin(t0), sdf(fi), pivot,
-                                  tEps, mth, alphaTh, cosApp);
+                                  tEps, mth, alphaTh, cosApp, gme);
               const int ds[3] = {x - fx, y - fy, z - fz};
               c(i) = vofWettingFraction(mth, alphaTh, ds);
               ap(i) = Kokkos::acos(cosApp < -1.0 ? -1.0 : (cosApp > 1.0 ? 1.0 : cosApp));

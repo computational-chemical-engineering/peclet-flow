@@ -90,6 +90,16 @@ KOKKOS_INLINE_FUNCTION double hfAreaElement(const double h[9]) {
   return Kokkos::sqrt(1.0 + hx * hx + hy * hy);
 }
 
+/// The same on an ANISOTROPIC cell: the graph is the PHYSICAL `f = h_d * h_idx` over the physical
+/// transverse coordinates, so the two slopes carry the ratios of `hfPatchKappa(h, g, d)` (V2.3).
+/// Unit metric == the expression above, bit for bit.
+KOKKOS_INLINE_FUNCTION double hfAreaElement(const double h[9], const VofMetric& g, int d) {
+  const int d1 = (d + 1) % 3, d2 = (d + 2) % 3;
+  const double hx = 0.5 * (h[2 + 3 * 1] - h[0 + 3 * 1]) * (g.h[d] / g.h[d1]);
+  const double hy = 0.5 * (h[1 + 3 * 2] - h[1 + 3 * 0]) * (g.h[d] / g.h[d2]);
+  return Kokkos::sqrt(1.0 + hx * hx + hy * hy);
+}
+
 /// **Variant C — the height function's own footprint times its own metric** (`kAreaFootprint`).
 ///
 /// This is the one construction whose cell pieces TILE, and the measurement says that is the whole
@@ -124,6 +134,20 @@ KOKKOS_INLINE_FUNCTION double hfFootprintArea(const double h[9]) {
   return f * Kokkos::sqrt(1.0 + hx * hx + hy * hy);
 }
 
+/// The same on an ANISOTROPIC cell. The FOOTPRINT FRACTION `f` — which part of the transverse
+/// unit square this cell's piece of the graph covers — is cell-crossing bookkeeping in INDEX
+/// units and is unchanged; the PHYSICAL area is that fraction times the physical footprint
+/// `h_d1 h_d2` times the physical slope factor. Unit metric: `f * 1.0 * sqrt(1+hx^2+hy^2)`.
+KOKKOS_INLINE_FUNCTION double hfFootprintArea(const double h[9], const VofMetric& g, int d) {
+  const int d1 = (d + 1) % 3, d2 = (d + 2) % 3;
+  const double hx = 0.5 * (h[2 + 3 * 1] - h[0 + 3 * 1]);
+  const double hy = 0.5 * (h[1 + 3 * 2] - h[1 + 3 * 0]);
+  const double h0 = h[1 + 3 * 1];
+  const double off = 0.5 * (hx + hy) - h0;
+  const double f = plicVolume(hx, hy, 0.0, 0.5 + off) - plicVolume(hx, hy, 0.0, -0.5 + off);
+  return f * (g.h[d1] * g.h[d2]) * hfAreaElement(h, g, d);
+}
+
 /// The unit surface normal implied by the SAME 3x3 patch of heights, in world components.
 /// `x_d = orient h(x_d1, x_d2)` has normal `(-h_x, -h_y, 1)` in the frame `(d1, d2, d)`, up to a
 /// global sign that no consumer here cares about (`plicArea` is invariant under `m -> -m` with
@@ -134,6 +158,19 @@ KOKKOS_INLINE_FUNCTION void hfSurfaceNormal(const double h[9], int d, double m[3
   const double hx = 0.5 * (h[2 + 3 * 1] - h[0 + 3 * 1]);
   const double hy = 0.5 * (h[1 + 3 * 2] - h[1 + 3 * 0]);
   const int d1 = (d + 1) % 3, d2 = (d + 2) % 3;
+  const double inv = 1.0 / Kokkos::sqrt(1.0 + hx * hx + hy * hy);
+  m[d1] = -hx * inv;
+  m[d2] = -hy * inv;
+  m[d] = inv;
+}
+
+/// The same on an ANISOTROPIC cell — the PHYSICAL unit normal of the graph, i.e. the same
+/// expression with the physical slopes. Unit metric == the overload above, bit for bit.
+KOKKOS_INLINE_FUNCTION void hfSurfaceNormal(const double h[9], int d, const VofMetric& g,
+                                            double m[3]) {
+  const int d1 = (d + 1) % 3, d2 = (d + 2) % 3;
+  const double hx = 0.5 * (h[2 + 3 * 1] - h[0 + 3 * 1]) * (g.h[d] / g.h[d1]);
+  const double hy = 0.5 * (h[1 + 3 * 2] - h[1 + 3 * 0]) * (g.h[d] / g.h[d2]);
   const double inv = 1.0 / Kokkos::sqrt(1.0 + hx * hx + hy * hy);
   m[d1] = -hx * inv;
   m[d2] = -hy * inv;
@@ -151,23 +188,32 @@ KOKKOS_INLINE_FUNCTION void pvSurfaceNormal(const double a[6], const double t1[3
     m[i] = (-a[1] * t1[i] - a[2] * t2[i] + nn[i]) * inv;
 }
 
-/// Turn an accurate unit normal `ns` into the cell's interfacial area, given the cell's MYC plane
-/// (`m`, `alpha`) and its colour `c`. `mode` selects the construction (see the file header).
-///
 /// The projection axis of `kAreaMetric` is the one `ns` is most aligned with — the column
 /// direction on tiers 1/2 by construction, and the same choice on tier 3 — because the footprint
-/// factor `|n.e_d|` is the one that stays farthest from zero there.
+/// factor `|n.e_d|` is the one that stays farthest from zero there. `kAreaPlic` returns
+/// `plicArea(m, alpha)` unchanged (times the metric), so the old behaviour is one branch and not a
+/// special case.
 ///
-/// Returns `plicArea(m, alpha)` unchanged for `kAreaPlic`, so the old behaviour is one branch and
-/// not a special case.
+/// Turn an accurate PHYSICAL unit normal `ns` into the cell's PHYSICAL interfacial area (in
+/// `hRef^2`), given the cell's MYC plane (`m`, `alpha`) in INDEX space and its colour `c`.
+/// `mode` selects the construction (see the file header).
+///
+/// **Phase 3 (`flow/doc/anisotropic_vof.md` §7, V5.1).** A unit-cube polygon area `A_xi` is the
+/// physical area `A_xi * det(H) * s(m)` (`plicAreaMetric`); `ns` is a physical direction, so the
+/// footprint ratio of `kAreaMetric` is taken between the two PHYSICAL normals. Unit metric:
+/// `det = 1`, `s = q/q = 1`, and the physical normal of `m` is `m/|m|` — today's arithmetic.
 KOKKOS_INLINE_FUNCTION double interfaceAreaFromNormal(int mode, double mx, double my, double mz,
-                                                      double alpha, double c, const double ns[3]) {
-  const double aPlic = plicArea(mx, my, mz, alpha);
+                                                      double alpha, double c, const double ns[3],
+                                                      const VofMetric& g) {
+  const double m[3] = {mx, my, mz};
+  const double aPlic = plicAreaMetric(mx, my, mz, alpha, g);
   if (mode == kAreaPlic)
     return aPlic;
   if (mode == kAreaNormal) {
-    const double al = plicAlpha(ns[0], ns[1], ns[2], c);
-    return plicArea(ns[0], ns[1], ns[2], al);
+    double mi[3];
+    vofIndexNormal(ns, g, mi);  // the accurate PHYSICAL normal, pushed to index space
+    const double al = plicAlpha(mi[0], mi[1], mi[2], c);
+    return plicAreaMetric(mi[0], mi[1], mi[2], al, g);
   }
   // kAreaMetric: keep the PLIC footprint, replace the slope.
   int d = 0;
@@ -182,11 +228,16 @@ KOKKOS_INLINE_FUNCTION double interfaceAreaFromNormal(int mode, double mx, doubl
   }
   if (!(best > 0.0))
     return aPlic;
-  const double q = Kokkos::sqrt(mx * mx + my * my + mz * mz);
-  if (!(q > 0.0))
+  double np[3];
+  if (!(vofPhysNormal(m, g, np) > 0.0))
     return aPlic;
-  const double md = (d == 0) ? mx : ((d == 1) ? my : mz);
-  return aPlic * (Kokkos::fabs(md) / q) / best;
+  return aPlic * Kokkos::fabs(np[d]) / best;
+}
+
+/// Unit-metric overload (isotropic cells) — the pre-Phase-3 signature, unchanged arithmetic.
+KOKKOS_INLINE_FUNCTION double interfaceAreaFromNormal(int mode, double mx, double my, double mz,
+                                                      double alpha, double c, const double ns[3]) {
+  return interfaceAreaFromNormal(mode, mx, my, mz, alpha, c, ns, VofMetric{});
 }
 
 }  // namespace peclet::flow::vof

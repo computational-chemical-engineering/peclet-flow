@@ -592,6 +592,132 @@ void gateDeviceHost() {
     CHECK(dmax < 1e-14);
   }
 }
+
+// ------------------------------------------------------------------ K1 (Phase 3): the metric
+// PHASE 3 GATE K1 — PLIC on ANISOTROPIC cells (`flow/doc/anisotropic_vof.md` §3, §11 K1).
+//
+// The design claim under test: **a stretched cell is the unit cube of the index coordinates and
+// the PLIC toolbox is already its normalised formulation.** A physical plane `n . x = d` over the
+// box `[0,h_x] x [0,h_y] x [0,h_z]` cuts the same VOLUME FRACTION as the index plane `m . xi = d`
+// with `m = H n` cuts out of the unit cube — so `plicVolume` needs no metric at all, and
+// `planeCellFractionAniso` is one call to it.
+//
+// Two things are checked. (a) The fraction against an INDEPENDENT oracle: `refVolume`, the
+// inclusion-exclusion series this file already carries, evaluated on the rescaled normal in long
+// double. (b) The unit metric reproduces the scalar-h helper BITWISE, which is the Rule B claim
+// that keeps the whole isotropic battery unchanged.
+void gateAnisoMetric() {
+  std::printf("\n=== K1: PLIC on anisotropic cells (metric-free volumes) ===\n");
+  Rng r(0xA173C0DEu);
+  const int N = 200000;
+
+  double worst = 0.0, worstBox = 0.0;
+  long nOra = 0;
+  for (int i = 0; i < N; ++i) {
+    // a cell metric spanning a factor 16 between the axes
+    const double h[3] = {std::pow(2.0, -2.0 + 4.0 * r.uniform()),
+                         std::pow(2.0, -2.0 + 4.0 * r.uniform()),
+                         std::pow(2.0, -2.0 + 4.0 * r.uniform())};
+    const VofMetric g{{h[0], h[1], h[2]}};
+    double n[3];
+    do {
+      n[0] = r.sym();
+      n[1] = r.sym();
+      n[2] = r.sym();
+    } while (n[0] * n[0] + n[1] * n[1] + n[2] * n[2] > 1.0);
+    // The INDEX normal is what the oracle has to be well conditioned for (the metric changes the
+    // conditioning), so the well-behaved-sample cut of gate A is applied AFTER the rescale — the
+    // inclusion-exclusion series, not plicVolume, is the inaccurate side near an axis.
+    double mi[3] = {n[0] * h[0], n[1] * h[1], n[2] * h[2]};
+    const double s1 = std::fabs(mi[0]) + std::fabs(mi[1]) + std::fabs(mi[2]);
+    if (!(s1 > 0.0))
+      continue;
+    const double amin = std::fmin(std::fmin(std::fabs(mi[0]), std::fabs(mi[1])), std::fabs(mi[2]));
+    if (amin / s1 < 1e-2)
+      continue;
+    ++nOra;
+
+    // a global plane through a random point of the cell (so the plane actually cuts it)
+    const double x0 = r.sym(), y0 = r.sym(), z0 = r.sym();
+    const double px = x0 + h[0] * r.uniform(), py = y0 + h[1] * r.uniform(),
+                 pz = z0 + h[2] * r.uniform();
+    const double aG = n[0] * px + n[1] * py + n[2] * pz;
+
+    const double got = planeCellFractionAniso(n[0], n[1], n[2], aG, x0, y0, z0, g);
+    // ORACLE: the same statement in the index frame, in long double.
+    const double aLoc = aG - (n[0] * x0 + n[1] * y0 + n[2] * z0);
+    const double ref = (double)refVolume(mi[0], mi[1], mi[2], aLoc);
+    worst = std::fmax(worst, std::fabs(got - ref));
+
+    // the donor-cell flux slab of the SAME stretched cell, as a fraction of the whole cell
+    const double f = 0.25 + 0.5 * r.uniform();
+    const double slab = plicSlabVolume(mi[0], mi[1], mi[2], aLoc, 0, 0.0, f);
+    const double refS = f * (double)refVolume(mi[0] * f, mi[1], mi[2], aLoc);
+    worstBox = std::fmax(worstBox, std::fabs(slab - refS));
+  }
+  std::printf("  max |frac - oracle| over %ld well-conditioned (n, alpha, h in [0.25,4]^3): %.3e\n",
+              nOra, worst);
+  std::printf("  max |slab - oracle| (stretched donor flux)                              : %.3e\n",
+              worstBox);
+  CHECK(worst < 1e-14);
+  CHECK(worstBox < 1e-14);
+
+  // RULE B: the unit metric reproduces the scalar-h helper BIT FOR BIT — the claim the whole
+  // `extent=None` battery rests on.
+  {
+    std::vector<double> mx, my, mz, vv;
+    makeSamples(N, mx, my, mz, vv, 0x51D3ACC1u);
+    Rng r2(0xBEEFu);
+    long bitwise = 0, tot = 0;
+    for (int i = 0; i < N; ++i) {
+      const double hh = 0.5 + r2.uniform();
+      const VofMetric gu{{hh, hh, hh}};
+      const double x0 = r2.sym(), y0 = r2.sym(), z0 = r2.sym();
+      const double aG = mx[i] * (x0 + hh * r2.uniform()) + my[i] * (y0 + hh * r2.uniform()) +
+                        mz[i] * (z0 + hh * r2.uniform());
+      const double a = planeCellFraction(mx[i], my[i], mz[i], aG, x0, y0, z0, hh);
+      const double b = planeCellFractionAniso(mx[i], my[i], mz[i], aG, x0, y0, z0, gu);
+      ++tot;
+      if (a == b)
+        ++bitwise;
+    }
+    std::printf("  isotropic metric == the scalar-h helper, bitwise: %ld/%ld\n", bitwise, tot);
+    CHECK(bitwise == tot);
+  }
+
+  // The two normal maps: `s = 1` and `n = m/|m|` EXACTLY at the unit metric (the reason every
+  // physical-frame kernel is bit-identical there), and `H^-1 (H n) = n` for any metric.
+  {
+    const VofMetric one{};
+    const VofMetric g{{0.5, 2.0, 1.25}};
+    double rt = 0.0;
+    long exact = 0, tot = 0;
+    Rng r3(0x1234u);
+    for (int i = 0; i < 2000; ++i) {
+      double m[3] = {r3.sym(), r3.sym(), r3.sym()};
+      const double q = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+      if (!(q > 1e-6))
+        continue;
+      ++tot;
+      double n1[3];
+      const double s1 = vofPhysNormal(m, one, n1);
+      if (s1 == 1.0 && n1[0] == m[0] / q && n1[1] == m[1] / q && n1[2] == m[2] / q)
+        ++exact;
+      double n2[3], mi[3], n3[3];
+      if (vofPhysNormal(m, g, n2) > 0.0) {
+        vofIndexNormal(n2, g, mi);
+        vofPhysNormal(mi, g, n3);
+        for (int d = 0; d < 3; ++d)
+          rt = std::fmax(rt, std::fabs(n3[d] - n2[d]));
+      }
+    }
+    std::printf("  vofPhysNormal at the unit metric == m/|m| exactly: %ld/%ld;"
+                "  H^-1(H n) round trip %.3e\n", exact, tot, rt);
+    CHECK(exact == tot);
+    CHECK(rt < 1e-15);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -603,6 +729,7 @@ int main(int argc, char** argv) {
     gateNormalsPlane();
     gateNormalsSphere();
     gateDeviceHost();
+    gateAnisoMetric();
   }
   Kokkos::finalize();
   if (failures == 0) {

@@ -54,7 +54,8 @@ KOKKOS_INLINE_FUNCTION bool vofIsInterface(double c, double eps) {
 template <class SF>
 KOKKOS_INLINE_FUNCTION void curvHeightCell(long i, SF c, SF mx, SF my, SF mz, SF al, SF kap, SF br,
                                            long s0, long s1, long s2, double mtol, double ptW,
-                                           double ieps, bool forceFb, bool oneDir, bool useFit) {
+                                           double ieps, bool forceFb, bool oneDir, bool useFit,
+                                           VofMetric g) {
   const long st[3] = {s0, s1, s2};
         kap(i) = 0.0;
         if (!vofIsInterface(c(i), ieps)) {
@@ -105,7 +106,9 @@ KOKKOS_INLINE_FUNCTION void curvHeightCell(long i, SF c, SF mx, SF my, SF mz, SF
             }
           if (!ok)
             continue;
-          kap(i) = hfPatchKappa(hh);
+          // Phase 3 (V2.3): the heights are in cells along `d` and the patch spans cells along
+          // `d1`/`d2`, so the metric turns them into the physical graph. Unit metric == today.
+          kap(i) = hfPatchKappa(hh, g, d);
           br(i) = static_cast<double>(t == 0 ? kCurvHf : kCurvHfMixed);
           return;
         }
@@ -116,10 +119,10 @@ KOKKOS_INLINE_FUNCTION void curvHeightCell(long i, SF c, SF mx, SF my, SF mz, SF
         // 3x3x7-per-direction footprint tier 1 already used, so it costs no extra halo.
         if (useFit) {
           const double m0 = mx(i), m1 = my(i), m2 = mz(i);
-          const double nsq = m0 * m0 + m1 * m1 + m2 * m2;
-          if (nsq > 0.0) {
-            const double invn = 1.0 / Kokkos::sqrt(nsq);
-            const double nn[3] = {m0 * invn, m1 * invn, m2 * invn};
+          const double mi[3] = {m0, m1, m2};
+          double nn[3] = {0.0, 0.0, 0.0};
+          // PHYSICAL frame (Phase 3, V2.4); identity at the unit metric.
+          if (vofPhysNormalInv(mi, g, nn) > 0.0) {
             double t1[3], t2[3];
             curvFrame(nn, t1, t2);
             double vtx[8][3], ctr[3], area;
@@ -145,7 +148,7 @@ KOKKOS_INLINE_FUNCTION void curvHeightCell(long i, SF c, SF mx, SF my, SF mz, SF
                   X[d1] = static_cast<double>(p);
                   X[d2] = static_cast<double>(q);
                   X[d] = orient * hv;  // the interface POSITION along d (h is the signed height)
-                  ptFitAdd(pf, X, org, t1, t2, nn, ptW);
+                  ptFitAdd(pf, X, org, t1, t2, nn, ptW, g);
                 }
             }
             double a[6];
@@ -163,19 +166,18 @@ KOKKOS_INLINE_FUNCTION void curvHeightCell(long i, SF c, SF mx, SF my, SF mz, SF
 template <class SF>
 KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, SF c, SF mx, SF my, SF mz, SF al, SF kap,
                                              SF br, long sy, long sz, int gr, double dW,
-                                             double cmin, double ieps) {
+                                             double cmin, double ieps, VofMetric g) {
         if (br(i) >= 0.0)
           return;
 
         const double m0 = mx(i), m1 = my(i), m2 = mz(i);
-        const double n2 = m0 * m0 + m1 * m1 + m2 * m2;
-        if (!(n2 > 0.0)) {
+        const double mi[3] = {m0, m1, m2};
+        double nn[3] = {0.0, 0.0, 0.0};
+        if (!(vofPhysNormalInv(mi, g, nn) > 0.0)) {  // PHYSICAL frame (V2.4); identity at h = 1
           kap(i) = 0.0;
           br(i) = static_cast<double>(kCurvNoEstimate);
           return;
         }
-        const double invn = 1.0 / Kokkos::sqrt(n2);
-        const double nn[3] = {m0 * invn, m1 * invn, m2 * invn};
         double t1[3], t2[3];
         curvFrame(nn, t1, t2);
 
@@ -195,7 +197,7 @@ KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, SF c, SF mx, SF my, SF mz, 
                 continue;
               const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
                                      static_cast<double>(oz)};
-              pvFitAdd(fit, mx(j), my(j), mz(j), al(j), off, org, t1, t2, nn, dW, cmin);
+              pvFitAdd(fit, mx(j), my(j), mz(j), al(j), off, org, t1, t2, nn, dW, cmin, g);
             }
 
         double a[6];
@@ -299,6 +301,11 @@ class VofCurvature {
   SField branch() const { return branch_; }
 
   // ---- tunables (all measured knobs, defaults are the literature values) ---------------------
+  /// The anisotropic cell metric (Phase 3). Default `{1,1,1}` == the pre-Phase-3 arithmetic.
+  /// `Solver::pushVofMetric()` sets it; the Wendland supports below are scaled by `metric.maxH()`
+  /// so the 5^3 stencil's farthest cell along the LONG axis stays inside the support exactly as
+  /// `d = 2.5` cells does on a cubic grid.
+  VofMetric metric;
   /// Wendland support width `d` of the PV fit, in cell units (Han et al. §5: 2.5 with S = 5).
   double weightWidth = kPvWeightWidth;
   /// Tolerance of the column monotonicity test (`hfColumnHeight`). Tight enough to reject a
@@ -502,7 +509,8 @@ class VofCurvature {
     const int g = g_;
     const long st[3] = {1, e_.x, static_cast<long>(e_.x) * e_.y};
     SField mx = mx_, my = my_, mz = mz_, al = alpha_, kap = kappa_, br = branch_;
-    const double mtol = monoTol, ptW = ptWeightWidth, ieps = interfaceEps;
+    const double mtol = monoTol, ptW = ptWeightWidth * metric.maxH(), ieps = interfaceEps;
+    const VofMetric gm = metric;  // `g` is the ghost width in this scope
     const bool forceFb = debugForceFallback, oneDir = debugSingleDirection,
                useFit = useMixedHeightFit;
     const long s0 = st[0], s1 = st[1], s2 = st[2];
@@ -525,7 +533,7 @@ class VofCurvature {
           "vof::curv::hf_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nI_),
           KOKKOS_LAMBDA(long t) {
             curvHeightCell(list(t), c, mx, my, mz, al, kap, br, s0, s1, s2, mtol, ptW, ieps,
-                           forceFb, oneDir, useFit);
+                           forceFb, oneDir, useFit, gm);
           });
       Kokkos::fence();
       return;
@@ -536,7 +544,7 @@ class VofCurvature {
                                                       {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           curvHeightCell(L3(x, y, z, e), c, mx, my, mz, al, kap, br, s0, s1, s2, mtol, ptW, ieps,
-                         forceFb, oneDir, useFit);
+                         forceFb, oneDir, useFit, gm);
         });
     Kokkos::fence();
   }
@@ -548,7 +556,8 @@ class VofCurvature {
     const I3 e = e_, n = n_;
     const int g = g_, gr = kPvHalf;
     SField mx = mx_, my = my_, mz = mz_, al = alpha_, kap = kappa_, br = branch_;
-    const double dW = weightWidth, cmin = cosMin, ieps = interfaceEps;
+    const double dW = weightWidth * metric.maxH(), cmin = cosMin, ieps = interfaceEps;
+    const VofMetric gm = metric;  // `g` is the ghost width in this scope
     const long sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
     if (useWorklist) {
       // Tier 3 is a SUBSET of the interfacial cells (those tier 1/2 could not serve), so the
@@ -558,7 +567,7 @@ class VofCurvature {
       Kokkos::parallel_for(
           "vof::curv::pv_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nI_),
           KOKKOS_LAMBDA(long t) {
-            curvFallbackCell(list(t), c, mx, my, mz, al, kap, br, sy, sz, gr, dW, cmin, ieps);
+            curvFallbackCell(list(t), c, mx, my, mz, al, kap, br, sy, sz, gr, dW, cmin, ieps, gm);
           });
       Kokkos::fence();
       return;
@@ -568,7 +577,8 @@ class VofCurvature {
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
                                                       {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
-          curvFallbackCell(L3(x, y, z, e), c, mx, my, mz, al, kap, br, sy, sz, gr, dW, cmin, ieps);
+          curvFallbackCell(L3(x, y, z, e), c, mx, my, mz, al, kap, br, sy, sz, gr, dW, cmin, ieps,
+                           gm);
         });
     Kokkos::fence();
   }
