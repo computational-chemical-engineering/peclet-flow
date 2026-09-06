@@ -1,9 +1,32 @@
 # Anisotropic VoF — the geometric two-phase stack on stretched cells
 
 *Design note, 2026-09-06, Phase 3 (VoF half) of `suite/docs/PHYSICAL_UNITS_PLAN.md` (§9.5).
-Status: DESIGN — every ⚑ of §9.5's VoF half is decided below; the implementation follows the
-work orders of §10 against the gates of §11. The AMR half is `core/docs/amr_anisotropic.md`.
+Status: **IMPLEMENTED** (2026-09-06) — work orders V0–V5 landed on flow branch `aniso3`; V6 (the
+rebase onto Phase 2 and the solver gates S1–S5) is the only one open, because Phase 2 has not
+pushed its implementation yet. The AMR half is `core/docs/amr_anisotropic.md` and is ON MAIN.
 Decisions D1–D5 of the plan are taken as given and are not reopened here.*
+
+**Measured, 2026-09-06 (§11 gate numbers as run):**
+
+| gate | number |
+|---|---|
+| G0 flow `tests/kokkos` OpenMP / **CUDA** | **39/39** / **39/39** — the 36 pre-existing plus the three isotropic units gates UNCHANGED |
+| G0 flow `tests/kokkos_mpi` np = 1, 2, 4 | **103/103** |
+| G0 regression (no `--update`) | **PASS**, every metric **+0.00 %**, every `p_iter_tot` **+0.0 %**, every step count equal |
+| G0 the five verify scripts | **PASS** ×5 (poiseuille, periodic-spheres, lid-cavity, channel, bfs) |
+| K1 PLIC on stretched cells | **1.22e-15** vs the inclusion–exclusion oracle over 186 058 well-conditioned samples; slab **1.11e-15**; **200000/200000 bitwise** at the unit metric |
+| K2 curvature | sphere L1 order **2.27** on h = (1,1,2) (cubic 2.26); plane **5.6e-15**; cylinder L1 2.9e-2 (fine axis) / 1.8e-2 (coarse); `noEstimate = 0` everywhere; RULE B **0 / 54 872** cells differ |
+| K3 wetting idempotence | **6.66e-16** on (1,1,1), (1,1,2), (2,1.5,1); apparent angle 1.3e-14 deg |
+| K4 area | `plicAreaMetric` 8.6e-05 vs a 2000² quadrature (its own floor); joined sheet **5.34e-16**; isotropic bitwise |
+| K5 one-sided gradient | PHYSICAL offsets **9.60e-16**; the same fit on INDEX offsets **1.50e+00** — the discriminating control |
+
+One deviation from §11 as written: K2's plane gate is stated against a **cubic index-equivalent
+control** rather than an absolute 1e-13, because the (2.5, 1, 1.7) orientation routes 91 % of its
+cells to the PV fallback, whose normal-equations solve has its own floor — measured **8.8e-06 on
+the stretched mesh against 7.1e-05 on the cubic grid carrying the same index normal**, i.e. the
+stretched run is BETTER, and the branch census is identical (8.93 % HF both). The gate now asserts
+`stretched <= 4x its cubic control`, which is the statement that separates the metric from the
+cascade.
 
 ## 0. The result in one paragraph
 
