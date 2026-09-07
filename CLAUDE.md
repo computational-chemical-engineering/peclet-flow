@@ -180,7 +180,7 @@ u = s.get_u()   # 3-D numpy array [x,y,z];  p = s.get_p() is the physical pressu
 ```
 See the "Pressure solver options" table below and `scripts/*_sdflow.py` for the full API.
 
-### Physical domains and units (2026-09-06, `suite/docs/PHYSICAL_UNITS_PLAN.md` Phase 1)
+### Physical domains and units (2026-09-07, `suite/docs/PHYSICAL_UNITS_PLAN.md` Phases 1-2)
 
 `Solver((nx,ny,nz), extent=(Lx,Ly,Lz), origin=(0,0,0))` gives the solver a **physical domain** and it
 derives its own cell size. Everything the user writes is then in one consistent system of their own
@@ -208,11 +208,40 @@ unit system the caller uses (`docs/SCALING_ISSUES.md` #1). **The RAW field regis
 coupling does) must convert; `s.unit_scales` is the dict of factors for exactly that, and its
 `identity` entry is True on the cell-unit path where they are all 1.0.
 
-Phase 1 is **isotropic**: `extent/cells` must give the same spacing on all three axes or the
-constructor raises with the three numbers. Anisotropic cells are Phase 2 of the plan. Gates:
-`tests/kokkos` ctests `units_identity` (accessors, and BITWISE fields at `extent == cells, rho = dt = 1`)
-and `units_scale_invariance` (the same physical problem in two unit systems 1000x apart, sampled SDF and
-analytic scene, agreeing to ~1e-15 relative).
+**ANISOTROPIC cells are Phase 2, and they landed** (`doc/anisotropic_metric.md`, commits C1-C4b).
+`extent/cells` may now differ per axis on the staggered `Solver` AND on `SolverColocated`, single
+phase: sampled or scene geometry, constant or variable properties, variable density, porous
+continuity with or without implicit drag, every domain-BC type, every pressure driver and bottom,
+the velocity multigrid, scalar transport, the collocated face-interpolation modes, the hydrodynamic
+force and torque integrals (moving geometry included) and MPI. **Refused, with a `throw` naming the
+three spacings:** `enable_vof` (Phase 3); the AMR octree and the CFD-DEM coupling driver keep their
+own pre-existing guards. Three spacings agreeing to 1e-12 relative are **SNAPPED** to one, so
+`hp = w = (1,1,1)`, `vol = 1`, `aniso = false` EXACTLY and an isotropic domain stays bit-identical
+however its extent was written. Internally `hRef = min_a h_a` (the FINEST axis is exactly 1), and
+every operator carries `w_a = 1/h_a'^2` on its pressure gradient / Laplacian and `mu' w_b` on its
+viscous coefficient; the embedded closures march along the index direction `m_a = n_a/h_a'` of the
+physical normal.
+
+Both geometric multigrids **defer an axis that is already `theta = 2` times coarser than the finest
+coarsenable one** (`PECLET_FLOW_MG_ASPECT`, default 2.0, read once — a measurement knob, not a user
+setting; the rule engages only on an anisotropic domain, so isotropic hierarchies are bit-identical).
+`Solver.pressure_mg_level_ratios()` prints the level table. That rule is what makes stretched grids
+solvable at all: on the `(N, 2N, N/2)` ladder MG-PCG went **500/500/500 CAPPED → 7/8/8** and the
+Z&H sphere **24 → 10** iterations at N = 32, with the V-cycle rate 0.692 → 0.150. Caveat:
+`scripts/check_decomposition.py`'s pre-flight is a fifth copy of the level loop that takes no metric
+and still models the ISOTROPIC rule.
+
+Exactness is stated where the shipped **float** operator storage cannot mask it: `units_anisotropic_
+poiseuille` is pointwise exact (1.4e-15) at a float-representable metric `spacing (1, 0.25, 2)`, and
+keeps `(1, 0.3, 2)` at 1e-7 as a **tripwire for WO-M's float floor** (3.1e-08, and 8.7e-15 under
+`-DPECLET_FLOW_MREAL_DOUBLE`) — not a metric defect (`doc/units_escalation.md` E1).
+
+Gates: `tests/kokkos` ctests `units_identity` (accessors, and BITWISE fields at
+`extent == cells, rho = dt = 1`), `units_scale_invariance` (the same physical problem in two unit
+systems 1000x apart, sampled SDF and analytic scene, ~1e-15 relative), plus the five Phase 2 ones —
+`units_anisotropic_poiseuille`, `units_anisotropic_sphere` (Z&H drag on `(N, 2N, N/2)`),
+`units_anisotropic_tgv` (the anisotropic backward-Euler eigenvalue, 2.1e-15), `cutcellmg_aniso`
+(order + level table + V-cycle rate) and `cutcellmg_aniso_mpi` in `tests/kokkos_mpi`.
 
 ## Conventions
 

@@ -1,7 +1,7 @@
 # Anisotropic cells, single phase — the metric in every discrete operator (Phase 2 design note)
 
-**Status:** design settled 2026-09-06 (Fable). Implementation follows this note; nothing below is
-implemented yet. Plan: `suite/docs/PHYSICAL_UNITS_PLAN.md` §3.2, §5, §9.4, §9.8. Phase 1 (isotropic
+**Status:** design settled 2026-09-06 (Fable); **IMPLEMENTED AND LANDED 2026-09-07** (flow `12cac0f`,
+`735fb46`, `6cf870b`, `0d8417b`, `f168436` — see §10 and its final table). Plan: `suite/docs/PHYSICAL_UNITS_PLAN.md` §3.2, §5, §9.4, §9.8. Phase 1 (isotropic
 physical domains, flow `1e3d67d`) is the base and is not reopened. Decisions D1–D5 stand.
 
 The two ⚑ design points of §9.4 are decided here: **§5** the coarsening order for aspect ratios in both
@@ -943,6 +943,44 @@ couple `8 pi mu R^3 Omega`: `movingscene_advect_mpi` TRANSLATES, so `Omega = 0` 
 returns before its arithmetic runs. Building such a gate was deliberately out of C4b's scope. It
 belongs to the coupling campaign, and it is the one place in Phase 2 where a per-axis constant is
 carried on argument alone rather than on a measurement.
+
+### Phase 2, the final table (what shipped, and the number that proves each half)
+
+| commit | work order | what it put in | the number |
+|---|---|---|---|
+| `5285aae` | U9 | this note | — |
+| `12cac0f` | U10 | the per-axis MOMENTUM fold `b_a = mu' w_a`, `AC = idiag + 2((bx+by)+bz)`, the `!aniso` smoother dispatch, `VelocityMG::setMetric`, scalar transport | `AC` bitwise the old `idiag + 6.0*beta` at `w = (1,1,1)`; `1.0700000524520874` at `w = (1,4,¼)` |
+| `735fb46` | U11 weights | the per-axis PRESSURE weight `w_a` at the three `setOpenness` sites and every correction / cell-gradient kernel, `buildOpenness(hp)`, the §4.2 census, the §1.4 **snap**, the §7 refusals | **G1** Poiseuille pointwise exact **1.388e-15** at `spacing (1, 0.25, 2)` |
+| `6cf870b` | U11 ⚑ A | `mgChooseRatio` in all four level loops, `levelRatios()`, `PECLET_FLOW_MG_ASPECT` | **G4** stretched MG-PCG **500/500/500 CAPPED → 7/8/8**; Z&H sphere **24 → 10** iters; V-cycle rate **0.6920 → 0.1501** |
+| `0d8417b` | U12 ⚑ B | the §6 closures on the index-space normal `m`, the slip length, `ibmVolfrac`, the §4.4 forces; the collocated policy and the force integrals ADMITTED | **G2** `K_s,inf = 7.46034` = 0.2465 % of 7.442, `p_s = 2.2500`; **G3** amplitude ratio to **2.088e-15** |
+| `f168436` | E3 | the v3 wall-torque traction on its AREA vector; the last refusal lifted | `movingscene_advect_mpi` **bitwise** C4 vs C4b at one thread, all 17 digits |
+
+**G0, on every one of them:** `tests/kokkos` **43/43** and `tests/kokkos_mpi` **106/106** (np = 1, 2,
+4) on host-openmp AND nvidia-cuda; `sdflow_mpi_np1` bit-exact to single-rank; all THREE regression
+baselines at `+0.00 %` with every iteration and step count equal; the six verify scripts
+`np.array_equal` TRUE on every array.
+
+**The three things Phase 2 measured that were not asked for, and are worth carrying forward:**
+
+1. **The float operator-storage floor is the binding constraint on any anisotropic exactness claim**
+   (E1). At `spacing (1, 0.3, 2)` neither `mu' = 55.5…` nor `AC = 124.61…` is representable and the
+   whole profile is scaled by `1 − 1.06e-07`; `-DPECLET_FLOW_MREAL_DOUBLE` reads `8.674e-15`. Every
+   exactness gate in this phase is therefore stated at a float-representable metric, with the
+   production-shaped configuration kept beside it as a tripwire. `docs/SCALING_ISSUES.md` #1.
+2. **Two solver paths are not run-to-run deterministic under OpenMP**, both through
+   `Kokkos::atomic_add` over an overlay: the fluid-only star elimination (`starEliminate`, 2.2e-16 on
+   the collocated Z&H sphere) and `hydroForceTorqueReaction` (5.6e-16 on the moving-scene force).
+   Neither is a Phase 2 change — both are pre-existing — but any future byte comparison that touches
+   them has to be made at `OMP_NUM_THREADS=1`, as this phase's were.
+3. **Two isotropic-rule copies were left behind on purpose**: `CutcellMG::predict()` (the
+   `scripts/check_decomposition.py` pre-flight, C3) still models the full-coarsening rule, and §5.4's
+   aspect rule on isotropic cells after a telescoping merge is deliberately not engaged because it
+   would change bits at `extent=None`. Both are one-line experiments for the scaling campaign.
+
+**The one open item.** The anisotropic v3 wall torque is implemented and isotropic-bitwise but
+**untested against a reference** — no gate measures a ROTATING body's torque against `8 pi mu R^3
+Omega`, and the only moving-geometry test translates. It is the single place in Phase 2 where a
+per-axis constant rests on argument rather than measurement; it belongs to the coupling campaign.
 
 ---
 
