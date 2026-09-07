@@ -172,9 +172,14 @@ inline void starApplyDelta(CCField y, CCConst x, const StarOverlay& ov, int nOv,
 /// Each such face has exactly one solid side (both-solid faces carry no constraint), so no
 /// atomics. phi is read on the (extP, gP) block; the face fields live on the (ext, g) block with
 /// the o(i)-is-low-face convention (face k=+side of s == low face of the + neighbour).
+///
+/// PHASE 2 (anisotropic cells, doc/anisotropic_metric.md §3): this is a FIX-UP of what
+/// `projectCorrect` applied, and `projectCorrect` now applies `-w_a (phi_hi - phi_lo)` per axis --
+/// so the difference this kernel adds back carries the SAME per-axis weight `w_a` of the face's own
+/// axis, applied outside the existing expression.  `w = (1,1,1)` isotropic (exact).
 inline void starCorrectFaces(CCField uf, CCField vf, CCField wf, CCConst phi,
                              const StarOverlay& ov, int nOv, C3 nn, C3 ext, int g, C3 extP,
-                             int gP) {
+                             int gP, double wx = 1.0, double wy = 1.0, double wz = 1.0) {
   if (nOv <= 0)
     return;
   CCExec space;
@@ -207,16 +212,17 @@ inline void starCorrectFaces(CCField uf, CCField vf, CCField wf, CCConst phi,
         // precision matters, and it must match the operator that was actually solved.
         const double phibar = num / D;
         CCField fa[3] = {uf, vf, wf};
+        const double wv[3] = {wx, wy, wz};
         for (int k = 0; k < 6; ++k) {
           if (starAval(ov, (long)s * 6 + k, exact) <= 0.0)
             continue;
           const int a2 = k / 2;
           if ((k & 1) == 0) {
             // + side: face is the LOW face of the + neighbour; s is the LOW cell -> += phibar
-            fa[a2](idxF(nb[k][0], nb[k][1], nb[k][2])) += phibar;
+            fa[a2](idxF(nb[k][0], nb[k][1], nb[k][2])) += wv[a2] * phibar;
           } else {
             // - side: face is s's own LOW face; s is the HIGH cell -> -= phibar
-            fa[a2](idxF(ix, iy, iz)) -= phibar;
+            fa[a2](idxF(ix, iy, iz)) -= wv[a2] * phibar;
           }
         }
       });

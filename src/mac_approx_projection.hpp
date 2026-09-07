@@ -309,8 +309,27 @@ inline void buildCellFraction(CCField cs, CCConst sdf, C3 e, int g) {
 // boundary geometry the projection uses. In the interior (cs=1, o_f=1, W=0) this is exactly the
 // backward-Euler diffusion operator idt·U − mu·Lap(U) — identical to the IBM matrix M there, so the
 // defect correction (M·u − L_FV·u) vanishes and interior cells stay byte-identical to mode 0.
+//
+// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §6.1/§6.2.  The per-axis pressure/Laplacian
+// weight `w_a = 1/h_a'^2` multiplies BOTH the two-point face flux of axis `a` (area V'/h_a' over
+// distance h_a') and the wall drag of axis `a` (area W_a V'/h_a' times the physical derivative
+// (1/h_a') dU/dxi_a):
+//
+//   L_FV(U)_i = idt cs_i U_i + mu' [ sum_a w_a ( o_{a-}(U_i - U_{-a}) + o_{a+}(U_i - U_{+a}) )
+//                                    - sum_a w_a W_a g_a(xi*) ]
+//
+// and the foot point marches along the INDEX DIRECTION of the physical normal, not along the
+// covariant gradient of the sampled SDF: with g_a = ½(sdf(i+e_a) - sdf(i-e_a)) = h_a' n_a, the
+// physical unit normal is n_a = (g_a/h_a')/|g/h'| and the index direction is m_a = n_a/h_a', so
+// xi* = xi - d' m moves d' in PHYSICAL hRef units along the true normal (|h'∘m| = |n| = 1).  The
+// one-sided samples at xi* ± sigma e_a and the clamp are unchanged (trap 8: |m_a| <= |n_a| <= 1
+// since h_a' >= 1, so the foot point never moves farther per axis than it does today).
+// `w = hp = (1,1,1)` on the isotropic path, where every multiplication and division is by an exact
+// 1.0 and the whole kernel is bit-identical — no dispatch needed (§6.1).
 inline void fvViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCConst ox, CCConst oy,
-                           CCConst oz, double mu, double idt, C3 e, int g) {
+                           CCConst oz, double mu, double idt, C3 e, int g, double wx = 1.0,
+                           double wy = 1.0, double wz = 1.0, double hpx = 1.0, double hpy = 1.0,
+                           double hpz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -319,6 +338,7 @@ inline void fvViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCCon
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long st[3] = {sx, sy, sz};
         const long i = (long)x + (long)y * sy + (long)z * sz;
+        const double wv[3] = {wx, wy, wz};
         CCConst oa[3] = {ox, oy, oz};
         double W[3], of[3];  // fragment normal per axis; low/high face openness
         double diag = 0.0, offs = 0.0, aw = 0.0;
@@ -326,30 +346,35 @@ inline void fvViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCCon
           const double om = oa[a](i), op = oa[a](i + st[a]);
           W[a] = om - op;
           of[a] = om + op;  // low + high face openness
-          diag += om + op;
-          offs += om * U(i - st[a]) + op * U(i + st[a]);
+          diag += wv[a] * (om + op);
+          offs += wv[a] * (om * U(i - st[a]) + op * U(i + st[a]));
           aw += (W[a] < 0.0 ? -W[a] : W[a]);
         }
         double wall = 0.0;
-        if (aw > 1e-12) {  // centroid-anchored wall drag mu·Σ_a W_a g_a (a-priori-validated:
+        if (aw > 1e-12) {  // centroid-anchored wall drag mu·Σ_a w_a W_a g_a (a-priori-validated:
                            // fv_wallflux_apriori.py)
-          double nx = 0.5 * (sdf(i + sx) - sdf(i - sx));
-          double ny = 0.5 * (sdf(i + sy) - sdf(i - sy));
-          double nz = 0.5 * (sdf(i + sz) - sdf(i - sz));
+          // g_a = index-space central difference = h_a'·n_a; the PHYSICAL unit normal is g/h'
+          // renormalised (§6.1), and it is what `sg` and the foot-point direction are built from.
+          double nx = 0.5 * (sdf(i + sx) - sdf(i - sx)) / hpx;
+          double ny = 0.5 * (sdf(i + sy) - sdf(i - sy)) / hpy;
+          double nz = 0.5 * (sdf(i + sz) - sdf(i - sz)) / hpz;
           double nn = Kokkos::sqrt(nx * nx + ny * ny + nz * nz);
           if (nn > 1e-12) {
             nx /= nn;
             ny /= nn;
             nz /= nn;
             const double nv[3] = {nx, ny, nz};
+            // m = the index direction of n (the contravariant pull-back): stepping t along m in
+            // index space moves t in physical hRef units along the true normal.
+            const double mx = nx / hpx, my = ny / hpy, mz = nz / hpz;
             const double sdi = sdf(i);
-            // foot point p* = x − sdi·n̂, clamped into the sampleable block [1, e−2] so the two
+            // foot point p* = x − sdi·m, clamped into the sampleable block [1, e−2] so the two
             // off-cell trilinear taps (p*+2σ) never index outside the padded field (guards a NaN/
             // large sdi too — ccSampleExt only clamps integer indices, not a NaN coordinate).
             auto cl = [](double v, double hi) { return v < 1.0 ? 1.0 : (v > hi ? hi : v); };
-            const double px = cl(x - sdi * nx, e.x - 2.0);
-            const double py = cl(y - sdi * ny, e.y - 2.0);
-            const double pz = cl(z - sdi * nz, e.z - 2.0);
+            const double px = cl(x - sdi * mx, e.x - 2.0);
+            const double py = cl(y - sdi * my, e.y - 2.0);
+            const double pz = cl(z - sdi * mz, e.z - 2.0);
             for (int a = 0; a < 3; ++a) {
               const double sg = nv[a] >= 0.0 ? 1.0 : -1.0;
               const double u1 = ccSampleExt(U, e, px + (a == 0 ? sg : 0.0),
@@ -357,14 +382,14 @@ inline void fvViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCCon
               const double u2 =
                   ccSampleExt(U, e, px + (a == 0 ? 2.0 * sg : 0.0), py + (a == 1 ? 2.0 * sg : 0.0),
                               pz + (a == 2 ? 2.0 * sg : 0.0));
-              wall += W[a] * sg * (2.0 * u1 - 0.5 * u2);
+              wall += wv[a] * (W[a] * sg * (2.0 * u1 - 0.5 * u2));
             }
           }
         }
-        // FV viscous operator = idt·cs·U + μ·[Σo_f(U_i−U_nbr) − Σ_a W_a g_a].  The wall term sign
-        // is −μ Σ W_a g_a: from ∫_CV −μ∇²u = −μ[flux_out − flux_in], the wall flux g_a enters with
-        // a minus, so a resistive wall (∂u/∂n<0) ADDS to the operator (dissipative), matching the
-        // interior −μLap. (+ would be anti-dissipative and blows the solve up.)
+        // FV viscous operator = idt·cs·U + μ·[Σ w_a o_f(U_i−U_nbr) − Σ_a w_a W_a g_a].  The wall
+        // term sign is −μ Σ W_a g_a: from ∫_CV −μ∇²u = −μ[flux_out − flux_in], the wall flux g_a
+        // enters with a minus, so a resistive wall (∂u/∂n<0) ADDS to the operator (dissipative),
+        // matching the interior −μLap. (+ would be anti-dissipative and blows the solve up.)
         Lu(i) = idt * cs(i) * U(i) + mu * (diag * U(i) - offs - wall);
         (void)of;
       });
@@ -376,7 +401,16 @@ KOKKOS_INLINE_FUNCTION double eQuad(double xx, double a1, double a2, double a3) 
 }
 
 // TRUE-NORMAL wall gradient d(U)/dn at the embedded boundary of a cut cell — the Basilisk embed.h
-// `dirichlet_gradient` (no-slip U_wall = 0), in cell units (h = 1). n̂ = unit inward-to-FLUID normal
+// `dirichlet_gradient` (no-slip U_wall = 0). PHASE 2 (doc/anisotropic_metric.md §6.3): the vector it
+// is handed is the INDEX DIRECTION `m_a = n_a/h_a'` of the physical unit normal and the point offset
+// is `p = -d' m`, so every distance this routine forms — the image-plane distance
+// `t_l = (io - p_da)/m_da`, the degenerate `d0 = |p_da/m_da|` and hence the returned derivative — is
+// already PHYSICAL, in hRef units per hRef, with no metric left to apply outside. The dominant axis
+// is `argmax_a |m_a|` (it is the INDEX slope `m_t/m_da` that must stay <= 1 for the ±1 transverse
+// stencil the Basilisk j/k rounding assumes), and the 0.5 floor on `d0` is now a floor on a physical
+// distance, which is the right thing to floor. On the isotropic path m == n̂ exactly and the body
+// below is literally today's arithmetic.
+// n̂ = unit inward-to-FLUID normal
 // (∇sdf), p = boundary-point offset from the cell centre (cell units). Along the dominant-|n̂| axis
 // it places two image points 1 and 2 cells into the fluid, interpolates U there by TRANSVERSE
 // bi-quadratic interpolation of the cell-centred values (`eQuad`×`eQuad`), and fits the quadratic
@@ -483,8 +517,15 @@ KOKKOS_INLINE_FUNCTION double embedDirichletGradient(CCConst U, CCConst sdf, C3 
 // fvViscousApply but with the O(h²) true-normal derivative in place of the O(h) axis
 // reconstruction. Interior cells (area→0) reduce to idt·cs·U + μ(diag·U − offs) exactly, so the
 // mode-0 defect vanishes there.
+// PHASE 2 (doc/anisotropic_metric.md §6.3): the face terms carry the same per-axis `w_a` as
+// `fvViscousApply`, and the fragment area over the cell volume becomes |A'|/V' = sqrt(Σ_a W_a² w_a)
+// (the physical area vector is A_a = W_a V'/h_a', so |A|/V' = sqrt(Σ (W_a/h_a')²)).  The gradient
+// routine is handed the index direction `m` and the foot point `-d' m`, and returns dU/dn per hRef
+// directly (§6.1).  Exactly today's arithmetic at w = hp = (1,1,1).
 inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCConst ox,
-                              CCConst oy, CCConst oz, double mu, double idt, C3 e, int g) {
+                              CCConst oy, CCConst oz, double mu, double idt, C3 e, int g,
+                              double wx = 1.0, double wy = 1.0, double wz = 1.0, double hpx = 1.0,
+                              double hpy = 1.0, double hpz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -493,30 +534,33 @@ inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CC
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long st[3] = {sx, sy, sz};
         const long i = (long)x + (long)y * sy + (long)z * sz;
+        const double wv[3] = {wx, wy, wz};
         CCConst oa[3] = {ox, oy, oz};
         double Wv[3];
         double diag = 0.0, offs = 0.0;
         for (int a = 0; a < 3; ++a) {
           const double om = oa[a](i), op = oa[a](i + st[a]);
           Wv[a] = om - op;
-          diag += om + op;
-          offs += om * U(i - st[a]) + op * U(i + st[a]);
+          diag += wv[a] * (om + op);
+          offs += wv[a] * (om * U(i - st[a]) + op * U(i + st[a]));
         }
-        const double area = Kokkos::sqrt(Wv[0] * Wv[0] + Wv[1] * Wv[1] + Wv[2] * Wv[2]);
+        const double area = Kokkos::sqrt(Wv[0] * Wv[0] * wv[0] + Wv[1] * Wv[1] * wv[1] +
+                                         Wv[2] * Wv[2] * wv[2]);
         double wall = 0.0;
         if (area > 1e-12) {
-          double nx = 0.5 * (sdf(i + sx) - sdf(i - sx));
-          double ny = 0.5 * (sdf(i + sy) - sdf(i - sy));
-          double nz = 0.5 * (sdf(i + sz) - sdf(i - sz));
+          double nx = 0.5 * (sdf(i + sx) - sdf(i - sx)) / hpx;
+          double ny = 0.5 * (sdf(i + sy) - sdf(i - sy)) / hpy;
+          double nz = 0.5 * (sdf(i + sz) - sdf(i - sz)) / hpz;
           const double nn = Kokkos::sqrt(nx * nx + ny * ny + nz * nz);
           if (nn > 1e-12) {
             nx /= nn;
             ny /= nn;
             nz /= nn;
-            const double sdi = sdf(i);  // foot-point (boundary centroid proxy) offset, cell units
-            const double dudn = embedDirichletGradient(U, sdf, e, x, y, z, nx, ny, nz, -sdi * nx,
-                                                       -sdi * ny, -sdi * nz);
-            wall = area * dudn;  // +μ·area·dudn == −μ·(W·∇U) with the true-normal derivative
+            const double mx = nx / hpx, my = ny / hpy, mz = nz / hpz;  // index direction of n
+            const double sdi = sdf(i);  // foot-point (boundary centroid proxy) offset, hRef units
+            const double dudn = embedDirichletGradient(U, sdf, e, x, y, z, mx, my, mz, -sdi * mx,
+                                                       -sdi * my, -sdi * mz);
+            wall = area * dudn;  // +μ·|A'|/V'·dudn == −μ·(W·∇U) with the true-normal derivative
           }
         }
         Lu(i) = idt * cs(i) * U(i) + mu * (diag * U(i) - offs + wall);

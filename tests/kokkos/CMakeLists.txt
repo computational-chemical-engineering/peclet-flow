@@ -301,3 +301,12 @@ add_test(NAME units_vof_sigma COMMAND test_units vof)
 #                          Poiseuille parabola on cells (16, 40, 8) over the box (16, 12, 16),
 #                          i.e. spacing (1, 0.3, 2), against its isotropic control.
 add_test(NAME units_anisotropic_poiseuille COMMAND test_units aniso)
+#  units_anisotropic_sphere — Phase 2 gate G2 (doc/anisotropic_metric.md §8.3): the regression's
+#                          Zick & Homsy sphere on cells (N, 2N, N/2) over the cube, N = 16/24/32,
+#                          against the cubic control and the recorded baseline; plus the §4.4
+#                          periodic-Stokes hydro-force identity on both grids.
+add_test(NAME units_anisotropic_sphere COMMAND test_units sphere)
+#  units_anisotropic_tgv   — Phase 2 gate G3 (doc/anisotropic_metric.md §8.4): Stokes Taylor-Green
+#                          on cells (N, 2N, 4) with the DISCRETELY divergence-free initial field,
+#                          against the exact anisotropic backward-Euler amplitude ratio.
+add_test(NAME units_anisotropic_tgv COMMAND test_units tgv)

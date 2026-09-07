@@ -62,9 +62,14 @@ namespace peclet::flow {
 // it reads there is a depth-1 ghost, which every property fill has already written; and because the
 // face at index `e-g` is formed from exactly the same two ghost values the neighbouring rank forms
 // its own index-`g` face from, in the same order, the plane is bitwise decomposition-independent.
+// PHASE 2 (anisotropic cells, doc/anisotropic_metric.md §1.2/§3): of the three terms only the
+// PRESSURE difference carries a metric.  `fc` is the body force already converted per axis by
+// Phase 1's `forceToInt(a)`, `fb` is a per-cell force in the same per-axis normalisation, and
+// `1/rho_f` is unit-free -- while `-grad_a P'` carries `w_a = 1/h_a'^2`, exactly as it does in the
+// staggered `buildRhs*` predictor and in `projectCorrect`.  `wa == 1.0` isotropic (exact).
 inline void buildFaceAccelVar(CCField af, CCConst P, CCConst rho, CCConst fb, bool haveFb,
                               CCConst o, bool haveRho, double rhoC, double fc, bool incr, double dt,
-                              long s, C3 e, int g) {
+                              long s, C3 e, int g, double wa = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -78,7 +83,7 @@ inline void buildFaceAccelVar(CCField af, CCConst P, CCConst rho, CCConst fb, bo
         }
         const double rf = haveRho ? 0.5 * (rho(i) + rho(i - s)) : rhoC;
         const double f = fc + (haveFb ? 0.5 * (fb(i) + fb(i - s)) : 0.0) -
-                         (incr ? (P(i) - P((long)i - s)) : 0.0);
+                         (incr ? wa * (P(i) - P((long)i - s)) : 0.0);
         af(i) = dt * f / rf;
       });
 }
@@ -130,9 +135,11 @@ inline void addFaceIncrement(CCField uf, CCConst af, C3 e, int g) {
 //
 // The expression is written EXACTLY as `projectCorrectVar` writes it (same grouping, same order),
 // so the number the cell averages is bit-for-bit the number the face received.  With `haveRho`
-// false it is the plain `projectCorrect` difference.
+// false it is the plain `projectCorrect` difference.  PHASE 2: including the per-axis weight
+// `w_a` those two kernels now apply OUTSIDE the whole expression (doc/anisotropic_metric.md §3) --
+// the pairing is the point of this kernel, so the weight has to be spelled the same way here.
 inline void faceAccelSubGradPhi(CCField af, CCConst phi, CCConst rho, CCConst o, bool haveRho,
-                                double rho0, long s, C3 e, int g) {
+                                double rho0, long s, C3 e, int g, double wa = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -143,9 +150,9 @@ inline void faceAccelSubGradPhi(CCField af, CCConst phi, CCConst rho, CCConst o,
         if (o(i) <= 1e-12)
           return;  // closed face: the total increment stays 0 (the wall holds the balance)
         if (haveRho)
-          af(i) -= rho0 / (0.5 * (rho(i) + rho(i - s))) * (phi(i) - phi((long)i - s));
+          af(i) -= wa * (rho0 / (0.5 * (rho(i) + rho(i - s))) * (phi(i) - phi((long)i - s)));
         else
-          af(i) -= phi(i) - phi((long)i - s);
+          af(i) -= wa * (phi(i) - phi((long)i - s));
       });
 }
 

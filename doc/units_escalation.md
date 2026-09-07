@@ -164,3 +164,86 @@ exact modal solution of the discrete system to every printed digit and gives the
 ctest runs and gates both ladders and prints the exact discrete value beside each measured one, so a
 future C3 run can read off the rate improvement directly. §8.5's rate item (c) asks for exactly this
 comparison; these are its "today's rule" numbers.
+
+---
+
+## E3 (Phase 2, commit C4) — §4.4's one sentence about the v3 wall torque admits two readings, and they differ on an anisotropic grid
+
+**Status: OPEN.** Everything else in C4 landed; this ONE sub-path (`hydroForceTorqueReaction` with
+`hasMotion_ && cutcellPressure_`, i.e. the v3 transposed-stress wall torque of a MOVING instance)
+keeps an explicit `requireIsotropic` refusal naming this entry, rather than have the implementing
+session choose. A static scene, and the force+torque of a moving one without cut-cell pressure, are
+admitted; every C4 gate is green.
+
+### What the note says
+
+`doc/anisotropic_metric.md` §4.4, second paragraph, in full:
+
+> *Reaction force* `hydroForceTorqueReaction()`: the momentum row of component `a` is a force
+> density in the component-`a` normalisation, so the body force is `F_a = - sum_owner R_a * h_a' *
+> V'` in `forceTotalToPhys` units (the isotropic `h_a' V' = 1`). **The wall-torque term (v3) takes
+> the same `h_a'` on its force factor and the physical lever arm.**
+
+### The two readings
+
+The v3 term (`flow_ibm.hpp`, `peclet::flow::hydro_reaction_torque_transpose`) is an added TRACTION,
+`mu (n dA) x Omega`, integrated over one cut cell's wall patch and crossed with the lever arm:
+
+```cpp
+const double ax = oxv(i + sx) - oxv(i);   // the aperture wall-area vector, BODY-outward
+const double ay = ..., az = ...;          // == -W_a of §4.4's traction paragraph
+const double vx = ay * wz - az * wy;      // v = (n dA) x Omega
+...
+Kokkos::atomic_add(&Td(3 * oi + 0), mu * (r.y * vz - r.z * vy));
+```
+
+1. **"the same h_a'" = the factor `F_a` takes, `h_a' V'`, on the FORCE component `a`.** The literal
+   reading of the sentence, and the one the session brief restated
+   ("and the same hp_a on the v3 wall-torque force factor"). It would give
+   `F_x = h_x' V' mu (a_y Omega_z - a_z Omega_y)`.
+2. **"the same h_a'" = the per-axis factor §4.4's own AREA VECTOR carries, `V'/h_a'`, on the area
+   component.** `n dA` here IS an area vector of exactly the kind the traction paragraph one
+   sentence earlier writes as `A_a = W_a V'/h_a'`. It would give
+   `F_x = mu ((a_y V'/h_y') Omega_z - (a_z V'/h_z') Omega_y)`.
+
+Reading 2 is what the physics gives: `F_phys = mu_phys A_phys omega_phys`, and putting
+`mu_phys = mu' rhoRef hRef^2/tRef`, `A_phys = A' hRef^2`, `omega_phys = Omega'/tRef` gives
+`F' = mu' A' Omega'` in `forceTotalToPhys = rhoRef hRef^4/tRef^2` units — so the metric belongs to
+the AREA, whose component index is the one the cross product consumes, not to the force component.
+The counter-example that separates them: a wall patch whose area vector is purely `x`,
+`n dA = (A_x, 0, 0)`, with `Omega = Omega_z e_z`, produces a force purely in `y`. Reading 1 scales
+it by `h_y' V'`; reading 2 by `V'/h_x'`. They agree only when `h_y' = 1/h_x'`, i.e. isotropically.
+
+Reading 1 is also not derivable from the reaction paragraph's own argument: that `h_a'` comes from
+the component-`a` normalisation of a MOMENTUM ROW, and the v3 term is not a momentum row — it is a
+traction the audit adds on top, with no `1/h_a` of surface-over-volume to cancel.
+
+### Why this was not simply implemented as reading 2
+
+Rule 2 of the implementing role: the note must not be second-guessed, and a sentence that names
+`h_a'` where the derivation wants `V'/h_a'` is a decision for the session that wrote it — not least
+because the same sentence also has to say whether `V'` is in the factor at all. The commit therefore
+REFUSES the one path instead of choosing, which no gate exercises (the term is inert unless
+`set_instance_motion` has been called AND `cutcell_pressure=True`) and which no isotropic run can
+see.
+
+### What C4 did implement, for contrast
+
+* the traction integral `hydroForceTorque()` exactly as §4.4 writes it,
+  `dFp_a = p' W_a V'/h_a'` and
+  `dFv_a = -mu' sum_b W_b (V'/h_b') [(h_a'/h_b') gu[a][b] + (h_b'/h_a') gu[b][a]]`;
+* the reaction force `F_a = -sum R_a h_a' V'`, gated by the periodic-Stokes identity
+  `F = F_body * V_fluid` on the stretched grid (`units_anisotropic_sphere`);
+* the v4 owner-boundary attribution correction, which §4.4's site list does not name at all: it
+  REMOVES a term that is already inside `F_a = -sum R_a h_a' V'`, so it must carry exactly what that
+  term carries there — the momentum row's pressure gradient is `w_c (P(i) - P(i-s))` since C1/C2, so
+  the combined factor on `pi(i)` is `w_c h_c' V' = V'/h_c'`, the physical area of the face. That one
+  is forced, not chosen: any other factor would break the identity the correction exists to keep.
+
+### The question
+
+Which of the two readings is §4.4's, for the v3 wall-torque force factor: `h_a' V'` on the force
+component, or `V'/h_b'` on the area component? Once answered, the change is three lines in
+`hydro_reaction_torque_transpose` plus dropping the `requireIsotropic` guard beside it, and a gate
+would be a rotating-sphere torque against the analytic Stokes couple `8 pi mu R^3 Omega` on a
+stretched grid.

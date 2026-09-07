@@ -258,13 +258,12 @@ class Solver {
     // rhoRef / tRef are pinned by the first set_rho / set_dt; whatever was set BEFORE the domain
     // (nothing, in the documented order) is re-derived here.
     refreshUnitDerived();
-    // The §7 refusal comes LAST, so a caught exception still leaves a fully consistent solver
-    // (armed and self-consistent, just not usable on this grid policy).
-    if constexpr (Grid::collocated)
-      requireIsotropic("SolverColocated (the collocated policy): its cell gradients and the ABC "
-                       "approximate projection need the anisotropic index-space normal of the "
-                       "embedded closures, which is commit C4 of doc/anisotropic_metric.md "
-                       "(Phase 2). Use the staggered Solver");
+    // Phase 2 commit C4 LIFTED the collocated refusal that stood here: the embedded closures
+    // (`fvViscousApply`, `embedViscousApply` / `embedDirichletGradient`) now march along the
+    // anisotropic index-space normal `m` of doc/anisotropic_metric.md §6.1 and carry the per-axis
+    // `w_a` on their face and wall terms, `starCorrectFaces` carries the same `w_a` its
+    // `projectCorrect` fix-up needs, and the V8 face acceleration weights its pressure difference.
+    // `enable_vof` keeps its own refusal (Phase 3).
   }
 
   /// Phase 2 §7 — refuse an ANISOTROPIC domain in a consumer this phase does not carry.  `what`
@@ -272,10 +271,13 @@ class Solver {
   /// spacings and the metric they give, so the message is actionable without a debugger.  A no-op
   /// (and never even formats a string) on the isotropic path, which is every cell-unit run.
   ///
-  /// ADMITTED on an anisotropic domain after this commit (doc/anisotropic_metric.md §7): the
-  /// staggered `Solver` with sampled or scene geometry, constant or variable properties, variable
-  /// density, porous continuity with or without implicit drag, every domain-BC type, every
-  /// pressure driver and bottom, the velocity multigrid, scalar transport and MPI.
+  /// ADMITTED on an anisotropic domain after commit C4 (doc/anisotropic_metric.md §7): the
+  /// staggered `Solver` AND `SolverColocated` with sampled or scene geometry, constant or variable
+  /// properties, variable density, porous continuity with or without implicit drag, every
+  /// domain-BC type, every pressure driver and bottom, the velocity multigrid, scalar transport,
+  /// the collocated face-interpolation modes, `hydro_force_torque`, `hydro_force_torque_reaction`
+  /// on a static scene, and MPI.  STILL REFUSED: `enable_vof` (Phase 3) and the v3 moving-wall
+  /// torque of `hydro_force_torque_reaction` (doc/units_escalation.md E3).
   void requireIsotropic(const char* what) const {
     if (!u_.aniso)
       return;
@@ -1856,8 +1858,9 @@ class Solver {
           useEx ? CCConst(tEx_[c][2]) : CCConst(), C3{nx_, ny_, nz_}, lam,
           lam > 0.0f ? c : -1,
           lam > 0.0f ? slipSkipDev_
-                     : Kokkos::View<int, CCMem>());  // SCHEME 0 = point-value (matches CUDA
+                     : Kokkos::View<int, CCMem>(),   // SCHEME 0 = point-value (matches CUDA
                                                      // ibm_geometry_ext_k<0>)
+          (float)u_.hp[0], (float)u_.hp[1], (float)u_.hp[2]);  // §6.4 slip metric (trap 9)
       if (lam > 0.0f) {
         int sk = 0;
         Kokkos::deep_copy(sk, slipSkipDev_);
@@ -4073,10 +4076,19 @@ class Solver {
     }
   }
 
+  /// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §4.4 — ADMITTED since commit C4.  With
+  /// `A_a = W_a V'/h_a'` the PHYSICAL fragment area vector in hRef^2 (`W_a = o_{a-} - o_{a+}`, which
+  /// is what `A[a]` below holds) and `gu[a][b]` the index-velocity central difference:
+  ///
+  ///     dFp_a = p' W_a V'/h_a'
+  ///     dFv_a = - mu' sum_b W_b (V'/h_b') [ (h_a'/h_b') gu[a][b] + (h_b'/h_a') gu[b][a] ]
+  ///
+  /// -- the `h_a'/h_b'` pair being the physical strain rate du_a/dx_b + du_b/dx_a written in index
+  /// velocities.  Both factors multiply the EXISTING expressions from outside, in the same
+  /// association order, so at `V' = h_a' = 1` they are exact 1.0 multiplications and the arithmetic
+  /// is bit-identical.  The lever arm `r = rp*sm.dToInt` is already a physical displacement in hRef
+  /// units on every axis, and `torqueToPhys` is unchanged.
   std::vector<double> hydroForceTorque() {
-    requireIsotropic("hydro_force_torque: the traction integral's fragment area vector and strain "
-                     "rate carry the per-axis metric (doc/anisotropic_metric.md §4.4), which is "
-                     "commit C4 of Phase 2");
     std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 12, 0.0);
     if (!hasScene_ || nInst_ <= 0 || cutOwner_.extent(0) != (std::size_t)nx_ * ny_ * nz_)
       return out;
@@ -4091,6 +4103,10 @@ class Solver {
     const C3 e = e_, og = og_;
     const int nx = nx_, ny = ny_;
     const double mu = mu_;
+    // §4.4: kA[a] = V'/h_a' turns the index fragment normal W_a into the physical area vector; the
+    // hp ratios below turn the index-velocity gradient pair into the physical strain rate.
+    const double kA0 = u_.vol / u_.hp[0], kA1 = u_.vol / u_.hp[1], kA2 = u_.vol / u_.hp[2];
+    const double hp0 = u_.hp[0], hp1 = u_.hp[1], hp2 = u_.hp[2];
     CCConst oxv = CCConst(ox_), oyv = CCConst(oy_), ozv = CCConst(oz_);
     CCConst U = CCConst(C[0].u), Vv = CCConst(C[1].u), W = CCConst(C[2].u);
     CCConst Pf = CCConst(P_);
@@ -4150,6 +4166,8 @@ class Solver {
             for (int b = 0; b < 3; ++b)
               gu[a][b] = 0.5 * (uc(a, i + st[b]) - uc(a, i - st[b]));
           const double p = Pf(i);
+          const double kA[3] = {kA0, kA1, kA2};  // V'/h_a'  (exactly 1.0 isotropic)
+          const double hpv[3] = {hp0, hp1, hp2};
           double dF[3], dFp[3], dFv[3];
           for (int a = 0; a < 3; ++a) {
             // A_wall is fluid-outward; the traction on the BODY takes -A_wall. Pressure and
@@ -4157,10 +4175,12 @@ class Solver {
             // one cell-centred value, while the viscous term differences a velocity whose stencil
             // reaches into solid cells -- so a deficit that lives entirely in one of them says
             // immediately which.
-            dFp[a] = p * A[a];
+            dFp[a] = (p * A[a]) * kA[a];
             double t = 0.0;
-            for (int b = 0; b < 3; ++b)
-              t += mu * (gu[a][b] + gu[b][a]) * A[b];
+            for (int b = 0; b < 3; ++b) {
+              const double rab = hpv[a] / hpv[b], rba = hpv[b] / hpv[a];
+              t += mu * (rab * gu[a][b] + rba * gu[b][a]) * (A[b] * kA[b]);
+            }
             dFv[a] = -t;
             dF[a] = dFp[a] + dFv[a];
           }
@@ -4285,10 +4305,16 @@ class Solver {
   /// domain BCs, ghost projection, drag diagonal, fluid-only star modes all put terms in the
   /// update this budget does not carry, and a missing term here is a silently mis-attributed
   /// force.
+  /// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §4.4 — ADMITTED since commit C4.  The
+  /// momentum row of component `a` is a force DENSITY in the component-`a` normalisation
+  /// (rhoRef h_a/tRef^2), so the total force on the body in `forceTotalToPhys` units is
+  /// `F_a = - sum_owner R_a h_a' V'` (isotropic `h_a' V' = 1`, so the factor below is an exact 1.0
+  /// multiplication and the arithmetic is bit-identical).  The lever arm is already physical.
+  /// NOT lifted here: the v3 transposed-stress WALL TORQUE (`hasMotion_ && cutcellPressure_`) --
+  /// see `doc/units_escalation.md` E3.  §4.4's one sentence about it ("takes the same h_a' on its
+  /// force factor") admits two readings that differ on an anisotropic grid, and choosing between
+  /// them is a design decision, so that ONE sub-path keeps an explicit refusal instead.
   std::vector<double> hydroForceTorqueReaction() {
-    requireIsotropic("hydro_force_torque_reaction: the momentum-row reaction carries h_a'*V' per "
-                     "component (doc/anisotropic_metric.md §4.4), which is commit C4 of Phase 2 -- "
-                     "and the CFD-DEM coupling that reads it has its own isotropy guard");
     std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 6, 0.0);
     if (!hasScene_ || nInst_ <= 0)
       return out;
@@ -4306,6 +4332,15 @@ class Solver {
     if (advect_ && (!haveAdvRhs_ || advRhs_[0].extent(0) != n_))
       throw std::runtime_error("hydro_force_torque_reaction: the advective RHS term was not "
                                "stashed -- set_advection was enabled after the last step()");
+    if (hasMotion_ && cutcellPressure_)
+      requireIsotropic(
+          "hydro_force_torque_reaction with a MOVING instance (the v3 transposed-stress wall "
+          "torque): doc/anisotropic_metric.md §4.4 says only that this term 'takes the same h_a' "
+          "on its force factor', which admits two readings that differ on an anisotropic grid -- "
+          "the per-axis metric of the AREA vector (V'/h_b' on the area component b, the reading "
+          "§4.4's own traction formula uses) versus h_a'V' on the FORCE component a. See "
+          "doc/units_escalation.md E3. A STATIC scene, and the force+torque of a moving one "
+          "without cut-cell pressure, are admitted");
     // u* ghosts: refresh with the standard fill (periodic wrap single-rank, halo exchange under
     // MPI; hasBc_ is refused above so no BC is imposed). The audit's viscous term reads +-1.
     for (int c = 0; c < 3; ++c)
@@ -4322,6 +4357,9 @@ class Solver {
     const auto box = q.box;
     const SceneMap sm = sceneMap();
     const bool hasFb = hasCellForce_;
+    // §4.4: the momentum row of component c is a force density in the component-c normalisation, so
+    // the total force carries h_c'*V' (exactly 1.0 isotropic -- an identity multiplication).
+    const double kR[3] = {u_.hp[0] * u_.vol, u_.hp[1] * u_.vol, u_.hp[2] * u_.vol};
     for (int c = 0; c < 3; ++c) {
       CCConst un = CCConst(old_[c]), uc = CCConst(C[c].u), us = CCConst(uStar_[c]),
               mk = CCConst(C[c].mask);
@@ -4331,6 +4369,7 @@ class Solver {
       const auto po = Grid::offset(c);
       const double offx = po.x, offy = po.y, offz = po.z;
       const int cc = c;
+      const double kRc = kR[c];
       Kokkos::parallel_for(
           "peclet::flow::hydro_reaction",
           Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
@@ -4357,7 +4396,8 @@ class Solver {
             const int oi = q.owner(p);
             if (oi < 0)
               return;
-            const double F = -R;  // force ON the body = minus the wall force on the fluid
+            // force ON the body = minus the wall force on the fluid, times h_c'V' (§4.4)
+            const double F = -R * kRc;
             Kokkos::atomic_add(&Fd(3 * oi + cc), F);
             const peclet::core::Vec3<double> rq = peclet::core::geom::minImage(
                 peclet::core::Vec3<double>{p.x - cen(3 * oi + 0), p.y - cen(3 * oi + 1),
@@ -4440,6 +4480,13 @@ class Solver {
         const auto po = Grid::offset(c);
         const double offx = po.x, offy = po.y, offz = po.z;
         const int cc = c;
+        // PHASE 2 (§4.4, a site the note's list does not name): this correction REMOVES a term that
+        // is already inside `F_a = -sum R_a h_a' V'`, so it must carry exactly the factor that term
+        // carries there.  The momentum row's pressure gradient is `w_c (P(i) - P(i-s))` since C1/C2,
+        // and F multiplies by `h_c' V'`, so the combined factor on `pi(i)` is
+        // `w_c h_c' V' = V'/h_c'` -- the physical area of the face, as it must be for a pressure
+        // force.  Exactly 1.0 isotropic (1.0/1.0), so this is an identity multiplication.
+        const double kP = u_.vol / u_.hp[c];
         Kokkos::parallel_for(
             "peclet::flow::hydro_reaction_owner_flux",
             Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
@@ -4465,7 +4512,7 @@ class Solver {
               // holds +pi(i) and b's -pi(i) from this face: a pure transfer across the owner
               // partition that belongs to NEITHER wall. Remove it from both, symmetrically --
               // the pairwise cancellation is what keeps the total exact.
-              const double flux = pf(i);
+              const double flux = pf(i) * kP;
               Kokkos::atomic_add(&Fd(3 * oa + cc), -flux);
               Kokkos::atomic_add(&Fd(3 * ob + cc), +flux);
               const peclet::core::Vec3<double> raq = peclet::core::geom::minImage(
@@ -5007,10 +5054,12 @@ class Solver {
         // g_a
         if (faceInterp_ >= 5)
           embedViscousApply(fvL_, CCConst(C[c].u), CCConst(sdf_), CCConst(cs_), CCConst(ox_),
-                            CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G);
+                            CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G, u_.w[0], u_.w[1],
+                            u_.w[2], u_.hp[0], u_.hp[1], u_.hp[2]);
         else
           fvViscousApply(fvL_, CCConst(C[c].u), CCConst(sdf_), CCConst(cs_), CCConst(ox_),
-                         CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G);
+                         CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G, u_.w[0], u_.w[1],
+                         u_.w[2], u_.hp[0], u_.hp[1], u_.hp[2]);
       }
     CCConst fvM = CCConst(fvM_), fvL = CCConst(fvL_), cs = CCConst(cs_);
     const double fvw = fvRelax_;  // local copy — a KOKKOS_LAMBDA must not read a member (device
@@ -5294,7 +5343,7 @@ class Solver {
       const long sc = strideOf(c);
       buildFaceAccelVar(faceAcc_[c], CCConst(P_), rho,
                         CCConst(hasCellForce_ ? cellForce_[c] : C[c].rscale), hasCellForce_,
-                        CCConst(oax[c]), haveRho, rho_, f_[c], incr, dt_, sc, e_, G);
+                        CCConst(oax[c]), haveRho, rho_, f_[c], incr, dt_, sc, e_, G, u_.w[c]);
       if (csfActive())
         addFaceAccelCsf(faceAcc_[c], CCConst(cField_), CCConst(kappaField_), CCConst(kappaBranch_),
                         rho, CCConst(oax[c]), haveRho, rho_, sigmaCsf_, vofAdv_.h(), dt_, sc, e_, G);
@@ -5318,7 +5367,7 @@ class Solver {
     for (int c = 0; c < 3; ++c) {
       const long sc = strideOf(c);
       faceAccelSubGradPhi(faceAcc_[c], CCConst(phi_), rho, CCConst(oax[c]), haveRho, rho_, sc, e_,
-                          G);
+                          G, u_.w[c]);
       applyCellFaceAverage(C[c].u, CCConst(faceAcc_[c]), CCConst(oax[c]), sc, e_, G);
     }
   }
@@ -5791,7 +5840,8 @@ class Solver {
       // Helmholtz + domain-face folds (VelocityMG::setStaircaseBc). The BC hook re-imposes the
       // level-0 velocity BC after every ghost fill, exactly as the RB-GS path's fillVelGhosts(c,1).
       const Off3 off = Grid::offset(c);
-      ibmVolfrac(vmgTheta_, CCConst(sdf_), e_, off);
+      ibmVolfrac(vmgTheta_, CCConst(sdf_), e_, off, u_.aniso, u_.hp[0], u_.hp[1], u_.hp[2],
+                 u_.w[0], u_.w[1], u_.w[2]);
       ibmCleanFluidMask(vmgClean_, CCConst(sdf_), e_, off);
       vmg_.setFineStencil(FPC(C[c].AC), FPC(C[c].AW), FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
                           FPC(C[c].AB), FPC(C[c].AT));
@@ -5888,7 +5938,8 @@ class Solver {
         // == RB-GS).
         const Off3 off =
             Grid::offset(c);  // velocity-unknown placement (staggered: -1/2 face; collocated: 0)
-        ibmVolfrac(vmgTheta_, CCConst(sdf_), e_, off);
+        ibmVolfrac(vmgTheta_, CCConst(sdf_), e_, off, u_.aniso, u_.hp[0], u_.hp[1], u_.hp[2],
+                 u_.w[0], u_.w[1], u_.w[2]);
         ibmCleanFluidMask(vmgClean_, CCConst(sdf_), e_, off);
         vmg_.setStaircase(CCConst(vmgTheta_), CCConst(C[c].mask), CCConst(vmgClean_), mu_,
                           rho_ / dt_, 0.5);
@@ -6590,7 +6641,7 @@ class Solver {
         projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
       if (fluidOnlyMode_ == 2)  // Design B: replace the solid side's phi=0 by phibar_s at
         starCorrectFaces(uf_, vf_, wf_, CCConst(phi_), starOv_, nStar_,  // fluid|solid faces
-                         C3{nx_, ny_, nz_}, e_, G, e_, G);
+                         C3{nx_, ny_, nz_}, e_, G, e_, G, u_.w[0], u_.w[1], u_.w[2]);
       fillGhosts(uf_);
       fillGhosts(vf_);
       fillGhosts(wf_);    // complete the divergence-free face field (boundary faces)

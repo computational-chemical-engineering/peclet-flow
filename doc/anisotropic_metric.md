@@ -407,13 +407,22 @@ bottom, the velocity MG, scalar transport, MPI (`init_mpi`, telescoping, coarse-
 **Refused, with a `throw` that prints the three spacings** (one helper `requireIsotropic(const char*
 what)` on the solver; the message names the phase that lifts it):
 
-| refused | where the guard goes | lifted by |
-|---|---|---|
-| `enable_vof` and every VoF entry point | `enableVof()` | Phase 3 |
-| the AMR module (`Octree(cells, extent)`) | `core/python/amr_bindings.cpp:h0FromExtent` (already refuses) | Phase 3 |
-| the CFD-DEM coupling driver | `coupling/python/peclet_coupling/driver.py` (already refuses) | Phase 2 follow-up (per-axis deposit) |
-| the collocated policy, until the ⚑ B commit lands | `Solver<Colocated>::setPhysicalDomain` | this phase, commit C4 |
-| `hydro_force_torque*` until its constants land (§4.4) | those two functions | this phase, commit C4 |
+| refused | where the guard goes | lifted by | state after C4 |
+|---|---|---|---|
+| `enable_vof` and every VoF entry point | `enableVof()` | Phase 3 | **still refused** |
+| the AMR module (`Octree(cells, extent)`) | `core/python/amr_bindings.cpp:h0FromExtent` (already refuses) | Phase 3 | **still refused** |
+| the CFD-DEM coupling driver | `coupling/python/peclet_coupling/driver.py` (already refuses) | Phase 2 follow-up (per-axis deposit) | **still refused** |
+| the collocated policy, until the ⚑ B commit lands | `Solver<Colocated>::setPhysicalDomain` | this phase, commit C4 | **ADMITTED (C4)** |
+| `hydro_force_torque*` until its constants land (§4.4) | those two functions | this phase, commit C4 | **ADMITTED (C4)** — except one sub-path, below |
+| the v3 transposed-stress WALL TORQUE of `hydro_force_torque_reaction` (a MOVING instance under cut-cell pressure) | `hydroForceTorqueReaction()`, beside the other v2 scope refusals | **open** — `doc/units_escalation.md` **E3** | **refused (new in C4)** |
+
+The last row is C4's one deliberate narrowing of what §7 promised. §4.4's single sentence about that
+term — "the wall-torque term (v3) takes the same `h_a'` on its force factor" — admits two readings
+that differ on an anisotropic grid (`h_a' V'` on the FORCE component `a`, versus the `V'/h_b'` that
+§4.4's own traction paragraph puts on the AREA component `b` that the cross product consumes), and
+picking one is a design decision. The implementing session refused the path instead of choosing;
+E3 carries the derivation and the counter-example. Nothing else in C4 is affected: the term is inert
+unless `set_instance_motion` has been called AND `cutcell_pressure=True`, and no gate reaches it.
 
 ---
 
@@ -701,6 +710,176 @@ rule defers x and z for two levels; and a FORCED merge at level 1 reaches the sa
 level loop that §5.3 does not list. It takes no metric, so it still models the isotropic rule; a
 comment there now says so and points at `levelRatios()`. Threading `hp` through it and through the
 Python pre-flight is a follow-up, not part of C3.
+
+### C4 (U12 ⚑ B, the embedded-boundary closures + the hydrodynamic forces) — flow, Phase 2 commit C4
+
+**The closures, and where the metric enters.** §6.1's two vectors are built in three kernels and
+nowhere else. From the index-space central difference `g_a = ½(sdf(i+e_a) − sdf(i−e_a)) = h_a' n_a`,
+the **physical unit normal** is `n = (g/h')/|g/h'|` and the **index direction** it marches along is
+`m_a = n_a/h_a'`; the foot point is `xi* = xi − d' m`. `fvViscousApply` and `embedViscousApply`
+(`mac_approx_projection.hpp`) carry `w_a` on both the two-point face flux and the wall term
+(`wall_a = w_a W_a sg (2u1 − ½u2)`), `embedViscousApply`'s fragment area becomes
+`|A'|/V' = sqrt(Σ_a W_a² w_a)`, and `embedDirichletGradient` is handed `m` and `−d' m` — so its image
+distance `t_l = (io − p_da)/m_da`, its dominant axis `argmax|m_a|`, its degenerate `d0 = |p_da/m_da|`
+with the 0.5 floor and the derivative it returns are all PHYSICAL, in hRef, with no metric left to
+apply outside. `buildIbmOverlay`'s Navier slip length (`mac_ibm.hpp`) is
+`lamAxis[a] = lamEff/(h_a' |n_a|)` with the same `n` in float, `s = 1 − n_c²` from it, the 1e-3 floor
+kept; `ibmVolfrac` becomes `theta = clamp(0.5 + d' |m|)` with `|m| = sqrt(Σ n_a² w_a)`, under a
+host-bool `aniso` dispatch that runs the literal `0.5 + sd` otherwise (a `sqrt` of a unit vector is
+not exactly 1 — the C1 smoother pattern). §4.4's forces land in `hydroForceTorque` (`dFp_a` and
+`dFv_a` verbatim, both factors applied OUTSIDE the existing expressions in the same association
+order) and `hydroForceTorqueReaction` (`F_a = −Σ R_a h_a' V'`). `Solver<Colocated>::setPhysicalDomain`
+and both force integrals no longer refuse an anisotropic domain; `enable_vof` still does.
+
+**Three sites the note's list did not name.**
+
+1. **`starCorrectFaces`** (`star_elimination.hpp`, collocated `fluid_only` mode 2) — C2's report
+   flagged it. It is a FIX-UP of what `projectCorrect` applied, and `projectCorrect` now applies
+   `−w_a (phi_hi − phi_lo)`, so the `±phibar_s` it adds back carries the same `w_a` of the face's own
+   axis. Forced, not chosen.
+2. **The V8 face acceleration** (`collocated_varrho.hpp`, C2's other flag) — of
+   `a_f = dt (f_c + f_b − (P(i) − P(i−s)))/rho_f` only the PRESSURE difference carries a metric
+   (`w_a`): `f_c`/`f_b` are already per-axis from Phase 1 and `1/rho_f` is unit-free.
+   `faceAccelSubGradPhi` takes the same `w_a` `projectCorrectVar` takes, spelled the same way,
+   because bit-for-bit pairing with the face correction is the whole point of that kernel. The cell
+   average of the two faces (`applyCellFaceAverage`) is unchanged, as §3 says. `addFaceAccelCsf` is
+   untouched: it is VoF-only and `enable_vof` still refuses an anisotropic domain (Phase 3).
+3. **The v4 owner-boundary attribution correction** in `hydroForceTorqueReaction` — §4.4 does not
+   mention it. It REMOVES a term that is already inside `F_a = −Σ R_a h_a' V'`, so it must carry
+   exactly what that term carries there: the momentum row's pressure gradient is
+   `w_c (P(i) − P(i−s))` since C1/C2, and `F` multiplies by `h_c' V'`, so the factor on `pi(i)` is
+   `w_c h_c' V' = V'/h_c'` — the physical area of the face. Also forced: any other factor breaks the
+   pairwise cancellation the correction exists to keep.
+
+**One thing C4 deliberately did NOT do** — see §7's table and `doc/units_escalation.md` **E3**: the
+v3 transposed-stress WALL TORQUE of `hydroForceTorqueReaction` (a moving instance under cut-cell
+pressure) keeps an explicit refusal, because §4.4's one sentence about it admits two readings that
+differ on an anisotropic grid and choosing between them is a design decision. Every C4 gate is green
+without it; the term is unreachable without `set_instance_motion`.
+
+**The SDF-as-a-length audit** (`grep 'sdf(' mac_approx_projection.hpp gauge_exact_gradient.hpp
+star_elimination.hpp ghost_projection.hpp collocated_varrho.hpp colocated_advection.hpp`): after C4
+the only reads of `|sdf|` as a DISTANCE anywhere on the collocated path are the two foot points C4
+just fixed. Everything else is a sign test or a per-axis crossing fraction, both invariant under a
+positive scaling of the SDF — `wallAwareFaceStencil`'s `th = sc/(sc − ss)`, its abscissae
+`xe/xc/xf/xg` (cells along ONE axis), `buildFaceCentroidDist`'s `d = s0/(s0 − s1)` and its uniform
+index-space subsampling (an affine, per-axis map, so the index centroid IS the physical one pulled
+back), `gpCenterGrad`'s `>= 0` branches, `starAval`, `gpBinaryOpenness`'s face means and `gpFillRow`'s
+`th`. `ccFractionCore` already took `dx,dy,dz` and got `hp` in C2. Nothing was found that needs a
+different algorithm.
+
+- **G0**, `tests/kokkos` **43/43** host-openmp and **43/43** nvidia-cuda (the 41 of C3 plus
+  `units_anisotropic_sphere` and `units_anisotropic_tgv`); `tests/kokkos_mpi` **106/106**
+  host-openmp and **106/106** nvidia-cuda at np = 1, 2, 4; `sdflow_mpi_np1` bit-exact to
+  single-rank, `k_dist = k_ref = 5.84542251e+00`, rel `0.00e+00`, `div 5.86e-12`.
+- **Regressions** (CUDA, never `--update`), all three baselines **PASS** with every recorded number
+  at `+0.00 %`, every fitted order and extrapolation at `d = 0.00` / `rel = 0.00 %`, and every
+  iteration and step count equal:
+  * `perf_baseline.json` (staggered): zh_sphere `K 7.2997 / 7.3891 / 7.4162 / 7.4361 / 7.4404`,
+    order `2.29`, `K_inf 7.447`, pressure iters/step `6/7/7/6/6` at steps `60/80/75/150/245`;
+    random_spheres `0.0064513 / 0.0063515 / 0.0062821 / 0.0062621` at `7/7/7/7`, order `2.19`,
+    `k*_inf 0.0062362`; hollow_rings `0.018629 / 0.018228 / 0.017659 / 0.017608` at `9/10/9/9`,
+    order `1.38`, `k*_inf 0.017184`.
+  * `perf_baseline_colocated_ghost.json` (`--solver colocated --scheme ghost`): zh_sphere
+    `K 7.3909 / 7.415 / 7.4283 / 7.436 / 7.4383` at `7/9/9/11/10`, order `1.59`, `K_inf 7.445`;
+    random_spheres order `1.46`, `k*_inf 0.0062399`; hollow_rings order `1.75`, `k*_inf 0.017201`.
+  * `perf_baseline_colocated.json` (`--solver colocated`): zh_sphere
+    `K 7.4879 / 7.4463 / 7.4495 / 7.4437 / 7.4417` at `6/7/7/7/7`, order `4.00`, `K_inf 7.4424`;
+    random_spheres order `0.30`, `k*_inf 0.0062504`; hollow_rings order `1.86`, `k*_inf 0.0172`.
+
+  The two COLLOCATED baselines are part of G0 for the first time here, because C4 is the commit that
+  admits the collocated policy on an anisotropic domain — and they are the deepest exercise the
+  collocated cell gradients, the star modes and the approximate projection get.
+- **Six verify scripts** vs a build of `6cf870b`, host-openmp, `np.array_equal` TRUE on every array:
+  poiseuille **800/800**, periodic_spheres **60/60**, channel **23/23**, bfs **221/221**,
+  lid_cavity **15/15**, and the collocated **colocated_taylor_green 4/4**.
+- **The collocated kernels no script and no ctest reaches** (`set_face_interp` 4/5/6/7 —
+  `fvViscousApply`, `embedViscousApply`, `embedDirichletGradient` — and
+  `set_fluid_only_constraint` 1/2 — `starCorrectFaces`), on the Z&H sphere at N = 24, 40 steps:
+  **24/24 arrays bitwise** at `OMP_NUM_THREADS=1`. At 4 threads the four `fluid_only 2` arrays
+  differ by 1.665e-16 — and so do **two runs of the UNCHANGED tree against each other, by
+  2.220e-16**: `starEliminate`'s `Kokkos::atomic_add` makes that one path run-to-run
+  non-deterministic under OpenMP, which is why the statement is made at one thread.
+- **Phase 1 + G1 units gates unchanged**, printed numbers included — `units_identity` bitwise;
+  `units_scale_invariance` u `8.882e-17`, p `0.000e+00`, sphere sampled
+  `4.070e-16 / 1.503e-15 / 1.761e-15` (div `6.915e-12`, d `1.850e-18`), scene
+  `6.105e-16 / 1.224e-15 / 1.370e-15` (d `0.000e+00`); `units_vof_sigma` Young-Laplace
+  `2.500000000e-01`, `capillary_dt 3.989422804e-01`, kappa rel `0.000e+00` / `2.202e-16`;
+  `units_anisotropic_poiseuille`'s three rows still **1.388e-15 / 3.052e-08 / 3.701e-15** with
+  `max|v| = max|w| = 0.000e+00` and the wall rows exactly 0. The one thing that changed in any
+  printed output is that gate's (d) block, which now records the collocated policy and
+  `hydro_force_torque` as **ADMITTED** instead of refused, and still asserts `enable_vof`'s refusal
+  (with the three spacings in the message).
+
+**G2 — `units_anisotropic_sphere`** (§8.3, the ctest half), host-openmp; the Z&H sphere `phi = 0.216`,
+`K_ref = 7.442`, the regression's own configuration, cells `(N, 2N, N/2)` over the cube:
+
+| N | cubic `K` | err_c | stretched `K` | err_s | iters/step c → s | steps c / s |
+|---|---|---|---|---|---|---|
+| 16 | 7.2996895730187736 | 1.9123 % | 7.2845639537087239 | 2.1155 % | 6.0 → 6.0 | 60 / 105 |
+| 24 | 7.3890630590938464 | 0.7113 % | 7.3890694982915299 | 0.7112 % | 7.0 → 6.0 | 80 / 100 |
+| 32 | 7.4161679424561768 | 0.3471 % | 7.4236776333311072 | 0.2462 % | 7.0 → 7.0 | 75 / 70 |
+
+(i) strictly decreasing ✓; (ii) `err_s ≤ 4 err_c + 0.2 %` ✓; (iii) the least-squares order of the
+stretched ERROR sequence **3.0759** (cubic 2.4603), bound 1.5 ✓; (iv) the cubic control reproduces
+`perf_baseline.json`'s `steps` (60 / 80 / 75) and `iters/step` (6 / 7 / 7) **exactly** and its drag
+factors to **1.353e-08 / 9.703e-10 / 1.824e-09** relative. That last number is NOT bit-for-bit and
+cannot be: the baseline is a CUDA run and its `u.mean()` is numpy's pairwise sum against a sequential
+C++ one here, and both perturb `K` at the pressure solve's own `rtol = 1e-8` stop. `fit_order` is
+degenerate on three grids (two free linear parameters fit three points exactly at every `p`), which
+is why the ctest gates the log-log error slope and the SCRIPT gates `fit_order`.
+
+**G2 — the ladder** (`scripts/verify_anisotropic_spheres.py`, §8.3's script half), nvidia-cuda:
+
+| N | cells (stretched) | spacing | `K_cubic` | `K_stretch` | err_c | err_s | it_c | it_s |
+|---|---|---|---|---|---|---|---|---|
+| 16 | 16×32×8 | (1, 0.5, 2) | 7.29969 | 7.28456 | 1.9123 % | 2.1155 % | 6.0 | 6.0 |
+| 24 | 24×48×12 | (1, 0.5, 2) | 7.38906 | 7.38907 | 0.7113 % | 0.7112 % | 7.0 | 6.0 |
+| 32 | 32×64×16 | (1, 0.5, 2) | 7.41617 | 7.42368 | 0.3471 % | 0.2462 % | 7.0 | 7.0 |
+| 48 | 48×96×24 | (1, 0.5, 2) | 7.43609 | 7.44711 | 0.0794 % | 0.0687 % | 6.0 | 7.0 |
+| 64 | 64×128×32 | (1, 0.5, 2) | 7.44041 | 7.45116 | 0.0213 % | 0.1231 % | 6.0 | 7.0 |
+
+`fit_order`: cubic `p = 2.2900`, `K_inf = 7.44704` (**0.0677 %** of `K_ref`) — i.e. the ladder's cubic
+column reproduces `perf_baseline.json`'s recorded `order 2.29` and `extrapolated 7.44704` and its
+`6/7/7/6/6` iterations exactly; stretched `p_s = 2.2500` ∈ [1.5, 2.5] ✓ and
+`K_s,inf = 7.46034`, **0.2465 %** of `K_ref` (bound 2 %) ✓. Pressure iterations per step on the
+stretched grid are `≤ cubic + 2` at every rung ✓ — the §5 aspect rule is what buys that.
+
+**The hydro-force gate** (§4.4 + §8.3), the periodic Stokes identity `F = F_body · V_fluid` with
+`V_fluid = h_x h_y h_z ×` (# fluid u-DOFs), on the analytic-scene sphere at N = 24 after 300 steps of
+the regression's `dt = 60` configuration, host-openmp:
+
+| grid | spacing | `F_x` | the identity | relative gap |
+|---|---|---|---|---|
+| cubic `(24,24,24)` | (1, 1, 1) | 10.878000070904704 | 10.878 (10878 DOFs) | **6.518e-09** |
+| stretched `(24,48,12)` | (1, 0.5, 2) | 10.844000905143286 | 10.844 (10844 DOFs) | **8.347e-08** |
+
+Both are at the march's own residual floor (at 120 steps they read 7.351e-07 and 2.234e-06, i.e. the
+remaining transient, and they fall together with more steps); the gate is the shared 1e-5 bound.
+
+**G3 — `units_anisotropic_tgv`** (§8.4), host-openmp. Stokes Taylor–Green on `L × L × L_z` with cells
+`(N, 2N, 4)`, `N = 16`, `L = 16`, `L_z = 4` → spacing `(1, 0.5, 1)`, `rho = dt = 1` (so every
+reference scale but `hRef` is 1 and the isotropic control CAN be compared bitwise), 10 steps, the
+DISCRETELY divergence-free initial field with `a_x sin(k h_x/2)/h_x = a_y sin(k h_y/2)/h_y`:
+
+| row | amplitude ratio | exact `r^10` | rel (bound) | max\|div_o\| | profile | max\|P\| (the φ proxy) |
+|---|---|---|---|---|---|---|
+| stretched Stokes | 0.47852135218094743 | 0.47852135218094644 | **2.088e-15** (1e-10) | 1.074e-16 | 1.618e-15 | 1.280e-16 |
+| stretched NS, `dt = 0.05` | 0.96143993730091892 | 0.96254747532385743 | **1.151e-03** (5e-3) | 2.678e-16 | — | — |
+| isotropic control `(16,16,4)` at extent == cells | 0.48016564490786506 | 0.48016564490785385 | **2.335e-14** | 6.160e-17 | 1.415e-15 | 2.682e-16 |
+
+and the isotropic control is **BITWISE** the cell-unit run of the same problem in `u, v, w, p`.
+
+Two configuration choices this gate needed, both inside §8.4's freedom and both recorded because
+they matter: **`mu = 0.25`**, which makes every assembled coefficient dyadic and therefore exactly
+representable in the shipped FLOAT operator storage — `AC = 5/2` isotropic (`b = (¼,¼,¼)`) and
+`AC = 4` stretched (`hRef = ½`, `hp = (2,1,2)`, `w = (¼,1,¼)`, `mu' = 1`, `b = (¼,1,¼)`) — the same
+move E1 made for G1; at `mu = 0.1` the identical gate reads **1.5e-07 (isotropic control)** and
+2.9e-07 (stretched), i.e. the WO-M float floor showing up in the ISOTROPIC row too, which is what
+identifies it as not a metric statement. And **`dt = 0.05` on the NS row only** (`sdflow_tg`'s own
+step): at the `dt = 1` the Stokes rows need for `tRef = 1`, the TG amplitude gives an advective
+CFL of 1 and the discrete nonlinear term's imbalance with the pressure gradient reads 2.0e-02 —
+the O(CFL²) advection error, not the metric.
 
 ---
 

@@ -58,12 +58,23 @@ KOKKOS_INLINE_FUNCTION bool ibmIsCut(float sc, const float sn[6]) {
 /// carrying them would couple the three segregated component solves.
 /// `sandwichSkipped` (optional) counts the axes where a one-cell fluid gap made the slip closure
 /// inapplicable and the no-slip one was kept.
+///
+/// PHASE 2 (anisotropic cells, doc/anisotropic_metric.md §6.4).  NOTHING in `ibmFillEntry` reads a
+/// distance — theta, D, K, M, X, Nbc, R and D_rescale are all functions of the crossing fractions
+/// along an axis, which are invariant under any positive scaling of the SDF.  The metric enters in
+/// exactly ONE place, the Navier slip length: the Robin condition along axis `a` reduces with
+/// d/dn = (1/(h_a |n_a|)) d/dxi_a, so the slip length measured in CELLS along that axis is the
+/// physical one divided by the physical cell size `h_a'` AND by |n_a| of the PHYSICAL normal.  The
+/// normal itself is the seven-sample gradient rescaled per axis and renormalised, `n_a =
+/// (g_a/h_a')/|g/h'|` (§6.1), and `s = 1 - n_c^2` uses that same n.  `hp` enters in FLOAT and
+/// `1.0f` is exact (trap 9), so the isotropic path is bit-identical.
 template <int SCHEME>
 inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, const IbmOverlay& ov,
                            Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter,
                            CCConst tx = CCConst(), CCConst ty = CCConst(), CCConst tz = CCConst(),
                            C3 nn = C3{0, 0, 0}, float slipLambda = 0.0f, int comp = -1,
-                           Kokkos::View<int, CCMem> sandwichSkipped = Kokkos::View<int, CCMem>()) {
+                           Kokkos::View<int, CCMem> sandwichSkipped = Kokkos::View<int, CCMem>(),
+                           float hpx = 1.0f, float hpy = 1.0f, float hpz = 1.0f) {
   CCExec space;
   Kokkos::deep_copy(space, counter, 0);
   Kokkos::deep_copy(space, idMap, -1);
@@ -108,11 +119,13 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
             thEx[2 * a + 1] = 1.0f - (float)(*ta[a])(im);  // NaN propagates -> fallback
           }
         }
+        const float hpv[3] = {hpx, hpy, hpz};  // h_a' in float; exactly 1.0f isotropic (trap 9)
         float lamAxis[3];
         if (hasSlip) {
           // grad(sdf) from the same 7 samples; k = 0/2/4 are the +a neighbours, 1/3/5 the -a ones.
-          const float gx = 0.5f * (sn[0] - sn[1]), gy = 0.5f * (sn[2] - sn[3]),
-                      gz = 0.5f * (sn[4] - sn[5]);
+          // Phase 2 (§6.1/§6.4): g_a = h_a'·n_a, so the PHYSICAL unit normal is g/h' renormalised.
+          const float gx = 0.5f * (sn[0] - sn[1]) / hpv[0], gy = 0.5f * (sn[2] - sn[3]) / hpv[1],
+                      gz = 0.5f * (sn[4] - sn[5]) / hpv[2];
           float gm = Kokkos::sqrt(gx * gx + gy * gy + gz * gz);
           if (gm < 1e-6f)
             gm = 1e-6f;
@@ -125,7 +138,7 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
             float na = Kokkos::fabs(nrm[a]);
             if (na < 1e-3f)
               na = 1e-3f;  // wall nearly parallel to this axis: cap at 1000x (still finite)
-            lamAxis[a] = lamEff / na;
+            lamAxis[a] = lamEff / (hpv[a] * na);
           }
         }
         ibmFillEntry<SCHEME>(ov, slot, (int)idx, sc, sn, bc_type, hasEx ? thEx : nullptr,
@@ -138,15 +151,57 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
 }
 
 // Volume fraction theta = clamp(0.5 + sdf_sample, 0, 1) at the staggered point (lx+off, ...).
-inline void ibmVolfrac(CCField theta, CCConst sdf, C3 ext, Off3 off) {
+//
+// PHASE 2 (anisotropic cells, doc/anisotropic_metric.md §6.4), RATE ONLY — this is the velocity
+// multigrid's staircase classification, so it decides a coarse operator's coefficient and never the
+// fixed point.  `sd` is a distance in hRef units and the staircase wants the distance in CELLS along
+// the normal, i.e. `theta = clamp(0.5 + d' |m|)` with `|m| = sqrt(sum_a n_a^2 w_a)` the index
+// distance per unit physical distance along the normal (n = the physical unit normal of §6.1, from
+// the sampled gradient at the staggered point).  The isotropic `|m|` is a `sqrt` of a unit vector,
+// which is NOT exactly 1, so the `!aniso` path runs the literal legacy expression (the same
+// host-bool dispatch C1 used for the const-coefficient smoother).
+// A degenerate gradient (|g/h'| below the guard) falls back to `|m| = 1`, i.e. to the legacy
+// expression: with no direction there is no per-axis information to use, and a plateau of the
+// sampled SDF must not be turned into theta = 0.5 on a deep cell.
+inline void ibmVolfrac(CCField theta, CCConst sdf, C3 ext, Off3 off, bool aniso = false,
+                       double hpx = 1.0, double hpy = 1.0, double hpz = 1.0, double wx = 1.0,
+                       double wy = 1.0, double wz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  if (!aniso) {
+    Kokkos::parallel_for(
+        "peclet::flow::ibm_volfrac", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          const long i = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
+          const double sd = ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
+          const double t = 0.5 + sd;
+          theta(i) = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+        });
+    return;
+  }
   Kokkos::parallel_for(
-      "peclet::flow::ibm_volfrac", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
+      "peclet::flow::ibm_volfrac_aniso", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long i = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
-        const double sd = ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
-        const double t = 0.5 + sd;
+        const double px = lx + off.x, py = ly + off.y, pz = lz + off.z;
+        const double sd = ccSampleExt(sdf, ext, px, py, pz);
+        // g_a = h_a' n_a from the central difference at the SAME staggered point.
+        const double gx = 0.5 * (ccSampleExt(sdf, ext, px + 1.0, py, pz) -
+                                 ccSampleExt(sdf, ext, px - 1.0, py, pz)) /
+                          hpx;
+        const double gy = 0.5 * (ccSampleExt(sdf, ext, px, py + 1.0, pz) -
+                                 ccSampleExt(sdf, ext, px, py - 1.0, pz)) /
+                          hpy;
+        const double gz = 0.5 * (ccSampleExt(sdf, ext, px, py, pz + 1.0) -
+                                 ccSampleExt(sdf, ext, px, py, pz - 1.0)) /
+                          hpz;
+        const double gm = Kokkos::sqrt(gx * gx + gy * gy + gz * gz);
+        double mm = 1.0;
+        if (gm > 1e-12) {
+          const double nx = gx / gm, ny = gy / gm, nz = gz / gm;
+          mm = Kokkos::sqrt(nx * nx * wx + ny * ny * wy + nz * nz * wz);
+        }
+        const double t = 0.5 + sd * mm;
         theta(i) = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
       });
 }

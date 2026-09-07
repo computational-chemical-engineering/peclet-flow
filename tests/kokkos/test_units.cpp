@@ -473,19 +473,24 @@ void gateAnisoPoiseuille() {
     CHECK(a.f.spacing[0] == 1.0 && a.f.spacing[1] == 1.0 && a.f.spacing[2] == 1.0);
     checkChannel("isotropic control (16, 16, 16) at extent == cells", a, 16, 16, 16, 5, 11, 1e-9);
   }
-  // (d) The §7 refusals: an anisotropic domain is admitted by the staggered solver above and
-  //     refused, with the three spacings in the message, by the collocated policy, by enable_vof
-  //     and by the hydro force integrals (each lifted by a named later commit).
+  // (d) The §7 table, as commit C4 leaves it.  ADMITTED (C4 lifted them): the collocated policy
+  //     and the hydro force integrals.  STILL REFUSED, with the three spacings in the message:
+  //     enable_vof (Phase 3), and hydro_force_torque_reaction only on the v3 moving-wall torque
+  //     path (doc/units_escalation.md E3), which needs a moving scene and is not reachable here.
   {
     bool threw = false;
     try {
       peclet::flow::Solver<peclet::flow::Colocated> sc(16, 40, 8);
       sc.setPhysicalDomain({16.0, 12.0, 16.0}, {0.0, 0.0, 0.0}, {16, 40, 8});
+      const auto sp = sc.spacing();
+      std::printf("      ADMITTED (collocated): spacing (%.17g, %.17g, %.17g), aniso %d\n", sp[0],
+                  sp[1], sp[2], (int)sc.unitScales().aniso);
+      CHECK(sc.unitScales().aniso);
     } catch (const std::exception& ex) {
       threw = true;
-      std::printf("      refused (collocated): %s\n", ex.what());
+      std::printf("      UNEXPECTED refusal (collocated): %s\n", ex.what());
     }
-    CHECK(threw);
+    CHECK(!threw);
     threw = false;
     try {
       peclet::flow::Solver<peclet::flow::Staggered> ss(16, 40, 8);
@@ -500,12 +505,13 @@ void gateAnisoPoiseuille() {
     try {
       peclet::flow::Solver<peclet::flow::Staggered> ss(16, 40, 8);
       ss.setPhysicalDomain({16.0, 12.0, 16.0}, {0.0, 0.0, 0.0}, {16, 40, 8});
-      ss.hydroForceTorque();
+      ss.hydroForceTorque();  // C4: admitted (no scene here, so it returns an empty result)
+      std::printf("      ADMITTED (hydro_force_torque)\n");
     } catch (const std::exception& ex) {
       threw = true;
-      std::printf("      refused (hydro_force_torque): %s\n", ex.what());
+      std::printf("      UNEXPECTED refusal (hydro_force_torque): %s\n", ex.what());
     }
-    CHECK(threw);
+    CHECK(!threw);
   }
 }
 
@@ -633,6 +639,404 @@ void gateScale() {
     CHECK(rd <= 1e-15);                   // and the residuals agree to their own round-off
   }
 }
+// --------------------------------------------------------------------------------------------
+// GATE 5 - units_anisotropic_sphere (`test_units sphere`).  Phase 2 gate G2,
+// doc/anisotropic_metric.md §8.3.  The regression suite's Zick & Homsy sphere (phi = 0.216,
+// K_ref = 7.442) with `tests/regression/perf_baseline.json`'s own configuration - rho 1, mu 0.1,
+// dt 60, F 1e-3, 80 velocity sweeps, MG-PCG 300 / 1e-8, cut-cell pressure, advection off, the same
+// convergence rule on mean(u) - on the CUBE L^3 resolved by cells (N, 2N, N/2), i.e.
+// h = (dx, dx/2, 2dx), with the SDF sampled at the PHYSICAL cell centres.  Four requirements:
+//   (i)   the stretched errors |K_s(N) - K_ref|/K_ref are STRICTLY DECREASING in N;
+//   (ii)  err_s(N) <= 4 err_c(N) + 0.2 % at every N (the z axis is twice as coarse, and second
+//         order allows 4x);
+//   (iii) the least-squares order of the stretched ERROR sequence, p_s >= 1.5;
+//   (iv)  the isotropic control (N, N, N) in CELL UNITS reproduces the recorded baseline: the step
+//         counts 60 / 80 / 75 and the pressure iterations per step 6 / 7 / 7 EXACTLY, and the drag
+//         factors 7.299689474225098 / 7.389063051924422 / 7.416167928926183 to 1e-6 relative.
+// Plus the §4.4 HYDRO-FORCE gate that C4 also lifts: on a periodic Stokes cell the total force on
+// the body equals the body force integrated over the fluid volume the momentum rows cover,
+// F_x * (h_x h_y h_z) * (# fluid u-DOFs) - the periodic Stokes identity.  Measured on the cubic and
+// on the stretched grid; the stretched grid must reach the tolerance the cubic one does.
+//
+// Two notes on (iii) and (iv).  `fit_order` (the regression's f(N) = f_inf + C N^-p grid search) is
+// DEGENERATE on three grids - two free linear parameters fit three points exactly for every p - so
+// the ctest gates the log-log least-squares slope of the errors instead, and
+// `scripts/verify_anisotropic_spheres.py` runs the five-grid ladder where `fit_order` is the same
+// estimator the regression uses.
+//
+// And "bitwise" in §8.3 (iv) is not attainable against `perf_baseline.json`, for two reasons that
+// have nothing to do with the metric: the baseline is recorded on the CUDA build (the regression's
+// documented tree) while this ctest also runs on host-openmp, and its `u.mean()` is numpy's
+// PAIRWISE summation against a sequential C++ sum here.  Both perturb the drag factor at the
+// PRESSURE SOLVE'S OWN STOPPING TOLERANCE - the baseline configuration is MG-PCG rtol 1e-8 - and
+// the measured gap is 1.4e-08 / 9.7e-10 / 1.8e-09, i.e. exactly there.  What IS exactly
+// reproducible is the discrete part of the record, so the gate asserts the step counts and the
+// pressure iterations per step EXACTLY (60 / 80 / 75 at 6 / 7 / 7) and the drag factor to 1e-6,
+// which still pins every digit `perf_baseline.json` prints, and it prints all 17 either way.
+//
+// GATE 6 - units_anisotropic_tgv (`test_units tgv`).  Phase 2 gate G3, §8.4.  Stokes Taylor-Green
+// on a periodic box L x L x L_z with cells (N, 2N, 4), rho = dt = 1 (so every reference scale but
+// hRef is 1 and the isotropic control can be compared BITWISE to the cell-unit run), mu = 0.1.  The
+// mu = 0.25 is chosen so that BOTH assembled operators are exactly representable in the shipped
+// FLOAT operator storage (`IbmSolver::FV`, MReal; WO-M / docs/SCALING_ISSUES.md #1) and the metric
+// is therefore on trial alone -- the same move E1 of doc/units_escalation.md made for G1.  Isotropic
+// control: hRef = 1, mu' = 0.25, b = (1/4, 1/4, 1/4), AC = 1 + 2((b+b)+b) = 5/2.  Stretched:
+// hRef = 0.5, hp = (2, 1, 2), w = (1/4, 1, 1/4), mu' = 1, b = (1/4, 1, 1/4), AC = 4.  Every one of
+// them dyadic.  At mu = 0.1 the same gate reads 1.5e-07 (isotropic control) and 2.9e-07 (stretched)
+// -- the float floor, in the isotropic control too, so not a metric statement.
+// The plain TG field is NOT discretely divergence-free on a stretched staggered grid; the initial
+// field is the one that is,
+//     u =  a_x cos(kx) sin(ky),  v = -a_y sin(kx) cos(ky),
+//     a_x sin(k h_x/2)/h_x == a_y sin(k h_y/2)/h_y,
+// which is also an eigenvector of the anisotropic 7-point operator, so the backward-Euler amplitude
+// ratio per step is EXACTLY r = 1/(1 + dt nu Lambda) with
+// Lambda = 2(1-cos k h_x)/h_x^2 + 2(1-cos k h_y)/h_y^2.
+struct Zh {
+  double K = 0.0, umean = 0.0, div = 0.0, R = 0.0, pIterStep = 0.0;
+  int steps = 0;
+  std::array<double, 3> spacing{};
+  bool aniso = false;
+};
+
+/// The regression's `run_case("zh_sphere", N)` transcribed.  `arm == false` is the CELL-UNIT
+/// baseline configuration; `arm == true` puts the same physical cube `L^3` on (nx, ny, nz) cells.
+Zh runZhSphere(int nx, int ny, int nz, bool arm, double L, int levels) {
+  const double RHO = 1.0, MU = 0.1, DT = 60.0, FX = 1e-3, PHI = 0.216;
+  const double R = std::pow(PHI * 3.0 / (4.0 * M_PI), 1.0 / 3.0) * L;
+  peclet::flow::Solver<peclet::flow::Staggered> s(nx, ny, nz);
+  if (arm)
+    s.setPhysicalDomain({L, L, L}, {0.0, 0.0, 0.0}, {nx, ny, nz});
+  s.setRho(RHO);
+  s.setMu(MU);
+  s.setDt(DT);
+  s.setBodyForce(FX, 0.0, 0.0);
+  s.setAdvection(false);
+  s.setVelocityIterations(80);
+  s.setPressureLevels(levels);
+  s.setPressurePcg(true, 300, 1e-8);
+  const std::vector<double> cx = s.cellCentres(0), cy = s.cellCentres(1), cz = s.cellCentres(2);
+  const double c = 0.5 * L;
+  std::vector<double> sdf((std::size_t)nx * ny * nz);
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < nx; ++x)
+        sdf[(std::size_t)x + (std::size_t)y * nx + (std::size_t)z * nx * ny] =
+            std::sqrt((cx[x] - c) * (cx[x] - c) + (cy[y] - c) * (cy[y] - c) +
+                      (cz[z] - c) * (cz[z] - c)) -
+            R;
+  s.setSolid(sdf, /*cutcellPressure=*/true);
+  std::vector<double> pit;
+  double prev = 0.0;
+  Zh r;
+  for (int it = 0; it < 400; ++it) {
+    s.step();
+    ++r.steps;
+    pit.push_back((double)s.lastPressureIterations());
+    if (it % 5 == 4) {
+      const std::vector<double> uu = s.getVelocity(0);
+      double m = 0.0;
+      for (double v : uu)
+        m += v;
+      m /= (double)uu.size();
+      if (it >= 15 && std::fabs(m - prev) < 1e-5 * (std::fabs(m) + 1e-30))
+        break;
+      prev = m;
+    }
+  }
+  const std::vector<double> uu = s.getVelocity(0);
+  double m = 0.0;
+  for (double v : uu)
+    m += v;
+  r.umean = m / (double)uu.size();
+  r.R = R;
+  r.K = FX * (L * L * L) / (6.0 * M_PI * MU * R * r.umean);
+  r.div = s.maxOpenDivergence();
+  r.spacing = s.spacing();
+  r.aniso = s.unitScales().aniso;
+  std::vector<double> half(pit.begin() + (std::ptrdiff_t)(pit.size() / 2), pit.end());
+  std::sort(half.begin(), half.end());
+  const std::size_t nh = half.size();
+  r.pIterStep = (nh % 2) ? half[nh / 2] : 0.5 * (half[nh / 2 - 1] + half[nh / 2]);
+  return r;
+}
+
+/// least-squares slope of log(err) against log(N) (the observed order of convergence).
+double logLogOrder(const std::vector<double>& Ns, const std::vector<double>& err) {
+  double sx = 0, sy = 0, sxx = 0, sxy = 0;
+  const double n = (double)Ns.size();
+  for (std::size_t i = 0; i < Ns.size(); ++i) {
+    const double X = std::log(Ns[i]), Y = std::log(err[i]);
+    sx += X;
+    sy += Y;
+    sxx += X * X;
+    sxy += X * Y;
+  }
+  return -(n * sxy - sx * sy) / (n * sxx - sx * sx);
+}
+
+/// The §4.4 periodic-Stokes force identity, on an ANALYTIC scene (hydroForceTorqueReaction needs
+/// one).  Returns the measured x reaction, the identity's value and their relative gap.
+struct React {
+  double Fx = 0.0, Fref = 0.0, rel = 0.0;
+  long nFluid = 0;
+  std::array<double, 3> spacing{};
+};
+
+React runReactionSphere(int nx, int ny, int nz, bool arm, double L, int levels, int nsteps) {
+  const double RHO = 1.0, MU = 0.1, DT = 60.0, FX = 1e-3, PHI = 0.216;
+  const double R = std::pow(PHI * 3.0 / (4.0 * M_PI), 1.0 / 3.0) * L;
+  peclet::flow::Solver<peclet::flow::Staggered> s(nx, ny, nz);
+  if (arm)
+    s.setPhysicalDomain({L, L, L}, {0.0, 0.0, 0.0}, {nx, ny, nz});
+  s.setRho(RHO);
+  s.setMu(MU);
+  s.setDt(DT);
+  s.setBodyForce(FX, 0.0, 0.0);
+  s.setAdvection(false);
+  s.setVelocityIterations(200);
+  s.setVelocityResidualTolerance(1e-12);
+  s.setPressureLevels(levels);
+  s.setPressurePcg(true, 300, 1e-10);
+  {
+    namespace g = peclet::core::geom;
+    g::SceneBuilder<double> b;
+    b.addLeaf(g::kSphere, {R});
+    g::Transform<double> tr;
+    tr.translation = peclet::core::Vec3<double>{0.5 * L, 0.5 * L, 0.5 * L};
+    b.addInstance(0, tr);
+    std::vector<int> ni, ii;
+    std::vector<double> nr, ir;
+    b.encode(ni, nr, ii, ir);
+    s.setScene(ni, nr, ii, ir, /*periodic=*/true);
+    s.setSolidFromScene(/*cutcellPressure=*/true);
+  }
+  for (int it = 0; it < nsteps; ++it)
+    s.step();
+  React out;
+  out.spacing = s.spacing();
+  // The fluid u-DOF count, from the solver's OWN sampled SDF and `ibmSolidMask`'s rule: the
+  // staggered sample at (x-1/2, y, z) is the mean of the two adjacent cell values (periodic wrap),
+  // and the DOF is SOLID for `sd <= 0`.
+  const std::vector<double> sd = s.getField("sdf");
+  long nf = 0;
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < nx; ++x) {
+        const int xm = (x + nx - 1) % nx;
+        const double a = sd[(std::size_t)xm + (std::size_t)y * nx + (std::size_t)z * nx * ny];
+        const double b2 = sd[(std::size_t)x + (std::size_t)y * nx + (std::size_t)z * nx * ny];
+        if (0.5 * (a + b2) > 0.0)
+          ++nf;
+      }
+  out.nFluid = nf;
+  const double vcell = out.spacing[0] * out.spacing[1] * out.spacing[2];
+  out.Fref = FX * vcell * (double)nf;
+  const std::vector<double> fr = s.hydroForceTorqueReaction();
+  out.Fx = fr.empty() ? 0.0 : fr[0];
+  out.rel = std::fabs(out.Fx - out.Fref) / std::fabs(out.Fref);
+  return out;
+}
+
+void gateAnisoSphere() {
+  std::printf("=== units_anisotropic_sphere ===\n");
+  const double KREF = 7.442;
+  const double REC[3] = {7.299689474225098, 7.389063051924422, 7.416167928926183};
+  const int NS[3] = {16, 24, 32};
+  std::vector<double> Ns, errS, errC;
+  for (int i = 0; i < 3; ++i) {
+    const int N = NS[i];
+    const int levels = std::max(2, (int)std::floor(std::log2((double)N)) - 1);
+    const Zh cub = runZhSphere(N, N, N, /*arm=*/false, (double)N, levels);
+    const Zh str = runZhSphere(N, 2 * N, N / 2, /*arm=*/true, (double)N, levels);
+    const double ec = std::fabs(cub.K - KREF) / KREF, es = std::fabs(str.K - KREF) / KREF;
+    Ns.push_back((double)N);
+    errC.push_back(ec);
+    errS.push_back(es);
+    std::printf("  N=%2d  cubic  K %.17g  err %.4f %%  iters/step %.1f  steps %3d  div %.2e\n", N,
+                cub.K, 100.0 * ec, cub.pIterStep, cub.steps, cub.div);
+    std::printf("        stretched (%d,%d,%d) spacing (%g, %g, %g) aniso %d  K %.17g  err %.4f %%"
+                "  iters/step %.1f  steps %3d  div %.2e\n",
+                N, 2 * N, N / 2, str.spacing[0], str.spacing[1], str.spacing[2], (int)str.aniso,
+                str.K, 100.0 * es, str.pIterStep, str.steps, str.div);
+    // (iv) the cubic control reproduces the recorded baseline value to every printed digit.
+    const double dRec = std::fabs(cub.K - REC[i]) / REC[i];
+    const int RECSTEPS[3] = {60, 80, 75};
+    const double RECITERS[3] = {6.0, 7.0, 7.0};
+    std::printf("        cubic vs perf_baseline.json %.17g   rel %.3e (bound 1e-6)   steps %d "
+                "(recorded %d)   iters/step %.1f (recorded %.1f)\n",
+                REC[i], dRec, cub.steps, RECSTEPS[i], cub.pIterStep, RECITERS[i]);
+    CHECK(dRec <= 1e-6);
+    CHECK(cub.steps == RECSTEPS[i]);
+    CHECK(cub.pIterStep == RECITERS[i]);
+    // (ii) err_s <= 4 err_c + 0.2 %
+    CHECK(es <= 4.0 * ec + 0.002);
+    // pressure iterations on the stretched grid: <= cubic + 2 (the §5 aspect rule)
+    std::printf("        pressure iters/step  cubic %.1f  stretched %.1f  (bound cubic + 2)\n",
+                cub.pIterStep, str.pIterStep);
+    CHECK(str.pIterStep <= cub.pIterStep + 2.0);
+  }
+  // (i) strictly decreasing stretched errors
+  CHECK(errS[1] < errS[0]);
+  CHECK(errS[2] < errS[1]);
+  // (iii) least-squares order of the stretched error sequence
+  const double ps = logLogOrder(Ns, errS), pc = logLogOrder(Ns, errC);
+  std::printf("  LS order of the ERROR sequence: stretched %.4f (bound >= 1.5), cubic %.4f\n", ps,
+              pc);
+  CHECK(ps >= 1.5);
+
+  // --- §4.4, the hydro-force gate C4 lifts: the periodic Stokes identity F = F_body * V_fluid ---
+  {
+    const int N = 24;
+    const int levels = std::max(2, (int)std::floor(std::log2((double)N)) - 1);
+    const React rc = runReactionSphere(N, N, N, /*arm=*/false, (double)N, levels, 300);
+    const React rs = runReactionSphere(N, 2 * N, N / 2, /*arm=*/true, (double)N, levels, 300);
+    std::printf("  hydro_force_torque_reaction, periodic Stokes identity F = F_body*V_fluid:\n");
+    std::printf("    cubic     (%d,%d,%d) spacing (%g,%g,%g)  F_x %.17g  identity %.17g  rel %.3e"
+                "  (%ld fluid u-DOFs)\n",
+                N, N, N, rc.spacing[0], rc.spacing[1], rc.spacing[2], rc.Fx, rc.Fref, rc.rel,
+                rc.nFluid);
+    std::printf("    stretched (%d,%d,%d) spacing (%g,%g,%g)  F_x %.17g  identity %.17g  rel %.3e"
+                "  (%ld fluid u-DOFs)\n",
+                N, 2 * N, N / 2, rs.spacing[0], rs.spacing[1], rs.spacing[2], rs.Fx, rs.Fref,
+                rs.rel, rs.nFluid);
+    // "to the same relative tolerance the cubic grid achieves" (§8.3), gated as ONE shared bound
+    // rather than a ratio: both grids are at the march's own residual floor here (300 steps of the
+    // regression's dt = 60 configuration, momentum residual stop 1e-12, MG-PCG 1e-10), and 1e-5 is
+    // the order the cubic grid reaches with a decade of margin.
+    CHECK(rs.rel <= 1e-5);
+    CHECK(rc.rel <= 1e-5);
+    std::printf("    stretched/cubic relative-gap ratio %.3f (both gated at 1e-5)\n",
+                rs.rel / rc.rel);
+  }
+}
+
+// --------------------------------------------------------------------------------------------
+struct Tgv {
+  double ratio = 0.0, rExact = 0.0, relRate = 0.0, div = 0.0, prof = 0.0, pmax = 0.0;
+  std::vector<double> u, v, w, p;
+  std::array<double, 3> spacing{};
+  bool aniso = false;
+};
+
+/// Stokes (or, with `advect`, NS) Taylor-Green on the DISCRETELY divergence-free stretched field.
+/// `arm == false` runs in cell units (spacing 1), which is what the isotropic control is compared
+/// against bitwise.
+Tgv runTgv(int nx, int ny, int nz, bool arm, double Lx, double Ly, double Lz, bool advect,
+           int nsteps, double DT = 1.0) {
+  const double RHO = 1.0, MU = 0.25;
+  const double hx = arm ? Lx / nx : 1.0, hy = arm ? Ly / ny : 1.0, hz = arm ? Lz / nz : 1.0;
+  const double Lw = arm ? Lx : (double)nx;  // the vortex wavelength (x and y share it)
+  const double k = 2.0 * M_PI / Lw;
+  const double ax = 1.0;
+  const double ay = ax * (std::sin(0.5 * k * hx) / hx) * (hy / std::sin(0.5 * k * hy));
+  peclet::flow::Solver<peclet::flow::Staggered> s(nx, ny, nz);
+  if (arm)
+    s.setPhysicalDomain({Lx, Ly, Lz}, {0.0, 0.0, 0.0}, {nx, ny, nz});
+  s.setRho(RHO);
+  s.setMu(MU);
+  s.setDt(DT);
+  s.setAdvection(advect);
+  s.setVelocityIterations(400);
+  s.setVelocityResidualTolerance(1e-14);
+  s.setPressurePcg(true, 300, 1e-13);
+  s.setPressureGeometry(std::vector<double>((std::size_t)nx * ny * nz, 10.0));
+  const std::size_t n = (std::size_t)nx * ny * nz;
+  std::vector<double> u(n), v(n), w(n, 0.0);
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < nx; ++x) {
+        const std::size_t i = (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * nx * ny;
+        u[i] = ax * std::cos(k * (x * hx)) * std::sin(k * ((y + 0.5) * hy));
+        v[i] = -ay * std::sin(k * ((x + 0.5) * hx)) * std::cos(k * (y * hy));
+      }
+  s.uploadVelocity(u, v, w);
+  Tgv r;
+  const double Lambda =
+      2.0 * (1.0 - std::cos(k * hx)) / (hx * hx) + 2.0 * (1.0 - std::cos(k * hy)) / (hy * hy);
+  r.rExact = std::pow(1.0 / (1.0 + DT * (MU / RHO) * Lambda), (double)nsteps);
+  for (int it = 0; it < nsteps; ++it)
+    s.step();
+  r.u = s.getVelocity(0);
+  r.v = s.getVelocity(1);
+  r.w = s.getVelocity(2);
+  r.p = s.getPressure();
+  r.spacing = s.spacing();
+  r.aniso = s.unitScales().aniso;
+  double num = 0.0, den = 0.0;
+  for (std::size_t i = 0; i < n; ++i) {
+    num += r.u[i] * u[i];
+    den += u[i] * u[i];
+  }
+  r.ratio = num / den;
+  double pmaxu = 0.0, perr = 0.0;
+  for (std::size_t i = 0; i < n; ++i) {
+    pmaxu = std::fmax(pmaxu, std::fabs(u[i]));
+    perr = std::fmax(perr, std::fabs(r.u[i] - r.ratio * u[i]));
+  }
+  r.prof = perr / pmaxu;
+  r.relRate = std::fabs(r.ratio - r.rExact) / r.rExact;
+  r.div = s.maxOpenDivergence();
+  r.pmax = maxAbs(r.p);
+  (void)hz;
+  return r;
+}
+
+void gateAnisoTgv() {
+  std::printf("=== units_anisotropic_tgv ===\n");
+  const int N = 16, NS = 10;
+  // (a) STOKES on the stretched box L x L x L_z with cells (N, 2N, 4): h = (1, 0.5, 1).
+  {
+    const Tgv t = runTgv(N, 2 * N, 4, /*arm=*/true, (double)N, (double)N, 4.0, /*advect=*/false, NS);
+    std::printf("  stretched Stokes (%d,%d,4) spacing (%g, %g, %g) aniso %d\n", N, 2 * N,
+                t.spacing[0], t.spacing[1], t.spacing[2], (int)t.aniso);
+    std::printf("    amplitude ratio %.17g  exact %.17g  rel %.3e (bound 1e-10)\n", t.ratio,
+                t.rExact, t.relRate);
+    std::printf("    max|div_o| %.3e (bound 1e-12)  profile %.3e (bound 1e-10)  max|P| %.3e "
+                "(the phi proxy, bound 1e-12)\n",
+                t.div, t.prof, t.pmax);
+    CHECK(t.aniso);
+    CHECK(t.relRate <= 1e-10);
+    CHECK(t.div <= 1e-12);
+    CHECK(t.prof <= 1e-10);
+    CHECK(t.pmax <= 1e-12);
+  }
+  // (b) the same with advection ON: the NS run.
+  {
+    // dt = 0.05 here, `sdflow_tg`'s own step, which is what makes the advective CFL 0.05: at the
+    // dt = 1 of the Stokes rows the TG amplitude gives CFL = 1 and the discrete nonlinear term's
+    // imbalance with the pressure gradient is 2.0e-2, i.e. the O(CFL^2) advection error, not a
+    // metric defect.  dt is free here -- the Stokes rows own the exactness statement and the
+    // bitwise control, both of which need dt = 1 (it pins tRef = 1).
+    const Tgv t =
+        runTgv(N, 2 * N, 4, /*arm=*/true, (double)N, (double)N, 4.0, /*advect=*/true, NS, 0.05);
+    std::printf("  stretched NS      (%d,%d,4) dt 0.05  amplitude ratio %.17g  exact %.17g  "
+                "rel %.3e (bound 5e-3)  max|div| %.3e (bound 1e-9)\n",
+                N, 2 * N, t.ratio, t.rExact, t.relRate, t.div);
+    CHECK(t.relRate <= 5e-3);
+    CHECK(t.div <= 1e-9);
+  }
+  // (c) the isotropic control (N, N, 4) at extent == cells: the same bounds, and BITWISE the
+  //     cell-unit run of the same problem (rho = dt = 1 pins every reference scale to 1).
+  {
+    const Tgv a = runTgv(N, N, 4, /*arm=*/true, (double)N, (double)N, 4.0, /*advect=*/false, NS);
+    const Tgv b = runTgv(N, N, 4, /*arm=*/false, (double)N, (double)N, 4.0, /*advect=*/false, NS);
+    std::printf("  isotropic control (%d,%d,4) spacing (%g, %g, %g) aniso %d\n", N, N,
+                a.spacing[0], a.spacing[1], a.spacing[2], (int)a.aniso);
+    std::printf("    amplitude ratio %.17g  exact %.17g  rel %.3e  max|div_o| %.3e  profile %.3e "
+                " max|P| %.3e\n",
+                a.ratio, a.rExact, a.relRate, a.div, a.prof, a.pmax);
+    CHECK(!a.aniso);
+    CHECK(a.relRate <= 1e-10);
+    CHECK(a.div <= 1e-12);
+    CHECK(a.prof <= 1e-10);
+    CHECK(a.pmax <= 1e-12);
+    const bool bit = bitwiseEqual(a.u, b.u) && bitwiseEqual(a.v, b.v) && bitwiseEqual(a.w, b.w) &&
+                     bitwiseEqual(a.p, b.p);
+    std::printf("    armed at extent == cells vs the cell-unit run: bitwise %s\n",
+                bit ? "EQUAL" : "DIFFERENT");
+    CHECK(bit);
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -647,8 +1051,12 @@ int main(int argc, char** argv) {
       gateVofSigma();
     else if (gate == "aniso")
       gateAnisoPoiseuille();
+    else if (gate == "sphere")
+      gateAnisoSphere();
+    else if (gate == "tgv")
+      gateAnisoTgv();
     else {
-      std::fprintf(stderr, "usage: test_units [identity|scale|vof|aniso]\n");
+      std::fprintf(stderr, "usage: test_units [identity|scale|vof|aniso|sphere|tgv]\n");
       ++failures;
     }
   }
