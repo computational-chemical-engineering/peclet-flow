@@ -2040,7 +2040,7 @@ class Solver {
                            // (const-coeff) or mixed (staircase + folds) mode
       // The per-axis metric BEFORE the hierarchy is built (doc/anisotropic_metric.md trap 5):
       // every level's b_a^L = mu' * w_a / cfac_a^2, and C3's aspect-ratio level rule reads it too.
-      vmg_.setMetric(u_.w);
+      vmg_.setMetric(u_.w, u_.hp);
 #ifdef PECLET_FLOW_MPI
       // Distributed: level 0 on the solver's own decomposition (the g=2 velocity block), coarse
       // levels coarsened in place with the even-block gate (no telescoping here yet -- measured
@@ -2400,6 +2400,11 @@ class Solver {
       mg_.setBoundaryConditions(bc_);  // per-level wall openness + null-space gating (no-op if
                                        // periodic); BEFORE initMpi — the per-level ghost width
                                        // (CA smoothing) is chosen for the periodic operator only
+      // Phase 2 C3 (doc/anisotropic_metric.md §5, trap 5): the per-axis spacings BEFORE the level
+      // table is built — the aspect-ratio rule defers an axis that is already theta times coarser
+      // than the finest coarsenable one.  Exactly (1,1,1) on the isotropic path, where the rule
+      // returns today's decision verbatim.
+      mg_.setMetric(u_.hp);
 #ifdef PECLET_FLOW_MPI
       if (distributed_)  // share the level-0 decomposition so the MG block matches this rank's
                          // block
@@ -2981,6 +2986,16 @@ class Solver {
     return m;
   }
   long lastPressureIterations() const { return lastPressureIters_; }
+  // The pressure multigrid's per-level coarsening ratio, one {rx, ry, rz} per level
+  // (doc/anisotropic_metric.md §5).  On an isotropic domain this is today's table; on a stretched
+  // one the aspect rule defers an axis while it is at least PECLET_FLOW_MG_ASPECT (2) times
+  // coarser than the finest coarsenable one.  Empty until the cut-cell operator exists.
+  std::vector<std::array<int, 3>> pressureMgLevelRatios() const {
+    std::vector<std::array<int, 3>> out;
+    for (const C3& r : mg_.levelRatios())
+      out.push_back({r.x, r.y, r.z});
+    return out;
+  }
   // ISSUES sweep item 6: did the last pressure solve break down (non-finite
   // preconditioner output / recurrence scalar)? A failing solve also reports the
   // iteration cap through `lastPressureIterations()`.

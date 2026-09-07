@@ -321,13 +321,27 @@ class VelocityMG {
 #endif
   };
 
-  /// Per-axis metric weights w_a = 1/h_a'^2 of the physical domain (doc/anisotropic_metric.md
-  /// §1.1): every level operator carries b_a^L = nu_dt * w_a / cfac_a^2.  Call BEFORE init/initMpi
-  /// (the aspect-ratio level rule of commit C3 needs the metric at that point too).  The default
-  /// (1,1,1) is the isotropic / cell-unit path and multiplies every coefficient by exactly 1.0.
-  void setMetric(const double w[3]) {
-    for (int a = 0; a < 3; ++a)
+  /// Per-axis metric of the physical domain (doc/anisotropic_metric.md §1.1): the weights
+  /// w_a = 1/h_a'^2, which every level operator carries as b_a^L = nu_dt * w_a / cfac_a^2 (C1),
+  /// and the spacings hp_a = h_a' that the aspect-ratio COARSENING rule of §5 reads (C3).  Call
+  /// BEFORE init/initMpi (trap 5): the level table is built there.  The default (1,1,1)/(1,1,1)
+  /// is the isotropic / cell-unit path -- every coefficient multiplied by exactly 1.0, and the
+  /// aspect rule inert by construction (`aniso_` false -> today's level table verbatim).
+  void setMetric(const double w[3], const double hp[3]) {
+    for (int a = 0; a < 3; ++a) {
       w_[a] = w[a];
+      hp_[a] = hp[a];
+    }
+    aniso_ = !(hp_[0] == 1.0 && hp_[1] == 1.0 && hp_[2] == 1.0);
+  }
+  /// The per-level coarsening ratio actually chosen (the level table of §5; the two hierarchies
+  /// share one rule, so on the same grid this equals CutcellMG::levelRatios()).
+  std::vector<C3> levelRatios() const {
+    std::vector<C3> r;
+    r.reserve(lv_.size());
+    for (const auto& v : lv_)
+      r.push_back(v.ratio);
+    return r;
   }
 
   // periodic uniform hierarchy (halve each axis while even and >=2, capped at nLevels).
@@ -345,18 +359,14 @@ class VelocityMG {
       C3 next = inner;
       C3 ratio{1, 1, 1};
       if (L + 1 < nLevels) {
-        if (can(inner.x)) {
-          ratio.x = 2;
-          next.x = inner.x / 2;
-        }
-        if (can(inner.y)) {
-          ratio.y = 2;
-          next.y = inner.y / 2;
-        }
-        if (can(inner.z)) {
-          ratio.z = 2;
-          next.z = inner.z / 2;
-        }
+        // The SHARED aspect-ratio rule (doc/anisotropic_metric.md §5.3): the same helper, the same
+        // hp, so this hierarchy's level table is the pressure hierarchy's on the same grid.
+        const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
+        const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
+        ratio = CutcellMG::mgChooseRatio(H, canA, aniso_, mgAspectTheta());
+        if (ratio.x == 2) next.x = inner.x / 2;
+        if (ratio.y == 2) next.y = inner.y / 2;
+        if (ratio.z == 2) next.z = inner.z / 2;
       }
       v.ratio = ratio;
       v.x = CCField("vmg_x", v.n);
@@ -438,18 +448,16 @@ class VelocityMG {
       v.n = idx.numCellsInclGhost();
       C3 next = gs, ratio{1, 1, 1};
       if (L + 1 < nLevels) {
-        if (can(gs.x) && (!inPlace || evenOn(dec, 0))) {
-          ratio.x = 2;
-          next.x = gs.x / 2;
-        }
-        if (can(gs.y) && (!inPlace || evenOn(dec, 1))) {
-          ratio.y = 2;
-          next.y = gs.y / 2;
-        }
-        if (can(gs.z) && (!inPlace || evenOn(dec, 2))) {
-          ratio.z = 2;
-          next.z = gs.z / 2;
-        }
+        // §5.3, distributed: today's candidate set (global can() + the even-block gate), then the
+        // aspect rule.  A pure function of replicated data on every rank, like CutcellMG's.
+        const bool canA[3] = {can(gs.x) && (!inPlace || evenOn(dec, 0)),
+                              can(gs.y) && (!inPlace || evenOn(dec, 1)),
+                              can(gs.z) && (!inPlace || evenOn(dec, 2))};
+        const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
+        ratio = CutcellMG::mgChooseRatio(H, canA, aniso_, mgAspectTheta());
+        if (ratio.x == 2) next.x = gs.x / 2;
+        if (ratio.y == 2) next.y = gs.y / 2;
+        if (ratio.z == 2) next.z = gs.z / 2;
       }
       v.ratio = ratio;
       v.x = CCField("vmg_x", v.n);
@@ -910,6 +918,8 @@ class VelocityMG {
  private:
   std::vector<Level> lv_;
   double w_[3] = {1.0, 1.0, 1.0};  // per-axis metric weight (setMetric); 1.0 = isotropic lattice
+  double hp_[3] = {1.0, 1.0, 1.0};  // per-axis spacing h_a' (setMetric); the §5 coarsening rule
+  bool aniso_ = false;              // engages that rule; false => today's level table verbatim
   int pre_ = 2, post_ = 2, bottom_ = 8;
   bool usePin_ = true,
        useResMask_ = true;  // staircase: pin + clean-fluid exclude; upwind/domain-BC: neither

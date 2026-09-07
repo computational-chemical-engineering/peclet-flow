@@ -499,6 +499,17 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def("set_velocity_multigrid", &S::setVelocityMultigrid, nb::arg("on"), nb::arg("levels") = 4,
            nb::arg("vcycles") = 8,
            "Enable velocity (momentum) multigrid for the implicit diffusion solve.")
+      .def("pressure_mg_level_ratios", &S::pressureMgLevelRatios,
+           "The pressure multigrid's per-level coarsening ratio, one (rx, ry, rz) per level "
+           "(read-only).\n\n"
+           "On an isotropic domain every coarsenable axis halves, as it always has. On an "
+           "ANISOTROPIC one (extent giving different spacings per axis) the hierarchy coarsens "
+           "the FINEST coarsenable axis and defers one that is already at least "
+           "PECLET_FLOW_MG_ASPECT (default 2) times coarser, so the coarse operators stay close "
+           "to isotropic and the point smoother keeps its rate -- e.g. cells (N, 2N, N/2) on a "
+           "cube gives (1,2,1), (2,2,1), (2,2,2), ... Empty until set_solid/"
+           "set_pressure_geometry has built the operator. See flow/doc/anisotropic_metric.md "
+           "\u00a75.")
       .def("last_pressure_iterations", &S::lastPressureIterations,
            "Return the pressure-solver iteration count from the last step().\n\n"
            "A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration "

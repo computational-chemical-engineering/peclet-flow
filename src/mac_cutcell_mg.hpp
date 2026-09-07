@@ -301,6 +301,17 @@ inline bool strictPressure() {
   }();
   return on;
 }
+// The aspect-ratio coarsening threshold `theta` of doc/anisotropic_metric.md §5.1, read ONCE.
+// A measurement knob for the §8.5 gate, not a user setting: `PECLET_FLOW_MG_ASPECT=1e9` restores
+// today's full coarsening (the ablation of §8.5 item (c)) and `1.4142` is the sqrt(2) variant §5.2
+// weighs against the default 2.0.  It is only ever consulted on an ANISOTROPIC metric.
+inline double mgAspectTheta() {
+  static const double th = [] {
+    const char* e = std::getenv("PECLET_FLOW_MG_ASPECT");
+    return e ? std::atof(e) : 2.0;
+  }();
+  return th;
+}
 inline int mgDebugSolves() {
   static const int n = [] {
     const char* e = std::getenv("PECLET_FLOW_MG_DEBUG_SOLVES");
@@ -434,6 +445,66 @@ class CutcellMG {
     return C3{lv.og.x - lv.g + 1, lv.og.y - lv.g + 1, lv.og.z - lv.g + 1};
   }
 
+  // ---- the aspect-ratio coarsening rule (doc/anisotropic_metric.md §5) -------------------------
+  // Shared by BOTH geometric hierarchies (VelocityMG calls it too): given this level's spacings
+  // H[a] = hp[a] * cfac[a] and the per-axis coarsenability canA[a] that today's tests produce
+  // (can(dim) single-rank, plus evenOn(dec, a) under MPI), return the per-axis coarsening ratio.
+  //
+  //   aniso == false : ratio_a = 2 iff canA[a]                     -- TODAY'S DECISION, VERBATIM
+  //   aniso == true  : ratio_a = 2 iff canA[a] and H[a] < theta * min_{b : canA[b]} H[b]
+  //
+  // i.e. always coarsen the finest coarsenable axis and DEFER one that is already at least theta
+  // times coarser (§5.2: the spread halves per level until it is below theta and then stays
+  // there, so no coarse operator is ever more than theta^2 anisotropic in coefficient).  On an
+  // isotropic metric every H in the candidate set is equal, 1 < theta, and the result is today's
+  // table bit for bit -- which is why the isotropic path is gated on the flag and not on the
+  // arithmetic (§5.4: the rule WOULD change the table after a telescoping merge).
+  //
+  // A DEFERRED axis is not a BLOCKED one: initMpi's telescope trigger keeps reading canA, so
+  // deferral alone never merges ranks (trap 6).
+  static C3 mgChooseRatio(const double H[3], const bool canA[3], bool aniso, double theta) {
+    C3 r{1, 1, 1};
+    if (!aniso) {
+      if (canA[0]) r.x = 2;
+      if (canA[1]) r.y = 2;
+      if (canA[2]) r.z = 2;
+      return r;
+    }
+    double hmin = 0.0;
+    bool any = false;
+    for (int a = 0; a < 3; ++a)
+      if (canA[a] && (!any || H[a] < hmin)) {
+        hmin = H[a];
+        any = true;
+      }
+    if (!any)
+      return r;
+    const double lim = theta * hmin;
+    if (canA[0] && H[0] < lim) r.x = 2;
+    if (canA[1] && H[1] < lim) r.y = 2;
+    if (canA[2] && H[2] < lim) r.z = 2;
+    return r;
+  }
+
+  /// Per-axis cell spacings h_a' = h_a / hRef of the physical domain (doc/anisotropic_metric.md
+  /// §1.1).  Call BEFORE init/initMpi (trap 5): the level table is built there, long before
+  /// setOpenness, and the aspect rule of §5 needs the metric at that point.  The default
+  /// (1, 1, 1) is the isotropic / cell-unit path, on which the rule is inert BY CONSTRUCTION
+  /// (`aniso_` is false, so mgChooseRatio returns today's decision verbatim).
+  void setMetric(const double hp[3]) {
+    for (int a = 0; a < 3; ++a)
+      hp_[a] = hp[a];
+    aniso_ = !(hp_[0] == 1.0 && hp_[1] == 1.0 && hp_[2] == 1.0);
+  }
+  /// The per-level coarsening ratio actually chosen (the level table of §5, gate §8.5).
+  std::vector<C3> levelRatios() const {
+    std::vector<C3> r;
+    r.reserve(lv_.size());
+    for (const auto& v : lv_)
+      r.push_back(v.ratio);
+    return r;
+  }
+
   // build the periodic level hierarchy: per axis, halve inner while even and >=2 (uniform when
   // cubic), capped at nLevels (mirrors DistributedPoissonMG::init uniform path).
   void init(int nx, int ny, int nz, int nLevels) {
@@ -454,18 +525,14 @@ class CutcellMG {
       C3 next = inner;
       C3 ratio{1, 1, 1};
       if (L + 1 < nLevels) {
-        if (can(inner.x)) {
-          ratio.x = 2;
-          next.x = inner.x / 2;
-        }
-        if (can(inner.y)) {
-          ratio.y = 2;
-          next.y = inner.y / 2;
-        }
-        if (can(inner.z)) {
-          ratio.z = 2;
-          next.z = inner.z / 2;
-        }
+        // §5.1: the candidate set is today's `can()` per axis; the aspect rule then defers an axis
+        // that is already >= theta times coarser than the finest candidate.  Inert when !aniso_.
+        const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
+        const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
+        ratio = mgChooseRatio(H, canA, aniso_, mgAspectTheta());
+        if (ratio.x == 2) next.x = inner.x / 2;
+        if (ratio.y == 2) next.y = inner.y / 2;
+        if (ratio.z == 2) next.z = inner.z / 2;
       }
       v.ratio = ratio;
       v.x = CCField("mg_x", v.n);
@@ -790,18 +857,19 @@ class CutcellMG {
           }
         }
         auto evenBlocks = [&](int ax) { return evenOn(curDec, ax); };
-        if (can(gs.x) && evenBlocks(0)) {
-          ratio.x = 2;
-          next.x = gs.x / 2;
-        }
-        if (can(gs.y) && evenBlocks(1)) {
-          ratio.y = 2;
-          next.y = gs.y / 2;
-        }
-        if (can(gs.z) && evenBlocks(2)) {
-          ratio.z = 2;
-          next.z = gs.z / 2;
-        }
+        // §5.1 again, with the MPI candidate set: an axis can coarsen when the GLOBAL dim can and
+        // every rank's (possibly just-merged) block is even on it.  The aspect rule then defers
+        // one that is already >= theta times coarser.  Note `blocked` above is computed from
+        // `can()` and `evenOn()` ALONE (trap 6): an axis deferred here is not blocked and must not
+        // trigger a telescope merge.  Every rank has the same doubles and the same decomposition,
+        // so this is a pure function -- no communication.
+        const bool canA[3] = {can(gs.x) && evenBlocks(0), can(gs.y) && evenBlocks(1),
+                              can(gs.z) && evenBlocks(2)};
+        const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
+        ratio = mgChooseRatio(H, canA, aniso_, mgAspectTheta());
+        if (ratio.x == 2) next.x = gs.x / 2;
+        if (ratio.y == 2) next.y = gs.y / 2;
+        if (ratio.z == 2) next.z = gs.z / 2;
       }
       v.ratio = ratio;
       v.x = CCField("mg_x", v.n);
@@ -2685,6 +2753,11 @@ class CutcellMG {
   static constexpr AllOp MPI_SUM_ = kSum, MPI_MAX_ = kMax;
 
   std::vector<Level> lv_;
+  // The physical metric (setMetric), doc/anisotropic_metric.md §5: h_a' = h_a/hRef and the flag
+  // that engages the aspect-ratio coarsening rule.  (1,1,1)/false is the isotropic lattice, on
+  // which mgChooseRatio reproduces today's level table exactly.
+  double hp_[3] = {1.0, 1.0, 1.0};
+  bool aniso_ = false;
   int pre_ = 2, post_ = 2, bottom_ = 4;
   int bc_[6] = {0, 0, 0, 0, 0, 0};
   bool hasBC_ = false, removeMean_ = true, hasOutflow_ = false;
@@ -2811,6 +2884,11 @@ class CutcellMG {
   // per level: global dims, ranks holding it, block dims (block 0), ratio to the next level, and
   // whether the transition out of it telescopes. This is the pre-flight for a job (P1 of
   // docs/MG_TELESCOPING_PLAN.md) and replaces launching `np` oversubscribed processes to find out.
+  // NOTE (Phase 2 C3): this planner models the ISOTROPIC rule -- it takes no metric, so it does
+  // NOT apply the aspect-ratio deferral of doc/anisotropic_metric.md §5.  On an anisotropic
+  // `extent` read the real table off the built hierarchy instead
+  // (`Solver.pressure_mg_level_ratios()` / `CutcellMG::levelRatios()`).  Threading `hp` through
+  // here and through scripts/check_decomposition.py is a follow-up the note does not order.
   struct PlanRow {
     C3 global, block, ratio;
     int ranks;

@@ -112,10 +112,31 @@ Option 3 was rejected.
 
 ## E2 (Phase 2, commit C2 → C3) — MG-PCG does not converge on the stretched hierarchy, so §8.5's ORDER row is measured on a stalled solve
 
-**Status: OPEN — C3's target.** The C2 gate PASSES; the coarsening rule of §5 is the next commit and
-its rate gate (§8.5 items (b) and (c)) is to be measured against exactly the before-numbers below:
-the **500-iteration cap** on every stretched rung, **FCG 19 / 22 / 27** on the same operator, and
-**cubic 8** in either driver.
+**Status: RESOLVED 2026-09-07 by commit C3, and by the coarsening rule ALONE.**
+`CutcellMG`/`VelocityMG` now defer an axis that is already `theta = 2` times coarser than the finest
+coarsenable one (`mgChooseRatio`, doc/anisotropic_metric.md §5), and on the stretched ladder MG-PCG
+goes **500 / 500 / 500 CAPPED -> 7 / 8 / 8** at N = 16 / 32 / 64, with `r/|b|`
+1.3e-11 / 3.0e-11 / 3.1e-11 and the L2 error equal to the exact discrete solution to every printed
+digit — i.e. the MG-PCG rows now ARE the FCG control, and the stretched order is the clean
+**2.0038** instead of the contaminated 2.0308. Nothing else changed: not the smoother, not the
+post-smoothing colour order, not the driver selection, not the bottom solve.
+
+The direct read-out confirms the mechanism. `pr` (`PECLET_FLOW_MG_DEBUG=2`, zero iff the V-cycle is
+symmetric w.r.t. the fine operator), median over the FCG iterations at N = 32:
+
+| problem | today's full coarsening | with the aspect rule | the cubic control |
+|---|---|---|---|
+| all-fluid stretched | **3.555e-01** (max 1.08) | **6.818e-02** | 2.814e-02 |
+| Z&H sphere stretched | 5.345e-02 | **4.002e-02** | — |
+
+so the stretched hierarchy's asymmetry falls 5.2x into the neighbourhood of the isotropic periodic
+hierarchy's own 0.062 (`flow/CLAUDE.md`, WO-H). The V-cycle rate over cycles 2-8 goes
+**0.6920 -> 0.1501** and the Z&H sphere at `phi = 0.216` goes **24 -> 10** iterations at N = 32
+(cubic control 9) and **25 -> 10** at N = 64 (cubic 10). `PECLET_FLOW_MG_ASPECT=1e9` reproduces
+every "before" number in the table below to the digit, so the ablation IS today's rule. Full record:
+`doc/anisotropic_metric.md` §10, the C3 entry.
+
+**The before-numbers, kept as the record:**
 
 `cutcellmg_aniso` (the new ctest), all-fluid periodic box, `(N, 2N, N/2)` with
 `setOpenness(…, 1, 4, ¼)`, `levels = 6`, 2/2 sweeps, host-openmp:

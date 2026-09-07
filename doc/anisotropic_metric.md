@@ -555,7 +555,7 @@ rebases onto C5.
   `AB/AT = -0.02500000037252903`; at `w = (1,1,1)`, `AC = 0.62000000476837158` == the pre-change
   `idiag + 6.0*beta` bitwise, both backends.
 
-### C2 (U11 weights, the pressure metric + the §1.4 snap) — flow `0c67ac1`
+### C2 (U11 weights, the pressure metric + the §1.4 snap) — flow `735fb46`
 
 - **G0**, `tests/kokkos` **41/41** host-openmp and **41/41** nvidia-cuda (the 39 of C1 plus
   `cutcellmg_aniso` and `units_anisotropic_poiseuille`); `tests/kokkos_mpi` **103/103**
@@ -604,6 +604,103 @@ rebases onto C5.
   `w = (1,1,1)` converges in **8** iterations, cubic shape with `w = (1,4,¼)` in **20**, and only
   stretched + stretched weights stalls — exactly §5.2's prediction for today's full-coarsening
   rule.
+
+### C3 (U11 ⚡ A, the aspect-ratio coarsening rule) — flow, Phase 2 commit C3
+
+**The rule, and where it lives.** One helper,
+`CutcellMG::mgChooseRatio(H, canA, aniso, theta)` (§5.1 verbatim: with `aniso` false it returns
+today's decision, ratio 2 on every axis with `canA` true; with `aniso` true, ratio 2 iff
+`canA[a] && H[a] < theta * min_{b: canA[b]} H[b]`), called from all four level loops —
+`CutcellMG::init`, `CutcellMG::initMpi`, `VelocityMG::init`, `VelocityMG::initMpi` — with
+`H[a] = hp[a] * cfac[a]` at that level. `CutcellMG::setMetric(hp)` and the extended
+`VelocityMG::setMetric(w, hp)` are called BEFORE `init`/`initMpi` at their single call sites in
+`flow_ibm.hpp` (`setSolidDevice`, and the velocity-MG build just above it) — trap 5.
+`theta` comes from `PECLET_FLOW_MG_ASPECT` (`mgAspectTheta()`, read once, default `2.0`).
+`levelRatios()` on both classes, `Solver.pressure_mg_level_ratios()` in Python.
+`coarsenAlignment`, `refineFactor`, `decomposition()` and the telescope trigger are UNCHANGED
+(§5.3, trap 6): `blocked` still reads `can()`/`evenOn()` alone.
+
+- **G0**, `tests/kokkos` **41/41** host-openmp and **41/41** nvidia-cuda; `tests/kokkos_mpi`
+  **106/106** host-openmp and **106/106** nvidia-cuda at np = 1, 2, 4 (the 103 of C2 plus
+  `cutcellmg_aniso_mpi` × 3); `sdflow_mpi_np1` bit-exact to single-rank,
+  `k_dist = k_ref = 5.84542251e+00`, rel `0.00e+00`, `div 5.86e-12`.
+- **Regression** (CUDA, never `--update`): PASS, every recorded number `+0.00 %` and every
+  iteration count identical to C1/C2 — zh_sphere `K 7.2997 / 7.3891 / 7.4162 / 7.4361 / 7.4404`,
+  order `2.29`, `K_inf 7.447`, pressure iters/step `6/7/7/6/6`; random_spheres
+  `0.0064513…0.0062621` at `7/7/7/7`; hollow_rings `0.018629…0.017608` at `9/10/9/9`.
+- **Five verify scripts** vs a build of `735fb46`, host-openmp, `np.array_equal` TRUE on every
+  array: poiseuille **800/800**, periodic_spheres **60/60**, channel **23/23**, bfs **221/221 (x_r/S 5.26 and 8.16 at an identical 5500 / 16400 steps)**,
+  lid_cavity **15/15**.
+- **Phase 1 + G1 units gates unchanged**, printed numbers included — `units_identity` bitwise;
+  `units_scale_invariance` u `8.882e-17`, p `0.000e+00`, sphere sampled
+  `4.070e-16 / 1.503e-15 / 1.761e-15` (div `6.915e-12`, d `1.850e-18`), scene
+  `6.105e-16 / 1.224e-15 / 1.370e-15` (d `0.000e+00`); `units_vof_sigma` Young-Laplace
+  `2.500000000e-01`, `capillary_dt 3.989422804e-01`, kappa rel `0.000e+00` / `2.202e-16`;
+  `units_anisotropic_poiseuille` **1.388e-15 / 3.052e-08 / 3.701e-15** on its three rows.
+
+**G4 — the level table** (§8.5), `levels = 6`, `theta = 2`, identical on both backends and
+(under MPI) on every rank:
+
+| grid | `levelRatios()` |
+|---|---|
+| stretched `(N, 2N, N/2)`, `hp = (1, ½, 2)`, N = 16 | `(1,2,1) (2,2,1) (2,2,2) (2,2,2) (1,1,1)` |
+| stretched, N = 32 and 64 | `(1,2,1) (2,2,1) (2,2,2) (2,2,2) (2,2,2) (1,1,1)` |
+| the SAME grid with no metric set (today's rule), N = 32 | `(2,2,2) (2,2,2) (2,2,2) (2,2,1) (1,2,1) (1,1,1)` |
+| cubic `(N, N, N)`, N = 16 / 32 / 64 | `(2,2,2)…(1,1,1)` — **bitwise the no-metric table**, asserted |
+
+`PECLET_FLOW_MG_ASPECT=1e9` reproduces the no-metric table exactly on every rung, which is what
+makes the ablation below a clean "today's rule" control.
+
+**G4 — the rate.** All host-openmp; nvidia-cuda identical to the digit.
+
+| measurement | today's rule (`MG_ASPECT=1e9`) | the §5 rule (default) |
+|---|---|---|
+| (a) V-cycle reduction, worst over cycles 2–8, stretched 32×64×16, random mean-zero RHS, 2/2 sweeps | **0.6920** | **0.1501** (gate ≤ 0.20) |
+| (b/c) Z&H sphere `φ = 0.216`, MG-PCG to `1e-10`, stretched N = 32 | **24** iters | **10** (cubic control **9**; gate ≤ cubic + 2 = 11) |
+| (b/c) the same at N = 64 | **25** iters | **10** (cubic control **10**; gate ≤ 12) |
+| the same, FCG | 23 / 24 | 10 / 10 |
+| the C2 ORDER ladder, stretched MG-PCG, N = 16/32/64 | **500 / 500 / 500 CAPPED** (r/\|b\| 5.2e-06 / 1.9e-04 / 1.5e-04), LS order 2.0308 | **7 / 8 / 8** (r/\|b\| 1.3e-11 / 3.0e-11 / 3.1e-11), LS order **2.0038** |
+
+The stretched MG-PCG rows now reproduce the exact discrete solution to every printed digit
+(7.996594e-03 / 1.990660e-03 / 4.971282e-04), i.e. they equal the FCG control — **E2 of
+`doc/units_escalation.md` is resolved by the coarsening rule alone**, with no change to the
+smoother, the post-smoothing colour order or the driver selection.
+
+**The symmetry read-out.** `pr` (`PECLET_FLOW_MG_DEBUG=2`, zero iff the V-cycle is symmetric w.r.t.
+the fine operator), median over the FCG iterations at N = 32:
+
+| problem | today's rule | the §5 rule | the cubic control |
+|---|---|---|---|
+| all-fluid stretched | **3.555e-01** (max 1.08) | **6.818e-02** | 2.814e-02 |
+| Z&H sphere stretched | 5.345e-02 | **4.002e-02** | — |
+
+i.e. the stretched hierarchy's asymmetry falls by 5.2× into the neighbourhood of the isotropic
+periodic hierarchy's own 0.062 (`flow/CLAUDE.md`, WO-H) — which is the mechanism: today's rule
+keeps `(1, ½, 2) → (2, 1, 4) → (4, 2, 8)`, the point RB-GS smoother stops damping along the
+strongly coupled axis, and the V-cycle preconditioner stops being symmetric enough for PCG.
+
+**G4 under MPI** (`tests/kokkos_mpi/test_cutcellmg_aniso_mpi.cpp`, the Z&H sphere on
+`(32, 64, 16)`, `levels = 6`, MG-PCG `rtol 1e-10`):
+
+| np | level table | iters (single-rank 10) | max\|dist − single-rank\| | telescope, min-extent trigger off |
+|---|---|---|---|---|
+| 1 | `(1,2,1) (2,2,1) (2,2,2) (2,2,2) (2,2,2) (1,1,1)` | 10 | **0.000e+00 — BIT-EXACT** | none |
+| 2 | identical, on every rank | 10 | 1.486e-06 = **1.013e-07** of max\|φ\| = 14.67 | none (trap 6) |
+| 4 | identical, on every rank | 10 | 4.351e-06 = **2.965e-07** relative | none (trap 6) |
+
+The np > 1 spread is the MG-PCG's own floor on a CUT-CELL operator (it stops on a RESIDUAL, and a
+small-aperture row has a tiny effective eigenvalue): a `-DPECLET_FLOW_MREAL_DOUBLE` build of the
+identical source moves it only 4× (3.602e-07 / 1.772e-06 absolute), so it is the stopping rule and
+not the float operator storage. **Trap 6 is gated directly**: with `setTelescopeMinExtent(0)` (merge
+only when an axis that CAN coarsen is not even on every rank) NO level telescopes, even though the
+rule defers x and z for two levels; and a FORCED merge at level 1 reaches the same answer
+(1.486e-06 / 4.351e-06) with the aspect rule still owning level 0.
+
+**One place the note's site list did not match the code.** `CutcellMG::predict()` (the
+`scripts/check_decomposition.py` pre-flight, `mac_cutcell_mg.hpp` ~:2880) is a FIFTH copy of the
+level loop that §5.3 does not list. It takes no metric, so it still models the isotropic rule; a
+comment there now says so and points at `levelRatios()`. Threading `hp` through it and through the
+Python pre-flight is a follow-up, not part of C3.
 
 ---
 
