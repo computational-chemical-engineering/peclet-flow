@@ -169,11 +169,25 @@ comparison; these are its "today's rule" numbers.
 
 ## E3 (Phase 2, commit C4) — §4.4's one sentence about the v3 wall torque admits two readings, and they differ on an anisotropic grid
 
-**Status: OPEN.** Everything else in C4 landed; this ONE sub-path (`hydroForceTorqueReaction` with
-`hasMotion_ && cutcellPressure_`, i.e. the v3 transposed-stress wall torque of a MOVING instance)
-keeps an explicit `requireIsotropic` refusal naming this entry, rather than have the implementing
-session choose. A static scene, and the force+torque of a moving one without cut-cell pressure, are
-admitted; every C4 gate is green.
+**Status: RESOLVED 2026-09-07 (Fable) — reading 2, implemented by commit C4b.** The derivation
+below is correct and the note's sentence was wrong. The v3 term is a **traction**,
+`F' = mu' (A' x Omega')` with `A'_b = W_b V'/h_b'` the physical area vector in `hRef^2` (the same `A`
+the traction paragraph of §4.4 uses) and `Omega' = Omega tRef`: the metric sits on the AREA component
+the cross product consumes, and `V'` enters only through `A'`. Reading 1 was an error — the
+"component-`a` normalisation" argument applies to MOMENTUM ROWS, and this term is not one. §4.4 of
+`doc/anisotropic_metric.md` now says so, `hydro_reaction_torque_transpose` scales `(ax, ay, az)` by
+`V'/h_b'` outside the existing expression (so the isotropic `1.0` reduction is exact), and the
+targeted `requireIsotropic` on `hasMotion_ && cutcellPressure_` that C4 left in place is GONE:
+moving geometry is admitted on an anisotropic domain.
+
+**Not tested against a reference.** No gate in the tree measures the torque of a ROTATING body
+against `8 pi mu R^3 Omega` — `movingscene_advect_mpi`, the only moving-geometry test, TRANSLATES,
+so `Omega = 0` and the v3 kernel returns before the arithmetic. The anisotropic torque path is
+therefore implemented and isotropic-bitwise but unmeasured; §10 of the note records it as an open
+item for the coupling campaign. C4b's gates are G0 (both backends, np 1/2/4) plus
+`movingscene_advect_mpi` bitwise unchanged.
+
+**The original report is kept below as the record of the question.**
 
 ### What the note says
 
@@ -240,10 +254,11 @@ see.
   the combined factor on `pi(i)` is `w_c h_c' V' = V'/h_c'`, the physical area of the face. That one
   is forced, not chosen: any other factor would break the identity the correction exists to keep.
 
-### The question
+### The question — ANSWERED
 
 Which of the two readings is §4.4's, for the v3 wall-torque force factor: `h_a' V'` on the force
-component, or `V'/h_b'` on the area component? Once answered, the change is three lines in
-`hydro_reaction_torque_transpose` plus dropping the `requireIsotropic` guard beside it, and a gate
-would be a rotating-sphere torque against the analytic Stokes couple `8 pi mu R^3 Omega` on a
-stretched grid.
+component, or `V'/h_b'` on the area component? **Answer: `V'/h_b'` on the area component (reading
+2).** The change was three lines in `hydro_reaction_torque_transpose` plus dropping the
+`requireIsotropic` guard beside it, both in commit C4b. The gate that would MEASURE it — a
+rotating-sphere torque against the analytic Stokes couple `8 pi mu R^3 Omega` on a stretched grid —
+does not exist in the tree and was deliberately not built here; it is the open item §10 records.

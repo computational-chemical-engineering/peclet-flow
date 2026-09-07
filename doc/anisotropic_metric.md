@@ -199,8 +199,16 @@ unchanged; `torqueToPhys` unchanged.
 
 *Reaction force* `hydroForceTorqueReaction()` (`~:4203`, the CFD-DEM source): the momentum row of
 component `a` is a force density in the component-`a` normalisation, so the body force is
-`F_a = - sum_owner R_a * h_a' * V'` in `forceTotalToPhys` units (the isotropic `h_a' V' = 1`). The
-wall-torque term (v3) takes the same `h_a'` on its force factor and the physical lever arm.
+`F_a = - sum_owner R_a * h_a' * V'` in `forceTotalToPhys` units (the isotropic `h_a' V' = 1`).
+
+*The v3 wall-torque term* is a **traction**, not a momentum row, so it takes the metric on its AREA
+VECTOR and not on its force component: `F' = mu' (A' x Omega')` with `A'_b = a_b * V'/h_b'` — the
+same physical area vector in `hRef^2` the traction paragraph above forms — and `Omega' = Omega tRef`,
+with the physical lever arm. (Corrected 2026-09-07; the first version of this sentence said "the same
+`h_a'` on its force factor", which is wrong: a wall patch with `n dA = (A_x, 0, 0)` and
+`Omega = Omega_z e_z` produces a force in **y**, so the per-axis factor belongs to the area component
+the cross product consumes, not to the force component — the two agree only when `h_y' = 1/h_x'`.
+`doc/units_escalation.md` E3 carries the derivation; commit C4b implements it.)
 
 ### 4.5 Geometry inputs (unchanged unless listed)
 `set_solid`: `d' = d/hRef` (Phase 1; a **distance** on every axis, not a per-axis scaling — the
@@ -407,22 +415,22 @@ bottom, the velocity MG, scalar transport, MPI (`init_mpi`, telescoping, coarse-
 **Refused, with a `throw` that prints the three spacings** (one helper `requireIsotropic(const char*
 what)` on the solver; the message names the phase that lifts it):
 
-| refused | where the guard goes | lifted by | state after C4 |
+| refused | where the guard goes | lifted by | state after C4 / C4b |
 |---|---|---|---|
 | `enable_vof` and every VoF entry point | `enableVof()` | Phase 3 | **still refused** |
 | the AMR module (`Octree(cells, extent)`) | `core/python/amr_bindings.cpp:h0FromExtent` (already refuses) | Phase 3 | **still refused** |
 | the CFD-DEM coupling driver | `coupling/python/peclet_coupling/driver.py` (already refuses) | Phase 2 follow-up (per-axis deposit) | **still refused** |
 | the collocated policy, until the ⚑ B commit lands | `Solver<Colocated>::setPhysicalDomain` | this phase, commit C4 | **ADMITTED (C4)** |
-| `hydro_force_torque*` until its constants land (§4.4) | those two functions | this phase, commit C4 | **ADMITTED (C4)** — except one sub-path, below |
-| the v3 transposed-stress WALL TORQUE of `hydro_force_torque_reaction` (a MOVING instance under cut-cell pressure) | `hydroForceTorqueReaction()`, beside the other v2 scope refusals | **open** — `doc/units_escalation.md` **E3** | **refused (new in C4)** |
+| `hydro_force_torque*` until its constants land (§4.4) | those two functions | this phase, commit C4 | **ADMITTED (C4)** |
+| the v3 transposed-stress WALL TORQUE of `hydro_force_torque_reaction` (a MOVING instance under cut-cell pressure) | `hydroForceTorqueReaction()`, beside the other v2 scope refusals | `doc/units_escalation.md` **E3**, RESOLVED | refused by C4, **ADMITTED (C4b)** |
 
-The last row is C4's one deliberate narrowing of what §7 promised. §4.4's single sentence about that
-term — "the wall-torque term (v3) takes the same `h_a'` on its force factor" — admits two readings
-that differ on an anisotropic grid (`h_a' V'` on the FORCE component `a`, versus the `V'/h_b'` that
-§4.4's own traction paragraph puts on the AREA component `b` that the cross product consumes), and
-picking one is a design decision. The implementing session refused the path instead of choosing;
-E3 carries the derivation and the counter-example. Nothing else in C4 is affected: the term is inert
-unless `set_instance_motion` has been called AND `cutcell_pressure=True`, and no gate reaches it.
+The last row is the one thing C4 narrowed and **C4b restored**. §4.4's original sentence about that
+term — "the wall-torque term (v3) takes the same `h_a'` on its force factor" — admitted two readings
+that differ on an anisotropic grid, so C4 refused the path rather than choose. E3 was decided for
+**reading 2** (the metric on the AREA vector, `A'_b = a_b V'/h_b'`, because the term is a TRACTION
+and not a momentum row), §4.4 now states that, and C4b implements it and drops the guard. Everything
+§7 promised for Phase 2 is therefore admitted; only `enable_vof` and the two consumers that carry
+their own guards (the AMR octree, the CFD-DEM coupling driver) still refuse.
 
 ---
 
@@ -753,9 +761,10 @@ and both force integrals no longer refuse an anisotropic domain; `enable_vof` st
 
 **One thing C4 deliberately did NOT do** — see §7's table and `doc/units_escalation.md` **E3**: the
 v3 transposed-stress WALL TORQUE of `hydroForceTorqueReaction` (a moving instance under cut-cell
-pressure) keeps an explicit refusal, because §4.4's one sentence about it admits two readings that
-differ on an anisotropic grid and choosing between them is a design decision. Every C4 gate is green
-without it; the term is unreachable without `set_instance_motion`.
+pressure) kept an explicit refusal, because §4.4's one sentence about it admitted two readings that
+differ on an anisotropic grid and choosing between them was a design decision. Every C4 gate was
+green without it; the term is unreachable without `set_instance_motion`. **Commit C4b closes it**
+(E3 decided for reading 2) — see the C4b entry below.
 
 **The SDF-as-a-length audit** (`grep 'sdf(' mac_approx_projection.hpp gauge_exact_gradient.hpp
 star_elimination.hpp ghost_projection.hpp collocated_varrho.hpp colocated_advection.hpp`): after C4
@@ -880,6 +889,60 @@ identifies it as not a metric statement. And **`dt = 0.05` on the NS row only** 
 step): at the `dt = 1` the Stokes rows need for `tRef = 1`, the TG amplitude gives an advective
 CFL of 1 and the discrete nonlinear term's imbalance with the pressure gradient reads 2.0e-02 —
 the O(CFL²) advection error, not the metric.
+
+### C4b (E3 — the v3 wall-torque reading) — flow, Phase 2 commit C4b
+
+**E3 decided: reading 2.** The v3 transposed-stress wall torque is a **traction**, not a momentum
+row, so `F' = mu' (A' x Omega')` with `A'_b = a_b V'/h_b'` the physical area vector in `hRef^2` — the
+same `A` §4.4's traction paragraph forms — and `Omega' = Omega tRef`. The metric sits on the AREA
+component the cross product consumes; `V'` enters only through `A'`. The counter-example that
+separates the readings: a wall patch with `n dA = (A_x, 0, 0)` under `Omega = Omega_z e_z` produces a
+force in **y**, which reading 1 would have scaled by `h_y' V'` and reading 2 scales by `V'/h_x'` —
+equal only when `h_y' = 1/h_x'`. `hydro_reaction_torque_transpose` now forms
+`Ax = ax*kA0` etc. with `kA_b = V'/h_b'` applied OUTSIDE the existing expression (exactly `1.0`
+isotropic, so an identity multiplication), the `requireIsotropic` C4 left on
+`hasMotion_ && cutcellPressure_` is gone, and §4.4 and §7 say so. **Every consumer §7 promised for
+Phase 2 is now admitted**; only `enable_vof` (Phase 3) and the two components with their own guards
+(the AMR octree, the CFD-DEM coupling driver) still refuse.
+
+- **G0**, `tests/kokkos` **43/43** host-openmp and **43/43** nvidia-cuda; `tests/kokkos_mpi`
+  **106/106** host-openmp and **106/106** nvidia-cuda at np = 1, 2, 4; `sdflow_mpi_np1` bit-exact to
+  single-rank, `k_dist = k_ref = 5.84542251e+00`, rel `0.00e+00`, `div 5.86e-12`.
+- **All three regression baselines** (CUDA, never `--update`): **PASS**, every recorded number
+  `+0.00 %`, every iteration and step count equal — identical to C4's line above.
+- **`units_identity` / `units_scale_invariance` / `units_vof_sigma` / `units_anisotropic_poiseuille`
+  printed output unchanged**, digit for digit (u `8.882e-17`, p `0.000e+00`; sphere
+  `4.070e-16 / 1.503e-15 / 1.761e-15`, div `6.915e-12`, d `1.850e-18`; scene
+  `6.105e-16 / 1.224e-15 / 1.370e-15`, d `0.000e+00`; Young-Laplace `2.500000000e-01`; `capillary_dt
+  3.989422804e-01`; kappa rel `0.000e+00 / 2.202e-16`; G1's three rows
+  `1.388e-15 / 3.052e-08 / 3.701e-15`).
+- **The decisive check — `movingscene_advect_mpi`, the only moving-geometry gate** (a 48³ towed
+  sphere, `hasMotion_ && cutcellPressure_` both true, i.e. the exact path C4 refused), np = 1, 2, 4
+  on both backends: PASS, with `du = 0.000e+00` and `dp = 0.000e+00` at np = 1 and
+  `dF <= 2.9e-15`, `dT <= 1.5e-14`, `div 2.37e-10`. Run against a build of C4 (`0d8417b`) at
+  **`OMP_NUM_THREADS=1`** the reaction force is **BITWISE identical on all 17 digits and
+  reproducibly so**:
+
+  ```
+  C4  r1/r2   F_ref = (-0.11367215421887535, -0.14541750499799105, -0.00070001790246804435)
+  C4b r1/r2   F_ref = (-0.11367215421887535, -0.14541750499799105, -0.00070001790246804435)
+  ```
+
+  At 4 threads the two builds differ in the last 2-3 digits — and so does **C4 against itself**: three
+  runs of the unchanged binary spread `5.6e-16` in `F_x` against `1.1e-15` between the builds, i.e.
+  the same size. That is `hydroForceTorqueReaction`'s own `Kokkos::atomic_add` accumulation floor,
+  which the test's header already documents ("NOT bitwise even at np = 1, and not because of MPI"),
+  and it is why the statement is made at one thread — the same reason C4's `starCorrectFaces` probe
+  was.
+- **The six verify scripts were deliberately NOT re-run**: none of them moves a body, so none reaches
+  the changed kernel, and C4's byte comparison already covers every path they exercise.
+
+**OPEN ITEM — the anisotropic torque path is implemented, isotropic-bitwise, and UNTESTED against a
+reference.** No gate in the tree measures the torque of a ROTATING body against the analytic Stokes
+couple `8 pi mu R^3 Omega`: `movingscene_advect_mpi` TRANSLATES, so `Omega = 0` and the v3 kernel
+returns before its arithmetic runs. Building such a gate was deliberately out of C4b's scope. It
+belongs to the coupling campaign, and it is the one place in Phase 2 where a per-axis constant is
+carried on argument alone rather than on a measurement.
 
 ---
 

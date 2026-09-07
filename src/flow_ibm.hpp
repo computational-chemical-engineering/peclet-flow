@@ -276,8 +276,8 @@ class Solver {
   /// properties, variable density, porous continuity with or without implicit drag, every
   /// domain-BC type, every pressure driver and bottom, the velocity multigrid, scalar transport,
   /// the collocated face-interpolation modes, `hydro_force_torque`, `hydro_force_torque_reaction`
-  /// on a static scene, and MPI.  STILL REFUSED: `enable_vof` (Phase 3) and the v3 moving-wall
-  /// torque of `hydro_force_torque_reaction` (doc/units_escalation.md E3).
+  /// (moving geometry included, since C4b resolved E3), and MPI.  STILL REFUSED: `enable_vof`
+  /// (Phase 3).
   void requireIsotropic(const char* what) const {
     if (!u_.aniso)
       return;
@@ -4310,10 +4310,12 @@ class Solver {
   /// (rhoRef h_a/tRef^2), so the total force on the body in `forceTotalToPhys` units is
   /// `F_a = - sum_owner R_a h_a' V'` (isotropic `h_a' V' = 1`, so the factor below is an exact 1.0
   /// multiplication and the arithmetic is bit-identical).  The lever arm is already physical.
-  /// NOT lifted here: the v3 transposed-stress WALL TORQUE (`hasMotion_ && cutcellPressure_`) --
-  /// see `doc/units_escalation.md` E3.  §4.4's one sentence about it ("takes the same h_a' on its
-  /// force factor") admits two readings that differ on an anisotropic grid, and choosing between
-  /// them is a design decision, so that ONE sub-path keeps an explicit refusal instead.
+  /// The v3 transposed-stress WALL TORQUE below carries the metric on its AREA VECTOR, not on its
+  /// force component (E3 of `doc/units_escalation.md`, RESOLVED): it is a TRACTION,
+  /// `F' = mu' (A' x Omega')` with `A'_b = a_b V'/h_b'` the same physical area vector in hRef^2
+  /// the traction paragraph of §4.4 uses, so the per-axis factor belongs to the area component the
+  /// cross product consumes.  The "component-a normalisation" that puts `h_a' V'` on `F_a` above
+  /// is an argument about MOMENTUM ROWS, and this term is not one.
   std::vector<double> hydroForceTorqueReaction() {
     std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 6, 0.0);
     if (!hasScene_ || nInst_ <= 0)
@@ -4332,15 +4334,6 @@ class Solver {
     if (advect_ && (!haveAdvRhs_ || advRhs_[0].extent(0) != n_))
       throw std::runtime_error("hydro_force_torque_reaction: the advective RHS term was not "
                                "stashed -- set_advection was enabled after the last step()");
-    if (hasMotion_ && cutcellPressure_)
-      requireIsotropic(
-          "hydro_force_torque_reaction with a MOVING instance (the v3 transposed-stress wall "
-          "torque): doc/anisotropic_metric.md §4.4 says only that this term 'takes the same h_a' "
-          "on its force factor', which admits two readings that differ on an anisotropic grid -- "
-          "the per-axis metric of the AREA vector (V'/h_b' on the area component b, the reading "
-          "§4.4's own traction formula uses) versus h_a'V' on the FORCE component a. See "
-          "doc/units_escalation.md E3. A STATIC scene, and the force+torque of a moving one "
-          "without cut-cell pressure, are admitted");
     // u* ghosts: refresh with the standard fill (periodic wrap single-rank, halo exchange under
     // MPI; hasBc_ is refused above so no BC is imposed). The audit's viscous term reads +-1.
     for (int c = 0; c < 3; ++c)
@@ -4360,6 +4353,8 @@ class Solver {
     // §4.4: the momentum row of component c is a force density in the component-c normalisation, so
     // the total force carries h_c'*V' (exactly 1.0 isotropic -- an identity multiplication).
     const double kR[3] = {u_.hp[0] * u_.vol, u_.hp[1] * u_.vol, u_.hp[2] * u_.vol};
+    // ... while the v3 wall-torque traction below carries V'/h_b' on its AREA vector (E3).
+    const double kA0 = u_.vol / u_.hp[0], kA1 = u_.vol / u_.hp[1], kA2 = u_.vol / u_.hp[2];
     for (int c = 0; c < 3; ++c) {
       CCConst un = CCConst(old_[c]), uc = CCConst(C[c].u), us = CCConst(uStar_[c]),
               mk = CCConst(C[c].mask);
@@ -4440,7 +4435,14 @@ class Solver {
             const double ay = oyv(i + sy) - oyv(i);
             const double az = ozv(i + sz) - ozv(i);
             if (ax == 0.0 && ay == 0.0 && az == 0.0)
-              return;  // not a cut cell
+              return;  // not a cut cell (a sign test: the positive per-axis factors below cannot
+                       // change it)
+            // PHASE 2 (doc/anisotropic_metric.md §4.4, E3 reading 2): (ax, ay, az) is an INDEX
+            // aperture area vector; the physical one in hRef^2 is A_b = a_b V'/h_b' -- the same
+            // A the traction paragraph of §4.4 forms -- so the metric multiplies the AREA
+            // component b, which is the index the cross product with Omega consumes, applied
+            // OUTSIDE the existing expression so V'/h_b' = 1.0 reduces exactly.
+            const double Ax = ax * kA0, Ay = ay * kA1, Az = az * kA2;
             const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * (double)(x - G + og.x),
                                                sm.a[1] + sm.b[1] * (double)(y - G + og.y),
                                                sm.a[2] + sm.b[2] * (double)(z - G + og.z)};
@@ -4454,9 +4456,9 @@ class Solver {
             if (wx == 0.0 && wy == 0.0 && wz == 0.0)
               return;
             // v = (n dA) x Omega  -- the missing traction integrated over this cell's wall patch
-            const double vx = ay * wz - az * wy;
-            const double vy = az * wx - ax * wz;
-            const double vz = ax * wy - ay * wx;
+            const double vx = Ay * wz - Az * wy;
+            const double vy = Az * wx - Ax * wz;
+            const double vz = Ax * wy - Ay * wx;
             const peclet::core::Vec3<double> rq = peclet::core::geom::minImage(
                 peclet::core::Vec3<double>{p.x - cen(3 * oi + 0), p.y - cen(3 * oi + 1),
                                            p.z - cen(3 * oi + 2)},
