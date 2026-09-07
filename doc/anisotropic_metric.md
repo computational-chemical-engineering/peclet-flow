@@ -419,7 +419,7 @@ what)` on the solver; the message names the phase that lifts it):
 |---|---|---|---|
 | `enable_vof` and every VoF entry point | `enableVof()` | Phase 3 | **ADMITTED** since Phase 3 landed (`flow/doc/anisotropic_vof.md`); gate `units_vof_aniso` |
 | the AMR module (`Octree(cells, extent)`) | `core/python/amr_bindings.cpp` | Phase 3 | **ADMITTED** since Phase 3 (`core/docs/amr_anisotropic.md`); the octree's cells are boxes, and only the scalar `spacing_from_extent` helper keeps a cubic contract |
-| the CFD-DEM coupling driver | `coupling/python/peclet_coupling/driver.py` (still refuses) | a Phase 3 follow-up | **still refused** — `gmap()` collapses one spacing onto all three axes, `inv_vcell` is `1/h^3`, and the velocity/force conversions take component 0 of a per-axis vector |
+| the CFD-DEM coupling driver | `coupling/python/peclet_coupling/driver.py` (still refuses) | NOT a metric item — see the note under this table | **still refused, and deliberately** — the obstacle is the PARTICLE MODEL, not the map |
 | the collocated policy, until the ⚑ B commit lands | `Solver<Colocated>::setPhysicalDomain` | this phase, commit C4 | **ADMITTED (C4)** |
 | `hydro_force_torque*` until its constants land (§4.4) | those two functions | this phase, commit C4 | **ADMITTED (C4)** |
 | the v3 transposed-stress WALL TORQUE of `hydro_force_torque_reaction` (a MOVING instance under cut-cell pressure) | `hydroForceTorqueReaction()`, beside the other v2 scope refusals | `doc/units_escalation.md` **E3**, RESOLVED | refused by C4, **ADMITTED (C4b)** |
@@ -431,6 +431,36 @@ that differ on an anisotropic grid, so C4 refused the path rather than choose. E
 and not a momentum row), §4.4 now states that, and C4b implements it and drops the guard. Everything
 §7 promised for Phase 2 is therefore admitted; only `enable_vof` and the two consumers that carry
 their own guards still refuse — after Phase 3 that is the CFD-DEM coupling driver alone.
+
+**And the coupling driver's refusal is NOT a metric gap — an earlier version of this table said it
+was, and that was wrong.** Three specific claims, corrected:
+
+- *"`gmap()` collapses one spacing onto all three axes."* It does not, and there is nothing to
+  fix: the driver poses the WHOLE coupling in the solver's INTERNAL units (`driver.py`, "THE UNIT
+  LAYER"), so particle positions reach `gmap` already converted to INDEX coordinates. A spacing of
+  1 is the *correct* map there, on a cubic mesh and on a box mesh alike, and `_inv_vcell_i` is
+  exactly 1.0 for the same reason.
+- *"`inv_vcell` is `1/h^3`."* True when written; fixed since (`1/(h_x h_y h_z)`, coupling
+  `9f7cd24`). It was a diagnostic, never on the kernel path.
+- *"the velocity/force conversions take component 0 of a per-axis vector."* True, and it is the
+  one real per-axis item — `velocity_to_internal` is a three-vector on a box mesh and the driver
+  reads `[0]`. It is a few lines.
+
+What actually blocks the driver is the **particle model**, and no amount of per-axis bookkeeping
+reaches it: an unresolved CFD-DEM particle has ONE radius, and every drag law in the suite
+(Stokes, Schiller–Naumann, Ergun, Di Felice, Wen & Yu, Gidaspow, Beetstra, Tang) is a function of
+ONE particle Reynolds number `Re_p = rho |u_s| d_p / mu`. Posed on the unit lattice of a box mesh
+there is no single length with which to form `d_p` — `hRef` is the finest axis, so a particle
+would be one diameter across in `x` and half of one in `y`, and the drag law would silently be
+evaluated at the wrong `Re_p`. The same is true of the deposit stencil's support and of the
+volume-averaging validity condition. The honest resolution is to pose the particle side in
+PHYSICAL units and convert per axis at the grid interface, which is a coupling design change and
+not a metric one; until then the guard stands and its message says exactly this.
+
+The one part of the coupling that **is** posed per axis already is the porosity volume FILTER,
+because its width is a physical length that has nothing to do with the lattice: `smooth_length`
+with `alpha_a = C/h_a^2`, `C = 1/(2 sum_a 1/h_a^2)` (coupling `9f7cd24`, gate
+`coupling/tests/test_smoothing_isotropy.py`). It reduces to `alpha = 1/6` on a cubic mesh bitwise.
 
 ---
 

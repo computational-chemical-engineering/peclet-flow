@@ -216,8 +216,11 @@ the velocity multigrid, scalar transport, the collocated face-interpolation mode
 force and torque integrals (moving geometry included) and MPI. **Phase 3 then admitted the geometric
 VoF stack too** (`enable_vof` and every VoF entry point — `doc/anisotropic_vof.md`, gate
 `units_vof_aniso`), so nothing in the solver refuses an anisotropic domain; the **CFD-DEM coupling
-driver** keeps its own pre-existing guard (its trilinear map still collapses one spacing, and the
-velocity/force conversions it applies are per-component — see that guard's message). The AMR octree
+driver** keeps its own guard, and for a reason that is NOT a metric gap — its trilinear map is
+already right (positions reach it in INDEX coordinates, so its spacing-1 map is correct on a box
+mesh too). What blocks it is the PARTICLE MODEL: an unresolved particle has one radius and every
+drag law is a function of one `Re_p`, which the unit lattice of a box mesh has no single length to
+form. See `doc/anisotropic_metric.md` §7's correction note; its guard message says the same. The AMR octree
 now takes an anisotropic extent as well (`core/docs/amr_anisotropic.md`), with the one caveat that
 its V-cycle is a preconditioner rather than a solver on box cells. Three spacings agreeing to 1e-12 relative are **SNAPPED** to one, so
 `hp = w = (1,1,1)`, `vol = 1`, `aniso = false` EXACTLY and an isotropic domain stays bit-identical
