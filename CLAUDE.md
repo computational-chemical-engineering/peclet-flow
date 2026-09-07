@@ -213,9 +213,13 @@ coupling does) must convert; `s.unit_scales` is the dict of factors for exactly 
 phase: sampled or scene geometry, constant or variable properties, variable density, porous
 continuity with or without implicit drag, every domain-BC type, every pressure driver and bottom,
 the velocity multigrid, scalar transport, the collocated face-interpolation modes, the hydrodynamic
-force and torque integrals (moving geometry included) and MPI. **Refused, with a `throw` naming the
-three spacings:** `enable_vof` (Phase 3); the AMR octree and the CFD-DEM coupling driver keep their
-own pre-existing guards. Three spacings agreeing to 1e-12 relative are **SNAPPED** to one, so
+force and torque integrals (moving geometry included) and MPI. **Phase 3 then admitted the geometric
+VoF stack too** (`enable_vof` and every VoF entry point — `doc/anisotropic_vof.md`, gate
+`units_vof_aniso`), so nothing in the solver refuses an anisotropic domain; the **CFD-DEM coupling
+driver** keeps its own pre-existing guard (its trilinear map still collapses one spacing, and the
+velocity/force conversions it applies are per-component — see that guard's message). The AMR octree
+now takes an anisotropic extent as well (`core/docs/amr_anisotropic.md`), with the one caveat that
+its V-cycle is a preconditioner rather than a solver on box cells. Three spacings agreeing to 1e-12 relative are **SNAPPED** to one, so
 `hp = w = (1,1,1)`, `vol = 1`, `aniso = false` EXACTLY and an isotropic domain stays bit-identical
 however its extent was written. Internally `hRef = min_a h_a` (the FINEST axis is exactly 1), and
 every operator carries `w_a = 1/h_a'^2` on its pressure gradient / Laplacian and `mu' w_b` on its

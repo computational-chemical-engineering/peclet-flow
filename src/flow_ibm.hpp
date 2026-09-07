@@ -241,7 +241,8 @@ class Solver {
     // arithmetic, whose per-axis extents N_a*H can differ by an ulp across axes (trap 2).
     // Otherwise the cells really are anisotropic: hRef = min_a h_a, and h_a' comes from the STORED
     // doubles (trap 1 — never extent/(cells*hRef); h_a' is exactly 1.0 only on the finest axis).
-    // What that admits, and what still refuses it, is §7 / `requireIsotropic` below.
+    // What that admits is §7 / `requireIsotropic` below; Phase 3 then admitted the VoF
+    // entry points too, so nothing in the solver refuses an anisotropic domain today.
     bool iso = true;
     for (int a = 1; a < 3; ++a)
       if (std::fabs(hh[a] - hh[0]) > 1e-12 * std::fabs(hh[0]))
@@ -271,7 +272,7 @@ class Solver {
     // anisotropic index-space normal `m` of doc/anisotropic_metric.md §6.1 and carry the per-axis
     // `w_a` on their face and wall terms, `starCorrectFaces` carries the same `w_a` its
     // `projectCorrect` fix-up needs, and the V8 face acceleration weights its pressure difference.
-    // `enable_vof` keeps its own refusal (Phase 3).
+    // `enable_vof` kept its own refusal here until PHASE 3 lifted it (see enableVof).
   }
 
   /// Phase 2 §7 — refuse an ANISOTROPIC domain in a consumer this phase does not carry.  `what`

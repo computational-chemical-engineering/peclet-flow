@@ -310,3 +310,6 @@ add_test(NAME units_anisotropic_sphere COMMAND test_units sphere)
 #                          on cells (N, 2N, 4) with the DISCRETELY divergence-free initial field,
 #                          against the exact anisotropic backward-Euler amplitude ratio.
 add_test(NAME units_anisotropic_tgv COMMAND test_units tgv)
+# PHASE 3 (flow/doc/anisotropic_vof.md §11 S2): the balanced-force CSF on BOX cells — the gate the
+# Phase 2 merge unlocked, since `enable_vof` refused an anisotropic domain until Phase 3 landed.
+add_test(NAME units_vof_aniso COMMAND test_units vofaniso)

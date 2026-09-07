@@ -417,9 +417,9 @@ what)` on the solver; the message names the phase that lifts it):
 
 | refused | where the guard goes | lifted by | state after C4 / C4b |
 |---|---|---|---|
-| `enable_vof` and every VoF entry point | `enableVof()` | Phase 3 | **still refused** |
-| the AMR module (`Octree(cells, extent)`) | `core/python/amr_bindings.cpp:h0FromExtent` (already refuses) | Phase 3 | **still refused** |
-| the CFD-DEM coupling driver | `coupling/python/peclet_coupling/driver.py` (already refuses) | Phase 2 follow-up (per-axis deposit) | **still refused** |
+| `enable_vof` and every VoF entry point | `enableVof()` | Phase 3 | **ADMITTED** since Phase 3 landed (`flow/doc/anisotropic_vof.md`); gate `units_vof_aniso` |
+| the AMR module (`Octree(cells, extent)`) | `core/python/amr_bindings.cpp` | Phase 3 | **ADMITTED** since Phase 3 (`core/docs/amr_anisotropic.md`); the octree's cells are boxes, and only the scalar `spacing_from_extent` helper keeps a cubic contract |
+| the CFD-DEM coupling driver | `coupling/python/peclet_coupling/driver.py` (still refuses) | a Phase 3 follow-up | **still refused** — `gmap()` collapses one spacing onto all three axes, `inv_vcell` is `1/h^3`, and the velocity/force conversions take component 0 of a per-axis vector |
 | the collocated policy, until the ⚑ B commit lands | `Solver<Colocated>::setPhysicalDomain` | this phase, commit C4 | **ADMITTED (C4)** |
 | `hydro_force_torque*` until its constants land (§4.4) | those two functions | this phase, commit C4 | **ADMITTED (C4)** |
 | the v3 transposed-stress WALL TORQUE of `hydro_force_torque_reaction` (a MOVING instance under cut-cell pressure) | `hydroForceTorqueReaction()`, beside the other v2 scope refusals | `doc/units_escalation.md` **E3**, RESOLVED | refused by C4, **ADMITTED (C4b)** |
@@ -430,7 +430,7 @@ that differ on an anisotropic grid, so C4 refused the path rather than choose. E
 **reading 2** (the metric on the AREA vector, `A'_b = a_b V'/h_b'`, because the term is a TRACTION
 and not a momentum row), §4.4 now states that, and C4b implements it and drops the guard. Everything
 §7 promised for Phase 2 is therefore admitted; only `enable_vof` and the two consumers that carry
-their own guards (the AMR octree, the CFD-DEM coupling driver) still refuse.
+their own guards still refuse — after Phase 3 that is the CFD-DEM coupling driver alone.
 
 ---
 
@@ -751,7 +751,7 @@ and both force integrals no longer refuse an anisotropic domain; `enable_vof` st
    `faceAccelSubGradPhi` takes the same `w_a` `projectCorrectVar` takes, spelled the same way,
    because bit-for-bit pairing with the face correction is the whole point of that kernel. The cell
    average of the two faces (`applyCellFaceAverage`) is unchanged, as §3 says. `addFaceAccelCsf` is
-   untouched: it is VoF-only and `enable_vof` still refuses an anisotropic domain (Phase 3).
+   untouched: it is VoF-only, and Phase 3 carried it (`flow/doc/anisotropic_vof.md` §5).
 3. **The v4 owner-boundary attribution correction** in `hydroForceTorqueReaction` — §4.4 does not
    mention it. It REMOVES a term that is already inside `F_a = −Σ R_a h_a' V'`, so it must carry
    exactly what that term carries there: the momentum row's pressure gradient is
@@ -902,8 +902,8 @@ equal only when `h_y' = 1/h_x'`. `hydro_reaction_torque_transpose` now forms
 `Ax = ax*kA0` etc. with `kA_b = V'/h_b'` applied OUTSIDE the existing expression (exactly `1.0`
 isotropic, so an identity multiplication), the `requireIsotropic` C4 left on
 `hasMotion_ && cutcellPressure_` is gone, and §4.4 and §7 say so. **Every consumer §7 promised for
-Phase 2 is now admitted**; only `enable_vof` (Phase 3) and the two components with their own guards
-(the AMR octree, the CFD-DEM coupling driver) still refuse.
+Phase 2 is now admitted**; `enable_vof` followed in Phase 3, and the two components with their own guards
+still refuse — after Phase 3 that is the CFD-DEM coupling driver alone.
 
 - **G0**, `tests/kokkos` **43/43** host-openmp and **43/43** nvidia-cuda; `tests/kokkos_mpi`
   **106/106** host-openmp and **106/106** nvidia-cuda at np = 1, 2, 4; `sdflow_mpi_np1` bit-exact to

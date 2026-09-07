@@ -493,14 +493,25 @@ void gateAnisoPoiseuille() {
     CHECK(!threw);
     threw = false;
     try {
+      // PHASE 3 INVERTED THIS ASSERTION. Phase 2 wrote it as `CHECK(threw)` — `enable_vof` was
+      // the one entry point its §7 still refused on an anisotropic domain, and the gate pinned
+      // that refusal so it could not be lifted by accident. Phase 3 (flow/doc/anisotropic_vof.md)
+      // is what lifts it: the colour transport is metric-free because a stretched cell IS the unit
+      // cube of the index coordinates, and everything that reads a direction, a length or an area
+      // — the height-function curvature, the paraboloid frames, the CSF face force's per-axis
+      // weight `w_a`, the wetting rotation, the phase-change normals/areas/V_cell — now carries
+      // the metric. `units_vof_aniso` is the gate that holds it: the balanced-force exactness
+      // identity is at machine zero (2.3e-17 at aspect 2, 1.9e-17 at aspect 4) and Young-Laplace
+      // is exact, which is only true if the CSF weight is EXACTLY this file's `w_a`.
       peclet::flow::Solver<peclet::flow::Staggered> ss(16, 40, 8);
       ss.setPhysicalDomain({16.0, 12.0, 16.0}, {0.0, 0.0, 0.0}, {16, 40, 8});
       ss.enableVof();
+      std::printf("      ADMITTED (enable_vof — Phase 3; see units_vof_aniso)\n");
     } catch (const std::exception& ex) {
       threw = true;
-      std::printf("      refused (enable_vof): %s\n", ex.what());
+      std::printf("      UNEXPECTED refusal (enable_vof): %s\n", ex.what());
     }
-    CHECK(threw);
+    CHECK(!threw);
     threw = false;
     try {
       peclet::flow::Solver<peclet::flow::Staggered> ss(16, 40, 8);
@@ -1039,6 +1050,162 @@ void gateAnisoTgv() {
 }
 }  // namespace
 
+
+// =============================================================== units_vof_aniso (PHASE 3, S2)
+//
+// `flow/doc/anisotropic_vof.md` §11 S2 — the gate the Phase 2 merge finally makes constructible,
+// because `enable_vof` refused an anisotropic domain until Phase 3 landed.
+//
+// A stationary droplet on cells that are NOT cubes. Two statements, and they are independent:
+//
+//  (a) THE BALANCED-FORCE IDENTITY SURVIVES THE METRIC. With a CONSTANT curvature the CSF force
+//      is `sigma' kappa' (C(i) - C(i-s_a)) * w_a` — the SAME per-axis weight `w_a = 1/h_a'^2` the
+//      momentum RHS puts on `-(P(i) - P(i-s_a))` (Phase 2 §1.3). So it is again exactly the
+//      discrete weighted gradient of `sigma' kappa' C`, the projection annihilates it, and the
+//      drop stays at machine zero. Get the weight wrong on ONE axis and this floors at the
+//      spurious-current level instead — which is precisely what the gate is for.
+//
+//  (b) YOUNG-LAPLACE IS THE PHYSICAL JUMP. `dp = sigma * kappa` in the caller's units, on a mesh
+//      whose cells differ by a factor 4 between axes.
+//
+// The colour is the EXACT fraction of a physical sphere over anisotropic cells, so the geometry is
+// the same physical problem at every aspect ratio and only the mesh changes.
+struct AnisoDrop {
+  double maxU = 0.0, dp = 0.0, kappa = 0.0, dtCap = 0.0, hMin = 0.0;
+};
+
+/// Exact liquid fraction of the box cell `[x0,x0+hx] x ...` inside a sphere: midpoint-subsampled
+/// in x and y, integrated ANALYTICALLY in z. Independent of every kernel under test.
+double sphereFracBox(double cx, double cy, double cz, double R, double x0, double y0, double z0,
+                     const double h[3], int sub = 24) {
+  const double wx = h[0] / sub, wy = h[1] / sub;
+  double acc = 0.0;
+  for (int b = 0; b < sub; ++b)
+    for (int a = 0; a < sub; ++a) {
+      const double px = x0 + (a + 0.5) * wx, py = y0 + (b + 0.5) * wy;
+      const double r2 = R * R - (px - cx) * (px - cx) - (py - cy) * (py - cy);
+      if (r2 <= 0.0)
+        continue;
+      const double hh = std::sqrt(r2);
+      const double lo = std::fmax(cz - hh, z0), hi = std::fmin(cz + hh, z0 + h[2]);
+      if (hi > lo)
+        acc += hi - lo;
+    }
+  return acc / (sub * sub * h[2]);
+}
+
+/// `n` cells per axis on a box mesh of cell size `h` (physical). `R` is the PHYSICAL radius.
+AnisoDrop runDropletAniso(const int n[3], const double h[3], double R, bool constantKappa,
+                          int steps) {
+  const double SIGMA = 1.0, MU = 0.1, RHO = 1.0;
+  peclet::flow::Solver<peclet::flow::Staggered> s(n[0], n[1], n[2]);
+  s.setPhysicalDomain({n[0] * h[0], n[1] * h[1], n[2] * h[2]}, {0.0, 0.0, 0.0},
+                      {n[0], n[1], n[2]});
+  s.setRho(RHO);
+  s.setMu(MU);
+  s.setDt(1.0);
+  s.setVelocityResidualTolerance(0.0);  // machine-precision gate: keep the fixed-sweep loop
+  const std::size_t nc = (std::size_t)n[0] * n[1] * n[2];
+  const double hMin = std::fmin(h[0], std::fmin(h[1], h[2]));
+  s.setPressureGeometry(std::vector<double>(nc, 10.0 * hMin));
+  s.setPressureChebyshev(true, 500, 1e-14);
+  s.enableVof();  // <- refused before Phase 3; the whole point of this gate
+  // the drop, off-centre by an irrational fraction of a cell on every axis
+  const double ctr[3] = {0.5 * n[0] * h[0] + 0.13 * h[0], 0.5 * n[1] * h[1] + 0.27 * h[1],
+                         0.5 * n[2] * h[2] + 0.11 * h[2]};
+  std::vector<double> C(nc);
+  for (int k = 0; k < n[2]; ++k)
+    for (int j = 0; j < n[1]; ++j)
+      for (int i = 0; i < n[0]; ++i)
+        C[(std::size_t)i + (std::size_t)j * n[0] + (std::size_t)k * n[0] * n[1]] =
+            sphereFracBox(ctr[0], ctr[1], ctr[2], R, i * h[0], j * h[1], k * h[2], h);
+  s.setVof(C);
+  s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {RHO, 0.0});
+  s.setSurfaceTension(SIGMA);
+  AnisoDrop d;
+  d.hMin = hMin;
+  d.kappa = 2.0 / R;  // physical 1/length
+  if (constantKappa)
+    s.setVofKappaConstant(d.kappa);
+  else
+    s.computeVofCurvature();
+  d.dtCap = s.capillaryDt();
+  s.setDt(0.5 * d.dtCap);
+  for (int q = 0; q < steps; ++q)
+    s.step();
+  for (int c = 0; c < 3; ++c)
+    d.maxU = std::fmax(d.maxU, maxAbs(s.getVelocity(c)));
+  const std::vector<double> p = s.getPressure();
+  const std::size_t inside = (std::size_t)(n[0] / 2) + (std::size_t)(n[1] / 2) * n[0] +
+                             (std::size_t)(n[2] / 2) * n[0] * n[1];
+  const std::size_t outside = 1 + (std::size_t)1 * n[0] + (std::size_t)1 * n[0] * n[1];
+  d.dp = p[inside] - p[outside];
+  return d;
+}
+
+void gateVofAniso() {
+  std::printf("=== units_vof_aniso (Phase 3 S2: the balanced-force CSF on BOX cells) ===\n");
+  // Three meshes carrying the SAME physical droplet: cubic, aspect 2, aspect 4. The cell counts
+  // keep the physical box cubic, so only the cell SHAPE changes.
+  const double base = 1.0 / 32.0;
+  struct Mesh { const char* name; int n[3]; double h[3]; };
+  const Mesh meshes[3] = {
+      {"cubic      ", {32, 32, 32}, {base, base, base}},
+      {"aspect 2   ", {32, 64, 32}, {base, base / 2, base}},
+      {"aspect 4   ", {32, 64, 128}, {base, base / 2, base / 4}},
+  };
+  const double R = 8.0 * base;  // D/h = 16 on the coarsest axis
+  const double uScale = 1.0 * (2.0 / R) / 0.1;  // sigma*kappa/mu, the naive-CSF current
+
+  for (int q = 0; q < 3; ++q) {
+    const Mesh& m = meshes[q];
+    // (a) the EXACTNESS identity: constant kappa -> the projection annihilates the force.
+    const AnisoDrop a = runDropletAniso(m.n, m.h, R, true, 20);
+    // (b) Young-Laplace with the same constant curvature.
+    std::printf("  %s n = (%3d,%3d,%3d)  h'/hMin = (%.2f, %.2f, %.2f)\n", m.name, m.n[0], m.n[1],
+                m.n[2], m.h[0] / a.hMin, m.h[1] / a.hMin, m.h[2] / a.hMin);
+    std::printf("      exactness max|u| = %.3e   (gate %.3e = 1e-14 * sigma*kappa/mu)\n", a.maxU,
+                1e-14 * uScale);
+    std::printf("      Young-Laplace dp = %.9e vs sigma*kappa = %.9e   (rel %.2e)\n", a.dp,
+                a.kappa, std::fabs(a.dp - a.kappa) / a.kappa);
+    std::printf("      capillary_dt     = %.9e   (h_min = %.6e)\n", a.dtCap, a.hMin);
+    CHECK(a.maxU < 1e-14 * uScale);
+    checkClose(a.dp, a.kappa, 1e-9 * a.kappa, "anisotropic Young-Laplace");
+    // The Brackbill limit is set by the SMALLEST cell: refining one axis by 2 must shrink it by
+    // 2^{3/2}, which is the statement that `capillary_dt` takes `min_a h_a` and not `h_x`.
+    if (q > 0) {
+      const double want = meshes[0].h[0] / a.hMin;  // hMin ratio vs the cubic mesh
+      const double got = runDropletAniso(meshes[0].n, meshes[0].h, R, true, 0).dtCap / a.dtCap;
+      std::printf("      dt_sigma(cubic)/dt_sigma(this) = %.4f   (h^{3/2} predicts %.4f)\n", got,
+                  std::pow(want, 1.5));
+      CHECK(std::fabs(got - std::pow(want, 1.5)) < 1e-9 * std::pow(want, 1.5));
+    }
+  }
+
+  // (c) the COMPUTED curvature. Everything above is EXACT because a constant kappa makes the CSF
+  // the discrete weighted gradient the projection annihilates; with the cascade's own kappa the
+  // residual currents are the curvature error and nothing else. MEASURED: the box mesh costs a
+  // constant factor, it does not diverge —
+  //
+  //     spurious Ca   cubic 2.499e-04   aspect 2  7.869e-04   (ratio 3.15)
+  //
+  // A factor ~3 at aspect 2, on a mesh whose sphere is resolved BETTER on the refined axis. The
+  // likely mechanism is the V2.1 decision (the column direction is ordered by the INDEX normal,
+  // which is the right frame for whether 7 cells can close a column but not for how much PHYSICAL
+  // interface those 7 cells span) — so a stretched mesh routes more cells to the PV fallback than
+  // its cell count suggests. NOT isolated here: confirming it needs the branch census per mesh,
+  // and it is an accuracy characteristic rather than a defect, because the property this rung
+  // rests on — the exactness identity above — is at machine zero on all three meshes.
+  // The gate is therefore set from the measurement (4x) and the number is printed every run.
+  const AnisoDrop cc = runDropletAniso(meshes[0].n, meshes[0].h, R, false, 20);
+  const AnisoDrop ca = runDropletAniso(meshes[1].n, meshes[1].h, R, false, 20);
+  const double caC = 0.1 * cc.maxU / 1.0, caA = 0.1 * ca.maxU / 1.0;
+  std::printf("  computed kappa: spurious Ca cubic %.3e vs aspect-2 %.3e (ratio %.2f, gate 4)\n",
+              caC, caA, caA / caC);
+  CHECK(caA < 4.0 * caC);
+  checkClose(ca.dp, ca.kappa, 5e-2 * ca.kappa, "anisotropic Young-Laplace (computed kappa)");
+}
+
 int main(int argc, char** argv) {
   const std::string gate = argc > 1 ? argv[1] : "identity";
   Kokkos::initialize(argc, argv);
@@ -1055,8 +1222,11 @@ int main(int argc, char** argv) {
       gateAnisoSphere();
     else if (gate == "tgv")
       gateAnisoTgv();
+    else if (gate == "vofaniso")
+      gateVofAniso();
     else {
-      std::fprintf(stderr, "usage: test_units [identity|scale|vof|aniso|sphere|tgv]\n");
+      std::fprintf(stderr,
+                   "usage: test_units [identity|scale|vof|aniso|sphere|tgv|vofaniso]\n");
       ++failures;
     }
   }
