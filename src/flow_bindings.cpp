@@ -75,6 +75,27 @@ static nb::ndarray<nb::numpy, double> field_out(S& s, std::vector<double>&& v) {
       {1, static_cast<std::int64_t>(nx), static_cast<std::int64_t>(nx * ny)});
 }
 
+// One VoF marker block's own inner colour as a Fortran-order (nx,ny,nz) array over its block box.
+// Bound under BOTH `vof_block_colour` (the original) and `vof_block_color` (the canonical US
+// spelling, suite/docs/NAMING.md 1.6) — one body, so the two can never drift.
+template <class S>
+static nb::ndarray<nb::numpy, double> vofBlockColourArray(S& s, long id) {
+  std::vector<double> v = s.vofBlockColour(id);
+  const auto st = s.vofBlockStats();
+  std::size_t nx = 0, ny = 0, nz = 0;
+  for (const auto& b : st)
+    if (b.id == id) {
+      nx = static_cast<std::size_t>(b.hi[0] - b.lo[0]);
+      ny = static_cast<std::size_t>(b.hi[1] - b.lo[1]);
+      nz = static_cast<std::size_t>(b.hi[2] - b.lo[2]);
+    }
+  if (v.size() != nx * ny * nz)
+    return peclet::core::python::vector_to_ndarray(std::move(v), {v.size()}, {1});
+  return peclet::core::python::vector_to_ndarray(
+      std::move(v), {nx, ny, nz},
+      {1, static_cast<std::int64_t>(nx), static_cast<std::int64_t>(nx * ny)});
+}
+
 // A Fortran-order (nx,ny,nz) float64 array -> flat x-fastest host vector (F-contiguous data() is
 // already x-fastest). nanobind casts/copies the input to f_contig double if needed.
 static std::vector<double> grid_in(nb::ndarray<double, nb::f_contig> a) {
@@ -213,13 +234,16 @@ static void bind_solver(nb::module_& m, const char* name) {
           },
           "The physical cell-centre coordinates of THIS rank's inner block as three 1-D arrays "
           "(x, y, z). np.meshgrid(*s.cell_centres(), indexing='ij') is the grid an SDF for "
-          "set_solid is sampled on.")
+          "set_solid is sampled on. ALIAS of the canonical US-spelled `cell_centers()` "
+          "(suite/docs/NAMING.md 1.6); both ship, and every recorded example uses this one.")
       .def(
           "cell_centers",
           [](S& s) {
             return nb::make_tuple(s.cellCentres(0), s.cellCentres(1), s.cellCentres(2));
           },
-          "US spelling of cell_centres().")
+          "The physical cell-centre coordinates of THIS rank's inner block as three 1-D arrays "
+          "(x, y, z) — the canonical spelling (suite/docs/NAMING.md 1.6). `cell_centres()` is the "
+          "same call.")
       .def("set_rho", &S::setRho, nb::arg("rho"),
            "Set fluid density rho (physical units). Set before geometry/first step.")
       .def("set_mu", &S::setMu, nb::arg("mu"), "Set dynamic viscosity mu (physical units).")
@@ -626,7 +650,11 @@ static void bind_solver(nb::module_& m, const char* name) {
            "fixes.")
       .def("has_moving_instance", &S::hasMovingInstance,
            "True when at least one scene instance carries a nonzero velocity.")
-      .def("scene_instance_count", &S::sceneInstanceCount)
+      .def("num_scene_instances", &S::sceneInstanceCount,
+           "Number of instances in the scene. The suite-canonical count spelling "
+           "(suite/docs/NAMING.md 1.3); `scene_instance_count` is the same call.")
+      .def("scene_instance_count", &S::sceneInstanceCount,
+           "ALIAS of the canonical `num_scene_instances`; both ship.")
       .def(
           "set_instance_transform",
           [](S& s, int i, std::array<double, 3> t, std::array<double, 4> q) {
@@ -1551,30 +1579,19 @@ static void bind_solver(nb::module_& m, const char* name) {
           "two boxes would be handed to both markers.")
       // --- Part III rung W3: checkpoint / restart of the block container ----------------------
       .def(
-          "vof_block_colour",
-          [](S& s, long id) {
-            std::vector<double> v = s.vofBlockColour(id);
-            const auto st = s.vofBlockStats();
-            std::size_t nx = 0, ny = 0, nz = 0;
-            for (const auto& b : st)
-              if (b.id == id) {
-                nx = static_cast<std::size_t>(b.hi[0] - b.lo[0]);
-                ny = static_cast<std::size_t>(b.hi[1] - b.lo[1]);
-                nz = static_cast<std::size_t>(b.hi[2] - b.lo[2]);
-              }
-            if (v.size() != nx * ny * nz)
-              return peclet::core::python::vector_to_ndarray(std::move(v), {v.size()}, {1});
-            return peclet::core::python::vector_to_ndarray(
-                std::move(v), {nx, ny, nz},
-                {1, static_cast<std::int64_t>(nx), static_cast<std::int64_t>(nx * ny)});
-          },
+          "vof_block_colour", &vofBlockColourArray<S>,
           nb::arg("id"),
           "One marker's OWN inner colour as a Fortran-order (nx,ny,nz) float64 array over its "
           "block box (vof_block_stats()['lo'/'hi']); empty on a rank that does not master it.\n\n"
           "This is the block's ONLY state, so {box, colour} per marker is a COMPLETE checkpoint "
           "of the container -- and it is the only exact one: re-seeding from the union colour "
           "field (enable_vof_blocks_from_field) hands each of two TOUCHING markers a slice of the "
-          "other, because that gather is a copy of the union clipped to the seed extent.")
+          "other, because that gather is a copy of the union clipped to the seed extent.\n\n"
+          "`vof_block_color` is the same call in the canonical US spelling.")
+      .def(
+          "vof_block_color", &vofBlockColourArray<S>, nb::arg("id"),
+          "US spelling of `vof_block_colour` and the suite-canonical one "
+          "(suite/docs/NAMING.md 1.6); both ship and every recorded example uses the -our form.")
       .def(
           "enable_vof_blocks_from_colours",
           [](S& s, const std::vector<std::array<int, 6>>& boxes, nb::list colours) {
@@ -2603,7 +2620,9 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "get_spacing", [](S& s) { auto h = s.spacing(); return std::vector<double>{h[0], h[1], h[2]}; },
           "Return the grid spacing [dx, dy, dz] = extent/cells. [1, 1, 1] without a physical "
-          "domain (the cell-unit default). Same numbers as the `spacing` property.")
+          "domain (the cell-unit default). ALIAS of the canonical `spacing` PROPERTY "
+          "(suite/docs/NAMING.md 1.2 — a value the object simply has is a bare name); both ship "
+          "and they return the same numbers.")
 #ifdef PECLET_FLOW_MPI
       // Distributed path (built with -DPECLET_FLOW_MPI): construct the Solver with this rank's
       // LOCAL block dims (see the module-level mpi_block()), then init_mpi with the GLOBAL grid
