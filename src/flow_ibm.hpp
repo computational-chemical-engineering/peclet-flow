@@ -225,20 +225,22 @@ class Solver {
     double hh[3];
     for (int a = 0; a < 3; ++a)
       hh[a] = extent[a] / (double)c[a];
-    // Phase 1 is isotropic: the momentum, pressure and VoF operators still assume one cell size.
-    // Anisotropic cells are Phase 2/3 of the plan (per-axis constants in every operator).
-    for (int a = 1; a < 3; ++a) {
-      if (std::fabs(hh[a] - hh[0]) > 1e-12 * std::fabs(hh[0])) {
-        char msg[320];
-        std::snprintf(msg, sizeof msg,
-                      "physical domain: Phase 1 supports ISOTROPIC cells only, but "
-                      "extent/cells gives dx=%.17g dy=%.17g dz=%.17g. Choose an extent "
-                      "proportional to the cell counts (anisotropic cells are Phase 2 of "
-                      "suite/docs/PHYSICAL_UNITS_PLAN.md).",
-                      hh[0], hh[1], hh[2]);
-        throw std::runtime_error(msg);
-      }
-    }
+    // Phase 2 C2 — THE SNAP (doc/anisotropic_metric.md §1.4).  Phase 1 refused any extent whose
+    // three spacings differed; this replaces the throw.  If the three agree to 1e-12 relative the
+    // spacings are SNAPPED to h_0 on every axis, so the metric is EXACTLY the identity
+    // (hp = w = (1,1,1), vol = 1, aniso = false) — that exactness is what keeps every operator
+    // fold of C1/C2 bit-identical and what keeps `units_scale_invariance` on literally Phase 1's
+    // arithmetic, whose per-axis extents N_a*H can differ by an ulp across axes (trap 2).
+    // Otherwise the cells really are anisotropic: hRef = min_a h_a, and h_a' comes from the STORED
+    // doubles (trap 1 — never extent/(cells*hRef); h_a' is exactly 1.0 only on the finest axis).
+    // What that admits, and what still refuses it, is §7 / `requireIsotropic` below.
+    bool iso = true;
+    for (int a = 1; a < 3; ++a)
+      if (std::fabs(hh[a] - hh[0]) > 1e-12 * std::fabs(hh[0]))
+        iso = false;
+    if (iso)
+      for (int a = 1; a < 3; ++a)
+        hh[a] = hh[0];
     u_.physical = true;
     for (int a = 0; a < 3; ++a) {
       u_.h[a] = hh[a];
@@ -246,28 +248,49 @@ class Solver {
       u_.org[a] = origin[a];
       u_.cells[a] = c[a];
     }
-    u_.hRef = hh[0];
-    // Phase 2 C1 — the per-axis metric (doc/anisotropic_metric.md §1.1, §1.4).  The isotropy
-    // assert above is STILL IN FORCE (commit C2 replaces it by the snap of §1.4 and admits a
-    // genuinely anisotropic extent), so every path that reaches here has three spacings agreeing
-    // to 1e-12 relative and the metric is EXACTLY the identity: hp = w = (1,1,1), vol = 1,
-    // aniso = false.  That exactness is what keeps every operator fold bit-identical — writing
-    // hp[a] = hh[a]/hRef here would give 1 +- 1 ulp on the axes an extent like N_a*H rounds
-    // differently, which is precisely what the §1.4 snap exists to remove.
+    u_.hRef = std::min(hh[0], std::min(hh[1], hh[2]));
     for (int a = 0; a < 3; ++a) {
-      u_.hp[a] = 1.0;
-      u_.w[a] = 1.0;
+      u_.hp[a] = iso ? 1.0 : u_.h[a] / u_.hRef;
+      u_.w[a] = iso ? 1.0 : 1.0 / (u_.hp[a] * u_.hp[a]);
     }
-    u_.vol = 1.0;
-    u_.aniso = false;
+    u_.vol = iso ? 1.0 : u_.hp[0] * u_.hp[1] * u_.hp[2];
+    u_.aniso = !iso;
     // rhoRef / tRef are pinned by the first set_rho / set_dt; whatever was set BEFORE the domain
     // (nothing, in the documented order) is re-derived here.
     refreshUnitDerived();
+    // The §7 refusal comes LAST, so a caught exception still leaves a fully consistent solver
+    // (armed and self-consistent, just not usable on this grid policy).
+    if constexpr (Grid::collocated)
+      requireIsotropic("SolverColocated (the collocated policy): its cell gradients and the ABC "
+                       "approximate projection need the anisotropic index-space normal of the "
+                       "embedded closures, which is commit C4 of doc/anisotropic_metric.md "
+                       "(Phase 2). Use the staggered Solver");
+  }
+
+  /// Phase 2 §7 — refuse an ANISOTROPIC domain in a consumer this phase does not carry.  `what`
+  /// names the entry point AND the phase/commit that lifts the refusal; this appends the three
+  /// spacings and the metric they give, so the message is actionable without a debugger.  A no-op
+  /// (and never even formats a string) on the isotropic path, which is every cell-unit run.
+  ///
+  /// ADMITTED on an anisotropic domain after this commit (doc/anisotropic_metric.md §7): the
+  /// staggered `Solver` with sampled or scene geometry, constant or variable properties, variable
+  /// density, porous continuity with or without implicit drag, every domain-BC type, every
+  /// pressure driver and bottom, the velocity multigrid, scalar transport and MPI.
+  void requireIsotropic(const char* what) const {
+    if (!u_.aniso)
+      return;
+    char msg[520];
+    std::snprintf(msg, sizeof msg,
+                  "%s: this entry point requires ISOTROPIC cells, but extent/cells gives "
+                  "dx=%.17g dy=%.17g dz=%.17g (hRef=%.17g, h'=(%.17g, %.17g, %.17g)).",
+                  what, u_.h[0], u_.h[1], u_.h[2], u_.hRef, u_.hp[0], u_.hp[1], u_.hp[2]);
+    throw std::runtime_error(msg);
   }
 
   bool hasPhysicalDomain() const { return u_.physical; }
   const UnitScales& unitScales() const { return u_; }
-  /// Cell size per axis (all equal in Phase 1). 1,1,1 without a physical domain.
+  /// Cell size per axis (equal on every axis unless the Phase 2 anisotropic path is armed --
+  /// see `unitScales().aniso`). 1,1,1 without a physical domain.
   std::array<double, 3> spacing() const { return {u_.h[0], u_.h[1], u_.h[2]}; }
   /// Physical lower corner of the GLOBAL inner grid.
   std::array<double, 3> domainOrigin() const { return {u_.org[0], u_.org[1], u_.org[2]}; }
@@ -2035,7 +2058,11 @@ class Solver {
       }
     }
     if (cutcellPressure_) {
-      buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, 1.0, 1.0, 1.0,
+      // Phase 2 C2 (doc/anisotropic_metric.md §4.5, trap 7): buildOpenness has taken dx,dy,dz
+      // all along and was handed 1.0 — `ccFractionCore` (the order-1 aperture model) forms the
+      // gradient (s+ - s-)/(2 dx) and the face extent |n_b| dy + |n_c| dz on the index lattice, so
+      // the right metric is h_a' (the marching-squares path, order 2, ignores them).
+      buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, u_.hp[0], u_.hp[1], u_.hp[2],
                     apertureOrder_);  // on the g=2 velocity block
       if (hasOpenOverride_) {
         // Analytic-SDF exact apertures (setOpennessOverride): overwrite the sampled-SDF openness
@@ -2381,7 +2408,10 @@ class Solver {
 #endif
         mg_.init(nx_, ny_, nz_,
                  nLevels_);  // geometric multigrid on the cut-cell openness (MG-PCG pressure)
-      mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), 1.0, 1.0, 1.0);
+      // Phase 2 C2 (doc/anisotropic_metric.md §1.3/§3): the per-axis pressure weight
+      // w_a = 1/h_a'^2 IS `setOpenness`'s idx2/idy2/idz2 (the coarse levels already form
+      // w_a/cfac_a^2).  Exactly 1.0 on the isotropic path.
+      mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), u_.w[0], u_.w[1], u_.w[2]);
       // Coarse-solve policy: an explicit set_pressure_graph_amg(True) forces agglomeration,
       // otherwise the mode set by set_pressure_bottom (default auto) decides.
       mg_.setAgglomerationMode(pressGraphAmg_ ? 1 : pressAgglomMode_);
@@ -2669,12 +2699,20 @@ class Solver {
     const C3 e = e_;
     const int dims[3] = {e.x, e.y, e.z};
     const long st[3] = {1, e.x, (long)e.x * e.y};
-    const double rho = rho_;
+    // Phase 2 C2 (doc/anisotropic_metric.md §4.2, trap 10): `energyInflux` mixes three velocity
+    // COMPONENTS, which on anisotropic cells carry three different velocity scales, so it cannot
+    // be converted after the fact -- each component is taken to physical units inside the reduce
+    // (k_a = velToPhys(a)) and the density with it.  `maxReverse` is scaled there too, i.e. before
+    // the max over face planes whose axes have different velocity scales.  Phase 1 left this
+    // diagnostic in index units and the Python binding converts nothing, so in cell units every
+    // factor here is exactly 1.0 and the reported numbers do not move.
+    const double rho = u_.rhoRef * rho_;
     for (int a = 0; a < 3; ++a)
       for (int s = 0; s < 2; ++s) {
         if (bc_[2 * a + s] != 3 || !touchesGlobalFace(2 * a + s))
           continue;
         const int b = (a + 1) % 3, c = (a + 2) % 3;
+        const double ka = u_.velToPhys(a), kb = u_.velToPhys(b), kc = u_.velToPhys(c);
         const long sa = st[a], sb = st[b], sc = st[c];
         const int bf = (s == 0) ? G : (dims[a] - G);        // the boundary normal-velocity plane
         const int bic = (s == 0) ? G : (dims[a] - G - 1);   // the outlet-adjacent inner cell
@@ -2691,9 +2729,10 @@ class Solver {
               const double back = sgn * un(base + (long)bf * sa);
               if (back > 0.0) {
                 const long ic = base + (long)bic * sa;
-                const double tb = ub(ic), tc = uc(ic);
-                lmx = Kokkos::fmax(lmx, back);
-                len += rho * back * 0.5 * (back * back + tb * tb + tc * tc);
+                const double tb = kb * ub(ic), tc = kc * uc(ic);
+                const double bp = ka * back;
+                lmx = Kokkos::fmax(lmx, bp);
+                len += rho * bp * 0.5 * (bp * bp + tb * tb + tc * tc);
                 lnr += 1;
               }
             },
@@ -4020,6 +4059,9 @@ class Solver {
   }
 
   std::vector<double> hydroForceTorque() {
+    requireIsotropic("hydro_force_torque: the traction integral's fragment area vector and strain "
+                     "rate carry the per-axis metric (doc/anisotropic_metric.md §4.4), which is "
+                     "commit C4 of Phase 2");
     std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 12, 0.0);
     if (!hasScene_ || nInst_ <= 0 || cutOwner_.extent(0) != (std::size_t)nx_ * ny_ * nz_)
       return out;
@@ -4229,6 +4271,9 @@ class Solver {
   /// update this budget does not carry, and a missing term here is a silently mis-attributed
   /// force.
   std::vector<double> hydroForceTorqueReaction() {
+    requireIsotropic("hydro_force_torque_reaction: the momentum-row reaction carries h_a'*V' per "
+                     "component (doc/anisotropic_metric.md §4.4), which is commit C4 of Phase 2 -- "
+                     "and the CFD-DEM coupling that reads it has its own isotropy guard");
     std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 6, 0.0);
     if (!hasScene_ || nInst_ <= 0)
       return out;
@@ -4901,25 +4946,30 @@ class Solver {
     const bool gg =
         Grid::collocated && (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) && incr;
     if constexpr (Grid::collocated) {
+      // Phase 2 C2: each gradient kernel carries the metric weight w_c of ITS OWN axis on its
+      // output (doc/anisotropic_metric.md §3), which is why the `gpw(i)` branch of the RHS below
+      // is not scaled again.
       if (gg) {
-        gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G, gauge2a_);
+        gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G,
+                     gauge2a_, u_.w[c]);
       } else if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         transposeGradWallAware(tgp_, CCConst(P_), CCConst(sdf_), CCConst(oax[c]), CCConst(xcs[c]),
-                               faceInterp_ >= 3, c, e_, G);
+                               faceInterp_ >= 3, c, e_, G, u_.w[c]);
       } else if (wg) {
         CCField oax[3] = {ox_, oy_, oz_};
-        centerGradOpen(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G);
+        centerGradOpen(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G, u_.w[c]);
       } else if (ag) {
         CCField oax[3] = {ox_, oy_, oz_};
         if (faceInterp_ == 12)
           centerGradApertureScaled(tgp_, CCConst(P_), CCConst(ox_), CCConst(oy_), CCConst(oz_), c,
-                                   e_, G);
+                                   e_, G, u_.w[c]);
         else if (faceInterp_ == 13)
-          centerGradOpenCapped(tgp_, CCConst(P_), CCConst(oax[c]), c, apertureFloor_, e_, G);
+          centerGradOpenCapped(tgp_, CCConst(P_), CCConst(oax[c]), c, apertureFloor_, e_, G,
+                               u_.w[c]);
         else
-          centerGradAperture(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G);
+          centerGradAperture(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G, u_.w[c]);
       }
     }
     CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg/wg/gg/ag false there)
@@ -5026,21 +5076,23 @@ class Solver {
         Grid::collocated && (faceInterp_ >= 11 && faceInterp_ <= 13) && incr;  // adjoint-aperture
     if constexpr (Grid::collocated) {
       if (gg) {
-        gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G, gauge2a_);
+        gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G,
+                     gauge2a_, u_.w[c]);
       } else if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         transposeGradWallAware(tgp_, CCConst(P_), CCConst(sdf_), CCConst(oax[c]), CCConst(xcs[c]),
-                               faceInterp_ >= 3, c, e_, G);
+                               faceInterp_ >= 3, c, e_, G, u_.w[c]);
       } else if (ag) {
         CCField oax[3] = {ox_, oy_, oz_};
         if (faceInterp_ == 12)
           centerGradApertureScaled(tgp_, CCConst(P_), CCConst(ox_), CCConst(oy_), CCConst(oz_), c,
-                                   e_, G);
+                                   e_, G, u_.w[c]);
         else if (faceInterp_ == 13)
-          centerGradOpenCapped(tgp_, CCConst(P_), CCConst(oax[c]), c, apertureFloor_, e_, G);
+          centerGradOpenCapped(tgp_, CCConst(P_), CCConst(oax[c]), c, apertureFloor_, e_, G,
+                               u_.w[c]);
         else
-          centerGradAperture(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G);
+          centerGradAperture(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G, u_.w[c]);
       }
     }
     CCConst gpw = CCConst(tgp_);
@@ -6346,7 +6398,7 @@ class Solver {
       }
       mg_.setBoundaryConditions(bc_);
       mg_.setOutflowCoefficient(hasOutflow_ && outflowOperatorCoeff());
-      mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), 1.0, 1.0, 1.0);
+      mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
       mg_.setOutflowCoefficient(false);
       chebBoundsSet_ = false;  // spectrum changed with the coefficients (re-estimated by the solve)
     }
@@ -6381,7 +6433,7 @@ class Solver {
                          CCConst(eps1_), e1_, 1);
       }
       mg_.setBoundaryConditions(bc_);
-      mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), 1.0, 1.0, 1.0);
+      mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
       chebBoundsSet_ = false;
     }
     // geometric multigrid solve of the cut-cell pressure Poisson A phi = -div(u*) (CUDA
@@ -6514,10 +6566,13 @@ class Solver {
       // field (central-difference cell gradient).
       // rung V8: per-face 1/rho_f on the gradient, matching the operator coefficient
       // c_f = o_f*rho0/rho_f — the SAME exact-adjoint face correction the staggered path uses.
+      // Phase 2 C2 (doc/anisotropic_metric.md §3): the per-axis weight w_a multiplies the whole
+      // existing correction, matching the w_a on the operator row of that axis.  1.0 isotropic.
       if (varRho_)
-        projectCorrectVar(uf_, vf_, wf_, CCConst(phi_), CCConst(rhoField_), rho_, e_, G);
+        projectCorrectVar(uf_, vf_, wf_, CCConst(phi_), CCConst(rhoField_), rho_, e_, G, u_.w[0],
+                          u_.w[1], u_.w[2]);
       else
-        projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G);
+        projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
       if (fluidOnlyMode_ == 2)  // Design B: replace the solid side's phi=0 by phibar_s at
         starCorrectFaces(uf_, vf_, wf_, CCConst(phi_), starOv_, nStar_,  // fluid|solid faces
                          C3{nx_, ny_, nz_}, e_, G, e_, G);
@@ -6534,9 +6589,10 @@ class Solver {
         for (int a = 0; a < 3; ++a)
           if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
             if (var)
-              bcCorrectOutflowVar(fa[a], phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_);
+              bcCorrectOutflowVar(fa[a], phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_,
+                                  u_.w[a]);
             else
-              bcCorrectOutflow(fa[a], phi_, e, G, a);
+              bcCorrectOutflow(fa[a], phi_, e, G, a, u_.w[a]);
           }
       }
       if (colocatedFaceForce()) {
@@ -6553,7 +6609,8 @@ class Solver {
         // predictor (buildRhs), so the pressure force the momentum feels and the correction stay
         // one operator family.
         for (int cc = 0; cc < 3; ++cc) {
-          gpCenterGrad(tgp_, CCConst(phi_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), cc, e_, G, gauge2a_);
+          gpCenterGrad(tgp_, CCConst(phi_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), cc, e_, G,
+                       gauge2a_, u_.w[cc]);
           subtractField(C[cc].u, CCConst(tgp_), e_, G);
         }
       } else if (faceInterp_ >= 2 &&
@@ -6563,14 +6620,14 @@ class Solver {
         CCField oax[3] = {ox_, oy_, oz_};
         for (int cc = 0; cc < 3; ++cc) {
           transposeGradWallAware(tgp_, CCConst(phi_), CCConst(sdf_), CCConst(oax[cc]),
-                                 CCConst(xcs[cc]), faceInterp_ >= 3, cc, e_, G);
+                                 CCConst(xcs[cc]), faceInterp_ >= 3, cc, e_, G, u_.w[cc]);
           subtractField(C[cc].u, CCConst(tgp_), e_, G);
         }
       } else if (faceInterp_ == 6 ||
                  faceInterp_ == 7) {  // embed: openness-WEIGHTED cell correction
         // (full open-face pressure force at cut cells) — Basilisk centered_grad
         projectCorrectCenterOpen(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
-                                 CCConst(oz_), e_, G);
+                                 CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
       } else if (faceInterp_ >= 11 && faceInterp_ <= 13) {  // adjoint-aperture: cell correction
         // = the TRANSPOSE of the aperture divergence of the 1/2-1/2 average, G = -(D_a Pi)^T
         // (centerGradAperture) -- support-consistent (collapses the invisible subspace) and
@@ -6580,33 +6637,36 @@ class Solver {
         for (int cc = 0; cc < 3; ++cc) {
           if (faceInterp_ == 12)
             centerGradApertureScaled(tgp_, CCConst(phi_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
-                                     cc, e_, G);
+                                     cc, e_, G, u_.w[cc]);
           else if (faceInterp_ == 13)
-            centerGradOpenCapped(tgp_, CCConst(phi_), CCConst(oax[cc]), cc, apertureFloor_, e_, G);
+            centerGradOpenCapped(tgp_, CCConst(phi_), CCConst(oax[cc]), cc, apertureFloor_, e_, G,
+                                 u_.w[cc]);
           else
-            centerGradAperture(tgp_, CCConst(phi_), CCConst(oax[cc]), cc, e_, G);
+            centerGradAperture(tgp_, CCConst(phi_), CCConst(oax[cc]), cc, e_, G, u_.w[cc]);
           subtractField(C[cc].u, CCConst(tgp_), e_, G);
         }
       } else {
         projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
-                             CCConst(oz_), e_, G);
+                             CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
       }
     } else {
       if (porous_ && porousCons_)  // eps-conservative gradient rho*idt/(eps_f rho idt + beta_f),
                                    // matching buildPorousCoeffCons (see mac_pressure.hpp)
         projectCorrectPorousCons(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(epsField_),
-                                 CCConst(dragBeta_), hasDrag_, rho_ / dt_, e_, G);
+                                 CCConst(dragBeta_), hasDrag_, rho_ / dt_, e_, G, u_.w[0], u_.w[1],
+                                 u_.w[2]);
       else if (porous_ &&
                hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
         projectCorrectPorousDrag(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(dragBeta_),
-                                 rho_ / dt_, e_, G);
+                                 rho_ / dt_, e_, G, u_.w[0], u_.w[1], u_.w[2]);
       else if (varRho_ && rhoFaceHarmonic_)  // the WO-J harmonic knob: coefficient AND correction
         projectCorrectVarHarm(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_,
-                              G);
+                              G, u_.w[0], u_.w[1], u_.w[2]);
       else if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
-        projectCorrectVar(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G);
+        projectCorrectVar(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
+                          u_.w[0], u_.w[1], u_.w[2]);
       else
-        projectCorrect(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G);
+        projectCorrect(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
       if (hasOutflow_) {  // correct the high-side outflow normal face that projectCorrect misses
                           // (mass leaves)
         B3 e{e_.x, e_.y, e_.z};
@@ -6623,9 +6683,10 @@ class Solver {
         for (int a = 0; a < 3; ++a)
           if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
             if (var)
-              bcCorrectOutflowVar(C[a].u, phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_);
+              bcCorrectOutflowVar(C[a].u, phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_,
+                                  u_.w[a]);
             else
-              bcCorrectOutflow(C[a].u, phi_, e, G, a);
+              bcCorrectOutflow(C[a].u, phi_, e, G, a, u_.w[a]);
           }
         outflowCorrValid_ = true;  // the outflow face now carries the mass that leaves
       }
@@ -7023,6 +7084,9 @@ class Solver {
   static constexpr int kVofG = 3;  // the colour field's ghost width (VOF_PLAN §3 rule 1)
 
   void enableVof() {
+    requireIsotropic("enable_vof: geometric VoF on anisotropic cells is PHASE 3 of "
+                     "suite/docs/PHYSICAL_UNITS_PLAN.md (the PLIC plane<->volume normalisation, "
+                     "the height-function columns and the CSF face force all need the metric)");
     if constexpr (Grid::collocated) {
       // Rung V8 (WO-T): allowed. The colour is advected by the PROJECTED face field uf_/vf_/wf_ —
       // which is what the ABC approximate projection makes exactly divergence-free, i.e. precisely

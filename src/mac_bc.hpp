@@ -274,7 +274,11 @@ inline void bcZeroPressureGhost(BField phi, B3 ext, int g, int a, int s) {
 // Projection correction of the high-side outflow normal face (index na-g) that correct_k misses:
 // f -= phi[bf] - phi[bf-sa] (with the Dirichlet ghost phi[bf]=0 -> += phi_inner).
 // (correct_outflow_k.)
-inline void bcCorrectOutflow(BField f, BField phi, B3 ext, int g, int a) {
+//
+// PHASE 2 (doc/anisotropic_metric.md §3): `wa` is the per-axis pressure weight w_a = 1/h_a'^2 of
+// the face's own axis, applied OUTSIDE the existing expression exactly as in the interior
+// kernels (projectCorrect and friends) this face continues. 1.0 on the isotropic path (exact).
+inline void bcCorrectOutflow(BField f, BField phi, B3 ext, int g, int a, double wa = 1.0) {
   BExec space;
   int dims[3];
   long strides[3];
@@ -286,7 +290,7 @@ inline void bcCorrectOutflow(BField f, BField phi, B3 ext, int g, int a) {
       "peclet::flow::bc_correct_outflow", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
         const long bf = (long)p0 * sb + (long)p1 * sc + (long)(dims[a] - g) * sa;
-        f(bf) -= phi(bf) - phi(bf - sa);
+        f(bf) -= wa * (phi(bf) - phi(bf - sa));
       });
 }
 
@@ -305,7 +309,7 @@ inline void bcCorrectOutflow(BField f, BField phi, B3 ext, int g, int a) {
 // the inner cell's rho — the statement WO-R makes — while remaining literally the same expression
 // as the interior kernel, which is what keeps the two consistent if the ghost policy ever changes.
 inline void bcCorrectOutflowVar(BField f, BField phi, BField rho, double rho0, B3 ext, int g, int a,
-                                bool harmonic) {
+                                bool harmonic, double wa = 1.0) {
   BExec space;
   int dims[3];
   long strides[3];
@@ -322,7 +326,7 @@ inline void bcCorrectOutflowVar(BField f, BField phi, BField rho, double rho0, B
         // ablation, set_rho_face_harmonic; it must switch BOTH or the outflow face disagrees with
         // the interior it is continuing)
         const double rf = harmonic ? (2.0 * ra * rb / (ra + rb)) : (0.5 * (ra + rb));
-        f(bf) -= rho0 / rf * (phi(bf) - phi(bf - sa));
+        f(bf) -= wa * (rho0 / rf * (phi(bf) - phi(bf - sa)));
       });
 }
 

@@ -25,6 +25,35 @@
 // Both a SAMPLED SDF (set_solid) and an ANALYTIC SCENE (set_scene + set_solid_from_scene) are
 // carried through the scale change, on Poiseuille and on a periodic sphere in Stokes flow.
 //
+// GATE 4 — units_anisotropic_poiseuille (`test_units aniso`).  Phase 2 (anisotropic cells),
+// flow/doc/anisotropic_metric.md §8.2.  Plane Poiseuille on cells (16, 40, 8), with the cut-cell
+// walls exactly on two y cell CENTRES — where the second difference of a quadratic is exact, so
+// the discrete solution IS the analytic parabola u(y) = F (y - ylo)(yhi - y)/(2 mu) and the only
+// thing the comparison can measure is the operator.  TWO stretched configurations, making two
+// DIFFERENT statements:
+//
+//   (a) EXACTNESS, extent (16, 10, 16) -> spacing (1, 0.25, 2), hRef = 0.25 on `y` (a non-trivial
+//       check that hRef is min_a h_a and not h_x), h' = (4, 1, 8), w = (1/16, 1, 1/64) and
+//       mu' = mu*tRef/hRef^2 = 80 — every one of them exactly representable in float, so the
+//       stored operator carries no rounding of its own and the metric is on trial alone.  Bound
+//       1e-9 of u_max = F H^2/(8 mu) = 0.2 (measured 1.388e-15).
+//
+//   (b) THE FLOAT-STORAGE TRIPWIRE, extent (16, 12, 16) -> spacing (1, 0.3, 2), h' = (10/3, 1,
+//       20/3), w = (0.09, 1, 0.0225) — the §5.3 configuration, and a production-SHAPED one: with
+//       hRef = 0.3 neither mu' = 55.5555… nor AC = 1 + 2((5 + 55.5555…) + 1.25) = 124.6111… is
+//       representable, so the six off-diagonals no longer sum to AC - idiag exactly and the whole
+//       profile is scaled by 1 - 1.06e-07 (that ratio is CONSTANT across all fifteen fluid rows,
+//       which is what identifies it).  Bound 1e-7, measured 3.052e-08 — and 8.674e-15 when the
+//       identical source is built with -DPECLET_FLOW_MREAL_DOUBLE.  The discretisation is
+//       pointwise exact here too; this row watches the WO-M float operator-storage floor
+//       (docs/SCALING_ISSUES.md #1), it is NOT an exactness statement and NOT a metric defect.
+//
+// Both configurations also require max|v|, max|w| <= 1e-12 u_max and the wall/solid u rows exactly
+// 0.  The isotropic control on (16, 16, 16) at extent == cells meets the same bounds and reports
+// the EXACT identity metric (hp = w = (1,1,1), vol = 1, aniso false) from the §1.4 snap.  The gate
+// also asserts the §7 refusals: the collocated policy, `enable_vof` and the hydro force integrals
+// each throw on an anisotropic domain with the three spacings in the message.
+//
 // GATE 3 — units_vof_sigma (`test_units vof`).  The V4 surface-tension gates with a PHYSICAL sigma
 // at extent = 1e-2 * cells (plan §9.3 U5, §5.6).  Surface tension is a force per unit LENGTH, i.e.
 // mass per time squared, so under a pure change of LENGTH unit sigma is numerically INVARIANT while
@@ -307,6 +336,180 @@ void gateVofSigma() {
 }
 
 // --------------------------------------------------------------------------------------------
+// Phase 2 gate G1 (doc/anisotropic_metric.md §8.2).
+// --------------------------------------------------------------------------------------------
+
+/// Plane Poiseuille between two cut-cell walls that sit exactly on y cell CENTRES, on an arbitrary
+/// (possibly anisotropic) physical box.  `jlo`/`jhi` are the wall cell indices; everything else is
+/// `runChannel`'s recipe, in the unit system the caller writes the box in (lam = 1).
+struct Channel {
+  Fields f;
+  std::vector<double> yc;              ///< the physical y cell centres
+  double ylo = 0.0, yhi = 0.0;         ///< the two wall positions (== yc[jlo], yc[jhi])
+  std::array<double, 3> w{1.0, 1.0, 1.0};
+  bool aniso = false;
+};
+
+Channel runChannelBox(int nx, int ny, int nz, const std::array<double, 3>& extent, int jlo, int jhi,
+                      bool arm) {
+  const double RHO = 1.0, MU = 0.1, F = 0.01, DT = 50.0;
+  peclet::flow::Solver<peclet::flow::Staggered> s(nx, ny, nz);
+  if (arm)
+    s.setPhysicalDomain(extent, {0.0, 0.0, 0.0}, {nx, ny, nz});
+  s.setRho(RHO);
+  s.setMu(MU);
+  s.setDt(DT);
+  s.setBodyForce(F, 0.0, 0.0);
+  s.setVelocityIterations(400);
+  s.setVelocityResidualTolerance(1e-14);
+  s.setPressurePcg(true, 80, 1e-13);
+  Channel ch;
+  ch.yc = s.cellCentres(1);
+  ch.ylo = ch.yc[jlo];
+  ch.yhi = ch.yc[jhi];
+  std::vector<double> sdf((std::size_t)nx * ny * nz);
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < nx; ++x)
+        sdf[(std::size_t)x + (std::size_t)y * nx + (std::size_t)z * nx * ny] =
+            std::min(ch.yc[y] - ch.ylo, ch.yhi - ch.yc[y]);
+  s.setSolid(sdf, /*cutcellPressure=*/false);
+  for (int it = 0; it < 300; ++it)
+    s.step();
+  ch.f.u = s.getVelocity(0);
+  ch.f.v = s.getVelocity(1);
+  ch.f.w = s.getVelocity(2);
+  ch.f.p = s.getPressure();
+  ch.f.spacing = s.spacing();
+  const auto& u = s.unitScales();
+  ch.w = {u.w[0], u.w[1], u.w[2]};
+  ch.aniso = u.aniso;
+  return ch;
+}
+
+/// The §8.2 assertions on one channel: the parabola over every FLUID y DOF within `bound`, the two
+/// wall rows exactly zero, and the two transverse components at the transverse floor.  `bound` is
+/// 1e-9 wherever the stored operator is float-exact and 1e-7 on the tripwire row (see the header).
+void checkChannel(const char* what, const Channel& ch, int nx, int ny, int nz, int jlo, int jhi,
+                  double bound) {
+  const double MU = 0.1, F = 0.01;
+  const double H = ch.yhi - ch.ylo;
+  const double umax = F * H * H / (8.0 * MU);
+  std::printf("  %s: spacing (%.17g, %.17g, %.17g)  aniso %d  w (%.17g, %.17g, %.17g)\n", what,
+              ch.f.spacing[0], ch.f.spacing[1], ch.f.spacing[2], (int)ch.aniso, ch.w[0], ch.w[1],
+              ch.w[2]);
+  double relErr = 0.0, wallMax = 0.0;
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < nx; ++x) {
+        const std::size_t i = (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * nx * ny;
+        const double uu = ch.f.u[i];
+        if (y <= jlo || y >= jhi) {  // wall and solid rows
+          if (!(std::fabs(uu) <= wallMax))
+            wallMax = std::fabs(uu);
+          continue;
+        }
+        const double ex = F * (ch.yc[y] - ch.ylo) * (ch.yhi - ch.yc[y]) / (2.0 * MU);
+        const double d = std::fabs(uu - ex) / umax;
+        if (!(d <= relErr))
+          relErr = d;
+      }
+  const double mv = maxAbs(ch.f.v), mw = maxAbs(ch.f.w);
+  std::printf("      H %.17g  u_max %.17g  max rel |u - parabola| %.3e (bound %.0e)  max|v| %.3e  "
+              "max|w| %.3e  max|u| on the wall/solid rows %.3e\n",
+              H, umax, relErr, bound, mv, mw, wallMax);
+  if (!(relErr <= bound))
+    std::printf("      NOTE: a miss that is a SINGLE one-signed multiplicative factor across the "
+                "whole profile (rel err proportional to u, one constant ratio on every fluid row) "
+                "is the FLOAT momentum-operator storage (`IbmSolver::FV`, MReal; WO-M / "
+                "docs/SCALING_ISSUES.md #1), not the metric -- rebuild with "
+                "-DPECLET_FLOW_MREAL_DOUBLE to separate the two.\n");
+  CHECK(relErr <= bound);
+  CHECK(wallMax == 0.0);
+  CHECK(mv <= 1e-12 * umax);
+  CHECK(mw <= 1e-12 * umax);
+}
+
+void gateAnisoPoiseuille() {
+  std::printf("=== units_anisotropic_poiseuille ===\n");
+  // (a) EXACTNESS. cells (16, 40, 8) over (16, 10, 16) -> spacing (1, 0.25, 2), hRef = 0.25 on the
+  //     y axis, h' = (4, 1, 8), w = (1/16, 1, 1/64), mu' = 80 -- all float-representable, so the
+  //     stored operator adds no rounding and the metric is on trial alone. Walls on the y cell
+  //     centres 12.5*0.25 = 3.125 and 28.5*0.25 = 7.125 (H = 4).
+  {
+    const Channel ch = runChannelBox(16, 40, 8, {16.0, 10.0, 16.0}, 12, 28, /*arm=*/true);
+    CHECK(ch.aniso);
+    CHECK(ch.f.spacing[0] == 1.0 && ch.f.spacing[1] == 0.25 && ch.f.spacing[2] == 2.0);
+    CHECK(ch.w[0] == 0.0625 && ch.w[1] == 1.0 && ch.w[2] == 0.015625);
+    CHECK(ch.ylo == 3.125 && ch.yhi == 7.125);
+    checkChannel("stretched EXACTNESS (16, 40, 8) on (16, 10, 16)", ch, 16, 40, 8, 12, 28, 1e-9);
+  }
+  // (b) THE FLOAT-STORAGE TRIPWIRE. The same grid over (16, 12, 16) -> spacing (1, 0.3, 2),
+  //     hRef = 0.3, h' = (10/3, 1, 20/3), w = (0.09, 1, 0.0225); walls at 12.5*0.3 = 3.75 and
+  //     28.5*0.3 = 8.55 (H = 4.8). mu' = 55.5555... and AC = 124.6111... are not representable in
+  //     the float operator storage, which scales the whole profile by 1 - 1.06e-07: measured
+  //     3.052e-08 here and 8.674e-15 with -DPECLET_FLOW_MREAL_DOUBLE. Bound 1e-7 (see the header).
+  {
+    const Channel ch = runChannelBox(16, 40, 8, {16.0, 12.0, 16.0}, 12, 28, /*arm=*/true);
+    CHECK(ch.aniso);
+    checkClose(ch.f.spacing[0], 1.0, 0.0, "aniso spacing x");
+    checkClose(ch.f.spacing[1], 0.3, 1e-17, "aniso spacing y");
+    checkClose(ch.f.spacing[2], 2.0, 0.0, "aniso spacing z");
+    checkClose(ch.ylo, 3.75, 1e-14, "aniso wall ylo");
+    checkClose(ch.yhi, 8.55, 1e-14, "aniso wall yhi");
+    checkChannel("stretched FLOAT-FLOOR (16, 40, 8) on (16, 12, 16)", ch, 16, 40, 8, 12, 28, 1e-7);
+  }
+  // (c) The isotropic control on (16, 16, 16) at extent == cells, with `runChannel`'s own wall
+  //     convention (round(0.30*ny) + 0.5, round(0.70*ny) + 0.5 in cells): the same bound, and the
+  //     §1.4 snap gives it EXACTLY the identity metric.  (It is not BITWISE the extent=None run of
+  //     the same problem, and must not be asserted to be: dt = 50 pins tRef = 50, so the armed run
+  //     computes with dt' = 1 and mu' = 50 mu while the cell-unit one computes with dt' = 50 and
+  //     mu' = mu -- the same physics, a different internal scaling.  `units_identity` is the
+  //     bitwise statement, and it fixes rho = dt = 1 for exactly this reason.)
+  {
+    const Channel a = runChannelBox(16, 16, 16, {16.0, 16.0, 16.0}, 5, 11, /*arm=*/true);
+    CHECK(!a.aniso);
+    CHECK(a.w[0] == 1.0 && a.w[1] == 1.0 && a.w[2] == 1.0);
+    CHECK(a.f.spacing[0] == 1.0 && a.f.spacing[1] == 1.0 && a.f.spacing[2] == 1.0);
+    checkChannel("isotropic control (16, 16, 16) at extent == cells", a, 16, 16, 16, 5, 11, 1e-9);
+  }
+  // (d) The §7 refusals: an anisotropic domain is admitted by the staggered solver above and
+  //     refused, with the three spacings in the message, by the collocated policy, by enable_vof
+  //     and by the hydro force integrals (each lifted by a named later commit).
+  {
+    bool threw = false;
+    try {
+      peclet::flow::Solver<peclet::flow::Colocated> sc(16, 40, 8);
+      sc.setPhysicalDomain({16.0, 12.0, 16.0}, {0.0, 0.0, 0.0}, {16, 40, 8});
+    } catch (const std::exception& ex) {
+      threw = true;
+      std::printf("      refused (collocated): %s\n", ex.what());
+    }
+    CHECK(threw);
+    threw = false;
+    try {
+      peclet::flow::Solver<peclet::flow::Staggered> ss(16, 40, 8);
+      ss.setPhysicalDomain({16.0, 12.0, 16.0}, {0.0, 0.0, 0.0}, {16, 40, 8});
+      ss.enableVof();
+    } catch (const std::exception& ex) {
+      threw = true;
+      std::printf("      refused (enable_vof): %s\n", ex.what());
+    }
+    CHECK(threw);
+    threw = false;
+    try {
+      peclet::flow::Solver<peclet::flow::Staggered> ss(16, 40, 8);
+      ss.setPhysicalDomain({16.0, 12.0, 16.0}, {0.0, 0.0, 0.0}, {16, 40, 8});
+      ss.hydroForceTorque();
+    } catch (const std::exception& ex) {
+      threw = true;
+      std::printf("      refused (hydro_force_torque): %s\n", ex.what());
+    }
+    CHECK(threw);
+  }
+}
+
+// --------------------------------------------------------------------------------------------
 void gateIdentity() {
   std::printf("=== units_identity ===\n");
 
@@ -442,8 +645,10 @@ int main(int argc, char** argv) {
       gateScale();
     else if (gate == "vof")
       gateVofSigma();
+    else if (gate == "aniso")
+      gateAnisoPoiseuille();
     else {
-      std::fprintf(stderr, "usage: test_units [identity|scale|vof]\n");
+      std::fprintf(stderr, "usage: test_units [identity|scale|vof|aniso]\n");
       ++failures;
     }
   }

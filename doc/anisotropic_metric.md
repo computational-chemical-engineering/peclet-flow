@@ -436,15 +436,33 @@ All gates run with `OMP_NUM_THREADS=4 OMP_PROC_BIND=false`, fresh `build_a_*` tr
   numbers.
 
 ### 8.2 G1 — `units_anisotropic_poiseuille` (ctest, `test_units.cpp`, commit C2)
-`runChannel` on cells `(16, 40, 8)` with `extent = (16, 12, 16)` so `spacing() == (1.0, 0.3, 2.0)`
-(`hRef = 0.3`, `h' = (10/3, 1, 20/3)` — the finest axis is `y`, a non-trivial check of `hRef = min`),
-walls at the `y` cell centres `ylo = 12.5*0.3 = 3.75`, `yhi = 28.5*0.3 = 8.55` (`H = 4.8`),
-`rho = 1, mu = 0.1, F = 0.01, dt = 50`, 300 steps, `velTol 1e-14`, `cutcellPressure = false`.
-- `max_j |u(y_j) - F (y_j - ylo)(yhi - y_j)/(2 mu)| / u_max ≤ 1e-9` over every fluid DOF,
-  `u_max = F H^2/(8 mu) = 0.288`; the DOFs on the walls are exactly `0`.
-- `max |v|, max |w| ≤ 1e-12 * u_max`.
-- The isotropic control `(16, 16, 16)` at `extent = cells` in the same test: the same bound, and its
-  fields `np.array_equal` to the `units_identity` run (G0 covers this; the test asserts it anyway).
+`runChannel` on cells `(16, 40, 8)`, walls exactly on two `y` cell CENTRES (where the second
+difference of a quadratic is exact, so the discrete solution IS the analytic parabola and the
+comparison measures only the operator), `rho = 1, mu = 0.1, F = 0.01, dt = 50`, 300 steps,
+`velTol 1e-14`, `cutcellPressure = false`.
+
+- **Two stretched configurations.**
+  **(a) Exactness:** `extent = (16, 10, 16)`, `spacing() == (1, 0.25, 2)`, `hRef = 0.25` on `y` (the
+  finest axis is `y`, a non-trivial check of `hRef = min`), `h' = (4, 1, 8)`,
+  `w = (1/16, 1, 1/64)`, `mu' = mu tRef/hRef^2 = 80` — all float-representable, so the stored
+  operator carries no rounding of its own; walls at `12.5*0.25 = 3.125` and `28.5*0.25 = 7.125`
+  (`H = 4`, `u_max = F H^2/(8 mu) = 0.2`):
+  `max_j |u(y_j) - F (y_j - ylo)(yhi - y_j)/(2 mu)| / u_max ≤ 1e-9` over every fluid DOF.
+  **(b) The §5.3 configuration** `extent = (16, 12, 16)`, `spacing() == (1, 0.3, 2)`,
+  `h' = (10/3, 1, 20/3)`, walls at `3.75` / `8.55` (`H = 4.8`, `u_max = 0.288`): `≤ 1e-7`.
+  The discretisation is pointwise exact in both; (b) sits at the float operator-storage floor
+  (WO-M, `docs/SCALING_ISSUES.md` #1) because `hRef = 0.3` makes `mu' = 55.5…` and
+  `AC = 124.61…` unrepresentable — a one-signed multiplicative factor of `1.06e-7` on every row,
+  `8.7e-15` under `-DPECLET_FLOW_MREAL_DOUBLE`. Not a metric defect; recorded. (b) is a
+  production-SHAPED configuration and is kept as the tripwire for that floor, not as an exactness
+  statement.
+- The DOFs on the walls are exactly `0`, and `max |v|, max |w| ≤ 1e-12 * u_max`, in both.
+- The isotropic control `(16, 16, 16)` at `extent = cells` in the same test: the same bounds, and it
+  reports the EXACT identity metric (`hp = w = (1,1,1)`, `vol = 1`, `aniso` false) from the §1.4
+  snap. (It is NOT bitwise the `extent=None` run of the same problem and must not be asserted to
+  be: `dt = 50` pins `tRef = 50`, so the armed run computes with `dt' = 1` and `mu' = 50 mu` while
+  the cell-unit one computes with `dt' = 50` and `mu' = mu` — the same physics, a different internal
+  scaling. `units_identity` is the bitwise statement, and it fixes `rho = dt = 1` for that reason.)
 - Print `spacing()`, `unit_scales["aniso"]`, and the three `w`.
 
 ### 8.3 G2 — `units_anisotropic_sphere` (ctest, `test_units.cpp`) + `scripts/verify_anisotropic_spheres.py` (commit C4)
@@ -521,7 +539,71 @@ rebases onto C5.
 
 ## 10. Measured (filled in by the implementing session, one line per gate, with backend and np)
 
-*(empty until the commits land)*
+### C1 (U10, the momentum fold) — flow `12cac0f`
+
+- **G0**, `tests/kokkos` **39/39** host-openmp and **39/39** nvidia-cuda; `tests/kokkos_mpi`
+  **103/103** on both backends (68 tests at np = 1, 2, 4); `sdflow_mpi_np1` bit-exact to
+  single-rank, `k_dist = k_ref = 5.84542251e+00`, rel `0.00e+00`.
+- **Regression** (CUDA, never `--update`): PASS, every recorded number `+0.00 %` — zh_sphere
+  `K 7.2997 / 7.3891 / 7.4162 / 7.4361 / 7.4404`, order `2.29`, `K_inf 7.447`, pressure iters/step
+  `6/7/7/6/6`; random_spheres `0.0064513…0.0062621` at `7/7/7/7`; hollow_rings
+  `0.018629…0.017608` at `9/10/9/9`.
+- **Five verify scripts** vs a build of `5285aae`, host-openmp: `np.array_equal` TRUE on every
+  field (poiseuille 24/24 arrays, periodic_spheres 8/8, channel 4/4, bfs 8/8, lid_cavity 4/4).
+- **Stencil unit test** (`test_stencils.cpp`): at `w = (1, 4, 1/4)`,
+  `AC = 1.0700000524520874`, `AW/AE = -0.10000000149011612`, `AS/AN = -0.40000000596046448`,
+  `AB/AT = -0.02500000037252903`; at `w = (1,1,1)`, `AC = 0.62000000476837158` == the pre-change
+  `idiag + 6.0*beta` bitwise, both backends.
+
+### C2 (U11 weights, the pressure metric + the §1.4 snap) — flow `0c67ac1`
+
+- **G0**, `tests/kokkos` **41/41** host-openmp and **41/41** nvidia-cuda (the 39 of C1 plus
+  `cutcellmg_aniso` and `units_anisotropic_poiseuille`); `tests/kokkos_mpi` **103/103**
+  host-openmp and **103/103** nvidia-cuda at np = 1, 2, 4; `sdflow_mpi_np1` bit-exact to
+  single-rank, `k_dist = k_ref = 5.84542251e+00`, rel `0.00e+00`, `div 5.86e-12`.
+- **Regression** (CUDA, never `--update`): PASS, every recorded number and every iteration count
+  identical to C1's line above (`+0.00 %` throughout).
+- **Five verify scripts** vs a build of `12cac0f`, host-openmp, `np.array_equal` TRUE on every
+  array: poiseuille **848/848**, periodic_spheres **76/76**, channel **31/31**, bfs **8/8**
+  (`x_r/S` 5.26 and 8.16 at an identical 5500 / 16400 steps), lid_cavity **4/4**.
+- **Phase 1 units gates unchanged**, printed numbers included — `units_identity` bitwise;
+  `units_scale_invariance` u `8.882e-17`, p `0.000e+00`, sphere sampled
+  `4.070e-16 / 1.503e-15 / 1.761e-15` with div `6.915e-12` (d `1.850e-18`), scene
+  `6.105e-16 / 1.224e-15 / 1.370e-15` (d `0.000e+00`); `units_vof_sigma` Young-Laplace
+  `2.500000000e-01`, `capillary_dt 3.989422804e-01`, computed kappa rel `0.000e+00` / `2.202e-16`.
+- **G1** (§8.2), identical on host-openmp and nvidia-cuda:
+
+  | configuration | `spacing()` | `w` | max rel \|u − parabola\| | bound |
+  |---|---|---|---|---|
+  | (a) exactness, extent `(16, 10, 16)` | `(1, 0.25, 2)` | `(1/16, 1, 1/64)` | **1.388e-15** | 1e-9 |
+  | (b) tripwire, extent `(16, 12, 16)` | `(1, 0.3, 2)` | `(0.09, 1, 0.0225)` | **3.052e-08** | 1e-7 |
+  | (c) isotropic control `(16,16,16)` at extent == cells | `(1, 1, 1)` | `(1, 1, 1)` | **3.701e-15** (CUDA 4.441e-15) | 1e-9 |
+
+  `max|v| = max|w| = 0.000e+00` exactly and the wall/solid `u` rows exactly `0` in all three.
+  Row (b)'s error is a single one-signed multiplicative factor — rel err / u = `1.06e-07` on all
+  fifteen fluid rows — and the identical source built with `-DPECLET_FLOW_MREAL_DOUBLE` reads
+  **8.674e-15**: the WO-M float operator-storage floor, not the metric.
+- **G4-order** (§8.5, the order half), `cutcellmg_aniso`, host-openmp (nvidia-cuda identical to the
+  digit). L2 error against the exact modal solution of the discrete system; `levels = 6`,
+  `rtol 1e-10`, 2/2 sweeps:
+
+  | ladder | N = 16 | N = 32 | N = 64 | LS order |
+  |---|---|---|---|---|
+  | stretched `(N,2N,N/2)`, `w = (1,4,¼)`, **MG-PCG** | 500 it, r/\|b\| 5.2e-06, 7.997679e-03 | 500, 1.9e-04, 1.990492e-03 | 500, 1.5e-04, 4.789682e-04 | **2.0308** |
+  | cubic `(N,N,N)`, `w = (1,1,1)`, MG-PCG | 8 it, 1.0e-11, 4.578780e-03 | 8, 4.2e-11, 1.138076e-03 | 8, 4.9e-11, 2.841076e-04 | **2.0052** |
+  | stretched, **FCG** (converged control) | 19 it, 4.5e-11, 7.996594e-03 | 22, 3.9e-11, 1.990660e-03 | 27, 7.5e-11, 4.971282e-04 | **2.0038** |
+  | cubic, FCG | 7 it, 4.578780e-03 | 8, 1.138076e-03 | 8, 2.841076e-04 | **2.0052** |
+
+  The FCG rows reproduce the exact discrete solution to every printed digit.
+- **The MG-PCG cap is §5's "before" number** (C3's rate gate is measured against it): MG-PCG caps
+  at 500 on every stretched rung, a stall (non-monotone around 1e-4…1e-5 relative), and the L2
+  error then drifts up to 3.6 % from the exact discrete value at N = 64, which is what inflates
+  the stretched order to 2.0308 against FCG's 2.0038. It is not the bottom solve
+  (`setAgglomerationMode` 0 / −1 / 1 identical to the digit) and not the depth (`levels` 2, 3, 4,
+  5, 6 all cap). A 2×2 ablation at N = 32 isolates it to the COMBINATION: stretched shape with
+  `w = (1,1,1)` converges in **8** iterations, cubic shape with `w = (1,4,¼)` in **20**, and only
+  stretched + stretched weights stalls — exactly §5.2's prediction for today's full-coarsening
+  rule.
 
 ---
 

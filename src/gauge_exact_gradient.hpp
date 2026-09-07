@@ -36,8 +36,13 @@ namespace peclet::flow {
 /// scheme family of this solver. Gradient 2a annihilates that mode. When the +/-3 cell is not
 /// fluid, grad2a falls back to the 2-point one-sided difference (their stable "gradient 1"),
 /// never to gradient 2. Default off: byte-identical to the shipped gauge-exact scheme.
+/// PHASE 2 (doc/anisotropic_metric.md §3/§6.5): `wa` is the per-axis pressure weight
+/// w_axis = 1/h_axis'^2, applied to the OUTPUT.  The directional closure itself classifies by the
+/// SIGN of the SDF and interpolates by theta, so no metric reaches inside it; the weight is the
+/// whole of it, and the SAME kernel supplies both the -grad(P^n) predictor and the projection's
+/// cell correction, so neither call site scales it again.  1.0 on the isotropic path (exact).
 inline void gpCenterGrad(CCField out, CCConst p, CCConst sdf, int axis, C3 e, int g,
-                         bool grad2a = false) {
+                         bool grad2a = false, double wa = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -76,7 +81,7 @@ inline void gpCenterGrad(CCField out, CCConst p, CCConst sdf, int axis, C3 e, in
                                           : (p(i) - p(i - sa));
         } else
           gr = 0.0;
-        out(i) = gr;
+        out(i) = wa * gr;
       });
 }
 

@@ -144,8 +144,16 @@ static void bind_solver(nb::module_& m, const char* name) {
           "pressure and curvature that come back are physical too.\n\n"
           "extent=None (the default) keeps the historical CELL-UNIT behaviour, bit for bit: the "
           "spacing is 1 and every quantity is in cells.\n\n"
-          "Phase 1 supports ISOTROPIC cells only - extent/cells must be the same on all three "
-          "axes (an anisotropic extent raises). Under MPI `cells` is this rank's block (from "
+          "ANISOTROPIC cells (extent/cells different per axis) are supported on the STAGGERED "
+          "Solver since Phase 2: sampled or scene geometry, constant or variable properties, "
+          "variable density, porous continuity with or without implicit drag, every domain-BC "
+          "type, every pressure driver and bottom, the velocity multigrid, scalar transport and "
+          "MPI. Three entry points still REFUSE one, each with a message naming the three "
+          "spacings and what lifts it: SolverColocated (its cell gradients need the anisotropic "
+          "index-space normal), enable_vof (Phase 3) and hydro_force_torque / "
+          "hydro_force_torque_reaction. Three spacings that agree to 1e-12 relative are SNAPPED "
+          "to one, so an isotropic domain stays bit-identical however its extent was written. "
+          "Under MPI `cells` is this rank's block (from "
           "mpi_block) while `extent`/`origin` describe the GLOBAL domain, so pass the global "
           "grid as `global_cells` - the same numbers init_mpi gets.")
       .def_prop_ro(

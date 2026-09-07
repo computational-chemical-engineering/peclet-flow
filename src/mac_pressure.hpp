@@ -271,18 +271,26 @@ inline void applyCutcellOpExactBox(CCField y, CCConst x, CCConst ox, CCConst oy,
       });
 }
 
+// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §1.3/§3: every correction kernel below
+// takes the per-axis pressure weight `w_a = 1/h_a'^2` and applies it OUTSIDE the whole existing
+// expression (`u -= w_x * (today's term)`) — the same weight `CutcellMG::setOpenness` puts on the
+// operator row of that axis, which is what makes the corrected open flux telescope. On the
+// isotropic path `w == 1.0` exactly and `1.0 * x == x` in IEEE-754, so these are bit-identical;
+// the defaulted arguments keep the kernel-level tests calling the historical signature.
+//
 // Projection correction u -= grad(phi) on the staggered faces (correct_k port). No openness here —
 // the openness lives in the operator + divergence; closed faces carry phi~0 on both sides so stay
 // unchanged.
-inline void projectCorrect(CCField u, CCField v, CCField w, CCConst phi, C3 e, int g) {
+inline void projectCorrect(CCField u, CCField v, CCField w, CCConst phi, C3 e, int g,
+                           double wx = 1.0, double wy = 1.0, double wz = 1.0) {
   ccFor3(
       "peclet::flow::correct", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
-        u(i) -= phi(i) - phi(i - sx);
-        v(i) -= phi(i) - phi(i - sy);
-        w(i) -= phi(i) - phi(i - sz);
+        u(i) -= wx * (phi(i) - phi(i - sx));
+        v(i) -= wy * (phi(i) - phi(i - sy));
+        w(i) -= wz * (phi(i) - phi(i - sz));
       });
 }
 
@@ -291,7 +299,8 @@ inline void projectCorrect(CCField u, CCField v, CCField w, CCConst phi, C3 e, i
 // c_f = open_f*rho0/rho_f, so the corrected open flux telescopes to A*phi exactly (discrete
 // consistency; constant rho == rho0 reduces to projectCorrect identically, ratio 1.0 exact in FP).
 inline void projectCorrectVar(CCField u, CCField v, CCField w, CCConst phi, CCConst rho,
-                              double rho0, C3 e, int g) {
+                              double rho0, C3 e, int g, double wx = 1.0, double wy = 1.0,
+                              double wz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -299,9 +308,9 @@ inline void projectCorrectVar(CCField u, CCField v, CCField w, CCConst phi, CCCo
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
-        u(i) -= rho0 / (0.5 * (rho(i) + rho(i - sx))) * (phi(i) - phi(i - sx));
-        v(i) -= rho0 / (0.5 * (rho(i) + rho(i - sy))) * (phi(i) - phi(i - sy));
-        w(i) -= rho0 / (0.5 * (rho(i) + rho(i - sz))) * (phi(i) - phi(i - sz));
+        u(i) -= wx * (rho0 / (0.5 * (rho(i) + rho(i - sx))) * (phi(i) - phi(i - sx)));
+        v(i) -= wy * (rho0 / (0.5 * (rho(i) + rho(i - sy))) * (phi(i) - phi(i - sy)));
+        w(i) -= wz * (rho0 / (0.5 * (rho(i) + rho(i - sz))) * (phi(i) - phi(i - sz)));
       });
 }
 
@@ -407,7 +416,8 @@ inline void buildRhoCoeffOutflowFace(CCField ca, CCConst rho, double rho0, C3 e,
 }
 
 inline void projectCorrectVarHarm(CCField u, CCField v, CCField w, CCConst phi, CCConst rho,
-                                  double rho0, C3 e, int g) {
+                                  double rho0, C3 e, int g, double wx = 1.0, double wy = 1.0,
+                                  double wz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -415,9 +425,12 @@ inline void projectCorrectVarHarm(CCField u, CCField v, CCField w, CCConst phi, 
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
-        u(i) -= rho0 * (rho(i) + rho(i - sx)) / (2.0 * rho(i) * rho(i - sx)) * (phi(i) - phi(i - sx));
-        v(i) -= rho0 * (rho(i) + rho(i - sy)) / (2.0 * rho(i) * rho(i - sy)) * (phi(i) - phi(i - sy));
-        w(i) -= rho0 * (rho(i) + rho(i - sz)) / (2.0 * rho(i) * rho(i - sz)) * (phi(i) - phi(i - sz));
+        u(i) -= wx * (rho0 * (rho(i) + rho(i - sx)) / (2.0 * rho(i) * rho(i - sx)) *
+                      (phi(i) - phi(i - sx)));
+        v(i) -= wy * (rho0 * (rho(i) + rho(i - sy)) / (2.0 * rho(i) * rho(i - sy)) *
+                      (phi(i) - phi(i - sy)));
+        w(i) -= wz * (rho0 * (rho(i) + rho(i - sz)) / (2.0 * rho(i) * rho(i - sz)) *
+                      (phi(i) - phi(i - sz)));
       });
 }
 
@@ -518,7 +531,8 @@ inline void buildPorousCoeffCons(CCField cx, CCField cy, CCField cz, CCConst ox,
       });
 }
 inline void projectCorrectPorousCons(CCField u, CCField v, CCField w, CCConst phi, CCConst eps,
-                                     CCConst beta, bool useBeta, double rhoidt, C3 e, int g) {
+                                     CCConst beta, bool useBeta, double rhoidt, C3 e, int g,
+                                     double wx = 1.0, double wy = 1.0, double wz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -531,16 +545,17 @@ inline void projectCorrectPorousCons(CCField u, CCField v, CCField w, CCConst ph
           const double bF = useBeta ? 0.5 * (beta(i) + beta(i - s)) : 0.0;
           return rhoidt / (epsF * rhoidt + bF);
         };
-        u(i) -= wf(sx) * (phi(i) - phi(i - sx));
-        v(i) -= wf(sy) * (phi(i) - phi(i - sy));
-        w(i) -= wf(sz) * (phi(i) - phi(i - sz));
+        u(i) -= wx * (wf(sx) * (phi(i) - phi(i - sx)));
+        v(i) -= wy * (wf(sy) * (phi(i) - phi(i - sy)));
+        w(i) -= wz * (wf(sz) * (phi(i) - phi(i - sz)));
       });
 }
 
 // Drag-relaxed velocity correction (sibling of projectCorrect): u_f -= w_f * grad(phi), w_f the
 // SAME face drag relaxation as buildPorousCoeffDrag. beta==0 -> w==1 -> projectCorrect exactly.
 inline void projectCorrectPorousDrag(CCField u, CCField v, CCField w, CCConst phi, CCConst beta,
-                                     double idt, C3 e, int g) {
+                                     double idt, C3 e, int g, double wx = 1.0, double wy = 1.0,
+                                     double wz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -548,9 +563,9 @@ inline void projectCorrectPorousDrag(CCField u, CCField v, CCField w, CCConst ph
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
-        u(i) -= idt / (idt + 0.5 * (beta(i) + beta(i - sx))) * (phi(i) - phi(i - sx));
-        v(i) -= idt / (idt + 0.5 * (beta(i) + beta(i - sy))) * (phi(i) - phi(i - sy));
-        w(i) -= idt / (idt + 0.5 * (beta(i) + beta(i - sz))) * (phi(i) - phi(i - sz));
+        u(i) -= wx * (idt / (idt + 0.5 * (beta(i) + beta(i - sx))) * (phi(i) - phi(i - sx)));
+        v(i) -= wy * (idt / (idt + 0.5 * (beta(i) + beta(i - sy))) * (phi(i) - phi(i - sy)));
+        w(i) -= wz * (idt / (idt + 0.5 * (beta(i) + beta(i - sz))) * (phi(i) - phi(i - sz)));
       });
 }
 

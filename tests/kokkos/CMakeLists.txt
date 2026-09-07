@@ -276,6 +276,16 @@ target_include_directories(test_vof_collocated PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(test_vof_collocated PRIVATE Kokkos::kokkos)
 add_test(NAME vof_collocated COMMAND test_vof_collocated)
 
+# ANISOTROPIC CELLS, the pressure operator alone (doc/anisotropic_metric.md §8.5, the ORDER part
+# of gate G4; Phase 2 commit C2). CutcellMG driven directly on a periodic all-fluid box with the
+# per-axis weights w = (1, 4, 1/4) of a (N, 2N, N/2) grid: the manufactured cos*cos*cos solution
+# must converge at the cubic rate. The level-table and V-cycle-rate parts of G4 are commit C3.
+add_executable(test_cutcellmg_aniso test_cutcellmg_aniso.cpp)
+target_include_directories(test_cutcellmg_aniso PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CORE_INC})
+target_link_libraries(test_cutcellmg_aniso PRIVATE Kokkos::kokkos)
+add_test(NAME cutcellmg_aniso COMMAND test_cutcellmg_aniso)
+
 # PHYSICAL DOMAINS (suite/docs/PHYSICAL_UNITS_PLAN.md Phase 1). Two gates off one binary:
 #  units_identity        — the physical constructor at extent == cells reproduces the cell-unit
 #                          solver (accessors, and BITWISE fields at rho = dt = 1);
@@ -287,3 +297,7 @@ target_link_libraries(test_units PRIVATE Kokkos::kokkos)
 add_test(NAME units_identity COMMAND test_units identity)
 add_test(NAME units_scale_invariance COMMAND test_units scale)
 add_test(NAME units_vof_sigma COMMAND test_units vof)
+#  units_anisotropic_poiseuille — Phase 2 gate G1 (doc/anisotropic_metric.md §8.2): the exact
+#                          Poiseuille parabola on cells (16, 40, 8) over the box (16, 12, 16),
+#                          i.e. spacing (1, 0.3, 2), against its isotropic control.
+add_test(NAME units_anisotropic_poiseuille COMMAND test_units aniso)

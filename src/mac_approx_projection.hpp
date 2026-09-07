@@ -232,8 +232,14 @@ inline void centerToFaceWallAware(CCField uf, CCField vf, CCField wf, CCConst U,
 // for BOTH the incremental predictor's -grad(P) and the projection's cell correction: at steady
 // state the predictor gradient IS the pressure force, so it must be the adjoint of the constraint —
 // upgrading T alone (mode 1) measurably WORSENS the drag.
+// PHASE 2 (doc/anisotropic_metric.md §3): every cell-gradient kernel in this file takes the
+// per-axis pressure weight `wa = w_axis = 1/h_axis'^2` and applies it to its OUTPUT — the one
+// place the metric enters, since the wall-aware stencils read the SDF only by sign and interpolate
+// by theta.  The SAME kernels supply the incremental predictor's -grad(P^n) and the projection's
+// cell correction, so both carry the weight from here and are never scaled again at the call site.
+// `wa == 1.0` on the isotropic path (exact).
 inline void transposeGradWallAware(CCField out, CCConst p, CCConst sdf, CCConst o, CCConst xc,
-                                   bool useCen, int axis, C3 e, int g) {
+                                   bool useCen, int axis, C3 e, int g, double wa = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -257,7 +263,7 @@ inline void transposeGradWallAware(CCField out, CCConst p, CCConst sdf, CCConst 
             if (idx[k] == i)
               acc += w[k] * o(f) * (p(f) - p(f - sa));
         }
-        out(i) = acc;
+        out(i) = wa * acc;
       });
 }
 
@@ -556,7 +562,8 @@ inline void subtractField(CCField u, CCConst d, C3 e, int g) {
 // boundary — the O(h) under-correction the plain map makes there (analysis defect (b)). Used for
 // both the incremental −grad(P^n) predictor and the projection correction of the EMBED path (mode
 // 6), so the two stay the openness-adjoint of the fs-weighted divergence constraint.
-inline void centerGradOpen(CCField out, CCConst p, CCConst o, int axis, C3 e, int g) {
+inline void centerGradOpen(CCField out, CCConst p, CCConst o, int axis, C3 e, int g,
+                           double wa = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -566,7 +573,7 @@ inline void centerGradOpen(CCField out, CCConst p, CCConst o, int axis, C3 e, in
         const long i = (long)x + (long)y * sy + (long)z * sz;
         const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
         const double om = o(i), op = o(i + sa);
-        out(i) = (om * (p(i) - p(i - sa)) + op * (p(i + sa) - p(i))) / (om + op + 1e-12);
+        out(i) = wa * ((om * (p(i) - p(i - sa)) + op * (p(i + sa) - p(i))) / (om + op + 1e-12));
       });
 }
 
@@ -580,7 +587,8 @@ inline void centerGradOpen(CCField out, CCConst p, CCConst o, int axis, C3 e, in
 // case (the normalized embed pair (modes 6/7) is non-adjoint and measured unconditionally
 // unstable on beds, dt-free doubling ~75 steps). The price is the 1/2·α under-weighting of the
 // pressure force at nearly-closed cut cells (accuracy measured on the ladder, not assumed).
-inline void centerGradAperture(CCField out, CCConst p, CCConst o, int axis, C3 e, int g) {
+inline void centerGradAperture(CCField out, CCConst p, CCConst o, int axis, C3 e, int g,
+                               double wa = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -589,7 +597,7 @@ inline void centerGradAperture(CCField out, CCConst p, CCConst o, int axis, C3 e
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
         const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
-        out(i) = 0.5 * (o(i) * (p(i) - p(i - sa)) + o(i + sa) * (p(i + sa) - p(i)));
+        out(i) = wa * (0.5 * (o(i) * (p(i) - p(i - sa)) + o(i + sa) * (p(i + sa) - p(i))));
       });
 }
 
@@ -602,7 +610,7 @@ inline void centerGradAperture(CCField out, CCConst p, CCConst o, int axis, C3 e
 // per-axis normalization, which is NOT such a rescaling and is measured unstable). The cap
 // sum >= 0.5 bounds S <= 12 at nearly-closed cells.
 inline void centerGradApertureScaled(CCField out, CCConst p, CCConst ox, CCConst oy, CCConst oz,
-                                     int axis, C3 e, int g) {
+                                     int axis, C3 e, int g, double wa = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -615,8 +623,8 @@ inline void centerGradApertureScaled(CCField out, CCConst p, CCConst ox, CCConst
         double osum = ox(i) + ox(i + sx) + oy(i) + oy(i + sy) + oz(i) + oz(i + sz);
         if (osum < 0.5)
           osum = 0.5;
-        out(i) = (6.0 / osum) * 0.5 *
-                 (o(i) * (p(i) - p(i - sa)) + o(i + sa) * (p(i + sa) - p(i)));
+        out(i) = wa * ((6.0 / osum) * 0.5 *
+                       (o(i) * (p(i) - p(i - sa)) + o(i + sa) * (p(i + sa) - p(i))));
       });
 }
 
@@ -629,7 +637,7 @@ inline void centerGradApertureScaled(CCField out, CCConst p, CCConst ox, CCConst
 // (k gap -11% at R=8). This kernel keeps the full-weight embed gradient wherever om+op >= omin
 // (every ordinary cut cell) and only caps the gain where an axis is nearly closed.
 inline void centerGradOpenCapped(CCField out, CCConst p, CCConst o, int axis, double omin, C3 e,
-                                 int g) {
+                                 int g, double wa = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -642,7 +650,7 @@ inline void centerGradOpenCapped(CCField out, CCConst p, CCConst o, int axis, do
         double den = om + op;
         if (den < omin)
           den = omin;
-        out(i) = (om * (p(i) - p(i - sa)) + op * (p(i + sa) - p(i))) / den;
+        out(i) = wa * ((om * (p(i) - p(i - sa)) + op * (p(i + sa) - p(i))) / den);
       });
 }
 
@@ -650,7 +658,8 @@ inline void centerGradOpenCapped(CCField out, CCConst p, CCConst o, int axis, do
 // analogue of projectCorrectCenter: the cut-cell cell velocity gets the full open-face pressure
 // force.
 inline void projectCorrectCenterOpen(CCField u, CCField v, CCField w, CCConst phi, CCConst ox,
-                                     CCConst oy, CCConst oz, C3 e, int g) {
+                                     CCConst oy, CCConst oz, C3 e, int g, double wx = 1.0,
+                                     double wy = 1.0, double wz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -661,9 +670,12 @@ inline void projectCorrectCenterOpen(CCField u, CCField v, CCField w, CCConst ph
         const double omx = ox(i), opx = ox(i + sx);
         const double omy = oy(i), opy = oy(i + sy);
         const double omz = oz(i), opz = oz(i + sz);
-        u(i) -= (omx * (phi(i) - phi(i - sx)) + opx * (phi(i + sx) - phi(i))) / (omx + opx + 1e-12);
-        v(i) -= (omy * (phi(i) - phi(i - sy)) + opy * (phi(i + sy) - phi(i))) / (omy + opy + 1e-12);
-        w(i) -= (omz * (phi(i) - phi(i - sz)) + opz * (phi(i + sz) - phi(i))) / (omz + opz + 1e-12);
+        u(i) -= wx * ((omx * (phi(i) - phi(i - sx)) + opx * (phi(i + sx) - phi(i))) /
+                      (omx + opx + 1e-12));
+        v(i) -= wy * ((omy * (phi(i) - phi(i - sy)) + opy * (phi(i + sy) - phi(i))) /
+                      (omy + opy + 1e-12));
+        w(i) -= wz * ((omz * (phi(i) - phi(i - sz)) + opz * (phi(i + sz) - phi(i))) /
+                      (omz + opz + 1e-12));
       });
 }
 
@@ -683,7 +695,8 @@ inline void projectCorrectCenterOpen(CCField u, CCField v, CCField w, CCConst ph
 // touched; the projection's face divergence-free guarantee is unaffected. phi ghosts + face
 // openness must be filled first.
 inline void projectCorrectCenter(CCField u, CCField v, CCField w, CCConst phi, CCConst ox,
-                                 CCConst oy, CCConst oz, C3 e, int g) {
+                                 CCConst oy, CCConst oz, C3 e, int g, double wx = 1.0,
+                                 double wy = 1.0, double wz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -697,9 +710,9 @@ inline void projectCorrectCenter(CCField u, CCField v, CCField w, CCConst phi, C
         const double gp_y = (oy(i + sy) > 1e-12) ? (phi(i + sy) - phi(i)) : 0.0;
         const double gm_z = (oz(i) > 1e-12) ? (phi(i) - phi(i - sz)) : 0.0;
         const double gp_z = (oz(i + sz) > 1e-12) ? (phi(i + sz) - phi(i)) : 0.0;
-        u(i) -= 0.5 * (gm_x + gp_x);
-        v(i) -= 0.5 * (gm_y + gp_y);
-        w(i) -= 0.5 * (gm_z + gp_z);
+        u(i) -= wx * (0.5 * (gm_x + gp_x));
+        v(i) -= wy * (0.5 * (gm_y + gp_y));
+        w(i) -= wz * (0.5 * (gm_z + gp_z));
       });
 }
 
