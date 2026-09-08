@@ -538,7 +538,7 @@ static void bind_solver(nb::module_& m, const char* name) {
            "that matters; the iteration count becomes a property of the problem rather than the "
            "rank count. ON by default since 2026-09-02 (the FoxBerry ladder); False restores the "
            "in-place-only hierarchy, byte-identical to before telescoping existed. See "
-           "docs/MG_TELESCOPING_PLAN.md.")
+           "suite/docs/archive/MG_TELESCOPING_PLAN.md.")
       .def("pressure_telescope", &S::pressureTelescope)
       .def(
           "set_pressure_bottom",
@@ -1185,8 +1185,8 @@ static void bind_solver(nb::module_& m, const char* name) {
           [](S& s, bool on) { s.setPressureExactResidual(on); }, nb::arg("on") = true,
           "Apply the level-0 pressure operator EXACTLY (matrix-free, double, flux form) in the "
           "residual and the Krylov matvec instead of reading the float band storage. P1 of the "
-          "suite defect-correction campaign (docs/DEFECT_CORRECTION_PLAN.md). Per solver, OFF at "
-          "construction.\n\n"
+          "suite defect-correction campaign (suite/docs/archive/DEFECT_CORRECTION_PLAN.md). Per "
+          "solver, OFF at construction.\n\n"
           "enable_vof() turns it ON, because a two-phase coefficient contrast is exactly what "
           "amplifies the float operator's broken row-sum identity A*1 = 0. Measured on Hysing "
           "case 2 (64x128x4, adaptive dt, nvidia-cuda): max|div(open u)| 1.85e-03 -> 5.15e-11, "
