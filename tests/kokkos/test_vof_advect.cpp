@@ -276,9 +276,16 @@ void gateZalesakBand() {
       "  the global max (what a whole-domain limiter would report) is %.4f (corner "
       "r = 0.7071)\n",
       omega * 0.5 * M_SQRT2 * dt / h);
-  CHECK(worst[1] <= 1.002 * bandBound);         // with the guard the band stays ON the interface
-  CHECK(worst[0] > 1.15 * bandBound);           // without it the round-off wake widens the band
-  CHECK(drift[0] < 1e-13 && drift[1] < 1e-13);  // neither touches conservation
+  CHECK(worst[1] <= 1.002 * bandBound);  // with the guard the band stays ON the interface
+  CHECK(worst[0] > 1.15 * bandBound);    // without it the round-off wake widens the band
+  // Neither touches conservation beyond round-off: with the guard off the split advection is exact
+  // to the summation floor (3.9e-16 here at every OpenMP thread count); with wispEps = 1e-8 the
+  // clipped sub-wisp cells are the only leak, and WHICH cells fall under 1e-8 is decided by
+  // round-off, i.e. by the reduction order: measured 2.6e-14 (3 threads) ... 2.0e-13 (1 thread),
+  // 1.1e-13 on the 2-thread CI runner. 1e-12 is ~ 300 wisps of 1e-8 over the disk's ~2800 cells
+  // and 1000 steps -- still four orders under the wisp size itself.
+  CHECK(drift[0] < 1e-13);
+  CHECK(drift[1] < 1e-12);
 }
 
 // ============================================================================ gate D: LeVeque
