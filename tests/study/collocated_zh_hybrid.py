@@ -40,7 +40,7 @@ def drag(N, mode, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=400
     s.set_pressure_pcg(True, 400, 1e-10)
     if mode:
         s.set_face_interp(mode)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(sdf, cutcell_pressure=True)
     prev, warm, um = 0.0, None, []
     for it in range(max_steps):
         s.step()

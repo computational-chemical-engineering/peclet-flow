@@ -55,7 +55,7 @@ def run(N, phi, mode, vel_iter=200, vlevels=4, vcycles=12, mu=0.1, f=1e-3, dt=60
     lv = max(2, int(np.log2(N)) - 1)
     s.set_pressure_multigrid(True, levels=lv)
     s.set_pressure_pcg(True, max_iter=200, rtol=1e-8)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(sdf, cutcell_pressure=True)
     prev = 0.0; t0 = time.time()
     for it in range(max_steps):
         s.step()

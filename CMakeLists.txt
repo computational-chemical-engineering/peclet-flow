@@ -1,7 +1,16 @@
 cmake_minimum_required(VERSION 3.24)
-project(peclet_flow LANGUAGES CXX)
 
-# Canonical cfd-gpu build: the Kokkos `sdflow` cut-cell IBM Navier-Stokes solver, as an importable
+# One version source: pyproject.toml (`version = "x.y.z"`); CMake derives its project version from it
+# (suite/docs/QUALITY_PLAN.md D4) so the two can never disagree.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml" _peclet_flow_version_line REGEX "^version = \"")
+string(REGEX REPLACE "^version = \"([0-9]+\\.[0-9]+\\.[0-9]+)[^\"]*\".*$" "\\1" PECLET_FLOW_VERSION
+       "${_peclet_flow_version_line}")
+if(NOT PECLET_FLOW_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  message(FATAL_ERROR "flow: could not read `version = \"x.y.z\"` from pyproject.toml (got '${_peclet_flow_version_line}')")
+endif()
+project(peclet_flow VERSION ${PECLET_FLOW_VERSION} LANGUAGES CXX)
+
+# Canonical build: the Kokkos `peclet.flow` cut-cell IBM Navier-Stokes solver, as an importable
 # Python module. Kokkos provides the backend (CUDA / HIP / OpenMP), selected by the install prefix
 # (extern/install/<backend>, built by ../tools/bootstrap_deps.sh -- a HARD build dependency).
 # (Pore-network extraction moved to its own suite project: ../pnm, peclet.pnm.)
@@ -39,7 +48,7 @@ peclet_require_kokkos()
 peclet_require_nanobind()
 peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../core" TPX_INC)
 
-# sdflow -- the cut-cell IBM Navier-Stokes solver (single-rank Python module).
+# peclet_flow -- the cut-cell IBM Navier-Stokes solver module (target; imports as peclet.flow).
 # NB_STATIC: bundle nanobind's runtime into the module (no shared libnanobind to ship); the Kokkos
 # device path is routed by the launch compiler regardless.
 # NOMINSIZE: nanobind's default -Os size optimization is rejected by nvcc ("'s': expected a number")
@@ -50,43 +59,43 @@ peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../core" TPX_INC)
 # shadow the installed one) and staged into <build>/peclet/... so `PYTHONPATH=<build> python …`
 # (`import peclet.flow`) works in the dev loop too. The SKBUILD install rules (guarded below) place
 # it into the wheel.
-nanobind_add_module(sdflow NB_STATIC NOMINSIZE src/flow_bindings.cpp)
-set_target_properties(sdflow PROPERTIES OUTPUT_NAME _flow   # -> peclet.flow._flow (NB_MODULE(_flow))
+nanobind_add_module(peclet_flow NB_STATIC NOMINSIZE src/flow_bindings.cpp)
+set_target_properties(peclet_flow PROPERTIES OUTPUT_NAME _flow   # -> peclet.flow._flow (NB_MODULE(_flow))
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/flow")
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/__init__.py COPYONLY)
-target_include_directories(sdflow PRIVATE src "${TPX_INC}")
-target_link_libraries(sdflow PRIVATE Kokkos::kokkos)
+target_include_directories(peclet_flow PRIVATE src "${TPX_INC}")
+target_link_libraries(peclet_flow PRIVATE Kokkos::kokkos)
 # HIP/lld strictness: nanobind's --gc-sections can drop Kokkos SharedAllocationRecord<HIPSpace> vtables
 # it only later finds referenced -> "undefined hidden symbol: vtable". Keep sections on HIP (nvcc/ld is lenient).
 if(Kokkos_ENABLE_HIP)
-  target_link_options(sdflow PRIVATE -Wl,--no-gc-sections)
+  target_link_options(peclet_flow PRIVATE -Wl,--no-gc-sections)
   # HIP/lld experiment 1 (docs/RELEASE.md §8): nanobind sets CXX_VISIBILITY_PRESET hidden, and under hipcc
   # the host objects then reference the Kokkos SharedAllocationRecord / shared_ptr control-block vtables
   # as hidden symbols that nothing defines ("undefined hidden symbol: vtable for ..."). Default visibility
   # on the HIP path only; CUDA/OpenMP builds are untouched.
-  set_target_properties(sdflow PROPERTIES CXX_VISIBILITY_PRESET default)
+  set_target_properties(peclet_flow PROPERTIES CXX_VISIBILITY_PRESET default)
 endif()
 
 # Distributed (MPI) flow: compile the binding TU with the halo-gating flag + link MPI (the core grid
-# halo lives in the header-only TPX_INC). Mirrors dem's PECLET_DEM_MPI wiring; OFF keeps sdflow untouched.
+# halo lives in the header-only TPX_INC). Mirrors dem's PECLET_DEM_MPI wiring; OFF keeps the module untouched.
 if(PECLET_FLOW_MPI)
   find_package(MPI REQUIRED COMPONENTS CXX)
-  target_compile_definitions(sdflow PRIVATE PECLET_FLOW_MPI=1)
-  target_link_libraries(sdflow PRIVATE MPI::MPI_CXX)
+  target_compile_definitions(peclet_flow PRIVATE PECLET_FLOW_MPI=1)
+  target_link_libraries(peclet_flow PRIVATE MPI::MPI_CXX)
   message(STATUS "flow: distributed step ENABLED (MPI)")
 endif()
 
 # Redistributable CUDA wheel: point the module at the nvidia-cuda-runtime wheel's libcudart via a
 # relative $ORIGIN RPATH (up to site-packages, then into nvidia/cu13/lib).
 if(PECLET_CUDA_RUNTIME_WHEEL)
-  set_target_properties(sdflow PROPERTIES
+  set_target_properties(peclet_flow PROPERTIES
     INSTALL_RPATH "$ORIGIN/../../nvidia/cu13/lib" INSTALL_RPATH_USE_LINK_PATH OFF)
 endif()
 
 # --- pip / scikit-build-core install rule -------------------------------------------------------
 if(DEFINED SKBUILD)
-  install(TARGETS sdflow LIBRARY DESTINATION peclet/flow COMPONENT python)
+  install(TARGETS peclet_flow LIBRARY DESTINATION peclet/flow COMPONENT python)
   install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
           DESTINATION peclet/flow RENAME __init__.py COMPONENT python)
 endif()

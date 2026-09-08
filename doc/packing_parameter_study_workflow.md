@@ -43,7 +43,7 @@ sdf_zyx, origin, spacing = pnm.SDFReader.read_vti("data/packing_256.vti")
 # (see scripts/verify_periodic_spheres_sdflow.py for the full pipeline).
 solver = peclet.flow.Solver(nx, ny, nz)
 solver.set_rho(1.0); solver.set_mu(1.0); solver.set_dt(dt)   # physical units; fix before geometry
-solver.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+solver.set_solid(sdf, cutcell_pressure=True)
 ```
 
 ### 2.2 Recommended way to create the three resolutions
@@ -107,8 +107,8 @@ solver.set_outer_tolerance(1e-4)
 solver.set_pressure_multigrid(True, levels=3) # geometric MG depth (levels=1 => pure RB-GS)
 solver.set_pressure_pcg(True)                 # MG-PCG outer driver (single-GPU default)
 solver.set_velocity_multigrid(False)          # velocity MG off (RB-GS velocity is the default)
-# pressure coarse-operator mode is selected on set_solid(..., pressure_coarse="rediscretized")
-# (also "galerkin" / "const"); set_pressure_warmstart(True) seeds each solve from the previous phi.
+# the pressure coarse operators are always the rediscretized per-level cut-cell operators;
+# set_pressure_warmstart(True) seeds each solve from the previous phi.
 # <!-- TODO: the retired API's set_ibm_scheme(0) (sharp vs averaged cut-cell polynomials) and
 # set_outer_convergence_mode(1) are NOT exposed in the current nanobind bindings
 # (src/flow_bindings.cpp); the IBM scheme is now a compile-time template (SCHEME) in

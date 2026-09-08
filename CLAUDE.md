@@ -36,7 +36,7 @@ CMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda" pip install .
 # Or a dev cmake build (single-rank Python modules):
 cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda"
 cmake --build build -j
-# Output: build/peclet.flow.*.so (the CFD solver) + build/pnm.*.so (pore extraction)
+# Output: build/peclet/flow/_flow.*.so (import peclet.flow with PYTHONPATH=build)
 
 # OpenMP backend: same source, just swap the prefix (extern/install/host-openmp).
 ```
@@ -64,11 +64,11 @@ C++ kernel + multi-rank test suites (own `find_package` projects; build against 
 ```bash
 # Single-rank Kokkos kernel unit tests:
 cmake -S tests/kokkos -B build_kokkos -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda
-cmake --build build_kokkos -j && ctest --test-dir build_kokkos --output-on-failure   # 22 tests
+cmake --build build_kokkos -j && ctest --test-dir build_kokkos --output-on-failure   # 44 tests
 # Multi-rank (MPI) tests, np=1,2,4:
 cmake -S tests/kokkos_mpi -B build_kmpi -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
   -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
-cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure       # 48 tests (16 x np)
+cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure       # 103 tests (np = 1, 2, 4[, 8])
 ```
 
 Single-GPU **accuracy + efficiency regression suite** (grid-convergence + recorded solver-iteration
@@ -172,8 +172,8 @@ import peclet.flow
 s = peclet.flow.Solver((nx, ny, nz), extent=(Lx, Ly, Lz))   # the PHYSICAL box; spacing is derived
 s.set_rho(1.0); s.set_mu(0.01); s.set_dt(60.0)   # physical units; fix before geometry
 s.set_body_force(1e-2, 0, 0)                       # force per unit volume
-x, y, z = s.cell_centres()                         # the grid the solver laid inside the box
-s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")  # SDF [x,y,z], <0 inside
+x, y, z = s.cell_centers()                         # the grid the solver laid inside the box
+s.set_solid(sdf, cutcell_pressure=True)            # SDF [x,y,z], <0 inside
 for _ in range(n_steps):
     s.step()
 u = s.get_u()   # 3-D numpy array [x,y,z];  p = s.get_p() is the physical pressure
@@ -189,7 +189,7 @@ the SDF handed to `set_solid`, the coordinates of `set_scene` and the velocities
 `set_instance_motion` — and everything that comes back is too: `get_u/v/w`, `get_p`, `get_uf`,
 `vof_curvature()` (1/length), `max_open_divergence()` (1/time), the hydro force and torque,
 `capillary_dt()` and `vof_step_limits()`. Read-only `cells`, `global_cells`, `extent`, `origin`,
-`spacing`, `physical_units`, and `cell_centres()` for the grid an SDF is sampled on. Under MPI the
+`spacing`, `physical_units`, and `cell_centers()` for the grid an SDF is sampled on. Under MPI the
 constructor still takes THIS RANK's block; pass the global grid as `global_cells` (the numbers
 `init_mpi` gets) and the global box as `extent`/`origin`.
 
@@ -368,8 +368,9 @@ operator. Four outer drivers wrap that V-cycle — **select one per solver**:
   sweep moves 9.5 → 11), not the bottom mode, not advection, not MPI. The fp64 build is 2×
   FASTER in wall clock there (71 iters vs a 200 cap), so on high-contrast beds fp64 is the
   performance choice, not a correctness tax.**
-- Coarse-operator mode: `set_solid(..., pressure_coarse="rediscretized")` (default; also `"galerkin"` /
-  `"const"`). `set_pressure_multigrid(on, levels)` sets the multigrid depth (`levels=1` == pure RB-GS).
+- Coarse operators: always the rediscretized per-level cut-cell operators (the former
+  `pressure_coarse=` selector on `set_solid` is gone). `set_pressure_multigrid(on, levels)` sets the
+  multigrid depth (`levels=1` == pure RB-GS).
 - `set_pressure_warmstart(True)` seeds each solve from the previous step's φ (opt-in, off by default).
 - `set_pressure_bottom("smoother" | "auto" | "agglomerated")` — coarse-level solve. A V-cycle is
   domain-independent only if its coarsest level is effectively solved, and the hierarchy cannot always
@@ -1069,7 +1070,7 @@ steady state, and TBFsolver ships NO reference statistics for the case** (60 tra
 profiles, only a qualitative contour in `user_guide.pdf`) — so these are our first datum and the
 cross-code comparison needs TBFsolver built and run.
 
-**Checkpoint/restart of the block container (rung W3).** `vof_block_colour(id)` returns one
+**Checkpoint/restart of the block container (rung W3).** `vof_block_color(id)` returns one
 marker's OWN inner colour as a Fortran-order `(nx,ny,nz)` array over its block box
 (`vof_block_stats()['lo'/'hi']`), and `enable_vof_blocks_from_colours(boxes, colours)` restarts the
 container from those. That colour is a block's ONLY state, so `{box, colour}` per marker is a

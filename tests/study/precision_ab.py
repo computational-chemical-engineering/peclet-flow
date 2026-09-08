@@ -207,8 +207,7 @@ def case_contrast(Ngs=(48, 64, 96), steps=4, maxit=300, rtol=1e-8, driver="pcg")
             s.set_pressure_fcg(True, maxit, rtol)
         else:
             s.set_pressure_chebyshev(True, maxit, rtol)
-        s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True,
-                    pressure_coarse="rediscretized")
+        s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
         its, t0 = [], time.time()
         for _ in range(steps):
             s.step()
@@ -239,8 +238,7 @@ def case_zh(Ns=(32, 48, 64), phi=0.125, mu=0.1, F=1e-3, dt=None, max_steps=600, 
         s.set_velocity_solver_params(120)
         s.set_pressure_multigrid(True, levels=max(2, int(np.log2(N)) - 1))
         s.set_pressure_pcg(True, 400, 1e-9)
-        s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True,
-                    pressure_coarse="rediscretized")
+        s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
         prev, nit = 0.0, 0
         for it in range(max_steps):
             s.step()
@@ -278,8 +276,7 @@ def case_perm(Ngs=(44, 56), mu=0.1, F=1e-3, dt=80.0, max_steps=3000, tol=1e-6):
         s.set_velocity_solver_params(150)
         s.set_pressure_multigrid(True, levels=lv)
         s.set_pressure_pcg(True, 400, 1e-9)
-        s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True,
-                    pressure_coarse="rediscretized")
+        s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
         prev, nit = 0.0, 0
         for it in range(max_steps):
             s.step()
@@ -316,8 +313,7 @@ def case_cost(Ngs=(64, 96, 128), steps=10, warmup=3):
         s.set_velocity_solver_params(150)
         s.set_pressure_multigrid(True, levels=lv)
         s.set_pressure_pcg(True, 300, 1e-6)   # 1e-8 CAPS on this bed in float (see case_contrast)
-        s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True,
-                    pressure_coarse="rediscretized")
+        s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
         for _ in range(warmup):
             s.step()
         m1 = gpu_mem_mb()
@@ -380,7 +376,7 @@ def case_trace(Ng=96, steps=2, maxit=300, rtol=1e-8, driver="pcg", levels=None):
         s.set_pressure_fcg(True, maxit, rtol)
     else:
         s.set_pressure_chebyshev(True, maxit, rtol)
-    s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
     for _ in range(steps):
         s.step()
     return dict(Ng=Ng, levels=lv, driver=driver, its=int(s.last_pressure_iterations()),

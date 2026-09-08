@@ -55,11 +55,8 @@ def _upsample2(a):
     return np.repeat(np.repeat(np.repeat(a, 2, 0), 2, 1), 2, 2) * 4.0
 
 
-def run_sdflow(N, phi, mu=0.1, f=1e-3, dt=None, max_steps=600, tol=1e-6, coarse="rediscretized",
-               seed=None):
-    """Multilevel MG-PCG pressure solve; `coarse` selects the coarse-operator mode
-    ('rediscretized' = the geometric per-level cut-cell operator, the recommended default;
-    'galerkin' = the inconsistent aggregation path; 'const' = geometry-blind coarse).
+def run_sdflow(N, phi, mu=0.1, f=1e-3, dt=None, max_steps=600, tol=1e-6, seed=None):
+    """Multilevel MG-PCG pressure solve (rediscretized per-level cut-cell coarse operators).
     `seed` = (u,v,w) from the next-coarser N, upsampled here, to start the march near steady."""
     from peclet import flow as sdflow
     if dt is None:
@@ -72,7 +69,7 @@ def run_sdflow(N, phi, mu=0.1, f=1e-3, dt=None, max_steps=600, tol=1e-6, coarse=
     #                                                           converges the IBM diffusion -- separate bug)
     s.set_pressure_multigrid(True, levels=lv)
     s.set_pressure_pcg(True, max_iter=200, rtol=1e-8)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse=coarse)
+    s.set_solid(sdf, cutcell_pressure=True)
     if seed is not None:
         u, v, w = (np.asfortranarray(_upsample2(c)) for c in seed)
         s.set_state(u, v, w)

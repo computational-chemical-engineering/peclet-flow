@@ -42,8 +42,7 @@ def run(kind, N):
             s.set_collocated_scheme("gauge-exact")
         else:
             s.set_face_interp(9)
-    s.set_solid(np.full((N, N, NZ), 1e3, order="F"), cutcell_pressure=True,
-                pressure_coarse="rediscretized")
+    s.set_solid(np.full((N, N, NZ), 1e3, order="F"), cutcell_pressure=True)
     # initial condition sampled at each solver's own u/v locations
     cc = np.arange(N) + 0.5
     fc = np.arange(N) * 1.0                     # low-face coordinate of cell i

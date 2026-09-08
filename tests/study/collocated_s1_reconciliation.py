@@ -76,7 +76,7 @@ def march(N):
         s.set_collocated_scheme("gauge-exact")
     else:
         s.set_face_interp(9)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(sdf, cutcell_pressure=True)
     prev = 0.0
     for it in range(MAXS):
         s.step()

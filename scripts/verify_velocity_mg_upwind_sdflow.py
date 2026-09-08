@@ -44,7 +44,7 @@ def run(vmg, dt, fx, n_steps, vlevels=3, vcycles=10, to_steady=False):
     if vmg:
         s.set_velocity_multigrid(True, vlevels, vcycles)
     s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="galerkin")
+    s.set_solid(sdf, cutcell_pressure=True)
     prev = 0.0
     for it in range(n_steps):
         s.step()

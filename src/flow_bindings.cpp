@@ -75,9 +75,8 @@ static nb::ndarray<nb::numpy, double> field_out(S& s, std::vector<double>&& v) {
       {1, static_cast<std::int64_t>(nx), static_cast<std::int64_t>(nx * ny)});
 }
 
-// One VoF marker block's own inner colour as a Fortran-order (nx,ny,nz) array over its block box.
-// Bound under BOTH `vof_block_colour` (the original) and `vof_block_color` (the canonical US
-// spelling, suite/docs/NAMING.md 1.6) — one body, so the two can never drift.
+// One VoF marker block's own inner colour as a Fortran-order (nx,ny,nz) array over its block box
+// (bound as `vof_block_color`, suite/docs/NAMING.md 1.6).
 template <class S>
 static nb::ndarray<nb::numpy, double> vofBlockColourArray(S& s, long id) {
   std::vector<double> v = s.vofBlockColour(id);
@@ -182,10 +181,12 @@ static void bind_solver(nb::module_& m, const char* name) {
           [](S& s) {
             return std::array<long, 3>{s.nx(), s.ny(), s.nz()};
           },
-          "This rank's inner block resolution (nx, ny, nz).")
+          "This rank's inner block resolution (nx, ny, nz) -- the shape of every field array "
+          "(get_u, get_p, the SDF for set_solid). Under MPI it is the LOCAL block from mpi_block().")
       .def_prop_ro(
           "global_cells", [](S& s) { return s.globalCells(); },
-          "The GLOBAL grid resolution (== `cells` single-rank).")
+          "The GLOBAL grid resolution (gnx, gny, gnz); == `cells` single-rank, the numbers "
+          "init_mpi gets under MPI (the CFD-DEM co-decomposition weight field is this shape).")
       .def_prop_ro(
           "extent", [](S& s) { return s.domainExtent(); },
           "The GLOBAL domain side lengths. Equal to the cell counts without a physical domain.")
@@ -194,7 +195,9 @@ static void bind_solver(nb::module_& m, const char* name) {
           "The physical lower corner of the GLOBAL domain (0,0,0 by default).")
       .def_prop_ro(
           "spacing", [](S& s) { return s.spacing(); },
-          "The cell size (dx, dy, dz) = extent/cells. (1,1,1) without a physical domain.")
+          "The cell size [dx, dy, dz] = extent/cells as three floats; [1.0, 1.0, 1.0] "
+          "without a physical domain (the cell-unit default). Three spacings within 1e-12 "
+          "relative are snapped to one value, so an isotropic box is exactly isotropic.")
       .def_prop_ro(
           "unit_scales",
           [](S& s) {
@@ -228,22 +231,14 @@ static void bind_solver(nb::module_& m, const char* name) {
           "physical_units", [](S& s) { return s.hasPhysicalDomain(); },
           "True when the solver was given an extent, i.e. lengths are physical rather than cells.")
       .def(
-          "cell_centres",
-          [](S& s) {
-            return nb::make_tuple(s.cellCentres(0), s.cellCentres(1), s.cellCentres(2));
-          },
-          "The physical cell-centre coordinates of THIS rank's inner block as three 1-D arrays "
-          "(x, y, z). np.meshgrid(*s.cell_centres(), indexing='ij') is the grid an SDF for "
-          "set_solid is sampled on. ALIAS of the canonical US-spelled `cell_centers()` "
-          "(suite/docs/NAMING.md 1.6); both ship, and every recorded example uses this one.")
-      .def(
           "cell_centers",
           [](S& s) {
             return nb::make_tuple(s.cellCentres(0), s.cellCentres(1), s.cellCentres(2));
           },
-          "The physical cell-centre coordinates of THIS rank's inner block as three 1-D arrays "
-          "(x, y, z) — the canonical spelling (suite/docs/NAMING.md 1.6). `cell_centres()` is the "
-          "same call.")
+          "The physical cell-center coordinates of THIS rank's inner block as three 1-D float64 "
+          "arrays (x, y, z), i.e. origin + (i + 1/2) * spacing per axis. "
+          "np.meshgrid(*s.cell_centers(), indexing='ij') is the grid an SDF for set_solid is "
+          "sampled on. Under MPI these are the LOCAL block's centers in GLOBAL coordinates.")
       .def("set_rho", &S::setRho, nb::arg("rho"),
            "Set fluid density rho (physical units). Set before geometry/first step.")
       .def("set_mu", &S::setMu, nb::arg("mu"), "Set dynamic viscosity mu (physical units).")
@@ -330,8 +325,6 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
            "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
            "explicit-lagged wall term). Steady state is independent of w.")
-      .def("set_velocity_streams", &S::setVelocityStreams, nb::arg("on"),
-           "Toggle overlapped per-component velocity solves.")
       .def("set_implicit_advection", &S::setImplicitAdvection, nb::arg("on"),
            "Use implicit-FOU advection with deferred-correction TVD.")
       .def("set_outer_iterations", &S::setOuterIterations, nb::arg("n"),
@@ -651,10 +644,9 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def("has_moving_instance", &S::hasMovingInstance,
            "True when at least one scene instance carries a nonzero velocity.")
       .def("num_scene_instances", &S::sceneInstanceCount,
-           "Number of instances in the scene. The suite-canonical count spelling "
-           "(suite/docs/NAMING.md 1.3); `scene_instance_count` is the same call.")
-      .def("scene_instance_count", &S::sceneInstanceCount,
-           "ALIAS of the canonical `num_scene_instances`; both ship.")
+           "Number of instances in the scene set by set_scene (0 before it). Instance indices "
+           "run 0..num_scene_instances()-1 in set_instance_transform / set_instance_motion, "
+           "scene_owner() and the hydrodynamic force/torque accessors.")
       .def(
           "set_instance_transform",
           [](S& s, int i, std::array<double, 3> t, std::array<double, 4> q) {
@@ -805,16 +797,17 @@ static void bind_solver(nb::module_& m, const char* name) {
           "owner and resolved CFD-DEM posts the hydrodynamic force back to it.")
       .def(
           "set_solid",
-          [](S& s, nb::ndarray<double, nb::f_contig> sdf, bool cutcell_pressure,
-             const std::string& /*pressure_coarse*/) {
+          [](S& s, nb::ndarray<double, nb::f_contig> sdf, bool cutcell_pressure) {
             s.setSolid(grid_in(sdf), cutcell_pressure);
           },
-          nb::arg("sdf"), nb::arg("cutcell_pressure") = false, nb::arg("pressure_coarse") = "const",
-          "Set the solid SDF as a Fortran-order (nx,ny,nz) float64 array (negative inside the "
-          "solid, positive in fluid). cutcell_pressure=True enables the open-face-weighted "
-          "cut-cell "
-          "pressure operator (proper no-slip); it composes with domain BCs, so this is the single "
-          "call for a no-slip immersed body in an inflow/outflow domain.")
+          nb::arg("sdf"), nb::arg("cutcell_pressure") = false,
+          "Set the solid SDF as a Fortran-order (nx,ny,nz) float64 array sampled at cell_centers() "
+          "(negative inside the solid, positive in fluid, in the solver's length unit). "
+          "cutcell_pressure=True enables the open-face-weighted cut-cell pressure operator "
+          "(proper no-slip); it composes with domain BCs, so this is the single call for a "
+          "no-slip immersed body in an inflow/outflow domain. The multigrid coarse operators are "
+          "always the rediscretized per-level cut-cell operators (the former `pressure_coarse=` "
+          "mode selector is gone).")
       .def(
           "set_state",
           [](S& s, nb::ndarray<double, nb::f_contig> u, nb::ndarray<double, nb::f_contig> v,
@@ -877,13 +870,18 @@ static void bind_solver(nb::module_& m, const char* name) {
           "[x,y,z]).")
       .def(
           "get_ox", [](S& s) { return field_out(s, s.getOpenness(0)); },
-          "TEMP: -x face openness (fluid area fraction) per inner cell, (nx,ny,nz).")
+          "The -x face openness field of the cut-cell operator: the fluid area fraction (0..1, "
+          "dimensionless) of the face between cells (i-1,j,k) and (i,j,k), as a Fortran-order "
+          "(nx,ny,nz) float64 array over THIS rank's inner cells. Computed by set_solid from the "
+          "SDF (1 everywhere without a solid); it is what the momentum operator and the geometric "
+          "cut-cell projection see. get_ox_proj is the openness the PROJECTION actually conserves "
+          "fluxes through, which differs under set_ghost_projection (binary/coupled faces).")
       .def(
           "get_oy", [](S& s) { return field_out(s, s.getOpenness(1)); },
-          "TEMP: -y face openness per inner cell, (nx,ny,nz).")
+          "The geometric -y face openness per inner cell, (nx,ny,nz); see get_ox.")
       .def(
           "get_oz", [](S& s) { return field_out(s, s.getOpenness(2)); },
-          "TEMP: -z face openness per inner cell, (nx,ny,nz).")
+          "The geometric -z face openness per inner cell, (nx,ny,nz); see get_ox.")
       .def(
           "get_ox_proj", [](S& s) { return field_out(s, s.getOpennessProj(0)); },
           "-x face openness whose fluxes the projection CONSERVES (binary/COUPLED under "
@@ -1579,19 +1577,14 @@ static void bind_solver(nb::module_& m, const char* name) {
           "two boxes would be handed to both markers.")
       // --- Part III rung W3: checkpoint / restart of the block container ----------------------
       .def(
-          "vof_block_colour", &vofBlockColourArray<S>,
-          nb::arg("id"),
-          "One marker's OWN inner colour as a Fortran-order (nx,ny,nz) float64 array over its "
-          "block box (vof_block_stats()['lo'/'hi']); empty on a rank that does not master it.\n\n"
-          "This is the block's ONLY state, so {box, colour} per marker is a COMPLETE checkpoint "
-          "of the container -- and it is the only exact one: re-seeding from the union colour "
-          "field (enable_vof_blocks_from_field) hands each of two TOUCHING markers a slice of the "
-          "other, because that gather is a copy of the union clipped to the seed extent.\n\n"
-          "`vof_block_color` is the same call in the canonical US spelling.")
-      .def(
           "vof_block_color", &vofBlockColourArray<S>, nb::arg("id"),
-          "US spelling of `vof_block_colour` and the suite-canonical one "
-          "(suite/docs/NAMING.md 1.6); both ship and every recorded example uses the -our form.")
+          "One marker's OWN inner color as a Fortran-order (nx,ny,nz) float64 array over its "
+          "block box (vof_block_stats()['lo'/'hi']); empty on a rank that does not master it.\n\n"
+          "This is the block's ONLY state, so {box, color} per marker is a COMPLETE checkpoint "
+          "of the container -- and it is the only exact one: re-seeding from the union color "
+          "field (enable_vof_blocks_from_field) hands each of two TOUCHING markers a slice of the "
+          "other, because that gather is a copy of the union clipped to the seed extent. "
+          "enable_vof_blocks_from_colours(boxes, colours) restarts the container from these.")
       .def(
           "enable_vof_blocks_from_colours",
           [](S& s, const std::vector<std::array<int, 6>>& boxes, nb::list colours) {
@@ -1604,7 +1597,7 @@ static void bind_solver(nb::module_& m, const char* name) {
             s.enableVofBlocksFromColours(boxes, c);
           },
           nb::arg("boxes"), nb::arg("colours"),
-          "Restart the block container from a vof_block_colour() checkpoint: one marker per "
+          "Restart the block container from a vof_block_color() checkpoint: one marker per "
           "(lo_x, lo_y, lo_z, hi_x, hi_y, hi_z) INNER box (exactly the 'lo'/'hi' of "
           "vof_block_stats(), NOT grown by the margin again) with its colour written directly. "
           "Exact whatever the markers are doing -- nothing is gathered out of the union field.")
@@ -2598,17 +2591,6 @@ static void bind_solver(nb::module_& m, const char* name) {
            "Residual of the volume-averaged continuity max|div(open*eps*u) + d(eps)/dt| -- the "
            "quantity the porous projection drives to zero. 0 unless set_porous_continuity(True).")
       .def(
-          "get_resolution", [](S& s) { return std::vector<int>{s.nx(), s.ny(), s.nz()}; },
-          "Return the LOCAL grid resolution [nx, ny, nz] (this rank's block under MPI).")
-      .def(
-          "global_resolution",
-          [](S& s) {
-            auto g = s.globalResolution();
-            return std::vector<int>{g[0], g[1], g[2]};
-          },
-          "Return the GLOBAL grid resolution [gnx, gny, gnz] (== local single-rank). For the "
-          "CFD-DEM co-decomposition weight field.")
-      .def(
           "block_origin",
           [](S& s) {
             auto o = s.blockOrigin();
@@ -2617,12 +2599,6 @@ static void bind_solver(nb::module_& m, const char* name) {
           "This rank's inner-block origin in GLOBAL cells ([0,0,0] single-rank). Shift the "
           "coupling "
           "deposit origin by this so particles in global coordinates land in the local block.")
-      .def(
-          "get_spacing", [](S& s) { auto h = s.spacing(); return std::vector<double>{h[0], h[1], h[2]}; },
-          "Return the grid spacing [dx, dy, dz] = extent/cells. [1, 1, 1] without a physical "
-          "domain (the cell-unit default). ALIAS of the canonical `spacing` PROPERTY "
-          "(suite/docs/NAMING.md 1.2 — a value the object simply has is a bare name); both ship "
-          "and they return the same numbers.")
 #ifdef PECLET_FLOW_MPI
       // Distributed path (built with -DPECLET_FLOW_MPI): construct the Solver with this rank's
       // LOCAL block dims (see the module-level mpi_block()), then init_mpi with the GLOBAL grid

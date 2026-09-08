@@ -1,11 +1,11 @@
 name: CI
 
-# Build the Kokkos (OpenMP/Serial) backend from source, then build the sdflow Python module and
+# Build the Kokkos (OpenMP/Serial) backend from source, then build the peclet.flow Python module and
 # run the single-rank Kokkos kernel unit tests. The GPU (CUDA/HIP) backends and the multi-rank MPI
 # tests are NOT exercisable on free GitHub runners (no GPU); this CI covers the portable host build and
 # the CPU kernel tests, which is what catches the vast majority of regressions. The single-rank modules
-# never link MPI/core (the distributed path is gated behind CFD_MPI), so Kokkos + pybind11 is
-# the whole dependency set here.
+# never link MPI (the distributed path is gated behind PECLET_FLOW_MPI), so Kokkos + nanobind + the
+# header-only core checkout are the whole dependency set here.
 
 on:
   push:
@@ -47,7 +47,7 @@ jobs:
           cmake --build /tmp/kokkos/build -j
           cmake --install /tmp/kokkos/build
 
-      - name: Build the sdflow module
+      - name: Build the peclet.flow module
         run: |
           # main builds against core's main (the vendored default PECLET_TPX_TAG is the last core
           # release, which lags the headers main already uses; the release repins it).

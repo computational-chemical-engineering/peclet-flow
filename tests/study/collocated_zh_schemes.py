@@ -38,7 +38,7 @@ def drag(N, scheme, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=4
     s.set_pressure_multigrid(True, max(2, int(np.log2(N)) - 1))
     s.set_pressure_pcg(True, 200, 1e-8)
     s.set_collocated_scheme(scheme)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(sdf, cutcell_pressure=True)
     prev, warm, um, pit, t0 = 0.0, None, [], [], time.time()
     for it in range(max_steps):
         s.step()

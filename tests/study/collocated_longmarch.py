@@ -101,7 +101,7 @@ if ROTW != 1.0:
     s.set_rotational_weight(ROTW)
 if WALLW > 0:
     s.set_rotational_wall_weight(WALLW)
-s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+s.set_solid(sdf, cutcell_pressure=True)
 fluid = sdf >= 0.0
 
 print(f"# bed {os.path.basename(BED)} N={N} R={R:.1f} kind={KIND} rot={ROT} rotf={ROTF} rotw={ROTW} wallw={WALLW} dt={DT} steps={STEPS}", flush=True)

@@ -51,8 +51,7 @@ def permeability(Ng, sdf, side, colloc, ghost, mode=0, mu=0.1, F=1e-3, dt=80.0, 
         s.set_ghost_projection(True, 1, 2)
     if mode:
         s.set_face_interp(mode)
-    s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True,
-                pressure_coarse="rediscretized")
+    s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
     prev = 0.0
     for it in range(max_steps):
         s.step()

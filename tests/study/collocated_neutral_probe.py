@@ -68,7 +68,7 @@ def make():
             s.set_collocated_scheme(KIND)
         else:
             s.set_face_interp({"gauge-exact": 9, "plain": 0}[KIND])
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(sdf, cutcell_pressure=True)
     return s
 
 

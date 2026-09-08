@@ -327,7 +327,7 @@ class Solver {
   /// The grid `set_solid` expects an SDF sampled on: meshgrid these three and evaluate.
   std::vector<double> cellCentres(int axis) const {
     if (axis < 0 || axis > 2)
-      throw std::runtime_error("cell_centres: axis must be 0, 1 or 2");
+      throw std::runtime_error("cell_centers: axis must be 0, 1 or 2");
     const int n[3] = {nx_, ny_, nz_};
     const int og[3] = {og_.x, og_.y, og_.z};
     std::vector<double> c((std::size_t)n[axis]);
@@ -958,10 +958,6 @@ class Solver {
   // Under-relaxation of the mode-4 FV wall-flux defect correction (1 = full; <1 damps the stiff
   // explicit-lagged wall term). The steady state is independent of this value.
   void setFvRelax(double w) { fvRelax_ = w; }
-  // CUDA-only 3-stream concurrent velocity solve (set_velocity_streams): no Kokkos analogue in this
-  // port (the default-execution-space kernels are already stream-ordered). Accepted as a no-op for
-  // API parity.
-  void setVelocityStreams(bool /*on*/) {}
   // Seed/restore the velocity state (CUDA set_state / upload_velocity): u/v/w are inner-cell fields
   // (flat x-fastest, size nx*ny*nz); written into the velocity block + ghosts refreshed (periodic
   // wrap).
@@ -8058,9 +8054,9 @@ class Solver {
   // seeding gather out of the UNION would give each a slice of the other; WO-W12 open item 5).
   std::vector<double> vofBlockColour(long id) {
     if (!vofBlocks_)
-      throw std::runtime_error("vof_block_colour: call enable_vof_blocks first");
+      throw std::runtime_error("vof_block_color: call enable_vof_blocks first");
     if (id < 0 || static_cast<std::size_t>(id) >= vofBlocks_->count())
-      throw std::runtime_error("vof_block_colour: no such block id");
+      throw std::runtime_error("vof_block_color: no such block id");
     return vofBlocks_->blockColourHost(static_cast<std::size_t>(id));
   }
   void enableVofBlocksFromColours(const std::vector<std::array<int, 6>>& boxes,

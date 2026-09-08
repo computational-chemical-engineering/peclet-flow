@@ -17,7 +17,7 @@ def drag(N, mode, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=400
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(F,0,0); s.set_advection(False)
     s.set_velocity_solver_params(200); s.set_pressure_multigrid(True,levels=lv)
     s.set_pressure_pcg(True,400,1e-10); s.set_face_interp(mode)
-    s.set_solid(sdf,cutcell_pressure=True,pressure_coarse="rediscretized")
+    s.set_solid(sdf,cutcell_pressure=True)
     prev,warm,um,t0=0.0,None,[],time.time()
     for it in range(max_steps):
         s.step(); m=float(s.get_u().mean()); um.append(m)

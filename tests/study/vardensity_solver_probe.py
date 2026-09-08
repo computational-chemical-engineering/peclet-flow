@@ -232,8 +232,7 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
     if sdf is None:
         s.set_pressure_geometry(np.asfortranarray(np.full((N, N, N), 10.0)))
     else:
-        s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True,
-                    pressure_coarse="rediscretized")
+        s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
 
     if shape == "const":                         # the constant-density control: varRho never on
         ratio = 1.0
@@ -430,8 +429,7 @@ def cheb_overhead(geom, N, ratio=1e3):
         if sdf is None:
             s.set_pressure_geometry(np.asfortranarray(np.full((N, N, N), 10.0)))
         else:
-            s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True,
-                        pressure_coarse="rediscretized")
+            s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
         if varrho:
             s.add_field("rho")
             s.set_field("rho", np.asfortranarray(rho_field("slab", "sharp", ratio, N)))

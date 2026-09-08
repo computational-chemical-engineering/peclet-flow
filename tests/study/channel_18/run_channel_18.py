@@ -6,7 +6,7 @@ GPU (`tests/study/vof_channel_18.py`).  W3 is the same case run to ~20 eddy turn
 H100s, which no single job's wall clock can hold, so this driver differs from that one in exactly
 three ways and in nothing else:
 
-  1. **it checkpoints and restarts** — velocity + every marker's OWN colour (`vof_block_colour` /
+  1. **it checkpoints and restarts** — velocity + every marker's OWN colour (`vof_block_color` /
      `enable_vof_blocks_from_colours`, added for this rung: re-seeding from the union field is
      NOT exact once two markers touch, WO-W12 open item 5),
   2. **it accumulates the statistics across chunks** (running sums live in the checkpoint), with an
@@ -337,7 +337,7 @@ def block_state(s):
     out = []
     for b in s.vof_block_stats():
         lo, hi = b["lo"], b["hi"]
-        c = s.vof_block_colour(b["id"])
+        c = s.vof_block_color(b["id"])
         out.append(([lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]], np.asfortranarray(c)))
     return out
 

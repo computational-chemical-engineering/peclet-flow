@@ -618,7 +618,7 @@ A block's only state is its own inner colour (everything else is either replicat
 or recomputed every step), so `{box, colour}` per marker is a complete and exact checkpoint:
 
 ```python
-c   = s.vof_block_colour(id)                       # the marker's OWN (nx,ny,nz) inner colour
+c   = s.vof_block_color(id)                        # the marker's OWN (nx,ny,nz) inner colour
 s.enable_vof_blocks_from_colours(boxes, colours)   # restart the container from those
 ```
 

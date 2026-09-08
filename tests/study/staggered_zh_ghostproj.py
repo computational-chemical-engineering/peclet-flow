@@ -38,7 +38,7 @@ def drag(N, ghost, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=40
     s.set_pressure_pcg(True, 400, 1e-10)
     if ghost:
         s.set_ghost_projection(True)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(sdf, cutcell_pressure=True)
     prev, warm, um, t0 = 0.0, None, [], time.time()
     for it in range(max_steps):
         s.step()

@@ -50,12 +50,11 @@ def run(nx, ny, nz, arm, L, cfg):
     s.set_velocity_solver_params(cfg["vel_sweeps"])
     s.set_pressure_multigrid(True, levels=levels)
     s.set_pressure_pcg(True, cfg["pcg_maxit"], cfg["pcg_rtol"])
-    cx, cy, cz = s.cell_centres()
+    cx, cy, cz = s.cell_centers()
     c = 0.5 * L
     X, Y, Z = np.meshgrid(cx, cy, cz, indexing="ij")
     sdf = np.sqrt((X - c) ** 2 + (Y - c) ** 2 + (Z - c) ** 2) - R
-    s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True,
-                pressure_coarse=cfg["coarse"])
+    s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
 
     t0 = time.time()
     prev, steps, p_iters = 0.0, 0, []

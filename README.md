@@ -52,7 +52,7 @@ CMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" pip install .   # -> peclet
 # Or a dev cmake build (nanobind found via the active interpreter, no cmakedir needed):
 cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" && cmake --build build -j
 # distributed flow build (opt-in MPI):
-cmake -S . -B build_mpi -DCFD_BUILD_MPI=ON -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" \
+cmake -S . -B build_mpi -DPECLET_FLOW_MPI=ON -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" \
   && cmake --build build_mpi -j
 ```
 

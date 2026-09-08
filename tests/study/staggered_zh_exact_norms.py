@@ -158,7 +158,7 @@ def run(N, scheme, warm_tol=1e-7, tail=40, max_steps=5000, dt=80.0):
     else:
         mo, ro = {"g22": (2, 2), "g11": (1, 1), "g12": (1, 2)}[scheme]
         s.set_ghost_projection(True, matrix_order=mo, rhs_order=ro)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(sdf, cutcell_pressure=True)
     prev, warm, um, t0 = 0.0, None, [], time.time()
     for it in range(max_steps):
         s.step()

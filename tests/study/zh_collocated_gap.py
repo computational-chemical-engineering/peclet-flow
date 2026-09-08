@@ -41,7 +41,7 @@ def drag(N, kind, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=400
             s.set_collocated_scheme(kind)
         else:
             s.set_face_interp({"gauge-exact": 9, "plain": 0}[kind])
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(sdf, cutcell_pressure=True)
     prev, warm, um, t0 = 0.0, None, [], time.time()
     for it in range(max_steps):
         s.step()

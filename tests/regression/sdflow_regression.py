@@ -132,7 +132,7 @@ def run_case(name, N, cfg, quiet=True, solver="staggered", scheme="gauge-exact")
     if solver == "colocated":
         s.set_collocated_scheme(scheme)      # ALWAYS explicit: baselines pin schemes, not defaults
         # (the shipped default is AUTO = ghost since 2026-08-25)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse=cfg["coarse"])
+    s.set_solid(sdf, cutcell_pressure=True)
 
     deep_solid = sdf < -2.0
     t0 = time.time()

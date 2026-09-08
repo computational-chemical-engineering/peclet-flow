@@ -1,4 +1,4 @@
-# Python packaging for the `sdflow` CFD solver (pore-network extraction lives in its own
+# Python packaging for the `peclet.flow` CFD solver (pore-network extraction lives in its own
 # peclet-pnm package since 2026-07).
 #
 # `pip install .` builds the Kokkos extension via scikit-build-core and installs it as
@@ -13,8 +13,11 @@
 #   # NVIDIA GPU (Snellius) — put nvcc on PATH first:
 #   CMAKE_PREFIX_PATH=/path/to/extern/install/nvidia-cuda pip install .
 #
-# The Python module is single-rank; the multi-rank MPI solver is exercised by the C++ tests/kokkos_mpi
-# suite. See ../docs/DEPLOYMENT.md for the full environment matrix and HPC/container recipes.
+# The default module is single-rank. Configuring with -DPECLET_FLOW_MPI=ON (e.g.
+# `pip install . -C cmake.define.PECLET_FLOW_MPI=ON`) links MPI and exposes Solver.init_mpi / rank /
+# size and the module-level mpi_block() -- the distributed step, bit-exact to single-rank -- which the
+# C++ tests/kokkos_mpi suite validates at np = 1, 2, 4. See ../docs/DEPLOYMENT.md for the full
+# environment matrix and HPC/container recipes.
 
 [build-system]
 requires = ["scikit-build-core>=0.8", "nanobind>=2.0"]

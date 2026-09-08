@@ -49,7 +49,7 @@ def run(case, N, solver="staggered", re=0.0, mu=0.1, F=1e-3, dt=60.0, max_steps=
     if re>0: s.set_implicit_advection(True)
     s.set_velocity_solver_params(80)
     s.set_pressure_multigrid(True,levels=lv); s.set_pressure_pcg(True,300,1e-8)
-    s.set_solid(sdf,cutcell_pressure=True,pressure_coarse="rediscretized")
+    s.set_solid(sdf,cutcell_pressure=True)
     t0=time.time(); prev=0.0; steps=0; piters=[]
     for it in range(max_steps):
         s.step(); steps+=1; piters.append(s.last_pressure_iterations())

@@ -20,7 +20,7 @@ def run(N, mode, mu=0.1, F=0.01, dt=50.0, max_steps=1500):
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(F, 0, 0); s.set_advection(False)
     s.set_velocity_solver_params(200); s.set_pressure_multigrid(True, levels=lv)
     s.set_pressure_pcg(True, 400, 1e-11); s.set_face_interp(mode)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(sdf, cutcell_pressure=True)
     prev = 0.0
     for it in range(max_steps):
         s.step(); u = float(s.get_u().max())

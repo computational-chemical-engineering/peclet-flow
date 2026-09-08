@@ -58,7 +58,7 @@ def run(sdf, mode, dt, vcyc=16, levels=4, mu=0.1, f=1e-3, steps=600, tol=1e-7):
         s.set_velocity_multigrid(True, levels, vcyc)          # IBM -> staircase coarse op (the default)
     plv = max(2, int(np.log2(N)) - 1)
     s.set_pressure_multigrid(True, levels=plv); s.set_pressure_pcg(True, max_iter=300, rtol=1e-9)
-    s.set_solid(sdf, cutcell_pressure=True, pressure_coarse="rediscretized")
+    s.set_solid(sdf, cutcell_pressure=True)
     prev = 0.0
     for it in range(steps):
         s.step()
