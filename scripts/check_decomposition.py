@@ -111,7 +111,10 @@ def predict(args):
     gx, gy, gz = args.grid
     for np_ in args.np:
         for tele in (False, True):
-            rows = flow.predict_hierarchy(gx, gy, gz, np_, args.levels, tele)
+            # --decomp-levels must reach predict_hierarchy: it is a pure function with no process
+            # state to read since flow ad917b1, so omitting it predicts the ALIGNED hierarchy.
+            rows = flow.predict_hierarchy(gx, gy, gz, np_, args.levels, tele,
+                                          decomposition_levels=args.decomp_levels)
             cg = rows[-1][0]
             print(f"\n{gx}x{gy}x{gz} np={np_} levels={args.levels} telescope={'ON' if tele else 'off'}"
                   f" -> {len(rows)} levels, coarsest {cg[0]}x{cg[1]}x{cg[2]}, "
@@ -145,6 +148,11 @@ def main():
             args.grid = [int(v) for v in args.grid.split(",")]
         if isinstance(args.np, str):
             args.np = [int(v) for v in args.np.split(",")]
+        # In --predict, --mode selects the depth (it can list several). --decomp-levels is the
+        # run-mode flag; honour it when the user gave it and left --mode at its default, rather
+        # than silently overwriting it below.
+        if args.decomp_levels and str(args.mode) == "0":
+            args.mode = str(args.decomp_levels)
         for spec in (args.mode if isinstance(args.mode, list) else str(args.mode).split(",")):
             label, lv = mode_spec(spec, args.levels)
             args.decomp_levels = int(lv)
