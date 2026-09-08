@@ -1,7 +1,7 @@
 name: CI
 
 # Host (Kokkos OpenMP/Serial) CI for peclet.flow — suite/docs/QUALITY_PLAN.md §3.D ("CI that is honest"):
-#   * build-test : the single-rank module + the 44 kernel ctests (tests/kokkos) + the D3 env-knob guard
+#   * build-test : the single-rank module + the 43 non-bench kernel ctests (tests/kokkos) + the D3 env-knob guard
 #                  + the accuracy/efficiency regression suite + the three canonical verify scripts, all
 #                  from ONE tree built with
 #                  -DPECLET_FLOW_BUILD_TESTS=ON. `ctest -LE bench` — the `bench`-labelled timing instruments
