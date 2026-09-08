@@ -91,7 +91,7 @@ singular (no outflow). `set_pressure_graph_amg` propagates to the MG immediately
 | GraphAMG bottom | on for porous+drag | `set_pressure_graph_amg` |
 | d(ε)/dt source in the projection | on | `set_porous_deps_dt` |
 | pressure under-relaxation | off (ω=1) | `set_pressure_underrelax` |
-| void-fraction floor | 0.4 (≈ random-close-packing voidage) | `CfdDem(eps_min=…)` |
+| void-fraction floor | 0.25 (the driver default; 0.4 under-predicted dense-bed drag ~3×, 0.05 detonated beds) | `CfdDem(eps_min=…)` |
 
 ## 5. Validation
 
