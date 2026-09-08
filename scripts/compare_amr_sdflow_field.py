@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# UNMAINTAINED: written against the retired tpx_amr module; the import and the Octree constructor
+# were rewritten to the peclet.core.amr API (best effort, not re-run).
 """Localize the ~1% sdflow-collocated vs AMR converged-k difference: run both on the SAME
 registration-matched SC sphere and compare the converged velocity fields cell-by-cell. Is the
 difference at the cut cells (projection/openness) or in the bulk (base operator)?
@@ -41,12 +43,11 @@ def run_sdflow():
 
 
 def run_amr():
-    sys.path.insert(0, os.path.join(HERE, "..", "..", "transport-core", "python", "build"))
-    import tpx_amr
+    from peclet.core import amr
     def sph(x, y, z):
         return ((x - c) ** 2 + (y - c) ** 2 + (z - c) ** 2) ** 0.5 - R
-    oct = tpx_amr.Octree([N, N, N], 0, [-0.5, -0.5, -0.5], 1.0)
-    fl = tpx_amr.Flow(oct, 1.0, mu, dt); fl.set_body_force(f, 0, 0); fl.set_advection(False); fl.set_solid(sph)
+    oct = amr.Octree([N, N, N], lmax=0, origin=[-0.5, -0.5, -0.5], spacing=1.0)
+    fl = amr.Flow(oct, 1.0, mu, dt); fl.set_body_force(f, 0, 0); fl.set_advection(False); fl.set_solid(sph)
     # The device Stokes MG-PCG amplifies a near-nullspace mode over MANY steps; 120 steps is the
     # converged plateau (matches the registration study), well before the blow-up.
     for _ in range(120):

@@ -4,7 +4,7 @@
 # the cfd Kokkos operator headers. Build:
 #   cmake -S tests/kokkos_mpi -B build_kmpi \
 #         -DCMAKE_PREFIX_PATH="<suite>/extern/install/<backend>" \
-#         -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun -DTPX_DIR=<suite>/core
+#         -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun -DPECLET_CORE_DIR=<suite>/core
 #   cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure
 cmake_minimum_required(VERSION 3.24)
 project(cfd_kokkos_mpi LANGUAGES CXX)
@@ -18,7 +18,7 @@ endif()
 find_package(Kokkos CONFIG REQUIRED)
 find_package(MPI REQUIRED)
 
-set(TPX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../core" CACHE PATH "core repo")
+set(PECLET_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../core" CACHE PATH "core repo")
 if(NOT MPIEXEC_EXECUTABLE)
   set(MPIEXEC_EXECUTABLE /usr/bin/mpirun)
 endif()
@@ -29,7 +29,7 @@ foreach(t distributed_diffusion distributed_pressure distributed_mg)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-    ${TPX_DIR}/include)
+    ${PECLET_CORE_DIR}/include)
   target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
   foreach(np 1 2 4)
     add_test(NAME ${t}_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_${t}>)
@@ -45,7 +45,7 @@ foreach(t cutcellmg_mpi telescope_mpi telescope_varrho_mpi velocitymg_mpi veloci
         vof_blocks_ns_mpi vof_redistribute_mpi)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${TPX_DIR}/include)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_DIR}/include)
   target_compile_definitions(test_${t} PRIVATE PECLET_FLOW_MPI)
   target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
   foreach(np 1 2 4)
@@ -61,7 +61,7 @@ endforeach()
 # PECLET_FLOW_MPI; it shares the scene builders with the single-rank battery in tests/kokkos.
 add_executable(test_vof_blocks_mpi test_vof_blocks_mpi.cpp)
 target_include_directories(test_vof_blocks_mpi PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${TPX_DIR}/include)
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${PECLET_CORE_DIR}/include)
 target_compile_definitions(test_vof_blocks_mpi PRIVATE PECLET_FLOW_MPI)
 target_link_libraries(test_vof_blocks_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX)
 # np 8 as well since rung W1 (WO-W12): the 64-bubble swarm's LPT assignment and its migration are
@@ -73,7 +73,7 @@ endforeach()
 
 add_executable(test_vof_advect_mpi test_vof_advect_mpi.cpp)
 target_include_directories(test_vof_advect_mpi PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${TPX_DIR}/include)
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${PECLET_CORE_DIR}/include)
 target_link_libraries(test_vof_advect_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX)
 foreach(np 1 2 4)
   add_test(NAME vof_advect_mpi_np${np}

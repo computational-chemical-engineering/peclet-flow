@@ -19,7 +19,7 @@
 ///
 /// Arrays cross the boundary through the shared zero-copy bridge (peclet::core::python, in core):
 /// fields come back as Fortran-order (nx,ny,nz) float64 NumPy arrays referencing the field buffer,
-/// and inputs are read as flat x-fastest buffers. See tpx/python/ndarray_interop.hpp.
+/// and inputs are read as flat x-fastest buffers. See peclet/core/python/ndarray_interop.hpp.
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
@@ -1110,7 +1110,7 @@ static void bind_solver(nb::module_& m, const char* name) {
           "3.2e-5 liquid volume per step and the conserved functional drifts 1.3e-8 in 30 steps; "
           "with it on the clip stops firing.")
       .def(
-          "vof_filled_colour", [](S& s) { return field_out(s, s.getVofFilledColour()); },
+          "vof_filled_color", [](S& s) { return field_out(s, s.getVofFilledColour()); },
           "The colour field INCLUDING the neutral solid-band fill — what the MYC and "
           "height-function stencils actually read — as a Fortran-order (nx,ny,nz) array. "
           "get_vof()/'C' is the canonical field and carries EXACTLY 0 in solid cells; the fill is "
@@ -1584,9 +1584,9 @@ static void bind_solver(nb::module_& m, const char* name) {
           "of the container -- and it is the only exact one: re-seeding from the union color "
           "field (enable_vof_blocks_from_field) hands each of two TOUCHING markers a slice of the "
           "other, because that gather is a copy of the union clipped to the seed extent. "
-          "enable_vof_blocks_from_colours(boxes, colours) restarts the container from these.")
+          "enable_vof_blocks_from_colors(boxes, colors) restarts the container from these.")
       .def(
-          "enable_vof_blocks_from_colours",
+          "enable_vof_blocks_from_colors",
           [](S& s, const std::vector<std::array<int, 6>>& boxes, nb::list colours) {
             std::vector<std::vector<double>> c;
             c.reserve(nb::len(colours));
@@ -1596,7 +1596,7 @@ static void bind_solver(nb::module_& m, const char* name) {
             }
             s.enableVofBlocksFromColours(boxes, c);
           },
-          nb::arg("boxes"), nb::arg("colours"),
+          nb::arg("boxes"), nb::arg("colors"),
           "Restart the block container from a vof_block_color() checkpoint: one marker per "
           "(lo_x, lo_y, lo_z, hi_x, hi_y, hi_z) INNER box (exactly the 'lo'/'hi' of "
           "vof_block_stats(), NOT grown by the margin again) with its colour written directly. "

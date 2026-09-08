@@ -19,7 +19,7 @@
 //   3. The theta pass writes solid cells at ghost depth <= 2 like WO-Q's pass 1, so the shrinking
 //      depth budget and the second exchange still have to compose.
 //
-// Gates: the filled colour (`vof_filled_colour`) pointwise BITWISE at np 1/2/4 against a full-grid
+// Gates: the filled colour (`vof_filled_color`) pointwise BITWISE at np 1/2/4 against a full-grid
 // single-rank reference, the band census identical, and a coupled surface-tension run at the
 // reduction floor.
 #include <mpi.h>

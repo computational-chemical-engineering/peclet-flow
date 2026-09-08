@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# UNMAINTAINED: written against the retired tpx_amr module and the sdflow-era module names; the import
+# and the Octree constructor were rewritten to the peclet.core.amr API (best effort, not re-run).
 """Grid-convergence of Stokes permeability through an SC sphere array (Zick & Homsy ground truth),
 comparing how the SUPERFICIAL VELOCITY U_sup = <u_x> is computed across discretizations:
 
@@ -6,7 +8,7 @@ comparing how the SUPERFICIAL VELOCITY U_sup = <u_x> is computed across discreti
   * collocated/cell — sdflow.SolverColocated: <u_x> over the CELL-centered velocity (the default).
   * collocated/face — sdflow.SolverColocated: <u_x> over the projected, divergence-free MAC FACE field
                       (get_uf). Same solve as collocated/cell — only the averaging location differs.
-  * amr/uniform     — transport-core tpx_amr.Flow (collocated cut-cell) on a UNIFORM octree (lmax=0).
+  * amr/uniform     — peclet.core.amr.Flow (collocated cut-cell) on a UNIFORM octree (lmax=0).
 
 Motivation: the staggered solver is ~1% more accurate per grid than collocated on permeability. The cell
 average is biased by the openness-aware central-difference pressure correction (projectCorrectCenter) at cut
@@ -83,10 +85,10 @@ def run_sdflow(SolverCls, N, phi, mu=0.1, f=1e-3, dt=60.0, max_steps=600, tol=1e
 
 
 def run_amr(N, phi, mu=0.1, f=1e-3, dt=60.0, steps=100, mom=120, pres=6, psw=2):
-    import tpx_amr
+    from peclet.core import amr
     _, R, c = sc_sdf(N, phi)
-    oct = tpx_amr.Octree([N, N, N], 0, [0.0, 0.0, 0.0], 1.0)
-    fl = tpx_amr.Flow(oct, 1.0, mu, dt)
+    oct = amr.Octree([N, N, N], lmax=0, origin=[0.0, 0.0, 0.0], spacing=1.0)
+    fl = amr.Flow(oct, 1.0, mu, dt)
     fl.set_body_force(f, 0, 0); fl.set_advection(False)
     fl.set_solid(lambda x, y, z: ((x - c) ** 2 + (y - c) ** 2 + (z - c) ** 2) ** 0.5 - R)
     for _ in range(steps):

@@ -7,7 +7,7 @@ H100s, which no single job's wall clock can hold, so this driver differs from th
 three ways and in nothing else:
 
   1. **it checkpoints and restarts** — velocity + every marker's OWN colour (`vof_block_color` /
-     `enable_vof_blocks_from_colours`, added for this rung: re-seeding from the union field is
+     `enable_vof_blocks_from_colors`, added for this rung: re-seeding from the union field is
      NOT exact once two markers touch, WO-W12 open item 5),
   2. **it accumulates the statistics across chunks** (running sums live in the checkpoint), with an
      explicit transient window that is discarded, and
@@ -412,7 +412,7 @@ def main():
     if blocks is None:
         s.enable_vof_blocks_from_field(boxes)
     else:
-        s.enable_vof_blocks_from_colours([b for b, _ in blocks], [c for _, c in blocks])
+        s.enable_vof_blocks_from_colors([b for b, _ in blocks], [c for _, c in blocks])
     s.enable_vof_block_csf()
     st0 = s.vof_block_stats()
     vol0 = [b["volume"] for b in st0]

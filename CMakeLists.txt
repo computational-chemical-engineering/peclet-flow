@@ -46,7 +46,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(PecletDeps)
 peclet_require_kokkos()
 peclet_require_nanobind()
-peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../core" TPX_INC)
+peclet_sibling_include(peclet-core "${PECLET_CORE_TAG}" "../core" PECLET_CORE_INCLUDE)
 
 # peclet_flow -- the cut-cell IBM Navier-Stokes solver module (target; imports as peclet.flow).
 # NB_STATIC: bundle nanobind's runtime into the module (no shared libnanobind to ship); the Kokkos
@@ -64,7 +64,7 @@ set_target_properties(peclet_flow PROPERTIES OUTPUT_NAME _flow   # -> peclet.flo
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/flow")
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/__init__.py COPYONLY)
-target_include_directories(peclet_flow PRIVATE src "${TPX_INC}")
+target_include_directories(peclet_flow PRIVATE src "${PECLET_CORE_INCLUDE}")
 target_link_libraries(peclet_flow PRIVATE Kokkos::kokkos)
 # HIP/lld strictness: nanobind's --gc-sections can drop Kokkos SharedAllocationRecord<HIPSpace> vtables
 # it only later finds referenced -> "undefined hidden symbol: vtable". Keep sections on HIP (nvcc/ld is lenient).
@@ -78,7 +78,7 @@ if(Kokkos_ENABLE_HIP)
 endif()
 
 # Distributed (MPI) flow: compile the binding TU with the halo-gating flag + link MPI (the core grid
-# halo lives in the header-only TPX_INC). Mirrors dem's PECLET_DEM_MPI wiring; OFF keeps the module untouched.
+# halo lives in the header-only PECLET_CORE_INCLUDE). Mirrors dem's PECLET_DEM_MPI wiring; OFF keeps the module untouched.
 if(PECLET_FLOW_MPI)
   find_package(MPI REQUIRED COMPONENTS CXX)
   target_compile_definitions(peclet_flow PRIVATE PECLET_FLOW_MPI=1)

@@ -24,9 +24,9 @@ message(STATUS "flow/mg_precond: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES})")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../../cmake")
 include(PecletDeps)
-peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../../../../core" CORE_INC)
+peclet_sibling_include(peclet-core "${PECLET_CORE_TAG}" "../../../../core" PECLET_CORE_INCLUDE)
 
 add_executable(mg_dense_precond mg_dense_precond.cpp)
 target_include_directories(mg_dense_precond PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(mg_dense_precond PRIVATE Kokkos::kokkos)

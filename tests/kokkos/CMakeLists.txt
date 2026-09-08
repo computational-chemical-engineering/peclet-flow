@@ -18,11 +18,11 @@ message(STATUS "cfd/kokkos: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES})")
 # the sibling checkout in the suite, or FetchContent at the release pin on a standalone CI checkout.
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake")
 include(PecletDeps)
-peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../../../core" CORE_INC)
+peclet_sibling_include(peclet-core "${PECLET_CORE_TAG}" "../../../core" PECLET_CORE_INCLUDE)
 # WO-W0: the container-free VoF kernels moved to core (peclet::core::vof) and flow's src/vof/*.hpp
 # are thin includes of them, so ANY target that compiles a src/ header needs the core include path,
 # not only the ones that reach for the field registry. Directory-wide (the headers are header-only).
-include_directories("${CORE_INC}")
+include_directories("${PECLET_CORE_INCLUDE}")
 
 enable_testing()
 add_executable(test_reductions test_reductions.cpp)
@@ -33,35 +33,35 @@ add_test(NAME reductions COMMAND test_reductions)
 # Named field registry on the Solver (includes flow_ibm.hpp -> needs the core headers).
 add_executable(test_field_registry test_field_registry.cpp)
 target_include_directories(test_field_registry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_field_registry PRIVATE Kokkos::kokkos)
 add_test(NAME field_registry COMMAND test_field_registry)
 
 # Scalar transport (advection-diffusion): 2nd-order diffusion operator + advection conservation.
 add_executable(test_scalar_transport test_scalar_transport.cpp)
 target_include_directories(test_scalar_transport PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_scalar_transport PRIVATE Kokkos::kokkos)
 add_test(NAME scalar_transport COMMAND test_scalar_transport)
 
 # Property closures + per-cell body force (LinearMix / Boussinesq / Arrhenius vs host oracle).
 add_executable(test_closures test_closures.cpp)
 target_include_directories(test_closures PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_closures PRIVATE Kokkos::kokkos)
 add_test(NAME closures COMMAND test_closures)
 
 # Variable-viscosity diffusion stencil (ibmBuildDiffusionVar + FaceProps means vs oracle).
 add_executable(test_variable_mu test_variable_mu.cpp)
 target_include_directories(test_variable_mu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_variable_mu PRIVATE Kokkos::kokkos)
 add_test(NAME variable_mu COMMAND test_variable_mu)
 
 # Variable-density projection: hydrostatic acid test (ratio 3 + 1e3) + uniform-rho reduction.
 add_executable(test_vardensity_projection test_vardensity_projection.cpp)
 target_include_directories(test_vardensity_projection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vardensity_projection PRIVATE Kokkos::kokkos)
 add_test(NAME vardensity_projection COMMAND test_vardensity_projection)
 
@@ -70,7 +70,7 @@ add_test(NAME vardensity_projection COMMAND test_vardensity_projection)
 # PECLET_FLOW_MG_BCGHOST=0 reinstates the pre-repair coarse ghost and makes every PCG row fail.
 add_executable(test_pressure_wallbounded test_pressure_wallbounded.cpp)
 target_include_directories(test_pressure_wallbounded PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_pressure_wallbounded PRIVATE Kokkos::kokkos)
 add_test(NAME pressure_wallbounded COMMAND test_pressure_wallbounded)
 
@@ -84,7 +84,7 @@ add_test(NAME vof_plic COMMAND test_vof_plic)
 # regression, the divergence source at ratio 100, and the 1-D Stefan problem.
 add_executable(test_vof_phase_change test_vof_phase_change.cpp)
 target_include_directories(test_vof_phase_change PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_phase_change PRIVATE Kokkos::kokkos)
 add_test(NAME vof_phase_change COMMAND test_vof_phase_change)
 
@@ -111,10 +111,10 @@ target_link_libraries(test_transfer PRIVATE Kokkos::kokkos)
 add_test(NAME transfer COMMAND test_transfer)
 
 add_executable(test_cutcell test_cutcell.cpp)
-# CORE_INC: the P1 exact-apply block includes mac_cutcell_mg.hpp for MReal/FPV (the operator
+# PECLET_CORE_INCLUDE: the P1 exact-apply block includes mac_cutcell_mg.hpp for MReal/FPV (the operator
 # storage type it measures against), which pulls in the core GraphAMG/halo headers.
 target_include_directories(test_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_cutcell PRIVATE Kokkos::kokkos)
 add_test(NAME cutcell COMMAND test_cutcell)
 
@@ -167,7 +167,7 @@ add_test(NAME poiseuille COMMAND test_poiseuille)
 # mirror-periodic twin (the pressure solve).
 add_executable(test_freeslip test_freeslip.cpp)
 target_include_directories(test_freeslip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_freeslip PRIVATE Kokkos::kokkos)
 add_test(NAME freeslip COMMAND test_freeslip)
 
@@ -175,7 +175,7 @@ add_test(NAME freeslip COMMAND test_freeslip)
 # zero-gradient-outflow regime (reversed outlet with the backflow stabilization off).
 add_executable(test_outflow_backflow test_outflow_backflow.cpp)
 target_include_directories(test_outflow_backflow PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_outflow_backflow PRIVATE Kokkos::kokkos)
 add_test(NAME outflow_backflow COMMAND test_outflow_backflow)
 
@@ -184,14 +184,14 @@ add_test(NAME outflow_backflow COMMAND test_outflow_backflow)
 # PECLET_VOF_TWOPHASE_LONG=1 runs the conservation gate for 1000 steps instead of 200.
 add_executable(test_vof_twophase test_vof_twophase.cpp)
 target_include_directories(test_vof_twophase PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_twophase PRIVATE Kokkos::kokkos)
 add_test(NAME vof_twophase COMMAND test_vof_twophase)
 
 # VoF rung V2b (WO-K): momentum-consistent transport of rho^c u_c on the half-shifted MAC CVs.
 add_executable(test_vof_momentum test_vof_momentum.cpp)
 target_include_directories(test_vof_momentum PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_momentum PRIVATE Kokkos::kokkos)
 add_test(NAME vof_momentum COMMAND test_vof_momentum)
 
@@ -206,7 +206,7 @@ add_test(NAME vof_curvature COMMAND test_vof_curvature)
 # The loud gate is P1: a stationary droplet with a constant curvature must stay at machine zero.
 add_executable(test_vof_surface_tension test_vof_surface_tension.cpp)
 target_include_directories(test_vof_surface_tension PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_surface_tension PRIVATE Kokkos::kokkos)
 add_test(NAME vof_surface_tension COMMAND test_vof_surface_tension)
 
@@ -216,13 +216,13 @@ add_test(NAME vof_surface_tension COMMAND test_vof_surface_tension)
 # WO-V9: the profiling instrument is inert (timers on/off and worklist on/off bitwise).
 add_executable(test_vof_timing test_vof_timing.cpp)
 target_include_directories(test_vof_timing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_timing PRIVATE Kokkos::kokkos)
 add_test(NAME vof_timing COMMAND test_vof_timing)
 
 add_executable(test_vof_cutcell test_vof_cutcell.cpp)
 target_include_directories(test_vof_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CMAKE_CURRENT_SOURCE_DIR} ${CORE_INC})
+                           ${CMAKE_CURRENT_SOURCE_DIR} ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_cutcell PRIVATE Kokkos::kokkos)
 add_test(NAME vof_cutcell COMMAND test_vof_cutcell)
 
@@ -230,7 +230,7 @@ add_test(NAME vof_cutcell COMMAND test_vof_cutcell)
 # flat-wall idempotence that makes the prescribed contact angle a fixed point of the fill.
 add_executable(test_vof_wetting test_vof_wetting.cpp)
 target_include_directories(test_vof_wetting PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_wetting PRIVATE Kokkos::kokkos)
 add_test(NAME vof_wetting COMMAND test_vof_wetting)
 
@@ -239,7 +239,7 @@ add_test(NAME vof_wetting COMMAND test_vof_wetting)
 # and the two through the solver on a kinematic advancing/receding pair.
 add_executable(test_vof_wetting_dynamic test_vof_wetting_dynamic.cpp)
 target_include_directories(test_vof_wetting_dynamic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_wetting_dynamic PRIVATE Kokkos::kokkos)
 add_test(NAME vof_wetting_dynamic COMMAND test_vof_wetting_dynamic)
 
@@ -248,7 +248,7 @@ add_test(NAME vof_wetting_dynamic COMMAND test_vof_wetting_dynamic)
 # variable-density outflow correction. PECLET_VOF_BC_QUICK=1 shortens the budget run.
 add_executable(test_vof_bc test_vof_bc.cpp)
 target_include_directories(test_vof_bc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_bc PRIVATE Kokkos::kokkos)
 add_test(NAME vof_bc COMMAND test_vof_bc)
 
@@ -266,13 +266,13 @@ add_test(NAME poiseuille_ibm COMMAND test_poiseuille_ibm)
 # block_exchange.hpp). Standalone -- its own advectors and its own serial exchange, no Solver.
 add_executable(test_vof_blocks test_vof_blocks.cpp)
 target_include_directories(test_vof_blocks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_blocks PRIVATE Kokkos::kokkos)
 add_test(NAME vof_blocks COMMAND test_vof_blocks)
 
 add_executable(test_vof_collocated test_vof_collocated.cpp)
 target_include_directories(test_vof_collocated PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CMAKE_CURRENT_SOURCE_DIR} ${CORE_INC})
+                           ${CMAKE_CURRENT_SOURCE_DIR} ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_collocated PRIVATE Kokkos::kokkos)
 add_test(NAME vof_collocated COMMAND test_vof_collocated)
 
@@ -282,7 +282,7 @@ add_test(NAME vof_collocated COMMAND test_vof_collocated)
 # must converge at the cubic rate. The level-table and V-cycle-rate parts of G4 are commit C3.
 add_executable(test_cutcellmg_aniso test_cutcellmg_aniso.cpp)
 target_include_directories(test_cutcellmg_aniso PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${CORE_INC})
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_cutcellmg_aniso PRIVATE Kokkos::kokkos)
 add_test(NAME cutcellmg_aniso COMMAND test_cutcellmg_aniso)
 
@@ -292,7 +292,7 @@ add_test(NAME cutcellmg_aniso COMMAND test_cutcellmg_aniso)
 #  units_scale_invariance — the same physical problem in two unit systems 1000x apart agrees to
 #                          1e-13 relative, on a sampled SDF and on an analytic scene.
 add_executable(test_units test_units.cpp)
-target_include_directories(test_units PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CORE_INC})
+target_include_directories(test_units PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_units PRIVATE Kokkos::kokkos)
 add_test(NAME units_identity COMMAND test_units identity)
 add_test(NAME units_scale_invariance COMMAND test_units scale)

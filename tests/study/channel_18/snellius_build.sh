@@ -40,7 +40,7 @@ cmake -S "$FLOW" -B "$BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$SUITE/extern/install/nvidia-cuda" \
   -DPECLET_SIBLING_PECLET_CORE="$CORE" \
-  -DTPX_DIR="$CORE" \
+  -DPECLET_CORE_DIR="$CORE" \
   -DPython_EXECUTABLE="$PY" \
   -DPython_INCLUDE_DIR="$INC"
 

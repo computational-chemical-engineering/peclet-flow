@@ -7376,7 +7376,7 @@ class Solver {
   // independence: it must be pointwise BITWISE across np (`tests/kokkos_mpi/test_vof_cutcell_mpi`).
   std::vector<double> getVofFilledColour() {
     if (!vofEnabled_)
-      throw std::runtime_error("vof_filled_colour: VoF is not enabled");
+      throw std::runtime_error("vof_filled_color: VoF is not enabled");
     bridgeColourToVof();
     CCField t("vofFilled", n_);
     copyInner(t, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
@@ -8063,7 +8063,7 @@ class Solver {
                                   const std::vector<std::vector<double>>& colours) {
     if (boxes.size() != colours.size())
       throw std::runtime_error(
-          "enable_vof_blocks_from_colours: one colour array per box is required");
+          "enable_vof_blocks_from_colors: one color array per box is required");
     prepareVofBlocks();
     for (std::size_t i = 0; i < boxes.size(); ++i) {
       vof::VofBox bb;

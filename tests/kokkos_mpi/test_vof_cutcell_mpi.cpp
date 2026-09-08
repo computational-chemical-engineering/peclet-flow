@@ -15,7 +15,7 @@
 //      at ghost depth <= 3-k and reads only fluid cells or cells filled in an EARLIER pass),
 //      followed by a second exchange. The shrinking budget is exactly what makes every read fall
 //      inside the halo the exchange has already made owner-consistent. Gated bitwise, pointwise,
-//      through `vof_filled_colour()`.
+//      through `vof_filled_color()`.
 //
 //   3. THE OPENNESS-WEIGHTED FLUX ACROSS A RANK BOUNDARY. One flux per face, formed once, so the
 //      Weymouth-Yue telescoping — hence conservation — holds across the boundary too. The

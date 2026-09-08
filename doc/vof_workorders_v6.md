@@ -619,7 +619,7 @@ or recomputed every step), so `{box, colour}` per marker is a complete and exact
 
 ```python
 c   = s.vof_block_color(id)                        # the marker's OWN (nx,ny,nz) inner colour
-s.enable_vof_blocks_from_colours(boxes, colours)   # restart the container from those
+s.enable_vof_blocks_from_colors(boxes, colors)   # restart the container from those
 ```
 
 (`VofBlockSet::blockColourHost` / `seedBoxWithColour`, which seeds an INNER box directly — not the
@@ -5248,14 +5248,14 @@ the two logs are **identical line for line** after stripping only the build-dire
 lines of measured output on OpenMP, 416 on CUDA. 10/10 pass either side.
 
 Two build facts the move exposed, both fixed here:
-- `tests/kokkos/CMakeLists.txt` handed `${CORE_INC}` to only some targets (not `test_vof_plic`,
+- `tests/kokkos/CMakeLists.txt` handed `${PECLET_CORE_INCLUDE}` to only some targets (not `test_vof_plic`,
   `test_vof_advect`, `test_vof_curvature`). Since `src/vof/*.hpp` now include `peclet/core/vof/…`,
   **any** target that compiles a `src/` header needs the path; the fix is one directory-wide
-  `include_directories("${CORE_INC}")` next to `peclet_sibling_include`, not per-target patching.
+  `include_directories("${PECLET_CORE_INCLUDE}")` next to `peclet_sibling_include`, not per-target patching.
 - `peclet_sibling_include()` resolved the sibling only as `<source>/../core`, which cannot be
   pointed at a git WORKTREE — and worktrees are how this suite runs concurrent agents. It now
   honours `-DPECLET_SIBLING_PECLET_CORE=<repo root>` (unset ⇒ byte-identical behaviour). Every
-  build in this WO used `-DPECLET_SIBLING_PECLET_CORE=…/core-w0` / `-DTPX_DIR=…/core-w0`.
+  build in this WO used `-DPECLET_SIBLING_PECLET_CORE=…/core-w0` / `-DPECLET_CORE_DIR=…/core-w0`.
 - **A pre-existing merge artefact on `main`** (`tests/kokkos_mpi/CMakeLists.txt`, since before
   `518c2a5`): the gated `foreach` list closed with `vof_collocated_mpi)` and was followed by a
   DANGLING argument line `vof_surface_tension_mpi vof_cutcell_mpi vof_bc_mpi)`. CMake cannot parse

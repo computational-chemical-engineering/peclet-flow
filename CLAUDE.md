@@ -625,7 +625,7 @@ CFL 0.2): drift **7.7e-12** against a `max|div(open·u)|` floor of **3.0e-11**, 
 with) and it throws otherwise. New Python: `advect_vof(dt)` (kinematic advection with the current
 face velocity, no NS step — it **throws** unless the field is discretely divergence-free to 1e-10,
 because WY conservation is conditional on that), `set_vof_step_parity()`, `vof_has_geometry()`,
-`vof_filled_colour()`, `vof_geometry(which)`, `set_vof_cutcell_flux_clamp()`,
+`vof_filled_color()`, `vof_geometry(which)`, `set_vof_cutcell_flux_clamp()`,
 `set_vof_solid_colour_zero()`; `vof_diagnostics()` gains `volume` / `raw_volume` / `solid_sum` /
 `min_fluid` / `max_fluid` / `clipped_volume` / `cut_cells` / `solid_cells` / `clamped_faces`.
 `src/vof/cutcell.hpp` holds the container-free rules; the geometry branch in `advect_wy.hpp` and
@@ -1072,7 +1072,7 @@ cross-code comparison needs TBFsolver built and run.
 
 **Checkpoint/restart of the block container (rung W3).** `vof_block_color(id)` returns one
 marker's OWN inner colour as a Fortran-order `(nx,ny,nz)` array over its block box
-(`vof_block_stats()['lo'/'hi']`), and `enable_vof_blocks_from_colours(boxes, colours)` restarts the
+(`vof_block_stats()['lo'/'hi']`), and `enable_vof_blocks_from_colors(boxes, colors)` restarts the
 container from those. That colour is a block's ONLY state, so `{box, colour}` per marker is a
 COMPLETE checkpoint — and the only exact one: `enable_vof_blocks_from_field` gathers each marker out
 of the UNION field and clips it to the seed extent, so two markers in contact each take a slice of
