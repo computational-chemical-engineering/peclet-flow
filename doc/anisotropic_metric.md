@@ -241,7 +241,7 @@ aniso == true  :  ratio_a^L = 2   iff   a ∈ C^L   and   H_a^L < theta * min_{b
 ```
 
 **Always coarsen the finest coarsenable axis; defer an axis while it is already at least `theta`
-times coarser than the finest one.** `theta` is read once from `PECLET_FLOW_MG_ASPECT` (default
+times coarser than the finest one.** `theta` comes from `set_multigrid_aspect_threshold` (default
 `2.0`) — a measurement knob for the gate of §8.5, not a user setting. The rule is **engaged only on
 an anisotropic domain**: on an isotropic one the level table is today's by construction, including
 after a telescoping merge, where an axis that was blocked for some levels re-enters `C` with a
@@ -273,7 +273,7 @@ smaller `cfac` than its neighbours (an *operator* anisotropy on isotropic cells 
   in `(sqrt 2, 2)`, buying a coarse-level aspect of `≤ 1.41` instead of `≤ 2` at the price of an extra
   level with 2–4× the cells of a fully coarsened one. On the gate grid the two thresholds give the
   **same** hierarchy, so the gate cannot separate them; `theta = 2` is the cheaper default and
-  `PECLET_FLOW_MG_ASPECT=1.4142` is one run away if a stretched production case ever shows the
+  `set_multigrid_aspect_threshold(1.4142)` is one run away if a stretched production case ever shows the
   iteration count drifting with aspect ratio. Record that run in this note if it is made.
 - **Levels.** `nLevels_` (default 4, `set_pressure_multigrid(on, levels)`) keeps its meaning (a count
   of levels); the deferred axes consume levels, so a stretched hierarchy bottoms out on a finer grid
@@ -555,7 +555,7 @@ with `setOpenness(…, 1, 4, ¼)`; `levels = 6`, MG-PCG `rtol 1e-10`, 2/2 sweeps
 - **Rate (C3):** (a) all-fluid random mean-zero RHS: the residual reduction per V-cycle over cycles
   2–8 `≤ 0.2` (the isotropic `mg` test achieves ~0.1); (b) with the Zick & Homsy sphere openness,
   MG-PCG iterations to `1e-10` on the stretched grid `≤ cubic (same cell count) + 2` at `N = 32` and
-  `64`; (c) the same (b) with `PECLET_FLOW_MG_ASPECT=1e9` (i.e. today's full coarsening) must be
+  `64`; (c) the same (b) with `test_cutcellmg_aniso --theta=1e9` (i.e. today's full coarsening) must be
   **worse or equal** — the measurement that justifies §5; record all three counts in §10.
 - Under MPI (`tests/kokkos_mpi`): the stretched hierarchy at `np = 1, 2, 4` bit-exact across ranks
   for the same problem (the existing MPI pressure gate pattern).
@@ -574,7 +574,7 @@ count that changes; MPI np = 1 not bit-exact; a kernel that would need a differe
 | **C0** | U9 | this note | — |
 | **C1** | U10 | `UnitScales` tail (`hp, w, vol, aniso`), the snap-less `refreshUnitDerived` plumbing, §2 momentum sites incl. domain-BC folds, the `!aniso` legacy dispatch of the const-coeff smoother, `VelocityMG::setMetric`, scalar transport; **assert intact** | G0 + a stencil-level unit test in `test_stencils.cpp` (`ibmBuildDiffusion` / `buildConstAniso` with `w = (1, 4, ¼)` produce `AC = idiag + 2(bx+by+bz)` and the six off-diagonals, and `w = (1,1,1)` is bitwise today's) |
 | **C2** | U11 (weights) | §3 pressure weights at the three `setOpenness` sites and every correction / gradient kernel, `buildOpenness(hp)`, §4.2 census, the **snap + relaxed assert** (§1.4, admits the list of §7 minus the collocated policy and the hydro forces), `requireIsotropic` guards | G0, **G1**, G4-order |
-| **C3** | U11 (⚑ A) | `mgChooseRatio`, `setMetric` before `init`/`initMpi` in both MGs, `levelRatios()`, `PECLET_FLOW_MG_ASPECT` | G0, **G4** full (incl. MPI) |
+| **C3** | U11 (⚑ A) | `mgChooseRatio`, `setMetric` before `init`/`initMpi` in both MGs, `levelRatios()`, `setAspectThreshold` | G0, **G4** full (incl. MPI) |
 | **C4** | U12 (⚑ B) | §6.1–6.4 closures, slip length, `ibmVolfrac`, §4.4 forces; admits the collocated policy and the hydro forces | G0, **G2**, **G3** |
 | **C5** | docs | `flow/CLAUDE.md` "Physical domains and units" (anisotropic admitted, what Phase 3 still refuses), `suite/docs/CONVENTIONS.md` §7 one line, `PHYSICAL_UNITS_PLAN.md` §9.4 marked landed with the gate numbers of §10 | — |
 
@@ -662,7 +662,8 @@ today's decision, ratio 2 on every axis with `canA` true; with `aniso` true, rat
 `H[a] = hp[a] * cfac[a]` at that level. `CutcellMG::setMetric(hp)` and the extended
 `VelocityMG::setMetric(w, hp)` are called BEFORE `init`/`initMpi` at their single call sites in
 `flow_ibm.hpp` (`setSolidDevice`, and the velocity-MG build just above it) — trap 5.
-`theta` comes from `PECLET_FLOW_MG_ASPECT` (`mgAspectTheta()`, read once, default `2.0`).
+`theta` comes from `setAspectThreshold` (`CutcellMG::aspectTheta_` / `VelocityMG::aspectTheta_`,
+per object, default `2.0`; `Solver.set_multigrid_aspect_threshold` sets both).
 `levelRatios()` on both classes, `Solver.pressure_mg_level_ratios()` in Python.
 `coarsenAlignment`, `refineFactor`, `decomposition()` and the telescope trigger are UNCHANGED
 (§5.3, trap 6): `blocked` still reads `can()`/`evenOn()` alone.
@@ -695,7 +696,7 @@ today's decision, ratio 2 on every axis with `canA` true; with `aniso` true, rat
 | the SAME grid with no metric set (today's rule), N = 32 | `(2,2,2) (2,2,2) (2,2,2) (2,2,1) (1,2,1) (1,1,1)` |
 | cubic `(N, N, N)`, N = 16 / 32 / 64 | `(2,2,2)…(1,1,1)` — **bitwise the no-metric table**, asserted |
 
-`PECLET_FLOW_MG_ASPECT=1e9` reproduces the no-metric table exactly on every rung, which is what
+`--theta=1e9` reproduces the no-metric table exactly on every rung, which is what
 makes the ablation below a clean "today's rule" control.
 
 **G4 — the rate.** All host-openmp; nvidia-cuda identical to the digit.
@@ -981,7 +982,7 @@ carried on argument alone rather than on a measurement.
 | `5285aae` | U9 | this note | — |
 | `12cac0f` | U10 | the per-axis MOMENTUM fold `b_a = mu' w_a`, `AC = idiag + 2((bx+by)+bz)`, the `!aniso` smoother dispatch, `VelocityMG::setMetric`, scalar transport | `AC` bitwise the old `idiag + 6.0*beta` at `w = (1,1,1)`; `1.0700000524520874` at `w = (1,4,¼)` |
 | `735fb46` | U11 weights | the per-axis PRESSURE weight `w_a` at the three `setOpenness` sites and every correction / cell-gradient kernel, `buildOpenness(hp)`, the §4.2 census, the §1.4 **snap**, the §7 refusals | **G1** Poiseuille pointwise exact **1.388e-15** at `spacing (1, 0.25, 2)` |
-| `6cf870b` | U11 ⚑ A | `mgChooseRatio` in all four level loops, `levelRatios()`, `PECLET_FLOW_MG_ASPECT` | **G4** stretched MG-PCG **500/500/500 CAPPED → 7/8/8**; Z&H sphere **24 → 10** iters; V-cycle rate **0.6920 → 0.1501** |
+| `6cf870b` | U11 ⚑ A | `mgChooseRatio` in all four level loops, `levelRatios()`, `setAspectThreshold` | **G4** stretched MG-PCG **500/500/500 CAPPED → 7/8/8**; Z&H sphere **24 → 10** iters; V-cycle rate **0.6920 → 0.1501** |
 | `0d8417b` | U12 ⚑ B | the §6 closures on the index-space normal `m`, the slip length, `ibmVolfrac`, the §4.4 forces; the collocated policy and the force integrals ADMITTED | **G2** `K_s,inf = 7.46034` = 0.2465 % of 7.442, `p_s = 2.2500`; **G3** amplitude ratio to **2.088e-15** |
 | `f168436` | E3 | the v3 wall-torque traction on its AREA vector; the last refusal lifted | `movingscene_advect_mpi` **bitwise** C4 vs C4b at one thread, all 17 digits |
 
@@ -1029,7 +1030,7 @@ per-axis constant rests on argument rather than measurement; it belongs to the c
 5. **`setMetric` before `init`.** The level table is built in `init`/`initMpi` (called from
    `setSolidDevice` and the MPI init), long before `setOpenness`; the ratio rule needs `hp` at that
    point.
-6. **Telescoping.** An aspect-deferred axis is not "blocked". Test with `PECLET_FLOW_TELESCOPE=1` on a
+6. **Telescoping.** An aspect-deferred axis is not "blocked". Test with `set_pressure_telescope(True)` on a
    stretched `np = 4` case that the merge is not triggered by deferral alone.
 7. **`buildOpenness` has taken `dx,dy,dz` all along** (`~:2010` passes `1.0`). Hand it `hp`; the
    marching-squares path ignores them.

@@ -109,11 +109,10 @@ inline int buildStarOverlay(CCConst sdf, CCConst ox, CCConst oy, CCConst oz, C3 
 /// both periodic via inner-grid wrap. Sign convention of applyCutcellOp (positive-definite):
 /// row i gains a_si (x_i - phibar_s). Atomic adds (several stars can touch one row).
 inline void starApplyDelta(CCField y, CCConst x, const StarOverlay& ov, int nOv, C3 nn, C3 extY,
-                           int gY, C3 extX, int gX) {
+                           int gY, C3 extX, int gX, bool exact) {
   if (nOv <= 0)
     return;
   CCExec space;
-  const bool exact = exactResidual();
   Kokkos::parallel_for(
       "peclet::flow::star_apply", Kokkos::RangePolicy<CCExec>(space, 0, nOv), KOKKOS_LAMBDA(int s) {
         const int inner = ov.cell(s);
@@ -177,12 +176,11 @@ inline void starApplyDelta(CCField y, CCConst x, const StarOverlay& ov, int nOv,
 /// so the difference this kernel adds back carries the SAME per-axis weight `w_a` of the face's own
 /// axis, applied outside the existing expression.  `w = (1,1,1)` isotropic (exact).
 inline void starCorrectFaces(CCField uf, CCField vf, CCField wf, CCConst phi, const StarOverlay& ov,
-                             int nOv, C3 nn, C3 ext, int g, C3 extP, int gP, double wx = 1.0,
-                             double wy = 1.0, double wz = 1.0) {
+                             int nOv, C3 nn, C3 ext, int g, C3 extP, int gP, bool exact,
+                             double wx = 1.0, double wy = 1.0, double wz = 1.0) {
   if (nOv <= 0)
     return;
   CCExec space;
-  const bool exact = exactResidual();
   Kokkos::parallel_for(
       "peclet::flow::star_correct_faces", Kokkos::RangePolicy<CCExec>(space, 0, nOv),
       KOKKOS_LAMBDA(int s) {

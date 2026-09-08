@@ -318,6 +318,105 @@ static void bind_solver(nb::module_& m, const char* name) {
            "+0.59/+0.27% bed permeability at R=8/12 -- see doc/collocated_paper_plan.md row 51). "
            "For analytic geometry, exact apertures via set_openness_override are better still. "
            "Call before set_solid.")
+      .def("set_aperture_floor", &S::setApertureFloor, nb::arg("floor"),
+           "Denominator floor of the capped open-face pressure gradient (collocated scheme 13). "
+           "DEFAULT 0.25; must be in (0, 1]. Smaller floors admit sliver faces into the gradient "
+           "and cost robustness, larger ones smear the wall-normal gradient.")
+      .def_prop_ro("aperture_floor", &S::apertureFloor,
+                   "The capped-gradient denominator floor in force (see set_aperture_floor).")
+      .def("set_advection_wall_velocity", &S::setAdvectionWallVelocity, nb::arg("on"),
+           "A0: fill the advection inputs' masked (solid) rows with the instantaneous WALL "
+           "velocity instead of zeros, so a MOVING body's advective term sees the body's own "
+           "motion. DEFAULT True; False is the pre-A0 ablation (measurement only). Inert on a "
+           "static scene and on the collocated grid.")
+      .def_prop_ro("advection_wall_velocity", &S::advectionWallVelocity,
+                   "Whether the wall-velocity advection inputs are in force.")
+      .def(
+          "set_comm_avoiding",
+          [](S& s, const std::string& mode) {
+            int mask = 0;
+            if (mode == "both")
+              mask = peclet::flow::kCaBoth;
+            else if (mode == "off")
+              mask = 0;
+            else if (mode == "momentum")
+              mask = peclet::flow::kCaMomentum;
+            else if (mode == "pressure")
+              mask = peclet::flow::kCaMg;
+            else
+              throw std::runtime_error(
+                  "set_comm_avoiding: 'both' | 'off' | 'momentum' | 'pressure'");
+            s.setCommAvoiding(mask);
+          },
+          nb::arg("mode"),
+          "Communication-avoiding red-black smoothing (multi-rank): exchange a 2-deep ghost layer "
+          "once per red-black PAIR instead of a 1-deep layer before every colour, redundantly "
+          "re-smoothing the first colour's ghost ring so the second colour reads exactly what a "
+          "per-colour exchange would have delivered. BIT-IDENTICAL, at half the halo events "
+          "(measured: np=32 weak efficiency 35% -> 62%). 'both' (DEFAULT) | 'off' | 'momentum' "
+          "(the velocity RB-GS only) | 'pressure' (the pressure-multigrid coarse levels only) -- "
+          "the split exists to ATTRIBUTE a measured regression to one subsystem. Set it BEFORE "
+          "init_mpi: the momentum half is latched with the halo topology, and either half is "
+          "inert on blocks smaller than 4 cells on any axis.")
+      .def_prop_ro(
+          "comm_avoiding",
+          [](S& s) {
+            const int m = s.commAvoiding();
+            return std::string(m == peclet::flow::kCaBoth      ? "both"
+                               : m == peclet::flow::kCaMomentum ? "momentum"
+                               : m == peclet::flow::kCaMg       ? "pressure"
+                                                                : "off");
+          },
+          "The communication-avoiding smoothing mode in force (see set_comm_avoiding).")
+      .def("set_multigrid_aspect_threshold", &S::setMultigridAspectThreshold, nb::arg("theta"),
+           "Anisotropic-coarsening aspect threshold theta shared by the pressure and velocity "
+           "multigrids (doc/anisotropic_metric.md §5.1): an axis is coarsened only while its cell "
+           "size stays within theta of the smallest one, so a stretched grid semi-coarsens instead "
+           "of building levels whose operator is dominated by one direction. DEFAULT 2.0; must be "
+           "> 1; 1e9 restores full coarsening on every axis (the §8.5 item (c) ablation). Only "
+           "ever consulted on an ANISOTROPIC metric, so it is inert on cubic cells.")
+      .def_prop_ro("multigrid_aspect_threshold", &S::multigridAspectThreshold,
+                   "The anisotropic-coarsening threshold in force (see "
+                   "set_multigrid_aspect_threshold).")
+      .def("set_pressure_strict", &S::setPressureStrict, nb::arg("on"),
+           "Raise instead of report when the pressure preconditioner returns a non-finite "
+           "correction. DEFAULT False: the shipped behaviour caps the solve, prints one line, and "
+           "raises the pressure_solve_failed() flag, so a check can catch it without changing "
+           "control flow. True turns the same event into an exception.")
+      .def_prop_ro("pressure_strict", &S::pressureStrict,
+                   "Whether a non-finite pressure preconditioner output raises (see "
+                   "set_pressure_strict).")
+      .def("set_pressure_coarse_ghost", &S::setPressureCoarseGhost, nb::arg("on"),
+           "Zero-gradient (Neumann) coarse ghost on wall/inflow faces before the pressure "
+           "multigrid's prolongation -- the WO-H symmetry repair. DEFAULT True. False restores "
+           "the pre-2026-08-30 periodic-wrap ghost, which reinstates the asymmetry that stalls "
+           "MG-PCG on every 3-D wall-bounded grid: a MEASUREMENT ABLATION, never a production "
+           "setting. Inert on periodic / IBM problems, where the two are the same.")
+      .def_prop_ro("pressure_coarse_ghost", &S::pressureCoarseGhost,
+                   "Whether the Neumann coarse ghost is in force (see set_pressure_coarse_ghost).")
+      .def("set_decomposition", &S::setDecomposition, nb::arg("levels"),
+           nb::arg("max_imbalance") = 1.05,
+           "Choose how this solver's shared MPI decomposition is built. levels=0 (DEFAULT) = the "
+           "aligned ORB: split positions on the FINE grid are snapped to a power of two (capped "
+           "at 16, i.e. 5 nested multigrid levels). levels >= 2 = COARSE-FIRST: build the ORB on "
+           "the grid coarsened levels-1 times and refine the partition upward, so every block is "
+           "a multiple of the coarsening factor BY CONSTRUCTION and the hierarchy nests for the "
+           "full requested depth. Each candidate depth is built and MEASURED, and the deepest one "
+           "whose max-block/min-block ratio stays within max_imbalance (default 1.05) is taken, "
+           "else the aligned ORB. CALL BEFORE init_mpi(), and pass the SAME levels / "
+           "max_imbalance to flow.mpi_block() -- both derive the same partition and must agree.")
+      .def_prop_ro("decomposition_levels", &S::decompositionLevels,
+                   "This solver's decomposition mode (0 = aligned ORB, >= 2 = coarse-first with "
+                   "that depth).")
+      .def_prop_ro("decomposition_max_imbalance", &S::decompositionMaxImbalance,
+                   "The load-imbalance budget the coarse-first search stays within.")
+      .def("set_pressure_bottom_extent", &S::setPressureBottomExtent, nb::arg("cells"),
+           "The threshold set_pressure_bottom('auto') applies: agglomerate the coarsest level "
+           "onto a global operator once the coarsest GLOBAL grid exceeds this many cells on any "
+           "AXIS (not cell count -- what a few smoother sweeps cannot fix is a mode spanning many "
+           "cells along one axis). DEFAULT 4.")
+      .def_prop_ro("pressure_bottom_extent", &S::pressureBottomExtent,
+                   "The agglomerated-bottom extent threshold (see set_pressure_bottom_extent).")
       .def("set_fluid_only_constraint", &S::setFluidOnlyConstraint, nb::arg("mode"),
            "Fluid-only pressure constraint (route 2b, call before set_solid; collocated "
            "experiment). 1 = Design A (openness filter), 2 = Design B (SPD Kron star "
@@ -360,7 +459,7 @@ static void bind_solver(nb::module_& m, const char* name) {
            "AUTO velocity-MG rule (when set_velocity_multigrid was never called): under MPI (np > 1) "
            "use the V-cycle once the global cells per rank fall below cells_per_rank (default 65536; "
            "0 = never), for global problems of at least min_global_cells (default 8M). Env "
-           "PECLET_FLOW_VMG_AUTO_CELLS / PECLET_FLOW_VMG_AUTO_MIN_GLOBAL.")
+           "set_velocity_multigrid_auto.")
       .def("velocity_multigrid_active", &S::velocityMultigridActive)
       .def(
           "outflow_backflow",
@@ -437,8 +536,9 @@ static void bind_solver(nb::module_& m, const char* name) {
            "down / correction up within rank groups, and the roots keep coarsening on a "
            "sub-communicator to a tiny bottom. Idle ranks below the telescope point cost nothing "
            "that matters; the iteration count becomes a property of the problem rather than the "
-           "rank count. OFF by default (byte-identical to before); env PECLET_FLOW_TELESCOPE=1 "
-           "is the no-rebuild switch. See docs/MG_TELESCOPING_PLAN.md.")
+           "rank count. ON by default since 2026-09-02 (the FoxBerry ladder); False restores the "
+           "in-place-only hierarchy, byte-identical to before telescoping existed. See "
+           "docs/MG_TELESCOPING_PLAN.md.")
       .def("pressure_telescope", &S::pressureTelescope)
       .def(
           "set_pressure_bottom",
@@ -455,7 +555,7 @@ static void bind_solver(nb::module_& m, const char* name) {
           "under MPI once ANY rank's block turns odd -- so at fixed cells/rank the coarsest GLOBAL "
           "grid grows with the rank count and the bottom is progressively under-solved. "
           "'auto' (DEFAULT) agglomerates the coarsest level onto a global operator and solves it "
-          "exactly whenever it exceeds PECLET_FLOW_AGGLOM_EXTENT (4) cells on any axis, and uses "
+          "exactly whenever it exceeds set_pressure_bottom_extent (4) cells on any axis, and uses "
           "the cheap smoothed bottom otherwise (byte-identical to 'smoother' then). 'smoother' = "
           "never agglomerate (legacy). 'agglomerated' = always. Measured on one GPU (2048x64x64 "
           "channel): a smoothed bottom needs 13.5 pressure iterations/step at 4 levels and 6.0 at "
@@ -522,7 +622,7 @@ static void bind_solver(nb::module_& m, const char* name) {
            "On an isotropic domain every coarsenable axis halves, as it always has. On an "
            "ANISOTROPIC one (extent giving different spacings per axis) the hierarchy coarsens "
            "the FINEST coarsenable axis and defers one that is already at least "
-           "PECLET_FLOW_MG_ASPECT (default 2) times coarser, so the coarse operators stay close "
+           "set_multigrid_aspect_threshold (default 2) times coarser, so the coarse operators stay close "
            "to isotropic and the point smoother keeps its rate -- e.g. cells (N, 2N, N/2) on a "
            "cube gives (1,2,1), (2,2,1), (2,2,2), ... Empty until set_solid/"
            "set_pressure_geometry has built the operator. See flow/doc/anisotropic_metric.md "
@@ -540,7 +640,7 @@ static void bind_solver(nb::module_& m, const char* name) {
            "line on stdout ('preconditioner produced non-finite z') while "
            "last_pressure_iterations() reported 0, i.e. a perfectly healthy-looking solve "
            "(measured: examples/pore-scale-imbibition, a 3.1-cell throat). Set "
-           "PECLET_FLOW_PRESSURE_STRICT=1 to raise instead.")
+           "set_pressure_strict(True) to raise instead.")
       .def(
           "last_step_timers",
           [](S& s) {
@@ -1085,8 +1185,8 @@ static void bind_solver(nb::module_& m, const char* name) {
           [](S& s, bool on) { s.setPressureExactResidual(on); }, nb::arg("on") = true,
           "Apply the level-0 pressure operator EXACTLY (matrix-free, double, flux form) in the "
           "residual and the Krylov matvec instead of reading the float band storage. P1 of the "
-          "suite defect-correction campaign (docs/DEFECT_CORRECTION_PLAN.md); PROCESS-WIDE, and "
-          "PECLET_FLOW_EXACT_RESIDUAL initialises it.\n\n"
+          "suite defect-correction campaign (docs/DEFECT_CORRECTION_PLAN.md). Per solver, OFF at "
+          "construction.\n\n"
           "enable_vof() turns it ON, because a two-phase coefficient contrast is exactly what "
           "amplifies the float operator's broken row-sum identity A*1 = 0. Measured on Hysing "
           "case 2 (64x128x4, adaptive dt, nvidia-cuda): max|div(open u)| 1.85e-03 -> 5.15e-11, "
@@ -1738,7 +1838,7 @@ static void bind_solver(nb::module_& m, const char* name) {
           "set_outflow_rho_correction", [](S& s, bool on) { s.setOutflowRhoCorrection(on); },
           nb::arg("on") = true,
           "The 1/rho_f mobility factor on the HIGH-side outflow face correction. DEFAULT TRUE "
-          "since WO-R2; pass False (or PECLET_FLOW_OUTFLOW_RHO=0) for the ablation.\n\n"
+          "since WO-R2; pass False for the ablation.\n\n"
           "A projection correction cancels the discrete divergence only if it uses the SAME face "
           "coefficient the operator row used. Until WO-R2 the multigrid re-imposed the literal "
           "openness 1.0 at every Dirichlet domain face, overwriting buildRhoCoeff's "
@@ -2184,7 +2284,7 @@ static void bind_solver(nb::module_& m, const char* name) {
       .def(
           "set_phase_change_deposit_fallback",
           [](S& s, bool on) { s.setPhaseChangeDepositFallback(on); }, nb::arg("on") = true,
-          "WO-P3f open item 6 / WO-P3g (default from PECLET_PC_DEPOSIT_FALLBACK, i.e. OFF): give "
+          "WO-P3f open item 6 / WO-P3g (OFF by default): give "
           "an interfacial cell whose two along-the-normal deposit candidates are BOTH still "
           "interfacial a target from the 5^3 box instead of leaving the divergence source in "
           "place. A cell that keeps its source carries div(open u) = S on its own faces, so "
@@ -2689,24 +2789,37 @@ NB_MODULE(_flow, m) {
   // is called if needed.
   m.def(
       "mpi_block",
-      [](int gnx, int gny, int gnz) {
+      [](int gnx, int gny, int gnz, int levels, double max_imbalance) {
         ensure_mpi_init();
         int rank = 0, size = 1;
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
         MPI_Comm_size(MPI_COMM_WORLD, &size);
         // Derive it through the SAME factory Solver::initMpi uses, so this local block size matches
-        // the solver's dec_ under either decomposition mode (see set_decomposition_levels).
+        // the solver's dec_ under either decomposition mode (see Solver.set_decomposition).
         auto dec = peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size), gnx, gny,
-                                                          gnz);
+                                                          gnz, levels, max_imbalance);
         auto blk = dec.block(static_cast<std::size_t>(rank));
         std::vector<int> origin{(int)blk.origin[0], (int)blk.origin[1], (int)blk.origin[2]};
         std::vector<int> bsize{(int)blk.size[0], (int)blk.size[1], (int)blk.size[2]};
         return std::make_pair(origin, bsize);
       },
-      nb::arg("gnx"), nb::arg("gny"), nb::arg("gnz"),
+      nb::arg("gnx"), nb::arg("gny"), nb::arg("gnz"), nb::arg("levels") = 0,
+      nb::arg("max_imbalance") = 1.05,
       "Return this MPI rank's ORB block of the global (gnx,gny,gnz) grid as (origin, size), each a "
       "length-3 list [x,y,z]. Use it to slice the global SDF into this rank's local block for a "
-      "distributed Solver (see Solver.init_mpi). MPI_Init is called if needed.");
+      "distributed Solver (see Solver.init_mpi). MPI_Init is called if needed.\n\n"
+      "levels / max_imbalance choose how the partition is built and MUST match the values given "
+      "to Solver.set_decomposition() -- both derive the same partition and have to agree. "
+      "levels=0 (DEFAULT) = the aligned ORB: split positions on the FINE grid are snapped to a "
+      "power of two (capped at 16, i.e. 5 nested multigrid levels). levels >= 2 = COARSE-FIRST: "
+      "build the ORB on the grid coarsened levels-1 times and refine the partition upward, so "
+      "every block is a multiple of the coarsening factor BY CONSTRUCTION and the hierarchy nests "
+      "for the full requested depth. Coarse-first also balances better: the aligned ORB picks a "
+      "split and then rounds it (a balanced 96|96 can round to 128|64), whereas on the coarse "
+      "grid one cell IS the quantum, so the rank count no longer has to be a power of two -- what "
+      "matters is that the COARSE grid divides among the ranks. Each candidate depth is BUILT and "
+      "measured, and the deepest one whose max-block/min-block ratio stays within max_imbalance "
+      "(default 1.05) is taken, else the aligned ORB.");
 
 #ifdef PECLET_FLOW_MPI
   m.def(
@@ -2726,28 +2839,10 @@ NB_MODULE(_flow, m) {
       nb::arg("gnx"), nb::arg("gny"), nb::arg("gnz"), nb::arg("np"), nb::arg("levels"),
       nb::arg("telescope") = false, nb::arg("min_extent") = 4,
       "The pressure-multigrid hierarchy init_mpi WOULD build for this grid / rank count / level "
-      "request, under the current decomposition mode (set_decomposition_levels) and with or "
+      "request, for the given decomposition depth (as Solver.set_decomposition) and with or "
       "without coarse-level telescoping -- a pure function, no MPI, no allocation, any rank "
       "count. Returns one row per level: (global dims, ranks holding the level, block-0 dims, "
       "ratio to the next level, telescopes-out). Pre-flight any job with it.");
-  m.def(
-      "set_decomposition_levels",
-      [](int levels) { peclet::flow::CutcellMG::setDecompositionLevels(levels); },
-      nb::arg("levels"),
-      "Choose how the shared MPI decomposition is built. 0 (default) = the aligned ORB: split "
-      "positions on the FINE grid are snapped to a power of two (capped at 16, i.e. 5 nested "
-      "multigrid levels). levels >= 2 = COARSE-FIRST: build the ORB on the grid coarsened "
-      "levels-1 times and refine the partition upward, so every block is a multiple of the "
-      "coarsening factor BY CONSTRUCTION and the hierarchy nests for the full requested depth. "
-      "Coarse-first also balances better: the aligned ORB picks a split and then rounds it (a "
-      "balanced 96|96 can round to 128|64), whereas on the coarse grid one cell IS the quantum, so "
-      "the rank count no longer has to be a power of two -- what matters is that the COARSE grid "
-      "divides among the ranks. Backs off automatically if the coarse grid would have fewer cells "
-      "than ranks. CALL BEFORE mpi_block() AND Solver.init_mpi(): both derive the same partition "
-      "from this setting and must agree. Env override: PECLET_FLOW_DECOMP_LEVELS.");
-  m.def("decomposition_levels", [] { return peclet::flow::CutcellMG::decompositionLevels(); },
-        "Current decomposition mode (0 = aligned ORB, >= 2 = coarse-first with that depth).");
-
   m.attr("has_mpi") = true;
 #else
   m.attr("has_mpi") = false;

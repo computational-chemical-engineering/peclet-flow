@@ -509,6 +509,14 @@ void composedGate(bool cutOutlet, int nSlug, int nAfter) {
   s.setVelocityIterations(60);
   s.setPressureLevels(4);
   s.setPressureIterations(400);
+  // The steady field this gate freezes is measured against a 1e-10 divergence floor, and reaching
+  // that floor on a cut-cell outflow duct needs the EXACT (double, flux-form) level-0 apply: with
+  // the float bands the projected max|div(open u)| lands at 9e-11 / 1.6e-09 instead of 2e-15 /
+  // 7e-14. `enableVof()` below turns the flag on, but it is turned on too late for these 80 steps,
+  // so ask for it here. (Until the QUALITY_PLAN D3 env-var sweep the flag was PROCESS-WIDE, so an
+  // earlier gate's enableVof() silently supplied it to this one -- exactly the accident D3 exists
+  // to prevent, and the reason this line reads as new behaviour rather than a new requirement.)
+  s.setPressureExactResidual(true);
   for (int i = 0; i < 80; ++i)  // to a steady duct flow through the packing
     s.step();
   const double div = s.maxOpenDivergenceProjected();

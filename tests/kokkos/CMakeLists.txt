@@ -75,7 +75,7 @@ add_test(NAME vardensity_projection COMMAND test_vardensity_projection)
 
 # WO-H: 3-D wall-bounded (nz >= 8) pressure convergence for all three Krylov drivers, including the
 # stratified hydrostatic column and the small-coefficient-at-an-inflow-face configurations.
-# PECLET_FLOW_MG_BCGHOST=0 reinstates the pre-repair coarse ghost and makes every PCG row fail.
+# --no-coarse-ghost reinstates the pre-repair coarse ghost and makes every PCG row fail.
 add_executable(test_pressure_wallbounded test_pressure_wallbounded.cpp)
 target_include_directories(test_pressure_wallbounded PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
                            ${PECLET_CORE_INCLUDE})

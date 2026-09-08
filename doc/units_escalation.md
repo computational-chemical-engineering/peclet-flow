@@ -132,7 +132,7 @@ symmetric w.r.t. the fine operator), median over the FCG iterations at N = 32:
 so the stretched hierarchy's asymmetry falls 5.2x into the neighbourhood of the isotropic periodic
 hierarchy's own 0.062 (`flow/CLAUDE.md`, WO-H). The V-cycle rate over cycles 2-8 goes
 **0.6920 -> 0.1501** and the Z&H sphere at `phi = 0.216` goes **24 -> 10** iterations at N = 32
-(cubic control 9) and **25 -> 10** at N = 64 (cubic 10). `PECLET_FLOW_MG_ASPECT=1e9` reproduces
+(cubic control 9) and **25 -> 10** at N = 64 (cubic 10). `--theta=1e9` reproduces
 every "before" number in the table below to the digit, so the ablation IS today's rule. Full record:
 `doc/anisotropic_metric.md` §10, the C3 entry.
 

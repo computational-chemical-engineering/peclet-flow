@@ -290,28 +290,6 @@ inline int mgDebugLevel() {
   }();
   return lv;
 }
-// ISSUES sweep item 6. PECLET_FLOW_PRESSURE_STRICT=1 turns a non-finite preconditioner output
-// into a throw instead of a printed line + a zero correction. Off by default: the shipped
-// behaviour is to report the cap through `last_pressure_iterations()` and raise the
-// `pressure_solve_failed()` flag, so a rule-3b check catches it without changing control flow.
-inline bool strictPressure() {
-  static const bool on = [] {
-    const char* e = std::getenv("PECLET_FLOW_PRESSURE_STRICT");
-    return e && std::atoi(e) != 0;
-  }();
-  return on;
-}
-// The aspect-ratio coarsening threshold `theta` of doc/anisotropic_metric.md §5.1, read ONCE.
-// A measurement knob for the §8.5 gate, not a user setting: `PECLET_FLOW_MG_ASPECT=1e9` restores
-// today's full coarsening (the ablation of §8.5 item (c)) and `1.4142` is the sqrt(2) variant §5.2
-// weighs against the default 2.0.  It is only ever consulted on an ANISOTROPIC metric.
-inline double mgAspectTheta() {
-  static const double th = [] {
-    const char* e = std::getenv("PECLET_FLOW_MG_ASPECT");
-    return e ? std::atof(e) : 2.0;
-  }();
-  return th;
-}
 inline int mgDebugSolves() {
   static const int n = [] {
     const char* e = std::getenv("PECLET_FLOW_MG_DEBUG_SOLVES");
@@ -320,55 +298,14 @@ inline int mgDebugSolves() {
   return n;
 }
 
-// PECLET_FLOW_MG_DIAGRESUM=1 — the WO-M "double-diagonal" MEASUREMENT ABLATION, off by default.
-//
-// The candidate production policy WO-M was asked to evaluate is: keep the six face coefficients in
-// float (+0 B/cell) and store/resum the diagonal in double, so the singular row-sum identity
-// A*1 = 0 holds EXACTLY per row despite float faces. That is the fix already proven at the
-// agglomerated bottom (buildAmg, ~line 1411), generalised to every level; it costs +4 B/cell where
-// a full fp64 hierarchy costs +28.
-//
-// Shipping it means giving AC a different view type from AW..AT through the smoother, residual,
-// matvec, restriction, CA ring and AMG assembly. Before paying for that type surgery, the NUMERICS
-// can be measured on their own: in a -DPECLET_FLOW_MREAL_DOUBLE build, round each stored face
-// coefficient back to float and recompute the diagonal as the exact double sum of those rounded
-// faces. That is bit-for-bit the arithmetic a double-diagonal hierarchy would do — it merely pays
-// fp64 storage for it. If the high-contrast failure survives THAT, the diagonal is not the whole
-// story and double-diagonal cannot be the answer.
-//
-// In a default (float) build the flag is a no-op by construction: the faces are already float and
-// the resummed diagonal is rounded straight back to float, so it is not a valid emulation there and
-// resumDiagonal refuses to run. Never a production path.
-inline bool mgDiagResum() {
-  static const bool v = [] {
-    const char* e = std::getenv("PECLET_FLOW_MG_DIAGRESUM");
-    return e && std::atoi(e) != 0;
-  }();
-  return v;
-}
-
-// Communication-avoiding smoothing (PECLET_FLOW_CA): exchange a 2-deep ghost layer once per
+// Communication-avoiding smoothing (`set_comm_avoiding`): exchange a 2-deep ghost layer once per
 // red-black PAIR instead of 1-deep before every colour, redundantly re-smoothing the 1-deep ghost
 // ring of the first colour so the second colour reads exactly the values a per-colour exchange
 // would have delivered — bit-identical, at half the halo events. Consumed by CutcellMG's coarse
-// levels and by the momentum RB-GS in flow_ibm.hpp. PECLET_FLOW_CA values: unset / "1" = both
-// (default), "0" = off, "mom" = momentum sweeps only, "mg" = pressure-MG coarse levels only —
-// the split exists to ATTRIBUTE a measured regression to one subsystem without a rebuild.
-enum : int { kCaMomentum = 1, kCaMg = 2 };
-inline int caSmoothingMode() {
-  static const int v = [] {
-    const char* e = std::getenv("PECLET_FLOW_CA");
-    if (!e)
-      return kCaMomentum | kCaMg;
-    const std::string s(e);
-    if (s == "mom" || s == "momentum")
-      return (int)kCaMomentum;
-    if (s == "mg")
-      return (int)kCaMg;
-    return std::atoi(e) != 0 ? (kCaMomentum | kCaMg) : 0;
-  }();
-  return v;
-}
+// levels and by the momentum RB-GS in flow_ibm.hpp. The two subsystems are switched independently
+// so a measured regression can be ATTRIBUTED to one of them without a rebuild; both are on by
+// default.
+enum : int { kCaMomentum = 1, kCaMg = 2, kCaBoth = kCaMomentum | kCaMg };
 
 class CutcellMG {
  public:
@@ -535,7 +472,7 @@ class CutcellMG {
         // that is already >= theta times coarser than the finest candidate.  Inert when !aniso_.
         const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
         const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
-        ratio = mgChooseRatio(H, canA, aniso_, mgAspectTheta());
+        ratio = mgChooseRatio(H, canA, aniso_, aspectTheta_);
         if (ratio.x == 2)
           next.x = inner.x / 2;
         if (ratio.y == 2)
@@ -622,23 +559,13 @@ class CutcellMG {
   }
 
   // ---- coarse-first ("decompose coarse, refine upward") decomposition ---------------------------
-  // Requested hierarchy depth for the LEVEL-0 DECOMPOSITION: 0 (default) = the legacy aligned-ORB
-  // route above; L >= 2 = build the ORB on the grid coarsened L-1 times and refine the partition
-  // upward, which guarantees L nested levels and balances on the coarse grid instead of snapping
-  // fine splits afterwards. Read once from PECLET_FLOW_DECOMP_LEVELS, overridable programmatically.
-  // MUST be set before the decomposition is built (i.e. before mpi_block()/init_mpi), because all
-  // three call sites — mpi_block(), IbmSolver::initMpi and this class — derive the SAME partition
-  // from it and would otherwise disagree about the block layout.
-  static int& decompositionLevelsRef() {
-    static int v = [] {
-      const char* e = std::getenv("PECLET_FLOW_DECOMP_LEVELS");
-      return e ? std::atoi(e) : 0;
-    }();
-    return v;
-  }
-  static int decompositionLevels() { return decompositionLevelsRef(); }
-  static void setDecompositionLevels(int levels) { decompositionLevelsRef() = levels; }
-
+  // `levels` selects how the LEVEL-0 DECOMPOSITION is built: 0 (the default) = the legacy
+  // aligned-ORB route above; L >= 2 = build the ORB on the grid coarsened L-1 times and refine the
+  // partition upward, which guarantees L nested levels and balances on the coarse grid instead of
+  // snapping fine splits afterwards. It is a PARAMETER, not process state: `decomposition()` is a
+  // pure function of (numBlocks, grid, levels, maxImbalance), so every rank — and every call site
+  // that must agree on the partition (`flow.mpi_block`, `IbmSolver::initMpi`) — computes the same
+  // answer without communicating, and two solvers in one process can differ.
   // Per-axis coarsening factor a depth-`levels` hierarchy will actually apply: 2^(levels-1),
   // bounded by that axis's factors of two (an odd axis never coarsens, so its factor stays 1).
   static peclet::core::IVec<3> refineFactor(int gnx, int gny, int gnz, int levels) {
@@ -665,8 +592,8 @@ class CutcellMG {
   // THE shared level-0 decomposition. Every call site must go through this so the solver's block,
   // mpi_block()'s sizing and the MG's level 0 cannot drift apart.
   static peclet::core::decomp::BlockDecomposer<3> decomposition(std::size_t numBlocks, int gnx,
-                                                                int gny, int gnz) {
-    const int levels = decompositionLevels();
+                                                                int gny, int gnz, int levels = 0,
+                                                                double maxImbalance = 1.05) {
     if (levels < 2)
       return peclet::core::decomp::BlockDecomposer<3>(
           numBlocks, peclet::core::IVec<3>{gnx, gny, gnz}, coarsenAlignment(gnx, gny, gnz));
@@ -676,11 +603,8 @@ class CutcellMG {
     // its imbalance: take the deepest one that stays within budget, else keep the legacy aligned
     // ORB. The whole search is a pure function of (numBlocks, grid, levels) — every rank computes
     // the same answer without communicating.
-    const double maxImbalance = [] {
-      const char* e = std::getenv("PECLET_FLOW_DECOMP_MAX_IMBALANCE");
-      const double v = e ? std::atof(e) : 1.05;
-      return v > 1.0 ? v : 1.05;
-    }();
+    if (!(maxImbalance > 1.0))
+      maxImbalance = 1.05;
     auto imbalanceOf = [](const peclet::core::decomp::BlockDecomposer<3>& d) {
       std::size_t hi = 0, lo = std::numeric_limits<std::size_t>::max();
       for (const auto& s : d.sizes()) {
@@ -777,7 +701,7 @@ class CutcellMG {
       // phi staging, ghost-projection g=2 staging) assumes it. Only for the periodic/IBM operator
       // — with domain BCs (setBoundaryConditions BEFORE initMpi) every level keeps the g=1 layout,
       // so that path is byte-identical to the pre-CA code.
-      v.g = (L > 0 && !hasBC_ && (caSmoothingMode() & kCaMg) && minBlockExtent(dec) >= 4) ? 2 : 1;
+      v.g = (L > 0 && !hasBC_ && (caMode_ & kCaMg) && minBlockExtent(dec) >= 4) ? 2 : 1;
       v.caOk = (v.g == 2);
       v.halo->buildTopology(dec, curRank, v.g, per, curComm);
       v.comm = curComm;
@@ -896,7 +820,7 @@ class CutcellMG {
         const bool canA[3] = {can(gs.x) && evenBlocks(0), can(gs.y) && evenBlocks(1),
                               can(gs.z) && evenBlocks(2)};
         const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
-        ratio = mgChooseRatio(H, canA, aniso_, mgAspectTheta());
+        ratio = mgChooseRatio(H, canA, aniso_, aspectTheta_);
         if (ratio.x == 2)
           next.x = gs.x / 2;
         if (ratio.y == 2)
@@ -1107,7 +1031,6 @@ class CutcellMG {
         f);  // re-impose non-periodic wall/inflow faces the periodic fill clobbered
     buildCutcellOp(f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT, CCConst(f.ox), CCConst(f.oy),
                    CCConst(f.oz), f.ext, G, idx2, idy2, idz2);
-    resumDiagonal(f, G);
 #ifdef PECLET_FLOW_MPI
     // A telescope point gathers this level's openness onto the group roots (all group ranks take
     // part); the next level coarsens from that stage. A rank idling below holds no next level, so
@@ -1154,7 +1077,6 @@ class CutcellMG {
       buildCutcellOp(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.ox), CCConst(c.oy),
                      CCConst(c.oz), c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy,
                      idz2 * sz);
-      resumDiagonal(c, c.g == 2 ? c.g - 1 : c.g);
 #ifdef PECLET_FLOW_MPI
       if (c.tele) {
         teleGather(c, c.ox, c.tele->ox);
@@ -1175,36 +1097,6 @@ class CutcellMG {
     amgGlobalN_ = 0;
   }
 
-  // WO-M double-diagonal MEASUREMENT ABLATION (PECLET_FLOW_MG_DIAGRESUM=1, off by default and a
-  // no-op in a float build — see mgDiagResum()). Round each stored face coefficient back to float
-  // and recompute the diagonal as the EXACT double sum of those rounded faces, i.e. exactly the
-  // arithmetic a "float faces + double diagonal" hierarchy would perform, on fp64 storage. Makes
-  // A*1 = 0 hold per row to double precision while every off-diagonal still carries only float
-  // information, which is the discrimination step 3 of WO-M needs.
-  void resumDiagonal(Level& lv, int g) {
-    if (!mgDiagResum() || sizeof(MReal) == sizeof(float))
-      return;  // float storage cannot represent the exact diagonal, so the emulation is invalid
-    CCExec space;
-    const C3 e = lv.ext;
-    FPV AC = lv.AC, AW = lv.AW, AE = lv.AE, AS = lv.AS, AN = lv.AN, AB = lv.AB, AT = lv.AT;
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    Kokkos::parallel_for(
-        "peclet::flow::mg_diag_resum", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
-        KOKKOS_LAMBDA(int lx, int ly, int lz) {
-          const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
-          const double aw = (double)(float)AW(i), ae = (double)(float)AE(i);
-          const double as = (double)(float)AS(i), an = (double)(float)AN(i);
-          const double ab = (double)(float)AB(i), at = (double)(float)AT(i);
-          AW(i) = (MReal)aw;
-          AE(i) = (MReal)ae;
-          AS(i) = (MReal)as;
-          AN(i) = (MReal)an;
-          AB(i) = (MReal)ab;
-          AT(i) = (MReal)at;
-          AC(i) = (MReal)(-(aw + ae + as + an + ab + at));
-        });
-  }
-
   // CG preconditioned by one symmetric V-cycle (solve_pcg port). rhs on level 0; solution left in
   // level-0 x. Returns the iteration count. Scratch supplied by the caller (level-0-sized fields).
   // Optional star overlay (mode-B fluid-only constraint): the SPD Kron-elimination couplings are
@@ -1223,7 +1115,7 @@ class CutcellMG {
     auto matvec = [&](CCField y, CCField v) {
       matvecOverlap(l0, y, v);
       if (star)
-        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G);
+        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
     auto precond = [&](CCField zz, CCField rr) {
       Kokkos::deep_copy(l0.rhs, rr);
@@ -1261,7 +1153,7 @@ class CutcellMG {
         // ISSUES sweep item 6: this is a FAILED solve, not a converged one. It used to print to
         // stdout, zero the correction and return 0 iterations, so a caller's rule-3b "no capped
         // pressure solve" check passed while the projection had been handed nothing. Report the
-        // cap and raise the flag; PECLET_FLOW_PRESSURE_STRICT=1 turns it into a throw.
+        // cap and raise the flag; set_pressure_strict(True) turns it into a throw.
         solveFailed_ = true;
         printf(
             "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
@@ -1269,10 +1161,10 @@ class CutcellMG {
             maxit, maxit);
         Kokkos::deep_copy(x, 0.0);
         Kokkos::deep_copy(l0.x, x);
-        if (strictPressure())
+        if (strictPressure_)
           throw std::runtime_error(
               "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z "
-              "(PECLET_FLOW_PRESSURE_STRICT=1)");
+              "(set_pressure_strict)");
         return maxit;
       }
       for (; it < maxit; ++it) {
@@ -1344,7 +1236,7 @@ class CutcellMG {
     auto matvec = [&](CCField y, CCField v) {
       matvecOverlap(l0, y, v);
       if (star)
-        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G);
+        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
     auto precond = [&](CCField zz, CCField rr) {
       Kokkos::deep_copy(l0.rhs, rr);
@@ -1380,10 +1272,10 @@ class CutcellMG {
             maxit, maxit);
         Kokkos::deep_copy(x, 0.0);
         Kokkos::deep_copy(l0.x, x);
-        if (strictPressure())
+        if (strictPressure_)
           throw std::runtime_error(
               "peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z "
-              "(PECLET_FLOW_PRESSURE_STRICT=1)");
+              "(set_pressure_strict)");
         return maxit;
       }
       for (; it < maxit; ++it) {
@@ -1776,11 +1668,8 @@ class CutcellMG {
       residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
                       FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lv.g);
     };
-    if (!resFill_) {  // PECLET_FLOW_MG_RESFILL=0: the legacy stale-ghost residual (ablation only)
-      fullResidual();
-    }
 #ifdef PECLET_FLOW_MPI
-    else if (distributed_) {
+    if (distributed_) {
       const int g = lv.g;
       const C3 lo{g + 1, g + 1, g + 1};
       const C3 hi{lv.ext.x - g - 1, lv.ext.y - g - 1, lv.ext.z - g - 1};
@@ -1927,9 +1816,8 @@ class CutcellMG {
   // count WORSE (442 -> 622 total, +41 %) at unchanged accuracy, so the assembled coarse operator
   // is evidently not consistent with the V-cycle's on that IBM path. Until that is understood,
   // `auto` is opt-in and the legacy smoothed bottom stays the default. `mode`: 0 = never / plain
-  // smoothed bottom (DEFAULT), -1 = auto, 1 = always. PECLET_FLOW_AGGLOM_CELLS overrides the
-  // threshold; the ideal bottom is a handful of cells per axis, and 512 is a generous cut that
-  // leaves genuinely small bottoms on the cheap path.
+  // smoothed bottom (DEFAULT), -1 = auto, 1 = always. `setAgglomerationExtent` moves the
+  // threshold; the ideal bottom is a handful of cells per axis.
   bool agglomerateBottom() const {
     if (agglomMode_ == 0)
       return false;
@@ -1951,11 +1839,7 @@ class CutcellMG {
     // sweeps cannot fix is a mode spanning many cells along an axis, and Gauss-Seidel needs O(L^2)
     // sweeps to damp a wavelength of L cells. A 64x2x2 bottom is only 256 cells yet still 64 across
     // -- measured, that costs 6.0 pressure iterations/step against 4.0 for an exact solve.
-    static const int thresh = [] {
-      const char* e = std::getenv("PECLET_FLOW_AGGLOM_EXTENT");
-      const int v = e ? std::atoi(e) : 4;
-      return v > 0 ? v : 4;
-    }();
+    const int thresh = agglomExtent_ > 0 ? agglomExtent_ : 4;
     // coarsest GLOBAL cell count (the local block does not decide how hard the coarse solve is)
     long gx = gnxF_, gy = gnyF_, gz = gnzF_;
     for (int L = 0; L + 1 < (int)lv_.size(); ++L) {
@@ -2375,7 +2259,7 @@ class CutcellMG {
   // writes y (no aliasing) => bit-identical to the blocking fill-then-apply. Single-rank: the
   // blocking path.
   void matvecOverlap(Level& l0, CCField y, CCField v) {
-    const bool ex = exactResidual();  // P1: exact double flux-form apply instead of the bands
+    const bool ex = exactResidual_;  // P1: exact double flux-form apply instead of the bands
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       const C3 lo{G + 1, G + 1, G + 1};
@@ -2827,21 +2711,30 @@ class CutcellMG {
   bool solveFailed_ = false;
   std::vector<double> lvTime_;  // per-level V-cycle wall time (mgDebugLevel() >= 3)
   int lvCycles_ = 0;
-  // Halo refresh before the V-cycle's residual (see vcycle). ON by default — the legacy
-  // stale-ghost residual is kept behind PECLET_FLOW_MG_RESFILL=0 purely as a benchmark ablation.
-  bool resFill_ = [] {
-    const char* e = std::getenv("PECLET_FLOW_MG_RESFILL");
-    return !e || std::atoi(e) != 0;
-  }();
   // Zero-gradient (Neumann) coarse ghost before the prolongation on wall/inflow faces — the WO-H
-  // symmetry repair (see applyNeumannGhost). ON by default; PECLET_FLOW_MG_BCGHOST=0 restores the
+  // symmetry repair (see applyNeumannGhost). ON by default; `setCoarseGhost(false)` restores the
   // pre-2026-08-30 periodic-wrap ghost purely as a MEASUREMENT ABLATION (it reinstates the
   // asymmetry that stalls MG-PCG on every 3-D wall-bounded grid — never a production setting).
   // Inert on periodic/IBM problems (hasBC_ == false), where the fix is a no-op either way.
-  bool bcGhost_ = [] {
-    const char* e = std::getenv("PECLET_FLOW_MG_BCGHOST");
-    return !e || std::atoi(e) != 0;
-  }();
+  bool bcGhost_ = true;
+  // The aspect-ratio coarsening threshold `theta` of doc/anisotropic_metric.md §5.1
+  // (`setAspectThreshold`; only ever consulted on an ANISOTROPIC metric). 1e9 restores full
+  // coarsening (the §8.5 item (c) ablation), 1.4142 is the sqrt(2) variant §5.2 weighs against 2.0.
+  double aspectTheta_ = 2.0;
+  // Communication-avoiding smoothing (see the kCa* enum): both subsystems on by default. Only
+  // kCaMg is read here; the momentum half lives in IbmSolver.
+  int caMode_ = kCaBoth;
+  // ISSUES sweep item 6. `setStrictPressure(true)` turns a non-finite preconditioner output into a
+  // throw instead of a printed line + a zero correction. Off by default: the shipped behaviour is
+  // to report the cap through `last_pressure_iterations()` and raise the `pressure_solve_failed()`
+  // flag, so a rule-3b check catches it without changing control flow.
+  bool strictPressure_ = false;
+  // P1 of the defect-correction campaign — the exact (matrix-free, double, flux-form) level-0
+  // operator apply in the residual and the Krylov matvec. See mac_cutcell.hpp.
+  bool exactResidual_ = false;
+  // The `agglomerateBottom()` auto criterion: agglomerate once the coarsest GLOBAL grid exceeds
+  // this many cells on any axis (`setAgglomerationExtent`).
+  int agglomExtent_ = 4;
   double allreduceTime_ = 0.0;
   long allreduceCount_ = 0;
   // --- decomposition-agnostic algebraic bottom solve (GraphAMG) ---
@@ -2853,25 +2746,18 @@ class CutcellMG {
   // decomposition), and the solution scattered back. With nLevels==1 this makes the whole pressure
   // solve mesh-independent AND decomposition-agnostic.
   int agglomMode_ = 0;  // 0 smoothed bottom (default), -1 auto (see agglomerateBottom), 1 always
-  // Coarse-level telescoping (see Telescope). OFF by default: with it off every code path is
-  // byte-identical to before it existed. PECLET_FLOW_TELESCOPE=1 turns it on without a code
-  // change; the solver setter wins over the env. teleForce_ > 0 forces a telescope at that level
-  // even when in-place coarsening is legal (tests: compare the two hierarchies on one problem).
-  bool telescope_ =
-      [] {  // DEFAULT ON since 2026-09-02 (FoxBerry ladder); PECLET_FLOW_TELESCOPE=0 disables
-        const char* e = std::getenv("PECLET_FLOW_TELESCOPE");
-        return !e || std::atoi(e) != 0;
-      }();
+  // Coarse-level telescoping (see Telescope). DEFAULT ON since 2026-09-02 (the FoxBerry ladder);
+  // `setTelescope(false)` restores the in-place-only hierarchy, which is byte-identical to before
+  // telescoping existed. teleForce_ > 0 forces a telescope at that level even when in-place
+  // coarsening is legal (tests: compare the two hierarchies on one problem).
+  bool telescope_ = true;
   int teleForce_ = -1;
   bool teleActive_ = true;  // false on a rank that idles below a telescope point
   // Economic trigger (MueLu's "min rows per proc", PETSc's reduction factor): once a level's
   // smallest block extent drops below this, merge -- and merge far enough that the merged blocks
   // clear it -- even if in-place coarsening is still legal. A 1x3x3 block on 1024 ranks is a
   // halo exchange with nine cells of work behind it. 0 disables (merge only when blocked).
-  int teleMinExtent_ = [] {
-    const char* e = std::getenv("PECLET_FLOW_TELESCOPE_MIN_EXTENT");
-    return e ? std::atoi(e) : 4;
-  }();
+  int teleMinExtent_ = 4;
   int gnxF_ = 0, gnyF_ = 0, gnzF_ = 0;  // GLOBAL fine dims (== local single-rank)
   // Fine-level 1/h^2 per axis, as handed to setOpenness. Only the exact (matrix-free) level-0
   // apply reads them; the bands carry gf already folded in.
@@ -2904,7 +2790,24 @@ class CutcellMG {
   // Enable the agglomerated GraphAMG bottom solve (decomposition-agnostic multigrid coarse solve).
   // Rebuilds lazily on the next solve. Safe single-rank (local assemble + serial AMG).
   void setAgglomerationMode(int mode) { agglomMode_ = mode; }  // -1 auto, 0 never, 1 always
+  void setAgglomerationExtent(int cells) { agglomExtent_ = cells > 0 ? cells : 4; }
+  int agglomerationExtent() const { return agglomExtent_; }
   void setTelescope(bool on) { telescope_ = on; }
+  /// Neumann coarse ghost on wall/inflow faces before the prolongation (see bcGhost_).
+  void setCoarseGhost(bool on) { bcGhost_ = on; }
+  bool coarseGhost() const { return bcGhost_; }
+  /// Anisotropic-coarsening aspect threshold theta (see aspectTheta_).
+  void setAspectThreshold(double theta) { aspectTheta_ = theta; }
+  double aspectThreshold() const { return aspectTheta_; }
+  /// Communication-avoiding smoothing mask (kCaMomentum | kCaMg); only kCaMg is read here.
+  void setCommAvoiding(int mask) { caMode_ = mask; }
+  int commAvoiding() const { return caMode_; }
+  /// Throw instead of reporting when the preconditioner returns a non-finite correction.
+  void setStrictPressure(bool on) { strictPressure_ = on; }
+  bool strictPressure() const { return strictPressure_; }
+  /// The exact double flux-form level-0 apply in the residual and the Krylov matvec.
+  void setExactResidual(bool on) { exactResidual_ = on; }
+  bool exactResidual() const { return exactResidual_; }
   // WO-R2 item 1: the next setOpenness receives a variable-density COEFFICIENT field, so the
   // Dirichlet (outflow) domain-face rows must carry the caller's coefficient rather than the
   // literal openness 1.0. See applyBoundaryOpenness. Reset it for a raw-openness build.

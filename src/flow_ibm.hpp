@@ -537,8 +537,8 @@ class Solver {
   // the block is small enough that the momentum RB-GS is halo-latency-bound, take the V-cycle
   // instead (1-2 cycles/component == 2-4 exchanges against 8-9 sweeps x 2). Measured crossover on
   // the FoxBerry bed: RB-GS 2.91 s vs MG 3.32 s/step at 147k cells/rank, MG 0.834 vs 0.844 at
-  // 37k; threshold PECLET_FLOW_VMG_AUTO_CELLS (default 65536 cells per rank, 0 = never), and only
-  // for global problems of at least PECLET_FLOW_VMG_AUTO_MIN_GLOBAL cells (8M) -- small grids split
+  // 37k; threshold cellsPerRank (default 65536 cells per rank, 0 = never), and only
+  // for global problems of at least minGlobalCells (8M) -- small grids split
   // across ranks keep RB-GS so a distributed run stays exactly the single-rank one.
   void setVelocityMultigridAuto(long cellsPerRank, long minGlobalCells = -1) {
     vmgAutoCells_ = cellsPerRank;
@@ -940,6 +940,53 @@ class Solver {
     apertureOrder_ = order;
   }
   int apertureOrder() const { return apertureOrder_; }
+  /// Denominator floor of the capped open-face gradient (collocated mode 13). DEFAULT 0.25.
+  void setApertureFloor(double floor) {
+    if (!(floor > 0.0) || floor > 1.0)
+      throw std::runtime_error("set_aperture_floor: the floor must be in (0, 1]");
+    apertureFloor_ = floor;
+  }
+  double apertureFloor() const { return apertureFloor_; }
+  /// A0 — wall velocity (not zeros) in the advection inputs' masked rows. DEFAULT true.
+  void setAdvectionWallVelocity(bool on) { advWallVel_ = on; }
+  bool advectionWallVelocity() const { return advWallVel_; }
+  /// Communication-avoiding red-black smoothing: kCaMomentum | kCaMg. DEFAULT both.
+  /// Must be set BEFORE init_mpi (the momentum half is latched with the halo topology).
+  void setCommAvoiding(int mask) {
+    caMode_ = mask;
+    mg_.setCommAvoiding(mask);
+  }
+  int commAvoiding() const { return caMode_; }
+  /// The anisotropic-coarsening aspect threshold theta shared by the pressure and velocity
+  /// multigrids (doc/anisotropic_metric.md §5.1). DEFAULT 2.0; only read on an anisotropic metric.
+  void setMultigridAspectThreshold(double theta) {
+    if (!(theta > 1.0))
+      throw std::runtime_error("set_multigrid_aspect_threshold: theta must be > 1");
+    aspectTheta_ = theta;
+    mg_.setAspectThreshold(theta);
+    vmg_.setAspectThreshold(theta);
+  }
+  double multigridAspectThreshold() const { return aspectTheta_; }
+  /// Throw instead of reporting when the pressure preconditioner returns a non-finite
+  /// correction (ISSUES sweep item 6). DEFAULT false.
+  void setPressureStrict(bool on) { mg_.setStrictPressure(on); }
+  bool pressureStrict() const { return mg_.strictPressure(); }
+  /// Neumann (zero-gradient) coarse ghost on wall/inflow faces before the pressure MG's
+  /// prolongation — the WO-H symmetry repair. DEFAULT true; false is a measurement ablation.
+  void setPressureCoarseGhost(bool on) { mg_.setCoarseGhost(on); }
+  bool pressureCoarseGhost() const { return mg_.coarseGhost(); }
+  /// The `set_pressure_bottom("auto")` criterion: agglomerate once the coarsest GLOBAL grid
+  /// exceeds this many cells on any axis. DEFAULT 4.
+  void setPressureBottomExtent(int cells) { mg_.setAgglomerationExtent(cells); }
+  int pressureBottomExtent() const { return mg_.agglomerationExtent(); }
+  /// How the shared level-0 MPI decomposition is built. MUST be set before init_mpi, and the
+  /// same values must be handed to `flow.mpi_block` — both derive the same partition.
+  void setDecomposition(int levels, double maxImbalance = 1.05) {
+    decompLevels_ = levels;
+    decompMaxImbalance_ = maxImbalance;
+  }
+  int decompositionLevels() const { return decompLevels_; }
+  double decompositionMaxImbalance() const { return decompMaxImbalance_; }
   void setFluidOnlyConstraint(int mode) {
     if (mode < 0 || mode > 2)
       throw std::runtime_error("set_fluid_only_constraint: mode must be 0, 1 or 2");
@@ -1037,10 +1084,12 @@ class Solver {
     int size = 1;
     MPI_Comm_size(comm, &size);
     // Build the shared decomposition so the pressure MG can derive nested coarse levels
-    // (CutcellMG::coarsened) — aligned ORB by default, or coarse-first when
-    // set_decomposition_levels/PECLET_FLOW_DECOMP_LEVELS asks for it. Depends only on the global
-    // grid and that setting, so it matches mpi_block()'s sizing exactly.
-    initMpi(CutcellMG::decomposition(static_cast<std::size_t>(size), gnx, gny, gnz), comm);
+    // (CutcellMG::coarsened) — aligned ORB by default, or coarse-first when `set_decomposition`
+    // asks for it. Depends only on the global grid and that setting, so it matches mpi_block()'s
+    // sizing exactly when the same values are passed there.
+    initMpi(CutcellMG::decomposition(static_cast<std::size_t>(size), gnx, gny, gnz, decompLevels_,
+                                     decompMaxImbalance_),
+            comm);
   }
   // Shared-decomposition overload: wire the g=2 velocity-block halo from an EXTERNALLY-built ORB
   // (so flow and dem share one BlockDecomposer for coupled runs, and redistribute() can re-init
@@ -1065,14 +1114,14 @@ class Solver {
     // Communication-avoiding momentum sweeps (see smoothComp): the velocity block is g=2 already,
     // so the CA pair needs no new topology — only this float exchange for the stencil ring
     // (operator coefficients are float). Eligible when every rank's block is >= 4 on every axis
-    // (rank-uniform: the decomposition is replicated), gated by PECLET_FLOW_CA.
+    // (rank-uniform: the decomposition is replicated), gated by `set_comm_avoiding`.
     velDevF_ = std::make_shared<GridHalo<MReal>>();
     velDevF_->init(*velHalo_);
     long minExt = std::numeric_limits<long>::max();
     for (const auto& s : dec.sizes())
       for (int k = 0; k < 3; ++k)
         minExt = std::min(minExt, (long)s[k]);
-    caMomentum_ = (caSmoothingMode() & kCaMomentum) && minExt >= 4;
+    caMomentum_ = (caMode_ & kCaMomentum) && minExt >= 4;
     for (bool& d : momStencilDirty_)
       d = true;
     dec_ =
@@ -3021,7 +3070,7 @@ class Solver {
   long lastPressureIterations() const { return lastPressureIters_; }
   // The pressure multigrid's per-level coarsening ratio, one {rx, ry, rz} per level
   // (doc/anisotropic_metric.md §5).  On an isotropic domain this is today's table; on a stretched
-  // one the aspect rule defers an axis while it is at least PECLET_FLOW_MG_ASPECT (2) times
+  // one the aspect rule defers an axis while it is at least the aspect threshold (2) times
   // coarser than the finest coarsenable one.  Empty until the cut-cell operator exists.
   std::vector<std::array<int, 3>> pressureMgLevelRatios() const {
     std::vector<std::array<int, 3>> out;
@@ -4011,15 +4060,10 @@ class Solver {
     // interior plane. Either way the exchange is exact: fill the ghosts from the owner. Measured
     // before the fix: np=2/4 max|du| 1.45e-07 / 1.14e-05 against 3e-7 (bit-exact at np=1), up to
     // 3.5 % of max|u| with a body parked on a rank cut. Static scenes never reach this code.
-    static const bool doExchange = [] {
-      const char* e = std::getenv("PECLET_FLOW_UBC_EXCHANGE");  // ablation knob (gate 7)
-      return !(e && e[0] == '0');
-    }();
-    if (doExchange)
-      for (int c = 0; c < 3; ++c) {
-        exchangeExtRaw(uBc_[c]);
-        exchangeExtRaw(uwCell_[c]);
-      }
+    for (int c = 0; c < 3; ++c) {
+      exchangeExtRaw(uBc_[c]);
+      exchangeExtRaw(uwCell_[c]);
+    }
   }
 
   /// Raw ghost fill of an extended-block field: the rank halo exchange under MPI, the periodic
@@ -4931,18 +4975,11 @@ class Solver {
   // WALL rows come from uBc_, which depends only on instance motion and is built once per
   // geometry/motion update.
   //
-  // ABLATION: `PECLET_FLOW_ADV_WALLVEL=0` restores the pre-A0 behaviour (masked zeros in the
-  // advection inputs) without a rebuild -- the instrument that differences "zeros vs wall velocity
-  // in the advective term" directly. Everything else on the moving path is untouched by it.
-  static bool advWallVelEnabled() {
-    static const bool en = [] {
-      const char* v = std::getenv("PECLET_FLOW_ADV_WALLVEL");
-      return !(v && v[0] == '0');
-    }();
-    return en;
-  }
+  // ABLATION: `set_advection_wall_velocity(False)` restores the pre-A0 behaviour (masked zeros in
+  // the advection inputs) -- the instrument that differences "zeros vs wall velocity in the
+  // advective term" directly. Everything else on the moving path is untouched by it.
   bool advWallInputs() const {
-    return advWallVelEnabled() && !Grid::collocated && hasScene_ && hasMotion_ && advect_ &&
+    return advWallVel_ && !Grid::collocated && hasScene_ && hasMotion_ && advect_ &&
            uBc_[0].extent(0) == n_ && C[0].mask.extent(0) == n_;
   }
   void buildAdvInputs() {
@@ -4955,24 +4992,11 @@ class Solver {
       Kokkos::deep_copy(uwAdv_[c], C[c].u);
       CCField a = uwAdv_[c];
       CCConst m = CCConst(C[c].mask), w = CCConst(uBc_[c]);
-      // gate-7 ablation knob: 0 = fill all rows (shipped), 1 = inner rows only, 2 = ghost rows only
-      static const int mode = [] {
-        const char* e = std::getenv("PECLET_FLOW_ADV_FILL_MODE");
-        return e ? std::atoi(e) : 0;
-      }();
-      const C3 e = e_;
-      const int fillMode = mode;  // device lambdas capture locals, not function statics
       Kokkos::parallel_for(
           "peclet::flow::adv_wall_inputs", Kokkos::RangePolicy<CCExec>(space, 0, (long)n_),
           KOKKOS_LAMBDA(long i) {
             if (m(i) <= 0.5)
               return;
-            if (fillMode != 0) {
-              const int x = (int)(i % e.x), y = (int)((i / e.x) % e.y), z = (int)(i / ((long)e.x * e.y));
-              const bool inner = x >= G && x < e.x - G && y >= G && y < e.y - G && z >= G && z < e.z - G;
-              if ((fillMode == 1) != inner)
-                return;
-            }
             a(i) = w(i);
           });
     }
@@ -6500,7 +6524,7 @@ class Solver {
             buildRhoCoeffOutflowFace(cc[a], CCConst(rho1_), rho_, e1_, 1, a, rhoFaceHarmonic_);
       }
       mg_.setBoundaryConditions(bc_);
-      mg_.setOutflowCoefficient(hasOutflow_ && outflowOperatorCoeff());
+      mg_.setOutflowCoefficient(hasOutflow_ && outflowOpCoeff_);
       mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
       mg_.setOutflowCoefficient(false);
       chebBoundsSet_ = false;  // spectrum changed with the coefficients (re-estimated by the solve)
@@ -6678,7 +6702,8 @@ class Solver {
         projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
       if (fluidOnlyMode_ == 2)  // Design B: replace the solid side's phi=0 by phibar_s at
         starCorrectFaces(uf_, vf_, wf_, CCConst(phi_), starOv_, nStar_,  // fluid|solid faces
-                         C3{nx_, ny_, nz_}, e_, G, e_, G, u_.w[0], u_.w[1], u_.w[2]);
+                         C3{nx_, ny_, nz_}, e_, G, e_, G, exactResidual_, u_.w[0], u_.w[1],
+                         u_.w[2]);
       fillGhosts(uf_);
       fillGhosts(vf_);
       fillGhosts(wf_);    // complete the divergence-free face field (boundary faces)
@@ -6779,7 +6804,7 @@ class Solver {
         // validations never saw it. The porous branches keep the plain correction: their
         // coefficient is the drag/eps relaxation, not 1/rho, and a two-phase porous outlet is not
         // this rung. `!varRho_` is byte-identical.
-        // `set_outflow_rho_correction(False)` (or PECLET_FLOW_OUTFLOW_RHO=0) drops the 1/rho_f
+        // `set_outflow_rho_correction(False)` drops the 1/rho_f
         // factor. DEFAULT ON since WO-R2 fixed the operator's outflow-face coefficient — see
         // setOutflowRhoCorrection for the before/after table and the mechanism.
         const bool var = varRho_ && !porous_ && outflowRhoCorr_;
@@ -7226,8 +7251,7 @@ class Solver {
     // it removes is the float operator's broken row-sum identity A*1 = 0, and a two-phase
     // coefficient contrast is precisely what amplifies it. `set_pressure_exact_residual(False)`
     // after `enable_vof` is the ablation.
-    if (!exactResidualPinned())  // an explicit PECLET_FLOW_EXACT_RESIDUAL wins (the ablation)
-      setExactResidual(true);
+    setPressureExactResidual(true);
     // WO-R2 item 4 — the wisp tolerance. 0 is V1 verbatim (and stays the standalone advector's
     // default); an open-boundary domain that DRAINS reaches C ~ 1e-18 everywhere, where the MYC
     // normal is degenerate and plicAlpha divides by it (measured: sum C -> -inf -> NaN in three
@@ -7245,16 +7269,9 @@ class Solver {
     vofAdv_.wispEps = eps;
   }
   double vofWispEps() const { return vofWispEps_; }
-  /// The value `enableVof` starts from: 1e-8, or `PECLET_FLOW_VOF_WISP_EPS` when it is set (which
-  /// is how the "V1 verbatim" ablation is taken across a whole battery). A standalone
-  /// `WyAdvector` that a test compares the solver against must be given the SAME value.
-  static double defaultVofWispEps() {
-    static const double v = [] {
-      const char* e = std::getenv("PECLET_FLOW_VOF_WISP_EPS");
-      return e ? std::atof(e) : 1e-8;
-    }();
-    return v;
-  }
+  /// The value `enableVof` starts from. A standalone `WyAdvector` that a test compares the solver
+  /// against must be given the SAME value; `set_vof_wisp_eps(0)` is the "V1 verbatim" ablation.
+  static constexpr double defaultVofWispEps() { return 1e-8; }
   bool vofEnabled() const { return vofEnabled_; }
   // Initial / prescribed colour field on the inner cells (flat x-fastest, nx*ny*nz), C in [0,1]:
   // the LIQUID fraction of the cell. Enables VoF if it is not on yet. Ghosts are refreshed here so
@@ -7927,7 +7944,7 @@ class Solver {
   // field is the projection's own output and its residual divergence IS the conservation floor --
   // exactly as for the structured `advectVof()`, which has never carried a check here -- so the
   // in-step call passes false. (Rung W2: with variable density the projected residual sits at
-  // ~1e-7 without `PECLET_FLOW_EXACT_RESIDUAL`, which would refuse every coupled step.)
+  // ~1e-7 without the exact level-0 apply, which would refuse every coupled step.)
   /// `dt` is in the caller's time unit.
   void advectVofBlocks(double dtPhysArg, bool requireSolenoidal = true) {
     const double dt = dtPhysArg * u_.timeToInt();
@@ -8144,22 +8161,20 @@ class Solver {
   // as a measured knob for the coefficient-coarsening question, not as an alternative scheme.
   void setRhoFaceHarmonic(bool on) { rhoFaceHarmonic_ = on; }
   /// WO-R2 item 3 — the exact (matrix-free, double, flux-form) level-0 operator apply in the
-  /// residual and the Krylov matvec. PROCESS-WIDE (it is a static flag, see mac_cutcell.hpp);
-  /// `enableVof` turns it on, and this is the ablation switch.
-  void setPressureExactResidual(bool on) { setExactResidual(on); }
-  /// WO-R2 item 1 ABLATION, env-only: `PECLET_FLOW_OUTFLOW_COEFF=0` restores the pre-WO-R2
+  /// residual and the Krylov matvec. Per solver; `enableVof` turns it on, and this is the
+  /// ablation switch.
+  void setPressureExactResidual(bool on) {
+    exactResidual_ = on;
+    mg_.setExactResidual(on);
+  }
+  /// WO-R2 item 1 ABLATION: `set_outflow_operator_coefficient(False)` restores the pre-WO-R2
   /// operator, whose Dirichlet domain-face rows carried the literal openness 1.0 instead of the
   /// variable-density coefficient `open_f*rho0/rho_f`. It exists so the before/after of the
-  /// Nusselt film and the outflow divergence stays measurable on one binary; there is no reason
-  /// to set it in production.
-  static bool outflowOperatorCoeff() {
-    static const bool v = [] {
-      const char* e = std::getenv("PECLET_FLOW_OUTFLOW_COEFF");
-      return !(e && e[0] == '0');
-    }();
-    return v;
-  }
-  bool pressureExactResidual() const { return exactResidual(); }
+  /// Nusselt film and the outflow divergence stays measurable; there is no reason to set it in
+  /// production. ON by default.
+  void setOutflowOperatorCoefficient(bool on) { outflowOpCoeff_ = on; }
+  bool outflowOperatorCoefficient() const { return outflowOpCoeff_; }
+  bool pressureExactResidual() const { return exactResidual_; }
   bool rhoFaceHarmonic() const { return rhoFaceHarmonic_; }
   // WO-R item 4 asked for the `1/rho_f` factor on the high-side outflow correction;
   // `doc/variable_density_projection.md` §4 listed its absence as a defect. WO-R measured the
@@ -8179,7 +8194,7 @@ class Solver {
   // operator is the one whose coefficient is also the PHYSICALLY right mobility at the outlet
   // (the low-side outlet had no consistent pairing at all before the fix — see the Nusselt film).
   //
-  // DEFAULT ON since WO-R2 (`PECLET_FLOW_OUTFLOW_RHO=0` is the ablation). Bitwise inert at
+  // DEFAULT ON since WO-R2 (`set_outflow_rho_correction(False)` is the ablation). Bitwise inert at
   // constant density either way (rho_f == rho0 makes the factor exactly 1), and gated on varRho.
   void setOutflowRhoCorrection(bool on) { outflowRhoCorr_ = on; }
   bool outflowRhoCorrection() const { return outflowRhoCorr_; }
@@ -9491,7 +9506,7 @@ class Solver {
   }
   bool phaseChangeCurvatureDistance() const { return pcCurvDist_; }
   /// **WO-P3f open item 6 / WO-P3g** — the divergence source's 5^3 fallback target, as a setter
-  /// (it was only reachable through `PECLET_PC_DEPOSIT_FALLBACK`). An interfacial cell whose two
+  /// (it was only reachable through `set_phase_change_deposit_fallback`). An interfacial cell whose two
   /// along-the-normal candidates (`round(k n)`, k = 1, 2) are BOTH still interfacial keeps its
   /// source, and then carries `div(open u) = S` on its OWN faces — i.e. Weymouth-Yue advects the
   /// colour with a field that is not the liquid velocity, which
@@ -11482,10 +11497,9 @@ class Solver {
   double velTol_ = 0.0;         // momentum tolerance stop (0 = legacy fixed-count loop)
   int velMinIters_ = 2;
   long lastMomentumSweeps_ = 0;  // sweeps actually run last step (summed over components/Picard)
-  double velResTol_ = [] {  // residual-based momentum stop: < 0 follows the pressure rtol (DEFAULT
-    const char* e = std::getenv("PECLET_FLOW_VRES");  // since 2026-09-02), 0 = update criterion,
-    return e ? std::atof(e) : -1.0;                   // > 0 fixed; env override for bisection
-  }();
+  // Residual-based momentum stop (setVelocityResidualTolerance): < 0 follows the pressure rtol
+  // (DEFAULT since 2026-09-02), 0 = the update criterion, > 0 = a fixed tolerance.
+  double velResTol_ = -1.0;
   double lastMomentumResid_ = -1.0;  // max_c max|r|/max|b| at exit (residual mode)
   CCField velRes_;                 // scratch for the stencil-path residual
   double lastAxNorm_ = 0.0;        // max|A u| of the last residual evaluation (scale)
@@ -11501,7 +11515,7 @@ class Solver {
   int nLevels_ = 4;             // multigrid depth (CUDA default; set_pressure_multigrid)
   bool pressGraphAmg_ = false;
   // Coarse-solve policy: -1 auto (DEFAULT — agglomerate when the coarsest grid exceeds
-  // PECLET_FLOW_AGGLOM_EXTENT on any axis; identical to the smoothed bottom otherwise),
+  // setPressureBottomExtent cells on any axis; identical to the smoothed bottom otherwise),
   // 0 smoothed, 1 always. Auto became the default 2026-08-13 after the IBM-path anomaly was
   // fixed (per-fluid-component null-space projection; see ../docs/DECOMPOSITION_AND_MULTIGRID.md).
   int pressAgglomMode_ = -1;
@@ -11530,7 +11544,7 @@ class Solver {
   std::shared_ptr<GridHaloTopology<3>> velHalo_;  // g=2 velocity-block topology
   std::shared_ptr<GridHalo<double>> velDev_;      // g=2 velocity-block ghost exchange
   std::shared_ptr<GridHalo<MReal>> velDevF_;      // float twin (momentum-stencil ring, CA sweeps)
-  bool caMomentum_ = false;  // communication-avoiding momentum sweeps (PECLET_FLOW_CA + extent>=4)
+  bool caMomentum_ = false;  // communication-avoiding momentum sweeps (setCommAvoiding, extent>=4)
   bool momStencilDirty_[3] = {true, true, true};  // per-component: stencil ring needs an exchange
   std::shared_ptr<peclet::core::decomp::BlockDecomposer<3>>
       dec_;  // current partition (redistribute)
@@ -11560,10 +11574,24 @@ class Solver {
        pwarm_ = false;    // incremental-rotational pressure (CUDA default on) + warm-start
   bool dtDirty_ = false;  // set_dt after set_solid: momentum stencil needs a rebuild
     int faceInterp_ = 9;    // collocated scheme: 9 = gauge-exact (DEFAULT), 0 = plain (legacy)
-  double apertureFloor_ = [] {  // mode-13 denominator floor (PECLET_FLOW_APERTURE_FLOOR)
-    const char* v = std::getenv("PECLET_FLOW_APERTURE_FLOOR");
-    return v ? std::atof(v) : 0.25;
-  }();
+  double apertureFloor_ = 0.25;  // mode-13 denominator floor (setApertureFloor)
+  // A0: fill the advection inputs' masked (solid) rows with the WALL velocity instead of zeros.
+  // ON by default; setAdvectionWallVelocity(false) is the pre-A0 ablation. See advWallInputs.
+  bool advWallVel_ = true;
+  // WO-R2 item 1 — the variable-density coefficient on the operator's Dirichlet (outflow)
+  // domain-face rows. ON by default; see setOutflowOperatorCoefficient.
+  bool outflowOpCoeff_ = true;
+  // P1 — the exact double flux-form level-0 apply (setPressureExactResidual; enableVof turns it
+  // on). Mirrored into mg_, and read directly by the star overlay's additive delta.
+  bool exactResidual_ = false;
+  // Communication-avoiding smoothing mask (kCaMomentum | kCaMg), see setCommAvoiding. Both on by
+  // default; the momentum half is additionally gated on the block extent (caMomentum_).
+  int caMode_ = kCaBoth;
+  // The shared level-0 MPI decomposition (setDecomposition): 0 = the aligned ORB, >= 2 =
+  // coarse-first with that depth, taking the deepest candidate within maxImbalance.
+  int decompLevels_ = 0;
+  double decompMaxImbalance_ = 1.05;
+  double aspectTheta_ = 2.0;  // mirror of the two multigrids' threshold
   bool gauge2a_ = false;   // gauge-exact with the Guy-Fogelson "gradient 2a" one-sided branch
                            // (set_collocated_scheme("gauge-2a"); experimental stall fix).
                            // Single-rank exact; at rank seams the +/-3 stencil falls back to the
@@ -11578,12 +11606,9 @@ class Solver {
   double rotFilterEps_ = 0.05;  // S' = eps I + (1-eps) S (see setRotationalFilter)
   double rotWeight_ = 1.0;      // rotational under-relaxation w (setRotationalWeight)
   double rotWallW_ = 0.0;       // wall-banded rotational blend w0 (setRotationalWallWeight)
-  int apertureOrder_ = [] {  // face-aperture estimator order (setApertureOrder; DEFAULT 2 =
-    // marching-squares since 2026-08-26 -- user decision, kills the convexity bias; 1 = the
-    // legacy one-sample model). PECLET_FLOW_APERTURE_ORDER overrides the default (diagnostics).
-    const char* v = std::getenv("PECLET_FLOW_APERTURE_ORDER");
-    return v ? std::atoi(v) : 2;
-  }();
+  // Face-aperture estimator order (setApertureOrder; DEFAULT 2 = marching-squares since
+  // 2026-08-26 -- user decision, kills the convexity bias; 1 = the legacy one-sample model).
+  int apertureOrder_ = 2;
   int fluidOnlyMode_ = 0;  // fluid-only constraint (setFluidOnlyConstraint): 1=A filter, 2=B star
   StarOverlay starOv_;     // mode-B Kron star overlay (built in setSolid)
   Kokkos::View<int, CCMem> starCounter_;
@@ -11591,14 +11616,8 @@ class Solver {
   double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
   bool vmgExplicit_ = false;  // set_velocity_multigrid was called (AUTO rule off)
-  long vmgAutoCells_ = [] {   // AUTO threshold, cells per rank (0 = never)
-    const char* e = std::getenv("PECLET_FLOW_VMG_AUTO_CELLS");
-    return e ? std::atol(e) : 65536L;
-  }();
-  long vmgAutoMinGlobal_ = [] {  // AUTO applies only to global problems at least this large
-    const char* e = std::getenv("PECLET_FLOW_VMG_AUTO_MIN_GLOBAL");
-    return e ? std::atol(e) : (1L << 23);  // 8M cells
-  }();
+  long vmgAutoCells_ = 65536L;         // AUTO threshold, cells per rank (0 = never)
+  long vmgAutoMinGlobal_ = 1L << 23;   // AUTO applies only to global problems >= 8M cells
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
   VelocityMG vmg_;
   CCField vmgTheta_, vmgClean_;
@@ -11744,13 +11763,10 @@ class Solver {
   vof::VofMcArea pcAreaMc_;          // WO-P3d: the joined marching-tet area driver
   double pcMcOrphanArea_ = 0.0;      // WO-P3d: area booked to non-interfacial cells
   CCField pcAreaCg2_;                // its inner values on the G = 2 phase-change block
-  // WO-P23 ablation, process-wide (the `PECLET_FLOW_OUTFLOW_RHO` pattern): give the interfacial
+  // WO-P23 ablation (`set_phase_change_deposit_fallback`): give the interfacial
   // cells whose along-the-normal deposit candidates are BOTH still interfacial a target from the
   // 5^3 box instead of leaving the source in place. Default OFF — see the findings.
-  bool pcDepositFallback_ = [] {
-    const char* e = std::getenv("PECLET_PC_DEPOSIT_FALLBACK");
-    return e && e[0] != '0';
-  }();
+  bool pcDepositFallback_ = false;
   bool pcEnergy_ = false;    // consistent rho c_p T transport + variable k(C)/rho c_p(C) operator
   double pcRcpG_ = 1.0, pcRcpL_ = 1.0;
   CCField pcKcell_, pcRcp_;  // k(C) and (rho c_p)(C) on the G=2 block, refreshed per step
@@ -11807,11 +11823,8 @@ class Solver {
   // WO-R item 4 measured NO against the DEFECTIVE operator; WO-R2 item 1 fixed the operator and
   // the answer flipped to YES (measured: with the fix, the projected outflow divergence at ratio
   // 10 is 8.31e-10 WITH the factor and 9.97e-05 without). DEFAULT ON;
-  // PECLET_FLOW_OUTFLOW_RHO=0 restores the plain correction as the ablation.
-  bool outflowRhoCorr_ = [] {
-    const char* e = std::getenv("PECLET_FLOW_OUTFLOW_RHO");
-    return !(e && e[0] == '0');
-  }();
+  // `set_outflow_rho_correction(False)` restores the plain correction as the ablation.
+  bool outflowRhoCorr_ = true;
   CCField cField_;                 // the G=2 registry mirror of the colour field ("C")
   CCField vofCs_;                  // rung V5a: cell fluid fraction on the G=2 block (staggered)
   CCField vofSolidG2_;             // rung V5a: 1 where the cell is SOLID (G=2 mirror), else 0

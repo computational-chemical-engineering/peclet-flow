@@ -45,7 +45,7 @@
 //     moving + advection OFF  (GATE7_ADV=0)        du = 5.99e-16
 //     static + advection ON   (GATE7_MOVE=0)       du = 3.47e-17
 //     moving + advection ON, A0 fill disabled
-//       (PECLET_FLOW_ADV_WALLVEL=0)                du = 1.28e-16
+//       (set_advection_wall_velocity(False))     du = 1.28e-16
 //
 // So neither the moving-geometry machinery nor the advection is decomposition-dependent on its
 // own, and with the A0 fill turned off the moving+advective march is bit-clean across ranks. The
@@ -67,7 +67,8 @@
 //
 // ABLATION KNOBS (all default to the shipped case): GATE7_ADV=0 turns advection off, GATE7_MOVE=0
 // freezes the instance and drives the flow with a body force instead, GATE7_SHIFT=<cells> slides
-// the whole tow path, and the solver's own PECLET_FLOW_ADV_WALLVEL=0 disables the A0 fill.
+// the whole tow path, and the solver's own set_advection_wall_velocity(False) disables the
+// A0 fill.
 #include <mpi.h>
 
 #include <array>

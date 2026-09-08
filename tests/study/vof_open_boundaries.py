@@ -13,7 +13,7 @@ COUPLED solve and a number somebody else published:
     nusselt     WO-R gate G2: a falling liquid film fed by a prescribed Nusselt inlet profile,
                 against the analytical flow rate. Run at density ratio 100 (V2a regime) and at
                 1000 with momentum consistency. This is the gate on the 1/rho_f outflow
-                correction: `PECLET_FLOW_OUTFLOW_RHO=0` restores the pre-WO-R correction and the
+                correction: `--no-outflow-rho` restores the pre-WO-R correction and the
                 script reports BOTH columns.
     pool        WO-R gate G3: gas blown over a resting liquid pool at ratio 1000. Gates the pool's
                 volume, the velocity it is allowed to pick up, and the inflow ghost DENSITY.
@@ -167,7 +167,7 @@ def gate_nusselt(ratio=100, steps=None, outflow_rho=True):
     steps = steps or (900 if QUICK else 2400)
     print("\n" + "=" * 96)
     print(f"G2 NUSSELT FALLING FILM, density ratio {ratio}, mu ratio {p['mu_l']/p['mu_g']:.0f}"
-          f"{'' if outflow_rho else '   [ABLATION: PECLET_FLOW_OUTFLOW_RHO=0]'}")
+          f"{'' if outflow_rho else '   [ABLATION: --no-outflow-rho]'}")
     print("=" * 96)
     print("  A liquid film of thickness delta = 8 cells runs down the -x wall of a quasi-2D duct,")
     print("  fed at the +z inlet with the exact Nusselt profile and leaving through the -z outlet.")
@@ -349,7 +349,7 @@ if __name__ == "__main__":
     if "budget" in todo:
         results["budget"] = gate_budget()
     if "nusselt" in todo:
-        ablation = os.environ.get("PECLET_FLOW_OUTFLOW_RHO") == "0"
+        ablation = "--no-outflow-rho" in sys.argv
         rows = []
         for r in (100, 1000):
             ok, dq, dd, st, it = gate_nusselt(r, outflow_rho=not ablation)

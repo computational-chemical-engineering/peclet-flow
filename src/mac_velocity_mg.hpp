@@ -363,7 +363,7 @@ class VelocityMG {
         // hp, so this hierarchy's level table is the pressure hierarchy's on the same grid.
         const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
         const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
-        ratio = CutcellMG::mgChooseRatio(H, canA, aniso_, mgAspectTheta());
+        ratio = CutcellMG::mgChooseRatio(H, canA, aniso_, aspectTheta_);
         if (ratio.x == 2)
           next.x = inner.x / 2;
         if (ratio.y == 2)
@@ -457,7 +457,7 @@ class VelocityMG {
                               can(gs.y) && (!inPlace || evenOn(dec, 1)),
                               can(gs.z) && (!inPlace || evenOn(dec, 2))};
         const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
-        ratio = CutcellMG::mgChooseRatio(H, canA, aniso_, mgAspectTheta());
+        ratio = CutcellMG::mgChooseRatio(H, canA, aniso_, aspectTheta_);
         if (ratio.x == 2)
           next.x = gs.x / 2;
         if (ratio.y == 2)
@@ -648,6 +648,8 @@ class VelocityMG {
   // the CUDA vmg also does). With it the vel-MG converges to the RB-GS fixed point. IbmSolver
   // supplies this per component before the solve.
   void setBcApplyL0(std::function<void(CCField)> fn) { bcApplyL0_ = std::move(fn); }
+  /// Anisotropic-coarsening aspect threshold theta (doc/anisotropic_metric.md §5.1).
+  void setAspectThreshold(double theta) { aspectTheta_ = theta; }
   // const-coeff aniso operator + no-slip/inflow/outflow boundary fold for component comp, on EVERY
   // level. nu_dt = mu, idiag = rho/dt, h0 = 1. Rebuilt per component (the fold is
   // component-dependent). No pin. useResMask_: exclude the HELD normal-Dirichlet boundary face
@@ -924,6 +926,7 @@ class VelocityMG {
   double w_[3] = {1.0, 1.0, 1.0};   // per-axis metric weight (setMetric); 1.0 = isotropic lattice
   double hp_[3] = {1.0, 1.0, 1.0};  // per-axis spacing h_a' (setMetric); the §5 coarsening rule
   bool aniso_ = false;              // engages that rule; false => today's level table verbatim
+  double aspectTheta_ = 2.0;        // anisotropic-coarsening threshold (setAspectThreshold)
   int pre_ = 2, post_ = 2, bottom_ = 8;
   bool usePin_ = true,
        useResMask_ = true;  // staircase: pin + clean-fluid exclude; upwind/domain-BC: neither

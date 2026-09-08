@@ -27,13 +27,14 @@
 // a low iteration count alone is not a good solve, because the CG breakdown guard exits early and
 // keeps the last finite iterate.
 //
-// Demonstrating the failure: PECLET_FLOW_MG_BCGHOST=0 restores the pre-repair periodic-wrap coarse
+// Demonstrating the failure: --no-coarse-ghost restores the pre-repair periodic-wrap coarse
 // ghost (measurement ablation only). Every PCG configuration below fails under it; the test prints
 // which mode it is running so an ablation run is self-labelling.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <Kokkos_Core.hpp>
 #include <string>
 #include <vector>
@@ -106,8 +107,13 @@ struct Case {
   int gate;
 };
 
+/// `--no-coarse-ghost` reinstates the pre-WO-H periodic-wrap coarse ghost (the ablation): the
+/// gates below are then EXPECTED TO FAIL, which is what makes the repair measurable.
+bool gAblate = false;
+
 void run(const Case& cs, Driver d) {
   peclet::flow::IbmSolver s(NX, NY, NZ);
+  s.setPressureCoarseGhost(!gAblate);
   s.setRho(1.0);
   s.setMu(MU);
   s.setDt(DT);
@@ -176,14 +182,14 @@ void run(const Case& cs, Driver d) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  for (int i = 1; i < argc; ++i)
+    if (std::strcmp(argv[i], "--no-coarse-ghost") == 0)
+      gAblate = true;
   Kokkos::initialize(argc, argv);
   {
-    const char* ab = std::getenv("PECLET_FLOW_MG_BCGHOST");
-    const bool ablated = ab && std::atoi(ab) == 0;
-    std::printf(
-        "3-D wall-bounded pressure convergence: %dx%dx%d, %d levels, %d steps, cap %d%s\n", NX, NY,
-        NZ, LEVELS, STEPS, MAXIT,
-        ablated ? "   [PECLET_FLOW_MG_BCGHOST=0 — pre-WO-H ablation, EXPECTED TO FAIL]" : "");
+    std::printf("3-D wall-bounded pressure convergence: %dx%dx%d, %d levels, %d steps, cap %d%s\n",
+                NX, NY, NZ, LEVELS, STEPS, MAXIT,
+                gAblate ? "   [--no-coarse-ghost — pre-WO-H ablation, EXPECTED TO FAIL]" : "");
     const int ALL = (1 << kPcg) | (1 << kFcg) | (1 << kCheb);
     const int FCG_CHEB = (1 << kFcg) | (1 << kCheb);
     const int CHEB_ONLY = (1 << kCheb);

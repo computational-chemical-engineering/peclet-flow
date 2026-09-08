@@ -58,7 +58,7 @@ module load Python/3.12.3-GCCcore-13.3.0
 export OMPI_MCA_pml=ucx UCX_MEMTYPE_CACHE=n
 export OMP_NUM_THREADS=8 OMP_PROC_BIND=false        # the CUDA prefix carries an OpenMP HOST backend
 export PYTHONPATH="$BUILD:${PYTHONPATH:-}"
-export PECLET_FLOW_EXACT_RESIDUAL=1
+# (the exact level-0 pressure apply is turned on by enable_vof(); no switch needed)
 
 echo "[ch18] $(date -Is)  job $SLURM_JOB_ID on $(hostname)  tag=$TAG"
 echo "[ch18] build $BUILD"

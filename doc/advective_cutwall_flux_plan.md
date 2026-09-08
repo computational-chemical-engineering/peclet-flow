@@ -165,7 +165,7 @@ points over the whole extended block. `advVelView(c)` hands those to the three e
 builders (`buildRhs` / `buildRhsForced` / `buildRhsVar`), to both implicit-FOU stencil builders
 (`buildAdvStencil` / `buildAdvStencilVar`) and to `VelocityMG::restrictAdvVelocities`. Filled once
 per Picard iteration (the fluid rows are `u^k`; the wall rows depend only on instance motion).
-`maskVelocity`'s global convention is untouched. Gated on `hasMotion_`; **`PECLET_FLOW_ADV_WALLVEL=0`
+`maskVelocity`'s global convention is untouched. Gated on `hasMotion_`; **`set_advection_wall_velocity(False)`
 is the ablation** and reproduces every pre-A0 baseline to 3-4 significant figures, which is how the
 before-columns below were measured in the same binary.
 
@@ -226,7 +226,7 @@ complete).
 Was: not re-measurable — `force_gate.py FORCE_ADVECT=1` returned NaN at N = 32/48/64/128 with
 `CutcellMG::solvePCG: preconditioner produced non-finite z`. **PRE-EXISTING and unrelated to A0**
 — the pre-A0 module `build_wop_cuda` (built 12:44 the same day) NaNs identically, the ablation
-`PECLET_FLOW_ADV_WALLVEL=0` reproduces it bit for bit, and A0 is structurally inert on a static
+`set_advection_wall_velocity(False)` reproduces it bit for bit, and A0 is structurally inert on a static
 scene (`hasMotion_` is false, so `advVelView` returns `CCConst(C[c].u)`). `FORCE_ADVECT=0` passes
 at 2.2e-15 / 3.3e-15.
 
@@ -388,7 +388,7 @@ bit for bit (the same caveat `mpi_scene_gate.py` states).
 | moving + advection ON (the shipped case) | **1.45e-07** |
 | moving + advection OFF (`GATE7_ADV=0`) | 5.99e-16 |
 | static + advection ON (`GATE7_MOVE=0`, body-force driven) | 3.47e-17 |
-| moving + advection ON, A0 fill disabled (`PECLET_FLOW_ADV_WALLVEL=0`) | 1.28e-16 |
+| moving + advection ON, A0 fill disabled (`set_advection_wall_velocity(False)`) | 1.28e-16 |
 
 Neither the moving-geometry machinery nor the advection is decomposition-dependent on its own, and
 with the A0 fill off the moving + advective march is bit-clean across ranks. Note what the third
@@ -423,7 +423,7 @@ cmake -S tests/kokkos_mpi -B build_kmpi -DCMAKE_PREFIX_PATH=$PWD/../extern/insta
   -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
 cmake --build build_kmpi --target test_movingscene_advect_mpi -j
 mpirun -np 2 ./build_kmpi/test_movingscene_advect_mpi          # and -np 1, -np 4
-PECLET_FLOW_ADV_WALLVEL=0 mpirun -np 2 ./build_kmpi/test_movingscene_advect_mpi   # ablation
+mpirun -np 2 ./build_kmpi/test_movingscene_advect_mpi   # (the A0 ablation is a solver setter now)
 ```
 Runtimes on one RTX 5080 (each run also builds the full-grid reference on rank 0): np = 1 95 s,
 np = 2 212 s, np = 4 332 s.
@@ -452,5 +452,6 @@ Ablations at np=2 (`test_movingscene_advect_mpi`, body towed across the ORB cut)
 Fix: `if (hasMotion_) exchangeExtRaw(C[c].mask)` after `ibmSolidMask` (static scenes never
 consume ghost masks — byte-identical by construction), plus the uBc_/uwCell_ exchange (correct on
 its own terms: those planes were wrong too, they just were not what the SOU read first). np=1
-stays bit-exact. The `PECLET_FLOW_UBC_EXCHANGE` / `PECLET_FLOW_ADV_FILL_MODE` ablation knobs are
+stays bit-exact. The `PECLET_FLOW_UBC_EXCHANGE` / `PECLET_FLOW_ADV_FILL_MODE` ablation knobs were
+DELETED with their code paths in the QUALITY_PLAN §3.E env-var sweep; they are
 left in as documented instrumentation.

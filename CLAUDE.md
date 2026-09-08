@@ -62,13 +62,14 @@ python scripts/validate_zick_homsy_sdflow.py       # external ground truth (Z&H 
 
 C++ kernel + multi-rank test suites: ONE tree per backend, `-DPECLET_FLOW_BUILD_TESTS=ON` adds
 `tests/kokkos` (44 kernel ctests + the `bench`-labelled instruments) and, with `PECLET_FLOW_MPI`,
-`tests/kokkos_mpi` (106 ctests, np = 1, 2, 4[, 8]) to the module's tree, plus the regression suite and
-the three smallest verify scripts as Python ctests on the module built there:
+`tests/kokkos_mpi` (106 ctests, np = 1, 2, 4[, 8]) to the module's tree, plus the regression suite,
+the three smallest verify scripts and the D3 env-knob guard (`no_env_knobs`) as Python ctests on
+the module built there:
 ```bash
 cmake -S . -B build_dev -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
   -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
 cmake --build build_dev -j
-ctest --test-dir build_dev -N                                  # 155 registered, nothing hidden
+ctest --test-dir build_dev -N                                  # 156 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure  # just the distributed suite
 ```
@@ -234,7 +235,7 @@ viscous coefficient; the embedded closures march along the index direction `m_a 
 physical normal.
 
 Both geometric multigrids **defer an axis that is already `theta = 2` times coarser than the finest
-coarsenable one** (`PECLET_FLOW_MG_ASPECT`, default 2.0, read once — a measurement knob, not a user
+coarsenable one** (`set_multigrid_aspect_threshold`, default 2.0 — a measurement knob, not a user
 setting; the rule engages only on an anisotropic domain, so isotropic hierarchies are bit-identical).
 `Solver.pressure_mg_level_ratios()` prints the level table. That rule is what makes stretched grids
 solvable at all: on the `(N, 2N, N/2)` ladder MG-PCG went **500/500/500 CAPPED → 7/8/8** and the
@@ -259,6 +260,41 @@ systems 1000x apart, sampled SDF and analytic scene, ~1e-15 relative), plus the 
 - **SDF sign**: Negative inside solid, positive in fluid
 - **Kokkos kernels**: `parallel_for` / `parallel_reduce` over `Kokkos::View`s (`MDRangePolicy` for 3-D loops); device sources are `.hpp` compiled as C++ (the launch compiler routes through `nvcc`/`hipcc`), never `.cu`
 - **Staggered grid**: u at (i+1/2,j,k), v at (i,j+1/2,k), w at (i,j,k+1/2), p at cell centers
+- **No environment variable changes a result** (`suite/docs/QUALITY_PLAN.md` D3, executed
+  2026-09-08). Twenty numerics-changing / algorithm-selecting `PECLET_FLOW_*` reads became solver
+  setters, four ablations were deleted with their code paths, one host-launch tuning read became a
+  compile-time constant, and `tests/python/test_no_env_knobs.py` (ctest `no_env_knobs`) fails if a
+  new one appears in `src/`. The whole map:
+
+  | was | now | default |
+  |---|---|---|
+  | `PECLET_FLOW_APERTURE_ORDER` | `set_aperture_order(order)` | 2 |
+  | `PECLET_FLOW_APERTURE_FLOOR` | `set_aperture_floor(floor)` | 0.25 |
+  | `PECLET_FLOW_ADV_WALLVEL` | `set_advection_wall_velocity(on)` | True |
+  | `PECLET_FLOW_OUTFLOW_RHO` | `set_outflow_rho_correction(on)` | True |
+  | `PECLET_FLOW_OUTFLOW_COEFF` | `set_outflow_operator_coefficient(on)` | True |
+  | `PECLET_FLOW_VRES` | `set_velocity_residual_tolerance(rtol)` | -1 (follow the pressure rtol) |
+  | `PECLET_FLOW_VMG_AUTO_CELLS` / `_MIN_GLOBAL` | `set_velocity_multigrid_auto(cells_per_rank, min_global_cells)` | 65536 / 8388608 |
+  | `PECLET_FLOW_CA` | `set_comm_avoiding(mode)` — `"both"`/`"off"`/`"momentum"`/`"pressure"` | `"both"` |
+  | `PECLET_FLOW_MG_ASPECT` | `set_multigrid_aspect_threshold(theta)` | 2.0 |
+  | `PECLET_FLOW_MG_BCGHOST` | `set_pressure_coarse_ghost(on)` | True |
+  | `PECLET_FLOW_PRESSURE_STRICT` | `set_pressure_strict(on)` | False |
+  | `PECLET_FLOW_AGGLOM_EXTENT` | `set_pressure_bottom_extent(cells)` | 4 |
+  | `PECLET_FLOW_TELESCOPE` / `_MIN_EXTENT` | `set_pressure_telescope(on)` / `CutcellMG::setTelescopeMinExtent` | True / 4 |
+  | `PECLET_FLOW_EXACT_RESIDUAL` | `set_pressure_exact_residual(on)` — now PER SOLVER | False (`enable_vof` turns it on) |
+  | `PECLET_FLOW_VOF_WISP_EPS` | `set_vof_wisp_eps(eps)` | 1e-8 |
+  | `PECLET_PC_DEPOSIT_FALLBACK` | `set_phase_change_deposit_fallback(on)` | False |
+  | `PECLET_FLOW_DECOMP_LEVELS` / `_MAX_IMBALANCE` | `Solver.set_decomposition(levels, max_imbalance)` **and** `flow.mpi_block(..., levels=, max_imbalance=)` — the process-global static is gone, so both call sites must be given the same values | 0 / 1.05 |
+  | `PECLET_FLOW_UBC_EXCHANGE`, `PECLET_FLOW_ADV_FILL_MODE`, `PECLET_FLOW_MG_RESFILL`, `PECLET_FLOW_MG_DIAGRESUM` | DELETED with their code paths (gate-7 / benchmark ablations) | — |
+  | `PECLET_FLOW_HOST_SERIAL_CELLS` | `kHostSerialCellCutoff` (a compile-time constant; host launch tuning, never numerics) | 8192 |
+
+  Kept, because none of them touches an arithmetic path: `PECLET_FLOW_MG_DEBUG`,
+  `PECLET_FLOW_MG_DEBUG_SOLVES`, `PECLET_FLOW_AGMG_DEBUG`, `PECLET_FLOW_GP_DEBUG`,
+  `PECLET_FLOW_GP_DEBUG_FILE`. The `tests/kokkos` binaries' own scenario knobs stay environment
+  variables (they configure a TEST, not the solver), except the two that switched a solver setting:
+  `test_cutcellmg_aniso --theta=<x>` and `test_pressure_wallbounded --no-coarse-ghost` are command-line
+  flags now. `scripts/verify_bfs_sdflow.py` takes `--re800` (its `SDFLOW_BFS_RE800` was documented
+  here under a name that never existed in the code).
 
 ## MPI / flow (the CFD solver, core integration)
 
@@ -281,7 +317,7 @@ Key pieces (all `src/*.hpp`, Kokkos, header-only, `namespace flow`):
 **Distributed smoother communication** (see `../docs/COMMUNICATION_SCALING.md`): every RB-GS sweep
 (momentum + each MG level) overlaps its halo exchange with the interior sweep (post / smooth
 interior / finish / smooth boundary shell — bit-identical by construction), and
-**communication-avoiding smoothing** (`PECLET_FLOW_CA`, default ON, `=0` kills it) exchanges a
+**communication-avoiding smoothing** (`set_comm_avoiding`, default `"both"`, `"off"` kills it) exchanges a
 2-deep ghost layer ONCE per red-black pair instead of 1-deep per colour, redundantly re-smoothing
 the 1-deep ghost ring so the second colour needs no exchange — bit-identical, half the halo
 events. CA engages on the periodic/IBM operator where every rank's block extent is ≥ 4: in the
@@ -330,7 +366,7 @@ operator. Four outer drivers wrap that V-cycle — **select one per solver**:
   `pr` (`PECLET_FLOW_MG_DEBUG=2`, zero iff M is symmetric w.r.t. the fine operator) drops from
   0.42–0.52 median wall-bounded to **0.008–0.086**, at or below the 0.062 of the *periodic* hierarchy.
   Periodic/IBM is byte-identical (`hasBC_` gates it) and the single-phase regression is +0.00 % with
-  identical iteration counts. `PECLET_FLOW_MG_BCGHOST=0` restores the old ghost as a measurement
+  identical iteration counts. `set_pressure_coarse_ghost(False)` restores the old ghost as a measurement
   ablation. Gate: `tests/kokkos/test_pressure_wallbounded.cpp` (nz = 16, all three drivers).
 - **What remains: a high coefficient CONTRAST makes the V-cycle preconditioner indefinite.** Both CG
   drivers still cap on a wall-bounded *stratified* column at density ratio ≳ 10³ and PCG on the
@@ -362,8 +398,9 @@ operator. Four outer drivers wrap that V-cycle — **select one per solver**:
   measured on the same GPU at identical iteration counts: +12 % step time, +120 B/cell (+10 % GPU
   memory).** The recommended production fix is the **double-diagonal** (faces float, diagonal stored
   and resummed in double so `A·1 = 0` holds exactly — the fix already proven at the agglomerated
-  bottom, generalised); `PECLET_FLOW_MG_DIAGRESUM=1` **on a double build** emulates exactly its
-  arithmetic and matches full double at every grid measured. Full findings + policy:
+  bottom, generalised); the `PECLET_FLOW_MG_DIAGRESUM` emulation that measured it (float faces,
+  double resummed diagonal) was DELETED with the env-var sweep — the measurement stands in the
+  work order, the code path does not. Full findings + policy:
   `doc/vof_workorders_v34.md` (WO-M). **Independently reproduced in the field (2026-09-01,
   peclet-examples `benchmarks/foxberry-scaling`): a 5000-sphere φ=0.45 bed caps MG-PCG at 384³
   (R = 10.7 cells) while the SAME bed converges in 11 iterations at 128³ and 20 at 256³, at np=1
@@ -381,7 +418,7 @@ operator. Four outer drivers wrap that V-cycle — **select one per solver**:
   get there (§1.1/1.2 of [`../docs/DECOMPOSITION_AND_MULTIGRID.md`](../docs/DECOMPOSITION_AND_MULTIGRID.md)).
   `"auto"` agglomerates the coarsest level into a global operator (keyed by global cell id, so it is
   decomposition-independent — np=6 vs np=1 to 4.5e-16) and solves it exactly whenever that grid
-  exceeds `PECLET_FLOW_AGGLOM_EXTENT` (4) cells on any axis. Measured, 2048×64×64 channel: 4 levels
+  exceeds `set_pressure_bottom_extent` (4) cells on any axis. Measured, 2048×64×64 channel: 4 levels
   13.5 → 4.0 iters/step, 6 levels 6.0 → 4.0 (91 → 69.5 ms) — better than full geometric depth (4.4,
   77.2 ms). The former IBM anomaly (+41 % on `random_spheres`) is RESOLVED (2026-08-13): the bottom
   null-space projection is now per-fluid-component (solid identity rows excluded), the fluid
@@ -392,8 +429,8 @@ operator. Four outer drivers wrap that V-cycle — **select one per solver**:
   bottom-operator anatomy + inner-CG stats; see `../docs/DECOMPOSITION_AND_MULTIGRID.md` §2.7.)
   **`"auto"` is the DEFAULT since 2026-08-13** (suite sweep: staggered regression +0.00 %, colocated
   13–27 % FEWER pressure iterations at identical accuracy, domain-BC verifies unchanged, MPI ctests
-  green); `"smoother"` remains available, and `PECLET_FLOW_AGGLOM_EXTENT=1000000` reproduces the
-  legacy behaviour without a code change. Porous / variable-ρ rebuild the operator every step and so
+  green); `"smoother"` remains available, and `set_pressure_bottom_extent(1000000)` reproduces the
+  legacy behaviour. Porous / variable-ρ rebuild the operator every step and so
   rebuild the bottom AMG every step — negligible for the intended few-cells-per-axis bottoms, but
   avoid `auto` + a badly-factored grid (huge bottom) on those paths.
 
@@ -405,8 +442,7 @@ two, not its size. **An odd dimension never coarsens at all**: measured on one G
 MPI there is a second gate — a level coarsens an axis only if *every rank's block* is even on it, so
 the achievable depth is set by the per-rank block, not the global grid.
 
-**Telescoping is the DEFAULT since 2026-09-02** (`PECLET_FLOW_TELESCOPE=0` / `set_pressure_telescope(False)`
-disables): when a level cannot coarsen in place, ORB siblings are merged onto fewer ranks and the
+**Telescoping is the DEFAULT since 2026-09-02** (`set_pressure_telescope(False)` disables): when a level cannot coarsen in place, ORB siblings are merged onto fewer ranks and the
 hierarchy continues to 3³ on one rank (`docs/MG_TELESCOPING_PLAN.md`). The WO-R2 variable-density
 outflow *coefficient* (which lives on a ghost plane of each level) crosses a telescope point too:
 `teleGatherPlane` carries the high-side outflow plane into the merged stage with the inner cells and
@@ -426,8 +462,9 @@ this already exists as `set_pressure_bottom("auto")`, only the intermediate step
 problem 1.
 
 Two ways to build a decomposition that survives that, selected by
-`flow.set_decomposition_levels(L)` (or `PECLET_FLOW_DECOMP_LEVELS`), which **must be set before
-`mpi_block()` and `Solver.init_mpi()` — both derive the same partition from it**:
+`Solver.set_decomposition(L, max_imbalance=1.05)` and the matching `flow.mpi_block(gnx, gny, gnz,
+levels=L, max_imbalance=...)`, which **must agree and must be set before `Solver.init_mpi()` —
+both derive the same partition from them**:
 
 | `L` | how the level-0 partition is built |
 |---|---|
@@ -442,7 +479,7 @@ cases — what matters is that the coarse grid divides among the ranks, not that
 
 Depth and balance genuinely trade off (each extra level doubles the quantum), so `decomposition()`
 builds each candidate depth and **measures** its imbalance, taking the deepest that stays within
-`PECLET_FLOW_DECOMP_MAX_IMBALANCE` (default 1.05) and otherwise falling back to the aligned ORB. The
+`max_imbalance` (default 1.05) and otherwise falling back to the aligned ORB. The
 search is a pure function of (ranks, grid, levels), so every rank reaches the same answer with no
 communication.
 
@@ -720,7 +757,7 @@ Findings and every measured number: `doc/vof_workorders_v6.md` § "ISSUES sweep"
   staggered `Solver` handed the same faces. A face field that was never built at all is refused.
 - **A pressure preconditioner breakdown is VISIBLE**: `pressure_solve_failed()`, and
   `last_pressure_iterations()` reports the CAP, so the usual rule-3b check catches it;
-  `PECLET_FLOW_PRESSURE_STRICT=1` raises instead. It used to print one line to stdout, zero the
+  `set_pressure_strict(True)` raises instead. It used to print one line to stdout, zero the
   correction and report **0 iterations** — a perfectly healthy-looking solve that had been handed
   nothing (measured: a two-phase post array with 3.08-cell throats, four times in a row).
 - **`set_contact_angle` binds to a DOMAIN-BC wall** (type 1 no-slip or type 4 free-slip) — see
@@ -1301,7 +1338,7 @@ discrete divergence only if it uses the SAME face coefficient the operator row u
 `CutcellMG::applyBoundaryOpenness` re-imposed the literal openness **1.0** at every Dirichlet domain
 face on every level, overwriting `buildRhoCoeff`'s `o_f·ρ₀/ρ_f`. WO-R2 fixed that (below) and the
 table flipped, so `set_outflow_rho_correction` is now **default ON**
-(`PECLET_FLOW_OUTFLOW_RHO=0` is the ablation):
+(`set_outflow_rho_correction(False)` is the ablation):
 
 | stratified duct, ratio 10, `max\|div(open u)\|` projected | old operator | fixed operator |
 |---|---|---|
@@ -1319,9 +1356,9 @@ nothing writes and the periodic/halo fill wraps the opposite boundary into — i
 snapshotted before the level-0 fill and **area-coarsened plane by plane** down the hierarchy
 (`mgCoarsenFacePlane`). Gated by `CutcellMG::setOutflowCoefficient`, so the raw-openness path is
 byte-identical (`pressure_wallbounded` and the single-phase regression are the tripwires);
-`PECLET_FLOW_OUTFLOW_COEFF=0` restores the old row as a measured ablation. **MG telescoping is
+`set_outflow_operator_coefficient(False)` restores the old row as a measured ablation. **MG telescoping is
 refused** on this path (the telescope stage gathers inner cells only, so the fine high-side plane
-does not survive the merge) — keep `PECLET_FLOW_TELESCOPE` off for two-phase open boundaries.
+does not survive the merge) — keep `set_pressure_telescope(False)` for two-phase open boundaries.
 
 What it bought, all previously unreachable: the **Nusselt falling film converges at ratio 100 AND
 1000** (δ 8.0825 / 8.0820 against 8, flow rate **+0.21 %** against the analytical Nusselt Q,
@@ -1344,7 +1381,7 @@ a sphere cutting the outlet plane, `ΣC` over solid cells exactly **0** in both.
 
 **Two VoF defaults changed (WO-R2).** `enable_vof()` now turns ON:
 - **the exact level-0 pressure operator** (`set_pressure_exact_residual`, P1 of
-  `suite/docs/DEFECT_CORRECTION_PLAN.md`; `PECLET_FLOW_EXACT_RESIDUAL` still initialises it and an
+  `suite/docs/DEFECT_CORRECTION_PLAN.md`; it is PER SOLVER, off at construction, and an
   explicit setting wins). A two-phase coefficient contrast is exactly what amplifies the float
   operator's broken `A·1 = 0`. Measured: Hysing 2 flux divergence 1.85e-03 → 5.15e-11 with every
   functional identical; the cut-cell packing gate's `max|div|` **3.05e-11 → 1.48e-15** and its
@@ -1913,7 +1950,7 @@ Full A/B, mechanism and a minimal-reproducer plan:
 developing plane channel (uniform inlet → parabolic Poiseuille outlet, `u_max/U_mean`→1.5, exact mass
 conservation, machine-precision divergence; `scripts/verify_channel_sdflow.py`); backward-facing step
 (Gartling expansion-ratio-2, `scripts/verify_bfs_sdflow.py`) — reattachment `x_r/S` 5.3 (Re_S=100) → 8.3
-(Re_S=200) on the Armaly/Biswas curve, `PECLET_FLOW_BFS_RE800=1` pushes to the Gartling Re=800 benchmark.
+(Re_S=200) on the Armaly/Biswas curve, `--re800` pushes to the Gartling Re=800 benchmark.
 
 The **rediscretized geometric pressure multigrid is multilevel on these non-periodic domains** (not just the
 periodic/IBM case): each coarse level re-imposes the boundary face openness (Neumann wall/inflow → 0,
@@ -2047,8 +2084,8 @@ criterion cannot see that stall either). **The V-cycle needs no depth on a pore-
 3, 4 and 5 levels give identical cycle counts at 96³ (the coarse grid only serves the clean fluid
 interior; the exclude mask hands the band to the smoother), so the velocity hierarchy does NOT
 need telescoping where the pressure one did. **AUTO rule**: when `set_velocity_multigrid` was never
-called, a distributed run (np > 1) of at least `PECLET_FLOW_VMG_AUTO_MIN_GLOBAL` = 8M cells takes
-the 3-level V-cycle once global cells / ranks fall below `PECLET_FLOW_VMG_AUTO_CELLS` (65536;
+called, a distributed run (np > 1) of at least `min_global_cells` = 8M cells takes
+the 3-level V-cycle once global cells / ranks fall below `cells_per_rank` (65536;
 `set_velocity_multigrid_auto(cells, min_global)`, 0 = never) on an eligible operator mode — the
 size floor keeps every test-sized distributed run exactly equal to its single-rank reference — the measured crossover on the FoxBerry bed (RB-GS 2.91 vs MG 3.32 s/step at 147 k
 cells/rank; 0.844 vs 0.834 at 37 k). Above it RB-GS with the residual stop is the cheaper solver.

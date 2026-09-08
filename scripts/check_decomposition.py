@@ -57,7 +57,7 @@ def child(args):
     from peclet import flow
 
     gx, gy, gz = args.grid
-    origin, size = flow.mpi_block(gx, gy, gz)
+    origin, size = flow.mpi_block(gx, gy, gz, levels=args.decomp_levels)
     lnx, lny, lnz = size
     cells = lnx * lny * lnz
     hi = w.allreduce(cells, op=MPI.MAX)
@@ -68,6 +68,7 @@ def child(args):
         # Constructing the Solver is what builds the MG hierarchy; with PECLET_FLOW_MG_DEBUG=1 it
         # prints the level table, which the parent parses for the achieved depth.
         s = flow.Solver(lnx, lny, lnz)
+        s.set_decomposition(args.decomp_levels)  # must match the mpi_block() call above
         s.init_mpi(gx, gy, gz)
         s.set_rho(1.0)
         s.set_mu(0.1)
@@ -134,6 +135,9 @@ def main():
     ap.add_argument("--predict", action="store_true",
                     help="use flow.predict_hierarchy (pure function, no mpirun, any np): print the "
                          "level ladder with and without coarse-level telescoping")
+    ap.add_argument("--decomp-levels", type=int, default=0,
+                    help="Solver.set_decomposition(levels) / flow.mpi_block(levels=): 0 = the "
+                         "aligned ORB, >= 2 = coarse-first with that depth")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
     if getattr(args, "predict", False):
@@ -143,9 +147,8 @@ def main():
             args.np = [int(v) for v in args.np.split(",")]
         for spec in (args.mode if isinstance(args.mode, list) else str(args.mode).split(",")):
             label, lv = mode_spec(spec, args.levels)
-            from peclet import flow
-            flow.set_decomposition_levels(int(lv))
-            print(f"=== decomposition mode {label} (set_decomposition_levels({int(lv)})) ===")
+            args.decomp_levels = int(lv)
+            print(f"=== decomposition mode {label} (set_decomposition({int(lv)})) ===")
             predict(args)
         return
     args.grid = [int(v) for v in args.grid.split(",")]
@@ -162,9 +165,10 @@ def main():
     for tok in args.mode.split(","):
         label, decomp = mode_spec(tok.strip(), args.levels)
         for np_ in [int(v) for v in args.np.split(",")]:
-            env = dict(os.environ, PECLET_FLOW_MG_DEBUG="1", PECLET_FLOW_DECOMP_LEVELS=decomp)
+            env = dict(os.environ, PECLET_FLOW_MG_DEBUG="1")
             cmd = [args.mpirun, "--oversubscribe", "-np", str(np_), sys.executable, HERE, "--child",
-                   "--grid", ",".join(map(str, args.grid)), "--levels", str(args.levels)]
+                   "--grid", ",".join(map(str, args.grid)), "--levels", str(args.levels),
+                   "--decomp-levels", str(decomp)]
             if args.walls:
                 cmd.append("--walls")
             if args.orb_only:

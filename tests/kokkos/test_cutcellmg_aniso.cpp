@@ -37,15 +37,16 @@
 //   (rate b/c)     with the Zick & Homsy sphere openness (phi = 0.216, sampled SDF through the
 //                  solver's own buildOpenness with hp), MG-PCG iterations to rtol 1e-10 on the
 //                  stretched grid <= cubic (SAME cell count) + 2 at N = 32 and 64; and the same
-//                  measurement under PECLET_FLOW_MG_ASPECT=1e9 (today's full coarsening) must be
-//                  worse or equal.  That ablation is a SEPARATE RUN of this binary (the threshold
-//                  is read once per process); with the env var set the gates below print instead
-//                  of asserting and the run is a measurement, not a test.
+//                  measurement under --theta=1e9 (today's full coarsening) must be
+//                  worse or equal.  That ablation is a SEPARATE RUN of this binary
+//                  (`test_cutcellmg_aniso --theta=1e9`); with --theta given the gates below print
+//                  instead of asserting and the run is a measurement, not a test.
 //
 // Both hierarchies share one rule (CutcellMG::mgChooseRatio, called by VelocityMG too), so this
 // file gates the rule itself.
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <Kokkos_Core.hpp>
 #include <vector>
 
@@ -55,6 +56,17 @@
 using namespace peclet::flow;
 
 namespace {
+
+/// The aspect threshold every hierarchy in this file is built with. 2.0 is the shipped default;
+/// `--theta=<x>` on the command line takes the §8.5 item (c) ablation (e.g. 1e9 = today's full
+/// coarsening) as a separate INVOCATION of this binary, in which the gates print their numbers
+/// instead of asserting.
+double gTheta = 2.0;
+
+/// Is this run the aspect-threshold ablation (§8.5 item (c))?
+bool ablation() {
+  return gTheta != 2.0;
+}
 int failures = 0;
 
 struct Run {
@@ -107,6 +119,7 @@ Run solveOne(int N, bool stretched, bool fcg = false) {
   Kokkos::deep_copy(xf, 0.0);
 
   CutcellMG mg;
+  mg.setAspectThreshold(gTheta);
   // C3: the per-axis spacings BEFORE init (trap 5) -- hp = h_a/dref = (1, 1/2, 2) stretched,
   // (1,1,1) cubic.  The rule is scale-free (it compares H's), so this IS the note's hp.
   const double hp[3] = {hx / dref, hy / dref, hz / dref};
@@ -224,18 +237,12 @@ void ladder(bool stretched, bool fcg, double minOrder) {
 // C3 — the aspect-ratio coarsening rule of doc/anisotropic_metric.md §5
 // ---------------------------------------------------------------------------------------------
 
-/// Is this run the PECLET_FLOW_MG_ASPECT ablation (§8.5 item (c))?  The threshold is read once per
-/// process, so "today's full coarsening" is a separate INVOCATION of this binary; in it the gates
-/// print their numbers instead of asserting.
-bool ablation() {
-  return mgAspectTheta() != 2.0;
-}
-
 /// The level table a hierarchy of `levels` levels builds on (nx, ny, nz) with spacings `hp`.
 /// `withMetric == false` reproduces the pre-C3 call sequence exactly (no setMetric at all).
 std::vector<C3> levelTable(int nx, int ny, int nz, const double hp[3], int levels,
                            bool withMetric) {
   CutcellMG mg;
+  mg.setAspectThreshold(gTheta);
   if (withMetric)
     mg.setMetric(hp);
   mg.init(nx, ny, nz, levels);
@@ -259,7 +266,7 @@ bool sameTable(const std::vector<C3>& a, const std::vector<C3>& b) {
 }
 
 void levelTables() {
-  std::printf("  LEVEL TABLE (§8.5, C3), levels = 6, theta = %.4g:\n", mgAspectTheta());
+  std::printf("  LEVEL TABLE (§8.5, C3), levels = 6, theta = %.4g:\n", gTheta);
   const double hpS[3] = {1.0, 0.5, 2.0};  // the stretched (N, 2N, N/2) box on a cube
   const double hpC[3] = {1.0, 1.0, 1.0};  // the cubic control
   const C3 want[4] = {{1, 2, 1}, {2, 2, 1}, {2, 2, 2}, {2, 2, 2}};
@@ -356,6 +363,7 @@ void vcycleRate(int N, double maxFactor) {
   Kokkos::deep_copy(oy, 1.0);
   Kokkos::deep_copy(oz, 1.0);
   CutcellMG mg;
+  mg.setAspectThreshold(gTheta);
   const double hp[3] = {1.0, 0.5, 2.0};
   mg.setMetric(hp);
   mg.init(nx, ny, nz, 6);
@@ -452,6 +460,7 @@ Run solveSphere(int N, bool stretched, bool fcg) {
   buildOpenness(ox, oy, oz, CCConst(sdf), e, hp[0], hp[1], hp[2], 1);
 
   CutcellMG mg;
+  mg.setAspectThreshold(gTheta);
   mg.setMetric(hp);
   mg.init(nx, ny, nz, 6);
   mg.setOpenness(CCConst(ox), CCConst(oy), CCConst(oz), wx, wy, wz);
@@ -528,7 +537,7 @@ void sphereGate() {
   std::printf(
       "  SPHERE RATE (§8.5 rate (b)/(c)), Zick & Homsy phi = 0.216, MG-PCG rtol 1e-10, "
       "theta = %.4g:\n",
-      mgAspectTheta());
+      gTheta);
   for (int N : {32, 64}) {
     const Run st = solveSphere(N, /*stretched=*/true, /*fcg=*/false);
     const Run cu = solveSphere(N, /*stretched=*/false, /*fcg=*/false);
@@ -551,6 +560,9 @@ void sphereGate() {
 }  // namespace
 
 int main(int argc, char** argv) {
+  for (int i = 1; i < argc; ++i)
+    if (std::strncmp(argv[i], "--theta=", 8) == 0)
+      gTheta = std::atof(argv[i] + 8);
   Kokkos::initialize(argc, argv);
   {
     std::printf("=== cutcellmg_aniso (G4-order, doc/anisotropic_metric.md §8.5) ===\n");
@@ -568,9 +580,9 @@ int main(int argc, char** argv) {
     std::printf("=== C3 — the aspect-ratio coarsening rule (doc/anisotropic_metric.md §5) ===\n");
     if (ablation())
       std::printf(
-          "  PECLET_FLOW_MG_ASPECT = %.4g -> ABLATION RUN: the gates below PRINT, they do "
+          "  --theta=%.4g -> ABLATION RUN: the gates below PRINT, they do "
           "not assert (§8.5 item (c)).\n",
-          mgAspectTheta());
+          gTheta);
     levelTables();
     vcycleRate(32, 0.2);
     sphereGate();

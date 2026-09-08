@@ -127,7 +127,8 @@ rebuild) and is immune. Consequence, implemented in `setDensityMode`:
 > which always had it). Measured: `pr` wall-bounded **0.42–0.52 → 0.008–0.086**, at or below the
 > periodic 0.062; on a 24×24×16 constant-density lid box **PCG 200/200 → 6, FCG 22 → 6, Chebyshev
 > 12 → 7**. Periodic/IBM byte-identical; single-phase regression +0.00 %. Ablation:
-> `PECLET_FLOW_MG_BCGHOST=0`. Gate: `tests/kokkos/test_pressure_wallbounded.cpp`.
+> `set_pressure_coarse_ghost(False)` (`test_pressure_wallbounded --no-coarse-ghost`). Gate:
+> `tests/kokkos/test_pressure_wallbounded.cpp`.
 > (ii) *What the repair does NOT cover* — the two residual modes above are the **same** defect, and it
 > is a coefficient defect, not a boundary one: at a high density contrast the arithmetic coarsening of
 > the face coefficient makes the V-cycle preconditioner **indefinite** (measured on a densely

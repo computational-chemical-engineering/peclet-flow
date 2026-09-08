@@ -22,8 +22,9 @@ using CCMem = CCExec::memory_space;
 using CCField = Kokkos::View<double*, CCMem>;
 using CCConst = Kokkos::View<const double*, CCMem>;
 
-// PECLET_FLOW_EXACT_RESIDUAL=1 — P1 of the defect-correction campaign
-// (docs/DEFECT_CORRECTION_PLAN.md). Off by default; byte-identical when off.
+// The EXACT level-0 operator apply — P1 of the defect-correction campaign
+// (docs/DEFECT_CORRECTION_PLAN.md). PER SOLVER (`set_pressure_exact_residual`): off at
+// construction, byte-identical when off, and turned ON by `enable_vof`.
 //
 // The rule: the residual and the Krylov matvec use the EXACT operator in double, in flux form;
 // everything below that line is a preconditioner and may stay float. With the gate on, the
@@ -34,38 +35,13 @@ using CCConst = Kokkos::View<const double*, CCMem>;
 // the convergence RATE and never the fixed point.
 //
 // Nothing inside vcycle() changes: residualCutcell, the smoother, restriction, the CA ring and
-// the AMG bottom all keep the float bands on purpose. This is strictly stronger than the
-// double-diagonal ablation (PECLET_FLOW_MG_DIAGRESUM) on the identity both exist to protect:
-// the flux form annihilates the constant vector BITWISE, a stored double diagonal only to
-// eps_f64. And it costs 0 B/cell where the double diagonal costs +17.
+// the AMG bottom all keep the float bands on purpose.
 //
-// WO-R2 item 3: the env var only INITIALISES the flag; `setExactResidual` overrides it
-// process-wide, and `IbmSolver::enableVof` turns it ON (measured: on Hysing case 2 it removes 7.5
-// orders of the projected flux divergence, 1.85e-03 -> 5.15e-11, and moves the iteration count,
-// the step count, the dt-limit census and both published functionals by nothing at all — the
-// float `A*1 != 0` defect is exactly what a moving interface's coefficient contrast amplifies).
+// `IbmSolver::enableVof` turns it ON (measured: on Hysing case 2 it removes 7.5 orders of the
+// projected flux divergence, 1.85e-03 -> 5.15e-11, and moves the iteration count, the step count,
+// the dt-limit census and both published functionals by nothing at all — the float `A*1 != 0`
+// defect is exactly what a moving interface's coefficient contrast amplifies).
 // `set_pressure_exact_residual(False)` after `enable_vof` is the ablation.
-inline bool& exactResidualFlag() {
-  static bool v = [] {
-    const char* e = std::getenv("PECLET_FLOW_EXACT_RESIDUAL");
-    return e && std::atoi(e) != 0;
-  }();
-  return v;
-}
-inline bool exactResidual() {
-  return exactResidualFlag();
-}
-inline void setExactResidual(bool on) {
-  exactResidualFlag() = on;
-}
-/// True when PECLET_FLOW_EXACT_RESIDUAL was set explicitly. `IbmSolver::enableVof` does NOT
-/// override an explicit environment request, which is what makes `PECLET_FLOW_EXACT_RESIDUAL=0`
-/// the process-wide ablation of WO-R2 item 3 (used to measure which VoF ctests move under the
-/// new default, and by how much).
-inline bool exactResidualPinned() {
-  static const bool v = std::getenv("PECLET_FLOW_EXACT_RESIDUAL") != nullptr;
-  return v;
-}
 
 // P2 shares this gate: the star overlay's additive delta (star_elimination.hpp) is part of the
 // same level-0 operator, so "the matvec is exact" has to mean the overlay too or the composed
@@ -271,18 +247,12 @@ inline void buildOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ex
 // per 50 V-cycles, ~8% of the whole V-cycle; 128^3/rank ~1.5%; 256^3/rank (the fat-rank target
 // size) ~0.2%, i.e. below run-to-run noise. A LARGER cutoff back-fires (131072 serializes levels
 // with real work: 64^3 projection 16.6 -> 20.6 ms/step), so keep it small.
-inline long hostSerialCellCutoff() {
-  static const long n = [] {
-    const char* e = std::getenv("PECLET_FLOW_HOST_SERIAL_CELLS");
-    return e ? std::atol(e) : 8192L;
-  }();
-  return n;
-}
+inline constexpr long kHostSerialCellCutoff = 8192L;
 // True when a host launch of `cells` cells should run sequentially instead (always false on
 // device).
 inline bool hostRunSerial(long cells) {
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>)
-    return cells > 0 && cells < hostSerialCellCutoff();
+    return cells > 0 && cells < kHostSerialCellCutoff;
   else
     return false;
 }

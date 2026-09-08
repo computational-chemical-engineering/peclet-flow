@@ -1,8 +1,9 @@
 name: CI
 
 # Host (Kokkos OpenMP/Serial) CI for peclet.flow — suite/docs/QUALITY_PLAN.md §3.D ("CI that is honest"):
-#   * build-test : the single-rank module + the 44 kernel ctests (tests/kokkos) + the accuracy/efficiency
-#                  regression suite + the three canonical verify scripts, all from ONE tree built with
+#   * build-test : the single-rank module + the 44 kernel ctests (tests/kokkos) + the D3 env-knob guard
+#                  + the accuracy/efficiency regression suite + the three canonical verify scripts, all
+#                  from ONE tree built with
 #                  -DPECLET_FLOW_BUILD_TESTS=ON. `ctest -LE bench` — the `bench`-labelled timing instruments
 #                  (vof_timing, bench_rbgs) are listed by `ctest -N` but not run here.
 #   * mpi        : the same tree with -DPECLET_FLOW_MPI=ON; the 106 distributed ctests at np = 1 and 2 on
@@ -74,7 +75,7 @@ jobs:
       - name: Import smoke test
         run: PYTHONPATH=$PWD/build python3 -c "import peclet.flow; print('peclet.flow import OK')"
 
-      - name: Kernel ctests (tests/kokkos, -LE bench)
+      - name: Kernel ctests + quality guards (tests/kokkos, -LE bench)
         run: ctest --test-dir build -j1 --timeout 1200 --output-on-failure -LE bench -E '^(regression_|verify_)'
 
       - name: Regression suite + verify scripts (Python, on the built module)
