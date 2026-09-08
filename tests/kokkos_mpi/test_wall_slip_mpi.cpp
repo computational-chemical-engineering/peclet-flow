@@ -157,20 +157,23 @@ int main(int argc, char** argv) {
         if ((int)sz[a] != gn[a])
           cut[a] = true;
     if (rank == 0)
-    if (rank == 0) {
-      std::printf("WALL-SLIP MPI np=%d  grid %dx%dx%d  block %dx%dx%d  cut axes: %s%s%s  "
-                  "walls z = %.2f / %.2f  z-blocks:",
-                  size, NX, NY, NZ, lnx, lny, lnz, cut[0] ? "x" : "", cut[1] ? "y" : "",
-                  cut[2] ? "z" : "", Z0, Z1);
-      for (int r = 0; r < size; ++r)
-        std::printf(" [%d,%d)", (int)dec.block((std::size_t)r).origin[2],
-                    (int)(dec.block((std::size_t)r).origin[2] + dec.block((std::size_t)r).size[2]));
-      std::printf("\n");
-    }
+      if (rank == 0) {
+        std::printf(
+            "WALL-SLIP MPI np=%d  grid %dx%dx%d  block %dx%dx%d  cut axes: %s%s%s  "
+            "walls z = %.2f / %.2f  z-blocks:",
+            size, NX, NY, NZ, lnx, lny, lnz, cut[0] ? "x" : "", cut[1] ? "y" : "",
+            cut[2] ? "z" : "", Z0, Z1);
+        for (int r = 0; r < size; ++r)
+          std::printf(
+              " [%d,%d)", (int)dec.block((std::size_t)r).origin[2],
+              (int)(dec.block((std::size_t)r).origin[2] + dec.block((std::size_t)r).size[2]));
+        std::printf("\n");
+      }
     if (size > 1 && !cut[2]) {
       if (rank == 0)
-        std::printf("  FAIL — the decomposition does NOT cut the walled z axis; this test exists "
-                    "to gate the Navier closure across a rank boundary\n");
+        std::printf(
+            "  FAIL — the decomposition does NOT cut the walled z axis; this test exists "
+            "to gate the Navier closure across a rank boundary\n");
       fail = 1;
     }
 
@@ -200,9 +203,10 @@ int main(int argc, char** argv) {
         // consistency error: the closure coefficients are stored in float, and the SAME scene at
         // lambda = 0 misses the (exact) no-slip parabola by 1.15e-6 relative. Gate both at 5e-6.
         const bool ok = du <= tol && aerr < 5e-6;
-        std::printf("  [lambda=%.2f np=%d] du=%.3e (|u|=%.3e, tol %.1e) | analytic rel err "
-                    "%.3e (tol 5.0e-06)  %s\n",
-                    lam, size, du, umag, tol, aerr, ok ? "OK" : "FAIL");
+        std::printf(
+            "  [lambda=%.2f np=%d] du=%.3e (|u|=%.3e, tol %.1e) | analytic rel err "
+            "%.3e (tol 5.0e-06)  %s\n",
+            lam, size, du, umag, tol, aerr, ok ? "OK" : "FAIL");
         if (!ok)
           fail = 1;
       }

@@ -16,9 +16,8 @@
 #define PECLET_FLOW_PROPERTY_CLOSURES_HPP
 
 #include <array>
-#include <string>
-
 #include <Kokkos_Core.hpp>
+#include <string>
 
 #include "mac_cutcell.hpp"
 
@@ -97,7 +96,6 @@ inline void applyClosure(const Closure& cl, C3 e, int g) {
         out(i) = v;
       });
 }
-
 
 // Apply one closure on the GHOST BAND of a single domain face (axis `a`, side `side`), i.e. on the
 // `g` ghost layers outside the boundary — the cells `applyClosure` above deliberately leaves alone.

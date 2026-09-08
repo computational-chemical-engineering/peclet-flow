@@ -48,8 +48,7 @@ class VofInterfaceArea {
 
   void init(int nx, int ny, int nz, int ghost) {
     if (ghost < kHfColumn / 2)
-      throw std::invalid_argument(
-          "peclet::flow::vof::VofInterfaceArea: ghost width must be >= 3");
+      throw std::invalid_argument("peclet::flow::vof::VofInterfaceArea: ghost width must be >= 3");
     if (nx < 1 || ny < 1 || nz < 1)
       throw std::invalid_argument("peclet::flow::vof::VofInterfaceArea: empty block");
     n_ = I3{nx, ny, nz};

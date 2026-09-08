@@ -123,8 +123,8 @@ using IbmOverlay = IbmOverlayT<IMem>;
 // linear-interpolated theta; non-finite entries fall back.
 template <int SCHEME, class OV>
 KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, float sdf_c,
-                                         const float sdf_n[6], int bc_type,
-                                         const float* thEx, const float* lamAxis = nullptr,
+                                         const float sdf_n[6], int bc_type, const float* thEx,
+                                         const float* lamAxis = nullptr,
                                          int* sandwichSkipped = nullptr) {
   o.cell_index(list_idx) = c_idx;
   o.num_boundaries(list_idx) = 6;
@@ -282,11 +282,8 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
 // fl(6*beta) == 6.0*beta to the last bit — the isotropic operator is BIT-IDENTICAL to the
 // pre-Phase-2 `idiag + 6.0*beta`.  Any other grouping breaks that.
 template <class MV>
-inline void ibmBuildDiffusion(MV AC, MV AW,
-                              MV AE, MV AS,
-                              MV AN, MV AB,
-                              MV AT, int ex, int ey, int ez, double bx, double by, double bz,
-                              double idiag) {
+inline void ibmBuildDiffusion(MV AC, MV AW, MV AE, MV AS, MV AN, MV AB, MV AT, int ex, int ey,
+                              int ez, double bx, double by, double bz, double idiag) {
   Kokkos::DefaultExecutionSpace space;
   const std::size_t n = (std::size_t)ex * ey * ez;
   using MVreal = typename MV::non_const_value_type;
@@ -308,11 +305,8 @@ inline void ibmBuildDiffusion(MV AC, MV AW,
 // Isotropic spelling (b_x = b_y = b_z = beta), kept for the kernel-level tests and any caller
 // with no metric: bit-identical to the pre-Phase-2 kernel by the association note above.
 template <class MV>
-inline void ibmBuildDiffusion(MV AC, MV AW,
-                              MV AE, MV AS,
-                              MV AN, MV AB,
-                              MV AT, int ex, int ey, int ez, double beta,
-                              double idiag) {
+inline void ibmBuildDiffusion(MV AC, MV AW, MV AE, MV AS, MV AN, MV AB, MV AT, int ex, int ey,
+                              int ez, double beta, double idiag) {
   ibmBuildDiffusion(AC, AW, AE, AS, AN, AB, AT, ex, ey, ez, beta, beta, beta, idiag);
 }
 
@@ -322,11 +316,8 @@ inline void ibmBuildDiffusion(MV AC, MV AW,
 // first). Face means are computed in double, cast to float once (mirroring the constant path).
 // FaceProps: UniformFaceProps reproduces the constant operator; FieldFaceProps reads a mu field.
 template <class FaceProps, class MV>
-inline void ibmBuildDiffusionVar(MV AC, MV AW,
-                                 MV AE, MV AS,
-                                 MV AN, MV AB,
-                                 MV AT, int ex, int ey, int ez, int g,
-                                 FaceProps fp, double wx = 1.0, double wy = 1.0,
+inline void ibmBuildDiffusionVar(MV AC, MV AW, MV AE, MV AS, MV AN, MV AB, MV AT, int ex, int ey,
+                                 int ez, int g, FaceProps fp, double wx = 1.0, double wy = 1.0,
                                  double wz = 1.0) {
   Kokkos::DefaultExecutionSpace space;
   using MD = Kokkos::MDRangePolicy<Kokkos::DefaultExecutionSpace, Kokkos::Rank<3>>;
@@ -359,14 +350,10 @@ inline void ibmBuildDiffusionVar(MV AC, MV AW,
 // scalar u_bc_val, which is what keeps a static solver bit-identical: the accumulated term is
 // (double)Nbc * 0.0f * vnb either way, the same three roundings in the same order.
 template <class MV>
-inline void ibmModifyStencil(MV AC, MV AW,
-                             MV AE, MV AS,
-                             MV AN, MV AB,
-                             MV AT, Kokkos::View<double*, IMem> a_inhom,
-                             Kokkos::View<double*, IMem> rhs_scale, const IbmOverlay& ibm,
-                             int numActive, float u_bc_val,
-                             Kokkos::View<const double*, IMem> u_bc =
-                                 Kokkos::View<const double*, IMem>()) {
+inline void ibmModifyStencil(
+    MV AC, MV AW, MV AE, MV AS, MV AN, MV AB, MV AT, Kokkos::View<double*, IMem> a_inhom,
+    Kokkos::View<double*, IMem> rhs_scale, const IbmOverlay& ibm, int numActive, float u_bc_val,
+    Kokkos::View<const double*, IMem> u_bc = Kokkos::View<const double*, IMem>()) {
   Kokkos::DefaultExecutionSpace space;
   const bool hasInhom = (a_inhom.extent(0) != 0), hasScale = (rhs_scale.extent(0) != 0);
   const bool hasWallVel = (u_bc.extent(0) != 0);

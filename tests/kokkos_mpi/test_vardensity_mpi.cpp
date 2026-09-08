@@ -14,13 +14,14 @@
 //     interior divergence vanishes, the projection returns u == 0, and P accumulates exactly
 //     -rho_f*g per face. A stale rho ghost, a rho bridge that misses the g=1 ghost ring, or a
 //     mismatched face mean breaks the telescoping and leaves a PERMANENT spurious velocity. Both
-//     gates are decomposition-independent physics: max|u| ~ 1e-16 and dP/dz == -g*rho_f at every np.
-//     The pressure gate is the sharper one — see the walled-axis note below.
+//     gates are decomposition-independent physics: max|u| ~ 1e-16 and dP/dz == -g*rho_f at every
+//     np. The pressure gate is the sharper one — see the walled-axis note below.
 //
 //   * `jump-z` — the rho-ghost / rho-bridge canary: a SHARP ratio-1000 density jump stacked along
 //     the CUT axis, so at np = 2 and 4 the jump sits exactly on a rank boundary and the coefficient
 //     rho0/rho_f at that face is assembled from an exchanged ghost. Fully periodic, driven by a
-//     uniform body force (no rest state — this one is a pure np-consistency + Chebyshev-count gate).
+//     uniform body force (no rest state — this one is a pure np-consistency + Chebyshev-count
+//     gate).
 //
 // WALLED AXIS / MPI — this is the point of the configuration (WO-F). flow's per-face domain BCs
 // used to be imposed by EVERY rank on its OWN block faces: `applyVelocityBcCompTo`, the flux-
@@ -96,8 +97,8 @@ static void configure(IbmSolver& s, const Config& c, int ox, int oy, int oz, int
   }
   s.setPressureGeometry(std::vector<double>((std::size_t)lnx * lny * lnz, 10.0));
   s.setDensityMode(true);  // installs the Chebyshev pressure driver by default
-  s.setField("rho", blockOf([&](int x, int y, int z) { return rhoAt(c, x, y, z); }, ox, oy, oz,
-                            lnx, lny, lnz));
+  s.setField("rho", blockOf([&](int x, int y, int z) { return rhoAt(c, x, y, z); }, ox, oy, oz, lnx,
+                            lny, lnz));
   s.exchangeField("rho");
   if (c.walls) {
     // gravity closure: the per-cell force -g*rho, face-interpolated to -g*rho_f
@@ -218,10 +219,11 @@ int main(int argc, char** argv) {
       // covering it, so fail loudly instead.
       if (size > 1 && !cut[c.axis]) {
         if (rank == 0)
-          std::printf("  [%-7s np=%d] FAIL — the decomposition does NOT cut axis %d; this test "
-                      "exists to gate the domain-BC / property-ghost rank ownership on a CUT "
-                      "walled axis (WO-F)\n",
-                      c.name, size, c.axis);
+          std::printf(
+              "  [%-7s np=%d] FAIL — the decomposition does NOT cut axis %d; this test "
+              "exists to gate the domain-BC / property-ghost rank ownership on a CUT "
+              "walled axis (WO-F)\n",
+              c.name, size, c.axis);
         fail = 1;
         continue;
       }
@@ -250,9 +252,9 @@ int main(int argc, char** argv) {
         for (int it = 0; it < STEPS; ++it) {
           ref.step();
           itr.push_back(ref.lastPressureIterations());
-          refUmax.push_back(std::fmax(maxAbs(ref.getVelocity(0)),
-                                      std::fmax(maxAbs(ref.getVelocity(1)),
-                                                maxAbs(ref.getVelocity(2)))));
+          refUmax.push_back(
+              std::fmax(maxAbs(ref.getVelocity(0)),
+                        std::fmax(maxAbs(ref.getVelocity(1)), maxAbs(ref.getVelocity(2)))));
         }
         double du = 0, umag = 0;
         for (int comp = 0; comp < 3; ++comp) {
@@ -290,10 +292,11 @@ int main(int argc, char** argv) {
         char extra[80] = "";
         if (c.walls)
           std::snprintf(extra, sizeof(extra), " | max|u|=%.2e dP/dz err=%.2e", umax, perr);
-        std::printf("  [%-7s np=%d] du=%.3e dp=%.3e (tol %.1e/%.1e) | cheb its %ld..%ld "
-                    "max-delta=%ld over %d/%d non-degenerate steps%s  %s\n",
-                    c.name, size, du, dp, utol, ptol, itr.front(), itr.back(), dits, nWin, STEPS,
-                    extra, ok ? "OK" : "FAIL");
+        std::printf(
+            "  [%-7s np=%d] du=%.3e dp=%.3e (tol %.1e/%.1e) | cheb its %ld..%ld "
+            "max-delta=%ld over %d/%d non-degenerate steps%s  %s\n",
+            c.name, size, du, dp, utol, ptol, itr.front(), itr.back(), dits, nWin, STEPS, extra,
+            ok ? "OK" : "FAIL");
         std::printf("    dist its:");
         for (long v : itd)
           std::printf(" %ld", v);

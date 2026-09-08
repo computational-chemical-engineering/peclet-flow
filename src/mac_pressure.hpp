@@ -71,18 +71,18 @@ inline void cutcellSmoothColor(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, O
     const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
     const long cells = (long)nyi * nzi * (e.x - 2 * g);
     auto pencil = KOKKOS_LAMBDA(long t) {
-          const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
-          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
-          const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
-          for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
-            const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-            const double ac = AC(i);
-            if (ac < 1e-30)
-              continue;  // fully closed (solid) cell: decoupled, phi stays 0
-            const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
-                             AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
-            phi(i) = (b(i) - s) / ac;
-          }
+      const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+      for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const double ac = AC(i);
+        if (ac < 1e-30)
+          continue;  // fully closed (solid) cell: decoupled, phi stays 0
+        const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
+                         AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
+        phi(i) = (b(i) - s) / ac;
+      }
     };
     if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
       for (long t = 0; t < (long)nyi * nzi; ++t)
@@ -129,21 +129,21 @@ inline void cutcellSmoothColorBox(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE
     const int nyi = rhi.y - rlo.y, nzi = rhi.z - rlo.z;
     const long cells = (long)nyi * nzi * (rhi.x - rlo.x);
     auto pencil = KOKKOS_LAMBDA(long t) {
-          const int ly = rlo.y + (int)(t % nyi), lz = rlo.z + (int)(t / nyi);
-          const bool yzSkip = ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z;
-          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
-          const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
-          for (int lx = rlo.x + ((P ^ (rlo.x & 1)) & 1); lx < rhi.x; lx += 2) {
-            if (yzSkip && lx >= slo.x && lx < shi.x)
-              continue;  // inside the skip box (already swept by the interior pass)
-            const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-            const double ac = AC(i);
-            if (ac < 1e-30)
-              continue;
-            const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
-                             AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
-            phi(i) = (b(i) - s) / ac;
-          }
+      const int ly = rlo.y + (int)(t % nyi), lz = rlo.z + (int)(t / nyi);
+      const bool yzSkip = ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z;
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+      for (int lx = rlo.x + ((P ^ (rlo.x & 1)) & 1); lx < rhi.x; lx += 2) {
+        if (yzSkip && lx >= slo.x && lx < shi.x)
+          continue;  // inside the skip box (already swept by the interior pass)
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const double ac = AC(i);
+        if (ac < 1e-30)
+          continue;
+        const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
+                         AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
+        phi(i) = (b(i) - s) / ac;
+      }
     };
     if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
       for (long t = 0; t < (long)nyi * nzi; ++t)

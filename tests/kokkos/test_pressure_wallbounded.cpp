@@ -180,10 +180,10 @@ int main(int argc, char** argv) {
   {
     const char* ab = std::getenv("PECLET_FLOW_MG_BCGHOST");
     const bool ablated = ab && std::atoi(ab) == 0;
-    std::printf("3-D wall-bounded pressure convergence: %dx%dx%d, %d levels, %d steps, cap %d%s\n",
-                NX, NY, NZ, LEVELS, STEPS, MAXIT,
-                ablated ? "   [PECLET_FLOW_MG_BCGHOST=0 — pre-WO-H ablation, EXPECTED TO FAIL]"
-                        : "");
+    std::printf(
+        "3-D wall-bounded pressure convergence: %dx%dx%d, %d levels, %d steps, cap %d%s\n", NX, NY,
+        NZ, LEVELS, STEPS, MAXIT,
+        ablated ? "   [PECLET_FLOW_MG_BCGHOST=0 — pre-WO-H ablation, EXPECTED TO FAIL]" : "");
     const int ALL = (1 << kPcg) | (1 << kFcg) | (1 << kCheb);
     const int FCG_CHEB = (1 << kFcg) | (1 << kCheb);
     const int CHEB_ONLY = (1 << kCheb);

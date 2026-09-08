@@ -310,10 +310,10 @@ inline void buildCellFraction(CCField cs, CCConst sdf, C3 e, int g) {
 // backward-Euler diffusion operator idt·U − mu·Lap(U) — identical to the IBM matrix M there, so the
 // defect correction (M·u − L_FV·u) vanishes and interior cells stay byte-identical to mode 0.
 //
-// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §6.1/§6.2.  The per-axis pressure/Laplacian
-// weight `w_a = 1/h_a'^2` multiplies BOTH the two-point face flux of axis `a` (area V'/h_a' over
-// distance h_a') and the wall drag of axis `a` (area W_a V'/h_a' times the physical derivative
-// (1/h_a') dU/dxi_a):
+// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §6.1/§6.2.  The per-axis
+// pressure/Laplacian weight `w_a = 1/h_a'^2` multiplies BOTH the two-point face flux of axis `a`
+// (area V'/h_a' over distance h_a') and the wall drag of axis `a` (area W_a V'/h_a' times the
+// physical derivative (1/h_a') dU/dxi_a):
 //
 //   L_FV(U)_i = idt cs_i U_i + mu' [ sum_a w_a ( o_{a-}(U_i - U_{-a}) + o_{a+}(U_i - U_{+a}) )
 //                                    - sum_a w_a W_a g_a(xi*) ]
@@ -401,25 +401,24 @@ KOKKOS_INLINE_FUNCTION double eQuad(double xx, double a1, double a2, double a3) 
 }
 
 // TRUE-NORMAL wall gradient d(U)/dn at the embedded boundary of a cut cell — the Basilisk embed.h
-// `dirichlet_gradient` (no-slip U_wall = 0). PHASE 2 (doc/anisotropic_metric.md §6.3): the vector it
-// is handed is the INDEX DIRECTION `m_a = n_a/h_a'` of the physical unit normal and the point offset
-// is `p = -d' m`, so every distance this routine forms — the image-plane distance
-// `t_l = (io - p_da)/m_da`, the degenerate `d0 = |p_da/m_da|` and hence the returned derivative — is
-// already PHYSICAL, in hRef units per hRef, with no metric left to apply outside. The dominant axis
-// is `argmax_a |m_a|` (it is the INDEX slope `m_t/m_da` that must stay <= 1 for the ±1 transverse
-// stencil the Basilisk j/k rounding assumes), and the 0.5 floor on `d0` is now a floor on a physical
-// distance, which is the right thing to floor. On the isotropic path m == n̂ exactly and the body
-// below is literally today's arithmetic.
-// n̂ = unit inward-to-FLUID normal
-// (∇sdf), p = boundary-point offset from the cell centre (cell units). Along the dominant-|n̂| axis
-// it places two image points 1 and 2 cells into the fluid, interpolates U there by TRANSVERSE
-// bi-quadratic interpolation of the cell-centred values (`eQuad`×`eQuad`), and fits the quadratic
-// {0 at wall, v0 at d0, v1 at d1} for a 2nd-order derivative. Fallbacks (Basilisk): if the near
-// image point's 3×3 transverse stencil straddles the wall, a biased-linear `embed_interpolate`
-// anchored at the fluid home cell (uses only fluid cells); if even the home cell is solid, the
-// degenerate 1-point estimate through the cell centre. A-priori-validated O(h²) with 0% degenerate
-// on the Stokes sphere (tests/study/fv_wallflux_apriori.py, variant C). Interior/transverse reads
-// of U and sdf must be halo-filled (the velocity block carries G=2 ghosts).
+// `dirichlet_gradient` (no-slip U_wall = 0). PHASE 2 (doc/anisotropic_metric.md §6.3): the vector
+// it is handed is the INDEX DIRECTION `m_a = n_a/h_a'` of the physical unit normal and the point
+// offset is `p = -d' m`, so every distance this routine forms — the image-plane distance `t_l = (io
+// - p_da)/m_da`, the degenerate `d0 = |p_da/m_da|` and hence the returned derivative — is already
+// PHYSICAL, in hRef units per hRef, with no metric left to apply outside. The dominant axis is
+// `argmax_a |m_a|` (it is the INDEX slope `m_t/m_da` that must stay <= 1 for the ±1 transverse
+// stencil the Basilisk j/k rounding assumes), and the 0.5 floor on `d0` is now a floor on a
+// physical distance, which is the right thing to floor. On the isotropic path m == n̂ exactly and
+// the body below is literally today's arithmetic. n̂ = unit inward-to-FLUID normal (∇sdf), p =
+// boundary-point offset from the cell centre (cell units). Along the dominant-|n̂| axis it places
+// two image points 1 and 2 cells into the fluid, interpolates U there by TRANSVERSE bi-quadratic
+// interpolation of the cell-centred values (`eQuad`×`eQuad`), and fits the quadratic {0 at wall, v0
+// at d0, v1 at d1} for a 2nd-order derivative. Fallbacks (Basilisk): if the near image point's 3×3
+// transverse stencil straddles the wall, a biased-linear `embed_interpolate` anchored at the fluid
+// home cell (uses only fluid cells); if even the home cell is solid, the degenerate 1-point
+// estimate through the cell centre. A-priori-validated O(h²) with 0% degenerate on the Stokes
+// sphere (tests/study/fv_wallflux_apriori.py, variant C). Interior/transverse reads of U and sdf
+// must be halo-filled (the velocity block carries G=2 ghosts).
 KOKKOS_INLINE_FUNCTION double embedDirichletGradient(CCConst U, CCConst sdf, C3 e, int x, int y,
                                                      int z, double nx, double ny, double nz,
                                                      double px, double py, double pz) {
@@ -498,12 +497,13 @@ KOKKOS_INLINE_FUNCTION double embedDirichletGradient(CCConst U, CCConst sdf, C3 
   double d0 = Kokkos::fabs(pv[da] / nv[da]);  // degenerate sliver: 1-point through the cell centre
   // Floor d0 at the resolution scale. The degenerate estimate U/d0 enters the momentum march as an
   // EXPLICIT lagged wall flux (defect correction), whose per-step gain ~ mu*area/d0 against the row
-  // diagonal mu*sum(o) + rho/dt must stay < 1: with area <= sqrt(3), d0 >= 0.5 bounds it by ~0.6 for
-  // any (mu, rho, dt). The previous 1e-3 floor let a cell centre grazing the surface (|sdf|~1e-3,
-  // guaranteed on multi-sphere beds) drive gains of O(10^2) -- the dt-independent x~100/step blowup
-  // behind the mode-6/7 "CutcellMG preconditioner non-finite z" abort. (Basilisk's identical
-  // dirichlet_gradient stencil is safe there because its home coefficient goes into the IMPLICIT
-  // diagonal via *coef; this port applies it explicitly, so the floor carries the stability.)
+  // diagonal mu*sum(o) + rho/dt must stay < 1: with area <= sqrt(3), d0 >= 0.5 bounds it by ~0.6
+  // for any (mu, rho, dt). The previous 1e-3 floor let a cell centre grazing the surface
+  // (|sdf|~1e-3, guaranteed on multi-sphere beds) drive gains of O(10^2) -- the dt-independent
+  // x~100/step blowup behind the mode-6/7 "CutcellMG preconditioner non-finite z" abort.
+  // (Basilisk's identical dirichlet_gradient stencil is safe there because its home coefficient
+  // goes into the IMPLICIT diagonal via *coef; this port applies it explicitly, so the floor
+  // carries the stability.)
   if (d0 < 0.5)
     d0 = 0.5;
   const long ii = (long)ci[0] * st[0] + (long)ci[1] * st[1] + (long)ci[2] * st[2];
@@ -544,8 +544,8 @@ inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CC
           diag += wv[a] * (om + op);
           offs += wv[a] * (om * U(i - st[a]) + op * U(i + st[a]));
         }
-        const double area = Kokkos::sqrt(Wv[0] * Wv[0] * wv[0] + Wv[1] * Wv[1] * wv[1] +
-                                         Wv[2] * Wv[2] * wv[2]);
+        const double area =
+            Kokkos::sqrt(Wv[0] * Wv[0] * wv[0] + Wv[1] * Wv[1] * wv[1] + Wv[2] * Wv[2] * wv[2]);
         double wall = 0.0;
         if (area > 1e-12) {
           double nx = 0.5 * (sdf(i + sx) - sdf(i - sx)) / hpx;
@@ -571,8 +571,8 @@ inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CC
 // form the mode-4 defect-correction RHS  b = M·u^k − rs·L_FV(u^k) + rs·b_FV, whose fixed point
 // satisfies L_FV·u* = b_FV exactly, with M only the (stable, small-cell-safe) preconditioner.
 template <class MC>
-inline void stencilMatvec(CCField y, CCConst u, MC AC, MC AW, MC AE, MC AS,
-                          MC AN, MC AB, MC AT, C3 e, int g) {
+inline void stencilMatvec(CCField y, CCConst u, MC AC, MC AW, MC AE, MC AS, MC AN, MC AB, MC AT,
+                          C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -658,8 +658,8 @@ inline void centerGradApertureScaled(CCField out, CCConst p, CCConst ox, CCConst
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "peclet::flow::center_grad_aperture_scaled", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
-      KOKKOS_LAMBDA(int x, int y, int z) {
+      "peclet::flow::center_grad_aperture_scaled",
+      MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}), KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
         const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;

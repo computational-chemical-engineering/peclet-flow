@@ -95,43 +95,43 @@ int main(int argc, char** argv) {
                    (std::size_t)(z + oz) * N * N];
 
     for (int mode : {0, 9}) {
-    Colo sd(lnx, lny, lnz);
-    sd.initMpi(N, N, N, MPI_COMM_WORLD);
-    configure(sd, mode);
-    sd.setSolid(lsdf, /*cutcell_pressure=*/true);
-    for (int it = 0; it < STEPS; ++it)
-      sd.step();
-    double lsum = localUSum(sd), gsum = 0;
-    MPI_Allreduce(&lsum, &gsum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    const double k_dist = MU * (gsum / gcells) / F;
-    const double div_dist = sd.maxOpenDivergence();
-
-    // --- single-rank reference (full grid) on rank 0 ---
-    double k_ref = 0.0;
-    if (rank == 0) {
-      Colo ref(N, N, N);
-      configure(ref, mode);
-      ref.setSolid(gsdf, true);
+      Colo sd(lnx, lny, lnz);
+      sd.initMpi(N, N, N, MPI_COMM_WORLD);
+      configure(sd, mode);
+      sd.setSolid(lsdf, /*cutcell_pressure=*/true);
       for (int it = 0; it < STEPS; ++it)
-        ref.step();
-      double rsum = 0;
-      {
-        auto u = ref.getVelocity(0);
-        for (double v : u)
-          rsum += v;
-      }
-      k_ref = MU * (rsum / gcells) / F;
-    }
-    MPI_Bcast(&k_ref, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        sd.step();
+      double lsum = localUSum(sd), gsum = 0;
+      MPI_Allreduce(&lsum, &gsum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      const double k_dist = MU * (gsum / gcells) / F;
+      const double div_dist = sd.maxOpenDivergence();
 
-    const double reld = std::fabs(k_dist - k_ref) / (std::fabs(k_ref) + 1e-30);
-    const double tol =
-        (size == 1) ? 1e-12 : 2e-5;  // np=1 bit-exact; np>1 the MG-PCG reduction-order floor
-    if (rank == 0)
-      std::printf("  [mode %d] k_dist=%.8e  k_ref=%.8e  rel=%.2e  div=%.2e  (np=%d, tol %.0e)\n",
-                  mode, k_dist, k_ref, reld, div_dist, size, tol);
-    if (reld > tol || !(div_dist < 1e-5))
-      fail = 1;
+      // --- single-rank reference (full grid) on rank 0 ---
+      double k_ref = 0.0;
+      if (rank == 0) {
+        Colo ref(N, N, N);
+        configure(ref, mode);
+        ref.setSolid(gsdf, true);
+        for (int it = 0; it < STEPS; ++it)
+          ref.step();
+        double rsum = 0;
+        {
+          auto u = ref.getVelocity(0);
+          for (double v : u)
+            rsum += v;
+        }
+        k_ref = MU * (rsum / gcells) / F;
+      }
+      MPI_Bcast(&k_ref, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+      const double reld = std::fabs(k_dist - k_ref) / (std::fabs(k_ref) + 1e-30);
+      const double tol =
+          (size == 1) ? 1e-12 : 2e-5;  // np=1 bit-exact; np>1 the MG-PCG reduction-order floor
+      if (rank == 0)
+        std::printf("  [mode %d] k_dist=%.8e  k_ref=%.8e  rel=%.2e  div=%.2e  (np=%d, tol %.0e)\n",
+                    mode, k_dist, k_ref, reld, div_dist, size, tol);
+      if (reld > tol || !(div_dist < 1e-5))
+        fail = 1;
     }
   }
   int totalFail = 0;

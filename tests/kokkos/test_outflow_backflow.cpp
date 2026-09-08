@@ -25,7 +25,7 @@ void configure(peclet::flow::IbmSolver& s, int nx, int ny, int nz, double U) {
   s.setMu(0.1);
   s.setDt(0.01);  // rho/dt dominates: one step leaves the imposed field nearly unchanged
   s.setAdvection(true);
-  s.setDomainBc(0, 2, U, 0.0, 0.0);  // -x inflow
+  s.setDomainBc(0, 2, U, 0.0, 0.0);    // -x inflow
   s.setDomainBc(1, 3, 0.0, 0.0, 0.0);  // +x outflow
   s.setDomainBc(2, 1, 0.0, 0.0, 0.0);
   s.setDomainBc(3, 1, 0.0, 0.0, 0.0);
@@ -56,9 +56,10 @@ int main(int argc, char** argv) {
       s.setVelocity(0, u);
       s.step();
       const auto ob = s.outflowBackflow();
-      std::printf("[backflow] reversed outlet: max_reverse %.3f  fraction %.3f  energy_influx %.3e  "
-                  "(%ld / %ld faces)\n",
-                  ob.maxReverse, ob.fraction, ob.energyInflux, ob.reversed, ob.total);
+      std::printf(
+          "[backflow] reversed outlet: max_reverse %.3f  fraction %.3f  energy_influx %.3e  "
+          "(%ld / %ld faces)\n",
+          ob.maxReverse, ob.fraction, ob.energyInflux, ob.reversed, ob.total);
       CHECK(ob.total == (long)ny * nz);
       CHECK(ob.reversed > 0);
       CHECK(ob.fraction > 0.3 && ob.fraction < 0.7);

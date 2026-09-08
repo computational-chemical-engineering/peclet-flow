@@ -45,8 +45,8 @@
 #ifndef PECLET_FLOW_VOF_ENERGY_ADVECT_HPP
 #define PECLET_FLOW_VOF_ENERGY_ADVECT_HPP
 
-#include <Kokkos_Core.hpp>
 #include <functional>
+#include <Kokkos_Core.hpp>
 #include <stdexcept>
 
 #include "vof/advect_wy.hpp"
@@ -89,10 +89,10 @@ class VofEnergyAdvector {
   /// Why it exists, measured: the geometric energy flux is what makes the transport CONSISTENT with
   /// the colour, but its donor-cell temperature carries the first-order upwind numerical diffusion
   /// `|u| h (1 - CFL)/2`, which thickens the thermal boundary layer and therefore LOWERS the
-  /// interfacial gradient — exactly the quantity `mdot` is. On the P3 Scriven bubble at Ja = 0.5 the
-  /// consistent transport with plain upwind reads -2.24 % on R(t) against -1.46 % for the scalar
-  /// module's Koren TVD advection, i.e. the consistency is bought with accuracy at that Jakob
-  /// number. The limited reconstruction buys it back.
+  /// interfacial gradient — exactly the quantity `mdot` is. On the P3 Scriven bubble at Ja = 0.5
+  /// the consistent transport with plain upwind reads -2.24 % on R(t) against -1.46 % for the
+  /// scalar module's Koren TVD advection, i.e. the consistency is bought with accuracy at that
+  /// Jakob number. The limited reconstruction buys it back.
   ///
   /// Why it is not the default: this is the energy twin of `momentumMuscl`, and there the slope's
   /// coefficient is unbounded in the density ratio on a control volume the sweep empties. The
@@ -170,7 +170,8 @@ class VofEnergyAdvector {
   void energyUpdate(WyAdvector& w, int d, double dth) {
     const I3 e = e_, n = n_;
     const int g = g_;
-    const long sd = d == 0 ? 1 : (d == 1 ? static_cast<long>(e_.x) : static_cast<long>(e_.x) * e_.y);
+    const long sd =
+        d == 0 ? 1 : (d == 1 ? static_cast<long>(e_.x) : static_cast<long>(e_.x) * e_.y);
     // The update is OUT OF PLACE: every cell reads its two upwind neighbours' temperatures, so
     // writing `T` in place is a read-write race between threads (measured: it moved the P2
     // interface position by 0.6 % and turned an order-2.8 ladder into order 0.5). `Tw_` takes the

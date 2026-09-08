@@ -164,8 +164,8 @@ static int runCase(const char* name, double rfrac, int mo, int ro, int rank, int
     // Allreduce reorder only — the decoupled-phi pinning removed every larger term).
     const double tol = (size == 1) ? 0.0 : 1e-9;
     const bool ok = eu <= tol;
-    std::printf("  [%-12s np=%d] u rel=%.3e  tol=%.0e  div(d)=%.3e div(ref)=%.3e  %s\n", name,
-                size, eu, tol, resd, ref.maxOpenDivergence(), ok ? "OK" : "FAIL");
+    std::printf("  [%-12s np=%d] u rel=%.3e  tol=%.0e  div(d)=%.3e div(ref)=%.3e  %s\n", name, size,
+                eu, tol, resd, ref.maxOpenDivergence(), ok ? "OK" : "FAIL");
     if (!ok)
       fail = 1;
   }

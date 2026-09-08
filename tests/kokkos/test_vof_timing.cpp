@@ -157,10 +157,10 @@ int main(int argc, char** argv) {
     const auto& v = s->vofTimingReport();
     const auto& k = s->vofKernelTiming();
     const auto& q = s->vofCurvatureTiming();
-    std::printf("T4    steps %ld  momAdvect %.4f s  curvature %.4f s  csf %.4f s  "
-                "[recon %.4f fluxes %.4f sweep %.4f exch %.4f]\n",
-                v.steps, v.momAdvect, v.curvature, v.csf, k.reconstruct, k.fluxes, k.sweep,
-                k.exchange);
+    std::printf(
+        "T4    steps %ld  momAdvect %.4f s  curvature %.4f s  csf %.4f s  "
+        "[recon %.4f fluxes %.4f sweep %.4f exch %.4f]\n",
+        v.steps, v.momAdvect, v.curvature, v.csf, k.reconstruct, k.fluxes, k.sweep, k.exchange);
     CHECK(v.steps == 10);
     CHECK(v.momAdvect > 0.0);
     CHECK(v.curvature > 0.0);
@@ -170,9 +170,10 @@ int main(int argc, char** argv) {
     // the kernel breakdown is a part of the momentum-consistent colour stage
     CHECK(k.reconstruct + k.fluxes + k.sweep + k.clip + k.exchange + k.freeze <=
           v.momAdvect * 1.02 + 1e-6);
-    std::printf("T4    curvature passes: compact %.4f planes %.4f height %.4f fallback %.4f "
-                "census %.4f (%ld calls)\n",
-                q.compact, q.planes, q.height, q.fallback, q.census, q.calls);
+    std::printf(
+        "T4    curvature passes: compact %.4f planes %.4f height %.4f fallback %.4f "
+        "census %.4f (%ld calls)\n",
+        q.compact, q.planes, q.height, q.fallback, q.census, q.calls);
     CHECK(q.calls == 10);
     CHECK(q.planes > 0.0 && q.height > 0.0);
     CHECK(q.compact + q.planes + q.height + q.fallback + q.census <= v.curvature * 1.02 + 1e-6);

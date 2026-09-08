@@ -39,9 +39,9 @@ namespace peclet::flow::vof {
 class VofMcArea {
  public:
   struct Stats {
-    long cells = 0;         ///< inner cells that received area
-    long orphanCells = 0;   ///< ... of which are NOT interfacial under `interfaceEps`
-    double area = 0.0;      ///< the sum this rung exists to get right
+    long cells = 0;           ///< inner cells that received area
+    long orphanCells = 0;     ///< ... of which are NOT interfacial under `interfaceEps`
+    double area = 0.0;        ///< the sum this rung exists to get right
     double orphanArea = 0.0;  ///< ... the part of it the phase-change consumer would drop
   };
 
@@ -164,8 +164,8 @@ class VofMcArea {
                   const long j = L3(x + ox + bx, y + oy + by, z + oz + bz, e);
                   const double cv = c(j);
                   v[k].psi = 0.5 - cv;
-                  v[k].has = vofIsInterface(cv, ieps) &&
-                             (mx(j) != 0.0 || my(j) != 0.0 || mz(j) != 0.0);
+                  v[k].has =
+                      vofIsInterface(cv, ieps) && (mx(j) != 0.0 || my(j) != 0.0 || mz(j) != 0.0);
                   v[k].d = dd(j);
                   v[k].n[0] = mx(j);
                   v[k].n[1] = my(j);

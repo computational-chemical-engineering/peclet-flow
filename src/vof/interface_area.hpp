@@ -54,7 +54,7 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
-#include "vof/curvature.hpp"  // core: hfColumnHeight, curvFrame, PvFit, paraboloidKappa, ...
+#include "vof/curvature.hpp"     // core: hfColumnHeight, curvFrame, PvFit, paraboloidKappa, ...
 #include "vof/phase_change.hpp"  // plicArea
 #include "vof/plic.hpp"
 
@@ -63,9 +63,9 @@ namespace peclet::flow::vof {
 /// Which construction turns the cascade's normal into an area. Exposed because the choice is a
 /// MEASUREMENT (see the sphere probe in the WO-P3c findings), not a taste.
 enum InterfaceAreaMode : int {
-  kAreaPlic = 0,    ///< rung P0/P1: `plicArea` on the MYC normal. The old numbers.
-  kAreaMetric = 1,  ///< variant A: the PLIC footprint x the cascade's slope. DEFAULT.
-  kAreaNormal = 2,  ///< variant B: `plicArea` rebuilt on the cascade's normal.
+  kAreaPlic = 0,       ///< rung P0/P1: `plicArea` on the MYC normal. The old numbers.
+  kAreaMetric = 1,     ///< variant A: the PLIC footprint x the cascade's slope. DEFAULT.
+  kAreaNormal = 2,     ///< variant B: `plicArea` rebuilt on the cascade's normal.
   kAreaFootprint = 3,  ///< variant C: the height function's OWN footprint x its own metric.
   // ---- WO-P3d: a JOINED surface (marching tetrahedra on the cell-centre lattice). No per-cell
   // construction converges (see `vof/marching_cubes.hpp`); these four do not build a per-cell

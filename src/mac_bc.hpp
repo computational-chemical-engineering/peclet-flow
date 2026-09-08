@@ -103,7 +103,8 @@ inline void bcSlipComp(BField f, B3 ext, int g, int a, int s, int comp, int fold
   const int bf = (s == 0) ? g : (na - g);
   using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
   Kokkos::parallel_for(
-      "peclet::flow::bc_slip", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+      "peclet::flow::bc_slip", MD(space, {0, 0}, {dims[b], dims[c]}),
+      KOKKOS_LAMBDA(int p0, int p1) {
         const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
         auto at = [&](int ia) -> double& { return f(base + static_cast<long>(ia) * sa); };
         if (s == 0)

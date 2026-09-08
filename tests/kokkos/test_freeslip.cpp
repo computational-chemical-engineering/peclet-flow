@@ -183,9 +183,10 @@ void gateUniform(const char* grid, bool advection) {
     if (!(std::fabs(x - uex) <= du))
       du = std::fabs(x - uex);
   const double div = s.maxOpenDivergence();
-  std::printf("[B %s advection=%d] max|u - F t/rho| = %.2e (u = %.3f)  max|v| = %.2e  max|w| = %.2e  "
-              "div %.1e\n",
-              grid, (int)advection, du, uex, maxAbs(v), maxAbs(w), div);
+  std::printf(
+      "[B %s advection=%d] max|u - F t/rho| = %.2e (u = %.3f)  max|v| = %.2e  max|w| = %.2e  "
+      "div %.1e\n",
+      grid, (int)advection, du, uex, maxAbs(v), maxAbs(w), div);
   // Staggered, advection OFF: the all-fluid domain-BC momentum solve is the DOUBLE
   // const-coefficient fold smoother -> round-off over 20 steps (measured 4.6e-12). Advection ON
   // (the domain-BC path solves advection implicitly, i.e. the FLOAT-stored FOU stencil,
@@ -261,9 +262,10 @@ void gateSphere() {
         }
   }
   const double divh = sh.maxOpenDivergence(), divf = sf.maxOpenDivergence();
-  std::printf("[C] sphere in a slip box vs mirror-periodic twin: max|du| %.2e  |dv| %.2e  |dw| %.2e  "
-              "(u_max %.3e, rel %.2e)  div %.1e / %.1e\n",
-              d[0], d[1], d[2], umax, std::max({d[0], d[1], d[2]}) / umax, divh, divf);
+  std::printf(
+      "[C] sphere in a slip box vs mirror-periodic twin: max|du| %.2e  |dv| %.2e  |dw| %.2e  "
+      "(u_max %.3e, rel %.2e)  div %.1e / %.1e\n",
+      d[0], d[1], d[2], umax, std::max({d[0], d[1], d[2]}) / umax, divh, divf);
   CHECK(std::max({d[0], d[1], d[2]}) / umax < 1e-7);
   // the divergence floor is the float-stored pressure operator's (A.1 rounding), ~5e-9 relative
   CHECK(divh / umax < 1e-6 && divf / umax < 1e-6);

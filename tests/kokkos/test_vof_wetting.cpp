@@ -443,7 +443,6 @@ void solverGates() {
   CHECK(std::fabs(a1.theta - b1.theta) <= 1.0);
 }
 
-
 // ============================================================ PHASE 3 GATE K3: anisotropic cells
 //
 // `flow/doc/anisotropic_vof.md` §6 (decision V4.1) and §11 K3. The claim: theta is a PHYSICAL
@@ -490,12 +489,13 @@ void anisoIdempotence() {
             const double sdfF = (f[2] + 0.5) * g.h[2] - zw * g.h[2];
             for (int piv = 0; piv < 4; ++piv) {
               double mth[3], alphaTh, ca;
-              const int br = vofWettingPlane(mIdx, cf, nwIdx, std::cos(th), std::sin(th), sdfF,
-                                             piv, 1e-6, mth, alphaTh, ca, g);
+              const int br = vofWettingPlane(mIdx, cf, nwIdx, std::cos(th), std::sin(th), sdfF, piv,
+                                             1e-6, mth, alphaTh, ca, g);
               (void)br;
               if (piv == 0)
-                wang = std::fmax(wang, std::fabs(std::acos(ca < -1.0 ? -1.0 : (ca > 1.0 ? 1.0 : ca))
-                                                 - th) / kDeg);
+                wang = std::fmax(
+                    wang,
+                    std::fabs(std::acos(ca < -1.0 ? -1.0 : (ca > 1.0 ? 1.0 : ca)) - th) / kDeg);
               for (int ks = 0; ks <= 2; ++ks) {
                 const int sc[3] = {f[0], f[1], ks};
                 const int ds[3] = {sc[0] - f[0], sc[1] - f[1], sc[2] - f[2]};
@@ -509,8 +509,10 @@ void anisoIdempotence() {
             }
           }
       }
-    std::printf("   h = (%.3g, %.3g, %.3g):  worst |C_fill - C_exact| %.3e   apparent-angle error"
-                " %.3e deg\n", hs[q][0], hs[q][1], hs[q][2], worst, wang);
+    std::printf(
+        "   h = (%.3g, %.3g, %.3g):  worst |C_fill - C_exact| %.3e   apparent-angle error"
+        " %.3e deg\n",
+        hs[q][0], hs[q][1], hs[q][2], worst, wang);
     CHECK(worst <= 1e-12);
     CHECK(wang <= 1.0);
     worstAll = std::fmax(worstAll, worst);

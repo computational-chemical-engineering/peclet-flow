@@ -70,8 +70,12 @@ struct Config {
 
 // Both configurations load the CUT y axis: the literal monotone two-layer stack mu1|mu2 (see the
 // header), walled for `couette-y` and periodic for `per-y`.
-static double muAt(const Config&, int, int y, int) { return (y < NY / 2) ? MU1 : MU2; }
-static double srcAt(int, int y, int) { return std::cos(2.0 * M_PI * y / NY); }
+static double muAt(const Config&, int, int y, int) {
+  return (y < NY / 2) ? MU1 : MU2;
+}
+static double srcAt(int, int y, int) {
+  return std::cos(2.0 * M_PI * y / NY);
+}
 
 template <class Fn>
 static std::vector<double> blockOf(Fn f, int ox, int oy, int oz, int lnx, int lny, int lnz) {
@@ -220,10 +224,11 @@ int main(int argc, char** argv) {
       // property-ghost ownership tests exist for.
       if (size > 1 && !cut[1]) {
         if (rank == 0)
-          std::printf("  [%-9s np=%d] FAIL — the decomposition does NOT cut the walled y axis; "
-                      "this test exists to gate the domain-BC / property-ghost rank ownership on "
-                      "a CUT walled axis (WO-F)\n",
-                      c.name, size);
+          std::printf(
+              "  [%-9s np=%d] FAIL — the decomposition does NOT cut the walled y axis; "
+              "this test exists to gate the domain-BC / property-ghost rank ownership on "
+              "a CUT walled axis (WO-F)\n",
+              c.name, size);
         fail = 1;
         continue;
       }
@@ -270,9 +275,10 @@ int main(int argc, char** argv) {
         char extra[64] = "";
         if (c.couette)
           std::snprintf(extra, sizeof(extra), "  analytic err=%.4f%%", aerr * 100.0);
-        std::printf("  [%-9s np=%d] du=%.3e (rel %.2e, tol %.1e) | dp=%.3e (|P|=%.2e, tol %.1e)"
-                    "%s  %s\n",
-                    c.name, size, du, rel, utol, dp, pmag, ptol, extra, ok ? "OK" : "FAIL");
+        std::printf(
+            "  [%-9s np=%d] du=%.3e (rel %.2e, tol %.1e) | dp=%.3e (|P|=%.2e, tol %.1e)"
+            "%s  %s\n",
+            c.name, size, du, rel, utol, dp, pmag, ptol, extra, ok ? "OK" : "FAIL");
         if (!ok)
           fail = 1;
       }

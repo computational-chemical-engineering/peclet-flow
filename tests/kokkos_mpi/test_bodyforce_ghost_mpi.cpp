@@ -5,7 +5,8 @@
 // external CFD-DEM writer (`field_view` + `exchange_field_add`) likewise leaves the ghost ring
 // holding its deposit residue rather than the owner's value. But NOTHING used to exchange
 // `force_x/y/z`: `fillPropGhosts` was called for rho / mu / drag_beta / eps and never for the force
-// fields, which are zero-initialised at registration. `buildRhsVar` face-interpolates the cell force
+// fields, which are zero-initialised at registration. `buildRhsVar` face-interpolates the cell
+// force
 //
 //     f_f(i) = 0.5*(fb(i) + fb(i - stride_c))
 //
@@ -18,8 +19,8 @@
 //
 // The gates are ABSOLUTE physics, not a distributed-vs-reference comparison — deliberately. The
 // single-rank reference carries the identical defect, so `du = 0` proves nothing here: `per-z` and
-// `per-x` at np = 1 are exactly the single-rank periodic wrap-plane variant the work order asks for,
-// and they FAIL before the fix. Configurations:
+// `per-x` at np = 1 are exactly the single-rank periodic wrap-plane variant the work order asks
+// for, and they FAIL before the fix. Configurations:
 //
 //   * `per-z`   — fully periodic, UNIFORM rho, UNIFORM force_z from a closure, inviscid, no
 //                 advection. From rest the momentum solve is (rho/dt) w = (rho/dt) w^n + f_f, so
@@ -156,7 +157,8 @@ static double pressureGradientError(const std::vector<double>& p, int* worstPlan
   for (int z = 1; z < NZ; ++z) {
     const std::size_t i0 =
         (std::size_t)(NX / 2) + (std::size_t)(NY / 2) * NX + (std::size_t)(z - 1) * NX * NY;
-    const double e = std::fabs((p[i0 + (std::size_t)NX * NY] - p[i0]) + GRAV * RHO0) / (GRAV * RHO0);
+    const double e =
+        std::fabs((p[i0 + (std::size_t)NX * NY] - p[i0]) + GRAV * RHO0) / (GRAV * RHO0);
     if (e > perr) {
       perr = e;
       *worstPlane = z;
@@ -199,9 +201,10 @@ int main(int argc, char** argv) {
     for (const Config& c : configs) {
       if (c.needCut && size > 1 && !cut[c.comp]) {
         if (rank == 0)
-          std::printf("  [%-7s np=%d] FAIL — the decomposition does NOT cut the forced axis %d; "
-                      "this test exists to gate the force ghost ACROSS a rank boundary (WO-G)\n",
-                      c.name, size, c.comp);
+          std::printf(
+              "  [%-7s np=%d] FAIL — the decomposition does NOT cut the forced axis %d; "
+              "this test exists to gate the force ghost ACROSS a rank boundary (WO-G)\n",
+              c.name, size, c.comp);
         fail = 1;
         continue;
       }

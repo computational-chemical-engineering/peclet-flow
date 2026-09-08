@@ -86,7 +86,8 @@ inline void copyFaceVelocity(SField dst, I3 de, int dg, SField src, I3 se, int s
 /// dropped or duplicated across a rank boundary).
 inline void copyAdvectedVelocity(SField dst, I3 de, int dg, SField src, I3 se, int sg, int dir,
                                  I3 n) {
-  const int ox = sg - (dir == 0 ? 1 : 0), oy = sg - (dir == 1 ? 1 : 0), oz = sg - (dir == 2 ? 1 : 0);
+  const int ox = sg - (dir == 0 ? 1 : 0), oy = sg - (dir == 1 ? 1 : 0),
+            oz = sg - (dir == 2 ? 1 : 0);
   Kokkos::parallel_for(
       "vof::copyAdvectedVelocity",
       Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),

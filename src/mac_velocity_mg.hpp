@@ -309,7 +309,7 @@ class VelocityMG {
 #endif
   struct Level {
     C3 ext, inner, ratio{2, 2, 2}, cfac{1, 1, 1};
-    C3 og{0, 0, 0};  // block inner origin (global red-black parity); {0,0,0} single-rank
+    C3 og{0, 0, 0};    // block inner origin (global red-black parity); {0,0,0} single-rank
     C3 gdim{0, 0, 0};  // GLOBAL dims of this level (og + inner == gdim -> owns the +face)
     std::size_t n = 0;
     CCField x, rhs, res, theta, pin, resMask;
@@ -364,9 +364,12 @@ class VelocityMG {
         const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
         const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
         ratio = CutcellMG::mgChooseRatio(H, canA, aniso_, mgAspectTheta());
-        if (ratio.x == 2) next.x = inner.x / 2;
-        if (ratio.y == 2) next.y = inner.y / 2;
-        if (ratio.z == 2) next.z = inner.z / 2;
+        if (ratio.x == 2)
+          next.x = inner.x / 2;
+        if (ratio.y == 2)
+          next.y = inner.y / 2;
+        if (ratio.z == 2)
+          next.z = inner.z / 2;
       }
       v.ratio = ratio;
       v.x = CCField("vmg_x", v.n);
@@ -455,9 +458,12 @@ class VelocityMG {
                               can(gs.z) && (!inPlace || evenOn(dec, 2))};
         const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
         ratio = CutcellMG::mgChooseRatio(H, canA, aniso_, mgAspectTheta());
-        if (ratio.x == 2) next.x = gs.x / 2;
-        if (ratio.y == 2) next.y = gs.y / 2;
-        if (ratio.z == 2) next.z = gs.z / 2;
+        if (ratio.x == 2)
+          next.x = gs.x / 2;
+        if (ratio.y == 2)
+          next.y = gs.y / 2;
+        if (ratio.z == 2)
+          next.z = gs.z / 2;
       }
       v.ratio = ratio;
       v.x = CCField("vmg_x", v.n);
@@ -625,9 +631,9 @@ class VelocityMG {
   }
 
   // DOMAIN-BC const-coeff path (cavity/BFS): per-face BC types {-x,+x,-y,+y,-z,+z}
-  // (0=periodic,1=wall, 2=inflow,3=outflow,4=free-slip). Enables the non-periodic fill (periodic axes wrap;
-  // non-periodic ghosts left as the caller / correction set them) + the Dirichlet/Neumann
-  // prolongation ghosts.
+  // (0=periodic,1=wall, 2=inflow,3=outflow,4=free-slip). Enables the non-periodic fill (periodic
+  // axes wrap; non-periodic ghosts left as the caller / correction set them) + the
+  // Dirichlet/Neumann prolongation ghosts.
   void setBC(const int bc[6]) {
     bcMode_ = false;
     for (int i = 0; i < 6; ++i) {
@@ -834,24 +840,22 @@ class VelocityMG {
           const C3 lo{G + 1, G + 1, G + 1};
           const C3 hi{lv.ext.x - G - 1, lv.ext.y - G - 1, lv.ext.z - G - 1};
           lv.dev->exchangeBegin(lv.x);
-          ibmRbgsStencilColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
-                                 FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB),
-                                 FPC(lv.AT), pin, lv.ext, og, color, lo, hi, C3{0, 0, 0},
-                                 C3{0, 0, 0});
+          ibmRbgsStencilColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                                 FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), pin, lv.ext, og,
+                                 color, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
           lv.dev->exchangeEnd(lv.x);
-          ibmRbgsStencilColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
-                                 FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB),
-                                 FPC(lv.AT), pin, lv.ext, og, color, C3{G, G, G},
-                                 C3{lv.ext.x - G, lv.ext.y - G, lv.ext.z - G}, lo, hi);
+          ibmRbgsStencilColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                                 FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), pin, lv.ext, og,
+                                 color, C3{G, G, G}, C3{lv.ext.x - G, lv.ext.y - G, lv.ext.z - G},
+                                 lo, hi);
           continue;
         }
 #endif
         fill(lv, lv.x);
         if (isL0 && bcApplyL0_)
           bcApplyL0_(lv.x);  // re-impose the velocity BC (held Dirichlet faces) per colour
-        ibmRbgsStencilColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                            FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), pin, lv.ext,
-                            og, G, color);
+        ibmRbgsStencilColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
+                            FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), pin, lv.ext, og, G, color);
       }
   }
   // periodic ghost fill; in domain-BC mode only the periodic axes wrap (non-periodic boundary
@@ -917,7 +921,7 @@ class VelocityMG {
 
  private:
   std::vector<Level> lv_;
-  double w_[3] = {1.0, 1.0, 1.0};  // per-axis metric weight (setMetric); 1.0 = isotropic lattice
+  double w_[3] = {1.0, 1.0, 1.0};   // per-axis metric weight (setMetric); 1.0 = isotropic lattice
   double hp_[3] = {1.0, 1.0, 1.0};  // per-axis spacing h_a' (setMetric); the §5 coarsening rule
   bool aniso_ = false;              // engages that rule; false => today's level table verbatim
   int pre_ = 2, post_ = 2, bottom_ = 8;
@@ -927,10 +931,10 @@ class VelocityMG {
   int bc_[6] = {0, 0, 0, 0, 0, 0};          // domain-BC (non-periodic) mode
   std::function<void(CCField)> bcApplyL0_;  // re-impose the velocity BC on level 0 (domain-BC mode)
   CCConst empty_;                           // zero-extent View -> "no pin / no mask" to the kernels
-  bool distributed_ = false;  // multi-rank (initMpi); fill() exchanges on every level
-  CCField prev_;              // previous iterate for the update-tolerance stop (solve tol > 0)
+  bool distributed_ = false;                // multi-rank (initMpi); fill() exchanges on every level
+  CCField prev_;                // previous iterate for the update-tolerance stop (solve tol > 0)
   double lastResRatio_ = -1.0;  // max|r|/max|b| at exit of the last resTol-mode solve
-  int heldComp_ = -1;           // component of the last domain-BC operator build (held-face exclude)
+  int heldComp_ = -1;  // component of the last domain-BC operator build (held-face exclude)
 };
 
 }  // namespace peclet::flow

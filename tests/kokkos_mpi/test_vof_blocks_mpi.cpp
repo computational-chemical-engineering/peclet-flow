@@ -340,14 +340,10 @@ int main(int argc, char** argv) {
     // here is simultaneously (a) decomposition independence, (b) assignment independence and
     // (c) exactness of the migration -- the colour and the previous centroid are the only state a
     // block carries, and they travel as a contiguous message.
-    runScene(SceneSpec{Flow::LeVeque,
-                       48,
+    runScene(SceneSpec{Flow::LeVeque, 48,
                        0.08 / 48,  // the LeVeque field peaks near |uf| = 2, so CFL ~ 0.16
-                       1.5,
-                       24,
-                       lattice(4, 2.0 / 48, 8.0 / 48),
-                       "W1 64 bubbles / LeVeque / LPT + re-assignment",
-                       true,
+                       1.5, 24, lattice(4, 2.0 / 48, 8.0 / 48),
+                       "W1 64 bubbles / LeVeque / LPT + re-assignment", true,
                        /*assign=*/1,
                        /*reassign=*/8},
              rank, size);

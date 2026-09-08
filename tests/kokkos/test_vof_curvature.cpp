@@ -111,10 +111,9 @@ Err curvError(const Case& cs, double kExact, int margin = 0) {
   long cnt = 0, nan = 0;
   Kokkos::parallel_reduce(
       "curv::err",
-      Kokkos::MDRangePolicy<peclet::flow::SExec, Kokkos::Rank<3>>(peclet::flow::SExec(), {g, g, g},
-                                                                  {g + n.x - 2 * margin,
-                                                                   g + n.y - 2 * margin,
-                                                                   g + n.z - 2 * margin}),
+      Kokkos::MDRangePolicy<peclet::flow::SExec, Kokkos::Rank<3>>(
+          peclet::flow::SExec(), {g, g, g},
+          {g + n.x - 2 * margin, g + n.y - 2 * margin, g + n.z - 2 * margin}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc, double& m, long& c, long& bad) {
         const long i = L3(x, y, z, e);
         if (static_cast<int>(br(i)) == vf::kCurvNone)
@@ -141,10 +140,11 @@ Err curvError(const Case& cs, double kExact, int margin = 0) {
 
 void printStats(const char* tag, const VofCurvature::Stats& s) {
   const double t = s.interfacial ? static_cast<double>(s.interfacial) : 1.0;
-  std::printf("    %s interfacial %5ld | HF %5.2f%%  HFdir %5.2f%%  HFfit %5.2f%%  PV %5.2f%%"
-              "  PVred %5.3f%%  none %ld\n",
-              tag, s.interfacial, 100.0 * s.hf / t, 100.0 * s.hfMixed / t, 100.0 * s.hfFit / t,
-              100.0 * s.pv / t, 100.0 * s.pvReduced / t, s.noEstimate);
+  std::printf(
+      "    %s interfacial %5ld | HF %5.2f%%  HFdir %5.2f%%  HFfit %5.2f%%  PV %5.2f%%"
+      "  PVred %5.3f%%  none %ld\n",
+      tag, s.interfacial, 100.0 * s.hf / t, 100.0 * s.hfMixed / t, 100.0 * s.hfFit / t,
+      100.0 * s.pv / t, 100.0 * s.pvReduced / t, s.noEstimate);
 }
 
 // ========================================================== gate A: the geometry primitives
@@ -176,18 +176,18 @@ void gateGeometry() {
       continue;
     vf::polygonAreaCentroid(v, nv, ctr, area);
     const double d = 1e-6;
-    const double dVda = (vf::plicVolume(m[0], m[1], m[2], al + d) -
-                         vf::plicVolume(m[0], m[1], m[2], al - d)) /
-                        (2 * d);
+    const double dVda =
+        (vf::plicVolume(m[0], m[1], m[2], al + d) - vf::plicVolume(m[0], m[1], m[2], al - d)) /
+        (2 * d);
     const double l2 = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
     maxA = std::max(maxA, std::fabs(area - l2 * dVda) / std::max(area, 1e-3));
     for (int k = 0; k < 3; ++k) {
       double mp[3] = {m[0], m[1], m[2]}, mm[3] = {m[0], m[1], m[2]};
       mp[k] += d;
       mm[k] -= d;
-      const double dVdm = (vf::plicVolume(mp[0], mp[1], mp[2], al) -
-                           vf::plicVolume(mm[0], mm[1], mm[2], al)) /
-                          (2 * d);
+      const double dVdm =
+          (vf::plicVolume(mp[0], mp[1], mp[2], al) - vf::plicVolume(mm[0], mm[1], mm[2], al)) /
+          (2 * d);
       maxC = std::max(maxC, std::fabs(ctr[k] - (-dVdm / dVda)));
     }
     ++nsamp;
@@ -238,8 +238,8 @@ void gateGeometry() {
         bool in = true;
         for (int k = 0; k < nv && in; ++k) {
           const int k1 = (k + 1) % nv;
-          const double cr = (xy[k1][0] - xy[k][0]) * (y - xy[k][1]) -
-                            (xy[k1][1] - xy[k][1]) * (x - xy[k][0]);
+          const double cr =
+              (xy[k1][0] - xy[k][0]) * (y - xy[k][1]) - (xy[k1][1] - xy[k][1]) * (x - xy[k][0]);
           if (cr < 0.0)
             in = false;
         }
@@ -278,8 +278,8 @@ void gateShapes() {
     SField cc = cs.c();
     vofscene::forEachExtended(
         cs.blk, KOKKOS_LAMBDA(long i, int gx, int gy, int gz) {
-          cc(i) = vf::planeCellFraction(m0, m1, m2, 0.5 * (m0 + m1 + m2), gx * h, gy * h, gz * h,
-                                        h);
+          cc(i) =
+              vf::planeCellFraction(m0, m1, m2, 0.5 * (m0 + m1 + m2), gx * h, gy * h, gz * h, h);
         });
     cs.adv.syncGhosts();
     const auto st = cs.curv.compute(cs.c());
@@ -409,11 +409,13 @@ void gateSweep() {
   }
 }
 
-// ================================================= gate D: translating droplet, realistic fractions
+// ================================================= gate D: translating droplet, realistic
+// fractions
 void gateTranslating() {
   std::printf("\n=== D  translating droplet (advection-realistic fractions) -- a MEASUREMENT\n");
-  std::printf("  the plateau is the method's physics (Han/Evrard/Desjardins 2024 3; "
-              "VOF_PLAN.md 6)\n");
+  std::printf(
+      "  the plateau is the method's physics (Han/Evrard/Desjardins 2024 3; "
+      "VOF_PLAN.md 6)\n");
   const int Ns[3] = {16, 32, 64};
   double l1[3], mx[3], l1e[3];
   for (int q = 0; q < 3; ++q) {
@@ -652,21 +654,22 @@ void gateMixedHeightFitAblation() {
       mx[mode][q] = er.max;
     }
   for (int mode = 0; mode < 2; ++mode)
-    std::printf("  tier 2b %-3s  L1 %.3e / %.3e / %.3e (order %.2f)   max %.3e / %.3e / %.3e"
-                " (order %.2f)\n",
-                mode ? "ON" : "OFF", l1[mode][0], l1[mode][1], l1[mode][2],
-                order(l1[mode][0], l1[mode][2]) / 2.0, mx[mode][0], mx[mode][1], mx[mode][2],
-                order(mx[mode][0], mx[mode][2]) / 2.0);
-  std::printf("  the fit serves the cells tier 1 cannot; its data set is the columns that CLOSED,"
-              " a slope-selected\n  and therefore asymmetric subset, so its bias is scale"
-              " invariant. The PV fallback's 5^3 PLIC\n  polygons exist at every slope and are"
-              " not.\n");
+    std::printf(
+        "  tier 2b %-3s  L1 %.3e / %.3e / %.3e (order %.2f)   max %.3e / %.3e / %.3e"
+        " (order %.2f)\n",
+        mode ? "ON" : "OFF", l1[mode][0], l1[mode][1], l1[mode][2],
+        order(l1[mode][0], l1[mode][2]) / 2.0, mx[mode][0], mx[mode][1], mx[mode][2],
+        order(mx[mode][0], mx[mode][2]) / 2.0);
+  std::printf(
+      "  the fit serves the cells tier 1 cannot; its data set is the columns that CLOSED,"
+      " a slope-selected\n  and therefore asymmetric subset, so its bias is scale"
+      " invariant. The PV fallback's 5^3 PLIC\n  polygons exist at every slope and are"
+      " not.\n");
   // The shipped default must beat the alternative in the max norm, and must converge there.
   CHECK(order(mx[0][0], mx[0][2]) / 2.0 > 1.5);
   CHECK(order(mx[1][0], mx[1][2]) / 2.0 < 1.0);
   CHECK(mx[0][2] < 0.25 * mx[1][2]);
 }
-
 
 // ======================================================= PHASE 3 GATE K2: anisotropic cells
 //
@@ -726,8 +729,7 @@ void gateAnisotropic() {
   // V3 cascade that the anisotropic gate must not be blamed for.
   {
     double pmax[4] = {0, 0, 0, 0};
-    const double hs[4][3] = {
-        {1.0, 2.0, 4.0}, {1.0, 1.0, 1.0}, {2.5, 1.0, 1.7}, {1.0, 1.0, 1.0}};
+    const double hs[4][3] = {{1.0, 2.0, 4.0}, {1.0, 1.0, 1.0}, {2.5, 1.0, 1.7}, {1.0, 1.0, 1.0}};
     for (int q = 0; q < 4; ++q) {
       const double* h = hs[q];
       const int N = 24;
@@ -752,8 +754,7 @@ void gateAnisotropic() {
         for (int y = 0; y < e.y; ++y)
           for (int x = 0; x < e.x; ++x) {
             const double x0 = (x - gg) * h[0], y0 = (y - gg) * h[1], z0 = (z - gg) * h[2];
-            host(L3(x, y, z, e)) =
-                vf::planeCellFractionAniso(n[0], n[1], n[2], d, x0, y0, z0, g);
+            host(L3(x, y, z, e)) = vf::planeCellFractionAniso(n[0], n[1], n[2], d, x0, y0, z0, g);
           }
       Kokkos::deep_copy(cs.c(), host);
       cs.adv.syncGhosts();
@@ -766,8 +767,10 @@ void gateAnisotropic() {
       CHECK(st.noEstimate == 0);
       pmax[q] = er.max;
     }
-    std::printf("  plane: stretched vs its CUBIC index-equivalent control -> %.3e vs %.3e, "
-                "%.3e vs %.3e\n", pmax[0], pmax[1], pmax[2], pmax[3]);
+    std::printf(
+        "  plane: stretched vs its CUBIC index-equivalent control -> %.3e vs %.3e, "
+        "%.3e vs %.3e\n",
+        pmax[0], pmax[1], pmax[2], pmax[3]);
     // A plane has zero curvature, so the metric must not introduce one BEYOND what the same
     // index-space geometry already costs on a cubic grid.
     CHECK(pmax[0] <= 4.0 * std::fmax(pmax[1], 1e-15));

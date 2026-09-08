@@ -203,8 +203,8 @@ int main(int argc, char** argv) {
           std::printf("  [np=%d] FAIL — the theta band fill is not bitwise (%.3e)\n", size, df);
           fail = 1;
         }
-        if (tot[0] != rd.dynamicCells || tot[1] != rd.pinnedCells ||
-            tot[2] != rd.advancingCells || tot[3] != rd.recedingCells) {
+        if (tot[0] != rd.dynamicCells || tot[1] != rd.pinnedCells || tot[2] != rd.advancingCells ||
+            tot[3] != rd.recedingCells) {
           std::printf("  [np=%d] FAIL — the state census differs from the reference\n", size);
           fail = 1;
         }

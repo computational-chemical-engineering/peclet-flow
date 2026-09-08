@@ -20,7 +20,9 @@ using IbmSolver = peclet::flow::IbmSolver;
 static constexpr int N = 32, STEPS = 4;
 static constexpr double RHO0 = 1.0, RATIO = 100.0, MU = 0.1, DT = 0.5, WIN = 0.05;
 
-static double rhoAt(int gz) { return (gz < N / 2) ? RATIO * RHO0 : RHO0; }
+static double rhoAt(int gz) {
+  return (gz < N / 2) ? RATIO * RHO0 : RHO0;
+}
 
 static void run(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz, int forceLevel,
                 bool telescope, std::vector<double>& u, std::vector<double>& p, int& teleCount) {
@@ -91,12 +93,14 @@ int main(int argc, char** argv) {
     int cTg = 0;
     MPI_Allreduce(&cT, &cTg, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
     const double relU = g[0] / (g[2] + 1e-300), relP = g[1] / (g[3] + 1e-300);
-    const double tol = 1e-8;  // the PCG tolerance's footprint on two different-but-equivalent hierarchies
+    const double tol =
+        1e-8;  // the PCG tolerance's footprint on two different-but-equivalent hierarchies
     const bool teleOk = (size == 1) || cTg >= 1;  // np=1 has one block: nothing to merge
     if (rank == 0)
-      std::printf("  telescoped(force L1) vs in-place: rel du %.2e  rel dp %.2e (tol %.0e)  "
-                  "telescopes %d  |u| %.3e |p| %.3e  (np=%d)\n",
-                  relU, relP, tol, cTg, g[2], g[3], size);
+      std::printf(
+          "  telescoped(force L1) vs in-place: rel du %.2e  rel dp %.2e (tol %.0e)  "
+          "telescopes %d  |u| %.3e |p| %.3e  (np=%d)\n",
+          relU, relP, tol, cTg, g[2], g[3], size);
     if (!(relU <= tol) || !(relP <= tol) || !teleOk)
       fail = 1;
   }
@@ -104,7 +108,8 @@ int main(int argc, char** argv) {
   MPI_Allreduce(&fail, &totalFail, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   if (rank == 0) {
     if (totalFail == 0)
-      std::printf("OK (np=%d): variable-density outflow across a telescope point == in-place\n", size);
+      std::printf("OK (np=%d): variable-density outflow across a telescope point == in-place\n",
+                  size);
     else
       std::fprintf(stderr, "FAILED (np=%d)\n", size);
   }

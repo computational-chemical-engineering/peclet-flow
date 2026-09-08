@@ -59,9 +59,9 @@ static void configure(IbmSolver& s, bool vmg, bool slipZ) {
   // only to ~5e-4 on this operator -- rows span 1e3 -- and the fixed-point gate needs better).
   s.setVelocityResidualTolerance(1e-10);
   if (vmg) {
-    s.setVelocityMultigrid(true, 4, 60);    // up to 60 V-cycles
+    s.setVelocityMultigrid(true, 4, 60);  // up to 60 V-cycles
   } else {
-    s.setVelocityIterations(20000);         // RB-GS to the same tolerance
+    s.setVelocityIterations(20000);  // RB-GS to the same tolerance
   }
 }
 
@@ -74,7 +74,8 @@ int main(int argc, char** argv) {
   for (int pass = 0; pass < 2; ++pass) {
     const bool slipZ = (pass == 1);
     if (rank == 0)
-      std::printf("[velocitymg_bc] pass %d: +-z %s\n", pass, slipZ ? "FREE-SLIP (type 4)" : "no-slip walls");
+      std::printf("[velocitymg_bc] pass %d: +-z %s\n", pass,
+                  slipZ ? "FREE-SLIP (type 4)" : "no-slip walls");
     const std::vector<double> gsdf = sphereSdf();
 
     // (a) distributed, velocity MG
@@ -88,7 +89,8 @@ int main(int argc, char** argv) {
       for (int y = 0; y < lny; ++y)
         for (int x = 0; x < lnx; ++x)
           lsdf[(std::size_t)x + (std::size_t)y * lnx + (std::size_t)z * lnx * lny] =
-              gsdf[(std::size_t)(x + ox) + (std::size_t)(y + oy) * N + (std::size_t)(z + oz) * N * N];
+              gsdf[(std::size_t)(x + ox) + (std::size_t)(y + oy) * N +
+                   (std::size_t)(z + oz) * N * N];
     IbmSolver sd(lnx, lny, lnz);
     sd.initMpi(N, N, N, MPI_COMM_WORLD);
     configure(sd, true, slipZ);
@@ -142,13 +144,15 @@ int main(int argc, char** argv) {
     MPI_Allreduce(g, gg, 3, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
     const double relAB = gg[0] / gg[2], relBC = gg[1] / gg[2];
     const double tolAB = (size == 1) ? 1e-12 : 1e-7;  // np>1: the pressure PCG's reduction floor
-    const double tolBC = 1e-5;                         // V-cycle vs converged RB-GS fixed point
+    const double tolBC = 1e-5;                        // V-cycle vs converged RB-GS fixed point
     if (rank == 0)
-      std::printf("  dist-vs-single (vmg) rel %.2e (tol %.0e)  vmg-vs-RBGS rel %.2e (tol %.0e)  "
-                  "div %.2e  cycles/step %.1f (single %.1f) vs RB-GS sweeps/step %.1f  (np=%d)\n",
-                  relAB, tolAB, relBC, tolBC, divd, cycles / (double)STEPS,
-                  cyclesRef / (double)STEPS, sweepsRef / (double)STEPS, size);
-    if (!(relAB <= tolAB) || !(relBC <= tolBC) || !(divd < 1e-3))  // div: sanity (open-boundary level)
+      std::printf(
+          "  dist-vs-single (vmg) rel %.2e (tol %.0e)  vmg-vs-RBGS rel %.2e (tol %.0e)  "
+          "div %.2e  cycles/step %.1f (single %.1f) vs RB-GS sweeps/step %.1f  (np=%d)\n",
+          relAB, tolAB, relBC, tolBC, divd, cycles / (double)STEPS, cyclesRef / (double)STEPS,
+          sweepsRef / (double)STEPS, size);
+    if (!(relAB <= tolAB) || !(relBC <= tolBC) ||
+        !(divd < 1e-3))  // div: sanity (open-boundary level)
       fail = 1;
     if (slipZ) {
       // the slip faces are impermeable: the wall-normal component on the +-z boundary planes
@@ -172,8 +176,10 @@ int main(int argc, char** argv) {
   MPI_Allreduce(&fail, &totalFail, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   if (rank == 0) {
     if (totalFail == 0)
-      std::printf("OK (np=%d): mixed (solid + domain-BC) velocity MG distributed == single-rank == RB-GS "
-                  "(walls, and +-z free-slip)\n", size);
+      std::printf(
+          "OK (np=%d): mixed (solid + domain-BC) velocity MG distributed == single-rank == RB-GS "
+          "(walls, and +-z free-slip)\n",
+          size);
     else
       std::fprintf(stderr, "FAILED (np=%d)\n", size);
   }

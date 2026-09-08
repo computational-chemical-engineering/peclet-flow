@@ -52,8 +52,12 @@ inline bool& exactResidualFlag() {
   }();
   return v;
 }
-inline bool exactResidual() { return exactResidualFlag(); }
-inline void setExactResidual(bool on) { exactResidualFlag() = on; }
+inline bool exactResidual() {
+  return exactResidualFlag();
+}
+inline void setExactResidual(bool on) {
+  exactResidualFlag() = on;
+}
 /// True when PECLET_FLOW_EXACT_RESIDUAL was set explicitly. `IbmSolver::enableVof` does NOT
 /// override an explicit environment request, which is what makes `PECLET_FLOW_EXACT_RESIDUAL=0`
 /// the process-wide ablation of WO-R2 item 3 (used to measure which VoF ctests move under the
@@ -143,12 +147,36 @@ KOKKOS_INLINE_FUNCTION double ccTriFrac(double a, double b, double c) {
     return 0.0;
   double x, y, z;
   if (np == 1) {  // rotate the positive vertex into x
-    if (pa) { x = a; y = b; z = c; } else if (pb) { x = b; y = c; z = a; } else { x = c; y = a; z = b; }
+    if (pa) {
+      x = a;
+      y = b;
+      z = c;
+    } else if (pb) {
+      x = b;
+      y = c;
+      z = a;
+    } else {
+      x = c;
+      y = a;
+      z = b;
+    }
     const double den = (x - y) * (x - z);
     return den > 1e-300 ? (x * x) / den : 1.0;
   }
   // np == 2: rotate the negative vertex into x
-  if (!pa) { x = a; y = b; z = c; } else if (!pb) { x = b; y = c; z = a; } else { x = c; y = a; z = b; }
+  if (!pa) {
+    x = a;
+    y = b;
+    z = c;
+  } else if (!pb) {
+    x = b;
+    y = c;
+    z = a;
+  } else {
+    x = c;
+    y = a;
+    z = b;
+  }
   const double den = (x - y) * (x - z);
   return 1.0 - (den > 1e-300 ? (x * x) / den : 1.0);
 }
@@ -250,7 +278,8 @@ inline long hostSerialCellCutoff() {
   }();
   return n;
 }
-// True when a host launch of `cells` cells should run sequentially instead (always false on device).
+// True when a host launch of `cells` cells should run sequentially instead (always false on
+// device).
 inline bool hostRunSerial(long cells) {
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>)
     return cells > 0 && cells < hostSerialCellCutoff();
@@ -275,8 +304,8 @@ inline void ccFor3(const char* name, C3 lo, C3 hi, F f) {
             f(lx, ly, lz);
       return;
     }
-    Kokkos::parallel_for(
-        name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x - lo.x, 2, 2}), f);
+    Kokkos::parallel_for(name,
+                         MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x - lo.x, 2, 2}), f);
   } else {
     Kokkos::parallel_for(name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}), f);
   }
@@ -290,9 +319,9 @@ inline void ccReduce3(const char* name, C3 lo, C3 hi, F f, R&& reducer) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
-    Kokkos::parallel_reduce(
-        name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x - lo.x, 2, 2}), f,
-        std::forward<R>(reducer));
+    Kokkos::parallel_reduce(name,
+                            MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x - lo.x, 2, 2}),
+                            f, std::forward<R>(reducer));
   } else {
     Kokkos::parallel_reduce(name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}), f,
                             std::forward<R>(reducer));

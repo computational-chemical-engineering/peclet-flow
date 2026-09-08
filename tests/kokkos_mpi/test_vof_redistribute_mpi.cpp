@@ -100,8 +100,8 @@ static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, in
   for (int z = 0; z < lnz; ++z)
     for (int y = 0; y < lny; ++y)
       for (int x = 0; x < lnx; ++x) {
-        const double v = std::fmax(bubbleAt(0, x + ox, y + oy, z + oz),
-                                   bubbleAt(1, x + ox, y + oy, z + oz));
+        const double v =
+            std::fmax(bubbleAt(0, x + ox, y + oy, z + oz), bubbleAt(1, x + ox, y + oy, z + oz));
         const std::size_t i = (std::size_t)x + (std::size_t)y * lnx + (std::size_t)z * lnx * lny;
         c[i] = v;
         t[i] = 0.5 + 0.25 * std::sin(0.3 * (x + ox)) * std::cos(0.2 * (z + oz));
@@ -233,12 +233,13 @@ int main(int argc, char** argv) {
           moved = 1;
     }
     if (rank == 0) {
-      std::printf("VOF REDISTRIBUTE MPI np=%d  grid %dx%dx%d  block %dx%dx%d  partition moves: %s\n",
-                  size, NX, NY, NZ, lnx, lny, lnz, moved ? "YES" : "no");
+      std::printf(
+          "VOF REDISTRIBUTE MPI np=%d  grid %dx%dx%d  block %dx%dx%d  partition moves: %s\n", size,
+          NX, NY, NZ, lnx, lny, lnz, moved ? "YES" : "no");
       for (int r = 0; r < size && size > 1; ++r) {
         const auto a = D1.block(r), b = D2.block(r);
-        std::printf("    rank %d: %ldx%ldx%ld @ (%ld,%ld,%ld)  ->  %ldx%ldx%ld @ (%ld,%ld,%ld)\n", r,
-                    (long)a.size[0], (long)a.size[1], (long)a.size[2], (long)a.origin[0],
+        std::printf("    rank %d: %ldx%ldx%ld @ (%ld,%ld,%ld)  ->  %ldx%ldx%ld @ (%ld,%ld,%ld)\n",
+                    r, (long)a.size[0], (long)a.size[1], (long)a.size[2], (long)a.origin[0],
                     (long)a.origin[1], (long)a.origin[2], (long)b.size[0], (long)b.size[1],
                     (long)b.size[2], (long)b.origin[0], (long)b.origin[1], (long)b.origin[2]);
       }
@@ -344,11 +345,12 @@ int main(int argc, char** argv) {
         configure(ref, 0, 0, 0, NX, NY, NZ, cfg);
         for (int k = 0; k < STEPS; ++k)
           ref.step();
-        std::vector<double> r[6] = {ref.getVof(),      ref.getVelocity(0), ref.getVelocity(1),
-                                    ref.getVelocity(2), ref.getPressure(), ref.getField("T")};
-        std::printf("    R2 vs the single-rank reference after %d steps"
-                    "  [rebalanced | never-rebalanced control]:\n     ",
-                    STEPS);
+        std::vector<double> r[6] = {ref.getVof(),       ref.getVelocity(0), ref.getVelocity(1),
+                                    ref.getVelocity(2), ref.getPressure(),  ref.getField("T")};
+        std::printf(
+            "    R2 vs the single-rank reference after %d steps"
+            "  [rebalanced | never-rebalanced control]:\n     ",
+            STEPS);
         for (int i = 0; i < 6; ++i) {
           const double d = maxDiff(g[i], r[i]), dc = maxDiff(gc[i], r[i]);
           // np = 1: the control IS the reference (one rank owns everything), so `bound` collapses

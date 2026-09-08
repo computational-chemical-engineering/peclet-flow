@@ -259,8 +259,8 @@ struct Drop {
 /// A stationary droplet in a triply periodic box, off-centre by an irrational fraction of a cell.
 /// `lam` scales the LENGTH unit: lengths / lam, mu * lam, rho * lam^3, sigma unchanged.
 Drop runDroplet(int n, double Rcells, double lam, bool constantKappa, int steps) {
-  const double H = 1.0 / lam;              // one cell, physically
-  const double SIGMA = 1.0;                // invariant under a change of LENGTH unit
+  const double H = 1.0 / lam;  // one cell, physically
+  const double SIGMA = 1.0;    // invariant under a change of LENGTH unit
   const double MU = 0.1 * lam, RHO = 1.0 * lam * lam * lam;
   peclet::flow::Solver<peclet::flow::Staggered> s(n, n, n);
   s.setPhysicalDomain({n * H, n * H, n * H}, {0.0, 0.0, 0.0}, {n, n, n});
@@ -271,8 +271,7 @@ Drop runDroplet(int n, double Rcells, double lam, bool constantKappa, int steps)
   s.setPressureGeometry(std::vector<double>((std::size_t)n * n * n, 10.0 * H));
   s.setPressureChebyshev(true, 500, 1e-14);
   s.enableVof();
-  const std::vector<double> C =
-      sphereColour(n, Rcells, n / 2 + 0.13, n / 2 + 0.27, n / 2 + 0.11);
+  const std::vector<double> C = sphereColour(n, Rcells, n / 2 + 0.13, n / 2 + 0.27, n / 2 + 0.11);
   s.setVof(C);
   s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {RHO, 0.0});
   s.setSurfaceTension(SIGMA);
@@ -290,8 +289,8 @@ Drop runDroplet(int n, double Rcells, double lam, bool constantKappa, int steps)
     d.maxU = std::fmax(d.maxU, maxAbs(s.getVelocity(c)));
   // Young-Laplace: the pressure inside the drop minus the pressure well outside it.
   const std::vector<double> p = s.getPressure();
-  const std::size_t inside = (std::size_t)(n / 2) + (std::size_t)(n / 2) * n +
-                             (std::size_t)(n / 2) * n * n;
+  const std::size_t inside =
+      (std::size_t)(n / 2) + (std::size_t)(n / 2) * n + (std::size_t)(n / 2) * n * n;
   const std::size_t outside = 1 + (std::size_t)1 * n + (std::size_t)1 * n * n;
   d.dp = p[inside] - p[outside];
   return d;
@@ -307,8 +306,8 @@ void gateVofSigma() {
   // (a) the exactness identity, in both unit systems.
   const Drop a = runDroplet(N, Rc, 1.0, true, 20);
   const Drop b = runDroplet(N, Rc, lam, true, 20);
-  std::printf("  constant kappa: max|u| %.3e (lam=1) vs %.3e (lam=%g)  ->  %.3e rescaled\n",
-              a.maxU, b.maxU, lam, b.maxU * lam);
+  std::printf("  constant kappa: max|u| %.3e (lam=1) vs %.3e (lam=%g)  ->  %.3e rescaled\n", a.maxU,
+              b.maxU, lam, b.maxU * lam);
   // A velocity of exactly zero would also pass, so pin the SCALE the currents are measured against:
   // sigma*kappa/mu is the capillary velocity the naive CSF would produce.
   const double uScale = 1.0 * a.kappa / 0.1;
@@ -319,7 +318,8 @@ void gateVofSigma() {
   std::printf("  Young-Laplace: dp %.9e vs sigma*kappa %.9e   (lam=%g: %.9e rescaled)\n", a.dp,
               a.kappa, lam, b.dp / lam);
   checkClose(b.kappa / lam, a.kappa, 1e-12 * a.kappa, "kappa scales as 1/length");
-  checkClose(b.dtCap, a.dtCap, 1e-12 * a.dtCap, "capillary_dt invariant under a length-unit change");
+  checkClose(b.dtCap, a.dtCap, 1e-12 * a.dtCap,
+             "capillary_dt invariant under a length-unit change");
   std::printf("  capillary_dt %.9e vs %.9e (invariant: sigma and the time unit are)\n", a.dtCap,
               b.dtCap);
 
@@ -328,9 +328,10 @@ void gateVofSigma() {
   const Drop cb = runDroplet(N, Rc, lam, false, 20);
   const double ru = std::fabs(ca.maxU - cb.maxU * lam) / std::fabs(ca.maxU);
   const double rp = std::fabs(ca.dp - cb.dp / lam) / std::fabs(ca.dp);
-  std::printf("  computed kappa: max|u| %.6e vs %.6e rescaled (rel %.3e); dp %.6e vs %.6e "
-              "(rel %.3e)\n",
-              ca.maxU, cb.maxU * lam, ru, ca.dp, cb.dp / lam, rp);
+  std::printf(
+      "  computed kappa: max|u| %.6e vs %.6e rescaled (rel %.3e); dp %.6e vs %.6e "
+      "(rel %.3e)\n",
+      ca.maxU, cb.maxU * lam, ru, ca.dp, cb.dp / lam, rp);
   CHECK(ru <= 1e-12);
   CHECK(rp <= 1e-12);
 }
@@ -344,8 +345,8 @@ void gateVofSigma() {
 /// `runChannel`'s recipe, in the unit system the caller writes the box in (lam = 1).
 struct Channel {
   Fields f;
-  std::vector<double> yc;              ///< the physical y cell centres
-  double ylo = 0.0, yhi = 0.0;         ///< the two wall positions (== yc[jlo], yc[jhi])
+  std::vector<double> yc;       ///< the physical y cell centres
+  double ylo = 0.0, yhi = 0.0;  ///< the two wall positions (== yc[jlo], yc[jhi])
   std::array<double, 3> w{1.0, 1.0, 1.0};
   bool aniso = false;
 };
@@ -415,15 +416,17 @@ void checkChannel(const char* what, const Channel& ch, int nx, int ny, int nz, i
           relErr = d;
       }
   const double mv = maxAbs(ch.f.v), mw = maxAbs(ch.f.w);
-  std::printf("      H %.17g  u_max %.17g  max rel |u - parabola| %.3e (bound %.0e)  max|v| %.3e  "
-              "max|w| %.3e  max|u| on the wall/solid rows %.3e\n",
-              H, umax, relErr, bound, mv, mw, wallMax);
+  std::printf(
+      "      H %.17g  u_max %.17g  max rel |u - parabola| %.3e (bound %.0e)  max|v| %.3e  "
+      "max|w| %.3e  max|u| on the wall/solid rows %.3e\n",
+      H, umax, relErr, bound, mv, mw, wallMax);
   if (!(relErr <= bound))
-    std::printf("      NOTE: a miss that is a SINGLE one-signed multiplicative factor across the "
-                "whole profile (rel err proportional to u, one constant ratio on every fluid row) "
-                "is the FLOAT momentum-operator storage (`IbmSolver::FV`, MReal; WO-M / "
-                "docs/SCALING_ISSUES.md #1), not the metric -- rebuild with "
-                "-DPECLET_FLOW_MREAL_DOUBLE to separate the two.\n");
+    std::printf(
+        "      NOTE: a miss that is a SINGLE one-signed multiplicative factor across the "
+        "whole profile (rel err proportional to u, one constant ratio on every fluid row) "
+        "is the FLOAT momentum-operator storage (`IbmSolver::FV`, MReal; WO-M / "
+        "docs/SCALING_ISSUES.md #1), not the metric -- rebuild with "
+        "-DPECLET_FLOW_MREAL_DOUBLE to separate the two.\n");
   CHECK(relErr <= bound);
   CHECK(wallMax == 0.0);
   CHECK(mv <= 1e-12 * umax);
@@ -690,7 +693,7 @@ void gateScale() {
 // hRef is 1 and the isotropic control can be compared BITWISE to the cell-unit run), mu = 0.1.  The
 // mu = 0.25 is chosen so that BOTH assembled operators are exactly representable in the shipped
 // FLOAT operator storage (`IbmSolver::FV`, MReal; WO-M / docs/SCALING_ISSUES.md #1) and the metric
-// is therefore on trial alone -- the same move E1 of doc/units_escalation.md made for G1.  Isotropic
+// is therefore on trial alone -- the same move E1 of doc/units_escalation.md made for G1. Isotropic
 // control: hRef = 1, mu' = 0.25, b = (1/4, 1/4, 1/4), AC = 1 + 2((b+b)+b) = 5/2.  Stretched:
 // hRef = 0.5, hp = (2, 1, 2), w = (1/4, 1, 1/4), mu' = 1, b = (1/4, 1, 1/4), AC = 4.  Every one of
 // them dyadic.  At mu = 0.1 the same gate reads 1.5e-07 (isotropic control) and 2.9e-07 (stretched)
@@ -865,17 +868,19 @@ void gateAnisoSphere() {
     errS.push_back(es);
     std::printf("  N=%2d  cubic  K %.17g  err %.4f %%  iters/step %.1f  steps %3d  div %.2e\n", N,
                 cub.K, 100.0 * ec, cub.pIterStep, cub.steps, cub.div);
-    std::printf("        stretched (%d,%d,%d) spacing (%g, %g, %g) aniso %d  K %.17g  err %.4f %%"
-                "  iters/step %.1f  steps %3d  div %.2e\n",
-                N, 2 * N, N / 2, str.spacing[0], str.spacing[1], str.spacing[2], (int)str.aniso,
-                str.K, 100.0 * es, str.pIterStep, str.steps, str.div);
+    std::printf(
+        "        stretched (%d,%d,%d) spacing (%g, %g, %g) aniso %d  K %.17g  err %.4f %%"
+        "  iters/step %.1f  steps %3d  div %.2e\n",
+        N, 2 * N, N / 2, str.spacing[0], str.spacing[1], str.spacing[2], (int)str.aniso, str.K,
+        100.0 * es, str.pIterStep, str.steps, str.div);
     // (iv) the cubic control reproduces the recorded baseline value to every printed digit.
     const double dRec = std::fabs(cub.K - REC[i]) / REC[i];
     const int RECSTEPS[3] = {60, 80, 75};
     const double RECITERS[3] = {6.0, 7.0, 7.0};
-    std::printf("        cubic vs perf_baseline.json %.17g   rel %.3e (bound 1e-6)   steps %d "
-                "(recorded %d)   iters/step %.1f (recorded %.1f)\n",
-                REC[i], dRec, cub.steps, RECSTEPS[i], cub.pIterStep, RECITERS[i]);
+    std::printf(
+        "        cubic vs perf_baseline.json %.17g   rel %.3e (bound 1e-6)   steps %d "
+        "(recorded %d)   iters/step %.1f (recorded %.1f)\n",
+        REC[i], dRec, cub.steps, RECSTEPS[i], cub.pIterStep, RECITERS[i]);
     CHECK(dRec <= 1e-6);
     CHECK(cub.steps == RECSTEPS[i]);
     CHECK(cub.pIterStep == RECITERS[i]);
@@ -902,14 +907,15 @@ void gateAnisoSphere() {
     const React rc = runReactionSphere(N, N, N, /*arm=*/false, (double)N, levels, 300);
     const React rs = runReactionSphere(N, 2 * N, N / 2, /*arm=*/true, (double)N, levels, 300);
     std::printf("  hydro_force_torque_reaction, periodic Stokes identity F = F_body*V_fluid:\n");
-    std::printf("    cubic     (%d,%d,%d) spacing (%g,%g,%g)  F_x %.17g  identity %.17g  rel %.3e"
-                "  (%ld fluid u-DOFs)\n",
-                N, N, N, rc.spacing[0], rc.spacing[1], rc.spacing[2], rc.Fx, rc.Fref, rc.rel,
-                rc.nFluid);
-    std::printf("    stretched (%d,%d,%d) spacing (%g,%g,%g)  F_x %.17g  identity %.17g  rel %.3e"
-                "  (%ld fluid u-DOFs)\n",
-                N, 2 * N, N / 2, rs.spacing[0], rs.spacing[1], rs.spacing[2], rs.Fx, rs.Fref,
-                rs.rel, rs.nFluid);
+    std::printf(
+        "    cubic     (%d,%d,%d) spacing (%g,%g,%g)  F_x %.17g  identity %.17g  rel %.3e"
+        "  (%ld fluid u-DOFs)\n",
+        N, N, N, rc.spacing[0], rc.spacing[1], rc.spacing[2], rc.Fx, rc.Fref, rc.rel, rc.nFluid);
+    std::printf(
+        "    stretched (%d,%d,%d) spacing (%g,%g,%g)  F_x %.17g  identity %.17g  rel %.3e"
+        "  (%ld fluid u-DOFs)\n",
+        N, 2 * N, N / 2, rs.spacing[0], rs.spacing[1], rs.spacing[2], rs.Fx, rs.Fref, rs.rel,
+        rs.nFluid);
     // "to the same relative tolerance the cubic grid achieves" (§8.3), gated as ONE shared bound
     // rather than a ratio: both grids are at the march's own residual floor here (300 steps of the
     // regression's dt = 60 configuration, momentum residual stop 1e-12, MG-PCG 1e-10), and 1e-5 is
@@ -997,14 +1003,16 @@ void gateAnisoTgv() {
   const int N = 16, NS = 10;
   // (a) STOKES on the stretched box L x L x L_z with cells (N, 2N, 4): h = (1, 0.5, 1).
   {
-    const Tgv t = runTgv(N, 2 * N, 4, /*arm=*/true, (double)N, (double)N, 4.0, /*advect=*/false, NS);
+    const Tgv t =
+        runTgv(N, 2 * N, 4, /*arm=*/true, (double)N, (double)N, 4.0, /*advect=*/false, NS);
     std::printf("  stretched Stokes (%d,%d,4) spacing (%g, %g, %g) aniso %d\n", N, 2 * N,
                 t.spacing[0], t.spacing[1], t.spacing[2], (int)t.aniso);
     std::printf("    amplitude ratio %.17g  exact %.17g  rel %.3e (bound 1e-10)\n", t.ratio,
                 t.rExact, t.relRate);
-    std::printf("    max|div_o| %.3e (bound 1e-12)  profile %.3e (bound 1e-10)  max|P| %.3e "
-                "(the phi proxy, bound 1e-12)\n",
-                t.div, t.prof, t.pmax);
+    std::printf(
+        "    max|div_o| %.3e (bound 1e-12)  profile %.3e (bound 1e-10)  max|P| %.3e "
+        "(the phi proxy, bound 1e-12)\n",
+        t.div, t.prof, t.pmax);
     CHECK(t.aniso);
     CHECK(t.relRate <= 1e-10);
     CHECK(t.div <= 1e-12);
@@ -1020,9 +1028,10 @@ void gateAnisoTgv() {
     // bitwise control, both of which need dt = 1 (it pins tRef = 1).
     const Tgv t =
         runTgv(N, 2 * N, 4, /*arm=*/true, (double)N, (double)N, 4.0, /*advect=*/true, NS, 0.05);
-    std::printf("  stretched NS      (%d,%d,4) dt 0.05  amplitude ratio %.17g  exact %.17g  "
-                "rel %.3e (bound 5e-3)  max|div| %.3e (bound 1e-9)\n",
-                N, 2 * N, t.ratio, t.rExact, t.relRate, t.div);
+    std::printf(
+        "  stretched NS      (%d,%d,4) dt 0.05  amplitude ratio %.17g  exact %.17g  "
+        "rel %.3e (bound 5e-3)  max|div| %.3e (bound 1e-9)\n",
+        N, 2 * N, t.ratio, t.rExact, t.relRate, t.div);
     CHECK(t.relRate <= 5e-3);
     CHECK(t.div <= 1e-9);
   }
@@ -1031,11 +1040,12 @@ void gateAnisoTgv() {
   {
     const Tgv a = runTgv(N, N, 4, /*arm=*/true, (double)N, (double)N, 4.0, /*advect=*/false, NS);
     const Tgv b = runTgv(N, N, 4, /*arm=*/false, (double)N, (double)N, 4.0, /*advect=*/false, NS);
-    std::printf("  isotropic control (%d,%d,4) spacing (%g, %g, %g) aniso %d\n", N, N,
-                a.spacing[0], a.spacing[1], a.spacing[2], (int)a.aniso);
-    std::printf("    amplitude ratio %.17g  exact %.17g  rel %.3e  max|div_o| %.3e  profile %.3e "
-                " max|P| %.3e\n",
-                a.ratio, a.rExact, a.relRate, a.div, a.prof, a.pmax);
+    std::printf("  isotropic control (%d,%d,4) spacing (%g, %g, %g) aniso %d\n", N, N, a.spacing[0],
+                a.spacing[1], a.spacing[2], (int)a.aniso);
+    std::printf(
+        "    amplitude ratio %.17g  exact %.17g  rel %.3e  max|div_o| %.3e  profile %.3e "
+        " max|P| %.3e\n",
+        a.ratio, a.rExact, a.relRate, a.div, a.prof, a.pmax);
     CHECK(!a.aniso);
     CHECK(a.relRate <= 1e-10);
     CHECK(a.div <= 1e-12);
@@ -1049,7 +1059,6 @@ void gateAnisoTgv() {
   }
 }
 }  // namespace
-
 
 // =============================================================== units_vof_aniso (PHASE 3, S2)
 //
@@ -1099,8 +1108,7 @@ AnisoDrop runDropletAniso(const int n[3], const double h[3], double R, bool cons
                           int steps) {
   const double SIGMA = 1.0, MU = 0.1, RHO = 1.0;
   peclet::flow::Solver<peclet::flow::Staggered> s(n[0], n[1], n[2]);
-  s.setPhysicalDomain({n[0] * h[0], n[1] * h[1], n[2] * h[2]}, {0.0, 0.0, 0.0},
-                      {n[0], n[1], n[2]});
+  s.setPhysicalDomain({n[0] * h[0], n[1] * h[1], n[2] * h[2]}, {0.0, 0.0, 0.0}, {n[0], n[1], n[2]});
   s.setRho(RHO);
   s.setMu(MU);
   s.setDt(1.0);
@@ -1148,13 +1156,17 @@ void gateVofAniso() {
   // Three meshes carrying the SAME physical droplet: cubic, aspect 2, aspect 4. The cell counts
   // keep the physical box cubic, so only the cell SHAPE changes.
   const double base = 1.0 / 32.0;
-  struct Mesh { const char* name; int n[3]; double h[3]; };
+  struct Mesh {
+    const char* name;
+    int n[3];
+    double h[3];
+  };
   const Mesh meshes[3] = {
       {"cubic      ", {32, 32, 32}, {base, base, base}},
       {"aspect 2   ", {32, 64, 32}, {base, base / 2, base}},
       {"aspect 4   ", {32, 64, 128}, {base, base / 2, base / 4}},
   };
-  const double R = 8.0 * base;  // D/h = 16 on the coarsest axis
+  const double R = 8.0 * base;                  // D/h = 16 on the coarsest axis
   const double uScale = 1.0 * (2.0 / R) / 0.1;  // sigma*kappa/mu, the naive-CSF current
 
   for (int q = 0; q < 3; ++q) {
@@ -1166,8 +1178,8 @@ void gateVofAniso() {
                 m.n[2], m.h[0] / a.hMin, m.h[1] / a.hMin, m.h[2] / a.hMin);
     std::printf("      exactness max|u| = %.3e   (gate %.3e = 1e-14 * sigma*kappa/mu)\n", a.maxU,
                 1e-14 * uScale);
-    std::printf("      Young-Laplace dp = %.9e vs sigma*kappa = %.9e   (rel %.2e)\n", a.dp,
-                a.kappa, std::fabs(a.dp - a.kappa) / a.kappa);
+    std::printf("      Young-Laplace dp = %.9e vs sigma*kappa = %.9e   (rel %.2e)\n", a.dp, a.kappa,
+                std::fabs(a.dp - a.kappa) / a.kappa);
     std::printf("      capillary_dt     = %.9e   (h_min = %.6e)\n", a.dtCap, a.hMin);
     CHECK(a.maxU < 1e-14 * uScale);
     checkClose(a.dp, a.kappa, 1e-9 * a.kappa, "anisotropic Young-Laplace");
@@ -1225,8 +1237,7 @@ int main(int argc, char** argv) {
     else if (gate == "vofaniso")
       gateVofAniso();
     else {
-      std::fprintf(stderr,
-                   "usage: test_units [identity|scale|vof|aniso|sphere|tgv|vofaniso]\n");
+      std::fprintf(stderr, "usage: test_units [identity|scale|vof|aniso|sphere|tgv|vofaniso]\n");
       ++failures;
     }
   }

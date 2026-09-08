@@ -170,8 +170,7 @@ static std::vector<double> packingSdf(int ox, int oy, int oz, int lnx, int lny, 
       for (int x = 0; x < lnx; ++x) {
         double d = 1e30;
         for (const auto& q : sp) {
-          const double dx = x + ox + 0.5 - q[0], dy = y + oy + 0.5 - q[1],
-                       dz = z + oz + 0.5 - q[2];
+          const double dx = x + ox + 0.5 - q[0], dy = y + oy + 0.5 - q[1], dz = z + oz + 0.5 - q[2];
           d = std::fmin(d, std::sqrt(dx * dx + dy * dy + dz * dz) - q[3]);
         }
         f[(std::size_t)x + (std::size_t)y * lnx + (std::size_t)z * lnx * lny] = d;
@@ -298,9 +297,10 @@ int main(int argc, char** argv) {
         const double budget = std::fabs(gSum - gLedger);
         std::printf("  [slug-kin  np=%d] colour vs single-rank %.3e (BITWISE required)\n", size,
                     dc);
-        std::printf("  [slug-kin  np=%d] ledger vs single-rank %.3e; global budget "
-                    "|sum(C) - ledger| %.3e; in %.10g out %.10g\n",
-                    size, dl, budget, gIn, gOut);
+        std::printf(
+            "  [slug-kin  np=%d] ledger vs single-rank %.3e; global budget "
+            "|sum(C) - ledger| %.3e; in %.10g out %.10g\n",
+            size, dl, budget, gIn, gOut);
         if (!(dc == 0.0)) {
           std::printf("  [slug-kin  np=%d] FAIL — colour is not bitwise\n", size);
           fail = 1;
@@ -350,9 +350,10 @@ int main(int argc, char** argv) {
         for (int i = 0; i < steps; ++i)
           ref.step();
         const double dc = maxAbsDiff(gc, ref.getVof());
-        std::printf("  [jet-coupl np=%d] colour vs single-rank %.3e; inflow rho ghost owners "
-                    "wrong on %d rank(s); pressure %ld/400, max|div| %.3e\n",
-                    size, dc, badAll, gItmax, divmax);
+        std::printf(
+            "  [jet-coupl np=%d] colour vs single-rank %.3e; inflow rho ghost owners "
+            "wrong on %d rank(s); pressure %ld/400, max|div| %.3e\n",
+            size, dc, badAll, gItmax, divmax);
         const double tol = (size == 1) ? 0.0 : 1e-11;
         if (!(dc <= tol)) {
           std::printf("  [jet-coupl np=%d] FAIL — colour beyond the reduction floor (tol %.1e)\n",
@@ -412,10 +413,11 @@ int main(int argc, char** argv) {
           ref.step();
         const double dc = maxAbsDiff(gc, ref.getVof());
         const double budget = std::fabs((g1 - g0) - gLed);
-        std::printf("  [packing   np=%d] colour vs single-rank %.3e; budget "
-                    "|d sum(eps_eff C) - ledger| %.3e (rel %.3e); solid colour %.3e; "
-                    "pressure %ld/400\n",
-                    size, dc, budget, budget / g0, gSolid, gIt);
+        std::printf(
+            "  [packing   np=%d] colour vs single-rank %.3e; budget "
+            "|d sum(eps_eff C) - ledger| %.3e (rel %.3e); solid colour %.3e; "
+            "pressure %ld/400\n",
+            size, dc, budget, budget / g0, gSolid, gIt);
         const double tol = (size == 1) ? 0.0 : 1e-11;
         if (!(dc <= tol)) {
           std::printf("  [packing   np=%d] FAIL — colour beyond the reduction floor (tol %.1e)\n",
@@ -431,8 +433,7 @@ int main(int argc, char** argv) {
           fail = 1;
         }
         if (gIt >= 400) {
-          std::printf("  [packing   np=%d] FAIL — the pressure solve CAPPED (run invalid)\n",
-                      size);
+          std::printf("  [packing   np=%d] FAIL — the pressure solve CAPPED (run invalid)\n", size);
           fail = 1;
         }
       }

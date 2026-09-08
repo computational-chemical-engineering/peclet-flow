@@ -28,13 +28,12 @@
 #ifndef PECLET_FLOW_GHOST_PROJECTION_DEBUG_HPP
 #define PECLET_FLOW_GHOST_PROJECTION_DEBUG_HPP
 
-#include <Kokkos_Core.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <Kokkos_Core.hpp>
 #include <string>
 #include <vector>
 
@@ -51,8 +50,8 @@ inline int gpDebugLevel() {
 /// Census + optional per-row dump of the built overlay. `nn` is the inner grid, `nRows` the row
 /// count returned by buildGpOverlay, `idMap` the inner-cell -> row map (-1 = no row). `rank` only
 /// labels the output. Host-side; copies the overlay out of device memory once.
-inline void gpDebugReport(const GpOverlay& ov, int nRows, C3 nn,
-                          Kokkos::View<int*, CCMem> idMap, int rank = 0) {
+inline void gpDebugReport(const GpOverlay& ov, int nRows, C3 nn, Kokkos::View<int*, CCMem> idMap,
+                          int rank = 0) {
   const int level = gpDebugLevel();
   if (level <= 0 || nRows <= 0)
     return;
@@ -63,14 +62,14 @@ inline void gpDebugReport(const GpOverlay& ov, int nRows, C3 nn,
   const auto h_cpl = Kokkos::create_mirror_view_and_copy(
       Kokkos::HostSpace(), Kokkos::subview(ov.coupled, Kokkos::make_pair(0, nRows)));
   const auto sub6 = Kokkos::make_pair(0, 6 * nRows);
-  const auto h_st = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                                                        Kokkos::subview(ov.state, sub6));
+  const auto h_st =
+      Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.state, sub6));
   const auto h_th =
       Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.th, sub6));
-  const auto h_wm1 = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                                                         Kokkos::subview(ov.wm_n1, sub6));
-  const auto h_wm2 = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
-                                                         Kokkos::subview(ov.wm_n2, sub6));
+  const auto h_wm1 =
+      Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.wm_n1, sub6));
+  const auto h_wm2 =
+      Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.wm_n2, sub6));
   const auto h_w1 =
       Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.w_n1, sub6));
   const auto h_w2 =
@@ -159,9 +158,10 @@ inline void gpDebugReport(const GpOverlay& ov, int nRows, C3 nn,
     std::printf("  %s=%ld", stName[i], stCount[i]);
   std::printf("\n[gp]   theta: EXTENDED(1,2)=%ld  clamped-low(1e-4)=%ld  clamped-high(2)=%ld\n",
               extendedTh, clampedThLo, clampedThHi);
-  std::printf("[gp]   rho decades  [1e-5,1e-4)=%ld [1e-4,1e-3)=%ld [1e-3,1e-2)=%ld "
-              "[1e-2,1e-1)=%ld [1e-1,1)=%ld ==1:%ld   min=%.3e\n",
-              rhoDec[0] + rhoDec[1], rhoDec[2], rhoDec[3], rhoDec[4], rhoDec[5], rhoDec[6], rhoMin);
+  std::printf(
+      "[gp]   rho decades  [1e-5,1e-4)=%ld [1e-4,1e-3)=%ld [1e-3,1e-2)=%ld "
+      "[1e-2,1e-1)=%ld [1e-1,1)=%ld ==1:%ld   min=%.3e\n",
+      rhoDec[0] + rhoDec[1], rhoDec[2], rhoDec[3], rhoDec[4], rhoDec[5], rhoDec[6], rhoMin);
   std::printf("[gp]   max|w| decades");
   for (int i = 0; i < 8; ++i)
     std::printf(" 1e%d:%ld", i, wDec[i]);

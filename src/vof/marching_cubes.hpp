@@ -180,9 +180,12 @@ KOKKOS_INLINE_FUNCTION double mcEdgeT(const McVertex& a, const McVertex& b, cons
             const double sq = Kokkos::sqrt(disc);
             const double r1 = (-B + sq) / (2.0 * A), r2 = (-B - sq) / (2.0 * A);
             const bool o1 = (r1 >= 0.0 && r1 <= 1.0), o2 = (r2 >= 0.0 && r2 <= 1.0);
-            if (o1 && !o2) s2 = r1;
-            else if (o2 && !o1) s2 = r2;
-            else if (o1 && o2) s2 = (Kokkos::fabs(r1 - t) < Kokkos::fabs(r2 - t)) ? r1 : r2;
+            if (o1 && !o2)
+              s2 = r1;
+            else if (o2 && !o1)
+              s2 = r2;
+            else if (o1 && o2)
+              s2 = (Kokkos::fabs(r1 - t) < Kokkos::fabs(r2 - t)) ? r1 : r2;
           }
         }
         if (s2 >= 0.0 && s2 <= 1.0)
@@ -419,7 +422,8 @@ KOKKOS_INLINE_FUNCTION double mcCubeCornerArea(const McVertex v[8], int lc, int 
       int neg[2], pos[2], nn = 0, np = 0;
       for (int j = 0; j < 4; ++j)
         ((code & (1 << j)) ? neg[nn++] : pos[np++]) = j;
-      const int pair[4][2] = {{neg[0], pos[0]}, {neg[0], pos[1]}, {neg[1], pos[1]}, {neg[1], pos[0]}};
+      const int pair[4][2] = {
+          {neg[0], pos[0]}, {neg[0], pos[1]}, {neg[1], pos[1]}, {neg[1], pos[0]}};
       for (int q = 0; q < 4; ++q) {
         const int ca = TET[t][pair[q][0]], cb = TET[t][pair[q][1]];
         double pa[3], pb[3];

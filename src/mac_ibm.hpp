@@ -107,7 +107,10 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
         float thEx[6];
         if (hasEx) {
           const int ix = lx - g, iy = ly - g, iz = lz - g;
-          auto wrap = [](int v, int n) { v %= n; return v < 0 ? v + n : v; };
+          auto wrap = [](int v, int n) {
+            v %= n;
+            return v < 0 ? v + n : v;
+          };
           const CCConst* ta[3] = {&tx, &ty, &tz};
           for (int a = 0; a < 3; ++a) {
             const long ip = (long)ix + (long)iy * nn.x + (long)iz * (long)nn.x * nn.y;
@@ -154,8 +157,8 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
 //
 // PHASE 2 (anisotropic cells, doc/anisotropic_metric.md §6.4), RATE ONLY — this is the velocity
 // multigrid's staircase classification, so it decides a coarse operator's coefficient and never the
-// fixed point.  `sd` is a distance in hRef units and the staircase wants the distance in CELLS along
-// the normal, i.e. `theta = clamp(0.5 + d' |m|)` with `|m| = sqrt(sum_a n_a^2 w_a)` the index
+// fixed point.  `sd` is a distance in hRef units and the staircase wants the distance in CELLS
+// along the normal, i.e. `theta = clamp(0.5 + d' |m|)` with `|m| = sqrt(sum_a n_a^2 w_a)` the index
 // distance per unit physical distance along the normal (n = the physical unit normal of §6.1, from
 // the sampled gradient at the staggered point).  The isotropic `|m|` is a `sqrt` of a unit vector,
 // which is NOT exactly 1, so the `!aniso` path runs the literal legacy expression (the same
@@ -186,15 +189,18 @@ inline void ibmVolfrac(CCField theta, CCConst sdf, C3 ext, Off3 off, bool aniso 
         const double px = lx + off.x, py = ly + off.y, pz = lz + off.z;
         const double sd = ccSampleExt(sdf, ext, px, py, pz);
         // g_a = h_a' n_a from the central difference at the SAME staggered point.
-        const double gx = 0.5 * (ccSampleExt(sdf, ext, px + 1.0, py, pz) -
-                                 ccSampleExt(sdf, ext, px - 1.0, py, pz)) /
-                          hpx;
-        const double gy = 0.5 * (ccSampleExt(sdf, ext, px, py + 1.0, pz) -
-                                 ccSampleExt(sdf, ext, px, py - 1.0, pz)) /
-                          hpy;
-        const double gz = 0.5 * (ccSampleExt(sdf, ext, px, py, pz + 1.0) -
-                                 ccSampleExt(sdf, ext, px, py, pz - 1.0)) /
-                          hpz;
+        const double gx =
+            0.5 *
+            (ccSampleExt(sdf, ext, px + 1.0, py, pz) - ccSampleExt(sdf, ext, px - 1.0, py, pz)) /
+            hpx;
+        const double gy =
+            0.5 *
+            (ccSampleExt(sdf, ext, px, py + 1.0, pz) - ccSampleExt(sdf, ext, px, py - 1.0, pz)) /
+            hpy;
+        const double gz =
+            0.5 *
+            (ccSampleExt(sdf, ext, px, py, pz + 1.0) - ccSampleExt(sdf, ext, px, py, pz - 1.0)) /
+            hpz;
         const double gm = Kokkos::sqrt(gx * gx + gy * gy + gz * gz);
         double mm = 1.0;
         if (gm > 1e-12) {
@@ -259,9 +265,8 @@ inline void ibmCleanFluidMask(CCField m, CCConst sdf, C3 ext, Off3 off) {
 // the MDRange form (same-colour cells are independent, so update order within a colour cannot
 // change the result); the device keeps the MDRange form untouched.
 template <class MC>
-inline void ibmRbgsStencilColor(CCField x, CCConst b, MC AC, MC AW, MC AE, MC AS,
-                                MC AN, MC AB, MC AT, CCConst solidmask, C3 ext, C3 og,
-                                int g, int color) {
+inline void ibmRbgsStencilColor(CCField x, CCConst b, MC AC, MC AW, MC AE, MC AS, MC AN, MC AB,
+                                MC AT, CCConst solidmask, C3 ext, C3 og, int g, int color) {
   CCExec space;
   const bool hasMask = (solidmask.extent(0) != 0);
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
@@ -315,9 +320,8 @@ inline void ibmRbgsStencilColor(CCField x, CCConst b, MC AC, MC AW, MC AE, MC AS
 // registers — no extra memory pass). The momentum tolerance stop runs this as the SECOND colour of
 // a sweep: one colour's max increment is the convergence proxy. Same math as the plain sweep.
 template <class MC>
-inline double ibmRbgsStencilColorDu(CCField x, CCConst b, MC AC, MC AW, MC AE,
-                                    MC AS, MC AN, MC AB, MC AT, CCConst solidmask,
-                                    C3 ext, C3 og, int g, int color) {
+inline double ibmRbgsStencilColorDu(CCField x, CCConst b, MC AC, MC AW, MC AE, MC AS, MC AN, MC AB,
+                                    MC AT, CCConst solidmask, C3 ext, C3 og, int g, int color) {
   CCExec space;
   const bool hasMask = (solidmask.extent(0) != 0);
   double du = 0.0;
@@ -384,9 +388,9 @@ inline double ibmRbgsStencilColorDu(CCField x, CCConst b, MC AC, MC AW, MC AE,
 // bit-identical to the full sweep — a colour's cells never read same-colour cells (see
 // cutcellSmoothColorBox in mac_pressure.hpp).
 template <class MC>
-inline void ibmRbgsStencilColorBox(CCField x, CCConst b, MC AC, MC AW, MC AE,
-                                   MC AS, MC AN, MC AB, MC AT, CCConst solidmask,
-                                   C3 ext, C3 og, int color, C3 rlo, C3 rhi, C3 slo, C3 shi) {
+inline void ibmRbgsStencilColorBox(CCField x, CCConst b, MC AC, MC AW, MC AE, MC AS, MC AN, MC AB,
+                                   MC AT, CCConst solidmask, C3 ext, C3 og, int color, C3 rlo,
+                                   C3 rhi, C3 slo, C3 shi) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
   CCExec space;
@@ -420,10 +424,9 @@ inline void ibmRbgsStencilColorBox(CCField x, CCConst b, MC AC, MC AW, MC AE,
 // combine by max, which is order-independent — max(interior, shell) is bit-identical to the
 // one-pass reduction.
 template <class MC>
-inline double ibmRbgsStencilColorDuBox(CCField x, CCConst b, MC AC, MC AW, MC AE,
-                                       MC AS, MC AN, MC AB, MC AT,
-                                       CCConst solidmask, C3 ext, C3 og, int color, C3 rlo, C3 rhi,
-                                       C3 slo, C3 shi) {
+inline double ibmRbgsStencilColorDuBox(CCField x, CCConst b, MC AC, MC AW, MC AE, MC AS, MC AN,
+                                       MC AB, MC AT, CCConst solidmask, C3 ext, C3 og, int color,
+                                       C3 rlo, C3 rhi, C3 slo, C3 shi) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return 0.0;
   CCExec space;

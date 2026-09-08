@@ -50,8 +50,8 @@ static void fillSource(CCField b, C3 ext, C3 og, IVec<3> gs) {
     for (int y = 0; y < ext.y; ++y)
       for (int x = 0; x < ext.x; ++x) {
         const long i = (long)x + (long)y * ext.x + (long)z * (long)ext.x * ext.y;
-        const bool inner = x >= G && x < ext.x - G && y >= G && y < ext.y - G && z >= G &&
-                           z < ext.z - G;
+        const bool inner =
+            x >= G && x < ext.x - G && y >= G && y < ext.y - G && z >= G && z < ext.z - G;
         h(i) = inner ? source(x - G + og.x, y - G + og.y, z - G + og.z, gs) : 0.0;
       }
   Kokkos::deep_copy(b, h);
@@ -78,8 +78,7 @@ static Result setupAndSolve(CutcellMG& mg, C3 ext, C3 og, IVec<3> gs) {
 }
 
 // max |distributed block - single-rank reference| over this rank's inner cells
-static double compareBlock(const Result& d, const CutcellMG::Level& l0, const Result& ref,
-                           C3 re) {
+static double compareBlock(const Result& d, const CutcellMG::Level& l0, const Result& ref, C3 re) {
   double maxdiff = 0.0;
   for (int z = G; z < l0.ext.z - G; ++z)
     for (int y = G; y < l0.ext.y - G; ++y)
@@ -176,11 +175,12 @@ int main(int argc, char** argv) {
       if (!ok)
         ++fail;
       if (rank == 0)
-        std::printf("  starved 24^3: coarsest global no-telescope %dx%dx%d, telescope %dx%dx%d "
-                    "(%d telescope%s), single-rank %dx%dx%d; iterations %d / %d / %d  %s\n",
-                    cgC0.x, cgC0.y, cgC0.z, cg[0], cg[1], cg[2], tele0, tele0 == 1 ? "" : "s",
-                    cgRef.x, cgRef.y, cgRef.z, itersC0, itersC1, itersRef,
-                    ok ? "ok" : "FAIL (telescoped hierarchy != single-rank)");
+        std::printf(
+            "  starved 24^3: coarsest global no-telescope %dx%dx%d, telescope %dx%dx%d "
+            "(%d telescope%s), single-rank %dx%dx%d; iterations %d / %d / %d  %s\n",
+            cgC0.x, cgC0.y, cgC0.z, cg[0], cg[1], cg[2], tele0, tele0 == 1 ? "" : "s", cgRef.x,
+            cgRef.y, cgRef.z, itersC0, itersC1, itersRef,
+            ok ? "ok" : "FAIL (telescoped hierarchy != single-rank)");
     }
   }
   int totalFail = 0;

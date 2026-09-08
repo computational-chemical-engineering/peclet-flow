@@ -63,16 +63,17 @@
 ///
 /// The angle kernels below (`coxVoinovAngle`, `vofHysteresisBase`, `vofDynamicContactAngle`,
 /// `vofWallTangent`, `vofContactLineSpeed`) are **container-free** — scalars and small arrays only,
-/// the `plic.hpp` rule — so a host oracle calls them verbatim (that IS gate G1). `VofDynamicWetting`
-/// below is the driver that runs them over the colour block; it owns only its own scratch views and
-/// reads the advector through its public accessors, so `advect_wy.hpp` is not touched by this rung.
+/// the `plic.hpp` rule — so a host oracle calls them verbatim (that IS gate G1).
+/// `VofDynamicWetting` below is the driver that runs them over the colour block; it owns only its
+/// own scratch views and reads the advector through its public accessors, so `advect_wy.hpp` is not
+/// touched by this rung.
 #ifndef PECLET_FLOW_VOF_WETTING_DYNAMIC_HPP
 #define PECLET_FLOW_VOF_WETTING_DYNAMIC_HPP
 
-#include <Kokkos_Core.hpp>
-#include <Kokkos_MathematicalFunctions.hpp>
 #include <cmath>
 #include <functional>
+#include <Kokkos_Core.hpp>
+#include <Kokkos_MathematicalFunctions.hpp>
 
 #include "vof/advect_wy.hpp"
 
@@ -80,11 +81,11 @@ namespace peclet::flow::vof {
 
 /// Which rule produced a band cell's imposed angle (`vof_dynamic_field(4)`).
 enum VofDynamicState : int {
-  kVofDynNone = 0,        ///< not a contact cell (no anchor / no usable normal): theta = the base
-  kVofDynStatic = 1,      ///< Cox-Voinov applied to the static base (no hysteresis configured)
-  kVofDynPinned = 2,      ///< theta_r <= theta_app <= theta_a: the apparent angle is imposed
-  kVofDynAdvancing = 3,   ///< theta_app > theta_a: theta_a (+ Cox-Voinov)
-  kVofDynReceding = 4,    ///< theta_app < theta_r: theta_r (+ Cox-Voinov)
+  kVofDynNone = 0,       ///< not a contact cell (no anchor / no usable normal): theta = the base
+  kVofDynStatic = 1,     ///< Cox-Voinov applied to the static base (no hysteresis configured)
+  kVofDynPinned = 2,     ///< theta_r <= theta_app <= theta_a: the apparent angle is imposed
+  kVofDynAdvancing = 3,  ///< theta_app > theta_a: theta_a (+ Cox-Voinov)
+  kVofDynReceding = 4,   ///< theta_app < theta_r: theta_r (+ Cox-Voinov)
   kVofDynStateCount = 5
 };
 
@@ -218,19 +219,19 @@ KOKKOS_INLINE_FUNCTION double vofContactLineSpeed(const double u[3], const doubl
 /// values too. That is what makes the imposed angle — and hence the fill — bitwise across np.
 struct VofDynamicWetting {
   // ---- configuration (all angles in RADIANS) -------------------------------------------------
-  bool dynamic = false;      ///< the Cox-Voinov correction is configured
-  bool hysteresis = false;   ///< theta_a / theta_r are configured
+  bool dynamic = false;     ///< the Cox-Voinov correction is configured
+  bool hysteresis = false;  ///< theta_a / theta_r are configured
   double thetaA = 0.0, thetaR = 0.0;
   /// The anisotropic cell metric (Phase 3, V4.3); `{1,1,1}` == the pre-Phase-3 arithmetic.
   VofMetric metric;
-  double slip = 0.1;         ///< lambda, in CELLS (Delta = 1 cell), so logRatio = -ln(slip)
-  double muLiquid = 0.0;     ///< the LIQUID dynamic viscosity used in Ca_cl
-  double sigma = 0.0;        ///< the surface tension used in Ca_cl (the solver resolves it)
+  double slip = 0.1;      ///< lambda, in CELLS (Delta = 1 cell), so logRatio = -ln(slip)
+  double muLiquid = 0.0;  ///< the LIQUID dynamic viscosity used in Ca_cl
+  double sigma = 0.0;     ///< the surface tension used in Ca_cl (the solver resolves it)
   double thetaMin = 1.0 * 3.14159265358979323846 / 180.0;
   double thetaMax = 179.0 * 3.14159265358979323846 / 180.0;
-  bool smooth = true;        ///< the 3-point in-wall mean of U_cl (ablation)
-  double pureEps = 1e-8;     ///< a donor this close to 0/1 carries no interface
-  double tanEps = 1e-6;      ///< below this the interface is parallel to the wall
+  bool smooth = true;     ///< the 3-point in-wall mean of U_cl (ablation)
+  double pureEps = 1e-8;  ///< a donor this close to 0/1 carries no interface
+  double tanEps = 1e-6;   ///< below this the interface is parallel to the wall
 
   bool active() const { return dynamic || hysteresis; }
   /// `ln(Delta/lambda)` at `Delta = 1` cell. On an ANISOTROPIC grid `Delta` is the cell size
@@ -244,11 +245,11 @@ struct VofDynamicWetting {
   /// `WyAdvector::contactAngle()` into it whenever the static angle is (re)set, because the pass
   /// OVERWRITES `contactAngle()` and must not read back its own previous output.
   SField base() const { return base_; }
-  SField imposed() const { return imposed_; }   ///< the angle written this fill (rad)
-  SField apparent() const { return app_; }      ///< the measured apparent angle (rad)
-  SField speed() const { return uclS_; }        ///< the SMOOTHED U_cl
-  SField capillary() const { return ca_; }      ///< Ca_cl
-  SField stateField() const { return stateD_; } ///< `VofDynamicState`, as a double
+  SField imposed() const { return imposed_; }     ///< the angle written this fill (rad)
+  SField apparent() const { return app_; }        ///< the measured apparent angle (rad)
+  SField speed() const { return uclS_; }          ///< the SMOOTHED U_cl
+  SField capillary() const { return ca_; }        ///< Ca_cl
+  SField stateField() const { return stateD_; }   ///< `VofDynamicState`, as a double
   SField cellVel(int d) const { return uc_[d]; }  ///< cell-centre velocity (the solver fills it)
 
   void allocate(long len) {
@@ -333,8 +334,8 @@ struct VofDynamicWetting {
             } else {
               // The anchor column carries no interface: average over its MIXED fluid neighbours,
               // the same set `solidBandFillPassWetting`'s neighbour branch averages over.
-              const bool inner = fx >= 1 && fy >= 1 && fz >= 1 && fx + 1 < e.x && fy + 1 < e.y &&
-                                 fz + 1 < e.z;
+              const bool inner =
+                  fx >= 1 && fy >= 1 && fz >= 1 && fx + 1 < e.x && fy + 1 < e.y && fz + 1 < e.z;
               if (inner)
                 for (int kz = -1; kz <= 1; ++kz)
                   for (int ky = -1; ky <= 1; ++ky)
@@ -350,8 +351,7 @@ struct VofDynamicWetting {
                           Kokkos::fabs(gm[0]) + Kokkos::fabs(gm[1]) + Kokkos::fabs(gm[2]);
                       if (!(gl > 0.0))
                         continue;
-                      const double g2 =
-                          Kokkos::sqrt(gm[0] * gm[0] + gm[1] * gm[1] + gm[2] * gm[2]);
+                      const double g2 = Kokkos::sqrt(gm[0] * gm[0] + gm[1] * gm[1] + gm[2] * gm[2]);
                       for (int d = 0; d < 3; ++d)
                         mAcc[d] += gm[d] / g2;
                       uAcc[0] += ux(gi);

@@ -143,16 +143,14 @@ void fluxInertGate() {
     long nd = 0;
     Kokkos::parallel_reduce(
         "bc::flux_inert",
-        Kokkos::MDRangePolicy<peclet::flow::SExec, Kokkos::Rank<3>>(peclet::flow::SExec(),
-                                                                    {1, 1, 1},
-                                                                    {e.x - 1, e.y - 1, e.z - 1}),
+        Kokkos::MDRangePolicy<peclet::flow::SExec, Kokkos::Rank<3>>(
+            peclet::flow::SExec(), {1, 1, 1}, {e.x - 1, e.y - 1, e.z - 1}),
         KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
           const long p = L3(x, y, z, e);
           for (int k = -3; k <= 3; ++k) {
             const double a = 0.07 * k;  // both signs and a == 0
             const double f0 = peclet::flow::vof::wyFaceFlux(a, p, sd, d, c, mx, my, mz, al);
-            const double f1 =
-                peclet::flow::vof::wyFaceFluxBc(a, p, sd, d, c, mx, my, mz, al, zero);
+            const double f1 = peclet::flow::vof::wyFaceFluxBc(a, p, sd, d, c, mx, my, mz, al, zero);
             if (!(f0 == f1))
               ++acc;
           }
@@ -228,9 +226,10 @@ void budgetGate(int nz, int nSlug, int nAfter) {
       else if (v > 1e-12)
         ++edges;
     }
-    std::printf("C  slug at its fullest: sum(C) %.6g over %d full planes + %d partial (expected "
-                "length %.4g cells)\n",
-                peak, plateau, edges, peak / (nx * ny));
+    std::printf(
+        "C  slug at its fullest: sum(C) %.6g over %d full planes + %d partial (expected "
+        "length %.4g cells)\n",
+        peak, plateau, edges, peak / (nx * ny));
   }
   const auto d = s.vofDiagnostics();
   const auto tot = s.vofBcVolumesTotal();
@@ -331,9 +330,10 @@ void backflowGate() {
             ++layers;
         }
       }
-    std::printf("E  backflow side %d: %ld cells disagree with the rule, %ld ghost cells took the "
-                "backflow colour (all %d layers)\n",
-                side, wrong, layers, g);
+    std::printf(
+        "E  backflow side %d: %ld cells disagree with the rule, %ld ghost cells took the "
+        "backflow colour (all %d layers)\n",
+        side, wrong, layers, g);
     CHECK(wrong == 0);
     CHECK(layers == (long)(e.x / 2) * e.y * g);
   }
@@ -365,9 +365,10 @@ void outflowVarGate() {
   for (long i = 0; i < len; ++i)
     if (!(h0(i) == h1(i)))
       ++diff;
-  std::printf("F  bcCorrectOutflowVar at uniform rho == rho0: %ld bitwise disagreements with "
-              "bcCorrectOutflow\n",
-              diff);
+  std::printf(
+      "F  bcCorrectOutflowVar at uniform rho == rho0: %ld bitwise disagreements with "
+      "bcCorrectOutflow\n",
+      diff);
   CHECK(diff == 0);
 
   // and at a real jump it must differ by exactly rho0/rho_f
@@ -395,8 +396,7 @@ void outflowVarGate() {
 // itself. That face is the low face of the first GHOST cell, so `getVelocity()` (inner cells)
 // cannot see it — reading it needs `fieldView("u")`. A gate that used getVelocity() would report
 // "no difference" and be measuring the wrong quantity.
-double outflowFaceProbe(bool corr, double ratio, double& divOut, double& uInner,
-                        double& divMut) {
+double outflowFaceProbe(bool corr, double ratio, double& divOut, double& uInner, double& divMut) {
   const int nx = 32, ny = 4, nz = 16;
   const double rhoL = 100.0, rhoG = rhoL / ratio;
   peclet::flow::IbmSolver s(nx, ny, nz);
@@ -441,15 +441,17 @@ void outflowReachedGate() {
     double d0 = 0, d1 = 0, i0 = 0, i1 = 0, m0 = 0, m1 = 0;
     const double on = outflowFaceProbe(true, ratio, d0, i0, m0);
     const double off = outflowFaceProbe(false, ratio, d1, i1, m1);
-    std::printf("F2 ratio %-6g outflow face u: with the 1/rho_f factor %.17g, without %.17g "
-                "(delta %.3e)\n",
-                ratio, on, off, on - off);
-    std::printf("F2 ratio %-6g last inner u %.17g -> the face is %s the zero-gradient copy; "
-                "max|div| projected %.3e / %.3e, mutating diagnostic %.3e / %.3e\n",
-                ratio, i0, (on == i0) ? "STILL" : "NOT", d0, d1, m0, m1);
+    std::printf(
+        "F2 ratio %-6g outflow face u: with the 1/rho_f factor %.17g, without %.17g "
+        "(delta %.3e)\n",
+        ratio, on, off, on - off);
+    std::printf(
+        "F2 ratio %-6g last inner u %.17g -> the face is %s the zero-gradient copy; "
+        "max|div| projected %.3e / %.3e, mutating diagnostic %.3e / %.3e\n",
+        ratio, i0, (on == i0) ? "STILL" : "NOT", d0, d1, m0, m1);
     if (ratio == 1.0) {  // constant density: the factor is exactly 1, both paths bitwise equal
       CHECK(on == off);
-      CHECK(on != i0);   // ... but the projection's correction IS there
+      CHECK(on != i0);    // ... but the projection's correction IS there
       CHECK(d0 < 1e-15);  // and the projected field is divergence-free to machine precision
     } else {
       CHECK(on != off);  // the solver must actually reach the sibling kernel
@@ -465,7 +467,6 @@ void outflowReachedGate() {
     }
   }
 }
-
 
 // ------------------------------------------ G: the V5a cut-cell path composed with the V-BC rule
 struct Sph {

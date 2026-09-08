@@ -115,8 +115,7 @@ inline void starApplyDelta(CCField y, CCConst x, const StarOverlay& ov, int nOv,
   CCExec space;
   const bool exact = exactResidual();
   Kokkos::parallel_for(
-      "peclet::flow::star_apply", Kokkos::RangePolicy<CCExec>(space, 0, nOv),
-      KOKKOS_LAMBDA(int s) {
+      "peclet::flow::star_apply", Kokkos::RangePolicy<CCExec>(space, 0, nOv), KOKKOS_LAMBDA(int s) {
         const int inner = ov.cell(s);
         const int ix = inner % nn.x, iy = (inner / nn.x) % nn.y, iz = inner / (nn.x * nn.y);
         auto idx = [&](int cx, int cy, int cz, C3 ext, int gb) {
@@ -177,9 +176,9 @@ inline void starApplyDelta(CCField y, CCConst x, const StarOverlay& ov, int nOv,
 /// `projectCorrect` applied, and `projectCorrect` now applies `-w_a (phi_hi - phi_lo)` per axis --
 /// so the difference this kernel adds back carries the SAME per-axis weight `w_a` of the face's own
 /// axis, applied outside the existing expression.  `w = (1,1,1)` isotropic (exact).
-inline void starCorrectFaces(CCField uf, CCField vf, CCField wf, CCConst phi,
-                             const StarOverlay& ov, int nOv, C3 nn, C3 ext, int g, C3 extP,
-                             int gP, double wx = 1.0, double wy = 1.0, double wz = 1.0) {
+inline void starCorrectFaces(CCField uf, CCField vf, CCField wf, CCConst phi, const StarOverlay& ov,
+                             int nOv, C3 nn, C3 ext, int g, C3 extP, int gP, double wx = 1.0,
+                             double wy = 1.0, double wz = 1.0) {
   if (nOv <= 0)
     return;
   CCExec space;

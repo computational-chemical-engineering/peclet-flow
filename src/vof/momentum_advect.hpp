@@ -150,8 +150,7 @@ KOKKOS_INLINE_FUNCTION double vofMinmod(double a, double b) {
 /// contract `wyFaceFlux` uses, which is what keeps full/empty cells exactly stationary.
 KOKKOS_INLINE_FUNCTION double vofCellBox(const SField& c, const SField& mx, const SField& my,
                                          const SField& mz, const SField& al, long q,
-                                         const double lo[3], const double hi[3],
-                                         double eps = 0.0) {
+                                         const double lo[3], const double hi[3], double eps = 0.0) {
   const double cq = c(q);
   const double vol = (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]);
   // WO-R2 item 4: the SAME wisp tolerance the colour reconstruction used, or this reads a plane

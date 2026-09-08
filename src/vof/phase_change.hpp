@@ -466,11 +466,11 @@ KOKKOS_INLINE_FUNCTION double pcGfmThetaK(double phiC, double nd, double s, doub
 ///
 /// The clean way to see it: the plane's distance from cell `i`'s centre, measured along the grid
 /// line, is `|phi_i| / |n . e_d^phys|` where `phi_i` is the PHYSICAL plane distance of that centre
-/// and `e_d^phys` is the UNIT physical direction of the axis — which is just `e_d`. So the numerator
-/// is `|phiC - s h_d n_d|` (the physical distance of the neighbour's centre, one cell of size `h_d`
-/// away) and the denominator is `|n_d| h_d` (the physical step per cell along `d` projected on the
-/// normal). The curvature correction's lateral offset is likewise physical:
-/// `rho^2 = h_d^2 (1 - n_d^2)`.
+/// and `e_d^phys` is the UNIT physical direction of the axis — which is just `e_d`. So the
+/// numerator is `|phiC - s h_d n_d|` (the physical distance of the neighbour's centre, one cell of
+/// size `h_d` away) and the denominator is `|n_d| h_d` (the physical step per cell along `d`
+/// projected on the normal). The curvature correction's lateral offset is likewise physical: `rho^2
+/// = h_d^2 (1 - n_d^2)`.
 ///
 /// At `g.h = {1,1,1}` every factor is 1.0 and the expression is `pcGfmThetaK` term for term.
 KOKKOS_INLINE_FUNCTION double pcGfmThetaKAniso(double phiC, const double n[3], int d, double s,

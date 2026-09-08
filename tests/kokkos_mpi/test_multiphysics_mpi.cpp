@@ -51,8 +51,12 @@ static std::vector<double> packingSdf(double rfrac = 0.18) {
 static double muAt(int x, int y, int) {
   return MU * (1.2 + 0.5 * std::sin(2.0 * M_PI * x / N) * std::cos(2.0 * M_PI * y / N));
 }
-static double rhoAt(int, int, int z) { return RHO * (1.0 + 0.4 * std::sin(2.0 * M_PI * z / N)); }
-static double epsAt(int, int, int z) { return 0.6 + 0.3 * std::sin(2.0 * M_PI * z / N); }
+static double rhoAt(int, int, int z) {
+  return RHO * (1.0 + 0.4 * std::sin(2.0 * M_PI * z / N));
+}
+static double epsAt(int, int, int z) {
+  return 0.6 + 0.3 * std::sin(2.0 * M_PI * z / N);
+}
 static double scalarAt(int x, int y, int z) {
   auto wrap = [](double d) { return d - N * std::round(d / N); };
   const double dx = wrap(x - 0.5 * N), dy = wrap(y - 0.5 * N), dz = wrap(z - 0.5 * N);

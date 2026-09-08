@@ -92,7 +92,6 @@ static double stefanLambda(double St) {
   return 0.5 * (a + b);
 }
 
-
 // WO-P3c: run every scene below with a non-default interfacial-AREA geometry
 // (`set_phase_change_area`) when `PECLET_P3C_AREA` is set, so the planar rungs can be re-taken on
 // the cascade area without a second binary. Inert (and byte-identical) when the variable is unset.
@@ -225,7 +224,7 @@ int main(int argc, char** argv) {
         s.setField("T", blockOf(temp, Ox, Oy, Oz, nx, ny, nz));
         s.enablePhaseChange(1.0, 1.0, 1.0);
         applyAreaModeEnv(s);
-  applyP3fEnv(s);
+        applyP3fEnv(s);
         s.setPhaseChangeThermal("T", 0.0, D, D, 0.0);
       };
       std::vector<double> refC;
@@ -259,13 +258,13 @@ int main(int argc, char** argv) {
       CHECK(d < 1e-9);
     }
 
-    // ================================================================ P2 sucking interface (WO-P23)
-    // Everything rung P2/P3 adds, distributed and on a decomposition that cuts the interface: the
-    // plane-anchored (ghost-fluid) Dirichlet rows (whose theta reads the NEIGHBOUR cell's plane
-    // normal and centre distance, i.e. depth-1 data that has to be exchanged and domain-zeroed),
-    // the quadratic one-sided fit, the per-phase k(C) / rho c_p(C) operator, and the CONSISTENT
-    // rho c_p T transport, which rides the colour advector's own g = 3 block and therefore its own
-    // halo. Coupled steps, so the pressure solve is in the loop too.
+    // ================================================================ P2 sucking interface
+    // (WO-P23) Everything rung P2/P3 adds, distributed and on a decomposition that cuts the
+    // interface: the plane-anchored (ghost-fluid) Dirichlet rows (whose theta reads the NEIGHBOUR
+    // cell's plane normal and centre distance, i.e. depth-1 data that has to be exchanged and
+    // domain-zeroed), the quadratic one-sided fit, the per-phase k(C) / rho c_p(C) operator, and
+    // the CONSISTENT rho c_p T transport, which rides the colour advector's own g = 3 block and
+    // therefore its own halo. Coupled steps, so the pressure solve is in the loop too.
     {
       const char* xe = std::getenv("PECLET_P23_XEP");
       const double ratio = 10.0, ja = 1.0, alpha_l = 1.0, x0p = 0.10, Fo = 0.5;
@@ -311,7 +310,7 @@ int main(int argc, char** argv) {
         s.setField("T", blockOf(temp, Ox, Oy, Oz, nx, ny, nz));
         s.enablePhaseChange(rho_v, rho_l, h_lv);
         applyAreaModeEnv(s);
-  applyP3fEnv(s);
+        applyP3fEnv(s);
         s.setPhaseChangeThermal("T", 0.0, k_v, k_l, 0.0);
         // Probe switches (findings only): PECLET_P23_OFF is a subset of "pqe" to disable —
         // p = the plane-anchored Dirichlet, q = the quadratic fit, e = the consistent rho c_p T.

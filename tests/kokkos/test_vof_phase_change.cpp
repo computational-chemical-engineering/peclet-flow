@@ -47,33 +47,33 @@
 #include "flow_ibm.hpp"
 
 namespace {
-using peclet::flow::vof::plicAlpha;
-using peclet::flow::vof::plicArea;
-using peclet::flow::vof::plicVolume;
-using peclet::flow::vof::hfAreaElement;          // WO-P3c
+using peclet::flow::vof::hfAreaElement;  // WO-P3c
 using peclet::flow::vof::hfSurfaceNormal;
-using peclet::flow::vof::pvSurfaceNormal;
 using peclet::flow::vof::interfaceAreaFromNormal;
-using peclet::flow::vof::kAreaPlic;
 using peclet::flow::vof::kAreaMetric;
 using peclet::flow::vof::kAreaNormal;
-using peclet::flow::vof::McVertex;                // WO-P3d
-using peclet::flow::vof::mcCubeCornerArea;
-using peclet::flow::vof::kMcSrcColour;
-using peclet::flow::vof::kMcSrcPlic;
+using peclet::flow::vof::kAreaPlic;
 using peclet::flow::vof::kMcDepositCentroid;
 using peclet::flow::vof::kMcDepositSplit;
-using peclet::flow::vof::plicNormalizeL1;
-using peclet::flow::vof::VofMetric;               // Phase 3 (K4/K5)
-using peclet::flow::vof::vofIndexNormal;
-using peclet::flow::vof::vofPhysNormal;
-using peclet::flow::vof::plicAreaMetric;
-using peclet::flow::vof::PcGradFit;
-using peclet::flow::vof::pcGradWeight;
-using peclet::flow::vof::pcGradAdd;
-using peclet::flow::vof::pcGradSolve;
-using peclet::flow::vof::pcOffsetDistance;
+using peclet::flow::vof::kMcSrcColour;
+using peclet::flow::vof::kMcSrcPlic;
+using peclet::flow::vof::mcCubeCornerArea;
+using peclet::flow::vof::McVertex;  // WO-P3d
 using peclet::flow::vof::pcCentreDistance;
+using peclet::flow::vof::pcGradAdd;
+using peclet::flow::vof::PcGradFit;
+using peclet::flow::vof::pcGradSolve;
+using peclet::flow::vof::pcGradWeight;
+using peclet::flow::vof::pcOffsetDistance;
+using peclet::flow::vof::plicAlpha;
+using peclet::flow::vof::plicArea;
+using peclet::flow::vof::plicAreaMetric;
+using peclet::flow::vof::plicNormalizeL1;
+using peclet::flow::vof::plicVolume;
+using peclet::flow::vof::pvSurfaceNormal;
+using peclet::flow::vof::vofIndexNormal;
+using peclet::flow::vof::VofMetric;  // Phase 3 (K4/K5)
+using peclet::flow::vof::vofPhysNormal;
 
 int failures = 0;
 #define CHECK(cond)                                                                      \
@@ -174,14 +174,14 @@ void areaGate() {
 //       RETARGETED — the retarget moves area between cells, never loses it. That identity is what
 //       makes `Sigma_cells A` a property of the sheet and not of the booking rule.
 void mcSheetGate() {
-  const double ns[][3] = {{1, 0, 0},          {0, 0, -1},      {1, 1, 0},        {1, -1, 0},
-                          {1, 1, 1},          {1, 2, 3},       {0.2, 0.3, 0.5},  {3, 1, -2},
-                          {0.05, 1.0, 0.02},  {1, 0.5, 0.25}};
+  const double ns[][3] = {{1, 0, 0},         {0, 0, -1},    {1, 1, 0},       {1, -1, 0},
+                          {1, 1, 1},         {1, 2, 3},     {0.2, 0.3, 0.5}, {3, 1, -2},
+                          {0.05, 1.0, 0.02}, {1, 0.5, 0.25}};
   double worstPlic = 0.0, worstSplit = 0.0, worstPart = 0.0, worstColourAxis = 0.0;
   int rows = 0, axisRows = 0;
   for (const auto& nn : ns) {
     const double q = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
-    const double u[3] = {nn[0] / q, nn[1] / q, nn[2] / q};   // unit, gas-ward
+    const double u[3] = {nn[0] / q, nn[1] / q, nn[2] / q};  // unit, gas-ward
     const bool axis = (std::fabs(u[0]) == 1.0 || std::fabs(u[1]) == 1.0 || std::fabs(u[2]) == 1.0);
     for (double off = -0.86; off < 0.87; off += 0.07) {
       // gas-positive distance at the dual cube's corner k, for the plane through the cube centre
@@ -256,10 +256,11 @@ void mcSheetGate() {
       }
     }
   }
-  std::printf("K6 joined sheet on a PLANE (%d rows, %d axis-aligned): max rel |PLIC-source sum - "
-              "exact| %.3e, |split - centroid| %.3e, |retargeted - plain| %.3e, "
-              "|colour-source axis - exact| %.3e\n",
-              rows, axisRows, worstPlic, worstSplit, worstPart, worstColourAxis);
+  std::printf(
+      "K6 joined sheet on a PLANE (%d rows, %d axis-aligned): max rel |PLIC-source sum - "
+      "exact| %.3e, |split - centroid| %.3e, |retargeted - plain| %.3e, "
+      "|colour-source axis - exact| %.3e\n",
+      rows, axisRows, worstPlic, worstSplit, worstPart, worstColourAxis);
   CHECK(rows > 100);
   // ~1.7e-14 relative, i.e. about 75 eps: the sheet's total is a sum of a dozen triangle areas,
   // each a square root of a cross product, so this is the round-off of the SUM and not an error of
@@ -284,8 +285,8 @@ void mcSheetGate() {
 //     reflections through the cell centre);
 //   * `pvSurfaceNormal` of a paraboloid with no linear terms is the frame's own normal.
 void areaModeGate() {
-  const double ms[][3] = {{1, 0, 0},        {0, -1, 0},       {0.5, 0.5, 0},   {0.02, 0.98, 0},
-                          {0.2, 0.3, 0.5},  {-0.2, 0.3, -0.5}, {0.1, 0.1, 0.8}, {0.45, 0.45, 0.1}};
+  const double ms[][3] = {{1, 0, 0},       {0, -1, 0},        {0.5, 0.5, 0},   {0.02, 0.98, 0},
+                          {0.2, 0.3, 0.5}, {-0.2, 0.3, -0.5}, {0.1, 0.1, 0.8}, {0.45, 0.45, 0.1}};
   double worst1 = 0.0, worst2 = 0.0, worstMetric = 0.0, worstNrm = 0.0;
   int exactAxis = 0;
   for (const auto& m : ms) {
@@ -323,9 +324,10 @@ void areaModeGate() {
       }
     }
   }
-  std::printf("K5 area modes on a PLANE: max rel |metric - 1| %.3e, |normal| %.3e, "
-              "mode1 vs mode0 %.3e, mode2 vs mode0 %.3e (%d axis-aligned rows BITWISE)\n",
-              worstMetric, worstNrm, worst1, worst2, exactAxis);
+  std::printf(
+      "K5 area modes on a PLANE: max rel |metric - 1| %.3e, |normal| %.3e, "
+      "mode1 vs mode0 %.3e, mode2 vs mode0 %.3e (%d axis-aligned rows BITWISE)\n",
+      worstMetric, worstNrm, worst1, worst2, exactAxis);
   CHECK(worstMetric < 1e-15);
   CHECK(worstNrm < 1e-15);
   CHECK(worst1 < 1e-14);
@@ -406,8 +408,10 @@ void quadraticGradientGate() {
       }
   const double lin = peclet::flow::vof::pcGradSolve(f);
   const double quad = peclet::flow::vof::pcGradSolve2(f);
-  std::printf("K3 quadratic fit on a curved profile: quad %.17g vs exact %.17g (lin %.17g, "
-              "%d samples)\n", quad, g, lin, f.n);
+  std::printf(
+      "K3 quadratic fit on a curved profile: quad %.17g vs exact %.17g (lin %.17g, "
+      "%d samples)\n",
+      quad, g, lin, f.n);
   CHECK(std::fabs(quad - g) < 1e-13);
   CHECK(std::fabs(lin - g) > 0.1);  // the linear fit is genuinely biased here
 }
@@ -415,8 +419,8 @@ void quadraticGradientGate() {
 // ============================================================ K4: the plane-anchored GFM distance
 void gfmThetaGate() {
   // A grid-aligned plane: liquid at high x, so n = -x_hat and phi_c = 1/2 - C. The pure GAS cell is
-  // at i - e_x (step s = +1 from it to the interfacial cell) and sits phi_c + 1 = 3/2 - C cells from
-  // the plane; the pure LIQUID cell is at i + e_x (s = -1) and sits 1/2 + C cells from it.
+  // at i - e_x (step s = +1 from it to the interfacial cell) and sits phi_c + 1 = 3/2 - C cells
+  // from the plane; the pure LIQUID cell is at i + e_x (s = -1) and sits 1/2 + C cells from it.
   for (double C : {0.15, 0.5, 0.87}) {
     const double phic = 0.5 - C, nd = -1.0;
     const double thGas = peclet::flow::vof::pcGfmTheta(phic, nd, +1.0, 0.1, 1.9);
@@ -484,14 +488,16 @@ void gfmSecondOrderGate() {
     worstLin = std::fmax(worstLin, std::fabs(qlin + b));
     worst1 = std::fmax(worst1, std::fabs(q1 + (b + c)));
     if (i % 4 == 1)
-      std::printf("   theta %.2f  a_G %8.4f a_B %6.4f | T'' %.17g (err %.2e)  Q %.17g "
-                  "(err %.2e)  |  order-1 Q err %+.3e\n",
-                  th, r2.aGamma, r2.aBehind, lap, std::fabs(lap - 2 * c), q2,
-                  std::fabs(q2 + (b + c)), q1 + (b + c));
+      std::printf(
+          "   theta %.2f  a_G %8.4f a_B %6.4f | T'' %.17g (err %.2e)  Q %.17g "
+          "(err %.2e)  |  order-1 Q err %+.3e\n",
+          th, r2.aGamma, r2.aBehind, lap, std::fabs(lap - 2 * c), q2, std::fabs(q2 + (b + c)),
+          q1 + (b + c));
   }
-  std::printf("K5 worst over theta in [0.05, 0.95]: |T''_row - T''| %.3e, |Q - Q_exact| %.3e "
-              "(linear profile %.3e); the SHIPPED two-point row: %.3e\n",
-              worstLap, worstFlux, worstLin, worst1);
+  std::printf(
+      "K5 worst over theta in [0.05, 0.95]: |T''_row - T''| %.3e, |Q - Q_exact| %.3e "
+      "(linear profile %.3e); the SHIPPED two-point row: %.3e\n",
+      worstLap, worstFlux, worstLin, worst1);
   CHECK(worstLap < 1e-14);
   CHECK(worstFlux < 1e-14);
   CHECK(worstLin < 1e-14);
@@ -766,9 +772,10 @@ double stefanRunP23(int N, double& exact) {
   exact = 2 * lam * std::sqrt(alpha * te) * N;
   const double layer = N - sum / (ny * nz);
   const auto d = s.phaseChangeDiagnostics();
-  std::printf("P1' Stefan N=%d, PLANE-ANCHORED Dirichlet + QUADRATIC fit: layer = %.5f cells, "
-              "exact %.5f, rel %+.4f %% ; C in [%.3e, %.17g]\n",
-              N, layer, exact, 100.0 * (layer - exact) / exact, d.minC, d.maxC);
+  std::printf(
+      "P1' Stefan N=%d, PLANE-ANCHORED Dirichlet + QUADRATIC fit: layer = %.5f cells, "
+      "exact %.5f, rel %+.4f %% ; C in [%.3e, %.17g]\n",
+      N, layer, exact, 100.0 * (layer - exact) / exact, d.minC, d.maxC);
   CHECK(d.minC >= 0.0);
   CHECK(d.maxC <= 1.0);
   return layer;
@@ -817,8 +824,10 @@ void energyIdentity(double rcpRatio) {
     for (double q : t)
       worst = std::fmax(worst, std::fabs(q - T0));
   }
-  std::printf("ENERGY uniform-T identity at rho c_p ratio %g: max |T - T0| = %.3e over 20 "
-              "kinematic steps\n", rcpRatio, worst);
+  std::printf(
+      "ENERGY uniform-T identity at rho c_p ratio %g: max |T - T0| = %.3e over 20 "
+      "kinematic steps\n",
+      rcpRatio, worst);
   CHECK(worst == 0.0);  // the deviation form makes this BITWISE, not "small"
 }
 
@@ -836,7 +845,8 @@ double suckingB(double ja, double rr) {
 // Welch & Wilson (JCP 160:662, 2000): saturated vapour against a wall, SUPERHEATED liquid beyond,
 // the interface moving into the liquid and the liquid pushed out through an outlet. All of mdot
 // comes from the LIQUID side, so this is the gate on the liquid half of the fit, the per-phase
-// closures and the consistent rho c_p T transport at once. Full ladder in tests/study/vof_sucking.py.
+// closures and the consistent rho c_p T transport at once. Full ladder in
+// tests/study/vof_sucking.py.
 void p2(int N) {
   const double ratio = 10.0, ja = 1.0, alpha_l = 1.0, x0p = 0.10, xep = 0.25, Fo = 0.5, cfl = 0.2;
   const double rr = 1.0 / ratio, b = suckingB(ja, rr);
@@ -903,11 +913,12 @@ void p2(int N) {
   const double layer = N - sum / (ny * nz);
   const double exact = 2 * b * std::sqrt(alpha_l * te) * N;
   const auto d = s.phaseChangeDiagnostics();
-  std::printf("P2 sucking interface N=%d (%d steps, ratio %g, Ja %g, b = %.6f): layer = %.5f "
-              "cells, exact %.5f, rel %+.4f %% ; pressure iters max %d/4000 (capped %d), "
-              "band_div %.3e, C in [%.3e, %.17g]\n",
-              N, ns, ratio, ja, b, layer, exact, 100.0 * (layer - exact) / exact, (int)itmax, capped,
-              d.bandDiv, d.minC, d.maxC);
+  std::printf(
+      "P2 sucking interface N=%d (%d steps, ratio %g, Ja %g, b = %.6f): layer = %.5f "
+      "cells, exact %.5f, rel %+.4f %% ; pressure iters max %d/4000 (capped %d), "
+      "band_div %.3e, C in [%.3e, %.17g]\n",
+      N, ns, ratio, ja, b, layer, exact, 100.0 * (layer - exact) / exact, (int)itmax, capped,
+      d.bandDiv, d.minC, d.maxC);
   CHECK(capped == 0);  // rule 3b
   CHECK(std::fabs(layer - exact) / exact < 0.01);
 }
@@ -940,7 +951,6 @@ void inert() {
   CHECK(diff == 0.0);
 }
 
-
 // ============================================== PHASE 3 GATES K4 / K5: anisotropic cells
 //
 // `flow/doc/anisotropic_vof.md` §7 (decision V5) and §11 K4/K5.
@@ -955,10 +965,8 @@ void inert() {
 void anisoAreaAndGradient() {
   std::printf("\nK4/K5 (Phase 3): anisotropic area and one-sided gradient\n");
   const double hs[3][3] = {{1.0, 1.0, 1.0}, {1.0, 1.0, 2.0}, {2.0, 1.5, 4.0}};
-  const double ns[4][3] = {{1.0, 0.0, 0.0},
-                           {0.6, -0.8, 0.0},
-                           {0.4243, -0.7071, 0.5657},
-                           {0.5774, 0.5774, 0.5774}};
+  const double ns[4][3] = {
+      {1.0, 0.0, 0.0}, {0.6, -0.8, 0.0}, {0.4243, -0.7071, 0.5657}, {0.5774, 0.5774, 0.5774}};
 
   // ---- K4a: plicAreaMetric against the analytic area of the plane's cross-section --------------
   double worstA = 0.0;
@@ -1006,9 +1014,10 @@ void anisoAreaAndGradient() {
       }
     }
   }
-  std::printf("  K4a plicAreaMetric vs a 2000^2 footprint quadrature: max rel %.3e (gate 2e-3,\n"
-              "      the quadrature's own 1/sub floor); isotropic == plicArea bitwise %ld/%ld\n",
-              worstA, bitA, totA);
+  std::printf(
+      "  K4a plicAreaMetric vs a 2000^2 footprint quadrature: max rel %.3e (gate 2e-3,\n"
+      "      the quadrature's own 1/sub floor); isotropic == plicArea bitwise %ld/%ld\n",
+      worstA, bitA, totA);
   CHECK(worstA < 2e-3);
   CHECK(bitA == totA);
 
@@ -1032,8 +1041,8 @@ void anisoAreaAndGradient() {
           // an exact index-space signed distance to the plane through the cube centre + off
           // The index-space distance to the plane, on the L2-unit index normal (so `psi` is a
           // true distance and `kMcSrcPlic` interpolates it exactly, as the isotropic gate does).
-          const double phi = mu[0] * (pc[0] - 0.5) + mu[1] * (pc[1] - 0.5) + mu[2] * (pc[2] - 0.5) -
-                             off;
+          const double phi =
+              mu[0] * (pc[0] - 0.5) + mu[1] * (pc[1] - 0.5) + mu[2] * (pc[2] - 0.5) - off;
           v[k].psi = phi;
           v[k].d = phi;
           v[k].n[0] = mu[0];
@@ -1064,9 +1073,10 @@ void anisoAreaAndGradient() {
       }
     }
   }
-  std::printf("  K4b joined sheet on a stretched plane: max rel |sum - exact| %.3e (gate 1e-13);"
-              "\n      isotropic == the unit-metric overload bitwise %ld/%ld\n", worstMc, bitMc,
-              totMc);
+  std::printf(
+      "  K4b joined sheet on a stretched plane: max rel |sum - exact| %.3e (gate 1e-13);"
+      "\n      isotropic == the unit-metric overload bitwise %ld/%ld\n",
+      worstMc, bitMc, totMc);
   CHECK(worstMc < 1e-13);
   CHECK(bitMc == totMc);
 
@@ -1100,7 +1110,7 @@ void anisoAreaAndGradient() {
             g.toPhys(di, dp);
             const double phiP = pcOffsetDistance(phic, np, dp[0], dp[1], dp[2]);
             if (!(phiP > 0.0))
-              continue;  // gas side only
+              continue;                          // gas side only
             const double T = Tg + Gtrue * phiP;  // the manufactured PHYSICAL profile
             const double wP = pcGradWeight(dp[0], dp[1], dp[2], np);
             if (wP > 0.0)
@@ -1118,9 +1128,11 @@ void anisoAreaAndGradient() {
       }
     }
   }
-  std::printf("  K5 one-sided dT/dn on a linear profile:  PHYSICAL offsets rel err %.3e"
-              " (gate 1e-12)\n      the same fit on INDEX offsets: %.3e  <- what the metric"
-              " removes\n", worstPhys, worstIdx);
+  std::printf(
+      "  K5 one-sided dT/dn on a linear profile:  PHYSICAL offsets rel err %.3e"
+      " (gate 1e-12)\n      the same fit on INDEX offsets: %.3e  <- what the metric"
+      " removes\n",
+      worstPhys, worstIdx);
   CHECK(worstPhys < 1e-12);
   CHECK(worstIdx > 1e-2);  // the gate is only discriminating while the two genuinely differ
 }

@@ -43,9 +43,8 @@
 #ifndef PECLET_FLOW_GHOST_PROJECTION_HPP
 #define PECLET_FLOW_GHOST_PROJECTION_HPP
 
-#include <Kokkos_Core.hpp>
-
 #include <cstdint>
+#include <Kokkos_Core.hpp>
 
 #include "cut_cell_ibm.hpp"  // poly_D / poly_Nc / poly_N_nb (momentum IBM)
 #include "mac_cutcell.hpp"   // CCField/CCConst, C3, CCExec
@@ -54,18 +53,18 @@
 // to the definitions that lived here; Kokkos_Core.hpp is included above, so they compile as
 // KOKKOS_INLINE_FUNCTION). The grid-specific parts (overlay SoA, periodic wrap, delta kernels,
 // gpCenterGrad) stay here.
-#include "peclet/core/scheme/ghost_closure.hpp"
 #include "gauge_exact_gradient.hpp"  // gpCenterGrad (moved out: the production scheme needs it)
+#include "peclet/core/scheme/ghost_closure.hpp"
 
 namespace peclet::flow {
 
 using peclet::core::scheme::GP_THETA_MIN;
 using enum peclet::core::scheme::GpState;
-using peclet::core::scheme::GpFace;
-using peclet::core::scheme::GpState;
 using peclet::core::scheme::gpClassifyFace;
+using peclet::core::scheme::GpFace;
 using peclet::core::scheme::gpFillRow;
 using peclet::core::scheme::gpOrderWeights;
+using peclet::core::scheme::GpState;
 
 /// Per-overlay-row SoA. Face slot k = 2*axis + (0 = plus side, 1 = minus side), matching the
 /// momentum overlay's direction order {+x,-x,+y,-y,+z,-z}. Weights are the UNSCALED closure
@@ -77,11 +76,11 @@ using peclet::core::scheme::gpOrderWeights;
 /// the operator mismatch converges through the time stepping, measured rate ~0.4).
 template <class Space>
 struct GpOverlayT {
-  Kokkos::View<int*, Space> cell;         // packed INNER flat index x + y*nx + z*nx*ny
-  Kokkos::View<float*, Space> rescale;    // rho = min(1, min_f D_f) of the MATRIX weights
-  Kokkos::View<int8_t*, Space> coupled;   // 1 if the row has any phi coupling at all
-  Kokkos::View<int8_t*, Space> state;     // [slot*6+k]
-  Kokkos::View<float*, Space> th;         // [slot*6+k] (parity/diagnostics)
+  Kokkos::View<int*, Space> cell;                // packed INNER flat index x + y*nx + z*nx*ny
+  Kokkos::View<float*, Space> rescale;           // rho = min(1, min_f D_f) of the MATRIX weights
+  Kokkos::View<int8_t*, Space> coupled;          // 1 if the row has any phi coupling at all
+  Kokkos::View<int8_t*, Space> state;            // [slot*6+k]
+  Kokkos::View<float*, Space> th;                // [slot*6+k] (parity/diagnostics)
   Kokkos::View<float*, Space> w_bc, w_n1, w_n2;  // [slot*6+k] RHS/diagnostic closure weights
   Kokkos::View<float*, Space> wm_n1, wm_n2;      // [slot*6+k] matrix (implicit phi) weights
 };
@@ -117,8 +116,7 @@ KOKKOS_INLINE_FUNCTION int gpWrap(int v, int n) {
 inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov,
                           Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter,
                           int matrixOrder = 2, int rhsOrder = 2, CCConst tx = CCConst(),
-                          CCConst ty = CCConst(), CCConst tz = CCConst(),
-                          bool useGhost = false) {
+                          CCConst ty = CCConst(), CCConst tz = CCConst(), bool useGhost = false) {
   CCExec space;
   Kokkos::deep_copy(space, counter, 0);
   Kokkos::deep_copy(space, idMap, -1);
@@ -148,8 +146,8 @@ inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov
         // cheap pre-check: fully interior rows (all six 1st neighbors fluid on faces+centers)
         bool clean = true;
         for (int a = 0; a < 3; ++a)
-          clean = clean && F[a][1] >= 0.0f && F[a][2] >= 0.0f && Cq[a][1] >= 0.0f &&
-                  Cq[a][3] >= 0.0f;
+          clean =
+              clean && F[a][1] >= 0.0f && F[a][2] >= 0.0f && Cq[a][1] >= 0.0f && Cq[a][3] >= 0.0f;
         if (clean)
           return;
         const int inner = x + y * nn.x + z * nn.x * nn.y;
@@ -249,8 +247,8 @@ inline void gpApplyDelta(CCField y, CCConst x, const GpOverlay& ov, int nOv, C3 
           return x((long)(cx + gbX) + (long)(cy + gbX) * extX.x +
                    (long)(cz + gbX) * (long)extX.x * extX.y);
         };
-        const long r = (long)(ix + gbY) + (long)(iy + gbY) * extY.x +
-                       (long)(iz + gbY) * (long)extY.x * extY.y;
+        const long r =
+            (long)(ix + gbY) + (long)(iy + gbY) * extY.x + (long)(iz + gbY) * (long)extY.x * extY.y;
         double delta = 0.0;
         for (int k = 0; k < 6; ++k) {
           const int8_t st = ov.state(s * 6 + k);
@@ -277,8 +275,8 @@ inline void gpApplyDelta(CCField y, CCConst x, const GpOverlay& ov, int nOv, C3 
 /// (distributed) reads straight offsets into the exchanged velocity halo (reach -1..+2, gb >= 2).
 /// Rows with no phi coupling are zeroed (decoupled). Used identically for
 /// the RHS div(u*) and the post-correction diagnostic — the diagnostic IS the residual.
-inline void gpDivergDelta(CCField d, CCConst u, CCConst v, CCConst w, const GpOverlay& ov,
-                          int nOv, C3 nn, C3 extb, int gb, bool useGhost = false) {
+inline void gpDivergDelta(CCField d, CCConst u, CCConst v, CCConst w, const GpOverlay& ov, int nOv,
+                          C3 nn, C3 extb, int gb, bool useGhost = false) {
   if (nOv <= 0)
     return;
   CCExec space;
@@ -292,12 +290,12 @@ inline void gpDivergDelta(CCField d, CCConst u, CCConst v, CCConst w, const GpOv
           const int cx = a == 0 ? (ug ? ix + m : gpWrap(ix + m, nn.x)) : ix;
           const int cy = a == 1 ? (ug ? iy + m : gpWrap(iy + m, nn.y)) : iy;
           const int cz = a == 2 ? (ug ? iz + m : gpWrap(iz + m, nn.z)) : iz;
-          const long i = (long)(cx + gb) + (long)(cy + gb) * extb.x +
-                         (long)(cz + gb) * (long)extb.x * extb.y;
+          const long i =
+              (long)(cx + gb) + (long)(cy + gb) * extb.x + (long)(cz + gb) * (long)extb.x * extb.y;
           return a == 0 ? u(i) : (a == 1 ? v(i) : w(i));
         };
-        const long r = (long)(ix + gb) + (long)(iy + gb) * extb.x +
-                       (long)(iz + gb) * (long)extb.x * extb.y;
+        const long r =
+            (long)(ix + gb) + (long)(iy + gb) * extb.x + (long)(iz + gb) * (long)extb.x * extb.y;
         double dd = d(r);
         for (int k = 0; k < 6; ++k) {
           const int8_t st = ov.state(s * 6 + k);

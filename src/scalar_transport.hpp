@@ -81,8 +81,8 @@ struct ScalarField {
 // isotropic operator is bit-identical.
 inline void scalarBuildDiffusionVarK(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN,
                                      CCField AB, CCField AT, CCConst ox, CCConst oy, CCConst oz,
-                                     CCConst kc, CCConst rcp, CCConst mask, double idt, C3 e,
-                                     int g, double wx = 1.0, double wy = 1.0, double wz = 1.0) {
+                                     CCConst kc, CCConst rcp, CCConst mask, double idt, C3 e, int g,
+                                     double wx = 1.0, double wy = 1.0, double wz = 1.0) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
@@ -215,8 +215,8 @@ inline void scalarMaskGfm(CCField AC, CCField AW, CCField AE, CCField AS, CCFiel
             // V5.3/V5.4: the axis pullback of the PHYSICAL (plane distance, normal) pair, and
             // this axis's Laplacian weight. Both are the identity at equal spacings.
             const double nvec[3] = {gnx(j), gny(j), gnz(j)};
-            const double th = vof::pcGfmThetaKAniso(gphi(j), nvec, d, (double)sgn, 0.0, thMin,
-                                                    thMax, gm);
+            const double th =
+                vof::pcGfmThetaKAniso(gphi(j), nvec, d, (double)sgn, 0.0, thMin, thMax, gm);
             const double coef = kd * wa[d] * of / th;
             // replace this face's interior coupling (band = -k_f of, AC += k_f of) by the Dirichlet
             // one, without double counting: AC += coef + band, band = 0.

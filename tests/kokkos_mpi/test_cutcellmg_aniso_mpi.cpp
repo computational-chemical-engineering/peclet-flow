@@ -27,7 +27,7 @@
 #include <utility>
 #include <vector>
 
-#include "mac_cutcell.hpp"     // buildOpenness (the solver's own aperture model)
+#include "mac_cutcell.hpp"  // buildOpenness (the solver's own aperture model)
 #include "mac_cutcell_mg.hpp"
 #include "peclet/core/common/types.hpp"
 
@@ -164,7 +164,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[rank %d] level COUNT differs across ranks: %d..%d\n", rank, nlMin,
                      nlMax);
       } else {
-        std::vector<int> mine(3 * (std::size_t)nl), lo(3 * (std::size_t)nl), hi(3 * (std::size_t)nl);
+        std::vector<int> mine(3 * (std::size_t)nl), lo(3 * (std::size_t)nl),
+            hi(3 * (std::size_t)nl);
         for (int L = 0; L < nl; ++L) {
           mine[3 * (std::size_t)L] = tab[(std::size_t)L].x;
           mine[3 * (std::size_t)L + 1] = tab[(std::size_t)L].y;
@@ -225,8 +226,7 @@ int main(int argc, char** argv) {
         for (int y = G; y < ext.y - G; ++y)
           for (int x = G; x < ext.x - G; ++x) {
             const int gx = x - G + og.x, gy = y - G + og.y, gz = z - G + og.z;
-            const double a =
-                h((long)x + (long)y * ext.x + (long)z * (long)ext.x * ext.y);
+            const double a = h((long)x + (long)y * ext.x + (long)z * (long)ext.x * ext.y);
             const double rr =
                 hr((long)(gx + G) + (long)(gy + G) * re.x + (long)(gz + G) * (long)re.x * re.y);
             const double d = std::fabs(a - rr);
@@ -253,9 +253,10 @@ int main(int argc, char** argv) {
                    "[rank %d] pass 1 max|distributed - single-rank| = %.3e (rel %.3e, tol %.3e)\n",
                    rank, d1, d1 / xref, tol);
     } else if (rank == 0)
-      std::printf("  pass 1: %d iters (single-rank %d), max|dist - single| = %.3e = %.3e relative "
-                  "of max|phi| = %.4f (np=%d%s)\n",
-                  it, refIt, d1, d1 / xref, xref, size, size == 1 ? ", BIT-EXACT" : "");
+      std::printf(
+          "  pass 1: %d iters (single-rank %d), max|dist - single| = %.3e = %.3e relative "
+          "of max|phi| = %.4f (np=%d%s)\n",
+          it, refIt, d1, d1 / xref, xref, size, size == 1 ? ", BIT-EXACT" : "");
     if (std::abs(it - refIt) > 2) {
       ++fail;
       std::fprintf(stderr, "[rank %d] pass 1 iterations %d vs single-rank %d (allowed +/-2)\n",
@@ -289,9 +290,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[rank %d] pass 2 max|telescoped - single-rank| = %.3e (rel %.3e)\n",
                      rank, d2, d2 / xref);
       } else if (rank == 0)
-        std::printf("  pass 2 (telescope forced at level 1): %d iters, max|dist - single| = %.3e "
-                    "= %.3e relative\n",
-                    it2, d2, d2 / xref);
+        std::printf(
+            "  pass 2 (telescope forced at level 1): %d iters, max|dist - single| = %.3e "
+            "= %.3e relative\n",
+            it2, d2, d2 / xref);
       if (rank == 0 && mg2.level(0).ratio.x == 1 && mg2.level(0).ratio.y == 2)
         std::printf("  pass 2: the aspect rule still owns level 0 across the merge\n");
     }

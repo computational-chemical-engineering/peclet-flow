@@ -2,7 +2,8 @@
 // advancing/receding HYSTERESIS, as a PURE KERNEL test plus the one end-to-end check the model
 // itself needs.
 //
-// G1a  THE MODEL, as arithmetic. `coxVoinovAngle` reproduces theta^3 = theta_e^3 + 9 Ca ln(1/lambda)
+// G1a  THE MODEL, as arithmetic. `coxVoinovAngle` reproduces theta^3 = theta_e^3 + 9 Ca
+// ln(1/lambda)
 //      to round-off, is monotone in Ca (advancing RAISES the angle, receding LOWERS it), and the
 //      clamp catches the film-entrainment branch where the cube goes non-positive.
 // G1b  THE SIGN CONVENTION, as geometry. `vofWallTangent` + `vofContactLineSpeed` on a vertical
@@ -67,15 +68,17 @@ void modelArithmetic() {
     }
     const double up = coxVoinovAngle(thE * kDeg, +1e-2, lr, 1.0 * kDeg, 179.0 * kDeg);
     const double dn = coxVoinovAngle(thE * kDeg, -1e-2, lr, 1.0 * kDeg, 179.0 * kDeg);
-    std::printf("   theta_e %5.1f  ->  advancing (Ca=+1e-2) %7.3f deg,  receding (Ca=-1e-2) %7.3f\n",
-                thE, up / kDeg, dn / kDeg);
+    std::printf(
+        "   theta_e %5.1f  ->  advancing (Ca=+1e-2) %7.3f deg,  receding (Ca=-1e-2) %7.3f\n", thE,
+        up / kDeg, dn / kDeg);
     CHECK(up > thE * kDeg && dn < thE * kDeg);
   }
   // the film-entrainment branch: the cube goes non-positive and the clamp catches it
   const double ent = coxVoinovAngle(30.0 * kDeg, -1.0, lr, 1.0 * kDeg, 179.0 * kDeg);
-  std::printf("   worst |kernel - host| over the sweep %.3e ; the Ca = -1 (film entrainment) "
-              "branch clamps to %.3f deg\n",
-              worst, ent / kDeg);
+  std::printf(
+      "   worst |kernel - host| over the sweep %.3e ; the Ca = -1 (film entrainment) "
+      "branch clamps to %.3f deg\n",
+      worst, ent / kDeg);
   CHECK(worst <= 1e-15);
   CHECK(std::fabs(ent - 1.0 * kDeg) <= 1e-15);
 }
@@ -88,8 +91,7 @@ void signConvention() {
   for (double thApp : {45.0, 90.0, 135.0})
     for (double psi : {0.0, 37.0, 90.0, 200.0}) {
       const double mf[3] = {std::sin(thApp * kDeg) * std::cos(psi * kDeg),
-                            std::sin(thApp * kDeg) * std::sin(psi * kDeg),
-                            std::cos(thApp * kDeg)};
+                            std::sin(thApp * kDeg) * std::sin(psi * kDeg), std::cos(thApp * kDeg)};
       double that[3], cosApp;
       const bool ok = vofWallTangent(mf, nw, 1e-6, that, cosApp);
       CHECK(ok);
@@ -104,9 +106,10 @@ void signConvention() {
       CHECK(std::fabs(vofContactLineSpeed(uAdv, that) - 0.3) <= 1e-15);
       CHECK(std::fabs(vofContactLineSpeed(uRec, that) + 0.3) <= 1e-15);
     }
-  std::printf("   theta_app recovered from m_f . n_w to %.3e rad; U_cl = +u.t_hat verified over "
-              "3 angles x 4 azimuths\n",
-              worst);
+  std::printf(
+      "   theta_app recovered from m_f . n_w to %.3e rad; U_cl = +u.t_hat verified over "
+      "3 angles x 4 azimuths\n",
+      worst);
   CHECK(worst <= 1e-14);
   // an interface parallel to the wall has no contact-line direction
   const double mpar[3] = {0.0, 0.0, 1.0};
@@ -249,7 +252,8 @@ void solverGates() {
   CHECK(std::fabs(cd.maxCaCl - muL * U / sigma) <= 1e-12);
 
   // --- G4b hysteresis, end to end -------------------------------------------------------------
-  std::printf("G4b hysteresis through the solver, same scene at REST (U_cl = 0 by mu_l -> Ca = 0)\n");
+  std::printf(
+      "G4b hysteresis through the solver, same scene at REST (U_cl = 0 by mu_l -> Ca = 0)\n");
   struct HRow {
     double a, r;
     const char* what;
@@ -275,8 +279,7 @@ void solverGates() {
         "%.0f) | pinned %ld advancing %ld receding %ld\n",
         h.a, h.r, h.what, at(im, 16, 4, zb), at(ap, 16, 4, zb), at(st, 16, 4, zb), d2.pinnedCells,
         d2.advancingCells, d2.recedingCells);
-    const double want = (h.a >= 90.0 && h.r <= 90.0) ? at(ap, 16, 4, zb)
-                                                     : (90.0 > h.a ? h.a : h.r);
+    const double want = (h.a >= 90.0 && h.r <= 90.0) ? at(ap, 16, 4, zb) : (90.0 > h.a ? h.a : h.r);
     CHECK(std::fabs(at(im, 16, 4, zb) - want) <= 1e-9);
   }
 }

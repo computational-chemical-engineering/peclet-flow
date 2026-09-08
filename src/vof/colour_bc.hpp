@@ -58,7 +58,7 @@
 
 #include <Kokkos_Core.hpp>
 
-#include "mac_stencils.hpp"  // peclet::flow::SExec, SField, I3, L3
+#include "mac_stencils.hpp"   // peclet::flow::SExec, SField, I3, L3
 #include "vof/advect_wy.hpp"  // UCField
 
 namespace peclet::flow::vof {

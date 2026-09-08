@@ -217,9 +217,10 @@ int main(int argc, char** argv) {
             "  none %ld\n",
             c.name, size, refCounts[0], refCounts[1], refCounts[2], refCounts[3], refCounts[4],
             refCounts[5], refCounts[6]);
-        std::printf("      kappa: %ld/%ld cells differ (max |d| %.3e)   branch: %ld differ"
-                    "   census %s\n",
-                    nk, (long)GCELLS, dk, nb, countsOk ? "MATCHES" : "DIFFERS");
+        std::printf(
+            "      kappa: %ld/%ld cells differ (max |d| %.3e)   branch: %ld differ"
+            "   census %s\n",
+            nk, (long)GCELLS, dk, nb, countsOk ? "MATCHES" : "DIFFERS");
 
         // Bitwise, with no tolerance: the cascade contains no reduction.
         if (nk != 0 || nb != 0 || !countsOk) {
@@ -228,8 +229,9 @@ int main(int argc, char** argv) {
         }
         // The fallback must actually be exercised, or the test gates only the HF stencil.
         if (refCounts[4] + refCounts[5] == 0) {
-          std::printf("      FAIL — the PLIC-volumetric fallback never fired; this configuration "
-                      "no longer gates its stencil reach\n");
+          std::printf(
+              "      FAIL — the PLIC-volumetric fallback never fired; this configuration "
+              "no longer gates its stencil reach\n");
           fail = 1;
         }
         if (refCounts[6] != 0) {

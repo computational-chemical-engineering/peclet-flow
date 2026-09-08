@@ -430,7 +430,7 @@ class WyAdvector {
     Kokkos::parallel_for(
         "vof::wy::wetting_normals",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                     {g + n.x, g + n.y, g + n.z}),
+                                                      {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           mx(i) = 0.0;
@@ -870,9 +870,10 @@ class WyAdvector {
           const long i = L3(x, y, z, e);
           const double ci = c(i);
           const bool band = wyIsMixed(ci, weps) || wyColourJump(c(i - sx), ci, weps) ||
-                            wyColourJump(c(i + sx), ci, weps) || wyColourJump(c(i - sy), ci, weps) ||
-                            wyColourJump(c(i + sy), ci, weps) || wyColourJump(c(i - sz), ci, weps) ||
-                            wyColourJump(c(i + sz), ci, weps);
+                            wyColourJump(c(i + sx), ci, weps) ||
+                            wyColourJump(c(i - sy), ci, weps) ||
+                            wyColourJump(c(i + sy), ci, weps) ||
+                            wyColourJump(c(i - sz), ci, weps) || wyColourJump(c(i + sz), ci, weps);
           if (!band)
             return;
           acc = Kokkos::fmax(acc, Kokkos::fabs(u(i)));
@@ -1271,9 +1272,10 @@ class WyAdvector {
             return;
           const double ci = c(i);
           const bool band = wyIsMixed(ci, weps) || wyColourJump(c(i - sx), ci, weps) ||
-                            wyColourJump(c(i + sx), ci, weps) || wyColourJump(c(i - sy), ci, weps) ||
-                            wyColourJump(c(i + sy), ci, weps) || wyColourJump(c(i - sz), ci, weps) ||
-                            wyColourJump(c(i + sz), ci, weps);
+                            wyColourJump(c(i + sx), ci, weps) ||
+                            wyColourJump(c(i - sy), ci, weps) ||
+                            wyColourJump(c(i + sy), ci, weps) ||
+                            wyColourJump(c(i - sz), ci, weps) || wyColourJump(c(i + sz), ci, weps);
           if (!band)
             return;
           const double ei = ep(i);
@@ -1389,8 +1391,8 @@ class WyAdvector {
                 // anchor's MIXED fluid neighbours; with none, the pure continuation stands.
                 double acc2 = 0.0;
                 int cnt2 = 0;
-                const bool inner = fx >= 1 && fy >= 1 && fz >= 1 && fx + 1 < e.x && fy + 1 < e.y &&
-                                   fz + 1 < e.z;
+                const bool inner =
+                    fx >= 1 && fy >= 1 && fz >= 1 && fx + 1 < e.x && fy + 1 < e.y && fz + 1 < e.z;
                 if (inner)
                   for (int kz = -1; kz <= 1; ++kz)
                     for (int ky = -1; ky <= 1; ++ky)
@@ -1422,9 +1424,8 @@ class WyAdvector {
                 break;  // no usable fluid-only normal -> the neutral fallback below
               double mth[3], alphaTh, cosApp;
               const double t0 = th(i);
-              const int br =
-                  vofWettingPlane(mf, cf, nw, Kokkos::cos(t0), Kokkos::sin(t0), sdf(fi), pivot,
-                                  tEps, mth, alphaTh, cosApp, gme);
+              const int br = vofWettingPlane(mf, cf, nw, Kokkos::cos(t0), Kokkos::sin(t0), sdf(fi),
+                                             pivot, tEps, mth, alphaTh, cosApp, gme);
               const int ds[3] = {x - fx, y - fy, z - fz};
               c(i) = vofWettingFraction(mth, alphaTh, ds);
               ap(i) = Kokkos::acos(cosApp < -1.0 ? -1.0 : (cosApp > 1.0 ? 1.0 : cosApp));

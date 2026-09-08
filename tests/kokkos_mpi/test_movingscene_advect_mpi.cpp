@@ -87,13 +87,13 @@ using peclet::flow::IbmSolver;
 
 static constexpr int N = 48, STEPS = 60;
 static constexpr std::size_t GCELLS = (std::size_t)N * N * N;
-static constexpr double DIAM = 8.0;    // sphere diameter, cells
-static constexpr double U = 0.05;      // tow speed, cells per time unit
-static constexpr double RE = 20.0;     // U * DIAM / MU  -> finite-Re, advection matters
+static constexpr double DIAM = 8.0;  // sphere diameter, cells
+static constexpr double U = 0.05;    // tow speed, cells per time unit
+static constexpr double RE = 20.0;   // U * DIAM / MU  -> finite-Re, advection matters
 static constexpr double MU = U * DIAM / RE;
 static constexpr double RHO = 1.0;
-static constexpr double DT = 4.0;      // CFL = U*DT/h = 0.2; 0.2 cells of body motion per step
-static constexpr double OFF = 0.3;     // off-lattice centre (grid-aligned walls go inert)
+static constexpr double DT = 4.0;   // CFL = U*DT/h = 0.2; 0.2 cells of body motion per step
+static constexpr double OFF = 0.3;  // off-lattice centre (grid-aligned walls go inert)
 // Tow direction (unit): diagonal in x-y so the body crosses the ORB cut planes on BOTH cut axes.
 static constexpr double DIRX = 0.6, DIRY = 0.8;
 // Start so that the 60-step path (7.2 cells in x, 9.6 in y) straddles the np=2/np=4 cut at 24.
@@ -105,8 +105,12 @@ static double gShift() {
   const char* v = std::getenv("GATE7_SHIFT");
   return v ? std::atof(v) : 0.0;
 }
-static double X0() { return X0C + gShift(); }
-static double Y0() { return Y0C + gShift(); }
+static double X0() {
+  return X0C + gShift();
+}
+static double Y0() {
+  return Y0C + gShift();
+}
 
 // The flat scene encoding (peclet/core/geom/scene_builder.hpp): one sphere leaf, one instance.
 static void sphereScene(std::vector<int>& ni, std::vector<double>& nr, std::vector<int>& ii,
@@ -141,7 +145,7 @@ static void configure(IbmSolver& s) {
   s.setMu(MU);
   s.setDt(DT);
   s.setAdvection(envOn("GATE7_ADV"));  // THE point of this test (ablation knob)
-  s.setAdvectionScheme(0);    // SOU (the default)
+  s.setAdvectionScheme(0);             // SOU (the default)
   s.setVelocityIterations(60);
   s.setPressureLevels(4);
   s.setPressurePcg(true, 200, 1e-10);
@@ -251,11 +255,12 @@ int main(int argc, char** argv) {
         ++crossings;
     }
     if (rank == 0)
-      std::printf("MOVING-SCENE ADVECT MPI np=%d  grid %d^3  block %dx%dx%d  cut axes: %s%s%s  "
-                  "sphere d=%g Re=%g mu=%g dt=%g steps=%d  tow (%.2f,%.2f)->(%.2f,%.2f) "
-                  "cut-plane crossings=%d\n",
-                  size, N, lnx, lny, lnz, cut[0] ? "x" : "", cut[1] ? "y" : "", cut[2] ? "z" : "",
-                  DIAM, RE, MU, DT, STEPS, X0(), Y0(), x1, y1, crossings);
+      std::printf(
+          "MOVING-SCENE ADVECT MPI np=%d  grid %d^3  block %dx%dx%d  cut axes: %s%s%s  "
+          "sphere d=%g Re=%g mu=%g dt=%g steps=%d  tow (%.2f,%.2f)->(%.2f,%.2f) "
+          "cut-plane crossings=%d\n",
+          size, N, lnx, lny, lnz, cut[0] ? "x" : "", cut[1] ? "y" : "", cut[2] ? "z" : "", DIAM, RE,
+          MU, DT, STEPS, X0(), Y0(), x1, y1, crossings);
     const bool plainRun = gShift() == 0.0 && envOn("GATE7_MOVE") && envOn("GATE7_ADV");
     if (size > 1 && plainRun && crossings == 0) {
       if (rank == 0)
@@ -305,10 +310,10 @@ int main(int argc, char** argv) {
         dF = std::fmax(dF, std::fabs(frDist[k] - frRef[k]));
         dT = std::fmax(dT, std::fabs(frDist[3 + k] - frRef[3 + k]));
       }
-      const double fmagv = std::fmax(std::fmax(std::fabs(frRef[0]), std::fabs(frRef[1])),
-                                     std::fabs(frRef[2]));
-      const double tmagv = std::fmax(std::fmax(std::fabs(frRef[3]), std::fabs(frRef[4])),
-                                     std::fabs(frRef[5]));
+      const double fmagv =
+          std::fmax(std::fmax(std::fabs(frRef[0]), std::fabs(frRef[1])), std::fabs(frRef[2]));
+      const double tmagv =
+          std::fmax(std::fmax(std::fabs(frRef[3]), std::fabs(frRef[4])), std::fabs(frRef[5]));
 
       // FIELDS: np=1 BIT-EXACT (tol 0.0); np>1 the established 3e-7-relative class of the other
       // scene/field MPI gates (the MG-PCG inner-product Allreduce reorders with the rank count).
@@ -327,11 +332,12 @@ int main(int argc, char** argv) {
 
       // The case must be non-degenerate: a real flow, a real reaction force, a clean projection.
       const bool live = umag > 1e-4 && fmagv > 1e-6;
-      const bool ok = du <= utol && dp <= ptol && dF <= ftol && dT <= ttol && live &&
-                      divDist < 1e-6;
-      std::printf("  np=%d  du=%.3e (|u|=%.4e)  dp=%.3e (|p|=%.4e)  dF=%.3e  dT=%.3e  "
-                  "div=%.2e  tol %.1e/%.1e rel\n",
-                  size, du, umag, dp, pmag, dF, dT, divDist, rel, relF);
+      const bool ok =
+          du <= utol && dp <= ptol && dF <= ftol && dT <= ttol && live && divDist < 1e-6;
+      std::printf(
+          "  np=%d  du=%.3e (|u|=%.4e)  dp=%.3e (|p|=%.4e)  dF=%.3e  dT=%.3e  "
+          "div=%.2e  tol %.1e/%.1e rel\n",
+          size, du, umag, dp, pmag, dF, dT, divDist, rel, relF);
       std::printf("  np=%d  F_dist=(%.17g, %.17g, %.17g)\n", size, frDist[0], frDist[1], frDist[2]);
       std::printf("  np=%d  F_ref =(%.17g, %.17g, %.17g)  T_ref=(%.3e, %.3e, %.3e)\n", size,
                   frRef[0], frRef[1], frRef[2], frRef[3], frRef[4], frRef[5]);

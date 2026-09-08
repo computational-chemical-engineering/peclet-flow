@@ -17,18 +17,18 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <limits>
 #include <Kokkos_Core.hpp>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "ghost_projection.hpp"  // GpOverlay + gpApplyDelta (ghost-projection BiCGStab matvec)
-#include "star_elimination.hpp"  // StarOverlay + starApplyDelta (mode-B fluid-only PCG matvec)
 #include "mac_bc.hpp"
 #include "mac_pressure.hpp"
 #include "peclet/core/solver/graph_amg.hpp"  // decomposition-agnostic algebraic bottom solve
+#include "star_elimination.hpp"  // StarOverlay + starApplyDelta (mode-B fluid-only PCG matvec)
 
 // Multi-rank (MPI) path is opt-in: the single-GPU module never links MPI, so all distributed code
 // is gated (mirrors the CUDA PECLET_FLOW_BUILD_MPI gating). When PECLET_FLOW_MPI is off, CutcellMG
@@ -61,9 +61,9 @@ using peclet::core::halo::GridHaloTopology;
 // three families of hard `(float)` casts that survived the templating and clamped their operator to
 // float even in a double build: `IbmSolver::buildAdvStencil` / `buildAdvStencilVar` (the implicit-
 // FOU momentum stencil), `IbmSolver::addDragDiagonal` (the CFD-DEM face drag — its symptom was a
-// porous steady drag balance stuck at 4.8e-8 in BOTH builds), and five sites in `mac_velocity_mg.hpp`
-// (the velocity-MG staircase / upwind-coarse / const-aniso operators and the no-slip fold). They now
-// cast to MReal, which is byte-identical when MReal is float.
+// porous steady drag balance stuck at 4.8e-8 in BOTH builds), and five sites in
+// `mac_velocity_mg.hpp` (the velocity-MG staircase / upwind-coarse / const-aniso operators and the
+// no-slip fold). They now cast to MReal, which is byte-identical when MReal is float.
 #ifdef PECLET_FLOW_MREAL_DOUBLE
 using MReal = double;
 #else
@@ -418,12 +418,12 @@ class CutcellMG {
     MPI_Comm subComm = MPI_COMM_NULL;    // roots only (MPI_COMM_NULL on members)
     bool root = false;
     int nMembers = 1;
-    int g = 1;                 // ghost width of level L (the stage buffers use it)
+    int g = 1;                   // ghost width of level L (the stage buffers use it)
     C3 mInner{}, mOg{}, mExt{};  // merged block (root): inner dims, global origin, extent
     // per-member fine block geometry in group-rank order (root first), root only
     std::vector<C3> memO, memS;
     std::vector<int> counts, displs;  // Gatherv/Scatterv layout (cells)
-    CCField res, x, ox, oy, oz;  // stage buffers at resolution L on the merged block (root)
+    CCField res, x, ox, oy, oz;       // stage buffers at resolution L on the merged block (root)
     ~Telescope() {
       int fin = 0;
       MPI_Finalized(&fin);
@@ -465,9 +465,12 @@ class CutcellMG {
   static C3 mgChooseRatio(const double H[3], const bool canA[3], bool aniso, double theta) {
     C3 r{1, 1, 1};
     if (!aniso) {
-      if (canA[0]) r.x = 2;
-      if (canA[1]) r.y = 2;
-      if (canA[2]) r.z = 2;
+      if (canA[0])
+        r.x = 2;
+      if (canA[1])
+        r.y = 2;
+      if (canA[2])
+        r.z = 2;
       return r;
     }
     double hmin = 0.0;
@@ -480,9 +483,12 @@ class CutcellMG {
     if (!any)
       return r;
     const double lim = theta * hmin;
-    if (canA[0] && H[0] < lim) r.x = 2;
-    if (canA[1] && H[1] < lim) r.y = 2;
-    if (canA[2] && H[2] < lim) r.z = 2;
+    if (canA[0] && H[0] < lim)
+      r.x = 2;
+    if (canA[1] && H[1] < lim)
+      r.y = 2;
+    if (canA[2] && H[2] < lim)
+      r.z = 2;
     return r;
   }
 
@@ -530,9 +536,12 @@ class CutcellMG {
         const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
         const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
         ratio = mgChooseRatio(H, canA, aniso_, mgAspectTheta());
-        if (ratio.x == 2) next.x = inner.x / 2;
-        if (ratio.y == 2) next.y = inner.y / 2;
-        if (ratio.z == 2) next.z = inner.z / 2;
+        if (ratio.x == 2)
+          next.x = inner.x / 2;
+        if (ratio.y == 2)
+          next.y = inner.y / 2;
+        if (ratio.z == 2)
+          next.z = inner.z / 2;
       }
       v.ratio = ratio;
       v.x = CCField("mg_x", v.n);
@@ -571,10 +580,10 @@ class CutcellMG {
   // decomposition-agnostic GraphAMG) for a weighted co-decomposition. nullptr => equal-weight
   // everywhere (the original behaviour, byte-identical).
   // Per-axis split alignment that makes an ORB safely coarsenable by this MG: align[k] =
-  // 2^(number of times axis k can coarsen, until it turns odd) — the NATURAL MAXIMUM, independent of
-  // the actual nLevels (over-aligning is harmless: coarsened() still divides cleanly at every real
-  // level). Depends only on the global grid, so the solver's dec_, the mpi_block() sizing, and this
-  // MG all compute the SAME value without threading nLevels. The solver builds its shared
+  // 2^(number of times axis k can coarsen, until it turns odd) — the NATURAL MAXIMUM, independent
+  // of the actual nLevels (over-aligning is harmless: coarsened() still divides cleanly at every
+  // real level). Depends only on the global grid, so the solver's dec_, the mpi_block() sizing, and
+  // this MG all compute the SAME value without threading nLevels. The solver builds its shared
   // decomposition with this alignment so initMpi derives nested coarse levels via coarsened().
   static peclet::core::IVec<3> coarsenAlignment(int gnx, int gny, int gnz) {
     auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
@@ -582,9 +591,21 @@ class CutcellMG {
     peclet::core::IVec<3> a{1, 1, 1};
     for (bool any = true; any;) {
       any = false;
-      if (can(gs.x)) { a[0] *= 2; gs.x /= 2; any = true; }
-      if (can(gs.y)) { a[1] *= 2; gs.y /= 2; any = true; }
-      if (can(gs.z)) { a[2] *= 2; gs.z /= 2; any = true; }
+      if (can(gs.x)) {
+        a[0] *= 2;
+        gs.x /= 2;
+        any = true;
+      }
+      if (can(gs.y)) {
+        a[1] *= 2;
+        gs.y /= 2;
+        any = true;
+      }
+      if (can(gs.z)) {
+        a[2] *= 2;
+        gs.z /= 2;
+        any = true;
+      }
     }
     // Cap at 2^(default nLevels - 1): all the 5-level hierarchy needs. The UNCAPPED natural-max
     // over-constrains the ORB on power-of-two-rich grids (e.g. 192^3 -> align 64): the split snap
@@ -618,16 +639,25 @@ class CutcellMG {
   static int decompositionLevels() { return decompositionLevelsRef(); }
   static void setDecompositionLevels(int levels) { decompositionLevelsRef() = levels; }
 
-  // Per-axis coarsening factor a depth-`levels` hierarchy will actually apply: 2^(levels-1), bounded
-  // by that axis's factors of two (an odd axis never coarsens, so its factor stays 1).
+  // Per-axis coarsening factor a depth-`levels` hierarchy will actually apply: 2^(levels-1),
+  // bounded by that axis's factors of two (an odd axis never coarsens, so its factor stays 1).
   static peclet::core::IVec<3> refineFactor(int gnx, int gny, int gnz, int levels) {
     auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
     C3 gs{gnx, gny, gnz};
     peclet::core::IVec<3> r{1, 1, 1};
     for (int L = 1; L < levels; ++L) {
-      if (can(gs.x)) { r[0] *= 2; gs.x /= 2; }
-      if (can(gs.y)) { r[1] *= 2; gs.y /= 2; }
-      if (can(gs.z)) { r[2] *= 2; gs.z /= 2; }
+      if (can(gs.x)) {
+        r[0] *= 2;
+        gs.x /= 2;
+      }
+      if (can(gs.y)) {
+        r[1] *= 2;
+        gs.y /= 2;
+      }
+      if (can(gs.z)) {
+        r[2] *= 2;
+        gs.z /= 2;
+      }
     }
     return r;
   }
@@ -638,14 +668,14 @@ class CutcellMG {
                                                                 int gny, int gnz) {
     const int levels = decompositionLevels();
     if (levels < 2)
-      return peclet::core::decomp::BlockDecomposer<3>(numBlocks, peclet::core::IVec<3>{gnx, gny, gnz},
-                                                      coarsenAlignment(gnx, gny, gnz));
+      return peclet::core::decomp::BlockDecomposer<3>(
+          numBlocks, peclet::core::IVec<3>{gnx, gny, gnz}, coarsenAlignment(gnx, gny, gnz));
     // Depth and load balance pull against each other: each extra level doubles the quantum on every
-    // axis that still coarsens, and a partition built on the coarse grid can only place a split on a
-    // coarse-cell boundary. So rather than guess a granularity, BUILD each candidate and measure its
-    // imbalance: take the deepest one that stays within budget, else keep the legacy aligned ORB.
-    // The whole search is a pure function of (numBlocks, grid, levels) — every rank computes the
-    // same answer without communicating.
+    // axis that still coarsens, and a partition built on the coarse grid can only place a split on
+    // a coarse-cell boundary. So rather than guess a granularity, BUILD each candidate and measure
+    // its imbalance: take the deepest one that stays within budget, else keep the legacy aligned
+    // ORB. The whole search is a pure function of (numBlocks, grid, levels) — every rank computes
+    // the same answer without communicating.
     const double maxImbalance = [] {
       const char* e = std::getenv("PECLET_FLOW_DECOMP_MAX_IMBALANCE");
       const double v = e ? std::atof(e) : 1.05;
@@ -706,9 +736,9 @@ class CutcellMG {
     auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
     // Coarse levels are NESTED: level 0 is the shared solver decomposition (dec0), and each coarse
     // level is the previous level's decomposition coarsened IN PLACE (same tree/leaf order, split
-    // positions halved). This keeps restrict/prolong's coarse-local i <-> fine-local ratio*i mapping
-    // valid on every rank. (An independent ORB per level does NOT nest — coarse blocks can split a
-    // different axis than the fine level, sending restrict/prolong out of bounds.)
+    // positions halved). This keeps restrict/prolong's coarse-local i <-> fine-local ratio*i
+    // mapping valid on every rank. (An independent ORB per level does NOT nest — coarse blocks can
+    // split a different axis than the fine level, sending restrict/prolong out of bounds.)
     peclet::core::decomp::BlockDecomposer<3> curDec;
     if (dec0) {
       curDec = *dec0;  // solver's shared decomposition (built aligned; see flow_ibm initMpi)
@@ -867,9 +897,12 @@ class CutcellMG {
                               can(gs.z) && evenBlocks(2)};
         const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
         ratio = mgChooseRatio(H, canA, aniso_, mgAspectTheta());
-        if (ratio.x == 2) next.x = gs.x / 2;
-        if (ratio.y == 2) next.y = gs.y / 2;
-        if (ratio.z == 2) next.z = gs.z / 2;
+        if (ratio.x == 2)
+          next.x = gs.x / 2;
+        if (ratio.y == 2)
+          next.y = gs.y / 2;
+        if (ratio.z == 2)
+          next.z = gs.z / 2;
       }
       v.ratio = ratio;
       v.x = CCField("mg_x", v.n);
@@ -889,7 +922,8 @@ class CutcellMG {
         break;
       gs = next;
       cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
-      // Next level's decomposition = this level's coarsened in place (nested; preserves rank order).
+      // Next level's decomposition = this level's coarsened in place (nested; preserves rank
+      // order).
       curDec = curDec.coarsened(peclet::core::IVec<3>{ratio.x, ratio.y, ratio.z});
     }
     if (mgDebugLevel() && rank == 0) {
@@ -898,10 +932,10 @@ class CutcellMG {
       C3 g{gnx, gny, gnz};
       int ranks = size;
       for (int L = 0; L < (int)lv_.size(); ++L) {
-        printf("[mg]  L%d global %4dx%4dx%4d  ranks %5d  rank0 block %4dx%4dx%4d  ratio(%d,%d,%d)%s\n",
-               L, g.x, g.y, g.z, ranks, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z,
-               lv_[L].ratio.x, lv_[L].ratio.y, lv_[L].ratio.z,
-               lv_[L].tele ? "  -> TELESCOPE" : "");
+        printf(
+            "[mg]  L%d global %4dx%4dx%4d  ranks %5d  rank0 block %4dx%4dx%4d  ratio(%d,%d,%d)%s\n",
+            L, g.x, g.y, g.z, ranks, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z, lv_[L].ratio.x,
+            lv_[L].ratio.y, lv_[L].ratio.z, lv_[L].tele ? "  -> TELESCOPE" : "");
         if (lv_[L].tele) {
           int sub = 1;
           MPI_Comm_size(lv_[L].tele->subComm, &sub);
@@ -917,8 +951,8 @@ class CutcellMG {
   Level& level(int L) { return lv_[L]; }
 
   // per-face domain BC types {-x,+x,-y,+y,-z,+z}: 0=periodic, 1/2/4=Neumann (wall/inflow/
-  // free-slip), 3=Dirichlet (outflow). Default all-periodic -> applyBoundaryOpenness is a no-op (periodic/IBM
-  // path byte-identical).
+  // free-slip), 3=Dirichlet (outflow). Default all-periodic -> applyBoundaryOpenness is a no-op
+  // (periodic/IBM path byte-identical).
   void setBoundaryConditions(const int bc[6]) {
     hasBC_ = false;
     hasOutflow_ = false;
@@ -949,14 +983,15 @@ class CutcellMG {
   // per-level ghost fill is PERIODIC on all three axes (fill()/GridHalo), so on a walled face a
   // level's `x` ghost carries the value from the OPPOSITE side of the domain. Every *operator*
   // consumer is immune — the wall face openness is 0, so the smoother/residual/matvec multiply that
-  // ghost by AW/AE/... = 0 — but `prolongAdd` is NOT: trilinear interpolation reads the coarse ghost
-  // with weight 1/4 whatever the openness, so the fine cells against a wall were receiving a quarter
-  // of the coarse correction from the far wall. That teleport is a long-range coupling present in P
-  // and absent from R, i.e. exactly the asymmetry that broke MG-PCG on domain-BC grids (measured:
-  // dense-M skew ||M-M^T||F/||M||F 3.5-5.4 % wall-bounded vs 0.8 % periodic, and PCG 200/200 vs 7).
-  // With the zero-gradient ghost the boundary fine cell simply takes the coarse value
-  // (0.25*c0 + 0.75*c0 = c0), which is also what the constant-mode-preserving prolongation must do.
-  // Call after every (periodic) fill of a level's solution field that a prolongation will read.
+  // ghost by AW/AE/... = 0 — but `prolongAdd` is NOT: trilinear interpolation reads the coarse
+  // ghost with weight 1/4 whatever the openness, so the fine cells against a wall were receiving a
+  // quarter of the coarse correction from the far wall. That teleport is a long-range coupling
+  // present in P and absent from R, i.e. exactly the asymmetry that broke MG-PCG on domain-BC grids
+  // (measured: dense-M skew ||M-M^T||F/||M||F 3.5-5.4 % wall-bounded vs 0.8 % periodic, and PCG
+  // 200/200 vs 7). With the zero-gradient ghost the boundary fine cell simply takes the coarse
+  // value (0.25*c0 + 0.75*c0 = c0), which is also what the constant-mode-preserving prolongation
+  // must do. Call after every (periodic) fill of a level's solution field that a prolongation will
+  // read.
   //
   // This is the pressure-side counterpart of `VelocityMG::fillProlongBcGhosts` /
   // `fillBcGhost` (mac_velocity_mg.hpp), the port of the retired CUDA `mg_fill_bc_ghost_k`: the
@@ -1043,9 +1078,8 @@ class CutcellMG {
       const int b = (a + 1) % 3, c = (a + 2) % 3;
       const std::size_t np = (std::size_t)dims[b] * dims[c];
       if (bcPlane_[a].extent(0) != np)
-        bcPlane_[a] = CCField(Kokkos::view_alloc("peclet::flow::mg_bcplane",
-                                                 Kokkos::WithoutInitializing),
-                              np);
+        bcPlane_[a] = CCField(
+            Kokkos::view_alloc("peclet::flow::mg_bcplane", Kokkos::WithoutInitializing), np);
       mgSaveFacePlane(bcPlane_[a], CCConst(oa[a]), lv.ext, lv.g, a, 1);
     }
   }
@@ -1095,8 +1129,8 @@ class CutcellMG {
         // teleGatherPlane), so the coarse boundary coefficient is coarsened from the stage exactly
         // as the in-place path coarsens it from the finer level.
         Telescope& T = *fin.tele;
-        coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(T.ox), CCConst(T.oy), CCConst(T.oz), c.ext,
-                       T.mExt, c.g, T.g, c.inner, fin.ratio);
+        coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(T.ox), CCConst(T.oy), CCConst(T.oz), c.ext, T.mExt,
+                       c.g, T.g, c.inner, fin.ratio);
         fillOpenness(c);
         CCField so[3] = {T.ox, T.oy, T.oz};
         applyBoundaryOpennessFrom(c, so, T.mExt, T.g, fin.ratio);
@@ -1229,9 +1263,10 @@ class CutcellMG {
         // pressure solve" check passed while the projection had been handed nothing. Report the
         // cap and raise the flag; PECLET_FLOW_PRESSURE_STRICT=1 turns it into a throw.
         solveFailed_ = true;
-        printf("peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
-               "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
-               maxit, maxit);
+        printf(
+            "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
+            "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
+            maxit, maxit);
         Kokkos::deep_copy(x, 0.0);
         Kokkos::deep_copy(l0.x, x);
         if (strictPressure())
@@ -1339,9 +1374,10 @@ class CutcellMG {
       double rz = dot(l0, r, z);
       if (!std::isfinite(rz)) {
         solveFailed_ = true;  // ISSUES sweep item 6 -- see solvePCG for the mechanism
-        printf("peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z; "
-               "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
-               maxit, maxit);
+        printf(
+            "peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z; "
+            "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
+            maxit, maxit);
         Kokkos::deep_copy(x, 0.0);
         Kokkos::deep_copy(l0.x, x);
         if (strictPressure())
@@ -1528,10 +1564,12 @@ class CutcellMG {
   }
 
  public:  // (public for nvcc extended-lambda rule)
-  // Per-level V-cycle wall time (PECLET_FLOW_MG_DEBUG>=3; HOST backends only — no device fence, so
-  // on CUDA the numbers are launch times, not kernel times). Answers "how much of the solve is
-  // spent on the small coarse levels", i.e. whether coarse-level launch overhead is worth chasing.
+          // Per-level V-cycle wall time (PECLET_FLOW_MG_DEBUG>=3; HOST backends only — no device
+          // fence, so on CUDA the numbers are launch times, not kernel times). Answers "how much of
+          // the solve is spent on the small coarse levels", i.e. whether coarse-level launch
+          // overhead is worth chasing.
 #ifdef PECLET_FLOW_MPI
+
   // Telescope data movement (host-staged; the stage is a coarse level, i.e. small). Gather: every
   // member packs its INNER cells x-fastest and the group root lands them in the merged block at
   // (member origin - merged origin + g). Scatter-add: the inverse, each member adding the
@@ -1546,8 +1584,10 @@ class CutcellMG {
     for (int k = 0; k < lv.inner.z; ++k)
       for (int j = 0; j < lv.inner.y; ++j)
         for (int i = 0; i < lv.inner.x; ++i)
-          sb[(std::size_t)i + (std::size_t)j * lv.inner.x + (std::size_t)k * lv.inner.x * lv.inner.y] =
-              hs((long)(i + g) + (long)(j + g) * lv.ext.x + (long)(k + g) * (long)lv.ext.x * lv.ext.y);
+          sb[(std::size_t)i + (std::size_t)j * lv.inner.x +
+             (std::size_t)k * lv.inner.x * lv.inner.y] =
+              hs((long)(i + g) + (long)(j + g) * lv.ext.x +
+                 (long)(k + g) * (long)lv.ext.x * lv.ext.y);
     std::vector<double> rb;
     if (T.root)
       rb.resize((std::size_t)T.displs.back() + (std::size_t)T.counts.back());
@@ -1587,7 +1627,8 @@ class CutcellMG {
   void teleGatherPlane(const Level& lv, CCField src, CCField dst, int a) {
     Telescope& T = *lv.tele;
     const int g = lv.g, b = (a + 1) % 3, c = (a + 2) % 3;
-    const int ext[3] = {lv.ext.x, lv.ext.y, lv.ext.z}, inn[3] = {lv.inner.x, lv.inner.y, lv.inner.z};
+    const int ext[3] = {lv.ext.x, lv.ext.y, lv.ext.z},
+              inn[3] = {lv.inner.x, lv.inner.y, lv.inner.z};
     const long st[3] = {1, (long)lv.ext.x, (long)lv.ext.x * lv.ext.y};
     const bool mine = touchesGlobalFace(lv, 2 * a + 1);
     // pack my plane (ghost index ext[a]-g along a; inner ranges along b, c) if I touch the +face
@@ -1638,7 +1679,8 @@ class CutcellMG {
       for (int k = 0; k < ms[c]; ++k)
         for (int j = 0; j < ms[b]; ++j)
           hd(pa + (long)(mo[b] - mog[b] + j + T.g) * mst[b] +
-             (long)(mo[c] - mog[c] + k + T.g) * mst[c]) = q[(std::size_t)j + (std::size_t)k * ms[b]];
+             (long)(mo[c] - mog[c] + k + T.g) * mst[c]) =
+              q[(std::size_t)j + (std::size_t)k * ms[b]];
     }
     Kokkos::deep_copy(dst, hd);
   }
@@ -1672,8 +1714,10 @@ class CutcellMG {
     for (int k = 0; k < lv.inner.z; ++k)
       for (int j = 0; j < lv.inner.y; ++j)
         for (int i = 0; i < lv.inner.x; ++i)
-          hd((long)(i + g) + (long)(j + g) * lv.ext.x + (long)(k + g) * (long)lv.ext.x * lv.ext.y) +=
-              rb[(std::size_t)i + (std::size_t)j * lv.inner.x + (std::size_t)k * lv.inner.x * lv.inner.y];
+          hd((long)(i + g) + (long)(j + g) * lv.ext.x +
+             (long)(k + g) * (long)lv.ext.x * lv.ext.y) +=
+              rb[(std::size_t)i + (std::size_t)j * lv.inner.x +
+                 (std::size_t)k * lv.inner.x * lv.inner.y];
     Kokkos::deep_copy(dst, hd);
   }
 #endif
@@ -1741,14 +1785,14 @@ class CutcellMG {
       const C3 lo{g + 1, g + 1, g + 1};
       const C3 hi{lv.ext.x - g - 1, lv.ext.y - g - 1, lv.ext.z - g - 1};
       lv.dev->exchangeBegin(lv.x);
-      residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
-                         FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lo, hi,
+      residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                         FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lo, hi,
                          C3{0, 0, 0}, C3{0, 0, 0});
       lv.dev->exchangeEnd(lv.x);
       applyOutflowGhost(lv, lv.x, g);
-      residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW),
-                         FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext,
-                         C3{g, g, g}, C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
+      residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                         FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, C3{g, g, g},
+                         C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
     } else
 #endif
     {
@@ -1819,13 +1863,12 @@ class CutcellMG {
       for (int k = 0; k < sweeps; ++k) {
         const int c0 = reverse ? 1 : 0, c1 = 1 - c0;
         lv.dev->exchangeBegin(lv.x);
-        cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                              FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, c0, lo,
-                              hi, C3{0, 0, 0}, C3{0, 0, 0});
+        cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
+                              FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, c0, lo, hi,
+                              C3{0, 0, 0}, C3{0, 0, 0});
         lv.dev->exchangeEnd(lv.x);
-        cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                              FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, c0, rlo,
-                              rhi, lo, hi);
+        cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
+                              FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, c0, rlo, rhi, lo, hi);
         cutcellSmoothColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
                            FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, g, c1);
       }
@@ -1864,13 +1907,14 @@ class CutcellMG {
       }
   }
 
-  // --- when to agglomerate ------------------------------------------------------------------------
-  // A V-cycle only converges at a rate independent of the domain if its COARSEST level is small
-  // enough to be solved (essentially) exactly by the few smoother sweeps applied there. A geometric
-  // hierarchy cannot always get there: an axis stops coarsening once it turns odd, and under MPI it
-  // stops once any rank's block turns odd — so on a fixed per-rank block the coarsest GLOBAL grid
-  // grows with the rank count and the bottom is progressively under-solved. That is the mechanism
-  // behind weak-scaling curves that decay while communication stays negligible.
+  // --- when to agglomerate
+  // ------------------------------------------------------------------------ A V-cycle only
+  // converges at a rate independent of the domain if its COARSEST level is small enough to be
+  // solved (essentially) exactly by the few smoother sweeps applied there. A geometric hierarchy
+  // cannot always get there: an axis stops coarsening once it turns odd, and under MPI it stops
+  // once any rank's block turns odd — so on a fixed per-rank block the coarsest GLOBAL grid grows
+  // with the rank count and the bottom is progressively under-solved. That is the mechanism behind
+  // weak-scaling curves that decay while communication stays negligible.
   //
   // Measured (single GPU, channel, Lx = 2048 x 64 x 64, everything else held): a smoothed bottom
   // needs 13.5 pressure iterations/step at 4 levels and 6.0 at 6 levels, against 4.4 at full
@@ -1880,12 +1924,12 @@ class CutcellMG {
   //
   // NOT the default yet, and the reason is measured: on the cut-cell sphere-packing regression
   // (random_spheres, N=48) switching the bottom to the agglomerated solve makes the OUTER iteration
-  // count WORSE (442 -> 622 total, +41 %) at unchanged accuracy, so the assembled coarse operator is
-  // evidently not consistent with the V-cycle's on that IBM path. Until that is understood, `auto`
-  // is opt-in and the legacy smoothed bottom stays the default.
-  // `mode`: 0 = never / plain smoothed bottom (DEFAULT), -1 = auto, 1 = always.
-  // PECLET_FLOW_AGGLOM_CELLS overrides the threshold; the ideal bottom is a handful of cells per
-  // axis, and 512 is a generous cut that leaves genuinely small bottoms on the cheap path.
+  // count WORSE (442 -> 622 total, +41 %) at unchanged accuracy, so the assembled coarse operator
+  // is evidently not consistent with the V-cycle's on that IBM path. Until that is understood,
+  // `auto` is opt-in and the legacy smoothed bottom stays the default. `mode`: 0 = never / plain
+  // smoothed bottom (DEFAULT), -1 = auto, 1 = always. PECLET_FLOW_AGGLOM_CELLS overrides the
+  // threshold; the ideal bottom is a handful of cells per axis, and 512 is a generous cut that
+  // leaves genuinely small bottoms on the cheap path.
   bool agglomerateBottom() const {
     if (agglomMode_ == 0)
       return false;
@@ -2058,10 +2102,11 @@ class CutcellMG {
         nTiny30 += ad < 1e-30;
         nTiny12 += ad < 1e-12;
       }
-      printf("[agmg-build] n=%d solid=%ld fluid=%ld  fluid|diag| min=%.3e max=%.3e  "
-             "tiny<1e-30=%ld <1e-12=%ld\n",
-             amgGlobalN_, nSolid, (long)ggid.size() - nSolid, minFluidDiag, maxFluidDiag, nTiny30,
-             nTiny12);
+      printf(
+          "[agmg-build] n=%d solid=%ld fluid=%ld  fluid|diag| min=%.3e max=%.3e  "
+          "tiny<1e-30=%ld <1e-12=%ld\n",
+          amgGlobalN_, nSolid, (long)ggid.size() - nSolid, minFluidDiag, maxFluidDiag, nTiny30,
+          nTiny12);
       // Row-sum defect: the operator's null vector is the constant ONLY if every fluid row sums
       // to zero. The level coefficients are stored in float (MReal), so the diagonal is a
       // float-rounded sum of the face coefficients — a nonzero defect here bounds how far a
@@ -2295,10 +2340,11 @@ class CutcellMG {
       const double rn = std::sqrt(dot(r, r));
       ++agmgCalls_;
       if (dbg >= 2 || agmgCalls_ <= 60 || it >= 100 || agmgCalls_ % 50 == 0) {
-        printf("[agmg] call=%ld iters=%d relres=%.2e  |b|sol=%.3e |b|fl=%.3e  "
-               "mean(b) fl=%.3e all=%.3e  compat=%.2e  |x|sol=%.3e |x|fl=%.3e%s\n",
-               agmgCalls_, it, r0 > 0 ? rn / r0 : 0.0, bSolidMax, bFluidMax, bFluidMean, bAllMean,
-               bCompMax, xSolidMax, xFluidMax, it >= 100 ? "  CAP" : "");
+        printf(
+            "[agmg] call=%ld iters=%d relres=%.2e  |b|sol=%.3e |b|fl=%.3e  "
+            "mean(b) fl=%.3e all=%.3e  compat=%.2e  |x|sol=%.3e |x|fl=%.3e%s\n",
+            agmgCalls_, it, r0 > 0 ? rn / r0 : 0.0, bSolidMax, bFluidMax, bFluidMean, bAllMean,
+            bCompMax, xSolidMax, xFluidMax, it >= 100 ? "  CAP" : "");
         fflush(stdout);
       }
     }
@@ -2320,8 +2366,7 @@ class CutcellMG {
       tot += bc[r];
     }
     all.resize((std::size_t)tot / sizeof(T));
-    MPI_Allgatherv(local.data(), lbytes, MPI_BYTE, all.data(), bc.data(), bd.data(), MPI_BYTE,
-                   c);
+    MPI_Allgatherv(local.data(), lbytes, MPI_BYTE, all.data(), bc.data(), bd.data(), MPI_BYTE, c);
   }
 #endif
 
@@ -2668,9 +2713,10 @@ class CutcellMG {
     double dcnt = (double)cnt;
     allreduceSum2(sum, dcnt
 #ifdef PECLET_FLOW_MPI
-                  , lv.comm
+                  ,
+                  lv.comm
 #endif
-                  );  // ONE latency hit for the {sum, count} pair (was two)
+    );  // ONE latency hit for the {sum, count} pair (was two)
     cnt = (long)dcnt;
     if (cnt == 0)
       return;
@@ -2688,9 +2734,9 @@ class CutcellMG {
 
   // Mean-removal scope. "all" (legacy): project the nullspace out at every V-cycle level,
   // after every matvec and on every residual update — ~10 extra MPI_Allreduce latency hits per
-  // Krylov iteration whose only role is FP hygiene. "fine" (DEFAULT) keeps the removals that carry the
-  // algorithm (the rhs/residual projections + the fine-level V-cycle exit + the final iterate) and
-  // drops the interior-level ones: A maps mean-free vectors to mean-free vectors, so the Krylov
+  // Krylov iteration whose only role is FP hygiene. "fine" (DEFAULT) keeps the removals that carry
+  // the algorithm (the rhs/residual projections + the fine-level V-cycle exit + the final iterate)
+  // and drops the interior-level ones: A maps mean-free vectors to mean-free vectors, so the Krylov
   // space never sees the dropped components (they lie in the nullspace and are removed from the
   // final x). Validated by iteration-count parity; not bit-identical to "all".
   void setMeanRemovalScope(bool all) { meanRemovalAll_ = all; }
@@ -2727,7 +2773,8 @@ class CutcellMG {
       double g = 0;
       MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, op == kSum ? MPI_SUM : MPI_MAX,
                     c == nullptr_comm() ? comm_ : c);
-      allreduceTime_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      allreduceTime_ +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       ++allreduceCount_;
       return g;
     }
@@ -2743,7 +2790,8 @@ class CutcellMG {
       const auto t0 = std::chrono::steady_clock::now();
       double v[2] = {a, b}, g[2] = {0.0, 0.0};
       MPI_Allreduce(v, g, 2, MPI_DOUBLE, MPI_SUM, c == nullptr_comm() ? comm_ : c);
-      allreduceTime_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      allreduceTime_ +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       ++allreduceCount_;
       a = g[0];
       b = g[1];
@@ -2809,10 +2857,11 @@ class CutcellMG {
   // byte-identical to before it existed. PECLET_FLOW_TELESCOPE=1 turns it on without a code
   // change; the solver setter wins over the env. teleForce_ > 0 forces a telescope at that level
   // even when in-place coarsening is legal (tests: compare the two hierarchies on one problem).
-  bool telescope_ = [] {  // DEFAULT ON since 2026-09-02 (FoxBerry ladder); PECLET_FLOW_TELESCOPE=0 disables
-    const char* e = std::getenv("PECLET_FLOW_TELESCOPE");
-    return !e || std::atoi(e) != 0;
-  }();
+  bool telescope_ =
+      [] {  // DEFAULT ON since 2026-09-02 (FoxBerry ladder); PECLET_FLOW_TELESCOPE=0 disables
+        const char* e = std::getenv("PECLET_FLOW_TELESCOPE");
+        return !e || std::atoi(e) != 0;
+      }();
   int teleForce_ = -1;
   bool teleActive_ = true;  // false on a rank that idles below a telescope point
   // Economic trigger (MueLu's "min rows per proc", PETSc's reduction factor): once a level's

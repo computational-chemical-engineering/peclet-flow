@@ -79,8 +79,8 @@ inline void diffSmoothColorT(SField c, SConst b, I3 e, I3 og, int g, double bx, 
           return;
         const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
         const double b0 = bx, b1 = by, b2 = bz;  // first-capture outside the constexpr-if (nvcc)
-        const double nE = c(i + sx), nW = c(i - sx), nN = c(i + sy), nS = c(i - sy),
-                     nT = c(i + sz), nB = c(i - sz);
+        const double nE = c(i + sx), nW = c(i - sx), nN = c(i + sy), nS = c(i - sy), nT = c(i + sz),
+                     nB = c(i - sz);
         double s;
         if constexpr (Aniso)
           s = b0 * (nE + nW) + b1 * (nN + nS) + b2 * (nT + nB);
@@ -119,8 +119,8 @@ inline void diffResidualT(SField r, SConst c, SConst b, I3 e, int g, double bx, 
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
         const double b0 = bx, b1 = by, b2 = bz;  // first-capture outside the constexpr-if (nvcc)
-        const double nE = c(i + sx), nW = c(i - sx), nN = c(i + sy), nS = c(i - sy),
-                     nT = c(i + sz), nB = c(i - sz);
+        const double nE = c(i + sx), nW = c(i - sx), nN = c(i + sy), nS = c(i - sy), nT = c(i + sz),
+                     nB = c(i - sz);
         double sum;
         if constexpr (Aniso)
           sum = b0 * (nE + nW) + b1 * (nN + nS) + b2 * (nT + nB);
@@ -192,8 +192,8 @@ inline double diffSmoothColorDuT(SField c, SConst b, I3 e, I3 og, int g, double 
           return;
         const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
         const double b0 = bx, b1 = by, b2 = bz;  // first-capture outside the constexpr-if (nvcc)
-        const double nE = c(i + sx), nW = c(i - sx), nN = c(i + sy), nS = c(i - sy),
-                     nT = c(i + sz), nB = c(i - sz);
+        const double nE = c(i + sx), nW = c(i - sx), nN = c(i + sy), nS = c(i - sy), nT = c(i + sz),
+                     nB = c(i - sz);
         double s;
         if constexpr (Aniso)
           s = b0 * (nE + nW) + b1 * (nN + nS) + b2 * (nT + nB);

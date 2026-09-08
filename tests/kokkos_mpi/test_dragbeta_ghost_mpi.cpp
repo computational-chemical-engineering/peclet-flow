@@ -68,11 +68,11 @@
 //                is the PERIODIC WRAP plane in x, which is the single-rank half of the same defect
 //                and an equally hard gate; at np = 4 x is genuinely cut. Runs at every np.
 //   * `cons-z` — the eps-CONSERVATIVE porous momentum (`setPorousConservative(true)`): the diagonal
-//                is eps_f*rho/dt + beta_f and the RHS goes through `buildRhsVar`, so this covers the
-//                variable-density sibling of the stencil build. Requires z to be CUT.
+//                is eps_f*rho/dt + beta_f and the RHS goes through `buildRhsVar`, so this covers
+//                the variable-density sibling of the stencil build. Requires z to be CUT.
 //
-// np = 1 is additionally compared bitwise against a full-grid single-rank reference; np > 1 lands on
-// the usual MPI reduction-order floor (see `test_vardensity_mpi.cpp`) — though on these
+// np = 1 is additionally compared bitwise against a full-grid single-rank reference; np > 1 lands
+// on the usual MPI reduction-order floor (see `test_vardensity_mpi.cpp`) — though on these
 // configurations the projection is a no-op, so in practice it comes out bitwise there too.
 #include <mpi.h>
 
@@ -94,8 +94,8 @@ static constexpr std::size_t GCELLS = (std::size_t)NX * NY * NZ;
 
 struct Config {
   const char* name;
-  int comp;     // forced velocity component (0=x, 1=y, 2=z) == the axis whose face beta is read
-  bool cons;    // eps-conservative porous momentum (buildRhsVar path) vs the plain porous momentum
+  int comp;      // forced velocity component (0=x, 1=y, 2=z) == the axis whose face beta is read
+  bool cons;     // eps-conservative porous momentum (buildRhsVar path) vs the plain porous momentum
   bool needCut;  // the forced axis MUST be cut at np > 1 (loud coverage loss if it stops being)
 };
 
@@ -117,8 +117,8 @@ static void configure(IbmSolver& s, const Config& c, int lnx, int lny, int lnz) 
   s.setField("drag_beta", std::vector<double>((std::size_t)lnx * lny * lnz, BETA));
 }
 
-// The analytic diagonal recursion u^{n+1} = (idt*u^n + F)/(idt + beta), evaluated in double with the
-// same float diagonal the solver builds.
+// The analytic diagonal recursion u^{n+1} = (idt*u^n + F)/(idt + beta), evaluated in double with
+// the same float diagonal the solver builds.
 static double analyticVelocity() {
   const double ac = (double)(float)(RHO0 / DT + BETA);
   double u = 0.0;
@@ -203,9 +203,11 @@ static int worstPlane(const std::vector<double>& u, int axis) {
         idx[axis] = p;
         idx[(axis + 1) % 3] = a;
         idx[(axis + 2) % 3] = b;
-        dev = std::fmax(dev, std::fabs(u[(std::size_t)idx[0] + (std::size_t)idx[1] * NX +
-                                         (std::size_t)idx[2] * NX * NY] -
-                                       mean));
+        dev = std::fmax(
+            dev,
+            std::fabs(
+                u[(std::size_t)idx[0] + (std::size_t)idx[1] * NX + (std::size_t)idx[2] * NX * NY] -
+                mean));
       }
     if (dev > worstDev) {
       worstDev = dev;
@@ -239,17 +241,17 @@ int main(int argc, char** argv) {
                   size, NX, NY, NZ, lnx, lny, lnz, cut[0] ? "x" : "", cut[1] ? "y" : "",
                   cut[2] ? "z" : "");
 
-    const Config configs[] = {{"per-z", 2, false, true},
-                              {"per-x", 0, false, false},
-                              {"cons-z", 2, true, true}};
+    const Config configs[] = {
+        {"per-z", 2, false, true}, {"per-x", 0, false, false}, {"cons-z", 2, true, true}};
     const double want = analyticVelocity();
 
     for (const Config& c : configs) {
       if (c.needCut && size > 1 && !cut[c.comp]) {
         if (rank == 0)
-          std::printf("  [%-6s np=%d] FAIL — the decomposition does NOT cut the forced axis %d; "
-                      "this test exists to gate the drag_beta ghost ACROSS a rank boundary (WO-I)\n",
-                      c.name, size, c.comp);
+          std::printf(
+              "  [%-6s np=%d] FAIL — the decomposition does NOT cut the forced axis %d; "
+              "this test exists to gate the drag_beta ghost ACROSS a rank boundary (WO-I)\n",
+              c.name, size, c.comp);
         fail = 1;
         continue;
       }
@@ -274,8 +276,7 @@ int main(int argc, char** argv) {
       // THE primary gate: the assembled momentum diagonal itself, read where the face drag is
       // formed. (The velocity gate below sees the same defect only through the projection, which on
       // a periodic box turns one bad plane into a uniform mean shift.)
-      const std::vector<double> gd =
-          gatherGlobal(diagLocal, ox, oy, oz, lnx, lny, lnz, rank, size);
+      const std::vector<double> gd = gatherGlobal(diagLocal, ox, oy, oz, lnx, lny, lnz, rank, size);
 
       if (rank == 0) {
         IbmSolver ref(NX, NY, NZ);
@@ -320,11 +321,12 @@ int main(int argc, char** argv) {
         const bool diagOk = (dlo == wantDiag) && (dhi == wantDiag);
         ok = ok && diagOk && spread <= 1e-13 * want && verr <= 1e-13 && cross <= 1e-13 * want &&
              pabs <= 1e-11;
-        std::printf("  [%-6s np=%d] du=%.3e dp=%.3e (tol %.1e/%.1e) | diag [%.17g, %.17g] "
-                    "(want %.17g, worst plane %d) | u spread=%.3e (want 0) value=%.17g "
-                    "(want %.17g) cross=%.2e max|P|=%.2e  %s\n",
-                    c.name, size, du, dp, utol, ptol, dlo, dhi, wantDiag, worstPlane(gd, c.comp),
-                    spread, 0.5 * (hi + lo), want, cross, pabs, ok ? "OK" : "FAIL");
+        std::printf(
+            "  [%-6s np=%d] du=%.3e dp=%.3e (tol %.1e/%.1e) | diag [%.17g, %.17g] "
+            "(want %.17g, worst plane %d) | u spread=%.3e (want 0) value=%.17g "
+            "(want %.17g) cross=%.2e max|P|=%.2e  %s\n",
+            c.name, size, du, dp, utol, ptol, dlo, dhi, wantDiag, worstPlane(gd, c.comp), spread,
+            0.5 * (hi + lo), want, cross, pabs, ok ? "OK" : "FAIL");
         if (!ok)
           fail = 1;
       }

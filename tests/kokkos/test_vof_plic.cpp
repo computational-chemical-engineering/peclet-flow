@@ -711,8 +711,10 @@ void gateAnisoMetric() {
           rt = std::fmax(rt, std::fabs(n3[d] - n2[d]));
       }
     }
-    std::printf("  vofPhysNormal at the unit metric == m/|m| exactly: %ld/%ld;"
-                "  H^-1(H n) round trip %.3e\n", exact, tot, rt);
+    std::printf(
+        "  vofPhysNormal at the unit metric == m/|m| exactly: %ld/%ld;"
+        "  H^-1(H n) round trip %.3e\n",
+        exact, tot, rt);
     CHECK(exact == tot);
     CHECK(rt < 1e-15);
   }

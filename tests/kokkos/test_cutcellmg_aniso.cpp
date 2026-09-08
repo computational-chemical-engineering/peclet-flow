@@ -49,7 +49,7 @@
 #include <Kokkos_Core.hpp>
 #include <vector>
 
-#include "mac_cutcell.hpp"     // buildOpenness (the solver's own aperture model)
+#include "mac_cutcell.hpp"  // buildOpenness (the solver's own aperture model)
 #include "mac_cutcell_mg.hpp"
 
 using namespace peclet::flow;
@@ -58,10 +58,10 @@ namespace {
 int failures = 0;
 
 struct Run {
-  double l2 = 0.0;     ///< L2 norm of (phi_h - phi_exact) over the inner cells
-  double l2exact = 0.0;///< the same, from the exact modal solution of the discrete system
-  double rrel = 0.0;   ///< achieved max|r| / max|b|
-  int iters = 0;       ///< Krylov iterations
+  double l2 = 0.0;       ///< L2 norm of (phi_h - phi_exact) over the inner cells
+  double l2exact = 0.0;  ///< the same, from the exact modal solution of the discrete system
+  double rrel = 0.0;     ///< achieved max|r| / max|b|
+  int iters = 0;         ///< Krylov iterations
   int levels = 0;
 };
 
@@ -203,13 +203,13 @@ void ladder(bool stretched, bool fcg, double minOrder) {
   for (int N : Ns) {
     const Run rr = solveOne(N, stretched, fcg);
     err.push_back(rr.l2);
-    std::printf("    N = %3d  cells %4d x %4d x %4d  levels %d  %3d iters  r/|b| %.2e  "
-                "L2 err %.6e  (exact discrete %.6e)",
-                N, N, stretched ? 2 * N : N, stretched ? N / 2 : N, rr.levels, rr.iters, rr.rrel,
-                rr.l2, rr.l2exact);
+    std::printf(
+        "    N = %3d  cells %4d x %4d x %4d  levels %d  %3d iters  r/|b| %.2e  "
+        "L2 err %.6e  (exact discrete %.6e)",
+        N, N, stretched ? 2 * N : N, stretched ? N / 2 : N, rr.levels, rr.iters, rr.rrel, rr.l2,
+        rr.l2exact);
     if (err.size() > 1)
-      std::printf("   order %.4f",
-                  std::log(err[err.size() - 2] / err.back()) / std::log(2.0));
+      std::printf("   order %.4f", std::log(err[err.size() - 2] / err.back()) / std::log(2.0));
     std::printf("\n");
   }
   const double ord = fitOrder(Ns, err);
@@ -227,7 +227,9 @@ void ladder(bool stretched, bool fcg, double minOrder) {
 /// Is this run the PECLET_FLOW_MG_ASPECT ablation (§8.5 item (c))?  The threshold is read once per
 /// process, so "today's full coarsening" is a separate INVOCATION of this binary; in it the gates
 /// print their numbers instead of asserting.
-bool ablation() { return mgAspectTheta() != 2.0; }
+bool ablation() {
+  return mgAspectTheta() != 2.0;
+}
 
 /// The level table a hierarchy of `levels` levels builds on (nx, ny, nz) with spacings `hp`.
 /// `withMetric == false` reproduces the pre-C3 call sequence exactly (no setMetric at all).
@@ -258,8 +260,8 @@ bool sameTable(const std::vector<C3>& a, const std::vector<C3>& b) {
 
 void levelTables() {
   std::printf("  LEVEL TABLE (§8.5, C3), levels = 6, theta = %.4g:\n", mgAspectTheta());
-  const double hpS[3] = {1.0, 0.5, 2.0};   // the stretched (N, 2N, N/2) box on a cube
-  const double hpC[3] = {1.0, 1.0, 1.0};   // the cubic control
+  const double hpS[3] = {1.0, 0.5, 2.0};  // the stretched (N, 2N, N/2) box on a cube
+  const double hpC[3] = {1.0, 1.0, 1.0};  // the cubic control
   const C3 want[4] = {{1, 2, 1}, {2, 2, 1}, {2, 2, 2}, {2, 2, 2}};
   for (int N : {16, 32, 64}) {
     const std::vector<C3> st = levelTable(N, 2 * N, N / 2, hpS, 6, true);
@@ -329,12 +331,11 @@ double residualInf(CutcellMG& mg, const std::vector<double>& b) {
     for (int j = 0; j < ny; ++j)
       for (int i = 0; i < nx; ++i) {
         const std::size_t c = id(i, j, k);
-        const double Ax = (double)hAC(c) * hx(c) + (double)hAW(c) * hx(id(i - 1, j, k)) +
-                          (double)hAE(c) * hx(id(i + 1, j, k)) +
-                          (double)hAS(c) * hx(id(i, j - 1, k)) +
-                          (double)hAN(c) * hx(id(i, j + 1, k)) +
-                          (double)hAB(c) * hx(id(i, j, k - 1)) +
-                          (double)hAT(c) * hx(id(i, j, k + 1));
+        const double Ax =
+            (double)hAC(c) * hx(c) + (double)hAW(c) * hx(id(i - 1, j, k)) +
+            (double)hAE(c) * hx(id(i + 1, j, k)) + (double)hAS(c) * hx(id(i, j - 1, k)) +
+            (double)hAN(c) * hx(id(i, j + 1, k)) + (double)hAB(c) * hx(id(i, j, k - 1)) +
+            (double)hAT(c) * hx(id(i, j, k + 1));
         const double r = b[c] - Ax;
         if (!(std::fabs(r) <= m))
           m = std::fabs(r);
@@ -391,8 +392,10 @@ void vcycleRate(int N, double maxFactor) {
     Kokkos::deep_copy(l0.rhs, m);
   }
   Kokkos::deep_copy(l0.x, 0.0);
-  std::printf("  V-CYCLE RATE (§8.5 rate (a)), stretched (%d, %d, %d), 2/2 sweeps, random "
-              "mean-zero RHS:\n", nx, ny, nz);
+  std::printf(
+      "  V-CYCLE RATE (§8.5 rate (a)), stretched (%d, %d, %d), 2/2 sweeps, random "
+      "mean-zero RHS:\n",
+      nx, ny, nz);
   double prev = 0.0, worst = 0.0;
   for (int c = 1; c <= 8; ++c) {
     mg.vcycle(0, /*sym=*/true);
@@ -522,18 +525,22 @@ Run solveSphere(int N, bool stretched, bool fcg) {
 }
 
 void sphereGate() {
-  std::printf("  SPHERE RATE (§8.5 rate (b)/(c)), Zick & Homsy phi = 0.216, MG-PCG rtol 1e-10, "
-              "theta = %.4g:\n", mgAspectTheta());
+  std::printf(
+      "  SPHERE RATE (§8.5 rate (b)/(c)), Zick & Homsy phi = 0.216, MG-PCG rtol 1e-10, "
+      "theta = %.4g:\n",
+      mgAspectTheta());
   for (int N : {32, 64}) {
     const Run st = solveSphere(N, /*stretched=*/true, /*fcg=*/false);
     const Run cu = solveSphere(N, /*stretched=*/false, /*fcg=*/false);
     const Run stF = solveSphere(N, /*stretched=*/true, /*fcg=*/true);
-    std::printf("    N = %3d  stretched %4d x %4d x %4d  levels %d  PCG %3d iters (r/|b| %.2e)"
-                "   FCG %3d iters\n",
-                N, N, 2 * N, N / 2, st.levels, st.iters, st.rrel, stF.iters);
-    std::printf("             cubic     %4d x %4d x %4d  levels %d  PCG %3d iters (r/|b| %.2e)"
-                "   [require stretched <= cubic + 2 = %d]\n",
-                N, N, N, cu.levels, cu.iters, cu.rrel, cu.iters + 2);
+    std::printf(
+        "    N = %3d  stretched %4d x %4d x %4d  levels %d  PCG %3d iters (r/|b| %.2e)"
+        "   FCG %3d iters\n",
+        N, N, 2 * N, N / 2, st.levels, st.iters, st.rrel, stF.iters);
+    std::printf(
+        "             cubic     %4d x %4d x %4d  levels %d  PCG %3d iters (r/|b| %.2e)"
+        "   [require stretched <= cubic + 2 = %d]\n",
+        N, N, N, cu.levels, cu.iters, cu.rrel, cu.iters + 2);
     if (!ablation() && !(st.iters <= cu.iters + 2)) {
       std::fprintf(stderr, "FAIL: N = %d stretched PCG %d iters > cubic %d + 2\n", N, st.iters,
                    cu.iters);
@@ -560,8 +567,10 @@ int main(int argc, char** argv) {
     ladder(/*stretched=*/false, /*fcg=*/true, 1.95);
     std::printf("=== C3 — the aspect-ratio coarsening rule (doc/anisotropic_metric.md §5) ===\n");
     if (ablation())
-      std::printf("  PECLET_FLOW_MG_ASPECT = %.4g -> ABLATION RUN: the gates below PRINT, they do "
-                  "not assert (§8.5 item (c)).\n", mgAspectTheta());
+      std::printf(
+          "  PECLET_FLOW_MG_ASPECT = %.4g -> ABLATION RUN: the gates below PRINT, they do "
+          "not assert (§8.5 item (c)).\n",
+          mgAspectTheta());
     levelTables();
     vcycleRate(32, 0.2);
     sphereGate();
