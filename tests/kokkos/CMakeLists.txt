@@ -1,30 +1,38 @@
-# cfd-gpu portable-kernel unit tests (Phase 3, Kokkos). Standalone (Kokkos only): each ported kernel
-# is validated in isolation before sdflow is migrated. Build:
+# flow single-rank Kokkos kernel unit tests (44 ctests). Built by the module's CMake under
+# `-DPECLET_FLOW_BUILD_TESTS=ON` (one tree per backend; suite/docs/QUALITY_PLAN.md §3.D), which
+# supplies Kokkos and the core include path already resolved for the module; the directory also
+# still configures STANDALONE (Kokkos only), which is how the older three-trees-per-backend recipe
+# and the GPU probe trees drive it:
 #   cmake -S tests/kokkos -B build_kokkos -DCMAKE_PREFIX_PATH=<suite>/extern/install/<backend>
 #   cmake --build build_kokkos -j && ctest --test-dir build_kokkos --output-on-failure
 cmake_minimum_required(VERSION 3.24)
-project(cfd_kokkos_kernels LANGUAGES CXX)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  # ---- standalone project -----------------------------------------------------------------------
+  project(peclet_flow_kernel_tests LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+  endif()
+
+  find_package(Kokkos CONFIG REQUIRED)
+  message(STATUS "flow/tests/kokkos: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES})")
+
+  # core headers (field registry / GraphAMG bottom / halo types included by the solver headers):
+  # the sibling checkout in the suite, or FetchContent at the release pin on a standalone CI checkout.
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake")
+  include(PecletDeps)
+  peclet_sibling_include(peclet-core "${PECLET_CORE_TAG}" "../../../core" PECLET_CORE_INCLUDE)
+  enable_testing()
+elseif(NOT PECLET_CORE_INCLUDE)
+  message(FATAL_ERROR "flow/tests/kokkos: add_subdirectory() needs PECLET_CORE_INCLUDE from the module's CMake")
 endif()
-
-find_package(Kokkos CONFIG REQUIRED)
-message(STATUS "cfd/kokkos: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES})")
-
-# core headers (field registry / GraphAMG bottom / halo types included by the solver headers):
-# the sibling checkout in the suite, or FetchContent at the release pin on a standalone CI checkout.
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake")
-include(PecletDeps)
-peclet_sibling_include(peclet-core "${PECLET_CORE_TAG}" "../../../core" PECLET_CORE_INCLUDE)
 # WO-W0: the container-free VoF kernels moved to core (peclet::core::vof) and flow's src/vof/*.hpp
 # are thin includes of them, so ANY target that compiles a src/ header needs the core include path,
 # not only the ones that reach for the field registry. Directory-wide (the headers are header-only).
 include_directories("${PECLET_CORE_INCLUDE}")
 
-enable_testing()
 add_executable(test_reductions test_reductions.cpp)
 target_include_directories(test_reductions PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_reductions PRIVATE Kokkos::kokkos)
@@ -143,9 +151,13 @@ target_include_directories(test_sdflow_tg PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..
 target_link_libraries(test_sdflow_tg PRIVATE Kokkos::kokkos)
 add_test(NAME sdflow_tg COMMAND test_sdflow_tg)
 
+# Red-black Gauss-Seidel throughput probe (N K on the command line). Registered under the `bench`
+# label so `ctest -N` lists it and `ctest -LE bench` (CI) leaves it out -- nothing is hidden.
 add_executable(bench_rbgs bench_rbgs.cpp)
 target_include_directories(bench_rbgs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(bench_rbgs PRIVATE Kokkos::kokkos)
+add_test(NAME bench_rbgs COMMAND bench_rbgs 64 20)
+set_tests_properties(bench_rbgs PROPERTIES LABELS bench)
 
 add_executable(test_mg test_mg.cpp)
 target_include_directories(test_mg PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
@@ -219,6 +231,8 @@ target_include_directories(test_vof_timing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.
                            ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_timing PRIVATE Kokkos::kokkos)
 add_test(NAME vof_timing COMMAND test_vof_timing)
+# A timing instrument, not a correctness gate: LABELS bench, excluded by `ctest -LE bench` (CI).
+set_tests_properties(vof_timing PROPERTIES LABELS bench)
 
 add_executable(test_vof_cutcell test_vof_cutcell.cpp)
 target_include_directories(test_vof_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src

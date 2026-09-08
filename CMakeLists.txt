@@ -19,8 +19,9 @@ project(peclet_flow VERSION ${PECLET_FLOW_VERSION} LANGUAGES CXX)
 #   cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda"
 #   cmake --build build -j        ->  build/peclet/flow/_flow.*.so
 #
-# Multi-rank MPI is exercised by the tests/kokkos_mpi ctest suite (its own find_package project); the
-# single-rank kernel unit tests live in tests/kokkos. See CLAUDE.md.
+# Tests: -DPECLET_FLOW_BUILD_TESTS=ON adds tests/kokkos (single-rank kernel ctests) and, with
+# PECLET_FLOW_MPI, tests/kokkos_mpi (np = 1, 2, 4) to THIS tree, plus the Python regression suite and
+# the canonical verify scripts as ctests on the built module. One tree per backend. See CLAUDE.md.
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,6 +39,11 @@ option(PECLET_FLOW_MPI "Build the flow module with the distributed (MPI) step ex
 # to reach that wheel from its install location so `import peclet.flow` works with no system CUDA. Used
 # by the peclet-flow-cu13 packaging (packaging/pyproject-cuda.toml + the release workflow's cuda job).
 option(PECLET_CUDA_RUNTIME_WHEEL "RPATH the modules to the nvidia-cuda-runtime wheel's libcudart" OFF)
+
+# Test suites in this tree (suite/docs/QUALITY_PLAN.md §3.D): OFF by default so a wheel build is
+# unaffected; ON in CI and in the CLAUDE.md dev recipe. tests/kokkos and tests/kokkos_mpi remain
+# configurable standalone as well (their project() is guarded).
+option(PECLET_FLOW_BUILD_TESTS "Build the ctest suites (tests/kokkos; + tests/kokkos_mpi with PECLET_FLOW_MPI; regression + verify scripts)" OFF)
 
 # Dependencies via the vendored PecletDeps helper: an installed Kokkos prefix + sibling checkout for the
 # dev/suite build, or FetchContent-built Kokkos + fetched core headers for a self-contained
@@ -91,6 +97,37 @@ endif()
 if(PECLET_CUDA_RUNTIME_WHEEL)
   set_target_properties(peclet_flow PROPERTIES
     INSTALL_RPATH "$ORIGIN/../../nvidia/cu13/lib" INSTALL_RPATH_USE_LINK_PATH OFF)
+endif()
+
+# --- test suites (PECLET_FLOW_BUILD_TESTS) -------------------------------------------------------
+if(PECLET_FLOW_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests/kokkos)          # 44 kernel ctests (+ the `bench`-labelled instruments)
+  if(PECLET_FLOW_MPI)
+    add_subdirectory(tests/kokkos_mpi)    # 103 distributed ctests, np = 1, 2, 4[, 8]
+  endif()
+
+  # Python gates on the module built HERE (PYTHONPATH = this tree). Run from the repo root so the
+  # scripts' relative data paths resolve. `python_*` tests exit 77 -> ctest SKIPPED, never green-by-no-op.
+  # (the verify scripts also insert $SDFLOW_BUILD -- default `build_mpi`/`build` -- at the FRONT of
+  # sys.path, ahead of PYTHONPATH: point it here too, or a stale sibling tree gets tested instead)
+  set(_flow_py_env "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};SDFLOW_BUILD=${CMAKE_CURRENT_BINARY_DIR}")
+  # The single-GPU accuracy + efficiency regression suite (tests/regression/README.md): Z&H sphere,
+  # random-sphere bed, hollow-ring bed on the grid ladder, checked against the recorded baseline.
+  add_test(NAME regression_staggered
+           COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/sdflow_regression.py
+                   --build ${CMAKE_CURRENT_BINARY_DIR}
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(regression_staggered PROPERTIES ENVIRONMENT "${_flow_py_env}" LABELS regression
+                       SKIP_RETURN_CODE 77)
+  # The three smallest canonical verify scripts (CLAUDE.md "Running Tests and Verification").
+  foreach(v poiseuille_flow lid_cavity_sdflow colocated_taylor_green)
+    add_test(NAME verify_${v}
+             COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify_${v}.py
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    set_tests_properties(verify_${v} PROPERTIES ENVIRONMENT "${_flow_py_env}" LABELS verify
+                         SKIP_RETURN_CODE 77)
+  endforeach()
 endif()
 
 # --- pip / scikit-build-core install rule -------------------------------------------------------

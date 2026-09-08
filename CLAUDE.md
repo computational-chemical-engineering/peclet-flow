@@ -60,16 +60,20 @@ python scripts/verify_chebyshev_sdflow.py          # Chebyshev pressure driver =
 python scripts/validate_zick_homsy_sdflow.py       # external ground truth (Z&H drag)
 ```
 
-C++ kernel + multi-rank test suites (own `find_package` projects; build against the same prefix):
+C++ kernel + multi-rank test suites: ONE tree per backend, `-DPECLET_FLOW_BUILD_TESTS=ON` adds
+`tests/kokkos` (44 kernel ctests + the `bench`-labelled instruments) and, with `PECLET_FLOW_MPI`,
+`tests/kokkos_mpi` (106 ctests, np = 1, 2, 4[, 8]) to the module's tree, plus the regression suite and
+the three smallest verify scripts as Python ctests on the module built there:
 ```bash
-# Single-rank Kokkos kernel unit tests:
-cmake -S tests/kokkos -B build_kokkos -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda
-cmake --build build_kokkos -j && ctest --test-dir build_kokkos --output-on-failure   # 44 tests
-# Multi-rank (MPI) tests, np=1,2,4:
-cmake -S tests/kokkos_mpi -B build_kmpi -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
-  -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
-cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure       # 103 tests (np = 1, 2, 4[, 8])
+cmake -S . -B build_dev -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
+  -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
+cmake --build build_dev -j
+ctest --test-dir build_dev -N                                  # 155 registered, nothing hidden
+OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
+ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure  # just the distributed suite
 ```
+(`tests/kokkos` and `tests/kokkos_mpi` still configure standalone with the old `cmake -S tests/kokkos
+-B build_kokkos …` / `-S tests/kokkos_mpi -B build_kmpi -DPECLET_CORE_DIR=…` forms.)
 
 Single-GPU **accuracy + efficiency regression suite** (grid-convergence + recorded solver-iteration
 counts, checked against a saved baseline so regressions are caught — Z&H sphere, random-sphere bed,
@@ -2049,14 +2053,13 @@ the 3-level V-cycle once global cells / ranks fall below `PECLET_FLOW_VMG_AUTO_C
 size floor keeps every test-sized distributed run exactly equal to its single-rank reference — the measured crossover on the FoxBerry bed (RB-GS 2.91 vs MG 3.32 s/step at 147 k
 cells/rank; 0.844 vs 0.834 at 37 k). Above it RB-GS with the residual stop is the cheaper solver.
 
-Build/test the multi-rank ctests:
+Build/test the multi-rank ctests (in the module's tree, `PECLET_FLOW_BUILD_TESTS=ON`):
 ```bash
 export PATH=/usr/local/cuda-13.2/bin:$PATH
-cmake -S tests/kokkos_mpi -B build_kmpi \
-  -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
-  -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
-cmake --build build_kmpi -j
-ctest --test-dir build_kmpi --output-on-failure
+cmake -S . -B build_dev -DCMAKE_PREFIX_PATH=$PWD/../extern/install/nvidia-cuda \
+  -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
+cmake --build build_dev -j
+ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure
 ```
 **Force `-DMPIEXEC_EXECUTABLE=/usr/bin/mpirun`** — FindMPI may pick ParaView's bundled `mpiexec` on
 `PATH`, which launches the OpenMPI-linked test binaries as singletons (so `*_np4` silently runs 4×np=1).

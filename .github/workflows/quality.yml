@@ -26,17 +26,24 @@ jobs:
             --exclude ".venv,venv,build,build_*,__pycache__,_deps,extern,legacy,notebooks"
 
   cpp-format:
-    name: clang-format (informational)
+    name: clang-format
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install "clang-format==18.1.8"
-      - name: clang-format dry-run (uses the repo .clang-format)
+      - name: clang-format check (BLOCKING; uses the repo .clang-format)
         run: |
+          # src/ and tests/ were reformatted in one commit (QUALITY_PLAN.md §3.D.7) and this check
+          # is blocking from then on. TEMPORARY EXCLUDE LIST: the six files the vof-w4 worktree
+          # (branch vof-w4, WIP f29c8e7) modifies were left UNFORMATTED so that the W4 merge does
+          # not conflict with a whitespace commit; drop this list (and format the files) when W4
+          # merges.
+          exclude='src/flow_bindings.cpp src/flow_ibm.hpp src/vof/block_container.hpp src/vof/block_exchange.hpp tests/kokkos/test_vof_blocks.cpp tests/kokkos_mpi/test_vof_blocks_ns_mpi.cpp'
           files=$(git ls-files 'src/*.hpp' 'src/*.cpp' 'tests/*.hpp' 'tests/*.cpp')
+          for x in $exclude; do files=$(printf '%s\n' $files | grep -vx "$x"); done
           [ -z "$files" ] && { echo "no C++ sources"; exit 0; }
+          echo "checking $(printf '%s\n' $files | wc -l) files (W4 exclusions: $exclude)"
           clang-format --dry-run --Werror $files

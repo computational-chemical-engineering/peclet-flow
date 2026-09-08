@@ -71,7 +71,7 @@ source .venv/bin/activate
 python scripts/verify_lid_cavity_sdflow.py     # lid-driven cavity vs Ghia, Ghia & Shin (1982)
 python scripts/verify_channel_sdflow.py        # developing plane channel -> Poiseuille
 python scripts/verify_bfs_sdflow.py            # backward-facing step (reattachment length)
-ctest --test-dir build_mpi --output-on-failure # the multi-rank C++ test suite
+ctest --test-dir build_dev --output-on-failure # the C++ kernel + multi-rank suites (-DPECLET_FLOW_BUILD_TESTS=ON)
 ```
 
 ## Documentation
