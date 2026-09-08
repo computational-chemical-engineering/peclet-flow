@@ -2824,12 +2824,14 @@ NB_MODULE(_flow, m) {
 #ifdef PECLET_FLOW_MPI
   m.def(
       "predict_hierarchy",
-      [](int gnx, int gny, int gnz, int np, int levels, bool telescope, int min_extent) {
+      [](int gnx, int gny, int gnz, int np, int levels, bool telescope, int min_extent,
+         int decomposition_levels, double max_imbalance) {
         std::vector<std::tuple<std::tuple<int, int, int>, int, std::tuple<int, int, int>,
                                std::tuple<int, int, int>, bool>>
             out;
-        for (const auto& r : peclet::flow::CutcellMG::predict(gnx, gny, gnz, np, levels, telescope,
-                                                              min_extent))
+        for (const auto& r :
+             peclet::flow::CutcellMG::predict(gnx, gny, gnz, np, levels, telescope, min_extent,
+                                              decomposition_levels, max_imbalance))
           out.emplace_back(std::make_tuple(r.global.x, r.global.y, r.global.z), r.ranks,
                            std::make_tuple(r.block.x, r.block.y, r.block.z),
                            std::make_tuple(r.ratio.x, r.ratio.y, r.ratio.z), r.tele);
@@ -2838,8 +2840,10 @@ NB_MODULE(_flow, m) {
       },
       nb::arg("gnx"), nb::arg("gny"), nb::arg("gnz"), nb::arg("np"), nb::arg("levels"),
       nb::arg("telescope") = false, nb::arg("min_extent") = 4,
+      nb::arg("decomposition_levels") = 0, nb::arg("max_imbalance") = 1.05,
       "The pressure-multigrid hierarchy init_mpi WOULD build for this grid / rank count / level "
-      "request, for the given decomposition depth (as Solver.set_decomposition) and with or "
+      "request, for the level-0 decomposition that decomposition_levels / max_imbalance describe "
+      "(pass what you will pass to Solver.set_decomposition) and with or "
       "without coarse-level telescoping -- a pure function, no MPI, no allocation, any rank "
       "count. Returns one row per level: (global dims, ranks holding the level, block-0 dims, "
       "ratio to the next level, telescopes-out). Pre-flight any job with it.");

@@ -38,9 +38,12 @@ cut-cell IBM primitives now live in `src/cut_cell_ibm.hpp`; the operator headers
   (inflow) / outflow / free-slip (symmetry plane), plus per-position **inlet velocity profiles**. Validated
   on the lid-driven cavity (Ghia et al.), the developing plane channel (Poiseuille), the backward-facing
   step (Armaly/Gartling), and a half channel closed by a symmetry plane (pointwise equal to the full one).
-- **Pressure multigrid:** rediscretized geometric V-cycle, grid-independent, with MG-PCG and Chebyshev
-  outer accelerators. Works on periodic, IBM, and non-periodic (BC) domains, including **semi-coarsening**
-  for thin (quasi-2D) grids.
+- **Pressure multigrid:** rediscretized geometric V-cycle, grid-independent, with MG-PCG, flexible
+  MG-CG and Chebyshev outer accelerators, an agglomerated coarse solve and coarse-level telescoping.
+  Works on periodic, IBM and non-periodic (BC) domains, including **semi-coarsening** for thin
+  (quasi-2D) grids.
+- **Two-phase flow:** geometric VoF (PLIC + Weymouth–Yue advection), height-function curvature,
+  balanced-force surface tension, contact angles and phase change.
 - **Time integration:** pressure projection with optional incremental pressure, explicit (Koren) or
   implicit-deferred-correction advection, and Picard outer iteration.
 
@@ -49,11 +52,11 @@ cut-cell IBM primitives now live in `src/cut_cell_ibm.hpp`; the operator headers
 ```bash
 # Canonical: build + install via scikit-build-core
 CMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" pip install .   # -> peclet.flow
-# Or a dev cmake build (nanobind found via the active interpreter, no cmakedir needed):
-cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" && cmake --build build -j
-# distributed flow build (opt-in MPI):
-cmake -S . -B build_mpi -DPECLET_FLOW_MPI=ON -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" \
-  && cmake --build build_mpi -j
+# Or a dev cmake build (nanobind found via the active interpreter, no cmakedir needed).
+# ONE tree per backend: add the test suites, and MPI, to the same tree.
+cmake -S . -B build_dev -DCMAKE_PREFIX_PATH="$PWD/../extern/install/<backend>" \
+  -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
+cmake --build build_dev -j
 ```
 
 `<backend>` is one of `nvidia-cuda` / `host-openmp` / `lumi-hip` under `../extern/install/`, produced once
@@ -67,11 +70,14 @@ Simulations are scripts, not C++ mains. The `scripts/verify_*_sdflow.py` files a
 verification entry points:
 
 ```bash
-source .venv/bin/activate
+source ../.venv/bin/activate                   # THE suite venv (see ../CLAUDE.md, "One venv")
+export PYTHONPATH=$PWD/build_dev
 python scripts/verify_lid_cavity_sdflow.py     # lid-driven cavity vs Ghia, Ghia & Shin (1982)
 python scripts/verify_channel_sdflow.py        # developing plane channel -> Poiseuille
 python scripts/verify_bfs_sdflow.py            # backward-facing step (reattachment length)
-ctest --test-dir build_dev --output-on-failure # the C++ kernel + multi-rank suites (-DPECLET_FLOW_BUILD_TESTS=ON)
+# the C++ kernel + multi-rank suites, from the tree built above (156 registered, 154 without
+# the `bench`-labelled timing instruments):
+OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ```
 
 ## Documentation
@@ -83,5 +89,6 @@ GitHub Pages by the `Documentation` CI workflow. Build it locally with:
 doxygen docs/Doxyfile      # output in docs/html/index.html
 ```
 
-The architecture, conventions, and design rationale are described in `CLAUDE.md` and the design notes
-under `doc/` in the repository.
+The architecture, conventions and design rationale are in [`CLAUDE.md`](CLAUDE.md) and the design
+notes under [`doc/`](doc/README.md); the campaign records and work orders that produced them are
+archived, indexed and unmaintained under [`doc/history/`](doc/history/README.md).

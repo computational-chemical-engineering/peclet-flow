@@ -2846,8 +2846,14 @@ class CutcellMG {
     int ranks;
     bool tele;
   };
+  // `decompLevels`/`maxImbalance` are the LEVEL-0 decomposition's parameters (what
+  // Solver::setDecomposition takes), not the MG level count `nLevels`: predict is a pure function,
+  // so a caller pre-flighting a coarse-first job must state the depth it will run with. Before the
+  // env-var retirement these came from a process-global static, which is exactly why they are
+  // parameters now.
   static std::vector<PlanRow> predict(int gnx, int gny, int gnz, int np, int nLevels,
-                                      bool telescope, int minExtent = 4) {
+                                      bool telescope, int minExtent = 4, int decompLevels = 0,
+                                      double maxImbalance = 1.05) {
     using Dec = peclet::core::decomp::BlockDecomposer<3>;
     std::vector<PlanRow> rows;
     auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
@@ -2857,7 +2863,8 @@ class CutcellMG {
           return false;
       return true;
     };
-    Dec cur = decomposition(static_cast<std::size_t>(np), gnx, gny, gnz);
+    Dec cur =
+        decomposition(static_cast<std::size_t>(np), gnx, gny, gnz, decompLevels, maxImbalance);
     C3 gs{gnx, gny, gnz};
     for (int L = 0; L < nLevels; ++L) {
       PlanRow r;

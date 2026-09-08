@@ -47,31 +47,31 @@ So `64^3` is useful as a continuation/initialization grid, but not as an accurat
 
 ### Force vs target Reynolds number
 
-![Force vs Re by resolution](../output/packing_multires_re_targets/force_vs_re_by_resolution.png)
+![Force vs Re by resolution](../../output/packing_multires_re_targets/force_vs_re_by_resolution.png)
 
 The force-Re branch shifts downward with refinement. The difference between `128^3` and `256^3` remains clearly visible through `Re=100`.
 
 ### Outer work vs target Reynolds number
 
-![Outer total vs Re by resolution](../output/packing_multires_re_targets/outer_total_vs_re_by_resolution.png)
+![Outer total vs Re by resolution](../../output/packing_multires_re_targets/outer_total_vs_re_by_resolution.png)
 
 The fine-grid solves remain tractable when seeded from the next coarser converged state.
 
 ### Time steps vs target Reynolds number
 
-![Steps vs Re by resolution](../output/packing_multires_re_targets/steps_vs_re_by_resolution.png)
+![Steps vs Re by resolution](../../output/packing_multires_re_targets/steps_vs_re_by_resolution.png)
 
 The coarse-to-fine initialization reduces the amount of transient settling needed on the finer grids.
 
 ### Relative force error versus `256^3`
 
-![Relative force error vs 256](../output/packing_multires_re_targets/force_relative_error_vs_256.png)
+![Relative force error vs 256](../../output/packing_multires_re_targets/force_relative_error_vs_256.png)
 
 The `64^3` error grows quickly with `Re`, while `128^3` remains much closer but is not yet asymptotically converged at the top of the range.
 
 ### Apparent force-convergence order
 
-![Apparent order vs Re](../output/packing_multires_re_targets/force_order_vs_re.png)
+![Apparent order vs Re](../../output/packing_multires_re_targets/force_order_vs_re.png)
 
 Using
 

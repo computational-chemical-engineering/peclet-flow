@@ -4,7 +4,7 @@ Robust-Scaled cut-cell IBM — the first immersed-solid test of the collocated s
 flow through the pores; the cut-cell overlay enforces no-slip at the cell-centered velocities and the
 shared cut-cell pressure operator + approximate (MAC) projection enforce incompressibility.
 
-This is the §4 gate of doc/sdflow_colocated_plan.md: the collocated permeability must (a) be incompressible
+This is the §4 gate of doc/flow_colocated_plan.md: the collocated permeability must (a) be incompressible
 (projected FACE field divergence-free to machine precision), (b) satisfy exact no-slip in the deep solid,
 and (c) converge — across resolution AND toward the staggered solver, which is itself validated against the
 Zick & Homsy sphere-array drag. The plain area-weighted face averaging (Option A) + central-difference cell
