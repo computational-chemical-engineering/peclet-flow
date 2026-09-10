@@ -1615,12 +1615,6 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "solid-centred neighbours, an O(1/h) gauge error), and on a dense bed it also fails to "
           "reach steady state within 800 steps at coarse resolution. Kept for reproducing "
           "published results.")
-      .def("set_aperture_floor", &S::setApertureFloor, nb::arg("floor"),
-           "Denominator floor of the capped open-face pressure gradient (collocated scheme 13). "
-           "DEFAULT 0.25; must be in (0, 1]. Smaller floors admit sliver faces into the gradient "
-           "and cost robustness, larger ones smear the wall-normal gradient.")
-      .def_prop_ro("aperture_floor", &S::apertureFloor,
-                   "The capped-gradient denominator floor in force (see set_aperture_floor).")
       .def("set_decomposition", &S::setDecomposition, nb::arg("levels"),
            nb::arg("max_imbalance") = 1.05,
            "Choose how this solver's shared MPI decomposition is built. levels=0 (DEFAULT) = the "
@@ -1644,9 +1638,6 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "cells along one axis). DEFAULT 4.")
       .def_prop_ro("pressure_bottom_extent", &S::pressureBottomExtent,
                    "The agglomerated-bottom extent threshold (see set_pressure_bottom_extent).")
-      .def("set_fv_relax", &S::setFvRelax, nb::arg("w"),
-           "Mode-4 FV wall-flux defect-correction under-relaxation (1=full; <1 damps the stiff "
-           "explicit-lagged wall term). Steady state is independent of w.")
       .def("set_implicit_advection", &S::setImplicitAdvection, nb::arg("on"),
            "Use implicit-FOU advection with deferred-correction TVD.")
       .def("set_velocity_residual_tolerance", &S::setVelocityResidualTolerance, nb::arg("rtol"),

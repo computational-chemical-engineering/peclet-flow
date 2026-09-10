@@ -302,99 +302,6 @@ inline void buildCellFraction(CCField cs, CCConst sdf, C3 e, int g) {
       });
 }
 
-// FINITE-VOLUME MOMENTUM OPERATOR (mode 4): applies L_FV(U) over the fluid control volume of each
-// cell (the centroid wall-gradient is validated a priori in tests/study/fv_wallflux_apriori.py):
-//   L_FV(U)_i = idt·cs_i·U_i + mu·[ Σ_f o_f·(U_i − U_nbr) + Σ_a W_a·g_a^centroid(U) ]
-// The o_f-weighted two-point face fluxes + the fragment-centroid wall drag = the same finite-volume
-// boundary geometry the projection uses. In the interior (cs=1, o_f=1, W=0) this is exactly the
-// backward-Euler diffusion operator idt·U − mu·Lap(U) — identical to the IBM matrix M there, so the
-// defect correction (M·u − L_FV·u) vanishes and interior cells stay byte-identical to mode 0.
-//
-// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §6.1/§6.2.  The per-axis
-// pressure/Laplacian weight `w_a = 1/h_a'^2` multiplies BOTH the two-point face flux of axis `a`
-// (area V'/h_a' over distance h_a') and the wall drag of axis `a` (area W_a V'/h_a' times the
-// physical derivative (1/h_a') dU/dxi_a):
-//
-//   L_FV(U)_i = idt cs_i U_i + mu' [ sum_a w_a ( o_{a-}(U_i - U_{-a}) + o_{a+}(U_i - U_{+a}) )
-//                                    - sum_a w_a W_a g_a(xi*) ]
-//
-// and the foot point marches along the INDEX DIRECTION of the physical normal, not along the
-// covariant gradient of the sampled SDF: with g_a = ½(sdf(i+e_a) - sdf(i-e_a)) = h_a' n_a, the
-// physical unit normal is n_a = (g_a/h_a')/|g/h'| and the index direction is m_a = n_a/h_a', so
-// xi* = xi - d' m moves d' in PHYSICAL hRef units along the true normal (|h'∘m| = |n| = 1).  The
-// one-sided samples at xi* ± sigma e_a and the clamp are unchanged (trap 8: |m_a| <= |n_a| <= 1
-// since h_a' >= 1, so the foot point never moves farther per axis than it does today).
-// `w = hp = (1,1,1)` on the isotropic path, where every multiplication and division is by an exact
-// 1.0 and the whole kernel is bit-identical — no dispatch needed (§6.1).
-inline void fvViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CCConst ox, CCConst oy,
-                           CCConst oz, double mu, double idt, C3 e, int g, double wx = 1.0,
-                           double wy = 1.0, double wz = 1.0, double hpx = 1.0, double hpy = 1.0,
-                           double hpz = 1.0) {
-  CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for(
-      "peclet::flow::fv_viscous_apply", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
-      KOKKOS_LAMBDA(int x, int y, int z) {
-        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
-        const long st[3] = {sx, sy, sz};
-        const long i = (long)x + (long)y * sy + (long)z * sz;
-        const double wv[3] = {wx, wy, wz};
-        CCConst oa[3] = {ox, oy, oz};
-        double W[3], of[3];  // fragment normal per axis; low/high face openness
-        double diag = 0.0, offs = 0.0, aw = 0.0;
-        for (int a = 0; a < 3; ++a) {
-          const double om = oa[a](i), op = oa[a](i + st[a]);
-          W[a] = om - op;
-          of[a] = om + op;  // low + high face openness
-          diag += wv[a] * (om + op);
-          offs += wv[a] * (om * U(i - st[a]) + op * U(i + st[a]));
-          aw += (W[a] < 0.0 ? -W[a] : W[a]);
-        }
-        double wall = 0.0;
-        if (aw > 1e-12) {  // centroid-anchored wall drag mu·Σ_a w_a W_a g_a (a-priori-validated:
-                           // fv_wallflux_apriori.py)
-          // g_a = index-space central difference = h_a'·n_a; the PHYSICAL unit normal is g/h'
-          // renormalised (§6.1), and it is what `sg` and the foot-point direction are built from.
-          double nx = 0.5 * (sdf(i + sx) - sdf(i - sx)) / hpx;
-          double ny = 0.5 * (sdf(i + sy) - sdf(i - sy)) / hpy;
-          double nz = 0.5 * (sdf(i + sz) - sdf(i - sz)) / hpz;
-          double nn = Kokkos::sqrt(nx * nx + ny * ny + nz * nz);
-          if (nn > 1e-12) {
-            nx /= nn;
-            ny /= nn;
-            nz /= nn;
-            const double nv[3] = {nx, ny, nz};
-            // m = the index direction of n (the contravariant pull-back): stepping t along m in
-            // index space moves t in physical hRef units along the true normal.
-            const double mx = nx / hpx, my = ny / hpy, mz = nz / hpz;
-            const double sdi = sdf(i);
-            // foot point p* = x − sdi·m, clamped into the sampleable block [1, e−2] so the two
-            // off-cell trilinear taps (p*+2σ) never index outside the padded field (guards a NaN/
-            // large sdi too — ccSampleExt only clamps integer indices, not a NaN coordinate).
-            auto cl = [](double v, double hi) { return v < 1.0 ? 1.0 : (v > hi ? hi : v); };
-            const double px = cl(x - sdi * mx, e.x - 2.0);
-            const double py = cl(y - sdi * my, e.y - 2.0);
-            const double pz = cl(z - sdi * mz, e.z - 2.0);
-            for (int a = 0; a < 3; ++a) {
-              const double sg = nv[a] >= 0.0 ? 1.0 : -1.0;
-              const double u1 = ccSampleExt(U, e, px + (a == 0 ? sg : 0.0),
-                                            py + (a == 1 ? sg : 0.0), pz + (a == 2 ? sg : 0.0));
-              const double u2 =
-                  ccSampleExt(U, e, px + (a == 0 ? 2.0 * sg : 0.0), py + (a == 1 ? 2.0 * sg : 0.0),
-                              pz + (a == 2 ? 2.0 * sg : 0.0));
-              wall += wv[a] * (W[a] * sg * (2.0 * u1 - 0.5 * u2));
-            }
-          }
-        }
-        // FV viscous operator = idt·cs·U + μ·[Σ w_a o_f(U_i−U_nbr) − Σ_a w_a W_a g_a].  The wall
-        // term sign is −μ Σ W_a g_a: from ∫_CV −μ∇²u = −μ[flux_out − flux_in], the wall flux g_a
-        // enters with a minus, so a resistive wall (∂u/∂n<0) ADDS to the operator (dissipative),
-        // matching the interior −μLap. (+ would be anti-dissipative and blows the solve up.)
-        Lu(i) = idt * cs(i) * U(i) + mu * (diag * U(i) - offs - wall);
-        (void)of;
-      });
-}
-
 // Lagrange quadratic through (-1,a1),(0,a2),(+1,a3) evaluated at xx (Basilisk embed.h `quadratic`).
 KOKKOS_INLINE_FUNCTION double eQuad(double xx, double a1, double a2, double a3) {
   return (a1 * (xx - 1.0) + a3 * (xx + 1.0)) * xx * 0.5 - a2 * (xx - 1.0) * (xx + 1.0);
@@ -568,7 +475,7 @@ inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CC
 }
 
 // 7-point stencil matvec y = M·u using the stored (rs-scaled) IBM operator coefficients. Used to
-// form the mode-4 defect-correction RHS  b = M·u^k − rs·L_FV(u^k) + rs·b_FV, whose fixed point
+// form the embed defect-correction RHS  b = M·u^k − rs·L_FV(u^k) + rs·b_FV, whose fixed point
 // satisfies L_FV·u* = b_FV exactly, with M only the (stable, small-cell-safe) preconditioner.
 template <class MC>
 inline void stencilMatvec(CCField y, CCConst u, MC AC, MC AW, MC AE, MC AS, MC AN, MC AB, MC AT,
@@ -586,7 +493,8 @@ inline void stencilMatvec(CCField y, CCConst u, MC AC, MC AW, MC AE, MC AS, MC A
       });
 }
 
-// u -= d over the inner cells (the mode-2 correction applies the transposeGradWallAware field).
+// u -= d over the inner cells (the gauge-exact and embed-5 cell corrections apply a gradient
+// field).
 inline void subtractField(CCField u, CCConst d, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
@@ -618,83 +526,6 @@ inline void centerGradOpen(CCField out, CCConst p, CCConst o, int axis, C3 e, in
         const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
         const double om = o(i), op = o(i + sa);
         out(i) = wa * ((om * (p(i) - p(i - sa)) + op * (p(i + sa) - p(i))) / (om + op + 1e-12));
-      });
-}
-
-// ADJOINT-APERTURE cell pressure gradient along one axis (setFaceInterp(11)):
-// out(i) = 1/2·(o(i)·(p(i)−p(i−sa)) + o(i+sa)·(p(i+sa)−p(i))) — centerGradOpen WITHOUT the
-// normalization, which makes it the exact TRANSPOSE of the aperture divergence of the 1/2-1/2
-// face average: G = −(D_α Π)^T. Two structural consequences (collocated_invisible_subspace.md):
-// (i) support-consistent — it reads a solid-centred φ wherever the constraint couples it
-// (α_f > 0), so the invisible pressure subspace of the gauge-exact/plain gradients collapses;
-// (ii) adjoint — the dt→∞ Uzawa pressure map has an SPSD Schur complement, the stabilizable
-// case (the normalized embed pair (modes 6/7) is non-adjoint and measured unconditionally
-// unstable on beds, dt-free doubling ~75 steps). The price is the 1/2·α under-weighting of the
-// pressure force at nearly-closed cut cells (accuracy measured on the ladder, not assumed).
-inline void centerGradAperture(CCField out, CCConst p, CCConst o, int axis, C3 e, int g,
-                               double wa = 1.0) {
-  CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for(
-      "peclet::flow::center_grad_aperture", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
-      KOKKOS_LAMBDA(int x, int y, int z) {
-        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
-        const long i = (long)x + (long)y * sy + (long)z * sz;
-        const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
-        out(i) = wa * (0.5 * (o(i) * (p(i) - p(i - sa)) + o(i + sa) * (p(i + sa) - p(i))));
-      });
-}
-
-// PER-CELL-RESCALED adjoint-aperture gradient (setFaceInterp(12)): centerGradAperture times the
-// scalar S(i) = 6 / max(sum_a(o_a(i) + o_a(i+sa)), 0.5), one weight per CELL (not per axis).
-// S == 1 in the bulk (sum = 6), so interior cells reproduce mode 11 / mode 0 exactly; at cut
-// cells it restores (on average) the full-weight pressure force the 1/2*alpha under-weighting of
-// the pure adjoint removes -- the mode-11 accuracy price -- while keeping the corrector a
-// positive-DIAGONAL rescaling S*G of the adjoint pair (support unchanged; contrast mode 6's
-// per-axis normalization, which is NOT such a rescaling and is measured unstable). The cap
-// sum >= 0.5 bounds S <= 12 at nearly-closed cells.
-inline void centerGradApertureScaled(CCField out, CCConst p, CCConst ox, CCConst oy, CCConst oz,
-                                     int axis, C3 e, int g, double wa = 1.0) {
-  CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for(
-      "peclet::flow::center_grad_aperture_scaled",
-      MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}), KOKKOS_LAMBDA(int x, int y, int z) {
-        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
-        const long i = (long)x + (long)y * sy + (long)z * sz;
-        const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
-        CCConst o = (axis == 0) ? ox : (axis == 1) ? oy : oz;
-        double osum = ox(i) + ox(i + sx) + oy(i) + oy(i + sy) + oz(i) + oz(i + sz);
-        if (osum < 0.5)
-          osum = 0.5;
-        out(i) = wa * ((6.0 / osum) * 0.5 *
-                       (o(i) * (p(i) - p(i - sa)) + o(i + sa) * (p(i + sa) - p(i))));
-      });
-}
-
-// CAPPED per-axis normalized aperture gradient (setFaceInterp(13)): the mode-6 embed form
-// (om*d- + op*d+)/(om+op) with the denominator FLOORED at omin -- equivalently the adjoint
-// gradient centerGradAperture times the per-cell-per-COMPONENT diagonal S = 2/max(om+op, omin).
-// Rationale: mode 6's floor is 1e-12, an unbounded diagonal gain (up to ~1e12) at nearly-closed
-// axes, and the mode-6 pressure loop is measured unconditionally unstable on beds; mode 11
-// (S = 1) is unconditionally clean but under-weights the cut-cell pressure force by ~(om+op)/2
-// (k gap -11% at R=8). This kernel keeps the full-weight embed gradient wherever om+op >= omin
-// (every ordinary cut cell) and only caps the gain where an axis is nearly closed.
-inline void centerGradOpenCapped(CCField out, CCConst p, CCConst o, int axis, double omin, C3 e,
-                                 int g, double wa = 1.0) {
-  CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-  Kokkos::parallel_for(
-      "peclet::flow::center_grad_open_capped", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
-      KOKKOS_LAMBDA(int x, int y, int z) {
-        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
-        const long i = (long)x + (long)y * sy + (long)z * sz;
-        const long sa = (axis == 0) ? sx : (axis == 1) ? sy : sz;
-        const double om = o(i), op = o(i + sa);
-        double den = om + op;
-        if (den < omin)
-          den = omin;
-        out(i) = wa * ((om * (p(i) - p(i - sa)) + op * (p(i + sa) - p(i))) / den);
       });
 }
 

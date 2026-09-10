@@ -447,12 +447,11 @@ class Solver {
       uf_ = CCField("uf", n_);
       vf_ = CCField("vf", n_);
       wf_ = CCField("wf", n_);
-      tgp_ = CCField("tgp", n_);    // scratch: wall-aware transpose gradient (setFaceInterp(2/3))
-      wdef_ = CCField("wdef", n_);  // scratch: FV wall viscous-flux defect (setFaceInterp(4))
-      fvM_ = CCField("fvM", n_);    // scratch: M·u^k (mode-4 defect matvec)
-      fvL_ = CCField("fvL", n_);    // scratch: L_FV(u^k) (mode-4 FV operator apply)
-      cs_ = CCField("cs", n_);      // static cell fluid fraction (setFaceInterp(4))
-      xcx_ = CCField("xcx", n_);  // static per-face open-centroid wall distance (setFaceInterp(3))
+      tgp_ = CCField("tgp", n_);  // scratch: the collocated cell pressure gradient
+      fvM_ = CCField("fvM", n_);  // scratch: M·u^k (embed defect matvec)
+      fvL_ = CCField("fvL", n_);  // scratch: L_FV(u^k) (embed operator apply)
+      cs_ = CCField("cs", n_);    // static cell fluid fraction (embed)
+      xcx_ = CCField("xcx", n_);  // static per-face open-centroid wall distance (wall-aware map)
       xcy_ = CCField("xcy", n_);
       xcz_ = CCField("xcz", n_);
     }
@@ -715,9 +714,9 @@ class Solver {
       // plain (mode-0) face map applies — the wall-aware/FV/embed face-interp modes replace the
       // very operators this scheme owns.
       if (on && faceInterp_ != 0)
-        faceInterp_ = 0;  // QUARANTINED verification path: it owns the operators mode 9 replaces,
-                          // so it selects the plain face map itself rather than throwing on the
-                          // (now default) gauge-exact scheme.
+        faceInterp_ = 0;  // QUARANTINED verification path: it owns the operators the gauge-exact
+                          // scheme replaces, so it selects the plain face map itself rather than
+                          // throwing on the (now default) gauge-exact scheme.
     }
     if (on && (porous_ || varRho_ || hasBc_ || useChebyshev_))
       throw std::runtime_error(
@@ -794,81 +793,39 @@ class Solver {
   // steady march -> a more converged phi per fixed solver budget) instead of zeroing the initial
   // guess.
   void setPressureWarmstart(bool on) { pwarm_ = on; }
-  // Collocated cut-cell treatment of the approximate projection (no effect on the staggered path):
-  //   0 = plain ½/½ cell->face averaging + central-difference -grad(P) (default; a consistent
-  //       adjoint pair of the WRONG geometry — wall at the solid neighbour's center — first-order
-  //       drag at curved walls);
-  //   1 = wall-aware cell->face map only (ablation: breaks the adjoint pairing — WORSE, don't use);
-  //   2 = wall-aware map + its TRANSPOSE as the predictor -grad(P) and the cell correction
-  //       (consistent pair, but face-CENTER point values under-count the open-area flux —
-  //       ablation);
-  //   3 = mode 2 evaluated at the OPEN-FACE-CENTROID wall distance (static geometry from
-  //       buildFaceCentroidDist) — the flux-consistent constraint quadrature (stable, but the
-  //       momentum row is still the O(h) axis-by-axis IBM: FV constraint vs FD momentum are
-  //       inconsistent);
-  //   4 = FULLY-FV: mode-3 projection PLUS the second-order wall viscous-flux deferred correction
-  //   on
-  //       the momentum (fvViscousApply: μ Σ_a W_a·centroid wall drag via defect correction, W_a
-  //       from the divergence-theorem fragment normal o_{a−}−o_{a+}, centroid gradient at the SDF
-  //       foot point). Momentum and constraint now share the same finite-volume cut-cell geometry →
-  //       targets O(h²).
-  //   5 = EMBED (Basilisk embed.h): like mode 4 but the momentum wall drag is the TRUE-NORMAL
-  //       image-point gradient embedDirichletGradient (μ·area·d(U)/dn along n̂, O(h²) a-priori)
-  //       rather than the axis-by-axis W_a g_a — the reconstruction the mode-4 arc found the O(h)
-  //       ceiling in. Keeps the mode-3 (wall-aware, o-adjoint) projection.
-  //   6 = EMBED momentum + PLAIN (mode-0) projection: the Basilisk pairing — embed viscous no-slip
-  //       with the ½/½ face average, fs-weighted cut-cell Poisson, and central-difference
-  //       correction (the mode-1/2/3 wall-aware projection was measured WORSE than plain; embed
-  //       drives momentum).
-  //   9 = CUTCELL-GHOST HYBRID (the recommended collocated mode for tight-throat porous media):
-  //       mode-0's aperture projection unchanged (plain ½/½ map, real openness divergence —
-  //       throttles sub-cell throats, symmetric MG-PCG, no fragmentation concern) but the
-  //       predictor -grad(P) and the cell correction use the directional gpCenterGrad gradient
-  //       (2nd-order one-sided at cut cells, never reads a solid-centered cell's P — the measured
-  //       O(1/h) mode-0 defect). Measured: Z&H drag in a −0.04..−0.10% band N=32..128 (NOT clean
-  //       2nd order — the pinned-face aperture-constraint truncation floors it — but 7–20× below
-  //       mode 0); RCP permeability monotone toward the staggered-cutcell reference
-  //       (−13.0/−8.6/−6.2% at Ng=32/44/56) where mode 0 is erratic (−20%..+14%, pathologically
-  //       slow settling) and the ghost projection needs its fragmentation guard. See
-  //       doc/collocated_second_order_open_problem.md §9.
-  //  10 = mode 9 with the OPEN-CENTROID wall-aware constraint quadrature (the mode-3
-  //       centerToFaceWallAware map). DEAD ABLATION — kept for the record: O(h) with a worse
-  //       constant than mode 9 on Z&H, and DIVERGES on RCP slivers (the mode-3a non-telescoping
-  //       row-sum mechanism; the telescoping gpCenterGrad force does not cure the
-  //       constraint-side injection). Do not use.
-  // Collocated cut-cell projection treatment. THE SUPPORTED VALUES ARE 0 AND 9 — prefer the
-  // string API setCollocatedScheme(). 9 ("gauge-exact") is the DEFAULT since 2026-08-18: the
-  // aperture constraint (unchanged, throat-safe, symmetric MG-PCG) with the directional
-  // gpCenterGrad replacing the two operators measured to be O(1) at cut cells — the -grad(P)
-  // predictor and the projection's cell correction. Measured on two periodic sphere beds
-  // (peclet-examples benchmarks/porous-scaling, colcmp*/colcmp060*): SECOND ORDER on both
-  // (2.36-2.89 over R=5..8, landing at +0.08 % of k_inf at R=16) where mode 0 is first order
-  // (0.94-1.20) and additionally fails to reach steady state within 800 steps on 3 of 5 rungs of
-  // the phi=0.60 bed; and cheapest of every variant tried, 4.6x faster than the STAGGERED
-  // cut-cell reference and 5-6x faster than the directional ghost projection.
-  //
-  // RETIRED 2026-08-18 (rejected here; the kernels remain but are unreachable, deletion is a
-  // follow-up): 1, 2 were pure ablations, and 10 was a documented dead ablation (O(h)
-  // with a worse constant on Z&H, divergent on RCP slivers — doc/
-  // collocated_second_order_open_problem.md §9.1). 3 and 4 (the FV-constraint variants, 4 with
-  // set_fv_relax) survive as ablations reachable only through this integer entry point.
-  //
-  // 5/6/7 were RE-INSTATED 2026-08-19: they are not ablations, they are the Basilisk embed.h port
-  // (true-normal dirichlet_gradient wall drag, openness-weighted cell correction, solid-cut-cell
-  // sliver mask — commits db5b4aa/f5fde8c/6d412ec/03a71c6, doc/collocated_embed_port_plan.md).
-  // That line is the live candidate for removing the collocated accuracy ceiling, so it must stay
-  // reachable. Retiring them was my error.
+  // Collocated cut-cell treatment of the approximate projection (no effect on the staggered path).
+  // The public API is the string form setCollocatedScheme(); the integer mode is the C++ switch
+  // behind it and the Python developer tier's `diagnostics.set_face_interp(5|6)`:
+  //   0  "plain"        plain ½/½ cell->face averaging + central-difference -grad(P): a consistent
+  //                     adjoint pair of the WRONG geometry (wall at the solid neighbour's centre),
+  //                     first-order drag at curved walls. Legacy, kept for reproducing results.
+  //   9  "gauge-exact"  the aperture constraint (unchanged, throat-safe, symmetric MG-PCG) with the
+  //                     directional gpCenterGrad replacing the two operators measured to be O(1)
+  //                     at cut cells -- the -grad(P) predictor and the projection's cell
+  //                     correction. SECOND ORDER on two periodic sphere beds (2.36-2.89 over
+  //                     R=5..8, +0.08 % of k_inf at R=16) where mode 0 is first order; the
+  //                     cheapest scheme measured (doc/collocated_paper_plan.md).
+  //   5/6/7 "embed"     the Basilisk embed.h port (commits db5b4aa/f5fde8c/6d412ec/03a71c6,
+  //                     doc/history/collocated_embed_port_plan.md): the FV momentum operator with
+  //                     the true-normal dirichlet_gradient wall drag applied as a defect
+  //                     correction on the IBM matrix (5 = that alone, on the wall-aware face map
+  //                     with the transpose-gradient pressure force; 6 = plus the openness-weighted
+  //                     -grad(P) predictor and cell correction, on the plain face map; 7 = 6 on
+  //                     the wall-aware face map and the solid-cut-cell sliver mask -- the
+  //                     COMPLETE port, the public "embed"). The live candidate for removing the
+  //                     collocated accuracy ceiling; 5 and 6 are its two intermediate rungs.
+  // The "ghost" scheme (setGhostProjection) is not a face-interp mode: it owns the operators the
+  // modes replace and forces mode 0 underneath itself.
+  // Modes 1, 2, 3, 4, 10, 11, 12 and 13 (pure ablations, the FV-constraint variants and the
+  // adjoint-aperture family) and the "gauge-2a" one-sided gradient branch were DELETED with their
+  // kernels at 1.0.0 (suite/docs/QUALITY_PLAN.md F); the record of what they measured is in
+  // doc/history/collocated_*.md.
   void setFaceInterp(int mode) {
-    static constexpr int kRetired[] = {1, 2, 10};
-    for (int r : kRetired)
-      if (mode == r)
-        throw std::runtime_error(
-            "set_face_interp(" + std::to_string(mode) +
-            "): retired 2026-08-18 (ablation / measured divergent). Use "
-            "set_collocated_scheme(\"gauge-exact\") — the default — or \"plain\" for the "
-            "legacy first-order aperture projection.");
-    if (mode != 0 && (mode < 3 || mode > 7) && mode != 9 && (mode < 11 || mode > 13))
-      throw std::runtime_error("set_face_interp: unknown mode " + std::to_string(mode));
+    if (mode != 0 && mode != 9 && (mode < 5 || mode > 7))
+      throw std::runtime_error(
+          "set_face_interp: mode " + std::to_string(mode) +
+          " is not one of 0 (plain), 5/6/7 (embed rungs) or 9 (gauge-exact); use "
+          "set_collocated_scheme('plain' | 'gauge-exact' | 'embed' | 'ghost')");
     if (ghostProjection_ && mode != 0)
       throw std::runtime_error(
           "set_face_interp: incompatible with the ghost projection (set_ghost_projection(False) "
@@ -876,9 +833,12 @@ class Solver {
     faceInterp_ = mode;
     colSchemeAuto_ = false;  // explicit selection disables the AUTO default
   }
-  // Preferred API for the collocated projection scheme.
-  //   "gauge-exact" (default) aperture constraint + directional (gauge-exact) pressure gradient
-  //   "plain"                 the legacy plain-average / central-difference path (first order)
+  int faceInterp() const { return faceInterp_; }
+  // Preferred API for the collocated projection scheme (the strings the Python API takes):
+  //   "ghost"        the fluid-only constraint scheme (the AUTO default where supported)
+  //   "gauge-exact"  aperture constraint + directional (gauge-exact) pressure gradient (mode 9)
+  //   "plain"        the legacy plain-average / central-difference path (mode 0, first order)
+  //   "embed"        the complete Basilisk embed.h port (mode 7)
   void setCollocatedScheme(const std::string& name) {
     if (name != "ghost" && ghostProjection_) {
       ghostProjection_ = false;  // scheme transition: drop the ghost before selecting a face mode
@@ -886,13 +846,10 @@ class Solver {
     }
     if (name == "gauge-exact") {
       setFaceInterp(9);
-      gauge2a_ = false;
-    } else if (name == "gauge-2a") {  // EXPERIMENTAL: gauge-exact with the "gradient 2a"
-      setFaceInterp(9);               // one-sided branch (see gauge_exact_gradient.hpp)
-      gauge2a_ = true;
     } else if (name == "plain") {
       setFaceInterp(0);
-      gauge2a_ = false;
+    } else if (name == "embed") {
+      setFaceInterp(7);
     } else if (name == "ghost") {
       // The fluid-only constraint scheme (route 2b, 2026-08): binary-openness divergence +
       // directional closures + gauge-exact gradient. Clean-protocol record: family-free
@@ -902,12 +859,10 @@ class Solver {
       // planned), ~1.6 KB/cell overlay (caps single-GPU size), fragmentation guard. The (1,2)
       // mixed mode stays quarantined (march-unstable on >2000-sphere beds).
       setGhostProjection(true, 2, 2);
-      gauge2a_ = false;
     } else
       throw std::runtime_error(
-          "set_collocated_scheme: expected \"gauge-exact\", \"gauge-2a\", \"plain\" or "
-          "\"ghost\", got \"" +
-          name + "\"");
+          "set_collocated_scheme: expected 'ghost', 'gauge-exact', 'plain' or 'embed', got '" +
+          name + "'");
   }
   // PM I ablation (Guy-Fogelson): keep the incremental predictor -grad(P^n) but accumulate
   // P += (rho/dt)*phi WITHOUT the rotational -mu*div(u*) term (constant-mu path only; the
@@ -940,13 +895,6 @@ class Solver {
     apertureOrder_ = order;
   }
   int apertureOrder() const { return apertureOrder_; }
-  /// Denominator floor of the capped open-face gradient (collocated mode 13). DEFAULT 0.25.
-  void setApertureFloor(double floor) {
-    if (!(floor > 0.0) || floor > 1.0)
-      throw std::runtime_error("set_aperture_floor: the floor must be in (0, 1]");
-    apertureFloor_ = floor;
-  }
-  double apertureFloor() const { return apertureFloor_; }
   /// A0 — wall velocity (not zeros) in the advection inputs' masked rows. DEFAULT true.
   void setAdvectionWallVelocity(bool on) { advWallVel_ = on; }
   bool advectionWallVelocity() const { return advWallVel_; }
@@ -1002,9 +950,6 @@ class Solver {
     rotFilter_ = on;
     rotFilterEps_ = eps;
   }
-  // Under-relaxation of the mode-4 FV wall-flux defect correction (1 = full; <1 damps the stiff
-  // explicit-lagged wall term). The steady state is independent of this value.
-  void setFvRelax(double w) { fvRelax_ = w; }
   // Seed/restore the velocity state (CUDA set_state / upload_velocity): u/v/w are inner-cell fields
   // (flat x-fastest, size nx*ny*nz); written into the velocity block + ghosts refreshed (periodic
   // wrap).
@@ -1027,10 +972,10 @@ class Solver {
     if constexpr (Grid::collocated) {
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);
-      if ((faceInterp_ >= 1 && faceInterp_ <= 5) || faceInterp_ == 7 || faceInterp_ == 10)
+      if (faceInterp_ == 5 || faceInterp_ == 7)
         centerToFaceWallAware(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u),
-                              CCConst(sdf_), CCConst(xcx_), CCConst(xcy_), CCConst(xcz_),
-                              faceInterp_ >= 3, e_, G);
+                              CCConst(sdf_), CCConst(xcx_), CCConst(xcy_), CCConst(xcz_), true,
+                              e_, G);
       else
         centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
       faceFieldValid_ = true;
@@ -2172,9 +2117,9 @@ class Solver {
           space.fence();
         }
       }
-      if constexpr (Grid::collocated) {  // static open-centroid wall distances (setFaceInterp(3))
+      if constexpr (Grid::collocated) {  // static open-centroid wall distances (wall-aware map)
         buildFaceCentroidDist(xcx_, xcy_, xcz_, CCConst(sdf_), e_);
-        buildCellFraction(cs_, CCConst(sdf_), e_, G);  // cell fluid fraction (setFaceInterp(4))
+        buildCellFraction(cs_, CCConst(sdf_), e_, G);  // cell fluid fraction (embed)
         if (faceInterp_ >= 5 &&
             faceInterp_ <= 7) {  // EMBED: a solid-CENTRED cut cell (cs>0) is partially fluid and
                                  // holds
@@ -2593,10 +2538,9 @@ class Solver {
       if (outerTol_ > 0)
         for (int c = 0; c < 3; ++c)
           Kokkos::deep_copy(prev_[c], C[c].u);
-      if (advect_ || hasBc_ || (Grid::collocated && faceInterp_ >= 4 && faceInterp_ <= 7))
+      if (advect_ || hasBc_ || (Grid::collocated && faceInterp_ >= 5 && faceInterp_ <= 7))
         for (int c = 0; c < 3; ++c)
-          fillVelGhosts(c,
-                        0);  // explicit ghosts (periodic + BC) for advect / mode-4 FV defect matvec
+          fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect / embed defect matvec
       // A0 (advective cut-wall flux): build the advection's wall-aware velocity inputs. AFTER the
       // ghost exchange, over the extended block, so ghost solid rows carry the wall velocity too.
       // No-op -- and no allocation -- unless a scene instance is moving; static scenes keep reading
@@ -5046,80 +4990,56 @@ class Solver {
     // final momentum solve actually saw.
     const bool sa = ensureAdvStash(c, adv);
     CCField ar = advRhs_[c];
-    // Mode-2 wall-aware pressure force (collocated): -grad(P) = the TRANSPOSE of the wall-aware
-    // cell->face constraint interpolation, precomputed per component (the plain path's central
-    // difference is the transpose of the plain 1/2-1/2 average, so this keeps the momentum/
-    // constraint operators an adjoint pair on both paths).
-    const bool tg = Grid::collocated && faceInterp_ >= 2 && faceInterp_ <= 5 && incr;
-    // modes 6/7: openness-weighted -grad(P^n) predictor, matching the fs-weighted correction
+    // Embed rung 5: wall-aware pressure force (collocated): -grad(P) = the TRANSPOSE of the
+    // wall-aware cell->face constraint interpolation, precomputed per component (the plain path's
+    // central difference is the transpose of the plain 1/2-1/2 average, so this keeps the
+    // momentum/constraint operators an adjoint pair on both paths).
+    const bool tg = Grid::collocated && faceInterp_ == 5 && incr;
+    // embed 6/7: openness-weighted -grad(P^n) predictor, matching the fs-weighted correction
     const bool wg = Grid::collocated && (faceInterp_ == 6 || faceInterp_ == 7) && incr;
-    // mode 11: adjoint-aperture -grad(P^n) predictor G = -(D_a Pi)^T (centerGradAperture) --
-    // support-consistent AND adjoint; matches the mode-11 correction so momentum and constraint
-    // stay one operator family.
-    const bool ag = Grid::collocated && (faceInterp_ >= 11 && faceInterp_ <= 13) && incr;
-    // ghost mode (and the mode-9/10 cutcell-ghost hybrids): directional gpCenterGrad predictor —
-    // the mode-0 central difference reads the decoupled P=0 at solid-centered cells, a
-    // gauge-dependent O(1) gradient error at every cut cell (measured O(1/h) in physical units,
+    // ghost mode and the gauge-exact scheme: directional gpCenterGrad predictor — the mode-0
+    // central difference reads the decoupled P=0 at solid-centered cells, a gauge-dependent O(1)
+    // gradient error at every cut cell (measured O(1/h) in physical units,
     // ghost_collocated_apriori.py [C2]).
-    const bool gg =
-        Grid::collocated && (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) && incr;
+    const bool gg = Grid::collocated && (ghostProjection_ || faceInterp_ == 9) && incr;
     if constexpr (Grid::collocated) {
       // Phase 2 C2: each gradient kernel carries the metric weight w_c of ITS OWN axis on its
       // output (doc/anisotropic_metric.md §3), which is why the `gpw(i)` branch of the RHS below
       // is not scaled again.
       if (gg) {
         gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G,
-                     gauge2a_, u_.w[c]);
+                     u_.w[c]);
       } else if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         transposeGradWallAware(tgp_, CCConst(P_), CCConst(sdf_), CCConst(oax[c]), CCConst(xcs[c]),
-                               faceInterp_ >= 3, c, e_, G, u_.w[c]);
+                               true, c, e_, G, u_.w[c]);
       } else if (wg) {
         CCField oax[3] = {ox_, oy_, oz_};
         centerGradOpen(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G, u_.w[c]);
-      } else if (ag) {
-        CCField oax[3] = {ox_, oy_, oz_};
-        if (faceInterp_ == 12)
-          centerGradApertureScaled(tgp_, CCConst(P_), CCConst(ox_), CCConst(oy_), CCConst(oz_), c,
-                                   e_, G, u_.w[c]);
-        else if (faceInterp_ == 13)
-          centerGradOpenCapped(tgp_, CCConst(P_), CCConst(oax[c]), c, apertureFloor_, e_, G,
-                               u_.w[c]);
-        else
-          centerGradAperture(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G, u_.w[c]);
       }
     }
-    CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg/wg/gg/ag false there)
-    // Mode-4 fully-FV momentum via DEFECT CORRECTION: solve M·u^{k+1} = M·u^k − rs·L_FV(u^k) +
+    CCConst gpw = CCConst(tgp_);  // empty view on the staggered path (tg/wg/gg false there)
+    // Embed (5/6/7) FV momentum via DEFECT CORRECTION: solve M·u^{k+1} = M·u^k − rs·L_FV(u^k) +
     // rs·b_FV so the fixed point satisfies the second-order finite-volume balance L_FV·u* = b_FV
     // exactly, with the (stable, small-cell-safe) IBM matrix M only as preconditioner. fvM_ = M·u^k
-    // (stencilMatvec), fvL_ = L_FV(u^k) (fvViscousApply: o_f faces + cs time + centroid wall drag).
-    // Interior cells: M = L_FV → the defect vanishes → byte-identical to mode 0. Stokes only
-    // (advection folds into the IBM matrix, not yet into L_FV).
+    // (stencilMatvec), fvL_ = L_FV(u^k) (embedViscousApply: o_f faces + cs time + true-normal
+    // wall drag). Interior cells: M = L_FV → the defect vanishes → byte-identical to mode 0.
+    // Stokes only (advection folds into the IBM matrix, not yet into L_FV).
     // Porous advection-form compensation (+rho*u_f*div(u)_f): see the step() comment. Off (and the
     // view untouched) on every non-porous path.
     const bool pc = porous_ && advect_;
     CCConst dv = CCConst(divAdv_);
-    const bool wd = Grid::collocated && faceInterp_ >= 4 && faceInterp_ <= 7;
+    const bool wd = Grid::collocated && faceInterp_ >= 5 && faceInterp_ <= 7;
     if constexpr (Grid::collocated)
       if (wd) {
         stencilMatvec(fvM_, CCConst(C[c].u), FPC(C[c].AC), FPC(C[c].AW), FPC(C[c].AE),
                       FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT), e_, G);
-        // modes 5/6: TRUE-NORMAL embed wall drag (embedDirichletGradient); mode 4: axis-by-axis W_a
-        // g_a
-        if (faceInterp_ >= 5)
-          embedViscousApply(fvL_, CCConst(C[c].u), CCConst(sdf_), CCConst(cs_), CCConst(ox_),
-                            CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G, u_.w[0], u_.w[1],
-                            u_.w[2], u_.hp[0], u_.hp[1], u_.hp[2]);
-        else
-          fvViscousApply(fvL_, CCConst(C[c].u), CCConst(sdf_), CCConst(cs_), CCConst(ox_),
-                         CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G, u_.w[0], u_.w[1],
-                         u_.w[2], u_.hp[0], u_.hp[1], u_.hp[2]);
+        embedViscousApply(fvL_, CCConst(C[c].u), CCConst(sdf_), CCConst(cs_), CCConst(ox_),
+                          CCConst(oy_), CCConst(oz_), mu_, rho_ / dt_, e_, G, u_.w[0], u_.w[1],
+                          u_.w[2], u_.hp[0], u_.hp[1], u_.hp[2]);
       }
     CCConst fvM = CCConst(fvM_), fvL = CCConst(fvL_), cs = CCConst(cs_);
-    const double fvw = fvRelax_;  // local copy — a KOKKOS_LAMBDA must not read a member (device
-                                  // deref of the host `this` pointer = illegal memory access)
     // b = descale*(idiag*u^n - rho*Koren(u^k) + rho*FOU(u^k) + f - grad P^n) - inhom  (+ BC fold
     // brhs). The time base is u^n (Picard); the advecting velocity & advected field are the current
     // iterate u^k.
@@ -5146,14 +5066,13 @@ class Solver {
           const double gp =
               !incr ? 0.0
               : Grid::collocated
-                  ? ((tg || wg || gg || ag) ? gpw(i)
-                                            : wc * (0.5 * (P((long)i + strd) - P((long)i - strd))))
+                  ? ((tg || wg || gg) ? gpw(i)
+                                      : wc * (0.5 * (P((long)i + strd) - P((long)i - strd))))
                   : wc * (P(i) - P((long)i - strd));
-          if (wd) {  // FV defect-correction RHS  M·u − ω·rs·(L_FV·u − b_FV),  b_FV = idt·cs·u^n +
-                     // cs·(f − grad P). ω<1 damps the (stiff, explicit-lagged) wall-flux
-                     // correction; the fixed point L_FV·u* = b_FV is independent of ω.
+          if (wd) {  // FV defect-correction RHS  M·u − rs·(L_FV·u − b_FV),  b_FV = idt·cs·u^n +
+                     // cs·(f − grad P); the fixed point L_FV·u* = b_FV.
             const double bfv = idiag * cs(i) * un(i) + cs(i) * (fc - gp);
-            bb(i) = fvM(i) - fvw * rs(i) * (fvL(i) - bfv);
+            bb(i) = fvM(i) - rs(i) * (fvL(i) - bfv);
           } else {
             const double comp = pc ? rho * uu(i) * 0.5 * (dv(i) + dv((long)i - strd)) : 0.0;
             bb(i) = rs(i) * (idiag * un(i) + fc - rho * aK + rho * aF + comp - gp) +
@@ -5187,32 +5106,18 @@ class Solver {
     // Porous advection-form compensation (+rho*u_f*div(u)_f): see the step() comment.
     const bool pc = porous_ && advect_;
     CCConst dv = CCConst(divAdv_);
-    const bool tg = Grid::collocated && faceInterp_ >= 2 && faceInterp_ <= 5 &&
-                    incr;  // wall-aware -grad(P) (mode 2/3)
-    const bool gg =
-        Grid::collocated && (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) &&
-        incr;  // directional ghost -grad(P)
-    const bool ag =
-        Grid::collocated && (faceInterp_ >= 11 && faceInterp_ <= 13) && incr;  // adjoint-aperture
+    const bool tg = Grid::collocated && faceInterp_ == 5 && incr;  // wall-aware -grad(P)
+    const bool gg = Grid::collocated && (ghostProjection_ || faceInterp_ == 9) &&
+                    incr;  // directional ghost -grad(P)
     if constexpr (Grid::collocated) {
       if (gg) {
         gpCenterGrad(tgp_, CCConst(P_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), c, e_, G,
-                     gauge2a_, u_.w[c]);
+                     u_.w[c]);
       } else if (tg) {
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         transposeGradWallAware(tgp_, CCConst(P_), CCConst(sdf_), CCConst(oax[c]), CCConst(xcs[c]),
-                               faceInterp_ >= 3, c, e_, G, u_.w[c]);
-      } else if (ag) {
-        CCField oax[3] = {ox_, oy_, oz_};
-        if (faceInterp_ == 12)
-          centerGradApertureScaled(tgp_, CCConst(P_), CCConst(ox_), CCConst(oy_), CCConst(oz_), c,
-                                   e_, G, u_.w[c]);
-        else if (faceInterp_ == 13)
-          centerGradOpenCapped(tgp_, CCConst(P_), CCConst(oax[c]), c, apertureFloor_, e_, G,
-                               u_.w[c]);
-        else
-          centerGradAperture(tgp_, CCConst(P_), CCConst(oax[c]), c, e_, G, u_.w[c]);
+                               true, c, e_, G, u_.w[c]);
       }
     }
     CCConst gpw = CCConst(tgp_);
@@ -5233,7 +5138,7 @@ class Solver {
             ar(i) = rho * (aF - aK);
           const double gp = !incr ? 0.0
                             : Grid::collocated
-                                ? ((tg || gg || ag)
+                                ? ((tg || gg)
                                        ? gpw(i)
                                        : wc * (0.5 * (P((long)i + strd) - P((long)i - strd))))
                                 : wc * (P(i) - P((long)i - strd));
@@ -6380,11 +6285,10 @@ class Solver {
       // (closed walls are openness 0).
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);
-      if ((faceInterp_ >= 1 && faceInterp_ <= 5) || faceInterp_ == 7 ||
-          faceInterp_ == 10)  // wall-aware flux map at solid
+      if (faceInterp_ == 5 || faceInterp_ == 7)  // wall-aware flux map at solid (embed 5/7)
         centerToFaceWallAware(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u),
-                              CCConst(sdf_), CCConst(xcx_), CCConst(xcy_), CCConst(xcz_),
-                              faceInterp_ >= 3, e_, G);  // faces (modes 1-5,7,10; mode 6/9 = plain)
+                              CCConst(sdf_), CCConst(xcx_), CCConst(xcy_), CCConst(xcz_), true,
+                              e_, G);
       else
         centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
       faceFieldValid_ = true;  // ISSUES sweep item 5
@@ -6730,25 +6634,24 @@ class Solver {
         // and a stationary droplet are exactly balanced on the faces, so the cell averages an exact
         // zero. This replaces the whole constant-density cell-correction chain below.
         applyCellFaceAverageCorrection();
-      } else if (ghostProjection_ || faceInterp_ == 9 || faceInterp_ == 10) {
-        // Ghost cell correction (also the mode-9/10 cutcell-ghost hybrids): the directional
-        // gpCenterGrad gradient of phi — 2nd-order one-sided at cut cells, never reads a
-        // decoupled (solid/pocket) phi. The same operator supplies the momentum's -grad(P^n)
-        // predictor (buildRhs), so the pressure force the momentum feels and the correction stay
-        // one operator family.
+      } else if (ghostProjection_ || faceInterp_ == 9) {
+        // Ghost cell correction (also the gauge-exact scheme): the directional gpCenterGrad
+        // gradient of phi — 2nd-order one-sided at cut cells, never reads a decoupled
+        // (solid/pocket) phi. The same operator supplies the momentum's -grad(P^n) predictor
+        // (buildRhs), so the pressure force the momentum feels and the correction stay one
+        // operator family.
         for (int cc = 0; cc < 3; ++cc) {
           gpCenterGrad(tgp_, CCConst(phi_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), cc, e_, G,
-                       gauge2a_, u_.w[cc]);
+                       u_.w[cc]);
           subtractField(C[cc].u, CCConst(tgp_), e_, G);
         }
-      } else if (faceInterp_ >= 2 &&
-                 faceInterp_ <= 5) {  // modes 2-5: cell correction = the TRANSPOSE of the
+      } else if (faceInterp_ == 5) {  // embed 5: cell correction = the TRANSPOSE of the
         // wall-aware map, keeping (T, Tᵀ) an adjoint pair (transposeGradWallAware)
         CCField xcs[3] = {xcx_, xcy_, xcz_};
         CCField oax[3] = {ox_, oy_, oz_};
         for (int cc = 0; cc < 3; ++cc) {
           transposeGradWallAware(tgp_, CCConst(phi_), CCConst(sdf_), CCConst(oax[cc]),
-                                 CCConst(xcs[cc]), faceInterp_ >= 3, cc, e_, G, u_.w[cc]);
+                                 CCConst(xcs[cc]), true, cc, e_, G, u_.w[cc]);
           subtractField(C[cc].u, CCConst(tgp_), e_, G);
         }
       } else if (faceInterp_ == 6 ||
@@ -6756,23 +6659,6 @@ class Solver {
         // (full open-face pressure force at cut cells) — Basilisk centered_grad
         projectCorrectCenterOpen(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
                                  CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
-      } else if (faceInterp_ >= 11 && faceInterp_ <= 13) {  // adjoint-aperture: cell correction
-        // = the TRANSPOSE of the aperture divergence of the 1/2-1/2 average, G = -(D_a Pi)^T
-        // (centerGradAperture) -- support-consistent (collapses the invisible subspace) and
-        // adjoint (SPSD Uzawa map). Mode 12 = the same times the per-cell openness rescale S(i)
-        // (centerGradApertureScaled), the accuracy repair for the 1/2*alpha under-weighting.
-        CCField oax[3] = {ox_, oy_, oz_};
-        for (int cc = 0; cc < 3; ++cc) {
-          if (faceInterp_ == 12)
-            centerGradApertureScaled(tgp_, CCConst(phi_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
-                                     cc, e_, G, u_.w[cc]);
-          else if (faceInterp_ == 13)
-            centerGradOpenCapped(tgp_, CCConst(phi_), CCConst(oax[cc]), cc, apertureFloor_, e_, G,
-                                 u_.w[cc]);
-          else
-            centerGradAperture(tgp_, CCConst(phi_), CCConst(oax[cc]), cc, e_, G, u_.w[cc]);
-          subtractField(C[cc].u, CCConst(tgp_), e_, G);
-        }
       } else {
         projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
                              CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
@@ -11573,8 +11459,7 @@ class Solver {
   bool incremental_ = true,
        pwarm_ = false;    // incremental-rotational pressure (CUDA default on) + warm-start
   bool dtDirty_ = false;  // set_dt after set_solid: momentum stencil needs a rebuild
-    int faceInterp_ = 9;    // collocated scheme: 9 = gauge-exact (DEFAULT), 0 = plain (legacy)
-  double apertureFloor_ = 0.25;  // mode-13 denominator floor (setApertureFloor)
+  int faceInterp_ = 9;  // collocated scheme: 9 = gauge-exact (DEFAULT), 0 = plain, 5/6/7 = embed
   // A0: fill the advection inputs' masked (solid) rows with the WALL velocity instead of zeros.
   // ON by default; setAdvectionWallVelocity(false) is the pre-A0 ablation. See advWallInputs.
   bool advWallVel_ = true;
@@ -11592,10 +11477,6 @@ class Solver {
   int decompLevels_ = 0;
   double decompMaxImbalance_ = 1.05;
   double aspectTheta_ = 2.0;  // mirror of the two multigrids' threshold
-  bool gauge2a_ = false;   // gauge-exact with the Guy-Fogelson "gradient 2a" one-sided branch
-                           // (set_collocated_scheme("gauge-2a"); experimental stall fix).
-                           // Single-rank exact; at rank seams the +/-3 stencil falls back to the
-                           // 2-point form (decomposition-dependent there until the halo is widened).
   bool rotationalP_ = true;  // false = PM I ablation: drop the -mu*div(u*) Timmermans term from
                              // the incremental pressure accumulation (constant-mu path only)
   bool rotFilter_ = false;   // filtered rotational: smooth div(u*) (mask-aware axis-wise 1-2-1,
@@ -11613,7 +11494,6 @@ class Solver {
   StarOverlay starOv_;     // mode-B Kron star overlay (built in setSolid)
   Kokkos::View<int, CCMem> starCounter_;
   int nStar_ = 0;
-  double fvRelax_ = 1.0;  // mode-4 FV defect-correction under-relaxation (setFvRelax)
   bool useVelocityMg_ = false;
   bool vmgExplicit_ = false;  // set_velocity_multigrid was called (AUTO rule off)
   long vmgAutoCells_ = 65536L;         // AUTO threshold, cells per rank (0 = never)
@@ -11731,10 +11611,9 @@ class Solver {
   CCField faceAcc_[3];      // rung V8 (WO-T): the collocated face velocity increment of
                             // this step (force acceleration, then minus the projection's
                             // own face correction). Allocated only on that path.
-  CCField tgp_;             // collocated: transpose-gradient scratch (setFaceInterp(2/3))
-  CCField wdef_;            // collocated: FV wall viscous-flux defect scratch (setFaceInterp(4))
-  CCField fvM_, fvL_, cs_;  // collocated: mode-4 defect scratch (M·u, L_FV·u) + cell fluid fraction
-  CCField xcx_, xcy_, xcz_;   // collocated: open-centroid wall distance per face (setFaceInterp(3))
+  CCField tgp_;             // collocated: cell pressure-gradient scratch
+  CCField fvM_, fvL_, cs_;  // collocated: embed defect scratch (M·u, L_FV·u) + cell fluid fraction
+  CCField xcx_, xcy_, xcz_;  // collocated: open-centroid wall distance per face (wall-aware map)
   CCField old_[3], prev_[3];  // u^n time base + previous Picard iterate
   Comp C[3];
   peclet::core::FieldSet fields_;     // named directory of all cell fields (velocity/p/sdf + user)
