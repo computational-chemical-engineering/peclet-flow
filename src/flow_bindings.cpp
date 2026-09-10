@@ -262,8 +262,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "(measured: np=32 weak efficiency 35% -> 62%). 'both' (DEFAULT) | 'off' | 'momentum' "
           "(the velocity RB-GS only) | 'pressure' (the pressure-multigrid coarse levels only) -- "
           "the split exists to ATTRIBUTE a measured regression to one subsystem. Set it BEFORE "
-          "init_mpi: the momentum half is latched with the halo topology, and either half is "
-          "inert on blocks smaller than 4 cells on any axis.")
+          "init_mpi (a later call raises: the momentum half is latched with the halo topology); "
+          "either half is inert on blocks smaller than 4 cells on any axis.")
       .def_prop_ro(
           "comm_avoiding",
           [](D& diag) {
@@ -390,18 +390,20 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "linear-interpolated theta in the momentum cut-cell overlay AND the ghost-projection "
            "closures. Flat array of 9*nx*ny*nz values, blocks [(c*3+k)]: component c's staggered "
            "point at inner cell i toward its +k neighbour; NaN = no crossing. Call BEFORE "
-           "set_solid; empty list clears. Single-rank, staggered momentum placement.")
+          "set_solid (a later call raises); empty list clears. Single-rank, staggered momentum "
+          "placement.")
       .def("set_openness_override", [](D& diag, const std::vector<double>& ox, const std::vector<double>& oy, const std::vector<double>& oz) { return diag.s->setOpennessOverride(ox, oy, oz); }, nb::arg("ox"), nb::arg("oy"),
            nb::arg("oz"),
            "Analytic-SDF capability: exact face-aperture (openness) fields for the cut-cell "
            "projection, overriding the sampled-SDF openness. Inner nx*ny*nz arrays, x-fastest; "
-           "ox[i] = fluid fraction of the -x face of cell i. Call BEFORE set_solid; empty ox "
-           "clears. Single-rank.")
+           "ox[i] = fluid fraction of the -x face of cell i. Call BEFORE set_solid (a later call "
+          "raises); empty ox clears. Single-rank.")
       .def("set_ghost_projection", [](D& diag, bool on, int matrixOrder, int rhsOrder) { return diag.s->setGhostProjection(on, matrixOrder, rhsOrder); }, nb::arg("on"),
            nb::arg("matrix_order") = 2, nb::arg("rhs_order") = 2,
            "QUARANTINED 2026-08-18 (verification only, unsupported): superseded by the gauge-exact collocated scheme, which matches its accuracy at 5-6x lower cost. Kept as the independent second discretization behind the cross-IBM physics gate. Enabling it on the collocated grid silently selects the plain face map, since it owns the operators the gauge-exact scheme replaces. EXPERIMENTAL directional ghost-cell projection (second staggered IBM): point-based FD "
            "divergence with wall-anchored directional closures instead of the openness-weighted "
-           "cut-cell projection; solved by MG-preconditioned BiCGStab. Call BEFORE set_solid. "
+           "cut-cell projection; solved by MG-preconditioned BiCGStab. Call BEFORE set_solid (a "
+          "later call raises). "
            "Closure orders (1=linear, 2=quadratic): (matrix_order, rhs_order) = (2,2) full "
            "quadratic 13-point matrix; (1,1) linear 7-point; (1,2) mixed/deferred — 2nd-order "
            "steady constraint on a 7-point matrix. Collocated: the same closures/matrix on the "
@@ -608,8 +610,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "with 116/600 pressure iterations, 1123 steps, the dt-limit census and both published "
           "functionals (v_rise max 0.2574 at t = 0.671, y_c(3) 1.1082) identical to every printed "
           "digit. Everything below level 0 stays float on purpose: it is a preconditioner and its "
-          "errors change the convergence RATE, never the fixed point. Call it with False AFTER "
-          "enable_vof for the ablation.")
+          "errors change the convergence RATE, never the fixed point. A flag read at every solve, "
+          "so it may be changed at any time; the ablation is False AFTER enable_vof.")
       .def(
           "pressure_exact_residual", [](D& diag) { return diag.s->pressureExactResidual(); },
           "Whether the exact level-0 operator apply is in force (see set_pressure_exact_residual).")
@@ -1536,8 +1538,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "Create a solver on an nx x ny x nz grid of UNIT cells (x-fastest, I = x + y*nx + "
            "z*nx*ny). Everything is then in cell units: the cell size is 1 and lengths, "
            "velocities and the SDF are measured in cells. Prefer the physical form "
-           "Solver((nx,ny,nz), extent=(Lx,Ly,Lz)). Set rho/mu/dt and any domain BCs before the "
-           "geometry / first step.")
+           "Solver((nx,ny,nz), extent=(Lx,Ly,Lz)). Set the domain BCs before the geometry (a later "
+           "set_domain_bc raises).")
       .def(
           "__init__",
           [](S* self, std::array<long, 3> cells, std::optional<std::array<double, 3>> extent,
@@ -1636,11 +1638,17 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "np.meshgrid(*s.cell_centers(), indexing='ij') is the grid an SDF for set_solid is "
           "sampled on. Under MPI these are the LOCAL block's centers in GLOBAL coordinates.")
       .def("set_rho", &S::setRho, nb::arg("rho"),
-           "Set fluid density rho (physical units). Set before geometry/first step.")
-      .def("set_mu", &S::setMu, nb::arg("mu"), "Set dynamic viscosity mu (physical units).")
+           "Set the fluid density rho (the caller's units). Under a physical domain the FIRST call "
+           "pins the reference density the internal scales are built on; a later change rebuilds "
+           "the momentum operator at the next step.")
+      .def("set_mu", &S::setMu, nb::arg("mu"),
+           "Set the dynamic viscosity mu (the caller's units); a change after the geometry "
+           "rebuilds the momentum operator at the next step.")
       .def("set_dt", &S::setDt, nb::arg("dt"),
-           "Set the time step dt; the momentum solve is scaled by 1/dt (well-conditioned at large "
-           "dt).")
+           "Set the time step dt (the caller's time unit); the momentum solve is scaled by 1/dt "
+           "(well-conditioned at large dt). Under a physical domain the FIRST call pins the "
+           "reference time the internal scales are built on; any later call (step_adaptive "
+           "makes them) rebuilds the momentum operator at the next step.")
       .def("set_body_force", &S::setBodyForce, nb::arg("fx"), nb::arg("fy"), nb::arg("fz"),
            "Set the body force per unit volume (fx, fy, fz) — e.g. a mean pressure gradient.")
       .def("set_advection", &S::setAdvection, nb::arg("on"),
@@ -1698,8 +1706,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "a multiple of the coarsening factor BY CONSTRUCTION and the hierarchy nests for the "
            "full requested depth. Each candidate depth is built and MEASURED, and the deepest one "
            "whose max-block/min-block ratio stays within max_imbalance (default 1.05) is taken, "
-           "else the aligned ORB. CALL BEFORE init_mpi(), and pass the SAME levels / "
-           "max_imbalance to flow.mpi_block() -- both derive the same partition and must agree.")
+           "else the aligned ORB. Call BEFORE init_mpi() (a later call raises), and pass the SAME "
+           "levels / max_imbalance to flow.mpi_block() -- both derive the same partition and must "
+           "agree.")
       .def_prop_ro("decomposition_levels", &S::decompositionLevels,
                    "This solver's decomposition mode (0 = aligned ORB, >= 2 = coarse-first with "
                    "that depth).")
@@ -2849,9 +2858,10 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "continuity this is NOT ~0 -- it equals -d(eps)/dt (the bed expanding). Use "
            "max_porous_residual() for the continuity residual.")
       .def("sync_porous_prev", &S::syncPorousPrev,
-           "Reseed eps^n = eps^{n+1} (d(eps)/dt=0 this step) — call once after the first "
-           "void-fraction "
-           "deposition so step 0 has no spurious source.")
+           "Reseed eps^n = eps^{n+1} (d(eps)/dt = 0 for the next step). Call it once the first "
+           "void-fraction field has been written into 'eps' and before the first step, so that "
+           "step sees no spurious d(eps)/dt source; any later call simply restarts the "
+           "d(eps)/dt bookkeeping from the current field.")
       .def("max_porous_residual", &S::maxPorousResidual,
            "Residual of the volume-averaged continuity max|div(open*eps*u) + d(eps)/dt| -- the "
            "quantity the porous projection drives to zero. 0 unless set_porous_continuity(True).")

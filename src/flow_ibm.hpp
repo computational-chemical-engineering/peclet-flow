@@ -476,13 +476,21 @@ class Solver {
       refreshUnitDerived();
       return;
     }
-    rho_ = r * u_.rhoToInt();
+    const double ri = r * u_.rhoToInt();
+    if (ri != rho_) {
+      rho_ = ri;
+      dtDirty_ = true;  // the momentum stencil bakes rho/dt in its diagonal (rebuildStencils)
+    }
   }
   /// Dynamic viscosity, in the caller's units. Internally the cell diffusion number
   /// mu*tRef/(rhoRef*hRef^2).
   void setMu(double m) {
     muPhys_ = m;
-    mu_ = m * u_.muToInt();
+    const double mi = m * u_.muToInt();
+    if (mi != mu_) {
+      mu_ = mi;
+      dtDirty_ = true;  // the momentum stencil bakes mu in its off-diagonals (rebuildStencils)
+    }
   }
   void setDt(double d) {
     dtPhys_ = d;
@@ -718,6 +726,10 @@ class Solver {
                           // scheme replaces, so it selects the plain face map itself rather than
                           // throwing on the (now default) gauge-exact scheme.
     }
+    if (on && geometryBuilt_)
+      throw std::runtime_error(
+          "set_ghost_projection / set_collocated_scheme('ghost'): call BEFORE set_solid -- the "
+          "ghost overlay is built with the geometry");
     if (on && (porous_ || varRho_ || hasBc_ || useChebyshev_))
       throw std::runtime_error(
           "set_ghost_projection: incompatible with porous/variable-rho/domain-BC/Chebyshev (v1)");
@@ -740,6 +752,7 @@ class Solver {
   // Python from the analytic geometry (e.g. line-sphere intersection). Call BEFORE set_solid;
   // pass an empty array to clear. Single-rank only.
   void setExactCrossings(const std::vector<double>& t) {
+    requireNoGeometry("set_exact_crossings");
     const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
     if (t.empty()) {
       hasExactCross_ = false;
@@ -767,6 +780,7 @@ class Solver {
   // nx*ny*nz); ox[i] = fluid area fraction of the -x face of cell i, etc. Call BEFORE set_solid.
   void setOpennessOverride(const std::vector<double>& ox, const std::vector<double>& oy,
                            const std::vector<double>& oz) {
+    requireNoGeometry("set_openness_override");
     const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
     if (ox.empty()) {
       hasOpenOverride_ = false;
@@ -890,6 +904,7 @@ class Solver {
   // In-solver ceiling is the trilinear field; for ANALYTIC geometry use exact/Saye apertures
   // via set_openness_override (scripts/exact_apertures_spheres.py). Call before set_solid.
   void setApertureOrder(int order) {
+    requireNoGeometry("set_aperture_order");
     if (order < 1 || order > 2)
       throw std::runtime_error("set_aperture_order: order must be 1 or 2");
     apertureOrder_ = order;
@@ -901,6 +916,10 @@ class Solver {
   /// Communication-avoiding red-black smoothing: kCaMomentum | kCaMg. DEFAULT both.
   /// Must be set BEFORE init_mpi (the momentum half is latched with the halo topology).
   void setCommAvoiding(int mask) {
+    if (distributed_)
+      throw std::runtime_error(
+          "set_comm_avoiding: call BEFORE init_mpi -- the momentum half is latched with the halo "
+          "topology");
     caMode_ = mask;
     mg_.setCommAvoiding(mask);
   }
@@ -930,12 +949,16 @@ class Solver {
   /// How the shared level-0 MPI decomposition is built. MUST be set before init_mpi, and the
   /// same values must be handed to `flow.mpi_block` — both derive the same partition.
   void setDecomposition(int levels, double maxImbalance = 1.05) {
+    if (distributed_)
+      throw std::runtime_error(
+          "set_decomposition: call BEFORE init_mpi -- the decomposition is built there");
     decompLevels_ = levels;
     decompMaxImbalance_ = maxImbalance;
   }
   int decompositionLevels() const { return decompLevels_; }
   double decompositionMaxImbalance() const { return decompMaxImbalance_; }
   void setFluidOnlyConstraint(int mode) {
+    requireNoGeometry("set_fluid_only_constraint");
     if (mode < 0 || mode > 2)
       throw std::runtime_error("set_fluid_only_constraint: mode must be 0, 1 or 2");
     fluidOnlyMode_ = mode;
@@ -1173,6 +1196,7 @@ class Solver {
   // wall,2=Dirichlet/inflow,3=outflow,4=free-slip/symmetry (zero normal velocity, zero normal
   // derivative of the tangential components, pressure Neumann like a wall; vx/vy/vz ignored).
   void setDomainBc(int face, int type, double vx, double vy, double vz) {
+    requireNoGeometry("set_domain_bc");
     if (face < 0 || face > 5)
       throw std::invalid_argument("set_domain_bc: face must be 0..5 (-x,+x,-y,+y,-z,+z)");
     if (type < 0 || type > 4)
@@ -1206,6 +1230,7 @@ class Solver {
   // Resampled (clamp) to the ghost-inclusive face grid so the BC kernel indexes it directly by face
   // position.
   void setDomainBcProfile(int face, const std::vector<double>& prof, int nb, int nc) {
+    requireNoGeometry("set_domain_bc_profile");
     // The user's (nb, nc, 3) profile is KEPT so the resampling can be redone when the block
     // changes size — the resampled buffer is indexed by LOCAL face position, so a redistribute
     // that changes this rank's face grid invalidates it (see resampleBcProfile).
@@ -2455,6 +2480,16 @@ class Solver {
     // initMpi rebuilds the block. Inert (and byte-identical) when VoF is off.
     if (vofEnabled_)
       buildVofBlock();
+    geometryBuilt_ = true;
+  }
+  bool geometryBuilt() const { return geometryBuilt_; }
+  void requireNoGeometry(const char* who) const {
+    if (geometryBuilt_)
+      throw std::runtime_error(
+          std::string(who) +
+          ": call BEFORE the geometry (set_solid / set_pressure_geometry / set_solid_from_scene) "
+          "-- this setting is folded into the operators when the geometry is built, so a later "
+          "call would be silently ignored");
   }
 
   void step() {
@@ -11458,7 +11493,11 @@ class Solver {
   int advScheme_ = 0;         // high-order advection: 0 = SOU (default), 1 = Koren TVD
   bool incremental_ = true,
        pwarm_ = false;    // incremental-rotational pressure (CUDA default on) + warm-start
-  bool dtDirty_ = false;  // set_dt after set_solid: momentum stencil needs a rebuild
+  bool dtDirty_ = false;  // set_dt/set_rho/set_mu after set_solid: momentum stencil needs a rebuild
+  // Set once setSolidDevice has built the operators. The settings that are FOLDED INTO that build
+  // (domain BCs, aperture order, exact crossings / openness overrides, the fluid-only constraint,
+  // the ghost overlay) refuse a later call instead of being silently ignored (QUALITY_PLAN F).
+  bool geometryBuilt_ = false;
   int faceInterp_ = 9;  // collocated scheme: 9 = gauge-exact (DEFAULT), 0 = plain, 5/6/7 = embed
   // A0: fill the advection inputs' masked (solid) rows with the WALL velocity instead of zeros.
   // ON by default; setAdvectionWallVelocity(false) is the pre-A0 ablation. See advWallInputs.
