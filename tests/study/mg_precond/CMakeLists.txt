@@ -5,7 +5,7 @@
 #         -DCMAKE_PREFIX_PATH=<suite>/extern/install/host-openmp
 #   cmake -S tests/study/mg_precond -B build_wom_probe_d \
 #         -DCMAKE_PREFIX_PATH=<suite>/extern/install/host-openmp \
-#         -DCMAKE_CXX_FLAGS=-DPECLET_FLOW_MREAL_DOUBLE
+#         -DCMAKE_CXX_FLAGS=-DPECLET_FLOW_OPERATOR_DOUBLE
 #
 # The two builds differ ONLY in the operator/level storage precision (mac_cutcell_mg.hpp MReal), so
 # the A/B isolates float rounding from the coarsening approximation. Analysis (skew, LDL pivots,

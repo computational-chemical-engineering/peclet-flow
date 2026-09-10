@@ -44,7 +44,7 @@ def run(N, rho=1.0, mu=0.1, dt=60.0, F=1e-3, max_steps=200):
     s.set_rho(rho)
     s.set_mu(mu)
     s.set_dt(dt)
-    s.set_body_force(F, 0.0, 0.0)
+    s.set_body_force((F, 0.0, 0.0))
     s.set_advection(False)  # creeping (Stokes) flow
     # Default solver: simple Red-Black Gauss-Seidel (matches pnm_backend's approach and per-step speed;
     # the Galerkin-multigrid/PCG path stays available via set_pressure_pcg for stiff cases).

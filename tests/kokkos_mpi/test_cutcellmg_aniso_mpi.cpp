@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
     // (rtol 1e-10 of |b|inf), and on a CUT-CELL operator a small-aperture row has a tiny effective
     // eigenvalue, so the same residual leaves a much larger solution spread than the all-fluid
     // hierarchy of test_cutcellmg_mpi does.  Measured here (max|phi| = 14.67): 1.01e-07 /
-    // 2.97e-07 relative at np = 2 / 4, and a -DPECLET_FLOW_MREAL_DOUBLE build of the identical
+    // 2.97e-07 relative at np = 2 / 4, and a -DPECLET_FLOW_OPERATOR_DOUBLE build of the identical
     // source moves it only 4x (to 2.46e-08 / 1.21e-07), so it is the stopping rule and NOT the
     // float operator storage.
     // The iteration count -- the decomposition-independence statement that actually has teeth --

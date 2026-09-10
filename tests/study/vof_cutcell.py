@@ -64,7 +64,7 @@ def stokes_state(n, steps=60, mu=0.2, force=(2e-3, 1e-3, 5e-4)):
     s.set_rho(1.0)
     s.set_mu(mu)
     s.set_dt(1.0)
-    s.set_body_force(*force)
+    s.set_body_force(force)
     s.set_solid(packing(n), cutcell_pressure=True)
     it = 0
     for _ in range(steps):

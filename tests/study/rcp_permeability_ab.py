@@ -53,7 +53,7 @@ def permeability(Ng, sdf, side, colloc, ghost, mode=0, mu=0.1, F=1e-3, dt=80.0, 
     s.set_rho(1.0)
     s.set_mu(mu)
     s.set_dt(dt)
-    s.set_body_force(F, 0, 0)
+    s.set_body_force((F, 0, 0))
     s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(150)
     s.set_pressure_multigrid(True, levels=lv)

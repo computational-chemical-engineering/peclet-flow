@@ -30,7 +30,7 @@ def drag(N, kind, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=400
     sdf = np.asfortranarray(np.sqrt(d(X) ** 2 + d(Y) ** 2 + d(Z) ** 2) - R)
     s = flow.Solver(N, N, N) if kind == "stag" else flow.SolverColocated(N, N, N)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt)
-    s.set_body_force(F, 0, 0); s.set_advection(False)
+    s.set_body_force((F, 0, 0)); s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(150)
     s.set_pressure_multigrid(True, max(2, int(np.log2(N)) - 1))
     s.set_pressure_pcg(True, 200, 1e-8)

@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
     ibmBuildDiffusion(AC, AW, AE, AS, AN, AB, AT, ex, ey, ez, beta, idiag);
 
     // build overlay on device
-    IbmOverlay ov{
+    IbmOverlayReal<float> ov{
         Kokkos::View<int*, IMem>("ci", M),   Kokkos::View<int*, IMem>("nb", M),
         Kokkos::View<float*, IMem>("dr", M), Kokkos::View<int*, IMem>("dc", (std::size_t)M * 6),
         FV("K", (std::size_t)M * 6),         FV("Mv", (std::size_t)M * 6),

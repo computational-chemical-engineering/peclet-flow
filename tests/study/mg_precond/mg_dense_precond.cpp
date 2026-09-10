@@ -14,7 +14,7 @@
 // This probe separates them. It assembles M column by column exactly as CG builds it — one
 // mean-removed unit basis vector in, one symmetric V-cycle, the result out — on the SAME code path
 // the CG drivers use, and writes the dense matrix to disk. Building this file twice, with and
-// without -DPECLET_FLOW_MREAL_DOUBLE, changes ONLY the operator storage precision. If the negative
+// without -DPECLET_FLOW_OPERATOR_DOUBLE, changes ONLY the operator storage precision. If the negative
 // pivot disappears in double, the S3 coefficient-coarsening theory loses its evidence; if it
 // survives, S3 stands as an independent mechanism.
 //
@@ -204,7 +204,7 @@ void run(const Config& cfg, const std::string& outdir) {
     }
   const double skew = std::sqrt(fs) / std::sqrt(fa + 1e-300);
 
-#ifdef PECLET_FLOW_MREAL_DOUBLE
+#ifdef PECLET_FLOW_OPERATOR_DOUBLE
   const char* prec = "double";
 #else
   const char* prec = "float";

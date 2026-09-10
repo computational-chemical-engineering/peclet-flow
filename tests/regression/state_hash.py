@@ -65,7 +65,7 @@ def sphere_fractions(shape, R, c, sub=4):
 
 def stokes_bed(cls, N=16, steps=5, scheme=None):
     s = cls(N, N, N)
-    s.set_rho(1.0); s.set_mu(0.1); s.set_dt(60.0); s.set_body_force(1e-3, 0.0, 0.0)
+    s.set_rho(1.0); s.set_mu(0.1); s.set_dt(60.0); s.set_body_force((1e-3, 0.0, 0.0))
     s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(80)
     s.set_pressure_multigrid(True, 3)
@@ -103,7 +103,7 @@ def case_channel():
     s = pf.Solver(nx, ny, nz)
     s.set_rho(1.0); s.set_mu(0.05); s.set_dt(0.5)
     s.set_advection(True); s.set_advection_scheme("koren")
-    s.set_domain_bc("-x", "inflow", 1.0, 0.0, 0.0)
+    s.set_domain_bc("-x", "inflow", (1.0, 0.0, 0.0))
     s.set_domain_bc("+x", "outflow")
     s.set_domain_bc("-y", "wall"); s.set_domain_bc("+y", "wall")
     s.set_pressure_geometry(np.asfortranarray(np.full((nx, ny, nz), 10.0)))
@@ -135,7 +135,7 @@ def case_scalar():
     s.set_rho(1.0); s.set_mu(0.05); s.set_dt(8.0)
     s.set_implicit_advection(True); s.diagnostics.set_outer_iterations(2)
     for f in ("-x", "+x", "-y", "+y"):
-        s.set_domain_bc(f, "wall", 0.0, 0.0, 0.0)
+        s.set_domain_bc(f, "wall", (0.0, 0.0, 0.0))
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, nz), 10.0)))
     alpha = 0.05 / 0.71
     s.add_scalar("T", diffusivity=alpha, scheme="koren", iters=50)
@@ -163,7 +163,7 @@ def case_porous():
     s.set_field("drag_beta", np.asfortranarray(np.full((N, N, N), 4.0)))
     s.diagnostics.exchange_field("eps"); s.diagnostics.exchange_field("drag_beta")
     s.sync_porous_prev()
-    s.set_body_force(0.0, 0.0, 0.2)
+    s.set_body_force((0.0, 0.0, 0.2))
     for _ in range(5):
         s.step()
     return s
@@ -172,7 +172,7 @@ def case_porous():
 def case_scene_moving():
     N = 16
     s = pf.Solver(N, N, N)
-    s.set_rho(1.0); s.set_mu(0.1); s.set_dt(2.0); s.set_body_force(1e-3, 0.0, 0.0)
+    s.set_rho(1.0); s.set_mu(0.1); s.set_dt(2.0); s.set_body_force((1e-3, 0.0, 0.0))
     s.set_advection(False)
     s.set_pressure_pcg(True, 200, 1e-9)
     node_ints = np.array([1, -1, -1], dtype=np.int32)      # kSphere
@@ -218,7 +218,7 @@ def case_mpi():
     lsdf = np.asfortranarray(gsdf[ox:ox + lnx, oy:oy + lny, oz:oz + lnz])
     s = pf.Solver(lnx, lny, lnz)
     s.init_mpi(N, N, N)
-    s.set_rho(1.0); s.set_mu(0.1); s.set_dt(60.0); s.set_body_force(1e-3, 0.0, 0.0)
+    s.set_rho(1.0); s.set_mu(0.1); s.set_dt(60.0); s.set_body_force((1e-3, 0.0, 0.0))
     s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(80)
     s.set_pressure_multigrid(True, 3)

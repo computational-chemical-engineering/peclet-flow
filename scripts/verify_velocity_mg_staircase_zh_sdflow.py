@@ -47,7 +47,7 @@ def run(N, phi, mode, vel_iter=200, vlevels=4, vcycles=12, mu=0.1, f=1e-3, dt=60
     """mode: 'rbgs' (plain RB-GS reference) | 'vmg' (the staircase velocity-MG, via set_velocity_multigrid)."""
     sdf, R = sc_sdf(N, phi)
     s = sdflow.Solver(N, N, N)
-    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(f, 0, 0); s.set_advection(False)
+    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force((f, 0, 0)); s.set_advection(False)
     if mode == "rbgs":
         s.diagnostics.set_velocity_solver_params(vel_iter)
     else:

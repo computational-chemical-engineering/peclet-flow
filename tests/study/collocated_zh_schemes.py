@@ -33,7 +33,7 @@ def drag(N, scheme, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=4
     sdf, R = sphere_sdf(N, PHI0)
     s = flow.SolverColocated(N, N, N)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt)
-    s.set_body_force(F, 0, 0); s.set_advection(False)
+    s.set_body_force((F, 0, 0)); s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(150)
     s.set_pressure_multigrid(True, max(2, int(np.log2(N)) - 1))
     s.set_pressure_pcg(True, 200, 1e-8)

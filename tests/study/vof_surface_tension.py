@@ -236,8 +236,8 @@ def gate_wave():
         s = pf.Solver(nx, ny, nz)
         s.set_rho(rho)
         s.set_mu(nu * rho)
-        s.set_domain_bc("-z", "wall", 0, 0, 0)
-        s.set_domain_bc("+z", "wall", 0, 0, 0)
+        s.set_domain_bc("-z", "wall", (0, 0, 0))
+        s.set_domain_bc("+z", "wall", (0, 0, 0))
         s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
         s.set_pressure_chebyshev(True, 500, 1e-11)
         s.enable_vof()
@@ -407,8 +407,8 @@ def gate_hysing(case=1, nx=64):
     s = pf.Solver(nx, ny, nz)
     s.set_rho(p["rho1"])
     s.set_mu(sc.mu(p["mu1"]))
-    s.set_domain_bc("-z", "wall", 0, 0, 0)
-    s.set_domain_bc("+z", "wall", 0, 0, 0)  # no-slip top/bottom, as the benchmark prescribes
+    s.set_domain_bc("-z", "wall", (0, 0, 0))
+    s.set_domain_bc("+z", "wall", (0, 0, 0))  # no-slip top/bottom, as the benchmark prescribes
     s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
     s.set_pressure_chebyshev(True, 600, 1e-12)
     s.enable_vof()

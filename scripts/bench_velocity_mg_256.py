@@ -35,7 +35,7 @@ def cavity(N, nz, Re, dt, mode, U=1.0, nsteps=200, vcyc=4, vel_iter=60, outer=2,
         s.set_domain_bc(f, "wall")
     if nz > 1:
         s.set_domain_bc("-z", "wall"); s.set_domain_bc("+z", "wall")
-    s.set_domain_bc("+y", "inflow", U, 0.0, 0.0)               # +y lid
+    s.set_domain_bc("+y", "inflow", (U, 0.0, 0.0))               # +y lid
     s.diagnostics.set_velocity_solver_params(vel_iter)
     if mode in ("vmg", "vmg_fou"):
         s.set_velocity_multigrid(True, 8, vcyc)

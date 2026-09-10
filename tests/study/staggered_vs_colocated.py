@@ -55,7 +55,7 @@ def run_one(sdflow, case, regime, solver, N, mu_override=None):
     sdf, info = CASES[case]["sdf"](N)
     levels = max(2, int(np.floor(np.log2(N))) - 1)
     s = make_solver(sdflow, solver, N)
-    s.set_rho(cfg["rho"]); s.set_mu(mu); s.set_dt(cfg["dt"]); s.set_body_force(cfg["F"], 0.0, 0.0)
+    s.set_rho(cfg["rho"]); s.set_mu(mu); s.set_dt(cfg["dt"]); s.set_body_force((cfg["F"], 0.0, 0.0))
     s.set_advection(cfg["advect"])
     if cfg["implicit"]:
         s.set_implicit_advection(True); s.diagnostics.set_outer_iterations(cfg["outer"]); s.diagnostics.set_outer_tolerance(1e-4)
@@ -147,7 +147,7 @@ def cmd_mem(args):
         base = gpu_mem_mb()
         sdf, _ = sdf_random_spheres(N)
         s = make_solver(sdflow, solver, N)
-        s.set_rho(1.0); s.set_mu(0.1); s.set_dt(60.0); s.set_body_force(1e-3, 0, 0)
+        s.set_rho(1.0); s.set_mu(0.1); s.set_dt(60.0); s.set_body_force((1e-3, 0, 0))
         s.set_pressure_pcg(True, 300, 1e-8); s.set_solid(sdf, cutcell_pressure=True)
         s.step()
         peak = gpu_mem_mb()

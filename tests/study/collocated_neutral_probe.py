@@ -59,7 +59,7 @@ fluid = sdf >= 0.0
 def make():
     s = (flow.Solver if KIND == "stag" else flow.SolverColocated)(N, N, N)
     s.set_rho(1.0); s.set_mu(MU); s.set_dt(DT)
-    s.set_body_force(F0, 0, 0); s.set_advection(False)
+    s.set_body_force((F0, 0, 0)); s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(150)
     s.set_pressure_multigrid(True, max(2, int(np.log2(N)) - 2))
     s.set_pressure_pcg(True, 300, 1e-8)

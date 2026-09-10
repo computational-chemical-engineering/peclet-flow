@@ -31,7 +31,7 @@ def run(chebyshev, max_steps=200):
     sdf = np.asfortranarray(packing_sdf(N))
     s = sdflow.Solver(N, N, N)
     s.set_rho(1.0); s.set_mu(MU); s.set_dt(DT)
-    s.set_body_force(F, 0.0, 0.0)
+    s.set_body_force((F, 0.0, 0.0))
     s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(80)
     s.set_pressure_multigrid(True, 4)

@@ -2,8 +2,8 @@
 """WO-M step 2 — what does the solver's fp32 operator storage actually COST us?
 
 The solver stores its multigrid operator (`mac_cutcell_mg.hpp` MReal) and its momentum stencil
-(`flow_ibm.hpp` FV) in float. `-DPECLET_FLOW_MREAL_DOUBLE` switches both to double. This script is
-the A/B: run it against a default build and against a `-DPECLET_FLOW_MREAL_DOUBLE` build of the same
+(`flow_ibm.hpp` FV) in float. `-DPECLET_FLOW_OPERATOR_DOUBLE` switches both to double. This script is
+the A/B: run it against a default build and against a `-DPECLET_FLOW_OPERATOR_DOUBLE` build of the same
 commit, and diff the JSON. It measures ACCURACY and COST on cases we actually ship, not on synthetic
 ones, because a precision change that costs 2x operator bandwidth for an accuracy nobody needs is
 not worth shipping.
@@ -104,8 +104,8 @@ def case_hydro(ratios=(1e1, 1e2, 1e3, 1e4, 1e5, 1e6), N=8, NZ=24, g=0.1, steps=1
         s.set_rho(1.0)
         s.set_mu(0.0)          # inviscid: the balance is exact
         s.set_dt(1.0)
-        s.set_domain_bc("-z", "wall", 0, 0, 0)
-        s.set_domain_bc("+z", "wall", 0, 0, 0)
+        s.set_domain_bc("-z", "wall", (0, 0, 0))
+        s.set_domain_bc("+z", "wall", (0, 0, 0))
         s.set_pressure_geometry(np.asfortranarray(np.full((N, N, NZ), 10.0)))
         rho = np.empty((N, N, NZ), order="F")
         zs = np.arange(NZ)
@@ -166,7 +166,7 @@ def case_porous(N=16, beta=4.0, f_drive=0.2, eps=0.6, dt=0.5, steps=200):
     s.diagnostics.exchange_field("eps")
     s.diagnostics.exchange_field("drag_beta")
     s.sync_porous_prev()
-    s.set_body_force(0.0, 0.0, f_drive)
+    s.set_body_force((0.0, 0.0, f_drive))
     pit = 0
     for _ in range(steps):
         s.step()
@@ -197,7 +197,7 @@ def case_contrast(Ngs=(48, 64, 96), steps=4, maxit=300, rtol=1e-8, driver="pcg")
         s.set_rho(1.0)
         s.set_mu(0.1)
         s.set_dt(80.0)
-        s.set_body_force(1e-3, 0, 0)
+        s.set_body_force((1e-3, 0, 0))
         s.set_advection(False)
         s.diagnostics.set_velocity_solver_params(150)
         s.set_pressure_multigrid(True, levels=lv)
@@ -233,7 +233,7 @@ def case_zh(Ns=(32, 48, 64), phi=0.125, mu=0.1, F=1e-3, dt=None, max_steps=600, 
         s.set_rho(1.0)
         s.set_mu(mu)
         s.set_dt(dt if dt else 60.0)
-        s.set_body_force(F, 0, 0)
+        s.set_body_force((F, 0, 0))
         s.set_advection(False)
         s.diagnostics.set_velocity_solver_params(120)
         s.set_pressure_multigrid(True, levels=max(2, int(np.log2(N)) - 1))
@@ -271,7 +271,7 @@ def case_perm(Ngs=(44, 56), mu=0.1, F=1e-3, dt=80.0, max_steps=3000, tol=1e-6):
         s.set_rho(1.0)
         s.set_mu(mu)
         s.set_dt(dt)
-        s.set_body_force(F, 0, 0)
+        s.set_body_force((F, 0, 0))
         s.set_advection(False)
         s.diagnostics.set_velocity_solver_params(150)
         s.set_pressure_multigrid(True, levels=lv)
@@ -308,7 +308,7 @@ def case_cost(Ngs=(64, 96, 128), steps=10, warmup=3):
         s.set_rho(1.0)
         s.set_mu(0.1)
         s.set_dt(80.0)
-        s.set_body_force(1e-3, 0, 0)
+        s.set_body_force((1e-3, 0, 0))
         s.set_advection(False)
         s.diagnostics.set_velocity_solver_params(150)
         s.set_pressure_multigrid(True, levels=lv)
@@ -366,7 +366,7 @@ def case_trace(Ng=96, steps=2, maxit=300, rtol=1e-8, driver="pcg", levels=None):
     s.set_rho(1.0)
     s.set_mu(0.1)
     s.set_dt(80.0)
-    s.set_body_force(1e-3, 0, 0)
+    s.set_body_force((1e-3, 0, 0))
     s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(150)
     s.set_pressure_multigrid(True, levels=lv)

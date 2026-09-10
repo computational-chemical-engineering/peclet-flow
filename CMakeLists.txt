@@ -40,6 +40,21 @@ option(PECLET_FLOW_MPI "Build the flow module with the distributed (MPI) step ex
 # by the peclet-flow-cu13 packaging (packaging/pyproject-cuda.toml + the release workflow's cuda job).
 option(PECLET_CUDA_RUNTIME_WHEEL "RPATH the modules to the nvidia-cuda-runtime wheel's libcudart" OFF)
 
+# Operator storage precision (QUALITY_PLAN G.6, suite/docs/SCALING_ISSUES.md #1): OFF (default)
+# keeps MReal (mac_cutcell_mg.hpp) = float -- the pressure hierarchy AND, via IbmSolver::FV /
+# IbmOverlay, the momentum + cut-cell overlay storage. ON makes the whole operator double end to
+# end (+~12% step time); float rounding breaks the singular row-sum identity A.1 = 0 and a dense
+# cut-cell bed's residual floors then REBOUNDS -- the run is invalid, not merely degraded. This
+# used to be reachable only via a raw, untested `-DCMAKE_CXX_FLAGS=-DPECLET_FLOW_OPERATOR_DOUBLE`
+# (renamed from PECLET_FLOW_MREAL_DOUBLE); it is now `pip install . -C
+# cmake.define.PECLET_FLOW_OPERATOR_DOUBLE=ON` like every other option here. Directory-scoped so
+# every target in this tree (the module, tests/kokkos, tests/kokkos_mpi) sees the same macro.
+option(PECLET_FLOW_OPERATOR_DOUBLE "Operator (pressure + momentum + cut-cell overlay) storage in double, not float" OFF)
+if(PECLET_FLOW_OPERATOR_DOUBLE)
+  add_compile_definitions(PECLET_FLOW_OPERATOR_DOUBLE=1)
+  message(STATUS "flow: operator storage precision = DOUBLE (+~12% step time; see CLAUDE.md)")
+endif()
+
 # Test suites in this tree (suite/docs/QUALITY_PLAN.md §3.D): OFF by default so a wheel build is
 # unaffected; ON in CI and in the CLAUDE.md dev recipe. tests/kokkos and tests/kokkos_mpi remain
 # configurable standalone as well (their project() is guarded).
@@ -133,6 +148,13 @@ if(PECLET_FLOW_BUILD_TESTS)
            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_no_env_knobs.py
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(no_env_knobs PROPERTIES LABELS quality)
+  # QUALITY_PLAN G.6: no hard (float) cast / float-typed view on the operator-storage path outside
+  # the allow-list (mreal/MReal must be used, or the line carries a PRECISION-EXEMPT reason).
+  add_test(NAME no_float_operator_casts
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_no_float_operator_casts.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(no_float_operator_casts PROPERTIES LABELS quality)
 endif()
 
 # --- pip / scikit-build-core install rule -------------------------------------------------------

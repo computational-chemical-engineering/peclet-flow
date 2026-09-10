@@ -36,7 +36,7 @@ def run(vmg, dt, fx, n_steps, vlevels=3, vcycles=10, to_steady=False):
     s.set_rho(1.0)
     s.set_mu(NU)
     s.set_dt(dt)
-    s.set_body_force(fx, 0.0, 0.0)
+    s.set_body_force((fx, 0.0, 0.0))
     s.set_advection(True)
     s.set_implicit_advection(True)
     s.diagnostics.set_outer_iterations(3)

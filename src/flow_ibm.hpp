@@ -428,16 +428,17 @@ class Solver {
       bcDcorr_[c] = CCField("dcorr", n_);
       bcBrhs_[c] = CCField("brhs", n_);
       const int maxCut = nx * ny * nz;
-      using FV32 = Kokkos::View<float*, CCMem>;  // IbmOverlay row data stays float
+      // G.6: IbmOverlay row data follows MReal (was hardcoded float -- FV32) so a
+      // -DPECLET_FLOW_OPERATOR_DOUBLE build carries the overlay in double end to end.
       C[c].ov = IbmOverlay{Kokkos::View<int*, CCMem>("ci", maxCut),
                            Kokkos::View<int*, CCMem>("nb", maxCut),
-                           FV32("dr", maxCut),
+                           FV("dr", maxCut),
                            Kokkos::View<int*, CCMem>("dc", (std::size_t)maxCut * 6),
-                           FV32("K", (std::size_t)maxCut * 6),
-                           FV32("M", (std::size_t)maxCut * 6),
-                           FV32("X", (std::size_t)maxCut * 6),
-                           FV32("Nbc", (std::size_t)maxCut * 6),
-                           FV32("R", (std::size_t)maxCut * 6)};
+                           FV("K", (std::size_t)maxCut * 6),
+                           FV("M", (std::size_t)maxCut * 6),
+                           FV("X", (std::size_t)maxCut * 6),
+                           FV("Nbc", (std::size_t)maxCut * 6),
+                           FV("R", (std::size_t)maxCut * 6)};
       C[c].idMap = Kokkos::View<int*, CCMem>("idMap", n_);
       C[c].counter = Kokkos::View<int, CCMem>("cnt");
       old_[c] = CCField("uOld", n_);    // u^n time base (fixed over the step's Picard sweeps)
@@ -1195,13 +1196,24 @@ class Solver {
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip
   // wall,2=Dirichlet/inflow,3=outflow,4=free-slip/symmetry (zero normal velocity, zero normal
   // derivative of the tangential components, pressure Neumann like a wall; vx/vy/vz ignored).
+  // Call order (QUALITY_PLAN F milestone iv, refined 2026-09-10): the TYPE decides the operator
+  // openness (wall/inflow closed, outflow open, periodic) and the stencil path, so only a TYPE
+  // CHANGE has to precede the geometry; a VALUE update on a face whose type is unchanged (ramping
+  // an inflow jet, a lid's tangential speed) is allowed at any time and takes effect the next
+  // step -- see the refresh below.
   void setDomainBc(int face, int type, double vx, double vy, double vz) {
-    requireNoGeometry("set_domain_bc");
     if (face < 0 || face > 5)
       throw std::invalid_argument("set_domain_bc: face must be 0..5 (-x,+x,-y,+y,-z,+z)");
     if (type < 0 || type > 4)
       throw std::invalid_argument(
           "set_domain_bc: type must be 0 periodic / 1 wall / 2 inflow / 3 outflow / 4 free-slip");
+    const bool valueUpdateOnly = geometryBuilt_ && type == bc_[face];
+    if (geometryBuilt_ && !valueUpdateOnly)
+      throw std::runtime_error(
+          "set_domain_bc: call BEFORE the geometry (set_solid / set_pressure_geometry / "
+          "set_solid_from_scene) to CHANGE a face's TYPE -- the type is folded into the "
+          "operators when the geometry is built. A VALUE update (vx, vy, vz) on a face whose "
+          "type is unchanged is allowed after the geometry.");
     // WO-P3g: the "does this cell carry a row" mask depends on which domain faces are periodic.
     pcInDomain_ = CCField();
     bc_[face] = type;
@@ -1224,13 +1236,28 @@ class Solver {
     // contact angle: `buildVofGeometry` then takes exactly the branch it took before.
     if (vofEnabled_)
       buildVofGeometry();
+    // A VALUE update on an already-built staggered geometry: setupBcDiffusion() bakes bcVel_'s
+    // TANGENTIAL component into the implicit-diffusion fold (bcDcorr_/bcBrhs_) once, at geometry
+    // time -- ghost fills read bcVel_ live every step (the NORMAL component takes effect on its
+    // own), but the fold does not, so a lid-driven cavity ramping its lid's tangential velocity
+    // after set_solid would silently keep stepping on the OLD speed without this refresh. The
+    // collocated grid uses explicit reflection ghosts (no fold) and needs none.
+    if (valueUpdateOnly && hasBc_ && !Grid::collocated)
+      setupBcDiffusion();
   }
   // per-position inlet velocity profile on `face` (CUDA set_domain_bc_profile): prof is (nb,nc,3)
   // on the inner grid of the face's two perpendicular axes; sets the face to inflow (type 2).
   // Resampled (clamp) to the ghost-inclusive face grid so the BC kernel indexes it directly by face
-  // position.
+  // position. Same call-order rule as set_domain_bc: allowed after the geometry only when the
+  // face is ALREADY inflow (a profile VALUE update), since that is the one case that does not
+  // change the type the operators were built with.
   void setDomainBcProfile(int face, const std::vector<double>& prof, int nb, int nc) {
-    requireNoGeometry("set_domain_bc_profile");
+    if (geometryBuilt_ && bc_[face] != 2)
+      throw std::runtime_error(
+          "set_domain_bc_profile: call BEFORE the geometry (set_solid / set_pressure_geometry / "
+          "set_solid_from_scene) to make a face inflow -- the type is folded into the operators "
+          "when the geometry is built. Updating the profile on a face that is ALREADY inflow is "
+          "allowed after the geometry.");
     // The user's (nb, nc, 3) profile is KEPT so the resampling can be redone when the block
     // changes size — the resampled buffer is indexed by LOCAL face position, so a redistribute
     // that changes this rank's face grid invalidates it (see resampleBcProfile).
@@ -1895,7 +1922,7 @@ class Solver {
   void buildVelocityOverlays(bool resetU) {
     const bool useEx = hasExactCross_ && !Grid::collocated;  // exact-theta arrays are for the
                                                              // staggered point placement
-    const float lam = (float)(wallSlip_ ? slipLambda_ : 0.0);
+    const mreal lam = (mreal)(wallSlip_ ? slipLambda_ : 0.0);
     if (lam > 0.0f && slipSkipDev_.data() == nullptr)
       slipSkipDev_ = Kokkos::View<int, CCMem>("peclet::flow::slipSkip");
     for (int c = 0; c < 3; ++c) {
@@ -1909,7 +1936,7 @@ class Solver {
           lam > 0.0f ? slipSkipDev_
                      : Kokkos::View<int, CCMem>(),   // SCHEME 0 = point-value (matches CUDA
                                                      // ibm_geometry_ext_k<0>)
-          (float)u_.hp[0], (float)u_.hp[1], (float)u_.hp[2]);  // §6.4 slip metric (trap 9)
+          (mreal)u_.hp[0], (mreal)u_.hp[1], (mreal)u_.hp[2]);  // §6.4 slip metric (trap 9)
       if (lam > 0.0f) {
         int sk = 0;
         Kokkos::deep_copy(sk, slipSkipDev_);
@@ -1944,21 +1971,27 @@ class Solver {
   /// round-trips through the host. This is the body every set_solid path shares.
   void setSolidDevice(CCField din, bool cutcellPressure) {
     cutcellPressure_ = cutcellPressure;
-    // A few setup paths below (the ghost-projection pocket decoupling) are host-side
-    // connected-component analyses and genuinely need the inner SDF on the host. Materialise it
-    // ONCE, lazily, so the common path keeps the device-resident benefit.
-    std::vector<double> sdfInnerHost_;
-    auto sdfInner_ = [&]() -> const std::vector<double>& {
-      if (sdfInnerHost_.empty()) {
-        const std::size_t nI = (std::size_t)nx_ * ny_ * nz_;
-        sdfInnerHost_.resize(nI);
-        Kokkos::deep_copy(
-            Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
-                sdfInnerHost_.data(), nI),
-            din);
-      }
-      return sdfInnerHost_;
-    };
+    setSolidSelectScheme();
+    setSolidUploadSdf(din);
+    setSolidBuildOverlaysAndStencils();
+    setSolidVelocityMgAuto();
+    setSolidInitVelocityMg();
+    if (cutcellPressure_) {
+      setSolidBuildOpenness();
+      setSolidStarOverlay();
+      setSolidGhostProjectionOverlay(din);
+      setSolidInitPressureMg();
+    }
+    // Rung V5a (WO-Q): the colour block's cut-cell geometry is derived from the openness and the
+    // SDF that were just rebuilt, so set_solid AFTER enable_vof must rebuild it — the same reason
+    // initMpi rebuilds the block. Inert (and byte-identical) when VoF is off.
+    if (vofEnabled_)
+      buildVofBlock();
+    geometryBuilt_ = true;
+  }
+  // ---- setSolidDevice stages (QUALITY_PLAN G.1): pure cut-and-paste, each a contiguous
+  // block of the original function sharing only member fields and a CCExec. ----
+  void setSolidSelectScheme() {
     if constexpr (Grid::collocated) {
       // DEFAULT SWITCH (2026-08-25, user decision after the attractor campaign): the collocated
       // scheme default is AUTO = the GHOST (fluid-only) projection — family-free, unconditionally
@@ -1988,6 +2021,8 @@ class Solver {
         }
       }
     }
+  }
+  void setSolidUploadSdf(CCField din) {
 #ifdef PECLET_FLOW_MPI
     for (bool& d : momStencilDirty_)  // stencil ring re-exchange for the CA momentum sweeps
       d = true;
@@ -2048,6 +2083,8 @@ class Solver {
           });
       space.fence();
     }
+  }
+  void setSolidBuildOverlaysAndStencils() {
     // FREE-SLIP / symmetry faces (type 4): the periodic/halo fill above wrapped the OPPOSITE side
     // of the domain into the ghost band, so a wall at the far side becomes a phantom solid ON the
     // symmetry plane (measured: a half Poiseuille channel closed by a type-4 face read u ~ 0
@@ -2065,6 +2102,8 @@ class Solver {
     // explicit reflection ghosts (refreshed each smoother sweep), so it needs no fold.
     if (hasBc_ && !Grid::collocated)
       setupBcDiffusion();
+  }
+  void setSolidVelocityMgAuto() {
 #ifdef PECLET_FLOW_MPI
     // AUTO: pick the V-cycle when the per-rank block is small (see setVelocityMultigridAuto). The
     // decision uses the GLOBAL cells / ranks, so every rank agrees without communication. Only on
@@ -2088,6 +2127,8 @@ class Solver {
       }
     }
 #endif
+  }
+  void setSolidInitVelocityMg() {
     if (useVelocityMg_) {  // velocity-MG hierarchy: IBM (staircase/upwind), domain-BC
                            // (const-coeff) or mixed (staircase + folds) mode
       // The per-axis metric BEFORE the hierarchy is built (doc/anisotropic_metric.md trap 5):
@@ -2109,7 +2150,8 @@ class Solver {
         vmgClean_ = CCField("vmgClean", n_);
       }
     }
-    if (cutcellPressure_) {
+  }
+  void setSolidBuildOpenness() {
       // Phase 2 C2 (doc/anisotropic_metric.md §4.5, trap 7): buildOpenness has taken dx,dy,dz
       // all along and was handed 1.0 — `ccFractionCore` (the order-1 aperture model) forms the
       // gradient (s+ - s-)/(2 dx) and the face extent |n_b| dy + |n_c| dz on the index lattice, so
@@ -2215,6 +2257,8 @@ class Solver {
       copyInner(ox1_, e1_, 1, CCConst(ox_), e_, G);  // bridge openness g=2 -> g=1 for the MG
       copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
       copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
+  }
+  void setSolidStarOverlay() {
       if (fluidOnlyMode_ == 2) {
         // Design B: the MG hierarchy is built from the FILTERED openness (Design A's operator,
         // the symmetric surrogate preconditioner + the 7-point part of the true operator); the
@@ -2250,6 +2294,23 @@ class Solver {
         buildStarOverlay(CCConst(sdf_), CCConst(ox_), CCConst(oy_), CCConst(oz_), e_, G, nn,
                          starOv_, starCounter_);
       }
+  }
+  void setSolidGhostProjectionOverlay(CCField din) {
+    // A few setup paths below (the ghost-projection pocket decoupling) are host-side
+    // connected-component analyses and genuinely need the inner SDF on the host. Materialise it
+    // ONCE, lazily, so the common path keeps the device-resident benefit.
+    std::vector<double> sdfInnerHost_;
+    auto sdfInner_ = [&]() -> const std::vector<double>& {
+      if (sdfInnerHost_.empty()) {
+        const std::size_t nI = (std::size_t)nx_ * ny_ * nz_;
+        sdfInnerHost_.resize(nI);
+        Kokkos::deep_copy(
+            Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+                sdfInnerHost_.data(), nI),
+            din);
+      }
+      return sdfInnerHost_;
+    };
       if (ghostProjection_) {
         // Directional ghost-cell projection: build the closure overlay + the binary (COUPLED)
         // openness. The binary field replaces the geometric openness on the MG rails (the MG
@@ -2449,6 +2510,8 @@ class Solver {
         copyInner(oy1_, e1_, 1, CCConst(oyb_), e_, G);
         copyInner(oz1_, e1_, 1, CCConst(ozb_), e_, G);
       }
+  }
+  void setSolidInitPressureMg() {
       mg_.setBoundaryConditions(bc_);  // per-level wall openness + null-space gating (no-op if
                                        // periodic); BEFORE initMpi — the per-level ghost width
                                        // (CA smoothing) is chosen for the periodic operator only
@@ -2474,13 +2537,6 @@ class Solver {
       mg_.setAgglomerationMode(pressGraphAmg_ ? 1 : pressAgglomMode_);
       Kokkos::deep_copy(phi_, 0.0);
       Kokkos::deep_copy(P_, 0.0);
-    }
-    // Rung V5a (WO-Q): the colour block's cut-cell geometry is derived from the openness and the
-    // SDF that were just rebuilt, so set_solid AFTER enable_vof must rebuild it — the same reason
-    // initMpi rebuilds the block. Inert (and byte-identical) when VoF is off.
-    if (vofEnabled_)
-      buildVofBlock();
-    geometryBuilt_ = true;
   }
   bool geometryBuilt() const { return geometryBuilt_; }
   void requireNoGeometry(const char* who) const {
@@ -2920,7 +2976,7 @@ class Solver {
   // measuring (its own comment says so) — which both destroys `bcCorrectOutflow`'s correction as a
   // side effect and reports the divergence of a field the solver never used. On an open-boundary
   // two-phase box that artefact is the dominant number: measured 5e-3, flat in the iteration
-  // count, flat in the density ratio and bit-identical in a `-DPECLET_FLOW_MREAL_DOUBLE` build —
+  // count, flat in the density ratio and bit-identical in a `-DPECLET_FLOW_OPERATOR_DOUBLE` build —
   // i.e. not a solver residual at all. This sibling fills the ghosts with `doOutflow = false`,
   // exactly as `step()` does after `project()`, and leaves the velocity field alone.
   //
@@ -2937,7 +2993,7 @@ class Solver {
       return maxOpenDivergenceInternal();  // the collocated branch already measures the face
                                           // field
     for (int c = 0; c < 3; ++c)
-      fillVelGhostsKeepOutflow(c);
+      fillVelGhostsTo(C[c].u, c, 0, false);
     divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
                CCConst(oz_), div_, e_, G);
     addWallFluxDivergence(div_);
@@ -3719,7 +3775,7 @@ class Solver {
       // the zero-gradient fill is exactly what supplies that face, so run the full one.
       // With no outflow face at all the two are identical.
       if (outflowCorrValid_)
-        fillVelGhostsKeepOutflow(c);
+        fillVelGhostsTo(C[c].u, c, 0, false);
       else
         fillVelGhosts(c, 0);
       // The uniform face-velocity seam (getFaceVelocity): staggered C[c].u already lives on the
@@ -6116,33 +6172,20 @@ class Solver {
     applyVelocityBcCompTo(C[comp].u, comp, fold, doOutflow);
   }
   // Field-parameterized variants (so the velocity-MG can re-impose the BC on its own level-0
-  // iterate).
-  void fillVelGhostsTo(CCField f, int comp, int fold) {
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      velDev_->exchange(f);
-      applyVelocityBcCompTo(f, comp, fold, true);
-      return;
-    }
-#endif
-    for (int a = 0; a < 3; ++a)
-      if (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0)
-        fillAxis(f, a);
-    applyVelocityBcCompTo(f, comp, fold, true);
-  }
-  // SIBLING of fillVelGhostsTo that does NOT re-impose the zero-gradient OUTFLOW face
-  // (`doOutflow = false`, exactly what `step()` already passes after `project()` — "keep
-  // outflow"). Used ONLY by `bridgeVelocityToVof`.
+  // iterate). `doOutflow = false` is the SIBLING behaviour merged in here (was
+  // `fillVelGhostsKeepOutflow`, used ONLY by `bridgeVelocityToVof` and the two call sites below,
+  // always with `fold = 0`): it does NOT re-impose the zero-gradient OUTFLOW face — exactly what
+  // `step()` already passes after `project()` ("keep outflow").
   //
-  // WHY IT EXISTS (WO-R; a defect found by gate F2). The projection corrects the high-side
-  // OUTFLOW normal face separately from every other face (`bcCorrectOutflow`) — that correction
-  // IS how mass leaves the domain, and `step()` deliberately re-imposes the domain BCs afterwards
-  // with `doOutflow = false` so it survives. `bridgeVelocityToVof` then called the FULL
-  // `fillVelGhosts` (`doOutflow = true`), whose `bcOutflowComp` overwrites the boundary face with
-  // the zero-gradient copy of the last inner cell — erasing the correction immediately after the
-  // projection made it, on every step, whenever VoF is enabled.
+  // WHY THE `doOutflow = false` PATH EXISTS (WO-R; a defect found by gate F2). The projection
+  // corrects the high-side OUTFLOW normal face separately from every other face
+  // (`bcCorrectOutflow`) — that correction IS how mass leaves the domain, and `step()` deliberately
+  // re-imposes the domain BCs afterwards with `doOutflow = false` so it survives. `bridgeVelocityToVof`
+  // used to call the FULL fill (`doOutflow = true`), whose `bcOutflowComp` overwrites the boundary
+  // face with the zero-gradient copy of the last inner cell — erasing the correction immediately
+  // after the projection made it, on every step, whenever VoF is enabled.
   //
-  // Two measured consequences, both of which vanish with this sibling
+  // Two measured consequences, both of which vanish with `doOutflow = false`
   // (`tests/kokkos/test_vof_bc.cpp` gate F2):
   //   * the field the colour advector is handed is NOT discretely divergence-free at the outflow,
   //     which is precisely the hypothesis Weymouth-Yue's exact conservation rests on;
@@ -6154,19 +6197,18 @@ class Solver {
   //
   // Inert for everything that existed: `bridgeVelocityToVof` runs only under `enable_vof`, and no
   // VoF configuration before this rung combined VoF with an outflow face.
-  void fillVelGhostsKeepOutflow(int comp) {
-    CCField f = C[comp].u;
+  void fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow = true) {
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       velDev_->exchange(f);
-      applyVelocityBcCompTo(f, comp, 0, false);
+      applyVelocityBcCompTo(f, comp, fold, doOutflow);
       return;
     }
 #endif
     for (int a = 0; a < 3; ++a)
       if (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0)
         fillAxis(f, a);
-    applyVelocityBcCompTo(f, comp, 0, false);
+    applyVelocityBcCompTo(f, comp, fold, doOutflow);
   }
   // Distributed: a rank applies a face's BC iff its block TOUCHES that global face
   // (`touchesGlobalFace`, the same rule the scalar path uses in `applyScalarBc`). Without the test
@@ -6310,6 +6352,15 @@ class Solver {
         });
   }
   void project() {
+    projectAssembleDivergence();
+    projectBuildCoefficients();
+    projectSolve();
+    projectCorrectVelocities();
+    projectPressureUpdate();
+  }
+  // ---- project() stages (QUALITY_PLAN G.1): pure cut-and-paste, each a contiguous
+  // block of the original function sharing only member fields and a CCExec. ----
+  void projectAssembleDivergence() {
     // ghosts incl. domain BCs (outflow zero-gradient) BEFORE the divergence -- matches CUDA
     // apply_velocity_bc before diverg_open, so div(u*) counts the outflow flux (else the rotational
     // pressure pumps the mis-counted outflow divergence and blows up the outflow-wall corner).
@@ -6431,6 +6482,8 @@ class Solver {
               r((long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y) = 0.0;
           });
     }
+  }
+  void projectBuildCoefficients() {
     // Variable density: rebuild the Poisson operator with the face coefficients
     // c_f = open_f * rho0/rho_f (rho0 = the scalar rho_, so uniform rho == rho_ reduces exactly to
     // the openness operator). The coefficient fields ride the openness rails: bridge rho to the g=1
@@ -6502,6 +6555,8 @@ class Solver {
       mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
       chebBoundsSet_ = false;
     }
+  }
+  void projectSolve() {
     // geometric multigrid solve of the cut-cell pressure Poisson A phi = -div(u*) (CUDA
     // mac_multigrid): MG-PCG by default, or the communication-light Chebyshev driver (bounds
     // estimated once, then reused). Warm start (CUDA pwarm_): keep the previous step's phi1_ as the
@@ -6614,6 +6669,8 @@ class Solver {
           if (bc_[2 * a + s] == 3 && touchesGlobalFace(2 * a + s))
             bcZeroPressureGhost(phi_, e, G, a, s);
     }
+  }
+  void projectCorrectVelocities() {
     if constexpr (Grid::collocated) {
       // phi: zero-gradient (Neumann) at non-periodic walls so the cell-centered central-difference
       // correction carries no spurious normal acceleration through the wall (the periodic fill
@@ -6745,6 +6802,8 @@ class Solver {
     // stability).
     for (int c = 0; c < 3; ++c)
       maskVelocity(c);
+  }
+  void projectPressureUpdate() {
     // Rotational incremental pressure (Timmermans), matching CUDA press_update_k: P += (rho/dt)*phi
     // - mu*div(u*). Classical non-incremental Chorin (!incremental_) skips the accumulation;
     // getPressure() derives p from phi.
@@ -7677,7 +7736,7 @@ class Solver {
       // projection's outflow-face correction when there is one, otherwise the full fill (the
       // kinematic path, where the zero-gradient rule is what supplies the boundary face at all).
       if (outflowCorrValid_)
-        fillVelGhostsKeepOutflow(c);
+        fillVelGhostsTo(C[c].u, c, 0, false);
       else
         fillVelGhosts(c, 0);
       if (vofDynVel_[c].extent(0) != n_)

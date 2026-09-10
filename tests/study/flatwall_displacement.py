@@ -99,7 +99,7 @@ def set_forces(sol, exp, ny, w_lo, w_hi):
     yc = 0.5 * (w_lo + w_hi)
     fluid = (y > w_lo) & (y < w_hi)
     if exp == "E1":
-        sol.set_body_force(F0, 0.0, 0.0)
+        sol.set_body_force((F0, 0.0, 0.0))
         return
     sol.enable_cell_force()
     if exp == "E1b":

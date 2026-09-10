@@ -45,7 +45,7 @@ def run(nx, ny, nz, arm, L, cfg):
     kw = {} if not arm else {"extent": (L, L, L), "origin": (0.0, 0.0, 0.0)}
     s = sdflow.Solver((nx, ny, nz), **kw)
     s.set_rho(cfg["rho"]); s.set_mu(cfg["mu"]); s.set_dt(cfg["dt"])
-    s.set_body_force(cfg["F"], 0.0, 0.0)
+    s.set_body_force((cfg["F"], 0.0, 0.0))
     s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(cfg["vel_sweeps"])
     s.set_pressure_multigrid(True, levels=levels)

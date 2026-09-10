@@ -62,7 +62,7 @@ def poiseuille(nz, z0, z1, lam, steps=4000, verbose=True):
     s.set_mu(MU)
     s.set_dt(50.0)
     s.set_advection(False)          # Stokes: the exact profile is a steady Stokes solution
-    s.set_body_force(G, 0.0, 0.0)
+    s.set_body_force((G, 0.0, 0.0))
     s.set_pressure_multigrid(True, levels=3)
     s.set_pressure_solver_params(400)
     s.diagnostics.set_velocity_solver_params(400)
@@ -92,7 +92,7 @@ def couette(nz, z0, lam, U=1.0, steps=200):
 
     The bottom boundary is an SDF wall at `z0` with slip lambda; the top is the +z DOMAIN face
     driven at U.  A type-1 domain wall IGNORES its tangential velocity (measured: a plain channel
-    with `set_domain_bc(5, 1, U, 0, 0)` stays identically 0 after 400 steps) -- the moving lid has
+    with `set_domain_bc(5, 1, (U, 0, 0))` stays identically 0 after 400 steps) -- the moving lid has
     to be an INFLOW face (type 2) whose velocity is purely tangential, which is what
     `tests/kokkos_mpi/test_varmu_mpi.cpp` uses.  Exact steady Stokes profile:
 
@@ -107,8 +107,8 @@ def couette(nz, z0, lam, U=1.0, steps=200):
     s.set_mu(MU)
     s.set_dt(100.0)
     s.set_advection(False)
-    s.set_domain_bc("-z", "wall", 0.0, 0.0, 0.0)          # -z: wall, buried in the solid
-    s.set_domain_bc("+z", "inflow", U, 0.0, 0.0)            # +z: the moving lid
+    s.set_domain_bc("-z", "wall", (0.0, 0.0, 0.0))          # -z: wall, buried in the solid
+    s.set_domain_bc("+z", "inflow", (U, 0.0, 0.0))            # +z: the moving lid
     s.set_pressure_pcg(True, 400, 1e-12)
     s.diagnostics.set_velocity_solver_params(400)
     z = (np.arange(nz) + 0.5)[None, None, :]

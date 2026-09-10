@@ -12,7 +12,7 @@ def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=4000, vmg=False, vlevels=3, vcyc
     s = sdflow.Solver(N, N, nz)
     s.set_rho(1.0); s.set_mu(nu); s.set_dt(dt); s.set_advection(True)
     s.set_domain_bc("-x", "wall"); s.set_domain_bc("+x", "wall"); s.set_domain_bc("-y", "wall")
-    s.set_domain_bc("+y", "inflow", U, 0.0, 0.0)
+    s.set_domain_bc("+y", "inflow", (U, 0.0, 0.0))
     s.diagnostics.set_velocity_solver_params(vel_iter)
     if vmg:
         s.set_velocity_multigrid(True, vlevels, vcycles)

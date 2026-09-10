@@ -33,7 +33,7 @@ def run(implicit, dt, fx, n_steps, to_steady=False):
     s.set_rho(1.0)            # grid units: rho=1, mu=NU -> nu=NU
     s.set_mu(NU)
     s.set_dt(dt)
-    s.set_body_force(fx, 0.0, 0.0)
+    s.set_body_force((fx, 0.0, 0.0))
     s.set_advection(True)
     s.set_implicit_advection(implicit)
     s.diagnostics.set_outer_iterations(3)

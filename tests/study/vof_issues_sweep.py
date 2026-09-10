@@ -48,7 +48,7 @@ def scene_cfl(n=16):
     s.set_mu(0.01)
     s.set_dt(0.1)
     s.set_pressure_geometry(np.full((n, n, n), 1e30, order="F"))
-    s.set_body_force(0.0, 0.0, 1e-3)
+    s.set_body_force((0.0, 0.0, 1e-3))
     s.enable_vof()
     C = np.zeros((n, n, n), order="F")
     C[:, :, : n // 2] = 1.0
@@ -86,7 +86,7 @@ def gate_atomic():
     s.set_rho(1.0)
     s.set_mu(0.05)
     s.set_pressure_geometry(np.full((n, n, n), 1e30, order="F"))
-    s.set_body_force(0.0, 0.0, 1e-3)
+    s.set_body_force((0.0, 0.0, 1e-3))
     s.enable_vof()
     x, y, z = np.meshgrid(*[np.arange(n) + 0.5] * 3, indexing="ij")
     r = np.sqrt((x - n / 2) ** 2 + (y - n / 2) ** 2 + (z - n / 2) ** 2)
@@ -126,7 +126,7 @@ def scene_hysing(nx=32, nz=64, sigma=0.02):
     s.set_pressure_fcg(True, 600, 1e-10)
     if sigma > 0:
         s.set_surface_tension(sigma)
-    s.set_body_force(0.0, 0.0, -5e-2)
+    s.set_body_force((0.0, 0.0, -5e-2))
     # A divergence-free x-shear in w (no z dependence, periodic in x, so the walls do not kill
     # it) — this is what makes the interface-local CFL a REAL, binding limit on the sigma = 0
     # configuration instead of an infinity.
@@ -266,7 +266,7 @@ def half_channel(nz, top_type, mu=0.05, F=1e-3, dt=5000.0, steps=200):
     s.set_domain_bc("-z", "wall")            # -z no-slip wall
     s.set_domain_bc("+z", top_type)     # +z: 'wall' = no-slip, 'slip' = FREE SLIP
     s.set_pressure_geometry(np.full((4, 4, nz), 1e30, order="F"))
-    s.set_body_force(F, 0.0, 0.0)
+    s.set_body_force((F, 0.0, 0.0))
     for _ in range(steps):
         s.step()
     return s

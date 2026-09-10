@@ -16,8 +16,10 @@
 # The default module is single-rank. Configuring with -DPECLET_FLOW_MPI=ON (e.g.
 # `pip install . -C cmake.define.PECLET_FLOW_MPI=ON`) links MPI and exposes Solver.init_mpi / rank /
 # size and the module-level mpi_block() -- the distributed step, bit-exact to single-rank -- which the
-# C++ tests/kokkos_mpi suite validates at np = 1, 2, 4. See ../docs/DEPLOYMENT.md for the full
-# environment matrix and HPC/container recipes.
+# C++ tests/kokkos_mpi suite validates at np = 1, 2, 4. Operator storage precision is float unless
+# `pip install . -C cmake.define.PECLET_FLOW_OPERATOR_DOUBLE=ON` (QUALITY_PLAN G.6,
+# ../docs/SCALING_ISSUES.md #1: float breaks A.1=0 and a dense cut-cell bed's residual rebounds).
+# See ../docs/DEPLOYMENT.md for the full environment matrix and HPC/container recipes.
 
 [build-system]
 requires = ["scikit-build-core>=0.8", "nanobind>=2.0"]

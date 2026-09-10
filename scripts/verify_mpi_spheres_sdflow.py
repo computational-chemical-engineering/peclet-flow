@@ -38,7 +38,7 @@ def packing_sdf(rfrac=0.18):
 
 
 def configure(s):
-    s.set_rho(RHO); s.set_mu(MU); s.set_dt(DT); s.set_body_force(F, 0.0, 0.0)
+    s.set_rho(RHO); s.set_mu(MU); s.set_dt(DT); s.set_body_force((F, 0.0, 0.0))
     s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(80)
     s.set_pressure_multigrid(True, 4)

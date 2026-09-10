@@ -27,7 +27,7 @@ def lattice_sdf(N, phi=0.125):
 def drag(N, mode, mu=0.1, F=1e-3, dt=400.0, min_steps=500, max_steps=3500, dtol=5e-5):
     sdf, R = lattice_sdf(N); lv = max(2, int(np.log2(N)) - 1)
     s = flow.SolverColocated(N, N, N)
-    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(F, 0, 0); s.set_advection(False)
+    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force((F, 0, 0)); s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(200); s.set_pressure_multigrid(True, levels=lv)
     s.set_pressure_pcg(True, 500, 1e-12); _collocated_mode(s, mode); s.diagnostics.set_pressure_warmstart(True)
     s.set_solid(sdf, cutcell_pressure=True)

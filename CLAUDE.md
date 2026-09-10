@@ -49,17 +49,18 @@ four independent np = 1 jobs.
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 156 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 157 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-156 registered / **154 with `-LE bench`** (verified 2026-09-08): 45 from `tests/kokkos` — of which
-`bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 106 from
-`tests/kokkos_mpi` (35 cases at np = 1, 2, 4 plus one np = 8 rung), and 5 Python ctests on the
-module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
-`verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`, `no_env_knobs`). Always bound the
-OpenMP pool — an unbounded one on a many-core host is an hour-long trap.
+157 registered / **155 with `-LE bench`** (G.6 added `no_float_operator_casts`): 45 from
+`tests/kokkos` — of which `bench_rbgs` and `vof_timing` carry the `bench` label and are
+instruments, not gates — 106 from `tests/kokkos_mpi` (35 cases at np = 1, 2, 4 plus one np = 8
+rung), and 6 Python ctests on the module built in that tree (`regression_staggered`,
+`verify_poiseuille_flow`, `verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`,
+`no_env_knobs`, `no_float_operator_casts`). Always bound the OpenMP pool — an unbounded one on a
+many-core host is an hour-long trap.
 
 More verification lives in `scripts/verify_*_sdflow.py` and `validate_zick_homsy_sdflow.py` (the
 external ground truth), run with `PYTHONPATH=<tree>`. `tests/regression/sdflow_regression.py` is
@@ -88,6 +89,41 @@ All header-only Kokkos C++20 in `namespace peclet::flow`.
   `peclet::core::vof` in `../core`, so `src/vof/{plic,curvature,cutcell,wetting}.hpp` are thin
   includes. **New container-free VoF math belongs in `core`**; the drivers stay here.
 - `tests/{kokkos,kokkos_mpi,python,regression,study}`, `scripts/`, `doc/` + `doc/history/`.
+
+## Settled decisions — do not reverse silently
+
+Each of these was chosen *against* the obvious or textbook alternative, on measured evidence. They
+are the ones that have actually been re-proposed by mistake. Full entries, with verbatim quotes and
+provenance, in [`../docs/decisions/flow.md`](../docs/decisions/flow.md); reversing one takes a new
+recorded decision, not a judgement call in the moment.
+
+- **Collocated pressure coupling is the Almgren–Bell–Colella approximate (MAC) projection — NEVER
+  Rhie–Chow.** The residual cell divergence is *intrinsic* to cell-centred velocity placement, and
+  the permeability gap lives in the momentum solve, not the projection. Rhie–Chow has been proposed
+  by mistake repeatedly; it is not an "upgrade".
+- **The pressure solve is PCG (Krylov), not RB-GS**, for cut-cell IBM.
+- **Backward Euler is the default time integrator.** Crank–Nicolson was ported and reverted.
+- **Porous beds use ε-weighted momentum with a matched projection.** Plain incompressible continuity
+  with ε only in the drag term is the *wrong* constraint.
+- **Masking excludes both cut cells and solid cells**, never cut cells alone.
+- **IBM velocity-MG must never un-scale the residual by `1/D_rescale`.**
+- **The ORB must never split the wall-normal axis** in wall-bounded flow.
+- **Geometric const-coeff operators + masking are the validated defaults**; Galerkin/CG is opt-in.
+- **Momentum advection uses the actual wall velocity field**, not `maskVelocity`'s solid zeros.
+- **Float `MReal` operator storage silently breaks A·1=0** at high MG contrast — it fails without an
+  error, so it will not announce itself.
+- **The rotational (Timmermans) pressure update must be restored, not the non-rotational Goda form.**
+- **`set_ghost_projection(True)` must be called before `set_solid`** — call order is load-bearing.
+- **Distributed cut-cell MG coarse levels must be nested**, never independently re-decomposed.
+- **Fresh (newly-uncovered) cells are seeded with the local wall velocity**, not the stale interior.
+- **Closed dead ends, do not re-attempt:** mode-10 quadrature, the Seo–Mittal pressure-only split,
+  ghost-as-production, and the double-diagonal fallback (measurably worse, not merely unnecessary).
+
+⚠️ **Unresolved — do not rely on either reading until settled:** the interstitial-vs-superficial
+drag normalisation. `ibm-accuracy-sphere-validation.md` states both that our K (=Zick–Homsy) is
+interstitial while vdH/Tenneti report superficial (l.45), and that K is reported superficial (=Z&H)
+while vdH/Beetstra is interstitial (l.110). Both note the dilute limit hides the difference. This
+decides a (1−φ) factor on published permeabilities.
 
 ## Conventions and hard rules
 
@@ -133,7 +169,7 @@ All header-only Kokkos C++20 in `namespace peclet::flow`.
 import peclet.flow
 s = peclet.flow.Solver((nx, ny, nz), extent=(Lx, Ly, Lz))   # PHYSICAL box; spacing derived
 s.set_rho(1.0); s.set_mu(0.01); s.set_dt(60.0)
-s.set_body_force(1e-2, 0, 0)                                # force per unit volume
+s.set_body_force((1e-2, 0, 0))                              # force per unit volume
 x, y, z = s.cell_centers()
 s.set_solid(sdf, cutcell_pressure=True)                     # SDF [x,y,z], < 0 inside
 for _ in range(n_steps):
@@ -184,11 +220,20 @@ deselected on its own; name the driver you want instead.
 - **High coefficient CONTRAST makes the V-cycle preconditioner indefinite** and both CG drivers cap
   above density ratio ~10³ — the cause is the arithmetic coarsening of the face coefficient, not
   float storage. Only Chebyshev is healthy there; coefficient-aware coarsening is the open fix.
-- **Operator STORAGE precision is a separate axis.** `MReal` (`mac_cutcell_mg.hpp`) types the
-  pressure hierarchy and, via `IbmSolver::FV`, the momentum stencil; `-DPECLET_FLOW_MREAL_DOUBLE`
-  makes both double at +12 % step time. Float rounding breaks `A·1 = 0`, and on a high-contrast bed
-  the residual floors and then **rebounds** — the run is **invalid, not degraded**
-  (`../docs/SCALING_ISSUES.md` #1).
+- **Operator STORAGE precision is a separate axis, and a typed CMake option (QUALITY_PLAN G.6).**
+  `MReal` (`mac_cutcell_mg.hpp`) types the pressure hierarchy and, via `IbmSolver::FV` and
+  `IbmOverlay` (the cut-cell overlay: `cut_cell_ibm.hpp`'s `poly_*`/`ibmFillEntry`/
+  `ibmModifyStencil`, templated on `Real`), the momentum stencil and the closure factors K/M/X/
+  Nbc/R/D_rescale. `option(PECLET_FLOW_OPERATOR_DOUBLE)` (`pip install . -C
+  cmake.define.PECLET_FLOW_OPERATOR_DOUBLE=ON`) makes all of it double at +12 % step time; OFF
+  (default) is bit-identical to before G.6. Float rounding breaks `A·1 = 0`, and on a high-contrast
+  bed the residual floors and then **rebounds** — the run is **invalid, not degraded**
+  (`../docs/SCALING_ISSUES.md` #1). `tests/python/test_no_float_operator_casts.py` (ctest
+  `no_float_operator_casts`) fails on a new hard `(float)` cast / `float`-typed operator view in
+  `src/` outside its allow-list (a `// PRECISION-EXEMPT: <reason>` marker, or one of the whole-file
+  exemptions it documents — `ghost_projection.hpp`'s `GpOverlay` is float-only still, a known,
+  deferred gap: it needs the same `Real`-templating `IbmOverlayT` got, and it is NOT dead code —
+  it backs the AUTO-default `'ghost'` collocated scheme).
 - `set_pressure_bottom("auto" | "smoother" | "agglomerated")` — **`"auto"` is the default**: it
   agglomerates the coarsest level into a global, decomposition-independent operator and solves it
   exactly whenever that grid exceeds `set_pressure_bottom_extent` (4) cells on any axis. Porous and
@@ -248,15 +293,17 @@ march-unstable above ~2000 spheres.
 
 ## Domain boundary conditions
 
-`set_domain_bc(face, type, vx, vy, vz)` with `face` one of `'-x'`, `'+x'`, `'-y'`, `'+y'`, `'-z'`,
-`'+z'` and `type` one of `'periodic'` (default), `'wall'` (no-slip), `'inflow'` (Dirichlet
+`set_domain_bc(face, type, velocity=(vx, vy, vz))` with `face` one of `'-x'`, `'+x'`, `'-y'`, `'+y'`,
+`'-z'`, `'+z'` and `type` one of `'periodic'` (default), `'wall'` (no-slip), `'inflow'` (Dirichlet
 velocity), `'outflow'`, `'slip'` (free-slip/symmetry, which also **mirrors the SDF ghost band**
 about that face, `mirrorSdfSlipFaces`, or a half channel closed by a symmetry plane would see the
 far wall as a solid). Tangential walls use a face-fold in the implicit diffusion so `u_inner` stays
 implicit. `set_domain_bc_profile(face, profile[Nb,Nc,3])` prescribes a per-position inlet (and
-sets the face to inflow) — the backward-facing step is realized purely this way. Both must precede
-the geometry (they raise afterwards). With no immersed solid, use
-`set_pressure_geometry(all_fluid_sdf)`.
+sets the face to inflow) — the backward-facing step is realized purely this way. Only a call that
+would CHANGE a face's TYPE must precede the geometry (it raises afterwards); a VALUE update
+(`velocity=`, or a new profile) on a face whose type is unchanged is allowed at any time and takes
+effect the next step — ramp an inflow jet or a lid's tangential speed after `set_solid`. With no
+immersed solid, use `set_pressure_geometry(all_fluid_sdf)`.
 
 - **Open boundaries** split face openness in two: the *operator* openness (pressure matrix) is 0 at
   walls and inflow and open at outflow (Dirichlet p = 0, mean-removal off); the *flux* openness

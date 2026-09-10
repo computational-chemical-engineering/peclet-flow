@@ -2,6 +2,14 @@
 /// @brief flow — directional ghost-cell IBM projection overlay (experimental second staggered
 /// IBM).
 ///
+/// PRECISION-EXEMPT (whole file, QUALITY_PLAN G.6, deferred): `GpOverlay` and this file's SDF/
+/// theta sampling stay float, unlike `IbmOverlayT` (cut_cell_ibm.hpp), which G.6 templated on
+/// `Real` to follow `MReal`. Giving `GpOverlay` the same templating is the same shape of change
+/// (struct + `gpBuildOverlay`/`gpFillRow` + every `poly_*` call site here) but was not reached in
+/// this pass; tracked as a known gap in the G.6 report. `set_collocated_scheme('ghost')` is the
+/// AUTO default (CLAUDE.md), so this is a real remaining exposure, not dead code, and a
+/// `-DPECLET_FLOW_OPERATOR_DOUBLE` build does not remove it.
+///
 /// Point-based finite-difference projection near the immersed boundary, NO openness factors: the
 /// divergence of a fluid-centered pressure cell uses plain face differences; a face whose
 /// staggered velocity point is solid is closed by the momentum IBM's 1-D wall-anchored quadratic

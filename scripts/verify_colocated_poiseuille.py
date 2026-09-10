@@ -35,7 +35,7 @@ def run(SolverCls, N, rho=1.0, mu=0.1, dt=50.0, F=0.01, max_steps=400):
     s.set_rho(rho)
     s.set_mu(mu)
     s.set_dt(dt)
-    s.set_body_force(F, 0.0, 0.0)
+    s.set_body_force((F, 0.0, 0.0))
     s.diagnostics.set_velocity_solver_params(200)
     s.set_solid(channel_sdf(nx, ny, nz, ylo, yhi), cutcell_pressure=False)
 

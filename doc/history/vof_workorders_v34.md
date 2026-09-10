@@ -59,7 +59,7 @@ production defects fixed along the way (rank-unaware domain BCs, body-force ghos
    outcome.
 
 **Coordinate, do not duplicate.** The collocated-paper session owns the `MReal` compile
-switch (`-DPECLET_FLOW_MREAL_DOUBLE`, smoothers/matvec templated on the coefficient view
+switch (`-DPECLET_FLOW_OPERATOR_DOUBLE`, smoothers/matvec templated on the coefficient view
 type) and has an experiment tree at `/projects/0/prjs1022/peclet/suite/flow_mreal64/`, with
 data under `flow/doc/data/collocated_campaign/`. Read what is on flow main before writing
 anything, and prefer extending their switch to inventing a second one. **Do not rsync into
@@ -195,7 +195,7 @@ zero-iteration `solvePCG` first puts the V-cycle on the production `(pre, post, 
 schedule), plus the fine operator `A` via `matvecOverlap`; `mg_precond_analyze.py` reports the skew
 `||M−Mᵀ||_F/||M||_F`, the unpivoted LDLᵀ pivots (WO-H's instrument, for comparability) **and** the
 eigenvalues of `sym(M)` restricted to the mean-free subspace. Build it twice against the same
-prefix, the second time with `-DPECLET_FLOW_MREAL_DOUBLE`; nothing else differs.
+prefix, the second time with `-DPECLET_FLOW_OPERATOR_DOUBLE`; nothing else differs.
 
 8³, 3 levels, sharp mid-height ρ-slab, `c_f = ρ₀/ρ_f` (`buildRhoCoeff`), host-openmp:
 
@@ -253,7 +253,7 @@ Reproduce:
 ```bash
 cmake -S tests/study/mg_precond -B build_wom_probe_f -DCMAKE_PREFIX_PATH=$PWD/../extern/install/host-openmp
 cmake -S tests/study/mg_precond -B build_wom_probe_d -DCMAKE_PREFIX_PATH=$PWD/../extern/install/host-openmp \
-      -DCMAKE_CXX_FLAGS=-DPECLET_FLOW_MREAL_DOUBLE
+      -DCMAKE_CXX_FLAGS=-DPECLET_FLOW_OPERATOR_DOUBLE
 cmake --build build_wom_probe_f -j && cmake --build build_wom_probe_d -j
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ./build_wom_probe_f/mg_dense_precond --sweep --outdir doc/data/wom
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ./build_wom_probe_d/mg_dense_precond --sweep --outdir doc/data/wom
@@ -418,7 +418,7 @@ it happily, so this only shows up on the CUDA leg.
 ### WO-M steps 2 + 3 — what float storage costs, and the precision policy that follows
 
 All numbers below are one A/B: the **same commit** built twice against `nvidia-cuda`, the second time
-with `-DPECLET_FLOW_MREAL_DOUBLE`, run on one RTX 5080. Harness: `tests/study/precision_ab.py`
+with `-DPECLET_FLOW_OPERATOR_DOUBLE`, run on one RTX 5080. Harness: `tests/study/precision_ab.py`
 (+ `mg_trace_parse.py` for the residual traces). Because the shared checkout was mid-flight with
 WO-O's V3 work, every number here was produced in a **`git worktree` at HEAD + this WO's diff only**,
 so none of it is contaminated by concurrent work.
@@ -604,7 +604,7 @@ the diagonal at eps_f32 and the solve dies.
    *Implementation cost is the honest objection*: `AC` needs a view type distinct from `AW…AT`
    through the smoother, residual, matvec, CA ring and AMG assembly. That is a follow-on work order,
    not a line edit — which is exactly why it was worth proving the numerics first with `DIAGRESUM`.
-2. **Until then, `-DPECLET_FLOW_MREAL_DOUBLE` is a validated escape hatch**, not a science project:
+2. **Until then, `-DPECLET_FLOW_OPERATOR_DOUBLE` is a validated escape hatch**, not a science project:
    it is the only way to get a *valid* solve on a high-contrast bed above ~Ng 96 today, and it costs
    a measured +12 % time / +10 % memory. Document it for high-contrast porous and high-ratio VoF work.
 3. **Do NOT make fp64 the default.** It buys nothing on the accuracy metrics anyone quotes (Z&H drag,
@@ -799,7 +799,7 @@ a Dirichlet boundary): measured on the MPI `exact-walls-z` configuration, 2.11e-
 MPI gate asserts machine zero on the periodic configuration and a bound plus decomposition-
 independence on the walled one.
 
-**It is NOT the float operator storage.** The same battery in a `-DPECLET_FLOW_MREAL_DOUBLE` build
+**It is NOT the float operator storage.** The same battery in a `-DPECLET_FLOW_OPERATOR_DOUBLE` build
 reproduces every number above to five significant figures (2.0374e-05 against 2.0374e-05 at ratio 10,
 mu = 0.1) even though `max|div(open u)|` improves from 9.4e-14 to 7.6e-21. What the double build
 *does* fix is the residue **at mu = 0**, where the mu-mechanism is absent:

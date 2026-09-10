@@ -14,24 +14,34 @@
 #include <Kokkos_Core.hpp>
 #include <type_traits>
 
-#include "cut_cell_ibm.hpp"  // IbmOverlay, ibmFillEntry
-#include "mac_cutcell.hpp"   // peclet::flow::C3, peclet::flow::ccSampleExt, CCConst
+#include "cut_cell_ibm.hpp"    // IbmOverlayT, ibmFillEntry
+#include "mac_cutcell.hpp"     // peclet::flow::C3, peclet::flow::ccSampleExt, CCConst
+#include "mac_cutcell_mg.hpp"  // MReal (G.6: the overlay follows the operator storage precision)
 
 namespace peclet::flow {
 
-using mreal = float;  // matrix coefficient type (matches cfd's mreal)
+using mreal = MReal;  // matrix coefficient type; float unless -DPECLET_FLOW_OPERATOR_DOUBLE (G.6)
+// MConst / ibmRbgsSweep stay FIXED float: a standalone kernel-level facility exercised by
+// tests/kokkos/test_ibm.cpp with its own literal-float coefficients, independent of the solver's
+// MReal -- unlike IbmOverlay below, it is not on IbmSolver's overlay-precision path (ibmRbgsSweep
+// itself has no caller in flow_ibm.hpp), so tying it to `mreal` would only make the test's fixed
+// float buffers fail to bind under -DPECLET_FLOW_OPERATOR_DOUBLE for no G.6 benefit.
 using MConst = Kokkos::View<const float*, CCMem>;
+// The canonical cut-cell overlay type: IbmOverlayT<Space, Real> instantiated at this build's
+// operator precision. Bit-identical to the pre-G.6 hardcoded-float IbmOverlay when mreal = float.
+using IbmOverlay = IbmOverlayT<IMem, mreal>;
 
 struct Off3 {
   float x, y, z;
 };
 
 // Cut cell = fluid centre with at least one solid axis neighbour.
-KOKKOS_INLINE_FUNCTION bool ibmIsCut(float sc, const float sn[6]) {
-  if (sc <= 0.0f)
+template <class Real>
+KOKKOS_INLINE_FUNCTION bool ibmIsCut(Real sc, const Real sn[6]) {
+  if (sc <= Real(0))
     return false;
   for (int k = 0; k < 6; ++k)
-    if (sn[k] < 0.0f)
+    if (sn[k] < Real(0))
       return true;
   return false;
 }
@@ -72,15 +82,15 @@ template <int SCHEME>
 inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, const IbmOverlay& ov,
                            Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter,
                            CCConst tx = CCConst(), CCConst ty = CCConst(), CCConst tz = CCConst(),
-                           C3 nn = C3{0, 0, 0}, float slipLambda = 0.0f, int comp = -1,
+                           C3 nn = C3{0, 0, 0}, mreal slipLambda = mreal(0), int comp = -1,
                            Kokkos::View<int, CCMem> sandwichSkipped = Kokkos::View<int, CCMem>(),
-                           float hpx = 1.0f, float hpy = 1.0f, float hpz = 1.0f) {
+                           mreal hpx = mreal(1), mreal hpy = mreal(1), mreal hpz = mreal(1)) {
   CCExec space;
   Kokkos::deep_copy(space, counter, 0);
   Kokkos::deep_copy(space, idMap, -1);
   const bool hasEx = tx.size() > 0;
-  const bool hasSlip = (slipLambda > 0.0f) && (comp >= 0) && (SCHEME == 0);
-  const float lamBase = slipLambda;
+  const bool hasSlip = (slipLambda > mreal(0)) && (comp >= 0) && (SCHEME == 0);
+  const mreal lamBase = slipLambda;
   const int slipComp = comp;
   int* skipPtr = sandwichSkipped.data();
   if (sandwichSkipped.data() != nullptr)
@@ -90,11 +100,13 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
       "peclet::flow::ibm_build_overlay", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long idx = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
-        const float sc = (float)ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
+        // G.6: (mreal) instead of a hard (float) -- a double build no longer narrows the SDF
+        // sample before the overlay is built from it.
+        const mreal sc = (mreal)ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
         const int d[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-        float sn[6];
+        mreal sn[6];
         for (int k = 0; k < 6; ++k)
-          sn[k] = (float)ccSampleExt(sdf, ext, lx + d[k][0] + off.x, ly + d[k][1] + off.y,
+          sn[k] = (mreal)ccSampleExt(sdf, ext, lx + d[k][0] + off.x, ly + d[k][1] + off.y,
                                      lz + d[k][2] + off.z);
         if (!ibmIsCut(sc, sn))
           return;
@@ -104,7 +116,7 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
         // arrays, t_a(i) = exact crossing fraction from this component's staggered point i toward
         // i + e_a (NaN = no crossing). +a dir: theta = t_a(i); -a dir: theta = 1 - t_a(i - e_a),
         // periodic wrap on the inner grid.
-        float thEx[6];
+        mreal thEx[6];
         if (hasEx) {
           const int ix = lx - g, iy = ly - g, iz = lz - g;
           auto wrap = [](int v, int n) {
@@ -118,29 +130,30 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
             const int my = a == 1 ? wrap(iy - 1, nn.y) : iy;
             const int mz = a == 2 ? wrap(iz - 1, nn.z) : iz;
             const long im = (long)mx + (long)my * nn.x + (long)mz * (long)nn.x * nn.y;
-            thEx[2 * a] = (float)(*ta[a])(ip);
-            thEx[2 * a + 1] = 1.0f - (float)(*ta[a])(im);  // NaN propagates -> fallback
+            thEx[2 * a] = (mreal)(*ta[a])(ip);
+            thEx[2 * a + 1] = mreal(1) - (mreal)(*ta[a])(im);  // NaN propagates -> fallback
           }
         }
-        const float hpv[3] = {hpx, hpy, hpz};  // h_a' in float; exactly 1.0f isotropic (trap 9)
-        float lamAxis[3];
+        const mreal hpv[3] = {hpx, hpy, hpz};  // h_a'; exactly 1 isotropic (trap 9)
+        mreal lamAxis[3];
         if (hasSlip) {
           // grad(sdf) from the same 7 samples; k = 0/2/4 are the +a neighbours, 1/3/5 the -a ones.
           // Phase 2 (§6.1/§6.4): g_a = h_a'·n_a, so the PHYSICAL unit normal is g/h' renormalised.
-          const float gx = 0.5f * (sn[0] - sn[1]) / hpv[0], gy = 0.5f * (sn[2] - sn[3]) / hpv[1],
-                      gz = 0.5f * (sn[4] - sn[5]) / hpv[2];
-          float gm = Kokkos::sqrt(gx * gx + gy * gy + gz * gz);
-          if (gm < 1e-6f)
-            gm = 1e-6f;
-          const float nrm[3] = {gx / gm, gy / gm, gz / gm};
-          float tang = 1.0f - nrm[slipComp] * nrm[slipComp];
-          if (tang < 0.0f)
-            tang = 0.0f;
-          const float lamEff = lamBase * tang;
+          const mreal gx = mreal(0.5) * (sn[0] - sn[1]) / hpv[0],
+                      gy = mreal(0.5) * (sn[2] - sn[3]) / hpv[1],
+                      gz = mreal(0.5) * (sn[4] - sn[5]) / hpv[2];
+          mreal gm = Kokkos::sqrt(gx * gx + gy * gy + gz * gz);
+          if (gm < mreal(1e-6))
+            gm = mreal(1e-6);
+          const mreal nrm[3] = {gx / gm, gy / gm, gz / gm};
+          mreal tang = mreal(1) - nrm[slipComp] * nrm[slipComp];
+          if (tang < mreal(0))
+            tang = mreal(0);
+          const mreal lamEff = lamBase * tang;
           for (int a = 0; a < 3; ++a) {
-            float na = Kokkos::fabs(nrm[a]);
-            if (na < 1e-3f)
-              na = 1e-3f;  // wall nearly parallel to this axis: cap at 1000x (still finite)
+            mreal na = Kokkos::fabs(nrm[a]);
+            if (na < mreal(1e-3))
+              na = mreal(1e-3);  // wall nearly parallel to this axis: cap at 1000x (still finite)
             lamAxis[a] = lamEff / (hpv[a] * na);
           }
         }
@@ -247,13 +260,13 @@ inline void ibmCleanFluidMask(CCField m, CCConst sdf, C3 ext, Off3 off) {
       "peclet::flow::ibm_clean", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long i = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
-        const float sc = (float)ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
+        const mreal sc = (mreal)ccSampleExt(sdf, ext, lx + off.x, ly + off.y, lz + off.z);
         const int d[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-        float sn[6];
+        mreal sn[6];
         for (int k = 0; k < 6; ++k)
-          sn[k] = (float)ccSampleExt(sdf, ext, lx + d[k][0] + off.x, ly + d[k][1] + off.y,
+          sn[k] = (mreal)ccSampleExt(sdf, ext, lx + d[k][0] + off.x, ly + d[k][1] + off.y,
                                      lz + d[k][2] + off.z);
-        const bool solid = (sc <= 0.0f);
+        const bool solid = (sc <= mreal(0));
         m(i) = (solid || ibmIsCut(sc, sn)) ? 0.0 : 1.0;
       });
 }

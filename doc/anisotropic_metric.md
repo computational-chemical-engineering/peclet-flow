@@ -500,7 +500,7 @@ comparison measures only the operator), `rho = 1, mu = 0.1, F = 0.01, dt = 50`, 
   The discretisation is pointwise exact in both; (b) sits at the float operator-storage floor
   (WO-M, `docs/SCALING_ISSUES.md` #1) because `hRef = 0.3` makes `mu' = 55.5…` and
   `AC = 124.61…` unrepresentable — a one-signed multiplicative factor of `1.06e-7` on every row,
-  `8.7e-15` under `-DPECLET_FLOW_MREAL_DOUBLE`. Not a metric defect; recorded. (b) is a
+  `8.7e-15` under `-DPECLET_FLOW_OPERATOR_DOUBLE`. Not a metric defect; recorded. (b) is a
   production-SHAPED configuration and is kept as the tripwire for that floor, not as an exactness
   statement.
 - The DOFs on the walls are exactly `0`, and `max |v|, max |w| ≤ 1e-12 * u_max`, in both.
@@ -628,7 +628,7 @@ rebases onto C5.
 
   `max|v| = max|w| = 0.000e+00` exactly and the wall/solid `u` rows exactly `0` in all three.
   Row (b)'s error is a single one-signed multiplicative factor — rel err / u = `1.06e-07` on all
-  fifteen fluid rows — and the identical source built with `-DPECLET_FLOW_MREAL_DOUBLE` reads
+  fifteen fluid rows — and the identical source built with `-DPECLET_FLOW_OPERATOR_DOUBLE` reads
   **8.674e-15**: the WO-M float operator-storage floor, not the metric.
 - **G4-order** (§8.5, the order half), `cutcellmg_aniso`, host-openmp (nvidia-cuda identical to the
   digit). L2 error against the exact modal solution of the discrete system; `levels = 6`,
@@ -737,7 +737,7 @@ strongly coupled axis, and the V-cycle preconditioner stops being symmetric enou
 | 4 | identical, on every rank | 10 | 4.351e-06 = **2.965e-07** relative | none (trap 6) |
 
 The np > 1 spread is the MG-PCG's own floor on a CUT-CELL operator (it stops on a RESIDUAL, and a
-small-aperture row has a tiny effective eigenvalue): a `-DPECLET_FLOW_MREAL_DOUBLE` build of the
+small-aperture row has a tiny effective eigenvalue): a `-DPECLET_FLOW_OPERATOR_DOUBLE` build of the
 identical source moves it only 4× (3.602e-07 / 1.772e-06 absolute), so it is the stopping rule and
 not the float operator storage. **Trap 6 is gated directly**: with `setTelescopeMinExtent(0)` (merge
 only when an axis that CAN coarsen is not even on every rank) NO level telescopes, even though the
@@ -998,7 +998,7 @@ baselines at `+0.00 %` with every iteration and step count equal; the six verify
 
 1. **The float operator-storage floor is the binding constraint on any anisotropic exactness claim**
    (E1). At `spacing (1, 0.3, 2)` neither `mu' = 55.5…` nor `AC = 124.61…` is representable and the
-   whole profile is scaled by `1 − 1.06e-07`; `-DPECLET_FLOW_MREAL_DOUBLE` reads `8.674e-15`. Every
+   whole profile is scaled by `1 − 1.06e-07`; `-DPECLET_FLOW_OPERATOR_DOUBLE` reads `8.674e-15`. Every
    exactness gate in this phase is therefore stated at a float-representable metric, with the
    production-shaped configuration kept beside it as a tripwire. `docs/SCALING_ISSUES.md` #1.
 2. **Two solver paths are not run-to-run deterministic under OpenMP**, both through

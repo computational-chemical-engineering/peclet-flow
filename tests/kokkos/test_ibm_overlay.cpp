@@ -52,15 +52,15 @@ static int run(int bc) {
       m(i) = hn[i];
     Kokkos::deep_copy(dn, m);
   }
-  IbmOverlay dev{Kokkos::View<int*, IMem>("ci", N),
-                 Kokkos::View<int*, IMem>("nb", N),
-                 Kokkos::View<float*, IMem>("dr", N),
-                 Kokkos::View<int*, IMem>("dirc", (std::size_t)N * 6),
-                 Kokkos::View<float*, IMem>("K", (std::size_t)N * 6),
-                 Kokkos::View<float*, IMem>("M", (std::size_t)N * 6),
-                 Kokkos::View<float*, IMem>("X", (std::size_t)N * 6),
-                 Kokkos::View<float*, IMem>("Nbc", (std::size_t)N * 6),
-                 Kokkos::View<float*, IMem>("R", (std::size_t)N * 6)};
+  IbmOverlayReal<float> dev{Kokkos::View<int*, IMem>("ci", N),
+                            Kokkos::View<int*, IMem>("nb", N),
+                            Kokkos::View<float*, IMem>("dr", N),
+                            Kokkos::View<int*, IMem>("dirc", (std::size_t)N * 6),
+                            Kokkos::View<float*, IMem>("K", (std::size_t)N * 6),
+                            Kokkos::View<float*, IMem>("M", (std::size_t)N * 6),
+                            Kokkos::View<float*, IMem>("X", (std::size_t)N * 6),
+                            Kokkos::View<float*, IMem>("Nbc", (std::size_t)N * 6),
+                            Kokkos::View<float*, IMem>("R", (std::size_t)N * 6)};
   Kokkos::parallel_for(
       "ibm_build", Kokkos::RangePolicy<DSpace>(0, N), KOKKOS_LAMBDA(int i) {
         float sn[6];

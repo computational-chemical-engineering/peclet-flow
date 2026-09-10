@@ -222,8 +222,8 @@ def case_hysing1(nx=64, momentum=True, worklist=True):
     s = flow.Solver(nx, ny, nz)
     s.set_rho(p["rho1"])
     s.set_mu(sc.mu(p["mu1"]))
-    s.set_domain_bc("-z", "wall", 0, 0, 0)
-    s.set_domain_bc("+z", "wall", 0, 0, 0)
+    s.set_domain_bc("-z", "wall", (0, 0, 0))
+    s.set_domain_bc("+z", "wall", (0, 0, 0))
     s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
     s.set_pressure_chebyshev(True, 600, 1e-12)
     s.enable_vof()
@@ -260,8 +260,8 @@ def case_packed(nx=64, nz=160, worklist=True):
     s = flow.Solver(nx, nx, nz)
     s.set_rho(rho_l)
     s.set_mu(mu_l)
-    s.set_domain_bc("-z", "wall", 0, 0, 0)
-    s.set_domain_bc("+z", "wall", 0, 0, 0)
+    s.set_domain_bc("-z", "wall", (0, 0, 0))
+    s.set_domain_bc("+z", "wall", (0, 0, 0))
     s.set_solid(np.asfortranarray(SDF), cutcell_pressure=True)
     s.enable_vof()
     s.diagnostics.set_vof_worklist(worklist)
@@ -297,8 +297,8 @@ def case_trickle(nx=48, nz=96, worklist=True):
     s.set_rho(RHO_L)
     s.set_mu(MU_L)
     for f in ("-x", "+x", "-y", "+y"):
-        s.set_domain_bc(f, "periodic", 0, 0, 0)
-    s.set_domain_bc("-z", "outflow", 0, 0, 0)
+        s.set_domain_bc(f, "periodic", (0, 0, 0))
+    s.set_domain_bc("-z", "outflow", (0, 0, 0))
     xc = (np.arange(nx) + 0.5)[:, None]
     yc = (np.arange(nx) + 0.5)[None, :]
     disc = ((xc - nx / 2) ** 2 + (yc - nx / 2) ** 2) < rd ** 2

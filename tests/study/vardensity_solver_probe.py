@@ -214,15 +214,15 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
     s.set_advection(False)                       # creeping Stokes: isolate the pressure solve
     s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)
     if case == "hydro":                          # periodic x/y, walls +-z
-        s.set_domain_bc("-z", "wall", 0, 0, 0)
-        s.set_domain_bc("+z", "wall", 0, 0, 0)
+        s.set_domain_bc("-z", "wall", (0, 0, 0))
+        s.set_domain_bc("+z", "wall", (0, 0, 0))
     elif case == "lid":                          # walls -x/+x/-z, lid at +z, periodic y
-        s.set_domain_bc("-x", "wall", 0, 0, 0)
-        s.set_domain_bc("+x", "wall", 0, 0, 0)
-        s.set_domain_bc("-z", "wall", 0, 0, 0)
-        s.set_domain_bc("+z", "inflow", ULID, 0.0, 0.0)
+        s.set_domain_bc("-x", "wall", (0, 0, 0))
+        s.set_domain_bc("+x", "wall", (0, 0, 0))
+        s.set_domain_bc("-z", "wall", (0, 0, 0))
+        s.set_domain_bc("+z", "inflow", (ULID, 0.0, 0.0))
     elif case == "per":                          # fully periodic + uniform body force in x
-        s.set_body_force(FBODY, 0.0, 0.0)
+        s.set_body_force((FBODY, 0.0, 0.0))
     else:
         raise ValueError(case)
     s.set_pressure_multigrid(True, levels=levels)
@@ -237,7 +237,7 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
     if shape == "const":                         # the constant-density control: varRho never on
         ratio = 1.0
         if case == "hydro":
-            s.set_body_force(0.0, 0.0, -GRAV)    # uniform gravity replaces the rho closure
+            s.set_body_force((0.0, 0.0, -GRAV))    # uniform gravity replaces the rho closure
     else:
         s.add_field("rho")
         s.set_field("rho", np.asfortranarray(rho_field(shape, edge, ratio, N)))
@@ -421,10 +421,10 @@ def cheb_overhead(geom, N, ratio=1e3):
         s.set_dt(DT)
         s.set_advection(False)
         s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)
-        s.set_domain_bc("-x", "wall", 0, 0, 0)
-        s.set_domain_bc("+x", "wall", 0, 0, 0)
-        s.set_domain_bc("-z", "wall", 0, 0, 0)
-        s.set_domain_bc("+z", "inflow", ULID, 0.0, 0.0)
+        s.set_domain_bc("-x", "wall", (0, 0, 0))
+        s.set_domain_bc("+x", "wall", (0, 0, 0))
+        s.set_domain_bc("-z", "wall", (0, 0, 0))
+        s.set_domain_bc("+z", "inflow", (ULID, 0.0, 0.0))
         s.set_pressure_multigrid(True, levels=levels)
         if sdf is None:
             s.set_pressure_geometry(np.asfortranarray(np.full((N, N, N), 10.0)))

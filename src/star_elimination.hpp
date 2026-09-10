@@ -53,7 +53,9 @@ inline StarOverlay starMakeOverlay(long n) {
 /// gate ON returns the exact double the openness actually carries.
 KOKKOS_INLINE_FUNCTION double starAval(const StarOverlay& ov, long k, bool exact) {
   const double v = ov.a(k);
-  return exact ? v : (double)(float)v;
+  // Deliberate bit-compat gate (not an operator-precision leak): OFF reproduces the float-rounded
+  // value the overlay used to store (bitwise unchanged default path), ON returns the exact double.
+  return exact ? v : (double)(float)v;  // PRECISION-EXEMPT: bit-compat gate, see above
 }
 
 KOKKOS_INLINE_FUNCTION int starWrap(int v, int n) {

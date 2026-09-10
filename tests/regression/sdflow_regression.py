@@ -124,7 +124,7 @@ def run_case(name, N, cfg, quiet=True, solver="staggered", scheme="gauge-exact")
     SolverCls = sdflow.SolverColocated if solver == "colocated" else sdflow.Solver
     s = SolverCls(N, N, N)
     s.set_rho(cfg["rho"]); s.set_mu(cfg["mu"]); s.set_dt(cfg["dt"])
-    s.set_body_force(cfg["F"], 0.0, 0.0)
+    s.set_body_force((cfg["F"], 0.0, 0.0))
     s.set_advection(False)  # creeping Stokes
     s.diagnostics.set_velocity_solver_params(cfg["vel_sweeps"])
     s.set_pressure_multigrid(True, levels=levels)

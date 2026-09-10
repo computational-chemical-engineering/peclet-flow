@@ -8,6 +8,14 @@
 /// (double-sided) cases. Output factors are written into Kokkos Views (SoA, [list_idx*6+k]); the
 /// build kernel fills one entry per cut cell. KOKKOS_INLINE_FUNCTION so the math is shared with the
 /// host reference.
+///
+/// QUALITY_PLAN G.6 (precision as a typed policy): the closure polynomials and the overlay are
+/// templated on `Real` (the operator storage type, `IbmSolver::mreal` = `MReal`). The default
+/// build instantiates every one of these at `Real = float`, so the generated code -- same
+/// operations, same integer-exact literals -- is BIT-IDENTICAL to the pre-G.6 hardcoded-float
+/// version; a `-DPECLET_FLOW_OPERATOR_DOUBLE` build instantiates the SAME templates at
+/// `Real = double`, so the overlay build no longer narrows the SDF/theta samples (and every
+/// K/M/X/Nbc/R/D_rescale factor derived from them) to float before storing them.
 #ifndef PECLET_FLOW_CUT_CELL_IBM_HPP
 #define PECLET_FLOW_CUT_CELL_IBM_HPP
 
@@ -18,30 +26,38 @@ namespace peclet::flow {
 
 using IMem = Kokkos::DefaultExecutionSpace::memory_space;
 
-// ---- boundary-distance polynomials (verbatim from cut_cell_ibm.cuh) ----
-KOKKOS_INLINE_FUNCTION float poly_D(float xi) {
-  return xi * (1.0f + xi);
+// ---- boundary-distance polynomials (verbatim from cut_cell_ibm.cuh, templated on Real: G.6) ----
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_D(Real xi) {
+  return xi * (Real(1) + xi);
 }
-KOKKOS_INLINE_FUNCTION float poly_N_nb(float xi) {
-  return xi * (1.0f - xi);
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_N_nb(Real xi) {
+  return xi * (Real(1) - xi);
 }
-KOKKOS_INLINE_FUNCTION float poly_Nc(float xi) {
-  return 2.0f * (xi * xi - 1.0f);
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_Nc(Real xi) {
+  return Real(2) * (xi * xi - Real(1));
 }
-KOKKOS_INLINE_FUNCTION float poly_Nbc(float) {
-  return 2.0f;
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_Nbc(Real) {
+  return Real(2);
 }
-KOKKOS_INLINE_FUNCTION float poly_D_avg(float xi) {
-  return xi * (1.0f + xi) - 1.0f / 12.0f;
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_D_avg(Real xi) {
+  return xi * (Real(1) + xi) - Real(1) / Real(12);
 }
-KOKKOS_INLINE_FUNCTION float poly_Nnb_avg(float xi) {
-  return xi * (1.0f - xi) + 1.0f / 12.0f;
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_Nnb_avg(Real xi) {
+  return xi * (Real(1) - xi) + Real(1) / Real(12);
 }
-KOKKOS_INLINE_FUNCTION float poly_Nc_avg(float xi) {
-  return 2.0f * (xi * xi - 1.0f) - 1.0f / 6.0f;
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_Nc_avg(Real xi) {
+  return Real(2) * (xi * xi - Real(1)) - Real(1) / Real(6);
 }
-KOKKOS_INLINE_FUNCTION float poly_Nbc_avg(float) {
-  return 2.0f;
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_Nbc_avg(Real) {
+  return Real(2);
 }
 // ---- Navier-slip generalization of the one-sided Dirichlet polynomials (WO-V6b) ----
 //
@@ -66,106 +82,128 @@ KOKKOS_INLINE_FUNCTION float poly_Nbc_avg(float) {
 // that no extra rounding is introduced at all). lam -> infinity gives the free-slip (zero
 // normal-derivative) closure: at theta = 1/2, u_g -> u_c.
 //
-// NOTE the closure is stored in FLOAT: the Robin datum is indistinguishable from no-slip once
-// lam*(1+2 theta) drops below eps_f32 * D(theta) ~ 1e-7, i.e. below lam ~ 3e-8 cells (measured
-// floor in the findings). Every physically meaningful lambda is orders of magnitude above it.
-KOKKOS_INLINE_FUNCTION float poly_D_slip(float xi, float lam) {
-  return poly_D(xi) + lam * (1.0f + 2.0f * xi);
+// NOTE the closure is stored in FLOAT by default (double under -DPECLET_FLOW_OPERATOR_DOUBLE): the
+// Robin datum is indistinguishable from no-slip once lam*(1+2 theta) drops below the storage
+// epsilon times D(theta), i.e. below lam ~ 3e-8 cells in the float build (measured floor in the
+// findings). Every physically meaningful lambda is orders of magnitude above it.
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_D_slip(Real xi, Real lam) {
+  return poly_D(xi) + lam * (Real(1) + Real(2) * xi);
 }
-KOKKOS_INLINE_FUNCTION float poly_N_nb_slip(float xi, float lam) {
-  return poly_N_nb(xi) + lam * (1.0f - 2.0f * xi);
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_N_nb_slip(Real xi, Real lam) {
+  return poly_N_nb(xi) + lam * (Real(1) - Real(2) * xi);
 }
-KOKKOS_INLINE_FUNCTION float poly_Nc_slip(float xi, float lam) {
-  return poly_Nc(xi) + 4.0f * lam * xi;
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_Nc_slip(Real xi, Real lam) {
+  return poly_Nc(xi) + Real(4) * lam * xi;
 }
 
-KOKKOS_INLINE_FUNCTION float poly_D_sandwich(float xi_m, float xi_p) {
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_D_sandwich(Real xi_m, Real xi_p) {
   return xi_m * xi_p;
 }
-KOKKOS_INLINE_FUNCTION float poly_N_c_sandwich(float xi_m, float xi_p) {
-  return (xi_m + 1.0f) * (xi_p - 1.0f);
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_N_c_sandwich(Real xi_m, Real xi_p) {
+  return (xi_m + Real(1)) * (xi_p - Real(1));
 }
-KOKKOS_INLINE_FUNCTION float poly_Nbc_pp_sw(float xi_m, float xi_p) {
-  return (xi_m / (xi_m + xi_p)) * (1.0f + xi_m);
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_Nbc_pp_sw(Real xi_m, Real xi_p) {
+  return (xi_m / (xi_m + xi_p)) * (Real(1) + xi_m);
 }
-KOKKOS_INLINE_FUNCTION float poly_Nbc_mp_sw(float xi_m, float xi_p) {
-  return (xi_p / (xi_m + xi_p)) * (1.0f - xi_p);
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_Nbc_mp_sw(Real xi_m, Real xi_p) {
+  return (xi_p / (xi_m + xi_p)) * (Real(1) - xi_p);
 }
-KOKKOS_INLINE_FUNCTION float poly_D_sandwich_avg(float xi_m, float xi_p) {
-  return xi_m * xi_p - 1.0f / 12.0f;
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_D_sandwich_avg(Real xi_m, Real xi_p) {
+  return xi_m * xi_p - Real(1) / Real(12);
 }
-KOKKOS_INLINE_FUNCTION float poly_N_c_sandwich_avg(float xi_m, float xi_p) {
-  return (xi_m + 1.0f) * (xi_p - 1.0f) - 1.0f / 12.0f;
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_N_c_sandwich_avg(Real xi_m, Real xi_p) {
+  return (xi_m + Real(1)) * (xi_p - Real(1)) - Real(1) / Real(12);
 }
-KOKKOS_INLINE_FUNCTION float poly_Nbc_pp_sw_avg(float xi_m, float xi_p) {
-  return (xi_m / (xi_m + xi_p)) * (1.0f + xi_m) - 1.0f / 12.0f;
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_Nbc_pp_sw_avg(Real xi_m, Real xi_p) {
+  return (xi_m / (xi_m + xi_p)) * (Real(1) + xi_m) - Real(1) / Real(12);
 }
-KOKKOS_INLINE_FUNCTION float poly_Nbc_mp_sw_avg(float xi_m, float xi_p) {
-  return (xi_p / (xi_m + xi_p)) * (1.0f - xi_p) + 1.0f / 12.0f;
+template <class Real>
+KOKKOS_INLINE_FUNCTION Real poly_Nbc_mp_sw_avg(Real xi_m, Real xi_p) {
+  return (xi_p / (xi_m + xi_p)) * (Real(1) - xi_p) + Real(1) / Real(12);
 }
 
 // IBM overlay output (SoA Views; per-direction arrays are size 6*num_cells). Templated on the
-// memory space so the device build and a HostSpace reference share the same fill code.
-template <class Space>
+// memory space AND the storage precision (G.6) so the device build and a HostSpace reference
+// share the same fill code, and a `-DPECLET_FLOW_OPERATOR_DOUBLE` build carries the overlay in
+// double end to end instead of narrowing it to float at this SoA.
+template <class Space, class Real = float>
 struct IbmOverlayT {
+  using value_type = Real;
   Kokkos::View<int*, Space> cell_index;
   Kokkos::View<int*, Space> num_boundaries;
-  Kokkos::View<float*, Space> D_rescale;
+  Kokkos::View<Real*, Space> D_rescale;
   Kokkos::View<int*, Space> dir_code;
-  Kokkos::View<float*, Space> K_val, M_val, X_val, Nbc_val, R_val;
+  Kokkos::View<Real*, Space> K_val, M_val, X_val, Nbc_val, R_val;
 };
-using IbmOverlay = IbmOverlayT<IMem>;
+// Float alias kept for callers that have not opted into a typed overlay (none left in-tree after
+// G.6; mac_ibm.hpp defines the canonical `IbmOverlay = IbmOverlayT<IMem, mreal>`, mreal = MReal).
+template <class Real>
+using IbmOverlayReal = IbmOverlayT<IMem, Real>;
 
 // Fill one overlay entry (list_idx) for a cut cell from its 7 SDF samples. Verbatim port of
 // ibm_fill_entry<SCHEME>. bc_type: 0 = Dirichlet, 1 = Neumann. thEx (optional, may be nullptr):
 // per-direction EXACT wall-crossing fractions theta from the cut cell toward each of the 6
 // neighbours (analytic-SDF capability, setExactCrossings) — a finite thEx[k] overrides the
-// linear-interpolated theta; non-finite entries fall back.
+// linear-interpolated theta; non-finite entries fall back. `Real` (the overlay's own storage
+// type, `OV::value_type`) is deduced from `o` — every existing call site is unchanged.
 template <int SCHEME, class OV>
-KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, float sdf_c,
-                                         const float sdf_n[6], int bc_type, const float* thEx,
-                                         const float* lamAxis = nullptr,
+KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx,
+                                         typename OV::value_type sdf_c,
+                                         const typename OV::value_type sdf_n[6], int bc_type,
+                                         const typename OV::value_type* thEx,
+                                         const typename OV::value_type* lamAxis = nullptr,
                                          int* sandwichSkipped = nullptr) {
+  using Real = typename OV::value_type;
   o.cell_index(list_idx) = c_idx;
   o.num_boundaries(list_idx) = 6;
   bool is_ghost[6];
-  float xi_vals[6], D_vals[6];
+  Real xi_vals[6], D_vals[6];
   for (int k = 0; k < 6; ++k) {
-    if (sdf_n[k] < 0.0f) {
+    if (sdf_n[k] < Real(0)) {
       is_ghost[k] = true;
       if (bc_type == 0) {
-        float theta = sdf_c / (sdf_c - sdf_n[k]);
+        Real theta = sdf_c / (sdf_c - sdf_n[k]);
         if (thEx != nullptr && Kokkos::isfinite(thEx[k]))
           theta = thEx[k];
-        if (theta < 1e-4f)
-          theta = 1e-4f;
-        if (theta > 1.0f)
-          theta = 1.0f;
+        if (theta < Real(1e-4))
+          theta = Real(1e-4);
+        if (theta > Real(1))
+          theta = Real(1);
         xi_vals[k] = theta;
-        const float lam = (lamAxis != nullptr && SCHEME == 0) ? lamAxis[k >> 1] : 0.0f;
-        D_vals[k] = lam > 0.0f ? poly_D_slip(theta, lam)
-                               : ((SCHEME == 0) ? poly_D(theta) : poly_D_avg(theta));
+        const Real lam = (lamAxis != nullptr && SCHEME == 0) ? lamAxis[k >> 1] : Real(0);
+        D_vals[k] = lam > Real(0) ? poly_D_slip(theta, lam)
+                                  : ((SCHEME == 0) ? poly_D(theta) : poly_D_avg(theta));
       } else {
-        xi_vals[k] = 0.5f;
-        D_vals[k] = 1.0f;
+        xi_vals[k] = Real(0.5);
+        D_vals[k] = Real(1);
       }
     } else {
       is_ghost[k] = false;
-      xi_vals[k] = 1.0f;
-      D_vals[k] = 1e9f;
+      xi_vals[k] = Real(1);
+      D_vals[k] = Real(1e9);
     }
   }
 
   if (bc_type == 0) {
     bool is_sandwich[3] = {is_ghost[0] && is_ghost[1], is_ghost[2] && is_ghost[3],
                            is_ghost[4] && is_ghost[5]};
-    float D_sandwich[3] = {0, 0, 0};
+    Real D_sandwich[3] = {Real(0), Real(0), Real(0)};
     for (int a = 0; a < 3; ++a)
       if (is_sandwich[a])
         D_sandwich[a] = (SCHEME == 0) ? poly_D_sandwich(xi_vals[2 * a + 1], xi_vals[2 * a])
                                       : poly_D_sandwich_avg(xi_vals[2 * a + 1], xi_vals[2 * a]);
-    float min_D_abs = 1e30f, D_rescale = 1.0f;
-    auto update_min = [&](float val) {
+    Real min_D_abs = Real(1e30), D_rescale = Real(1);
+    auto update_min = [&](Real val) {
       if (Kokkos::fabs(val) < min_D_abs) {
         min_D_abs = Kokkos::fabs(val);
         D_rescale = val;
@@ -190,13 +228,13 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
       // applied. A slip length is a sub-cell wall model and a gap that a single cell spans does
       // not resolve one; the axis keeps its validated no-slip Dirichlet closure. Counted (not
       // silent) through sandwichSkipped so a geometry where it matters is visible.
-      if (sandwich && lamAxis != nullptr && lamAxis[axis] > 0.0f && sandwichSkipped != nullptr)
+      if (sandwich && lamAxis != nullptr && lamAxis[axis] > Real(0) && sandwichSkipped != nullptr)
         Kokkos::atomic_fetch_add(sandwichSkipped, 1);
-      float D_axis =
+      Real D_axis =
           sandwich ? D_sandwich[axis] : (g_p ? D_vals[kp] : (g_m ? D_vals[km] : D_rescale));
-      float R = D_rescale / D_axis;
-      if (Kokkos::fabs(D_axis) < 1e-9f)
-        R = 1.0f;
+      Real R = D_rescale / D_axis;
+      if (Kokkos::fabs(D_axis) < Real(1e-9))
+        R = Real(1);
       o.R_val(list_idx * 6 + kp) = R;
       o.R_val(list_idx * 6 + km) = R;
       if (sandwich) {
@@ -219,16 +257,16 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
                                           poly_Nbc_mp_sw_avg(xi_vals[kp], xi_vals[km])) *
                                          R;
         }
-        o.M_val(list_idx * 6 + kp) = 0.0f;
-        o.X_val(list_idx * 6 + kp) = 0.0f;
-        o.M_val(list_idx * 6 + km) = 0.0f;
-        o.X_val(list_idx * 6 + km) = 0.0f;
+        o.M_val(list_idx * 6 + kp) = Real(0);
+        o.X_val(list_idx * 6 + kp) = Real(0);
+        o.M_val(list_idx * 6 + km) = Real(0);
+        o.X_val(list_idx * 6 + km) = Real(0);
       } else {
         for (int side = 0; side < 2; ++side) {
           int kk = side == 0 ? kp : km;
           if (is_ghost[kk]) {
-            const float lam = (lamAxis != nullptr && SCHEME == 0) ? lamAxis[axis] : 0.0f;
-            if (lam > 0.0f) {
+            const Real lam = (lamAxis != nullptr && SCHEME == 0) ? lamAxis[axis] : Real(0);
+            if (lam > Real(0)) {
               o.K_val(list_idx * 6 + kk) = poly_Nc_slip(xi_vals[kk], lam) * R;
               o.X_val(list_idx * 6 + kk) = poly_N_nb_slip(xi_vals[kk], lam) * R;
               o.Nbc_val(list_idx * 6 + kk) = poly_Nbc(xi_vals[kk]) * R;
@@ -241,12 +279,12 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
               o.X_val(list_idx * 6 + kk) = poly_Nnb_avg(xi_vals[kk]) * R;
               o.Nbc_val(list_idx * 6 + kk) = poly_Nbc_avg(xi_vals[kk]) * R;
             }
-            o.M_val(list_idx * 6 + kk) = 0.0f;
+            o.M_val(list_idx * 6 + kk) = Real(0);
           } else {
-            o.K_val(list_idx * 6 + kk) = 0.0f;
-            o.M_val(list_idx * 6 + kk) = 1.0f;
-            o.X_val(list_idx * 6 + kk) = 0.0f;
-            o.Nbc_val(list_idx * 6 + kk) = 0.0f;
+            o.K_val(list_idx * 6 + kk) = Real(0);
+            o.M_val(list_idx * 6 + kk) = Real(1);
+            o.X_val(list_idx * 6 + kk) = Real(0);
+            o.Nbc_val(list_idx * 6 + kk) = Real(0);
           }
         }
       }
@@ -254,22 +292,23 @@ KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, f
       o.dir_code(list_idx * 6 + km) = km;
     }
   } else {  // Neumann
-    o.D_rescale(list_idx) = 1.0f;
+    o.D_rescale(list_idx) = Real(1);
     for (int k = 0; k < 6; ++k) {
       o.dir_code(list_idx * 6 + k) = k;
-      o.R_val(list_idx * 6 + k) = 1.0f;
-      o.K_val(list_idx * 6 + k) = is_ghost[k] ? 1.0f : 0.0f;
-      o.M_val(list_idx * 6 + k) = is_ghost[k] ? 0.0f : 1.0f;
-      o.X_val(list_idx * 6 + k) = 0.0f;
-      o.Nbc_val(list_idx * 6 + k) = 0.0f;
+      o.R_val(list_idx * 6 + k) = Real(1);
+      o.K_val(list_idx * 6 + k) = is_ghost[k] ? Real(1) : Real(0);
+      o.M_val(list_idx * 6 + k) = is_ghost[k] ? Real(0) : Real(1);
+      o.X_val(list_idx * 6 + k) = Real(0);
+      o.Nbc_val(list_idx * 6 + k) = Real(0);
     }
   }
 }
 
 // Sampled-theta entry point (the historical signature; all existing call sites unchanged).
 template <int SCHEME, class OV>
-KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx, float sdf_c,
-                                         const float sdf_n[6], int bc_type) {
+KOKKOS_INLINE_FUNCTION void ibmFillEntry(const OV& o, int list_idx, int c_idx,
+                                         typename OV::value_type sdf_c,
+                                         const typename OV::value_type sdf_n[6], int bc_type) {
   ibmFillEntry<SCHEME>(o, list_idx, c_idx, sdf_c, sdf_n, bc_type, nullptr, nullptr, nullptr);
 }
 
@@ -344,15 +383,16 @@ inline void ibmBuildDiffusionVar(MV AC, MV AW, MV AE, MV AS, MV AN, MV AB, MV AT
 // Apply the Robust-Scaled overlay to the momentum stencil at each cut cell (port of
 // ibm_modify_stencil_k): modify A_C / 6 off-diagonals + accumulate the inhomogeneous
 // (wall-velocity) term and store the row scaling. Each cut cell owns a distinct grid index c -> no
-// races.
+// races. `OV` (deduced): the overlay's own storage type is `OV::value_type` (G.6).
 // `u_bc` (optional): per-cell wall velocity of THIS component, on the extended block -- the
 // kinematic no-slip datum for MOVING geometry (Layer 3 rung 2). An EMPTY View falls back to the
 // scalar u_bc_val, which is what keeps a static solver bit-identical: the accumulated term is
 // (double)Nbc * 0.0f * vnb either way, the same three roundings in the same order.
-template <class MV>
+template <class MV, class OV>
 inline void ibmModifyStencil(
     MV AC, MV AW, MV AE, MV AS, MV AN, MV AB, MV AT, Kokkos::View<double*, IMem> a_inhom,
-    Kokkos::View<double*, IMem> rhs_scale, const IbmOverlay& ibm, int numActive, float u_bc_val,
+    Kokkos::View<double*, IMem> rhs_scale, const OV& ibm, int numActive,
+    typename OV::value_type u_bc_val,
     Kokkos::View<const double*, IMem> u_bc = Kokkos::View<const double*, IMem>()) {
   Kokkos::DefaultExecutionSpace space;
   const bool hasInhom = (a_inhom.extent(0) != 0), hasScale = (rhs_scale.extent(0) != 0);
@@ -362,7 +402,7 @@ inline void ibmModifyStencil(
       KOKKOS_LAMBDA(int list_idx) {
         const int OPP[6] = {1, 0, 3, 2, 5, 4};
         const int c = ibm.cell_index(list_idx);
-        const float descale = ibm.D_rescale(list_idx);
+        const auto descale = ibm.D_rescale(list_idx);
         if (hasScale)
           rhs_scale(c) = descale;
         const double ubc = hasWallVel ? u_bc(c) : (double)u_bc_val;
@@ -371,13 +411,13 @@ inline void ibmModifyStencil(
         double mod[6] = {0, 0, 0, 0, 0, 0};
         double inhom = 0.0;
         for (int k = 0; k < 6; ++k) {
-          const float K = ibm.K_val(list_idx * 6 + k), M = ibm.M_val(list_idx * 6 + k);
-          const float X = ibm.X_val(list_idx * 6 + k), Nbc = ibm.Nbc_val(list_idx * 6 + k);
+          const auto K = ibm.K_val(list_idx * 6 + k), M = ibm.M_val(list_idx * 6 + k);
+          const auto X = ibm.X_val(list_idx * 6 + k), Nbc = ibm.Nbc_val(list_idx * 6 + k);
           const double vnb = orig[k];
-          aC += vnb * K;
+          aC += vnb * (double)K;
           inhom += (double)Nbc * ubc * vnb;
-          mod[k] += vnb * ((double)descale * M - 1.0);
-          mod[OPP[k]] += vnb * X;
+          mod[k] += vnb * ((double)descale * (double)M - 1.0);
+          mod[OPP[k]] += vnb * (double)X;
         }
         AC(c) = (typename MV::non_const_value_type)aC;
         AE(c) = (typename MV::non_const_value_type)(orig[0] + mod[0]);

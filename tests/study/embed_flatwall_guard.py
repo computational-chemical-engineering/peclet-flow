@@ -28,7 +28,7 @@ def run(N, mode, mu=0.1, F=0.01, dt=50.0, max_steps=1500):
     sdf = np.minimum(gy - ylo, yhi - gy)[None, :, None] * np.ones((nx, ny, nz))
     lv = max(2, int(np.log2(N)) - 1)
     s = flow.SolverColocated(nx, ny, nz)
-    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(F, 0, 0); s.set_advection(False)
+    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force((F, 0, 0)); s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(200); s.set_pressure_multigrid(True, levels=lv)
     s.set_pressure_pcg(True, 400, 1e-11); _collocated_mode(s, mode)
     s.set_solid(sdf, cutcell_pressure=True)

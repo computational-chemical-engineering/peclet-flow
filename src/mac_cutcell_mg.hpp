@@ -54,7 +54,7 @@ using peclet::core::halo::GridHaloTopology;
 // apertures span 3 decades) the defect on mixed large+tiny rows is amplified to ~eps_f*contrast,
 // which perturbs the near-null vector the mean-removal deflation assumes and floors/rebounds the
 // CG-family drivers near r/r0 ~ 1e-6 (see doc/collocated_paper_plan.md row 55). The bottom AMG
-// already re-sums its diagonal in double for exactly this reason. -DPECLET_FLOW_MREAL_DOUBLE
+// already re-sums its diagonal in double for exactly this reason. -DPECLET_FLOW_OPERATOR_DOUBLE
 // switches the whole hierarchy to double (A/B instrument; ~2x operator memory).
 //
 // EVERY store into an FPV/FV must go through MReal, or the switch is silently partial. WO-M found
@@ -64,7 +64,7 @@ using peclet::core::halo::GridHaloTopology;
 // porous steady drag balance stuck at 4.8e-8 in BOTH builds), and five sites in
 // `mac_velocity_mg.hpp` (the velocity-MG staircase / upwind-coarse / const-aniso operators and the
 // no-slip fold). They now cast to MReal, which is byte-identical when MReal is float.
-#ifdef PECLET_FLOW_MREAL_DOUBLE
+#ifdef PECLET_FLOW_OPERATOR_DOUBLE
 using MReal = double;
 #else
 using MReal = float;  // operator storage = CUDA mreal

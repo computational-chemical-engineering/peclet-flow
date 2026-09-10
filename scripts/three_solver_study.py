@@ -44,7 +44,7 @@ def run(case, N, solver="staggered", re=0.0, mu=0.1, F=1e-3, dt=60.0, max_steps=
     else:          sdf,R=sdf_random(N); metric="k*"
     lv=max(2,int(np.floor(np.log2(N)))-1)
     Cls=sdflow.SolverColocated if solver=="colocated" else sdflow.Solver
-    s=Cls(N,N,N); s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(F,0,0)
+    s=Cls(N,N,N); s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force((F, 0, 0))
     s.set_advection(re>0.0)
     if re>0: s.set_implicit_advection(True)
     s.diagnostics.set_velocity_solver_params(80)

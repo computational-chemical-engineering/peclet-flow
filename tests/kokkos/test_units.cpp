@@ -44,7 +44,7 @@
 //       representable, so the six off-diagonals no longer sum to AC - idiag exactly and the whole
 //       profile is scaled by 1 - 1.06e-07 (that ratio is CONSTANT across all fifteen fluid rows,
 //       which is what identifies it).  Bound 1e-7, measured 3.052e-08 — and 8.674e-15 when the
-//       identical source is built with -DPECLET_FLOW_MREAL_DOUBLE.  The discretisation is
+//       identical source is built with -DPECLET_FLOW_OPERATOR_DOUBLE.  The discretisation is
 //       pointwise exact here too; this row watches the WO-M float operator-storage floor
 //       (docs/SCALING_ISSUES.md #1), it is NOT an exactness statement and NOT a metric defect.
 //
@@ -426,7 +426,7 @@ void checkChannel(const char* what, const Channel& ch, int nx, int ny, int nz, i
         "whole profile (rel err proportional to u, one constant ratio on every fluid row) "
         "is the FLOAT momentum-operator storage (`IbmSolver::FV`, MReal; WO-M / "
         "docs/SCALING_ISSUES.md #1), not the metric -- rebuild with "
-        "-DPECLET_FLOW_MREAL_DOUBLE to separate the two.\n");
+        "-DPECLET_FLOW_OPERATOR_DOUBLE to separate the two.\n");
   CHECK(relErr <= bound);
   CHECK(wallMax == 0.0);
   CHECK(mv <= 1e-12 * umax);
@@ -451,7 +451,7 @@ void gateAnisoPoiseuille() {
   //     hRef = 0.3, h' = (10/3, 1, 20/3), w = (0.09, 1, 0.0225); walls at 12.5*0.3 = 3.75 and
   //     28.5*0.3 = 8.55 (H = 4.8). mu' = 55.5555... and AC = 124.6111... are not representable in
   //     the float operator storage, which scales the whole profile by 1 - 1.06e-07: measured
-  //     3.052e-08 here and 8.674e-15 with -DPECLET_FLOW_MREAL_DOUBLE. Bound 1e-7 (see the header).
+  //     3.052e-08 here and 8.674e-15 with -DPECLET_FLOW_OPERATOR_DOUBLE. Bound 1e-7 (see the header).
   {
     const Channel ch = runChannelBox(16, 40, 8, {16.0, 12.0, 16.0}, 12, 28, /*arm=*/true);
     CHECK(ch.aniso);

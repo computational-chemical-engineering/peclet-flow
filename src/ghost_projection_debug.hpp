@@ -1,6 +1,9 @@
 /// @file
 /// @brief flow — OPT-IN forensics for the ghost-projection overlay (`PECLET_FLOW_GP_DEBUG`).
 ///
+/// PRECISION-EXEMPT (whole file, QUALITY_PLAN G.6): opt-in debug forensics that never feeds a
+/// solve (see below); its float census/dump precision is unrelated to operator correctness.
+///
 /// Analysis-only instrumentation, in the style of `PECLET_FLOW_AGMG_DEBUG`: nothing here runs
 /// unless the environment variable is set, and nothing here feeds the solve. It answers phase-A2
 /// of `doc/ghost_hardening_plan.md` — "is the divergence seeded by a handful of identifiable

@@ -1649,8 +1649,12 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "(well-conditioned at large dt). Under a physical domain the FIRST call pins the "
            "reference time the internal scales are built on; any later call (step_adaptive "
            "makes them) rebuilds the momentum operator at the next step.")
-      .def("set_body_force", &S::setBodyForce, nb::arg("fx"), nb::arg("fy"), nb::arg("fz"),
-           "Set the body force per unit volume (fx, fy, fz) — e.g. a mean pressure gradient.")
+      .def(
+          "set_body_force",
+          [](S& s, std::array<double, 3> force) { s.setBodyForce(force[0], force[1], force[2]); },
+          nb::arg("force"),
+          "Set the body force per unit volume (fx, fy, fz) as one 3-sequence — e.g. a mean "
+          "pressure gradient.")
       .def("set_advection", &S::setAdvection, nb::arg("on"),
            "Enable/disable explicit high-order momentum advection (default scheme SOU). Off ⇒ "
            "Stokes.")
@@ -1816,23 +1820,26 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "Enable velocity (momentum) multigrid for the implicit diffusion solve.")
       .def(
           "set_domain_bc",
-          [](S& s, const std::string& face, const std::string& type, double vx, double vy,
-             double vz) {
+          [](S& s, const std::string& face, const std::string& type,
+             std::array<double, 3> velocity) {
             s.setDomainBc(face_index(face, "set_domain_bc"),
-                          enum_index(type, kBcTypes, "set_domain_bc", "type"), vx, vy, vz);
+                          enum_index(type, kBcTypes, "set_domain_bc", "type"), velocity[0],
+                          velocity[1], velocity[2]);
           },
-          nb::arg("face"), nb::arg("type"), nb::arg("vx") = 0.0, nb::arg("vy") = 0.0,
-          nb::arg("vz") = 0.0,
+          nb::arg("face"), nb::arg("type"),
+          nb::arg("velocity") = std::array<double, 3>{0.0, 0.0, 0.0},
           "Set a per-face domain BC. `face` is one of '-x', '+x', '-y', '+y', '-z', '+z'; `type` "
           "is 'periodic' (the default on every face), 'wall' (no-slip), 'inflow' (Dirichlet "
-          "velocity vx, vy, vz -- an inlet, or a lid with a tangential velocity), 'outflow' "
+          "`velocity` -- an inlet, or a lid with a tangential velocity), 'outflow' "
           "(zero-gradient velocity, p = 0) or 'slip' (free-slip / symmetry plane: zero normal "
           "velocity, zero normal derivative of the tangential components, pressure Neumann like a "
-          "wall; vx/vy/vz are ignored). Call BEFORE the geometry (set_solid / "
-          "set_pressure_geometry / set_solid_from_scene): the BCs are folded into the operators "
-          "when the geometry is built, and a later call raises. A half-domain closed by a 'slip' "
-          "face reproduces the full symmetric domain pointwise (tests/kokkos/test_freeslip). Both "
-          "grids (Solver and SolverColocated).")
+          "wall; `velocity` is ignored). The TYPE must be set BEFORE the geometry (set_solid / "
+          "set_pressure_geometry / set_solid_from_scene): it is folded into the operators when "
+          "the geometry is built, and a call that would CHANGE it raises afterwards. A VALUE "
+          "update on a face whose type is unchanged (ramping an inflow jet, a lid's tangential "
+          "speed) is allowed at any time and takes effect the next step. A half-domain closed by "
+          "a 'slip' face reproduces the full symmetric domain pointwise "
+          "(tests/kokkos/test_freeslip). Both grids (Solver and SolverColocated).")
       .def(
           "set_domain_bc_profile",
           [](S& s, const std::string& face, nb::ndarray<double, nb::c_contig> prof) {
@@ -1845,8 +1852,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           },
           nb::arg("face"), nb::arg("profile"),
           "Prescribe a per-position inlet velocity profile (Nb,Nc,3) over a face (one of '-x', "
-          "'+x', '-y', '+y', '-z', '+z'; sets it to 'inflow'). Like set_domain_bc, call it "
-          "BEFORE the geometry is built.")
+          "'+x', '-y', '+y', '-z', '+z'; sets it to 'inflow'). Like set_domain_bc, the TYPE (making "
+          "a face inflow for the first time) must be set BEFORE the geometry; updating the "
+          "profile on a face that is ALREADY inflow is allowed after the geometry.")
       .def(
           "set_pressure_geometry",
           [](S& s, nb::ndarray<double, nb::f_contig> sdf) { s.setPressureGeometry(grid_in(sdf)); },
@@ -2850,7 +2858,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "time loop changes the run, and (b) reports the divergence of a field the solver never "
           "used. Measured on a stratified ratio-1000 outflow box: 5e-3 from the mutating "
           "diagnostic, flat in the iteration count, flat in the density ratio and bit-identical in "
-          "a -DPECLET_FLOW_MREAL_DOUBLE build (i.e. not a solver residual), against the projected "
+          "a -DPECLET_FLOW_OPERATOR_DOUBLE build (i.e. not a solver residual), against the projected "
           "field's own residual from this call. Identical to max_open_divergence() when there is "
           "no outflow face, and on the collocated grid (which already measures the face field).")
       .def("max_open_divergence", &S::maxOpenDivergence,

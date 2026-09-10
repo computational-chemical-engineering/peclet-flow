@@ -81,7 +81,7 @@ sdf, R = bed_sdf(N, BED)
 sv = flow.Solver if KIND == "stag" else flow.SolverColocated
 s = sv(N, N, N)
 s.set_rho(1.0); s.set_mu(MU); s.set_dt(DT)
-s.set_body_force(F0, 0, 0); s.set_advection(False)
+s.set_body_force((F0, 0, 0)); s.set_advection(False)
 s.diagnostics.set_velocity_solver_params(int(os.environ.get("VIT", "150")))
 if int(os.environ.get("APORDER", "1")) != 1:
     s.diagnostics.set_aperture_order(int(os.environ["APORDER"]))   # 2 = marching-squares apertures

@@ -17,7 +17,7 @@ float-representable metric: `extent = (16, 10, 16)`, `spacing (1, 0.25, 2)`, `hR
 `(16, 12, 16)`, `spacing (1, 0.3, 2)`, stays in the same test as a second stretched case at
 **`1e-7`**: it is a real production-shaped configuration (`mu' = 55.5…` unrepresentable) and what it
 measures is the WO-M float operator-storage floor (`docs/SCALING_ISSUES.md` #1) — a one-signed
-multiplicative factor of ~1e-7 that `-DPECLET_FLOW_MREAL_DOUBLE` removes. It is a **tripwire for
+multiplicative factor of ~1e-7 that `-DPECLET_FLOW_OPERATOR_DOUBLE` removes. It is a **tripwire for
 that floor, not an exactness statement**. Option 3 (gate the whole thing in a double build) is
 rejected: a gate on a build nobody ships proves nothing about the shipped one. The other three
 assertions — `|v| = |w| = 0`, wall rows exactly `0`, and the isotropic control — apply to both
@@ -51,7 +51,7 @@ so `spacing() == (1.0, 0.3, 2.0)`, walls on the `y` cell centres `3.75` / `8.55`
 |---|---|
 | stretched `(16, 40, 8)` on `(16, 12, 16)` — **the §8.2 configuration** | **3.052e-08** |
 | the isotropic control `(16, 16, 16)` at `extent == cells` (same test) | 3.701e-15 |
-| the SAME stretched run, rebuilt with `-DPECLET_FLOW_MREAL_DOUBLE` | **8.674e-15** |
+| the SAME stretched run, rebuilt with `-DPECLET_FLOW_OPERATOR_DOUBLE` | **8.674e-15** |
 
 `max|v| = max|w| = 0.000e+00` exactly, and the wall/solid `u` rows are exactly `0` — the other three
 §8.2 assertions pass, in every row above.
@@ -100,7 +100,7 @@ reason that predates and is orthogonal to Phase 2. Which of these is §8.2?
    `h' = (4, 1, 8)`, walls at the y cell centres `3.125` / `7.125`, `H = 4.0`,
    `u_max = F H²/(8 mu) = 0.2` — which measures **1.388e-15**, i.e. the isotropic control's own floor.
 3. **Keep both, build the gate in double**: a second `test_units` executable compiled with
-   `-DPECLET_FLOW_MREAL_DOUBLE` (measured 8.674e-15). Costs a second binary and states the gate about
+   `-DPECLET_FLOW_OPERATOR_DOUBLE` (measured 8.674e-15). Costs a second binary and states the gate about
    a build the solver does not ship.
 
 **Decided:** 1 and 2 together — see the Status paragraph at the top of E1. The ctest now carries

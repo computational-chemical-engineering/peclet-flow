@@ -26,7 +26,7 @@ def run(H, L, Re=100.0, U=1.0, nz=4, max_steps=8000, dt=0.5):
     nu = U * H / Re
     s = sdflow.SolverColocated(L, H, nz)
     s.set_rho(1.0); s.set_mu(nu); s.set_dt(dt); s.set_advection(True)
-    s.set_domain_bc("-x", "inflow", U, 0.0, 0.0)   # -x inflow: uniform stream
+    s.set_domain_bc("-x", "inflow", (U, 0.0, 0.0))   # -x inflow: uniform stream
     s.set_domain_bc("+x", "outflow")                # +x outflow
     s.set_domain_bc("-y", "wall"); s.set_domain_bc("+y", "wall")  # -y, +y no-slip walls
     s.diagnostics.set_velocity_solver_params(60)

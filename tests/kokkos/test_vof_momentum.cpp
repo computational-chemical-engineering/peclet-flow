@@ -155,7 +155,7 @@ std::unique_ptr<IbmSolver> makeSolver(int n, const std::vector<double>& C, doubl
 // stencil (`Solver::FV`) while `buildRhsVar*` forms the same `rho_f/dt` in double, so
 // `u* = b/diag` differs from `u^n` at FLOAT epsilon whenever rho varies — a pre-existing 1e-7 floor
 // that has nothing to do with this rung (it is identically zero for uniform rho, and a
-// `-DPECLET_FLOW_MREAL_DOUBLE` build puts the same measurement at 4e-16). The multi-step value is
+// `-DPECLET_FLOW_OPERATOR_DOUBLE` build puts the same measurement at 4e-16). The multi-step value is
 // therefore gated loosely and printed, not asserted at machine zero.
 void uniformIdentity() {
   const int n = 24;

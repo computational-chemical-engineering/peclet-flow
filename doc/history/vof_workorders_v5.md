@@ -1595,7 +1595,7 @@ operator defect, not the boundary machinery.
   probe runs here.
 * the ratio-1000 cap is **not** WO-M's float `A·1 = 0` defect. Measured on the G3 pool
   configuration (32×4×16, ratio 1000, FCG cap 800, 40 steps) against a
-  `-DPECLET_FLOW_MREAL_DOUBLE` build of the same tree: the per-step iteration counts and
+  `-DPECLET_FLOW_OPERATOR_DOUBLE` build of the same tree: the per-step iteration counts and
   divergences agree to **every printed digit** from step 1 onward (step 0 reads 112 float / 120
   double), e.g. step 39 = 634 iterations and 4.821e-03 in both builds. So it is the coarsening /
   boundary-coefficient side, i.e. the S3 family, not the operator storage precision.

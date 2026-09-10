@@ -405,7 +405,7 @@ INVALID; the worst observed was 21/300 with `max|div(open u)| <= 2e-11`.
 
 **The uniform-velocity sweep, consistent vs inconsistent, 200 coupled steps, 32^3, mu = 0, g = 0.**
 The left half is the shipped (default) build; the right half is the same code in a
-`-DPECLET_FLOW_MREAL_DOUBLE` build — the existing A/B instrument, no source change — and it is the
+`-DPECLET_FLOW_OPERATOR_DOUBLE` build — the existing A/B instrument, no source change — and it is the
 half that answers the work order's question, for the reason in finding 6.
 
 | scene | ratio | default build: consistent | default: inconsistent | MReal=double: consistent | MReal=double: inconsistent |
@@ -545,7 +545,7 @@ differs from its input at float epsilon **whenever rho varies in space**. It is 
 uniform rho (measured: exactly 0.0, 0 pressure iterations) and it is present with momentum
 consistency OFF, so it is neither caused by nor curable within this rung.
 
-Confirmed by A/B with the existing `-DPECLET_FLOW_MREAL_DOUBLE` instrument in a separate build
+Confirmed by A/B with the existing `-DPECLET_FLOW_OPERATOR_DOUBLE` instrument in a separate build
 directory (no source change, shipped default untouched): the identical measurement returns
 **1.2e-15, flat across ratios 1e1..1e4** on both scenes. The pressure solve is NOT implicated —
 `max|div(open u)| = 3.3e-16` and 13..21 iterations against a cap of 300 in the double build, and
