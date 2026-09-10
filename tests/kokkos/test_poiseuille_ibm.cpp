@@ -46,15 +46,16 @@ int main(int argc, char** argv) {
 
     // build the u-component IBM overlay
     const int maxCut = (int)((long)nx * ny * nz);
+    // IbmOverlay row storage follows mreal (G.6): float unless -DPECLET_FLOW_OPERATOR_DOUBLE.
     IbmOverlay ov{Kokkos::View<int*, CCMem>("ci", maxCut),
                   Kokkos::View<int*, CCMem>("nb", maxCut),
-                  Kokkos::View<float*, CCMem>("dr", maxCut),
+                  Kokkos::View<mreal*, CCMem>("dr", maxCut),
                   Kokkos::View<int*, CCMem>("dc", (std::size_t)maxCut * 6),
-                  Kokkos::View<float*, CCMem>("K", (std::size_t)maxCut * 6),
-                  Kokkos::View<float*, CCMem>("M", (std::size_t)maxCut * 6),
-                  Kokkos::View<float*, CCMem>("X", (std::size_t)maxCut * 6),
-                  Kokkos::View<float*, CCMem>("Nbc", (std::size_t)maxCut * 6),
-                  Kokkos::View<float*, CCMem>("R", (std::size_t)maxCut * 6)};
+                  Kokkos::View<mreal*, CCMem>("K", (std::size_t)maxCut * 6),
+                  Kokkos::View<mreal*, CCMem>("M", (std::size_t)maxCut * 6),
+                  Kokkos::View<mreal*, CCMem>("X", (std::size_t)maxCut * 6),
+                  Kokkos::View<mreal*, CCMem>("Nbc", (std::size_t)maxCut * 6),
+                  Kokkos::View<mreal*, CCMem>("R", (std::size_t)maxCut * 6)};
     Kokkos::View<int*, CCMem> idMap("idMap", n);
     Kokkos::View<int, CCMem> counter("counter");
     int nCut =
