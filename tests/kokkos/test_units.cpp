@@ -451,7 +451,8 @@ void gateAnisoPoiseuille() {
   //     hRef = 0.3, h' = (10/3, 1, 20/3), w = (0.09, 1, 0.0225); walls at 12.5*0.3 = 3.75 and
   //     28.5*0.3 = 8.55 (H = 4.8). mu' = 55.5555... and AC = 124.6111... are not representable in
   //     the float operator storage, which scales the whole profile by 1 - 1.06e-07: measured
-  //     3.052e-08 here and 8.674e-15 with -DPECLET_FLOW_OPERATOR_DOUBLE. Bound 1e-7 (see the header).
+  //     3.052e-08 here and 8.674e-15 with -DPECLET_FLOW_OPERATOR_DOUBLE. Bound 1e-7 (see the
+  //     header).
   {
     const Channel ch = runChannelBox(16, 40, 8, {16.0, 12.0, 16.0}, 12, 28, /*arm=*/true);
     CHECK(ch.aniso);

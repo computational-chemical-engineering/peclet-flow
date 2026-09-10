@@ -14,9 +14,9 @@
 // This probe separates them. It assembles M column by column exactly as CG builds it — one
 // mean-removed unit basis vector in, one symmetric V-cycle, the result out — on the SAME code path
 // the CG drivers use, and writes the dense matrix to disk. Building this file twice, with and
-// without -DPECLET_FLOW_OPERATOR_DOUBLE, changes ONLY the operator storage precision. If the negative
-// pivot disappears in double, the S3 coefficient-coarsening theory loses its evidence; if it
-// survives, S3 stands as an independent mechanism.
+// without -DPECLET_FLOW_OPERATOR_DOUBLE, changes ONLY the operator storage precision. If the
+// negative pivot disappears in double, the S3 coefficient-coarsening theory loses its evidence; if
+// it survives, S3 stands as an independent mechanism.
 //
 // It also assembles the FINE operator A densely (same unit-vector trick) so the mechanism claim
 // itself — the per-row defect of A*1 = 0 — is a measured number rather than an argument.
