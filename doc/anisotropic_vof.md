@@ -252,7 +252,7 @@ on Phase 2's `hRef` choice; `min_a h'_a` is `1.0` today. `vof_step_limits()`, `s
 the adaptive step read the same function.
 
 **V3.3 Everything else in the CSF is unit-free**: `csfKappaDefined`, the orphan census, the
-wisp threshold `interfaceEps = 1e-8`, `set_vof_kappa_constant` (already converts through
+wisp threshold `interfaceEps = 1e-8`, `diagnostics.set_vof_kappa_constant` (already converts through
 `curvToPhys`).
 
 ## 6. Wetting — DECISION V4: rotate in the physical frame, walk in index space
@@ -333,7 +333,7 @@ distance along a grid line *in cells*, which is an axis ratio: with the INDEX ce
 and INDEX unit normal it is already right on a stretched cell (§2, "ratios along an axis") —
 **unchanged**, and the operator-flux `mdot` (`pcOperatorMassFlux`, the shipped `energy_order=2`
 path) reads the same `theta`. `pcGfmThetaK` (the curvature correction, on with
-`set_phase_change_curvature_distance`) mixes a physical `kappa'` with an index `rho^2 = 1 - nd^2`;
+`diagnostics.set_phase_change_curvature_distance`) mixes a physical `kappa'` with an index `rho^2 = 1 - nd^2`;
 its stretched form is `rho^2 = h'_d^2 (1 - n_d^2)` with the *physical* `n_d` and the correction
 applied to the *physical* distance, then divided by `h'_d` to return to cells:
 `|phi_phys - s h'_d n_d + kappa' h'_d^2 (1 - n_d^2)/4| / (h'_d |n_d|)`, which at `H = I` is the

@@ -79,18 +79,18 @@ disabled for porous+drag (diverges on the high-`w_f`-contrast operator). The **G
 (agglomerated, decomposition-agnostic coarse solve) is the porous+drag default and is domain-BC
 aware: the assembled bottom matrix does not wrap across non-periodic faces (the Dirichlet outflow
 anchor stays diagonal-only) and the constant-mode projection is applied only when the operator is
-singular (no outflow). `set_pressure_graph_amg` propagates to the MG immediately.
+singular (no outflow). `diagnostics.set_pressure_graph_amg` propagates to the MG immediately.
 
 ## 4. Defaults and knobs
 
 | what | default | knob |
 |---|---|---|
 | convection (implicit FOU + deferred TVD) | on (set by the coupling) | `CfdDem(advection=…)` |
-| incremental-rotational pressure | on | `set_incremental_pressure` |
+| incremental-rotational pressure | on | `diagnostics.set_incremental_pressure` |
 | pressure driver | MG-PCG | `set_pressure_pcg` / `set_pressure_multigrid` |
-| GraphAMG bottom | on for porous+drag | `set_pressure_graph_amg` |
-| d(ε)/dt source in the projection | on | `set_porous_deps_dt` |
-| pressure under-relaxation | off (ω=1) | `set_pressure_underrelax` |
+| GraphAMG bottom | on for porous+drag | `diagnostics.set_pressure_graph_amg` |
+| d(ε)/dt source in the projection | on | `diagnostics.set_porous_deps_dt` |
+| pressure under-relaxation | off (ω=1) | `diagnostics.set_pressure_underrelax` |
 | void-fraction floor | 0.25 (the driver default; 0.4 under-predicted dense-bed drag ~3×, 0.05 detonated beds) | `CfdDem(eps_min=…)` |
 
 ## 5. Validation

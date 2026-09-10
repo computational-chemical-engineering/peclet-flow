@@ -6,7 +6,7 @@ shares the FaceProps/rotational machinery).
 
 ## 1. The scheme
 
-Enabled by `set_density_mode("variable")` (or automatically by a closure targeting `"rho"`).
+Enabled by `diagnostics.set_density_mode("variable")` (or automatically by a closure targeting `"rho"`).
 The scalar `rho_` (`set_rho`) becomes the **reference density ρ₀**; the registered cell field
 `"rho"` carries ρ(x). Staggered grid only (v1).
 
@@ -64,7 +64,7 @@ coefficients; Chebyshev only needs real spectrum bounds (re-estimated after ever
 rebuild) and is immune. Consequence, implemented in `setDensityMode`:
 
 - **Chebyshev is the default pressure driver under variable density** (an explicit
-  `set_pressure_pcg` / `set_pressure_chebyshev` after `set_density_mode` still wins).
+  `set_pressure_pcg` / `set_pressure_chebyshev` after `diagnostics.set_density_mode` still wins).
 - Practical accuracy: the first solve on a fresh field leaves a transient velocity residual
   ~1e-6·(g·dt) (the driver's stopping estimate); the incremental scheme absorbs it within a few
   steps and the steady state is machine-exact (§3).
@@ -127,7 +127,7 @@ rebuild) and is immune. Consequence, implemented in `setDensityMode`:
 > which always had it). Measured: `pr` wall-bounded **0.42–0.52 → 0.008–0.086**, at or below the
 > periodic 0.062; on a 24×24×16 constant-density lid box **PCG 200/200 → 6, FCG 22 → 6, Chebyshev
 > 12 → 7**. Periodic/IBM byte-identical; single-phase regression +0.00 %. Ablation:
-> `set_pressure_coarse_ghost(False)` (`test_pressure_wallbounded --no-coarse-ghost`). Gate:
+> `diagnostics.set_pressure_coarse_ghost(False)` (`test_pressure_wallbounded --no-coarse-ghost`). Gate:
 > `tests/kokkos/test_pressure_wallbounded.cpp`.
 > (ii) *What the repair does NOT cover* — the two residual modes above are the **same** defect, and it
 > is a coefficient defect, not a boundary one: at a high density contrast the arithmetic coarsening of
@@ -201,14 +201,14 @@ identical anyway** at every np on both backends, as does CUDA `walls-z` at np = 
 
 ## 4. Limitations / deferred
 
-- **Staggered only** (collocated `set_density_mode` throws): the collocated correction path
+- **Staggered only** (collocated `diagnostics.set_density_mode` throws): the collocated correction path
   (wall-aware transpose maps) needs its own 1/ρ treatment.
 - **Outflow + varRho**: `bcCorrectOutflow` corrects the outflow face without the 1/ρ_f factor —
   fine when the outflow region has ρ ≈ uniform; revisit with a two-phase outflow case.
 - **Boussinesq vs varRho**: for small Δρ/ρ prefer the Phase-3 Boussinesq closure (cheaper: no
   per-step operator rebuild).
 - The rotational-term policy under simultaneous variable μ follows Phase 4
-  (`set_variable_rotational`; constant-μ default term is valid for variable ρ — the μ-part of the
+  (`diagnostics.set_variable_rotational`; constant-μ default term is valid for variable ρ — the μ-part of the
   stress is what the rotational correction concerns, cf. Guermond & Salgado [2] using exactly this
   constant-coefficient philosophy for variable density).
 - ~~MPI/CUDA validation deferred~~ — **done, §3 + §3.1** (VoF rung V-1 / WO-A). Two limitations were

@@ -21,7 +21,7 @@ MPI-clean, with the ghost implementation as the correctness oracle.
 
 ## The design family (cheap -> deep)
 
-**A. Neumann-closed openness filter (mode 14a, IMPLEMENTED, `set_fluid_only_constraint`).**
+**A. Neumann-closed openness filter (mode 14a, IMPLEMENTED, `diagnostics.set_fluid_only_constraint`).**
 Zero every openness face with a solid-centered side before the pressure stack consumes it.
 One kernel; operator/divergence/correction/MG all stay consistent automatically; SPD, 7-point,
 pointwise-local (MPI-trivial). Closure quality: Neumann-zero at closed faces -- throat flux

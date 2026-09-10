@@ -15,7 +15,7 @@ whose iteration count is ~O(1) in N.
 > MG is the next fix (see "Velocity-diffusion MG" below). Tooling: the MG ctests
 > (`tests/kokkos/test_mg.cpp`, `tests/kokkos_mpi/test_cutcellmg_mpi.cpp`) plus the grid-convergence
 > regression suite `tests/regression/sdflow_regression.py` (records MG-PCG iteration counts across N via
-> `last_pressure_iterations()`); `scripts/validate_zick_homsy_sdflow.py` checks correctness.
+> `diagnostics.last_pressure_iterations()`); `scripts/validate_zick_homsy_sdflow.py` checks correctness.
 > <!-- TODO: the standalone coarse-mode comparison harness (the retired CUDA `tests/profile_mg_scaling.cu`)
 > was not ported to Kokkos; the per-coarse-mode V-cycle-ρ table below was produced by it. -->
 
@@ -140,9 +140,9 @@ Exposed via `set_solid(..., pressure_coarse="rediscretized")` (default). All 24 
   staggered velocity geometry is *not* the cell-face openness. A proper velocity MG needs the per-
   component velocity geometry and a coarse operator consistent with the Robust-Scaling (research effort,
   secondary payoff). Reverted to the const-coeff coarse (converges, slowly). **Velocity RB-GS
-  (`set_velocity_solver_params`) is exact and the recommended default** — the velocity Helmholtz is the
+  (`diagnostics.set_velocity_solver_params`) is exact and the recommended default** — the velocity Helmholtz is the
   *easy*, non-singular operator; the pressure solve is the one that needed MG.
-- **Warm-start — DONE (opt-in, `set_pressure_warmstart`, default off).** Seeds the pressure solve from
+- **Warm-start — DONE (opt-in, `diagnostics.set_pressure_warmstart`, default off).** Seeds the pressure solve from
   the previous step's projection potential. Correct (same K on/off, PCG converges to tolerance); default
   off preserves the bit-exact cold-start cell-for-cell ctests; turn on for steady production marches.
 - MG-PCG already available (`set_pressure_pcg`). FMG and Chebyshev-on-coarse left as future tuning.

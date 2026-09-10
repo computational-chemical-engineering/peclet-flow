@@ -64,7 +64,10 @@ OpenMP pool — an unbounded one on a many-core host is an hour-long trap.
 More verification lives in `scripts/verify_*_sdflow.py` and `validate_zick_homsy_sdflow.py` (the
 external ground truth), run with `PYTHONPATH=<tree>`. `tests/regression/sdflow_regression.py` is
 the accuracy + iteration-count regression against a saved baseline (`--update` re-records;
-`--solver colocated --scheme ghost` has its own); `tests/study/` holds instruments, not gates.
+`--solver colocated --scheme ghost` has its own); `tests/regression/state_hash.py` prints the
+SHA-256 of the final state of one fixed-seed run per public entry path (the byte gate for any
+refactor that must not change numerics — the hashes at each package-F milestone are in the commit
+messages); `tests/study/` holds instruments, not gates.
 
 CI: `ci.yml` builds one host tree (kernel ctests + regression + verify), then the same tree with
 MPI at np = 1, 2 (4/8 if time allows). `quality.yml` runs ruff critical errors and a **blocking**
@@ -102,12 +105,27 @@ All header-only Kokkos C++20 in `namespace peclet::flow`.
   `tests/python/test_no_env_knobs.py` (ctest `no_env_knobs`) fails if a new one appears in `src/`.
   The old-name → setter table is in the `ad917b1` message. Do not add one, and do not document a
   workflow that sets one.
-- **Call order matters and is not enforced everywhere.** `set_rho`/`set_mu`/`set_dt` before
-  geometry (the first two fix the reference scales); `set_domain_bc`/`set_domain_bc_profile` before
-  geometry and the first step; `set_decomposition(levels, max_imbalance)` and
-  `flow.mpi_block(..., levels=, max_imbalance=)` must get the **same** values and both precede
-  `init_mpi()`. Select the pressure driver **last**: `set_property_model("rho", …)` fires
-  `set_density_mode`, which re-selects Chebyshev and discards an earlier choice.
+- **Two API tiers (QUALITY_PLAN D2, since 2026-09-10).** `Solver` / `SolverColocated` carry the
+  PUBLIC surface — what a user of single-phase, VoF, porous, moving-geometry, scalar-transport or
+  thermal flow needs to set up, run and read out a run (~140 members). Everything a developer uses
+  to inspect, profile, ablate or tune — the `*_diagnostics/_stats/_census/_budget/_ledger/_probe/
+  _timing` families, `last_*`, solver tuning beyond the driver selection, the ablation switches,
+  the zero-copy/MPI internals `field_view`/`exchange_field`/`rebalance_by_weights` — lives on
+  `s.diagnostics` (a view holding a reference to the solver, one class per grid). Integer codes are
+  strings everywhere (`set_domain_bc('-x', 'inflow', …)`, `set_advection_scheme('koren')`,
+  `add_scalar(scheme='koren')`, `set_scalar_bc(name, '+z', 'dirichlet', v)`), and every on/off pair
+  is one setter with a leading `enabled` bool (`set_phase_change_thermal(False)`).
+- **Call order is enforced where a wrong order gives a wrong result.** The settings that are folded
+  into the operators when the geometry is built — `set_domain_bc`/`set_domain_bc_profile`,
+  `diagnostics.set_aperture_order`, `set_exact_crossings`, `set_openness_override`,
+  `set_fluid_only_constraint`, `set_ghost_projection` / `set_collocated_scheme('ghost')` — raise
+  after `set_solid`/`set_pressure_geometry`/`set_solid_from_scene`; `set_decomposition` and
+  `diagnostics.set_comm_avoiding` raise after `init_mpi`. `set_rho`/`set_mu`/`set_dt` may be
+  called at any time (a change after the geometry rebuilds the momentum operator at the next step;
+  under a physical domain the FIRST `set_rho` and the FIRST `set_dt` pin the reference scales).
+  `set_decomposition(levels, max_imbalance)` and `flow.mpi_block(..., levels=, max_imbalance=)`
+  must get the **same** values. Select the pressure driver **last**: `set_property_model("rho", …)`
+  fires the density mode, which re-selects Chebyshev and discards an earlier choice.
 
 ## Python API and units
 
@@ -134,8 +152,8 @@ torque out. Under MPI the constructor takes **this rank's** block; pass the glob
 API boundary (`Solver::UnitScales` in `src/flow_ibm.hpp`, derivation in the comment above it), with
 `hRef = min h`, `rhoRef` = the first `set_rho` and `tRef` = the first `set_dt`, so stored float
 operator coefficients stay O(1) in any unit system. **The raw field registry —
-`field_view`/`get_field`/`set_field`/`exchange_field` — hands out those INTERNAL arrays**, unlike
-`get_u`/`get_p`, which convert. A driver writing `force_x` or `drag_beta` directly (CFD-DEM does)
+`get_field`/`set_field` and `diagnostics.field_view`/`diagnostics.exchange_field` — hands out those
+INTERNAL arrays**, unlike `get_u`/`get_p`, which convert. A driver writing `force_x` or `drag_beta` directly (CFD-DEM does)
 must convert with `s.unit_scales`.
 
 **Anisotropic cells** work on both solvers, single phase and VoF
@@ -201,7 +219,7 @@ pressure driver's rtol** — the projection consumes u* and resolves its diverge
 tolerance, so "no less accurately than pressure" is the rule with no free constant; `0` restores the
 legacy update criterion. At least one sweep always runs, and there is deliberately no early return
 for a warm start that already meets the tolerance (skipping it drifts the hydrostatic acid test by
-1e-8 in dP/dz). With `set_velocity_multigrid` never called, `set_velocity_multigrid_auto` takes the
+1e-8 in dP/dz). With `set_velocity_multigrid` never called, `diagnostics.set_velocity_multigrid_auto` takes the
 3-level V-cycle on a distributed run of ≥ 8 M cells once cells/rank fall below 65536; the V-cycle
 needs no depth on a pore-confined bed, so no telescoping.
 
@@ -212,31 +230,39 @@ before touching this path; [`doc/collocated_paper_plan.md`](doc/collocated_paper
 results and [`doc/fluid_only_constraint_plan.md`](doc/fluid_only_constraint_plan.md) is the
 production plan. **The default is AUTO = `"ghost"`** (the fluid-only scheme) wherever the
 configuration supports it, falling back to gauge-exact with a stderr notice on porous / variable-ρ
-/ domain-BC / Chebyshev. Any explicit `set_collocated_scheme` / `set_face_interp` /
-`set_ghost_projection` disables AUTO; tests and baselines pin schemes explicitly.
+/ domain-BC / Chebyshev. Any explicit `set_collocated_scheme` / `diagnostics.set_face_interp` /
+`diagnostics.set_ghost_projection` disables AUTO; tests and baselines pin schemes explicitly.
 
-`"ghost"` == `set_ghost_projection(True, 2, 2)`: fluid-only binary-openness constraint, directional
+`set_collocated_scheme` takes one of four strings. `"ghost"` ==
+`diagnostics.set_ghost_projection(True, 2, 2)`: fluid-only binary-openness constraint, directional
 closures, gauge-exact gradient — family-free, no stabilizer, but BiCGStab (~2.3–2.7× the pressure
 stage) and ~1.6 KB/cell of overlay. `"gauge-exact"` converges yet carries an attractor family;
-`"plain"` is first order and legacy. MPI validated np = 1, 2, 4 (np ≥ 16 unresolved); the mixed
-`(matrix_order=1, rhs_order=2)` mode is **do-not-use**, march-unstable above ~2000 spheres.
+`"plain"` is first order and legacy; `"embed"` is the complete Basilisk embed.h port (the FV
+momentum operator with the true-normal wall drag as a defect correction, the openness-weighted
+pressure force, the wall-aware face map and the sliver mask — the live candidate for the accuracy
+ceiling; its two intermediate rungs are `diagnostics.set_face_interp(5 | 6)`). Inside the C++
+these are `faceInterp_` 0 / 9 / 7 (5, 6); the integer modes 1–4 and 10–13 and the `gauge-2a`
+gradient branch were deleted with their kernels at 1.0.0. MPI validated np = 1, 2, 4 (np ≥ 16
+unresolved); the mixed `(matrix_order=1, rhs_order=2)` ghost mode is **do-not-use**,
+march-unstable above ~2000 spheres.
 
 ## Domain boundary conditions
 
-`set_domain_bc(face, type, vx, vy, vz)` for faces 0=−x…5=+z; `type` 0=periodic (default),
-1=no-slip wall, 2=Dirichlet velocity/inflow, 3=outflow, 4=free-slip/symmetry (which also **mirrors
-the SDF ghost band** about that face, `mirrorSdfSlipFaces`, or a half channel closed by a symmetry
-plane would see the far wall as a solid). Tangential walls use a face-fold in the implicit
-diffusion so `u_inner` stays implicit.
-`set_domain_bc_profile(face, profile[Nb,Nc,3])` prescribes a per-position inlet (and sets the face
-to inflow) — the backward-facing step is realized purely this way. With no immersed solid, use
+`set_domain_bc(face, type, vx, vy, vz)` with `face` one of `'-x'`, `'+x'`, `'-y'`, `'+y'`, `'-z'`,
+`'+z'` and `type` one of `'periodic'` (default), `'wall'` (no-slip), `'inflow'` (Dirichlet
+velocity), `'outflow'`, `'slip'` (free-slip/symmetry, which also **mirrors the SDF ghost band**
+about that face, `mirrorSdfSlipFaces`, or a half channel closed by a symmetry plane would see the
+far wall as a solid). Tangential walls use a face-fold in the implicit diffusion so `u_inner` stays
+implicit. `set_domain_bc_profile(face, profile[Nb,Nc,3])` prescribes a per-position inlet (and
+sets the face to inflow) — the backward-facing step is realized purely this way. Both must precede
+the geometry (they raise afterwards). With no immersed solid, use
 `set_pressure_geometry(all_fluid_sdf)`.
 
 - **Open boundaries** split face openness in two: the *operator* openness (pressure matrix) is 0 at
   walls and inflow and open at outflow (Dirichlet p = 0, mean-removal off); the *flux* openness
   stays open at both so their flux is counted. **Outlet reversal** is the one conditionally-stable
   regime and it is instrumented: `set_backflow_stabilization` (default β = 0.2, β ≥ ½ the
-  unconditional bound) adds β ρ |u·n| to the reversed row's diagonal, `outflow_backflow()` returns
+  unconditional bound) adds β ρ |u·n| to the reversed row's diagonal, `diagnostics.outflow_backflow()` returns
   the census, and `step()` warns once on stderr when reversal appears with β = 0. Purely outgoing
   outlets are byte-identical.
 - **Rank-aware:** every per-face application is guarded by `touchesGlobalFace` — a rank imposes a
@@ -258,13 +284,16 @@ the 2-D value), height-function curvature with a PLIC-volumetric paraboloid fall
 balanced-force CSF surface tension, transport through an SDF solid, static and dynamic contact
 angles, open boundaries, a per-bubble block container, and phase change. `"C"` is an ordinary
 registered `G=2` cell field, so ρ(C)/μ(C) go through the existing closures and the field accessors
-work on it unchanged. Entry points: `enable_vof()`, `set_vof`/`get_vof`, `vof_advect`,
+work on it unchanged. Entry points: `enable_vof()`, `set_vof`/`get_vof`, `advect_vof`,
 `compute_vof_curvature`, `set_surface_tension`, `enable_vof_momentum`, `set_contact_angle*`,
-`set_vof_inflow*`, `enable_vof_blocks*`, `enable_phase_change`, plus their `*_diagnostics`.
+`set_vof_inflow*`, `enable_vof_blocks*`, `enable_phase_change`; their `*_diagnostics` censuses and
+the ablation knobs (`set_csf_mode`, `set_vof_kappa_*`, the `set_phase_change_*` wall) are on
+`s.diagnostics`.
 
 - **`enable_vof()` turns on two things**: the exact level-0 pressure operator
-  (`set_pressure_exact_residual`, per solver — a two-phase contrast is exactly what amplifies the
-  float operator's broken `A·1 = 0`) and the wisp guard `set_vof_wisp_eps` at **1e-8** (0 is the
+  (`diagnostics.set_pressure_exact_residual`, per solver — a two-phase contrast is exactly what
+  amplifies the float operator's broken `A·1 = 0`) and the wisp guard `diagnostics.set_vof_wisp_eps`
+  at **1e-8** (0 is the
   bit-for-bit V1 predicate and still the standalone `WyAdvector`'s default). Any gate comparing the
   solver against a standalone `WyAdvector` must copy the knob (`IbmSolver::defaultVofWispEps()`).
   **`enable_phase_change` then sets the wisp eps back to 0** — the guard and phase change are

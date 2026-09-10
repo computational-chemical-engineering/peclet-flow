@@ -241,7 +241,7 @@ aniso == true  :  ratio_a^L = 2   iff   a ∈ C^L   and   H_a^L < theta * min_{b
 ```
 
 **Always coarsen the finest coarsenable axis; defer an axis while it is already at least `theta`
-times coarser than the finest one.** `theta` comes from `set_multigrid_aspect_threshold` (default
+times coarser than the finest one.** `theta` comes from `diagnostics.set_multigrid_aspect_threshold` (default
 `2.0`) — a measurement knob for the gate of §8.5, not a user setting. The rule is **engaged only on
 an anisotropic domain**: on an isotropic one the level table is today's by construction, including
 after a telescoping merge, where an axis that was blocked for some levels re-enters `C` with a
@@ -273,7 +273,7 @@ smaller `cfac` than its neighbours (an *operator* anisotropy on isotropic cells 
   in `(sqrt 2, 2)`, buying a coarse-level aspect of `≤ 1.41` instead of `≤ 2` at the price of an extra
   level with 2–4× the cells of a fully coarsened one. On the gate grid the two thresholds give the
   **same** hierarchy, so the gate cannot separate them; `theta = 2` is the cheaper default and
-  `set_multigrid_aspect_threshold(1.4142)` is one run away if a stretched production case ever shows the
+  `diagnostics.set_multigrid_aspect_threshold(1.4142)` is one run away if a stretched production case ever shows the
   iteration count drifting with aspect ratio. Record that run in this note if it is made.
 - **Levels.** `nLevels_` (default 4, `set_pressure_multigrid(on, levels)`) keeps its meaning (a count
   of levels); the deferred axes consume levels, so a stretched hierarchy bottoms out on a finer grid
@@ -835,7 +835,10 @@ different algorithm.
   lid_cavity **15/15**, and the collocated **colocated_taylor_green 4/4**.
 - **The collocated kernels no script and no ctest reaches** (`set_face_interp` 4/5/6/7 —
   `fvViscousApply`, `embedViscousApply`, `embedDirichletGradient` — and
-  `set_fluid_only_constraint` 1/2 — `starCorrectFaces`), on the Z&H sphere at N = 24, 40 steps:
+  `set_fluid_only_constraint` 1/2 — `starCorrectFaces`; at 1.0.0 these are
+  `set_collocated_scheme('embed')` = 7, `diagnostics.set_face_interp(5 | 6)`,
+  `diagnostics.set_fluid_only_constraint('filter' | 'star')`, and mode 4 with `fvViscousApply` is
+  deleted), on the Z&H sphere at N = 24, 40 steps:
   **24/24 arrays bitwise** at `OMP_NUM_THREADS=1`. At 4 threads the four `fluid_only 2` arrays
   differ by 1.665e-16 — and so do **two runs of the UNCHANGED tree against each other, by
   2.220e-16**: `starEliminate`'s `Kokkos::atomic_add` makes that one path run-to-run

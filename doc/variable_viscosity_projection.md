@@ -41,7 +41,7 @@ The solver advances the momentum equation in the *divided-by-dt* convention (ope
 
 ## 2. The variable-viscosity momentum operator (what changed in the predictor)
 
-Enabled by `set_property_mode("variable", harmonic=…)` on the Python side (or automatically when a
+Enabled by `diagnostics.set_property_mode("variable", harmonic=…)` on the Python side (or automatically when a
 property closure targets `"mu"`); internal flag `varProps_`.
 
 - **Viscosity field**: a registered cell-centred field `"mu"` (`muField_`), set from Python
@@ -127,7 +127,7 @@ the incremental scheme fully active and make the rotational *coefficient* safe:
 P ← P + (ρ/dt)·φ − μ_rot(i)·(∇·u*)(i)
 ```
 
-selected by `set_variable_rotational(mode, chi)` (`Solver::setVariableRotational`,
+selected by `diagnostics.set_variable_rotational(mode, chi)` (`Solver::setVariableRotational`,
 `src/flow_ibm.hpp`):
 
 | mode | μ_rot | properties |
@@ -139,7 +139,7 @@ selected by `set_variable_rotational(mode, chi)` (`Solver::setVariableRotational
 Defaults: `mode="min"`, `χ=1`. `μ_min` is a per-step device min-reduction over the inner cells
 (`minMuInner()`), with an `MPI_Allreduce(MIN)` under the distributed path so all ranks use the
 global minimum. The classical (non-incremental) projection remains available via the pre-existing
-`set_incremental_pressure(False)` but is **no longer forced**.
+`diagnostics.set_incremental_pressure(False)` but is **no longer forced**.
 
 The constant-coefficient idea has precedent: it is the same philosophy as Guermond & Salgado's
 variable-density projection, where the Poisson/rotational machinery is run with a constant
