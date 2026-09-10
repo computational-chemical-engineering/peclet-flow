@@ -18,7 +18,7 @@ implicit quadrature (R. Saye, SIAM J. Sci. Comput. 37(2), 2015) -- not implement
 Usage:
     from exact_apertures_spheres import exact_openness
     ox, oy, oz = exact_openness(N, centers_cells, radii_cells)   # cubic N, periodic
-    s.set_openness_override(ox.ravel(order="F"), oy.ravel(order="F"), oz.ravel(order="F"))
+    s.diagnostics.set_openness_override(ox.ravel(order="F"), oy.ravel(order="F"), oz.ravel(order="F"))
 """
 import numpy as np
 

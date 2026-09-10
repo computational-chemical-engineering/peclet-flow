@@ -37,7 +37,7 @@ def run(SolverCls, N, nz=4, U0=1.0, rho=1.0, nu=0.05, dt=0.5, steps=100):
     s.set_mu(rho * nu)
     s.set_dt(dt)
     s.set_advection(True)                      # exercise the projection: advection injects divergence
-    s.set_velocity_solver_params(80)
+    s.diagnostics.set_velocity_solver_params(80)
     sdf = np.asfortranarray(np.ones((N, N, nz)) * 1e3)   # all-fluid SDF -> trivial cut-cell, full projection
     s.set_solid(sdf, cutcell_pressure=True)
     u0, v0, w0 = tg_fields(N, nz, U0, 1.0)

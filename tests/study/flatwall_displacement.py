@@ -81,14 +81,14 @@ def make_solver(kind, N, s):
     sol = sv(NX, ny, NZ)
     sol.set_rho(1.0); sol.set_mu(MU); sol.set_dt(DT)
     sol.set_advection(False)
-    sol.set_velocity_solver_params(200)
+    sol.diagnostics.set_velocity_solver_params(200)
     sol.set_pressure_multigrid(True, 3)
     sol.set_pressure_pcg(True, 200, 1e-10)
     if kind != "stag":
         if hasattr(sol, "set_collocated_scheme"):
             sol.set_collocated_scheme(kind)
         else:
-            sol.set_face_interp({"gauge-exact": 9, "plain": 0}[kind])
+            sol.diagnostics.set_face_interp({"gauge-exact": 9, "plain": 0}[kind])
     sol.set_solid(sdf, cutcell_pressure=True)
     return sol, sdf, ny, w_lo, w_hi
 

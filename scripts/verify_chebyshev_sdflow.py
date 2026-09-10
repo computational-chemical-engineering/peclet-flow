@@ -33,7 +33,7 @@ def run(chebyshev, max_steps=200):
     s.set_rho(1.0); s.set_mu(MU); s.set_dt(DT)
     s.set_body_force(F, 0.0, 0.0)
     s.set_advection(False)
-    s.set_velocity_solver_params(80)
+    s.diagnostics.set_velocity_solver_params(80)
     s.set_pressure_multigrid(True, 4)
     if chebyshev:
         s.set_pressure_chebyshev(True, 200, 1e-9)
@@ -48,7 +48,7 @@ def run(chebyshev, max_steps=200):
     u = s.get_u()
     k = MU * float(u.mean()) / F
     div = s.max_open_divergence()
-    iters = s.last_pressure_iterations()
+    iters = s.diagnostics.last_pressure_iterations()
     del s; gc.collect()
     return k, div, float(u.max()), int(iters)
 

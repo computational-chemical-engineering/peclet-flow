@@ -77,7 +77,7 @@ def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.2, max_steps=24000):
     s.set_domain_bc_profile(0, inlet_profile(H, S, nz, U_in))  # -x partial parabolic inlet (-> inflow)
     s.set_domain_bc(1, 3)                                      # +x outflow
     s.set_domain_bc(2, 1); s.set_domain_bc(3, 1)              # -y, +y no-slip walls
-    s.set_velocity_solver_params(60)
+    s.diagnostics.set_velocity_solver_params(60)
     if os.environ.get("SDFLOW_BFS_VMG") == "1":               # opt-in: velocity-MG (diffusion-only) on the BFS
         s.set_velocity_multigrid(True, 8, 4)                  #   -- exercises the outflow -beta fold + inflow
     s.set_pressure_multigrid(True, levels=8)                  # semi-coarsening MG (z frozen, x/y deep; capped)
@@ -99,7 +99,7 @@ def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.2, max_steps=24000):
             if verbose and s.rank() == 0:
                 print(f"    [Re={Re} it={it+1} x_r/S={xr/S:.2f} t={time.time()-t0:.0f}s]", flush=True)
             prev = xr
-            if s.bcast_from_root(done):
+            if s.diagnostics.bcast_from_root(done):
                 steps = it + 1
                 break
     u = s.get_u(); div = s.max_open_divergence()

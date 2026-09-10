@@ -109,7 +109,7 @@ class Health:
         self.failed = 0          # ISSUES sweep item 6: preconditioner breakdowns
 
     def sample(self, s):
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         self.iters = max(self.iters, it)
         self.capped += int(it >= self.cap)
         # ISSUES sweep item 6. A solve that gives up on a non-finite preconditioner output used to
@@ -117,7 +117,7 @@ class Health:
         # check said "no capped solve, run valid" while the projection had been handed NOTHING.
         # It now reports the CAP (so `capped` sees it) and raises this flag, which is the one that
         # names the mechanism.
-        self.failed += int(s.pressure_solve_failed())
+        self.failed += int(s.diagnostics.pressure_solve_failed())
         self.div = max(self.div, s.max_open_divergence_projected())
 
     @property
@@ -183,7 +183,7 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     s.set_dt(0.05)
     s.set_domain_bc(0, 2, U, 0.0, 0.0)
     s.set_domain_bc(1, 3, 0.0, 0.0, 0.0)
-    s.set_velocity_solver_params(VEL_SWEEPS)
+    s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)
     s.set_pressure_multigrid(True, levels=MG_LEVELS)
     s.set_pressure_solver_params(80)
     s.set_solid(sdf, cutcell_pressure=True)
@@ -201,7 +201,7 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     s.set_vof_inflow(0, 1.0)
     s.set_vof_backflow(1, 0.0)
 
-    eps = np.asarray(s.vof_geometry(0))
+    eps = np.asarray(s.diagnostics.vof_geometry(0))
     arr = slice(int(X_IN), int(X_BT))
     pore = float(eps[arr].sum())
     L0 = s.vof_step_limits()
@@ -287,7 +287,7 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
           f"{fs['clusters']} connected invaded cluster(s)")
     print("    (a COMPACT displacement reaches every row with a small std; a FINGERED one has a "
           "large std, a deep max and leaves rows untouched)")
-    d = s.vof_diagnostics()
+    d = s.diagnostics.vof_diagnostics()
     print(f"  colour: solid_sum {d['solid_sum']:.3e}, min/max over uncut fluid "
           f"{d['min_fluid']:.3e}/{d['max_fluid']:.6f}, clipped {d['clipped_volume']:.3e}")
     print(f"  {h}")

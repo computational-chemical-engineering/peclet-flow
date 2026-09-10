@@ -13,7 +13,7 @@ def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=4000, vmg=False, vlevels=3, vcyc
     s.set_rho(1.0); s.set_mu(nu); s.set_dt(dt); s.set_advection(True)
     s.set_domain_bc(0, 1); s.set_domain_bc(1, 1); s.set_domain_bc(2, 1)
     s.set_domain_bc(3, 2, U, 0.0, 0.0)
-    s.set_velocity_solver_params(vel_iter)
+    s.diagnostics.set_velocity_solver_params(vel_iter)
     if vmg:
         s.set_velocity_multigrid(True, vlevels, vcycles)
     s.set_pressure_multigrid(True, levels=8)

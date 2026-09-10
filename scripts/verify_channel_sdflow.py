@@ -38,7 +38,7 @@ def run(H=32, L=224, Re=100.0, U=1.0, nz=4, max_steps=8000, dt=0.5):
     s.set_domain_bc(0, 2, U, 0.0, 0.0)   # -x inflow: uniform stream
     s.set_domain_bc(1, 3)                # +x outflow
     s.set_domain_bc(2, 1); s.set_domain_bc(3, 1)  # -y, +y no-slip walls
-    s.set_velocity_solver_params(60)
+    s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_multigrid(True, levels=8)       # semi-coarsening MG (z frozen, x/y deep; auto-capped)
     s.set_pressure_solver_params(80)
     s.set_pressure_geometry(np.full((L, H, nz), 1e30))  # all-fluid + BC pressure faces
@@ -52,7 +52,7 @@ def run(H=32, L=224, Re=100.0, U=1.0, nz=4, max_steps=8000, dt=0.5):
             m = float(u[L - 4, H // 2, nz // 2]) if s.rank() == 0 else 0.0  # outlet centreline u
             done = it > 1000 and abs(m - prev) < 1e-5 * (abs(m) + 1e-30)
             prev = m
-            if s.bcast_from_root(done):
+            if s.diagnostics.bcast_from_root(done):
                 steps = it + 1
                 break
     u = s.get_u(); p = s.get_p(); div = s.max_open_divergence()

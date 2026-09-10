@@ -36,8 +36,8 @@ def run(implicit, dt, fx, n_steps, to_steady=False):
     s.set_body_force(fx, 0.0, 0.0)
     s.set_advection(True)
     s.set_implicit_advection(implicit)
-    s.set_outer_iterations(3)
-    s.set_velocity_solver_params(80)  # implicit-FOU uses RB-GS (n_diff sweeps), not vel-MG
+    s.diagnostics.set_outer_iterations(3)
+    s.diagnostics.set_velocity_solver_params(80)  # implicit-FOU uses RB-GS (n_diff sweeps), not vel-MG
     s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)
     s.set_solid(sdf, cutcell_pressure=True)
     prev = 0.0

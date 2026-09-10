@@ -58,8 +58,8 @@ def run_one(sdflow, case, regime, solver, N, mu_override=None):
     s.set_rho(cfg["rho"]); s.set_mu(mu); s.set_dt(cfg["dt"]); s.set_body_force(cfg["F"], 0.0, 0.0)
     s.set_advection(cfg["advect"])
     if cfg["implicit"]:
-        s.set_implicit_advection(True); s.set_outer_iterations(cfg["outer"]); s.set_outer_tolerance(1e-4)
-    s.set_velocity_solver_params(cfg["vel_sweeps"])
+        s.set_implicit_advection(True); s.diagnostics.set_outer_iterations(cfg["outer"]); s.diagnostics.set_outer_tolerance(1e-4)
+    s.diagnostics.set_velocity_solver_params(cfg["vel_sweeps"])
     s.set_pressure_multigrid(True, levels=levels)
     s.set_pressure_pcg(True, 300, 1e-8)
     s.set_solid(sdf, cutcell_pressure=True)
@@ -68,7 +68,7 @@ def run_one(sdflow, case, regime, solver, N, mu_override=None):
     t0 = time.time()
     for it in range(cfg["max_steps"]):
         s.step(); steps += 1
-        piters.append(s.last_pressure_iterations())
+        piters.append(s.diagnostics.last_pressure_iterations())
         if it % cfg["check"] == cfg["check"] - 1:
             m = float(s.get_u().mean())
             if it >= cfg["min_steps"] and abs(m - prev) < cfg["dtol"] * (abs(m) + 1e-30):

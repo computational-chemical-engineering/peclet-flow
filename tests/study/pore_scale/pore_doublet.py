@@ -104,7 +104,7 @@ class Health:
         self.cap, self.iters, self.div, self.capped = cap, 0, 0.0, 0
 
     def sample(self, s):
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         self.iters = max(self.iters, it)
         self.capped += int(it >= self.cap)
         self.div = max(self.div, s.max_open_divergence_projected())
@@ -129,7 +129,7 @@ def build(theta_deg, U, momentum=True, slip=0.0):
     s.set_domain_bc(4, 1, 0.0, 0.0, 0.0)    # -z wall  (buried in the solid)
     s.set_domain_bc(5, 1, 0.0, 0.0, 0.0)    # +z wall  (buried in the solid)
     # y stays periodic: the case is quasi-2D.
-    s.set_velocity_solver_params(VEL_SWEEPS)
+    s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)
     s.set_pressure_multigrid(True, levels=MG_LEVELS)
     s.set_pressure_solver_params(80)
     s.set_solid(doublet_sdf(), cutcell_pressure=True)
@@ -224,7 +224,7 @@ def run(theta_deg, ca, steps, sample_every, label, momentum=True, budget=None, s
     s = build(theta_deg, U, momentum, slip)
     if slip > 0.0:
         print(f"  wall_slip_length() = {s.wall_slip_length():g}; one-cell-gap axes kept no-slip "
-              f"{s.wall_slip_sandwich_cells()}")
+              f"{s.diagnostics.wall_slip_sandwich_cells()}")
     L = s.vof_step_limits()
     print(f"  dt census at t = 0: capillary_dt {L['capillary_dt']:.5g} (x{CAP_CFL} = "
           f"{CAP_CFL*L['capillary_dt']:.5g}), WY cfl_dt {L['cfl_dt']:.5g}, binding "
@@ -236,7 +236,7 @@ def run(theta_deg, ca, steps, sample_every, label, momentum=True, budget=None, s
     s.set_dt(dt)
 
     h = Health()
-    eps = np.asarray(s.vof_geometry(0))
+    eps = np.asarray(s.diagnostics.vof_geometry(0))
     hist = []
     bt = {"narrow": None, "wide": None}
     ncap_cfl = 0
@@ -284,7 +284,7 @@ def run(theta_deg, ca, steps, sample_every, label, momentum=True, budget=None, s
     wall = time.time() - t0
     C = np.asarray(s.get_vof())
     f = fronts(C, eps)
-    d = s.vof_diagnostics()
+    d = s.diagnostics.vof_diagnostics()
     print(f"\n  ran {nsteps} steps to t = {t:.4g} s in {wall:.0f} s "
           f"({1000*wall/max(nsteps,1):.2f} ms/step, SHARED GPU)")
     print(f"  dt: final {dt:.5g}; the WY CFL limit displaced the capillary one on "

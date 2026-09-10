@@ -91,7 +91,7 @@ def relax(s, steps, cfl=0.15, dt_cap=None, probe=0):
             dt = min(dt_cap, 1.2 * dt)
             s.set_dt(dt)
         s.step()
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         maxit = max(maxit, it)
         capped += 1 if it >= PRESS_MAXIT else 0
         if probe and (i + 1) % probe == 0:
@@ -138,14 +138,14 @@ def g1(thetas=(30.0, 60.0, 90.0, 120.0, 150.0), ratio=1.0, steps=600, R=12.0, nx
         s.set_vof(c0)
         s.set_surface_tension(sigma)
         if pivot:
-            s.set_contact_angle_pivot(pivot)
+            s.diagnostics.set_contact_angle_pivot(pivot)
         s.set_contact_angle(th)
-        v0 = s.vof_diagnostics()["volume"]
+        v0 = s.diagnostics.vof_diagnostics()["volume"]
         dt, maxit, capped, _ = relax(s, steps)
-        d = s.vof_diagnostics()
-        cd = s.contact_angle_diagnostics()
+        d = s.diagnostics.vof_diagnostics()
+        cd = s.diagnostics.contact_angle_diagnostics()
         cc = s.get_vof()
-        eps = s.vof_geometry(0)
+        eps = s.diagnostics.vof_geometry(0)
         ix = iy = nx // 2
         h = float((cc[ix, iy, :] * eps[ix, iy, :]).sum())
         V = d["volume"]
@@ -201,12 +201,12 @@ def g1_domain(thetas=(60.0, 90.0, 120.0), ratio=1.0, steps=500, R=12.0, nx=64, n
         s.set_vof(c0)
         s.set_surface_tension(sigma)
         s.set_contact_angle(th)
-        v0 = s.vof_diagnostics()["volume"]
+        v0 = s.diagnostics.vof_diagnostics()["volume"]
         dt, maxit, capped, _ = relax(s, steps)
-        d = s.vof_diagnostics()
-        cd = s.contact_angle_diagnostics()
+        d = s.diagnostics.vof_diagnostics()
+        cd = s.diagnostics.contact_angle_diagnostics()
         cc = s.get_vof()
-        eps = s.vof_geometry(0)
+        eps = s.diagnostics.vof_geometry(0)
         ix = iy = nx // 2
         h = float((cc[ix, iy, :] * eps[ix, iy, :]).sum())
         V = d["volume"]
@@ -334,12 +334,12 @@ def g2(thetas=(60.0, 90.0, 120.0), steps=600, Rs=12.0, Rd=8.0, n=64, sigma=1.0, 
         s.set_vof(c0)
         s.set_surface_tension(sigma)
         s.set_contact_angle(th)
-        v0 = s.vof_diagnostics()["volume"]
+        v0 = s.diagnostics.vof_diagnostics()["volume"]
         dt, maxit, capped, _ = relax(s, steps)
-        d = s.vof_diagnostics()
-        cd = s.contact_angle_diagnostics()
+        d = s.diagnostics.vof_diagnostics()
+        cd = s.diagnostics.contact_angle_diagnostics()
         cc = s.get_vof()
-        eps = s.vof_geometry(0)
+        eps = s.diagnostics.vof_geometry(0)
         ix = iy = int(cx)
         col = cc[ix, iy, :] * eps[ix, iy, :]
         H = float(col[int(cz):].sum()) + Rs  # apex height above the solid centre
@@ -403,10 +403,10 @@ def g4(theta=30.0, steps=4000, nx=80, ny=4, nz=96, gap=24, plate=4, sigma=1.0, r
     s.set_vof(c0)
     s.set_surface_tension(sigma)
     s.set_contact_angle(theta)
-    v0 = s.vof_diagnostics()["volume"]
+    v0 = s.diagnostics.vof_diagnostics()["volume"]
     dt, maxit, capped, trace = relax(s, steps, probe=max(1, steps // 8))
     cc = s.get_vof()
-    eps = s.vof_geometry(0)
+    eps = s.diagnostics.vof_geometry(0)
     zc = np.arange(nz) + 0.5
 
     def level(xs):
@@ -419,7 +419,7 @@ def g4(theta=30.0, steps=4000, nx=80, ny=4, nz=96, gap=24, plate=4, sigma=1.0, r
     xin = np.arange(int(x1 + plate) + 2, int(x2) - 1)
     xout = np.concatenate([np.arange(0, int(x1) - 1), np.arange(int(x2 + plate) + 2, nx)])
     lin, lout = level(xin), level(xout)
-    d = s.vof_diagnostics()
+    d = s.diagnostics.vof_diagnostics()
     print(f"  inner level {lin:.3f}  outer level {lout:.3f}  difference {lin-lout:.3f} cells "
           f"vs Jurin {h_pred:.3f}  ({100*((lin-lout)-h_pred)/h_pred:+.2f} %)")
     print(f"  dV/V {abs(d['volume']-v0)/v0:.3e}  max|u| {max_u(s):.3e}  iters {maxit} "

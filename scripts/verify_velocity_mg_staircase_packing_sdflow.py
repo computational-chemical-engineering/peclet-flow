@@ -53,7 +53,7 @@ def run(sdf, mode, dt, vcyc=16, levels=4, mu=0.1, f=1e-3, steps=600, tol=1e-7):
     s = sdflow.Solver(N, N, N)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(f, 0, 0); s.set_advection(False)
     if mode == "rbgs":
-        s.set_velocity_solver_params(400)
+        s.diagnostics.set_velocity_solver_params(400)
     else:
         s.set_velocity_multigrid(True, levels, vcyc)          # IBM -> staircase coarse op (the default)
     plv = max(2, int(np.log2(N)) - 1)

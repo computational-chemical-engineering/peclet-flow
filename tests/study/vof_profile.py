@@ -148,7 +148,7 @@ def set_dt(s, dt):
     s.set_dt(dt)
 def profile(s, nsteps, pick_dt, cap, label, extra=None):
     """`pick_dt(s, i)` sets dt for step i and returns which limit bound it ('cfl'|'cap'|'fixed')."""
-    s.set_vof_timing(True)
+    s.diagnostics.set_vof_timing(True)
     binds = {"cfl": 0, "cap": 0, "fixed": 0}
     itmax, capped = 0, 0
     t0 = time.time()
@@ -164,12 +164,12 @@ def profile(s, nsteps, pick_dt, cap, label, extra=None):
                     raise
                 retries += 1
                 set_dt(s, 0.5 * _LAST_DT["dt"])
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         itmax = max(itmax, it)
         capped += int(it >= cap)
     wall = time.time() - t0
-    tm = dict(s.vof_timing())
-    s.set_vof_timing(False)
+    tm = dict(s.diagnostics.vof_timing())
+    s.diagnostics.set_vof_timing(False)
     tm["label"] = label
     tm["wall"] = wall
     tm["ms_per_step"] = 1e3 * wall / nsteps
@@ -227,7 +227,7 @@ def case_hysing1(nx=64, momentum=True, worklist=True):
     s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
     s.set_pressure_chebyshev(True, 600, 1e-12)
     s.enable_vof()
-    s.set_vof_worklist(worklist)
+    s.diagnostics.set_vof_worklist(worklist)
     s.set_vof(np.asfortranarray(
         1.0 - cylinder_fractions((nx, ny, nz), R, nx / 2.0, sc.s * 0.5)))
     s.set_property_model("rho", "linear", "C", [p["rho2"], p["rho1"] - p["rho2"]])
@@ -264,7 +264,7 @@ def case_packed(nx=64, nz=160, worklist=True):
     s.set_domain_bc(5, 1, 0, 0, 0)
     s.set_solid(np.asfortranarray(SDF), cutcell_pressure=True)
     s.enable_vof()
-    s.set_vof_worklist(worklist)
+    s.diagnostics.set_vof_worklist(worklist)
     s.set_vof(cached(f"c0_e7_{nx}_{nz}", lambda: bubble_colour_sub(nx, nz, RBUB, ZBUB)))
     s.set_property_model("rho", "linear", "C", [rho_g, rho_l - rho_g])
     s.set_property_model("mu", "linear", "C", [mu_g, mu_l - mu_g])
@@ -305,12 +305,12 @@ def case_trickle(nx=48, nz=96, worklist=True):
     prof = np.zeros((nx, nx, 3))
     prof[:, :, 2] = np.where(disc, -umax, 0.0)
     s.set_domain_bc_profile(5, np.ascontiguousarray(prof))
-    s.set_velocity_solver_params(60)
+    s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_multigrid(True, levels=6)
     s.set_pressure_solver_params(80)
     s.set_solid(np.asfortranarray(SDF), cutcell_pressure=True)
     s.enable_vof()
-    s.set_vof_worklist(worklist)
+    s.diagnostics.set_vof_worklist(worklist)
     s.set_vof(np.zeros((nx, nx, nz), order="F"))
     s.set_surface_tension(sigma)
     s.set_contact_angle(THETA)
@@ -344,7 +344,7 @@ def case_droplet(n=128, worklist=True):
     s.set_pressure_geometry(np.full((n, n, n), 10.0, order="F"))
     s.set_pressure_chebyshev(True, 500, 1e-14)
     s.enable_vof()
-    s.set_vof_worklist(worklist)
+    s.diagnostics.set_vof_worklist(worklist)
     s.set_vof(cached(f"drop_{n}", lambda: sphere_fractions(
         (n, n, n), R, (n / 2 + off[0], n / 2 + off[1], n / 2 + off[2]))))
     s.set_property_model("rho", "linear", "C", [1.0, 0.0])
@@ -381,7 +381,7 @@ def case_scriven(n=96, ja=0.5, ratio=10.0, r0=6.0, worklist=True):
         s.set_domain_bc(f, 3)
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
     s.enable_vof()
-    s.set_vof_worklist(worklist)
+    s.diagnostics.set_vof_worklist(worklist)
     s.set_vof(cached(f"scriven_c_{n}_{r0}", lambda: vs.sphere_colour_chunked(n, ctr, r0, 4)))
     s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
     s.set_pressure_fcg(True, 600, 1e-10)
@@ -393,9 +393,9 @@ def case_scriven(n=96, ja=0.5, ratio=10.0, r0=6.0, worklist=True):
         lambda: vs.initial_temperature(n, ctr, r0, beta, rr, dT, mode="similarity"))))
     s.enable_phase_change(rho_v, rho_l, h_lv)
     s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
-    s.set_phase_change_plane_dirichlet(True)
+    s.diagnostics.set_phase_change_plane_dirichlet(True)
     s.set_phase_change_energy(rho_v * cpl, rho_l * cpl)
-    s.set_phase_change_quadratic_fit(True)
+    s.diagnostics.set_phase_change_quadratic_fit(True)
     Rd = beta * math.sqrt(alpha_l / t0)
     dt = 0.4 * 0.2 / max(Rd * (1.0 - rr), 1e-30)
     s.set_dt(dt)
@@ -407,7 +407,7 @@ def case_scriven(n=96, ja=0.5, ratio=10.0, r0=6.0, worklist=True):
 
     def pick(sv, i):
         if i > 0:
-            c = sv.vof_last_courant()
+            c = sv.diagnostics.vof_last_courant()
             st["dt"] *= min(1.2, max(0.5, 0.2 / max(c, 1e-30)))
         set_dt(sv, st["dt"])
         return "cfl"
@@ -485,7 +485,7 @@ def main():
       for cwl in cwls:
         for wl in wls:
             s, pick, cap, label = CASES[nm](worklist=wl)
-            s.set_vof_curvature_worklist(cwl)
+            s.diagnostics.set_vof_curvature_worklist(cwl)
             label += "" if cwl else "  [curv worklist OFF]"
             for i in range(a.warm):
                 pick(s, i)

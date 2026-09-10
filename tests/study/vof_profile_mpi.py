@@ -115,7 +115,7 @@ def main():
         s.step()
     tm = vp.profile(s, a.steps, pick, cap, f"{label} np={size}")
     # C sum is a global reduction the solver already does; use it as the run's sanity read-out
-    d = s.vof_diagnostics()
+    d = s.diagnostics.vof_diagnostics()
     if rank == 0:
         n = max(tm["steps"], 1)
         st = tm["step"] / n

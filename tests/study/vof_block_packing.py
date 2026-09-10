@@ -27,8 +27,8 @@ def build(n, seeds, device, pool):
     # a solenoidal cellular field, so the kinematic advection is admissible
     s.set_dt(0.05)
     s.enable_vof_blocks(seeds)
-    s.set_vof_block_device_staging(device)
-    s.set_vof_block_pool(pool)
+    s.diagnostics.set_vof_block_device_staging(device)
+    s.diagnostics.set_vof_block_pool(pool)
     return s
 
 
@@ -51,7 +51,7 @@ def run(n, seeds, device, pool, steps, warm):
     for _ in range(steps):
         s.advect_vof_blocks(0.0)
     dt = (time.time() - t0) / steps
-    st = s.vof_block_stats()
+    st = s.diagnostics.vof_block_stats()
     vol = sum(b["volume"] for b in st)
     del s
     return dt, vol

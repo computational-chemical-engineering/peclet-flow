@@ -29,7 +29,7 @@ def run(H, L, Re=100.0, U=1.0, nz=4, max_steps=8000, dt=0.5):
     s.set_domain_bc(0, 2, U, 0.0, 0.0)   # -x inflow: uniform stream
     s.set_domain_bc(1, 3)                # +x outflow
     s.set_domain_bc(2, 1); s.set_domain_bc(3, 1)  # -y, +y no-slip walls
-    s.set_velocity_solver_params(60)
+    s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_pcg(True, 400, 1e-9)
     s.set_pressure_geometry(np.asfortranarray(np.full((L, H, nz), 1e30)))
 

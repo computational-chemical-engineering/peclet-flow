@@ -148,16 +148,16 @@ def run(N, scheme, warm_tol=1e-7, tail=40, max_steps=5000, dt=80.0):
     s.set_dt(dt)
     s.set_body_force(F, 0, 0)
     s.set_advection(False)
-    s.set_velocity_solver_params(200)
+    s.diagnostics.set_velocity_solver_params(200)
     s.set_pressure_multigrid(True, levels=lv)
     s.set_pressure_pcg(True, 400, 1e-10)
-    s.set_exact_crossings(exact_crossings(N))
+    s.diagnostics.set_exact_crossings(exact_crossings(N))
     if scheme == "cutcell":
         ox, oy, oz = exact_openness(N)
-        s.set_openness_override(ox.ravel(order="F"), oy.ravel(order="F"), oz.ravel(order="F"))
+        s.diagnostics.set_openness_override(ox.ravel(order="F"), oy.ravel(order="F"), oz.ravel(order="F"))
     else:
         mo, ro = {"g22": (2, 2), "g11": (1, 1), "g12": (1, 2)}[scheme]
-        s.set_ghost_projection(True, matrix_order=mo, rhs_order=ro)
+        s.diagnostics.set_ghost_projection(True, matrix_order=mo, rhs_order=ro)
     s.set_solid(sdf, cutcell_pressure=True)
     prev, warm, um, t0 = 0.0, None, [], time.time()
     for it in range(max_steps):
@@ -173,7 +173,7 @@ def run(N, scheme, warm_tol=1e-7, tail=40, max_steps=5000, dt=80.0):
             break
     K = F * N**3 / (6 * np.pi * MU * radius(N) * np.mean(um[-tail:]))
     fields = dict(u=s.get_u(), v=s.get_v(), w=s.get_w(), p=s.get_p())
-    return dict(K=K, steps=it + 1, iters=s.last_pressure_iterations(),
+    return dict(K=K, steps=it + 1, iters=s.diagnostics.last_pressure_iterations(),
                 div=s.max_open_divergence(), secs=time.time() - t0, **fields)
 
 

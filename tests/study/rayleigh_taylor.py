@@ -36,7 +36,7 @@ def hydrostatic(ratio, mu=0.0, steps=100, g=0.1, dt=1.0, N=8, NZ=24):
     rz = np.where(z < NZ // 2, ratio, 1.0).astype(np.float64)        # heavy below (stable)
     s.add_field("rho")
     s.set_field("rho", np.asfortranarray(np.broadcast_to(rz[None, None, :], (N, N, NZ)).copy()))
-    s.set_density_mode("variable")                                    # Chebyshev pressure driver
+    s.diagnostics.set_density_mode("variable")                                    # Chebyshev pressure driver
     s.set_property_model("force_z", "linear", "rho", [0.0, -g])
     m = None
     for _ in range(steps):

@@ -335,7 +335,7 @@ def load_ckpt(path):
 def block_state(s):
     """{box, own colour} per marker — the complete state of the block container."""
     out = []
-    for b in s.vof_block_stats():
+    for b in s.diagnostics.vof_block_stats():
         lo, hi = b["lo"], b["hi"]
         c = s.vof_block_color(b["id"])
         out.append(([lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]], np.asfortranarray(c)))
@@ -414,7 +414,7 @@ def main():
     else:
         s.enable_vof_blocks_from_colors([b for b, _ in blocks], [c for _, c in blocks])
     s.enable_vof_block_csf()
-    st0 = s.vof_block_stats()
+    st0 = s.diagnostics.vof_block_stats()
     vol0 = [b["volume"] for b in st0]
     print(f"  void fraction {100*alpha0:.3f} % (case: 1.492 %), <rho> = {rho_av:.6f}; "
           f"{len(st0)} markers, V in [{min(vol0):.3f}, {max(vol0):.3f}] "
@@ -429,7 +429,7 @@ def main():
     # step index.  Resuming with it reset changes the colour at the splitting error (measured
     # 6.2e-4 after ONE step, off a bitwise-identical velocity).  set_vof_step_parity sets the
     # solver's counter AND the block container's.
-    s.set_vof_step_parity(step0)
+    s.diagnostics.set_vof_step_parity(step0)
 
     seedV = 4.0 / 3.0 * math.pi * Rc ** 3
     if NSTEP == 0:      # state round-trip diagnostic: checkpoint the restored state and stop
@@ -455,7 +455,7 @@ def main():
                     with open(CKPT + ".failed", "w") as f:
                         f.write(json.dumps({"step": i, "t": t, "turnovers": t * UTAU,
                                             "limit": nm, "value": L[nm],
-                                            "vof": s.vof_diagnostics()}, default=float) + "\n")
+                                            "vof": s.diagnostics.vof_diagnostics()}, default=float) + "\n")
                     raise SystemExit(
                         f"  *** step {i}: {nm} = {L[nm]} at t u_tau/h = {t*UTAU:.4f} — the state "
                         f"is already broken (the colour has left [0,1]); the last checkpoint is "
@@ -479,17 +479,17 @@ def main():
             raise
         i += 1
         stepped += 1
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         maxit = max(maxit, it)
         maxdiv = max(maxdiv, s.max_open_divergence())
         if t * UTAU >= STATS_START and (i % SAMPLE == 0):
             sample(acc, s, t)
         if i % PRINTEVERY == 0:
             el = time.time() - wall0
-            D = s.vof_diagnostics()
+            D = s.diagnostics.vof_diagnostics()
             cmx = max(float(D.get("max", 0.0)), float(D.get("max_fluid", 0.0)))
             umx = max(np.abs(s.get_u()).max(), np.abs(s.get_v()).max(), np.abs(s.get_w()).max())
-            st = s.vof_block_stats()
+            st = s.diagnostics.vof_block_stats()
             cen = np.array([b["centroid"] for b in st])
             box = np.array([NX, NY, NZ], dtype=float)
             dmin = 1e30
@@ -522,7 +522,7 @@ def main():
                 break
 
     el = time.time() - wall0
-    st = s.vof_block_stats()
+    st = s.diagnostics.vof_block_stats()
     vols = [b["volume"] for b in st]
     capped = maxit >= 800
     rec = {

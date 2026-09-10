@@ -35,11 +35,11 @@ def drag(N, mode, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=400
     s.set_dt(dt)
     s.set_body_force(F, 0, 0)
     s.set_advection(False)
-    s.set_velocity_solver_params(200)
+    s.diagnostics.set_velocity_solver_params(200)
     s.set_pressure_multigrid(True, levels=max(2, int(np.log2(N)) - 1))
     s.set_pressure_pcg(True, 400, 1e-10)
     if mode:
-        s.set_face_interp(mode)
+        s.diagnostics.set_face_interp(mode)
     s.set_solid(sdf, cutcell_pressure=True)
     prev, warm, um = 0.0, None, []
     for it in range(max_steps):
@@ -54,7 +54,7 @@ def drag(N, mode, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=400
         elif it - warm >= tail:
             break
     K = F * N**3 / (6 * np.pi * mu * R * np.mean(um[-tail:]))
-    return K, s.last_pressure_iterations()
+    return K, s.diagnostics.last_pressure_iterations()
 
 
 if __name__ == "__main__":

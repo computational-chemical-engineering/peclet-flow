@@ -44,13 +44,13 @@ def permeability(Ng, sdf, side, colloc, ghost, mode=0, mu=0.1, F=1e-3, dt=80.0, 
     s.set_dt(dt)
     s.set_body_force(F, 0, 0)
     s.set_advection(False)
-    s.set_velocity_solver_params(150)
+    s.diagnostics.set_velocity_solver_params(150)
     s.set_pressure_multigrid(True, levels=lv)
     s.set_pressure_pcg(True, 400, 1e-9)
     if ghost:
-        s.set_ghost_projection(True, 1, 2)
+        s.diagnostics.set_ghost_projection(True, 1, 2)
     if mode:
-        s.set_face_interp(mode)
+        s.diagnostics.set_face_interp(mode)
     s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
     prev = 0.0
     for it in range(max_steps):
@@ -62,7 +62,7 @@ def permeability(Ng, sdf, side, colloc, ghost, mode=0, mu=0.1, F=1e-3, dt=80.0, 
             prev = m
     umean = float(s.get_u().mean())
     return dict(k=mu * umean / F * (side / Ng) ** 2, steps=it + 1,
-                pit=s.last_pressure_iterations(), div=s.max_open_divergence())
+                pit=s.diagnostics.last_pressure_iterations(), div=s.max_open_divergence())
 
 
 if __name__ == "__main__":

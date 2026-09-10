@@ -115,16 +115,16 @@ def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, nt=4,
     s.set_field("T", t)
     s.enable_phase_change(rho_v, rho_l, h_lv)
     s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
-    s.set_phase_change_plane_dirichlet(plane)
-    s.set_phase_change_quadratic_fit(quad)
+    s.diagnostics.set_phase_change_plane_dirichlet(plane)
+    s.diagnostics.set_phase_change_quadratic_fit(quad)
     if consistent:
         s.set_phase_change_energy(rcp_v, rcp_l)
-        s.set_phase_change_energy_muscl(muscl)
+        s.diagnostics.set_phase_change_energy_muscl(muscl)
     # WO-P3g: the second-order interfacial energy operator (default 1 = the shipped scheme, bitwise)
     if energy_order != 1:
-        s.set_phase_change_energy_order(energy_order)
+        s.diagnostics.set_phase_change_energy_order(energy_order)
     if deposit is not None:
-        s.set_phase_change_deposit_fallback(bool(deposit))
+        s.diagnostics.set_phase_change_deposit_fallback(bool(deposit))
 
     # initial liquid velocity (the projection would find it anyway; this removes a startup transient)
     Xdot = b * math.sqrt(alpha_l / t0) * n           # cells/s
@@ -146,13 +146,13 @@ def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, nt=4,
         s.step()
         tcur += dt
         nsteps += 1
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         itmax = max(itmax, it)
         if it >= 4000:
             capped += 1
     layer = n - s.get_vof().sum() / (ny * nz)      # vapour thickness in cells
     exact = 2 * b * math.sqrt(alpha_l * te) * n
-    d = s.phase_change_diagnostics()
+    d = s.diagnostics.phase_change_diagnostics()
     # temperature profile error against the similarity solution, over the LIQUID
     tnum = s.get_field("T")[:, 0, 0]
     terr, tn = 0.0, 0

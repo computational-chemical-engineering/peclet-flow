@@ -112,12 +112,12 @@ def case_hydro(ratios=(1e1, 1e2, 1e3, 1e4, 1e5, 1e6), N=8, NZ=24, g=0.1, steps=1
         rho[:, :, :] = np.where(zs < NZ // 2, ratio, 1.0)[None, None, :]
         s.add_field("rho")
         s.set_field("rho", rho)
-        s.set_density_mode("variable")
+        s.diagnostics.set_density_mode("variable")
         s.set_property_model("force_z", "linear", "rho", [0.0, -g])
         pit = 0
         for _ in range(steps):
             s.step()
-            pit = max(pit, s.last_pressure_iterations())
+            pit = max(pit, s.diagnostics.last_pressure_iterations())
         umax = max(float(np.abs(s.get_u()).max()), float(np.abs(s.get_v()).max()),
                    float(np.abs(s.get_w()).max()))
         p = s.get_p()
@@ -163,14 +163,14 @@ def case_porous(N=16, beta=4.0, f_drive=0.2, eps=0.6, dt=0.5, steps=200):
     s.set_porous_continuity(True)
     s.set_field("eps", np.asfortranarray(np.full((N, N, N), eps)))
     s.set_field("drag_beta", np.asfortranarray(np.full((N, N, N), beta)))
-    s.exchange_field("eps")
-    s.exchange_field("drag_beta")
+    s.diagnostics.exchange_field("eps")
+    s.diagnostics.exchange_field("drag_beta")
     s.sync_porous_prev()
     s.set_body_force(0.0, 0.0, f_drive)
     pit = 0
     for _ in range(steps):
         s.step()
-        pit = max(pit, s.last_pressure_iterations())
+        pit = max(pit, s.diagnostics.last_pressure_iterations())
     ui = float(s.get_w().mean())
     # eps-conservative pair: the momentum diagonal is eps*rho/dt + beta and the steady drive is the
     # body force f, so f = beta*u_i exactly.
@@ -199,7 +199,7 @@ def case_contrast(Ngs=(48, 64, 96), steps=4, maxit=300, rtol=1e-8, driver="pcg")
         s.set_dt(80.0)
         s.set_body_force(1e-3, 0, 0)
         s.set_advection(False)
-        s.set_velocity_solver_params(150)
+        s.diagnostics.set_velocity_solver_params(150)
         s.set_pressure_multigrid(True, levels=lv)
         if driver == "pcg":
             s.set_pressure_pcg(True, maxit, rtol)
@@ -211,7 +211,7 @@ def case_contrast(Ngs=(48, 64, 96), steps=4, maxit=300, rtol=1e-8, driver="pcg")
         its, t0 = [], time.time()
         for _ in range(steps):
             s.step()
-            its.append(int(s.last_pressure_iterations()))
+            its.append(int(s.diagnostics.last_pressure_iterations()))
         dt_ = time.time() - t0
         rec = dict(Ng=Ng, phi=phi, levels=lv, driver=driver, iters=its, cap=maxit,
                    capped=bool(max(its) >= maxit), div=float(s.max_open_divergence()),
@@ -235,7 +235,7 @@ def case_zh(Ns=(32, 48, 64), phi=0.125, mu=0.1, F=1e-3, dt=None, max_steps=600, 
         s.set_dt(dt if dt else 60.0)
         s.set_body_force(F, 0, 0)
         s.set_advection(False)
-        s.set_velocity_solver_params(120)
+        s.diagnostics.set_velocity_solver_params(120)
         s.set_pressure_multigrid(True, levels=max(2, int(np.log2(N)) - 1))
         s.set_pressure_pcg(True, 400, 1e-9)
         s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
@@ -253,7 +253,7 @@ def case_zh(Ns=(32, 48, 64), phi=0.125, mu=0.1, F=1e-3, dt=None, max_steps=600, 
         K = F * (N ** 3) / (6.0 * np.pi * mu * R * umean) if umean else float("nan")
         out.append(dict(N=N, phi=phi, umean=umean, K=K, Kref=Kref,
                         rel_vs_ref=(K / Kref - 1.0) if Kref else float("nan"), steps=nit,
-                        pit=int(s.last_pressure_iterations()),
+                        pit=int(s.diagnostics.last_pressure_iterations()),
                         div=float(s.max_open_divergence())))
         print(f"  zh N={N}: K {K:.6f} (ref {Kref:.3f}, {100*(K/Kref-1):+.2f}%)  "
               f"umean {umean:.12e}  steps {nit} "
@@ -273,7 +273,7 @@ def case_perm(Ngs=(44, 56), mu=0.1, F=1e-3, dt=80.0, max_steps=3000, tol=1e-6):
         s.set_dt(dt)
         s.set_body_force(F, 0, 0)
         s.set_advection(False)
-        s.set_velocity_solver_params(150)
+        s.diagnostics.set_velocity_solver_params(150)
         s.set_pressure_multigrid(True, levels=lv)
         s.set_pressure_pcg(True, 400, 1e-9)
         s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
@@ -288,8 +288,8 @@ def case_perm(Ngs=(44, 56), mu=0.1, F=1e-3, dt=80.0, max_steps=3000, tol=1e-6):
                 prev = m
         umean = float(s.get_u().mean())
         k = mu * umean / F * (side / Ng) ** 2
-        out.append(dict(Ng=Ng, phi=phi, k=k, steps=nit, pit=int(s.last_pressure_iterations()),
-                        capped=bool(s.last_pressure_iterations() >= 400),
+        out.append(dict(Ng=Ng, phi=phi, k=k, steps=nit, pit=int(s.diagnostics.last_pressure_iterations()),
+                        capped=bool(s.diagnostics.last_pressure_iterations() >= 400),
                         div=float(s.max_open_divergence())))
         print(f"  perm Ng={Ng}: k {k:.8e}  steps {nit}  its {out[-1]['pit']}"
               f"{' CAPPED(INVALID)' if out[-1]['capped'] else ''}", flush=True)
@@ -310,7 +310,7 @@ def case_cost(Ngs=(64, 96, 128), steps=10, warmup=3):
         s.set_dt(80.0)
         s.set_body_force(1e-3, 0, 0)
         s.set_advection(False)
-        s.set_velocity_solver_params(150)
+        s.diagnostics.set_velocity_solver_params(150)
         s.set_pressure_multigrid(True, levels=lv)
         s.set_pressure_pcg(True, 300, 1e-6)   # 1e-8 CAPS on this bed in float (see case_contrast)
         s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
@@ -321,7 +321,7 @@ def case_cost(Ngs=(64, 96, 128), steps=10, warmup=3):
         its = []
         for _ in range(steps):
             s.step()
-            its.append(int(s.last_pressure_iterations()))
+            its.append(int(s.diagnostics.last_pressure_iterations()))
         dt_ = time.time() - t0
         cells = Ng ** 3
         rec = dict(Ng=Ng, cells=cells, levels=lv, ms_per_step=1e3 * dt_ / steps,
@@ -368,7 +368,7 @@ def case_trace(Ng=96, steps=2, maxit=300, rtol=1e-8, driver="pcg", levels=None):
     s.set_dt(80.0)
     s.set_body_force(1e-3, 0, 0)
     s.set_advection(False)
-    s.set_velocity_solver_params(150)
+    s.diagnostics.set_velocity_solver_params(150)
     s.set_pressure_multigrid(True, levels=lv)
     if driver == "pcg":
         s.set_pressure_pcg(True, maxit, rtol)
@@ -379,7 +379,7 @@ def case_trace(Ng=96, steps=2, maxit=300, rtol=1e-8, driver="pcg", levels=None):
     s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
     for _ in range(steps):
         s.step()
-    return dict(Ng=Ng, levels=lv, driver=driver, its=int(s.last_pressure_iterations()),
+    return dict(Ng=Ng, levels=lv, driver=driver, its=int(s.diagnostics.last_pressure_iterations()),
                 cap=maxit, div=float(s.max_open_divergence()))
 
 

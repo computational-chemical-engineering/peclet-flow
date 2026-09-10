@@ -71,36 +71,36 @@ sv = flow.Solver if KIND == "stag" else flow.SolverColocated
 s = sv(N, N, N)
 s.set_rho(1.0); s.set_mu(MU); s.set_dt(DT)
 s.set_body_force(F0, 0, 0); s.set_advection(False)
-s.set_velocity_solver_params(int(os.environ.get("VIT", "150")))
+s.diagnostics.set_velocity_solver_params(int(os.environ.get("VIT", "150")))
 if int(os.environ.get("APORDER", "1")) != 1:
-    s.set_aperture_order(int(os.environ["APORDER"]))   # 2 = marching-squares apertures
+    s.diagnostics.set_aperture_order(int(os.environ["APORDER"]))   # 2 = marching-squares apertures
 s.set_pressure_multigrid(True, int(os.environ.get("MGL", "0")) or max(2, int(np.log2(N)) - 2))
 s.set_pressure_pcg(True, 300, 1e-8)
 if KIND != "stag":
     if KIND == "default":
         pass                                 # AUTO: whatever the shipped default resolves to
     elif KIND == "ghost":
-        s.set_ghost_projection(True)         # fluid-only constraint + directional closures (route 2)
+        s.diagnostics.set_ghost_projection(True)         # fluid-only constraint + directional closures (route 2)
     elif KIND == "fluidonly":
-        s.set_fluid_only_constraint(1)       # Design A: fluid-only openness filter + gauge-exact G
+        s.diagnostics.set_fluid_only_constraint(1)       # Design A: fluid-only openness filter + gauge-exact G
     elif KIND.startswith("fluidonly2"):
-        s.set_fluid_only_constraint(2)       # Design B: SPD Kron star elimination + gauge-exact G
+        s.diagnostics.set_fluid_only_constraint(2)       # Design B: SPD Kron star elimination + gauge-exact G
         if "_m" in KIND:                     # e.g. fluidonly2_m13: pair with another cell gradient
-            s.set_face_interp(int(KIND.split("_m")[1]))
+            s.diagnostics.set_face_interp(int(KIND.split("_m")[1]))
     elif KIND.startswith("mode"):
-        s.set_face_interp(int(KIND[4:]))     # numbered ablations (e.g. mode3 = adjoint (T,T^T) pair)
+        s.diagnostics.set_face_interp(int(KIND[4:]))     # numbered ablations (e.g. mode3 = adjoint (T,T^T) pair)
     elif hasattr(s, "set_collocated_scheme"):
         s.set_collocated_scheme(KIND)
     else:
-        s.set_face_interp({"gauge-exact": 9, "plain": 0}[KIND])
+        s.diagnostics.set_face_interp({"gauge-exact": 9, "plain": 0}[KIND])
 if not ROT:
-    s.set_rotational_pressure(False)
+    s.diagnostics.set_rotational_pressure(False)
 if ROTF:
-    s.set_rotational_filter(True)
+    s.diagnostics.set_rotational_filter(True)
 if ROTW != 1.0:
-    s.set_rotational_weight(ROTW)
+    s.diagnostics.set_rotational_weight(ROTW)
 if WALLW > 0:
-    s.set_rotational_wall_weight(WALLW)
+    s.diagnostics.set_rotational_wall_weight(WALLW)
 s.set_solid(sdf, cutcell_pressure=True)
 fluid = sdf >= 0.0
 

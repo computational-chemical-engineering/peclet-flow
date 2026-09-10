@@ -44,7 +44,7 @@ def run(N, Solver, rho=1.0, mu=0.1, dt=50.0, F=0.01, max_steps=400):
     s.set_mu(mu)
     s.set_dt(dt)
     s.set_body_force(F, 0.0, 0.0)              # force per unit volume (= -dp/dx)
-    s.set_velocity_solver_params(200)          # IBM RB-GS velocity solve
+    s.diagnostics.set_velocity_solver_params(200)          # IBM RB-GS velocity solve
     s.set_pressure_solver_params(1)            # x-independent flow is divergence-free -> projection is a no-op
     s.set_solid(channel_sdf(nx, ny, nz, ylo, yhi), cutcell_pressure=False)  # Robust-Scaled no-slip walls
 
@@ -57,7 +57,7 @@ def run(N, Solver, rho=1.0, mu=0.1, dt=50.0, F=0.01, max_steps=400):
             u_now = float(u.max())
             stop = it > 5 and abs(u_now - prev) < 1e-10 * (abs(u_now) + 1e-12)
             prev = u_now
-        if s.bcast_from_root(stop):
+        if s.diagnostics.bcast_from_root(stop):
             break
 
     u = s.get_u()

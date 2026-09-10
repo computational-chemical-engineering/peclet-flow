@@ -65,7 +65,7 @@ def run_sdflow(N, phi, mu=0.1, f=1e-3, dt=None, max_steps=600, tol=1e-6, seed=No
     sdf, R = sc_sdf_xyz(N, phi)
     s = sdflow.Solver(N, N, N)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(f, 0, 0); s.set_advection(False)
-    s.set_velocity_solver_params(200)                         # velocity RB-GS (the velocity MG under-
+    s.diagnostics.set_velocity_solver_params(200)                         # velocity RB-GS (the velocity MG under-
     #                                                           converges the IBM diffusion -- separate bug)
     s.set_pressure_multigrid(True, levels=lv)
     s.set_pressure_pcg(True, max_iter=200, rtol=1e-8)

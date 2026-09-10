@@ -123,8 +123,8 @@ def main():
         s.set_mu(0.0)          # predictor becomes (rho/dt) I  =>  u* = u exactly
         s.set_dt(1.0)
         s.set_advection(False)
-        s.set_incremental_pressure(False)
-        s.set_pressure_warmstart(False)          # cold start: the count is not an initial-guess artefact
+        s.diagnostics.set_incremental_pressure(False)
+        s.diagnostics.set_pressure_warmstart(False)          # cold start: the count is not an initial-guess artefact
         s.set_pressure_multigrid(True, args.levels)
         s.set_pressure_pcg(True, 500, args.rtol)
         s.set_pressure_bottom(args.bottom)
@@ -134,7 +134,7 @@ def main():
         s.set_pressure_geometry(np.asfortranarray(np.full((nx, ny, nz), 1e30)))
         s.set_state(*velocity(nx, ny, nz, args.rhs))
         s.step()
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         first = first or n
         print(f"{f'{nx}x{ny}x{nz}':>18} {nx * ny * nz / 1e6:8.2f} {first / n:8.3f} {it:20.1f}")
         del s

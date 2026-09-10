@@ -29,7 +29,7 @@ def run_sdflow():
     sdf = np.asfortranarray(np.sqrt((X - c) ** 2 + (Y - c) ** 2 + (Z - c) ** 2) - R)
     s = sdflow.SolverColocated(N, N, N)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(f, 0, 0); s.set_advection(False)
-    s.set_velocity_solver_params(300); s.set_pressure_multigrid(True, levels=max(2, int(np.log2(N)) - 1))
+    s.diagnostics.set_velocity_solver_params(300); s.set_pressure_multigrid(True, levels=max(2, int(np.log2(N)) - 1))
     s.set_pressure_pcg(True, 300, 1e-10); s.set_solid(sdf, cutcell_pressure=True)
     prev = 0.0
     for it in range(800):

@@ -86,7 +86,7 @@ class Solve:
         self.div = 0.0
 
     def sample(self, s):
-        self.iters = max(self.iters, s.last_pressure_iterations())
+        self.iters = max(self.iters, s.diagnostics.last_pressure_iterations())
         self.div = max(self.div, s.max_open_divergence())
 
     @property
@@ -169,7 +169,7 @@ def gate_static():
         br, ka = s.vof_curvature_branch(), s.vof_curvature()
         d = (br > 0.5) & (br < 5.5)
         dk = np.abs(ka[d] - 2.0 / R)
-        d2 = s.csf_diagnostics()
+        d2 = s.diagnostics.csf_diagnostics()
         print(f"  D/dx = {2*R:5.1f}   Ca = {ca:.3e}"
               + (f"   ({prev/ca:.2f} x the coarser rung)" if prev else "               ")
               + f"   dkappa rms {dk.std():.2e} max {dk.max():.2e}"
@@ -189,7 +189,7 @@ def gate_static():
         s.set_vof(sphere_fractions((n, n, n), R, (n / 2 + 0.13, n / 2 + 0.27, n / 2 + 0.11)))
         s.set_property_model("rho", "linear", "C", [1.0, 0.0])
         s.set_surface_tension(1.0)
-        s.set_vof_interface_eps(eps)
+        s.diagnostics.set_vof_interface_eps(eps)
         s.set_dt(0.5 * s.capillary_dt())
         u = []
         try:
@@ -524,9 +524,9 @@ def gate_falling():
         s.set_property_model("force_z", "linear", "C",
                              [g * (rho_l - rho_g) * phi, -g * (rho_l - rho_g)])
         if rtol > 0:
-            s.set_velocity_solver_params(cap, rtol, 2)
+            s.diagnostics.set_velocity_solver_params(cap, rtol, 2)
         else:
-            s.set_velocity_solver_params(cap)
+            s.diagnostics.set_velocity_solver_params(cap)
         dt = 0.5 * s.capillary_dt()
         s.set_dt(dt)
         tau = 2.0 * R * R * rho_l / (9.0 * mu_out)
@@ -537,7 +537,7 @@ def gate_falling():
         for i in range(nsteps):
             s.step()
             h.sample(s)
-            sweeps = max(sweeps, s.last_step_timers()["momentum_sweeps"])
+            sweeps = max(sweeps, s.diagnostics.last_step_timers()["momentum_sweeps"])
             C = s.get_vof()
             w = s.get_w()
             ud = float((C * w).sum() / C.sum())

@@ -126,7 +126,7 @@ def run_case(name, N, cfg, quiet=True, solver="staggered", scheme="gauge-exact")
     s.set_rho(cfg["rho"]); s.set_mu(cfg["mu"]); s.set_dt(cfg["dt"])
     s.set_body_force(cfg["F"], 0.0, 0.0)
     s.set_advection(False)  # creeping Stokes
-    s.set_velocity_solver_params(cfg["vel_sweeps"])
+    s.diagnostics.set_velocity_solver_params(cfg["vel_sweeps"])
     s.set_pressure_multigrid(True, levels=levels)
     s.set_pressure_pcg(True, cfg["pcg_maxit"], cfg["pcg_rtol"])
     if solver == "colocated":
@@ -140,7 +140,7 @@ def run_case(name, N, cfg, quiet=True, solver="staggered", scheme="gauge-exact")
     for it in range(cfg["max_steps"]):
         s.step()
         steps += 1
-        p_iters.append(s.last_pressure_iterations())
+        p_iters.append(s.diagnostics.last_pressure_iterations())
         if it % cfg["check_every"] == cfg["check_every"] - 1:
             m = float(s.get_u().mean())
             if it >= cfg["min_steps"] and abs(m - prev) < cfg["conv_tol"] * (abs(m) + 1e-30):
@@ -161,7 +161,7 @@ def run_case(name, N, cfg, quiet=True, solver="staggered", scheme="gauge-exact")
         "N": N, "metric": float(metric),
         "pressure_iters_total": int(sum(p_iters)),
         "pressure_iters_per_step": float(np.median(half)),
-        "outer_iters": int(s.last_outer_iterations()),
+        "outer_iters": int(s.diagnostics.last_outer_iterations()),
         "steps": int(steps), "divergence": div, "max_u_solid": u_solid,
         "walltime_s": float(wall),
     }

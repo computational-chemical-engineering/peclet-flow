@@ -48,7 +48,7 @@ class Solve:
         self.div = 0.0
 
     def sample(self, s):
-        self.iters = max(self.iters, s.last_pressure_iterations())
+        self.iters = max(self.iters, s.diagnostics.last_pressure_iterations())
         # max_open_divergence() RE-IMPOSES the zero-gradient outflow face before measuring, which
         # both destroys bcCorrectOutflow's correction (so calling it once per step changes the run)
         # and reports a field the solver never used. On an open boundary use the projected sibling.
@@ -107,7 +107,7 @@ def gate_budget():
     # (scripts/verify_channel_sdflow.py): a deep semi-coarsening hierarchy, enough momentum
     # sweeps, and the all-fluid SDF far from every cell. With the defaults this configuration
     # diverges — see the findings entry.
-    s.set_velocity_solver_params(60)
+    s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_multigrid(True, levels=8)
     s.set_pressure_solver_params(80)
     s.set_pressure_geometry(np.full((nx, ny, nz), 1e30, order="F"))
@@ -125,7 +125,7 @@ def gate_budget():
             s.set_vof_inflow(4, 0.0)
         s.step()
         h.sample(s)
-        d = s.vof_diagnostics()
+        d = s.diagnostics.vof_diagnostics()
         ledger += sum(s.vof_bc_volumes())
         b = d["sum"] - ledger
         if budget0 is None:
@@ -134,7 +134,7 @@ def gate_budget():
         cmin, cmax = min(cmin, d["min"]), max(cmax, d["max"])
     tot = s.vof_bc_volumes_total()
     injected, left = tot[4], -tot[5]
-    d = s.vof_diagnostics()
+    d = s.diagnostics.vof_diagnostics()
     print(f"  injected {injected:.10g}, left {left:.10g}, remaining sum(C) {d['sum']:.3e}")
     print(f"  |budget drift| {drift:.3e}  (relative to the injected volume {drift/injected:.3e})")
     print(f"  C in [{cmin:.3e}, {cmax:.17g}]")
@@ -193,7 +193,7 @@ def gate_nusselt(ratio=100, steps=None, outflow_rho=True):
     # (scripts/verify_channel_sdflow.py): a deep semi-coarsening hierarchy, enough momentum
     # sweeps, and the all-fluid SDF far from every cell. With the defaults this configuration
     # diverges — see the findings entry.
-    s.set_velocity_solver_params(60)
+    s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_multigrid(True, levels=8)
     s.set_pressure_solver_params(80)
     s.set_pressure_geometry(np.full((nx, ny, nz), 1e30, order="F"))
@@ -239,7 +239,7 @@ def gate_nusselt(ratio=100, steps=None, outflow_rho=True):
             ncap += int(dt < p["dt"])
         s.step()
         h.sample(s)
-        hist.append(s.vof_diagnostics()["sum"])
+        hist.append(s.diagnostics.vof_diagnostics()["sum"])
     C = s.get_vof()
     w = s.get_w()
     zmid = nz // 2
@@ -299,7 +299,7 @@ def gate_pool():
     # (scripts/verify_channel_sdflow.py): a deep semi-coarsening hierarchy, enough momentum
     # sweeps, and the all-fluid SDF far from every cell. With the defaults this configuration
     # diverges — see the findings entry.
-    s.set_velocity_solver_params(60)
+    s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_multigrid(True, levels=8)
     s.set_pressure_solver_params(80)
     s.set_pressure_geometry(np.full((nx, ny, nz), 1e30, order="F"))
@@ -317,17 +317,17 @@ def gate_pool():
     s.set_vof_backflow(1, 0.0)
 
     h = Solve(800)
-    v0 = s.vof_diagnostics()["sum"]
+    v0 = s.diagnostics.vof_diagnostics()["sum"]
     t0 = time.time()
     for _ in range(steps):
         s.step()
         h.sample(s)
-    v1 = s.vof_diagnostics()["sum"]
+    v1 = s.diagnostics.vof_diagnostics()["sum"]
     C = s.get_vof()
     u, v, w = s.get_u(), s.get_v(), s.get_w()
     liq = C > 0.999
     umax_liq = float(np.max([np.abs(f[liq]).max() for f in (u, v, w)]))
-    rho = to_host(s.field_view("rho"))
+    rho = to_host(s.diagnostics.field_view("rho"))
     G = (rho.shape[0] - nx) // 2
     ghost = rho[G - 1, G + ny // 2, :]          # the -x inflow ghost column
     gh_gas = float(np.mean(ghost[G + nz // 2: G + nz]))

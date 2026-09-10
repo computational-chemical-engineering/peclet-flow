@@ -154,12 +154,12 @@ def relax(s, steps, cfl=0.15, dt_cap=None, probe=0, cb=None, ramp=0.02):
             dt = min(dt_cap, 1.1 * dt)
             s.set_dt(dt)
         s.step()
-        cl = s.vof_last_courant()
+        cl = s.diagnostics.vof_last_courant()
         if cl > 0.2:  # the sweep that just ran came close to the WY cap: back off before the next
             dt = max(dt * 0.5, 1e-6 * dt_cap)
             s.set_dt(dt)
         t += dt
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         maxit = max(maxit, it)
         capped += 1 if it >= PRESS_MAXIT else 0
         if probe and (i + 1) % probe == 0:
@@ -233,7 +233,7 @@ def set_zero_mean_buoyancy(s, dg, ratio, wos=False):
         return None
     rho_g, rho_l = 1.0 / ratio, 1.0
     g = dg / (rho_l - rho_g)
-    eps = s.vof_geometry(0)
+    eps = s.diagnostics.vof_geometry(0)
     cc = s.get_vof()
     cbar = float((cc * eps).sum()) / float(eps.sum())
     rho_bar = rho_g + (rho_l - rho_g) * cbar
@@ -307,8 +307,8 @@ def g3_static(theta=30.0, steps=500, nx=96, ny=4, nz=112, w=16.0, plate=8.0, dg=
     set_zero_mean_buoyancy(s, dg, ratio, wos)
     s.set_surface_tension(sigma)
     s.set_contact_angle(theta)
-    v0 = s.vof_diagnostics()["volume"]
-    eps = s.vof_geometry(0)
+    v0 = s.diagnostics.vof_diagnostics()["volume"]
+    eps = s.diagnostics.vof_geometry(0)
     xin, xout = _channel_columns(sdf, nz)
     l0 = level_of(s.get_vof(), eps, xin) - level_of(s.get_vof(), eps, xout)
     print(f"    initial level DIFFERENCE {l0:.4f} (the initial condition IS the exact equilibrium "
@@ -318,7 +318,7 @@ def g3_static(theta=30.0, steps=500, nx=96, ny=4, nz=112, w=16.0, plate=8.0, dg=
         cb=lambda q: level_of(q.get_vof(), eps, xin) - level_of(q.get_vof(), eps, xout))
     cc = s.get_vof()
     lin, lout = level_of(cc, eps, xin), level_of(cc, eps, xout)
-    d = s.vof_diagnostics()
+    d = s.diagnostics.vof_diagnostics()
     err = ((lin - lout) - ref) / ref
     print(f"  measured inner level {lin:.4f}  outer {lout:.4f}  DIFFERENCE {lin-lout:.4f} cells "
           f"vs Jurin {ref:.4f}  -> {100*err:+.2f} % (gate 5 %)  "
@@ -373,14 +373,14 @@ def g2_spread(theta_e=30.0, slip=0.1, steps=1500, probe=50, nx=64, nz=40, R=12.0
         s.set_contact_angle(theta_e)
     if wall_slip:                    # WO-V6b: the SAME lambda in the momentum wall closure
         s.set_wall_slip_length(slip)
-    eps = s.vof_geometry(0)
+    eps = s.diagnostics.vof_geometry(0)
     ix = nx // 2
     hist = []
 
     def shape(sv):
         cc = sv
         h = float((cc[ix, ix, :] * eps[ix, ix, :]).sum())
-        V = s.vof_diagnostics()["volume"]
+        V = s.diagnostics.vof_diagnostics()["volume"]
         a = math.sqrt(max((6.0 * V / (math.pi * h) - h * h) / 3.0, 1e-12))
         return h, a, 2.0 * math.degrees(math.atan2(h, a))
 
@@ -398,11 +398,11 @@ def g2_spread(theta_e=30.0, slip=0.1, steps=1500, probe=50, nx=64, nz=40, R=12.0
             s.set_dt(dt)
         s.step()
         t += dt
-        maxit = max(maxit, s.last_pressure_iterations())
-        capped += 1 if s.last_pressure_iterations() >= PRESS_MAXIT else 0
+        maxit = max(maxit, s.diagnostics.last_pressure_iterations())
+        capped += 1 if s.diagnostics.last_pressure_iterations() >= PRESS_MAXIT else 0
         if (i + 1) % probe == 0:
             h, a, th = shape(s.get_vof())
-            cd = s.contact_angle_diagnostics()
+            cd = s.diagnostics.contact_angle_diagnostics()
             hist.append((t, h, a, th, cd.get("mean_imposed_theta", 0.0),
                          cd.get("max_Ca_cl", 0.0), cd.get("max_contact_speed", 0.0)))
     print(f"  {'t':>9} {'h':>7} {'a':>7} {'theta_app':>9} {'theta_imp':>9} {'Ca_cl(dadt)':>12} "
@@ -480,16 +480,16 @@ def g3_rise(theta_e=30.0, slips=(0.05, 0.3), steps=1500, nx=96, ny=4, nz=112, w=
             s.set_contact_angle_dynamic(theta_e, sl, mu, sigma)
         if wall_slip and sl is not None:      # WO-V6b: the SAME lambda in the momentum closure
             s.set_wall_slip_length(sl)
-        eps = s.vof_geometry(0)
-        v0 = s.vof_diagnostics()["volume"]
+        eps = s.diagnostics.vof_geometry(0)
+        v0 = s.diagnostics.vof_diagnostics()["volume"]
         dt, maxit, capped, trace, tend = relax(
             s, steps, probe=probe if probe else max(1, steps // 15),
             cb=lambda q: level_of(q.get_vof(), eps, xin) - level_of(q.get_vof(), eps, xout))
         h = [v for _, _, v in trace]
         final, peak = h[-1], max(h)
         over = (peak - final) / max(abs(final), 1e-12)
-        cd = s.contact_angle_diagnostics() if sl is not None else None
-        d = s.vof_diagnostics()
+        cd = s.diagnostics.contact_angle_diagnostics() if sl is not None else None
+        d = s.diagnostics.vof_diagnostics()
         print(f"  {label:20s}: final {final:.3f} vs equilibrium {ref:.3f} "
               f"({100*(final/ref-1):+.1f} %, gate 10 %)  "
               f"{'PASS' if abs(final/ref-1) <= 0.10 else 'FAIL'} | peak {peak:.3f} -> overshoot "
@@ -556,7 +556,7 @@ def g4_incline(theta_a=70.0, theta_r=50.0, bo_fracs=(0.5, 0.7, 1.5, 2.5), steps=
         # periodic box accelerates the whole fluid without bound (WO-Q finding 9), and the
         # accelerating frame then cancels part of the very force this gate is measuring.
         cc = s.get_vof()
-        eps = s.vof_geometry(0)
+        eps = s.diagnostics.vof_geometry(0)
         cbar = float((cc * eps).sum()) / float(eps.sum())
         s.set_property_model("force_x", "linear", "C", [-g_t * cbar, g_t])
         xg = (np.arange(nx) + 0.5)[:, None, None]
@@ -567,7 +567,7 @@ def g4_incline(theta_a=70.0, theta_r=50.0, bo_fracs=(0.5, 0.7, 1.5, 2.5), steps=
             cb=lambda q: float((q.get_vof() * eps * xg).sum()) / max(float((q.get_vof() * eps).sum()), 1e-30))
         cc1 = s.get_vof()
         x1 = float((cc1 * eps * xg).sum()) / max(float((cc1 * eps).sum()), 1e-30)
-        cd = s.contact_angle_diagnostics()
+        cd = s.diagnostics.contact_angle_diagnostics()
         moved = x1 - x0
         pin_frac = cd["pinned_cells"] / max(cd["dynamic_cells"], 1)
         verdict = "PINNED" if abs(moved) < 0.5 else "SLIDING"

@@ -168,17 +168,17 @@ def apply_p3g(s, order=1, op_mdot=None, gfm_order=None, curv_dist=None, carry=No
     shipped scheme, bitwise.
     """
     if order == 2:
-        s.set_phase_change_energy_order(2)
+        s.diagnostics.set_phase_change_energy_order(2)
     if op_mdot is not None:
-        s.set_phase_change_mdot_operator(bool(op_mdot))
+        s.diagnostics.set_phase_change_mdot_operator(bool(op_mdot))
     if gfm_order is not None:
-        s.set_phase_change_gfm_order(int(gfm_order))
+        s.diagnostics.set_phase_change_gfm_order(int(gfm_order))
     if curv_dist is not None:
-        s.set_phase_change_curvature_distance(bool(curv_dist))
+        s.diagnostics.set_phase_change_curvature_distance(bool(curv_dist))
     if carry is not None:
-        s.set_phase_change_carry_conserve(bool(carry))
+        s.diagnostics.set_phase_change_carry_conserve(bool(carry))
     if deposit is not None:
-        s.set_phase_change_deposit_fallback(bool(deposit))
+        s.diagnostics.set_phase_change_deposit_fallback(bool(deposit))
 
 def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, consistent=True,
         quad=True, muscl=False, init="similarity", sub=4, area_mode=None, verbose=True,
@@ -223,31 +223,31 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     # back, which is how the 48 % / dt-collapse row of the findings is reproduced.
     import os
     if os.environ.get("PECLET_P23_WISP"):
-        s.set_vof_wisp_eps(float(os.environ["PECLET_P23_WISP"]))
+        s.diagnostics.set_vof_wisp_eps(float(os.environ["PECLET_P23_WISP"]))
     if os.environ.get("PECLET_P23_NO_EXACTRES"):
-        s.set_pressure_exact_residual(False)
+        s.diagnostics.set_pressure_exact_residual(False)
     if os.environ.get("PECLET_P23_NO_OUTFLOWRHO"):
-        s.set_outflow_rho_correction(False)
+        s.diagnostics.set_outflow_rho_correction(False)
     s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
-    s.set_phase_change_plane_dirichlet(plane)
+    s.diagnostics.set_phase_change_plane_dirichlet(plane)
     if consistent:
         s.set_phase_change_energy(rcp_v, rcp_l)
-        s.set_phase_change_energy_muscl(muscl)
-    s.set_phase_change_quadratic_fit(quad)
+        s.diagnostics.set_phase_change_energy_muscl(muscl)
+    s.diagnostics.set_phase_change_quadratic_fit(quad)
     if area_mode is not None:
-        s.set_phase_change_area(area_mode)
+        s.diagnostics.set_phase_change_area(area_mode)
     if fitkap:
-        s.set_phase_change_fit_curvature(-2.0 / r0)
+        s.diagnostics.set_phase_change_fit_curvature(-2.0 / r0)
     if carry:
         # WO-P3f: conserve the enthalpy the interfacial cells' Dirichlet overwrite destroys.
-        s.set_phase_change_carry_conserve(True)
+        s.diagnostics.set_phase_change_carry_conserve(True)
     if p3g:
         apply_p3g(s, **p3g)
         budget = budget or 10        # the flux identity IS gate (c); never run item 1 blind
     if budget:
         # WO-P3f instrument (a): the energy budget of the energy solve, printed every `budget`
         # steps.  Off by default and inert in the solver when off.
-        s.set_phase_change_budget(True)
+        s.diagnostics.set_phase_change_budget(True)
 
     # ADAPTIVE dt on the solver's OWN interface-local Courant number. The a-priori estimate
     # u = (1 - rho_v/rho_l) Rdot is the CONTINUUM interface speed and the discrete field overshoots
@@ -273,7 +273,7 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         if fitkap and rows:
             # WO-P3f: the PRESCRIBED curvature of the bubble the run currently carries, from the
             # liquid-volume deficit.  An instrument (a known geometry), not an estimator.
-            s.set_phase_change_fit_curvature(-2.0 / rows[-1][1])
+            s.diagnostics.set_phase_change_fit_curvature(-2.0 / rows[-1][1])
         while True:
             s.set_dt(dt)
             try:
@@ -286,23 +286,23 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
                 if dt < dtmin:
                     raise RuntimeError(
                         f"vof_scriven: dt COLLAPSED below {dtmin:.3e} (initial {dt0:.3e}) at step "
-                        f"{nst}, t = {tcur:.4f} of {te:.4f}, last CFL {s.vof_last_courant():.4g} — "
+                        f"{nst}, t = {tcur:.4f} of {te:.4f}, last CFL {s.diagnostics.vof_last_courant():.4g} — "
                         f"the interface velocity is running away, not the time step being small")
         dt_used = dt
         tcur += dt
         nst += 1
         if verbose and nst % 200 == 0:
             print(f"      [step {nst}: t {tcur:.4f}/{te:.4f}, dt {dt:.4e}, "
-                  f"cfl {s.vof_last_courant():.4f}]", flush=True)
-        c_ = s.vof_last_courant()
+                  f"cfl {s.diagnostics.vof_last_courant():.4f}]", flush=True)
+        c_ = s.diagnostics.vof_last_courant()
         dt *= min(1.3, max(0.5, cfl / max(c_, 1e-30)))
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         itmax = max(itmax, it)
         capped += 1 if it >= 600 else 0
         vol = float(n) ** 3 - s.get_vof().sum()
         rnum = (3.0 * vol / (4.0 * math.pi)) ** (1.0 / 3.0)
         rex = 2 * beta * math.sqrt(alpha_l * tcur)
-        dg = s.phase_change_diagnostics()
+        dg = s.diagnostics.phase_change_diagnostics()
         # exact mdot = rho_v Rdot = rho_v beta sqrt(alpha_l/t)
         mex = rho_v * beta * math.sqrt(alpha_l / tcur)
         # WHERE the growth deficit sits (WO-P3b).  `mdot_mean` is an unweighted mean over the
@@ -334,7 +334,7 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         # mdot is evaluated at the head of the step from the converged T of the step before.
         e_lat_n = rho_l * dg['removed_volume'] * h_lv / dt_used
         if p3g is not None and budget:
-            b_ = s.phase_change_budget()
+            b_ = s.diagnostics.phase_change_budget()
             if e_lat_n != 0.0:
                 # the BY-CONSTRUCTION half: the latent heat this step books IS the heat the
                 # operator's own rows draw on the fields it read.
@@ -345,7 +345,7 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
                 worst_lag = max(worst_lag, abs(dg['q_operator'] + qprev) / abs(dg['q_operator']))
             qprev = b_['q_gfm'] + b_['q_behind']
         if budget and (nst % budget == 0 or nst == 1) and verbose:
-            b = s.phase_change_budget()
+            b = s.diagnostics.phase_change_budget()
             # E_lat: the latent heat the REGRESSION booked this step (W).  removed_volume is
             # sum mdot A dt / rho_l, so rho_l removed_volume h_lv / dt = sum mdot A h_lv.
             e_lat = rho_l * dg['removed_volume'] * h_lv / dt_used
@@ -360,7 +360,7 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
             print(f"                     H_liq {b['h_liquid']:12.5e}  H_open {b['h_open']:12.5e}  "
                   f"dH_open/dt {dH:12.5e} W  |  class change: enter {b['e_enter']:11.4e} J "
                   f"leave {b['e_leave']:11.4e} J  net {dcls:12.5e} W ({100*dcls/e_lat if e_lat else float('nan'):+7.3f} % of E_lat)")
-            led = s.phase_change_carry_ledger()
+            led = s.diagnostics.phase_change_carry_ledger()
             # the CONSERVATION identity of the option: what the deposit hands back plus what it
             # could not place must equal what the overwrite destroys, exactly.
             idn = (led['deposited'] + led['lost'] + b['d_overwrite'])
@@ -387,7 +387,7 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         rows.append((tcur, rnum, rex, it, dg['mdot_mean'], mex, meff, arel,
                      dg['interface_cells'], delta, r_a, dg['deficit_cells'],
                      dg['redistributed'], arel_end, area_end))
-    d = s.phase_change_diagnostics()
+    d = s.diagnostics.phase_change_diagnostics()
     # thickness of the thermal boundary layer at t0: where the exact profile reaches 99 % of dT
     lo_, hi_ = r0, 200.0 * r0
     for _ in range(200):
@@ -590,7 +590,7 @@ def area_advect(n=128, R=16.0, sub=16, steps=100, cfl=0.2, amp=0.0, drift=(0.5, 
     def sample(tag):
         row = {}
         for m in modes:
-            s.set_phase_change_area(m)
+            s.diagnostics.set_phase_change_area(m)
             row[m] = s.vof_interface_area()
         cc = s.get_vof()
         mixed = int(np.count_nonzero((cc > 0.0) & (cc < 1.0)))
@@ -672,9 +672,9 @@ def area_probe(n, radii, ratio=100.0, sub=4, mode=None, shape="sphere"):
         s.enable_phase_change(rho_v, rho_l, 1.0)
         s.set_mass_flux_uniform(0.0)
         if mode is not None:
-            s.set_phase_change_area(mode)
+            s.diagnostics.set_phase_change_area(mode)
         s.apply_phase_change(0.0)
-        d = s.phase_change_diagnostics()
+        d = s.diagnostics.phase_change_diagnostics()
         mc = _mc_area(c0) if R > -5 else float("nan")   # the periodic rows have an EXACT ref
         if not (ref == ref):
             ref = mc
@@ -820,11 +820,11 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
                 s.set_vof(cstart)
                 s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
                 s.enable_phase_change(rho_v, rho_l, 1.0)
-                s.set_phase_change_area(mode)
+                s.diagnostics.set_phase_change_area(mode)
                 s.set_mass_flux_uniform(1.0)
                 a_bef = s.vof_interface_area()
                 s.apply_phase_change(delta)
-                d = s.phase_change_diagnostics()
+                d = s.diagnostics.phase_change_diagnostics()
                 c1 = s.get_vof()
                 a_aft = s.vof_interface_area()
                 del s
@@ -941,21 +941,21 @@ def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt,
     s.set_field("T", tprof)
     s.enable_phase_change(rho_v, rho_l, h_lv)
     s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
-    s.set_phase_change_plane_dirichlet(plane)
+    s.diagnostics.set_phase_change_plane_dirichlet(plane)
     s.set_phase_change_energy(rcp_v, rcp_l)
-    s.set_phase_change_quadratic_fit(quad)
+    s.diagnostics.set_phase_change_quadratic_fit(quad)
     if area_mode is not None:
-        s.set_phase_change_area(area_mode)
+        s.diagnostics.set_phase_change_area(area_mode)
     if kap:
         # WO-P3f: the curvature-corrected sample distance, with kappa = div(n) PRESCRIBED from the
         # known geometry (-2/R for a gas sphere; 0 for the flat control).
-        s.set_phase_change_fit_curvature(-2.0 / R if geom == "sphere" else 0.0)
-    s.set_phase_change_budget(True)     # WO-P3f: also read the GFM heat the SAME fields draw
+        s.diagnostics.set_phase_change_fit_curvature(-2.0 / R if geom == "sphere" else 0.0)
+    s.diagnostics.set_phase_change_budget(True)     # WO-P3f: also read the GFM heat the SAME fields draw
     if p3g:
         apply_p3g(s, **p3g)
     s.apply_phase_change(dt)
-    dg = s.phase_change_diagnostics()
-    bud = s.phase_change_budget()
+    dg = s.diagnostics.phase_change_diagnostics()
+    bud = s.diagnostics.phase_change_budget()
     md = np.asarray(s.get_field("mdot"))
     cc = np.asarray(c0)
     iface = (cc > 1e-12) & (cc < 1.0 - 1e-12)
@@ -1077,10 +1077,10 @@ def carry_probe(n, steps, ratio=100.0, carry=False, sub=16, grad=0.05, mdot=2.0e
     # path (and with it the per-cell Dirichlet set) OFF.
     s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
     s.set_phase_change_energy(rcp_v, rcp_l)
-    s.set_phase_change_area(6)
-    s.set_phase_change_budget(True)
+    s.diagnostics.set_phase_change_area(6)
+    s.diagnostics.set_phase_change_budget(True)
     if carry:
-        s.set_phase_change_carry_conserve(True)
+        s.diagnostics.set_phase_change_carry_conserve(True)
     if p3g:
         apply_p3g(s, **p3g)
     print(f"  WO-P3f CARRY probe, {n}^3, planar interface, prescribed mdot {mdot:g}, linear "
@@ -1093,15 +1093,15 @@ def carry_probe(n, steps, ratio=100.0, carry=False, sub=16, grad=0.05, mdot=2.0e
     for k in range(steps):
         s.set_dt(dt)
         s.step()
-        b = s.phase_change_budget()
-        led = s.phase_change_carry_ledger()
+        b = s.diagnostics.phase_change_budget()
+        led = s.diagnostics.phase_change_carry_ledger()
         idn = led['deposited'] + led['lost'] + b['d_overwrite']
         T = np.asarray(s.get_field("T"))
         C = np.asarray(s.get_vof())
         H = float(np.sum((rcp_v * (1.0 - C) + rcp_l * C) * T))
         dH = float("nan") if hprev is None else H - hprev
         hprev = H
-        dgp = s.phase_change_diagnostics()
+        dgp = s.diagnostics.phase_change_diagnostics()
         e_lat_p = rho_l * dgp['removed_volume'] * h_lv / dt
         qop = b['q_gfm'] + b['q_behind']
         print(f"      step {k+1:3d}  E_lat {e_lat_p:12.5e} W  q_op(build) "

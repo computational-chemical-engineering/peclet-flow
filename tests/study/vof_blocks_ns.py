@@ -247,7 +247,7 @@ def gate_grace():
         i += 1
         s.step()
         h.sample(s)
-        st = s.vof_block_stats()[0]
+        st = s.diagnostics.vof_block_stats()[0]
         if st["volume"] > 0:
             hist.append((t, st["centroid"][2], st["volume"], st["area"],
                          st["moments"][2], st["moments"][0]))
@@ -363,7 +363,7 @@ def gate_pair():
                 if gap == 0 and merged_at is None:
                     merged_at = t
                 if blk:
-                    vols = [b["volume"] for b in s.vof_block_stats()]
+                    vols = [b["volume"] for b in s.diagnostics.vof_block_stats()]
                     overlap_max = max(overlap_max, sum(vols) - float(C.sum()))
             if i % 100 == 0:
                 print(f"    t = {t:7.2f}  gap {axis_gap(s.get_vof()):3d} cells  "
@@ -373,7 +373,7 @@ def gate_pair():
                     wall=time.time() - t0)
         print(f"\n  -- {name}: {i} steps, {info['solve']}  ({info['wall']:.0f} s)")
         if blk:
-            st = s.vof_block_stats()
+            st = s.diagnostics.vof_block_stats()
             info["vols"] = [b["volume"] for b in st]
             info["zc"] = [b["centroid"][2] for b in st]
             info["overlap"] = overlap_max
@@ -475,7 +475,7 @@ def gate_contact():
             prev = v
         info = dict(blobs=blobs, union=float(C.sum()), solve=h, wall=time.time() - t0)
         if blk:
-            st = s.vof_block_stats()
+            st = s.diagnostics.vof_block_stats()
             info["vols"] = [b["volume"] for b in st]
             info["shared"] = sum(info["vols"]) - info["union"]
             info["cells_both"] = None
@@ -519,11 +519,11 @@ def gate_swarm():
                 seeds.append(((i + 0.5) * n / 4, (j + 0.5) * n / 4, (m + 0.5) * n / 4, r))
                 k += 1
     s.enable_vof_blocks(seeds)
-    print(f"  {len(s.vof_block_stats())} markers seeded")
+    print(f"  {len(s.diagnostics.vof_block_stats())} markers seeded")
     print(f"  {'mode':<16}{'imbalance (np = 1 here; the census is the replicated table)':<40}")
     for mode, name in ((0, "round robin"), (1, "LPT"), (2, "weighted ORB")):
-        print(f"  {name:<16}{s.vof_block_imbalance_of(mode):.4f}")
-    st = s.vof_block_stats()
+        print(f"  {name:<16}{s.diagnostics.vof_block_imbalance_of(mode):.4f}")
+    st = s.diagnostics.vof_block_stats()
     tot_v = sum(b["volume"] for b in st)
     tot_a = sum(b["area"] for b in st)
     print(f"  per-bubble outputs: total volume {tot_v:.2f} cells, total interface area "

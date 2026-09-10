@@ -38,7 +38,7 @@ class SolveWatch:
         self.capped = 0
 
     def sample(self, s):
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         self.max_iters = max(self.max_iters, it)
         if it >= self.cap:
             self.capped += 1
@@ -224,10 +224,10 @@ def gate_uniform_advection_only(n=32, steps=1, ratios=(10.0, 1e2, 1e3, 1e4)):
                 s.step()
             e = 0.0
             for c, uc in enumerate(U):
-                f = s.vof_advected_velocity(c)
+                f = s.diagnostics.vof_advected_velocity(c)
                 e = max(e, float(np.max(np.abs(f - uc))))
             errs.append(e / max(abs(x) for x in U))
-            d = s.vof_momentum_diagnostics()
+            d = s.diagnostics.vof_momentum_diagnostics()
             print("      %-8s R=%-8g err %.3e   C^c in [%.4e, %.6f]  floored %d  min rho^c %.4g"
                   % (scene, R, errs[-1], min(d["min_Cc"]), max(d["max_Cc"]), d["floored"],
                      d["min_rho_c"]))
@@ -302,17 +302,17 @@ def gate_rho_floor(n=32, steps=200, R=1000.0):
     ref = None
     for frac in (1e-3, 1e-6, 1e-9, 1e-12):
         s = make_solver(n, C, 1.0, R, 0.0, 0.2, U, True)
-        s.set_vof_rho_floor(frac)
+        s.diagnostics.set_vof_rho_floor(frac)
         for _ in range(steps):
             s.step()
-        d = s.vof_momentum_diagnostics()
+        d = s.diagnostics.vof_momentum_diagnostics()
         u = np.stack([s.get_u(), s.get_v(), s.get_w()])
         dd = 0.0 if ref is None else float(np.max(np.abs(u - ref)))
         if ref is None:
             ref = u
         print("  frac %-8g floor %-11.4g floored CVs %-6d  min rho^c %.6f  "
               "C^c in [%.3e, %.6f]  du vs frac=1e-3: %.3e"
-              % (frac, s.vof_rho_floor(), d["floored"], d["min_rho_c"],
+              % (frac, s.diagnostics.vof_rho_floor(), d["floored"], d["min_rho_c"],
                  min(d["min_Cc"]), max(d["max_Cc"]), dd))
         del s
 
@@ -400,7 +400,7 @@ def gate_falling_drop(n=48, D=15, R=800.0, mu_ratio=100.0, steps=500, quiet=Fals
                 hist.append(float((c * uz).sum() / m) if m > 0 else 0.0)
             # keep the interface-local Courant number inside the WY cap
             if k % 10 == 9:
-                cfl = s.vof_last_courant()
+                cfl = s.diagnostics.vof_last_courant()
                 if cfl > 0.18:
                     dt *= 0.18 / cfl
                     s.set_dt(dt)
@@ -474,7 +474,7 @@ def gate_rt(res=(24, 48), R=1000.0, steps=300):
                     blew = True
                     break
                 w.sample(s)
-                cfl = s.vof_last_courant()
+                cfl = s.diagnostics.vof_last_courant()
                 if cfl > 0.18:
                     dt *= 0.18 / cfl
                     s.set_dt(dt)

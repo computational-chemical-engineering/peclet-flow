@@ -166,7 +166,7 @@ def one_adaptive(nsteps, cflT, capT, sigma, dmax):
           f"max|d dt| = {max(abs(x - y) for x, y in zip(dts_a, dts_b)):.3e}")
     check("  state bitwise identical", same(state(a), state(b)), str(d))
     print(f"     {nsteps} steps, dt {dts_a[0]:.6g} -> {dts_a[-1]:.6g}, "
-          f"pressure {a.last_pressure_iterations()}/600, failed={a.pressure_solve_failed()}; "
+          f"pressure {a.diagnostics.last_pressure_iterations()}/600, failed={a.diagnostics.pressure_solve_failed()}; "
           f"capillary bound {ncap} steps, CFL bound {ncfl}; "
           f"dt range [{min(dts_a):.6g}, {max(dts_a):.6g}]")
 
@@ -179,16 +179,16 @@ def gate_geometry():
     s.set_rho(1.0); s.set_mu(0.1)
     s.set_pressure_geometry(np.full((n, n, n), 10.0, order="F"))
     s.enable_vof()
-    eps = np.asarray(s.vof_geometry(0))
-    kind = np.asarray(s.vof_geometry(4))
+    eps = np.asarray(s.diagnostics.vof_geometry(0))
+    kind = np.asarray(s.diagnostics.vof_geometry(4))
     check("vof_has_geometry() is False", s.vof_has_geometry() is False)
     check("eps == 1 everywhere", eps.shape == (n, n, n) and np.all(eps == 1.0),
           f"min {eps.min()} max {eps.max()}")
     check("openness == 1 everywhere",
-          all(np.all(np.asarray(s.vof_geometry(k)) == 1.0) for k in (1, 2, 3)))
+          all(np.all(np.asarray(s.diagnostics.vof_geometry(k)) == 1.0) for k in (1, 2, 3)))
     check("classification == 0 everywhere", np.all(kind == 0.0))
     # the E7 driver's dual use: one expression for both scenes
-    gas = np.asarray(s.vof_geometry(0)) * (1.0 - s.get_vof())
+    gas = np.asarray(s.diagnostics.vof_geometry(0)) * (1.0 - s.get_vof())
     check("E7 dual-use expression runs", gas.shape == (n, n, n))
 
 
@@ -290,7 +290,7 @@ def gate_freeslip(nz=32):
     e_disc = float(np.abs(u - disc).max() / disc.max())
     print(f"    u_max {u.max():.8f}; continuum parabola {cont.max():.8f} (rel {e_cont:.3e}), "
           f"discrete parabola {disc.max():.8f} (rel {e_disc:.3e}); "
-          f"pressure {s.last_pressure_iterations()}, failed={s.pressure_solve_failed()}")
+          f"pressure {s.diagnostics.last_pressure_iterations()}, failed={s.diagnostics.pressure_solve_failed()}")
     check("half-channel == the scheme's own discrete parabola (solver tol)", e_disc < 1e-8, f"{e_disc:.3e}")
     check("half-channel within h^2 of the continuum parabola", e_cont < 1e-3, f"{e_cont:.3e}")
     # (b) free slip IS symmetry: the half channel must equal the lower half of a FULL channel of

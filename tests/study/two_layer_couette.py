@@ -32,9 +32,9 @@ def couette(harmonic, rot=None, chi=1.0, dt=20.0, N=32, steps=4000, tol=1e-9):
     muy = np.where(y < N // 2, mu1, mu2).astype(np.float64)
     s.add_field("mu")
     s.set_field("mu", np.asfortranarray(np.repeat(muy[None, :, None], N, 0).repeat(nz, 2)))
-    s.set_property_mode("variable", harmonic)
+    s.diagnostics.set_property_mode("variable", harmonic)
     if rot is not None:
-        s.set_variable_rotational(rot, chi)
+        s.diagnostics.set_variable_rotational(rot, chi)
     prev, conv = None, -1
     for it in range(steps):
         s.step()

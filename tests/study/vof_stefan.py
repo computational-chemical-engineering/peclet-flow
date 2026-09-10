@@ -81,7 +81,7 @@ def gate_p0a(nx=64, ny=4, nz=4, x0=32.25, mdot=0.02, dt=1.0, nsteps=1000):
         s.apply_phase_change(dt)
         x = s.get_vof().sum() / (ny * nz)
         worst = max(worst, abs(x - (x0 - mdot * dt * k)))
-        d = s.phase_change_diagnostics()
+        d = s.diagnostics.phase_change_diagnostics()
         lo, hi = min(lo, d["min_C"]), max(hi, d["max_C"])
         clips += d["deficit_cells"]
         redist += d["redistributed"]
@@ -122,7 +122,7 @@ def gate_p0b(nx=64, ny=4, nz=4, rg=1.0, rl=100.0, mdot=0.01, x0=32.25, nsteps=20
     dmax = np.abs(div - src)[:-1, :-1, :-1].max()
     plateau = u[35:56, 0, 0]
     liq = np.abs(u[2:30, 0, 0]).max()
-    d = s.phase_change_diagnostics()
+    d = s.diagnostics.phase_change_diagnostics()
     print(f"p0b  ratio {rl/rg:g}, closed column + balanced sink, {nsteps} steps")
     print(f"     u_gas = {plateau.mean():.17g}  exact {ug:.17g}  rel {(plateau.mean()-ug)/ug:+.3e}"
           f"   [gate 1e-10]")
@@ -130,10 +130,10 @@ def gate_p0b(nx=64, ny=4, nz=4, rg=1.0, rl=100.0, mdot=0.01, x0=32.25, nsteps=20
     print(f"     interfacial-cell faces u = {u[32,0,0]:.3e}, {u[33,0,0]:.3e}  (the LIQUID velocity)")
     print(f"     max|div(u) - S| = {dmax:.3e}   source sum {d['source_sum']:.6g} into "
           f"{d['source_cells']} cells, fallback {d['fallback_cells']}")
-    print(f"     pressure iterations {s.last_pressure_iterations()} / cap 400 "
+    print(f"     pressure iterations {s.diagnostics.last_pressure_iterations()} / cap 400 "
           f"(a capped solve makes the run INVALID)")
     return abs((plateau.mean() - ug) / ug) < 1e-10 and dmax < 1e-12 \
-        and s.last_pressure_iterations() < 400
+        and s.diagnostics.last_pressure_iterations() < 400
 
 
 # ------------------------------------------------------------------ p1
@@ -168,7 +168,7 @@ def stefan_run(n, st=1.0, alpha=1.0, x0p=0.10, xep=0.25, fo=0.5, ny=4, nz=4):
         s.advance_scalars()
     layer = n - s.get_vof().sum() / (ny * nz)
     exact = 2 * lam * math.sqrt(alpha * te) * n
-    return layer, exact, nsteps, lam, s.phase_change_diagnostics()
+    return layer, exact, nsteps, lam, s.diagnostics.phase_change_diagnostics()
 
 
 def gate_p1(ns=(64, 128, 256)):

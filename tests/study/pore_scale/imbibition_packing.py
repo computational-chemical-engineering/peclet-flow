@@ -136,7 +136,7 @@ class Health:
         self.cap, self.iters, self.div, self.capped = cap, 0, 0.0, 0
 
     def sample(self, s):
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         self.iters = max(self.iters, it)
         self.capped += int(it >= self.cap)
         self.div = max(self.div, s.max_open_divergence_projected())
@@ -202,7 +202,7 @@ def run(theta_deg, ca, sdf, klo, khi, steps, probe=False, after=0.25, sample_eve
     s.set_dt(0.05)
     s.set_domain_bc(4, 2, 0.0, 0.0, U)     # -z inflow (liquid)
     s.set_domain_bc(5, 3, 0.0, 0.0, 0.0)   # +z outflow
-    s.set_velocity_solver_params(60)
+    s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_multigrid(True, levels=8)
     s.set_pressure_solver_params(80)
     s.set_solid(sdf, cutcell_pressure=True)
@@ -223,7 +223,7 @@ def run(theta_deg, ca, sdf, klo, khi, steps, probe=False, after=0.25, sample_eve
     s.set_vof_inflow(4, 1.0)
     s.set_vof_backflow(5, 0.0)
 
-    eps = np.asarray(s.vof_geometry(0))
+    eps = np.asarray(s.diagnostics.vof_geometry(0))
     pore = float(eps[:, :, klo:khi].sum())
     L0 = s.vof_step_limits()
     print(f"  dt census at t = 0: capillary_dt {L0['capillary_dt']:.5g} (x{CAP_CFL}), "
@@ -282,7 +282,7 @@ def run(theta_deg, ca, sdf, klo, khi, steps, probe=False, after=0.25, sample_eve
         os.makedirs(npy_dir, exist_ok=True)
         np.save(os.path.join(npy_dir, f"packing_C_theta{int(theta_deg)}.npy"), C)
         np.save(os.path.join(npy_dir, "packing_eps.npy"), eps)
-    d = s.vof_diagnostics()
+    d = s.diagnostics.vof_diagnostics()
     print(f"\n  ran {n} steps to t = {t:.5g} s in {wall:.0f} s "
           f"({1000*wall/max(n,1):.2f} ms/step, SHARED GPU)")
     print(f"  dt final {dt:.5g}; the WY CFL limit displaced the capillary one on {ncfl} of "

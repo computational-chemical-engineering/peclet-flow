@@ -41,7 +41,7 @@ def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=5000):
     s.set_rho(1.0); s.set_mu(nu); s.set_dt(1.0); s.set_advection(True)
     s.set_domain_bc(0, 1); s.set_domain_bc(1, 1); s.set_domain_bc(2, 1)  # -x, +x, -y no-slip
     s.set_domain_bc(3, 2, U, 0.0, 0.0)                                   # +y lid moving in +x
-    s.set_velocity_solver_params(60)
+    s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_multigrid(True, levels=8)         # semi-coarsening MG (z frozen, x/y deep; auto-capped)
     s.set_pressure_solver_params(80)
     s.set_pressure_geometry(np.full((N, N, nz), 1e30))                  # all-fluid + Neumann walls
@@ -55,7 +55,7 @@ def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=5000):
             m = float(u[:, :, nz // 2].mean()) if s.rank() == 0 else 0.0
             done = it > 300 and abs(m - prev) < 1e-5 * (abs(m) + 1e-30)
             prev = m
-            if s.bcast_from_root(done):
+            if s.diagnostics.bcast_from_root(done):
                 steps = it + 1
                 break
     u = s.get_u(); v = s.get_v(); div = s.max_open_divergence()

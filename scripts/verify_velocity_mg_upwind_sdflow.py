@@ -39,8 +39,8 @@ def run(vmg, dt, fx, n_steps, vlevels=3, vcycles=10, to_steady=False):
     s.set_body_force(fx, 0.0, 0.0)
     s.set_advection(True)
     s.set_implicit_advection(True)
-    s.set_outer_iterations(3)
-    s.set_velocity_solver_params(80)              # RB-GS sweeps when vmg off
+    s.diagnostics.set_outer_iterations(3)
+    s.diagnostics.set_velocity_solver_params(80)              # RB-GS sweeps when vmg off
     if vmg:
         s.set_velocity_multigrid(True, vlevels, vcycles)
     s.set_pressure_pcg(True, max_iter=120, rtol=1e-9)

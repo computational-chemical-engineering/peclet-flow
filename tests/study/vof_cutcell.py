@@ -69,7 +69,7 @@ def stokes_state(n, steps=60, mu=0.2, force=(2e-3, 1e-3, 5e-4)):
     it = 0
     for _ in range(steps):
         s.step()
-        it = max(it, s.last_pressure_iterations())
+        it = max(it, s.diagnostics.last_pressure_iterations())
     return s, it
 
 
@@ -81,19 +81,19 @@ def g2(n=48, nadv=500, cfl=0.2):
     c0 = np.zeros((n, n, n), order="F")
     c0[:, :, : n // 2] = 1.0
     s.set_vof(c0)
-    d0 = s.vof_diagnostics()
+    d0 = s.diagnostics.vof_diagnostics()
     dt = cfl / s.vof_max_courant()
     clip = 0.0
     mn, mx = 1e30, -1e30
     solid = 0.0
     for _ in range(nadv):
         s.advect_vof(dt)
-        d = s.vof_diagnostics()
+        d = s.diagnostics.vof_diagnostics()
         clip += d["clipped_volume"]
         mn = min(mn, d["min_fluid"])
         mx = max(mx, d["max_fluid"])
         solid = max(solid, abs(d["solid_sum"]))
-    d1 = s.vof_diagnostics()
+    d1 = s.diagnostics.vof_diagnostics()
     drift = (d1["volume"] - d0["volume"]) / d0["volume"]
     raw = (d1["raw_volume"] - d0["raw_volume"]) / d0["raw_volume"]
     print(f"G2 packing {n}^3, {nadv} kinematic steps at interface CFL {cfl} (dt = {dt:.5g})")
@@ -131,15 +131,15 @@ def g4(n=48, steps=400, ratio=10.0, grav=2e-3, momentum=True):
     s.set_property_model("force_z", "linear", "rho", [grav * rho_mean, -grav])
     if momentum:
         s.enable_vof_momentum(1.0, ratio)
-    v0 = s.vof_diagnostics()["volume"]
+    v0 = s.diagnostics.vof_diagnostics()["volume"]
     maxit, capped, clip = 0, 0, 0.0
     for _ in range(steps):
         s.step()
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         maxit = max(maxit, it)
         capped += it >= PRESS_MAXIT
-        clip += s.vof_diagnostics()["clipped_volume"]
-    d1 = s.vof_diagnostics()
+        clip += s.diagnostics.vof_diagnostics()["clipped_volume"]
+    d1 = s.diagnostics.vof_diagnostics()
     umax = max(abs(np.asarray(g())).max() for g in (s.get_u, s.get_v, s.get_w))
     drift = (d1["volume"] - v0) / v0
     print(f"G4 packing {n}^3 draining, ratio {ratio}, {steps} coupled steps, "
@@ -192,15 +192,15 @@ def g5(diam=24, steps=200, sigma=1.0, mu=0.05, cfl=0.5):
     s.set_surface_tension(sigma)
     dts = s.capillary_dt()
     s.set_dt(cfl * dts)
-    v0 = s.vof_diagnostics()["volume"]
+    v0 = s.diagnostics.vof_diagnostics()["volume"]
     maxit, capped = 0, 0
     for _ in range(steps):
         s.step()
-        it = s.last_pressure_iterations()
+        it = s.diagnostics.last_pressure_iterations()
         maxit = max(maxit, it)
         capped += it >= PRESS_MAXIT
     cc = np.asarray(s.get_vof())
-    d1 = s.vof_diagnostics()
+    d1 = s.diagnostics.vof_diagnostics()
     z0 = int(math.ceil(zw))
     # h: the liquid column on the axis, counting only the FLUID part of the cut wall cell
     frac = np.clip(np.arange(nz) + 1 - zw, 0.0, 1.0)

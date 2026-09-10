@@ -212,7 +212,7 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
     s.set_mu(MU)
     s.set_dt(DT)
     s.set_advection(False)                       # creeping Stokes: isolate the pressure solve
-    s.set_velocity_solver_params(VEL_SWEEPS)
+    s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)
     if case == "hydro":                          # periodic x/y, walls +-z
         s.set_domain_bc(4, 1, 0, 0, 0)
         s.set_domain_bc(5, 1, 0, 0, 0)
@@ -241,7 +241,7 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
     else:
         s.add_field("rho")
         s.set_field("rho", np.asfortranarray(rho_field(shape, edge, ratio, N)))
-        s.set_density_mode("variable")           # (defaults the driver to Chebyshev)
+        s.diagnostics.set_density_mode("variable")           # (defaults the driver to Chebyshev)
         if case == "hydro":
             s.set_property_model("force_z", "linear", "rho", [0.0, -GRAV])
 
@@ -265,8 +265,8 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
     t_wall0 = time.perf_counter()
     for _ in range(STEPS):
         s.step()
-        iters.append(int(s.last_pressure_iterations()))
-        tm = s.last_step_timers()
+        iters.append(int(s.diagnostics.last_pressure_iterations()))
+        tm = s.diagnostics.last_step_timers()
         t_step.append(float(tm["step"]))
         t_proj.append(float(tm["projection"]))
         divs.append(float(s.max_open_divergence()))
@@ -420,7 +420,7 @@ def cheb_overhead(geom, N, ratio=1e3):
         s.set_mu(MU)
         s.set_dt(DT)
         s.set_advection(False)
-        s.set_velocity_solver_params(VEL_SWEEPS)
+        s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)
         s.set_domain_bc(0, 1, 0, 0, 0)
         s.set_domain_bc(1, 1, 0, 0, 0)
         s.set_domain_bc(4, 1, 0, 0, 0)
@@ -433,7 +433,7 @@ def cheb_overhead(geom, N, ratio=1e3):
         if varrho:
             s.add_field("rho")
             s.set_field("rho", np.asfortranarray(rho_field("slab", "sharp", ratio, N)))
-            s.set_density_mode("variable")
+            s.diagnostics.set_density_mode("variable")
         if driver == "cheb":
             s.set_pressure_chebyshev(True, MAXIT, RTOL)
         else:
@@ -442,8 +442,8 @@ def cheb_overhead(geom, N, ratio=1e3):
         tp, it = [], []
         for _ in range(STEPS):
             s.step()
-            tp.append(float(s.last_step_timers()["projection"]))
-            it.append(int(s.last_pressure_iterations()))
+            tp.append(float(s.diagnostics.last_step_timers()["projection"]))
+            it.append(int(s.diagnostics.last_pressure_iterations()))
         return np.asarray(tp), np.asarray(it)
 
     out = {}

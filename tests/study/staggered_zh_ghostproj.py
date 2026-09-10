@@ -33,11 +33,11 @@ def drag(N, ghost, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=40
     s.set_dt(dt)
     s.set_body_force(F, 0, 0)
     s.set_advection(False)
-    s.set_velocity_solver_params(200)
+    s.diagnostics.set_velocity_solver_params(200)
     s.set_pressure_multigrid(True, levels=lv)
     s.set_pressure_pcg(True, 400, 1e-10)
     if ghost:
-        s.set_ghost_projection(True)
+        s.diagnostics.set_ghost_projection(True)
     s.set_solid(sdf, cutcell_pressure=True)
     prev, warm, um, t0 = 0.0, None, [], time.time()
     for it in range(max_steps):
@@ -52,7 +52,7 @@ def drag(N, ghost, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=40
         elif it - warm >= tail:
             break
     K = F * N**3 / (6 * np.pi * mu * R * np.mean(um[-tail:]))
-    return K, it + 1, s.last_pressure_iterations(), s.max_open_divergence(), time.time() - t0
+    return K, it + 1, s.diagnostics.last_pressure_iterations(), s.max_open_divergence(), time.time() - t0
 
 
 kref = 4.2920

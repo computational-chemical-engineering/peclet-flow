@@ -244,7 +244,7 @@ def main():
         s.set_surface_tension(S ** 3 * SIGMA)
         s.enable_vof_blocks_from_field(boxes)
         s.enable_vof_block_csf()
-        print(f"  markers seeded: {len(s.vof_block_stats())}; force_x = {f0:.6e} {f1:+.6e} C")
+        print(f"  markers seeded: {len(s.diagnostics.vof_block_stats())}; force_x = {f0:.6e} {f1:+.6e} C")
     else:
         s.set_property_model("force_x", "const", "C", [S * TAUW])
         print(f"  SINGLE PHASE: force_x = {S*TAUW:.6e}")
@@ -266,7 +266,7 @@ def main():
             s.set_dt(dt)
         t += dt
         s.step()
-        maxit = max(maxit, s.last_pressure_iterations())
+        maxit = max(maxit, s.diagnostics.last_pressure_iterations())
         maxdiv = max(maxdiv, s.max_open_divergence())
         if i >= NSTEP // 2:                   # average over the second half of the window
             accU += s.get_u().mean(axis=(0, 2))
@@ -276,9 +276,9 @@ def main():
         if i % 100 == 0:
             um = s.get_u().mean() / S
             print(f"    step {i:6d}  t u_tau/h = {t*UTAU:7.4f}  dt = {dt:.3e}  U_b = {um:.4f}  "
-                  f"press {s.last_pressure_iterations():3d}/800  ({time.time()-wall0:.0f} s)")
+                  f"press {s.diagnostics.last_pressure_iterations():3d}/800  ({time.time()-wall0:.0f} s)")
             if not SINGLE:
-                st = s.vof_block_stats()
+                st = s.diagnostics.vof_block_stats()
                 v = [b["volume"] for b in st]
                 print(f"           markers {len(st)}: V min {min(v):.2f} max {max(v):.2f} "
                       f"(seed {4/3*math.pi*Rc**3:.2f}), total area "

@@ -96,8 +96,8 @@ def build(n, Cglob, ratio=100.0):
     s.set_property_model("mu", "linear", "C", [0.05, 0.05 / ratio - 0.05])
     s.set_surface_tension(1.0)
     s.set_property_model("force_z", "linear", "C", [-1e-4 * rho_l, -1e-4 * (rho_g - rho_l)])
-    s.set_vof_curvature_worklist(os.environ.get("V9_CURV_WL", "1") == "1")
-    s.set_vof_worklist(os.environ.get("V9_ADV_WL", "1") == "1")
+    s.diagnostics.set_vof_curvature_worklist(os.environ.get("V9_CURV_WL", "1") == "1")
+    s.diagnostics.set_vof_worklist(os.environ.get("V9_ADV_WL", "1") == "1")
     s.set_dt(0.4 * s.capillary_dt())
     return s, o, sz
 
@@ -173,7 +173,7 @@ def main():
     if rank == 0:
         print(f"\n  weights: 1 + {a.w} * [mixed];  {int(Wglob.sum())} interfacial cells of "
               f"{n**3} ({100*Wglob.sum()/n**3:.2f} %)")
-    s.rebalance_by_weights(list(w))
+    s.diagnostics.rebalance_by_weights(list(w))
     t_after = report(f"interface-weighted ORB (W = {a.w})")
     if rank == 0:
         b, af = t_before["ms_per_step"], t_after["ms_per_step"]

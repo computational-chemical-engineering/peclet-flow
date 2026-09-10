@@ -69,13 +69,13 @@ def march(N):
     s = flow.SolverColocated(N, N, N)
     s.set_rho(1.0); s.set_mu(0.1); s.set_dt(DT)
     s.set_body_force(1e-3, 0, 0); s.set_advection(False)
-    s.set_velocity_solver_params(150)
+    s.diagnostics.set_velocity_solver_params(150)
     s.set_pressure_multigrid(True, max(2, int(np.log2(N)) - 2))
     s.set_pressure_pcg(True, 300, 1e-8)
     if hasattr(s, "set_collocated_scheme"):
         s.set_collocated_scheme("gauge-exact")
     else:
-        s.set_face_interp(9)
+        s.diagnostics.set_face_interp(9)
     s.set_solid(sdf, cutcell_pressure=True)
     prev = 0.0
     for it in range(MAXS):

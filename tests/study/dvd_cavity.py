@@ -23,7 +23,7 @@ def cavity(N, Ra, Pr=0.71, mu=0.05, dt=8.0, steps=3000, tol=1e-5, verbose=False)
     nz = 4
     s = F.Solver(N, N, nz)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt)
-    s.set_implicit_advection(True); s.set_outer_iterations(2)
+    s.set_implicit_advection(True); s.diagnostics.set_outer_iterations(2)
     for f in (0, 1, 2, 3):
         s.set_domain_bc(f, 1, 0.0, 0.0, 0.0)              # no-slip walls (z periodic)
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, nz), 10.0)))

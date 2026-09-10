@@ -65,7 +65,7 @@ def poiseuille(nz, z0, z1, lam, steps=4000, verbose=True):
     s.set_body_force(G, 0.0, 0.0)
     s.set_pressure_multigrid(True, levels=3)
     s.set_pressure_solver_params(400)
-    s.set_velocity_solver_params(400)
+    s.diagnostics.set_velocity_solver_params(400)
     s.set_solid(slab_sdf(nz, z0, z1), cutcell_pressure=True)
     if lam > 0:
         s.set_wall_slip_length(lam)
@@ -83,7 +83,7 @@ def poiseuille(nz, z0, z1, lam, steps=4000, verbose=True):
               f"max|u - u_exact| {err:.4e}  rel {err/scale:.4e}   u_slip(exact) {us:.6e}   "
               f"u_centre {u[fluid][len(u[fluid])//2]:.8e}")
     return dict(lam=lam, err=err, rel=err / scale, u=u.copy(), ue=ue, fluid=fluid,
-                iters=s.last_pressure_iterations(), sandwich=s.wall_slip_sandwich_cells(),
+                iters=s.diagnostics.last_pressure_iterations(), sandwich=s.diagnostics.wall_slip_sandwich_cells(),
                 div=s.max_open_divergence_projected(), u_slip=us, steps=n)
 
 
@@ -110,7 +110,7 @@ def couette(nz, z0, lam, U=1.0, steps=200):
     s.set_domain_bc(4, 1, 0.0, 0.0, 0.0)          # -z: wall, buried in the solid
     s.set_domain_bc(5, 2, U, 0.0, 0.0)            # +z: the moving lid
     s.set_pressure_pcg(True, 400, 1e-12)
-    s.set_velocity_solver_params(400)
+    s.diagnostics.set_velocity_solver_params(400)
     z = (np.arange(nz) + 0.5)[None, None, :]
     d = np.broadcast_to(z - z0, (NX, NY, nz)).astype(float).copy()
     s.set_solid(np.asfortranarray(d), cutcell_pressure=True)
@@ -125,7 +125,7 @@ def couette(nz, z0, lam, U=1.0, steps=200):
     print(f"  lambda {lam:<10.4g} H {H:g}  steps {n:5d} (dU {dd:.2e})  "
           f"max|u - u_exact| {err:.4e}  rel {err/U:.4e}   "
           f"u(wall,exact) {U*lam/(H+lam):.6e}  u(first fluid cell) {u[fluid][0]:.8e} "
-          f"vs exact {ue[fluid][0]:.8e}   press {s.last_pressure_iterations()}")
+          f"vs exact {ue[fluid][0]:.8e}   press {s.diagnostics.last_pressure_iterations()}")
     return dict(lam=lam, err=err, rel=err / U)
 
 
