@@ -222,8 +222,8 @@ def case_hysing1(nx=64, momentum=True, worklist=True):
     s = flow.Solver(nx, ny, nz)
     s.set_rho(p["rho1"])
     s.set_mu(sc.mu(p["mu1"]))
-    s.set_domain_bc(4, 1, 0, 0, 0)
-    s.set_domain_bc(5, 1, 0, 0, 0)
+    s.set_domain_bc("-z", "wall", 0, 0, 0)
+    s.set_domain_bc("+z", "wall", 0, 0, 0)
     s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
     s.set_pressure_chebyshev(True, 600, 1e-12)
     s.enable_vof()
@@ -260,8 +260,8 @@ def case_packed(nx=64, nz=160, worklist=True):
     s = flow.Solver(nx, nx, nz)
     s.set_rho(rho_l)
     s.set_mu(mu_l)
-    s.set_domain_bc(4, 1, 0, 0, 0)
-    s.set_domain_bc(5, 1, 0, 0, 0)
+    s.set_domain_bc("-z", "wall", 0, 0, 0)
+    s.set_domain_bc("+z", "wall", 0, 0, 0)
     s.set_solid(np.asfortranarray(SDF), cutcell_pressure=True)
     s.enable_vof()
     s.diagnostics.set_vof_worklist(worklist)
@@ -296,15 +296,15 @@ def case_trickle(nx=48, nz=96, worklist=True):
     s = flow.Solver(nx, nx, nz)
     s.set_rho(RHO_L)
     s.set_mu(MU_L)
-    for f in range(4):
-        s.set_domain_bc(f, 0, 0, 0, 0)
-    s.set_domain_bc(4, 3, 0, 0, 0)
+    for f in ("-x", "+x", "-y", "+y"):
+        s.set_domain_bc(f, "periodic", 0, 0, 0)
+    s.set_domain_bc("-z", "outflow", 0, 0, 0)
     xc = (np.arange(nx) + 0.5)[:, None]
     yc = (np.arange(nx) + 0.5)[None, :]
     disc = ((xc - nx / 2) ** 2 + (yc - nx / 2) ** 2) < rd ** 2
     prof = np.zeros((nx, nx, 3))
     prof[:, :, 2] = np.where(disc, -umax, 0.0)
-    s.set_domain_bc_profile(5, np.ascontiguousarray(prof))
+    s.set_domain_bc_profile("+z", np.ascontiguousarray(prof))
     s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_multigrid(True, levels=6)
     s.set_pressure_solver_params(80)
@@ -319,8 +319,8 @@ def case_trickle(nx=48, nz=96, worklist=True):
     s.set_property_model("force_z", "linear", "C", [0.0, -drho * g])
     s.enable_vof_momentum(rho_g, RHO_L)
     s.set_pressure_fcg(True, 400, 1e-11)
-    s.set_vof_inflow_profile(5, np.ascontiguousarray(disc.astype(float)))
-    s.set_vof_backflow(4, 0.0)
+    s.set_vof_inflow_profile("+z", np.ascontiguousarray(disc.astype(float)))
+    s.set_vof_backflow("-z", 0.0)
     dt_cap = 0.5 * s.capillary_dt()
     s.set_dt(dt_cap)
 
@@ -377,8 +377,8 @@ def case_scriven(n=96, ja=0.5, ratio=10.0, r0=6.0, worklist=True):
     s = flow.Solver(n, n, n)
     s.set_rho(rho_l)
     s.set_mu(1e-3)
-    for f in range(6):
-        s.set_domain_bc(f, 3)
+    for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
+        s.set_domain_bc(f, "outflow")
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
     s.enable_vof()
     s.diagnostics.set_vof_worklist(worklist)
@@ -386,15 +386,15 @@ def case_scriven(n=96, ja=0.5, ratio=10.0, r0=6.0, worklist=True):
     s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
     s.set_pressure_fcg(True, 600, 1e-10)
     s.add_scalar("T", k_l / (rho_l * cpl), 1, 200)
-    for f in range(6):
-        s.set_scalar_bc("T", f, 2, dT)
+    for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
+        s.set_scalar_bc("T", f, "dirichlet", dT)
     s.set_field("T", np.asfortranarray(cached(
         f"scriven_T_{n}_{r0}_{ja}",
         lambda: vs.initial_temperature(n, ctr, r0, beta, rr, dT, mode="similarity"))))
     s.enable_phase_change(rho_v, rho_l, h_lv)
-    s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
+    s.set_phase_change_thermal(True, "T", 0.0, k_v, k_l, 0.0)
     s.diagnostics.set_phase_change_plane_dirichlet(True)
-    s.set_phase_change_energy(rho_v * cpl, rho_l * cpl)
+    s.set_phase_change_energy(True, rho_v * cpl, rho_l * cpl)
     s.diagnostics.set_phase_change_quadratic_fit(True)
     Rd = beta * math.sqrt(alpha_l / t0)
     dt = 0.4 * 0.2 / max(Rd * (1.0 - rr), 1e-30)

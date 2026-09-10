@@ -88,7 +88,7 @@ def make_solver(kind, N, s):
         if hasattr(sol, "set_collocated_scheme"):
             sol.set_collocated_scheme(kind)
         else:
-            sol.diagnostics.set_face_interp({"gauge-exact": 9, "plain": 0}[kind])
+            sol.set_collocated_scheme(kind)
     sol.set_solid(sdf, cutcell_pressure=True)
     return sol, sdf, ny, w_lo, w_hi
 

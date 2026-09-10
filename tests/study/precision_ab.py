@@ -104,8 +104,8 @@ def case_hydro(ratios=(1e1, 1e2, 1e3, 1e4, 1e5, 1e6), N=8, NZ=24, g=0.1, steps=1
         s.set_rho(1.0)
         s.set_mu(0.0)          # inviscid: the balance is exact
         s.set_dt(1.0)
-        s.set_domain_bc(4, 1, 0, 0, 0)
-        s.set_domain_bc(5, 1, 0, 0, 0)
+        s.set_domain_bc("-z", "wall", 0, 0, 0)
+        s.set_domain_bc("+z", "wall", 0, 0, 0)
         s.set_pressure_geometry(np.asfortranarray(np.full((N, N, NZ), 10.0)))
         rho = np.empty((N, N, NZ), order="F")
         zs = np.arange(NZ)

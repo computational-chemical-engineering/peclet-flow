@@ -41,8 +41,8 @@ def bfs(S, Re, dt, mode, Lr=12, U_in=1.0, nz=4, max_steps=6000, tol=2e-5, vcyc=4
     s.set_rho(1.0); s.set_mu(nu); s.set_dt(dt); s.set_advection(True)
     if mode == "vmg_fou":
         s.set_implicit_advection(True); s.diagnostics.set_outer_iterations(outer)
-    s.set_domain_bc_profile(0, inlet_profile(H, S, nz, U_in))
-    s.set_domain_bc(1, 3); s.set_domain_bc(2, 1); s.set_domain_bc(3, 1)
+    s.set_domain_bc_profile("-x", inlet_profile(H, S, nz, U_in))
+    s.set_domain_bc("+x", "outflow"); s.set_domain_bc("-y", "wall"); s.set_domain_bc("+y", "wall")
     s.diagnostics.set_velocity_solver_params(vel_iter)
     if mode in ("vmg", "vmg_fou"):
         s.set_velocity_multigrid(True, 8, vcyc)

@@ -181,8 +181,8 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     s.set_rho(RHO_L)
     s.set_mu(MU_L)
     s.set_dt(0.05)
-    s.set_domain_bc(0, 2, U, 0.0, 0.0)
-    s.set_domain_bc(1, 3, 0.0, 0.0, 0.0)
+    s.set_domain_bc("-x", "inflow", U, 0.0, 0.0)
+    s.set_domain_bc("+x", "outflow", 0.0, 0.0, 0.0)
     s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)
     s.set_pressure_multigrid(True, levels=MG_LEVELS)
     s.set_pressure_solver_params(80)
@@ -198,8 +198,8 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     s.set_capillary_cfl(CAP_CFL)
     s.set_contact_angle(theta_deg)
     s.set_pressure_fcg(True, PRESS_CAP, PRESS_RTOL)     # driver LAST
-    s.set_vof_inflow(0, 1.0)
-    s.set_vof_backflow(1, 0.0)
+    s.set_vof_inflow("-x", 1.0)
+    s.set_vof_backflow("+x", 0.0)
 
     eps = np.asarray(s.diagnostics.vof_geometry(0))
     arr = slice(int(X_IN), int(X_BT))

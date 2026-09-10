@@ -76,8 +76,8 @@ def child(args):
         s.set_pressure_multigrid(True, args.levels)
         s.set_pressure_pcg(True, 200, 1e-6)
         if args.walls:
-            s.set_domain_bc(2, 1)
-            s.set_domain_bc(3, 1)
+            s.set_domain_bc("-y", "wall")
+            s.set_domain_bc("+y", "wall")
         s.set_pressure_geometry(np.asfortranarray(np.full((lnx, lny, lnz), 1e30)))
 
     if w.rank == 0:

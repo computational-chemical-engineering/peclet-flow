@@ -3,6 +3,17 @@ sys.path.insert(0, os.path.abspath("build_cuda2"))
 import numpy as np
 from peclet import flow
 
+
+def _collocated_mode(s, mode):
+    """Select a collocated scheme by the integer face-interp mode this script was written with:
+    0/7/9 are the public strings ('plain' / 'embed' / 'gauge-exact'), 5/6 the diagnostics rungs,
+    and every other number was deleted at 1.0.0 (the call then raises)."""
+    names = {0: "plain", 7: "embed", 9: "gauge-exact"}
+    if mode in names:
+        s.set_collocated_scheme(names[mode])
+    else:
+        s.diagnostics.set_face_interp(mode)
+
 def lattice_sdf(N, phi=0.125):
     R=(3*phi/(4*np.pi))**(1/3)*N
     g=np.arange(N)+0.5; X,Y,Z=np.meshgrid(g,g,g,indexing="ij")
@@ -16,7 +27,7 @@ def drag(N, mode, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=400
     s=flow.SolverColocated(N,N,N)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_body_force(F,0,0); s.set_advection(False)
     s.diagnostics.set_velocity_solver_params(200); s.set_pressure_multigrid(True,levels=lv)
-    s.set_pressure_pcg(True,400,1e-10); s.diagnostics.set_face_interp(mode)
+    s.set_pressure_pcg(True,400,1e-10); _collocated_mode(s, mode)
     s.set_solid(sdf,cutcell_pressure=True)
     prev,warm,um,t0=0.0,None,[],time.time()
     for it in range(max_steps):

@@ -45,9 +45,9 @@ def run(Re, S=16, Lr=12, U_in=1.0, nz=4, dt=0.4, max_steps=8000):
     nu = U_in * S / Re
     s = sdflow.SolverColocated(L, H, nz)
     s.set_rho(1.0); s.set_mu(nu); s.set_dt(dt); s.set_advection(True)
-    s.set_domain_bc_profile(0, inlet_profile(H, S, nz, U_in))  # -x partial parabolic inlet (-> inflow)
-    s.set_domain_bc(1, 3)                                      # +x outflow
-    s.set_domain_bc(2, 1); s.set_domain_bc(3, 1)              # -y, +y no-slip walls
+    s.set_domain_bc_profile("-x", inlet_profile(H, S, nz, U_in))  # -x partial parabolic inlet (-> inflow)
+    s.set_domain_bc("+x", "outflow")                                      # +x outflow
+    s.set_domain_bc("-y", "wall"); s.set_domain_bc("+y", "wall")              # -y, +y no-slip walls
     s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_pcg(True, 400, 1e-9)
     s.set_pressure_geometry(np.asfortranarray(np.full((L, H, nz), 1e30)))

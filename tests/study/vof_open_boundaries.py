@@ -99,10 +99,10 @@ def gate_budget():
     s.set_rho(1.0)
     s.set_mu(0.5)
     s.set_dt(dt)
-    for f in range(4):
-        s.set_domain_bc(f, 1, 0, 0, 0)
-    s.set_domain_bc(4, 2, 0.0, 0.0, W)
-    s.set_domain_bc(5, 3, 0, 0, 0)
+    for f in ("-x", "+x", "-y", "+y"):
+        s.set_domain_bc(f, "wall", 0, 0, 0)
+    s.set_domain_bc("-z", "inflow", 0.0, 0.0, W)
+    s.set_domain_bc("+z", "outflow", 0, 0, 0)
     # the open-boundary duct settings the validated channel case uses
     # (scripts/verify_channel_sdflow.py): a deep semi-coarsening hierarchy, enough momentum
     # sweeps, and the all-fluid SDF far from every cell. With the defaults this configuration
@@ -114,15 +114,15 @@ def gate_budget():
     s.set_pressure_chebyshev(True, 400, 1e-12)
     s.enable_vof()
     s.set_vof(np.zeros((nx, ny, nz), order="F"))
-    s.set_vof_inflow(4, 1.0)
-    s.set_vof_backflow(5, 0.0)
+    s.set_vof_inflow("-z", 1.0)
+    s.set_vof_backflow("+z", 0.0)
     h = Solve(400)
     ledger, budget0, drift = 0.0, None, 0.0
     cmin, cmax = 1.0, 0.0
     t0 = time.time()
     for i in range(nslug + nafter):
         if i == nslug:
-            s.set_vof_inflow(4, 0.0)
+            s.set_vof_inflow("-z", 0.0)
         s.step()
         h.sample(s)
         d = s.diagnostics.vof_diagnostics()
@@ -180,15 +180,15 @@ def gate_nusselt(ratio=100, steps=None, outflow_rho=True):
     s.set_rho(p["rho_l"])
     s.set_mu(p["mu_l"])
     s.set_dt(p["dt"])
-    s.set_domain_bc(0, 1, 0, 0, 0)
-    s.set_domain_bc(1, 1, 0, 0, 0)  # walls +-x (the film wall and the far wall)
-    s.set_domain_bc(4, 3, 0, 0, 0)  # outflow at the BOTTOM
+    s.set_domain_bc("-x", "wall", 0, 0, 0)
+    s.set_domain_bc("+x", "wall", 0, 0, 0)  # walls +-x (the film wall and the far wall)
+    s.set_domain_bc("-z", "outflow", 0, 0, 0)  # outflow at the BOTTOM
     # inlet velocity profile on face 5 (+z): axes (b, c) = (x, y)
     xc = np.arange(nx) + 0.5
     wprof = np.where(xc < delta, -(drho * p["g"] / p["mu_l"]) * (delta * xc - 0.5 * xc ** 2), 0.0)
     prof = np.zeros((nx, ny, 3))
     prof[:, :, 2] = wprof[:, None]
-    s.set_domain_bc_profile(5, np.ascontiguousarray(prof))
+    s.set_domain_bc_profile("+z", np.ascontiguousarray(prof))
     # the open-boundary duct settings the validated channel case uses
     # (scripts/verify_channel_sdflow.py): a deep semi-coarsening hierarchy, enough momentum
     # sweeps, and the all-fluid SDF far from every cell. With the defaults this configuration
@@ -215,8 +215,8 @@ def gate_nusselt(ratio=100, steps=None, outflow_rho=True):
     # film accelerates until the WY cap throws) and MG-PCG burns any cap, while FCG converges.
     s.set_pressure_fcg(True, p["cap"], 1e-11)
     # the inlet carries the same film: colour profile 1 in the film, 0 in the gas
-    s.set_vof_inflow_profile(5, np.ascontiguousarray(np.repeat(frac[:, None], ny, axis=1)))
-    s.set_vof_backflow(4, 0.0)
+    s.set_vof_inflow_profile("+z", np.ascontiguousarray(np.repeat(frac[:, None], ny, axis=1)))
+    s.set_vof_backflow("-z", 0.0)
     # seed the interior with the analytical velocity so the transient is short
     w0 = np.zeros((nx, ny, nz), order="F")
     w0[:, :, :] = wprof[:, None, None]
@@ -286,15 +286,15 @@ def gate_pool():
     s.set_rho(rho_l)
     s.set_mu(mu_l)
     s.set_dt(0.2)
-    s.set_domain_bc(4, 1, 0, 0, 0)
-    s.set_domain_bc(5, 1, 0, 0, 0)  # walls +-z (the pool floor and the lid)
-    s.set_domain_bc(1, 3, 0, 0, 0)  # outflow at +x
+    s.set_domain_bc("-z", "wall", 0, 0, 0)
+    s.set_domain_bc("+z", "wall", 0, 0, 0)  # walls +-z (the pool floor and the lid)
+    s.set_domain_bc("+x", "outflow", 0, 0, 0)  # outflow at +x
     # inflow at -x: gas only above the pool. Face 0 -> (b, c) = (y, z).
     zc = np.arange(nz) + 0.5
     gas = zc >= nz / 2
     prof = np.zeros((ny, nz, 3))
     prof[:, :, 0] = np.where(gas, U, 0.0)[None, :]
-    s.set_domain_bc_profile(0, np.ascontiguousarray(prof))
+    s.set_domain_bc_profile("-x", np.ascontiguousarray(prof))
     # the open-boundary duct settings the validated channel case uses
     # (scripts/verify_channel_sdflow.py): a deep semi-coarsening hierarchy, enough momentum
     # sweeps, and the all-fluid SDF far from every cell. With the defaults this configuration
@@ -313,8 +313,8 @@ def gate_pool():
     s.set_pressure_fcg(True, 800, 1e-11)  # driver LAST — see gate_nusselt
     # the inlet colour is the pool's own: liquid below, gas above
     cprof = np.where(gas, 0.0, 1.0)
-    s.set_vof_inflow_profile(0, np.ascontiguousarray(np.repeat(cprof[None, :], ny, axis=0)))
-    s.set_vof_backflow(1, 0.0)
+    s.set_vof_inflow_profile("-x", np.ascontiguousarray(np.repeat(cprof[None, :], ny, axis=0)))
+    s.set_vof_backflow("+x", 0.0)
 
     h = Solve(800)
     v0 = s.diagnostics.vof_diagnostics()["sum"]

@@ -25,8 +25,8 @@ def couette(harmonic, rot=None, chi=1.0, dt=20.0, N=32, steps=4000, tol=1e-9):
     mu1, mu2, U = 1.0, 0.1, 1.0
     s = F.Solver(N, N, nz)
     s.set_rho(1.0); s.set_mu(mu1); s.set_dt(dt)
-    s.set_domain_bc(2, 1, 0.0, 0.0, 0.0)          # -y fixed wall
-    s.set_domain_bc(3, 2, U, 0.0, 0.0)            # +y moving wall
+    s.set_domain_bc("-y", "wall", 0.0, 0.0, 0.0)          # -y fixed wall
+    s.set_domain_bc("+y", "inflow", U, 0.0, 0.0)            # +y moving wall
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, nz), 10.0)))
     y = np.arange(N)
     muy = np.where(y < N // 2, mu1, mu2).astype(np.float64)

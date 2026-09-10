@@ -41,7 +41,7 @@ def run(kind, N):
         if hasattr(s, "set_collocated_scheme"):
             s.set_collocated_scheme("gauge-exact")
         else:
-            s.diagnostics.set_face_interp(9)
+            s.set_collocated_scheme("gauge-exact")
     s.set_solid(np.full((N, N, NZ), 1e3, order="F"), cutcell_pressure=True)
     # initial condition sampled at each solver's own u/v locations
     cc = np.arange(N) + 0.5

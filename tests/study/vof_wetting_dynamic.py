@@ -368,7 +368,7 @@ def g2_spread(theta_e=30.0, slip=0.1, steps=1500, probe=50, nx=64, nz=40, R=12.0
     s.set_vof(c0)
     s.set_surface_tension(sigma)
     if dynamic:
-        s.set_contact_angle_dynamic(theta_e, slip, mu, sigma)
+        s.set_contact_angle_dynamic(True, theta_e, slip, mu, sigma)
     else:
         s.set_contact_angle(theta_e)
     if wall_slip:                    # WO-V6b: the SAME lambda in the momentum wall closure
@@ -477,7 +477,7 @@ def g3_rise(theta_e=30.0, slips=(0.05, 0.3), steps=1500, nx=96, ny=4, nz=112, w=
         if sl is None:
             s.set_contact_angle(theta_e)
         else:
-            s.set_contact_angle_dynamic(theta_e, sl, mu, sigma)
+            s.set_contact_angle_dynamic(True, theta_e, sl, mu, sigma)
         if wall_slip and sl is not None:      # WO-V6b: the SAME lambda in the momentum closure
             s.set_wall_slip_length(sl)
         eps = s.diagnostics.vof_geometry(0)
@@ -550,7 +550,7 @@ def g4_incline(theta_a=70.0, theta_r=50.0, bo_fracs=(0.5, 0.7, 1.5, 2.5), steps=
         s.set_vof(c0)
         s.set_surface_tension(sigma)
         s.set_contact_angle(0.5 * (theta_a + theta_r))
-        s.set_contact_angle_dynamic(0.5 * (theta_a + theta_r), slip, mu, sigma)
+        s.set_contact_angle_dynamic(True, 0.5 * (theta_a + theta_r), slip, mu, sigma)
         s.set_contact_angle_hysteresis(theta_a, theta_r)
         # ZERO-MEAN tangential force: `g_t (C - Cbar)`. A non-zero-mean body force in a fully
         # periodic box accelerates the whole fluid without bound (WO-Q finding 9), and the

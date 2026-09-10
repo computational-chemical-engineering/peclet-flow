@@ -101,6 +101,36 @@ static std::vector<double> grid_in(nb::ndarray<double, nb::f_contig> a) {
   return peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(a));
 }
 
+// String enums of the public API (suite/docs/NAMING.md; QUALITY_PLAN F): every integer mode code
+// became a name, and a name outside the accepted set raises listing that set.
+static int enum_index(const std::string& v, const std::vector<std::string>& names, const char* who,
+                      const char* what) {
+  for (std::size_t i = 0; i < names.size(); ++i)
+    if (v == names[i])
+      return static_cast<int>(i);
+  std::string all;
+  for (std::size_t i = 0; i < names.size(); ++i)
+    all += (i ? " | '" : "'") + names[i] + "'";
+  throw std::invalid_argument(std::string(who) + ": " + what + " must be one of " + all +
+                              ", got '" + v + "'");
+}
+static const std::vector<std::string> kFaces{"-x", "+x", "-y", "+y", "-z", "+z"};
+static int face_index(const std::string& f, const char* who) {
+  return enum_index(f, kFaces, who, "face");
+}
+static const std::vector<std::string> kBcTypes{"periodic", "wall", "inflow", "outflow", "slip"};
+static const std::vector<std::string> kScalarBcTypes{"periodic", "neumann", "dirichlet"};
+static const std::vector<std::string> kAdvSchemes{"sou", "koren"};
+static const std::vector<std::string> kScalarSchemes{"fou", "koren", "sou"};
+static const std::vector<std::string> kFluidOnly{"off", "filter", "star"};
+static const std::vector<std::string> kCsfModes{"face", "cell"};
+static const std::vector<std::string> kPivots{"volume", "centroid", "projected-centroid",
+                                             "contact-line"};
+static const std::vector<std::string> kAreaModes{
+    "plic",          "cascade-metric",      "cascade-normal",     "cascade-footprint",
+    "sheet-color-centroid", "sheet-color-split", "sheet-plic-centroid", "sheet-plic-split"};
+static const std::vector<std::string> kBlockAssign{"round-robin", "lpt", "orb"};
+
 // Zero-copy export of a registered field's padded device buffer as a Fortran-order 3-D array of the
 // full block shape (ex,ey,ez) = (nx+2G, ny+2G, nz+2G), x-fastest strides {1,ex,ex*ey}. Includes the
 // ghost band (the flat buffer is contiguous; a ghost-stripped view would not be). The shared bridge
@@ -150,12 +180,25 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       "a simulation. It holds a reference to the solver and no state of its own; the setters "
       "that CHANGE RESULTS say so in their docstring.")
       .def(
-          "set_face_interp", [](D& diag, int mode) { diag.s->setFaceInterp(mode); },
+          "set_face_interp",
+          [](D& diag, int mode) {
+            if (mode != 5 && mode != 6)
+              throw std::invalid_argument(
+                  "diagnostics.set_face_interp: mode must be 5 or 6 (the two intermediate rungs "
+                  "of the embed port); the complete schemes are Solver.set_collocated_scheme("
+                  "'plain' | 'gauge-exact' | 'embed' | 'ghost')");
+            diag.s->setFaceInterp(mode);
+          },
           nb::arg("mode"),
-          "DEPRECATED integer form of set_collocated_scheme (0 = plain, 9 = gauge-exact, the "
-          "default). Modes 1/2/5/6/7/10 were RETIRED 2026-08-18 (ablations; 10 measured divergent) "
-          "and now raise. Modes 3/4 survive as FV-constraint ablations (4 pairs with "
-          "set_fv_relax). No effect on the staggered solver.")
+          "The two INTERMEDIATE rungs of the Basilisk embed.h port on the collocated grid "
+          "(doc/history/collocated_embed_port_plan.md), reachable for the ladder that measures "
+          "what each piece of the complete port ('embed' = mode 7) is worth: 5 = the FV momentum "
+          "operator with the true-normal dirichlet_gradient wall drag as a defect correction, on "
+          "the wall-aware face map with the transpose-gradient pressure force; 6 = plus the "
+          "openness-weighted -grad(P) predictor and cell correction, on the plain face map "
+          "(7 adds the wall-aware face map and the solid-cut-cell sliver mask). CHANGES RESULTS; "
+          "no effect on the staggered solver. Modes 1-4 and 10-13 (ablations) were deleted with "
+          "their kernels at 1.0.0.")
       .def("set_incremental_pressure", [](D& diag, bool on) { return diag.s->setIncrementalPressure(on); }, nb::arg("on"),
            "Toggle the rotational incremental-pressure projection.")
       .def("set_pressure_warmstart", [](D& diag, bool on) { return diag.s->setPressureWarmstart(on); }, nb::arg("on"),
@@ -164,8 +207,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "set_rotational_pressure", [](D& diag, bool on) { return diag.s->setRotationalPressure(on); }, nb::arg("on"),
           "PM I ablation (Guy-Fogelson 2005): False drops the rotational -mu*div(u*) term from "
           "the incremental pressure accumulation (constant-mu path only). Default True = shipped "
-          "rotational (Timmermans) update. Also: set_collocated_scheme accepts \"gauge-2a\" -- "
-          "the experimental gradient-2a one-sided branch of the gauge-exact gradient.")
+          "rotational (Timmermans) update.")
       .def(
           "set_rotational_filter", [](D& diag, bool on, double eps) { return diag.s->setRotationalFilter(on, eps); }, nb::arg("on"), nb::arg("eps") = 0.05,
           "Experimental filtered rotational update: smooth div(u*) (mask-aware axis-wise 1-2-1, "
@@ -187,7 +229,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "marching-squares (5 samples/face, O(h^2); removes the convexity bias measured at "
            "+0.59/+0.27% bed permeability at R=8/12 -- see doc/collocated_paper_plan.md row 51). "
            "For analytic geometry, exact apertures via set_openness_override are better still. "
-           "Call before set_solid.")
+           "Call before set_solid (a later call raises).")
       .def("set_advection_wall_velocity", [](D& diag, bool on) { return diag.s->setAdvectionWallVelocity(on); }, nb::arg("on"),
            "A0: fill the advection inputs' masked (solid) rows with the instantaneous WALL "
            "velocity instead of zeros, so a MOVING body's advective term sees the body's own "
@@ -258,10 +300,16 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "setting. Inert on periodic / IBM problems, where the two are the same.")
       .def_prop_ro("pressure_coarse_ghost", [](D& diag) { return diag.s->pressureCoarseGhost(); },
                    "Whether the Neumann coarse ghost is in force (see set_pressure_coarse_ghost).")
-      .def("set_fluid_only_constraint", [](D& diag, int mode) { return diag.s->setFluidOnlyConstraint(mode); }, nb::arg("mode"),
-           "Fluid-only pressure constraint (route 2b, call before set_solid; collocated "
-           "experiment). 1 = Design A (openness filter), 2 = Design B (SPD Kron star "
-           "elimination), 0 = off.")
+      .def(
+          "set_fluid_only_constraint",
+          [](D& diag, const std::string& mode) {
+            diag.s->setFluidOnlyConstraint(
+                enum_index(mode, kFluidOnly, "set_fluid_only_constraint", "mode"));
+          },
+          nb::arg("mode"),
+          "Fluid-only pressure constraint (route 2b, a collocated mechanism instrument; call before "
+          "set_solid): 'filter' = Design A (openness filter), 'star' = Design B (SPD Kron star "
+          "elimination), 'off'. Any setting other than 'off' disables the AUTO scheme.")
       .def("set_outer_iterations", [](D& diag, int iters) { return diag.s->setOuterIterations(iters); }, nb::arg("n"),
            "Set the number of Picard/outer iterations per step.")
       .def("set_outer_tolerance", [](D& diag, double tol) { return diag.s->setOuterTolerance(tol); }, nb::arg("tol"),
@@ -598,14 +646,19 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "actually execute: eps = 1, openness = 1, classification = 0. It used to raise, which "
           "meant one diagnostic could not serve a packed scene and its all-fluid control.")
       .def(
-          "set_contact_angle_pivot", [](D& diag, int m) { diag.s->setContactAnglePivot(m); }, nb::arg("mode"),
-          "ABLATION — how the theta-plane is anchored in the fluid cell. 0 (DEFAULT) match the "
-          "anchor cell's liquid volume with plicAlpha; 1 pass through the PLIC centroid p_f (the "
-          "Afkhami-Bussmann / Basilisk contact.h rule); 2 the work order's c = p_f - sdf(p_f) n_w; "
-          "3 the contact line on the wall. Modes 0/1/3 are exactly idempotent (1e-15 on gate G0a); "
-          "mode 2 is NOT — projecting the centroid along n_w shifts the plane by -sdf(p_f) "
-          "cos(theta), measured 0.26 in cell fraction at theta = 60, with the wrong sign (it "
-          "removes liquid from the band for a wetting angle).")
+          "set_contact_angle_pivot",
+          [](D& diag, const std::string& mode) {
+            diag.s->setContactAnglePivot(enum_index(mode, kPivots, "set_contact_angle_pivot", "mode"));
+          },
+          nb::arg("mode"),
+          "ABLATION -- how the theta-plane is anchored in the fluid cell. 'volume' (DEFAULT) match "
+          "the anchor cell's liquid volume with plicAlpha; 'centroid' pass through the PLIC "
+          "centroid p_f (the Afkhami-Bussmann / Basilisk contact.h rule); 'projected-centroid' the "
+          "work order's c = p_f - sdf(p_f) n_w; 'contact-line' the contact line on the wall. "
+          "'volume', 'centroid' and 'contact-line' are exactly idempotent (1e-15 on gate G0a); "
+          "'projected-centroid' is NOT -- projecting the centroid along n_w shifts the plane by "
+          "-sdf(p_f) cos(theta), measured 0.26 in cell fraction at theta = 60, with the wrong sign "
+          "(it removes liquid from the band for a wetting angle).")
       .def(
           "contact_angle_diagnostics",
           [](D& diag) {
@@ -1014,37 +1067,41 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "the P1 Stefan interface position from +0.195 % to +0.003 % at N = 256, and the mdot "
           "kernel itself from order 1.1 to order 2.0. set(False) is the ablation.")
       .def(
-          "set_phase_change_area", [](D& diag, int mode) { diag.s->setPhaseChangeArea(mode); },
+          "set_phase_change_area",
+          [](D& diag, const std::string& mode) {
+            diag.s->setPhaseChangeArea(enum_index(mode, kAreaModes, "set_phase_change_area", "mode"));
+          },
           nb::arg("mode"),
           "WO-P3c: WHICH GEOMETRY the interfacial area A_Gamma comes from. A_Gamma sets the plane "
           "shift dV = mdot A dt / rho_l and the divergence source S = mdot A (1/rho_g - 1/rho_l), "
           "so a bubble grows as int mdot dA and a biased area is a biased growth rate.\n"
-          "  0 = PLIC (DEFAULT, rungs P0/P1): plicArea = |m|_2 dV/dalpha on the MYC normal.\n"
-          "  1 = cascade metric: the V3 curvature cascade's own geometry — the height function's "
+          "  'plic' (DEFAULT, rungs P0/P1): plicArea = |m|_2 dV/dalpha on the MYC normal.\n"
+          "  'cascade-metric': the V3 curvature cascade's own geometry -- the height function's "
           "area element sqrt(1 + h_x^2 + h_y^2) from the SAME central differences the curvature "
-          "differentiates once more (tiers 1/2), the PV paraboloid's gradient (tier 3) — applied "
+          "differentiates once more (tiers 1/2), the PV paraboloid's gradient (tier 3) -- applied "
           "to the PLIC polygon's projected footprint, so the cells of a column still tile.\n"
-          "  2 = cascade normal: the same normals, but the plane is rebuilt on them, "
+          "  'cascade-normal': the same normals, but the plane is rebuilt on them, "
           "plicArea(n*, plicAlpha(n*, C)).\n"
-          "  3 = cascade footprint: the height function's OWN footprint times its own metric, the "
+          "  'cascade-footprint': the height function's OWN footprint times its own metric, the "
           "only per-cell variant whose pieces tile.\n"
-          "  4..7 = WO-P3d, the JOINED sheet: marching tetrahedra on the cell-centre lattice, one "
-          "watertight surface whose triangles are booked to cells — 4 the C = 1/2 level set with "
-          "whole triangles to the cell holding the centroid, 5 the same sheet clipped to each "
-          "cell's cube, 6 and 7 the same two deposits on the zero of the PLIC-reconstructed signed "
-          "distance (exact on a TILTED plane, where interpolating C is not, because C(d) is the SZ "
-          "piecewise cubic). Modes 4-7 are the only ones whose SUM converges on a curved "
-          "interface: WO-P3c proved with two analytic controls that every PER-CELL area is first "
-          "order in h/R because the pieces do not JOIN across cells.\n"
-          "All of 0-3 are EXACT on a plane, so every planar gate (P0a/P0b/P1/P2) is unmoved. The "
-          "default is 0 because the measurement says so: on a sphere whose colour field is "
-          "resolved (16^3 sub-sampling), summed plicArea is within 0.5 % of 4 pi R^2 and the "
-          "cascade does not improve it. WO-P3b's 5.5-9.3 % 'PLIC area deficit' was its probe's own "
-          "4^3 sub-sampling, which quantizes C to 1/64 and drops a QUARTER of the interfacial "
-          "cells (their volume is 1e-4 %, their area 6 %).")
-      .def("phase_change_area", [](D& diag) { return diag.s->phaseChangeArea(); },
-           "The set_phase_change_area mode in force (0 PLIC, 1 cascade metric, 2 cascade normal, "
-           "3 cascade footprint, 4-7 the joined marching-tetrahedra sheet).")
+          "  'sheet-color-centroid' / 'sheet-color-split' / 'sheet-plic-centroid' / "
+          "'sheet-plic-split' = WO-P3d, the JOINED sheet: marching tetrahedra on the cell-centre "
+          "lattice, one watertight surface whose triangles are booked to cells -- the C = 1/2 level "
+          "set with whole triangles to the cell holding the centroid, the same sheet clipped to "
+          "each cell's cube, and the same two deposits on the zero of the PLIC-reconstructed "
+          "signed distance (exact on a TILTED plane, where interpolating C is not, because C(d) is "
+          "the SZ piecewise cubic). The sheet modes are the only ones whose SUM converges on a "
+          "curved interface: WO-P3c proved with two analytic controls that every PER-CELL area is "
+          "first order in h/R because the pieces do not JOIN across cells.\n"
+          "All of the per-cell modes are EXACT on a plane, so every planar gate (P0a/P0b/P1/P2) is "
+          "unmoved. The default is 'plic' because the measurement says so: on a sphere whose "
+          "colour field is resolved (16^3 sub-sampling), summed plicArea is within 0.5 % of "
+          "4 pi R^2 and the cascade does not improve it. WO-P3b's 5.5-9.3 % 'PLIC area deficit' "
+          "was its probe's own 4^3 sub-sampling, which quantizes C to 1/64 and drops a QUARTER of "
+          "the interfacial cells (their volume is 1e-4 %, their area 6 %).")
+      .def(
+          "phase_change_area", [](D& diag) { return kAreaModes.at(diag.s->phaseChangeArea()); },
+          "The set_phase_change_area mode in force, as its name.")
       .def(
           "set_phase_change_energy_muscl",
           [](D& diag, bool on) { diag.s->setPhaseChangeEnergyMuscl(on); }, nb::arg("on"),
@@ -1244,14 +1301,18 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "The discrete balance the entries close over one solve is "
           "`sum rho c_p (T^{n+1} - T*)/dt = q_gfm + (domain boundary flux) + (solve residual)`.")
       .def(
-          "set_csf_mode", [](D& diag, int m) { diag.s->setCsfMode(m); }, nb::arg("mode"),
-          "ABLATION. 0 (default, the only production mode) evaluates the surface-tension force as "
-          "sigma*kappa_f*(C(i)-C(i-s))/h at the face — the projection's own gradient operator. "
-          "1 evaluates a CELL-CENTRED sigma*kappa*grad(C) and face-interpolates it with the "
-          "arithmetic mean, exactly as the per-cell body-force machinery carries a rho*g field: "
-          "consistent, convergent, and wrong for surface tension, because the result is not in the "
-          "range of the operator the projection inverts. Shipped so the difference is a measured "
-          "number (see the vof_surface_tension ctest), not an argument.")
+          "set_csf_mode",
+          [](D& diag, const std::string& mode) {
+            diag.s->setCsfMode(enum_index(mode, kCsfModes, "set_csf_mode", "mode"));
+          },
+          nb::arg("mode"),
+          "ABLATION. 'face' (default, the only production mode) evaluates the surface-tension "
+          "force as sigma*kappa_f*(C(i)-C(i-s))/h at the face -- the projection's own gradient "
+          "operator. 'cell' evaluates a CELL-CENTRED sigma*kappa*grad(C) and face-interpolates it "
+          "with the arithmetic mean, exactly as the per-cell body-force machinery carries a rho*g "
+          "field: consistent, convergent, and wrong for surface tension, because the result is not "
+          "in the range of the operator the projection inverts. Shipped so the difference is a "
+          "measured number (see the vof_surface_tension ctest), not an argument.")
       .def(
           "set_vof_interface_eps", [](D& diag, double eps) { diag.s->setVofInterfaceEps(eps); },
           nb::arg("eps"),
@@ -1558,7 +1619,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "The factors between the caller's units and the ones the solver computes in.\n\n"
           "The solver keeps computing on the UNIT LATTICE and folds the metric into constants at "
           "its API boundary, so every array reached through the RAW field registry "
-          "(field_view / get_field / set_field) is in those INTERNAL units, unlike get_u/get_p, "
+          "(diagnostics.field_view / get_field / set_field) is in those INTERNAL units, unlike get_u/get_p, "
           "which convert. `identity` is True when no extent was given, and then every factor is "
           "exactly 1.0 and internal == physical. Multiply a physical value by *_to_internal, and "
           "an internal one by force_to_physical (a total force) to come back.")
@@ -1585,32 +1646,45 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def("set_advection", &S::setAdvection, nb::arg("on"),
            "Enable/disable explicit high-order momentum advection (default scheme SOU). Off ⇒ "
            "Stokes.")
-      .def("set_advection_scheme", &S::setAdvectionScheme, nb::arg("scheme"),
-           "High-order advection scheme: 0 = second-order upwind (SOU, default), 1 = Koren TVD.")
+      .def(
+          "set_advection_scheme",
+          [](S& s, const std::string& scheme) {
+            s.setAdvectionScheme(enum_index(scheme, kAdvSchemes, "set_advection_scheme", "scheme"));
+          },
+          nb::arg("scheme"),
+          "High-order momentum advection scheme: 'sou' (second-order upwind, the default) or "
+          "'koren' (Koren TVD).")
       .def(
           "set_collocated_scheme", &S::setCollocatedScheme, nb::arg("name"),
           "Collocated cut-cell projection scheme (no effect on the staggered solver). DEFAULT "
           "since 2026-08-25: AUTO = 'ghost' where supported, falling back to 'gauge-exact' with "
           "a stderr notice on porous/variable-rho/domain-BC/Chebyshev configurations (ghost v1 "
           "limits); any explicit selection here disables AUTO.\n"
-          "  'gauge-exact' (default 2026-08-18..25; the AUTO fallback) — the aperture constraint with the "
-          "directional gauge-exact pressure gradient. Cheapest scheme measured (symmetric MG-PCG, "
-          "no fragmentation guard). CAVEATS from the 2026-08 campaign "
-          "(doc/collocated_invisible_subspace.md): possesses an attractor FAMILY of steady states "
-          "(support-inconsistent gradient/constraint pair) selected by march protocol, and a "
-          "rotational-update instability whose wall-blend stopgap "
-          "(set_rotational_wall_weight) has a resolution-dependent margin — UNSTABLE at "
-          "(R>=16 cells/radius, dt>=600); use fixed dt<=60 protocols at high resolution. "
-          "Clean-protocol bias vs the staggered reference: -2.5% (R=8) -> ~+0.2% asymptote.\n"
-          "  'ghost' — the fluid-only constraint scheme (binary-openness divergence + directional "
+          "  'ghost' -- the fluid-only constraint scheme (binary-openness divergence + directional "
           "closures + the same gauge-exact gradient). Family-free, unconditionally stable "
           "(dt 60..1e20, no stabilizer), protocol-independent (C2), both-bed clean ladder "
           "-1.4% (R=8) -> +0.22% asymptote, Z&H anchor -0.018% at N=128. Costs: nonsymmetric "
           "BiCGStab pressure solve (~2.3-2.7x), ~1.6 KB/cell overlay (single-GPU size cap), "
           "fragmentation guard. MPI-capable (np=1,2,4 ctests); at-scale np>=16 hardening in "
-          "progress. Equivalent to set_ghost_projection(True, 2, 2); the (1, 2) mixed mode "
-          "stays quarantined.\n"
-          "  'plain' — the legacy path: plain 1/2-1/2 face average + central-difference grad(P). "
+          "progress. Equivalent to diagnostics.set_ghost_projection(True, 2, 2); the (1, 2) "
+          "mixed mode stays quarantined there.\n"
+          "  'gauge-exact' (the AUTO fallback) -- the aperture constraint with the directional "
+          "gauge-exact pressure gradient. Cheapest scheme measured (symmetric MG-PCG, no "
+          "fragmentation guard). CAVEATS from the 2026-08 campaign "
+          "(doc/collocated_invisible_subspace.md): possesses an attractor FAMILY of steady states "
+          "(support-inconsistent gradient/constraint pair) selected by march protocol, and a "
+          "rotational-update instability whose wall-blend stopgap "
+          "(diagnostics.set_rotational_wall_weight) has a resolution-dependent margin -- UNSTABLE "
+          "at (R>=16 cells/radius, dt>=600); use fixed dt<=60 protocols at high resolution. "
+          "Clean-protocol bias vs the staggered reference: -2.5% (R=8) -> ~+0.2% asymptote.\n"
+          "  'embed' -- the complete Basilisk embed.h port (doc/history/"
+          "collocated_embed_port_plan.md): the finite-volume momentum operator with the "
+          "true-normal dirichlet_gradient wall drag applied as a defect correction on the IBM "
+          "matrix, the openness-weighted -grad(P) predictor and cell correction, the wall-aware "
+          "face map and the solid-cut-cell sliver mask. The live candidate for removing the "
+          "collocated accuracy ceiling; its two intermediate rungs are "
+          "diagnostics.set_face_interp(5 | 6).\n"
+          "  'plain' -- the legacy path: plain 1/2-1/2 face average + central-difference grad(P). "
           "FIRST order at curved cut cells (the cell gradient reads the decoupled p=0 of "
           "solid-centred neighbours, an O(1/h) gauge error), and on a dense bed it also fails to "
           "reach steady state within 800 steps at coarse resolution. Kept for reproducing "
@@ -1710,11 +1784,11 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            nb::arg("rtol") = 1e-8,
            "Use the MG-PCG pressure accelerator (single-GPU default) and set its iteration cap and "
            "relative tolerance. on=True GENUINELY selects: it clears both competing selections "
-           "(Chebyshev and FCG), so it works after set_density_mode / set_porous -- last set wins. "
+           "(Chebyshev and FCG), so it works after diagnostics.set_density_mode / set_porous -- last set wins. "
            "on=False RAISES: MG-PCG is the terminal fallback of the driver dispatch, so it cannot "
            "be deselected on its own -- select the driver you want instead "
            "(set_pressure_chebyshev(True, ...) or set_pressure_fcg(True, ...)). Under "
-           "set_ghost_projection the nonsymmetric operator is solved by BiCGStab; this call still "
+           "diagnostics.set_ghost_projection the nonsymmetric operator is solved by BiCGStab; this call still "
            "sets that solve's cap/tolerance (they are shared) and does not change its method.")
       .def("set_pressure_fcg", &S::setPressureFcg, nb::arg("on"), nb::arg("max_iter") = 200,
            nb::arg("rtol") = 1e-8,
@@ -1726,33 +1800,44 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "preconditioner that is not symmetric with respect to the fine operator. On a symmetric "
            "preconditioner the two betas are algebraically identical, so FCG reproduces PCG's "
            "iteration count. Unlike set_pressure_pcg this flag GENUINELY selects: on=True clears "
-           "the Chebyshev selection (so it works after set_density_mode/set_porous), on=False "
+           "the Chebyshev selection (so it works after diagnostics.set_density_mode/set_porous), on=False "
            "returns to MG-PCG, and a later set_pressure_chebyshev(True, ...) wins over it.")
       .def("set_velocity_multigrid", &S::setVelocityMultigrid, nb::arg("on"), nb::arg("levels") = 4,
            nb::arg("vcycles") = 8,
            "Enable velocity (momentum) multigrid for the implicit diffusion solve.")
-      .def("set_domain_bc", &S::setDomainBc, nb::arg("face"), nb::arg("type"), nb::arg("vx") = 0.0,
-           nb::arg("vy") = 0.0, nb::arg("vz") = 0.0,
-           "Set a per-face domain BC (face 0..5 = -x,+x,-y,+y,-z,+z; type 0 periodic / 1 no-slip "
-           "wall / 2 Dirichlet velocity (inflow, or a lid with a tangential vx,vy,vz) / 3 outflow "
-           "(zero-gradient velocity, p = 0) / 4 free-slip = symmetry plane: zero normal velocity, "
-           "zero normal derivative of the tangential components, pressure Neumann like a wall; "
-           "vx/vy/vz are ignored). Call before the geometry / first step. A half-domain closed by a "
-           "type-4 face reproduces the full symmetric domain pointwise (tests/kokkos/test_freeslip). "
-           "Both grids (Solver and SolverColocated).")
+      .def(
+          "set_domain_bc",
+          [](S& s, const std::string& face, const std::string& type, double vx, double vy,
+             double vz) {
+            s.setDomainBc(face_index(face, "set_domain_bc"),
+                          enum_index(type, kBcTypes, "set_domain_bc", "type"), vx, vy, vz);
+          },
+          nb::arg("face"), nb::arg("type"), nb::arg("vx") = 0.0, nb::arg("vy") = 0.0,
+          nb::arg("vz") = 0.0,
+          "Set a per-face domain BC. `face` is one of '-x', '+x', '-y', '+y', '-z', '+z'; `type` "
+          "is 'periodic' (the default on every face), 'wall' (no-slip), 'inflow' (Dirichlet "
+          "velocity vx, vy, vz -- an inlet, or a lid with a tangential velocity), 'outflow' "
+          "(zero-gradient velocity, p = 0) or 'slip' (free-slip / symmetry plane: zero normal "
+          "velocity, zero normal derivative of the tangential components, pressure Neumann like a "
+          "wall; vx/vy/vz are ignored). Call BEFORE the geometry (set_solid / "
+          "set_pressure_geometry / set_solid_from_scene): the BCs are folded into the operators "
+          "when the geometry is built, and a later call raises. A half-domain closed by a 'slip' "
+          "face reproduces the full symmetric domain pointwise (tests/kokkos/test_freeslip). Both "
+          "grids (Solver and SolverColocated).")
       .def(
           "set_domain_bc_profile",
-          [](S& s, int face, nb::ndarray<double, nb::c_contig> prof) {
+          [](S& s, const std::string& face, nb::ndarray<double, nb::c_contig> prof) {
             if (prof.ndim() != 3 || prof.shape(2) != 3)
               throw std::runtime_error("profile must be (Nb,Nc,3)");
             const int nb_ = (int)prof.shape(0), nc = (int)prof.shape(1);
             s.setDomainBcProfile(
-                face, peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_,
+                face_index(face, "set_domain_bc_profile"), peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_,
                 nc);
           },
           nb::arg("face"), nb::arg("profile"),
-          "Prescribe a per-position inlet velocity profile (Nb,Nc,3) over a face (sets it to "
-          "inflow).")
+          "Prescribe a per-position inlet velocity profile (Nb,Nc,3) over a face (one of '-x', "
+          "'+x', '-y', '+y', '-z', '+z'; sets it to 'inflow'). Like set_domain_bc, call it "
+          "BEFORE the geometry is built.")
       .def(
           "set_pressure_geometry",
           [](S& s, nb::ndarray<double, nb::f_contig> sdf) { s.setPressureGeometry(grid_in(sdf)); },
@@ -1781,7 +1866,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "the caller's own PHYSICAL ones when the solver was given an extent -- so ONE scene "
           "serves flow, dem and voro unchanged -- and CELL UNITS on the global inner grid "
           "otherwise (cell (i,j,k)'s centre at (i,j,k)). The scene is replicated on every rank, so scene-derived geometry needs no "
-          "communication and -- unlike set_exact_crossings -- is NOT single-rank only. "
+          "communication and -- unlike diagnostics.set_exact_crossings -- is NOT single-rank only. "
           "periodic=True treats the scene as min-image periodic over the global grid (one "
           "instance per body, no images); periodic=False leaves images to the caller.")
       .def("set_solid_from_scene", &S::setSolidFromScene, nb::arg("cutcell_pressure") = true,
@@ -1850,8 +1935,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "[1] torque about the instance centre. This is the RECOMMENDED coupling force: exactly "
           "conservative (sum = f * N_fluid-cells at steady state, to solver residual) and as "
           "accurate as the flow solution it sustains. The traction integral "
-          "(hydro_force_torque) under-reads by a resolution-independent ~29% and remains as a "
-          "diagnostic. Staggered; EXPLICIT advection is carried (the stashed advective RHS term "
+          "(hydro_force_torque) under-reads by a resolution-independent ~29% but carries the "
+          "pressure/viscous split. Staggered; EXPLICIT advection is carried (the stashed advective RHS term "
           "is subtracted); implicit advection / porous / variable properties / domain BCs are "
           "refused loudly (v2). Atomics: tolerance-reproducible, not bitwise.")
       .def(
@@ -1863,13 +1948,15 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
                 std::move(v), {4, n, 3},
                 {static_cast<std::int64_t>(3 * n), 3, 1});
           },
-          "DIAGNOSTIC ONLY -- use hydro_force_torque_reaction for the coupling force. The "
-          "reconstructed-traction loads, shape (4, n_instances, 3): [0] force, [1] torque about "
+          "The reconstructed-TRACTION loads (the resolved CFD-DEM coupling's `force_method="
+          "'traction'`; hydro_force_torque_reaction is the recommended one), shape "
+          "(4, n_instances, 3): [0] force, [1] torque about "
           "the instance centre, [2] the pressure part, [3] the viscous part ([0] == [2] + [3]). "
           "The cut-cell surface integral of (-p I + mu(grad u + grad u^T)) against the exact "
           "aperture wall-area vector; its central-difference gradient under-reads the drag by a "
-          "resolution-independent ~29% (measured; see the design note), which is why it is kept "
-          "only to keep that inconsistency visible. Atomics: tolerance-reproducible, not bitwise.")
+          "resolution-independent ~29% (measured; see the design note) -- it is the split into a "
+          "pressure and a viscous part that the reaction cannot give. Atomics: "
+          "tolerance-reproducible, not bitwise.")
       .def("instance_center", &S::instanceCenter, nb::arg("i"),
            "The resolved centre of rotation of instance i (world coordinates).")
       .def(
@@ -1952,7 +2039,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "(nx,ny,nz) float64 array over THIS rank's inner cells. Computed by set_solid from the "
           "SDF (1 everywhere without a solid); it is what the momentum operator and the geometric "
           "cut-cell projection see. get_ox_proj is the openness the PROJECTION actually conserves "
-          "fluxes through, which differs under set_ghost_projection (binary/coupled faces).")
+          "fluxes through, which differs under diagnostics.set_ghost_projection (binary/coupled faces).")
       .def(
           "get_oy", [](S& s) { return field_out(s, s.getOpenness(1)); },
           "The geometric -y face openness per inner cell, (nx,ny,nz); see get_ox.")
@@ -1962,7 +2049,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def(
           "get_ox_proj", [](S& s) { return field_out(s, s.getOpennessProj(0)); },
           "-x face openness whose fluxes the projection CONSERVES (binary/COUPLED under "
-          "set_ghost_projection, geometric cut-cell otherwise). Use for flux bookkeeping "
+          "diagnostics.set_ghost_projection, geometric cut-cell otherwise). Use for flux bookkeeping "
           "(peclet.pnm extract_network_flow).")
       .def(
           "get_oy_proj", [](S& s) { return field_out(s, s.getOpennessProj(1)); },
@@ -2004,28 +2091,33 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           },
           nb::arg("name"), nb::arg("array"),
           "Write a Fortran-order (nx,ny,nz) float64 array into a registered field's inner region "
-          "(ghosts refilled on the next exchange_field/step).")
+          "(ghosts refilled on the next diagnostics.exchange_field/step).")
       // --- Scalar transport (advection-diffusion) ----------------------------------------------
       .def(
           "add_scalar",
-          [](S& s, const std::string& name, double diffusivity, int scheme, int iters) {
-            s.addScalar(name, diffusivity, scheme, iters);
+          [](S& s, const std::string& name, double diffusivity, const std::string& scheme,
+             int iters) {
+            s.addScalar(name, diffusivity,
+                        enum_index(scheme, kScalarSchemes, "add_scalar", "scheme"), iters);
           },
-          nb::arg("name"), nb::arg("diffusivity") = 0.0, nb::arg("scheme") = 1,
+          nb::arg("name"), nb::arg("diffusivity") = 0.0, nb::arg("scheme") = "koren",
           nb::arg("iters") = 50,
-          "Register a transported scalar (temperature/concentration/…): constant diffusivity (grid "
-          "units), advection scheme 0=FOU/1=Koren TVD/2=SOU, and RB-GS diffusion sweeps. The "
-          "scalar "
-          "is a registered field (get_field/set_field/field_view). Requires geometry "
+          "Register a transported scalar (temperature/concentration/...): constant diffusivity "
+          "(grid units), advection scheme 'fou' (first-order upwind), 'koren' (Koren TVD, the "
+          "default) or 'sou' (second-order upwind), and RB-GS diffusion sweeps. The scalar is a "
+          "registered field (get_field/set_field/diagnostics.field_view). Requires geometry "
           "(set_solid/set_pressure_geometry) for the openness-weighted operators.")
       .def(
           "set_scalar_bc",
-          [](S& s, const std::string& name, int face, int type, double value) {
-            s.setScalarBc(name, face, type, value);
+          [](S& s, const std::string& name, const std::string& face, const std::string& type,
+             double value) {
+            s.setScalarBc(name, face_index(face, "set_scalar_bc"),
+                          enum_index(type, kScalarBcTypes, "set_scalar_bc", "type"), value);
           },
           nb::arg("name"), nb::arg("face"), nb::arg("type"), nb::arg("value") = 0.0,
-          "Scalar boundary condition on a domain face (0..5 = -x,+x,-y,+y,-z,+z): type 0 periodic, "
-          "1 Neumann zero-flux (adiabatic), 2 Dirichlet value. Single-rank.")
+          "Scalar boundary condition on a domain face ('-x', '+x', '-y', '+y', '-z', '+z'): "
+          "type 'periodic', 'neumann' (zero flux, adiabatic) or 'dirichlet' (the given value). "
+          "Single-rank.")
       .def(
           "has_scalar", [](S& s, const std::string& name) { return s.hasScalar(name); },
           nb::arg("name"), "Whether a transported scalar of this name is registered.")
@@ -2036,7 +2128,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def(
           "enable_vof", [](S& s) { s.enableVof(); },
           "Enable the geometric (PLIC + Weymouth-Yue) VoF colour field 'C'. Registers 'C' as an "
-          "ordinary cell field (get_field/set_field/field_view/closure input) and allocates the "
+          "ordinary cell field (get_field/set_field/diagnostics.field_view/closure input) and allocates the "
           "colour field's OWN g=3 working block + halo; the solver's G=2 is untouched. C is "
           "advected at the end of every step() with the just-projected face velocities.\n\n"
           "RUNG V2a SCOPE — read before using: there is NO surface tension (rung V4) and NO "
@@ -2061,7 +2153,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "openness-weighted divergence; it needs set_solid(..., cutcell_pressure=True) (the "
           "staircase operator has no face openness to weight with) and it approximates the "
           "solid-clipped flux polygon by (whole-cell PLIC slab) x (open area) — see "
-          "vof_diagnostics()['clipped_volume'].")
+          "diagnostics.vof_diagnostics()['clipped_volume'].")
       .def(
           "set_vof",
           [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setVof(grid_in(a)); }, nb::arg("array"),
@@ -2143,18 +2235,27 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "The prescribed static contact angle in degrees (90 if none was set).")
       .def(
           "set_contact_angle_dynamic",
-          [](S& s, double th, double slip, double mu, double sigma) {
+          [](S& s, bool enabled, double th, double slip, double mu, double sigma) {
+            if (!enabled) {
+              s.setContactAngleDynamicOff();
+              return;
+            }
+            if (!(slip > 0.0 && slip < 1.0) || !(mu > 0.0))
+              throw std::invalid_argument(
+                  "set_contact_angle_dynamic(True, ...): slip_length_cells must lie in (0, 1) and "
+                  "mu_liquid must be positive");
             s.setContactAngleDynamic(th, slip, mu, sigma);
           },
-          nb::arg("theta_e"), nb::arg("slip_length_cells"), nb::arg("mu_liquid"),
-          nb::arg("sigma") = 0.0,
-          "Rung V6 (WO-V6). The DYNAMIC contact angle: the angle imposed at the grid scale is the "
-          "Cox-Voinov apparent angle of a contact line moving at speed U_cl, with the outer "
-          "cut-off at the CELL SIZE and an EXPLICIT slip length lambda (Afkhami, Zaleski & "
+          nb::arg("enabled"), nb::arg("theta_e") = 90.0, nb::arg("slip_length_cells") = 0.0,
+          nb::arg("mu_liquid") = 0.0, nb::arg("sigma") = 0.0,
+          "Rung V6 (WO-V6). The DYNAMIC contact angle -- `enabled=False` turns it (and the "
+          "hysteresis) off so the static angle stands again; `enabled=True` imposes at the grid "
+          "scale the Cox-Voinov apparent angle of a contact line moving at speed U_cl, with the "
+          "outer cut-off at the CELL SIZE and an EXPLICIT slip length lambda (Afkhami, Zaleski & "
           "Bussmann, JCP 228:5370, 2009):\n\n"
           "    theta_Delta^3 = theta_e^3 + 9 Ca_cl ln(Delta/lambda),   Ca_cl = mu_l U_cl / sigma\n\n"
           "angles in radians internally, arguments in DEGREES; Ca_cl > 0 advancing, < 0 receding; "
-          "theta_Delta is clamped into [1, 179] degrees (set_contact_angle_clamp).\n\n"
+          "theta_Delta is clamped into [1, 179] degrees (diagnostics.set_contact_angle_clamp).\n\n"
           "`slip_length_cells` is lambda/Delta and must lie in (0, 1). It is not a tuning knob "
           "you may omit from a report: a VoF contact line's NUMERICAL slip is proportional to the "
           "cell size, so without an explicit lambda the imposed angle is silently grid-dependent "
@@ -2206,13 +2307,10 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "projector is taken DIAGONAL (the cross terms -n_c n_j u_j are dropped; they vanish "
           "exactly for an axis-aligned wall and are O(n_c n_j) otherwise), and an axis whose BOTH "
           "neighbours are solid (a one-cell fluid gap) keeps the no-slip closure - counted by "
-          "wall_slip_sandwich_cells().")
+          "diagnostics.wall_slip_sandwich_cells().")
       .def(
           "wall_slip_length", [](S& s) { return s.wallSlipLength(); },
           "The Navier slip length in force, in the caller's units (0 = no-slip).")
-      .def(
-          "set_contact_angle_dynamic_off", [](S& s) { s.setContactAngleDynamicOff(); },
-          "Turn the V6 dynamic angle and hysteresis off; the static V5b angle stands again.")
       .def(
           "vof_has_geometry", [](S& s) { return s.vofHasGeometry(); },
           "True when the colour advection is running the CUT-CELL (openness-weighted) kernels, "
@@ -2222,8 +2320,13 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       // --- Part III rung W0 (WO-W0): the per-bubble block container ----------------------------
       .def(
           "enable_vof_blocks",
-          [](S& s, const std::vector<std::array<double, 4>>& seeds) { s.enableVofBlocks(seeds); },
-          nb::arg("seeds"),
+          [](S& s, std::optional<std::vector<std::array<double, 4>>> seeds) {
+            if (seeds)
+              s.enableVofBlocks(*seeds);
+            else
+              s.disableVofBlocks();
+          },
+          nb::arg("seeds") = nb::none(),
           "Carry each bubble on its OWN VoF block (the TBFsolver vofBlock pattern, VOF_PLAN §10): "
           "one Weymouth-Yue advector per marker on a small moving global index box (bubble extent "
           "+ 3 cells, its own g = 3 halo on top) with a master rank of its own, and the registered "
@@ -2234,19 +2337,18 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "236 cells carry BOTH markers at closest approach (30.0 cells of shared liquid) while "
           "each marker's own volume is conserved to 2.6e-15, and the single-field control merges "
           "them irreversibly (neck colour 0.77 against the blocks' 0.00 after the reversal).\n\n"
-          "'seeds' is a list of (cx, cy, cz, radius) spheres in CELL units, global indices -- these "
+          "`seeds=None` DROPS the container (the structured colour field 'C' and advect_vof are "
+          "unaffected). Otherwise 'seeds' is a list of (cx, cy, cz, radius) spheres in CELL "
+          "units, global indices -- these "
           "are GRID coordinates and a physical domain does not convert them. The "
           "colour is the same exact sphere fraction set_vof would take.\n\n"
           "SCOPE at W0: ALL-FLUID (an immersed solid raises — the cut-cell block is rung W12) and "
           "KINEMATIC (advect_vof_blocks(dt); NS coupling is W12). Masters are assigned round robin "
           "by block id, deliberately independent of where the bubble's cells live — the weighted-"
-          "ORB assignment is rung W1; vof_block_imbalance() is the number to beat.")
-      .def(
-          "disable_vof_blocks", [](S& s) { s.disableVofBlocks(); },
-          "Drop the block container; the structured colour field ('C', advect_vof) is unaffected.")
+          "ORB assignment is rung W1; diagnostics.vof_block_imbalance() is the number to beat.")
       .def(
           "vof_blocks_enabled", [](S& s) { return s.vofBlocksEnabled(); },
-          "True after enable_vof_blocks.")
+          "True while the block container exists (enable_vof_blocks with seeds; None drops it).")
       .def(
           "advect_vof_blocks", [](S& s, double dt) { s.advectVofBlocks(dt); }, nb::arg("dt"),
           "Advance every block by dt with the CURRENT (projected) face velocity and union the "
@@ -2281,7 +2383,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def(
           "vof_block_color", &vofBlockColourArray<S>, nb::arg("id"),
           "One marker's OWN inner color as a Fortran-order (nx,ny,nz) float64 array over its "
-          "block box (vof_block_stats()['lo'/'hi']); empty on a rank that does not master it.\n\n"
+          "block box (diagnostics.vof_block_stats()['lo'/'hi']); empty on a rank that does not master it.\n\n"
           "This is the block's ONLY state, so {box, color} per marker is a COMPLETE checkpoint "
           "of the container -- and it is the only exact one: re-seeding from the union color "
           "field (enable_vof_blocks_from_field) hands each of two TOUCHING markers a slice of the "
@@ -2301,25 +2403,28 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           nb::arg("boxes"), nb::arg("colors"),
           "Restart the block container from a vof_block_color() checkpoint: one marker per "
           "(lo_x, lo_y, lo_z, hi_x, hi_y, hi_z) INNER box (exactly the 'lo'/'hi' of "
-          "vof_block_stats(), NOT grown by the margin again) with its colour written directly. "
+          "diagnostics.vof_block_stats(), NOT grown by the margin again) with its colour written directly. "
           "Exact whatever the markers are doing -- nothing is gathered out of the union field.")
       .def(
           "set_vof_block_assign",
-          [](S& s, int mode, long every) { s.setVofBlockAssign(mode, every); }, nb::arg("mode"),
-          nb::arg("every") = 0,
-          "Master assignment of the block container (rung W1). mode 0 = round robin by block id "
-          "(rung W0's, blind to block SIZE), 1 = LONGEST-PROCESSING-TIME greedy on the block cell "
-          "counts, 2 = weighted ORB over a 1-D block space (core's BlockDecomposer<1> with the "
+          [](S& s, const std::string& mode, long every) {
+            s.setVofBlockAssign(enum_index(mode, kBlockAssign, "set_vof_block_assign", "mode"),
+                                every);
+          },
+          nb::arg("mode"), nb::arg("every") = 0,
+          "Master assignment of the block container (rung W1). 'round-robin' by block id (rung "
+          "W0's, blind to block SIZE), 'lpt' = LONGEST-PROCESSING-TIME greedy on the block cell "
+          "counts, 'orb' = weighted ORB over a 1-D block space (core's BlockDecomposer<1> with the "
           "cell counts as weights). 'every' > 0 re-runs the assignment every 'every' block steps "
           "and MIGRATES the colour of any block that changed master (nothing else in a block is "
           "state, so the migration is exact and the bitwise gates hold across it).\n\n"
           "All three are pure functions of the REPLICATED block table, so every rank computes the "
-          "same assignment without an exchange — which is what lets a re-assignment happen "
+          "same assignment without an exchange -- which is what lets a re-assignment happen "
           "mid-run without breaking a bitwise gate. LPT is the measured winner (see the WO-W12 "
           "findings): the ORB's blocks must be CONTIGUOUS in block id, which LPT is free of.")
       .def(
-          "vof_block_assign", [](S& s) { return s.vofBlockAssign(); },
-          "The current master-assignment mode (see set_vof_block_assign).")
+          "vof_block_assign", [](S& s) { return kBlockAssign.at(s.vofBlockAssign()); },
+          "The current master-assignment mode ('round-robin' | 'lpt' | 'orb').")
       .def(
           "enable_vof_block_csf", [](S& s) { s.enableVofBlockCsf(); },
           "Form the surface-tension force PER BLOCK (rung W2): each marker runs its own curvature "
@@ -2339,10 +2444,11 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "advect_vof slot.")
       // --- two-phase open boundaries (rung V-BC, WO-R) ------------------------------------------
       .def(
-          "set_vof_inflow", [](S& s, int face, double value) { s.setVofInflow(face, value); },
+          "set_vof_inflow", [](S& s, const std::string& face, double value) { s.setVofInflow(face_index(face, "set_vof_inflow"), value); },
           nb::arg("face"), nb::arg("value"),
-          "Colour of the fluid ENTERING through inflow face 'face' (0..5 = -x,+x,-y,+y,-z,+z); "
-          "1 = liquid, 0 = gas. The face must already be an inflow (set_domain_bc(face, 2, ...)) "
+          "Colour of the fluid ENTERING through inflow face 'face' ('-x', '+x', '-y', '+y', '-z', "
+          "'+z'); 1 = liquid, 0 = gas. The face must already be an inflow (set_domain_bc(face, "
+          "'inflow', ...)) "
           "or this raises.\n\n"
           "The value may be FRACTIONAL, and it then means 'this fraction of the incoming flux is "
           "liquid' — a flux statement, not a sub-cell interface position. That is exactly how it "
@@ -2356,12 +2462,12 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "zero-gradient copy, i.e. today's behaviour, bit for bit.")
       .def(
           "set_vof_inflow_profile",
-          [](S& s, int face, nb::ndarray<double, nb::c_contig> prof) {
+          [](S& s, const std::string& face, nb::ndarray<double, nb::c_contig> prof) {
             if (prof.ndim() != 2)
               throw std::runtime_error("vof inflow profile must be (Nb,Nc)");
             const int nb_ = (int)prof.shape(0), nc = (int)prof.shape(1);
             s.setVofInflowProfile(
-                face, peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_,
+                face_index(face, "set_vof_inflow_profile"), peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_,
                 nc);
           },
           nb::arg("face"), nb::arg("profile"),
@@ -2370,9 +2476,10 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "This is how a liquid distributor over part of an inlet is expressed: the colour "
           "profile says WHERE liquid enters, the velocity profile says how fast.")
       .def(
-          "set_vof_backflow", [](S& s, int face, double value) { s.setVofBackflow(face, value); },
+          "set_vof_backflow", [](S& s, const std::string& face, double value) { s.setVofBackflow(face_index(face, "set_vof_backflow"), value); },
           nb::arg("face"), nb::arg("value") = 0.0,
-          "inletOutlet colour on OUTFLOW face 'face' (default 0 = gas): where the boundary face "
+          "inletOutlet colour on OUTFLOW face 'face' ('-x' ... '+z'; default 0 = gas): where the "
+          "boundary face "
           "velocity points back INTO the domain, the colour ghost carries this value instead of "
           "the zero-gradient copy. This is OpenFOAM's inletOutletFvPatchField (Rusche 2002 thesis "
           "section 4), the standard VoF outlet — an outlet is a place where you know what leaves "
@@ -2532,12 +2639,21 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "array (== set_field('mdot') plus the ghost fill). Turns the thermal mass flux OFF.")
       .def(
           "set_phase_change_thermal",
-          [](S& s, const std::string& name, double t_sat, double k_gas, double k_liquid,
-             double r_int) { s.setPhaseChangeThermal(name, t_sat, k_gas, k_liquid, r_int); },
-          nb::arg("scalar"), nb::arg("t_sat"), nb::arg("k_gas"), nb::arg("k_liquid"),
-          nb::arg("r_int") = 0.0,
+          [](S& s, bool enabled, const std::string& name, double t_sat, double k_gas,
+             double k_liquid, double r_int) {
+            if (!enabled) {
+              s.setPhaseChangeThermalOff();
+              return;
+            }
+            if (name.empty())
+              throw std::invalid_argument(
+                  "set_phase_change_thermal(True, ...): name the registered temperature scalar");
+            s.setPhaseChangeThermal(name, t_sat, k_gas, k_liquid, r_int);
+          },
+          nb::arg("enabled"), nb::arg("scalar") = "", nb::arg("t_sat") = 0.0,
+          nb::arg("k_gas") = 0.0, nb::arg("k_liquid") = 0.0, nb::arg("r_int") = 0.0,
           "P1: compute mdot each step from a registered scalar (the temperature) instead of "
-          "prescribing it:\n\n"
+          "prescribing it; `enabled=False` stops that (back to the prescribed mdot field):\n\n"
           "    mdot = ( k_g dT_g/dn - k_l dT_l/dn ) / h_lv ,   n = m/|m|_2 (LIQUID -> GAS)\n\n"
           "Each one-sided derivative is a weighted least-squares fit THROUGH the interface value "
           "over the PURE-PHASE cells of a 5^3 stencil on that side, with Malan's collinearity "
@@ -2545,50 +2661,53 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "cells are pinned at T_G = t_sat + mdot*r_int in the energy solve through a per-cell "
           "Dirichlet mask on the scalar (r_int = 0 is the hard Dirichlet; a nonzero r_int is the "
           "Schrage/IHTR Robin condition of Bures & Sato 2021).\n\n"
-          "SIGN CONVENTION — the interfacial energy balance is mdot*h_lv = (q_l - q_g).n with "
+          "SIGN CONVENTION -- the interfacial energy balance is mdot*h_lv = (q_l - q_g).n with "
           "q = -k grad T and n pointing OUT OF THE LIQUID, which is the form above. Check it on "
           "the Stefan problem: superheated vapour behind the interface gives grad(T_g).n > 0 and "
           "mdot > 0, i.e. evaporation. The opposite pairing (k_l grad T_l - k_g grad T_g) with the "
           "SAME n would condense a superheated vapour.\n\n"
           "The energy scalar's diffusivity is whatever add_scalar was given (a CONSTANT); per-cell "
-          "k(C) and the consistent rho c_p T geometric transport are the P3 upgrade. That is not a "
-          "limitation for the Stefan gate, where the liquid is saturated and pinned at T_sat.")
-      .def(
-          "set_phase_change_thermal_off", [](S& s) { s.setPhaseChangeThermalOff(); },
-          "Stop computing mdot from the temperature (back to the prescribed field).")
+          "k(C) and the consistent rho c_p T geometric transport are set_phase_change_energy. That "
+          "is not a limitation for the Stefan gate, where the liquid is saturated and pinned at "
+          "T_sat.")
       .def(
           "vof_interface_area", [](S& s) { return s.vofInterfaceArea(); },
           "Total interfacial area of the colour field, in CELLS squared (h^2), summed over "
           "the inner region and globally reduced under MPI. Uses the geometry "
-          "set_phase_change_area selects, so the number a page quotes and the number the phase "
+          "diagnostics.set_phase_change_area selects, so the number a page quotes and the number the phase "
           "change integrates are the same one. Needs enable_vof; phase change need not be on. "
           "A sphere of radius R cells reads 4 pi R^2 to about 0.2-0.8 % once its colour field is "
           "resolved (WO-P3c).")
       .def(
           "set_phase_change_energy",
-          [](S& s, double rcp_gas, double rcp_liquid) {
+          [](S& s, bool enabled, double rcp_gas, double rcp_liquid) {
+            if (!enabled) {
+              s.setPhaseChangeEnergyOff();
+              return;
+            }
+            if (!(rcp_gas > 0.0) || !(rcp_liquid > 0.0))
+              throw std::invalid_argument(
+                  "set_phase_change_energy(True, ...): both heat capacities must be positive");
             s.setPhaseChangeEnergy(rcp_gas, rcp_liquid);
           },
-          nb::arg("rho_cp_gas"), nb::arg("rho_cp_liquid"),
+          nb::arg("enabled"), nb::arg("rho_cp_gas") = 0.0, nb::arg("rho_cp_liquid") = 0.0,
           "CONSISTENT rho*c_p*T transport (VOF_PLAN section 9 item 6) for the scalar named by "
-          "set_phase_change_thermal. Two things change together:\n"
+          "set_phase_change_thermal; `enabled=False` returns to the constant-diffusivity scalar "
+          "operator and the Koren TVD advective term (the rung P0/P1 energy path). Two things "
+          "change together:\n"
           " (1) TRANSPORT: H = (rho c_p) T is advected with the colour advection's OWN geometric "
           "fluxes, sweep order and frozen dilation flag (vof/energy_advect.hpp), and T is recovered "
-          "as H / (rho c_p)(C^{n+1}) — so a uniform temperature is preserved EXACTLY at any heat "
+          "as H / (rho c_p)(C^{n+1}) -- so a uniform temperature is preserved EXACTLY at any heat "
           "capacity ratio. With two different fluxes the heat carried into a mixed cell is divided "
           "by a capacity built from another flux: an error of order d(rho c_p), i.e. ~2000x at "
           "water/steam, which is the artificial interfacial heating this removes.\n"
           " (2) DIFFUSION: the implicit operator becomes A_C = rho c_p(C)/dt + sum_f k_f open_f "
           "with k_f the arithmetic mean of the cells' k(C) (the k_gas/k_liquid of "
           "set_phase_change_thermal) EXCEPT at a face touching a per-cell Dirichlet (interfacial) "
-          "cell, where the pure neighbour's own k is used — a Dirichlet row is an identity row, so "
+          "cell, where the pure neighbour's own k is used -- a Dirichlet row is an identity row, so "
           "that coefficient's only job is the conductance with which the pure cell reaches a "
           "boundary condition that already sits at the interface.\n"
           "Units: rho*c_p in J/(cell^3 K), k in W/(cell K). Requires set_phase_change_thermal.")
-      .def(
-          "set_phase_change_energy_off", [](S& s) { s.setPhaseChangeEnergyOff(); },
-          "Back to the constant-diffusivity scalar operator and the Koren TVD advective term "
-          "(the rung P0/P1 energy path).")
       .def(
           "set_divergence_source",
           [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setDivergenceSource(grid_in(a)); },
@@ -2684,7 +2803,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "Allocate + register the per-cell body-force fields force_x/force_y/force_z and route "
           "them "
           "into the momentum RHS, for an external writer (e.g. CFD-DEM drag feedback) to fill "
-          "directly via field_view('force_z'). They persist across steps until overwritten.")
+          "directly via diagnostics.field_view('force_z'). They persist across steps until overwritten.")
       .def(
           "enable_drag", [](S& s) { s.enableDrag(); },
           "Enable implicit (semi-implicit) linear drag for CFD-DEM: allocate the per-cell "
@@ -2692,10 +2811,10 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "field (added to the momentum diagonal so a -beta*(u-u_p) source is treated implicitly "
           "-> "
           "unconditionally stable for the stiff beta of a dense bed) plus force_x/y/z (which carry "
-          "beta*u_p, the RHS target). Fill 'drag_beta' and 'force_*' via field_view each step.")
+          "beta*u_p, the RHS target). Fill 'drag_beta' and 'force_*' via diagnostics.field_view each step.")
       .def(
           "ghost_width", [](S& s) { return s.ghostWidth(); },
-          "Ghost-layer width g of the velocity block (field_view returns an (n+2g) buffer).")
+          "Ghost-layer width g of the velocity block (diagnostics.field_view returns an (n+2g) buffer).")
       .def(
           "has_cutcell_pressure", [](S& s) { return s.hasCutcellPressure(); },
           "True once the cut-cell pressure operator exists (set_solid or set_pressure_geometry was "

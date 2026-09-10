@@ -129,8 +129,8 @@ def main():
         s.set_pressure_pcg(True, 500, args.rtol)
         s.set_pressure_bottom(args.bottom)
         if not args.periodic_y:
-            s.set_domain_bc(2, 1)
-            s.set_domain_bc(3, 1)
+            s.set_domain_bc("-y", "wall")
+            s.set_domain_bc("+y", "wall")
         s.set_pressure_geometry(np.asfortranarray(np.full((nx, ny, nz), 1e30)))
         s.set_state(*velocity(nx, ny, nz, args.rhs))
         s.step()

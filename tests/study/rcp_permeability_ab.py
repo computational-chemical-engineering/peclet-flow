@@ -20,6 +20,17 @@ from peclet import flow
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+
+def _collocated_mode(s, mode):
+    """Select a collocated scheme by the integer face-interp mode this script was written with:
+    0/7/9 are the public strings ('plain' / 'embed' / 'gauge-exact'), 5/6 the diagnostics rungs,
+    and every other number was deleted at 1.0.0 (the call then raises)."""
+    names = {0: "plain", 7: "embed", 9: "gauge-exact"}
+    if mode in names:
+        s.set_collocated_scheme(names[mode])
+    else:
+        s.diagnostics.set_face_interp(mode)
+
 def sdf_from_pack(Ng, pos, r, side):
     g = (np.arange(Ng) + 0.5) / Ng * side
     X, Y, Z = np.meshgrid(g, g, g, indexing="ij")
@@ -50,7 +61,7 @@ def permeability(Ng, sdf, side, colloc, ghost, mode=0, mu=0.1, F=1e-3, dt=80.0, 
     if ghost:
         s.diagnostics.set_ghost_projection(True, 1, 2)
     if mode:
-        s.diagnostics.set_face_interp(mode)
+        _collocated_mode(s, mode)
     s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
     prev = 0.0
     for it in range(max_steps):

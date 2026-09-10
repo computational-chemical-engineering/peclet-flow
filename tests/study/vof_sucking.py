@@ -81,8 +81,8 @@ def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, nt=4,
     s = pf.Solver(n, ny, nz)
     s.set_rho(rho_l)          # reference density = the OUTLET phase; see the module docstring
     s.set_mu(1e-3)
-    s.set_domain_bc(0, 1)     # -x wall (the vapour side)
-    s.set_domain_bc(1, 3)     # +x outflow (the liquid leaves)
+    s.set_domain_bc("-x", "wall")     # -x wall (the vapour side)
+    s.set_domain_bc("+x", "outflow")     # +x outflow (the liquid leaves)
     s.set_pressure_geometry(np.full((n, ny, nz), 1.0, order="F"))
     s.enable_vof()
     c = np.zeros((n, ny, nz), order="F")
@@ -109,16 +109,16 @@ def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, nt=4,
         sv = 1.0 / (2 * math.sqrt(alpha_l * tt)) - b * (1.0 - rr)
         return dT - dT * math.erfc(sv) / math.erfc(b * rr)
 
-    s.add_scalar("T", al, 1, 60)
-    s.set_scalar_bc("T", 0, 2, 0.0)       # saturated vapour against the wall
-    s.set_scalar_bc("T", 1, 2, farT(t0))  # superheated far field (exact, refreshed per step)
+    s.add_scalar("T", al, "koren", 60)
+    s.set_scalar_bc("T", "-x", "dirichlet", 0.0)       # saturated vapour against the wall
+    s.set_scalar_bc("T", "+x", "dirichlet", farT(t0))  # superheated far field (exact, refreshed per step)
     s.set_field("T", t)
     s.enable_phase_change(rho_v, rho_l, h_lv)
-    s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
+    s.set_phase_change_thermal(True, "T", 0.0, k_v, k_l, 0.0)
     s.diagnostics.set_phase_change_plane_dirichlet(plane)
     s.diagnostics.set_phase_change_quadratic_fit(quad)
     if consistent:
-        s.set_phase_change_energy(rcp_v, rcp_l)
+        s.set_phase_change_energy(True, rcp_v, rcp_l)
         s.diagnostics.set_phase_change_energy_muscl(muscl)
     # WO-P3g: the second-order interfacial energy operator (default 1 = the shipped scheme, bitwise)
     if energy_order != 1:
@@ -142,7 +142,7 @@ def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, nt=4,
         dt = min(cfl / max(Xd * (1.0 - rr), 1e-30), fo / al)
         dt = min(dt, (te - tcur))
         s.set_dt(dt)
-        s.set_scalar_bc("T", 1, 2, farT(tcur + dt))
+        s.set_scalar_bc("T", "+x", "dirichlet", farT(tcur + dt))
         s.step()
         tcur += dt
         nsteps += 1

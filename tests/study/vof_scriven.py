@@ -41,6 +41,11 @@ import numpy as np
 
 import peclet.flow as pf
 
+# The set_phase_change_area names, indexed by the integer modes this script's CLI takes
+# (0 = PLIC ... 7 = the joined PLIC-distance sheet, split deposit).
+AREA_MODES = ("plic", "cascade-metric", "cascade-normal", "cascade-footprint",
+              "sheet-color-centroid", "sheet-color-split", "sheet-plic-centroid", "sheet-plic-split")
+
 _GL = np.polynomial.legendre.leggauss(400)
 
 
@@ -199,8 +204,8 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     s = pf.Solver(n, n, n)
     s.set_rho(rho_l)
     s.set_mu(1e-3)
-    for f in range(6):
-        s.set_domain_bc(f, 3)              # outflow everywhere: the vapour production must leave
+    for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
+        s.set_domain_bc(f, "outflow")              # outflow everywhere: the vapour production must leave
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
     s.enable_vof()
     c0 = sphere_colour_chunked(n, ctr, r0, sub)
@@ -213,9 +218,9 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     s.set_pressure_fcg(True, 600, 1e-10)
 
     tprof = initial_temperature(n, ctr, r0, beta, rr, dT, mode=init)
-    s.add_scalar("T", k_l / rcp_l, 1, sweeps)
-    for f in range(6):
-        s.set_scalar_bc("T", f, 2, dT)
+    s.add_scalar("T", k_l / rcp_l, "koren", sweeps)
+    for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
+        s.set_scalar_bc("T", f, "dirichlet", dT)
     s.set_field("T", np.asfortranarray(tprof))
     s.enable_phase_change(rho_v, rho_l, h_lv)
     # Ablations kept because they are the findings' evidence. enable_phase_change turns WO-R2's
@@ -228,14 +233,14 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
         s.diagnostics.set_pressure_exact_residual(False)
     if os.environ.get("PECLET_P23_NO_OUTFLOWRHO"):
         s.diagnostics.set_outflow_rho_correction(False)
-    s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
+    s.set_phase_change_thermal(True, "T", 0.0, k_v, k_l, 0.0)
     s.diagnostics.set_phase_change_plane_dirichlet(plane)
     if consistent:
-        s.set_phase_change_energy(rcp_v, rcp_l)
+        s.set_phase_change_energy(True, rcp_v, rcp_l)
         s.diagnostics.set_phase_change_energy_muscl(muscl)
     s.diagnostics.set_phase_change_quadratic_fit(quad)
     if area_mode is not None:
-        s.diagnostics.set_phase_change_area(area_mode)
+        s.diagnostics.set_phase_change_area(AREA_MODES[area_mode])
     if fitkap:
         s.diagnostics.set_phase_change_fit_curvature(-2.0 / r0)
     if carry:
@@ -590,7 +595,7 @@ def area_advect(n=128, R=16.0, sub=16, steps=100, cfl=0.2, amp=0.0, drift=(0.5, 
     def sample(tag):
         row = {}
         for m in modes:
-            s.diagnostics.set_phase_change_area(m)
+            s.diagnostics.set_phase_change_area(AREA_MODES[m])
             row[m] = s.vof_interface_area()
         cc = s.get_vof()
         mixed = int(np.count_nonzero((cc > 0.0) & (cc < 1.0)))
@@ -672,7 +677,7 @@ def area_probe(n, radii, ratio=100.0, sub=4, mode=None, shape="sphere"):
         s.enable_phase_change(rho_v, rho_l, 1.0)
         s.set_mass_flux_uniform(0.0)
         if mode is not None:
-            s.diagnostics.set_phase_change_area(mode)
+            s.diagnostics.set_phase_change_area(AREA_MODES[mode])
         s.apply_phase_change(0.0)
         d = s.diagnostics.phase_change_diagnostics()
         mc = _mc_area(c0) if R > -5 else float("nan")   # the periodic rows have an EXACT ref
@@ -820,7 +825,7 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
                 s.set_vof(cstart)
                 s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
                 s.enable_phase_change(rho_v, rho_l, 1.0)
-                s.diagnostics.set_phase_change_area(mode)
+                s.diagnostics.set_phase_change_area(AREA_MODES[mode])
                 s.set_mass_flux_uniform(1.0)
                 a_bef = s.vof_interface_area()
                 s.apply_phase_change(delta)
@@ -935,17 +940,17 @@ def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt,
     s.enable_vof()
     s.set_vof(c0)
     s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
-    s.add_scalar("T", k_l / rcp_l, 1, 1)
-    for f in range(6):
-        s.set_scalar_bc("T", f, 1, 0.0)                # Neumann: the fit reads +-2 cells only
+    s.add_scalar("T", k_l / rcp_l, "koren", 1)
+    for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
+        s.set_scalar_bc("T", f, "neumann", 0.0)                # Neumann: the fit reads +-2 cells only
     s.set_field("T", tprof)
     s.enable_phase_change(rho_v, rho_l, h_lv)
-    s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
+    s.set_phase_change_thermal(True, "T", 0.0, k_v, k_l, 0.0)
     s.diagnostics.set_phase_change_plane_dirichlet(plane)
-    s.set_phase_change_energy(rcp_v, rcp_l)
+    s.set_phase_change_energy(True, rcp_v, rcp_l)
     s.diagnostics.set_phase_change_quadratic_fit(quad)
     if area_mode is not None:
-        s.diagnostics.set_phase_change_area(area_mode)
+        s.diagnostics.set_phase_change_area(AREA_MODES[area_mode])
     if kap:
         # WO-P3f: the curvature-corrected sample distance, with kappa = div(n) PRESCRIBED from the
         # known geometry (-2/R for a gas sphere; 0 for the flat control).
@@ -1058,16 +1063,16 @@ def carry_probe(n, steps, ratio=100.0, carry=False, sub=16, grad=0.05, mdot=2.0e
     s = pf.Solver(n, n, n)
     s.set_rho(rho_l)
     s.set_mu(1e-3)
-    for f in range(6):
-        s.set_domain_bc(f, 3)
+    for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
+        s.set_domain_bc(f, "outflow")
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
     s.enable_vof()
     s.set_vof(c0)
     s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
     s.set_pressure_fcg(True, 600, 1e-10)
-    s.add_scalar("T", k_l / rcp_l, 1, 50)
-    for f in range(6):
-        s.set_scalar_bc("T", f, 1, 0.0)
+    s.add_scalar("T", k_l / rcp_l, "koren", 50)
+    for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
+        s.set_scalar_bc("T", f, "neumann", 0.0)
     s.set_field("T", tprof)
     s.enable_phase_change(rho_v, rho_l, h_lv)
     # thermal mdot, but on a FLAT interface with an exactly LINEAR profile, which is the one
@@ -1075,9 +1080,9 @@ def carry_probe(n, steps, ratio=100.0, carry=False, sub=16, grad=0.05, mdot=2.0e
     # mass flux is then `mdot` by construction and nothing but the enthalpy book-keeping is under
     # test.  A PRESCRIBED mdot cannot be used here -- `set_mass_flux_uniform` turns the thermal
     # path (and with it the per-cell Dirichlet set) OFF.
-    s.set_phase_change_thermal("T", 0.0, k_v, k_l, 0.0)
-    s.set_phase_change_energy(rcp_v, rcp_l)
-    s.diagnostics.set_phase_change_area(6)
+    s.set_phase_change_thermal(True, "T", 0.0, k_v, k_l, 0.0)
+    s.set_phase_change_energy(True, rcp_v, rcp_l)
+    s.diagnostics.set_phase_change_area("sheet-plic-centroid")
     s.diagnostics.set_phase_change_budget(True)
     if carry:
         s.diagnostics.set_phase_change_carry_conserve(True)

@@ -107,8 +107,8 @@ def couette(nz, z0, lam, U=1.0, steps=200):
     s.set_mu(MU)
     s.set_dt(100.0)
     s.set_advection(False)
-    s.set_domain_bc(4, 1, 0.0, 0.0, 0.0)          # -z: wall, buried in the solid
-    s.set_domain_bc(5, 2, U, 0.0, 0.0)            # +z: the moving lid
+    s.set_domain_bc("-z", "wall", 0.0, 0.0, 0.0)          # -z: wall, buried in the solid
+    s.set_domain_bc("+z", "inflow", U, 0.0, 0.0)            # +z: the moving lid
     s.set_pressure_pcg(True, 400, 1e-12)
     s.diagnostics.set_velocity_solver_params(400)
     z = (np.arange(nz) + 0.5)[None, None, :]

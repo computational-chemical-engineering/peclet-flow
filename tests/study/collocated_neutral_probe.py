@@ -67,7 +67,7 @@ def make():
         if hasattr(s, "set_collocated_scheme"):
             s.set_collocated_scheme(KIND)
         else:
-            s.diagnostics.set_face_interp({"gauge-exact": 9, "plain": 0}[KIND])
+            s.set_collocated_scheme(KIND)
     s.set_solid(sdf, cutcell_pressure=True)
     return s
 

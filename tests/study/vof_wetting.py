@@ -138,7 +138,8 @@ def g1(thetas=(30.0, 60.0, 90.0, 120.0, 150.0), ratio=1.0, steps=600, R=12.0, nx
         s.set_vof(c0)
         s.set_surface_tension(sigma)
         if pivot:
-            s.diagnostics.set_contact_angle_pivot(pivot)
+            s.diagnostics.set_contact_angle_pivot(
+                ("volume", "centroid", "projected-centroid", "contact-line")[pivot])
         s.set_contact_angle(th)
         v0 = s.diagnostics.vof_diagnostics()["volume"]
         dt, maxit, capped, _ = relax(s, steps)
@@ -191,8 +192,8 @@ def g1_domain(thetas=(60.0, 90.0, 120.0), ratio=1.0, steps=500, R=12.0, nx=64, n
         s = pf.Solver(nx, nx, nz)
         s.set_rho(1.0)
         s.set_mu(mu)
-        s.set_domain_bc(4, 1)    # -z: the wetting wall
-        s.set_domain_bc(5, 1)    # +z: a lid, far from the drop
+        s.set_domain_bc("-z", "wall")    # -z: the wetting wall
+        s.set_domain_bc("+z", "wall")    # +z: a lid, far from the drop
         s.set_pressure_geometry(np.full((nx, nx, nz), 1e30, order="F"))
         s.enable_vof()
         if ratio != 1.0:

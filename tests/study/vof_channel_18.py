@@ -200,8 +200,8 @@ def main():
     s = pf.Solver(NX, NY, NZ)
     s.set_rho(RHO_L)
     s.set_mu(S * S * MU)
-    s.set_domain_bc(2, 1, 0, 0, 0)     # -y wall
-    s.set_domain_bc(3, 1, 0, 0, 0)     # +y wall
+    s.set_domain_bc("-y", "wall", 0, 0, 0)     # -y wall
+    s.set_domain_bc("+y", "wall", 0, 0, 0)     # +y wall
     s.set_pressure_geometry(np.full((NX, NY, NZ), 10.0, order="F"))
     s.set_pressure_chebyshev(True, 800, 1e-10)
 

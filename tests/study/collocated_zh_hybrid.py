@@ -14,6 +14,17 @@ import numpy as np
 from peclet import flow
 
 
+
+def _collocated_mode(s, mode):
+    """Select a collocated scheme by the integer face-interp mode this script was written with:
+    0/7/9 are the public strings ('plain' / 'embed' / 'gauge-exact'), 5/6 the diagnostics rungs,
+    and every other number was deleted at 1.0.0 (the call then raises)."""
+    names = {0: "plain", 7: "embed", 9: "gauge-exact"}
+    if mode in names:
+        s.set_collocated_scheme(names[mode])
+    else:
+        s.diagnostics.set_face_interp(mode)
+
 def lattice_sdf(N, phi=0.125):
     R = (3 * phi / (4 * np.pi)) ** (1 / 3) * N
     g = np.arange(N) + 0.5
@@ -39,7 +50,7 @@ def drag(N, mode, mu=0.1, F=1e-3, dt=80.0, warm_tol=1e-7, tail=40, max_steps=400
     s.set_pressure_multigrid(True, levels=max(2, int(np.log2(N)) - 1))
     s.set_pressure_pcg(True, 400, 1e-10)
     if mode:
-        s.diagnostics.set_face_interp(mode)
+        _collocated_mode(s, mode)
     s.set_solid(sdf, cutcell_pressure=True)
     prev, warm, um = 0.0, None, []
     for it in range(max_steps):

@@ -98,8 +98,8 @@ def gate_p0b(nx=64, ny=4, nz=4, rg=1.0, rl=100.0, mdot=0.01, x0=32.25, nsteps=20
     s.set_rho(rg)
     s.set_mu(1e-3)
     s.set_dt(1.0)
-    s.set_domain_bc(0, 1)
-    s.set_domain_bc(1, 1)
+    s.set_domain_bc("-x", "wall")
+    s.set_domain_bc("+x", "wall")
     s.set_pressure_geometry(np.full((nx, ny, nz), 1.0, order="F"))
     s.enable_vof()
     s.set_vof(planar_colour(nx, ny, nz, x0))
@@ -148,8 +148,8 @@ def stefan_run(n, st=1.0, alpha=1.0, x0p=0.10, xep=0.25, fo=0.5, ny=4, nz=4):
     s.set_rho(1.0)
     s.set_mu(1e-3)
     s.set_dt(dt)
-    s.set_domain_bc(0, 1)
-    s.set_domain_bc(1, 1)
+    s.set_domain_bc("-x", "wall")
+    s.set_domain_bc("+x", "wall")
     s.set_pressure_geometry(np.full((n, ny, nz), 1.0, order="F"))
     s.enable_vof()
     s.set_vof(planar_colour(n, ny, nz, x0p * n, liquid_low=False))
@@ -157,12 +157,12 @@ def stefan_run(n, st=1.0, alpha=1.0, x0p=0.10, xep=0.25, fo=0.5, ny=4, nz=4):
     for i in range(n):
         x = (i + 0.5) / n
         t[i, :, :] = (1.0 - math.erf(lam * x / x0p) / math.erf(lam)) if x < x0p else 0.0
-    s.add_scalar("T", d, 1, 60)
-    s.set_scalar_bc("T", 0, 2, 1.0)        # superheated wall,  T_w - T_sat = 1
-    s.set_scalar_bc("T", 1, 2, 0.0)        # saturated far field
+    s.add_scalar("T", d, "koren", 60)
+    s.set_scalar_bc("T", "-x", "dirichlet", 1.0)        # superheated wall,  T_w - T_sat = 1
+    s.set_scalar_bc("T", "+x", "dirichlet", 0.0)        # saturated far field
     s.set_field("T", t)
     s.enable_phase_change(1.0, 1.0, 1.0)   # h_lv = 1, c_p = 1  =>  St = 1
-    s.set_phase_change_thermal("T", 0.0, d, d, 0.0)
+    s.set_phase_change_thermal(True, "T", 0.0, d, d, 0.0)
     for _ in range(nsteps):
         s.apply_phase_change(dt)
         s.advance_scalars()

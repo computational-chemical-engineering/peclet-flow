@@ -24,13 +24,13 @@ def cavity(N, Ra, Pr=0.71, mu=0.05, dt=8.0, steps=3000, tol=1e-5, verbose=False)
     s = F.Solver(N, N, nz)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt)
     s.set_implicit_advection(True); s.diagnostics.set_outer_iterations(2)
-    for f in (0, 1, 2, 3):
-        s.set_domain_bc(f, 1, 0.0, 0.0, 0.0)              # no-slip walls (z periodic)
+    for f in ("-x", "+x", "-y", "+y"):
+        s.set_domain_bc(f, "wall", 0.0, 0.0, 0.0)              # no-slip walls (z periodic)
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, nz), 10.0)))
     alpha = mu / Pr
-    s.add_scalar("T", diffusivity=alpha, scheme=1, iters=50)
-    s.set_scalar_bc("T", 0, 2, 1.0); s.set_scalar_bc("T", 1, 2, 0.0)   # hot / cold walls
-    s.set_scalar_bc("T", 2, 1, 0.0); s.set_scalar_bc("T", 3, 1, 0.0)   # adiabatic top/bottom
+    s.add_scalar("T", diffusivity=alpha, scheme="koren", iters=50)
+    s.set_scalar_bc("T", "-x", "dirichlet", 1.0); s.set_scalar_bc("T", "+x", "dirichlet", 0.0)   # hot / cold walls
+    s.set_scalar_bc("T", "-y", "neumann", 0.0); s.set_scalar_bc("T", "+y", "neumann", 0.0)   # adiabatic top/bottom
     coeff = Ra * mu * mu / (Pr * N**3)                    # rho0*g*beta so that Ra hits target
     s.set_property_model("force_y", "boussinesq", "T", [1.0, coeff, 1.0, 0.5])
     x = np.arange(N)

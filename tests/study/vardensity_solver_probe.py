@@ -214,13 +214,13 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
     s.set_advection(False)                       # creeping Stokes: isolate the pressure solve
     s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)
     if case == "hydro":                          # periodic x/y, walls +-z
-        s.set_domain_bc(4, 1, 0, 0, 0)
-        s.set_domain_bc(5, 1, 0, 0, 0)
+        s.set_domain_bc("-z", "wall", 0, 0, 0)
+        s.set_domain_bc("+z", "wall", 0, 0, 0)
     elif case == "lid":                          # walls -x/+x/-z, lid at +z, periodic y
-        s.set_domain_bc(0, 1, 0, 0, 0)
-        s.set_domain_bc(1, 1, 0, 0, 0)
-        s.set_domain_bc(4, 1, 0, 0, 0)
-        s.set_domain_bc(5, 2, ULID, 0.0, 0.0)
+        s.set_domain_bc("-x", "wall", 0, 0, 0)
+        s.set_domain_bc("+x", "wall", 0, 0, 0)
+        s.set_domain_bc("-z", "wall", 0, 0, 0)
+        s.set_domain_bc("+z", "inflow", ULID, 0.0, 0.0)
     elif case == "per":                          # fully periodic + uniform body force in x
         s.set_body_force(FBODY, 0.0, 0.0)
     else:
@@ -421,10 +421,10 @@ def cheb_overhead(geom, N, ratio=1e3):
         s.set_dt(DT)
         s.set_advection(False)
         s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)
-        s.set_domain_bc(0, 1, 0, 0, 0)
-        s.set_domain_bc(1, 1, 0, 0, 0)
-        s.set_domain_bc(4, 1, 0, 0, 0)
-        s.set_domain_bc(5, 2, ULID, 0.0, 0.0)
+        s.set_domain_bc("-x", "wall", 0, 0, 0)
+        s.set_domain_bc("+x", "wall", 0, 0, 0)
+        s.set_domain_bc("-z", "wall", 0, 0, 0)
+        s.set_domain_bc("+z", "inflow", ULID, 0.0, 0.0)
         s.set_pressure_multigrid(True, levels=levels)
         if sdf is None:
             s.set_pressure_geometry(np.asfortranarray(np.full((N, N, N), 10.0)))

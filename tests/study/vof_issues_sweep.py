@@ -113,7 +113,7 @@ def scene_hysing(nx=32, nz=64, sigma=0.02):
     s = pf.Solver(nx, 4, nz)
     s.set_rho(1.0)
     s.set_mu(0.01)
-    s.set_domain_bc(4, 1); s.set_domain_bc(5, 1)
+    s.set_domain_bc("-z", "wall"); s.set_domain_bc("+z", "wall")
     s.set_pressure_geometry(np.full((nx, 4, nz), 1e30, order="F"))
     s.enable_vof()
     x, y, z = np.meshgrid(np.arange(nx) + 0.5, np.arange(4) + 0.5,
@@ -263,8 +263,8 @@ def gate_collocated():
 def half_channel(nz, top_type, mu=0.05, F=1e-3, dt=5000.0, steps=200):
     s = pf.Solver(4, 4, nz)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt)
-    s.set_domain_bc(4, 1)            # -z no-slip wall
-    s.set_domain_bc(5, top_type)     # +z: 1 = no-slip, 4 = FREE SLIP
+    s.set_domain_bc("-z", "wall")            # -z no-slip wall
+    s.set_domain_bc("+z", top_type)     # +z: 'wall' = no-slip, 'slip' = FREE SLIP
     s.set_pressure_geometry(np.full((4, 4, nz), 1e30, order="F"))
     s.set_body_force(F, 0.0, 0.0)
     for _ in range(steps):
@@ -280,7 +280,7 @@ def gate_freeslip(nz=32):
     #     the only inexact ingredient is the no-slip wall's mirror ghost (u(-h/2) = -u(h/2) is
     #     exact only for an ODD function, and z^2 is even). That offset is the NO-SLIP wall's, not
     #     the free-slip one's -- which is the point: the free-slip face contributes no error at all.
-    s = half_channel(nz, 4, mu, F)
+    s = half_channel(nz, "slip", mu, F)
     u = s.get_u()[0, 0, :]
     zc = np.arange(nz) + 0.5
     H = float(nz)
@@ -295,13 +295,13 @@ def gate_freeslip(nz=32):
     check("half-channel within h^2 of the continuum parabola", e_cont < 1e-3, f"{e_cont:.3e}")
     # (b) free slip IS symmetry: the half channel must equal the lower half of a FULL channel of
     #     twice the height with no-slip on both sides.
-    f2 = half_channel(2 * nz, 1, mu, F)
+    f2 = half_channel(2 * nz, "wall", mu, F)
     u2 = f2.get_u()[0, 0, :nz]
     d = float(np.abs(u - u2).max() / u.max())
     print(f"    vs the lower half of a {2*nz}-cell no-slip channel: max rel difference {d:.3e}")
     check("free slip == the symmetry plane of a full channel", d < 1e-9, f"{d:.3e}")
     # (c) inert when unused: a type-1 lid must reproduce a plain no-slip channel exactly.
-    a = half_channel(nz, 1, mu, F)
+    a = half_channel(nz, "wall", mu, F)
     check("type 4 unused -> nothing moves (sanity)", np.isfinite(a.get_u()).all())
 
 

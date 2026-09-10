@@ -124,10 +124,10 @@ def build(theta_deg, U, momentum=True, slip=0.0):
     s.set_rho(RHO_L)
     s.set_mu(MU_L)
     s.set_dt(0.1)
-    s.set_domain_bc(0, 2, U, 0.0, 0.0)      # -x inflow, uniform U
-    s.set_domain_bc(1, 3, 0.0, 0.0, 0.0)    # +x outflow
-    s.set_domain_bc(4, 1, 0.0, 0.0, 0.0)    # -z wall  (buried in the solid)
-    s.set_domain_bc(5, 1, 0.0, 0.0, 0.0)    # +z wall  (buried in the solid)
+    s.set_domain_bc("-x", "inflow", U, 0.0, 0.0)      # -x inflow, uniform U
+    s.set_domain_bc("+x", "outflow", 0.0, 0.0, 0.0)    # +x outflow
+    s.set_domain_bc("-z", "wall", 0.0, 0.0, 0.0)    # -z wall  (buried in the solid)
+    s.set_domain_bc("+z", "wall", 0.0, 0.0, 0.0)    # +z wall  (buried in the solid)
     # y stays periodic: the case is quasi-2D.
     s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)
     s.set_pressure_multigrid(True, levels=MG_LEVELS)
@@ -157,8 +157,8 @@ def build(theta_deg, U, momentum=True, slip=0.0):
     # THE DRIVER IS SELECTED LAST — `set_property_model("rho", ...)` fires set_density_mode, which
     # reselects Chebyshev and silently discards an earlier choice (WO-H; vof_open_boundaries.py).
     s.set_pressure_fcg(True, PRESS_CAP, PRESS_RTOL)
-    s.set_vof_inflow(0, 1.0)                # liquid enters
-    s.set_vof_backflow(1, 0.0)              # gas backflow at the outlet (inletOutlet)
+    s.set_vof_inflow("-x", 1.0)                # liquid enters
+    s.set_vof_backflow("+x", 0.0)              # gas backflow at the outlet (inletOutlet)
     return s
 
 

@@ -43,6 +43,17 @@ MU, F0 = 0.1, 1e-3
 SHIFT = np.array([float(v) for v in os.environ.get("SHIFT", "0,0,0").split(",")])  # cells
 
 
+
+def _collocated_mode(s, mode):
+    """Select a collocated scheme by the integer face-interp mode this script was written with:
+    0/7/9 are the public strings ('plain' / 'embed' / 'gauge-exact'), 5/6 the diagnostics rungs,
+    and every other number was deleted at 1.0.0 (the call then raises)."""
+    names = {0: "plain", 7: "embed", 9: "gauge-exact"}
+    if mode in names:
+        s.set_collocated_scheme(names[mode])
+    else:
+        s.diagnostics.set_face_interp(mode)
+
 def bed_sdf(N, npz):
     pk = np.load(npz)
     box = np.asarray(pk["box"], float)
@@ -82,17 +93,17 @@ if KIND != "stag":
     elif KIND == "ghost":
         s.diagnostics.set_ghost_projection(True)         # fluid-only constraint + directional closures (route 2)
     elif KIND == "fluidonly":
-        s.diagnostics.set_fluid_only_constraint(1)       # Design A: fluid-only openness filter + gauge-exact G
+        s.diagnostics.set_fluid_only_constraint("filter")       # Design A: fluid-only openness filter + gauge-exact G
     elif KIND.startswith("fluidonly2"):
-        s.diagnostics.set_fluid_only_constraint(2)       # Design B: SPD Kron star elimination + gauge-exact G
+        s.diagnostics.set_fluid_only_constraint("star")       # Design B: SPD Kron star elimination + gauge-exact G
         if "_m" in KIND:                     # e.g. fluidonly2_m13: pair with another cell gradient
-            s.diagnostics.set_face_interp(int(KIND.split("_m")[1]))
+            _collocated_mode(s, int(KIND.split("_m")[1]))
     elif KIND.startswith("mode"):
-        s.diagnostics.set_face_interp(int(KIND[4:]))     # numbered ablations (e.g. mode3 = adjoint (T,T^T) pair)
+        _collocated_mode(s, int(KIND[4:]))     # numbered ablations (e.g. mode3 = adjoint (T,T^T) pair)
     elif hasattr(s, "set_collocated_scheme"):
         s.set_collocated_scheme(KIND)
     else:
-        s.diagnostics.set_face_interp({"gauge-exact": 9, "plain": 0}[KIND])
+        s.set_collocated_scheme(KIND)
 if not ROT:
     s.diagnostics.set_rotational_pressure(False)
 if ROTF:

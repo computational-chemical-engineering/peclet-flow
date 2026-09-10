@@ -30,7 +30,7 @@ import peclet.flow as F
 def hydrostatic(ratio, mu=0.0, steps=100, g=0.1, dt=1.0, N=8, NZ=24):
     s = F.Solver(N, N, NZ)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt)
-    s.set_domain_bc(4, 1, 0, 0, 0); s.set_domain_bc(5, 1, 0, 0, 0)   # walls +-z
+    s.set_domain_bc("-z", "wall", 0, 0, 0); s.set_domain_bc("+z", "wall", 0, 0, 0)   # walls +-z
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, NZ), 10.0)))
     z = np.arange(NZ)
     rz = np.where(z < NZ // 2, ratio, 1.0).astype(np.float64)        # heavy below (stable)
@@ -53,10 +53,10 @@ def rayleigh_taylor(N=48, NZ=96, g=0.005, mu=0.002, dt=1.0, steps=240):
     s = F.Solver(N, 4, NZ)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt)
     s.set_advection(True)
-    s.set_domain_bc(4, 1, 0, 0, 0); s.set_domain_bc(5, 1, 0, 0, 0)
+    s.set_domain_bc("-z", "wall", 0, 0, 0); s.set_domain_bc("+z", "wall", 0, 0, 0)
     s.set_pressure_geometry(np.asfortranarray(np.full((N, 4, NZ), 10.0)))
-    s.add_scalar("c", diffusivity=0.0, scheme=1, iters=1)
-    s.set_scalar_bc("c", 4, 1, 0.0); s.set_scalar_bc("c", 5, 1, 0.0)
+    s.add_scalar("c", diffusivity=0.0, scheme="koren", iters=1)
+    s.set_scalar_bc("c", "-z", "neumann", 0.0); s.set_scalar_bc("c", "+z", "neumann", 0.0)
     s.set_property_model("rho", "linear", "c", [1.0, 2.0])            # rho = 1 + 2c (ratio 3)
     s.set_property_model("force_z", "linear", "rho", [0.0, -g])
     x, z = np.arange(N), np.arange(NZ)
@@ -108,7 +108,7 @@ def rayleigh_taylor_vof(N=48, NZ=96, g=0.005, mu=0.002, steps=240, cfl=0.2, dt0=
     s = F.Solver(N, 4, NZ)
     s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt0)
     s.set_advection(True)
-    s.set_domain_bc(4, 1, 0, 0, 0); s.set_domain_bc(5, 1, 0, 0, 0)
+    s.set_domain_bc("-z", "wall", 0, 0, 0); s.set_domain_bc("+z", "wall", 0, 0, 0)
     s.set_pressure_geometry(np.asfortranarray(np.full((N, 4, NZ), 10.0)))
     s.enable_vof()
     x, z = np.arange(N), np.arange(NZ)

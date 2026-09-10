@@ -27,8 +27,8 @@ def run(N=128, Re=100.0, U=1.0, nz=4, max_steps=9000):
     nu = U * N / Re
     s = sdflow.SolverColocated(N, N, nz)
     s.set_rho(1.0); s.set_mu(nu); s.set_dt(1.0); s.set_advection(True)
-    s.set_domain_bc(0, 1); s.set_domain_bc(1, 1); s.set_domain_bc(2, 1)   # -x, +x, -y no-slip
-    s.set_domain_bc(3, 2, U, 0.0, 0.0)                                    # +y lid moving in +x
+    s.set_domain_bc("-x", "wall"); s.set_domain_bc("+x", "wall"); s.set_domain_bc("-y", "wall")   # -x, +x, -y no-slip
+    s.set_domain_bc("+y", "inflow", U, 0.0, 0.0)                                    # +y lid moving in +x
     s.diagnostics.set_velocity_solver_params(60)
     s.set_pressure_pcg(True, 400, 1e-9)
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, nz), 1e30)))  # all-fluid + Neumann walls
