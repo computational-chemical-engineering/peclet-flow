@@ -3147,36 +3147,40 @@ class Solver {
     double phaseChange = 0.0; ///< the Part II phase-change stage (mdot, deposit, regression)
     long steps = 0;
   };
-  void setVofTiming(bool on) {
-    vofTiming_ = on;
-    vofAdv_.timingOn = on;
-    vofCurv_.timingOn = on;
-    resetVofTiming();
-  }
-  bool vofTiming() const { return vofTiming_; }
-  void resetVofTiming() {
-    vt_ = VofTiming();
-    vofAdv_.resetTiming();
-    vofCurv_.resetTiming();
-    tStepSum_ = tPredSum_ = tMomSum_ = tProjSum_ = 0.0;
-  }
-  const VofTiming& vofTimingReport() const { return vt_; }
-  const vof::WyAdvector::Timing& vofKernelTiming() const { return vofAdv_.timing(); }
-  const vof::VofCurvature::Timing& vofCurvatureTiming() const { return vofCurv_.timing(); }
-  /// `VofCurvature::useWorklist` — run the height-function cascade and the PV fallback over a
+  void setVofTiming(bool on);
+
+bool vofTiming() const;
+
+void resetVofTiming();
+
+const VofTiming& vofTimingReport() const;
+
+const vof::WyAdvector::Timing& vofKernelTiming() const;
+
+const vof::VofCurvature::Timing& vofCurvatureTiming() const;
+
+/// `VofCurvature::useWorklist` — run the height-function cascade and the PV fallback over a
   /// COMPACTED list of the interfacial cells instead of over the whole inner region. See the
   /// binding docstring and the WO-V9 findings for what it is worth and why.
-  void setVofCurvatureWorklist(bool on) { vofCurv_.useWorklist = on; }
-  bool vofCurvatureWorklist() const { return vofCurv_.useWorklist; }
-  double vofTimingStepSeconds() const { return tStepSum_; }
-  double vofTimingPredictorSeconds() const { return tPredSum_; }
-  double vofTimingMomentumSeconds() const { return tMomSum_; }
-  double vofTimingProjectionSeconds() const { return tProjSum_; }
-  /// `WyAdvector::useWorklist` — the compaction of the PLIC reconstruction pass onto the mixed
+  void setVofCurvatureWorklist(bool on);
+
+bool vofCurvatureWorklist() const;
+
+double vofTimingStepSeconds() const;
+
+double vofTimingPredictorSeconds() const;
+
+double vofTimingMomentumSeconds() const;
+
+double vofTimingProjectionSeconds() const;
+
+/// `WyAdvector::useWorklist` — the compaction of the PLIC reconstruction pass onto the mixed
   /// cells. Pure optimization: off must reproduce the same field bit for bit.
-  void setVofWorklist(bool on) { vofAdv_.useWorklist = on; }
-  bool vofWorklist() const { return vofAdv_.useWorklist; }
-  double lastPressureAllreduceSeconds() const { return mg_.allreduceSeconds(); }
+  void setVofWorklist(bool on);
+
+bool vofWorklist() const;
+
+double lastPressureAllreduceSeconds() const { return mg_.allreduceSeconds(); }
   long lastPressureAllreduceCount() const { return mg_.allreduceCount(); }
   int nx() const { return nx_; }
   int ny() const { return ny_; }
@@ -3365,63 +3369,9 @@ class Solver {
   // Allocate the colour field's own g=3 working block and wire its ghost/all-reduce hooks. Called
   // by enableVof() and again by any path that re-sizes the block (redistribute -> initMpi), since
   // the advector's block must track the solver's.
-  void buildVofBlock() {
-    vofAdv_.init(nx_, ny_, nz_, 1.0, kVofG);  // h = 1: flow works in cell units
-    vofAdv_.cflLimit = vofCflLimit_;
-    vofAdv_.interfaceLocalCfl = true;  // WO-J item 4 — see maxCourantInterface()
-    const I3 e3 = vofAdv_.extent();
-    e3_ = C3{e3.x, e3.y, e3.z};
-    vofAdv_.exchange = [this](CCField f) { this->vofFillGhosts(f); };
-    vofAdv_.globalMax = nullptr;
-#ifdef PECLET_FLOW_MPI
-    if (distributed_ && dec_) {
-      int rank = 0;
-      MPI_Comm_rank(comm_, &rank);
-      // Periodic on all three axes, exactly like the velocity halo: the halo owns every interior
-      // ghost and wraps the global boundary, and vofFillGhosts then overwrites the out-of-domain
-      // ghosts of any non-periodic axis with the globally-clamped value.
-      std::array<bool, 3> per{true, true, true};
-      vofHalo_ = std::make_shared<GridHaloTopology<3>>();
-      vofHalo_->buildTopology(*dec_, rank, kVofG, per, comm_);
-      vofDev_ = std::make_shared<GridHalo<double>>();
-    vofDev_->setLabel("vof g3");
-      vofDev_->init(*vofHalo_);
-      MPI_Comm cm = comm_;
-      vofAdv_.globalMax = [cm](double v) {
-        double r = v;
-        MPI_Allreduce(&v, &r, 1, MPI_DOUBLE, MPI_MAX, cm);
-        return r;
-      };
-    }
-#endif
-    buildVofGeometry();  // rung V5a (WO-Q): openness + fluid fraction on the colour block
-    // WO-R: the out-of-domain mask and the resampled boundary-colour profiles are properties of
-    // THIS block, so they are (re)built with it — and the mask is only INSTALLED on the advector
-    // when a VoF boundary colour has actually been set, which is what keeps the V1 flux path
-    // bit-identical otherwise (gate G5).
-    vofRebuildBcBlock();
-    // The half-shifted momentum CVs live on this same block, so they are rebuilt with it.
-    vofCurv_.init(nx_, ny_, nz_, kVofG);
-    if (vofMomEnabled_) {
-      vofMom_.init(vofAdv_, vofRhoG_, vofRhoL_);
-      for (int c = 0; c < 3; ++c)
-        if (uAdv_[c].extent(0) != n_)
-          uAdv_[c] = CCField("uAdv", n_);
-    }
-    // The other drivers that live on THIS block and are initialised lazily: their own `ready()` /
-    // `initialized()` predicates ask "has init run", not "is it the right size", so a
-    // re-decomposition has to re-init them here or they keep the previous block's allocations
-    // while every kernel indexes them with the new `e3_`.
-    const std::size_t blockLen = (std::size_t)e3_.x * e3_.y * e3_.z;
-    if (pcAreaC_.ready() && pcAreaC_.area().extent(0) != blockLen)
-      pcAreaC_.init(nx_, ny_, nz_, kVofG);
-    if (pcAreaMc_.ready() && pcAreaMc_.area().extent(0) != blockLen)
-      pcAreaMc_.init(nx_, ny_, nz_, kVofG);
-    if (vofEnergy_.initialized() && vofEnergy_.temperature().extent(0) != blockLen)
-      vofEnergy_.init(vofAdv_, pcRcpG_, pcRcpL_);
-    bindVofBlockPatch();  // rung W0: the block exchange's Views were just reallocated
-  }
-  // --- rung V5a (WO-Q): the cut-cell geometry of the colour block ------------------------------
+  void buildVofBlock();
+
+// --- rung V5a (WO-Q): the cut-cell geometry of the colour block ------------------------------
   //
   // The advector needs, on ITS g=3 block and in ITS high-face index convention, the face openness
   // `o_d` and the cell fluid fraction `eps`. Both are built here and both are then run through the
@@ -3451,91 +3401,16 @@ class Solver {
   // plus the matching wall SDF (`applyContactAngle`), after which WO-S's theta pass, WO-Q's
   // passes 2-3, the branch census and the V6 dynamic angle all run unchanged, with `n_w` coming
   // out of the same central difference and equalling the inward face normal by construction.
-  int vofWetWallMask() const {
-    if (!vofEnabled_ || !contactAngleSet_)
-      return 0;
-    int m = 0;
-    for (int f = 0; f < 6; ++f)
-      if (bc_[f] == 1 || bc_[f] == 4)
-        m |= (1 << f);
-    return m;
-  }
-  // Signed distance (cell units, POSITIVE inside the domain) from a cell centre at GLOBAL index
+  int vofWetWallMask() const;
+
+// Signed distance (cell units, POSITIVE inside the domain) from a cell centre at GLOBAL index
   // (gx,gy,gz) to the nearest wetting domain wall plane. Container-free so a device lambda can
   // call it. `+inf` when no face is a wetting wall.
-  KOKKOS_INLINE_FUNCTION static double vofWallPlaneSdf(int gx, int gy, int gz, I3 gs, int mask) {
-    const int gi[3] = {gx, gy, gz};
-    const int q[3] = {gs.x, gs.y, gs.z};
-    double d = 1e30;
-    for (int a = 0; a < 3; ++a) {
-      const double c = (double)gi[a] + 0.5;
-      if (mask & (1 << (2 * a)))
-        d = Kokkos::fmin(d, c);
-      if (mask & (1 << (2 * a + 1)))
-        d = Kokkos::fmin(d, (double)q[a] - c);
-    }
-    return d;
-  }
-  void buildVofGeometry() {
-    if (!vofEnabled_)
-      return;
-    const int wet = vofWetWallMask();
-    if ((!hasSolid_ || !cutcellPressure_) && !wet) {
-      vofAdv_.disableGeometry();  // all-fluid: the V1 kernels run byte-identically
-      vofAdv_.disableWetting();
-      vofSolidG2_ = CCField();
-      return;
-    }
-    if (wet && !cutcellPressure_)
-      throw std::runtime_error(
-          "set_contact_angle: a wetting DOMAIN wall (bc type 1/4) needs a cut-cell pressure "
-          "operator, because the colour transport weights its geometric fluxes with the face "
-          "openness. Build one with set_pressure_geometry(all_fluid_sdf) (all-fluid) or "
-          "set_solid(sdf, cutcell_pressure=True).");
-    vofAdv_.enableGeometry();
-    if (hasSolid_ && cutcellPressure_) {
-      if (vofCs_.extent(0) != n_)
-        vofCs_ = CCField("vofCs", n_);
-      buildCellFraction(vofCs_, CCConst(sdf_), e_,
-                        G);  // inner region; ghosts come from the exchange
-      copyInner(vofAdv_.epsFraction(), e3_, kVofG, CCConst(vofCs_), e_, G);
-      vofExchangeRaw(vofAdv_.epsFraction());
-      CCField oa[3] = {ox_, oy_, oz_};
-      for (int d = 0; d < 3; ++d) {
-        vof::copyFaceVelocity(vofAdv_.faceOpenness(d), I3{e3_.x, e3_.y, e3_.z}, kVofG, oa[d],
-                              I3{e_.x, e_.y, e_.z}, G, d);
-        vofExchangeRaw(vofAdv_.faceOpenness(d));
-      }
-    } else {
-      // Domain walls only: the trivial geometry (every cell whole, every face open) is exactly
-      // what the uncut kernels compute, and `applyDomainWallGeometry` then closes the band.
-      Kokkos::deep_copy(vofAdv_.epsFraction(), 1.0);
-      for (int d = 0; d < 3; ++d)
-        Kokkos::deep_copy(vofAdv_.faceOpenness(d), 1.0);
-    }
-    if (wet)
-      applyDomainWallGeometry(wet);
-    vofAdv_.classifyGeometry();
-    vofExchangeRaw(vofAdv_.kindDouble());  // the owner's classification into every ghost layer
-    // ISSUES sweep item 3: that exchange ends in `clampFill`, whose zero-gradient copy would set
-    // the out-of-domain band back to the first INNER cell's classification (fluid) -- the band
-    // is the one region with no owner, so it has to be re-imposed here. Without this the whole
-    // domain-wall fill is silently inert (measured: contact census 0, equilibrium ~141 deg at
-    // every prescribed angle, i.e. the perfectly non-wetting empty band).
-    if (wet)
-      imposeDomainWallKind(wet);
-    vofAdv_.finalizeGeometry();
-    // The G=2 mirror of the classification: the canonical "C" field reports EXACTLY 0 in solid
-    // cells (gate G2), while the g=3 working block carries the neutral band fill that the MYC and
-    // height-function stencils need. The fill is regenerated deterministically by every
-    // `vofFillGhosts`, so nothing is lost by not persisting it.
-    if (vofSolidG2_.extent(0) != n_)
-      vofSolidG2_ = CCField("vofSolidG2", n_);
-    copyInner(vofSolidG2_, e_, G, CCConst(vofAdv_.kindDouble()), e3_, kVofG);
-    applyContactAngle();  // rung V5b (WO-S): re-wire the theta field / wall SDF onto the new block
-    zeroSolidColour();
-  }
-  // ISSUES sweep item 3: close the colour block's out-of-domain band across every wetting domain
+  KOKKOS_INLINE_FUNCTION static double vofWallPlaneSdf(int gx, int gy, int gz, I3 gs, int mask);
+
+void buildVofGeometry();
+
+// ISSUES sweep item 3: close the colour block's out-of-domain band across every wetting domain
   // wall, so `classifyGeometry` calls those ghost cells SOLID and WO-S's theta pass owns them.
   //
   // The rule is the one the SDF path uses, evaluated on an exact plane: a cell whose centre lies
@@ -3544,310 +3419,73 @@ class Solver {
   // nothing in the projection moves) AND all six faces of every band cell, which is what
   // `vofIsSolidCell` requires. Composes with an SDF solid: the solid's eps/openness are simply
   // masked to zero outside the wall.
-  void applyDomainWallGeometry(int mask) {
-    const I3 gs = vofGlobalSize(), org = vofOrigin();
-    const C3 e = e3_;
-    const int g = kVofG, mk = mask;
-    CCField ep = vofAdv_.epsFraction();
-    CCField of[3] = {vofAdv_.faceOpenness(0), vofAdv_.faceOpenness(1), vofAdv_.faceOpenness(2)};
-    CCField ofx = of[0], ofy = of[1], ofz = of[2];
-    Kokkos::parallel_for(
-        "peclet::flow::vof_domain_wall_geom",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          const int gx = x - g + org.x, gy = y - g + org.y, gz = z - g + org.z;
-          auto inside = [&](int ax, int ay, int az) {
-            const int gi[3] = {ax, ay, az};
-            const int q[3] = {gs.x, gs.y, gs.z};
-            for (int a = 0; a < 3; ++a) {
-              if ((mk & (1 << (2 * a))) && gi[a] < 0)
-                return false;
-              if ((mk & (1 << (2 * a + 1))) && gi[a] >= q[a])
-                return false;
-            }
-            return true;
-          };
-          const bool in0 = inside(gx, gy, gz);
-          if (!in0)
-            ep(i) = 0.0;
-          // the advector's HIGH-face convention: of[d](i) is the +d face of cell i
-          if (!in0 || !inside(gx + 1, gy, gz))
-            ofx(i) = 0.0;
-          if (!in0 || !inside(gx, gy + 1, gz))
-            ofy(i) = 0.0;
-          if (!in0 || !inside(gx, gy, gz + 1))
-            ofz(i) = 0.0;
-        });
-    CCExec().fence();
-  }
-  // ISSUES sweep item 3: mark the out-of-domain band SOLID after the classification exchange
+  void applyDomainWallGeometry(int mask);
+
+// ISSUES sweep item 3: mark the out-of-domain band SOLID after the classification exchange
   // (see the call site for why the exchange undoes it).
-  void imposeDomainWallKind(int mask) {
-    const I3 gs = vofGlobalSize(), org = vofOrigin();
-    const C3 e = e3_;
-    const int g = kVofG, mk = mask;
-    CCField kd = vofAdv_.kindDouble();
-    Kokkos::parallel_for(
-        "peclet::flow::vof_domain_wall_kind",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          const int gi[3] = {x - g + org.x, y - g + org.y, z - g + org.z};
-          const int q[3] = {gs.x, gs.y, gs.z};
-          for (int a = 0; a < 3; ++a) {
-            if (((mk & (1 << (2 * a))) && gi[a] < 0) ||
-                ((mk & (1 << (2 * a + 1))) && gi[a] >= q[a])) {
-              kd(i) = 1.0;
-              return;
-            }
-          }
-        });
-    CCExec().fence();
-  }
-  // ISSUES sweep item 3: the outermost (depth-3) band layer of a wetting DOMAIN wall is the one
+  void imposeDomainWallKind(int mask);
+
+// ISSUES sweep item 3: the outermost (depth-3) band layer of a wetting DOMAIN wall is the one
   // cell no fill pass can write -- the passes stop at ghost depth 3-k and their 6-point stencil
   // would index outside the g=3 block there -- and the zero-gradient clamp that used to supply it
   // is now skipped (it would wipe the theta band). Continue the band outward instead: depth 3
   // takes depth 2's value, the zero-slope continuation of the theta plane rather than of the first
   // INNER cell's colour. For an SDF wall this cell is an ordinary solid cell and nothing here
   // applies.
-  void vofExtendWallBand(CCField f, int mask) {
-    const I3 gs = vofGlobalSize(), org = vofOrigin();
-    const C3 e = e3_;
-    const int g = kVofG;
-    for (int a = 0; a < 3; ++a)
-      for (int sd = 0; sd < 2; ++sd) {
-        if (!(mask & (1 << (2 * a + sd))))
-          continue;
-        const int q = (a == 0) ? gs.x : (a == 1) ? gs.y : gs.z;
-        const int o = (a == 0) ? org.x : (a == 1) ? org.y : org.z;
-        // block-local index of the depth-3 and depth-2 layers on this face
-        const int i3 = (sd == 0) ? (-3 - o + g) : (q - o + g + 2);
-        const int i2 = (sd == 0) ? (-2 - o + g) : (q - o + g + 1);
-        const int dims[3] = {e.x, e.y, e.z};
-        if (i3 < 0 || i3 >= dims[a] || i2 < 0 || i2 >= dims[a])
-          continue;  // this rank's block does not own that face
-        const long st[3] = {1, (long)e.x, (long)e.x * (long)e.y};
-        const int b = (a + 1) % 3, c = (a + 2) % 3;
-        const long sa = st[a], sb = st[b], sc = st[c];
-        CCField ff = f;
-        Kokkos::parallel_for(
-            "peclet::flow::vof_extend_wall_band",
-            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(CCExec(), {0, 0}, {dims[b], dims[c]}),
-            KOKKOS_LAMBDA(int p0, int p1) {
-              const long base = (long)p0 * sb + (long)p1 * sc;
-              ff(base + (long)i3 * sa) = ff(base + (long)i2 * sa);
-            });
-      }
-    CCExec().fence();
-  }
-  // Zero the canonical G=2 colour field inside solid cells (see buildVofGeometry).
-  void zeroSolidColour() {
-    if (!vofEnabled_ || !vofAdv_.hasGeometry() || !vofSolidG2_.extent(0) || !vofSolidZero_)
-      return;
-    // `vofSolidG2_` lives on the EXTENDED G=2 block (copyInner wrote it at (x+G, y+G, z+G)), so it
-    // is indexed exactly like cField_ — indexing it as an inner-sized array reads the wrong cells
-    // and silently zeroes live fluid colour (measured: 0.5 % of the liquid volume lost per step).
-    CCField c = cField_;
-    CCConst sl = CCConst(vofSolidG2_);
-    const int ex = e_.x, ey = e_.y, g = G;
-    Kokkos::parallel_for(
-        "peclet::flow::vof_zero_solid",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey;
-          if (sl(i) > 0.5)
-            c(i) = 0.0;
-        });
-    CCExec().fence();
-  }
-  // Is axis `a` periodic for the colour field? flow's per-face bc_ is 0 (periodic) on BOTH ends of
+  void vofExtendWallBand(CCField f, int mask);
+
+// Zero the canonical G=2 colour field inside solid cells (see buildVofGeometry).
+  void zeroSolidColour();
+
+// Is axis `a` periodic for the colour field? flow's per-face bc_ is 0 (periodic) on BOTH ends of
   // a periodic axis, so an axis is periodic iff neither of its faces carries a domain BC.
-  bool vofAxisPeriodic(int a) const { return bc_[2 * a] == 0 && bc_[2 * a + 1] == 0; }
-  // The colour field's ghost policy on its own g=3 block: halo/periodic base, then zero-gradient
+  bool vofAxisPeriodic(int a) const;
+
+// The colour field's ghost policy on its own g=3 block: halo/periodic base, then zero-gradient
   // (globally clamped) on every non-periodic axis. Zero-gradient is the same policy the material
   // properties get (`fillPropGhosts`) — a wall neither creates nor destroys colour, and the MYC
   // stencil of an inner boundary cell must see a plausible continuation rather than a wrap from the
   // far side of the domain. Prescribing C at an inflow face is a V5+ concern (it needs a flux BC,
   // not a ghost value) and is not offered here.
-  void vofFillGhosts(CCField f) {
-    vofExchangeRaw(f);
-    // Rung V5a (WO-Q): the neutral (90 deg) solid-band fill, for the COLOUR field only. It is a
-    // stencil device, not transported data — the MYC 3^3 stencil and the V3 height-function
-    // columns of a near-wall cell reach into the solid, and leaving those cells at 0 makes every
-    // wall perfectly non-wetting. Three passes with a shrinking depth budget (`vof/cutcell.hpp`),
-    // then a SECOND exchange so the outermost ghost layer holds its owner's filled value (the
-    // passes only reach ghost depth 2, and the curvature cascade reads depth 3).
-    if (vofAdv_.hasGeometry() && f.data() == vofAdv_.colour().data()) {
-      // Rung V5b (WO-S): the theta-consistent pass 1 reads the FLUID-ONLY Youngs normal of the
-      // anchor fluid cell, which the pass may reach at ghost depth 3 — one deeper than a 3^3
-      // stencil can be evaluated on this block. Build it on the INNER region and run it through
-      // the block's own ghost policy, exactly as the geometry classification is: every read the
-      // theta pass then makes is the OWNER's value, which is what keeps the inner fill
-      // decomposition-independent.
-      if (vofAdv_.hasWetting()) {
-        vofAdv_.buildWettingNormals();
-        for (int d = 0; d < 3; ++d)
-          vofExchangeRaw(vofAdv_.wettingNormal(d));
-        // Rung V6 (WO-V6): produce the theta FIELD the pass is about to read. Pass A measures the
-        // apparent angle and the raw contact-line speed at ghost depth <= 2 from already-exchanged
-        // data; both are then exchanged so the 3-point in-wall smoothing of pass B, which reaches
-        // depth 3, reads the OWNER's values — the same argument that makes the V5b fill bitwise
-        // across np. Five extra exchanges per fill (three velocity components + two measurements),
-        // skipped entirely when no dynamic angle is configured.
-        if (vofDyn_.active() && vofDyn_.allocated()) {
-          buildVofCellVelocity();
-          vofDyn_.sigma = effectiveContactSigma();
-          if (!(vofDyn_.sigma > 0.0) && vofDyn_.dynamic && !contactSigmaWarned_) {
-            contactSigmaWarned_ = true;
-            std::fprintf(stderr,
-                         "peclet.flow: set_contact_angle_dynamic is active but sigma is 0 "
-                         "(no set_surface_tension and no explicit sigma) - Ca_cl is 0 and the "
-                         "Cox-Voinov correction is inert.\n");
-          }
-          vofDyn_.measure(vofAdv_);
-          vofExchangeRaw(vofDyn_.uclRaw());
-          vofExchangeRaw(vofDyn_.valid());
-          vofDyn_.impose(vofAdv_);
-        }
-      }
-      vofAdv_.solidBandFill();
-      if (const int wet = vofWetWallMask())
-        vofExtendWallBand(f, wet);  // ISSUES sweep item 3: the depth-3 layer no pass can write
-      vofExchangeRaw(f);
-    }
-  }
-  void vofExchangeRaw(CCField f) {
-    const bool px = vofAxisPeriodic(0), py = vofAxisPeriodic(1), pz = vofAxisPeriodic(2);
-#ifdef PECLET_FLOW_MPI
-    if (distributed_ && vofDev_)
-      vofDev_->exchange(f);
-    else
-#endif
-      vof::periodicFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, px, py, pz);
-    if (px && py && pz)
-      return;
-    const I3 gs = vofGlobalSize(), org = vofOrigin();
-    // ISSUES sweep item 3: the theta band of a wetting DOMAIN wall lives in exactly the ghost
-    // cells `clampFill` would overwrite with the zero-gradient copy, so the colour field skips
-    // the clamp there and `vofFillGhosts` owns that band instead. 0 for every other field and
-    // for every configuration without a domain-wall contact angle -> byte-identical.
-    const int skip = (f.data() == vofAdv_.colour().data()) ? vofWetWallMask() : 0;
-    vof::clampFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, org, gs, px, py, pz, skip);
-    vofApplyColourBc(f);  // WO-R: inflow / inletOutlet backflow; a no-op unless one is set
-  }
-  I3 vofGlobalSize() const {
-#ifdef PECLET_FLOW_MPI
-    if (distributed_)
-      return I3{gnx_, gny_, gnz_};
-#endif
-    return I3{nx_, ny_, nz_};
-  }
-  // Global index of this block's inner cell (0,0,0). og_ is exactly that (originInclGhost + G).
-  I3 vofOrigin() const { return I3{og_.x, og_.y, og_.z}; }
-  // Face velocities -> the advector's g=3 block. The advecting field must be the PROJECTED one
+  void vofFillGhosts(CCField f);
+
+void vofExchangeRaw(CCField f);
+
+I3 vofGlobalSize() const;
+
+// Global index of this block's inner cell (0,0,0). og_ is exactly that (originInclGhost + G).
+  I3 vofOrigin() const;
+
+// Face velocities -> the advector's g=3 block. The advecting field must be the PROJECTED one
   // (see advectVof), and its ghost ring must be valid because the advector reads the `-d` face of
   // the first inner cell, which is a ghost cell's `+d` face. fillVelGhosts is the solver's own
   // halo+domain-BC fill and is exactly what the Picard loop does at the top of every iteration, so
   // calling it here leaves the velocity ghosts in the state the next consumer would have produced.
-  void bridgeVelocityToVof() {
-    // Rung V8 (WO-T): on the collocated grid the divergence-free field is the PROJECTED MAC face
-    // field uf_/vf_/wf_, not the cell field — and it is in flow's own low-face convention
-    // (`uf(i) = 1/2(U(i)+U(i-1))` sits at i-1/2, the -x face of cell i), the SAME convention
-    // `getFaceVelocity` reports and `copyFaceVelocity` shifts. So the bridge is the identical call
-    // on a different source view; the cell field never enters the colour transport.
-    if constexpr (Grid::collocated) {
-      CCField fa[3] = {uf_, vf_, wf_};
-      for (int c = 0; c < 3; ++c) {
-        fillGhosts(fa[c]);  // the face field's own ghost policy (project() does exactly this)
-        vof::copyFaceVelocity(vofAdv_.faceVel(c), I3{e3_.x, e3_.y, e3_.z}, kVofG, fa[c],
-                              I3{e_.x, e_.y, e_.z}, G, c);
-      }
-      return;
-    }
-    for (int c = 0; c < 3; ++c) {
-      // KEEP the projection's outflow-face correction when there IS one (see
-      // fillVelGhostsKeepOutflow): the full fill would overwrite it with the zero-gradient copy
-      // and hand the advector a field that is not divergence-free at the outlet. When no
-      // projection has run since the last full fill — the KINEMATIC path, where the caller
-      // prescribes the velocity on the inner cells and the boundary face has never been set —
-      // the zero-gradient fill is exactly what supplies that face, so run the full one.
-      // With no outflow face at all the two are identical.
-      if (outflowCorrValid_)
-        fillVelGhostsTo(C[c].u, c, 0, false);
-      else
-        fillVelGhosts(c, 0);
-      // The uniform face-velocity seam (getFaceVelocity): staggered C[c].u already lives on the
-      // faces. copyFaceVelocity carries the low-face -> high-face index shift; see
-      // colour_field.hpp.
-      vof::copyFaceVelocity(vofAdv_.faceVel(c), I3{e3_.x, e3_.y, e3_.z}, kVofG, C[c].u,
-                            I3{e_.x, e_.y, e_.z}, G, c);
-    }
-  }
-  // --- rung W0: the block container's view of this rank's patch --------------------------------
+  void bridgeVelocityToVof();
+
+// --- rung W0: the block container's view of this rank's patch --------------------------------
   // The owned inner box of every rank, in global cells — the table the block gather/scatter pieces
   // are cut against. It is a function of the CURRENT decomposition, so it is built here rather
   // than inlined at `enable_vof_blocks`: a redistribute has to push the new one through
   // `bindVofBlockPatch` or every piece keeps addressing the previous partition.
-  std::vector<vof::VofBox> vofBlockRankBoxes(int size) const {
-    std::vector<vof::VofBox> rb(static_cast<std::size_t>(size));
-    const I3 gs = vofGlobalSize();
-#ifdef PECLET_FLOW_MPI
-    if (distributed_ && dec_) {
-      for (int r = 0; r < size; ++r) {
-        const auto b = dec_->block(static_cast<std::size_t>(r));
-        for (int d = 0; d < 3; ++d) {
-          rb[r].lo[d] = static_cast<int>(b.origin[d]);
-          rb[r].hi[d] = static_cast<int>(b.origin[d] + b.size[d]);
-        }
-      }
-      return rb;
-    }
-#endif
-    rb[0].hi[0] = gs.x;
-    rb[0].hi[1] = gs.y;
-    rb[0].hi[2] = gs.z;
-    return rb;
-  }
-  // The gather reads the face velocity in the ADVECTOR's high-face convention on the g=3 block,
+  std::vector<vof::VofBox> vofBlockRankBoxes(int size) const;
+
+// The gather reads the face velocity in the ADVECTOR's high-face convention on the g=3 block,
   // i.e. exactly what `bridgeVelocityToVof` writes, and the scatter writes the union into that
   // same block's colour. `buildVofBlock` reallocates those Views, so the binding is refreshed
   // there — a stale View here would silently gather from freed memory.
-  void bindVofBlockPatch() {
-    if (!vofBlockExch_)
-      return;
-    // The rank table first, for the same reason: `buildVofBlock` runs on every re-decomposition
-    // (redistribute -> initMpi), and the pieces are meaningless against the old boxes.
-    int size = 1;
-#ifdef PECLET_FLOW_MPI
-    if (distributed_)
-      MPI_Comm_size(comm_, &size);
-#endif
-    vofBlockExch_->setRankBoxes(vofBlockRankBoxes(size));
-    vof::VofBlockExchange::Patch pp;
-    pp.e = I3{e3_.x, e3_.y, e3_.z};
-    pp.n = I3{nx_, ny_, nz_};
-    pp.o = vofOrigin();
-    pp.g = kVofG;
-    vofBlockExch_->setPatch(pp, vofAdv_.faceVel(0), vofAdv_.faceVel(1), vofAdv_.faceVel(2));
-  }
-  // The union colour on the g=3 block -> the canonical registered "C" (+ its ghost policy, the
-  // same `fillPropGhosts` rho and mu are derived through).
-  void harvestVofBlockUnion() {
-    copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
-    fillPropGhosts(cField_);
-  }
+  void bindVofBlockPatch();
 
-  // Colour: G=2 registry mirror -> the g=3 working block, then the colour field's own ghost policy.
+// The union colour on the g=3 block -> the canonical registered "C" (+ its ghost policy, the
+  // same `fillPropGhosts` rho and mu are derived through).
+  void harvestVofBlockUnion();
+
+// Colour: G=2 registry mirror -> the g=3 working block, then the colour field's own ghost policy.
   // Inner cells only in the copy — the two blocks have different ghost extents and each fills its
   // own (the one bridge; see the enableVof note).
-  void bridgeColourToVof() {
-    copyInner(vofAdv_.colour(), e3_, kVofG, CCConst(cField_), e_, G);
-    vofFillGhosts(vofAdv_.colour());
-  }
+  void bridgeColourToVof();
 
-  // Staggered face stride of velocity component c (the -c face of cell i pairs cells i and i-s).
+// Staggered face stride of velocity component c (the -c face of cell i pairs cells i and i-s).
   long strideOf(int c) const { return (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y; }
   // The face-property accessor for the momentum stencil of component c: mu constant-or-field
   // (arithmetic/harmonic mean), rho constant-or-field (arithmetic face mean for the time diagonal —
@@ -5446,31 +5084,9 @@ class Solver {
   //
   // `sigmaCsf_ == 0` (the default) never reaches here: `csfActive()` gates the call site, so every
   // non-VoF path is byte-identical.
-  void addCsfRhs(int c) {
-    CCExec space;
-    C3 e = e_;
-    CCField bb = C[c].b;
-    CCConst rs = CCConst(C[c].rscale), cv = CCConst(cField_), kp = CCConst(kappaField_),
-            kb = CCConst(kappaBranch_);
-    const long strd = strideOf(c);
-    // Phase 3 (V3.1): the CSF carries the PRESSURE-GRADIENT WEIGHT of this component's axis,
-    // `w_a = 1/h_a'^2` — the same symbol Phase 2 puts on `-(P(i) - P(i - s_a))`. Exactly 1.0 on
-    // every isotropic run, so `x / 1.0 == x` keeps this kernel bit-identical.
-    const double sig = sigmaCsf_, h = 1.0 / u_.w[c];
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    Kokkos::parallel_for(
-        "csf_rhs", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          const double dC = cv(i) - cv(i - strd);
-          if (dC == 0.0)
-            return;  // no interface across this face -> no force, and no orphan either
-          double kf = 0.0;
-          vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
-          bb(i) += rs(i) * vof::csfFaceForce(sig, kf, dC, h);
-        });
-  }
-  // ABLATION (`set_csf_mode(1)`): the same physics discretized the OTHER plausible way — a
+  void addCsfRhs(int c);
+
+// ABLATION (`set_csf_mode(1)`): the same physics discretized the OTHER plausible way — a
   // cell-centred force `f(j) = sigma*kappa(j)*(C(j+s) - C(j-s))/2h` interpolated to the face with
   // the arithmetic mean `1/2 (f(i) + f(i-s))`, exactly as the per-cell body-force machinery would
   // carry a `rho*g` field. It is consistent, it converges, and it is WRONG for surface tension: the
@@ -5478,30 +5094,9 @@ class Solver {
   // cannot annihilate it. This kernel exists so the difference is a measured number in the ctest
   // rather than an argument — the same role the harmonic-rho_f ablation plays for WO-J's
   // hydrostatic gate. NEVER a production path.
-  void addCsfRhsCellInterp(int c) {
-    CCExec space;
-    C3 e = e_;
-    CCField bb = C[c].b;
-    CCConst rs = CCConst(C[c].rscale), cv = CCConst(cField_), kp = CCConst(kappaField_),
-            kb = CCConst(kappaBranch_);
-    const long strd = strideOf(c);
-    const double sig = sigmaCsf_, h = 1.0 / u_.w[c];  // the ablation takes the same weight (V3.1)
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    Kokkos::parallel_for(
-        "csf_rhs_cellinterp", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          double f[2] = {0.0, 0.0};
-          for (int q = 0; q < 2; ++q) {  // q = 0 -> cell i-s_c, q = 1 -> cell i
-            const long j = i - (1 - q) * strd;
-            if (!vof::csfKappaDefined(kb(j)))
-              continue;
-            f[q] = sig * kp(j) * 0.5 * (cv(j + strd) - cv(j - strd)) / h;
-          }
-          bb(i) += rs(i) * 0.5 * (f[0] + f[1]);
-        });
-  }
-  // --- rung W2 (WO-W12): the BLOCK CSF, a sibling of `addCsfRhs` ------------------------------
+  void addCsfRhsCellInterp(int c);
+
+// --- rung W2 (WO-W12): the BLOCK CSF, a sibling of `addCsfRhs` ------------------------------
   //
   // Same force, same place in the RHS, same `rs(i)` cut-cell rescale — but the face value was
   // formed ON THE BLOCKS (each marker's own curvature cascade on its own dense box, the same
@@ -5518,21 +5113,9 @@ class Solver {
   // projection's gradient uses) is available per marker.
   //
   // Gated on `vofBlockCsf()`, which is false whenever the block container is absent.
-  void addCsfRhsBlocks(int c) {
-    CCExec space;
-    C3 e = e_;
-    CCField bb = C[c].b;
-    CCConst rs = CCConst(C[c].rscale), fb = CCConst(csfBlkF_[c]);
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    Kokkos::parallel_for(
-        "csf_rhs_blocks", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          bb(i) += rs(i) * fb(i);
-        });
-  }
+  void addCsfRhsBlocks(int c);
 
-  // Census of the CSF face force over this rank's inner region, on the CURRENT colour + curvature
+// Census of the CSF face force over this rank's inner region, on the CURRENT colour + curvature
   // fields: the max |F| per component, and the number of ORPHAN faces — faces across which the
   // colour jumps by more than the wisp threshold but neither cell carries a curvature estimate, so
   // the force was silently dropped. An orphan is a defect (Basilisk's "this should not happen"); it
@@ -5547,45 +5130,9 @@ class Solver {
     long orphanFaces[3] = {0, 0, 0};
     long forcedFaces[3] = {0, 0, 0};
   };
-  CsfDiagnostics csfDiagnostics() {
-    if (!vofEnabled_ || !kappaField_.extent(0))
-      throw std::runtime_error(
-          "csf_diagnostics: needs VoF + a curvature field (call set_surface_tension and step, or "
-          "compute_vof_curvature)");
-    CsfDiagnostics d;
-    C3 e = e_;
-    CCConst cv = CCConst(cField_), kp = CCConst(kappaField_), kb = CCConst(kappaBranch_);
-    const double sig = sigmaCsf_, eps = csfInterfaceEps_;
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    for (int c = 0; c < 3; ++c) {
-      const double h = 1.0 / u_.w[c];  // the V3.1 per-axis gradient weight of this component
-      const long strd = strideOf(c);
-      double mx = 0.0;
-      long orph = 0, forced = 0;
-      Kokkos::parallel_reduce(
-          "csf_diag", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-          KOKKOS_LAMBDA(int x, int y, int z, double& m, long& o, long& f) {
-            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-            const double dC = cv(i) - cv(i - strd);
-            if (dC == 0.0)
-              return;
-            double kf = 0.0;
-            const bool ok = vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
-            if (ok)
-              ++f;
-            else if (Kokkos::fabs(dC) > eps)
-              ++o;
-            m = Kokkos::fmax(m, Kokkos::fabs(vof::csfFaceForce(sig, kf, dC, h)));
-          },
-          Kokkos::Max<double>(mx), orph, forced);
-      d.maxForce[c] = mx;
-      d.orphanFaces[c] = orph;
-      d.forcedFaces[c] = forced;
-    }
-    return d;
-  }
+  CsfDiagnostics csfDiagnostics();
 
-  // Implicit-FOU velocity stencil (CUDA build_adv_stencil_k + ibm_modify_stencil): backward-Euler
+// Implicit-FOU velocity stencil (CUDA build_adv_stencil_k + ibm_modify_stencil): backward-Euler
   // diffusion (idiag+6beta diag, -beta off) + rho*FOU(u^k) upwind operator (diagonally dominant ->
   // stable at high Re), then the Robust-Scaled cut-cell bake. The advecting velocity u^k = the
   // current C[*].u (ghosts filled).
@@ -7196,130 +6743,51 @@ class Solver {
   // fine (and is what the acid test uses) — the check is on `hasSolid_`, i.e. on any inner SDF < 0.
   static constexpr int kVofG = 3;  // the colour field's ghost width (VOF_PLAN §3 rule 1)
 
-  void enableVof() {
-    // PHASE 3 LIFTED Phase 2's `requireIsotropic` refusal here (flow/doc/anisotropic_vof.md).
-    // The colour transport itself needed nothing — a stretched cell IS the unit cube of the index
-    // coordinates, so every volume fraction, PLIC plane<->volume relation, slab flux and
-    // Weymouth-Yue sweep is metric-free (§3, decision V1). What took the metric is everything
-    // that reads a DIRECTION, a LENGTH or an AREA: the height-function curvature over physical
-    // column and transverse spacings, the two paraboloid fits in the physical frame (§4), the CSF
-    // face force carrying THIS axis's pressure-gradient weight `w_a` so the balanced-force
-    // identity survives (§5), the theta rotation of the wetting fill (§6), and the phase-change
-    // layer's normals, areas, sample distances and `V_cell` (§7).
-    
-    if constexpr (Grid::collocated) {
-      // Rung V8 (WO-T): allowed. The colour is advected by the PROJECTED face field uf_/vf_/wf_ —
-      // which is what the ABC approximate projection makes exactly divergence-free, i.e. precisely
-      // the field Weymouth-Yue's conservation proof needs — and every interfacial force is a face
-      // acceleration (collocated_varrho.hpp). ALL-FLUID only at this rung.
-      if (hasSolid_)
-        throw std::runtime_error(
-            "enable_vof: geometric VoF on SolverColocated (rung V8) is ALL-FLUID only — an immersed "
-            "solid needs the cut-cell face acceleration and the matching one-sided closures, which "
-            "is a later rung. Use the staggered Solver (rung V5a supports cut cells).");
-      collocatedV8AutoFallback("geometric VoF on the collocated grid");
-    }
-    if (vofEnabled_)
-      return;
-    cField_ = addField("C");  // the G=2 registry mirror (closure input / IO / redistribute)
-    vofEnabled_ = true;
-    // WO-R2 item 3 — the EXACT (matrix-free, double, flux-form) level-0 residual/matvec becomes
-    // the default the moment there is an interface. Measured on Hysing case 2 (WO-R item 6,
-    // 64x128x4, adaptive dt): it removes 7.5 orders of the projected flux divergence
-    // (1.85e-03 -> 5.15e-11) and moves NOTHING else — 116/600 pressure iterations, 1123 steps, the
-    // dt-limit census and both published functionals identical to every printed digit. The defect
-    // it removes is the float operator's broken row-sum identity A*1 = 0, and a two-phase
-    // coefficient contrast is precisely what amplifies it. `set_pressure_exact_residual(False)`
-    // after `enable_vof` is the ablation.
-    setPressureExactResidual(true);
-    // WO-R2 item 4 — the wisp tolerance. 0 is V1 verbatim (and stays the standalone advector's
-    // default); an open-boundary domain that DRAINS reaches C ~ 1e-18 everywhere, where the MYC
-    // normal is degenerate and plicAlpha divides by it (measured: sum C -> -inf -> NaN in three
-    // steps). Same 1e-8 the curvature predicate uses under surface tension.
-    vofAdv_.wispEps = vofWispEps_;
-    buildVofBlock();
-  }
-  /// WO-R2 item 4 — the wisp threshold on the advector's mixed-cell predicate and on the
+  void enableVof();
+
+/// WO-R2 item 4 — the wisp threshold on the advector's mixed-cell predicate and on the
   /// interface Courant band. Default 1e-8 once VoF is enabled; 0 restores the V1 predicate bit
   /// for bit. See `vof::wyIsMixed(c, eps)` and `vof::wyColourJump`.
-  void setVofWispEps(double eps) {
-    if (!(eps >= 0.0) || eps >= 0.5)
-      throw std::runtime_error("set_vof_wisp_eps: the threshold must be in [0, 0.5)");
-    vofWispEps_ = eps;
-    vofAdv_.wispEps = eps;
-  }
-  double vofWispEps() const { return vofWispEps_; }
-  /// The value `enableVof` starts from. A standalone `WyAdvector` that a test compares the solver
+  void setVofWispEps(double eps);
+
+double vofWispEps() const;
+
+/// The value `enableVof` starts from. A standalone `WyAdvector` that a test compares the solver
   /// against must be given the SAME value; `set_vof_wisp_eps(0)` is the "V1 verbatim" ablation.
-  static constexpr double defaultVofWispEps() { return 1e-8; }
-  bool vofEnabled() const { return vofEnabled_; }
-  // Initial / prescribed colour field on the inner cells (flat x-fastest, nx*ny*nz), C in [0,1]:
+  static constexpr double defaultVofWispEps();
+
+bool vofEnabled() const;
+
+// Initial / prescribed colour field on the inner cells (flat x-fastest, nx*ny*nz), C in [0,1]:
   // the LIQUID fraction of the cell. Enables VoF if it is not on yet. Ghosts are refreshed here so
   // a closure applied before the first step already sees a consistent field.
-  void setVof(const std::vector<double>& c) {
-    enableVof();
-    scatterInner(cField_, c);
-    zeroSolidColour();  // rung V5a: solid cells carry no colour (the band fill is regenerated)
-    fillPropGhosts(cField_);
-    pcMaskFresh_ = false;  // WO-P3g: the Dirichlet/plane geometry no longer describes this colour
-  }
-  std::vector<double> getVof() { return gatherInner(cField_); }
-  // Local (this rank's) colour census: sum / min / max / mixed-cell count / wisp count.
-  vof::WyAdvector::Diagnostics vofDiagnostics() {
-    if (!vofEnabled_)
-      throw std::runtime_error("vof_diagnostics: VoF is not enabled (call enable_vof/set_vof)");
-    bridgeColourToVof();
-    auto d = vofAdv_.diagnostics();
-    // `solidSumC` is the census of the CANONICAL field: the working block's solid cells carry the
-    // neutral band fill (reported as `solidFillSum`), while "C" itself is 0 there — that is the
-    // quantity gate G2 of WO-Q asks for.
-    d.solidSumC = vofSolidColourSum();
-    return d;
-  }
-  // sum of the canonical colour field "C" over SOLID cells of this rank (0 by construction).
-  double vofSolidColourSum() {
-    if (!vofEnabled_ || !vofAdv_.hasGeometry() || !vofSolidG2_.extent(0))
-      return 0.0;
-    CCConst c = CCConst(cField_), sl = CCConst(vofSolidG2_);
-    const int ex = e_.x, ey = e_.y, g = G;
-    double acc = 0.0;
-    Kokkos::parallel_reduce(
-        "peclet::flow::vof_solid_sum",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& a) {
-          const long i = (long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey;
-          if (sl(i) > 0.5)
-            a += c(i);
-        },
-        acc);
-    Kokkos::fence();
-    return acc;
-  }
-  // Interface-local Courant number max|uf|*dt/h over the faces of mixed cells and their face
+  void setVof(const std::vector<double>& c);
+
+std::vector<double> getVof();
+
+// Local (this rank's) colour census: sum / min / max / mixed-cell count / wisp count.
+  vof::WyAdvector::Diagnostics vofDiagnostics();
+
+// sum of the canonical colour field "C" over SOLID cells of this rank (0 by construction).
+  double vofSolidColourSum();
+
+// Interface-local Courant number max|uf|*dt/h over the faces of mixed cells and their face
   // neighbours, with the CURRENT velocity and dt (an all-reduce max under MPI). This is the number
   // the WY boundedness bound applies to — NOT the global max, which over-throttles badly (V1
   // measured 0.314 in a quiescent Zalesak corner against 0.157 at the interface). Use it to pick
   // dt: `dt_new = dt * cfl_target / vof_max_courant()`.
-  double vofMaxCourant() {
-    if (!vofEnabled_)
-      return 0.0;
-    bridgeVelocityToVof();
-    bridgeColourToVof();
-    const double loc = vofAdv_.maxCourantInterfaceAuto(dt_ / vofAdv_.h());
-    return vofAdv_.globalMax ? vofAdv_.globalMax(loc) : loc;
-  }
-  // The interface-local Courant number of the step just taken (0 before the first step).
-  double vofLastCourant() const { return vofEnabled_ ? vofAdv_.lastCfl() : 0.0; }
-  // Weymouth-Yue boundedness cap (default 0.25, the PROVEN 3D bound 1/(2(N-1)); 0.5 is the 2D
-  // value). `step()` throws when the interface-local Courant number exceeds it.
-  void setVofCflLimit(double v) {
-    vofCflLimit_ = v;
-    if (vofEnabled_)
-      vofAdv_.cflLimit = v;
-  }
-  double vofCflLimit() const { return vofCflLimit_; }
+  double vofMaxCourant();
 
-  // --- rung V5a (WO-Q): VoF transport through an immersed solid ---------------------------------
+// The interface-local Courant number of the step just taken (0 before the first step).
+  double vofLastCourant() const;
+
+// Weymouth-Yue boundedness cap (default 0.25, the PROVEN 3D bound 1/(2(N-1)); 0.5 is the 2D
+  // value). `step()` throws when the interface-local Courant number exceeds it.
+  void setVofCflLimit(double v);
+
+double vofCflLimit() const;
+
+// --- rung V5a (WO-Q): VoF transport through an immersed solid ---------------------------------
   //
   // The colour advection is openness-weighted (`vof/cutcell.hpp`): the geometric flux of every face
   // is multiplied by the face openness `o_f`, the update is done in FLUID-VOLUME units
@@ -7334,80 +6802,41 @@ class Solver {
   // (Huang, JCP 2025/2026). Conservative and exact where interface and wall are parallel or the
   // cell is whole; O(1) wrong in the distribution INSIDE a cell whose interface crosses its wall.
   // `vof_diagnostics().clipped_volume` is the tripwire.
-  void requireVofGeometry(const char* who) {
-    if constexpr (Grid::collocated) {
-      // Rung V8 scope, re-checked here because `set_solid` can follow `enable_vof`.
-      if (hasSolid_)
-        throw std::runtime_error(
-            std::string(who) +
-            ": geometric VoF on SolverColocated (rung V8) is ALL-FLUID only. The cut-cell colour "
-            "transport (rung V5a) is validated on the STAGGERED solver.");
-    }
-    if (!hasSolid_ || vofAdv_.hasGeometry())
-      return;
-    std::string m(who);
-    m += ": an immersed solid is present but the colour block has no cut-cell geometry. Rung V5a "
-         "needs the cut-cell openness, i.e. set_solid(sdf, cutcell_pressure=True) (the staircase "
-         "pressure operator has no face openness to weight the geometric fluxes with).";
-    throw std::runtime_error(m);
-  }
-  // Does the colour advection run the cut-cell (openness-weighted) kernels?
-  bool vofHasGeometry() const { return vofAdv_.hasGeometry(); }
-  // Ablation: drop Weymouth's admissible-interval clamp on the openness-weighted flux
+  void requireVofGeometry(const char* who);
+
+// Does the colour advection run the cut-cell (openness-weighted) kernels?
+  bool vofHasGeometry() const;
+
+// Ablation: drop Weymouth's admissible-interval clamp on the openness-weighted flux
   // (`vof/cutcell.hpp` vofCutFluxClamp). ON by default — the measurement that put it there is in
   // that header. With it off the [0,1] clip becomes the mechanism instead of a tripwire and the
   // conserved functional drifts.
-  void setVofCutFluxClamp(bool on) { vofAdv_.cutFluxClamp = on; }
-  bool vofCutFluxClamp() const { return vofAdv_.cutFluxClamp; }
-  // What the CANONICAL "C" field carries in SOLID cells (the working block always carries the
+  void setVofCutFluxClamp(bool on);
+
+bool vofCutFluxClamp() const;
+
+// What the CANONICAL "C" field carries in SOLID cells (the working block always carries the
   // neutral band fill, which is what the MYC / height-function stencils need):
   //   true  (default) 0 — "no colour in the solid", the WO-Q gate. The closures then see gas
   //                   density there and the CSF sees a full colour jump across a wall face.
   //   false           the band fill — a zero-slope continuation of the liquid into the wall.
   // Measured on the G5 cap (D/dx = 24, sigma = 1, mu = 0.05): see the WO-Q findings entry.
-  void setVofSolidColourZero(bool on) { vofSolidZero_ = on; }
-  bool vofSolidColourZero() const { return vofSolidZero_; }
-  // The colour field INCLUDING the neutral solid-band fill, on the inner region — i.e. what the
+  void setVofSolidColourZero(bool on);
+
+bool vofSolidColourZero() const;
+
+// The colour field INCLUDING the neutral solid-band fill, on the inner region — i.e. what the
   // MYC / height-function stencils actually read, as opposed to the canonical "C" (0 in solid).
   // The fill is regenerated here, so this is also the direct gate on its decomposition
   // independence: it must be pointwise BITWISE across np (`tests/kokkos_mpi/test_vof_cutcell_mpi`).
-  std::vector<double> getVofFilledColour() {
-    if (!vofEnabled_)
-      throw std::runtime_error("vof_filled_color: VoF is not enabled");
-    bridgeColourToVof();
-    CCField t("vofFilled", n_);
-    copyInner(t, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
-    return gatherInner(t);
-  }
-  // The cut-cell geometry the colour block runs on, on the inner region: 0 = the cell fluid
+  std::vector<double> getVofFilledColour();
+
+// The cut-cell geometry the colour block runs on, on the inner region: 0 = the cell fluid
   // fraction eps, 1/2/3 = the openness of the +x/+y/+z face of each cell (the ADVECTOR's high-face
   // convention), 4 = the cell classification (1 = solid). All must be bitwise across np.
-  std::vector<double> getVofGeometry(int which) {
-    if (!vofEnabled_)
-      throw std::runtime_error("vof_geometry: VoF is not enabled (needs enable_vof)");
-    if (which < 0 || which > 4)
-      throw std::runtime_error("vof_geometry: `which` must be 0..4");
-    // ISSUES sweep item 4. An ALL-FLUID VoF solver has no cut-cell geometry block, but the
-    // geometry it would carry is not undefined -- it is the trivial one, and it is exactly what
-    // the V1 transport kernels execute: every cell fully fluid (eps = 1), every face fully open
-    // (o = 1), no solid (kind = 0). Returning it lets ONE diagnostic --
-    // `vof_geometry(0) * (1 - get_vof())` for the gas volume, say -- serve a packed scene and its
-    // all-fluid control, instead of forcing the caller to branch on `vof_has_geometry()` and
-    // synthesise the ones itself (which is what examples/bubble-through-packing had to do).
-    if (!vofAdv_.hasGeometry())
-      return std::vector<double>((std::size_t)nx_ * ny_ * nz_, which == 4 ? 0.0 : 1.0);
-    CCField t("vofGeom", n_);
-    CCConst src;
-    if (which == 0)
-      src = CCConst(vofAdv_.epsFraction());
-    else if (which < 4)
-      src = CCConst(vofAdv_.faceOpenness(which - 1));
-    else
-      src = CCConst(vofAdv_.kindDouble());
-    copyInner(t, e_, G, src, e3_, kVofG);
-    return gatherInner(t);
-  }
-  // --- rung V5b (WO-S): static contact angle on SDF solids --------------------------------------
+  std::vector<double> getVofGeometry(int which);
+
+// --- rung V5b (WO-S): static contact angle on SDF solids --------------------------------------
   //
   // The band fill of rung V5a is a stencil device: it decides what the MYC 3^3 stencil and the V3
   // height-function columns of a near-wall cell see INSIDE the solid, and WO-Q's neutral (mean of
@@ -7421,53 +6850,30 @@ class Solver {
   // theta is a per-cell FIELD so the dynamic-angle rung (V6) changes only what fills it. Setting
   // it needs `set_solid(..., cutcell_pressure=True)` + `enable_vof` (there is no wall otherwise);
   // with no call the neutral fill runs and every V5a number is byte-identical.
-  void setContactAngle(double thetaDeg) {
-    if (!(thetaDeg >= 0.0 && thetaDeg <= 180.0))
-      throw std::runtime_error("set_contact_angle: theta must be in [0, 180] degrees");
-    contactAngleDeg_ = thetaDeg;
-    contactAngleField_.clear();
-    contactAngleSet_ = true;
-    requireWettingWall();
-    buildVofGeometry();  // item 3: a wetting DOMAIN wall changes the colour block's geometry
-    applyContactAngle();
-  }
-  // ISSUES sweep item 3: `set_contact_angle` used to be a silent no-op whenever there was nothing
+  void setContactAngle(double thetaDeg);
+
+// ISSUES sweep item 3: `set_contact_angle` used to be a silent no-op whenever there was nothing
   // for it to bind to -- the theta field simply was never consulted, and
   // `contact_angle_diagnostics()['contact_cells']` reading 0 was the only tell. Say so instead.
-  void requireWettingWall() const {
-    if (!vofEnabled_ || hasSolid_ || vofWetWallMask() != 0)
-      return;
-    throw std::runtime_error(
-        "set_contact_angle: this solver has no wetting wall - no immersed SDF solid (set_solid) "
-        "and no impermeable domain face (set_domain_bc(face, 1) no-slip or 4 free-slip). The "
-        "angle would be imposed nowhere. (Inflow/outflow faces carry no contact line.)");
-  }
-  // Per-cell contact angle in DEGREES on the inner region (flat x-fastest, nx*ny*nz). Only the
+  void requireWettingWall() const;
+
+// Per-cell contact angle in DEGREES on the inner region (flat x-fastest, nx*ny*nz). Only the
   // value at the SOLID band cell being filled is read, so cells away from a wall are irrelevant.
-  void setContactAngleField(const std::vector<double>& thetaDeg) {
-    if (thetaDeg.size() != (std::size_t)nx_ * ny_ * nz_)
-      throw std::runtime_error("set_contact_angle_field: expected nx*ny*nz values");
-    contactAngleField_ = thetaDeg;
-    contactAngleSet_ = true;
-    requireWettingWall();
-    buildVofGeometry();  // item 3
-    applyContactAngle();
-  }
-  bool contactAngleSet() const { return contactAngleSet_; }
-  double contactAngle() const { return contactAngleDeg_; }
-  // Which anchor the theta-plane uses (`vof::VofWettingPivot`): 0 volume-consistent (DEFAULT,
+  void setContactAngleField(const std::vector<double>& thetaDeg);
+
+bool contactAngleSet() const;
+
+double contactAngle() const;
+
+// Which anchor the theta-plane uses (`vof::VofWettingPivot`): 0 volume-consistent (DEFAULT,
   // idempotent), 1 the PLIC centroid p_f (Afkhami-Bussmann), 2 the work order's
   // `c = p_f - sdf(p_f) n_w` (NOT idempotent — measured to be off by 0.26 in cell fraction at
   // theta = 60, gate G0), 3 the contact line on the wall. Ablation only.
-  void setContactAnglePivot(int mode) {
-    if (mode < 0 || mode > 3)
-      throw std::runtime_error("set_contact_angle_pivot: mode must be 0..3");
-    contactPivot_ = mode;
-    vofAdv_.wettingPivot = mode;
-  }
-  int contactAnglePivot() const { return contactPivot_; }
+  void setContactAnglePivot(int mode);
 
-  // --- rung V6 (WO-V6): the DYNAMIC contact angle and hysteresis --------------------------------
+int contactAnglePivot() const;
+
+// --- rung V6 (WO-V6): the DYNAMIC contact angle and hysteresis --------------------------------
   //
   // Nothing in the V5b fill changes; only the VALUE of theta per contact cell does. See
   // `vof/wetting_dynamic.hpp` for the model (Afkhami, Zaleski & Bussmann, JCP 228:5370 (2009)):
@@ -7485,130 +6891,51 @@ class Solver {
   // @param muLiquid    the LIQUID dynamic viscosity entering Ca_cl (solver units).
   // @param sigma       the surface tension entering Ca_cl; <= 0 means "use set_surface_tension".
   void setContactAngleDynamic(double thetaEDeg, double slipCells, double muLiquid,
-                              double sigma = 0.0) {
-    // `slipCells` is a LENGTH in the caller's units (cells when no physical domain is armed);
-    // the model needs lambda/Delta, which is what the internal value is.
-    const double slipInt = slipCells * u_.lenToInt();
-    if (!(slipInt > 0.0 && slipInt < 1.0))
-      throw std::runtime_error(
-          "set_contact_angle_dynamic: the slip length must lie in (0, 1) cell (lambda < Delta)");
-    if (!(muLiquid > 0.0))
-      throw std::runtime_error("set_contact_angle_dynamic: mu_liquid must be positive");
-    vofDyn_.dynamic = true;
-    vofDyn_.slip = slipInt;
-    vofDyn_.muLiquid = muLiquid * u_.muToInt();
-    contactSigmaOverride_ = sigma;
-    // ONE lambda across the two halves of Afkhami-Zaleski-Bussmann (WO-V6b): this call and
-    // set_wall_slip_length write the SAME stored value, so the angle model's inner cut-off and
-    // the momentum wall closure can never disagree (last call wins). Whether the MOMENTUM half is
-    // active is a separate switch, set only by set_wall_slip_length -- so every result WO-V6
-    // validated with the angle half alone stays exactly what it was.
-    slipPhys_ = slipCells;
-    slipLambda_ = slipInt;
-    if (wallSlip_ && hasSolid_ && !Grid::collocated) {
-      buildVelocityOverlays(/*resetU=*/false);
-      rebuildStencils();
-    }
-    setContactAngle(thetaEDeg);  // sets the static base and (re)wires the theta field
-  }
-  /// WO-V6b -- the VELOCITY half of the dynamic contact line. Replaces the TANGENTIAL no-slip
+                              double sigma = 0.0);
+
+/// WO-V6b -- the VELOCITY half of the dynamic contact line. Replaces the TANGENTIAL no-slip
   /// Dirichlet datum of the Robust-Scaled cut-cell closure by the Navier condition
   /// `u_t(wall) = lambda du_t/dn`; the wall-NORMAL component stays impermeable (the moving-body
   /// datum if any). `lambdaCells` is lambda/Delta; 0 restores the validated no-slip closure
   /// bit-identically. Shares its value with set_contact_angle_dynamic's cut-off.
-  void setWallSlipLength(double lambdaCells) {
-    if (!(lambdaCells >= 0.0))
-      throw std::runtime_error("set_wall_slip_length: lambda must be >= 0");
-    const double lambdaInt = lambdaCells * u_.lenToInt();
-    if (lambdaCells > 0.0 && Grid::collocated)
-      throw std::runtime_error(
-          "set_wall_slip_length: the Navier wall closure is a staggered-grid feature (the "
-          "collocated scheme carries its own wall treatment)");
-    slipPhys_ = lambdaCells;
-    slipLambda_ = lambdaInt;
-    wallSlip_ = lambdaCells > 0.0;
-    if (vofDyn_.dynamic && lambdaCells > 0.0)
-      vofDyn_.slip = lambdaInt;
-    if (hasSolid_) {
-      buildVelocityOverlays(/*resetU=*/false);
-      rebuildStencils();
-    }
-  }
-  /// The Navier slip length in the caller's units (0 = no-slip).
-  double wallSlipLength() const { return wallSlip_ ? slipPhys_ : 0.0; }
-  /// Cut-cell axes at which a one-cell fluid gap kept the no-slip closure (per component).
-  std::array<int, 3> wallSlipSandwichCells() const { return slipSandwich_; }
-  // theta_a / theta_r, degrees. Composes with the dynamic correction when that is also set: the
+  void setWallSlipLength(double lambdaCells);
+
+/// The Navier slip length in the caller's units (0 = no-slip).
+  double wallSlipLength() const;
+
+/// Cut-cell axes at which a one-cell fluid gap kept the no-slip closure (per component).
+  std::array<int, 3> wallSlipSandwichCells() const;
+
+// theta_a / theta_r, degrees. Composes with the dynamic correction when that is also set: the
   // hysteresis selector picks the BASE angle and Cox-Voinov corrects it, except on the PINNED
   // branch (theta_r <= theta_app <= theta_a), where the apparent angle itself is imposed and the
   // idempotence of the V5b fill (WO-S finding 1) is what makes the contact line stand still.
-  void setContactAngleHysteresis(double thetaADeg, double thetaRDeg) {
-    if (!(thetaADeg >= thetaRDeg))
-      throw std::runtime_error("set_contact_angle_hysteresis: theta_a must be >= theta_r");
-    if (!(thetaRDeg >= 0.0 && thetaADeg <= 180.0))
-      throw std::runtime_error("set_contact_angle_hysteresis: angles must lie in [0, 180]");
-    const double toRad = 3.14159265358979323846 / 180.0;
-    vofDyn_.hysteresis = true;
-    vofDyn_.thetaA = thetaADeg * toRad;
-    vofDyn_.thetaR = thetaRDeg * toRad;
-    if (!contactAngleSet_)
-      setContactAngle(0.5 * (thetaADeg + thetaRDeg));  // a base is required; the mid angle
-    else
-      applyContactAngle();
-  }
-  // Back to the static V5b angle, byte-identically (the driver's views are kept but never read).
-  void setContactAngleDynamicOff() {
-    vofDyn_.dynamic = false;
-    vofDyn_.hysteresis = false;
-    applyContactAngle();
-  }
-  bool contactAngleDynamic() const { return vofDyn_.dynamic; }
-  bool contactAngleHysteresis() const { return vofDyn_.hysteresis; }
-  double contactAngleSlip() const { return vofDyn_.slip; }
-  // ABLATION: the 3-point in-wall mean of U_cl (default ON). Off = the raw per-cell MAC velocity.
-  void setContactAngleSmoothing(bool on) { vofDyn_.smooth = on; }
-  // The angle clamp of the Cox-Voinov cube, degrees (default 1 / 179).
-  void setContactAngleClamp(double loDeg, double hiDeg) {
-    if (!(loDeg > 0.0 && hiDeg < 180.0 && loDeg < hiDeg))
-      throw std::runtime_error("set_contact_angle_clamp: need 0 < lo < hi < 180");
-    const double toRad = 3.14159265358979323846 / 180.0;
-    vofDyn_.thetaMin = loDeg * toRad;
-    vofDyn_.thetaMax = hiDeg * toRad;
-  }
-  // The sigma the dynamic correction uses: the explicit override if one was given, else the CSF's.
-  double effectiveContactSigma() const {
-    return contactSigmaOverride_ > 0.0 ? contactSigmaOverride_ : sigmaCsf_;
-  }
-  // The per-cell dynamic-wetting state on the inner region: 0 the IMPOSED angle (degrees),
+  void setContactAngleHysteresis(double thetaADeg, double thetaRDeg);
+
+// Back to the static V5b angle, byte-identically (the driver's views are kept but never read).
+  void setContactAngleDynamicOff();
+
+bool contactAngleDynamic() const;
+
+bool contactAngleHysteresis() const;
+
+double contactAngleSlip() const;
+
+// ABLATION: the 3-point in-wall mean of U_cl (default ON). Off = the raw per-cell MAC velocity.
+  void setContactAngleSmoothing(bool on);
+
+// The angle clamp of the Cox-Voinov cube, degrees (default 1 / 179).
+  void setContactAngleClamp(double loDeg, double hiDeg);
+
+// The sigma the dynamic correction uses: the explicit override if one was given, else the CSF's.
+  double effectiveContactSigma() const;
+
+// The per-cell dynamic-wetting state on the inner region: 0 the IMPOSED angle (degrees),
   // 1 the measured APPARENT angle (degrees), 2 the smoothed U_cl, 3 Ca_cl, 4 the
   // `vof::VofDynamicState`. Non-contact cells read 0 in 1..4 and the static base in 0.
-  std::vector<double> getVofDynamicField(int which) {
-    if (!vofEnabled_ || !vofDyn_.active() || !vofDyn_.allocated())
-      throw std::runtime_error(
-          "vof_dynamic_field: no dynamic contact angle (call set_contact_angle_dynamic / "
-          "set_contact_angle_hysteresis first)");
-    bridgeColourToVof();  // regenerates the fill, hence the dynamic pass
-    CCField t("vofDyn", n_);
-    const double toDeg = 180.0 / 3.14159265358979323846;
-    CCConst src;
-    if (which == 0)
-      src = CCConst(vofDyn_.imposed());
-    else if (which == 1)
-      src = CCConst(vofDyn_.apparent());
-    else if (which == 2)
-      src = CCConst(vofDyn_.speed());
-    else if (which == 3)
-      src = CCConst(vofDyn_.capillary());
-    else
-      src = CCConst(vofDyn_.stateField());
-    copyInner(t, e_, G, src, e3_, kVofG);
-    auto v = gatherInner(t);
-    if (which <= 1)
-      for (auto& q : v)
-        q *= toDeg;
-    return v;
-  }
-  struct ContactAngleDiagnostics {
+  std::vector<double> getVofDynamicField(int which);
+
+struct ContactAngleDiagnostics {
     long contactCells = 0;    ///< band cells written by the theta plane of their own anchor
     long neighbourCells = 0;  ///< band cells written by the mean of the anchor's MIXED neighbours
     long pureCells = 0;       ///< band cells that took the pure-phase continuation
@@ -7630,153 +6957,36 @@ class Solver {
   // The band census of the CURRENT colour field: how many band cells each branch of the fill wrote
   // and the mean APPARENT angle the fluid-only normal reported at the contact cells (G1's
   // measurement, evaluated on the fill's own data rather than on a post-processed shape).
-  ContactAngleDiagnostics contactAngleDiagnostics() {
-    if (!vofEnabled_)
-      throw std::runtime_error("contact_angle_diagnostics: VoF is not enabled");
-    ContactAngleDiagnostics d;
-    d.setAngle = contactAngleDeg_;
-    if (!vofAdv_.hasWetting())
-      return d;
-    bridgeColourToVof();  // regenerates the fill, hence the census
-    long counts[vof::kVofWetCount];
-    long nApp = 0;
-    // ISSUES sweep item 3: a wetting DOMAIN wall's band lives in the GHOST layers, so the
-    // census has to reach them or `contact_cells` reads 0 -- the very symptom the item was
-    // reported for. 0 (the inner region) when no domain wall is wetting.
-    vofAdv_.wettingCensusGhost(counts, d.meanApparentAngle, nApp,
-                               vofWetWallMask() ? kVofG : 0);
-    d.unfilledCells = counts[vof::kVofWetNone];
-    d.contactCells = counts[vof::kVofWetTheta];
-    d.neighbourCells = counts[vof::kVofWetNeighbour];
-    d.pureCells = counts[vof::kVofWetPure];
-    d.parallelCells = counts[vof::kVofWetParallel];
-    d.neutralCells = counts[vof::kVofWetNeutral];
-    if (vofDyn_.active() && vofDyn_.allocated()) {
-      const auto cs = vofDyn_.census(vofAdv_);
-      d.dynamicCells = cs.contactCells;
-      d.pinnedCells = cs.cells[vof::kVofDynPinned];
-      d.advancingCells = cs.cells[vof::kVofDynAdvancing];
-      d.recedingCells = cs.cells[vof::kVofDynReceding];
-      d.meanImposedTheta = cs.meanImposedDeg;
-      d.meanApparentTheta = cs.meanApparentDeg;
-      d.maxCaCl = cs.maxCa;
-      d.maxContactSpeed = cs.maxSpeed;
-    }
-    return d;
-  }
-  // Wire the theta field + the wall SDF onto the colour block. Idempotent; called by the setters
+  ContactAngleDiagnostics contactAngleDiagnostics();
+
+// Wire the theta field + the wall SDF onto the colour block. Idempotent; called by the setters
   // and again by every geometry rebuild (`buildVofGeometry`), since the block can be re-sized.
-  void applyContactAngle() {
-    if (!contactAngleSet_ || !vofEnabled_ || !vofAdv_.hasGeometry())
-      return;  // remembered; buildVofGeometry calls back once the geometry exists
-    vofAdv_.enableWetting();
-    vofAdv_.wettingPivot = contactPivot_;
-    // (a) the SDF on the colour block: inner region from the solver's own sdf_, then the colour
-    //     field's ghost policy, so the central-difference wall normal at ghost depth <= 2 is the
-    //     OWNER's (the WO-Q finding-5 argument, applied to the wall normal).
-    if (hasSolid_)
-      copyInner(vofAdv_.wallSdf(), e3_, kVofG, CCConst(sdf_), e_, G);
-    else
-      Kokkos::deep_copy(vofAdv_.wallSdf(), 1e30);
-    vofExchangeRaw(vofAdv_.wallSdf());
-    // ISSUES sweep item 3: fold the wetting DOMAIN wall planes into the same field, on the WHOLE
-    // block (the plane distance is a closed form of the global index, so no exchange is needed and
-    // the out-of-domain band gets the value the clamp cannot produce). `min` is the SDF of the
-    // union of the solids, so an SDF body and a domain wall compose; and the central difference
-    // the theta pass takes of this field is exactly the inward face normal in the band.
-    if (const int wet = vofWetWallMask()) {
-      const I3 gs = vofGlobalSize(), org = vofOrigin();
-      const C3 e = e3_;
-      const int g = kVofG;
-      CCField sd = vofAdv_.wallSdf();
-      Kokkos::parallel_for(
-          "peclet::flow::vof_wall_sdf_domain",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
-            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-            const double d = vofWallPlaneSdf(x - g + org.x, y - g + org.y, z - g + org.z, gs, wet);
-            sd(i) = Kokkos::fmin(sd(i), d);
-          });
-      CCExec().fence();
-    }
-    // (b) theta, in radians.
-    const double toRad = 3.14159265358979323846 / 180.0;
-    if (contactAngleField_.empty()) {
-      Kokkos::deep_copy(vofAdv_.contactAngle(), contactAngleDeg_ * toRad);
-    } else {
-      CCField t("thetaG2", n_);
-      std::vector<double> rad(contactAngleField_.size());
-      for (std::size_t i = 0; i < rad.size(); ++i)
-        rad[i] = contactAngleField_[i] * toRad;
-      scatterInner(t, rad);
-      copyInner(vofAdv_.contactAngle(), e3_, kVofG, CCConst(t), e_, G);
-      vofExchangeRaw(vofAdv_.contactAngle());
-    }
-    // (c) rung V6: the STATIC base the dynamic selector starts from. The V6 pass OVERWRITES
-    //     `contactAngle()` every fill, so it must never read back its own previous output.
-    if (vofDyn_.active()) {
-      vofDyn_.allocate(vofAdv_.size());
-      Kokkos::deep_copy(vofDyn_.base(), vofAdv_.contactAngle());
-    }
-  }
-  // Cell-centre velocity on the colour block, for the V6 contact-line speed. Built from the
+  void applyContactAngle();
+
+// Cell-centre velocity on the colour block, for the V6 contact-line speed. Built from the
   // solver's own staggered faces (`0.5*(u(i) + u(i+s_c))`, both valid after `fillVelGhosts`) on
   // the INNER region and then run through the colour field's ghost policy, exactly as the wall SDF
   // and the fluid-only normals are — that is what keeps the imposed angle decomposition-
   // independent (WO-S finding 9 applied to a third field).
-  void buildVofCellVelocity() {
-    if (!vofDyn_.allocated())
-      return;
-    if constexpr (Grid::collocated)
-      throw std::runtime_error("set_contact_angle_dynamic: SolverColocated has no immersed solid");
-    const long st[3] = {1, (long)e_.x, (long)e_.x * (long)e_.y};
-    for (int c = 0; c < 3; ++c) {
-      // The cell-centre mean reads the face ONE cell out on the component's own axis, so the
-      // velocity ghost ring has to be valid. Same rule as `bridgeVelocityToVof`: keep the
-      // projection's outflow-face correction when there is one, otherwise the full fill (the
-      // kinematic path, where the zero-gradient rule is what supplies the boundary face at all).
-      if (outflowCorrValid_)
-        fillVelGhostsTo(C[c].u, c, 0, false);
-      else
-        fillVelGhosts(c, 0);
-      if (vofDynVel_[c].extent(0) != n_)
-        vofDynVel_[c] = CCField("vofDynVel", n_);
-      CCField t = vofDynVel_[c];
-      CCConst u = CCConst(C[c].u);
-      const long sc = st[c];
-      const int ex = e_.x, ey = e_.y, g = G;
-      Kokkos::parallel_for(
-          "peclet::flow::vof_dyn_cellvel",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
-            const long i = (long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey;
-            t(i) = 0.5 * (u(i) + u(i + sc));
-          });
-      CCExec().fence();
-      copyInner(vofDyn_.cellVel(c), e3_, kVofG, CCConst(t), e_, G);
-      vofExchangeRaw(vofDyn_.cellVel(c));
-    }
-  }
+  void buildVofCellVelocity();
 
-  // The colour advector itself (its g=3 block, geometry views and planes). For TESTS: gate G3 of
+// The colour advector itself (its g=3 block, geometry views and planes). For TESTS: gate G3 of
   // `tests/kokkos/test_vof_cutcell.cpp` rebuilds the openness/fraction by an independent route and
   // compares against these.
-  const vof::WyAdvector& vofAdvector() const { return vofAdv_; }
-  // The sweep permutation index of the NEXT colour advection (`kWySweepPerm[n % 6]`). Exposed so a
+  const vof::WyAdvector& vofAdvector() const;
+
+// The sweep permutation index of the NEXT colour advection (`kWySweepPerm[n % 6]`). Exposed so a
   // benchmark can hold the permutation fixed, or resume one, across a restart.
   // The sweep permutation is `kWySweepPerm[n % 6]`, so this counter is STATE: a run resumed with
   // it reset takes a different sweep order and its colour differs at the splitting error (measured
   // 6.2e-4 after ONE step of `channel_18`, off a bitwise-identical velocity). The BLOCK container
   // keeps its own counter — `VofBlockSet::step_`, which drives `WyAdvector::advect(dt, step_)` for
   // every marker — so a restart has to set both, and this is the one call that does it.
-  void setVofStepParity(long n) {
-    vofStep_ = n;
-    if (vofBlocks_)
-      vofBlocks_->setStep(n);
-  }
-  long vofStepParity() const { return vofStep_; }
+  void setVofStepParity(long n);
 
-  // KINEMATIC colour advection: advance C ONCE with the solver's CURRENT face velocity and the
+long vofStepParity() const;
+
+// KINEMATIC colour advection: advance C ONCE with the solver's CURRENT face velocity and the
   // given dt, with no Navier-Stokes step at all. This is the entry point the advection benchmarks
   // (Zalesak, LeVeque) and the cut-cell conservation gates use — a frozen Stokes field advecting a
   // colour slab is a pure statement about the advection scheme, with the momentum solve and the
@@ -7789,69 +6999,9 @@ class Solver {
   // projected output (run `step()` to a steady state, or call `project()`), never an analytic
   // sample.
   /// `dt` is in the caller's time unit.
-  void advectVofKinematic(double dtPhysArg) {
-    const double dt = dtPhysArg * u_.timeToInt();
-    if (!vofEnabled_)
-      throw std::runtime_error("advect_vof: VoF is not enabled (call enable_vof / set_vof first)");
-    requireVofGeometry("advect_vof");
-    // ISSUES sweep item 5: on the collocated grid the advecting field is the MAC FACE field, and
-    // a face field that was never built is all zeros — which the divergence guard below happily
-    // certifies as solenoidal, so the whole advection became a silent no-op. `set_state` /
-    // `set_velocity` now seed it (seedFaceFieldFromCells) and a projection builds it; refuse the
-    // one remaining way to reach the trap.
-    if constexpr (Grid::collocated) {
-      if (!faceFieldValid_)
-        throw std::runtime_error(
-            "advect_vof: SolverColocated advects the colour with the MAC FACE field uf_/vf_/wf_ "
-            "(the only discretely divergence-free field on this grid), and it has never been "
-            "built — it is all zeros, which the divergence guard would certify as solenoidal and "
-            "the advection would be a silent no-op. Call set_state()/set_velocity() (which now "
-            "seed the face field through the same centerToFace map project() uses) or step() "
-            "first.");
-    }
-    // WO-R2 item 4a (found by the E1 gallery page): the divergence guard below was INERT on a bare
-    // box. `maxOpenDivergence()` returns 0.0 when there is no cut-cell pressure operator, so a
-    // cell-centre-sampled analytic field — LeVeque, whose true max|div(open u)| is 0.612 — sailed
-    // through the check and lost 4.93 % of the liquid in 50 steps with no diagnostic at all.
-    // Refuse the configuration instead of measuring nothing.
-    if (!cutcellPressure_)
-      throw std::runtime_error(
-          "advect_vof: no cut-cell pressure operator, so the divergence guard cannot measure "
-          "anything (max_open_divergence() would return 0 whatever the field is). Build one with "
-          "set_pressure_geometry(sdf) on an all-fluid box, or set_solid(sdf, "
-          "cutcell_pressure=True) — Weymouth-Yue conservation is conditional on "
-          "sum_f o_f u_f = 0 per cell and a cell-centre-sampled analytic field does NOT satisfy "
-          "it (measured on LeVeque: max|div| 0.612, 4.93 % of the liquid lost in 50 steps).");
-    // and measure the field the caller actually has: max_open_divergence() re-imposes the
-    // zero-gradient outflow face before measuring, i.e. it MUTATES u and reports a field the
-    // advector will not be handed (WO-R). The projected sibling does neither.
-    const double div = maxOpenDivergenceProjectedInternal();  // the 1e-10 gate is index-unit
-    if (!(div <= 1e-10)) {
-      char msg[320];
-      std::snprintf(msg, sizeof(msg),
-                    "advect_vof: the current face velocity is not discretely divergence-free "
-                    "(max|div(open*u)| = %.6g > 1e-10). Weymouth-Yue conservation is conditional "
-                    "on it; project the field first (step() / project()).",
-                    div);
-      throw std::runtime_error(msg);
-    }
-    bridgeVelocityToVof();
-    bridgeColourToVof();
-    if (pcEnergy_) {  // WO-P23: the temperature rides the same sweeps here too
-      ScalarField& sc = scalarField(pcTName_);
-      copyInner(vofEnergy_.temperature(), e3_, kVofG, CCConst(sc.c), e_, G);
-      vofEnergy_.advect(vofAdv_, dt, vofStep_++);
-      copyInner(sc.c, e_, G, CCConst(vofEnergy_.temperature()), e3_, kVofG);
-      scalarFillGhosts(sc);
-    } else {
-      vofAdv_.advect(dt, vofStep_++);
-    }
-    copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
-    zeroSolidColour();
-    fillPropGhosts(cField_);
-    pcUpdateEnergyProps();
-  }
-  // --- Part III rung W0 (WO-W0): the per-bubble VoF BLOCK container -----------------------------
+  void advectVofKinematic(double dtPhysArg);
+
+// --- Part III rung W0 (WO-W0): the per-bubble VoF BLOCK container -----------------------------
   //
   // A THIRD container over the same L1 kernels (`suite/docs/VOF_PLAN.md` §10, the TBFsolver
   // `vofBlock` pattern): one bubble = one `WyAdvector` on a small moving global index box with a
@@ -7867,54 +7017,20 @@ class Solver {
   //
   // Scope at W0: all-fluid (no immersed solid — the cut-cell block is W12), and the seeds are
   // spheres given in CELL units.
-  void enableVofBlocks(const std::vector<std::array<double, 4>>& seeds) {
-    prepareVofBlocks();
-    for (const auto& sd : seeds)
-      vofBlocks_->seedSphere(sd[0], sd[1], sd[2], sd[3]);
-    vofBlocks_->scatter(vofAdv_.colour());
-    finishVofBlocks();
-  }
-  // Everything `enable_vof_blocks` does EXCEPT the seeding, so the sphere seeds and the
+  void enableVofBlocks(const std::vector<std::array<double, 4>>& seeds);
+
+// Everything `enable_vof_blocks` does EXCEPT the seeding, so the sphere seeds and the
   // general (`enable_vof_blocks_from_field`) seeds share one code path.
-  void prepareVofBlocks() {
-    if (!vofEnabled_)
-      throw std::runtime_error("enable_vof_blocks: VoF is not enabled (call enable_vof first)");
-    if (hasSolid_)
-      throw std::runtime_error(
-          "enable_vof_blocks: the block container is ALL-FLUID at rung W0 (the cut-cell block is "
-          "rung W12). Drop set_solid, or use the structured colour field (advect_vof).");
-    int rank = 0, size = 1;
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      MPI_Comm_rank(comm_, &rank);
-      MPI_Comm_size(comm_, &size);
-    }
-#endif
-    vofBlocks_ = std::make_shared<vof::VofBlockSet>();
-    const std::array<bool, 3> per{vofAxisPeriodic(0), vofAxisPeriodic(1), vofAxisPeriodic(2)};
-    vofBlocks_->init(vofGlobalSize(), per, rank, size, 1.0);  // flow works in cell units
-    vofBlocks_->cflLimit = vofCflLimit_;
-    vofBlockExch_ = std::make_shared<vof::VofBlockExchange>();
-    vofBlockExch_->init(vofGlobalSize(), per, vofBlockRankBoxes(size), rank);
-#ifdef PECLET_FLOW_MPI
-    if (distributed_)
-      vofBlockExch_->setComm(comm_);
-#endif
-    bindVofBlockPatch();
-    vofBlocks_->setExchange(vofBlockExch_);
-  }
-  // The union the closures see, plus the rung-W1 master assignment on the seeded boxes.
-  void finishVofBlocks() {
-    vofBlocks_->assignMasters();
-    vofBlocks_->scatter(vofAdv_.colour());
-    harvestVofBlockUnion();
-  }
-  bool vofBlocksEnabled() const { return static_cast<bool>(vofBlocks_); }
-  void disableVofBlocks() {
-    vofBlocks_.reset();
-    vofBlockExch_.reset();
-  }
-  // Kinematic block advection with the CURRENT (projected) face velocity — the block twin of
+  void prepareVofBlocks();
+
+// The union the closures see, plus the rung-W1 master assignment on the seeded boxes.
+  void finishVofBlocks();
+
+bool vofBlocksEnabled() const;
+
+void disableVofBlocks();
+
+// Kinematic block advection with the CURRENT (projected) face velocity — the block twin of
   // `advect_vof`. Same precondition: Weymouth-Yue conservation is conditional on the face field
   // being discretely divergence-free, so a field that is not is refused rather than silently
   // reported as a conservation defect.
@@ -7926,214 +7042,78 @@ class Solver {
   // in-step call passes false. (Rung W2: with variable density the projected residual sits at
   // ~1e-7 without the exact level-0 apply, which would refuse every coupled step.)
   /// `dt` is in the caller's time unit.
-  void advectVofBlocks(double dtPhysArg, bool requireSolenoidal = true) {
-    const double dt = dtPhysArg * u_.timeToInt();
-    if (!vofBlocks_)
-      throw std::runtime_error("advect_vof_blocks: call enable_vof_blocks first");
-    const double div = requireSolenoidal ? maxOpenDivergenceInternal() : 0.0;  // index-unit gate
-    if (!(div <= 1e-10)) {
-      char msg[320];
-      std::snprintf(msg, sizeof(msg),
-                    "advect_vof_blocks: the current face velocity is not discretely "
-                    "divergence-free (max|div(open*u)| = %.6g > 1e-10). Weymouth-Yue conservation "
-                    "is conditional on it; project the field first (step() / project()).",
-                    div);
-      throw std::runtime_error(msg);
-    }
-    bridgeVelocityToVof();  // the block exchange reads THESE views (advector high-face convention)
-    vofBlocks_->advect(dt, vofAdv_.colour());
-    harvestVofBlockUnion();
-  }
-  // Per-bubble Lagrangian census. Only this rank's MASTER blocks carry numbers (volume, centroid,
-  // centroid velocity, the central second moments); the box and the master are replicated.
-  std::vector<vof::VofBlockStats> vofBlockStats() const {
-    if (!vofBlocks_)
-      throw std::runtime_error("vof_block_stats: call enable_vof_blocks first");
-    return vofBlocks_->statsAll();
-  }
-  // max/mean of the per-rank block-cell load under the CURRENT master assignment (round robin at
-  // W0; the weighted-ORB assignment is W1 and these are the numbers to beat). 1.0 = perfect.
-  double vofBlockImbalance() const {
-    if (!vofBlocks_)
-      throw std::runtime_error("vof_block_imbalance: call enable_vof_blocks first");
-    return vofBlocks_->cellImbalance();
-  }
-  // Blocks mastered by each rank, and the inner cells those blocks carry.
-  void vofBlockCensus(std::vector<long>& masters, std::vector<long>& cells) const {
-    if (!vofBlocks_)
-      throw std::runtime_error("vof_block_census: call enable_vof_blocks first");
-    vofBlocks_->masterCensus(masters, cells);
-  }
+  void advectVofBlocks(double dtPhysArg, bool requireSolenoidal = true);
 
-  // --- Part III rung W1 (WO-W12) ----------------------------------------------------------------
+// Per-bubble Lagrangian census. Only this rank's MASTER blocks carry numbers (volume, centroid,
+  // centroid velocity, the central second moments); the box and the master are replicated.
+  std::vector<vof::VofBlockStats> vofBlockStats() const;
+
+// max/mean of the per-rank block-cell load under the CURRENT master assignment (round robin at
+  // W0; the weighted-ORB assignment is W1 and these are the numbers to beat). 1.0 = perfect.
+  double vofBlockImbalance() const;
+
+// Blocks mastered by each rank, and the inner cells those blocks carry.
+  void vofBlockCensus(std::vector<long>& masters, std::vector<long>& cells) const;
+
+// --- Part III rung W1 (WO-W12) ----------------------------------------------------------------
   //
   // (a) Master assignment. `mode` 0 = round robin (W0), 1 = LPT greedy on the block cell counts,
   //     2 = weighted ORB over a 1-D block space (core's `BlockDecomposer<1>`). `every` re-runs the
   //     assignment every `every` block steps, MIGRATING the colour of any block that changed
   //     master (nothing else in a block is state). Applied immediately.
-  void setVofBlockAssign(int mode, long every) {
-    if (!vofBlocks_)
-      throw std::runtime_error("set_vof_block_assign: call enable_vof_blocks first");
-    vofBlocks_->assignMode = static_cast<vof::VofMasterAssign>(mode);
-    vofBlocks_->reassignEvery = every;
-    vofBlocks_->assignMasters();
-  }
-  int vofBlockAssign() const {
-    if (!vofBlocks_)
-      throw std::runtime_error("vof_block_assign: call enable_vof_blocks first");
-    return static_cast<int>(vofBlocks_->assignMode);
-  }
-  // The imbalance the CURRENT `assignMode` would give without applying it — so a study can put the
-  // three modes side by side on one swarm without perturbing the run.
-  double vofBlockImbalanceOf(int mode) const {
-    if (!vofBlocks_)
-      throw std::runtime_error("vof_block_imbalance_of: call enable_vof_blocks first");
-    const auto save = vofBlocks_->assignMode;
-    vofBlocks_->assignMode = static_cast<vof::VofMasterAssign>(mode);
-    const std::vector<int> m = vofBlocks_->plannedMasters();
-    vofBlocks_->assignMode = save;
-    const int np = vofBlocks_->size();
-    std::vector<long> load(static_cast<std::size_t>(np), 0);
-    long tot = 0, mx = 0;
-    for (std::size_t i = 0; i < m.size(); ++i) {
-      const long w = vofBlocks_->blocks()[i].box.cells();
-      load[static_cast<std::size_t>(m[i])] += w;
-      tot += w;
-    }
-    for (long v : load)
-      mx = std::max(mx, v);
-    return tot == 0 ? 1.0 : static_cast<double>(mx) * np / static_cast<double>(tot);
-  }
-  // (b)/(c) instrumentation: device-resident packing on/off, and the block-pool hit census.
-  void setVofBlockDeviceStaging(bool on) {
-    if (!vofBlockExch_)
-      throw std::runtime_error("set_vof_block_device_staging: call enable_vof_blocks first");
-    vofBlockExch_->deviceStaging = on;
-  }
-  void setVofBlockPool(bool on) {
-    if (!vofBlocks_)
-      throw std::runtime_error("set_vof_block_pool: call enable_vof_blocks first");
-    vofBlocks_->usePool = on;
-    if (!on)
-      vofBlocks_->clearPool();
-  }
-  std::array<long, 2> vofBlockPoolStats() const {
-    if (!vofBlocks_)
-      throw std::runtime_error("vof_block_pool_stats: call enable_vof_blocks first");
-    return {vofBlocks_->poolHits(), vofBlocks_->poolMisses()};
-  }
+  void setVofBlockAssign(int mode, long every);
 
-  // General seeding (rung W1): one block per given GLOBAL index box, with the colour taken from
+int vofBlockAssign() const;
+
+// The imbalance the CURRENT `assignMode` would give without applying it — so a study can put the
+  // three modes side by side on one swarm without perturbing the run.
+  double vofBlockImbalanceOf(int mode) const;
+
+// (b)/(c) instrumentation: device-resident packing on/off, and the block-pool hit census.
+  void setVofBlockDeviceStaging(bool on);
+
+void setVofBlockPool(bool on);
+
+std::array<long, 2> vofBlockPoolStats() const;
+
+// General seeding (rung W1): one block per given GLOBAL index box, with the colour taken from
   // the field `set_vof` installed. A sphere seed is a convenience over this; a Hysing bubble, a
   // quasi-2-D cylinder or any scanned marker enters here. The boxes are the BUBBLE extents (the
   // container grows them by the 3-cell margin itself) and must not overlap in a way that makes a
   // cell belong to two markers at seed time -- the gather is a copy, not a union, so a cell inside
   // two boxes would be given to both markers.
-  void enableVofBlocksFromField(const std::vector<std::array<int, 6>>& boxes) {
-    prepareVofBlocks();
-    for (const auto& q : boxes) {
-      vof::VofBox bb;
-      for (int d = 0; d < 3; ++d) {
-        bb.lo[d] = q[d];
-        bb.hi[d] = q[3 + d];
-      }
-      vofBlocks_->seedBox(bb);
-    }
-    bridgeColourToVof();  // the caller's `set_vof` field -> the g=3 patch the gather reads
-    vofBlocks_->finishSeeding(vofAdv_.colour());
-    finishVofBlocks();
-  }
+  void enableVofBlocksFromField(const std::vector<std::array<int, 6>>& boxes);
 
-  // --- rung W3: checkpoint / restart of the block container ------------------------------------
+// --- rung W3: checkpoint / restart of the block container ------------------------------------
   //
   // The block's own inner colour is a block's ONLY state, so {box, colour} per block is a complete
   // checkpoint -- and unlike `enableVofBlocksFromField` it is exact when two markers touch (the
   // seeding gather out of the UNION would give each a slice of the other; WO-W12 open item 5).
-  std::vector<double> vofBlockColour(long id) {
-    if (!vofBlocks_)
-      throw std::runtime_error("vof_block_color: call enable_vof_blocks first");
-    if (id < 0 || static_cast<std::size_t>(id) >= vofBlocks_->count())
-      throw std::runtime_error("vof_block_color: no such block id");
-    return vofBlocks_->blockColourHost(static_cast<std::size_t>(id));
-  }
-  void enableVofBlocksFromColours(const std::vector<std::array<int, 6>>& boxes,
-                                  const std::vector<std::vector<double>>& colours) {
-    if (boxes.size() != colours.size())
-      throw std::runtime_error(
-          "enable_vof_blocks_from_colors: one color array per box is required");
-    prepareVofBlocks();
-    for (std::size_t i = 0; i < boxes.size(); ++i) {
-      vof::VofBox bb;
-      for (int d = 0; d < 3; ++d) {
-        bb.lo[d] = boxes[i][d];
-        bb.hi[d] = boxes[i][3 + d];
-      }
-      vofBlocks_->seedBoxWithColour(bb, colours[i]);
-    }
-    finishVofBlocks();
-  }
+  std::vector<double> vofBlockColour(long id);
 
-  // --- rung W2: the block CSF ------------------------------------------------------------------
+void enableVofBlocksFromColours(const std::vector<std::array<int, 6>>& boxes,
+                                  const std::vector<std::vector<double>>& colours);
+
+// --- rung W2: the block CSF ------------------------------------------------------------------
   //
   // Turn the surface tension of `set_surface_tension` into a PER-BLOCK force: each marker runs its
   // own curvature cascade on its own box and forms the V4 balanced-force face force there, and the
   // three face fields are summed into the local patch (UNPACK_SUM). Requires the block container.
-  void enableVofBlockCsf() {
-    if (!vofBlocks_)
-      throw std::runtime_error("enable_vof_block_csf: call enable_vof_blocks first");
-    if (!(sigmaCsf_ > 0.0))
-      throw std::runtime_error(
-          "enable_vof_block_csf: set_surface_tension(sigma) first (sigma > 0)");
-    if constexpr (Grid::collocated)
-      throw std::runtime_error(
-          "enable_vof_block_csf: the block CSF is STAGGERED-only at rung W2 (the collocated face "
-          "-acceleration form is V8's, and composing the two is not this rung).");
-    // The block cascade must be the SAME estimator as the structured one -- above all the wisp
-    // guard: without `interfaceEps` a Weymouth-Yue round-off wisp is an "interfacial" cell whose
-    // zero-area PLIC polygon returns |kappa| ~ 1e8, and the face between it and a real interface
-    // carries a force eight orders too large.  Measured consequence when it was missing: the
-    // distributed run's CSF force differed from the single-rank one by 6.7e-3 after two steps,
-    // amplified from a 3e-16 colour difference by a flipped cascade branch.
-    vofBlocks_->curvProto.interfaceEps = csfInterfaceEps_;
-    vofBlocks_->curvProto.weightWidth = vofCurv_.weightWidth;
-    vofBlocks_->curvProto.monoTol = vofCurv_.monoTol;
-    vofBlocks_->curvProto.ptWeightWidth = vofCurv_.ptWeightWidth;
-    vofBlocks_->curvProto.cosMin = vofCurv_.cosMin;
-    vofBlocks_->curvProto.useMixedHeightFit = vofCurv_.useMixedHeightFit;
-    vofBlocks_->curvProto.useWorklist = vofCurv_.useWorklist;
-    vofBlocks_->enableCsf(sigmaCsf_);
-    const long len3 = static_cast<long>(e3_.x) * e3_.y * e3_.z;
-    for (int c = 0; c < 3; ++c) {
-      vofBlkF_[c] = SField("vof::blockcsf::patch", len3);
-      csfBlkF_[c] = CCField("vof::blockcsf", n_);
-    }
-    computeVofBlockCsf();
-  }
-  // Per-block curvature + CSF face force, scattered SUM into the registered face-force fields the
+  void enableVofBlockCsf();
+
+// Per-block curvature + CSF face force, scattered SUM into the registered face-force fields the
   // RHS reads. Called at the head of every step by `updateVofCurvature()`.
-  void computeVofBlockCsf() {
-    if (!vofBlocks_ || !vofBlocks_->csfEnabled)
-      return;
-    vofBlocks_->computeCsf(vofBlkF_[0], vofBlkF_[1], vofBlkF_[2]);
-    for (int c = 0; c < 3; ++c)
-      copyInner(csfBlkF_[c], e_, G, CCConst(vofBlkF_[c]), e3_, kVofG);
-  }
-  // DIAGNOSTIC: the scattered block CSF face force on this rank's inner cells, component c (the
+  void computeVofBlockCsf();
+
+// DIAGNOSTIC: the scattered block CSF face force on this rank's inner cells, component c (the
   // low face of each cell, the same convention `addCsfRhs` uses). This is the field the block mode
   // adds to the RHS; comparing it across decompositions is how a scatter defect is localised.
-  std::vector<double> getVofBlockForce(int c) {
-    if (!csfBlkF_[c].extent(0))
-      throw std::runtime_error("vof_block_force: call enable_vof_block_csf() first");
-    return gatherInner(csfBlkF_[c]);
-  }
-  // The summed branch census of the last block CSF (LOCAL to this rank).
-  vof::VofCurvature::Stats vofBlockCurvatureStats() const {
-    if (!vofBlocks_)
-      throw std::runtime_error("vof_block_curvature_stats: call enable_vof_blocks first");
-    return vofBlocks_->csfCurvatureStats();
-  }
+  std::vector<double> getVofBlockForce(int c);
 
-  // Harmonic instead of arithmetic rho_f in the pressure projection (WO-J item 5). DEFAULT OFF and
+// The summed branch census of the last block CSF (LOCAL to this rank).
+  vof::VofCurvature::Stats vofBlockCurvatureStats() const;
+
+// Harmonic instead of arithmetic rho_f in the pressure projection (WO-J item 5). DEFAULT OFF and
   // it should stay off — read the long note in mac_pressure.hpp before turning it on: arithmetic
   // rho_f IS the harmonic mean of the mobility 1/rho (the series-correct choice for a normal flux)
   // and is what makes the discrete hydrostatic balance exact, because the momentum time term and
@@ -8204,55 +7184,34 @@ class Solver {
 
   /// Colour of the fluid entering through inflow face `f` (0..5 = -x,+x,-y,+y,-z,+z), in [0,1].
   /// The face must already be an inflow (`set_domain_bc(f, 2, ...)`).
-  void setVofInflow(int f, double value) {
-    checkVofBcFace(f, 2, "set_vof_inflow");
-    vofInflowSet_[f] = true;
-    vofInflowC_[f] = value;
-    vofInflowProfRaw_[f].clear();
-    vofBcArm();
-  }
-  /// Per-position inflow colour on face `f`: `prof` is (nb, nc) on the INNER grid of the face's two
+  void setVofInflow(int f, double value);
+
+/// Per-position inflow colour on face `f`: `prof` is (nb, nc) on the INNER grid of the face's two
   /// perpendicular axes (the same layout and the same clamp resampling `set_domain_bc_profile`
   /// uses for the velocity).
-  void setVofInflowProfile(int f, const std::vector<double>& prof, int nb, int nc) {
-    checkVofBcFace(f, 2, "set_vof_inflow_profile");
-    if ((int)prof.size() != nb * nc)
-      throw std::runtime_error("set_vof_inflow_profile: profile size != nb*nc");
-    vofInflowSet_[f] = true;
-    vofInflowProfRaw_[f] = prof;
-    vofInflowProfNb_[f] = nb;
-    vofInflowProfNc_[f] = nc;
-    vofBcArm();
-  }
-  /// `inletOutlet` backflow colour on outflow face `f` (default 0 = gas): where the boundary face
+  void setVofInflowProfile(int f, const std::vector<double>& prof, int nb, int nc);
+
+/// `inletOutlet` backflow colour on outflow face `f` (default 0 = gas): where the boundary face
   /// velocity points back INTO the domain, the colour ghost carries this value instead of the
   /// zero-gradient copy (Rusche 2002 thesis section 4; OpenFOAM `inletOutletFvPatchField`). Where
   /// the fluid leaves, zero-gradient is kept and what leaves is what is inside.
-  void setVofBackflow(int f, double value) {
-    checkVofBcFace(f, 3, "set_vof_backflow");
-    vofBackflowSet_[f] = true;
-    vofBackflowC_[f] = value;
-    vofBcArm();
-  }
-  bool vofBcActive() const { return vofBcActive_; }
-  /// Signed liquid volume that crossed each of the six domain faces during the LAST colour
+  void setVofBackflow(int f, double value);
+
+bool vofBcActive() const;
+
+/// Signed liquid volume that crossed each of the six domain faces during the LAST colour
   /// advection, in cell-volume units, POSITIVE for liquid entering the domain. Local to this rank
   /// (a distributed caller sums them, as it does for every other VoF diagnostic).
-  std::vector<double> vofBcVolumes() const {
-    return std::vector<double>(vofBcVol_, vofBcVol_ + 6);
-  }
-  /// The same, accumulated since `enable_vof()` (or the last `resetVofBcVolumes()`). Changing a
+  std::vector<double> vofBcVolumes() const;
+
+/// The same, accumulated since `enable_vof()` (or the last `resetVofBcVolumes()`). Changing a
   /// boundary colour mid-run deliberately does NOT reset it — a slug injection is exactly the case
   /// where the running total is the quantity of interest.
-  std::vector<double> vofBcVolumesTotal() const {
-    return std::vector<double>(vofBcVolTotal_, vofBcVolTotal_ + 6);
-  }
-  void resetVofBcVolumes() {
-    for (int f = 0; f < 6; ++f)
-      vofBcVol_[f] = vofBcVolTotal_[f] = 0.0;
-  }
+  std::vector<double> vofBcVolumesTotal() const;
 
-  // nvcc requires the enclosing member of an extended device lambda to be public; these are
+void resetVofBcVolumes();
+
+// nvcc requires the enclosing member of an extended device lambda to be public; these are
   // implementation detail (see the same note above `patchScalarDirichletFace`).
 
   /// The colour field's boundary rules, applied at the END of `vofFillGhosts` — i.e. after the
@@ -8268,30 +7227,9 @@ class Solver {
   ///    nonsense. (Consequence, recorded rather than hidden: under `enable_vof_momentum` the
   ///    half-shifted colour keeps the zero-gradient band at an inflow face. It matters only when
   ///    the inflow colour differs from the colour of the fluid already at the boundary.)
-  void vofApplyColourBc(CCField f) {
-    if (!vofBcActive_ || !vofEnabled_)
-      return;
-    if (f.data() != vofAdv_.colour().data())
-      return;
-    const I3 e3{e3_.x, e3_.y, e3_.z};
-    for (int face = 0; face < 6; ++face) {
-      if (!touchesGlobalFace(face))
-        continue;  // rank-owned global faces only (the WO-F rule)
-      const int a = face / 2, sd = face % 2;
-      if (bc_[face] == 2 && vofInflowSet_[face]) {
-        if (vofInflowProf3_[face].extent(0))
-          vof::bcColourProfile(f, e3, kVofG, a, sd, vofInflowProf3_[face], vofProf3Nc_[face]);
-        else
-          vof::bcColourConst(f, e3, kVofG, a, sd, vofInflowC_[face]);
-      } else if (bc_[face] == 3 && vofBackflowSet_[face]) {
-        // reads the face velocity the advector is about to flux with, so it must run after
-        // bridgeVelocityToVof() — which it does: advectVof bridges the velocity first.
-        vof::bcColourBackflow(f, e3, kVofG, a, sd, vofAdv_.faceVel(a), vofBackflowC_[face]);
-      }
-    }
-  }
+  void vofApplyColourBc(CCField f);
 
-  /// WO-R item 5 — the Neumann property policy at an inflow face.
+/// WO-R item 5 — the Neumann property policy at an inflow face.
   ///
   /// `fillPropGhosts` copies the inner cell's value into the ghost. At a liquid inlet next to a gas
   /// interior that makes the inlet FACE density (the arithmetic mean of inner and ghost, used by
@@ -8307,116 +7245,31 @@ class Solver {
   ///  * `f` is a closure OUTPUT -> re-evaluate that closure on the ghost band.
   /// Anything else (a field with no closure, a hand-set rho) keeps the Neumann copy — there is no
   /// C to derive it from and inventing one would be a silent model.
-  void vofBcPropGhosts(CCField f) {
-    if (!vofBcActive_ || !vofEnabled_)
-      return;
-    const bool isColour = cField_.extent(0) && f.data() == cField_.data();
-    const I3 e2{e_.x, e_.y, e_.z};
-    for (int face = 0; face < 6; ++face) {
-      if (bc_[face] != 2 || !vofInflowSet_[face] || !touchesGlobalFace(face))
-        continue;
-      const int a = face / 2, sd = face % 2;
-      if (isColour) {
-        if (vofInflowProfG2_[face].extent(0))
-          vof::bcColourProfile(f, e2, G, a, sd, vofInflowProfG2_[face], vofProfG2Nc_[face]);
-        else
-          vof::bcColourConst(f, e2, G, a, sd, vofInflowC_[face]);
-      } else {
-        for (const auto& cl : closures_)
-          if (cl.out.data() == f.data())
-            applyClosureFaceGhost(cl, e_, G, a, sd);
-      }
-    }
-  }
+  void vofBcPropGhosts(CCField f);
 
-  /// (Re)build everything that lives on the g=3 block for this rung: the out-of-domain mask and the
+/// (Re)build everything that lives on the g=3 block for this rung: the out-of-domain mask and the
   /// resampled boundary-colour profiles. Called from `buildVofBlock` (so a redistribute/initMpi
   /// re-derives them) and from `vofBcArm` (so a setter takes effect immediately).
-  void vofRebuildBcBlock() {
-    if (!vofEnabled_)
-      return;
-    const I3 e3{e3_.x, e3_.y, e3_.z};
-    const bool px = vofAxisPeriodic(0), py = vofAxisPeriodic(1), pz = vofAxisPeriodic(2);
-    if (vofBcActive_) {
-      vofOutside_ = vof::UCField("vof::outside", vofAdv_.size());
-      vof::buildOutsideMask(vofOutside_, e3, kVofG, vofOrigin(), vofGlobalSize(), px, py, pz);
-      vofAdv_.setOutsideMask(vofOutside_);
-    } else {
-      vofAdv_.setOutsideMask(vof::UCField());
-    }
-    // the boundary-flux ledger counts only the GLOBAL domain faces this rank owns
-    for (int face = 0; face < 6; ++face)
-      vofAdv_.setBcFaceOwned(face, vofBcActive_ && bc_[face] != 0 && touchesGlobalFace(face));
-    for (int face = 0; face < 6; ++face) {
-      vofInflowProf3_[face] = CCField();
-      vofInflowProfG2_[face] = CCField();
-      if (vofInflowProfRaw_[face].empty())
-        continue;
-      vofInflowProf3_[face] =
-          resampleFaceScalar(vofInflowProfRaw_[face], vofInflowProfNb_[face],
-                             vofInflowProfNc_[face], face, e3_, kVofG, vofProf3Nc_[face]);
-      vofInflowProfG2_[face] =
-          resampleFaceScalar(vofInflowProfRaw_[face], vofInflowProfNb_[face],
-                             vofInflowProfNc_[face], face, e_, G, vofProfG2Nc_[face]);
-    }
-  }
+  void vofRebuildBcBlock();
 
-  /// Clamp-resample a per-position face scalar from the user's (nb, nc) INNER grid onto the
+/// Clamp-resample a per-position face scalar from the user's (nb, nc) INNER grid onto the
   /// ghost-inclusive (b, c) plane of an extended block, so the fill kernel indexes it directly by
   /// face position. Same rule as `setDomainBcProfile`, one component instead of three.
   CCField resampleFaceScalar(const std::vector<double>& prof, int nb, int nc, int face, C3 ext,
-                             int g, int& outNc) {
-    const int a = face / 2;
-    const int dims[3] = {ext.x, ext.y, ext.z};
-    const int bax = (a + 1) % 3, cax = (a + 2) % 3;
-    const int Lb = dims[bax], Lc = dims[cax];
-    CCField pf("vof::bcprof", (std::size_t)Lb * Lc);
-    auto h = Kokkos::create_mirror_view(pf);
-    auto cl = [](int v, int n) { return v < 0 ? 0 : (v >= n ? n - 1 : v); };
-    for (int p0 = 0; p0 < Lb; ++p0)
-      for (int p1 = 0; p1 < Lc; ++p1)
-        h((long)p0 * Lc + p1) = prof[(std::size_t)cl(p0 - g, nb) * nc + cl(p1 - g, nc)];
-    Kokkos::deep_copy(pf, h);
-    outNc = Lc;
-    return pf;
-  }
+                             int g, int& outNc);
 
-  /// A VoF boundary colour is only meaningful on a face that already carries the matching domain
+/// A VoF boundary colour is only meaningful on a face that already carries the matching domain
   /// BC, and getting that wrong is silent (the ghost band would be written and then never read as
   /// boundary data). Fail loudly instead.
-  void checkVofBcFace(int f, int wantType, const char* who) {
-    if (f < 0 || f > 5)
-      throw std::runtime_error(std::string(who) + ": face must be 0..5 (-x,+x,-y,+y,-z,+z)");
-    enableVof();
-    if (bc_[f] != wantType)
-      throw std::runtime_error(
-          std::string(who) + ": face " + std::to_string(f) + " has domain BC type " +
-          std::to_string(bc_[f]) + ", not " + std::to_string(wantType) +
-          " — call set_domain_bc(face, " + std::to_string(wantType) + ", ...) first (2 = inflow, "
-          "3 = outflow).");
-  }
-  /// Arm the rung: install the mask, rebuild the profiles, and zero the boundary volume ledger.
-  void vofBcArm() {
-    vofBcActive_ = true;
-    vofRebuildBcBlock();
-    // Refresh C's G=2 ghost band NOW. The property ghosts derive from it (vofBcPropGhosts) and the
-    // first step's `project()` fills rho's ghosts BEFORE the colour advection refills C's, so
-    // without this the first step would evaluate rho(C) at the inflow ghost on the pre-BC (Neumann
-    // copy) colour — i.e. on the interior's phase.
-    if (vofEnabled_ && cField_.extent(0))
-      fillPropGhosts(cField_);
-  }
-  /// Move the advector's per-face boundary volume ledger into the solver's, once per advection.
-  void vofHarvestBcVolumes() {
-    if (!vofBcActive_)
-      return;
-    for (int f = 0; f < 6; ++f) {
-      vofBcVol_[f] = vofAdv_.bcFaceVolume(f);
-      vofBcVolTotal_[f] += vofBcVol_[f];
-    }
-  }
+  void checkVofBcFace(int f, int wantType, const char* who);
 
-  // --- interface curvature (rung V3, WO-O) -----------------------------------------------------
+/// Arm the rung: install the mask, rebuild the profiles, and zero the boundary volume ledger.
+  void vofBcArm();
+
+/// Move the advector's per-face boundary volume ledger into the solver's, once per advection.
+  void vofHarvestBcVolumes();
+
+// --- interface curvature (rung V3, WO-O) -----------------------------------------------------
   //
   // `compute_vof_curvature()` fills two registered G=2 cell fields from the CURRENT colour field:
   //
@@ -8434,54 +7287,32 @@ class Solver {
   // The whole cascade is a pure local stencil on the colour field's g = 3 block — no reductions,
   // no new halo — so it is bitwise decomposition-independent by construction. See
   // `vof/curvature.hpp` for the cascade, its literature anchors and its measured branch shares.
-  void computeVofCurvature() {
-    if (!vofEnabled_)
-      throw std::runtime_error(
-          "compute_vof_curvature: VoF is not enabled (call enable_vof / set_vof first)");
-    if (!kappaField_.extent(0)) {
-      kappaField_ = addField("kappa");
-      kappaBranch_ = addField("kappa_branch");
-    }
-    bridgeColourToVof();
-    vofCurvStats_ = vofCurv_.compute(vofAdv_.colour());
-    copyInner(kappaField_, e_, G, CCConst(vofCurv_.kappa()), e3_, kVofG);
-    copyInner(kappaBranch_, e_, G, CCConst(vofCurv_.branch()), e3_, kVofG);
-    // kappa is face-interpolated by the V4 surface-tension force exactly as the properties are, so
-    // it gets the same rank-aware ghost policy they do (WO-G / WO-I).
-    fillPropGhosts(kappaField_);
-    fillPropGhosts(kappaBranch_);
-  }
-  // The branch census of the last `computeVofCurvature()` — LOCAL to this rank (the driver is
+  void computeVofCurvature();
+
+// The branch census of the last `computeVofCurvature()` — LOCAL to this rank (the driver is
   // MPI-free; a distributed caller sums them).
-  vof::VofCurvature::Stats vofCurvatureStats() const { return vofCurvStats_; }
-  /// The interface curvature kappa = 2H in the caller's units, i.e. 1/LENGTH (the internal field
+  vof::VofCurvature::Stats vofCurvatureStats() const;
+
+/// The interface curvature kappa = 2H in the caller's units, i.e. 1/LENGTH (the internal field
   /// is 1/h; kappa_phys = kappa'/hRef).
-  std::vector<double> getVofCurvature() {
-    if (!kappaField_.extent(0))
-      throw std::runtime_error("vof_curvature: call compute_vof_curvature() first");
-    std::vector<double> out = gatherInner(kappaField_);
-    const double k = u_.curvToPhys();
-    if (k != 1.0)
-      for (double& x : out)
-        x *= k;
-    return out;
-  }
-  std::vector<double> getVofCurvatureBranch() {
-    if (!kappaBranch_.extent(0))
-      throw std::runtime_error("vof_curvature_branch: call compute_vof_curvature() first");
-    return gatherInner(kappaBranch_);
-  }
-  // Wendland support width of the PV fallback fit, in cell units (Han et al.: 2.5 with a 5^3
+  std::vector<double> getVofCurvature();
+
+std::vector<double> getVofCurvatureBranch();
+
+// Wendland support width of the PV fallback fit, in cell units (Han et al.: 2.5 with a 5^3
   // stencil; 3.5 recovers first-order spurious-current convergence on a translating droplet and
   // 4.5 over-smooths and destroys it). Exposed for WO-P's sweep.
-  void setVofCurvatureWeightWidth(double d) { vofCurv_.weightWidth = d; }
-  double vofCurvatureWeightWidth() const { return vofCurv_.weightWidth; }
-  // Tier 2b, the mixed height-position fit. OFF by default and it should stay off — see
-  // `vof::VofCurvature::useMixedHeightFit` for the measurement that put it there.
-  void setVofCurvatureMixedHeightFit(bool on) { vofCurv_.useMixedHeightFit = on; }
-  bool vofCurvatureMixedHeightFit() const { return vofCurv_.useMixedHeightFit; }
+  void setVofCurvatureWeightWidth(double d);
 
-  // --- balanced-force surface tension (rung V4, WO-P) -------------------------------------------
+double vofCurvatureWeightWidth() const;
+
+// Tier 2b, the mixed height-position fit. OFF by default and it should stay off — see
+  // `vof::VofCurvature::useMixedHeightFit` for the measurement that put it there.
+  void setVofCurvatureMixedHeightFit(bool on);
+
+bool vofCurvatureMixedHeightFit() const;
+
+// --- balanced-force surface tension (rung V4, WO-P) -------------------------------------------
   //
   // `set_surface_tension(sigma)` turns on the continuum surface force
   //
@@ -8512,76 +7343,48 @@ class Solver {
   //
   // REQUIREMENTS. VoF must be enabled (staggered only). The curvature cascade runs once per step,
   // at the head, from the SAME colour field the density closure sees.
-  void setSurfaceTension(double sigma) {
-    if (!(sigma >= 0.0))
-      throw std::runtime_error("set_surface_tension: sigma must be >= 0");
-    if (sigma > 0.0) {
-      enableVof();
-      if (!kappaField_.extent(0)) {
-        kappaField_ = addField("kappa");
-        kappaBranch_ = addField("kappa_branch");
-      }
-      // Wisp guard on the curvature's interfacial predicate. NOT optional once the curvature feeds
-      // a force: Weymouth-Yue leaves round-off colour residue (measured down to -3e-35) in every
-      // cell its sweeps touch, those cells satisfy `0 < C < 1`, and the cascade returns |kappa| up
-      // to 1e8 for them off a zero-area PLIC polygon. A face between one of them and a real
-      // interfacial cell then carries a force eight orders too large. See
-      // `vof::VofCurvature::interfaceEps` for the measurement; the V3 default (0) is unchanged for
-      // anyone calling `compute_vof_curvature()` without surface tension.
-      vofCurv_.interfaceEps = csfInterfaceEps_;
-    }
-    // sigma is PHYSICAL (force per unit length); internally sigma*tRef^2/(rhoRef*hRef^3), which is
-    // what makes p' = sigma'*kappa' hold with kappa' = kappa*hRef.
-    sigmaPhys_ = sigma;
-    sigmaCsf_ = sigma * u_.sigmaToInt();
-  }
-  /// The surface tension in the caller's units (what set_surface_tension was given).
-  double surfaceTension() const { return sigmaPhys_; }
-  // The wisp threshold above, exposed so it can be swept/ablated. Default 1e-8; 0 restores the
+  void setSurfaceTension(double sigma);
+
+/// The surface tension in the caller's units (what set_surface_tension was given).
+  double surfaceTension() const;
+
+// The wisp threshold above, exposed so it can be swept/ablated. Default 1e-8; 0 restores the
   // unguarded V3 predicate and, with surface tension on, reproduces the instability it exists for.
-  void setVofInterfaceEps(double eps) {
-    csfInterfaceEps_ = eps;
-    if (sigmaCsf_ > 0.0)
-      vofCurv_.interfaceEps = eps;
-  }
-  double vofInterfaceEps() const { return csfInterfaceEps_; }
-  // ABLATION: 0 = the balanced-force face difference (default, the only production mode);
+  void setVofInterfaceEps(double eps);
+
+double vofInterfaceEps() const;
+
+// ABLATION: 0 = the balanced-force face difference (default, the only production mode);
   // 1 = a cell-centred sigma*kappa*grad(C) face-interpolated like an ordinary body force. See
   // `addCsfRhsCellInterp`. Kept so the ctest can measure what the operator pairing is worth.
-  void setCsfMode(int m) { csfMode_ = m; }
-  int csfMode() const { return csfMode_; }
-  // Rung W2: the CSF may be formed on the BLOCKS instead of the global colour+kappa fields, in
+  void setCsfMode(int m);
+
+int csfMode() const;
+
+// Rung W2: the CSF may be formed on the BLOCKS instead of the global colour+kappa fields, in
   // which case there is no `kappaField_` at all. `vofBlockCsf()` is false whenever the block
   // container is absent (`vofBlocks_` is null unless `enable_vof_blocks` ran), so the expression
   // below reduces to W0's character for character on every non-block path.
-  bool vofBlockCsf() const { return static_cast<bool>(vofBlocks_) && vofBlocks_->csfEnabled; }
-  bool csfActive() const {
-    return vofEnabled_ && sigmaCsf_ > 0.0 && (kappaField_.extent(0) != 0 || vofBlockCsf());
-  }
+  bool vofBlockCsf() const;
 
-  // INSTRUMENT (not a configuration): stop recomputing the curvature at the head of each step and
+bool csfActive() const;
+
+// INSTRUMENT (not a configuration): stop recomputing the curvature at the head of each step and
   // use whatever is in the "kappa" / "kappa_branch" fields. Together with `set_vof_kappa_constant`
   // this isolates the BALANCED-FORCE identity from the curvature estimator — the exactness gate of
   // this rung, which must hold at machine zero for a curvature that is merely constant, whether or
   // not it is the right one.
-  void setVofKappaFrozen(bool on) { kappaFrozen_ = on; }
-  bool vofKappaFrozen() const { return kappaFrozen_; }
-  // INSTRUMENT: set kappa to a constant over the WHOLE block (inner + ghosts) and mark every cell's
+  void setVofKappaFrozen(bool on);
+
+bool vofKappaFrozen() const;
+
+// INSTRUMENT: set kappa to a constant over the WHOLE block (inner + ghosts) and mark every cell's
   // branch as a valid estimate, then freeze it. The force (1) is then exactly the discrete gradient
   // of `sigma*kappa*C`, so the projection must annihilate it to round-off from ANY colour field.
   /// `kappa` is a PHYSICAL curvature, 1/length (the internal field is 1/h; see vof_curvature()).
-  void setVofKappaConstant(double kappa) {
-    enableVof();
-    if (!kappaField_.extent(0)) {
-      kappaField_ = addField("kappa");
-      kappaBranch_ = addField("kappa_branch");
-    }
-    Kokkos::deep_copy(kappaField_, kappa / u_.curvToPhys());
-    Kokkos::deep_copy(kappaBranch_, (double)vof::kCurvHf);
-    kappaFrozen_ = true;
-  }
+  void setVofKappaConstant(double kappa);
 
-  // The Brackbill (1992) / Denner & van Wachem (2015) capillary time-step limit
+// The Brackbill (1992) / Denner & van Wachem (2015) capillary time-step limit
   // `sqrt((rho_1 + rho_2) h^3 / (4 pi sigma))`. +inf when surface tension is off.
   //
   // The density SUM is taken from the declared phase pair when momentum consistency is on
@@ -8596,26 +7399,20 @@ class Solver {
   /// What crosses the boundary changes: sigma on the way in, kappa and every TIME on the way out.
   /// Check: dt' = sqrt((rho1'+rho2')/(4 pi sigma')) with rho' = rho/rhoRef and
   /// sigma' = sigma*tRef^2/(rhoRef*hRef^3) gives exactly sqrt((rho1+rho2)hRef^3/(4 pi sigma))/tRef.
-  double capillaryDt() { return capillaryDtInternal() * u_.timeToPhys(); }
-  /// The same limit in the solver's index time (per tRef) — what the step's own guards compare to.
-  double capillaryDtInternal() {
-    if (!(sigmaCsf_ > 0.0))
-      return std::numeric_limits<double>::infinity();
-    // Phase 3 (V3.2): the SMALLEST spacing sets the shortest resolvable capillary wave. `hpMin`
-    // is exactly 1.0 on every isotropic run, so the number is unchanged.
-    double hpMin = u_.hp[0];
-    for (int a = 1; a < 3; ++a)
-      hpMin = hpMin < u_.hp[a] ? hpMin : u_.hp[a];
-    return vof::capillaryDt(phaseDensitySum(), vofEnabled_ ? hpMin : 1.0, sigmaCsf_);
-  }
-  // Safety factor on the capillary limit: `step()` throws when `dt > factor * capillaryDt()`.
+  double capillaryDt();
+
+/// The same limit in the solver's index time (per tRef) — what the step's own guards compare to.
+  double capillaryDtInternal();
+
+// Safety factor on the capillary limit: `step()` throws when `dt > factor * capillaryDt()`.
   // Default 1.0 — Denner & van Wachem measured the Brackbill prefactor to BE the stability
   // boundary, so there is no margin built into the formula itself. Set it huge to disable the
   // check, exactly as `set_vof_cfl_limit` is the escape hatch for the Weymouth-Yue cap.
-  void setCapillaryCfl(double f) { capillaryCfl_ = f; }
-  double capillaryCfl() const { return capillaryCfl_; }
+  void setCapillaryCfl(double f);
 
-  // Both explicit two-phase step limits at the CURRENT state, and which one binds. This is the
+double capillaryCfl() const;
+
+// Both explicit two-phase step limits at the CURRENT state, and which one binds. This is the
   // number WO-P asks for: at pore-scale capillary numbers the capillary dt, not the Weymouth-Yue
   // CFL, is expected to be the binding constraint, and that decides whether implicit surface
   // tension is ever worth revisiting.
@@ -8627,59 +7424,13 @@ class Solver {
     bool capillaryBinds = false;
   };
   /// Both limits at the current state, in the CALLER's time unit (`courant` is dimensionless).
-  VofStepLimits vofStepLimits() {
-    VofStepLimits L;
-    L.courant = vofMaxCourant();
-    L.cflDt = (L.courant > 0.0) ? dtPhys_ * vofCflLimit_ / L.courant
-                                : std::numeric_limits<double>::infinity();
-    L.capillaryDt = capillaryDt();
-    const double cap = capillaryCfl_ * L.capillaryDt;
-    L.capillaryBinds = cap < L.cflDt;
-    L.binding = L.capillaryBinds ? cap : L.cflDt;
-    return L;
-  }
-  // rho_1 + rho_2 for the capillary limit. Public because nvcc refuses an extended
+  VofStepLimits vofStepLimits();
+
+// rho_1 + rho_2 for the capillary limit. Public because nvcc refuses an extended
   // __host__ __device__ lambda inside a private member function (the WO-O build note).
-  double phaseDensitySum() {
-    if (vofMomEnabled_)
-      return vofRhoG_ + vofRhoL_;
-    if (!effVarRho())
-      return 2.0 * rho_;
-    CCExec space;
-    C3 e = e_;
-    double lo = 1e300, hi = -1e300;
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    // A closure-driven rho field is produced by updateProperties() at the head of the step, so
-    // before the FIRST step it is still all zeros and a naive min+max would report 0 — and this is
-    // a diagnostic users call while choosing dt, i.e. exactly then. Refresh and retry once in that
-    // case; the step's own call site runs after updateProperties() and never takes the branch.
-    for (int pass = 0; pass < 2; ++pass) {
-      CCConst f = CCConst(effRhoField());
-      lo = 1e300;
-      hi = -1e300;
-      Kokkos::parallel_reduce(
-          "rho_minmax", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-          KOKKOS_LAMBDA(int x, int y, int z, double& mn, double& mx) {
-            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-            mn = Kokkos::fmin(mn, f(i));
-            mx = Kokkos::fmax(mx, f(i));
-          },
-          Kokkos::Min<double>(lo), Kokkos::Max<double>(hi));
-      if (hi > 0.0 || pass == 1)
-        break;
-      updateProperties();
-    }
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      double g[2] = {lo, -hi}, r[2];
-      MPI_Allreduce(g, r, 2, MPI_DOUBLE, MPI_MIN, comm_);
-      lo = r[0];
-      hi = -r[1];
-    }
-#endif
-    return lo + hi;
-  }
-  // Head-of-step curvature refresh + the capillary dt check. No-op unless surface tension is on.
+  double phaseDensitySum();
+
+// Head-of-step curvature refresh + the capillary dt check. No-op unless surface tension is on.
   //
   // The curvature is taken from the colour field the step is ABOUT to run with — the same field
   // `updateProperties()` just turned into rho(C) and mu(C), i.e. C^{n+1} under momentum consistency
@@ -8702,32 +7453,9 @@ class Solver {
   // because IEEE multiplication is monotone, hence `f*min(a,b) == min(f*a,f*b)`.
   //
   // `set_dt` / `step()` semantics are untouched: this is a wrapper, not a mode.
-  double stepAdaptive(double cflTarget, double capillaryCflTarget, double dtMax) {
-    if (!vofEnabled_)
-      throw std::runtime_error("step_adaptive: needs enable_vof() (it picks dt from the two "
-                               "explicit two-phase limits vof_step_limits() reports)");
-    if (!(cflTarget > 0.0) || !(capillaryCflTarget > 0.0) || !(dtMax > 0.0))
-      throw std::runtime_error("step_adaptive: cfl_target, capillary_cfl and dt_max must be > 0");
-    const VofStepLimits L = vofStepLimits();
-    double dt = cflTarget * L.cflDt;
-    const double dc = capillaryCflTarget * L.capillaryDt;
-    if (dc < dt)
-      dt = dc;
-    if (dtMax < dt)
-      dt = dtMax;
-    if (!(dt > 0.0) || !std::isfinite(dt))
-      throw std::runtime_error(
-          "step_adaptive: no finite dt (cfl_dt = " + std::to_string(L.cflDt) +
-          ", capillary_dt = " + std::to_string(L.capillaryDt) +
-          ") - pass a finite dt_max when neither limit is active");
-    setDt(dt);
-    // The limits were just evaluated on this exact state, so `step()`'s own head-of-step
-    // pre-check (item 1) would repeat the interface-local reduction and the g=3 fill for nothing.
-    vofPrecheckDone_ = true;
-    step();
-    return dt;
-  }
-  // ISSUES sweep item 1: the two explicit two-phase stability caps, evaluated at the head of
+  double stepAdaptive(double cflTarget, double capillaryCflTarget, double dtMax);
+
+// ISSUES sweep item 1: the two explicit two-phase stability caps, evaluated at the head of
   // `step()` on the state the call STARTS from, so a rejected dt costs nothing.
   //
   // What this can and cannot pre-empt, measured rather than assumed:
@@ -8743,56 +7471,13 @@ class Solver {
   //    step's advection used) and pre-empts every case where the CAP or the DT moved, but not the
   //    case where the projection itself accelerates the field inside the step. That residual is
   //    what `step_adaptive` (item 2) removes, by re-picking dt from the same limits every step.
-  void vofStepPrecheck() {
-    const bool skip = vofPrecheckDone_;
-    vofPrecheckDone_ = false;
-    if (!vofEnabled_ || skip)
-      return;
-    if (csfActive()) {
-      const double cap = capillaryCfl_ * capillaryDtInternal();
-      if (!(dt_ <= cap))
-        throw std::runtime_error(capillaryThrowMessage(cap));
-    }
-    // The block container carries one advector per marker with its own colour support; the union
-    // field on `vofAdv_` is a derived quantity there, so the cap is left to the blocks themselves.
-    if (vofBlocks_)
-      return;
-    const double cfl = vofMaxCourant();
-    if (!(cfl <= vofCflLimit_))
-      throw std::runtime_error(
-          "peclet::flow::vof::WyAdvector: CFL = max|uf| dt/h = " + std::to_string(cfl) +
-          " exceeds the Weymouth-Yue boundedness cap " + std::to_string(vofCflLimit_) +
-          " (dt = " + std::to_string(dt_) + ", h = " + std::to_string(vofAdv_.h()) +
-          ") - reduce dt. Rejected at the HEAD of step(): no field has been advanced, so a retry "
-          "at a smaller dt is exact (see set_vof_cfl_limit / step_adaptive).");
-  }
-  std::string capillaryThrowMessage(double cap) const {
-    return "surface tension: dt = " + std::to_string(dt_) + " exceeds the capillary limit " +
-           std::to_string(cap) + " (Brackbill sqrt((rho_1+rho_2) h^3/(4 pi sigma)) = " +
-           std::to_string(cap / (capillaryCfl_ > 0.0 ? capillaryCfl_ : 1.0)) +
-           " x safety factor " + std::to_string(capillaryCfl_) +
-           "). Surface tension is EXPLICIT: this is a hard stability boundary (Denner & van "
-           "Wachem 2015), not a margin. Reduce dt, or raise set_capillary_cfl deliberately.";
-  }
-  void updateVofCurvature() {
-    if (!csfActive())
-      return;
-    if (vofBlockCsf())
-      computeVofBlockCsf();  // rung W2: per-block cascade + the CSF face force, scattered SUM
-    else if (!kappaFrozen_)
-      computeVofCurvature();
-    const double cap = capillaryCfl_ * capillaryDtInternal();
-    if (!(dt_ <= cap))
-      throw std::runtime_error(
-          "surface tension: dt = " + std::to_string(dt_) + " exceeds the capillary limit " +
-          std::to_string(cap) + " (Brackbill sqrt((rho_1+rho_2) h^3/(4 pi sigma)) = " +
-          std::to_string(capillaryDtInternal()) + " x safety factor " +
-          std::to_string(capillaryCfl_) +
-          "). Surface tension is EXPLICIT: this is a hard stability boundary (Denner & van Wachem "
-          "2015), not a margin. Reduce dt, or raise set_capillary_cfl deliberately.");
-  }
+  void vofStepPrecheck();
 
-  // Advance the colour field one dt with the just-projected face velocities. Called by step()
+std::string capillaryThrowMessage(double cap) const;
+
+void updateVofCurvature();
+
+// Advance the colour field one dt with the just-projected face velocities. Called by step()
   // immediately before advanceScalars(); exposed so a test can drive it in isolation.
   //
   // WHY HERE (the ordering, WO-J item 2). Weymouth-Yue conserves volume exactly only against a
@@ -8827,53 +7512,9 @@ class Solver {
   //     block, and the velocity is already embedded there (`bridgeVelocityToVof`).
   // What WO-K must NOT do, and what this structure keeps honest: interpolate C to build C^c. The
   // planes are here; clip them.
-  void advectVof() {
-    if (!vofEnabled_)
-      return;
-    // Rung W2: with the block container on, the colour is the BLOCKS' state and the registered
-    // "C" is the union derived from it — so the step's colour stage is the block advection, in
-    // exactly this slot and for exactly the same reason (the face field has just been projected).
-    // `vofBlocks_` is null unless `enable_vof_blocks` ran, so every other path is unchanged.
-    if (vofBlocks_) {
-      advectVofBlocks(dt_, /*requireSolenoidal=*/false);
-      return;
-    }
-    requireVofGeometry("enable_vof");
-    const double _tv0 = vofTick();  // WO-V9: the whole colour stage
-    double _tb = 0.0;               // ... of which the G=2 <-> g=3 bridges
-    const double _tb0 = vofTick();
-    bridgeVelocityToVof();
-    bridgeColourToVof();
-    vofAdd(_tb, _tb0);
-    vofAdv_.resetBcFaceVolume();  // WO-R: the per-step boundary liquid ledger
-    if (pcEnergy_) {
-      // WO-P23: the CONSISTENT rho c_p T transport. The temperature rides the SAME sweeps, planes
-      // and fluxes as the colour (`vof/energy_advect.hpp`), so it has to be bridged onto the g=3
-      // block first and taken off it after; the scalar module then does diffusion ONLY (its
-      // `energy` flag switches off the Koren advective term and the constant-D operator).
-      ScalarField& sc = scalarField(pcTName_);
-      copyInner(vofEnergy_.temperature(), e3_, kVofG, CCConst(sc.c), e_, G);
-      vofEnergy_.advect(vofAdv_, dt_, vofStep_++);
-      copyInner(sc.c, e_, G, CCConst(vofEnergy_.temperature()), e3_, kVofG);
-      scalarFillGhosts(sc);
-    } else {
-      vofAdv_.advect(dt_, vofStep_++);
-    }
-    vofHarvestBcVolumes();
-    // Back to the G=2 registry mirror, then ITS ghost policy: the closures write inner cells only,
-    // but the property face means (rho_f in the momentum diagonal, the projection coefficient, the
-    // face body force) read the ghost ring, so C's ghosts must be filled with the SAME policy rho
-    // uses or the derived rho ghost is inconsistent with the interior at a boundary.
-    const double _tb1 = vofTick();
-    copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
-    zeroSolidColour();  // rung V5a: the canonical field carries 0 in solid cells, not the fill
-    fillPropGhosts(cField_);
-    vofAdd(_tb, _tb1);
-    vofAdd(vt_.advect, _tv0);
-    vt_.bridge += _tb;
-  }
+  void advectVof();
 
-  // --- momentum-consistent transport (rung V2b, WO-K) ------------------------------------------
+// --- momentum-consistent transport (rung V2b, WO-K) ------------------------------------------
   //
   // Turn on the transport of `rho^c u_c` on the half-shifted MAC control volumes by the SAME
   // geometric fluxes, the same sweep order and one frozen dilation flag as the colour advection of
@@ -8911,107 +7552,48 @@ class Solver {
   // instead would break the hydrostatic acid test at O(d rho) — measured and recorded in the WO-K
   // findings.
   /// `rhoGas` / `rhoLiquid` are PHYSICAL densities, the same numbers the rho closure is given.
-  void enableVofMomentum(double rhoGasPhys, double rhoLiquidPhys) {
-    const double rhoGas = rhoGasPhys * u_.rhoToInt(), rhoLiquid = rhoLiquidPhys * u_.rhoToInt();
-    if constexpr (Grid::collocated)
-      throw std::runtime_error(
-          "enable_vof_momentum: momentum-consistent VoF transport is STAGGERED-ONLY (rung V2b); the "
-          "collocated construction is Favre-averaged face states, rung V8.");
-    enableVof();
-    if (porous_)
-      throw std::runtime_error(
-          "enable_vof_momentum: the volume-averaged porous momentum and the momentum-consistent VoF "
-          "transport both own the momentum time term; they are not composable at this rung.");
-    if (!(rhoGas > 0.0) || !(rhoLiquid > 0.0))
-      throw std::runtime_error("enable_vof_momentum: both phase densities must be > 0");
-    vofRhoG_ = rhoGas;
-    vofRhoL_ = rhoLiquid;
-    vofMomEnabled_ = true;
-    for (int c = 0; c < 3; ++c)
-      if (uAdv_[c].extent(0) != n_)
-        uAdv_[c] = CCField("uAdv", n_);
-    vofMom_.init(vofAdv_, vofRhoG_, vofRhoL_);
-  }
-  bool vofMomentumEnabled() const { return vofMomEnabled_; }
-  // Floor on rho^c in the recovery divide u = (rho^c u)/rho^c, as a FRACTION of min(rho_g, rho_l)
+  void enableVofMomentum(double rhoGasPhys, double rhoLiquidPhys);
+
+bool vofMomentumEnabled() const;
+
+// Floor on rho^c in the recovery divide u = (rho^c u)/rho^c, as a FRACTION of min(rho_g, rho_l)
   // (default 1e-6). rho^c leaves [rho_g, rho_l] only through a wisp in the half-shifted colour, and
   // driving it to zero would need C^c ~ -1/(ratio-1); the floor is a guard, not a model, and
   // `vof_momentum_diagnostics()` reports how many control volumes it actually touched.
-  void setVofRhoFloorFrac(double f) { vofMom_.rhoFloorFrac = f; }
-  double vofRhoFloorFrac() const { return vofMom_.rhoFloorFrac; }
-  double vofRhoFloor() const { return vofMom_.lastRhoFloor(); }
-  // MinMod-limited donor reconstruction in the momentum flux. OFF by default — on a control volume
+  void setVofRhoFloorFrac(double f);
+
+double vofRhoFloorFrac() const;
+
+double vofRhoFloor() const;
+
+// MinMod-limited donor reconstruction in the momentum flux. OFF by default — on a control volume
   // a sweep empties, the slope's deviation from the volume's own velocity is amplified by
   // drho*F/rho^c, which is unbounded in the density ratio; measured, it grew the uniform-velocity
   // residual to 2.2e-10 at ratio 1e4 over 50 steps while plain donor-cell upwind stayed flat at
   // 6.7e-16. Harmless at ratio 1e3. See vof/momentum_advect.hpp.
-  void setVofMomentumMuscl(bool on) { vofMom_.momentumMuscl = on; }
-  // Ablation: the literal reading of "the same frozen dilation flag" (the PRESSURE-cell flag on the
+  void setVofMomentumMuscl(bool on);
+
+// Ablation: the literal reading of "the same frozen dilation flag" (the PRESSURE-cell flag on the
   // shifted control volume instead of its structural analogue).
-  void setVofMomentumCellFlag(bool on) { vofMom_.useCellDilationFlag = on; }
-  // Ablation: drop the Weymouth flux clamp on the shifted control volume. With it off the
+  void setVofMomentumCellFlag(bool on);
+
+// Ablation: drop the Weymouth flux clamp on the shifted control volume. With it off the
   // half-shifted colour leaves [0,1] by O(a^2) and rho^c goes NEGATIVE at high ratio — the
   // measurement that the clamp is a necessity, not a habit. See vof/momentum_advect.hpp point 3.
-  void setVofFluxClamp(bool on) { vofMom_.clampFluxes = on; }
-  vof::MomentumConsistentAdvector::Diagnostics vofMomentumDiagnostics() {
-    if (!vofMomEnabled_)
-      throw std::runtime_error("vof_momentum_diagnostics: enable_vof_momentum was never called");
-    return vofMom_.diagnostics();
-  }
-  // The recovered advected velocity of component c on the inner cells (the momentum RHS's time
+  void setVofFluxClamp(bool on);
+
+vof::MomentumConsistentAdvector::Diagnostics vofMomentumDiagnostics();
+
+// The recovered advected velocity of component c on the inner cells (the momentum RHS's time
   // base). Exposed so a test can gate the uniform-velocity identity on the advection ALONE, with
   // the projection and the momentum solve out of the picture.
-  std::vector<double> getVofAdvectedVelocity(int c) {
-    if (!vofMomEnabled_)
-      throw std::runtime_error("vof_advected_velocity: enable_vof_momentum was never called");
-    return gatherInner(uAdv_[c]);
-  }
+  std::vector<double> getVofAdvectedVelocity(int c);
 
-  // The coupled colour + momentum advection. Called from the head of step() when momentum
+// The coupled colour + momentum advection. Called from the head of step() when momentum
   // consistency is on; exposed so a test can drive it in isolation.
-  void advectVofMomentum() {
-    if (!vofMomEnabled_)
-      return;
-    requireVofGeometry("enable_vof_momentum");
-    if (implicitAdv())
-      throw std::runtime_error(
-          "enable_vof_momentum is incompatible with implicit advection (set_implicit_advection / a "
-          "domain-BC stencil path): the momentum advection is already done conservatively by the "
-          "VoF fluxes, and the implicit-FOU operator would add a second one.");
-    if (!effVarRho())
-      throw std::runtime_error(
-          "enable_vof_momentum requires the variable-density momentum/projection path: register a "
-          "density closure on C (set_property_model('rho','linear','C',[rho_g, rho_l-rho_g])) or "
-          "call set_density_mode('variable').");
-    if (vofMom_.phaseRhoG() != vofRhoG_ || vofMom_.phaseRhoL() != vofRhoL_)
-      vofMom_.setPhaseDensities(vofRhoG_, vofRhoL_);
-    const double _tv0 = vofTick();  // WO-V9: the whole colour + momentum stage
-    double _tb = 0.0;
-    const double _tb0 = vofTick();
-    bridgeVelocityToVof();
-    bridgeColourToVof();
-    vofAdd(_tb, _tb0);
-    vofAdv_.resetBcFaceVolume();  // WO-R: the per-step boundary liquid ledger
-    vofMom_.advect(vofAdv_, dt_, vofStep_++);
-    vofHarvestBcVolumes();
-    // Colour back to the G=2 registry mirror (same contract as advectVof), and the advected
-    // velocity back onto the solver's velocity index convention.
-    const double _tb1 = vofTick();
-    copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
-    zeroSolidColour();
-    fillPropGhosts(cField_);
-    // A plain inner-to-inner copy: the momentum control volumes are indexed in the solver's own
-    // low-face convention (vof/momentum_advect.hpp "Indexing"), so CV_c(i) IS the solver's u_c(i)
-    // and there is no shift here to get wrong.
-    for (int c = 0; c < 3; ++c)
-      copyInner(uAdv_[c], e_, G, CCConst(vofMom_.advectedVelocity(c)), e3_, kVofG);
-    vofAdd(_tb, _tb1);
-    vofAdd(vt_.momAdvect, _tv0);
-    vt_.momBridge += _tb;
-  }
+  void advectVofMomentum();
 
-
-  // --- Phase change (Part II, rungs P0/P1 — WO-P01) --------------------------------------------
+// --- Phase change (Part II, rungs P0/P1 — WO-P01) --------------------------------------------
   //
   // The kernel set of `suite/docs/VOF_PLAN.md` §9 in its planar form, following Boyd & Ling (2023)
   // and Malan et al. (2021): a mass flux `mdot` on interfacial cells (prescribed at P0, from
@@ -9112,94 +7694,27 @@ class Solver {
   /// they are given EXPLICITLY rather than read off a closure, exactly as `enable_vof_momentum`
   /// does and for the same reason. `hlv` is the latent heat (J/kg) and is only used by the thermal
   /// mass flux. Registers "mdot" (kg m^-2 s^-1, solver units) and "pc_source" (1/s).
-  void enablePhaseChange(double rhoG, double rhoL, double hlv) {
-    if constexpr (Grid::collocated)
-      throw std::runtime_error(
-          "enable_phase_change: rungs P0/P1 are STAGGERED-ONLY (the collocated grid carries every "
-          "force as a face acceleration and the source deposit has not been composed with it).");
-    enableVof();
-    if (hasSolid_)
-      throw std::runtime_error(
-          "enable_phase_change: an immersed solid is out of scope at rungs P0/P1 (the source "
-          "deposit and the regression would need the solid-clipped flux polygons of rung V5a's "
-          "follow-on). Use an all-fluid set_pressure_geometry.");
-    if (vofMomEnabled_)
-      throw std::runtime_error(
-          "enable_phase_change is not composable with enable_vof_momentum at this rung: both own "
-          "the head of the step, and momentum consistency would have to carry the interfacial mass "
-          "transfer in its own fluxes.");
-    if (!(rhoG > 0.0) || !(rhoL > 0.0))
-      throw std::runtime_error("enable_phase_change: both phase densities must be > 0");
-    if (!(hlv > 0.0))
-      throw std::runtime_error("enable_phase_change: the latent heat h_lv must be > 0");
-    pcRhoG_ = rhoG;
-    pcRhoL_ = rhoL;
-    pcHlv_ = hlv;
-    // WO-P23: phase change and WO-R2 item 4's wisp guard are NOT compatible, and the measurement
-    // is in the findings. `enable_vof` sets `WyAdvector::wispEps = 1e-8`, which makes the advector
-    // treat a cell with `C <= 1e-8` as a PURE phase for reconstruction and flux. The phase-change
-    // driver needs the colour it reconstructs a plane from, deposits a source behind and pins a
-    // Dirichlet row in to be the colour that is actually advected; over the band
-    // `1e-12 < C < 1e-8` the two disagree, and on a CURVED interface that diverges the run — the
-    // P3 Scriven bubble at Ja = 0.5 reads `R(t)` error 48 % and trips the study's dt-collapse guard
-    // at step 34, against 2.002 % and 80 clean steps with the guard off. Sharing the tolerance
-    // (`pcEffInterfaceEps` / `pcEffPureEps`) is necessary but not sufficient: it fixes the planar
-    // gates and moves the Scriven blow-up from step 34 to step ~200 of 80-worth of physical time,
-    // and only `wispEps = 0` removes it. So phase change turns the guard off, loudly, and
-    // `set_vof_wisp_eps` after `enable_phase_change` is the deliberate override.
-    setVofWispEps(0.0);
-    pcMdot_ = addField("mdot");
-    pcSrc_ = addField("pc_source");
-    if (pcArea_.extent(0) != n_) {
-      pcArea_ = CCField("pc_area", n_);
-      pcNrm_[0] = CCField("pc_nx", n_);
-      pcNrm_[1] = CCField("pc_ny", n_);
-      pcNrm_[2] = CCField("pc_nz", n_);
-      pcDep_ = CCField("pc_dep", n_);
-      pcTgt_ = CCField("pc_tgt", n_);
-      pcCnew_ = CCField("pc_cnew", n_);
-      pcDefic_ = CCField("pc_defic", n_);
-    }
-    pcEnabled_ = true;
-  }
-  bool phaseChangeEnabled() const { return pcEnabled_; }
+  void enablePhaseChange(double rhoG, double rhoL, double hlv);
 
-  /// Prescribe a UNIFORM mass flux (P0). Overwrites "mdot" on the inner cells and its ghosts.
-  void setMassFluxUniform(double v) {
-    requirePhaseChange("set_mass_flux_uniform");
-    Kokkos::deep_copy(pcMdot_, v);
-    pcThermal_ = false;
-  }
-  /// Prescribe a per-cell mass flux (P0), x-fastest over the inner region.
-  void setMassFlux(const std::vector<double>& v) {
-    requirePhaseChange("set_mass_flux");
-    scatterInner(pcMdot_, v);
-    fillPropGhosts(pcMdot_);
-    pcThermal_ = false;
-  }
-  /// P1: compute `mdot` each step from the registered scalar `tname` by the one-sided pure-cell
+bool phaseChangeEnabled() const;
+
+/// Prescribe a UNIFORM mass flux (P0). Overwrites "mdot" on the inner cells and its ghosts.
+  void setMassFluxUniform(double v);
+
+/// Prescribe a per-cell mass flux (P0), x-fastest over the inner region.
+  void setMassFlux(const std::vector<double>& v);
+
+/// P1: compute `mdot` each step from the registered scalar `tname` by the one-sided pure-cell
   /// weighted least-squares gradients of `vof/phase_change.hpp`. `Tsat` is the saturation
   /// temperature, `kg`/`kl` the phase conductivities (W/(cell K)) and `Rint` the interfacial
   /// heat-transfer resistance of the Schrage/IHTR Robin condition `T_G = T_sat + mdot R_int`
   /// (Bureš & Sato 2021); `Rint = 0` is the hard Dirichlet and is the default.
   void setPhaseChangeThermal(const std::string& tname, double Tsat, double kg, double kl,
-                             double Rint) {
-    requirePhaseChange("set_phase_change_thermal");
-    if (!hasScalar(tname))
-      throw std::runtime_error("set_phase_change_thermal: no scalar named '" + tname +
-                               "' (call add_scalar first)");
-    pcTName_ = tname;
-    pcTsat_ = Tsat;
-    pcKg_ = kg;
-    pcKl_ = kl;
-    pcRint_ = Rint;
-    pcThermal_ = true;
-    scalarDirichletMask(tname);  // allocate the per-cell Dirichlet mask + value fields
-    pcUpdateThermalMask();
-  }
-  void setPhaseChangeThermalOff() { pcThermal_ = false; }
+                             double Rint);
 
-  // --- WO-P23 (rungs P2/P3) --------------------------------------------------------------------
+void setPhaseChangeThermalOff();
+
+// --- WO-P23 (rungs P2/P3) --------------------------------------------------------------------
 
   /// The PLANE-ANCHORED (ghost-fluid) Dirichlet condition, ON by default.
   ///
@@ -9213,18 +7728,20 @@ class Solver {
   /// on the CURRENT colour and temperature. On a saturated side the fit returns 0 and the condition
   /// degenerates to the hard Dirichlet exactly, so it is inert wherever the old form was right.
   /// `set_phase_change_plane_dirichlet(False)` restores the P0/P1 behaviour bit-for-bit.
-  void setPhaseChangePlaneDirichlet(bool on) { pcPlaneDir_ = on; }
-  bool phaseChangePlaneDirichlet() const { return pcPlaneDir_; }
+  void setPhaseChangePlaneDirichlet(bool on);
 
-  /// The QUADRATIC one-sided gradient fit (`T - T_G = G phi + Q phi^2`) instead of the linear one.
+bool phaseChangePlaneDirichlet() const;
+
+/// The QUADRATIC one-sided gradient fit (`T - T_G = G phi + Q phi^2`) instead of the linear one.
   /// This is VOF_PLAN §9 item 1's Aslam quadratic extrapolation in least-squares form: the same
   /// samples and the same stencil reach, one more basis function. Once the plane-anchored Dirichlet
   /// has removed the cell-centre mismatch, the linear fit's `O(T'' h)` curvature bias is the
   /// leading error of the rung.
-  void setPhaseChangeQuadraticFit(bool on) { pcQuadFit_ = on; }
-  bool phaseChangeQuadraticFit() const { return pcQuadFit_; }
+  void setPhaseChangeQuadraticFit(bool on);
 
-  /// **WO-P3c — which geometry the interfacial AREA comes from.** `A_Gamma` enters the plane shift
+bool phaseChangeQuadraticFit() const;
+
+/// **WO-P3c — which geometry the interfacial AREA comes from.** `A_Gamma` enters the plane shift
   /// (`dV = mdot A dt / rho_l`) and the divergence source (`S = mdot A (1/rho_g - 1/rho_l)`), so the
   /// bubble grows as `int mdot dA` and a biased area is a biased growth rate.
   ///
@@ -9249,94 +7766,24 @@ class Solver {
   /// well-resolved colour field the MYC area is already within 0.5 % of `4 pi R^2` on a sphere and
   /// the cascade buys nothing measurable — see the WO-P3c findings, which also record that
   /// WO-P3b's 5.5-9.3 % deficit was its probe's own 4^3 sub-sampled initialisation.
-  void setPhaseChangeArea(int mode) {
-    if (mode < 0 || mode > 7)
-      throw std::runtime_error(
-          "set_phase_change_area: mode must be 0 (PLIC/MYC), 1 (cascade metric), 2 (cascade "
-          "normal), 3 (cascade footprint) or 4-7 (the joined marching-tetrahedra sheet: 4 colour/"
-          "centroid, 5 colour/split, 6 PLIC-distance/centroid, 7 PLIC-distance/split)");
-    pcAreaMode_ = mode;
-  }
-  int phaseChangeArea() const { return pcAreaMode_; }
+  void setPhaseChangeArea(int mode);
 
-  /// The summed interfacial area over the inner region, in h^2 (globally reduced under MPI) —
+int phaseChangeArea() const;
+
+/// The summed interfacial area over the inner region, in h^2 (globally reduced under MPI) —
   /// the E7 gallery's `vof_interface_area()`. Uses the CURRENT `set_phase_change_area` geometry,
   /// so the number a page quotes and the number the phase change integrates are the same one.
   /// Needs `enable_vof`; does not need phase change.
-  double vofInterfaceArea() {
-    if (!vofEnabled_)
-      throw std::runtime_error("vof_interface_area: VoF is not enabled (call enable_vof first)");
-    bridgeColourToVof();
-    double a = 0.0;
-    if (pcAreaMode_ == vof::kAreaPlic) {
-      const I3 e3 = I3{e3_.x, e3_.y, e3_.z};
-      const int g = kVofG;
-      const long sy = e3.x, sz = (long)e3.x * e3.y;
-      CCConst c = CCConst(vofAdv_.colour());
-      const double eps = pcEffInterfaceEps();
-      Kokkos::parallel_reduce(
-          "peclet::flow::vof_area_plic",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {g, g, g},
-                                                         {g + nx_, g + ny_, g + nz_}),
-          KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
-            const long i = (long)x + (long)y * e3.x + (long)z * sz;
-            if (!vof::pcIsInterfacial(c(i), eps))
-              return;
-            double st[27];
-            for (int kk = -1; kk <= 1; ++kk)
-              for (int jj = -1; jj <= 1; ++jj)
-                for (int ii = -1; ii <= 1; ++ii)
-                  st[vof::plicSt(ii + 1, jj + 1, kk + 1)] = c(i + ii + jj * sy + kk * sz);
-            double m[3];
-            vof::mycNormal(st, m);
-            acc += vof::plicArea(m[0], m[1], m[2], vof::plicAlpha(m[0], m[1], m[2], c(i)));
-          },
-          a);
-      Kokkos::fence();
-    } else {
-      a = pcAreaCascadeCompute().area;
-    }
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      double gsum = 0.0;
-      MPI_Allreduce(&a, &gsum, 1, MPI_DOUBLE, MPI_SUM, comm_);
-      a = gsum;
-    }
-#endif
-    return a;
-  }
+  double vofInterfaceArea();
 
-  /// Run the cascade area driver on the (already bridged) g = 3 colour block. Returns the LOCAL
+/// Run the cascade area driver on the (already bridged) g = 3 colour block. Returns the LOCAL
   /// census; the area field stays on the driver for `copyInner`.
-  vof::VofInterfaceArea::Stats pcAreaCascadeCompute() {
-    if (pcAreaMode_ >= vof::kAreaMcColour) {
-      if (!pcAreaMc_.ready())
-        pcAreaMc_.init(nx_, ny_, nz_, kVofG);
-      pcAreaMc_.interfaceEps = pcEffInterfaceEps();
-      const auto m = pcAreaMc_.compute(vofAdv_.colour(), pcAreaMode_);
-      vof::VofInterfaceArea::Stats s;
-      s.interfacial = m.cells;
-      s.hf = m.cells - m.orphanCells;  // the cells the flux integral can actually use
-      s.hfMixed = 0;
-      s.pv = 0;
-      s.noEstimate = m.orphanCells;
-      s.area = m.area;
-      pcMcOrphanArea_ = m.orphanArea;
-      return s;
-    }
-    pcMcOrphanArea_ = 0.0;
-    if (!pcAreaC_.ready())
-      pcAreaC_.init(nx_, ny_, nz_, kVofG);
-    pcAreaC_.interfaceEps = pcEffInterfaceEps();
-    return pcAreaC_.compute(vofAdv_.colour(), pcAreaMode_);
-  }
+  vof::VofInterfaceArea::Stats pcAreaCascadeCompute();
 
-  /// The area field the last `pcAreaCascadeCompute` filled (either driver).
-  SField pcAreaCascadeField() const {
-    return (pcAreaMode_ >= vof::kAreaMcColour) ? pcAreaMc_.area() : pcAreaC_.area();
-  }
+/// The area field the last `pcAreaCascadeCompute` filled (either driver).
+  SField pcAreaCascadeField() const;
 
-  /// Turn on the CONSISTENT energy transport (VOF_PLAN §9 item 6) for the scalar
+/// Turn on the CONSISTENT energy transport (VOF_PLAN §9 item 6) for the scalar
   /// `set_phase_change_thermal` names: `rho c_p T` is advected with the colour advection's OWN
   /// geometric fluxes (`vof/energy_advect.hpp`) instead of the scalar module's Koren TVD flux, and
   /// the implicit solve carries per-cell `k(C)` (the `k_gas`/`k_liquid` of
@@ -9345,81 +7792,42 @@ class Solver {
   /// This is what stops artificial heating at a high `rho c_p` ratio: with two different fluxes the
   /// heat content carried into a mixed cell is divided by a heat capacity built from another flux,
   /// an error of order `d(rho c_p)` — 2000x at water/steam. Requires the thermal mass flux.
-  void setPhaseChangeEnergy(double rcpGas, double rcpLiquid) {
-    requirePhaseChange("set_phase_change_energy");
-    if (!pcThermal_)
-      throw std::runtime_error(
-          "set_phase_change_energy: call set_phase_change_thermal first (the consistent transport "
-          "is for the energy scalar it names)");
-    if (!(rcpGas > 0.0) || !(rcpLiquid > 0.0))
-      throw std::runtime_error("set_phase_change_energy: both phase rho*c_p must be > 0");
-    pcRcpG_ = rcpGas;
-    pcRcpL_ = rcpLiquid;
-    if (pcKcell_.extent(0) != n_) {
-      pcKcell_ = CCField("pc_k", n_);
-      pcRcp_ = CCField("pc_rcp", n_);
-    }
-    ScalarField& sc = scalarField(pcTName_);
-    sc.energy = true;
-    sc.kcell = pcKcell_;
-    sc.rcp = pcRcp_;
-    if (!vofEnergy_.initialized())
-      vofEnergy_.init(vofAdv_, pcRcpG_, pcRcpL_);
-    else
-      vofEnergy_.setPhaseRcp(pcRcpG_, pcRcpL_);
-    vofEnergy_.exchange = [this](CCField f) { this->vofExchangeScalar(f); };
-    pcEnergy_ = true;
-    pcUpdateEnergyProps();
-  }
-  /// MinMod-limited donor reconstruction of the face temperature in the consistent energy flux
-  /// (`vof/energy_advect.hpp`). OFF by default — see the note there for the measurement.
-  void setPhaseChangeEnergyMuscl(bool on) { vofEnergy_.energyMuscl = on; }
-  bool phaseChangeEnergyMuscl() const { return vofEnergy_.energyMuscl; }
-  void setPhaseChangeEnergyOff() {
-    pcEnergy_ = false;
-    if (!pcTName_.empty() && hasScalar(pcTName_))
-      scalarField(pcTName_).energy = false;
-  }
-  bool phaseChangeEnergy() const { return pcEnergy_; }
+  void setPhaseChangeEnergy(double rcpGas, double rcpLiquid);
 
-  /// WO-P3f: turn the ENERGY BUDGET instrument on. Allocates one extra cell field and runs two
+/// MinMod-limited donor reconstruction of the face temperature in the consistent energy flux
+  /// (`vof/energy_advect.hpp`). OFF by default — see the note there for the measurement.
+  void setPhaseChangeEnergyMuscl(bool on);
+
+bool phaseChangeEnergyMuscl() const;
+
+void setPhaseChangeEnergyOff();
+
+bool phaseChangeEnergy() const;
+
+/// WO-P3f: turn the ENERGY BUDGET instrument on. Allocates one extra cell field and runs two
   /// reductions per energy solve; OFF by default and every kernel is skipped when off, so the
   /// solve is bit-identical. Read with `phase_change_budget()`.
-  void setPhaseChangeBudget(bool on) {
-    requirePhaseChange("set_phase_change_budget");
-    pcBudgetOn_ = on;
-    if (on && pcClsPrev_.extent(0) != n_) {
-      pcClsPrev_ = CCField("pc_cls_prev", n_);
-      Kokkos::deep_copy(pcClsPrev_, -1.0);  // "no previous step": the first call counts no changes
-    }
-  }
-  bool phaseChangeBudget() const { return pcBudgetOn_; }
+  void setPhaseChangeBudget(bool on);
 
-  /// WO-P3f: make the per-cell Dirichlet overwrite ENTHALPY-CONSERVING. See `pcCarryDeposit` for
+bool phaseChangeBudget() const;
+
+/// WO-P3f: make the per-cell Dirichlet overwrite ENTHALPY-CONSERVING. See `pcCarryDeposit` for
   /// the mechanism and the measurement. OFF by default (the shipped scheme is unchanged).
-  void setPhaseChangeCarryConserve(bool on) {
-    requirePhaseChange("set_phase_change_carry_conserve");
-    pcCarryConserve_ = on;
-    if (on && pcCarrySrc_.extent(0) != n_) {
-      pcCarrySrc_ = CCField("pc_carry_src", n_);
-      Kokkos::deep_copy(pcCarrySrc_, 0.0);
-    }
-  }
-  bool phaseChangeCarryConserve() const { return pcCarryConserve_; }
+  void setPhaseChangeCarryConserve(bool on);
 
-  /// WO-P3f INSTRUMENT: prescribe the interface curvature `kappa = div(n)` the one-sided fits use
+bool phaseChangeCarryConserve() const;
+
+/// WO-P3f INSTRUMENT: prescribe the interface curvature `kappa = div(n)` the one-sided fits use
   /// to correct their sample distances (`vof::pcCurvedDistance`). 0 (the default) is the shipped
   /// tangent-plane distance and is bitwise inert. This is a PRESCRIBED number, not an estimator:
   /// it exists so the O(h/R) curvature bias of the fit can be measured against a known geometry
   /// before anyone builds a curvature estimator for it.
   /// `kappa` is a PHYSICAL curvature, 1/length (stored as the internal 1/h).
-  void setPhaseChangeFitCurvature(double kappa) {
-    requirePhaseChange("set_phase_change_fit_curvature");
-    pcFitKappa_ = kappa / u_.curvToPhys();
-  }
-  double phaseChangeFitCurvature() const { return pcFitKappa_ * u_.curvToPhys(); }
+  void setPhaseChangeFitCurvature(double kappa);
 
-  /// **WO-P3g — the SECOND-ORDER interfacial energy operator, as one package.**
+double phaseChangeFitCurvature() const;
+
+/// **WO-P3g — the SECOND-ORDER interfacial energy operator, as one package.**
   ///
   /// `order = 1` is the shipped WO-P23…P3f scheme, bitwise. `order = 2` turns on, together:
   ///
@@ -9438,54 +7846,31 @@ class Solver {
   /// residue of a CANCELLATION between (F1) the fit's `O(h/R)` curvature bias `+6 %`, (F2) the
   /// two-point row's `O(h/delta_T)` flux deficit `−5 %`, and (F3) the overwrite's `−0.7 … −4.3 %`
   /// enthalpy destruction — so repairing any ONE of them alone makes the gate worse, measured.
-  void setPhaseChangeEnergyOrder(int order) {
-    requirePhaseChange("set_phase_change_energy_order");
-    if (order != 1 && order != 2)
-      throw std::runtime_error("set_phase_change_energy_order: order must be 1 or 2");
-    setPhaseChangeMdotOperator(order == 2);
-    setPhaseChangeGfmOrder(order);
-    setPhaseChangeCurvatureDistance(order == 2);
-    setPhaseChangeCarryConserve(order == 2);
-  }
-  int phaseChangeEnergyOrder() const {
-    return (pcMdotOperator_ && pcGfmOrder_ == 2 && pcCurvDist_ && pcCarryConserve_) ? 2 : 1;
-  }
+  void setPhaseChangeEnergyOrder(int order);
 
-  /// WO-P3g item 1: take `mdot` from the energy operator's own interfacial flux instead of the
+int phaseChangeEnergyOrder() const;
+
+/// WO-P3g item 1: take `mdot` from the energy operator's own interfacial flux instead of the
   /// one-sided least-squares fit. The fit stays as `phase_change_diagnostics()['mdot_fit']`.
-  void setPhaseChangeMdotOperator(bool on) {
-    requirePhaseChange("set_phase_change_mdot_operator");
-    if (on && pcRint_ != 0.0 && !pcThermal_)
-      throw std::runtime_error("set_phase_change_mdot_operator: needs the thermal mass flux");
-    pcMdotOperator_ = on;
-    if (on && pcMdotFit_.extent(0) != n_)
-      pcMdotFit_ = CCField("pc_mdot_fit", n_);
-  }
-  bool phaseChangeMdotOperator() const { return pcMdotOperator_; }
+  void setPhaseChangeMdotOperator(bool on);
 
-  /// WO-P3g item 2: the order of the one-sided (ghost-fluid) Dirichlet row. 1 = the shipped
+bool phaseChangeMdotOperator() const;
+
+/// WO-P3g item 2: the order of the one-sided (ghost-fluid) Dirichlet row. 1 = the shipped
   /// two-point form; 2 = Gibou–Fedkiw's three-point form (`vof::pcGfmRow`).
-  void setPhaseChangeGfmOrder(int order) {
-    requirePhaseChange("set_phase_change_gfm_order");
-    if (order != 1 && order != 2)
-      throw std::runtime_error("set_phase_change_gfm_order: order must be 1 or 2");
-    pcGfmOrder_ = order;
-  }
-  int phaseChangeGfmOrder() const { return pcGfmOrder_; }
+  void setPhaseChangeGfmOrder(int order);
 
-  /// WO-P3g item 3: measure the GFM row's `theta` and the one-sided fits' sample distances to the
+int phaseChangeGfmOrder() const;
+
+/// WO-P3g item 3: measure the GFM row's `theta` and the one-sided fits' sample distances to the
   /// CURVED interface, with the mean curvature taken per cell from the V3 cascade. Supersedes
   /// `set_phase_change_fit_curvature`, which prescribes ONE curvature for the whole field; where
   /// both are on the cascade wins.
-  void setPhaseChangeCurvatureDistance(bool on) {
-    requirePhaseChange("set_phase_change_curvature_distance");
-    pcCurvDist_ = on;
-    if (on && pcKappa_.extent(0) != n_)
-      pcKappa_ = CCField("pc_kappa", n_);
-    pcMaskFresh_ = false;  // the row geometry has to be rebuilt with (or without) the curvature
-  }
-  bool phaseChangeCurvatureDistance() const { return pcCurvDist_; }
-  /// **WO-P3f open item 6 / WO-P3g** — the divergence source's 5^3 fallback target, as a setter
+  void setPhaseChangeCurvatureDistance(bool on);
+
+bool phaseChangeCurvatureDistance() const;
+
+/// **WO-P3f open item 6 / WO-P3g** — the divergence source's 5^3 fallback target, as a setter
   /// (it was only reachable through `set_phase_change_deposit_fallback`). An interfacial cell whose two
   /// along-the-normal candidates (`round(k n)`, k = 1, 2) are BOTH still interfacial keeps its
   /// source, and then carries `div(open u) = S` on its OWN faces — i.e. Weymouth-Yue advects the
@@ -9494,18 +7879,21 @@ class Solver {
   /// back to the best cell of the `+n` half of the 5^3 box (Malan's collinearity weight). The
   /// order matters: making that search the PRIMARY rule DIVERGES the Scriven bubble (WO-P23), so
   /// it only ever fills holes.
-  void setPhaseChangeDepositFallback(bool on) {
-    requirePhaseChange("set_phase_change_deposit_fallback");
-    pcDepositFallback_ = on;
-  }
-  bool phaseChangeDepositFallback() const { return pcDepositFallback_; }
-  double phaseChangeQOperator() const { return pcQOperator_; }
-  double phaseChangeQOrphan() const { return pcQOrphan_; }
-  double phaseChangeCarryDeposited() const { return pcCarryDeposited_; }
-  double phaseChangeCarryLost() const { return pcCarryLost_; }
-  PhaseChangeBudget phaseChangeBudgetValues() const { return pcBudget_; }
+  void setPhaseChangeDepositFallback(bool on);
 
-  /// The BAND-EXTENDED LIQUID VELOCITY of VOF_PLAN §9 item 3, as a MEASUREMENT rather than a
+bool phaseChangeDepositFallback() const;
+
+double phaseChangeQOperator() const;
+
+double phaseChangeQOrphan() const;
+
+double phaseChangeCarryDeposited() const;
+
+double phaseChangeCarryLost() const;
+
+PhaseChangeBudget phaseChangeBudgetValues() const;
+
+/// The BAND-EXTENDED LIQUID VELOCITY of VOF_PLAN §9 item 3, as a MEASUREMENT rather than a
   /// switch. What that item exists to guarantee is that the field Weymouth-Yue advects the colour
   /// with is the LIQUID velocity at every interfacial cell — which the source deposit already
   /// delivers when it lands in the compact pure-gas layer behind the interface (WO-P01's P0b row
@@ -9515,86 +7903,26 @@ class Solver {
   /// `phase_change_diagnostics()['band_div']` reports `max |div(open u)|` over interfacial cells;
   /// a nonzero value there, times the frozen dilation flag, is the volume the colour update
   /// creates, so it is the direct read-out and not a proxy.
-  double pcBandDivergence() {
-    const C3 e = e_;
-    const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
-    CCConst c = CCConst(cField_), U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u);
-    CCConst ox = CCConst(ox_), oy = CCConst(oy_), oz = CCConst(oz_);
-    const double eps = pcEffInterfaceEps();
-    double m = 0.0;
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_band_div",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
-          const long i = (long)x + (long)y * sy + (long)z * sz;
-          if (!vof::pcIsInterfacial(c(i), eps))
-            return;
-          const double d = (ox(i + sx) * U(i + sx) - ox(i) * U(i)) +
-                           (oy(i + sy) * V(i + sy) - oy(i) * V(i)) +
-                           (oz(i + sz) * W(i + sz) - oz(i) * W(i));
-          acc = Kokkos::fmax(acc, Kokkos::fabs(d));
-        },
-        Kokkos::Max<double>(m));
-    Kokkos::fence();
-    return Kokkos::fmax(m, 0.0);
-  }
+  double pcBandDivergence();
 
-  /// Refresh `k(C)` and `(rho c_p)(C)` on the G=2 block from the current colour.
-  void pcUpdateEnergyProps() {
-    if (!pcEnergy_)
-      return;
-    const C3 e = e_;
-    CCField kf = pcKcell_, rf = pcRcp_;
-    CCConst c = CCConst(cField_);
-    const double kg = pcKg_, kl = pcKl_, rg = pcRcpG_, rl = pcRcpL_;
-    Kokkos::parallel_for(
-        "peclet::flow::pc_energy_props",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          const double cl = Kokkos::fmin(Kokkos::fmax(c(i), 0.0), 1.0);
-          kf(i) = vof::pcPhaseMix(kg, kl, cl);
-          rf(i) = vof::pcPhaseMix(rg, rl, cl);
-        });
-    Kokkos::fence();
-    fillPropGhosts(pcKcell_);
-    fillPropGhosts(pcRcp_);
-  }
+/// Refresh `k(C)` and `(rho c_p)(C)` on the G=2 block from the current colour.
+  void pcUpdateEnergyProps();
 
-  /// The colour block's ghost policy WITHOUT the colour-specific rules (no solid-band fill, no VoF
+/// The colour block's ghost policy WITHOUT the colour-specific rules (no solid-band fill, no VoF
   /// boundary colour): the halo/periodic exchange plus the non-periodic zero-gradient clamp. This
   /// is the temperature's policy on the g=3 block.
-  void vofExchangeScalar(CCField f) {
-    const bool px = vofAxisPeriodic(0), py = vofAxisPeriodic(1), pz = vofAxisPeriodic(2);
-#ifdef PECLET_FLOW_MPI
-    if (distributed_ && vofDev_)
-      vofDev_->exchange(f);
-    else
-#endif
-      vof::periodicFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, px, py, pz);
-    if (px && py && pz)
-      return;
-    const I3 gs = vofGlobalSize(), org = vofOrigin();
-    vof::clampFill(f, I3{e3_.x, e3_.y, e3_.z}, kVofG, org, gs, px, py, pz);
-  }
+  void vofExchangeScalar(CCField f);
 
-  /// A PRESCRIBED extra divergence source (1/s), x-fastest over the inner region, added to the
+/// A PRESCRIBED extra divergence source (1/s), x-fastest over the inner region, added to the
   /// Poisson RHS exactly like the phase-change deposit: the projection then solves for
   /// `div(open u) = S_pc + S_user`. This is how a CLOSED (periodic) box is made compatible with a
   /// net vapour production: put a balancing sink somewhere the exact solution can absorb it. In a
   /// domain with an outflow face the outflow carries the imbalance and this is not needed.
-  void setDivergenceSource(const std::vector<double>& v) {
-    if (pcUser_.extent(0) != n_)
-      pcUser_ = addField("div_source");
-    scatterInner(pcUser_, v);
-    fillPropGhosts(pcUser_);
-    pcHasUser_ = true;
-  }
-  void clearDivergenceSource() { pcHasUser_ = false; }
+  void setDivergenceSource(const std::vector<double>& v);
 
-  /// WO-P23: an AUTO-BALANCED sink region for the phase-change divergence source. `w` is a
+void clearDivergenceSource();
+
+/// WO-P23: an AUTO-BALANCED sink region for the phase-change divergence source. `w` is a
   /// non-negative weight per inner cell (x-fastest); after every deposit the solver subtracts
   /// `(global sum of the phase-change source) * w(i) / (global sum of w)` from the source field, so
   /// the Poisson RHS is EXACTLY compatible in a closed domain, every step, with no user
@@ -9602,99 +7930,23 @@ class Solver {
   /// a closed-box phase-change run possible without the variable-density OUTFLOW operator (whose
   /// density-ratio inconsistency is WO-R2's subject): the sink is a region of the LIQUID far from
   /// the interface, where the exact solution simply has the liquid leaving.
-  void setDivergenceSink(const std::vector<double>& w) {
-    requirePhaseChange("set_divergence_sink");
-    if (pcSink_.extent(0) != n_)
-      pcSink_ = addField("div_sink");
-    scatterInner(pcSink_, w);
-    fillPropGhosts(pcSink_);
-    const C3 e = e_;
-    CCConst wv = CCConst(pcSink_);
-    double acc = 0.0;
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_sink_weight",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& a) {
-          a += wv((long)x + (long)y * e.x + (long)z * (long)e.x * e.y);
-        },
-        acc);
-    Kokkos::fence();
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      double g = 0;
-      MPI_Allreduce(&acc, &g, 1, MPI_DOUBLE, MPI_SUM, comm_);
-      acc = g;
-    }
-#endif
-    if (!(acc > 0.0))
-      throw std::runtime_error("set_divergence_sink: the weights must have a positive global sum");
-    pcSinkW_ = acc;
-    pcHasSink_ = true;
-  }
-  void clearDivergenceSink() { pcHasSink_ = false; }
+  void setDivergenceSink(const std::vector<double>& w);
 
-  /// Kinematic entry point (the P0a/P1 driver): build `mdot`/`A_G`/`n` from the current colour and
+void clearDivergenceSink();
+
+/// Kinematic entry point (the P0a/P1 driver): build `mdot`/`A_G`/`n` from the current colour and
   /// temperature, deposit the divergence source (for the census only — nothing is projected here)
   /// and apply the interface regression. No Navier-Stokes step, no advection.
   /// `dt` is in the caller's time unit.
-  void applyPhaseChange(double dtPhysArg) {
-    const double dt = dtPhysArg * u_.timeToInt();
-    requirePhaseChange("apply_phase_change");
-    pcBuildInterface();
-    pcScatterSource();
-    pcRegress(dt);
-    pcUpdateEnergyProps();
-    pcUpdateThermalMask();
-    // WO-P3f: the a-priori half of the energy-budget instrument. With no energy solve to bracket,
-    // `pcBudgetPost` on the CURRENT temperature and the just-rebuilt plane geometry answers the
-    // one question an exact-state probe can ask of the energy side: how much heat do the
-    // plane-anchored rows draw across this interface, against the `mdot h_lv A_Gamma` the SAME
-    // fields make the regression book? Inert unless `set_phase_change_budget(true)` ran.
-    if (pcBudgetOn_ && pcThermal_ && pcClsPrev_.extent(0) == n_) {
-      ScalarField& sc = scalarField(pcTName_);
-      if (sc.dmask.extent(0) == n_)
-        pcBudgetPost(sc);
-    }
-  }
+  void applyPhaseChange(double dtPhysArg);
 
-  /// The in-step driver: everything `applyPhaseChange` does, at the head of `step()`.
+/// The in-step driver: everything `applyPhaseChange` does, at the head of `step()`.
   /// Byte-identical no-op when phase change is off.
-  void phaseChangeStep() {
-    if (!pcEnabled_)
-      return;
-    pcBuildInterface();
-    pcScatterSource();
-    pcRegress(dt_);
-  }
+  void phaseChangeStep();
 
-  PhaseChangeDiagnostics phaseChangeDiagnostics() {
-    requirePhaseChange("phase_change_diagnostics");
-    PhaseChangeDiagnostics d = pcDiag_;
-    // colour extrema of the CURRENT field (the regression's own boundedness read-out)
-    CCConst c = CCConst(cField_);
-    const C3 e = e_;
-    double mn = 1e300, mx = -1e300;
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_extrema",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& lo, double& hi) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          lo = Kokkos::fmin(lo, c(i));
-          hi = Kokkos::fmax(hi, c(i));
-        },
-        Kokkos::Min<double>(mn), Kokkos::Max<double>(mx));
-    Kokkos::fence();
-    d.minC = mn;
-    d.maxC = mx;
-    d.bandDiv = pcBandDivergence();
-    if (pcEnergy_ && vofEnergy_.initialized())
-      vofEnergy_.extrema(d.Tmin, d.Tmax);
-    return d;
-  }
+PhaseChangeDiagnostics phaseChangeDiagnostics();
 
-  // nvcc requires members holding extended device lambdas to be public.
+// nvcc requires members holding extended device lambdas to be public.
 
   /// (1) The interface build: for every inner interfacial cell reconstruct the PLIC plane from the
   /// canonical G=2 colour, store its area and unit normal, evaluate `mdot` (thermal or prescribed),
@@ -9702,559 +7954,25 @@ class Solver {
   /// per-cell quantities so the regression's depth-1 ring and the source gather's depth-2 ring see
   /// the OWNER's values — which is what makes both decomposition-independent WITHOUT any
   /// reverse/add halo and without an atomic scatter (bitwise MPI, not a reduction floor).
-  void pcBuildInterface() {
-    // WO-P23 (a defect found in the P0/P1 code): the gradient fit reads the temperature at +-2, so
-    // the energy scalar's ghost band has to be VALID here. `set_field` and the coupling drivers
-    // write inner cells only, and `advanceScalars` fills the ghosts at its END — so the FIRST
-    // `apply_phase_change` / `step` of every run fitted its one-sided gradients against a band of
-    // zeros. Measured on the P2 sucking-interface kernel probe (an exact analytic state, no time
-    // stepping, quasi-2D so the y/z ghosts are inside the 5^3 stencil): mdot came out
-    // **8.16 against the exact 18.48**, a 56 % error that did NOT converge under refinement,
-    // because the transverse ghost samples are counted as pure liquid at T = 0 and pull the fit
-    // towards zero. One line, and it is a correctness fix, not a tolerance.
-    if (pcThermal_)
-      scalarFillGhosts(scalarField(pcTName_));
-    // WO-P3g item 1: the operator-flux `mdot` reads the very rows the energy solve uses, so the
-    // Dirichlet mask, the plane geometry and (item 3) the curvature must belong to the colour this
-    // build reconstructs from. In the COUPLED step they already do — `pcUpdateThermalMask` runs at
-    // the bottom of `step()` on exactly this colour, and nothing has touched it since — so this
-    // costs nothing there. After `set_vof` / `set_field`, i.e. in the one-shot `apply_phase_change`
-    // probe, they do not, and rebuilding here is what makes the probe measure the same operator the
-    // run does.
-    if (pcMdotOperator_ && pcThermal_ && !pcMaskFresh_) {
-      pcUpdateEnergyProps();
-      pcUpdateThermalMask();
-    }
-    // WO-P3c: the cascade-consistent interfacial area, computed on the colour field's OWN g = 3
-    // block (the height columns reach +-3, which the G = 2 phase-change block does not carry) and
-    // copied back onto the inner region. Inert at `pcAreaMode_ == kAreaPlic`: the kernel below then
-    // takes the branch it always took, and `pcAreaCg2_` is never even allocated.
-    const bool cascadeArea = (pcAreaMode_ != vof::kAreaPlic);
-    if (cascadeArea) {
-      if (pcAreaCg2_.extent(0) != n_)
-        pcAreaCg2_ = CCField("pc_area_cascade", n_);
-      bridgeColourToVof();
-      const auto as = pcAreaCascadeCompute();
-      pcDiag_.areaHf = as.hf + as.hfMixed;
-      pcDiag_.areaPv = as.pv;
-      pcDiag_.areaNone = as.noEstimate;
-      pcDiag_.areaOrphan = pcMcOrphanArea_;
-      copyInner(pcAreaCg2_, e_, G, CCConst(pcAreaCascadeField()), e3_, kVofG);
-    }
-    CCConst areaCasc = CCConst(cascadeArea ? pcAreaCg2_ : pcMdot_);
-    const C3 e = e_;
-    const long sy = e_.x, sz = (long)e_.x * e_.y;
-    CCField mdot = pcMdot_, area = pcArea_, dep = pcDep_, tgt = pcTgt_;
-    CCField nx = pcNrm_[0], ny = pcNrm_[1], nz = pcNrm_[2];
-    CCConst c = CCConst(cField_);
-    const bool thermal = pcThermal_;
-    CCConst T = thermal ? CCConst(scalarField(pcTName_).c) : CCConst(cField_);
-    const double eps = pcEffInterfaceEps(), pureEps = pcEffPureEps();
-    const bool quad = pcQuadFit_;
-    const bool depFallback = pcDepositFallback_;
-    const double Tsat = pcTsat_, kg = pcKg_, kl = pcKl_, hlv = pcHlv_, Rint = pcRint_;
-    const double kapPresc = pcFitKappa_;  // WO-P3f, 0 = the shipped (tangent-plane) distance
-    const double rhoG = pcRhoG_, rhoL = pcRhoL_;
-    // WO-P3g. `curvDist` (item 3) replaces the prescribed curvature by the V3 cascade's per-cell
-    // one; `opMode` (item 1) replaces the least-squares fit by the energy operator's own flux, for
-    // which the whole Dirichlet row set has to be readable inside the kernel.
-    const bool curvDist = pcCurvDist_ && pcKappa_.extent(0) == n_;
-    CCConst kapF = CCConst(curvDist ? pcKappa_ : pcMdot_);
-    ScalarField* scT = thermal ? &scalarField(pcTName_) : nullptr;
-    const bool opMode = pcMdotOperator_ && thermal && pcGphi_.extent(0) == n_ &&
-                        scT->dmask.extent(0) == n_;
-    const bool opEnergy = opMode && scT->energy && scT->kcell.extent(0) == n_;
-    if (opMode)
-      pcBuildInDomain();
-    CCConst mkF = CCConst(opMode ? scT->dmask : pcMdot_);
-    CCConst inD = CCConst(opMode ? pcInDomain_ : pcMdot_);
-    CCConst kcF = CCConst(opEnergy ? scT->kcell : pcMdot_);
-    CCConst oxF = CCConst(ox_), oyF = CCConst(oy_), ozF = CCConst(oz_);
-    const double Dconst = thermal ? scT->D : 0.0, thMin = pcGfmThMin_, thMax = pcGfmThMax_;
-    const int gfmOrder = pcGfmOrder_;
-    // Phase 3 (V5, `flow/doc/anisotropic_vof.md` §7): the phase-change layer is where lengths,
-    // areas and the cell VOLUME all enter at once.  `gme` is the per-axis metric; `vCell` the cell
-    // volume in hRef^3.  Both are exactly 1 on every isotropic run.
-    const vof::VofMetric gme = u_.vofMetric();
-    const double vCell = u_.vol;
-    CCField mdotFit = opMode ? pcMdotFit_ : pcMdot_;
-    long nIface = 0, nFallback = 0;
-    double sumArea = 0.0, sumMdot = 0.0, sumQ = 0.0, sumQorph = 0.0, sumMdotFitA = 0.0;
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_build",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, long& nif, long& nfb, double& aacc, double& macc,
-                      double& qacc, double& qorph, double& mfacc) {
-          const long i = (long)x + (long)y * e.x + (long)z * sz;
-          area(i) = 0.0;
-          dep(i) = 0.0;
-          tgt(i) = 0.0;
-          nx(i) = 0.0;
-          ny(i) = 0.0;
-          nz(i) = 0.0;
-          if (!vof::pcIsInterfacial(c(i), eps)) {
-            if (thermal)
-              mdot(i) = 0.0;
-            return;
-          }
-          double st[27];
-          for (int kk = -1; kk <= 1; ++kk)
-            for (int jj = -1; jj <= 1; ++jj)
-              for (int ii = -1; ii <= 1; ++ii)
-                st[vof::plicSt(ii + 1, jj + 1, kk + 1)] = c(i + ii + jj * sy + kk * sz);
-          double m[3];
-          vof::mycNormal(st, m);
-          const double al = vof::plicAlpha(m[0], m[1], m[2], c(i));
-          // PHYSICAL area (V5.1) — `areaCasc` already carries the metric from its own driver.
-          const double A = cascadeArea ? areaCasc(i) : vof::plicAreaMetric(m[0], m[1], m[2], al, gme);
-          // The PHYSICAL unit normal and the PHYSICAL centre distance (V5.2): `s(m)` is the shape
-          // factor of §2, exactly 1.0 at equal spacings, so both are today's values there.
-          double n[3] = {1.0, 0.0, 0.0};
-          const double sMet = vof::vofPhysNormal(m, gme, n);
-          if (!(sMet > 0.0))
-            return;
-          const double phic = vof::pcCentreDistance(m[0], m[1], m[2], al) / sMet;
-          // **WO-P3g item 1 — the area is a UNIT CONVERSION, not a term in the mass balance.**
-          // The regression removes `dV = mdot A dt/rho_l` and the source deposits
-          // `S = mdot A (1/rho_g - 1/rho_l)`, and with `mdot = q/(h_lv A)` BOTH are `A`-free:
-          // `dV = q dt/(h_lv rho_l)`, `S = q (1/rho_g - 1/rho_l)/h_lv`. So a cell the AREA
-          // ESTIMATOR gave nothing still has to evaporate the heat its Dirichlet rows draw, or
-          // that heat is simply destroyed. Measured on the a-priori probe (exact sphere, R = 20,
-          // Ja 0.5, area mode 6): **27.6 % of the operator's total interfacial heat sits on
-          // interfacial cells with A = 0** -- the joined marching-tetrahedra sheet deposits each
-          // triangle to the cell holding its centroid, so a band cell can carry an interface and
-          // no area. `Aeff` is the unit conversion those cells use; the DIAGNOSTIC area
-          // (`interface_area`) stays the geometric one, so `mdot_area` is unaffected.
-          double Aeff = A;
-          double md = mdot(i);
-          if (thermal) {
-            const double Tg = vof::pcInterfaceTemperature(Tsat, md, Rint);
-            // WO-P3g item 3: the sample distance is measured to the CURVED interface, with the
-            // curvature taken per cell from the V3 cascade (`curvDist`) or, as WO-P3f shipped it,
-            // prescribed for the whole field. Bitwise unchanged when both are 0.
-            const double kapFit = curvDist ? kapF(i) : kapPresc;
-            vof::PcGradFit fg, fl;
-            for (int dz = -2; dz <= 2; ++dz)
-              for (int dy = -2; dy <= 2; ++dy)
-                for (int dx = -2; dx <= 2; ++dx) {
-                  if (dx == 0 && dy == 0 && dz == 0)
-                    continue;
-                  // V5.2: the sample offset is PHYSICAL — `delta = H d` — because the fit models
-                  // T against the physical normal distance and returns a physical dT/dn.  With
-                  // index offsets the fitted gradient would be off by the shape factor `s(m)`.
-                  // `g.h = {1,1,1}` multiplies each component by 1.0.
-                  const double di[3] = {(double)dx, (double)dy, (double)dz};
-                  double dp[3];
-                  gme.toPhys(di, dp);
-                  const double w = vof::pcGradWeight(dp[0], dp[1], dp[2], n);
-                  if (!(w > 0.0))
-                    continue;
-                  const long j = i + dx + dy * sy + dz * sz;
-                  const double cj = c(j);
-                  double phi = vof::pcOffsetDistance(phic, n, dp[0], dp[1], dp[2]);
-                  // WO-P3f: bitwise unchanged at kappaFit == 0 (the shipped default)
-                  if (kapFit != 0.0)
-                    phi = vof::pcCurvedDistance(phi, dp[0], dp[1], dp[2], n, kapFit);
-                  if (cj <= pureEps && phi > 0.0)
-                    vof::pcGradAdd(fg, w, phi, T(j), Tg);
-                  else if (cj >= 1.0 - pureEps && phi < 0.0)
-                    vof::pcGradAdd(fl, w, phi, T(j), Tg);
-                }
-            md = quad ? vof::pcMassFlux(kg, vof::pcGradSolve2(fg), kl, vof::pcGradSolve2(fl), hlv)
-                      : vof::pcMassFlux(kg, vof::pcGradSolve(fg), kl, vof::pcGradSolve(fl), hlv);
-            // **WO-P3g item 1 — `mdot` from the ENERGY OPERATOR's own interfacial flux.**
-            //
-            // The rows the energy solve runs are `scalarMaskGfm2`'s, one per (pure cell, masked
-            // neighbour) face; this gathers the SAME rows from the masked side and asks how much
-            // heat they draw. Every ingredient is read from the state that solve used — the
-            // Dirichlet mask, the face openness, `k(C)` and the plane geometry — and the plane this
-            // kernel just reconstructed is bitwise the plane `pcUpdateThermalMask` stored (same
-            // colour, same `mycNormal`/`plicAlpha`), so `theta` is identical to the row's own.
-            //
-            // What it buys: `mdot h_lv A = q` makes the heat the energy equation loses and the mass
-            // the regression produces ONE discrete quantity (WO-P3f measured the shipped pair
-            // disagreeing by 0.95…1.04), and `A` then cancels out of both the plane shift
-            // `dV = mdot A dt/rho_l` and the divergence source — the interfacial area stops being a
-            // term in the mass balance at all.
-            if (opMode) {
-              const long stq[3] = {1, sy, sz};
-              double qsum = 0.0, csum = 0.0;
-              for (int d = 0; d < 3; ++d)
-                for (int sg = -1; sg <= 1; sg += 2) {
-                  const long pc = i + (long)sg * stq[d];
-                  if (mkF(pc) > 0.5)
-                    continue;  // an identity row: it carries no Dirichlet coupling
-                  if (!(inD(pc) > 0.5))
-                    continue;  // outside the global domain: no row exists there at all
-                  const double of = (d == 0)   ? ((sg > 0) ? oxF(i + 1) : oxF(i))
-                                    : (d == 1) ? ((sg > 0) ? oyF(i + sy) : oyF(i))
-                                               : ((sg > 0) ? ozF(i + sz) : ozF(i));
-                  if (!(of > 0.0))
-                    continue;
-                  const double ofB = (d == 0)   ? ((sg > 0) ? oxF(pc + 1) : oxF(pc))
-                                     : (d == 1) ? ((sg > 0) ? oyF(pc + sy) : oyF(pc))
-                                                : ((sg > 0) ? ozF(pc + sz) : ozF(pc));
-                  const long jb = pc + (long)sg * stq[d];
-                  const bool behind = !(mkF(jb) > 0.5) && ofB > 0.0;
-                  // the step from the PURE cell `pc` to this (masked) cell is -sg
-                  // V5.3: `theta` is a distance ALONG a grid line, i.e. an axis ratio — it takes
-                  // the INDEX centre distance and the INDEX normal component, both of which the
-                  // metric-aware overload reconstructs from the physical pair.
-                  const double th = vof::pcGfmThetaKAniso(phic, n, d, (double)(-sg),
-                                                          curvDist ? kapF(i) : 0.0, thMin, thMax,
-                                                          gme);
-                  const vof::PcGfmRow row = vof::pcGfmRow(th, behind, gfmOrder);
-                  const double cf = (opEnergy ? kcF(pc) : Dconst) * of * row.aGamma;
-                  qsum += cf * (T(pc) - Tsat);
-                  csum += cf;
-                  // The three-point row also RESCALES `pc`'s band toward the cell BEHIND it, and
-                  // that rescaling is one-sided (cell `jb`'s own row does not mirror it), so it is
-                  // part of the heat the interface removes from the solved set. Booking it here is
-                  // what makes `sum_j Q_j` the EXACT total the operator transfers -- and, on a
-                  // 1-D quadratic, the exact conductive flux through the interfacial face at every
-                  // theta (gate (a); with the Dirichlet coupling alone it is a factor 2/(1+theta)
-                  // off, which is the whole point of the second-order row).
-                  if (behind && row.aBehind != 1.0) {
-                    const double kb = opEnergy ? 0.5 * (kcF(pc) + kcF(jb)) : Dconst;
-                    qsum += (row.aBehind - 1.0) * kb * ofB * (T(pc) - T(jb));
-                  }
-                }
-              mdotFit(i) = md;  // the least-squares estimator, kept as a diagnostic
-              Aeff = (A > 0.0) ? A : 1.0;
-              md = vof::pcOperatorMassFlux(qsum, csum, Aeff, hlv, Rint);
-              qacc += qsum;
-              if (!(A > 0.0))
-                qorph += qsum;  // reported, but no longer dropped
-              mfacc += mdotFit(i) * A;
-            }
-            mdot(i) = md;
-          }
-          area(i) = Aeff;
-          nx(i) = n[0];
-          ny(i) = n[1];
-          nz(i) = n[2];
-          ++nif;
-          aacc += A;  // the GEOMETRIC area, for the diagnostics; `Aeff` is the unit conversion
-          macc += md;
-          // the divergence source and the pure-gas cell that will carry it
-          // V5.5: `S` is a volumetric source, so the interfacial flux is divided by the cell
-          // VOLUME `V' = hp_x hp_y hp_z` (exactly 1.0 isotropic: `x / 1.0 == x`).
-          const double S = vof::pcDivSource(md, Aeff, rhoG, rhoL) / vCell;
-          if (S != 0.0) {
-            // WO-P23: the receiving PURE GAS cell is the BEST cell of the 5^3 neighbourhood on
-            // the `+n` side, scored by Malan's own collinearity weight `(d.n)^2/|d|^3` — closest
-            // and most nearly along the normal wins, so it returns the `d = round(n)` cell whenever
-            // that one is pure and degrades gracefully when it is not. The rung P0/P1 rule tried
-            // exactly two candidates (`round(k n)`, k = 1, 2) and left the source IN the
-            // interfacial cell when both were still interfacial — which is what happens on a
-            // CURVED interface: measured 48 … 262 such cells on the P3 Scriven bubble, and each of
-            // them then carries `div(open u) = S` on its OWN faces, i.e. Weymouth-Yue advects it
-            // with a field that is not the liquid velocity (that is exactly what
-            // `phase_change_diagnostics()['band_div']` reports). The search order is fixed and the
-            // comparison strict, so the choice is deterministic and decomposition-independent.
-            int tx = 0, ty = 0, tz = 0;
-            bool found = false;
-            for (int k = 1; k <= 2 && !found; ++k) {  // the rung P0/P1 rule, FIRST and unchanged
-              const int ox = (int)Kokkos::round(k * n[0]);
-              const int oy = (int)Kokkos::round(k * n[1]);
-              const int oz = (int)Kokkos::round(k * n[2]);
-              if (ox == 0 && oy == 0 && oz == 0)
-                continue;
-              if (c(i + ox + oy * sy + oz * sz) <= pureEps) {
-                tx = ox;
-                ty = oy;
-                tz = oz;
-                found = true;
-              }
-            }
-            if (!found && depFallback) {
-              // Only where that rule FAILS does the deposit fall back to the best cell of the `+n`
-              // half of the 5^3 box, scored by Malan's collinearity weight. Those are the cells the
-              // P0/P1 code left the source in (48 … 262 of them on the Scriven bubble), and each
-              // one then carries `div(open u) = S` on its OWN faces, i.e. Weymouth-Yue advecting
-              // the colour with a field that is not the liquid velocity.
-              //
-              // The order matters and the measurement says so: making the search the PRIMARY rule
-              // (best-`w` over the whole box) DIVERGES the Scriven bubble — `max|uf|` runs away and
-              // the study's dt-collapse guard trips at step 316 of the Ja = 0.5 run with the
-              // Weymouth-Yue Courant number pinned at 0.38 however small dt is. The planar gates
-              // (P0a/P0b/P1/P2) never saw it, because there the two rules choose the same cell.
-              // Preferring the along-the-normal candidates keeps the validated behaviour wherever
-              // it existed and only fills the holes.
-              double best = 0.0;
-              for (int dz = -2; dz <= 2; ++dz)
-                for (int dy = -2; dy <= 2; ++dy)
-                  for (int dx = -2; dx <= 2; ++dx) {
-                    if (dx == 0 && dy == 0 && dz == 0)
-                      continue;
-                    // V5.5: the candidate is scored on its PHYSICAL offset, so on a stretched
-                    // grid the search still prefers the cell that is nearest AND most along the
-                    // normal. `g.h = {1,1,1}` multiplies each component by 1.0.
-                    const double di[3] = {(double)dx, (double)dy, (double)dz};
-                    double dp[3];
-                    gme.toPhys(di, dp);
-                    if (!(dp[0] * n[0] + dp[1] * n[1] + dp[2] * n[2] > 0.0))
-                      continue;  // the deposit goes BEHIND the interface, into the gas
-                    const double w = vof::pcGradWeight(dp[0], dp[1], dp[2], n);
-                    if (!(w > best))
-                      continue;
-                    if (c(i + dx + dy * sy + dz * sz) > pureEps)
-                      continue;
-                    best = w;
-                    tx = dx;
-                    ty = dy;
-                    tz = dz;
-                  }
-              if (!(best > 0.0))
-                ++nfb;  // no pure gas cell in the 5^3 box on the +n side: the source stays put
-            } else if (!found) {
-              ++nfb;  // the default: no pure gas cell within two cells, the source stays put
-            }
-            dep(i) = S;
-            tgt(i) = (double)((tx + 2) + 5 * (ty + 2) + 25 * (tz + 2));
-          }
-        },
-        nIface, nFallback, sumArea, sumMdot, sumQ, sumQorph, sumMdotFitA);
-    Kokkos::fence();
-    pcQOperator_ = sumQ;
-    pcQOrphan_ = sumQorph;
-    pcMdotFitMean_ = sumArea > 0.0 ? sumMdotFitA / sumArea : 0.0;
-    pcDiag_.qOperator = sumQ;
-    pcDiag_.qOrphan = sumQorph;
-    pcDiag_.mdotFit = pcMdotFitMean_;
-    pcDiag_.interfaceCells = nIface;
-    pcDiag_.fallbackCells = nFallback;
-    pcDiag_.area = sumArea;
-    pcDiag_.mdotMean = nIface > 0 ? sumMdot / (double)nIface : 0.0;
-    // extrema of mdot over interfacial cells
-    double mn = 0.0, mx = 0.0;
-    if (nIface > 0) {
-      mn = 1e300;
-      mx = -1e300;
-      CCConst md = CCConst(pcMdot_), ar = CCConst(pcArea_);
-      Kokkos::parallel_reduce(
-          "peclet::flow::pc_mdot_extrema",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                         {e.x - G, e.y - G, e.z - G}),
-          KOKKOS_LAMBDA(int x, int y, int z, double& lo, double& hi) {
-            const long i = (long)x + (long)y * e.x + (long)z * sz;
-            if (ar(i) > 0.0) {
-              lo = Kokkos::fmin(lo, md(i));
-              hi = Kokkos::fmax(hi, md(i));
-            }
-          },
-          Kokkos::Min<double>(mn), Kokkos::Max<double>(mx));
-      Kokkos::fence();
-    }
-    pcDiag_.mdotMin = mn;
-    pcDiag_.mdotMax = mx;
-    // The exchange that makes the two consumers decomposition-independent. `fillGhosts` is the
-    // halo/periodic base; on a NON-periodic domain face the periodic wrap would import the far
-    // side's interface as a phantom source/deficit donor, so those ghosts are zeroed.
-    fillGhosts(pcMdot_);
-    fillGhosts(pcArea_);
-    fillGhosts(pcDep_);
-    fillGhosts(pcTgt_);
-    for (int d = 0; d < 3; ++d)
-      fillGhosts(pcNrm_[d]);
-    pcZeroDomainGhosts(pcMdot_);
-    pcZeroDomainGhosts(pcArea_);
-    pcZeroDomainGhosts(pcDep_);
-    pcZeroDomainGhosts(pcTgt_);
-    for (int d = 0; d < 3; ++d)
-      pcZeroDomainGhosts(pcNrm_[d]);
-  }
+  void pcBuildInterface();
 
-  /// (2) Deposit each interfacial cell's source into its chosen pure-gas cell, as a GATHER (each
+/// (2) Deposit each interfacial cell's source into its chosen pure-gas cell, as a GATHER (each
   /// receiving cell scans the 5^3 box for donors that named it). A gather rather than an atomic
   /// scatter because the sum then has a fixed order and the result is bitwise reproducible across
   /// decompositions; the donors' `dep`/`tgt` are valid two cells deep thanks to `pcBuildInterface`'s
   /// exchange.
-  void pcScatterSource() {
-    const C3 e = e_;
-    const long sy = e_.x, sz = (long)e_.x * e_.y;
-    CCField src = pcSrc_;
-    CCConst dep = CCConst(pcDep_), tgt = CCConst(pcTgt_);
-    double sum = 0.0;
-    long ncell = 0;
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_source_gather",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& acc, long& nc) {
-          const long i = (long)x + (long)y * e.x + (long)z * sz;
-          double s = 0.0;
-          for (int dz = -2; dz <= 2; ++dz)
-            for (int dy = -2; dy <= 2; ++dy)
-              for (int dx = -2; dx <= 2; ++dx) {
-                const long j = i + dx + dy * sy + dz * sz;
-                const double dj = dep(j);
-                if (dj == 0.0)
-                  continue;
-                const int code = (int)tgt(j);
-                const int tx = code % 5 - 2, ty = (code / 5) % 5 - 2, tz = code / 25 - 2;
-                if (tx + dx == 0 && ty + dy == 0 && tz + dz == 0)
-                  s += dj;
-              }
-          src(i) = s;
-          acc += s;
-          if (s != 0.0)
-            ++nc;
-        },
-        sum, ncell);
-    Kokkos::fence();
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      double g = 0;
-      MPI_Allreduce(&sum, &g, 1, MPI_DOUBLE, MPI_SUM, comm_);
-      sum = g;
-    }
-#endif
-    // WO-P23: the auto-balanced sink. Subtract the GLOBAL deposited source, spread over the sink
-    // weights, so a closed domain's Poisson RHS is compatible by construction.
-    if (pcHasSink_) {
-      const double f = sum / pcSinkW_;
-      CCConst wv = CCConst(pcSink_);
-      Kokkos::parallel_for(
-          "peclet::flow::pc_sink_apply",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                         {e.x - G, e.y - G, e.z - G}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
-            const long i = (long)x + (long)y * e.x + (long)z * sz;
-            src(i) -= f * wv(i);
-          });
-      Kokkos::fence();
-    }
-    pcDiag_.sourceSum = sum;
-    pcDiag_.sourceCells = ncell;
-    fillPropGhosts(pcSrc_);
-  }
+  void pcScatterSource();
 
-  /// (3) The regression: two Jacobi passes over the exchanged per-cell data, so the clip deficit is
+/// (3) The regression: two Jacobi passes over the exchanged per-cell data, so the clip deficit is
   /// redistributed with a FIXED summation order (bitwise across decompositions).
   ///   pass 1 (inner region grown by one, reading only exchanged fields): the raw plane shift
   ///          `C - mdot A dt/rho_l`, clipped into [0,1], with the residue stored;
   ///   pass 2 (inner region): add the clipped colour to the shares of the six face neighbours'
   ///          residues, pushed along `-n` (a liquid deficit) or `+n` (a condensation excess) with
   ///          weights `n_d^2`.
-  void pcRegress(double dt) {
-    const C3 e = e_;
-    const long sy = e_.x, sz = (long)e_.x * e_.y;
-    CCField Cf = cField_, cnew = pcCnew_, defic = pcDefic_;
-    CCConst md = CCConst(pcMdot_), ar = CCConst(pcArea_);
-    const double rhoL = pcRhoL_;
-    // V5.5: `mdot A dt/rho_l` is a liquid VOLUME; the colour it removes is that volume divided by
-    // the CELL volume `V' = hp_x hp_y hp_z` (exactly 1.0 on every isotropic run).
-    const double vCell = u_.vol;
-    double removed = 0.0;
-    long ndef = 0, nexc = 0;
-    double redist = 0.0;
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_regress_raw",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& rem, long& nd, long& ne, double& rd) {
-          const long i = (long)x + (long)y * e.x + (long)z * sz;
-          const double A = ar(i);
-          if (!(A > 0.0)) {
-            cnew(i) = Cf(i);
-            defic(i) = 0.0;
-            return;
-          }
-          const double dV = vof::pcRegressVolume(md(i), A, dt, rhoL) / vCell;
-          const double raw = Cf(i) - dV;
-          const double cl = Kokkos::fmin(Kokkos::fmax(raw, 0.0), 1.0);
-          cnew(i) = cl;
-          defic(i) = raw - cl;
-          const bool inner = (x >= G && x < e.x - G && y >= G && y < e.y - G && z >= G &&
-                              z < e.z - G);
-          if (inner) {
-            rem += dV;
-            if (raw < 0.0)
-              ++nd;
-            if (raw > 1.0)
-              ++ne;
-            rd += Kokkos::fabs(raw - cl);
-          }
-        },
-        removed, ndef, nexc, redist);
-    Kokkos::fence();
-    CCConst cn = CCConst(pcCnew_), df = CCConst(pcDefic_);
-    CCConst nxv = CCConst(pcNrm_[0]), nyv = CCConst(pcNrm_[1]), nzv = CCConst(pcNrm_[2]);
-    Kokkos::parallel_for(
-        "peclet::flow::pc_regress_apply",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * e.x + (long)z * sz;
-          double v = cn(i);
-          const long st[3] = {1, sy, sz};
-          for (int d = 0; d < 3; ++d)
-            for (int s = -1; s <= 1; s += 2) {
-              const long j = i + (long)s * st[d];  // the neighbour that might push into i
-              const double dj = df(j);
-              if (dj == 0.0)
-                continue;
-              // Recompute j's WHOLE allocation here (not just i's share): every receiver runs the
-              // identical arithmetic on the identical inputs, so the sum each cell forms has a
-              // fixed order and is bitwise independent of the decomposition.
-              const double sgn = dj < 0.0 ? -1.0 : 1.0;
-              double n[3] = {nxv(j), nyv(j), nzv(j)};
-              int step[3];
-              double w[3];
-              bool avail[3];
-              for (int q = 0; q < 3; ++q) {
-                const double p = sgn * n[q];
-                const int sq = (p > 0.0) ? 1 : ((p < 0.0) ? -1 : 0);
-                const double ct = sq == 0 ? 0.0 : cn(j + (long)sq * st[q]);
-                avail[q] = sq != 0 && (dj < 0.0 ? (ct > 0.0) : (ct < 1.0));
-              }
-              vof::pcPushWeights(n, sgn, avail, step, w);
-              // j pushes into j + step[d]*e_d; that is i iff step[d] == -s
-              if (step[d] == -s)
-                v += dj * w[d];
-            }
-          Cf(i) = v;
-        });
-    Kokkos::fence();
-    pcDiag_.removedVolume = removed;
-    pcDiag_.deficitCells = ndef;
-    pcDiag_.excessCells = nexc;
-    pcDiag_.redistributed = redist;
-    // How much residue found no neighbour able to absorb it (pushed anyway, on the unrestricted
-    // weights, so conservation holds and the colour goes slightly out of [0,1] instead).
-    double unres = 0.0;
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_unresolved",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
-          const long i = (long)x + (long)y * e.x + (long)z * sz;
-          const double dj = df(i);
-          if (dj == 0.0)
-            return;
-          const double sgn = dj < 0.0 ? -1.0 : 1.0;
-          const long st[3] = {1, sy, sz};
-          double n[3] = {nxv(i), nyv(i), nzv(i)};
-          bool avail[3];
-          for (int q = 0; q < 3; ++q) {
-            const double p = sgn * n[q];
-            const int sq = (p > 0.0) ? 1 : ((p < 0.0) ? -1 : 0);
-            const double ct = sq == 0 ? 0.0 : cn(i + (long)sq * st[q]);
-            avail[q] = sq != 0 && (dj < 0.0 ? (ct > 0.0) : (ct < 1.0));
-          }
-          int step[3];
-          double w[3];
-          if (!vof::pcPushWeights(n, sgn, avail, step, w))
-            acc += Kokkos::fabs(dj);
-        },
-        unres);
-    Kokkos::fence();
-    pcDiag_.unresolved = unres;
-    fillPropGhosts(cField_);
-  }
+  void pcRegress(double dt);
 
-  /// The per-cell Dirichlet mask of the energy scalar: `T = T_sat + mdot R_int` in every
+/// The per-cell Dirichlet mask of the energy scalar: `T = T_sat + mdot R_int` in every
   /// interfacial cell, released everywhere else. Rebuilt from the CURRENT colour, so a call after
   /// the colour advection is what the energy solve at the bottom of the step sees.
   /// **WO-P3g item 3** — the V3 curvature cascade's `kappa` on the G = 2 phase-change block, from
@@ -10263,19 +7981,9 @@ class Solver {
   /// bubble — which is exactly `div(n)` for the PLIC normal, the convention `pcCurvedDistance` and
   /// `pcGfmThetaK` are derived in. Where the cascade produces no estimate it leaves 0, and both
   /// consumers then fall back to the tangent-plane distance, which is the shipped behaviour.
-  void pcUpdateCurvature() {
-    if (pcKappa_.extent(0) != n_)
-      pcKappa_ = CCField("pc_kappa", n_);
-    bridgeColourToVof();
-    vofCurv_.compute(vofAdv_.colour());
-    copyInner(pcKappa_, e_, G, CCConst(vofCurv_.kappa()), e3_, kVofG);
-    // read at depth 1 (the GFM row asks for the INTERFACIAL neighbour's curvature), so exchange;
-    // a periodic wrap on a non-periodic domain face would import a phantom curvature, so zero it.
-    fillGhosts(pcKappa_);
-    pcZeroDomainGhosts(pcKappa_);
-  }
+  void pcUpdateCurvature();
 
-  /// **WO-P3g** — 1 on every cell that CARRIES A ROW in the energy solve, 0 otherwise.
+/// **WO-P3g** — 1 on every cell that CARRIES A ROW in the energy solve, 0 otherwise.
   ///
   /// The operator-flux `mdot` gathers, from the interfacial side, the Dirichlet couplings of its
   /// PURE face neighbours. A neighbour that is a ghost belonging to another RANK does carry a row
@@ -10289,177 +7997,15 @@ class Solver {
   /// cross-section, so its edge cells sit ON the domain boundary): without it those cells' `mdot`
   /// reads 2.115e-3 against the exact 2.000e-3, +5.8 %, and the operator flux exceeds the energy
   /// solve's own by 5.3e-4 of the total.
-  void pcBuildInDomain() {
-    if (pcInDomain_.extent(0) == n_)
-      return;
-    pcInDomain_ = CCField("pc_indomain", n_);
-    Kokkos::deep_copy(pcInDomain_, 0.0);
-    const C3 e = e_;
-    CCField f = pcInDomain_;
-    Kokkos::parallel_for(
-        "peclet::flow::pc_indomain",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          f((long)x + (long)y * e.x + (long)z * (long)e.x * e.y) = 1.0;
-        });
-    Kokkos::fence();
-    fillGhosts(pcInDomain_);
-    pcZeroDomainGhosts(pcInDomain_);
-  }
+  void pcBuildInDomain();
 
-  void pcUpdateThermalMask() {
-    if (!pcThermal_)
-      return;
-    if (pcCurvDist_)
-      pcUpdateCurvature();  // WO-P3g item 3: kappa for the row's theta and for the carried-value fit
-    ScalarField& sc = scalarField(pcTName_);
-    scalarFillGhosts(sc);  // the carried-value refit reads T at +-2 (see pcBuildInterface)
-    const C3 e = e_;
-    const long sy = e_.x, sz = (long)e_.x * e_.y;
-    CCField mk = sc.dmask, dv = sc.dval, tg = pcTgam_;
-    CCField gn0 = pcGn_[0], gn1 = pcGn_[1], gn2 = pcGn_[2], gph = pcGphi_;
-    CCConst c = CCConst(cField_), md = CCConst(pcMdot_), T = CCConst(sc.c);
-    const double eps = pcEffInterfaceEps(), pureEps = pcEffPureEps(), Tsat = pcTsat_, Rint = pcRint_;
-    const double kapPresc = pcFitKappa_;  // WO-P3f
-    const vof::VofMetric gme = u_.vofMetric();  // Phase 3 (V5.2/V5.3)
-    const bool curvDist = pcCurvDist_ && pcKappa_.extent(0) == n_;  // WO-P3g item 3
-    CCConst kapF = CCConst(curvDist ? pcKappa_ : pcMdot_);
-    const bool carry = pcPlaneDir_, quad = pcQuadFit_;
-    const long syl = sy, szl = sz;
-    Kokkos::parallel_for(
-        "peclet::flow::pc_thermal_mask",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * e.x + (long)z * sz;
-          const bool on = vof::pcIsInterfacial(c(i), eps);
-          const double Tgam = vof::pcInterfaceTemperature(Tsat, md(i), Rint);
-          mk(i) = on ? 1.0 : 0.0;
-          tg(i) = Tgam;
-          dv(i) = Tgam;
-          gn0(i) = 0.0;
-          gn1(i) = 0.0;
-          gn2(i) = 0.0;
-          gph(i) = 0.0;
-          if (!on)
-            return;
-          // WO-P23: the plane geometry the PLANE-ANCHORED (ghost-fluid) Dirichlet rows need — the
-          // unit normal and the signed centre distance of THIS cell's PLIC plane, rebuilt from the
-          // colour the energy solve is about to run with (the head-of-step values belong to C^n and
-          // the interface has moved since).
-          double st[27];
-          for (int kk = -1; kk <= 1; ++kk)
-            for (int jj = -1; jj <= 1; ++jj)
-              for (int ii = -1; ii <= 1; ++ii)
-                st[vof::plicSt(ii + 1, jj + 1, kk + 1)] = c(i + ii + jj * sy + kk * sz);
-          double m[3];
-          vof::mycNormal(st, m);
-          // V5.2/V5.3: the stored normal and centre distance are PHYSICAL — the plane-anchored
-          // rows and the one-sided fit both measure in physical lengths, and the axis pullback
-          // happens in `pcGfmThetaKAniso`. Identity at the unit metric.
-          double n[3] = {0.0, 0.0, 0.0};
-          const double sMet = vof::vofPhysNormal(m, gme, n);
-          if (!(sMet > 0.0))
-            return;
-          const double al = vof::plicAlpha(m[0], m[1], m[2], c(i));
-          gn0(i) = n[0];
-          gn1(i) = n[1];
-          gn2(i) = n[2];
-          const double phic = vof::pcCentreDistance(m[0], m[1], m[2], al) / sMet;
-          gph(i) = phic;
-          if (!carry)
-            return;
-          // The value this cell CARRIES until the interface sweeps past it and it becomes pure.
-          // Nothing reads it across a face (the plane-anchored rows use `tg`), so it is free to be
-          // the one-sided extrapolation of the profile on the side the cell CENTRE lies on.
-          const bool gasSide = phic > 0.0;
-          const double kapFit = curvDist ? kapF(i) : kapPresc;  // WO-P3g item 3
-          vof::PcGradFit f;
-          for (int dz = -2; dz <= 2; ++dz)
-            for (int dy = -2; dy <= 2; ++dy)
-              for (int dx = -2; dx <= 2; ++dx) {
-                if (dx == 0 && dy == 0 && dz == 0)
-                  continue;
-                const double di[3] = {(double)dx, (double)dy, (double)dz};
-                double dp[3];
-                gme.toPhys(di, dp);  // V5.2: PHYSICAL sample offsets
-                const double w = vof::pcGradWeight(dp[0], dp[1], dp[2], n);
-                if (!(w > 0.0))
-                  continue;
-                const long j = i + dx + dy * syl + dz * szl;
-                const double cj = c(j);
-                double phi = vof::pcOffsetDistance(phic, n, dp[0], dp[1], dp[2]);
-                if (kapFit != 0.0)  // WO-P3f, bitwise unchanged at 0
-                  phi = vof::pcCurvedDistance(phi, dp[0], dp[1], dp[2], n, kapFit);
-                if (gasSide) {
-                  if (cj <= pureEps && phi > 0.0)
-                    vof::pcGradAdd(f, w, phi, T(j), Tgam);
-                } else if (cj >= 1.0 - pureEps && phi < 0.0) {
-                  vof::pcGradAdd(f, w, phi, T(j), Tgam);
-                }
-              }
-          dv(i) = vof::pcCarriedValue(Tgam, quad ? vof::pcGradSolve2(f) : vof::pcGradSolve(f), phic);
-        });
-    Kokkos::fence();
-    // The GFM rows read mask / dval / n / phi of a FACE NEIGHBOUR, i.e. at depth 1: exchange, then
-    // kill the periodic wrap on non-periodic domain faces (a wrapped "interfacial" ghost would turn
-    // a domain-boundary face into a phantom Dirichlet).
-    fillGhosts(sc.dmask);
-    fillGhosts(sc.dval);
-    fillGhosts(pcTgam_);
-    fillGhosts(pcGn_[0]);
-    fillGhosts(pcGn_[1]);
-    fillGhosts(pcGn_[2]);
-    fillGhosts(pcGphi_);
-    pcZeroDomainGhosts(sc.dmask);
-    pcZeroDomainGhosts(sc.dval);
-    pcZeroDomainGhosts(pcTgam_);
-    pcZeroDomainGhosts(pcGn_[0]);
-    pcZeroDomainGhosts(pcGn_[1]);
-    pcZeroDomainGhosts(pcGn_[2]);
-    pcZeroDomainGhosts(pcGphi_);
-    // WO-P3f: the enthalpy the overwrite is about to destroy, returned to the phase it came from.
-    // Runs AFTER the exchanges above (it reads the donor's mask/normal/T_Gamma at depth 1 and the
-    // donor's own neighbours at depth 2). Inert -- no kernel, no allocation -- when the option
-    // is off.
-    if (pcCarryConserve_ && pcCarrySrc_.extent(0) == n_)
-      pcCarryDeposit(sc);
-    // WO-P3g item 1: the Dirichlet rows now describe THIS colour field, which is what the
-    // operator-flux `mdot` needs before it may read them (see the note in `pcBuildInterface`).
-    pcMaskFresh_ = true;
-  }
+void pcUpdateThermalMask();
 
-  /// Zero the two ghost layers on every NON-periodic domain face this rank owns. Used for the
+/// Zero the two ghost layers on every NON-periodic domain face this rank owns. Used for the
   /// per-cell phase-change data, whose consumers treat a nonzero ghost as a real donor.
-  void pcZeroDomainGhosts(CCField f) {
-    for (int face = 0; face < 6; ++face) {
-      if (bc_[face] == 0 || !touchesGlobalFace(face))
-        continue;
-      const int a = face / 2, side = face % 2;
-      const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
-      const int nt1 = (t1 == 0) ? nx_ : (t1 == 1) ? ny_ : nz_;
-      const int nt2 = (t2 == 0) ? nx_ : (t2 == 1) ? ny_ : nz_;
-      const int na = (a == 0) ? nx_ : (a == 1) ? ny_ : nz_;
-      const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
-      const long sa = (a == 0) ? sx : (a == 1) ? sy : sz;
-      const long st1 = (t1 == 0) ? sx : (t1 == 1) ? sy : sz;
-      const long st2 = (t2 == 0) ? sx : (t2 == 1) ? sy : sz;
-      const int aInner = (side == 0) ? G : (G + na - 1);
-      const int dir = (side == 0) ? -1 : +1;
-      Kokkos::parallel_for(
-          "peclet::flow::pc_zero_ghosts",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(CCExec(), {G, G}, {G + nt1, G + nt2}),
-          KOKKOS_LAMBDA(int j1, int j2) {
-            const long base = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
-            for (int L = 1; L <= 2; ++L)
-              f(base + (long)dir * L * sa) = 0.0;
-          });
-    }
-    Kokkos::fence();
-  }
+  void pcZeroDomainGhosts(CCField f);
 
-  /// **WO-P3f — the enthalpy the per-cell Dirichlet overwrite destroys, returned to the phase it
+/// **WO-P3f — the enthalpy the per-cell Dirichlet overwrite destroys, returned to the phase it
   /// came from.** An OPTION (`set_phase_change_carry_conserve`), OFF by default.
   ///
   /// The leak. An interfacial cell's row is the identity `T = dval` (`scalarMaskRhs`), so whatever
@@ -10490,186 +8036,19 @@ class Solver {
   ///
   /// Reads: the donor at depth 1 and the donor's own neighbours at depth 2, all inside the G = 2
   /// halo and all exchanged before this runs. Writes: inner unmasked cells only.
-  void pcCarryDeposit(ScalarField& sc) {
-    const C3 e = e_;
-    const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
-    CCConst c = CCConst(cField_), T = CCConst(sc.c), dv = CCConst(sc.dval), mk = CCConst(sc.dmask),
-            tg = CCConst(pcTgam_), gn0 = CCConst(pcGn_[0]), gn1 = CCConst(pcGn_[1]),
-            gn2 = CCConst(pcGn_[2]);
-    CCField srcF = pcCarrySrc_;
-    const bool useRcp = pcEnergy_;
-    const double rcpG = pcRcpG_, rcpL = pcRcpL_;
-    double dep = 0.0, lost = 0.0;
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_carry_deposit", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
-          const long st[3] = {sx, sy, sz};
-          const long i = (long)x + (long)y * sy + (long)z * sz;
-          if (mk(i) > 0.5)
-            return;  // masked cells are the identity rows; they receive nothing
-          double add = 0.0;
-          for (int d = 0; d < 3; ++d)
-            for (int sg = -1; sg <= 1; sg += 2) {
-              const long j = i + (long)sg * st[d];
-              if (!(mk(j) > 0.5))
-                continue;
-              const double rj = useRcp ? vof::pcPhaseMix(rcpG, rcpL, c(j)) : 1.0;
-              const double dE = rj * (T(j) - dv(j));
-              if (!(dE != 0.0))
-                continue;
-              const double nn[3] = {gn0(j), gn1(j), gn2(j)};
-              const double devj = T(j) - tg(j);
-              int chosen[3] = {0, 0, 0};
-              double w[3] = {0.0, 0.0, 0.0}, wsum = 0.0;
-              for (int dd = 0; dd < 3; ++dd) {
-                if (nn[dd] == 0.0)
-                  continue;
-                const int sL = (nn[dd] > 0.0) ? -1 : +1;  // n points into the GAS
-                const double dl = T(j + (long)sL * st[dd]) - tg(j);
-                const double dg = T(j - (long)sL * st[dd]) - tg(j);
-                const int s = (dl * devj >= dg * devj) ? sL : -sL;
-                if (mk(j + (long)s * st[dd]) > 0.5)
-                  continue;  // that neighbour is itself an identity row: it cannot absorb
-                chosen[dd] = s;
-                w[dd] = nn[dd] * nn[dd];
-                wsum += w[dd];
-              }
-              if (!(wsum > 0.0))
-                continue;  // no neighbour left in the solve; the residual is booked below
-              if (chosen[d] != -sg)
-                continue;
-              add += (w[d] / wsum) * dE;
-            }
-          if (add == 0.0)
-            return;
-          const double ri = useRcp ? vof::pcPhaseMix(rcpG, rcpL, c(i)) : 1.0;
-          srcF(i) += add / ri;  // stored as a TEMPERATURE increment for cell i
-          acc += add;
-        },
-        dep);
-    // The donor total, so `lost` is the EXACT unplaced remainder rather than a census of one
-    // failure mode: an interfacial cell whose whole `n_d^2` allocation lands on cells that are
-    // themselves identity rows keeps its discarded enthalpy, and on a curved interface the band is
-    // thicker than one cell, so that is not a rare event. Report it, never hide it.
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_carry_total", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& tot) {
-          const long i = (long)x + (long)y * sy + (long)z * sz;
-          if (!(mk(i) > 0.5))
-            return;
-          const double ri = useRcp ? vof::pcPhaseMix(rcpG, rcpL, c(i)) : 1.0;
-          tot += ri * (T(i) - dv(i));
-        },
-        lost);
-    Kokkos::fence();
-    pcCarryDeposited_ = dep;
-    pcCarryLost_ = lost - dep;
-  }
+  void pcCarryDeposit(ScalarField& sc);
 
-  /// WO-P3f: consume `pcCarrySrc_` into the energy solve's time base. Called from
+/// WO-P3f: consume `pcCarrySrc_` into the energy solve's time base. Called from
   /// `advanceScalars` right after `cOld` is taken, so the deposit enters that step's RHS.
-  void pcCarryApply(ScalarField& sc) {
-    const C3 e = e_;
-    const long sy = e_.x, sz = (long)e_.x * e_.y;
-    CCField cOld = sc.cOld, srcF = pcCarrySrc_;
-    CCConst mk = CCConst(sc.dmask);
-    Kokkos::parallel_for(
-        "peclet::flow::pc_carry_apply",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * sy + (long)z * sz;
-          if (!(mk(i) > 0.5))
-            cOld(i) += srcF(i);
-          srcF(i) = 0.0;
-        });
-    Kokkos::fence();
-  }
+  void pcCarryApply(ScalarField& sc);
 
-  /// WO-P3f, the energy-budget instrument, part 1: the state BEFORE the energy solve, and the
+/// WO-P3f, the energy-budget instrument, part 1: the state BEFORE the energy solve, and the
   /// class-change accounting against the previous step. Called from `advanceScalars` after the time
   /// base `cOld` is taken and BEFORE `scalarMaskRhs` overwrites the masked cells with `dval`, which
   /// is the exact moment the transported temperature of a newly interfacial cell is discarded.
-  void pcBudgetPre(ScalarField& sc) {
-    const C3 e = e_;
-    const long sy = e_.x, sz = (long)e_.x * e_.y;
-    CCConst c = CCConst(cField_), T = CCConst(sc.cOld), dvl = CCConst(sc.dval),
-            mk = CCConst(sc.dmask), cls = CCConst(pcClsPrev_);
-    const bool useRcp = sc.energy && sc.rcp.extent(0) == n_;
-    CCConst rcp = useRcp ? CCConst(sc.rcp) : CCConst(sc.c);
-    const double Tsat = pcTsat_;
-    double hOpen = 0, hLiq = 0, hMask = 0, dEo = 0, dEoN = 0, eEnt = 0, eLev = 0;
-    long nEL = 0, nEG = 0, nLL = 0, nLG = 0, nM = 0;
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_budget_pre", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& a1, double& a2, double& a3, double& a4,
-                      double& a5, double& a6, double& a7) {
-          const long i = (long)x + (long)y * sy + (long)z * sz;
-          const double r = useRcp ? rcp(i) : 1.0;
-          const double h = r * (T(i) - Tsat);
-          const bool msk = mk(i) > 0.5;
-          if (msk) {
-            a3 += h;
-            a4 += r * (dvl(i) - T(i));
-          } else {
-            a1 += h;
-            if (c(i) >= 0.5)
-              a2 += h;
-          }
-          const double cp = cls(i);
-          if (!(cp >= 0.0))
-            return;  // the first instrumented step has no previous class
-          const bool wasMsk = (cp > 0.5 && cp < 1.5);
-          if (msk && !wasMsk) {
-            a6 += h;
-            a5 += r * (dvl(i) - T(i));
-          } else if (!msk && wasMsk) {
-            a7 += h;
-          }
-        },
-        hOpen, hLiq, hMask, dEo, dEoN, eEnt, eLev);
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_budget_counts", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, long& c1, long& c2, long& c3, long& c4, long& c5) {
-          const long i = (long)x + (long)y * sy + (long)z * sz;
-          const bool msk = mk(i) > 0.5;
-          if (msk)
-            c5 += 1;
-          const double cp = cls(i);
-          if (!(cp >= 0.0))
-            return;
-          const bool wasMsk = (cp > 0.5 && cp < 1.5);
-          if (msk && !wasMsk) {
-            if (cp > 1.5)
-              c1 += 1;
-            else
-              c2 += 1;
-          } else if (!msk && wasMsk) {
-            if (c(i) >= 0.5)
-              c3 += 1;
-            else
-              c4 += 1;
-          }
-        },
-        nEL, nEG, nLL, nLG, nM);
-    Kokkos::fence();
-    pcBudget_.hOpen = hOpen;
-    pcBudget_.hLiquid = hLiq;
-    pcBudget_.hMasked = hMask;
-    pcBudget_.dEoverwrite = dEo;
-    pcBudget_.dEoverwriteNew = dEoN;
-    pcBudget_.eEnter = eEnt;
-    pcBudget_.eLeave = eLev;
-    pcBudget_.nEnterLiquid = nEL;
-    pcBudget_.nEnterGas = nEG;
-    pcBudget_.nLeaveLiquid = nLL;
-    pcBudget_.nLeaveGas = nLG;
-    pcBudget_.nMasked = nM;
-  }
+  void pcBudgetPre(ScalarField& sc);
 
-  /// WO-P3f, part 2: the state AFTER the energy solve, the heat the plane-anchored rows actually
+/// WO-P3f, part 2: the state AFTER the energy solve, the heat the plane-anchored rows actually
   /// delivered across the interface, and the class snapshot the NEXT step compares against.
   ///
   /// `qGfm` mirrors `scalarMaskGfm` exactly (same `theta`, same face conductivity choice, same
@@ -10677,98 +8056,13 @@ class Solver {
   /// set, i.e. NEGATIVE while a bubble grows into superheated liquid. It is the energy equation's
   /// own interfacial flux, and `mdot h_lv A_Gamma` is the regression's; the instrument exists to
   /// compare them.
-  void pcBudgetPost(ScalarField& sc) {
-    const C3 e = e_;
-    const long sx = 1, sy = e_.x, sz = (long)e_.x * e_.y;
-    CCConst c = CCConst(cField_), T = CCConst(sc.c), mk = CCConst(sc.dmask),
-            tg = CCConst(pcTgam_), gnx = CCConst(pcGn_[0]), gny = CCConst(pcGn_[1]),
-            gnz = CCConst(pcGn_[2]), gph = CCConst(pcGphi_);
-    CCConst ox = CCConst(ox_), oy = CCConst(oy_), oz = CCConst(oz_);
-    const bool useRcp = sc.energy && sc.rcp.extent(0) == n_;
-    const bool useK = sc.energy && sc.kcell.extent(0) == n_;
-    CCConst rcp = useRcp ? CCConst(sc.rcp) : CCConst(sc.c);
-    CCConst kc = useK ? CCConst(sc.kcell) : CCConst(sc.c);
-    const double Tsat = pcTsat_, Dc = sc.D, thMin = pcGfmThMin_, thMax = pcGfmThMax_;
-    const bool gfm = pcPlaneDir_ && pcGphi_.extent(0) == n_;
-    // WO-P3g: the instrument has to mirror the ROW, or it measures a scheme nobody ran.
-    const int gfmOrder = pcGfmOrder_;
-    const bool curvDist = pcCurvDist_ && pcKappa_.extent(0) == n_;
-    CCConst kapF = CCConst(curvDist ? pcKappa_ : pcGphi_);
-    const vof::VofMetric gme = u_.vofMetric();  // Phase 3 (V5.3)
-    CCField clsOut = pcClsPrev_;
-    double hOpen = 0, q = 0, qb = 0;
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_budget_post", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& a1, double& a2, double& a3) {
-          const long i = (long)x + (long)y * sy + (long)z * sz;
-          const double r = useRcp ? rcp(i) : 1.0;
-          const bool msk = mk(i) > 0.5;
-          clsOut(i) = msk ? 1.0 : (c(i) >= 0.5 ? 2.0 : 0.0);
-          if (msk)
-            return;
-          a1 += r * (T(i) - Tsat);
-          if (!gfm)
-            return;
-          const long st[3] = {sx, sy, sz};
-          const double kd = useK ? kc(i) : Dc;
-          for (int d = 0; d < 3; ++d)
-            for (int sgn = -1; sgn <= 1; sgn += 2) {
-              const long j = i + (long)sgn * st[d];
-              if (!(mk(j) > 0.5))
-                continue;
-              const double of = (d == 0)   ? ((sgn < 0) ? ox(i) : ox(i + sx))
-                                : (d == 1) ? ((sgn < 0) ? oy(i) : oy(i + sy))
-                                           : ((sgn < 0) ? oz(i) : oz(i + sz));
-              const double nvec[3] = {gnx(j), gny(j), gnz(j)};
-              const double th = vof::pcGfmThetaKAniso(gph(j), nvec, d, (double)sgn,
-                                                      curvDist ? kapF(j) : 0.0, thMin, thMax, gme);
-              const long jb = i - (long)sgn * st[d];
-              const double ofB = (d == 0)   ? ((sgn < 0) ? ox(i + sx) : ox(i))
-                                 : (d == 1) ? ((sgn < 0) ? oy(i + sy) : oy(i))
-                                            : ((sgn < 0) ? oz(i + sz) : oz(i));
-              const bool behind = !(mk(jb) > 0.5) && ofB > 0.0;
-              const vof::PcGfmRow row = vof::pcGfmRow(th, behind, gfmOrder);
-              a2 += kd * of * row.aGamma * (tg(j) - T(i));
-              if (behind && row.aBehind != 1.0) {
-                const double kb = useK ? 0.5 * (kc(i) + kc(jb)) : Dc;
-                a3 += (row.aBehind - 1.0) * kb * ofB * (T(jb) - T(i));
-              }
-            }
-        },
-        hOpen, q, qb);
-    Kokkos::fence();
-    pcBudget_.hOpenNew = hOpen;
-    pcBudget_.qGfm = q;
-    pcBudget_.qBehind = qb;
-    pcBudget_.calls += 1;
-  }
+  void pcBudgetPost(ScalarField& sc);
 
-  /// Subtract the phase-change (and any prescribed) divergence source from `div_` so the deflated
+/// Subtract the phase-change (and any prescribed) divergence source from `div_` so the deflated
   /// pressure solve delivers `div(open u) = S`. One branch in `project()`, inert when off.
-  void pcApplyDivergenceSource(CCField div) {
-    if (!pcEnabled_ && !pcHasUser_)
-      return;
-    const C3 e = e_;
-    const bool hasPc = pcEnabled_, hasUser = pcHasUser_;
-    CCConst sp = hasPc ? CCConst(pcSrc_) : CCConst(div);
-    CCConst su = hasUser ? CCConst(pcUser_) : CCConst(div);
-    Kokkos::parallel_for(
-        "peclet::flow::pc_div_source",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          double s = 0.0;
-          if (hasPc)
-            s += sp(i);
-          if (hasUser)
-            s += su(i);
-          div(i) -= s;
-        });
-  }
+  void pcApplyDivergenceSource(CCField div);
 
-  /// The colour tolerance that decides which cells are INTERFACIAL, and it has to be at least the
+/// The colour tolerance that decides which cells are INTERFACIAL, and it has to be at least the
   /// colour advector's own wisp tolerance.
   ///
   /// **This is a real interaction bug and the measurement is in the findings.** WO-R2 item 4 made
@@ -10781,19 +8075,17 @@ class Solver {
   /// `R(t)` error 48 % and the study's dt-collapse guard trips at step 34, against **2.002 %** and
   /// 80 clean steps with `set_vof_wisp_eps(0.0)`. The planar P0/P1/P2 gates never saw it (their
   /// interface has no wisps), which is exactly why it had to be found on the curved case.
-  double pcEffInterfaceEps() const { return Kokkos::fmax(pcInterfaceEps_, vofAdv_.wispEps); }
-  /// …and the mirror statement: a cell the ADVECTOR treats as a pure phase is a pure phase here
+  double pcEffInterfaceEps() const;
+
+/// …and the mirror statement: a cell the ADVECTOR treats as a pure phase is a pure phase here
   /// too, or the source deposit's "find a pure gas cell" walk rejects exactly the cells the colour
   /// field has already emptied and the source is left in an interfacial cell (measured:
   /// `band_div` 2.2e+02 on the P2 sucking gate with only the interfacial tolerance raised).
-  double pcEffPureEps() const { return Kokkos::fmax(pcPureEps_, vofAdv_.wispEps); }
+  double pcEffPureEps() const;
 
-  void requirePhaseChange(const char* who) const {
-    if (!pcEnabled_)
-      throw std::runtime_error(std::string(who) + ": phase change is not enabled (call "
-                                                  "enable_phase_change first)");
-  }
-  ScalarField& scalarField(const std::string& name) {
+void requirePhaseChange(const char* who) const;
+
+ScalarField& scalarField(const std::string& name) {
     for (auto& sc : scalars_)
       if (sc.name == name)
         return sc;
@@ -11609,26 +8901,15 @@ class Solver {
   bool vofTiming_ = false;
   VofTiming vt_;
   double tStepSum_ = 0.0, tPredSum_ = 0.0, tMomSum_ = 0.0, tProjSum_ = 0.0;
-  double vofTick() const {
-    if (!vofTiming_)
-      return 0.0;
-    Kokkos::fence();
-    return vof::WyAdvector::wallSeconds();
-  }
-  void vofAdd(double& acc, double t0) {
-    if (!vofTiming_)
-      return;
-    Kokkos::fence();
-    acc += vof::WyAdvector::wallSeconds() - t0;
-  }
-  // fence-then-read wall clock: phase boundaries must not attribute queued device work to the
+  double vofTick() const;
+
+void vofAdd(double& acc, double t0);
+
+// fence-then-read wall clock: phase boundaries must not attribute queued device work to the
   // next phase
-  static double phaseTick() {
-    Kokkos::fence();
-    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-  }
-  CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
+  static double phaseTick();
+
+CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
   bool ghostProjection_ = false;  // directional ghost-cell projection (the collocated AUTO default)
   bool colSchemeAuto_ = Grid::collocated;  // AUTO scheme resolution at setSolid (cleared by any
                                            // explicit scheme selection)
@@ -11882,5 +9163,8 @@ class Solver {
 using IbmSolver = Solver<Staggered>;
 
 }  // namespace peclet::flow
+
+#include "flow_ibm_vof.hpp"
+#include "flow_ibm_phase_change.hpp"
 
 #endif  // PECLET_FLOW_SDFLOW_IBM_HPP
