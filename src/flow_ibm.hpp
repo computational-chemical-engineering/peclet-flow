@@ -75,7 +75,9 @@ class Solver {
 
   Solver(int nx, int ny, int nz);
 
-// ==========================================================================================
+
+
+  // ==========================================================================================
   // PHYSICAL UNITS — the solver takes the world in the caller's own units
   // (suite/docs/PHYSICAL_UNITS_PLAN.md; Phase 1 = isotropic cells)
   //
@@ -195,19 +197,25 @@ class Solver {
   };
   SceneMap sceneMap() const;
 
-/// Physical-domain constructor (plan §3.3).  `nx,ny,nz` is this rank's block exactly as in the
+
+
+  /// Physical-domain constructor (plan §3.3).  `nx,ny,nz` is this rank's block exactly as in the
   /// cell-unit constructor; `extent`/`origin` describe the GLOBAL domain and `globalCells` the
   /// global cell counts the extent spans (equal to nx,ny,nz single-rank — pass the global grid
   /// under MPI, the same numbers `init_mpi` gets).
   Solver(int nx, int ny, int nz, const std::array<double, 3>& extent,
          const std::array<double, 3>& origin, const std::array<long, 3>& globalCells);
 
-/// Arm the physical domain.  Call before any property, geometry or field call — it fixes hRef,
+
+
+  /// Arm the physical domain.  Call before any property, geometry or field call — it fixes hRef,
   /// which every conversion below is built on.
   void setPhysicalDomain(const std::array<double, 3>& extent, const std::array<double, 3>& origin,
                          const std::array<long, 3>& globalCells);
 
-/// Phase 2 §7 — refuse an ANISOTROPIC domain in a consumer this phase does not carry.  `what`
+
+
+  /// Phase 2 §7 — refuse an ANISOTROPIC domain in a consumer this phase does not carry.  `what`
   /// names the entry point AND the phase/commit that lifts the refusal; this appends the three
   /// spacings and the metric they give, so the message is actionable without a debugger.  A no-op
   /// (and never even formats a string) on the isotropic path, which is every cell-unit run.
@@ -222,33 +230,45 @@ class Solver {
   /// anisotropic domain today; this helper stays for the next consumer that needs to.
   void requireIsotropic(const char* what) const;
 
-bool hasPhysicalDomain() const;
 
-const UnitScales& unitScales() const;
 
-/// Cell size per axis (equal on every axis unless the Phase 2 anisotropic path is armed --
+  bool hasPhysicalDomain() const;
+
+
+  const UnitScales& unitScales() const;
+
+
+  /// Cell size per axis (equal on every axis unless the Phase 2 anisotropic path is armed --
   /// see `unitScales().aniso`). 1,1,1 without a physical domain.
   std::array<double, 3> spacing() const;
 
-/// Physical lower corner of the GLOBAL inner grid.
+
+  /// Physical lower corner of the GLOBAL inner grid.
   std::array<double, 3> domainOrigin() const;
 
-/// Physical extent of the GLOBAL inner grid (cell counts without a physical domain).
+
+  /// Physical extent of the GLOBAL inner grid (cell counts without a physical domain).
   std::array<double, 3> domainExtent() const;
 
-/// The GLOBAL cell counts (this rank's block single-rank).
+
+  /// The GLOBAL cell counts (this rank's block single-rank).
   std::array<long, 3> globalCells() const;
 
-/// Physical cell-centre coordinates of THIS rank's inner block along `axis` (nx/ny/nz values).
+
+  /// Physical cell-centre coordinates of THIS rank's inner block along `axis` (nx/ny/nz values).
   /// The grid `set_solid` expects an SDF sampled on: meshgrid these three and evaluate.
   std::vector<double> cellCentres(int axis) const;
 
-/// Re-derive every internal (index-unit) quantity from the stored physical inputs.  Idempotent
+
+
+  /// Re-derive every internal (index-unit) quantity from the stored physical inputs.  Idempotent
   /// and order-free: it reads only the phys_ mirrors and writes only the internal members, so the
   /// caller may set properties before or after the domain, and before or after each other.
   void refreshUnitDerived();
 
-/// Hand the anisotropic cell metric to every VoF driver that exists (Phase 3).
+
+
+  /// Hand the anisotropic cell metric to every VoF driver that exists (Phase 3).
   ///
   /// The drivers are created lazily (`enableVof`, `enableVofBlocks`, `setPhaseChangeArea`, ...),
   /// so this is called BOTH from `refreshUnitDerived()` — whenever a scale moves — and at the end
@@ -256,26 +276,35 @@ const UnitScales& unitScales() const;
   /// never reached behaves exactly as before.
   void pushVofMetric();
 
-// (Re)allocate every per-block buffer for a local inner block of nx*ny*nz. Called by the
+
+
+  // (Re)allocate every per-block buffer for a local inner block of nx*ny*nz. Called by the
   // constructor and by redistribute() after a re-decomposition changes this rank's block size.
   void allocateBlock(int nx, int ny, int nz);
 
-/// Fluid density, in the caller's units. The FIRST call pins the reference density rhoRef when
+
+
+  /// Fluid density, in the caller's units. The FIRST call pins the reference density rhoRef when
   /// a physical domain is armed (the internal density is then exactly 1).
   void setRho(double r);
 
-/// Dynamic viscosity, in the caller's units. Internally the cell diffusion number
+
+  /// Dynamic viscosity, in the caller's units. Internally the cell diffusion number
   /// mu*tRef/(rhoRef*hRef^2).
   void setMu(double m);
 
-void setDt(double d);
 
-/// Body force per unit volume, in the caller's units (e.g. a mean pressure gradient, or rho*g).
+  void setDt(double d);
+
+
+  /// Body force per unit volume, in the caller's units (e.g. a mean pressure gradient, or rho*g).
   void setBodyForce(double fx, double fy, double fz);
 
-void setVelocityIterations(int it);
 
-// Momentum tolerance stop: end the RB-GS loop once the swept colour's max increment has dropped
+  void setVelocityIterations(int it);
+
+
+  // Momentum tolerance stop: end the RB-GS loop once the swept colour's max increment has dropped
   // to rtol of the first sweep's (GS contracts geometrically, so the increment tracks the error).
   // rtol = 0 (default) keeps the legacy fixed-count loop byte-identical. Easy regimes (small
   // nu*dt/dx^2) exit after ~3-5 sweeps; stiff regimes run to the velIters_ cap unchanged. The
@@ -283,9 +312,11 @@ void setVelocityIterations(int it);
   // rank-uniform (MPI max) so distributed halo exchanges stay in lockstep.
   void setVelocityTolerance(double rtol, int minIters);
 
-long lastMomentumSweeps() const;
 
-// Residual-based momentum stop (opt-in, 0 = off): a component's implicit solve ends once
+  long lastMomentumSweeps() const;
+
+
+  // Residual-based momentum stop (opt-in, 0 = off): a component's implicit solve ends once
   // max|b - A u| <= rtol * max|b| over the fluid unknowns (global under MPI). Unlike the update
   // criterion (relative to the FIRST sweep's update, which on a warm-started near-steady step is
   // already at noise level and then costs hundreds of sweeps to shrink by 1e-3) this measures the
@@ -298,7 +329,8 @@ long lastMomentumSweeps() const;
   // accurately than pressure" is the self-consistent choice with no free constant.
   void setVelocityResidualTolerance(double rtol);
 
-// Velocity-MG AUTO rule (applies when set_velocity_multigrid was never called): under MPI, once
+
+  // Velocity-MG AUTO rule (applies when set_velocity_multigrid was never called): under MPI, once
   // the block is small enough that the momentum RB-GS is halo-latency-bound, take the V-cycle
   // instead (1-2 cycles/component == 2-4 exchanges against 8-9 sweeps x 2). Measured crossover on
   // the FoxBerry bed: RB-GS 2.91 s vs MG 3.32 s/step at 147k cells/rank, MG 0.834 vs 0.844 at
@@ -307,53 +339,65 @@ long lastMomentumSweeps() const;
   // across ranks keep RB-GS so a distributed run stays exactly the single-rank one.
   void setVelocityMultigridAuto(long cellsPerRank, long minGlobalCells = -1);
 
-// The tolerance actually in force (resolves the follow-the-pressure default).
+
+  // The tolerance actually in force (resolves the follow-the-pressure default).
   double velocityResidualTolerance() const;
 
-// max over components of max|r|/max|b| at exit of the last step's momentum solves (residual
+
+  // max over components of max|r|/max|b| at exit of the last step's momentum solves (residual
   // mode only; -1 otherwise).
   double lastMomentumResidual() const;
 
-// Pressure-solve mean-removal scope: "fine" (default — drops the interior-level / post-matvec
+
+  // Pressure-solve mean-removal scope: "fine" (default — drops the interior-level / post-matvec
   // nullspace projections, ~3x fewer global-reduction latency hits per Krylov iteration; measured
   // winner of the at-scale ablation, iteration counts identical) or "all" (legacy). See CutcellMG.
   void setPressureMeanRemoval(bool all);
 
-void setPressureIterations(int it);
 
-void setAdvection(bool on);
+  void setPressureIterations(int it);
 
-// explicit high-order advection (default SOU)
+
+  void setAdvection(bool on);
+
+  // explicit high-order advection (default SOU)
   // High-order advection scheme for the (explicit, or deferred-correction) flux: 0 = second-order
   // upwind (SOU, default — 2nd order at smooth extrema too); 1 = Koren TVD (monotone limiter, the
   // legacy CUDA scheme). Only matters when advection is enabled; FOU stays the deferred-correction
   // base.
   void setAdvectionScheme(int s);
 
-// Implicit-FOU deferred-correction advection (CUDA set_implicit_advection): solve the
+
+  // Implicit-FOU deferred-correction advection (CUDA set_implicit_advection): solve the
   // first-order-upwind part of advection implicitly (in the velocity operator) + keep (Koren-FOU)
   // explicit in the RHS -> unconditionally stable for advection (high Re / large dt). Requires the
   // IBM stencil (rebuilt per Picard iteration with the FOU term); the domain-BC path needs
   // velocity-MG (separate milestone).
   void setImplicitAdvection(bool on);
 
-// Picard outer iterations over the step (CUDA set_outer_iterations): the advecting velocity is
+
+  // Picard outer iterations over the step (CUDA set_outer_iterations): the advecting velocity is
   // lagged at the current iterate u^k while the time base stays u^n. iters>=1; tol>0 stops early on
   // max|du| < tol.
   void setOuterIterations(int iters);
 
-void setOuterTolerance(double tol);
 
-long lastOuterIterations() const;
+  void setOuterTolerance(double tol);
 
-// Velocity (momentum) multigrid for the IBM diffusion solve (CUDA set_velocity_multigrid): the
+
+  long lastOuterIterations() const;
+
+
+  // Velocity (momentum) multigrid for the IBM diffusion solve (CUDA set_velocity_multigrid): the
   // STAIRCASE coarse operator (exact == RB-GS, stiff-stable at large dt). Call before set_solid;
   // built at geometry time.
   void setVelocityMultigrid(bool on, int levels, int vcycles);
 
-bool velocityMultigridActive() const;
 
-// Enable the agglomerated GraphAMG bottom solve in the pressure MG: the coarsest level is solved
+  bool velocityMultigridActive() const;
+
+
+  // Enable the agglomerated GraphAMG bottom solve in the pressure MG: the coarsest level is solved
   // by a mesh-agnostic algebraic multigrid on the operator gathered to rank 0 --
   // decomposition-agnostic, so multilevel convergence works under a WEIGHTED ORB (where the
   // geometric coarse levels can't cleanly coarsen). Applied at the next set_solid / geometry
@@ -362,36 +406,44 @@ bool velocityMultigridActive() const;
   // when the geometric hierarchy cannot reach a small enough coarsest grid), 1 always. See CutcellMG.
   void setPressureBottomMode(int mode);
 
-// Coarse-level telescoping of the pressure multigrid (mac_cutcell_mg.hpp Telescope): when a
+  // Coarse-level telescoping of the pressure multigrid (mac_cutcell_mg.hpp Telescope): when a
   // per-rank block turns odd, merge ORB siblings onto fewer ranks and keep coarsening instead of
   // stopping. Multi-rank only; a no-op single-rank. Takes effect at the next init_mpi/set_solid.
   void setPressureTelescope(bool on);
 
-bool pressureTelescope() const;
 
-// Force a telescope at that level even where in-place coarsening is legal (tests: compare the
+  bool pressureTelescope() const;
+
+
+  // Force a telescope at that level even where in-place coarsening is legal (tests: compare the
   // two hierarchies on one problem); -1 = the trigger decides. Set before geometry.
   void setPressureTelescopeForceLevel(int level);
 
-int pressureTelescopeCount() const;
 
-void setPressureGraphAmg(bool on);
+  int pressureTelescopeCount() const;
 
-void setPressureLevels(int levels);
 
-// MG depth (CUDA default 4)
+
+  void setPressureGraphAmg(bool on);
+
+
+  void setPressureLevels(int levels);
+
+  // MG depth (CUDA default 4)
   // Backflow stabilization at outflow faces (Bazilevs 2009 / Esmaily-Moghadam 2011): beta in [0,1]
   // scales the dissipative outflow term that prevents backflow divergence (0 = off). Default 0.2.
   void setBackflowStab(double beta);
 
-// Deferred-correction advection: on (default) = implicit FOU operator + explicit (HO - FOU)
+
+  // Deferred-correction advection: on (default) = implicit FOU operator + explicit (HO - FOU)
   // high-order correction (2nd order; HO = SOU by default, or Koren TVD via set_advection_scheme).
   // off = pure implicit FOU (1st order, more dissipative, unconditionally stable) -- useful for
   // very sharp shear layers where the (unlimited SOU) explicit correction overshoots and
   // destabilizes.
   void setDeferredCorrection(bool on);
 
-// Chebyshev pressure driver (CUDA set_pressure_chebyshev): communication-light alternative to
+
+  // Chebyshev pressure driver (CUDA set_pressure_chebyshev): communication-light alternative to
   // MG-PCG -- Chebyshev semi-iteration preconditioned by one symmetric V-cycle, no per-iteration
   // global dot-products. Spectral bounds of M^{-1}A are estimated once (lazily) on the first solve
   // and reused every step.
@@ -400,7 +452,8 @@ void setPressureLevels(int levels);
   // whatever else is selected — FCG if set, otherwise MG-PCG.
   void setPressureChebyshev(bool on, int maxit, double rtol);
 
-// MG-PCG pressure driver (CUDA set_pressure_pcg) + its iteration cap / relative tolerance.
+
+  // MG-PCG pressure driver (CUDA set_pressure_pcg) + its iteration cap / relative tolerance.
   // `on = true` GENUINELY SELECTS MG-PCG, clearing both competing selections (Chebyshev and FCG),
   // so it works after set_density_mode / set_porous — "last set wins", as CLAUDE.md and the
   // docstring have always claimed. Until 2026-08-30 the flag was silently discarded (WO-H defect 1;
@@ -418,7 +471,8 @@ void setPressureLevels(int levels);
   // and simply does not change which Krylov method the gp branch runs.
   void setPressurePcg(bool on, int maxit, double rtol);
 
-// FLEXIBLE MG-CG (set_pressure_fcg): the same Krylov driver as MG-PCG with the same V-cycle
+
+  // FLEXIBLE MG-CG (set_pressure_fcg): the same Krylov driver as MG-PCG with the same V-cycle
   // preconditioner, the same stopping estimate, the same mean removal and the same cap/tolerance
   // (`pcgMaxit_`/`pcgRtol_`, shared deliberately — it is the same solve), differing ONLY in the
   // beta recurrence: Polak-Ribiere `r^T(z_{k+1} - z_k) / r^T z_k` instead of Fletcher-Reeves.
@@ -431,7 +485,8 @@ void setPressureLevels(int levels);
   // (Before WO-H, setPressurePcg's `on` flag was silently discarded — see its comment.)
   void setPressureFcg(bool on, int maxit, double rtol);
 
-// EXPERIMENTAL directional ghost-cell projection (second staggered IBM, ghost_projection.hpp):
+
+  // EXPERIMENTAL directional ghost-cell projection (second staggered IBM, ghost_projection.hpp):
   // point-based FD divergence with wall-anchored directional closures instead of the
   // openness-weighted cut-cell projection. Call BEFORE set_solid (the overlay is built there).
   // v1: periodic + IBM only, stationary walls (both grids; the collocated variant closes the
@@ -448,7 +503,8 @@ void setPressureLevels(int levels);
   //         the operator mismatch converges through the time stepping (measured rate ~0.4).
   void setGhostProjection(bool on, int matrixOrder = 2, int rhsOrder = 2);
 
-// Analytic-SDF capability: EXACT wall-crossing fractions overriding the linear-interp theta in
+
+  // Analytic-SDF capability: EXACT wall-crossing fractions overriding the linear-interp theta in
   // BOTH the momentum cut-cell overlay and the ghost-projection closures. t is a flat array of
   // size 9*nx*ny*nz, blocks ordered [(c*3 + k)]: for velocity component c, t[(c*3+k)*n + i] is
   // the exact crossing fraction in (0,1) from component c's staggered point at inner cell i
@@ -457,25 +513,29 @@ void setPressureLevels(int levels);
   // pass an empty array to clear. Single-rank only.
   void setExactCrossings(const std::vector<double>& t);
 
-// Analytic-SDF capability: EXACT face-openness (aperture) fields overriding the sampled-SDF
+
+  // Analytic-SDF capability: EXACT face-openness (aperture) fields overriding the sampled-SDF
   // ccFractionCore openness the cut-cell projection uses. Inner arrays (flat x-fastest,
   // nx*ny*nz); ox[i] = fluid area fraction of the -x face of cell i, etc. Call BEFORE set_solid.
   void setOpennessOverride(const std::vector<double>& ox, const std::vector<double>& oy,
                            const std::vector<double>& oz);
 
-// Incremental-rotational pressure (CUDA set_incremental_pressure, default ON): the predictor
+
+  // Incremental-rotational pressure (CUDA set_incremental_pressure, default ON): the predictor
   // carries -grad(P^n) and the physical pressure is accumulated rotationally P += (rho/dt)*phi -
   // mu*div(u*). OFF => classical non-incremental Chorin (no -grad(P^n) predictor; P derived on
   // demand as (rho/dt)*phi).
   void setIncrementalPressure(bool on);
 
-// Pressure warm-start (CUDA set_pressure_warmstart, default OFF): seed each cut-cell pressure
+
+  // Pressure warm-start (CUDA set_pressure_warmstart, default OFF): seed each cut-cell pressure
   // solve from the previous step's projection potential (consecutive phi's are similar along a
   // steady march -> a more converged phi per fixed solver budget) instead of zeroing the initial
   // guess.
   void setPressureWarmstart(bool on);
 
-// Collocated cut-cell treatment of the approximate projection (no effect on the staggered path).
+
+  // Collocated cut-cell treatment of the approximate projection (no effect on the staggered path).
   // The public API is the string form setCollocatedScheme(); the integer mode is the C++ switch
   // behind it and the Python developer tier's `diagnostics.set_face_interp(5|6)`:
   //   0  "plain"        plain ½/½ cell->face averaging + central-difference -grad(P): a consistent
@@ -504,21 +564,25 @@ void setPressureLevels(int levels);
   // doc/history/collocated_*.md.
   void setFaceInterp(int mode);
 
-int faceInterp() const;
 
-// Preferred API for the collocated projection scheme (the strings the Python API takes):
+  int faceInterp() const;
+
+
+  // Preferred API for the collocated projection scheme (the strings the Python API takes):
   //   "ghost"        the fluid-only constraint scheme (the AUTO default where supported)
   //   "gauge-exact"  aperture constraint + directional (gauge-exact) pressure gradient (mode 9)
   //   "plain"        the legacy plain-average / central-difference path (mode 0, first order)
   //   "embed"        the complete Basilisk embed.h port (mode 7)
   void setCollocatedScheme(const std::string& name);
 
-// PM I ablation (Guy-Fogelson): keep the incremental predictor -grad(P^n) but accumulate
+
+  // PM I ablation (Guy-Fogelson): keep the incremental predictor -grad(P^n) but accumulate
   // P += (rho/dt)*phi WITHOUT the rotational -mu*div(u*) term (constant-mu path only; the
   // variable-mu branches keep their own treatment). Default true = shipped behaviour.
   void setRotationalPressure(bool on);
 
-// Rotational under-relaxation: P += ct*phi - w*mu*div(u*). w = 1 is the shipped Timmermans
+
+  // Rotational under-relaxation: P += ct*phi - w*mu*div(u*). w = 1 is the shipped Timmermans
   // update; w = 0 is PM I. Shrinking w shrinks the O(1) velocity->pressure off-diagonal that
   // makes the cell-centered approximate projection marginally unstable (Guy-Fogelson eq. 92-94:
   // the destabilizing-perturbation threshold scales ~1/w), at the cost of ~1/w slower pressure
@@ -526,11 +590,13 @@ int faceInterp() const;
   // w > 0, at every dt including dt -> infinity.
   void setRotationalWeight(double w);
 
-// Wall-banded rotational blend (Frank, 2026-08-20): see the press_wallblend kernel. w0 = 0
+
+  // Wall-banded rotational blend (Frank, 2026-08-20): see the press_wallblend kernel. w0 = 0
   // (default) disables; typical w0 ~ 0.3-0.5. Composes with setRotationalWeight (uniform factor).
   void setRotationalWallWeight(double w0);
 
-// Fluid-only pressure constraint (route 2b). Call BEFORE set_solid. Collocated experiment;
+
+  // Fluid-only pressure constraint (route 2b). Call BEFORE set_solid. Collocated experiment;
   // defaults byte-identical when 0. mode 1 = Design A (close every openness face with a
   // solid-centered side, everywhere); mode 2 = Design B (Kron star elimination: filtered
   // openness feeds the MG hierarchy only, the SPD star overlay restores the throat coupling in
@@ -543,60 +609,79 @@ int faceInterp() const;
   // via set_openness_override (scripts/exact_apertures_spheres.py). Call before set_solid.
   void setApertureOrder(int order);
 
-int apertureOrder() const;
 
-/// A0 — wall velocity (not zeros) in the advection inputs' masked rows. DEFAULT true.
+  int apertureOrder() const;
+
+
+  /// A0 — wall velocity (not zeros) in the advection inputs' masked rows. DEFAULT true.
   void setAdvectionWallVelocity(bool on);
 
-bool advectionWallVelocity() const;
 
-/// Communication-avoiding red-black smoothing: kCaMomentum | kCaMg. DEFAULT both.
+  bool advectionWallVelocity() const;
+
+
+  /// Communication-avoiding red-black smoothing: kCaMomentum | kCaMg. DEFAULT both.
   /// Must be set BEFORE init_mpi (the momentum half is latched with the halo topology).
   void setCommAvoiding(int mask);
 
-int commAvoiding() const;
 
-/// The anisotropic-coarsening aspect threshold theta shared by the pressure and velocity
+  int commAvoiding() const;
+
+
+  /// The anisotropic-coarsening aspect threshold theta shared by the pressure and velocity
   /// multigrids (doc/anisotropic_metric.md §5.1). DEFAULT 2.0; only read on an anisotropic metric.
   void setMultigridAspectThreshold(double theta);
 
-double multigridAspectThreshold() const;
 
-/// Throw instead of reporting when the pressure preconditioner returns a non-finite
+  double multigridAspectThreshold() const;
+
+
+  /// Throw instead of reporting when the pressure preconditioner returns a non-finite
   /// correction (ISSUES sweep item 6). DEFAULT false.
   void setPressureStrict(bool on);
 
-bool pressureStrict() const;
 
-/// Neumann (zero-gradient) coarse ghost on wall/inflow faces before the pressure MG's
+  bool pressureStrict() const;
+
+
+  /// Neumann (zero-gradient) coarse ghost on wall/inflow faces before the pressure MG's
   /// prolongation — the WO-H symmetry repair. DEFAULT true; false is a measurement ablation.
   void setPressureCoarseGhost(bool on);
 
-bool pressureCoarseGhost() const;
 
-/// The `set_pressure_bottom("auto")` criterion: agglomerate once the coarsest GLOBAL grid
+  bool pressureCoarseGhost() const;
+
+
+  /// The `set_pressure_bottom("auto")` criterion: agglomerate once the coarsest GLOBAL grid
   /// exceeds this many cells on any axis. DEFAULT 4.
   void setPressureBottomExtent(int cells);
 
-int pressureBottomExtent() const;
 
-/// How the shared level-0 MPI decomposition is built. MUST be set before init_mpi, and the
+  int pressureBottomExtent() const;
+
+
+  /// How the shared level-0 MPI decomposition is built. MUST be set before init_mpi, and the
   /// same values must be handed to `flow.mpi_block` — both derive the same partition.
   void setDecomposition(int levels, double maxImbalance = 1.05);
 
-int decompositionLevels() const;
 
-double decompositionMaxImbalance() const;
+  int decompositionLevels() const;
 
-void setFluidOnlyConstraint(int mode);
 
-// Filtered rotational update (experimental): P += ct*phi - mu*S(div u*), S = one mask-aware
+  double decompositionMaxImbalance() const;
+
+
+  void setFluidOnlyConstraint(int mode);
+
+
+  // Filtered rotational update (experimental): P += ct*phi - mu*S(div u*), S = one mask-aware
   // axis-wise (1,2,1)/4 smoothing pass per axis (one-sided 1/2(d_i+d_nbr) toward the open side at
   // a solid-centered neighbour, identity when sandwiched). S annihilates the axis checkerboard
   // including AT wall-adjacent cells; for smooth fields S = I + O(h^2). Steady state unchanged.
   void setRotationalFilter(bool on, double eps = 0.05);
 
-// Seed/restore the velocity state (CUDA set_state / upload_velocity): u/v/w are inner-cell fields
+
+  // Seed/restore the velocity state (CUDA set_state / upload_velocity): u/v/w are inner-cell fields
   // (flat x-fastest, size nx*ny*nz); written into the velocity block + ghosts refreshed (periodic
   // wrap).
   // ISSUES sweep item 5. On the COLLOCATED grid the colour transport rides the MAC face field
@@ -616,12 +701,14 @@ void setFluidOnlyConstraint(int mode);
   // nothing downstream changes. Staggered: a no-op (the cell field IS the face field).
   void seedFaceFieldFromCells();
 
-/// Upload an initial velocity field in the caller's PHYSICAL units (converted per component to
+
+  /// Upload an initial velocity field in the caller's PHYSICAL units (converted per component to
   /// the index velocity the kernels carry; the conversion is the identity in cell units).
   void uploadVelocity(const std::vector<double>& uu, const std::vector<double>& vv,
                       const std::vector<double>& ww);
 
 #ifdef PECLET_FLOW_MPI
+
   // Multi-rank: this rank's IbmSolver is constructed with its LOCAL block dims (= the
   // BlockDecomposer of the GLOBAL grid for this rank); initMpi wires the g=2 velocity-block halo +
   // the global-origin red-black parity, and switches fillGhosts/maxOpenDivergence + the pressure MG
@@ -629,13 +716,15 @@ void setFluidOnlyConstraint(int mode);
   // ORB) to size the constructor; initMpi re-derives it.
   void initMpi(int gnx, int gny, int gnz, MPI_Comm comm);
 
-// Shared-decomposition overload: wire the g=2 velocity-block halo from an EXTERNALLY-built ORB
+
+  // Shared-decomposition overload: wire the g=2 velocity-block halo from an EXTERNALLY-built ORB
   // (so flow and dem share one BlockDecomposer for coupled runs, and redistribute() can re-init
   // onto a re-decomposed partition). The local block size must already match dec.block(rank).size
   // (set via the constructor / allocateBlock).
   void initMpi(const peclet::core::decomp::BlockDecomposer<3>& dec, MPI_Comm comm);
 
-// Redistribute the solver's state onto a NEW decomposition (dynamic load balancing). Enumerates
+
+  // Redistribute the solver's state onto a NEW decomposition (dynamic load balancing). Enumerates
   // the registered fields, moves them from the current block layout to the new one (bit-exact via
   // redistributeGridFields), reallocates every buffer to the new block, re-inits the halo +
   // pressure MG on the new partition, and rebuilds all geometry-derived state (openness / IBM
@@ -643,13 +732,15 @@ void setFluidOnlyConstraint(int mode);
   // scalar/property fields) survive; per-step scratch is rebuilt.
   void redistribute(const peclet::core::decomp::BlockDecomposer<3>& newDec);
 
-// Redistribute onto the weighted ORB of per-cell weights `w` (global x-fastest, gnx*gny*gnz). The
+
+  // Redistribute onto the weighted ORB of per-cell weights `w` (global x-fastest, gnx*gny*gnz). The
   // ergonomic Python entry point for load balancing: the caller passes a weight field (e.g. fluid
   // work + gamma*particle_count) and both flow and dem rebuild the SAME deterministic partition
   // from it. No BlockDecomposer object crosses the language boundary.
   void rebalanceByWeights(const std::vector<peclet::core::Real>& w);
 
 #endif
+
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip
   // wall,2=Dirichlet/inflow,3=outflow,4=free-slip/symmetry (zero normal velocity, zero normal
   // derivative of the tangential components, pressure Neumann like a wall; vx/vy/vz ignored).
@@ -660,7 +751,8 @@ void setFluidOnlyConstraint(int mode);
   // step -- see the refresh below.
   void setDomainBc(int face, int type, double vx, double vy, double vz);
 
-// per-position inlet velocity profile on `face` (CUDA set_domain_bc_profile): prof is (nb,nc,3)
+
+  // per-position inlet velocity profile on `face` (CUDA set_domain_bc_profile): prof is (nb,nc,3)
   // on the inner grid of the face's two perpendicular axes; sets the face to inflow (type 2).
   // Resampled (clamp) to the ghost-inclusive face grid so the BC kernel indexes it directly by face
   // position. Same call-order rule as set_domain_bc: allowed after the geometry only when the
@@ -668,14 +760,18 @@ void setFluidOnlyConstraint(int mode);
   // change the type the operators were built with.
   void setDomainBcProfile(int face, const std::vector<double>& prof, int nb, int nc);
 
-// Resample the stored raw inlet profile of `face` onto THIS block's ghost-inclusive face grid.
+
+  // Resample the stored raw inlet profile of `face` onto THIS block's ghost-inclusive face grid.
   void resampleBcProfile(int face);
 
-// all-fluid + domain-BC pressure (CUDA set_pressure_geometry): same path as set_solid with an
+
+  // all-fluid + domain-BC pressure (CUDA set_pressure_geometry): same path as set_solid with an
   // open SDF.
   void setPressureGeometry(const std::vector<double>& sdfInner);
 
-// SDF on the inner cells (flat x-fastest, size nx*ny*nz; <0 solid). cutcellPressure enables the
+
+
+  // SDF on the inner cells (flat x-fastest, size nx*ny*nz; <0 solid). cutcellPressure enables the
   // open-face-weighted cut-cell projection (off => velocity-only, e.g. unidirectional body-force
   // flow).
   // ---------------------------------------------------------------------------------------
@@ -709,13 +805,18 @@ void setFluidOnlyConstraint(int mode);
                 const std::vector<int>& instInts, const std::vector<double>& instReals,
                 bool periodic = false);
 
-/// The resolved centre of rotation of instance i and whether it is pinned (explicit) or
+
+
+  /// The resolved centre of rotation of instance i and whether it is pinned (explicit) or
   /// follows the body's translation.
   std::array<double, 3> instanceCenter(int i) const;
 
-bool instanceCenterPinned(int i) const;
 
-/// Rigid-body motion of one scene instance (Layer 3 rung 2). `lin` is the body's linear
+  bool instanceCenterPinned(int i) const;
+
+
+
+  /// Rigid-body motion of one scene instance (Layer 3 rung 2). `lin` is the body's linear
   /// velocity, `ang` its angular velocity about its own centre -- both in CELL UNITS PER TIME, the
   /// same units the velocity field carries, since the scene lives on the global inner grid.
   ///
@@ -726,7 +827,9 @@ bool instanceCenterPinned(int i) const;
   void setInstanceMotion(int i, const std::array<double, 3>& lin,
                          const std::array<double, 3>& ang, const double* center = nullptr);
 
-/// Move one instance (Layer 3 rung 4). Takes effect at the next rebuild_geometry() -- the SDF
+
+
+  /// Move one instance (Layer 3 rung 4). Takes effect at the next rebuild_geometry() -- the SDF
   /// field, the cut-cell overlay, the apertures and the pressure operator are ALL derived from the
   /// instance transforms, so a transform change without a rebuild would leave the solver running
   /// on the old geometry with a new wall velocity, which is worse than either.
@@ -736,7 +839,9 @@ bool instanceCenterPinned(int i) const;
   void setInstanceTransform(int i, const std::array<double, 3>& translation,
                             const std::array<double, 4>& quat);
 
-/// Re-derive ALL geometry from the current instance transforms (Layer 3 rung 4): rebuild the
+
+
+  /// Re-derive ALL geometry from the current instance transforms (Layer 3 rung 4): rebuild the
   /// accelerated scene query, re-sample the SDF, rebuild the cut-cell overlay / apertures /
   /// pressure operator, and re-derive the exact crossings if they were in use.
   ///
@@ -752,7 +857,9 @@ bool instanceCenterPinned(int i) const;
   /// question recorded in the design note.
   void rebuildGeometry();
 
-/// FRESH CELLS: the points a moving body has just uncovered.
+
+
+  /// FRESH CELLS: the points a moving body has just uncovered.
   ///
   /// Restoring u across the rebuild hands such a point whatever the SOLID held there -- zero, or a
   /// stale masked value -- rather than a fluid state. The momentum solve relaxes it within a step,
@@ -769,14 +876,19 @@ bool instanceCenterPinned(int i) const;
   /// old behaviour exactly when the wall is not moving.
   void seedFreshCells(CCField mOld[3]);
 
-/// Fresh-cell policy for moving geometry. true (DEFAULT) = seed with the local wall velocity;
+
+
+  /// Fresh-cell policy for moving geometry. true (DEFAULT) = seed with the local wall velocity;
   /// false = inherit whatever the solid held, which is what shipped before 2026-08-30. Inert when
   /// nothing moves, so a static run is bit-identical either way. See seedFreshCells.
   void setFreshCellSeed(bool on);
 
-bool freshCellSeed() const;
 
-/// Re-derive ONLY the wall-velocity fields and the momentum operator that folds them in.
+  bool freshCellSeed() const;
+
+
+
+  /// Re-derive ONLY the wall-velocity fields and the momentum operator that folds them in.
   ///
   /// The linearised moving-boundary problems -- an oscillating body at vanishing amplitude, a
   /// shear cell driven by counter-moving plates -- change the wall VELOCITY every step while the
@@ -790,31 +902,45 @@ bool freshCellSeed() const;
   /// is silently wrong -- call `rebuild_geometry()` instead. Velocity and pressure are untouched.
   void refreshWallVelocity();
 
-/// True when at least one instance carries a nonzero velocity -- i.e. the moving-geometry paths
+
+
+  /// True when at least one instance carries a nonzero velocity -- i.e. the moving-geometry paths
   /// are live. Everything downstream keys off this, so a driver can assert it.
   bool hasMovingInstance() const;
 
-int sceneInstanceCount() const;
 
-/// Rung 3 on/off. ON (the default) is the correct physics: a rigid body sweeping through a cut
+  int sceneInstanceCount() const;
+
+
+
+  /// Rung 3 on/off. ON (the default) is the correct physics: a rigid body sweeping through a cut
   /// cell injects a wall flux the projection must balance. The switch exists so the Galilean gate
   /// can EXHIBIT the failure the term fixes rather than assert it -- turning it off leaves rung 2's
   /// wall velocity in the momentum operator and a projection that wrongly forces div_open(u) = 0.
   void setWallFluxDivergence(bool on);
 
-bool wallFluxDivergence() const;
 
-bool hasScene() const;
+  bool wallFluxDivergence() const;
 
-/// Per-inner-cell owning instance (Layer 3 rung 1), x-fastest, -1 where no scene has been
+
+
+  bool hasScene() const;
+
+
+
+  /// Per-inner-cell owning instance (Layer 3 rung 1), x-fastest, -1 where no scene has been
   /// sampled yet. Host copy; the device field is what the solver kernels read.
   std::vector<int> getCutOwner() const;
 
-/// Sample the scene onto this rank's inner grid and install it as the solid, entirely on device
+
+
+  /// Sample the scene onto this rank's inner grid and install it as the solid, entirely on device
   /// -- no nx*ny*nz float64 host round trip, and correct on every rank.
   void setSolidFromScene(bool cutcellPressure);
 
-/// A MOVING instance whose surface produces no fractional face aperture has no path for its
+
+
+  /// A MOVING instance whose surface produces no fractional face aperture has no path for its
   /// wall velocity into the momentum operator: the no-slip datum enters ONLY through the cut-cell
   /// fold, so a box face sitting exactly on a grid plane (or a body smaller than a cell) behaves
   /// as a STATIONARY wall and `set_instance_motion` is silently inert -- the shear-driving plates
@@ -822,20 +948,26 @@ bool hasScene() const;
   /// per moving instance, the inner cells it owns that touch a fractional aperture; warn on zero.
   void checkMovingInstancesAreCut();
 
-/// Per instance: cut rows of the momentum operator (all three components) at inner points this
+
+  /// Per instance: cut rows of the momentum operator (all three components) at inner points this
   /// rank owns for it, recounted by set_solid_from_scene / rebuild_geometry when any instance
   /// moves (global under MPI; empty when nothing moves). Zero for a moving instance = its wall
   /// velocity is silently inert.
   std::vector<long> movingInstanceCutCells() const;
 
-/// Per instance: staggered points where the sampled sdf is exactly zero (see the warning).
+
+  /// Per instance: staggered points where the sampled sdf is exactly zero (see the warning).
   std::vector<long> movingInstanceDegeneratePoints() const;
 
-/// Cells on this rank whose solid/fluid sign was set by a periodic IMAGE of an instance wider
+
+
+  /// Cells on this rank whose solid/fluid sign was set by a periodic IMAGE of an instance wider
   /// than the box (see setSolidFromScene); 0 when no instance is that wide or the images agree.
   long periodicImageOverlapCells() const;
 
-/// EXACT wall crossings straight from the scene, on device, on every rank -- the in-solver
+
+
+  /// EXACT wall crossings straight from the scene, on device, on every rank -- the in-solver
   /// replacement for set_exact_crossings + scripts/exact_apertures_spheres.py.
   ///
   /// t[c][a](i) = the fraction in (0,1) along the unit segment from component c's staggered point
@@ -846,51 +978,73 @@ bool hasScene() const;
   /// leave the bracket entirely.
   void setExactCrossingsFromScene();
 
-/// Host entry point: upload the inner SDF once and delegate. Kept so every existing caller and
+
+
+  /// Host entry point: upload the inner SDF once and delegate. Kept so every existing caller and
   /// the Python binding are unchanged.
   void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure);
 
-/// Build the three per-component Robust-Scaled cut-cell overlays + solid masks from the CURRENT
+
+
+  /// Build the three per-component Robust-Scaled cut-cell overlays + solid masks from the CURRENT
   /// `sdf_` (extracted verbatim from setSolidDevice so that a wall-slip change can rebuild the
   /// closure without re-running the whole geometry setup). `resetU` zeroes the velocity, which the
   /// geometry path wants and a pure closure change must NOT do.
   void buildVelocityOverlays(bool resetU);
 
-/// Mirror a cell-centred geometry field about every rank-owned FREE-SLIP (type 4) domain face
+
+
+  /// Mirror a cell-centred geometry field about every rank-owned FREE-SLIP (type 4) domain face
   /// (the symmetric extension the BC asserts). No-op without a type-4 face.
   void mirrorSdfSlipFaces(CCField f);
 
-/// Device entry point (Layer 2): the inner SDF is ALREADY on device, so geometry never
+
+  /// Device entry point (Layer 2): the inner SDF is ALREADY on device, so geometry never
   /// round-trips through the host. This is the body every set_solid path shares.
   void setSolidDevice(CCField din, bool cutcellPressure);
 
-// ---- setSolidDevice stages (QUALITY_PLAN G.1): pure cut-and-paste, each a contiguous
+
+  // ---- setSolidDevice stages (QUALITY_PLAN G.1): pure cut-and-paste, each a contiguous
   // block of the original function sharing only member fields and a CCExec. ----
   void setSolidSelectScheme();
 
-void setSolidUploadSdf(CCField din);
 
-void setSolidBuildOverlaysAndStencils();
+  void setSolidUploadSdf(CCField din);
 
-void setSolidVelocityMgAuto();
 
-void setSolidInitVelocityMg();
+  void setSolidBuildOverlaysAndStencils();
 
-void setSolidBuildOpenness();
 
-void setSolidStarOverlay();
+  void setSolidVelocityMgAuto();
 
-void setSolidGhostProjectionOverlay(CCField din);
 
-void setSolidInitPressureMg();
+  void setSolidInitVelocityMg();
 
-bool geometryBuilt() const;
 
-void requireNoGeometry(const char* who) const;
+  void setSolidBuildOpenness();
 
-void step();
 
-/// OUTFLOW REVERSAL CENSUS -- the regime in which the zero-gradient (do-nothing) outflow is
+  void setSolidStarOverlay();
+
+
+  void setSolidGhostProjectionOverlay(CCField din);
+
+
+  void setSolidInitPressureMg();
+
+
+  bool geometryBuilt() const;
+
+
+  void requireNoGeometry(const char* who) const;
+
+
+
+  void step();
+
+
+
+  /// OUTFLOW REVERSAL CENSUS -- the regime in which the zero-gradient (do-nothing) outflow is
   /// only conditionally energy-stable. Over every rank-owned outflow face plane (the boundary
   /// normal-velocity plane; the tangential components are the boundary-adjacent inner cell's):
   ///   maxReverse   = max(0, -u.n)                        the largest reversed normal velocity,
@@ -913,27 +1067,32 @@ void step();
   };
   OutflowBackflow outflowBackflow();
 
-// velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
+
+  // velocity component c (0=u,1=v,2=w) on the inner cells, flat x-fastest [nx*ny*nz].
   std::vector<double> getVelocity(int c);
 
-/// Write a component's inner velocity from a host vector (x-fastest, inner region) and
+
+  /// Write a component's inner velocity from a host vector (x-fastest, inner region) and
   /// re-impose the solid mask. An initial-condition hook (e.g. a uniform stream around a fixed
   /// body — the Galilean twin of a towed one); u^n is taken from the live field at step start.
   void setVelocity(int c, const std::vector<double>& v);
 
-// The divergence-free FACE velocity component (collocated: the projected MAC face field
+
+  // The divergence-free FACE velocity component (collocated: the projected MAC face field
   // uf_/vf_/wf_, exactly div-free; staggered: C[c].u already lives on the faces). For a periodic
   // bed its mean is the momentum-balance superficial velocity, unperturbed by the openness-aware
   // cell gradient correction (projectCorrectCenter) that biases the cell-field mean at cut cells.
   std::vector<double> getFaceVelocity(int c);
 
-// TEMP DIAGNOSTIC: the face openness (fluid area fraction) used by the cut-cell projection.
+
+  // TEMP DIAGNOSTIC: the face openness (fluid area fraction) used by the cut-cell projection.
   // component c: 0 -> ox_ (low -x face of each inner cell), 1 -> oy_, 2 -> oz_. Grid-independent
   // (built once from the SDF). Exposed to compare the open-weighted superficial flux against the
   // raw velocity mean.
   std::vector<double> getOpenness(int c);
 
-// Diagnostic read-out of the ASSEMBLED momentum-operator diagonal of component c — the float
+
+  // Diagnostic read-out of the ASSEMBLED momentum-operator diagonal of component c — the float
   // stencil `AC` after the diffusion build, the Robust-Scaled cut-cell bake and, under implicit
   // drag, `addDragDiagonal`'s face drag beta_f — as an x-fastest (nx,ny,nz) inner-region host
   // buffer. Read-only; no solver state is touched. Added for WO-I's
@@ -942,16 +1101,19 @@ void step();
   // shift of the velocity, so a velocity-only gate sees THAT the drag was wrong but not WHERE.
   std::vector<double> getMomentumDiagonal(int c);
 
-// The openness whose face fluxes the PROJECTION conserves: the binary (COUPLED) openness in
+
+  // The openness whose face fluxes the PROJECTION conserves: the binary (COUPLED) openness in
   // ghost-projection mode (oxb_ — the geometric ox_ stays a diagnostic there), the geometric
   // cut-cell openness otherwise. This is what flux bookkeeping downstream of the solve must use
   // (e.g. peclet.pnm's extract_network_flow): sum(o_proj*u*A) over a cell's faces IS the
   // discrete divergence the projection drives to zero.
   std::vector<double> getOpennessProj(int c);
 
-std::vector<double> getPressure();
 
-// WO-R: the divergence of the field the projection ACTUALLY produced, outflow correction
+  std::vector<double> getPressure();
+
+
+  // WO-R: the divergence of the field the projection ACTUALLY produced, outflow correction
   // included. `maxOpenDivergence()` below re-imposes the zero-gradient outflow face before
   // measuring (its own comment says so) — which both destroys `bcCorrectOutflow`'s correction as a
   // side effect and reports the divergence of a field the solver never used. On an open-boundary
@@ -964,46 +1126,58 @@ std::vector<double> getPressure();
   // repo was taken with the mutating one, and re-baselining them is not this work order's call.
   double maxOpenDivergenceProjected();
 
-/// The same diagnostic in INDEX units (per tRef), which is what the solver's own guards read.
+
+  /// The same diagnostic in INDEX units (per tRef), which is what the solver's own guards read.
   double maxOpenDivergenceProjectedInternal();
 
-double maxOpenDivergence();
 
-/// The same diagnostic in INDEX units (per tRef), which is what the solver's own guards read.
+  double maxOpenDivergence();
+
+
+  /// The same diagnostic in INDEX units (per tRef), which is what the solver's own guards read.
   double maxOpenDivergenceInternal();
 
-// Residual of the volume-averaged continuity, max|div(open*eps*u) + d(eps)/dt| — the quantity the
+
+  // Residual of the volume-averaged continuity, max|div(open*eps*u) + d(eps)/dt| — the quantity the
   // porous projection actually drives to zero (NOT the velocity divergence, which is -d(eps)/dt !=
   // 0 in a fluidizing bed). Meaningful only with set_porous_continuity(True); returns 0 otherwise.
   double maxPorousResidual();
 
-long lastPressureIterations() const;
 
-// The pressure multigrid's per-level coarsening ratio, one {rx, ry, rz} per level
+  long lastPressureIterations() const;
+
+
+  // The pressure multigrid's per-level coarsening ratio, one {rx, ry, rz} per level
   // (doc/anisotropic_metric.md §5).  On an isotropic domain this is today's table; on a stretched
   // one the aspect rule defers an axis while it is at least the aspect threshold (2) times
   // coarser than the finest coarsenable one.  Empty until the cut-cell operator exists.
   std::vector<std::array<int, 3>> pressureMgLevelRatios() const;
 
-// ISSUES sweep item 6: did the last pressure solve break down (non-finite
+
+  // ISSUES sweep item 6: did the last pressure solve break down (non-finite
   // preconditioner output / recurrence scalar)? A failing solve also reports the
   // iteration cap through `lastPressureIterations()`.
   bool pressureSolveFailed() const;
 
-// Per-phase wall times of the last step() in seconds, THIS RANK (device-fenced at each phase
+
+  // Per-phase wall times of the last step() in seconds, THIS RANK (device-fenced at each phase
   // boundary): predictor = ghost fills + RHS/advection/stencil builds, momentum = the per-component
   // implicit-diffusion solves, projection = the cut-cell pressure projection; step = the whole
   // step() (remainder = BC re-imposition, Picard bookkeeping, scalars). The allreduce pair is the
   // pressure solve's global-reduction tax (time in / count of MPI_Allreduce; 0 single-rank).
   double lastStepSeconds() const;
 
-double lastPredictorSeconds() const;
 
-double lastMomentumSeconds() const;
+  double lastPredictorSeconds() const;
 
-double lastProjectionSeconds() const;
 
-// ---- WO-V9: the VoF pipeline's own per-stage timers ----------------------------------------
+  double lastMomentumSeconds() const;
+
+
+  double lastProjectionSeconds() const;
+
+
+  // ---- WO-V9: the VoF pipeline's own per-stage timers ----------------------------------------
   //
   // `set_vof_timing(True)` arms them; they are OFF by default and, when off, cost one predictable
   // branch per stage and no fence. A phase boundary on a device backend has to fence or the
@@ -1026,48 +1200,68 @@ double lastProjectionSeconds() const;
   };
   void setVofTiming(bool on);
 
-bool vofTiming() const;
 
-void resetVofTiming();
+  bool vofTiming() const;
 
-const VofTiming& vofTimingReport() const;
 
-const vof::WyAdvector::Timing& vofKernelTiming() const;
+  void resetVofTiming();
 
-const vof::VofCurvature::Timing& vofCurvatureTiming() const;
 
-/// `VofCurvature::useWorklist` — run the height-function cascade and the PV fallback over a
+  const VofTiming& vofTimingReport() const;
+
+
+  const vof::WyAdvector::Timing& vofKernelTiming() const;
+
+
+  const vof::VofCurvature::Timing& vofCurvatureTiming() const;
+
+
+  /// `VofCurvature::useWorklist` — run the height-function cascade and the PV fallback over a
   /// COMPACTED list of the interfacial cells instead of over the whole inner region. See the
   /// binding docstring and the WO-V9 findings for what it is worth and why.
   void setVofCurvatureWorklist(bool on);
 
-bool vofCurvatureWorklist() const;
 
-double vofTimingStepSeconds() const;
+  bool vofCurvatureWorklist() const;
 
-double vofTimingPredictorSeconds() const;
 
-double vofTimingMomentumSeconds() const;
+  double vofTimingStepSeconds() const;
 
-double vofTimingProjectionSeconds() const;
 
-/// `WyAdvector::useWorklist` — the compaction of the PLIC reconstruction pass onto the mixed
+  double vofTimingPredictorSeconds() const;
+
+
+  double vofTimingMomentumSeconds() const;
+
+
+  double vofTimingProjectionSeconds() const;
+
+
+  /// `WyAdvector::useWorklist` — the compaction of the PLIC reconstruction pass onto the mixed
   /// cells. Pure optimization: off must reproduce the same field bit for bit.
   void setVofWorklist(bool on);
 
-bool vofWorklist() const;
 
-double lastPressureAllreduceSeconds() const;
+  bool vofWorklist() const;
 
-long lastPressureAllreduceCount() const;
 
-int nx() const;
+  double lastPressureAllreduceSeconds() const;
 
-int ny() const;
 
-int nz() const;
+  long lastPressureAllreduceCount() const;
 
-private:
+
+  int nx() const;
+
+
+  int ny() const;
+
+
+  int nz() const;
+
+
+
+ private:
   struct Comp {
     CCField u, b, inhom, rscale, mask;
     FV AC, AW, AE, AS, AN, AB, AT;
@@ -1089,7 +1283,8 @@ private:
   // explicit advection, as before.
   bool implicitAdv() const;
 
-// Domain-BC momentum solved via the Robust-Scaled cut-cell / FOU stencil smoother
+
+  // Domain-BC momentum solved via the Robust-Scaled cut-cell / FOU stencil smoother
   // (ibmRbgsStencilColor
   // + reflection-ghost BCs), not the all-fluid const-coeff fold. Needed when (a) an immersed solid
   // is present (cut-cell no-slip must be in the operator), or (b) advection is implicit (the FOU
@@ -1108,12 +1303,14 @@ private:
   // while the all-fluid domain-BC velocity MG is the folded operator and is not.
   bool bcStencilPath() const;
 
-// The mixed velocity MG: solid + domain BCs, diffusion-dominated constant-property momentum
+
+  // The mixed velocity MG: solid + domain BCs, diffusion-dominated constant-property momentum
   // (implicit advection / variable properties / drag stay on RB-GS: their fine stencils are not
   // approximated by the staircase Helmholtz).
   bool mixedVelocityMg() const;
 
-// Fill a property field's ghosts for the face means: periodic/halo base, then zero-gradient
+
+  // Fill a property field's ghosts for the face means: periodic/halo base, then zero-gradient
   // (copy) on domain-BC (wall/inflow/outflow) faces — a periodic wrap there would bring the wrong
   // layer's value to the wall face (destabilising, especially for the harmonic mean).
   // Distributed: the override is per-face rank-OWNED (`touchesGlobalFace`), exactly as
@@ -1122,9 +1319,11 @@ private:
   // keyed on the wrong predicate: it dropped the override at EVERY np including 1.
   void fillPropGhosts(CCField f);
 
-void fillMuGhosts();
 
-// Ghost ring of the per-cell body-force fields ("force_x/y/z") — WO-G.
+  void fillMuGhosts();
+
+
+  // Ghost ring of the per-cell body-force fields ("force_x/y/z") — WO-G.
   //
   // Neither writer of these fields fills their ghosts: `applyClosure` writes the INNER cells only
   // ("ghosts untouched — refilled by the field's own exchange", `property_closures.hpp`), and the
@@ -1163,7 +1362,8 @@ void fillMuGhosts();
   // field's ghost contract does not depend on which RHS kernel happens to consume it.
   void fillCellForceGhosts();
 
-// Ghost ring of the per-cell drag coefficient "drag_beta" — WO-I.
+
+  // Ghost ring of the per-cell drag coefficient "drag_beta" — WO-I.
   //
   // Same defect class as the body force above, one phase earlier in the step. Under `porous_`,
   // `addDragDiagonal` builds the staggered momentum diagonal from the FACE drag
@@ -1209,7 +1409,8 @@ void fillMuGhosts();
   // path `addDragDiagonal` uses the cell value alone, so the fill is numerically inert there.
   void fillDragBetaGhosts();
 
-// Eps ghost policy for the porous (volume-averaged) machinery. Periodic/halo base fill, then at
+
+  // Eps ghost policy for the porous (volume-averaged) machinery. Periodic/halo base fill, then at
   // non-periodic domain faces: wall -> zero-gradient; INFLOW/OUTFLOW -> mirror around 1 so the
   // arithmetic face mean is EXACTLY 1 (the boundary is pure gas: below the distributor and in the
   // freeboard eps = 1, so a prescribed inflow velocity is the SUPERFICIAL gas velocity and its face
@@ -1221,13 +1422,15 @@ void fillMuGhosts();
   // eps_f*U instead of U.
   void fillPorousEpsGhosts();
 
-// --- VoF internals (rung V2a, WO-J) ---------------------------------------------------------
+
+  // --- VoF internals (rung V2a, WO-J) ---------------------------------------------------------
   // Allocate the colour field's own g=3 working block and wire its ghost/all-reduce hooks. Called
   // by enableVof() and again by any path that re-sizes the block (redistribute -> initMpi), since
   // the advector's block must track the solver's.
   void buildVofBlock();
 
-// --- rung V5a (WO-Q): the cut-cell geometry of the colour block ------------------------------
+
+  // --- rung V5a (WO-Q): the cut-cell geometry of the colour block ------------------------------
   //
   // The advector needs, on ITS g=3 block and in ITS high-face index convention, the face openness
   // `o_d` and the cell fluid fraction `eps`. Both are built here and both are then run through the
@@ -1259,14 +1462,17 @@ void fillMuGhosts();
   // out of the same central difference and equalling the inward face normal by construction.
   int vofWetWallMask() const;
 
-// Signed distance (cell units, POSITIVE inside the domain) from a cell centre at GLOBAL index
+
+  // Signed distance (cell units, POSITIVE inside the domain) from a cell centre at GLOBAL index
   // (gx,gy,gz) to the nearest wetting domain wall plane. Container-free so a device lambda can
   // call it. `+inf` when no face is a wetting wall.
   KOKKOS_INLINE_FUNCTION static double vofWallPlaneSdf(int gx, int gy, int gz, I3 gs, int mask);
 
-void buildVofGeometry();
 
-// ISSUES sweep item 3: close the colour block's out-of-domain band across every wetting domain
+  void buildVofGeometry();
+
+
+  // ISSUES sweep item 3: close the colour block's out-of-domain band across every wetting domain
   // wall, so `classifyGeometry` calls those ghost cells SOLID and WO-S's theta pass owns them.
   //
   // The rule is the one the SDF path uses, evaluated on an exact plane: a cell whose centre lies
@@ -1277,11 +1483,13 @@ void buildVofGeometry();
   // masked to zero outside the wall.
   void applyDomainWallGeometry(int mask);
 
-// ISSUES sweep item 3: mark the out-of-domain band SOLID after the classification exchange
+
+  // ISSUES sweep item 3: mark the out-of-domain band SOLID after the classification exchange
   // (see the call site for why the exchange undoes it).
   void imposeDomainWallKind(int mask);
 
-// ISSUES sweep item 3: the outermost (depth-3) band layer of a wetting DOMAIN wall is the one
+
+  // ISSUES sweep item 3: the outermost (depth-3) band layer of a wetting DOMAIN wall is the one
   // cell no fill pass can write -- the passes stop at ghost depth 3-k and their 6-point stencil
   // would index outside the g=3 block there -- and the zero-gradient clamp that used to supply it
   // is now skipped (it would wipe the theta band). Continue the band outward instead: depth 3
@@ -1290,14 +1498,17 @@ void buildVofGeometry();
   // applies.
   void vofExtendWallBand(CCField f, int mask);
 
-// Zero the canonical G=2 colour field inside solid cells (see buildVofGeometry).
+
+  // Zero the canonical G=2 colour field inside solid cells (see buildVofGeometry).
   void zeroSolidColour();
 
-// Is axis `a` periodic for the colour field? flow's per-face bc_ is 0 (periodic) on BOTH ends of
+
+  // Is axis `a` periodic for the colour field? flow's per-face bc_ is 0 (periodic) on BOTH ends of
   // a periodic axis, so an axis is periodic iff neither of its faces carries a domain BC.
   bool vofAxisPeriodic(int a) const;
 
-// The colour field's ghost policy on its own g=3 block: halo/periodic base, then zero-gradient
+
+  // The colour field's ghost policy on its own g=3 block: halo/periodic base, then zero-gradient
   // (globally clamped) on every non-periodic axis. Zero-gradient is the same policy the material
   // properties get (`fillPropGhosts`) — a wall neither creates nor destroys colour, and the MYC
   // stencil of an inner boundary cell must see a plausible continuation rather than a wrap from the
@@ -1305,55 +1516,69 @@ void buildVofGeometry();
   // not a ghost value) and is not offered here.
   void vofFillGhosts(CCField f);
 
-void vofExchangeRaw(CCField f);
 
-I3 vofGlobalSize() const;
+  void vofExchangeRaw(CCField f);
 
-// Global index of this block's inner cell (0,0,0). og_ is exactly that (originInclGhost + G).
+
+  I3 vofGlobalSize() const;
+
+
+  // Global index of this block's inner cell (0,0,0). og_ is exactly that (originInclGhost + G).
   I3 vofOrigin() const;
 
-// Face velocities -> the advector's g=3 block. The advecting field must be the PROJECTED one
+
+  // Face velocities -> the advector's g=3 block. The advecting field must be the PROJECTED one
   // (see advectVof), and its ghost ring must be valid because the advector reads the `-d` face of
   // the first inner cell, which is a ghost cell's `+d` face. fillVelGhosts is the solver's own
   // halo+domain-BC fill and is exactly what the Picard loop does at the top of every iteration, so
   // calling it here leaves the velocity ghosts in the state the next consumer would have produced.
   void bridgeVelocityToVof();
 
-// --- rung W0: the block container's view of this rank's patch --------------------------------
+
+  // --- rung W0: the block container's view of this rank's patch --------------------------------
   // The owned inner box of every rank, in global cells — the table the block gather/scatter pieces
   // are cut against. It is a function of the CURRENT decomposition, so it is built here rather
   // than inlined at `enable_vof_blocks`: a redistribute has to push the new one through
   // `bindVofBlockPatch` or every piece keeps addressing the previous partition.
   std::vector<vof::VofBox> vofBlockRankBoxes(int size) const;
 
-// The gather reads the face velocity in the ADVECTOR's high-face convention on the g=3 block,
+
+  // The gather reads the face velocity in the ADVECTOR's high-face convention on the g=3 block,
   // i.e. exactly what `bridgeVelocityToVof` writes, and the scatter writes the union into that
   // same block's colour. `buildVofBlock` reallocates those Views, so the binding is refreshed
   // there — a stale View here would silently gather from freed memory.
   void bindVofBlockPatch();
 
-// The union colour on the g=3 block -> the canonical registered "C" (+ its ghost policy, the
+
+  // The union colour on the g=3 block -> the canonical registered "C" (+ its ghost policy, the
   // same `fillPropGhosts` rho and mu are derived through).
   void harvestVofBlockUnion();
 
-// Colour: G=2 registry mirror -> the g=3 working block, then the colour field's own ghost policy.
+
+
+  // Colour: G=2 registry mirror -> the g=3 working block, then the colour field's own ghost policy.
   // Inner cells only in the copy — the two blocks have different ghost extents and each fills its
   // own (the one bridge; see the enableVof note).
   void bridgeColourToVof();
 
-// Staggered face stride of velocity component c (the -c face of cell i pairs cells i and i-s).
+
+
+  // Staggered face stride of velocity component c (the -c face of cell i pairs cells i and i-s).
   long strideOf(int c) const;
 
-// The face-property accessor for the momentum stencil of component c: mu constant-or-field
+
+  // The face-property accessor for the momentum stencil of component c: mu constant-or-field
   // (arithmetic/harmonic mean), rho constant-or-field (arithmetic face mean for the time diagonal —
   // the same face density the variable-density projection uses).
   // Effective variable density: true varRho, or the eps-conservative porous momentum (rho_eff =
   // eps*rho in epsRho_, refreshed per step by updateEpsRho).
   bool effVarRho() const;
 
-CCField effRhoField();
 
-// --- rung V8 (WO-T): the collocated face-acceleration predictor --------------------------------
+  CCField effRhoField();
+
+
+  // --- rung V8 (WO-T): the collocated face-acceleration predictor --------------------------------
   //
   // TRUE exactly on the configurations that used to throw outright on this grid — variable density
   // (`set_density_mode`) and surface tension (which needs `enable_vof`) on `SolverColocated` — so
@@ -1366,36 +1591,50 @@ CCField effRhoField();
   // `collocated_varrho.hpp` for why the cell balance is not an option here.
   bool colocatedFaceForce() const;
 
-// The AUTO collocated scheme (set in setSolid/setPressureGeometry) picks the GHOST projection when
+
+  // The AUTO collocated scheme (set in setSolid/setPressureGeometry) picks the GHOST projection when
   // the configuration allows it, and the ghost v1 supports neither variable density nor the V8 face
   // force. `set_density_mode` / `enable_vof` can be called AFTER the geometry, so re-run the same
   // fallback here rather than failing later inside project(). An explicit scheme selection has
   // already cleared colSchemeAuto_ and is left alone (it will hit the loud throw instead).
   void collocatedV8AutoFallback(const char* why);
 
-void ensureFaceAcc();
 
-// Guard rail for rung V8's scope. The collocated variable-density / face-force path is validated
+  void ensureFaceAcc();
+
+
+  // Guard rail for rung V8's scope. The collocated variable-density / face-force path is validated
   // ALL-FLUID (`set_pressure_geometry`); an immersed solid on it would need the cut-cell face
   // acceleration AND the one-sided (gauge-exact / ghost) closures to agree with the face averaging
   // operator, which is a separate derivation. Fail loudly instead of half-supporting it.
   void requireCollocatedFaceForceScope(const char* who);
 
-void updateEpsRho();
 
-VarFaceProps makeFaceProps(int c);
+  void updateEpsRho();
 
-// Mirror the host motion arrays onto the device (KBs; rebuilt only when a driver changes a
+
+  VarFaceProps makeFaceProps(int c);
+
+
+  // Mirror the host motion arrays onto the device (KBs; rebuilt only when a driver changes a
   // body's velocity, not per step).
   void buildSceneQuery();
 
-void refreshMotionFlag();
 
-void uploadMotion();
 
-peclet::core::geom::InstanceMotionView<double> motionView() const;
+  void refreshMotionFlag();
 
-// MOVING GEOMETRY (Layer 3 rungs 2-3): sample the scene's KINEMATIC WALL VELOCITY onto the grid.
+
+
+  void uploadMotion();
+
+
+
+  peclet::core::geom::InstanceMotionView<double> motionView() const;
+
+
+
+  // MOVING GEOMETRY (Layer 3 rungs 2-3): sample the scene's KINEMATIC WALL VELOCITY onto the grid.
   //
   // At each probe p (component c's staggered point for rung 2; the cell centre for rung 3):
   //   n_hat = central difference of the SAMPLED sdf_, normalised   -- O(h), the v1 fidelity
@@ -1411,13 +1650,17 @@ peclet::core::geom::InstanceMotionView<double> motionView() const;
   // taken in v1 -- see the design note.
   void buildWallVelocity();
 
-/// Raw ghost fill of an extended-block field: the rank halo exchange under MPI, the periodic
+
+
+  /// Raw ghost fill of an extended-block field: the rank halo exchange under MPI, the periodic
   /// wrap single-rank. No boundary-condition fold is applied (this is for GEOMETRIC data such as
   /// the wall velocity, not a velocity iterate); non-periodic single-rank ghosts are left as the
   /// kernel computed them.
   void exchangeExtRaw(CCField f);
 
-// MOVING GEOMETRY rung 3: the wall's own volume flux, folded into the cell divergence.
+
+
+  // MOVING GEOMETRY rung 3: the wall's own volume flux, folded into the cell divergence.
   //
   // A rigid body sweeping through a cut cell injects a net flux through the WALL part of the
   // cell's fluid boundary; it is zero only integrally over a closed body, never cell by cell.
@@ -1429,7 +1672,9 @@ peclet::core::geom::InstanceMotionView<double> motionView() const;
   // in form. Inert unless a moving instance exists.
   void addWallFluxDivergence(CCField d);
 
-/// Hydrodynamic force and torque on each scene instance (Layer 4 rung 2) -- the resolved
+
+
+  /// Hydrodynamic force and torque on each scene instance (Layer 4 rung 2) -- the resolved
   /// CFD-DEM feedback. Returns four 3*nInst blocks: force, torque, and the force split into its
   /// PRESSURE and VISCOUS parts (force == pressure + viscous), because the two carry different
   /// discretisation error and a deficit that sits in one of them localises itself.
@@ -1457,7 +1702,9 @@ peclet::core::geom::InstanceMotionView<double> motionView() const;
   /// identity in cell units.
   void scaleForceTorque(std::vector<double>& out, std::size_t m) const;
 
-/// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §4.4 — ADMITTED since commit C4.  With
+
+
+  /// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §4.4 — ADMITTED since commit C4.  With
   /// `A_a = W_a V'/h_a'` the PHYSICAL fragment area vector in hRef^2 (`W_a = o_{a-} - o_{a+}`, which
   /// is what `A[a]` below holds) and `gu[a][b]` the index-velocity central difference:
   ///
@@ -1471,7 +1718,9 @@ peclet::core::geom::InstanceMotionView<double> motionView() const;
   /// units on every axis, and `torqueToPhys` is unchanged.
   std::vector<double> hydroForceTorque();
 
-/// Hydrodynamic force and torque per instance from the DISCRETE REACTION (route (b) of the
+
+
+  /// Hydrodynamic force and torque per instance from the DISCRETE REACTION (route (b) of the
   /// design note's OPEN FOR REVIEW 1) -- the recommended source of the resolved CFD-DEM feedback.
   /// Returns two 3*nInst blocks: force, torque about the instance centre.
   ///
@@ -1567,11 +1816,15 @@ peclet::core::geom::InstanceMotionView<double> motionView() const;
   /// is an argument about MOMENTUM ROWS, and this term is not one.
   std::vector<double> hydroForceTorqueReaction();
 
-/// The number of unmasked (fluid) staggered momentum cells per component -- the exact discrete
+
+
+  /// The number of unmasked (fluid) staggered momentum cells per component -- the exact discrete
   /// datum the reaction identity is stated against: at steady state, sum_bodies F_c = f_c * N_c.
   std::array<long, 3> fluidMomentumCells();
 
-/// R0 DECOMPOSITION PROBE. The reaction identity in its full discrete form is
+
+
+  /// R0 DECOMPOSITION PROBE. The reaction identity in its full discrete form is
   ///     sum_bodies F_c  =  f_c*N_c + sum_i fb_i + sum_i A_i  -  sum_i (rho/dt)(u_i - u^n_i)
   /// (every RHS term of the composed step, summed over the FLUID momentum cells; the viscous
   /// fluxes and grad(pi) telescope to zero over the whole fluid region). The Stokes gate drops the
@@ -1586,7 +1839,9 @@ peclet::core::geom::InstanceMotionView<double> motionView() const;
   /// term and converges away under refinement -- measure it, do not assume it.
   std::vector<double> reactionBudgetTerms();
 
-/// A_wall EXACTNESS PROBE (diagnostic for the Layer-4 force integral). For any smooth field q,
+
+
+  /// A_wall EXACTNESS PROBE (diagnostic for the Layer-4 force integral). For any smooth field q,
   ///     sum_cells q(x_c) * A_wall,cell  ->  integral over the wall of q n_fluid dA
   /// and taking q = x_a turns that, by the divergence theorem applied to the SOLID interior, into
   /// exactly -V_solid along axis a and 0 on the others. So this returns
@@ -1596,33 +1851,43 @@ peclet::core::geom::InstanceMotionView<double> motionView() const;
   /// one that does not is the pressure / velocity-gradient reconstruction's.
   std::array<double, 3> wallAreaProbe();
 
-/// Net wall flux this rank injects, sum over inner cells of u_w . A_wall -- the compatibility
+
+
+  /// Net wall flux this rank injects, sum over inner cells of u_w . A_wall -- the compatibility
   /// datum of the singular pressure problem. Exactly zero for a translating body in a periodic
   /// box (the aperture differences telescope); small but nonzero for rotation and for a body
   /// crossing a non-periodic boundary. Reported, not corrected.
   double wallFluxImbalance();
 
-// Empty when the geometry is static -> ibmModifyStencil takes its scalar u_bc path, unchanged.
+
+
+  // Empty when the geometry is static -> ibmModifyStencil takes its scalar u_bc path, unchanged.
   CCConst wallVelView(int c) const;
 
-void rebuildStencils();
 
-// copy the nx*ny*nz inner cells between two extended blocks of different ghost width (g=2 <-> g=1
+
+  void rebuildStencils();
+
+
+  // copy the nx*ny*nz inner cells between two extended blocks of different ghost width (g=2 <-> g=1
   // MG).
   void copyInner(CCField dst, C3 de, int dg, CCConst src, C3 se, int sg);
 
-// Copy the ENTIRE destination block (including its ghost ring) from the source block at per-axis
+
+  // Copy the ENTIRE destination block (including its ghost ring) from the source block at per-axis
   // cell offset `off`: dst(x,y,z) <- src(x+off, y+off, z+off). Bridges a G=2 field to the g=1 MG
   // block INCLUDING the g=1 ghosts (off = G-1), so face means at the first inner cell read a valid
   // neighbour. Requires the source ghosts filled (fillGhosts/fillPropGhosts) — under MPI those are
   // the cross-rank values, so the bridge is decomposition-correct.
   void copyBlockShifted(CCField dst, C3 de, CCConst src, C3 se, int off);
 
-// Fill ghost width G periodically on all 3 axes (x then y then z, covering corners). Distributed:
+
+  // Fill ghost width G periodically on all 3 axes (x then y then z, covering corners). Distributed:
   // the velocity-block halo (cross-rank + periodic, all ghosts incl. corners).
   void fillGhosts(CCField f);
 
-// Fused periodic FACE-ghost fill in ONE kernel (vs 3 fillAxis): each inner boundary cell scatters
+
+  // Fused periodic FACE-ghost fill in ONE kernel (vs 3 fillAxis): each inner boundary cell scatters
   // its periodic image to the opposite face ghost, all 3 axes at once. Valid only for
   // FACE-neighbour (7-point) stencils -- it does NOT fill the corner/edge ghosts (which fillAxis's
   // sequential x->y->z does). The IBM RB-GS smoother reads only the 7-point stencil, so this is
@@ -1631,14 +1896,18 @@ void rebuildStencils();
   // full fillGhosts there.
   void fillGhostsFaces(CCField f);
 
-void fillAxis(CCField f, int axis);
 
-// Cell divergence of the current velocity iterate, on the inner cells + one ghost ring (the RHS
+  void fillAxis(CCField f, int axis);
+
+
+  // Cell divergence of the current velocity iterate, on the inner cells + one ghost ring (the RHS
   // compensation reads div at i and i-strd, so faces at the low inner boundary need the ghost-cell
   // value; velocity ghosts were just filled). Porous-only scratch (divAdv_).
   void computeDivAdv();
 
-/// R0 helper: allocate (once) and arm the per-component advective-term stash the reaction-force
+
+
+  /// R0 helper: allocate (once) and arm the per-component advective-term stash the reaction-force
   /// budget consumes. Returns whether the RHS kernel should write it. Off (and untouched) unless a
   /// scene is installed on the staggered grid with explicit advection on, so every other path is
   /// byte-identical and pays no memory.
@@ -1675,23 +1944,31 @@ void fillAxis(CCField f, int axis);
   // advective term" directly. Everything else on the moving path is untouched by it.
   bool advWallInputs() const;
 
-void buildAdvInputs();
 
-/// The velocity view the advection operators must read for component c: the wall-corrected
+  void buildAdvInputs();
+
+
+  /// The velocity view the advection operators must read for component c: the wall-corrected
   /// scratch while an instance is moving, the live field (byte-identical) otherwise.
   CCConst advVelView(int c) const;
 
-bool ensureAdvStash(int c, bool adv);
 
-void buildRhs(int c);
 
-// Sibling of buildRhs adding a per-cell body force fb(i) (Boussinesq buoyancy / CFD-DEM
+  bool ensureAdvStash(int c, bool adv);
+
+
+
+  void buildRhs(int c);
+
+
+  // Sibling of buildRhs adding a per-cell body force fb(i) (Boussinesq buoyancy / CFD-DEM
   // feedback): the constant fc becomes fc + fb(i). Kept as a separate kernel so buildRhs stays
   // byte-identical (no codegen drift on the single-phase path). Selected in step() when
   // hasCellForce_.
   void buildRhsForced(int c);
 
-// Variable-density RHS (sibling of buildRhsForced): the time term, the advection weight, and the
+
+  // Variable-density RHS (sibling of buildRhsForced): the time term, the advection weight, and the
   // per-cell body force all use the FACE density of component c (arithmetic mean over the staggered
   // face, matching VarFaceProps::idiag and the projection coefficient — this three-way consistency
   // is what makes discrete hydrostatic balance exact). The cell force fb is face-interpolated for
@@ -1699,7 +1976,8 @@ void buildRhs(int c);
   // rho ghosts filled (rebuildStencils / buildAdvStencilVar did it this step).
   void buildRhsVar(int c);
 
-// Momentum-consistent sibling of buildRhsVar (rung V2b, WO-K). The validated `buildRhsVar` is not
+
+  // Momentum-consistent sibling of buildRhsVar (rung V2b, WO-K). The validated `buildRhsVar` is not
   // touched; this one differs in exactly one term and drops one.
   //
   //   buildRhsVar :  rho_f/dt * u^n   - rho_f * adv(u^k)   (+ implicit-FOU deferred correction)
@@ -1714,7 +1992,9 @@ void buildRhs(int c);
   // hydrostatic balance exact is untouched (see the enableVofMomentum note).
   void buildRhsVarMom(int c);
 
-// --- rung V8 (WO-T): the collocated predictor when the forces live on the faces ----------------
+
+
+  // --- rung V8 (WO-T): the collocated predictor when the forces live on the faces ----------------
   //
   // SIBLING of buildRhsVar, reached only when `colocatedFaceForce()` — i.e. only on `SolverColocated`
   // with variable density and/or surface tension, both of which used to throw. It differs from
@@ -1732,13 +2012,17 @@ void buildRhs(int c);
   // Koren/SOU advection and its implicit-FOU deferred correction.
   void buildRhsColoFF(int c);
 
-// Add the face acceleration a_f = dt*(f_f - grad_f(P^n))/rho_f to the just-averaged face field,
+
+
+  // Add the face acceleration a_f = dt*(f_f - grad_f(P^n))/rho_f to the just-averaged face field,
   // and REMEMBER it in faceAcc_ so the cell counterpart can average exactly the same numbers.
   // Called from project() immediately after centerToFace, before the divergence. See
   // collocated_varrho.hpp.
   void applyFaceAcceleration();
 
-// The cell counterpart of the face path: turn faceAcc_ into the TOTAL face velocity increment of
+
+
+  // The cell counterpart of the face path: turn faceAcc_ into the TOTAL face velocity increment of
   // this step (force acceleration minus the projection's own face correction) and give each cell the
   // openness-gated average of its two faces. Called from project() in place of the constant-density
   // cell-correction chain.
@@ -1749,7 +2033,9 @@ void buildRhs(int c);
   // `bcCorrectOutflowVar`).
   void applyCellFaceAverageCorrection();
 
-// --- balanced-force CSF (rung V4, WO-P) ------------------------------------------------------
+
+
+  // --- balanced-force CSF (rung V4, WO-P) ------------------------------------------------------
   //
   // ADDITIVE to whichever RHS builder just ran (`buildRhs` / `buildRhsForced` / `buildRhsVar` /
   // `buildRhsVarMom`), because the force is independent of which time term and which advection form
@@ -1772,7 +2058,8 @@ void buildRhs(int c);
   // non-VoF path is byte-identical.
   void addCsfRhs(int c);
 
-// ABLATION (`set_csf_mode(1)`): the same physics discretized the OTHER plausible way — a
+
+  // ABLATION (`set_csf_mode(1)`): the same physics discretized the OTHER plausible way — a
   // cell-centred force `f(j) = sigma*kappa(j)*(C(j+s) - C(j-s))/2h` interpolated to the face with
   // the arithmetic mean `1/2 (f(i) + f(i-s))`, exactly as the per-cell body-force machinery would
   // carry a `rho*g` field. It is consistent, it converges, and it is WRONG for surface tension: the
@@ -1782,7 +2069,8 @@ void buildRhs(int c);
   // hydrostatic gate. NEVER a production path.
   void addCsfRhsCellInterp(int c);
 
-// --- rung W2 (WO-W12): the BLOCK CSF, a sibling of `addCsfRhs` ------------------------------
+
+  // --- rung W2 (WO-W12): the BLOCK CSF, a sibling of `addCsfRhs` ------------------------------
   //
   // Same force, same place in the RHS, same `rs(i)` cut-cell rescale — but the face value was
   // formed ON THE BLOCKS (each marker's own curvature cascade on its own dense box, the same
@@ -1801,7 +2089,9 @@ void buildRhs(int c);
   // Gated on `vofBlockCsf()`, which is false whenever the block container is absent.
   void addCsfRhsBlocks(int c);
 
-// Census of the CSF face force over this rank's inner region, on the CURRENT colour + curvature
+
+
+  // Census of the CSF face force over this rank's inner region, on the CURRENT colour + curvature
   // fields: the max |F| per component, and the number of ORPHAN faces — faces across which the
   // colour jumps by more than the wisp threshold but neither cell carries a curvature estimate, so
   // the force was silently dropped. An orphan is a defect (Basilisk's "this should not happen"); it
@@ -1818,18 +2108,22 @@ void buildRhs(int c);
   };
   CsfDiagnostics csfDiagnostics();
 
-// Implicit-FOU velocity stencil (CUDA build_adv_stencil_k + ibm_modify_stencil): backward-Euler
+
+
+  // Implicit-FOU velocity stencil (CUDA build_adv_stencil_k + ibm_modify_stencil): backward-Euler
   // diffusion (idiag+6beta diag, -beta off) + rho*FOU(u^k) upwind operator (diagonally dominant ->
   // stable at high Re), then the Robust-Scaled cut-cell bake. The advecting velocity u^k = the
   // current C[*].u (ghosts filled).
   void buildAdvStencil(int c);
 
-// Variable-property sibling of buildAdvStencil: VarFaceProps diffusion build (per-face mu, face-
+
+  // Variable-property sibling of buildAdvStencil: VarFaceProps diffusion build (per-face mu, face-
   // density time diagonal) + the FOU upwind weighted by the FACE density (constant path:
   // fouw=rho_). Separate kernel so the validated buildAdvStencil stays byte-identical.
   void buildAdvStencilVar(int c);
 
-// Backflow stabilization (Bazilevs 2009 / Esmaily-Moghadam 2011) for the NORMAL momentum at
+
+  // Backflow stabilization (Bazilevs 2009 / Esmaily-Moghadam 2011) for the NORMAL momentum at
   // outflow faces: add the dissipative diagonal term beta*rho*|min(u.n,0)| where the outflow
   // reverses (fluid re-entering, u.n<0). This removes the spurious kinetic-energy influx that the
   // do-nothing/zero- gradient outflow advects in -- the "backflow divergence" that blows up
@@ -1840,10 +2134,12 @@ void buildRhs(int c);
   // normal to each outflow face.
   void applyBackflowStab(int c);
 
-// max|a-b| over inner cells (Picard outer-tolerance check).
+
+  // max|a-b| over inner cells (Picard outer-tolerance check).
   double maxAbsDiffInner(CCConst a, CCConst b);
 
-// Shared momentum RB-GS loop: fixed velIters_ sweeps, or (velTol_ > 0) the tolerance stop —
+
+  // Shared momentum RB-GS loop: fixed velIters_ sweeps, or (velTol_ > 0) the tolerance stop —
   // colour 0 plain, colour 1 via the fused max-increment kernel, stop once the increment has
   // contracted to velTol_ of the first sweep's. The decision is rank-uniform under MPI (all ranks
   // see the same global max), so per-sweep halo exchanges stay in lockstep.
@@ -1853,37 +2149,49 @@ void buildRhs(int c);
   void velSweepLoop(Fill&& fill, Color&& sweepColor, ColorDu&& sweepColorDu,
                     std::function<double()> resid = nullptr, double bnorm = 0.0);
 
-VelocityMG::Comm vmgComm() const;
 
-// residual functor + max|b| for the stencil paths of component c (see velSweepLoop)
+
+  VelocityMG::Comm vmgComm() const;
+
+
+  // residual functor + max|b| for the stencil paths of component c (see velSweepLoop)
   // Common tail of a residual evaluation: the held normal-Dirichlet face is imposed, not solved
   // (excluded), remember max|A u| for the convergence scale, return max|r|.
   double finishResidual(int c);
 
-std::function<double()> stencilResidual(int c, bool exchange = false);
 
-// The all-fluid domain-BC smoother's operator (per-axis constant coefficients + the boundary
+  std::function<double()> stencilResidual(int c, bool exchange = false);
+
+
+  // The all-fluid domain-BC smoother's operator (per-axis constant coefficients + the boundary
   // fold). `aniso` selects the per-axis body; the isotropic path runs the legacy kernel literally
   // (doc/anisotropic_metric.md §2, trap 4).
   std::function<double()> constCoeffResidual(int c, double bx, double by, double bz, double Ac);
 
-double stencilBnorm(int c);
 
-void smoothComp(int c);
+  double stencilBnorm(int c);
 
-// pressure ghost at domain faces for the incremental predictor's grad(P): zero-gradient (Neumann)
+
+
+  void smoothComp(int c);
+
+
+  // pressure ghost at domain faces for the incremental predictor's grad(P): zero-gradient (Neumann)
   // at every non-periodic face so grad(P) carries no spurious force there (the periodic fill
   // wrapped the opposite boundary's pressure). Outflow pressure (Dirichlet p=0) is enforced
   // separately in the MG solve.
   void pressureBcGhost();
 
-// domain-BC velocity ghosts: periodic-fill periodic axes, then apply per-face BCs (fold=0
+
+  // domain-BC velocity ghosts: periodic-fill periodic axes, then apply per-face BCs (fold=0
   // explicit/1 implicit).
   void fillVelGhosts(int comp, int fold);
 
-void applyVelocityBcComp(int comp, int fold, bool doOutflow);
 
-// Field-parameterized variants (so the velocity-MG can re-impose the BC on its own level-0
+  void applyVelocityBcComp(int comp, int fold, bool doOutflow);
+
+
+  // Field-parameterized variants (so the velocity-MG can re-impose the BC on its own level-0
   // iterate). `doOutflow = false` is the SIBLING behaviour merged in here (was
   // `fillVelGhostsKeepOutflow`, used ONLY by `bridgeVelocityToVof` and the two call sites below,
   // always with `fold = 0`): it does NOT re-impose the zero-gradient OUTFLOW face — exactly what
@@ -1911,7 +2219,8 @@ void applyVelocityBcComp(int comp, int fold, bool doOutflow);
   // VoF configuration before this rung combined VoF with an outflow face.
   void fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow = true);
 
-// Distributed: a rank applies a face's BC iff its block TOUCHES that global face
+
+  // Distributed: a rank applies a face's BC iff its block TOUCHES that global face
   // (`touchesGlobalFace`, the same rule the scalar path uses in `applyScalarBc`). Without the test
   // every rank imposed the wall on its OWN block faces, so a partition cutting a walled axis split
   // the domain into independent sub-domains — invisible in the velocity (each sub-domain is
@@ -1919,12 +2228,14 @@ void applyVelocityBcComp(int comp, int fold, bool doOutflow);
   // so this is byte-identical there.
   void applyVelocityBcCompTo(CCField f, int comp, int fold, bool doOutflow);
 
-// implicit-diffusion wall fold (CUDA setup_bc_diffusion): dcorr += (wall:+beta tangential /
+
+  // implicit-diffusion wall fold (CUDA setup_bc_diffusion): dcorr += (wall:+beta tangential /
   // outflow:-beta), brhs += 2*beta*wall (tangential Dirichlet); bake dcorr into the per-component
   // stencil diagonal.
   void setupBcDiffusion();
 
-// Incremental (rotational) cut-cell projection: solve A phi = -div_open(u*) (RB-GS,
+
+  // Incremental (rotational) cut-cell projection: solve A phi = -div_open(u*) (RB-GS,
   // mean-removed), u -= grad phi, then accumulate the physical pressure P += (rho/dt)*phi -
   // mu*div(u*) (Timmermans).
   // one mask-aware axis-wise smoothing pass of a cell field (the filtered-rotational S; see
@@ -1932,93 +2243,124 @@ void applyVelocityBcComp(int comp, int fold, bool doOutflow);
   // one solid side -> 1/2(self + open-side neighbour); both solid -> identity.
   void filterCellField(CCField f, int axis);
 
-void project();
 
-// ---- project() stages (QUALITY_PLAN G.1): pure cut-and-paste, each a contiguous
+  void project();
+
+
+  // ---- project() stages (QUALITY_PLAN G.1): pure cut-and-paste, each a contiguous
   // block of the original function sharing only member fields and a CCExec. ----
   void projectAssembleDivergence();
 
-void projectBuildCoefficients();
 
-void projectSolve();
+  void projectBuildCoefficients();
 
-void projectCorrectVelocities();
 
-void projectPressureUpdate();
+  void projectSolve();
 
-void maskVelocity(int c);
 
-// Minimum viscosity over the (global, under MPI) inner cells — the provably-stable rotational
+  void projectCorrectVelocities();
+
+
+  void projectPressureUpdate();
+
+
+  void maskVelocity(int c);
+
+
+  // Minimum viscosity over the (global, under MPI) inner cells — the provably-stable rotational
   // coefficient for variable viscosity (chi*mu_min <= mu(x) everywhere).
   double minMuInner();
 
-double reduceMaxAbsInner(CCConst f);
 
-std::vector<double> gatherInner(CCField fld);
+  double reduceMaxAbsInner(CCConst f);
 
-// Inverse of gatherInner: scatter an x-fastest (nx,ny,nz) inner-region host buffer into the inner
+
+  std::vector<double> gatherInner(CCField fld);
+
+
+  // Inverse of gatherInner: scatter an x-fastest (nx,ny,nz) inner-region host buffer into the inner
   // cells of a ghosted G=2 field (ghost cells untouched — refill via exchangeField/fillGhosts).
   void scatterInner(CCField fld, const std::vector<double>& in);
 
-// --- Named field registry (multiphysics field container) ------------------------------------
+
+
+  // --- Named field registry (multiphysics field container) ------------------------------------
   // Register a new zero-initialised cell-centred field on the G=2 velocity block and return its
   // buffer. Idempotent: re-adding an existing name returns the existing buffer unchanged.
   CCField addField(const std::string& name);
 
-bool hasField(const std::string& name) const;
 
-CCField fieldView(const std::string& name);
+  bool hasField(const std::string& name) const;
 
-std::vector<std::string> fieldNames() const;
 
-// Ghost-exchange a registered field (cross-rank + periodic under MPI; periodic-only single-rank).
+  CCField fieldView(const std::string& name);
+
+
+  std::vector<std::string> fieldNames() const;
+
+
+  // Ghost-exchange a registered field (cross-rank + periodic under MPI; periodic-only single-rank).
   void exchangeField(const std::string& name);
 
-// Add-reduce ("reverse") halo: fold ghost-layer deposits back onto their owner cell (both
+
+  // Add-reduce ("reverse") halo: fold ghost-layer deposits back onto their owner cell (both
   // cross-rank AND periodic self-wrap). This is the coupling primitive for particle->grid
   // deposition (e.g. void fraction / drag reaction) where a particle near a block boundary scatters
   // into ghost cells owned by a neighbour; after this the inner block holds the complete sum.
   // Single-rank non-periodic: a no-op.
   void exchangeFieldAdd(const std::string& name);
 
-// Host round-trip: read a registered field's inner region as an x-fastest (nx,ny,nz) buffer, or
+
+  // Host round-trip: read a registered field's inner region as an x-fastest (nx,ny,nz) buffer, or
   // write one (ghosts left stale until the next exchangeField).
   std::vector<double> getField(const std::string& name);
 
-void setField(const std::string& name, const std::vector<double>& v);
 
-// Padded-block extents + ghost width, so a zero-copy field buffer (size ex*ey*ez, x-fastest) can
+  void setField(const std::string& name, const std::vector<double>& v);
+
+
+  // Padded-block extents + ghost width, so a zero-copy field buffer (size ex*ey*ez, x-fastest) can
   // be reshaped in Python.
   std::array<int, 3> blockShape() const;
 
-int ghostWidth() const;
 
-// Global grid dims (== local dims single-rank). For the CFD-DEM co-decomposition weight field.
+  int ghostWidth() const;
+
+
+  // Global grid dims (== local dims single-rank). For the CFD-DEM co-decomposition weight field.
   std::array<int, 3> globalResolution() const;
 
-// This rank's inner-block origin in GLOBAL cells ({0,0,0} single-rank). The deposit-origin shift
+
+  // This rank's inner-block origin in GLOBAL cells ({0,0,0} single-rank). The deposit-origin shift
   // so particles in global coords land in the local block (gm origin = blockOrigin * h).
   std::array<int, 3> blockOrigin() const;
 
-// --- Scalar transport (advection-diffusion) -------------------------------------------------
+
+
+  // --- Scalar transport (advection-diffusion) -------------------------------------------------
   // Register a transported scalar `name` with constant diffusivity D (grid units). scheme: 0 FOU,
   // 1 Koren TVD (default), 2 SOU. iters = RB-GS sweeps for the implicit diffusion solve. Its field
   // is registered in the directory (get_field/set_field/field_view). Openness (set_solid /
   // set_pressure_geometry) must be established for transport to occur.
   void addScalar(const std::string& name, double D, int scheme, int iters);
 
-bool hasScalar(const std::string& name) const;
 
-// Per-face scalar BC: face 0..5 = -x,+x,-y,+y,-z,+z; type 0 periodic, 1 Neumann zero-flux
+  bool hasScalar(const std::string& name) const;
+
+
+  // Per-face scalar BC: face 0..5 = -x,+x,-y,+y,-z,+z; type 0 periodic, 1 Neumann zero-flux
   // (adiabatic), 2 Dirichlet value. Single-rank / non-decomposed domains (distributed BC deferred).
   void setScalarBc(const std::string& name, int face, int type, double value);
 
-// Advance all registered scalars one dt with the current divergence-free velocity (also called at
+
+  // Advance all registered scalars one dt with the current divergence-free velocity (also called at
   // the end of step()). Exposed so a test can prescribe a velocity and transport a scalar in
   // isolation.
   void advanceScalars();
 
-// --- Geometric VoF: the colour field (rung V2a, WO-J) ---------------------------------------
+
+
+  // --- Geometric VoF: the colour field (rung V2a, WO-J) ---------------------------------------
   //
   // WHAT THIS RUNG IS. One phase, transported by geometric (PLIC + Weymouth-Yue) VoF, drives the
   // fluid properties through the ORDINARY property closures, and the existing variable-density
@@ -2069,49 +2411,63 @@ bool hasScalar(const std::string& name) const;
 
   void enableVof();
 
-/// WO-R2 item 4 — the wisp threshold on the advector's mixed-cell predicate and on the
+
+  /// WO-R2 item 4 — the wisp threshold on the advector's mixed-cell predicate and on the
   /// interface Courant band. Default 1e-8 once VoF is enabled; 0 restores the V1 predicate bit
   /// for bit. See `vof::wyIsMixed(c, eps)` and `vof::wyColourJump`.
   void setVofWispEps(double eps);
 
-double vofWispEps() const;
 
-/// The value `enableVof` starts from. A standalone `WyAdvector` that a test compares the solver
+  double vofWispEps() const;
+
+
+  /// The value `enableVof` starts from. A standalone `WyAdvector` that a test compares the solver
   /// against must be given the SAME value; `set_vof_wisp_eps(0)` is the "V1 verbatim" ablation.
   static constexpr double defaultVofWispEps();
 
-bool vofEnabled() const;
 
-// Initial / prescribed colour field on the inner cells (flat x-fastest, nx*ny*nz), C in [0,1]:
+  bool vofEnabled() const;
+
+
+  // Initial / prescribed colour field on the inner cells (flat x-fastest, nx*ny*nz), C in [0,1]:
   // the LIQUID fraction of the cell. Enables VoF if it is not on yet. Ghosts are refreshed here so
   // a closure applied before the first step already sees a consistent field.
   void setVof(const std::vector<double>& c);
 
-std::vector<double> getVof();
 
-// Local (this rank's) colour census: sum / min / max / mixed-cell count / wisp count.
+  std::vector<double> getVof();
+
+
+  // Local (this rank's) colour census: sum / min / max / mixed-cell count / wisp count.
   vof::WyAdvector::Diagnostics vofDiagnostics();
 
-// sum of the canonical colour field "C" over SOLID cells of this rank (0 by construction).
+
+  // sum of the canonical colour field "C" over SOLID cells of this rank (0 by construction).
   double vofSolidColourSum();
 
-// Interface-local Courant number max|uf|*dt/h over the faces of mixed cells and their face
+
+  // Interface-local Courant number max|uf|*dt/h over the faces of mixed cells and their face
   // neighbours, with the CURRENT velocity and dt (an all-reduce max under MPI). This is the number
   // the WY boundedness bound applies to — NOT the global max, which over-throttles badly (V1
   // measured 0.314 in a quiescent Zalesak corner against 0.157 at the interface). Use it to pick
   // dt: `dt_new = dt * cfl_target / vof_max_courant()`.
   double vofMaxCourant();
 
-// The interface-local Courant number of the step just taken (0 before the first step).
+
+  // The interface-local Courant number of the step just taken (0 before the first step).
   double vofLastCourant() const;
 
-// Weymouth-Yue boundedness cap (default 0.25, the PROVEN 3D bound 1/(2(N-1)); 0.5 is the 2D
+
+  // Weymouth-Yue boundedness cap (default 0.25, the PROVEN 3D bound 1/(2(N-1)); 0.5 is the 2D
   // value). `step()` throws when the interface-local Courant number exceeds it.
   void setVofCflLimit(double v);
 
-double vofCflLimit() const;
 
-// --- rung V5a (WO-Q): VoF transport through an immersed solid ---------------------------------
+  double vofCflLimit() const;
+
+
+
+  // --- rung V5a (WO-Q): VoF transport through an immersed solid ---------------------------------
   //
   // The colour advection is openness-weighted (`vof/cutcell.hpp`): the geometric flux of every face
   // is multiplied by the face openness `o_f`, the update is done in FLUID-VOLUME units
@@ -2128,18 +2484,22 @@ double vofCflLimit() const;
   // `vof_diagnostics().clipped_volume` is the tripwire.
   void requireVofGeometry(const char* who);
 
-// Does the colour advection run the cut-cell (openness-weighted) kernels?
+
+  // Does the colour advection run the cut-cell (openness-weighted) kernels?
   bool vofHasGeometry() const;
 
-// Ablation: drop Weymouth's admissible-interval clamp on the openness-weighted flux
+
+  // Ablation: drop Weymouth's admissible-interval clamp on the openness-weighted flux
   // (`vof/cutcell.hpp` vofCutFluxClamp). ON by default — the measurement that put it there is in
   // that header. With it off the [0,1] clip becomes the mechanism instead of a tripwire and the
   // conserved functional drifts.
   void setVofCutFluxClamp(bool on);
 
-bool vofCutFluxClamp() const;
 
-// What the CANONICAL "C" field carries in SOLID cells (the working block always carries the
+  bool vofCutFluxClamp() const;
+
+
+  // What the CANONICAL "C" field carries in SOLID cells (the working block always carries the
   // neutral band fill, which is what the MYC / height-function stencils need):
   //   true  (default) 0 — "no colour in the solid", the WO-Q gate. The closures then see gas
   //                   density there and the CSF sees a full colour jump across a wall face.
@@ -2147,20 +2507,24 @@ bool vofCutFluxClamp() const;
   // Measured on the G5 cap (D/dx = 24, sigma = 1, mu = 0.05): see the WO-Q findings entry.
   void setVofSolidColourZero(bool on);
 
-bool vofSolidColourZero() const;
 
-// The colour field INCLUDING the neutral solid-band fill, on the inner region — i.e. what the
+  bool vofSolidColourZero() const;
+
+
+  // The colour field INCLUDING the neutral solid-band fill, on the inner region — i.e. what the
   // MYC / height-function stencils actually read, as opposed to the canonical "C" (0 in solid).
   // The fill is regenerated here, so this is also the direct gate on its decomposition
   // independence: it must be pointwise BITWISE across np (`tests/kokkos_mpi/test_vof_cutcell_mpi`).
   std::vector<double> getVofFilledColour();
 
-// The cut-cell geometry the colour block runs on, on the inner region: 0 = the cell fluid
+
+  // The cut-cell geometry the colour block runs on, on the inner region: 0 = the cell fluid
   // fraction eps, 1/2/3 = the openness of the +x/+y/+z face of each cell (the ADVECTOR's high-face
   // convention), 4 = the cell classification (1 = solid). All must be bitwise across np.
   std::vector<double> getVofGeometry(int which);
 
-// --- rung V5b (WO-S): static contact angle on SDF solids --------------------------------------
+
+  // --- rung V5b (WO-S): static contact angle on SDF solids --------------------------------------
   //
   // The band fill of rung V5a is a stencil device: it decides what the MYC 3^3 stencil and the V3
   // height-function columns of a near-wall cell see INSIDE the solid, and WO-Q's neutral (mean of
@@ -2176,28 +2540,36 @@ bool vofSolidColourZero() const;
   // with no call the neutral fill runs and every V5a number is byte-identical.
   void setContactAngle(double thetaDeg);
 
-// ISSUES sweep item 3: `set_contact_angle` used to be a silent no-op whenever there was nothing
+
+  // ISSUES sweep item 3: `set_contact_angle` used to be a silent no-op whenever there was nothing
   // for it to bind to -- the theta field simply was never consulted, and
   // `contact_angle_diagnostics()['contact_cells']` reading 0 was the only tell. Say so instead.
   void requireWettingWall() const;
 
-// Per-cell contact angle in DEGREES on the inner region (flat x-fastest, nx*ny*nz). Only the
+
+  // Per-cell contact angle in DEGREES on the inner region (flat x-fastest, nx*ny*nz). Only the
   // value at the SOLID band cell being filled is read, so cells away from a wall are irrelevant.
   void setContactAngleField(const std::vector<double>& thetaDeg);
 
-bool contactAngleSet() const;
 
-double contactAngle() const;
+  bool contactAngleSet() const;
 
-// Which anchor the theta-plane uses (`vof::VofWettingPivot`): 0 volume-consistent (DEFAULT,
+
+  double contactAngle() const;
+
+
+  // Which anchor the theta-plane uses (`vof::VofWettingPivot`): 0 volume-consistent (DEFAULT,
   // idempotent), 1 the PLIC centroid p_f (Afkhami-Bussmann), 2 the work order's
   // `c = p_f - sdf(p_f) n_w` (NOT idempotent — measured to be off by 0.26 in cell fraction at
   // theta = 60, gate G0), 3 the contact line on the wall. Ablation only.
   void setContactAnglePivot(int mode);
 
-int contactAnglePivot() const;
 
-// --- rung V6 (WO-V6): the DYNAMIC contact angle and hysteresis --------------------------------
+  int contactAnglePivot() const;
+
+
+
+  // --- rung V6 (WO-V6): the DYNAMIC contact angle and hysteresis --------------------------------
   //
   // Nothing in the V5b fill changes; only the VALUE of theta per contact cell does. See
   // `vof/wetting_dynamic.hpp` for the model (Afkhami, Zaleski & Bussmann, JCP 228:5370 (2009)):
@@ -2217,49 +2589,62 @@ int contactAnglePivot() const;
   void setContactAngleDynamic(double thetaEDeg, double slipCells, double muLiquid,
                               double sigma = 0.0);
 
-/// WO-V6b -- the VELOCITY half of the dynamic contact line. Replaces the TANGENTIAL no-slip
+
+  /// WO-V6b -- the VELOCITY half of the dynamic contact line. Replaces the TANGENTIAL no-slip
   /// Dirichlet datum of the Robust-Scaled cut-cell closure by the Navier condition
   /// `u_t(wall) = lambda du_t/dn`; the wall-NORMAL component stays impermeable (the moving-body
   /// datum if any). `lambdaCells` is lambda/Delta; 0 restores the validated no-slip closure
   /// bit-identically. Shares its value with set_contact_angle_dynamic's cut-off.
   void setWallSlipLength(double lambdaCells);
 
-/// The Navier slip length in the caller's units (0 = no-slip).
+
+  /// The Navier slip length in the caller's units (0 = no-slip).
   double wallSlipLength() const;
 
-/// Cut-cell axes at which a one-cell fluid gap kept the no-slip closure (per component).
+
+  /// Cut-cell axes at which a one-cell fluid gap kept the no-slip closure (per component).
   std::array<int, 3> wallSlipSandwichCells() const;
 
-// theta_a / theta_r, degrees. Composes with the dynamic correction when that is also set: the
+
+  // theta_a / theta_r, degrees. Composes with the dynamic correction when that is also set: the
   // hysteresis selector picks the BASE angle and Cox-Voinov corrects it, except on the PINNED
   // branch (theta_r <= theta_app <= theta_a), where the apparent angle itself is imposed and the
   // idempotence of the V5b fill (WO-S finding 1) is what makes the contact line stand still.
   void setContactAngleHysteresis(double thetaADeg, double thetaRDeg);
 
-// Back to the static V5b angle, byte-identically (the driver's views are kept but never read).
+
+  // Back to the static V5b angle, byte-identically (the driver's views are kept but never read).
   void setContactAngleDynamicOff();
 
-bool contactAngleDynamic() const;
 
-bool contactAngleHysteresis() const;
+  bool contactAngleDynamic() const;
 
-double contactAngleSlip() const;
 
-// ABLATION: the 3-point in-wall mean of U_cl (default ON). Off = the raw per-cell MAC velocity.
+  bool contactAngleHysteresis() const;
+
+
+  double contactAngleSlip() const;
+
+
+  // ABLATION: the 3-point in-wall mean of U_cl (default ON). Off = the raw per-cell MAC velocity.
   void setContactAngleSmoothing(bool on);
 
-// The angle clamp of the Cox-Voinov cube, degrees (default 1 / 179).
+
+  // The angle clamp of the Cox-Voinov cube, degrees (default 1 / 179).
   void setContactAngleClamp(double loDeg, double hiDeg);
 
-// The sigma the dynamic correction uses: the explicit override if one was given, else the CSF's.
+
+  // The sigma the dynamic correction uses: the explicit override if one was given, else the CSF's.
   double effectiveContactSigma() const;
 
-// The per-cell dynamic-wetting state on the inner region: 0 the IMPOSED angle (degrees),
+
+  // The per-cell dynamic-wetting state on the inner region: 0 the IMPOSED angle (degrees),
   // 1 the measured APPARENT angle (degrees), 2 the smoothed U_cl, 3 Ca_cl, 4 the
   // `vof::VofDynamicState`. Non-contact cells read 0 in 1..4 and the static base in 0.
   std::vector<double> getVofDynamicField(int which);
 
-struct ContactAngleDiagnostics {
+
+  struct ContactAngleDiagnostics {
     long contactCells = 0;    ///< band cells written by the theta plane of their own anchor
     long neighbourCells = 0;  ///< band cells written by the mean of the anchor's MIXED neighbours
     long pureCells = 0;       ///< band cells that took the pure-phase continuation
@@ -2283,23 +2668,28 @@ struct ContactAngleDiagnostics {
   // measurement, evaluated on the fill's own data rather than on a post-processed shape).
   ContactAngleDiagnostics contactAngleDiagnostics();
 
-// Wire the theta field + the wall SDF onto the colour block. Idempotent; called by the setters
+
+  // Wire the theta field + the wall SDF onto the colour block. Idempotent; called by the setters
   // and again by every geometry rebuild (`buildVofGeometry`), since the block can be re-sized.
   void applyContactAngle();
 
-// Cell-centre velocity on the colour block, for the V6 contact-line speed. Built from the
+
+  // Cell-centre velocity on the colour block, for the V6 contact-line speed. Built from the
   // solver's own staggered faces (`0.5*(u(i) + u(i+s_c))`, both valid after `fillVelGhosts`) on
   // the INNER region and then run through the colour field's ghost policy, exactly as the wall SDF
   // and the fluid-only normals are — that is what keeps the imposed angle decomposition-
   // independent (WO-S finding 9 applied to a third field).
   void buildVofCellVelocity();
 
-// The colour advector itself (its g=3 block, geometry views and planes). For TESTS: gate G3 of
+
+
+  // The colour advector itself (its g=3 block, geometry views and planes). For TESTS: gate G3 of
   // `tests/kokkos/test_vof_cutcell.cpp` rebuilds the openness/fraction by an independent route and
   // compares against these.
   const vof::WyAdvector& vofAdvector() const;
 
-// The sweep permutation index of the NEXT colour advection (`kWySweepPerm[n % 6]`). Exposed so a
+
+  // The sweep permutation index of the NEXT colour advection (`kWySweepPerm[n % 6]`). Exposed so a
   // benchmark can hold the permutation fixed, or resume one, across a restart.
   // The sweep permutation is `kWySweepPerm[n % 6]`, so this counter is STATE: a run resumed with
   // it reset takes a different sweep order and its colour differs at the splitting error (measured
@@ -2308,9 +2698,12 @@ struct ContactAngleDiagnostics {
   // every marker — so a restart has to set both, and this is the one call that does it.
   void setVofStepParity(long n);
 
-long vofStepParity() const;
 
-// KINEMATIC colour advection: advance C ONCE with the solver's CURRENT face velocity and the
+  long vofStepParity() const;
+
+
+
+  // KINEMATIC colour advection: advance C ONCE with the solver's CURRENT face velocity and the
   // given dt, with no Navier-Stokes step at all. This is the entry point the advection benchmarks
   // (Zalesak, LeVeque) and the cut-cell conservation gates use — a frozen Stokes field advecting a
   // colour slab is a pure statement about the advection scheme, with the momentum solve and the
@@ -2325,7 +2718,8 @@ long vofStepParity() const;
   /// `dt` is in the caller's time unit.
   void advectVofKinematic(double dtPhysArg);
 
-// --- Part III rung W0 (WO-W0): the per-bubble VoF BLOCK container -----------------------------
+
+  // --- Part III rung W0 (WO-W0): the per-bubble VoF BLOCK container -----------------------------
   //
   // A THIRD container over the same L1 kernels (`suite/docs/VOF_PLAN.md` §10, the TBFsolver
   // `vofBlock` pattern): one bubble = one `WyAdvector` on a small moving global index box with a
@@ -2343,18 +2737,23 @@ long vofStepParity() const;
   // spheres given in CELL units.
   void enableVofBlocks(const std::vector<std::array<double, 4>>& seeds);
 
-// Everything `enable_vof_blocks` does EXCEPT the seeding, so the sphere seeds and the
+
+  // Everything `enable_vof_blocks` does EXCEPT the seeding, so the sphere seeds and the
   // general (`enable_vof_blocks_from_field`) seeds share one code path.
   void prepareVofBlocks();
 
-// The union the closures see, plus the rung-W1 master assignment on the seeded boxes.
+
+  // The union the closures see, plus the rung-W1 master assignment on the seeded boxes.
   void finishVofBlocks();
 
-bool vofBlocksEnabled() const;
 
-void disableVofBlocks();
+  bool vofBlocksEnabled() const;
 
-// Kinematic block advection with the CURRENT (projected) face velocity — the block twin of
+
+  void disableVofBlocks();
+
+
+  // Kinematic block advection with the CURRENT (projected) face velocity — the block twin of
   // `advect_vof`. Same precondition: Weymouth-Yue conservation is conditional on the face field
   // being discretely divergence-free, so a field that is not is refused rather than silently
   // reported as a conservation defect.
@@ -2368,18 +2767,23 @@ void disableVofBlocks();
   /// `dt` is in the caller's time unit.
   void advectVofBlocks(double dtPhysArg, bool requireSolenoidal = true);
 
-// Per-bubble Lagrangian census. Only this rank's MASTER blocks carry numbers (volume, centroid,
+
+  // Per-bubble Lagrangian census. Only this rank's MASTER blocks carry numbers (volume, centroid,
   // centroid velocity, the central second moments); the box and the master are replicated.
   std::vector<vof::VofBlockStats> vofBlockStats() const;
 
-// max/mean of the per-rank block-cell load under the CURRENT master assignment (round robin at
+
+  // max/mean of the per-rank block-cell load under the CURRENT master assignment (round robin at
   // W0; the weighted-ORB assignment is W1 and these are the numbers to beat). 1.0 = perfect.
   double vofBlockImbalance() const;
 
-// Blocks mastered by each rank, and the inner cells those blocks carry.
+
+  // Blocks mastered by each rank, and the inner cells those blocks carry.
   void vofBlockCensus(std::vector<long>& masters, std::vector<long>& cells) const;
 
-// --- Part III rung W1 (WO-W12) ----------------------------------------------------------------
+
+
+  // --- Part III rung W1 (WO-W12) ----------------------------------------------------------------
   //
   // (a) Master assignment. `mode` 0 = round robin (W0), 1 = LPT greedy on the block cell counts,
   //     2 = weighted ORB over a 1-D block space (core's `BlockDecomposer<1>`). `every` re-runs the
@@ -2387,20 +2791,27 @@ void disableVofBlocks();
   //     master (nothing else in a block is state). Applied immediately.
   void setVofBlockAssign(int mode, long every);
 
-int vofBlockAssign() const;
 
-// The imbalance the CURRENT `assignMode` would give without applying it — so a study can put the
+  int vofBlockAssign() const;
+
+
+  // The imbalance the CURRENT `assignMode` would give without applying it — so a study can put the
   // three modes side by side on one swarm without perturbing the run.
   double vofBlockImbalanceOf(int mode) const;
 
-// (b)/(c) instrumentation: device-resident packing on/off, and the block-pool hit census.
+
+  // (b)/(c) instrumentation: device-resident packing on/off, and the block-pool hit census.
   void setVofBlockDeviceStaging(bool on);
 
-void setVofBlockPool(bool on);
 
-std::array<long, 2> vofBlockPoolStats() const;
+  void setVofBlockPool(bool on);
 
-// General seeding (rung W1): one block per given GLOBAL index box, with the colour taken from
+
+  std::array<long, 2> vofBlockPoolStats() const;
+
+
+
+  // General seeding (rung W1): one block per given GLOBAL index box, with the colour taken from
   // the field `set_vof` installed. A sphere seed is a convenience over this; a Hysing bubble, a
   // quasi-2-D cylinder or any scanned marker enters here. The boxes are the BUBBLE extents (the
   // container grows them by the 3-cell margin itself) and must not overlap in a way that makes a
@@ -2408,36 +2819,46 @@ std::array<long, 2> vofBlockPoolStats() const;
   // two boxes would be given to both markers.
   void enableVofBlocksFromField(const std::vector<std::array<int, 6>>& boxes);
 
-// --- rung W3: checkpoint / restart of the block container ------------------------------------
+
+
+  // --- rung W3: checkpoint / restart of the block container ------------------------------------
   //
   // The block's own inner colour is a block's ONLY state, so {box, colour} per block is a complete
   // checkpoint -- and unlike `enableVofBlocksFromField` it is exact when two markers touch (the
   // seeding gather out of the UNION would give each a slice of the other; WO-W12 open item 5).
   std::vector<double> vofBlockColour(long id);
 
-void enableVofBlocksFromColours(const std::vector<std::array<int, 6>>& boxes,
+
+  void enableVofBlocksFromColours(const std::vector<std::array<int, 6>>& boxes,
                                   const std::vector<std::vector<double>>& colours);
 
-// --- rung W2: the block CSF ------------------------------------------------------------------
+
+
+  // --- rung W2: the block CSF ------------------------------------------------------------------
   //
   // Turn the surface tension of `set_surface_tension` into a PER-BLOCK force: each marker runs its
   // own curvature cascade on its own box and forms the V4 balanced-force face force there, and the
   // three face fields are summed into the local patch (UNPACK_SUM). Requires the block container.
   void enableVofBlockCsf();
 
-// Per-block curvature + CSF face force, scattered SUM into the registered face-force fields the
+
+  // Per-block curvature + CSF face force, scattered SUM into the registered face-force fields the
   // RHS reads. Called at the head of every step by `updateVofCurvature()`.
   void computeVofBlockCsf();
 
-// DIAGNOSTIC: the scattered block CSF face force on this rank's inner cells, component c (the
+
+  // DIAGNOSTIC: the scattered block CSF face force on this rank's inner cells, component c (the
   // low face of each cell, the same convention `addCsfRhs` uses). This is the field the block mode
   // adds to the RHS; comparing it across decompositions is how a scatter defect is localised.
   std::vector<double> getVofBlockForce(int c);
 
-// The summed branch census of the last block CSF (LOCAL to this rank).
+
+  // The summed branch census of the last block CSF (LOCAL to this rank).
   vof::VofCurvature::Stats vofBlockCurvatureStats() const;
 
-// Harmonic instead of arithmetic rho_f in the pressure projection (WO-J item 5). DEFAULT OFF and
+
+
+  // Harmonic instead of arithmetic rho_f in the pressure projection (WO-J item 5). DEFAULT OFF and
   // it should stay off — read the long note in mac_pressure.hpp before turning it on: arithmetic
   // rho_f IS the harmonic mean of the mobility 1/rho (the series-correct choice for a normal flux)
   // and is what makes the discrete hydrostatic balance exact, because the momentum time term and
@@ -2445,25 +2866,31 @@ void enableVofBlocksFromColours(const std::vector<std::array<int, 6>>& boxes,
   // as a measured knob for the coefficient-coarsening question, not as an alternative scheme.
   void setRhoFaceHarmonic(bool on);
 
-/// WO-R2 item 3 — the exact (matrix-free, double, flux-form) level-0 operator apply in the
+
+  /// WO-R2 item 3 — the exact (matrix-free, double, flux-form) level-0 operator apply in the
   /// residual and the Krylov matvec. Per solver; `enableVof` turns it on, and this is the
   /// ablation switch.
   void setPressureExactResidual(bool on);
 
-/// WO-R2 item 1 ABLATION: `set_outflow_operator_coefficient(False)` restores the pre-WO-R2
+
+  /// WO-R2 item 1 ABLATION: `set_outflow_operator_coefficient(False)` restores the pre-WO-R2
   /// operator, whose Dirichlet domain-face rows carried the literal openness 1.0 instead of the
   /// variable-density coefficient `open_f*rho0/rho_f`. It exists so the before/after of the
   /// Nusselt film and the outflow divergence stays measurable; there is no reason to set it in
   /// production. ON by default.
   void setOutflowOperatorCoefficient(bool on);
 
-bool outflowOperatorCoefficient() const;
 
-bool pressureExactResidual() const;
+  bool outflowOperatorCoefficient() const;
 
-bool rhoFaceHarmonic() const;
 
-// WO-R item 4 asked for the `1/rho_f` factor on the high-side outflow correction;
+  bool pressureExactResidual() const;
+
+
+  bool rhoFaceHarmonic() const;
+
+
+  // WO-R item 4 asked for the `1/rho_f` factor on the high-side outflow correction;
   // `doc/variable_density_projection.md` §4 listed its absence as a defect. WO-R measured the
   // factor making the outflow divergence SEVEN ORDERS WORSE and recorded the item as refuted —
   // correctly, for the operator as it then was. WO-R2 item 1 fixed that operator
@@ -2485,9 +2912,12 @@ bool rhoFaceHarmonic() const;
   // constant density either way (rho_f == rho0 makes the factor exactly 1), and gated on varRho.
   void setOutflowRhoCorrection(bool on);
 
-bool outflowRhoCorrection() const;
 
-// --- two-phase open boundaries (rung V-BC, WO-R) ---------------------------------------------
+  bool outflowRhoCorrection() const;
+
+
+
+  // --- two-phase open boundaries (rung V-BC, WO-R) ---------------------------------------------
   //
   // Rung V2a gave the colour field one non-periodic ghost rule, `clampFill` (globally-clamped
   // zero-gradient). It is the right rule for a WALL and the wrong one for an INFLOW, where the
@@ -2514,32 +2944,40 @@ bool outflowRhoCorrection() const;
   /// The face must already be an inflow (`set_domain_bc(f, 2, ...)`).
   void setVofInflow(int f, double value);
 
-/// Per-position inflow colour on face `f`: `prof` is (nb, nc) on the INNER grid of the face's two
+
+  /// Per-position inflow colour on face `f`: `prof` is (nb, nc) on the INNER grid of the face's two
   /// perpendicular axes (the same layout and the same clamp resampling `set_domain_bc_profile`
   /// uses for the velocity).
   void setVofInflowProfile(int f, const std::vector<double>& prof, int nb, int nc);
 
-/// `inletOutlet` backflow colour on outflow face `f` (default 0 = gas): where the boundary face
+
+  /// `inletOutlet` backflow colour on outflow face `f` (default 0 = gas): where the boundary face
   /// velocity points back INTO the domain, the colour ghost carries this value instead of the
   /// zero-gradient copy (Rusche 2002 thesis section 4; OpenFOAM `inletOutletFvPatchField`). Where
   /// the fluid leaves, zero-gradient is kept and what leaves is what is inside.
   void setVofBackflow(int f, double value);
 
-bool vofBcActive() const;
 
-/// Signed liquid volume that crossed each of the six domain faces during the LAST colour
+  bool vofBcActive() const;
+
+
+  /// Signed liquid volume that crossed each of the six domain faces during the LAST colour
   /// advection, in cell-volume units, POSITIVE for liquid entering the domain. Local to this rank
   /// (a distributed caller sums them, as it does for every other VoF diagnostic).
   std::vector<double> vofBcVolumes() const;
 
-/// The same, accumulated since `enable_vof()` (or the last `resetVofBcVolumes()`). Changing a
+
+  /// The same, accumulated since `enable_vof()` (or the last `resetVofBcVolumes()`). Changing a
   /// boundary colour mid-run deliberately does NOT reset it — a slug injection is exactly the case
   /// where the running total is the quantity of interest.
   std::vector<double> vofBcVolumesTotal() const;
 
-void resetVofBcVolumes();
 
-// nvcc requires the enclosing member of an extended device lambda to be public; these are
+  void resetVofBcVolumes();
+
+
+
+  // nvcc requires the enclosing member of an extended device lambda to be public; these are
   // implementation detail (see the same note above `patchScalarDirichletFace`).
 
   /// The colour field's boundary rules, applied at the END of `vofFillGhosts` — i.e. after the
@@ -2557,7 +2995,9 @@ void resetVofBcVolumes();
   ///    the inflow colour differs from the colour of the fluid already at the boundary.)
   void vofApplyColourBc(CCField f);
 
-/// WO-R item 5 — the Neumann property policy at an inflow face.
+
+
+  /// WO-R item 5 — the Neumann property policy at an inflow face.
   ///
   /// `fillPropGhosts` copies the inner cell's value into the ghost. At a liquid inlet next to a gas
   /// interior that makes the inlet FACE density (the arithmetic mean of inner and ghost, used by
@@ -2575,29 +3015,39 @@ void resetVofBcVolumes();
   /// C to derive it from and inventing one would be a silent model.
   void vofBcPropGhosts(CCField f);
 
-/// (Re)build everything that lives on the g=3 block for this rung: the out-of-domain mask and the
+
+
+  /// (Re)build everything that lives on the g=3 block for this rung: the out-of-domain mask and the
   /// resampled boundary-colour profiles. Called from `buildVofBlock` (so a redistribute/initMpi
   /// re-derives them) and from `vofBcArm` (so a setter takes effect immediately).
   void vofRebuildBcBlock();
 
-/// Clamp-resample a per-position face scalar from the user's (nb, nc) INNER grid onto the
+
+
+  /// Clamp-resample a per-position face scalar from the user's (nb, nc) INNER grid onto the
   /// ghost-inclusive (b, c) plane of an extended block, so the fill kernel indexes it directly by
   /// face position. Same rule as `setDomainBcProfile`, one component instead of three.
   CCField resampleFaceScalar(const std::vector<double>& prof, int nb, int nc, int face, C3 ext,
                              int g, int& outNc);
 
-/// A VoF boundary colour is only meaningful on a face that already carries the matching domain
+
+
+  /// A VoF boundary colour is only meaningful on a face that already carries the matching domain
   /// BC, and getting that wrong is silent (the ghost band would be written and then never read as
   /// boundary data). Fail loudly instead.
   void checkVofBcFace(int f, int wantType, const char* who);
 
-/// Arm the rung: install the mask, rebuild the profiles, and zero the boundary volume ledger.
+
+  /// Arm the rung: install the mask, rebuild the profiles, and zero the boundary volume ledger.
   void vofBcArm();
 
-/// Move the advector's per-face boundary volume ledger into the solver's, once per advection.
+
+  /// Move the advector's per-face boundary volume ledger into the solver's, once per advection.
   void vofHarvestBcVolumes();
 
-// --- interface curvature (rung V3, WO-O) -----------------------------------------------------
+
+
+  // --- interface curvature (rung V3, WO-O) -----------------------------------------------------
   //
   // `compute_vof_curvature()` fills two registered G=2 cell fields from the CURRENT colour field:
   //
@@ -2617,30 +3067,39 @@ void resetVofBcVolumes();
   // `vof/curvature.hpp` for the cascade, its literature anchors and its measured branch shares.
   void computeVofCurvature();
 
-// The branch census of the last `computeVofCurvature()` — LOCAL to this rank (the driver is
+
+  // The branch census of the last `computeVofCurvature()` — LOCAL to this rank (the driver is
   // MPI-free; a distributed caller sums them).
   vof::VofCurvature::Stats vofCurvatureStats() const;
 
-/// The interface curvature kappa = 2H in the caller's units, i.e. 1/LENGTH (the internal field
+
+  /// The interface curvature kappa = 2H in the caller's units, i.e. 1/LENGTH (the internal field
   /// is 1/h; kappa_phys = kappa'/hRef).
   std::vector<double> getVofCurvature();
 
-std::vector<double> getVofCurvatureBranch();
 
-// Wendland support width of the PV fallback fit, in cell units (Han et al.: 2.5 with a 5^3
+  std::vector<double> getVofCurvatureBranch();
+
+
+  // Wendland support width of the PV fallback fit, in cell units (Han et al.: 2.5 with a 5^3
   // stencil; 3.5 recovers first-order spurious-current convergence on a translating droplet and
   // 4.5 over-smooths and destroys it). Exposed for WO-P's sweep.
   void setVofCurvatureWeightWidth(double d);
 
-double vofCurvatureWeightWidth() const;
 
-// Tier 2b, the mixed height-position fit. OFF by default and it should stay off — see
+  double vofCurvatureWeightWidth() const;
+
+
+  // Tier 2b, the mixed height-position fit. OFF by default and it should stay off — see
   // `vof::VofCurvature::useMixedHeightFit` for the measurement that put it there.
   void setVofCurvatureMixedHeightFit(bool on);
 
-bool vofCurvatureMixedHeightFit() const;
 
-// --- balanced-force surface tension (rung V4, WO-P) -------------------------------------------
+  bool vofCurvatureMixedHeightFit() const;
+
+
+
+  // --- balanced-force surface tension (rung V4, WO-P) -------------------------------------------
   //
   // `set_surface_tension(sigma)` turns on the continuum surface force
   //
@@ -2673,46 +3132,59 @@ bool vofCurvatureMixedHeightFit() const;
   // at the head, from the SAME colour field the density closure sees.
   void setSurfaceTension(double sigma);
 
-/// The surface tension in the caller's units (what set_surface_tension was given).
+
+  /// The surface tension in the caller's units (what set_surface_tension was given).
   double surfaceTension() const;
 
-// The wisp threshold above, exposed so it can be swept/ablated. Default 1e-8; 0 restores the
+
+  // The wisp threshold above, exposed so it can be swept/ablated. Default 1e-8; 0 restores the
   // unguarded V3 predicate and, with surface tension on, reproduces the instability it exists for.
   void setVofInterfaceEps(double eps);
 
-double vofInterfaceEps() const;
 
-// ABLATION: 0 = the balanced-force face difference (default, the only production mode);
+  double vofInterfaceEps() const;
+
+
+  // ABLATION: 0 = the balanced-force face difference (default, the only production mode);
   // 1 = a cell-centred sigma*kappa*grad(C) face-interpolated like an ordinary body force. See
   // `addCsfRhsCellInterp`. Kept so the ctest can measure what the operator pairing is worth.
   void setCsfMode(int m);
 
-int csfMode() const;
 
-// Rung W2: the CSF may be formed on the BLOCKS instead of the global colour+kappa fields, in
+  int csfMode() const;
+
+
+  // Rung W2: the CSF may be formed on the BLOCKS instead of the global colour+kappa fields, in
   // which case there is no `kappaField_` at all. `vofBlockCsf()` is false whenever the block
   // container is absent (`vofBlocks_` is null unless `enable_vof_blocks` ran), so the expression
   // below reduces to W0's character for character on every non-block path.
   bool vofBlockCsf() const;
 
-bool csfActive() const;
 
-// INSTRUMENT (not a configuration): stop recomputing the curvature at the head of each step and
+  bool csfActive() const;
+
+
+
+  // INSTRUMENT (not a configuration): stop recomputing the curvature at the head of each step and
   // use whatever is in the "kappa" / "kappa_branch" fields. Together with `set_vof_kappa_constant`
   // this isolates the BALANCED-FORCE identity from the curvature estimator — the exactness gate of
   // this rung, which must hold at machine zero for a curvature that is merely constant, whether or
   // not it is the right one.
   void setVofKappaFrozen(bool on);
 
-bool vofKappaFrozen() const;
 
-// INSTRUMENT: set kappa to a constant over the WHOLE block (inner + ghosts) and mark every cell's
+  bool vofKappaFrozen() const;
+
+
+  // INSTRUMENT: set kappa to a constant over the WHOLE block (inner + ghosts) and mark every cell's
   // branch as a valid estimate, then freeze it. The force (1) is then exactly the discrete gradient
   // of `sigma*kappa*C`, so the projection must annihilate it to round-off from ANY colour field.
   /// `kappa` is a PHYSICAL curvature, 1/length (the internal field is 1/h; see vof_curvature()).
   void setVofKappaConstant(double kappa);
 
-// The Brackbill (1992) / Denner & van Wachem (2015) capillary time-step limit
+
+
+  // The Brackbill (1992) / Denner & van Wachem (2015) capillary time-step limit
   // `sqrt((rho_1 + rho_2) h^3 / (4 pi sigma))`. +inf when surface tension is off.
   //
   // The density SUM is taken from the declared phase pair when momentum consistency is on
@@ -2729,18 +3201,23 @@ bool vofKappaFrozen() const;
   /// sigma' = sigma*tRef^2/(rhoRef*hRef^3) gives exactly sqrt((rho1+rho2)hRef^3/(4 pi sigma))/tRef.
   double capillaryDt();
 
-/// The same limit in the solver's index time (per tRef) — what the step's own guards compare to.
+
+  /// The same limit in the solver's index time (per tRef) — what the step's own guards compare to.
   double capillaryDtInternal();
 
-// Safety factor on the capillary limit: `step()` throws when `dt > factor * capillaryDt()`.
+
+  // Safety factor on the capillary limit: `step()` throws when `dt > factor * capillaryDt()`.
   // Default 1.0 — Denner & van Wachem measured the Brackbill prefactor to BE the stability
   // boundary, so there is no margin built into the formula itself. Set it huge to disable the
   // check, exactly as `set_vof_cfl_limit` is the escape hatch for the Weymouth-Yue cap.
   void setCapillaryCfl(double f);
 
-double capillaryCfl() const;
 
-// Both explicit two-phase step limits at the CURRENT state, and which one binds. This is the
+  double capillaryCfl() const;
+
+
+
+  // Both explicit two-phase step limits at the CURRENT state, and which one binds. This is the
   // number WO-P asks for: at pore-scale capillary numbers the capillary dt, not the Weymouth-Yue
   // CFL, is expected to be the binding constraint, and that decides whether implicit surface
   // tension is ever worth revisiting.
@@ -2754,11 +3231,13 @@ double capillaryCfl() const;
   /// Both limits at the current state, in the CALLER's time unit (`courant` is dimensionless).
   VofStepLimits vofStepLimits();
 
-// rho_1 + rho_2 for the capillary limit. Public because nvcc refuses an extended
+
+  // rho_1 + rho_2 for the capillary limit. Public because nvcc refuses an extended
   // __host__ __device__ lambda inside a private member function (the WO-O build note).
   double phaseDensitySum();
 
-// Head-of-step curvature refresh + the capillary dt check. No-op unless surface tension is on.
+
+  // Head-of-step curvature refresh + the capillary dt check. No-op unless surface tension is on.
   //
   // The curvature is taken from the colour field the step is ABOUT to run with — the same field
   // `updateProperties()` just turned into rho(C) and mu(C), i.e. C^{n+1} under momentum consistency
@@ -2783,7 +3262,8 @@ double capillaryCfl() const;
   // `set_dt` / `step()` semantics are untouched: this is a wrapper, not a mode.
   double stepAdaptive(double cflTarget, double capillaryCflTarget, double dtMax);
 
-// ISSUES sweep item 1: the two explicit two-phase stability caps, evaluated at the head of
+
+  // ISSUES sweep item 1: the two explicit two-phase stability caps, evaluated at the head of
   // `step()` on the state the call STARTS from, so a rejected dt costs nothing.
   //
   // What this can and cannot pre-empt, measured rather than assumed:
@@ -2801,11 +3281,15 @@ double capillaryCfl() const;
   //    what `step_adaptive` (item 2) removes, by re-picking dt from the same limits every step.
   void vofStepPrecheck();
 
-std::string capillaryThrowMessage(double cap) const;
 
-void updateVofCurvature();
+  std::string capillaryThrowMessage(double cap) const;
 
-// Advance the colour field one dt with the just-projected face velocities. Called by step()
+
+  void updateVofCurvature();
+
+
+
+  // Advance the colour field one dt with the just-projected face velocities. Called by step()
   // immediately before advanceScalars(); exposed so a test can drive it in isolation.
   //
   // WHY HERE (the ordering, WO-J item 2). Weymouth-Yue conserves volume exactly only against a
@@ -2842,7 +3326,9 @@ void updateVofCurvature();
   // planes are here; clip them.
   void advectVof();
 
-// --- momentum-consistent transport (rung V2b, WO-K) ------------------------------------------
+
+
+  // --- momentum-consistent transport (rung V2b, WO-K) ------------------------------------------
   //
   // Turn on the transport of `rho^c u_c` on the half-shifted MAC control volumes by the SAME
   // geometric fluxes, the same sweep order and one frozen dilation flag as the colour advection of
@@ -2882,46 +3368,60 @@ void updateVofCurvature();
   /// `rhoGas` / `rhoLiquid` are PHYSICAL densities, the same numbers the rho closure is given.
   void enableVofMomentum(double rhoGasPhys, double rhoLiquidPhys);
 
-bool vofMomentumEnabled() const;
 
-// Floor on rho^c in the recovery divide u = (rho^c u)/rho^c, as a FRACTION of min(rho_g, rho_l)
+  bool vofMomentumEnabled() const;
+
+
+  // Floor on rho^c in the recovery divide u = (rho^c u)/rho^c, as a FRACTION of min(rho_g, rho_l)
   // (default 1e-6). rho^c leaves [rho_g, rho_l] only through a wisp in the half-shifted colour, and
   // driving it to zero would need C^c ~ -1/(ratio-1); the floor is a guard, not a model, and
   // `vof_momentum_diagnostics()` reports how many control volumes it actually touched.
   void setVofRhoFloorFrac(double f);
 
-double vofRhoFloorFrac() const;
 
-double vofRhoFloor() const;
+  double vofRhoFloorFrac() const;
 
-// MinMod-limited donor reconstruction in the momentum flux. OFF by default — on a control volume
+
+  double vofRhoFloor() const;
+
+
+  // MinMod-limited donor reconstruction in the momentum flux. OFF by default — on a control volume
   // a sweep empties, the slope's deviation from the volume's own velocity is amplified by
   // drho*F/rho^c, which is unbounded in the density ratio; measured, it grew the uniform-velocity
   // residual to 2.2e-10 at ratio 1e4 over 50 steps while plain donor-cell upwind stayed flat at
   // 6.7e-16. Harmless at ratio 1e3. See vof/momentum_advect.hpp.
   void setVofMomentumMuscl(bool on);
 
-// Ablation: the literal reading of "the same frozen dilation flag" (the PRESSURE-cell flag on the
+
+  // Ablation: the literal reading of "the same frozen dilation flag" (the PRESSURE-cell flag on the
   // shifted control volume instead of its structural analogue).
   void setVofMomentumCellFlag(bool on);
 
-// Ablation: drop the Weymouth flux clamp on the shifted control volume. With it off the
+
+  // Ablation: drop the Weymouth flux clamp on the shifted control volume. With it off the
   // half-shifted colour leaves [0,1] by O(a^2) and rho^c goes NEGATIVE at high ratio — the
   // measurement that the clamp is a necessity, not a habit. See vof/momentum_advect.hpp point 3.
   void setVofFluxClamp(bool on);
 
-vof::MomentumConsistentAdvector::Diagnostics vofMomentumDiagnostics();
 
-// The recovered advected velocity of component c on the inner cells (the momentum RHS's time
+  vof::MomentumConsistentAdvector::Diagnostics vofMomentumDiagnostics();
+
+
+  // The recovered advected velocity of component c on the inner cells (the momentum RHS's time
   // base). Exposed so a test can gate the uniform-velocity identity on the advection ALONE, with
   // the projection and the momentum solve out of the picture.
   std::vector<double> getVofAdvectedVelocity(int c);
 
-// The coupled colour + momentum advection. Called from the head of step() when momentum
+
+
+  // The coupled colour + momentum advection. Called from the head of step() when momentum
   // consistency is on; exposed so a test can drive it in isolation.
   void advectVofMomentum();
 
-// --- Phase change (Part II, rungs P0/P1 — WO-P01) --------------------------------------------
+
+
+
+  // --- Phase change (Part II, rungs P0/P1 — WO-P01) --------------------------------------------
   //
   // The kernel set of `suite/docs/VOF_PLAN.md` §9 in its planar form, following Boyd & Ling (2023)
   // and Malan et al. (2021): a mass flux `mdot` on interfacial cells (prescribed at P0, from
@@ -3024,15 +3524,20 @@ vof::MomentumConsistentAdvector::Diagnostics vofMomentumDiagnostics();
   /// mass flux. Registers "mdot" (kg m^-2 s^-1, solver units) and "pc_source" (1/s).
   void enablePhaseChange(double rhoG, double rhoL, double hlv);
 
-bool phaseChangeEnabled() const;
 
-/// Prescribe a UNIFORM mass flux (P0). Overwrites "mdot" on the inner cells and its ghosts.
+  bool phaseChangeEnabled() const;
+
+
+
+  /// Prescribe a UNIFORM mass flux (P0). Overwrites "mdot" on the inner cells and its ghosts.
   void setMassFluxUniform(double v);
 
-/// Prescribe a per-cell mass flux (P0), x-fastest over the inner region.
+
+  /// Prescribe a per-cell mass flux (P0), x-fastest over the inner region.
   void setMassFlux(const std::vector<double>& v);
 
-/// P1: compute `mdot` each step from the registered scalar `tname` by the one-sided pure-cell
+
+  /// P1: compute `mdot` each step from the registered scalar `tname` by the one-sided pure-cell
   /// weighted least-squares gradients of `vof/phase_change.hpp`. `Tsat` is the saturation
   /// temperature, `kg`/`kl` the phase conductivities (W/(cell K)) and `Rint` the interfacial
   /// heat-transfer resistance of the Schrage/IHTR Robin condition `T_G = T_sat + mdot R_int`
@@ -3040,9 +3545,12 @@ bool phaseChangeEnabled() const;
   void setPhaseChangeThermal(const std::string& tname, double Tsat, double kg, double kl,
                              double Rint);
 
-void setPhaseChangeThermalOff();
 
-// --- WO-P23 (rungs P2/P3) --------------------------------------------------------------------
+  void setPhaseChangeThermalOff();
+
+
+
+  // --- WO-P23 (rungs P2/P3) --------------------------------------------------------------------
 
   /// The PLANE-ANCHORED (ghost-fluid) Dirichlet condition, ON by default.
   ///
@@ -3058,18 +3566,24 @@ void setPhaseChangeThermalOff();
   /// `set_phase_change_plane_dirichlet(False)` restores the P0/P1 behaviour bit-for-bit.
   void setPhaseChangePlaneDirichlet(bool on);
 
-bool phaseChangePlaneDirichlet() const;
 
-/// The QUADRATIC one-sided gradient fit (`T - T_G = G phi + Q phi^2`) instead of the linear one.
+  bool phaseChangePlaneDirichlet() const;
+
+
+
+  /// The QUADRATIC one-sided gradient fit (`T - T_G = G phi + Q phi^2`) instead of the linear one.
   /// This is VOF_PLAN §9 item 1's Aslam quadratic extrapolation in least-squares form: the same
   /// samples and the same stencil reach, one more basis function. Once the plane-anchored Dirichlet
   /// has removed the cell-centre mismatch, the linear fit's `O(T'' h)` curvature bias is the
   /// leading error of the rung.
   void setPhaseChangeQuadraticFit(bool on);
 
-bool phaseChangeQuadraticFit() const;
 
-/// **WO-P3c — which geometry the interfacial AREA comes from.** `A_Gamma` enters the plane shift
+  bool phaseChangeQuadraticFit() const;
+
+
+
+  /// **WO-P3c — which geometry the interfacial AREA comes from.** `A_Gamma` enters the plane shift
   /// (`dV = mdot A dt / rho_l`) and the divergence source (`S = mdot A (1/rho_g - 1/rho_l)`), so the
   /// bubble grows as `int mdot dA` and a biased area is a biased growth rate.
   ///
@@ -3096,22 +3610,31 @@ bool phaseChangeQuadraticFit() const;
   /// WO-P3b's 5.5-9.3 % deficit was its probe's own 4^3 sub-sampled initialisation.
   void setPhaseChangeArea(int mode);
 
-int phaseChangeArea() const;
 
-/// The summed interfacial area over the inner region, in h^2 (globally reduced under MPI) —
+  int phaseChangeArea() const;
+
+
+
+  /// The summed interfacial area over the inner region, in h^2 (globally reduced under MPI) —
   /// the E7 gallery's `vof_interface_area()`. Uses the CURRENT `set_phase_change_area` geometry,
   /// so the number a page quotes and the number the phase change integrates are the same one.
   /// Needs `enable_vof`; does not need phase change.
   double vofInterfaceArea();
 
-/// Run the cascade area driver on the (already bridged) g = 3 colour block. Returns the LOCAL
+
+
+  /// Run the cascade area driver on the (already bridged) g = 3 colour block. Returns the LOCAL
   /// census; the area field stays on the driver for `copyInner`.
   vof::VofInterfaceArea::Stats pcAreaCascadeCompute();
 
-/// The area field the last `pcAreaCascadeCompute` filled (either driver).
+
+
+  /// The area field the last `pcAreaCascadeCompute` filled (either driver).
   SField pcAreaCascadeField() const;
 
-/// Turn on the CONSISTENT energy transport (VOF_PLAN §9 item 6) for the scalar
+
+
+  /// Turn on the CONSISTENT energy transport (VOF_PLAN §9 item 6) for the scalar
   /// `set_phase_change_thermal` names: `rho c_p T` is advected with the colour advection's OWN
   /// geometric fluxes (`vof/energy_advect.hpp`) instead of the scalar module's Koren TVD flux, and
   /// the implicit solve carries per-cell `k(C)` (the `k_gas`/`k_liquid` of
@@ -3122,30 +3645,42 @@ int phaseChangeArea() const;
   /// an error of order `d(rho c_p)` — 2000x at water/steam. Requires the thermal mass flux.
   void setPhaseChangeEnergy(double rcpGas, double rcpLiquid);
 
-/// MinMod-limited donor reconstruction of the face temperature in the consistent energy flux
+
+  /// MinMod-limited donor reconstruction of the face temperature in the consistent energy flux
   /// (`vof/energy_advect.hpp`). OFF by default — see the note there for the measurement.
   void setPhaseChangeEnergyMuscl(bool on);
 
-bool phaseChangeEnergyMuscl() const;
 
-void setPhaseChangeEnergyOff();
+  bool phaseChangeEnergyMuscl() const;
 
-bool phaseChangeEnergy() const;
 
-/// WO-P3f: turn the ENERGY BUDGET instrument on. Allocates one extra cell field and runs two
+  void setPhaseChangeEnergyOff();
+
+
+  bool phaseChangeEnergy() const;
+
+
+
+  /// WO-P3f: turn the ENERGY BUDGET instrument on. Allocates one extra cell field and runs two
   /// reductions per energy solve; OFF by default and every kernel is skipped when off, so the
   /// solve is bit-identical. Read with `phase_change_budget()`.
   void setPhaseChangeBudget(bool on);
 
-bool phaseChangeBudget() const;
 
-/// WO-P3f: make the per-cell Dirichlet overwrite ENTHALPY-CONSERVING. See `pcCarryDeposit` for
+  bool phaseChangeBudget() const;
+
+
+
+  /// WO-P3f: make the per-cell Dirichlet overwrite ENTHALPY-CONSERVING. See `pcCarryDeposit` for
   /// the mechanism and the measurement. OFF by default (the shipped scheme is unchanged).
   void setPhaseChangeCarryConserve(bool on);
 
-bool phaseChangeCarryConserve() const;
 
-/// WO-P3f INSTRUMENT: prescribe the interface curvature `kappa = div(n)` the one-sided fits use
+  bool phaseChangeCarryConserve() const;
+
+
+
+  /// WO-P3f INSTRUMENT: prescribe the interface curvature `kappa = div(n)` the one-sided fits use
   /// to correct their sample distances (`vof::pcCurvedDistance`). 0 (the default) is the shipped
   /// tangent-plane distance and is bitwise inert. This is a PRESCRIBED number, not an estimator:
   /// it exists so the O(h/R) curvature bias of the fit can be measured against a known geometry
@@ -3153,9 +3688,12 @@ bool phaseChangeCarryConserve() const;
   /// `kappa` is a PHYSICAL curvature, 1/length (stored as the internal 1/h).
   void setPhaseChangeFitCurvature(double kappa);
 
-double phaseChangeFitCurvature() const;
 
-/// **WO-P3g — the SECOND-ORDER interfacial energy operator, as one package.**
+  double phaseChangeFitCurvature() const;
+
+
+
+  /// **WO-P3g — the SECOND-ORDER interfacial energy operator, as one package.**
   ///
   /// `order = 1` is the shipped WO-P23…P3f scheme, bitwise. `order = 2` turns on, together:
   ///
@@ -3176,29 +3714,40 @@ double phaseChangeFitCurvature() const;
   /// enthalpy destruction — so repairing any ONE of them alone makes the gate worse, measured.
   void setPhaseChangeEnergyOrder(int order);
 
-int phaseChangeEnergyOrder() const;
 
-/// WO-P3g item 1: take `mdot` from the energy operator's own interfacial flux instead of the
+  int phaseChangeEnergyOrder() const;
+
+
+
+  /// WO-P3g item 1: take `mdot` from the energy operator's own interfacial flux instead of the
   /// one-sided least-squares fit. The fit stays as `phase_change_diagnostics()['mdot_fit']`.
   void setPhaseChangeMdotOperator(bool on);
 
-bool phaseChangeMdotOperator() const;
 
-/// WO-P3g item 2: the order of the one-sided (ghost-fluid) Dirichlet row. 1 = the shipped
+  bool phaseChangeMdotOperator() const;
+
+
+
+  /// WO-P3g item 2: the order of the one-sided (ghost-fluid) Dirichlet row. 1 = the shipped
   /// two-point form; 2 = Gibou–Fedkiw's three-point form (`vof::pcGfmRow`).
   void setPhaseChangeGfmOrder(int order);
 
-int phaseChangeGfmOrder() const;
 
-/// WO-P3g item 3: measure the GFM row's `theta` and the one-sided fits' sample distances to the
+  int phaseChangeGfmOrder() const;
+
+
+
+  /// WO-P3g item 3: measure the GFM row's `theta` and the one-sided fits' sample distances to the
   /// CURVED interface, with the mean curvature taken per cell from the V3 cascade. Supersedes
   /// `set_phase_change_fit_curvature`, which prescribes ONE curvature for the whole field; where
   /// both are on the cascade wins.
   void setPhaseChangeCurvatureDistance(bool on);
 
-bool phaseChangeCurvatureDistance() const;
 
-/// **WO-P3f open item 6 / WO-P3g** — the divergence source's 5^3 fallback target, as a setter
+  bool phaseChangeCurvatureDistance() const;
+
+
+  /// **WO-P3f open item 6 / WO-P3g** — the divergence source's 5^3 fallback target, as a setter
   /// (it was only reachable through `set_phase_change_deposit_fallback`). An interfacial cell whose two
   /// along-the-normal candidates (`round(k n)`, k = 1, 2) are BOTH still interfacial keeps its
   /// source, and then carries `div(open u) = S` on its OWN faces — i.e. Weymouth-Yue advects the
@@ -3209,19 +3758,27 @@ bool phaseChangeCurvatureDistance() const;
   /// it only ever fills holes.
   void setPhaseChangeDepositFallback(bool on);
 
-bool phaseChangeDepositFallback() const;
 
-double phaseChangeQOperator() const;
+  bool phaseChangeDepositFallback() const;
 
-double phaseChangeQOrphan() const;
 
-double phaseChangeCarryDeposited() const;
+  double phaseChangeQOperator() const;
 
-double phaseChangeCarryLost() const;
 
-PhaseChangeBudget phaseChangeBudgetValues() const;
+  double phaseChangeQOrphan() const;
 
-/// The BAND-EXTENDED LIQUID VELOCITY of VOF_PLAN §9 item 3, as a MEASUREMENT rather than a
+
+  double phaseChangeCarryDeposited() const;
+
+
+  double phaseChangeCarryLost() const;
+
+
+  PhaseChangeBudget phaseChangeBudgetValues() const;
+
+
+
+  /// The BAND-EXTENDED LIQUID VELOCITY of VOF_PLAN §9 item 3, as a MEASUREMENT rather than a
   /// switch. What that item exists to guarantee is that the field Weymouth-Yue advects the colour
   /// with is the LIQUID velocity at every interfacial cell — which the source deposit already
   /// delivers when it lands in the compact pure-gas layer behind the interface (WO-P01's P0b row
@@ -3233,24 +3790,33 @@ PhaseChangeBudget phaseChangeBudgetValues() const;
   /// creates, so it is the direct read-out and not a proxy.
   double pcBandDivergence();
 
-/// Refresh `k(C)` and `(rho c_p)(C)` on the G=2 block from the current colour.
+
+
+  /// Refresh `k(C)` and `(rho c_p)(C)` on the G=2 block from the current colour.
   void pcUpdateEnergyProps();
 
-/// The colour block's ghost policy WITHOUT the colour-specific rules (no solid-band fill, no VoF
+
+
+  /// The colour block's ghost policy WITHOUT the colour-specific rules (no solid-band fill, no VoF
   /// boundary colour): the halo/periodic exchange plus the non-periodic zero-gradient clamp. This
   /// is the temperature's policy on the g=3 block.
   void vofExchangeScalar(CCField f);
 
-/// A PRESCRIBED extra divergence source (1/s), x-fastest over the inner region, added to the
+
+
+  /// A PRESCRIBED extra divergence source (1/s), x-fastest over the inner region, added to the
   /// Poisson RHS exactly like the phase-change deposit: the projection then solves for
   /// `div(open u) = S_pc + S_user`. This is how a CLOSED (periodic) box is made compatible with a
   /// net vapour production: put a balancing sink somewhere the exact solution can absorb it. In a
   /// domain with an outflow face the outflow carries the imbalance and this is not needed.
   void setDivergenceSource(const std::vector<double>& v);
 
-void clearDivergenceSource();
 
-/// WO-P23: an AUTO-BALANCED sink region for the phase-change divergence source. `w` is a
+  void clearDivergenceSource();
+
+
+
+  /// WO-P23: an AUTO-BALANCED sink region for the phase-change divergence source. `w` is a
   /// non-negative weight per inner cell (x-fastest); after every deposit the solver subtracts
   /// `(global sum of the phase-change source) * w(i) / (global sum of w)` from the source field, so
   /// the Poisson RHS is EXACTLY compatible in a closed domain, every step, with no user
@@ -3260,21 +3826,30 @@ void clearDivergenceSource();
   /// the interface, where the exact solution simply has the liquid leaving.
   void setDivergenceSink(const std::vector<double>& w);
 
-void clearDivergenceSink();
 
-/// Kinematic entry point (the P0a/P1 driver): build `mdot`/`A_G`/`n` from the current colour and
+  void clearDivergenceSink();
+
+
+
+  /// Kinematic entry point (the P0a/P1 driver): build `mdot`/`A_G`/`n` from the current colour and
   /// temperature, deposit the divergence source (for the census only — nothing is projected here)
   /// and apply the interface regression. No Navier-Stokes step, no advection.
   /// `dt` is in the caller's time unit.
   void applyPhaseChange(double dtPhysArg);
 
-/// The in-step driver: everything `applyPhaseChange` does, at the head of `step()`.
+
+
+  /// The in-step driver: everything `applyPhaseChange` does, at the head of `step()`.
   /// Byte-identical no-op when phase change is off.
   void phaseChangeStep();
 
-PhaseChangeDiagnostics phaseChangeDiagnostics();
 
-// nvcc requires members holding extended device lambdas to be public.
+
+  PhaseChangeDiagnostics phaseChangeDiagnostics();
+
+
+
+  // nvcc requires members holding extended device lambdas to be public.
 
   /// (1) The interface build: for every inner interfacial cell reconstruct the PLIC plane from the
   /// canonical G=2 colour, store its area and unit normal, evaluate `mdot` (thermal or prescribed),
@@ -3284,14 +3859,18 @@ PhaseChangeDiagnostics phaseChangeDiagnostics();
   /// reverse/add halo and without an atomic scatter (bitwise MPI, not a reduction floor).
   void pcBuildInterface();
 
-/// (2) Deposit each interfacial cell's source into its chosen pure-gas cell, as a GATHER (each
+
+
+  /// (2) Deposit each interfacial cell's source into its chosen pure-gas cell, as a GATHER (each
   /// receiving cell scans the 5^3 box for donors that named it). A gather rather than an atomic
   /// scatter because the sum then has a fixed order and the result is bitwise reproducible across
   /// decompositions; the donors' `dep`/`tgt` are valid two cells deep thanks to `pcBuildInterface`'s
   /// exchange.
   void pcScatterSource();
 
-/// (3) The regression: two Jacobi passes over the exchanged per-cell data, so the clip deficit is
+
+
+  /// (3) The regression: two Jacobi passes over the exchanged per-cell data, so the clip deficit is
   /// redistributed with a FIXED summation order (bitwise across decompositions).
   ///   pass 1 (inner region grown by one, reading only exchanged fields): the raw plane shift
   ///          `C - mdot A dt/rho_l`, clipped into [0,1], with the residue stored;
@@ -3300,7 +3879,9 @@ PhaseChangeDiagnostics phaseChangeDiagnostics();
   ///          weights `n_d^2`.
   void pcRegress(double dt);
 
-/// The per-cell Dirichlet mask of the energy scalar: `T = T_sat + mdot R_int` in every
+
+
+  /// The per-cell Dirichlet mask of the energy scalar: `T = T_sat + mdot R_int` in every
   /// interfacial cell, released everywhere else. Rebuilt from the CURRENT colour, so a call after
   /// the colour advection is what the energy solve at the bottom of the step sees.
   /// **WO-P3g item 3** — the V3 curvature cascade's `kappa` on the G = 2 phase-change block, from
@@ -3311,7 +3892,9 @@ PhaseChangeDiagnostics phaseChangeDiagnostics();
   /// consumers then fall back to the tangent-plane distance, which is the shipped behaviour.
   void pcUpdateCurvature();
 
-/// **WO-P3g** — 1 on every cell that CARRIES A ROW in the energy solve, 0 otherwise.
+
+
+  /// **WO-P3g** — 1 on every cell that CARRIES A ROW in the energy solve, 0 otherwise.
   ///
   /// The operator-flux `mdot` gathers, from the interfacial side, the Dirichlet couplings of its
   /// PURE face neighbours. A neighbour that is a ghost belonging to another RANK does carry a row
@@ -3327,13 +3910,19 @@ PhaseChangeDiagnostics phaseChangeDiagnostics();
   /// solve's own by 5.3e-4 of the total.
   void pcBuildInDomain();
 
-void pcUpdateThermalMask();
 
-/// Zero the two ghost layers on every NON-periodic domain face this rank owns. Used for the
+
+  void pcUpdateThermalMask();
+
+
+
+  /// Zero the two ghost layers on every NON-periodic domain face this rank owns. Used for the
   /// per-cell phase-change data, whose consumers treat a nonzero ghost as a real donor.
   void pcZeroDomainGhosts(CCField f);
 
-/// **WO-P3f — the enthalpy the per-cell Dirichlet overwrite destroys, returned to the phase it
+
+
+  /// **WO-P3f — the enthalpy the per-cell Dirichlet overwrite destroys, returned to the phase it
   /// came from.** An OPTION (`set_phase_change_carry_conserve`), OFF by default.
   ///
   /// The leak. An interfacial cell's row is the identity `T = dval` (`scalarMaskRhs`), so whatever
@@ -3366,17 +3955,23 @@ void pcUpdateThermalMask();
   /// halo and all exchanged before this runs. Writes: inner unmasked cells only.
   void pcCarryDeposit(ScalarField& sc);
 
-/// WO-P3f: consume `pcCarrySrc_` into the energy solve's time base. Called from
+
+
+  /// WO-P3f: consume `pcCarrySrc_` into the energy solve's time base. Called from
   /// `advanceScalars` right after `cOld` is taken, so the deposit enters that step's RHS.
   void pcCarryApply(ScalarField& sc);
 
-/// WO-P3f, the energy-budget instrument, part 1: the state BEFORE the energy solve, and the
+
+
+  /// WO-P3f, the energy-budget instrument, part 1: the state BEFORE the energy solve, and the
   /// class-change accounting against the previous step. Called from `advanceScalars` after the time
   /// base `cOld` is taken and BEFORE `scalarMaskRhs` overwrites the masked cells with `dval`, which
   /// is the exact moment the transported temperature of a newly interfacial cell is discarded.
   void pcBudgetPre(ScalarField& sc);
 
-/// WO-P3f, part 2: the state AFTER the energy solve, the heat the plane-anchored rows actually
+
+
+  /// WO-P3f, part 2: the state AFTER the energy solve, the heat the plane-anchored rows actually
   /// delivered across the interface, and the class snapshot the NEXT step compares against.
   ///
   /// `qGfm` mirrors `scalarMaskGfm` exactly (same `theta`, same face conductivity choice, same
@@ -3386,11 +3981,15 @@ void pcUpdateThermalMask();
   /// compare them.
   void pcBudgetPost(ScalarField& sc);
 
-/// Subtract the phase-change (and any prescribed) divergence source from `div_` so the deflated
+
+
+  /// Subtract the phase-change (and any prescribed) divergence source from `div_` so the deflated
   /// pressure solve delivers `div(open u) = S`. One branch in `project()`, inert when off.
   void pcApplyDivergenceSource(CCField div);
 
-/// The colour tolerance that decides which cells are INTERFACIAL, and it has to be at least the
+
+
+  /// The colour tolerance that decides which cells are INTERFACIAL, and it has to be at least the
   /// colour advector's own wisp tolerance.
   ///
   /// **This is a real interaction bug and the measurement is in the findings.** WO-R2 item 4 made
@@ -3405,21 +4004,28 @@ void pcUpdateThermalMask();
   /// interface has no wisps), which is exactly why it had to be found on the curved case.
   double pcEffInterfaceEps() const;
 
-/// …and the mirror statement: a cell the ADVECTOR treats as a pure phase is a pure phase here
+
+  /// …and the mirror statement: a cell the ADVECTOR treats as a pure phase is a pure phase here
   /// too, or the source deposit's "find a pure gas cell" walk rejects exactly the cells the colour
   /// field has already emptied and the source is left in an interfacial cell (measured:
   /// `band_div` 2.2e+02 on the P2 sucking gate with only the interfacial tolerance raised).
   double pcEffPureEps() const;
 
-void requirePhaseChange(const char* who) const;
 
-ScalarField& scalarField(const std::string& name);
 
-/// Allocate (idempotently) the per-cell Dirichlet mask + value of a registered scalar. Inert
+  void requirePhaseChange(const char* who) const;
+
+
+  ScalarField& scalarField(const std::string& name);
+
+
+  /// Allocate (idempotently) the per-cell Dirichlet mask + value of a registered scalar. Inert
   /// until allocated: `advanceScalars` branches on `dmask.extent(0)`.
   void scalarDirichletMask(const std::string& name);
 
-// --- Property closures + per-cell body force ------------------------------------------------
+
+
+  // --- Property closures + per-cell body force ------------------------------------------------
   // Register a property/force closure. target: a registered field name — a material property
   // ("mu"/"rho"/…) or a body-force component ("force_x"/"force_y"/"force_z"). kind: LinearMix /
   // BoussinesqForce / ArrheniusMu. in0/in1: input field names (in1 "" if unused). params: up to 4
@@ -3428,7 +4034,8 @@ ScalarField& scalarField(const std::string& name);
   void setPropertyModel(const std::string& target, ClosureKind kind, const std::string& in0,
                         const std::string& in1, const std::vector<double>& params);
 
-// Enable/disable variable density: binds the "rho" field (creating it seeded with the scalar rho_
+
+  // Enable/disable variable density: binds the "rho" field (creating it seeded with the scalar rho_
   // if absent) into the momentum time term, the advection weight, and the pressure projection
   // (face coefficient open/rho_f + 1/rho_f correction). rho_ (set_rho) becomes the REFERENCE
   // density rho0 of the projection scaling — a uniform rho field == rho_ reduces exactly to the
@@ -3449,7 +4056,8 @@ ScalarField& scalarField(const std::string& name);
   // either way, and is measured at ratio 1000).
   void setDensityMode(bool variable);
 
-// Enable/disable the volume-averaged (porous) continuity for unresolved CFD-DEM: the projection
+
+  // Enable/disable the volume-averaged (porous) continuity for unresolved CFD-DEM: the projection
   // enforces d(eps)/dt + div(eps u) = 0 instead of div(u)=0, so the velocity is NOT solenoidal
   // where the void fraction changes. Binds the "eps" field (void fraction from the particle
   // deposition; created seeded to 1 if absent). Staggered-only. The coupling deposits eps each step
@@ -3459,30 +4067,37 @@ ScalarField& scalarField(const std::string& name);
   // auto-install an all-fluid geometry.
   bool hasCutcellPressure() const;
 
-void setPorousContinuity(bool on);
 
-// Reseed eps^n = eps^{n+1} so d(eps)/dt = 0 this step. Call after the FIRST void-fraction
+  void setPorousContinuity(bool on);
+
+
+  // Reseed eps^n = eps^{n+1} so d(eps)/dt = 0 this step. Call after the FIRST void-fraction
   // deposition (the "eps" field starts empty, so without this step 0 sees a spurious d(eps)/dt from
   // 0 -> eps).
   void syncPorousPrev();
 
-// Include (default) or drop the d(eps)/dt source in the porous projection RHS. Dropping it
+
+  // Include (default) or drop the d(eps)/dt source in the porous projection RHS. Dropping it
   // enforces div(eps u)=0 — useful when eps is a bare per-cell particle deposit whose
   // time-derivative is too jagged and drives the eps-weighted pressure solve unstable.
   void setPorousDepsDt(bool on);
 
-void setPorousConservative(bool on);
 
-// Pressure under-relaxation factor omega_p in (0,1] (MFIX-style); 1.0 = off (default).
+  void setPorousConservative(bool on);
+
+
+  // Pressure under-relaxation factor omega_p in (0,1] (MFIX-style); 1.0 = off (default).
   void setPressureUnderRelax(double w);
 
-// Enable/disable variable-coefficient momentum (variable viscosity). variable=true binds the "mu"
+
+  // Enable/disable variable-coefficient momentum (variable viscosity). variable=true binds the "mu"
   // field (creating it, seeded with the current scalar mu, if absent) and forces the stencil solve
   // path. harmonic selects the harmonic face mean (continuous shear stress across a viscosity jump)
   // vs arithmetic. Escape hatch: set_field("mu", arr) then set_property_mode(True).
   void setPropertyMode(bool variable, bool harmonic);
 
-// Rotational-pressure treatment under variable viscosity. The Timmermans rotational term
+
+  // Rotational-pressure treatment under variable viscosity. The Timmermans rotational term
   // P += (rho/dt)phi - mu*div(u*) is only valid for HOMOGENEOUS viscosity (Deteix & Yakoubi, Appl.
   // Math. Lett. 2018 / arXiv:1902.05643): with spatially varying mu the pointwise term is no longer
   // the gradient part of the viscous stress, and the accumulated inconsistency destabilises the
@@ -3502,20 +4117,24 @@ void setPorousConservative(bool on);
   // solve for psi with rhs div(div(2 nu D(u)))) is deferred.
   void setVariableRotational(int mode, double chi);
 
-// Tabulated property: out = piecewise-linear interp of (xs, ys) at the input field (xs
+
+  // Tabulated property: out = piecewise-linear interp of (xs, ys) at the input field (xs
   // ascending).
   void setPropertyTable(const std::string& target, const std::string& in0,
                         const std::vector<double>& xs, const std::vector<double>& ys);
 
-// Apply all closures (also called at the top of step()). Exposed for testing.
+
+  // Apply all closures (also called at the top of step()). Exposed for testing.
   void updateProperties();
 
-// Allocate + register the per-cell body-force fields ("force_x/y/z") and route them into the
+
+  // Allocate + register the per-cell body-force fields ("force_x/y/z") and route them into the
   // momentum RHS, for an EXTERNAL writer (CFD-DEM feedback) to fill directly via field_view — no
   // closure needed. buildRhsForced then adds them each step (they persist; the writer overwrites).
   void enableCellForce();
 
-// Implicit (semi-implicit) linear drag: a per-cell coefficient field "drag_beta" is added to the
+
+  // Implicit (semi-implicit) linear drag: a per-cell coefficient field "drag_beta" is added to the
   // momentum diagonal each step, so a drag source −β(u − u_p) is treated implicitly (the fluid
   // solve becomes (ρ/dt + β)u = … + β u_p). The drag TARGET β·u_p goes into the force_x/y/z fields
   // (the RHS). Unconditionally stable for any β (unlike an explicit −β u force, which diverges for
@@ -3523,18 +4142,22 @@ void setPorousConservative(bool on);
   // "force_*" via field_view; enableDrag() allocates them and turns the diagonal path on.
   void enableDrag();
 
-// Porous + implicit drag: the drag-relaxation w_f=idt/(idt+beta) makes the pressure coefficient
+
+  // Porous + implicit drag: the drag-relaxation w_f=idt/(idt+beta) makes the pressure coefficient
   // high-ratio (~1 in the freeboard, ->0 in the dense bed). Chebyshev diverges on it; the algebraic
   // GraphAMG coarse solve + PCG is robust. Applied whenever BOTH porous_ and hasDrag_ are on
   // (either set second). An explicit set_pressure_* afterwards still wins.
   void configurePorousDragSolver();
 
-// Add the drag coefficient beta(i) to the (float) momentum diagonal of component c. Called after
+
+  // Add the drag coefficient beta(i) to the (float) momentum diagonal of component c. Called after
   // each stencil (re)build when hasDrag_. All-fluid (rscale==1) is exact; the drag×cut-cell-IBM
   // interaction (rscale≠1) is untested (documented).
   void addDragDiagonal(int c);
 
-private:
+
+
+ private:
   // === dynamic load balancing: making EVERY per-block allocation follow the new block ===========
   //
   // `allocateBlock` re-creates the buffers it names explicitly and re-`adopt`s the five aliased
@@ -3560,34 +4183,42 @@ private:
   // `allocateBlock` and BEFORE `initMpi` (which rebuilds the VoF block and writes `cField_`).
   void resizeForBlock();
 
-// Pass 1: the FieldSet's own storage. Fresh, zero-initialised, same name/ghost/centering; the
+
+  // Pass 1: the FieldSet's own storage. Fresh, zero-initialised, same name/ghost/centering; the
   // migrated data is scattered back into it by `redistribute` step 4. Aliased records
   // (`ownStorage == false`) are left alone — `allocateBlock` has just re-adopted them.
   void reallocOwnedFields();
 
-// Pass 2: re-resolve every member handle that aliases a registry record. A handle whose record
+
+  // Pass 2: re-resolve every member handle that aliases a registry record. A handle whose record
   // does not exist is left as it is (the feature was never switched on, so the handle is empty).
   void rebindFieldAliases();
 
-// Pass 3: the lazily-allocated per-block scratch. A view that was never allocated (extent 0)
+
+  // Pass 3: the lazily-allocated per-block scratch. A view that was never allocated (extent 0)
   // STAYS unallocated — "inert until its feature is enabled" is load-bearing all over this class
   // (every consumer branches on `extent(0)`), so resizing an empty view would switch a feature on.
   // Views that carry state across a step are re-derived below rather than left zeroed.
   static void resizeIfAllocated(CCField& f, const char* label, std::size_t n);
 
-void resizeBlockScratch();
 
-// Resolve a closure target to a registered buffer. A force component allocates ALL three
+  void resizeBlockScratch();
+
+
+  // Resolve a closure target to a registered buffer. A force component allocates ALL three
   // cellForce_ slots (buildRhsForced reads every component) and enables the body-force RHS path.
   CCField ensureTarget(const std::string& name);
 
-void ensureCellForceAll();
 
-// Ghost fill for a scalar: periodic (single-rank) / MPI halo base, then override any domain
+  void ensureCellForceAll();
+
+
+  // Ghost fill for a scalar: periodic (single-rank) / MPI halo base, then override any domain
   // Dirichlet/Neumann faces.
   void scalarFillGhosts(ScalarField& sc);
 
-// Overwrite the ghost band on each Dirichlet/Neumann domain face (both layers, for the ±2
+
+  // Overwrite the ghost band on each Dirichlet/Neumann domain face (both layers, for the ±2
   // advection reach). Distributed: a rank applies a face's BC iff its block TOUCHES that global
   // face. The halo fill runs first (and may periodic-wrap those ghosts); the BC overwrite wins,
   // exactly matching the single-rank fill-then-BC order. Cross-rank ghost CORNERS on a BC face
@@ -3595,10 +4226,12 @@ void ensureCellForceAll();
   // (7-point diffusion + straight ±2 advection reach), so those corners are never consumed.
   void applyScalarBc(ScalarField& sc);
 
-// Does this rank's block touch global domain face f (always true single-rank)?
+
+  // Does this rank's block touch global domain face f (always true single-rank)?
   bool touchesGlobalFace(int f) const;
 
-// Re-open the diffusion face at a Dirichlet domain boundary: set_domain_bc closes the boundary
+
+  // Re-open the diffusion face at a Dirichlet domain boundary: set_domain_bc closes the boundary
   // openness (ox_=0), which correctly makes Neumann/adiabatic walls zero-flux but would also cut a
   // Dirichlet wall's heat path. For each Dirichlet face, restore the face coefficient (band = -D,
   // A_C += D); the ghost carries 2*value - inner so the row is the standard Dirichlet operator.
@@ -3606,18 +4239,24 @@ void ensureCellForceAll();
   /// own `k(C)` instead of the constant `D`. Same rule, same rows; only the coefficient differs.
   void applyScalarBcStencilVar(ScalarField& sc);
 
-void applyScalarBcStencil(ScalarField& sc);
 
-// nvcc requires member functions that contain extended (device) lambdas to be PUBLIC — the
+  void applyScalarBcStencil(ScalarField& sc);
+
+
+  // nvcc requires member functions that contain extended (device) lambdas to be PUBLIC — the
   // OpenMP/host build accepts them private, so the breakage only shows on the CUDA backend.
  public:
   void patchScalarDirichletFaceVar(CCField AC, CCField band, CCField kc, int a, int side);
 
-void patchScalarDirichletFace(CCField AC, CCField band, double Din, int a, int side);
 
-void applyScalarBcFace(CCField c, int a, int side, int type, double val);
+  void patchScalarDirichletFace(CCField AC, CCField band, double Din, int a, int side);
 
-private:
+
+  void applyScalarBcFace(CCField c, int a, int side, int type, double val);
+
+
+
+ private:
   int nx_, ny_, nz_;
   C3 e_, e1_;
   std::size_t n_, n1_;
@@ -3769,13 +4408,16 @@ private:
   double tStepSum_ = 0.0, tPredSum_ = 0.0, tMomSum_ = 0.0, tProjSum_ = 0.0;
   double vofTick() const;
 
-void vofAdd(double& acc, double t0);
 
-// fence-then-read wall clock: phase boundaries must not attribute queued device work to the
+  void vofAdd(double& acc, double t0);
+
+
+  // fence-then-read wall clock: phase boundaries must not attribute queued device work to the
   // next phase
   static double phaseTick();
 
-CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
+
+  CCField sdf_, ox_, oy_, oz_, phi_, div_, P_, ox1_, oy1_, oz1_, rhs1_, phi1_, r_, z_, pp_, Ap_;
   bool ghostProjection_ = false;  // directional ghost-cell projection (the collocated AUTO default)
   bool colSchemeAuto_ = Grid::collocated;  // AUTO scheme resolution at setSolid (cleared by any
                                            // explicit scheme selection)
