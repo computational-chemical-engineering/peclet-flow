@@ -1296,9 +1296,9 @@ class Solver {
   }
   // all-fluid + domain-BC pressure (CUDA set_pressure_geometry): same path as set_solid with an
   // open SDF.
-  void setPressureGeometry(const std::vector<double>& sdfInner) { setSolid(sdfInner, true); }
+  void setPressureGeometry(const std::vector<double>& sdfInner);
 
-  // SDF on the inner cells (flat x-fastest, size nx*ny*nz; <0 solid). cutcellPressure enables the
+// SDF on the inner cells (flat x-fastest, size nx*ny*nz; <0 solid). cutcellPressure enables the
   // open-face-weighted cut-cell projection (off => velocity-only, e.g. unidirectional body-force
   // flow).
   // ---------------------------------------------------------------------------------------
@@ -1330,98 +1330,15 @@ class Solver {
   /// keeps the open-scene semantics (images are the caller's).
   void setScene(const std::vector<int>& nodeInts, const std::vector<double>& nodeReals,
                 const std::vector<int>& instInts, const std::vector<double>& instReals,
-                bool periodic = false) {
-    namespace g = peclet::core::geom;
-    g::SceneBuilder<double> b = g::SceneBuilder<double>::decode(nodeInts, nodeReals, instInts,
-                                                               instReals, /*grids=*/{},
-                                                               /*pool=*/{});
-    if (b.instances().empty())
-      throw std::runtime_error("set_scene: at least one instance required");
-    for (const auto& nd : b.nodes())
-      if (nd.kind == g::kGrid)
-        throw std::runtime_error("set_scene: grid leaves are not supported (analytic scenes only)");
-    // Global inner-grid extents: the distributed build carries them (gnx_); single-rank (or a
-    // non-MPI build) the local block IS the global grid.
-    double GX = nx_, GY = ny_, GZ = nz_;
-#ifdef PECLET_FLOW_MPI
-    if (gnx_ > 0) {
-      GX = gnx_;
-      GY = gny_;
-      GZ = gnz_;
-    }
-#endif
-    // The scene is in the caller's PHYSICAL coordinates when a domain is armed (so one scene
-    // serves flow, dem and voro unchanged), and in the historical cell coordinates otherwise.
-    peclet::core::Vec3<double> so{0, 0, 0}, se{GX, GY, GZ};
-    if (u_.physical) {
-      if (u_.cells[0] != (long)GX || u_.cells[1] != (long)GY || u_.cells[2] != (long)GZ)
-        throw std::runtime_error(
-            "set_scene: the physical domain was armed for a different global grid than the solver "
-            "has (pass global_cells = the grid init_mpi gets)");
-      so = peclet::core::Vec3<double>{u_.org[0], u_.org[1], u_.org[2]};
-      se = peclet::core::Vec3<double>{u_.ext[0], u_.ext[1], u_.ext[2]};
-    }
-    g::PeriodicBox<double> box{se.x, se.y, se.z, periodic};
-    sceneB_ = std::make_shared<g::SceneBuilder<double>>(std::move(b));
-    sceneOrigin_ = so;
-    sceneExtent_ = se;
-    scenePeriodic_ = periodic;
-    buildSceneQuery();
-    hasScene_ = true;
-    // Moving-geometry state travels WITH the scene: core's Instance already carries linVel/angVel/
-    // center, so a caller can encode motion directly and it arrives here. CENTRE OF ROTATION: the
-    // encoded `center` when it is nonzero, otherwise the instance's own translation -- which is
-    // what a caller who only placed the body means by "spin it". Set `center` explicitly (or pass
-    // it to set_instance_motion) to spin about some other point.
-    nInst_ = static_cast<int>(sceneB_->instances().size());
-    instCen_.assign((std::size_t)nInst_ * 3, 0.0);
-    instLin_.assign((std::size_t)nInst_ * 3, 0.0);
-    instAng_.assign((std::size_t)nInst_ * 3, 0.0);
-    instCenPinned_.assign((std::size_t)nInst_, 0);
-    for (int i = 0; i < nInst_; ++i) {
-      auto& in = sceneB_->instanceRef(i);
-      // CENTRE OF ROTATION (§7 item 3, resolved 2026-09-02): NaN = follows the body (the
-      // builder's default); any other finite point = PINNED there, the world origin included.
-      // An all-zero centre from a RAW instance array is the legacy 'follows the body' (every
-      // producer wrote zeros before NaN existed); a world-origin pin from a raw array goes
-      // through set_instance_motion(center=...). The decision is an explicit per-instance flag
-      // from here on, never re-inferred from the numbers.
-      // The decoder already resolved the record: an 18-real record carries the flag, a legacy
-      // 17-real record pins only a finite non-zero centre.
-      const bool pinned = in.centerPinned && std::isfinite(in.center.x) &&
-                          std::isfinite(in.center.y) && std::isfinite(in.center.z);
-      instCenPinned_[(std::size_t)i] = pinned ? 1 : 0;
-      const auto c = pinned ? in.center : in.transform.translation;
-      in.center = c;  // the resolved centre, so no consumer ever reads the NaN sentinel
-      instCen_[3 * (std::size_t)i + 0] = c.x;
-      instCen_[3 * (std::size_t)i + 1] = c.y;
-      instCen_[3 * (std::size_t)i + 2] = c.z;
-      instLin_[3 * (std::size_t)i + 0] = in.linVel.x;
-      instLin_[3 * (std::size_t)i + 1] = in.linVel.y;
-      instLin_[3 * (std::size_t)i + 2] = in.linVel.z;
-      instAng_[3 * (std::size_t)i + 0] = in.angVel.x;
-      instAng_[3 * (std::size_t)i + 1] = in.angVel.y;
-      instAng_[3 * (std::size_t)i + 2] = in.angVel.z;
-    }
-    refreshMotionFlag();
-    uploadMotion();
-  }
+                bool periodic = false);
 
-  /// The resolved centre of rotation of instance i and whether it is pinned (explicit) or
+/// The resolved centre of rotation of instance i and whether it is pinned (explicit) or
   /// follows the body's translation.
-  std::array<double, 3> instanceCenter(int i) const {
-    if (i < 0 || i >= nInst_)
-      throw std::runtime_error("instance_center: instance index out of range");
-    return {instCen_[3 * (std::size_t)i], instCen_[3 * (std::size_t)i + 1],
-            instCen_[3 * (std::size_t)i + 2]};
-  }
-  bool instanceCenterPinned(int i) const {
-    if (i < 0 || i >= nInst_)
-      throw std::runtime_error("instance_center_pinned: instance index out of range");
-    return instCenPinned_[(std::size_t)i] != 0;
-  }
+  std::array<double, 3> instanceCenter(int i) const;
 
-  /// Rigid-body motion of one scene instance (Layer 3 rung 2). `lin` is the body's linear
+bool instanceCenterPinned(int i) const;
+
+/// Rigid-body motion of one scene instance (Layer 3 rung 2). `lin` is the body's linear
   /// velocity, `ang` its angular velocity about its own centre -- both in CELL UNITS PER TIME, the
   /// same units the velocity field carries, since the scene lives on the global inner grid.
   ///
@@ -1430,30 +1347,9 @@ class Solver {
   /// and the cut-cell projection gains the wall's own volume flux (rung 3). With every component
   /// zero the solver stays on the static path, bit for bit.
   void setInstanceMotion(int i, const std::array<double, 3>& lin,
-                         const std::array<double, 3>& ang, const double* center = nullptr) {
-    if (!hasScene_)
-      throw std::runtime_error("set_instance_motion: call set_scene first");
-    if (i < 0 || i >= nInst_)
-      throw std::runtime_error("set_instance_motion: instance index out of range");
-    auto& in = sceneB_->instanceRef(i);
-    for (int k = 0; k < 3; ++k) {
-      instLin_[3 * (std::size_t)i + k] = lin[k];
-      instAng_[3 * (std::size_t)i + k] = ang[k];
-      if (center)
-        instCen_[3 * (std::size_t)i + k] = center[k];
-    }
-    if (center)
-      instCenPinned_[(std::size_t)i] = 1;  // an explicit centre is pinned, whatever its value
-    in.linVel = peclet::core::Vec3<double>{lin[0], lin[1], lin[2]};
-    in.angVel = peclet::core::Vec3<double>{ang[0], ang[1], ang[2]};
-    in.center = peclet::core::Vec3<double>{instCen_[3 * (std::size_t)i + 0],
-                                           instCen_[3 * (std::size_t)i + 1],
-                                           instCen_[3 * (std::size_t)i + 2]};
-    refreshMotionFlag();
-    uploadMotion();
-  }
+                         const std::array<double, 3>& ang, const double* center = nullptr);
 
-  /// Move one instance (Layer 3 rung 4). Takes effect at the next rebuild_geometry() -- the SDF
+/// Move one instance (Layer 3 rung 4). Takes effect at the next rebuild_geometry() -- the SDF
   /// field, the cut-cell overlay, the apertures and the pressure operator are ALL derived from the
   /// instance transforms, so a transform change without a rebuild would leave the solver running
   /// on the old geometry with a new wall velocity, which is worse than either.
@@ -1461,28 +1357,9 @@ class Solver {
   /// The centre of rotation FOLLOWS the body: it is re-anchored to the new translation unless the
   /// caller pinned one explicitly through set_instance_motion.
   void setInstanceTransform(int i, const std::array<double, 3>& translation,
-                            const std::array<double, 4>& quat) {
-    if (!hasScene_)
-      throw std::runtime_error("set_instance_transform: call set_scene first");
-    if (i < 0 || i >= nInst_)
-      throw std::runtime_error("set_instance_transform: instance index out of range");
-    auto& in = sceneB_->instanceRef(i);
-    // Follows-the-body vs pinned is the explicit flag, not a coincidence of the numbers (the old
-    // float comparison turned a pinned centre into a tracked one whenever the body passed
-    // through it).
-    const bool centreTracked = instCenPinned_[(std::size_t)i] == 0;
-    in.transform.translation =
-        peclet::core::Vec3<double>{translation[0], translation[1], translation[2]};
-    in.transform.rotation = peclet::core::Quat<double>{quat[0], quat[1], quat[2], quat[3]};
-    if (centreTracked) {
-      for (int k = 0; k < 3; ++k)
-        instCen_[3 * (std::size_t)i + k] = translation[k];
-      in.center = in.transform.translation;
-    }
-    sceneDirty_ = true;
-  }
+                            const std::array<double, 4>& quat);
 
-  /// Re-derive ALL geometry from the current instance transforms (Layer 3 rung 4): rebuild the
+/// Re-derive ALL geometry from the current instance transforms (Layer 3 rung 4): rebuild the
   /// accelerated scene query, re-sample the SDF, rebuild the cut-cell overlay / apertures /
   /// pressure operator, and re-derive the exact crossings if they were in use.
   ///
@@ -1496,37 +1373,9 @@ class Solver {
   /// there, not an extrapolated fluid value. That is the conservative v1 choice (bounded, and the
   /// momentum solve relaxes it within a step at small per-step motion); extrapolation is an open
   /// question recorded in the design note.
-  void rebuildGeometry() {
-    if (!hasScene_)
-      throw std::runtime_error("rebuild_geometry: call set_scene first");
-    CCField uSave[3], mSave[3];
-    for (int c = 0; c < 3; ++c) {
-      uSave[c] = CCField("uSave", n_);
-      Kokkos::deep_copy(uSave[c], C[c].u);
-      if (freshSeed_) {  // remember which points were SOLID, to find the ones the body uncovers
-        mSave[c] = CCField("mSave", n_);
-        Kokkos::deep_copy(mSave[c], C[c].mask);
-      }
-    }
-    CCField pSave("pSave", n_);
-    Kokkos::deep_copy(pSave, P_);
-    if (sceneDirty_) {
-      buildSceneQuery();
-      sceneDirty_ = false;
-    }
-    // Crossings BEFORE the solid: the overlay build consumes tEx_, so deriving them first means
-    // ONE geometry rebuild per step rather than two.
-    if (sceneCrossings_)
-      setExactCrossingsFromScene();
-    setSolidFromScene(cutcellPressure_);
-    for (int c = 0; c < 3; ++c)
-      Kokkos::deep_copy(C[c].u, uSave[c]);
-    Kokkos::deep_copy(P_, pSave);
-    if (freshSeed_)
-      seedFreshCells(mSave);
-  }
+  void rebuildGeometry();
 
-  /// FRESH CELLS: the points a moving body has just uncovered.
+/// FRESH CELLS: the points a moving body has just uncovered.
   ///
   /// Restoring u across the rebuild hands such a point whatever the SOLID held there -- zero, or a
   /// stale masked value -- rather than a fluid state. The momentum solve relaxes it within a step,
@@ -1541,33 +1390,16 @@ class Solver {
   /// staggered point, so a just-uncovered point starts moving with the surface that released it
   /// rather than at rest. It is bounded (no extrapolation), needs no new field, and reduces to the
   /// old behaviour exactly when the wall is not moving.
-  void seedFreshCells(CCField mOld[3]) {
-    if (!hasMotion_)
-      return;
-    CCExec space;
-    const C3 e = e_;
-    for (int c = 0; c < 3; ++c) {
-      if (mOld[c].extent(0) != n_ || uBc_[c].extent(0) != n_)
-        continue;
-      CCField u = C[c].u;
-      CCConst mo = CCConst(mOld[c]), mn = CCConst(C[c].mask), w = CCConst(uBc_[c]);
-      Kokkos::parallel_for(
-          "peclet::flow::seed_fresh", Kokkos::RangePolicy<CCExec>(space, 0, (long)n_),
-          KOKKOS_LAMBDA(long i) {
-            if (mo(i) > 0.5 && mn(i) <= 0.5)
-              u(i) = w(i);
-          });
-    }
-    space.fence();
-  }
+  void seedFreshCells(CCField mOld[3]);
 
-  /// Fresh-cell policy for moving geometry. true (DEFAULT) = seed with the local wall velocity;
+/// Fresh-cell policy for moving geometry. true (DEFAULT) = seed with the local wall velocity;
   /// false = inherit whatever the solid held, which is what shipped before 2026-08-30. Inert when
   /// nothing moves, so a static run is bit-identical either way. See seedFreshCells.
-  void setFreshCellSeed(bool on) { freshSeed_ = on; }
-  bool freshCellSeed() const { return freshSeed_; }
+  void setFreshCellSeed(bool on);
 
-  /// Re-derive ONLY the wall-velocity fields and the momentum operator that folds them in.
+bool freshCellSeed() const;
+
+/// Re-derive ONLY the wall-velocity fields and the momentum operator that folds them in.
   ///
   /// The linearised moving-boundary problems -- an oscillating body at vanishing amplitude, a
   /// shear cell driven by counter-moving plates -- change the wall VELOCITY every step while the
@@ -1579,247 +1411,54 @@ class Solver {
   /// SCOPE: the instance TRANSFORMS must be unchanged. Nothing here re-samples the SDF, the
   /// apertures, the ownership field or the pressure operator, so if a body has actually moved this
   /// is silently wrong -- call `rebuild_geometry()` instead. Velocity and pressure are untouched.
-  void refreshWallVelocity() {
-    if (!hasScene_)
-      throw std::runtime_error("refresh_wall_velocity: call set_scene first");
-    if (sceneDirty_)
-      throw std::runtime_error(
-          "refresh_wall_velocity: an instance TRANSFORM changed since the last geometry build -- "
-          "this call only refreshes the wall VELOCITY, so the run would continue on stale "
-          "geometry. Call rebuild_geometry() instead.");
-    buildWallVelocity();
-    rebuildStencils();
-  }
+  void refreshWallVelocity();
 
-  /// True when at least one instance carries a nonzero velocity -- i.e. the moving-geometry paths
+/// True when at least one instance carries a nonzero velocity -- i.e. the moving-geometry paths
   /// are live. Everything downstream keys off this, so a driver can assert it.
-  bool hasMovingInstance() const { return hasMotion_; }
-  int sceneInstanceCount() const { return nInst_; }
+  bool hasMovingInstance() const;
 
-  /// Rung 3 on/off. ON (the default) is the correct physics: a rigid body sweeping through a cut
+int sceneInstanceCount() const;
+
+/// Rung 3 on/off. ON (the default) is the correct physics: a rigid body sweeping through a cut
   /// cell injects a wall flux the projection must balance. The switch exists so the Galilean gate
   /// can EXHIBIT the failure the term fixes rather than assert it -- turning it off leaves rung 2's
   /// wall velocity in the momentum operator and a projection that wrongly forces div_open(u) = 0.
-  void setWallFluxDivergence(bool on) { wallFluxDiv_ = on; }
-  bool wallFluxDivergence() const { return wallFluxDiv_; }
+  void setWallFluxDivergence(bool on);
 
-  bool hasScene() const { return hasScene_; }
+bool wallFluxDivergence() const;
 
-  /// Per-inner-cell owning instance (Layer 3 rung 1), x-fastest, -1 where no scene has been
+bool hasScene() const;
+
+/// Per-inner-cell owning instance (Layer 3 rung 1), x-fastest, -1 where no scene has been
   /// sampled yet. Host copy; the device field is what the solver kernels read.
-  std::vector<int> getCutOwner() const {
-    const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
-    std::vector<int> out(n, -1);
-    if (cutOwner_.extent(0) != n)
-      return out;
-    using HostV = Kokkos::View<int*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
-    Kokkos::deep_copy(HostV(out.data(), n), cutOwner_);
-    return out;
-  }
+  std::vector<int> getCutOwner() const;
 
-  /// Sample the scene onto this rank's inner grid and install it as the solid, entirely on device
+/// Sample the scene onto this rank's inner grid and install it as the solid, entirely on device
   /// -- no nx*ny*nz float64 host round trip, and correct on every rank.
-  void setSolidFromScene(bool cutcellPressure) {
-    if (!hasScene_)
-      throw std::runtime_error("set_solid_from_scene: call set_scene first");
-    const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
-    CCField din("peclet::flow::sceneSdf", n);
-    if (cutOwner_.extent(0) != n)
-      cutOwner_ = Kokkos::View<int*, CCMem>("peclet::flow::cutOwner", n);
-    auto own = cutOwner_;
-    const auto q = sceneQ_->view();
-    const int nx = nx_, ny = ny_, nz = nz_;
-    const C3 og = og_;
-    const SceneMap sm = sceneMap();
-    CCExec space;
-    Kokkos::parallel_for(
-        "peclet::flow::scene_sample",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * (double)(x + og.x),
-                                             sm.a[1] + sm.b[1] * (double)(y + og.y),
-                                             sm.a[2] + sm.b[2] * (double)(z + og.z)};
-          // evalOwner is ONE traversal returning bitwise eval's value plus the argmin instance, so
-          // carrying the ownership field costs nothing over the sample it rides on.
-          int oi = -1;
-          const std::size_t idx =
-              (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny;
-          din(idx) = q.evalOwner(p, oi) * sm.dToInt;
-          own(idx) = oi;
-        });
-    space.fence();
-    // PERIODIC IMAGES ARE A UNION. The query takes the minimum over an instance's 27 neighbour
-    // images -- right for a body straddling a periodic face, and a silent TRAP for a leaf WIDER
-    // than the box: its images overlap, and a cavity carved from it (a container wall built as
-    // slab-minus-cavity) is refilled wherever a neighbouring image's slab covers it. Measured: a
-    // 0.7 L slab minus a 53-cell cavity gave a 38-cell duct; the ten Cate tank ran 30 % narrow
-    // through two campaigns and read as "creeping-valued confinement". Detect it EXACTLY: when
-    // some instance's bounding sphere spans more than the box on a periodic axis, sample the
-    // primary image alone and count the cells whose solid/fluid sign the images changed.
-    imageOverlapCells_ = 0;
-    if (scenePeriodic_) {
-      namespace g = peclet::core::geom;
-      const auto hv = sceneB_->view();
-      const double lmin = std::fmin(sceneExtent_.x, std::fmin(sceneExtent_.y, sceneExtent_.z));
-      bool wide = false;
-      for (int i = 0; i < hv.instanceCount; ++i)
-        if (2.0 * g::instanceBound(hv, i).r > lmin)
-          wide = true;
-      if (wide) {
-        g::PeriodicBox<double> nobox{sceneExtent_.x, sceneExtent_.y, sceneExtent_.z, false};
-        auto qnp = g::SceneQueryDevice<double, CCMem>::build(*sceneB_, sceneOrigin_, sceneExtent_,
-                                                            nobox, /*accelerate=*/false);
-        const auto qv = qnp.view();
-        long cnt = 0;
-        Kokkos::parallel_reduce(
-            "peclet::flow::scene_image_overlap",
-            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
-            KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
-              const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * (double)(x + og.x),
-                                                 sm.a[1] + sm.b[1] * (double)(y + og.y),
-                                                 sm.a[2] + sm.b[2] * (double)(z + og.z)};
-              int oi = -1;
-              const std::size_t idx =
-                  (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny;
-              const double dp = qv.evalOwner(p, oi);
-              if ((dp < 0.0) != (din(idx) < 0.0))
-                ++acc;
-            },
-            cnt);
-        space.fence();
-        imageOverlapCells_ = cnt;
-        if (cnt > 0)
-          std::fprintf(stderr,
-                       "peclet.flow set_solid_from_scene WARNING: an instance is wider than the "
-                       "periodic box, and the UNION of its periodic images changes the solid at "
-                       "%ld cells on this rank. If it is a container wall (slab minus cavity), "
-                       "keep the slab's half-extent at half the box plus the wall thickness -- "
-                       "not more -- or the images refill the cavity. "
-                       "periodic_image_overlap_cells() returns this count.\n",
-                       cnt);
-      }
-    }
-    setSolidDevice(din, cutcellPressure);
-    if (hasMotion_)
-      checkMovingInstancesAreCut();
-  }
+  void setSolidFromScene(bool cutcellPressure);
 
-  /// A MOVING instance whose surface produces no fractional face aperture has no path for its
+/// A MOVING instance whose surface produces no fractional face aperture has no path for its
   /// wall velocity into the momentum operator: the no-slip datum enters ONLY through the cut-cell
   /// fold, so a box face sitting exactly on a grid plane (or a body smaller than a cell) behaves
   /// as a STATIONARY wall and `set_instance_motion` is silently inert -- the shear-driving plates
   /// of the Jeffery-orbit page at y = 16.0 produced max|u| = 0 (peclet-examples ISSUES.md). Count,
   /// per moving instance, the inner cells it owns that touch a fractional aperture; warn on zero.
-  void checkMovingInstancesAreCut() {
-    const int nI = nInst_;
-    if (nI <= 0 || cutOwner_.extent(0) != (std::size_t)nx_ * ny_ * nz_)
-      return;
-    // The datum enters the momentum operator only through the IBM overlay's CUT ROWS (staggered
-    // points whose stencil crosses the wall, `idMap >= 0`), not through face apertures: a plane
-    // cutting faces parallel to itself leaves every aperture 0 or 1 and still has cut rows.
-    Kokkos::View<long*, CCMem> cnt("peclet::flow::movingCut", nI);  // zero-initialised
-    auto own = cutOwner_;
-    const C3 e = e_;
-    const int nx = nx_, ny = ny_, nz = nz_;
-    CCExec space;
-    for (int c = 0; c < 3; ++c) {
-      if (C[c].idMap.extent(0) != n_)
-        continue;
-      Kokkos::View<const int*, CCMem> idm = C[c].idMap;
-      Kokkos::parallel_for(
-          "peclet::flow::moving_cut_count",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
-            const long ie = (long)(x + G) + (long)(y + G) * e.x + (long)(z + G) * (long)e.x * e.y;
-            if (idm(ie) < 0)
-              return;
-            const int o = own((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny);
-            if (o >= 0 && o < nI)
-              Kokkos::atomic_add(&cnt(o), (long)1);
-          });
-    }
-    // DEGENERATE points: a staggered point where the sampled sdf is EXACTLY zero is fluid to the
-    // mask (strict < 0) and not a ghost to its neighbours' folds (strict < 0 too), so a wall face
-    // on a lattice plane never folds its datum -- the body is inert. Count them per owner.
-    Kokkos::View<long*, CCMem> deg("peclet::flow::movingDegenerate", nI);
-    {
-      CCConst sd = CCConst(sdf_);
-      for (int c = 0; c < 3; ++c) {
-        const auto po = Grid::offset(c);
-        const double ox = po.x, oy = po.y, oz = po.z;
-        Kokkos::parallel_for(
-            "peclet::flow::moving_degenerate_count",
-            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
-            KOKKOS_LAMBDA(int x, int y, int z) {
-              const double sv = ccSampleExt(sd, e, x + G + ox, y + G + oy, z + G + oz);
-              if (sv != 0.0)
-                return;
-              const int o = own((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny);
-              if (o >= 0 && o < nI)
-                Kokkos::atomic_add(&deg(o), (long)1);
-            });
-      }
-    }
-    space.fence();
-    auto h = Kokkos::create_mirror_view(cnt);
-    Kokkos::deep_copy(h, cnt);
-    auto hd = Kokkos::create_mirror_view(deg);
-    Kokkos::deep_copy(hd, deg);
-    movingCutCells_.assign((std::size_t)nI, 0);
-    movingDegenerate_.assign((std::size_t)nI, 0);
-    for (int i = 0; i < nI; ++i) {
-      movingCutCells_[(std::size_t)i] = h(i);
-      movingDegenerate_[(std::size_t)i] = hd(i);
-    }
-#ifdef PECLET_FLOW_MPI
-    // A body lives on SOME rank: the count is global, and only rank 0 speaks.
-    if (distributed_) {
-      std::vector<long> g((std::size_t)nI, 0);
-      MPI_Allreduce(movingCutCells_.data(), g.data(), nI, MPI_LONG, MPI_SUM, comm_);
-      movingCutCells_ = g;
-      MPI_Allreduce(movingDegenerate_.data(), g.data(), nI, MPI_LONG, MPI_SUM, comm_);
-      movingDegenerate_ = g;
-      int rank = 0;
-      MPI_Comm_rank(comm_, &rank);
-      if (rank != 0)
-        return;
-    }
-#endif
-    for (int i = 0; i < nI; ++i) {
-      const bool moves = instLin_[3 * (std::size_t)i] != 0.0 || instLin_[3 * (std::size_t)i + 1] != 0.0 ||
-                         instLin_[3 * (std::size_t)i + 2] != 0.0 || instAng_[3 * (std::size_t)i] != 0.0 ||
-                         instAng_[3 * (std::size_t)i + 1] != 0.0 || instAng_[3 * (std::size_t)i + 2] != 0.0;
-      if (moves && movingCutCells_[(std::size_t)i] == 0)
-        std::fprintf(stderr,
-                     "peclet.flow set_solid_from_scene WARNING: instance %d has a velocity but owns "
-                     "NO cut row of the momentum operator (sub-cell body?): the wall velocity "
-                     "cannot enter and the body behaves as a STATIONARY wall. "
-                     "moving_instance_cut_cells() returns the counts.\n",
-                     i);
-      if (moves && movingDegenerate_[(std::size_t)i] > 0)
-        std::fprintf(stderr,
-                     "peclet.flow set_solid_from_scene WARNING: instance %d has a velocity and its "
-                     "surface passes EXACTLY through %ld staggered velocity points (a face on a "
-                     "lattice plane). Such points are fluid to the mask and not ghosts to the "
-                     "cut-cell fold, so the wall datum never enters there and the face acts as a "
-                     "STATIONARY wall. Shift the body off the lattice (any fractional offset). "
-                     "moving_instance_degenerate_points() returns the counts.\n",
-                     i, movingDegenerate_[(std::size_t)i]);
-    }
-  }
-  /// Per instance: cut rows of the momentum operator (all three components) at inner points this
+  void checkMovingInstancesAreCut();
+
+/// Per instance: cut rows of the momentum operator (all three components) at inner points this
   /// rank owns for it, recounted by set_solid_from_scene / rebuild_geometry when any instance
   /// moves (global under MPI; empty when nothing moves). Zero for a moving instance = its wall
   /// velocity is silently inert.
-  std::vector<long> movingInstanceCutCells() const { return movingCutCells_; }
-  /// Per instance: staggered points where the sampled sdf is exactly zero (see the warning).
-  std::vector<long> movingInstanceDegeneratePoints() const { return movingDegenerate_; }
+  std::vector<long> movingInstanceCutCells() const;
 
-  /// Cells on this rank whose solid/fluid sign was set by a periodic IMAGE of an instance wider
+/// Per instance: staggered points where the sampled sdf is exactly zero (see the warning).
+  std::vector<long> movingInstanceDegeneratePoints() const;
+
+/// Cells on this rank whose solid/fluid sign was set by a periodic IMAGE of an instance wider
   /// than the box (see setSolidFromScene); 0 when no instance is that wide or the images agree.
-  long periodicImageOverlapCells() const { return imageOverlapCells_; }
+  long periodicImageOverlapCells() const;
 
-  /// EXACT wall crossings straight from the scene, on device, on every rank -- the in-solver
+/// EXACT wall crossings straight from the scene, on device, on every rank -- the in-solver
   /// replacement for set_exact_crossings + scripts/exact_apertures_spheres.py.
   ///
   /// t[c][a](i) = the fraction in (0,1) along the unit segment from component c's staggered point
@@ -1828,727 +1467,51 @@ class Solver {
   /// Newton: contract 2 of the design note only guarantees SIGN correctness for the bound-only
   /// leaves (ellipsoid, superquadric, CSG seams), and a Newton step on a non-distance field can
   /// leave the bracket entirely.
-  void setExactCrossingsFromScene() {
-    if (!hasScene_)
-      throw std::runtime_error("set_exact_crossings_from_scene: call set_scene first");
-    const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
-    const auto q = sceneQ_->view();
-    const int nx = nx_, ny = ny_, nz = nz_;
-    const C3 og = og_;
-    const SceneMap sm = sceneMap();
-    CCExec space;
-    for (int c = 0; c < 3; ++c) {
-      // Component c's sample placement comes from the GRID POLICY: staggered puts it on the low
-      // face along axis c (offset -1/2 there), collocated at the cell center (offset 0) -- the
-      // collocated ghost projection consumes tEx_[c][c] at CENTERS, so hardcoding the staggered
-      // offsets here would silently compute crossings from the wrong points on that path.
-      const auto po = Grid::offset(c);
-      const double offc[3] = {(double)po.x, (double)po.y, (double)po.z};
-      for (int a = 0; a < 3; ++a) {
-        tEx_[c][a] = CCField("tEx", n);
-        CCField t = tEx_[c][a];
-        const double ox = offc[0], oy = offc[1], oz = offc[2];
-        const int aa = a;
-        Kokkos::parallel_for(
-            "peclet::flow::scene_crossings",
-            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
-            KOKKOS_LAMBDA(int x, int y, int z) {
-              // The segment is ONE CELL long along `aa`; `s` stays the dimensionless fraction in
-              // (0,1) the consumer expects, so only the endpoints and the step become physical.
-              const double px = sm.a[0] + sm.b[0] * ((double)(x + og.x) + ox),
-                           py = sm.a[1] + sm.b[1] * ((double)(y + og.y) + oy),
-                           pz = sm.a[2] + sm.b[2] * ((double)(z + og.z) + oz);
-              const double dx = aa == 0 ? sm.b[0] : 0.0, dy = aa == 1 ? sm.b[1] : 0.0,
-                           dz = aa == 2 ? sm.b[2] : 0.0;
-              const auto f = [&](double s) {
-                return q.eval(peclet::core::Vec3<double>{px + s * dx, py + s * dy, pz + s * dz});
-              };
-              const double f0 = f(0.0), f1 = f(1.0);
-              const std::size_t idx =
-                  (std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny;
-              if ((f0 < 0.0) == (f1 < 0.0)) {  // no sign change -> no crossing on this segment
-                t(idx) = Kokkos::Experimental::quiet_NaN_v<double>;
-                return;
-              }
-              double lo = 0.0, hi = 1.0, flo = f0;
-              for (int it = 0; it < 52; ++it) {  // bisection to ~1 ulp of the unit interval
-                const double mid = 0.5 * (lo + hi);
-                const double fm = f(mid);
-                if ((fm < 0.0) == (flo < 0.0)) {
-                  lo = mid;
-                  flo = fm;
-                } else {
-                  hi = mid;
-                }
-              }
-              t(idx) = 0.5 * (lo + hi);
-            });
-      }
-    }
-    space.fence();
-    hasExactCross_ = true;
-    sceneCrossings_ = true;  // scene-derived: valid on every rank, unlike the host override path
-  }
+  void setExactCrossingsFromScene();
 
-  /// Host entry point: upload the inner SDF once and delegate. Kept so every existing caller and
+/// Host entry point: upload the inner SDF once and delegate. Kept so every existing caller and
   /// the Python binding are unchanged.
-  void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure) {
-    const std::size_t n = (std::size_t)nx_ * ny_ * nz_;
-    if (sdfInner.size() != n)
-      throw std::runtime_error("set_solid: expected nx*ny*nz values");
-    CCField din("peclet::flow::sdfInner_d", n);
-    using HostConst = Kokkos::View<const double*, Kokkos::HostSpace,
-                                   Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
-    // The caller's SDF is a PHYSICAL signed distance sampled at cellCentres(); the solver's
-    // geometry lives on the unit lattice, where a distance is measured in cells. (Isotropic in
-    // Phase 1: one hRef divides all three axes. Anisotropic cells need the metric of Phase 2,
-    // because the level set's gradient then stops being the index-space normal.)
-    const double k = u_.lenToInt();  // exactly 1.0 in cell units
-    if (k != 1.0) {
-      std::vector<double> scaled(n);
-      for (std::size_t i = 0; i < n; ++i)
-        scaled[i] = sdfInner[i] * k;
-      Kokkos::deep_copy(din, HostConst(scaled.data(), n));
-    } else {
-      Kokkos::deep_copy(din, HostConst(sdfInner.data(), n));
-    }
-    setSolidDevice(din, cutcellPressure);
-  }
+  void setSolid(const std::vector<double>& sdfInner, bool cutcellPressure);
 
-  /// Build the three per-component Robust-Scaled cut-cell overlays + solid masks from the CURRENT
+/// Build the three per-component Robust-Scaled cut-cell overlays + solid masks from the CURRENT
   /// `sdf_` (extracted verbatim from setSolidDevice so that a wall-slip change can rebuild the
   /// closure without re-running the whole geometry setup). `resetU` zeroes the velocity, which the
   /// geometry path wants and a pure closure change must NOT do.
-  void buildVelocityOverlays(bool resetU) {
-    const bool useEx = hasExactCross_ && !Grid::collocated;  // exact-theta arrays are for the
-                                                             // staggered point placement
-    const mreal lam = (mreal)(wallSlip_ ? slipLambda_ : 0.0);
-    if (lam > 0.0f && slipSkipDev_.data() == nullptr)
-      slipSkipDev_ = Kokkos::View<int, CCMem>("peclet::flow::slipSkip");
-    for (int c = 0; c < 3; ++c) {
-      const Off3 off =
-          Grid::offset(c);  // velocity-unknown placement (staggered: -1/2 face; collocated: 0)
-      C[c].nCut = buildIbmOverlay<0>(
-          CCConst(sdf_), e_, G, off, /*Dirichlet*/ 0, C[c].ov, C[c].idMap, C[c].counter,
-          useEx ? CCConst(tEx_[c][0]) : CCConst(), useEx ? CCConst(tEx_[c][1]) : CCConst(),
-          useEx ? CCConst(tEx_[c][2]) : CCConst(), C3{nx_, ny_, nz_}, lam,
-          lam > 0.0f ? c : -1,
-          lam > 0.0f ? slipSkipDev_
-                     : Kokkos::View<int, CCMem>(),   // SCHEME 0 = point-value (matches CUDA
-                                                     // ibm_geometry_ext_k<0>)
-          (mreal)u_.hp[0], (mreal)u_.hp[1], (mreal)u_.hp[2]);  // §6.4 slip metric (trap 9)
-      if (lam > 0.0f) {
-        int sk = 0;
-        Kokkos::deep_copy(sk, slipSkipDev_);
-        slipSandwich_[(std::size_t)c] = sk;
-      } else {
-        slipSandwich_[(std::size_t)c] = 0;
-      }
-      ibmSolidMask(C[c].mask, CCConst(sdf_), e_, off);
-      // Gate 7: ibmSolidMask samples the sdf at the staggered offset through the CLAMPING
-      // sampler, so on the outermost ghost plane the mask can disagree with the neighbour's
-      // interior value. The moving-geometry advection fill reads the ghost mask (it decides
-      // which ghost rows carry the wall velocity), so take the owner's mask there. Static
-      // scenes never consume ghost masks: keep them byte-identical by gating on motion.
-      if (hasMotion_)
-        exchangeExtRaw(C[c].mask);
-      if (resetU)
-        Kokkos::deep_copy(C[c].u, 0.0);
-    }
-  }
+  void buildVelocityOverlays(bool resetU);
 
-  /// Mirror a cell-centred geometry field about every rank-owned FREE-SLIP (type 4) domain face
+/// Mirror a cell-centred geometry field about every rank-owned FREE-SLIP (type 4) domain face
   /// (the symmetric extension the BC asserts). No-op without a type-4 face.
-  void mirrorSdfSlipFaces(CCField f) {
-    if (!hasBc_)
-      return;
-    B3 e{e_.x, e_.y, e_.z};
-    for (int face = 0; face < 6; ++face)
-      if (bc_[face] == 4 && touchesGlobalFace(face))
-        bcMirrorGhost(f, e, G, face / 2, face % 2);
-  }
-  /// Device entry point (Layer 2): the inner SDF is ALREADY on device, so geometry never
-  /// round-trips through the host. This is the body every set_solid path shares.
-  void setSolidDevice(CCField din, bool cutcellPressure) {
-    cutcellPressure_ = cutcellPressure;
-    setSolidSelectScheme();
-    setSolidUploadSdf(din);
-    setSolidBuildOverlaysAndStencils();
-    setSolidVelocityMgAuto();
-    setSolidInitVelocityMg();
-    if (cutcellPressure_) {
-      setSolidBuildOpenness();
-      setSolidStarOverlay();
-      setSolidGhostProjectionOverlay(din);
-      setSolidInitPressureMg();
-    }
-    // Rung V5a (WO-Q): the colour block's cut-cell geometry is derived from the openness and the
-    // SDF that were just rebuilt, so set_solid AFTER enable_vof must rebuild it — the same reason
-    // initMpi rebuilds the block. Inert (and byte-identical) when VoF is off.
-    if (vofEnabled_)
-      buildVofBlock();
-    geometryBuilt_ = true;
-  }
-  // ---- setSolidDevice stages (QUALITY_PLAN G.1): pure cut-and-paste, each a contiguous
-  // block of the original function sharing only member fields and a CCExec. ----
-  void setSolidSelectScheme() {
-    if constexpr (Grid::collocated) {
-      // DEFAULT SWITCH (2026-08-25, user decision after the attractor campaign): the collocated
-      // scheme default is AUTO = the GHOST (fluid-only) projection — family-free, unconditionally
-      // stable, protocol-independent (doc/collocated_invisible_subspace.md; clean ladders both
-      // beds) — falling back to gauge-exact with a stderr notice on the configurations the ghost
-      // v1 does not support (porous / variable-rho / domain-BC / Chebyshev / analytic overrides).
-      // Any explicit scheme selection (set_collocated_scheme / set_face_interp /
-      // set_ghost_projection / set_fluid_only_constraint) disables AUTO.
-      if (colSchemeAuto_) {
-        const bool ok = !(porous_ || varRho_ || hasBc_ || useChebyshev_ || hasExactCross_ ||
-                          hasOpenOverride_ || fluidOnlyMode_ != 0);
-        if (ok) {
-          ghostProjection_ = true;
-          gpMatrixOrder_ = 2;
-          gpRhsOrder_ = 2;
-          faceInterp_ = 0;  // the ghost owns the operators the face-interp modes replace
-          gpNRows_ = -1;
-        } else {
-          if (ghostProjection_)
-            gpNRows_ = -1;
-          ghostProjection_ = false;
-          faceInterp_ = 9;
-          fprintf(stderr,
-                  "peclet::flow SolverColocated: AUTO scheme fell back to gauge-exact "
-                  "(configuration unsupported by the ghost projection v1). Select explicitly "
-                  "with set_collocated_scheme to silence this notice.\n");
-        }
-      }
-    }
-  }
-  void setSolidUploadSdf(CCField din) {
-#ifdef PECLET_FLOW_MPI
-    for (bool& d : momStencilDirty_)  // stencil ring re-exchange for the CA momentum sweeps
-      d = true;
-#endif
-    // Does the geometry actually contain solid? (all-fluid set_pressure_geometry passes sd>0
-    // everywhere -> stays false, keeping the channel/BFS path.) Device reduction: din lives on
-    // device now, and pulling it back just to scan it would defeat the point.
-    {
-      const std::size_t nInner = (std::size_t)nx_ * ny_ * nz_;
-      int anySolid = 0;
-      CCConst dinC(din);
-      Kokkos::parallel_reduce(
-          "peclet::flow::has_solid", Kokkos::RangePolicy<CCExec>(0, nInner),
-          KOKKOS_LAMBDA(const std::size_t i, int& acc) { acc = acc || (dinC(i) < 0.0); }, anySolid);
-      hasSolid_ = anySolid != 0;
-    }
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {  // a solid anywhere in the global domain enables the IBM momentum path
-      int local = hasSolid_ ? 1 : 0, global = 0;
-      MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MAX, comm_);
-      hasSolid_ = global != 0;
-    }
-#endif
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      // Multi-rank: din is THIS rank's LOCAL inner block; fill the inner cells ON DEVICE, then
-      // halo-exchange the ghosts (cross-rank + periodic) so the overlay/openness read the
-      // neighbour's SDF at the block boundary. (Was a host mirror + triple loop + full H2D.)
-      CCExec space;
-      const int ex = e_.x, ey = e_.y, nx = nx_, ny = ny_, nz = nz_, g = G;
-      CCField sdf = sdf_;
-      CCConst dinC(din);
-      Kokkos::parallel_for(
-          "peclet::flow::sdf_fill_inner",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
-            sdf((long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey) =
-                dinC((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny);
-          });
-      space.fence();
-      velDev_->exchange(sdf_);
-    } else
-#endif
-    {
-      // Single-rank: periodic-wrap gather on device (G4) — fills the whole extended block
-      // (inner + periodic ghosts) in one kernel. `din` is already device-resident.
-      CCExec space;
-      const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
-      CCField sdf = sdf_;
-      Kokkos::parallel_for(
-          "peclet::flow::sdf_periodic_wrap",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {ex, ey, ez}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
-            const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
-                      iz = (((z - g) % nz) + nz) % nz;
-            sdf((long)x + (long)y * ex + (long)z * (long)ex * ey) = din(
-                (std::size_t)ix + (std::size_t)iy * nx + (std::size_t)iz * (std::size_t)nx * ny);
-          });
-      space.fence();
-    }
-  }
-  void setSolidBuildOverlaysAndStencils() {
-    // FREE-SLIP / symmetry faces (type 4): the periodic/halo fill above wrapped the OPPOSITE side
-    // of the domain into the ghost band, so a wall at the far side becomes a phantom solid ON the
-    // symmetry plane (measured: a half Poiseuille channel closed by a type-4 face read u ~ 0
-    // there). The symmetric extension is the mirror of the interior about the face, which is
-    // exactly what the BC asserts about the geometry. Rank-owned faces only (touchesGlobalFace);
-    // the other face types keep the wrap they always had (byte-identical).
-    mirrorSdfSlipFaces(sdf_);
-    buildVelocityOverlays(/*resetU=*/true);
-    // MOVING GEOMETRY (rung 2): the wall-velocity fields must exist BEFORE the momentum operator
-    // is assembled -- rebuildStencils folds them into the inhomogeneous term. sdf_ and its ghosts
-    // are final at this point, which is what the central-difference normals read.
-    buildWallVelocity();
-    rebuildStencils();
-    // Staggered domain BCs bake an implicit-diffusion wall fold; the collocated grid instead uses
-    // explicit reflection ghosts (refreshed each smoother sweep), so it needs no fold.
-    if (hasBc_ && !Grid::collocated)
-      setupBcDiffusion();
-  }
-  void setSolidVelocityMgAuto() {
-#ifdef PECLET_FLOW_MPI
-    // AUTO: pick the V-cycle when the per-rank block is small (see setVelocityMultigridAuto). The
-    // decision uses the GLOBAL cells / ranks, so every rank agrees without communication. Only on
-    // the validated operator modes: IBM-periodic, all-fluid domain-BC (explicit advection), mixed.
-    if (!vmgExplicit_ && distributed_ && vmgAutoCells_ > 0) {
-      int np = 1;
-      MPI_Comm_size(comm_, &np);
-      const double perRank = (double)gnx_ * gny_ * gnz_ / (double)np;
-      const bool eligible = !varProps_ && !varRho_ && !hasDrag_ && !porous_ && !Grid::collocated &&
-                            (!hasBc_ || hasSolid_ || !implicitFou_);
-      // np > 1: a single rank has no halo latency to hide (RB-GS is the cheaper solver there) and
-      // a distributed np=1 run must stay bit-identical to the single-rank path. Global size floor:
-      // the rule is about latency-bound LARGE runs; a small global problem split across ranks
-      // (every ctest, every quick check) keeps RB-GS so distributed == single-rank stays exact.
-      const double global = (double)gnx_ * gny_ * gnz_;
-      useVelocityMg_ = eligible && np > 1 && global >= (double)vmgAutoMinGlobal_ &&
-                       perRank < (double)vmgAutoCells_;
-      if (useVelocityMg_) {
-        vmgLevels_ = 3;
-        vmgVcycles_ = 40;
-      }
-    }
-#endif
-  }
-  void setSolidInitVelocityMg() {
-    if (useVelocityMg_) {  // velocity-MG hierarchy: IBM (staircase/upwind), domain-BC
-                           // (const-coeff) or mixed (staircase + folds) mode
-      // The per-axis metric BEFORE the hierarchy is built (doc/anisotropic_metric.md trap 5):
-      // every level's b_a^L = mu' * w_a / cfac_a^2, and C3's aspect-ratio level rule reads it too.
-      vmg_.setMetric(u_.w, u_.hp);
-#ifdef PECLET_FLOW_MPI
-      // Distributed: level 0 on the solver's own decomposition (the g=2 velocity block), coarse
-      // levels coarsened in place with the even-block gate (no telescoping here yet -- measured
-      // first, see docs/SCALING_ISSUES.md issue 5).
-      if (distributed_)
-        vmg_.initMpi(*dec_, vmgLevels_, comm_);
-      else
-#endif
-        vmg_.init(nx_, ny_, nz_, vmgLevels_);
-      if (hasBc_)
-        vmg_.setBC(bc_);
-      if (!hasBc_ || hasSolid_) {  // the staircase (IBM / mixed) paths classify by volume fraction
-        vmgTheta_ = CCField("vmgTheta", n_);
-        vmgClean_ = CCField("vmgClean", n_);
-      }
-    }
-  }
-  void setSolidBuildOpenness() {
-      // Phase 2 C2 (doc/anisotropic_metric.md §4.5, trap 7): buildOpenness has taken dx,dy,dz
-      // all along and was handed 1.0 — `ccFractionCore` (the order-1 aperture model) forms the
-      // gradient (s+ - s-)/(2 dx) and the face extent |n_b| dy + |n_c| dz on the index lattice, so
-      // the right metric is h_a' (the marching-squares path, order 2, ignores them).
-      buildOpenness(ox_, oy_, oz_, CCConst(sdf_), e_, u_.hp[0], u_.hp[1], u_.hp[2],
-                    apertureOrder_);  // on the g=2 velocity block
-      if (hasOpenOverride_) {
-        // Analytic-SDF exact apertures (setOpennessOverride): overwrite the sampled-SDF openness
-        // with the user-provided inner fields + periodic wrap into the ghost ring (single-rank).
-        const std::vector<double>* src[3] = {&oxOverride_, &oyOverride_, &ozOverride_};
-        CCField dst[3] = {ox_, oy_, oz_};
-        for (int f = 0; f < 3; ++f) {
-          CCField din("peclet::flow::openOv_d", (std::size_t)nx_ * ny_ * nz_);
-          Kokkos::deep_copy(din, Kokkos::View<const double*, Kokkos::HostSpace,
-                                              Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
-                                     src[f]->data(), src[f]->size()));
-          CCExec space;
-          const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
-          CCField o = dst[f];
-          Kokkos::parallel_for(
-              "peclet::flow::open_override_wrap",
-              Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {ex, ey, ez}),
-              KOKKOS_LAMBDA(int x, int y, int z) {
-                const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
-                          iz = (((z - g) % nz) + nz) % nz;
-                o((long)x + (long)y * ex + (long)z * (long)ex * ey) =
-                    din((std::size_t)ix + (std::size_t)iy * nx +
-                        (std::size_t)iz * (std::size_t)nx * ny);
-              });
-          space.fence();
-        }
-      }
-      if constexpr (Grid::collocated) {  // static open-centroid wall distances (wall-aware map)
-        buildFaceCentroidDist(xcx_, xcy_, xcz_, CCConst(sdf_), e_);
-        buildCellFraction(cs_, CCConst(sdf_), e_, G);  // cell fluid fraction (embed)
-        if (faceInterp_ >= 5 &&
-            faceInterp_ <= 7) {  // EMBED: a solid-CENTRED cut cell (cs>0) is partially fluid and
-                                 // holds
-          // its reconstructed near-wall velocity — masking it to 0 (the sdf<0 IBM mask) drops the
-          // near-wall closure and shifts the whole channel. Re-mask from cs: pin ONLY fully-solid
-          // cells (cs≈0), keeping every partial-fluid cut cell live in the embed solve +
-          // projection.
-          CCConst cs = CCConst(cs_);
-          const std::size_t nn = n_;
-          for (int c = 0; c < 3; ++c) {
-            CCField m = C[c].mask;
-            Kokkos::parallel_for(
-                "peclet::flow::embed_solid_mask", Kokkos::RangePolicy<CCExec>(0, nn),
-                KOKKOS_LAMBDA(std::size_t i) { m(i) = cs(i) < 1e-6 ? 1.0 : 0.0; });
-          }
-        }
-      }
-      if (fluidOnlyMode_ == 1) {
-        // Mode-14a FLUID-ONLY constraint (setFluidOnlyConstraint): close every face with a
-        // solid-CENTERED side in the openness the pressure stack consumes. The aperture operator,
-        // the divergence, the face correction and the MG rediscretization all read these fields,
-        // so one filter makes constraint/operator/correction consistent by construction: pressure
-        // DOFs decouple at solid-centered cells (their rows go empty like solid cells), the
-        // invisible multiplier subspace of collocated_invisible_subspace.md S4 ceases to exist,
-        // and the operator stays SPD + 7-point (CG + CutcellMG untouched). Closure quality is
-        // Neumann-zero at the closed faces (the crude end of the fluid-only family -- measured,
-        // not assumed); the consistent-closure variants ride on the gp row machinery instead.
-        CCConst sd = CCConst(sdf_);
-        CCField oa[3] = {ox_, oy_, oz_};
-        C3 e = e_;
-        for (int a = 0; a < 3; ++a) {
-          CCField o = oa[a];
-          const long sa = (a == 0) ? 1 : (a == 1) ? (long)e.x : (long)e.x * e.y;
-          Kokkos::parallel_for(
-              "peclet::flow::fluid_only_openness",
-              Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {1, 1, 1},
-                                                             {e.x, e.y, e.z}),
-              KOKKOS_LAMBDA(int x, int y, int z) {
-                const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-                if (sd(i) < 0.0 || sd(i - sa) < 0.0)
-                  o(i) = 0.0;
-              });
-        }
-      }
-#ifdef PECLET_FLOW_MPI
-      // openness ghosts (the operator + divergence read the +neighbour face) -> exchange across
-      // ranks
-      if (distributed_) {
-        velDev_->exchange(ox_);
-        velDev_->exchange(oy_);
-        velDev_->exchange(oz_);
-      }
-#endif
-      if (hasBc_) {  // FLUX openness (beta): a face is OPEN only where it carries normal flux --
-                     // outflow, or
-        B3 e2{e_.x, e_.y, e_.z};
-        CCField oa[3] = {ox_, oy_, oz_};  // an inflow with nonzero normal velocity. Walls
-        for (int a = 0; a < 3; ++a)
-          for (int s = 0; s < 2; ++s) {    // and tangential-only Dirichlet faces (e.g. a
-            const int t = bc_[2 * a + s];  // lid: type 2 with zero normal vel) are CLOSED.
-            const bool open = (t == 3) || (t == 2 && (bcProf_[2 * a + s].extent(0) > 0 ||
-                                                      std::fabs(bcVel_[2 * a + s][a]) > 1e-12));
-            if (t != 0 && !open && touchesGlobalFace(2 * a + s))
-              bcZeroOpenness(oa[a], e2, G, a, s);  // rank-owned global face only
-          }
-      }  // the MG re-derives the OPERATOR openness alpha (inflow Neumann -> closed) per level via
-         // setBC.
-      copyInner(ox1_, e1_, 1, CCConst(ox_), e_, G);  // bridge openness g=2 -> g=1 for the MG
-      copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
-      copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
-  }
-  void setSolidStarOverlay() {
-      if (fluidOnlyMode_ == 2) {
-        // Design B: the MG hierarchy is built from the FILTERED openness (Design A's operator,
-        // the symmetric surrogate preconditioner + the 7-point part of the true operator); the
-        // geometric ox_/oy_/oz_ stay ORIGINAL for the divergence and the face correction. Filter
-        // the g=1 bridge in place, then build the star overlay from the original apertures.
-        if (porous_ || varRho_ || hasBc_ || ghostProjection_ || distributed_ || !Grid::collocated)
-          throw std::runtime_error(
-              "set_fluid_only_constraint(2): v1 is single-rank periodic collocated only");
-        CCExec space;
-        CCConst sd = CCConst(sdf_);
-        CCField oa1[3] = {ox1_, oy1_, oz1_};
-        const C3 e1 = e1_, e2 = e_;
-        for (int a = 0; a < 3; ++a) {
-          CCField o1 = oa1[a];
-          const long sa2 = (a == 0) ? 1 : (a == 1) ? (long)e2.x : (long)e2.x * e2.y;
-          Kokkos::parallel_for(
-              "peclet::flow::star_filter_bridge",
-              Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
-              KOKKOS_LAMBDA(int x, int y, int z) {
-                const long i2 =
-                    (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
-                if (sd(i2) < 0.0 || sd(i2 - sa2) < 0.0)
-                  o1((long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y) =
-                      0.0;
-              });
-        }
-        space.fence();
-        starCounter_ = Kokkos::View<int, CCMem>("star_counter");
-        const C3 nn{nx_, ny_, nz_};
-        nStar_ = buildStarOverlay(CCConst(sdf_), CCConst(ox_), CCConst(oy_), CCConst(oz_), e_, G,
-                                  nn, StarOverlay{}, starCounter_);
-        starOv_ = starMakeOverlay(std::max(nStar_, 1));
-        buildStarOverlay(CCConst(sdf_), CCConst(ox_), CCConst(oy_), CCConst(oz_), e_, G, nn,
-                         starOv_, starCounter_);
-      }
-  }
-  void setSolidGhostProjectionOverlay(CCField din) {
-    // A few setup paths below (the ghost-projection pocket decoupling) are host-side
-    // connected-component analyses and genuinely need the inner SDF on the host. Materialise it
-    // ONCE, lazily, so the common path keeps the device-resident benefit.
-    std::vector<double> sdfInnerHost_;
-    auto sdfInner_ = [&]() -> const std::vector<double>& {
-      if (sdfInnerHost_.empty()) {
-        const std::size_t nI = (std::size_t)nx_ * ny_ * nz_;
-        sdfInnerHost_.resize(nI);
-        Kokkos::deep_copy(
-            Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
-                sdfInnerHost_.data(), nI),
-            din);
-      }
-      return sdfInnerHost_;
-    };
-      if (ghostProjection_) {
-        // Directional ghost-cell projection: build the closure overlay + the binary (COUPLED)
-        // openness. The binary field replaces the geometric openness on the MG rails (the MG
-        // hierarchy becomes the symmetric surrogate preconditioner; the overlay delta enters only
-        // the fine-level BiCGStab matvec). The geometric ox_/oy_/oz_ above stay for diagnostics.
-        if (porous_ || varRho_ || hasBc_)
-          throw std::runtime_error(
-              "ghost projection: incompatible with porous/variable-rho/domain-BC (v1)");
-        const std::size_t nInner = (std::size_t)nx_ * ny_ * nz_;
-        gpOv_ = gpMakeOverlay((long)nInner);  // worst-case sizing, like the momentum overlay
-        gpIdMap_ = Kokkos::View<int*, CCMem>("gp_idmap", nInner);
-        gpCounter_ = Kokkos::View<int, CCMem>("gp_counter");
-        oxb_ = CCField("oxb", n_);
-        oyb_ = CCField("oyb", n_);
-        ozb_ = CCField("ozb", n_);
-        gpRh_ = CCField("gpRh", n1_);
-        gpT_ = CCField("gpT", n1_);
-        gpZ2_ = CCField("gpZ2", n1_);
-        if (distributed_)
-          gpX2_ = CCField("gpXg2", n_);  // g=2 staging block for the distributed BiCGStab matvec
-        // Fragmentation guard: the binary COUPLED-face condition is stricter than aperture
-        // connectivity, so tight-throat geometries (e.g. a random close packing with touching
-        // spheres) fragment the fluid graph into a main component + tiny pockets at the
-        // contacts. Each pocket adds its own null vector that the single global mean-removal
-        // cannot handle, and BiCGStab breaks down (measured: fields to ~1e152 on the RCP
-        // example). Host BFS over the coupled graph of the INNER sdf; fluid cells outside the
-        // largest component are treated as SOLID for the PROJECTION ONLY (sdfGp), decoupling
-        // their rows; the momentum step keeps the true sdf.
-        // Distributed: connectivity is a GLOBAL property (a pocket can span rank boundaries) and
-        // every rank must agree on the main component, so allgather the inner sdf, run the
-        // deterministic guard on the global grid identically on every rank, and keep this
-        // rank's block of the result.
-        std::vector<double> sdfGpHost;
-        {
-          std::vector<double> work;
-          int fx = nx_, fy = ny_, fz = nz_;
-          bool verbose = true;
-#ifdef PECLET_FLOW_MPI
-          int myRank = 0;
-          if (distributed_) {
-            MPI_Comm_rank(comm_, &myRank);
-            int nRanks = 1;
-            MPI_Comm_size(comm_, &nRanks);
-            fx = gnx_;
-            fy = gny_;
-            fz = gnz_;
-            verbose = myRank == 0;
-            std::vector<int> cnts(nRanks), disp(nRanks);
-            long acc = 0;
-            for (int r = 0; r < nRanks; ++r) {
-              const auto b = dec_->block(r);
-              cnts[r] = (int)(b.size[0] * b.size[1] * b.size[2]);
-              disp[r] = (int)acc;
-              acc += cnts[r];
-            }
-            std::vector<double> flat((std::size_t)acc);
-            MPI_Allgatherv(sdfInner_().data(), (int)sdfInner_().size(), MPI_DOUBLE, flat.data(),
-                           cnts.data(), disp.data(), MPI_DOUBLE, comm_);
-            work.assign((std::size_t)fx * fy * fz, 0.0);
-            for (int r = 0; r < nRanks; ++r) {
-              const auto b = dec_->block(r);
-              const double* src = flat.data() + disp[r];
-              for (int z = 0; z < (int)b.size[2]; ++z)
-                for (int y = 0; y < (int)b.size[1]; ++y)
-                  for (int x = 0; x < (int)b.size[0]; ++x)
-                    work[(std::size_t)(x + b.origin[0]) + (std::size_t)(y + b.origin[1]) * fx +
-                         (std::size_t)(z + b.origin[2]) * (std::size_t)fx * fy] =
-                        src[(std::size_t)x + (std::size_t)y * b.size[0] +
-                            (std::size_t)z * (std::size_t)b.size[0] * b.size[1]];
-            }
-          } else
-#endif
-            work = sdfInner_();
-          const std::size_t nTot = work.size();
-          const int nx = fx, ny = fy, nz = fz;
-          auto id = [&](int x, int y, int z) {
-            return (std::size_t)((x + nx) % nx) + (std::size_t)((y + ny) % ny) * nx +
-                   (std::size_t)((z + nz) % nz) * (std::size_t)nx * ny;
-          };
-          std::vector<int> comp(nTot, -1);
-          std::vector<std::size_t> stack;
-          int ncomp = 0, mainComp = -1;
-          std::size_t mainSize = 0, nActive = 0;
-          for (std::size_t seed = 0; seed < nTot; ++seed) {
-            if (comp[seed] >= 0 || work[seed] < 0.0)
-              continue;
-            std::size_t size = 0;
-            comp[seed] = ncomp;
-            stack.assign(1, seed);
-            while (!stack.empty()) {
-              const std::size_t c = stack.back();
-              stack.pop_back();
-              ++size;
-              const int x = (int)(c % nx), y = (int)((c / nx) % ny),
-                        z = (int)(c / ((std::size_t)nx * ny));
-              const int nb[6][3] = {{x - 1, y, z}, {x + 1, y, z}, {x, y - 1, z},
-                                    {x, y + 1, z}, {x, y, z - 1}, {x, y, z + 1}};
-              for (auto& q : nb) {
-                const std::size_t j = id(q[0], q[1], q[2]);
-                if (comp[j] >= 0 || work[j] < 0.0)
-                  continue;
-                // COUPLED face: mean-of-centers face sdf fluid AND both centers fluid
-                if (0.5 * (work[c] + work[j]) < 0.0)
-                  continue;
-                comp[j] = ncomp;
-                stack.push_back(j);
-              }
-            }
-            if (size > mainSize) {
-              mainSize = size;
-              mainComp = ncomp;
-            }
-            nActive += size;
-            ++ncomp;
-          }
-          if (ncomp > 1) {
-            std::size_t pockets = 0;
-            for (std::size_t i = 0; i < nTot; ++i)
-              if (work[i] >= 0.0 && comp[i] != mainComp) {
-                work[i] = -(std::abs(work[i]) * 1.001 + 1e-30);
-                ++pockets;
-              }
-            if (verbose)
-              printf("peclet::flow ghost projection: %d fluid components; decoupled %zu pocket "
-                     "cells outside the main component (%zu of %zu fluid cells)\n",
-                     ncomp, pockets, mainSize, nActive);
-          }
-#ifdef PECLET_FLOW_MPI
-          if (distributed_) {
-            const auto b = dec_->block(myRank);
-            sdfGpHost.resize(sdfInner_().size());
-            for (int z = 0; z < nz_; ++z)
-              for (int y = 0; y < ny_; ++y)
-                for (int x = 0; x < nx_; ++x)
-                  sdfGpHost[(std::size_t)x + (std::size_t)y * nx_ +
-                            (std::size_t)z * (std::size_t)nx_ * ny_] =
-                      work[(std::size_t)(x + b.origin[0]) + (std::size_t)(y + b.origin[1]) * fx +
-                           (std::size_t)(z + b.origin[2]) * (std::size_t)fx * fy];
-          } else
-#endif
-            sdfGpHost = std::move(work);
-        }
-        sdfGp_ = CCField("peclet::flow::sdfGp", n_);
-        CCField sdfGp = sdfGp_;  // the projection's sdf view (pockets decoupled); persisted for
-                                 // the collocated gpCenterGrad predictor/correction
-#ifdef PECLET_FLOW_MPI
-        if (distributed_) {
-          // local inner block + halo exchange (cross-rank + periodic), same as the sdf_ upload:
-          // the overlay build reads sdfGp ghosts up to +/-2 = G across block boundaries.
-          auto h = Kokkos::create_mirror_view(sdfGp_);
-          Kokkos::deep_copy(h, sdfGp_);
-          for (int z = 0; z < nz_; ++z)
-            for (int y = 0; y < ny_; ++y)
-              for (int x = 0; x < nx_; ++x)
-                h((long)(x + G) + (long)(y + G) * e_.x + (long)(z + G) * (long)e_.x * e_.y) =
-                    sdfGpHost[(std::size_t)x + (std::size_t)y * nx_ +
-                              (std::size_t)z * (std::size_t)nx_ * ny_];
-          Kokkos::deep_copy(sdfGp_, h);
-          velDev_->exchange(sdfGp_);
-        } else
-#endif
-        {  // upload + periodic wrap (same pattern as the sdf upload above)
-          CCField din("peclet::flow::sdfGpInner_d", nInner);
-          Kokkos::deep_copy(din, Kokkos::View<const double*, Kokkos::HostSpace,
-                                              Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
-                                     sdfGpHost.data(), sdfGpHost.size()));
-          CCExec space;
-          const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
-          Kokkos::parallel_for(
-              "peclet::flow::sdfgp_wrap",
-              Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {ex, ey, ez}),
-              KOKKOS_LAMBDA(int x, int y, int z) {
-                const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
-                          iz = (((z - g) % nz) + nz) % nz;
-                sdfGp((long)x + (long)y * ex + (long)z * (long)ex * ey) =
-                    din((std::size_t)ix + (std::size_t)iy * nx +
-                        (std::size_t)iz * (std::size_t)nx * ny);
-              });
-          space.fence();
-        }
-        gpBinaryOpenness(oxb_, oyb_, ozb_, CCConst(sdfGp), e_);
-        gpNRows_ = buildGpOverlay(CCConst(sdfGp), e_, G, C3{nx_, ny_, nz_}, gpOv_, gpIdMap_,
-                                  gpCounter_, gpMatrixOrder_, gpRhsOrder_,
-                                  hasExactCross_ ? CCConst(tEx_[0][0]) : CCConst(),
-                                  hasExactCross_ ? CCConst(tEx_[1][1]) : CCConst(),
-                                  hasExactCross_ ? CCConst(tEx_[2][2]) : CCConst(),
-                                  /*useGhost=*/distributed_);
-        if (gpDebugLevel() > 0) {  // PECLET_FLOW_GP_DEBUG row forensics (analysis only)
-          int gpDbgRank = 0;
-#ifdef PECLET_FLOW_MPI
-          if (distributed_)
-            MPI_Comm_rank(comm_, &gpDbgRank);
-#endif
-          gpDebugReport(gpOv_, gpNRows_, C3{nx_, ny_, nz_}, gpIdMap_, gpDbgRank);
-        }
-        copyInner(ox1_, e1_, 1, CCConst(oxb_), e_, G);  // MG surrogate = binary openness
-        copyInner(oy1_, e1_, 1, CCConst(oyb_), e_, G);
-        copyInner(oz1_, e1_, 1, CCConst(ozb_), e_, G);
-      }
-  }
-  void setSolidInitPressureMg() {
-      mg_.setBoundaryConditions(bc_);  // per-level wall openness + null-space gating (no-op if
-                                       // periodic); BEFORE initMpi — the per-level ghost width
-                                       // (CA smoothing) is chosen for the periodic operator only
-      // Phase 2 C3 (doc/anisotropic_metric.md §5, trap 5): the per-axis spacings BEFORE the level
-      // table is built — the aspect-ratio rule defers an axis that is already theta times coarser
-      // than the finest coarsenable one.  Exactly (1,1,1) on the isotropic path, where the rule
-      // returns today's decision verbatim.
-      mg_.setMetric(u_.hp);
-#ifdef PECLET_FLOW_MPI
-      if (distributed_)  // share the level-0 decomposition so the MG block matches this rank's
-                         // block
-        mg_.initMpi(gnx_, gny_, gnz_, nLevels_, comm_, dec_.get());
-      else
-#endif
-        mg_.init(nx_, ny_, nz_,
-                 nLevels_);  // geometric multigrid on the cut-cell openness (MG-PCG pressure)
-      // Phase 2 C2 (doc/anisotropic_metric.md §1.3/§3): the per-axis pressure weight
-      // w_a = 1/h_a'^2 IS `setOpenness`'s idx2/idy2/idz2 (the coarse levels already form
-      // w_a/cfac_a^2).  Exactly 1.0 on the isotropic path.
-      mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), u_.w[0], u_.w[1], u_.w[2]);
-      // Coarse-solve policy: an explicit set_pressure_graph_amg(True) forces agglomeration,
-      // otherwise the mode set by set_pressure_bottom (default auto) decides.
-      mg_.setAgglomerationMode(pressGraphAmg_ ? 1 : pressAgglomMode_);
-      Kokkos::deep_copy(phi_, 0.0);
-      Kokkos::deep_copy(P_, 0.0);
-  }
-  bool geometryBuilt() const { return geometryBuilt_; }
-  void requireNoGeometry(const char* who) const {
-    if (geometryBuilt_)
-      throw std::runtime_error(
-          std::string(who) +
-          ": call BEFORE the geometry (set_solid / set_pressure_geometry / set_solid_from_scene) "
-          "-- this setting is folded into the operators when the geometry is built, so a later "
-          "call would be silently ignored");
-  }
+  void mirrorSdfSlipFaces(CCField f);
 
-  void step() {
+/// Device entry point (Layer 2): the inner SDF is ALREADY on device, so geometry never
+  /// round-trips through the host. This is the body every set_solid path shares.
+  void setSolidDevice(CCField din, bool cutcellPressure);
+
+// ---- setSolidDevice stages (QUALITY_PLAN G.1): pure cut-and-paste, each a contiguous
+  // block of the original function sharing only member fields and a CCExec. ----
+  void setSolidSelectScheme();
+
+void setSolidUploadSdf(CCField din);
+
+void setSolidBuildOverlaysAndStencils();
+
+void setSolidVelocityMgAuto();
+
+void setSolidInitVelocityMg();
+
+void setSolidBuildOpenness();
+
+void setSolidStarOverlay();
+
+void setSolidGhostProjectionOverlay(CCField din);
+
+void setSolidInitPressureMg();
+
+bool geometryBuilt() const;
+
+void requireNoGeometry(const char* who) const;
+
+void step() {
     // ISSUES sweep item 1 (VOF_PLAN section 13 item 9): make `step()` ATOMIC across the two
     // explicit two-phase stability throws. Both used to fire AFTER the momentum half had already
     // advanced by the rejected dt -- the Weymouth-Yue boundedness cap from inside `advectVof`
@@ -3585,46 +2548,15 @@ I3 vofGlobalSize() const;
   }
   // Mirror the host motion arrays onto the device (KBs; rebuilt only when a driver changes a
   // body's velocity, not per step).
-  void buildSceneQuery() {
-    namespace g = peclet::core::geom;
-    g::PeriodicBox<double> box{sceneExtent_.x, sceneExtent_.y, sceneExtent_.z, scenePeriodic_};
-    sceneQ_ = std::make_shared<g::SceneQueryDevice<double, CCMem>>(
-        g::SceneQueryDevice<double, CCMem>::build(*sceneB_, sceneOrigin_, sceneExtent_, box));
-  }
+  void buildSceneQuery();
 
-  void refreshMotionFlag() {
-    hasMotion_ = false;
-    for (std::size_t k = 0; k < instLin_.size(); ++k)
-      if (instLin_[k] != 0.0 || instAng_[k] != 0.0)
-        hasMotion_ = true;
-  }
+void refreshMotionFlag();
 
-  void uploadMotion() {
-    const std::size_t m = (std::size_t)nInst_ * 3;
-    if (instCenD_.extent(0) != m) {
-      instCenD_ = Kokkos::View<double*, CCMem>("instCen", m);
-      instLinD_ = Kokkos::View<double*, CCMem>("instLin", m);
-      instAngD_ = Kokkos::View<double*, CCMem>("instAng", m);
-    }
-    if (m == 0)
-      return;
-    using HostConst =
-        Kokkos::View<const double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
-    Kokkos::deep_copy(instCenD_, HostConst(instCen_.data(), m));
-    Kokkos::deep_copy(instLinD_, HostConst(instLin_.data(), m));
-    Kokkos::deep_copy(instAngD_, HostConst(instAng_.data(), m));
-  }
+void uploadMotion();
 
-  peclet::core::geom::InstanceMotionView<double> motionView() const {
-    peclet::core::geom::InstanceMotionView<double> mv;
-    mv.cen = instCenD_.data();
-    mv.lin = instLinD_.data();
-    mv.ang = instAngD_.data();
-    mv.n = nInst_;
-    return mv;
-  }
+peclet::core::geom::InstanceMotionView<double> motionView() const;
 
-  // MOVING GEOMETRY (Layer 3 rungs 2-3): sample the scene's KINEMATIC WALL VELOCITY onto the grid.
+// MOVING GEOMETRY (Layer 3 rungs 2-3): sample the scene's KINEMATIC WALL VELOCITY onto the grid.
   //
   // At each probe p (component c's staggered point for rung 2; the cell centre for rung 3):
   //   n_hat = central difference of the SAMPLED sdf_, normalised   -- O(h), the v1 fidelity
@@ -3638,124 +2570,15 @@ I3 vofGlobalSize() const;
   // Per-direction crossing-point placement (via tEx_) would put the wall point on the exact
   // crossing instead of along the gradient; that is the documented refinement, deliberately not
   // taken in v1 -- see the design note.
-  void buildWallVelocity() {
-    if (!hasScene_ || !hasMotion_) {
-      // Never moved: the fields stay EMPTY and every consumer takes its old, bit-identical path.
-      // MOVED AND THEN STOPPED is different, and was wrong: wallVelView() keys off the field's
-      // extent, not hasMotion_, so a previously-built uBc_ would keep being folded into the
-      // momentum operator's inhomogeneity after the caller set the velocity back to zero. Zero
-      // them instead of stranding them. Allocation state is unchanged either way, so a run that
-      // never moves is bit-identical to before.
-      for (int c = 0; c < 3; ++c) {
-        if (uBc_[c].extent(0) == n_)
-          Kokkos::deep_copy(uBc_[c], 0.0);
-        if (uwCell_[c].extent(0) == n_)
-          Kokkos::deep_copy(uwCell_[c], 0.0);
-      }
-      return;
-    }
-    for (int c = 0; c < 3; ++c) {
-      if (uBc_[c].extent(0) != n_)
-        uBc_[c] = CCField("uBc", n_);
-      if (uwCell_[c].extent(0) != n_)
-        uwCell_[c] = CCField("uwCell", n_);
-    }
-    const auto q = sceneQ_->view();
-    const auto mv = motionView();
-    CCConst sd = CCConst(sdf_);
-    const C3 e = e_, og = og_;
-    const SceneMap sm = sceneMap();
-    CCExec space;
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    // rung 2: component c's own staggered point, storing component c
-    for (int c = 0; c < 3; ++c) {
-      const auto po = Grid::offset(c);
-      const double ox = po.x, oy = po.y, oz = po.z;
-      CCField out = uBc_[c];
-      const int cc = c;
-      Kokkos::parallel_for(
-          "peclet::flow::wall_velocity_stag", MD(space, {0, 0, 0}, {e.x, e.y, e.z}),
-          KOKKOS_LAMBDA(int lx, int ly, int lz) {
-            const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
-            const double sx = (double)lx + ox, sy = (double)ly + oy, sz = (double)lz + oz;
-            const double s0 = ccSampleExt(sd, e, sx, sy, sz);
-            const peclet::core::Vec3<double> grad{
-                0.5 * (ccSampleExt(sd, e, sx + 1, sy, sz) - ccSampleExt(sd, e, sx - 1, sy, sz)),
-                0.5 * (ccSampleExt(sd, e, sx, sy + 1, sz) - ccSampleExt(sd, e, sx, sy - 1, sz)),
-                0.5 * (ccSampleExt(sd, e, sx, sy, sz + 1) - ccSampleExt(sd, e, sx, sy, sz - 1))};
-            // wallPoint works on the INDEX level set (sd/grad are index-space); map the point and
-            // the wall foot into the scene's coordinates for the instance query, and the scene's
-            // physical wall velocity back into the index velocity the momentum datum carries.
-            const peclet::core::Vec3<double> pi{sx - G + og.x, sy - G + og.y, sz - G + og.z};
-            const peclet::core::Vec3<double> wi = peclet::core::geom::wallPoint(pi, s0, grad);
-            const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * pi.x, sm.a[1] + sm.b[1] * pi.y,
-                                               sm.a[2] + sm.b[2] * pi.z};
-            const peclet::core::Vec3<double> w{sm.a[0] + sm.b[0] * wi.x, sm.a[1] + sm.b[1] * wi.y,
-                                               sm.a[2] + sm.b[2] * wi.z};
-            const peclet::core::Vec3<double> v =
-                peclet::core::geom::instanceVelocity(mv, q.owner(p), w, q.box);
-            out(i) = cc == 0 ? v.x * sm.velToInt[0]
-                             : (cc == 1 ? v.y * sm.velToInt[1] : v.z * sm.velToInt[2]);
-          });
-    }
-    // rung 3: the whole wall velocity at cell centres (the wall-flux divergence source)
-    {
-      CCField ux = uwCell_[0], uy = uwCell_[1], uz = uwCell_[2];
-      Kokkos::parallel_for(
-          "peclet::flow::wall_velocity_cell", MD(space, {0, 0, 0}, {e.x, e.y, e.z}),
-          KOKKOS_LAMBDA(int lx, int ly, int lz) {
-            const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
-            const double sx = lx, sy = ly, sz = lz;
-            const double s0 = ccSampleExt(sd, e, sx, sy, sz);
-            const peclet::core::Vec3<double> grad{
-                0.5 * (ccSampleExt(sd, e, sx + 1, sy, sz) - ccSampleExt(sd, e, sx - 1, sy, sz)),
-                0.5 * (ccSampleExt(sd, e, sx, sy + 1, sz) - ccSampleExt(sd, e, sx, sy - 1, sz)),
-                0.5 * (ccSampleExt(sd, e, sx, sy, sz + 1) - ccSampleExt(sd, e, sx, sy, sz - 1))};
-            const peclet::core::Vec3<double> pi{sx - G + og.x, sy - G + og.y, sz - G + og.z};
-            const peclet::core::Vec3<double> wi = peclet::core::geom::wallPoint(pi, s0, grad);
-            const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * pi.x, sm.a[1] + sm.b[1] * pi.y,
-                                               sm.a[2] + sm.b[2] * pi.z};
-            const peclet::core::Vec3<double> w{sm.a[0] + sm.b[0] * wi.x, sm.a[1] + sm.b[1] * wi.y,
-                                               sm.a[2] + sm.b[2] * wi.z};
-            const peclet::core::Vec3<double> v =
-                peclet::core::geom::instanceVelocity(mv, q.owner(p), w, q.box);
-            ux(i) = v.x * sm.velToInt[0];
-            uy(i) = v.y * sm.velToInt[1];
-            uz(i) = v.z * sm.velToInt[2];
-          });
-    }
-    space.fence();
-    // GHOST PLANES (gate 7, 2026-09-02). Both kernels above take a centred difference of the
-    // SAMPLED sdf through ccSampleExt, which CLAMPS its indices: on the outermost ghost plane the
-    // gradient is wrong, and buildAdvInputs then writes that plane into the advection scratch
-    // where the SOU stencil (reach 2) carries it inward. Under MPI that plane is a neighbour's
-    // interior, computed there with a full stencil; single-rank periodic it is the wrapped
-    // interior plane. Either way the exchange is exact: fill the ghosts from the owner. Measured
-    // before the fix: np=2/4 max|du| 1.45e-07 / 1.14e-05 against 3e-7 (bit-exact at np=1), up to
-    // 3.5 % of max|u| with a body parked on a rank cut. Static scenes never reach this code.
-    for (int c = 0; c < 3; ++c) {
-      exchangeExtRaw(uBc_[c]);
-      exchangeExtRaw(uwCell_[c]);
-    }
-  }
+  void buildWallVelocity();
 
-  /// Raw ghost fill of an extended-block field: the rank halo exchange under MPI, the periodic
+/// Raw ghost fill of an extended-block field: the rank halo exchange under MPI, the periodic
   /// wrap single-rank. No boundary-condition fold is applied (this is for GEOMETRIC data such as
   /// the wall velocity, not a velocity iterate); non-periodic single-rank ghosts are left as the
   /// kernel computed them.
-  void exchangeExtRaw(CCField f) {
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      velDev_->exchange(f);
-      return;
-    }
-#endif
-    for (int a = 0; a < 3; ++a)
-      if (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0)
-        fillAxis(f, a);
-  }
+  void exchangeExtRaw(CCField f);
 
-  // MOVING GEOMETRY rung 3: the wall's own volume flux, folded into the cell divergence.
+// MOVING GEOMETRY rung 3: the wall's own volume flux, folded into the cell divergence.
   //
   // A rigid body sweeping through a cut cell injects a net flux through the WALL part of the
   // cell's fluid boundary; it is zero only integrally over a closed body, never cell by cell.
@@ -3765,28 +2588,9 @@ I3 vofGlobalSize() const;
   // so continuity over the fluid region reads  div_open(u) + u_w . A_wall = 0. divergOpen has
   // already written the first term into `d`; this adds the second, leaving rhs = -(d) untouched
   // in form. Inert unless a moving instance exists.
-  void addWallFluxDivergence(CCField d) {
-    if (!hasScene_ || !hasMotion_ || !wallFluxDiv_ || uwCell_[0].extent(0) != n_)
-      return;
-    CCExec space;
-    const C3 e = e_;
-    CCConst oxv = CCConst(ox_), oyv = CCConst(oy_), ozv = CCConst(oz_);
-    CCConst wx = CCConst(uwCell_[0]), wy = CCConst(uwCell_[1]), wz = CCConst(uwCell_[2]);
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    Kokkos::parallel_for(
-        "peclet::flow::wall_flux_div", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
-          const long i = (long)x + (long)y * sy + (long)z * sz;
-          const double ax = -(oxv(i + sx) - oxv(i));
-          const double ay = -(oyv(i + sy) - oyv(i));
-          const double az = -(ozv(i + sz) - ozv(i));
-          d(i) += wx(i) * ax + wy(i) * ay + wz(i) * az;
-        });
-    space.fence();
-  }
+  void addWallFluxDivergence(CCField d);
 
-  /// Hydrodynamic force and torque on each scene instance (Layer 4 rung 2) -- the resolved
+/// Hydrodynamic force and torque on each scene instance (Layer 4 rung 2) -- the resolved
   /// CFD-DEM feedback. Returns four 3*nInst blocks: force, torque, and the force split into its
   /// PRESSURE and VISCOUS parts (force == pressure + viscous), because the two carry different
   /// discretisation error and a deficit that sits in one of them localises itself.
@@ -3812,18 +2616,9 @@ I3 vofGlobalSize() const;
   /// Convert an interleaved result of 3*nInst blocks (force, TORQUE, then further force blocks —
   /// the layout both hydro getters use) from the solver's index units to the caller's. Exactly the
   /// identity in cell units.
-  void scaleForceTorque(std::vector<double>& out, std::size_t m) const {
-    const double kF = u_.forceTotalToPhys(), kT = u_.torqueToPhys();
-    if (kF == 1.0 && kT == 1.0)
-      return;
-    for (std::size_t b = 0; m > 0 && b * m < out.size(); ++b) {
-      const double k = (b == 1) ? kT : kF;
-      for (std::size_t i = b * m; i < (b + 1) * m && i < out.size(); ++i)
-        out[i] *= k;
-    }
-  }
+  void scaleForceTorque(std::vector<double>& out, std::size_t m) const;
 
-  /// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §4.4 — ADMITTED since commit C4.  With
+/// PHASE 2 (anisotropic cells), doc/anisotropic_metric.md §4.4 — ADMITTED since commit C4.  With
   /// `A_a = W_a V'/h_a'` the PHYSICAL fragment area vector in hRef^2 (`W_a = o_{a-} - o_{a+}`, which
   /// is what `A[a]` below holds) and `gu[a][b]` the index-velocity central difference:
   ///
@@ -3835,141 +2630,9 @@ I3 vofGlobalSize() const;
   /// association order, so at `V' = h_a' = 1` they are exact 1.0 multiplications and the arithmetic
   /// is bit-identical.  The lever arm `r = rp*sm.dToInt` is already a physical displacement in hRef
   /// units on every axis, and `torqueToPhys` is unchanged.
-  std::vector<double> hydroForceTorque() {
-    std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 12, 0.0);
-    if (!hasScene_ || nInst_ <= 0 || cutOwner_.extent(0) != (std::size_t)nx_ * ny_ * nz_)
-      return out;
-    const std::size_t m = (std::size_t)nInst_ * 3;
-    Kokkos::View<double*, CCMem> Fd("hydroF", m), Td("hydroT", m), Pd("hydroFp", m),
-        Vd("hydroFv", m);
-    Kokkos::deep_copy(Fd, 0.0);
-    Kokkos::deep_copy(Td, 0.0);
-    Kokkos::deep_copy(Pd, 0.0);
-    Kokkos::deep_copy(Vd, 0.0);
-    CCExec space;
-    const C3 e = e_, og = og_;
-    const int nx = nx_, ny = ny_;
-    const double mu = mu_;
-    // §4.4: kA[a] = V'/h_a' turns the index fragment normal W_a into the physical area vector; the
-    // hp ratios below turn the index-velocity gradient pair into the physical strain rate.
-    const double kA0 = u_.vol / u_.hp[0], kA1 = u_.vol / u_.hp[1], kA2 = u_.vol / u_.hp[2];
-    const double hp0 = u_.hp[0], hp1 = u_.hp[1], hp2 = u_.hp[2];
-    CCConst oxv = CCConst(ox_), oyv = CCConst(oy_), ozv = CCConst(oz_);
-    CCConst U = CCConst(C[0].u), Vv = CCConst(C[1].u), W = CCConst(C[2].u);
-    CCConst Pf = CCConst(P_);
-    CCConst sd = CCConst(sdf_);
-    const bool haveWallVel = (uwCell_[0].extent(0) == n_);
-    CCConst wcx = haveWallVel ? CCConst(uwCell_[0]) : CCConst();
-    CCConst wcy = haveWallVel ? CCConst(uwCell_[1]) : CCConst();
-    CCConst wcz = haveWallVel ? CCConst(uwCell_[2]) : CCConst();
+  std::vector<double> hydroForceTorque();
 
-    auto own = cutOwner_;
-    auto cen = instCenD_;
-    const auto box = sceneQ_->view().box;
-    const SceneMap sm = sceneMap();
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
-    Kokkos::parallel_for(
-        "peclet::flow::hydro_force", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const long st[3] = {1, e.x, (long)e.x * e.y};
-          const long i = (long)x + (long)y * st[1] + (long)z * st[2];
-          const double A[3] = {-(oxv(i + st[0]) - oxv(i)), -(oyv(i + st[1]) - oyv(i)),
-                               -(ozv(i + st[2]) - ozv(i))};
-          if (A[0] == 0.0 && A[1] == 0.0 && A[2] == 0.0)
-            return;  // no wall passes through this cell
-          const int oi = own((std::size_t)(x - G) + (std::size_t)(y - G) * nx +
-                             (std::size_t)(z - G) * (std::size_t)nx * ny);
-          if (oi < 0)
-            return;
-          // Cell-centred velocity from the staggered faces.
-          //
-          // A SOLID CELL STORES A MASKED ZERO, WHICH IS THE MATERIAL VELOCITY ONLY WHEN THE WALL
-          // IS AT REST. Reading it as physical is harmless for static geometry and a sign error
-          // for moving geometry: the stencil then sees a spurious shear of the wall speed over one
-          // cell across the entire surface. Measured on the Galilean pair -- with the velocity
-          // field itself frame-invariant to 7e-7, the integrated force came out +7.08e+01 in the
-          // lab frame and -1.71e+02 in a frame boosted by 0.7, a ratio of -2.42. A resolved
-          // CFD-DEM loop driven by that does not settle, it runs away. Substituting the wall's own
-          // velocity restores frame invariance; with static geometry uwCell_ is empty and this is
-          // bit-identical to the plain expression.
-          auto uc = [&](int a, long c) {
-            if (haveWallVel && sd(c) < 0.0)
-              return a == 0 ? wcx(c) : (a == 1 ? wcy(c) : wcz(c));
-            const CCConst& F = a == 0 ? U : (a == 1 ? Vv : W);
-            return 0.5 * (F(c) + F(c + st[a]));
-          };
-          // PLAIN CENTRAL DIFFERENCE, as the Layer-4 spec prescribes. It spans 2h while the wall
-          // sits a fraction of a cell away, so it under-reads the wall shear -- measured as a
-          // RESOLUTION-INDEPENDENT ~29% drag deficit that lives almost entirely in the viscous
-          // part. The obvious one-sided repair, differencing to the wall over the crossing
-          // distance theta, was TRIED AND IS WORSE: cut cells with theta -> 0 make 1/theta
-          // unbounded and the drag came out 17x too large. That is precisely why the momentum
-          // operator uses a Robust-Scaled reconstruction rather than a raw one-sided difference,
-          // and it is why a correct wall-aware traction has to come from that machinery (or from
-          // the discrete reaction the operator already applies) rather than from a patch here.
-          // See the design note's OPEN FOR REVIEW.
-          double gu[3][3];
-          for (int a = 0; a < 3; ++a)
-            for (int b = 0; b < 3; ++b)
-              gu[a][b] = 0.5 * (uc(a, i + st[b]) - uc(a, i - st[b]));
-          const double p = Pf(i);
-          const double kA[3] = {kA0, kA1, kA2};  // V'/h_a'  (exactly 1.0 isotropic)
-          const double hpv[3] = {hp0, hp1, hp2};
-          double dF[3], dFp[3], dFv[3];
-          for (int a = 0; a < 3; ++a) {
-            // A_wall is fluid-outward; the traction on the BODY takes -A_wall. Pressure and
-            // viscous parts are kept apart because they fail differently: the pressure term reads
-            // one cell-centred value, while the viscous term differences a velocity whose stencil
-            // reaches into solid cells -- so a deficit that lives entirely in one of them says
-            // immediately which.
-            dFp[a] = (p * A[a]) * kA[a];
-            double t = 0.0;
-            for (int b = 0; b < 3; ++b) {
-              const double rab = hpv[a] / hpv[b], rba = hpv[b] / hpv[a];
-              t += mu * (rab * gu[a][b] + rba * gu[b][a]) * (A[b] * kA[b]);
-            }
-            dFv[a] = -t;
-            dF[a] = dFp[a] + dFv[a];
-          }
-          // The instance centre and the min-image box live in the SCENE's coordinates; dF is an
-          // index-unit force, so the lever arm has to come back to index units (a uniform scale, so
-          // min-imaging in either system is the same shortening).
-          const peclet::core::Vec3<double> rp = peclet::core::geom::minImage(
-              peclet::core::Vec3<double>{sm.a[0] + sm.b[0] * (double)(x - G + og.x) - cen[3 * oi + 0],
-                                         sm.a[1] + sm.b[1] * (double)(y - G + og.y) - cen[3 * oi + 1],
-                                         sm.a[2] + sm.b[2] * (double)(z - G + og.z) - cen[3 * oi + 2]},
-              box);
-          const peclet::core::Vec3<double> r{rp.x * sm.dToInt, rp.y * sm.dToInt, rp.z * sm.dToInt};
-          for (int a = 0; a < 3; ++a) {
-            Kokkos::atomic_add(&Fd(3 * oi + a), dF[a]);
-            Kokkos::atomic_add(&Pd(3 * oi + a), dFp[a]);
-            Kokkos::atomic_add(&Vd(3 * oi + a), dFv[a]);
-          }
-          Kokkos::atomic_add(&Td(3 * oi + 0), r.y * dF[2] - r.z * dF[1]);
-          Kokkos::atomic_add(&Td(3 * oi + 1), r.z * dF[0] - r.x * dF[2]);
-          Kokkos::atomic_add(&Td(3 * oi + 2), r.x * dF[1] - r.y * dF[0]);
-        });
-    space.fence();
-    using HostV = Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
-    Kokkos::deep_copy(HostV(out.data(), m), Fd);
-    Kokkos::deep_copy(HostV(out.data() + m, m), Td);
-    Kokkos::deep_copy(HostV(out.data() + 2 * m, m), Pd);
-    Kokkos::deep_copy(HostV(out.data() + 3 * m, m), Vd);
-    scaleForceTorque(out, m);
-    scaleForceTorque(out, m);
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      // Instances are REPLICATED, so each rank integrates only the wall cells inside its own
-      // block; the body's total is the sum over ranks.
-      std::vector<double> g(out.size(), 0.0);
-      MPI_Allreduce(out.data(), g.data(), (int)out.size(), MPI_DOUBLE, MPI_SUM, comm_);
-      out.swap(g);
-    }
-#endif
-    return out;
-  }
-
-  /// Hydrodynamic force and torque per instance from the DISCRETE REACTION (route (b) of the
+/// Hydrodynamic force and torque per instance from the DISCRETE REACTION (route (b) of the
   /// design note's OPEN FOR REVIEW 1) -- the recommended source of the resolved CFD-DEM feedback.
   /// Returns two 3*nInst blocks: force, torque about the instance centre.
   ///
@@ -4063,286 +2726,13 @@ I3 vofGlobalSize() const;
   /// the traction paragraph of §4.4 uses, so the per-axis factor belongs to the area component the
   /// cross product consumes.  The "component-a normalisation" that puts `h_a' V'` on `F_a` above
   /// is an argument about MOMENTUM ROWS, and this term is not one.
-  std::vector<double> hydroForceTorqueReaction() {
-    std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 6, 0.0);
-    if (!hasScene_ || nInst_ <= 0)
-      return out;
-    if constexpr (Grid::collocated)
-      throw std::runtime_error("hydro_force_torque_reaction: staggered only (v1)");
-    if (implicitAdv() || porous_ || varRho_ || varProps_ || hasBc_ || ghostProjection_ ||
-        hasDrag_ || fluidOnlyMode_ != 0)
-      throw std::runtime_error(
-          "hydro_force_torque_reaction: implicit advection / porous / variable-properties / "
-          "domain-BC / ghost-projection / drag / star modes put momentum terms in the step that "
-          "this budget does not carry (v2) -- a missing term is a silently mis-attributed force");
-    if (!haveUStar_)
-      throw std::runtime_error("hydro_force_torque_reaction: call step() first (u* is stashed "
-                               "during the step)");
-    if (advect_ && (!haveAdvRhs_ || advRhs_[0].extent(0) != n_))
-      throw std::runtime_error("hydro_force_torque_reaction: the advective RHS term was not "
-                               "stashed -- set_advection was enabled after the last step()");
-    // u* ghosts: refresh with the standard fill (periodic wrap single-rank, halo exchange under
-    // MPI; hasBc_ is refused above so no BC is imposed). The audit's viscous term reads +-1.
-    for (int c = 0; c < 3; ++c)
-      fillVelGhostsTo(uStar_[c], c, 0);
-    const std::size_t m = (std::size_t)nInst_ * 3;
-    Kokkos::View<double*, CCMem> Fd("reactF", m), Td("reactT", m);
-    Kokkos::deep_copy(Fd, 0.0);
-    Kokkos::deep_copy(Td, 0.0);
-    CCExec space;
-    const C3 e = e_, og = og_;
-    const double idt = rho_ / dt_, mu = mu_;
-    const auto q = sceneQ_->view();
-    auto cen = instCenD_;
-    const auto box = q.box;
-    const SceneMap sm = sceneMap();
-    const bool hasFb = hasCellForce_;
-    // §4.4: the momentum row of component c is a force density in the component-c normalisation, so
-    // the total force carries h_c'*V' (exactly 1.0 isotropic -- an identity multiplication).
-    const double kR[3] = {u_.hp[0] * u_.vol, u_.hp[1] * u_.vol, u_.hp[2] * u_.vol};
-    // ... while the v3 wall-torque traction below carries V'/h_b' on its AREA vector (E3).
-    const double kA0 = u_.vol / u_.hp[0], kA1 = u_.vol / u_.hp[1], kA2 = u_.vol / u_.hp[2];
-    for (int c = 0; c < 3; ++c) {
-      CCConst un = CCConst(old_[c]), uc = CCConst(C[c].u), us = CCConst(uStar_[c]),
-              mk = CCConst(C[c].mask);
-      CCConst fb = hasFb ? CCConst(cellForce_[c]) : CCConst();
-      CCConst av = advect_ ? CCConst(advRhs_[c]) : CCConst();
-      const double fc = f_[c];
-      const auto po = Grid::offset(c);
-      const double offx = po.x, offy = po.y, offz = po.z;
-      const int cc = c;
-      const double kRc = kR[c];
-      Kokkos::parallel_for(
-          "peclet::flow::hydro_reaction",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                         {e.x - G, e.y - G, e.z - G}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
-            const long st[3] = {1, e.x, (long)e.x * e.y};
-            const long i = (long)x + (long)y * st[1] + (long)z * st[2];
-            if (mk(i) > 0.5)
-              return;  // solid staggered point: no fluid momentum here
-            double R = idt * (uc(i) - un(i)) - fc - (fb.data() ? fb(i) : 0.0) -
-                       (av.data() ? av(i) : 0.0);
-            for (int a = 0; a < 3; ++a) {
-              const long jp = i + st[a], jm = i - st[a];
-              if (mk(jp) <= 0.5)
-                R -= mu * (us(jp) - us(i));
-              if (mk(jm) <= 0.5)
-                R -= mu * (us(jm) - us(i));
-            }
-            // The scene (owner query, instance centres, min-image box) is in the CALLER's
-            // coordinates; F is an index-unit force, so the lever arm comes back to index units.
-            const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * ((double)(x - G + og.x) + offx),
-                                               sm.a[1] + sm.b[1] * ((double)(y - G + og.y) + offy),
-                                               sm.a[2] + sm.b[2] * ((double)(z - G + og.z) + offz)};
-            const int oi = q.owner(p);
-            if (oi < 0)
-              return;
-            // force ON the body = minus the wall force on the fluid, times h_c'V' (§4.4)
-            const double F = -R * kRc;
-            Kokkos::atomic_add(&Fd(3 * oi + cc), F);
-            const peclet::core::Vec3<double> rq = peclet::core::geom::minImage(
-                peclet::core::Vec3<double>{p.x - cen(3 * oi + 0), p.y - cen(3 * oi + 1),
-                                           p.z - cen(3 * oi + 2)},
-                box);
-            const peclet::core::Vec3<double> r{rq.x * sm.dToInt, rq.y * sm.dToInt,
-                                               rq.z * sm.dToInt};
-            // torque of the scalar force F e_c at lever r: r x (F e_c)
-            if (cc == 0) {
-              Kokkos::atomic_add(&Td(3 * oi + 1), r.z * F);
-              Kokkos::atomic_add(&Td(3 * oi + 2), -r.y * F);
-            } else if (cc == 1) {
-              Kokkos::atomic_add(&Td(3 * oi + 0), -r.z * F);
-              Kokkos::atomic_add(&Td(3 * oi + 2), r.x * F);
-            } else {
-              Kokkos::atomic_add(&Td(3 * oi + 0), r.y * F);
-              Kokkos::atomic_add(&Td(3 * oi + 1), -r.x * F);
-            }
-          });
-    }
-    space.fence();
-    // v3: the transposed-stress wall torque, mu * r x (n dA x Omega) per cut cell. n dA is the
-    // exact aperture wall-area vector with the BODY-outward orientation, (oE-oW, oN-oS, oT-oB)
-    // per the wallAreaProbe convention (sum x*(oE-oW) = +V_solid). Skipped entirely when no
-    // instance moves, so a static run stays bit-identical; a purely TRANSLATING instance has
-    // Omega = 0 and contributes exact zeros. The FORCE is deliberately left alone: the term's
-    // force integral is identically zero over a closed surface, and adding its discrete
-    // counterpart would only inject aperture-level rounding into an exactly-gated identity.
-    if (hasMotion_ && cutcellPressure_) {
-      CCConst oxv = CCConst(ox_), oyv = CCConst(oy_), ozv = CCConst(oz_);
-      auto ang = instAngD_;
-      Kokkos::parallel_for(
-          "peclet::flow::hydro_reaction_torque_transpose",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                         {e.x - G, e.y - G, e.z - G}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
-            const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
-            const long i = (long)x + (long)y * sy + (long)z * sz;
-            const double ax = oxv(i + sx) - oxv(i);
-            const double ay = oyv(i + sy) - oyv(i);
-            const double az = ozv(i + sz) - ozv(i);
-            if (ax == 0.0 && ay == 0.0 && az == 0.0)
-              return;  // not a cut cell (a sign test: the positive per-axis factors below cannot
-                       // change it)
-            // PHASE 2 (doc/anisotropic_metric.md §4.4, E3 reading 2): (ax, ay, az) is an INDEX
-            // aperture area vector; the physical one in hRef^2 is A_b = a_b V'/h_b' -- the same
-            // A the traction paragraph of §4.4 forms -- so the metric multiplies the AREA
-            // component b, which is the index the cross product with Omega consumes, applied
-            // OUTSIDE the existing expression so V'/h_b' = 1.0 reduces exactly.
-            const double Ax = ax * kA0, Ay = ay * kA1, Az = az * kA2;
-            const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * (double)(x - G + og.x),
-                                               sm.a[1] + sm.b[1] * (double)(y - G + og.y),
-                                               sm.a[2] + sm.b[2] * (double)(z - G + og.z)};
-            const int oi = q.owner(p);
-            if (oi < 0)
-              return;
-            // The scene's angular velocity is 1/time in the caller's units; the index one is
-            // omega*tRef (v = omega x r holds on both sides of the map).
-            const double wx = ang(3 * oi + 0) * sm.angToInt, wy = ang(3 * oi + 1) * sm.angToInt,
-                         wz = ang(3 * oi + 2) * sm.angToInt;
-            if (wx == 0.0 && wy == 0.0 && wz == 0.0)
-              return;
-            // v = (n dA) x Omega  -- the missing traction integrated over this cell's wall patch
-            const double vx = Ay * wz - Az * wy;
-            const double vy = Az * wx - Ax * wz;
-            const double vz = Ax * wy - Ay * wx;
-            const peclet::core::Vec3<double> rq = peclet::core::geom::minImage(
-                peclet::core::Vec3<double>{p.x - cen(3 * oi + 0), p.y - cen(3 * oi + 1),
-                                           p.z - cen(3 * oi + 2)},
-                box);
-            const peclet::core::Vec3<double> r{rq.x * sm.dToInt, rq.y * sm.dToInt,
-                                               rq.z * sm.dToInt};
-            Kokkos::atomic_add(&Td(3 * oi + 0), mu * (r.y * vz - r.z * vy));
-            Kokkos::atomic_add(&Td(3 * oi + 1), mu * (r.z * vx - r.x * vz));
-            Kokkos::atomic_add(&Td(3 * oi + 2), mu * (r.x * vy - r.y * vx));
-          });
-      space.fence();
-    }
-    // v4: owner-boundary attribution correction (see the doc block). Only meaningful with at
-    // least two instances and the incremental pressure (P_ holds the physical pressure).
-    if (nInst_ > 1 && incremental_ && cutcellPressure_) {
-      fillGhosts(P_);
-      CCConst pf = CCConst(P_);
-      for (int c = 0; c < 3; ++c) {
-        CCConst mk = CCConst(C[c].mask);
-        const long strd = (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y;
-        const auto po = Grid::offset(c);
-        const double offx = po.x, offy = po.y, offz = po.z;
-        const int cc = c;
-        // PHASE 2 (§4.4, a site the note's list does not name): this correction REMOVES a term that
-        // is already inside `F_a = -sum R_a h_a' V'`, so it must carry exactly the factor that term
-        // carries there.  The momentum row's pressure gradient is `w_c (P(i) - P(i-s))` since C1/C2,
-        // and F multiplies by `h_c' V'`, so the combined factor on `pi(i)` is
-        // `w_c h_c' V' = V'/h_c'` -- the physical area of the face, as it must be for a pressure
-        // force.  Exactly 1.0 isotropic (1.0/1.0), so this is an identity multiplication.
-        const double kP = u_.vol / u_.hp[c];
-        Kokkos::parallel_for(
-            "peclet::flow::hydro_reaction_owner_flux",
-            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                           {e.x - G, e.y - G, e.z - G}),
-            KOKKOS_LAMBDA(int x, int y, int z) {
-              const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-              const long j = i + strd;                       // the +s neighbour: visit once
-              if (mk(i) > 0.5 || mk(j) > 0.5)
-                return;                                      // wall faces stay in the wall force
-              const peclet::core::Vec3<double> pa{
-                  sm.a[0] + sm.b[0] * ((double)(x - G + og.x) + offx),
-                  sm.a[1] + sm.b[1] * ((double)(y - G + og.y) + offy),
-                  sm.a[2] + sm.b[2] * ((double)(z - G + og.z) + offz)};
-              peclet::core::Vec3<double> pb = pa;  // one cell along cc, in scene coordinates
-              (cc == 0 ? pb.x : cc == 1 ? pb.y : pb.z) += sm.b[cc];
-              const int oa = q.owner(pa), ob = q.owner(pb);
-              if (oa == ob || oa < 0 || ob < 0)
-                return;
-              // One-sided staggered gradients: point i reads pi(i) - pi(i-s); point j = i+s
-              // reads pi(j) - pi(i). The cell shared by this owner-boundary face is cell i,
-              // entering a's telescoped sum(grad pi) with +pi(i) (via point i) and b's with
-              // -pi(i) (via point j). F_attr = -sum R carries +sum(grad pi), so a's attribution
-              // holds +pi(i) and b's -pi(i) from this face: a pure transfer across the owner
-              // partition that belongs to NEITHER wall. Remove it from both, symmetrically --
-              // the pairwise cancellation is what keeps the total exact.
-              const double flux = pf(i) * kP;
-              Kokkos::atomic_add(&Fd(3 * oa + cc), -flux);
-              Kokkos::atomic_add(&Fd(3 * ob + cc), +flux);
-              const peclet::core::Vec3<double> raq = peclet::core::geom::minImage(
-                  peclet::core::Vec3<double>{pa.x - cen(3 * oa + 0), pa.y - cen(3 * oa + 1),
-                                             pa.z - cen(3 * oa + 2)},
-                  box);
-              const peclet::core::Vec3<double> rbq = peclet::core::geom::minImage(
-                  peclet::core::Vec3<double>{pa.x - cen(3 * ob + 0), pa.y - cen(3 * ob + 1),
-                                             pa.z - cen(3 * ob + 2)},
-                  box);
-              const peclet::core::Vec3<double> ra{raq.x * sm.dToInt, raq.y * sm.dToInt,
-                                                  raq.z * sm.dToInt};
-              const peclet::core::Vec3<double> rb{rbq.x * sm.dToInt, rbq.y * sm.dToInt,
-                                                  rbq.z * sm.dToInt};
-              if (cc == 0) {
-                Kokkos::atomic_add(&Td(3 * oa + 1), ra.z * -flux);
-                Kokkos::atomic_add(&Td(3 * oa + 2), -ra.y * -flux);
-                Kokkos::atomic_add(&Td(3 * ob + 1), rb.z * +flux);
-                Kokkos::atomic_add(&Td(3 * ob + 2), -rb.y * +flux);
-              } else if (cc == 1) {
-                Kokkos::atomic_add(&Td(3 * oa + 0), -ra.z * -flux);
-                Kokkos::atomic_add(&Td(3 * oa + 2), ra.x * -flux);
-                Kokkos::atomic_add(&Td(3 * ob + 0), -rb.z * +flux);
-                Kokkos::atomic_add(&Td(3 * ob + 2), rb.x * +flux);
-              } else {
-                Kokkos::atomic_add(&Td(3 * oa + 0), ra.y * -flux);
-                Kokkos::atomic_add(&Td(3 * oa + 1), -ra.x * -flux);
-                Kokkos::atomic_add(&Td(3 * ob + 0), rb.y * +flux);
-                Kokkos::atomic_add(&Td(3 * ob + 1), -rb.x * +flux);
-              }
-            });
-      }
-      space.fence();
-    }
-    using HostV = Kokkos::View<double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
-    Kokkos::deep_copy(HostV(out.data(), m), Fd);
-    Kokkos::deep_copy(HostV(out.data() + m, m), Td);
-    scaleForceTorque(out, m);
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      std::vector<double> g(out.size(), 0.0);
-      MPI_Allreduce(out.data(), g.data(), (int)out.size(), MPI_DOUBLE, MPI_SUM, comm_);
-      out.swap(g);
-    }
-#endif
-    return out;
-  }
+  std::vector<double> hydroForceTorqueReaction();
 
-  /// The number of unmasked (fluid) staggered momentum cells per component -- the exact discrete
+/// The number of unmasked (fluid) staggered momentum cells per component -- the exact discrete
   /// datum the reaction identity is stated against: at steady state, sum_bodies F_c = f_c * N_c.
-  std::array<long, 3> fluidMomentumCells() {
-    std::array<long, 3> out{0, 0, 0};
-    CCExec space;
-    const C3 e = e_;
-    for (int c = 0; c < 3; ++c) {
-      CCConst mk = CCConst(C[c].mask);
-      long n = 0;
-      Kokkos::parallel_reduce(
-          "peclet::flow::fluid_cells",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                         {e.x - G, e.y - G, e.z - G}),
-          KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
-            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-            if (mk(i) <= 0.5)
-              ++acc;
-          },
-          n);
-      out[(std::size_t)c] = n;
-    }
-    space.fence();
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      std::array<long, 3> g{0, 0, 0};
-      MPI_Allreduce(out.data(), g.data(), 3, MPI_LONG, MPI_SUM, comm_);
-      out = g;
-    }
-#endif
-    return out;
-  }
+  std::array<long, 3> fluidMomentumCells();
 
-  /// R0 DECOMPOSITION PROBE. The reaction identity in its full discrete form is
+/// R0 DECOMPOSITION PROBE. The reaction identity in its full discrete form is
   ///     sum_bodies F_c  =  f_c*N_c + sum_i fb_i + sum_i A_i  -  sum_i (rho/dt)(u_i - u^n_i)
   /// (every RHS term of the composed step, summed over the FLUID momentum cells; the viscous
   /// fluxes and grad(pi) telescope to zero over the whole fluid region). The Stokes gate drops the
@@ -4355,43 +2745,9 @@ I3 vofGlobalSize() const;
   /// through the fluid region's boundary, which at a cut wall is reconstructed from stencils that
   /// read the masked (wall-velocity) value one or two cells inside the solid. It is an O(h) wall
   /// term and converges away under refinement -- measure it, do not assume it.
-  std::vector<double> reactionBudgetTerms() {
-    std::vector<double> out(6, 0.0);
-    CCExec space;
-    const C3 e = e_;
-    const double idt = rho_ / dt_;
-    const bool haveA = advect_ && haveAdvRhs_ && advRhs_[0].extent(0) == n_;
-    for (int c = 0; c < 3; ++c) {
-      CCConst un = CCConst(old_[c]), uc = CCConst(C[c].u), mk = CCConst(C[c].mask);
-      CCConst av = haveA ? CCConst(advRhs_[c]) : CCConst();
-      double su = 0.0, sa = 0.0;
-      Kokkos::parallel_reduce(
-          "peclet::flow::budget_terms",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                         {e.x - G, e.y - G, e.z - G}),
-          KOKKOS_LAMBDA(int x, int y, int z, double& au, double& aa) {
-            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-            if (mk(i) > 0.5)
-              return;
-            au += idt * (uc(i) - un(i));
-            aa += av.data() ? av(i) : 0.0;
-          },
-          su, sa);
-      out[(std::size_t)c] = su;
-      out[(std::size_t)c + 3] = sa;
-    }
-    space.fence();
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      std::vector<double> g(6, 0.0);
-      MPI_Allreduce(out.data(), g.data(), 6, MPI_DOUBLE, MPI_SUM, comm_);
-      out.swap(g);
-    }
-#endif
-    return out;
-  }
+  std::vector<double> reactionBudgetTerms();
 
-  /// A_wall EXACTNESS PROBE (diagnostic for the Layer-4 force integral). For any smooth field q,
+/// A_wall EXACTNESS PROBE (diagnostic for the Layer-4 force integral). For any smooth field q,
   ///     sum_cells q(x_c) * A_wall,cell  ->  integral over the wall of q n_fluid dA
   /// and taking q = x_a turns that, by the divergence theorem applied to the SOLID interior, into
   /// exactly -V_solid along axis a and 0 on the others. So this returns
@@ -4399,77 +2755,18 @@ I3 vofGlobalSize() const;
   /// which must equal -V_solid componentwise if the aperture wall-area vectors are right. It
   /// isolates the GEOMETRY from the traction: a force deficit that shows up here is A_wall's, and
   /// one that does not is the pressure / velocity-gradient reconstruction's.
-  std::array<double, 3> wallAreaProbe() {
-    std::array<double, 3> out{0, 0, 0};
-    if (!hasScene_)
-      return out;
-    CCExec space;
-    const C3 e = e_, og = og_;
-    CCConst oxv = CCConst(ox_), oyv = CCConst(oy_), ozv = CCConst(oz_);
-    double sx = 0, sy = 0, sz = 0;
-    Kokkos::parallel_reduce(
-        "peclet::flow::wall_area_probe",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& ax, double& ay, double& az) {
-          const long st[3] = {1, e.x, (long)e.x * e.y};
-          const long i = (long)x + (long)y * st[1] + (long)z * st[2];
-          ax += (double)(x - G + og.x) * -(oxv(i + st[0]) - oxv(i));
-          ay += (double)(y - G + og.y) * -(oyv(i + st[1]) - oyv(i));
-          az += (double)(z - G + og.z) * -(ozv(i + st[2]) - ozv(i));
-        },
-        sx, sy, sz);
-    space.fence();
-    out = {sx, sy, sz};
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      std::array<double, 3> g{0, 0, 0};
-      MPI_Allreduce(out.data(), g.data(), 3, MPI_DOUBLE, MPI_SUM, comm_);
-      out = g;
-    }
-#endif
-    return out;
-  }
+  std::array<double, 3> wallAreaProbe();
 
-  /// Net wall flux this rank injects, sum over inner cells of u_w . A_wall -- the compatibility
+/// Net wall flux this rank injects, sum over inner cells of u_w . A_wall -- the compatibility
   /// datum of the singular pressure problem. Exactly zero for a translating body in a periodic
   /// box (the aperture differences telescope); small but nonzero for rotation and for a body
   /// crossing a non-periodic boundary. Reported, not corrected.
-  double wallFluxImbalance() {
-    if (!hasScene_ || !hasMotion_ || uwCell_[0].extent(0) != n_)
-      return 0.0;
-    CCExec space;
-    const C3 e = e_;
-    CCConst oxv = CCConst(ox_), oyv = CCConst(oy_), ozv = CCConst(oz_);
-    CCConst wx = CCConst(uwCell_[0]), wy = CCConst(uwCell_[1]), wz = CCConst(uwCell_[2]);
-    double sum = 0.0;
-    Kokkos::parallel_reduce(
-        "peclet::flow::wall_flux_sum",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
-          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
-          const long i = (long)x + (long)y * sy + (long)z * sz;
-          acc += wx(i) * -(oxv(i + sx) - oxv(i)) + wy(i) * -(oyv(i + sy) - oyv(i)) +
-                 wz(i) * -(ozv(i + sz) - ozv(i));
-        },
-        sum);
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      double g = 0;
-      MPI_Allreduce(&sum, &g, 1, MPI_DOUBLE, MPI_SUM, comm_);
-      return g;
-    }
-#endif
-    return sum;
-  }
+  double wallFluxImbalance();
 
-  // Empty when the geometry is static -> ibmModifyStencil takes its scalar u_bc path, unchanged.
-  CCConst wallVelView(int c) const {
-    return uBc_[c].extent(0) == n_ ? CCConst(uBc_[c]) : CCConst();
-  }
+// Empty when the geometry is static -> ibmModifyStencil takes its scalar u_bc path, unchanged.
+  CCConst wallVelView(int c) const;
 
-  void rebuildStencils() {
+void rebuildStencils() {
     // Per-axis viscous coefficient b_a = mu' * w_a (doc/anisotropic_metric.md §2); w == 1.0 on
     // the isotropic path, so this is literally `beta = mu_` there.
     const double idiag = rho_ / dt_, bx = mu_ * u_.w[0], by = mu_ * u_.w[1], bz = mu_ * u_.w[2];
@@ -9164,6 +7461,9 @@ using IbmSolver = Solver<Staggered>;
 
 }  // namespace peclet::flow
 
+#include "flow_ibm_scene.hpp"
+#include "flow_ibm_geometry.hpp"
+#include "flow_ibm_hydro.hpp"
 #include "flow_ibm_vof.hpp"
 #include "flow_ibm_phase_change.hpp"
 
