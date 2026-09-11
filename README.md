@@ -28,7 +28,9 @@ The original CUDA implementation has been **retired** (Kokkos became canonical, 
 validated bit-identical to the CUDA solver — to machine precision, and against Zick & Homsy sphere-array
 drag — before the CUDA sources were deleted (restore point: git tag `pre-cuda-retirement`). The shared
 cut-cell IBM primitives now live in `src/cut_cell_ibm.hpp`; the operator headers are `src/mac_*.hpp` +
-`src/flow_ibm.hpp`.
+`src/flow_ibm.hpp` (the `Solver` class declarations + state; its member definitions are split by
+physics domain across twelve `src/flow_ibm_*.hpp` headers it includes -- see `CLAUDE.md`'s Layout
+section).
 
 ## Capabilities
 

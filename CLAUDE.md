@@ -79,8 +79,27 @@ temporarily excluded. `docs.yml` publishes Doxygen from `docs/Doxyfile`.
 
 All header-only Kokkos C++20 in `namespace peclet::flow`.
 
-- `src/flow_ibm.hpp` — `IbmSolver`: diffusion, projection, the pressure drivers, Picard, domain BCs,
-  MPI; `src/flow_bindings.cpp` — the nanobind module.
+- `src/flow_ibm.hpp` — `template <class Grid> class Solver` (`IbmSolver` = `Solver<Staggered>`):
+  includes, the nested structs, every member DECLARATION (with its docstring) and the whole state
+  block (QUALITY_PLAN G.1: split 2026-09-11, 11886 -> 4046 lines). The out-of-line member
+  DEFINITIONS live in twelve domain headers included at the bottom (each reopens
+  `namespace peclet::flow`; declarations + state never move):
+  `flow_ibm_core.hpp` (allocation, rho/mu/dt + driver setters, stencils/ghosts/advection inputs,
+  the momentum-solve smoother family, reductions, gather/scatter, the field registry),
+  `flow_ibm_project.hpp` (`step()`, the `project()` stages, the `buildRhs` family,
+  `applyFaceAcceleration`), `flow_ibm_scene.hpp` (scene instances + motion upload, wall velocity,
+  wall-flux divergence, `setSolidFromScene`), `flow_ibm_geometry.hpp` (`setSolid`/`setSolidDevice`
+  + its nine stages, pressure geometry), `flow_ibm_hydro.hpp` (hydro force/torque, reaction-budget
+  terms, wall probes), `flow_ibm_vof.hpp` (colour field, cut-cell VoF, contact angle, VoF blocks,
+  curvature, surface tension / CSF RHS, advection, `stepAdaptive`), `flow_ibm_phase_change.hpp`
+  (interface area, mass flux, energy transport, budgets, the `pc*` machinery),
+  `flow_ibm_closures.hpp` (property closures/modes, porous continuity, drag, prop/eps ghosts),
+  `flow_ibm_scalars.hpp` (`addScalar`/`setScalarBc`/`advanceScalars` + BC application),
+  `flow_ibm_bc.hpp` (domain BCs/profiles, `pressureBcGhost`, `fillVelGhosts*`,
+  `setupBcDiffusion`), `flow_ibm_mpi.hpp` (`initMpi`, `redistribute`, `rebalanceByWeights`, the
+  post-repartition field-resize passes; `#ifdef PECLET_FLOW_MPI`-guarded), `flow_ibm_diagnostics.hpp`
+  (state getters, divergence probes, timers, the outflow/backflow census). `src/flow_bindings.cpp`
+  — the nanobind module.
 - `src/mac_cutcell_mg.hpp` (`CutcellMG`, pressure MG), `src/mac_velocity_mg.hpp` (`VelocityMG`),
   the `src/mac_*.hpp` operators, `src/cut_cell_ibm.hpp` (the Robust-Scaled overlay: `poly_*`,
   K/M/X/Nbc/R, `D_rescale`), `src/staggered_advection.hpp` (`sadv::advect`),
