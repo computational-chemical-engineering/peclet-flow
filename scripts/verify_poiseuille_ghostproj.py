@@ -11,14 +11,12 @@ the parabola). The closure-sign/theta physics is gated by tests/study/staggered_
 
 Single-rank only (ghost projection v1). Pattern: scripts/verify_poiseuille_flow.py.
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
-                                                os.environ.get("SDFLOW_BUILD", "build_cuda2"))))
-from peclet import flow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 
 def channel_sdf(nx, ny, nz, ylo, yhi):

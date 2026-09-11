@@ -8,14 +8,12 @@ centreline profiles to the tabulated Ghia, Ghia & Shin (1982) data at Re=100.
 Uses the canonical `sdflow` module. NO immersed solid -- the cavity is set up with set_domain_bc +
 set_pressure_geometry(all-fluid). Physical units: set_rho/set_mu; Re = U_lid * L / nu, L = N (grid units).
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
-                                                 os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 # Ghia, Ghia & Shin (1982), Re=100 -- u along the vertical centreline, v along the horizontal centreline.
 GHIA_Y = np.array([0, .0547, .0625, .0703, .1016, .1719, .2813, .4531, .5, .6172, .7344, .8516, .9531,

@@ -179,9 +179,10 @@ if(PECLET_FLOW_BUILD_TESTS)
 
   # Python gates on the module built HERE (PYTHONPATH = this tree). Run from the repo root so the
   # scripts' relative data paths resolve. `python_*` tests exit 77 -> ctest SKIPPED, never green-by-no-op.
-  # (the verify scripts also insert $SDFLOW_BUILD -- default `build_mpi`/`build` -- at the FRONT of
-  # sys.path, ahead of PYTHONPATH: point it here too, or a stale sibling tree gets tested instead)
-  set(_flow_py_env "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};SDFLOW_BUILD=${CMAKE_CURRENT_BINARY_DIR}")
+  # (scripts/_bootstrap.py's ensure_flow(): PYTHONPATH already makes peclet.flow importable here, so
+  # this is belt-and-suspenders -- but PECLET_FLOW_BUILD is what a stale-tree-free run relies on when
+  # PYTHONPATH is not the whole story, so keep it pointed at the SAME tree, never a stale sibling)
+  set(_flow_py_env "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};PECLET_FLOW_BUILD=${CMAKE_CURRENT_BINARY_DIR}")
   # The single-GPU accuracy + efficiency regression suite (tests/regression/README.md): Z&H sphere,
   # random-sphere bed, hollow-ring bed on the grid ladder, checked against the recorded baseline.
   add_test(NAME regression_staggered

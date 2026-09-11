@@ -35,8 +35,9 @@ import time
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 
 # --------------------------------------------------------------------------------------------
@@ -394,7 +395,7 @@ def main():
     ap.add_argument("--label", default="")
     args = ap.parse_args()
     names = list(CASES) if args.cases == "all" else args.cases.split(",")
-    res = dict(label=args.label, build=os.environ.get("SDFLOW_BUILD", "build"))
+    res = dict(label=args.label, build=flow.__file__)
     for nm in names:
         print(f"[{nm}]", flush=True)
         res[nm] = CASES[nm]()

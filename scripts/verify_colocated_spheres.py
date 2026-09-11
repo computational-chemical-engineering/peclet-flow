@@ -11,13 +11,12 @@ Zick & Homsy sphere-array drag. The plain area-weighted face averaging (Option A
 correction are tested here; escalation to the open-centroid reconstruction (Option B) / openness-aware cell
 gradient is only warranted if this gate fails.
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 
 def packing_sdf(N, radius_frac=0.18):

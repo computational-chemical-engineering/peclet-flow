@@ -14,7 +14,7 @@ sample points, relative to the reference field's rms on the same mask; pressure 
 Linf additionally reported on the interior fluid (sdf > 2 h_coarse) because the reference
 spline carries O(h_ref^2) kink error in the first wall band. Pairwise Richardson orders.
 
-Run:  SDFLOW_BUILD=build_cuda2 python tests/study/staggered_zh_exact_norms.py [--quick]
+Run:  PECLET_FLOW_BUILD=build_cuda2 python tests/study/staggered_zh_exact_norms.py [--quick]
       (--run-ref to (re)compute the reference; otherwise loaded from zh_exact_ref_N<ref>.npz)
 """
 import argparse
@@ -22,11 +22,12 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.abspath(os.environ.get("SDFLOW_BUILD", "build_cuda2")))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
+
 import numpy as np
 from scipy.ndimage import map_coordinates
-
-from peclet import flow
 
 PHI = 0.125
 MU = 0.1

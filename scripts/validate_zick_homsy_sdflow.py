@@ -12,15 +12,13 @@ K is dimensionless and unit-invariant.
 
 Usage:  python scripts/validate_zick_homsy_sdflow.py [N1,N2,...] [phi1,phi2,...]
 """
-import os
 import sys
 import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "build")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
-                                                 os.environ.get("SDFLOW_BUILD", "build_mpi"))))
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 # Zick & Homsy (1982), simple cubic: solid fraction c -> drag factor K.
 ZH_PHI = [0.000125, 0.001, 0.008, 0.027, 0.064, 0.125, 0.216, 0.343, 0.45, 0.5236]
@@ -58,7 +56,6 @@ def _upsample2(a):
 def run_sdflow(N, phi, mu=0.1, f=1e-3, dt=None, max_steps=600, tol=1e-6, seed=None):
     """Multilevel MG-PCG pressure solve (rediscretized per-level cut-cell coarse operators).
     `seed` = (u,v,w) from the next-coarser N, upsampled here, to start the march near steady."""
-    from peclet import flow as sdflow
     if dt is None:
         dt = 60.0 if N <= 64 else 120.0
     lv = max(2, int(np.log2(N)) - 1)                          # coarsen to ~4^3

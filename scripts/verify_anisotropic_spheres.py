@@ -17,8 +17,8 @@ The order/extrapolation estimator is the regression's own `fit_order` (f(N) = f_
 the cubic column is directly comparable to `perf_baseline.json`'s recorded `order` / `extrapolated`.
 
 Usage (from the repo root, venv active):
-    SDFLOW_BUILD=build python scripts/verify_anisotropic_spheres.py
-    SDFLOW_BUILD=build python scripts/verify_anisotropic_spheres.py --grids 16,24,32
+    PYTHONPATH=build python scripts/verify_anisotropic_spheres.py
+    PECLET_FLOW_BUILD=build python scripts/verify_anisotropic_spheres.py --grids 16,24,32
 """
 import argparse
 import os
@@ -27,11 +27,11 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
-                                                os.environ.get("SDFLOW_BUILD", "build"))))
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tests",
                                                 "regression")))
-from peclet import flow as sdflow  # noqa: E402
 from sdflow_regression import CFG, fit_order, zh_ref  # noqa: E402
 
 PHI = 0.216

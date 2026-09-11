@@ -7,7 +7,7 @@ The GAP between two computations on the same grid has no such limit: the benchma
 so a ceiling of 0.3 % is resolvable far below its own size, and the question "does the gap decay
 under refinement or flatten" gets a clean answer.
 
-    SDFLOW_BUILD=build_ge python tests/study/zh_collocated_gap.py [N ...]
+    PECLET_FLOW_BUILD=build_ge python tests/study/zh_collocated_gap.py [N ...]
 """
 import os
 import sys
@@ -15,9 +15,9 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 PHI0, K_ZH = 0.125, 4.292
 

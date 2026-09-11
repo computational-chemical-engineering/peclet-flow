@@ -15,14 +15,12 @@ L_e ~ 0.04*Re*H. With L >~ 6H the outlet is fully developed, so we check:
 
 Uses the canonical `sdflow` module. NO immersed solid. Physical units: set_rho/set_mu; Re = U*H/nu.
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
-                                                 os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 
 def run(H=32, L=224, Re=100.0, U=1.0, nz=4, max_steps=8000, dt=0.5):

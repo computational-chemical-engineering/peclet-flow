@@ -20,7 +20,7 @@ i.e. phi = 0 and div(u*) = 0.  Consequences, each measured here at the march's s
                                    This is a smoothing difference (h^2 D2u/4 in the bulk); the
                                    interesting part is whether the NEAR-WALL part floors.
 
-Usage:  SDFLOW_BUILD=build_ge BED=<packing.npz> python collocated_s1_reconciliation.py [N ...]
+Usage:  PECLET_FLOW_BUILD=build_ge BED=<packing.npz> python collocated_s1_reconciliation.py [N ...]
         (defaults N = 96 128 192 -> R = 6, 8, 12 on the 16^3-box beds)
 """
 import os
@@ -28,9 +28,9 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 BED = os.environ.get("BED", "")
 if not BED:

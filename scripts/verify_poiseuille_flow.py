@@ -14,13 +14,12 @@ tests method order and would catch a genuine first-order regression.)
 Uses the canonical `peclet.flow` module (one GPU as plain `python`, or multi-rank under `mpirun -np N`).
 Physical units: set_rho/set_mu, body force F is a force per unit volume (= -dp/dx). Grid spacing = 1.
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-from peclet import flow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 
 def channel_sdf(nx, ny, nz, ylo, yhi):

@@ -11,16 +11,16 @@ Runs the phi=0.60 bed, collocated gauge-exact, for STEPS steps regardless of any
 printing every EVERY steps: k (cell + flux estimators), m1 = rms|uf - halfavg(u)|/<|u|>,
 m2 = rms alpha-div(halfavg(u))/<|u|>, and the drift of each since the last print.
 
-  SDFLOW_BUILD=build_ge BED=...npz N=192 STEPS=20000 EVERY=500 DT=60 python collocated_longmarch.py
+  PECLET_FLOW_BUILD=build_ge BED=...npz N=192 STEPS=20000 EVERY=500 DT=60 python collocated_longmarch.py
 """
 import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 BED = os.environ["BED"]
 N = int(os.environ.get("N", "192"))

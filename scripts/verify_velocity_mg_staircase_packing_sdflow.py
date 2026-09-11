@@ -8,13 +8,11 @@ staircase velocity-MG (a) gives the EXACT RB-GS mean velocity / permeability on 
 at large dt, and (c) how the coarsening-level cap matters (deep coarsening dissolves the thin necks).
 """
 import os
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
-                                                 os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 
 def packing_sdf(N, R, target_phi, gap=2.0, seed=0):

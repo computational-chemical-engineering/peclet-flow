@@ -5,13 +5,12 @@ quasi-2D (periodic z), no immersed solid. This exercises the collocated domain-B
 reflection velocity ghosts (every component reflects about the boundary face), the explicit-reflection
 diffusion smoother, and the Neumann phi wall ghost in the approximate projection.
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 GHIA_Y = np.array([0, .0547, .0625, .0703, .1016, .1719, .2813, .4531, .5, .6172, .7344, .8516, .9531,
                    .9609, .9688, .9766, 1])

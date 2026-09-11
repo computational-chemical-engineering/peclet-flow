@@ -11,14 +11,13 @@ reattachment length x_r/S must grow with Re, mass is conserved, and the flow sta
 outflow leaves the approximate projection's O(h^2) residual, looser than the staggered 1e-6). The staggered
 solver reaches x_r/S 5.3 (Re=100) -> 8.3 (Re=200) on the Armaly/Biswas curve.
 """
-import os
 import sys
 import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 
 def inlet_profile(H, S, nz, U_in):

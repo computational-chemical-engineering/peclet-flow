@@ -24,7 +24,7 @@ Sweep s in [0,1) x N (channel width in cells) x solver in {stag, gauge-exact (mo
 (mode 0)}.  Errors are reported on the conserved face flux (primary; mean(alpha_x*uf)) and the
 cell mean, both relative to the exact discharge.
 
-  SDFLOW_BUILD=build_omp3 python tests/study/flatwall_displacement.py            # default sweep
+  PECLET_FLOW_BUILD=build_omp3 python tests/study/flatwall_displacement.py            # default sweep
   ... flatwall_displacement.py --N 8,16,32,64 --s 0.1,0.3,0.5,0.7,0.9 --exp E1,E1b,E2
 """
 import argparse
@@ -33,9 +33,9 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 MU, F0 = 0.1, 1e-3
 NX = NZ = 8          # periodic; the solution is x/z-invariant

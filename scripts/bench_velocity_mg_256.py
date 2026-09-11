@@ -13,14 +13,12 @@ Reports, per case:
     converging (CFL = U*dt up to O(1000)), where explicit advection and the IBM packed case would diverge.
 """
 import os
-import sys
 import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
-                                                 os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 
 def cavity(N, nz, Re, dt, mode, U=1.0, nsteps=200, vcyc=4, vel_iter=60, outer=2, pit=40):

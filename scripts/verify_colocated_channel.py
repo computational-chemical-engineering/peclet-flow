@@ -13,13 +13,12 @@ residual (vs the staggered exact projection), so the divergence tolerance here i
 1e-6 and is checked to SHRINK with resolution. Global mass conservation (flux_in == flux_out) is the
 primary continuity check.
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 
 def run(H, L, Re=100.0, U=1.0, nz=4, max_steps=8000, dt=0.5):

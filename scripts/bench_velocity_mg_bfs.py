@@ -6,14 +6,12 @@ resolution, and (b) stay free of any dt restriction (no immersed solid -> geomet
 Re_S = U_in*S/nu; the step is the inlet condition (set_domain_bc_profile), +x outflow, -y/+y no-slip walls.
 """
 import os
-import sys
 import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
-                                                 os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 
 def inlet_profile(H, S, nz, U_in):

@@ -16,8 +16,8 @@ cells, which has a non-zero mean there; the face field's correction is a plain g
 so its mean is the clean momentum-balance superficial velocity. This script measures whether averaging the
 divergence-free face field recovers the staggered accuracy.
 
-K = f N^3 / (6 pi mu R U_sup) (Z&H drag); err% vs the Z&H table. Run from sdflow/ with the OpenMP build:
-  SDFLOW_BUILD=build_omp PYTHONPATH=build_omp:../transport-core/python/build python scripts/study_avg_velocity_spheres.py
+K = f N^3 / (6 pi mu R U_sup) (Z&H drag); err% vs the Z&H table. Run from flow/ with the OpenMP build:
+  PYTHONPATH=build_omp:../transport-core/python/build python scripts/study_avg_velocity_spheres.py
 """
 import os
 import sys
@@ -26,10 +26,10 @@ import time
 import numpy as np
 
 _here = os.path.dirname(__file__)
-sys.path.insert(0, os.path.abspath(os.path.join(_here, "..", os.environ.get("SDFLOW_BUILD", "build_omp"))))
-sys.path.insert(0, os.path.abspath(os.path.join(_here, "..", "..", "transport-core", "python", "build")))
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
-from peclet import flow as sdflow  # noqa: E402
+sys.path.insert(0, os.path.abspath(os.path.join(_here, "..", "..", "transport-core", "python", "build")))
 
 ZH_PHI = [0.000125, 0.001, 0.008, 0.027, 0.064, 0.125, 0.216, 0.343, 0.45, 0.5236]
 ZH_K = [1.096, 1.212, 1.525, 2.008, 2.810, 4.292, 7.442, 15.4, 28.1, 42.1]

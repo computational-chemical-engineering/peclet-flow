@@ -6,7 +6,7 @@ Regenerates the page's collocated columns now that "gauge-exact" (the former set
 is the default. Reproducing the published "plain" column is the control that the harness matches
 the earlier runs.
 
-    SDFLOW_BUILD=build_ge python tests/study/collocated_zh_schemes.py
+    PECLET_FLOW_BUILD=build_ge python tests/study/collocated_zh_schemes.py
 """
 import os
 import sys
@@ -14,9 +14,9 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 PHI0, K_ZH = 0.125, 4.292
 

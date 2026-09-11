@@ -9,16 +9,16 @@ IC), then (1) perturb the converged state with a small random solenoidal-ish kic
 (2) march independently from IC-B (a bulk plug profile).  Attractor => all k agree to march
 noise.  Neutral modes => they differ at the plateau scale.
 
-  SDFLOW_BUILD=build_omp3 BED=...npz N=96 python collocated_neutral_probe.py
+  PECLET_FLOW_BUILD=build_omp3 BED=...npz N=96 python collocated_neutral_probe.py
 """
 import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 BED = os.environ["BED"]
 N = int(os.environ.get("N", "96"))

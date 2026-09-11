@@ -12,14 +12,12 @@ This checks, on a sphere in a periodic box (full 3-D NS + cut-cell IBM + cut-cel
 The fine residual + smoother guarantee the exact fine (sharp-IBM) answer regardless of the coarse op,
 so MG-on must converge to the same field as RB-GS.
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
-                                                 os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 N = 32
 NU = 0.1

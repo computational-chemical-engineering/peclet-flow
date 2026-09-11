@@ -10,10 +10,11 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.abspath(os.environ.get("SDFLOW_BUILD", "build_cuda2")))
-import numpy as np
-from peclet import flow
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
+import numpy as np
 
 def lattice_sdf(N, phi=0.125):
     R = (3 * phi / (4 * np.pi)) ** (1 / 3) * N

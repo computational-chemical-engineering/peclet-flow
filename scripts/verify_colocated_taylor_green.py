@@ -9,13 +9,12 @@ to remove the divergence the discrete advection injects each step. We check (a) 
 divergence-free (max_open_divergence -> solver tol) and (b) the velocity matches the exact decayed field,
 the L2 error shrinking with resolution. Grid spacing = 1; the vortex wavelength is the box length N (k=2pi/N).
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 
 def tg_fields(N, nz, U0, amp):

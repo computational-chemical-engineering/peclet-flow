@@ -19,7 +19,10 @@ Usage:
   python tests/regression/sdflow_regression.py              # run + check against the baseline (exit 0/1)
   python tests/regression/sdflow_regression.py --update     # run + (re)write the baseline
   python tests/regression/sdflow_regression.py --cases zh_sphere,random_spheres
-  python tests/regression/sdflow_regression.py --build build_mpi    # pick the sdflow build dir
+  python tests/regression/sdflow_regression.py --build build_mpi    # pick the flow build dir
+                                                                     # (only consulted if peclet.flow
+                                                                     # isn't already importable, same
+                                                                     # as PECLET_FLOW_BUILD)
   python tests/regression/sdflow_regression.py --quick      # coarser grids, looser march (fast smoke)
 """
 import argparse
@@ -33,6 +36,9 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 BASELINE = os.path.join(HERE, "perf_baseline.json")
+
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
 
 # Zick & Homsy (1982), simple cubic: solid fraction c -> Stokes drag factor K.
 ZH_PHI = [0.000125, 0.001, 0.008, 0.027, 0.064, 0.125, 0.216, 0.343, 0.45, 0.5236]
@@ -258,7 +264,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--update", action="store_true", help="(re)write the baseline instead of checking")
     ap.add_argument("--cases", default=",".join(CASES), help="comma-separated subset of cases")
-    ap.add_argument("--build", default="build", help="sdflow build dir under the repo root")
+    ap.add_argument("--build", default=None,
+                    help="flow build dir under the repo root, tried only if peclet.flow isn't "
+                         "already importable (same standing as PECLET_FLOW_BUILD -- an "
+                         "already-importable peclet.flow, e.g. via PYTHONPATH, always wins)")
     ap.add_argument("--solver", default="staggered", choices=["staggered", "colocated"],
                     help="which grid variant to run (sdflow.Solver / sdflow.SolverColocated)")
     ap.add_argument("--scheme", default="gauge-exact",
@@ -267,7 +276,8 @@ def main():
     ap.add_argument("--quick", action="store_true", help="coarser grids + looser march (fast smoke)")
     args = ap.parse_args()
 
-    sys.path.insert(0, os.path.join(ROOT, args.build))
+    explicit_build = os.path.join(ROOT, args.build) if args.build else None
+    ensure_flow(explicit_build=explicit_build)
     baseline = BASELINE if args.solver == "staggered" else os.path.join(
         HERE, "perf_baseline_colocated.json" if args.scheme == "gauge-exact"
         else f"perf_baseline_colocated_{args.scheme.replace('-', '_')}.json")

@@ -8,13 +8,12 @@ shrink with resolution on the collocated grid too. The u-component's wall-normal
 centre on BOTH grids, so the two solvers should agree closely. This exercises the collocated {0,0,0} IBM
 offset + implicit diffusion path (advection is ~0 for unidirectional flow; it is stressed in phase 3).
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 
 def channel_sdf(nx, ny, nz, ylo, yhi):

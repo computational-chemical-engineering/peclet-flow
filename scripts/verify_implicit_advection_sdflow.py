@@ -10,13 +10,12 @@ correction. This checks both:
   (2) moderate Re (where explicit is stable): the two agree -> same Koren scheme at convergence.
 Flow around a sphere in a periodic box (full 3-D NS + cut-cell IBM + cut-cell pressure). One GPU.
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 N = 32
 NU = 0.1

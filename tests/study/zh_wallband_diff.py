@@ -13,16 +13,16 @@ projected one), and split the difference by distance to the wall in CELL units.
   amplitude ~ 1/h  => mechanism found: a gauge/scaling error in the near-wall reconstruction
   amplitude ~ O(1) => the band contributes O(h) and the gap must come from somewhere else
 
-    SDFLOW_BUILD=build_ge python tests/study/zh_wallband_diff.py [N ...]
+    PECLET_FLOW_BUILD=build_ge python tests/study/zh_wallband_diff.py [N ...]
 """
 import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 PHI0 = 0.125
 BED = os.environ.get("BED", "")     # pack_bed.py npz (cubic box) -> use a sphere BED, not Z&H

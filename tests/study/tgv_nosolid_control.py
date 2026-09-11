@@ -12,16 +12,16 @@ F = exp(-2 nu k^2 t).  Fixed Re = U0*N/nu and fixed CFL per rung; measured at t*
 tile transits.  Backward-Euler time error is O(dt) and shared by both solvers; the col-stag
 difference cancels most of it, so ITS order is the clean spatial readout.
 
-  SDFLOW_BUILD=build_omp3 python tests/study/tgv_nosolid_control.py [N ...]   # default 16 32 64
+  PECLET_FLOW_BUILD=build_omp3 python tests/study/tgv_nosolid_control.py [N ...]   # default 16 32 64
 """
 import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", os.environ.get("SDFLOW_BUILD", "build"))))
-from peclet import flow  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts"))
+from _bootstrap import ensure_flow  # noqa: E402
+flow = ensure_flow()
 
 U0, RE, CFL, T_TRANSITS, NZ = 1.0, 100.0, 0.2, 1.0, 4
 

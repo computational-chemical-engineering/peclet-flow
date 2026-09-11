@@ -6,7 +6,8 @@
 # verify_periodic_spheres_sdflow.
 import sys, gc
 import numpy as np
-from peclet import flow as sdflow
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 N, MU, DT, F = 32, 0.1, 60.0, 1e-3
 

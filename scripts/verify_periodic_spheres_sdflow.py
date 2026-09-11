@@ -10,13 +10,12 @@ incompressibility. We report the Darcy permeability k = mu*<u>/F and check:
 Uses the canonical `sdflow` module (one GPU as plain `python`, or multi-rank under `mpirun -np N python`).
 Physical units: set_rho/set_mu, body force F is a force per unit volume (= -dp/dx). Grid units (dx = 1).
 """
-import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", os.environ.get("SDFLOW_BUILD", "build_mpi"))))
-from peclet import flow as sdflow  # noqa: E402
+from _bootstrap import ensure_flow  # noqa: E402
+sdflow = ensure_flow()
 
 
 def packing_sdf(N, radius_frac=0.18):
