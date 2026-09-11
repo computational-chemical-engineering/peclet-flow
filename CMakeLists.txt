@@ -49,10 +49,25 @@ option(PECLET_CUDA_RUNTIME_WHEEL "RPATH the modules to the nvidia-cuda-runtime w
 # (renamed from PECLET_FLOW_MREAL_DOUBLE); it is now `pip install . -C
 # cmake.define.PECLET_FLOW_OPERATOR_DOUBLE=ON` like every other option here. Directory-scoped so
 # every target in this tree (the module, tests/kokkos, tests/kokkos_mpi) sees the same macro.
-option(PECLET_FLOW_OPERATOR_DOUBLE "Operator (pressure + momentum + cut-cell overlay) storage in double, not float" OFF)
+# DEFAULT ON since 2026-09-11 (SCALING_ISSUES #1, maintainer decision). Float operator storage
+# silently breaks A*1 = 0 at high multigrid contrast: it fails with no error, and the porous path's
+# default MG-PCG was reporting a non-finite preconditioner on 2 of 5 steps, deterministically. P1
+# (2026-09-01) measured the cost of being wrong: RCP bed, rtol 1e-8 -- float 24/33/CAPPED iterations
+# with div 4.51e-06, versus 14/14/28 and div 9.51e-12 in double. ~12% step time is the price of a
+# default that cannot silently invalidate a dense-bed run.
+#
+# NOT the double-DIAGONAL fallback, which is a different thing and stays retired: it converges to the
+# float-face operator rather than the true one and separated 65x on divergence (P1, DIAGRESUM vs
+# exact). See docs/decisions/flow.md.
+#
+# Opt out with -DPECLET_FLOW_OPERATOR_DOUBLE=OFF for the float operator and its ~12%.
+option(PECLET_FLOW_OPERATOR_DOUBLE "Operator (pressure + momentum + cut-cell overlay) storage in double, not float" ON)
 if(PECLET_FLOW_OPERATOR_DOUBLE)
   add_compile_definitions(PECLET_FLOW_OPERATOR_DOUBLE=1)
-  message(STATUS "flow: operator storage precision = DOUBLE (+~12% step time; see CLAUDE.md)")
+  message(STATUS "flow: operator storage precision = DOUBLE (default since 2026-09-11; +~12% step time)")
+else()
+  message(WARNING "flow: operator storage precision = FLOAT. A*1 = 0 can break SILENTLY at high MG "
+                  "contrast (SCALING_ISSUES #1); dense-bed results from this build are not trustworthy.")
 endif()
 
 # Test suites in this tree (suite/docs/QUALITY_PLAN.md §3.D): OFF by default so a wheel build is
