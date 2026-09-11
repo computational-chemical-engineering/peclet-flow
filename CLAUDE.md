@@ -291,12 +291,19 @@ deselected on its own; name the driver you want instead.
   `Real`-templating `IbmOverlayT`'s siblings got, done in `core`, out of this repo's scope.
   `PECLET_FLOW_OPERATOR_DOUBLE=ON` therefore widens `gpOv_`'s SoA storage (so it no longer
   round-trips a computed value through a *second*, separate float narrowing) without changing the
-  ghost closure's own arithmetic. Measured (`build_q_dbl`, 2026-09-11): 151/155 non-bench
-  (`regression_staggered` passes; the `bodyforce_ghost_mpi_*`/`dragbeta_ghost_mpi_*` MPI cases
-  that actually exercise `'ghost'` all pass); the 4 failures (`verify_lid_cavity_sdflow`,
-  `vardensity_mpi_np4`, `vof_bc_mpi_np2`, `vof_bc_mpi_np4`) are variable-density MG iteration-count
-  parity and VOF cross-rank colour-reduction tolerance, none on the ghost path — consistent with
-  the pre-existing float-tuned tolerance/reduction-order sensitivity this option already carried.
+  ghost closure's own arithmetic. **Double is the DEFAULT since 2026-09-12** and the battery is
+  clean at it: 155/155 non-bench on host-openmp. An earlier reading of "151/155, four float-tuned
+  gates" (`build_q_dbl`, 2026-09-11) is superseded — two of those four (`vof_bc_mpi_np2`,
+  `vof_bc_mpi_np4`) do not reproduce, and the other two were defects in the GATES, not tolerance
+  noise, each fixed with its cause recorded in the commit:
+  `verify_lid_cavity_sdflow` measured steady state by the plane-MEAN of u, which is near zero by
+  symmetry and therefore mostly pressure-solve round-off, so it halted the march at step 400 instead
+  of 650 and compared an unconverged field to Ghia; it now measures the largest velocity change on
+  the plane, and float and double then agree to four digits (both 1000 steps, u_rms 0.0067, v_rms
+  0.0037, centreline min u −0.2124). `vardensity_mpi_np4` demanded EXACT Chebyshev V-cycle-count
+  equality between the distributed and single-rank solves, which is not well posed above np = 1
+  because the stopping test reads a global reduction whose summation order differs; the count gate
+  is now exact at np = 1 and ±1 above it, while the answer tolerances are untouched.
 - `set_pressure_bottom("auto" | "smoother" | "agglomerated")` — **`"auto"` is the default**: it
   agglomerates the coarsest level into a global, decomposition-independent operator and solves it
   exactly whenever that grid exceeds `set_pressure_bottom_extent` (4) cells on any axis. Porous and
