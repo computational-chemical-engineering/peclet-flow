@@ -49,7 +49,12 @@ four independent np = 1 jobs.
 **`Solver<Grid>` is compiled ONCE per grid, not once per consumer** (QUALITY_PLAN G.8, 2026-09-11).
 `src/flow_solver_staggered.cpp` and `src/flow_solver_colocated.cpp` hold the explicit instantiations;
 `cmake/PecletFlowSolver.cmake` builds them into a static library that the module and all 45 tests
-link, and `flow_ibm.hpp` ends with the matching `extern template` declarations. Two consequences for
+link, and `flow_ibm.hpp` ends with the matching `extern template` declarations. It also includes the
+twelve domain headers **only in those two TUs** (`PECLET_FLOW_INSTANTIATING`), so everything else
+sees declarations alone and an edit to one domain header rebuilds four objects, not forty-nine. The
+one rule that follows: a member *template* of `Solver` that a test or the bindings calls must be
+defined in `flow_ibm.hpp` itself — an explicit instantiation of the class does not cover member
+templates, so a definition left in a domain header would not link. Two consequences for
 anyone editing the build: a target that includes `flow_ibm.hpp` must link `peclet_flow_solver`
 (tests/kokkos links every target in the directory, so a new single-rank test needs no edit at all),
 and it must link the variant matching its `PECLET_FLOW_MPI` — which is why the macro is a PUBLIC
@@ -103,7 +108,8 @@ All header-only Kokkos C++20 in `namespace peclet::flow`.
 - `src/flow_ibm.hpp` — `template <class Grid> class Solver` (`IbmSolver` = `Solver<Staggered>`):
   includes, the nested structs, every member DECLARATION (with its docstring) and the whole state
   block (QUALITY_PLAN G.1: split 2026-09-11, 11886 -> 4046 lines). The out-of-line member
-  DEFINITIONS live in twelve domain headers included at the bottom (each reopens
+  DEFINITIONS live in twelve domain headers included at the bottom — since G.8, only in the two
+  instantiation TUs (each reopens
   `namespace peclet::flow`; declarations + state never move):
   `flow_ibm_core.hpp` (allocation, rho/mu/dt + driver setters, stencils/ghosts/advection inputs,
   the momentum-solve smoother family, reductions, gather/scatter, the field registry),
@@ -151,8 +157,11 @@ recorded decision, not a judgement call in the moment.
 - **The ORB must never split the wall-normal axis** in wall-bounded flow.
 - **Geometric const-coeff operators + masking are the validated defaults**; Galerkin/CG is opt-in.
 - **Momentum advection uses the actual wall velocity field**, not `maskVelocity`'s solid zeros.
-- **Float `MReal` operator storage silently breaks A·1=0** at high MG contrast — it fails without an
-  error, so it will not announce itself.
+- **Operator storage is double by default** (`PECLET_FLOW_OPERATOR_DOUBLE=ON` since 2026-09-11).
+  Float storage silently breaks A·1=0 at high MG contrast — it fails without an error, so it will
+  not announce itself; that is why it is no longer the default. Opting out costs correctness on
+  dense beds, not just accuracy. The double-*diagonal* fallback is a different thing and stays
+  retired (it converges to the float-face operator; 65× worse on divergence).
 - **The rotational (Timmermans) pressure update must be restored, not the non-rotational Goda form.**
 - **`set_ghost_projection(True)` must be called before `set_solid`** — call order is load-bearing.
 - **Distributed cut-cell MG coarse levels must be nested**, never independently re-decomposed.

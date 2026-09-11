@@ -4672,6 +4672,19 @@ using IbmSolver = Solver<Staggered>;
 
 }  // namespace peclet::flow
 
+// The twelve domain headers hold the out-of-line member DEFINITIONS, and since G.8 only the two
+// instantiation TUs need them: everything else linking `peclet_flow_solver` gets the declarations
+// above and calls into the library.  Narrowing the include to those TUs is what makes an edit to one
+// domain header rebuild FOUR objects instead of all 49 (measured: 9m10s -> 4m35s of CPU at -j8).
+//
+// The one thing this forbids: a member TEMPLATE of `Solver` may not be defined in a domain header
+// and called from a consumer -- an explicit instantiation of the class does not cover member
+// templates, so the consumer would need the definition and would fail to link.  There is exactly one
+// member template on the class today (the VoF `template <class Fill, class Color, class ColorDu>`
+// pair), it is used only from inside the class, and the whole battery links.  If you add one that a
+// test or the bindings must call, declare it in this file and define it HERE, above this point --
+// not in a domain header.
+#ifdef PECLET_FLOW_INSTANTIATING
 #include "flow_ibm_core.hpp"
 #include "flow_ibm_project.hpp"
 #include "flow_ibm_scene.hpp"
@@ -4684,10 +4697,12 @@ using IbmSolver = Solver<Staggered>;
 #include "flow_ibm_bc.hpp"
 #include "flow_ibm_mpi.hpp"
 #include "flow_ibm_diagnostics.hpp"
+#endif  // PECLET_FLOW_INSTANTIATING
 
 
 // The ONE compiled instantiation (suite/docs/QUALITY_PLAN.md §3.G.8).  `Solver<Grid>` is a ~12 k-line
-// class template whose 517 out-of-line members are defined in the twelve domain headers above; every
+// class template whose 517 out-of-line members are defined in the twelve domain headers included just
+// above (in the instantiation TUs only); every
 // consumer used to instantiate all of it at -O3 for itself (45 test executables plus the bindings,
 // for both grids), which is what made a full rebuild ~45-50 CPU-minutes and made an edit to any one
 // domain header invalidate all 45.  These declarations suppress that implicit instantiation; the
