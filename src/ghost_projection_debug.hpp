@@ -3,6 +3,9 @@
 ///
 /// PRECISION-EXEMPT (whole file, QUALITY_PLAN G.6): opt-in debug forensics that never feeds a
 /// solve (see below); its float census/dump precision is unrelated to operator correctness.
+/// `gpDebugReport` is templated on `Real` only so it compiles against whatever
+/// `GpOverlayReal<Real>` `IbmSolver::gpOv_` uses (`ghost_projection.hpp`) -- its own locals stay
+/// `float` deliberately.
 ///
 /// Analysis-only instrumentation, in the style of `PECLET_FLOW_AGMG_DEBUG`: nothing here runs
 /// unless the environment variable is set, and nothing here feeds the solve. It answers phase-A2
@@ -53,8 +56,9 @@ inline int gpDebugLevel() {
 /// Census + optional per-row dump of the built overlay. `nn` is the inner grid, `nRows` the row
 /// count returned by buildGpOverlay, `idMap` the inner-cell -> row map (-1 = no row). `rank` only
 /// labels the output. Host-side; copies the overlay out of device memory once.
-inline void gpDebugReport(const GpOverlay& ov, int nRows, C3 nn, Kokkos::View<int*, CCMem> idMap,
-                          int rank = 0) {
+template <class Real>
+inline void gpDebugReport(const GpOverlayReal<Real>& ov, int nRows, C3 nn,
+                          Kokkos::View<int*, CCMem> idMap, int rank = 0) {
   const int level = gpDebugLevel();
   if (level <= 0 || nRows <= 0)
     return;

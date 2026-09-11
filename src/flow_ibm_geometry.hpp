@@ -449,7 +449,7 @@ void Solver<Grid>::setSolidGhostProjectionOverlay(CCField din) {
       throw std::runtime_error(
           "ghost projection: incompatible with porous/variable-rho/domain-BC (v1)");
     const std::size_t nInner = (std::size_t)nx_ * ny_ * nz_;
-    gpOv_ = gpMakeOverlay((long)nInner);  // worst-case sizing, like the momentum overlay
+    gpOv_ = gpMakeOverlay<MReal>((long)nInner);  // worst-case sizing, like the momentum overlay
     gpIdMap_ = Kokkos::View<int*, CCMem>("gp_idmap", nInner);
     gpCounter_ = Kokkos::View<int, CCMem>("gp_counter");
     oxb_ = CCField("oxb", n_);

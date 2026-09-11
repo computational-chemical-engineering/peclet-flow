@@ -1342,7 +1342,7 @@ class CutcellMG {
   // apply the overlay in ghost mode. Single-rank (h2 == nullptr) is byte-identical to before.
   int solveBiCGStab(CCField b, CCField x, CCField r, CCField rh, CCField p, CCField v, CCField t,
                     CCField z, CCField z2, int maxit, double rtol, int pre, int post, int bottom,
-                    const GpOverlay& ov, int nOv, C3 nn
+                    const GpOverlayReal<MReal>& ov, int nOv, C3 nn
 #ifdef PECLET_FLOW_MPI
                     ,
                     CCField xg2 = CCField(), GridHalo<double>* h2 = nullptr, C3 ext2 = C3{0, 0, 0}

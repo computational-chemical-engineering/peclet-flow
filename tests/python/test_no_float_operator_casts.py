@@ -30,11 +30,6 @@ FILE_EXEMPT = {
         "opt-in forensics (PECLET_FLOW_GP_DEBUG); never feeds a solve, precision is unrelated to "
         "correctness"
     ),
-    "ghost_projection.hpp": (
-        "GpOverlay + its SDF/theta sampling stay float -- deferred: the same Real-templating "
-        "IbmOverlayT (cut_cell_ibm.hpp) received in G.6, not reached this pass; a real exposure "
-        "(the AUTO default collocated scheme), not dead code -- see the file's own header comment"
-    ),
 }
 
 

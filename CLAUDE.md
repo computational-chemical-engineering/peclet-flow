@@ -243,16 +243,29 @@ deselected on its own; name the driver you want instead.
   `MReal` (`mac_cutcell_mg.hpp`) types the pressure hierarchy and, via `IbmSolver::FV` and
   `IbmOverlay` (the cut-cell overlay: `cut_cell_ibm.hpp`'s `poly_*`/`ibmFillEntry`/
   `ibmModifyStencil`, templated on `Real`), the momentum stencil and the closure factors K/M/X/
-  Nbc/R/D_rescale. `option(PECLET_FLOW_OPERATOR_DOUBLE)` (`pip install . -C
+  Nbc/R/D_rescale — and, since 2026-09-11, `GpOverlayMReal` (`ghost_projection.hpp`'s
+  `GpOverlayT`/`GpOverlayReal<Real>`, aliased in `mac_ibm.hpp` next to `IbmOverlay`), the
+  ghost-projection overlay `IbmSolver::gpOv_` behind the AUTO-default `'ghost'` collocated scheme.
+  `option(PECLET_FLOW_OPERATOR_DOUBLE)` (`pip install . -C
   cmake.define.PECLET_FLOW_OPERATOR_DOUBLE=ON`) makes all of it double at +12 % step time; OFF
   (default) is bit-identical to before G.6. Float rounding breaks `A·1 = 0`, and on a high-contrast
   bed the residual floors and then **rebounds** — the run is **invalid, not degraded**
   (`../docs/SCALING_ISSUES.md` #1). `tests/python/test_no_float_operator_casts.py` (ctest
   `no_float_operator_casts`) fails on a new hard `(float)` cast / `float`-typed operator view in
   `src/` outside its allow-list (a `// PRECISION-EXEMPT: <reason>` marker, or one of the whole-file
-  exemptions it documents — `ghost_projection.hpp`'s `GpOverlay` is float-only still, a known,
-  deferred gap: it needs the same `Real`-templating `IbmOverlayT` got, and it is NOT dead code —
-  it backs the AUTO-default `'ghost'` collocated scheme).
+  exemptions it documents). **`GpOverlay`'s two remaining `PRECISION-EXEMPT` casts are a real,
+  cross-repo gap, not dead code:** `buildGpOverlay`'s per-face SDF/theta samples still narrow to
+  `float` before reaching `peclet::core::scheme::gpFillRow`/`gpClassifyFace`
+  (`ghost_closure.hpp`), which are float-hardcoded — templating them needs the same
+  `Real`-templating `IbmOverlayT`'s siblings got, done in `core`, out of this repo's scope.
+  `PECLET_FLOW_OPERATOR_DOUBLE=ON` therefore widens `gpOv_`'s SoA storage (so it no longer
+  round-trips a computed value through a *second*, separate float narrowing) without changing the
+  ghost closure's own arithmetic. Measured (`build_q_dbl`, 2026-09-11): 151/155 non-bench
+  (`regression_staggered` passes; the `bodyforce_ghost_mpi_*`/`dragbeta_ghost_mpi_*` MPI cases
+  that actually exercise `'ghost'` all pass); the 4 failures (`verify_lid_cavity_sdflow`,
+  `vardensity_mpi_np4`, `vof_bc_mpi_np2`, `vof_bc_mpi_np4`) are variable-density MG iteration-count
+  parity and VOF cross-rank colour-reduction tolerance, none on the ghost path — consistent with
+  the pre-existing float-tuned tolerance/reduction-order sensitivity this option already carried.
 - `set_pressure_bottom("auto" | "smoother" | "agglomerated")` — **`"auto"` is the default**: it
   agglomerates the coarsest level into a global, decomposition-independent operator and solves it
   exactly whenever that grid exceeds `set_pressure_bottom_extent` (4) cells on any axis. Porous and

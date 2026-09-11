@@ -4421,7 +4421,7 @@ class Solver {
   bool ghostProjection_ = false;  // directional ghost-cell projection (the collocated AUTO default)
   bool colSchemeAuto_ = Grid::collocated;  // AUTO scheme resolution at setSolid (cleared by any
                                            // explicit scheme selection)
-  GpOverlay gpOv_;                // its per-row overlay (built by setSolid)
+  GpOverlayMReal gpOv_;            // its per-row overlay (built by setSolid), follows MReal (G.6)
   Kokkos::View<int*, CCMem> gpIdMap_;
   Kokkos::View<int, CCMem> gpCounter_;
   int gpNRows_ = -1;         // -1 = overlay not built (set_solid must run with the mode on)

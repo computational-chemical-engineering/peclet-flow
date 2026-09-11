@@ -30,6 +30,11 @@ using MConst = Kokkos::View<const float*, CCMem>;
 // The canonical cut-cell overlay type: IbmOverlayT<Space, Real> instantiated at this build's
 // operator precision. Bit-identical to the pre-G.6 hardcoded-float IbmOverlay when mreal = float.
 using IbmOverlay = IbmOverlayT<IMem, mreal>;
+// The ghost-projection overlay (ghost_projection.hpp) at this build's operator precision --
+// defined here, not in ghost_projection.hpp, because mac_cutcell_mg.hpp #includes
+// ghost_projection.hpp BEFORE its own `using MReal = ...`, so ghost_projection.hpp cannot name
+// MReal/mreal itself. Bit-identical to the pre-G.6 hardcoded-float GpOverlay when mreal = float.
+using GpOverlayMReal = GpOverlayReal<mreal>;
 
 struct Off3 {
   float x, y, z;

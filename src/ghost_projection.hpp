@@ -2,13 +2,27 @@
 /// @brief flow — directional ghost-cell IBM projection overlay (experimental second staggered
 /// IBM).
 ///
-/// PRECISION-EXEMPT (whole file, QUALITY_PLAN G.6, deferred): `GpOverlay` and this file's SDF/
-/// theta sampling stay float, unlike `IbmOverlayT` (cut_cell_ibm.hpp), which G.6 templated on
-/// `Real` to follow `MReal`. Giving `GpOverlay` the same templating is the same shape of change
-/// (struct + `gpBuildOverlay`/`gpFillRow` + every `poly_*` call site here) but was not reached in
-/// this pass; tracked as a known gap in the G.6 report. `set_collocated_scheme('ghost')` is the
-/// AUTO default (CLAUDE.md), so this is a real remaining exposure, not dead code, and a
-/// `-DPECLET_FLOW_OPERATOR_DOUBLE` build does not remove it.
+/// QUALITY_PLAN G.6: `GpOverlayT` is templated on `Real` the same way `IbmOverlayT`
+/// (cut_cell_ibm.hpp) was -- `GpOverlayReal<MReal>` (aliased `GpOverlayMReal` in mac_ibm.hpp, next
+/// to `IbmOverlay`) is `IbmSolver::gpOv_`'s type, so its SoA storage (rescale/th/w_bc/w_n1/w_n2/
+/// wm_n1/wm_n2) is double on a `-DPECLET_FLOW_OPERATOR_DOUBLE` build; the default (`Real = float`)
+/// build is bit-identical to before. `gpMakeOverlay`/`buildGpOverlay`/`gpApplyDelta`/
+/// `gpDivergDelta` (and `ghost_projection_debug.hpp`'s `gpDebugReport`) are templated on `Real`
+/// too, deduced from the overlay argument (`gpMakeOverlay` alone needs it named at the call site,
+/// since nothing there fixes it) -- this sidesteps an include-order constraint (`MReal` is defined
+/// in mac_cutcell_mg.hpp, AFTER it `#include`s this file, so this header cannot name `MReal`
+/// itself; every function here stays generic on `Real` instead).
+///
+/// PRECISION-EXEMPT, NOT closed by the above (two lines in `buildGpOverlay`): the per-face SDF/
+/// theta samples this file hands to `peclet::core::scheme::gpFillRow`/`gpClassifyFace` MUST be
+/// `float` -- their signatures (`ghost_closure.hpp`, shared verbatim with core's AMR octree band)
+/// are hardcoded `float`, not templated, so passing a `Real`-typed sample would not compile (no
+/// implicit `Real(*)[4]` -> `float(*)[4]` conversion) and passing one cast per element would still
+/// run the wall-anchored quadratic (`gpPolyD`/`gpPolyNc`/`gpOrderWeights`/`gpClassifyFace`) in
+/// float regardless of what `Real` this file's own storage uses. Removing this narrowing needs
+/// the same `Real`-templating core's `IbmOverlayT` counterparts got, done to `ghost_closure.hpp`
+/// in `core` -- a cross-repo change, out of this repo's scope; tracked as the actual remaining gap
+/// (`set_collocated_scheme('ghost')` is the AUTO default, so this is live, not dead code).
 ///
 /// Point-based finite-difference projection near the immersed boundary, NO openness factors: the
 /// divergence of a fluid-centered pressure cell uses plain face differences; a face whose
@@ -82,30 +96,33 @@ using peclet::core::scheme::GpState;
 /// (gpApplyDelta). Orders may differ (the mixed/deferred-correction scheme: rhs_order=2 keeps
 /// the 2nd-order steady constraint, matrix_order=1 keeps the matrix 7-point and near-symmetric —
 /// the operator mismatch converges through the time stepping, measured rate ~0.4).
-template <class Space>
+template <class Space, class Real = float>
 struct GpOverlayT {
-  Kokkos::View<int*, Space> cell;                // packed INNER flat index x + y*nx + z*nx*ny
-  Kokkos::View<float*, Space> rescale;           // rho = min(1, min_f D_f) of the MATRIX weights
-  Kokkos::View<int8_t*, Space> coupled;          // 1 if the row has any phi coupling at all
-  Kokkos::View<int8_t*, Space> state;            // [slot*6+k]
-  Kokkos::View<float*, Space> th;                // [slot*6+k] (parity/diagnostics)
-  Kokkos::View<float*, Space> w_bc, w_n1, w_n2;  // [slot*6+k] RHS/diagnostic closure weights
-  Kokkos::View<float*, Space> wm_n1, wm_n2;      // [slot*6+k] matrix (implicit phi) weights
+  Kokkos::View<int*, Space> cell;               // packed INNER flat index x + y*nx + z*nx*ny
+  Kokkos::View<Real*, Space> rescale;           // rho = min(1, min_f D_f) of the MATRIX weights
+  Kokkos::View<int8_t*, Space> coupled;         // 1 if the row has any phi coupling at all
+  Kokkos::View<int8_t*, Space> state;           // [slot*6+k]
+  Kokkos::View<Real*, Space> th;                // [slot*6+k] (parity/diagnostics)
+  Kokkos::View<Real*, Space> w_bc, w_n1, w_n2;  // [slot*6+k] RHS/diagnostic closure weights
+  Kokkos::View<Real*, Space> wm_n1, wm_n2;      // [slot*6+k] matrix (implicit phi) weights
 };
-using GpOverlay = GpOverlayT<CCMem>;
+template <class Real>
+using GpOverlayReal = GpOverlayT<CCMem, Real>;
+using GpOverlay = GpOverlayReal<float>;
 
-inline GpOverlay gpMakeOverlay(long n) {
-  GpOverlay ov;
+template <class Real = float>
+inline GpOverlayReal<Real> gpMakeOverlay(long n) {
+  GpOverlayReal<Real> ov;
   ov.cell = Kokkos::View<int*, CCMem>("gp_cell", n);
-  ov.rescale = Kokkos::View<float*, CCMem>("gp_rescale", n);
+  ov.rescale = Kokkos::View<Real*, CCMem>("gp_rescale", n);
   ov.coupled = Kokkos::View<int8_t*, CCMem>("gp_coupled", n);
   ov.state = Kokkos::View<int8_t*, CCMem>("gp_state", 6 * n);
-  ov.th = Kokkos::View<float*, CCMem>("gp_th", 6 * n);
-  ov.w_bc = Kokkos::View<float*, CCMem>("gp_wbc", 6 * n);
-  ov.w_n1 = Kokkos::View<float*, CCMem>("gp_wn1", 6 * n);
-  ov.w_n2 = Kokkos::View<float*, CCMem>("gp_wn2", 6 * n);
-  ov.wm_n1 = Kokkos::View<float*, CCMem>("gp_wmn1", 6 * n);
-  ov.wm_n2 = Kokkos::View<float*, CCMem>("gp_wmn2", 6 * n);
+  ov.th = Kokkos::View<Real*, CCMem>("gp_th", 6 * n);
+  ov.w_bc = Kokkos::View<Real*, CCMem>("gp_wbc", 6 * n);
+  ov.w_n1 = Kokkos::View<Real*, CCMem>("gp_wn1", 6 * n);
+  ov.w_n2 = Kokkos::View<Real*, CCMem>("gp_wn2", 6 * n);
+  ov.wm_n1 = Kokkos::View<Real*, CCMem>("gp_wmn1", 6 * n);
+  ov.wm_n2 = Kokkos::View<Real*, CCMem>("gp_wmn2", 6 * n);
   return ov;
 }
 
@@ -121,7 +138,8 @@ KOKKOS_INLINE_FUNCTION int gpWrap(int v, int n) {
 /// rank's inner cells only, which IS the gp-row ownership under MPI. Overlay arrays must be sized
 /// for the worst case; returns the row count. idMap (size nn.x*nn.y*nn.z) gets slot or -1.
 /// (Exact crossings tx/ty/tz are inner-sized with wrap access — single-rank only, not lifted.)
-inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov,
+template <class Real>
+inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlayReal<Real>& ov,
                           Kokkos::View<int*, CCMem> idMap, Kokkos::View<int, CCMem> counter,
                           int matrixOrder = 2, int rhsOrder = 2, CCConst tx = CCConst(),
                           CCConst ty = CCConst(), CCConst tz = CCConst(), bool useGhost = false) {
@@ -138,7 +156,7 @@ inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov
           const long i = (long)((ug ? x + dx : gpWrap(x + dx, nn.x)) + g) +
                          (long)((ug ? y + dy : gpWrap(y + dy, nn.y)) + g) * ext.x +
                          (long)((ug ? z + dz : gpWrap(z + dz, nn.z)) + g) * (long)ext.x * ext.y;
-          return (float)sdf(i);
+          return (float)sdf(i);  // PRECISION-EXEMPT: feeds core::scheme::gpFillRow, float-hardcoded
         };
         const float sc = S(0, 0, 0);
         if (sc < 0.0f)
@@ -171,7 +189,8 @@ inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlay& ov
               const int cx = a == 0 ? gpWrap(x + m, nn.x) : x;
               const int cy = a == 1 ? gpWrap(y + m, nn.y) : y;
               const int cz = a == 2 ? gpWrap(z + m, nn.z) : z;
-              return (float)(*ta[a])((long)cx + (long)cy * nn.x + (long)cz * (long)nn.x * nn.y);
+              const long ii = (long)cx + (long)cy * nn.x + (long)cz * (long)nn.x * nn.y;
+              return (float)(*ta[a])(ii);  // PRECISION-EXEMPT: ditto
             };
             exStd[2 * a + 1] = 1.0f - T(0);
             exSliver[2 * a + 1] = 2.0f - T(-1);
@@ -237,8 +256,9 @@ inline void gpBinaryOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3
 /// into x's exchanged halo (requires gbX >= 2). Face at relative index m couples cells (i+m-1,
 /// i+m); the div coefficient c = sgn*w contributes A x += -c*x(i+m) + c*x(i+m-1)  =>  delta =
 /// sgn*w*(x_cm - x_cp). Distinct rows per thread: no atomics.
-inline void gpApplyDelta(CCField y, CCConst x, const GpOverlay& ov, int nOv, C3 nn, C3 extY,
-                         int gbY, C3 extX, int gbX, bool useGhost = false) {
+template <class Real>
+inline void gpApplyDelta(CCField y, CCConst x, const GpOverlayReal<Real>& ov, int nOv, C3 nn,
+                         C3 extY, int gbY, C3 extX, int gbX, bool useGhost = false) {
   if (nOv <= 0)
     return;
   CCExec space;
@@ -283,8 +303,9 @@ inline void gpApplyDelta(CCField y, CCConst x, const GpOverlay& ov, int nOv, C3 
 /// (distributed) reads straight offsets into the exchanged velocity halo (reach -1..+2, gb >= 2).
 /// Rows with no phi coupling are zeroed (decoupled). Used identically for
 /// the RHS div(u*) and the post-correction diagnostic — the diagnostic IS the residual.
-inline void gpDivergDelta(CCField d, CCConst u, CCConst v, CCConst w, const GpOverlay& ov, int nOv,
-                          C3 nn, C3 extb, int gb, bool useGhost = false) {
+template <class Real>
+inline void gpDivergDelta(CCField d, CCConst u, CCConst v, CCConst w, const GpOverlayReal<Real>& ov,
+                          int nOv, C3 nn, C3 extb, int gb, bool useGhost = false) {
   if (nOv <= 0)
     return;
   CCExec space;
