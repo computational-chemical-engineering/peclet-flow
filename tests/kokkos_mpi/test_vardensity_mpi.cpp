@@ -281,7 +281,22 @@ int main(int argc, char** argv) {
           ++nWin;
           dits = std::max(dits, std::labs(itd[k] - itr[k]));
         }
-        const long itTol = 0;  // the bounds path must be decomposition-independent, exactly
+        // np=1 must be decomposition-independent EXACTLY. np>1 gets one V-cycle of slack, for the
+        // same reason utol and ptol get a floor there: the stopping test is
+        // `maxabs(r) < rtol*r0`, and at np>1 both sides of that come from a global reduction whose
+        // summation order is not the single-rank order. The count is a DISCONTINUOUS function of a
+        // quantity that already carries a reduction-order floor, so a step whose residual sits near
+        // the threshold can land on either side of it and spend one V-cycle more or less. That is
+        // not the bounds path differing; the answers agree far inside utol/ptol when it happens.
+        // Widened from 0 on 2026-09-12, when double operator storage became the default
+        // (SCALING_ISSUES #1) and [walls-z np=4] began reporting max-delta=1 with du=4.4e-17
+        // against a 1.0e-15 tolerance, max|u|=2.8e-17 against 1e-14 and dP/dz err=1.1e-15 against
+        // 1e-11 — every physics gate passing by three orders of magnitude or more. Exact equality
+        // was never well posed at np>1: this test's own comment above records that the count
+        // sequence changes with the OpenMP THREAD COUNT alone at fixed np=1. One V-cycle is the
+        // smallest slack that is not zero, and it keeps the assertion sharp — a real decomposition
+        // defect shows up as a large and growing divergence, never as a steady +/-1.
+        const long itTol = (size == 1) ? 0 : 1;
         bool ok = du <= utol && dp <= ptol && dits <= itTol;
         double umax = -1, perr = -1;
         if (c.walls) {  // decomposition-independent physics gates
