@@ -69,6 +69,39 @@ peclet_require_kokkos()
 peclet_require_nanobind()
 peclet_sibling_include(peclet-core "${PECLET_CORE_TAG}" "../core" PECLET_CORE_INCLUDE)
 
+# The ONE compiled instantiation of Solver<Staggered> / Solver<Colocated> (QUALITY_PLAN G.8): the
+# module and every test link it instead of instantiating the ~12 k-line class template themselves.
+# PECLET_FLOW_MPI changes the class, so there is one library per configuration and each consumer
+# links the matching one -- PUBLIC on the library, so the macro cannot disagree with the
+# instantiation. The MPI variant is built when the option is on (the module and tests/kokkos_mpi
+# need it); the plain variant when the module is single-rank or when tests/kokkos is configured.
+include(PecletFlowSolver)
+
+# ccache (QUALITY_PLAN G.8) is opt-in, via the standard -DCMAKE_CXX_COMPILER_LAUNCHER=ccache; nothing
+# here turns it on. It works on the host backends. It CANNOT work on a Kokkos CUDA/HIP prefix, and
+# the failure is otherwise baffling, so fail here with the reason instead: Kokkos routes device
+# compilation by putting `kokkos_launch_compiler <nvcc_wrapper> <c++>` in the global
+# RULE_LAUNCH_COMPILE, and that script redirects only when the executable that FOLLOWS it is the
+# very compiler it was given. A compiler launcher is expanded between the two, so the launcher --
+# not the compiler -- is what the script sees, it declines to redirect, and plain `c++` is handed
+# nvcc's flags ("unrecognized command-line option '-arch=sm_120'") after a long build.
+get_property(_peclet_flow_rule_launch GLOBAL PROPERTY RULE_LAUNCH_COMPILE)
+if(CMAKE_CXX_COMPILER_LAUNCHER AND _peclet_flow_rule_launch MATCHES "kokkos_launch_compiler")
+  message(FATAL_ERROR
+    "flow: CMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER} cannot be combined with this "
+    "Kokkos prefix -- Kokkos already owns the compile rule's launcher slot with kokkos_launch_compiler "
+    "(device backend), and a second launcher breaks its redirect. Configure this tree without the "
+    "launcher; ccache is available on the host-openmp / host-serial prefixes.")
+endif()
+
+if(PECLET_FLOW_MPI)
+  find_package(MPI REQUIRED COMPONENTS CXX)
+  peclet_flow_add_solver_library(peclet_flow_solver_mpi MPI)
+endif()
+if(PECLET_FLOW_BUILD_TESTS OR NOT PECLET_FLOW_MPI)
+  peclet_flow_add_solver_library(peclet_flow_solver)
+endif()
+
 # peclet_flow -- the cut-cell IBM Navier-Stokes solver module (target; imports as peclet.flow).
 # NB_STATIC: bundle nanobind's runtime into the module (no shared libnanobind to ship); the Kokkos
 # device path is routed by the launch compiler regardless.
@@ -87,6 +120,14 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/__init__.py COPYONLY)
 target_include_directories(peclet_flow PRIVATE src "${PECLET_CORE_INCLUDE}")
 target_link_libraries(peclet_flow PRIVATE Kokkos::kokkos)
+# G.8: the solver instantiation. STATIC, so its objects land INSIDE _flow.so -- nothing extra to
+# ship in the wheel. PIC and hidden visibility on the library match what nanobind_add_module puts
+# on this target, so the module's code generation is what it was before the split.
+if(PECLET_FLOW_MPI)
+  target_link_libraries(peclet_flow PRIVATE peclet_flow_solver_mpi)
+else()
+  target_link_libraries(peclet_flow PRIVATE peclet_flow_solver)
+endif()
 # HIP/lld strictness: nanobind's --gc-sections can drop Kokkos SharedAllocationRecord<HIPSpace> vtables
 # it only later finds referenced -> "undefined hidden symbol: vtable". Keep sections on HIP (nvcc/ld is lenient).
 if(Kokkos_ENABLE_HIP)
@@ -101,9 +142,8 @@ endif()
 # Distributed (MPI) flow: compile the binding TU with the halo-gating flag + link MPI (the core grid
 # halo lives in the header-only PECLET_CORE_INCLUDE). Mirrors dem's PECLET_DEM_MPI wiring; OFF keeps the module untouched.
 if(PECLET_FLOW_MPI)
-  find_package(MPI REQUIRED COMPONENTS CXX)
-  target_compile_definitions(peclet_flow PRIVATE PECLET_FLOW_MPI=1)
-  target_link_libraries(peclet_flow PRIVATE MPI::MPI_CXX)
+  # PECLET_FLOW_MPI=1 and MPI::MPI_CXX arrive PUBLIC from peclet_flow_solver_mpi (G.8), which is
+  # what guarantees the module's binding TU sees the same class the instantiation compiled.
   message(STATUS "flow: distributed step ENABLED (MPI)")
 endif()
 

@@ -4685,4 +4685,29 @@ using IbmSolver = Solver<Staggered>;
 #include "flow_ibm_mpi.hpp"
 #include "flow_ibm_diagnostics.hpp"
 
+
+// The ONE compiled instantiation (suite/docs/QUALITY_PLAN.md §3.G.8).  `Solver<Grid>` is a ~12 k-line
+// class template whose 517 out-of-line members are defined in the twelve domain headers above; every
+// consumer used to instantiate all of it at -O3 for itself (45 test executables plus the bindings,
+// for both grids), which is what made a full rebuild ~45-50 CPU-minutes and made an edit to any one
+// domain header invalidate all 45.  These declarations suppress that implicit instantiation; the
+// definitions are compiled once, in src/flow_solver_staggered.cpp and src/flow_solver_colocated.cpp,
+// into the static library every consumer links (cmake/PecletFlowSolver.cmake).
+//
+// Nothing is hidden by this.  The class definition above is complete, so a consumer can still derive
+// from it (the bindings' `BoundSolver final : Solver<Grid>` inherits the constructor) and the
+// standard exempts inline functions -- everything defined inside the class body -- from an explicit
+// instantiation declaration, so the small accessors are instantiated and inlined in the consumer
+// exactly as before.  What moves is the out-of-line bulk, compiled from the same source under the
+// same flags (no LTO, no -march: there is no cross-TU optimization to lose).
+//
+// PECLET_FLOW_MPI must match between the instantiation TUs and their consumers -- it changes the
+// class.  The build makes that structural: the macro is a PUBLIC property of the MPI library.
+#ifndef PECLET_FLOW_INSTANTIATING
+namespace peclet::flow {
+extern template class Solver<Staggered>;
+extern template class Solver<Colocated>;
+}  // namespace peclet::flow
+#endif
+
 #endif  // PECLET_FLOW_SDFLOW_IBM_HPP

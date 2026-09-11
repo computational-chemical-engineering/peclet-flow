@@ -33,6 +33,13 @@ endif()
 # not only the ones that reach for the field registry. Directory-wide (the headers are header-only).
 include_directories("${PECLET_CORE_INCLUDE}")
 
+# The ONE compiled instantiation of Solver<Grid> (QUALITY_PLAN G.8), which the eighteen tests here
+# that include flow_ibm.hpp link instead of instantiating the class template themselves. The module
+# defines it for us when this directory is a subdirectory; standalone we define it ourselves. These
+# are the SINGLE-RANK tests, so it is the variant WITHOUT PECLET_FLOW_MPI.
+include(PecletFlowSolver)
+peclet_flow_add_solver_library(peclet_flow_solver)
+
 add_executable(test_reductions test_reductions.cpp)
 target_include_directories(test_reductions PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_reductions PRIVATE Kokkos::kokkos)
@@ -327,3 +334,13 @@ add_test(NAME units_anisotropic_tgv COMMAND test_units tgv)
 # PHASE 3 (flow/doc/anisotropic_vof.md §11 S2): the balanced-force CSF on BOX cells — the gate the
 # Phase 2 merge unlocked, since `enable_vof` refused an anisotropic domain until Phase 3 landed.
 add_test(NAME units_vof_aniso COMMAND test_units vofaniso)
+
+# G.8: link every target in this directory against the one compiled instantiation. The library is
+# STATIC, so this is inert for the kernel unit tests that never name `Solver` -- the linker pulls no
+# member in -- and it means a test added later gets the fast build without a separate edit here.
+get_property(_flow_kernel_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_t IN LISTS _flow_kernel_test_targets)
+  if(NOT "${_t}" STREQUAL "peclet_flow_solver")   # standalone: the library is defined HERE
+    target_link_libraries(${_t} PRIVATE peclet_flow_solver)
+  endif()
+endforeach()

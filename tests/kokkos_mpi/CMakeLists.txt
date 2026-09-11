@@ -23,6 +23,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
   set(PECLET_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../core" CACHE PATH "core repo")
   set(PECLET_CORE_INCLUDE "${PECLET_CORE_DIR}/include")
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake")
   enable_testing()
 elseif(NOT PECLET_CORE_INCLUDE)
   message(FATAL_ERROR "flow/tests/kokkos_mpi: add_subdirectory() needs PECLET_CORE_INCLUDE from the module's CMake")
@@ -32,13 +33,22 @@ endif()
 if(NOT MPIEXEC_EXECUTABLE)
   set(MPIEXEC_EXECUTABLE /usr/bin/mpirun)
 endif()
+
+# The ONE compiled instantiation of Solver<Grid> (QUALITY_PLAN G.8): the tests here link it instead
+# of instantiating the ~12 k-line class template themselves. PECLET_FLOW_MPI changes the class, so
+# there are two variants and each test links the one matching the macro it is compiled with -- and
+# since the macro is a PUBLIC property of `peclet_flow_solver_mpi`, the test no longer declares it
+# itself and the two cannot drift apart. The module defines both when this is a subdirectory.
+include(PecletFlowSolver)
+peclet_flow_add_solver_library(peclet_flow_solver_mpi MPI)
+peclet_flow_add_solver_library(peclet_flow_solver)
 # Standalone distributed primitives (own halo/reduction harness; do not need the gated CutcellMG MPI path).
 foreach(t distributed_diffusion distributed_pressure distributed_mg)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src
     ${PECLET_CORE_INCLUDE})
-  target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
+  target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver)
   foreach(np 1 2 4)
     add_test(NAME ${t}_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_${t}>)
   endforeach()
@@ -54,8 +64,7 @@ foreach(t cutcellmg_mpi telescope_mpi telescope_varrho_mpi velocitymg_mpi veloci
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
-  target_compile_definitions(test_${t} PRIVATE PECLET_FLOW_MPI)
-  target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
+  target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
   foreach(np 1 2 4)
     add_test(NAME ${t}_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_${t}>)
   endforeach()
@@ -70,8 +79,7 @@ endforeach()
 add_executable(test_vof_blocks_mpi test_vof_blocks_mpi.cpp)
 target_include_directories(test_vof_blocks_mpi PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${PECLET_CORE_INCLUDE})
-target_compile_definitions(test_vof_blocks_mpi PRIVATE PECLET_FLOW_MPI)
-target_link_libraries(test_vof_blocks_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX)
+target_link_libraries(test_vof_blocks_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
 # np 8 as well since rung W1 (WO-W12): the 64-bubble swarm's LPT assignment and its migration are
 # only exercised once there are more ranks than the few blocks the W0 scenes carry.
 foreach(np 1 2 4 8)
@@ -82,7 +90,8 @@ endforeach()
 add_executable(test_vof_advect_mpi test_vof_advect_mpi.cpp)
 target_include_directories(test_vof_advect_mpi PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${PECLET_CORE_INCLUDE})
-target_link_libraries(test_vof_advect_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX)
+# No PECLET_FLOW_MPI (its own g=3 colour halo), so it links the variant compiled without it.
+target_link_libraries(test_vof_advect_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver)
 foreach(np 1 2 4)
   add_test(NAME vof_advect_mpi_np${np}
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_vof_advect_mpi>)

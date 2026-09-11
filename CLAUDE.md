@@ -46,6 +46,27 @@ byte-identical). Swapping backend = swapping the prefix and using a second tree.
 `PATH`, which launches the OpenMPI-linked binaries as singletons — every `*_np4` then silently runs
 four independent np = 1 jobs.
 
+**`Solver<Grid>` is compiled ONCE per grid, not once per consumer** (QUALITY_PLAN G.8, 2026-09-11).
+`src/flow_solver_staggered.cpp` and `src/flow_solver_colocated.cpp` hold the explicit instantiations;
+`cmake/PecletFlowSolver.cmake` builds them into a static library that the module and all 45 tests
+link, and `flow_ibm.hpp` ends with the matching `extern template` declarations. Two consequences for
+anyone editing the build: a target that includes `flow_ibm.hpp` must link `peclet_flow_solver`
+(tests/kokkos links every target in the directory, so a new single-rank test needs no edit at all),
+and it must link the variant matching its `PECLET_FLOW_MPI` — which is why the macro is a PUBLIC
+property of `peclet_flow_solver_mpi` and no test declares it itself. Adding a third grid policy means
+adding a third instantiation TU beside those two.
+
+**`ccache` is opt-in, never forced, and HOST-ONLY**: pass `-DCMAKE_CXX_COMPILER_LAUNCHER=ccache` at
+configure time on a `host-openmp` / `host-serial` prefix (measured on this tree: the solver library
+cold 69 s, warm 0.3 s, 100 % direct hits). Nothing turns it on, so a tree configured without it
+behaves exactly as before. **It cannot work on a CUDA/HIP prefix, and the reason is structural:**
+Kokkos routes device compilation by putting `kokkos_launch_compiler <nvcc_wrapper> <c++>` in the
+global `RULE_LAUNCH_COMPILE`, and that script redirects only when the executable immediately
+following it is the compiler it was handed. A compiler launcher is expanded exactly there, so the
+script sees `ccache`, declines to redirect, and plain `c++` gets nvcc's flags
+(`unrecognized command-line option '-arch=sm_120'`) — at the end of a long build. The CMake now
+rejects the combination at configure time with that explanation, so do not re-attempt it blind.
+
 ## Test
 
 ```bash
@@ -99,7 +120,8 @@ All header-only Kokkos C++20 in `namespace peclet::flow`.
   `setupBcDiffusion`), `flow_ibm_mpi.hpp` (`initMpi`, `redistribute`, `rebalanceByWeights`, the
   post-repartition field-resize passes; `#ifdef PECLET_FLOW_MPI`-guarded), `flow_ibm_diagnostics.hpp`
   (state getters, divergence probes, timers, the outflow/backflow census). `src/flow_bindings.cpp`
-  — the nanobind module.
+  — the nanobind module. `src/flow_solver_staggered.cpp` / `src/flow_solver_colocated.cpp` — the
+  two explicit instantiations of the class, the only TUs that compile it (see "Build").
 - `src/mac_cutcell_mg.hpp` (`CutcellMG`, pressure MG), `src/mac_velocity_mg.hpp` (`VelocityMG`),
   the `src/mac_*.hpp` operators, `src/cut_cell_ibm.hpp` (the Robust-Scaled overlay: `poly_*`,
   K/M/X/Nbc/R, `D_rescale`), `src/staggered_advection.hpp` (`sadv::advect`),
