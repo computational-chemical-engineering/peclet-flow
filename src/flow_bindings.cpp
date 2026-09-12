@@ -334,7 +334,16 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "use the V-cycle once the global cells per rank fall below cells_per_rank (default 65536; "
            "0 = never), for global problems of at least min_global_cells (default 8M). Env "
            "set_velocity_multigrid_auto.")
-      .def("velocity_multigrid_active", [](D& diag) { return diag.s->velocityMultigridActive(); })
+      .def("velocity_multigrid_active", [](D& diag) { return diag.s->velocityMultigridActive(); },
+           "Whether the velocity (momentum) solve uses the multigrid V-cycle rather than plain "
+           "RB-GS. Reads back the OUTCOME, not the setting: an explicit set_velocity_multigrid("
+           "on=...) call always wins, but absent one the AUTO rule (set_velocity_multigrid_auto) "
+           "decides it when the geometry is built (set_solid / set_pressure_geometry / "
+           "set_solid_from_scene) -- on for a distributed run (np > 1) in an eligible operator "
+           "mode with a global problem of at least min_global_cells (default 8M) and fewer than "
+           "cells_per_rank (default 65536) cells per rank, off otherwise. So the value can differ "
+           "from what the caller last set explicitly, and is only meaningful after geometry has "
+           "been installed (False on a fresh solver).")
       .def(
           "outflow_backflow",
           [](D& diag) {
@@ -1770,7 +1779,12 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "rank count. ON by default since 2026-09-02 (the FoxBerry ladder); False restores the "
            "in-place-only hierarchy, byte-identical to before telescoping existed. See "
            "suite/docs/archive/MG_TELESCOPING_PLAN.md.")
-      .def("pressure_telescope", &S::pressureTelescope)
+      .def("pressure_telescope", &S::pressureTelescope,
+           "Whether the pressure multigrid's coarse levels telescope (merge ORB siblings onto "
+           "fewer ranks once a level's block turns odd) rather than stop coarsening in place. "
+           "Reads back set_pressure_telescope's current setting; ON by default since 2026-09-02 "
+           "(the FoxBerry ladder), so this is normally True even though it was never called "
+           "explicitly -- check it rather than assuming the legacy in-place-only hierarchy.")
       .def(
           "set_pressure_bottom",
           [](S& s, const std::string& m) {
@@ -1889,7 +1903,12 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def("set_solid_from_scene", &S::setSolidFromScene, nb::arg("cutcell_pressure") = true,
            "Sample the installed scene onto this rank's inner grid and install it as the solid, "
            "entirely on device (no nx*ny*nz float64 host round trip).")
-      .def("has_scene", &S::hasScene)
+      .def("has_scene", &S::hasScene,
+           "True once set_scene has installed an analytic CSG scene on this solver. False for "
+           "geometry set any other way (set_solid with a sampled SDF, set_pressure_geometry), and "
+           "false again if no scene has been given yet. set_solid_from_scene and the "
+           "scene-derived per-body hydrodynamic force/motion bookkeeping all require this to be "
+           "True first.")
       .def(
           "set_instance_motion",
           [](S& s, int i, std::array<double, 3> lin, std::array<double, 3> ang,
