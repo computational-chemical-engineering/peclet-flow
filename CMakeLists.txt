@@ -30,6 +30,14 @@ if(NOT PECLET_FLOW_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
 endif()
 project(peclet_flow VERSION ${PECLET_FLOW_VERSION} LANGUAGES CXX)
 
+
+# MSVC: the templated Kokkos translation units blow past the COFF section limit -- measured on the
+# 2026-09-13 wheel probe, flow_solver_colocated.cpp raised "C1128: number of sections exceeded
+# object file format limit". /bigobj raises it; there is no downside and no other compiler needs it.
+if(MSVC)
+  add_compile_options(/bigobj)
+endif()
+
 # Canonical build: the Kokkos `peclet.flow` cut-cell IBM Navier-Stokes solver, as an importable
 # Python module. Kokkos provides the backend (CUDA / HIP / OpenMP), selected by the install prefix
 # (extern/install/<backend>, built by ../tools/bootstrap_deps.sh -- a HARD build dependency).
