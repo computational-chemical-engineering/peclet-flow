@@ -1837,6 +1837,19 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def("set_velocity_multigrid", &S::setVelocityMultigrid, nb::arg("on"), nb::arg("levels") = 4,
            nb::arg("vcycles") = 8,
            "Enable velocity (momentum) multigrid for the implicit diffusion solve.")
+      .def("set_velocity_chebyshev", &S::setVelocityChebyshev, nb::arg("on"),
+           nb::arg("max_iter") = 400,
+           "Solve the implicit momentum (diffusion) equation with Chebyshev semi-iteration instead "
+           "of the red-black Gauss-Seidel smoother -- same sharp cut-cell operator, same residual "
+           "stop, same tolerance, so the projection consumes the same u*. The momentum operator's "
+           "condition number is 1 + 12*D in the diffusion number D = mu*dt/(rho*h^2) and does not "
+           "grow with the mesh, so Chebyshev's O(sqrt(kappa)) beats Gauss-Seidel's O(kappa) with no "
+           "coarse grid; and one Chebyshev iteration costs ONE residual and ONE halo exchange "
+           "against a red-black sweep's two of each. The spectral interval is Gershgorin arithmetic "
+           "on the stored stencil, never a power iteration. Applies to the IBM/periodic path; a "
+           "domain-BC configuration keeps the red-black smoother.")
+      .def("velocity_chebyshev_active", &S::velocityChebyshevActive,
+           "Whether the Chebyshev momentum solver is selected.")
       .def(
           "set_domain_bc",
           [](S& s, const std::string& face, const std::string& type,

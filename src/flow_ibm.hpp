@@ -38,6 +38,7 @@
 #include "ghost_projection_debug.hpp"  // opt-in gp row forensics (PECLET_FLOW_GP_DEBUG), no-op off
 #include "grid_layout.hpp"
 #include "mac_approx_projection.hpp"
+#include "mac_cheb_momentum.hpp"
 #include "mac_cutcell_mg.hpp"
 #include "mac_ibm.hpp"
 #include "mac_pressure.hpp"
@@ -346,6 +347,18 @@ class Solver {
   // An explicit setVelocityMultigrid() overrides all of this.
   void setVelocityMultigridAuto(long cellsPerRank, long minGlobalCells = -1,
                                 int minBlockExtent = -1);
+
+
+  // Chebyshev semi-iteration as the momentum solver, in place of the red-black Gauss-Seidel
+  // smoother, on the SAME sharp cut-cell stencil and to the same tolerance -- so it has the same
+  // fixed point and the projection consumes the same u*. The momentum operator's condition number
+  // is kappa = 1 + 12 D in D = mu dt/(rho h^2) and does NOT grow with the mesh, so Chebyshev's
+  // O(sqrt kappa) beats Gauss-Seidel's O(kappa) without a coarse grid; and one Chebyshev step is
+  // ONE residual and ONE halo exchange against a red-black sweep's two of each. The spectral
+  // interval is Gershgorin arithmetic on the stored stencil (ibmStencilJacobiBounds), not a power
+  // iteration. IBM/periodic path only: a domain-BC configuration keeps RB-GS.
+  void setVelocityChebyshev(bool on, int maxit = 400);
+  bool velocityChebyshevActive() const;
 
 
   // The tolerance actually in force (resolves the follow-the-pressure default).
@@ -2182,6 +2195,9 @@ class Solver {
 
 
   void smoothComp(int c);
+  // Chebyshev momentum solve for one component (IBM/periodic path). Same stop criterion,
+  // scale and counters as velSweepLoop, so the two solvers are interchangeable.
+  void chebSolveComp(int c);
 
 
   // pressure ghost at domain faces for the incremental predictor's grad(P): zero-gradient (Neumann)
@@ -4287,6 +4303,7 @@ class Solver {
   double velResTol_ = -1.0;
   double lastMomentumResid_ = -1.0;  // max_c max|r|/max|b| at exit (residual mode)
   CCField velRes_;                 // scratch for the stencil-path residual
+  CCField chebD_;                  // scratch: the Chebyshev search direction (see chebSolveComp)
   double lastAxNorm_ = 0.0;        // max|A u| of the last residual evaluation (scale)
   int pcgMaxit_ = 500;
   double pcgRtol_ = 1e-10;  // cut-cell pressure MG-PCG
@@ -4409,6 +4426,8 @@ class Solver {
                                   // (1 + 12 D; measured crossover D ~ 1)
   bool vmgDecided_ = false;  // the momentum-solver choice has been made (and the MG built)
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
+  bool useVelocityCheb_ = false;  // Chebyshev momentum solver (setVelocityChebyshev)
+  int velChebMaxit_ = 400;
   VelocityMG vmg_;
   CCField vmgTheta_, vmgClean_;
   int outerIters_ = 1;

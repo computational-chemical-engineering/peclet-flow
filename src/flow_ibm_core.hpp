@@ -367,6 +367,17 @@ void Solver<Grid>::setVelocityMultigridAuto(long cellsPerRank, long minGlobalCel
 }
 
 template <class Grid>
+void Solver<Grid>::setVelocityChebyshev(bool on, int maxit) {
+  useVelocityCheb_ = on;
+  velChebMaxit_ = maxit < 1 ? 1 : maxit;
+}
+
+template <class Grid>
+bool Solver<Grid>::velocityChebyshevActive() const {
+  return useVelocityCheb_;
+}
+
+template <class Grid>
 double Solver<Grid>::velocityResidualTolerance() const {
   if (velResTol_ >= 0.0)
     return velResTol_;
@@ -1279,6 +1290,94 @@ double Solver<Grid>::stencilBnorm(int c) {
 }
 
 template <class Grid>
+void Solver<Grid>::chebSolveComp(int c) {
+  if (chebD_.extent(0) != n_)
+    chebD_ = CCField("chebD", n_);
+  if (velRes_.extent(0) != n_)
+    velRes_ = CCField("velRes", n_);
+  Kokkos::deep_copy(chebD_, 0.0);
+
+  auto gmax = [&](double v) {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      double g = 0.0;
+      MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, MPI_MAX, comm_);
+      return g;
+    }
+#endif
+    return v;
+  };
+  auto fill = [&] {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      velDev_->exchange(C[c].u);
+      return;
+    }
+#endif
+    fillGhostsFaces(C[c].u);
+  };
+  auto residual = [&] {
+    residualVarPin(velRes_, CCConst(C[c].u), CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
+                   FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT),
+                   CCConst(C[c].mask), e_, G);
+  };
+
+  // The interval must be IDENTICAL on every rank or the iterates diverge from one another, so the
+  // two Gershgorin bounds are reduced over the communicator before the recurrence starts. They are
+  // bounds, not estimates: -lo is reduced by MAX to get a global MIN without a second reducer.
+  double lo = 0.0, hi = 0.0;
+  ibmStencilJacobiBounds(FPC(C[c].AC), FPC(C[c].AW), FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
+                         FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask), e_, G, lo, hi);
+  lo = -gmax(-lo);
+  hi = gmax(hi);
+  // A degenerate interval means the operator is not the positive-definite Helmholtz this solver
+  // assumes (an all-pinned block, or a stencil not yet built). Fall back rather than diverge.
+  if (!(hi > lo) || !(lo > 0.0)) {
+    smoothComp(c);
+    return;
+  }
+
+  const double vtol = velocityResidualTolerance();
+  const bool useRes = vtol > 0.0;
+  ChebCoeffs cb(lo, hi);
+  double scale = 0.0, rPrev = -1.0;
+  if (useRes) {
+    // Same convergence scale as velSweepLoop: max(|b|, |A u|) from the initial residual, so the
+    // two solvers stop on the same criterion at the same tolerance.
+    fill();
+    residual();
+    (void)finishResidual(c);
+    scale = std::max(gmax(maxAbsInner(CCConst(C[c].b), e_, G)), gmax(lastAxNorm_));
+  }
+
+  int used = velChebMaxit_;
+  for (int it = 0; it < velChebMaxit_; ++it) {
+    fill();
+    residual();
+    if (useRes && (it == 0 || (it + 1) % 4 == 0 || it + 1 == velChebMaxit_)) {
+      const double r = gmax(finishResidual(c));
+      // Round-off floor ONLY -- NOT velSweepLoop's "no decrease between checks" guard. Chebyshev
+      // minimises a polynomial over the spectral interval, so its max-norm residual is not
+      // monotone: it rises over the first few iterations before it falls. Carrying the Gauss-
+      // Seidel stagnation test across aborted the solve after three iterations per component and
+      // left <u> 3.9 % off the red-black answer. Stagnation is instead caught by the cap.
+      const bool floor = r <= 1e-14 * scale;
+      rPrev = r;
+      if (r <= vtol * scale || floor) {
+        lastMomentumResid_ = std::max(lastMomentumResid_, scale > 0 ? r / scale : 0.0);
+        used = it;  // this iteration's update is not applied: the iterate already passes
+        break;
+      }
+    }
+    double alpha = 0.0, beta = 0.0;
+    cb.next(it, alpha, beta);
+    ibmChebUpdate(C[c].u, chebD_, CCConst(velRes_), FPC(C[c].AC), CCConst(C[c].mask), e_, G, alpha,
+                  beta);
+  }
+  lastMomentumSweeps_ += used;
+}
+
+template <class Grid>
 void Solver<Grid>::smoothComp(int c) {
   if constexpr (Grid::collocated) {
     if (hasBc_) {  // collocated domain BC: the (all-fluid) IBM diffusion stencil + cell-centered
@@ -1385,6 +1484,14 @@ void Solver<Grid>::smoothComp(int c) {
                                             CCConst(bcDcorr_[c]), an);
                  },
                  constCoeffResidual(c, bx, by, bz, Ac), stencilBnorm(c));
+    return;
+  }
+  if (useVelocityCheb_) {
+    // Chebyshev momentum solver on the sharp cut-cell stencil. Reached only on the IBM/periodic
+    // path: the collocated, mixed, bcStencilPath and domain-BC branches above have all returned,
+    // so a configuration with domain BCs keeps the red-black smoother that owns its ghost fold.
+    chebSolveComp(c);
+    maskVelocity(c);
     return;
   }
   if (useVelocityMg_) {  // IBM velocity multigrid: fine = sharp As_[c]; coarse op depends on the
