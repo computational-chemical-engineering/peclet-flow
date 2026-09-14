@@ -15,7 +15,11 @@
 //   3. **the ledger must be a per-rank partial sum.** Each rank accumulates the boundary fluxes of
 //      the faces it owns; the caller MPI_SUMs them. The budget identity then closes globally.
 //
-// Two configurations on 16x16x32 (the aligned ORB cuts the long z axis at np = 2 and 4):
+// Four configurations on 16x16x32 (the aligned ORB cuts the long z axis at np = 2 and 4). Two are
+// KINEMATIC and gated BITWISE — `slug-kin` and `packing-kin`, which is where the decomposition
+// exactness of this path is actually asserted; two are COUPLED and gated on conservation and
+// cancellation rather than pointwise agreement, because the colour is not a Lipschitz function of
+// the velocity (the long comment on case C, and docs/wo_vof_mpi_parity_gates.md):
 //
 //   * `slug-kin` — the WO-R gate G1 budget, KINEMATIC: uniform inflow at -z, outflow at +z, walls
 //     elsewhere, the advecting field the exactly-divergence-free uniform w. A liquid slug is
@@ -24,11 +28,20 @@
 //     np, and the global budget must close to round-off.
 //
 //   * `jet-coupled` — a liquid inflow into a gas domain at density ratio 100 with the full
-//     coupled step (rho(C) closure, variable-density projection). The colour is gated at the
-//     reduction floor, because the pressure driver's allreduces make np > 1 non-bitwise by
-//     construction (the `test_vardensity_mpi.cpp` protocol); what is gated bitwise here is that
-//     the inflow ghost DENSITY is the inlet fluid's on every rank that owns the face and untouched
-//     on every rank that does not.
+//     coupled step (rho(C) closure, variable-density projection). What is gated BITWISE here is
+//     that the inflow ghost DENSITY is the inlet fluid's on every rank that owns the face and
+//     untouched on every rank that does not; the colour gets the coupled pair of gates (see below).
+//
+//   * `packing-kin` — V5a x V-BC COMPOSED and kinematic: the sphere packing of the case below,
+//     one sphere cutting the outlet plane, driven by a prescribed velocity that varies in all
+//     three directions. BITWISE at every np and thread count. This is the gate on the composed
+//     cut-cell x open-boundary colour transport, and the one the coupled case cannot be.
+//
+//   * `packing` — the same scene under the full coupled step. Gated on the CONSERVATIVE content:
+//     the WO-R budget identity, the solid-colour rule, and a signed-sum gate saying the colour
+//     difference CANCELS. Its pointwise colour gate is a bound on the field going wrong, not a
+//     reduction floor — the colour is not a Lipschitz function of the velocity, and the long
+//     comment there carries the trace that shows why.
 #include <mpi.h>
 
 #include <cmath>
@@ -96,6 +109,16 @@ static double maxAbsDiff(const std::vector<double>& a, const std::vector<double>
     m = std::fmax(m, d);
   }
   return m;
+}
+// The SIGNED sum of the difference. `maxAbsDiff` asks whether the two fields agree; this asks
+// whether whatever they disagree about was CONSERVED — a difference that cancels is colour moved
+// between cells (a flux that landed differently), a difference that does not is colour created or
+// destroyed, which is what a decomposition defect does. See the tolerance comment on case C.
+static double signedSumDiff(const std::vector<double>& a, const std::vector<double>& b) {
+  double s = 0;
+  for (std::size_t i = 0; i < b.size(); ++i)
+    s += a[i] - b[i];
+  return s;
 }
 static long countNonFinite(const std::vector<double>& a) {
   long n = 0;
@@ -177,6 +200,32 @@ static std::vector<double> packingSdf(int ox, int oy, int oz, int lnx, int lny, 
       }
   return f;
 }
+// The KINEMATIC driver for the composed scene: a smooth velocity built from GLOBAL cell centres,
+// so every decomposition prescribes the SAME field and any decomposition dependence left in the
+// colour transport is the transport's own. A UNIFORM field would not do: with every value equal, a
+// ghost band filled from the wrong side is indistinguishable from one filled from the right side,
+// and the whole halo/bridge path would go untested. It is NOT discretely solenoidal — see the
+// budget note on case C0, which is why that case gates reproducibility and not conservation.
+static void packingVelocity(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz) {
+  const double pi = 3.14159265358979323846;
+  std::vector<double> fu((std::size_t)lnx * lny * lnz, 0.0), fv(fu), fw(fu);
+  for (int z = 0; z < lnz; ++z)
+    for (int y = 0; y < lny; ++y)
+      for (int x = 0; x < lnx; ++x) {
+        const std::size_t k = (std::size_t)x + (std::size_t)y * lnx + (std::size_t)z * lnx * lny;
+        const double gx = x + ox + 0.5, gy = y + oy + 0.5, gz = z + oz + 0.5;
+        fu[k] =
+            0.10 * std::sin(2 * pi * gx / NX) * std::cos(2 * pi * gy / NY) * std::cos(pi * gz / NZ);
+        fv[k] =
+            0.10 * std::cos(2 * pi * gx / NX) * std::sin(2 * pi * gy / NY) * std::cos(pi * gz / NZ);
+        fw[k] = 0.50 + 0.10 * std::cos(2 * pi * gx / NX) * std::cos(2 * pi * gy / NY) *
+                           std::sin(pi * gz / NZ);
+      }
+  s.setField("u", fu);
+  s.setField("v", fv);
+  s.setField("w", fw);
+}
+
 static void configurePacking(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz) {
   s.setRho(1.0);
   s.setMu(0.5);
@@ -350,14 +399,30 @@ int main(int argc, char** argv) {
         for (int i = 0; i < steps; ++i)
           ref.step();
         const double dc = maxAbsDiff(gc, ref.getVof());
+        const double dsum = signedSumDiff(gc, ref.getVof());
+        const double csum = sumOf(ref.getVof());
         std::printf(
-            "  [jet-coupl np=%d] colour vs single-rank %.3e; inflow rho ghost owners "
-            "wrong on %d rank(s); pressure %ld/400, max|div| %.3e\n",
-            size, dc, badAll, gItmax, divmax);
-        const double tol = (size == 1) ? 0.0 : 1e-11;
+            "  [jet-coupl np=%d] colour vs single-rank %.3e (signed sum %.3e); inflow rho ghost "
+            "owners wrong on %d rank(s); pressure %ld/400, max|div| %.3e\n",
+            size, dc, dsum, badAll, gItmax, divmax);
+        // The SAME pair of gates as case C, for the same reason and with the same derivation — see
+        // the long comment there. This case happens to sit at 1.3e-15 today, but it is a coupled
+        // run through an inflow face whose colour front is axis-aligned, i.e. exactly the
+        // configuration in which `mycNormal`'s estimator selection ties; nothing about it earns a
+        // tighter pointwise gate than case C, and a tighter one here would only mean this file
+        // fails on a different machine instead of the same one.
+        const double tol = (size == 1) ? 0.0 : 1e-6;
         if (!(dc <= tol)) {
-          std::printf("  [jet-coupl np=%d] FAIL — colour beyond the reduction floor (tol %.1e)\n",
-                      size, tol);
+          std::printf("  [jet-coupl np=%d] FAIL — the colour field is wrong (tol %.1e)\n", size,
+                      tol);
+          fail = 1;
+        }
+        const double tolSum = (size == 1) ? 0.0 : 1e-11 * std::fabs(csum);
+        if (!(std::fabs(dsum) <= tolSum)) {
+          std::printf(
+              "  [jet-coupl np=%d] FAIL — the colour difference does not CANCEL: signed sum %.3e "
+              "> %.3e\n",
+              size, dsum, tolSum);
           fail = 1;
         }
         if (badAll != 0) {
@@ -371,6 +436,83 @@ int main(int argc, char** argv) {
         }
       }
     }
+    // ------------------------- C0: V5a x V-BC composed, KINEMATIC (the bitwise gate on this path)
+    //
+    // The SAME composed scene as case C — the same packing SDF, the same inflow/outflow faces, the
+    // same initial colour — driven by a PRESCRIBED velocity instead of the coupled step. Nothing
+    // in the update then goes through a reduction, so the colour must be BITWISE identical to the
+    // single-rank reference at every np, exactly as `slug-kin` is.
+    //
+    // WHY THIS CASE EXISTS. Case C below cannot be gated bitwise, and (WO 2026-09-14) it cannot be
+    // gated at a reduction floor either — see the long comment there. That left the composed
+    // cut-cell x open-boundary path with no exact gate at all, which is the coverage this restores:
+    // the out-of-domain mask on GLOBAL indices, the owner-only boundary colour, the openness-
+    // weighted domain-face flux and the per-rank ledger are all exercised here, against an
+    // absolute standard, with a velocity that VARIES in all three directions so a mis-filled ghost
+    // cannot hide behind a uniform field.
+    //
+    // What it does NOT cover, and case C still must: `setField` clears `outflowCorrValid_`, so the
+    // bridge takes its `doOutflow = true` branch here. The outflow-face correction the projection
+    // makes lives only on the coupled path.
+    {
+      const int steps = 20;
+      IbmSolver sd(lnx, lny, lnz);
+      sd.initMpi(dec, MPI_COMM_WORLD);
+      configurePacking(sd, ox, oy, oz, lnx, lny, lnz);
+      packingVelocity(sd, ox, oy, oz, lnx, lny, lnz);
+      double ledger = 0.0, solidSum = 0.0;
+      const double vol0loc = sd.vofDiagnostics().volume;
+      for (int i = 0; i < steps; ++i) {
+        sd.advectVof();
+        const auto v = sd.vofBcVolumes();
+        for (int f = 0; f < 6; ++f)
+          ledger += v[f];
+        solidSum = std::fmax(solidSum, std::fabs(sd.vofDiagnostics().solidSumC));
+      }
+      const double vol1loc = sd.vofDiagnostics().volume;
+      double g0 = 0, g1 = 0, gLed = 0, gSolid = 0;
+      MPI_Allreduce(&vol0loc, &g0, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(&vol1loc, &g1, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(&ledger, &gLed, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(&solidSum, &gSolid, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      const std::vector<double> gc =
+          gatherGlobal(sd.getVof(), ox, oy, oz, lnx, lny, lnz, rank, size);
+      if (rank == 0) {
+        IbmSolver ref(NX, NY, NZ);
+        configurePacking(ref, 0, 0, 0, NX, NY, NZ);
+        packingVelocity(ref, 0, 0, 0, NX, NY, NZ);
+        for (int i = 0; i < steps; ++i)
+          ref.advectVof();
+        const double dc = maxAbsDiff(gc, ref.getVof());
+        const double budget = std::fabs((g1 - g0) - gLed);
+        const long nbad = countNonFinite(gc) + countNonFinite(ref.getVof());
+        // The budget is REPORTED, not gated, and this is the one thing the case gives up: the
+        // Weymouth-Yue conservation identity rests on the advecting field being discretely
+        // divergence-free in the OPENNESS-WEIGHTED sense, and a prescribed analytic field is not
+        // (2.6e-03 relative over these 20 steps). The identity is gated where its hypothesis holds
+        // — on `slug-kin`, whose uniform w is exactly solenoidal, and on case C below, whose field
+        // comes out of the projection. What this case gates is the one thing those two cannot:
+        // that the composed cut-cell x open-boundary colour transport is decomposition-EXACT.
+        std::printf(
+            "  [packing-kin np=%d] colour vs single-rank %.3e (BITWISE required); budget "
+            "|d sum(eps_eff C) - ledger| %.3e (rel %.3e, NOT gated — the prescribed field is not "
+            "discretely solenoidal); solid colour %.3e\n",
+            size, dc, budget, budget / g0, gSolid);
+        if (!(dc == 0.0)) {
+          std::printf("  [packing-kin np=%d] FAIL — the composed colour is not bitwise\n", size);
+          fail = 1;
+        }
+        if (nbad != 0) {
+          std::printf("  [packing-kin np=%d] FAIL — %ld non-finite colour cells\n", size, nbad);
+          fail = 1;
+        }
+        if (!(gSolid == 0.0)) {
+          std::printf("  [packing-kin np=%d] FAIL — colour leaked into solid cells\n", size);
+          fail = 1;
+        }
+      }
+    }
+
     // ------------------------------------------- C: V5a x V-BC composed (WO-R2 item 2), coupled
     //
     // WHY THIS ONE IS AT THE REDUCTION FLOOR AND NOT BITWISE. The kinematic pattern the two rungs
@@ -413,15 +555,76 @@ int main(int argc, char** argv) {
           ref.step();
         const double dc = maxAbsDiff(gc, ref.getVof());
         const double budget = std::fabs((g1 - g0) - gLed);
+        const double dsum = signedSumDiff(gc, ref.getVof());
+        const double csum = sumOf(ref.getVof());
         std::printf(
-            "  [packing   np=%d] colour vs single-rank %.3e; budget "
+            "  [packing   np=%d] colour vs single-rank %.3e (signed sum %.3e, rel %.3e); budget "
             "|d sum(eps_eff C) - ledger| %.3e (rel %.3e); solid colour %.3e; "
             "pressure %ld/400\n",
-            size, dc, budget, budget / g0, gSolid, gIt);
-        const double tol = (size == 1) ? 0.0 : 1e-11;
+            size, dc, dsum, dsum / csum, budget, budget / g0, gSolid, gIt);
+        // THE COLOUR IS NOT A LIPSCHITZ FUNCTION OF THE VELOCITY, so at np > 1 there is no
+        // reduction floor to gate the POINTWISE field against. Measured, on this configuration
+        // (WO docs/wo_vof_mpi_parity_gates.md, 2026-09-14):
+        //
+        //   * the composed VoF path itself is decomposition-EXACT — `packing-kin` above drives
+        //     this very scene with a prescribed 3-D velocity and is bitwise at np = 2 and 4 and at
+        //     1..16 OpenMP threads;
+        //   * under `step()` every field the solver carries agrees at the allreduce floor: u, v, w
+        //     and their ghosts to 1.4e-14, p to 1.4e-13 on |p| = 1.9e2;
+        //   * and yet the colour parts company by 4.795e-09 in exactly TWO adjacent cells, equal
+        //     and opposite, i.e. one x-face flux.
+        //
+        // The mechanism is `mycNormal`'s estimator selection (core/vof/plic.hpp), which is a STRICT
+        // comparison — `if (fabs(mm[cn][cn]) > t0) cn = 3;` — between the centred and the Youngs
+        // candidate. At a near-axis-aligned interface the two candidates carry the same dominant
+        // component, so that comparison is an exact tie: traced here, the centred candidate scored
+        // 0.99986893026188128 against Youngs' 0.99986893026188106 at np = 2 (ONE ULP apart, Youngs
+        // loses) and 0.99986893026188106 against 0.99986893026188106 single-rank (equal, so `>` is
+        // false and the centred one wins). The two winners are the same plane to 1e-6 in their
+        // dominant component and differ by 2.9e-06 in the transverse ones; re-tilting the plane by
+        // that much moves the liquid volume in the |a| = 3.4e-03 slab of that face by ~a^2 s
+        // = 1.5e-09, and the sweep by 4.795e-09. ONE ULP of colour in, 4.8e-09 out — and which way
+        // the tie breaks is decided by bits that a reduction order is entitled to change.
+        //
+        // The 1e-11 this gate used to ask for was therefore never a property of the code: it was a
+        // coin toss. It came up heads in CI and on 1 thread, and tails everywhere else — measured
+        // over 24 (ranks, threads) pairs, np = 1 is bitwise at 1..16 threads, np = 2 flips at 2..16
+        // threads and not at 1, and np = 4 flips at 2, 3, 4, 6 and 12 threads but NOT at 1, 8 and
+        // 16, which is the only reason `vof_bc_mpi_np4` passes on the 48-core box at all.
+        //
+        // So the pointwise gate is no longer a reduction-floor gate and does not pretend to be. The
+        // reduction-floor content moves to the SIGNED SUM below, which is Lipschitz and is what a
+        // real defect breaks; the pointwise number becomes a bound on the field going WRONG. It is
+        // set at 1e-6: three orders above the largest flip this scene can produce (a tie needs the
+        // two candidates to agree in the dominant component, which bounds their transverse mass
+        // s = 1 - max|m| and hence the flux jump at ~cfl^2 s), and far below what a real defect
+        // does here. That second half is MEASURED, not asserted — the WO-F owner rule was deleted
+        // (`vofApplyColourBc`'s `touchesGlobalFace` test, so every rank injects the inflow colour
+        // into its own block's -z ghost band) and re-run at np = 2: this gate reports 1.000e+00
+        // against its 1e-06, the signed sum 5.141e+02 against its 3.886e-08, and `packing-kin`
+        // 1.000e+00 against bitwise. Nine orders of margin, not one.
+        //
+        // The OTHER defect named in this file's header — the out-of-domain mask built on per-block
+        // instead of global indices — was injected too, and is worth recording precisely because
+        // this case does NOT see it: `packing` stayed at 3.174e-09 and `packing-kin` at exactly
+        // zero, while `slug-kin`'s bitwise gate caught it at 2.769e-37. It is caught by the
+        // bitwise cases, which is where that coverage lives; the 1e-11 this case used to carry
+        // never had it either.
+        const double tol = (size == 1) ? 0.0 : 1e-6;
         if (!(dc <= tol)) {
-          std::printf("  [packing   np=%d] FAIL — colour beyond the reduction floor (tol %.1e)\n",
-                      size, tol);
+          std::printf("  [packing   np=%d] FAIL — the colour field is wrong (tol %.1e)\n", size,
+                      tol);
+          fail = 1;
+        }
+        // The reduction floor, on the quantity that HAS one. An 8192-term naive sum of O(1) values
+        // drifts by O(N eps) ~ 2e-12 relative; 1e-11 is five times that, and a flux that a
+        // decomposition lost or double-counted does not cancel at all.
+        const double tolSum = (size == 1) ? 0.0 : 1e-11 * std::fabs(csum);
+        if (!(std::fabs(dsum) <= tolSum)) {
+          std::printf(
+              "  [packing   np=%d] FAIL — the colour difference does not CANCEL: signed sum %.3e "
+              "> %.3e (colour created or destroyed, not moved)\n",
+              size, dsum, tolSum);
           fail = 1;
         }
         if (!(budget / g0 < 1e-10)) {

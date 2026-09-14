@@ -70,6 +70,12 @@ foreach(t cutcellmg_mpi telescope_mpi telescope_varrho_mpi velocitymg_mpi veloci
   endforeach()
 endforeach()
 
+# DIAGNOSTIC PROBE (no ctest): the lockstep np vs single-rank colour curve of the packing case.
+add_executable(probe_vof_packing EXCLUDE_FROM_ALL probe_vof_packing.cpp)
+target_include_directories(probe_vof_packing PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
+target_link_libraries(probe_vof_packing PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
+
 # VoF rung V1: distributed Weymouth-Yue advection. Standalone (its own g=3 colour halo, no
 # CutcellMG), so it does NOT need PECLET_FLOW_MPI; it shares the scene builders with the
 # single-rank battery in tests/kokkos.

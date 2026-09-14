@@ -231,9 +231,35 @@ int main(int argc, char** argv) {
         const double dp = maxAbsDiff(gp, ref.getPressure());
         const double dc = maxAbsDiff(gc, ref.getField("C"));
         const double sp = maxAbs(ref.getPressure());
-        long dit = 0;
-        for (std::size_t k = 0; k < itd.size(); ++k)
+        long dit = 0, sumd = 0, sumr = 0, maxd = 0, maxr = 0;
+        for (std::size_t k = 0; k < itd.size(); ++k) {
           dit = std::max(dit, std::labs(itd[k] - itr[k]));
+          sumd += itd[k];
+          sumr += itr[k];
+          maxd = std::max(maxd, itd[k]);
+          maxr = std::max(maxr, itr[k]);
+        }
+        // THE PER-STEP V-CYCLE COUNT IS NOT A DECOMPOSITION INVARIANT HERE, and one cycle of slack
+        // (the `vardensity_mpi` precedent, flow 65b2b6a) is not enough. That commit's argument was
+        // that `maxabs(r) < rtol r0` is a threshold crossing on a quantity carrying a
+        // reduction-order floor, so the crossing index can move by one. `hydro-z` is worse than
+        // that: it is a REST STATE. Its converged face velocity is 1.9e-13 on |P| = 1.2e+03, so the
+        // divergence the projection is asked to remove is not a physical residual at all — it is
+        // the round-off of the hydrostatic balance, and r0 itself therefore differs between two
+        // decompositions by an O(1) RELATIVE amount. The count needed to cut THAT by rtol is a
+        // random walk, not a shifted copy. Measured over the 20 steps at np = 2 (2026-09-14): the
+        // sequences part at ten steps, by one at nine of them and by two at step 11 (10 vs 12) —
+        // and whether the worst gap is one or two depends on the OpenMP THREAD COUNT alone (one at
+        // 1, 4 and 8 threads, two at 2, at both np = 2 and np = 4). `dit <= 1` was a coin toss.
+        //
+        // What a decomposition defect actually does to a pressure solve — a stale ghost, a broken
+        // coarse level, a mis-scaled operator — is inflate it SYSTEMATICALLY; it does not shuffle
+        // it by a cycle. So the invariant with content is the COST ENVELOPE, and that is what is
+        // gated above np = 1: the worst step within one V-cycle of the reference's worst, and the
+        // total within one V-cycle per step. np = 1 keeps its exact zero.
+        const bool itOk = (size == 1) ? (dit == 0)
+                                      : (maxd <= maxr + 1 &&
+                                         std::labs(sumd - sumr) <= static_cast<long>(itd.size()));
         // np = 1 must be BITWISE; np > 1 sits on the MPI reduction-order floor.
         // THE YARDSTICK FOR A REST STATE IS THE FORCING, NOT THE ANSWER. `hydro-z` is hydrostatic:
         // its converged velocity is ~0 (1.4e-07, and that is the invisible checkerboard, not
@@ -246,16 +272,27 @@ int main(int argc, char** argv) {
         const double tolF = (size == 1) ? 0.0 : 1e-11 * std::fmax(fRef, 1e-12);
         const double tolP = (size == 1) ? 0.0 : 1e-9 * std::fmax(sp, 1e-12);
         const double tolC = (size == 1) ? 0.0 : 1e-11;
-        const bool ok = du <= tolU && df <= tolF && dp <= tolP && dc <= tolC && dit <= 1;
+        const bool ok = du <= tolU && df <= tolF && dp <= tolP && dc <= tolC && itOk;
         std::printf(
             "  [%-7s np=%d] du %.3e (|u| %.3e)  duf %.3e (|uf| %.3e)  dP %.3e (|P| %.3e)"
-            "  dC %.3e   d(iters) %ld   %s\n",
-            c.name, size, du, su, df, sf, dp, sp, dc, dit, ok ? "OK" : "*** FAIL ***");
+            "  dC %.3e   d(iters) %ld  iters max %ld/%ld sum %ld/%ld   %s\n",
+            c.name, size, du, su, df, sf, dp, sp, dc, dit, maxd, maxr, sumd, sumr,
+            ok ? "OK" : "*** FAIL ***");
         if (c.walls)
           std::printf(
               "           face |uf| %.3e (the gated hydrostatic quantity), cell |u| %.3e "
               "(carries the approximate projection's invisible checkerboard)\n",
               maxAbs(ref.getFaceVelocity(2)), maxAbs(ref.getVelocity(2)));
+        if (dit > 0) {
+          // The evidence the gate's slack is argued from: WHERE in the sequence the counts part,
+          // and by how much. A single step out of step by one is the stopping test landing on the
+          // other side of its threshold; a whole tail shifted would be a different animal.
+          std::printf("           iteration counts (step: np/ref):");
+          for (std::size_t k = 0; k < itd.size(); ++k)
+            if (itd[k] != itr[k])
+              std::printf("  %zu: %ld/%ld", k, itd[k], itr[k]);
+          std::printf("\n");
+        }
         if (!ok)
           fail = 1;
       }
