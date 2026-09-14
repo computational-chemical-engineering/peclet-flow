@@ -1850,6 +1850,19 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "domain-BC configuration keeps the red-black smoother.")
       .def("velocity_chebyshev_active", &S::velocityChebyshevActive,
            "Whether the Chebyshev momentum solver is selected.")
+      .def("set_velocity_mg_chebyshev", &S::setVelocityMgChebyshev, nb::arg("on"),
+           nb::arg("degree") = 0, nb::arg("eig_ratio") = 10.0,
+           "Use a Chebyshev polynomial smoother INSIDE the velocity multigrid instead of red-black "
+           "Gauss-Seidel, on every level. Independent of set_velocity_chebyshev, which replaces the "
+           "V-cycle outright: this keeps the V-cycle -- whose mesh-independent convergence is what "
+           "wins on this operator -- and spends half the halo exchanges within it (one residual and "
+           "one exchange per polynomial degree, against two colour passes and two exchanges per "
+           "Gauss-Seidel sweep). degree=0 follows the V-cycle's own pre/post/bottom counts, so the "
+           "two smoothers are compared at equal nominal work. The interval is [hi/eig_ratio, hi] "
+           "with hi each level's Gershgorin lambda_max: a smoother wants the top of the spectrum "
+           "because the coarse grid owns the rest.")
+      .def("velocity_mg_chebyshev", &S::velocityMgChebyshev,
+           "Whether the velocity multigrid uses the Chebyshev smoother.")
       .def(
           "set_domain_bc",
           [](S& s, const std::string& face, const std::string& type,

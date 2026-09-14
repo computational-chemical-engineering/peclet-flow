@@ -378,6 +378,19 @@ bool Solver<Grid>::velocityChebyshevActive() const {
 }
 
 template <class Grid>
+void Solver<Grid>::setVelocityMgChebyshev(bool on, int degree, double eig_ratio) {
+  vmgCheb_ = on;
+  vmgChebDegree_ = degree;
+  vmgChebEigRatio_ = eig_ratio;
+  vmg_.setChebyshevSmoother(on, degree, eig_ratio);
+}
+
+template <class Grid>
+bool Solver<Grid>::velocityMgChebyshev() const {
+  return vmgCheb_;
+}
+
+template <class Grid>
 double Solver<Grid>::velocityResidualTolerance() const {
   if (velResTol_ >= 0.0)
     return velResTol_;

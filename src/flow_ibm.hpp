@@ -360,6 +360,14 @@ class Solver {
   void setVelocityChebyshev(bool on, int maxit = 400);
   bool velocityChebyshevActive() const;
 
+  // Chebyshev as the velocity MULTIGRID's smoother, in place of red-black Gauss-Seidel on every
+  // level. Independent of setVelocityChebyshev (which replaces the V-cycle outright): this keeps
+  // the V-cycle -- whose convergence is what actually wins on this operator -- and spends half the
+  // halo exchanges inside it. `degree` 0 follows the V-cycle's own pre/post/bottom sweep counts,
+  // so the two smoothers are compared at equal nominal work.
+  void setVelocityMgChebyshev(bool on, int degree = 0, double eig_ratio = 10.0);
+  bool velocityMgChebyshev() const;
+
 
   // The tolerance actually in force (resolves the follow-the-pressure default).
   double velocityResidualTolerance() const;
@@ -4427,6 +4435,9 @@ class Solver {
   bool vmgDecided_ = false;  // the momentum-solver choice has been made (and the MG built)
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
   bool useVelocityCheb_ = false;  // Chebyshev momentum solver (setVelocityChebyshev)
+  bool vmgCheb_ = false;         // Chebyshev smoother INSIDE the velocity MG
+  int vmgChebDegree_ = 0;
+  double vmgChebEigRatio_ = 10.0;
   int velChebMaxit_ = 400;
   VelocityMG vmg_;
   CCField vmgTheta_, vmgClean_;

@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "mac_cheb_momentum.hpp"    // ibmStencilJacobiBounds, ibmChebUpdate, ChebCoeffs
 #include "mac_cutcell_mg.hpp"       // restrictAvg, prolongAdd, FPV/FPC
 #include "mac_ibm.hpp"              // ibmRbgsStencilColor (pin smoother), MConst
 #include "staggered_advection.hpp"  // fou_operator_aniso (upwind-convective coarse op)
@@ -313,6 +314,8 @@ class VelocityMG {
     C3 gdim{0, 0, 0};  // GLOBAL dims of this level (og + inner == gdim -> owns the +face)
     std::size_t n = 0;
     CCField x, rhs, res, theta, pin, resMask;
+    CCField cd;            // Chebyshev search direction (chebSmooth_; allocated on first use)
+    double chebHi = -1.0;  // Gershgorin lambda_max of diag(AC)^-1 A, GLOBAL; set per solve()
     CCField advU, advV, advW;  // restricted advecting velocity (upwind-convective coarse op; L>=1)
     FPV AC, AW, AE, AS, AN, AB, AT;
 #ifdef PECLET_FLOW_MPI
@@ -651,6 +654,19 @@ class VelocityMG {
   // the CUDA vmg also does). With it the vel-MG converges to the RB-GS fixed point. IbmSolver
   // supplies this per component before the solve.
   void setBcApplyL0(std::function<void(CCField)> fn) { bcApplyL0_ = std::move(fn); }
+
+  // Use a Chebyshev polynomial smoother instead of red-black Gauss-Seidel on every level.
+  // `degree` is taken from the caller's sweep counts (pre/post/bottom), so a 2/2 V-cycle becomes a
+  // degree-2 polynomial and the two are compared at equal nominal work. The interval is
+  // [hi/eigRatio, hi] with hi the level's Gershgorin lambda_max: a SMOOTHER wants the top of the
+  // spectrum (the coarse grid owns the rest), which is why this is not the solver's true lower
+  // bound. eigRatio is the usual MG knob -- PETSc defaults near 10, MueLu near 20.
+  void setChebyshevSmoother(bool on, int degree = 0, double eigRatio = 10.0) {
+    chebSmooth_ = on;
+    chebDegree_ = degree;  // 0 = follow pre_/post_/bottom_
+    chebEigRatio_ = eigRatio > 1.0 ? eigRatio : 10.0;
+  }
+  bool chebyshevSmoother() const { return chebSmooth_; }
   /// Anisotropic-coarsening aspect threshold theta (doc/anisotropic_metric.md §5.1).
   void setAspectThreshold(double theta) { aspectTheta_ = theta; }
   // const-coeff aniso operator + no-slip/inflow/outflow boundary fold for component comp, on EVERY
@@ -737,6 +753,18 @@ class VelocityMG {
 #endif
       return v;
     };
+    // Chebyshev needs an interval that CONTAINS each level's spectrum, and every rank must use
+    // the SAME polynomial or the iterates drift apart. The operator is fixed for the whole solve,
+    // so the Gershgorin reduction runs once per level here -- not inside smooth(), which would put
+    // an all-reduce on every level of every V-cycle and hand back the latency the smoother saves.
+    if (chebSmooth_)
+      for (Level& lv : lv_) {
+        double lo = 0.0, hi = 0.0;
+        ibmStencilJacobiBounds(FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS), FPC(lv.AN),
+                               FPC(lv.AB), FPC(lv.AT), usePin_ ? CCConst(lv.pin) : empty_, lv.ext,
+                               G, lo, hi);
+        lv.chebHi = gmax(hi);
+      }
     auto residual = [&]() {
       fill(l0, l0.x);
       if (bcApplyL0_)
@@ -835,6 +863,10 @@ class VelocityMG {
   void smooth(Level& lv, int sweeps, bool isL0) {
     const C3 og = lv.og;  // global red-black parity (block inner origin); {0,0,0} single-rank
     CCConst pin = usePin_ ? CCConst(lv.pin) : empty_;
+    if (chebSmooth_ && lv.chebHi > 0.0) {
+      chebSmooth(lv, chebDegree_ > 0 ? chebDegree_ : sweeps, isL0, pin);
+      return;
+    }
     for (int k = 0; k < sweeps; ++k)
       for (int color = 0; color < 2; ++color) {
 #ifdef PECLET_FLOW_MPI
@@ -862,6 +894,30 @@ class VelocityMG {
         ibmRbgsStencilColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
                             FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), pin, lv.ext, og, G, color);
       }
+  }
+
+  // Degree-`degree` Chebyshev polynomial smoother on diag(AC)^-1 A over [hi/eigRatio, hi]. One
+  // residual and ONE halo exchange per degree, against red-black's two colour passes and two
+  // exchanges per sweep -- the reason to want it here at all. The direction restarts at zero on
+  // every call: each smooth is an independent polynomial application, not a continued iteration.
+  // lv.res is scratch here; vcycle recomputes it after smoothing, so overwriting it is safe.
+  void chebSmooth(Level& lv, int degree, bool isL0, CCConst pin) {
+    if (degree < 1)
+      return;
+    if (lv.cd.extent(0) != lv.n)
+      lv.cd = CCField("vmg_cd", lv.n);
+    Kokkos::deep_copy(lv.cd, 0.0);
+    ChebCoeffs cb(lv.chebHi / chebEigRatio_, lv.chebHi);
+    for (int k = 0; k < degree; ++k) {
+      fill(lv, lv.x);
+      if (isL0 && bcApplyL0_)
+        bcApplyL0_(lv.x);
+      residualVarPin(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
+                     FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), pin, lv.ext, G);
+      double alpha = 0.0, beta = 0.0;
+      cb.next(k, alpha, beta);
+      ibmChebUpdate(lv.x, lv.cd, CCConst(lv.res), FPC(lv.AC), pin, lv.ext, G, alpha, beta);
+    }
   }
   // periodic ghost fill; in domain-BC mode only the periodic axes wrap (non-periodic boundary
   // ghosts are left as the caller / correction set them -- the boundary fold + held ghost represent
@@ -931,6 +987,9 @@ class VelocityMG {
   bool aniso_ = false;              // engages that rule; false => today's level table verbatim
   double aspectTheta_ = 2.0;        // anisotropic-coarsening threshold (setAspectThreshold)
   int pre_ = 2, post_ = 2, bottom_ = 8;
+  bool chebSmooth_ = false;      // Chebyshev polynomial smoother instead of red-black GS
+  int chebDegree_ = 0;           // 0 = follow pre_/post_/bottom_
+  double chebEigRatio_ = 10.0;   // interval is [chebHi/chebEigRatio_, chebHi]
   bool usePin_ = true,
        useResMask_ = true;  // staircase: pin + clean-fluid exclude; upwind/domain-BC: neither
   bool bcMode_ = false;
