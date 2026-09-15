@@ -228,29 +228,55 @@ void Solver<Grid>::setSolidBuildOverlaysAndStencils() {
 
 template <class Grid>
 void Solver<Grid>::setSolidVelocityMgAuto() {
+  // The momentum solver's DEFAULT is the velocity V-cycle (changed 2026-09-15; see
+  // docs/decisions/flow.md). Until then the default was red-black Gauss-Seidel, with the V-cycle
+  // selected only below 65536 cells per rank and only under MPI at np > 1. That rule had the sign
+  // of the effect backwards: measured on the 1.0.0 scaling benchmark (a 384^3 cut-cell bed), the
+  // V-cycle is faster at EVERY rank count, and its margin is LARGEST at the biggest blocks --
+  // 2.23x at 147k cells/rank on Genoa, 2.19x on a single H100 at 56.6 M cells/rank, against
+  // 1.66x near the old threshold. Red-black was in fact running at its iteration cap
+  // (velIters_ = 200 sweeps per component) on every rung of both ladders, so it was not merely
+  // slower, it was not converging.
+  //
+  // What the rule still declines to do:
+  //   * override an explicit set_velocity_multigrid() (vmgExplicit_), which always wins;
+  //   * run on an operator mode the velocity MG has not been validated for (eligible, below);
+  //   * build a hierarchy on a block too small to coarsen -- below vmgAutoMinExtent_ cells on the
+  //     shortest axis the V-cycle degenerates to its bottom smoother and only adds setup, so
+  //     small blocks keep RB-GS. This is what the old global-cell floor was reaching for, stated
+  //     in the quantity that actually decides it.
+  //   * honour an explicitly requested upper bound: set_velocity_multigrid_auto(cells_per_rank)
+  //     still means "V-cycle only below this many cells per rank", so
+  //     set_velocity_multigrid_auto(65536, 1 << 23) reproduces the 1.0.0 behaviour exactly, and
+  //     set_velocity_multigrid_auto(0) still means never.
+  if (vmgExplicit_ || vmgAutoCells_ == 0)
+    return;
+  const bool eligible = !varProps_ && !varRho_ && !hasDrag_ && !porous_ && !Grid::collocated &&
+                        (!hasBc_ || hasSolid_ || !implicitFou_);
+  // The shortest inner extent any rank owns. Every rank must reach the SAME decision or they
+  // iterate with different solvers, so this is reduced; it is a setup-path reduction, once per
+  // geometry build, not a per-step one.
+  int minExt = std::min({e_.x - 2 * G, e_.y - 2 * G, e_.z - 2 * G});
+  // Serial (or a non-MPI build): the local block IS the global grid, so both sizes come from the
+  // same place. gnx_/gny_/gnz_ exist only under PECLET_FLOW_MPI.
+  double global = (double)(e_.x - 2 * G) * (e_.y - 2 * G) * (e_.z - 2 * G);
+  double perRank = global;
 #ifdef PECLET_FLOW_MPI
-  // AUTO: pick the V-cycle when the per-rank block is small (see setVelocityMultigridAuto). The
-  // decision uses the GLOBAL cells / ranks, so every rank agrees without communication. Only on
-  // the validated operator modes: IBM-periodic, all-fluid domain-BC (explicit advection), mixed.
-  if (!vmgExplicit_ && distributed_ && vmgAutoCells_ > 0) {
-    int np = 1;
+  if (distributed_) {
+    int np = 1, g = minExt;
     MPI_Comm_size(comm_, &np);
-    const double perRank = (double)gnx_ * gny_ * gnz_ / (double)np;
-    const bool eligible = !varProps_ && !varRho_ && !hasDrag_ && !porous_ && !Grid::collocated &&
-                          (!hasBc_ || hasSolid_ || !implicitFou_);
-    // np > 1: a single rank has no halo latency to hide (RB-GS is the cheaper solver there) and
-    // a distributed np=1 run must stay bit-identical to the single-rank path. Global size floor:
-    // the rule is about latency-bound LARGE runs; a small global problem split across ranks
-    // (every ctest, every quick check) keeps RB-GS so distributed == single-rank stays exact.
-    const double global = (double)gnx_ * gny_ * gnz_;
-    useVelocityMg_ = eligible && np > 1 && global >= (double)vmgAutoMinGlobal_ &&
-                     perRank < (double)vmgAutoCells_;
-    if (useVelocityMg_) {
-      vmgLevels_ = 3;
-      vmgVcycles_ = 40;
-    }
+    MPI_Allreduce(&minExt, &g, 1, MPI_INT, MPI_MIN, comm_);
+    minExt = g;
+    global = (double)gnx_ * gny_ * gnz_;
+    perRank = global / (double)np;
   }
 #endif
+  useVelocityMg_ = eligible && minExt >= vmgAutoMinExtent_ &&
+                   global >= (double)vmgAutoMinGlobal_ && perRank < (double)vmgAutoCells_;
+  if (useVelocityMg_) {
+    vmgLevels_ = 3;
+    vmgVcycles_ = 40;
+  }
 }
 
 template <class Grid>

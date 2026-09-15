@@ -334,9 +334,18 @@ pressure driver's rtol** — the projection consumes u* and resolves its diverge
 tolerance, so "no less accurately than pressure" is the rule with no free constant; `0` restores the
 legacy update criterion. At least one sweep always runs, and there is deliberately no early return
 for a warm start that already meets the tolerance (skipping it drifts the hydrostatic acid test by
-1e-8 in dP/dz). With `set_velocity_multigrid` never called, `diagnostics.set_velocity_multigrid_auto` takes the
-3-level V-cycle on a distributed run of ≥ 8 M cells once cells/rank fall below 65536; the V-cycle
-needs no depth on a pore-confined bed, so no telescoping.
+1e-8 in dP/dz). **The momentum solver's default is the 3-level velocity V-cycle** (since 2026-09-15) on every
+validated operator mode and at every rank count, serial included — red-black Gauss-Seidel is now
+the fallback, taken only on an ineligible operator or a per-rank block shorter than 16 cells on any
+axis. It replaced a rule that had the sign of the effect backwards (V-cycle only *below* 65536
+cells/rank, and only at np > 1): measured on the 1.0.0 scaling benchmark the V-cycle is faster at
+**every** rung of both ladders, by 2.23× at 147k cells/rank and 2.19× on a single H100, with its
+margin *largest* at the biggest blocks — and red-black was running at its sweep cap
+(`velIters_` = 200/component), i.e. not converging, on every rung of both. Zick & Homsy is
+unchanged to 4 digits across the switch (the +3.5 % velocity-MG drift of 2026-06 was fixed by the
+clean-fluid exclude mask). `set_velocity_multigrid_auto(65536, 1 << 23)` restores the 1.0.0 rule
+and `(0)` disables the V-cycle. The V-cycle needs no depth on a pore-confined bed, so no
+telescoping.
 
 ## Collocated solver (`SolverColocated`)
 

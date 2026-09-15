@@ -357,10 +357,13 @@ void Solver<Grid>::setVelocityResidualTolerance(double rtol) {
 }
 
 template <class Grid>
-void Solver<Grid>::setVelocityMultigridAuto(long cellsPerRank, long minGlobalCells) {
+void Solver<Grid>::setVelocityMultigridAuto(long cellsPerRank, long minGlobalCells,
+                                           int minBlockExtent) {
   vmgAutoCells_ = cellsPerRank;
   if (minGlobalCells >= 0)
     vmgAutoMinGlobal_ = minGlobalCells;
+  if (minBlockExtent >= 0)
+    vmgAutoMinExtent_ = minBlockExtent;
 }
 
 template <class Grid>

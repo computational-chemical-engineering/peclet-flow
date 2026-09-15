@@ -328,12 +328,17 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "to rtol of the first sweep's (iters becomes the cap, min_iters the floor). Easy "
           "regimes (small nu*dt/dx^2) exit after ~3-5 sweeps; stiff regimes run to the cap "
           "unchanged. rtol = 0 (default) is the legacy fixed count, byte-identical.")
-      .def("set_velocity_multigrid_auto", [](D& diag, long cellsPerRank, long minGlobalCells) { return diag.s->setVelocityMultigridAuto(cellsPerRank, minGlobalCells); }, nb::arg("cells_per_rank"),
-           nb::arg("min_global_cells") = -1,
-           "AUTO velocity-MG rule (when set_velocity_multigrid was never called): under MPI (np > 1) "
-           "use the V-cycle once the global cells per rank fall below cells_per_rank (default 65536; "
-           "0 = never), for global problems of at least min_global_cells (default 8M). Env "
-           "set_velocity_multigrid_auto.")
+      .def("set_velocity_multigrid_auto", [](D& diag, long cellsPerRank, long minGlobalCells, int minBlockExtent) { return diag.s->setVelocityMultigridAuto(cellsPerRank, minGlobalCells, minBlockExtent); }, nb::arg("cells_per_rank"),
+           nb::arg("min_global_cells") = -1, nb::arg("min_block_extent") = -1,
+           "Narrow the rule that selects the momentum solver. Since 2026-09-15 the DEFAULT is the "
+           "velocity V-cycle on every validated operator mode and at every rank count: measured on "
+           "the 1.0.0 scaling benchmark it is faster at every rung of both the CPU and the GPU "
+           "ladder (2.23x at 147k cells/rank, 2.19x on one H100), and the red-black smoother it "
+           "replaced was running at its sweep cap -- not converging -- on every rung of both. "
+           "cells_per_rank sets an upper bound in cells per rank (0 = never use the V-cycle); "
+           "set_velocity_multigrid_auto(65536, 1 << 23) restores the 1.0.0 behaviour exactly. "
+           "min_block_extent (default 16) is the shortest per-rank inner extent worth building a "
+           "hierarchy on. An explicit set_velocity_multigrid() overrides all of it.")
       .def("velocity_multigrid_active", [](D& diag) { return diag.s->velocityMultigridActive(); },
            "Whether the velocity (momentum) solve uses the multigrid V-cycle rather than plain "
            "RB-GS. Reads back the OUTCOME, not the setting: an explicit set_velocity_multigrid("

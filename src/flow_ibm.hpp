@@ -330,14 +330,22 @@ class Solver {
   void setVelocityResidualTolerance(double rtol);
 
 
-  // Velocity-MG AUTO rule (applies when set_velocity_multigrid was never called): under MPI, once
-  // the block is small enough that the momentum RB-GS is halo-latency-bound, take the V-cycle
-  // instead (1-2 cycles/component == 2-4 exchanges against 8-9 sweeps x 2). Measured crossover on
-  // the FoxBerry bed: RB-GS 2.91 s vs MG 3.32 s/step at 147k cells/rank, MG 0.834 vs 0.844 at
-  // 37k; threshold cellsPerRank (default 65536 cells per rank, 0 = never), and only
-  // for global problems of at least minGlobalCells (8M) -- small grids split
-  // across ranks keep RB-GS so a distributed run stays exactly the single-rank one.
-  void setVelocityMultigridAuto(long cellsPerRank, long minGlobalCells = -1);
+  // The momentum solver's default selection rule. Since 2026-09-15 the DEFAULT is the velocity
+  // V-cycle on every validated operator mode and at every rank count, replacing red-black
+  // Gauss-Seidel. Measured on the 1.0.0 scaling benchmark (384^3 cut-cell bed): the V-cycle is
+  // faster at every rung of both the Genoa and the H100 ladder -- 2.23x at 147k cells/rank,
+  // 2.19x on a single H100 -- and red-black was running at its sweep cap (velIters_), i.e. not
+  // converging, on every rung of both.
+  //
+  // This setter narrows that default rather than enabling it:
+  //   cellsPerRank    upper bound in cells per rank (default: none). 0 = never use the V-cycle.
+  //                   set_velocity_multigrid_auto(65536, 1 << 23) restores the 1.0.0 rule.
+  //   minGlobalCells  global-size floor (default: none).
+  //   minBlockExtent  shortest per-rank inner extent worth building a hierarchy on (default 16);
+  //                   below it the V-cycle degenerates to its bottom smoother and only adds setup.
+  // An explicit setVelocityMultigrid() overrides all of this.
+  void setVelocityMultigridAuto(long cellsPerRank, long minGlobalCells = -1,
+                                int minBlockExtent = -1);
 
 
   // The tolerance actually in force (resolves the follow-the-pressure default).
@@ -4391,8 +4399,12 @@ class Solver {
   int nStar_ = 0;
   bool useVelocityMg_ = false;
   bool vmgExplicit_ = false;  // set_velocity_multigrid was called (AUTO rule off)
-  long vmgAutoCells_ = 65536L;         // AUTO threshold, cells per rank (0 = never)
-  long vmgAutoMinGlobal_ = 1L << 23;   // AUTO applies only to global problems >= 8M cells
+  // The V-cycle is the DEFAULT momentum solver (2026-09-15): no upper bound on the block size,
+  // no global-size floor. 0 = never; a finite value restores an upper bound (1.0.0 used 65536
+  // cells/rank with a 1<<23 global floor).
+  long vmgAutoCells_ = std::numeric_limits<long>::max();
+  long vmgAutoMinGlobal_ = 0L;
+  int vmgAutoMinExtent_ = 16;          // shortest per-rank inner extent the V-cycle is worth
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
   VelocityMG vmg_;
   CCField vmgTheta_, vmgClean_;
