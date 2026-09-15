@@ -22,6 +22,18 @@ void Solver<Grid>::step() {
   // retrying. Both checks are now evaluated here, at the head of `step()` and before the first
   // mutator, so a throw leaves every field bitwise as it was on entry. No-op unless VoF is on.
   vofStepPrecheck();
+
+  // The momentum-solver choice, for a configuration that never calls set_solid. set_solid is the
+  // other (and historically the only) place it is made; a domain-BC case with no immersed solid
+  // never reaches it, which is why enabling the velocity MG there used to build no hierarchy and
+  // segfault. Deciding at the head of the first step is if anything more correct than deciding in
+  // set_solid: every flag the eligibility test reads (advection scheme, variable properties,
+  // drag, porous) is final by now, whereas at set_solid time it need not be.
+  if (!vmgDecided_) {
+    setSolidVelocityMgAuto();
+    initVelocityMg();
+    vmgDecided_ = true;
+  }
   const double ts0 = phaseTick();
   tPredictor_ = tMomentum_ = tProjection_ = 0.0;
   lastMomentumSweeps_ = 0;

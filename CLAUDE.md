@@ -334,18 +334,33 @@ pressure driver's rtol** — the projection consumes u* and resolves its diverge
 tolerance, so "no less accurately than pressure" is the rule with no free constant; `0` restores the
 legacy update criterion. At least one sweep always runs, and there is deliberately no early return
 for a warm start that already meets the tolerance (skipping it drifts the hydrostatic acid test by
-1e-8 in dP/dz). **The momentum solver's default is the 3-level velocity V-cycle** (since 2026-09-15) on every
-validated operator mode and at every rank count, serial included — red-black Gauss-Seidel is now
-the fallback, taken only on an ineligible operator or a per-rank block shorter than 16 cells on any
-axis. It replaced a rule that had the sign of the effect backwards (V-cycle only *below* 65536
-cells/rank, and only at np > 1): measured on the 1.0.0 scaling benchmark the V-cycle is faster at
-**every** rung of both ladders, by 2.23× at 147k cells/rank and 2.19× on a single H100, with its
-margin *largest* at the biggest blocks — and red-black was running at its sweep cap
-(`velIters_` = 200/component), i.e. not converging, on every rung of both. Zick & Homsy is
-unchanged to 4 digits across the switch (the +3.5 % velocity-MG drift of 2026-06 was fixed by the
-clean-fluid exclude mask). `set_velocity_multigrid_auto(65536, 1 << 23)` restores the 1.0.0 rule
-and `(0)` disables the V-cycle. The V-cycle needs no depth on a pore-confined bed, so no
-telescoping.
+1e-8 in dP/dz). **Which momentum solver runs is decided by the PHYSICS, not by the configuration** (2026-09-15).
+The criterion is the implicit-diffusion operator's condition number,
+`kappa = 1 + 4·dt·mu·(w_x+w_y+w_z)/rho` — that is `1 + 12·D` in the diffusion number
+`D = mu·dt/(rho·h²)` on an isotropic grid, and metric-correct on an anisotropic one. Above
+`kappa >= 13` (D ≳ 1) the 3-level **velocity V-cycle**; below it, red-black Gauss-Seidel. The rule
+names no geometry at all, so an immersed solid and a domain-BC box with the same `dt` get the same
+solver — IBM is a way of sculpting geometry, not a different momentum equation.
+
+It replaced two rules that keyed on the wrong thing: 1.0.0's (RB-GS by default, V-cycle only
+*below* 65536 cells/rank at np>1) had the block-size effect backwards — the V-cycle's margin is
+*largest* on big blocks (2.23× at 147k cells/rank, 2.19× on one H100) — and a brief intermediate
+rule made the choice depend on whether a solid was present.
+
+**The threshold is a correctness one, not a tuning one.** Measured on a domain-BC channel:
+below D≈1 RB-GS converges in tens of sweeps and the V-cycle is pure overhead (0.86× at D=0.25);
+above D≈4 RB-GS stops meeting its tolerance at all, hitting `velIters_` and returning residuals of
+6.8e-08 at D=6 and 7.7e-06 at D=12 against a 1e-10 target. Zick & Homsy is unchanged to 4 digits
+across the switch.
+
+The decision is taken at the head of the **first `step()`**, never at `set_solid` time, so a
+`set_dt()` issued after `set_solid` cannot leave it stale; `set_solid` resets the latch. A
+configuration with **no** immersed solid reaches it too — before this, enabling the velocity MG
+there built no hierarchy and segfaulted on the first solve (pre-existing bug, fixed here).
+Declines only for cause: an explicit `set_velocity_multigrid()`, an unvalidated operator mode, or
+a per-rank block shorter than 16 cells on any axis.
+`set_velocity_multigrid_auto(65536, 1 << 23)` restores the 1.0.0 rule; `(0)` disables the V-cycle.
+The V-cycle needs no depth on a pore-confined bed, so no telescoping.
 
 ## Collocated solver (`SolverColocated`)
 

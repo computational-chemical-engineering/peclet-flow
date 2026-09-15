@@ -501,6 +501,9 @@ class VelocityMG {
   }
   int nLevels() const { return (int)lv_.size(); }
   Level& level(int L) { return lv_[L]; }
+  // Levels built; 0 means the hierarchy has never been initialised. Dereferencing level 0 in
+  // that state is a segfault, so callers that can reach solve() without init() must ask.
+  int levels() const { return (int)lv_.size(); }
 
   // level-0 fine operator = the external IBM stencil (7 float arrays on the same G=2 block).
   void setFineStencil(FPC AC, FPC AW, FPC AE, FPC AS, FPC AN, FPC AB, FPC AT) {

@@ -92,8 +92,9 @@ void Solver<Grid>::setSolidDevice(CCField din, bool cutcellPressure) {
   setSolidSelectScheme();
   setSolidUploadSdf(din);
   setSolidBuildOverlaysAndStencils();
-  setSolidVelocityMgAuto();
-  setSolidInitVelocityMg();
+  // set_solid changes eligibility (hasSolid_), so re-decide at the next step(),
+  // where dt/mu/rho are final. Deciding HERE would read a dt the caller has not set yet.
+  vmgDecided_ = false;
   if (cutcellPressure_) {
     setSolidBuildOpenness();
     setSolidStarOverlay();
@@ -228,37 +229,46 @@ void Solver<Grid>::setSolidBuildOverlaysAndStencils() {
 
 template <class Grid>
 void Solver<Grid>::setSolidVelocityMgAuto() {
-  // The momentum solver's DEFAULT is the velocity V-cycle (changed 2026-09-15; see
-  // docs/decisions/flow.md). Until then the default was red-black Gauss-Seidel, with the V-cycle
-  // selected only below 65536 cells per rank and only under MPI at np > 1. That rule had the sign
-  // of the effect backwards: measured on the 1.0.0 scaling benchmark (a 384^3 cut-cell bed), the
-  // V-cycle is faster at EVERY rank count, and its margin is LARGEST at the biggest blocks --
-  // 2.23x at 147k cells/rank on Genoa, 2.19x on a single H100 at 56.6 M cells/rank, against
-  // 1.66x near the old threshold. Red-black was in fact running at its iteration cap
-  // (velIters_ = 200 sweeps per component) on every rung of both ladders, so it was not merely
-  // slower, it was not converging.
+  // WHICH MOMENTUM SOLVER, and the criterion is the PHYSICS, not the configuration. Decided
+  // 2026-09-15; it replaces two earlier rules, both of which keyed on the wrong thing:
+  //   * 1.0.0: red-black by default, V-cycle only BELOW 65536 cells/rank and only at np > 1 --
+  //     the sign of the block-size effect was backwards (the V-cycle's margin is LARGEST on big
+  //     blocks: 2.23x at 147k cells/rank, 2.19x on one H100 at 56.6 M).
+  //   * the same day, briefly: V-cycle always, for any configuration carrying a solid -- which
+  //     made the solver depend on whether an immersed body happened to be present, even though
+  //     IBM is also just a way of sculpting geometry and the momentum equation is the same one
+  //     either way.
   //
-  // What the rule still declines to do:
-  //   * override an explicit set_velocity_multigrid() (vmgExplicit_), which always wins;
-  //   * run on an operator mode the velocity MG has not been validated for (eligible, below);
-  //   * build a hierarchy on a block too small to coarsen -- below vmgAutoMinExtent_ cells on the
-  //     shortest axis the V-cycle degenerates to its bottom smoother and only adds setup, so
-  //     small blocks keep RB-GS. This is what the old global-cell floor was reaching for, stated
-  //     in the quantity that actually decides it.
-  //   * honour an explicitly requested upper bound: set_velocity_multigrid_auto(cells_per_rank)
-  //     still means "V-cycle only below this many cells per rank", so
-  //     set_velocity_multigrid_auto(65536, 1 << 23) reproduces the 1.0.0 behaviour exactly, and
-  //     set_velocity_multigrid_auto(0) still means never.
+  // The momentum operator is a screened Helmholtz whose condition number is a property of the
+  // TIMESTEP, not of the mesh or the geometry:
+  //     kappa = lambda_max / lambda_min = 1 + 4 dt mu (w_x + w_y + w_z) / rho,
+  // which is 1 + 12 D on an isotropic grid in the diffusion number D = mu dt / (rho h^2), and
+  // stays correct on an anisotropic one because it reads the metric. A smoother removes error at
+  // a rate set by kappa, so it needs O(kappa) sweeps; the V-cycle does not.
+  //
+  // Measured crossover (96^3 and 64^3, channel with domain BCs and no solid, and the 384^3
+  // cut-cell bed): below kappa ~ 13 the smoother converges in a few tens of sweeps and the
+  // V-cycle's hierarchy is pure overhead (0.86x at D = 0.25); above it the V-cycle pulls away
+  // (1.88x at D = 4) and -- the reason this is a correctness threshold and not a tuning one --
+  // red-black stops MEETING ITS TOLERANCE, hitting velIters_ and returning a residual of 6.8e-08
+  // at D = 6 and 7.7e-06 at D = 12 against a 1e-10 target.
+  //
+  // The rule therefore names no geometry at all. It declines only for cause: an explicit
+  // set_velocity_multigrid() always wins; an operator mode the velocity MG is not validated for;
+  // and a per-rank block too short to coarsen, where the V-cycle degenerates to its bottom
+  // smoother and only adds setup.
   if (vmgExplicit_ || vmgAutoCells_ == 0)
     return;
   const bool eligible = !varProps_ && !varRho_ && !hasDrag_ && !porous_ && !Grid::collocated &&
                         (!hasBc_ || hasSolid_ || !implicitFou_);
-  // The shortest inner extent any rank owns. Every rank must reach the SAME decision or they
-  // iterate with different solvers, so this is reduced; it is a setup-path reduction, once per
-  // geometry build, not a per-step one.
+  // Gershgorin condition number of the implicit-diffusion operator, from the metric the solver
+  // will actually use. dt, mu and rho are final here: the decision is taken at the head of the
+  // first step(), never at set_solid time, precisely so that a set_dt() after set_solid cannot
+  // leave the choice stale.
+  const double kappa =
+      1.0 + 4.0 * dt_ * mu_ * (u_.w[0] + u_.w[1] + u_.w[2]) / (rho_ > 0.0 ? rho_ : 1.0);
   int minExt = std::min({e_.x - 2 * G, e_.y - 2 * G, e_.z - 2 * G});
-  // Serial (or a non-MPI build): the local block IS the global grid, so both sizes come from the
-  // same place. gnx_/gny_/gnz_ exist only under PECLET_FLOW_MPI.
+  // Serial (or a non-MPI build): the local block IS the global grid.
   double global = (double)(e_.x - 2 * G) * (e_.y - 2 * G) * (e_.z - 2 * G);
   double perRank = global;
 #ifdef PECLET_FLOW_MPI
@@ -271,7 +281,7 @@ void Solver<Grid>::setSolidVelocityMgAuto() {
     perRank = global / (double)np;
   }
 #endif
-  useVelocityMg_ = eligible && minExt >= vmgAutoMinExtent_ &&
+  useVelocityMg_ = eligible && kappa >= vmgAutoMinCond_ && minExt >= vmgAutoMinExtent_ &&
                    global >= (double)vmgAutoMinGlobal_ && perRank < (double)vmgAutoCells_;
   if (useVelocityMg_) {
     vmgLevels_ = 3;
@@ -280,8 +290,12 @@ void Solver<Grid>::setSolidVelocityMgAuto() {
 }
 
 template <class Grid>
-void Solver<Grid>::setSolidInitVelocityMg() {
-  if (useVelocityMg_) {  // velocity-MG hierarchy: IBM (staircase/upwind), domain-BC
+void Solver<Grid>::initVelocityMg() {
+  // Nothing here needs the solid: the hierarchy is a property of the grid, the metric and the
+  // boundary conditions. It lived under set_solid only because that was the one caller, which is
+  // why enabling the velocity MG on a configuration WITHOUT an immersed solid used to build no
+  // levels and segfault on the first solve (pre-existing; fixed 2026-09-15).
+  if (useVelocityMg_ && vmg_.levels() == 0) {  // velocity-MG hierarchy: IBM (staircase/upwind), domain-BC
                          // (const-coeff) or mixed (staircase + folds) mode
     // The per-axis metric BEFORE the hierarchy is built (doc/anisotropic_metric.md trap 5):
     // every level's b_a^L = mu' * w_a / cfac_a^2, and C3's aspect-ratio level rule reads it too.

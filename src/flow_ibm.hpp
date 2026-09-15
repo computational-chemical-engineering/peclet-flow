@@ -1026,7 +1026,7 @@ class Solver {
   void setSolidVelocityMgAuto();
 
 
-  void setSolidInitVelocityMg();
+  void initVelocityMg();
 
 
   void setSolidBuildOpenness();
@@ -4404,7 +4404,10 @@ class Solver {
   // cells/rank with a 1<<23 global floor).
   long vmgAutoCells_ = std::numeric_limits<long>::max();
   long vmgAutoMinGlobal_ = 0L;
-  int vmgAutoMinExtent_ = 16;          // shortest per-rank inner extent the V-cycle is worth
+  int vmgAutoMinExtent_ = 16;   // shortest per-rank inner extent the V-cycle is worth
+  double vmgAutoMinCond_ = 13.0;  // operator condition number above which the V-cycle wins
+                                  // (1 + 12 D; measured crossover D ~ 1)
+  bool vmgDecided_ = false;  // the momentum-solver choice has been made (and the MG built)
   int vmgLevels_ = 4, vmgVcycles_ = 8;  // IBM velocity multigrid (staircase)
   VelocityMG vmg_;
   CCField vmgTheta_, vmgClean_;
