@@ -55,7 +55,7 @@ template <class SF>
 KOKKOS_INLINE_FUNCTION void curvHeightCell(long i, SF c, SF mx, SF my, SF mz, SF al, SF kap, SF br,
                                            long s0, long s1, long s2, double mtol, double ptW,
                                            double ieps, bool forceFb, bool oneDir, bool useFit,
-                                           VofMetric g) {
+                                           VofMetric g, double peps) {
   const long st[3] = {s0, s1, s2};
   kap(i) = 0.0;
   if (!vofIsInterface(c(i), ieps)) {
@@ -92,7 +92,7 @@ KOKKOS_INLINE_FUNCTION void curvHeightCell(long i, SF c, SF mx, SF my, SF mz, SF
           col[k] = c(base + (k - kHfColumn / 2) * sd);
         double h;
         int orient;
-        if (!hfColumnHeight(col, kHfColumn, h, orient, mtol)) {
+        if (!hfColumnHeight(col, kHfColumn, h, orient, mtol, peps)) {
           ok = false;
           break;
         }
@@ -142,7 +142,7 @@ KOKKOS_INLINE_FUNCTION void curvHeightCell(long i, SF c, SF mx, SF my, SF mz, SF
               col[k] = c(base + (k - kHfColumn / 2) * sd);
             double hv;
             int orient;
-            if (!hfColumnHeight(col, kHfColumn, hv, orient, mtol))
+            if (!hfColumnHeight(col, kHfColumn, hv, orient, mtol, peps))
               continue;
             double X[3];
             X[d1] = static_cast<double>(p);
@@ -307,6 +307,21 @@ class VofCurvature {
   VofMetric metric;
   /// Wendland support width `d` of the PV fit, in cell units (Han et al. §5: 2.5 with S = 5).
   double weightWidth = kPvWeightWidth;
+  /// Tolerance of the PURITY test that ends a height-function column (`hfIsFull`/`hfIsEmpty`),
+  /// floored by `core`'s `kHfPureEps = 1e-10`.
+  ///
+  /// **Set this to the tolerance the COLOUR FIELD was advected at** (`WyAdvector::wispEps`);
+  /// `Solver::computeVofCurvature` does. The two must agree about what a pure cell is. When the
+  /// advector is the looser of the two it treats a cell at `1 - O(1e-9)` as pure -- fluxing it
+  /// algebraically instead of reconstructing it -- so the colour field accumulates bulk cells in
+  /// the band between the two tolerances, the column walk finds no pure end there, and the whole
+  /// height-function tier degrades into the paraboloid fallback. It degrades SILENTLY: a fallback
+  /// is a valid answer, so nothing fails, the curvature just gets worse as the run goes on.
+  /// Measured on the mode-2 droplet (48^3, R = 8, mu = 0.0025, 2.5 periods) with the advector at
+  /// 1e-8 and this at the 1e-10 floor: the HF tier fell 790 -> 134 cells over the run (37 % ->
+  /// 89 % fallback) as 425 bulk cells drifted into the band, and the mode-2 damping rate came out
+  /// 2.3x the shared-tolerance value.
+  double pureEps = 0.0;
   /// Tolerance of the column monotonicity test (`hfColumnHeight`). Tight enough to reject a
   /// sub-grid blob inside a column, loose enough to ignore transport round-off.
   double monoTol = 1e-6;
@@ -508,6 +523,7 @@ class VofCurvature {
     const long st[3] = {1, e_.x, static_cast<long>(e_.x) * e_.y};
     SField mx = mx_, my = my_, mz = mz_, al = alpha_, kap = kappa_, br = branch_;
     const double mtol = monoTol, ptW = ptWeightWidth * metric.maxH(), ieps = interfaceEps;
+    const double peps = pureEps;
     const VofMetric gm = metric;  // `g` is the ghost width in this scope
     const bool forceFb = debugForceFallback, oneDir = debugSingleDirection,
                useFit = useMixedHeightFit;
@@ -530,7 +546,7 @@ class VofCurvature {
       Kokkos::parallel_for(
           "vof::curv::hf_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nI_), KOKKOS_LAMBDA(long t) {
             curvHeightCell(list(t), c, mx, my, mz, al, kap, br, s0, s1, s2, mtol, ptW, ieps,
-                           forceFb, oneDir, useFit, gm);
+                           forceFb, oneDir, useFit, gm, peps);
           });
       Kokkos::fence();
       return;
@@ -541,7 +557,7 @@ class VofCurvature {
                                                       {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           curvHeightCell(L3(x, y, z, e), c, mx, my, mz, al, kap, br, s0, s1, s2, mtol, ptW, ieps,
-                         forceFb, oneDir, useFit, gm);
+                         forceFb, oneDir, useFit, gm, peps);
         });
     Kokkos::fence();
   }

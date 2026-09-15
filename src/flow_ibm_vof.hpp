@@ -1478,6 +1478,8 @@ void Solver<Grid>::enableVofBlockCsf() {
   // distributed run's CSF force differed from the single-rank one by 6.7e-3 after two steps,
   // amplified from a 3e-16 colour difference by a flipped cascade branch.
   vofBlocks_->curvProto.interfaceEps = csfInterfaceEps_;
+  // Same contract as the structured cascade: the purity test follows the advector (VofCurvature::pureEps).
+  vofBlocks_->curvProto.pureEps = vofAdv_.wispEps;
   vofBlocks_->curvProto.weightWidth = vofCurv_.weightWidth;
   vofBlocks_->curvProto.monoTol = vofCurv_.monoTol;
   vofBlocks_->curvProto.ptWeightWidth = vofCurv_.ptWeightWidth;
@@ -1707,6 +1709,11 @@ void Solver<Grid>::computeVofCurvature() {
     kappaBranch_ = addField("kappa_branch");
   }
   bridgeColourToVof();
+  // The cascade's purity test must agree with the one the colour field was ADVECTED under. Set
+  // here, at the point of use, rather than at enable_vof: `set_vof_wisp_eps` and
+  // `enable_phase_change` both move `wispEps` afterwards, and a stale copy degrades the height
+  // function silently (see `vof::VofCurvature::pureEps` for the mechanism and the measurement).
+  vofCurv_.pureEps = vofAdv_.wispEps;
   vofCurvStats_ = vofCurv_.compute(vofAdv_.colour());
   copyInner(kappaField_, e_, G, CCConst(vofCurv_.kappa()), e3_, kVofG);
   copyInner(kappaBranch_, e_, G, CCConst(vofCurv_.branch()), e3_, kVofG);

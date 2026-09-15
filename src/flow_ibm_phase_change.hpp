@@ -204,6 +204,7 @@ vof::VofInterfaceArea::Stats Solver<Grid>::pcAreaCascadeCompute() {
   if (!pcAreaC_.ready())
     pcAreaC_.init(nx_, ny_, nz_, kVofG);
   pcAreaC_.interfaceEps = pcEffInterfaceEps();
+  pcAreaC_.pureEps = vofAdv_.wispEps;
   return pcAreaC_.compute(vofAdv_.colour(), pcAreaMode_);
 }
 

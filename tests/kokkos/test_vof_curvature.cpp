@@ -887,6 +887,93 @@ void gateAnisotropic() {
   }
 }
 
+
+/// H  advector/cascade purity agreement -- the regression gate for the silent HF collapse.
+///
+/// `enable_vof` runs the advector at `wispEps = 1e-8` (WO-R2 item 4: without it a DRAINED open
+/// domain reaches C ~ 1e-18, the MYC normal is degenerate and `sum C` goes to NaN in three steps).
+/// A cell the advector calls pure is fluxed ALGEBRAICALLY and never reconstructed back onto
+/// exactly 1.0, so the colour field legitimately carries bulk cells at `1 - O(1e-9)`. If the
+/// height function judges those same cells at its own 1e-10 floor it finds no pure end to the
+/// column, rejects it, and the whole HF tier decays into the paraboloid fallback -- WITHOUT any
+/// test failing, because a fallback is a valid answer.
+///
+/// That is what happened between the V3 gate and 1.0.0: on the mode-2 droplet the HF tier fell
+/// 790 -> 134 cells (37 % -> 89 % fallback) over 2.5 periods and the damping rate came out 1.4x
+/// wrong. This gate pins the contract that prevents it: at a bulk deficit INSIDE the advector's
+/// tolerance, the census must not move, and the curvature must not move by more than the deficit.
+void gatePurityAgreement() {
+  std::printf("\n=== H  advector/cascade purity agreement (the silent-HF-collapse gate)\n");
+  const double WISP = 1e-8;      // what enable_vof sets
+  const double DEFICIT = 5e-9;   // a bulk cell inside it, but 50x outside the 1e-10 floor
+
+  // --- H1: the kernel contract, in isolation. One column, liquid low.
+  {
+    double col[vf::kHfColumn] = {1.0, 1.0, 1.0, 0.63, 0.0, 0.0, 0.0};
+    double hClean = 0.0, hDrift = 0.0;
+    int oClean = 0, oDrift = 0;
+    const bool okClean = vf::hfColumnHeight(col, vf::kHfColumn, hClean, oClean, 1e-6);
+    CHECK(okClean);
+    for (int k = 0; k < vf::kHfColumn; ++k)  // the bulk drifts off 1.0, inside the advector's eps
+      if (col[k] == 1.0)
+        col[k] = 1.0 - DEFICIT;
+    // At the 1e-10 floor the drifted column is REJECTED -- the bug, pinned so it stays visible.
+    double hj = 0.0; int oj = 0;
+    CHECK(!vf::hfColumnHeight(col, vf::kHfColumn, hj, oj, 1e-6));
+    // Told the advector's tolerance, it closes again, and the height moves by O(DEFICIT).
+    const bool okDrift = vf::hfColumnHeight(col, vf::kHfColumn, hDrift, oDrift, 1e-6, WISP);
+    CHECK(okDrift);
+    CHECK(oDrift == oClean);
+    std::printf("  H1 column: clean h = %.15f, drifted h = %.15f, |dh| = %.3e (deficit %.1e)\n",
+                hClean, hDrift, std::fabs(hDrift - hClean), DEFICIT);
+    CHECK(std::fabs(hDrift - hClean) < 4.0 * DEFICIT);
+  }
+
+  // --- H2: the driver. A sphere whose BULK liquid sits at 1 - DEFICIT, as an advected field does.
+  {
+    const int N = 48;
+    const double h = 1.0 / N, R = 0.25;
+    vf::VofCurvature::Stats st[2];
+    double kerr[2] = {0.0, 0.0};
+    for (int q = 0; q < 2; ++q) {           // q = 0: floor only (the bug); q = 1: told wispEps
+      Case cs;
+      cs.setup(N, N, N, h);
+      vofscene::initSphere(cs.c(), cs.blk, h, 0.5, 0.5, 0.5, R, 6);
+      // Push every FULL cell just inside the advector's tolerance.
+      auto hc = Kokkos::create_mirror_view(cs.c());
+      Kokkos::deep_copy(hc, cs.c());
+      for (std::size_t i = 0; i < hc.extent(0); ++i)
+        if (hc(i) >= 1.0 - 1e-12)
+          hc(i) = 1.0 - DEFICIT;
+      Kokkos::deep_copy(cs.c(), hc);
+      cs.adv.syncGhosts();
+      cs.curv.interfaceEps = WISP;          // as enable_vof does under surface tension
+      cs.curv.pureEps = (q == 0) ? 0.0 : WISP;
+      st[q] = cs.curv.compute(cs.c());
+      auto kh = Kokkos::create_mirror_view(cs.curv.kappa());
+      auto bh = Kokkos::create_mirror_view(cs.curv.branch());
+      Kokkos::deep_copy(kh, cs.curv.kappa());
+      Kokkos::deep_copy(bh, cs.curv.branch());
+      const double kExact = 2.0 / (R / h);  // kappa = 2/R in CELL units
+      double acc = 0.0; long n = 0;
+      for (std::size_t i = 0; i < kh.extent(0); ++i)
+        if (bh(i) > 0.0) { acc += std::fabs(kh(i) - kExact) / kExact; ++n; }
+      kerr[q] = n ? acc / n : 0.0;
+    }
+    const long hf0 = st[0].hf + st[0].hfMixed + st[0].hfFit;
+    const long hf1 = st[1].hf + st[1].hfMixed + st[1].hfFit;
+    std::printf("  H2 sphere with bulk at 1 - %.0e:  floor-only HF = %ld / %ld (%.1f %% fallback), "
+                "L1 kappa err %.4f\n", DEFICIT, hf0, st[0].interfacial,
+                100.0 * double(st[0].pv + st[0].pvReduced) / double(st[0].interfacial), kerr[0]);
+    std::printf("                                    shared    HF = %ld / %ld (%.1f %% fallback), "
+                "L1 kappa err %.4f\n", hf1, st[1].interfacial,
+                100.0 * double(st[1].pv + st[1].pvReduced) / double(st[1].interfacial), kerr[1]);
+    // The contract: a deficit INSIDE the advector's tolerance must not cost the HF tier.
+    CHECK(hf1 > 4 * hf0);
+    CHECK(st[1].noEstimate == 0);
+    CHECK(kerr[1] < kerr[0]);
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -903,6 +990,7 @@ int main(int argc, char** argv) {
     gateFallbackAlone();
     gateMixedHeightFitAblation();
     gateAnisotropic();
+    gatePurityAgreement();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
                 failures == 1 ? "" : "s");
   }

@@ -72,6 +72,11 @@ class VofInterfaceArea {
   VofMetric metric;
   double weightWidth = kPvWeightWidth;
   double monoTol = 1e-6;
+  /// Purity tolerance of the height-function column walk -- the same contract as
+  /// `VofCurvature::pureEps`: set it to the tolerance the colour field was advected at
+  /// (`WyAdvector::wispEps`), or the HF tier silently decays into the footprint fallback as bulk
+  /// cells drift into the band between the two. `Solver` sets it; floored by core at 1e-10.
+  double pureEps = 0.0;
   double cosMin = 0.2;
   /// The interfacial predicate's wisp threshold. The phase-change driver passes ITS OWN
   /// (`pcEffInterfaceEps`), because a cell this driver calls pure would get area 0 while
@@ -122,6 +127,7 @@ class VofInterfaceArea {
     const long st[3] = {1, e_.x, static_cast<long>(e_.x) * e_.y};
     SField mx = mx_, my = my_, mz = mz_, al = alpha_, ar = area_, br = branch_;
     const double mtol = monoTol, ieps = interfaceEps;
+    const double peps = pureEps;
     const VofMetric gm = metric;  // `g` is the ghost width in this scope
     const int md = mode;
     Kokkos::parallel_for(
@@ -158,7 +164,7 @@ class VofInterfaceArea {
                   col[k] = c(base + (k - kHfColumn / 2) * sd);
                 double h;
                 int orient;
-                if (!hfColumnHeight(col, kHfColumn, h, orient, mtol)) {
+                if (!hfColumnHeight(col, kHfColumn, h, orient, mtol, peps)) {
                   ok = false;
                   break;
                 }
