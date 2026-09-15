@@ -1478,7 +1478,8 @@ void Solver<Grid>::enableVofBlockCsf() {
   // distributed run's CSF force differed from the single-rank one by 6.7e-3 after two steps,
   // amplified from a 3e-16 colour difference by a flipped cascade branch.
   vofBlocks_->curvProto.interfaceEps = csfInterfaceEps_;
-  // Same contract as the structured cascade: the purity test follows the advector (VofCurvature::pureEps).
+  // Same contract as the structured cascade: the purity test follows the advector
+  // (VofCurvature::pureEps).
   vofBlocks_->curvProto.pureEps = vofAdv_.wispEps;
   vofBlocks_->curvProto.weightWidth = vofCurv_.weightWidth;
   vofBlocks_->curvProto.monoTol = vofCurv_.monoTol;

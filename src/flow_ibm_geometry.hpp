@@ -295,8 +295,9 @@ void Solver<Grid>::initVelocityMg() {
   // boundary conditions. It lived under set_solid only because that was the one caller, which is
   // why enabling the velocity MG on a configuration WITHOUT an immersed solid used to build no
   // levels and segfault on the first solve (pre-existing; fixed 2026-09-15).
-  if (useVelocityMg_ && vmg_.levels() == 0) {  // velocity-MG hierarchy: IBM (staircase/upwind), domain-BC
-                         // (const-coeff) or mixed (staircase + folds) mode
+  if (useVelocityMg_ &&
+      vmg_.levels() == 0) {  // velocity-MG hierarchy: IBM (staircase/upwind), domain-BC
+                             // (const-coeff) or mixed (staircase + folds) mode
     // The per-axis metric BEFORE the hierarchy is built (doc/anisotropic_metric.md trap 5):
     // every level's b_a^L = mu' * w_a / cfac_a^2, and C3's aspect-ratio level rule reads it too.
     vmg_.setMetric(u_.w, u_.hp);
