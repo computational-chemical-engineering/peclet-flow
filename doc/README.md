@@ -22,7 +22,7 @@ The short working reference is [`../CLAUDE.md`](../CLAUDE.md); suite-wide contra
 | [variable_viscosity_projection.md](variable_viscosity_projection.md) | 2026-07 | The variable-viscosity momentum operator and the rotational-incremental projection it needs. |
 | [variable_density_projection.md](variable_density_projection.md) | 2026-07 … 09 | Variable density: momentum, projection scaling, the pressure driver, and (§4) the rank-aware domain-BC repair. |
 | [porous_drag_scheme.md](porous_drag_scheme.md) | 2026-07 … 09 | The volume-averaged (porous) CFD-DEM fluid scheme — the gas phase of `peclet.coupling` with `porous=True`. |
-| [cutcell_openbc_convergence.md](cutcell_openbc_convergence.md) | 2026-09-01 | The **open defect**: solid geometry intersecting an inflow/outflow face breaks the pressure solve. |
+| [cutcell_openbc_convergence.md](cutcell_openbc_convergence.md) | 2026-09-01 … 09-16 | Solid geometry intersecting an inflow/outflow face: the two defects (SDF ghost wrap, Dirichlet row aperture), the fix, and the sealed-pocket rejection. |
 | [anisotropic_metric.md](anisotropic_metric.md) | 2026-09 | The metric in every discrete operator on stretched cells (physical-units Phase 2) — the reference for anisotropic domains. |
 | [anisotropic_vof.md](anisotropic_vof.md) | 2026-09 | The same for the geometric two-phase stack (Phase 3). |
 | [units_escalation.md](units_escalation.md) | 2026-09 | The escalation channel for the physical-domains work (`../../docs/PHYSICAL_UNITS_PLAN.md` §9.6); kept live while Phase 4 is open. |

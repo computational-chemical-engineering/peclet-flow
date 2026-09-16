@@ -172,6 +172,10 @@ double Solver<Grid>::maxOpenDivergenceProjectedInternal() {
   if constexpr (Grid::collocated)
     return maxOpenDivergenceInternal();  // the collocated branch already measures the face
                                          // field
+  // `doOutflow = false` keeps the mass-conserving outflow face the projection wrote -- that is the
+  // whole point of this sibling, and distributed it is `fillVelGhostsTo` that has to defend the
+  // plane against the halo's periodic wrap (SCALING_ISSUES #3/#8). Before that, this diagnostic
+  // returned ~|U_inlet| under MPI on every bed, converged or not.
   for (int c = 0; c < 3; ++c)
     fillVelGhostsTo(C[c].u, c, 0, false);
   divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),

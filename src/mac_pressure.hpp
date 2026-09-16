@@ -396,8 +396,8 @@ inline void buildRhoCoeffHarm(CCField cx, CCField cy, CCField cz, CCConst ox, CC
 // The whole transverse plane is written (ghost ring included) so that a distributed CA level's
 // ring rows coarsen from a valid fine plane; `rho`'s ghost ring must be filled first, which is
 // what the bridge in IbmSolver::project guarantees.
-inline void buildRhoCoeffOutflowFace(CCField ca, CCConst rho, double rho0, C3 e, int g, int a,
-                                     bool harmonic) {
+inline void buildRhoCoeffOutflowFace(CCField ca, CCConst oa, CCConst rho, double rho0, C3 e, int g,
+                                     int a, bool harmonic) {
   CCExec space;
   int dims[3] = {e.x, e.y, e.z};
   long st[3] = {1, (long)e.x, (long)e.x * e.y};
@@ -411,7 +411,11 @@ inline void buildRhoCoeffOutflowFace(CCField ca, CCConst rho, double rho0, C3 e,
         const long i = (long)p0 * sb + (long)p1 * sc + (long)bf * sa;
         const double ra = rho(i), rb = rho(i - sa);
         const double rf = harmonic ? (2.0 * ra * rb / (ra + rb)) : (0.5 * (ra + rb));
-        ca(i) = rho0 / rf;
+        // SCALING_ISSUES #3: `oa(i)` is this face's cut-cell aperture, which every OTHER face of
+        // the coefficient carries (buildRhoCoeff multiplies by it) and this one used to drop --
+        // invisible while the outlet is clear of solid (aperture 1), an operator that disagrees
+        // with the divergence constraint by (1 - aperture) once a solid cuts the outlet.
+        ca(i) = oa(i) * rho0 / rf;
       });
 }
 
@@ -463,12 +467,17 @@ inline void divergOpenEps(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst o
 // Constant-density gas: the correction stays u -= grad(phi) (projectCorrect) so the open*eps flux
 // telescopes to A*phi. (Combining with variable rho — c_f *= rho0/rho_f, projectCorrectVar — is a
 // later composition.)
+// SCALING_ISSUES #3: the three porous builders run ONE index past the inner block along each axis,
+// so the HIGH domain face of each axis -- a ghost index no other kernel writes, and the face the
+// MG's `applyBoundaryOpenness` carries at a Dirichlet outlet -- is built by the same formula as
+// every other face, cut-cell aperture `o(i)` included. The extra plane is read-only elsewhere (the
+// per-level ghost fill overwrites it) and every operand it reads is a ghost-filled index.
 inline void buildPorousCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy, CCConst oz,
                              CCConst eps, C3 e, int g) {
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "peclet::flow::porous_coeff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "peclet::flow::porous_coeff", MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -490,7 +499,8 @@ inline void buildPorousCoeffDrag(CCField cx, CCField cy, CCField cz, CCConst ox,
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "peclet::flow::porous_coeff_drag", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "peclet::flow::porous_coeff_drag",
+      MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -515,7 +525,8 @@ inline void buildPorousCoeffCons(CCField cx, CCField cy, CCField cz, CCConst ox,
   CCExec space;
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
-      "peclet::flow::porous_coeff_cons", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "peclet::flow::porous_coeff_cons",
+      MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;

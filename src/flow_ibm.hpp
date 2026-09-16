@@ -1028,9 +1028,12 @@ class Solver {
 
 
 
-  /// Mirror a cell-centred geometry field about every rank-owned FREE-SLIP (type 4) domain face
-  /// (the symmetric extension the BC asserts). No-op without a type-4 face.
-  void mirrorSdfSlipFaces(CCField f);
+  /// Repair a cell-centred geometry field's ghost band on every rank-owned NON-PERIODIC domain
+  /// face, which the periodic/halo fill filled from the opposite side of the domain: type 4
+  /// (free-slip) takes the mirror the symmetry plane asserts, types 1/2/3 (wall / inflow /
+  /// outflow) the constant normal extension. Decides the BOUNDARY-FACE APERTURE, since
+  /// `ccFaceOpen` samples the SDF at the face. No-op without a non-periodic face.
+  void extendSdfDomainGhosts(CCField f);
 
 
   /// Device entry point (Layer 2): the inner SDF is ALREADY on device, so geometry never
@@ -1056,6 +1059,15 @@ class Solver {
 
 
   void setSolidBuildOpenness();
+
+  /// Reject geometry that seals fluid cells against a prescribed INFLOW face off from the rest of
+  /// the domain -- an inconsistent pressure row that no solve can satisfy. SCALING_ISSUES #3.
+  void checkSealedInflowCells();
+
+  /// Bridge the HIGH-side boundary-face openness plane of every rank-owned outflow axis from the
+  /// g=2 block to the g=1 MG block (`copyInner` reaches only the inner cells, and that plane is a
+  /// ghost index). SCALING_ISSUES #3.
+  void bridgeOutflowFacePlanes();
 
 
   void setSolidStarOverlay();
@@ -4680,6 +4692,9 @@ class Solver {
   CCField vofInflowProf3_[6], vofInflowProfG2_[6];  // resampled onto the g=3 / G=2 face planes
   int vofProf3Nc_[6] = {0, 0, 0, 0, 0, 0}, vofProfG2Nc_[6] = {0, 0, 0, 0, 0, 0};
   vof::UCField vofOutside_;              // the out-of-domain mask on the g=3 block
+  // SCALING_ISSUES #3/#8: scratch for fillVelGhostsTo's save/restore of the high-side outflow face
+  // plane across the distributed halo exchange, one per axis, allocated on first use.
+  CCField outflowPlane_[3];
   double vofBcVol_[6] = {0, 0, 0, 0, 0, 0};       // signed liquid volume of the LAST step, + = in
   double vofBcVolTotal_[6] = {0, 0, 0, 0, 0, 0};  // running total since enable_vof
   // --- curvature (rung V3, WO-O) ---

@@ -181,8 +181,40 @@ template <class Grid>
 void Solver<Grid>::fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow) {
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {
+    // `doOutflow = false` asks for the mass-conserving outflow face the projection wrote to
+    // SURVIVE this fill (WO-R, gate F2 -- see the header comment on this function). The exchange
+    // below destroys it anyway, because that face is the first GHOST index along its axis and the
+    // decomposition wraps periodically on every axis: it comes back carrying the value from the
+    // OPPOSITE boundary, i.e. the inlet. SCALING_ISSUES #3/#8 -- invisible while the outlet's
+    // openness was ALSO the inlet's (the two wrapped together and stayed self-consistent), and it
+    // broke the VoF composed budget the moment the openness became the outlet's own aperture.
+    // Save the plane and put it back. Only component `comp` matters: the outflow correction lives
+    // on the NORMAL face of its own axis.
+    //
+    // STAGGERED ONLY, deliberately. There, index `ext_a - G` IS the outflow face and holds exactly
+    // the value `bcCorrectOutflow` wrote. On the COLLOCATED grid the correction lives on the FACE
+    // field (`uf_`, corrected by the same helper) while this fills the CELL field, whose
+    // `doOutflow = false` means "leave the whole ghost BAND alone" -- restoring one layer of two
+    // would be a third behaviour, on a path no test covers (no collocated MPI test carries an
+    // outflow face). Left exactly as it was; see docs/SCALING_ISSUES.md #8.
+    const int a = comp;
+    const bool keep = !Grid::collocated && !doOutflow && hasOutflow_ && a >= 0 && a < 3 &&
+                      bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1);
+    B3 eb{e_.x, e_.y, e_.z};
+    if (keep) {
+      const int b = (a + 1) % 3, c = (a + 2) % 3;
+      const int d[3] = {e_.x, e_.y, e_.z};
+      const std::size_t np = (std::size_t)(d[b] - 2 * G) * (d[c] - 2 * G);
+      if (outflowPlane_[a].extent(0) != np)
+        outflowPlane_[a] = CCField(
+            Kokkos::view_alloc("peclet::flow::outflow_face_plane", Kokkos::WithoutInitializing),
+            np);
+      bcSaveHighFacePlaneInner(outflowPlane_[a], f, eb, G, a);
+    }
     velDev_->exchange(f);
     applyVelocityBcCompTo(f, comp, fold, doOutflow);
+    if (keep)
+      bcRestoreHighFacePlaneInner(f, outflowPlane_[a], eb, G, a);
     return;
   }
 #endif

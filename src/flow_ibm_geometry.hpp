@@ -77,13 +77,19 @@ void Solver<Grid>::buildVelocityOverlays(bool resetU) {
 }
 
 template <class Grid>
-void Solver<Grid>::mirrorSdfSlipFaces(CCField f) {
+void Solver<Grid>::extendSdfDomainGhosts(CCField f) {
   if (!hasBc_)
     return;
   B3 e{e_.x, e_.y, e_.z};
-  for (int face = 0; face < 6; ++face)
-    if (bc_[face] == 4 && touchesGlobalFace(face))
-      bcMirrorGhost(f, e, G, face / 2, face % 2);
+  for (int face = 0; face < 6; ++face) {
+    if (!touchesGlobalFace(face))
+      continue;
+    const int a = face / 2, s = face % 2;
+    if (bc_[face] == 4)
+      bcMirrorGhost(f, e, G, a, s);  // symmetry plane: the mirror IS what the BC asserts
+    else if (bc_[face] != 0)
+      bcNeumannGhost(f, e, G, a, s);  // wall / inflow / outflow: constant normal extension
+  }
 }
 
 template <class Grid>
@@ -208,13 +214,21 @@ void Solver<Grid>::setSolidUploadSdf(CCField din) {
 
 template <class Grid>
 void Solver<Grid>::setSolidBuildOverlaysAndStencils() {
-  // FREE-SLIP / symmetry faces (type 4): the periodic/halo fill above wrapped the OPPOSITE side
-  // of the domain into the ghost band, so a wall at the far side becomes a phantom solid ON the
-  // symmetry plane (measured: a half Poiseuille channel closed by a type-4 face read u ~ 0
-  // there). The symmetric extension is the mirror of the interior about the face, which is
-  // exactly what the BC asserts about the geometry. Rank-owned faces only (touchesGlobalFace);
-  // the other face types keep the wrap they always had (byte-identical).
-  mirrorSdfSlipFaces(sdf_);
+  // NON-PERIODIC domain faces: the periodic/halo fill above wrapped the OPPOSITE side of the
+  // domain into the ghost band, so the geometry a boundary face sees is teleported from the far
+  // side. On a FREE-SLIP face (type 4) that made a far wall a phantom solid ON the symmetry plane
+  // (measured: a half Poiseuille channel closed by a type-4 face read u ~ 0 there) and the mirror
+  // is what the BC asserts. On a WALL / INFLOW / OUTFLOW face (types 1/2/3) the same wrap decides
+  // the BOUNDARY-FACE APERTURE, because `ccFaceOpen` samples the SDF AT the face, i.e. halfway
+  // between the last inner cell and that ghost: a solid cell against an inflow plane was handed
+  // the far side's fluid and came out as a fully OPEN face, so the prescribed inflow velocity was
+  // pushed into a cell whose pressure row is entirely closed -- an inconsistent row, and the
+  // iteration cap and max|div| = U of SCALING_ISSUES #3 (doc/cutcell_openbc_convergence.md).
+  // The constant normal extension is the geometric reading of "the domain plane cuts the solid":
+  // the solid continues straight out, so the boundary face's aperture is the fluid fraction of the
+  // boundary plane itself. Rank-owned faces only (touchesGlobalFace); a bed clear of the open
+  // faces is byte-identical either way (the aperture is 1 whichever value the ghost carries).
+  extendSdfDomainGhosts(sdf_);
   buildVelocityOverlays(/*resetU=*/true);
   // MOVING GEOMETRY (rung 2): the wall-velocity fields must exist BEFORE the momentum operator
   // is assembled -- rebuildStencils folds them into the inhomogeneous term. sdf_ and its ghosts
@@ -405,6 +419,16 @@ void Solver<Grid>::setSolidBuildOpenness() {
     velDev_->exchange(ox_);
     velDev_->exchange(oy_);
     velDev_->exchange(oz_);
+    // SCALING_ISSUES #3: the HIGH domain face of each axis sits at a GHOST index, so the exchange
+    // just overwrote it with the periodic wrap of the opposite boundary -- on a rank owning that
+    // global face, another boundary's aperture. Re-derive it from the SDF. (The LOW face is an
+    // inner index and survives.) Invisible until this fix, because the Dirichlet row overwrote the
+    // value with the literal 1.0, and a bed clear of the open faces wraps 1.0 onto 1.0 anyway.
+    CCField oa[3] = {ox_, oy_, oz_};
+    for (int a = 0; a < 3; ++a)
+      if (bc_[2 * a + 1] != 0 && touchesGlobalFace(2 * a + 1))
+        buildOpennessHighFace(oa[a], CCConst(sdf_), e_, G, a, u_.hp[0], u_.hp[1], u_.hp[2],
+                              apertureOrder_);
   }
 #endif
   if (hasBc_) {  // FLUX openness (beta): a face is OPEN only where it carries normal flux --
@@ -421,9 +445,134 @@ void Solver<Grid>::setSolidBuildOpenness() {
       }
   }  // the MG re-derives the OPERATOR openness alpha (inflow Neumann -> closed) per level via
      // setBC.
+  if (hasBc_)
+    checkSealedInflowCells();
   copyInner(ox1_, e1_, 1, CCConst(ox_), e_, G);  // bridge openness g=2 -> g=1 for the MG
   copyInner(oy1_, e1_, 1, CCConst(oy_), e_, G);
   copyInner(oz1_, e1_, 1, CCConst(oz_), e_, G);
+}
+
+// The two sides of an axis are ASYMMETRIC in the face-index convention (mac_cutcell_mg.hpp): the
+// LOW domain face is the INNER index that `copyInner` above already wrote, the HIGH one is the
+// first GHOST index, which no kernel writes and the MG's periodic fill wraps over. At a Dirichlet
+// OUTFLOW face the MG now carries the true cut-cell aperture instead of the literal 1.0 (the WO-R2
+// item 1 save/restore/coarsen machinery, generalized from the variable-density coefficient to the
+// openness itself), so the g=1 bridge has to carry that plane across too.
+template <class Grid>
+void Solver<Grid>::bridgeOutflowFacePlanes() {
+  if (!hasOutflow_)
+    return;
+  const bool gp = ghostProjection_ && oxb_.extent(0) > 0;  // the MG rails carry the BINARY
+  CCField dst[3] = {ox1_, oy1_, oz1_};                     // openness in ghost mode
+  CCField src[3] = {gp ? oxb_ : ox_, gp ? oyb_ : oy_, gp ? ozb_ : oz_};
+  const int de[3] = {e1_.x, e1_.y, e1_.z}, se[3] = {e_.x, e_.y, e_.z};
+  const long dst3[3] = {1, (long)e1_.x, (long)e1_.x * e1_.y};
+  const long sst3[3] = {1, (long)e_.x, (long)e_.x * e_.y};
+  for (int a = 0; a < 3; ++a) {
+    if (bc_[2 * a + 1] != 3 || !touchesGlobalFace(2 * a + 1))
+      continue;
+    const int b = (a + 1) % 3, c = (a + 2) % 3;
+    const long dsa = dst3[a], dsb = dst3[b], dsc = dst3[c];
+    const long ssa = sst3[a], ssb = sst3[b], ssc = sst3[c];
+    const long dbf = de[a] - 1, sbf = se[a] - G;  // the high boundary face on each block
+    const int nb = de[b] - 2, nc = de[c] - 2;     // inner extent of the g=1 block
+    CCField d = dst[a];
+    CCConst sv = CCConst(src[a]);
+    Kokkos::parallel_for(
+        "peclet::flow::bridge_outflow_plane",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(CCExec(), {0, 0}, {nb, nc}),
+        KOKKOS_LAMBDA(int p0, int p1) {
+          d((long)(p0 + 1) * dsb + (long)(p1 + 1) * dsc + dbf * dsa) =
+              sv((long)(p0 + G) * ssb + (long)(p1 + G) * ssc + sbf * ssa);
+        });
+  }
+}
+
+// SCALING_ISSUES #3, the configuration the fix does NOT make solvable. A cell whose pressure row
+// is entirely closed (every one of its six OPERATOR apertures is 0) but which a prescribed inflow
+// face still feeds is an INCONSISTENT row: the row says "nothing may leave this cell", the
+// constraint says "this much enters", and no pressure satisfies both. MG-PCG cannot converge — it
+// runs to its iteration cap with max|div| stuck at exactly the prescribed influx — so the
+// geometry, not the solver, has to be rejected. It means a pocket of fluid that the solid seals
+// off from the rest of the domain and that opens only onto the inlet, which is a physically
+// impossible thing to ask of an incompressible fluid whatever the discretization.
+//
+// Before the ghost-extension fix above this fired on ordinary geometry, because a SOLID cell
+// against the inlet was handed a fully open inflow face by the periodic wrap. It now takes a
+// genuinely sealed pocket.
+template <class Grid>
+void Solver<Grid>::checkSealedInflowCells() {
+  const int dims[3] = {e_.x, e_.y, e_.z};
+  const long st[3] = {1, (long)e_.x, (long)e_.x * e_.y};
+  int bct[6];
+  int own[6];
+  for (int f = 0; f < 6; ++f) {
+    bct[f] = bc_[f];
+    own[f] = touchesGlobalFace(f) ? 1 : 0;
+  }
+  long sealedOn[6] = {0, 0, 0, 0, 0, 0};
+  for (int a = 0; a < 3; ++a)
+    for (int s = 0; s < 2; ++s) {
+      if (bct[2 * a + s] != 2 || !own[2 * a + s])
+        continue;
+      const int b = (a + 1) % 3, c = (a + 2) % 3;
+      const long sa = st[a], sb = st[b], sc = st[c];
+      const long base = (long)((s == 0) ? G : dims[a] - G - 1) * sa;
+      const long inflowFace = (s == 0) ? 0 : sa;
+      const int nb = dims[b] - 2 * G, nc = dims[c] - 2 * G;
+      CCConst oc[3] = {CCConst(ox_), CCConst(oy_), CCConst(oz_)};
+      const int dd[3] = {dims[0], dims[1], dims[2]};
+      const long ss[3] = {st[0], st[1], st[2]};
+      const int cA = a, cB = b, cC = c, cS = s;
+      long sealed = 0;
+      Kokkos::parallel_reduce(
+          "peclet::flow::sealed_inflow",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(CCExec(), {0, 0}, {nb, nc}),
+          KOKKOS_LAMBDA(int pb, int pc, long& acc) {
+            const long i = base + (long)(pb + G) * sb + (long)(pc + G) * sc;
+            if (oc[cA](i + inflowFace) <= 0.0)
+              return;    // the inflow face carries no flux into this cell
+            int idx[3];  // the cell's index along each axis: a global face is an extreme one
+            idx[cA] = (cS == 0) ? G : (dd[cA] - G - 1);
+            idx[cB] = pb + G;
+            idx[cC] = pc + G;
+            double alpha = 0.0;
+            for (int a2 = 0; a2 < 3; ++a2)
+              for (int s2 = 0; s2 < 2; ++s2) {
+                const bool global = own[2 * a2 + s2] != 0 &&
+                                    ((s2 == 0) ? (idx[a2] == G) : (idx[a2] == dd[a2] - G - 1));
+                const int t = bct[2 * a2 + s2];
+                if (global && (t == 1 || t == 2 || t == 4))
+                  continue;  // Neumann domain face: the operator closes it whatever the aperture
+                alpha += oc[a2](i + ((s2 == 0) ? 0 : ss[a2]));
+              }
+            if (alpha <= 0.0)
+              ++acc;
+          },
+          sealed);
+      sealedOn[2 * a + s] = sealed;
+    }
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {  // ONE reduction for all six faces: set_solid is per-step on moving geometry
+    long g[6];
+    MPI_Allreduce(sealedOn, g, 6, MPI_LONG, MPI_SUM, comm_);
+    for (int f = 0; f < 6; ++f)
+      sealedOn[f] = g[f];
+  }
+#endif
+  for (int f = 0; f < 6; ++f) {
+    if (sealedOn[f] == 0)
+      continue;
+    static const char* kFace[6] = {"-x", "+x", "-y", "+y", "-z", "+z"};
+    throw std::runtime_error(
+        std::string("set_solid: the immersed solid seals ") + std::to_string(sealedOn[f]) +
+        " fluid cell(s) against the " + kFace[f] +
+        " INFLOW face off from the rest of the domain: their pressure row is entirely closed "
+        "yet the inflow still feeds them, which no pressure field can satisfy (the pressure "
+        "solve would run to its iteration cap with max|div| stuck at the inflow velocity). "
+        "Either pull the solid clear of that face, refine the grid so the pocket connects, or "
+        "make the face a wall. See doc/cutcell_openbc_convergence.md.");
+  }
 }
 
 template <class Grid>
@@ -685,6 +834,8 @@ void Solver<Grid>::setSolidGhostProjectionOverlay(CCField din) {
 
 template <class Grid>
 void Solver<Grid>::setSolidInitPressureMg() {
+  bridgeOutflowFacePlanes();  // after every writer of the g=1 openness rails (ghost-mode surrogate
+                              // included), before the hierarchy reads them
   mg_.setBoundaryConditions(bc_);  // per-level wall openness + null-space gating (no-op if
                                    // periodic); BEFORE initMpi — the per-level ghost width
                                    // (CA smoothing) is chosen for the periodic operator only
@@ -704,6 +855,13 @@ void Solver<Grid>::setSolidInitPressureMg() {
   // Phase 2 C2 (doc/anisotropic_metric.md §1.3/§3): the per-axis pressure weight
   // w_a = 1/h_a'^2 IS `setOpenness`'s idx2/idy2/idz2 (the coarse levels already form
   // w_a/cfac_a^2).  Exactly 1.0 on the isotropic path.
+  // SCALING_ISSUES #3: a Dirichlet (outflow) domain face row carries the face's own cut-cell
+  // APERTURE, not the literal openness 1.0. With a solid cutting the outlet the two differ, and
+  // the operator then solved a different constraint from the one the divergence imposes: the
+  // projection pushed flux through a face that carries none (measured max|div| 1.5e-2 against
+  // 4.7e-4 for the same bed pulled clear). `set_outflow_operator_coefficient(False)` is the
+  // ablation back to the literal 1.0; a bed clear of the open faces is byte-identical either way.
+  mg_.setOutflowCoefficient(hasOutflow_ && outflowOpCoeff_);
   mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), u_.w[0], u_.w[1], u_.w[2]);
   // Coarse-solve policy: an explicit set_pressure_graph_amg(True) forces agglomeration,
   // otherwise the mode set by set_pressure_bottom (default auto) decides.

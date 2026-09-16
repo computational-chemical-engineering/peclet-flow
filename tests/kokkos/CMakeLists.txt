@@ -198,6 +198,15 @@ target_include_directories(test_outflow_backflow PRIVATE ${CMAKE_CURRENT_SOURCE_
 target_link_libraries(test_outflow_backflow PRIVATE Kokkos::kokkos)
 add_test(NAME outflow_backflow COMMAND test_outflow_backflow)
 
+# Immersed solid TOGETHER with inflow/outflow domain BCs (SCALING_ISSUES #3) -- the first test
+# anywhere to call setDomainBc and setSolid together, with the sphere clear of the open faces and
+# cutting each of them in turn.
+add_executable(test_openbc_solid test_openbc_solid.cpp)
+target_include_directories(test_openbc_solid PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_openbc_solid PRIVATE Kokkos::kokkos)
+add_test(NAME openbc_solid COMMAND test_openbc_solid)
+
 # VoF rung V2a (WO-J): the colour field wired into the NS solver — bridge, hydrostatic acid test
 # through C, conservation, C==const reductions, harmonic rho_f ablation, interface-local CFL.
 # PECLET_VOF_TWOPHASE_LONG=1 runs the conservation gate for 1000 steps instead of 200.

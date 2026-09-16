@@ -840,9 +840,11 @@ void Solver<Grid>::projectBuildCoefficients() {
     // the low-side outlet inconsistent with projectCorrectVar by the full density ratio).
     {
       CCField cc[3] = {cx1_, cy1_, cz1_};
+      CCField oo[3] = {ox1_, oy1_, oz1_};
       for (int a = 0; a < 3; ++a)
         if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
-          buildRhoCoeffOutflowFace(cc[a], CCConst(rho1_), rho_, e1_, 1, a, rhoFaceHarmonic_);
+          buildRhoCoeffOutflowFace(cc[a], CCConst(oo[a]), CCConst(rho1_), rho_, e1_, 1, a,
+                                   rhoFaceHarmonic_);
     }
     mg_.setBoundaryConditions(bc_);
     mg_.setOutflowCoefficient(hasOutflow_ && outflowOpCoeff_);
@@ -881,7 +883,12 @@ void Solver<Grid>::projectBuildCoefficients() {
                        CCConst(eps1_), e1_, 1);
     }
     mg_.setBoundaryConditions(bc_);
+    // SCALING_ISSUES #3: the widened porous builders above wrote the HIGH Dirichlet face plane
+    // too, so the outlet row carries open_f*eps_f (and w_f) exactly like every inner face,
+    // instead of the literal openness 1.0.
+    mg_.setOutflowCoefficient(hasOutflow_ && outflowOpCoeff_);
     mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
+    mg_.setOutflowCoefficient(false);
     chebBoundsSet_ = false;
   }
 }

@@ -331,6 +331,48 @@ inline void bcCorrectOutflowVar(BField f, BField phi, BField rho, double rho0, B
       });
 }
 
+// Save / restore the HIGH-side domain-face plane of a field over the block's INNER transverse
+// range. SCALING_ISSUES #3/#8: that face is the first GHOST index along axis `a`, and the
+// distributed halo wraps periodically on every axis, so after an exchange it carries the OPPOSITE
+// boundary's value -- which destroys the mass-conserving outflow correction the projection wrote
+// there and that `fillVelGhostsTo(..., doOutflow = false)` exists to preserve.
+//
+// INNER transverse range ONLY, and that is the point: the plane's transverse ghost rows are
+// legitimately the NEIGHBOUR's inner values, which the exchange has just delivered correctly.
+// Putting stale local values back over them would trade one wrong plane for another.
+inline void bcSaveHighFacePlaneInner(BField dst, BField src, B3 ext, int g, int a) {
+  BExec space;
+  int dims[3];
+  long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int bf = dims[a] - g, nb = dims[b] - 2 * g, nc = dims[c] - 2 * g;
+  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::bc_save_high_face", MD(space, {0, 0}, {nb, nc}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        dst((long)p0 + (long)p1 * nb) =
+            src((long)(p0 + g) * sb + (long)(p1 + g) * sc + (long)bf * sa);
+      });
+}
+inline void bcRestoreHighFacePlaneInner(BField dst, BField src, B3 ext, int g, int a) {
+  BExec space;
+  int dims[3];
+  long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int bf = dims[a] - g, nb = dims[b] - 2 * g, nc = dims[c] - 2 * g;
+  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::bc_restore_high_face", MD(space, {0, 0}, {nb, nc}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        dst((long)(p0 + g) * sb + (long)(p1 + g) * sc + (long)bf * sa) =
+            src((long)p0 + (long)p1 * nb);
+      });
+}
+
 // Set the a-component face openness on a domain face to `val` (Neumann wall/inflow -> 0; the
 // periodic fill would otherwise wrap the wrong value into an outflow face from the opposite
 // boundary -> set it open = 1).

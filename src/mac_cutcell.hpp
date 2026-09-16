@@ -235,6 +235,37 @@ inline void buildOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ex
       });
 }
 
+// Re-derive ONE staggered face-openness plane: component `a` at the HIGH domain-face index
+// (ext.a - g) along axis a. SCALING_ISSUES #3: that index is a GHOST index, so the distributed
+// openness halo exchange overwrites it with the periodic wrap of the opposite boundary -- which at
+// a non-periodic domain face is another boundary's aperture, not this one's. It is the face the
+// divergence weights the outgoing flux by AND (since the Dirichlet row carries the aperture) the
+// one the operator reads, so it has to be the geometry's own value. `buildOpenness` had it right
+// before the exchange; this re-derives it from the same (already exchanged, already
+// domain-extended) SDF rather than keeping a save buffer alive across a per-step set_solid.
+inline void buildOpennessHighFace(CCField oa, CCConst sdf, C3 ext, int g, int a, double dx,
+                                  double dy, double dz, int order = 1) {
+  CCExec space;
+  const int dims[3] = {ext.x, ext.y, ext.z};
+  const long st[3] = {1, (long)ext.x, (long)ext.x * ext.y};
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = st[a], sb = st[b], sc = st[c];
+  const int bf = dims[a] - g;
+  const int type = a + 1;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  Kokkos::parallel_for(
+      "peclet::flow::cc_open_high_face", MD(space, {0, 0}, {dims[b], dims[c]}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        double q[3];
+        q[a] = (double)bf - 0.5;
+        q[b] = (double)p0;
+        q[c] = (double)p1;
+        const long i = (long)p0 * sb + (long)p1 * sc + (long)bf * sa;
+        oa(i) = (order >= 2) ? ccFaceOpenMS(sdf, ext, q[0], q[1], q[2], type)
+                             : ccFaceOpen(sdf, ext, q[0], q[1], q[2], type, dx, dy, dz);
+      });
+}
+
 // HOST-only serial cutoff: below this many cells an OpenMP launch costs more than the work it does
 // (fork/join is ~20-30 us at 24 threads), so run the loop sequentially instead. That is
 // BIT-IDENTICAL for elementwise kernels and for colored sweeps (same-color cells are independent,

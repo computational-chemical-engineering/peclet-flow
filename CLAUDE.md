@@ -389,9 +389,10 @@ march-unstable above ~2000 spheres.
 
 `set_domain_bc(face, type, velocity=(vx, vy, vz))` with `face` one of `'-x'`, `'+x'`, `'-y'`, `'+y'`,
 `'-z'`, `'+z'` and `type` one of `'periodic'` (default), `'wall'` (no-slip), `'inflow'` (Dirichlet
-velocity), `'outflow'`, `'slip'` (free-slip/symmetry, which also **mirrors the SDF ghost band**
-about that face, `mirrorSdfSlipFaces`, or a half channel closed by a symmetry plane would see the
-far wall as a solid). Tangential walls use a face-fold in the implicit diffusion so `u_inner` stays
+velocity), `'outflow'`, `'slip'` (free-slip/symmetry, which **mirrors the SDF ghost band** about
+that face — `extendSdfDomainGhosts`, which gives every other non-periodic face the constant normal
+extension instead — or a half channel closed by a symmetry plane would see the far wall as a
+solid). Tangential walls use a face-fold in the implicit diffusion so `u_inner` stays
 implicit. `set_domain_bc_profile(face, profile[Nb,Nc,3])` prescribes a per-position inlet (and
 sets the face to inflow) — the backward-facing step is realized purely this way. Only a call that
 would CHANGE a face's TYPE must precede the geometry (it raises afterwards); a VALUE update
@@ -413,9 +414,32 @@ immersed solid, use `set_pressure_geometry(all_fluid_sdf)`.
 - **Ghost fills that are easy to lose:** `step()` fills the cell body-force and `drag_beta` ghosts
   right after `updateProperties()` because `buildRhsVar`/`addDragDiagonal` face-interpolate them;
   skip either and the first inner plane of every block silently carries half the value.
-- **OPEN DEFECT:** an immersed solid *cutting* an inflow/outflow face breaks the pressure solve
-  (iteration cap, `max|div|` 4e-3, divergence at MG depth ≤ 2). A bed clear of the open faces is
-  fine. [`doc/cutcell_openbc_convergence.md`](doc/cutcell_openbc_convergence.md).
+- **Solid CUTTING an open face** (fixed 2026-09-16, `test_openbc_solid{,_mpi}` — the first tests to
+  combine `set_domain_bc` with `set_solid`): the SDF ghost outside a non-periodic face was filled by
+  PERIODIC WRAP, so the boundary-face aperture was teleported from the far side — a solid cell
+  against the inlet came out fully open and the prescribed inflow fed a closed pressure row
+  (inconsistent: MG-PCG capped, `max|div|` = U). `extendSdfDomainGhosts` now extends the SDF
+  constant out of every non-periodic face (type 4 keeps its mirror). Separately, a Dirichlet outlet
+  row carried the literal openness 1.0 instead of the face aperture — silently wrong, mass leaving
+  through solid — and now carries the aperture through the WO-R2 save/restore/coarsen machinery
+  (`set_outflow_operator_coefficient(False)` ablates back). Geometry that SEALS fluid cells against
+  an inlet is rejected by `set_solid` with a named error, not stalled on.
+  [`doc/cutcell_openbc_convergence.md`](doc/cutcell_openbc_convergence.md).
+- **The two ends of an axis are ASYMMETRIC and the halo knows nothing about domain BCs.** The LOW
+  domain face of an axis is an INNER index; the HIGH one is the first GHOST index, and the
+  decomposition wraps periodically on every axis (the non-periodic conditions are imposed on top),
+  so any high-side boundary plane comes back from an exchange carrying the OPPOSITE boundary's
+  value. Two things depend on it and **fixing either alone makes things worse** — they used to wrap
+  together and stay mutually consistent while both were wrong about the geometry: the cut-cell
+  openness (`buildOpennessHighFace` re-derives it from the SDF after the exchange) and the outflow
+  face velocity (`fillVelGhostsTo(..., doOutflow = false)` now saves and restores the plane over the
+  INNER transverse range; the transverse ghost rows are the neighbour's inner values and must stay).
+  `test_vof_bc_mpi`'s composed budget is the gate: 1.25e-14 → 2.46e-02 with the openness half alone
+  → 2.89e-14 with both, at np=1. `docs/SCALING_ISSUES.md` #8.
+- **Which divergence to read at an outlet:** `max_open_divergence()` refills the outflow ghost with
+  the zero-gradient extrapolation before measuring, so at a partly blocked outlet it reports how far
+  zero-gradient is from the mass-conserving face and does NOT decay.
+  `max_open_divergence_projected()` is the residual of the constraint the projection solved.
 
 ## Geometric VoF (`src/vof/`)
 
@@ -459,4 +483,4 @@ The rung-by-rung record — every work order, gate number and refuted hypothesis
 ## Open items
 
 Intermediate-level multigrid repartitioning at scale; coefficient-aware coarsening for high
-contrast; double-diagonal operator storage; solid cutting an open face; `vof-w4`.
+contrast; double-diagonal operator storage; `vof-w4`.
