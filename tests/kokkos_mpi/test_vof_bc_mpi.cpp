@@ -56,6 +56,7 @@
 #include "peclet/core/decomp/block_decomposer.hpp"
 
 using peclet::flow::IbmSolver;
+using Colo = peclet::flow::Solver<peclet::flow::Colocated>;
 
 static constexpr int NX = 16, NY = 16, NZ = 32;
 static constexpr std::size_t GCELLS = (std::size_t)NX * NY * NZ;
@@ -174,6 +175,35 @@ static void configureJet(IbmSolver& s, int lnx, int lny, int lnz) {
   // tell). Without this the distributed run falls back to `presIters_` standalone V-cycles.
   s.setPressureFcg(true, 400, 1e-11);
   s.setVofInflow(4, 1.0);  // fed by liquid
+  s.setVofBackflow(5, 0.0);
+}
+
+// ------------------------------ config D: the COLLOCATED bridge through an open boundary
+// All-fluid duct, -z inflow fed by liquid, +z outflow, colour initially filling the upper half.
+// Density ratio 1 on purpose: the colour rides as a passive tracer, so the CONSERVATION BUDGET is
+// a statement about the transport and the boundary ledger alone, with no two-phase pressure
+// coupling in the way.
+static void configureColoJet(Colo& s, int oz, int lnx, int lny, int lnz) {
+  s.setRho(1.0);
+  s.setMu(0.05);
+  s.setDt(0.05);
+  for (int f = 0; f < 4; ++f)
+    s.setDomainBc(f, 1, 0, 0, 0);
+  s.setDomainBc(4, 2, 0.0, 0.0, 0.5);  // -z inflow
+  s.setDomainBc(5, 3, 0, 0, 0);        // +z outflow
+  s.setVelocityIterations(60);
+  s.setPressureLevels(4);
+  s.setPressureIterations(400);
+  s.setPressureGeometry(std::vector<double>((std::size_t)lnx * lny * lnz, 1e30));
+  s.enableVof();
+  std::vector<double> c0((std::size_t)lnx * lny * lnz, 0.0);
+  for (int z = 0; z < lnz; ++z)
+    if (z + oz >= NZ / 2)
+      for (int y = 0; y < lny; ++y)
+        for (int x = 0; x < lnx; ++x)
+          c0[(std::size_t)x + (std::size_t)y * lnx + (std::size_t)z * lnx * lny] = 1.0;
+  s.setVof(c0);
+  s.setVofInflow(4, 1.0);
   s.setVofBackflow(5, 0.0);
 }
 
@@ -637,6 +667,72 @@ int main(int argc, char** argv) {
         }
         if (gIt >= 400) {
           std::printf("  [packing   np=%d] FAIL — the pressure solve CAPPED (run invalid)\n", size);
+          fail = 1;
+        }
+      }
+    }
+
+    // ------------------------------------ D: the COLLOCATED bridge through an open boundary
+    //
+    // The staggered composed case above gates this identity on `IbmSolver`; nothing gated it on
+    // `SolverColocated`, whose VoF bridge takes a DIFFERENT path -- it hands the advector the FACE
+    // field `uf_/vf_/wf_` and re-fills its ghosts first. `fillGhosts` is BC-unaware and wraps every
+    // axis, and the outflow face is a GHOST index, so that fill overwrites the mass-conserving
+    // value `bcCorrectOutflow` had just written with the opposite boundary's -- single-rank as
+    // well as distributed, since the single-rank fill wraps periodically too.
+    //
+    // The conserved functional is summed from the CANONICAL colour field, not from the advector
+    // census: `volume` (sum eps_eff*C) is populated only with cut-cell geometry attached, and
+    // `diagnostics()` returns what the last `advect()` stored, so neither is meaningful BEFORE the
+    // first step. This duct is all-fluid, so sum C over the inner block is the right quantity.
+    {
+      const int steps = 30;
+      Colo sd(lnx, lny, lnz);
+      sd.initMpi(dec, MPI_COMM_WORLD);
+      configureColoJet(sd, oz, lnx, lny, lnz);
+      double colLedger = 0.0;
+      const double colC0 = sumOf(sd.getVof());
+      long colIt = 0;
+      for (int i = 0; i < steps; ++i) {
+        sd.step();
+        colIt = std::max<long>(colIt, sd.lastPressureIterations());
+        const auto v = sd.vofBcVolumes();
+        for (int f = 0; f < 6; ++f)
+          colLedger += v[f];
+      }
+      const double colC1 = sumOf(sd.getVof());
+      double gC0 = 0, gC1 = 0, gColLed = 0;
+      long gColIt = 0;
+      MPI_Allreduce(&colC0, &gC0, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(&colC1, &gC1, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(&colLedger, &gColLed, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(&colIt, &gColIt, 1, MPI_LONG, MPI_MAX, MPI_COMM_WORLD);
+      const std::vector<double> gcol =
+          gatherGlobal(sd.getVof(), ox, oy, oz, lnx, lny, lnz, rank, size);
+      if (rank == 0) {
+        Colo ref(NX, NY, NZ);
+        configureColoJet(ref, 0, NX, NY, NZ);
+        for (int i = 0; i < steps; ++i)
+          ref.step();
+        const double dcol = maxAbsDiff(gcol, ref.getVof());
+        const double budget = std::fabs((gC1 - gC0) - gColLed);
+        const double csum = sumOf(ref.getVof());
+        std::printf(
+            "  [colo-jet  np=%d] colour vs single-rank %.3e; budget |d sum(C) - ledger| %.3e "
+            "(rel %.3e); pressure %ld/400\n",
+            size, dcol, budget, budget / gC0, gColIt);
+        const double tolCol = (size == 1) ? 0.0 : 1e-9 * std::fabs(csum);
+        if (!(dcol <= tolCol)) {
+          std::printf("  [colo-jet  np=%d] FAIL — the colour field is wrong (tol %.1e)\n", size,
+                      tolCol);
+          fail = 1;
+        }
+        if (!(budget / gC0 < 1e-10)) {
+          std::printf("  [colo-jet  np=%d] FAIL — the boundary budget does not close\n", size);
+          fail = 1;
+        }
+        if (gColIt >= 400) {
+          std::printf("  [colo-jet  np=%d] FAIL — the pressure solve CAPPED (run invalid)\n", size);
           fail = 1;
         }
       }

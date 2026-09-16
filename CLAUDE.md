@@ -423,7 +423,9 @@ immersed solid, use `set_pressure_geometry(all_fluid_sdf)`.
   row carried the literal openness 1.0 instead of the face aperture — silently wrong, mass leaving
   through solid — and now carries the aperture through the WO-R2 save/restore/coarsen machinery
   (`set_outflow_operator_coefficient(False)` ablates back). Geometry that SEALS fluid cells against
-  an inlet is rejected by `set_solid` with a named error, not stalled on.
+  an inlet is rejected by `set_solid` with a named error, not stalled on. **Both grids** — the fix
+  is all geometry, so it is grid-independent, and the pre-fix collocated inlet-cut bed capped at 200
+  with `max|div|` = U exactly as the staggered one did; `test_openbc_solid` runs on both.
   [`doc/cutcell_openbc_convergence.md`](doc/cutcell_openbc_convergence.md).
 - **The two ends of an axis are ASYMMETRIC and the halo knows nothing about domain BCs.** The LOW
   domain face of an axis is an INNER index; the HIGH one is the first GHOST index, and the

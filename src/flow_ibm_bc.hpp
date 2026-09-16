@@ -191,12 +191,16 @@ void Solver<Grid>::fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow
     // Save the plane and put it back. Only component `comp` matters: the outflow correction lives
     // on the NORMAL face of its own axis.
     //
-    // STAGGERED ONLY, deliberately. There, index `ext_a - G` IS the outflow face and holds exactly
-    // the value `bcCorrectOutflow` wrote. On the COLLOCATED grid the correction lives on the FACE
-    // field (`uf_`, corrected by the same helper) while this fills the CELL field, whose
-    // `doOutflow = false` means "leave the whole ghost BAND alone" -- restoring one layer of two
-    // would be a third behaviour, on a path no test covers (no collocated MPI test carries an
-    // outflow face). Left exactly as it was; see docs/SCALING_ISSUES.md #8.
+    // STAGGERED ONLY, and on the collocated grid this is UNREACHABLE rather than merely skipped:
+    // all three callers that pass `doOutflow = false` return or throw before they get here on
+    // `SolverColocated` -- `bridgeVelocityToVof` takes its own face-field branch and returns,
+    // `buildVofCellVelocity` throws ("SolverColocated has no immersed solid"), and
+    // `maxOpenDivergenceProjectedInternal` delegates to `maxOpenDivergenceInternal`. The guard
+    // states that, so a future caller on the collocated path has to come here and decide
+    // deliberately: there, the outflow correction lives on the FACE field (`uf_`, written by the
+    // same `bcCorrectOutflow`) while this fills the CELL field, whose `doOutflow = false` means
+    // "leave the whole ghost BAND alone" -- one restored layer of two would be a third behaviour.
+    // See docs/SCALING_ISSUES.md #8.
     const int a = comp;
     const bool keep = !Grid::collocated && !doOutflow && hasOutflow_ && a >= 0 && a < 3 &&
                       bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1);

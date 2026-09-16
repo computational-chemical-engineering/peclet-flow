@@ -178,6 +178,36 @@ exonerated; FCG capped and Chebyshev NaN'd. All of that is the inconsistent inle
 an inconsistent system does not become consistent at a different MG depth or with a different
 Krylov driver.
 
+## Both grids
+
+Every part of the fix is in the GEOMETRY, which is grid-independent: the SDF ghost extension, the
+boundary-face aperture the Dirichlet row carries, and the sealed-inlet rejection all run identically
+on `SolverColocated`. Nothing gated them there, so `test_openbc_solid` runs its cases on both grids.
+Against the pre-fix build the collocated inlet-cut bed reads **200 iterations / max|div| 1.000e+00**,
+exactly as the staggered one does, and the sealed pocket is not rejected — the defect was never
+grid-specific.
+
+Two collocated-specific things are worth stating, because both look like gaps and neither is:
+
+* **The collocated grid reads a different divergence.** `maxOpenDivergenceProjected` delegates to
+  `maxOpenDivergenceInternal` there, which re-imposes the zero-gradient outflow face before
+  measuring — so the number is the "how far is zero-gradient from the mass-conserving face"
+  quantity, and it does not fall to solver tolerance at a partly blocked outlet (2.4e-03 on a clear
+  bed, 1.2e-01 on the outlet-cut one). That is a property of the grid, not of this work, and the
+  collocated gate is the iteration count plus the rejection.
+* **The `doOutflow = false` velocity-plane repair is UNREACHABLE on the collocated grid**, not
+  merely skipped: all three callers return or throw first — `bridgeVelocityToVof` takes its own
+  face-field branch, `buildVofCellVelocity` throws, and `maxOpenDivergenceProjectedInternal`
+  delegates. The `!Grid::collocated` guard states that so a future caller has to decide
+  deliberately.
+
+The collocated VoF bridge *does* re-fill the face field's ghosts after the projection corrected the
+outflow face (`fillGhosts` is BC-unaware and wraps every axis, single-rank included), which looks
+like the same defect — but the advector's boundary flux does not read that ghost index, and the
+conservation identity closes at **1.1e-16**. That is now gated: `test_vof_bc_mpi`'s `colo-jet` case,
+an all-fluid duct with a -z inlet and a +z outlet, checks `d Σ C = boundary ledger` on
+`SolverColocated`, which had no open-boundary conservation gate of any kind before.
+
 ## Why it was never caught
 
 Nothing combined `set_domain_bc` with `set_solid` in a way that put solid *on* an open face. Four

@@ -54,7 +54,8 @@ std::vector<double> sphereSdf(double cx) {
   return sdf;
 }
 
-void configure(peclet::flow::IbmSolver& s) {
+template <class S>
+void configure(S& s) {
   s.setRho(1.0);
   s.setMu(1.0);
   s.setDt(0.5);
@@ -75,8 +76,9 @@ struct Result {
 };
 
 // cx < 0 with solid == false selects the all-fluid control.
+template <class S>
 Result run(double cx, bool solid, bool outflowOpCoeff = true) {
-  peclet::flow::IbmSolver s(NX, NY, NZ);
+  S s(NX, NY, NZ);
   configure(s);
   s.setOutflowOperatorCoefficient(outflowOpCoeff);
   if (solid)
@@ -95,8 +97,9 @@ Result run(double cx, bool solid, bool outflowOpCoeff = true) {
 // A single fluid cell against the inlet plane, walled in by solid on its other five faces: the
 // pressure row is entirely closed while the inflow still feeds it. No pressure field satisfies
 // that, so set_solid must REJECT the geometry rather than hand the solve an inconsistent row.
+template <class S>
 bool sealedPocketRejected() {
-  peclet::flow::IbmSolver s(NX, NY, NZ);
+  S s(NX, NY, NZ);
   configure(s);
   std::vector<double> sdf((std::size_t)NX * NY * NZ, -1.0);  // solid everywhere ...
   const int py = NY / 2, pz = NZ / 2;
@@ -118,11 +121,12 @@ bool sealedPocketRejected() {
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
-    const Result empty = run(0.0, false);
-    const Result clear = run(0.5 * NX, true);
-    const Result cutOut = run(NX - 0.5, true);
-    const Result cutIn = run(-0.5, true);
-    const char* fmt = "[openbc-solid] %-28s iters %3ld  projected max|div| %.3e\n";
+    // ---------------------------------------------------------------- STAGGERED (the reference)
+    const Result empty = run<peclet::flow::IbmSolver>(0.0, false);
+    const Result clear = run<peclet::flow::IbmSolver>(0.5 * NX, true);
+    const Result cutOut = run<peclet::flow::IbmSolver>(NX - 0.5, true);
+    const Result cutIn = run<peclet::flow::IbmSolver>(-0.5, true);
+    const char* fmt = "[openbc-solid] staggered  %-26s iters %3ld  projected max|div| %.3e\n";
     std::printf(fmt, "all-fluid duct:", empty.iters, empty.divp);
     std::printf(fmt, "sphere clear of the faces:", clear.iters, clear.divp);
     std::printf(fmt, "sphere cutting the OUTLET:", cutOut.iters, cutOut.divp);
@@ -137,12 +141,43 @@ int main(int argc, char** argv) {
     // The outlet half, pinned by its ablation: with the Dirichlet row back on the literal openness
     // 1.0 the operator disagrees with the divergence constraint by (1 - aperture), and the
     // projected divergence PLATEAUS four orders up instead of falling to solver tolerance.
-    const Result ablated = run(NX - 0.5, true, /*outflowOpCoeff=*/false);
-    std::printf("[openbc-solid] %-28s iters %3ld  projected max|div| %.3e (the defect)\n",
-                "OUTLET, literal-1.0 row:", ablated.iters, ablated.divp);
+    const Result ablated = run<peclet::flow::IbmSolver>(NX - 0.5, true, /*outflowOpCoeff=*/false);
+    std::printf(
+        "[openbc-solid] staggered  %-26s iters %3ld  projected max|div| %.3e (the defect)\n",
+        "OUTLET, literal-1.0 row:", ablated.iters, ablated.divp);
     CHECK(ablated.divp > 1e-4);  // measured 6.7e-3
 
-    CHECK(sealedPocketRejected());
+    CHECK(sealedPocketRejected<peclet::flow::IbmSolver>());
+
+    // ------------------------------------------------------------------------------- COLLOCATED
+    // Every part of the fix is in the GEOMETRY, which is grid-independent: the SDF ghost
+    // extension, the boundary-face aperture the Dirichlet row carries, and the sealed-inlet
+    // rejection all run identically on `SolverColocated`. Nothing gated them there, which is the
+    // whole reason this block exists -- not because the collocated path needed its own fix.
+    //
+    // It reads a DIFFERENT divergence, and that is a property of the grid, not of this work:
+    // `maxOpenDivergenceProjected` delegates to `maxOpenDivergenceInternal` on the collocated
+    // path, which re-imposes the zero-gradient outflow face before measuring. So the number here
+    // is the same "how far is zero-gradient from the mass-conserving face" quantity the staggered
+    // `max_open_divergence()` reports, and it does not fall to solver tolerance at a partly
+    // blocked outlet. The gate is therefore the iteration count -- which is what the defect
+    // actually broke, capping every step -- plus the rejection. Measured against the pre-fix
+    // build, the inlet-cut bed reads 200 iters / max|div| 1.000e+00 here exactly as it does on the
+    // staggered grid, and the sealed pocket is not rejected: the defect was never grid-specific.
+    using Colo = peclet::flow::Solver<peclet::flow::Colocated>;
+    const Result cEmpty = run<Colo>(0.0, false);
+    const Result cClear = run<Colo>(0.5 * NX, true);
+    const Result cCutOut = run<Colo>(NX - 0.5, true);
+    const Result cCutIn = run<Colo>(-0.5, true);
+    const char* cfmt = "[openbc-solid] collocated %-26s iters %3ld  max|div| %.3e\n";
+    std::printf(cfmt, "all-fluid duct:", cEmpty.iters, cEmpty.divp);
+    std::printf(cfmt, "sphere clear of the faces:", cClear.iters, cClear.divp);
+    std::printf(cfmt, "sphere cutting the OUTLET:", cCutOut.iters, cCutOut.divp);
+    std::printf(cfmt, "sphere cutting the INLET:", cCutIn.iters, cCutIn.divp);
+    const Result cAll[4] = {cEmpty, cClear, cCutOut, cCutIn};
+    for (const Result& r : cAll)
+      CHECK(r.iters < PMAXIT);
+    CHECK(sealedPocketRejected<Colo>());
 
     if (failures == 0)
       std::printf("[openbc-solid] OK\n");
