@@ -358,6 +358,11 @@ class Solver {
   // interval is Gershgorin arithmetic on the stored stencil (ibmStencilJacobiBounds), not a power
   // iteration. IBM/periodic path only: a domain-BC configuration keeps RB-GS.
   void setVelocityChebyshev(bool on, int maxit = 400);
+
+  // Return the momentum-solver choice to the automatic rule (the default), undoing an
+  // explicit setVelocityMultigrid/setVelocityChebyshev. The choice is re-taken at the next
+  // step(), where dt and mu are final.
+  void setVelocitySolverAuto();
   bool velocityChebyshevActive() const;
 
   // Chebyshev as the velocity MULTIGRID's smoother, in place of red-black Gauss-Seidel on every

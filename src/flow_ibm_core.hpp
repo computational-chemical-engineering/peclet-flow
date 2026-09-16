@@ -373,6 +373,14 @@ void Solver<Grid>::setVelocityChebyshev(bool on, int maxit) {
 }
 
 template <class Grid>
+void Solver<Grid>::setVelocitySolverAuto() {
+  vmgExplicit_ = false;
+  useVelocityCheb_ = false;
+  useVelocityMg_ = false;
+  vmgDecided_ = false;  // re-decide at the next step()
+}
+
+template <class Grid>
 bool Solver<Grid>::velocityChebyshevActive() const {
   return useVelocityCheb_;
 }

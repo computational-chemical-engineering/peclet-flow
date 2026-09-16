@@ -317,6 +317,73 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def("last_outer_iterations", [](D& diag) { return diag.s->lastOuterIterations(); },
            "Return the outer-iteration count from the last step().")
       .def(
+          "set_velocity_solver",
+          [](D& diag, const std::string& name) {
+            if (name == "auto")
+              diag.s->setVelocitySolverAuto();
+            else if (name == "gauss_seidel") {
+              diag.s->setVelocityChebyshev(false);
+              diag.s->setVelocityMultigrid(false, 3, 40);
+            } else if (name == "multigrid") {
+              diag.s->setVelocityChebyshev(false);
+              diag.s->setVelocityMultigrid(true, 3, 40);
+            } else if (name == "chebyshev") {
+              diag.s->setVelocityMultigrid(false, 3, 40);
+              diag.s->setVelocityChebyshev(true);
+            }
+            else
+              throw std::invalid_argument(
+                  "set_velocity_solver: expected 'auto', 'gauss_seidel', 'multigrid' or "
+                  "'chebyshev', got '" + name + "'");
+          },
+          nb::arg("name"),
+          "Which solver runs the implicit momentum (diffusion) equation. 'auto' (DEFAULT) picks by "
+          "the operator's condition number kappa = 1 + 4 dt mu (sum w)/rho -- the multigrid at "
+          "kappa >= 13, the smoother below -- and names no geometry, so an immersed body and a "
+          "domain-BC box at the same dt get the same solver. 'gauss_seidel' is the red-black "
+          "smoother; 'multigrid' the 3-level velocity V-cycle; 'chebyshev' Chebyshev "
+          "semi-iteration over a Gershgorin interval. ALL FOUR SOLVE THE SAME EQUATION TO THE SAME "
+          "TOLERANCE, so this changes cost and not the answer -- except that 'gauss_seidel' runs "
+          "out of sweeps above kappa ~ 50 and then returns a solution that never met it. "
+          "MEASURED (384^3 cut-cell bed, Snellius): multigrid beats gauss_seidel 1.66x-2.23x "
+          "across the CPU ladder and 2.19x on one H100; chebyshev beats gauss_seidel by the "
+          "sqrt(kappa) factor theory predicts but loses to multigrid except at the smallest "
+          "per-rank blocks, where the evidence is suggestive and not conclusive.")
+      .def(
+          "set_velocity_mg_smoother",
+          [](D& diag, const std::string& name, int degree, double eig_ratio) {
+            if (name == "gauss_seidel")
+              diag.s->setVelocityMgChebyshev(false);
+            else if (name == "chebyshev")
+              diag.s->setVelocityMgChebyshev(true, degree, eig_ratio);
+            else
+              throw std::invalid_argument(
+                  "set_velocity_mg_smoother: expected 'gauss_seidel' or 'chebyshev', got '" +
+                  name + "'");
+          },
+          nb::arg("name"), nb::arg("degree") = 0, nb::arg("eig_ratio") = 10.0,
+          "Which smoother the velocity multigrid uses on every level -- orthogonal to "
+          "set_velocity_solver, and read only when that selects 'multigrid'. 'gauss_seidel' "
+          "(DEFAULT) or 'chebyshev'. ABLATION, AND CHEBYSHEV IS MEASURED SLOWER: at degree 4 / "
+          "eig_ratio 6 it IS the stronger smoother per cycle (8.0 V-cycles against red-black's "
+          "9.3) and still loses 1.21x on wall time, because matching red-black's smoothing "
+          "strength costs the same four halo exchanges two sweeps cost, while Chebyshev needs a "
+          "separate residual and update pass where a Gauss-Seidel sweep fuses the two. Kept "
+          "because it is the apparatus for a question that gets asked repeatedly. degree=0 "
+          "follows the V-cycle's own pre/post/bottom counts.")
+      .def("velocity_solver", [](D& diag) {
+            return diag.s->velocityChebyshevActive()  ? std::string("chebyshev")
+                   : diag.s->velocityMultigridActive() ? std::string("multigrid")
+                                                       : std::string("gauss_seidel");
+          },
+          "The momentum solver actually in force, resolving 'auto'. Only meaningful after the "
+          "first step(), which is where the choice is made (dt and mu are final only then).")
+      .def("velocity_mg_smoother", [](D& diag) {
+            return diag.s->velocityMgChebyshev() ? std::string("chebyshev")
+                                                 : std::string("gauss_seidel");
+          },
+          "The velocity multigrid's smoother.")
+      .def(
           "set_velocity_solver_params",
           [](D& diag, int iters, double rtol, int min_iters) {
             diag.s->setVelocityIterations(iters);
@@ -349,37 +416,6 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "cells_per_rank (default 65536) cells per rank, off otherwise. So the value can differ "
            "from what the caller last set explicitly, and is only meaningful after geometry has "
            "been installed (False on a fresh solver).")
-      .def("set_velocity_chebyshev", [](D& diag, bool on, int maxit) { return diag.s->setVelocityChebyshev(on, maxit); },
-           nb::arg("on"), nb::arg("max_iter") = 400,
-           "ABLATION. Solve the implicit momentum equation with Chebyshev semi-iteration instead of "
-           "the red-black smoother -- same sharp cut-cell operator, same residual stop, same "
-           "tolerance, so the projection consumes the same u*. Diagnostics tier because it is an "
-           "alternative to a solver the code already chooses for you, kept so the choice can be "
-           "measured rather than argued about. The spectral interval is Gershgorin arithmetic on the "
-           "stored stencil, never a power iteration (an under-estimated lambda_max is the one error "
-           "that makes Chebyshev diverge). MEASURED: it beats red-black by the sqrt(kappa) factor "
-           "theory predicts (107 iterations/component against 147, predicted 111) but LOSES to the "
-           "velocity V-cycle except at the smallest per-rank blocks, where its one halo exchange per "
-           "iteration starts to tell -- 443 ms of momentum at 1536 cores against the V-cycle's "
-           "473-1037 ms over five allocations, which is suggestive and not conclusive on a rung "
-           "whose repeats spread 2.01x. IBM/periodic path only; a domain-BC configuration keeps "
-           "red-black.")
-      .def("velocity_chebyshev_active", [](D& diag) { return diag.s->velocityChebyshevActive(); },
-           "Whether the Chebyshev momentum solver is selected.")
-      .def("set_velocity_mg_chebyshev", [](D& diag, bool on, int degree, double eig_ratio) { return diag.s->setVelocityMgChebyshev(on, degree, eig_ratio); },
-           nb::arg("on"), nb::arg("degree") = 0, nb::arg("eig_ratio") = 10.0,
-           "ABLATION, and MEASURED SLOWER -- kept because it is the apparatus for a question that "
-           "gets asked repeatedly, not because it is a tuning knob. Uses a Chebyshev polynomial "
-           "smoother inside the velocity multigrid instead of red-black Gauss-Seidel, on every "
-           "level, hoping to spend half the halo exchanges within a V-cycle whose convergence "
-           "already wins. It does not pay: at degree 4 / eig_ratio 6 it IS the stronger smoother "
-           "per cycle (8.0 V-cycles against red-black's 9.3) and still loses 1.21x on wall time, "
-           "because matching red-black's smoothing strength costs the same four exchanges two "
-           "sweeps cost, and Chebyshev needs a separate residual and update pass where a "
-           "Gauss-Seidel sweep fuses the two. degree=0 follows the V-cycle's own pre/post/bottom "
-           "counts; the interval is [hi/eig_ratio, hi] with hi each level's Gershgorin lambda_max.")
-      .def("velocity_mg_chebyshev", [](D& diag) { return diag.s->velocityMgChebyshev(); },
-           "Whether the velocity multigrid uses the Chebyshev smoother.")
       .def(
           "outflow_backflow",
           [](D& diag) {
