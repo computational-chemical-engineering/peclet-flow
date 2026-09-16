@@ -109,8 +109,8 @@ inline void ibmChebUpdate(CCField x, CCField d, CCConst r, FPC AC, CCConst solid
 
 /// The Chebyshev coefficient recurrence (Golub-Varga; the form multigrid Chebyshev smoothers use).
 /// Iteration 0 takes alpha = 1/theta, beta = 0; iteration k takes rho_k = 1/(2 sigma - rho_{k-1}),
-/// alpha = 2 rho_k / delta, beta = rho_k rho_{k-1}. Holding the recurrence in one small struct keeps
-/// the driver free of solver algebra.
+/// alpha = 2 rho_k / delta, beta = rho_k rho_{k-1}. Holding the recurrence in one small struct
+/// keeps the driver free of solver algebra.
 struct ChebCoeffs {
   double theta, delta, sigma, rho;
   ChebCoeffs(double lo, double hi)

@@ -314,8 +314,8 @@ class VelocityMG {
     C3 gdim{0, 0, 0};  // GLOBAL dims of this level (og + inner == gdim -> owns the +face)
     std::size_t n = 0;
     CCField x, rhs, res, theta, pin, resMask;
-    CCField cd;            // Chebyshev search direction (chebSmooth_; allocated on first use)
-    double chebHi = -1.0;  // Gershgorin lambda_max of diag(AC)^-1 A, GLOBAL; set per solve()
+    CCField cd;                // Chebyshev search direction (chebSmooth_; allocated on first use)
+    double chebHi = -1.0;      // Gershgorin lambda_max of diag(AC)^-1 A, GLOBAL; set per solve()
     CCField advU, advV, advW;  // restricted advecting velocity (upwind-convective coarse op; L>=1)
     FPV AC, AW, AE, AS, AN, AB, AT;
 #ifdef PECLET_FLOW_MPI
@@ -987,9 +987,9 @@ class VelocityMG {
   bool aniso_ = false;              // engages that rule; false => today's level table verbatim
   double aspectTheta_ = 2.0;        // anisotropic-coarsening threshold (setAspectThreshold)
   int pre_ = 2, post_ = 2, bottom_ = 8;
-  bool chebSmooth_ = false;      // Chebyshev polynomial smoother instead of red-black GS
-  int chebDegree_ = 0;           // 0 = follow pre_/post_/bottom_
-  double chebEigRatio_ = 10.0;   // interval is [chebHi/chebEigRatio_, chebHi]
+  bool chebSmooth_ = false;     // Chebyshev polynomial smoother instead of red-black GS
+  int chebDegree_ = 0;          // 0 = follow pre_/post_/bottom_
+  double chebEigRatio_ = 10.0;  // interval is [chebHi/chebEigRatio_, chebHi]
   bool usePin_ = true,
        useResMask_ = true;  // staircase: pin + clean-fluid exclude; upwind/domain-BC: neither
   bool bcMode_ = false;
