@@ -25,6 +25,12 @@ using peclet::core::IVec;
 using Colo = peclet::flow::Solver<peclet::flow::Colocated>;
 
 static constexpr int N = 32, STEPS = 120;
+// The advecting config marches far fewer steps: at DT = 60 the implicit-FOU momentum solve costs
+// several times a Stokes step (CFL ~ 12), and this config exists to prove the PROJECTED FACE
+// FIELD'S HALO is decomposition-invariant, not to reach a steady state. A handful of steps is
+// enough -- the face field is rebuilt and re-exchanged every one of them, so a wrong ghost shows
+// up on the second. CI caps an MPI ctest at 1200 s; 120 advecting steps does not fit in it.
+static constexpr int STEPS_ADVECT = 20;
 static constexpr double RHO = 1.0, MU = 0.1, F = 1e-3, DT = 60.0;
 
 // global sphere-packing SDF (flat x-fastest, negative inside), 2x2x2 spheres, periodic
@@ -116,7 +122,8 @@ int main(int argc, char** argv) {
       sd.initMpi(N, N, N, MPI_COMM_WORLD);
       configure(sd, mode, cfg.advect);
       sd.setSolid(lsdf, /*cutcell_pressure=*/true);
-      for (int it = 0; it < STEPS; ++it)
+      const int steps = cfg.advect ? STEPS_ADVECT : STEPS;
+      for (int it = 0; it < steps; ++it)
         sd.step();
       double lsum = localUSum(sd), gsum = 0;
       MPI_Allreduce(&lsum, &gsum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
@@ -129,7 +136,7 @@ int main(int argc, char** argv) {
         Colo ref(N, N, N);
         configure(ref, mode, cfg.advect);
         ref.setSolid(gsdf, true);
-        for (int it = 0; it < STEPS; ++it)
+        for (int it = 0; it < steps; ++it)
           ref.step();
         double rsum = 0;
         {
@@ -156,7 +163,7 @@ int main(int argc, char** argv) {
   MPI_Allreduce(&fail, &totalFail, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   if (rank == 0) {
     if (totalFail == 0)
-      std::printf("OK (np=%d): distributed collocated Stokes permeability == single-rank\n", size);
+      std::printf("OK (np=%d): distributed collocated <u> == single-rank, every config\n", size);
     else
       std::fprintf(stderr, "FAILED (np=%d)\n", size);
   }
