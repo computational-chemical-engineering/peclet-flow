@@ -6,6 +6,15 @@
 [![CI](https://github.com/computational-chemical-engineering/peclet-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/computational-chemical-engineering/peclet-flow/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21132439.svg)](https://doi.org/10.5281/zenodo.21132439)
 
+```bash
+pip install peclet-flow          # CPU (OpenMP) wheels — or `pip install peclet` for the whole family
+pip install peclet-flow-cu13     # the CUDA 13 build of the same module, in its OWN venv
+```
+
+Both ship the incompressible cut-cell IBM Navier–Stokes solver as `peclet.flow`; they provide the **same import**, so they are mutually
+exclusive in one environment — one venv per backend. Multi-GPU/MPI and AMD/HIP are source or
+container builds: see [Install & run](https://computational-chemical-engineering.github.io/peclet/DEPLOYMENT/).
+
 GPU-accelerated incompressible **Navier–Stokes** solver for flow in complex geometry, built around a
 staggered **MAC** grid, a signed-distance-field (**SDF**) description of the solid, a cut-cell **Immersed
 Boundary Method**, and a pressure-projection step with a geometric **multigrid** Poisson solve. The code is
