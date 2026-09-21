@@ -6,7 +6,10 @@ Run:  OMP_NUM_THREADS=1 OMP_PROC_BIND=false PYTHONPATH=<build> python tests/regr
       OMP_NUM_THREADS=1 PYTHONPATH=<build> mpirun -np 2 python tests/regression/state_hash.py mpi
 
 Entry paths: the staggered periodic sphere bed (set_solid, cut-cell pressure), the collocated
-solver under each of its four schemes ('ghost', 'gauge-exact', 'plain', 'embed'), an
+solver under each of its four schemes ('ghost', 'gauge-exact', 'plain', 'embed'), the collocated
+ADVECTING paths -- periodic (explicit SOU/Koren) and inflow/outflow (implicit FOU + deferred
+correction), the two branches that read the projected face field as the advecting velocity and the
+only ones the four scheme cases above miss (they are Stokes: set_advection(False)) -- an
 inflow/wall/outflow channel with advection, a VoF droplet under surface tension, Boussinesq
 scalar transport, the porous (volume-averaged) continuity with implicit drag, an analytic scene
 with a moving instance (set_instance_motion + set_instance_transform + rebuild_geometry), and the
@@ -27,7 +30,8 @@ import numpy as np
 import peclet.flow as pf
 
 CASES = ("staggered_bed", "colocated_ghost", "colocated_gauge_exact", "colocated_plain",
-         "colocated_embed", "channel", "vof_droplet", "scalar", "porous", "scene_moving")
+         "colocated_embed", "colocated_advect", "colocated_advect_bc", "channel", "vof_droplet",
+         "scalar", "porous", "scene_moving")
 
 
 def sha(a):
@@ -96,6 +100,52 @@ def case_colocated_plain():
 
 def case_colocated_embed():
     return stokes_bed(pf.SolverColocated, scheme="embed")
+
+
+def _tg_state(N, nz, U0=1.0):
+    """A divergence-free (to O(h^2)) cell-centred Taylor-Green pair: a non-trivial advecting
+    field with no body force, so the hash reflects the advection + projection only."""
+    k = 2.0 * np.pi / N
+    ix = np.arange(N)
+    X, Y = np.meshgrid(ix, ix, indexing="ij")
+    u = np.repeat((U0 * np.sin(k * X) * np.cos(k * Y))[:, :, None], nz, axis=2)
+    v = np.repeat((-U0 * np.cos(k * X) * np.sin(k * Y))[:, :, None], nz, axis=2)
+    return (np.asfortranarray(u), np.asfortranarray(v),
+            np.asfortranarray(np.zeros((N, N, nz))))
+
+
+def case_colocated_advect():
+    """Collocated + advection, triply periodic: hasBc_ false, so advection is EXPLICIT (Koren in
+    the RHS) and the advecting velocity is the projected face field of the previous step."""
+    N, nz = 16, 8
+    s = pf.SolverColocated(N, N, nz)
+    s.set_rho(1.0); s.set_mu(0.05); s.set_dt(0.5)
+    s.set_advection(True); s.set_advection_scheme("koren")
+    s.diagnostics.set_velocity_solver_params(80)
+    s.set_pressure_pcg(True, 200, 1e-9)
+    s.set_solid(np.asfortranarray(np.full((N, N, nz), 1e3)), cutcell_pressure=True)
+    s.set_state(*_tg_state(N, nz))
+    for _ in range(5):
+        s.step()
+    return s
+
+
+def case_colocated_advect_bc():
+    """Collocated + advection + domain BCs: hasBc_ true, so implicitAdv() holds and the IMPLICIT
+    FOU operator (buildAdvStencil) plus the explicit (SOU - FOU) deferred correction both read
+    the advecting velocity -- they must read the SAME one."""
+    nx, ny, nz = 24, 12, 8
+    s = pf.SolverColocated(nx, ny, nz)
+    s.set_rho(1.0); s.set_mu(0.05); s.set_dt(0.5)
+    s.set_advection(True); s.set_advection_scheme("koren")
+    s.set_domain_bc("-x", "inflow", (1.0, 0.0, 0.0))
+    s.set_domain_bc("+x", "outflow")
+    s.set_domain_bc("-y", "wall"); s.set_domain_bc("+y", "wall")
+    s.set_pressure_geometry(np.asfortranarray(np.full((nx, ny, nz), 10.0)))
+    s.set_pressure_pcg(True, 200, 1e-9)
+    for _ in range(5):
+        s.step()
+    return s
 
 
 def case_channel():

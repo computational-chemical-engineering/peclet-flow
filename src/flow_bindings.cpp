@@ -237,6 +237,18 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "static scene and on the collocated grid.")
       .def_prop_ro("advection_wall_velocity", [](D& diag) { return diag.s->advectionWallVelocity(); },
                    "Whether the wall-velocity advection inputs are in force.")
+      .def("set_uf_advection", [](D& diag, bool on) { return diag.s->setUfAdvection(on); }, nb::arg("on"),
+           "Advect the COLLOCATED momentum with the projected, divergence-free MAC face field "
+           "uf/vf/wf of the last projection instead of the un-projected cell->face average "
+           "0.5*(u_i+u_j). DEFAULT True -- the shipped scheme: doc/flow_colocated_plan.md "
+           "step 3, the Almgren-Bell-Colella prescription (the field the projection just made "
+           "solenoidal IS the conservative advective flux), and what the FOU operator's "
+           "conservative row-sum identity needs. False is the ablation that restores the phase-2 "
+           "average (measurement only; see doc/uf_advection.md). Inert on the staggered grid (the "
+           "stored velocity already IS the projected face velocity) and before the first "
+           "projection or set_velocity has built a face field.")
+      .def_prop_ro("uf_advection", [](D& diag) { return diag.s->ufAdvection(); },
+                   "Whether the projected face field is the collocated advecting velocity.")
       .def(
           "set_comm_avoiding",
           [](D& diag, const std::string& mode) {

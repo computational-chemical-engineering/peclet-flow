@@ -209,23 +209,19 @@ double Solver<Grid>::maxOpenDivergenceInternal() {
     // staggered diagnostic, whose fillVelGhosts overwrites the mass-conserving outflow
     // correction): the operator zeroes the alpha-divergence, but the raw beta-divergence at the
     // open-boundary corner is otherwise spurious.
-    if (hasOutflow_) {
-      B3 e{e_.x, e_.y, e_.z};
-      CCField fa[3] = {uf_, vf_, wf_};
-      for (int a = 0; a < 3; ++a)
-        if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
-          bcNeumannGhost(fa[a], e, G, a, 1);
-    }
+    // ...through `openFaceView`, the field `buildOpenFaceField` already prepared for exactly
+    // this -- the advection reads the same one. This diagnostic used to apply the re-imposition
+    // to `uf_` IN PLACE, which is live state between steps (the next predictor's advecting
+    // velocity, and the flux the colour / scalar transport ride), so reading the diagnostic
+    // would have changed the next step's answer for a caller who only asked to look.
+    CCConst du = openFaceView(0), dv = openFaceView(1), dw = openFaceView(2);
     if (ghostProjection_ && gpNRows_ >= 0) {
       // Ghost mode: the closed point divergence of the projected face field (same kernel pair
       // as the RHS) — the mode's true residual.
-      divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(oxb_), CCConst(oyb_),
-                 CCConst(ozb_), div_, e_, G);
-      gpDivergDelta(div_, CCConst(uf_), CCConst(vf_), CCConst(wf_), gpOv_, gpNRows_,
-                    C3{nx_, ny_, nz_}, e_, G, distributed_);
+      divergOpen(du, dv, dw, CCConst(oxb_), CCConst(oyb_), CCConst(ozb_), div_, e_, G);
+      gpDivergDelta(div_, du, dv, dw, gpOv_, gpNRows_, C3{nx_, ny_, nz_}, e_, G, distributed_);
     } else
-      divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
-                 div_, e_, G);
+      divergOpen(du, dv, dw, CCConst(ox_), CCConst(oy_), CCConst(oz_), div_, e_, G);
   } else {
     for (int c = 0; c < 3; ++c)
       fillVelGhosts(c, 0);  // ghosts incl. outflow zero-gradient before the divergence

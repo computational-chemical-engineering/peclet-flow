@@ -830,6 +830,7 @@ void Solver<Grid>::seedFaceFieldFromCells() {
     else
       centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
     faceFieldValid_ = true;
+    buildOpenFaceField();  // keep the advecting/diagnostic view in step with the seeded field
   }
 }
 
@@ -1065,6 +1066,49 @@ CCConst Solver<Grid>::advVelView(int c) const {
 }
 
 template <class Grid>
+CCConst Solver<Grid>::advFaceView(int c) const {
+  return CCConst(c == 0 ? uf_ : (c == 1 ? vf_ : wf_));
+}
+
+template <class Grid>
+CCConst Solver<Grid>::openFaceView(int c) const {
+  return (hasOutflow_ && ufOpen_[c].extent(0) == n_) ? CCConst(ufOpen_[c]) : advFaceView(c);
+}
+
+template <class Grid>
+void Solver<Grid>::buildOpenFaceField() {
+  if constexpr (Grid::collocated) {
+    if (!hasOutflow_)
+      return;  // openFaceView then reads uf_ directly: nothing to replace
+    CCField src[3] = {uf_, vf_, wf_};
+    for (int a = 0; a < 3; ++a) {
+      if (ufOpen_[a].extent(0) != n_)
+        ufOpen_[a] = CCField("peclet::flow::ufOpen", n_);
+      Kokkos::deep_copy(ufOpen_[a], src[a]);
+    }
+    B3 e{e_.x, e_.y, e_.z};
+    for (int a = 0; a < 3; ++a)
+      if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
+        bcNeumannGhost(ufOpen_[a], e, G, a, 1);
+  }
+}
+
+template <class Grid>
+bool Solver<Grid>::ufAdvVelocity() const {
+  return Grid::collocated && ufAdvect_ && faceFieldValid_;
+}
+
+template <class Grid>
+void Solver<Grid>::setUfAdvection(bool on) {
+  ufAdvect_ = on;
+}
+
+template <class Grid>
+bool Solver<Grid>::ufAdvection() const {
+  return ufAdvect_;
+}
+
+template <class Grid>
 bool Solver<Grid>::ensureAdvStash(int c, bool adv) {
   const bool want = !Grid::collocated && hasScene_ && adv;
   if (want && advRhs_[c].extent(0) != n_)
@@ -1084,7 +1128,13 @@ void Solver<Grid>::buildAdvStencil(int c) {
   CCExec space;
   FV AC = C[c].AC, AW = C[c].AW, AE = C[c].AE, AS = C[c].AS, AN = C[c].AN, AB = C[c].AB,
      AT = C[c].AT;
-  CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2);  // A0: wall-aware inputs
+  // A0: wall-aware inputs (staggered).  COLLOCATED: the projected divergence-free face field --
+  // the implicit FOU operator MUST see the same advecting velocity as the explicit deferred
+  // (SOU - FOU) correction in buildRhs* or the FOU stops cancelling at steady state
+  // (ufAdvVelocity()).
+  const bool ufa = ufAdvVelocity();
+  CCConst U = ufa ? openFaceView(0) : advVelView(0), V = ufa ? openFaceView(1) : advVelView(1),
+          W = ufa ? openFaceView(2) : advVelView(2);
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "advstencil", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
@@ -1093,7 +1143,7 @@ void Solver<Grid>::buildAdvStencil(int c) {
         double cC = AC(i), cxm = AW(i), cxp = AE(i), cym = AS(i), cyp = AN(i), czm = AB(i),
                czp = AT(i);
         sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y};
-        Grid::fou_operator(c, x, y, z, Ua, Va, Wa, fouw, cC, cxm, cxp, cym, cyp, czm, czp);
+        Grid::fou_operator(c, x, y, z, Ua, Va, Wa, fouw, cC, cxm, cxp, cym, cyp, czm, czp, ufa);
         AC(i) = (MReal)cC;
         AW(i) = (MReal)cxm;
         AE(i) = (MReal)cxp;
@@ -1127,7 +1177,13 @@ void Solver<Grid>::buildAdvStencilVar(int c) {
   CCExec space;
   FV AC = C[c].AC, AW = C[c].AW, AE = C[c].AE, AS = C[c].AS, AN = C[c].AN, AB = C[c].AB,
      AT = C[c].AT;
-  CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2);  // A0: wall-aware inputs
+  // A0: wall-aware inputs (staggered).  COLLOCATED: the projected divergence-free face field --
+  // the implicit FOU operator MUST see the same advecting velocity as the explicit deferred
+  // (SOU - FOU) correction in buildRhs* or the FOU stops cancelling at steady state
+  // (ufAdvVelocity()).
+  const bool ufa = ufAdvVelocity();
+  CCConst U = ufa ? openFaceView(0) : advVelView(0), V = ufa ? openFaceView(1) : advVelView(1),
+          W = ufa ? openFaceView(2) : advVelView(2);
   const bool vr = effVarRho();
   const double rhoC = rho_;
   CCConst rf = vr ? CCConst(effRhoField()) : CCConst();
@@ -1141,7 +1197,7 @@ void Solver<Grid>::buildAdvStencilVar(int c) {
                czp = AT(i);
         sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y};
         const double fouw = vr ? 0.5 * (rf(i) + rf(i - sc)) : rhoC;
-        Grid::fou_operator(c, x, y, z, Ua, Va, Wa, fouw, cC, cxm, cxp, cym, cyp, czm, czp);
+        Grid::fou_operator(c, x, y, z, Ua, Va, Wa, fouw, cC, cxm, cxp, cym, cyp, czm, czp, ufa);
         AC(i) = (MReal)cC;
         AW(i) = (MReal)cxm;
         AE(i) = (MReal)cxp;

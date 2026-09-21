@@ -40,53 +40,65 @@ struct Staggered {
            : c == 1 ? Off3{0.0f, -0.5f, 0.0f}
                     : Off3{0.0f, 0.0f, -0.5f};
   }
+  // `uf` (the projected-face-field advecting velocity, see Colocated below) is meaningless here:
+  // the stored staggered velocity IS the face velocity, and after the projection it IS the
+  // divergence-free one. Accepted and ignored so the call sites stay grid-agnostic.
   template <class A>
-  KOKKOS_INLINE_FUNCTION static double advect(int c, int x, int y, int z, A U, A V, A W, A F) {
+  KOKKOS_INLINE_FUNCTION static double advect(int c, int x, int y, int z, A U, A V, A W, A F,
+                                              bool /*uf*/) {
     return sadv::advect(c, x, y, z, U, V, W, F);
   }
   template <class A>
-  KOKKOS_INLINE_FUNCTION static double advect_sou(int c, int x, int y, int z, A U, A V, A W, A F) {
+  KOKKOS_INLINE_FUNCTION static double advect_sou(int c, int x, int y, int z, A U, A V, A W, A F,
+                                                  bool /*uf*/) {
     return sadv::advect_sou(c, x, y, z, U, V, W, F);
   }
   template <class A>
-  KOKKOS_INLINE_FUNCTION static double advect_fou(int c, int x, int y, int z, A U, A V, A W, A F) {
+  KOKKOS_INLINE_FUNCTION static double advect_fou(int c, int x, int y, int z, A U, A V, A W, A F,
+                                                  bool /*uf*/) {
     return sadv::advect_fou(c, x, y, z, U, V, W, F);
   }
   template <class A>
   KOKKOS_INLINE_FUNCTION static void fou_operator(int c, int x, int y, int z, A U, A V, A W,
                                                   double dt, double& cC, double& cxm, double& cxp,
                                                   double& cym, double& cyp, double& czm,
-                                                  double& czp) {
+                                                  double& czp, bool /*uf*/) {
     sadv::fou_operator(c, x, y, z, U, V, W, dt, cC, cxm, cxp, cym, cyp, czm, czp);
   }
 };
 
 // Collocated (cell-centered) grid: all three components live at the cell center (offset 0),
-// advected on the cell control volume with cell->face-averaged advecting velocities (cadv). The
-// pressure coupling (approximate/MAC projection) is added in a later phase; this policy carries the
-// predictor pieces.
+// advected on the cell control volume (cadv) by the projected divergence-free MAC face field the
+// approximate (ABC) projection produced last step — the cell->face average only until that field
+// exists, or under the `set_uf_advection(False)` ablation.
 struct Colocated {
   static constexpr const char* name = "colocated";
   static constexpr bool collocated = true;  // cell-centered velocity; approximate (MAC) projection
   static constexpr Off3 offset(int /*c*/) { return Off3{0.0f, 0.0f, 0.0f}; }
+  // `uf == true`: U/V/W are the projected divergence-free MAC face field (low-face convention),
+  // read verbatim at the control volume's faces; `false`: they are the cell velocities and the
+  // face value is their average. See colocated_advection.hpp and Solver::ufAdvVelocity().
   template <class A>
-  KOKKOS_INLINE_FUNCTION static double advect(int c, int x, int y, int z, A U, A V, A W, A F) {
-    return cadv::advect(c, x, y, z, U, V, W, F);
+  KOKKOS_INLINE_FUNCTION static double advect(int c, int x, int y, int z, A U, A V, A W, A F,
+                                              bool uf) {
+    return cadv::advect(c, x, y, z, U, V, W, F, uf);
   }
   template <class A>
-  KOKKOS_INLINE_FUNCTION static double advect_sou(int c, int x, int y, int z, A U, A V, A W, A F) {
-    return cadv::advect_sou(c, x, y, z, U, V, W, F);
+  KOKKOS_INLINE_FUNCTION static double advect_sou(int c, int x, int y, int z, A U, A V, A W, A F,
+                                                  bool uf) {
+    return cadv::advect_sou(c, x, y, z, U, V, W, F, uf);
   }
   template <class A>
-  KOKKOS_INLINE_FUNCTION static double advect_fou(int c, int x, int y, int z, A U, A V, A W, A F) {
-    return cadv::advect_fou(c, x, y, z, U, V, W, F);
+  KOKKOS_INLINE_FUNCTION static double advect_fou(int c, int x, int y, int z, A U, A V, A W, A F,
+                                                  bool uf) {
+    return cadv::advect_fou(c, x, y, z, U, V, W, F, uf);
   }
   template <class A>
   KOKKOS_INLINE_FUNCTION static void fou_operator(int c, int x, int y, int z, A U, A V, A W,
                                                   double dt, double& cC, double& cxm, double& cxp,
                                                   double& cym, double& cyp, double& czm,
-                                                  double& czp) {
-    cadv::fou_operator(c, x, y, z, U, V, W, dt, cC, cxm, cxp, cym, cyp, czm, czp);
+                                                  double& czp, bool uf) {
+    cadv::fou_operator(c, x, y, z, U, V, W, dt, cC, cxm, cxp, cym, cyp, czm, czp, uf);
   }
 };
 

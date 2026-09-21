@@ -1,7 +1,8 @@
 // cfd-gpu — the assembled multi-rank COLLOCATED solver step (collocated plan phase 5c).
 //
-// The collocated counterpart of test_sdflow_mpi: solves creeping (Stokes) flow through a periodic
-// 2x2x2 sphere packing with Solver<Colocated>, two ways -- single-rank on the full grid, and
+// The collocated counterpart of test_sdflow_mpi: solves flow through a periodic
+// 2x2x2 sphere packing with Solver<Colocated> -- creeping (Stokes) under both aperture schemes and
+// then mode 9 with implicit advection -- two ways: single-rank on the full grid, and
 // distributed (each rank constructs the solver with its ORB block dims, calls initMpi, setSolid
 // with its LOCAL SDF block). The collocated approximate (MAC) projection runs multi-rank on exactly
 // the same transport-core halo machinery as the staggered solver: the cell-velocity halo feeds
@@ -48,12 +49,21 @@ static std::vector<double> packingSdf(double rfrac = 0.18) {
   return sdf;
 }
 
-static void configure(Colo& s, int faceInterp) {
+static void configure(Colo& s, int faceInterp, bool advect) {
   s.setRho(RHO);
   s.setMu(MU);
   s.setDt(DT);
   s.setBodyForce(F, 0, 0);
-  s.setAdvection(false);
+  // ADVECTING CONFIG: the advecting velocity is the PROJECTED face field uf_/vf_/wf_ of the
+  // previous projection (Solver::ufAdvVelocity), read at the control volume's faces -- INCLUDING
+  // the face on the block boundary, whose value comes from the halo exchange in
+  // projectCorrectVelocities. Nothing else in this suite tests that: the Stokes configs have no
+  // advecting velocity at all. So this config is the decomposition-invariance gate for the face
+  // field's ghosts. Implicit FOU (stable at DT=60) additionally puts the SAME velocity in the
+  // momentum OPERATOR, so an inconsistent ghost would show up in the matrix too.
+  s.setAdvection(advect);
+  if (advect)
+    s.setImplicitAdvection(true);
   s.setVelocityIterations(80);
   s.setPressureLevels(4);
   s.setPressurePcg(true, 200, 1e-9);
@@ -94,10 +104,17 @@ int main(int argc, char** argv) {
               gsdf[(std::size_t)(x + ox) + (std::size_t)(y + oy) * N +
                    (std::size_t)(z + oz) * N * N];
 
-    for (int mode : {0, 9}) {
+    // {face-interp mode, advection}: the two Stokes schemes, plus mode 9 (the production
+    // default) under advection.
+    const struct {
+      int mode;
+      bool advect;
+    } CONFIGS[] = {{0, false}, {9, false}, {9, true}};
+    for (const auto& cfg : CONFIGS) {
+      const int mode = cfg.mode;
       Colo sd(lnx, lny, lnz);
       sd.initMpi(N, N, N, MPI_COMM_WORLD);
-      configure(sd, mode);
+      configure(sd, mode, cfg.advect);
       sd.setSolid(lsdf, /*cutcell_pressure=*/true);
       for (int it = 0; it < STEPS; ++it)
         sd.step();
@@ -110,7 +127,7 @@ int main(int argc, char** argv) {
       double k_ref = 0.0;
       if (rank == 0) {
         Colo ref(N, N, N);
-        configure(ref, mode);
+        configure(ref, mode, cfg.advect);
         ref.setSolid(gsdf, true);
         for (int it = 0; it < STEPS; ++it)
           ref.step();
@@ -128,8 +145,9 @@ int main(int argc, char** argv) {
       const double tol =
           (size == 1) ? 1e-12 : 2e-5;  // np=1 bit-exact; np>1 the MG-PCG reduction-order floor
       if (rank == 0)
-        std::printf("  [mode %d] k_dist=%.8e  k_ref=%.8e  rel=%.2e  div=%.2e  (np=%d, tol %.0e)\n",
-                    mode, k_dist, k_ref, reld, div_dist, size, tol);
+        std::printf(
+            "  [mode %d%s] k_dist=%.8e  k_ref=%.8e  rel=%.2e  div=%.2e  (np=%d, tol %.0e)\n", mode,
+            cfg.advect ? " advect" : "", k_dist, k_ref, reld, div_dist, size, tol);
       if (reld > tol || !(div_dist < 1e-5))
         fail = 1;
     }

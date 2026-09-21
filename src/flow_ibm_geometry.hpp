@@ -74,6 +74,21 @@ void Solver<Grid>::buildVelocityOverlays(bool resetU) {
     if (resetU)
       Kokkos::deep_copy(C[c].u, 0.0);
   }
+  if constexpr (Grid::collocated)
+    if (resetU) {
+      // The collocated MAC face field is NOT a registry field and nothing above rebuilds it, so
+      // zeroing the cell velocity here (setSolid is the initial-geometry setup) would otherwise
+      // leave `uf_` holding the PREVIOUS geometry's projected field while `u` is 0 -- a stale
+      // advecting velocity for `cadv` (ufAdvVelocity()) and a stale flux for the colour /
+      // scalar transport that also ride it.  Drop it and say so: `faceFieldValid_ = false`
+      // sends momentum advection back to the cell->face average (of a zero field: the same
+      // zero) for one step, and makes `advect_vof`'s guard refuse instead of accepting a field
+      // that is only "solenoidal" because it is zero.
+      Kokkos::deep_copy(uf_, 0.0);
+      Kokkos::deep_copy(vf_, 0.0);
+      Kokkos::deep_copy(wf_, 0.0);
+      faceFieldValid_ = false;
+    }
 }
 
 template <class Grid>

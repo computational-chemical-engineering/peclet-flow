@@ -228,6 +228,18 @@ if(PECLET_FLOW_BUILD_TESTS)
     set_tests_properties(verify_${v} PROPERTIES ENVIRONMENT "${_flow_py_env}" LABELS verify
                          SKIP_RETURN_CODE 77)
   endforeach()
+  # The collocated OPEN BOUNDARY: stability + mass conservation + the developed profile on one
+  # coarse developing channel. Registered 2026-09-21 because nothing here covered that
+  # configuration -- every other collocated ctest is Stokes or periodic/walled -- and the
+  # advecting-velocity change (doc/uf_advection.md) took the channel and the BFS to NaN while all
+  # 161 ctests passed. The full-fidelity studies (scripts/verify_colocated_channel.py,
+  # verify_colocated_bfs.py) stay hand-run: ~20 min each is past what CI can carry.
+  add_test(NAME colocated_open_boundary
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_colocated_open_boundary.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(colocated_open_boundary PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # QUALITY_PLAN D3: `src/` carries no environment variable that can change a result (package E).
   add_test(NAME no_env_knobs
            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_no_env_knobs.py

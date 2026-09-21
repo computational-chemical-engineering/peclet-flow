@@ -75,7 +75,9 @@ Per step, after the cell-centered predictor `u*` (existing IBM implicit diffusio
    openness, fed the reconstructed face field.
 3. **Correct the faces**: `u_f = u_f* − grad_f(phi)` — the existing `projectCorrect`. The *face* field is
    now discretely divergence-free (the approximate-projection guarantee). These `u_f` become the
-   **advecting** velocities for the next step's advection.
+   **advecting** velocities for the next step's advection. *(Landed for the projection on
+   2026-06-22; the advecting-velocity half of this sentence landed only on 2026-09-21 — see
+   `uf_advection.md` for what it changed and what it measured.)*
 4. **Correct the centers**: `u_c −= grad_c(phi)`, with the central-difference cell gradient
    `grad_c phi|_x = ½(phi(i+1) − phi(i−1))` (= the average of the two adjacent face gradients).
 5. **Rotational pressure update**: `P += (rho/dt)·phi − mu·div(u_f*)` — unchanged

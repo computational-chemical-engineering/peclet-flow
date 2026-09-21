@@ -654,6 +654,22 @@ class Solver {
   bool advectionWallVelocity() const;
 
 
+  /// Advect the collocated momentum with the PROJECTED, divergence-free MAC face field
+  /// `uf_/vf_/wf_` (DEFAULT true) rather than the un-projected cell->face average
+  /// 1/2(u_i+u_j).  `doc/uf_advection.md`; `doc/flow_colocated_plan.md` §1 step 3 ("these u_f
+  /// become the advecting velocities for the next step's advection") and the
+  /// Almgren–Bell–Colella prescription: the field the projection just made solenoidal IS the
+  /// conservative advective flux, and it is the one the FOU operator's conservative row-sum
+  /// identity needs (../docs/decisions/flow.md:977).  `false` is the developer-tier ablation that
+  /// restores the phase-2 average.  A no-op on the staggered grid (the stored velocity already IS
+  /// the projected face velocity) and before the first projection/`set_velocity` has built a face
+  /// field (`faceFieldValid_`), where the average is the only field there is.
+  void setUfAdvection(bool on);
+
+
+  bool ufAdvection() const;
+
+
   /// Communication-avoiding red-black smoothing: kCaMomentum | kCaMg. DEFAULT both.
   /// Must be set BEFORE init_mpi (the momentum half is latched with the halo topology).
   void setCommAvoiding(int mask);
@@ -1997,6 +2013,49 @@ class Solver {
   /// The velocity view the advection operators must read for component c: the wall-corrected
   /// scratch while an instance is moving, the live field (byte-identical) otherwise.
   CCConst advVelView(int c) const;
+
+
+  /// Component c of the collocated MAC face field (`uf_`/`vf_`/`wf_`), flow's low-face
+  /// convention: entry i is the velocity at the -axis face of cell i.  Empty on the staggered
+  /// grid, where nothing calls it.
+  CCConst advFaceView(int c) const;
+
+
+  /// Component c of the face field AS THE ADVECTION AND THE DIVERGENCE DIAGNOSTIC MUST READ IT:
+  /// `advFaceView(c)` everywhere except an OPEN (outflow) domain face, where the zero-gradient
+  /// extrapolation of the interior face replaces the projection's mass-balance closure
+  /// (`buildOpenFaceField`).  Identical to `advFaceView(c)` when there is no outflow.
+  CCConst openFaceView(int c) const;
+
+
+  /// Build `ufOpen_` = the face field with each open (outflow) domain face overwritten by its
+  /// zero-gradient extrapolation.  A no-op on the staggered grid and without an outflow.
+  ///
+  /// WHY the advecting velocity cannot be the raw projected face there. At an outflow
+  /// `bcCorrectOutflow` writes onto that ONE face the correction that makes the discrete mass
+  /// balance close (the operator's Dirichlet-p row owns it), so its value is set by GLOBAL
+  /// continuity, not by the fluid next to it. Feeding that into the upwind advective flux of the
+  /// last cell -- and, on the domain-BC path, into the implicit-FOU operator's diagonal there --
+  /// closes a positive feedback loop: measured on the collocated developing channel (H=16,
+  /// L=112, Re=100, dt=0.5), the outflow column gains mass from step 2 (mean u 1.009 against an
+  /// inflow of 0.998), max|u| reaches 4.5e+02 by step 50 and the pressure PCG loses its
+  /// preconditioner at step 69. The zero-gradient value is what momentum advection at an open
+  /// boundary has always used (it is what the cell->face average of the outflow-filled cell
+  /// ghosts came to) and it is local, so the loop does not close. `verify_colocated_channel` and
+  /// `verify_colocated_bfs` are the gates.
+  ///
+  /// The COLOUR and SCALAR transport keep reading the raw `uf_`: their flux at the outlet SHOULD
+  /// be the mass-conserving one, which is the whole point of `bcCorrectOutflow` for them. That is
+  /// why this is a separate field and not an in-place fix-up.
+  void buildOpenFaceField();
+
+
+  /// Are the advection operators reading the projected face field this step?  Collocated grid,
+  /// `setUfAdvection` on, and a face field actually built.  The SAME answer must reach the
+  /// implicit-FOU operator (`fou_operator`) and the explicit high-order/FOU terms
+  /// (`advect_sou`/`advect`/`advect_fou`) or the deferred correction stops cancelling at steady
+  /// state, so every call site reads this one predicate.
+  bool ufAdvVelocity() const;
 
 
 
@@ -4348,6 +4407,10 @@ class Solver {
   int pressAgglomMode_ = -1;
   long lastPressureIters_ = 0;
   bool lastPressureFailed_ = false;  // ISSUES sweep item 6
+  // The collocated face field with every OPEN (outflow) domain face replaced by its
+  // zero-gradient extrapolation -- see buildOpenFaceField(). Allocated on first use and only
+  // when there IS an outflow; `openFaceView` falls through to uf_/vf_/wf_ otherwise.
+  CCField ufOpen_[3];
   // ISSUES sweep item 5: has the collocated MAC face field ever been built (by a projection
   // or by `seedFaceFieldFromCells`)? Meaningless on the staggered grid.
   bool faceFieldValid_ = false;
@@ -4408,6 +4471,10 @@ class Solver {
   // A0: fill the advection inputs' masked (solid) rows with the WALL velocity instead of zeros.
   // ON by default; setAdvectionWallVelocity(false) is the pre-A0 ablation. See advWallInputs.
   bool advWallVel_ = true;
+  // Advect the collocated momentum with the projected divergence-free face field (the shipped
+  // scheme) instead of the un-projected cell->face average. ON by default;
+  // setUfAdvection(false) is the developer-tier ablation. See ufAdvVelocity / doc/uf_advection.md.
+  bool ufAdvect_ = true;
   // WO-R2 item 1 — the variable-density coefficient on the operator's Dirichlet (outflow)
   // domain-face rows. ON by default; see setOutflowOperatorCoefficient.
   bool outflowOpCoeff_ = true;

@@ -133,6 +133,16 @@ void Solver<Grid>::redistribute(const peclet::core::decomp::BlockDecomposer<3>& 
     fillGhosts(fields_.at(names[k]).data);
   for (auto& sc : scalars_)
     applyScalarBc(sc);  // a scalar's own domain BCs override the halo/periodic base
+  // 7. RE-SEED THE COLLOCATED FACE FIELD. `uf_/vf_/wf_` are block scratch, not registry fields:
+  //    step 3's `allocateBlock` handed us fresh ZERO buffers and nothing above migrates them, so
+  //    the projected face field of the old partition is simply gone. Everything that rides it --
+  //    momentum advection (ufAdvVelocity()), the colour transport, the scalars -- would read
+  //    zeros on the step after a rebalance, and `advect_vof`'s divergence guard would wave them
+  //    through (a zero field is perfectly solenoidal). Seeding from the migrated cell velocity
+  //    with the same `centerToFace` map `project()` uses restores a consistent (not yet
+  //    divergence-free) field, exactly as `set_state` does; the next `project()` makes it
+  //    solenoidal again. A no-op on the staggered grid.
+  seedFaceFieldFromCells();
 }
 
 template <class Grid>

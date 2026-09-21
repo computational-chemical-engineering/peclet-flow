@@ -157,6 +157,15 @@ recorded decision, not a judgement call in the moment.
 - **The ORB must never split the wall-normal axis** in wall-bounded flow.
 - **Geometric const-coeff operators + masking are the validated defaults**; Galerkin/CG is opt-in.
 - **Momentum advection uses the actual wall velocity field**, not `maskVelocity`'s solid zeros.
+- **COLLOCATED momentum advection uses the PROJECTED, divergence-free face field** `uf_/vf_/wf_`
+  of the previous step's projection — never the un-projected cell→face average ½(u_i+u_j) (the
+  phase-2 form, kept only as the ablation `diagnostics.set_uf_advection(False)`). It is
+  `doc/flow_colocated_plan.md` §1 step 3, the Almgren–Bell–Colella prescription, and what the FOU
+  operator's conservative row sum needs; it closed the last uniform-grid difference against
+  `peclet.amr` (2.5e-4 → 1.9e-11 over 20 NS steps). The implicit FOU operator and the explicit
+  (SOU−FOU) deferred correction MUST read the same field — one predicate, `ufAdvVelocity()`.
+  Landed 2026-09-21; evidence and limits in `doc/uf_advection.md`. Staggered is unaffected (its
+  stored velocity already IS the projected face velocity) and proved bit-identical.
 - **Operator storage is double by default** (`PECLET_FLOW_OPERATOR_DOUBLE=ON` since 2026-09-11).
   Float storage silently breaks A·1=0 at high MG contrast — it fails without an error, so it will
   not announce itself; that is why it is no longer the default. Opting out costs correctness on

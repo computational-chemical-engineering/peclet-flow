@@ -163,8 +163,13 @@ void Solver<Grid>::step() {
     // components).
     if (useVelocityMg_ && advect_ &&
         ((implicitFou_ && !hasBc_) || (mixedVelocityMg() && implicitAdv())))
-      vmg_.restrictAdvVelocities(advVelView(0), advVelView(1),
-                                 advVelView(2));  // A0: same inputs as the fine operator
+      vmg_.restrictAdvVelocities(  // A0: same inputs as the fine operator -- including the
+                                   // collocated projected face field, so the coarse FOU
+                                   // preconditioner stays consistent with the fine one
+                                   // (levels >= 1 only; level 0 IS buildAdvStencil's operator)
+          ufAdvVelocity() ? openFaceView(0) : advVelView(0),
+          ufAdvVelocity() ? openFaceView(1) : advVelView(1),
+          ufAdvVelocity() ? openFaceView(2) : advVelView(2));
     const double tp1 = phaseTick();
     tPredictor_ += tp1 - tp0;
     for (int c = 0; c < 3; ++c)
@@ -326,8 +331,13 @@ void Solver<Grid>::buildRhs(int c) {
   // A0: U/V/W (the advecting velocities) and aP (the advected field) come from the wall-aware
   // advection inputs -- identical to C[*].u unless an instance is moving. `uu` stays the live
   // field: its only other consumer is the porous advection-form compensation.
-  CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2), aP = advVelView(c),
-          uu = CCConst(C[c].u), un = CCConst(old_[c]);
+  // COLLOCATED (`ufa`): the advecting velocities are instead the PROJECTED divergence-free MAC
+  // face field of the last projection (the advected field aP stays the CELL field) -- see
+  // ufAdvVelocity(). advWallInputs() is staggered-only, so the two never overlap.
+  const bool ufa = ufAdvVelocity();
+  CCConst U = ufa ? openFaceView(0) : advVelView(0), V = ufa ? openFaceView(1) : advVelView(1),
+          W = ufa ? openFaceView(2) : advVelView(2), aP = advVelView(c), uu = CCConst(C[c].u),
+          un = CCConst(old_[c]);
   const long strd = (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y;
   // Pure implicit FOU (no deferred correction): 1st-order upwind carried entirely by the
   // operator, no explicit high-order term in the RHS -- maximally dissipative/stable (diffuses
@@ -405,10 +415,10 @@ void Solver<Grid>::buildRhs(int c) {
         double aK = 0.0, aF = 0.0;
         if (adv) {
           sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{aP, e.x, e.y};
-          aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa)
-                          : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa);
+          aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa, ufa)
+                          : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa, ufa);
           if (ifou)
-            aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa);
+            aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa, ufa);
         }
         if (sa)
           ar(i) = rho * (aF - aK);
@@ -445,8 +455,13 @@ void Solver<Grid>::buildRhsForced(int c) {
   // A0: U/V/W (the advecting velocities) and aP (the advected field) come from the wall-aware
   // advection inputs -- identical to C[*].u unless an instance is moving. `uu` stays the live
   // field: its only other consumer is the porous advection-form compensation.
-  CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2), aP = advVelView(c),
-          uu = CCConst(C[c].u), un = CCConst(old_[c]);
+  // COLLOCATED (`ufa`): the advecting velocities are instead the PROJECTED divergence-free MAC
+  // face field of the last projection (the advected field aP stays the CELL field) -- see
+  // ufAdvVelocity(). advWallInputs() is staggered-only, so the two never overlap.
+  const bool ufa = ufAdvVelocity();
+  CCConst U = ufa ? openFaceView(0) : advVelView(0), V = ufa ? openFaceView(1) : advVelView(1),
+          W = ufa ? openFaceView(2) : advVelView(2), aP = advVelView(c), uu = CCConst(C[c].u),
+          un = CCConst(old_[c]);
   const long strd = (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y;
   const bool pureFou = implicitAdv() && !deferredCorr_;
   const bool incr = cutcellPressure_ && incremental_, adv = advect_ && !pureFou,
@@ -480,10 +495,10 @@ void Solver<Grid>::buildRhsForced(int c) {
         double aK = 0.0, aF = 0.0;
         if (adv) {
           sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{aP, e.x, e.y};
-          aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa)
-                          : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa);
+          aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa, ufa)
+                          : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa, ufa);
           if (ifou)
-            aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa);
+            aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa, ufa);
         }
         if (sa)
           ar(i) = rho * (aF - aK);
@@ -509,8 +524,13 @@ void Solver<Grid>::buildRhsVar(int c) {
   // A0: U/V/W (the advecting velocities) and aP (the advected field) come from the wall-aware
   // advection inputs -- identical to C[*].u unless an instance is moving. `uu` stays the live
   // field: its only other consumer is the porous advection-form compensation.
-  CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2), aP = advVelView(c),
-          uu = CCConst(C[c].u), un = CCConst(old_[c]);
+  // COLLOCATED (`ufa`): the advecting velocities are instead the PROJECTED divergence-free MAC
+  // face field of the last projection (the advected field aP stays the CELL field) -- see
+  // ufAdvVelocity(). advWallInputs() is staggered-only, so the two never overlap.
+  const bool ufa = ufAdvVelocity();
+  CCConst U = ufa ? openFaceView(0) : advVelView(0), V = ufa ? openFaceView(1) : advVelView(1),
+          W = ufa ? openFaceView(2) : advVelView(2), aP = advVelView(c), uu = CCConst(C[c].u),
+          un = CCConst(old_[c]);
   const long strd = strideOf(c);
   const bool pureFou = implicitAdv() && !deferredCorr_;
   const bool incr = cutcellPressure_ && incremental_, adv = advect_ && !pureFou,
@@ -531,10 +551,10 @@ void Solver<Grid>::buildRhsVar(int c) {
         double aK = 0.0, aF = 0.0;
         if (adv) {
           sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{aP, e.x, e.y};
-          aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa)
-                          : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa);
+          aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa, ufa)
+                          : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa, ufa);
           if (ifou)
-            aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa);
+            aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa, ufa);
         }
         const double gp = !incr              ? 0.0
                           : Grid::collocated ? wc * (0.5 * (P((long)i + strd) - P((long)i - strd)))
@@ -581,8 +601,9 @@ void Solver<Grid>::buildRhsColoFF(int c) {
   const bool haveRho = effVarRho();
   // Unread placeholder when the density is constant (a Kokkos View must still be a live handle).
   CCConst rf = CCConst(haveRho ? effRhoField() : C[c].rscale);
-  CCConst U = advVelView(0), V = advVelView(1), W = advVelView(2), aP = advVelView(c),
-          un = CCConst(old_[c]);
+  const bool ufa = ufAdvVelocity();
+  CCConst U = ufa ? openFaceView(0) : advVelView(0), V = ufa ? openFaceView(1) : advVelView(1),
+          W = ufa ? openFaceView(2) : advVelView(2), aP = advVelView(c), un = CCConst(old_[c]);
   const bool pureFou = implicitAdv() && !deferredCorr_;
   const bool adv = advect_ && !pureFou, bc = hasBc_ && !bcStencilPath();
   const bool ifou = implicitAdv() && deferredCorr_;
@@ -597,10 +618,10 @@ void Solver<Grid>::buildRhsColoFF(int c) {
         double aK = 0.0, aF = 0.0;
         if (adv) {
           sadv::ViewAcc Ua{U, e.x, e.y}, Va{V, e.x, e.y}, Wa{W, e.x, e.y}, Fa{aP, e.x, e.y};
-          aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa)
-                          : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa);
+          aK = (sch == 0) ? Grid::advect_sou(c, x, y, z, Ua, Va, Wa, Fa, ufa)
+                          : Grid::advect(c, x, y, z, Ua, Va, Wa, Fa, ufa);
           if (ifou)
-            aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa);
+            aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa, ufa);
         }
         bb(i) = rs(i) * (dg * un(i) - rhoC * aK + rhoC * aF) + (bc ? brhs(i) : -inh(i));
       });
@@ -1055,6 +1076,10 @@ void Solver<Grid>::projectCorrectVelocities() {
             bcCorrectOutflow(fa[a], phi_, e, G, a, u_.w[a]);
         }
     }
+    // The face field is now final for this step. Derive the OPEN-boundary view the next
+    // predictor's advection and the divergence diagnostic read (buildOpenFaceField explains why
+    // the outflow face cannot be the mass-balance closure there); a no-op without an outflow.
+    buildOpenFaceField();
     if (colocatedFaceForce()) {
       // rung V8 (WO-T): the cell sees the AVERAGE of what its two faces saw — the force
       // acceleration minus the projection's own rho-weighted face correction — through the same
