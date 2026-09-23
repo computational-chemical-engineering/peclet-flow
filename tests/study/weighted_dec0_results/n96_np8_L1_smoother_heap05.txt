@@ -1,0 +1,30 @@
+[mg] initMpi 96x96x96 np=8 -> 1 levels (requested 1)  [telescope ON]
+[mg]  L0 global   96x  96x  96  ranks     8  rank0 block   48x  48x  48  ratio(1,1,1)
+[probe] n=96^3 np=8 levels=1 graph_amg=False bottom=smoother telescope=True
+[probe] BEFORE (equal-weight aligned ORB): per-rank blocks (origin / size / odd axes)
+[probe]   rank 0: origin [0, 0, 0]  size [48, 48, 48]  odd-axes -  weight 110592
+[probe]   rank 1: origin [0, 0, 48]  size [48, 48, 48]  odd-axes -  weight 110592
+[probe]   rank 2: origin [0, 48, 0]  size [48, 48, 48]  odd-axes -  weight 110592
+[probe]   rank 3: origin [0, 48, 48]  size [48, 48, 48]  odd-axes -  weight 110592
+[probe]   rank 4: origin [48, 0, 0]  size [48, 48, 48]  odd-axes -  weight 110592
+[probe]   rank 5: origin [48, 0, 48]  size [48, 48, 48]  odd-axes -  weight 110592
+[probe]   rank 6: origin [48, 48, 0]  size [48, 48, 48]  odd-axes -  weight 110592
+[probe]   rank 7: origin [48, 48, 48]  size [48, 48, 48]  odd-axes -  weight 110592
+[probe]   weight imbalance max/mean = 1.000   cell imbalance max/mean = 1.000
+[probe] ---- rebalance_by_weights ----
+[mg] initMpi 96x96x96 np=8 -> 1 levels (requested 1)  [telescope ON]
+[mg]  L0 global   96x  96x  96  ranks     8  rank0 block   45x  45x  27  ratio(1,1,1)
+[probe] AFTER (weighted ORB): per-rank blocks (origin / size / odd axes)
+[probe]   rank 0: origin [0, 0, 0]  size [45, 45, 27]  odd-axes xyz  weight 273564
+[probe]   rank 1: origin [0, 0, 27]  size [45, 45, 69]  odd-axes xyz  weight 265089
+[probe]   rank 2: origin [0, 45, 0]  size [45, 51, 23]  odd-axes xyz  weight 264187
+[probe]   rank 3: origin [0, 45, 23]  size [45, 51, 73]  odd-axes xyz  weight 269463
+[probe]   rank 4: origin [45, 0, 0]  size [51, 44, 23]  odd-axes xz  weight 258258
+[probe]   rank 5: origin [45, 0, 23]  size [51, 44, 73]  odd-axes xz  weight 264574
+[probe]   rank 6: origin [45, 44, 0]  size [51, 52, 20]  odd-axes x  weight 264430
+[probe]   rank 7: origin [45, 44, 20]  size [51, 52, 76]  odd-axes x  weight 263479
+[probe]   weight imbalance max/mean = 1.031   cell imbalance max/mean = 1.822
+[probe] rebalance took 0.21 s
+[probe] BEFORE pressure iters/step [29, 29, 29]  step s [0.276, 0.276, 0.274]  median 0.276  projection(max rank) 0.211  momentum(max rank) 0.063
+[probe] AFTER  pressure iters/step [29, 29, 29]  step s [0.411, 0.406, 0.412]  median 0.411  projection(max rank) 0.306  momentum(max rank) 0.099
+[probe] SUMMARY n=96 np=8 levels=1 graph_amg=False bottom=smoother tilt=0.5 seed=7 iters 29.0 -> 29.0 step 0.276 -> 0.411 s projection 0.211 -> 0.306 s momentum 0.063 -> 0.099 s

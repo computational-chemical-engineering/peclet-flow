@@ -1,0 +1,22 @@
+[mg] initMpi 96x96x96 np=4 -> 1 levels (requested 1)  [telescope ON]
+[mg]  L0 global   96x  96x  96  ranks     4  rank0 block   48x  48x  96  ratio(1,1,1)
+[probe] n=96^3 np=4 levels=1 graph_amg=False telescope=True
+[probe] BEFORE (equal-weight aligned ORB): per-rank blocks (origin / size / odd axes)
+[probe]   rank 0: origin [0, 0, 0]  size [48, 48, 96]  odd-axes -  weight 221184
+[probe]   rank 1: origin [0, 48, 0]  size [48, 48, 96]  odd-axes -  weight 221184
+[probe]   rank 2: origin [48, 0, 0]  size [48, 48, 96]  odd-axes -  weight 221184
+[probe]   rank 3: origin [48, 48, 0]  size [48, 48, 96]  odd-axes -  weight 221184
+[probe]   weight imbalance max/mean = 1.000   cell imbalance max/mean = 1.000
+[probe] ---- rebalance_by_weights ----
+[mg] initMpi 96x96x96 np=4 -> 1 levels (requested 1)  [telescope ON]
+[mg]  L0 global   96x  96x  96  ranks     4  rank0 block   45x  45x  96  ratio(1,1,1)
+[probe] AFTER (weighted ORB): per-rank blocks (origin / size / odd axes)
+[probe]   rank 0: origin [0, 0, 0]  size [45, 45, 96]  odd-axes xy  weight 538653
+[probe]   rank 1: origin [0, 45, 0]  size [45, 51, 96]  odd-axes xy  weight 533650
+[probe]   rank 2: origin [45, 0, 0]  size [51, 44, 96]  odd-axes x  weight 522832
+[probe]   rank 3: origin [45, 44, 0]  size [51, 52, 96]  odd-axes x  weight 527909
+[probe]   weight imbalance max/mean = 1.015   cell imbalance max/mean = 1.151
+[probe] rebalance took 0.17 s
+[probe] BEFORE pressure iters/step [2, 2, 2, 2, 2]  step s [8.49, 8.557, 8.384, 8.587, 8.404]  median 8.490  projection(max rank) 8.319  momentum(max rank) 0.167
+[probe] AFTER  pressure iters/step [2, 2, 2, 2, 2]  step s [11.651, 8.355, 8.168, 8.153, 8.165]  median 8.168  projection(max rank) 7.989  momentum(max rank) 0.175
+[probe] SUMMARY n=96 np=4 levels=1 graph_amg=False tilt=0.5 seed=7 iters 2.0 -> 2.0 step 8.490 -> 8.168 s projection 8.319 -> 7.989 s momentum 0.167 -> 0.175 s

@@ -1,0 +1,28 @@
+[mg] initMpi 96x96x96 np=4 -> 4 levels (requested 4)  [telescope ON]
+[mg]  L0 global   96x  96x  96  ranks     4  rank0 block   48x  48x  96  ratio(2,2,2)
+[mg]  L1 global   48x  48x  48  ranks     4  rank0 block   24x  24x  48  ratio(2,2,2)
+[mg]  L2 global   24x  24x  24  ranks     4  rank0 block   12x  12x  24  ratio(2,2,2)
+[mg]  L3 global   12x  12x  12  ranks     4  rank0 block    6x   6x  12  ratio(1,1,1)
+[probe] n=96^3 np=4 levels=4 graph_amg=True telescope=True
+[probe] BEFORE (equal-weight aligned ORB): per-rank blocks (origin / size / odd axes)
+[probe]   rank 0: origin [0, 0, 0]  size [48, 48, 96]  odd-axes -  weight 221184
+[probe]   rank 1: origin [0, 48, 0]  size [48, 48, 96]  odd-axes -  weight 221184
+[probe]   rank 2: origin [48, 0, 0]  size [48, 48, 96]  odd-axes -  weight 221184
+[probe]   rank 3: origin [48, 48, 0]  size [48, 48, 96]  odd-axes -  weight 221184
+[probe]   weight imbalance max/mean = 1.000   cell imbalance max/mean = 1.000
+[probe] ---- rebalance_by_weights ----
+[mg] initMpi 96x96x96 np=4 -> 4 levels (requested 4)  [telescope ON]
+[mg]  L0 global   96x  96x  96  ranks     4  rank0 block   45x  45x  96  ratio(2,2,2)  -> TELESCOPE
+[mg]  L1 global   48x  48x  48  ranks     1  rank0 block   48x  48x  48  ratio(2,2,2)
+[mg]  L2 global   24x  24x  24  ranks     1  rank0 block   24x  24x  24  ratio(2,2,2)
+[mg]  L3 global   12x  12x  12  ranks     1  rank0 block   12x  12x  12  ratio(1,1,1)
+[probe] AFTER (weighted ORB): per-rank blocks (origin / size / odd axes)
+[probe]   rank 0: origin [0, 0, 0]  size [45, 45, 96]  odd-axes xy  weight 538653
+[probe]   rank 1: origin [0, 45, 0]  size [45, 51, 96]  odd-axes xy  weight 533650
+[probe]   rank 2: origin [45, 0, 0]  size [51, 44, 96]  odd-axes x  weight 522832
+[probe]   rank 3: origin [45, 44, 0]  size [51, 52, 96]  odd-axes x  weight 527909
+[probe]   weight imbalance max/mean = 1.015   cell imbalance max/mean = 1.151
+[probe] rebalance took 0.25 s
+[probe] BEFORE pressure iters/step [8, 8, 8, 8, 8]  step s [0.34, 0.342, 0.34, 0.339, 0.34]  median 0.340  projection(max rank) 0.170  momentum(max rank) 0.166
+[probe] AFTER  pressure iters/step [8, 8, 8, 8, 8]  step s [0.43, 0.422, 0.422, 0.421, 0.421]  median 0.422  projection(max rank) 0.246  momentum(max rank) 0.173
+[probe] SUMMARY n=96 np=4 levels=4 graph_amg=True tilt=0.5 seed=7 iters 8.0 -> 8.0 step 0.340 -> 0.422 s projection 0.170 -> 0.246 s momentum 0.166 -> 0.173 s
