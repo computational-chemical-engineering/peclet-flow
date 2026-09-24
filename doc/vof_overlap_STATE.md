@@ -62,13 +62,23 @@ column (zero net volume flux, TBFsolver flowCtrl 2 flow_rate 0; peclet driver su
 each step) — flowCtrl 3 grew a net upflow from wall friction. TBFsolver closed run: engineer
 restarting (8x3 cores); open-column output kept in tbfsolver/run_open/. peclet run waits for the fix.
 
-**Next action (2026-09-24 23:15).** Overnight GPU chain (scratchpad/c18_g4b/chain.sh): peclet
-bubble column t=150 (PID 4030167, ETA ~04:30) -> peclet D/h=24 check to t=5 -> channel_18
-10000 -> 5 turnovers (G4(b)). Reviewer agent reviewing 3b7376b..03b1660 (doc/vof_overlap_review.md,
-untracked by repo convention). TBFsolver t=150 done: rise 0.778+-0.024 on [50,150], gas -1.18 %.
-Early transient differs: t=1 peclet 0.83 vs TBF 0.70 -> resolution check D/h=24 both codes.
-Then: page benchmarks/bubble-column/index.qmd (peclet-examples worktree, branch bubble-column);
-merge vof-overlap to main after review; decision-register entry (design §10) when umbrella free.
+**Next action (2026-09-25 00:20, before a session compaction).** USER AUTHORIZED push + publish.
+Running: (a) opus-implementer Phase B of the review fixes (doc/vof_overlap_review.md, untracked):
+real clip test, curvProto-propagation test, ctests for wrap-recentre / residue return / phantom
+bound (np 1/2/4), cost measurement + parallel per-cell writes, setter
+diagnostics.set_vof_phantom_capillary_bound (default on), rename set_vof_kappa_clip ->
+set_vof_block_kappa_clip, kinematic interfaceEps consistency, G2/G3/G4(a)/Hysing re-runs with
+counters, a block case in state_hash.py. (b) GPU chain scratchpad/c18_g4b/chain.sh on frozen module
+scratchpad/flow_prod (= 14d9483): peclet bubble column t=150 (ETA ~05:15) -> peclet D/h=24 to t=5
+-> channel_18 10000 -> 5 turnovers (G4(b)). Branches vof-overlap (flow) and bubble-column
+(peclet-examples) pushed to origin as backups. THEN: reviewer re-check of Phase B (short) ->
+rebase vof-overlap onto moved flow origin/main (core 1.2.0 pin, init_mpi raise), rebuild, battery
+once, push flow main; umbrella pointer bump LAST (release session active: core 1.2.0 out, AMR in
+progress — coordinate, stage named paths); update flow/CLAUDE.md VoF scope sentence (colliding
+markers now rated) + decision-register entry (design §10); finish page
+peclet-examples/benchmarks/bubble-column/index.qmd (prose placeholders), peclet_reduce.py ->
+data/peclet_closed.npz (+ _d24_t5), render, merge bubble-column to main, push = publish.
+Cleanup after: tbfsolver/run, run_open, run150 raw snapshots (~17 GB), peclet/run_degraded_pureEps.
 
 **Gates (to be set with the design).** channel_18 ≥ 5 turnovers; static pair parasitic current
 flat in d; marker volumes 1e-12; every existing block ctest bit-identical when no overlap.
