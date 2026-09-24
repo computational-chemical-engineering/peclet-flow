@@ -524,9 +524,14 @@ the ablation knobs (`set_csf_mode`, `set_vof_kappa_*`, the `set_phase_change_*` 
   VoF advection to the head of `step()` and needs variable density, staggered layout, explicit
   advection, no solid, no porous continuity; it makes ratios above ~100 usable.
 - **Scope, and say it to users:** staggered is the reference; collocated is all-fluid, ratio ≲ 100
-  with motion. The block container is all-fluid, staggered-only for its CSF, and **colliding
-  markers are outside the rating** (a contacting pair drives through the 2-cell film at ~1.5 eddy
-  turnovers, dt-independent; the fix is the parked `vof-w4` branch).
+  with motion. The block container is all-fluid and staggered-only for its CSF. **Colliding
+  markers are rated since 2026-09-25** (`doc/vof_overlap_design.md`): the blow-up was garbage
+  curvature on sub-cell *debris* one marker leaves inside another, not the SUM-force/MAX-colour
+  pairing. The fix is per-step debris + sub-`wispEps` residue removal with exact return to the
+  marker's own interface, a block-only `|κ| ≤ 1/Δ_min` clip, and a gas–gas capillary dt bound
+  while markers overlap. **Never assemble the block force from the union colour** (rejected: it
+  re-creates numerical coalescence through the rim crease); the parked `vof-w4` branch is
+  superseded.
 
 The rung-by-rung record — every work order, gate number and refuted hypothesis — is
 `doc/history/vof_workorders{,_v2,_v34,_v5,_v6}.md`.

@@ -411,9 +411,10 @@ remain valid future work and are unaffected by this note.
 
 ## 10. Decision-register entry (to land in `../docs/decisions/flow.md` when the umbrella is free)
 
-*Block VoF surface tension: per-cell `|κ| ≤ 1/Δ_min` clip on both VoF paths and per-step
-per-marker debris removal (`Σ_{5³} C < 1` cell) with exact volume return to the marker's attached
-interface.* Rejected: union-based force assembly (W4 item 1 — statically unnecessary, would
+*Block VoF surface tension: per-step per-marker debris removal (interfacial cells with no
+`C > 1/2` in their 5³ neighbourhood, §11) and sub-`wispEps` residue clearing (§13), both with exact
+volume return to the marker's attached interface; a per-cell `|κ| ≤ 1/Δ_min` clip on the BLOCK
+path only (§11); a gated gas–gas capillary dt bound while markers overlap (§5.6).* Rejected: union-based force assembly (W4 item 1 — statically unnecessary, would
 reintroduce numerical coalescence through the rim crease), raising `interfaceEps` (moves the
 failure), TBFsolver's unsized fragment predicate (deletes satellites and thin sheets), discarding
 without return (percent-level loss over 20 turnovers). Evidence: `doc/vof_overlap_design_brief.md`
