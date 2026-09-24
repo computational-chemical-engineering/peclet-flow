@@ -1,10 +1,11 @@
 // Rung-3 relocation oracle: evaluate dem's SDF surface over a large deterministic point cloud and
 // dump the RAW BITS. Run before and after the port; the files must be byte-identical. This is a
 // far sharper gate than the pass/fail ctests, which carry tolerances.
-#include <Kokkos_Core.hpp>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
+#include <Kokkos_Core.hpp>
 #include <vector>
+
 #include "dem_portable.hpp"
 #include "narrowphase.hpp"
 
@@ -51,13 +52,19 @@ int main(int argc, char** argv) {
 
     ShapeDesc sd{};
     sd.type = SHAPE_GRID_SDF;
-    sd.grid.nx = NX; sd.grid.ny = NY; sd.grid.nz = NZ; sd.grid.offset = 0;
+    sd.grid.nx = NX;
+    sd.grid.ny = NY;
+    sd.grid.nz = NZ;
+    sd.grid.offset = 0;
     sd.grid.origin = peclet::core::Vec3<float>{-1.0f, -1.0f, -1.0f};
     sd.grid.invSpacing = peclet::core::Vec3<float>{1.0f / 0.3f, 1.0f / 0.3f, 1.0f / 0.3f};
     sd.grid.extension = peclet::core::geom::GridExtension::kObject;
 
     WallSdf w{};
-    w.grid.nx = NX; w.grid.ny = NY; w.grid.nz = NZ; w.grid.offset = 0;
+    w.grid.nx = NX;
+    w.grid.ny = NY;
+    w.grid.nz = NZ;
+    w.grid.offset = 0;
     w.grid.origin = peclet::core::Vec3<float>{-1.0f, -1.0f, -1.0f};
     w.grid.invSpacing = peclet::core::Vec3<float>{1.0f / 0.3f, 1.0f / 0.3f, 1.0f / 0.3f};
     w.grid.extension = peclet::core::geom::GridExtension::kContainer;
@@ -65,20 +72,24 @@ int main(int argc, char** argv) {
     const int NP = 4000;
     Kokkos::View<float*, CpMem> out("out", 2 * NP);
     std::vector<F3> pts(NP);
-    for (int i = 0; i < NP; ++i) pts[i] = F3{u(-2.5f, 2.0f), u(-2.5f, 2.0f), u(-2.5f, 2.0f)};
+    for (int i = 0; i < NP; ++i)
+      pts[i] = F3{u(-2.5f, 2.0f), u(-2.5f, 2.0f), u(-2.5f, 2.0f)};
     Kokkos::View<F3*, CpMem> dp("dp", NP);
     auto hdp = Kokkos::create_mirror_view(dp);
-    for (int i = 0; i < NP; ++i) hdp(i) = pts[i];
+    for (int i = 0; i < NP; ++i)
+      hdp(i) = pts[i];
     Kokkos::deep_copy(dp, hdp);
 
-    Kokkos::parallel_for("cap", Kokkos::RangePolicy<CpExec>(0, NP), KOKKOS_LAMBDA(int i) {
-      out(2 * i) = sampleGridSdf(dp(i), sd, pool);
-      out(2 * i + 1) = sampleWallSdf(dp(i), w, pool);
-    });
+    Kokkos::parallel_for(
+        "cap", Kokkos::RangePolicy<CpExec>(0, NP), KOKKOS_LAMBDA(int i) {
+          out(2 * i) = sampleGridSdf(dp(i), sd, pool);
+          out(2 * i + 1) = sampleWallSdf(dp(i), w, pool);
+        });
     Kokkos::fence();
     auto ho = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, out);
     for (int i = 0; i < 2 * NP; ++i) {
-      std::uint32_t b; float v = ho(i);
+      std::uint32_t b;
+      float v = ho(i);
       std::memcpy(&b, &v, 4);
       bits.push_back(b);
     }
@@ -89,13 +100,14 @@ int main(int argc, char** argv) {
     hs(0) = sd;
     Kokkos::deep_copy(shp, hs);
     Kokkos::View<float*, CpMem> out2("out2", NP);
-    Kokkos::parallel_for("cap2", Kokkos::RangePolicy<CpExec>(0, NP), KOKKOS_LAMBDA(int i) {
-      out2(i) = sdfEvalShape(dp(i), shp(0), pool);
-    });
+    Kokkos::parallel_for(
+        "cap2", Kokkos::RangePolicy<CpExec>(0, NP),
+        KOKKOS_LAMBDA(int i) { out2(i) = sdfEvalShape(dp(i), shp(0), pool); });
     Kokkos::fence();
     auto ho2 = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, out2);
     for (int i = 0; i < NP; ++i) {
-      std::uint32_t b; float v = ho2(i);
+      std::uint32_t b;
+      float v = ho2(i);
       std::memcpy(&b, &v, 4);
       bits.push_back(b);
     }

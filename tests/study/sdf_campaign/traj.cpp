@@ -1,12 +1,13 @@
 // Deterministic single-shape trajectory dump: proves the Layer-1 shape-registry refactor left the
 // existing (shapeId == 0) path bit-identical. Uses ONLY the pre-Layer-1 API so it compiles against
 // both revisions.
-#include "sim.hpp"
-#include <cstdio>
-#include <cstring>
 #include <cstdint>
-#include <vector>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
+
+#include "sim.hpp"
 using namespace peclet::dem;
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
@@ -22,17 +23,23 @@ int main(int argc, char** argv) {
         return lo + (hi - lo) * ((float)((st >> 8) & 0xFFFFFFu) / (float)0x1000000u);
       };
       std::vector<float> pos(3 * 60);
-      for (auto& v : pos) v = u(0.15f, 0.85f);
+      for (auto& v : pos)
+        v = u(0.15f, 0.85f);
       s.setPositions(pos);
       s.setGravity(0.f, -9.81f, 0.f);
       s.setDt(2e-4f);
       const int NSTEP = std::atoi(argv[2]);
-      for (int k = 0; k < NSTEP; ++k) s.step(2e-4f);
-      s.computeOverlaps();   // narrow-phase ONLY on the given configuration -- no dynamics
-      std::printf("  shape=%d  static overlap probe: contacts=%d maxOverlap=%.9g\n",
-                  shape, s.numContacts(), (double)s.maxOverlap());
+      for (int k = 0; k < NSTEP; ++k)
+        s.step(2e-4f);
+      s.computeOverlaps();  // narrow-phase ONLY on the given configuration -- no dynamics
+      std::printf("  shape=%d  static overlap probe: contacts=%d maxOverlap=%.9g\n", shape,
+                  s.numContacts(), (double)s.maxOverlap());
       for (const std::vector<float>& arr : {s.getPositions(), s.getVelocities(), s.getInvInertia()})
-        for (float v : arr) { std::uint32_t b; std::memcpy(&b, &v, 4); bits.push_back(b); }
+        for (float v : arr) {
+          std::uint32_t b;
+          std::memcpy(&b, &v, 4);
+          bits.push_back(b);
+        }
     }
   }
   Kokkos::finalize();

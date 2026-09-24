@@ -1,9 +1,10 @@
 // End-to-end: what does the exact-gradient change do to a real dem step? BOX shape (a shell, so
 // contact normals are evaluated per shell point per contact) in a dense periodic box.
-#include "sim.hpp"
-#include <Kokkos_Core.hpp>
 #include <cstdio>
 #include <cstdlib>
+#include <Kokkos_Core.hpp>
+
+#include "sim.hpp"
 using namespace peclet::dem;
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
@@ -19,20 +20,23 @@ int main(int argc, char** argv) {
       return lo + (hi - lo) * ((float)((st >> 8) & 0xFFFFFFu) / (float)0x1000000u);
     };
     std::vector<float> pos(3 * N);
-    for (auto& v : pos) v = u(0.06f, 0.94f);
+    for (auto& v : pos)
+      v = u(0.06f, 0.94f);
     s.setPositions(pos);
     s.setGravity(0.f, -9.81f, 0.f);
     s.setDt(DT);
     // broad+narrow phase ONLY, on a FIXED configuration: idempotent, so both builds do exactly
     // the same work and the only difference is how the contact normal is computed.
-    for (int k = 0; k < 5; ++k) s.computeOverlaps();   // warm-up
+    for (int k = 0; k < 5; ++k)
+      s.computeOverlaps();  // warm-up
     Kokkos::fence();
     Kokkos::Timer t;
-    for (int k = 0; k < STEPS; ++k) s.computeOverlaps();
+    for (int k = 0; k < STEPS; ++k)
+      s.computeOverlaps();
     Kokkos::fence();
     const double ms = 1e3 * t.seconds() / STEPS;
-    std::printf("  %d boxes, %d narrowphase passes: %.4f ms/pass  (contacts=%d)\n",
-                N, STEPS, ms, s.numContacts());
+    std::printf("  %d boxes, %d narrowphase passes: %.4f ms/pass  (contacts=%d)\n", N, STEPS, ms,
+                s.numContacts());
   }
   Kokkos::finalize();
   return 0;

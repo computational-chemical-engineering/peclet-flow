@@ -1,12 +1,13 @@
 // Batched evaluation parity: the device drivers must reproduce the host per-point evaluation
 // BIT-IDENTICALLY (same backend), sphere-union + candidate grid + min-image periodicity included.
-#include <Kokkos_Core.hpp>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cstdint>
 #include <fstream>
+#include <Kokkos_Core.hpp>
 #include <sstream>
 #include <vector>
+
 #include "peclet/core/geom/device_scene.hpp"
 
 using namespace peclet::core;
@@ -21,18 +22,26 @@ int main(int argc, char** argv) {
     std::ifstream f("/home/frankp/Codes/suite/core/tests/data/rcp_pack_seed3_unit.txt");
     std::string line;
     while (std::getline(f, line)) {
-      if (line.empty() || line[0] == '#') continue;
-      std::istringstream is(line); double x, y, z, rr;
-      if (is >> x >> y >> z >> rr) { cx.push_back(x); cy.push_back(y); cz.push_back(z); r.push_back(rr); }
+      if (line.empty() || line[0] == '#')
+        continue;
+      std::istringstream is(line);
+      double x, y, z, rr;
+      if (is >> x >> y >> z >> rr) {
+        cx.push_back(x);
+        cy.push_back(y);
+        cz.push_back(z);
+        r.push_back(rr);
+      }
     }
-    SphereBedQuery q(cx, cy, cz, r, Vec<3>{0,0,0}, Vec<3>{1,1,1}, true);
+    SphereBedQuery q(cx, cy, cz, r, Vec<3>{0, 0, 0}, Vec<3>{1, 1, 1}, true);
 
     // device copies of the union + grid
     const int n = q.sphereUnion().n;
     auto mkview = [](const char* nm, const double* src, std::size_t cnt) {
       Kokkos::View<double*> v(nm, cnt);
       auto h = Kokkos::create_mirror_view(v);
-      for (std::size_t i = 0; i < cnt; ++i) h(i) = src[i];
+      for (std::size_t i = 0; i < cnt; ++i)
+        h(i) = src[i];
       Kokkos::deep_copy(v, h);
       return v;
     };
@@ -43,24 +52,32 @@ int main(int argc, char** argv) {
     Kokkos::View<int*> doff("off", nbins + 1), ditems("items", gh.offsets[nbins]);
     {
       auto h1 = Kokkos::create_mirror_view(doff);
-      for (long i = 0; i <= nbins; ++i) h1(i) = gh.offsets[i];
+      for (long i = 0; i <= nbins; ++i)
+        h1(i) = gh.offsets[i];
       Kokkos::deep_copy(doff, h1);
       auto h2 = Kokkos::create_mirror_view(ditems);
-      for (int i = 0; i < gh.offsets[nbins]; ++i) h2(i) = gh.items[i];
+      for (int i = 0; i < gh.offsets[nbins]; ++i)
+        h2(i) = gh.items[i];
       Kokkos::deep_copy(ditems, h2);
     }
     SphereUnionView<double> du = q.sphereUnion();
-    du.cx = dcx.data(); du.cy = dcy.data(); du.cz = dcz.data(); du.r = dr.data();
+    du.cx = dcx.data();
+    du.cy = dcy.data();
+    du.cz = dcz.data();
+    du.r = dr.data();
     CandidateGridView<double> dg = gh;
-    dg.offsets = doff.data(); dg.items = ditems.data();
+    dg.offsets = doff.data();
+    dg.items = ditems.data();
 
     // probe points: box + beyond + surface-hugging
     const int NP = 200000;
-    Kokkos::View<double*[3]> pts("pts", NP);
+    Kokkos::View<double* [3]> pts("pts", NP);
     auto hp = Kokkos::create_mirror_view(pts);
     std::uint64_t st = 0x9E3779B97F4A7C15ull;
     auto u01 = [&]() {
-      st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+      st ^= st << 13;
+      st ^= st >> 7;
+      st ^= st << 17;
       return (double)((st >> 11) & ((1ull << 53) - 1)) / (double)(1ull << 53);
     };
     for (int i = 0; i < NP; ++i) {
@@ -72,7 +89,9 @@ int main(int argc, char** argv) {
         hp(i, 1) = cy[s] + (r[s] + eps) * sr * std::sin(th);
         hp(i, 2) = cz[s] + (r[s] + eps) * uz;
       } else {
-        hp(i, 0) = 1.6 * u01() - 0.3; hp(i, 1) = 1.6 * u01() - 0.3; hp(i, 2) = 1.6 * u01() - 0.3;
+        hp(i, 0) = 1.6 * u01() - 0.3;
+        hp(i, 1) = 1.6 * u01() - 0.3;
+        hp(i, 2) = 1.6 * u01() - 0.3;
       }
     }
     Kokkos::deep_copy(pts, hp);
@@ -89,10 +108,15 @@ int main(int argc, char** argv) {
       std::memcpy(&a, &ref, 8);
       const double v = ho(i);
       std::memcpy(&b, &v, 8);
-      if (a != b) { if (nbit < 3) std::printf("  mismatch %d: dev %.17g host %.17g\n", i, v, ref); ++nbit; }
+      if (a != b) {
+        if (nbit < 3)
+          std::printf("  mismatch %d: dev %.17g host %.17g\n", i, v, ref);
+        ++nbit;
+      }
     }
     std::printf("  batched device vs host query: %d/%d bit mismatches\n", nbit, NP);
-    if (nbit) bad = 1;
+    if (nbit)
+      bad = 1;
   }
   Kokkos::finalize();
   std::printf(bad ? "BATCH FAIL\n" : "BATCH OK\n");
