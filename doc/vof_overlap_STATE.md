@@ -9,27 +9,25 @@ Build tree `build_cuda` (CUDA prefix, tests+MPI on). An AMR session is doing a r
 parallel — do not touch umbrella docs/RELEASE*, core, amr. W4 WIP stays parked on `vof-w4`
 (f29c8e7); not merged here.
 
-**Now (2026-09-24 evening, implementer, after design §11).** Landed on vof-overlap: WO-1 clip,
-BLOCK path only `85b659d`; WO-3 debris removal + return + ledger, predicate max_{5^3} C < 1/2
-`042f9c2`; phantom trigger S > 1.01 `d8183af`; WO-4 tests `3d13924` (WO-2 `3b7376b`, WO-7
-`29b1bb8` earlier). G0: ctest -LE bench 163/163 (build_impl, CUDA+MPI); block-CSF ctests assert
-clip/debris/overlap counters 0 (vof_blocks_ns_mpi np1/2/4: 0/0/0); single-field cannot clip;
-48 dumped arrays + G2 8 cases + state_hash 13/13 bitwise vs the unmodified tree. G1: speck cells
--> 0.0, account removed + sub-1e-8 residue = painted to 1.7e-18 (literal +-1e-14 on debrisVolume
-unreachable: advection precedes removal, residue 8.6e-9), B volume 2.2e-16, A bitwise, max|u| =
-reference. G5 vof_blocks_debris_mpi np1/2/4 bitwise (union C, volumes, 5 ledger fields). G2 r10:
-brief table, bitwise. G3 r10: completes (5104 steps), max|u| 15.69, dV 5.7e-14, returned
-0.144/0.105 (> the 0.1 gate), lost 0, bound 3627 steps (= contact 779-4447, off after
-separation). G3 r50: 8247 steps, 15.69, 9.8e-14, returned 0.077/0.079, bound 6368 (= contact).
-STOPPED: (1) box guard parked on `vof-overlap-box-guard-pending` (98f53ea) -- as specified it
-fires in test_vof_blocks G1 (LeVeque, bubbleEps = 0 set: box 34 > 32 on y, only WY residue
-lost); needs a threshold on the dropped colour or a wrap-aware copy. (2) G4(a) channel_18 FAILS:
-debris ON dies at 10908 (marker 12 colour non-finite in 1e-33 residue cells; box 12 had grown to
-57 x 28 x 30 on 1e-12..1e-8 wisps the predicate cannot see); debris OFF dies at 12518 exactly as
-before (m2 box 128 -> wiped, m13 inf). Block advectors run WY at wispEps = 0 while curvProto
-.pureEps = 1e-8; diagnostic build with block wispEps = 1e-8: no inf, but every box grows to 128
-and the snap wipes the markers (volumes -> 0 by ~12400). Phantom bound on every channel step
-(real overlaps S up to 1.47). Residue/wake handling of the block container is the open question.
+**Now (2026-09-24 late, implementer, after design §12).** On vof-overlap: WO-1 `85b659d`, WO-3
+`042f9c2`, trigger `d8183af`, WO-4 `3d13924` (G0 163/163, G1, G2 bitwise, G3 r10/r50, G5 np1/2/4
+bitwise -- all BEFORE §12); §12.1-2 `97f9ca0` (block wispEps = global, box threshold
+max(bubbleEps, wispEps), discarded migrates), §12.3 `db37e32` (full-axis wrap copy, full_axis).
+Side branches wo1-pending / box-guard-pending deleted.
+G4(a) channel_18 10000 -> 13000 with §12: RUNS THROUGH (no blow-up, 3000 steps, max|u| 35.81
+<= 52; boxes <= 23x21x22 all run, full_axis 0 everywhere; debris returned m2 0.104, m4 0.027,
+m12 1.6e-4, m13 0.111, m17 0.240, lost 0, unresolved 0; clip fired on 2697/3000 steps (max 22
+cells); phantom bound on 3000/3000 steps (real overlaps, S to ~1.5)). STOPPED on volumes: max
+rel marker volume change 1.5e-9 (gate 1e-12), a steady loss on EVERY marker incl. non-colliding
+(m0 -1.4e-7 over 2400 steps). Reproduced in isolation (scratchpad leak.py: one R = 5 marker,
+uniform u, 1500 advect_vof_blocks(0.2)): unmodified tree / block wispEps 0: dV +6e-12, ledger
+consistent; block wispEps 1e-8 (§12): dV -3.18e-7, discarded 1.69e-7, UNLEDGERED -1.49e-7. The
+global field at wispEps 1e-8 conserves (9e-13 over 1500 steps). Hypothesis: sub-1e-8 residue is
+fluxed algebraically (pure-cell branch) and, now that it no longer defines the box, drifts out
+of the inner box into the ghost ring, which the fill zeroes -- unledgered; the rest is dropped at
+re-centring (ledgered, but 1e-7, not the "<= 1e-10 per event" §12.2 assumed). Needs a design
+choice (ledger the inner-box boundary flux / keep a residue margin / clear sub-eps colour
+explicitly). Not run per the order: -R vof ctests, G2/G3 reruns, full battery.
 
 **Instruments.** `tests/study/vof_blocks_overlap.py` (static pair vs d); scratch
 `diag_c18.py` (restart channel_18 from W3's healthy step-10000 checkpoint
