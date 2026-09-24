@@ -454,3 +454,27 @@ G4(a), ~step 12150, marker 2 → volume 0). Replace the silent path with a loud 
 block, its box and the likely cause (debris / a marker as large as the domain); debris removal is
 the fix for the cause. And **G7 verdict: the tent stays opt-in** — at μ_g/μ_l = 0.02 it is worse
 than MAX + gated bound (d = 8 peak 0.42–0.58 vs 0.32).
+
+## 12. Addendum (Opus, 2026-09-24 16:10) — the block container's residue policy
+
+G4(a) after §11 (STATE a18e891): removal ON dies at 10908 (marker 12 non-finite in cells holding
+1e-33 residue; box 57×28×30 grown on 1e-12…1e-8 wisps); removal OFF dies at 12518 as before; a
+diagnostic build with block wispEps = 1e-8 has no non-finite colour but EVERY marker's box grows
+to 128 and is wiped. One inconsistency explains all three: the global path runs WY with the
+wisp guard 1e-8 (`enable_vof`), the block advectors at 0 (they reconstruct 1e-33 residue → NaN);
+and with the guard on, residue below it is frozen in place while `bubbleBox` still tracks
+C > 1e-12, so a travelling bubble drags its box along its own frozen wake until it spans Lx.
+
+1. **Block advectors take the global advector's `wispEps`** (the `enable_vof` value, 1e-8;
+   copied in the same place `curvProto.pureEps` already follows `vofAdv_.wispEps`). The
+   block == global gates compare against a global path that already runs at that value.
+2. **The box tracks `C > max(bubbleEps, wispEps)`.** Residue below the wisp threshold never
+   defines the box; what the next recentre leaves outside the box is dropped and ledgered in
+   the existing `discarded` (never physical; measured ≤ 1e-10 per event on W0). `discarded` must
+   now migrate with the block like the three debris fields (implementer's note: it does not).
+3. **A periodic box that needs ≥ the domain length is snapped to [0, L) and copied WITH the
+   periodic wrap** (source index mod L), which is lossless — a marker genuinely as long as the
+   domain (a slug) is legal. No throw; `st_.fullAxis` counter for the census. The §11 guard
+   branch (98f53ea) is superseded.
+4. Accepted: G3 r10 `debrisReturned` 0.144 / 0.105 per marker exceeds the note's "≤ 0.1"; that
+   number was a guess, not derived — the gate is "lost == 0 and completes".
