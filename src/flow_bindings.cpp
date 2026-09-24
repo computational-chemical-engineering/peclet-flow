@@ -1050,6 +1050,16 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "'overlap_bound_active' = the phantom-aware capillary limit (2 rho_min in place of "
           "rho_l + rho_g) is in force for the next step (triggered by max S > 1 + 1e-2).")
       .def(
+          "set_vof_phantom_capillary_bound",
+          [](D& diag, bool enabled) { diag.s->setVofPhantomCapillaryBound(enabled); },
+          nb::arg("enabled") = true,
+          "The phantom-aware capillary limit of the block container (doc/vof_overlap_design.md "
+          "5.6, 11.3), DEFAULT True: while two block markers overlap (max S > 1 + 1e-2) the "
+          "capillary limit of vof_step_limits() and step() uses 2 rho_min in place of "
+          "rho_l + rho_g -- the part of one marker's surface inside another is an interface with "
+          "gas on both sides. False restores the pre-5.6 bound (the ablation; a fixed-dt driver "
+          "at a density ratio above ~31 otherwise throws at first contact).")
+      .def(
           "set_vof_block_debris", [](D& diag, bool enabled) { diag.s->setVofBlockDebris(enabled); },
           nb::arg("enabled"),
           "Per-step marker DEBRIS removal of the block container (doc/vof_overlap_design.md 5.3, "
@@ -1157,7 +1167,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           },
           "Branch census of the last block-CSF curvature pass, SUMMED over this rank's blocks "
           "(local to the rank). 'no_estimate' must be 0 on any gated case. 'clipped' = cells whose "
-          "|kappa| the admissibility clip bounded (set_vof_kappa_clip); 0 on a resolved interface.")
+          "|kappa| the admissibility clip bounded (set_vof_block_kappa_clip; a NaN counts too); 0 "
+          "on a resolved interface.")
       .def(
           "set_outflow_rho_correction", [](D& diag, bool on) { diag.s->setOutflowRhoCorrection(on); },
           nb::arg("on") = true,
@@ -1514,9 +1525,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "vof_interface_eps", [](D& diag) { return diag.s->vofInterfaceEps(); },
           "The wisp threshold set by set_vof_interface_eps.")
       .def(
-          "set_vof_kappa_clip",
+          "set_vof_block_kappa_clip",
           [](D& diag, bool enabled, std::optional<double> kappaMax) {
-            diag.s->setVofKappaClip(enabled, kappaMax ? *kappaMax : -1.0);
+            diag.s->setVofBlockKappaClip(enabled, kappaMax ? *kappaMax : -1.0);
           },
           nb::arg("enabled"), nb::arg("kappa_max") = nb::none(),
           "Curvature admissibility clip of the BLOCK container (doc/vof_overlap_design.md 5.1, "

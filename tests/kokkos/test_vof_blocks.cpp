@@ -13,11 +13,13 @@
 //                             control merges them irreversibly. The raison d'etre gate.
 //   G3 re-centring          : a sphere translated 20 cells; the moving block is bitwise equal to a
 //                             block large enough never to move, and its volume is exact.
-//   D1 seeded debris        : doc/vof_overlap_design.md gate G1 -- two R = 5 markers 16 cells
+//   D1 seeded debris        : doc/vof_overlap_design.md gate G1(ii) -- two R = 5 markers 16 cells
 //                             apart plus three cells of B's colour painted into A's interface
-//                             band, through a real Solver with the block CSF: (i) the clip bounds
-//                             B's curvature there and the face-force perturbation; (ii) one step
-//                             removes the speck, returns its volume to B exactly, leaves A alone.
+//                             band, through a real Solver with the block CSF: one step removes
+//                             the speck, returns its volume to B exactly and leaves A alone. (The
+//                             speck is more than two cells from any other B colour, so it gets NO
+//                             curvature estimate at all; the clip's G1(i) gate is gate K of
+//                             test_vof_blocks_overlap, with a speck at B's own fringe.)
 //
 // Everything is compared against a plain `WyAdvector` on the whole grid seeded with the SAME exact
 // `sphereCellFraction` and driven by the SAME face field, so "bitwise" is a real statement about
@@ -850,7 +852,7 @@ struct DebrisScene {
                        {RHO_L, RHO_G - RHO_L});
     s.setSurfaceTension(SIGMA);
     if (!clip)
-      s.setVofKappaClip(false);
+      s.setVofBlockKappaClip(false);
     if (!debris)
       s.setVofBlockDebris(false);
     std::vector<std::array<int, 6>> boxes = {box[0], box[1]};

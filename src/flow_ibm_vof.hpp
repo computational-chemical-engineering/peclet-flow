@@ -599,7 +599,14 @@ void Solver<Grid>::updateVofBlockOverlap() {
   // contact (measured: bound on 5028 of 5907 shear steps, every channel_18 step), whereas a
   // phantom interface worth a capillary mode means a marker's band inside another's body.
   constexpr double kPhantomTrigger = 1e-2;
-  vofOverlap_.active = vofBlocks_->csfEnabled && !vofOverlapDensity_ && mx > 1.0 + kPhantomTrigger;
+  vofOverlap_.active = vofPhantomBound_ && vofBlocks_->csfEnabled && !vofOverlapDensity_ &&
+                       mx > 1.0 + kPhantomTrigger;
+}
+
+template <class Grid>
+void Solver<Grid>::setVofPhantomCapillaryBound(bool enabled) {
+  vofPhantomBound_ = enabled;
+  vofOverlap_.active = vofOverlap_.active && enabled;  // takes effect for the very next step
 }
 
 template <class Grid>
@@ -1933,7 +1940,7 @@ double Solver<Grid>::vofInterfaceEps() const {
 }
 
 template <class Grid>
-void Solver<Grid>::setVofKappaClip(bool enabled, double kappaMaxPhys) {
+void Solver<Grid>::setVofBlockKappaClip(bool enabled, double kappaMaxPhys) {
   double km = 0.0;  // off
   if (enabled) {
     if (kappaMaxPhys < 0.0)
@@ -1942,7 +1949,7 @@ void Solver<Grid>::setVofKappaClip(bool enabled, double kappaMaxPhys) {
       km = kappaMaxPhys * u_.lenToPhys();  // kappa' = kappa * hRef (index units)
     else
       throw std::runtime_error(
-          "set_vof_kappa_clip: kappa_max must be > 0 (or None for 1/Delta_min)");
+          "set_vof_block_kappa_clip: kappa_max must be > 0 (or None for 1/Delta_min)");
   }
   vofBlockKappaMax_ = km;  // the single-field cascade (vofCurv_) never clips (§11)
   if (vofBlocks_)

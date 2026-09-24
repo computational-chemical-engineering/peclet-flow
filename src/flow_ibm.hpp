@@ -2992,6 +2992,9 @@ class Solver {
   // §11). Default: ON under enable_vof_block_csf, OFF otherwise (a kinematic block run is
   // unchanged). May be called before or after enable_vof_blocks / enable_vof_block_csf.
   void setVofBlockDebris(bool enabled);
+  // vof_overlap_design §5.6: the phantom-aware capillary bound (2 rho_min while block markers
+  // overlap). Default ON; `false` restores the pre-§5.6 bound (the ablation, review finding 5).
+  void setVofPhantomCapillaryBound(bool enabled);
 
 
   // DIAGNOSTIC: the scattered block CSF face force on this rank's inner cells, component c (the
@@ -3296,7 +3299,7 @@ class Solver {
   // every interfacial cell of every BLOCK marker's cascade (the single-field cascade never clips).
   // `kappaMaxPhys` is PHYSICAL (1/length); a negative value selects the default 1/Delta_min.
   // `enabled = false` restores the pre-clip block cascade verbatim. Default: ON at 1/Delta_min.
-  void setVofKappaClip(bool enabled, double kappaMaxPhys = -1.0);
+  void setVofBlockKappaClip(bool enabled, double kappaMaxPhys = -1.0);
 
 
   // ABLATION: 0 = the balanced-force face difference (default, the only production mode);
@@ -4487,6 +4490,7 @@ class Solver {
   double vofBlockKappaMax_ = -1.0;
   // set_vof_block_debris: -1 = not set (the default: ON under the block CSF), 0 = off, 1 = on.
   int vofBlockDebris_ = -1;
+  bool vofPhantomBound_ = true;  // setVofPhantomCapillaryBound
   bool distributed_ = false;
   C3 og_{0, 0, 0};  // velocity-block inner origin (global red-black parity); {0,0,0} single-rank
 #ifdef PECLET_FLOW_MPI
