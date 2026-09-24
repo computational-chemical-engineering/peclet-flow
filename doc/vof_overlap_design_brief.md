@@ -113,9 +113,13 @@ on an RTX 5080 with new per-marker diagnostics (`diagnostics.vof_block_kappa(id)
    overlap) 0.162/0.049; d=8 (2 cells) 0.135/0.055; d=6 (4 cells) 0.217/0.049. Volumes 5e-15.
    So SUM-vs-MAX is NOT a static balanced-force defect (as expected: Σ_k σ κ_k ∇_f C_k is the
    discrete gradient of σ Σ κ_k C_k for constant κ_k, and 1/ρ_f multiplies force and pressure alike).
-6. **Controlled collision (Couette, U=±16, offset b=6, We≈0.7)**: the pair collides, overlaps up to
-   ~5 cells, orbits and separates; 2800 steps stable, max|u| flat at 15.67, volumes exact. A gentle
-   collision alone does not reproduce the failure. (A harder one, U=±40, We≈4.5, is running.)
+6. **Controlled collision (Couette, U=±16, offset b=6, We≈0.7) — a small deterministic
+   reproducer.** `PYTHONPATH=build_cuda python tests/study/vof_blocks_overlap.py shear` (65×40×30,
+   ~20 min on the RTX 5080). The pair collides, overlaps up to ~5 cells of volume, orbits and
+   separates, max|u| flat at 15.67 and volumes exact — and then, AFTER separation (union overlap
+   only 0.01–0.03 cells, i.e. residual wisps of one marker inside the other), the run dies at step
+   2910 on a WY-CFL throw (a one-step velocity spike). Same signature as channel_18, no turbulence
+   needed. This is the cheap gate for the fix.
 7. **Raising the wisp threshold only MOVES the failure.** Same restart with
    `set_vof_interface_eps(1e-3)` / `(1e-2)` (cells with C < eps get no curvature): both pass 10706,
    then die at **11213** / **11331** (t u_tau/h 1.586 / 1.597) — a different place, v/w faces near
