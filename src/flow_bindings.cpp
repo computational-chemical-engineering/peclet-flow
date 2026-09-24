@@ -890,6 +890,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             r["kc_planes"] = q.planes;
             r["kc_height"] = q.height;
             r["kc_fallback"] = q.fallback;
+            r["kc_clip"] = q.clip;
             r["kc_census"] = q.census;
             return r;
           },
@@ -1130,10 +1131,12 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             r["pv"] = st.pv;
             r["pv_reduced"] = st.pvReduced;
             r["no_estimate"] = st.noEstimate;
+            r["clipped"] = st.clipped;
             return r;
           },
           "Branch census of the last block-CSF curvature pass, SUMMED over this rank's blocks "
-          "(local to the rank). 'no_estimate' must be 0 on any gated case.")
+          "(local to the rank). 'no_estimate' must be 0 on any gated case. 'clipped' = cells whose "
+          "|kappa| the admissibility clip bounded (set_vof_kappa_clip); 0 on a resolved interface.")
       .def(
           "set_outflow_rho_correction", [](D& diag, bool on) { diag.s->setOutflowRhoCorrection(on); },
           nb::arg("on") = true,
@@ -1489,6 +1492,25 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def(
           "vof_interface_eps", [](D& diag) { return diag.s->vofInterfaceEps(); },
           "The wisp threshold set by set_vof_interface_eps.")
+      .def(
+          "set_vof_kappa_clip",
+          [](D& diag, bool enabled, std::optional<double> kappaMax) {
+            diag.s->setVofKappaClip(enabled, kappaMax ? *kappaMax : -1.0);
+          },
+          nb::arg("enabled"), nb::arg("kappa_max") = nb::none(),
+          "Curvature admissibility clip of the BLOCK container (doc/vof_overlap_design.md 5.1, "
+          "11): after each marker's cascade every interfacial cell gets |kappa| <= kappa_max. "
+          "DEFAULT ON at kappa_max = 1/Delta_min. kappa_max is PHYSICAL (1/length); None selects "
+          "the default. enabled=False restores the pre-clip block cascade verbatim (the "
+          "ablation). The single-field cascade never clips: there a large |kappa| is legitimate "
+          "(an under-resolved droplet, a contact-line cell).\n\n"
+          "Why: a mixed cell with no body of its marker near it (debris left where two markers "
+          "overlapped) has no closing height-function column and a PLIC-volumetric fit through "
+          "polygons of area ~0, so its paraboloid is arbitrary (measured |kappa| 273 and 428 per "
+          "cell against a true 0.4 on channel_18; one-step velocity blow-up). |kappa| <= 1/Delta "
+          "is a sphere of R >= 2 Delta, the smallest the height function can see, and bounds every "
+          "CSF face force by sigma |dC| / Delta^2. The value is written only where it changes, so "
+          "a resolved interface is bit-identical; vof_block_curvature_stats() reports 'clipped'.")
       .def(
           "set_vof_kappa_frozen", [](D& diag, bool on) { diag.s->setVofKappaFrozen(on); },
           nb::arg("on") = true,
@@ -2698,6 +2720,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
             r["pv"] = d.pv;
             r["pv_reduced"] = d.pvReduced;
             r["no_estimate"] = d.noEstimate;
+            r["clipped"] = d.clipped;
             return r;
           },
           "VoF rung V3: compute the interface curvature from the CURRENT colour field and store it "

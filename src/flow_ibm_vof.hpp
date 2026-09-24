@@ -1575,6 +1575,7 @@ void Solver<Grid>::enableVofBlockCsf() {
   vofBlocks_->curvProto.cosMin = vofCurv_.cosMin;
   vofBlocks_->curvProto.useMixedHeightFit = vofCurv_.useMixedHeightFit;
   vofBlocks_->curvProto.useWorklist = vofCurv_.useWorklist;
+  vofBlocks_->curvProto.kappaMax = vofBlockKappaMax_;  // the clip: BLOCK path only (§5.1, §11)
   vofBlocks_->enableCsf(sigmaCsf_);
   const long len3 = static_cast<long>(e3_.x) * e3_.y * e3_.z;
   for (int c = 0; c < 3; ++c) {
@@ -1897,6 +1898,23 @@ void Solver<Grid>::setVofInterfaceEps(double eps) {
 template <class Grid>
 double Solver<Grid>::vofInterfaceEps() const {
   return csfInterfaceEps_;
+}
+
+template <class Grid>
+void Solver<Grid>::setVofKappaClip(bool enabled, double kappaMaxPhys) {
+  double km = 0.0;  // off
+  if (enabled) {
+    if (kappaMaxPhys < 0.0)
+      km = -1.0;  // the default 1/Delta_min, evaluated against the cascade's own metric
+    else if (kappaMaxPhys > 0.0)
+      km = kappaMaxPhys * u_.lenToPhys();  // kappa' = kappa * hRef (index units)
+    else
+      throw std::runtime_error(
+          "set_vof_kappa_clip: kappa_max must be > 0 (or None for 1/Delta_min)");
+  }
+  vofBlockKappaMax_ = km;  // the single-field cascade (vofCurv_) never clips (§11)
+  if (vofBlocks_)
+    vofBlocks_->setKappaMax(km);
 }
 
 template <class Grid>

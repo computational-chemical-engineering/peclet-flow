@@ -34,6 +34,7 @@
 #include "mac_stencils.hpp"   // peclet::flow::SExec, SField, I3, L3
 #include "vof/advect_wy.hpp"  // wyIsMixed, wyReconstructCell
 #include "vof/curvature.hpp"
+#include "vof/surface_tension.hpp"  // csfKappaDefined
 
 namespace peclet::flow::vof {
 
@@ -225,6 +226,10 @@ class VofCurvature {
     long pv = 0;           ///< tier 3: PV paraboloid fit, full 6-parameter model
     long pvReduced = 0;    ///< tier 3 with the rank-deficient 3-parameter model
     long noEstimate = 0;   ///< NO estimate produced (must be 0 on every gated case)
+    /// Cells whose curvature the admissibility clip (`kappaMax`) bounded this call. 0 on every
+    /// resolved interface; a non-zero count says the cascade was asked for a curvature it cannot
+    /// resolve (`R < 2 Delta`) -- debris, a pinch-off tail, a sub-cell drop.
+    long clipped = 0;
   };
 
   /// @param ghost must be >= 3 (the column reach); the colour block's `kVofG` is 3.
@@ -271,6 +276,7 @@ class VofCurvature {
     double fallback = 0.0;  ///< tier 3, the PLIC-volumetric paraboloid
     double census = 0.0;    ///< the branch census reduction
     double compact = 0.0;   ///< the two parallel_scans (0 when the compaction is off)
+    double clip = 0.0;      ///< the curvature admissibility clip
     long calls = 0;
   };
   bool useWorklist = true;
@@ -382,6 +388,25 @@ class VofCurvature {
   /// Turning it on is therefore a measurement, not a configuration. Kept because it is the WO's
   /// specified tier 2 and because the mechanism above is worth being able to re-measure.
   bool useMixedHeightFit = false;
+  /// **Curvature admissibility clip** (`doc/vof_overlap_design.md` §5.1, §11): after the cascade,
+  /// every inner cell carrying a curvature (`csfKappaDefined`) gets `|kappa| <= kappaMax`, in INDEX
+  /// units (1/hRef). `0` (the class DEFAULT) is off -- the single-field cascade never clips (§11:
+  /// there it would bound LEGITIMATE curvature: under-resolved droplets, contact-line cells).
+  /// The block container's prototype sets it ON. Negative means `1 / metric.minH()`, which is 1
+  /// when `hRef = min h`:
+  /// `|kappa| <= 1/Delta` is a sphere of `R >= 2 Delta`, the smallest the 7-cell height function
+  /// can see at all, and it bounds every CSF face force by `sigma |dC| / Delta^2` -- the scale the
+  /// Brackbill capillary step is built to hold. The value is written only where it CHANGES, so an
+  /// unclipped field is bit-identical.
+  ///
+  /// Why it exists: an interfacial cell of a marker with no body of that marker near it (DEBRIS,
+  /// left where two markers overlapped) has no pure end in any height-function column, and the
+  /// PLIC-volumetric fit is then made from a handful of corner-sliver polygons of total area ~0.
+  /// The paraboloid through them is arbitrary: measured |kappa| = 273 and 428 per cell against a
+  /// true 0.4 on channel_18, face forces 3-100x the physical ones, a one-step velocity blow-up.
+  double kappaMax = 0.0;
+  /// The bound the clip applies this call (0 = off).
+  double kappaClipValue() const { return kappaMax < 0.0 ? 1.0 / metric.minH() : kappaMax; }
 
   /// Compute the curvature over the inner region from a colour field on the SAME extended block.
   /// `c`'s ghosts must be valid on entry (the caller's exchange); nothing here communicates.
@@ -401,9 +426,13 @@ class VofCurvature {
     const double t3 = tick_();
     fallbackPass(c);
     addT_(tm.fallback, t3);
+    const double t5 = tick_();
+    const long nclip = clipPass();
+    addT_(tm.clip, t5);
     const double t4 = tick_();
-    const Stats s = census();
+    Stats s = census();
     addT_(tm.census, t4);
+    s.clipped = nclip;
     ++tm.calls;
     return s;
   }
@@ -593,6 +622,47 @@ class VofCurvature {
                            gm);
         });
     Kokkos::fence();
+  }
+
+  /// The admissibility clip (see `kappaMax`), over the same cells the cascade ran on: the
+  /// compacted interfacial list in worklist mode, the inner region in dense mode. Returns the
+  /// number of cells it bounded (an integer reduction: deterministic).
+  long clipPass() {
+    const double km = kappaClipValue();
+    if (!(km > 0.0))
+      return 0;
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    SField kap = kappa_, br = branch_;
+    long cnt = 0;
+    if (useWorklist) {
+      LField list = listI_;
+      Kokkos::parallel_reduce(
+          "vof::curv::clip_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nI_),
+          KOKKOS_LAMBDA(long t, long& acc) {
+            const long i = list(t);
+            if (csfKappaDefined(br(i)) && Kokkos::fabs(kap(i)) > km) {
+              kap(i) = Kokkos::copysign(km, kap(i));
+              ++acc;
+            }
+          },
+          cnt);
+    } else {
+      Kokkos::parallel_reduce(
+          "vof::curv::clip",
+          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                        {g + n.x, g + n.y, g + n.z}),
+          KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+            const long i = L3(x, y, z, e);
+            if (csfKappaDefined(br(i)) && Kokkos::fabs(kap(i)) > km) {
+              kap(i) = Kokkos::copysign(km, kap(i));
+              ++acc;
+            }
+          },
+          cnt);
+    }
+    Kokkos::fence();
+    return cnt;
   }
 
   Stats census() const {

@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "vof/advect_wy.hpp"
+#include "vof/block_container.hpp"  // VofBlockSet::blockCurvProto (the clip is block-only)
 #include "vof/curvature.hpp"
 #include "vof/curvature_field.hpp"
 #include "vof_advect_scenes.hpp"
@@ -142,9 +143,9 @@ void printStats(const char* tag, const VofCurvature::Stats& s) {
   const double t = s.interfacial ? static_cast<double>(s.interfacial) : 1.0;
   std::printf(
       "    %s interfacial %5ld | HF %5.2f%%  HFdir %5.2f%%  HFfit %5.2f%%  PV %5.2f%%"
-      "  PVred %5.3f%%  none %ld\n",
+      "  PVred %5.3f%%  none %ld  clipped %ld\n",
       tag, s.interfacial, 100.0 * s.hf / t, 100.0 * s.hfMixed / t, 100.0 * s.hfFit / t,
-      100.0 * s.pv / t, 100.0 * s.pvReduced / t, s.noEstimate);
+      100.0 * s.pv / t, 100.0 * s.pvReduced / t, s.noEstimate, s.clipped);
 }
 
 // ========================================================== gate A: the geometry primitives
@@ -982,6 +983,65 @@ void gatePurityAgreement() {
     CHECK(kerr[1] < kerr[0]);
   }
 }
+
+/// I  the curvature admissibility clip is LIVE (doc/vof_overlap_design.md §5.1, WO-1).
+///
+/// A resolved sphere (R = 6 cells) plus ONE detached cell at C = 1e-6, two cells outside its
+/// surface -- the shape of the channel_18 debris: a mixed cell with no closing height-function
+/// column whose PLIC-volumetric fit is made from the sphere's fringe polygons and its own polygon
+/// of area ~0. Without the clip the cascade returns |kappa| > 1 there (arbitrary; measured 3.6 on
+/// the pre-clip tree); with the block container's clip (1/Delta = 1) it is bounded, and every other
+/// cell is bitwise the unclipped value.
+void gateClipLive() {
+  std::printf("\n=== I  curvature admissibility clip is live (a detached cell at C = 1e-6)\n");
+  const int N = 32;
+  const double h = 1.0 / N, R = 6.0 * h;
+  const int px = 8, py = 17, pz = 16;  // two cells outside the surface, -x side
+  std::vector<double> kv[2];
+  long target[2] = {0, 0};
+  vf::VofCurvature::Stats st[2];
+  for (int q = 0; q < 2; ++q) {  // q = 0: clip off (kappaMax = 0); q = 1: the default clip
+    Case cs;
+    cs.setup(N, N, N, h);
+    vofscene::initSphere(cs.c(), cs.blk, h, 16.13 * h, 15.77 * h, 16.31 * h, R, 6);
+    auto hc = Kokkos::create_mirror_view(cs.c());
+    Kokkos::deep_copy(hc, cs.c());
+    const long it = L3(px + cs.g(), py + cs.g(), pz + cs.g(), cs.e());
+    CHECK(hc(it) == 0.0);  // the cell really is detached
+    hc(it) = 1e-6;
+    Kokkos::deep_copy(cs.c(), hc);
+    cs.adv.syncGhosts();
+    // The clip is a BLOCK-path rule (doc/vof_overlap_design.md §11): the class default is off,
+    // and the block prototype turns it on at 1/Delta_min -- which is what q = 1 reproduces.
+    cs.curv.kappaMax = (q == 0) ? 0.0 : vf::VofBlockSet::blockCurvProto().kappaMax;
+    st[q] = cs.curv.compute(cs.c());
+    printStats(q == 0 ? "clip off" : "clip on ", st[q]);
+    auto kh = Kokkos::create_mirror_view(cs.curv.kappa());
+    Kokkos::deep_copy(kh, cs.curv.kappa());
+    kv[q].assign(kh.data(), kh.data() + kh.extent(0));
+    target[q] = it;
+  }
+  const double k0 = kv[0][target[0]], k1 = kv[1][target[1]];
+  long above = 0, differ = 0, differAbove = 0;
+  for (std::size_t i = 0; i < kv[0].size(); ++i) {
+    const bool big = std::fabs(kv[0][i]) > 1.0;
+    above += big ? 1 : 0;
+    if (!(kv[0][i] == kv[1][i])) {
+      ++differ;
+      differAbove += big ? 1 : 0;
+    }
+  }
+  std::printf(
+      "  detached cell kappa: clip off %.4f, clip on %.4f; cells above 1/Delta without the "
+      "clip %ld, cells changed by the clip %ld (all of them above: %s)\n",
+      k0, k1, above, differ, differ == differAbove ? "yes" : "NO");
+  CHECK(std::fabs(k0) > 1.0);     // the degenerate fit really is unbounded without the clip
+  CHECK(std::fabs(k1) <= 1.0);    // ... and bounded with it
+  CHECK(st[0].clipped == 0);      // off means off
+  CHECK(st[1].clipped == above);  // it fires exactly where |kappa| > 1/Delta
+  CHECK(differ == differAbove);   // and nowhere else (bitwise)
+  CHECK(st[1].clipped >= 1);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -999,6 +1059,7 @@ int main(int argc, char** argv) {
     gateMixedHeightFitAblation();
     gateAnisotropic();
     gatePurityAgreement();
+    gateClipLive();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
                 failures == 1 ? "" : "s");
   }

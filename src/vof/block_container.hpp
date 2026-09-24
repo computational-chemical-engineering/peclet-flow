@@ -457,7 +457,15 @@ class VofBlockSet {
   /// -- measured, on the rung-W2 MPI gate, before this was propagated.  The solver sets it from
   /// its own `set_vof_interface_eps` / `set_surface_tension`, so the block and structured paths
   /// run the SAME estimator.
-  VofCurvature curvProto;
+  VofCurvature curvProto = blockCurvProto();
+  /// The block prototype: the class defaults, plus the admissibility clip ON at `1/Delta_min`
+  /// (`doc/vof_overlap_design.md` §5.1, §11 -- the clip is a BLOCK-path rule: a marker's debris
+  /// inside another marker is the one place the cascade meets arbitrary degenerate fits).
+  static VofCurvature blockCurvProto() {
+    VofCurvature c;
+    c.kappaMax = -1.0;
+    return c;
+  }
   /// The colour threshold that defines the BUBBLE EXTENT (and hence the box). Weymouth-Yue leaves
   /// round-off residue in every cell its sweeps touch — measured down to 1e-35 and of either sign
   /// (the same residue that made the V4 curvature cascade need `interfaceEps = 1e-8`) — so a
@@ -613,11 +621,20 @@ class VofBlockSet {
       curvStats_.pv += st.pv;
       curvStats_.pvReduced += st.pvReduced;
       curvStats_.noEstimate += st.noEstimate;
+      curvStats_.clipped += st.clipped;
       buildCsfForce(b);
     }
     exch_->scatterForceSum(blocks_, fx, fy, fz);
   }
   VofCurvature::Stats csfCurvatureStats() const { return curvStats_; }
+
+  /// Set the curvature admissibility clip (`VofCurvature::kappaMax`, index units) on the prototype
+  /// AND on every block's live cascade, so a change mid-run takes effect at the next step.
+  void setKappaMax(double km) {
+    curvProto.kappaMax = km;
+    for (auto& b : blocks_)
+      b.curv_.kappaMax = km;
+  }
 
   void allocateCsf(std::size_t idx) {
     VofBlock& b = blocks_[idx];
@@ -630,6 +647,7 @@ class VofBlockSet {
     b.curv_.interfaceEps = curvProto.interfaceEps;
     b.curv_.useMixedHeightFit = curvProto.useMixedHeightFit;
     b.curv_.useWorklist = curvProto.useWorklist;  // WO-V9: the compaction follows the prototype
+    b.curv_.kappaMax = curvProto.kappaMax;        // the clip (vof_overlap_design §5.1)
     const long len = static_cast<long>(b.adv_.extent().x) * b.adv_.extent().y * b.adv_.extent().z;
     for (int c = 0; c < 3; ++c)
       b.f_[c] = SField("vof::block::csf", len);

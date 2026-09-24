@@ -204,8 +204,31 @@ int main(int argc, char** argv) {
     IbmSolver sd(lnx, lny, lnz);
     sd.initMpi(dec, MPI_COMM_WORLD);
     configure(sd, ox, oy, oz, lnx, lny, lnz, csf);
-    for (int k = 0; k < STEPS; ++k)
+    // vof_overlap_design G0: the overlap rules must be INERT on this non-colliding pair -- no
+    // clipped curvature, no debris, no marker overlap (so no phantom capillary bound) -- at
+    // every step, on every rank.
+    long nClip = 0, nDebris = 0, nOverlap = 0;
+    for (int k = 0; k < STEPS; ++k) {
       sd.step();
+      if (csf) {
+        nClip += sd.vofBlockCurvatureStats().clipped;
+        for (const auto& q : sd.vofBlockStats())
+          nDebris += q.debrisCells;
+        nOverlap += sd.vofBlockOverlapCensus().cells;
+      }
+    }
+    {
+      long loc[3] = {nClip, nDebris, nOverlap}, glb[3];
+      MPI_Allreduce(loc, glb, 3, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+      if (rank == 0)
+        std::printf("  overlap-design counters over %d steps: clipped %ld, debris cells %ld, "
+                    "overlap cells %ld\n", STEPS, glb[0], glb[1], glb[2]);
+      if (glb[0] != 0 || glb[1] != 0 || glb[2] != 0) {
+        if (rank == 0)
+          std::printf("  FAIL: an overlap-design rule fired on a non-colliding pair\n");
+        fail = 1;
+      }
+    }
 
     // per-marker volumes: only the master carries them, so a SUM over ranks is the census
     const auto stats = sd.vofBlockStats();

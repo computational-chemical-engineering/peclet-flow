@@ -3286,6 +3286,13 @@ class Solver {
   double vofInterfaceEps() const;
 
 
+  // Curvature admissibility clip (doc/vof_overlap_design.md §5.1, §11): |kappa| <= kappa_max on
+  // every interfacial cell of every BLOCK marker's cascade (the single-field cascade never clips).
+  // `kappaMaxPhys` is PHYSICAL (1/length); a negative value selects the default 1/Delta_min.
+  // `enabled = false` restores the pre-clip block cascade verbatim. Default: ON at 1/Delta_min.
+  void setVofKappaClip(bool enabled, double kappaMaxPhys = -1.0);
+
+
   // ABLATION: 0 = the balanced-force face difference (default, the only production mode);
   // 1 = a cell-centred sigma*kappa*grad(C) face-interpolated like an ordinary body force. See
   // `addCsfRhsCellInterp`. Kept so the ctest can measure what the operator pairing is worth.
@@ -4469,6 +4476,9 @@ class Solver {
   SField vofBlkS_, vofBlkCeff_;
   VofOverlapCensus vofOverlap_{};
   bool vofOverlapDensity_ = false;
+  // The block-path curvature clip in index units (VofCurvature::kappaMax: <0 = 1/Delta_min, 0 =
+  // off), kept here so a setting made before enable_vof_blocks survives the container's creation.
+  double vofBlockKappaMax_ = -1.0;
   bool distributed_ = false;
   C3 og_{0, 0, 0};  // velocity-block inner origin (global red-black parity); {0,0,0} single-rank
 #ifdef PECLET_FLOW_MPI

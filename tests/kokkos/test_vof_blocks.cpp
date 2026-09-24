@@ -13,10 +13,15 @@
 //                             control merges them irreversibly. The raison d'etre gate.
 //   G3 re-centring          : a sphere translated 20 cells; the moving block is bitwise equal to a
 //                             block large enough never to move, and its volume is exact.
+//   D1 seeded debris        : doc/vof_overlap_design.md gate G1(i) -- two R = 5 markers 16 cells
+//                             apart plus three cells of B's colour painted into A's interface
+//                             band, through a real Solver with the block CSF: the admissibility
+//                             clip bounds B's curvature there and the face-force perturbation.
 //
 // Everything is compared against a plain `WyAdvector` on the whole grid seeded with the SAME exact
 // `sphereCellFraction` and driven by the SAME face field, so "bitwise" is a real statement about
 // the container and not about the scene.
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -24,6 +29,7 @@
 #include <limits>
 #include <vector>
 
+#include "flow_ibm.hpp"
 #include "vof/block_container.hpp"
 #include "vof/block_exchange.hpp"
 #include "vof_advect_scenes.hpp"
@@ -785,6 +791,141 @@ void gateInert() {
               packMs[0], packMs[0] / packMs[1]);
 }
 
+// ---------------------------------------------------------------------------------------------
+// D1: seeded debris through the Solver (doc/vof_overlap_design.md G1(i), WO-4)
+// ---------------------------------------------------------------------------------------------
+
+/// Exact-ish sphere fraction by 8^3 sub-sampling (the scene only needs a resolved interface).
+double sphereFrac(double cx, double cy, double cz, double R, int x, int y, int z) {
+  const int NS = 8;
+  int in = 0;
+  for (int k = 0; k < NS; ++k)
+    for (int j = 0; j < NS; ++j)
+      for (int i = 0; i < NS; ++i) {
+        const double px = x + (i + 0.5) / NS - cx, py = y + (j + 0.5) / NS - cy,
+                     pz = z + (k + 0.5) / NS - cz;
+        in += (px * px + py * py + pz * pz < R * R) ? 1 : 0;
+      }
+  return static_cast<double>(in) / (NS * NS * NS);
+}
+
+struct DebrisScene {
+  static constexpr int NX = 48, NY = 32, NZ = 32;
+  static constexpr double R = 5.0, SIGMA = 320.0, RHO_L = 1.0, RHO_G = 0.1, MU = 0.5333;
+  // A at x = 16.3; B 16 cells further along x. B's box reaches back into A's +x band (x = 21).
+  static constexpr double AX = 16.3, BX = 32.3, CY = 16.2, CZ = 16.1;
+  // The speck: three cells of B's colour in A's interface band, in a line along y.
+  static constexpr int SX = 21, SY0 = 15, SZ = 16;
+  static constexpr double SPECK[3] = {1e-5, 1e-2, 3e-3};
+  std::array<int, 6> box[2] = {{7, 7, 7, 26, 26, 26}, {18, 7, 7, 41, 26, 26}};
+
+  std::vector<double> colour(int m, bool speck) const {
+    const std::array<int, 6>& b = box[m];
+    std::vector<double> c;
+    c.reserve(static_cast<std::size_t>(b[3] - b[0]) * (b[4] - b[1]) * (b[5] - b[2]));
+    for (int z = b[2]; z < b[5]; ++z)
+      for (int y = b[1]; y < b[4]; ++y)
+        for (int x = b[0]; x < b[3]; ++x) {
+          double v = sphereFrac(m == 0 ? AX : BX, CY, CZ, R, x, y, z);
+          if (m == 1 && speck && x == SX && z == SZ && y >= SY0 && y < SY0 + 3)
+            v = SPECK[y - SY0];
+          c.push_back(v);
+        }
+    return c;
+  }
+  long localIndex(int m, int x, int y, int z) const {
+    const std::array<int, 6>& b = box[m];
+    const long nx = b[3] - b[0], ny = b[4] - b[1];
+    return (x - b[0]) + nx * ((y - b[1]) + ny * static_cast<long>(z - b[2]));
+  }
+  void build(peclet::flow::IbmSolver& s, bool speck, bool clip) const {
+    s.setRho(RHO_L);
+    s.setMu(MU);
+    s.setPressureGeometry(std::vector<double>(static_cast<std::size_t>(NX) * NY * NZ, 10.0));
+    s.setPressureChebyshev(true, 800, 1e-12);
+    s.enableVof();
+    s.setVof(std::vector<double>(static_cast<std::size_t>(NX) * NY * NZ, 0.0));
+    s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "",
+                       {RHO_L, RHO_G - RHO_L});
+    s.setSurfaceTension(SIGMA);
+    if (!clip)
+      s.setVofKappaClip(false);
+    std::vector<std::array<int, 6>> boxes = {box[0], box[1]};
+    std::vector<std::vector<double>> cols = {colour(0, speck), colour(1, speck)};
+    s.enableVofBlocksFromColours(boxes, cols);
+    s.enableVofBlockCsf();
+  }
+};
+
+void gateDebrisSpeck() {
+  std::printf("\n=== D1 seeded debris through the Solver (vof_overlap_design G1(i))\n");
+  DebrisScene sc;
+  const double spMax = 1e-2;  // max |dC| across any face touching the speck
+  const double bound = sc.SIGMA * spMax;  // sigma max|dC_speck| / Delta^2, Delta = 1
+  // reference: the same two markers without the speck
+  peclet::flow::IbmSolver ref(sc.NX, sc.NY, sc.NZ);
+  sc.build(ref, false, true);
+  peclet::flow::IbmSolver sp(sc.NX, sc.NY, sc.NZ);
+  sc.build(sp, true, true);
+  peclet::flow::IbmSolver raw(sc.NX, sc.NY, sc.NZ);  // the speck with the clip OFF, for scale
+  sc.build(raw, true, false);
+  const auto kc = sp.vofBlockKappa(1), kr = raw.vofBlockKappa(1);
+  double kmax = 0.0, kraw = 0.0;
+  for (int j = 0; j < 3; ++j) {
+    const long q = sc.localIndex(1, sc.SX, sc.SY0 + j, sc.SZ);
+    std::printf("  speck cell y=%d  C_B = %.0e  kappa_B clipped %.4f  (clip off %.4f)\n",
+                sc.SY0 + j, sc.SPECK[j], kc[q], kr[q]);
+    kmax = std::fmax(kmax, std::fabs(kc[q]));
+    kraw = std::fmax(kraw, std::fabs(kr[q]));
+  }
+  double dF = 0.0, dFraw = 0.0;
+  for (int c = 0; c < 3; ++c) {
+    const auto f0 = ref.getVofBlockForce(c), f1 = sp.getVofBlockForce(c),
+               f2 = raw.getVofBlockForce(c);
+    for (std::size_t i = 0; i < f0.size(); ++i) {
+      dF = std::fmax(dF, std::fabs(f1[i] - f0[i]));
+      dFraw = std::fmax(dFraw, std::fabs(f2[i] - f0[i]));
+    }
+  }
+  const auto cs = sp.vofBlockCurvatureStats(), cr = ref.vofBlockCurvatureStats();
+  std::printf("  max|kappa_B| on the speck %.4f (clip off %.4f); max|F - F_ref| %.4e (clip off "
+              "%.4e), bound sigma*max|dC|/h^2 = %.4e; clipped: speck run %ld, reference %ld\n",
+              kmax, kraw, dF, dFraw, bound, cs.clipped, cr.clipped);
+  CHECK(kmax <= 1.0);
+  CHECK(dF <= bound);
+  CHECK(cr.clipped == 0);  // the resolved pair never fires the clip
+  // the debris census sees the speck (and only it) on B, and nothing on A or the reference
+  const auto ss = sp.vofBlockStats(), rs = ref.vofBlockStats();
+  std::printf("  debris census before any step: speck run B %ld, reference %ld/%ld\n",
+              ss[1].debrisCells, rs[0].debrisCells, rs[1].debrisCells);
+  // one step of each, so the census (which runs after the advection) has run
+  for (auto* s : {&ref, &sp}) {
+    s->setDt(0.25 * s->capillaryDt());
+    s->step();
+  }
+  const auto ss1 = sp.vofBlockStats(), rs1 = ref.vofBlockStats();
+  double sumSpeck = 0.0;
+  for (double v : sc.SPECK)
+    sumSpeck += v;
+  std::printf("  after one step: debris census speck run A %ld / B %ld cells, B volume %.6e "
+              "(painted %.6e); reference A %ld / B %ld\n",
+              ss1[0].debrisCells, ss1[1].debrisCells, ss1[1].debrisVolume, sumSpeck,
+              rs1[0].debrisCells, rs1[1].debrisCells);
+  CHECK(rs1[0].debrisCells == 0 && rs1[1].debrisCells == 0);
+  CHECK(ss1[0].debrisCells == 0);
+  CHECK(ss1[1].debrisCells >= 3);
+  CHECK(std::fabs(ss1[1].debrisVolume - sumSpeck) < 1e-6);
+  double umR = 0.0, umS = 0.0;
+  for (int c = 0; c < 3; ++c) {
+    for (double v : ref.getVelocity(c))
+      umR = std::fmax(umR, std::fabs(v));
+    for (double v : sp.getVelocity(c))
+      umS = std::fmax(umS, std::fabs(v));
+  }
+  std::printf("  max|u| after one step: reference %.6e, speck %.6e (difference %.3e)\n", umR, umS,
+              umS - umR);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -797,6 +938,7 @@ int main(int argc, char** argv) {
     gateRecentre();
     gateAssignment();
     gateInert();
+    gateDebrisSpeck();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
                 failures == 1 ? "" : "s");
   }
