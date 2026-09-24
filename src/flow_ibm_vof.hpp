@@ -592,6 +592,13 @@ void Solver<Grid>::updateVofBlockOverlap() {
 }
 
 template <class Grid>
+void Solver<Grid>::setVofBlockDebris(bool enabled) {
+  vofBlockDebris_ = enabled ? 1 : 0;
+  if (vofBlocks_ && vofBlocks_->csfEnabled)
+    vofBlocks_->debrisRemove = enabled;
+}
+
+template <class Grid>
 void Solver<Grid>::setVofBlockOverlapDensity(bool enabled) {
   if (!vofBlocks_)
     throw std::runtime_error("set_vof_block_overlap_density: call enable_vof_blocks first");
@@ -1576,6 +1583,7 @@ void Solver<Grid>::enableVofBlockCsf() {
   vofBlocks_->curvProto.useMixedHeightFit = vofCurv_.useMixedHeightFit;
   vofBlocks_->curvProto.useWorklist = vofCurv_.useWorklist;
   vofBlocks_->curvProto.kappaMax = vofBlockKappaMax_;  // the clip: BLOCK path only (§5.1, §11)
+  vofBlocks_->debrisRemove = (vofBlockDebris_ != 0);   // debris removal: default ON (§5.3)
   vofBlocks_->enableCsf(sigmaCsf_);
   const long len3 = static_cast<long>(e3_.x) * e3_.y * e3_.z;
   for (int c = 0; c < 3; ++c) {

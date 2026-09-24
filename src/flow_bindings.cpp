@@ -1030,17 +1030,30 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "liquid (measured -9.5e-17 over a 20-cell translation, against a bubble volume of 524), "
           "but it is reported rather than hidden — a container that silently loses mass is not "
           "acceptable.\n\n"
-          "'debris_cells' / 'debris_volume' are this step's marker DEBRIS census (block CSF on "
-          "only; master only): interfacial cells whose 5^3 stencil holds less than one cell volume "
-          "of the marker's own colour, and their summed colour. 'debris_returned', 'debris_lost' "
-          "and 'debris_unresolved' are the cumulative removal ledger (doc/vof_overlap_design.md "
-          "5.3; zero while only the census runs).\n\n"
+          "'debris_cells' / 'debris_volume' are this step's marker DEBRIS removal (block CSF on "
+          "only; master only; see set_vof_block_debris): interfacial cells with every cell of the "
+          "marker within two cells below C = 1/2, and their summed colour. 'debris_returned', "
+          "'debris_lost' and 'debris_unresolved' are the cumulative ledger "
+          "(doc/vof_overlap_design.md 5.3): volume + discarded + debris_lost is conserved.\n\n"
           "'overlap_*' are the GLOBAL marker-overlap census of the last block advection "
           "(vof_overlap_design 5.6; block CSF or the overlap density on), the same in every dict: "
           "'overlap_max_sum' = max over cells of S = sum_k C_k, 'overlap_excess' = sum of "
           "(S - 1)^+ (cell volumes), 'overlap_cells' = cells with S > 1 + 1e-8, and "
           "'overlap_bound_active' = the phantom-aware capillary limit (2 rho_min in place of "
           "rho_l + rho_g) is in force for the next step.")
+      .def(
+          "set_vof_block_debris", [](D& diag, bool enabled) { diag.s->setVofBlockDebris(enabled); },
+          nb::arg("enabled"),
+          "Per-step marker DEBRIS removal of the block container (doc/vof_overlap_design.md 5.3, "
+          "11). Default: ON under enable_vof_block_csf, off otherwise. A debris cell is an "
+          "interfacial cell of a marker (1e-8 < C < 1-1e-8) with every cell of that marker within "
+          "two cells below C = 1/2: colour with no resolvable interface near it (what two "
+          "overlapping markers tear off each other). Its colour is zeroed and the volume is "
+          "returned to the marker's attached interfacial cells weighted C(1-C), in a fixed "
+          "summation order, so the marker volume is exact and the state decomposition-"
+          "independent. Ledger in vof_block_stats(): debris_cells / debris_volume (this step), "
+          "debris_returned, debris_lost, debris_unresolved (cumulative, migrate with the block). "
+          "enabled=False keeps the census (what WOULD be removed) and moves nothing.")
       .def(
           "set_vof_block_overlap_density",
           [](D& diag, bool enabled) { diag.s->setVofBlockOverlapDensity(enabled); },

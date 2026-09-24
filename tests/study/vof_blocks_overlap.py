@@ -74,6 +74,9 @@ def counters(s):
     return {"clipped": cs.get("clipped", 0),
             "debris_cells": sum(b.get("debris_cells", 0) for b in st),
             "debris_volume": sum(b.get("debris_volume", 0.0) for b in st),
+            "returned": [b.get("debris_returned", 0.0) for b in st],
+            "lost": sum(b.get("debris_lost", 0.0) for b in st),
+            "unresolved": sum(b.get("debris_unresolved", 0) for b in st),
             "overlap_cells": st[0].get("overlap_cells", 0) if st else 0,
             "overlap_excess": st[0].get("overlap_excess", 0.0) if st else 0.0,
             "bound": bool(st[0].get("overlap_bound_active", False)) if st else False}
@@ -258,7 +261,9 @@ def gate_shear():
               f"({agg['first_contact']}..{agg['last_contact']})  max overlap excess "
               f"{agg['ovmax']:.4f}  phantom-bound steps {agg['bound']}  clipped cells (sum) "
               f"{agg['clipped']}  debris: max cells {agg['debris']}, steps with debris "
-              f"{agg['debris_steps']}, max volume {agg['debris_vol_max']:.3e}", flush=True)
+              f"{agg['debris_steps']}, max volume {agg['debris_vol_max']:.3e}; ledger returned per "
+              f"marker {[f'{r:.3e}' for r in k['returned']]}, lost {k['lost']:.3e}, unresolved "
+              f"{k['unresolved']}", flush=True)
 
 
 ALL = {"static": gate_static, "shear": gate_shear}

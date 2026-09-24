@@ -585,7 +585,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
       const long len = static_cast<long>(e.x) * e.y * e.z;
       dbuf[i] = buffer(len);
       hbuf[i] = Kokkos::create_mirror_view(dbuf[i]);
-      hAux[i].resize(4, 0.0);
+      hAux[i].resize(VofBlock::kAuxLen, 0.0);
       if (from == rank_) {
         Kokkos::deep_copy(dbuf[i], blocks[i].advector().colour());
         Kokkos::deep_copy(hbuf[i], dbuf[i]);
@@ -594,15 +594,17 @@ class VofBlockExchange : public VofBlockExchangeBase {
         MPI_Isend(hbuf[i].data(), static_cast<int>(len), MPI_DOUBLE, to, tagOf(blocks[i].id, 2),
                   comm_, &reqs.back());
         reqs.push_back(MPI_REQUEST_NULL);
-        MPI_Isend(hAux[i].data(), 4, MPI_DOUBLE, to, tagOf(blocks[i].id, 3), comm_, &reqs.back());
+        MPI_Isend(hAux[i].data(), VofBlock::kAuxLen, MPI_DOUBLE, to, tagOf(blocks[i].id, 3), comm_,
+                  &reqs.back());
       } else {
         reqs.push_back(MPI_REQUEST_NULL);
         MPI_Irecv(hbuf[i].data(), static_cast<int>(len), MPI_DOUBLE, from, tagOf(blocks[i].id, 2),
                   comm_, &reqs.back());
         reqs.push_back(MPI_REQUEST_NULL);
-        MPI_Irecv(hAux[i].data(), 4, MPI_DOUBLE, from, tagOf(blocks[i].id, 3), comm_, &reqs.back());
+        MPI_Irecv(hAux[i].data(), VofBlock::kAuxLen, MPI_DOUBLE, from, tagOf(blocks[i].id, 3),
+                  comm_, &reqs.back());
       }
-      mBytes_ += (len + 4) * 8;
+      mBytes_ += (len + VofBlock::kAuxLen) * 8;
       mMsgs_ += 2;
     }
     if (!reqs.empty())

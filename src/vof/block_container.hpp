@@ -281,16 +281,18 @@ struct VofBlockStats {
   /// Lagrangian output. A sphere of radius R reads 4 pi R^2 to the PLIC discretization error
   /// (~1 % at R/h = 8), NOT exactly; it is a measure of the reconstructed surface, not of a fit.
   double area = 0.0;
-  /// Marker DEBRIS census (`doc/vof_overlap_design.md` §5.2, WO-2): an interfacial cell
-  /// (`vofIsInterface(C, curvProto.interfaceEps)`) whose 5^3 fit stencil holds less than
-  /// `VofBlockSet::kDebrisVolume` cell volumes of the marker's OWN colour -- a mixed cell with no
-  /// body of its marker near it, the cell the curvature cascade cannot fit. Evaluated per step on
-  /// the master, after the WY advection and before the re-centring, when the block CSF is on.
-  long debrisCells = 0;         ///< debris cells this step
-  double debrisVolume = 0.0;    ///< their colour, summed in index order (cell volumes), this step
-  double debrisReturned = 0.0;  ///< cumulative volume returned to the attached interface (WO-3)
-  double debrisLost = 0.0;      ///< cumulative volume the return could not place (WO-3)
-  long debrisUnresolved = 0;    ///< cumulative debris cells left for want of an interface (WO-3)
+  /// Marker DEBRIS (`doc/vof_overlap_design.md` §5.2 as amended by §11): an interfacial cell
+  /// (`vofIsInterface(C, curvProto.interfaceEps)`) with NO cell of the marker's own colour above
+  /// `VofBlockSet::kDebrisMaxC` (1/2) within two cells (its 5^3 fit stencil) -- colour with no
+  /// resolvable interface of its marker near it, the cell the curvature cascade cannot fit.
+  /// Evaluated per step on the master, after the WY advection and before the re-centring, while
+  /// the block CSF is on; removed (colour -> 0, volume returned to the marker's attached interface)
+  /// when `VofBlockSet::debrisRemove` is on.
+  long debrisCells = 0;         ///< debris cells removed this step (detected, if removal is off)
+  double debrisVolume = 0.0;    ///< their colour, summed in list order (cell volumes), this step
+  double debrisReturned = 0.0;  ///< cumulative sum of debrisVolume over the removals
+  double debrisLost = 0.0;      ///< cumulative volume the return could not place (C capped at 1)
+  long debrisUnresolved = 0;    ///< cumulative debris cells left for want of an attached interface
 };
 
 /// One bubble's block. Every rank holds the (id, box, master) triple — the replicated table — and
@@ -317,17 +319,25 @@ class VofBlock {
   const VofCurvature& curvature() const { return curv_; }
   SField csfForce(int c) const { return f_[c]; }
   /// The non-colour state a master carries between steps: the previous centroid (so a migrated
-  /// block's reported velocity has no gap) and whether it is valid. Four doubles; everything else
-  /// in a block is either replicated (the table) or recomputed every step.
-  void serializeAux(double out[4]) const {
+  /// block's reported velocity has no gap), whether it is valid, and the cumulative debris ledger
+  /// (`doc/vof_overlap_design.md` §5.3: it migrates with the block). `kAuxLen` doubles; everything
+  /// else in a block is either replicated (the table) or recomputed every step.
+  static constexpr int kAuxLen = 7;
+  void serializeAux(double out[kAuxLen]) const {
     for (int d = 0; d < 3; ++d)
       out[d] = prevCentroid_[d];
     out[3] = hasPrev_ ? 1.0 : 0.0;
+    out[4] = st_.debrisReturned;
+    out[5] = st_.debrisLost;
+    out[6] = static_cast<double>(st_.debrisUnresolved);  // a cell count: exact in a double
   }
-  void deserializeAux(const double in[4]) {
+  void deserializeAux(const double in[kAuxLen]) {
     for (int d = 0; d < 3; ++d)
       prevCentroid_[d] = in[d];
     hasPrev_ = (in[3] != 0.0);
+    st_.debrisReturned = in[4];
+    st_.debrisLost = in[5];
+    st_.debrisUnresolved = static_cast<long>(in[6]);
   }
 
   friend class VofBlockSet;
@@ -484,13 +494,21 @@ class VofBlockSet {
   /// Let a block SHRINK when it has grown much larger than the bubble needs. Off gives a block
   /// that only ever grows — the G3 reference (a block large enough that it never has to move).
   bool allowShrink = true;
-  /// Debris predicate threshold, in CELL VOLUMES of the marker's own colour in the 5^3 stencil
-  /// (`doc/vof_overlap_design.md` §5.2). A discretization constant like `kPvHalf`, not a knob:
-  /// a cell whose own fit data set holds less than one cell of colour cannot carry a paraboloid.
-  static constexpr double kDebrisVolume = 1.0;
-  /// Run the debris census (WO-2) in `advect()`. It only COUNTS -- nothing in the state moves --
-  /// and it runs only while the block CSF is on (a kinematic block run never pays for it).
+  /// Debris predicate threshold (`doc/vof_overlap_design.md` §11): an interfacial cell is debris
+  /// when NO cell of its 5^3 stencil holds more than half a cell of the marker's colour --
+  /// TBFsolver's fragment rule with "full" read as C > 1/2. A discretization constant, not a knob.
+  /// (The §5.2 size rule, sum_{5^3} C < 1, was measured not to separate debris from attached
+  /// fringe cells: fragments 0.10-1.24 against attached >= 1.19 on the channel_18 dumps.)
+  static constexpr double kDebrisMaxC = 0.5;
+  /// Run the debris pass in `advect()` (only while the block CSF is on -- a kinematic block run
+  /// never pays for it). With `debrisRemove` off it only COUNTS: nothing in the state moves.
   bool debrisCensus = true;
+  /// Remove the debris and return its volume (§5.3). Solver default: ON under
+  /// `enable_vof_block_csf`, via `diagnostics.set_vof_block_debris`.
+  bool debrisRemove = false;
+  /// Guard of the volume return (§5.3 step 3): a marker whose attached interface holds less than
+  /// this much colour (cell volumes) keeps its debris (counted in `debrisUnresolved`).
+  static constexpr double kDebrisMinAttached = 1.0;
   double cellSize() const { return h_; }
 
   std::size_t count() const { return blocks_.size(); }
@@ -771,7 +789,7 @@ class VofBlockSet {
         // reset its previous centroid and blank one step of its reported velocity.
         blocks_[i].mine_ = true;
         fillBlockGhosts(blocks_[i]);
-        double aux[4];
+        double aux[VofBlock::kAuxLen];
         blocks_[i].serializeAux(aux);  // the migrated previous centroid survives the re-measure
         measure(blocks_[i], 0.0);
         blocks_[i].deserializeAux(aux);
@@ -1207,12 +1225,21 @@ class VofBlockSet {
     blocks_[idx].st_.discarded += dropped;
   }
 
-  /// WO-2 debris census on one master block (`doc/vof_overlap_design.md` §5.2): marks the debris
-  /// cells into `listD_` with a `parallel_scan` in inner-box index order and sums their colour
-  /// SEQUENTIALLY in that order, so the result is a pure function of the colour (decomposition-
-  /// and launch-independent). The 5^3 stencil reads the block's ghost ring as `advect()` left it
-  /// (valid on exit: 0 inside the domain by the margin invariant, the periodic wrap / the
-  /// zero-gradient clamp elsewhere) -- the same values the cascade's PV fit reads.
+  /// Debris pass on one master block (`doc/vof_overlap_design.md` §5.2-5.3, predicate of §11).
+  ///
+  /// 1. mark: two `parallel_scan`s in inner-box index order -> `listD_` (debris cells) and, only
+  ///    when there is debris, `listA_` (attached interfacial cells: interfacial and not debris).
+  ///    The 5^3 stencil reads the block's ghost ring as `advect()` left it (valid on exit: 0 inside
+  ///    the domain by the margin invariant, the periodic wrap / the zero-gradient clamp elsewhere)
+  ///    -- the values the cascade's PV fit reads. The predicate is evaluated on the colour BEFORE
+  ///    any removal (mark, then act), so it does not depend on the traversal order.
+  /// 2. sums: dV = sum_D C, W = sum_A C(1-C), VA = sum_A C, each SEQUENTIAL in list order on one
+  ///    thread -- a fixed summation order, so the state stays decomposition-independent bitwise.
+  /// 3. guard: VA < kDebrisMinAttached -> nothing removed, debrisUnresolved += nD.
+  /// 4. act (same single thread, list order): debris -> 0; attached C += dV C(1-C)/W, capped at 1
+  ///    with the excess accumulated in `lost` (expected identically 0).
+  /// 5. ledger: debrisCells, debrisVolume (this step), debrisReturned += dV, debrisLost += lost.
+  /// nD == 0 (the common case) runs nothing after the first scan: a bitwise no-op.
   void debrisPass(VofBlock& b) {
     b.st_.debrisCells = 0;
     b.st_.debrisVolume = 0.0;
@@ -1222,11 +1249,11 @@ class VofBlockSet {
     if (static_cast<long>(listD_.extent(0)) < region)
       listD_ = LField(Kokkos::view_alloc("vof::block::debris_list", Kokkos::WithoutInitializing),
                       region);
-    const double ieps = curvProto.interfaceEps, kdv = kDebrisVolume;
+    const double ieps = curvProto.interfaceEps, cfull = kDebrisMaxC;
     const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
     const int nx = n.x, ny = n.y;
     SField c = b.adv_.colour();
-    LField list = listD_;
+    LField listD = listD_;
     long nD = 0;
     Kokkos::parallel_scan(
         "vof::block::debris_mark", Kokkos::RangePolicy<SExec>(SExec(), 0, region),
@@ -1237,34 +1264,99 @@ class VofBlockSet {
           const long i = L3(g + ix, g + iy, g + iz, e);
           if (!vofIsInterface(c(i), ieps))
             return;
-          double sum = 0.0;
           for (int oz = -2; oz <= 2; ++oz)
             for (int oy = -2; oy <= 2; ++oy)
               for (int ox = -2; ox <= 2; ++ox)
-                sum += c(i + ox + oy * sy + oz * sz);
-          if (!(sum < kdv))
-            return;
+                if (c(i + ox + oy * sy + oz * sz) > cfull)
+                  return;  // attached: a cell at least half full of this marker within two cells
           if (final)
-            list(upd) = i;
+            listD(upd) = i;
           ++upd;
         },
         nD);
     Kokkos::fence();
     if (nD == 0)
       return;  // the common case: nothing else runs
-    double dV = 0.0;
-    Kokkos::parallel_reduce(
-        "vof::block::debris_sum", Kokkos::RangePolicy<SExec>(SExec(), 0, 1),
-        KOKKOS_LAMBDA(const long, double& acc) {
-          double a = 0.0;  // one thread, list order: a FIXED summation order
-          for (long t = 0; t < nD; ++t)
-            a += c(list(t));
-          acc += a;
+    if (static_cast<long>(listA_.extent(0)) < region)
+      listA_ = LField(Kokkos::view_alloc("vof::block::attached_list", Kokkos::WithoutInitializing),
+                      region);
+    LField listA = listA_;
+    long nA = 0;
+    Kokkos::parallel_scan(
+        "vof::block::debris_attached", Kokkos::RangePolicy<SExec>(SExec(), 0, region),
+        KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
+          const int ix = static_cast<int>(r % nx);
+          const int iy = static_cast<int>((r / nx) % ny);
+          const int iz = static_cast<int>(r / (static_cast<long>(nx) * ny));
+          const long i = L3(g + ix, g + iy, g + iz, e);
+          if (!vofIsInterface(c(i), ieps))
+            return;
+          bool attached = false;
+          for (int oz = -2; oz <= 2 && !attached; ++oz)
+            for (int oy = -2; oy <= 2 && !attached; ++oy)
+              for (int ox = -2; ox <= 2 && !attached; ++ox)
+                attached = c(i + ox + oy * sy + oz * sz) > cfull;
+          if (!attached)
+            return;
+          if (final)
+            listA(upd) = i;
+          ++upd;
         },
-        dV);
+        nA);
     Kokkos::fence();
+    // [0] dV, [1] W, [2] VA, [3] lost, [4] removed? -- one thread, list order throughout
+    Kokkos::View<double[5], SMem> out("vof::block::debris_out");
+    const bool remove = debrisRemove;
+    const double vaMin = kDebrisMinAttached;
+    Kokkos::parallel_for(
+        "vof::block::debris_act", Kokkos::RangePolicy<SExec>(SExec(), 0, 1),
+        KOKKOS_LAMBDA(const long) {
+          double dV = 0.0, W = 0.0, VA = 0.0, lost = 0.0;
+          for (long t = 0; t < nD; ++t)
+            dV += c(listD(t));
+          for (long t = 0; t < nA; ++t) {
+            const double ca = c(listA(t));
+            W += ca * (1.0 - ca);
+            VA += ca;
+          }
+          out(0) = dV;
+          out(1) = W;
+          out(2) = VA;
+          out(4) = 0.0;
+          if (!remove || VA < vaMin || !(W > 0.0))
+            return;
+          for (long t = 0; t < nD; ++t)
+            c(listD(t)) = 0.0;
+          for (long t = 0; t < nA; ++t) {
+            const long i = listA(t);
+            const double ca = c(i);
+            const double d = dV * (ca * (1.0 - ca)) / W;
+            double cn = ca + d;
+            if (cn > 1.0) {
+              lost += cn - 1.0;
+              cn = 1.0;
+            }
+            c(i) = cn;
+          }
+          out(3) = lost;
+          out(4) = 1.0;
+        });
+    Kokkos::fence();
+    auto ho = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), out);
+    if (!remove) {  // census only: report what WOULD be removed
+      b.st_.debrisCells = nD;
+      b.st_.debrisVolume = ho(0);
+      return;
+    }
+    if (ho(4) == 0.0) {  // step 3: no attached interface worth a cell -- the clip bounds it
+      b.st_.debrisUnresolved += nD;
+      return;
+    }
+    fillBlockGhosts(b);  // the inner colour moved; the next reader expects valid ghosts
     b.st_.debrisCells = nD;
-    b.st_.debrisVolume = dV;
+    b.st_.debrisVolume = ho(0);
+    b.st_.debrisReturned += ho(0);
+    b.st_.debrisLost += ho(3);
   }
 
   /// Sum of the block's colour over inner cells whose GLOBAL index falls outside `nb`.
@@ -1433,7 +1525,7 @@ class VofBlockSet {
   long poolHits_ = 0, poolMisses_ = 0;
   long lastReassigned_ = 0;
   VofCurvature::Stats curvStats_{};
-  LField listD_;  ///< WO-2: the debris list, reused across blocks and steps
+  LField listD_, listA_;  ///< the debris / attached-interface lists, reused across blocks and steps
 };
 
 }  // namespace peclet::flow::vof

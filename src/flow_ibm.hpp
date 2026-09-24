@@ -2986,6 +2986,10 @@ class Solver {
   // registered "C") becomes `C_eff = S <= 1 + 1e-8 ? max_k C_k : max(0, 2 - S)` -- the overlap
   // volume as film liquid ("the tent"). See vof_overlap_design §5.6 for what it costs.
   void setVofBlockOverlapDensity(bool enabled);
+  // Per-step marker DEBRIS removal with exact volume return (vof_overlap_design §5.3, predicate
+  // §11). Default: ON under enable_vof_block_csf, OFF otherwise (a kinematic block run is
+  // unchanged). May be called before or after enable_vof_blocks / enable_vof_block_csf.
+  void setVofBlockDebris(bool enabled);
 
 
   // DIAGNOSTIC: the scattered block CSF face force on this rank's inner cells, component c (the
@@ -4479,6 +4483,8 @@ class Solver {
   // The block-path curvature clip in index units (VofCurvature::kappaMax: <0 = 1/Delta_min, 0 =
   // off), kept here so a setting made before enable_vof_blocks survives the container's creation.
   double vofBlockKappaMax_ = -1.0;
+  // set_vof_block_debris: -1 = not set (the default: ON under the block CSF), 0 = off, 1 = on.
+  int vofBlockDebris_ = -1;
   bool distributed_ = false;
   C3 og_{0, 0, 0};  // velocity-block inner origin (global red-black parity); {0,0,0} single-rank
 #ifdef PECLET_FLOW_MPI
