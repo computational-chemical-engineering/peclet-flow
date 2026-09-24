@@ -19,6 +19,15 @@
 //     matches the single-rank one to +-1 (reduction-order steering of the adaptive PCG). The
 //     no-telescope count is printed for the record, not gated.
 //
+//  D  a WEIGHTED level-0 decomposition (what rebalanceByWeights builds) whose ORB root split is
+//     ODD: the sibling-merge search alone collapses level 0 onto ONE rank (SCALING_ISSUES #2).
+//     With setRepartition(true) — what the Solver sets for a weighted dec0 — the stage is a
+//     Repartition onto a proportional ORB on np_L ranks instead (amr/docs/amr_mg_core_boundary.md
+//     §11.1). Gates: the precondition holds (odd root split), a Repartition stage happened, the
+//     solution matches the single-rank reference and the collapsed hierarchy as the other cases
+//     do, the coarsest global grid equals the single-rank one, and the iteration count is the
+//     single-rank one +-1.
+//
 // np=1 has nothing to telescope (one block) and is byte-identical to the single-rank path by
 // construction; the gates run at np=2 and 4.
 #include <mpi.h>
@@ -26,6 +35,7 @@
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
+#include <vector>
 
 #include "mac_cutcell_mg.hpp"
 #include "peclet/core/common/types.hpp"
@@ -181,6 +191,66 @@ int main(int argc, char** argv) {
             cgC0.x, cgC0.y, cgC0.z, cg[0], cg[1], cg[2], tele0, tele0 == 1 ? "" : "s", cgRef.x,
             cgRef.y, cgRef.z, itersC0, itersC1, itersRef,
             ok ? "ok" : "FAIL (telescoped hierarchy != single-rank)");
+    }
+  }
+  if (size > 1) {
+    // D: 48x32x32 (x the longest axis, so the ORB root splits x) with a weight 20x heavier on the
+    // slab x < 3: the root split lands on x = 3 at np = 2 and 4 (closest cumulative weight to the
+    // half), so level 0 is odd on x and the telescope fires at L0.
+    const IVec<3> gs{48, 32, 32};
+    std::vector<double> w((std::size_t)gs[0] * gs[1] * gs[2]);
+    for (Index z = 0; z < gs[2]; ++z)
+      for (Index y = 0; y < gs[1]; ++y)
+        for (Index x = 0; x < gs[0]; ++x)
+          w[(std::size_t)(x + y * gs[0] + z * gs[0] * gs[1])] = x < 3 ? 20.0 : 1.0;
+    peclet::core::decomp::BlockDecomposer<3> weighted((std::size_t)size, gs, w);
+    const bool oddRoot = (weighted.block(0).size[0] % 2) != 0;
+    const int nlev = 4;
+    Result d[2];
+    int teleN[2] = {0, 0}, repN[2] = {0, 0};
+    C3 cg[2]{};
+    for (int k = 0; k < 2; ++k) {  // k = 0: sibling merges only (the collapse); 1: Repartition
+      CutcellMG mg;
+      mg.setAgglomerationMode(-1);
+      mg.setRepartition(k == 1);
+      mg.initMpi(gs[0], gs[1], gs[2], nlev, MPI_COMM_WORLD, &weighted);
+      CutcellMG::Level& l0 = mg.level(0);
+      d[k] = setupAndSolve(mg, l0.ext, l0.og, gs);
+      teleN[k] = mg.telescopeCount();
+      repN[k] = mg.repartitionCount();
+      cg[k] = mg.coarsestGlobal();
+      if (k == 1) {
+        CutcellMG ref;
+        ref.setAgglomerationMode(-1);
+        ref.init(gs[0], gs[1], gs[2], nlev);
+        const C3 re{gs[0] + 2 * G, gs[1] + 2 * G, gs[2] + 2 * G}, ro{0, 0, 0};
+        Result r = setupAndSolve(ref, re, ro, gs);
+        double dr = compareBlock(d[1], l0, r, re), dc = 0.0;
+        for (std::size_t i = 0; i < d[1].x.extent(0); ++i)
+          dc = std::max(dc, std::fabs(d[1].x(i) - d[0].x(i)));
+        double g[2] = {dr, dc}, gmax[2] = {0.0, 0.0};
+        MPI_Allreduce(g, gmax, 2, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        int rep0 = repN[1], tele0 = teleN[0];
+        int cgr[3] = {cg[1].x, cg[1].y, cg[1].z};
+        MPI_Bcast(&rep0, 1, MPI_INT, 0, MPI_COMM_WORLD);  // rank 0 always holds every level
+        MPI_Bcast(&tele0, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(cgr, 3, MPI_INT, 0, MPI_COMM_WORLD);
+        const C3 cgRef = ref.coarsestGlobal();
+        const bool ok = oddRoot && rep0 >= 1 && gmax[0] <= 1e-7 && gmax[1] <= 1e-7 &&
+                        cgr[0] == cgRef.x && cgr[1] == cgRef.y && cgr[2] == cgRef.z &&
+                        std::abs(d[1].iters - r.iters) <= 1;
+        if (!ok)
+          ++fail;
+        if (rank == 0)
+          std::printf(
+              "  %-42s np=%d root split x=%ld (%s)  collapse: %d telescope(s), %d iters; "
+              "repartition: %d repartition stage(s), %d iters, coarsest %dx%dx%d; single-rank "
+              "%d iters, coarsest %dx%dx%d  max|rep-ref|=%.3e  max|rep-collapse|=%.3e  %s\n",
+              "D weighted dec0 48x32x32, repartition", size, (long)weighted.block(0).size[0],
+              oddRoot ? "odd" : "EVEN - precondition broken", tele0, d[0].iters, rep0, d[1].iters,
+              cgr[0], cgr[1], cgr[2], r.iters, cgRef.x, cgRef.y, cgRef.z, gmax[0], gmax[1],
+              ok ? "ok" : "FAIL");
+      }
     }
   }
   int totalFail = 0;

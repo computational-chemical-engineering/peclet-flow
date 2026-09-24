@@ -2943,6 +2943,15 @@ class CutcellMG {
 #endif
     return n;
   }
+  // Repartition stages this rank passed through (a subset of telescopeCount()).
+  int repartitionCount() const {
+    int n = 0;
+#ifdef PECLET_FLOW_MPI
+    for (const Level& l : lv_)
+      n += (l.tele && l.tele->repartition()) ? 1 : 0;
+#endif
+    return n;
+  }
   C3 coarsestGlobal() const {
     C3 g{gnxF_, gnyF_, gnzF_};
     for (std::size_t L = 0; L + 1 < lv_.size(); ++L)
