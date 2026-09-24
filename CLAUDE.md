@@ -75,16 +75,16 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 157 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 165 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-157 registered / **155 with `-LE bench`** (G.6 added `no_float_operator_casts`): 45 from
-`tests/kokkos` — of which `bench_rbgs` and `vof_timing` carry the `bench` label and are
-instruments, not gates — 106 from `tests/kokkos_mpi` (35 cases at np = 1, 2, 4 plus one np = 8
-rung), and 6 Python ctests on the module built in that tree (`regression_staggered`,
-`verify_poiseuille_flow`, `verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`,
+165 registered / **163 with `-LE bench`** (counted 2026-09-24): 46 from `tests/kokkos` — of
+which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 112
+from `tests/kokkos_mpi` (37 cases at np = 1, 2, 4 plus one np = 8 rung), and 7 Python ctests on
+the module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
+`verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`, `colocated_open_boundary`,
 `no_env_knobs`, `no_float_operator_casts`). Always bound the OpenMP pool — an unbounded one on a
 many-core host is an hour-long trap.
 
@@ -215,7 +215,13 @@ decides a (1−φ) factor on published permeabilities.
   `diagnostics.set_aperture_order`, `set_exact_crossings`, `set_openness_override`,
   `set_fluid_only_constraint`, `set_ghost_projection` / `set_collocated_scheme('ghost')` — raise
   after `set_solid`/`set_pressure_geometry`/`set_solid_from_scene`; `set_decomposition` and
-  `diagnostics.set_comm_avoiding` raise after `init_mpi`. `set_rho`/`set_mu`/`set_dt` may be
+  `diagnostics.set_comm_avoiding` raise after `init_mpi`. **`init_mpi` itself raises after the
+  geometry** (2026-09-24): the geometry builds the pressure and velocity multigrids for the
+  partition in force when it runs, so built first they were single-rank and every rank ran its own
+  block-periodic pressure solve — PCG converged, nothing failed, and the velocity kept each block's
+  mean divergence (4.0e-2 of max|u| 0.36 after one step at np = 4; exact at np = 1, whose block is
+  the domain, which is why it hid). The order is `Solver(*size)` → `init_mpi` → geometry;
+  `test_cellforce_mpi` gates it. `set_rho`/`set_mu`/`set_dt` may be
   called at any time (a change after the geometry rebuilds the momentum operator at the next step;
   under a physical domain the FIRST `set_rho` and the FIRST `set_dt` pin the reference scales).
   `set_decomposition(levels, max_imbalance)` and `flow.mpi_block(..., levels=, max_imbalance=)`
