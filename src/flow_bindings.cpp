@@ -3000,7 +3000,10 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "Wire the multi-rank step: pass the GLOBAL grid dims (gnx,gny,gnz). The Solver must have "
           "been "
           "constructed with this rank's LOCAL block dims (from mpi_block). MPI_Init is called if "
-          "needed.")
+          "needed. Call it BEFORE the geometry (set_solid / set_pressure_geometry / "
+          "set_solid_from_scene): the geometry builds the pressure and velocity multigrids for "
+          "the partition in force when it runs, so init_mpi raises if a geometry already exists "
+          "(built first, every rank would solve its own block-periodic pressure problem).")
       .def(
           "rank",
           [](S&) {
@@ -3081,7 +3084,9 @@ NB_MODULE(_flow, m) {
       nb::arg("max_imbalance") = 1.05,
       "Return this MPI rank's ORB block of the global (gnx,gny,gnz) grid as (origin, size), each a "
       "length-3 list [x,y,z]. Use it to slice the global SDF into this rank's local block for a "
-      "distributed Solver (see Solver.init_mpi). MPI_Init is called if needed.\n\n"
+      "distributed Solver, in this order: Solver(*size), init_mpi(gnx, gny, gnz), then the "
+      "geometry (init_mpi raises after set_solid / set_pressure_geometry). MPI_Init is called if "
+      "needed.\n\n"
       "levels / max_imbalance choose how the partition is built and MUST match the values given "
       "to Solver.set_decomposition() -- both derive the same partition and have to agree. "
       "levels=0 (DEFAULT) = the aligned ORB: split positions on the FINE grid are snapped to a "

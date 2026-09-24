@@ -27,6 +27,22 @@ void Solver<Grid>::initMpi(int gnx, int gny, int gnz, MPI_Comm comm) {
 
 template <class Grid>
 void Solver<Grid>::initMpi(const peclet::core::decomp::BlockDecomposer<3>& dec, MPI_Comm comm) {
+  // The FIRST initMpi must precede the geometry. setSolid builds the pressure MG, the velocity MG,
+  // the SDF ghost ring and the cut-cell overlays for the partition in force when it runs; before
+  // initMpi that is the single-rank one, so each rank's hierarchy treats its own block as a
+  // periodic domain of its own. Nothing below rebuilds it, and the step then runs with a
+  // distributed momentum solve but P independent pressure solves: every PCG converges, and the
+  // velocity leaves each rank carrying the divergence of its block-local mean (measured, one
+  // step: a Gaussian cell force at np = 4, 2x2x1, max|du| 4.0e-2 of max|u| 0.36; a pure-gradient
+  // force at np = 2, max|div u| 7.5e-2 where single-rank gives 2e-15). np = 1 is exact by
+  // accident -- its block IS the domain -- so the order is enforced at every rank count.
+  // redistribute() re-enters here with distributed_ already set and rebuilds the geometry itself.
+  if (geometryBuilt_ && !distributed_)
+    throw std::runtime_error(
+        "init_mpi: call BEFORE the geometry (set_solid / set_pressure_geometry / "
+        "set_solid_from_scene) -- the geometry builds the pressure and velocity multigrids for the "
+        "partition in force when it runs, so a geometry built first gives every rank an "
+        "independent, block-periodic pressure solve (a wrong answer at np > 1, with no error)");
   pcInDomain_ = CCField();  // WO-P3g: which ghosts carry a row depends on the decomposition
   distributed_ = true;
   comm_ = comm;
