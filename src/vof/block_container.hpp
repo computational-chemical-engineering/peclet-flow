@@ -793,6 +793,26 @@ class VofBlockSet {
     return out;
   }
 
+  /// One marker's OWN curvature over its inner box, x-fastest (empty unless this rank masters it
+  /// and the block CSF is on). A diagnostic: which curvature each marker carries at a face.
+  std::vector<double> blockKappaHost(std::size_t idx) {
+    VofBlock& b = blocks_.at(idx);
+    if (!b.mine_ || !b.allocated_ || !csfEnabled)
+      return {};
+    const I3 n = b.adv_.inner();
+    SField k = b.curv_.kappa();
+    auto hk = Kokkos::create_mirror_view(k);
+    Kokkos::deep_copy(hk, k);
+    std::vector<double> out(static_cast<std::size_t>(n.x) * static_cast<std::size_t>(n.y) *
+                            static_cast<std::size_t>(n.z));
+    std::size_t q = 0;
+    for (int z = 0; z < n.z; ++z)
+      for (int y = 0; y < n.y; ++y)
+        for (int x = 0; x < n.x; ++x)
+          out[q++] = hk(b.adv_.index(x, y, z));
+    return out;
+  }
+
   /// Seed a block whose INNER box is EXACTLY `bb` (not grown by the margin: `bb` is what
   /// `blockColourHost` was paired with) and whose colour is the given host array, x-fastest over
   /// `bb`. No seed clip runs -- the colour is given, not gathered out of a union.

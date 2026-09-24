@@ -1445,6 +1445,15 @@ std::vector<double> Solver<Grid>::vofBlockColour(long id) {
 }
 
 template <class Grid>
+std::vector<double> Solver<Grid>::vofBlockKappa(long id) {
+  if (!vofBlocks_)
+    throw std::runtime_error("vof_block_kappa: call enable_vof_blocks first");
+  if (id < 0 || static_cast<std::size_t>(id) >= vofBlocks_->count())
+    throw std::runtime_error("vof_block_kappa: no such block id");
+  return vofBlocks_->blockKappaHost(static_cast<std::size_t>(id));
+}
+
+template <class Grid>
 void Solver<Grid>::enableVofBlocksFromColours(const std::vector<std::array<int, 6>>& boxes,
                                               const std::vector<std::vector<double>>& colours) {
   if (boxes.size() != colours.size())

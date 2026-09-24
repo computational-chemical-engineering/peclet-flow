@@ -95,6 +95,25 @@ static nb::ndarray<nb::numpy, double> vofBlockColourArray(S& s, long id) {
       {1, static_cast<std::int64_t>(nx), static_cast<std::int64_t>(nx * ny)});
 }
 
+// One marker block's own inner curvature, same layout as `vofBlockColourArray` (diagnostic).
+template <class S>
+static nb::ndarray<nb::numpy, double> vofBlockKappaArray(S& s, long id) {
+  std::vector<double> v = s.vofBlockKappa(id);
+  const auto st = s.vofBlockStats();
+  std::size_t nx = 0, ny = 0, nz = 0;
+  for (const auto& b : st)
+    if (b.id == id) {
+      nx = static_cast<std::size_t>(b.hi[0] - b.lo[0]);
+      ny = static_cast<std::size_t>(b.hi[1] - b.lo[1]);
+      nz = static_cast<std::size_t>(b.hi[2] - b.lo[2]);
+    }
+  if (v.size() != nx * ny * nz)
+    return peclet::core::python::vector_to_ndarray(std::move(v), {v.size()}, {1});
+  return peclet::core::python::vector_to_ndarray(
+      std::move(v), {nx, ny, nz},
+      {1, static_cast<std::int64_t>(nx), static_cast<std::int64_t>(nx * ny)});
+}
+
 // A Fortran-order (nx,ny,nz) float64 array -> flat x-fastest host vector (F-contiguous data() is
 // already x-fastest). nanobind casts/copies the input to f_contig double if needed.
 static std::vector<double> grid_in(nb::ndarray<double, nb::f_contig> a) {
@@ -1054,6 +1073,18 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             return r;
           },
           "Block-pool census: 'hits' = advectors recycled, 'misses' = advectors allocated.")
+      .def(
+          "vof_block_kappa", [](D& diag, long id) { return vofBlockKappaArray(*diag.s, id); },
+          nb::arg("id"),
+          "One marker's OWN curvature (internal units, 1/cell) over its block box, the layout of "
+          "vof_block_color; empty unless this rank masters it and the block CSF is on. A diagnostic.")
+      .def(
+          "vof_block_force",
+          [](D& diag, int c) { return field_out(*diag.s, diag.s->getVofBlockForce(c)); },
+          nb::arg("component"),
+          "The block CSF face force of component c (0,1,2) as scattered (summed over markers) into "
+          "the solver's LOW-face slot of each cell, internal units; the field the momentum RHS adds. "
+          "A diagnostic.")
       .def(
           "vof_block_curvature_stats",
           [](D& diag) {

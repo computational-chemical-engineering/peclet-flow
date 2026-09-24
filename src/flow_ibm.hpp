@@ -2943,6 +2943,7 @@ class Solver {
   // checkpoint -- and unlike `enableVofBlocksFromField` it is exact when two markers touch (the
   // seeding gather out of the UNION would give each a slice of the other; WO-W12 open item 5).
   std::vector<double> vofBlockColour(long id);
+  std::vector<double> vofBlockKappa(long id);
 
 
   void enableVofBlocksFromColours(const std::vector<std::array<int, 6>>& boxes,
