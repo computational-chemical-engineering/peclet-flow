@@ -272,8 +272,8 @@ class Solver {
   /// Hand the anisotropic cell metric to every VoF driver that exists (Phase 3).
   ///
   /// The drivers are created lazily (`enableVof`, `enableVofBlocks`, `setPhaseChangeArea`, ...),
-  /// so this is called BOTH from `refreshUnitDerived()` — whenever a scale moves — and at the end
-  /// of each driver's own set-up. Every driver defaults to the unit metric, so a driver that is
+  /// so this is called from `refreshUnitDerived()` — whenever a scale moves — and a lazily created
+  /// driver takes `u_.vofMetric()` at its own creation (the block set: `prepareVofBlocks`). Every driver defaults to the unit metric, so a driver that is
   /// never reached behaves exactly as before.
   void pushVofMetric();
 
@@ -2946,6 +2946,8 @@ class Solver {
   // seeding gather out of the UNION would give each a slice of the other; WO-W12 open item 5).
   std::vector<double> vofBlockColour(long id);
   std::vector<double> vofBlockKappa(long id);
+  /// The block container itself, read-only (tests: the metric and tunables its cascades carry).
+  const vof::VofBlockSet* vofBlockSet() const { return vofBlocks_.get(); }
 
 
   void enableVofBlocksFromColours(const std::vector<std::array<int, 6>>& boxes,

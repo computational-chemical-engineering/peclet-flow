@@ -1394,6 +1394,11 @@ void Solver<Grid>::prepareVofBlocks() {
   vofBlocks_ = std::make_shared<vof::VofBlockSet>();
   const std::array<bool, 3> per{vofAxisPeriodic(0), vofAxisPeriodic(1), vofAxisPeriodic(2)};
   vofBlocks_->init(vofGlobalSize(), per, rank, size, 1.0);  // flow works in cell units
+  // The anisotropic metric: `pushVofMetric` runs from `refreshUnitDerived`, which in the documented
+  // order (Solver(extent) -> set_rho -> ... -> enable_vof_blocks) fires BEFORE the block set exists,
+  // so the set is created here with the metric already in force (review2 finding 1: the block CSF
+  // silently ran on the unit metric on every anisotropic box).
+  vofBlocks_->setMetric(u_.vofMetric());
   vofBlocks_->cflLimit = vofCflLimit_;
   // vof_overlap_design §12.1: the block advectors run the SAME wisp guard as the global one (the
   // enable_vof value); at 0 they reconstruct 1e-33 residue into NaN (channel_18, step 10908).
@@ -1602,17 +1607,14 @@ void Solver<Grid>::enableVofBlockCsf() {
   // carries a force eight orders too large.  Measured consequence when it was missing: the
   // distributed run's CSF force differed from the single-rank one by 6.7e-3 after two steps,
   // amplified from a 3e-16 colour difference by a flipped cascade branch.
+  // Every tunable from the structured cascade in ONE copy (review2 finding 2: a hand-written list
+  // here once dropped the debug switches), then the three the block path sets itself.
+  vofBlocks_->curvProto.copyTunablesFrom(vofCurv_);
   vofBlocks_->curvProto.interfaceEps = csfInterfaceEps_;
   // Same contract as the structured cascade: the purity test follows the advector
   // (VofCurvature::pureEps).
   vofBlocks_->curvProto.pureEps = vofAdv_.wispEps;
   vofBlocks_->setWispEps(vofAdv_.wispEps);  // §12.1: the advectors follow the same value
-  vofBlocks_->curvProto.weightWidth = vofCurv_.weightWidth;
-  vofBlocks_->curvProto.monoTol = vofCurv_.monoTol;
-  vofBlocks_->curvProto.ptWeightWidth = vofCurv_.ptWeightWidth;
-  vofBlocks_->curvProto.cosMin = vofCurv_.cosMin;
-  vofBlocks_->curvProto.useMixedHeightFit = vofCurv_.useMixedHeightFit;
-  vofBlocks_->curvProto.useWorklist = vofCurv_.useWorklist;
   vofBlocks_->curvProto.kappaMax = vofBlockKappaMax_;  // the clip: BLOCK path only (§5.1, §11)
   vofBlocks_->debrisRemove = (vofBlockDebris_ != 0);   // debris removal: default ON (§5.3)
   vofBlocks_->enableCsf(sigmaCsf_);

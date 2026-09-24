@@ -196,6 +196,7 @@ void gatePrototypePropagation() {
   p.cosMin = 0.21;
   p.interfaceEps = 3e-8;
   p.debugSingleDirection = true;
+  p.debugForceFallback = true;  // P computes no curvature; set so a copy that drops it is caught
   p.useMixedHeightFit = true;
   p.useWorklist = false;
   p.kappaMax = 1.7;
@@ -339,6 +340,46 @@ void gateResidueReturn() {
 
 }  // namespace
 
+// ------------------------------------------------------------------------------------------ M
+/// The Solver hands the anisotropic cell metric to the block set it creates -- in the documented
+/// order the unit-derived refresh (the only other push) has already run by then (review2 finding 1).
+void gateSolverMetric() {
+  std::printf("\n=== M  enable_vof_blocks on an anisotropic box: the blocks carry its metric\n");
+  constexpr int NX = 32, NY = 32, NZ = 32;
+  const std::array<int, 6> box = {8, 8, 8, 24, 24, 24};
+  // cells 1.5 : 1 : 2 -- every axis different, so a dropped or permuted metric is caught
+  peclet::flow::IbmSolver s(NX, NY, NZ, {48.0, 32.0, 64.0}, {0.0, 0.0, 0.0}, {NX, NY, NZ});
+  s.setRho(1.0);
+  s.setMu(0.5);
+  s.setPressureGeometry(std::vector<double>(static_cast<std::size_t>(NX) * NY * NZ, 10.0));
+  s.enableVof();
+  s.setVof(std::vector<double>(static_cast<std::size_t>(NX) * NY * NZ, 0.0));
+  s.setSurfaceTension(1.0);
+  std::vector<double> c;
+  for (int z = box[2]; z < box[5]; ++z)
+    for (int y = box[1]; y < box[4]; ++y)
+      for (int x = box[0]; x < box[3]; ++x)
+        c.push_back(sphereFrac(16.2, 16.1, 15.9, 5.0, x, y, z));
+  s.enableVofBlocksFromColours({box}, {c});
+  s.enableVofBlockCsf();
+  const auto* set = s.vofBlockSet();
+  auto ratios = [](const peclet::flow::vof::VofMetric& m, const char* who) {
+    const double rx = m.h[0] / m.h[1], rz = m.h[2] / m.h[1];
+    std::printf("  %-22s h = (%.4f, %.4f, %.4f), hx/hy %.4f, hz/hy %.4f\n", who, m.h[0], m.h[1],
+                m.h[2], rx, rz);
+    return std::fabs(rx - 1.5) < 1e-12 && std::fabs(rz - 2.0) < 1e-12;
+  };
+  CHECK(set != nullptr);
+  CHECK(ratios(set->metric(), "set"));
+  CHECK(ratios(set->curvProto.metric, "curvature prototype"));
+  for (const auto& b : set->blocks()) {
+    if (!b.mine())
+      continue;
+    CHECK(ratios(b.curvature().metric, "block cascade"));
+    CHECK(ratios(b.advector().metric, "block advector"));
+  }
+}
+
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
@@ -346,6 +387,7 @@ int main(int argc, char** argv) {
                 peclet::flow::SExec::name());
     gateClipOnBlockPath();
     gatePrototypePropagation();
+    gateSolverMetric();
     gateWrapRecentre();
     gateResidueReturn();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,

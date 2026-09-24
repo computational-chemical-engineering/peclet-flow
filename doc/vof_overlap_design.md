@@ -141,7 +141,7 @@ for each inner cell i with csfKappaDefined(branch(i)):
   diagnostic see the clipped field; `|κ_f| ≤ κ_max` follows.
 - Both paths: the global `vofCurv_` and every block's `curv_` via `curvProto` (same propagation
   as `interfaceEps`, `block_container.hpp:603`).
-- Solver setter, diagnostics tier: `diagnostics.set_vof_kappa_clip(enabled, kappa_max=None)`;
+- Solver setter, diagnostics tier: `diagnostics.set_vof_block_kappa_clip(enabled, kappa_max=None)`;
   physical `kappa_max` (1/length) converted with the unit scales (`κ' = κ hRef`); `None` = the
   default `1/Δ_min`; `enabled=False` = the pre-clip cascade verbatim. Two justifications for the
   default, both resolution statements: `|κ| ≤ 1/Δ` is a sphere of `R ≥ 2Δ` (`D ≥ 4Δ`), the
@@ -350,7 +350,7 @@ over-damped collisions, try ρ-only).
 ## 7. Work orders (commit-sized, dependency order)
 
 - **WO-1 clip.** `kappaMax` + clip pass + `Stats.clipped` in `curvature_field.hpp`; prototype
-  propagation in `allocateCsf`; `setVofKappaClip` + binding on `diagnostics`; expose `clipped` in
+  propagation in `allocateCsf`; `setVofBlockKappaClip` + binding on `diagnostics`; expose `clipped` in
   the curvature-stats dict. Acceptance: G0 counters and hashes; a unit assertion in
   `test_vof_curvature.cpp` that a hand-seeded detached cell at C = 1e-6 gets `|κ| ≤ 1` with the
   clip and `> 1` without (documents that the clip is live).
@@ -497,3 +497,19 @@ separate cumulative `residueReturned` (signed) so debris statistics stay interpr
 colour exists below the box threshold, the margin invariant holds again, `discarded` should read
 0 (reported), and volume is exact to summation round-off. Gate: the leak.py scene and G4(a)
 marker volumes to 1e-12 relative.
+
+## 14. Addendum (Opus, 2026-09-25 01:40) — review2 (Phase B re-check)
+
+- **MUST-FIX closed.** `prepareVofBlocks` now calls `setMetric(u_.vofMetric())`: the only other
+  push (`refreshUnitDerived`) fires before the set exists in the documented call order, so every
+  anisotropic block run had used the unit metric in its advectors and CSF weights. Gate M
+  (`test_vof_blocks_overlap`, a 1.5:1:2 box) fails with the line removed (verified) and passes with it.
+- `finishVofBlocks` takes the prototype by ONE `copyTunablesFrom(vofCurv_)` and overrides only
+  `interfaceEps`, `pureEps`, `kappaMax` (bitwise for every existing configuration: the newly copied
+  fields are the metric and the two debug switches at their defaults). Gate P sets
+  `debugForceFallback` so a copy that drops it is caught.
+- Open (recorded, not fixed): a curvature setter called AFTER `enable_vof_block_csf` reaches only
+  the structured cascade; re-enabling the phantom bound takes effect from the next overlap update
+  (one step late); the review's #6/#8/#9/#10 notes (np-dependent SUM order with ≥3 markers per
+  cell, stale ledger on release, ledger not checkpointed, global phantom trigger); the debris-pass
+  cost on channel_18 is unmeasured.
