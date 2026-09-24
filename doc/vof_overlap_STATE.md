@@ -9,25 +9,28 @@ Build tree `build_cuda` (CUDA prefix, tests+MPI on). An AMR session is doing a r
 parallel — do not touch umbrella docs/RELEASE*, core, amr. W4 WIP stays parked on `vof-w4`
 (f29c8e7); not merged here.
 
-**Now (2026-09-24 late, implementer, after design §12).** On vof-overlap: WO-1 `85b659d`, WO-3
-`042f9c2`, trigger `d8183af`, WO-4 `3d13924` (G0 163/163, G1, G2 bitwise, G3 r10/r50, G5 np1/2/4
-bitwise -- all BEFORE §12); §12.1-2 `97f9ca0` (block wispEps = global, box threshold
-max(bubbleEps, wispEps), discarded migrates), §12.3 `db37e32` (full-axis wrap copy, full_axis).
-Side branches wo1-pending / box-guard-pending deleted.
-G4(a) channel_18 10000 -> 13000 with §12: RUNS THROUGH (no blow-up, 3000 steps, max|u| 35.81
-<= 52; boxes <= 23x21x22 all run, full_axis 0 everywhere; debris returned m2 0.104, m4 0.027,
-m12 1.6e-4, m13 0.111, m17 0.240, lost 0, unresolved 0; clip fired on 2697/3000 steps (max 22
-cells); phantom bound on 3000/3000 steps (real overlaps, S to ~1.5)). STOPPED on volumes: max
-rel marker volume change 1.5e-9 (gate 1e-12), a steady loss on EVERY marker incl. non-colliding
-(m0 -1.4e-7 over 2400 steps). Reproduced in isolation (scratchpad leak.py: one R = 5 marker,
-uniform u, 1500 advect_vof_blocks(0.2)): unmodified tree / block wispEps 0: dV +6e-12, ledger
-consistent; block wispEps 1e-8 (§12): dV -3.18e-7, discarded 1.69e-7, UNLEDGERED -1.49e-7. The
-global field at wispEps 1e-8 conserves (9e-13 over 1500 steps). Hypothesis: sub-1e-8 residue is
-fluxed algebraically (pure-cell branch) and, now that it no longer defines the box, drifts out
-of the inner box into the ghost ring, which the fill zeroes -- unledgered; the rest is dropped at
-re-centring (ledgered, but 1e-7, not the "<= 1e-10 per event" §12.2 assumed). Needs a design
-choice (ledger the inner-box boundary flux / keep a residue margin / clear sub-eps colour
-explicitly). Not run per the order: -R vof ctests, G2/G3 reruns, full battery.
+**Now (2026-09-24 night, implementer, after design §12-13).** On vof-overlap: WO-1 `85b659d`,
+WO-3 `042f9c2`, trigger S>1.01 `d8183af`, WO-4 `3d13924`, §12.1-2 `97f9ca0` (block wispEps =
+global, box threshold, discarded migrates), §12.3 `db37e32` (full-axis wrap copy, full_axis), §13
+`05e2ea3` (sub-wispEps residue cleared + returned, residueReturned; runs on kinematic block runs
+too), tests `03b1660`. leak.py: rel dV 1.3e-15, discarded 0 (§12 alone: -6.1e-10 / 1.7e-7).
+G4(a) channel_18 10000->13000: PASS -- 3000 steps, max|u| 35.64, marker volumes |dV|/V <= 1.8e-14,
+boxes <= 23x22x22 all run, full_axis 0, discarded 0, debris returned m2 0.098 m4 0.069 m13 0.280
+m17 0.185 (others < 3e-3), lost 0, unresolved 0, residue returned ~1e-5 per marker, clip on
+2711/3000 steps (<= 24 cells), phantom bound on 3000/3000 steps (real overlaps; S to ~1.5).
+-R vof: 61/61 after the G1/G5 tests adopted §13 (only vof_blocks D1 failed: its sub-threshold
+account is now residue). G1: speck window 0.0, B volume 2.2e-16, A bitwise. G5 np1/2/4: union C,
+volumes and 7 ledger fields bitwise; volumes exact. G2 r10: peaks moved <= 0.6 % (d=10.5 0.2301
+vs 0.2314), end values <= 3.5 % (d=10 0.1315 vs 0.1270), dV 1e-15 (was 5e-15); within 5 %.
+G3 r10: completes (4972 steps), max|u| 15.69, dV 1.3e-15, debris returned 0.0096/0.0196, lost 0,
+bound 3397 steps (contact 751-4212). G3 r50: completes (6547), 15.68, dV 1.3e-15, returned
+0.0054/0.0054, bound 4248 (contact 822-5131). Hysing gate (vof_blocks_ns.py hysing, nx 64,
+T 3): global path bitwise unchanged; block path moved: v_rise max 0.2827287000 -> 0.2827271797,
+y_c 1.2085701812 -> 1.2085639735, block-vs-global -0.0005 % / -0.0005 % (was -0.0000 %); local
+block-vs-global max|dC| 1.1e-5 -> 2.5e-3, max|w| diff 9.1e-5 -> 5.1e-2 of max|w| 43 (bubble band,
+z 67-89); was never bitwise (C convention flip). vof_blocks_ns_mpi / vof_redistribute_mpi: all
+gated diffs stay at round-off (np>1 |dV| vs np=1 0 -> 1.1e-13, tol 1e-11). G0: ctest -LE
+bench 163/163 (OMP 4, -j8, 12358 s); state_hash 13/13 identical.
 
 **Instruments.** `tests/study/vof_blocks_overlap.py` (static pair vs d); scratch
 `diag_c18.py` (restart channel_18 from W3's healthy step-10000 checkpoint
