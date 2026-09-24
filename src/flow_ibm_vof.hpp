@@ -518,8 +518,86 @@ void Solver<Grid>::bindVofBlockPatch() {
 
 template <class Grid>
 void Solver<Grid>::harvestVofBlockUnion() {
-  copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
+  if (vofOverlapDensity_ && vofBlkS_.extent(0)) {
+    // vof_overlap_design §5.6, opt-in: the overlap volume as film liquid (the "tent").
+    const long len3 = static_cast<long>(e3_.x) * e3_.y * e3_.z;
+    if (static_cast<long>(vofBlkCeff_.extent(0)) != len3)
+      vofBlkCeff_ = SField("vof::blockcsf::ceff", len3);
+    const I3 e = I3{e3_.x, e3_.y, e3_.z};
+    const int g = kVofG;
+    SField un = vofAdv_.colour(), sm = vofBlkS_, ce = vofBlkCeff_;
+    Kokkos::parallel_for(
+        "vof::block::tent",
+        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                      {g + nx_, g + ny_, g + nz_}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = L3(x, y, z, e);
+          const double sv = sm(i);
+          ce(i) = (sv <= 1.0 + 1e-8) ? un(i) : Kokkos::fmax(0.0, 2.0 - sv);
+        });
+    Kokkos::fence();
+    copyInner(cField_, e_, G, CCConst(vofBlkCeff_), e3_, kVofG);
+  } else {
+    copyInner(cField_, e_, G, CCConst(vofAdv_.colour()), e3_, kVofG);
+  }
   fillPropGhosts(cField_);
+}
+
+template <class Grid>
+void Solver<Grid>::updateVofBlockOverlap() {
+  vofOverlap_ = VofOverlapCensus{};
+  if (!vofBlocks_ || !(vofBlocks_->csfEnabled || vofOverlapDensity_))
+    return;
+  const long len3 = static_cast<long>(e3_.x) * e3_.y * e3_.z;
+  if (static_cast<long>(vofBlkS_.extent(0)) != len3)
+    vofBlkS_ = SField("vof::blockcsf::sum", len3);
+  vofBlocks_->scatterSum(vofBlkS_);
+  const I3 e = I3{e3_.x, e3_.y, e3_.z};
+  const int g = kVofG;
+  SField sm = vofBlkS_;
+  double mx = 0.0, ex = 0.0;
+  long nc = 0;
+  Kokkos::parallel_reduce(
+      "vof::block::overlap_census",
+      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+                                                    {g + nx_, g + ny_, g + nz_}),
+      KOKKOS_LAMBDA(int x, int y, int z, double& m, double& a, long& c) {
+        const double sv = sm(L3(x, y, z, e));
+        m = Kokkos::fmax(m, sv);
+        if (sv > 1.0 + 1e-8) {
+          a += sv - 1.0;
+          ++c;
+        }
+      },
+      Kokkos::Max<double>(mx), ex, nc);
+  Kokkos::fence();
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    double gm = 0.0, ge = 0.0;
+    long gc = 0;
+    MPI_Allreduce(&mx, &gm, 1, MPI_DOUBLE, MPI_MAX, comm_);
+    MPI_Allreduce(&ex, &ge, 1, MPI_DOUBLE, MPI_SUM, comm_);
+    MPI_Allreduce(&nc, &gc, 1, MPI_LONG, MPI_SUM, comm_);
+    mx = gm;
+    ex = ge;
+    nc = gc;
+  }
+#endif
+  vofOverlap_.maxSum = mx;
+  vofOverlap_.excess = ex;
+  vofOverlap_.cells = nc;
+  // Under the opt-in overlap density the phantom is an ordinary liquid-gas interface (C_eff runs
+  // 0.5 -> 0 across it), so the base bound is the right one there (vof_overlap_design §5.6, G7a).
+  vofOverlap_.active = vofBlocks_->csfEnabled && !vofOverlapDensity_ && mx > 1.0 + 1e-8;
+}
+
+template <class Grid>
+void Solver<Grid>::setVofBlockOverlapDensity(bool enabled) {
+  if (!vofBlocks_)
+    throw std::runtime_error("set_vof_block_overlap_density: call enable_vof_blocks first");
+  vofOverlapDensity_ = enabled;
+  updateVofBlockOverlap();
+  harvestVofBlockUnion();
 }
 
 template <class Grid>
@@ -1335,6 +1413,7 @@ void Solver<Grid>::advectVofBlocks(double dtPhysArg, bool requireSolenoidal) {
   }
   bridgeVelocityToVof();  // the block exchange reads THESE views (advector high-face convention)
   vofBlocks_->advect(dt, vofAdv_.colour());
+  updateVofBlockOverlap();  // vof_overlap_design §5.6: S, the census, the phantom-bound gate
   harvestVofBlockUnion();
 }
 
@@ -1502,6 +1581,7 @@ void Solver<Grid>::enableVofBlockCsf() {
     vofBlkF_[c] = SField("vof::blockcsf::patch", len3);
     csfBlkF_[c] = CCField("vof::blockcsf", n_);
   }
+  updateVofBlockOverlap();  // an overlap present at seeding gates the very first step
   computeVofBlockCsf();
 }
 
@@ -1875,6 +1955,13 @@ double Solver<Grid>::capillaryDtInternal() {
   double hpMin = u_.hp[0];
   for (int a = 1; a < 3; ++a)
     hpMin = hpMin < u_.hp[a] ? hpMin : u_.hp[a];
+  // vof_overlap_design §5.6: while two block markers overlap, the part of A's surface inside B
+  // is an interface with rho_min on BOTH sides, so its Brackbill bound uses 2 rho_min.
+  if (vofOverlap_.active && vofBlockCsf()) {
+    double lo = 0.0, hi = 0.0;
+    phaseDensityRange(lo, hi);
+    return vof::capillaryDt(2.0 * lo, vofEnabled_ ? hpMin : 1.0, sigmaCsf_);
+  }
   return vof::capillaryDt(phaseDensitySum(), vofEnabled_ ? hpMin : 1.0, sigmaCsf_);
 }
 
@@ -1903,10 +1990,23 @@ typename Solver<Grid>::VofStepLimits Solver<Grid>::vofStepLimits() {
 
 template <class Grid>
 double Solver<Grid>::phaseDensitySum() {
-  if (vofMomEnabled_)
-    return vofRhoG_ + vofRhoL_;
-  if (!effVarRho())
-    return 2.0 * rho_;
+  double lo = 0.0, hi = 0.0;
+  phaseDensityRange(lo, hi);
+  return lo + hi;
+}
+
+template <class Grid>
+void Solver<Grid>::phaseDensityRange(double& rlo, double& rhi) {
+  if (vofMomEnabled_) {
+    rlo = std::fmin(vofRhoG_, vofRhoL_);
+    rhi = std::fmax(vofRhoG_, vofRhoL_);
+    return;
+  }
+  if (!effVarRho()) {
+    rlo = rho_;
+    rhi = rho_;
+    return;
+  }
   CCExec space;
   C3 e = e_;
   double lo = 1e300, hi = -1e300;
@@ -1939,7 +2039,8 @@ double Solver<Grid>::phaseDensitySum() {
     hi = -r[1];
   }
 #endif
-  return lo + hi;
+  rlo = lo;
+  rhi = hi;
 }
 
 template <class Grid>
@@ -1996,8 +2097,12 @@ void Solver<Grid>::vofStepPrecheck() {
 
 template <class Grid>
 std::string Solver<Grid>::capillaryThrowMessage(double cap) const {
+  const std::string rho = (vofOverlap_.active && vofBlockCsf())
+                              ? "2 rho_min [block markers overlap: the phantom gas-gas interface, "
+                                "vof_overlap_design 5.6]"
+                              : "rho_1+rho_2";
   return "surface tension: dt = " + std::to_string(dt_) + " exceeds the capillary limit " +
-         std::to_string(cap) + " (Brackbill sqrt((rho_1+rho_2) h^3/(4 pi sigma)) = " +
+         std::to_string(cap) + " (Brackbill sqrt((" + rho + ") h^3/(4 pi sigma)) = " +
          std::to_string(cap / (capillaryCfl_ > 0.0 ? capillaryCfl_ : 1.0)) + " x safety factor " +
          std::to_string(capillaryCfl_) +
          "). Surface tension is EXPLICIT: this is a hard stability boundary (Denner & van "
@@ -2014,13 +2119,7 @@ void Solver<Grid>::updateVofCurvature() {
     computeVofCurvature();
   const double cap = capillaryCfl_ * capillaryDtInternal();
   if (!(dt_ <= cap))
-    throw std::runtime_error(
-        "surface tension: dt = " + std::to_string(dt_) + " exceeds the capillary limit " +
-        std::to_string(cap) + " (Brackbill sqrt((rho_1+rho_2) h^3/(4 pi sigma)) = " +
-        std::to_string(capillaryDtInternal()) + " x safety factor " +
-        std::to_string(capillaryCfl_) +
-        "). Surface tension is EXPLICIT: this is a hard stability boundary (Denner & van Wachem "
-        "2015), not a margin. Reduce dt, or raise set_capillary_cfl deliberately.");
+    throw std::runtime_error(capillaryThrowMessage(cap));
 }
 
 template <class Grid>

@@ -40,6 +40,9 @@ def arg(name, default, cast=float):
 R = arg("--R", 5.0)
 RHO_L, RHO_G = 1.0, arg("--rho-g", 0.1)
 MU = arg("--mu", 0.5333)
+MU_G = arg("--mu-g", MU)          # gas viscosity (default: the liquid's, as channel_18)
+TENT = "--tent" in sys.argv       # vof_overlap_design 5.6: the opt-in overlap density
+REPICK = "--repick" in sys.argv   # re-pick dt every step from vof_step_limits() (static gate)
 SIGMA = arg("--sigma", 320.0)
 STEPS = arg("--steps", 400, int)
 
@@ -54,27 +57,56 @@ def solver(n, seeds, blocks=True, csf=True):
     s.enable_vof()
     s.set_vof(np.zeros((nx, ny, nz), order="F"))
     s.set_property_model("rho", "linear", "C", [RHO_L, RHO_G - RHO_L])
-    s.set_property_model("mu", "linear", "C", [MU, 0.0])
+    s.set_property_model("mu", "linear", "C", [MU, MU_G - MU])
     s.set_surface_tension(SIGMA)
     s.enable_vof_blocks(seeds)
     if csf:
         s.enable_vof_block_csf()
+    if TENT:
+        s.diagnostics.set_vof_block_overlap_density(True)
     return s
+
+
+def counters(s):
+    """The overlap-design counters: clip (block cascade), debris census, overlap census."""
+    st = s.diagnostics.vof_block_stats()
+    cs = s.diagnostics.vof_block_curvature_stats()
+    return {"clipped": cs.get("clipped", 0),
+            "debris_cells": sum(b.get("debris_cells", 0) for b in st),
+            "debris_volume": sum(b.get("debris_volume", 0.0) for b in st),
+            "overlap_cells": st[0].get("overlap_cells", 0) if st else 0,
+            "overlap_excess": st[0].get("overlap_excess", 0.0) if st else 0.0,
+            "bound": bool(st[0].get("overlap_bound_active", False)) if st else False}
 
 
 def umax(s):
     return max(np.abs(s.get_u()).max(), np.abs(s.get_v()).max(), np.abs(s.get_w()).max())
 
 
-def run(s, steps, dt=None, every=50, tag=""):
+RUNSTAT = {}
+
+
+def run(s, steps, dt=None, every=50, tag="", safety=None):
     L = s.vof_step_limits()
     if dt is None:
         dt = 0.25 * min(L["cfl_dt"], L["capillary_dt"])
     s.set_dt(dt)
     hist = []
+    RUNSTAT.update(bound_steps=0, dt_min=dt, clipped=0, debris=0, ov_cells=0)
     for i in range(steps):
+        if REPICK and safety is not None:
+            L = s.vof_step_limits()
+            dt = safety * L["capillary_dt"]
+            s.set_dt(dt)
+            RUNSTAT["dt_min"] = min(RUNSTAT["dt_min"], dt)
         try:
             s.step()
+            if hasattr(s.diagnostics, "vof_block_stats"):
+                k = counters(s)
+                RUNSTAT["bound_steps"] += int(k["bound"])
+                RUNSTAT["clipped"] += k["clipped"]
+                RUNSTAT["debris"] = max(RUNSTAT["debris"], k["debris_cells"])
+                RUNSTAT["ov_cells"] = max(RUNSTAT["ov_cells"], k["overlap_cells"])
         except Exception as exc:
             print(f"    {tag} step {i}: THREW {exc}")
             hist.append(float("nan"))
@@ -97,7 +129,9 @@ def gate_static():
     print(f"  R = {R} cells, box {n}, rho_g/rho_l = {RHO_G}, mu = {MU}, sigma = {SIGMA}; "
           f"Brackbill dt = {cap:.4e}; Laplace dp = {2*SIGMA/R:.2f}")
     rows = []
-    cases = [("single", None)] + [(f"d={d:g}", d) for d in (14.0, 10.5, 10.0, 9.0, 8.0, 6.0, 4.0)]
+    ds = [float(x) for x in arg("--d", "14,10.5,10,9,8,6,4", str).split(",")]
+    cases = ([("single", None)] if "--no-single" not in sys.argv else []) + \
+        [(f"d={d:g}", d) for d in ds]
     for name, d in cases:
         if d is None:
             seeds = [(cx, cy, cz, R)]
@@ -106,13 +140,20 @@ def gate_static():
         s = solver(n, seeds)
         v0 = [b["volume"] for b in s.diagnostics.vof_block_stats()]
         t0 = time.time()
-        dt, h = run(s, STEPS, dt=0.25 * cap, tag=name)
+        dt, h = run(s, STEPS, dt=arg("--cap-safety", 0.25) * cap, tag=name,
+                    safety=arg("--cap-safety", 0.25))
         v1 = [b["volume"] for b in s.diagnostics.vof_block_stats()]
         C = s.get_field("C")
         dv = max(abs(a / b - 1) for a, b in zip(v1, v0))
         rows.append((name, h))
         print(f"  {name:8s} max|u| @50 {h[min(49,len(h)-1)]:.3e} @end {h[-1]:.3e} peak {np.nanmax(h):.3e}  "
-              f"maxC {float(C.max()):.6f}  dV {dv:.1e}  ({time.time()-t0:.0f} s)", flush=True)
+              f"maxC {float(C.max()):.6f}  dV {dv:.1e}  ({time.time()-t0:.0f} s)  "
+              f"bound-steps {RUNSTAT['bound_steps']} dt_min/Brackbill {RUNSTAT['dt_min']/cap:.3f} "
+              f"clipped {RUNSTAT['clipped']} debris<= {RUNSTAT['debris']} "
+              f"ov_cells<= {RUNSTAT['ov_cells']}", flush=True)
+        if "--dump" in sys.argv:
+            np.savez(f"{arg('--dump', 'static', str)}_{name}.npz", h=h, u=s.get_u(), v=s.get_v(),
+                     w=s.get_w(), C=C)
     return rows
 
 
@@ -142,12 +183,14 @@ def gate_shear():
     s.enable_vof()
     s.set_vof(np.zeros(n, order="F"))
     s.set_property_model("rho", "linear", "C", [RHO_L, RHO_G - RHO_L])
-    s.set_property_model("mu", "linear", "C", [MU, 0.0])
+    s.set_property_model("mu", "linear", "C", [MU, MU_G - MU])
     s.set_surface_tension(SIGMA)
     seeds = [(nx / 2 - gap0 / 2, ny / 2 + b / 2, nz / 2, R), (nx / 2 + gap0 / 2, ny / 2 - b / 2, nz / 2, R)]
     if blocks:
         s.enable_vof_blocks(seeds)
         s.enable_vof_block_csf()
+        if TENT:
+            s.diagnostics.set_vof_block_overlap_density(True)
     else:
         from vof_surface_tension import sphere_fractions
         C = np.zeros(n)
@@ -160,6 +203,9 @@ def gate_shear():
     T = arg("--T", 3.0 * gap0 / max(rel, 1e-9))
     t, i = 0.0, 0
     t0 = time.time()
+    V0 = [q["volume"] for q in s.diagnostics.vof_block_stats()] if blocks else None
+    agg = dict(umax=0.0, bound=0, contact=0, ovmax=0.0, clipped=0, debris=0, dvol=0.0,
+               first_contact=None, last_contact=None, debris_steps=0, debris_vol_max=0.0)
     while t < T:
         L = s.vof_step_limits()
         dt = 0.25 * min(L["cfl_dt"], L["capillary_dt"])
@@ -174,6 +220,19 @@ def gate_shear():
             break
         t += dt
         i += 1
+        if blocks and hasattr(s.diagnostics, "vof_block_curvature_stats"):
+            k = counters(s)
+            agg["umax"] = max(agg["umax"], umax(s))
+            agg["bound"] += int(k["bound"])
+            if k["overlap_cells"] > 0:
+                agg["contact"] += 1
+                agg["first_contact"] = agg["first_contact"] or i
+                agg["last_contact"] = i
+            agg["ovmax"] = max(agg["ovmax"], k["overlap_excess"])
+            agg["clipped"] += k["clipped"]
+            agg["debris"] = max(agg["debris"], k["debris_cells"])
+            agg["debris_steps"] += int(k["debris_cells"] > 0)
+            agg["debris_vol_max"] = max(agg["debris_vol_max"], k["debris_volume"])
         if i % 20 == 0:
             C = s.get_field("C")
             um = umax(s)
@@ -191,6 +250,15 @@ def gate_shear():
             if not math.isfinite(um) or um > 20 * U:
                 print("  BLOW-UP")
                 break
+    if blocks:
+        V1 = [q["volume"] for q in s.diagnostics.vof_block_stats()]
+        agg["dvol"] = max(abs(a / b - 1) for a, b in zip(V1, V0))
+        print(f"  SUMMARY steps {i} t {t:.3f}/{T:.3f}  max|u| {agg['umax']:.3f}  "
+              f"max rel dV {agg['dvol']:.2e}  contact steps {agg['contact']} "
+              f"({agg['first_contact']}..{agg['last_contact']})  max overlap excess "
+              f"{agg['ovmax']:.4f}  phantom-bound steps {agg['bound']}  clipped cells (sum) "
+              f"{agg['clipped']}  debris: max cells {agg['debris']}, steps with debris "
+              f"{agg['debris_steps']}, max volume {agg['debris_vol_max']:.3e}", flush=True)
 
 
 ALL = {"static": gate_static, "shear": gate_shear}

@@ -555,6 +555,13 @@ class VofBlockExchange : public VofBlockExchangeBase {
     scatterImpl(blocks, 3, loc, &forceViewOf, ghostOf(blocks), /*op=*/1);
   }
 
+  /// `S = sum_k C_k` (vof_overlap_design §5.6): the colour scatter with UNPACK_SUM. With at most
+  /// two markers on a cell the sum is exact whatever the order (IEEE addition is commutative).
+  void scatterColourSum(std::vector<VofBlock>& blocks, SField sLocal) override {
+    SField loc[1] = {sLocal};
+    scatterImpl(blocks, 1, loc, &colourViewOf, ghostOf(blocks), /*op=*/1);
+  }
+
   /// Move a block's colour from its old master to its new one after a re-assignment (rung W1
   /// item a). The two boxes are identical (the table was replicated before the re-assignment) so
   /// the whole extended array travels as one contiguous message and lands bit for bit.

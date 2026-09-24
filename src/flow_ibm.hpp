@@ -2964,6 +2964,30 @@ class Solver {
   void computeVofBlockCsf();
 
 
+  // --- vof_overlap_design §5.6 (WO-7): phantom (gas-gas) interfaces of overlapping markers -------
+  //
+  // `S = sum_k C_k` is scattered beside the MAX union after every block advection (and when the
+  // block CSF or the overlap density is switched on). While the block CSF is on and any cell has
+  // `S > 1 + 1e-8` (a GLOBAL max), the capillary limit -- `vof_step_limits()['capillary_dt']` and
+  // the `step()` check -- uses `2 rho_min` in place of `rho_l + rho_g`: the part of marker A's
+  // surface inside B is an interface with rho_g on both sides. Detected at the end of step n, it
+  // binds from step n+1. Not under the opt-in overlap density below, whose phantom is an ordinary
+  // liquid-gas interface.
+  struct VofOverlapCensus {
+    double maxSum = 0.0;  ///< max_cells S (global)
+    double excess = 0.0;  ///< sum over cells of (S - 1)^+ (global, cell volumes)
+    long cells = 0;       ///< cells with S > 1 + 1e-8 (global)
+    bool active = false;  ///< the phantom-aware capillary bound is in force
+  };
+  VofOverlapCensus vofBlockOverlapCensus() const { return vofOverlap_; }
+  // Recompute S and the census (collective under MPI). Public for nvcc's extended-lambda rule.
+  void updateVofBlockOverlap();
+  // OPT-IN MODEL, default off (MAX verbatim): the union colour that feeds rho(C), mu(C) (and the
+  // registered "C") becomes `C_eff = S <= 1 + 1e-8 ? max_k C_k : max(0, 2 - S)` -- the overlap
+  // volume as film liquid ("the tent"). See vof_overlap_design §5.6 for what it costs.
+  void setVofBlockOverlapDensity(bool enabled);
+
+
   // DIAGNOSTIC: the scattered block CSF face force on this rank's inner cells, component c (the
   // low face of each cell, the same convention `addCsfRhs` uses). This is the field the block mode
   // adds to the RHS; comparing it across decompositions is how a scatter defect is localised.
@@ -3352,6 +3376,8 @@ class Solver {
   // rho_1 + rho_2 for the capillary limit. Public because nvcc refuses an extended
   // __host__ __device__ lambda inside a private member function (the WO-O build note).
   double phaseDensitySum();
+  // The min and max of the density field behind `phaseDensitySum()` (lo + hi is that sum).
+  void phaseDensityRange(double& lo, double& hi);
 
 
   // Head-of-step curvature refresh + the capillary dt check. No-op unless surface tension is on.
@@ -4438,6 +4464,11 @@ class Solver {
   // the G=2 registry block the RHS reads. Allocated only by `enable_vof_block_csf`.
   SField vofBlkF_[3];
   CCField csfBlkF_[3];
+  // vof_overlap_design §5.6: S = sum_k C_k on the g=3 patch, the census, the opt-in tent and its
+  // scratch patch. Allocated on first use; untouched unless the block CSF or the tent is on.
+  SField vofBlkS_, vofBlkCeff_;
+  VofOverlapCensus vofOverlap_{};
+  bool vofOverlapDensity_ = false;
   bool distributed_ = false;
   C3 og_{0, 0, 0};  // velocity-block inner origin (global red-black parity); {0,0,0} single-rank
 #ifdef PECLET_FLOW_MPI

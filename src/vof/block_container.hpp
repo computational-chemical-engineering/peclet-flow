@@ -370,6 +370,12 @@ struct VofBlockExchangeBase {
   /// (TBFsolver's UNPACK_SUM, `VOF.f90::computeSurfaceTension`): overlapping markers ADD their
   /// forces, which is what makes two touching bubbles push on the fluid twice and not once.
   virtual void scatterForceSum(std::vector<VofBlock>& blocks, SField fx, SField fy, SField fz) = 0;
+  /// SUM every master block's inner colour into the caller's colour patch: `S = sum_k C_k`, the
+  /// overlap measure beside the MAX union (`doc/vof_overlap_design.md` §5.6). `S > 1` exactly
+  /// where two markers interpenetrate. Same machinery and block order as `scatterForceSum`.
+  virtual void scatterColourSum(std::vector<VofBlock>&, SField) {
+    throw std::runtime_error("peclet::flow::vof: this block exchange has no colour SUM scatter");
+  }
   /// Move a block's state from `oldMaster[i]` to `blocks[i].master` after a re-assignment. The
   /// gaining rank has ALREADY allocated the (zeroed) advector; only the colour travels — everything
   /// else in a block is either replicated (the table) or recomputed per step.
@@ -666,6 +672,13 @@ class VofBlockSet {
           });
     }
     Kokkos::fence();
+  }
+
+  /// `S = sum_k C_k` of the CURRENT (replicated) table into `sLocal`'s inner region (§5.6).
+  void scatterSum(SField sLocal) {
+    if (!exch_)
+      throw std::runtime_error("peclet::flow::vof::VofBlockSet: no exchange installed");
+    exch_->scatterColourSum(blocks_, sLocal);
   }
 
   /// Union the current colour into `cLocal` without advecting (used right after seeding).

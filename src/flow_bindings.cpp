@@ -988,6 +988,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "vof_block_stats",
           [](D& diag) {
             nb::list out;
+            const auto ov = diag.s->vofBlockOverlapCensus();
             for (const auto& b : diag.s->vofBlockStats()) {
               nb::dict r;
               r["id"] = b.id;
@@ -1008,6 +1009,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
               r["debris_returned"] = b.debrisReturned;
               r["debris_lost"] = b.debrisLost;
               r["debris_unresolved"] = b.debrisUnresolved;
+              r["overlap_max_sum"] = ov.maxSum;
+              r["overlap_excess"] = ov.excess;
+              r["overlap_cells"] = ov.cells;
+              r["overlap_bound_active"] = ov.active;
               out.append(r);
             }
             return out;
@@ -1028,7 +1033,25 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "only; master only): interfacial cells whose 5^3 stencil holds less than one cell volume "
           "of the marker's own colour, and their summed colour. 'debris_returned', 'debris_lost' "
           "and 'debris_unresolved' are the cumulative removal ledger (doc/vof_overlap_design.md "
-          "5.3; zero while only the census runs).")
+          "5.3; zero while only the census runs).\n\n"
+          "'overlap_*' are the GLOBAL marker-overlap census of the last block advection "
+          "(vof_overlap_design 5.6; block CSF or the overlap density on), the same in every dict: "
+          "'overlap_max_sum' = max over cells of S = sum_k C_k, 'overlap_excess' = sum of "
+          "(S - 1)^+ (cell volumes), 'overlap_cells' = cells with S > 1 + 1e-8, and "
+          "'overlap_bound_active' = the phantom-aware capillary limit (2 rho_min in place of "
+          "rho_l + rho_g) is in force for the next step.")
+      .def(
+          "set_vof_block_overlap_density",
+          [](D& diag, bool enabled) { diag.s->setVofBlockOverlapDensity(enabled); },
+          nb::arg("enabled"),
+          "OPT-IN MODEL, default False (the MAX union verbatim). With it the union colour that "
+          "feeds rho(C) and mu(C) -- and the registered 'C' -- becomes C_eff = max_k C_k where "
+          "S = sum_k C_k <= 1 + 1e-8 and max(0, 2 - S) where markers overlap: the overlap volume "
+          "is treated as the sub-grid FILM liquid (the 'tent'), so the phantom interface of one "
+          "marker inside another is an ordinary liquid-gas interface under the base capillary "
+          "bound. Its cost: the lens holds liquid the real state does not (buoyancy and mixture "
+          "weight off by 2 V_overlap during a contact), and it changes collision dynamics. See "
+          "doc/vof_overlap_design.md 5.6.")
       .def(
           "vof_block_imbalance", [](D& diag) { return diag.s->vofBlockImbalance(); },
           "max/mean of the per-rank block-cell load under the CURRENT master assignment "
