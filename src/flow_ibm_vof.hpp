@@ -588,7 +588,12 @@ void Solver<Grid>::updateVofBlockOverlap() {
   vofOverlap_.cells = nc;
   // Under the opt-in overlap density the phantom is an ordinary liquid-gas interface (C_eff runs
   // 0.5 -> 0 across it), so the base bound is the right one there (vof_overlap_design §5.6, G7a).
-  vofOverlap_.active = vofBlocks_->csfEnabled && !vofOverlapDensity_ && mx > 1.0 + 1e-8;
+  // The TRIGGER is S > 1 + 1e-2, not the census's 1 + 1e-8 (vof_overlap_design §11): Weymouth-Yue
+  // residue of one marker inside another keeps S a hair above 1 on nearly every step after a
+  // contact (measured: bound on 5028 of 5907 shear steps, every channel_18 step), whereas a
+  // phantom interface worth a capillary mode means a marker's band inside another's body.
+  constexpr double kPhantomTrigger = 1e-2;
+  vofOverlap_.active = vofBlocks_->csfEnabled && !vofOverlapDensity_ && mx > 1.0 + kPhantomTrigger;
 }
 
 template <class Grid>

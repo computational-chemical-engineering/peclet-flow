@@ -2968,8 +2968,8 @@ class Solver {
   //
   // `S = sum_k C_k` is scattered beside the MAX union after every block advection (and when the
   // block CSF or the overlap density is switched on). While the block CSF is on and any cell has
-  // `S > 1 + 1e-8` (a GLOBAL max), the capillary limit -- `vof_step_limits()['capillary_dt']` and
-  // the `step()` check -- uses `2 rho_min` in place of `rho_l + rho_g`: the part of marker A's
+  // `S > 1 + 1e-2` (a GLOBAL max; §11), the capillary limit --
+  // `vof_step_limits()['capillary_dt']` and the `step()` check -- uses `2 rho_min` in place of `rho_l + rho_g`: the part of marker A's
   // surface inside B is an interface with rho_g on both sides. Detected at the end of step n, it
   // binds from step n+1. Not under the opt-in overlap density below, whose phantom is an ordinary
   // liquid-gas interface.

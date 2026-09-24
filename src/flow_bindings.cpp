@@ -1040,7 +1040,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "'overlap_max_sum' = max over cells of S = sum_k C_k, 'overlap_excess' = sum of "
           "(S - 1)^+ (cell volumes), 'overlap_cells' = cells with S > 1 + 1e-8, and "
           "'overlap_bound_active' = the phantom-aware capillary limit (2 rho_min in place of "
-          "rho_l + rho_g) is in force for the next step.")
+          "rho_l + rho_g) is in force for the next step (triggered by max S > 1 + 1e-2).")
       .def(
           "set_vof_block_debris", [](D& diag, bool enabled) { diag.s->setVofBlockDebris(enabled); },
           nb::arg("enabled"),
