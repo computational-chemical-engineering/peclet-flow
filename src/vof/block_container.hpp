@@ -505,9 +505,12 @@ class VofBlockSet {
   /// Set `wispEps` on the set AND on every live advector (pooled ones take it on reuse).
   void setWispEps(double eps) {
     wispEps = eps;
+    curvProto.pureEps = eps;  // the cascade's purity test follows the advector (review finding 1)
     for (auto& b : blocks_)
-      if (b.allocated_)
+      if (b.allocated_) {
         b.adv_.wispEps = eps;
+        b.curv_.pureEps = eps;
+      }
   }
   /// Wisp guard on the INTERFACE-AREA predicate (`VofBlockStats::area`), the same threshold and
   /// the same reason as the curvature's `interfaceEps`. A Weymouth-Yue round-off wisp satisfies
@@ -694,6 +697,10 @@ class VofBlockSet {
     b.curv_.useMixedHeightFit = curvProto.useMixedHeightFit;
     b.curv_.useWorklist = curvProto.useWorklist;  // WO-V9: the compaction follows the prototype
     b.curv_.kappaMax = curvProto.kappaMax;        // the clip (vof_overlap_design §5.1)
+    // The purity test of the height function must agree with the tolerance the block colour was
+    // ADVECTED at (VofCurvature::pureEps; review finding 1): a block WY at wispEps 1e-8 judged at
+    // the 1e-10 floor decays the HF tier into the PV fallback silently (63.8 % -> 52.3 %).
+    b.curv_.pureEps = curvProto.pureEps;
     const long len = static_cast<long>(b.adv_.extent().x) * b.adv_.extent().y * b.adv_.extent().z;
     for (int c = 0; c < 3; ++c)
       b.f_[c] = SField("vof::block::csf", len);

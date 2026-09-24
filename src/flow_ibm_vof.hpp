@@ -1384,7 +1384,7 @@ void Solver<Grid>::prepareVofBlocks() {
   vofBlocks_->cflLimit = vofCflLimit_;
   // vof_overlap_design §12.1: the block advectors run the SAME wisp guard as the global one (the
   // enable_vof value); at 0 they reconstruct 1e-33 residue into NaN (channel_18, step 10908).
-  vofBlocks_->wispEps = vofAdv_.wispEps;
+  vofBlocks_->setWispEps(vofAdv_.wispEps);
   vofBlockExch_ = std::make_shared<vof::VofBlockExchange>();
   vofBlockExch_->init(vofGlobalSize(), per, vofBlockRankBoxes(size), rank);
 #ifdef PECLET_FLOW_MPI

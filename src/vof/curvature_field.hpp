@@ -641,8 +641,10 @@ class VofCurvature {
           "vof::curv::clip_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nI_),
           KOKKOS_LAMBDA(long t, long& acc) {
             const long i = list(t);
-            if (csfKappaDefined(br(i)) && Kokkos::fabs(kap(i)) > km) {
-              kap(i) = Kokkos::copysign(km, kap(i));
+            // `!(|k| <= km)` rather than `|k| > km`: a NaN curvature is clipped (to +km, the sign
+            // of a NaN is meaningless) and counted, never silently kept.
+            if (csfKappaDefined(br(i)) && !(Kokkos::fabs(kap(i)) <= km)) {
+              kap(i) = (kap(i) == kap(i)) ? Kokkos::copysign(km, kap(i)) : km;
               ++acc;
             }
           },
@@ -654,8 +656,10 @@ class VofCurvature {
                                                         {g + n.x, g + n.y, g + n.z}),
           KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
             const long i = L3(x, y, z, e);
-            if (csfKappaDefined(br(i)) && Kokkos::fabs(kap(i)) > km) {
-              kap(i) = Kokkos::copysign(km, kap(i));
+            // `!(|k| <= km)` rather than `|k| > km`: a NaN curvature is clipped (to +km, the sign
+            // of a NaN is meaningless) and counted, never silently kept.
+            if (csfKappaDefined(br(i)) && !(Kokkos::fabs(kap(i)) <= km)) {
+              kap(i) = (kap(i) == kap(i)) ? Kokkos::copysign(km, kap(i)) : km;
               ++acc;
             }
           },
