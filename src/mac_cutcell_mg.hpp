@@ -35,9 +35,13 @@
 // is byte-identical to before.
 #ifdef PECLET_FLOW_MPI
 #include <memory>
+#include <optional>
+#include <stdexcept>
 
 #include "peclet/core/decomp/block_decomposer.hpp"
 #include "peclet/core/decomp/grid_redistribute.hpp"
+#include "peclet/core/decomp/stage_comm.hpp"
+#include "peclet/core/decomp/stage_target.hpp"
 #include "peclet/core/halo/grid_halo.hpp"
 #include "peclet/core/halo/grid_halo_topology.hpp"
 #endif
@@ -350,10 +354,17 @@ class CutcellMG {
   // are not roots idle below L (they join the gather and the scatter, on the parent comm, and skip
   // the recursion). restrictAvg/prolongAdd/coarsenOpenAvg are untouched: they read fine INNER
   // cells only / write fine INNER cells only, so the stage needs no halo of its own.
+  //
+  // The target, the communicators and the movement are core's (suite decision "Coarse-level
+  // redistribution lives in core; the hierarchies stay in the methods",
+  // amr/docs/amr_mg_core_boundary.md §7): the depth search is `chooseStageTarget` /
+  // `shallowestLiftableMerge` with flow's per-axis lift rule as the predicate, and the group /
+  // roots communicators are `makeStageComm`'s. This struct is flow's per-level record of a stage.
   struct Telescope {
-    MPI_Comm groupComm = MPI_COMM_NULL;  // this rank's group (the ranks merged into one block)
-    MPI_Comm subComm = MPI_COMM_NULL;    // roots only (MPI_COMM_NULL on members)
-    bool root = false;
+    // group = this rank's group (the ranks merged into one block, owner first), sub = the roots
+    // only (MPI_COMM_NULL on members). Owned and freed by the StageComm.
+    peclet::core::decomp::StageComm comm;
+    bool root() const { return comm.active; }  // this rank owns the merged block
     int nMembers = 1;
     int g = 1;                   // ghost width of level L (the stage buffers use it)
     C3 mInner{}, mOg{}, mExt{};  // merged block (root): inner dims, global origin, extent
@@ -361,16 +372,6 @@ class CutcellMG {
     std::vector<C3> memO, memS;
     std::vector<int> counts, displs;  // Gatherv/Scatterv layout (cells)
     CCField res, x, ox, oy, oz;       // stage buffers at resolution L on the merged block (root)
-    ~Telescope() {
-      int fin = 0;
-      MPI_Finalized(&fin);
-      if (fin)
-        return;
-      if (groupComm != MPI_COMM_NULL)
-        MPI_Comm_free(&groupComm);
-      if (subComm != MPI_COMM_NULL)
-        MPI_Comm_free(&subComm);
-    }
   };
 #endif
   static constexpr int G = 1;  // level-0 / single-rank ghost width (the flow_ibm g=1 bridge)
@@ -516,6 +517,23 @@ class CutcellMG {
   // the coarse-level transfer is only clean when nLevels==1 (pure RB-GS) — use that (or the
   // decomposition-agnostic GraphAMG) for a weighted co-decomposition. nullptr => equal-weight
   // everywhere (the original behaviour, byte-identical).
+
+  // flow's LIFT rule — "every block can coarsen in place one more time": every block is even in
+  // origin and size on every axis whose GLOBAL extent `gs` can still halve (can()). An axis that
+  // cannot halve is not a constraint. This is the predicate core's stage policy
+  // (peclet::core::decomp::chooseStageTarget) is parameterised on, shared by initMpi and predict.
+  static bool teleLiftable(const peclet::core::decomp::BlockDecomposer<3>& d, C3 gs) {
+    auto can = [](int e) { return (e % 2 == 0) && (e / 2 >= 2); };
+    const int ga[3] = {gs.x, gs.y, gs.z};
+    for (int ax = 0; ax < 3; ++ax) {
+      if (!can(ga[ax]))
+        continue;
+      for (std::size_t b = 0; b < d.sizes().size(); ++b)
+        if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
+          return false;
+    }
+    return true;
+  }
   // Per-axis split alignment that makes an ORB safely coarsenable by this MG: align[k] =
   // 2^(number of times axis k can coarsen, until it turns odd) — the NATURAL MAXIMUM, independent
   // of the actual nLevels (over-aligning is harmless: coarsened() still divides cleanly at every
@@ -726,73 +744,63 @@ class CutcellMG {
         // full natural depth; on an unaligned/awkward decomposition it used to simply stop
         // coarsening that axis (fewer geometric levels) — with telescoping ON, a blocked axis
         // instead merges ORB siblings onto fewer ranks and carries on (see Telescope).
+        namespace cdec = peclet::core::decomp;
         const bool canAny = can(gs.x) || can(gs.y) || can(gs.z);
-        bool blocked = false;
-        for (int ax = 0; ax < 3; ++ax)
-          if (can(ax == 0 ? gs.x : ax == 1 ? gs.y : gs.z) && !evenOn(curDec, ax))
-            blocked = true;
-        auto minExtentOf = [](const peclet::core::decomp::BlockDecomposer<3>& d) {
-          long m = std::numeric_limits<long>::max();
-          for (const auto& sz : d.sizes())
-            for (int k = 0; k < 3; ++k)
-              m = std::min(m, (long)sz[k]);
-          return (int)m;
-        };
-        const bool tooSmall = teleMinExtent_ > 0 && minExtentOf(curDec) < teleMinExtent_;
+        // flow's lift rule, the predicate core's stage policy is parameterised on.
+        auto liftable = [&](const cdec::BlockDecomposer<3>& d) { return teleLiftable(d, gs); };
+        const bool blocked = !liftable(curDec);
+        const bool tooSmall = teleMinExtent_ > 0 &&
+                              cdec::minBlockExtent(curDec) < (peclet::core::Index)teleMinExtent_;
         const bool doTele = canAny && curDec.numBlocks() > 1 &&
                             ((telescope_ && (blocked || tooSmall)) || teleForce_ == L);
         if (doTele) {
           // Fewest merges (largest tree depth) at which EVERY still-coarsenable axis has even
           // blocks — "any axis" would be wrong: it can unblock z and leave x frozen at the extent
-          // that matters. depth 0 (one block: origin 0, size gs, even by can()) always qualifies.
-          std::vector<int> groupOf, rootOf;
-          peclet::core::decomp::BlockDecomposer<3> cand;
-          int dSel = -1;
-          for (int d = curDec.treeDepth() - 1; d >= 0; --d) {
-            std::vector<int> go, ro;
-            cand = curDec.agglomerated(d, &go, &ro);
-            bool ok = true;
-            for (int ax = 0; ax < 3; ++ax)
-              if (can(ax == 0 ? gs.x : ax == 1 ? gs.y : gs.z) && !evenOn(cand, ax))
-                ok = false;
-            // and, with the economic trigger, fat enough to STAY above the threshold after the
-            // halving that follows (a single block always qualifies): merging to blocks of 4 that
-            // become 2 on the next level would merge again there, and again after that.
-            if (ok && teleMinExtent_ > 0 && cand.numBlocks() > 1 &&
-                minExtentOf(cand) < 2 * teleMinExtent_)
-              ok = false;
-            if (ok && cand.numBlocks() < curDec.numBlocks()) {
-              dSel = d;
-              groupOf = go;
-              rootOf = ro;
-              break;
+          // that matters. depth 0 (one block: origin 0, size gs, even by can()) always qualifies;
+          // with the economic trigger a merged candidate must also stay fat enough after the
+          // halving that follows. That search is core's `shallowestLiftableMerge`, and behind
+          // flow's trigger it is `chooseStageTarget` with maxBlockCells = 0 (byte-identical to the
+          // search flow carried inline until S4). The test-only forced telescope runs the search
+          // where in-place coarsening is legal, i.e. the search on its own.
+          std::optional<cdec::StageTarget<3>> t;
+          if (teleForce_ == L) {
+            if (auto m = cdec::shallowestLiftableMerge(curDec, liftable, teleMinExtent_)) {
+              t.emplace();
+              t->kind = cdec::StageKind::SiblingMerge;
+              t->dec = std::move(m->dec);
+              t->ownerOf = std::move(m->ownerOf);
+              t->groupOf = std::move(m->groupOf);
             }
+          } else {
+            t = cdec::chooseStageTarget(curDec, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable,
+                                        teleMinExtent_);
+            if (t->kind != cdec::StageKind::SiblingMerge)
+              throw std::logic_error(
+                  "CutcellMG::initMpi: the telescope search found no merge (depth 0 always lifts "
+                  "under flow's rule)");
           }
-          if (dSel >= 0) {
+          if (t) {
             auto T = std::make_shared<Telescope>();
-            const int myGroup = groupOf[(std::size_t)curRank];
-            T->root = (curRank == rootOf[(std::size_t)myGroup]);
-            MPI_Comm_split(curComm, myGroup, curRank, &T->groupComm);
-            MPI_Comm_split(curComm, T->root ? 0 : MPI_UNDEFINED, myGroup, &T->subComm);
+            T->comm = cdec::makeStageComm(curComm, *t);
+            const int myGroup = T->comm.myGroup;
             T->g = v.g;
-            const auto mb = cand.block((std::size_t)myGroup);
+            const auto mb = t->dec.block((std::size_t)myGroup);
             T->mOg = C3{(int)mb.origin[0], (int)mb.origin[1], (int)mb.origin[2]};
             T->mInner = C3{(int)mb.size[0], (int)mb.size[1], (int)mb.size[2]};
             T->mExt = C3{T->mInner.x + 2 * T->g, T->mInner.y + 2 * T->g, T->mInner.z + 2 * T->g};
-            // members in group-comm rank order == ascending old block index (key = curRank)
+            // members in group-comm rank order == ascending old block index (makeStageComm)
             int disp = 0;
-            for (std::size_t b = 0; b < curDec.numBlocks(); ++b)
-              if (groupOf[b] == myGroup) {
-                const auto fb = curDec.block(b);
-                T->memO.push_back(C3{(int)fb.origin[0], (int)fb.origin[1], (int)fb.origin[2]});
-                T->memS.push_back(C3{(int)fb.size[0], (int)fb.size[1], (int)fb.size[2]});
-                const int n = (int)(fb.size[0] * fb.size[1] * fb.size[2]);
-                T->counts.push_back(n);
-                T->displs.push_back(disp);
-                disp += n;
-              }
+            for (const int b : T->comm.members) {
+              const auto fb = curDec.block((std::size_t)b);
+              T->memO.push_back(C3{(int)fb.origin[0], (int)fb.origin[1], (int)fb.origin[2]});
+              T->memS.push_back(C3{(int)fb.size[0], (int)fb.size[1], (int)fb.size[2]});
+              const int n = (int)(fb.size[0] * fb.size[1] * fb.size[2]);
+              T->counts.push_back(n);
+              T->displs.push_back(disp);
+              disp += n;
+            }
             T->nMembers = (int)T->counts.size();
-            if (T->root) {
+            if (T->root()) {
               const std::size_t mn = (std::size_t)T->mExt.x * T->mExt.y * T->mExt.z;
               T->res = CCField("tele_res", mn);
               T->x = CCField("tele_x", mn);
@@ -801,9 +809,9 @@ class CutcellMG {
               T->oz = CCField("tele_oz", mn);
             }
             v.tele = T;
-            if (T->root) {
-              curDec = cand;
-              curComm = T->subComm;
+            if (T->root()) {
+              curDec = t->dec;
+              curComm = T->comm.sub;
               MPI_Comm_rank(curComm, &curRank);
             } else {
               idleBelow = true;  // this rank holds levels 0..L only
@@ -862,7 +870,7 @@ class CutcellMG {
             lv_[L].ratio.y, lv_[L].ratio.z, lv_[L].tele ? "  -> TELESCOPE" : "");
         if (lv_[L].tele) {
           int sub = 1;
-          MPI_Comm_size(lv_[L].tele->subComm, &sub);
+          MPI_Comm_size(lv_[L].tele->comm.sub, &sub);
           ranks = sub;
         }
         g = C3{g.x / lv_[L].ratio.x, g.y / lv_[L].ratio.y, g.z / lv_[L].ratio.z};
@@ -1481,11 +1489,11 @@ class CutcellMG {
               hs((long)(i + g) + (long)(j + g) * lv.ext.x +
                  (long)(k + g) * (long)lv.ext.x * lv.ext.y);
     std::vector<double> rb;
-    if (T.root)
+    if (T.root())
       rb.resize((std::size_t)T.displs.back() + (std::size_t)T.counts.back());
-    MPI_Gatherv(sb.data(), (int)nIn, MPI_DOUBLE, T.root ? rb.data() : nullptr, T.counts.data(),
-                T.displs.data(), MPI_DOUBLE, 0, T.groupComm);
-    if (!T.root)
+    MPI_Gatherv(sb.data(), (int)nIn, MPI_DOUBLE, T.root() ? rb.data() : nullptr, T.counts.data(),
+                T.displs.data(), MPI_DOUBLE, 0, T.comm.group);
+    if (!T.root())
       return;
     auto hd = Kokkos::create_mirror_view(dst);
     for (int m = 0; m < T.nMembers; ++m) {
@@ -1539,7 +1547,7 @@ class CutcellMG {
     std::vector<int> counts, displs;
     std::vector<double> rb;
     const int gd[3] = {lv.gdim.x, lv.gdim.y, lv.gdim.z};
-    if (T.root) {
+    if (T.root()) {
       int disp = 0;
       for (int m = 0; m < T.nMembers; ++m) {
         const int mo[3] = {T.memO[m].x, T.memO[m].y, T.memO[m].z};
@@ -1551,10 +1559,10 @@ class CutcellMG {
       }
       rb.resize((std::size_t)disp);
     }
-    MPI_Gatherv(sb.data(), (int)sb.size(), MPI_DOUBLE, T.root ? rb.data() : nullptr,
-                T.root ? counts.data() : nullptr, T.root ? displs.data() : nullptr, MPI_DOUBLE, 0,
-                T.groupComm);
-    if (!T.root)
+    MPI_Gatherv(sb.data(), (int)sb.size(), MPI_DOUBLE, T.root() ? rb.data() : nullptr,
+                T.root() ? counts.data() : nullptr, T.root() ? displs.data() : nullptr, MPI_DOUBLE,
+                0, T.comm.group);
+    if (!T.root())
       return;
     const int mext[3] = {T.mExt.x, T.mExt.y, T.mExt.z};
     const long mst[3] = {1, (long)T.mExt.x, (long)T.mExt.x * T.mExt.y};
@@ -1580,7 +1588,7 @@ class CutcellMG {
     Telescope& T = *lv.tele;
     const int g = lv.g;
     std::vector<double> sb;
-    if (T.root) {
+    if (T.root()) {
       auto hs = Kokkos::create_mirror_view(src);
       Kokkos::deep_copy(hs, src);
       sb.resize((std::size_t)T.displs.back() + (std::size_t)T.counts.back());
@@ -1599,8 +1607,8 @@ class CutcellMG {
     }
     const std::size_t nIn = (std::size_t)lv.inner.x * lv.inner.y * lv.inner.z;
     std::vector<double> rb(nIn);
-    MPI_Scatterv(T.root ? sb.data() : nullptr, T.counts.data(), T.displs.data(), MPI_DOUBLE,
-                 rb.data(), (int)nIn, MPI_DOUBLE, 0, T.groupComm);
+    MPI_Scatterv(T.root() ? sb.data() : nullptr, T.counts.data(), T.displs.data(), MPI_DOUBLE,
+                 rb.data(), (int)nIn, MPI_DOUBLE, 0, T.comm.group);
     auto hd = Kokkos::create_mirror_view(dst);
     Kokkos::deep_copy(hd, dst);
     for (int k = 0; k < lv.inner.z; ++k)
@@ -1696,7 +1704,7 @@ class CutcellMG {
       // recurse / prolong on the sub-communicator, and the correction comes back the same way.
       Telescope& T = *lv.tele;
       teleGather(lv, lv.res, T.res);
-      if (T.root) {
+      if (T.root()) {
         Level& cs = lv_[L + 1];
         restrictAvg(cs.rhs, CCConst(T.res), cs.ext, T.mExt, cs.g, T.g, cs.inner, lv.ratio);
         Kokkos::deep_copy(cs.x, 0.0);
@@ -2875,35 +2883,18 @@ class CutcellMG {
       r.ratio = C3{1, 1, 1};
       C3 next = gs;
       if (L + 1 < nLevels) {
-        const int gsa[3] = {gs.x, gs.y, gs.z};
-        bool blocked = false, canAny = false;
-        for (int ax = 0; ax < 3; ++ax) {
-          canAny = canAny || can(gsa[ax]);
-          if (can(gsa[ax]) && !evenOn(cur, ax))
-            blocked = true;
-        }
-        auto minExtentOf = [](const Dec& d) {
-          long m = std::numeric_limits<long>::max();
-          for (const auto& sz : d.sizes())
-            for (int k = 0; k < 3; ++k)
-              m = std::min(m, (long)sz[k]);
-          return (int)m;
-        };
-        const bool tooSmall = minExtent > 0 && minExtentOf(cur) < minExtent;
+        const bool canAny = can(gs.x) || can(gs.y) || can(gs.z);
+        auto liftable = [&](const Dec& d) { return teleLiftable(d, gs); };
+        const bool blocked = !liftable(cur);
+        const bool tooSmall = minExtent > 0 && peclet::core::decomp::minBlockExtent(cur) <
+                                                   (peclet::core::Index)minExtent;
+        // initMpi's trigger + core's policy (maxBlockCells = 0: flow's sibling-merge search)
         if (telescope && (blocked || tooSmall) && canAny && cur.numBlocks() > 1) {
-          for (int d = cur.treeDepth() - 1; d >= 0; --d) {
-            Dec cand = cur.agglomerated(d);
-            bool ok = true;
-            for (int ax = 0; ax < 3; ++ax)
-              if (can(gsa[ax]) && !evenOn(cand, ax))
-                ok = false;
-            if (ok && minExtent > 0 && cand.numBlocks() > 1 && minExtentOf(cand) < 2 * minExtent)
-              ok = false;
-            if (ok && cand.numBlocks() < cur.numBlocks()) {
-              cur = cand;
-              r.tele = true;
-              break;
-            }
+          auto t = peclet::core::decomp::chooseStageTarget(
+              cur, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable, minExtent);
+          if (t.kind == peclet::core::decomp::StageKind::SiblingMerge) {
+            cur = std::move(t.dec);
+            r.tele = true;
           }
         }
         if (can(gs.x) && evenOn(cur, 0)) {
