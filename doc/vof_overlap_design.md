@@ -418,3 +418,39 @@ reintroduce numerical coalescence through the rim crease), raising `interfaceEps
 failure), TBFsolver's unsized fragment predicate (deletes satellites and thin sheets), discarding
 without return (percent-level loss over 20 turnovers). Evidence: `doc/vof_overlap_design_brief.md`
 §6, this note, the G0–G5 numbers in `doc/vof_overlap_STATE.md`.
+
+## 11. Addendum (Opus, 2026-09-24 14:30) — three premises measured false, three decisions
+
+The implementer's gates (STATE, commit 94eeb34) falsified three premises; decided on the evidence,
+reviewer to check at the end.
+
+1. **Clip scope → BLOCK PATH ONLY** (Q4 reversed). On the single-field path the clip fires in
+   existing gates on *legitimately* large curvature — under-resolved droplets (vof_curvature
+   D/Δ 2.8/4.4: κ = 2/R > 1 by definition), contact-line cells (vof_wetting 2.9, vof_wetting_mpi
+   8.7, vof_cutcell 1.6), the eps = 0 wisp ablation of vof_surface_tension P6 — and would move
+   validated numbers. The single-field path has never shown the debris failure (one colour field
+   cannot hold one marker's debris inside another). Default `1/Δ_min`, prototype-propagated to
+   blocks only; `vofCurv_` unchanged.
+2. **Debris predicate → `interfacial(C, 1e-8) && max_{5³} C < 0.5`** (replaces `Σ_{5³} C < 1`).
+   Measured: the size criterion does not separate (fragments Σ 0.10–1.24, attached ≥ 1.19), and a
+   connected-component rule would not either — the debris is mostly CONNECTED to its own body
+   through trails of 1e-8…1e-3 (blob of m13 detaches only at a 1e-4 threshold; m2's tails not even
+   at 1e-3). "No cell above ½ within two cells" is TBFsolver's fragment rule with "full" read as
+   C > ½; on the dumps it selects exactly the census sets (m2 6/0.069, m13 5/4.2e-3; eps-1e-3 dump
+   m13 24/0.162), and it selects NOTHING at the healthy step-10000 checkpoint (all 18 markers).
+   §4's objection to TBFsolver's rule (it deletes a C = 0.9 satellite) does not apply: such a
+   satellite has cells above ½ and is kept. What it removes is colour more than two cells from
+   any cell the marker at least half fills — sub-cell sheets and tails with no resolvable
+   interface. Volume return, ledger, fixed-order sums, placement and default exactly as §5.3–5.4.
+3. **Phantom-bound trigger → `S > 1 + 1e-2`** (was 1 + 1e-8). Measured: WY residue of one marker
+   inside another keeps S just above 1 on essentially every step after a contact (shear r10: bound
+   on 5028/5907 steps, also after separation; channel_18: every step, dt 2.24e-3 → 1.76e-3), so the
+   1e-8 trigger is a permanent 27 % dt tax for no stability benefit. A phantom interface worth a
+   capillary mode needs a marker's interface band inside another's body, i.e. S − 1 = O(0.1–1).
+
+Also: **box guard.** When a periodic bubble box would reach the full domain length, `vofClampBox`
+snaps it to [0, L) and `recentre`'s copy by unwrapped index silently wipes the marker (channel_18
+G4(a), ~step 12150, marker 2 → volume 0). Replace the silent path with a loud error naming the
+block, its box and the likely cause (debris / a marker as large as the domain); debris removal is
+the fix for the cause. And **G7 verdict: the tent stays opt-in** — at μ_g/μ_l = 0.02 it is worse
+than MAX + gated bound (d = 8 peak 0.42–0.58 vs 0.32).
