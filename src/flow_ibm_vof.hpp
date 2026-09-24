@@ -16,6 +16,8 @@ void Solver<Grid>::setVofTiming(bool on) {
   vofTiming_ = on;
   vofAdv_.timingOn = on;
   vofCurv_.timingOn = on;
+  if (vofBlocks_)
+    vofBlocks_->timingOn = on;
   resetVofTiming();
 }
 
@@ -29,6 +31,10 @@ void Solver<Grid>::resetVofTiming() {
   vt_ = VofTiming();
   vofAdv_.resetTiming();
   vofCurv_.resetTiming();
+  if (vofBlocks_) {
+    vofBlocks_->debrisSeconds = 0.0;
+    vofBlocks_->debrisCalls = 0;
+  }
   tStepSum_ = tPredSum_ = tMomSum_ = tProjSum_ = 0.0;
 }
 
@@ -1428,10 +1434,17 @@ void Solver<Grid>::advectVofBlocks(double dtPhysArg, bool requireSolenoidal) {
                   div);
     throw std::runtime_error(msg);
   }
+  const double _tv0 = vofTick();
+  vofBlocks_->timingOn = vofTiming_;
+  const double _td0 = vofBlocks_->debrisSeconds;
   bridgeVelocityToVof();  // the block exchange reads THESE views (advector high-face convention)
   vofBlocks_->advect(dt, vofAdv_.colour());
   updateVofBlockOverlap();  // vof_overlap_design §5.6: S, the census, the phantom-bound gate
   harvestVofBlockUnion();
+  if (vofTiming_) {
+    vofAdd(vt_.blockAdvect, _tv0);
+    vt_.blockDebris += vofBlocks_->debrisSeconds - _td0;
+  }
 }
 
 template <class Grid>

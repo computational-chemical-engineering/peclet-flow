@@ -535,6 +535,15 @@ class VofBlockSet {
   /// Remove the debris and return its volume (§5.3). Solver default: ON under
   /// `enable_vof_block_csf`, via `diagnostics.set_vof_block_debris`.
   bool debrisRemove = false;
+  /// Instrument: fence-bounded wall time of the debris/residue pass (all blocks, all calls) while
+  /// `timingOn`; `debrisCalls` counts block-passes. Diagnostic only.
+  bool timingOn = false;
+  double debrisSeconds = 0.0;
+  long debrisCalls = 0;
+  static double tick_() {
+    Kokkos::fence();
+    return WyAdvector::wallSeconds();
+  }
   /// Guard of the volume return (§5.3 step 3): a marker whose attached interface holds less than
   /// this much colour (cell volumes) keeps its debris (counted in `debrisUnresolved`).
   static constexpr double kDebrisMinAttached = 1.0;
@@ -1296,6 +1305,15 @@ class VofBlockSet {
   ///    sum_R, debrisLost += lost.
   /// Nothing marked (the common case without a wisp guard) runs nothing else: a bitwise no-op.
   void debrisPass(VofBlock& b) {
+    const double t0 = timingOn ? tick_() : 0.0;
+    debrisPassImpl(b);
+    if (timingOn) {
+      Kokkos::fence();
+      debrisSeconds += tick_() - t0;
+    }
+    ++debrisCalls;
+  }
+  void debrisPassImpl(VofBlock& b) {
     b.st_.debrisCells = 0;
     b.st_.debrisVolume = 0.0;
     const bool doDebris = csfEnabled && debrisCensus, doResidue = wispEps > 0.0;
@@ -1306,7 +1324,12 @@ class VofBlockSet {
       if (static_cast<long>(f.extent(0)) < region)
         f = LField(Kokkos::view_alloc(std::string(name), Kokkos::WithoutInitializing), region);
     };
-    const double ieps = curvProto.interfaceEps, cfull = kDebrisMaxC, weps = wispEps;
+    // The interfacial predicate of D and A is `max(interfaceEps, wispEps)` (review finding 7): R
+    // is `0 < |C| <= wispEps`, so the three lists are DISJOINT whatever the two thresholds are --
+    // on a kinematic block run curvProto.interfaceEps is 0 while wispEps is 1e-8, and an A/R or
+    // D/R overlap would drop a W share or count one cell in both ledgers.
+    const double weps = wispEps, cfull = kDebrisMaxC;
+    const double ieps = curvProto.interfaceEps > weps ? curvProto.interfaceEps : weps;
     const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
     const int nx = n.x, ny = n.y;
     SField c = b.adv_.colour();
@@ -1397,15 +1420,20 @@ class VofBlockSet {
         },
         nA);
     Kokkos::fence();
-    // [0] sum_D, [1] sum_R, [2] W, [3] VA, [4] lost, [5] acted? -- one thread, list order
-    Kokkos::View<double[6], SMem> out("vof::block::debris_out");
+    // [0] sum_D, [1] sum_R, [2] W, [3] VA, [4] lost, [5] acted?
+    // The SUMS run on one thread in list order (a fixed summation order: the state stays
+    // decomposition-independent bitwise); the per-cell writes are independent once dV and W are
+    // known -- D, R and A are disjoint -- so they run in parallel and every cell receives exactly
+    // the double the serial loop gave it (review finding 4). `lost` (a cap at 1, expected never to
+    // fire) is summed in list order from a per-cell scratch only when some cell was capped.
+    Kokkos::View<double[6], SMem> out = debrisOut_;
     LField listD = listD_, listR = listR_;
     const long nDr = removeD ? nD : 0, nDc = doDebris ? nD : 0;
     const double vaMin = kDebrisMinAttached;
     Kokkos::parallel_for(
-        "vof::block::debris_act", Kokkos::RangePolicy<SExec>(SExec(), 0, 1),
+        "vof::block::debris_sums", Kokkos::RangePolicy<SExec>(SExec(), 0, 1),
         KOKKOS_LAMBDA(const long) {
-          double sD = 0.0, sR = 0.0, W = 0.0, VA = 0.0, lost = 0.0;
+          double sD = 0.0, sR = 0.0, W = 0.0, VA = 0.0;
           for (long t = 0; t < nDc; ++t)
             sD += c(listD(t));
           for (long t = 0; t < nR; ++t)
@@ -1419,34 +1447,68 @@ class VofBlockSet {
           out(1) = sR;
           out(2) = W;
           out(3) = VA;
-          out(5) = 0.0;
-          if (VA < vaMin || !(W > 0.0))
-            return;
-          double dV = 0.0;  // the removed volume, in the fixed order D then R
-          for (long t = 0; t < nDr; ++t) {
+          out(4) = 0.0;
+          out(5) = (VA < vaMin || !(W > 0.0)) ? 0.0 : 1.0;
+          // the removed volume, in the fixed order D (if removing) then R -- the serial order
+          double dV = 0.0;
+          for (long t = 0; t < nDr; ++t)
             dV += c(listD(t));
-            c(listD(t)) = 0.0;
-          }
-          for (long t = 0; t < nR; ++t) {
+          for (long t = 0; t < nR; ++t)
             dV += c(listR(t));
-            c(listR(t)) = 0.0;
-          }
-          for (long t = 0; t < nA; ++t) {
-            const long i = listA(t);
+          out(4) = dV;  // carried to the write kernel; `lost` replaces it below
+        });
+    Kokkos::deep_copy(debrisOutHost_, out);
+    auto ho = debrisOutHost_;
+    if (ho(5) != 0.0) {
+      const double dV = ho(4), W = ho(2);
+      if (static_cast<long>(debrisEx_.extent(0)) < region)
+        debrisEx_ = SField(Kokkos::view_alloc("vof::block::debris_excess",
+                                              Kokkos::WithoutInitializing),
+                           region);
+      SField ex = debrisEx_;
+      const long nZ = nDr + nR, nTot = nZ + nA;
+      long capped = 0;
+      Kokkos::parallel_reduce(
+          "vof::block::debris_write", Kokkos::RangePolicy<SExec>(SExec(), 0, nTot),
+          KOKKOS_LAMBDA(const long t, long& cap) {
+            if (t < nDr) {
+              c(listD(t)) = 0.0;
+              return;
+            }
+            if (t < nZ) {
+              c(listR(t - nDr)) = 0.0;
+              return;
+            }
+            const long ta = t - nZ;
+            const long i = listA(ta);
             const double ca = c(i);
             const double d = dV * (ca * (1.0 - ca)) / W;
             double cn = ca + d;
+            double e = 0.0;
             if (cn > 1.0) {
-              lost += cn - 1.0;
+              e = cn - 1.0;
               cn = 1.0;
+              ++cap;
             }
+            ex(ta) = e;
             c(i) = cn;
-          }
-          out(4) = lost;
-          out(5) = 1.0;
-        });
-    Kokkos::fence();
-    auto ho = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), out);
+          },
+          capped);
+      double lost = 0.0;
+      if (capped > 0) {
+        Kokkos::parallel_reduce(
+            "vof::block::debris_lost", Kokkos::RangePolicy<SExec>(SExec(), 0, 1),
+            KOKKOS_LAMBDA(const long, double& acc) {
+              double a = 0.0;  // list order, as the serial loop accumulated it
+              for (long t = 0; t < nA; ++t)
+                a += ex(t);
+              acc += a;
+            },
+            lost);
+      }
+      ho(4) = lost;
+    }
+
     if (doDebris && !debrisRemove && nD > 0) {  // census of what WOULD be removed
       b.st_.debrisCells = nD;
       b.st_.debrisVolume = ho(0);
@@ -1642,6 +1704,9 @@ class VofBlockSet {
   long lastReassigned_ = 0;
   VofCurvature::Stats curvStats_{};
   LField listD_, listA_, listR_;  ///< debris / attached / residue lists, reused across blocks
+  SField debrisEx_;               ///< per-attached-cell cap excess (only read when a cap fired)
+  Kokkos::View<double[6], SMem> debrisOut_{"vof::block::debris_out"};
+  Kokkos::View<double[6], Kokkos::HostSpace> debrisOutHost_{"vof::block::debris_out_host"};
 };
 
 }  // namespace peclet::flow::vof

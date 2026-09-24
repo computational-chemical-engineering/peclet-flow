@@ -1261,6 +1261,8 @@ class Solver {
     double curvature = 0.0;   ///< the V3 height-function cascade + the capillary dt check
     double csf = 0.0;         ///< the V4 balanced-force CSF added to the three momentum RHSs
     double phaseChange = 0.0; ///< the Part II phase-change stage (mdot, deposit, regression)
+    double blockAdvect = 0.0; ///< the block-container colour stage as a whole (advectVofBlocks)
+    double blockDebris = 0.0; ///< ... of which: the debris/residue pass (§5.3/§13 of the note)
     long steps = 0;
   };
   void setVofTiming(bool on);

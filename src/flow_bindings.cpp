@@ -891,6 +891,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             r["kc_height"] = q.height;
             r["kc_fallback"] = q.fallback;
             r["kc_clip"] = q.clip;
+            r["block_advect"] = v.blockAdvect;
+            r["block_debris"] = v.blockDebris;
             r["kc_census"] = q.census;
             return r;
           },
