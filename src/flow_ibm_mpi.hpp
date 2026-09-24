@@ -150,6 +150,17 @@ void Solver<Grid>::redistribute(const peclet::core::decomp::BlockDecomposer<3>& 
     fillGhosts(fields_.at(names[k]).data);
   for (auto& sc : scalars_)
     applyScalarBc(sc);  // a scalar's own domain BCs override the halo/periodic base
+  // 6b. RE-SEED eps^n. It is STATE, not scratch: a re-partition is not a time step, so the
+  //    porosity must not appear to have jumped across it -- eps^n := the migrated eps^{n+1}, i.e.
+  //    d(eps)/dt = 0 over the redistribute, the only choice that leaves the projection RHS
+  //    unchanged. It must happen HERE, after step 4 scattered the migrated eps into `epsField_`:
+  //    it used to happen in `resizeForBlock` (step 3), where `epsField_` is the freshly allocated
+  //    ZERO buffer whenever the block changes size, so eps^n = 0 and the first porous projection
+  //    after a rebalance saw d(eps)/dt = eps/dt. Measured on coupling's test_mpi_rebalance (a
+  //    32^3 heap, np = 2 and 4): pressure off by 2.2e+02 and velocity by 2.4 (|u| <= 0.07) one
+  //    step after the move; a rebalance that keeps every block's size hid it (no reallocation).
+  if (epsPrev_.extent(0) == n_ && epsField_.extent(0) == n_)
+    Kokkos::deep_copy(epsPrev_, epsField_);
   // 7. RE-SEED THE COLLOCATED FACE FIELD. `uf_/vf_/wf_` are block scratch, not registry fields:
   //    step 3's `allocateBlock` handed us fresh ZERO buffers and nothing above migrates them, so
   //    the projected face field of the old partition is simply gone. Everything that rides it --
@@ -341,12 +352,7 @@ void Solver<Grid>::resizeBlockScratch() {
   resizeIfAllocated(depsdt_, "depsdt", n);
   resizeIfAllocated(divAdv_, "divAdv", n);
   resizeIfAllocated(epsRho_, "epsRho", n);
-  resizeIfAllocated(epsPrev_, "epsPrev", n);
-  // eps^n is STATE, not scratch: a re-partition is not a time step, so the porosity must not
-  // appear to have jumped across it. Seed it from the migrated eps^{n+1} => d(eps)/dt = 0 over
-  // the redistribute, which is the only choice that leaves the projection RHS unchanged.
-  if (epsPrev_.extent(0) == n && epsField_.extent(0) == n)
-    Kokkos::deep_copy(epsPrev_, epsField_);
+  resizeIfAllocated(epsPrev_, "epsPrev", n);  // eps^n is STATE: `redistribute` re-seeds it (6b)
   for (int c = 0; c < 3; ++c)
     for (int k = 0; k < 3; ++k)
       if (tEx_[c][k].extent(0) != 0 && tEx_[c][k].extent(0) != (std::size_t)nx_ * ny_ * nz_) {
