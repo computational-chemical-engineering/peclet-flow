@@ -40,6 +40,7 @@
 
 #include "peclet/core/decomp/block_decomposer.hpp"
 #include "peclet/core/decomp/grid_redistribute.hpp"
+#include "peclet/core/decomp/redistribute_topology.hpp"
 #include "peclet/core/decomp/stage_comm.hpp"
 #include "peclet/core/decomp/stage_target.hpp"
 #include "peclet/core/halo/grid_halo.hpp"
@@ -358,8 +359,12 @@ class CutcellMG {
   // The target, the communicators and the movement are core's (suite decision "Coarse-level
   // redistribution lives in core; the hierarchies stay in the methods",
   // amr/docs/amr_mg_core_boundary.md §7): the depth search is `chooseStageTarget` /
-  // `shallowestLiftableMerge` with flow's per-axis lift rule as the predicate, and the group /
-  // roots communicators are `makeStageComm`'s. This struct is flow's per-level record of a stage.
+  // `shallowestLiftableMerge` with flow's per-axis lift rule as the predicate, the group / roots
+  // communicators are `makeStageComm`'s, and the gather / scatter of a level field is a
+  // `RedistributeTopology` built once here and run every V-cycle. What stays in flow: this struct
+  // (flow's per-level record of a stage), the stage buffers, the scatter's ADD (core's backward
+  // overwrites) and the WO-R2 outflow ghost-plane gather (teleGatherPlane), which moves a plane
+  // beyond the inner block that the inner-cell topology does not describe.
   struct Telescope {
     // group = this rank's group (the ranks merged into one block, owner first), sub = the roots
     // only (MPI_COMM_NULL on members). Owned and freed by the StageComm.
@@ -370,8 +375,10 @@ class CutcellMG {
     C3 mInner{}, mOg{}, mExt{};  // merged block (root): inner dims, global origin, extent
     // per-member fine block geometry in group-rank order (root first), root only
     std::vector<C3> memO, memS;
-    std::vector<int> counts, displs;  // Gatherv/Scatterv layout (cells)
-    CCField res, x, ox, oy, oz;       // stage buffers at resolution L on the merged block (root)
+    // the movement of a level-L field: this rank's inner cells <-> the merged block's (root)
+    peclet::core::decomp::RedistributeTopology<3, double> move;
+    std::vector<double> back;    // teleScatterAdd's landing buffer, level L's padded layout
+    CCField res, x, ox, oy, oz;  // stage buffers at resolution L on the merged block (root)
   };
 #endif
   static constexpr int G = 1;  // level-0 / single-rank ghost width (the flow_ibm g=1 bridge)
@@ -789,17 +796,30 @@ class CutcellMG {
             T->mInner = C3{(int)mb.size[0], (int)mb.size[1], (int)mb.size[2]};
             T->mExt = C3{T->mInner.x + 2 * T->g, T->mInner.y + 2 * T->g, T->mInner.z + 2 * T->g};
             // members in group-comm rank order == ascending old block index (makeStageComm)
-            int disp = 0;
             for (const int b : T->comm.members) {
               const auto fb = curDec.block((std::size_t)b);
               T->memO.push_back(C3{(int)fb.origin[0], (int)fb.origin[1], (int)fb.origin[2]});
               T->memS.push_back(C3{(int)fb.size[0], (int)fb.size[1], (int)fb.size[2]});
-              const int n = (int)(fb.size[0] * fb.size[1] * fb.size[2]);
-              T->counts.push_back(n);
-              T->displs.push_back(disp);
-              disp += n;
             }
-            T->nMembers = (int)T->counts.size();
+            T->nMembers = (int)T->comm.members.size();
+            // The movement: a global cell of this rank's level-L block lives at its padded slot
+            // (og, g, ext of the level); on the root, a cell of the merged block at the stage
+            // buffer's (mOg, g, mExt). Built once; teleGather / teleScatterAdd run it.
+            {
+              const C3 lo = v.og, le = v.ext, mo = T->mOg, me = T->mExt;
+              const int lg = v.g, mg = T->g;
+              using peclet::core::Index;
+              auto srcIdx = [&](const peclet::core::IVec<3>& c) {
+                return (Index)(c[0] - lo.x + lg) + (Index)(c[1] - lo.y + lg) * le.x +
+                       (Index)(c[2] - lo.z + lg) * (Index)le.x * le.y;
+              };
+              auto dstIdx = [&](const peclet::core::IVec<3>& c) {
+                return (Index)(c[0] - mo.x + mg) + (Index)(c[1] - mo.y + mg) * me.x +
+                       (Index)(c[2] - mo.z + mg) * (Index)me.x * me.y;
+              };
+              T->move.build(curDec, *t, T->comm, srcIdx, dstIdx);
+              T->back.assign(v.n, 0.0);
+            }
             if (T->root()) {
               const std::size_t mn = (std::size_t)T->mExt.x * T->mExt.y * T->mExt.z;
               T->res = CCField("tele_res", mn);
@@ -1470,44 +1490,22 @@ class CutcellMG {
           // overhead is worth chasing.
 #ifdef PECLET_FLOW_MPI
 
-  // Telescope data movement (host-staged; the stage is a coarse level, i.e. small). Gather: every
-  // member packs its INNER cells x-fastest and the group root lands them in the merged block at
-  // (member origin - merged origin + g). Scatter-add: the inverse, each member adding the
-  // received box into `dst`'s inner cells (prolongAdd is additive). Pure data movement, bitwise.
+  // Telescope data movement (host-staged; the stage is a coarse level, i.e. small), through the
+  // stage's core RedistributeTopology. Gather: every member's INNER cells land in the merged
+  // block at (member origin - merged origin + g) on the group root (core's forward: a group
+  // Gatherv). Scatter-add: the inverse (core's backward: a group Scatterv, which OVERWRITES its
+  // landing buffer), then each member ADDS the received box into `dst`'s inner cells (prolongAdd
+  // is additive — flow's arithmetic, not the movement's). Pure data movement, bitwise.
   void teleGather(const Level& lv, CCField src, CCField dst) {
     Telescope& T = *lv.tele;
-    const int g = lv.g;
-    const std::size_t nIn = (std::size_t)lv.inner.x * lv.inner.y * lv.inner.z;
     auto hs = Kokkos::create_mirror_view(src);
     Kokkos::deep_copy(hs, src);
-    std::vector<double> sb(nIn);
-    for (int k = 0; k < lv.inner.z; ++k)
-      for (int j = 0; j < lv.inner.y; ++j)
-        for (int i = 0; i < lv.inner.x; ++i)
-          sb[(std::size_t)i + (std::size_t)j * lv.inner.x +
-             (std::size_t)k * lv.inner.x * lv.inner.y] =
-              hs((long)(i + g) + (long)(j + g) * lv.ext.x +
-                 (long)(k + g) * (long)lv.ext.x * lv.ext.y);
-    std::vector<double> rb;
-    if (T.root())
-      rb.resize((std::size_t)T.displs.back() + (std::size_t)T.counts.back());
-    MPI_Gatherv(sb.data(), (int)nIn, MPI_DOUBLE, T.root() ? rb.data() : nullptr, T.counts.data(),
-                T.displs.data(), MPI_DOUBLE, 0, T.comm.group);
-    if (!T.root())
+    if (!T.root()) {
+      T.move.forward({hs.data()}, {});
       return;
-    auto hd = Kokkos::create_mirror_view(dst);
-    for (int m = 0; m < T.nMembers; ++m) {
-      const C3 o = T.memO[m], sz = T.memS[m];
-      const double* q = rb.data() + T.displs[m];
-      for (int k = 0; k < sz.z; ++k)
-        for (int j = 0; j < sz.y; ++j)
-          for (int i = 0; i < sz.x; ++i) {
-            const int x = o.x - T.mOg.x + i + g, y = o.y - T.mOg.y + j + g,
-                      z = o.z - T.mOg.z + k + g;
-            hd((long)x + (long)y * T.mExt.x + (long)z * (long)T.mExt.x * T.mExt.y) =
-                q[(std::size_t)i + (std::size_t)j * sz.x + (std::size_t)k * sz.x * sz.y];
-          }
     }
+    auto hd = Kokkos::create_mirror_view(dst);
+    T.move.forward({hs.data()}, {hd.data()});
     Kokkos::deep_copy(dst, hd);
   }
   // WO-R2 outflow coefficient across a telescope point: the HIGH-side outflow coefficient of a
@@ -1587,37 +1585,22 @@ class CutcellMG {
   void teleScatterAdd(const Level& lv, CCField src, CCField dst) {
     Telescope& T = *lv.tele;
     const int g = lv.g;
-    std::vector<double> sb;
     if (T.root()) {
       auto hs = Kokkos::create_mirror_view(src);
       Kokkos::deep_copy(hs, src);
-      sb.resize((std::size_t)T.displs.back() + (std::size_t)T.counts.back());
-      for (int m = 0; m < T.nMembers; ++m) {
-        const C3 o = T.memO[m], sz = T.memS[m];
-        double* q = sb.data() + T.displs[m];
-        for (int k = 0; k < sz.z; ++k)
-          for (int j = 0; j < sz.y; ++j)
-            for (int i = 0; i < sz.x; ++i) {
-              const int x = o.x - T.mOg.x + i + g, y = o.y - T.mOg.y + j + g,
-                        z = o.z - T.mOg.z + k + g;
-              q[(std::size_t)i + (std::size_t)j * sz.x + (std::size_t)k * sz.x * sz.y] =
-                  hs((long)x + (long)y * T.mExt.x + (long)z * (long)T.mExt.x * T.mExt.y);
-            }
-      }
+      T.move.backward({hs.data()}, {T.back.data()});
+    } else {
+      T.move.backward({}, {T.back.data()});
     }
-    const std::size_t nIn = (std::size_t)lv.inner.x * lv.inner.y * lv.inner.z;
-    std::vector<double> rb(nIn);
-    MPI_Scatterv(T.root() ? sb.data() : nullptr, T.counts.data(), T.displs.data(), MPI_DOUBLE,
-                 rb.data(), (int)nIn, MPI_DOUBLE, 0, T.comm.group);
     auto hd = Kokkos::create_mirror_view(dst);
     Kokkos::deep_copy(hd, dst);
     for (int k = 0; k < lv.inner.z; ++k)
       for (int j = 0; j < lv.inner.y; ++j)
-        for (int i = 0; i < lv.inner.x; ++i)
-          hd((long)(i + g) + (long)(j + g) * lv.ext.x +
-             (long)(k + g) * (long)lv.ext.x * lv.ext.y) +=
-              rb[(std::size_t)i + (std::size_t)j * lv.inner.x +
-                 (std::size_t)k * lv.inner.x * lv.inner.y];
+        for (int i = 0; i < lv.inner.x; ++i) {
+          const long id =
+              (long)(i + g) + (long)(j + g) * lv.ext.x + (long)(k + g) * (long)lv.ext.x * lv.ext.y;
+          hd(id) += T.back[(std::size_t)id];
+        }
     Kokkos::deep_copy(dst, hd);
   }
 #endif
