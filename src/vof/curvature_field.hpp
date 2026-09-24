@@ -405,6 +405,24 @@ class VofCurvature {
   /// The paraboloid through them is arbitrary: measured |kappa| = 273 and 428 per cell against a
   /// true 0.4 on channel_18, face forces 3-100x the physical ones, a one-step velocity blow-up.
   double kappaMax = 0.0;
+  /// Copy EVERY tunable above (the metric, the estimator knobs, the predicates, the clip, the
+  /// diagnostic switches) from `src` -- the one place a prototype reaches a cascade, so a new
+  /// tunable is added here and nowhere else (review finding 1: the block path once dropped
+  /// `pureEps`; the block ctest pins every field through this function).
+  void copyTunablesFrom(const VofCurvature& src) {
+    metric = src.metric;
+    weightWidth = src.weightWidth;
+    pureEps = src.pureEps;
+    monoTol = src.monoTol;
+    ptWeightWidth = src.ptWeightWidth;
+    cosMin = src.cosMin;
+    interfaceEps = src.interfaceEps;
+    debugForceFallback = src.debugForceFallback;
+    debugSingleDirection = src.debugSingleDirection;
+    useMixedHeightFit = src.useMixedHeightFit;
+    kappaMax = src.kappaMax;
+    useWorklist = src.useWorklist;
+  }
   /// The bound the clip applies this call (0 = off).
   double kappaClipValue() const { return kappaMax < 0.0 ? 1.0 / metric.minH() : kappaMax; }
 

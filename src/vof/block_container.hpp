@@ -689,18 +689,11 @@ class VofBlockSet {
     VofBlock& b = blocks_[idx];
     const I3 n = b.adv_.inner();
     b.curv_.init(n.x, n.y, n.z, ghost_);
-    b.curv_.weightWidth = curvProto.weightWidth;
-    b.curv_.monoTol = curvProto.monoTol;
-    b.curv_.ptWeightWidth = curvProto.ptWeightWidth;
-    b.curv_.cosMin = curvProto.cosMin;
-    b.curv_.interfaceEps = curvProto.interfaceEps;
-    b.curv_.useMixedHeightFit = curvProto.useMixedHeightFit;
-    b.curv_.useWorklist = curvProto.useWorklist;  // WO-V9: the compaction follows the prototype
-    b.curv_.kappaMax = curvProto.kappaMax;        // the clip (vof_overlap_design §5.1)
-    // The purity test of the height function must agree with the tolerance the block colour was
-    // ADVECTED at (VofCurvature::pureEps; review finding 1): a block WY at wispEps 1e-8 judged at
-    // the 1e-10 floor decays the HF tier into the PV fallback silently (63.8 % -> 52.3 %).
-    b.curv_.pureEps = curvProto.pureEps;
+    // EVERY tunable of the prototype, the metric included (review finding 1: this list once
+    // dropped `pureEps`, so a block WY at wispEps 1e-8 was judged at the 1e-10 purity floor and the
+    // HF tier decayed into the PV fallback silently, 63.8 % -> 52.3 %; and it never carried the
+    // metric, so a cascade re-allocated by a re-centring ran an anisotropic block at unit metric).
+    b.curv_.copyTunablesFrom(curvProto);
     const long len = static_cast<long>(b.adv_.extent().x) * b.adv_.extent().y * b.adv_.extent().z;
     for (int c = 0; c < 3; ++c)
       b.f_[c] = SField("vof::block::csf", len);
@@ -1115,6 +1108,7 @@ class VofBlockSet {
         Kokkos::fence();
         a.cflLimit = cflLimit;
         a.wispEps = wispEps;
+        a.metric = metric_;  // a pooled advector carries whatever metric it last had
         a.globalMax = nullptr;
         a.exchange = nullptr;  // re-installed by installHook
         return a;
@@ -1125,6 +1119,7 @@ class VofBlockSet {
     a.init(nx, ny, nz, h_, ghost_);
     a.cflLimit = cflLimit;
     a.wispEps = wispEps;
+    a.metric = metric_;  // a re-centred block's fresh advector keeps the anisotropic metric
     a.globalMax = nullptr;  // the block IS the whole domain of its own advector
     return a;
   }
