@@ -8,8 +8,13 @@
 // result must be BITWISE independent of the decomposition.
 //
 // Compared bitwise against a single-rank run of the same scene (rank 0): the union colour, every
-// marker's volume, and the five ledger fields. At np >= 2 the ORB cuts x, i.e. between the two
-// marker centres, and the masters are round-robin, so A and B live on different ranks.
+// marker's volume, and the seven ledger fields (with residueReturned). At np >= 2 the ORB cuts x
+// and the masters are round-robin, so A and B live on different ranks.
+//
+// Second scene (review finding 3c): an OVERLAPPING pair with variable density, split between ranks
+// -- the phantom capillary bound activates, cuts the capillary dt by exactly
+// sqrt(2 rho_min / (rho_min + rho_max)) against the set_vof_phantom_capillary_bound(False) run, and
+// max S, the overlap cell count, the flag and the capillary dt are identical to np = 1.
 #include <mpi.h>
 
 #include <array>
@@ -82,6 +87,36 @@ static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, in
   s.setVelocity(0, u);
   s.setVelocity(1, zero);
   s.setVelocity(2, zero);
+}
+
+// ---- the PHANTOM capillary bound (vof_overlap_design §5.6/§11.3; review finding 3c): two
+// markers 8 cells apart (R = 5: 2 cells of overlap), each carrying only its own sphere, with a
+// variable density so the bound has a density range to act on. The x cut of np 2 / 4 falls
+// between the two centres, so the S = sum_k C_k census is assembled from both masters.
+static constexpr double PAX = 18.3, PBX = 26.3, RHO_L = 1.0, RHO_G = 0.1;
+static const std::array<int, 6> PBOX[2] = {{9, 7, 7, 28, 26, 26}, {17, 7, 7, 36, 26, 26}};
+static std::vector<double> pairColour(int m) {
+  const auto& b = PBOX[m];
+  std::vector<double> c;
+  for (int z = b[2]; z < b[5]; ++z)
+    for (int y = b[1]; y < b[4]; ++y)
+      for (int x = b[0]; x < b[3]; ++x)
+        c.push_back(sphereFrac(m == 0 ? PAX : PBX, x, y, z));
+  return c;
+}
+static void configurePair(IbmSolver& s, int lnx, int lny, int lnz, bool bound) {
+  const std::size_t loc = (std::size_t)lnx * lny * lnz;
+  s.setRho(RHO_L);
+  s.setMu(0.5);
+  s.setPressureGeometry(std::vector<double>(loc, 10.0));
+  s.enableVof();
+  s.setVof(std::vector<double>(loc, 0.0));
+  s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {RHO_L, RHO_G - RHO_L});
+  s.setSurfaceTension(SIGMA);
+  if (!bound)
+    s.setVofPhantomCapillaryBound(false);
+  s.enableVofBlocksFromColours({PBOX[0], PBOX[1]}, {pairColour(0), pairColour(1)});
+  s.enableVofBlockCsf();  // forms S and the census for the first step
 }
 
 static std::vector<double> gatherGlobal(const std::vector<double>& local, int ox, int oy, int oz,
@@ -222,6 +257,46 @@ int main(int argc, char** argv) {
       }
     }
     MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    // ---- the phantom capillary bound on an OVERLAPPING pair split between ranks
+    {
+      IbmSolver pb(lnx, lny, lnz), pn(lnx, lny, lnz);
+      pb.initMpi(dec, MPI_COMM_WORLD);
+      pn.initMpi(dec, MPI_COMM_WORLD);
+      configurePair(pb, lnx, lny, lnz, true);
+      configurePair(pn, lnx, lny, lnz, false);
+      const auto cb = pb.vofBlockOverlapCensus(), cn = pn.vofBlockOverlapCensus();
+      const double dtB = pb.capillaryDt(), dtN = pn.capillaryDt();  // collective
+      const double want = std::sqrt(2.0 * RHO_G / (RHO_G + RHO_L));
+      if (rank == 0) {
+        IbmSolver ref(NX, NY, NZ);
+        configurePair(ref, NX, NY, NZ, true);
+        const auto cr = ref.vofBlockOverlapCensus();
+        const double dtR = ref.capillaryDt();
+        std::printf(
+            "  phantom bound, overlapping pair: max S %.17g, excess %.17g, cells %ld, "
+            "active %d (off-switch run: active %d); capillary dt ratio %.17g (want "
+            "%.17g); np=1: max S %.17g cells %ld active %d dt %.17g\n",
+            cb.maxSum, cb.excess, cb.cells, (int)cb.active, (int)cn.active, dtB / dtN, want,
+            cr.maxSum, cr.cells, (int)cr.active, dtR);
+        if (!(cb.active && !cn.active)) {
+          std::printf("  FAIL: the phantom bound did not activate (or the off switch failed)\n");
+          fail = 1;
+        }
+        if (!(std::fabs(dtB / dtN / want - 1.0) <= 1e-14)) {
+          std::printf("  FAIL: capillary dt ratio is not sqrt(2 rho_min / (rho_min + rho_max))\n");
+          fail = 1;
+        }
+        // max S and the cell count are exact across np (a two-term sum is order-independent and
+        // the reductions are MAX / integer SUM); the excess is a floating SUM over ranks
+        if (!(cb.maxSum == cr.maxSum && cb.cells == cr.cells && cb.active == cr.active &&
+              dtB == dtR && std::fabs(cb.excess - cr.excess) <= 1e-12 * cr.excess)) {
+          std::printf("  FAIL: the overlap census / bound differs from np = 1\n");
+          fail = 1;
+        }
+      }
+      MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    }
     if (rank == 0)
       std::printf("%s\n", fail ? "FAILED" : "PASSED");
   }

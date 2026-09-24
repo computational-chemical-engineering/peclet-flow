@@ -299,6 +299,14 @@ target_include_directories(test_vof_blocks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.
                            ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_vof_blocks PRIVATE Kokkos::kokkos)
 add_test(NAME vof_blocks COMMAND test_vof_blocks)
+# doc/vof_overlap_design.md §5/§11-§13, one gate per mechanism (review findings 1-3): the block-path
+# clip is live, every prototype tunable reaches every block, the lossless periodic-wrap re-centring,
+# and the exact residue return over a long kinematic run.
+add_executable(test_vof_blocks_overlap test_vof_blocks_overlap.cpp)
+target_include_directories(test_vof_blocks_overlap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR} ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_vof_blocks_overlap PRIVATE Kokkos::kokkos)
+add_test(NAME vof_blocks_overlap COMMAND test_vof_blocks_overlap)
 
 add_executable(test_vof_collocated test_vof_collocated.cpp)
 target_include_directories(test_vof_collocated PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
