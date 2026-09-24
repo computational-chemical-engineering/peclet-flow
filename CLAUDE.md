@@ -323,6 +323,22 @@ deselected on its own; name the driver you want instead.
   (`set_pressure_telescope`): a level that cannot coarsen in place merges ORB siblings onto fewer
   ranks and continues to 3³. The in-place requirement on intermediate levels is the top open item
   at scale (`../docs/DECOMPOSITION_AND_MULTIGRID.md` §2.8).
+- **The stage machinery is core's** (2026-09-24, S4 of `../amr/docs/amr_mg_core_boundary.md`,
+  proved byte-identical): the depth search is `peclet::core::decomp::chooseStageTarget` with
+  flow's lift rule `CutcellMG::teleLiftable` as the predicate (the forced test telescope is
+  `shallowestLiftableMerge`), the communicators `makeStageComm`, the gather / scatter one
+  `RedistributeTopology` per stage. `Telescope` stays flow's per-level record; the scatter's ADD
+  and the WO-R2 outflow ghost-plane gather stay here. Do not re-inline any of it.
+- **A weighted level-0 decomposition gets Repartition stages** (S5). After
+  `diagnostics.rebalance_by_weights` the ORB has odd splits, and the sibling-merge search alone
+  collapsed the level at the shallowest odd split onto ONE rank when the root split was odd
+  (`../docs/SCALING_ISSUES.md` #2 TRAP: projection ×2.25–2.6, iterations unchanged). The Solver
+  now calls `CutcellMG::setRepartition(true)` for a weighted `dec0` only, which caps the block a
+  stage hands a rank at the largest level-0 block and repartitions the level onto a proportional
+  ORB on `np_L` ranks instead (`[mg]` trace: `-> REPARTITION`). A run that never rebalances takes
+  none (maxBlockCells = 0), and a Repartition computes the same bits as the collapse it replaces
+  (coarse arithmetic is pointwise) — `test_telescope_mpi` gate D. The escapes the old source
+  comment recommended (`nLevels = 1`, the GraphAMG bottom) do not escape; do not re-recommend them.
 - Decomposition: `set_decomposition(0)` (default) is aligned ORB (fine-grid splits snapped to a
   power of two); `set_decomposition(L>=2)` is coarse-first — decompose the grid coarsened `L-1`
   times, then refine the partition upward, so blocks nest for the full depth and balance better.
@@ -493,5 +509,9 @@ The rung-by-rung record — every work order, gate number and refuted hypothesis
 
 ## Open items
 
-Intermediate-level multigrid repartitioning at scale; coefficient-aware coarsening for high
-contrast; double-diagonal operator storage; `vof-w4`.
+Intermediate-level multigrid repartitioning at scale (the Repartition kind exists and fires for
+a weighted `dec0`; unweighted ladders are unchanged); the ALIGNED weighted ORB for
+`rebalance_by_weights` (S5 of `../amr/docs/amr_mg_core_boundary.md`, built and measured on branch
+`s5-aligned-rebalance`, not landed: `dem`'s `migrate_to_weights` must build the same partition
+from the same weights, and has no way to yet); coefficient-aware coarsening for high contrast;
+double-diagonal operator storage; `vof-w4`.
