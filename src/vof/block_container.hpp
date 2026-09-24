@@ -322,7 +322,7 @@ class VofBlock {
   /// block's reported velocity has no gap), whether it is valid, and the cumulative debris ledger
   /// (`doc/vof_overlap_design.md` §5.3: it migrates with the block). `kAuxLen` doubles; everything
   /// else in a block is either replicated (the table) or recomputed every step.
-  static constexpr int kAuxLen = 7;
+  static constexpr int kAuxLen = 8;
   void serializeAux(double out[kAuxLen]) const {
     for (int d = 0; d < 3; ++d)
       out[d] = prevCentroid_[d];
@@ -330,6 +330,7 @@ class VofBlock {
     out[4] = st_.debrisReturned;
     out[5] = st_.debrisLost;
     out[6] = static_cast<double>(st_.debrisUnresolved);  // a cell count: exact in a double
+    out[7] = st_.discarded;  // §12.2: the re-centring ledger migrates too
   }
   void deserializeAux(const double in[kAuxLen]) {
     for (int d = 0; d < 3; ++d)
@@ -338,6 +339,7 @@ class VofBlock {
     st_.debrisReturned = in[4];
     st_.debrisLost = in[5];
     st_.debrisUnresolved = static_cast<long>(in[6]);
+    st_.discarded = in[7];
   }
 
   friend class VofBlockSet;
@@ -483,6 +485,19 @@ class VofBlockSet {
   /// the global field. `1e-12` is 12 orders below any physical colour and ~5 orders above the
   /// residue; what it drops is accumulated into `VofBlockStats::discarded`.
   double bubbleEps = 1e-12;
+  /// The Weymouth-Yue wisp tolerance of every block advector (`WyAdvector::wispEps`); the solver
+  /// sets it to its own global advector's value (`doc/vof_overlap_design.md` §12.1: a block run at
+  /// 0 reconstructs 1e-33 residue into NaN). It also floors the box threshold (§12.2): residue
+  /// below it is frozen in place by the advector and must never define the bubble extent.
+  /// Default 0 = the W0 container verbatim (the standalone gates).
+  double wispEps = 0.0;
+  /// Set `wispEps` on the set AND on every live advector (pooled ones take it on reuse).
+  void setWispEps(double eps) {
+    wispEps = eps;
+    for (auto& b : blocks_)
+      if (b.allocated_)
+        b.adv_.wispEps = eps;
+  }
   /// Wisp guard on the INTERFACE-AREA predicate (`VofBlockStats::area`), the same threshold and
   /// the same reason as the curvature's `interfaceEps`. A Weymouth-Yue round-off wisp satisfies
   /// `0 < C < 1`, its MYC normal is degenerate (the stencil is all zeros, so the kernel returns
@@ -1079,6 +1094,7 @@ class VofBlockSet {
           Kokkos::deep_copy(a.faceVel(d), 0.0);
         Kokkos::fence();
         a.cflLimit = cflLimit;
+        a.wispEps = wispEps;
         a.globalMax = nullptr;
         a.exchange = nullptr;  // re-installed by installHook
         return a;
@@ -1088,6 +1104,7 @@ class VofBlockSet {
     WyAdvector a;
     a.init(nx, ny, nz, h_, ghost_);
     a.cflLimit = cflLimit;
+    a.wispEps = wispEps;
     a.globalMax = nullptr;  // the block IS the whole domain of its own advector
     return a;
   }
@@ -1132,7 +1149,7 @@ class VofBlockSet {
   bool bubbleBox(const VofBlock& b, VofBox& out) const {
     const I3 e = b.adv_.extent(), n = b.adv_.inner();
     const int g = ghost_;
-    const double eps = bubbleEps;
+    const double eps = bubbleEps > wispEps ? bubbleEps : wispEps;  // §12.2
     SField c = b.adv_.colour();
     int lo[3] = {n.x, n.y, n.z}, hi[3] = {-1, -1, -1};
     using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;

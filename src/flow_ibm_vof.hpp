@@ -774,6 +774,8 @@ void Solver<Grid>::setVofWispEps(double eps) {
     throw std::runtime_error("set_vof_wisp_eps: the threshold must be in [0, 0.5)");
   vofWispEps_ = eps;
   vofAdv_.wispEps = eps;
+  if (vofBlocks_)
+    vofBlocks_->setWispEps(eps);  // §12.1: one wisp guard for the global and the block advectors
 }
 
 template <class Grid>
@@ -1380,6 +1382,9 @@ void Solver<Grid>::prepareVofBlocks() {
   const std::array<bool, 3> per{vofAxisPeriodic(0), vofAxisPeriodic(1), vofAxisPeriodic(2)};
   vofBlocks_->init(vofGlobalSize(), per, rank, size, 1.0);  // flow works in cell units
   vofBlocks_->cflLimit = vofCflLimit_;
+  // vof_overlap_design §12.1: the block advectors run the SAME wisp guard as the global one (the
+  // enable_vof value); at 0 they reconstruct 1e-33 residue into NaN (channel_18, step 10908).
+  vofBlocks_->wispEps = vofAdv_.wispEps;
   vofBlockExch_ = std::make_shared<vof::VofBlockExchange>();
   vofBlockExch_->init(vofGlobalSize(), per, vofBlockRankBoxes(size), rank);
 #ifdef PECLET_FLOW_MPI
@@ -1581,6 +1586,7 @@ void Solver<Grid>::enableVofBlockCsf() {
   // Same contract as the structured cascade: the purity test follows the advector
   // (VofCurvature::pureEps).
   vofBlocks_->curvProto.pureEps = vofAdv_.wispEps;
+  vofBlocks_->setWispEps(vofAdv_.wispEps);  // §12.1: the advectors follow the same value
   vofBlocks_->curvProto.weightWidth = vofCurv_.weightWidth;
   vofBlocks_->curvProto.monoTol = vofCurv_.monoTol;
   vofBlocks_->curvProto.ptWeightWidth = vofCurv_.ptWeightWidth;
