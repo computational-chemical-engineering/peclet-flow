@@ -228,6 +228,87 @@ step reads and writes one block on its master.
 - Hysing block == global stays exact: the clip is in the shared cascade and debris never fires
   on a single non-colliding marker.
 
+### 5.6 Phantom interfaces and the capillary time step (addendum, 2026-09-24, after review)
+
+**The premise (measured by the reviewer).** Under SUM/MAX the part of marker A's surface inside
+B's body is a *gas–gas* interface with tension σ: the union colour is 1 on both sides, so ρ = ρ_g
+on both sides. The explicit capillary bound on it is Brackbill with `2ρ_g`, i.e.
+`sqrt(2ρ_g/(ρ_l+ρ_g))` of the bound `step()` enforces: 0.43 at ratio 10 (channel_18 at 0.25 is
+inside), **0.198 at ratio 50** (Loisy E1, the bubble-column benchmark, dt capillary-bound).
+Static pair R = 5, σ = 320, ratio 50, μ ratio 1, 400 steps, peak max|u|: separated 0.142 at every
+safety factor; d = 8 (2-cell overlap) 0.26 @0.15, 0.586 @0.25, 1.163 @0.40 — a transient that
+grows with dt and crosses the single-bubble level where the gas–gas bound says, damped here only
+because the gas carries the liquid's viscosity (viscosity relaxes the capillary bound, Denner &
+van Wachem 2015; at μ_g/μ_l = 0.02 that relief is gone). So this is an explicit-stability
+boundary of the model, not a debris effect, and neither rule of §4 touches it.
+
+**Decision: (c), in one specific form — the overlap volume is film liquid.** The union colour
+that feeds ρ(C) and μ(C) becomes
+
+```
+S      = Σ_k C_k                       (a SUM scatter beside the existing MAX one; same machinery,
+                                        same deterministic block order as scatterForceSum)
+C_eff  = (S <= 1 + 1e-8) ? max_k C_k : max(0, 2 - S)
+```
+
+i.e. gas only where exactly one marker is; where none *or two* markers are, liquid. Nothing else
+changes: the force stays `Σ_k σ κ_k ∇C_k` on each marker's own colour, the clip and the debris
+rule stay as designed, `set_capillary_cfl` keeps its meaning and value.
+
+Why this is the principled choice and not a patch:
+
+- *It removes the gas–gas interface instead of slowing the clock for it.* Across A's phantom
+  surface `S` goes 1 → 2 and ρ goes ρ_g → ρ_l: an ordinary liquid–gas interface, whose bound is
+  the one already enforced. In the thin-overlap band a cell with `C_A = 0.5, C_B = 1` has
+  `C_eff = 0.5` and the arithmetic-mean density — exactly what every real interfacial cell has. No
+  dt switching, no 5× cost at ratio 50, no per-step decision.
+- *The balanced-force property is untouched, for any ρ field.* With constant κ_k the force is a
+  gradient `∇(σ Σ κ_k C_k)`, and the variable-density projection `∇·(ρ⁻¹∇p) = ∇·(ρ⁻¹F)` is solved
+  exactly by `p = σ Σ κ_k C_k` whatever ρ is. The static-pair balance of brief §6.5 survives by
+  construction; (d) below cannot say that.
+- *It restores liquid that MAX deletes.* Two markers cannot occupy one volume; physically the
+  lens is where the film liquid is. MAX removes that liquid; the tent puts it back with its
+  inertia and its viscosity, which is the direction real film drainage acts (it decelerates the
+  approach more than gas would). It is a soft contact model for free: the lens is at
+  `p_∞ + σκ_A + σκ_B` and pushes both bubbles apart — already true under MAX; now the pushed
+  region is heavy.
+- *Bit-identical without real overlap.* The `1 + 1e-8` guard (the wisp eps again) keeps a
+  `1 + 1e-9` wisp sum on the MAX branch, so every non-colliding run is byte-identical; only cells
+  with genuine overlap change, and those are already outside today's rating.
+- Cost: one more block→owner scatter per step (same size as the MAX one); `S` also gives the
+  overlap census for free (`max S`, overlapped volume `Σ (S−1)⁺` per step) — report it in
+  `vof_block_stats()`.
+
+**Rejected.** (a) *dt from 2ρ_min when overlap exists*: correct but 5× at ratio 50 during
+contact, and in a swarm some pair is nearly always in contact, so it degenerates to (b); keep it
+only as an opt-in diagnostic once `S` exists. (b) *always 2ρ_min*: cost. (d) *drop the phantom
+force where covered by another marker*: the masked force is no longer a gradient, so the rim
+acquires unbalanced-CSF spurious currents of order `σκ/(ρ_g Δ)` in statics — the very thing V4
+removed; it needs B's colour on A's master (a pairwise exchange); and without its own tension A's
+inner part becomes a passive scalar in B's circulation, which is the debris generator of §2 made
+worse. (e) *rate it*: the honest fallback if G7 fails, not a design.
+
+**Measured vs assumed.** Measured: the dt-scaling spike and its threshold (above). Assumed, and
+gated: that the tent removes the spike (G7a); that it does not change the static balance (G7a,
+by construction, but measured anyway); that collision dynamics stay physical — the pair still
+separates in the shear case, overlap depth is not larger than under MAX (G7b). Not gated here:
+bounce statistics against a reference (that is W4 G3 and the benchmark itself).
+
+**Gate G7.** (a) The reviewer's static pair table at ratio 50, μ ratio 1, with the tent: d = 8
+peak ≤ 1.1 × single (≤ 0.16) at safety 0.25 **and** 0.40, end values unchanged; separated cases
+bitwise. Then the same at μ_g/μ_l = 0.02 (the benchmark's), where MAX is expected to fail and the
+tent to hold the same bound. (b) The shear reproducer under the tent: completes, max|u| ≤ 18,
+the pair separates, max overlap volume ≤ the MAX run's, debris ledger reported. (c) No-op proof:
+`clipped`, `debrisCells` and the new overlap census all zero on every existing ctest, hashes
+unchanged. Fallback if G7a fails: rate the block container at
+`set_capillary_cfl ≤ 0.8·sqrt(2ρ_g/(ρ_l+ρ_g))` for colliding runs (0.16 at ratio 50) and revisit.
+
+**WO-7** (after WO-3): `scatterColourSum` in the block exchange, `C_eff` in
+`harvestVofBlockUnion`, the overlap census fields, setter
+`diagnostics.set_vof_block_overlap_density(enabled)` (default ON under block CSF; OFF = MAX
+verbatim), G7 runs. **Q7** (fact): whether the tent's `μ` should follow the same map or stay MAX
+(default: same map — the film is liquid; if G7b shows over-damped collisions, try ρ-only).
+
 ## 6. Gates (falsifiable)
 
 - **G0 battery no-op.** `ctest -LE bench` all green on `build_cuda` (and host if available);
