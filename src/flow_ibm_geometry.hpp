@@ -860,10 +860,11 @@ void Solver<Grid>::setSolidInitPressureMg() {
   // returns today's decision verbatim.
   mg_.setMetric(u_.hp);
 #ifdef PECLET_FLOW_MPI
-  if (distributed_)  // share the level-0 decomposition so the MG block matches this rank's
-                     // block
+  if (distributed_) {  // share the level-0 decomposition so the MG block matches this rank's
+                       // block; a weighted one (rebalanceByWeights) gets Repartition stages
+    mg_.setRepartition(weightedDec_);
     mg_.initMpi(gnx_, gny_, gnz_, nLevels_, comm_, dec_.get());
-  else
+  } else
 #endif
     mg_.init(nx_, ny_, nz_,
              nLevels_);  // geometric multigrid on the cut-cell openness (MG-PCG pressure)

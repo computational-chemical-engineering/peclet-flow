@@ -4488,6 +4488,11 @@ class Solver {
   // coarse-first with that depth, taking the deepest candidate within maxImbalance.
   int decompLevels_ = 0;
   double decompMaxImbalance_ = 1.05;
+  // True once rebalanceByWeights has put the solver on a WEIGHTED level-0 decomposition (reset by
+  // initMpi(gnx, gny, gnz, comm)). It switches the pressure MG's Repartition stages on
+  // (CutcellMG::setRepartition): a weighted ORB has odd splits, and without them a telescope stage
+  // can collapse a level far larger than one rank's block onto one rank (SCALING_ISSUES #2).
+  bool weightedDec_ = false;
   double aspectTheta_ = 2.0;  // mirror of the two multigrids' threshold
   bool rotationalP_ = true;  // false = PM I ablation: drop the -mu*div(u*) Timmermans term from
                              // the incremental pressure accumulation (constant-mu path only)

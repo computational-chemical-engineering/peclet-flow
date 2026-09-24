@@ -370,6 +370,7 @@ class CutcellMG {
     // only (MPI_COMM_NULL on members). Owned and freed by the StageComm.
     peclet::core::decomp::StageComm comm;
     bool root() const { return comm.active; }  // this rank owns the merged block
+    bool repartition() const { return comm.kind == peclet::core::decomp::StageKind::Repartition; }
     int nMembers = 1;
     int g = 1;                   // ghost width of level L (the stage buffers use it)
     C3 mInner{}, mOg{}, mExt{};  // merged block (root): inner dims, global origin, extent
@@ -377,6 +378,9 @@ class CutcellMG {
     std::vector<C3> memO, memS;
     // the movement of a level-L field: this rank's inner cells <-> the merged block's (root)
     peclet::core::decomp::RedistributeTopology<3, double> move;
+    // Repartition only: the level's decomposition and the target's (replicated), which the
+    // outflow ghost-plane movement (teleGatherPlaneRepartition) intersects.
+    peclet::core::decomp::BlockDecomposer<3> srcDec, dstDec;
     std::vector<double> back;    // teleScatterAdd's landing buffer, level L's padded layout
     CCField res, x, ox, oy, oz;  // stage buffers at resolution L on the merged block (root)
   };
@@ -520,10 +524,21 @@ class CutcellMG {
   // init()'s field exactly.
   // dec0: OPTIONAL shared level-0 decomposition (load-balance / CFD-DEM co-decomposition). When
   // given, level 0 uses it so the MG's level-0 block matches the caller's (possibly weighted)
-  // block; the coarse levels keep the equal-weight ORB of the coarsened grid. For a weighted dec0
-  // the coarse-level transfer is only clean when nLevels==1 (pure RB-GS) — use that (or the
-  // decomposition-agnostic GraphAMG) for a weighted co-decomposition. nullptr => equal-weight
-  // everywhere (the original behaviour, byte-identical).
+  // block, and each coarse level is the previous one coarsened in place while every block stays
+  // even. nullptr => the solver's own aligned ORB (`decomposition()`), byte-identical to before.
+  // A WEIGHTED dec0 (rebalanceByWeights) generally has ODD splits: in-place coarsening blocks at
+  // the shallowest odd split and a telescope stage fires there — at level 0 when the ORB root
+  // split is odd. The sibling-merge search alone then lands at the shallowest even ORB depth,
+  // which is ONE RANK (d = 0) whenever the root split is odd: the whole level gathered to one rank
+  // every V-cycle. Measured (SCALING_ISSUES #2, 96^3 heap, np = 8): projection 2.25-2.6x slower,
+  // iterations unchanged. The two escapes this comment used to recommend do NOT escape: the
+  // GraphAMG bottom leaves that level-0 telescope untouched (0.085 -> 0.218 s), and nLevels == 1
+  // either runs the redundant GraphAMG on the whole grid (the `auto` bottom, ~55x slower) or pure
+  // RB-GS (the smoother bottom, slower than the collapse it replaces). What bounds it is
+  // setRepartition(true), which the Solver sets for a weighted dec0: a stage never hands a rank
+  // more cells than the largest level-0 block, and a merge that would is replaced by a Repartition
+  // onto a proportional ORB of the level's grid on np_L ranks (core's chooseStageTarget with
+  // maxBlockCells > 0, amr/docs/amr_mg_core_boundary.md §11.1-§11.3).
 
   // flow's LIFT rule — "every block can coarsen in place one more time": every block is even in
   // origin and size on every axis whose GLOBAL extent `gs` can still halve (can()). An axis that
@@ -700,6 +715,10 @@ class CutcellMG {
     MPI_Comm curComm = comm;
     int curRank = rank;
     teleActive_ = true;
+    // setRepartition: a stage never hands a rank more cells than the largest LEVEL-0 block
+    // (design §11.1 — the finest level's largest block, replicated); 0 = sibling merges only.
+    const peclet::core::Index maxBlockCells =
+        repartition_ ? peclet::core::decomp::largestBlockCells(curDec) : 0;
     auto evenOn = [](const peclet::core::decomp::BlockDecomposer<3>& d, int ax) {
       for (std::size_t b = 0; b < d.sizes().size(); ++b)
         if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
@@ -780,8 +799,8 @@ class CutcellMG {
             }
           } else {
             t = cdec::chooseStageTarget(curDec, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable,
-                                        teleMinExtent_);
-            if (t->kind != cdec::StageKind::SiblingMerge)
+                                        teleMinExtent_, maxBlockCells);
+            if (t->kind != cdec::StageKind::SiblingMerge && t->kind != cdec::StageKind::Repartition)
               throw std::logic_error(
                   "CutcellMG::initMpi: the telescope search found no merge (depth 0 always lifts "
                   "under flow's rule)");
@@ -789,12 +808,21 @@ class CutcellMG {
           if (t) {
             auto T = std::make_shared<Telescope>();
             T->comm = cdec::makeStageComm(curComm, *t);
-            const int myGroup = T->comm.myGroup;
             T->g = v.g;
-            const auto mb = t->dec.block((std::size_t)myGroup);
-            T->mOg = C3{(int)mb.origin[0], (int)mb.origin[1], (int)mb.origin[2]};
-            T->mInner = C3{(int)mb.size[0], (int)mb.size[1], (int)mb.size[2]};
-            T->mExt = C3{T->mInner.x + 2 * T->g, T->mInner.y + 2 * T->g, T->mInner.z + 2 * T->g};
+            // The target block this rank's data moves into: its merge group's (SiblingMerge — the
+            // root owns it, the members only feed it), or the one it owns (Repartition; none on a
+            // rank that idles below).
+            const int tb = T->repartition() ? T->comm.myTargetBlock : T->comm.myGroup;
+            if (tb >= 0) {
+              const auto mb = t->dec.block((std::size_t)tb);
+              T->mOg = C3{(int)mb.origin[0], (int)mb.origin[1], (int)mb.origin[2]};
+              T->mInner = C3{(int)mb.size[0], (int)mb.size[1], (int)mb.size[2]};
+              T->mExt = C3{T->mInner.x + 2 * T->g, T->mInner.y + 2 * T->g, T->mInner.z + 2 * T->g};
+            }
+            if (T->repartition()) {
+              T->srcDec = curDec;
+              T->dstDec = t->dec;
+            }
             // members in group-comm rank order == ascending old block index (makeStageComm)
             for (const int b : T->comm.members) {
               const auto fb = curDec.block((std::size_t)b);
@@ -817,7 +845,7 @@ class CutcellMG {
                 return (Index)(c[0] - mo.x + mg) + (Index)(c[1] - mo.y + mg) * me.x +
                        (Index)(c[2] - mo.z + mg) * (Index)me.x * me.y;
               };
-              T->move.build(curDec, *t, T->comm, srcIdx, dstIdx);
+              T->move.build(curDec, *t, T->comm, srcIdx, dstIdx, /*id=*/L);
               T->back.assign(v.n, 0.0);
             }
             if (T->root()) {
@@ -887,7 +915,9 @@ class CutcellMG {
         printf(
             "[mg]  L%d global %4dx%4dx%4d  ranks %5d  rank0 block %4dx%4dx%4d  ratio(%d,%d,%d)%s\n",
             L, g.x, g.y, g.z, ranks, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z, lv_[L].ratio.x,
-            lv_[L].ratio.y, lv_[L].ratio.z, lv_[L].tele ? "  -> TELESCOPE" : "");
+            lv_[L].ratio.y, lv_[L].ratio.z,
+            lv_[L].tele ? (lv_[L].tele->repartition() ? "  -> REPARTITION" : "  -> TELESCOPE")
+                        : "");
         if (lv_[L].tele) {
           int sub = 1;
           MPI_Comm_size(lv_[L].tele->comm.sub, &sub);
@@ -1519,8 +1549,101 @@ class CutcellMG {
     CCField src[3] = {lv.ox, lv.oy, lv.oz};
     CCField dst[3] = {lv.tele->ox, lv.tele->oy, lv.tele->oz};
     for (int a = 0; a < 3; ++a)
-      if (bc_[2 * a + 1] == 3)
-        teleGatherPlane(lv, src[a], dst[a], a);
+      if (bc_[2 * a + 1] == 3) {
+        if (lv.tele->repartition())
+          teleGatherPlaneRepartition(lv, src[a], dst[a], a);
+        else
+          teleGatherPlane(lv, src[a], dst[a], a);
+      }
+  }
+  // The same plane across a REPARTITION stage, where there are no merge groups: a source block
+  // touching the global +face sends each target block touching it the part of its plane that lies
+  // in the target's transverse (b, c) rectangle — the box intersections, computed from the two
+  // replicated decompositions, exactly as core's RedistributeTopology does for the inner cells.
+  // One MPI_Alltoallv on the level's communicator (every rank takes part; most counts are zero),
+  // cells in (c, b) order on both sides; the target lands them on its stage buffer's own ghost
+  // plane. Pure data movement.
+  void teleGatherPlaneRepartition(const Level& lv, CCField src, CCField dst, int a) {
+    Telescope& T = *lv.tele;
+    using Blk = peclet::core::decomp::Block<3>;
+    const int b = (a + 1) % 3, c = (a + 2) % 3;
+    const long gd[3] = {lv.gdim.x, lv.gdim.y, lv.gdim.z};
+    int rank = 0, np = 1;
+    MPI_Comm_rank(T.comm.parent, &rank);
+    MPI_Comm_size(T.comm.parent, &np);
+    auto touches = [&](const Blk& k) { return (long)(k.origin[a] + k.size[a]) == gd[a]; };
+    // transverse overlap [lo, hi) of two blocks on axes b and c; false when empty
+    auto overlap = [&](const Blk& p, const Blk& q, long lo[2], long hi[2]) {
+      const int ax[2] = {b, c};
+      for (int e = 0; e < 2; ++e) {
+        lo[e] = (long)std::max(p.origin[ax[e]], q.origin[ax[e]]);
+        hi[e] = (long)std::min(p.origin[ax[e]] + p.size[ax[e]], q.origin[ax[e]] + q.size[ax[e]]);
+        if (hi[e] <= lo[e])
+          return false;
+      }
+      return true;
+    };
+    std::vector<int> sc((std::size_t)np, 0), sd((std::size_t)np, 0), rc((std::size_t)np, 0),
+        rd((std::size_t)np, 0);
+    std::vector<double> sb, rb;
+    const Blk me = T.srcDec.block((std::size_t)rank);
+    if (touches(me)) {
+      const int g = lv.g;
+      const int ext[3] = {lv.ext.x, lv.ext.y, lv.ext.z};
+      const long st[3] = {1, (long)lv.ext.x, (long)lv.ext.x * lv.ext.y};
+      auto hs = Kokkos::create_mirror_view(src);
+      Kokkos::deep_copy(hs, src);
+      const long pa = (long)(ext[a] - g) * st[a];
+      for (std::size_t t = 0; t < T.dstDec.numBlocks(); ++t) {
+        long lo[2], hi[2];
+        const Blk tb = T.dstDec.block(t);
+        if (!touches(tb) || !overlap(me, tb, lo, hi))
+          continue;
+        sd[t] = (int)sb.size();
+        for (long k = lo[1]; k < hi[1]; ++k)
+          for (long j = lo[0]; j < hi[0]; ++j)
+            sb.push_back(hs(pa + (j - (long)me.origin[b] + g) * st[b] +
+                            (k - (long)me.origin[c] + g) * st[c]));
+        sc[t] = (int)sb.size() - sd[t];
+      }
+    }
+    const bool land = T.root() && touches(T.dstDec.block((std::size_t)rank));
+    if (land) {
+      const Blk tb = T.dstDec.block((std::size_t)rank);
+      int n = 0;
+      for (std::size_t s2 = 0; s2 < T.srcDec.numBlocks(); ++s2) {
+        long lo[2], hi[2];
+        const Blk sk = T.srcDec.block(s2);
+        if (!touches(sk) || !overlap(sk, tb, lo, hi))
+          continue;
+        rd[s2] = n;
+        rc[s2] = (int)((hi[0] - lo[0]) * (hi[1] - lo[1]));
+        n += rc[s2];
+      }
+      rb.resize((std::size_t)n);
+    }
+    MPI_Alltoallv(sb.data(), sc.data(), sd.data(), MPI_DOUBLE, rb.data(), rc.data(), rd.data(),
+                  MPI_DOUBLE, T.comm.parent);
+    if (!land)
+      return;
+    const Blk tb = T.dstDec.block((std::size_t)rank);
+    const long mst[3] = {1, (long)T.mExt.x, (long)T.mExt.x * T.mExt.y};
+    const int mext[3] = {T.mExt.x, T.mExt.y, T.mExt.z};
+    auto hd = Kokkos::create_mirror_view(dst);
+    Kokkos::deep_copy(hd, dst);
+    const long pa = (long)(mext[a] - T.g) * mst[a];
+    for (std::size_t s2 = 0; s2 < T.srcDec.numBlocks(); ++s2) {
+      if (rc[s2] == 0)
+        continue;
+      long lo[2], hi[2];
+      overlap(T.srcDec.block(s2), tb, lo, hi);
+      const double* q = rb.data() + rd[s2];
+      for (long k = lo[1]; k < hi[1]; ++k)
+        for (long j = lo[0]; j < hi[0]; ++j)
+          hd(pa + (j - (long)tb.origin[b] + T.g) * mst[b] +
+             (k - (long)tb.origin[c] + T.g) * mst[c]) = *q++;
+    }
+    Kokkos::deep_copy(dst, hd);
   }
   void teleGatherPlane(const Level& lv, CCField src, CCField dst, int a) {
     Telescope& T = *lv.tele;
@@ -2749,6 +2872,11 @@ class CutcellMG {
   // clear it -- even if in-place coarsening is still legal. A 1x3x3 block on 1024 ranks is a
   // halo exchange with nine cells of work behind it. 0 disables (merge only when blocked).
   int teleMinExtent_ = 4;
+  // Repartition stages (setRepartition): bound the block a telescope stage may hand a rank by the
+  // largest level-0 block, repartitioning the level onto a proportional ORB on fewer ranks where a
+  // sibling merge would exceed it. OFF by default (sibling merges only, byte-identical to S4); the
+  // Solver switches it on for a weighted level-0 decomposition.
+  bool repartition_ = false;
   int gnxF_ = 0, gnyF_ = 0, gnzF_ = 0;  // GLOBAL fine dims (== local single-rank)
   // Fine-level 1/h^2 per axis, as handed to setOpenness. Only the exact (matrix-free) level-0
   // apply reads them; the bands carry gf already folded in.
@@ -2905,6 +3033,9 @@ class CutcellMG {
   bool telescope() const { return telescope_; }
   void setTelescopeForceLevel(int L) { teleForce_ = L; }  // tests only; -1 = never force
   void setTelescopeMinExtent(int e) { teleMinExtent_ = e; }
+  /// Repartition stages for a weighted level-0 decomposition (see repartition_); before initMpi.
+  void setRepartition(bool on) { repartition_ = on; }
+  bool repartition() const { return repartition_; }
   // Number of levels THIS rank holds (fewer than the hierarchy's on a rank idling below a
   // telescope point) and the hierarchy's rank count per level (replicated).
   int localLevels() const { return (int)lv_.size(); }

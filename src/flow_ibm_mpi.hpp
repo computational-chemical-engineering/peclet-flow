@@ -15,6 +15,7 @@ template <class Grid>
 void Solver<Grid>::initMpi(int gnx, int gny, int gnz, MPI_Comm comm) {
   int size = 1;
   MPI_Comm_size(comm, &size);
+  weightedDec_ = false;  // the equal-weight partition; rebalanceByWeights sets it
   // Build the shared decomposition so the pressure MG can derive nested coarse levels
   // (CutcellMG::coarsened) — aligned ORB by default, or coarse-first when `set_decomposition`
   // asks for it. Depends only on the global grid and that setting, so it matches mpi_block()'s
@@ -153,6 +154,7 @@ void Solver<Grid>::rebalanceByWeights(const std::vector<peclet::core::Real>& w) 
   MPI_Comm_size(comm_, &size);
   peclet::core::decomp::BlockDecomposer<3> newDec((std::size_t)size,
                                                   peclet::core::IVec<3>{gnx_, gny_, gnz_}, w);
+  weightedDec_ = true;  // before redistribute: its setSolid rebuilds the pressure MG
   redistribute(newDec);
 }
 #endif
