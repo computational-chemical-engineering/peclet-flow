@@ -924,9 +924,7 @@ void gateDebrisSpeck() {
   for (int j = 0; j < 3; ++j)
     speckLeft = std::fmax(speckLeft, std::fabs(cB[locB(sc.SX, sc.SY0 + j, sc.SZ)]));
   // The debris pass runs AFTER the step's advection, which fluxes a few 1e-9 of the speck into
-  // neighbours below the interfacial threshold (1e-8); those are not debris and stay. So the exact
-  // statement is the ACCOUNT: removed + the B colour left in a window around the speck (clear of
-  // B's body, x >= 27) == the painted volume.
+  // neighbours below the interfacial threshold (1e-8); those are not debris but RESIDUE (§13).
   double residue = 0.0;
   for (int z = sc.SZ - 3; z <= sc.SZ + 3; ++z)
     for (int y = sc.SY0 - 3; y <= sc.SY0 + 5; ++y)
@@ -951,11 +949,15 @@ void gateDebrisSpeck() {
   CHECK(ss1[0].debrisCells == 0 && ss1[0].debrisReturned == 0.0);  // A has no debris
   CHECK(ss1[1].debrisCells >= 3);
   CHECK(speckLeft == 0.0);                     // the three painted cells read exactly 0
-  std::printf("  account: removed %.17g + residue left below the threshold %.3e = %.17g "
-              "(painted %.17g, |d| %.3e)\n",
-              ss1[1].debrisVolume, residue, ss1[1].debrisVolume + residue, sumSpeck,
-              std::fabs(ss1[1].debrisVolume + residue - sumSpeck));
-  CHECK(std::fabs(ss1[1].debrisVolume + residue - sumSpeck) <= 1e-14);
+  // §13: the sub-wispEps part of the speck that the step's advection fluxed into neighbours is
+  // cleared too and returned as RESIDUE (residueReturned, which also carries B's own WY residue),
+  // so no B colour is left in the window and B's volume is exact.
+  std::printf("  account: debris removed %.17g, residue returned %.3e (B, whole box), B left "
+              "in the speck window %.3e (painted %.17g, painted - removed %.3e)\n",
+              ss1[1].debrisVolume, ss1[1].residueReturned, residue, sumSpeck,
+              sumSpeck - ss1[1].debrisVolume);
+  CHECK(residue == 0.0);
+  CHECK(ss1[1].residueReturned >= sumSpeck - ss1[1].debrisVolume - 1e-15);
   CHECK(std::fabs(ss1[1].debrisVolume - sumSpeck) <= 1e-7);  // the residue is the step's WY flux
   CHECK(ss1[1].debrisReturned == ss1[1].debrisVolume);
   CHECK(ss1[1].debrisLost == 0.0);

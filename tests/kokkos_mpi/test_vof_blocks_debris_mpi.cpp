@@ -120,8 +120,9 @@ static std::vector<double> gatherGlobal(const std::vector<double>& local, int ox
   return global;
 }
 
-// per marker: volume, debrisCells, debrisVolume, debrisReturned, debrisLost, debrisUnresolved
-static constexpr int NF = 6;
+// per marker: volume, debrisCells, debrisVolume, debrisReturned, debrisLost, debrisUnresolved,
+// residueReturned (§13)
+static constexpr int NF = 7;
 static std::vector<double> ledger(IbmSolver& s) {
   std::vector<double> v;
   for (const auto& q : s.vofBlockStats()) {
@@ -131,6 +132,7 @@ static std::vector<double> ledger(IbmSolver& s) {
     v.push_back(q.debrisReturned);
     v.push_back(q.debrisLost);
     v.push_back(static_cast<double>(q.debrisUnresolved));
+    v.push_back(q.residueReturned);
   }
   return v;
 }
@@ -185,7 +187,7 @@ int main(int argc, char** argv) {
       long nL = 0;
       for (std::size_t i = 0; i < rl.size(); ++i)
         nL += (lAll[i] == rl[i]) ? 0 : 1;
-      const char* fn[NF] = {"volume", "cells", "vol", "returned", "lost", "unresolved"};
+      const char* fn[NF] = {"volume", "cells", "vol", "returned", "lost", "unresolved", "residue"};
       for (std::size_t m = 0; m < rl.size() / NF; ++m) {
         std::printf("  marker %zu:", m);
         for (int f = 0; f < NF; ++f)
