@@ -1,0 +1,334 @@
+# Design — bounded surface tension for overlapping markers in the block VoF container
+
+Fable design note, 2026-09-24, branch `vof-overlap`. Answers `doc/vof_overlap_design_brief.md`.
+Implementer: an Opus engineer who has seen neither the brief nor the conversation; every number
+and predicate needed is in this note.
+
+## 1. Problem and scope
+
+Two markers of the block container (`src/vof/block_container.hpp`) that interpenetrate produce,
+some hundreds of steps later, a one-step velocity blow-up. The container must never produce an
+unbounded face force, whatever the markers do, and it must keep every marker's volume exact.
+
+In scope: (a) a curvature admissibility rule, (b) per-marker debris removal with exact volume
+return, (c) the pipeline placement, MPI treatment, bit-identity statement, gates and work orders,
+(d) a verdict on WO-W4 item 1 (union-based force assembly).
+
+Out of scope (unchanged from the brief): coalescence/breakup models, a contact model, the
+bubble-column example, the TBFsolver benchmark set-up, anisotropic specifics beyond the metric
+already in the code, collocated block CSF, cut cells, the single-field path's satellite policy.
+
+## 2. Diagnosis — accepted, with one refinement and one hypothesis
+
+**Accepted.** The proximate cause is the curvature the cascade assigns to *debris*: mixed cells
+of a marker with no body of that marker near them. On such cells every height-function column
+fails (no pure end within the column) and the PLIC-volumetric fit is made from a handful of
+corner-sliver polygons of total area ~0; the paraboloid through them is arbitrary (measured
+|κ| = 273 and 428 per cell against a true 0.4). The face force `σ κ_f ΔC/h` then exceeds the
+physical one by 3–100× (measured −306 and −10 810 against a typical ≤ 120) and acts on the light
+phase. The SUM-force / MAX-colour pairing is *not* the cause: static overlapping pairs are
+balanced at every depth (brief §6.5), and the algebra says why (with constant κ_k the summed
+force is the gradient of `σ Σ_k κ_k C_k`, which the projection annihilates). Raising
+`interfaceEps` cannot fix it because debris exists at C up to 0.08 (brief §6.7).
+
+**Refinement — how debris is made (hypothesis, cheaply testable).** The segment of marker A's
+surface that lies inside marker B's body is advected by B's *internal* gas circulation, while the
+rest of A moves with A. Two colliding bubbles have different velocities, so that segment is
+sheared off at the lens rim into slivers thinner than a cell, which WY advection fragments. When
+the pair separates, the entrained colour of A stays behind inside B — exactly the "residual wisps
+of one marker inside the other, 0.01–0.03 cells" that kill the shear reproducer *after*
+separation (brief §6.6). Prediction: A's debris cells sit where `C_B ≥ 0.5` (or in B's band) and
+their displacement per step tracks B's centroid velocity, not A's. The existing channel_18 dump
+(step 10702, markers 2/3) can confirm this without a new run. Consequence for the design: debris
+is intrinsic to independent markers in relative motion under SUM/MAX — it is not a bug that a
+better advector removes — so the container needs a *standing* hygiene rule, not a one-off fix.
+(A contact model that limits overlap depth, W4 item 2, would reduce the rate; out of scope.)
+
+**Two side observations for the record, neither causal here.** (i) `block_container.hpp` says in
+three places that the ghost ring is "pure gas" while `C = 1` is the bubble (the shear reproducer
+sets `rho = rho_l + C (rho_g − rho_l)`); the ghost is `C = 0`, the continuous phase — a doc slip,
+fix the words in passing. (ii) TBFsolver counts a full cell touching an empty one as mixed so the
+face gets a κ; peclet leaves that face an *orphan* (force 0, counted in `csfDiagnostics`). Not
+this campaign's problem; noted so nobody rediscovers it as the cause.
+
+## 3. Constraints and invariants
+
+- Cell units internally; `hRef = min h`, so the finest spacing is 1 in index units; the block
+  metric is `VofMetric` (`minH()` available).
+- Marker volumes exact: `Σ C_k` over the inner box changes only by advection flux and by what
+  the ledger reports. Target 1e-12 relative on closed cases.
+- Non-colliding runs bit-identical: every existing ctest (`vof_*`, MPI twins np 1/2/4, the
+  Hysing block == global gate, `state_hash.py`) unchanged unless a counter proves a rule fired.
+- Balanced force (static droplet at machine-level parasitic currents) untouched — neither rule
+  touches a cell of a resolved static interface (§6, gate G0/G2).
+- One master rank per block; a rule that needs another marker's colour needs an exchange. Both
+  rules below are block-local: **no new exchange**.
+- Kokkos device-only; the block state must stay decomposition-independent bitwise (W0), so
+  anything that enters the *state* through a floating-point reduction must use a fixed summation
+  order.
+- No numerics-changing environment variables; new behaviour behind per-solver setters with the
+  old behaviour reachable (`enabled=False`).
+- `core/` is not touched this session: the clip lives in flow's cascade driver
+  (`src/vof/curvature_field.hpp`), not in `core/.../curvature.hpp`.
+
+## 4. The decision
+
+**Two rules, with different roles.**
+
+1. **Curvature clip (the safety invariant):** `|κ| ≤ κ_max = 1/Δ_min` on every cell,
+   both VoF paths (block and global). This alone bounds every face force by
+   `σ |ΔC| / Δ_min²` — the same scale the Brackbill capillary step
+   `Δt < sqrt((ρ₁+ρ₂)Δ³/4πσ)` is built to hold, so a clipped debris force is by construction no
+   worse than the steepest *resolvable* capillary wave. Applied to the brief's two sites:
+   step 10706 face `κ_f` 137 → (0.294 + 1)/2 = 0.65, marker 2's contribution −306 → −1.5;
+   step 11331 `κ` −428 → −1, force −10 810 → ≈ −26. Both sub-typical.
+2. **Debris removal with exact volume return (hygiene):** per master block, every step, after
+   advection: an interfacial cell whose 5³ fit stencil holds less than one cell volume of the
+   marker's own colour is debris; its colour is zeroed and the removed volume is returned to the
+   marker's own attached interface, weighted `C(1−C)`, in a fixed summation order. The marker's
+   volume is unchanged to round-off; every quantity is ledgered.
+
+Why both: the clip guarantees boundedness whatever happens; without it any future debris
+generator (a new advector, a contact model, breakup) reopens the failure. Removal is needed for
+*accuracy over long runs*: debris grew from 6 to 24 cells in 600 steps on channel_18 (brief
+§6.4/6.7); each debris cell keeps exerting a bounded but spurious force (κ pinned at 1/Δ), sits
+in the union colour as a density defect where it lies in liquid, and — if merely zeroed as
+TBFsolver does — costs volume: at the measured ~0.07–0.16 cells per colliding pair per ~500
+steps, a bubble in continuous collision over the 20-turnover benchmark (~1.4e5 steps) would lose
+of order 5 % of its volume. TBFsolver's own `offset_volume_difference` (commented out at
+`VOF.f90:395`) shows they saw that loss; peclet's selling point is that it does not have one.
+
+**Rejected alternatives.**
+
+- *Raise `interfaceEps`* — moves the failure (measured); debris exists at C = 0.08.
+- *Clip only, no removal* — bounded but accumulating debris, growing spurious forcing and
+  density defects; fails the long-run accuracy goal though not the stability one.
+- *Removal only, no clip* — the fragment predicate is a size rule; anything it does not catch
+  (a sub-cell drop of Σ > 1, a thin ligament) can still get an arbitrary fit κ. Safety must not
+  depend on a hygiene predicate.
+- *TBFsolver's predicate verbatim ("no full cell in 5³")* — deletes whole unresolved satellites
+  (a 3-cell blob at C = 0.9 everywhere sums to ~24 cells = 5 % of a D = 10 bubble) and thin
+  sheets of a strongly deformed bubble. With the volume-return step that would move 5 % of a
+  bubble onto its rim in one pass. A *size* criterion (`Σ_{5³} C < 1`) catches the measured debris
+  (0.07, 0.16, 0.01–0.03 cells; individual 5³ sums ≤ 0.2) with a ≥ 16× margin to any resolved
+  surface cell (a surface cell of a sphere with R ≥ 2Δ has ≥ ~16 cell volumes in its 5³), and
+  leaves satellites — whose policy is W4 item 4 — alone with a clipped, bounded κ.
+- *Discard without return (TBFsolver)* — the volume argument above.
+- *Connected-component labelling* — correct but not needed; the local 5³ sum is one 125-read
+  scan per interfacial cell and needs no labels, no iteration, no exchange.
+- *Every 10 steps (TBFsolver)* — the force must never see a debris cell; per step the rule costs
+  less than the cascade and keeps each event's perturbation smallest.
+- *Curvature from the union / union-based force (W4 item 1)* — §9.
+
+## 5. The design
+
+### 5.1 Curvature clip
+
+Location: `VofCurvature` (`src/vof/curvature_field.hpp`), a final pass after `fallbackPass`,
+over `listI_` in worklist mode and over the inner region in dense mode (same cells by
+construction).
+
+```
+kappaMax  : double, index units; default 1.0 / metric.minH()  (== 1 when hRef = min h); 0 = off
+for each inner cell i with csfKappaDefined(branch(i)):
+    if (fabs(kappa(i)) > kappaMax) { kappa(i) = copysign(kappaMax, kappa(i)); ++clipped; }
+```
+
+- Exact no-op where it does not fire: the value is written only when it changes (never
+  `k * min(1, kmax/|k|)`), so an unclipped field is bit-identical.
+- `Stats.clipped` (long) joins the census (reduction of an integer — deterministic).
+- Applied to the CELL value, so `csfFaceCurvature`'s average, `vof_curvature()` and every
+  diagnostic see the clipped field; `|κ_f| ≤ κ_max` follows.
+- Both paths: the global `vofCurv_` and every block's `curv_` via `curvProto` (same propagation
+  as `interfaceEps`, `block_container.hpp:603`).
+- Solver setter, diagnostics tier: `diagnostics.set_vof_kappa_clip(enabled, kappa_max=None)`;
+  physical `kappa_max` (1/length) converted with the unit scales (`κ' = κ hRef`); `None` = the
+  default `1/Δ_min`; `enabled=False` = the pre-clip cascade verbatim. Two justifications for the
+  default, both resolution statements: `|κ| ≤ 1/Δ` is a sphere of `R ≥ 2Δ` (`D ≥ 4Δ`), the
+  smallest the 7-cell height function can see at all; and the force bound of §4.
+
+### 5.2 Debris predicate
+
+Per master block `b`, over the inner box, reading the block's own colour `C` (ghosts are `0` by
+the margin invariant; reads may equivalently be clamped to the inner box — state which in the
+code, both give the same answer):
+
+```
+kDebrisVolume = 1.0            // cell volumes; a discretization constant like kPvHalf, not a setter
+ieps          = curvProto.interfaceEps   // 1e-8: "interfacial" means the same thing as to the cascade
+
+debris(i)  :=  vofIsInterface(C(i), ieps)  &&  Σ_{|ox|,|oy|,|oz| ≤ 2} C(i+o)  <  kDebrisVolume
+```
+
+`Σ_{5³} C < 1` implies there is no full cell in the stencil (TBFsolver's condition) and adds the
+size bound. The stencil is exactly the PV fit's: a cell whose own fit data set holds less than one
+cell of colour cannot carry a meaningful paraboloid. The predicate is evaluated on the colour
+*before* any removal in this pass (two-phase: mark, then act), so the result does not depend on
+traversal order.
+
+### 5.3 Removal and volume return
+
+```
+1. mark: parallel_scan over the inner box in index order ->
+         listD (debris cells), nD;   listA (attached interfacial cells: interfacial && !debris), nA
+   if nD == 0: return                        // the common case; nothing else runs -> bitwise no-op
+2. dV   = Σ_{i in listD} C(i)     in list order, sequential (single-thread kernel or host)
+   W    = Σ_{i in listA} C(i)(1-C(i))   in list order, sequential
+   VA   = Σ_{i in listA} C(i)     (same pass)
+3. guard: if VA < 1.0 (the marker has no attached interface worth a cell) -> do NOT remove,
+          stats.debrisUnresolved += nD, return          // clip still bounds it
+4. act:  for i in listD: C(i) = 0.0
+         for i in listA: d = dV * C(i)(1-C(i)) / W;  Cn = C(i) + d;
+                         if (Cn > 1.0) { lost += Cn - 1.0; Cn = 1.0; }  C(i) = Cn
+   (`lost` accumulated in list order; expected identically 0 — d ≤ ~1e-3 at realistic sizes.)
+5. ledger (VofBlockStats, master-owned, migrated with the block like `discarded`):
+   debrisCells (this step), debrisVolume (this step, = dV), debrisReturned (cumulative Σ dV),
+   debrisLost (cumulative Σ lost), debrisUnresolved (cumulative count from step 3)
+```
+
+Conservation statement, exact by construction: `volume_k(t) + discarded_k + debrisLost_k =
+volume_k(0) + boundary flux_k` to summation round-off; on a closed box, to 1e-12 relative.
+
+Why fixed-order sums: `dV/W` enters the *state*. A tree reduction's order is not guaranteed
+across launches or ranks; index-order sequential accumulation over lists produced by a
+`parallel_scan` is, so the W0 np-independence gate keeps holding bitwise *even when debris
+fires*. The lists are a few hundred entries on a block; the cost is nil.
+
+Setter: `diagnostics.set_vof_block_debris(enabled)`; default ON when block CSF is enabled
+(`enable_vof_block_csf`), OFF otherwise (a kinematic-only block run keeps today's behaviour).
+Rationale: debris is harmless without surface tension and the container is then bit-identical to
+today; with surface tension it is the rule that makes the rating hold.
+
+### 5.4 Pipeline placement (one step)
+
+```
+step n head:  updateVofCurvature -> per master block: cascade -> CLIP (5.1) -> buildCsfForce
+              -> scatterForceSum -> addCsfRhsBlocks -> momentum -> projection
+after projection: advectVof -> VofBlockSet::advect:
+              gatherFaceVel -> per block: WY advect -> DEBRIS (5.2/5.3) -> recentre
+              -> syncTable -> (reassign) -> scatterColourMax -> measure
+```
+
+Debris runs before `recentre` so the bubble box excludes it and the returned volume is never
+double-counted with recentre's `discarded`; the curvature of step n+1 and the union colour that
+sets ρ/μ at n+1 both see clean colour. No new exchange anywhere: the clip is per cell, the debris
+step reads and writes one block on its master.
+
+### 5.5 What changes bitwise, and for which runs
+
+- Clip: only cells with `|κ| > 1/Δ_min` — by definition unresolved (`R < 2Δ`). Expected count on
+  every existing gate: 0 (resolved spheres, `R ≥ 4` cells at the coarsest ladder rung, κ ≤ 0.5).
+  If a gate does fire it (a pinch-off tail on Hysing case 2 is the only candidate), that case
+  changes only there; re-baseline with the count and pre-clip max|κ| in the commit message.
+- Debris: only when `nD > 0` on a block with CSF on; then debris cells → 0 and attached
+  interfacial cells move by ≤ ~1e-3 each. Zero on every non-colliding existing gate (no cell of
+  a gated case lies detached above 1e-8 — the V4 finding).
+- The proof of no-op is the counters, not a hash alone: G0 asserts `clipped == 0` and
+  `debrisCells == 0` per test, and the hashes then follow.
+- Hysing block == global stays exact: the clip is in the shared cascade and debris never fires
+  on a single non-colliding marker.
+
+## 6. Gates (falsifiable)
+
+- **G0 battery no-op.** `ctest -LE bench` all green on `build_cuda` (and host if available);
+  `tests/regression/state_hash.py` VoF entries unchanged; every VoF ctest reports
+  `clipped == 0` and `debrisCells == 0` (helper assertion added to the block and curvature
+  tests). Any test with a non-zero count is listed with its pre-clip max|κ| and decided per §5.5.
+- **G1 seeded-debris ctest** (`tests/kokkos/test_vof_blocks.cpp`, via
+  `enable_vof_blocks_from_colours`): marker A sphere R = 5, marker B sphere R = 5 at centre
+  distance 16 (no overlap), plus three cells of B's colour hand-painted in A's interface band:
+  `1e-5, 1e-2, 3e-3` in a line. σ = 320, ρ ratio 10, u = 0.
+  (i) clip ON, debris OFF: B's κ at the three cells satisfies `|κ| ≤ 1`, and at every face
+  `|F_total − F_A-alone| ≤ σ · max|ΔC_speck| / Δ²` (`vof_block_force` vs. the A-only run).
+  (ii) clip ON, debris ON: after one `step()` the three cells read exactly `0.0`,
+  `debrisVolume == 1.3e-2 ± 1e-14`, `debrisLost == 0`, B's volume unchanged to 1e-12 relative,
+  A's colour bitwise unchanged (A has no debris), max|u| after the step ≤ the A-alone value + 1e-6.
+- **G2 static pair sweep** (brief §6.5, `vof_blocks_overlap.py static`): the peak/end table
+  reproduced to 5 % with both rules on; report `clipped` and `debrisCells` per distance (expected
+  0 everywhere — then bitwise).
+- **G3 shear reproducer** (`vof_blocks_overlap.py shear`, ~20 min): runs to its full `T`
+  (= 3·gap/rel ≈ 12.5) without throwing (today: WY-CFL throw at step 2910); max|u| ≤ 18
+  throughout (today's plateau 15.67); each marker's volume to 1e-12 relative; cumulative
+  `debrisReturned` per marker ≤ 0.1 cells reported; `debrisLost == 0`.
+- **G4 channel_18.** (a) Restart from the step-10000 checkpoint to step 13000 (≈ 15 min at
+  0.3 s/step): passes 10706, 11213 and 11331; max|u| ≤ 52 (1.5× the healthy 34.65); volumes
+  1e-12; per-marker `debrisReturned` and `clipped` history reported. (b) A fresh chain to
+  ≥ 5 eddy turnovers with the same bounds (≈ 35 000 steps ≈ 3 h on the RTX 5080; the full 20 for
+  the TBFsolver statistics is a billing decision, §8).
+- **G5 MPI.** The G1 scene with a linear shear velocity `u = γ(y − y_c)` and 20 steps, np 1/2/4
+  with the ORB cutting between the markers: union colour, block volumes and the five ledger
+  fields bitwise identical across np.
+- **G6 curvature order ladder** (`test_vof_curvature` 16/32/64): bitwise (subsumed by G0; named
+  because it is the accuracy contract the clip must not touch).
+
+## 7. Work orders (commit-sized, dependency order)
+
+- **WO-1 clip.** `kappaMax` + clip pass + `Stats.clipped` in `curvature_field.hpp`; prototype
+  propagation in `allocateCsf`; `setVofKappaClip` + binding on `diagnostics`; expose `clipped` in
+  the curvature-stats dict. Acceptance: G0 counters and hashes; a unit assertion in
+  `test_vof_curvature.cpp` that a hand-seeded detached cell at C = 1e-6 gets `|κ| ≤ 1` with the
+  clip and `> 1` without (documents that the clip is live).
+- **WO-2 debris census only.** Predicate (5.2), lists, the five stats fields, no removal;
+  `vof_block_stats()` reports them. Acceptance: on the channel_18 step-10702 dump the census
+  reads marker 2 ≈ 6 cells / 0.07 and marker 13 ≈ 5 cells / 4.5e-3 (the brief's counts; any
+  difference is the size bound and is reported); the refinement check of §2 (debris of 2 inside
+  3, moving with 3) run and its result written to the STATE file.
+- **WO-3 removal + return + ledger.** 5.3 in `VofBlockSet::advect` before `recentre`;
+  fixed-order sums; ledger migration in `serializeAux`; `setVofBlockDebris` + binding; default ON
+  under `enable_vof_block_csf`. Acceptance: G1(ii), G0, G5.
+- **WO-4 tests.** G1 ctest + its MPI twin (G5) registered; block-test helper asserting zero
+  counters on the existing block scenes. Acceptance: the two new ctests green at np 1/2/4.
+- **WO-5 reproducers.** G2, G3, G4(a) run; numbers into `doc/vof_overlap_STATE.md`; the
+  CLAUDE.md scope sentence ("colliding markers are outside the rating") rewritten to the measured
+  state; a decision-register entry queued for `../docs/decisions/flow.md` (umbrella is off-limits
+  this session — write the entry text into this note's §10 and land it later).
+- **WO-6 the chain.** G4(b) ≥ 5 turnovers; where it runs is the user's call (§8 Q6).
+
+## 8. Risks and open questions (each with a default, so work proceeds unattended)
+
+- **Q1 clip value** (fact). `1/Δ_min` vs `2/Δ_min`. Settled by WO-1's counter on the battery
+  plus a pre-clip max|κ| histogram over healthy channel_18 steps (are there legitimate HF cells
+  above 1 on strongly deformed bubbles?). Default `1/Δ_min` (TBFsolver's value, both resolution
+  arguments of §5.1).
+- **Q2 `kDebrisVolume`** (fact). 1.0 vs 0.5 cell volumes. Settled by the WO-2 histogram of
+  `Σ_{5³} C` over debris cells vs attached cells on the dump; the two populations should be
+  separated by more than a decade. Default 1.0.
+- **Q3 return vs ledger-only** (user preference). Exact conservation is the container's selling
+  point and the loss estimate is percent-level over the benchmark; default return.
+- **Q4 clip on the global path too** (preference + fact). A curvature admissibility rule is not a
+  block concept and the single-field path has the same degenerate-fit exposure above 1e-8.
+  Default on for both; if a single-field regression baseline moves, re-baseline with the count.
+- **Q5 per-step vs periodic removal** (fact, performance). Default per step; measure the block
+  step time before/after on G3 (expected < 1 %).
+- **Q6 where the 5- and 20-turnover chains run** (user: billing). Default the local RTX 5080
+  overnight for 5 turnovers; the 20-turnover statistics run waits for the user.
+- **Risk: debris rate.** If the returned volume per turnover is not small (say > 1e-2 of a
+  marker), the model's SUM/MAX overlap is generating too much torn colour and a contact rule
+  (W4 item 2) moves up the queue. The ledger makes this visible; the gate reports it.
+- **Risk: the shear reproducer's second failure.** If G3 survives the wisps but dies later of
+  something else, the new site is instrumented exactly as before (κ, C, force per marker) before
+  any further rule is added.
+
+## 9. Verdict on WO-W4 item 1 — union-based force assembly: REJECT
+
+Not needed: the summed per-marker force is statically balanced at every overlap depth (measured),
+the blow-up is debris curvature (measured), and W4's own union-force branch still died at 1.53
+turnovers because it did not touch debris κ. Not wanted: the union colour `max_k C_k` has a
+*crease* at the lens rim where two spheres intersect; a curvature of the union sees that crease as
+a near-singular κ and pulls the rim — which is precisely the numerical-coalescence mechanism the
+container exists to avoid. Per-marker κ on per-marker colour gives the rim no special force, and a
+thin film between two *non*-overlapping bubbles correctly feels both Laplace pressures (two
+interfaces, each with σ) — SUM is the physics, not an approximation to the union. The one thing
+the union does define is ρ and μ, and it keeps doing that. No exchange of `(κ, ΔC)` pairs, no
+owner-side assembly. W4 items 2–5 (contact census, coalescence and breakup as explicit models)
+remain valid future work and are unaffected by this note.
+
+## 10. Decision-register entry (to land in `../docs/decisions/flow.md` when the umbrella is free)
+
+*Block VoF surface tension: per-cell `|κ| ≤ 1/Δ_min` clip on both VoF paths and per-step
+per-marker debris removal (`Σ_{5³} C < 1` cell) with exact volume return to the marker's attached
+interface.* Rejected: union-based force assembly (W4 item 1 — statically unnecessary, would
+reintroduce numerical coalescence through the rim crease), raising `interfaceEps` (moves the
+failure), TBFsolver's unsized fragment predicate (deletes satellites and thin sheets), discarding
+without return (percent-level loss over 20 turnovers). Evidence: `doc/vof_overlap_design_brief.md`
+§6, this note, the G0–G5 numbers in `doc/vof_overlap_STATE.md`.
