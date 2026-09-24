@@ -478,3 +478,21 @@ C > 1e-12, so a travelling bubble drags its box along its own frozen wake until 
    branch (98f53ea) is superseded.
 4. Accepted: G3 r10 `debrisReturned` 0.144 / 0.105 per marker exceeds the note's "≤ 0.1"; that
    number was a guess, not derived — the gate is "lost == 0 and completes".
+
+## 13. Addendum (Opus, 2026-09-24) — residue is returned, not left to leak
+
+§12 made channel_18 stable (10000→13000: max|u| 35.81, boxes ≤ 23×21×22, lost 0) but broke
+exact volume: 1.5e-9 relative over 3000 steps, on every marker including non-colliding ones;
+reproduced kinematically (one marker, uniform flow, 1500 advections: −3.18e-7, of which only
+1.69e-7 ledgered as `discarded`). Cause: colour below `wispEps` no longer defines the box, so the
+margin invariant no longer covers it; it reaches the ghost ring and is zeroed uncounted.
+
+Rule: after every block advection, every cell of the inner box with `0 < |C| <= wispEps` is set to
+exactly 0 and its SIGNED colour is added to the removed volume `dV` of the §5.3 pass (same
+index-order lists and sums), which returns it to the marker's attached interfacial cells weighted
+`C(1−C)`. Runs whenever the block `wispEps > 0` (kinematic block runs included — the leak is not
+a CSF matter); debris removal itself keeps its §5.3 default (ON under block CSF). Ledger: a
+separate cumulative `residueReturned` (signed) so debris statistics stay interpretable. With it no
+colour exists below the box threshold, the margin invariant holds again, `discarded` should read
+0 (reported), and volume is exact to summation round-off. Gate: the leak.py scene and G4(a)
+marker volumes to 1e-12 relative.
