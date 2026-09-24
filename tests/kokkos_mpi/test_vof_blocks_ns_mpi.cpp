@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
       if (csf) {
         nClip += sd.vofBlockCurvatureStats().clipped;
         for (const auto& q : sd.vofBlockStats())
-          nDebris += q.debrisCells;
+          nDebris += q.debrisCells + q.debrisUnresolved + (q.debrisReturned != 0.0 ? 1 : 0);
         nOverlap += sd.vofBlockOverlapCensus().cells;
       }
     }

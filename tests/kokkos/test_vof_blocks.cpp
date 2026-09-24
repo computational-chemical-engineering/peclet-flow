@@ -13,10 +13,11 @@
 //                             control merges them irreversibly. The raison d'etre gate.
 //   G3 re-centring          : a sphere translated 20 cells; the moving block is bitwise equal to a
 //                             block large enough never to move, and its volume is exact.
-//   D1 seeded debris        : doc/vof_overlap_design.md gate G1(i) -- two R = 5 markers 16 cells
+//   D1 seeded debris        : doc/vof_overlap_design.md gate G1 -- two R = 5 markers 16 cells
 //                             apart plus three cells of B's colour painted into A's interface
-//                             band, through a real Solver with the block CSF: the admissibility
-//                             clip bounds B's curvature there and the face-force perturbation.
+//                             band, through a real Solver with the block CSF: (i) the clip bounds
+//                             B's curvature there and the face-force perturbation; (ii) one step
+//                             removes the speck, returns its volume to B exactly, leaves A alone.
 //
 // Everything is compared against a plain `WyAdvector` on the whole grid seeded with the SAME exact
 // `sphereCellFraction` and driven by the SAME face field, so "bitwise" is a real statement about
@@ -838,7 +839,7 @@ struct DebrisScene {
     const long nx = b[3] - b[0], ny = b[4] - b[1];
     return (x - b[0]) + nx * ((y - b[1]) + ny * static_cast<long>(z - b[2]));
   }
-  void build(peclet::flow::IbmSolver& s, bool speck, bool clip) const {
+  void build(peclet::flow::IbmSolver& s, bool speck, bool clip, bool debris = true) const {
     s.setRho(RHO_L);
     s.setMu(MU);
     s.setPressureGeometry(std::vector<double>(static_cast<std::size_t>(NX) * NY * NZ, 10.0));
@@ -850,6 +851,8 @@ struct DebrisScene {
     s.setSurfaceTension(SIGMA);
     if (!clip)
       s.setVofKappaClip(false);
+    if (!debris)
+      s.setVofBlockDebris(false);
     std::vector<std::array<int, 6>> boxes = {box[0], box[1]};
     std::vector<std::vector<double>> cols = {colour(0, speck), colour(1, speck)};
     s.enableVofBlocksFromColours(boxes, cols);
@@ -858,7 +861,7 @@ struct DebrisScene {
 };
 
 void gateDebrisSpeck() {
-  std::printf("\n=== D1 seeded debris through the Solver (vof_overlap_design G1(i))\n");
+  std::printf("\n=== D1 seeded debris through the Solver (vof_overlap_design G1)\n");
   DebrisScene sc;
   const double spMax = 1e-2;  // max |dC| across any face touching the speck
   const double bound = sc.SIGMA * spMax;  // sigma max|dC_speck| / Delta^2, Delta = 1
@@ -898,23 +901,68 @@ void gateDebrisSpeck() {
   const auto ss = sp.vofBlockStats(), rs = ref.vofBlockStats();
   std::printf("  debris census before any step: speck run B %ld, reference %ld/%ld\n",
               ss[1].debrisCells, rs[0].debrisCells, rs[1].debrisCells);
-  // one step of each, so the census (which runs after the advection) has run
-  for (auto* s : {&ref, &sp}) {
+  // G1(ii): one step. The debris pass runs after the advection, so after ONE step the speck
+  // (no cell of B above 1/2 within two cells) is gone and its volume is on B's interface.
+  peclet::flow::IbmSolver off(sc.NX, sc.NY, sc.NZ);  // the speck with removal OFF (census only)
+  sc.build(off, true, true, false);
+  const double vB0 = sp.vofBlockStats()[1].volume;
+  for (auto* s : {&ref, &sp, &off}) {
     s->setDt(0.25 * s->capillaryDt());
     s->step();
   }
-  const auto ss1 = sp.vofBlockStats(), rs1 = ref.vofBlockStats();
+  const auto ss1 = sp.vofBlockStats(), rs1 = ref.vofBlockStats(), os1 = off.vofBlockStats();
   double sumSpeck = 0.0;
   for (double v : sc.SPECK)
     sumSpeck += v;
-  std::printf("  after one step: debris census speck run A %ld / B %ld cells, B volume %.6e "
-              "(painted %.6e); reference A %ld / B %ld\n",
-              ss1[0].debrisCells, ss1[1].debrisCells, ss1[1].debrisVolume, sumSpeck,
-              rs1[0].debrisCells, rs1[1].debrisCells);
+  const auto cB = sp.vofBlockColour(1);
+  const auto& bb = ss1[1];
+  auto locB = [&](int x, int y, int z) {  // B's box may have been re-centred: index its CURRENT box
+    const long nx = bb.hi[0] - bb.lo[0], ny = bb.hi[1] - bb.lo[1];
+    return (x - bb.lo[0]) + nx * ((y - bb.lo[1]) + ny * static_cast<long>(z - bb.lo[2]));
+  };
+  double speckLeft = 0.0;
+  for (int j = 0; j < 3; ++j)
+    speckLeft = std::fmax(speckLeft, std::fabs(cB[locB(sc.SX, sc.SY0 + j, sc.SZ)]));
+  // The debris pass runs AFTER the step's advection, which fluxes a few 1e-9 of the speck into
+  // neighbours below the interfacial threshold (1e-8); those are not debris and stay. So the exact
+  // statement is the ACCOUNT: removed + the B colour left in a window around the speck (clear of
+  // B's body, x >= 27) == the painted volume.
+  double residue = 0.0;
+  for (int z = sc.SZ - 3; z <= sc.SZ + 3; ++z)
+    for (int y = sc.SY0 - 3; y <= sc.SY0 + 5; ++y)
+      for (int x = bb.lo[0]; x <= sc.SX + 3; ++x)
+        residue += cB[locB(x, y, z)];
+  const double dVrel = std::fabs(ss1[1].volume - vB0) / vB0;
+  const auto cA1 = sp.vofBlockColour(0), cA0 = off.vofBlockColour(0);
+  long aDiff = (cA1.size() == cA0.size()) ? 0 : -1;
+  for (std::size_t i = 0; aDiff >= 0 && i < cA1.size(); ++i)
+    aDiff += (cA1[i] == cA0[i]) ? 0 : 1;
+  std::printf("  after one step: B removed %ld cells / %.17g (painted %.17g, |d| %.3e), lost %.3e, "
+              "unresolved %ld; speck cells now max %.3e; B volume rel change %.3e; A: %ld cells "
+              "differ from the removal-OFF run; census-only run reports %ld / %.17g\n",
+              ss1[1].debrisCells, ss1[1].debrisVolume, sumSpeck,
+              std::fabs(ss1[1].debrisVolume - sumSpeck), ss1[1].debrisLost,
+              ss1[1].debrisUnresolved, speckLeft, dVrel, aDiff, os1[1].debrisCells,
+              os1[1].debrisVolume);
+  // the reference pair: nothing fires (the G0 zero-counter statement on a resolved pair)
   CHECK(rs1[0].debrisCells == 0 && rs1[1].debrisCells == 0);
-  CHECK(ss1[0].debrisCells == 0);
+  CHECK(rs1[0].debrisReturned == 0.0 && rs1[1].debrisReturned == 0.0);
+  CHECK(ref.vofBlockCurvatureStats().clipped == 0);
+  CHECK(ss1[0].debrisCells == 0 && ss1[0].debrisReturned == 0.0);  // A has no debris
   CHECK(ss1[1].debrisCells >= 3);
-  CHECK(std::fabs(ss1[1].debrisVolume - sumSpeck) < 1e-6);
+  CHECK(speckLeft == 0.0);                     // the three painted cells read exactly 0
+  std::printf("  account: removed %.17g + residue left below the threshold %.3e = %.17g "
+              "(painted %.17g, |d| %.3e)\n",
+              ss1[1].debrisVolume, residue, ss1[1].debrisVolume + residue, sumSpeck,
+              std::fabs(ss1[1].debrisVolume + residue - sumSpeck));
+  CHECK(std::fabs(ss1[1].debrisVolume + residue - sumSpeck) <= 1e-14);
+  CHECK(std::fabs(ss1[1].debrisVolume - sumSpeck) <= 1e-7);  // the residue is the step's WY flux
+  CHECK(ss1[1].debrisReturned == ss1[1].debrisVolume);
+  CHECK(ss1[1].debrisLost == 0.0);
+  CHECK(ss1[1].debrisUnresolved == 0);
+  CHECK(dVrel <= 1e-12);                       // B's volume: exact return
+  CHECK(aDiff == 0);                           // A bitwise untouched by the removal
+  CHECK(os1[1].debrisCells == ss1[1].debrisCells && os1[1].debrisReturned == 0.0);
   double umR = 0.0, umS = 0.0;
   for (int c = 0; c < 3; ++c) {
     for (double v : ref.getVelocity(c))
@@ -922,8 +970,9 @@ void gateDebrisSpeck() {
     for (double v : sp.getVelocity(c))
       umS = std::fmax(umS, std::fabs(v));
   }
-  std::printf("  max|u| after one step: reference %.6e, speck %.6e (difference %.3e)\n", umR, umS,
-              umS - umR);
+  std::printf("  max|u| after one step: reference (no speck) %.6e, speck %.6e (difference %.3e)\n",
+              umR, umS, umS - umR);
+  CHECK(umS <= umR + 1e-6);
 }
 
 }  // namespace
