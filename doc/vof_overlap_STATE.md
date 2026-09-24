@@ -9,20 +9,30 @@ Build tree `build_cuda` (CUDA prefix, tests+MPI on). An AMR session is doing a r
 parallel — do not touch umbrella docs/RELEASE*, core, amr. W4 WIP stays parked on `vof-w4`
 (f29c8e7); not merged here.
 
-**Now.** ROOT CAUSE LOCALISED (2026-09-24, local restart of W3's step-10000 checkpoint, RTX 5080):
-blow-up in ONE step 10705->10706, max|u| 34.65 -> 135.5 at v(26,41,12), inside the boxes of the
-overlapping pair (markers 2,3; they have shared ~4-6 cells of volume since step 10000 without harm).
-The face force there is -405 = marker 3's regular -89 (kappa 0.35) + marker 2's -306: marker 2 has
-DEBRIS (6 fragment cells, vol 0.07, C 2e-5..4e-2, no C>0.5 cell within 2) stranded in marker 3's
-interface band; the cell with C2 = 2.08e-5 counts as interfacial (interfaceEps = 1e-8) and gets
-kappa = 273/cell (true ~0.4). sigma*kappa_f*dC = 320*137*7e-3 on low-rho fluid -> blow-up.
-Marker 13 (the 12/13 pair) carries the same kind of debris. So: NOT the SUM-vs-MAX balanced-force
-argument (WO-W4 premise); a curvature estimate on marker debris created in the overlap region.
-TBFsolver has exactly the two guards peclet lacks: |kappa| <= 1/Delta clip, and resetFragments
-(zero mixed cells with no full cell in 5^3, every 10 steps).
-Static pair: single 0.13 peak, d=14 0.13, d=10.5 0.23 (bounded) — static H1 not supported so far.
-Running: restart with set_vof_interface_eps 1e-3 / 1e-2 (does removing kappa on C<eps cells survive?);
-shear collision test (vof_blocks_overlap.py shear).
+**Now (2026-09-24 evening, implementer).** vof-overlap: WO-2 census `3b7376b`, WO-7 `29b1bb8`
+landed. WO-1 clip is on branch `vof-overlap-wo1-pending` (`795765c`), NOT merged: STOPPED on Q4 --
+the clip fires in existing ctests: vof_surface_tension P6 (eps=0 wisp ablation, 205639 clips, pre
+max 3.5e26) FAILS `kmax > 100*2/R`; vof_curvature C sweep D/dx 2.8/4.4 (40/92, pre 2.31/1.14,
+errors change), wrap-seam of periodic planes B2/K2 (202; 2/68/30/140, pre <= 12.3, gated numbers
+unchanged); vof_cutcell G5 (968, 1.60), vof_wetting G1 (10640, 2.90), vof_wetting_mpi (968, 8.70),
+vof_wetting_dynamic_mpi (576, 1.18) -- printed output unchanged. WO-3 NOT implemented: STOPPED on
+Q2 -- 5^3-sum histogram not a decade apart at 1.0 (dump 10702: fragments 0.10-0.89 vs attached
+>= 1.19; eps1e-3 dump: a fragment at 1.24). Census on the dump = brief (m2 6/0.069, m13 5/4.2e-3).
+Refinement check: m2's debris sits in m3's band (C3 0.10-0.95), m13's in NO marker; motion not
+resolvable in the 3-step window. G1(i) scene is trivial: the speck gets NO estimate (kappa 0).
+No-op proofs: 48 arrays + G2 8 cases + state_hash 13/13 bitwise vs unmodified tree (clip on/off).
+Gates (clip + census + gated bound, no removal): G2 ratio 10 = brief table exactly, bitwise.
+G3 shear r10: completes T 12.5 (5907 steps, was dead at 2910), max|u| 15.69, dV 6e-14, debris <= 34
+cells / 0.22, bound on 5028 steps (stays on after separation: residual wisps keep S > 1+1e-8).
+G4(a) channel_18: passes 10706/11213/11331 (max|u| <= 35.9) but at ~12150 marker 2's debris-
+stretched box reaches 128 = Lx, vofClampBox snaps it to [0,128) and recentre's copy by unwrapped
+index WIPES the marker (volume 0); at 12518 marker 13 (box 118 wide) goes non-finite. Debris
+<= 52 cells / 0.22 per marker, clip fires 2198/2518 steps; phantom bound on EVERY step, dt 2.24e-3
+-> 1.76e-3 (the note's "never binds" is false). G7 ratio 50 peak/end, single | d=8 MAX+gated |
+d=8 tent: mu_g=mu_l @0.25 0.142/0.050 | 0.144/0.115 (dt 0.05) | 0.145/0.055; @0.40 0.145/0.066 |
+0.144/0.075 | 0.149/0.069; mu_g=0.02: single itself grows (0.437 @0.25, 0.546 @0.40), MAX+gated
+d=8 0.318/0.245, 0.317/0.204, tent 0.423/0.423, 0.576/0.523. Shear r50: MAX+gated 8305 steps,
+contact 810-7249; tent 3140 steps, contact 810-2089; both complete, max|u| 15.69, dV <= 1e-13.
 
 **Instruments.** `tests/study/vof_blocks_overlap.py` (static pair vs d); scratch
 `diag_c18.py` (restart channel_18 from W3's healthy step-10000 checkpoint
