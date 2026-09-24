@@ -163,15 +163,33 @@ void Solver<Grid>::redistribute(const peclet::core::decomp::BlockDecomposer<3>& 
 }
 
 template <class Grid>
-void Solver<Grid>::rebalanceByWeights(const std::vector<peclet::core::Real>& w) {
+int Solver<Grid>::rebalanceByWeights(const std::vector<peclet::core::Real>& w) {
   if (!distributed_)
-    return;
-  int size = 1;
+    return 1;
+  int size = 1, rank = 0;
   MPI_Comm_size(comm_, &size);
-  peclet::core::decomp::BlockDecomposer<3> newDec((std::size_t)size,
-                                                  peclet::core::IVec<3>{gnx_, gny_, gnz_}, w);
+  MPI_Comm_rank(comm_, &rank);
+  // The ALIGNED weighted ORB (amr/docs/amr_mg_core_boundary.md §6, §9.2, §11.4): split planes on
+  // multiples of 2^a, a the largest alignment whose weight imbalance stays within the 1.05 budget
+  // (a = 0: the plain weighted ORB, bit for bit). Every split is then even for a lifts, so the
+  // pressure MG coarsens in place for a levels before any telescope stage can fire, and whatever
+  // stage fires does so on a level 8^a smaller. A pure function of (ranks, grid, weights): every
+  // rank computes the same partition, and so must any code that co-decomposes from `w` -- which is
+  // why the chosen alignment is RETURNED: dem rebuilds this partition as the aligned weighted ORB
+  // `init(size, G, w, {2^a,...})`, and at a = 0 as the plain weighted ORB (core guarantees the
+  // two coincide bit for bit at align 1).
+  const auto c = peclet::core::decomp::chooseAlignedWeighted(
+      (std::size_t)size, peclet::core::IVec<3>{gnx_, gny_, gnz_}, w);
+  if (mgDebugLevel() && rank == 0) {
+    std::printf(
+        "[mg] rebalanceByWeights: aligned weighted ORB a = %d (align %d), weight imbalance "
+        "%.4f\n",
+        c.a, 1 << c.a, (double)c.imbalance);
+    std::fflush(stdout);
+  }
   weightedDec_ = true;  // before redistribute: its setSolid rebuilds the pressure MG
-  redistribute(newDec);
+  redistribute(c.dec);
+  return 1 << c.a;
 }
 #endif
 

@@ -1593,12 +1593,15 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       // pressure MG. Bit-exact to single-rank.
       .def(
           "rebalance_by_weights",
-          [](D& diag, const std::vector<double>& w) { diag.s->rebalanceByWeights(w); }, nb::arg("weights"),
+          [](D& diag, const std::vector<double>& w) { return diag.s->rebalanceByWeights(w); },
+          nb::arg("weights"),
           "Dynamic load balancing: redistribute the solver's state onto the weighted ORB of "
-          "per-cell "
-          "weights (global x-fastest, gnx*gny*gnz). Pass fluid work + gamma*particle_count and the "
-          "coupled dem migrates onto the SAME partition from the same array. State-preserving "
-          "(bit-exact at np=1, reduction floor at np>1).")
+          "per-cell weights (global x-fastest, gnx*gny*gnz), its split planes aligned to 2^a "
+          "cells with a the largest alignment whose weight imbalance stays within 1.05, so the "
+          "pressure multigrid keeps coarsening in place for a levels. Returns that alignment "
+          "(1 = the plain weighted ORB). Pass fluid work + gamma*particle_count; a coupled dem "
+          "migrates onto the SAME partition with migrate_to_weights(weights, align=<the "
+          "return value>). State-preserving (bit-exact at np=1, reduction floor at np>1).")
 #else
 #endif
       .def(

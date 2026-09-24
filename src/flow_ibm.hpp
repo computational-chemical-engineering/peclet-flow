@@ -783,11 +783,14 @@ class Solver {
   void redistribute(const peclet::core::decomp::BlockDecomposer<3>& newDec);
 
 
-  // Redistribute onto the weighted ORB of per-cell weights `w` (global x-fastest, gnx*gny*gnz). The
-  // ergonomic Python entry point for load balancing: the caller passes a weight field (e.g. fluid
-  // work + gamma*particle_count) and both flow and dem rebuild the SAME deterministic partition
-  // from it. No BlockDecomposer object crosses the language boundary.
-  void rebalanceByWeights(const std::vector<peclet::core::Real>& w);
+  // Redistribute onto the ALIGNED weighted ORB of per-cell weights `w` (global x-fastest,
+  // gnx*gny*gnz). The ergonomic Python entry point for load balancing: the caller passes a weight
+  // field (e.g. fluid work + gamma*particle_count) and both flow and dem rebuild the SAME
+  // deterministic partition from it. No BlockDecomposer object crosses the language boundary.
+  // Returns the alignment 2^a the imbalance budget chose (1 = the plain weighted ORB; 1 also when
+  // not distributed): a co-decomposing code must build its partition from the same `w` AND this
+  // alignment (dem: `migrate_to_weights(w, align=...)`), or the two own different blocks.
+  int rebalanceByWeights(const std::vector<peclet::core::Real>& w);
 
 #endif
 
