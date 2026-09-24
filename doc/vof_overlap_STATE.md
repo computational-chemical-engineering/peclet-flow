@@ -62,8 +62,13 @@ column (zero net volume flux, TBFsolver flowCtrl 2 flow_rate 0; peclet driver su
 each step) — flowCtrl 3 grew a net upflow from wall friction. TBFsolver closed run: engineer
 restarting (8x3 cores); open-column output kept in tbfsolver/run_open/. peclet run waits for the fix.
 
-**Next action.** Review Fable's design note; iterate to consensus; implement (opus); gate on the
-shear reproducer + channel_18 restart; then the peclet side of the bubble column.
+**Next action (2026-09-24 23:15).** Overnight GPU chain (scratchpad/c18_g4b/chain.sh): peclet
+bubble column t=150 (PID 4030167, ETA ~04:30) -> peclet D/h=24 check to t=5 -> channel_18
+10000 -> 5 turnovers (G4(b)). Reviewer agent reviewing 3b7376b..03b1660 (doc/vof_overlap_review.md,
+untracked by repo convention). TBFsolver t=150 done: rise 0.778+-0.024 on [50,150], gas -1.18 %.
+Early transient differs: t=1 peclet 0.83 vs TBF 0.70 -> resolution check D/h=24 both codes.
+Then: page benchmarks/bubble-column/index.qmd (peclet-examples worktree, branch bubble-column);
+merge vof-overlap to main after review; decision-register entry (design §10) when umbrella free.
 
 **Gates (to be set with the design).** channel_18 ≥ 5 turnovers; static pair parasitic current
 flat in d; marker volumes 1e-12; every existing block ctest bit-identical when no overlap.
