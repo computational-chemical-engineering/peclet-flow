@@ -1003,6 +1003,11 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
               r["recentred"] = b.recentred;
               r["discarded"] = b.discarded;
               r["area"] = b.area;
+              r["debris_cells"] = b.debrisCells;
+              r["debris_volume"] = b.debrisVolume;
+              r["debris_returned"] = b.debrisReturned;
+              r["debris_lost"] = b.debrisLost;
+              r["debris_unresolved"] = b.debrisUnresolved;
               out.append(r);
             }
             return out;
@@ -1018,7 +1023,12 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "that wake, so the residue falling outside the new box is discarded. Never physical "
           "liquid (measured -9.5e-17 over a 20-cell translation, against a bubble volume of 524), "
           "but it is reported rather than hidden — a container that silently loses mass is not "
-          "acceptable.")
+          "acceptable.\n\n"
+          "'debris_cells' / 'debris_volume' are this step's marker DEBRIS census (block CSF on "
+          "only; master only): interfacial cells whose 5^3 stencil holds less than one cell volume "
+          "of the marker's own colour, and their summed colour. 'debris_returned', 'debris_lost' "
+          "and 'debris_unresolved' are the cumulative removal ledger (doc/vof_overlap_design.md "
+          "5.3; zero while only the census runs).")
       .def(
           "vof_block_imbalance", [](D& diag) { return diag.s->vofBlockImbalance(); },
           "max/mean of the per-rank block-cell load under the CURRENT master assignment "

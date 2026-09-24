@@ -37,8 +37,9 @@
 ///
 /// ## Ghost policy of a block (the reason G1 can be BITWISE)
 ///
-/// A block's extended-box cells that lie inside the domain but outside its inner box are **pure
-/// gas** — that is what the margin guarantees — so the ghost fill writes 0 there, which is exactly
+/// A block's extended-box cells that lie inside the domain but outside its inner box carry **no
+/// colour of this marker** (C = 0, the continuous phase) — that is what the margin guarantees —
+/// so the ghost fill writes 0 there, which is exactly
 /// the value the global-field advector holds at the same global cells. Cells outside the domain on
 /// a non-periodic axis take the globally-clamped (zero-gradient) value, the same rule
 /// `colour_field.hpp::clampFill` applies to the structured field. A block whose box spans a whole
@@ -280,6 +281,16 @@ struct VofBlockStats {
   /// Lagrangian output. A sphere of radius R reads 4 pi R^2 to the PLIC discretization error
   /// (~1 % at R/h = 8), NOT exactly; it is a measure of the reconstructed surface, not of a fit.
   double area = 0.0;
+  /// Marker DEBRIS census (`doc/vof_overlap_design.md` §5.2, WO-2): an interfacial cell
+  /// (`vofIsInterface(C, curvProto.interfaceEps)`) whose 5^3 fit stencil holds less than
+  /// `VofBlockSet::kDebrisVolume` cell volumes of the marker's OWN colour -- a mixed cell with no
+  /// body of its marker near it, the cell the curvature cascade cannot fit. Evaluated per step on
+  /// the master, after the WY advection and before the re-centring, when the block CSF is on.
+  long debrisCells = 0;         ///< debris cells this step
+  double debrisVolume = 0.0;    ///< their colour, summed in index order (cell volumes), this step
+  double debrisReturned = 0.0;  ///< cumulative volume returned to the attached interface (WO-3)
+  double debrisLost = 0.0;      ///< cumulative volume the return could not place (WO-3)
+  long debrisUnresolved = 0;    ///< cumulative debris cells left for want of an interface (WO-3)
 };
 
 /// One bubble's block. Every rank holds the (id, box, master) triple — the replicated table — and
@@ -459,6 +470,13 @@ class VofBlockSet {
   /// Let a block SHRINK when it has grown much larger than the bubble needs. Off gives a block
   /// that only ever grows — the G3 reference (a block large enough that it never has to move).
   bool allowShrink = true;
+  /// Debris predicate threshold, in CELL VOLUMES of the marker's own colour in the 5^3 stencil
+  /// (`doc/vof_overlap_design.md` §5.2). A discretization constant like `kPvHalf`, not a knob:
+  /// a cell whose own fit data set holds less than one cell of colour cannot carry a paraboloid.
+  static constexpr double kDebrisVolume = 1.0;
+  /// Run the debris census (WO-2) in `advect()`. It only COUNTS -- nothing in the state moves --
+  /// and it runs only while the block CSF is on (a kinematic block run never pays for it).
+  bool debrisCensus = true;
   double cellSize() const { return h_; }
 
   std::size_t count() const { return blocks_.size(); }
@@ -533,6 +551,9 @@ class VofBlockSet {
       clampFaceVelocity(b);
       b.adv_.advect(dt, step_);
       b.st_.recentred = false;
+      // Before the re-centring, so the bubble box a re-centre measures is the one the census saw.
+      if (csfEnabled && debrisCensus)
+        debrisPass(b);
     }
     for (std::size_t k = 0; k < blocks_.size(); ++k)
       if (blocks_[k].mine_)
@@ -611,7 +632,8 @@ class VofBlockSet {
   /// The V4 balanced-force CSF on the BLOCK's faces — the same `csfFaceCurvature` +
   /// `csfFaceForce` pair `Solver::addCsfRhs` applies to the global field, on the block's own
   /// colour and curvature. Formed over the inner box; the low face of an inner cell at local index
-  /// 0 reads the block's ghost, which the margin guarantees is pure gas, so the force is exactly
+  /// 0 reads the block's ghost, which the margin guarantees carries C = 0 (the continuous
+  /// phase), so the force is exactly
   /// zero there and the block's force has compact support inside its own box.
   void buildCsfForce(VofBlock& b) {
     const I3 e = b.adv_.extent(), n = b.adv_.inner();
@@ -882,7 +904,7 @@ class VofBlockSet {
     const I3 e = b.adv_.extent(), n = b.adv_.inner(), o = b.box.origin();
     const int g = ghost_;
     SField f = b.adv_.colour();
-    // 1. every ghost cell -> 0 (the block's far field: pure gas, guaranteed by the margin).
+    // 1. every ghost cell -> 0 (the block's far field: C = 0, the continuous phase, by the margin).
     Kokkos::parallel_for(
         "vof::block::ghost_zero",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
@@ -1154,6 +1176,66 @@ class VofBlockSet {
     blocks_[idx].st_.discarded += dropped;
   }
 
+  /// WO-2 debris census on one master block (`doc/vof_overlap_design.md` §5.2): marks the debris
+  /// cells into `listD_` with a `parallel_scan` in inner-box index order and sums their colour
+  /// SEQUENTIALLY in that order, so the result is a pure function of the colour (decomposition-
+  /// and launch-independent). The 5^3 stencil reads the block's ghost ring as `advect()` left it
+  /// (valid on exit: 0 inside the domain by the margin invariant, the periodic wrap / the
+  /// zero-gradient clamp elsewhere) -- the same values the cascade's PV fit reads.
+  void debrisPass(VofBlock& b) {
+    b.st_.debrisCells = 0;
+    b.st_.debrisVolume = 0.0;
+    const I3 e = b.adv_.extent(), n = b.adv_.inner();
+    const int g = ghost_;
+    const long region = static_cast<long>(n.x) * n.y * n.z;
+    if (static_cast<long>(listD_.extent(0)) < region)
+      listD_ = LField(Kokkos::view_alloc("vof::block::debris_list", Kokkos::WithoutInitializing),
+                      region);
+    const double ieps = curvProto.interfaceEps, kdv = kDebrisVolume;
+    const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
+    const int nx = n.x, ny = n.y;
+    SField c = b.adv_.colour();
+    LField list = listD_;
+    long nD = 0;
+    Kokkos::parallel_scan(
+        "vof::block::debris_mark", Kokkos::RangePolicy<SExec>(SExec(), 0, region),
+        KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
+          const int ix = static_cast<int>(r % nx);
+          const int iy = static_cast<int>((r / nx) % ny);
+          const int iz = static_cast<int>(r / (static_cast<long>(nx) * ny));
+          const long i = L3(g + ix, g + iy, g + iz, e);
+          if (!vofIsInterface(c(i), ieps))
+            return;
+          double sum = 0.0;
+          for (int oz = -2; oz <= 2; ++oz)
+            for (int oy = -2; oy <= 2; ++oy)
+              for (int ox = -2; ox <= 2; ++ox)
+                sum += c(i + ox + oy * sy + oz * sz);
+          if (!(sum < kdv))
+            return;
+          if (final)
+            list(upd) = i;
+          ++upd;
+        },
+        nD);
+    Kokkos::fence();
+    if (nD == 0)
+      return;  // the common case: nothing else runs
+    double dV = 0.0;
+    Kokkos::parallel_reduce(
+        "vof::block::debris_sum", Kokkos::RangePolicy<SExec>(SExec(), 0, 1),
+        KOKKOS_LAMBDA(const long, double& acc) {
+          double a = 0.0;  // one thread, list order: a FIXED summation order
+          for (long t = 0; t < nD; ++t)
+            a += c(list(t));
+          acc += a;
+        },
+        dV);
+    Kokkos::fence();
+    b.st_.debrisCells = nD;
+    b.st_.debrisVolume = dV;
+  }
+
   /// Sum of the block's colour over inner cells whose GLOBAL index falls outside `nb`.
   double outOfBoxSum(const VofBlock& b, const VofBox& nb) const {
     const I3 e = b.adv_.extent(), n = b.adv_.inner();
@@ -1320,6 +1402,7 @@ class VofBlockSet {
   long poolHits_ = 0, poolMisses_ = 0;
   long lastReassigned_ = 0;
   VofCurvature::Stats curvStats_{};
+  LField listD_;  ///< WO-2: the debris list, reused across blocks and steps
 };
 
 }  // namespace peclet::flow::vof
