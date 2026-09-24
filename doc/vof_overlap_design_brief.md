@@ -114,11 +114,17 @@ on an RTX 5080 with new per-marker diagnostics (`diagnostics.vof_block_kappa(id)
    So SUM-vs-MAX is NOT a static balanced-force defect (as expected: Σ_k σ κ_k ∇_f C_k is the
    discrete gradient of σ Σ κ_k C_k for constant κ_k, and 1/ρ_f multiplies force and pressure alike).
 6. **Controlled collision (Couette, U=±16, offset b=6, We≈0.7)**: the pair collides, overlaps up to
-   ~5 cells, then orbits; >2000 steps stable, max|u| flat at 15.67 — a gentle collision alone does
-   not reproduce the failure (no debris-forming shear at this We). [update when finished]
-7. **Confirmation run**: the same restart with `set_vof_interface_eps(1e-3)` and `(1e-2)` (so cells
-   with C < eps get no curvature) passes the baseline failure step (10706) with max|u| flat at
-   34.65. [update with how far it gets]
+   ~5 cells, orbits and separates; 2800 steps stable, max|u| flat at 15.67, volumes exact. A gentle
+   collision alone does not reproduce the failure. (A harder one, U=±40, We≈4.5, is running.)
+7. **Raising the wisp threshold only MOVES the failure.** Same restart with
+   `set_vof_interface_eps(1e-3)` / `(1e-2)` (cells with C < eps get no curvature): both pass 10706,
+   then die at **11213** / **11331** (t u_tau/h 1.586 / 1.597) — a different place, v/w faces near
+   (104,41,54), inside the 12/17 and 12/13 pairs. There, marker 13 has grown **24 fragment cells,
+   volume 0.16**: an isolated blob with C up to 0.081 and NO full cell within 2 (C slice shows a
+   3×3 speck: 3e-3 / 8.1e-2 / 3.4e-3 surrounded by 1e-5…1e-7), curvature **−428/cell**; the global
+   face force at the site is **−10 810** (max over the field; typical ≤ 120). Same mechanism, debris
+   above any sensible eps. So the fix must bound the curvature/force of debris AND/OR remove the
+   debris; a threshold on C alone cannot.
 8. **TBFsolver (the reference, runs 20 turnovers on this case)** does exactly SUM-force/MAX-colour
    too, and has NO collision/overlap model. Its guards that peclet lacks: (i) per-cell
    `|kappa| <= 1/min(dx,dy,dz)` clip (`VOF.f90:2201`); (ii) `resetFragments` every 10 steps —

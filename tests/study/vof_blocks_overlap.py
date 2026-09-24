@@ -27,7 +27,8 @@ import peclet.flow as pf
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-GATES = [a for a in sys.argv[1:] if not a.startswith("--")] or ["static"]
+GATES = [a for i, a in enumerate(sys.argv[1:], 1)
+         if not a.startswith("--") and not sys.argv[i - 1].startswith("--")] or ["static"]
 
 
 def arg(name, default, cast=float):
