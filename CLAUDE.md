@@ -75,14 +75,14 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 165 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 168 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-165 registered / **163 with `-LE bench`** (counted 2026-09-24): 46 from `tests/kokkos` — of
-which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 112
-from `tests/kokkos_mpi` (37 cases at np = 1, 2, 4 plus one np = 8 rung), and 7 Python ctests on
+168 registered / **166 with `-LE bench`** (counted 2026-09-25): 46 from `tests/kokkos` — of
+which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 115
+from `tests/kokkos_mpi` (38 cases at np = 1, 2, 4 plus one np = 8 rung), and 7 Python ctests on
 the module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
 `verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`, `colocated_open_boundary`,
 `no_env_knobs`, `no_float_operator_casts`). Always bound the OpenMP pool — an unbounded one on a
@@ -345,6 +345,23 @@ deselected on its own; name the driver you want instead.
   none (maxBlockCells = 0), and a Repartition computes the same bits as the collapse it replaces
   (coarse arithmetic is pointwise) — `test_telescope_mpi` gate D. The escapes the old source
   comment recommended (`nLevels = 1`, the GraphAMG bottom) do not escape; do not re-recommend them.
+- **`rebalance_by_weights` builds the ALIGNED weighted ORB and RETURNS the alignment** (S5, landed
+  2026-09-25). The partition is core's `chooseAlignedWeighted(np, G, w)`: split planes on multiples
+  of `2^a`, `a` the largest alignment whose weight imbalance stays within 1.05 (`a = 0` = the plain
+  weighted ORB, bit for bit), so the pressure MG coarsens in place for `a` levels before any stage
+  fires (`[mg] rebalanceByWeights: aligned weighted ORB a = …` under `PECLET_FLOW_MG_DEBUG`). It
+  returns `2^a`, and **a co-decomposing code must build its partition from the same weights AND
+  that alignment** — dem's `migrate_to_weights(w, align=…)`, which coupling's `CfdDem.rebalance()`
+  calls with the return value; a code that uses the weights alone owns different blocks. Probe
+  (96³, np = 4/8, pinned, median of 5): projection ÷ momentum after the rebalance 1.05–1.10 against
+  0.98–1.07 unweighted (Repartition alone: up to 1.10; the collapse: up to 1.87).
+- **`redistribute` must carry every piece of cross-step state, and seed it AFTER the scatter.**
+  Its step 3 reallocates every buffer whose block changed size (fresh zeros) and only step 4
+  scatters the migrated registry fields into them, so state DERIVED from a registry field must be
+  re-derived after step 4 — eps^n (`epsPrev_`, the porous d(eps)/dt) was copied from the zeroed
+  `eps` in step 3 until 2026-09-25, and the first porous projection after any size-changing
+  rebalance saw d(eps)/dt = eps/dt (pressure off by 2.2e+02 in a CfdDem rebalance).
+  `test_porous_redistribute_mpi` gates it; a rebalance that keeps every block's size hides it.
 - Decomposition: `set_decomposition(0)` (default) is aligned ORB (fine-grid splits snapped to a
   power of two); `set_decomposition(L>=2)` is coarse-first — decompose the grid coarsened `L-1`
   times, then refine the partition upward, so blocks nest for the full depth and balance better.
@@ -516,8 +533,7 @@ The rung-by-rung record — every work order, gate number and refuted hypothesis
 ## Open items
 
 Intermediate-level multigrid repartitioning at scale (the Repartition kind exists and fires for
-a weighted `dec0`; unweighted ladders are unchanged); the ALIGNED weighted ORB for
-`rebalance_by_weights` (S5 of `../amr/docs/amr_mg_core_boundary.md`, built and measured on branch
-`s5-aligned-rebalance`, not landed: `dem`'s `migrate_to_weights` must build the same partition
-from the same weights, and has no way to yet); coefficient-aware coarsening for high contrast;
-double-diagonal operator storage; `vof-w4`.
+a weighted `dec0`; unweighted ladders are unchanged); logging the aligned rebalance's `a` in
+`scripts/check_decomposition.py --predict` (needs the weights to reach `predict_hierarchy` — a new
+public keyword, not decided); coefficient-aware coarsening for high contrast; double-diagonal
+operator storage; `vof-w4`.
