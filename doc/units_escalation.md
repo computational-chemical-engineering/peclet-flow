@@ -8,7 +8,7 @@ design note.
 
 ## E1 (Phase 2, commit C2) — gate **G1**'s `1e-9` bound is unreachable at the shipped operator precision
 
-**Status: RESOLVED 2026-09-07 (Fable).** Keep **both** configurations in
+**Status: RESOLVED 2026-09-07 (architect).** Keep **both** configurations in
 `units_anisotropic_poiseuille`, making two different statements. The gate exists to prove the
 anisotropic operator is pointwise exact on the quadratic, and that statement has to be made where
 the float operator storage cannot mask it — so the `1e-9` exactness bound moves to a
@@ -169,7 +169,7 @@ comparison; these are its "today's rule" numbers.
 
 ## E3 (Phase 2, commit C4) — §4.4's one sentence about the v3 wall torque admits two readings, and they differ on an anisotropic grid
 
-**Status: RESOLVED 2026-09-07 (Fable) — reading 2, implemented by commit C4b.** The derivation
+**Status: RESOLVED 2026-09-07 (architect) — reading 2, implemented by commit C4b.** The derivation
 below is correct and the note's sentence was wrong. The v3 term is a **traction**,
 `F' = mu' (A' x Omega')` with `A'_b = W_b V'/h_b'` the physical area vector in `hRef^2` (the same `A`
 the traction paragraph of §4.4 uses) and `Omega' = Omega tRef`: the metric sits on the AREA component

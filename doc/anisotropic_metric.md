@@ -1,6 +1,6 @@
 # Anisotropic cells, single phase — the metric in every discrete operator (Phase 2 design note)
 
-**Status:** design settled 2026-09-06 (Fable); **IMPLEMENTED AND LANDED 2026-09-07** (flow `12cac0f`,
+**Status:** design settled 2026-09-06 (architect); **IMPLEMENTED AND LANDED 2026-09-07** (flow `12cac0f`,
 `735fb46`, `6cf870b`, `0d8417b`, `f168436` — see §10 and its final table). Plan: `suite/docs/PHYSICAL_UNITS_PLAN.md` §3.2, §5, §9.4, §9.8. Phase 1 (isotropic
 physical domains, flow `1e3d67d`) is the base and is not reopened. Decisions D1–D5 stand.
 

@@ -1,6 +1,6 @@
 # VoF work orders — the remainder of the ladder (V6, V7, V9, P0–P3, W0–W2)
 
-Written 2026-09-02 (Fable) after `suite/docs/VOF_PLAN.md` §13. The **shared preamble of
+Written 2026-09-02 (architect) after `suite/docs/VOF_PLAN.md` §13. The **shared preamble of
 `vof_workorders_v5.md` applies verbatim** (hard rules 1–8, build recipes, conventions, the
 worktree rule, `OMP_NUM_THREADS=8 OMP_PROC_BIND=false`, rule 3b on capped solves, rule 4 on
 twice-failed gates, never `git add -A`). Read it first. Findings go in the log at the bottom of
@@ -17,7 +17,7 @@ operator is being fixed by WO-R2), the collocated all-fluid path, `PECLET_FLOW_E
 
 ---
 
-## WO-V6 — dynamic contact angle and hysteresis  [Fable derivation → OPUS]
+## WO-V6 — dynamic contact angle and hysteresis  [architect derivation → OPUS]
 
 **Goal.** Replace the static θ imposed by the V5b fill with the grid-scale apparent angle of a
 moving contact line, with an explicit slip length, and advancing/receding hysteresis. Nothing in
@@ -87,7 +87,7 @@ selector, `U_cl` projection), the plumbing where the θ field is filled, binding
 
 ---
 
-## WO-W0 — Part III, the block container (single rank + distributed)  [Fable exchange design → OPUS]
+## WO-W0 — Part III, the block container (single rank + distributed)  [architect exchange design → OPUS]
 
 **Goal.** A per-bubble VoF block (the TBFsolver `vofBlock` pattern, VOF_PLAN §10) as a THIRD
 container over the same kernels: each block owns its own `WyAdvector` (+ later `VofCurvature`),
@@ -153,7 +153,7 @@ the core move + its ctest run, findings, CLAUDE.md (flow and core).
 
 ---
 
-## WO-P01 — Part II, rungs P0 (fixed-flux interface) and P1 (Stefan problem)  [Fable spec → OPUS]
+## WO-P01 — Part II, rungs P0 (fixed-flux interface) and P1 (Stefan problem)  [architect spec → OPUS]
 
 **Goal.** The phase-change kernel set of VOF_PLAN §9 in its planar form: interface regression by
 PLIC plane shift with exact clip-and-redistribute, the divergence source shifted into pure gas
@@ -220,7 +220,7 @@ findings, CLAUDE.md.
 
 ---
 
-## WO-P23 — Part II, rungs P2 (sucking interface) and P3 (Scriven bubble growth)  [Fable spec → OPUS, after WO-P01]
+## WO-P23 — Part II, rungs P2 (sucking interface) and P3 (Scriven bubble growth)  [architect spec → OPUS, after WO-P01]
 
 Build on WO-P01 as shipped (read its findings first: the ṁ sign convention with the PLIC normal
 into the gas, the analytic `plicArea`, the liquid-aware clip-and-redistribute, the fixed-order
@@ -314,7 +314,7 @@ mode, bindings, `tests/kokkos/test_vof_blocks.cpp` extended, MPI twin, `tests/st
 
 ---
 
-## WO-V6b — the velocity half of the dynamic contact line: Navier slip in the cut-cell wall closure  [Fable design → OPUS; COORDINATE with the velocity-solve session first]
+## WO-V6b — the velocity half of the dynamic contact line: Navier slip in the cut-cell wall closure  [architect design → OPUS; COORDINATE with the velocity-solve session first]
 
 **Why it is now on the critical path.** WO-V6 shipped the angle half of Afkhami–Zaleski–Bussmann
 and measured the contact line moving ~180× slower than Lucas–Washburn; WO-V7 then found every
@@ -353,7 +353,7 @@ change to the closure VALUE (the Dirichlet datum) rather than the stencil struct
 
 ---
 
-## WO-P3g — a second-order interfacial energy operator (the P3 closure)  [Fable design → OPUS]
+## WO-P3g — a second-order interfacial energy operator (the P3 closure)  [architect design → OPUS]
 
 Six attempts at the Scriven 1 % gate (WO-P23 … P3f) each retired one candidate; P3f's verdict
 is that the remaining 1.0–1.5 % is the RESIDUE OF A CANCELLATION between three first-order
@@ -414,7 +414,7 @@ that becomes the default on a passed (d).
 
 ---
 
-## WO-P3h — the Scriven gate at Ja 2: state of the problem, what is proven, what remains  [Fable dossier → OPUS when resumed]
+## WO-P3h — the Scriven gate at Ja 2: state of the problem, what is proven, what remains  [architect dossier → OPUS when resumed]
 
 **Status 2026-09-04.** Part II's P3 gate (Scriven bubble growth, `R(t) = 2β√(α_l t)`, 1 % on
 `max|ΔR|/R` over the last half AND on `β_eff/β − 1`, 128³, ratio 100, similarity start, MUSCL)
@@ -494,7 +494,7 @@ table as the a-priori gate.
 
 ---
 
-## WO-W4 — Part III: overlapping markers, collision and coalescence as models  [Fable design → OPUS]
+## WO-W4 — Part III: overlapping markers, collision and coalescence as models  [architect design → OPUS]
 
 **Why now.** W3 (Snellius, `channel_18`) dies at ~1.5 eddy turnovers, independent of dt, the
 moment two markers interpenetrate: the block CSF scatters each marker's face force with
@@ -562,7 +562,7 @@ findings, CLAUDE.md.
 
 ---
 
-## WO-V7 — the pore-scale campaign (after WO-R2)  [OPUS runs, Fable/user interpret]
+## WO-V7 — the pore-scale campaign (after WO-R2)  [OPUS runs, the architect/user interpret]
 
 Three cases, each a script under `tests/study/pore_scale/` and together one gallery page
 (`examples/pore-scale-imbibition`): (1) the pore doublet (two channels of different width from a
@@ -2923,7 +2923,7 @@ for no defensible gain.
 
 * **P3 remains NOT closed** at 1.31 % (Ja 0.5) / 1.83 % (Ja 2), mode 3, 128³. The remaining
   deficit is `−2.5 %` of area and it is quantitatively the first-order term; a P3d joined-surface
-  area is the named lever and it is a Fable decision whether the rung is worth it.
+  area is the named lever and it is an architect decision whether the rung is worth it.
 * **Mode 3 is not the default.** It is better on every gate that moves and byte-identical on every
   gate that does not, but it fails the "converging" half of the WO's a-priori gate — which nothing
   can — and the campaign's rule is that a default changes on a passed gate, not on a better number.
@@ -3251,7 +3251,7 @@ on the gate having been re-derived**. It is the only construction measured in th
 at the floor on every a-priori geometry (sphere, cylinder, axis-aligned plane, tilted plane), the
 only one that does not drift with the wisp population, the only one that makes P2 bitwise across np,
 and it removes the deposit fallback entirely. What it does not do is close P3 — because P3 is no
-longer area-limited. **If Fable wants a default change, the honest gate to change it on is gate (a)
+longer area-limited. **If the architect wants a default change, the honest gate to change it on is gate (a)
 plus (b) plus (d), all of which it passes, with P3 quoted as the open rung it no longer explains.**
 
 ### Open

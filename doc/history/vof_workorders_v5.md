@@ -1,6 +1,6 @@
 # VoF work orders — the finishing campaign (V5a, V-BC, V5b, V8, examples)
 
-Written 2026-09-02 (Fable) after the review recorded in `suite/docs/VOF_PLAN.md` §12 and
+Written 2026-09-02 (architect) after the review recorded in `suite/docs/VOF_PLAN.md` §12 and
 `suite/docs/VOF_NEXT_SESSION.md`. Companion to `vof_workorders.md` (phase 0),
 `vof_workorders_v2.md` (V2) and `vof_workorders_v34.md` (V3/V4). Each work order is written to be
 executed by an **Opus agent standalone**; findings go into this file under the WO, never into the
@@ -138,7 +138,7 @@ WO-S (contact angle), which only replaces the fill.
    the cell fraction `eps` of the cell whose centre it sits on. Gate: WO-K's uniform-velocity
    identity holds **bitwise away from cut cells** and is bounded (report it) at cut cells; the
    colour/momentum drift per step on the packing draining case ≤ 1e-10. If the bound at cut
-   cells exceeds 1e-6 relative at ratio 1000, stop and report — that is a Fable derivation.
+   cells exceeds 1e-6 relative at ratio 1000, stop and report — that is an architect derivation.
 
 **Gates.**
 - **G1 byte-identity.** All `vof_*` ctests (host-openmp AND nvidia-cuda) and the MPI `vof_*`
@@ -256,7 +256,7 @@ bindings, `tests/kokkos/test_vof_bc.cpp`, `tests/kokkos_mpi/test_vof_bc_mpi.cpp`
 
 ---
 
-## WO-S — rung V5b: static contact angle on SDF solids (the θ-consistent fill)  [Fable design → OPUS]
+## WO-S — rung V5b: static contact angle on SDF solids (the θ-consistent fill)  [architect design → OPUS]
 
 **Goal.** Replace WO-Q's neutral pass-1 fill by a fill that makes the height functions and the
 MYC stencils see an interface meeting the solid at the prescribed angle θ, so that the unmodified
@@ -324,11 +324,11 @@ the measurement), and the branch census in the wall band.
 
 Escalation path: if G1 misses by more than 3° at every θ with the same sign, switch item 1 to the
 two-pass scheme (neutral fill → MYC normals → θ-fill → MYC again) and re-measure; if it still
-misses, stop — the pivot choice (item 3) is then the suspect and needs a Fable derivation.
+misses, stop — the pivot choice (item 3) is then the suspect and needs an architect derivation.
 
 ---
 
-## WO-T — rung V8 (minimal): the collocated path  [Fable design → OPUS]
+## WO-T — rung V8 (minimal): the collocated path  [architect design → OPUS]
 
 **Goal.** `enable_vof` on `SolverColocated`: variable density in the ABC approximate projection,
 the balanced force on the face field with the consistent cell counterpart, colour advection from
@@ -390,7 +390,7 @@ printing both columns, findings, CLAUDE.md.
 
 ---
 
-## WO-U — the example gallery (`~/Codes/peclet-examples`)  [OPUS, page designs by Fable]
+## WO-U — the example gallery (`~/Codes/peclet-examples`)  [OPUS, page designs by the architect]
 
 Pages, in the order they become runnable (E1–E4 need nothing beyond `main` + WO-Q's `advect_vof`;
 E5–E7 need WO-Q/R/S). Every page follows `STYLE_GUIDE.md` (bootstrap cell, What-you'll-learn,
@@ -410,7 +410,7 @@ that, a note that the collocated path is rung V8). Frozen outputs are rendered b
   with an exact curvature; the estimator is the ceiling. This is the "characterization of
   parasitic currents" page.
 - **E3 `capillary-oscillations`** — the standing capillary wave against the **viscous** two-fluid
-  dispersion relation (`s² + ω₀²(1 − k/√(k² + s/ν)) = 0`, equal fluids; Fable's derivation in
+  dispersion relation (`s² + ω₀²(1 − k/√(k² + s/ν)) = 0`, equal fluids; the architect's derivation in
   VOF_NEXT_SESSION Item 2 — it removes the −2…−4 % "deviation" WO-P recorded against the inviscid
   formula) and the mode-2 droplet against Lamb + the viscous correction (Miller & Scriven 1968;
   see the Item-2 trace for what to state about the residual deficit).

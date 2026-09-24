@@ -65,7 +65,7 @@ it here (that is S2).
 
 ---
 
-## WO-K (rung V2b) — momentum-consistent transport  [Fable design, below; Opus implements]
+## WO-K (rung V2b) — momentum-consistent transport  [architect design, below; Opus implements]
 
 **Why this is not optional.** With mass and momentum advected by *different* fluxes, a mixed
 cell multiplies the gas acceleration by the liquid density: a spurious interfacial momentum
