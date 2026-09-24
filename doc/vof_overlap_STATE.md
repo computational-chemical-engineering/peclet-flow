@@ -29,7 +29,24 @@ shear collision test (vof_blocks_overlap.py shear).
 `flow-w4/tests/study/channel_18/runs/prod/ckpt.npz`, dump the window around the blow-up).
 New diagnostics bound: `diagnostics.vof_block_kappa(id)`, `diagnostics.vof_block_force(c)`.
 
-**Next action.** Run static sweep + channel_18 restart diagnostics; localise the first bad step.
+**Second failure mode (same family).** set_vof_interface_eps 1e-3 / 1e-2 pass 10706 but die at
+11213 / 11331: marker 13 grew a 24-cell debris blob (vol 0.16, C up to 0.08, kappa -428, face force
+-10810). Couette pair (`vof_blocks_overlap.py shear`, U 16, 20 min) dies at step 2910 AFTER
+separating = cheap deterministic reproducer. U 40 run: stable through 1540+ steps.
+
+**Design.** Brief `doc/vof_overlap_design_brief.md` sent to fable-architect (2026-09-24 ~09:45);
+deliverable `doc/vof_overlap_design.md`. Opus reviews + pushes back until consensus.
+
+**Bubble column (independent).** DECISION: walled periodic column (x vertical periodic, walls +-y,
+z periodic), 128x96x64, D=16 cells, 16 bubbles phi 4.36 %, Loisy E1 (Ar 29.9, Bo 2) with density
+and viscosity ratios 0.02; reason: TBFsolver FAST_MODE Poisson is tridiagonal in y (no fully
+periodic swarm). Case module `~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/
+scripts/case.py` (worktree of peclet-examples, branch bubble-column). TBFsolver built locally in
+scratchpad/tbf (patched to read specs/bubblePositions; patch file beside it). An opus-engineer is
+setting up + running the TBFsolver case (CPU, <= 24 cores; machine loaded by other sessions).
+
+**Next action.** Review Fable's design note; iterate to consensus; implement (opus); gate on the
+shear reproducer + channel_18 restart; then the peclet side of the bubble column.
 
 **Gates (to be set with the design).** channel_18 ≥ 5 turnovers; static pair parasitic current
 flat in d; marker volumes 1e-12; every existing block ctest bit-identical when no overlap.
