@@ -293,6 +293,9 @@ struct VofBlockStats {
   double debrisReturned = 0.0;  ///< cumulative sum of debrisVolume over the removals
   double debrisLost = 0.0;      ///< cumulative volume the return could not place (C capped at 1)
   long debrisUnresolved = 0;    ///< cumulative debris cells left for want of an attached interface
+  /// Cumulative re-centrings whose box had to span a whole periodic axis (vof_overlap_design
+  /// §12.3): the box is snapped to [0, L) there and the colour copied with the periodic wrap.
+  long fullAxis = 0;
 };
 
 /// One bubble's block. Every rank holds the (id, box, master) triple — the replicated table — and
@@ -322,7 +325,7 @@ class VofBlock {
   /// block's reported velocity has no gap), whether it is valid, and the cumulative debris ledger
   /// (`doc/vof_overlap_design.md` §5.3: it migrates with the block). `kAuxLen` doubles; everything
   /// else in a block is either replicated (the table) or recomputed every step.
-  static constexpr int kAuxLen = 8;
+  static constexpr int kAuxLen = 9;
   void serializeAux(double out[kAuxLen]) const {
     for (int d = 0; d < 3; ++d)
       out[d] = prevCentroid_[d];
@@ -331,6 +334,7 @@ class VofBlock {
     out[5] = st_.debrisLost;
     out[6] = static_cast<double>(st_.debrisUnresolved);  // a cell count: exact in a double
     out[7] = st_.discarded;  // §12.2: the re-centring ledger migrates too
+    out[8] = static_cast<double>(st_.fullAxis);
   }
   void deserializeAux(const double in[kAuxLen]) {
     for (int d = 0; d < 3; ++d)
@@ -340,6 +344,7 @@ class VofBlock {
     st_.debrisLost = in[5];
     st_.debrisUnresolved = static_cast<long>(in[6]);
     st_.discarded = in[7];
+    st_.fullAxis = static_cast<long>(in[8]);
   }
 
   friend class VofBlockSet;
@@ -1201,13 +1206,24 @@ class VofBlockSet {
           wasteful = true;
     if (b.box.contains(need) && !wasteful)
       return;
-    const VofBox nb = vofClampBox(VofBox::grown(bb, margin_ + recentrePad), gs_, per_);
+    const VofBox want = VofBox::grown(bb, margin_ + recentrePad);
+    const VofBox nb = vofClampBox(want, gs_, per_);
     if (nb == b.box)
       return;
+    // §12.3: an axis on which the box spans the whole periodic domain is copied WITH the wrap
+    // (source index = destination global index mod L) -- lossless, a marker as long as the domain
+    // is legal. Every other axis keeps the plain copy by unwrapped global index.
+    const int L[3] = {gs_.x, gs_.y, gs_.z};
+    bool wrap[3];
+    bool anyWrap = false;
+    for (int d = 0; d < 3; ++d) {
+      wrap[d] = per_[d] && nb.n(d) == L[d];
+      anyWrap = anyWrap || (wrap[d] && want.n(d) >= L[d]);
+    }
     // What the move DROPS: the colour of old-box cells that fall outside the new box. Measured
     // directly rather than as `sum(old) - sum(new)`, which at |sum| ~ 1e2 is 1e-13 of summation
     // rounding and says nothing about the wisps (measured -5.7e-14 that way on the G1 scene).
-    const double dropped = outOfBoxSum(b, nb);
+    const double dropped = outOfBoxSum(b, nb, wrap);
     // exact copy by global index (both boxes are in the same unwrapped global frame)
     WyAdvector fresh = acquireAdvector(nb.n(0), nb.n(1), nb.n(2));
     const I3 se = b.adv_.extent(), de = fresh.extent();
@@ -1216,13 +1232,21 @@ class VofBlockSet {
     const int sx = b.box.lo[0], sy = b.box.lo[1], sz = b.box.lo[2];
     const int snx = b.box.n(0), sny = b.box.n(1), snz = b.box.n(2);
     const int dx = nb.lo[0], dy = nb.lo[1], dz = nb.lo[2];
+    const bool wx = wrap[0], wy = wrap[1], wz = wrap[2];
+    const int Lx = L[0], Ly = L[1], Lz = L[2];
     SField src = b.adv_.colour(), dst = fresh.colour();
     Kokkos::parallel_for(
         "vof::block::recentre_copy",
         Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {dn.x, dn.y, dn.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const int gx = x + dx, gy = y + dy, gz = z + dz;
-          const int lx = gx - sx, ly = gy - sy, lz = gz - sz;
+          int lx = gx - sx, ly = gy - sy, lz = gz - sz;
+          if (wx)
+            lx = ((lx % Lx) + Lx) % Lx;
+          if (wy)
+            ly = ((ly % Ly) + Ly) % Ly;
+          if (wz)
+            lz = ((lz % Lz) + Lz) % Lz;
           double v = 0.0;
           if (lx >= 0 && lx < snx && ly >= 0 && ly < sny && lz >= 0 && lz < snz)
             v = src(L3(lx + g, ly + g, lz + g, se));
@@ -1240,6 +1264,8 @@ class VofBlockSet {
     fillBlockGhosts(blocks_[idx]);
     blocks_[idx].st_.recentred = true;
     blocks_[idx].st_.discarded += dropped;
+    if (anyWrap)
+      ++blocks_[idx].st_.fullAxis;
   }
 
   /// Debris pass on one master block (`doc/vof_overlap_design.md` §5.2-5.3, predicate of §11).
@@ -1378,11 +1404,18 @@ class VofBlockSet {
 
   /// Sum of the block's colour over inner cells whose GLOBAL index falls outside `nb`.
   double outOfBoxSum(const VofBlock& b, const VofBox& nb) const {
+    const bool nowrap[3] = {false, false, false};
+    return outOfBoxSum(b, nb, nowrap);
+  }
+  /// ... where an axis flagged in `wrap` spans the whole periodic domain in `nb` and is copied
+  /// with the wrap: every old cell lands in `nb` on that axis, so it drops nothing there.
+  double outOfBoxSum(const VofBlock& b, const VofBox& nb, const bool wrap[3]) const {
     const I3 e = b.adv_.extent(), n = b.adv_.inner();
     const int g = ghost_;
     const int sx = b.box.lo[0], sy = b.box.lo[1], sz = b.box.lo[2];
     const int lx = nb.lo[0], ly = nb.lo[1], lz = nb.lo[2];
     const int hx = nb.hi[0], hy = nb.hi[1], hz = nb.hi[2];
+    const bool wx = wrap[0], wy = wrap[1], wz = wrap[2];
     SField c = b.adv_.colour();
     double v = 0.0;
     Kokkos::parallel_reduce(
@@ -1391,7 +1424,9 @@ class VofBlockSet {
                                                       {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, double& a) {
           const int gx = x - g + sx, gy = y - g + sy, gz = z - g + sz;
-          if (gx >= lx && gx < hx && gy >= ly && gy < hy && gz >= lz && gz < hz)
+          const bool inX = wx || (gx >= lx && gx < hx), inY = wy || (gy >= ly && gy < hy),
+                     inZ = wz || (gz >= lz && gz < hz);
+          if (inX && inY && inZ)
             return;
           a += c(L3(x, y, z, e));
         },

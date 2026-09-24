@@ -1010,6 +1010,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
               r["debris_returned"] = b.debrisReturned;
               r["debris_lost"] = b.debrisLost;
               r["debris_unresolved"] = b.debrisUnresolved;
+              r["full_axis"] = b.fullAxis;
               r["overlap_max_sum"] = ov.maxSum;
               r["overlap_excess"] = ov.excess;
               r["overlap_cells"] = ov.cells;
@@ -1034,7 +1035,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "only; master only; see set_vof_block_debris): interfacial cells with every cell of the "
           "marker within two cells below C = 1/2, and their summed colour. 'debris_returned', "
           "'debris_lost' and 'debris_unresolved' are the cumulative ledger "
-          "(doc/vof_overlap_design.md 5.3): volume + discarded + debris_lost is conserved.\n\n"
+          "(doc/vof_overlap_design.md 5.3): volume + discarded + debris_lost is conserved. "
+          "'full_axis' counts re-centrings whose box had to span a whole periodic axis (it is "
+          "then [0, L) and copied with the wrap, losslessly; 12.3).\n\n"
           "'overlap_*' are the GLOBAL marker-overlap census of the last block advection "
           "(vof_overlap_design 5.6; block CSF or the overlap density on), the same in every dict: "
           "'overlap_max_sum' = max over cells of S = sum_k C_k, 'overlap_excess' = sum of "
