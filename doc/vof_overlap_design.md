@@ -242,72 +242,77 @@ because the gas carries the liquid's viscosity (viscosity relaxes the capillary 
 van Wachem 2015; at μ_g/μ_l = 0.02 that relief is gone). So this is an explicit-stability
 boundary of the model, not a debris effect, and neither rule of §4 touches it.
 
-**Decision: (c), in one specific form — the overlap volume is film liquid.** The union colour
-that feeds ρ(C) and μ(C) becomes
+**Decision (revised after review): two things, at different levels.**
 
-```
-S      = Σ_k C_k                       (a SUM scatter beside the existing MAX one; same machinery,
-                                        same deterministic block order as scatterForceSum)
-C_eff  = (S <= 1 + 1e-8) ? max_k C_k : max(0, 2 - S)
-```
+*Safety, default ON, model unchanged — phantom-aware capillary bound while an overlap exists.*
+A SUM scatter of the markers' colour beside the existing MAX one gives `S = Σ_k C_k` on the
+owner (same machinery and deterministic block order as `scatterForceSum`). Whenever block CSF is
+on and any cell has `S > 1 + 1e-8`, `vof_step_limits()['capillary_dt']` and the `step()`
+enforcement use `sqrt(2 ρ_min Δ_min³ / 4πσ)` instead of the `(ρ_l+ρ_g)` bound; otherwise nothing
+changes. This is option (a) gated by the overlap itself. Cost: the rating factor
+`sqrt(2ρ_g/(ρ_l+ρ_g))` (0.43 at ratio 10, 0.198 at ratio 50) on dt **only while a pair is in
+contact** — for channel_18 at safety 0.25 it never binds; for the bubble column at ratio 50 it is
+1.6× (0.25 → 0.16) during contacts, and at φ = 4.4 %, Bo = 2 Loisy report no close contact below
+φ ≈ 5 %, so contact should be rare there (the overlap census from `S` measures it). The overlap is
+detected at the end of step n and binds from step n+1 — a one-step lag on a transient that takes
+tens of steps to grow (the 400-step peaks above); acceptable, stated. The drivers re-pick dt every
+step; a fixed-dt driver at ratio ≥ ~31 (where 0.25 exceeds the factor) will see `step()` throw at
+first contact, which is the same hard-boundary policy `step()` already applies to the base bound.
 
-i.e. gas only where exactly one marker is; where none *or two* markers are, liquid. Nothing else
-changes: the force stays `Σ_k σ κ_k ∇C_k` on each marker's own colour, the clip and the debris
-rule stay as designed, `set_capillary_cfl` keeps its meaning and value.
+*Model, OPT-IN, default OFF — the "tent": the overlap volume as film liquid.*
+`diagnostics.set_vof_block_overlap_density(enabled)`; with it the union colour that feeds ρ(C),
+μ(C) becomes `C_eff = (S <= 1 + 1e-8) ? max_k C_k : max(0, 2 − S)`. Its justification is
+**stiffness and inertia only, and it is a model**: across A's phantom surface `S` goes 1 → 2 and
+ρ goes ρ_g → ρ_l, so the phantom is an ordinary liquid–gas interface under the base bound (a
+thin-overlap band cell with `C_A = 0.5, C_B = 1` gets `C_eff = 0.5`, the mean density every
+real interfacial cell has), and the lens acquires the inertia and viscosity the missing film would
+have. The balanced-force property holds for any ρ field (with constant κ_k the force is
+`∇(σ Σ κ_k C_k)`, and `p = σ Σ κ_k C_k` solves the variable-density projection exactly), so the
+static balance of brief §6.5 survives by construction.
 
-Why this is the principled choice and not a patch:
+**What the tent costs — stated honestly (my first draft had this backwards).** The real state
+is gas `V_A + V_B` with a sub-grid film. MAX shows gas `V_A + V_B − V_ov`: it already has `V_ov`
+*too much* liquid. The tent shows `V_A + V_B − 2V_ov`: it doubles that error. Per contacting pair
+the mixture weight is off by `2 V_ov Δρ g` while the drivers' `⟨ρ⟩` uses the markers' volumes,
+so a column feels a small net force during contacts (`V_ov ~ 5` of 523 cells ≈ 2 %, transient),
+and each colliding bubble loses `V_ov` of buoyancy while in contact. It also changes collision
+dynamics (harder deceleration on approach) — and the partner code of the benchmark, TBFsolver, is
+MAX (with ρ smoothing), so a tent default would turn the peclet–TBFsolver comparison into a
+comparison of two collision models. Hence opt-in, and a default flip only on measurement (G7),
+recorded as a decision.
 
-- *It removes the gas–gas interface instead of slowing the clock for it.* Across A's phantom
-  surface `S` goes 1 → 2 and ρ goes ρ_g → ρ_l: an ordinary liquid–gas interface, whose bound is
-  the one already enforced. In the thin-overlap band a cell with `C_A = 0.5, C_B = 1` has
-  `C_eff = 0.5` and the arithmetic-mean density — exactly what every real interfacial cell has. No
-  dt switching, no 5× cost at ratio 50, no per-step decision.
-- *The balanced-force property is untouched, for any ρ field.* With constant κ_k the force is a
-  gradient `∇(σ Σ κ_k C_k)`, and the variable-density projection `∇·(ρ⁻¹∇p) = ∇·(ρ⁻¹F)` is solved
-  exactly by `p = σ Σ κ_k C_k` whatever ρ is. The static-pair balance of brief §6.5 survives by
-  construction; (d) below cannot say that.
-- *It restores liquid that MAX deletes.* Two markers cannot occupy one volume; physically the
-  lens is where the film liquid is. MAX removes that liquid; the tent puts it back with its
-  inertia and its viscosity, which is the direction real film drainage acts (it decelerates the
-  approach more than gas would). It is a soft contact model for free: the lens is at
-  `p_∞ + σκ_A + σκ_B` and pushes both bubbles apart — already true under MAX; now the pushed
-  region is heavy.
-- *Bit-identical without real overlap.* The `1 + 1e-8` guard (the wisp eps again) keeps a
-  `1 + 1e-9` wisp sum on the MAX branch, so every non-colliding run is byte-identical; only cells
-  with genuine overlap change, and those are already outside today's rating.
-- Cost: one more block→owner scatter per step (same size as the MAX one); `S` also gives the
-  overlap census for free (`max S`, overlapped volume `Σ (S−1)⁺` per step) — report it in
-  `vof_block_stats()`.
-
-**Rejected.** (a) *dt from 2ρ_min when overlap exists*: correct but 5× at ratio 50 during
-contact, and in a swarm some pair is nearly always in contact, so it degenerates to (b); keep it
-only as an opt-in diagnostic once `S` exists. (b) *always 2ρ_min*: cost. (d) *drop the phantom
+**Rejected.** (b) *always 2ρ_min*: pays the factor when no phantom exists. (d) *drop the phantom
 force where covered by another marker*: the masked force is no longer a gradient, so the rim
 acquires unbalanced-CSF spurious currents of order `σκ/(ρ_g Δ)` in statics — the very thing V4
 removed; it needs B's colour on A's master (a pairwise exchange); and without its own tension A's
-inner part becomes a passive scalar in B's circulation, which is the debris generator of §2 made
-worse. (e) *rate it*: the honest fallback if G7 fails, not a design.
+inner part becomes a passive scalar in B's circulation, the debris generator of §2 made worse.
+(e) *a fixed rating* `set_capillary_cfl ≤ 0.8·sqrt(2ρ_g/(ρ_l+ρ_g))`: correct but pays the factor
+always; the gated bound is (e) applied only when it is needed, and it is what a fixed-dt driver
+should set by hand.
 
-**Measured vs assumed.** Measured: the dt-scaling spike and its threshold (above). Assumed, and
-gated: that the tent removes the spike (G7a); that it does not change the static balance (G7a,
-by construction, but measured anyway); that collision dynamics stay physical — the pair still
-separates in the shear case, overlap depth is not larger than under MAX (G7b). Not gated here:
-bounce statistics against a reference (that is W4 G3 and the benchmark itself).
+**Measured vs assumed.** Measured: the dt-scaling spike and its threshold (above). Assumed and
+gated: that the gated bound removes the spike at ratio 50 (G7a); that contact is rare in the
+column (overlap census, G7c); for the tent, that it removes the spike at the base bound and does
+not deepen or prolong contact (G7a/b). Not gated here: bounce statistics against a reference
+(W4 G3 and the benchmark).
 
-**Gate G7.** (a) The reviewer's static pair table at ratio 50, μ ratio 1, with the tent: d = 8
-peak ≤ 1.1 × single (≤ 0.16) at safety 0.25 **and** 0.40, end values unchanged; separated cases
-bitwise. Then the same at μ_g/μ_l = 0.02 (the benchmark's), where MAX is expected to fail and the
-tent to hold the same bound. (b) The shear reproducer under the tent: completes, max|u| ≤ 18,
-the pair separates, max overlap volume ≤ the MAX run's, debris ledger reported. (c) No-op proof:
-`clipped`, `debrisCells` and the new overlap census all zero on every existing ctest, hashes
-unchanged. Fallback if G7a fails: rate the block container at
-`set_capillary_cfl ≤ 0.8·sqrt(2ρ_g/(ρ_l+ρ_g))` for colliding runs (0.16 at ratio 50) and revisit.
+**Gate G7 (ratio 50, R = 5, σ = 320, the reviewer's static table).** (a) MAX + gated bound: at
+requested safety 0.25 and 0.40 the run's dt drops to the phantom bound while d = 8 overlaps and
+the peak is ≤ 1.1 × single (≤ 0.16); end values unchanged; separated cases bitwise; repeated at
+μ_g/μ_l = 0.02. The same rows with the tent at the base bound, side by side. (b) Shear
+reproducer, both configurations: completes, max|u| ≤ 18, the pair separates; report max overlap
+volume, contact duration, debris ledger, and the number of steps the gated bound bound.
+(c) No-op proof: `clipped`, `debrisCells`, the overlap census all zero on every existing ctest,
+hashes unchanged; then the bubble column's overlap census over its first turnovers (fraction of
+steps with any `S > 1 + 1e-8`). The default stays MAX + gated bound unless (a)/(b) show the tent
+better on something that matters (peak, contact depth, debris rate) — then a recorded decision.
 
-**WO-7** (after WO-3): `scatterColourSum` in the block exchange, `C_eff` in
-`harvestVofBlockUnion`, the overlap census fields, setter
-`diagnostics.set_vof_block_overlap_density(enabled)` (default ON under block CSF; OFF = MAX
-verbatim), G7 runs. **Q7** (fact): whether the tent's `μ` should follow the same map or stay MAX
-(default: same map — the film is liquid; if G7b shows over-damped collisions, try ρ-only).
+**WO-7** (after WO-3): `scatterColourSum` in the block exchange; the per-step overlap census
+(`max S`, `Σ (S−1)⁺`, cell count) in `vof_block_stats()`; the gated capillary bound in
+`vof_step_limits()` and the `step()` check; `C_eff` in `harvestVofBlockUnion` behind
+`set_vof_block_overlap_density(enabled)` (default OFF = MAX verbatim); G7 runs. **Q7** (fact,
+tent only): whether μ follows the same map or stays MAX (default: same map; if G7b shows
+over-damped collisions, try ρ-only).
 
 ## 6. Gates (falsifiable)
 
