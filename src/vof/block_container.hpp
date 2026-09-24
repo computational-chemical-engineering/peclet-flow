@@ -64,6 +64,7 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "mac_stencils.hpp"  // peclet::flow::SExec, SField, I3, L3
@@ -296,6 +297,9 @@ struct VofBlockStats {
   /// Cumulative re-centrings whose box had to span a whole periodic axis (vof_overlap_design
   /// §12.3): the box is snapped to [0, L) there and the colour copied with the periodic wrap.
   long fullAxis = 0;
+  /// Cumulative SIGNED volume of the sub-`wispEps` residue cleared after each advection and
+  /// returned to the attached interface with the debris (`doc/vof_overlap_design.md` §13).
+  double residueReturned = 0.0;
 };
 
 /// One bubble's block. Every rank holds the (id, box, master) triple — the replicated table — and
@@ -325,7 +329,7 @@ class VofBlock {
   /// block's reported velocity has no gap), whether it is valid, and the cumulative debris ledger
   /// (`doc/vof_overlap_design.md` §5.3: it migrates with the block). `kAuxLen` doubles; everything
   /// else in a block is either replicated (the table) or recomputed every step.
-  static constexpr int kAuxLen = 9;
+  static constexpr int kAuxLen = 10;
   void serializeAux(double out[kAuxLen]) const {
     for (int d = 0; d < 3; ++d)
       out[d] = prevCentroid_[d];
@@ -335,6 +339,7 @@ class VofBlock {
     out[6] = static_cast<double>(st_.debrisUnresolved);  // a cell count: exact in a double
     out[7] = st_.discarded;  // §12.2: the re-centring ledger migrates too
     out[8] = static_cast<double>(st_.fullAxis);
+    out[9] = st_.residueReturned;
   }
   void deserializeAux(const double in[kAuxLen]) {
     for (int d = 0; d < 3; ++d)
@@ -345,6 +350,7 @@ class VofBlock {
     st_.debrisUnresolved = static_cast<long>(in[6]);
     st_.discarded = in[7];
     st_.fullAxis = static_cast<long>(in[8]);
+    st_.residueReturned = in[9];
   }
 
   friend class VofBlockSet;
@@ -604,7 +610,9 @@ class VofBlockSet {
       b.adv_.advect(dt, step_);
       b.st_.recentred = false;
       // Before the re-centring, so the bubble box a re-centre measures is the one the census saw.
-      if (csfEnabled && debrisCensus)
+      // §13: also whenever the advectors run a wisp guard -- the sub-wispEps residue must be
+      // returned on the kinematic path too (the leak is not a CSF matter).
+      if ((csfEnabled && debrisCensus) || wispEps > 0.0)
         debrisPass(b);
     }
     for (std::size_t k = 0; k < blocks_.size(); ++k)
@@ -1268,61 +1276,101 @@ class VofBlockSet {
       ++blocks_[idx].st_.fullAxis;
   }
 
-  /// Debris pass on one master block (`doc/vof_overlap_design.md` §5.2-5.3, predicate of §11).
+  /// Debris + residue pass on one master block (`doc/vof_overlap_design.md` §5.2-5.3, predicate
+  /// of §11, residue of §13).
   ///
-  /// 1. mark: two `parallel_scan`s in inner-box index order -> `listD_` (debris cells) and, only
-  ///    when there is debris, `listA_` (attached interfacial cells: interfacial and not debris).
-  ///    The 5^3 stencil reads the block's ghost ring as `advect()` left it (valid on exit: 0 inside
-  ///    the domain by the margin invariant, the periodic wrap / the zero-gradient clamp elsewhere)
-  ///    -- the values the cascade's PV fit reads. The predicate is evaluated on the colour BEFORE
-  ///    any removal (mark, then act), so it does not depend on the traversal order.
-  /// 2. sums: dV = sum_D C, W = sum_A C(1-C), VA = sum_A C, each SEQUENTIAL in list order on one
-  ///    thread -- a fixed summation order, so the state stays decomposition-independent bitwise.
-  /// 3. guard: VA < kDebrisMinAttached -> nothing removed, debrisUnresolved += nD.
-  /// 4. act (same single thread, list order): debris -> 0; attached C += dV C(1-C)/W, capped at 1
-  ///    with the excess accumulated in `lost` (expected identically 0).
-  /// 5. ledger: debrisCells, debrisVolume (this step), debrisReturned += dV, debrisLost += lost.
-  /// nD == 0 (the common case) runs nothing after the first scan: a bitwise no-op.
+  /// 1. mark: `parallel_scan`s in inner-box index order -> `listD_` (debris cells: interfacial, no
+  ///    cell of the marker at or above 1/2 within two cells; only while the block CSF is on),
+  ///    `listR_` (RESIDUE: 0 < |C| <= wispEps; only while wispEps > 0) and, only when there is
+  ///    something to return, `listA_` (attached: interfacial with a cell >= 1/2 within two). The
+  ///    5^3 stencil reads the ghost ring as `advect()` left it -- the PV fit's view -- and every
+  ///    predicate reads the colour BEFORE any change (mark, then act).
+  /// 2. sums on ONE thread in list order (a fixed summation order, so the state stays
+  ///    decomposition-independent bitwise): dV = [sum_D C if removing debris] + sum_R C (signed),
+  ///    W = sum_A C(1-C), VA = sum_A C.
+  /// 3. guard: VA < kDebrisMinAttached (or W = 0) -> nothing moves; debrisUnresolved += nD.
+  /// 4. act: removed cells -> 0; attached C += dV C(1-C)/W, capped at 1 (excess -> lost).
+  /// 5. ledger: debrisCells, debrisVolume (this step), debrisReturned += sum_D, residueReturned +=
+  ///    sum_R, debrisLost += lost.
+  /// Nothing marked (the common case without a wisp guard) runs nothing else: a bitwise no-op.
   void debrisPass(VofBlock& b) {
     b.st_.debrisCells = 0;
     b.st_.debrisVolume = 0.0;
+    const bool doDebris = csfEnabled && debrisCensus, doResidue = wispEps > 0.0;
     const I3 e = b.adv_.extent(), n = b.adv_.inner();
     const int g = ghost_;
     const long region = static_cast<long>(n.x) * n.y * n.z;
-    if (static_cast<long>(listD_.extent(0)) < region)
-      listD_ = LField(Kokkos::view_alloc("vof::block::debris_list", Kokkos::WithoutInitializing),
-                      region);
-    const double ieps = curvProto.interfaceEps, cfull = kDebrisMaxC;
+    auto ensure = [&](LField& f, const char* name) {
+      if (static_cast<long>(f.extent(0)) < region)
+        f = LField(Kokkos::view_alloc(std::string(name), Kokkos::WithoutInitializing), region);
+    };
+    const double ieps = curvProto.interfaceEps, cfull = kDebrisMaxC, weps = wispEps;
     const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
     const int nx = n.x, ny = n.y;
     SField c = b.adv_.colour();
-    LField listD = listD_;
-    long nD = 0;
-    Kokkos::parallel_scan(
-        "vof::block::debris_mark", Kokkos::RangePolicy<SExec>(SExec(), 0, region),
-        KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
-          const int ix = static_cast<int>(r % nx);
-          const int iy = static_cast<int>((r / nx) % ny);
-          const int iz = static_cast<int>(r / (static_cast<long>(nx) * ny));
-          const long i = L3(g + ix, g + iy, g + iz, e);
-          if (!vofIsInterface(c(i), ieps))
-            return;
-          for (int oz = -2; oz <= 2; ++oz)
-            for (int oy = -2; oy <= 2; ++oy)
-              for (int ox = -2; ox <= 2; ++ox)
-                if (c(i + ox + oy * sy + oz * sz) > cfull)
-                  return;  // attached: a cell at least half full of this marker within two cells
-          if (final)
-            listD(upd) = i;
-          ++upd;
-        },
-        nD);
+    long nD = 0, nR = 0;
+    if (doDebris) {
+      ensure(listD_, "vof::block::debris_list");
+      LField listD = listD_;
+      Kokkos::parallel_scan(
+          "vof::block::debris_mark", Kokkos::RangePolicy<SExec>(SExec(), 0, region),
+          KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
+            const int ix = static_cast<int>(r % nx);
+            const int iy = static_cast<int>((r / nx) % ny);
+            const int iz = static_cast<int>(r / (static_cast<long>(nx) * ny));
+            const long i = L3(g + ix, g + iy, g + iz, e);
+            if (!vofIsInterface(c(i), ieps))
+              return;
+            for (int oz = -2; oz <= 2; ++oz)
+              for (int oy = -2; oy <= 2; ++oy)
+                for (int ox = -2; ox <= 2; ++ox)
+                  if (c(i + ox + oy * sy + oz * sz) >= cfull)
+                    return;  // attached: a cell at least half full of this marker within two
+            if (final)
+              listD(upd) = i;
+            ++upd;
+          },
+          nD);
+    }
+    if (doResidue) {
+      ensure(listR_, "vof::block::residue_list");
+      LField listR = listR_;
+      Kokkos::parallel_scan(
+          "vof::block::residue_mark", Kokkos::RangePolicy<SExec>(SExec(), 0, region),
+          KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
+            const int ix = static_cast<int>(r % nx);
+            const int iy = static_cast<int>((r / nx) % ny);
+            const int iz = static_cast<int>(r / (static_cast<long>(nx) * ny));
+            const double ci = c(L3(g + ix, g + iy, g + iz, e));
+            if (!(ci != 0.0 && Kokkos::fabs(ci) <= weps))
+              return;
+            if (final)
+              listR(upd) = L3(g + ix, g + iy, g + iz, e);
+            ++upd;
+          },
+          nR);
+    }
     Kokkos::fence();
-    if (nD == 0)
-      return;  // the common case: nothing else runs
-    if (static_cast<long>(listA_.extent(0)) < region)
-      listA_ = LField(Kokkos::view_alloc("vof::block::attached_list", Kokkos::WithoutInitializing),
-                      region);
+    const bool removeD = doDebris && debrisRemove && nD > 0;
+    if (!removeD && nR == 0) {
+      if (doDebris && nD > 0) {  // census only: report what WOULD be removed
+        LField listD = listD_;
+        double dVd = 0.0;
+        Kokkos::parallel_reduce(
+            "vof::block::debris_census", Kokkos::RangePolicy<SExec>(SExec(), 0, 1),
+            KOKKOS_LAMBDA(const long, double& acc) {
+              double a = 0.0;
+              for (long t = 0; t < nD; ++t)
+                a += c(listD(t));
+              acc += a;
+            },
+            dVd);
+        b.st_.debrisCells = nD;
+        b.st_.debrisVolume = dVd;
+      }
+      return;  // nothing to remove: nothing else runs
+    }
+    ensure(listA_, "vof::block::attached_list");
     LField listA = listA_;
     long nA = 0;
     Kokkos::parallel_scan(
@@ -1338,7 +1386,7 @@ class VofBlockSet {
           for (int oz = -2; oz <= 2 && !attached; ++oz)
             for (int oy = -2; oy <= 2 && !attached; ++oy)
               for (int ox = -2; ox <= 2 && !attached; ++ox)
-                attached = c(i + ox + oy * sy + oz * sz) > cfull;
+                attached = c(i + ox + oy * sy + oz * sz) >= cfull;
           if (!attached)
             return;
           if (final)
@@ -1347,29 +1395,40 @@ class VofBlockSet {
         },
         nA);
     Kokkos::fence();
-    // [0] dV, [1] W, [2] VA, [3] lost, [4] removed? -- one thread, list order throughout
-    Kokkos::View<double[5], SMem> out("vof::block::debris_out");
-    const bool remove = debrisRemove;
+    // [0] sum_D, [1] sum_R, [2] W, [3] VA, [4] lost, [5] acted? -- one thread, list order
+    Kokkos::View<double[6], SMem> out("vof::block::debris_out");
+    LField listD = listD_, listR = listR_;
+    const long nDr = removeD ? nD : 0, nDc = doDebris ? nD : 0;
     const double vaMin = kDebrisMinAttached;
     Kokkos::parallel_for(
         "vof::block::debris_act", Kokkos::RangePolicy<SExec>(SExec(), 0, 1),
         KOKKOS_LAMBDA(const long) {
-          double dV = 0.0, W = 0.0, VA = 0.0, lost = 0.0;
-          for (long t = 0; t < nD; ++t)
-            dV += c(listD(t));
+          double sD = 0.0, sR = 0.0, W = 0.0, VA = 0.0, lost = 0.0;
+          for (long t = 0; t < nDc; ++t)
+            sD += c(listD(t));
+          for (long t = 0; t < nR; ++t)
+            sR += c(listR(t));
           for (long t = 0; t < nA; ++t) {
             const double ca = c(listA(t));
             W += ca * (1.0 - ca);
             VA += ca;
           }
-          out(0) = dV;
-          out(1) = W;
-          out(2) = VA;
-          out(4) = 0.0;
-          if (!remove || VA < vaMin || !(W > 0.0))
+          out(0) = sD;
+          out(1) = sR;
+          out(2) = W;
+          out(3) = VA;
+          out(5) = 0.0;
+          if (VA < vaMin || !(W > 0.0))
             return;
-          for (long t = 0; t < nD; ++t)
+          double dV = 0.0;  // the removed volume, in the fixed order D then R
+          for (long t = 0; t < nDr; ++t) {
+            dV += c(listD(t));
             c(listD(t)) = 0.0;
+          }
+          for (long t = 0; t < nR; ++t) {
+            dV += c(listR(t));
+            c(listR(t)) = 0.0;
+          }
           for (long t = 0; t < nA; ++t) {
             const long i = listA(t);
             const double ca = c(i);
@@ -1381,25 +1440,28 @@ class VofBlockSet {
             }
             c(i) = cn;
           }
-          out(3) = lost;
-          out(4) = 1.0;
+          out(4) = lost;
+          out(5) = 1.0;
         });
     Kokkos::fence();
     auto ho = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), out);
-    if (!remove) {  // census only: report what WOULD be removed
+    if (doDebris && !debrisRemove && nD > 0) {  // census of what WOULD be removed
       b.st_.debrisCells = nD;
       b.st_.debrisVolume = ho(0);
-      return;
     }
-    if (ho(4) == 0.0) {  // step 3: no attached interface worth a cell -- the clip bounds it
-      b.st_.debrisUnresolved += nD;
+    if (ho(5) == 0.0) {  // step 3: no attached interface worth a cell -- the clip bounds it
+      if (removeD)
+        b.st_.debrisUnresolved += nD;
       return;
     }
     fillBlockGhosts(b);  // the inner colour moved; the next reader expects valid ghosts
-    b.st_.debrisCells = nD;
-    b.st_.debrisVolume = ho(0);
-    b.st_.debrisReturned += ho(0);
-    b.st_.debrisLost += ho(3);
+    if (removeD) {
+      b.st_.debrisCells = nD;
+      b.st_.debrisVolume = ho(0);
+      b.st_.debrisReturned += ho(0);
+    }
+    b.st_.residueReturned += ho(1);
+    b.st_.debrisLost += ho(4);
   }
 
   /// Sum of the block's colour over inner cells whose GLOBAL index falls outside `nb`.
@@ -1577,7 +1639,7 @@ class VofBlockSet {
   long poolHits_ = 0, poolMisses_ = 0;
   long lastReassigned_ = 0;
   VofCurvature::Stats curvStats_{};
-  LField listD_, listA_;  ///< the debris / attached-interface lists, reused across blocks and steps
+  LField listD_, listA_, listR_;  ///< debris / attached / residue lists, reused across blocks
 };
 
 }  // namespace peclet::flow::vof
