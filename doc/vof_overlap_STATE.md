@@ -62,23 +62,22 @@ column (zero net volume flux, TBFsolver flowCtrl 2 flow_rate 0; peclet driver su
 each step) — flowCtrl 3 grew a net upflow from wall friction. TBFsolver closed run: engineer
 restarting (8x3 cores); open-column output kept in tbfsolver/run_open/. peclet run waits for the fix.
 
-**Next action (2026-09-25 00:20, before a session compaction).** USER AUTHORIZED push + publish.
-Running: (a) opus-implementer Phase B of the review fixes (doc/vof_overlap_review.md, untracked):
-real clip test, curvProto-propagation test, ctests for wrap-recentre / residue return / phantom
-bound (np 1/2/4), cost measurement + parallel per-cell writes, setter
-diagnostics.set_vof_phantom_capillary_bound (default on), rename set_vof_kappa_clip ->
-set_vof_block_kappa_clip, kinematic interfaceEps consistency, G2/G3/G4(a)/Hysing re-runs with
-counters, a block case in state_hash.py. (b) GPU chain scratchpad/c18_g4b/chain.sh on frozen module
-scratchpad/flow_prod (= 14d9483): peclet bubble column t=150 (ETA ~05:15) -> peclet D/h=24 to t=5
--> channel_18 10000 -> 5 turnovers (G4(b)). Branches vof-overlap (flow) and bubble-column
-(peclet-examples) pushed to origin as backups. THEN: reviewer re-check of Phase B (short) ->
-rebase vof-overlap onto moved flow origin/main (core 1.2.0 pin, init_mpi raise), rebuild, battery
-once, push flow main; umbrella pointer bump LAST (release session active: core 1.2.0 out, AMR in
-progress — coordinate, stage named paths); update flow/CLAUDE.md VoF scope sentence (colliding
-markers now rated) + decision-register entry (design §10); finish page
-peclet-examples/benchmarks/bubble-column/index.qmd (prose placeholders), peclet_reduce.py ->
-data/peclet_closed.npz (+ _d24_t5), render, merge bubble-column to main, push = publish.
-Cleanup after: tbfsolver/run, run_open, run150 raw snapshots (~17 GB), peclet/run_degraded_pureEps.
+**Next action (2026-09-25 01:10).** USER AUTHORIZED push + publish. Phase B committed (04781e2,
+fc3bd0c, 7242eac, 92af58f); implementer STOPPED (not done: G2/G3/G4(a)/Hysing re-runs with
+counters, c18 cost measurement, state_hash block case, review findings 8-9). Branch REBASED onto
+flow origin/main (clean); CLAUDE.md scope + design §10 register text updated (e40ccf8).
+DECISION: skip the full G2/G4(a)/Hysing re-runs (Phase B is bitwise for isotropic runs; gates
+passed at 03b1660/14d9483) -> battery once + G3 r10 on the rebased head. Alternative: run all.
+Reversible by: running them from tests/study/vof_blocks_overlap.py before the push.
+Running: build_impl rebuild (reconfigured MPIEXEC_PREFLAGS=--bind-to;none: the previous battery
+was pinned, ~30 min/test, killed); fresh reviewer re-check of Phase B -> doc/vof_overlap_review2.md;
+GPU chain scratchpad/c18_g4b/chain.sh (peclet column t=150 ETA ~05:30 -> D/h=24 t=5 -> channel_18
+5 turnovers). THEN: full battery once (-LE bench, -j8, OMP_NUM_THREADS=4) -> push flow main -> land
+register entry in ../docs/decisions/flow.md + umbrella pointer LAST -> page (peclet_reduce,
+"Where the two codes differ", "Cost": TBF 85.7 ms/step on 24 cores, 99658 steps, 8541 s wall) ->
+render -> merge bubble-column to main + push. Cleanup: tbfsolver raw runs (~17 GB),
+peclet/run_degraded_pureEps. TOKEN DISCIPLINE: one blocking completion wait per job; no agent
+polling; never read agent jsonl.
 
 **Gates (to be set with the design).** channel_18 ≥ 5 turnovers; static pair parasitic current
 flat in d; marker volumes 1e-12; every existing block ctest bit-identical when no overlap.
