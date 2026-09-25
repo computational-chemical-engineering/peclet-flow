@@ -62,18 +62,20 @@ column (zero net volume flux, TBFsolver flowCtrl 2 flow_rate 0; peclet driver su
 each step) — flowCtrl 3 grew a net upflow from wall friction. TBFsolver closed run: engineer
 restarting (8x3 cores); open-column output kept in tbfsolver/run_open/. peclet run waits for the fix.
 
-**Next action (2026-09-25 06:40).** PUSH HELD. Battery at eb883d7 167/167 (6 long MPI tests
-needed no timeout + OMPI_MCA_hwloc_base_binding_policy=none; tests/kokkos_mpi ignores
-MPIEXEC_PREFLAGS). G3 r10 at eb883d7 passes (dV 1.1e-15). BUT the production column (14d9483)
-lost per-marker conservation from t~47: marker 3 +8.8e-6 (t48) -> +2.4e-2 (t84), 9 -2.8e-2, 2
-+2.4e-2; both signs; markers touching the y=0 wall; union volume ~1.5e-3; conserved 4e-12 before.
-Production + chain STOPPED at t=86 (reproducer scratchpad/wallcons/ckpt_t86.npz). opus-engineer
-debugging per scratchpad/wallcons/BRIEF.md (mechanism, fix + wall ctest, gate 3000 steps <=1e-12).
-THEN: battery subset, push flow main; register entry + umbrella pointer LAST (umbrella local commit
-2ca28ee unpushed); RE-RUN the production column from t=0 on the fixed build (~10 h) + D/h=24 t=5;
-page (peclet_reduce, "differ", "Cost": TBF 85.7 ms/step on 24 cores, peclet ~310 ms/step), render,
-merge bubble-column to main + push. Cleanup: tbfsolver raw (~17 GB), peclet/run_degraded_pureEps.
-TOKEN DISCIPLINE: one blocking completion wait per job; no agent polling; never read agent jsonl.
+**Next action (2026-09-25 07:45).** PUSH HELD for one MPI test. Wall leak FIXED (788c215, design
+§15): the block face-velocity gather copied index 0 into the LOW non-periodic domain face (v at
+y=1/2 instead of the wall's 0), so markers with colour in a low-wall layer leaked; only those
+drifted. Gate: ckpt_t86 3000 steps 3.9e-3 -> 7.7e-15; gate W in test_vof_blocks (fails with the old
+clamp); vof_blocks 12/12; probes bitwise where no colour touches a low wall. Running: engineer adds
+an MPI low-wall variant np 1/2/4 (+ negative check); NEW chain scratchpad/c18_g4c/chain.sh on frozen
+module scratchpad/flow_prod2 (= 788c215): column from t=0 (~10 h) -> D/h=24 t=5 -> channel_18
+10000 -> 5 turnovers. Old run kept as peclet/run_wallleak_14d9483 (contaminated from t~47).
+THEN: push flow main (battery at eb883d7 was 167/167; after the MPI test re-run -R vof_blocks +
+kokkos_mpi vof tests); register entry + umbrella pointer LAST (umbrella local commit 2ca28ee);
+page after the column (peclet_reduce, "differ", "Cost": TBF 85.7 ms/step on 24 cores, peclet
+~310 ms/step), render, merge bubble-column to main + push. Cleanup: tbfsolver raw (~17 GB),
+peclet/run_degraded_pureEps, run_wallleak_14d9483. TOKEN DISCIPLINE: one blocking completion
+wait per job; no agent polling; never read agent jsonl.
 
 **Gates (to be set with the design).** channel_18 ≥ 5 turnovers; static pair parasitic current
 flat in d; marker volumes 1e-12; every existing block ctest bit-identical when no overlap.
