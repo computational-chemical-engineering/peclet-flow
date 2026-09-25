@@ -301,3 +301,99 @@ time per step instead.
 - **Snellius `hwloc-ls` / `taskset -cp` of the 1x24 and 8x3 layouts (Q4).** It needs a compute
   node, which is billed; not run without the user's go-ahead. The checkpoint is already on the
   project space for when it is.
+
+---
+
+## 2026-09-25 — WO-1 … WO-5: gates (implementer session)
+
+**Method.** Every build was frozen (`~/Codes/bubble_column_perf/frozen_<wo>/{omp,cuda,flt}`) and gated by
+`~/Codes/bubble_column_perf/gbit.sh <wo> <kind>` against the WO-0 baseline files: `state_hash.py`
+(12 cases, 8 threads) + its `mpi` case at np 2, compared byte for byte with `baseline/hash_<kind>*.txt`;
+the 50-step bubble-column dump (`prof.py 50 --pcg --dump`) compared by `cmp.py` with
+`baseline/dump_{omp8,omp24,cuda}.npz` over all 24 arrays (u v w p C dts iters col0..15). All host runs
+`OMP_PROC_BIND=false OMP_WAIT_POLICY=passive` (numerics-neutral, WO-0 surprise 1). Raw output:
+`~/Codes/bubble_column_perf/gates/<wo>_<kind>/`.
+
+**Deviation (recorded).** The full ctest batteries (host `-LE bench`, the CUDA tree) were run ONCE, on
+the final tree, not per work order: at load 60–130 one host battery takes hours. Every work order
+got G-BIT items 1, 2 (and 4 where storage changed), which are the bitwise evidence.
+
+| WO | state | host omp (hash, np2, d8, d24) | cuda (hash, np2, dump) | flt (hash, np2) |
+|---|---|---|---|---|
+| WO-1a `-ffp-contract=off` | 29c3f60 | identical / identical / bitwise / bitwise | compile commands unchanged (no flags.make carries the flag) | identical / identical |
+| WO-1b `HOST_ARCH=native` | 17f5061 | identical / identical / bitwise / bitwise | not applicable (ignored on CUDA) | — |
+| WO-2 A0+A4 | dbdd158 | identical / identical / bitwise / bitwise | identical / identical / bitwise | — |
+| WO-3 A2, as written (TX = +o·gf, consumers read −TX) | not committed | identical / identical / bitwise / bitwise | **DIFFERS** (u 8.8e-15, p 8.1e-15 rel. after 50 steps; staggered_bed…embed + np2 hashes change) | identical / identical |
+| WO-4 A3 on top of that | not committed | identical / identical / bitwise / bitwise | DIFFERS (inherited from WO-3) | — |
+| WO-3 with the band sign stored (TX = −o·gf) + WO-4 + WO-5a | not committed | identical / identical / bitwise / bitwise | identical / identical / bitwise | identical / identical |
+| + WO-5b A6 (final tree) | not committed | identical / identical / bitwise / bitwise | identical / identical / bitwise | — |
+
+Pressure iterations 13.02/step (13 on 49 steps, 14 on one) in every passing dump, as the baseline.
+
+**WO-3 STOPPED on risk R1 (§9).** As specified, the face form changes device bits; host builds
+are bitwise (no contraction there). Most likely mechanism (not verified in PTX): nvcc folds the
+negation of `(−TX(i+1))·φ + (−TX(i))·φ + …` into the add/sub, which changes which product the FMA
+combiner fuses relative to the band form's `AE(i)·φ + AW(i)·φ + …`. Storing the band sign instead —
+`TX(i) = −ox(i)·gfx` (= the old AW(i)), so `AE(i) = TX(i+sx)`, `AW(i) = TX(i)` and every consumer
+expression is literally the band expression — is bitwise on host, CUDA and the float tree (rows
+above). Same storage (3 arrays, 32 B/cell), same bitwise argument, sign convention flipped. That is
+a change to §4.2's definition, so it is left to the note's owner; WO-3, WO-4 and WO-5 are held
+uncommitted on top of it (replayable from `~/Codes/bubble_column_perf/states/r_wo{3,4,5a}` and the
+scripts in the session scratchpad).
+
+**A6 NaN-injection test** (`tests/kokkos/test_pcg_breakdown.cpp`, ctest `pcg_breakdown`): PASS on
+host and CUDA — NaN pAp at iteration 3 → it 3, failed, x bitwise the maxit-3 iterate; NaN rᵀz at 3 →
+it 3, failed, x bitwise the maxit-4 iterate; NaN rᵀz at the last iteration (maxit 4) → the post-loop
+read reports it 3; NaN pAp at iteration 0 → it 0. The reduction-into-a-device-View assumption
+(§5.6) holds: the final tree is bitwise on CUDA.
+
+### G-PERF (indicative only: load 60–130, GPU shared with D1 and other sessions)
+
+Host kernel timer, 1x8, 20-step difference (`perf/<wo>/kern_omp8.txt`), ms/step:
+
+| kernel | WO-0 | WO-2 | WO-4 | WO-5a |
+|---|---|---|---|---|
+| total kernel time | 2123 | 1686 | 1315 | 1696 |
+| launches/step | 2537 | 2535 | 2138 | 2099 |
+| cc_smooth (312/step) | 378 | 331 | 316 | 428 |
+| mg_pfill3 launches/step | 416 | 416 | 19 (+ serial below the cutoff) | 19 |
+| mg_pfill3 ms | 174 | 203 | 5 | 6 |
+| prolong | 167 | 100 | 88 | 125 |
+| cc_residual | 97 | 44 | 45 | 60 |
+| mgmeans | 48 | 31 | 30 | 27 |
+| cc_apply_exact | 63 | 26 | 35 | 51 |
+
+WO-2's "cc_residual, prolong, mgmeans at least halved": residual −55 %, prolong −40 %, mgmeans −37 %
+(noise ±25 % at this load). WO-4's "mg_pfill3 ≤ 60 launches/step": 19 parallel launches (the fills
+before prolongation and of the openness; the smaller ones run serially).
+
+GPU (nsys, 20-step difference, `perf/<wo>_cuda/`): kernel time/step 31.6 ms (WO-0) → 30.2 (WO-3neg+4+5a)
+→ 30.6 (final); the fused-wrap smoother `cutcellSmoothColorFaceWrap` 4.13 ms/step against
+`cutcellSmoothColor` 4.75; `fillWrap` 416 launches/step → gone from the top 30. Synchronisations/step
+(CUDA API): cudaStreamSynchronize 730 → 652 and cudaDeviceSynchronize 348 → 376 with A6 (net −50);
+A5 removed the preconditioner's full-field copies: D→D memcpys > 1 MiB 37 → 11 per step. The
+projection's host reads are r0 + the initial rᵀz + one 24-B packet per iteration = 15 per step
+at 13 iterations (≤ iterations + 4). D→H memcpys ≥ 1 KiB: 17/step remain — the GraphAMG bottom's
+per-V-cycle rhs/solution round trip, which WO-6 (B1) removes; the transfer gate cannot pass before it.
+
+### Batteries (final tree = WO-1, WO-2 + held WO-3(band sign), WO-4, WO-5a, WO-5b)
+
+- host-openmp (`build_omp2`, `OMP_NUM_THREADS=8 OMP_PROC_BIND=false OMP_WAIT_POLICY=passive`,
+  `-LE bench -j8`): **176/176** (175 + the new `pcg_breakdown`), all `_np` MPI cases included.
+- nvidia-cuda (`build_mg`, `OMP_NUM_THREADS=4`, `-LE bench -j4`): **176/176**.
+
+### Implementation choices the note did not spell out (reversible, each isolated)
+
+- `fillWrap`'s row-wise rewrite (§5.4) is the HOST branch only; the device keeps its
+  one-thread-per-cell launch (rule H item 2: device launches unchanged; a thread per row would copy
+  ~130 cells serially and uncoalesced on the GPU). Bitwise either way.
+- A6 is the single-rank driver `solvePCGResident`; `distributed_` keeps solvePCG's host-scalar loop
+  verbatim (§1, §4.4 "single-rank", §8 "distributed branches byte-identical"). FCG keeps host
+  scalars (§5.6 names PCG and Chebyshev only); every single-rank `removeMean` (V-cycle exit,
+  Chebyshev, FCG, the eigenvalue estimate) is device-resident. BiCGStab keeps its preconditioner
+  copies (A5 names PCG, FCG, Chebyshev and the eigenvalue estimate).
+- A5's restriction-zeroing is single-rank only; the distributed branch keeps
+  `restrictAvg` + the full zero fill.
+
+D1 (started in WO-0) finished: `~/Codes/bubble_column_perf/d1/d1.log` ends "D1 DONE" — not analysed
+here (WO-13).
