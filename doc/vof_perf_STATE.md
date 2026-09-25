@@ -23,11 +23,15 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
 - opus-implementer WO-8/WO-9 (batched block container + statistics) — worktree
   ../flow-vof-container, branch vof-container.
 - architect §12 E2(a) addendum — this worktree, branch vof-perf (brief doc/vof_constcoef_pressure_brief.md).
-- opus-engineer y-mirror asymmetry (bubbles collect at the LOW wall in the case AND its y-mirror)
-  — worktree ../flow-mirror-fix, branch mirror-fix (brief in the session scratchpad mirror/BRIEF.md;
-  harness copy /home/frankp/Codes/bubble_column_perf/run_mirror.py).
+- DONE: the LOW-wall asymmetry was variable-mu placement (face mean shifted h/2 towards +c): flow
+  main fe377a5 (b273031 fix, 392bf9a ctest mirror_symmetry, fe377a5 velocity MG refuses variable
+  mu), umbrella 5c328f2 (register). vof-mg / vof-container branches predate it: rebase at merge.
+- production column rerunning on the fix (frozen scratchpad/flow_prod4), peclet/run.
+- §12 E2(a) design landed (8ac2ea5). WO-E2.0 PASSED: ratio 1 -> 7.3 MG-PCG iterations (max 8) vs
+  13.1 at ratio 50. E2(a) CPU model 57-95 ms/step (TBF 45): parity needs E2(b) FFT = USER decision
+  (proposed: after E2(a) accuracy gates).
 
-**Next.** Merge mirror-fix -> rerun production column + D/h=24 + channel_18; WO-6 (B1 device
+**Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
 + core tag: coordinate with the release session); E2(a) per §12; register entries of design §11 as
 their WOs land; Snellius rerun (`/projects/0/prjs1022/peclet/bubble-cpu/bubble_cpu.slurm`, 15 min);
