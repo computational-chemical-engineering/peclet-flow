@@ -27,9 +27,9 @@
 #ifndef PECLET_FLOW_VOF_CURVATURE_FIELD_HPP
 #define PECLET_FLOW_VOF_CURVATURE_FIELD_HPP
 
+#include <algorithm>
 #include <chrono>
 #include <Kokkos_Core.hpp>
-#include <algorithm>
 #include <stdexcept>
 #include <vector>
 
