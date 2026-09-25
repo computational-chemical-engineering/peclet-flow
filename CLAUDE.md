@@ -75,18 +75,18 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 168 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 169 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-168 registered / **166 with `-LE bench`** (counted 2026-09-25): 46 from `tests/kokkos` — of
+169 registered / **167 with `-LE bench`** (counted 2026-09-25): 46 from `tests/kokkos` — of
 which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 115
-from `tests/kokkos_mpi` (38 cases at np = 1, 2, 4 plus one np = 8 rung), and 7 Python ctests on
+from `tests/kokkos_mpi` (38 cases at np = 1, 2, 4 plus one np = 8 rung), and 8 Python ctests on
 the module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
 `verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`, `colocated_open_boundary`,
-`no_env_knobs`, `no_float_operator_casts`). Always bound the OpenMP pool — an unbounded one on a
-many-core host is an hour-long trap.
+`cell_force_placement`, `no_env_knobs`, `no_float_operator_casts`). Always bound the OpenMP pool —
+an unbounded one on a many-core host is an hour-long trap.
 
 More verification lives in `scripts/verify_*_sdflow.py` and `validate_zick_homsy_sdflow.py` (the
 external ground truth), run with `PYTHONPATH=<tree>`. `tests/regression/sdflow_regression.py` is
@@ -460,7 +460,8 @@ immersed solid, use `set_pressure_geometry(all_fluid_sdf)`.
   walled axis split the domain into independent sub-domains, visible only in the pressure). A
   multi-rank inlet profile must be handed to each rank as its own slice; no scatter helper.
 - **Ghost fills that are easy to lose:** `step()` fills the cell body-force and `drag_beta` ghosts
-  right after `updateProperties()` because `buildRhsVar`/`addDragDiagonal` face-interpolate them;
+  right after `updateProperties()` because every staggered RHS builder and `addDragDiagonal`
+  face-interpolate them (`Grid::atVelocity`: a VOLUMETRIC force sits where the velocity lives);
   skip either and the first inner plane of every block silently carries half the value.
 - **Solid CUTTING an open face** (fixed 2026-09-16, `test_openbc_solid{,_mpi}` — the first tests to
   combine `set_domain_bc` with `set_solid`): the SDF ghost outside a non-periodic face was filled by

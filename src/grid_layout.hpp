@@ -40,6 +40,15 @@ struct Staggered {
            : c == 1 ? Off3{0.0f, -0.5f, 0.0f}
                     : Off3{0.0f, 0.0f, -0.5f};
   }
+  // A cell-centred VOLUMETRIC field (per-cell body force, drag coefficient) at component c's
+  // unknown, `s` = strideOf(c): the face between cells i - s and i, so the second-order face mean.
+  // Surface forces (pressure, viscous stress, surface tension) never come through here -- they are
+  // face integrals over the unknown's control volume (suite docs/decisions/flow.md, "Volumetric
+  // forces at the velocity location").
+  template <class A>
+  KOKKOS_INLINE_FUNCTION static double atVelocity(const A& f, long i, long s) {
+    return 0.5 * ((double)f(i) + (double)f(i - s));
+  }
   // `uf` (the projected-face-field advecting velocity, see Colocated below) is meaningless here:
   // the stored staggered velocity IS the face velocity, and after the projection it IS the
   // divergence-free one. Accepted and ignored so the call sites stay grid-agnostic.
@@ -75,6 +84,11 @@ struct Colocated {
   static constexpr const char* name = "colocated";
   static constexpr bool collocated = true;  // cell-centered velocity; approximate (MAC) projection
   static constexpr Off3 offset(int /*c*/) { return Off3{0.0f, 0.0f, 0.0f}; }
+  // A cell-centred volumetric field at the (cell-centred) unknown: the cell value itself.
+  template <class A>
+  KOKKOS_INLINE_FUNCTION static double atVelocity(const A& f, long i, long /*s*/) {
+    return (double)f(i);
+  }
   // `uf == true`: U/V/W are the projected divergence-free MAC face field (low-face convention),
   // read verbatim at the control volume's faces; `false`: they are the cell velocities and the
   // face value is their average. See colocated_advection.hpp and Solver::ufAdvVelocity().

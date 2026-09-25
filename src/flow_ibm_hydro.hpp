@@ -218,8 +218,10 @@ std::vector<double> Solver<Grid>::hydroForceTorqueReaction() {
           const long i = (long)x + (long)y * st[1] + (long)z * st[2];
           if (mk(i) > 0.5)
             return;  // solid staggered point: no fluid momentum here
-          double R =
-              idt * (uc(i) - un(i)) - fc - (fb.data() ? fb(i) : 0.0) - (av.data() ? av(i) : 0.0);
+          // the body force exactly as buildRhsForced placed it (Grid::atVelocity)
+          double R = idt * (uc(i) - un(i)) - fc -
+                     (fb.data() ? Grid::atVelocity(fb, i, st[cc]) : 0.0) -
+                     (av.data() ? av(i) : 0.0);
           for (int a = 0; a < 3; ++a) {
             const long jp = i + st[a], jm = i - st[a];
             if (mk(jp) <= 0.5)

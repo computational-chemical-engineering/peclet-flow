@@ -508,7 +508,10 @@ void Solver<Grid>::buildRhsForced(int c) {
                 ? ((tg || gg) ? gpw(i) : wc * (0.5 * (P((long)i + strd) - P((long)i - strd))))
                 : wc * (P(i) - P((long)i - strd));
         const double comp = pc ? rho * uu(i) * 0.5 * (dv(i) + dv((long)i - strd)) : 0.0;
-        bb(i) = rs(i) * (idiag * un(i) + fc + fb(i) - rho * aK + rho * aF + comp - gp) +
+        // The cell force is VOLUMETRIC: placed where the unknown lives (face mean on the MAC grid,
+        // cell value collocated) -- Grid::atVelocity, shared with buildRhsVar / addDragDiagonal.
+        const double fbU = Grid::atVelocity(fb, i, strd);
+        bb(i) = rs(i) * (idiag * un(i) + fc + fbU - rho * aK + rho * aF + comp - gp) +
                 (bc ? brhs(i) : -inh(i));
       });
 }
@@ -559,7 +562,7 @@ void Solver<Grid>::buildRhsVar(int c) {
         const double gp = !incr              ? 0.0
                           : Grid::collocated ? wc * (0.5 * (P((long)i + strd) - P((long)i - strd)))
                                              : wc * (P(i) - P((long)i - strd));
-        const double fbF = 0.5 * (fb(i) + fb(i - strd));
+        const double fbF = Grid::atVelocity(fb, i, strd);
         const double comp = pc ? rhoF * uu(i) * 0.5 * (dv(i) + dv((long)i - strd)) : 0.0;
         bb(i) = rs(i) * (rhoF * idt * un(i) + fc + fbF - rhoF * aK + rhoF * aF + comp - gp) +
                 (bc ? brhs(i) : -inh(i));
@@ -587,7 +590,7 @@ void Solver<Grid>::buildRhsVarMom(int c) {
         const double gp = !incr              ? 0.0
                           : Grid::collocated ? wc * (0.5 * (P((long)i + strd) - P((long)i - strd)))
                                              : wc * (P(i) - P((long)i - strd));
-        const double fbF = 0.5 * (fb(i) + fb(i - strd));
+        const double fbF = Grid::atVelocity(fb, i, strd);
         bb(i) = rs(i) * (rhoF * idt * ua(i) + fc + fbF - gp) + (bc ? brhs(i) : -inh(i));
       });
 }

@@ -1421,10 +1421,12 @@ class Solver {
   //     halve the body force on the outlet face — this same defect, relocated to the outlet.
   // So the policy does NOT differ per BC type; `fillPropGhosts` is used verbatim.
   //
-  // Consumer note: only `buildRhsVar` (variable density, or the eps-conservative porous momentum)
-  // reads the ghost. `buildRhsForced` reads the CELL value `fb(i)` alone, so on the constant-density
-  // forced path (Boussinesq) this fill is numerically INERT — applied unconditionally anyway, so the
-  // field's ghost contract does not depend on which RHS kernel happens to consume it.
+  // Consumer note: on the MAC grid EVERY RHS kernel reads the ghost -- `buildRhsForced`,
+  // `buildRhsVar` and `buildRhsVarMom` all place the force at the face by the same
+  // `Grid::atVelocity` mean (the constant-density kernel used to read the cell value alone, half a
+  // cell off the face; fixed 2026-09-25). On the collocated grid the cell value is the placement and
+  // the fill is inert -- applied unconditionally anyway, so the field's ghost contract does not
+  // depend on which RHS kernel happens to consume it.
   void fillCellForceGhosts();
 
 
@@ -1470,8 +1472,9 @@ class Solver {
   // only.
   //
   // Gated on `hasDrag_` (the field exists iff `enableDrag()` ran), not on `porous_`: the field's
-  // ghost contract should not depend on which consumer happens to read it. On the non-porous drag
-  // path `addDragDiagonal` uses the cell value alone, so the fill is numerically inert there.
+  // ghost contract should not depend on which consumer happens to read it. Since 2026-09-25
+  // `addDragDiagonal` takes the face mean on the MAC grid on the non-porous path too, so the fill
+  // is live there as well; it is inert only on the collocated grid (cell value).
   void fillDragBetaGhosts();
 
 
@@ -2069,8 +2072,10 @@ class Solver {
   void buildRhs(int c);
 
 
-  // Sibling of buildRhs adding a per-cell body force fb(i) (Boussinesq buoyancy / CFD-DEM
-  // feedback): the constant fc becomes fc + fb(i). Kept as a separate kernel so buildRhs stays
+  // Sibling of buildRhs adding a per-cell body force (Boussinesq buoyancy / CFD-DEM feedback): the
+  // constant fc becomes fc + Grid::atVelocity(fb) -- the force at the unknown's location, the face
+  // mean 1/2(fb(i)+fb(i-s_c)) on the MAC grid and fb(i) collocated (never chosen by the density
+  // model: buildRhsVar uses the same rule). Kept as a separate kernel so buildRhs stays
   // byte-identical (no codegen drift on the single-phase path). Selected in step() when
   // hasCellForce_.
   void buildRhsForced(int c);
@@ -4261,7 +4266,8 @@ class Solver {
   void configurePorousDragSolver();
 
 
-  // Add the drag coefficient beta(i) to the (float) momentum diagonal of component c. Called after
+  // Add the drag coefficient at the unknown's location, Grid::atVelocity(beta) (face mean on the
+  // MAC grid, cell value collocated), to the momentum diagonal of component c. Called after
   // each stencil (re)build when hasDrag_. All-fluid (rscale==1) is exact; the drag×cut-cell-IBM
   // interaction (rscale≠1) is untested (documented).
   void addDragDiagonal(int c);

@@ -370,16 +370,18 @@ void Solver<Grid>::addDragDiagonal(int c) {
   // du* = -grad(deltaP)/(idt+beta_f) and the projection returns phi = -deltaP/idt exactly (same
   // operator), so the incremental predictor cancels pressure errors in one step. With the cell
   // value beta(i) the loop has gain (idt+beta_f)/(idt+beta_cell) at a beta jump (bed top: ~3) and
-  // the accumulated pressure diverges exponentially. Non-porous (incompressible drag, w==1 path)
-  // keeps the validated cell-beta form.
-  const bool faceAvg = porous_;
+  // the accumulated pressure diverges exponentially.
+  // The drag is VOLUMETRIC, so beta is placed where the unknown lives by the GRID, not by the
+  // continuity model: the face mean on the MAC grid (porous or not -- the non-porous path used the
+  // cell value, half a cell off the face, while its RHS target beta*u_p in force_* is placed by the
+  // same Grid::atVelocity), the cell value collocated. Target and diagonal must agree, or a uniform
+  // particle velocity does not give a uniform steady gas velocity.
   using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
   Kokkos::parallel_for(
       "peclet::flow::add_drag_diag", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-        const double bd =
-            faceAvg ? 0.5 * ((double)beta(i) + (double)beta(i - sc)) : (double)beta(i);
+        const double bd = Grid::atVelocity(beta, i, sc);
         AC(i) = (MReal)((double)AC(i) + bd);
       });
 }
