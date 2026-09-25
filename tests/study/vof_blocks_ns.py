@@ -36,7 +36,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vof_surface_tension import Scale, Solve, cylinder_fractions, sphere_fractions  # noqa: E402
 
 QUICK = "--quick" in sys.argv
-GATES = [a for a in sys.argv[1:] if not a.startswith("--")]
+# --rtol R: the hysing gate's pressure-driver rtol (default 1e-12); the momentum solve follows it.
+# An instrument for the tolerance study (tests/study/vof_perf/d1_tolerance.py).
+RTOL = float(sys.argv[sys.argv.index("--rtol") + 1]) if "--rtol" in sys.argv else None
+GATES = [a for i, a in enumerate(sys.argv[1:], 1)
+         if not a.startswith("--") and sys.argv[i - 1] != "--rtol"]
 
 
 def marker_box(C, pad=1):
@@ -66,7 +70,7 @@ def build_hysing(nx, blocks):
     s.set_domain_bc("-z", "wall", (0, 0, 0))
     s.set_domain_bc("+z", "wall", (0, 0, 0))
     s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
-    s.set_pressure_chebyshev(True, 600, 1e-12)
+    s.set_pressure_chebyshev(True, 600, RTOL or 1e-12)
     s.enable_vof()
     B = cylinder_fractions((nx, ny, nz), R, nx / 2.0, sc.len_to_cells(0.5))  # 1 inside the bubble
     if blocks:

@@ -47,7 +47,13 @@ sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(_
 from vof_capillary_references import wave_mode, drop_mode  # noqa: E402
 
 QUICK = "--quick" in sys.argv
-GATES = [a for a in sys.argv[1:] if not a.startswith("--")]
+# --rtol R: the static gate's pressure-driver rtol (default 1e-14); the momentum solve follows it.
+# An instrument for the tolerance study (tests/study/vof_perf/d1_tolerance.py), which also reads
+# STATIC_RESULTS: one dict per resolution rung of the last gate_static() call.
+RTOL = float(sys.argv[sys.argv.index("--rtol") + 1]) if "--rtol" in sys.argv else None
+GATES = [a for i, a in enumerate(sys.argv[1:], 1)
+         if not a.startswith("--") and sys.argv[i - 1] != "--rtol"]
+STATIC_RESULTS = []
 
 
 # --------------------------------------------------------------------------- helpers
@@ -150,12 +156,13 @@ def gate_static():
     rungs = [(16, 4.0), (32, 8.0), (48, 12.0)] if QUICK else [(16, 4.0), (32, 8.0), (48, 12.0),
                                                               (64, 16.0)]
     prev = None
+    STATIC_RESULTS.clear()
     for n, R in rungs:
         s = pf.Solver(n, n, n)
         s.set_rho(1.0)
         s.set_mu(0.1)
         s.set_pressure_geometry(np.full((n, n, n), 10.0, order="F"))
-        s.set_pressure_chebyshev(True, 500, 1e-14)
+        s.set_pressure_chebyshev(True, 500, RTOL or 1e-14)
         s.enable_vof()
         s.set_vof(sphere_fractions((n, n, n), R, (n / 2 + 0.13, n / 2 + 0.27, n / 2 + 0.11)))
         s.set_property_model("rho", "linear", "C", [1.0, 0.0])
@@ -166,6 +173,8 @@ def gate_static():
             s.step()
             h.sample(s)
         ca = 0.1 * maxvel(s) / 1.0
+        STATIC_RESULTS.append(dict(n=n, R=R, max_u=maxvel(s), ca=ca, p_iters_max=h.iters,
+                                   div_max=h.div, capped=not h.valid))
         br, ka = s.vof_curvature_branch(), s.vof_curvature()
         d = (br > 0.5) & (br < 5.5)
         dk = np.abs(ka[d] - 2.0 / R)
@@ -184,7 +193,7 @@ def gate_static():
         s.set_rho(1.0)
         s.set_mu(0.1)
         s.set_pressure_geometry(np.full((n, n, n), 10.0, order="F"))
-        s.set_pressure_chebyshev(True, 500, 1e-14)
+        s.set_pressure_chebyshev(True, 500, RTOL or 1e-14)
         s.enable_vof()
         s.set_vof(sphere_fractions((n, n, n), R, (n / 2 + 0.13, n / 2 + 0.27, n / 2 + 0.11)))
         s.set_property_model("rho", "linear", "C", [1.0, 0.0])
