@@ -62,22 +62,20 @@ column (zero net volume flux, TBFsolver flowCtrl 2 flow_rate 0; peclet driver su
 each step) — flowCtrl 3 grew a net upflow from wall friction. TBFsolver closed run: engineer
 restarting (8x3 cores); open-column output kept in tbfsolver/run_open/. peclet run waits for the fix.
 
-**Next action (2026-09-25 01:10).** USER AUTHORIZED push + publish. Phase B committed (04781e2,
-fc3bd0c, 7242eac, 92af58f); implementer STOPPED (not done: G2/G3/G4(a)/Hysing re-runs with
-counters, c18 cost measurement, state_hash block case, review findings 8-9). Branch REBASED onto
-flow origin/main (clean); CLAUDE.md scope + design §10 register text updated (e40ccf8).
-DECISION: skip the full G2/G4(a)/Hysing re-runs (Phase B is bitwise for isotropic runs; gates
-passed at 03b1660/14d9483) -> battery once + G3 r10 on the rebased head. Alternative: run all.
-Reversible by: running them from tests/study/vof_blocks_overlap.py before the push.
-Running: build_impl rebuild (reconfigured MPIEXEC_PREFLAGS=--bind-to;none: the previous battery
-was pinned, ~30 min/test, killed); fresh reviewer re-check of Phase B -> doc/vof_overlap_review2.md;
-GPU chain scratchpad/c18_g4b/chain.sh (peclet column t=150 ETA ~05:30 -> D/h=24 t=5 -> channel_18
-5 turnovers). THEN: full battery once (-LE bench, -j8, OMP_NUM_THREADS=4) -> push flow main -> land
-register entry in ../docs/decisions/flow.md + umbrella pointer LAST -> page (peclet_reduce,
-"Where the two codes differ", "Cost": TBF 85.7 ms/step on 24 cores, 99658 steps, 8541 s wall) ->
-render -> merge bubble-column to main + push. Cleanup: tbfsolver raw runs (~17 GB),
-peclet/run_degraded_pureEps. TOKEN DISCIPLINE: one blocking completion wait per job; no agent
-polling; never read agent jsonl.
+**Next action (2026-09-25 05:30).** USER AUTHORIZED push + publish. Rebased on flow origin/main;
+review2 MUST-FIX (anisotropic metric never reached the block set) fixed in eb883d7 with gate M
+(fails without the fix, verified); design §14 lists what stays open. Battery at eb883d7: 161/167,
+the 6 misses are TIMEOUTS of long MPI tests that always take 1-2.6 h here (wall_slip_mpi_np2 9489 s
+before) under GPU sharing -- rerunning without a timeout (battery_rerun2.log); push flow main when
+they pass. NOTE: tests/kokkos_mpi ignores MPIEXEC_PREFLAGS -- use
+OMPI_MCA_hwloc_base_binding_policy=none. G3 r10 at eb883d7: completes, max|u| 15.688, dV 1.1e-15,
+contact 2945 steps, phantom bound 2887 steps. Production column (frozen 14d9483, isotropic so
+unaffected): t=80.5 at 04:45, ETA ~09:15 (phantom bound drops dt 5x during ~18 % of the time).
+THEN: register entry in ../docs/decisions/flow.md + umbrella pointer LAST (umbrella has local
+commit 2ca28ee, agents token rules, unpushed) -> page (peclet_reduce, "Where the two codes differ",
+"Cost": TBF 85.7 ms/step on 24 cores; peclet ~310 ms/step) -> render -> merge bubble-column to
+main + push. Cleanup: tbfsolver raw runs (~17 GB), peclet/run_degraded_pureEps. TOKEN
+DISCIPLINE: one blocking completion wait per job; no agent polling; never read agent jsonl.
 
 **Gates (to be set with the design).** channel_18 ≥ 5 turnovers; static pair parasitic current
 flat in d; marker volumes 1e-12; every existing block ctest bit-identical when no overlap.
