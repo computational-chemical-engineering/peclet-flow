@@ -342,7 +342,8 @@ void gateResidueReturn() {
 
 // ------------------------------------------------------------------------------------------ M
 /// The Solver hands the anisotropic cell metric to the block set it creates -- in the documented
-/// order the unit-derived refresh (the only other push) has already run by then (review2 finding 1).
+/// order the unit-derived refresh (the only other push) has already run by then (review2 finding
+/// 1).
 void gateSolverMetric() {
   std::printf("\n=== M  enable_vof_blocks on an anisotropic box: the blocks carry its metric\n");
   constexpr int NX = 32, NY = 32, NZ = 32;
