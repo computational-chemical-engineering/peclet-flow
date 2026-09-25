@@ -265,6 +265,16 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(velocity_solver_variable_mu PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # The guard against the collocated face-acceleration kick (doc/collocated_varrho_forces.md §7.6;
+  # suite-wide register "Collocated forces stay in the implicit predictor"): every collocated
+  # density path is stable at mu*dt/(rho h^2) up to 100 (seeded-checkerboard growth, G2) and has a
+  # dt-independent steady state (G3). A gate, not a grep: the defect has no token.
+  add_test(NAME collocated_stability_guard
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_collocated_stability_guard.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(collocated_stability_guard PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77 TIMEOUT 3600)
   # QUALITY_PLAN D3: `src/` carries no environment variable that can change a result (package E).
   add_test(NAME no_env_knobs
            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_no_env_knobs.py
