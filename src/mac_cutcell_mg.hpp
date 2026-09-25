@@ -1169,20 +1169,20 @@ class CutcellMG {
     post_ = post;
     bottom_ = bottom;
     Level& l0 = lv_[0];
-    Kokkos::deep_copy(l0.x, x);
+    Kokkos::deep_copy(CCExec(), l0.x, x);
     auto matvec = [&](CCField y, CCField v) {
       matvecOverlap(l0, y, v);
       if (star)
         starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
     auto precond = [&](CCField zz, CCField rr) {
-      Kokkos::deep_copy(l0.rhs, rr);
-      Kokkos::deep_copy(l0.x, 0.0);
+      Kokkos::deep_copy(CCExec(), l0.rhs, rr);
+      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
       vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(zz, l0.x);
+      Kokkos::deep_copy(CCExec(), zz, l0.x);
     };
     matvec(Ap, x);  // r = b - A x
-    Kokkos::deep_copy(r, b);
+    Kokkos::deep_copy(CCExec(), r, b);
     axpy(r, -1.0, Ap);
     removeMean(l0, r);  // compatibility: project rhs/residual onto the range
     const double r0 = maxabs(l0, r);
@@ -1205,7 +1205,7 @@ class CutcellMG {
     // NaN alpha/beta and letting the projection silently corrupt every field downstream).
     if (r0 > 0.0 && std::isfinite(r0)) {
       precond(z, r);
-      Kokkos::deep_copy(p, z);
+      Kokkos::deep_copy(CCExec(), p, z);
       double rz = dot(l0, r, z);
       if (!std::isfinite(rz)) {
         // ISSUES sweep item 6: this is a FAILED solve, not a converged one. It used to print to
@@ -1217,8 +1217,8 @@ class CutcellMG {
             "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
             "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
             maxit, maxit);
-        Kokkos::deep_copy(x, 0.0);
-        Kokkos::deep_copy(l0.x, x);
+        Kokkos::deep_copy(CCExec(), x, 0.0);
+        Kokkos::deep_copy(CCExec(), l0.x, x);
         if (strictPressure_)
           throw std::runtime_error(
               "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z "
@@ -1256,9 +1256,9 @@ class CutcellMG {
         rz = rznew;
       }
     }
-    Kokkos::deep_copy(l0.x, x);
+    Kokkos::deep_copy(CCExec(), l0.x, x);
     removeMean(l0, l0.x);
-    Kokkos::deep_copy(x, l0.x);
+    Kokkos::deep_copy(CCExec(), x, l0.x);
     return it;
   }
 
@@ -1290,20 +1290,20 @@ class CutcellMG {
     post_ = post;
     bottom_ = bottom;
     Level& l0 = lv_[0];
-    Kokkos::deep_copy(l0.x, x);
+    Kokkos::deep_copy(CCExec(), l0.x, x);
     auto matvec = [&](CCField y, CCField v) {
       matvecOverlap(l0, y, v);
       if (star)
         starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
     auto precond = [&](CCField zz, CCField rr) {
-      Kokkos::deep_copy(l0.rhs, rr);
-      Kokkos::deep_copy(l0.x, 0.0);
+      Kokkos::deep_copy(CCExec(), l0.rhs, rr);
+      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
       vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(zz, l0.x);
+      Kokkos::deep_copy(CCExec(), zz, l0.x);
     };
     matvec(Ap, x);  // r = b - A x
-    Kokkos::deep_copy(r, b);
+    Kokkos::deep_copy(CCExec(), r, b);
     axpy(r, -1.0, Ap);
     removeMean(l0, r);  // compatibility: project rhs/residual onto the range
     const double r0 = maxabs(l0, r);
@@ -1320,7 +1320,7 @@ class CutcellMG {
     ++dbgSolve_;
     if (r0 > 0.0 && std::isfinite(r0)) {
       precond(z, r);
-      Kokkos::deep_copy(p, z);
+      Kokkos::deep_copy(CCExec(), p, z);
       double rz = dot(l0, r, z);
       if (!std::isfinite(rz)) {
         solveFailed_ = true;  // ISSUES sweep item 6 -- see solvePCG for the mechanism
@@ -1328,8 +1328,8 @@ class CutcellMG {
             "peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z; "
             "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
             maxit, maxit);
-        Kokkos::deep_copy(x, 0.0);
-        Kokkos::deep_copy(l0.x, x);
+        Kokkos::deep_copy(CCExec(), x, 0.0);
+        Kokkos::deep_copy(CCExec(), l0.x, x);
         if (strictPressure_)
           throw std::runtime_error(
               "peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z "
@@ -1357,7 +1357,7 @@ class CutcellMG {
           ++it;
           break;
         }
-        Kokkos::deep_copy(zp, z);  // z_k, before the preconditioner overwrites it
+        Kokkos::deep_copy(CCExec(), zp, z);  // z_k, before the preconditioner overwrites it
         precond(z, r);
         const double rznew = dot(l0, r, z), rzcross = dot(l0, r, zp);
         if (!std::isfinite(rznew) || !std::isfinite(rzcross)) {
@@ -1378,9 +1378,9 @@ class CutcellMG {
         rz = rznew;
       }
     }
-    Kokkos::deep_copy(l0.x, x);
+    Kokkos::deep_copy(CCExec(), l0.x, x);
     removeMean(l0, l0.x);
-    Kokkos::deep_copy(x, l0.x);
+    Kokkos::deep_copy(CCExec(), x, l0.x);
     return it;
   }
 
@@ -1431,24 +1431,24 @@ class CutcellMG {
       gpApplyDelta(y, CCConst(q), ov, nOv, nn, l0.ext, G, l0.ext, G);
     };
     auto precond = [&](CCField zz, CCField rr) {
-      Kokkos::deep_copy(l0.rhs, rr);
-      Kokkos::deep_copy(l0.x, 0.0);
+      Kokkos::deep_copy(CCExec(), l0.rhs, rr);
+      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
       vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(zz, l0.x);
+      Kokkos::deep_copy(CCExec(), zz, l0.x);
     };
     matvec(t, x);  // r = b - A x  (t as scratch)
-    Kokkos::deep_copy(r, b);
+    Kokkos::deep_copy(CCExec(), r, b);
     axpy(r, -1.0, t);
     removeMean(l0, r);
-    Kokkos::deep_copy(rh, r);  // shadow residual r^ = r_0
+    Kokkos::deep_copy(CCExec(), rh, r);  // shadow residual r^ = r_0
     const double r0n = maxabs(l0, r);
     int it = 0;
     if (r0n > 0.0 && std::isfinite(r0n)) {
       double rho = 1.0, alpha = 1.0, omega = 1.0;
       double best = r0n;
       int lastImprove = 0;
-      Kokkos::deep_copy(p, 0.0);
-      Kokkos::deep_copy(v, 0.0);
+      Kokkos::deep_copy(CCExec(), p, 0.0);
+      Kokkos::deep_copy(CCExec(), v, 0.0);
       for (; it < maxit; ++it) {
         const double rhoNew = dot(l0, rh, r);
         if (!std::isfinite(rhoNew) || std::fabs(rhoNew) < 1e-300)
@@ -1507,9 +1507,9 @@ class CutcellMG {
         }
       }
     }
-    Kokkos::deep_copy(l0.x, x);
+    Kokkos::deep_copy(CCExec(), l0.x, x);
     removeMean(l0, l0.x);
-    Kokkos::deep_copy(x, l0.x);
+    Kokkos::deep_copy(CCExec(), x, l0.x);
     return it;
   }
 
@@ -1813,12 +1813,12 @@ class CutcellMG {
       if (T.root()) {
         Level& cs = lv_[L + 1];
         restrictAvg(cs.rhs, CCConst(T.res), cs.ext, T.mExt, cs.g, T.g, cs.inner, lv.ratio);
-        Kokkos::deep_copy(cs.x, 0.0);
+        Kokkos::deep_copy(CCExec(), cs.x, 0.0);
         vcycle(L + 1, sym);
         fill(cs, cs.x);
         applyOutflowGhost(cs, cs.x, cs.g);
         applyNeumannGhost(cs, cs.x, cs.g);
-        Kokkos::deep_copy(T.x, 0.0);
+        Kokkos::deep_copy(CCExec(), T.x, 0.0);
         prolongAdd(T.x, CCConst(cs.x), T.mExt, cs.ext, T.g, cs.g, T.mInner, lv.ratio);
       }
       teleScatterAdd(lv, T.x, lv.x);
@@ -1827,7 +1827,7 @@ class CutcellMG {
     {
       Level& cs = lv_[L + 1];
       restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
-      Kokkos::deep_copy(cs.x, 0.0);
+      Kokkos::deep_copy(CCExec(), cs.x, 0.0);
       vcycle(L + 1, sym);
       fill(cs, cs.x);
       applyOutflowGhost(cs, cs.x, cs.g);
@@ -2588,7 +2588,7 @@ class CutcellMG {
     if (v.extent(0) != n)
       v = CCField(label, n);
     else
-      Kokkos::deep_copy(v, 0.0);
+      Kokkos::deep_copy(CCExec(), v, 0.0);
     return v;
   }
 
@@ -2606,15 +2606,15 @@ class CutcellMG {
     const std::size_t n = l0.n;
     CCField v = workVector(0, n, "ev_v"), w = workVector(1, n, "ev_w"),
             z = workVector(2, n, "ev_z"), srhs = workVector(3, n, "ev_srhs");
-    Kokkos::deep_copy(srhs, seed);
+    Kokkos::deep_copy(CCExec(), srhs, seed);
     auto matvec = [&](CCField y, CCField x) { matvecOverlap(l0, y, x); };
     auto applyT = [&](CCField out,
                       CCField in) {  // out = M^{-1} A in, projected onto the fluid range
       matvec(w, in);
-      Kokkos::deep_copy(l0.rhs, w);
-      Kokkos::deep_copy(l0.x, 0.0);
+      Kokkos::deep_copy(CCExec(), l0.rhs, w);
+      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
       vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(out, l0.x);
+      Kokkos::deep_copy(CCExec(), out, l0.x);
       removeMean(l0, out);
       maskSolid(l0, out);
     };
@@ -2624,7 +2624,7 @@ class CutcellMG {
         scale(x, 1.0 / nr);
     };
     auto seedf = [&](CCField x) {
-      Kokkos::deep_copy(x, srhs);
+      Kokkos::deep_copy(CCExec(), x, srhs);
       removeMean(l0, x);
       maskSolid(l0, x);
       normalize(x);
@@ -2634,7 +2634,7 @@ class CutcellMG {
     for (int k = 0; k < iters; ++k) {
       applyT(z, v);
       lmax = dot(l0, v, z);
-      Kokkos::deep_copy(v, z);
+      Kokkos::deep_copy(CCExec(), v, z);
       normalize(v);
     }
     seedf(v);
@@ -2643,7 +2643,7 @@ class CutcellMG {
       applyT(z, v);
       lin(z, lmax, v, -1.0, z);  // z = lmax*v - T v
       mu = dot(l0, v, z);
-      Kokkos::deep_copy(v, z);
+      Kokkos::deep_copy(CCExec(), v, z);
       normalize(v);
     }
     double e_hi = lmax, e_lo = lmax - mu;  // direct (max) + shifted (min) Rayleigh estimates
@@ -2676,15 +2676,15 @@ class CutcellMG {
             d = workVector(6, n, "cb_d"), w = workVector(7, n, "cb_w");
     auto matvec = [&](CCField y, CCField v) { matvecOverlap(l0, y, v); };
     auto precond = [&](CCField zz, CCField rr) {
-      Kokkos::deep_copy(l0.rhs, rr);
-      Kokkos::deep_copy(l0.x, 0.0);
+      Kokkos::deep_copy(CCExec(), l0.rhs, rr);
+      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
       vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(zz, l0.x);
+      Kokkos::deep_copy(CCExec(), zz, l0.x);
     };
     const double theta = 0.5 * (bnd + a), delta = 0.5 * (bnd - a), sigma1 = theta / delta;
     double rho = 1.0 / sigma1;
     matvec(w, x);  // r = b - A x
-    Kokkos::deep_copy(r, b);
+    Kokkos::deep_copy(CCExec(), r, b);
     axpy(r, -1.0, w);
     removeMean(l0, r);
     const double r0 = maxabs(l0, r);
