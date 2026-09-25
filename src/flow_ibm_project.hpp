@@ -111,6 +111,11 @@ void Solver<Grid>::step() {
     if (effVarRho())
       fillPropGhosts(effRhoField());
   }
+  // (B) The balanced-force projection (doc/collocated_varrho_forces.md §4.6.2): once per step,
+  // before the Picard loop. Byte-identical (not even a flag read beyond this) when it is off.
+  coeffBuiltThisStep_ = false;
+  if (balancedForceActive())
+    applyBalancedForceProjection();
   lastOuterIters_ = 0;
   for (int outer = 0; outer < outerIters_; ++outer) {
     const double tp0 = phaseTick();
@@ -406,6 +411,185 @@ void Solver<Grid>::requireCollocatedFaceForceScope(const char* who) {
         "(diagnostics.set_incremental_pressure(True)): the pressure force lives inside the "
         "implicit predictor, and the non-incremental (Chorin) step has none, so its steady state "
         "would depend on dt.");
+}
+
+template <class Grid>
+void Solver<Grid>::setBalancedForceProjection(bool enabled) {
+  if (enabled)
+    requireBalancedForceScope("set_balanced_force_projection", false);
+  bfpSet_ = true;
+  bfpOn_ = enabled;
+}
+
+template <class Grid>
+bool Solver<Grid>::balancedForceProjection() const {
+  return balancedForceActive();
+}
+
+template <class Grid>
+long Solver<Grid>::lastBalancedForceIterations() const {
+  return lastBalancedForceIters_;
+}
+
+template <class Grid>
+bool Solver<Grid>::balancedForceActive() const {
+  return bfpSet_ ? bfpOn_ : false;
+}
+
+template <class Grid>
+void Solver<Grid>::requireBalancedForceScope(const char* who, bool atStep) const {
+  const std::string m = std::string(who) + ": the balanced-force projection ";
+  if (porous_)
+    throw std::runtime_error(m +
+                             "does not support the porous (volume-averaged) continuity: the "
+                             "VANS operator carries eps and the drag relaxation (CFD-DEM is out "
+                             "of scope). Call set_balanced_force_projection(False).");
+  bool autoGhost = false;
+  if constexpr (Grid::collocated)
+    autoGhost = colSchemeAuto_;  // an AUTO 'ghost' may still fall back; final at the step
+  if (ghostProjection_ && (atStep || !autoGhost))
+    throw std::runtime_error(m +
+                             "does not support the ghost projection (its overlay does not reach "
+                             "the balanced face force yet). Call set_balanced_force_projection"
+                             "(False).");
+  if (fluidOnlyMode_ == 2)
+    throw std::runtime_error(m + "does not support set_fluid_only_constraint(2).");
+  if (vofBlockCsf())
+    throw std::runtime_error(m + "does not support the block CSF (enable_vof_block_csf).");
+  for (int f = 0; f < 6; ++f)
+    if (bc_[f] == 2 || bc_[f] == 3)
+      throw std::runtime_error(
+          m +
+          "does not support inflow/outflow domain faces (v1: the operator-vs-flux openness rule "
+          "at inflow and the outflow planes are not wired). Call "
+          "set_balanced_force_projection(False).");
+  if (!incremental_)
+    throw std::runtime_error(m + "needs the incremental pressure (it re-splits P).");
+  if (atStep) {
+    if (!cutcellPressure_)
+      throw std::runtime_error(
+          m + "needs the cut-cell pressure operator (set_solid or set_pressure_geometry).");
+    if constexpr (Grid::collocated)
+      if (!colocatedFaceForce())
+        throw std::runtime_error(
+            m +
+            "has nothing to balance on the constant-density collocated path without surface "
+            "tension (its pressure force is the gauge-exact cell gradient, not the face "
+            "integral). It applies to variable density / surface tension on SolverColocated "
+            "and to every Solver configuration. Call set_balanced_force_projection(False).");
+  }
+}
+
+template <class Grid>
+void Solver<Grid>::buildBalancedFaceForce(int c) {
+  // beta = f_const + ½(f(j) + f(j-s)) (+ CSF below) on the face range [G, e-G]: the predictor's
+  // own face force. The face mean is the staggered Grid::atVelocity expression on BOTH grids (on
+  // the collocated grid the cell value is the predictor's placement, and the face mean is what the
+  // pressure must carry for rho g to balance: rho_c R(½(rho_L+rho_R) g/rho_f) = W rho_c g).
+  CCExec space;
+  const double fc = f_[c];
+  const long s = strideOf(c);
+  const bool haveFb = hasCellForce_;
+  CCConst fb = CCConst(haveFb ? cellForce_[c] : C[c].rscale);
+  CCField af = faceAcc_[c];
+  C3 e = e_;
+  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  Kokkos::parallel_for(
+      "peclet::flow::bfp_face_force", MD(space, {G, G, G}, {e.x - G + 1, e.y - G + 1, e.z - G + 1}),
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        af(i) = fc + (haveFb ? 0.5 * ((double)fb(i) + (double)fb(i - s)) : 0.0);
+      });
+  // CSF from the SAME code the predictor uses (row scale off, face range): the V4 face form on the
+  // collocated V8 path (which always uses it), and the csf mode's kernel on the staggered grid.
+  if (csfActive()) {
+    if (Grid::collocated || csfMode_ == 0)
+      addCsfRhs(c, af, /*rowScaled=*/false, /*faceRange=*/true);
+    else
+      addCsfRhsCellInterp(c, af, /*rowScaled=*/false, /*faceRange=*/true);
+  }
+  // times c = rho0/rho_f^op, the operator's own face mean (buildRhoCoeff / buildRhoCoeffHarm).
+  if (varRho_) {
+    CCConst rho = CCConst(rhoField_);
+    const double rho0 = rho_;
+    const bool harm = rhoFaceHarmonic_;
+    Kokkos::parallel_for(
+        "peclet::flow::bfp_face_coeff",
+        MD(space, {G, G, G}, {e.x - G + 1, e.y - G + 1, e.z - G + 1}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const double cf = harm ? rho0 * (rho(i) + rho(i - s)) / (2.0 * rho(i) * rho(i - s))
+                                 : rho0 / (0.5 * (rho(i) + rho(i - s)));
+          af(i) *= cf;
+        });
+  }
+}
+
+template <class Grid>
+void Solver<Grid>::applyBalancedForceProjection() {
+  requireBalancedForceScope("step", true);
+  // (B1) the variable-rho operator, once for the step (project() then skips its rebuild).
+  if (varRho_) {
+    projectBuildCoefficients();
+    coeffBuiltThisStep_ = true;
+  }
+  if (Pb_.extent(0) != n_)
+    Pb_ = addField("p_balanced");  // zero-initialised on first use
+  if (pb1_.extent(0) != n1_)
+    pb1_ = CCField("pb1", n1_);
+  // (B2) the face force c*beta, (B3) its constraint divergence (div_ is scratch here: project()
+  // recomputes it before anything reads it).
+  ensureFaceAcc();
+  for (int c = 0; c < 3; ++c)
+    buildBalancedFaceForce(c);
+  constraintDivergence(CCConst(faceAcc_[0]), CCConst(faceAcc_[1]), CCConst(faceAcc_[2]), div_);
+  // (B4) a force with no divergence needs no pressure (and an all-zero RHS must not reach a
+  // Krylov driver); otherwise the projection's own driver, warm-started from P_b.
+  long iters = 0;
+  double bmax = maxAbsInner(CCConst(div_), e_, G);
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    double g = 0.0;
+    MPI_Allreduce(&bmax, &g, 1, MPI_DOUBLE, MPI_MAX, comm_);
+    bmax = g;
+  }
+#endif
+  if (bmax == 0.0) {
+    Kokkos::deep_copy(pb1_, 0.0);
+  } else {
+    copyInner(rhs1_, e1_, 1, CCConst(div_), e_, G);
+    {
+      CCExec space;
+      CCField r = rhs1_;
+      Kokkos::parallel_for(
+          "peclet::flow::bfp_negdiv", Kokkos::RangePolicy<CCExec>(space, 0, n1_),
+          KOKKOS_LAMBDA(std::size_t i) { r(i) = -r(i); });
+    }
+    copyInner(pb1_, e1_, 1, CCConst(Pb_), e_, G);
+    iters = solvePressureSystem(rhs1_, pb1_);
+  }
+  lastBalancedForceIters_ = iters;
+  // (B5) P += X - P_b; P_b = X (one fused kernel over the inner cells), then the P ghosts the
+  // predictor reads.
+  {
+    CCExec space;
+    CCField P = P_, pb = Pb_;
+    CCConst x1 = CCConst(pb1_);
+    const C3 e1 = e1_, e2 = e_;
+    Kokkos::parallel_for(
+        "peclet::flow::bfp_split",
+        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i1 = (long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y;
+          const long i2 = (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
+          const double xv = x1(i1);
+          P(i2) += xv - pb(i2);
+          pb(i2) = xv;
+        });
+  }
+  fillGhosts(P_);
+  if (hasBc_)
+    pressureBcGhost();
 }
 
 template <class Grid>
@@ -790,7 +974,8 @@ void Solver<Grid>::filterCellField(CCField f, int axis) {
 template <class Grid>
 void Solver<Grid>::project() {
   projectAssembleDivergence();
-  projectBuildCoefficients();
+  if (!coeffBuiltThisStep_)  // the balanced-force stage (B1) already built them this step
+    projectBuildCoefficients();
   projectSolve();
   projectCorrectVelocities();
   projectPressureUpdate();

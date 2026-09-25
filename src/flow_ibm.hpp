@@ -581,6 +581,28 @@ class Solver {
   void setIncrementalPressure(bool on);
 
 
+  // Balanced-force projection (doc/collocated_varrho_forces.md §4.6; PUBLIC tier, both grids).
+  // Once per step, after the property/curvature refresh and before the momentum predictor, solve
+  //   D(O c w G X) = D(O c beta),  c = rho0/rho_f^op (1 at constant rho),
+  //   beta = f_const + ½(f(j) + f(j-s)) + CSF(j)  (the predictor's own face force, without rs),
+  // with the projection's OWN operator, constraint divergence and driver (warm-started from P_b),
+  // then P += X - P_b, P_b = X. P stays the total physical pressure; the predictor then sees only
+  // the part of the forces that drives flow, so gradient forces (hydrostatics, constant-kappa CSF)
+  // are balanced exactly from step 1 at every mu, dt, density ratio and openness. The solve is
+  // state-independent: stability and the converged steady state are identical ON and OFF. Cost:
+  // one extra pressure solve per step. OFF (the default here) is byte-identical to a solver
+  // without the option. Refused, with a named error at this setter when the configuration is
+  // already known and otherwise at the next step: porous continuity, the ghost projection,
+  // set_fluid_only_constraint(2), the block CSF, any inflow/outflow face, the non-incremental
+  // pressure, no cut-cell pressure operator, and the constant-density collocated path (its
+  // pressure force is gpCenterGrad; there is nothing to balance).
+  void setBalancedForceProjection(bool enabled);
+  bool balancedForceProjection() const;
+  // Pressure-driver iterations of the last step's balanced-force solve (0 when the force
+  // divergence was exactly zero, or the option is off).
+  long lastBalancedForceIterations() const;
+
+
   // Pressure warm-start (CUDA set_pressure_warmstart, default OFF): seed each cut-cell pressure
   // solve from the previous step's projection potential (consecutive phi's are similar along a
   // steady march -> a more converged phi per fixed solver budget) instead of zeroing the initial
@@ -1700,6 +1722,18 @@ class Solver {
   // acceleration AND the one-sided (gauge-exact / ghost) closures to agree with the face averaging
   // operator, which is a separate derivation. Fail loudly instead of half-supporting it.
   void requireCollocatedFaceForceScope(const char* who);
+
+
+  // --- the balanced-force projection (doc/collocated_varrho_forces.md §4.6) --------------------
+  // Is it on for this step? (the explicit setting; OFF by default)
+  bool balancedForceActive() const;
+  // The §4.6.4 refusals. `atStep` adds the checks that are only final once the solver is set up
+  // (the cut-cell operator, the collocated density path, an AUTO-selected ghost scheme).
+  void requireBalancedForceScope(const char* who, bool atStep) const;
+  // (B2) faceAcc_[c] = c * beta on the face range [G, e-G] (no openness: the divergence applies it).
+  void buildBalancedFaceForce(int c);
+  // B1-B5, once per step before the Picard loop.
+  void applyBalancedForceProjection();
 
 
   void updateEpsRho();
@@ -4497,6 +4531,14 @@ class Solver {
   int pressAgglomMode_ = -1;
   long lastPressureIters_ = 0;
   bool lastPressureFailed_ = false;  // ISSUES sweep item 6
+  // Balanced-force projection (doc/collocated_varrho_forces.md §4.6). `Pb_` (the registered G=2
+  // field "p_balanced", so redistribute carries it) and `pb1_` (g=1 scratch) exist only once the
+  // option has run; `coeffBuiltThisStep_` lets project() skip the variable-rho coefficient rebuild
+  // the balanced-force stage already did this step (rho is frozen within a step).
+  bool bfpSet_ = false, bfpOn_ = false;
+  CCField Pb_, pb1_;
+  bool coeffBuiltThisStep_ = false;
+  long lastBalancedForceIters_ = 0;
   // The collocated face field with every OPEN (outflow) domain face replaced by its
   // zero-gradient extrapolation -- see buildOpenFaceField(). Allocated on first use and only
   // when there IS an outflow; `openFaceView` falls through to uf_/vf_/wf_ otherwise.

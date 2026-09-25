@@ -232,7 +232,8 @@ void Solver<Grid>::rebindFieldAliases() {
   bind(cField_, "C");          // VoF: the canonical G=2 colour mirror
   bind(kappaField_, "kappa");  // VoF: the curvature mirrors
   bind(kappaBranch_, "kappa_branch");
-  bind(rhoField_, "rho");  // property closures
+  bind(rhoField_, "rho");   // property closures
+  bind(Pb_, "p_balanced");  // balanced-force projection split (doc/collocated_varrho_forces.md)
   bind(muField_, "mu");
   bind(epsField_, "eps");  // CFD-DEM: porosity + drag
   bind(dragBeta_, "drag_beta");
@@ -277,7 +278,9 @@ void Solver<Grid>::resizeBlockScratch() {
     resizeIfAllocated(uwAdv_[c], "uwAdv", n);
     resizeIfAllocated(faceAcc_[c], "faceAcc", n);
   }
-  haveUStar_ = false;  // u* belonged to the old block's last momentum solve
+  resizeIfAllocated(pb1_, "pb1",
+                    n1);  // balanced-force projection scratch (P_b itself is registered)
+  haveUStar_ = false;     // u* belonged to the old block's last momentum solve
   haveAdvRhs_ = false;
   // --- ghost projection (its overlay is rebuilt by setSolid) ------------------------------
   resizeIfAllocated(oxb_, "oxb", n);

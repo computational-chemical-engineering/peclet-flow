@@ -314,6 +314,14 @@ target_include_directories(test_vof_collocated PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(test_vof_collocated PRIVATE Kokkos::kokkos)
 add_test(NAME vof_collocated COMMAND test_vof_collocated)
 
+# The balanced-force projection on the STAGGERED grid (doc/collocated_varrho_forces.md §4.6-4.7,
+# gate G8): exact static balance from step 1 with immersed solids, the refusals.
+add_executable(test_balanced_force test_balanced_force.cpp)
+target_include_directories(test_balanced_force PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR} ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_balanced_force PRIVATE Kokkos::kokkos)
+add_test(NAME balanced_force COMMAND test_balanced_force)
+
 # ANISOTROPIC CELLS, the pressure operator alone (doc/anisotropic_metric.md §8.5, the ORDER part
 # of gate G4; Phase 2 commit C2). CutcellMG driven directly on a periodic all-fluid box with the
 # per-axis weights w = (1, 4, 1/4) of a (N, 2N, N/2) grid: the manufactured cos*cos*cos solution

@@ -540,6 +540,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "The uniform velocity shift set_superficial_velocity applied at the end of the last "
            "step() (physical velocity units; 0 when it is off). Reading it synchronises with the "
            "device.")
+      .def("last_balanced_force_iterations",
+           [](D& diag) { return diag.s->lastBalancedForceIterations(); },
+           "Pressure-driver iterations of the last step's balanced-force solve "
+           "(set_balanced_force_projection); 0 when it is off or the force divergence was zero.")
       .def("last_pressure_iterations", [](D& diag) { return diag.s->lastPressureIterations(); },
            "Return the pressure-solver iteration count from the last step().\n\n"
            "A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration "
@@ -1897,6 +1901,23 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "it. Staggered Solver, all-fluid domain (set_pressure_geometry), periodic `axis` only "
           "-- step() raises otherwise. set_superficial_velocity(False) turns it off. "
           "diagnostics.last_superficial_velocity_shift() is the shift the last step applied.")
+      .def("set_balanced_force_projection", &S::setBalancedForceProjection, nb::arg("enabled"),
+           "Balanced-force projection (flow doc/collocated_varrho_forces.md §4.6), on both grids. "
+           "Once per step, before the momentum predictor, the gradient part of the forces "
+           "(set_body_force, the per-cell force fields, the CSF) is moved into the pressure with "
+           "one extra solve of the projection's own operator, so static balances -- a hydrostatic "
+           "column, a constant-curvature drop -- are exact from the first step at every "
+           "viscosity, dt, density ratio and immersed-solid aperture. The solve does not depend "
+           "on the flow state, so stability and the converged steady state are identical on and "
+           "off; off leaves a decaying transient balance residue. get_p() stays the total "
+           "physical pressure. Cost: one extra pressure solve per step (warm-started). Default: "
+           "off. Refused (named error) with porous continuity, the ghost projection, "
+           "set_fluid_only_constraint(2), the block CSF, inflow/outflow faces, the "
+           "non-incremental pressure, and on the constant-density SolverColocated path (nothing "
+           "to balance there).")
+      .def_prop_ro("balanced_force_projection", [](S& s) { return s.balancedForceProjection(); },
+                   "Whether the balanced-force projection runs (see "
+                   "set_balanced_force_projection).")
       .def("set_advection", &S::setAdvection, nb::arg("on"),
            "Enable/disable explicit high-order momentum advection (default scheme SOU). Off ⇒ "
            "Stokes.")
