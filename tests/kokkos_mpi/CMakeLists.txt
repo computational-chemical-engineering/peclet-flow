@@ -7,6 +7,9 @@
 #         -DCMAKE_PREFIX_PATH="<suite>/extern/install/<backend>" \
 #         -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun -DPECLET_CORE_DIR=<suite>/core
 #   cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure
+# Every add_test passes ${MPIEXEC_PREFLAGS} after `-np N`: configure with
+# -DMPIEXEC_PREFLAGS="--bind-to;none" so concurrent np<=2 ctests are not all pinned to the same
+# cores by OpenMPI's default binding (seconds instead of ~30 min per test).
 cmake_minimum_required(VERSION 3.24)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # ---- standalone project -----------------------------------------------------------------------
@@ -50,7 +53,7 @@ foreach(t distributed_diffusion distributed_pressure distributed_mg)
     ${PECLET_CORE_INCLUDE})
   target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver)
   foreach(np 1 2 4)
-    add_test(NAME ${t}_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_${t}>)
+    add_test(NAME ${t}_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_${t}>)
   endforeach()
 endforeach()
 
@@ -67,7 +70,7 @@ foreach(t cutcellmg_mpi telescope_mpi telescope_varrho_mpi velocitymg_mpi veloci
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
   target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
   foreach(np 1 2 4)
-    add_test(NAME ${t}_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_${t}>)
+    add_test(NAME ${t}_np${np} COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_${t}>)
   endforeach()
 endforeach()
 
@@ -91,7 +94,7 @@ target_link_libraries(test_vof_blocks_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX pe
 # only exercised once there are more ranks than the few blocks the W0 scenes carry.
 foreach(np 1 2 4 8)
   add_test(NAME vof_blocks_mpi_np${np}
-           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_vof_blocks_mpi>)
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_vof_blocks_mpi>)
 endforeach()
 
 add_executable(test_vof_advect_mpi test_vof_advect_mpi.cpp)
@@ -101,5 +104,5 @@ target_include_directories(test_vof_advect_mpi PRIVATE
 target_link_libraries(test_vof_advect_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver)
 foreach(np 1 2 4)
   add_test(NAME vof_advect_mpi_np${np}
-           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_vof_advect_mpi>)
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_vof_advect_mpi>)
 endforeach()
