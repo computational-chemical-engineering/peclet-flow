@@ -1927,8 +1927,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "Cost: one extra pressure solve per step while the forces change, "
            "solved for the increment of the previous split and skipped when that is already "
            "converged -- a static interface costs no iterations. Default: "
-           "ON on SolverColocated with variable density or surface tension, OFF otherwise; an "
-           "explicit call always wins. Refused (named error) with porous continuity, the ghost projection, "
+           "ON on SolverColocated with variable density or surface tension, OFF otherwise; with "
+           "an inflow/outflow face that default resolves OFF (a one-time stderr notice says "
+           "so); an explicit call always wins. Refused (named error) with porous continuity, the ghost projection, "
            "set_fluid_only_constraint(2), the block CSF, inflow/outflow faces, the "
            "non-incremental pressure, and on the constant-density SolverColocated path (nothing "
            "to balance there).")

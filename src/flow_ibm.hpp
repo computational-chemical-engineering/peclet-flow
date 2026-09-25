@@ -596,8 +596,10 @@ class Solver {
   // the part of the forces that drives flow, so gradient forces (hydrostatics, constant-kappa CSF)
   // are balanced exactly from step 1 at every mu, dt, density ratio and openness. The solve is
   // state-independent: stability and the converged steady state are identical ON and OFF. Cost:
-  // one extra pressure solve per step while the forces change; none for a static interface. DEFAULT (U2): ON on the collocated variable-density / CSF
-  // path (V8), OFF elsewhere; an explicit setting always wins. OFF is byte-identical to a solver
+  // one extra pressure solve per step while the forces change; none for a static interface.
+  // DEFAULT (U2): ON on the collocated variable-density / CSF path (V8) -- except with an
+  // inflow/outflow domain face, where the default resolves OFF with a one-time stderr notice --
+  // and OFF elsewhere; an explicit setting always wins. OFF is byte-identical to a solver
   // without the option. Refused, with a named error at this setter when the configuration is
   // already known and otherwise at the next step: porous continuity, the ghost projection,
   // set_fluid_only_constraint(2), the block CSF, any inflow/outflow face, the non-incremental
@@ -1737,8 +1739,10 @@ class Solver {
 
 
   // --- the balanced-force projection (doc/collocated_varrho_forces.md §4.6) --------------------
-  // Is it on for this step? (the explicit setting, else ON exactly on the V8 path)
+  // Is it on for this step? (the explicit setting, else ON exactly on the V8 path without an
+  // inflow/outflow face)
   bool balancedForceActive() const;
+  bool hasOpenDomainFace() const;  // any inflow (2) / outflow (3) domain face
   // The §4.6.4 refusals. `atStep` adds the checks that are only final once the solver is set up
   // (the cut-cell operator, the collocated density path, an AUTO-selected ghost scheme).
   void requireBalancedForceScope(const char* who, bool atStep) const;
@@ -4554,6 +4558,7 @@ class Solver {
   // option has run; `coeffBuiltThisStep_` lets project() skip the variable-rho coefficient rebuild
   // the balanced-force stage already did this step (rho is frozen within a step).
   bool bfpSet_ = false, bfpOn_ = false;
+  bool bfpOpenNotice_ = false;  // the "V8 default resolved OFF: open face" notice, once
   CCField Pb_, pb1_;
   // Is Pb_ the balanced part of the CURRENT P_ (a valid split)? True for a fresh solver (P = Pb =
   // 0); cleared by a step with the option off (P moved without Pb) and by a set_field of "p" or

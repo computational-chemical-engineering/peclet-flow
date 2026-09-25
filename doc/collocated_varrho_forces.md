@@ -373,6 +373,10 @@ as today) and after properties, curvature and ghost fills; before the Picard loo
 - **C++:** `setBalancedForceProjection(bool)`, `balancedForceProjection()`,
   `lastBalancedForceIterations()`.
 - **Default: ON when `colocatedFaceForce()` (V8: collocated && (varRho || CSF)), OFF otherwise (U2).**
+  With an inflow/outflow domain face the V8 default resolves **OFF** (the option does not support
+  open faces, §4.6.4 / Q7), and the first step says so once on stderr, modelled on the AUTO-scheme
+  fallback notice (review fix 2026-09-25). Only an explicit `set_balanced_force_projection(True)`
+  with an open face throws the named error; gated in `test_balanced_force` (f).
   An explicit `set_balanced_force_projection(False)` on V8 is honoured. It may be toggled at any
   time; toggling only re-splits P (§4.6.2) and never moves a converged steady state. Switching
   OFF keeps `Pb_` inside P; the first ON step after OFF steps re-splits.
@@ -384,7 +388,8 @@ configuration is already known, otherwise at the next step's head) with:
 - the ghost projection (either grid; its overlay reaches β in the next package);
 - `fluidOnlyMode_ == 2`;
 - `vofBlockCsf()`;
-- any inflow/outflow domain face (Q7);
+- any inflow/outflow domain face (Q7) — for an EXPLICIT ON only; the V8 default resolves OFF
+  there with a notice (§4.6.3);
 - `!incremental_`;
 - `!cutcellPressure_`;
 - the collocated constant-ρ single-phase path. There the pressure force is `gpCenterGrad`, not Γ,
@@ -923,7 +928,7 @@ Other combinations unchanged.
 | Q4 | Moving-interface effect of Π_ρ's O(h) interface-local weighting | fact (WO-V3) | Accept (stability requires it); report |
 | Q5 | Motion rating | fact (WO-V3) | MEASURED: a translating drop throws the VoF CFL cap at ratio 100 and 1000 (ON and OFF); ratio 10 tracks staggered. Collocated with motion is rated ratio ~10 until the next package re-measures |
 | Q6 | 3-D rotational margin (κλ_max < 2 is measured, not proved) | fact | G2 covers dt ≤ 100. If G2 fails with κ = μ but passes with κ = 0, stop and report; never ship a κ change without the architect |
-| Q7 | Option with inflow/outflow faces | preference (scope) + fact | Refused in v1. It needs the operator-openness vs flux-openness rule at inflow and the WO-R2 outflow planes. Next package if the porous-media drainage target needs it |
+| Q7 | Option with inflow/outflow faces | preference (scope) + fact | Refused in v1 when requested explicitly; the V8 DEFAULT resolves OFF there with a one-time notice (review fix 2026-09-25). It needs the operator-openness vs flux-openness rule at inflow and the WO-R2 outflow planes. Next package if the porous-media drainage target needs it |
 | Q8 | Staggered VoF with the default OFF keeps WO-P's μdt² residue | preference | Resolved for V8 by U2's default ON. On staggered, the docs recommend enabling the option for static and low-Ca work (the porous-media drainage target) |
 | Q9 | Chebyshev bounds when ON | fact | RESOLVED (WO-P5 + review fix): the main bounds are estimated on the MAIN right-hand side only; the pre-projection keeps bounds of its OWN across steps, re-estimated on a structural operator change or a diverging solve, never shared. Main iterations ON = OFF (§4.8) |
 | Q10 | Pointwise formulas (L5) and the CSF pair → `core::scheme` / `core::vof`: now or when amr consumes them | preference (process) | When amr's multiphase package starts. Its WO-A0 moves them verbatim, with flow byte-identity as the gate |

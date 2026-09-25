@@ -21,7 +21,8 @@
 //       interface, mu = 0.1: face < 1e-12 and dP/dz between fluid cells < 1e-10 after 30 steps;
 //       (ii) the drop of (d) cut by an immersed plane 0.5 R below its centre, ratio 1 and 1000,
 //       mu = 0.1: face < 1e-12. OFF reported.
-//   (f) refusals: porous, ghost, block CSF, inflow/outflow, non-incremental -> named errors.
+//   (f) refusals: porous, ghost, block CSF, inflow/outflow, non-incremental -> named errors; the
+//       V8 DEFAULT with an inflow/outflow face resolves OFF (notice) instead of throwing.
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -36,6 +37,7 @@
 namespace {
 using peclet::flow::ClosureKind;
 using Stag = peclet::flow::Solver<peclet::flow::Staggered>;
+using Colo = peclet::flow::Solver<peclet::flow::Colocated>;
 
 int failures = 0;
 #define CHECK(cond)                                                                      \
@@ -271,7 +273,7 @@ void gateRefusals() {
   std::printf("\n=== (f) refusals\n");
   const int N = 16;
   const std::vector<double> fluid((std::size_t)N * N * N, 10.0);
-  auto base = [&](Stag& s) {
+  auto base = [&](auto& s) {
     s.setRho(1.0);
     s.setMu(0.01);
     s.setDt(1.0);
@@ -309,6 +311,38 @@ void gateRefusals() {
     s.setDomainBc(0, 2, 0.1, 0.0, 0.0);
     s.setDomainBc(1, 3, 0, 0, 0);
     s.setPressureGeometry(fluid);
+    s.setBalancedForceProjection(true);
+    s.step();
+  });
+  // The V8 DEFAULT with an inflow/outflow face resolves OFF (a one-time stderr notice), and the
+  // step runs; only an EXPLICIT ON with an open face throws the named error.
+  {
+    Colo s(N, N, N);
+    base(s);
+    s.setDomainBc(0, 2, 0.1, 0.0, 0.0);
+    s.setDomainBc(1, 3, 0, 0, 0);
+    s.setPressureGeometry(fluid);
+    s.setDensityMode(true);  // V8: the option's default would be ON
+    bool threw = false;
+    try {
+      s.step();
+      s.step();
+    } catch (const std::exception& e) {
+      threw = true;
+      std::printf("  V8 default + open face threw: %s\n", e.what());
+    }
+    std::printf("  V8 default + inflow/outflow: %s, option %s\n", threw ? "THREW" : "ran",
+                s.balancedForceProjection() ? "ON" : "OFF");
+    CHECK(!threw);
+    CHECK(!s.balancedForceProjection());
+  }
+  expectThrow("V8 + inflow/outflow face, explicit ON", [&] {
+    Colo s(N, N, N);
+    base(s);
+    s.setDomainBc(0, 2, 0.1, 0.0, 0.0);
+    s.setDomainBc(1, 3, 0, 0, 0);
+    s.setPressureGeometry(fluid);
+    s.setDensityMode(true);
     s.setBalancedForceProjection(true);
     s.step();
   });

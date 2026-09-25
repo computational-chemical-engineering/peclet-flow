@@ -118,10 +118,27 @@ void Solver<Grid>::step() {
     pbValid_ = pWritten_ && pbWritten_;
     pWritten_ = pbWritten_ = false;
   }
-  if (balancedForceActive())
+  if (balancedForceActive()) {
     applyBalancedForceProjection();
-  else
+  } else {
     pbValid_ = false;  // this step moves P without Pb: the next ON step re-splits
+    if (!bfpSet_ && !bfpOpenNotice_ && colocatedFaceForce() && hasOpenDomainFace()) {
+      // The V8 default resolved OFF because of an open face: say so once, as the AUTO-scheme
+      // fallback does.
+      bfpOpenNotice_ = true;
+      int r = 0;
+#ifdef PECLET_FLOW_MPI
+      if (distributed_)
+        MPI_Comm_rank(comm_, &r);
+#endif
+      if (r == 0)
+        std::fprintf(stderr,
+                     "peclet::flow SolverColocated: the balanced-force projection (default ON on "
+                     "variable density / surface tension) is OFF: it does not support "
+                     "inflow/outflow domain faces (v1). Call set_balanced_force_projection(False) "
+                     "to silence this notice.\n");
+    }
+  }
   lastOuterIters_ = 0;
   for (int outer = 0; outer < outerIters_; ++outer) {
     const double tp0 = phaseTick();
@@ -459,8 +476,19 @@ bool Solver<Grid>::balancedForceActive() const {
   // U2 (doc/collocated_varrho_forces.md §0): an explicit setting wins; the DEFAULT is ON on the
   // collocated variable-density / CSF path (V8), where the settled constant-kappa CSF balance
   // needs it, and OFF everywhere else (staggered and constant-density collocated stay
-  // byte-identical).
-  return bfpSet_ ? bfpOn_ : colocatedFaceForce();
+  // byte-identical). With an inflow/outflow domain face the V8 default resolves OFF (the option
+  // does not support open faces, §4.6.4 / Q7; step() says so once): only an EXPLICIT ON throws.
+  if (bfpSet_)
+    return bfpOn_;
+  return colocatedFaceForce() && !hasOpenDomainFace();
+}
+
+template <class Grid>
+bool Solver<Grid>::hasOpenDomainFace() const {
+  for (int f = 0; f < 6; ++f)
+    if (bc_[f] == 2 || bc_[f] == 3)
+      return true;
+  return false;
 }
 
 template <class Grid>
