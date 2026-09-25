@@ -62,20 +62,19 @@ column (zero net volume flux, TBFsolver flowCtrl 2 flow_rate 0; peclet driver su
 each step) — flowCtrl 3 grew a net upflow from wall friction. TBFsolver closed run: engineer
 restarting (8x3 cores); open-column output kept in tbfsolver/run_open/. peclet run waits for the fix.
 
-**Next action (2026-09-25 07:45).** PUSH HELD for one MPI test. Wall leak FIXED (788c215, design
-§15): the block face-velocity gather copied index 0 into the LOW non-periodic domain face (v at
-y=1/2 instead of the wall's 0), so markers with colour in a low-wall layer leaked; only those
-drifted. Gate: ckpt_t86 3000 steps 3.9e-3 -> 7.7e-15; gate W in test_vof_blocks (fails with the old
-clamp); vof_blocks 12/12; probes bitwise where no colour touches a low wall. Running: engineer adds
-an MPI low-wall variant np 1/2/4 (+ negative check); NEW chain scratchpad/c18_g4c/chain.sh on frozen
-module scratchpad/flow_prod2 (= 788c215): column from t=0 (~10 h) -> D/h=24 t=5 -> channel_18
-10000 -> 5 turnovers. Old run kept as peclet/run_wallleak_14d9483 (contaminated from t~47).
-THEN: push flow main (battery at eb883d7 was 167/167; after the MPI test re-run -R vof_blocks +
-kokkos_mpi vof tests); register entry + umbrella pointer LAST (umbrella local commit 2ca28ee);
-page after the column (peclet_reduce, "differ", "Cost": TBF 85.7 ms/step on 24 cores, peclet
-~310 ms/step), render, merge bubble-column to main + push. Cleanup: tbfsolver raw (~17 GB),
-peclet/run_degraded_pureEps, run_wallleak_14d9483. TOKEN DISCIPLINE: one blocking completion
-wait per job; no agent polling; never read agent jsonl.
+**Next action (2026-09-25 10:40).** FLOW MAIN PUSHED (f4b105e; -R "vof|cell_force" 63/63 on the
+rebased build; full battery 167/167 at eb883d7); umbrella c6840bb (pointer + register entry in
+docs/decisions/flow.md) and 1593360 (DECISIONS.md index) pushed. Remaining: the page. Chain
+scratchpad/c18_g4c/chain.sh on frozen module scratchpad/flow_prod2 (= 788c215, same numerics as
+main): column from t=0 (t=39 at 10:17, marker dV 4e-13; ETA ~18:00) -> D/h=24 t=5 -> channel_18
+10000 -> 5 turnovers (G4(b)). Then peclet_reduce -> data/peclet_closed.npz (+ _d24_t5), fill
+"Where the two codes differ" + "Cost" (TBF 85.7 ms/step on 24 cores; peclet ~360-400 ms/step with
+the Python closed-column round trip), render, merge bubble-column to peclet-examples main + push.
+Open (design §14-15): setters after enable_vof_block_csf, phantom re-arm lag, ≥3-marker SUM order,
+ledger on release/checkpoint, global phantom trigger, debris cost, inflow/outflow faces untested;
+tests/kokkos_mpi add_test ignores MPIEXEC_PREFLAGS (use OMPI_MCA_hwloc_base_binding_policy=none).
+Cleanup: tbfsolver raw (~17 GB), peclet/run_degraded_pureEps, run_wallleak_14d9483, flow worktree
+flow-vof-overlap after the page. TOKEN DISCIPLINE: one blocking completion wait per job.
 
 **Gates (to be set with the design).** channel_18 ≥ 5 turnovers; static pair parasitic current
 flat in d; marker volumes 1e-12; every existing block ctest bit-identical when no overlap.
