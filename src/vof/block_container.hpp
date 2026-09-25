@@ -43,10 +43,11 @@
 /// the value the global-field advector holds at the same global cells. Cells outside the domain on
 /// a non-periodic axis take the globally-clamped (zero-gradient) value, the same rule
 /// `colour_field.hpp::clampFill` applies to the structured field. A block whose box spans a whole
-/// periodic axis gets the periodic wrap on that axis instead. Since the face velocities are
-/// gathered from the owners of the same global cells, every double the block's WY update consumes
-/// is bit-for-bit the double the global-field update consumes — hence gate G1 is a *bitwise* gate
-/// and not a tolerance.
+/// periodic axis gets the periodic wrap on that axis instead. The face velocities are gathered
+/// from the owners of the same global cells — outside a non-periodic domain too, from the ghost
+/// layers of the boundary rank, because the low domain face lives there (gate W) — so every double
+/// the block's WY update consumes is bit-for-bit the double the global-field update consumes —
+/// hence gate G1 is a *bitwise* gate and not a tolerance.
 ///
 /// ## What lives where
 ///
@@ -127,8 +128,11 @@ struct VofBox {
 
 /// One contiguous run of GLOBAL indices covered by a block's index range on one axis, with the
 /// block-local index the run starts at. A range on a periodic axis that crosses the seam produces
-/// two runs; a range on a non-periodic axis produces one (the part outside the domain is not
-/// gathered — it is the block's own clamp fill).
+/// two runs; a range on a non-periodic axis produces one. Its part outside the domain is cut off
+/// (the colour's ghosts there are the block's own clamp fill) unless `outside > 0`, which keeps up
+/// to `outside` cells beyond each domain face: the FACE-VELOCITY gather needs them, because the
+/// low domain face of a non-periodic axis is stored at global index -1 in the advector's high-face
+/// convention — outside the domain (see `VofBlockExchangeBase::gatherFaceVel`).
 struct VofRun {
   int g0 = 0;    ///< first GLOBAL index of the run
   int len = 0;   ///< number of cells
@@ -141,13 +145,13 @@ struct VofRun {
 /// periodic axis (which is exactly what the EXTENDED box of a block spanning the whole axis is)
 /// revisits the same global cells, and that is correct — the extra local cells are the block's
 /// periodic ghosts and must carry the wrapped owner's value.
-inline int vofAxisRuns(int a, int b, int gs, bool periodic, VofRun out[5]) {
+inline int vofAxisRuns(int a, int b, int gs, bool periodic, VofRun out[5], int outside = 0) {
   int n = 0;
   if (b <= a)
     return 0;
   if (!periodic) {
-    const int s = a < 0 ? 0 : a;
-    const int e = b > gs ? gs : b;
+    const int s = a < -outside ? -outside : a;
+    const int e = b > gs + outside ? gs + outside : b;
     if (e > s)
       out[n++] = VofRun{s, e - s, s - a};
     return n;
@@ -377,8 +381,13 @@ class VofBlockSet;
 struct VofBlockExchangeBase {
   virtual ~VofBlockExchangeBase() = default;
   /// Fill every MASTER block's `faceU/V/W` over its EXTENDED box, from the face velocity the ranks
-  /// own. Cells with no owner (outside a non-periodic domain) are left untouched — the block's own
-  /// clamp fill supplies them.
+  /// own. Cells outside a non-periodic domain come from the ghost layers of the rank whose box
+  /// touches that domain face — the doubles the global-field advector consumes there. They are NOT
+  /// a clamp fill: `uf(i)` is the HIGH face of cell `i`, so the LOW domain face (a wall's normal
+  /// velocity, an inflow's datum) sits at global index -1. A zero-gradient copy of index 0 put the
+  /// first interior face's velocity on a no-slip wall, and every marker with colour in the
+  /// wall-adjacent layer then gained or lost volume through the wall (bubble column, 2026-09-25:
+  /// up to 1e-5 of a marker per step).
   virtual void gatherFaceVel(std::vector<VofBlock>& blocks, int ghost) = 0;
   /// UNION the masters' inner colour into the caller's local colour patch: zero the inner region,
   /// then `C = max(C, C_block)` cell by cell (TBFsolver's UNPACK_MAX).
@@ -618,7 +627,6 @@ class VofBlockSet {
     for (auto& b : blocks_) {
       if (!b.mine_)
         continue;
-      clampFaceVelocity(b);
       b.adv_.advect(dt, step_);
       b.st_.recentred = false;
       // Before the re-centring, so the bubble box a re-centre measures is the one the census saw.
@@ -1149,19 +1157,6 @@ class VofBlockSet {
   long poolHits() const { return poolHits_; }
   long poolMisses() const { return poolMisses_; }
   void clearPool() { pool_.clear(); }
-
- private:
-
-  /// Face velocity outside a non-periodic domain: the gather leaves it untouched, so continue it
-  /// with the same globally clamped rule the colour uses. Inside the domain every extended-box cell
-  /// has an owner and was filled.
-  void clampFaceVelocity(VofBlock& b) {
-    if (per_[0] && per_[1] && per_[2])
-      return;
-    const I3 e = b.adv_.extent(), o = b.box.origin();
-    for (int d = 0; d < 3; ++d)
-      vof::clampFill(b.adv_.faceVel(d), e, ghost_, o, gs_, per_[0], per_[1], per_[2]);
-  }
 
   // NOTE: everything below is public ONLY because nvcc refuses an extended `__host__ __device__`
   // lambda inside a private or protected member function ("The enclosing parent function ... cannot

@@ -513,3 +513,20 @@ marker volumes to 1e-12 relative.
   (one step late); the review's #6/#8/#9/#10 notes (np-dependent SUM order with ≥3 markers per
   cell, stale ledger on release, ledger not checkpointed, global phantom trigger); the debris-pass
   cost on channel_18 is unmeasured.
+
+## 15. Addendum (Opus, 2026-09-25) — a marker at a LOW wall leaked through the wall face
+
+Bubble column (walls y = 0, NY): every marker with colour in the y = 0 layer drifted, both signs,
+up to 1e-5 of its volume per step (ckpt t = 86, 300 steps: markers 2/3/9/10 at 1.1e-3, all others
+≤ 4e-15; no ledger entry moved). Cause: the block's face velocity outside a non-periodic domain was
+a zero-gradient clamp of index 0, but `uf(i)` is the HIGH face of cell i, so the LOW domain face is
+index -1 — outside the domain. The clamp put `v(y = 1/2)` (up to 9 cells/time) on the no-slip wall;
+the global field reads the solver's 0 there. The high wall face (index NY-1) is inside the domain
+and was always gathered, hence the asymmetry. Fix (not a design change — it restores the header's
+"every double the block consumes is the global field's"): the face-velocity gather also covers the
+`ghost` cells beyond a non-periodic domain face, read from the boundary rank's patch ghosts
+(`vofBuildPieces(…, outside)`); the clamp is gone. Inert unless a marker has colour in the low
+wall layer (walled probes with boxes hanging out of both walls, and with 68 cells of colour on
+the HIGH wall: all fields bitwise equal). Gate W (`test_vof_blocks`): sphere cut by y = 0, 240
+steps, block |V/V0−1| 3.0e-15 and block == global field (2.6e-3 and max|d| 0.16 with the clamp
+restored).

@@ -13,6 +13,14 @@
 //                             control merges them irreversibly. The raison d'etre gate.
 //   G3 re-centring          : a sphere translated 20 cells; the moving block is bitwise equal to a
 //                             block large enough never to move, and its volume is exact.
+//   W  marker at a wall     : a sphere cut by the no-slip wall y = 0 (colour in the wall-adjacent
+//                             layer) in a solenoidal field with v = 0 ON the wall face and v != 0
+//                             one face in: the block conserves its volume to round-off and equals
+//                             the global field. The LOW wall face is the advector's global index
+//                             -1 (high-face convention), outside the domain; a zero-gradient clamp
+//                             of the block's face velocity there put the first interior face's
+//                             velocity on the wall (bubble column 2026-09-25, 1e-5 of a marker per
+//                             step). Fails with that clamp restored.
 //   D1 seeded debris        : doc/vof_overlap_design.md gate G1(ii) -- two R = 5 markers 16 cells
 //                             apart plus three cells of B's colour painted into A's interface
 //                             band, through a real Solver with the block CSF: one step removes
@@ -219,6 +227,7 @@ void gatePlan() {
     std::array<bool, 3> per;
     const char* what;
     long expect;
+    int outside = 0;  // the face-velocity gather's reach beyond a non-periodic domain face
   };
   std::vector<Case> cases = {
       {VofBox{{4, 4, 4}, {20, 20, 20}}, {true, true, true}, "interior, periodic", 16L * 16 * 16},
@@ -229,15 +238,27 @@ void gatePlan() {
        {false, true, true},
        "walled -x, hangs out",
        13L * 16 * 16},
+      // the face-velocity gather reads the out-of-domain part from the boundary rank's patch ghosts
+      {VofBox{{-3, 4, 4}, {13, 20, 20}},
+       {false, true, true},
+       "walled -x, face gather",
+       16L * 16 * 16,
+       3},
+      {VofBox{{-3, -3, 4}, {35, 13, 20}},
+       {false, false, true},
+       "walled x+y corners, face gather",
+       38L * 16 * 16,
+       3},
       {VofBox{{-2, -2, -2}, {34, 34, 34}},
        {true, true, true},
        "spans the whole grid (clamped)",
        32L * 32 * 32},
   };
   for (auto& c : cases) {
-    const VofBox box = peclet::flow::vof::vofClampBox(c.box, gs, c.per);
+    // an extended box may hang `outside` cells beyond a walled face; only the inner box is clamped
+    const VofBox box = c.outside ? c.box : peclet::flow::vof::vofClampBox(c.box, gs, c.per);
     std::vector<VofPiece> pieces;
-    peclet::flow::vof::vofBuildPieces(box, gs, c.per, rb, pieces);
+    peclet::flow::vof::vofBuildPieces(box, gs, c.per, rb, pieces, c.outside);
     // mark every block-local cell each piece writes; assert each is written at most once
     std::vector<int> hits(static_cast<std::size_t>(box.cells()), 0);
     long total = 0;
@@ -979,6 +1000,119 @@ void gateDebrisSpeck() {
   CHECK(umS <= umR + 1e-6);
 }
 
+
+// ======================================================================== W: a marker at a wall
+/// psi(x, y) = -(A / 2pi) sin(2pi x) 4 y (1 - y): zero on both walls, so the discrete curl puts an
+/// EXACT 0 on the wall-normal faces y = 0 and y = 1, and v = O(A h) on the first interior face.
+KOKKOS_INLINE_FUNCTION double wallPsi(double x, double y, double A) {
+  const double PI = 3.14159265358979323846;
+  return -(A / (2.0 * PI)) * Kokkos::sin(2.0 * PI * x) * 4.0 * y * (1.0 - y);
+}
+
+void gateWall() {
+  std::printf("\n=== W  a marker against the wall y = 0: volume exact, block == global field\n");
+  const int gn = 32;
+  const double h = 1.0 / gn, A = 0.5;
+  const double dt = 0.25 * h / (4.0 * A);  // max|u| = 4A on the walls: CFL 0.25
+  const long steps = 240;
+  const double cx = 0.5, cy = 0.1, cz = 0.5, r = 0.2;  // cut by the wall: a contact line at y = 0
+  const std::array<bool, 3> per{true, false, true};
+  const I3 gs{gn, gn, gn};
+
+  Patch patch;
+  patch.init(gn, h);
+  const I3 e = patch.adv.extent();
+  {  // the analytic discrete curl on the WHOLE extended block, out-of-domain cells included
+    SField u = patch.adv.faceU(), v = patch.adv.faceV(), w = patch.adv.faceW();
+    const double invh = 1.0 / h;
+    vofscene::forEachExtended(
+        patch.blk, KOKKOS_LAMBDA(long i, int gx, int gy, int) {
+          const double xn = gx * h, xp = (gx + 1) * h, yn = gy * h, yp = (gy + 1) * h;
+          u(i) = (wallPsi(xp, yp, A) - wallPsi(xp, yn, A)) * invh;
+          v(i) = -(wallPsi(xp, yp, A) - wallPsi(xn, yp, A)) * invh;
+          w(i) = 0.0;
+        });
+    // the block gathers the WRAPPED owner's value on a periodic axis (see gate G1)
+    for (SField f : {u, v, w})
+      vofscene::periodicFill(f, e, G, true, false, true);
+  }
+  // the triggering condition, asserted so the gate cannot go vacuous: v = 0 on the wall face
+  // (advector index -1) and v != 0 on the first interior face (index 0)
+  double vWall = 0.0, vIn = 0.0;
+  {
+    auto hv = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), patch.adv.faceV());
+    for (int z = 0; z < gn; ++z)
+      for (int x = 0; x < gn; ++x) {
+        vWall = std::fmax(vWall, std::fabs(hv(L3(x + G, G - 1, z + G, e))));
+        vIn = std::fmax(vIn, std::fabs(hv(L3(x + G, G, z + G, e))));
+      }
+  }
+
+  WyAdvector ref;
+  ref.init(gn, gn, gn, h, G);
+  const vofscene::Block rblk = vofscene::blockOf(ref, I3{0, 0, 0});
+  ref.exchange = [rblk, gs](SField f) {
+    vofscene::periodicFill(f, rblk.e, G, true, false, true);
+    vofscene::clampFill(f, rblk, gs, true, false, true);
+  };
+  refSphere(ref, rblk, h, cx, cy, cz, r);
+  ref.syncGhosts();
+  Kokkos::deep_copy(ref.faceU(), patch.adv.faceU());
+  Kokkos::deep_copy(ref.faceV(), patch.adv.faceV());
+  Kokkos::deep_copy(ref.faceW(), patch.adv.faceW());
+
+  VofBlockSet set;
+  set.init(gs, per, 0, 1, h);
+  serialExchange(set, patch);
+  set.seedSphere(cx, cy, cz, r);
+  set.scatter(patch.adv.colour());
+  const auto& b0 = set.blocks()[0];
+  const double v0 = b0.stats().volume;
+  double wallLayer = 0.0;
+  {
+    const std::vector<double> gb = blockOnGrid(b0, gn);
+    for (int z = 0; z < gn; ++z)
+      for (int x = 0; x < gn; ++x) {
+        const double c = gb[static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * gn * gn];
+        if (!std::isnan(c))
+          wallLayer += c;
+      }
+  }
+  const double vr0 = sumInner(ref.colour(), e, gn, G);
+
+  double worstRel = 0.0, worstD = 0.0;
+  long firstDiff = -1;
+  for (long s = 0; s < steps; ++s) {
+    ref.advect(dt, s);
+    set.advect(dt, patch.adv.colour());
+    worstRel = std::fmax(worstRel, std::fabs(set.blocks()[0].stats().volume / v0 - 1.0));
+    double wd = 0.0;
+    const long d = gridDiff(blockOnGrid(set.blocks()[0], gn), fieldOnGrid(ref.colour(), e, gn, G),
+                            &wd);
+    if (d != 0 && firstDiff < 0)
+      firstDiff = s;
+    worstD = std::fmax(worstD, wd);
+  }
+  const double vr1 = sumInner(ref.colour(), e, gn, G);
+  const auto& st = set.blocks()[0].stats();
+  std::printf("  scene: colour in the wall layer %.3f cells; max|v| on the wall face %.3e, one "
+              "face in %.3e\n",
+              wallLayer, vWall, vIn);
+  std::printf("  %ld steps: block max|V/V0-1| %.3e (discarded %.3e, box y [%d, %d)); global field "
+              "%.3e\n",
+              steps, worstRel, st.discarded, set.blocks()[0].box.lo[1], set.blocks()[0].box.hi[1],
+              std::fabs(vr1 / vr0 - 1.0));
+  std::printf("  block vs global field: bitwise horizon %ld steps, max|d| %.3e\n",
+              firstDiff < 0 ? steps : firstDiff, worstD);
+  CHECK(wallLayer > 1.0);  // the marker really occupies the wall-adjacent layer
+  CHECK(vWall == 0.0);
+  CHECK(vIn > 1e-3);
+  CHECK(set.blocks()[0].box.lo[1] == 0);
+  CHECK(worstRel <= 1e-12);
+  CHECK(std::fabs(vr1 / vr0 - 1.0) <= 1e-12);
+  CHECK(worstD < 1e-15);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -992,6 +1126,7 @@ int main(int argc, char** argv) {
     gateAssignment();
     gateInert();
     gateDebrisSpeck();
+    gateWall();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
                 failures == 1 ? "" : "s");
   }

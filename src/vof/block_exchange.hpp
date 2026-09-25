@@ -17,9 +17,10 @@
 /// ## The plan
 ///
 /// A block's box lives in UNWRAPPED global indices and may hang outside `[0, gs)`. Per axis it is
-/// cut into contiguous GLOBAL runs (`vofAxisRuns`): one run on a non-periodic axis (the outside
-/// part has no owner and is the block's own clamp fill), one or two on a periodic axis that crosses
-/// the seam. The Cartesian product of the runs gives at most 8 global sub-boxes, each with a known
+/// cut into contiguous GLOBAL runs (`vofAxisRuns`): one run on a non-periodic axis (for the colour
+/// the outside part has no owner and is the block's own clamp fill; the face-velocity gather takes
+/// it from the boundary rank's patch ghosts), one or two on a periodic axis that crosses the seam.
+/// The Cartesian product of the runs gives at most 8 global sub-boxes, each with a known
 /// block-local offset; intersecting each with each rank's owned box gives the pieces. For one
 /// (block, rank) pair the pieces are concatenated in a canonical order (sub-box index, then
 /// x-fastest inside the piece) — both sides walk the same loop, so both agree on the layout without
@@ -63,13 +64,20 @@ struct VofPiece {
 };
 
 /// Build the pieces of one block box against every rank's owned box, in canonical order.
+///
+/// `outside > 0` (the face-velocity gather only) also covers up to `outside` cells beyond each face
+/// of a non-periodic domain, owned by the rank whose box touches that face and read from its patch
+/// ghost layers (so `outside` must not exceed the patch ghost width). The rank boxes tile the
+/// domain, so the grown boxes tile the grown domain and the pieces still partition the block box.
 inline void vofBuildPieces(const VofBox& box, I3 gs, const std::array<bool, 3>& per,
-                           const std::vector<VofBox>& rankBox, std::vector<VofPiece>& out) {
+                           const std::vector<VofBox>& rankBox, std::vector<VofPiece>& out,
+                           int outside = 0) {
   out.clear();
   VofRun rx[5], ry[5], rz[5];
-  const int nx = vofAxisRuns(box.lo[0], box.hi[0], gs.x, per[0], rx);
-  const int ny = vofAxisRuns(box.lo[1], box.hi[1], gs.y, per[1], ry);
-  const int nz = vofAxisRuns(box.lo[2], box.hi[2], gs.z, per[2], rz);
+  const int nx = vofAxisRuns(box.lo[0], box.hi[0], gs.x, per[0], rx, outside);
+  const int ny = vofAxisRuns(box.lo[1], box.hi[1], gs.y, per[1], ry, outside);
+  const int nz = vofAxisRuns(box.lo[2], box.hi[2], gs.z, per[2], rz, outside);
+  const int gsa[3] = {gs.x, gs.y, gs.z};
   for (int iz = 0; iz < nz; ++iz)
     for (int iy = 0; iy < ny; ++iy)
       for (int ix = 0; ix < nx; ++ix) {
@@ -82,7 +90,17 @@ inline void vofBuildPieces(const VofBox& box, I3 gs, const std::array<bool, 3>& 
         s.hi[2] = rz[iz].g0 + rz[iz].len;
         const int base[3] = {rx[ix].loc0, ry[iy].loc0, rz[iz].loc0};
         for (std::size_t r = 0; r < rankBox.size(); ++r) {
-          const VofBox o = VofBox::intersect(s, rankBox[r]);
+          VofBox own = rankBox[r];
+          if (outside > 0)
+            for (int d = 0; d < 3; ++d) {
+              if (per[d])
+                continue;
+              if (own.lo[d] == 0)
+                own.lo[d] = -outside;
+              if (own.hi[d] == gsa[d])
+                own.hi[d] = gsa[d] + outside;
+            }
+          const VofBox o = VofBox::intersect(s, own);
           if (o.empty())
             continue;
           VofPiece p;
@@ -177,7 +195,8 @@ class VofBlockExchange : public VofBlockExchangeBase {
   /// patch -> block. `useExtended` picks the box; `blockBase` is 0 for an array indexed over the
   /// extended box and `ghost` for one indexed over the inner box.
   void gatherImpl(std::vector<VofBlock>& blocks, int ghost, bool useExtended, int nc,
-                  const SField* loc, SField (*blockView)(VofBlock&, int), int blockBase) {
+                  const SField* loc, SField (*blockView)(VofBlock&, int), int blockBase,
+                  int outside = 0) {
     gBytes_ = 0;
     gMsgs_ = 0;
     bufSeq_ = 0;
@@ -197,7 +216,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
     for (std::size_t bi = 0; bi < blocks.size(); ++bi) {
       VofBlock& b = blocks[bi];
       const VofBox box = useExtended ? b.extended(ghost) : b.box;
-      vofBuildPieces(box, gs_, per_, rankBox_, pieces_);
+      vofBuildPieces(box, gs_, per_, rankBox_, pieces_, outside);
       const bool master = (b.master == rank_);
       if (master)
         for (int c = 0; c < nc; ++c)
@@ -261,7 +280,8 @@ class VofBlockExchange : public VofBlockExchangeBase {
     for (auto& r : recvs) {
       VofBlock& b = blocks[r.bi];
       Kokkos::deep_copy(r.dbuf, r.hbuf);
-      vofBuildPieces(useExtended ? b.extended(ghost) : b.box, gs_, per_, rankBox_, pieces_);
+      vofBuildPieces(useExtended ? b.extended(ghost) : b.box, gs_, per_, rankBox_, pieces_,
+                     outside);
       long off = 0;
       for (const auto& p : pieces_)
         if (p.rank == r.from)
@@ -528,12 +548,17 @@ class VofBlockExchange : public VofBlockExchangeBase {
   static SField forceViewOf(VofBlock& b, int c) { return b.csfForce(c); }
 
   void gatherFaceVel(std::vector<VofBlock>& blocks, int ghost) override {
+    // The block's extended box reaches `ghost` cells beyond a non-periodic domain face; those
+    // cells are read from the boundary rank's patch ghosts, so the patch must be at least as wide.
+    if (ghost > patch_.g)
+      throw std::runtime_error(
+          "peclet::flow::vof::VofBlockExchange: block ghost wider than the face-velocity patch");
     if (!deviceStaging) {
       gatherFaceVelHost(blocks, ghost);
       return;
     }
     SField loc[3] = {lu_, lv_, lw_};
-    gatherImpl(blocks, ghost, /*useExtended=*/true, 3, loc, &faceViewOf, 0);
+    gatherImpl(blocks, ghost, /*useExtended=*/true, 3, loc, &faceViewOf, 0, /*outside=*/ghost);
   }
 
   void gatherColour(std::vector<VofBlock>& blocks, SField cLocal) override {
@@ -675,7 +700,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
     for (std::size_t bi = 0; bi < blocks.size(); ++bi) {
       VofBlock& b = blocks[bi];
       const VofBox eb = b.extended(ghost);
-      vofBuildPieces(eb, gs_, per_, rankBox_, pieces_);
+      vofBuildPieces(eb, gs_, per_, rankBox_, pieces_, /*outside=*/ghost);
       const bool master = (b.master == rank_);
       if (master) {
         hbu[bi] = Kokkos::create_mirror_view(b.advector().faceU());
@@ -745,7 +770,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
     // 2. unpack
     for (auto& r : recvs) {
       VofBlock& b = blocks[r.bi];
-      vofBuildPieces(b.extended(ghost), gs_, per_, rankBox_, pieces_);
+      vofBuildPieces(b.extended(ghost), gs_, per_, rankBox_, pieces_, /*outside=*/ghost);
       long off = 0;
       for (const auto& p : pieces_) {
         if (p.rank != r.from)
