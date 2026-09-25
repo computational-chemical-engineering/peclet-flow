@@ -986,7 +986,8 @@ Other combinations unchanged.
     cell forces + CSF; c = rho0/rho_f^op), then P += X - P_b, P_b = X. X is solved as the
     INCREMENT on P_b with the stop relative to the full right-hand side, and skipped when P_b
     already meets it: a static interface costs no iterations, a changing force about one extra
-    pressure solve (step 1.6-2.1x at 32^3). Gradient forces (hydrostatics, constant-kappa CSF)
+    pressure solve with its own persistent Chebyshev bounds (step ON/OFF ~1.2x moving, ~1.0x static;
+    §4.8). P_b is restart state ("p_balanced"); OFF->ON or a restart without it re-splits (§4.6). Gradient forces (hydrostatics, constant-kappa CSF)
     are then balanced exactly from step 1 at every mu, dt, density ratio and openness. That
     includes immersed solids on the staggered grid, where it removes WO-P's mu*dt^2 residue
     (code: staggered drop 2.0e-5 / 1.0e-5 at ratio 10 / 1000 -> <= 2e-17; sphere across a
