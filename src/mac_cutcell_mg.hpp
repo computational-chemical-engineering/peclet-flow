@@ -14,6 +14,7 @@
 #ifndef PECLET_FLOW_MAC_CUTCELL_MG_HPP
 #define PECLET_FLOW_MAC_CUTCELL_MG_HPP
 
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -434,6 +435,21 @@ inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int gc, 
       "peclet::flow::restrict", C3{0, 0, 0}, C3{cinner.x, cinner.y, cinner.z},
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
         restrictAvgCell(coarse, fine, cext, fext, gc, gf, ratio, icx, icy, icz);
+      });
+}
+// A5 (doc/vof_step_performance_design.md §5.5): restrictAvg that also zeroes the coarse ITERATE on
+// the same inner cells in the same kernel, replacing the full-array zero fill of `cs.x` the V-cycle
+// launched after the restriction. The coarse ghosts are no longer zeroed; every consumer fills,
+// wrap-reads or overwrites them first (the smoother and the residual fill or wrap before reading,
+// GraphAMG writes the whole array). VelocityMG keeps the plain restrictAvg.
+inline void restrictAvgZeroX(CCField coarse, CCField coarseX, CCConst fine, C3 cext, C3 fext,
+                             int gc, int gf, C3 cinner, C3 ratio) {
+  ccFor3(
+      "peclet::flow::restrict", C3{0, 0, 0}, C3{cinner.x, cinner.y, cinner.z},
+      KOKKOS_LAMBDA(int icx, int icy, int icz) {
+        restrictAvgCell(coarse, fine, cext, fext, gc, gf, ratio, icx, icy, icz);
+        coarseX((long)(icx + gc) + (long)(icy + gc) * cext.x +
+                (long)(icz + gc) * (long)cext.x * cext.y) = 0.0;
       });
 }
 inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, int gc, C3 finner,
@@ -1337,13 +1353,8 @@ class CutcellMG {
       if (star)
         starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
-    auto precond = [&](CCField zz, CCField rr) {
-      Kokkos::deep_copy(CCExec(), l0.rhs, rr);
-      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
-      vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(CCExec(), zz, l0.x);
-    };
-    matvec(Ap, x);  // r = b - A x
+    auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
+    matvec(Ap, x);                                                          // r = b - A x
     Kokkos::deep_copy(CCExec(), r, b);
     axpy(r, -1.0, Ap);
     removeMean(l0, r);  // compatibility: project rhs/residual onto the range
@@ -1463,13 +1474,8 @@ class CutcellMG {
       if (star)
         starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
-    auto precond = [&](CCField zz, CCField rr) {
-      Kokkos::deep_copy(CCExec(), l0.rhs, rr);
-      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
-      vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(CCExec(), zz, l0.x);
-    };
-    matvec(Ap, x);  // r = b - A x
+    auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
+    matvec(Ap, x);                                                          // r = b - A x
     Kokkos::deep_copy(CCExec(), r, b);
     axpy(r, -1.0, Ap);
     removeMean(l0, r);  // compatibility: project rhs/residual onto the range
@@ -1899,6 +1905,27 @@ class CutcellMG {
     Kokkos::deep_copy(dst, hd);
   }
 #endif
+  // A5 (§5.5): z = M r with M one symmetric V-cycle, run IN PLACE on the caller's vectors: level
+  // 0's `rhs` and `x` are rebound to `rr` and `zz` (shallow View assignment) for the cycle and
+  // restored after it, replacing the `rhs <- r`, `x <- 0`, `z <- x` full-field copies. Relies on
+  // level 0 never WRITING `rhs` (only a communication-avoiding level exchanges its rhs, and those
+  // are coarse).
+  void precondVcycle(CCField zz, CCField rr) {
+    Level& l0 = lv_[0];
+    assert(!l0.caOk && "A5: level 0 must not exchange (write) its rhs");
+    struct Restore {
+      Level& l;
+      CCField rhs, x;
+      ~Restore() {
+        l.rhs = rhs;
+        l.x = x;
+      }
+    } restore{l0, l0.rhs, l0.x};
+    l0.rhs = rr;
+    l0.x = zz;
+    Kokkos::deep_copy(CCExec(), zz, 0.0);
+    vcycle(0, /*sym=*/true);
+  }
   void vcycle(int L, bool sym) {
     if (mgDebugLevel() >= 3) {
       const auto t0 = std::chrono::steady_clock::now();
@@ -2002,8 +2029,13 @@ class CutcellMG {
 #endif
     {
       Level& cs = lv_[L + 1];
-      restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
-      Kokkos::deep_copy(CCExec(), cs.x, 0.0);
+      if (!distributed_) {  // A5: the restriction zeroes cs.x's inner cells itself
+        restrictAvgZeroX(cs.rhs, cs.x, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner,
+                         lv.ratio);
+      } else {
+        restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
+        Kokkos::deep_copy(CCExec(), cs.x, 0.0);
+      }
       vcycle(L + 1, sym);
       fill(cs, cs.x);
       applyOutflowGhost(cs, cs.x, cs.g);
@@ -2863,10 +2895,7 @@ class CutcellMG {
     auto applyT = [&](CCField out,
                       CCField in) {  // out = M^{-1} A in, projected onto the fluid range
       matvec(w, in);
-      Kokkos::deep_copy(CCExec(), l0.rhs, w);
-      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
-      vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(CCExec(), out, l0.x);
+      precondVcycle(out, w);  // A5
       removeMean(l0, out);
       maskSolid(l0, out);
     };
@@ -2927,12 +2956,7 @@ class CutcellMG {
     CCField r = workVector(4, n, "cb_r"), z = workVector(5, n, "cb_z"),
             d = workVector(6, n, "cb_d"), w = workVector(7, n, "cb_w");
     auto matvec = [&](CCField y, CCField v) { matvecOverlap(l0, y, v); };
-    auto precond = [&](CCField zz, CCField rr) {
-      Kokkos::deep_copy(CCExec(), l0.rhs, rr);
-      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
-      vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(CCExec(), zz, l0.x);
-    };
+    auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
     const double theta = 0.5 * (bnd + a), delta = 0.5 * (bnd - a), sigma1 = theta / delta;
     double rho = 1.0 / sigma1;
     matvec(w, x);  // r = b - A x
