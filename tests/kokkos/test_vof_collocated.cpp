@@ -224,12 +224,11 @@ void gateHydrostatic() {
     CHECK(st.faceU < 1e-12);
     CHECK(st.pErr < 1e-11);
     // Collocated: the FACE field is the projected field of a velocity that is itself the decaying
-    // transient, so it sits at the pressure solve's round-off of that transient (not a balance
-    // statement). FROZEN at WO-V1 (2026-09-25) at 10x the measured value (doc §9 G4
-    // measure-then-freeze; the note's 1e-12 / 1e-10 missed by 7.3x / 2.9x): walled 7.34e-12,
-    // periodic 2.94e-10 at the default Chebyshev rtol 1e-9 (7.33e-12 / 1.15e-10 at 1e-14, so not
-    // an rtol artefact: it scales with the transient's cell checkerboard, 2.9e-4 / 2.3e-1).
-    CHECK(co.faceU < (c.periodic ? 2.94e-9 : 7.4e-11));
+    // transient, so it sits at the pressure solve's round-off of that transient. Walled: the
+    // note's 1e-12 holds (3.2e-13 measured, double operator storage). Periodic: FROZEN at WO-V1
+    // (2026-09-25) at 10x the measured 1.79e-10 (doc §9 G4 measure-then-freeze; the note's 1e-10
+    // missed by 1.8x; the periodic box carries a 2.3e-1 cell checkerboard transient at mu = 0).
+    CHECK(co.faceU < (c.periodic ? 1.8e-9 : 1e-12));
     CHECK(co4.cellU < co.cellU);  // the transient decays ...
     CHECK(co4.pErr < co.pErr);    // ... in the velocity and in the pressure gradient
     CHECK(co.iters < 200);        // rule 3b: no capped solve
@@ -245,7 +244,7 @@ void gateHydrostatic() {
         "    mu = %-6g  staggered face %.3e  dP/dz %.3e   |   COLLOCATED face %.3e  "
         "dP/dz %.3e\n",
         mu, st.faceU, st.pErr, co.faceU, co.pErr);
-    CHECK(co.faceU < 7.4e-11);  // frozen at WO-V1: 10x the measured 7.08e-12 .. 7.34e-12
+    CHECK(co.faceU < 1e-12);  // measured 4.2e-14 .. 3.2e-13 (double operator storage)
   }
 }
 
