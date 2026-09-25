@@ -42,6 +42,14 @@ export PYTHONPATH=$PWD/build_dev              # -> build_dev/peclet/flow/_flow.*
 adds MPI, `Solver.init_mpi`/`rank`/`size` and `flow.mpi_block()` (OFF leaves the single-rank module
 byte-identical). Swapping backend = swapping the prefix and using a second tree.
 
+**Host backends compile flow with `-ffp-contract=off`** (always; no compiler default may fuse an
+FMA), and `-DPECLET_FLOW_HOST_ARCH=<arch>` (default empty = generic x86-64) adds `-march=<arch>` —
+`native` on a dev box, `znver4` on Snellius genoa, `znver3` on the workstation. With contraction
+off the wider ISA vectorizes without changing a bit (state hashes and the bubble-column dumps are
+identical across generic, contract-off and `-march=native`). Neither flag reaches a CUDA/HIP build,
+and PyPI wheels stay generic (`doc/vof_step_performance_design.md` §5.1). On aarch64 contract-off
+does change bits against the old compiler default: it makes host results ISA-independent.
+
 **Force `-DMPIEXEC_EXECUTABLE=/usr/bin/mpirun`.** FindMPI may pick ParaView's bundled `mpiexec` off
 `PATH`, which launches the OpenMPI-linked binaries as singletons — every `*_np4` then silently runs
 four independent np = 1 jobs.

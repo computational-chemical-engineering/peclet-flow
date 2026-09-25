@@ -129,6 +129,20 @@ if(_peclet_flow_host_backend AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>)
   message(STATUS "flow: host backend -> -ffp-contract=off")
 endif()
+# Opt-in host ISA (§5.1, A1): -march=${PECLET_FLOW_HOST_ARCH} on the same targets, host backends
+# only. Empty (default) keeps the generic x86-64 baseline, which is what the PyPI wheels ship (§9
+# Q6); site packages and dev trees set it -- `native` on a dev box, `znver4` for Snellius genoa,
+# `znver3` for the workstation. With contraction off (above) the wider ISA vectorizes but does not
+# fuse, so the results stay bit-identical to the generic build. Never applied to a CUDA/HIP build,
+# and the shared Kokkos prefix is not touched (its own objects stay generic).
+set(PECLET_FLOW_HOST_ARCH "" CACHE STRING
+    "Host backends only: -march value for flow's targets (empty = generic; e.g. native, znver4)")
+if(PECLET_FLOW_HOST_ARCH AND _peclet_flow_host_backend AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-march=${PECLET_FLOW_HOST_ARCH}>)
+  message(STATUS "flow: host backend -> -march=${PECLET_FLOW_HOST_ARCH}")
+elseif(PECLET_FLOW_HOST_ARCH AND NOT _peclet_flow_host_backend)
+  message(STATUS "flow: PECLET_FLOW_HOST_ARCH=${PECLET_FLOW_HOST_ARCH} ignored on a device backend")
+endif()
 
 # The ONE compiled instantiation of Solver<Staggered> / Solver<Colocated> (QUALITY_PLAN G.8): the
 # module and every test link it instead of instantiating the ~12 k-line class template themselves.
