@@ -657,10 +657,16 @@ class VofBlockSet {
     // After every block has advected: each block's pass touches only its own colour, so running
     // them together (their sums in one launch) is the per-block sequence reordered, bit for bit.
     if (!deb.empty())
-      debrisPassBatch(deb);
-    for (std::size_t k = 0; k < blocks_.size(); ++k)
-      if (blocks_[k].mine_)
-        recentre(k);
+      debrisPassBatch(deb, /*deferLedger=*/batch);
+    if (batch) {
+      // §5.9 stage 5: every bubble box in one launch, then read #2 -- the boxes, the debris sums
+      // and the WO-R ledger in ONE device->host copy; the recentre decisions exactly as before.
+      recentreBatched(!deb.empty());
+    } else {
+      for (std::size_t k = 0; k < blocks_.size(); ++k)
+        if (blocks_[k].mine_)
+          recentre(k);
+    }
     exch_->syncTable(blocks_);
     for (auto& b : blocks_)
       b.mine_ = (b.master == rank_);
@@ -1245,10 +1251,14 @@ class VofBlockSet {
   /// Move / resize the block when the bubble has spent its margin (or when the box has grown
   /// wastefully large). The colour is copied by GLOBAL index — exact, no interpolation.
   void recentre(std::size_t idx) {
-    VofBlock& b = blocks_[idx];
     VofBox bb;
-    if (!bubbleBox(b, bb))
+    if (!bubbleBox(blocks_[idx], bb))
       return;
+    recentreTo(idx, bb);
+  }
+  /// `recentre` for a bubble box already measured (the batched path's read #2).
+  void recentreTo(std::size_t idx, const VofBox& bb) {
+    VofBlock& b = blocks_[idx];
     const VofBox need = vofClampBox(VofBox::grown(bb, margin_), gs_, per_);
     bool wasteful = false;
     if (allowShrink)
@@ -1346,12 +1356,19 @@ class VofBlockSet {
   /// single-thread order, so the same bits) and reach the host in ONE copy, instead of a
   /// single-thread kernel plus a device->host sync per block. The lists live at per-block offsets
   /// of the shared scratch, so no block's lists overwrite another's before the sums read them.
-  void debrisPassBatch(std::vector<VofBlock*>& bs) {
+  /// @param deferLedger  batched path only: leave the per-block packet on the device -- the caller
+  ///                     reads it with the boxes (read #2 of §5.9) and applies the ledger then.
+  void debrisPassBatch(std::vector<VofBlock*>& bs, bool deferLedger = false) {
     const double t0 = timingOn ? tick_() : 0.0;
-    if (batchEligible())
+    if (batchEligible()) {
       debrisBatched(bs);
-    else
+      if (!deferLedger) {
+        Kokkos::deep_copy(pkHost_, pk_);
+        applyDebrisLedger(bs, csfEnabled && debrisCensus);
+      }
+    } else {
       debrisPassBatchImpl(bs);
+    }
     if (timingOn) {
       Kokkos::fence();
       debrisSeconds += tick_() - t0;
@@ -1895,17 +1912,15 @@ class VofBlockSet {
       bCflHost_ = Kokkos::create_mirror_view(bCfl_);
       bStart_ = LField("vof::block::batch_start", nb);
       bEnd_ = LField("vof::block::batch_end", nb);
-      bBcv_ = SField("vof::block::batch_bcvol", 6 * nb);
-      bBcvHost_ = Kokkos::create_mirror_view(bBcv_);
     }
+    ensurePacket(nb);
     // (1) Courant numbers: one launch, one read, the throw before any block moves (R4)
     for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch)
       vofBatchCfl(batchTable(jobs, j0), bCfl_);
     Kokkos::deep_copy(bCflHost_, bCfl_);
     for (std::size_t k = 0; k < nb; ++k)
       mb[k]->adv_.enforceCfl(bCflHost_(k), dt);
-    if (anyMask)
-      Kokkos::deep_copy(SExec(), bBcv_, 0.0);
+    Kokkos::deep_copy(SExec(), pk_, 0.0);  // the WO-R ledger slots accumulate over the sweeps
     const int* perm = kWySweepPerm[static_cast<int>(step_ % 6)];
     for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch) {
       VofBlockTable T = batchTable(jobs, j0);
@@ -1925,18 +1940,11 @@ class VofBlockSet {
         vofSetOffsets(T, [d](const VofBlockJob& J) { return vofJobFaces(J, d); });
         vofBatchFlux(T, d);
         if (anyMask)
-          vofBatchBcLedger(T, d, bBcv_);
+          vofBatchBcLedger(T, d, pk_, kPk, kPkBcv);
         vofSetOffsets(T, vofJobInner);
         vofBatchUpdate(T, d);
         batchGhostFill(T);
       }
-    }
-    if (anyMask) {  // the WO-R ledger (no block installs a mask today: inert)
-      Kokkos::deep_copy(bBcvHost_, bBcv_);
-      for (std::size_t k = 0; k < nb; ++k)
-        for (int f = 0; f < 6; ++f)
-          if (jobs[k].outside != nullptr && jobs[k].bcOwn[f])
-            mb[k]->adv_.addBcFaceVolume(f, bBcvHost_(6 * k + f));
     }
     for (std::size_t k = 0; k < nb; ++k)
       mb[k]->adv_.noteBatchedStep();
@@ -1972,9 +1980,8 @@ class VofBlockSet {
       for (int q = 0; q < 6; ++q)
         dRange_[q] = LField("vof::block::batch_debris_range", nb);
       dCap_ = Kokkos::View<int*, SMem>("vof::block::batch_debris_cap", nb);
-      dOut_ = SField("vof::block::batch_debris_out", kDbSlots * nb);
-      dOutHost_ = Kokkos::create_mirror_view(dOut_);
     }
+    ensurePacket(nb);
     Kokkos::deep_copy(SExec(), dCap_, 0);
     const LField sD = dRange_[0], eD = dRange_[1], sR = dRange_[2], eR = dRange_[3],
                  sA = dRange_[4], eA = dRange_[5];
@@ -1995,24 +2002,22 @@ class VofBlockSet {
       }
       ensure(listA_, "vof::block::attached_list");
       vofBatchMark(T, 2, ieps, cfull, weps, listA_, sA, eA);
-      vofBatchDebrisSums(T, F, listD_, listR_, listA_, sD, eD, sR, eR, sA, eA, dOut_, kDbSlots, 0);
+      vofBatchDebrisSums(T, F, listD_, listR_, listA_, sD, eD, sR, eR, sA, eA, pk_, kPk, 0);
       if (static_cast<long>(debrisEx_.extent(0)) < region)
         debrisEx_ = SField(
             Kokkos::view_alloc("vof::block::debris_excess", Kokkos::WithoutInitializing), region);
-      vofBatchDebrisWrite(T, F, listD_, listR_, listA_, sD, sR, sA, eA, dOut_, kDbSlots, 0,
-                          debrisEx_, dCap_);
-      vofBatchDebrisLost(T, sA, eA, dOut_, kDbSlots, 0, debrisEx_, dCap_);
+      vofBatchDebrisWrite(T, F, listD_, listR_, listA_, sD, sR, sA, eA, pk_, kPk, 0, debrisEx_,
+                          dCap_);
+      vofBatchDebrisLost(T, sA, eA, pk_, kPk, 0, debrisEx_, dCap_);
       batchGhostFill(T);  // the inner colour moved; the next reader expects valid ghosts
     }
-    Kokkos::deep_copy(dOutHost_, dOut_);  // ONE device->host copy for every block
-    applyDebrisLedger(bs, F.doDebris);
   }
 
   /// The host half of the debris pass: the ledger of `debrisPassBatchImpl`, from the packet.
   void applyDebrisLedger(std::vector<VofBlock*>& bs, bool doDebris) {
     for (std::size_t k = 0; k < bs.size(); ++k) {
       VofBlockStats& st = bs[k]->st_;
-      const double* ho = &dOutHost_(kDbSlots * k);
+      const double* ho = &pkHost_(kPk * k);
       const long nD = static_cast<long>(ho[kDbND]);
       const bool removeD = doDebris && debrisRemove && nD > 0;
       const bool acted = ho[kDbActed] != 0.0;
@@ -2042,6 +2047,64 @@ class VofBlockSet {
     }
   }
 
+  /// The per-job packet of read #2 (§5.9): the debris slots (`VofDebrisSlot`), the bubble box, the
+  /// WO-R ledger. One row of `kPk` doubles per master block, in block order.
+  static constexpr int kPkBox = kDbSlots, kPkBcv = kDbSlots + 6, kPk = kDbSlots + 12;
+  void ensurePacket(std::size_t nb) {
+    if (static_cast<std::size_t>(pk_.extent(0)) < kPk * nb) {
+      pk_ = SField("vof::block::batch_packet", kPk * nb);
+      pkHost_ = Kokkos::create_mirror_view(pk_);
+    }
+  }
+
+  /// Stage 5 of §5.9 on the batched path: every master block's bubble box in one launch, then
+  /// read #2 -- the boxes, the debris sums and the WO-R ledger in ONE device->host copy -- then the
+  /// debris ledger, the WO-R ledger and the recentre decisions, exactly as the per-block path takes
+  /// them. The recentre copies themselves are rare and stay per block.
+  void recentreBatched(bool ranDebris) {
+    std::vector<std::size_t> idx;
+    std::vector<VofBlock*> mb;
+    for (std::size_t k = 0; k < blocks_.size(); ++k)
+      if (blocks_[k].mine_) {
+        idx.push_back(k);
+        mb.push_back(&blocks_[k]);
+      }
+    const std::size_t nb = idx.size();
+    if (nb == 0)
+      return;
+    std::vector<VofBlockJob> jobs(nb);
+    for (std::size_t k = 0; k < nb; ++k)
+      jobs[k] = makeJob(*mb[k], 0.0);
+    ensurePacket(nb);
+    const double eps = bubbleEps > wispEps ? bubbleEps : wispEps;  // bubbleBox's threshold (§12.2)
+    for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch)
+      vofBatchBox(batchTable(jobs, j0), eps, pk_, kPk, kPkBox);
+    Kokkos::deep_copy(pkHost_, pk_);  // read #2
+    if (ranDebris)
+      applyDebrisLedger(mb, csfEnabled && debrisCensus);
+    for (std::size_t k = 0; k < nb; ++k) {  // the WO-R ledger (no block installs a mask today)
+      if (jobs[k].outside == nullptr)
+        continue;
+      for (int f = 0; f < 6; ++f)
+        if (jobs[k].bcOwn[f])
+          mb[k]->adv_.addBcFaceVolume(f, pkHost_(kPk * k + kPkBcv + f));
+    }
+    for (std::size_t k = 0; k < nb; ++k) {
+      const double* hb = &pkHost_(kPk * k + kPkBox);
+      const int lo[3] = {static_cast<int>(hb[0]), static_cast<int>(hb[1]), static_cast<int>(hb[2])};
+      const int hi[3] = {static_cast<int>(hb[3]), static_cast<int>(hb[4]), static_cast<int>(hb[5])};
+      if (hi[0] < lo[0])
+        continue;  // the block is empty (bubbleBox returned false)
+      VofBlock& b = *mb[k];
+      VofBox bb;
+      for (int d = 0; d < 3; ++d) {
+        bb.lo[d] = lo[d] + b.box.lo[d];
+        bb.hi[d] = hi[d] + 1 + b.box.lo[d];
+      }
+      recentreTo(idx[k], bb);
+    }
+  }
+
  private:
   VofMetric metric_;  ///< Phase 3: the anisotropic cell metric (default = unit)
   double h_ = 1.0;
@@ -2063,13 +2126,13 @@ class VofBlockSet {
   SField debrisOut_;  ///< the batched sums, 6 per acting block (debrisPassBatch)
   SField::host_mirror_type debrisOutHost_;
   // C1 batched stages: per-job device scalars (indexed by the job's place among the master blocks)
-  SField bCfl_, bBcv_;
-  SField::host_mirror_type bCflHost_, bBcvHost_;
+  SField bCfl_;
+  SField::host_mirror_type bCflHost_;
   LField bList_, bStart_, bEnd_;  ///< the concatenated worklist and each job's range in it
   LField dRange_[6];              ///< the debris lists' per-job ranges: sD, eD, sR, eR, sA, eA
   Kokkos::View<int*, SMem> dCap_; ///< per job: some attached cell was capped at 1
-  SField dOut_;                   ///< the per-job debris packet (`VofDebrisSlot`)
-  SField::host_mirror_type dOutHost_;
+  SField pk_;                     ///< the per-job packet of read #2 (`kPk` doubles per block)
+  SField::host_mirror_type pkHost_;
 };
 
 }  // namespace peclet::flow::vof

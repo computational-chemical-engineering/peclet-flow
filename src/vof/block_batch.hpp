@@ -255,10 +255,10 @@ inline void vofBatchFlux(const VofBlockTable& T, int d) {
 
 /// The WO-R boundary ledger (`WyAdvector::accumulateBcFaceVolume`) of the jobs carrying the mask:
 /// one thread per (job, side), summing its plane of `d`-fluxes in (p0 fastest, p1) row order into
-/// `bcv(6 (base + k) + face)` -- a fixed order, which is a C2 order change against the per-block
-/// MDRange2 reduction (recorded; `doc/vof_step_performance_design.md` §5.9). The block container
-/// installs no mask today, so the path is inert on every shipped configuration.
-inline void vofBatchBcLedger(const VofBlockTable& T, int d, SField bcv) {
+/// `out(stride (base + k) + slot0 + face)` -- a fixed order, which is a C2 order change against the
+/// per-block MDRange2 reduction (recorded; `doc/vof_step_performance_design.md` §5.9). The block
+/// container installs no mask today, so the path is inert on every shipped configuration.
+inline void vofBatchBcLedger(const VofBlockTable& T, int d, SField out, int stride, int slot0) {
   Kokkos::parallel_for(
       "vof::block::batch_bcvol", Kokkos::RangePolicy<SExec>(SExec(), 0, 2 * T.nj),
       KOKKOS_LAMBDA(const long t) {
@@ -279,7 +279,7 @@ inline void vofBatchBcLedger(const VofBlockTable& T, int d, SField bcv) {
           for (int p0 = g; p0 < g + nn[b]; ++p0)
             acc += J.fl[static_cast<long>(p0) * sb + static_cast<long>(p1) * sc +
                         static_cast<long>(fa) * sd];
-        bcv(6 * (T.base + k) + f) += (s == 0) ? acc : -acc;
+        out(static_cast<long>(stride) * (T.base + k) + slot0 + f) += (s == 0) ? acc : -acc;
       });
 }
 
@@ -593,6 +593,52 @@ inline void vofBatchDebrisLost(const VofBlockTable& T, LField sA0, LField eA0, S
           lost = a;
         }
         out(ob + kDbDV) = lost;
+      });
+}
+
+// ---- stage 5: the bubble boxes (`VofBlockSet::bubbleBox`) ------------------------------------
+
+/// One team per job: the tight box of `|C| > eps` over the inner region, in the block's LOCAL inner
+/// frame (`bubbleBox`'s six Min/Max reductions; order-free). Written as doubles (exact integers)
+/// to `out(stride (base + k) + slot0 + {0..5})` = lo x, y, z, hi x, y, z; an empty block reads
+/// hi < lo (the reducers' identities), exactly as `bubbleBox` tests it.
+inline void vofBatchBox(const VofBlockTable& T, double eps, SField out, int stride, int slot0) {
+  using Team = Kokkos::TeamPolicy<SExec>;
+  Kokkos::parallel_for(
+      "vof::block::batch_bbox", Team(SExec(), T.nj, Kokkos::AUTO),
+      KOKKOS_LAMBDA(const typename Team::member_type& tm) {
+        const int k = tm.league_rank();
+        const VofBlockJob& J = T.job[k];
+        const I3 e = J.e, n = J.n;
+        const int g = J.g;
+        const long region = static_cast<long>(n.x) * n.y * n.z;
+        const VofRawField c{J.c};
+        int v[6];
+        for (int a = 0; a < 6; ++a) {
+          int r = 0;
+          auto body = [&](const long q, int& acc) {
+            const int px = static_cast<int>(q % n.x);
+            const int py = static_cast<int>((q / n.x) % n.y);
+            const int pz = static_cast<int>(q / (static_cast<long>(n.x) * n.y));
+            if (!(Kokkos::fabs(c(L3(px + g, py + g, pz + g, e))) > eps))
+              return;
+            const int p = (a % 3 == 0) ? px : (a % 3 == 1 ? py : pz);
+            if (a < 3)
+              acc = p < acc ? p : acc;
+            else
+              acc = p > acc ? p : acc;
+          };
+          if (a < 3)
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tm, region), body, Kokkos::Min<int>(r));
+          else
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tm, region), body, Kokkos::Max<int>(r));
+          v[a] = r;
+        }
+        Kokkos::single(Kokkos::PerTeam(tm), [&]() {
+          const long ob = static_cast<long>(stride) * (T.base + k) + slot0;
+          for (int a = 0; a < 6; ++a)
+            out(ob + a) = static_cast<double>(v[a]);
+        });
       });
 }
 
