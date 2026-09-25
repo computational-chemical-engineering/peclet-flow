@@ -2523,6 +2523,19 @@ class CutcellMG {
         });
   }
 
+  // A zero-filled level-0 work vector that persists across solves: the Chebyshev driver and its
+  // eigenvalue estimate used to allocate (and free) eight of these per step -- a
+  // cudaMalloc/cudaFree pair each, and cudaFree synchronises the device. Same contents as a fresh
+  // View (zeros), so the solves are unchanged bit for bit.
+  CCField workVector(int slot, std::size_t n, const char* label) {
+    CCField& v = work_[slot];
+    if (v.extent(0) != n)
+      v = CCField(label, n);
+    else
+      Kokkos::deep_copy(v, 0.0);
+    return v;
+  }
+
   // Estimate the spectral bounds [lmin,lmax] of M^{-1}A (M^{-1} = one symmetric V-cycle) by power
   // iteration (direct for the max + a shifted iteration for the min), seeded by `seed`.
   // Communication-heavy, so the CUDA driver runs it once on step 1 and reuses the bounds. Port of
@@ -2535,7 +2548,8 @@ class CutcellMG {
     bottom_ = bottom;
     Level& l0 = lv_[0];
     const std::size_t n = l0.n;
-    CCField v("ev_v", n), w("ev_w", n), z("ev_z", n), srhs("ev_srhs", n);
+    CCField v = workVector(0, n, "ev_v"), w = workVector(1, n, "ev_w"),
+            z = workVector(2, n, "ev_z"), srhs = workVector(3, n, "ev_srhs");
     Kokkos::deep_copy(srhs, seed);
     auto matvec = [&](CCField y, CCField x) { matvecOverlap(l0, y, x); };
     auto applyT = [&](CCField out,
@@ -2602,7 +2616,8 @@ class CutcellMG {
     }  // robust to swapped bounds
     a *= 0.95;
     bnd *= 1.05;  // safety margin: [a,b] must bracket the spectrum
-    CCField r("cb_r", n), z("cb_z", n), d("cb_d", n), w("cb_w", n);
+    CCField r = workVector(4, n, "cb_r"), z = workVector(5, n, "cb_z"),
+            d = workVector(6, n, "cb_d"), w = workVector(7, n, "cb_w");
     auto matvec = [&](CCField y, CCField v) { matvecOverlap(l0, y, v); };
     auto precond = [&](CCField zz, CCField rr) {
       Kokkos::deep_copy(l0.rhs, rr);
@@ -2799,6 +2814,7 @@ class CutcellMG {
   static constexpr AllOp MPI_SUM_ = kSum, MPI_MAX_ = kMax;
 
   std::vector<Level> lv_;
+  CCField work_[8];  // workVector's slots (0-3 the eigenvalue estimate, 4-7 the Chebyshev driver)
   // The physical metric (setMetric), doc/anisotropic_metric.md §5: h_a' = h_a/hRef and the flag
   // that engages the aspect-ratio coarsening rule.  (1,1,1)/false is the isotropic lattice, on
   // which mgChooseRatio reproduces today's level table exactly.
