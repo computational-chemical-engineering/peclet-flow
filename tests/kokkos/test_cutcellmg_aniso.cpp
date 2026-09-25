@@ -315,19 +315,21 @@ double residualInf(CutcellMG& mg, const std::vector<double>& b) {
   auto hx = Kokkos::create_mirror_view(l0.x);
   Kokkos::deep_copy(hx, l0.x);
   auto hAC = Kokkos::create_mirror_view(l0.AC);
-  auto hAW = Kokkos::create_mirror_view(l0.AW);
-  auto hAE = Kokkos::create_mirror_view(l0.AE);
-  auto hAS = Kokkos::create_mirror_view(l0.AS);
-  auto hAN = Kokkos::create_mirror_view(l0.AN);
-  auto hAB = Kokkos::create_mirror_view(l0.AB);
-  auto hAT = Kokkos::create_mirror_view(l0.AT);
+  // A2 face form: the bands are AW = AFX(c), AE = AFX(c+1), AS = AFY(c), AN = AFY(c+ex), ...
+  auto hAFX = Kokkos::create_mirror_view(l0.AFX);
+  auto hAFY = Kokkos::create_mirror_view(l0.AFY);
+  auto hAFZ = Kokkos::create_mirror_view(l0.AFZ);
   Kokkos::deep_copy(hAC, l0.AC);
-  Kokkos::deep_copy(hAW, l0.AW);
-  Kokkos::deep_copy(hAE, l0.AE);
-  Kokkos::deep_copy(hAS, l0.AS);
-  Kokkos::deep_copy(hAN, l0.AN);
-  Kokkos::deep_copy(hAB, l0.AB);
-  Kokkos::deep_copy(hAT, l0.AT);
+  Kokkos::deep_copy(hAFX, l0.AFX);
+  Kokkos::deep_copy(hAFY, l0.AFY);
+  Kokkos::deep_copy(hAFZ, l0.AFZ);
+  const std::size_t sy = e.x, sz = (std::size_t)e.x * e.y;
+  auto hAW = [&](std::size_t c) { return hAFX(c); };
+  auto hAE = [&](std::size_t c) { return hAFX(c + 1); };
+  auto hAS = [&](std::size_t c) { return hAFY(c); };
+  auto hAN = [&](std::size_t c) { return hAFY(c + sy); };
+  auto hAB = [&](std::size_t c) { return hAFZ(c); };
+  auto hAT = [&](std::size_t c) { return hAFZ(c + sz); };
   auto id = [&](int i, int j, int k) {
     const int wi = (i % nx + nx) % nx, wj = (j % ny + ny) % ny, wk = (k % nz + nz) % nz;
     return (std::size_t)(wi + G) + (std::size_t)(wj + G) * e.x +

@@ -95,6 +95,206 @@ inline void buildCutcellOp(OpV AC, OpV AW, OpV AE, OpV AS, OpV AN, OpV AB, OpV A
       });
 }
 
+// --- A2: the FACE form of the pressure operator (doc/vof_step_performance_design.md §4.2, §5.3) --
+// The pressure hierarchy stores the diagonal AC and ONE band coefficient per face instead of seven
+// bands: AFX(i) is the off-diagonal coefficient of cell i's LOW x face, -open_x(i) * gfx (MReal) --
+// exactly the old AW(i) -- and the same face is cell i-1's high face, so
+//   AW(i) = AFX(i)   AE(i) = AFX(i+sx)   AS(i) = AFY(i)   AN(i) = AFY(i+sy)
+//   AB(i) = AFZ(i)   AT(i) = AFZ(i+sz).
+// Bit-identical to the bands: AFX holds the same MReal-rounded value AW held, and every consumer
+// reads it into the identical band expression -- the order AE, AW, AN, AS, AT, AB, each term a
+// (coefficient) * (neighbour) product. Storing the band SIGN matters on the device: the first form
+// of this change stored +open*gf and read (-TX(i+1))*phi + ..., and nvcc then contracted a
+// different product into each FMA than for the band expression -- the bubble column drifted by
+// 8.8e-15 (u, relative) in 50 steps; host builds do not contract and were bitwise either way
+// (doc/vof_step_performance_design.md §4.2 note, WO-3). AC is built by the identical expression.
+// 32 instead of 56 bytes of operator per cell (double), and three arrays per level instead of six.
+// The seven-band kernels above stay for the scalar-transport smoother and the standalone kernel
+// tests.
+//
+// AFX/AFY/AFZ are written over the FULL extent [0, ext) -- every index a band consumer ever reads,
+// including the i+sx of the last ring cell of a communication-avoiding (g=2) level -- from the
+// ghost-filled, boundary-re-imposed openness; AC over the build box [gb, ext-gb) as before.
+template <class OpV, class OV>
+KOKKOS_INLINE_FUNCTION void cutcellBuildFaceOpCell(const OpV& AC, const OpV& AFX, const OpV& AFY,
+                                                   const OpV& AFZ, const OV& ox, const OV& oy,
+                                                   const OV& oz, long i, long sx, long sy, long sz,
+                                                   double gfx, double gfy, double gfz, bool diag) {
+  const double tw = ox(i) * gfx;
+  const double ts = oy(i) * gfy;
+  const double tb = oz(i) * gfz;
+  AFX(i) = -tw;
+  AFY(i) = -ts;
+  AFZ(i) = -tb;
+  if (diag) {
+    const double te = ox(i + sx) * gfx;
+    const double tn = oy(i + sy) * gfy;
+    const double tt = oz(i + sz) * gfz;
+    AC(i) = te + tw + tn + ts + tt + tb;
+  }
+}
+template <class PV, class BV, class OpV>
+KOKKOS_INLINE_FUNCTION void cutcellSmoothFaceCell(const PV& phi, const BV& b, const OpV& AC,
+                                                  const OpV& AFX, const OpV& AFY, const OpV& AFZ,
+                                                  long i, long sx, long sy, long sz, long xp,
+                                                  long xm, long yp, long ym, long zp, long zm) {
+  const double ac = AC(i);
+  if (ac < 1e-30)
+    return;  // fully closed (solid) cell: decoupled, phi stays 0
+  const double s = AFX(i + sx) * phi(xp) + AFX(i) * phi(xm) + AFY(i + sy) * phi(yp) +
+                   AFY(i) * phi(ym) + AFZ(i + sz) * phi(zp) + AFZ(i) * phi(zm);
+  phi(i) = (b(i) - s) / ac;
+}
+template <class XV, class OpV>
+KOKKOS_INLINE_FUNCTION double cutcellApplyFaceCell(const XV& x, const OpV& AC, const OpV& AFX,
+                                                   const OpV& AFY, const OpV& AFZ, long i, long sx,
+                                                   long sy, long sz, long xp, long xm, long yp,
+                                                   long ym, long zp, long zm) {
+  return AC(i) * x(i) + AFX(i + sx) * x(xp) + AFX(i) * x(xm) + AFY(i + sy) * x(yp) +
+         AFY(i) * x(ym) + AFZ(i + sz) * x(zp) + AFZ(i) * x(zm);
+}
+template <class RV, class XV, class BV, class OpV>
+KOKKOS_INLINE_FUNCTION void cutcellResidualFaceCell(const RV& r, const XV& x, const BV& b,
+                                                    const OpV& AC, const OpV& AFX, const OpV& AFY,
+                                                    const OpV& AFZ, long i, long sx, long sy,
+                                                    long sz, long xp, long xm, long yp, long ym,
+                                                    long zp, long zm) {
+  const double Ax = (double)AC(i) * x(i) + (double)AFX(i + sx) * x(xp) + (double)AFX(i) * x(xm) +
+                    (double)AFY(i + sy) * x(yp) + (double)AFY(i) * x(ym) +
+                    (double)AFZ(i + sz) * x(zp) + (double)AFZ(i) * x(zm);
+  r(i) = b(i) - Ax;
+}
+
+// Face-form build: AFX/AFY/AFZ over [0, ext), AC over the box [gb, ext-gb) (gb = the level's build
+// width, as buildCutcellOp's g).
+template <class OpV>
+inline void buildCutcellOpFace(OpV AC, OpV AFX, OpV AFY, OpV AFZ, CCConst ox, CCConst oy,
+                               CCConst oz, C3 e, int gb, double gfx, double gfy, double gfz) {
+  ccFor3(
+      "peclet::flow::cc_build_op", C3{0, 0, 0}, C3{e.x, e.y, e.z},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const bool diag =
+            lx >= gb && lx < e.x - gb && ly >= gb && ly < e.y - gb && lz >= gb && lz < e.z - gb;
+        cutcellBuildFaceOpCell(AC, AFX, AFY, AFZ, ox, oy, oz, i, sx, sy, sz, gfx, gfy, gfz, diag);
+      });
+}
+// Face-form siblings of cutcellSmoothColor / cutcellSmoothColorBox (same launch forms).
+template <class OpV>
+inline void cutcellSmoothColorFace(CCField phi, CCConst b, OpV AC, OpV AFX, OpV AFY, OpV AFZ, C3 e,
+                                   C3 og, int g, int color) {
+  CCExec space;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
+    const long cells = (long)nyi * nzi * (e.x - 2 * g);
+    auto pencil = KOKKOS_LAMBDA(long t) {
+      const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+      PECLET_FLOW_OMP_SIMD  // same-colour cells are independent (ccFor3's contract)
+          for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                              i - sy, i + sz, i - sz);
+      }
+    };
+    if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      for (long t = 0; t < (long)nyi * nzi; ++t)
+        pencil(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::cc_smooth",
+                         Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
+    return;
+  }
+  using MD = MDRange3<CCExec>;
+  Kokkos::parallel_for(
+      "peclet::flow::cc_smooth", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                              i - sy, i + sz, i - sz);
+      });
+}
+template <class OpV>
+inline void cutcellSmoothColorBoxFace(CCField phi, CCConst b, OpV AC, OpV AFX, OpV AFY, OpV AFZ,
+                                      C3 e, C3 og, int color, C3 rlo, C3 rhi, C3 slo, C3 shi) {
+  if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
+    return;
+  CCExec space;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    const int nyi = rhi.y - rlo.y, nzi = rhi.z - rlo.z;
+    const long cells = (long)nyi * nzi * (rhi.x - rlo.x);
+    auto pencil = KOKKOS_LAMBDA(long t) {
+      const int ly = rlo.y + (int)(t % nyi), lz = rlo.z + (int)(t / nyi);
+      const bool yzSkip = ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z;
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+      for (int lx = rlo.x + ((P ^ (rlo.x & 1)) & 1); lx < rhi.x; lx += 2) {
+        if (yzSkip && lx >= slo.x && lx < shi.x)
+          continue;  // inside the skip box (already swept by the interior pass)
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                              i - sy, i + sz, i - sz);
+      }
+    };
+    if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      for (long t = 0; t < (long)nyi * nzi; ++t)
+        pencil(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::cc_smooth_box",
+                         Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
+    return;
+  }
+  using MD = MDRange3<CCExec>;
+  Kokkos::parallel_for(
+      "peclet::flow::cc_smooth_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+          return;  // inside the skip box (already swept by the interior pass)
+        if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                              i - sy, i + sz, i - sz);
+      });
+}
+// Face-form siblings of applyCutcellOp / applyCutcellOpBox.
+template <class OpV>
+inline void applyCutcellOpFace(CCField y, CCConst x, OpV AC, OpV AFX, OpV AFY, OpV AFZ, C3 e,
+                               int g) {
+  ccFor3(
+      "peclet::flow::cc_apply", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        y(i) = cutcellApplyFaceCell(x, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                                    i - sy, i + sz, i - sz);
+      });
+}
+template <class OpV>
+inline void applyCutcellOpBoxFace(CCField y, CCConst x, OpV AC, OpV AFX, OpV AFY, OpV AFZ, C3 e,
+                                  C3 rlo, C3 rhi, C3 slo, C3 shi) {
+  if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
+    return;
+  ccFor3(
+      "peclet::flow::cc_apply_box", C3{rlo.x, rlo.y, rlo.z}, C3{rhi.x, rhi.y, rhi.z},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        y(i) = cutcellApplyFaceCell(x, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                                    i - sy, i + sz, i - sz);
+      });
+}
+
 // Open-weighted flux divergence d_i = sum_f signed(o_f * face-velocity), consistent with A
 // (diverg_open_k).
 inline void divergOpen(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst oy, CCConst oz,

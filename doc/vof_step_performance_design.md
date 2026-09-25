@@ -239,6 +239,16 @@ it keeps the expression shape (the order `AE, AW, AN, AS, AT, AB` in the smoothe
 - **Colour-packed layout.** It breaks the x-fastest storage convention.
 - **Float bands.** Register (the float-operator trap).
 
+**Implementation note (WO-3, 2026-09-25; coordinator decision): the arrays store the band sign.**
+As written above (`TX = +o·gf`, consumers reading `−TX`), A2 was bitwise on host-openmp and on the
+float tree but NOT on CUDA: the bubble column drifted by 8.8e-15 in u (relative, 50 steps), and the
+staggered/collocated and np2 state hashes changed. nvcc contracts the `(−TX(i+1))·φ + (−TX(i))·φ + …`
+chain into different FMAs than the band expression (risk R1; the host does not contract). The
+arrays therefore hold the off-diagonal coefficient of the cell's LOW face itself, named
+`AFX/AFY/AFZ`: `AFX(i) = −o_x(i)·gfx` = the old `AW(i)`, `AE(i) = AFX(i+1)`, and so on, so every
+consumer reads the literal band expression. Same storage (3 arrays, 32 B/cell) and the same bitwise
+argument; bitwise on host, CUDA and float (`vof_step_performance_log.md`, WO-1…5 section).
+
 ### 4.3 Ghost fills: fused periodic wrap (A3)
 
 **Decision.** On the single-rank path with no outflow face and no overlay:

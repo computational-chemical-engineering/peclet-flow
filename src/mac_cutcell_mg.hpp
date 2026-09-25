@@ -245,6 +245,33 @@ inline void residualCutcellBox(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, 
       });
 }
 
+// Face-form siblings of residualCutcell / residualCutcellBox (A2, see mac_pressure.hpp).
+inline void residualCutcellFace(CCField r, CCConst x, CCConst b, FPC AC, FPC AFX, FPC AFY, FPC AFZ,
+                                C3 e, int g) {
+  ccFor3(
+      "peclet::flow::cc_residual", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                                i - sy, i + sz, i - sz);
+      });
+}
+inline void residualCutcellBoxFace(CCField r, CCConst x, CCConst b, FPC AC, FPC AFX, FPC AFY,
+                                   FPC AFZ, C3 e, C3 rlo, C3 rhi, C3 slo, C3 shi) {
+  if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
+    return;
+  ccFor3(
+      "peclet::flow::cc_residual_box", rlo, rhi, KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+          return;  // inside the skip box (already done by the interior pass)
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                                i - sy, i + sz, i - sz);
+      });
+}
+
 // average restriction (coarse = mean of ratio^3 fine children; mg_restrict_k) + trilinear
 // prolongation (added to fine; mg_prolong_k). Both over inner cells. gc/gf: coarse/fine block
 // ghost widths (CA-eligible coarse levels carry g=2, so they can differ across one transfer).
@@ -355,7 +382,8 @@ class CutcellMG {
     int g = 1;
     bool caOk = false;  // width-2 topology built and every rank's block extent >= 4
     CCField x, rhs, res, ox, oy, oz;
-    FPV AC, AW, AE, AS, AN, AB, AT;
+    // A2 face form (mac_pressure.hpp): the diagonal + one coefficient per face, full extent.
+    FPV AC, AFX, AFY, AFZ;
 #ifdef PECLET_FLOW_MPI
     std::shared_ptr<GridHaloTopology<3>> halo;  // per-level topology (decomposed)
     std::shared_ptr<GridHalo<double>> dev;      // per-level ghost exchange
@@ -525,7 +553,7 @@ class CutcellMG {
       v.ox = CCField("mg_ox", v.n);
       v.oy = CCField("mg_oy", v.n);
       v.oz = CCField("mg_oz", v.n);
-      for (FPV* p : {&v.AC, &v.AW, &v.AE, &v.AS, &v.AN, &v.AB, &v.AT})
+      for (FPV* p : {&v.AC, &v.AFX, &v.AFY, &v.AFZ})
         *p = FPV("mg_A", v.n);
       lv_.push_back(v);
       if (next.x == inner.x && next.y == inner.y && next.z == inner.z)
@@ -917,7 +945,7 @@ class CutcellMG {
       v.ox = CCField("mg_ox", v.n);
       v.oy = CCField("mg_oy", v.n);
       v.oz = CCField("mg_oz", v.n);
-      for (FPV* p : {&v.AC, &v.AW, &v.AE, &v.AS, &v.AN, &v.AB, &v.AT})
+      for (FPV* p : {&v.AC, &v.AFX, &v.AFY, &v.AFZ})
         *p = FPV("mg_A", v.n);
       lv_.push_back(v);
       if (idleBelow) {
@@ -1113,8 +1141,8 @@ class CutcellMG {
              // idempotent when the caller already filled them, required when it passed inner-only.
     applyBoundaryOpenness(
         f);  // re-impose non-periodic wall/inflow faces the periodic fill clobbered
-    buildCutcellOp(f.AC, f.AW, f.AE, f.AS, f.AN, f.AB, f.AT, CCConst(f.ox), CCConst(f.oy),
-                   CCConst(f.oz), f.ext, G, idx2, idy2, idz2);
+    buildCutcellOpFace(f.AC, f.AFX, f.AFY, f.AFZ, CCConst(f.ox), CCConst(f.oy), CCConst(f.oz),
+                       f.ext, G, idx2, idy2, idz2);
 #ifdef PECLET_FLOW_MPI
     // A telescope point gathers this level's openness onto the group roots (all group ranks take
     // part); the next level coarsens from that stage. A rank idling below holds no next level, so
@@ -1158,9 +1186,8 @@ class CutcellMG {
       // so they come out bit-identical to the owning rank's inner rows — the redundant ring
       // re-smoothing of the CA sweep reads them. Inner rows are computed from the same operands
       // as the g-box build (identical). g=1 levels keep the inner-only build.
-      buildCutcellOp(c.AC, c.AW, c.AE, c.AS, c.AN, c.AB, c.AT, CCConst(c.ox), CCConst(c.oy),
-                     CCConst(c.oz), c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy,
-                     idz2 * sz);
+      buildCutcellOpFace(c.AC, c.AFX, c.AFY, c.AFZ, CCConst(c.ox), CCConst(c.oy), CCConst(c.oz),
+                         c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy, idz2 * sz);
 #ifdef PECLET_FLOW_MPI
       if (c.tele) {
         teleGather(c, c.ox, c.tele->ox);
@@ -1452,16 +1479,16 @@ class CutcellMG {
         h2->exchange(xg2);          // 2-deep halo (cross-rank + periodic)
         unstageG2(l0, q, xg2);      // whole l0 block back (fills q's g=1 halo — no 2nd exchange)
         applyOutflowGhost(l0, q);
-        applyCutcellOp(y, CCConst(q), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                       FPC(l0.AB), FPC(l0.AT), l0.ext, G);
+        applyCutcellOpFace(y, CCConst(q), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext,
+                           G);
         gpApplyDelta(y, CCConst(xg2), ov, nOv, nn, l0.ext, G, ext2, 2, /*useGhost=*/true);
         return;
       }
 #endif
       fill(l0, q);
       applyOutflowGhost(l0, q);
-      applyCutcellOp(y, CCConst(q), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                     FPC(l0.AB), FPC(l0.AT), l0.ext, G);
+      applyCutcellOpFace(y, CCConst(q), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext,
+                         G);
       gpApplyDelta(y, CCConst(q), ov, nOv, nn, l0.ext, G, l0.ext, G);
     };
     auto precond = [&](CCField zz, CCField rr) {
@@ -1813,8 +1840,8 @@ class CutcellMG {
     // flat 4.0 with the refresh). Distributed: overlap the exchange with the interior residual
     // (same interior/shell split as the smoother); single-rank: the periodic wrap copy.
     auto fullResidual = [&] {
-      residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                      FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lv.g);
+      residualCutcellFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX),
+                          FPC(lv.AFY), FPC(lv.AFZ), lv.ext, lv.g);
     };
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
@@ -1822,14 +1849,13 @@ class CutcellMG {
       const C3 lo{g + 1, g + 1, g + 1};
       const C3 hi{lv.ext.x - g - 1, lv.ext.y - g - 1, lv.ext.z - g - 1};
       lv.dev->exchangeBegin(lv.x);
-      residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                         FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lo, hi,
-                         C3{0, 0, 0}, C3{0, 0, 0});
+      residualCutcellBoxFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX),
+                             FPC(lv.AFY), FPC(lv.AFZ), lv.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
       lv.dev->exchangeEnd(lv.x);
       applyOutflowGhost(lv, lv.x, g);
-      residualCutcellBox(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                         FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, C3{g, g, g},
-                         C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
+      residualCutcellBoxFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX),
+                             FPC(lv.AFY), FPC(lv.AFZ), lv.ext, C3{g, g, g},
+                             C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
     } else
 #endif
     {
@@ -1900,14 +1926,13 @@ class CutcellMG {
       for (int k = 0; k < sweeps; ++k) {
         const int c0 = reverse ? 1 : 0, c1 = 1 - c0;
         lv.dev->exchangeBegin(lv.x);
-        cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
-                              FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, c0, lo, hi,
-                              C3{0, 0, 0}, C3{0, 0, 0});
+        cutcellSmoothColorBoxFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
+                                  FPC(lv.AFZ), lv.ext, og, c0, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
         lv.dev->exchangeEnd(lv.x);
-        cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
-                              FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, c0, rlo, rhi, lo, hi);
-        cutcellSmoothColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
-                           FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, g, c1);
+        cutcellSmoothColorBoxFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
+                                  FPC(lv.AFZ), lv.ext, og, c0, rlo, rhi, lo, hi);
+        cutcellSmoothColorFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
+                               FPC(lv.AFZ), lv.ext, og, g, c1);
       }
       return;
     }
@@ -1926,21 +1951,21 @@ class CutcellMG {
           const C3 lo{g + 1, g + 1, g + 1};
           const C3 hi{lv.ext.x - g - 1, lv.ext.y - g - 1, lv.ext.z - g - 1};
           lv.dev->exchangeBegin(lv.x);
-          cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                                FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, color,
-                                lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
+          cutcellSmoothColorBoxFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
+                                    FPC(lv.AFZ), lv.ext, og, color, lo, hi, C3{0, 0, 0},
+                                    C3{0, 0, 0});
           lv.dev->exchangeEnd(lv.x);
           applyOutflowGhost(lv, lv.x, g);
-          cutcellSmoothColorBox(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                                FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, color,
-                                C3{g, g, g}, C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
+          cutcellSmoothColorBoxFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
+                                    FPC(lv.AFZ), lv.ext, og, color, C3{g, g, g},
+                                    C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
           continue;
         }
 #endif
         fill(lv, lv.x);
         applyOutflowGhost(lv, lv.x, lv.g);
-        cutcellSmoothColor(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS),
-                           FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, og, lv.g, color);
+        cutcellSmoothColorFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
+                               FPC(lv.AFZ), lv.ext, og, lv.g, color);
       }
   }
 
@@ -2017,8 +2042,7 @@ class CutcellMG {
       Kokkos::deep_copy(h, v);
       return h;
     };
-    auto hC = host(lv.AC), hW = host(lv.AW), hE = host(lv.AE), hS = host(lv.AS), hN = host(lv.AN),
-         hB = host(lv.AB), hT = host(lv.AT);
+    auto hC = host(lv.AC), hAFX = host(lv.AFX), hAFY = host(lv.AFY), hAFZ = host(lv.AFZ);
     // this rank's rows: (gid, diag) and off-diagonals (gid -> ngid, coef), periodic-wrapped.
     std::vector<int> lgid, lrow, lcol;
     std::vector<double> ldiag, lval;
@@ -2039,8 +2063,10 @@ class CutcellMG {
           const double dc = (double)hC(p);
           ldiag.push_back(dc != 0.0 ? dc : 1.0);
           lsolid.push_back(dc == 0.0 ? 1 : 0);
-          const double bc[6] = {(double)hW(p), (double)hE(p), (double)hS(p),
-                                (double)hN(p), (double)hB(p), (double)hT(p)};
+          // A2 face form: AW = AFX(p), AE = AFX(p+1), ... (the band values themselves).
+          const double bc[6] = {(double)hAFX(p), (double)hAFX(p + 1),
+                                (double)hAFY(p), (double)hAFY(p + ex),
+                                (double)hAFZ(p), (double)hAFZ(p + (long)ex * ey)};
           for (int d = 0; d < 6; ++d) {
             if (bc[d] == 0.0)
               continue;  // closed face (wall) -> no coupling
@@ -2252,8 +2278,8 @@ class CutcellMG {
       // assembled a DIFFERENT matrix than the one the hierarchy applies.
       fill(lv, lv.x);
       applyOutflowGhost(lv, lv.x, lv.g);
-      residualCutcell(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AW), FPC(lv.AE),
-                      FPC(lv.AS), FPC(lv.AN), FPC(lv.AB), FPC(lv.AT), lv.ext, lv.g);
+      residualCutcellFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX),
+                          FPC(lv.AFY), FPC(lv.AFZ), lv.ext, lv.g);
       const double rn = maxabs(lv, lv.res);
       auto hb = Kokkos::create_mirror_view(lv.rhs);
       Kokkos::deep_copy(hb, lv.rhs);
@@ -2417,8 +2443,8 @@ class CutcellMG {
         applyCutcellOpExactBox(y, CCConst(v), CCConst(l0.ox), CCConst(l0.oy), CCConst(l0.oz),
                                l0.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0}, gfx_, gfy_, gfz_);
       else
-        applyCutcellOpBox(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                          FPC(l0.AB), FPC(l0.AT), l0.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
+        applyCutcellOpBoxFace(y, CCConst(v), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ),
+                              l0.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
       l0.dev->exchangeEnd(v);
       applyOutflowGhost(l0, v);
       if (ex)
@@ -2426,9 +2452,9 @@ class CutcellMG {
                                l0.ext, C3{G, G, G}, C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G},
                                lo, hi, gfx_, gfy_, gfz_);
       else
-        applyCutcellOpBox(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                          FPC(l0.AB), FPC(l0.AT), l0.ext, C3{G, G, G},
-                          C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G}, lo, hi);
+        applyCutcellOpBoxFace(y, CCConst(v), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ),
+                              l0.ext, C3{G, G, G}, C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G}, lo,
+                              hi);
       return;
     }
 #endif
@@ -2438,8 +2464,8 @@ class CutcellMG {
       applyCutcellOpExact(y, CCConst(v), CCConst(l0.ox), CCConst(l0.oy), CCConst(l0.oz), l0.ext, G,
                           gfx_, gfy_, gfz_);
     else
-      applyCutcellOp(y, CCConst(v), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE), FPC(l0.AS), FPC(l0.AN),
-                     FPC(l0.AB), FPC(l0.AT), l0.ext, G);
+      applyCutcellOpFace(y, CCConst(v), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext,
+                         G);
   }
   // periodic ghost fill (3 axes) of a level-sized field / the openness triple. Distributed: the
   // per-level core halo (cross-rank + periodic in one call).
