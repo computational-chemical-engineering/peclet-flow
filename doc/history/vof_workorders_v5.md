@@ -330,6 +330,9 @@ misses, stop — the pivot choice (item 3) is then the suspect and needs an arch
 
 ## WO-T — rung V8 (minimal): the collocated path  [architect design → OPUS]
 
+> **SUPERSEDED 2026-09-25 — the face-acceleration form was retired; see
+> doc/collocated_varrho_forces.md. Do not re-implement.**
+
 **Goal.** `enable_vof` on `SolverColocated`: variable density in the ABC approximate projection,
 the balanced force on the face field with the consistent cell counterpart, colour advection from
 the projected face field. Everything the staggered path validated must be re-run here; AMR VoF
@@ -845,6 +848,9 @@ report rather than a gate in most of their uses, so they are recorded here rathe
    carries the outflow face.
 
 ## WO-T — rung V8 minimal (the collocated path) — DONE 2026-09-02, branch `vof-wot`
+
+> **SUPERSEDED 2026-09-25 — the face-acceleration form was retired; see
+> doc/collocated_varrho_forces.md. Do not re-implement.**
 
 Worktree `../flow-wot`. All numbers below are reported for BOTH backends where they differ;
 `host-openmp` and `nvidia-cuda` agree to the digits shown unless a column says otherwise.

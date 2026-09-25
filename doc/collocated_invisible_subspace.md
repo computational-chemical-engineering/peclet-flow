@@ -325,3 +325,20 @@ mechanism identification credible.
 | mode 11 C2 | $k(60/600/10^{20})$ = 3.5743523/3.5743595/3.5745995e-3, $m_1\to10^{-5}$ | `lm128_mode11_dt*.log` |
 | adjoint-family gaps $R=8$ | $-11.1/-8.10/-8.55\%$ (11/12/13) | `lm128_mode1{1,2,3}_dt600.log` |
 | mode-12 gap $R=12$ | $-5.42\%$ ($\times1.49$ per $1.5\times$ — $O(h)$) | `lm192_mode12_dt600.log` |
+
+## 10. Variable density: the face-acceleration detour (WO-T → retired 2026-09-25)
+
+Rung V8 (WO-T, 2026-09-02) carried variable density and surface tension on the collocated grid by
+adding the lagged pressure and every force as a MAC **face acceleration after the implicit viscous
+solve** (Basilisk `centered.h`). It is balanced per step, but the lagged term
+$-\Delta t\,G_fP^n/\rho_f$ lies exactly in the range the projection removes, so $P^n$ never reaches
+$u$: the step is **non-incremental** (Chorin; steady state scaled by $1+\Delta t\mu\Lambda$, TG order
+−0.1, drag 2.48), and the rotational term then acts as an explicit pressure diffusion,
+$P^{n+1}=-4\kappa\Delta tSP^n/\rho$ — multiplier −12.0000 at $(\pi,\pi,\pi)$ for $\mu\Delta t=1$,
+unstable above $\mu\Delta t/(\rho h^2)=1/12$. The fix keeps this note's structure: the pressure and
+every force go back **inside the predictor** as $\rho_c\,\overline{(F_f-wG_fP)/\rho_f}$, and the
+constraint reads the **momentum-weighted** face velocity $(\rho_Lu_L+\rho_Ru_R)/(\rho_L+\rho_R)$, so
+$M\Gamma=-C^T$ — the variable-density form of the transpose pair of §6 (spectral radius exactly 1 at
+every ratio and dt in the model). At uniform ρ it *is* the constant-density scheme. Design, numbers
+and the guard: [`collocated_varrho_forces.md`](collocated_varrho_forces.md) (§2, §4.3, §7);
+gate `tests/python/test_collocated_stability_guard.py`.

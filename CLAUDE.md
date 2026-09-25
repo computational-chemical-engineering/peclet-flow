@@ -148,6 +148,16 @@ recorded decision, not a judgement call in the moment.
   Rhie–Chow.** The residual cell divergence is *intrinsic* to cell-centred velocity placement, and
   the permeability gap lives in the momentum solve, not the projection. Rhie–Chow has been proposed
   by mistake repeatedly; it is not an "upgrade".
+- **Collocated pressure and forces go INSIDE the implicit momentum predictor — never a face
+  acceleration added after the viscous solve (the Basilisk `centered.h` "kick").** Added after
+  the implicit solve, the projection removes the lagged pressure exactly, so the velocity update
+  is non-incremental. That gives Chorin's dt-dependent steady state, and with the rotational
+  update an explicit pressure diffusion growing like −12κ·dt/(ρh²) per step (measured −12.0000;
+  it capped V8 at density ratio ~100). Variable density keeps balance through the mass-adjoint
+  pair (the ρ-weighted face-average pressure force + the momentum-weighted centre→face map) and
+  the optional balanced-force projection — not through face placement. The guard is the
+  stability/dt-independence gate on every collocated path, not a grep. Register: suite-wide
+  "Collocated forces stay in the implicit predictor"; design: flow `doc/collocated_varrho_forces.md`.
 - **The pressure solve is PCG (Krylov), not RB-GS**, for cut-cell IBM.
 - **Backward Euler is the default time integrator.** Crank–Nicolson was ported and reverted.
 - **Porous beds use ε-weighted momentum with a matched projection.** Plain incompressible continuity
@@ -435,6 +445,11 @@ these are `faceInterp_` 0 / 9 / 7 (5, 6); the integer modes 1–4 and 10–13 an
 gradient branch were deleted with their kernels at 1.0.0. MPI validated np = 1, 2, 4 (np ≥ 16
 unresolved); the mixed `(matrix_order=1, rhs_order=2)` ghost mode is **do-not-use**,
 march-unstable above ~2000 spheres.
+
+**Variable density and surface tension (rung V8)** run all-fluid through the mass-adjoint ABC pair
+of [`doc/collocated_varrho_forces.md`](doc/collocated_varrho_forces.md) (immersed solids on that
+path: the next package, `doc/collocated_multiphase_solids_plan.md`); the balanced-force projection
+(`set_balanced_force_projection`) defaults ON there and makes static balances exact from step 1.
 
 ## Domain boundary conditions
 

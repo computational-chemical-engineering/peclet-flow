@@ -201,8 +201,13 @@ identical anyway** at every np on both backends, as does CUDA `walls-z` at np = 
 
 ## 4. Limitations / deferred
 
-- **Staggered only** (collocated `diagnostics.set_density_mode` throws): the collocated correction path
-  (wall-aware transpose maps) needs its own 1/ρ treatment.
+- **Collocated (rung V8, all-fluid).** `SolverColocated` runs variable density through the
+  mass-adjoint ABC pair of [`collocated_varrho_forces.md`](collocated_varrho_forces.md): the same
+  face coefficient $o_f\rho_0/\rho_f$ and face correction as here, the **momentum-weighted**
+  centre→face map in the constraint, and the pressure and every force *inside* the implicit
+  predictor as $\rho_c\,\overline{(F_f-wG_fP)/\rho_f}$ (never a face acceleration after the viscous
+  solve — the retired WO-T form, unstable above $\mu\Delta t/(\rho h^2)=1/12$). Immersed solids on
+  that path are the next package (`collocated_multiphase_solids_plan.md`).
 - **Outflow + varRho**: `bcCorrectOutflow` corrects the outflow face without the 1/ρ_f factor —
   fine when the outflow region has ρ ≈ uniform; revisit with a two-phase outflow case.
 - **Boussinesq vs varRho**: for small Δρ/ρ prefer the Phase-3 Boussinesq closure (cheaper: no
