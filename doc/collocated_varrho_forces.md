@@ -452,31 +452,53 @@ untouched.
   the INCREMENT, $A\,\delta P_b = D(Oc\beta) - A P_b^{n-1}$, with the stop relative to the FULL
   right-hand side, $\lVert r\rVert \le \mathrm{rtol}\cdot\max(\lVert D(Oc\beta)\rVert,\,\text{tiny})$, and
   is skipped (zero iterations) when $P_b^{n-1}$ already meets that test (WO-P5, orchestrator
-  decision 2026-09-25). Chebyshev bounds are the MAIN projection's, estimated on the main
-  right-hand side (Q9); when they are stale for the step's operator the pre-projection estimates
-  bounds of its own that the main solve never sees;
+  decision 2026-09-25). The MAIN projection's Chebyshev bounds are estimated on the main
+  right-hand side only (Q9) and their logic is unchanged. The pre-projection has bounds of its
+  OWN (review fix 2026-09-25): estimated once on its own right-hand side and **kept across
+  steps** — the per-step variable-ρ coefficient refresh (B1) invalidates only the main bounds —
+  and re-estimated after a structural operator change (the driver, density, porous and ρ-face
+  setters, a new geometry's pressure-MG rebuild — not a `redistribute`, which moves the same
+  operator) or when a pre-projection Chebyshev solve **diverges** (it ran to
+  the cap and its residual ended above its initial one; the solve then restarts from
+  $P_b^{n-1}$ with fresh bounds). Before this, every non-skipped pre-projection under variable ρ
+  estimated bounds (15 V-cycle iterations) and discarded them;
 - two copies.
+- **A failed pre-projection is visible and harmless** (review fix 2026-09-25). The driver's
+  breakdown flag is captured right after the solve, and a non-finite X is checked (one
+  reduction, agreed across ranks). On either, $P$ and $P_b$ are kept for the step (its predictor
+  sees the forces as with the option off), `diagnostics.last_balanced_force_failed()` is set,
+  `diagnostics.balanced_force_failures()` counts it, and the first one warns on stderr.
 
 No new halo exchange of state.
 
-**Measured [CODE] (WO-P4/P5, 32³, ratio 1000, Chebyshev rtol 1e-9, host-openmp on a loaded
-shared host; `tests/study/balanced_force_cost.py`):**
+**Measured [CODE] (32³, ratio 1000, Chebyshev rtol 1e-9, host-openmp, 4 threads, on a shared
+host at load 75–120; `tests/study/balanced_force_cost.py` at 5 repeats, OFF and ON interleaved,
+median; before = WO-P5 (`cbc1366`), after = the kept pre-projection bounds; two runs each, both
+shown):**
 
-| case | grid | step ON / OFF | main iterations OFF / ON | pre-projection iterations |
-|---|---|---|---|---|
-| moving drop (U = 0.02) | staggered | 1.70 | 9.9 / 9.8 | 10.2 |
-| moving drop | collocated | 1.59 | 9.8 / 9.4 | 10.2 |
-| drop at rest, height-function κ | staggered | 1.73 | 10.4 / 10.0 | 10.0 |
-| drop at rest, height-function κ | collocated | 2.13 | 10.5 / 10.6 | 10.0 |
-| drop at rest, constant κ (exact equilibrium) | staggered | 0.85 | 10.0 / 10.0 | 0.0 |
-| drop at rest, constant κ | collocated | 1.08 | 11.2 / 11.0 | 0.0 |
-| hydrostatic column, 20 steps (`balanced_force_mpi`) | both | — | — | 14 at step 1, then 0 |
+| case | grid | step ON / OFF before | step ON / OFF after | main iterations OFF / ON (before = after) | pre-projection iterations before → after |
+|---|---|---|---|---|---|
+| moving drop (U = 0.02) | staggered | 1.76, 1.75 | 1.20, 1.19 | 9.9 / 9.8 | 10.2 → 11.1 |
+| moving drop | collocated | 1.78, 1.68 | 1.22, 1.19 | 9.8 / 9.4 | 10.2 → 11.0 |
+| drop at rest, height-function κ | staggered | 1.73, 1.86 | 1.12, 1.20 | 10.4 / 10.0 | 10.0 → 10.0 |
+| drop at rest, height-function κ | collocated | 2.01, 1.81 | 1.22, 1.22 | 10.5 / 10.6 | 10.0 → 10.0 |
+| drop at rest, constant κ (exact equilibrium) | staggered | 0.95, 1.00 | 1.02, 1.01 | 10.0 / 10.0 | 0.0 → 0.0 |
+| drop at rest, constant κ | collocated | 0.97, 1.06 | 1.04, 1.10 | 11.2 / 11.0 | 0.0 → 0.0 |
+| hydrostatic column, 20 steps (`balanced_force_mpi`) | both | — | — | — | 14 at step 1, then 0 |
+
+(The WO-P4/P5 record of this table, 1.59–2.13 ON/OFF, was one run at 3 repeats; the "before"
+columns above re-measure it under the same load as the "after" ones.)
 
 - A static balance costs nothing after the first step. A changing force costs a full solve: the
-  pre-projection needs about as many iterations as the main projection, so the step costs 1.6–2.1×
-  (G7's 1.5× is missed; Q3). A drop "at rest" with height-function curvature is not static: its
-  parasitic currents move the interface, and the force changes every step.
-- Main iterations are equal ON and OFF (the 2× budget of Q9 is not approached).
+  pre-projection needs about as many iterations as the main projection (one more on the moving
+  drop, where the kept bounds are a few steps old), and the step costs 1.1–1.2× (G7's 1.5× is
+  met; its second criterion, pre-projection iterations ≤ main, misses by about one iteration on
+  the moving drop). Before the kept bounds it cost 1.7–2.0×, most of the difference being the two
+  per-step spectral estimates (the pre-projection's, discarded, and the main solve's). A drop
+  "at rest" with height-function curvature is not static: its parasitic currents move the
+  interface, and the force changes every step.
+- Main iterations are equal ON and OFF (the 2× budget of Q9 is not approached), and identical
+  before and after the kept bounds (the main bound logic is untouched).
 - The first implementation (WO-P1..P4: warm start from `Pb_`, stop relative to the initial
   residual) did NOT make a static interface cheap: the initial residual is the round-off of the
   previous solve and the stop asked it to fall by rtol again, i.e. a full solve at rtol 1e-9 and
@@ -880,13 +902,13 @@ Other combinations unchanged.
 | # | question | needs | default |
 |---|---|---|---|
 | Q1, Q2 | — | settled (U1) | — |
-| Q3 | Cost of the option | fact (WO-P4) | Accept up to 1.5×; beyond that the orchestrator asks the user about the lagged variant |
+| Q3 | Cost of the option | fact (WO-P4; re-measured with the kept pre-projection bounds) | Accept up to 1.5×; beyond that the orchestrator asks the user about the lagged variant. MEASURED after the kept bounds: 1.1–1.2× on a changing force (before: 1.7–2.0×), 1.0–1.1× static (§4.8) |
 | Q4 | Moving-interface effect of Π_ρ's O(h) interface-local weighting | fact (WO-V3) | Accept (stability requires it); report |
 | Q5 | Motion rating | fact (WO-V3) | MEASURED: a translating drop throws the VoF CFL cap at ratio 100 and 1000 (ON and OFF); ratio 10 tracks staggered. Collocated with motion is rated ratio ~10 until the next package re-measures |
 | Q6 | 3-D rotational margin (κλ_max < 2 is measured, not proved) | fact | G2 covers dt ≤ 100. If G2 fails with κ = μ but passes with κ = 0, stop and report; never ship a κ change without the architect |
 | Q7 | Option with inflow/outflow faces | preference (scope) + fact | Refused in v1. It needs the operator-openness vs flux-openness rule at inflow and the WO-R2 outflow planes. Next package if the porous-media drainage target needs it |
 | Q8 | Staggered VoF with the default OFF keeps WO-P's μdt² residue | preference | Resolved for V8 by U2's default ON. On staggered, the docs recommend enabling the option for static and low-Ca work (the porous-media drainage target) |
-| Q9 | Chebyshev bounds when ON | fact | RESOLVED (WO-P5): the main bounds are estimated on the MAIN right-hand side only; a pre-projection with stale bounds estimates its own, never shared. Main iterations ON = OFF (§4.8) |
+| Q9 | Chebyshev bounds when ON | fact | RESOLVED (WO-P5 + review fix): the main bounds are estimated on the MAIN right-hand side only; the pre-projection keeps bounds of its OWN across steps, re-estimated on a structural operator change or a diverging solve, never shared. Main iterations ON = OFF (§4.8) |
 | Q10 | Pointwise formulas (L5) and the CSF pair → `core::scheme` / `core::vof`: now or when amr consumes them | preference (process) | When amr's multiphase package starts. Its WO-A0 moves them verbatim, with flow byte-identity as the gate |
 | Q11 | Two collocated families in amr (ghost single-phase, aperture-adjoint multiphase+solids) | preference | See the companion plan §3: accept for S1; revisit at S2 |
 

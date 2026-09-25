@@ -197,6 +197,7 @@ void Solver<Grid>::setDensityMode(bool variable) {
     // and since WO-H set_pressure_pcg's `on` flag genuinely honours that promise.
     useChebyshev_ = true;
     chebBoundsSet_ = false;
+    bfpChebSet_ = false;
   }
   registerBalancedForceState();  // V8 turns the balanced-force projection on by default
 }
@@ -255,6 +256,7 @@ void Solver<Grid>::setPorousContinuity(bool on) {
     // rebuild (chebBoundsSet_ invalidation in project()). An explicit driver set afterwards wins.
     useChebyshev_ = true;
     chebBoundsSet_ = false;
+    bfpChebSet_ = false;
     configurePorousDragSolver();  // if drag already on, switch to GraphAMG+PCG (Chebyshev
                                   // diverges)
   }
@@ -364,6 +366,7 @@ void Solver<Grid>::configurePorousDragSolver() {
     mg_.setAgglomerationMode(1);
   useChebyshev_ = false;  // PCG, not Chebyshev (diverges on the high w_f ratio)
   chebBoundsSet_ = false;
+  bfpChebSet_ = false;
 }
 
 template <class Grid>

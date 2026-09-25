@@ -135,7 +135,14 @@ void Solver<Grid>::redistribute(const peclet::core::decomp::BlockDecomposer<3>& 
   // 5. rebuild geometry-derived state (openness/IBM/stencils/MG) from the migrated SDF. setSolid
   //    zeroes the velocity + pressure (it is the initial-geometry setup), so re-instate every
   //    non-SDF field afterward from the migrated data.
-  setSolid(gatherInner(sdf_), cutcellPressure_);
+  {
+    // A repartition is not an operator change: the balanced-force pre-projection keeps its
+    // Chebyshev bounds across it, as the main solve keeps its own (setSolid's MG rebuild would
+    // otherwise force a re-estimate, and an np = 1 rebalance would stop being bit-exact).
+    const bool keepBfpBounds = bfpChebSet_;
+    setSolid(gatherInner(sdf_), cutcellPressure_);
+    bfpChebSet_ = keepBfpBounds;
+  }
   for (std::size_t k = 0; k < names.size(); ++k)
     if (names[k] != "sdf")
       scatterPadded(names[k], newHost[k]);

@@ -543,7 +543,16 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def("last_balanced_force_iterations",
            [](D& diag) { return diag.s->lastBalancedForceIterations(); },
            "Pressure-driver iterations of the last step's balanced-force solve "
-           "(set_balanced_force_projection); 0 when it is off or the force divergence was zero.")
+           "(set_balanced_force_projection); 0 when it is off, the force divergence was zero, or "
+           "the previous split already met the stop.")
+      .def("last_balanced_force_failed",
+           [](D& diag) { return diag.s->lastBalancedForceFailed(); },
+           "Whether the last step's balanced-force solve FAILED (driver breakdown or a non-finite "
+           "result). A failed solve keeps P and p_balanced unchanged for that step; the first one "
+           "warns on stderr.")
+      .def("balanced_force_failures", [](D& diag) { return diag.s->balancedForceFailures(); },
+           "How many balanced-force solves have failed over the solver's lifetime (see "
+           "last_balanced_force_failed).")
       .def("last_pressure_iterations", [](D& diag) { return diag.s->lastPressureIterations(); },
            "Return the pressure-solver iteration count from the last step().\n\n"
            "A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration "

@@ -445,6 +445,16 @@ long Solver<Grid>::lastBalancedForceIterations() const {
 }
 
 template <class Grid>
+bool Solver<Grid>::lastBalancedForceFailed() const {
+  return lastBalancedForceFailed_;
+}
+
+template <class Grid>
+long Solver<Grid>::balancedForceFailures() const {
+  return balancedForceFailures_;
+}
+
+template <class Grid>
 bool Solver<Grid>::balancedForceActive() const {
   // U2 (doc/collocated_varrho_forces.md §0): an explicit setting wins; the DEFAULT is ON on the
   // collocated variable-density / CSF path (V8), where the settled constant-kappa CSF balance
@@ -566,6 +576,7 @@ void Solver<Grid>::applyBalancedForceProjection() {
   // skipped outright (zero iterations) when that initial residual already meets the test: a
   // static interface costs no iterations. A force with no divergence needs no pressure at all.
   long iters = 0;
+  bool failed = false;
   double bmax = maxAbsInner(CCConst(div_), e_, G);
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {
@@ -588,10 +599,63 @@ void Solver<Grid>::applyBalancedForceProjection() {
     copyInner(pb1_, e1_, 1, CCConst(Pb_), e_, G);
     const double rtol = useChebyshev_ ? chebRtol_ : pcgRtol_;
     const double bref = std::max(mg_.rhsNorm(rhs1_, r_), 1e-300);
-    if (mg_.residualNorm(rhs1_, pb1_, r_, Ap_) > rtol * bref)
-      iters = solveBalancedForceSystem(bref);
+    const double r0 = mg_.residualNorm(rhs1_, pb1_, r_, Ap_);
+    if (r0 > rtol * bref) {
+      iters = solveBalancedForceSystem(bref, r0);
+      // Captured right after the solve (ISSUES sweep item 6: a breakdown reports the cap and
+      // raises the flag); a non-finite X fails too. Agreed across ranks.
+      int bad = mg_.lastSolveFailed() ? 1 : 0;
+      {
+        CCExec space;
+        CCConst x1 = CCConst(pb1_);
+        const C3 e1 = e1_;
+        long nf = 0;  // a COUNT (sum reduction, identity 0) of the non-finite inner values
+        Kokkos::parallel_reduce(
+            "peclet::flow::bfp_nonfinite",
+            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {1, 1, 1},
+                                                            {e1.x - 1, e1.y - 1, e1.z - 1}),
+            KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+              const long i = (long)x + (long)y * e1.x + (long)z * (long)e1.x * e1.y;
+              if (!Kokkos::isfinite(x1(i)))
+                acc += 1;
+            },
+            nf);
+        bad = (bad || nf > 0) ? 1 : 0;
+      }
+#ifdef PECLET_FLOW_MPI
+      if (distributed_) {
+        int g = 0;
+        MPI_Allreduce(&bad, &g, 1, MPI_INT, MPI_MAX, comm_);
+        bad = g;
+      }
+#endif
+      failed = bad != 0;
+    }
   }
   lastBalancedForceIters_ = iters;
+  lastBalancedForceFailed_ = failed;
+  if (failed) {
+    // Keep the previous split: P and P_b unchanged (their ghosts were filled at the step head),
+    // so this step's predictor sees the forces exactly as with the option off. Counted, and the
+    // first one warns.
+    ++balancedForceFailures_;
+    if (!bfpFailWarned_) {
+      bfpFailWarned_ = true;
+      int r = 0;
+#ifdef PECLET_FLOW_MPI
+      if (distributed_)
+        MPI_Comm_rank(comm_, &r);
+#endif
+      if (r == 0)
+        std::fprintf(stderr,
+                     "peclet::flow WARNING: the balanced-force pre-projection solve failed (driver "
+                     "breakdown or a non-finite result, %ld iterations); P and p_balanced were "
+                     "kept for this step. Further failures are counted silently in "
+                     "diagnostics.balanced_force_failures().\n",
+                     iters);
+    }
+    return;
+  }
   // (B5) P += X - P_b; P_b = X (one fused kernel over the inner cells), then the P ghosts the
   // predictor reads. When P_b is NOT a valid split of the current P (pbValid_: steps with the
   // option off moved P, or a restart restored "p" without "p_balanced"), P already holds the
@@ -622,23 +686,37 @@ void Solver<Grid>::applyBalancedForceProjection() {
 }
 
 template <class Grid>
-long Solver<Grid>::solveBalancedForceSystem(double bref) {
+long Solver<Grid>::solveBalancedForceSystem(double bref, double r0) {
   // The balanced-force projection's own call path: the same operator and driver as the main
   // projection, but the stop is relative to the full right-hand side (setStopReference, reset on
-  // every exit) and a Chebyshev solve never touches the MAIN projection's spectral bounds -- it
-  // reuses them when they are current for this operator, and otherwise estimates bounds of its own
-  // on its own right-hand side that the main solve never sees (doc §11 Q9: the main bounds are
-  // estimated on the main right-hand side).
+  // every exit) and a Chebyshev solve uses bounds of its OWN (bfpChebA_/B_), never the main
+  // projection's (doc §11 Q9: the main bounds are estimated on the main right-hand side, and the
+  // per-step variable-rho refresh invalidates them every step). The own bounds are estimated once
+  // on this solve's right-hand side and kept across steps; they are re-estimated after a
+  // structural operator change (bfpChebSet_ cleared) or when the iteration DIVERGES: it ran to
+  // the cap and its residual ended above r0. Then the solve restarts from P_b^{n-1} with fresh
+  // bounds.
   struct StopRefGuard {
     CutcellMG& mg;
     ~StopRefGuard() { mg.setStopReference(-1.0); }
   } guard{mg_};
   mg_.setStopReference(bref);
   if (useChebyshev_) {
-    double a = chebA_, b = chebB_;
-    if (!chebBoundsSet_)
-      mg_.estimateEigenvalues(CCConst(rhs1_), a, b, 15, 2, 2, 12);
-    return mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, a, b);
+    if (!bfpChebSet_) {
+      mg_.estimateEigenvalues(CCConst(rhs1_), bfpChebA_, bfpChebB_, 15, 2, 2, 12);
+      bfpChebSet_ = true;
+    }
+    long it = mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_, bfpChebB_);
+    if (it >= chebMaxit_) {  // never met the stop: slow, or diverging on bounds gone stale?
+      const double rfin = mg_.residualNorm(rhs1_, pb1_, r_, Ap_);
+      if (!(rfin <= r0)) {  // residual growth (or non-finite): re-estimate and restart once
+        mg_.estimateEigenvalues(CCConst(rhs1_), bfpChebA_, bfpChebB_, 15, 2, 2, 12);
+        copyInner(pb1_, e1_, 1, CCConst(Pb_), e_, G);
+        it += mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_,
+                                 bfpChebB_);
+      }
+    }
+    return it;
   }
   if (useFcg_) {
     if (zp1_.extent(0) != n1_)

@@ -562,6 +562,7 @@ void Solver<Grid>::setPressureChebyshev(bool on, int maxit, double rtol) {
   chebMaxit_ = maxit;
   chebRtol_ = rtol;
   chebBoundsSet_ = false;
+  bfpChebSet_ = false;
 }
 
 template <class Grid>
@@ -574,6 +575,7 @@ void Solver<Grid>::setPressurePcg(bool on, int maxit, double rtol) {
   useChebyshev_ = false;  // genuine selection: the three drivers are mutually exclusive
   useFcg_ = false;
   chebBoundsSet_ = false;
+  bfpChebSet_ = false;
   pcgMaxit_ = maxit;
   pcgRtol_ = rtol;
 }
@@ -1912,6 +1914,7 @@ std::array<int, 3> Solver<Grid>::blockOrigin() const {
 template <class Grid>
 void Solver<Grid>::setRhoFaceHarmonic(bool on) {
   rhoFaceHarmonic_ = on;
+  bfpChebSet_ = false;  // a different face mean: the pre-projection's kept bounds are stale
 }
 
 template <class Grid>

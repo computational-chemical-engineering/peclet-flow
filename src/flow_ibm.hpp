@@ -608,6 +608,11 @@ class Solver {
   // Pressure-driver iterations of the last step's balanced-force solve (0 when the force
   // divergence was exactly zero, or the option is off).
   long lastBalancedForceIterations() const;
+  // Did the last step's balanced-force solve FAIL (driver breakdown, or a non-finite result)? A
+  // failed solve leaves P and P_b as they were (the step runs as if the option were off for that
+  // step's split) and is counted in balancedForceFailures(); the first one warns on stderr.
+  bool lastBalancedForceFailed() const;
+  long balancedForceFailures() const;
 
 
   // Pressure warm-start (CUDA set_pressure_warmstart, default OFF): seed each cut-cell pressure
@@ -1744,8 +1749,9 @@ class Solver {
   void registerBalancedForceState();
   // B1-B5, once per step before the Picard loop.
   void applyBalancedForceProjection();
-  // (B4) the increment solve with the full-RHS stop (WO-P5); pb1_ in/out, rhs1_ the RHS.
-  long solveBalancedForceSystem(double bref);
+  // (B4) the increment solve with the full-RHS stop (WO-P5); pb1_ in/out, rhs1_ the RHS; r0 its
+  // initial residual (the divergence test of the kept Chebyshev bounds).
+  long solveBalancedForceSystem(double bref, double r0);
 
 
   void updateEpsRho();
@@ -4556,6 +4562,18 @@ class Solver {
   // that would add the balanced pressure a second time (doc/collocated_varrho_forces.md §4.6.2).
   bool pbValid_ = true;
   bool pWritten_ = false, pbWritten_ = false;  // set_field("p" / "p_balanced") since the last step
+  // The pre-projection's OWN Chebyshev bounds (doc §4.8): estimated once, on its own right-hand
+  // side, and KEPT across the per-step variable-rho coefficient refresh (which invalidates only
+  // the MAIN bounds, chebBoundsSet_). Re-estimated after a structural operator change (the driver,
+  // density, porous and rho-face setters, a pressure-MG rebuild) or when a pre-projection
+  // Chebyshev solve diverges (it ran to the cap and its residual grew). Never shared with the
+  // main solve, whose bound logic is unchanged.
+  double bfpChebA_ = 0.0, bfpChebB_ = 0.0;
+  bool bfpChebSet_ = false;
+  // A failed pre-projection (a driver breakdown flag, or a non-finite X): P and P_b are kept.
+  bool lastBalancedForceFailed_ = false;
+  long balancedForceFailures_ = 0;
+  bool bfpFailWarned_ = false;
   bool coeffBuiltThisStep_ = false;
   long lastBalancedForceIters_ = 0;
   // The collocated face field with every OPEN (outflow) domain face replaced by its
