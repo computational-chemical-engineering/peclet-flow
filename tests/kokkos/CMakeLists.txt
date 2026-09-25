@@ -332,6 +332,15 @@ target_include_directories(test_cutcellmg_aniso PRIVATE ${CMAKE_CURRENT_SOURCE_D
 target_link_libraries(test_cutcellmg_aniso PRIVATE Kokkos::kokkos)
 add_test(NAME cutcellmg_aniso COMMAND test_cutcellmg_aniso)
 
+# WO-5 / A6 (doc/vof_step_performance_design.md §5.6): the breakdown exits of the device-resident
+# single-rank MG-PCG driver -- a NaN injected into pAp / r^T z must return the host-scalar loop's
+# iteration count and failure flag, with x bitwise the pre-breakdown iterate.
+add_executable(test_pcg_breakdown test_pcg_breakdown.cpp)
+target_include_directories(test_pcg_breakdown PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_pcg_breakdown PRIVATE Kokkos::kokkos)
+add_test(NAME pcg_breakdown COMMAND test_pcg_breakdown)
+
 # PHYSICAL DOMAINS (suite/docs/PHYSICAL_UNITS_PLAN.md Phase 1). Two gates off one binary:
 #  units_identity        — the physical constructor at extent == cells reproduces the cell-unit
 #                          solver (accessors, and BITWISE fields at rho = dt = 1);

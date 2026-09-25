@@ -1341,6 +1341,9 @@ class CutcellMG {
   int solvePCG(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                double rtol, int pre, int post, int bottom, const StarOverlay* star = nullptr,
                int nStar = 0, C3 nnStar = C3{0, 0, 0}) {
+    if (!distributed_)  // A6: the single-rank driver keeps its Krylov scalars on the device
+      return solvePCGResident(b, x, r, p, z, Ap, maxit, rtol, pre, post, bottom, star, nStar,
+                              nnStar);
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
     OverlayScope overlay(overlaySolve_, star != nullptr);
     pre_ = pre;
@@ -1431,6 +1434,226 @@ class CutcellMG {
         }
         aypx(p, beta, z);
         rz = rznew;
+      }
+    }
+    Kokkos::deep_copy(CCExec(), l0.x, x);
+    removeMean(l0, l0.x);
+    Kokkos::deep_copy(CCExec(), x, l0.x);
+    return it;
+  }
+
+  // --- A6 (doc/vof_step_performance_design.md §4.4, §5.6): device-resident Krylov scalars -------
+  // The single-rank MG-PCG driver. The same recurrence as solvePCG's loop, statement for statement,
+  // with its scalars kept on the device: the reductions land in slots of ks_ (0-d Views over one
+  // small device array) with the same policy and functor as dot / maxabs / removeMean, alpha and
+  // beta are formed by one-thread kernels with the same IEEE divisions, and the host reads ONE
+  // packet {pAp, |r|inf, stop} per iteration -- what the stop test needs -- instead of five scalars
+  // (two dots, the max, two mean-removal sums). Bit-identical to the host-scalar loop; every exit
+  // returns the same iteration count and sets the same solveFailed_:
+  //   * pAp non-finite or <= 1e-300: x and r untouched, break without ++it (failed iff non-finite);
+  //   * r^T z non-finite: flagged on the device; the NEXT iteration's packet reports it (its update
+  //     is skipped, x and r untouched) and the index of the iteration that computed it is returned
+  //     -- or, if that was the last one, the read after the loop does;
+  //   * |r|inf < rtol r0: ++it, break.
+  // The distributed path keeps solvePCG's host-scalar loop unchanged (a device-resident Allreduce
+  // is not in this design).
+  enum : int {
+    kPAp = 0,
+    kRn = 1,
+    kStop = 2,
+    kRz = 3,
+    kRzNew = 4,
+    kBeta = 5,
+    kAlpha = 6,
+    kMsum = 7
+  };
+  static constexpr int kNSlots = 8;
+  static constexpr double kBrkPAp = 1.0, kBrkRz = 2.0;  // the stop codes (slot kStop)
+  Kokkos::View<double*, CCMem> ks_;                     // the scalar slots
+  Kokkos::View<long, CCMem> kcnt_;                      // removeMean's fluid-cell count
+  Kokkos::View<double*, Kokkos::HostSpace> kpk_;        // the host packet {pAp, rn, stop}
+  void ensureScalars() {
+    if (ks_.extent(0) == (std::size_t)kNSlots)
+      return;
+    ks_ = Kokkos::View<double*, CCMem>("peclet::flow::mg_krylov_scalars", kNSlots);
+    kcnt_ = Kokkos::View<long, CCMem>("peclet::flow::mg_mean_count");
+    kpk_ = Kokkos::View<double*, Kokkos::HostSpace>("peclet::flow::mg_krylov_packet", 3);
+  }
+  Kokkos::View<double, CCMem> slot(int k) const {
+    return Kokkos::View<double, CCMem>(ks_.data() + k);
+  }
+  double readSlot(int k) const {
+    double v = 0.0;
+    Kokkos::deep_copy(v, slot(k));
+    return v;
+  }
+  void setSlot(int k, double v) { Kokkos::deep_copy(CCExec(), slot(k), v); }
+  // dot / maxabs into a slot: the SAME policy and functor as dot() / maxabs(), result on the
+  // device.
+  void dotTo(Level& lv, CCField a, CCField b, int k) {
+    C3 e = lv.ext;
+    const int g = lv.g;
+    CCField aa = a, bb = b;
+    FPV ac = lv.AC;
+    ccReduce3(
+        "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          if (ac(i) > 1e-30f)
+            acc += aa(i) * bb(i);
+        },
+        slot(k));
+  }
+  void maxabsTo(Level& lv, CCField a, int k) {
+    C3 e = lv.ext;
+    const int g = lv.g;
+    CCField aa = a;
+    FPV ac = lv.AC;
+    ccReduce3(
+        "mgmax", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          if (ac(i) > 1e-30f) {
+            const double v = Kokkos::fabs(aa(i));
+            if (v > acc)
+              acc = v;
+          }
+        },
+        Kokkos::Max<double, CCMem>(slot(k)));
+  }
+  // Test hook (tests/kokkos/test_pcg_breakdown.cpp): poison the pAp (which = 1) or r^T z
+  // (which = 2) of iteration `iter` of the next single-rank PCG solves with a NaN; which = 0 (the
+  // default) disarms it. Exercises the breakdown exits, which no healthy problem reaches.
+  void setDebugBreakdown(int which, int iter) {
+    dbgBrkWhich_ = which;
+    dbgBrkIter_ = iter;
+  }
+  int solvePCGResident(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
+                       double rtol, int pre, int post, int bottom, const StarOverlay* star,
+                       int nStar, C3 nnStar) {
+    solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
+    OverlayScope overlay(overlaySolve_, star != nullptr);
+    pre_ = pre;
+    post_ = post;
+    bottom_ = bottom;
+    ensureScalars();
+    Level& l0 = lv_[0];
+    Kokkos::deep_copy(CCExec(), l0.x, x);
+    auto matvec = [&](CCField y, CCField v) {
+      matvecOverlap(l0, y, v);
+      if (star)
+        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
+    };
+    auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
+    matvec(Ap, x);                                                          // r = b - A x
+    Kokkos::deep_copy(CCExec(), r, b);
+    axpy(r, -1.0, Ap);
+    removeMean(l0, r);                // compatibility: project rhs/residual onto the range
+    const double r0 = maxabs(l0, r);  // host read (once per solve)
+    int it = 0;
+    const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
+    if (trace)
+      printf("[mg] solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0, rtol,
+             pre, post, bottom);
+    ++dbgSolve_;
+    if (r0 > 0.0 && std::isfinite(r0)) {
+      precond(z, r);
+      Kokkos::deep_copy(CCExec(), p, z);
+      dotTo(l0, r, z, kRz);
+      const double rz0 = readSlot(kRz);  // host read (the initial guard)
+      if (!std::isfinite(rz0)) {
+        solveFailed_ = true;  // see solvePCG
+        printf(
+            "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
+            "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
+            maxit, maxit);
+        Kokkos::deep_copy(CCExec(), x, 0.0);
+        Kokkos::deep_copy(CCExec(), l0.x, x);
+        if (strictPressure_)
+          throw std::runtime_error(
+              "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z "
+              "(set_pressure_strict)");
+        return maxit;
+      }
+      setSlot(kStop, 0.0);
+      auto ks = ks_;
+      const std::size_t n = x.extent(0);
+      CCField xx = x, rr = r, pp = p, zz = z, aa = Ap;
+      const double brkPAp = kBrkPAp, brkRz = kBrkRz;  // by value into the kernels
+      bool exited = false;
+      for (; it < maxit; ++it) {
+        matvec(Ap, p);
+        if (meanRemovalAll_)
+          removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
+        dotTo(l0, p, Ap, kPAp);
+        if (dbgBrkWhich_ == 1 && it == dbgBrkIter_)
+          setSlot(kPAp, std::numeric_limits<double>::quiet_NaN());
+        Kokkos::parallel_for(  // alpha = rz / pAp, or the pAp breakdown flag
+            "mgpcg_alpha", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), KOKKOS_LAMBDA(int) {
+              const double pAp = ks(kPAp);
+              if (ks(kStop) == 0.0) {
+                if (Kokkos::isfinite(pAp) && pAp > 1e-300)
+                  ks(kAlpha) = ks(kRz) / pAp;
+                else
+                  ks(kStop) = brkPAp;
+              }
+            });
+        Kokkos::parallel_for(  // x += alpha p; r -= alpha Ap (axpy's expressions)
+            "mgpcg_update", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n),
+            KOKKOS_LAMBDA(std::size_t i) {
+              if (ks(kStop) != 0.0)
+                return;
+              const double a = ks(kAlpha), na = -a;
+              xx(i) += a * pp(i);
+              rr(i) += na * aa(i);
+            });
+        removeMean(l0, r, /*stopGuard=*/true);
+        maxabsTo(l0, r, kRn);
+        Kokkos::deep_copy(kpk_, Kokkos::subview(ks_, std::make_pair(0, 3)));  // THE read
+        const double pAp = kpk_(0), rn = kpk_(1), stop = kpk_(2);
+        if (stop == kBrkRz) {   // r^T z of the previous iteration was non-finite
+          solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
+          --it;                 // report the iteration that computed it
+          exited = true;
+          break;
+        }
+        if (stop == kBrkPAp) {
+          if (!std::isfinite(pAp))
+            solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
+          exited = true;
+          break;  // keep the last finite iterate
+        }
+        if (trace)
+          printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
+        if (rn < rtol * r0) {
+          ++it;
+          exited = true;
+          break;
+        }
+        precond(z, r);
+        dotTo(l0, r, z, kRzNew);
+        if (dbgBrkWhich_ == 2 && it == dbgBrkIter_)
+          setSlot(kRzNew, std::numeric_limits<double>::quiet_NaN());
+        Kokkos::parallel_for(  // beta = r^T z_new / r^T z; rz = r^T z_new -- or the flag
+            "mgpcg_beta", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), KOKKOS_LAMBDA(int) {
+              const double rznew = ks(kRzNew);
+              if (Kokkos::isfinite(rznew)) {
+                ks(kBeta) = rznew / ks(kRz);
+                ks(kRz) = rznew;
+              } else {
+                ks(kStop) = brkRz;
+              }
+            });
+        Kokkos::parallel_for(  // p = z + beta p (aypx's expression)
+            "mgaypx", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n), KOKKOS_LAMBDA(std::size_t i) {
+              if (ks(kStop) != 0.0)
+                return;
+              pp(i) = zz(i) + ks(kBeta) * pp(i);
+            });
+      }
+      if (!exited && maxit > 0 && readSlot(kStop) == kBrkRz) {
+        solveFailed_ = true;  // the last iteration's r^T z was non-finite
+        it = maxit - 1;
       }
     }
     Kokkos::deep_copy(CCExec(), l0.x, x);
@@ -3057,7 +3280,11 @@ class CutcellMG {
     return allreduce(m, MPI_MAX_);
 #endif
   }
-  void removeMean(Level& lv, CCField f) {
+  // Single rank (A6, §5.6): the {sum, count} reduce into device slots with the same policy and
+  // functor, and the subtract kernel forms mean = sum / count itself -- no host read. With
+  // `stopGuard` the subtract is skipped once the PCG stop flag is set (solvePCGResident keeps r
+  // exactly as the host-scalar loop leaves it at a break). Distributed: the Allreduce path below.
+  void removeMean(Level& lv, CCField f, bool stopGuard = false) {
     if (!removeMean_)
       return;  // non-singular operator (Dirichlet outflow present) -> no null-space projection
     CCExec space;
@@ -3065,6 +3292,33 @@ class CutcellMG {
     const int g = lv.g;
     CCField ff = f;
     FPV ac = lv.AC;
+    if (!distributed_) {
+      ensureScalars();
+      Kokkos::parallel_reduce(
+          "mgmeanr", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+          KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            if (ac(i) > 1e-30f) {
+              s += ff(i);
+              k += 1;
+            }
+          },
+          Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
+      auto ks = ks_;
+      auto kc = kcnt_;
+      const bool guard = stopGuard;
+      ccFor3(
+          "mgmeans", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long cnt = kc();
+            if (cnt == 0 || (guard && ks(kStop) != 0.0))
+              return;
+            const double mean = ks(kMsum) / (double)cnt;
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            meanSubtractCell(ff, ac, i, mean);
+          });
+      return;
+    }
     double sum = 0;
     long cnt = 0;
     Kokkos::parallel_reduce(
@@ -3184,7 +3438,8 @@ class CutcellMG {
   // way). setMeanRemovalScope(true) restores the legacy every-level scope.
   bool meanRemovalAll_ = false;
   bool distributed_ = false;
-  bool overlaySolve_ = false;  // A3: the current solve has an overlay (OverlayScope)
+  bool overlaySolve_ = false;              // A3: the current solve has an overlay (OverlayScope)
+  int dbgBrkWhich_ = 0, dbgBrkIter_ = -1;  // setDebugBreakdown (test hook)
   int dbgSolve_ = 0;  // solve counter for the env-gated convergence trace (mgDebugLevel() >= 2)
   // ISSUES sweep item 6: did the LAST Krylov solve give up on a non-finite recurrence
   // scalar (a preconditioner or operator that produced NaN/Inf)? Reset at the head of
