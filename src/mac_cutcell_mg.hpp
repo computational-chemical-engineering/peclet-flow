@@ -2416,9 +2416,65 @@ class CutcellMG {
       return;
     }
 #endif
-    fillAxis(lv, f, 0);
-    fillAxis(lv, f, 1);
-    fillAxis(lv, f, 2);
+    if (lv.inner.x < lv.g || lv.inner.y < lv.g || lv.inner.z < lv.g) {
+      // a ghost band wider than the block: the sequential passes copy ghost from ghost, which the
+      // one-shot wrap does not reproduce -- keep them
+      fillAxis(lv, f, 0);
+      fillAxis(lv, f, 1);
+      fillAxis(lv, f, 2);
+      return;
+    }
+    fillWrap(lv, f);
+  }
+  // The single-rank periodic fill in ONE launch over the ghost shell: every ghost cell takes the
+  // value of the inner cell its three coordinates wrap to. That is exactly what the three
+  // sequential `fillAxis` passes (x, then y, then z, each over the full transverse extent, ghosts
+  // included) leave behind -- a ghost already written by an earlier pass is overwritten by the
+  // later pass with the wrapped-inner value, and inner cells are only ever read -- so the two are
+  // bit-identical (pure copies). The V-cycle calls this before every smoother colour, so the three
+  // launches it replaces were two thirds of the solve's kernel launches, and on the coarse levels
+  // the launch, not the copy, is the cost.
+  void fillWrap(Level& lv, CCField f) {
+    CCExec space;
+    const C3 e = lv.ext;
+    const int G = lv.g;  // shadows the class constant: this level's ghost width
+    const int nx = lv.inner.x, ny = lv.inner.y, nz = lv.inner.z;
+    const long exy = (long)e.x * e.y;
+    // the shell as three slabs: z-ghost planes (all x, y), then y-ghost rows of the inner z range
+    // (all x), then x-ghost cells of the inner (y, z) range
+    const long nZ = 2L * G * exy, nY = (long)nz * 2 * G * e.x, nX = (long)nz * ny * 2 * G;
+    CCField ff = f;
+    Kokkos::parallel_for(
+        "peclet::flow::mg_pfill3", Kokkos::RangePolicy<CCExec>(space, 0, nZ + nY + nX),
+        KOKKOS_LAMBDA(long t) {
+          int x, y, z;
+          if (t < nZ) {
+            const int l = (int)(t / exy);
+            const long r = t - (long)l * exy;
+            x = (int)(r % e.x);
+            y = (int)(r / e.x);
+            z = l < G ? l : nz + l;
+          } else if (t < nZ + nY) {
+            const long t2 = t - nZ, row = 2L * G * e.x;
+            const long zi = t2 / row, r = t2 - zi * row;
+            const int l = (int)(r / e.x);
+            x = (int)(r % e.x);
+            y = l < G ? l : ny + l;
+            z = G + (int)zi;
+          } else {
+            const long t3 = t - nZ - nY, row = (long)ny * 2 * G;
+            const long zi = t3 / row, r = t3 - zi * row;
+            const int l = (int)(r % (2 * G));
+            x = l < G ? l : nx + l;
+            y = G + (int)(r / (2 * G));
+            z = G + (int)zi;
+          }
+          const int sx = x < G ? x + nx : (x >= G + nx ? x - nx : x);
+          const int sy = y < G ? y + ny : (y >= G + ny ? y - ny : y);
+          const int sz = z < G ? z + nz : (z >= G + nz ? z - nz : z);
+          ff((long)x + (long)y * e.x + (long)z * exy) =
+              ff((long)sx + (long)sy * e.x + (long)sz * exy);
+        });
   }
   void fillOpenness(Level& lv) {
     fill(lv, lv.ox);
