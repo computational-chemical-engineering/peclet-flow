@@ -15,8 +15,17 @@
 // -- the phantom capillary bound activates, cuts the capillary dt by exactly
 // sqrt(2 rho_min / (rho_min + rho_max)) against the set_vof_phantom_capillary_bound(False) run, and
 // max S, the overlap cell count, the flag and the capillary dt are identical to np = 1.
+//
+// Third scene (vof_overlap_design §15): a marker CUT BY THE LOW WALL y = 0 (walls +-y), colour in
+// the wall-adjacent layer, in a solenoidal field with v = 0 exactly on the wall face and v != 0 one
+// face in. The block's wall-face velocity lives at global index -1, outside the domain, and is
+// gathered from the wall rank's patch ghosts. np 2 cuts x through the marker and its master is
+// rank 1 (round robin, marker id 1), so the out-of-domain pieces travel by MPI; np 4 also cuts y
+// through its box, so ranks that own NO wall face take part. Per-marker volume <= 1e-12 and union
+// colour + volumes bitwise np = 1. (With the pre-§15 zero-gradient clamp: volume drift ~1e-3.)
 #include <mpi.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -117,6 +126,77 @@ static void configurePair(IbmSolver& s, int lnx, int lny, int lnz, bool bound) {
     s.setVofPhantomCapillaryBound(false);
   s.enableVofBlocksFromColours({PBOX[0], PBOX[1]}, {pairColour(0), pairColour(1)});
   s.enableVofBlockCsf();  // forms S and the census for the first step
+}
+
+// ---- a marker at the LOW wall y = 0 (§15)
+static constexpr double WR[2] = {5.0, 9.0}, WC[2][3] = {{40.3, 22.2, 16.1}, {20.3, 3.2, 16.1}};
+static constexpr double WA = 0.5, WDT = 0.5;
+static constexpr int WSTEPS = 40;
+static double sphereFrac3(const double* c, double r, int x, int y, int z) {
+  const int NS = 8;
+  int in = 0;
+  for (int k = 0; k < NS; ++k)
+    for (int j = 0; j < NS; ++j)
+      for (int i = 0; i < NS; ++i) {
+        const double px = x + (i + 0.5) / NS - c[0], py = y + (j + 0.5) / NS - c[1],
+                     pz = z + (k + 0.5) / NS - c[2];
+        in += (px * px + py * py + pz * pz < r * r) ? 1 : 0;
+      }
+  return static_cast<double>(in) / (NS * NS * NS);
+}
+static std::array<int, 6> wallBox(int m) {  // bubble box + the margin 3, inside the y walls
+  std::array<int, 6> q;
+  for (int d = 0; d < 3; ++d) {
+    q[d] = (int)std::floor(WC[m][d] - WR[m]) - 3;
+    q[3 + d] = (int)std::ceil(WC[m][d] + WR[m]) + 3;
+  }
+  q[1] = std::max(q[1], 0);
+  q[4] = std::min(q[4], NY);
+  return q;
+}
+static std::vector<double> wallColour(int m) {
+  const auto b = wallBox(m);
+  std::vector<double> c;
+  for (int z = b[2]; z < b[5]; ++z)
+    for (int y = b[1]; y < b[4]; ++y)
+      for (int x = b[0]; x < b[3]; ++x)
+        c.push_back(sphereFrac3(WC[m], WR[m], x, y, z));
+  return c;
+}
+/// psi on the z-edge (x, y): zero on both walls, periodic in x with an EXACT wrap (x mod NX).
+static double wallPsi(int x, int y) {
+  const double PI = 3.14159265358979323846;
+  const int xm = ((x % NX) + NX) % NX;
+  return WA * (NX / (2.0 * PI)) * std::sin(2.0 * PI * xm / NX) * 4.0 * y * (NY - y) /
+         (double)(NY * NY);
+}
+static void configureWall(IbmSolver& s, int ox, int oy, int lnx, int lny, int lnz) {
+  const std::size_t loc = (std::size_t)lnx * lny * lnz;
+  s.setRho(1.0);
+  s.setMu(0.5);
+  s.setDomainBc(2, 1, 0, 0, 0);
+  s.setDomainBc(3, 1, 0, 0, 0);  // walls +-y
+  s.setPressureGeometry(std::vector<double>(loc, 10.0));
+  s.enableVof();
+  s.setVof(std::vector<double>(loc, 0.0));
+  s.setSurfaceTension(SIGMA);
+  s.enableVofBlocksFromColours({wallBox(0), wallBox(1)}, {wallColour(0), wallColour(1)});
+  s.enableVofBlockCsf();  // the production configuration: debris + residue pass on
+  // flow's LOW-face convention: u(i, j) on the x face i between z-edges (i, j) and (i, j + 1),
+  // v(i, j) on the y face j between (i, j) and (i + 1, j) -- the discrete curl, so the discrete
+  // divergence telescopes; v(., 0) = 0 exactly (psi(., 0) = 0).
+  std::vector<double> u(loc, 0.0), v(loc, 0.0), w(loc, 0.0);
+  for (int z = 0; z < lnz; ++z)
+    for (int y = 0; y < lny; ++y)
+      for (int x = 0; x < lnx; ++x) {
+        const int gx = x + ox, gy = y + oy;
+        const std::size_t i = (std::size_t)x + (std::size_t)y * lnx + (std::size_t)z * lnx * lny;
+        u[i] = wallPsi(gx, gy + 1) - wallPsi(gx, gy);
+        v[i] = -(wallPsi(gx + 1, gy) - wallPsi(gx, gy));
+      }
+  s.setVelocity(0, u);
+  s.setVelocity(1, v);
+  s.setVelocity(2, w);
 }
 
 static std::vector<double> gatherGlobal(const std::vector<double>& local, int ox, int oy, int oz,
@@ -292,6 +372,83 @@ int main(int argc, char** argv) {
         if (!(cb.maxSum == cr.maxSum && cb.cells == cr.cells && cb.active == cr.active &&
               dtB == dtR && std::fabs(cb.excess - cr.excess) <= 1e-12 * cr.excess)) {
           std::printf("  FAIL: the overlap census / bound differs from np = 1\n");
+          fail = 1;
+        }
+      }
+      MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    }
+    // ---- a marker at the LOW wall (§15), split between ranks
+    {
+      bool cutY = false;
+      for (const auto& sz : dec.sizes())
+        if ((int)sz[1] != NY)
+          cutY = true;
+      IbmSolver sw(lnx, lny, lnz);
+      sw.initMpi(dec, MPI_COMM_WORLD);
+      configureWall(sw, ox, oy, lnx, lny, lnz);
+      std::vector<double> v0Loc, v0All;
+      for (const auto& q : sw.vofBlockStats())
+        v0Loc.push_back(q.volume);
+      v0All.assign(v0Loc.size(), 0.0);
+      MPI_Allreduce(v0Loc.data(), v0All.data(), (int)v0Loc.size(), MPI_DOUBLE, MPI_SUM,
+                    MPI_COMM_WORLD);
+      const int wMaster = sw.vofBlockStats()[1].master;
+      double worst = 0.0;
+      std::vector<double> vLoc(v0Loc.size()), vAll(v0Loc.size());
+      for (int k = 0; k < WSTEPS; ++k) {
+        sw.advectVofBlocks(WDT, /*requireSolenoidal=*/false);
+        const auto st = sw.vofBlockStats();
+        for (std::size_t m = 0; m < st.size(); ++m)
+          vLoc[m] = st[m].volume;
+        MPI_Allreduce(vLoc.data(), vAll.data(), (int)vLoc.size(), MPI_DOUBLE, MPI_SUM,
+                      MPI_COMM_WORLD);
+        for (std::size_t m = 0; m < vAll.size(); ++m)
+          worst = std::fmax(worst, std::fabs(vAll[m] / v0All[m] - 1.0));
+      }
+      const std::vector<double> gC =
+          gatherGlobal(sw.getVof(), ox, oy, oz, lnx, lny, lnz, rank, size);
+      if (rank == 0) {
+        IbmSolver ref(NX, NY, NZ);
+        configureWall(ref, 0, 0, NX, NY, NZ);
+        for (int k = 0; k < WSTEPS; ++k)
+          ref.advectVofBlocks(WDT, false);
+        const std::vector<double> rC = ref.getVof();
+        const auto rs = ref.vofBlockStats();
+        long nC = 0, nV = 0;
+        for (std::size_t i = 0; i < GCELLS; ++i)
+          nC += (gC[i] == rC[i]) ? 0 : 1;
+        for (std::size_t m = 0; m < rs.size(); ++m)
+          nV += (vAll[m] == rs[m].volume) ? 0 : 1;
+        // the triggering condition, so the gate cannot go vacuous
+        const auto wb = wallBox(1);
+        const std::vector<double> wc = wallColour(1);
+        double layer = 0.0;
+        for (int z = 0; z < wb[5] - wb[2]; ++z)
+          for (int x = 0; x < wb[3] - wb[0]; ++x)
+            layer += wc[(std::size_t)x + (std::size_t)z * (wb[3] - wb[0]) * (wb[4] - wb[1])];
+        const double vIn = std::fabs(wallPsi(20, 1) - wallPsi(21, 1));
+        std::printf(
+            "  low-wall marker: box y [%d, %d), wall-layer colour %.3f cells, |v| one face in "
+            "%.3e; master rank %d; y cut %s\n",
+            wb[1], wb[4], layer, vIn, wMaster, cutY ? "yes" : "no");
+        std::printf(
+            "  after %d steps: max marker |V/V0-1| %.3e (volumes %.17g, %.17g); union cells "
+            "differing from np=1: %ld; volumes differing: %ld\n",
+            WSTEPS, worst, vAll[0], vAll[1], nC, nV);
+        if (!(layer > 1.0 && wb[1] == 0 && vIn > 1e-3)) {
+          std::printf("  FAIL: the low-wall scene does not put colour on the wall layer\n");
+          fail = 1;
+        }
+        if (size > 1 && wMaster == 0) {
+          std::printf("  FAIL: the wall marker's master is rank 0 (no MPI gather exercised)\n");
+          fail = 1;
+        }
+        if (!(worst <= 1e-12)) {
+          std::printf("  FAIL: a marker at the low wall does not conserve its volume\n");
+          fail = 1;
+        }
+        if (nC != 0 || nV != 0) {
+          std::printf("  FAIL: the low-wall scene is not bitwise decomposition-independent\n");
           fail = 1;
         }
       }
