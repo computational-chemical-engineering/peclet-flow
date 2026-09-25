@@ -384,6 +384,218 @@ inline void vofBatchClamp(const VofBlockTable& T, I3 gs, bool px, bool py, bool 
       });
 }
 
+// ---- stage 4: marker debris and sub-wispEps residue (`VofBlockSet::debrisPassBatchImpl`) --------
+
+/// The debris predicate of `doc/vof_overlap_design.md` §11 on cell `i`: interfacial, and NO cell of
+/// the marker at or above `cfull` within two cells (the 5^3 fit stencil). Shared by the per-block
+/// scan and the batched one.
+template <class SF>
+KOKKOS_INLINE_FUNCTION bool vofDebrisCell(const SF& c, long i, long sy, long sz, double ieps,
+                                          double cfull) {
+  if (!vofIsInterface(c(i), ieps))
+    return false;
+  for (int oz = -2; oz <= 2; ++oz)
+    for (int oy = -2; oy <= 2; ++oy)
+      for (int ox = -2; ox <= 2; ++ox)
+        if (c(i + ox + oy * sy + oz * sz) >= cfull)
+          return false;  // attached: a cell at least half full of this marker within two
+  return true;
+}
+
+/// The ATTACHED predicate (§5.3 step 2): interfacial with a cell at or above `cfull` within two.
+template <class SF>
+KOKKOS_INLINE_FUNCTION bool vofAttachedCell(const SF& c, long i, long sy, long sz, double ieps,
+                                            double cfull) {
+  if (!vofIsInterface(c(i), ieps))
+    return false;
+  bool attached = false;
+  for (int oz = -2; oz <= 2 && !attached; ++oz)
+    for (int oy = -2; oy <= 2 && !attached; ++oy)
+      for (int ox = -2; ox <= 2 && !attached; ++ox)
+        attached = c(i + ox + oy * sy + oz * sz) >= cfull;
+  return attached;
+}
+
+/// The residue predicate (§13): `0 < |C| <= wispEps`.
+KOKKOS_INLINE_FUNCTION bool vofResidueCell(double ci, double weps) {
+  return ci != 0.0 && Kokkos::fabs(ci) <= weps;
+}
+
+/// One mark scan over the concatenated inner regions (`T.off` = `vofJobInner`), in each block's
+/// inner-box index order -- the per-block scan's order, so every list is the per-block list.
+/// `kind`: 0 debris, 1 residue, 2 attached. Each job's range lands in `start`/`end` (absolute).
+inline void vofBatchMark(const VofBlockTable& T, int kind, double ieps, double cfull, double weps,
+                         LField list, LField start, LField end) {
+  Kokkos::parallel_scan(
+      "vof::block::batch_debris_mark", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
+      KOKKOS_LAMBDA(const long t, long& upd, const bool final) {
+        const int k = vofJobOf(T.off, t);
+        const VofBlockJob& J = T.job[k];
+        const long r = t - T.off[k];
+        const int nx = J.n.x, ny = J.n.y, g = J.g;
+        const int ix = static_cast<int>(r % nx);
+        const int iy = static_cast<int>((r / nx) % ny);
+        const int iz = static_cast<int>(r / (static_cast<long>(nx) * ny));
+        const long i = L3(g + ix, g + iy, g + iz, J.e);
+        const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+        const VofRawField c{J.c};
+        const bool hit = kind == 0   ? vofDebrisCell(c, i, sy, sz, ieps, cfull)
+                         : kind == 1 ? vofResidueCell(c(i), weps)
+                                     : vofAttachedCell(c, i, sy, sz, ieps, cfull);
+        if (final) {
+          if (r == 0)
+            start(T.base + k) = upd;
+          if (hit)
+            list(upd) = i;
+          if (t + 1 == T.off[k + 1])
+            end(T.base + k) = upd + (hit ? 1 : 0);
+        }
+        if (hit)
+          ++upd;
+      });
+}
+
+/// The per-job slots of the debris packet (`out(stride * (base + k) + slot)`).
+enum VofDebrisSlot : int {
+  kDbSumD = 0,  ///< sum_D C in list order (the removed / census debris volume)
+  kDbSumR,      ///< sum_R C in list order (signed residue)
+  kDbW,         ///< sum_A C(1 - C)
+  kDbVA,        ///< sum_A C
+  kDbDV,        ///< the volume to return (D if removing, then R); replaced by `lost` once acted
+  kDbActed,     ///< 1 when the return ran (pending and VA >= kDebrisMinAttached and W > 0)
+  kDbND,        ///< debris count
+  kDbNR,        ///< residue count
+  kDbPending,   ///< 1 when there was something to remove (removeD or nR > 0)
+  kDbSlots
+};
+
+/// Flags of the pass, uniform over the blocks.
+struct VofDebrisFlags {
+  bool doDebris, doResidue, remove;
+  double vaMin;
+};
+
+/// Step 2 of the pass: one thread per job, every sum in list order (the per-block kernel's single
+/// thread and order, so the same bits). A job with nothing to remove computes only its census sum.
+inline void vofBatchDebrisSums(const VofBlockTable& T, VofDebrisFlags F, LField listD, LField listR,
+                               LField listA, LField sD0, LField eD0, LField sR0, LField eR0,
+                               LField sA0, LField eA0, SField out, int stride, int slot0) {
+  Kokkos::parallel_for(
+      "vof::block::batch_debris_sums", Kokkos::RangePolicy<SExec>(SExec(), 0, T.nj),
+      KOKKOS_LAMBDA(const long q) {
+        const int j = T.base + static_cast<int>(q);
+        const VofRawField c{T.job[q].c};
+        const long nD = F.doDebris ? eD0(j) - sD0(j) : 0;
+        const long nR = F.doResidue ? eR0(j) - sR0(j) : 0;
+        const bool removeD = F.doDebris && F.remove && nD > 0;
+        const bool pending = removeD || nR > 0;
+        const long ob = static_cast<long>(stride) * j + slot0;
+        double sD = 0.0, sR = 0.0, W = 0.0, VA = 0.0, dV = 0.0;
+        const long d0 = F.doDebris ? sD0(j) : 0;
+        for (long t = 0; t < nD; ++t)
+          sD += c(listD(d0 + t));
+        double acted = 0.0;
+        if (pending) {
+          const long r0 = F.doResidue ? sR0(j) : 0, a0 = sA0(j), nA = eA0(j) - sA0(j);
+          for (long t = 0; t < nR; ++t)
+            sR += c(listR(r0 + t));
+          for (long t = 0; t < nA; ++t) {
+            const double ca = c(listA(a0 + t));
+            W += ca * (1.0 - ca);
+            VA += ca;
+          }
+          acted = (VA < F.vaMin || !(W > 0.0)) ? 0.0 : 1.0;
+          // the removed volume, in the fixed order D (if removing) then R -- the serial order
+          const long nDr = removeD ? nD : 0;
+          for (long t = 0; t < nDr; ++t)
+            dV += c(listD(d0 + t));
+          for (long t = 0; t < nR; ++t)
+            dV += c(listR(r0 + t));
+        }
+        out(ob + kDbSumD) = sD;
+        out(ob + kDbSumR) = sR;
+        out(ob + kDbW) = W;
+        out(ob + kDbVA) = VA;
+        out(ob + kDbDV) = dV;
+        out(ob + kDbActed) = acted;
+        out(ob + kDbND) = static_cast<double>(nD);
+        out(ob + kDbNR) = static_cast<double>(nR);
+        out(ob + kDbPending) = pending ? 1.0 : 0.0;
+      });
+}
+
+/// Step 4, the act: removed cells -> 0, attached `C += dV C(1-C)/W` capped at 1 (the per-block
+/// write kernel's expressions verbatim). Over the upper bound (the inner region: D, R and A are
+/// disjoint subsets of it); a job that did not act, or a thread past its count, exits. `capf(j)`
+/// is raised when some cell of job j was capped.
+inline void vofBatchDebrisWrite(const VofBlockTable& T, VofDebrisFlags F, LField listD,
+                                LField listR, LField listA, LField sD0, LField sR0, LField sA0,
+                                LField eA0, SField out, int stride, int slot0, SField ex,
+                                Kokkos::View<int*, SMem> capf) {
+  Kokkos::parallel_for(
+      "vof::block::batch_debris_write", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
+      KOKKOS_LAMBDA(const long tt) {
+        const int k = vofJobOf(T.off, tt);
+        const int j = T.base + k;
+        const long ob = static_cast<long>(stride) * j + slot0;
+        if (out(ob + kDbActed) == 0.0)
+          return;
+        const long t = tt - T.off[k];
+        const long nD = static_cast<long>(out(ob + kDbND)), nR = static_cast<long>(out(ob + kDbNR));
+        const bool removeD = F.doDebris && F.remove && nD > 0;
+        const long nDr = removeD ? nD : 0, nA = eA0(j) - sA0(j);
+        const long nZ = nDr + nR, nTot = nZ + nA;
+        if (t >= nTot)
+          return;
+        const VofRawField c{T.job[k].c};
+        if (t < nDr) {
+          c(listD(sD0(j) + t)) = 0.0;
+          return;
+        }
+        if (t < nZ) {
+          c(listR(sR0(j) + t - nDr)) = 0.0;
+          return;
+        }
+        const double dV = out(ob + kDbDV), W = out(ob + kDbW);
+        const long ta = t - nZ;
+        const long i = listA(sA0(j) + ta);
+        const double ca = c(i);
+        const double d = dV * (ca * (1.0 - ca)) / W;
+        double cn = ca + d;
+        double e = 0.0;
+        if (cn > 1.0) {
+          e = cn - 1.0;
+          cn = 1.0;
+          Kokkos::atomic_max(&capf(j), 1);
+        }
+        ex(T.off[k] + ta) = e;
+        c(i) = cn;
+      });
+}
+
+/// `lost`: the capped excess of an acted job summed in list order on one thread (only where a cap
+/// fired, as the per-block path; 0 otherwise). Written over the job's `kDbDV` slot.
+inline void vofBatchDebrisLost(const VofBlockTable& T, LField sA0, LField eA0, SField out,
+                               int stride, int slot0, SField ex, Kokkos::View<int*, SMem> capf) {
+  Kokkos::parallel_for(
+      "vof::block::batch_debris_lost", Kokkos::RangePolicy<SExec>(SExec(), 0, T.nj),
+      KOKKOS_LAMBDA(const long q) {
+        const int j = T.base + static_cast<int>(q);
+        const long ob = static_cast<long>(stride) * j + slot0;
+        if (out(ob + kDbActed) == 0.0)
+          return;
+        double lost = 0.0;
+        if (capf(j) > 0) {
+          const long nA = eA0(j) - sA0(j), e0 = T.off[q];
+          double a = 0.0;  // list order, as the serial loop accumulated it
+          for (long t = 0; t < nA; ++t)
+            a += ex(e0 + t);
+          lost = a;
+        }
+        out(ob + kDbDV) = lost;
+      });
+}
+
 }  // namespace peclet::flow::vof
 
 #endif  // PECLET_FLOW_VOF_BLOCK_BATCH_HPP

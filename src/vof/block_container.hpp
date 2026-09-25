@@ -1348,7 +1348,10 @@ class VofBlockSet {
   /// of the shared scratch, so no block's lists overwrite another's before the sums read them.
   void debrisPassBatch(std::vector<VofBlock*>& bs) {
     const double t0 = timingOn ? tick_() : 0.0;
-    debrisPassBatchImpl(bs);
+    if (batchEligible())
+      debrisBatched(bs);
+    else
+      debrisPassBatchImpl(bs);
     if (timingOn) {
       Kokkos::fence();
       debrisSeconds += tick_() - t0;
@@ -1415,13 +1418,8 @@ class VofBlockSet {
               const int iy = static_cast<int>((r / nx) % ny);
               const int iz = static_cast<int>(r / (static_cast<long>(nx) * ny));
               const long i = L3(g + ix, g + iy, g + iz, e);
-              if (!vofIsInterface(c(i), ieps))
+              if (!vofDebrisCell(c, i, sy, sz, ieps, cfull))
                 return;
-              for (int oz = -2; oz <= 2; ++oz)
-                for (int oy = -2; oy <= 2; ++oy)
-                  for (int ox = -2; ox <= 2; ++ox)
-                    if (c(i + ox + oy * sy + oz * sz) >= cfull)
-                      return;  // attached: a cell at least half full of this marker within two
               if (final)
                 listD(o + upd) = i;
               ++upd;
@@ -1437,7 +1435,7 @@ class VofBlockSet {
               const int iy = static_cast<int>((r / nx) % ny);
               const int iz = static_cast<int>(r / (static_cast<long>(nx) * ny));
               const double ci = c(L3(g + ix, g + iy, g + iz, e));
-              if (!(ci != 0.0 && Kokkos::fabs(ci) <= weps))
+              if (!vofResidueCell(ci, weps))
                 return;
               if (final)
                 listR(o + upd) = L3(g + ix, g + iy, g + iz, e);
@@ -1474,14 +1472,7 @@ class VofBlockSet {
             const int iy = static_cast<int>((r / nx) % ny);
             const int iz = static_cast<int>(r / (static_cast<long>(nx) * ny));
             const long i = L3(g + ix, g + iy, g + iz, e);
-            if (!vofIsInterface(c(i), ieps))
-              return;
-            bool attached = false;
-            for (int oz = -2; oz <= 2 && !attached; ++oz)
-              for (int oy = -2; oy <= 2 && !attached; ++oy)
-                for (int ox = -2; ox <= 2 && !attached; ++ox)
-                  attached = c(i + ox + oy * sy + oz * sz) >= cfull;
-            if (!attached)
+            if (!vofAttachedCell(c, i, sy, sz, ieps, cfull))
               return;
             if (final)
               listA(o + upd) = i;
@@ -1951,6 +1942,106 @@ class VofBlockSet {
       mb[k]->adv_.noteBatchedStep();
   }
 
+  /// Stage 4 of §5.9, the debris/residue pass of `debrisPassBatchImpl` on every block of `bs` in
+  /// batched launches: the mark scans (D, R, A) over the concatenated inner regions with their
+  /// counts on the device, the per-block sums (one thread per block, list order), the act kernels
+  /// over the upper bound with device guards -- so "nothing marked" is a device no-op -- and one
+  /// batched ghost fill. The ghost fill runs for every block: a block that did not act has the
+  /// inner colour its last sweep's fill saw, and the block ghost policy is a function of the inner
+  /// colour alone, so re-filling it rewrites the same doubles. The ledger is applied on the host
+  /// from one read of the per-block packet, with the per-block path's logic verbatim.
+  void debrisBatched(std::vector<VofBlock*>& bs) {
+    const std::size_t nb = bs.size();
+    if (nb == 0)
+      return;
+    VofDebrisFlags F;
+    F.doDebris = csfEnabled && debrisCensus;
+    F.doResidue = wispEps > 0.0;
+    F.remove = debrisRemove;
+    F.vaMin = kDebrisMinAttached;
+    // the predicates of debrisPassBatchImpl (review finding 7 there: the three lists are disjoint)
+    const double weps = wispEps, cfull = kDebrisMaxC;
+    const double ieps = curvProto.interfaceEps > weps ? curvProto.interfaceEps : weps;
+    std::vector<VofBlockJob> jobs(nb);
+    for (std::size_t k = 0; k < nb; ++k) {
+      bs[k]->st_.debrisCells = 0;
+      bs[k]->st_.debrisVolume = 0.0;
+      jobs[k] = makeJob(*bs[k], 0.0);
+    }
+    if (static_cast<std::size_t>(dCap_.extent(0)) < nb) {
+      for (int q = 0; q < 6; ++q)
+        dRange_[q] = LField("vof::block::batch_debris_range", nb);
+      dCap_ = Kokkos::View<int*, SMem>("vof::block::batch_debris_cap", nb);
+      dOut_ = SField("vof::block::batch_debris_out", kDbSlots * nb);
+      dOutHost_ = Kokkos::create_mirror_view(dOut_);
+    }
+    Kokkos::deep_copy(SExec(), dCap_, 0);
+    const LField sD = dRange_[0], eD = dRange_[1], sR = dRange_[2], eR = dRange_[3],
+                 sA = dRange_[4], eA = dRange_[5];
+    for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch) {
+      VofBlockTable T = batchTable(jobs, j0);
+      const long region = vofSetOffsets(T, vofJobInner);
+      auto ensure = [&](LField& f, const char* name) {
+        if (static_cast<long>(f.extent(0)) < region)
+          f = LField(Kokkos::view_alloc(std::string(name), Kokkos::WithoutInitializing), region);
+      };
+      if (F.doDebris) {
+        ensure(listD_, "vof::block::debris_list");
+        vofBatchMark(T, 0, ieps, cfull, weps, listD_, sD, eD);
+      }
+      if (F.doResidue) {
+        ensure(listR_, "vof::block::residue_list");
+        vofBatchMark(T, 1, ieps, cfull, weps, listR_, sR, eR);
+      }
+      ensure(listA_, "vof::block::attached_list");
+      vofBatchMark(T, 2, ieps, cfull, weps, listA_, sA, eA);
+      vofBatchDebrisSums(T, F, listD_, listR_, listA_, sD, eD, sR, eR, sA, eA, dOut_, kDbSlots, 0);
+      if (static_cast<long>(debrisEx_.extent(0)) < region)
+        debrisEx_ = SField(
+            Kokkos::view_alloc("vof::block::debris_excess", Kokkos::WithoutInitializing), region);
+      vofBatchDebrisWrite(T, F, listD_, listR_, listA_, sD, sR, sA, eA, dOut_, kDbSlots, 0,
+                          debrisEx_, dCap_);
+      vofBatchDebrisLost(T, sA, eA, dOut_, kDbSlots, 0, debrisEx_, dCap_);
+      batchGhostFill(T);  // the inner colour moved; the next reader expects valid ghosts
+    }
+    Kokkos::deep_copy(dOutHost_, dOut_);  // ONE device->host copy for every block
+    applyDebrisLedger(bs, F.doDebris);
+  }
+
+  /// The host half of the debris pass: the ledger of `debrisPassBatchImpl`, from the packet.
+  void applyDebrisLedger(std::vector<VofBlock*>& bs, bool doDebris) {
+    for (std::size_t k = 0; k < bs.size(); ++k) {
+      VofBlockStats& st = bs[k]->st_;
+      const double* ho = &dOutHost_(kDbSlots * k);
+      const long nD = static_cast<long>(ho[kDbND]);
+      const bool removeD = doDebris && debrisRemove && nD > 0;
+      const bool acted = ho[kDbActed] != 0.0;
+      if (ho[kDbPending] == 0.0) {
+        if (doDebris && nD > 0) {  // census only: report what WOULD be removed
+          st.debrisCells = nD;
+          st.debrisVolume = ho[kDbSumD];
+        }
+        continue;  // nothing to remove: nothing else ran
+      }
+      if (doDebris && !debrisRemove && nD > 0) {  // census of what WOULD be removed
+        st.debrisCells = nD;
+        st.debrisVolume = ho[kDbSumD];
+      }
+      if (!acted) {  // step 3: no attached interface worth a cell -- the clip bounds it
+        if (removeD)
+          st.debrisUnresolved += nD;
+        continue;
+      }
+      if (removeD) {
+        st.debrisCells = nD;
+        st.debrisVolume = ho[kDbSumD];
+        st.debrisReturned += ho[kDbSumD];
+      }
+      st.residueReturned += ho[kDbSumR];
+      st.debrisLost += ho[kDbDV];  // `lost`, written over the dV slot by the act
+    }
+  }
+
  private:
   VofMetric metric_;  ///< Phase 3: the anisotropic cell metric (default = unit)
   double h_ = 1.0;
@@ -1975,6 +2066,10 @@ class VofBlockSet {
   SField bCfl_, bBcv_;
   SField::host_mirror_type bCflHost_, bBcvHost_;
   LField bList_, bStart_, bEnd_;  ///< the concatenated worklist and each job's range in it
+  LField dRange_[6];              ///< the debris lists' per-job ranges: sD, eD, sR, eR, sA, eA
+  Kokkos::View<int*, SMem> dCap_; ///< per job: some attached cell was capped at 1
+  SField dOut_;                   ///< the per-job debris packet (`VofDebrisSlot`)
+  SField::host_mirror_type dOutHost_;
 };
 
 }  // namespace peclet::flow::vof
