@@ -553,7 +553,6 @@ class VofCurvature {
                              J.ieps, J.gm);
           });
     }
-    Kokkos::fence();
   }
 
   /// The two compaction scans: `listG_` = every interfacial cell of the GROWN region (what
@@ -642,7 +641,6 @@ class VofCurvature {
       Kokkos::parallel_for(
           "vof::curv::planes_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nG_),
           KOKKOS_LAMBDA(long t) { wyReconstructCell(c, list(t), sy, sz, mx, my, mz, al); });
-      Kokkos::fence();
       return;
     }
     Kokkos::parallel_for(
@@ -660,7 +658,6 @@ class VofCurvature {
           }
           wyReconstructCell(c, i, sy, sz, mx, my, mz, al);
         });
-    Kokkos::fence();
   }
 
   /// Tiers 1 and 2. Writes `kappa`/`branch` for every inner cell; a cell the height functions
@@ -696,7 +693,6 @@ class VofCurvature {
             curvHeightCell(list(t), c, mx, my, mz, al, kap, br, s0, s1, s2, mtol, ptW, ieps,
                            forceFb, oneDir, useFit, gm, peps);
           });
-      Kokkos::fence();
       return;
     }
     Kokkos::parallel_for(
@@ -707,7 +703,6 @@ class VofCurvature {
           curvHeightCell(L3(x, y, z, e), c, mx, my, mz, al, kap, br, s0, s1, s2, mtol, ptW, ieps,
                          forceFb, oneDir, useFit, gm, peps);
         });
-    Kokkos::fence();
   }
 
   /// Tier 3, over the cells the height pass could not serve. A plain guarded `parallel_for` rather
@@ -729,7 +724,6 @@ class VofCurvature {
           "vof::curv::pv_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nI_), KOKKOS_LAMBDA(long t) {
             curvFallbackCell(list(t), c, mx, my, mz, al, kap, br, sy, sz, gr, dW, cmin, ieps, gm);
           });
-      Kokkos::fence();
       return;
     }
     Kokkos::parallel_for(
@@ -740,7 +734,6 @@ class VofCurvature {
           curvFallbackCell(L3(x, y, z, e), c, mx, my, mz, al, kap, br, sy, sz, gr, dW, cmin, ieps,
                            gm);
         });
-    Kokkos::fence();
   }
 
   /// The admissibility clip (see `kappaMax`), over the same cells the cascade ran on: the

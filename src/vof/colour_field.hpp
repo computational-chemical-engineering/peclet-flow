@@ -119,7 +119,6 @@ inline void periodicFill(SField f, I3 e, int g, bool px, bool py, bool pz) {
             f(base + static_cast<long>(g + N + gl) * sa) = f(base + static_cast<long>(g + gl) * sa);
           }
         });
-    Kokkos::fence();
   }
 }
 
@@ -168,7 +167,6 @@ inline void clampFill(SField f, I3 e, int g, I3 o, I3 gs, bool px, bool py, bool
         if (cx != gx || cy != gy || cz != gz)
           f(L3(x, y, z, e)) = f(L3(cx - o.x + g, cy - o.y + g, cz - o.z + g, e));
       });
-  Kokkos::fence();
 }
 
 }  // namespace peclet::flow::vof

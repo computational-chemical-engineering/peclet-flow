@@ -220,7 +220,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
       const bool master = (b.master == rank_);
       if (master)
         for (int c = 0; c < nc; ++c)
-          Kokkos::deep_copy(blockView(b, c), 0.0);
+          Kokkos::deep_copy(SExec(), blockView(b, c), 0.0);  // async: device work follows
       std::map<int, long> counts;
       for (const auto& p : pieces_)
         counts[p.rank] += p.cells();
@@ -287,7 +287,6 @@ class VofBlockExchange : public VofBlockExchangeBase {
         if (p.rank == r.from)
           unpackToBlock(p, nc, r.dbuf, off, blockView, b, blockBase);
     }
-    Kokkos::fence();
   }
 
   /// block -> patch, combined with `op` (0 = max, 1 = sum). The patch's INNER region is zeroed
@@ -381,7 +380,6 @@ class VofBlockExchange : public VofBlockExchangeBase {
         if (p.rank == rank_)
           combineBufIntoPatch(p, nc, r.dbuf, off, loc, op);
     }
-    Kokkos::fence();
   }
 
   // ---- the four device kernels (public for nvcc's extended-lambda rule) -----------------------
@@ -395,7 +393,6 @@ class VofBlockExchange : public VofBlockExchangeBase {
           Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
           KOKKOS_LAMBDA(int x, int y, int z) { f(L3(x + g, y + g, z + g, e)) = 0.0; });
     }
-    Kokkos::fence();
   }
 
   void packFromPatch(const VofPiece& p, int nc, const SField* loc, SField buf, long& off) {

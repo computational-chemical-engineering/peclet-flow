@@ -773,7 +773,6 @@ class VofBlockSet {
             ff(i) = f;
           });
     }
-    Kokkos::fence();
   }
 
   /// `S = sum_k C_k` of the CURRENT (replicated) table into `sLocal`'s inner region (§5.6).
@@ -1028,7 +1027,6 @@ class VofBlockSet {
             return;
           f(L3(x, y, z, e)) = 0.0;
         });
-    Kokkos::fence();
     // 2. an axis the block spans entirely, and which is globally periodic, wraps within the block.
     const bool sx = per_[0] && b.box.n(0) == gs_.x;
     const bool sy = per_[1] && b.box.n(1) == gs_.y;
