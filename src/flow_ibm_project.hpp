@@ -553,7 +553,7 @@ void Solver<Grid>::buildBalancedFaceForce(int c) {
   CCConst fb = CCConst(haveFb ? cellForce_[c] : C[c].rscale);
   CCField af = faceAcc_[c];
   C3 e = e_;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::bfp_face_force", MD(space, {G, G, G}, {e.x - G + 1, e.y - G + 1, e.z - G + 1}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -645,8 +645,7 @@ void Solver<Grid>::applyBalancedForceProjection() {
         long nf = 0;  // a COUNT (sum reduction, identity 0) of the non-finite inner values
         Kokkos::parallel_reduce(
             "peclet::flow::bfp_nonfinite",
-            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {1, 1, 1},
-                                                            {e1.x - 1, e1.y - 1, e1.z - 1}),
+            MDRange3<CCExec>(space, {1, 1, 1}, {e1.x - 1, e1.y - 1, e1.z - 1}),
             KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
               const long i = (long)x + (long)y * e1.x + (long)z * (long)e1.x * e1.y;
               if (!Kokkos::isfinite(x1(i)))
@@ -701,8 +700,7 @@ void Solver<Grid>::applyBalancedForceProjection() {
     const C3 e1 = e1_, e2 = e_;
     const bool resplit = !pbValid_;
     Kokkos::parallel_for(
-        "peclet::flow::bfp_split",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+        "peclet::flow::bfp_split", MDRange3<CCExec>(space, {0, 0, 0}, {nx_, ny_, nz_}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i1 = (long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y;
           const long i2 = (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
@@ -1440,8 +1438,7 @@ long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
       const C3 e1 = e1_, e2 = e_;
       const int lnx = nx_, lny = ny_;
       Kokkos::parallel_for(
-          "peclet::flow::gp_pin_decoupled",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+          "peclet::flow::gp_pin_decoupled", MDRange3<CCExec>(space, {0, 0, 0}, {nx_, ny_, nz_}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long i1 =
                 (long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y;
