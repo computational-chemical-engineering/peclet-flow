@@ -1019,3 +1019,738 @@ rejected: error ~ σκ").
    in core). Rejected: warp reduction of the normal equations (order change). WO-7.
 8. **Recorded order changes:** batched stats and the BC ledger (C2, WO-9); host sum-reduction
    order (B2, WO-10).
+
+---
+
+## 12. Addendum (2026-09-25): E2(a), the opt-in constant-coefficient pressure driver
+
+**Status:** DESIGN. Nothing is implemented. The user decided E2(a) on 2026-09-25 (register entry
+"Scoped constant-coefficient (Dodd–Ferrante) pressure driver: opt-in, solid-free boxes,
+accuracy-gated", umbrella `e390d73`). That decision supersedes §9 Q10 and the "not pursued" default
+of §10 E2. The brief is `doc/vof_constcoef_pressure_brief.md`. **Order:** E2 is implemented after
+the main line (§7 WO-0…WO-13). The one exception is WO-E2.0, a measurement with no code, which may
+run at any time. Numbers marked [model] are derived here and must be measured.
+
+**Reading order for an implementer:** §12.0, §12.3 (the discrete scheme), then your work order in
+§12.9, the gates it cites in §12.10, and §12.6 (placement). §12.4 and §12.5 give the reasons. Read
+them before you change any decision.
+
+### 12.0 Decisions at a glance
+
+| # | question | decision | rejected |
+|---|---|---|---|
+| D-E2.1 | form of the scheme | flow's incremental predictor is unchanged. One explicit face pre-correction `u** = u* − q` is built from the last pressure increment. Then today's constant-density projection runs: the openness operator, `projectCorrect`, the rotational update | TBFsolver's non-incremental form with the pressure removed from the predictor |
+| D-E2.2 | surface tension / balanced force | the CSF face force stays in the predictor, untouched. `q` contains no force. Static equilibrium is an exact fixed point | adding σκ∇C to the extrapolated-pressure term, which double counts it in the incremental form |
+| D-E2.3 | face density in `q` | `ρ_f = 0.5*(ρ(i)+ρ(i−s))`, the predictor's own expression | the arithmetic mean of 1/ρ (TBFsolver); the harmonic knob, which raises |
+| D-E2.4 | ρ0 | the global minimum of the density field, exact, recomputed every split step, device-resident. No safety factor | a fixed ρ0; a user-supplied ρ0; a factor s ≠ 1 |
+| D-E2.5 | extrapolation with variable dt | `p̂ − Pⁿ = θ·ΔPⁿ` with `θ = min(1, dtⁿ/dtⁿ⁻¹)` | the uncapped linear extrapolation, which is unstable when dt grows; ignoring dt |
+| D-E2.6 | history state | the registry field `"p_increment"` holds `ΔPⁿ = Pⁿ − Pⁿ⁻¹` of the stored values. The runtime scalar dtⁿ⁻¹ is not checkpointed. 2 exact start-up steps. A restart passes `startup_steps=0` | storing `Pⁿ⁻¹`; hooks inside `set_field` |
+| D-E2.7 | solver for option (a) | MG-PCG (the `set_pressure_pcg` cap and rtol) on the `set_pressure_geometry` operator, built once. It is independent of the Krylov driver selection, which then serves only the exact start-up steps. No special bottom | following the driver selection; a dedicated bottom engine |
+| D-E2.8 | rotational pressure term | reads `div(u**)`. This is the exact Timmermans correction for the constant-coefficient part | `div(u*)` |
+| D-E2.9 | slot for option (b) | a single solve function with a written contract (§12.3, S5) | — |
+
+### 12.1 Problem and scope
+
+**What is built:**
+- an opt-in pressure-velocity coupling for the staggered `Solver`:
+  `set_pressure_constant_coefficient(True)`;
+- it replaces the variable-coefficient projection `∇·((dt/ρ_f)∇δp) = ∇·u*` with Dodd & Ferrante
+  (2014) / Cifani (2019) splitting:
+
+  ```
+  ∇²p^{n+1}/ρ0 = ∇·u*/dt + ∇·((1/ρ0 − 1/ρ)∇p̂)
+  u^{n+1} = u* − dt[∇p^{n+1}/ρ0 + (1/ρ − 1/ρ0)∇p̂]
+  ```
+
+  written in flow's incremental form (§12.3);
+- the Poisson operator is constant, so it is built once, and MG-PCG iterations do not depend on the
+  density ratio.
+
+**Scope in which it runs (anything else raises; §12.6 lists the conditions):**
+- staggered grid;
+- solid-free box: `set_pressure_geometry` with an all-fluid SDF, no immersed solid, no scene;
+- every domain face is `'periodic'`, `'wall'` or `'slip'`;
+- variable density (a `"rho"` field, normally from `set_property_model("rho", …)`);
+- one Picard iteration;
+- no porous continuity, no drag field, no divergence source (phase change, user source);
+- the arithmetic face density.
+
+Anisotropic cells are allowed: the per-axis weight `w_c` enters exactly as in `projectCorrect`.
+MPI is allowed. Momentum-consistent VoF (`enable_vof_momentum`), the block container,
+`set_superficial_velocity`, and variable viscosity are allowed.
+
+**Out of scope:**
+- option (b), the FFT solver (§12.3 S5 only defines its slot);
+- the collocated grid. It is **not trivial**: rung V8 applies every force as a face acceleration
+  (`applyFaceAcceleration`) and corrects cells by `applyCellFaceAverageCorrection`, so the explicit
+  term would have to enter that machinery and the cell-average correction. That needs its own
+  design. The setter raises on `SolverColocated`;
+- making the driver the default;
+- inflow/outflow faces, Picard iterations, phase change, porous and IBM (§12.11 R-E2.5).
+
+### 12.2 Constraints and invariants
+
+- **Conventions:**
+  - x-fastest storage and iteration; `MDRange3` only through `src/policy.hpp`;
+  - new host kernels follow Rule H (§4.5);
+  - device code in `.hpp`;
+  - double operator storage (the default);
+  - no environment variable: selection is by setter only.
+- **The default path stays bitwise.** With the driver disabled, every existing function computes the
+  same bits. §8 G-BIT holds on every WO-E2.x commit. Every edit to an existing function is a branch
+  on a flag that is false by default, or an inert bookkeeping assignment.
+- **Balanced force.** The CSF face force σκ∇C and the pressure gradient share one face difference
+  and one face density: `buildRhsVar`, `addCsfRhsBlocks`, and the block container's per-marker SUM
+  paired with the union MAX colour (`doc/vof_overlap_design.md`). The split projection must keep an
+  equilibrium exactly stationary. §12.5 P2 proves that it does.
+- **Hydrostatic three-way consistency** (`doc/variable_density_projection.md` §1): one arithmetic
+  ρ_f in the time term, the body force and the pressure gradient. The explicit term uses the same
+  ρ_f (D-E2.3).
+- **dt-divided convention.** The momentum RHS is `rs·(ρ_f uⁿ/dt + … − G P)`. The projection works
+  on φ with `δP = (ρ0/dt)·φ`. Everything below is in the solver's internal (unit-lattice) units, as
+  the kernels compute.
+- **MPI.** The only new global operation is a MIN reduction, which is exact and order-independent.
+  All new kernels are pointwise with ghost fills. np-independence is therefore of the same kind as
+  the constant-density projection: bitwise at np = 1, and at np > 1 the `test_vardensity_mpi`
+  tolerances.
+- **Device residency.** A single-rank split step adds **no** host read. Under MPI it adds one
+  scalar allreduce per step, the same pattern as `applySuperficialVelocity`.
+
+### 12.3 The discrete scheme (normative)
+
+**Notation.**
+- For velocity component c: stride `s_c`, per-axis weight `w_c = u_.w[c]` (1.0 isotropic).
+- Face difference `G_c q(i) = w_c·(q(i) − q(i − s_c))`. This is the operator `buildRhsVar` applies to
+  `P` and `projectCorrect` applies to φ.
+- Density: `ρ = rhoField_` (internal units), with ghosts from `fillPropGhosts`.
+- Face density: `ρ_f(i) = 0.5 * (ρ(i) + ρ(i − s_c))`.
+- `o_c = ox_/oy_/oz_`: the g = 2 openness that `divergOpen` reads. It is 1 on interior and periodic
+  faces and 0 on wall and slip faces.
+- `P = P_`, and `ΔP` = the registry field `"p_increment"` (member `pIncrement_`).
+
+**One split step, n → n+1** (outerIters = 1):
+
+- **S0, predictor (unchanged).** `buildRhsVar` / `buildRhsVarMom` + `addCsfRhsBlocks` (or
+  `addCsfRhs`) + `smoothComp`. It solves `ρ_f(u* − uⁿ)/dt + adv − visc = −G Pⁿ + F_body + F_csf`.
+- **S1, ρ0.**
+  ```
+  ρ0 = min over inner cells and all ranks of ρ(i)
+  ```
+  Kokkos `Min` into a 0-d device View `constCoefRho0_`. Under MPI: `deep_copy` to host,
+  `MPI_Allreduce(MIN)`, `deep_copy` back (the `applySuperficialVelocity` pattern,
+  `flow_ibm_project.hpp:295`).
+- **S2, θ** (host scalar):
+  ```
+  θ = (pIncrementDt_ > 0 && dt_ < pIncrementDt_) ? dt_ / pIncrementDt_ : 1.0
+  ```
+- **S3, explicit face pre-correction.**
+  - Fills first: `fillPropGhosts(rhoField_)`, `fillGhosts(pIncrement_)`.
+  - Then for c = 0, 1, 2 over the inner faces `[G, e − G)`, with `r0 = constCoefRho0_()`:
+    ```
+    const double cq = th * dt / r0;                         // th = θ
+    const double rf = 0.5 * (rho(i) + rho(i - s));
+    u_c(i) -= o_c(i) * (w_c * ((r0 / rf - 1.0) * (cq * (dp(i) - dp(i - s)))));
+    ```
+    The expression shape is normative (FMA reproducibility; §9 R1).
+  - `r0/rf − 1.0 ≤ 0`, and it is exactly 0 on a face whose two cells both hold ρ0.
+  - The result is `u** = u* − dt(1/ρ_f − 1/ρ0)·G(θΔPⁿ)`.
+- **S4, divergence (unchanged).** `projectAssembleDivergence()` on u**: ghosts, `divergOpen`,
+  sources (none in scope), `rhs1_ = −div`.
+- **S5, the constant solve: the option-(a)/(b) slot `long solveConstantPressure()`.**
+  - It solves `A0 φ = rhs1_` on the g = 1 block. A0 is the operator `setSolidInitPressureMg`
+    builds (`mg_.setOpenness(ox1_, oy1_, oz1_, w…)`).
+  - Option (a), v1: `phi1_ = 0` (or warm if `pwarm_`), then `projectSolve`'s final MG-PCG call
+    **verbatim, arguments included**: `mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_,
+    pcgRtol_, 2, 2, 12, fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_})`. The
+    star overlay is unreachable without a solid, and keeping the call identical is what makes
+    G-E2-RED bitwise. Then `lastPressureFailed_ = mg_.lastSolveFailed()` and `projectSolveTail()`.
+  - **Contract for any engine (option (b) later):** same inputs (`rhs1_`, whose fluid-cell sum is
+    zero to rtol); φ is defined up to a constant, and the engine should return it in the solver's
+    mean-removed gauge; it returns an iteration count and sets `lastPressureFailed_`. It may assume
+    A0 is the constant 7-point operator with periodic or Neumann (wall/slip) faces and per-axis
+    weights `w_a`.
+  - Engine selection is an internal enum `constCoefEngine_ {MgPcg}`. v1 has no public engine switch.
+- **S6, correction (unchanged kernel).** `projectCorrect(C[0].u, C[1].u, C[2].u, phi_, …, w…)`,
+  then `maskVelocity`. So `u^{n+1} = u** − Gφ`.
+- **S7, pressure update and history.** Over all `n_` cells (the same range as the existing
+  `press*` kernels), with `ct = r0 / dt` computed in the kernel:
+  ```
+  const double p0 = P(i);
+  P(i) += ct * ph(i) - mr * d(i);          // textual twin of the existing "press" kernel
+  dp(i) = P(i) - p0;                       // ΔP^{n+1}: the stored pressures' own difference
+  ```
+  - `mr` is the rotational coefficient of the existing branch logic, unchanged:
+    - `varProps_` with `varRotMode_ == 1`: `varRotChi_·μ(i)`;
+    - `varProps_`, min mode: `varRotChi_·minMuInner()`;
+    - `varProps_`, off: 0;
+    - otherwise: `rotationalP_ ? rotWeight_·mu_ : 0`. The wall-blend branch reduces to this with no
+      solid.
+  - `d = div_ = div(u**)` (D-E2.8).
+  - Finally, on the host: `pIncrementDt_ = dt_`.
+
+**The same step in continuous form.** Let `δ = P^{n+1} − Pⁿ + μ_r∇·u**`. Then
+
+```
+u^{n+1} = u* − (dt/ρ0)∇δ − dt(1/ρ_f − 1/ρ0)∇(θΔPⁿ),      ∇·u^{n+1} = 0
+```
+
+Substitute `u* = ũ − (dt/ρ_f)∇Pⁿ`, where ũ is the momentum update without pressure. This is
+exactly the brief's scheme `u^{n+1} = ũ − dt[∇p^{n+1}/ρ0 + (1/ρ − 1/ρ0)∇p̂]` with `p̂ = Pⁿ + θΔPⁿ`,
+which is `2Pⁿ − Pⁿ⁻¹` at constant dt. The ∇Pⁿ terms cancel identically. The Poisson equation
+`∇²δ/ρ0 = ∇·u*/dt − ∇·((1/ρ_f − 1/ρ0)∇(θΔPⁿ))` is S3 + S4 + S5.
+
+**Exact (start-up) steps while the driver is enabled.**
+- The projection is today's five stages, untouched.
+- It is bracketed by `deep_copy(pIncrement_, P_)` before `projectPressureUpdate()` and
+  `pIncrement_(i) = P_(i) − pIncrement_(i)` (all `n_` cells) after it.
+- Then `pIncrementDt_ = dt_` and `--constCoefStartupLeft_`.
+- So ΔP has the same definition, "stored P^{n+1} minus stored Pⁿ", after either kind of step.
+
+### 12.4 Decisions and the reasons
+
+**D-E2.1 and D-E2.2: the incremental pre-correction form; the CSF stays in the predictor.**
+
+TBFsolver writes the non-incremental scheme and puts σκ∇C inside the old-pressure divergence:
+`computeOldPressDiv(…, psi, st, …)`. Its velocity update is
+`u = ũ − dt[(∇p^{n+1} − F)/ρ0 + (1/ρ − 1/ρ0)(∇p̂ − F)]`. Expand it:
+
+```
+= ũ + dt F/ρ − dt[∇p^{n+1}/ρ0 + (1/ρ − 1/ρ0)∇p̂]
+```
+
+because F/ρ0 + (1/ρ − 1/ρ0)F = F/ρ.
+- TBFsolver merges F with p only so that F meets the same face 1/ρ as the pressure. In flow, F
+  already sits in the predictor, beside `−G Pⁿ`, divided by the same ρ_f through the momentum
+  operator.
+- The DF explicit term then involves only the pressure increment (§12.3, continuous form). Putting
+  F into `q` as well would count it twice.
+- The incremental form keeps every validated piece of the projection bit-for-bit: the divergence,
+  the constant-density operator, `projectCorrect`, `maskVelocity`, and the rotational update. The
+  new code is one pointwise kernel, one reduction, and one twin of the pressure-update kernel.
+- The non-incremental alternative would need a second predictor without `−G Pⁿ`. That is a second
+  RHS family, and the incremental Timmermans machinery would have to be re-derived for it.
+  Rejected.
+
+**D-E2.3: ρ_f is the arithmetic mean of ρ, not the mean of 1/ρ.** The explicit term must cancel
+the predictor's `(dt/ρ_f)∇Pⁿ` exactly (the continuous-form derivation). A different face density
+ρ̃_f leaves an inconsistency `dt(1/ρ̃_f − 1/ρ_f)∇ΔPⁿ` that is first order in time and has a
+ratio-sized coefficient at interface faces. TBFsolver's mean of 1/ρ is consistent inside
+TBFsolver's own discretization; it is not consistent with flow's. The harmonic knob
+(`rhoFaceHarmonic_`) changes only the projection and not the predictor, so under this driver it
+raises.
+
+**D-E2.4: ρ0 = min ρ, exactly, per step.**
+- The linear analysis (§12.5 P3) gives the per-mode factor `μ = 1 − ρ0/ρ_f`. Stability at constant
+  dt needs `μ > −1/3`, i.e. ρ0 < (4/3)·min ρ_f.
+- `ρ0 = min ρ` is the largest ρ0 with μ ≥ 0 on every face, the regime in which the error modes decay
+  monotonically in modulus. It is also the most accurate stable choice: the explicit part
+  `(1/ρ0 − 1/ρ_f)` grows as ρ0 shrinks.
+- A factor s < 1 makes the explicit term nonzero in the light phase, which is exact at s = 1, and
+  slows the light-phase modes. A factor s > 1 buys at most a few per mille on the heavy-phase rate
+  and leaves a band of stability that no configuration needs. So s = 1.
+- Per step rather than fixed, because the density field is arbitrary: a closure, a table, or a
+  transported field.
+- The minimum is exact, so it is identical on every rank and at every np. It costs one 8 B/cell
+  read.
+- On a face between two light cells, `r0/rf − 1.0` is exactly 0: 0.5·(2ρ0) = ρ0 in IEEE-754.
+  Ghosts are copies of inner values, so a boundary face cannot go below ρ0.
+- No override in v1 (§12.11 R-E2.7).
+
+**D-E2.5: θ = min(1, dtⁿ/dtⁿ⁻¹).**
+- With a history ratio r, the error recurrence (§12.5 P3) is `z² − (1+r)μz + rμ = 0`.
+- By the Jury criterion it is stable for every μ ∈ [0,1) iff r ≤ 1. For r > 1 it is stable only
+  while `r < 1/μ_max = ρ_max/(ρ_max − ρ0)`, which is 1.02 at ratio 50.
+- The linear-in-time extrapolation `r = dtⁿ/dtⁿ⁻¹` therefore amplifies heavy-phase errors whenever
+  dt grows by more than 2 % in one step. `step_adaptive` and a driver's `set_dt` both do that.
+- Capping at 1 keeps the second-order linear extrapolation when dt shrinks. When dt grows it
+  under-extrapolates, which is first order for that step, and it is unconditionally stable in the
+  model. At constant dt, θ = 1.0 exactly, and `cq = 1.0*dt/r0`, so the constant-dt bits do not
+  depend on the rule.
+
+**D-E2.6: the history.**
+- ΔP is a registry field, `"p_increment"`, G = 2, cell-centred, internal units like `"p"`.
+  Consequences:
+  - it is device-resident and allocated once, when the driver is first enabled (zeros);
+  - `get_field` and `set_field` save and restore it with no new API;
+  - `redistribute` migrates it, because the FieldSet owns it. The member alias `pIncrement_` is
+    re-bound beside `rhoField_` (`flow_ibm_mpi.hpp:235`, `bind(pIncrement_, "p_increment")`).
+- It is not `Pⁿ⁻¹`. The increment is what the kernel consumes. It is small (O(dt·∂p/∂t)), so the
+  S3 difference carries no cancellation against the large hydrostatic and capillary P. And it
+  makes "no history" mean ΔP = 0, which is a valid (zero-order) extrapolation rather than a
+  pressure of zero.
+- **dtⁿ⁻¹** (`pIncrementDt_`) is a runtime scalar and is not checkpointed. It is reset to 0
+  ("unknown", θ = 1) by every call of the setter. A restart at constant dt is therefore bitwise
+  continuous, because the continuous run also has θ = 1.0.
+- **Start-up:** `startup_steps` exact steps (default 2) run after every call of
+  `set_pressure_constant_coefficient(True, startup_steps)`.
+  - From a cold P (zero, or any non-equilibrium field), the first exact step jumps P to near
+    equilibrium. Its ΔP is that jump, not a time increment.
+  - The second exact step records a genuine increment.
+  - A restart that restores `"p"` and `"p_increment"` passes `startup_steps=0`. A restart that
+    restores `"p"` only passes 1.
+- Hooks in `set_field` were rejected: a name-keyed special case in a generic accessor, with a
+  silent dependence on the order of the calls. An explicit argument makes the restart contract
+  visible in the driver script.
+
+**D-E2.7: the solver and the driver selection.** Option (a) is by definition MG-PCG on the constant
+operator.
+- The split solve always uses MG-PCG with the MG-PCG cap and rtol (`pcgMaxit_`, `pcgRtol_`; C++
+  defaults 500 and 1e-10; set by `set_pressure_pcg`).
+- It does **not** read `useChebyshev_` or `useFcg_`. The Krylov selection then governs only the
+  exact start-up steps. That is right: at ratio ≥ 10³ those steps want the density mode's Chebyshev
+  default (PCG caps there, as the CLAUDE.md pressure section records), while the constant operator
+  wants PCG at any ratio.
+- Consequence: the new setter is **order-independent** with respect to `set_property_model("rho")`.
+  "Select the driver last" still applies to the start-up driver only.
+- The momentum tolerance rule "follows the active pressure rtol" returns `pcgRtol_` while the driver
+  is enabled (`velocityResidualTolerance()`, `flow_ibm_core.hpp:430`). It does not flip between
+  start-up and split steps.
+- **Bottom:** nothing special. The constant operator's hierarchy and bottom are built by one
+  `setOpenness` and then reused:
+  - host: `auto` agglomeration → GraphAMG, set up once;
+  - GPU: the B1 geometric-Krylov bottom (§5.7), sub-hierarchy built once;
+  - before WO-6 the GPU keeps GraphAMG's per-V-cycle transfers, which is B1's concern, not E2's.
+- Whether the constant operator makes the agglomerated bottom unnecessary altogether (levels 6 with
+  the smoothed bottom on 4×3×2) is a fact WO-E2.0 measures (R-E2.6).
+
+**D-E2.8: the rotational term reads div(u**).** From u** to u^{n+1} the correction is the pure
+gradient Gφ of a constant-coefficient Poisson problem. So `Lap(Gφ) = G(Lap φ) = G(div u**)`, and
+`−μ_r div(u**)` is the exact Timmermans correction for the implicit part. The explicit q is lagged
+data and belongs with the predictor. The difference from `div(u*)` is `μ_r div q`, which is
+O(dt²). It keeps `projectAssembleDivergence` unchanged, with one divergence per step.
+
+### 12.5 What the design guarantees (the premises of the gates)
+
+**P1, reduction.** If ρ ≡ ρ0 everywhere (bitwise), then:
+- `r0/rf − 1.0 = 0` → S3 leaves u unchanged;
+- the exact path's `buildRhoCoeff` gives `cx1 = ox1·ρ0/ρ_f = ox1` exactly, so both paths hand
+  identical coefficients to `setOpenness`;
+- `projectCorrectVar` equals `projectCorrect` (ratio 1.0);
+- `ct` is the same division;
+- `mr` is the same.
+
+So a split step equals an exact MG-PCG step **bit for bit**. Gate G-E2-RED.
+
+**P2, identical fixed points; balanced force is exact at equilibrium.** Hold the interface, κ and
+the forces fixed, and suppose a steady state of the split scheme exists. Then
+`ΔP = P^{n+1} − Pⁿ = 0`, so q = 0. The update gives `(ρ0/dt)φ = μ_r div(u**)` with
+`Lap φ = div u**`. So `(ρ0/dt − μ_r Lap)φ = 0`. That operator is SPD on mean-free fields, also with
+a pointwise μ(i) > 0, so φ = 0. Hence `u** = u* = u^{n+1}`, divergence-free, and the momentum
+equation reads `ρ_f(u − u)/dt + adv − visc = −G P + F`. That is **the same steady-state system as
+the exact projection** (whose φ vanishes by the same argument with coefficient ρ0/ρ_f). In
+particular:
+- a static drop in exact discrete balance (`G P = F_csf` on every face, as P1/P3 of
+  `test_vof_surface_tension` construct with constant κ) is a fixed point of the split scheme, to
+  round-off;
+- the steady spurious-current field of a height-function drop, when one exists, is the same field.
+
+The register objection "error ~ σκ" therefore **does not apply at equilibrium**. It applies to
+transients (P3).
+
+**P3, the pressure-error dynamics (linear model).** Take an inviscid, advection-free perturbation
+about a steady state, with velocity kept solenoidal. Let `K = L0⁻¹L_ρ`, where
+`L_ρ = ∇·((1/ρ_f)∇·)` and `L0 = (1/ρ0)∇²`. For a pressure error `eⁿ`:
+
+```
+e^{n+1} = (I − K)·((1+θ)eⁿ − θ e^{n−1}),     spectrum of K ⊂ [ρ0/ρ_max, 1]
+```
+
+The exact projection gives `e^{n+1} = 0`. Per mode with `μ = 1 − λ`:
+- **Stability.** See D-E2.4 and D-E2.5.
+- **Decay (θ = 1).** The factor is |z| = √μ, a complex pair with argument ≈ √(1−μ).
+  - Heavy-phase modes (λ ≈ ρ0/ρ_max): 0.990 per step at ratio 50 (e-folding in 99 steps, ringing
+    period 2π√50 ≈ 44 steps); 0.9995 at ratio 1000 (e-folding 2000, period 199).
+  - Light-phase modes: λ = 1, removed in one step.
+- **Forced response.** A per-step defect f (the extrapolation truncation, ∝ dt²·∂²p/∂t²) settles to
+  e ≈ f/λ, i.e. **amplified by ρ_f/ρ0 in the heavy phase**. The splitting error is second order in
+  dt with a density-ratio-sized constant.
+- **Where it bites.** It is largest where ∂²p/∂t² is large. When a capillary jump crosses a cell,
+  that cell's P ramps by σκ·ΔC per step and kinks as the interface enters or leaves. That is the
+  register's objection, precisely. The model predicts:
+  - the split–exact difference falls ≈ 4× when dt halves (gate A2);
+  - it grows with ρ_max/ρ0 (gate A3, case 2 vs case 1).
+- **1-D exactness.** In a horizontally uniform, inviscid, walled column the recurrence is exact and
+  pointwise per face:
+  ```
+  g_{n+1} = (1 − a_f)((1+θ_n)g_n − θ_n g_{n−1}),   g_n = G Pⁿ − F_f,   a_f = ρ0/ρ_f
+  ```
+  with `g_{−1} = g_0` when there is no history, and the velocity stays exactly zero. This is an
+  implementation gate with no free parameter (G-E2-REC).
+
+**P4, conservation.** The constraint is enforced by the constant solve to `pcgRtol_`, as the exact
+path enforces its own. The Weymouth–Yue volume conservation, which depends only on the discrete
+divergence of the advecting field, is unaffected.
+
+### 12.6 Placement and code layout
+
+**In `step()`** (`flow_ibm_project.hpp:14`):
+- `constCoefPrecheck()` sits next to `superficialVelocityPrecheck()`, before the first mutator. So a
+  refused configuration throws with every field untouched.
+- Nothing else in `step()` changes.
+
+**In `project()`** (`flow_ibm_project.hpp:770`):
+
+```
+const bool split = constCoefP_ && constCoefStartupLeft_ == 0;
+constCoefLastSplit_ = split;
+if (split) {
+  constCoefPrepare();              // S1 (rho0), S2 (theta), fills, S3 kernel
+  projectAssembleDivergence();     // S4, unchanged
+  constCoefEnsureOperator();       // A0 into the MG iff !constCoefOpReady_
+  solveConstantPressure();         // S5 (includes projectSolveTail())
+  projectCorrectVelocities();      // S6: its staggered chain takes projectCorrect when split
+  constCoefPressureUpdate();       // S7
+} else {
+  projectAssembleDivergence(); projectBuildCoefficients(); projectSolve();
+  projectCorrectVelocities();
+  if (constCoefP_) { deep_copy(pIncrement_, P_); }
+  projectPressureUpdate();
+  if (constCoefP_) { pIncrement = P − pIncrement; pIncrementDt_ = dt_; --constCoefStartupLeft_; }
+}
+```
+
+**Edits to existing functions.** Each is inert when the driver is off.
+- `projectSolve()`: extract its tail (from `copyInner(phi_, …)` through the outflow block) into
+  `projectSolveTail()`, which is called by both. This is structural and bitwise.
+- `projectCorrectVelocities()`, staggered chain: `else if (varRho_)` becomes
+  `else if (varRho_ && !constCoefLastSplit_)`.
+- `constCoefOpReady_` is set false at every other `mg_.setOpenness` site: `projectBuildCoefficients`,
+  both branches; `setSolidInitPressureMg`; any MG (re)initialisation in the MPI and redistribute
+  paths. It is set true only by `constCoefEnsureOperator()`, which runs:
+  `mg_.setBoundaryConditions(bc_); mg_.setOutflowCoefficient(false);
+  mg_.setOpenness(ox1_, oy1_, oz1_, u_.w[0], u_.w[1], u_.w[2]);`
+  That is the geometry path's own sequence minus `init`, and it leaves `setAgglomerationMode` as the
+  geometry set it.
+- `velocityResidualTolerance()`: `if (constCoefP_) return pcgRtol_;` after the explicit-tolerance
+  test.
+
+**Files.**
+- The S3 kernel is a free function `projectExplicitSplit(...)` in `mac_pressure.hpp`, beside
+  `projectCorrectVar`, with the loop per Rule H.
+- The S1/S2/S7 members go in `flow_ibm_project.hpp`.
+- The setter and `velocityResidualTolerance` are in `flow_ibm_core.hpp`.
+- The precheck goes beside `superficialVelocityPrecheck`.
+- State and declarations with docstrings are in `flow_ibm.hpp`, near the pressure-driver state:
+
+  ```
+  bool constCoefP_ = false;              // set_pressure_constant_coefficient
+  int constCoefStartupLeft_ = 0;         // exact steps still to run before splitting
+  bool constCoefLastSplit_ = false;      // the last project() ran the split scheme
+  bool constCoefOpReady_ = false;        // the pressure MG holds A0 (see constCoefEnsureOperator)
+  double pIncrementDt_ = 0.0;            // dt of the step that produced p_increment; 0 = unknown
+  CCField pIncrement_;                   // aliases the registry field "p_increment"
+  Kokkos::View<double, CCMem> constCoefRho0_;  // per-step min rho (internal), device-resident
+  enum class ConstCoefEngine { MgPcg } constCoefEngine_ = ConstCoefEngine::MgPcg;
+  ```
+- `bind(pIncrement_, "p_increment")` goes into the redistribute re-alias list
+  (`flow_ibm_mpi.hpp:235`), and `constCoefOpReady_ = false` goes there after the MG rebuild.
+
+**`constCoefPrecheck()` raises (named message, "…under set_pressure_constant_coefficient…") if:**
+- an immersed solid is present (`hasSolid_`);
+- `!cutcellPressure_` (call `set_pressure_geometry` with an all-fluid SDF);
+- `porous_`;
+- `hasDrag_`;
+- `!varRho_` (a constant-density run already solves a constant operator);
+- any domain face is inflow or outflow;
+- `outerIters_ > 1`;
+- `pressUnderRelax_ != 1.0`;
+- `rhoFaceHarmonic_`;
+- `pcEnabled_ || pcHasUser_`;
+- `!incremental_`.
+
+The setter itself raises on `SolverColocated` and on `startup_steps < 0`.
+
+**MPI summary.**
+- S1: device MIN + one host allreduce.
+- S3: `fillPropGhosts` and `fillGhosts`, the existing halo paths.
+- S5: the existing distributed MG-PCG, including telescoping, on A0.
+- S7: pointwise.
+- redistribute: migration by the registry, re-alias, operator flag cleared.
+
+No other global operation is added.
+
+### 12.7 API
+
+- **Public** (`Solver`):
+  `set_pressure_constant_coefficient(enabled: bool, startup_steps: int = 2)`.
+  - The docstring states: the scope and what raises; that the split solve uses MG-PCG with
+    `set_pressure_pcg`'s cap and rtol while the selected driver serves the start-up steps; that the
+    call is order-independent of `set_property_model`; the restart recipe; and that adoption per
+    case follows the accuracy gates.
+  - Calling it again re-arms the start-up count and resets dtⁿ⁻¹. `enabled=False` returns to the
+    exact projection, which rebuilds its coefficient operator on the next step by itself. The field
+    is kept.
+- **Registry field** `"p_increment"` (internal units, like `"p"`), through
+  `get_field`/`set_field`. It is registered at the first `enabled=True`.
+- **Restart recipe** (documented; a driver script follows it verbatim):
+  1. build the solver exactly as before;
+  2. `set_field` for `u, v, w, p, C` (and the block state the script already restores), then
+     `set_field("p_increment", …)`;
+  3. `set_pressure_constant_coefficient(True, startup_steps=0)`.
+
+  Restore without `p_increment` → pass `startup_steps=1`. Bitwise continuity holds at constant dt
+  across the restart.
+- **Developer** (`s.diagnostics`): `pressure_constant_coefficient_stats()` returns
+  `{'enabled', 'last_step_split', 'startup_steps_left', 'rho0' (physical units; NaN before the first
+  split step), 'theta'}`. `rho0` is read on demand from the device View.
+- **NAMING:** new names only. WO-E2.5 confirms that no existing spelling of the concept exists
+  before adding them.
+
+### 12.8 Expected cost, bubble column (ms/step) [model]
+
+**Premises:**
+- 7–9 MG-PCG iterations at rtol 1e-10 on the constant operator (13–15 today on the variable one);
+  WO-E2.0 measures it;
+- the per-iteration cost of the main line from §6: CPU 3.0–5.5 ms, GPU 0.65–0.8 ms including the B1
+  bottom;
+- no per-step `setOpenness` or bottom setup;
+- S1 + S3 + S7 ≈ 110 B/cell of extra traffic, about 0.1 of one PCG iteration (≈ 1 ms CPU, ≈ 0.1 ms
+  GPU).
+
+| | CPU 1×24 main line (§6) | CPU + E2(a) | GPU main line (§6) | GPU + E2(a) |
+|---|---|---|---|---|
+| projection | 45–80 | **22–50** | 9–11 | **4.5–7** |
+| rest of the step | 35–45 | 35–45 | 8–10 | 8–10 |
+| **total** | 80–125 | **57–95** | 17–21 | **12.5–17** |
+| E2(a) + D1 at rtol 1e-8 (≈ 6 iterations) | | 54–80 | | 12–15 |
+| TBFsolver, same 24 cores [brief] | 45 | | | |
+
+**Conclusions:**
+- E2(a) roughly halves the projection on both backends. The iteration count no longer depends on
+  the density ratio: at ratio 10³ the variable operator needs Chebyshev at 44 V-cycles/step.
+- **CPU parity with TBFsolver is still not reached by E2(a).** It reaches 57–95 against 45.
+- Parity needs option (b): a direct solve of ≈ 7–10 ms, for a total of ≈ 42–55. That is the
+  separate decision, and this design leaves its slot ready.
+- On the GPU, E2(a) gives ≈ 3× TBFsolver's 24-core step.
+- Built before the main line (not planned), E2(a) would give CPU ≈ 55–75 and GPU ≈ 12–16 ms
+  projection, because the host bottom's per-V-cycle transfers remain.
+
+### 12.9 Work orders
+
+Each work order lands as its own commit or commits and stages named paths only.
+- WO-E2.1 and WO-E2.2 are **structural** and commit after §8 G-BIT.
+- WO-E2.3 and WO-E2.4 are **numerics on a new opt-in path**. They commit after their G-E2 gates,
+  and after G-BIT for the default path.
+- Dependency order: E2.0 → E2.1 → E2.2 → E2.3 → E2.4 → E2.5. E2.6 and E2.7 come after E2.3. The
+  bubble-column part of E2.6 comes after the low-wall physics fix.
+
+**WO-E2.0. Measure the premise (no code; may run before the main line).**
+- Run a ratio-1 control of the bubble column: the rho closure with params `[ρ_l, 0]`, everything
+  else as the case. From `ckpt_t43`, run 50 steps with MG-PCG at rtol {1e-10, 1e-8}. The MG then
+  holds the constant operator.
+- Record per-step PCG iterations at levels {4 auto, 5 auto, 6 smoother}, on host 1×8 and on GPU.
+- In the ratio-50 exact run, time `projectBuildCoefficients` (with the bottom setup) per step.
+- **Accept:** the numbers are in the campaign log.
+- **STOP and report** if the levels-4 control needs ≥ 12 iterations at 1e-10. The premise of
+  option (a) is then false.
+
+**WO-E2.1. Structural preparation.**
+- Extract `projectSolveTail()`.
+- Add the `constCoefOpReady_` bookkeeping at every `setOpenness` and MG-init site.
+- Add `solveConstantPressure()` (S5), not yet called.
+- **Accept:** G-BIT.
+
+**WO-E2.2. State, API, start-up bookkeeping** (no split numerics yet).
+- The setter (C++ `setPressureConstantCoefficient(bool enabled, int startupSteps)`) and its
+  binding.
+- The registry field and the alias; the redistribute re-bind.
+- `constCoefPrecheck()`; the `velocityResidualTolerance` rule; `diagnostics.…_stats()`.
+- The exact-step bracket of §12.3. In this WO, `split` is forced false.
+- **Accept, all of:**
+  - G-BIT with the driver off;
+  - with the driver on and `startup_steps=10**6`, on a PCG-selected ratio-50 VoF drop (32³):
+    u, v, w, p, C bitwise identical to the driver-off run over 20 steps, and `p_increment` equal
+    to P^{n+1} − Pⁿ bitwise at every step;
+  - one raising check per precheck condition and for `SolverColocated`, in the new ctest
+    `tests/kokkos/test_pressure_constant_coefficient.cpp`.
+
+**WO-E2.3. The split projection** (§12.3 S1–S7, the operator switch, θ).
+- **Accept:** G-E2-RED, G-E2-REC, G-E2-BAL and G-E2-RST on host-openmp **and** nvidia-cuda, all in
+  the ctest above; G-BIT for the default path.
+- If a gate misses, STOP and report. Do not tune a threshold.
+
+**WO-E2.4. MPI gate.**
+- The S1 allreduce may already be in WO-E2.3; its gate lands here.
+- Add `tests/kokkos_mpi/test_pressure_constant_coefficient_mpi.cpp` at np = 1, 2, 4.
+- **Accept:** G-E2-MPI; `ctest -R '_np[0-9]+$'` green.
+
+**WO-E2.5. Documentation.**
+- The "Pressure solve" section of `CLAUDE.md`: one paragraph with the scope, the order independence,
+  and the restart recipe; update "select the driver last" and the ctest counts.
+- A new section, "Constant-coefficient splitting (opt-in)", in `doc/variable_density_projection.md`,
+  with §12.3, §12.5 and the recipe.
+- The NAMING check (§12.7). Hand the register entries of §12.12 to the caller.
+- **Accept:** `no_env_knobs`, `no_float_operator_casts` and `iteration_order` green; links resolve.
+
+**WO-E2.6. Accuracy study** (decides adoption per case).
+- `tests/study/vof_constcoef_pressure.py` with gates `static`, `translate`, `hysing1`, `hysing2`.
+  Reuse `sphere_fractions` and friends from `vof_surface_tension.py`, and `build_hysing` and
+  `run_hysing` from `vof_blocks_ns.py`.
+- A `--constcoef` flag on the WO-0 bubble-column harness `tests/study/vof_perf/prof.py`.
+- **Accept:** the G-E2-ACC table is complete, with a verdict for each case, and it is logged and
+  reported to the user.
+
+**WO-E2.7. Performance.**
+- G-E2-PERF against §12.8.
+- **Accept:** the numbers are logged. A miss is reported, not reverted.
+
+### 12.10 Verification gates
+
+**G-BIT** (§8), with the driver off, on every WO-E2.x.
+
+**G-E2-RED — reduction** (ctest; P1).
+- Case: a uniform-density VoF drop. The rho closure `[ρ, 0]` with ρ equal to the `set_rho` value;
+  first assert that `rho0 == rho_` bitwise.
+- Setup: σ > 0, μ = 0.1, 32³ triply periodic; also an anisotropic 32×32×16 box with extent
+  (1, 1, 1). Both runs select `set_pressure_pcg(True, 500, 1e-12)`.
+- Compare the split driver (`startup_steps=0`) with the exact path.
+- **Pass:** u, v, w, p, C bitwise identical after 20 steps, and identical per-step PCG iterations.
+- On CUDA a mismatch means the S7 twin or the S3 shape diverged textually. Fix it; never relax it.
+
+**G-E2-REC — the discrete recurrence** (ctest; P3, 1-D).
+- Case: a two-layer column at rest, walls in z, periodic x and y, 8×8×32. Gravity through the cell
+  force `force_z = −g·ρ`. μ = 0 (if the solver rejects 0, use 1e-12 and a tolerance of 1e-7).
+  `startup_steps=0`, from P = 0, PCG rtol 1e-13.
+- Ratios 3 and 50, 30 steps. dt ×0.8 at step 10 (θ = 0.8) and ×1.25 at step 20 (θ capped at 1).
+- Predict `g_n` per face from the recurrence of P3 (a_f from the actual ρ_f; `g_{−1} = g_0`).
+- **Pass:**
+  - `max_faces |g_meas − g_pred| / max|g_0| ≤ 1e-9` at every step;
+  - `max|u| ≤ 1e-13` throughout.
+
+This gate fixes the sign and coefficient of S3, the definition of ΔP, θ and ρ0 without a free
+parameter.
+
+**G-E2-BAL — balanced force at a density contrast** (ctest; P2).
+- Case: `test_vof_surface_tension`'s P1 stationary droplet with constant κ (`setVofKappaConstant`),
+  32³, R = 8.
+- ρ_inside/ρ_outside ∈ {50, 0.02}, default `startup_steps`.
+- **Pass:**
+  - μ = 0, 30 steps: split `max|u| < 1e-14`, and P equal to σκC + const to 1e-10 relative (P3 of
+    that test);
+  - μ = 0.1, 200 steps: split `max|u| ≤ max(1e-14, 2 × exact path)` on the identical case.
+
+**G-E2-RST — restart** (ctest).
+- Case: a global-colour ratio-50 rising bubble, 32³.
+- Compare 40 continuous split steps with 20 steps, save, a fresh solver, the §12.7 restore with
+  `startup_steps=0`, and 20 more steps.
+- **Pass:** u, v, w, p, C bitwise identical to the continuous run.
+- Negative control: restoring without `p_increment` must differ, which proves the field matters.
+- If the exact path's own restart of this case is not bitwise, the gate becomes "deviation ≤ the
+  exact path's", and that is reported.
+
+**G-E2-MPI** (np = 1, 2, 4; the `test_vardensity_mpi` protocol).
+- Cases:
+  - `walls-z`, hydrostatic, ratio 1000;
+  - `jump-z`, periodic, ratio 1000, with the jump on the rank boundary;
+  - a ratio-50 VoF drop with σ, 32³.
+  All three are cut on the loaded axis and run with the driver on.
+- **Pass:**
+  - np = 1 bitwise against the single-rank reference;
+  - np > 1: `du ≤ max(1e-15, 1e-11·umag)`, `dp ≤ max(1e-12, 1e-11·pmag)`, and PCG iterations ±1;
+  - ρ0 bitwise identical on every rank and every np;
+  - walls-z: `max|u| < 1e-14` and dP/dz error `< 1e-11` at every np.
+- Rebalance sub-case, np = 2: `rebalance_by_weights` with a size-changing weight at step 10,
+  continued to step 20. It must match the no-rebalance np = 2 run within the same tolerances, which
+  proves that `p_increment` migrated.
+
+**G-E2-ACC — accuracy against the exact projection at equal resolution, dt and rtol** (study).
+These gates decide adoption per case. The exact path uses the case's production driver.
+- **A1, static bubble with height-function curvature.**
+  - Setup: 32³/R = 8 and 64³/R = 16; ρ_l/ρ_g ∈ {50, 1000} with the light phase inside; μ ratio
+    0.02; dt = 0.5·dt_σ; 500 steps.
+  - **Pass:** window-max Ca and final Ca of the split driver both ≤ 1.5 × the exact path's.
+  - More than 10× → STOP: a defect, not a splitting error.
+  - Report the time series; P3 predicts ringing with a period of ≈ 44 and ≈ 199 steps.
+- **A2, translating bubble** (the register objection's own test).
+  - Setup: triply periodic 32³/R = 8 and 64³/R = 16; ratio 50 and 1000 (the latter with
+    `enable_vof_momentum`); uniform initial velocity U0·(1, 0.5, 0.25) with We = ρ_l U0² 2R/σ = 1;
+    one domain crossing; `E = max_t max|u − U0|`.
+  - **Pass:**
+    - (i) E_split ≤ 1.5 × E_exact at dt = 0.25·dt_σ, the column's operating point;
+    - (ii) `E_split − E_exact` at 0.25·dt_σ ≤ 0.5 × its value at 0.5·dt_σ. This identifies the
+      splitting error by its dt-convergence. If it does not shrink, STOP. Criterion (ii) is
+      vacuous if the difference is ≤ 0 at 0.5·dt_σ;
+    - (iii) relative volume change ≤ 1e-12 in both.
+- **A3, Hysing.**
+  - Case 1: block path (`vof_blocks_ns.py hysing`), nx = 64. v_max, t(v_max) and y_c(3) each
+    within **0.2 %** of the exact path.
+  - Case 2: global colour with momentum consistency, nx = 64. v_max and y_c(3) within **1 %**.
+  - Also report the exact path's nx 32 → 64 change beside each, so the user sees the splitting
+    error against the discretization error.
+- **A4, bubble column** (after the low-wall defect fix).
+  - Run 2000 steps from `ckpt_t43`: the exact path at rtol 1e-10 (the reference) and at 1e-9 (the
+    chaos control), and the split driver at 1e-10. Define `σ_S = |S(1e-10) − S(1e-9)|` for each
+    statistic S.
+  - **Pass:**
+    - mean rise velocity over the last 1000 steps: `|split − exact| ≤ max(2σ_S, 1 %)`;
+    - wall-region gas hold-up (gas volume within one bubble diameter of each y wall, averaged over
+      the last 1000 steps), each wall: `≤ max(2σ_S, 5 %)` relative;
+    - total and maximum per-bubble volume drift ≤ max(1e-8, 2 × exact);
+    - per-step `max_open_divergence_projected()` ≤ 2 × the exact path's at the same step.
+- **Adoption.** A case is rated for the split driver when all its gates pass. The table of rated
+  cases goes into `doc/variable_density_projection.md`. Until then a case is not rated.
+
+**G-E2-PERF** (bubble column, 50 split steps after start-up; same machines as §8 G-PERF).
+- Report, against §12.8:
+  - PCG iterations per step (model 7–9);
+  - exactly one `setOpenness` after start-up;
+  - ms per stage, CPU 1×24 and GPU.
+- nsys: a split step adds no D→H read on a single-rank GPU run.
+
+### 12.11 Risks and open questions
+
+Each item carries a label and a default, so work can proceed unattended.
+
+- **R-E2.1 [fact]: iterations on the constant operator.** WO-E2.0 measures it. **Default:** proceed
+  if ≤ 11 at rtol 1e-10. At ≥ 12, stop and report, because §12.8 is then wrong.
+- **R-E2.2 [fact]: accuracy at ratio 10³.** P3 predicts heavy-phase error modes at 0.9995 per step
+  and a forced response amplified by ~10³. **Default:** the driver is rated only up to ratio 100
+  until A2 at ratio 1000 and A3 case 2 pass.
+- **R-E2.3 [fact]: does the bubble column pass A4?** **Default:** not rated until it does, and A4
+  runs only after the low-wall defect fix.
+- **R-E2.4 [pref]: the public names.** **Default:** `set_pressure_constant_coefficient`, the field
+  `"p_increment"`, and `diagnostics.pressure_constant_coefficient_stats`.
+- **R-E2.5 [pref]: widening the scope.** Candidates: inflow/outflow (the Dirichlet row and the
+  outflow correction would need the explicit term), Picard iterations (ΔP per step rather than per
+  iteration), phase change and divergence sources, drag, IBM, collocated. **Default:** they raise.
+  Each is a later decision with its own gate.
+- **R-E2.6 [fact]: can the constant operator drop the agglomerated bottom** (levels 6, smoothed
+  4×3×2 bottom)? WO-E2.0 answers it. **Default:** the main-line bottom. If levels 6 is within +1
+  iteration, recommend it in the case script only, with no code.
+- **R-E2.7 [pref]: a user override of ρ0.** **Default:** none (D-E2.4).
+- **R-E2.8 [pref]: a Chebyshev engine with fixed bounds for the constant operator** (no global dot
+  products, for multi-rank scale). **Default:** not in v1. The `constCoefEngine_` slot takes it
+  later.
+- **R-E2.9 [fact]: is the exact path's restart of a VoF case bitwise?** **Default:** G-E2-RST
+  compares against the exact path's deviation if not.
+- **R-E2.10 [pref]: billed Snellius runs** for long bubble-column statistics or CPU timing.
+  **Default:** workstation GPU for A4 (2000 steps). CPU timing uses the Snellius job already in use
+  for §8 G-PERF only if the user has approved that allocation. Otherwise use the workstation at
+  1×8, labelled as such.
+- **R-E2.11 [risk, accepted]: restart continuity.** A restart across a dt change is not bitwise,
+  because dtⁿ⁻¹ is not checkpointed (θ = 1 on the first step). This is documented.
+- **R-E2.12 [risk]: start-up at ratio ≥ 10³ with PCG selected** can cap on the variable operator.
+  **Default:** documented idiom:
+  - leave the density mode's Chebyshev for the start-up steps;
+  - to set the split solve's rtol, call `set_pressure_pcg(True, maxit, rtol)` and then
+    `set_pressure_chebyshev(True, …)`. The second call keeps `pcgRtol_`.
+
+### 12.12 Register entries this section creates (for the caller to add)
+
+1. **Split pressure in incremental form.** A face pre-correction `u** = u* − dt(1/ρ_f − 1/ρ0)∇(θΔPⁿ)`,
+   followed by the unchanged constant-density projection; the rotational term reads div(u**).
+   Rejected: TBFsolver's non-incremental form (a second predictor family); div(u*).
+2. **The CSF stays in the predictor under the split driver.** An equilibrium is an exact fixed
+   point, and the split and exact schemes share their steady states. This scopes the "error ~ σκ"
+   objection to transients, where G-E2-ACC measures it. Rejected: σκ∇C inside the extrapolated term
+   (double counting).
+3. **Face density of the explicit term = the predictor's arithmetic ρ_f.** Rejected: the mean of 1/ρ
+   (TBFsolver), which is inconsistent with flow's predictor to first order.
+4. **ρ0 = the exact global min of ρ per step, no safety factor.** Rejected: a fixed or user ρ0, and
+   s ≠ 1 (see the P3 analysis).
+5. **Extrapolation θ = min(1, dtⁿ/dtⁿ⁻¹).** Rejected: the uncapped linear form, unstable for a dt
+   growth above ρ_max/(ρ_max − ρ0).
+6. **History = the registry field `"p_increment"` + 2 exact start-up steps + explicit
+   `startup_steps=0` on restart.** Rejected: storing Pⁿ⁻¹; `set_field` hooks.
+7. **The split solve is MG-PCG on A0, independent of the driver selection;** the setter is
+   order-independent of the rho closure. Rejected: following `useChebyshev_`/`useFcg_`.
