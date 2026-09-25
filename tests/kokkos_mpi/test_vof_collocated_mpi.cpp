@@ -1,17 +1,19 @@
-// flow — multi-rank validation of the COLLOCATED two-phase path (VoF rung V8, WO-T).
+// flow — multi-rank validation of the COLLOCATED two-phase path (VoF rung V8,
+// doc/collocated_varrho_forces.md).
 //
-// What this gates that no existing MPI test does: the pieces rung V8 added to `SolverColocated`
-// all live on the FACE field or on its ghost ring, and every one of them is assembled from
-// exchanged property ghosts.
+// What this gates that no existing MPI test does: the pieces rung V8 adds to `SolverColocated`
+// live on the FACE field or on its ghost ring, and every one of them is assembled from exchanged
+// property ghosts.
 //
-//   * the face acceleration `af(i) = dt (f_f - (P(i)-P(i-s)))/rho_f(i)` is built over the inner
-//     region WIDENED BY ONE on the high side of every axis, so the plane at index `e-g` — the face
-//     the divergence of the last inner cell reads, and the one the cell average reads as `af(i+s)`
-//     — is formed on THIS rank from depth-1 ghosts of P, rho and the cell force. It is bitwise
-//     decomposition-independent only if those ghosts are the owner's values and the arithmetic is
-//     written in the same order on both sides (it is: the same `0.5*(rho(i)+rho(i-s))`);
-//   * the cell correction averages `af(i)` and `af(i+s)` with the openness-0 rule, i.e. it reads
-//     that same plane;
+//   * the predictor's face accelerations `Phi(i) = (f_const + CSF - (P(i)-P(i-s)))/rho_f(i)` are
+//     built on the face range `[g, e-g]`, so the plane at index `e-g` — the face the cell
+//     reconstruction of the last inner cell reads as `Phi(i+s)` — is formed on THIS rank from
+//     depth-1 ghosts of P and rho. It is bitwise decomposition-independent only if those ghosts are
+//     the owner's values and the arithmetic is written in the same order on both sides (it is: the
+//     same `0.5*(rho(i)+rho(i-s))`);
+//   * the constraint's momentum-weighted face field `(rho_L u_L + rho_R u_R)/(rho_L + rho_R)` and
+//     the cell correction (the face-to-cell reconstruction of the face corrections) read that same
+//     plane;
 //   * the colour is bridged from `uf_/vf_/wf_` after `fillGhosts`, not from the cell field.
 //
 // Two configurations on 16x16x32, whose aligned ORB cuts the LONG z axis at np = 2 and 4 — the axis
@@ -185,7 +187,7 @@ int main(int argc, char** argv) {
 
     for (const Config& c : configs) {
       // The stratification / interface axis must be CUT: that is the whole point (the face
-      // acceleration's high-side plane and the colour bridge both live on a block boundary there).
+      // accelerations' high-side plane and the colour bridge both live on a block boundary there).
       if (size > 1 && !cut[2]) {
         if (rank == 0)
           std::printf("  [%-7s np=%d] FAIL — the decomposition does NOT cut z\n", c.name, size);
@@ -262,10 +264,11 @@ int main(int argc, char** argv) {
                                          std::labs(sumd - sumr) <= static_cast<long>(itd.size()));
         // np = 1 must be BITWISE; np > 1 sits on the MPI reduction-order floor.
         // THE YARDSTICK FOR A REST STATE IS THE FORCING, NOT THE ANSWER. `hydro-z` is hydrostatic:
-        // its converged velocity is ~0 (1.4e-07, and that is the invisible checkerboard, not
-        // physics), so a tolerance relative to |u| would demand a bitwise match of the reduction
-        // order. The scale that means something there is the velocity the body force would produce
-        // in one step, g*dt, which is exactly what the projection has to cancel.
+        // its velocity is the decaying rest-state transient (1.2e-3 after 20 steps with the
+        // balanced-force projection OFF, round-off with it ON; mostly the invisible checkerboard,
+        // not physics), so a tolerance relative to |u| would demand a bitwise match of the
+        // reduction order. The scale that means something there is the velocity the body force
+        // would produce in one step, g*dt, which is exactly what the projection has to cancel.
         const double uRef = std::fmax(su, c.walls ? GRAV * DT : 0.0);
         const double fRef = std::fmax(sf, c.walls ? GRAV * DT : 0.0);
         const double tolU = (size == 1) ? 0.0 : 1e-11 * std::fmax(uRef, 1e-12);
