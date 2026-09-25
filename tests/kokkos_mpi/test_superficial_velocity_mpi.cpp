@@ -1,15 +1,16 @@
-// flow — set_bulk_velocity under MPI: the on-device bulk-velocity (zero-net-flux) constraint.
+// flow — set_superficial_velocity under MPI: the on-device superficial-velocity
+// (prescribed-net-flux) constraint.
 //
-// `setBulkVelocity(true, axis, U)` adds, at the end of every step(), one uniform shift to every
-// inner face velocity of component `axis` so that its volume mean is U. It replaces a Python driver
-// that did `u = s.get_u(); s.set_velocity(0, u - u.mean())` after each step (the bubble-column
-// benchmark's closed column): the same operation, but a device reduction (a global Allreduce under
-// MPI) instead of a full-field round trip through the host.
+// `setSuperficialVelocity(true, axis, U)` adds, at the end of every step(), one uniform shift to
+// every inner face velocity of component `axis` so that its volume mean is U. It replaces a Python
+// driver that did `u = s.get_u(); s.set_velocity(0, u - u.mean())` after each step (the
+// bubble-column benchmark's closed column): the same operation, but a device reduction (a global
+// Allreduce under MPI) instead of a full-field round trip through the host.
 //
 // Case: 32^3, x and y periodic, no-slip walls on +-z (np = 4 is 2x2x1: the ORB cuts x and y, never
 // the wall-normal axis), a uniform body force f_x plus six Gaussian force_x blobs (a 3-D field, so
 // the reduction has something to reorder), constant rho, MG-PCG pinned at rtol 1e-12, STEPS steps,
-// target bulk velocity U = 0.02 (not 0, so the conversion of the target is exercised too).
+// target superficial velocity U = 0.02 (not 0, so the conversion of the target is exercised too).
 //
 // Gates:
 //   * `driver`  — the device constraint against the host-driver semantics it replaces: a
@@ -39,7 +40,7 @@ using peclet::flow::IbmSolver;
 
 static constexpr int N = 32, STEPS = 3;
 static constexpr std::size_t GCELLS = (std::size_t)N * N * N;
-static constexpr double U_BULK = 0.02;
+static constexpr double U_SUP = 0.02;
 
 // Six blobs along x at (i + 1/2) N/6, y = 12, z = 10 (off-centre: the flow is fully 3-D).
 static std::vector<double> blobs() {
@@ -158,7 +159,8 @@ int main(int argc, char** argv) {
     const int lnx = (int)blk.size[0], lny = (int)blk.size[1], lnz = (int)blk.size[2];
     const std::size_t lcells = (std::size_t)lnx * lny * lnz;
     if (rank == 0)
-      std::printf("BULK VELOCITY MPI np=%d  grid %d^3  block %dx%dx%d\n", size, N, lnx, lny, lnz);
+      std::printf("SUPERFICIAL VELOCITY MPI np=%d  grid %d^3  block %dx%dx%d\n", size, N, lnx, lny,
+                  lnz);
     const std::vector<double> fg = blobs();
 
     // ---- driver + mean + active -------------------------------------------------------------
@@ -166,10 +168,10 @@ int main(int argc, char** argv) {
     sd.initMpi(dec, MPI_COMM_WORLD);
     build(sd, lcells);
     configure(sd, slice(fg, ox, oy, oz, lnx, lny, lnz));
-    sd.setBulkVelocity(true, 0, U_BULK);
+    sd.setSuperficialVelocity(true, 0, U_SUP);
     for (int it = 0; it < STEPS; ++it)
       sd.step();
-    const double shift = sd.lastBulkVelocityShift();
+    const double shift = sd.lastSuperficialVelocityShift();
     std::vector<double> gu[3];
     for (int c = 0; c < 3; ++c)
       gu[c] = gatherGlobal(sd.getVelocity(c), ox, oy, oz, lnx, lny, lnz, rank, size);
@@ -181,7 +183,7 @@ int main(int argc, char** argv) {
       for (int it = 0; it < STEPS; ++it) {
         ref.step();
         std::vector<double> u = ref.getVelocity(0);
-        const double ub = mean(u) - U_BULK;
+        const double ub = mean(u) - U_SUP;
         for (double& v : u)
           v -= ub;
         ref.setVelocity(0, u);
@@ -195,7 +197,7 @@ int main(int argc, char** argv) {
       const bool okD = du <= tol && umag > 1e-2;
       std::printf("  [driver np=%d] max|du| = %.3e (tol %.1e)  max|u| = %.3e  %s\n", size, du, tol,
                   umag, okD ? "OK" : "FAIL");
-      const double dm = std::fabs(mean(gu[0]) - U_BULK);
+      const double dm = std::fabs(mean(gu[0]) - U_SUP);
       const bool okM = dm <= 1e-13 * umag;
       std::printf("  [mean   np=%d] |<u> - U| = %.3e  %s\n", size, dm, okM ? "OK" : "FAIL");
       const bool okA = std::fabs(shift) > 1e-3;
@@ -211,7 +213,7 @@ int main(int argc, char** argv) {
       s.initMpi(dec, MPI_COMM_WORLD);
       build(s, lcells);
       configure(s, slice(fg, ox, oy, oz, lnx, lny, lnz));
-      s.setBulkVelocity(true, 2, 0.0);
+      s.setSuperficialVelocity(true, 2, 0.0);
       bool threw = false;
       try {
         s.step();
@@ -227,7 +229,7 @@ int main(int argc, char** argv) {
         fail = 1;
     }
     if (rank == 0)
-      std::printf("BULK VELOCITY MPI (np=%d): %s\n", size, fail ? "FAIL" : "PASS");
+      std::printf("SUPERFICIAL VELOCITY MPI (np=%d): %s\n", size, fail ? "FAIL" : "PASS");
   }
   Kokkos::finalize();
   MPI_Finalize();

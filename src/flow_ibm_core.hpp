@@ -336,31 +336,31 @@ void Solver<Grid>::setBodyForce(double fx, double fy, double fz) {
 }
 
 template <class Grid>
-void Solver<Grid>::setBulkVelocity(bool on, int axis, double velocity) {
+void Solver<Grid>::setSuperficialVelocity(bool on, int axis, double velocity) {
   if (!on) {
-    bulkAxis_ = -1;
+    superficialAxis_ = -1;
     return;
   }
   if (axis < 0 || axis > 2)
-    throw std::invalid_argument("set_bulk_velocity: axis must be 0, 1 or 2");
+    throw std::invalid_argument("set_superficial_velocity: axis must be 0, 1 or 2");
   if constexpr (Grid::collocated)
     throw std::runtime_error(
-        "set_bulk_velocity: staggered Solver only (the collocated grid would have to shift the "
-        "projected face field and the cell velocity consistently; not implemented)");
-  bulkAxis_ = axis;
-  bulkVelPhys_ = velocity;
-  if (bulkShift_.data() == nullptr)
-    bulkShift_ = Kokkos::View<double, CCMem>("bulk_shift");
-  Kokkos::deep_copy(bulkShift_, 0.0);
+        "set_superficial_velocity: staggered Solver only (the collocated grid would have to "
+        "shift the projected face field and the cell velocity consistently; not implemented)");
+  superficialAxis_ = axis;
+  superficialVelPhys_ = velocity;
+  if (superficialShift_.data() == nullptr)
+    superficialShift_ = Kokkos::View<double, CCMem>("superficial_shift");
+  Kokkos::deep_copy(superficialShift_, 0.0);
 }
 
 template <class Grid>
-double Solver<Grid>::lastBulkVelocityShift() const {
-  if (bulkAxis_ < 0 || bulkShift_.data() == nullptr)
+double Solver<Grid>::lastSuperficialVelocityShift() const {
+  if (superficialAxis_ < 0 || superficialShift_.data() == nullptr)
     return 0.0;
   double h = 0.0;
-  Kokkos::deep_copy(h, bulkShift_);
-  return h * u_.velToPhys(bulkAxis_);
+  Kokkos::deep_copy(h, superficialShift_);
+  return h * u_.velToPhys(superficialAxis_);
 }
 
 template <class Grid>

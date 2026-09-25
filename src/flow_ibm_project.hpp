@@ -22,7 +22,7 @@ void Solver<Grid>::step() {
   // retrying. Both checks are now evaluated here, at the head of `step()` and before the first
   // mutator, so a throw leaves every field bitwise as it was on entry. No-op unless VoF is on.
   vofStepPrecheck();
-  bulkVelocityPrecheck();  // set_bulk_velocity's scope, before the first mutator (same reason)
+  superficialVelocityPrecheck();  // its scope, before the first mutator (same reason)
 
   // The momentum-solver choice, for a configuration that never calls set_solid. set_solid is the
   // other (and historically the only) place it is made; a domain-BC case with no immersed solid
@@ -235,9 +235,10 @@ void Solver<Grid>::step() {
   // divergence-free velocity (properties frozen over the step). No-op (byte-identical) when no
   // scalar is registered.
   advanceScalars();
-  // set_bulk_velocity: the uniform shift of one velocity component, LAST, so the next step starts
-  // from the constrained field exactly as a driver shifting it between steps would. No-op when off.
-  applyBulkVelocity();
+  // set_superficial_velocity: the uniform shift of one velocity component, LAST, so the next step
+  // starts from the constrained field exactly as a driver shifting it between steps would. No-op
+  // when off.
+  applySuperficialVelocity();
   // The UNSTABLE outflow regime, detected rather than guessed (peclet-examples ISSUES.md
   // "Inflow/outflow diverges to NaN"): reversed flow on an outflow face with the backflow
   // stabilization switched OFF. Checked only in that configuration (beta <= 0 is not the
@@ -276,25 +277,25 @@ void Solver<Grid>::step() {
 }
 
 template <class Grid>
-void Solver<Grid>::bulkVelocityPrecheck() const {
-  if (bulkAxis_ < 0)
+void Solver<Grid>::superficialVelocityPrecheck() const {
+  if (superficialAxis_ < 0)
     return;
-  const int a = bulkAxis_;
+  const int a = superficialAxis_;
   if (bc_[2 * a] != 0 || bc_[2 * a + 1] != 0)
     throw std::runtime_error(
-        "set_bulk_velocity: the axis carries a domain boundary condition; a uniform shift of the "
-        "normal velocity is divergence-free only on a PERIODIC axis");
+        "set_superficial_velocity: the axis carries a domain boundary condition; a uniform "
+        "shift of the normal velocity is divergence-free only on a PERIODIC axis");
   if (hasSolid_)
     throw std::runtime_error(
-        "set_bulk_velocity: an immersed solid is present; a uniform shift would move fluid "
+        "set_superficial_velocity: an immersed solid is present; a uniform shift would move fluid "
         "through the cut faces (all-fluid domains only)");
 }
 
 template <class Grid>
-void Solver<Grid>::applyBulkVelocity() {
-  if (bulkAxis_ < 0)
+void Solver<Grid>::applySuperficialVelocity() {
+  if (superficialAxis_ < 0)
     return;
-  const int a = bulkAxis_;
+  const int a = superficialAxis_;
   CCExec space;
   const C3 e = e_;
   CCField f = C[a].u;
@@ -303,13 +304,13 @@ void Solver<Grid>::applyBulkVelocity() {
   if (distributed_)
     ncell = static_cast<long>(gnx_) * gny_ * gnz_;
 #endif
-  const double target = bulkVelPhys_ * u_.velToInt(a), dn = static_cast<double>(ncell);
-  Kokkos::View<double, CCMem> shift = bulkShift_;
+  const double target = superficialVelPhys_ * u_.velToInt(a), dn = static_cast<double>(ncell);
+  Kokkos::View<double, CCMem> shift = superficialShift_;
   const auto inner =
       Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G});
   // The inner sum into the device scalar (asynchronous: the result never visits the host).
   Kokkos::parallel_reduce(
-      "bulk_velocity_sum", inner,
+      "superficial_velocity_sum", inner,
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         acc += f((long)x + (long)y * e.x + (long)z * (long)e.x * e.y);
       },
@@ -324,10 +325,10 @@ void Solver<Grid>::applyBulkVelocity() {
   }
 #endif
   Kokkos::parallel_for(
-      "bulk_velocity_to_shift", Kokkos::RangePolicy<CCExec>(space, 0, 1),
+      "superficial_velocity_to_shift", Kokkos::RangePolicy<CCExec>(space, 0, 1),
       KOKKOS_LAMBDA(int) { shift() = target - shift() / dn; });
   Kokkos::parallel_for(
-      "bulk_velocity_shift", inner, KOKKOS_LAMBDA(int x, int y, int z) {
+      "superficial_velocity_shift", inner, KOKKOS_LAMBDA(int x, int y, int z) {
         f((long)x + (long)y * e.x + (long)z * (long)e.x * e.y) += shift();
       });
   // The ghost ring follows its (shifted) owners: periodic images, and the domain BCs of the

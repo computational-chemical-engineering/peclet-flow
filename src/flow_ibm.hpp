@@ -301,18 +301,20 @@ class Solver {
   /// Body force per unit volume, in the caller's units (e.g. a mean pressure gradient, or rho*g).
   void setBodyForce(double fx, double fy, double fz);
 
-  /// Hold the BULK velocity along a periodic axis: at the end of every `step()` one uniform shift
-  /// is added to every inner face velocity of component `axis` so that its volume mean equals
-  /// `velocity` (the caller's units; the volume flux through any cross-section divided by its
-  /// area). A uniform shift of the normal velocity on an axis with no boundary leaves every cell
+  /// Hold the SUPERFICIAL velocity along a periodic axis: at the end of every `step()` one uniform
+  /// shift is added to every inner face velocity of component `axis` so that its volume mean equals
+  /// `velocity` (the caller's units). This is the MIXTURE superficial velocity -- the volume flux
+  /// through a cross-section divided by the cross-section's FULL area -- not an interstitial
+  /// (per-phase) velocity, which in multiphase flow "velocity" alone would leave ambiguous. A
+  /// uniform shift of the normal velocity on an axis with no boundary leaves every cell
   /// divergence unchanged, so the field stays discretely solenoidal. A closed (batch) column is
   /// `velocity = 0`. The mean is a device reduction (global under MPI); single-rank the shift
   /// never leaves the device. Staggered, all-fluid (no immersed solid), periodic `axis` only --
   /// the step raises otherwise. `on = false` turns it off.
-  void setBulkVelocity(bool on, int axis, double velocity);
+  void setSuperficialVelocity(bool on, int axis, double velocity);
   /// The shift the last `step()` applied (caller's velocity units; 0 when off). Reading it
   /// synchronises with the device.
-  double lastBulkVelocityShift() const;
+  double lastSuperficialVelocityShift() const;
 
 
   void setVelocityIterations(int it);
@@ -2488,9 +2490,9 @@ class Solver {
   // the end of step()). Exposed so a test can prescribe a velocity and transport a scalar in
   // isolation.
   void advanceScalars();
-  // setBulkVelocity's per-step shift (the tail of step()); no-op when off.
-  void applyBulkVelocity();
-  void bulkVelocityPrecheck() const;
+  // setSuperficialVelocity's per-step shift (the tail of step()); no-op when off.
+  void applySuperficialVelocity();
+  void superficialVelocityPrecheck() const;
 
 
 
@@ -4448,12 +4450,13 @@ class Solver {
   double slipPhys_ = 0.0;
   double bcVelPhys_[6][3] = {};
   std::array<double, 3> f_{{0, 0, 0}};
-  // setBulkVelocity: the axis (-1 = off), the target in the CALLER's units (converted at each
-  // application, so any set_rho/set_dt order works), and the device-resident shift of the last
-  // application (internal units) -- a 0-d View so the single-rank path needs no host round trip.
-  int bulkAxis_ = -1;
-  double bulkVelPhys_ = 0.0;
-  Kokkos::View<double, CCMem> bulkShift_;
+  // setSuperficialVelocity: the axis (-1 = off), the target in the CALLER's units (converted at
+  // each application, so any set_rho/set_dt order works), and the device-resident shift of the
+  // last application (internal units) -- a 0-d View so the single-rank path needs no host round
+  // trip.
+  int superficialAxis_ = -1;
+  double superficialVelPhys_ = 0.0;
+  Kokkos::View<double, CCMem> superficialShift_;
   int velIters_ = 200, presIters_ = 20;
   double velTol_ = 0.0;         // momentum tolerance stop (0 = legacy fixed-count loop)
   int velMinIters_ = 2;
