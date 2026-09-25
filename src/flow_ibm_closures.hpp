@@ -198,6 +198,7 @@ void Solver<Grid>::setDensityMode(bool variable) {
     useChebyshev_ = true;
     chebBoundsSet_ = false;
   }
+  registerBalancedForceState();  // V8 turns the balanced-force projection on by default
 }
 
 template <class Grid>

@@ -114,8 +114,14 @@ void Solver<Grid>::step() {
   // (B) The balanced-force projection (doc/collocated_varrho_forces.md §4.6.2): once per step,
   // before the Picard loop. Byte-identical (not even a flag read beyond this) when it is off.
   coeffBuiltThisStep_ = false;
+  if (pWritten_ || pbWritten_) {  // a restart restored the pressure: is Pb its split?
+    pbValid_ = pWritten_ && pbWritten_;
+    pWritten_ = pbWritten_ = false;
+  }
   if (balancedForceActive())
     applyBalancedForceProjection();
+  else
+    pbValid_ = false;  // this step moves P without Pb: the next ON step re-splits
   lastOuterIters_ = 0;
   for (int outer = 0; outer < outerIters_; ++outer) {
     const double tp0 = phaseTick();
@@ -419,6 +425,13 @@ void Solver<Grid>::setBalancedForceProjection(bool enabled) {
     requireBalancedForceScope("set_balanced_force_projection", false);
   bfpSet_ = true;
   bfpOn_ = enabled;
+  registerBalancedForceState();
+}
+
+template <class Grid>
+void Solver<Grid>::registerBalancedForceState() {
+  if (balancedForceActive() && Pb_.extent(0) != n_)
+    Pb_ = addField("p_balanced");  // zero-initialised: with P = 0 that is a valid split
 }
 
 template <class Grid>
@@ -537,8 +550,7 @@ void Solver<Grid>::applyBalancedForceProjection() {
     projectBuildCoefficients();
     coeffBuiltThisStep_ = true;
   }
-  if (Pb_.extent(0) != n_)
-    Pb_ = addField("p_balanced");  // zero-initialised on first use
+  registerBalancedForceState();  // normally already registered by the setter that enabled it
   if (pb1_.extent(0) != n1_)
     pb1_ = CCField("pb1", n1_);
   // (B2) the face force c*beta, (B3) its constraint divergence (div_ is scratch here: project()
@@ -581,12 +593,16 @@ void Solver<Grid>::applyBalancedForceProjection() {
   }
   lastBalancedForceIters_ = iters;
   // (B5) P += X - P_b; P_b = X (one fused kernel over the inner cells), then the P ghosts the
-  // predictor reads.
+  // predictor reads. When P_b is NOT a valid split of the current P (pbValid_: steps with the
+  // option off moved P, or a restart restored "p" without "p_balanced"), P already holds the
+  // balanced pressure, and P += X - P_b would add it a second time: RE-SPLIT instead, P_b = X
+  // with P unchanged (doc/collocated_varrho_forces.md §4.6.2).
   {
     CCExec space;
     CCField P = P_, pb = Pb_;
     CCConst x1 = CCConst(pb1_);
     const C3 e1 = e1_, e2 = e_;
+    const bool resplit = !pbValid_;
     Kokkos::parallel_for(
         "peclet::flow::bfp_split",
         Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
@@ -594,10 +610,12 @@ void Solver<Grid>::applyBalancedForceProjection() {
           const long i1 = (long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y;
           const long i2 = (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
           const double xv = x1(i1);
-          P(i2) += xv - pb(i2);
+          if (!resplit)
+            P(i2) += xv - pb(i2);
           pb(i2) = xv;
         });
   }
+  pbValid_ = true;
   fillGhosts(P_);
   if (hasBc_)
     pressureBcGhost();

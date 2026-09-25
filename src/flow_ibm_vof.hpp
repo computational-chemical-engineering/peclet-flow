@@ -1920,6 +1920,7 @@ void Solver<Grid>::setSurfaceTension(double sigma) {
   // what makes p' = sigma'*kappa' hold with kappa' = kappa*hRef.
   sigmaPhys_ = sigma;
   sigmaCsf_ = sigma * u_.sigmaToInt();
+  registerBalancedForceState();  // V8 (collocated CSF) turns the balanced-force projection on
 }
 
 template <class Grid>

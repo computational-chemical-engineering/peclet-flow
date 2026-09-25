@@ -587,7 +587,12 @@ class Solver {
   //   beta = f_const + ½(f(j) + f(j-s)) + CSF(j)  (the predictor's own face force, without rs),
   // with the projection's OWN operator, constraint divergence and driver, as an INCREMENT on the
   // previous split, X = P_b + dP_b, stopped relative to the full right-hand side (and skipped when
-  // P_b already meets it), then P += X - P_b, P_b = X. P stays the total physical pressure; the predictor then sees only
+  // P_b already meets it), then P += X - P_b, P_b = X -- or, when P_b is not a valid split of the
+  // current P (the first step after steps with the option off, or a restart that restored "p"
+  // but not "p_balanced"), P_b = X with P unchanged (a RE-SPLIT: never a second copy of the
+  // balanced pressure). "p_balanced" is RESTART STATE: it is registered as soon as the option is
+  // active; restoring it together with "p" (set_field) keeps the split, omitting it re-splits.
+  // P stays the total physical pressure; the predictor then sees only
   // the part of the forces that drives flow, so gradient forces (hydrostatics, constant-kappa CSF)
   // are balanced exactly from step 1 at every mu, dt, density ratio and openness. The solve is
   // state-independent: stability and the converged steady state are identical ON and OFF. Cost:
@@ -1734,6 +1739,9 @@ class Solver {
   void requireBalancedForceScope(const char* who, bool atStep) const;
   // (B2) faceAcc_[c] = c * beta on the face range [G, e-G] (no openness: the divergence applies it).
   void buildBalancedFaceForce(int c);
+  // Register "p_balanced" (zero) as soon as the option is active, so a restart can restore it
+  // with set_field before the first step. Called by every setter that can switch it on.
+  void registerBalancedForceState();
   // B1-B5, once per step before the Picard loop.
   void applyBalancedForceProjection();
   // (B4) the increment solve with the full-RHS stop (WO-P5); pb1_ in/out, rhs1_ the RHS.
@@ -4541,6 +4549,13 @@ class Solver {
   // the balanced-force stage already did this step (rho is frozen within a step).
   bool bfpSet_ = false, bfpOn_ = false;
   CCField Pb_, pb1_;
+  // Is Pb_ the balanced part of the CURRENT P_ (a valid split)? True for a fresh solver (P = Pb =
+  // 0); cleared by a step with the option off (P moved without Pb) and by a set_field of "p" or
+  // "p_balanced" alone (a restart that restored one without the other); set again by every
+  // balanced-force stage. An invalid split is RE-SPLIT (Pb := X, P unchanged), never P += X - Pb:
+  // that would add the balanced pressure a second time (doc/collocated_varrho_forces.md §4.6.2).
+  bool pbValid_ = true;
+  bool pWritten_ = false, pbWritten_ = false;  // set_field("p" / "p_balanced") since the last step
   bool coeffBuiltThisStep_ = false;
   long lastBalancedForceIters_ = 0;
   // The collocated face field with every OPEN (outflow) domain face replaced by its

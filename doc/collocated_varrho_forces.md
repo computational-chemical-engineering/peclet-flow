@@ -343,8 +343,26 @@ as today) and after properties, curvature and ghost fills; before the Picard loo
 - **(B5) Bookkeeping.** In one fused kernel: $P\mathrel{+}=X-P_b$; $P_b:=X$. Then the existing
   `fillGhosts(P_)` and `pressureBcGhost()`.
 - **State.** `Pb_` is a registered g=2 cell field (`"p_balanced"`, so `redistribute` carries it),
-  allocated at the first ON step; `pb1_` is g=1 scratch. Neither exists while the option has never
-  been on.
+  registered (zero) **as soon as the option is active** — by `set_balanced_force_projection(True)`,
+  or on V8 by the setter that makes the path V8 (`set_density_mode`, `set_surface_tension`) — so a
+  restart can restore it before the first step; `pb1_` is g=1 scratch. Neither exists while the
+  option has never been active.
+- **The split is restart state; an invalid split is RE-SPLIT (review fix, 2026-09-25).** B5's
+  $P\mathrel{+}=X-P_b$ is right only while $P_b$ is the balanced part of the current $P$. Two
+  events break that: a step with the option off (P moves, $P_b$ does not), and a restart that
+  restored `"p"` (`set_field`) without `"p_balanced"` (or `"p_balanced"` without `"p"`). The
+  continuing update would then add the balanced pressure a second time — measured on a walled
+  ratio-1000 V8 column (8×8×24, μ 0.1, dt 1, g 0.1): 1.25e-2 after a restart and 1.27e-2 after
+  OFF 400 steps → ON, against 7.8e-14 continued. The rule: whenever $P_b$ is not a valid split
+  (`pbValid_`), the step sets $P_b:=X$ and leaves $P$ **unchanged**; restoring `"p"` and
+  `"p_balanced"` together keeps the split. A fresh solver ($P=P_b=0$) is a valid split, so the
+  first step still does $P\mathrel{+}=X$ and static balances stay exact from step 1. On a static
+  force a re-split step IS the OFF step (the predictor sees $\beta-wG_fP$ either way), so an
+  OFF → ON switch continues the OFF trajectory exactly — it never jumps, and it relaxes at the
+  OFF rate. Gate: `tests/python/test_balanced_force_restart.py` (ctest `balanced_force_restart`),
+  both grids — continued / restart / restart + `p_balanced` / OFF → ON against their twins
+  (§9 G8(g)). A write through `diagnostics.field_view` is invisible to the rule: restore with
+  `set_field`.
 
 **4.6.3 API.** Names follow `docs/NAMING.md`: `set_` + a leading `enabled` bool, a readback without
 `get_`, public tier.
@@ -355,8 +373,9 @@ as today) and after properties, curvature and ghost fills; before the Picard loo
 - **C++:** `setBalancedForceProjection(bool)`, `balancedForceProjection()`,
   `lastBalancedForceIterations()`.
 - **Default: ON when `colocatedFaceForce()` (V8: collocated && (varRho || CSF)), OFF otherwise (U2).**
-  An explicit `set_balanced_force_projection(False)` on V8 is honoured. It may be toggled at any time; toggling only re-splits P and never moves a
-  converged steady state. Switching OFF keeps `Pb_` inside P.
+  An explicit `set_balanced_force_projection(False)` on V8 is honoured. It may be toggled at any
+  time; toggling only re-splits P (§4.6.2) and never moves a converged steady state. Switching
+  OFF keeps `Pb_` inside P; the first ON step after OFF steps re-splits.
 
 **4.6.4 Scope.** The option raises a named error when first used (at the setter if the
 configuration is already known, otherwise at the next step's head) with:
@@ -835,6 +854,12 @@ Other combinations unchanged.
     centre, ratio 1 and 1000, μ = 0.1.
 - **(f) Refusals.** porous, ghost, block CSF, inflow/outflow and non-incremental each raise a
   named error.
+- **(g) The split survives a restart and a switch** (`balanced_force_restart`, both grids, the
+  column of §4.6.2): continued, restart without and with `p_balanced`, OFF 400 → ON after 1 and 6
+  steps, each within 1e-12 of its twin (the continued run; for OFF → ON the OFF run continued);
+  the restarts also < 1e-12 absolute. Measured: V8 restart 6.3e-14 (twin diff 6.7e-14), with
+  `p_balanced` bit-identical, OFF → ON 0 / 8.4e-14; staggered 1.8e-14 (4.5e-14), bit-identical,
+  0 / 3.0e-14. Before the fix: 1.25e-2 and 1.27e-2 on V8.
 
 ## 10. Byte-identity outside V8
 
@@ -844,8 +869,10 @@ Other combinations unchanged.
 - **The V8 redesign.** It lives inside the existing `colocatedFaceForce()` branches, i.e.
   `Grid::collocated && (varRho_ || csfActive())`. Staggered folds that to false; constant-ρ
   collocated without CSF evaluates it false.
-- **State.** `Pb_`/`pb1_` exist only after the option is first switched ON, so registry,
-  redistribution and memory are unchanged otherwise.
+- **State.** `Pb_`/`pb1_` exist only once the option has been active (V8, or an explicit ON), so
+  registry, redistribution and memory are unchanged otherwise. The split-validity flags
+  (`pbValid_`, set by `set_field("p")`/`("p_balanced")` and by an OFF step) are plain bools that no
+  OFF computation reads.
 - **`state_hash`.** No case is V8 (`vof_droplet` is staggered), and none enables the option.
 
 ## 11. Risks and open questions (each with a default)

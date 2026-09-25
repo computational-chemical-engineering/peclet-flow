@@ -75,19 +75,19 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 178 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 185 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-178 registered / **176 with `-LE bench`** (counted 2026-09-25): 47 from `tests/kokkos` — of
-which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 121
-from `tests/kokkos_mpi` (40 cases at np = 1, 2, 4 plus one np = 8 rung), and 10 Python ctests on
+185 registered / **183 with `-LE bench`** (counted 2026-09-25): 48 from `tests/kokkos` — of
+which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 124
+from `tests/kokkos_mpi` (41 cases at np = 1, 2, 4 plus one np = 8 rung), and 13 Python ctests on
 the module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
 `verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`, `colocated_open_boundary`,
-`cell_force_placement`, `collocated_stability_guard`, `no_env_knobs`, `no_float_operator_casts`,
-`iteration_order`). Always bound the OpenMP pool — an unbounded one on a many-core host is an
-hour-long trap.
+`cell_force_placement`, `collocated_stability_guard`, `balanced_force_restart`, `mirror_symmetry`,
+`velocity_solver_variable_mu`, `no_env_knobs`, `no_float_operator_casts`, `iteration_order`).
+Always bound the OpenMP pool — an unbounded one on a many-core host is an hour-long trap.
 
 More verification lives in `scripts/verify_*_sdflow.py` and `validate_zick_homsy_sdflow.py` (the
 external ground truth), run with `PYTHONPATH=<tree>`. `tests/regression/sdflow_regression.py` is

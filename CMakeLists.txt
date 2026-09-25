@@ -275,6 +275,15 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(collocated_stability_guard PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # The balanced-force projection's pressure split never counts the balanced pressure twice: a
+  # restart without "p_balanced" and an OFF -> ON switch re-split (doc/collocated_varrho_forces.md
+  # §4.6.2), on both grids.
+  add_test(NAME balanced_force_restart
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_balanced_force_restart.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(balanced_force_restart PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # QUALITY_PLAN D3: `src/` carries no environment variable that can change a result (package E).
   add_test(NAME no_env_knobs
            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_no_env_knobs.py

@@ -1877,6 +1877,12 @@ std::vector<double> Solver<Grid>::getField(const std::string& name) {
 template <class Grid>
 void Solver<Grid>::setField(const std::string& name, const std::vector<double>& v) {
   scatterInner(fields_.at(name).data, v);
+  // The balanced-force split (doc/collocated_varrho_forces.md §4.6.2): a restart that restores
+  // the pressure must restore "p_balanced" with it, or the next ON step re-splits. Flags only.
+  if (name == "p")
+    pWritten_ = true;
+  else if (name == "p_balanced")
+    pbWritten_ = true;
 }
 
 template <class Grid>
