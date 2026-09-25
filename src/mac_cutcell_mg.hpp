@@ -272,6 +272,114 @@ inline void residualCutcellBoxFace(CCField r, CCConst x, CCConst b, FPC AC, FPC 
       });
 }
 
+// --- A3: fused periodic wrap (doc/vof_step_performance_design.md §4.3, §5.4) -------------------
+// On a single-rank level whose ghosts a periodic fill would only COPY from the inner cells (no
+// outflow face, no overlay on the solve), the smoother, the residual and the Krylov matvec read a
+// boundary cell's periodic neighbour directly through the wrapped index instead of from a ghost
+// filled by a launch before each pass: per axis a, for inner coordinate k in [g, g+n_a),
+//   minus neighbour = (k == g)         ? i + (n_a-1) s_a : i - s_a
+//   plus  neighbour = (k == g+n_a-1)   ? i - (n_a-1) s_a : i + s_a.
+// That is the very cell the fill copies into the ghost, so a read-only pass (residual, matvec)
+// reads the identical value. A red-black colour pass does too exactly when every inner dimension is
+// EVEN: the wrapped neighbour then has the other colour, which this pass does not update, so it
+// still holds the value the fill copied before the pass (the caller checks the parity). Only the
+// field being smoothed or applied is wrapped; the coefficients are static over a solve and are read
+// at their ghost indices as before (AFX(i+sx) at the high ghost holds the periodic face, and a wall
+// face's coefficient is 0 there, multiplying the wrapped value exactly as it multiplied the ghost).
+struct CcNbrs {
+  long xp, xm, yp, ym, zp, zm;
+};
+KOKKOS_INLINE_FUNCTION CcNbrs ccWrapNbrs(int lx, int ly, int lz, C3 n, int g, long i, long sy,
+                                         long sz) {
+  CcNbrs w;
+  w.xm = (lx == g) ? i + (long)(n.x - 1) : i - 1;
+  w.xp = (lx == g + n.x - 1) ? i - (long)(n.x - 1) : i + 1;
+  w.ym = (ly == g) ? i + (long)(n.y - 1) * sy : i - sy;
+  w.yp = (ly == g + n.y - 1) ? i - (long)(n.y - 1) * sy : i + sy;
+  w.zm = (lz == g) ? i + (long)(n.z - 1) * sz : i - sz;
+  w.zp = (lz == g + n.z - 1) ? i - (long)(n.z - 1) * sz : i + sz;
+  return w;
+}
+// cutcellSmoothColorFace with wrapped neighbour reads (n = the level's inner dims, all even).
+inline void cutcellSmoothColorFaceWrap(CCField phi, CCConst b, FPC AC, FPC AFX, FPC AFY, FPC AFZ,
+                                       C3 e, C3 n, C3 og, int g, int color) {
+  CCExec space;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
+    const long cells = (long)nyi * nzi * (e.x - 2 * g);
+    auto pencil = KOKKOS_LAMBDA(long t) {
+      const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+      PECLET_FLOW_OMP_SIMD  // same-colour cells are independent (ccFor3's contract)
+          for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const CcNbrs w = ccWrapNbrs(lx, ly, lz, n, g, i, sy, sz);
+        cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
+                              w.zp, w.zm);
+      }
+    };
+    if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      for (long t = 0; t < (long)nyi * nzi; ++t)
+        pencil(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::cc_smooth",
+                         Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
+    return;
+  }
+  using MD = MDRange3<CCExec>;
+  Kokkos::parallel_for(
+      "peclet::flow::cc_smooth", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const CcNbrs w = ccWrapNbrs(lx, ly, lz, n, g, i, sy, sz);
+        cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
+                              w.zp, w.zm);
+      });
+}
+// residualCutcellFace with wrapped reads of x.
+inline void residualCutcellFaceWrap(CCField r, CCConst x, CCConst b, FPC AC, FPC AFX, FPC AFY,
+                                    FPC AFZ, C3 e, C3 n, int g) {
+  ccFor3(
+      "peclet::flow::cc_residual", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const CcNbrs w = ccWrapNbrs(lx, ly, lz, n, g, i, sy, sz);
+        cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
+                                w.zp, w.zm);
+      });
+}
+// applyCutcellOpFace / applyCutcellOpExact with wrapped reads of x (the level-0 Krylov matvec).
+inline void applyCutcellOpFaceWrap(CCField y, CCConst x, FPC AC, FPC AFX, FPC AFY, FPC AFZ, C3 e,
+                                   C3 n, int g) {
+  ccFor3(
+      "peclet::flow::cc_apply", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const CcNbrs w = ccWrapNbrs(lx, ly, lz, n, g, i, sy, sz);
+        y(i) = cutcellApplyFaceCell(x, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
+                                    w.zp, w.zm);
+      });
+}
+inline void applyCutcellOpExactWrap(CCField y, CCConst x, CCConst ox, CCConst oy, CCConst oz, C3 e,
+                                    C3 n, int g, double gfx, double gfy, double gfz) {
+  ccFor3(
+      "peclet::flow::cc_apply_exact", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const CcNbrs w = ccWrapNbrs(lx, ly, lz, n, g, i, sy, sz);
+        y(i) = cutcellApplyExactCell(x, ox, oy, oz, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym, w.zp,
+                                     w.zm, gfx, gfy, gfz);
+      });
+}
+
 // average restriction (coarse = mean of ratio^3 fine children; mg_restrict_k) + trilinear
 // prolongation (added to fine; mg_prolong_k). Both over inner cells. gc/gf: coarse/fine block
 // ghost widths (CA-eligible coarse levels carry g=2, so they can differ across one transfer).
@@ -1218,6 +1326,7 @@ class CutcellMG {
                double rtol, int pre, int post, int bottom, const StarOverlay* star = nullptr,
                int nStar = 0, C3 nnStar = C3{0, 0, 0}) {
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
+    OverlayScope overlay(overlaySolve_, star != nullptr);
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -1343,6 +1452,7 @@ class CutcellMG {
                int maxit, double rtol, int pre, int post, int bottom,
                const StarOverlay* star = nullptr, int nStar = 0, C3 nnStar = C3{0, 0, 0}) {
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
+    OverlayScope overlay(overlaySolve_, star != nullptr);
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -1467,7 +1577,8 @@ class CutcellMG {
                     CCField xg2 = CCField(), GridHalo<double>* h2 = nullptr, C3 ext2 = C3{0, 0, 0}
 #endif
   ) {
-    solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
+    solveFailed_ = false;                       // ISSUES sweep item 6: per-solve breakdown flag
+    OverlayScope overlay(overlaySolve_, true);  // A3: the gp overlay keeps today's fills
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -1859,9 +1970,14 @@ class CutcellMG {
     } else
 #endif
     {
-      fill(lv, lv.x);  // single-rank: the periodic wrap copy
-      applyOutflowGhost(lv, lv.x, lv.g);
-      fullResidual();
+      if (fusedWrapReads()) {  // A3: the residual reads the periodic wrap directly, no fill
+        residualCutcellFaceWrap(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX),
+                                FPC(lv.AFY), FPC(lv.AFZ), lv.ext, lv.inner, lv.g);
+      } else {
+        fill(lv, lv.x);  // single-rank: the periodic wrap copy
+        applyOutflowGhost(lv, lv.x, lv.g);
+        fullResidual();
+      }
     }
 #ifdef PECLET_FLOW_MPI
     if (lv.tele) {
@@ -1905,6 +2021,22 @@ class CutcellMG {
   // periodic/IBM operator — with domain BCs the ring rows would need post-BC ghost openness the
   // exchange does not deliver, so those keep the per-colour exchange.
   bool caSmooth(const Level& lv) const { return distributed_ && lv.caOk && !hasBC_; }
+  // A3 (§5.4) eligibility of the fused periodic-wrap reads: single rank, no outflow face (whose
+  // Dirichlet ghost is not a copy), and no overlay on the current solve (the star /
+  // ghost-projection paths keep today's fills). The smoother additionally needs every inner
+  // dimension even (see cutcellSmoothColorFaceWrap); the read-only residual and matvec need no
+  // parity.
+  bool fusedWrapReads() const { return !distributed_ && !hasOutflow_ && !overlaySolve_; }
+  bool fusedWrapSmooth(const Level& lv) const {
+    return fusedWrapReads() && lv.inner.x % 2 == 0 && lv.inner.y % 2 == 0 && lv.inner.z % 2 == 0;
+  }
+  // Marks a solve that carries an overlay (star couplings / the ghost-projection BiCGStab) for its
+  // whole duration, every exit path included.
+  struct OverlayScope {
+    bool& flag;
+    OverlayScope(bool& f, bool on) : flag(f) { flag = on; }
+    ~OverlayScope() { flag = false; }
+  };
   void smooth(Level& lv, int sweeps, bool reverse) {
     const C3 og = parityOg(lv);  // red-black parity origin ({0,0,0} single-rank)
 #ifdef PECLET_FLOW_MPI
@@ -1962,6 +2094,11 @@ class CutcellMG {
           continue;
         }
 #endif
+        if (fusedWrapSmooth(lv)) {  // A3: no fill; the pass reads the periodic wrap directly
+          cutcellSmoothColorFaceWrap(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
+                                     FPC(lv.AFZ), lv.ext, lv.inner, og, lv.g, color);
+          continue;
+        }
         fill(lv, lv.x);
         applyOutflowGhost(lv, lv.x, lv.g);
         cutcellSmoothColorFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
@@ -2458,6 +2595,15 @@ class CutcellMG {
       return;
     }
 #endif
+    if (fusedWrapReads()) {  // A3: the matvec reads the periodic wrap directly, no fill
+      if (ex)
+        applyCutcellOpExactWrap(y, CCConst(v), CCConst(l0.ox), CCConst(l0.oy), CCConst(l0.oz),
+                                l0.ext, l0.inner, G, gfx_, gfy_, gfz_);
+      else
+        applyCutcellOpFaceWrap(y, CCConst(v), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ),
+                               l0.ext, l0.inner, G);
+      return;
+    }
     fill(l0, v);
     applyOutflowGhost(l0, v);
     if (ex)
@@ -2503,6 +2649,55 @@ class CutcellMG {
     // the shell as three slabs: z-ghost planes (all x, y), then y-ghost rows of the inner z range
     // (all x), then x-ghost cells of the inner (y, z) range
     const long nZ = 2L * G * exy, nY = (long)nz * 2 * G * e.x, nX = (long)nz * ny * 2 * G;
+    if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+      // A3 (§4.3, §5.4): on a host backend the same three slabs go ROW by row -- the index math
+      // (one division) per row, a contiguous copy along x inside it -- serially below the cutoff.
+      // The one-thread-per-cell form below paid a 64-bit div/mod per ghost cell (85 us per
+      // launch at 24 threads). Every ghost cell is still written once, from the inner cell its
+      // three coordinates wrap to, so the result is identical. No simd mark: a row's source and
+      // destination can share the row (the x-ghost slab).
+      const long rZ = 2L * G * e.y, rY = (long)nz * 2 * G, rX = (long)nz * ny;
+      CCField ff = f;
+      auto copyRow = [=](long dst, long src) {  // one full x row, wrapped along x
+        for (int x = 0; x < G; ++x)
+          ff(dst + x) = ff(src + x + nx);
+        for (int x = G; x < G + nx; ++x)
+          ff(dst + x) = ff(src + x);
+        for (int x = G + nx; x < e.x; ++x)
+          ff(dst + x) = ff(src + x - nx);
+      };
+      auto row = [=](long t) {
+        if (t < rZ) {  // z-ghost plane row (y, zg)
+          const int l = (int)(t / e.y), y = (int)(t - (long)l * e.y);
+          const int z = l < G ? l : nz + l;
+          const int sy = y < G ? y + ny : (y >= G + ny ? y - ny : y);
+          const int sz = z < G ? z + nz : z - nz;
+          copyRow((long)y * e.x + (long)z * exy, (long)sy * e.x + (long)sz * exy);
+        } else if (t < rZ + rY) {  // y-ghost row (yg, z) of the inner z range
+          const long t2 = t - rZ;
+          const int zi = (int)(t2 / (2 * G)), l = (int)(t2 - (long)zi * 2 * G);
+          const int y = l < G ? l : ny + l, z = G + zi;
+          const int sy = y < G ? y + ny : y - ny;
+          copyRow((long)y * e.x + (long)z * exy, (long)sy * e.x + (long)z * exy);
+        } else {  // the x-ghost cells of inner row (y, z)
+          const long t3 = t - rZ - rY;
+          const int zi = (int)(t3 / ny), yi = (int)(t3 - (long)zi * ny);
+          const long base = (long)(G + yi) * e.x + (long)(G + zi) * exy;
+          for (int x = 0; x < G; ++x)
+            ff(base + x) = ff(base + x + nx);
+          for (int x = G + nx; x < e.x; ++x)
+            ff(base + x) = ff(base + x - nx);
+        }
+      };
+      if (hostRunSerial(nZ + nY + nX)) {
+        for (long t = 0; t < rZ + rY + rX; ++t)
+          row(t);
+        return;
+      }
+      Kokkos::parallel_for("peclet::flow::mg_pfill3",
+                           Kokkos::RangePolicy<CCExec>(space, 0, rZ + rY + rX), row);
+      return;
+    }
     CCField ff = f;
     Kokkos::parallel_for(
         "peclet::flow::mg_pfill3", Kokkos::RangePolicy<CCExec>(space, 0, nZ + nY + nX),
@@ -2965,6 +3160,7 @@ class CutcellMG {
   // way). setMeanRemovalScope(true) restores the legacy every-level scope.
   bool meanRemovalAll_ = false;
   bool distributed_ = false;
+  bool overlaySolve_ = false;  // A3: the current solve has an overlay (OverlayScope)
   int dbgSolve_ = 0;  // solve counter for the env-gated convergence trace (mgDebugLevel() >= 2)
   // ISSUES sweep item 6: did the LAST Krylov solve give up on a non-finite recurrence
   // scalar (a preconditioner or operator that produced NaN/Inf)? Reset at the head of
