@@ -642,6 +642,211 @@ inline void vofBatchBox(const VofBlockTable& T, double eps, SField out, int stri
       });
 }
 
+// ---- stage 6: the curvature cascade and the CSF face force (`VofBlockSet::computeCsf`) ---------
+
+/// One master block's cascade (`VofCurvature`, worklist mode) for the batched launches: its planes,
+/// curvature, branch and force fields, and every argument the per-cascade passes give the shared
+/// cell bodies (`wyReconstructCell`, `curvHeightCell`, `curvFallbackCell`, the clip, the census,
+/// `csfFaceCurvature` + `csfFaceForce`).
+struct VofCurvJob {
+  double *c, *mx, *my, *mz, *al, *kap, *br;
+  double* f[3];  ///< the block's CSF face force, per component
+  I3 e, n;
+  int g;
+  double ieps, mtol, ptW, peps, dW, cmin, km;
+  bool forceFb, oneDir, useFit;
+  VofMetric gm;
+};
+
+struct VofCurvTable {
+  VofCurvJob job[kVofBlockBatch];
+  long off[kVofBlockBatch + 1];
+  int nj;
+  int base;
+};
+
+template <class F>
+inline long vofSetOffsets(VofCurvTable& T, F size) {
+  T.off[0] = 0;
+  for (int k = 0; k < T.nj; ++k)
+    T.off[k + 1] = T.off[k] + size(T.job[k]);
+  for (int k = T.nj; k < kVofBlockBatch; ++k)
+    T.off[k + 1] = T.off[T.nj];
+  return T.off[T.nj];
+}
+inline long vofCurvInner(const VofCurvJob& J) {
+  return static_cast<long>(J.n.x) * J.n.y * J.n.z;
+}
+/// The inner region grown by `kPvHalf`: every cell `VofCurvature::reconstructPlanes` writes.
+inline long vofCurvGrown(const VofCurvJob& J) {
+  return static_cast<long>(J.n.x + 2 * kPvHalf) * (J.n.y + 2 * kPvHalf) * (J.n.z + 2 * kPvHalf);
+}
+
+/// Cell `r` of job `J`'s grown (`grown`) or inner region, in the region's x-fastest order.
+KOKKOS_INLINE_FUNCTION long vofCurvCell(const VofCurvJob& J, long r, bool grown) {
+  const int gr = grown ? kPvHalf : 0;
+  const int rx = J.n.x + 2 * gr, ry = J.n.y + 2 * gr;
+  const int ix = static_cast<int>(r % rx);
+  const int iy = static_cast<int>((r / rx) % ry);
+  const int iz = static_cast<int>(r / (static_cast<long>(rx) * ry));
+  return L3(J.g - gr + ix, J.g - gr + iy, J.g - gr + iz, J.e);
+}
+
+/// `VofCurvature::compact`: the interfacial cells of the grown (`grown`) or inner region, in the
+/// per-cascade scan's order; each job's range lands in `start`/`end` (absolute list positions).
+inline void vofCurvCompact(const VofCurvTable& T, bool grown, LField list, LField start,
+                           LField end) {
+  Kokkos::parallel_scan(
+      "vof::block::batch_curv_compact", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
+      KOKKOS_LAMBDA(const long t, long& upd, const bool final) {
+        const int k = vofJobOf(T.off, t);
+        const VofCurvJob& J = T.job[k];
+        const long r = t - T.off[k];
+        const long i = vofCurvCell(J, r, grown);
+        const bool hit = vofIsInterface(J.c[i], J.ieps);
+        if (final) {
+          if (r == 0)
+            start(T.base + k) = upd;
+          if (hit)
+            list(upd) = i;
+          if (t + 1 == T.off[k + 1])
+            end(T.base + k) = upd + (hit ? 1 : 0);
+        }
+        if (hit)
+          ++upd;
+      });
+}
+
+/// `reconstructPlanes` (worklist mode), part 1: zero the four plane fields over the grown region.
+inline void vofCurvPlanesZero(const VofCurvTable& T) {
+  Kokkos::parallel_for(
+      "vof::block::batch_curv_planes_zero", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
+      KOKKOS_LAMBDA(const long t) {
+        const int k = vofJobOf(T.off, t);
+        const VofCurvJob& J = T.job[k];
+        const long i = vofCurvCell(J, t - T.off[k], true);
+        J.mx[i] = 0.0;
+        J.my[i] = 0.0;
+        J.mz[i] = 0.0;
+        J.al[i] = 0.0;
+      });
+}
+
+/// Part 2: `wyReconstructCell` over the grown interfacial list (upper bound: the grown region).
+inline void vofCurvPlanesList(const VofCurvTable& T, LField list, LField start, LField end) {
+  Kokkos::parallel_for(
+      "vof::block::batch_curv_planes", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
+      KOKKOS_LAMBDA(const long t) {
+        const int k = vofJobOf(T.off, t);
+        const long q = start(T.base + k) + (t - T.off[k]);
+        if (q >= end(T.base + k))
+          return;
+        const VofCurvJob& J = T.job[k];
+        const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+        wyReconstructCell(VofRawField{J.c}, list(q), sy, sz, VofRawField{J.mx}, VofRawField{J.my},
+                          VofRawField{J.mz}, VofRawField{J.al});
+      });
+}
+
+/// `heightPass` (worklist mode), part 1: every inner cell to kappa = 0, branch = kCurvNone.
+inline void vofCurvHfReset(const VofCurvTable& T) {
+  Kokkos::parallel_for(
+      "vof::block::batch_curv_hf_reset", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
+      KOKKOS_LAMBDA(const long t) {
+        const int k = vofJobOf(T.off, t);
+        const VofCurvJob& J = T.job[k];
+        const long i = vofCurvCell(J, t - T.off[k], false);
+        J.kap[i] = 0.0;
+        J.br[i] = static_cast<double>(kCurvNone);
+      });
+}
+
+/// The per-list-cell passes of the cascade over the inner interfacial list (upper bound: the inner
+/// region): `pass` 0 = tiers 1-2 (`curvHeightCell`), 1 = tier 3 (`curvFallbackCell`), 2 = the
+/// admissibility clip (its count into `cnt(8 (base + k) + 7)`), 3 = the branch census (its seven
+/// counters into `cnt(8 (base + k) + 0..6)`, in `VofCurvature::census`'s order). The counts are
+/// integer atomics: exact whatever the order.
+inline void vofCurvListPass(const VofCurvTable& T, int pass, LField list, LField start, LField end,
+                            LField cnt) {
+  Kokkos::parallel_for(
+      "vof::block::batch_curv_list", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
+      KOKKOS_LAMBDA(const long t) {
+        const int k = vofJobOf(T.off, t);
+        const long q = start(T.base + k) + (t - T.off[k]);
+        if (q >= end(T.base + k))
+          return;
+        const VofCurvJob& J = T.job[k];
+        const long i = list(q);
+        const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+        const VofRawField c{J.c}, mx{J.mx}, my{J.my}, mz{J.mz}, al{J.al}, kap{J.kap}, br{J.br};
+        if (pass == 0) {
+          curvHeightCell(i, c, mx, my, mz, al, kap, br, 1L, sy, sz, J.mtol, J.ptW, J.ieps,
+                         J.forceFb, J.oneDir, J.useFit, J.gm, J.peps);
+          return;
+        }
+        if (pass == 1) {
+          curvFallbackCell(i, c, mx, my, mz, al, kap, br, sy, sz, kPvHalf, J.dW, J.cmin, J.ieps,
+                           J.gm);
+          return;
+        }
+        long* ct = &cnt(8 * (T.base + k));
+        if (pass == 2) {
+          const double km = J.km;
+          if (!(km > 0.0))
+            return;  // this cascade's clip is off (VofCurvature::clipPass returns 0)
+          // `!(|k| <= km)` rather than `|k| > km`: a NaN curvature is clipped (to +km, the sign of
+          // a NaN is meaningless) and counted, never silently kept.
+          if (csfKappaDefined(br(i)) && !(Kokkos::fabs(kap(i)) <= km)) {
+            kap(i) = (kap(i) == kap(i)) ? Kokkos::copysign(km, kap(i)) : km;
+            Kokkos::atomic_add(&ct[7], 1L);
+          }
+          return;
+        }
+        const int b = static_cast<int>(br(i));
+        if (b == kCurvNone)
+          return;
+        Kokkos::atomic_add(&ct[0], 1L);
+        if (b == kCurvHf)
+          Kokkos::atomic_add(&ct[1], 1L);
+        else if (b == kCurvHfMixed)
+          Kokkos::atomic_add(&ct[2], 1L);
+        else if (b == kCurvHfFit)
+          Kokkos::atomic_add(&ct[3], 1L);
+        else if (b == kCurvPv)
+          Kokkos::atomic_add(&ct[4], 1L);
+        else if (b == kCurvPvReduced)
+          Kokkos::atomic_add(&ct[5], 1L);
+        else
+          Kokkos::atomic_add(&ct[6], 1L);
+      });
+}
+
+/// `VofBlockSet::buildCsfForce` for every job, the three components per cell: the V4 balanced-force
+/// CSF at the LOW face of each inner cell, the per-block kernel's expressions verbatim.
+inline void vofCsfForceBatch(const VofCurvTable& T, double sig, double w0, double w1, double w2) {
+  Kokkos::parallel_for(
+      "vof::block::batch_csf_force", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
+      KOKKOS_LAMBDA(const long t) {
+        const int k = vofJobOf(T.off, t);
+        const VofCurvJob& J = T.job[k];
+        const long i = vofCurvCell(J, t - T.off[k], false);
+        const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+        const VofRawField cv{J.c}, kp{J.kap}, kb{J.br};
+        for (int cc = 0; cc < 3; ++cc) {
+          const double wc = cc == 0 ? w0 : (cc == 1 ? w1 : w2);
+          const long strd = (cc == 0) ? 1 : (cc == 1 ? sy : sz);
+          const double dC = cv(i) - cv(i - strd);
+          double f = 0.0;
+          if (dC != 0.0) {
+            double kf = 0.0;
+            vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
+            f = vof::csfFaceForce(sig, kf, dC, wc);
+          }
+          J.f[cc][i] = f;
+        }
+      });
+}
+
 }  // namespace peclet::flow::vof
 
 #endif  // PECLET_FLOW_VOF_BLOCK_BATCH_HPP

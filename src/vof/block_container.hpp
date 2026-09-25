@@ -705,6 +705,11 @@ class VofBlockSet {
     if (!exch_)
       throw std::runtime_error("peclet::flow::vof::VofBlockSet: no exchange installed");
     curvStats_ = VofCurvature::Stats{};
+    if (csfBatchEligible()) {  // C1 §5.9 stage 6: every pass for all blocks in one launch
+      computeCsfBatched();
+      exch_->scatterForceSum(blocks_, fx, fy, fz);
+      return;
+    }
     // Tier 3 of every local block in ONE batched launch (VofCurvature::computeBegin): bit-identical
     // to the per-block cascade, which ran the 5^3 fit's full latency once per block, serially.
     bool batch = true;
@@ -1807,6 +1812,122 @@ class VofBlockSet {
 
   // ---- C1: the batched container stages (`vof/block_batch.hpp`) -------------------------------
 
+  /// The batched cascade applies where the container step is batched and every master block's
+  /// cascade runs in worklist mode without its per-pass timers (the configuration whose tier 3 was
+  /// already batched, `VofCurvature::fallbackBatch`).
+  bool csfBatchEligible() const {
+    if (!batchEligible())
+      return false;
+    for (const auto& b : blocks_) {
+      if (!b.mine_)
+        continue;
+      if (!b.curv_.ready() || !b.curv_.useWorklist || b.curv_.timingOn || !b.f_[0].extent(0))
+        return false;
+    }
+    return true;
+  }
+
+  /// Stage 6 of §5.9: the curvature cascade (compaction, planes, tiers 1-2, tier 3, the clip, the
+  /// census) and the CSF face force of every master block, each pass one launch per chunk of
+  /// `kVofBlockBatch` blocks, the interfacial counts on the device (consumers launch over the
+  /// region and exit past the count). Each cell reads only its own block's fields and writes only
+  /// its own, so this is the per-block `computeBegin` / `fallbackBatch` / `computeEnd` /
+  /// `buildCsfForce` sequence reordered, bit for bit. The census and clip counters are integer
+  /// atomics (order-free) and reach the host in ONE copy.
+  void computeCsfBatched() {
+    std::vector<VofBlock*> mb;
+    for (auto& b : blocks_)
+      if (b.mine_)
+        mb.push_back(&b);
+    const std::size_t nb = mb.size();
+    if (nb == 0)
+      return;
+    std::vector<VofCurvJob> jobs(nb);
+    bool anyClip = false;
+    for (std::size_t k = 0; k < nb; ++k) {
+      VofBlock& b = *mb[k];
+      const VofCurvature& cv = b.curv_;
+      const VofCurvFallbackJob fj = cv.fallbackJob(b.adv_.colour());
+      VofCurvJob J;
+      J.c = fj.c;
+      J.mx = fj.mx;
+      J.my = fj.my;
+      J.mz = fj.mz;
+      J.al = fj.al;
+      J.kap = fj.kap;
+      J.br = fj.br;
+      for (int c = 0; c < 3; ++c)
+        J.f[c] = b.f_[c].data();
+      J.e = cv.extent();
+      J.n = cv.inner();
+      J.g = cv.ghost();
+      J.ieps = cv.interfaceEps;
+      J.mtol = cv.monoTol;
+      J.ptW = cv.ptWeightWidth * cv.metric.maxH();  // heightPass's `ptW`
+      J.peps = cv.pureEps;
+      J.dW = fj.dW;  // fallbackPass's `weightWidth * metric.maxH()`
+      J.cmin = fj.cmin;
+      J.km = cv.kappaClipValue();
+      J.forceFb = cv.debugForceFallback;
+      J.oneDir = cv.debugSingleDirection;
+      J.useFit = cv.useMixedHeightFit;
+      J.gm = cv.metric;
+      anyClip = anyClip || (J.km > 0.0);
+      jobs[k] = J;
+    }
+    if (static_cast<std::size_t>(cStartG_.extent(0)) < nb) {
+      cStartG_ = LField("vof::block::batch_curv_sG", nb);
+      cEndG_ = LField("vof::block::batch_curv_eG", nb);
+      cStartI_ = LField("vof::block::batch_curv_sI", nb);
+      cEndI_ = LField("vof::block::batch_curv_eI", nb);
+      cCnt_ = LField("vof::block::batch_curv_counts", 8 * nb);
+      cCntHost_ = Kokkos::create_mirror_view(cCnt_);
+    }
+    Kokkos::deep_copy(SExec(), cCnt_, 0L);
+    const double wgt[3] = {metric_.h[0] * metric_.h[0], metric_.h[1] * metric_.h[1],
+                           metric_.h[2] * metric_.h[2]};  // buildCsfForce's `1/h_a'^2` weights
+    for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch) {
+      VofCurvTable T;
+      T.nj = static_cast<int>(std::min<std::size_t>(kVofBlockBatch, nb - j0));
+      T.base = static_cast<int>(j0);
+      for (int k = 0; k < T.nj; ++k)
+        T.job[k] = jobs[j0 + k];
+      const long rg = vofSetOffsets(T, vofCurvGrown);
+      if (static_cast<long>(cListG_.extent(0)) < rg)
+        cListG_ = LField(
+            Kokkos::view_alloc(std::string("vof::block::batch_curv_listG"), Kokkos::WithoutInitializing),
+            rg);
+      vofCurvCompact(T, true, cListG_, cStartG_, cEndG_);
+      vofCurvPlanesZero(T);
+      vofCurvPlanesList(T, cListG_, cStartG_, cEndG_);
+      const long ri = vofSetOffsets(T, vofCurvInner);
+      if (static_cast<long>(cListI_.extent(0)) < ri)
+        cListI_ = LField(
+            Kokkos::view_alloc(std::string("vof::block::batch_curv_listI"), Kokkos::WithoutInitializing),
+            ri);
+      vofCurvCompact(T, false, cListI_, cStartI_, cEndI_);
+      vofCurvHfReset(T);
+      vofCurvListPass(T, 0, cListI_, cStartI_, cEndI_, cCnt_);  // tiers 1-2
+      vofCurvListPass(T, 1, cListI_, cStartI_, cEndI_, cCnt_);  // tier 3
+      if (anyClip)
+        vofCurvListPass(T, 2, cListI_, cStartI_, cEndI_, cCnt_);  // the admissibility clip
+      vofCurvListPass(T, 3, cListI_, cStartI_, cEndI_, cCnt_);    // the census
+      vofCsfForceBatch(T, sigma, wgt[0], wgt[1], wgt[2]);
+    }
+    Kokkos::deep_copy(cCntHost_, cCnt_);  // the one read of the curvature stage
+    for (std::size_t k = 0; k < nb; ++k) {
+      const long* ct = &cCntHost_(8 * k);
+      curvStats_.interfacial += ct[0];
+      curvStats_.hf += ct[1];
+      curvStats_.hfMixed += ct[2];
+      curvStats_.hfFit += ct[3];
+      curvStats_.pv += ct[4];
+      curvStats_.pvReduced += ct[5];
+      curvStats_.noEstimate += ct[6];
+      curvStats_.clipped += ct[7];
+    }
+  }
+
   /// The batched path applies to the plain `advect()` configuration: every master block an uncut
   /// all-fluid advector (no cut-cell geometry), the worklist on, no `debugRecomputeDilation`, no
   /// per-kernel timing, no all-reduce hook (a block is its own domain). Anything else runs the
@@ -2131,6 +2252,9 @@ class VofBlockSet {
   LField bList_, bStart_, bEnd_;  ///< the concatenated worklist and each job's range in it
   LField dRange_[6];              ///< the debris lists' per-job ranges: sD, eD, sR, eR, sA, eA
   Kokkos::View<int*, SMem> dCap_; ///< per job: some attached cell was capped at 1
+  LField cListG_, cListI_, cStartG_, cEndG_, cStartI_, cEndI_;  ///< the batched cascade's lists
+  LField cCnt_;                   ///< per job: the 7 census counters + the clip count
+  LField::host_mirror_type cCntHost_;
   SField pk_;                     ///< the per-job packet of read #2 (`kPk` doubles per block)
   SField::host_mirror_type pkHost_;
 };

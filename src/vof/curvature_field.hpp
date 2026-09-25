@@ -336,6 +336,10 @@ class VofCurvature {
   int ghost() const { return g_; }
   SField kappa() const { return kappa_; }
   SField branch() const { return branch_; }
+  /// The PLIC planes the cascade reconstructed (`planeM(d)`, `planeAlpha()`): for the block
+  /// container's batched cascade (`vof/block_batch.hpp`), which drives the passes itself.
+  SField planeM(int d) const { return d == 0 ? mx_ : (d == 1 ? my_ : mz_); }
+  SField planeAlpha() const { return alpha_; }
 
   // ---- tunables (all measured knobs, defaults are the literature values) ---------------------
   /// The anisotropic cell metric (Phase 3). Default `{1,1,1}` == the pre-Phase-3 arithmetic.

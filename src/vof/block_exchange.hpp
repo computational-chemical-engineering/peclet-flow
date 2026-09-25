@@ -293,12 +293,20 @@ class VofBlockExchange : public VofBlockExchangeBase {
   /// block -> patch, combined with `op` (0 = max, 1 = sum). The patch's INNER region is zeroed
   /// first: both combines start from an empty field (UNPACK_MAX's empty union is pure gas;
   /// UNPACK_SUM's is no force), so a cell no marker covers reads exactly 0.
+  ///
+  /// `gatherLocal` (UNPACK_SUM only; the CSF force, `doc/vof_step_performance_design.md` §5.9): the
+  /// pieces of the blocks this rank masters are not combined block by block but GATHERED in one
+  /// launch -- per patch cell, the blocks in block order, each adding its value if its box holds the
+  /// cell. That is the per-block combine's addition sequence (0, then the local masters in block
+  /// order, then the received pieces), so the sum is the same double.
   void scatterImpl(std::vector<VofBlock>& blocks, int nc, SField* loc,
-                   SField (*blockView)(VofBlock&, int), int blockBase, int op) {
+                   SField (*blockView)(VofBlock&, int), int blockBase, int op,
+                   bool gatherLocal = false) {
     sBytes_ = 0;
     sMsgs_ = 0;
     bufSeq_ = 0;
-    zeroPatchInner(nc, loc);
+    if (!gatherLocal)
+      zeroPatchInner(nc, loc);
     struct Recv {
       std::size_t bi;
       int from;
@@ -323,9 +331,10 @@ class VofBlockExchange : public VofBlockExchangeBase {
       if (master) {
         for (const auto& kv : counts) {
           if (kv.first == rank_) {
-            for (const auto& p : pieces_)
-              if (p.rank == rank_)
-                combineBlockIntoPatch(p, nc, blockView, b, blockBase, loc, op);
+            if (!gatherLocal)
+              for (const auto& p : pieces_)
+                if (p.rank == rank_)
+                  combineBlockIntoPatch(p, nc, blockView, b, blockBase, loc, op);
             continue;
           }
           SField d = buffer(nc * kv.second);
@@ -350,6 +359,8 @@ class VofBlockExchange : public VofBlockExchangeBase {
         recvs.push_back(std::move(r));
       }
     }
+    if (gatherLocal)
+      gatherLocalSum(blocks, nc, loc, blockView, blockBase);
     Kokkos::fence();
 #ifdef PECLET_FLOW_MPI
     if (size_ > 1) {
@@ -381,6 +392,104 @@ class VofBlockExchange : public VofBlockExchangeBase {
         if (p.rank == rank_)
           combineBufIntoPatch(p, nc, r.dbuf, off, loc, op);
     }
+  }
+
+  /// The local half of a `gatherLocal` UNPACK_SUM: every patch INNER cell written (so no zeroing
+  /// pass is needed) with 0 + the values of the blocks this rank masters whose box holds it, in
+  /// block order. A block box is at most one period long on a periodic axis, so a patch cell maps
+  /// to at most one block-local cell -- the one `vofBuildPieces` maps it to. More than
+  /// `kVofBlockBatch` blocks: later chunks continue each cell's sum from the value the previous
+  /// chunk left, which is the same addition sequence.
+  void gatherLocalSum(std::vector<VofBlock>& blocks, int nc, SField* loc,
+                      SField (*blockView)(VofBlock&, int), int blockBase) {
+    struct Job {
+      const double* f[3];
+      int lo[3], n[3];
+      I3 be;
+    };
+    std::vector<Job> jobs;
+    for (auto& b : blocks) {
+      if (b.master != rank_)
+        continue;
+      Job j;
+      for (int c = 0; c < 3; ++c)
+        j.f[c] = blockView(b, c < nc ? c : 0).data();
+      for (int d = 0; d < 3; ++d) {
+        j.lo[d] = b.box.lo[d];
+        j.n[d] = b.box.n(d);
+      }
+      j.be = b.advector().extent();
+      jobs.push_back(j);
+    }
+    GatherTable T;
+    T.nc = nc;
+    T.gh = blockBase;
+    for (int d = 0; d < 3; ++d)
+      T.per[d] = per_[d];
+    T.L[0] = gs_.x;
+    T.L[1] = gs_.y;
+    T.L[2] = gs_.z;
+    std::size_t j0 = 0;
+    do {
+      T.nj = static_cast<int>(std::min<std::size_t>(kVofBlockBatch, jobs.size() - j0));
+      T.first = (j0 == 0);
+      for (int k = 0; k < T.nj; ++k) {
+        for (int c = 0; c < 3; ++c)
+          T.f[k][c] = jobs[j0 + k].f[c];
+        for (int d = 0; d < 3; ++d) {
+          T.lo[k][d] = jobs[j0 + k].lo[d];
+          T.n[k][d] = jobs[j0 + k].n[d];
+        }
+        T.be[k] = jobs[j0 + k].be;
+      }
+      gatherLocalLaunch(T, loc);
+      j0 += kVofBlockBatch;
+    } while (j0 < jobs.size());
+  }
+  struct GatherTable {
+    const double* f[kVofBlockBatch][3];
+    int lo[kVofBlockBatch][3], n[kVofBlockBatch][3];
+    I3 be[kVofBlockBatch];
+    int nj, nc, gh, L[3];
+    bool per[3], first;
+  };
+  void gatherLocalLaunch(const GatherTable& T, SField* loc) {
+    const I3 e = patch_.e, n = patch_.n, o = patch_.o;
+    const int g = patch_.g;
+    SField d0 = loc[0], d1 = T.nc > 1 ? loc[1] : loc[0], d2 = T.nc > 2 ? loc[2] : loc[0];
+    Kokkos::parallel_for(
+        "vof::block::gather_local_sum", MDRange3<SExec>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const int gp[3] = {x + o.x, y + o.y, z + o.z};
+          const long i = L3(x + g, y + g, z + g, e);
+          double acc[3] = {0.0, 0.0, 0.0};
+          if (!T.first) {
+            acc[0] = d0(i);
+            acc[1] = T.nc > 1 ? d1(i) : 0.0;
+            acc[2] = T.nc > 2 ? d2(i) : 0.0;
+          }
+          for (int k = 0; k < T.nj; ++k) {
+            int l[3];
+            bool in = true;
+            for (int d = 0; d < 3 && in; ++d) {
+              int v = gp[d] - T.lo[k][d];
+              if (T.per[d])
+                v = ((v % T.L[d]) + T.L[d]) % T.L[d];
+              in = v >= 0 && v < T.n[k][d];
+              l[d] = v;
+            }
+            if (!in)
+              continue;
+            const long q = L3(l[0] + T.gh, l[1] + T.gh, l[2] + T.gh, T.be[k]);
+            for (int c = 0; c < T.nc; ++c)
+              acc[c] += T.f[k][c][q];
+          }
+          d0(i) = acc[0];
+          if (T.nc > 1)
+            d1(i) = acc[1];
+          if (T.nc > 2)
+            d2(i) = acc[2];
+        });
   }
 
   // ---- the four device kernels (public for nvcc's extended-lambda rule) -----------------------
@@ -575,7 +684,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
 
   void scatterForceSum(std::vector<VofBlock>& blocks, SField fx, SField fy, SField fz) override {
     SField loc[3] = {fx, fy, fz};
-    scatterImpl(blocks, 3, loc, &forceViewOf, ghostOf(blocks), /*op=*/1);
+    scatterImpl(blocks, 3, loc, &forceViewOf, ghostOf(blocks), /*op=*/1, /*gatherLocal=*/true);
   }
 
   /// `S = sum_k C_k` (vof_overlap_design §5.6): the colour scatter with UNPACK_SUM. With at most

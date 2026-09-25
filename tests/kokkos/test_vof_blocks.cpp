@@ -819,7 +819,9 @@ void gateInert() {
 // for all master blocks in one launch -- must be the per-block step bit for bit. Same 8-bubble
 // LeVeque scene as gateInert, run with `batched` on and off, on a fully periodic box and on one
 // with non-periodic y (the clamp pass of the ghost policy), the wisp guard on (so the residue pass
-// runs). Compared: the union, every block's own colour, box and every VofBlockStats field.
+// runs) and the block CSF on (curvature cascade, CSF face force and its scatter, the debris
+// removal). Compared: the union, every block's own colour, box and every VofBlockStats field, the
+// three scattered CSF face-force fields and the curvature census.
 void gateBatched() {
   std::printf("\n=== C1 batched container stages == per-block stages, BITWISE\n");
   const int gn = 48;
@@ -831,6 +833,8 @@ void gateBatched() {
     std::vector<double> ref;
     std::vector<std::vector<double>> refBlk;
     std::vector<peclet::flow::vof::VofBlockStats> refSt;
+    std::vector<double> refF[3];
+    peclet::flow::vof::VofCurvature::Stats refCs{};
     for (int q = 0; q < 2; ++q) {
       Patch patch;
       patch.init(gn, h);
@@ -838,7 +842,16 @@ void gateBatched() {
       set.init(I3{gn, gn, gn}, per, 0, 1, h);
       serialExchange(set, patch);
       set.setWispEps(1e-8);
+      set.curvProto.interfaceEps = 1e-8;
+      set.curvProto.pureEps = 1e-8;
+      set.debrisRemove = true;
+      set.enableCsf(0.5);
       set.batched = (q == 0);
+      SField force[3];
+      const long plen = static_cast<long>(patch.adv.extent().x) * patch.adv.extent().y *
+                        patch.adv.extent().z;
+      for (int c = 0; c < 3; ++c)
+        force[c] = SField("gate_c1_force", plen);
       // with y walls the markers sit 5.8 cells off the walls, so their boxes are clamped at the
       // domain faces and the clamp pass of the ghost policy has cells to fill
       const double y0 = geo == 0 ? 0.25 : 0.12, dy = geo == 0 ? 0.5 : 0.76;
@@ -861,9 +874,14 @@ void gateBatched() {
         vofscene::periodicFill(patch.adv.faceW(), patch.adv.extent(), G, true, true, true);
         Kokkos::fence();
         set.advect(dt, patch.adv.colour());
+        set.computeCsf(force[0], force[1], force[2]);
         for (const auto& st : set.statsAll())
           recentred += st.recentred ? 1 : 0;
       }
+      std::vector<double> fgot[3];
+      for (int c = 0; c < 3; ++c)
+        fgot[c] = fieldOnGrid(force[c], patch.adv.extent(), gn, G);
+      const auto cs = set.csfCurvatureStats();
       const std::vector<double> got = fieldOnGrid(patch.adv.colour(), patch.adv.extent(), gn, G);
       std::vector<std::vector<double>> blk;
       for (std::size_t b = 0; b < set.count(); ++b)
@@ -873,6 +891,9 @@ void gateBatched() {
         ref = got;
         refBlk = blk;
         refSt = st;
+        for (int c = 0; c < 3; ++c)
+          refF[c] = fgot[c];
+        refCs = cs;
         std::printf("  %s: %zu blocks (%ld clamped at a wall), %ld re-centrings over %ld steps\n",
                     geo == 0 ? "periodic" : "y walls", set.count(), clamped, recentred, steps);
         CHECK(recentred > 0);  // the gate must exercise the re-centring after a batched step
@@ -900,9 +921,28 @@ void gateBatched() {
           same = same && x.moment[k] == y.moment[k];
         ds += same ? 0 : 1;
       }
+      long df = 0;
+      double fmax = 0.0;
+      for (int c = 0; c < 3; ++c) {
+        df += (std::memcmp(fgot[c].data(), refF[c].data(), fgot[c].size() * sizeof(double)) == 0)
+                  ? 0
+                  : 1;
+        for (double v : fgot[c])
+          fmax = std::fmax(fmax, std::fabs(v));
+      }
+      const bool sameCs = cs.interfacial == refCs.interfacial && cs.hf == refCs.hf &&
+                          cs.hfMixed == refCs.hfMixed && cs.hfFit == refCs.hfFit &&
+                          cs.pv == refCs.pv && cs.pvReduced == refCs.pvReduced &&
+                          cs.noEstimate == refCs.noEstimate && cs.clipped == refCs.clipped;
       std::printf("  %s, per-block vs batched: union %ld cells differ, block colours %ld, "
-                  "stats %ld\n",
-                  geo == 0 ? "periodic" : "y walls", d, db, ds);
+                  "stats %ld, CSF force fields %ld (max|f| %.3e), curvature census %s "
+                  "(interfacial %ld, pv %ld)\n",
+                  geo == 0 ? "periodic" : "y walls", d, db, ds, df, fmax,
+                  sameCs ? "same" : "DIFFERS", cs.interfacial, cs.pv);
+      CHECK(df == 0);
+      CHECK(sameCs);
+      CHECK(fmax > 0.0);  // the gate must carry a force
+      CHECK(cs.pv > 0);   // ... and exercise tier 3
       CHECK(d == 0);
       CHECK(db == 0);
       CHECK(ds == 0);
