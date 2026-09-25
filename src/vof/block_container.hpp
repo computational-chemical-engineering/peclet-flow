@@ -71,6 +71,7 @@
 #include "mac_stencils.hpp"  // peclet::flow::SExec, SField, I3, L3
 #include "peclet/core/decomp/block_decomposer.hpp"
 #include "vof/advect_wy.hpp"
+#include "vof/block_batch.hpp"
 #include "vof/colour_field.hpp"
 #include "vof/curvature_field.hpp"
 #include "vof/surface_tension.hpp"
@@ -463,7 +464,19 @@ class VofBlockSet {
   /// re-allocates every `pad + 1` steps instead of every step. Pure bookkeeping: the transported
   /// colour is copied by GLOBAL index and is therefore bit-exact whatever the padding.
   int recentrePad = 2;
+  /// The Weymouth-Yue cap of every block advector. On the BATCHED path (`batched`, C1) the Courant
+  /// numbers of all master blocks are measured in one launch and checked before ANY block advects,
+  /// so a violation throws from an untouched state; the per-block path had already advected the
+  /// blocks earlier in the list when a later one threw (`doc/vof_step_performance_design.md` §9
+  /// R4: a successful step is identical either way, and a caller that catches the throw and
+  /// retries with a smaller dt now retries from the state it started from).
   double cflLimit = 0.25;
+  /// C1 (`doc/vof_step_performance_design.md` §4.6, §5.9): run each stage of the container step for
+  /// ALL master blocks in one launch (`vof/block_batch.hpp`) instead of block by block. Bitwise on
+  /// the state; taken only where `batchEligible()` holds (uncut all-fluid blocks, the worklist on,
+  /// no per-kernel timing, no debug switch) and the per-block path is kept beside it. `false` is
+  /// the per-block path verbatim -- the A/B switch of the ctests, not a user knob.
+  bool batched = true;
   /// Rung W1 item (a): how masters are chosen, and how often the choice is revisited.
   /// `reassignEvery = 0` never re-assigns (W0's behaviour). A re-assignment MIGRATES the block's
   /// colour to the new master — nothing else in a block is state — so it is exact by construction
@@ -626,10 +639,14 @@ class VofBlockSet {
       throw std::runtime_error("peclet::flow::vof::VofBlockSet: no exchange installed");
     exch_->gatherFaceVel(blocks_, ghost_);
     std::vector<VofBlock*> deb;
+    const bool batch = batchEligible();
+    if (batch)
+      advectBatched(dt);
     for (auto& b : blocks_) {
       if (!b.mine_)
         continue;
-      b.adv_.advect(dt, step_);
+      if (!batch)
+        b.adv_.advect(dt, step_);
       b.st_.recentred = false;
       // Before the re-centring, so the bubble box a re-centre measures is the one the census saw.
       // §13: also whenever the advectors run a wisp guard -- the sub-wispEps residue must be
@@ -1780,6 +1797,160 @@ class VofBlockSet {
     b.st_.moment[5] = syz * iv;
   }
 
+  // ---- C1: the batched container stages (`vof/block_batch.hpp`) -------------------------------
+
+  /// The batched path applies to the plain `advect()` configuration: every master block an uncut
+  /// all-fluid advector (no cut-cell geometry), the worklist on, no `debugRecomputeDilation`, no
+  /// per-kernel timing, no all-reduce hook (a block is its own domain). Anything else runs the
+  /// per-block path, unchanged.
+  bool batchEligible() const {
+    if (!batched)
+      return false;
+    for (const auto& b : blocks_) {
+      if (!b.mine_)
+        continue;
+      const WyAdvector& a = b.adv_;
+      if (!b.allocated_ || a.hasGeometry() || a.debugRecomputeDilation || !a.useWorklist ||
+          a.timingOn || a.globalMax || !a.exchange || a.ghost() != ghost_)
+        return false;
+    }
+    return true;
+  }
+
+  /// The raw-pointer job of one master block for the batched launches.
+  VofBlockJob makeJob(VofBlock& b, double dt) const {
+    WyAdvector& a = b.adv_;
+    VofBlockJob J;
+    J.c = a.colour().data();
+    J.mx = a.planeM(0).data();
+    J.my = a.planeM(1).data();
+    J.mz = a.planeM(2).data();
+    J.al = a.planeAlpha().data();
+    J.fl = a.faceFlux().data();
+    for (int d = 0; d < 3; ++d)
+      J.u[d] = a.faceVel(d).data();
+    J.cc = a.dilationFlag().data();
+    J.outside = a.hasOutsideMask() ? a.outsideMask().data() : nullptr;
+    J.e = a.extent();
+    J.n = a.inner();
+    J.o = b.box.origin();
+    J.g = a.ghost();
+    J.dth = dt / a.h();  // WyAdvector::advect's `dth`
+    J.weps = a.wispEps;
+    J.interfaceCfl = a.interfaceLocalCfl;
+    const int L[3] = {gs_.x, gs_.y, gs_.z};
+    for (int d = 0; d < 3; ++d)
+      J.span[d] = per_[d] && b.box.n(d) == L[d];
+    for (int f = 0; f < 6; ++f)
+      J.bcOwn[f] = a.bcFaceOwned(f) ? 1u : 0u;
+    return J;
+  }
+
+  static VofBlockTable batchTable(const std::vector<VofBlockJob>& jobs, std::size_t j0) {
+    VofBlockTable T;
+    T.nj = static_cast<int>(std::min<std::size_t>(kVofBlockBatch, jobs.size() - j0));
+    T.base = static_cast<int>(j0);
+    for (int k = 0; k < T.nj; ++k)
+      T.job[k] = jobs[j0 + k];
+    return T;
+  }
+
+  /// `fillBlockGhosts` of every job of `T`, pass by pass in the per-block pass order: zero, the
+  /// in-block periodic wrap (axis by axis, only the jobs spanning that axis), the clamp.
+  void batchGhostFill(VofBlockTable T) {
+    vofSetOffsets(T, vofJobLen);
+    vofBatchGhostZero(T);
+    for (int a = 0; a < 3; ++a) {
+      VofBlockTable P;
+      P.nj = 0;
+      P.base = T.base;
+      for (int k = 0; k < T.nj; ++k)
+        if (T.job[k].span[a])
+          P.job[P.nj++] = T.job[k];
+      if (P.nj == 0)
+        continue;
+      const int b = (a + 1) % 3, c = (a + 2) % 3;
+      vofSetOffsets(P, [b, c](const VofBlockJob& J) {
+        const int dims[3] = {J.e.x, J.e.y, J.e.z};
+        return static_cast<long>(dims[b]) * dims[c];
+      });
+      vofBatchPeriodic(P, a);
+    }
+    if (!per_[0] || !per_[1] || !per_[2])
+      vofBatchClamp(T, gs_, per_[0], per_[1], per_[2]);
+  }
+
+  /// Stages 1-3 of §5.9 for every master block: the Courant numbers in one launch and ONE host
+  /// read (the throw needs it), the frozen dilation flag, then the three sweeps -- worklist scan,
+  /// PLIC over the device count, fluxes, update, ghost fill -- each one launch per chunk of
+  /// `kVofBlockBatch` blocks. Blocks share no cells, so running stage k of every block before stage
+  /// k + 1 reorders nothing any block reads: each block's colour is what its own `advect()` gives.
+  void advectBatched(double dt) {
+    std::vector<VofBlock*> mb;
+    for (auto& b : blocks_)
+      if (b.mine_)
+        mb.push_back(&b);
+    if (mb.empty())
+      return;
+    const std::size_t nb = mb.size();
+    std::vector<VofBlockJob> jobs(nb);
+    bool anyMask = false;
+    for (std::size_t k = 0; k < nb; ++k) {
+      jobs[k] = makeJob(*mb[k], dt);
+      anyMask = anyMask || (jobs[k].outside != nullptr);
+    }
+    if (static_cast<std::size_t>(bCfl_.extent(0)) < nb) {
+      bCfl_ = SField("vof::block::batch_cfl", nb);
+      bCflHost_ = Kokkos::create_mirror_view(bCfl_);
+      bStart_ = LField("vof::block::batch_start", nb);
+      bEnd_ = LField("vof::block::batch_end", nb);
+      bBcv_ = SField("vof::block::batch_bcvol", 6 * nb);
+      bBcvHost_ = Kokkos::create_mirror_view(bBcv_);
+    }
+    // (1) Courant numbers: one launch, one read, the throw before any block moves (R4)
+    for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch)
+      vofBatchCfl(batchTable(jobs, j0), bCfl_);
+    Kokkos::deep_copy(bCflHost_, bCfl_);
+    for (std::size_t k = 0; k < nb; ++k)
+      mb[k]->adv_.enforceCfl(bCflHost_(k), dt);
+    if (anyMask)
+      Kokkos::deep_copy(SExec(), bBcv_, 0.0);
+    const int* perm = kWySweepPerm[static_cast<int>(step_ % 6)];
+    for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch) {
+      VofBlockTable T = batchTable(jobs, j0);
+      // (2) THE dilation flag, frozen once from C^n
+      vofSetOffsets(T, vofJobLen);
+      vofBatchFreeze(T);
+      // (3) three directional sweeps
+      for (int s = 0; s < 3; ++s) {
+        const int d = perm[s];
+        const long region = vofSetOffsets(T, vofJobGrown1);
+        if (static_cast<long>(bList_.extent(0)) < region)
+          bList_ = LField(Kokkos::view_alloc(std::string("vof::block::batch_list"),
+                                             Kokkos::WithoutInitializing),
+                          region);
+        vofBatchWorklist(T, bList_, bStart_, bEnd_);
+        vofBatchPlic(T, bList_, bStart_, bEnd_);
+        vofSetOffsets(T, [d](const VofBlockJob& J) { return vofJobFaces(J, d); });
+        vofBatchFlux(T, d);
+        if (anyMask)
+          vofBatchBcLedger(T, d, bBcv_);
+        vofSetOffsets(T, vofJobInner);
+        vofBatchUpdate(T, d);
+        batchGhostFill(T);
+      }
+    }
+    if (anyMask) {  // the WO-R ledger (no block installs a mask today: inert)
+      Kokkos::deep_copy(bBcvHost_, bBcv_);
+      for (std::size_t k = 0; k < nb; ++k)
+        for (int f = 0; f < 6; ++f)
+          if (jobs[k].outside != nullptr && jobs[k].bcOwn[f])
+            mb[k]->adv_.addBcFaceVolume(f, bBcvHost_(6 * k + f));
+    }
+    for (std::size_t k = 0; k < nb; ++k)
+      mb[k]->adv_.noteBatchedStep();
+  }
+
  private:
   VofMetric metric_;  ///< Phase 3: the anisotropic cell metric (default = unit)
   double h_ = 1.0;
@@ -1800,6 +1971,10 @@ class VofBlockSet {
   SField debrisEx_;               ///< per-attached-cell cap excess (only read when a cap fired)
   SField debrisOut_;  ///< the batched sums, 6 per acting block (debrisPassBatch)
   SField::host_mirror_type debrisOutHost_;
+  // C1 batched stages: per-job device scalars (indexed by the job's place among the master blocks)
+  SField bCfl_, bBcv_;
+  SField::host_mirror_type bCflHost_, bBcvHost_;
+  LField bList_, bStart_, bEnd_;  ///< the concatenated worklist and each job's range in it
 };
 
 }  // namespace peclet::flow::vof

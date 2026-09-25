@@ -132,9 +132,12 @@ inline constexpr int kWySweepPerm[6][3] = {{0, 1, 2}, {1, 2, 0}, {2, 0, 1},
 
 /// PLIC reconstruction of one cell: MYC normal from the 3^3 colour stencil + the analytic plane
 /// offset. Container-free apart from the flat view read, so it stays a thin wrapper over
-/// `plic.hpp`.
-KOKKOS_INLINE_FUNCTION void wyReconstructCell(const SField& c, long i, long sy, long sz, SField mx,
-                                              SField my, SField mz, SField alpha) {
+/// `plic.hpp`. A template on the field type (anything with `double& operator()(long)`: a `View`,
+/// or the raw-pointer `VofRawField` a batched multi-block launch walks) -- the body is one
+/// expression sequence whatever the accessor.
+template <class SF>
+KOKKOS_INLINE_FUNCTION void wyReconstructCell(const SF& c, long i, long sy, long sz, SF mx, SF my,
+                                              SF mz, SF alpha) {
   double st[27];
   for (int kk = -1; kk <= 1; ++kk)
     for (int jj = -1; jj <= 1; ++jj)
@@ -150,9 +153,10 @@ KOKKOS_INLINE_FUNCTION void wyReconstructCell(const SField& c, long i, long sy, 
 
 /// Signed Eulerian donor-cell flux through the `dir`-face between cell `p` and cell `p + sd`,
 /// as a fraction of a cell volume, positive along +dir. `a` is the face Courant number.
-KOKKOS_INLINE_FUNCTION double wyFaceFlux(double a, long p, long sd, int dir, const SField& c,
-                                         const SField& mx, const SField& my, const SField& mz,
-                                         const SField& alpha, double eps = 0.0) {
+template <class SF>
+KOKKOS_INLINE_FUNCTION double wyFaceFlux(double a, long p, long sd, int dir, const SF& c,
+                                         const SF& mx, const SF& my, const SF& mz, const SF& alpha,
+                                         double eps = 0.0) {
   if (a > 0.0) {  // donor is p; the outflow slab is the |a|-thick layer at its + face
     const double cd = c(p);
     return wyIsMixed(cd, eps) ? plicSlabVolume(mx(p), my(p), mz(p), alpha(p), dir, 1.0 - a, 1.0)
@@ -180,10 +184,10 @@ KOKKOS_INLINE_FUNCTION double wyFaceFlux(double a, long p, long sd, int dir, con
 ///
 /// With `outside(donor) == 0` this returns `wyFaceFlux`'s value BIT FOR BIT — the same
 /// expressions in the same order — which is what makes the mask branch inert (gate G5).
-KOKKOS_INLINE_FUNCTION double wyFaceFluxBc(double a, long p, long sd, int dir, const SField& c,
-                                           const SField& mx, const SField& my, const SField& mz,
-                                           const SField& alpha, const UCField& outside,
-                                           double eps = 0.0) {
+template <class SF, class MF>
+KOKKOS_INLINE_FUNCTION double wyFaceFluxBc(double a, long p, long sd, int dir, const SF& c,
+                                           const SF& mx, const SF& my, const SF& mz,
+                                           const SF& alpha, const MF& outside, double eps = 0.0) {
   if (a > 0.0) {  // donor is p
     const double cd = c(p);
     return (wyIsMixed(cd, eps) && !outside(p))
@@ -673,18 +677,7 @@ class WyAdvector {
     const double cflLocal =
         interfaceLocalCfl ? (hasGeom_ ? maxCourantInterfaceCut(dth) : maxCourantInterface(dth))
                           : maxCourant(dth);
-    const double cfl = globalMax ? globalMax(cflLocal) : cflLocal;
-    lastCfl_ = cfl;
-    // Weymouth's bound is INCLUSIVE (thesis eq. A.33: |a| <= 1/(2(N-1))), so a step exactly at
-    // `cflLimit` is admissible and only a strictly larger one aborts. NaN propagates to an abort.
-    if (!(cfl <= cflLimit)) {
-      char msg[256];
-      std::snprintf(msg, sizeof(msg),
-                    "peclet::flow::vof::WyAdvector: CFL = max|uf| dt/h = %.6g exceeds the "
-                    "Weymouth-Yue boundedness cap %.6g (dt = %.6g, h = %.6g) - reduce dt",
-                    cfl, cflLimit, dt, h_);
-      throw std::runtime_error(msg);
-    }
+    enforceCfl(globalMax ? globalMax(cflLocal) : cflLocal, dt);
 
     // (1) THE dilation flag: frozen ONCE from C^n, used unchanged by all three sweeps.
     freezeDilationFlag();
@@ -742,15 +735,24 @@ class WyAdvector {
   /// Weymouth-Yue boundedness cap enforced exactly as `advect()` enforces it — `lastCfl_` is set
   /// the same way, so a WO-K step reports the same number a WO-J step would.
   ///
-  /// This duplicates the guard at the top of `advect()` rather than refactoring it: `advect()` is a
-  /// validated body (V1 gates A-G) and hard rule 1 of the work orders forbids editing one. Keep the
-  /// two in step if the cap ever changes.
+  /// The cap itself is `enforceCfl`, shared with `advect()` and the block container's batched step
+  /// (host code only; the kernels are untouched).
   double checkCourant(double dt) {
     const double dth = dt / h_;
     const double cflLocal =
         interfaceLocalCfl ? (hasGeom_ ? maxCourantInterfaceCut(dth) : maxCourantInterface(dth))
                           : maxCourant(dth);
     const double cfl = globalMax ? globalMax(cflLocal) : cflLocal;
+    enforceCfl(cfl, dt);
+    return cfl;
+  }
+
+  /// Record `cfl` as this step's Courant number and enforce the Weymouth-Yue cap -- the one guard
+  /// `advect()`, `checkCourant()` and the block container's batched step (which measures the
+  /// Courant numbers of all its blocks in one launch, `vof/block_batch.hpp`) share.
+  /// Weymouth's bound is INCLUSIVE (thesis eq. A.33: |a| <= 1/(2(N-1))), so a step exactly at
+  /// `cflLimit` is admissible and only a strictly larger one aborts. NaN propagates to an abort.
+  void enforceCfl(double cfl, double dt) {
     lastCfl_ = cfl;
     if (!(cfl <= cflLimit)) {
       char msg[256];
@@ -760,8 +762,17 @@ class WyAdvector {
                     cfl, cflLimit, dt, h_);
       throw std::runtime_error(msg);
     }
-    return cfl;
   }
+
+  /// Bookkeeping of a step the block container ran on this advector's views in its batched launches
+  /// (`VofBlockSet::advectBatched`): the step counter `advect()` keeps. `lastMixedCount()` is NOT
+  /// updated there -- the worklist count stays on the device by design (C1) -- so it keeps the
+  /// value of the last per-block `advect()`.
+  void noteBatchedStep() { ++steps_; }
+  /// The WO-R boundary ledger, for the batched step: whether face `f` is a global domain face this
+  /// block owns, and the per-step addition `accumulateBcFaceVolume` would have made.
+  bool bcFaceOwned(int f) const { return bcOwn_[f] != 0; }
+  void addBcFaceVolume(int f, double v) { bcVol_[f] += v; }
 
   /// Local census over the inner region.
   Diagnostics diagnostics() const {

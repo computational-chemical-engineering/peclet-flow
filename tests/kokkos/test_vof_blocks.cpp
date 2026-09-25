@@ -815,6 +815,101 @@ void gateInert() {
               packMs[0], packMs[0] / packMs[1]);
 }
 
+// C1 (doc/vof_step_performance_design.md §4.6, §5.9): the BATCHED container step -- every stage
+// for all master blocks in one launch -- must be the per-block step bit for bit. Same 8-bubble
+// LeVeque scene as gateInert, run with `batched` on and off, on a fully periodic box and on one
+// with non-periodic y (the clamp pass of the ghost policy), the wisp guard on (so the residue pass
+// runs). Compared: the union, every block's own colour, box and every VofBlockStats field.
+void gateBatched() {
+  std::printf("\n=== C1 batched container stages == per-block stages, BITWISE\n");
+  const int gn = 48;
+  const double h = 1.0 / gn, T = 0.75;
+  const long steps = 120;
+  const double dt = T / 360;  // CFL 0.2 for the LeVeque field at 48^3 (gateInert's schedule)
+  for (int geo = 0; geo < 2; ++geo) {
+    const std::array<bool, 3> per = {true, geo == 0, true};
+    std::vector<double> ref;
+    std::vector<std::vector<double>> refBlk;
+    std::vector<peclet::flow::vof::VofBlockStats> refSt;
+    for (int q = 0; q < 2; ++q) {
+      Patch patch;
+      patch.init(gn, h);
+      VofBlockSet set;
+      set.init(I3{gn, gn, gn}, per, 0, 1, h);
+      serialExchange(set, patch);
+      set.setWispEps(1e-8);
+      set.batched = (q == 0);
+      // with y walls the markers sit 5.8 cells off the walls, so their boxes are clamped at the
+      // domain faces and the clamp pass of the ghost policy has cells to fill
+      const double y0 = geo == 0 ? 0.25 : 0.12, dy = geo == 0 ? 0.5 : 0.76;
+      for (int i = 0; i < 2; ++i)
+        for (int j = 0; j < 2; ++j)
+          for (int m = 0; m < 2; ++m)
+            set.seedSphere(0.25 + 0.5 * i, y0 + dy * j, 0.25 + 0.5 * m, 0.09);
+      set.scatter(patch.adv.colour());
+      long clamped = 0;
+      for (const auto& b : set.blocks())
+        clamped += (b.box.lo[1] == 0 || b.box.hi[1] == gn) ? 1 : 0;
+      if (geo == 1)
+        CHECK(clamped > 0);
+      long recentred = 0;
+      for (long s = 0; s < steps; ++s) {
+        const double phase = std::cos(M_PI * (s + 0.5) * dt / T);
+        vofscene::fillLeVeque(patch.adv, patch.blk, h, phase);
+        vofscene::periodicFill(patch.adv.faceU(), patch.adv.extent(), G, true, true, true);
+        vofscene::periodicFill(patch.adv.faceV(), patch.adv.extent(), G, true, true, true);
+        vofscene::periodicFill(patch.adv.faceW(), patch.adv.extent(), G, true, true, true);
+        Kokkos::fence();
+        set.advect(dt, patch.adv.colour());
+        for (const auto& st : set.statsAll())
+          recentred += st.recentred ? 1 : 0;
+      }
+      const std::vector<double> got = fieldOnGrid(patch.adv.colour(), patch.adv.extent(), gn, G);
+      std::vector<std::vector<double>> blk;
+      for (std::size_t b = 0; b < set.count(); ++b)
+        blk.push_back(set.blockColourHost(b));
+      const auto st = set.statsAll();
+      if (q == 0) {
+        ref = got;
+        refBlk = blk;
+        refSt = st;
+        std::printf("  %s: %zu blocks (%ld clamped at a wall), %ld re-centrings over %ld steps\n",
+                    geo == 0 ? "periodic" : "y walls", set.count(), clamped, recentred, steps);
+        CHECK(recentred > 0);  // the gate must exercise the re-centring after a batched step
+        continue;
+      }
+      double worst = 0.0;
+      const long d = gridDiff(got, ref, &worst);
+      long db = 0, ds = 0;
+      for (std::size_t b = 0; b < blk.size(); ++b) {
+        db += (blk[b].size() == refBlk[b].size() &&
+               std::memcmp(blk[b].data(), refBlk[b].data(), blk[b].size() * sizeof(double)) == 0)
+                  ? 0
+                  : 1;
+        const auto &x = st[b], &y = refSt[b];
+        bool same = x.volume == y.volume && x.area == y.area && x.discarded == y.discarded &&
+                    x.debrisCells == y.debrisCells && x.debrisVolume == y.debrisVolume &&
+                    x.debrisReturned == y.debrisReturned && x.debrisLost == y.debrisLost &&
+                    x.debrisUnresolved == y.debrisUnresolved && x.fullAxis == y.fullAxis &&
+                    x.residueReturned == y.residueReturned && x.recentred == y.recentred &&
+                    x.cells == y.cells;
+        for (int k = 0; k < 3; ++k)
+          same = same && x.lo[k] == y.lo[k] && x.hi[k] == y.hi[k] &&
+                 x.centroid[k] == y.centroid[k] && x.velocity[k] == y.velocity[k];
+        for (int k = 0; k < 6; ++k)
+          same = same && x.moment[k] == y.moment[k];
+        ds += same ? 0 : 1;
+      }
+      std::printf("  %s, per-block vs batched: union %ld cells differ, block colours %ld, "
+                  "stats %ld\n",
+                  geo == 0 ? "periodic" : "y walls", d, db, ds);
+      CHECK(d == 0);
+      CHECK(db == 0);
+      CHECK(ds == 0);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // D1: seeded debris through the Solver (doc/vof_overlap_design.md G1(i), WO-4)
 // ---------------------------------------------------------------------------------------------
@@ -1125,6 +1220,7 @@ int main(int argc, char** argv) {
     gateRecentre();
     gateAssignment();
     gateInert();
+    gateBatched();
     gateDebrisSpeck();
     gateWall();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
