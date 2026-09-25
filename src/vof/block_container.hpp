@@ -676,10 +676,26 @@ class VofBlockSet {
     if (!exch_)
       throw std::runtime_error("peclet::flow::vof::VofBlockSet: no exchange installed");
     curvStats_ = VofCurvature::Stats{};
+    // Tier 3 of every local block in ONE batched launch (VofCurvature::computeBegin): bit-identical
+    // to the per-block cascade, which ran the 5^3 fit's full latency once per block, serially.
+    bool batch = true;
+    for (auto& b : blocks_)
+      if (b.mine_ && !b.curv_.useWorklist)
+        batch = false;
+    if (batch) {
+      std::vector<VofCurvFallbackJob> jobs;
+      for (auto& b : blocks_)
+        if (b.mine_) {
+          b.curv_.computeBegin(b.adv_.colour());
+          jobs.push_back(b.curv_.fallbackJob(b.adv_.colour()));
+        }
+      VofCurvature::fallbackBatch(jobs);
+    }
     for (auto& b : blocks_) {
       if (!b.mine_)
         continue;
-      const VofCurvature::Stats st = b.curv_.compute(b.adv_.colour());
+      const VofCurvature::Stats st =
+          batch ? b.curv_.computeEnd() : b.curv_.compute(b.adv_.colour());
       curvStats_.interfacial += st.interfacial;
       curvStats_.hf += st.hf;
       curvStats_.hfMixed += st.hfMixed;

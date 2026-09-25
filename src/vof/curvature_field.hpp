@@ -29,7 +29,9 @@
 
 #include <chrono>
 #include <Kokkos_Core.hpp>
+#include <algorithm>
 #include <stdexcept>
+#include <vector>
 
 #include "mac_stencils.hpp"   // peclet::flow::SExec, SField, I3, L3
 #include "vof/advect_wy.hpp"  // wyIsMixed, wyReconstructCell
@@ -211,6 +213,35 @@ KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, SF c, SF mx, SF my, SF mz, 
   kap(i) = paraboloidKappa(a);
   br(i) = static_cast<double>(red ? kCurvPvReduced : kCurvPv);
 }
+
+/// A raw-pointer field accessor with the `View<double*>` call syntax, for kernels that walk SEVERAL
+/// blocks' fields in one launch (a device-side array of `View`s would carry reference counts).
+/// The cell bodies above are templates on the field type and use nothing but `operator()`.
+struct VofRawField {
+  double* p;
+  KOKKOS_INLINE_FUNCTION double& operator()(long i) const { return p[i]; }
+};
+
+/// One block's share of a batched tier-3 launch (`VofCurvature::fallbackBatch`): its fields, its
+/// compacted interfacial list, and every argument its own `fallbackPass` would pass to
+/// `curvFallbackCell`.
+struct VofCurvFallbackJob {
+  double *c, *mx, *my, *mz, *al, *kap, *br;
+  const long* list;
+  long n, sy, sz;
+  int gr;
+  double dW, cmin, ieps;
+  VofMetric gm;
+};
+
+/// The job table of one batched launch, passed to the kernel BY VALUE (namespace scope: nvcc's
+/// extended lambdas may not capture a function-local type).
+template <int N>
+struct VofCurvFallbackTable {
+  VofCurvFallbackJob job[N];
+  long off[N + 1];
+  int nj;
+};
 
 /// Curvature of the colour field on an extended (inner + ghost) block.
 class VofCurvature {
@@ -429,6 +460,19 @@ class VofCurvature {
   /// Compute the curvature over the inner region from a colour field on the SAME extended block.
   /// `c`'s ghosts must be valid on entry (the caller's exchange); nothing here communicates.
   Stats compute(SField c) {
+    computeBegin(c);
+    const double t3 = tick_();
+    fallbackPass(c);
+    addT_(tm.fallback, t3);
+    return computeEnd();
+  }
+
+  /// `compute()` in three parts, for a caller that runs MANY cascades (the block container):
+  /// `computeBegin` (compaction, planes, tiers 1-2) on every cascade, ONE `fallbackBatch` launch of
+  /// tier 3 over all of them, then `computeEnd` (clip + census) on every cascade. Each cell's
+  /// tier-3 body reads only its own block's planes/colour and writes only its own kappa/branch, so
+  /// the batch computes exactly what the per-cascade `fallbackPass` calls would: bit for bit.
+  void computeBegin(SField c) {
     if (!ready())
       throw std::runtime_error("peclet::flow::vof::VofCurvature::compute: init() not called");
     const double t0 = tick_();
@@ -441,9 +485,8 @@ class VofCurvature {
     const double t2 = tick_();
     heightPass(c);
     addT_(tm.height, t2);
-    const double t3 = tick_();
-    fallbackPass(c);
-    addT_(tm.fallback, t3);
+  }
+  Stats computeEnd() {
     const double t5 = tick_();
     const long nclip = clipPass();
     addT_(tm.clip, t5);
@@ -453,6 +496,64 @@ class VofCurvature {
     s.clipped = nclip;
     ++tm.calls;
     return s;
+  }
+  /// This cascade's tier-3 share for `fallbackBatch` (worklist mode only: the job walks the
+  /// compacted interfacial list `computeBegin` just built).
+  VofCurvFallbackJob fallbackJob(SField c) const {
+    VofCurvFallbackJob j;
+    j.c = c.data();
+    j.mx = mx_.data();
+    j.my = my_.data();
+    j.mz = mz_.data();
+    j.al = alpha_.data();
+    j.kap = kappa_.data();
+    j.br = branch_.data();
+    j.list = listI_.data();
+    j.n = nI_;
+    j.sy = e_.x;
+    j.sz = static_cast<long>(e_.x) * e_.y;
+    j.gr = kPvHalf;
+    j.dW = weightWidth * metric.maxH();
+    j.cmin = cosMin;
+    j.ieps = interfaceEps;
+    j.gm = metric;
+    return j;
+  }
+  /// Jobs per launch of `fallbackBatch` (the table rides in the kernel's functor by value).
+  static constexpr int kFallbackBatch = 16;
+  /// Tier 3 of many cascades in as few launches as possible: one kernel per `kFallbackBatch`
+  /// jobs over their concatenated interfacial lists. The per-cascade launches each put ~1e3
+  /// threads (one wave, a few warps per SM) on the device for the full latency of the 5^3 fit,
+  /// one block after the other; batched they share that latency. Pure re-scheduling (see
+  /// `computeBegin`).
+  static void fallbackBatch(const std::vector<VofCurvFallbackJob>& jobs) {
+    using Table = VofCurvFallbackTable<kFallbackBatch>;
+    for (std::size_t j0 = 0; j0 < jobs.size(); j0 += kFallbackBatch) {
+      Table T;
+      T.nj = static_cast<int>(std::min<std::size_t>(kFallbackBatch, jobs.size() - j0));
+      T.off[0] = 0;
+      for (int k = 0; k < T.nj; ++k) {
+        T.job[k] = jobs[j0 + k];
+        T.off[k + 1] = T.off[k] + T.job[k].n;
+      }
+      for (int k = T.nj; k < kFallbackBatch; ++k)
+        T.off[k + 1] = T.off[T.nj];
+      if (T.off[T.nj] == 0)
+        continue;
+      Kokkos::parallel_for(
+          "vof::curv::pv_batch", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
+          KOKKOS_LAMBDA(long t) {
+            int b = 0;
+            while (t >= T.off[b + 1])
+              ++b;
+            const VofCurvFallbackJob& J = T.job[b];
+            curvFallbackCell(J.list[t - T.off[b]], VofRawField{J.c}, VofRawField{J.mx},
+                             VofRawField{J.my}, VofRawField{J.mz}, VofRawField{J.al},
+                             VofRawField{J.kap}, VofRawField{J.br}, J.sy, J.sz, J.gr, J.dW, J.cmin,
+                             J.ieps, J.gm);
+          });
+    }
+    Kokkos::fence();
   }
 
   /// The two compaction scans: `listG_` = every interfacial cell of the GROWN region (what
