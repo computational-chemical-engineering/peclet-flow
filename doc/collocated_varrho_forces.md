@@ -672,10 +672,13 @@ doc/collocated_varrho_forces.md. Do not re-implement." History is otherwise unto
 **7.6 The gate that actually guards: `tests/python/test_collocated_stability_guard.py`** (ctest
 `collocated_stability_guard`, plus an amr counterpart).
 
-**Paths**, every collocated density path. A path that refuses the configuration is reported, not
-failed.
+**Paths**, every collocated density path. A throw FAILS the path at any step, unless the path is
+on the guard's explicit refusal whitelist (empty today). (Until the 2026-09-25 review a refusal at
+the first step counted as a pass, so a path that threw at once passed silently.)
 
-- constant ρ: AUTO (ghost), `gauge-exact`, `plain`, `embed`;
+- constant ρ: `ghost` (PINNED, and its build must print no AUTO fallback notice; its G3 walls are
+  an immersed solid, because the ghost v1 takes no domain-BC walls — the old "AUTO (ghost)" G3
+  case with ±y domain walls silently ran gauge-exact), `gauge-exact`, `plain`, `embed`;
 - V8 variable ρ, uniform ρ field and a frozen ratio-1000 slab, option OFF and ON;
 - V8 constant-ρ CSF (`enable_vof`, σ > 0, frozen C), OFF and ON.
 
@@ -683,11 +686,18 @@ failed.
 the step operator):
 
 - **G2, growth.** Seed P with ε(−1)^{x+y+z} plus a random field of amplitude ε. Run 100 steps at
-  dt ∈ {0.1, 1, 10, 100} (μ = 1, h = 1, so μdt/ρ_min h² up to 100) beside the unseeded twin.
-  Measure the (π,π,π) FFT amplitude of P − P_twin and max|u − u_twin|. Pass iff at step 100 both
-  are ≤ 2× their step-0 values and ≤ (1 + 1e-6)× their step-50 values.
-- **G3, dt-independence.** Walled at ±y, TG forcing, dt ∈ {1, 10, 100}, march to
-  max|Δu| ≤ 1e-12·max|u|. Pass iff max|u(dt_i) − u(dt_j)| ≤ 1e-9·max|u|.
+  dt ∈ {0.1, 100} (μ = 1, h = 1, so μdt/ρ_min h² up to 100) beside the unseeded twin, periodic;
+  once more WALLED (±y) at dt = 100 on the ratio-1000 slab (option OFF: the option does not touch
+  the homogeneous step operator, ON and OFF measure the same growth), so the weight sum, the
+  high-face openness and the Neumann ρ ghosts are in it. Measure the (π,π,π) FFT amplitude of P − P_twin and
+  max|u − u_twin|. Pass iff at step 100 both are ≤ 2× their step-0 values and ≤ (1 + 1e-6)×
+  their step-50 values.
+- **G3, dt-independence.** Walled at ±y, TG forcing, dt ∈ {100, 10, 1}, march to
+  max|Δu| ≤ 1e-10·max|u| (dt = 10 and 1 warm-started from the dt = 100 state; a V8 ON path's
+  dt = 100 march warm-started from the OFF path's converged state — the same fixed point, and the
+  first ON step re-splits, §4.6.2). Pass iff max|u(dt_i) − u(dt_j)| ≤ 1e-7·max|u|: the Chorin
+  signature is 2.5e-2–0.5, five decades above. Pressure rtol 1e-12 throughout. (Trimmed at the
+  2026-09-25 review from dt ∈ {0.1, 1, 10, 100} / 1e-12 / 1e-9 / rtol 1e-14, which took 915 s.)
 
 **Why a gate and not a grep.**
 
@@ -823,7 +833,14 @@ Other combinations unchanged.
   - T2 face at 30 steps ≤ 10× the value measured at WO-V1 (frozen with a comment).
   - T3 and T4: tolerances unchanged. T5: plus the non-incremental throw.
 - **ON:**
-  - T1: face < 1e-12, cell < 1e-10, dP/dz < 1e-10 — **after 1 step and after 100 steps**.
+  - T1: face < 1e-12, cell < 1e-10, dP/dz < 1e-10 — **after 1 step and after 100 steps** (the
+    periodic box at Chebyshev 1e-14, the walled ones at the default).
+  - T1 periodic at the DEFAULT rtol (1e-9), 100 steps: face < 1e-9, measured 2.2e-10. The
+    pre-projection solves once at step 1 to rtol·|b| relative to the full right-hand side, and
+    |b| (the ratio-1000 hydrostatic force) is large; from step 2 the previous split meets that
+    test and the solve is skipped, which freezes the step-1 error. The pre-projection tolerance
+    stays EQUAL to the main solve's (DECIDED 2026-09-25) — the 1e-14 case is the exactness
+    statement, this one guards against a regression at the shipped default.
   - T1b: cell ≤ 1e-10.
   - T2: ratio 1 face and cell < 1e-14; ratios 10–1000 < 1e-13.
   - Ratio-1000 μ sweep: < 1e-13 and < the staggered face.

@@ -466,6 +466,20 @@ void gateBalancedOn() {
       CHECK(co.cellU < 1e-10);
       CHECK(co.pErr < 1e-10);
     }
+  {  // T1 periodic at the DEFAULT Chebyshev rtol (1e-9), 100 steps: the frozen step-1 error.
+    // Why 1e-9 and not the 1e-12 above: the pre-projection solves once at step 1 to rtol * |b|
+    // relative to the FULL right-hand side (WO-P5), and |b| = |D(O c beta)| is large here (the
+    // ratio-1000 hydrostatic force), so rtol * |b| leaves ~1e-10 in X; from step 2 the previous
+    // split already meets that test and the solve is SKIPPED, which freezes that step-1 error in
+    // the face field instead of letting later solves shave it. Measured 2.2e-10 (WO-P5); gated
+    // at 1e-9 so a real regression (a second copy of the balanced pressure, a lost skip) shows.
+    // The pre-projection tolerance stays EQUAL to the main solve's (DECIDED 2026-09-25): do not
+    // tighten it to pass a tighter gate; the 1e-14 cases above are the exactness statement.
+    const auto d = hydrostatic<Colo>(1000.0, 0.0, 100, true, false, -1, -1.0);
+    std::printf("  T1 periodic at the default rtol, 100 steps: face %.3e  cell %.3e  dP/dz %.3e\n",
+                d.faceU, d.cellU, d.pErr);
+    CHECK(d.faceU < 1e-9);
+  }
   {  // T1b: the walled column's cell field is exact too (the transient never exists)
     const auto a = hydrostatic<Colo>(1000.0, 0.0, 100, false, false);
     std::printf("  T1b walled ratio 1000, 100 steps: cell %.3e (cb %.3e)\n", a.cellU, a.cb);
