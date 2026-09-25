@@ -49,6 +49,7 @@
 #include <Kokkos_Core.hpp>
 #include <stdexcept>
 
+#include "policy.hpp"
 #include "vof/advect_wy.hpp"
 #include "vof/momentum_advect.hpp"  // vofMinmod
 #include "vof/phase_change.hpp"
@@ -140,7 +141,7 @@ class VofEnergyAdvector {
     const int g = g_;
     SField T = T_;
     double mn = 0.0, mx = 0.0;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     MD pol(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z});
     Kokkos::parallel_reduce(
         "vof::energy::min", pol,
@@ -181,9 +182,7 @@ class VofEnergyAdvector {
     const double floor = 1e-12 * (rg < rl ? rg : rl);
     const bool muscl = energyMuscl;
     Kokkos::parallel_for(
-        "vof::energy::update",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::energy::update", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           const double aP = u(i) * dth, aM = u(i - sd) * dth;

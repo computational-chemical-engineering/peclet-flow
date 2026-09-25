@@ -39,7 +39,7 @@ typename Solver<Grid>::OutflowBackflow Solver<Grid>::outflowBackflow() {
       const double sgn = (s == 0) ? 1.0 : -1.0;          // u.n < 0 <-> sgn*u > 0
       CCConst un = Grid::collocated ? CCConst(a == 0 ? uf_ : a == 1 ? vf_ : wf_) : CCConst(C[a].u);
       CCConst ub = CCConst(C[b].u), uc = CCConst(C[c].u);
-      using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+      using MD = MDRange2<CCExec>;
       double mx = 0.0, en = 0.0;
       long nrev = 0;
       Kokkos::parallel_reduce(
@@ -267,7 +267,7 @@ double Solver<Grid>::maxPorousResidual() {
     C3 e = e_;  // local copy — capturing e_ in the KOKKOS_LAMBDA would read this-> on the device
     CCField d = div_, dd = depsdt_;
     const bool useDt = porousDepsDt_;
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<CCExec>;
     Kokkos::parallel_for(
         "peclet::flow::porous_resid", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {

@@ -79,6 +79,7 @@
 #include <stdexcept>
 
 #include "mac_stencils.hpp"  // peclet::flow::SExec, SField, SMem, I3, L3
+#include "policy.hpp"
 #include "vof/cutcell.hpp"
 #include "vof/plic.hpp"
 #include "vof/wetting.hpp"
@@ -339,8 +340,7 @@ class WyAdvector {
     const long sx = 1, sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
     SField ox = of_[0], oy = of_[1], oz = of_[2], ep = eps_, kd = kindD_;
     Kokkos::parallel_for(
-        "vof::wy::classify",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        "vof::wy::classify", MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           if (x == 0 || y == 0 || z == 0) {
@@ -429,8 +429,7 @@ class WyAdvector {
     UCField kk = kind_;
     Kokkos::parallel_for(
         "vof::wy::wetting_normals",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           mx(i) = 0.0;
@@ -479,7 +478,7 @@ class WyAdvector {
     const int g = g_;
     UCField wb = wetB_, kk = kind_;
     SField ap = appB_;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     const int gw = ghost < 0 ? 0 : (ghost > g ? g : ghost);
     MD pol(SExec(), {g - gw, g - gw, g - gw}, {g + n.x + gw, g + n.y + gw, g + n.z + gw});
     for (int b = 0; b < kVofWetCount; ++b) {
@@ -769,7 +768,7 @@ class WyAdvector {
     const I3 e = e_, n = n_;
     const int g = g_;
     SField c = c_;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     double sum = 0.0, mn = 0.0, mx = 0.0;
     long mixed = 0, wisps = 0;
     MD pol(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z});
@@ -819,9 +818,7 @@ class WyAdvector {
     SField u = uf_, v = vf_, w = wf_;
     double m = 0.0;
     Kokkos::parallel_reduce(
-        "vof::wy::cfl",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::wy::cfl", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = L3(x, y, z, e);
           acc = Kokkos::fmax(acc, Kokkos::fabs(u(i)));
@@ -863,9 +860,7 @@ class WyAdvector {
     const double weps = wispEps;
     double m = 0.0;
     Kokkos::parallel_reduce(
-        "vof::wy::cfl_interface",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::wy::cfl_interface", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = L3(x, y, z, e);
           const double ci = c(i);
@@ -906,9 +901,7 @@ class WyAdvector {
     SField u = uf_, v = vf_, w = wf_;
     double m = 0.0;
     Kokkos::parallel_reduce(
-        "vof::wy::divmax",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::wy::divmax", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = L3(x, y, z, e);
           const double d = (u(i) - u(i - 1)) + (v(i) - v(i - sy)) + (w(i) - w(i - sz));
@@ -1025,8 +1018,7 @@ class WyAdvector {
       UCField ob = outside_;
       Kokkos::parallel_for(
           "vof::wy::flux_bc",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {lo[0], lo[1], lo[2]},
-                                                        {hi[0], hi[1], hi[2]}),
+          MDRange3<SExec>(SExec(), {lo[0], lo[1], lo[2]}, {hi[0], hi[1], hi[2]}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long p = L3(x, y, z, e);
             fl(p) = wyFaceFluxBc(u(p) * dth, p, sd, d, c, mx, my, mz, al, ob, weps);
@@ -1035,9 +1027,7 @@ class WyAdvector {
       return;
     }
     Kokkos::parallel_for(
-        "vof::wy::flux",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {lo[0], lo[1], lo[2]},
-                                                      {hi[0], hi[1], hi[2]}),
+        "vof::wy::flux", MDRange3<SExec>(SExec(), {lo[0], lo[1], lo[2]}, {hi[0], hi[1], hi[2]}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long p = L3(x, y, z, e);
           fl(p) = wyFaceFlux(u(p) * dth, p, sd, d, c, mx, my, mz, al, weps);
@@ -1065,8 +1055,7 @@ class WyAdvector {
       const int fa = (s == 0) ? (g - 1) : (g + nd - 1);
       double acc = 0.0;
       Kokkos::parallel_reduce(
-          "vof::wy::bcvol",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>(SExec(), {g, g}, {g + nb, g + nc}),
+          "vof::wy::bcvol", MDRange2<SExec>(SExec(), {g, g}, {g + nb, g + nc}),
           KOKKOS_LAMBDA(int p0, int p1, double& r) {
             r += fl(static_cast<long>(p0) * sb + static_cast<long>(p1) * sc +
                     static_cast<long>(fa) * sd);
@@ -1097,9 +1086,7 @@ class WyAdvector {
     SField c = c_, fl = flux_, u = faceVel(d);
     UCField cc = cc_;
     Kokkos::parallel_for(
-        "vof::wy::update",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::wy::update", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           // The dilation term must scale the SAME uf by the SAME dt/h as the flux, or the exact
@@ -1142,9 +1129,7 @@ class WyAdvector {
     UCField ob = bc ? outside_ : UCField();
     long nclamp = 0;
     Kokkos::parallel_reduce(
-        "vof::wy::flux_cut",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {lo[0], lo[1], lo[2]},
-                                                      {hi[0], hi[1], hi[2]}),
+        "vof::wy::flux_cut", MDRange3<SExec>(SExec(), {lo[0], lo[1], lo[2]}, {hi[0], hi[1], hi[2]}),
         KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
           const long p = L3(x, y, z, e);
           const double op = o(p);
@@ -1192,9 +1177,7 @@ class WyAdvector {
     SField c = c_, fl = flux_, u = faceVel(d), o = of_[d], ep = eps_;
     UCField cc = cc_, kd = kind_;
     Kokkos::parallel_for(
-        "vof::wy::update_cut",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::wy::update_cut", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           if (kd(i) == kVofSolid)
@@ -1227,9 +1210,7 @@ class WyAdvector {
     UCField kd = kind_;
     double acc = 0.0, sgn = 0.0;
     Kokkos::parallel_reduce(
-        "vof::wy::clip_cut",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::wy::clip_cut", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, double& a, double& b) {
           const long i = L3(x, y, z, e);
           if (kd(i) == kVofSolid)
@@ -1264,8 +1245,7 @@ class WyAdvector {
     double m = 0.0;
     Kokkos::parallel_reduce(
         "vof::wy::cfl_interface_cut",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = L3(x, y, z, e);
           if (kd(i) == kVofSolid)
@@ -1301,8 +1281,7 @@ class WyAdvector {
     SField c = c_;
     UCField fs = fill_, mk = mark_;
     Kokkos::parallel_for(
-        "vof::wy::band_fill",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        "vof::wy::band_fill", MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           if (vofGhostDepth(x, y, z, g, n.x, n.y, n.z) > maxDepth)
             return;
@@ -1349,8 +1328,7 @@ class WyAdvector {
     const double tEps = wettingTangentEps, pureEps = wettingPureEps;
     const VofMetric gme = metric;  // `g` is the ghost width in this scope
     Kokkos::parallel_for(
-        "vof::wy::band_fill_theta",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        "vof::wy::band_fill_theta", MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           if (vofGhostDepth(x, y, z, g, n.x, n.y, n.z) > maxDepth)
             return;
@@ -1467,7 +1445,7 @@ class WyAdvector {
     const int g = g_;
     SField c = c_, ep = eps_;
     UCField kd = kind_;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     MD pol(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z});
     double vol = 0.0, raw = 0.0, solidC = 0.0;
     long ncut = 0, nsolid = 0;

@@ -4924,6 +4924,7 @@ using IbmSolver = Solver<Staggered>;
 #include "flow_ibm_bc.hpp"
 #include "flow_ibm_mpi.hpp"
 #include "flow_ibm_diagnostics.hpp"
+#include "policy.hpp"
 #endif  // PECLET_FLOW_INSTANTIATING
 
 

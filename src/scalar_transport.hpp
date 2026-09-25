@@ -24,6 +24,7 @@
 #include <string>
 
 #include "mac_cutcell.hpp"
+#include "policy.hpp"
 #include "staggered_advection.hpp"
 #include "vof/phase_change.hpp"
 
@@ -84,7 +85,7 @@ inline void scalarBuildDiffusionVarK(CCField AC, CCField AW, CCField AE, CCField
                                      CCConst kc, CCConst rcp, CCConst mask, double idt, C3 e, int g,
                                      double wx = 1.0, double wy = 1.0, double wz = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::scalar_build_diff_vark", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -119,7 +120,7 @@ inline void scalarBuildDiffusionVarK(CCField AC, CCField AW, CCField AE, CCField
 // `rcp*idt` diagonal above this is `rho c_p (T^{n+1} - T*)/dt = div(k grad T^{n+1})`.
 inline void scalarBuildRhsHeat(CCField b, CCConst cOld, CCConst rcp, double idt, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::scalar_build_rhs_heat", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -134,7 +135,7 @@ inline void scalarBuildRhsHeat(CCField b, CCConst cOld, CCConst rcp, double idt,
 inline void scalarMaskStencil(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN,
                               CCField AB, CCField AT, CCConst mask, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::scalar_mask_stencil", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -155,7 +156,7 @@ inline void scalarMaskStencil(CCField AC, CCField AW, CCField AE, CCField AS, CC
 // neighbours' first smoothing sweep already reads the imposed value.
 inline void scalarMaskRhs(CCField b, CCField c, CCConst mask, CCConst val, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::scalar_mask_rhs", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -191,7 +192,7 @@ inline void scalarMaskGfm(CCField AC, CCField AW, CCField AE, CCField AS, CCFiel
                           double wz = 1.0, vof::VofMetric gm = vof::VofMetric{}) {
   const double wa[3] = {wx, wy, wz};
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::scalar_mask_gfm", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -258,7 +259,7 @@ inline void scalarMaskGfm2(CCField AC, CCField AW, CCField AE, CCField AS, CCFie
                            vof::VofMetric gm = vof::VofMetric{}) {
   const double wa[3] = {wx, wy, wz};
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::scalar_mask_gfm2", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -309,7 +310,7 @@ inline void scalarMaskGfm2(CCField AC, CCField AW, CCField AE, CCField AS, CCFie
 // Add the plane-anchored Dirichlet contribution to the RHS of the unmasked rows.
 inline void scalarAddGfmRhs(CCField b, CCConst gfmB, CCConst mask, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::scalar_gfm_rhs", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -333,7 +334,7 @@ inline void scalarBuildDiffusionOpen(CCField AC, CCField AW, CCField AE, CCField
                                      double wy = 1.0, double wz = 1.0) {
   CCExec space;
   const double Dx = D * wx, Dy = D * wy, Dz = D * wz;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::scalar_build_diff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -358,7 +359,7 @@ inline void scalarBuildDiffusionOpen(CCField AC, CCField AW, CCField AE, CCField
 inline void scalarBuildRhs(CCField b, CCConst cOld, CCConst U, CCConst V, CCConst W, CCConst ox,
                            CCConst oy, CCConst oz, double idt, int scheme, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::scalar_build_rhs", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {

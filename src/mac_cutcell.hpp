@@ -15,6 +15,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "policy.hpp"
+
 namespace peclet::flow {
 
 using CCExec = Kokkos::DefaultExecutionSpace;
@@ -211,7 +213,7 @@ KOKKOS_INLINE_FUNCTION double ccFaceOpenMS(CCConst sdf, C3 ext, double fx, doubl
 inline void buildOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ext, double dx,
                           double dy, double dz, int order = 1) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   if (order >= 2) {
     Kokkos::parallel_for(
         "peclet::flow::cc_open_ms", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
@@ -252,7 +254,7 @@ inline void buildOpennessHighFace(CCField oa, CCConst sdf, C3 ext, int g, int a,
   const long sa = st[a], sb = st[b], sc = st[c];
   const int bf = dims[a] - g;
   const int type = a + 1;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::cc_open_high_face", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -296,7 +298,7 @@ inline bool hostRunSerial(long cells) {
 template <class F>
 inline void ccFor3(const char* name, C3 lo, C3 hi, F f) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
     if (hostRunSerial((long)(hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z))) {
       for (int lz = lo.z; lz < hi.z; ++lz)  // too small to be worth a fork/join (bit-identical)
@@ -318,7 +320,7 @@ inline void ccFor3(const char* name, C3 lo, C3 hi, F f) {
 template <class F, class R>
 inline void ccReduce3(const char* name, C3 lo, C3 hi, F f, R&& reducer) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
     Kokkos::parallel_reduce(name,
                             MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x - lo.x, 2, 2}),

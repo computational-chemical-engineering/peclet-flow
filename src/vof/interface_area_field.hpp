@@ -26,6 +26,7 @@
 #include <stdexcept>
 
 #include "mac_stencils.hpp"
+#include "policy.hpp"
 #include "vof/advect_wy.hpp"
 #include "vof/curvature.hpp"
 #include "vof/curvature_field.hpp"  // vofIsInterface
@@ -101,8 +102,8 @@ class VofInterfaceArea {
     const double ieps = interfaceEps;
     Kokkos::parallel_for(
         "vof::area::planes",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g - gr, g - gr, g - gr},
-                                                      {g + n.x + gr, g + n.y + gr, g + n.z + gr}),
+        MDRange3<SExec>(SExec(), {g - gr, g - gr, g - gr},
+                        {g + n.x + gr, g + n.y + gr, g + n.z + gr}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           if (!vofIsInterface(c(i), ieps)) {
@@ -131,9 +132,7 @@ class VofInterfaceArea {
     const VofMetric gm = metric;  // `g` is the ghost width in this scope
     const int md = mode;
     Kokkos::parallel_for(
-        "vof::area::hf",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::area::hf", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           ar(i) = 0.0;
@@ -203,9 +202,7 @@ class VofInterfaceArea {
     const VofMetric gm = metric;  // `g` is the ghost width in this scope
     const int md = mode;
     Kokkos::parallel_for(
-        "vof::area::pv",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::area::pv", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           if (br(i) >= 0.0)
@@ -265,9 +262,7 @@ class VofInterfaceArea {
     SField br = branch_, ar = area_;
     Stats s;
     Kokkos::parallel_reduce(
-        "vof::area::census",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::area::census", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, long& ni, long& n1, long& n2, long& n3, long& n4,
                       double& acc) {
           const long i = L3(x, y, z, e);

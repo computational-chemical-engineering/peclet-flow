@@ -112,7 +112,7 @@ Err curvError(const Case& cs, double kExact, int margin = 0) {
   long cnt = 0, nan = 0;
   Kokkos::parallel_reduce(
       "curv::err",
-      Kokkos::MDRangePolicy<peclet::flow::SExec, Kokkos::Rank<3>>(
+      peclet::flow::MDRange3<peclet::flow::SExec>(
           peclet::flow::SExec(), {g, g, g},
           {g + n.x - 2 * margin, g + n.y - 2 * margin, g + n.z - 2 * margin}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc, double& m, long& c, long& bad) {

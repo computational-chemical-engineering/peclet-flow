@@ -12,6 +12,8 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "policy.hpp"
+
 namespace peclet::flow {
 
 using BExec = Kokkos::DefaultExecutionSpace;
@@ -47,7 +49,7 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
   const int bf = (s == 0) ? g : (na - g);
   const bool hasProf =
       prof.extent(0) > 0;  // per-position inlet profile (resampled to the face grid)
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_vel", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
         const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
@@ -101,7 +103,7 @@ inline void bcSlipComp(BField f, B3 ext, int g, int a, int s, int comp, int fold
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int na = dims[a];
   const int bf = (s == 0) ? g : (na - g);
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_slip", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -127,7 +129,7 @@ inline void bcMirrorGhost(BField f, B3 ext, int g, int a, int s) {
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int na = dims[a];
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_mirror_ghost", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -160,7 +162,7 @@ inline void bcVelocityColocated(BField f, B3 ext, int g, int a, int s, double wa
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int na = dims[a];
   const bool hasProf = prof.extent(0) > 0;
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_vel_coloc", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -190,7 +192,7 @@ inline void bcNeumannGhost(BField f, B3 ext, int g, int a, int s) {
   const int na = dims[a];
   const int bic = (s == 0) ? g : (na - g - 1);
   const int lo = (s == 0) ? 0 : (na - g), hi = (s == 0) ? (g - 1) : (na - 1);
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_neumann_ghost", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -210,7 +212,7 @@ inline void bcOutflowComp(BField f, B3 ext, int g, int a, int s, int comp, int f
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int na = dims[a];
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_outflow", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -241,7 +243,7 @@ inline void bcDiffusionFold(BField dcorr, BField brhs, B3 ext, int g, int a, int
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int bic = (s == 0) ? g : (dims[a] - g - 1);
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_fold", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -262,7 +264,7 @@ inline void bcZeroPressureGhost(BField phi, B3 ext, int g, int a, int s) {
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int na = dims[a];
   const int lo = (s == 0) ? 0 : (na - g), hi = (s == 0) ? (g - 1) : (na - 1);
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_zero_p_ghost", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -286,7 +288,7 @@ inline void bcCorrectOutflow(BField f, BField phi, B3 ext, int g, int a, double 
   bcdetail::axisDims(ext, dims, strides);
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = strides[a], sb = strides[b], sc = strides[c];
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_correct_outflow", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -317,7 +319,7 @@ inline void bcCorrectOutflowVar(BField f, BField phi, BField rho, double rho0, B
   bcdetail::axisDims(ext, dims, strides);
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = strides[a], sb = strides[b], sc = strides[c];
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_correct_outflow_var", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -348,7 +350,7 @@ inline void bcSaveHighFacePlaneInner(BField dst, BField src, B3 ext, int g, int 
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int bf = dims[a] - g, nb = dims[b] - 2 * g, nc = dims[c] - 2 * g;
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_save_high_face", MD(space, {0, 0}, {nb, nc}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -364,7 +366,7 @@ inline void bcRestoreHighFacePlaneInner(BField dst, BField src, B3 ext, int g, i
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int bf = dims[a] - g, nb = dims[b] - 2 * g, nc = dims[c] - 2 * g;
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_restore_high_face", MD(space, {0, 0}, {nb, nc}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -384,7 +386,7 @@ inline void bcSetOpenness(BField oa, B3 ext, int g, int a, int s, double val) {
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int bf = (s == 0) ? g : (dims[a] - g);
-  using MD = Kokkos::MDRangePolicy<BExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<BExec>;
   Kokkos::parallel_for(
       "peclet::flow::bc_setopen", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {

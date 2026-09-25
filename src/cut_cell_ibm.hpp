@@ -22,6 +22,8 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
+#include "policy.hpp"
+
 namespace peclet::flow {
 
 using IMem = Kokkos::DefaultExecutionSpace::memory_space;
@@ -359,7 +361,7 @@ inline void ibmBuildDiffusionVar(MV AC, MV AW, MV AE, MV AS, MV AN, MV AB, MV AT
                                  int ez, int g, FaceProps fp, double wx = 1.0, double wy = 1.0,
                                  double wz = 1.0) {
   Kokkos::DefaultExecutionSpace space;
-  using MD = Kokkos::MDRangePolicy<Kokkos::DefaultExecutionSpace, Kokkos::Rank<3>>;
+  using MD = MDRange3<Kokkos::DefaultExecutionSpace>;
   Kokkos::parallel_for(
       "peclet::flow::ibm_build_diff_var", MD(space, {g, g, g}, {ex - g, ey - g, ez - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {

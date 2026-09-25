@@ -12,6 +12,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "mac_cutcell.hpp"  // CCField/CCConst, C3, CCExec
+#include "policy.hpp"
 
 namespace peclet::flow {
 
@@ -34,7 +35,7 @@ namespace peclet::flow {
 inline void gpCenterGrad(CCField out, CCConst p, CCConst sdf, int axis, C3 e, int g,
                          double wa = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::gp_center_grad", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {

@@ -153,8 +153,7 @@ double Solver<Grid>::vofInterfaceArea() {
     const double eps = pcEffInterfaceEps();
     Kokkos::parallel_reduce(
         "peclet::flow::vof_area_plic",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {g, g, g},
-                                                       {g + nx_, g + ny_, g + nz_}),
+        MDRange3<CCExec>(CCExec(), {g, g, g}, {g + nx_, g + ny_, g + nz_}),
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = (long)x + (long)y * e3.x + (long)z * sz;
           if (!vof::pcIsInterfacial(c(i), eps))
@@ -408,8 +407,7 @@ double Solver<Grid>::pcBandDivergence() {
   double m = 0.0;
   Kokkos::parallel_reduce(
       "peclet::flow::pc_band_div",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         const long i = (long)x + (long)y * sy + (long)z * sz;
         if (!vof::pcIsInterfacial(c(i), eps))
@@ -434,8 +432,7 @@ void Solver<Grid>::pcUpdateEnergyProps() {
   const double kg = pcKg_, kl = pcKl_, rg = pcRcpG_, rl = pcRcpL_;
   Kokkos::parallel_for(
       "peclet::flow::pc_energy_props",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         const double cl = Kokkos::fmin(Kokkos::fmax(c(i), 0.0), 1.0);
@@ -473,8 +470,7 @@ void Solver<Grid>::setDivergenceSink(const std::vector<double>& w) {
   double acc = 0.0;
   Kokkos::parallel_reduce(
       "peclet::flow::pc_sink_weight",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& a) {
         a += wv((long)x + (long)y * e.x + (long)z * (long)e.x * e.y);
       },
@@ -538,8 +534,7 @@ typename Solver<Grid>::PhaseChangeDiagnostics Solver<Grid>::phaseChangeDiagnosti
   double mn = 1e300, mx = -1e300;
   Kokkos::parallel_reduce(
       "peclet::flow::pc_extrema",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& lo, double& hi) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         lo = Kokkos::fmin(lo, c(i));
@@ -635,9 +630,7 @@ void Solver<Grid>::pcBuildInterface() {
   long nIface = 0, nFallback = 0;
   double sumArea = 0.0, sumMdot = 0.0, sumQ = 0.0, sumQorph = 0.0, sumMdotFitA = 0.0;
   Kokkos::parallel_reduce(
-      "peclet::flow::pc_build",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      "peclet::flow::pc_build", MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, long& nif, long& nfb, double& aacc, double& macc,
                     double& qacc, double& qorph, double& mfacc) {
         const long i = (long)x + (long)y * e.x + (long)z * sz;
@@ -888,8 +881,7 @@ void Solver<Grid>::pcBuildInterface() {
     CCConst md = CCConst(pcMdot_), ar = CCConst(pcArea_);
     Kokkos::parallel_reduce(
         "peclet::flow::pc_mdot_extrema",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
+        MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z, double& lo, double& hi) {
           const long i = (long)x + (long)y * e.x + (long)z * sz;
           if (ar(i) > 0.0) {
@@ -929,8 +921,7 @@ void Solver<Grid>::pcScatterSource() {
   long ncell = 0;
   Kokkos::parallel_reduce(
       "peclet::flow::pc_source_gather",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc, long& nc) {
         const long i = (long)x + (long)y * e.x + (long)z * sz;
         double s = 0.0;
@@ -967,8 +958,7 @@ void Solver<Grid>::pcScatterSource() {
     CCConst wv = CCConst(pcSink_);
     Kokkos::parallel_for(
         "peclet::flow::pc_sink_apply",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
+        MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * e.x + (long)z * sz;
           src(i) -= f * wv(i);
@@ -994,8 +984,7 @@ void Solver<Grid>::pcRegress(double dt) {
   long ndef = 0, nexc = 0;
   double redist = 0.0;
   Kokkos::parallel_reduce(
-      "peclet::flow::pc_regress_raw",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+      "peclet::flow::pc_regress_raw", MDRange3<CCExec>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z, double& rem, long& nd, long& ne, double& rd) {
         const long i = (long)x + (long)y * e.x + (long)z * sz;
         const double A = ar(i);
@@ -1026,8 +1015,7 @@ void Solver<Grid>::pcRegress(double dt) {
   CCConst nxv = CCConst(pcNrm_[0]), nyv = CCConst(pcNrm_[1]), nzv = CCConst(pcNrm_[2]);
   Kokkos::parallel_for(
       "peclet::flow::pc_regress_apply",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * sz;
         double v = cn(i);
@@ -1069,8 +1057,7 @@ void Solver<Grid>::pcRegress(double dt) {
   double unres = 0.0;
   Kokkos::parallel_reduce(
       "peclet::flow::pc_unresolved",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         const long i = (long)x + (long)y * e.x + (long)z * sz;
         const double dj = df(i);
@@ -1120,8 +1107,7 @@ void Solver<Grid>::pcBuildInDomain() {
   CCField f = pcInDomain_;
   Kokkos::parallel_for(
       "peclet::flow::pc_indomain",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         f((long)x + (long)y * e.x + (long)z * (long)e.x * e.y) = 1.0;
       });
@@ -1152,8 +1138,7 @@ void Solver<Grid>::pcUpdateThermalMask() {
   const long syl = sy, szl = sz;
   Kokkos::parallel_for(
       "peclet::flow::pc_thermal_mask",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * sz;
         const bool on = vof::pcIsInterfacial(c(i), eps);
@@ -1270,8 +1255,7 @@ void Solver<Grid>::pcZeroDomainGhosts(CCField f) {
     const int aInner = (side == 0) ? G : (G + na - 1);
     const int dir = (side == 0) ? -1 : +1;
     Kokkos::parallel_for(
-        "peclet::flow::pc_zero_ghosts",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(CCExec(), {G, G}, {G + nt1, G + nt2}),
+        "peclet::flow::pc_zero_ghosts", MDRange2<CCExec>(CCExec(), {G, G}, {G + nt1, G + nt2}),
         KOKKOS_LAMBDA(int j1, int j2) {
           const long base = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
           for (int L = 1; L <= 2; ++L)
@@ -1292,7 +1276,7 @@ void Solver<Grid>::pcCarryDeposit(ScalarField& sc) {
   const bool useRcp = pcEnergy_;
   const double rcpG = pcRcpG_, rcpL = pcRcpL_;
   double dep = 0.0, lost = 0.0;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_reduce(
       "peclet::flow::pc_carry_deposit", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
@@ -1367,8 +1351,7 @@ void Solver<Grid>::pcCarryApply(ScalarField& sc) {
   CCConst mk = CCConst(sc.dmask);
   Kokkos::parallel_for(
       "peclet::flow::pc_carry_apply",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * sy + (long)z * sz;
         if (!(mk(i) > 0.5))
@@ -1389,7 +1372,7 @@ void Solver<Grid>::pcBudgetPre(ScalarField& sc) {
   const double Tsat = pcTsat_;
   double hOpen = 0, hLiq = 0, hMask = 0, dEo = 0, dEoN = 0, eEnt = 0, eLev = 0;
   long nEL = 0, nEG = 0, nLL = 0, nLG = 0, nM = 0;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_reduce(
       "peclet::flow::pc_budget_pre", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& a1, double& a2, double& a3, double& a4, double& a5,
@@ -1478,7 +1461,7 @@ void Solver<Grid>::pcBudgetPost(ScalarField& sc) {
   const vof::VofMetric gme = u_.vofMetric();  // Phase 3 (V5.3)
   CCField clsOut = pcClsPrev_;
   double hOpen = 0, q = 0, qb = 0;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_reduce(
       "peclet::flow::pc_budget_post", MD(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& a1, double& a2, double& a3) {
@@ -1535,8 +1518,7 @@ void Solver<Grid>::pcApplyDivergenceSource(CCField div) {
   CCConst su = hasUser ? CCConst(pcUser_) : CCConst(div);
   Kokkos::parallel_for(
       "peclet::flow::pc_div_source",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {G, G, G},
-                                                     {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         double s = 0.0;

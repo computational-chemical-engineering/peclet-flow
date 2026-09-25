@@ -48,6 +48,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "mac_stencils.hpp"  // peclet::flow::SExec, SField, I3, L3
+#include "policy.hpp"
 
 namespace peclet::flow::vof {
 
@@ -65,8 +66,7 @@ inline void copyFaceVelocity(SField dst, I3 de, int dg, SField src, I3 se, int s
   const int s = dg - sg;
   const int ox = s - (dir == 0 ? 1 : 0), oy = s - (dir == 1 ? 1 : 0), oz = s - (dir == 2 ? 1 : 0);
   Kokkos::parallel_for(
-      "vof::copyFaceVelocity",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {se.x, se.y, se.z}),
+      "vof::copyFaceVelocity", MDRange3<SExec>(SExec(), {0, 0, 0}, {se.x, se.y, se.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         dst(L3(x + ox, y + oy, z + oz, de)) = src(L3(x, y, z, se));
       });
@@ -89,8 +89,7 @@ inline void copyAdvectedVelocity(SField dst, I3 de, int dg, SField src, I3 se, i
   const int ox = sg - (dir == 0 ? 1 : 0), oy = sg - (dir == 1 ? 1 : 0),
             oz = sg - (dir == 2 ? 1 : 0);
   Kokkos::parallel_for(
-      "vof::copyAdvectedVelocity",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
+      "vof::copyAdvectedVelocity", MDRange3<SExec>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         dst(L3(x + dg, y + dg, z + dg, de)) = src(L3(x + ox, y + oy, z + oz, se));
       });
@@ -110,8 +109,7 @@ inline void periodicFill(SField f, I3 e, int g, bool px, bool py, bool pz) {
     const long sa = st[a], sb = st[b], sc = st[c];
     const int N = dims[a] - 2 * g;
     Kokkos::parallel_for(
-        "vof::periodicFill",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>(SExec(), {0, 0}, {dims[b], dims[c]}),
+        "vof::periodicFill", MDRange2<SExec>(SExec(), {0, 0}, {dims[b], dims[c]}),
         KOKKOS_LAMBDA(int p0, int p1) {
           const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
           for (int gl = 0; gl < g; ++gl) {
@@ -145,8 +143,7 @@ inline void clampFill(SField f, I3 e, int g, I3 o, I3 gs, bool px, bool py, bool
   const int q0 = gs.x, q1 = gs.y, q2 = gs.z;
   const int sk = skip;
   Kokkos::parallel_for(
-      "vof::clampFill",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+      "vof::clampFill", MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const int gx = x - g + o.x, gy = y - g + o.y, gz = z - g + o.z;
         if (sk) {

@@ -44,6 +44,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "mac_cutcell.hpp"
+#include "policy.hpp"
 #include "vof/surface_tension.hpp"
 
 namespace peclet::flow {
@@ -71,7 +72,7 @@ inline void buildFaceAccelVar(CCField af, CCConst P, CCConst rho, CCConst fb, bo
                               CCConst o, bool haveRho, double rhoC, double fc, bool incr, double dt,
                               long s, C3 e, int g, double wa = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::colo_face_accel",
       MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
@@ -104,7 +105,7 @@ inline void addFaceAccelCsf(CCField af, CCConst cv, CCConst kp, CCConst kb, CCCo
                             bool haveRho, double rhoC, double sigma, double hGrad, double dt,
                             long s, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::colo_face_csf", MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -124,7 +125,7 @@ inline void addFaceAccelCsf(CCField af, CCConst cv, CCConst kp, CCConst kb, CCCo
 // uf += af over the same range the increment was built on.
 inline void addFaceIncrement(CCField uf, CCConst af, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::colo_face_add", MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -144,7 +145,7 @@ inline void addFaceIncrement(CCField uf, CCConst af, C3 e, int g) {
 inline void faceAccelSubGradPhi(CCField af, CCConst phi, CCConst rho, CCConst o, bool haveRho,
                                 double rho0, long s, C3 e, int g, double wa = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::colo_face_subgrad",
       MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
@@ -164,7 +165,7 @@ inline void faceAccelSubGradPhi(CCField af, CCConst phi, CCConst rho, CCConst o,
 // rule) applied to the face increments instead of to the raw phi differences.
 inline void applyCellFaceAverage(CCField u, CCConst af, CCConst o, long s, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::colo_cell_avg", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {

@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
       const int Ny = N;
       // x periodic
       Kokkos::parallel_for(
-          "fx", Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>(space, {0, 0}, {e.y, e.z}),
+          "fx", peclet::flow::MDRange2<SExec>(space, {0, 0}, {e.y, e.z}),
           KOKKOS_LAMBDA(int y, int z) {
             long base = (long)y * e.x + (long)z * (long)e.x * e.y;
             for (int gl = 0; gl < g; ++gl) {
@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
           });
       // z periodic
       Kokkos::parallel_for(
-          "fz", Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>(space, {0, 0}, {e.x, e.y}),
+          "fz", peclet::flow::MDRange2<SExec>(space, {0, 0}, {e.x, e.y}),
           KOKKOS_LAMBDA(int x, int y) {
             long base = (long)x + (long)y * e.x;
             long sz = (long)e.x * e.y;
@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
           });
       // y walls: ghost = 0
       Kokkos::parallel_for(
-          "fy", Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>(space, {0, 0}, {e.x, e.z}),
+          "fy", peclet::flow::MDRange2<SExec>(space, {0, 0}, {e.x, e.z}),
           KOKKOS_LAMBDA(int x, int z) {
             long base = (long)x + (long)z * (long)e.x * e.y;
             for (int gl = 0; gl < g; ++gl) {

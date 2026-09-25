@@ -14,6 +14,7 @@
 #include <type_traits>
 
 #include "mac_cutcell.hpp"
+#include "policy.hpp"
 
 namespace peclet::flow {
 
@@ -25,7 +26,7 @@ inline void buildCutcellOp(OpV AC, OpV AW, OpV AE, OpV AS, OpV AN, OpV AB, OpV A
                            CCConst oy, CCConst oz, C3 e, int g, double gfx, double gfy,
                            double gfz) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::cc_build_op", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -93,7 +94,7 @@ inline void cutcellSmoothColor(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, O
                          Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
     return;
   }
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::cc_smooth", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -154,7 +155,7 @@ inline void cutcellSmoothColorBox(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE
                          Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
     return;
   }
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::cc_smooth_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -196,7 +197,7 @@ inline void applyCutcellOpBox(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV 
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::cc_apply_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -256,7 +257,7 @@ inline void applyCutcellOpExactBox(CCField y, CCConst x, CCConst ox, CCConst oy,
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::cc_apply_exact_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -302,7 +303,7 @@ inline void projectCorrectVar(CCField u, CCField v, CCField w, CCConst phi, CCCo
                               double rho0, C3 e, int g, double wx = 1.0, double wy = 1.0,
                               double wz = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::correct_var", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -322,7 +323,7 @@ inline void projectCorrectVar(CCField u, CCField v, CCField w, CCConst phi, CCCo
 inline void buildRhoCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy, CCConst oz,
                           CCConst rho, double rho0, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::rho_coeff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -366,7 +367,7 @@ inline void buildRhoCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCCons
 inline void buildRhoCoeffHarm(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy,
                               CCConst oz, CCConst rho, double rho0, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::rho_coeff_harm", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -404,7 +405,7 @@ inline void buildRhoCoeffOutflowFace(CCField ca, CCConst oa, CCConst rho, double
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = st[a], sb = st[b], sc = st[c];
   const int bf = dims[a] - g;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::rho_coeff_outflow", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -423,7 +424,7 @@ inline void projectCorrectVarHarm(CCField u, CCField v, CCField w, CCConst phi, 
                                   double rho0, C3 e, int g, double wx = 1.0, double wy = 1.0,
                                   double wz = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::correct_var_harm", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -448,7 +449,7 @@ inline void projectCorrectVarHarm(CCField u, CCField v, CCField w, CCConst phi, 
 inline void divergOpenEps(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst oy, CCConst oz,
                           CCConst eps, CCField d, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::diverg_open_eps", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -475,7 +476,7 @@ inline void divergOpenEps(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst o
 inline void buildPorousCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy, CCConst oz,
                              CCConst eps, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::porous_coeff", MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -497,7 +498,7 @@ inline void buildPorousCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCC
 inline void buildPorousCoeffDrag(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy,
                                  CCConst oz, CCConst eps, CCConst beta, double idt, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::porous_coeff_drag",
       MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
@@ -523,7 +524,7 @@ inline void buildPorousCoeffCons(CCField cx, CCField cy, CCField cz, CCConst ox,
                                  CCConst oz, CCConst eps, CCConst beta, bool useBeta, double rhoidt,
                                  C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::porous_coeff_cons",
       MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
@@ -545,7 +546,7 @@ inline void projectCorrectPorousCons(CCField u, CCField v, CCField w, CCConst ph
                                      CCConst beta, bool useBeta, double rhoidt, C3 e, int g,
                                      double wx = 1.0, double wy = 1.0, double wz = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::correct_porous_cons", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -568,7 +569,7 @@ inline void projectCorrectPorousDrag(CCField u, CCField v, CCField w, CCConst ph
                                      double idt, C3 e, int g, double wx = 1.0, double wy = 1.0,
                                      double wz = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::correct_porous_drag", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {

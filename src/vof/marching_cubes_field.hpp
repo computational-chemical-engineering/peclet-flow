@@ -25,6 +25,7 @@
 #include <stdexcept>
 
 #include "mac_stencils.hpp"
+#include "policy.hpp"
 #include "vof/advect_wy.hpp"
 #include "vof/curvature_field.hpp"  // vofIsInterface
 #include "vof/interface_area.hpp"   // InterfaceAreaMode
@@ -96,8 +97,7 @@ class VofMcArea {
     const double ieps = interfaceEps;
     Kokkos::parallel_for(
         "vof::mc::planes",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g - 1, g - 1, g - 1},
-                                                      {g + n.x + 1, g + n.y + 1, g + n.z + 1}),
+        MDRange3<SExec>(SExec(), {g - 1, g - 1, g - 1}, {g + n.x + 1, g + n.y + 1, g + n.z + 1}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           dd(i) = 0.0;
@@ -133,9 +133,7 @@ class VofMcArea {
     const double ieps = interfaceEps;
     const VofMetric gm = metric;  // `g` is the ghost width in this scope
     Kokkos::parallel_for(
-        "vof::mc::area",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::mc::area", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i0 = L3(x, y, z, e);
           ar(i0) = 0.0;
@@ -186,9 +184,7 @@ class VofMcArea {
     const double ieps = interfaceEps;
     Stats s;
     Kokkos::parallel_reduce(
-        "vof::mc::census",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::mc::census", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, long& nc, long& no, double& acc, double& oacc) {
           const long i = L3(x, y, z, e);
           const double a = ar(i);

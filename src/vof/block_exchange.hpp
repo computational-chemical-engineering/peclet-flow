@@ -51,6 +51,7 @@
 #endif
 
 #include "vof/block_container.hpp"
+#include "policy.hpp"
 
 namespace peclet::flow::vof {
 
@@ -390,7 +391,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
       SField f = loc[c];
       Kokkos::parallel_for(
           "vof::block::zero_patch",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
+          MDRange3<SExec>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
           KOKKOS_LAMBDA(int x, int y, int z) { f(L3(x + g, y + g, z + g, e)) = 0.0; });
     }
   }
@@ -404,7 +405,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
     SField s0 = loc[0], s1 = nc > 1 ? loc[1] : loc[0], s2 = nc > 2 ? loc[2] : loc[0];
     Kokkos::parallel_for(
         "vof::block::pack_patch",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n0, n1, n2}),
+        MDRange3<SExec>(SExec(), {0, 0, 0}, {n0, n1, n2}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(lo0 + x - o.x + g, lo1 + y - o.y + g, lo2 + z - o.z + g, e);
           const long k = base + x + static_cast<long>(y) * n0 + static_cast<long>(z) * n0 * n1;
@@ -432,7 +433,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
       const int cc = c;
       Kokkos::parallel_for(
           "vof::block::unpack_block",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n0, n1, n2}),
+          MDRange3<SExec>(SExec(), {0, 0, 0}, {n0, n1, n2}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long k = base + x + static_cast<long>(y) * n0 + static_cast<long>(z) * n0 * n1;
             d(L3(q0 + x, q1 + y, q2 + z, be)) = buf(nc * k + cc);
@@ -455,7 +456,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
         throw std::runtime_error("vof::block: movePiece is patch->block only");
       Kokkos::parallel_for(
           "vof::block::move_local",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n0, n1, n2}),
+          MDRange3<SExec>(SExec(), {0, 0, 0}, {n0, n1, n2}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             dst(L3(q0 + x, q1 + y, q2 + z, be)) =
                 src(L3(lo0 + x - o.x + g, lo1 + y - o.y + g, lo2 + z - o.z + g, e));
@@ -474,7 +475,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
       const int cc = c;
       Kokkos::parallel_for(
           "vof::block::pack_block",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n0, n1, n2}),
+          MDRange3<SExec>(SExec(), {0, 0, 0}, {n0, n1, n2}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long k = base + x + static_cast<long>(y) * n0 + static_cast<long>(z) * n0 * n1;
             buf(nc * k + cc) = src(L3(q0 + x, q1 + y, q2 + z, be));
@@ -495,7 +496,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
       const int opc = op;
       Kokkos::parallel_for(
           "vof::block::combine_block",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n0, n1, n2}),
+          MDRange3<SExec>(SExec(), {0, 0, 0}, {n0, n1, n2}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const double v = src(L3(q0 + x, q1 + y, q2 + z, be));
             const long i = L3(lo0 + x - o.x + g, lo1 + y - o.y + g, lo2 + z - o.z + g, e);
@@ -520,7 +521,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
       const int cc = c, opc = op;
       Kokkos::parallel_for(
           "vof::block::combine_buf",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n0, n1, n2}),
+          MDRange3<SExec>(SExec(), {0, 0, 0}, {n0, n1, n2}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long k = base + x + static_cast<long>(y) * n0 + static_cast<long>(z) * n0 * n1;
             const double v = buf(nc * k + cc);

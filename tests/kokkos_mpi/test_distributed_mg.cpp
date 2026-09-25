@@ -111,8 +111,7 @@ struct DistMG {
     double s = 0;
     C3 e = v.e;
     Kokkos::parallel_reduce(
-        "ms",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(sp, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        "ms", peclet::flow::MDRange3<CCExec>(sp, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z, double& a) {
           a += f((long)x + (long)y * e.x + (long)z * (long)e.x * e.y);
         },
@@ -127,8 +126,7 @@ struct DistMG {
     C3 e = v.e;
     CCField ff = f;
     Kokkos::parallel_for(
-        "rm",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(sp, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        "rm", peclet::flow::MDRange3<CCExec>(sp, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           ff((long)x + (long)y * e.x + (long)z * (long)e.x * e.y) -= mean;
         });

@@ -20,6 +20,7 @@
 #include <string>
 
 #include "mac_cutcell.hpp"
+#include "policy.hpp"
 
 namespace peclet::flow {
 
@@ -48,7 +49,7 @@ struct Closure {
 // Apply one closure over the inner cells (ghosts untouched — refilled by the field's own exchange).
 inline void applyClosure(const Closure& cl, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   const ClosureKind kind = cl.kind;
   CCField out = cl.out;
   CCConst in0 = cl.in0, in1 = cl.in1;
@@ -127,7 +128,7 @@ inline void applyClosureFaceGhost(const Closure& cl, C3 e, int g, int a, int sid
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = st[a], sb = st[b], sc = st[c];
   const int lo = (side == 0) ? 0 : (dims[a] - g);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::apply_closure_face_ghost", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int j0, int j1) {

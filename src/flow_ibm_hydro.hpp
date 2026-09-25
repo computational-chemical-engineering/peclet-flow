@@ -54,7 +54,7 @@ std::vector<double> Solver<Grid>::hydroForceTorque() {
   auto cen = instCenD_;
   const auto box = sceneQ_->view().box;
   const SceneMap sm = sceneMap();
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::hydro_force", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -211,8 +211,7 @@ std::vector<double> Solver<Grid>::hydroForceTorqueReaction() {
     const double kRc = kR[c];
     Kokkos::parallel_for(
         "peclet::flow::hydro_reaction",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
+        MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long st[3] = {1, e.x, (long)e.x * e.y};
           const long i = (long)x + (long)y * st[1] + (long)z * st[2];
@@ -271,8 +270,7 @@ std::vector<double> Solver<Grid>::hydroForceTorqueReaction() {
     auto ang = instAngD_;
     Kokkos::parallel_for(
         "peclet::flow::hydro_reaction_torque_transpose",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
+        MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
           const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -335,8 +333,7 @@ std::vector<double> Solver<Grid>::hydroForceTorqueReaction() {
       const double kP = u_.vol / u_.hp[c];
       Kokkos::parallel_for(
           "peclet::flow::hydro_reaction_owner_flux",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                         {e.x - G, e.y - G, e.z - G}),
+          MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
             const long j = i + strd;  // the +s neighbour: visit once
@@ -417,8 +414,7 @@ std::array<long, 3> Solver<Grid>::fluidMomentumCells() {
     long n = 0;
     Kokkos::parallel_reduce(
         "peclet::flow::fluid_cells",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
+        MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           if (mk(i) <= 0.5)
@@ -451,8 +447,7 @@ std::vector<double> Solver<Grid>::reactionBudgetTerms() {
     double su = 0.0, sa = 0.0;
     Kokkos::parallel_reduce(
         "peclet::flow::budget_terms",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G},
-                                                       {e.x - G, e.y - G, e.z - G}),
+        MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z, double& au, double& aa) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           if (mk(i) > 0.5)
@@ -486,7 +481,7 @@ std::array<double, 3> Solver<Grid>::wallAreaProbe() {
   double sx = 0, sy = 0, sz = 0;
   Kokkos::parallel_reduce(
       "peclet::flow::wall_area_probe",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& ax, double& ay, double& az) {
         const long st[3] = {1, e.x, (long)e.x * e.y};
         const long i = (long)x + (long)y * st[1] + (long)z * st[2];
@@ -518,7 +513,7 @@ double Solver<Grid>::wallFluxImbalance() {
   double sum = 0.0;
   Kokkos::parallel_reduce(
       "peclet::flow::wall_flux_sum",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+      MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;

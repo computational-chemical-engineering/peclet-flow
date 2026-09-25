@@ -248,8 +248,7 @@ void Solver<Grid>::applyDomainWallGeometry(int mask) {
   CCField of[3] = {vofAdv_.faceOpenness(0), vofAdv_.faceOpenness(1), vofAdv_.faceOpenness(2)};
   CCField ofx = of[0], ofy = of[1], ofz = of[2];
   Kokkos::parallel_for(
-      "peclet::flow::vof_domain_wall_geom",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+      "peclet::flow::vof_domain_wall_geom", MDRange3<CCExec>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         const int gx = x - g + org.x, gy = y - g + org.y, gz = z - g + org.z;
@@ -285,8 +284,7 @@ void Solver<Grid>::imposeDomainWallKind(int mask) {
   const int g = kVofG, mk = mask;
   CCField kd = vofAdv_.kindDouble();
   Kokkos::parallel_for(
-      "peclet::flow::vof_domain_wall_kind",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+      "peclet::flow::vof_domain_wall_kind", MDRange3<CCExec>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         const int gi[3] = {x - g + org.x, y - g + org.y, z - g + org.z};
@@ -325,8 +323,7 @@ void Solver<Grid>::vofExtendWallBand(CCField f, int mask) {
       CCField ff = f;
       Kokkos::parallel_for(
           "peclet::flow::vof_extend_wall_band",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(CCExec(), {0, 0}, {dims[b], dims[c]}),
-          KOKKOS_LAMBDA(int p0, int p1) {
+          MDRange2<CCExec>(CCExec(), {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
             const long base = (long)p0 * sb + (long)p1 * sc;
             ff(base + (long)i3 * sa) = ff(base + (long)i2 * sa);
           });
@@ -345,8 +342,7 @@ void Solver<Grid>::zeroSolidColour() {
   CCConst sl = CCConst(vofSolidG2_);
   const int ex = e_.x, ey = e_.y, g = G;
   Kokkos::parallel_for(
-      "peclet::flow::vof_zero_solid",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
+      "peclet::flow::vof_zero_solid", MDRange3<CCExec>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey;
         if (sl(i) > 0.5)
@@ -533,9 +529,7 @@ void Solver<Grid>::harvestVofBlockUnion() {
     const int g = kVofG;
     SField un = vofAdv_.colour(), sm = vofBlkS_, ce = vofBlkCeff_;
     Kokkos::parallel_for(
-        "vof::block::tent",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + nx_, g + ny_, g + nz_}),
+        "vof::block::tent", MDRange3<SExec>(SExec(), {g, g, g}, {g + nx_, g + ny_, g + nz_}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           const double sv = sm(i);
@@ -565,8 +559,7 @@ void Solver<Grid>::updateVofBlockOverlap() {
   long nc = 0;
   Kokkos::parallel_reduce(
       "vof::block::overlap_census",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                    {g + nx_, g + ny_, g + nz_}),
+      MDRange3<SExec>(SExec(), {g, g, g}, {g + nx_, g + ny_, g + nz_}),
       KOKKOS_LAMBDA(int x, int y, int z, double& m, double& a, long& c) {
         const double sv = sm(L3(x, y, z, e));
         m = Kokkos::fmax(m, sv);
@@ -643,7 +636,7 @@ void Solver<Grid>::addCsfRhs(int c) {
   // `w_a = 1/h_a'^2` — the same symbol Phase 2 puts on `-(P(i) - P(i - s_a))`. Exactly 1.0 on
   // every isotropic run, so `x / 1.0 == x` keeps this kernel bit-identical.
   const double sig = sigmaCsf_, h = 1.0 / u_.w[c];
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "csf_rhs", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -666,7 +659,7 @@ void Solver<Grid>::addCsfRhsCellInterp(int c) {
           kb = CCConst(kappaBranch_);
   const long strd = strideOf(c);
   const double sig = sigmaCsf_, h = 1.0 / u_.w[c];  // the ablation takes the same weight (V3.1)
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "csf_rhs_cellinterp", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -688,7 +681,7 @@ void Solver<Grid>::addCsfRhsBlocks(int c) {
   C3 e = e_;
   CCField bb = C[c].b;
   CCConst rs = CCConst(C[c].rscale), fb = CCConst(csfBlkF_[c]);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "csf_rhs_blocks", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -707,7 +700,7 @@ typename Solver<Grid>::CsfDiagnostics Solver<Grid>::csfDiagnostics() {
   C3 e = e_;
   CCConst cv = CCConst(cField_), kp = CCConst(kappaField_), kb = CCConst(kappaBranch_);
   const double sig = sigmaCsf_, eps = csfInterfaceEps_;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   for (int c = 0; c < 3; ++c) {
     const double h = 1.0 / u_.w[c];  // the V3.1 per-axis gradient weight of this component
     const long strd = strideOf(c);
@@ -841,8 +834,7 @@ double Solver<Grid>::vofSolidColourSum() {
   const int ex = e_.x, ey = e_.y, g = G;
   double acc = 0.0;
   Kokkos::parallel_reduce(
-      "peclet::flow::vof_solid_sum",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
+      "peclet::flow::vof_solid_sum", MDRange3<CCExec>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
       KOKKOS_LAMBDA(int x, int y, int z, double& a) {
         const long i = (long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey;
         if (sl(i) > 0.5)
@@ -1221,8 +1213,7 @@ void Solver<Grid>::applyContactAngle() {
     const int g = kVofG;
     CCField sd = vofAdv_.wallSdf();
     Kokkos::parallel_for(
-        "peclet::flow::vof_wall_sdf_domain",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        "peclet::flow::vof_wall_sdf_domain", MDRange3<CCExec>(CCExec(), {0, 0, 0}, {e.x, e.y, e.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           const double d = vofWallPlaneSdf(x - g + org.x, y - g + org.y, z - g + org.z, gs, wet);
@@ -1274,8 +1265,7 @@ void Solver<Grid>::buildVofCellVelocity() {
     const long sc = st[c];
     const int ex = e_.x, ey = e_.y, g = G;
     Kokkos::parallel_for(
-        "peclet::flow::vof_dyn_cellvel",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
+        "peclet::flow::vof_dyn_cellvel", MDRange3<CCExec>(CCExec(), {0, 0, 0}, {nx_, ny_, nz_}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey;
           t(i) = 0.5 * (u(i) + u(i + sc));
@@ -1395,9 +1385,9 @@ void Solver<Grid>::prepareVofBlocks() {
   const std::array<bool, 3> per{vofAxisPeriodic(0), vofAxisPeriodic(1), vofAxisPeriodic(2)};
   vofBlocks_->init(vofGlobalSize(), per, rank, size, 1.0);  // flow works in cell units
   // The anisotropic metric: `pushVofMetric` runs from `refreshUnitDerived`, which in the documented
-  // order (Solver(extent) -> set_rho -> ... -> enable_vof_blocks) fires BEFORE the block set exists,
-  // so the set is created here with the metric already in force (review2 finding 1: the block CSF
-  // silently ran on the unit metric on every anisotropic box).
+  // order (Solver(extent) -> set_rho -> ... -> enable_vof_blocks) fires BEFORE the block set
+  // exists, so the set is created here with the metric already in force (review2 finding 1: the
+  // block CSF silently ran on the unit metric on every anisotropic box).
   vofBlocks_->setMetric(u_.vofMetric());
   vofBlocks_->cflLimit = vofCflLimit_;
   // vof_overlap_design §12.1: the block advectors run the SAME wisp guard as the global one (the
@@ -2069,7 +2059,7 @@ void Solver<Grid>::phaseDensityRange(double& rlo, double& rhi) {
   CCExec space;
   C3 e = e_;
   double lo = 1e300, hi = -1e300;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   // A closure-driven rho field is produced by updateProperties() at the head of the step, so
   // before the FIRST step it is still all zeros and a naive min+max would report 0 — and this is
   // a diagnostic users call while choosing dt, i.e. exactly then. Refresh and retry once in that

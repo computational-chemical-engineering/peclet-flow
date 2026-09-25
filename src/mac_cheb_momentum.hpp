@@ -28,6 +28,7 @@
 
 #include "mac_cutcell_mg.hpp"  // FPC
 #include "mac_ibm.hpp"         // CCField/CCConst/CCExec/C3
+#include "policy.hpp"
 
 namespace peclet::flow {
 
@@ -41,7 +42,7 @@ inline void ibmStencilJacobiBounds(MC AC, MC AW, MC AE, MC AS, MC AN, MC AB, MC 
                                    CCConst solidmask, C3 e, int g, double& lo, double& hi) {
   CCExec space;
   const bool hasMask = (solidmask.extent(0) != 0);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   const MD pol(space, {g, g, g}, {e.x - g, e.y - g, e.z - g});
   double rlo = 0.0, rhi = 0.0;
   Kokkos::parallel_reduce(
@@ -88,7 +89,7 @@ inline void ibmChebUpdate(CCField x, CCField d, CCConst r, FPC AC, CCConst solid
                           double alpha, double beta) {
   CCExec space;
   const bool hasMask = (solidmask.extent(0) != 0);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::cheb_update", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {

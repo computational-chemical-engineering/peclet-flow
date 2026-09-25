@@ -241,8 +241,7 @@ void Solver<Grid>::patchScalarDirichletFaceVar(CCField AC, CCField band, CCField
   const int aInner = (side == 0) ? G : (G + na - 1);
   CCExec space;
   Kokkos::parallel_for(
-      "peclet::flow::scalar_bc_stencil_var",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {G, G}, {G + nt1, G + nt2}),
+      "peclet::flow::scalar_bc_stencil_var", MDRange2<CCExec>(space, {G, G}, {G + nt1, G + nt2}),
       KOKKOS_LAMBDA(int j1, int j2) {
         const long i = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
         const double D = kc(i) * wa;  // V5.4: this axis's Laplacian weight (1.0 isotropic)
@@ -265,8 +264,7 @@ void Solver<Grid>::patchScalarDirichletFace(CCField AC, CCField band, double Din
   const int aInner = (side == 0) ? G : (G + na - 1);
   CCExec space;
   Kokkos::parallel_for(
-      "peclet::flow::scalar_bc_stencil",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {G, G}, {G + nt1, G + nt2}),
+      "peclet::flow::scalar_bc_stencil", MDRange2<CCExec>(space, {G, G}, {G + nt1, G + nt2}),
       KOKKOS_LAMBDA(int j1, int j2) {
         const long i = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
         // base build put band(i) = -D*open_face and A_C += D*open_face; force the face fully open
@@ -290,8 +288,7 @@ void Solver<Grid>::applyScalarBcFace(CCField c, int a, int side, int type, doubl
   const int dir = (side == 0) ? -1 : +1;              // toward the ghost
   CCExec space;
   Kokkos::parallel_for(
-      "peclet::flow::scalar_bc_face",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {G, G}, {G + nt1, G + nt2}),
+      "peclet::flow::scalar_bc_face", MDRange2<CCExec>(space, {G, G}, {G + nt1, G + nt2}),
       KOKKOS_LAMBDA(int j1, int j2) {
         const long base = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
         for (int L = 1; L <= 2; ++L) {

@@ -33,7 +33,8 @@
 #include <stdexcept>
 #include <vector>
 
-#include "mac_stencils.hpp"   // peclet::flow::SExec, SField, I3, L3
+#include "mac_stencils.hpp"  // peclet::flow::SExec, SField, I3, L3
+#include "policy.hpp"
 #include "vof/advect_wy.hpp"  // wyIsMixed, wyReconstructCell
 #include "vof/curvature.hpp"
 #include "vof/surface_tension.hpp"  // csfKappaDefined
@@ -628,8 +629,8 @@ class VofCurvature {
       // Every cell ends with exactly the value the dense kernel would have written.
       Kokkos::parallel_for(
           "vof::curv::planes_zero",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g - gr, g - gr, g - gr},
-                                                        {g + n.x + gr, g + n.y + gr, g + n.z + gr}),
+          MDRange3<SExec>(SExec(), {g - gr, g - gr, g - gr},
+                          {g + n.x + gr, g + n.y + gr, g + n.z + gr}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long i = L3(x, y, z, e);
             mx(i) = 0.0;
@@ -645,8 +646,8 @@ class VofCurvature {
     }
     Kokkos::parallel_for(
         "vof::curv::planes",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g - gr, g - gr, g - gr},
-                                                      {g + n.x + gr, g + n.y + gr, g + n.z + gr}),
+        MDRange3<SExec>(SExec(), {g - gr, g - gr, g - gr},
+                        {g + n.x + gr, g + n.y + gr, g + n.z + gr}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           if (!vofIsInterface(c(i), ieps)) {
@@ -679,9 +680,7 @@ class VofCurvature {
       // and an interfacial one at whatever the shared body writes -- the dense kernel's outcome,
       // cell for cell.
       Kokkos::parallel_for(
-          "vof::curv::hf_reset",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                        {g + n.x, g + n.y, g + n.z}),
+          "vof::curv::hf_reset", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long i = L3(x, y, z, e);
             kap(i) = 0.0;
@@ -696,9 +695,7 @@ class VofCurvature {
       return;
     }
     Kokkos::parallel_for(
-        "vof::curv::hf",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::curv::hf", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           curvHeightCell(L3(x, y, z, e), c, mx, my, mz, al, kap, br, s0, s1, s2, mtol, ptW, ieps,
                          forceFb, oneDir, useFit, gm, peps);
@@ -727,9 +724,7 @@ class VofCurvature {
       return;
     }
     Kokkos::parallel_for(
-        "vof::curv::pv",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::curv::pv", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           curvFallbackCell(L3(x, y, z, e), c, mx, my, mz, al, kap, br, sy, sz, gr, dW, cmin, ieps,
                            gm);
@@ -763,9 +758,7 @@ class VofCurvature {
           cnt);
     } else {
       Kokkos::parallel_reduce(
-          "vof::curv::clip",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                        {g + n.x, g + n.y, g + n.z}),
+          "vof::curv::clip", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
           KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
             const long i = L3(x, y, z, e);
             // `!(|k| <= km)` rather than `|k| > km`: a NaN curvature is clipped (to +km, the sign
@@ -787,9 +780,7 @@ class VofCurvature {
     SField br = branch_;
     Stats s;
     Kokkos::parallel_reduce(
-        "vof::curv::census",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::curv::census", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, long& ni, long& n1, long& n2, long& n2b, long& n3,
                       long& n4, long& n5) {
           const int b = static_cast<int>(br(L3(x, y, z, e)));

@@ -889,8 +889,7 @@ void Solver<Grid>::uploadVelocity(const std::vector<double>& uu, const std::vect
             src[c]->data(), src[c]->size()));
     CCField u = C[c].u;
     Kokkos::parallel_for(
-        "peclet::flow::upload_velocity",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+        "peclet::flow::upload_velocity", MDRange3<CCExec>(space, {0, 0, 0}, {nx, ny, nz}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           u((long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey) =
               din((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny);
@@ -981,8 +980,7 @@ template <class Grid>
 void Solver<Grid>::copyBlockShifted(CCField dst, C3 de, CCConst src, C3 se, int off) {
   CCExec space;
   Kokkos::parallel_for(
-      "peclet::flow::copyBlockShifted",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {de.x, de.y, de.z}),
+      "peclet::flow::copyBlockShifted", MDRange3<CCExec>(space, {0, 0, 0}, {de.x, de.y, de.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long di = (long)x + (long)y * de.x + (long)z * (long)de.x * de.y;
         const long si =
@@ -1049,8 +1047,7 @@ void Solver<Grid>::fillAxis(CCField f, int axis) {
   const int N = N3[a];
   CCField ff = f;
   Kokkos::parallel_for(
-      "peclet::flow::ibm_pfill",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+      "peclet::flow::ibm_pfill", MDRange2<CCExec>(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
         const long base = (long)p0 * sb + (long)p1 * sc;
         for (int gl = 0; gl < G; ++gl) {
@@ -1163,7 +1160,7 @@ void Solver<Grid>::buildAdvStencil(int c) {
   const bool ufa = ufAdvVelocity();
   CCConst U = ufa ? openFaceView(0) : advVelView(0), V = ufa ? openFaceView(1) : advVelView(1),
           W = ufa ? openFaceView(2) : advVelView(2);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "advstencil", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -1216,7 +1213,7 @@ void Solver<Grid>::buildAdvStencilVar(int c) {
   const double rhoC = rho_;
   CCConst rf = vr ? CCConst(effRhoField()) : CCConst();
   const long sc = strideOf(c);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "advstencil_var", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -1248,8 +1245,7 @@ double Solver<Grid>::maxAbsDiffInner(CCConst a, CCConst b) {
   C3 e = e_;
   double m = 0;
   Kokkos::parallel_reduce(
-      "maxdiff",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+      "maxdiff", MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         const double d = Kokkos::fabs(a(i) - b(i));
@@ -1757,8 +1753,7 @@ double Solver<Grid>::minMuInner() {
   CCConst f = CCConst(muField_);
   double m = 1e300;
   Kokkos::parallel_reduce(
-      "minmu",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+      "minmu", MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         if (f(i) < acc)
@@ -1781,8 +1776,7 @@ double Solver<Grid>::reduceMaxAbsInner(CCConst f) {
   C3 e = e_;
   double m = 0;
   Kokkos::parallel_reduce(
-      "maxabs",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+      "maxabs", MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         const double a = Kokkos::fabs(f(i));

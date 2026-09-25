@@ -127,6 +127,7 @@
 #include <Kokkos_Core.hpp>
 #include <stdexcept>
 
+#include "policy.hpp"
 #include "vof/advect_wy.hpp"
 #include "vof/cutcell.hpp"
 
@@ -300,7 +301,7 @@ class MomentumConsistentAdvector {
     const I3 e = e_, n = n_;
     const int g = g_;
     const double rg = rhoG_, rl = rhoL_;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     MD pol(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z});
     double gmin = 1e300;
     for (int c = 0; c < 3; ++c) {
@@ -355,7 +356,7 @@ class MomentumConsistentAdvector {
     SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
            al = w.planeAlpha();
     const double weps = w.wispEps;  // WO-R2 item 4: the colour reconstruction's own tolerance
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     for (int comp = 0; comp < 3; ++comp) {
       const long se = strideOf(comp);
       const int ec = comp;
@@ -383,7 +384,7 @@ class MomentumConsistentAdvector {
     const int g = g_;
     const bool cellFlag = useCellDilationFlag;
     UCField ccFlag = w.dilationFlag();
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     const double rg = rhoG_, rl = rhoL_;
     for (int comp = 0; comp < 3; ++comp) {
       const long se = strideOf(comp);
@@ -436,8 +437,7 @@ class MomentumConsistentAdvector {
     long nclamp = 0;
     Kokkos::parallel_reduce(
         "vof::mom::flux",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {lo3[0], lo3[1], lo3[2]},
-                                                      {hi3[0], hi3[1], hi3[2]}),
+        MDRange3<SExec>(SExec(), {lo3[0], lo3[1], lo3[2]}, {hi3[0], hi3[1], hi3[2]}),
         KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
           const long p = L3(x, y, z, e);
           // The shifted CV's face velocity is the `comp`-average of the two staggered faces; summed
@@ -532,9 +532,7 @@ class MomentumConsistentAdvector {
     UCField fl = flag_[comp];
     long nfloor = 0;
     Kokkos::parallel_reduce(
-        "vof::mom::update",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::mom::update", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
           const long i = L3(x, y, z, e);
           const double aP = af(i), aM = af(i - sd);
@@ -614,7 +612,7 @@ class MomentumConsistentAdvector {
            al = w.planeAlpha(), ep = w.epsFraction();
     UCField kd = w.cellKind();
     const double weps = w.wispEps;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     for (int comp = 0; comp < 3; ++comp) {
       const long se = strideOf(comp);
       const int ec = comp;
@@ -670,8 +668,7 @@ class MomentumConsistentAdvector {
     long nclamp = 0;
     Kokkos::parallel_reduce(
         "vof::mom::flux_cut",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {lo3[0], lo3[1], lo3[2]},
-                                                      {hi3[0], hi3[1], hi3[2]}),
+        MDRange3<SExec>(SExec(), {lo3[0], lo3[1], lo3[2]}, {hi3[0], hi3[1], hi3[2]}),
         KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
           const long p = L3(x, y, z, e);
           // The CV's face open area: the AXIAL face is the cell-centre plane of cell p, so its
@@ -765,9 +762,7 @@ class MomentumConsistentAdvector {
     UCField fl = flag_[comp];
     long nfloor = 0;
     Kokkos::parallel_reduce(
-        "vof::mom::update_cut",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                      {g + n.x, g + n.y, g + n.z}),
+        "vof::mom::update_cut", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
           const long i = L3(x, y, z, e);
           const double ecv = cvEps(ep, kd, i, se);

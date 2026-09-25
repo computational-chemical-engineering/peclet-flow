@@ -198,8 +198,7 @@ void Solver<Grid>::setSolidUploadSdf(CCField din) {
     CCField sdf = sdf_;
     CCConst dinC(din);
     Kokkos::parallel_for(
-        "peclet::flow::sdf_fill_inner",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+        "peclet::flow::sdf_fill_inner", MDRange3<CCExec>(space, {0, 0, 0}, {nx, ny, nz}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           sdf((long)(x + g) + (long)(y + g) * ex + (long)(z + g) * (long)ex * ey) =
               dinC((std::size_t)x + (std::size_t)y * nx + (std::size_t)z * (std::size_t)nx * ny);
@@ -215,8 +214,7 @@ void Solver<Grid>::setSolidUploadSdf(CCField din) {
     const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
     CCField sdf = sdf_;
     Kokkos::parallel_for(
-        "peclet::flow::sdf_periodic_wrap",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {ex, ey, ez}),
+        "peclet::flow::sdf_periodic_wrap", MDRange3<CCExec>(space, {0, 0, 0}, {ex, ey, ez}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
                     iz = (((z - g) % nz) + nz) % nz;
@@ -371,8 +369,7 @@ void Solver<Grid>::setSolidBuildOpenness() {
       const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
       CCField o = dst[f];
       Kokkos::parallel_for(
-          "peclet::flow::open_override_wrap",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {ex, ey, ez}),
+          "peclet::flow::open_override_wrap", MDRange3<CCExec>(space, {0, 0, 0}, {ex, ey, ez}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
                       iz = (((z - g) % nz) + nz) % nz;
@@ -419,7 +416,7 @@ void Solver<Grid>::setSolidBuildOpenness() {
       const long sa = (a == 0) ? 1 : (a == 1) ? (long)e.x : (long)e.x * e.y;
       Kokkos::parallel_for(
           "peclet::flow::fluid_only_openness",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(CCExec(), {1, 1, 1}, {e.x, e.y, e.z}),
+          MDRange3<CCExec>(CCExec(), {1, 1, 1}, {e.x, e.y, e.z}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
             if (sd(i) < 0.0 || sd(i - sa) < 0.0)
@@ -494,8 +491,7 @@ void Solver<Grid>::bridgeOutflowFacePlanes() {
     CCField d = dst[a];
     CCConst sv = CCConst(src[a]);
     Kokkos::parallel_for(
-        "peclet::flow::bridge_outflow_plane",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(CCExec(), {0, 0}, {nb, nc}),
+        "peclet::flow::bridge_outflow_plane", MDRange2<CCExec>(CCExec(), {0, 0}, {nb, nc}),
         KOKKOS_LAMBDA(int p0, int p1) {
           d((long)(p0 + 1) * dsb + (long)(p1 + 1) * dsc + dbf * dsa) =
               sv((long)(p0 + G) * ssb + (long)(p1 + G) * ssc + sbf * ssa);
@@ -541,8 +537,7 @@ void Solver<Grid>::checkSealedInflowCells() {
       const int cA = a, cB = b, cC = c, cS = s;
       long sealed = 0;
       Kokkos::parallel_reduce(
-          "peclet::flow::sealed_inflow",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(CCExec(), {0, 0}, {nb, nc}),
+          "peclet::flow::sealed_inflow", MDRange2<CCExec>(CCExec(), {0, 0}, {nb, nc}),
           KOKKOS_LAMBDA(int pb, int pc, long& acc) {
             const long i = base + (long)(pb + G) * sb + (long)(pc + G) * sc;
             if (oc[cA](i + inflowFace) <= 0.0)
@@ -608,8 +603,7 @@ void Solver<Grid>::setSolidStarOverlay() {
       CCField o1 = oa1[a];
       const long sa2 = (a == 0) ? 1 : (a == 1) ? (long)e2.x : (long)e2.x * e2.y;
       Kokkos::parallel_for(
-          "peclet::flow::star_filter_bridge",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+          "peclet::flow::star_filter_bridge", MDRange3<CCExec>(space, {0, 0, 0}, {nx_, ny_, nz_}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long i2 =
                 (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
@@ -816,8 +810,7 @@ void Solver<Grid>::setSolidGhostProjectionOverlay(CCField din) {
       CCExec space;
       const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
       Kokkos::parallel_for(
-          "peclet::flow::sdfgp_wrap",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {ex, ey, ez}),
+          "peclet::flow::sdfgp_wrap", MDRange3<CCExec>(space, {0, 0, 0}, {ex, ey, ez}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
                       iz = (((z - g) % nz) + nz) % nz;

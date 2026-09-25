@@ -17,6 +17,7 @@
 #include "cut_cell_ibm.hpp"    // IbmOverlayT, ibmFillEntry
 #include "mac_cutcell.hpp"     // peclet::flow::C3, peclet::flow::ccSampleExt, CCConst
 #include "mac_cutcell_mg.hpp"  // MReal (G.6: the overlay follows the operator storage precision)
+#include "policy.hpp"
 
 namespace peclet::flow {
 
@@ -100,7 +101,7 @@ inline int buildIbmOverlay(CCConst sdf, C3 ext, int g, Off3 off, int bc_type, co
   int* skipPtr = sandwichSkipped.data();
   if (sandwichSkipped.data() != nullptr)
     Kokkos::deep_copy(space, sandwichSkipped, 0);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::ibm_build_overlay", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -188,7 +189,7 @@ inline void ibmVolfrac(CCField theta, CCConst sdf, C3 ext, Off3 off, bool aniso 
                        double hpx = 1.0, double hpy = 1.0, double hpz = 1.0, double wx = 1.0,
                        double wy = 1.0, double wz = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   if (!aniso) {
     Kokkos::parallel_for(
         "peclet::flow::ibm_volfrac", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
@@ -247,7 +248,7 @@ inline void ibmVolfrac(CCField theta, CCConst sdf, C3 ext, Off3 off, bool aniso 
 // stencil becomes a wall-resolved discretization.
 inline void ibmSolidMask(CCField mask, CCConst sdf, C3 ext, Off3 off) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::ibm_solid", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -260,7 +261,7 @@ inline void ibmSolidMask(CCField mask, CCConst sdf, C3 ext, Off3 off) {
 // Clean-fluid-interior mask: 1 only at fluid cells with no solid neighbour (not cut, not solid).
 inline void ibmCleanFluidMask(CCField m, CCConst sdf, C3 ext, Off3 off) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::ibm_clean", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -312,7 +313,7 @@ inline void ibmRbgsStencilColor(CCField x, CCConst b, MC AC, MC AW, MC AE, MC AS
         });
     return;
   }
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::ibm_rbgs", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -373,7 +374,7 @@ inline double ibmRbgsStencilColorDu(CCField x, CCConst b, MC AC, MC AW, MC AE, M
         Kokkos::Max<double>(du));
     return du;
   }
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_reduce(
       "peclet::flow::ibm_rbgs_du", MD(space, {g, g, g}, {ext.x - g, ext.y - g, ext.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz, double& m) {
@@ -413,7 +414,7 @@ inline void ibmRbgsStencilColorBox(CCField x, CCConst b, MC AC, MC AW, MC AE, MC
     return;
   CCExec space;
   const bool hasMask = (solidmask.extent(0) != 0);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::ibm_rbgs_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -450,7 +451,7 @@ inline double ibmRbgsStencilColorDuBox(CCField x, CCConst b, MC AC, MC AW, MC AE
   CCExec space;
   const bool hasMask = (solidmask.extent(0) != 0);
   double du = 0.0;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_reduce(
       "peclet::flow::ibm_rbgs_du_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
       KOKKOS_LAMBDA(int lx, int ly, int lz, double& m) {

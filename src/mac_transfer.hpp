@@ -11,6 +11,8 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
+#include "policy.hpp"
+
 namespace peclet::flow {
 
 using TExec = Kokkos::DefaultExecutionSpace;
@@ -25,7 +27,7 @@ struct T3 {
 // Averaging restriction: coarse[ic] = mean of the ratio^3 fine cells it covers.
 inline void restrict_(TField coarse, TConst fine, T3 cext, T3 fext, int g, T3 cinner, T3 ratio) {
   TExec space;
-  using MD = Kokkos::MDRangePolicy<TExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<TExec>;
   Kokkos::parallel_for(
       "peclet::flow::restrict", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
@@ -66,7 +68,7 @@ KOKKOS_INLINE_FUNCTION double trilerp(TConst c, double x, double y, double z, T3
 // pre-filled).
 inline void prolong(TField fine, TConst coarse, T3 fext, T3 cext, int g, T3 finner, T3 ratio) {
   TExec space;
-  using MD = Kokkos::MDRangePolicy<TExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<TExec>;
   Kokkos::parallel_for(
       "peclet::flow::prolong", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
       KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
@@ -82,7 +84,7 @@ inline void prolong(TField fine, TConst coarse, T3 fext, T3 cext, int g, T3 finn
 // Projection velocity correction: u -= grad(phi) on the staggered faces, over inner cells.
 inline void correct(TField u, TField v, TField w, TConst phi, T3 e, int g) {
   TExec space;
-  using MD = Kokkos::MDRangePolicy<TExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<TExec>;
   Kokkos::parallel_for(
       "peclet::flow::correct", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {

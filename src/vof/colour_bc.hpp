@@ -58,7 +58,8 @@
 
 #include <Kokkos_Core.hpp>
 
-#include "mac_stencils.hpp"   // peclet::flow::SExec, SField, I3, L3
+#include "mac_stencils.hpp"  // peclet::flow::SExec, SField, I3, L3
+#include "policy.hpp"
 #include "vof/advect_wy.hpp"  // UCField
 
 namespace peclet::flow::vof {
@@ -84,8 +85,7 @@ inline void buildOutsideMask(UCField m, I3 e, int g, I3 o, I3 gs, bool px, bool 
   const bool p0 = px, p1 = py, p2 = pz;
   const int q0 = gs.x, q1 = gs.y, q2 = gs.z;
   Kokkos::parallel_for(
-      "vof::buildOutsideMask",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+      "vof::buildOutsideMask", MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const int gx = x - g + o.x, gy = y - g + o.y, gz = z - g + o.z;
         const bool out = (!p0 && (gx < 0 || gx >= q0)) || (!p1 && (gy < 0 || gy >= q1)) ||
@@ -107,8 +107,7 @@ inline void bcColourConst(SField f, I3 e, int g, int a, int s, double value) {
   const int na = dims[a];
   const int lo = (s == 0) ? 0 : (na - g);
   Kokkos::parallel_for(
-      "vof::bcColourConst",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>(SExec(), {0, 0}, {dims[b], dims[c]}),
+      "vof::bcColourConst", MDRange2<SExec>(SExec(), {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
         const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
         for (int k = 0; k < g; ++k)
@@ -130,8 +129,7 @@ inline void bcColourProfile(SField f, I3 e, int g, int a, int s, SField prof, in
   const int na = dims[a];
   const int lo = (s == 0) ? 0 : (na - g);
   Kokkos::parallel_for(
-      "vof::bcColourProfile",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>(SExec(), {0, 0}, {dims[b], dims[c]}),
+      "vof::bcColourProfile", MDRange2<SExec>(SExec(), {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
         const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
         const double v = prof(static_cast<long>(p0) * nc + p1);
@@ -162,8 +160,7 @@ inline void bcColourBackflow(SField f, I3 e, int g, int a, int s, SField un, dou
   const int fa = (s == 0) ? (g - 1) : (na - g - 1);  // a-index of the cell owning the boundary face
   const double sgn = (s == 0) ? 1.0 : -1.0;          // sign of an INWARD normal velocity
   Kokkos::parallel_for(
-      "vof::bcColourBackflow",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>(SExec(), {0, 0}, {dims[b], dims[c]}),
+      "vof::bcColourBackflow", MDRange2<SExec>(SExec(), {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
         const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
         if (sgn * un(base + static_cast<long>(fa) * sa) <= 0.0)

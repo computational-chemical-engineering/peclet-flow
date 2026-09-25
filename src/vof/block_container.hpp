@@ -74,6 +74,7 @@
 #include "vof/colour_field.hpp"
 #include "vof/curvature_field.hpp"
 #include "vof/surface_tension.hpp"
+#include "policy.hpp"
 
 namespace peclet::flow::vof {
 
@@ -604,7 +605,7 @@ class VofBlockSet {
       SField cf = nb.adv_.colour();
       Kokkos::parallel_for(
           "vof::block::seed_sphere",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+          MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const double gx = (x - g + o.x) * hh, gy = (y - g + o.y) * hh, gz = (z - g + o.z) * hh;
             cf(L3(x, y, z, e)) = sphereCellFraction(cx, cy, cz, r, gx, gy, gz, hh, subLevels);
@@ -759,7 +760,7 @@ class VofBlockSet {
       const long strd = (c == 0) ? 1 : (c == 1 ? sy : sz);
       Kokkos::parallel_for(
           "vof::block::csf_force",
-          Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+          MDRange3<SExec>(SExec(), {g, g, g},
                                                         {g + n.x, g + n.y, g + n.z}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long i = L3(x, y, z, e);
@@ -1003,7 +1004,7 @@ class VofBlockSet {
     SField c = b.adv_.colour();
     Kokkos::parallel_for(
         "vof::block::clip_seed",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
+        MDRange3<SExec>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const int gx = x + o.x, gy = y + o.y, gz = z + o.z;
           if (gx < lx || gx >= hx || gy < ly || gy >= hy || gz < lz || gz >= hz)
@@ -1021,7 +1022,7 @@ class VofBlockSet {
     // 1. every ghost cell -> 0 (the block's far field: C = 0, the continuous phase, by the margin).
     Kokkos::parallel_for(
         "vof::block::ghost_zero",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           if (x >= g && x < g + n.x && y >= g && y < g + n.y && z >= g && z < g + n.z)
             return;
@@ -1190,7 +1191,7 @@ class VofBlockSet {
     const double eps = bubbleEps > wispEps ? bubbleEps : wispEps;  // §12.2
     SField c = b.adv_.colour();
     int lo[3] = {n.x, n.y, n.z}, hi[3] = {-1, -1, -1};
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     MD pol(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z});
     Kokkos::parallel_reduce(
         "vof::block::bbox_lo", pol,
@@ -1270,7 +1271,7 @@ class VofBlockSet {
     SField src = b.adv_.colour(), dst = fresh.colour();
     Kokkos::parallel_for(
         "vof::block::recentre_copy",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {dn.x, dn.y, dn.z}),
+        MDRange3<SExec>(SExec(), {0, 0, 0}, {dn.x, dn.y, dn.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const int gx = x + dx, gy = y + dy, gz = z + dz;
           int lx = gx - sx, ly = gy - sy, lz = gz - sz;
@@ -1638,7 +1639,7 @@ class VofBlockSet {
     double v = 0.0;
     Kokkos::parallel_reduce(
         "vof::block::out_of_box",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+        MDRange3<SExec>(SExec(), {g, g, g},
                                                       {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, double& a) {
           const int gx = x - g + sx, gy = y - g + sy, gz = z - g + sz;
@@ -1660,7 +1661,7 @@ class VofBlockSet {
     double v = 0.0;
     Kokkos::parallel_reduce(
         "vof::block::inner_sum",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+        MDRange3<SExec>(SExec(), {g, g, g},
                                                       {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, double& a) { a += c(L3(x, y, z, e)); }, v);
     Kokkos::fence();
@@ -1682,7 +1683,7 @@ class VofBlockSet {
     double a = 0.0;
     Kokkos::parallel_reduce(
         "vof::block::area",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
+        MDRange3<SExec>(SExec(), {g, g, g},
                                                       {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = L3(x, y, z, e);
@@ -1714,7 +1715,7 @@ class VofBlockSet {
     const int g = ghost_;
     const double hh = h_;
     SField c = b.adv_.colour();
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     MD pol(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z});
     double v = 0.0, mx = 0.0, my = 0.0, mz = 0.0;
     Kokkos::parallel_reduce(

@@ -23,9 +23,10 @@
 #include <string>
 #include <vector>
 
-#include "mac_cheb_momentum.hpp"    // ibmStencilJacobiBounds, ibmChebUpdate, ChebCoeffs
-#include "mac_cutcell_mg.hpp"       // restrictAvg, prolongAdd, FPV/FPC
-#include "mac_ibm.hpp"              // ibmRbgsStencilColor (pin smoother), MConst
+#include "mac_cheb_momentum.hpp"  // ibmStencilJacobiBounds, ibmChebUpdate, ChebCoeffs
+#include "mac_cutcell_mg.hpp"     // restrictAvg, prolongAdd, FPV/FPC
+#include "mac_ibm.hpp"            // ibmRbgsStencilColor (pin smoother), MConst
+#include "policy.hpp"
 #include "staggered_advection.hpp"  // fou_operator_aniso (upwind-convective coarse op)
 
 namespace peclet::flow {
@@ -36,7 +37,7 @@ inline void residualVarPin(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC 
                            FPC AB, FPC AT, CCConst pin, C3 e, int g) {
   CCExec space;
   const bool hasPin = (pin.extent(0) != 0);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::vmg_resid", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -60,7 +61,7 @@ inline void residualVarPin(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC 
 inline void prolongMasked(CCField fine, CCConst coarse, CCConst mask, C3 fext, C3 cext, int g,
                           C3 finner, C3 ratio, double eps) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::vmg_prolong_masked", MD(space, {0, 0, 0}, {finner.x, finner.y, finner.z}),
       KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
@@ -94,7 +95,7 @@ inline void buildVelocityStaircase(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV A
                                    CCConst theta, C3 e, int g, double bx, double by, double bz,
                                    double thresh, double idiag) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::vmg_staircase", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -120,7 +121,7 @@ inline void buildVelocityStaircase(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV A
 inline void pinSolidRows(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV AT, CCConst theta,
                          C3 e, int g, double thresh) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::vmg_pin_rows", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -141,7 +142,7 @@ inline void buildAdvCoarse(FPV AC, FPV AW, FPV AE, FPV AS, FPV AN, FPV AB, FPV A
                            CCConst V, CCConst W, int comp, C3 e, int g, double bx, double by,
                            double bz, double fouw, double sx, double sy, double sz, double idiag) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::vmg_adv_coarse", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -195,8 +196,7 @@ inline void boundaryFold(FPV AC, C3 e, int g, int a, int s, double beta) {
   const long sa = st[a], sb = st[b], sc = st[c];
   const int bic = (s == 0) ? g : (dims[a] - g - 1);  // boundary-adjacent inner cell along a
   Kokkos::parallel_for(
-      "peclet::flow::vmg_bc_fold",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+      "peclet::flow::vmg_bc_fold", MDRange2<CCExec>(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
         const long i = (long)p0 * sb + (long)p1 * sc + (long)bic * sa;
         AC(i) = (MReal)((double)AC(i) + beta);
@@ -214,8 +214,7 @@ inline void fillBcGhost(CCField x, C3 e, int g, int a, int s, int dirichlet) {
   const long sa = st[a], sb = st[b], sc = st[c];
   const int na = dims[a];
   Kokkos::parallel_for(
-      "peclet::flow::vmg_fill_bc_ghost",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+      "peclet::flow::vmg_fill_bc_ghost", MDRange2<CCExec>(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
         const long base = (long)p0 * sb + (long)p1 * sc;
         if (s == 0) {
@@ -239,8 +238,7 @@ inline void zeroPlane(CCField m, C3 e, int axis, int idx) {
   const int b = (axis + 1) % 3, c = (axis + 2) % 3;
   const long sa = st[axis], sb = st[b], sc = st[c];
   Kokkos::parallel_for(
-      "peclet::flow::vmg_zero_plane",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+      "peclet::flow::vmg_zero_plane", MDRange2<CCExec>(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) { m((long)p0 * sb + (long)p1 * sc + (long)idx * sa) = 0.0; });
 }
 
@@ -257,7 +255,7 @@ inline void thresholdMask(CCField m, CCConst theta,
 // max |a| over the inner cells of a G-ghosted block.
 inline double maxAbsInner(CCConst a, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   double m = 0.0;
   Kokkos::parallel_reduce(
       "peclet::flow::vmg_maxabs", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
@@ -273,7 +271,7 @@ inline double maxAbsInner(CCConst a, C3 e, int g) {
 // max |a - b| over the inner cells of a G-ghosted block (the V-cycle update norm).
 inline double maxAbsDiffInner(CCConst a, CCConst b, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   double m = 0.0;
   Kokkos::parallel_reduce(
       "peclet::flow::vmg_maxabsdiff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
@@ -969,8 +967,7 @@ class VelocityMG {
     const int N = N3[a];
     CCField ff = f;
     Kokkos::parallel_for(
-        "peclet::flow::vmg_pfill",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+        "peclet::flow::vmg_pfill", MDRange2<CCExec>(space, {0, 0}, {dims[b], dims[c]}),
         KOKKOS_LAMBDA(int p0, int p1) {
           const long base = (long)p0 * sb + (long)p1 * sc;
           for (int gl = 0; gl < G; ++gl) {

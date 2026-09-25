@@ -77,6 +77,7 @@
 // gpCenterGrad) stay here.
 #include "gauge_exact_gradient.hpp"  // gpCenterGrad (moved out: the production scheme needs it)
 #include "peclet/core/scheme/ghost_closure.hpp"
+#include "policy.hpp"
 
 namespace peclet::flow {
 
@@ -148,7 +149,7 @@ inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlayReal
   Kokkos::deep_copy(space, idMap, -1);
   const bool hasEx = tx.size() > 0;
   const bool ug = useGhost;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::gp_build_overlay", MD(space, {0, 0, 0}, {nn.x, nn.y, nn.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -230,7 +231,7 @@ inline int buildGpOverlay(CCConst sdf, C3 ext, int g, C3 nn, const GpOverlayReal
 /// CutcellMG hierarchy (coarsening, smoothing, GraphAMG bottom) runs on it unchanged.
 inline void gpBinaryOpenness(CCField ox, CCField oy, CCField oz, CCConst sdf, C3 ext) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::gp_binary_openness", MD(space, {0, 0, 0}, {ext.x, ext.y, ext.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {

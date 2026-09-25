@@ -14,6 +14,7 @@
 
 #include "mac_stencils.hpp"  // SField/SConst, I3, L3
 #include "mac_transfer.hpp"  // restrict_, prolong, T3
+#include "policy.hpp"
 
 namespace peclet::flow {
 
@@ -26,7 +27,7 @@ inline void mgPeriodicFill(SField f, I3 e, int N, int g) {
     const int b = (axis + 1) % 3, c = (axis + 2) % 3;
     const long sa = st[axis], sb = st[b], sc = st[c];
     SField ff = f;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>;
+    using MD = MDRange2<SExec>;
     Kokkos::parallel_for(
         "peclet::flow::mg_pfill", MD(space, {0, 0}, {dims[b], dims[c]}),
         KOKKOS_LAMBDA(int p0, int p1) {
@@ -104,7 +105,7 @@ class MgPoisson {
     const I3 e = L.e;
     const double h2 = L.h2;
     SField phi = L.phi, f = L.f;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     Kokkos::parallel_for(
         "peclet::flow::mg_smooth", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
@@ -131,7 +132,7 @@ class MgPoisson {
     const I3 e = L.e;
     const double h2 = L.h2;
     SField phi = L.phi, f = L.f, r = L.r;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     Kokkos::parallel_for(
         "peclet::flow::mg_resid", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {

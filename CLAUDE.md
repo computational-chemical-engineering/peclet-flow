@@ -75,18 +75,18 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 169 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 177 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-169 registered / **167 with `-LE bench`** (counted 2026-09-25): 46 from `tests/kokkos` — of
-which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 115
-from `tests/kokkos_mpi` (38 cases at np = 1, 2, 4 plus one np = 8 rung), and 8 Python ctests on
+177 registered / **175 with `-LE bench`** (counted 2026-09-25): 47 from `tests/kokkos` — of
+which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 121
+from `tests/kokkos_mpi` (40 cases at np = 1, 2, 4 plus one np = 8 rung), and 9 Python ctests on
 the module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
 `verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`, `colocated_open_boundary`,
-`cell_force_placement`, `no_env_knobs`, `no_float_operator_casts`). Always bound the OpenMP pool —
-an unbounded one on a many-core host is an hour-long trap.
+`cell_force_placement`, `no_env_knobs`, `no_float_operator_casts`, `iteration_order`). Always
+bound the OpenMP pool — an unbounded one on a many-core host is an hour-long trap.
 
 More verification lives in `scripts/verify_*_sdflow.py` and `validate_zick_homsy_sdflow.py` (the
 external ground truth), run with `PYTHONPATH=<tree>`. `tests/regression/sdflow_regression.py` is
@@ -192,7 +192,10 @@ decides a (1−φ) factor on published permeabilities.
   cell centres.
 - **Kokkos device code lives in `.hpp` compiled as C++** (the launch compiler routes it through
   `nvcc`/`hipcc`) — never a `.cu`. `parallel_for`/`parallel_reduce` over `Kokkos::View`,
-  `MDRangePolicy` for 3-D loops.
+  `MDRange3<Exec>` / `MDRange2<Exec>` (`src/policy.hpp`) for 3-D / plane loops, lambda `(x, y, z)`.
+  **Iteration order follows storage — x fastest on every backend, never Kokkos' default** (which
+  is z-fastest on OpenMP/Serial; `../docs/CONVENTIONS.md` §1). A bare `Kokkos::Rank<` /
+  `MDRangePolicy<` outside `policy.hpp` fails the ctest `iteration_order`.
 - **No environment variable changes a result** (`../docs/QUALITY_PLAN.md` D3, executed 2026-09-08
   in `ad917b1`). Every numerics-changing or algorithm-selecting read became a per-solver setter
   with the old unset behaviour as its default, or was deleted with the ablation it served; the

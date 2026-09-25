@@ -25,6 +25,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "mac_cutcell.hpp"  // CCField/CCConst, C3, CCExec, CCMem
+#include "policy.hpp"
 
 namespace peclet::flow {
 
@@ -73,7 +74,7 @@ inline int buildStarOverlay(CCConst sdf, CCConst ox, CCConst oy, CCConst oz, C3 
   CCExec space;
   Kokkos::deep_copy(counter, 0);
   const bool fill = ov.cell.extent(0) > 0;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::star_build", MD(space, {0, 0, 0}, {nn.x, nn.y, nn.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {

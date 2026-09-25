@@ -75,6 +75,7 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
+#include "policy.hpp"
 #include "vof/advect_wy.hpp"
 
 namespace peclet::flow::vof {
@@ -286,8 +287,7 @@ struct VofDynamicWetting {
     const double pe = pureEps, te = tanEps;
     const VofMetric gme = metric;  // `g` is the ghost width in this scope
     Kokkos::parallel_for(
-        "vof::dyn::measure",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        "vof::dyn::measure", MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           ucl(i) = 0.0;
@@ -414,8 +414,7 @@ struct VofDynamicWetting {
     const double ta = thetaA, tr = thetaR, mu = muLiquid, sg = sigma, lr = logRatio();
     const double tmin = thetaMin, tmax = thetaMax;
     Kokkos::parallel_for(
-        "vof::dyn::impose",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+        "vof::dyn::impose", MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = L3(x, y, z, e);
           us(i) = 0.0;
@@ -482,7 +481,7 @@ struct VofDynamicWetting {
     const int g = adv.ghost();
     SField wg = wgt_, imp = imposed_, ap = app_, ca = ca_, st = stateD_, us = uclS_;
     UCField kk = adv.cellKind();
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     MD pol(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z});
     for (int s = 0; s < kVofDynStateCount; ++s) {
       long acc = 0;

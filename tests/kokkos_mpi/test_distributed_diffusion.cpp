@@ -57,8 +57,7 @@ static void periodicFill(SField f, I3 e) {
     const long sa = st[a], sb = st[b], sc = st[c];
     const int N = N3[a];
     Kokkos::parallel_for(
-        "ref_pfill",
-        Kokkos::MDRangePolicy<peclet::flow::SExec, Kokkos::Rank<2>>(sp, {0, 0}, {dims[b], dims[c]}),
+        "ref_pfill", peclet::flow::MDRange2<peclet::flow::SExec>(sp, {0, 0}, {dims[b], dims[c]}),
         KOKKOS_LAMBDA(int p0, int p1) {
           const long base = (long)p0 * sb + (long)p1 * sc;
           for (int gl = 0; gl < G; ++gl) {

@@ -45,6 +45,7 @@
 #include "peclet/core/decomp/stage_target.hpp"
 #include "peclet/core/halo/grid_halo.hpp"
 #include "peclet/core/halo/grid_halo_topology.hpp"
+#include "policy.hpp"
 #endif
 
 namespace peclet::flow {
@@ -83,7 +84,7 @@ using FPC = Kokkos::View<const MReal*, CCMem>;
 inline void coarsenOpenAvg(CCField oxc, CCField oyc, CCField ozc, CCConst oxf, CCConst oyf,
                            CCConst ozf, C3 cext, C3 fext, int gc, int gf, C3 cinner, C3 ratio) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::coarsen_open", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
@@ -136,7 +137,7 @@ inline void mgSaveFacePlane(CCField dst, CCConst src, C3 e, int g, int a, int s)
   const long sa = st[a], sb = st[b], sc = st[c];
   const int bf = (s == 0) ? g : (dims[a] - g);
   const int db = dims[b];
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::mg_save_face_plane", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -151,7 +152,7 @@ inline void mgRestoreFacePlane(CCField dst, CCConst src, C3 e, int g, int a, int
   const long sa = st[a], sb = st[b], sc = st[c];
   const int bf = (s == 0) ? g : (dims[a] - g);
   const int db = dims[b];
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::mg_restore_face_plane", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -180,7 +181,7 @@ inline void mgCoarsenFacePlane(CCField oc, CCConst of, C3 cext, C3 fext, int gc,
   const int rb = rt[b], rc = rt[c];
   const int fdb = fd[b], fdc = fd[c];
   const double inv = 1.0 / (double)(rb * rc);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+  using MD = MDRange2<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::mg_coarsen_face_plane", MD(space, {0, 0}, {cd[b], cd[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
@@ -2493,8 +2494,7 @@ class CutcellMG {
     const int N = N3[a];
     CCField ff = f;
     Kokkos::parallel_for(
-        "peclet::flow::mg_pfill",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+        "peclet::flow::mg_pfill", MDRange2<CCExec>(space, {0, 0}, {dims[b], dims[c]}),
         KOKKOS_LAMBDA(int p0, int p1) {
           const long base = (long)p0 * sb + (long)p1 * sc;
           for (int gl = 0; gl < G; ++gl) {
@@ -2511,8 +2511,7 @@ class CutcellMG {
     const C3 e1 = l0.ext, nn = l0.inner;
     CCField dst = xg2, src = q;
     Kokkos::parallel_for(
-        "peclet::flow::gp_stage_g2",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nn.x, nn.y, nn.z}),
+        "peclet::flow::gp_stage_g2", MDRange3<CCExec>(space, {0, 0, 0}, {nn.x, nn.y, nn.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           dst((long)(x + 2) + (long)(y + 2) * ext2.x + (long)(z + 2) * (long)ext2.x * ext2.y) =
               src((long)(x + G) + (long)(y + G) * e1.x + (long)(z + G) * (long)e1.x * e1.y);
@@ -2526,8 +2525,7 @@ class CutcellMG {
     const C3 ext2{e1.x + 2, e1.y + 2, e1.z + 2};  // same inner, gb 1 -> 2
     CCField dst = q, src = xg2;
     Kokkos::parallel_for(
-        "peclet::flow::gp_unstage_g2",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {e1.x, e1.y, e1.z}),
+        "peclet::flow::gp_unstage_g2", MDRange3<CCExec>(space, {0, 0, 0}, {e1.x, e1.y, e1.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           dst((long)x + (long)y * e1.x + (long)z * (long)e1.x * e1.y) =
               src((long)(x + 1) + (long)(y + 1) * ext2.x + (long)(z + 1) * (long)ext2.x * ext2.y);
@@ -2768,9 +2766,7 @@ class CutcellMG {
     double sum = 0;
     long cnt = 0;
     Kokkos::parallel_reduce(
-        "mgmeanr",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {g, g, g},
-                                                       {e.x - g, e.y - g, e.z - g}),
+        "mgmeanr", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
         KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           if (ac(i) > 1e-30f) {
@@ -2791,9 +2787,7 @@ class CutcellMG {
       return;
     const double mean = sum / (double)cnt;
     Kokkos::parallel_for(
-        "mgmeans",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {g, g, g},
-                                                       {e.x - g, e.y - g, e.z - g}),
+        "mgmeans", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
           if (ac(i) > 1e-30f)

@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
       CCField uu = u;
       const int Nx = nx, Nz = nz;
       Kokkos::parallel_for(
-          "fx", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {e.y, e.z}),
+          "fx", peclet::flow::MDRange2<CCExec>(space, {0, 0}, {e.y, e.z}),
           KOKKOS_LAMBDA(int y, int z) {
             long base = (long)y * e.x + (long)z * (long)e.x * e.y;
             for (int gl = 0; gl < g; ++gl) {
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
             }
           });
       Kokkos::parallel_for(
-          "fz", Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {e.x, e.y}),
+          "fz", peclet::flow::MDRange2<CCExec>(space, {0, 0}, {e.x, e.y}),
           KOKKOS_LAMBDA(int x, int y) {
             long base = (long)x + (long)y * e.x;
             long sz = (long)e.x * e.y;

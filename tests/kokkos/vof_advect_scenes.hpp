@@ -56,7 +56,7 @@ inline void periodicFill(SField f, I3 e, int g, bool px, bool py, bool pz) {
     const int N = dims[a] - 2 * g;
     Kokkos::parallel_for(
         "vofscene::periodicFill",
-        Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>(SExec(), {0, 0}, {dims[b], dims[c]}),
+        peclet::flow::MDRange2<SExec>(SExec(), {0, 0}, {dims[b], dims[c]}),
         KOKKOS_LAMBDA(int p0, int p1) {
           const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
           for (int gl = 0; gl < g; ++gl) {
@@ -93,8 +93,7 @@ inline void clampFill(SField f, Block b, I3 gs, bool px, bool py, bool pz) {
   const bool p0 = per[0], p1 = per[1], p2 = per[2];
   const int q0 = gsz[0], q1 = gsz[1], q2 = gsz[2];
   Kokkos::parallel_for(
-      "vofscene::clampFill",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+      "vofscene::clampFill", peclet::flow::MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const int gx = x - g + o.x, gy = y - g + o.y, gz = z - g + o.z;
         const int cx = p0 ? gx : (gx < 0 ? 0 : (gx >= q0 ? q0 - 1 : gx));
@@ -116,7 +115,7 @@ inline void forEachExtended(Block b, F fn) {
   const I3 o = b.o;
   Kokkos::parallel_for(
       "vofscene::forEachExtended",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+      peclet::flow::MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         fn(L3(x, y, z, e), x - g + o.x, y - g + o.y, z - g + o.z);
       });
@@ -245,8 +244,7 @@ inline double l1Diff(SField a, SField b, I3 e, I3 n, int g) {
   double s = 0.0;
   Kokkos::parallel_reduce(
       "vofscene::l1",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                    {g + n.x, g + n.y, g + n.z}),
+      peclet::flow::MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         const long i = L3(x, y, z, e);
         acc += Kokkos::fabs(a(i) - b(i));
@@ -261,8 +259,7 @@ inline double lInfDiff(SField a, SField b, I3 e, I3 n, int g) {
   double s = 0.0;
   Kokkos::parallel_reduce(
       "vofscene::linf",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g},
-                                                    {g + n.x, g + n.y, g + n.z}),
+      peclet::flow::MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         const long i = L3(x, y, z, e);
         acc = Kokkos::fmax(acc, Kokkos::fabs(a(i) - b(i)));

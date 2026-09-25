@@ -104,7 +104,7 @@ void Solver<Grid>::computeDivAdv() {
   C3 e = e_;
   CCField dv = divAdv_;
   CCConst U = CCConst(C[0].u), V = CCConst(C[1].u), W = CCConst(C[2].u);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::div_adv",
       MD(space, {G - 1, G - 1, G - 1}, {e.x - G + 1, e.y - G + 1, e.z - G + 1}),
@@ -376,7 +376,7 @@ void Solver<Grid>::addDragDiagonal(int c) {
   // cell value, half a cell off the face, while its RHS target beta*u_p in force_* is placed by the
   // same Grid::atVelocity), the cell value collocated. Target and diagonal must agree, or a uniform
   // particle velocity does not give a uniform steady gas velocity.
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::add_drag_diag", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {

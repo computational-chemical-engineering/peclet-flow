@@ -143,8 +143,8 @@ void fluxInertGate() {
     long nd = 0;
     Kokkos::parallel_reduce(
         "bc::flux_inert",
-        Kokkos::MDRangePolicy<peclet::flow::SExec, Kokkos::Rank<3>>(
-            peclet::flow::SExec(), {1, 1, 1}, {e.x - 1, e.y - 1, e.z - 1}),
+        peclet::flow::MDRange3<peclet::flow::SExec>(peclet::flow::SExec(), {1, 1, 1},
+                                                    {e.x - 1, e.y - 1, e.z - 1}),
         KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
           const long p = L3(x, y, z, e);
           for (int k = -3; k <= 3; ++k) {

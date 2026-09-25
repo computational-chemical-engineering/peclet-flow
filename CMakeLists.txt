@@ -260,6 +260,12 @@ if(PECLET_FLOW_BUILD_TESTS)
                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_no_float_operator_casts.py
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(no_float_operator_casts PROPERTIES LABELS quality)
+  # Iteration order follows storage (suite/docs/CONVENTIONS.md): every MDRange kernel uses the
+  # x-fastest aliases of src/policy.hpp, never Kokkos' backend-default order (z-fastest on host).
+  add_test(NAME iteration_order
+           COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_iteration_order.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(iteration_order PROPERTIES LABELS quality)
 endif()
 
 # --- pip / scikit-build-core install rule -------------------------------------------------------

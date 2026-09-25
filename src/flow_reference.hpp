@@ -16,6 +16,7 @@
 #include "mac_reductions.hpp"
 #include "mac_stencils.hpp"
 #include "mac_transfer.hpp"
+#include "policy.hpp"
 #include "staggered_advection.hpp"
 
 namespace peclet::flow {
@@ -156,7 +157,7 @@ class FlowReference {
     const double fx = fx_, fy = fy_, fz = fz_;
     const I3 e = e_;
     F u = u_, v = v_, w = w_, bu = bu_, bv = bv_, bw = bw_;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<SExec>;
     Kokkos::parallel_for(
         "peclet::flow::sdflow_rhs", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
@@ -222,7 +223,7 @@ class FlowReference {
     const int a = axis, b = (axis + 1) % 3, c = (axis + 2) % 3;
     const long sa = st[a], sb = st[b], sc = st[c];
     F ff = f;
-    using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<2>>;
+    using MD = MDRange2<SExec>;
     // copy the two ghost slabs from the wrapped inner planes; over the FULL perp extent so corners
     // fill.
     Kokkos::parallel_for(

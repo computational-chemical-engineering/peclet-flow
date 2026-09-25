@@ -123,7 +123,7 @@ void Solver<Grid>::applyBackflowStab(int c) {
     const double sgn = (s == 0) ? 1.0 : -1.0;     // reversal (u.n<0): u>0 at -a, u<0 at +a
     const int b = (a + 1) % 3, cc = (a + 2) % 3;
     const long sb = st[b], sc = st[cc];
-    using MD2 = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>;
+    using MD2 = MDRange2<CCExec>;
     Kokkos::parallel_for(
         "peclet::flow::backflow", MD2(space, {G, G}, {dims[b] - G, dims[cc] - G}),
         KOKKOS_LAMBDA(int p0, int p1) {
@@ -152,8 +152,7 @@ void Solver<Grid>::pressureBcGhost() {
       const int bic = (s == 0) ? G : (na - G - 1);
       const int lo = (s == 0) ? 0 : (na - G), hi = (s == 0) ? (G - 1) : (na - 1);
       Kokkos::parallel_for(
-          "pbcghost",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(space, {0, 0}, {dims[b], dims[c]}),
+          "pbcghost", MDRange2<CCExec>(space, {0, 0}, {dims[b], dims[c]}),
           KOKKOS_LAMBDA(int p0, int p1) {
             const long base = (long)p0 * sb + (long)p1 * sc;
             const double pin = P(base + (long)bic * sa);

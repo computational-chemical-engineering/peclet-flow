@@ -279,8 +279,7 @@ void Solver<Grid>::setSolidFromScene(bool cutcellPressure) {
   const SceneMap sm = sceneMap();
   CCExec space;
   Kokkos::parallel_for(
-      "peclet::flow::scene_sample",
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+      "peclet::flow::scene_sample", MDRange3<CCExec>(space, {0, 0, 0}, {nx, ny, nz}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * (double)(x + og.x),
                                            sm.a[1] + sm.b[1] * (double)(y + og.y),
@@ -318,8 +317,7 @@ void Solver<Grid>::setSolidFromScene(bool cutcellPressure) {
       const auto qv = qnp.view();
       long cnt = 0;
       Kokkos::parallel_reduce(
-          "peclet::flow::scene_image_overlap",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+          "peclet::flow::scene_image_overlap", MDRange3<CCExec>(space, {0, 0, 0}, {nx, ny, nz}),
           KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
             const peclet::core::Vec3<double> p{sm.a[0] + sm.b[0] * (double)(x + og.x),
                                                sm.a[1] + sm.b[1] * (double)(y + og.y),
@@ -368,8 +366,7 @@ void Solver<Grid>::checkMovingInstancesAreCut() {
       continue;
     Kokkos::View<const int*, CCMem> idm = C[c].idMap;
     Kokkos::parallel_for(
-        "peclet::flow::moving_cut_count",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+        "peclet::flow::moving_cut_count", MDRange3<CCExec>(space, {0, 0, 0}, {nx, ny, nz}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long ie = (long)(x + G) + (long)(y + G) * e.x + (long)(z + G) * (long)e.x * e.y;
           if (idm(ie) < 0)
@@ -390,8 +387,7 @@ void Solver<Grid>::checkMovingInstancesAreCut() {
       const auto po = Grid::offset(c);
       const double ox = po.x, oy = po.y, oz = po.z;
       Kokkos::parallel_for(
-          "peclet::flow::moving_degenerate_count",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+          "peclet::flow::moving_degenerate_count", MDRange3<CCExec>(space, {0, 0, 0}, {nx, ny, nz}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const double sv = ccSampleExt(sd, e, x + G + ox, y + G + oy, z + G + oz);
             if (sv != 0.0)
@@ -490,8 +486,7 @@ void Solver<Grid>::setExactCrossingsFromScene() {
       const double ox = offc[0], oy = offc[1], oz = offc[2];
       const int aa = a;
       Kokkos::parallel_for(
-          "peclet::flow::scene_crossings",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx, ny, nz}),
+          "peclet::flow::scene_crossings", MDRange3<CCExec>(space, {0, 0, 0}, {nx, ny, nz}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             // The segment is ONE CELL long along `aa`; `s` stays the dimensionless fraction in
             // (0,1) the consumer expects, so only the endpoints and the step become physical.
@@ -602,7 +597,7 @@ void Solver<Grid>::buildWallVelocity() {
   const C3 e = e_, og = og_;
   const SceneMap sm = sceneMap();
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   // rung 2: component c's own staggered point, storing component c
   for (int c = 0; c < 3; ++c) {
     const auto po = Grid::offset(c);
@@ -696,7 +691,7 @@ void Solver<Grid>::addWallFluxDivergence(CCField d) {
   const C3 e = e_;
   CCConst oxv = CCConst(ox_), oyv = CCConst(oy_), ozv = CCConst(oz_);
   CCConst wx = CCConst(uwCell_[0]), wy = CCConst(uwCell_[1]), wz = CCConst(uwCell_[2]);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::wall_flux_div", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {

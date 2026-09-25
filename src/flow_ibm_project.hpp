@@ -306,8 +306,7 @@ void Solver<Grid>::applySuperficialVelocity() {
 #endif
   const double target = superficialVelPhys_ * u_.velToInt(a), dn = static_cast<double>(ncell);
   Kokkos::View<double, CCMem> shift = superficialShift_;
-  const auto inner =
-      Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G});
+  const auto inner = MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G});
   // The inner sum into the device scalar (asynchronous: the result never visits the host).
   Kokkos::parallel_reduce(
       "superficial_velocity_sum", inner,
@@ -552,7 +551,7 @@ void Solver<Grid>::buildRhsForced(int c) {
     }
   }
   CCConst gpw = CCConst(tgp_);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "rhs_forced", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -610,7 +609,7 @@ void Solver<Grid>::buildRhsVar(int c) {
   // momentum given the enforced continuity (the u*[d(eps)/dt + div(eps u)] bracket vanishes).
   const bool pc = porous_ && advect_;
   CCConst dv = CCConst(divAdv_);
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "rhs_var", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -646,7 +645,7 @@ void Solver<Grid>::buildRhsVarMom(int c) {
   const long strd = strideOf(c);
   const bool incr = cutcellPressure_ && incremental_;
   const bool bc = hasBc_ && !bcStencilPath();
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "rhs_var_mom", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -676,7 +675,7 @@ void Solver<Grid>::buildRhsColoFF(int c) {
   const bool adv = advect_ && !pureFou, bc = hasBc_ && !bcStencilPath();
   const bool ifou = implicitAdv() && deferredCorr_;
   const int sch = advScheme_;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "rhs_colo_ff", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -739,7 +738,7 @@ void Solver<Grid>::filterCellField(CCField f, int axis) {
   CCConst sd = CCConst(sdf_);
   const double eps = rotFilterEps_;
   C3 e = e_;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::rot_filter", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -860,7 +859,7 @@ void Solver<Grid>::projectAssembleDivergence() {
     CCField d = div_, dd = depsdt_, ep = epsField_, epp = epsPrev_;
     const double idt = 1.0 / dt_;
     const bool useDt = porousDepsDt_;
-    using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+    using MD = MDRange3<CCExec>;
     Kokkos::parallel_for(
         "peclet::flow::deps_dt", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
@@ -890,8 +889,7 @@ void Solver<Grid>::projectAssembleDivergence() {
     CCConst sd = CCConst(sdf_);
     const C3 e1 = e1_, e2 = e_;
     Kokkos::parallel_for(
-        "peclet::flow::star_mask_rhs",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+        "peclet::flow::star_mask_rhs", MDRange3<CCExec>(space, {0, 0, 0}, {nx_, ny_, nz_}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i2 = (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
           if (sd(i2) < 0.0)
@@ -1030,8 +1028,7 @@ void Solver<Grid>::projectSolve() {
       const C3 e1 = e1_, e2 = e_;
       const int lnx = nx_, lny = ny_;
       Kokkos::parallel_for(
-          "peclet::flow::gp_pin_decoupled",
-          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+          "peclet::flow::gp_pin_decoupled", MDRange3<CCExec>(space, {0, 0, 0}, {nx_, ny_, nz_}),
           KOKKOS_LAMBDA(int x, int y, int z) {
             const long i1 =
                 (long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y;
@@ -1076,8 +1073,7 @@ void Solver<Grid>::projectSolve() {
     CCConst sd = CCConst(sdf_);
     const C3 e1 = e1_, e2 = e_;
     Kokkos::parallel_for(
-        "peclet::flow::star_pin_solid",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+        "peclet::flow::star_pin_solid", MDRange3<CCExec>(space, {0, 0, 0}, {nx_, ny_, nz_}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i2 = (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
           if (sd(i2) < 0.0)

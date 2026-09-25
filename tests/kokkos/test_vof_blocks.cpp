@@ -200,7 +200,7 @@ double sumInner(SField f, I3 e, int n, int g) {
   double s = 0.0;
   Kokkos::parallel_reduce(
       "sumInner",
-      Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>(SExec(), {g, g, g}, {g + n, g + n, g + n}),
+      peclet::flow::MDRange3<SExec>(SExec(), {g, g, g}, {g + n, g + n, g + n}),
       KOKKOS_LAMBDA(int x, int y, int z, double& a) { a += f(L3(x, y, z, e)); }, s);
   Kokkos::fence();
   return s;

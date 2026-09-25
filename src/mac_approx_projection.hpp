@@ -15,6 +15,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "mac_cutcell.hpp"  // peclet::flow::C3, CCField, CCConst, CCExec, ccSampleExt
+#include "policy.hpp"
 
 namespace peclet::flow {
 
@@ -31,7 +32,7 @@ inline void centerToFace(CCField uf, CCField vf, CCField wf, CCConst U, CCConst 
                          int g) {
   (void)g;
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::center_to_face", MD(space, {1, 1, 1}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -142,7 +143,7 @@ KOKKOS_INLINE_FUNCTION double wallAwareFaceValue(CCConst U, CCConst sdf, long i,
 // both-fluid branch never reads anyway). One-time cost at setSolid; the geometry is static.
 inline void buildFaceCentroidDist(CCField xcx, CCField xcy, CCField xcz, CCConst sdf, C3 e) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::face_centroid_dist", MD(space, {1, 1, 1}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -204,7 +205,7 @@ inline void centerToFaceWallAware(CCField uf, CCField vf, CCField wf, CCConst U,
                                   bool useCen, C3 e, int g) {
   (void)g;
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::center_to_face_wall", MD(space, {1, 1, 1}, {e.x, e.y, e.z}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -241,7 +242,7 @@ inline void centerToFaceWallAware(CCField uf, CCField vf, CCField wf, CCConst U,
 inline void transposeGradWallAware(CCField out, CCConst p, CCConst sdf, CCConst o, CCConst xc,
                                    bool useCen, int axis, C3 e, int g, double wa = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::transpose_grad_wall", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -273,7 +274,7 @@ inline void transposeGradWallAware(CCField out, CCConst p, CCConst sdf, CCConst 
 // surface error — part of what keeps modes 0-3 first-order).
 inline void buildCellFraction(CCField cs, CCConst sdf, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::cell_fraction", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -434,7 +435,7 @@ inline void embedViscousApply(CCField Lu, CCConst U, CCConst sdf, CCConst cs, CC
                               double wx = 1.0, double wy = 1.0, double wz = 1.0, double hpx = 1.0,
                               double hpy = 1.0, double hpz = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::embed_viscous_apply", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -481,7 +482,7 @@ template <class MC>
 inline void stencilMatvec(CCField y, CCConst u, MC AC, MC AW, MC AE, MC AS, MC AN, MC AB, MC AT,
                           C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::stencil_matvec", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y2, int z) {
@@ -497,7 +498,7 @@ inline void stencilMatvec(CCField y, CCConst u, MC AC, MC AW, MC AE, MC AS, MC A
 // field).
 inline void subtractField(CCField u, CCConst d, C3 e, int g) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::subtract_field", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -517,7 +518,7 @@ inline void subtractField(CCField u, CCConst d, C3 e, int g) {
 inline void centerGradOpen(CCField out, CCConst p, CCConst o, int axis, C3 e, int g,
                            double wa = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::center_grad_open", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -536,7 +537,7 @@ inline void projectCorrectCenterOpen(CCField u, CCField v, CCField w, CCConst ph
                                      CCConst oy, CCConst oz, C3 e, int g, double wx = 1.0,
                                      double wy = 1.0, double wz = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::correct_center_open", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -573,7 +574,7 @@ inline void projectCorrectCenter(CCField u, CCField v, CCField w, CCConst phi, C
                                  CCConst oy, CCConst oz, C3 e, int g, double wx = 1.0,
                                  double wy = 1.0, double wz = 1.0) {
   CCExec space;
-  using MD = Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
       "peclet::flow::correct_center", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {

@@ -14,6 +14,8 @@
 #include <Kokkos_Core.hpp>
 #include <type_traits>
 
+#include "policy.hpp"
+
 namespace peclet::flow {
 
 using SExec = Kokkos::DefaultExecutionSpace;
@@ -71,7 +73,7 @@ inline void diffSmoothColorT(SField c, SConst b, I3 e, I3 og, int g, double bx, 
         });
     return;
   }
-  using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<SExec>;
   Kokkos::parallel_for(
       "peclet::flow::diff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -113,7 +115,7 @@ inline void diffResidualT(SField r, SConst c, SConst b, I3 e, int g, double bx, 
                           double bz, double Ac, SConst dcorr) {
   SExec space;
   const bool hasD = (dcorr.extent(0) != 0);
-  using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<SExec>;
   Kokkos::parallel_for(
       "peclet::flow::diff_resid", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -184,7 +186,7 @@ inline double diffSmoothColorDuT(SField c, SConst b, I3 e, I3 og, int g, double 
         Kokkos::Max<double>(du));
     return du;
   }
-  using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<SExec>;
   Kokkos::parallel_reduce(
       "peclet::flow::diff_du", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z, double& m) {
@@ -225,7 +227,7 @@ inline double diffSmoothColorDu(SField c, SConst b, I3 e, I3 og, int g, double b
 // One Red-Black sweep colour of the (unit-coefficient) Poisson smoother: phi[i] = (sum - d[i]) / 6.
 inline void poisSmoothColor(SField phi, SConst d, I3 e, I3 og, int g, int color) {
   SExec space;
-  using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<SExec>;
   Kokkos::parallel_for(
       "peclet::flow::pois", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -241,7 +243,7 @@ inline void poisSmoothColor(SField phi, SConst d, I3 e, I3 og, int g, int color)
 // MAC divergence d[i] = (u[i+sx]-u[i]) + (v[i+sy]-v[i]) + (w[i+sz]-w[i]) over inner cells.
 inline void divergence(SConst u, SConst v, SConst w, SField d, I3 e, int g) {
   SExec space;
-  using MD = Kokkos::MDRangePolicy<SExec, Kokkos::Rank<3>>;
+  using MD = MDRange3<SExec>;
   Kokkos::parallel_for(
       "peclet::flow::diverg", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {

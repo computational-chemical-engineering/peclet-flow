@@ -50,9 +50,7 @@ struct Reduce {
     double s = 0;
     C3 ee = e;
     Kokkos::parallel_reduce(
-        "dot",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(sp, {G, G, G},
-                                                       {ee.x - G, ee.y - G, ee.z - G}),
+        "dot", peclet::flow::MDRange3<CCExec>(sp, {G, G, G}, {ee.x - G, ee.y - G, ee.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = (long)x + (long)y * ee.x + (long)z * (long)ee.x * ee.y;
           acc += a(i) * b(i);
@@ -67,9 +65,7 @@ struct Reduce {
     double m = 0;
     C3 ee = e;
     Kokkos::parallel_reduce(
-        "max",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(sp, {G, G, G},
-                                                       {ee.x - G, ee.y - G, ee.z - G}),
+        "max", peclet::flow::MDRange3<CCExec>(sp, {G, G, G}, {ee.x - G, ee.y - G, ee.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = (long)x + (long)y * ee.x + (long)z * (long)ee.x * ee.y;
           const double v = Kokkos::fabs(a(i));
@@ -86,9 +82,7 @@ struct Reduce {
     double s = 0;
     C3 ee = e;
     Kokkos::parallel_reduce(
-        "meansum",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(sp, {G, G, G},
-                                                       {ee.x - G, ee.y - G, ee.z - G}),
+        "meansum", peclet::flow::MDRange3<CCExec>(sp, {G, G, G}, {ee.x - G, ee.y - G, ee.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = (long)x + (long)y * ee.x + (long)z * (long)ee.x * ee.y;
           acc += f(i);
@@ -99,9 +93,7 @@ struct Reduce {
     const double mean = g / (double)globalCells;
     CCField ff = f;
     Kokkos::parallel_for(
-        "meansub",
-        Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(sp, {G, G, G},
-                                                       {ee.x - G, ee.y - G, ee.z - G}),
+        "meansub", peclet::flow::MDRange3<CCExec>(sp, {G, G, G}, {ee.x - G, ee.y - G, ee.z - G}),
         KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * ee.x + (long)z * (long)ee.x * ee.y;
           ff(i) -= mean;
@@ -242,8 +234,7 @@ int main(int argc, char** argv) {
         const int N = N3[a];
         CCField ff = f;
         Kokkos::parallel_for(
-            "sfill",
-            Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<2>>(sp, {0, 0}, {dims[bb], dims[cc]}),
+            "sfill", peclet::flow::MDRange2<CCExec>(sp, {0, 0}, {dims[bb], dims[cc]}),
             KOKKOS_LAMBDA(int p0, int p1) {
               const long base = (long)p0 * sb + (long)p1 * sc;
               for (int gl = 0; gl < G; ++gl) {
