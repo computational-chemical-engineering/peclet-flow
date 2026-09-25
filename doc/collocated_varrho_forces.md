@@ -249,7 +249,9 @@ $\Pi_\rho=M_f^{-1}\Pi M$. Then
 
 $$M\Gamma=M\Pi^TOM_f^{-1}G_f=-(D\,O\,M_f^{-1}\Pi M)^T=-C^T,$$
 
-and this holds **for any openness $0\le o\le1$**, fractional apertures included. Consequences:
+and this holds **for any openness $0\le o\le1$**, fractional apertures included. It is exact on
+isotropic spacing; on anisotropic cells it reads $M\Gamma=-W\,C^T$ with the per-axis weights $W$
+(`u_.w`), as on the constant-ρ path. Consequences:
 
 - **Schur complement.** $S=CA^{-1}C^T$ is SPD.
 - **Pressure-correction bound (a proof).** Cauchy–Schwarz on the average gives

@@ -23,6 +23,14 @@ void Solver<Grid>::step() {
   // mutator, so a throw leaves every field bitwise as it was on entry. No-op unless VoF is on.
   vofStepPrecheck();
   superficialVelocityPrecheck();  // its scope, before the first mutator (same reason)
+  // The configuration refusals of rung V8 (S0: all-fluid, no ghost projection, no harmonic rho_f,
+  // incremental pressure) and of the balanced-force projection (§4.6.4), HERE beside the VoF
+  // pre-check -- before advectVofMomentum, phaseChangeStep and updateProperties -- so a refused
+  // step also leaves every field bitwise as it was. Inert (no check at all) off those paths.
+  if (colocatedFaceForce())
+    requireCollocatedFaceForceScope("step");
+  if (balancedForceActive())
+    requireBalancedForceScope("step", true);
 
   // The momentum-solver choice, for a configuration that never calls set_solid. set_solid is the
   // other (and historically the only) place it is made; a domain-BC case with no immersed solid
@@ -98,11 +106,8 @@ void Solver<Grid>::step() {
     if (hasBc_)
       pressureBcGhost();
   }  // grad(P^n) for the incremental predictor (once)
-  // Rung V8 (S0, doc/collocated_varrho_forces.md §4.2): the collocated variable-density / CSF
-  // scope — all-fluid, no ghost projection, no harmonic rho_f, incremental pressure. Inert (no
-  // check at all) off that path.
+  // Rung V8 (doc/collocated_varrho_forces.md §4.2; its scope was checked at the step head).
   if (colocatedFaceForce()) {
-    requireCollocatedFaceForceScope("step");
     // The density ghosts under the PROPERTY ghost policy (Neumann copy at walls) — the same values
     // the Poisson coefficient reads in projectBuildCoefficients (§4.9 L4: the operator's rho_f,
     // the predictor's rho_f and Pi_rho's mass weights see the same cell rho). A bare halo fill
@@ -582,7 +587,7 @@ void Solver<Grid>::buildBalancedFaceForce(int c) {
 
 template <class Grid>
 void Solver<Grid>::applyBalancedForceProjection() {
-  requireBalancedForceScope("step", true);
+  // (scope: checked at the step head, beside vofStepPrecheck)
   // (B1) the variable-rho operator, once for the step (project() then skips its rebuild).
   if (varRho_) {
     projectBuildCoefficients();

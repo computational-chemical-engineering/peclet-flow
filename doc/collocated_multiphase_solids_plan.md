@@ -80,6 +80,14 @@ Q11 of the parent note flags the two-family consequence for amr (a preference fo
 - **Openness.** $o=\alpha$ is the cut-cell flux aperture (`ox_`/`oy_`/`oz_`, the field the
   staggered cut-cell projection uses). It is multiplicative in $\Pi_\rho$'s divergence, Φ, W, k and
   β (parent L1). Closed faces have α = 0.
+- **Sanitise closed-face values.** Because the openness is *multiplicative*, a closed face does
+  not hide what it multiplies: 0·NaN = NaN and 0·∞ = NaN. A non-finite value at a closed face — a
+  ρ or κ read from a solid-centred cell, a face mean over an uninitialised ghost, a curvature from
+  a zero-area PLIC polygon — therefore reaches the divergence and the pressure solve even though
+  its weight is zero. The solids package must write finite values (0, or the fluid neighbour's
+  value) at every closed face and solid-centred cell that these products read, and gate it (a
+  non-finite probe over the closed faces after the geometry and after every property refresh).
+  The parent's all-fluid path never meets this: it has no closed interior faces.
 - **The weight-sum rule.** At a cut cell, $W_c=\tfrac12(\alpha_-+\alpha_+)$. Hydrostatic balance is
   exact under it ([MODEL] disk: 1.5e-13).
 - **Solid-centred cells:**

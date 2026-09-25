@@ -4294,7 +4294,7 @@ class Solver {
   // correction that is the face-to-cell reconstruction of the face corrections (never a
   // cell-centred grad(phi)/rho_c); the pressure and every force enter the implicit predictor as
   // the matching face integral (doc/collocated_varrho_forces.md). Scope: ALL-FLUID
-  // (`set_pressure_geometry`) — an immersed solid still throws, at the first `project()`, and so do
+  // (`set_pressure_geometry`) — an immersed solid still throws, at the first `step()`, and so do
   // the ghost projection and `set_rho_face_harmonic` (see requireCollocatedFaceForceScope).
   // Momentum consistency (`enable_vof_momentum`) is NOT in this rung: the collocated construction
   // needs Favre face states, so the collocated two-phase path is rated to density ratio ~10 for
@@ -4814,8 +4814,10 @@ class Solver {
   CCField gpRh_, gpT_, gpZ2_;  // extra BiCGStab scratch (g=1 block)
   CCField gpX2_;  // distributed BiCGStab matvec staging (g=2 solver block; overlay +/-2 halo)
   CCField uf_, vf_, wf_;    // collocated: transient face (MAC) field (approx projection)
-  CCField faceAcc_[3];      // rung V8: the collocated face accelerations Phi_c of the
-                            // predictor (buildRhsColoVar). Allocated only on that path.
+  CCField faceAcc_[3];      // face-range scratch, allocated on first use by either consumer:
+                            // the V8 predictor's face accelerations Phi_c (buildRhsColoVar) and
+                            // the balanced-force projection's c*beta (buildBalancedFaceForce,
+                            // both grids).
   CCField tgp_;             // collocated: cell pressure-gradient scratch
   CCField fvM_, fvL_, cs_;  // collocated: embed defect scratch (M·u, L_FV·u) + cell fluid fraction
   CCField xcx_, xcy_, xcz_;  // collocated: open-centroid wall distance per face (wall-aware map)
