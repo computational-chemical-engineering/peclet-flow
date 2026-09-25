@@ -625,10 +625,11 @@ void Solver<Grid>::bridgeColourToVof() {
 }
 
 template <class Grid>
-void Solver<Grid>::addCsfRhs(int c) {
+void Solver<Grid>::addCsfRhs(int c, CCField dst, bool rowScaled, bool faceRange) {
   CCExec space;
   C3 e = e_;
-  CCField bb = C[c].b;
+  CCField bb = dst;
+  const int hi = faceRange ? 1 : 0;
   CCConst rs = CCConst(C[c].rscale), cv = CCConst(cField_), kp = CCConst(kappaField_),
           kb = CCConst(kappaBranch_);
   const long strd = strideOf(c);
@@ -638,7 +639,7 @@ void Solver<Grid>::addCsfRhs(int c) {
   const double sig = sigmaCsf_, h = 1.0 / u_.w[c];
   using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
-      "csf_rhs", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+      "csf_rhs", MD(space, {G, G, G}, {e.x - G + hi, e.y - G + hi, e.z - G + hi}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         const double dC = cv(i) - cv(i - strd);
@@ -646,22 +647,26 @@ void Solver<Grid>::addCsfRhs(int c) {
           return;  // no interface across this face -> no force, and no orphan either
         double kf = 0.0;
         vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
-        bb(i) += rs(i) * vof::csfFaceForce(sig, kf, dC, h);
+        if (rowScaled)
+          bb(i) += rs(i) * vof::csfFaceForce(sig, kf, dC, h);
+        else
+          bb(i) += vof::csfFaceForce(sig, kf, dC, h);
       });
 }
 
 template <class Grid>
-void Solver<Grid>::addCsfRhsCellInterp(int c) {
+void Solver<Grid>::addCsfRhsCellInterp(int c, CCField dst, bool rowScaled, bool faceRange) {
   CCExec space;
   C3 e = e_;
-  CCField bb = C[c].b;
+  CCField bb = dst;
+  const int hi = faceRange ? 1 : 0;
   CCConst rs = CCConst(C[c].rscale), cv = CCConst(cField_), kp = CCConst(kappaField_),
           kb = CCConst(kappaBranch_);
   const long strd = strideOf(c);
   const double sig = sigmaCsf_, h = 1.0 / u_.w[c];  // the ablation takes the same weight (V3.1)
   using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
-      "csf_rhs_cellinterp", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+      "csf_rhs_cellinterp", MD(space, {G, G, G}, {e.x - G + hi, e.y - G + hi, e.z - G + hi}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         double f[2] = {0.0, 0.0};
@@ -671,7 +676,10 @@ void Solver<Grid>::addCsfRhsCellInterp(int c) {
             continue;
           f[q] = sig * kp(j) * 0.5 * (cv(j + strd) - cv(j - strd)) / h;
         }
-        bb(i) += rs(i) * 0.5 * (f[0] + f[1]);
+        if (rowScaled)
+          bb(i) += rs(i) * 0.5 * (f[0] + f[1]);
+        else
+          bb(i) += 0.5 * (f[0] + f[1]);
       });
 }
 

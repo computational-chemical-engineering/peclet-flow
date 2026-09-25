@@ -155,8 +155,9 @@ void Solver<Grid>::step() {
     if (csfActive() && !coloFF) {
       const double _t0 = vofTick();  // WO-V9
       for (int c = 0; c < 3; ++c)
-        vofBlockCsf() ? addCsfRhsBlocks(c)
-                      : (csfMode_ == 0 ? addCsfRhs(c) : addCsfRhsCellInterp(c));
+        vofBlockCsf()
+            ? addCsfRhsBlocks(c)
+            : (csfMode_ == 0 ? addCsfRhs(c, C[c].b, true) : addCsfRhsCellInterp(c, C[c].b, true));
       vofAdd(vt_.csf, _t0);
     }
     // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
@@ -838,8 +839,7 @@ void Solver<Grid>::projectAssembleDivergence() {
       gpDivergDelta(div_, CCConst(uf_), CCConst(vf_), CCConst(wf_), gpOv_, gpNRows_,
                     C3{nx_, ny_, nz_}, e_, G, distributed_);
     } else
-      divergOpen(CCConst(uf_), CCConst(vf_), CCConst(wf_), CCConst(ox_), CCConst(oy_), CCConst(oz_),
-                 div_, e_, G);
+      constraintDivergence(CCConst(uf_), CCConst(vf_), CCConst(wf_), div_);
   } else {
     for (int c = 0; c < 3; ++c)
       fillVelGhosts(c, 0);
@@ -864,8 +864,7 @@ void Solver<Grid>::projectAssembleDivergence() {
       gpDivergDelta(div_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), gpOv_, gpNRows_,
                     C3{nx_, ny_, nz_}, e_, G, distributed_);
     } else
-      divergOpen(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), CCConst(ox_), CCConst(oy_),
-                 CCConst(oz_), div_, e_, G);
+      constraintDivergence(CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), div_);
   }
   // MOVING GEOMETRY (rung 3): the wall's own volume flux. Inert without a moving instance.
   addWallFluxDivergence(div_);
@@ -1012,77 +1011,7 @@ void Solver<Grid>::projectSolve() {
   // initial guess instead of zeroing.
   if (!pwarm_)
     Kokkos::deep_copy(phi1_, 0.0);
-  if (useChebyshev_) {
-    if (!chebBoundsSet_) {
-      mg_.estimateEigenvalues(CCConst(rhs1_), chebA_, chebB_, 15, 2, 2, 12);
-      chebBoundsSet_ = true;
-    }
-    lastPressureIters_ =
-        mg_.solveChebyshev(rhs1_, phi1_, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
-  } else if (ghostProjection_) {
-    // Nonsymmetric ghost-projection operator (both grids — the phi matrix is identical):
-    // BiCGStab, preconditioned by the symmetric binary-openness V-cycle (the hierarchy set up
-    // in setSolid); the overlay delta enters the fine-level matvec only. Distributed, the
-    // matvec stages the iterate on this solver's g=2 block (gpX2_) whose halo carries the
-    // overlay's +/-2 reach.
-#ifdef PECLET_FLOW_MPI
-    if (distributed_)
-      lastPressureIters_ =
-          mg_.solveBiCGStab(rhs1_, phi1_, r_, gpRh_, pp_, Ap_, gpT_, z_, gpZ2_, pcgMaxit_, pcgRtol_,
-                            2, 2, 12, gpOv_, gpNRows_, C3{nx_, ny_, nz_}, gpX2_, velDev_.get(), e_);
-    else
-#endif
-      lastPressureIters_ =
-          mg_.solveBiCGStab(rhs1_, phi1_, r_, gpRh_, pp_, Ap_, gpT_, z_, gpZ2_, pcgMaxit_, pcgRtol_,
-                            2, 2, 12, gpOv_, gpNRows_, C3{nx_, ny_, nz_});
-    // Pin the FREE variables of the binary-openness operator to their design value phi = 0:
-    // solid-centered (sdfGp < 0) cells and fully-BC_ONLY overlay rows have a zero row AND zero
-    // rhs, so the Krylov iteration leaves an arbitrary (V-cycle-prolongation, iteration-path,
-    // and decomposition dependent) value there — invisible to the gp residual (the closures
-    // never read those faces) but INJECTED into real near-wall fluid velocities by the plain
-    // projectCorrect face gradient. The doc contract of ghost_projection.hpp is "decoupled
-    // rows hold phi = 0"; enforce it (measured: without this, np=2 runs differ from the
-    // reference by ~1e-2 relative u at sphere-surface faces while agreeing 1e-13 elsewhere).
-    {
-      CCExec space;
-      CCField ph = phi1_;
-      CCConst sg = CCConst(sdfGp_);
-      auto idMap = gpIdMap_;
-      auto ov = gpOv_;
-      const C3 e1 = e1_, e2 = e_;
-      const int lnx = nx_, lny = ny_;
-      Kokkos::parallel_for(
-          "peclet::flow::gp_pin_decoupled", MDRange3<CCExec>(space, {0, 0, 0}, {nx_, ny_, nz_}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
-            const long i1 =
-                (long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y;
-            const long i2 =
-                (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
-            bool dec = sg(i2) < 0.0;
-            if (!dec) {
-              const int s = idMap((long)x + (long)y * lnx + (long)z * (long)lnx * lny);
-              if (s >= 0 && ov.coupled(s) == 0)
-                dec = true;
-            }
-            if (dec)
-              ph(i1) = 0.0;
-          });
-    }
-  } else if (useFcg_) {
-    // Flexible CG (set_pressure_fcg): identical to the MG-PCG branch below but for the
-    // Polak-Ribiere beta, which tolerates a V-cycle preconditioner that is not symmetric w.r.t.
-    // the fine operator. Its one extra vector is allocated on first use, so an unselected FCG
-    // costs nothing (not even memory).
-    if (zp1_.extent(0) != n1_)
-      zp1_ = CCField("zp1", n1_);
-    lastPressureIters_ =
-        mg_.solveFCG(rhs1_, phi1_, r_, pp_, z_, zp1_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
-                     fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_});
-  } else {
-    lastPressureIters_ =
-        mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
-                     fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_});
-  }
+  lastPressureIters_ = solvePressureSystem(rhs1_, phi1_);
   // ISSUES sweep item 6: a solve that gave up on a non-finite recurrence scalar reports the
   // iteration CAP (see CutcellMG::solvePCG) and raises this flag, so `pressure_solve_failed()`
   // and the usual rule-3b "no capped solve" check both catch it. It used to print one line to
@@ -1114,6 +1043,85 @@ void Solver<Grid>::projectSolve() {
         if (bc_[2 * a + s] == 3 && touchesGlobalFace(2 * a + s))
           bcZeroPressureGhost(phi_, e, G, a, s);
   }
+}
+
+template <class Grid>
+long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
+  long iters = 0;
+  if (useChebyshev_) {
+    if (!chebBoundsSet_) {
+      mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, 15, 2, 2, 12);
+      chebBoundsSet_ = true;
+    }
+    iters = mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
+  } else if (ghostProjection_) {
+    // Nonsymmetric ghost-projection operator (both grids — the phi matrix is identical):
+    // BiCGStab, preconditioned by the symmetric binary-openness V-cycle (the hierarchy set up
+    // in setSolid); the overlay delta enters the fine-level matvec only. Distributed, the
+    // matvec stages the iterate on this solver's g=2 block (gpX2_) whose halo carries the
+    // overlay's +/-2 reach.
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      iters =
+          mg_.solveBiCGStab(rhs1, x1, r_, gpRh_, pp_, Ap_, gpT_, z_, gpZ2_, pcgMaxit_, pcgRtol_, 2,
+                            2, 12, gpOv_, gpNRows_, C3{nx_, ny_, nz_}, gpX2_, velDev_.get(), e_);
+    else
+#endif
+      iters = mg_.solveBiCGStab(rhs1, x1, r_, gpRh_, pp_, Ap_, gpT_, z_, gpZ2_, pcgMaxit_, pcgRtol_,
+                                2, 2, 12, gpOv_, gpNRows_, C3{nx_, ny_, nz_});
+    // Pin the FREE variables of the binary-openness operator to their design value phi = 0:
+    // solid-centered (sdfGp < 0) cells and fully-BC_ONLY overlay rows have a zero row AND zero
+    // rhs, so the Krylov iteration leaves an arbitrary (V-cycle-prolongation, iteration-path,
+    // and decomposition dependent) value there — invisible to the gp residual (the closures
+    // never read those faces) but INJECTED into real near-wall fluid velocities by the plain
+    // projectCorrect face gradient. The doc contract of ghost_projection.hpp is "decoupled
+    // rows hold phi = 0"; enforce it (measured: without this, np=2 runs differ from the
+    // reference by ~1e-2 relative u at sphere-surface faces while agreeing 1e-13 elsewhere).
+    {
+      CCExec space;
+      CCField ph = x1;
+      CCConst sg = CCConst(sdfGp_);
+      auto idMap = gpIdMap_;
+      auto ov = gpOv_;
+      const C3 e1 = e1_, e2 = e_;
+      const int lnx = nx_, lny = ny_;
+      Kokkos::parallel_for(
+          "peclet::flow::gp_pin_decoupled",
+          Kokkos::MDRangePolicy<CCExec, Kokkos::Rank<3>>(space, {0, 0, 0}, {nx_, ny_, nz_}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const long i1 =
+                (long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y;
+            const long i2 =
+                (long)(x + G) + (long)(y + G) * e2.x + (long)(z + G) * (long)e2.x * e2.y;
+            bool dec = sg(i2) < 0.0;
+            if (!dec) {
+              const int s = idMap((long)x + (long)y * lnx + (long)z * (long)lnx * lny);
+              if (s >= 0 && ov.coupled(s) == 0)
+                dec = true;
+            }
+            if (dec)
+              ph(i1) = 0.0;
+          });
+    }
+  } else if (useFcg_) {
+    // Flexible CG (set_pressure_fcg): identical to the MG-PCG branch below but for the
+    // Polak-Ribiere beta, which tolerates a V-cycle preconditioner that is not symmetric w.r.t.
+    // the fine operator. Its one extra vector is allocated on first use, so an unselected FCG
+    // costs nothing (not even memory).
+    if (zp1_.extent(0) != n1_)
+      zp1_ = CCField("zp1", n1_);
+    iters = mg_.solveFCG(rhs1, x1, r_, pp_, z_, zp1_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
+                         fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_});
+  } else {
+    iters = mg_.solvePCG(rhs1, x1, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
+                         fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_});
+  }
+  return iters;
+}
+
+template <class Grid>
+void Solver<Grid>::constraintDivergence(CCConst fx, CCConst fy, CCConst fz, CCField out) {
+  divergOpen(fx, fy, fz, CCConst(ox_), CCConst(oy_), CCConst(oz_), out, e_, G);
 }
 
 template <class Grid>

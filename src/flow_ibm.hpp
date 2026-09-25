@@ -2175,7 +2175,13 @@ class Solver {
   //
   // `sigmaCsf_ == 0` (the default) never reaches here: `csfActive()` gates the call site, so every
   // non-VoF path is byte-identical.
-  void addCsfRhs(int c);
+  //
+  // `dst` receives the force (`C[c].b` in the predictor); `rowScaled` multiplies it by the cut-cell
+  // row rescale `rs(i)` (true in the predictor, false for the balanced-force projection's face
+  // force, doc/collocated_varrho_forces.md §4.6.2 B2, where `rs` multiplies the whole row and is not
+  // part of the force). `faceRange` widens the kernel from the inner cells `[G, e-G)` to the face
+  // range `[G, e-G]` the constraint divergence reads.
+  void addCsfRhs(int c, CCField dst, bool rowScaled, bool faceRange = false);
 
 
   // ABLATION (`set_csf_mode(1)`): the same physics discretized the OTHER plausible way — a
@@ -2185,8 +2191,8 @@ class Solver {
   // face value is no longer in the range of the projection's discrete gradient, so the projection
   // cannot annihilate it. This kernel exists so the difference is a measured number in the ctest
   // rather than an argument — the same role the harmonic-rho_f ablation plays for WO-J's
-  // hydrostatic gate. NEVER a production path.
-  void addCsfRhsCellInterp(int c);
+  // hydrostatic gate. NEVER a production path. Arguments as `addCsfRhs`.
+  void addCsfRhsCellInterp(int c, CCField dst, bool rowScaled, bool faceRange = false);
 
 
   // --- rung W2 (WO-W12): the BLOCK CSF, a sibling of `addCsfRhs` ------------------------------
@@ -2378,6 +2384,21 @@ class Solver {
 
 
   void projectSolve();
+
+
+  // The pressure-driver dispatch of projectSolve (Chebyshev with its bound estimate / ghost
+  // BiCGStab / flexible CG / MG-PCG): solve the projection's own operator for `x1` (g=1 block,
+  // used as the initial guess) with the right-hand side `rhs1`, at the driver's own rtol. Returns
+  // the iteration count; `mg_.lastSolveFailed()` reports a non-finite recurrence. Shared by the
+  // main projection and the balanced-force projection (doc/collocated_varrho_forces.md §4.6.2 B4).
+  long solvePressureSystem(CCField rhs1, CCField x1);
+
+
+  // The projection's constraint divergence of a face field (`out` on the g=2 block, inner cells):
+  // the flux-openness divergence `divergOpen(f, ox_, oy_, oz_)` of the non-porous, non-ghost
+  // branches of both grids. The balanced-force projection applies it to its face force (§4.9 L2:
+  // always through this routine, never divergOpen directly, so a scheme's overlay reaches both).
+  void constraintDivergence(CCConst fx, CCConst fy, CCConst fz, CCField out);
 
 
   void projectCorrectVelocities();
