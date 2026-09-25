@@ -137,6 +137,7 @@ static const std::vector<std::string> kFaces{"-x", "+x", "-y", "+y", "-z", "+z"}
 static int face_index(const std::string& f, const char* who) {
   return enum_index(f, kFaces, who, "face");
 }
+static const std::vector<std::string> kAxes{"x", "y", "z"};
 static const std::vector<std::string> kBcTypes{"periodic", "wall", "inflow", "outflow", "slip"};
 static const std::vector<std::string> kScalarBcTypes{"periodic", "neumann", "dirichlet"};
 static const std::vector<std::string> kAdvSchemes{"sou", "koren"};
@@ -534,6 +535,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "cube gives (1,2,1), (2,2,1), (2,2,2), ... Empty until set_solid/"
            "set_pressure_geometry has built the operator. See flow/doc/anisotropic_metric.md "
            "\u00a75.")
+      .def("last_bulk_velocity_shift", [](D& diag) { return diag.s->lastBulkVelocityShift(); },
+           "The uniform velocity shift set_bulk_velocity applied at the end of the last step() "
+           "(physical velocity units; 0 when it is off). Reading it synchronises with the device.")
       .def("last_pressure_iterations", [](D& diag) { return diag.s->lastPressureIterations(); },
            "Return the pressure-solver iteration count from the last step().\n\n"
            "A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration "
@@ -1869,6 +1873,24 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           nb::arg("force"),
           "Set the body force per unit volume (fx, fy, fz) as one 3-sequence — e.g. a mean "
           "pressure gradient.")
+      .def(
+          "set_bulk_velocity",
+          [](S& s, bool enabled, const std::string& axis, double velocity) {
+            s.setBulkVelocity(enabled, enum_index(axis, kAxes, "set_bulk_velocity", "axis"),
+                              velocity);
+          },
+          nb::arg("enabled"), nb::arg("axis") = "x", nb::arg("velocity") = 0.0,
+          "Hold the BULK velocity along a periodic axis at `velocity` (physical units): the "
+          "volume mean of that velocity component, i.e. the volume flux through any "
+          "cross-section divided by its area. At the end of every step() one uniform shift is "
+          "added to that component on every face; on an axis with no boundary a uniform shift "
+          "of the normal velocity leaves every cell divergence unchanged, so the field stays "
+          "discretely divergence-free. `velocity = 0` is a closed (batch) column: the flow can "
+          "circulate but not pass through (TBFsolver's constant flow rate at 0). The mean is a "
+          "device reduction, global under MPI; single-rank the step makes no host round trip for "
+          "it. Staggered Solver, all-fluid domain (set_pressure_geometry), periodic `axis` only "
+          "-- step() raises otherwise. set_bulk_velocity(False) turns it off. "
+          "diagnostics.last_bulk_velocity_shift() is the shift the last step applied.")
       .def("set_advection", &S::setAdvection, nb::arg("on"),
            "Enable/disable explicit high-order momentum advection (default scheme SOU). Off ⇒ "
            "Stokes.")
