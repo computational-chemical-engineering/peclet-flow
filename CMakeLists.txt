@@ -257,6 +257,14 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(mirror_symmetry PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # The velocity multigrid takes a scalar mu: an explicit request with a variable viscosity raises
+  # (either order), and AUTO keeps a variable viscosity on the red-black smoother.
+  add_test(NAME velocity_solver_variable_mu
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_velocity_solver_variable_mu.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(velocity_solver_variable_mu PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # QUALITY_PLAN D3: `src/` carries no environment variable that can change a result (package E).
   add_test(NAME no_env_knobs
            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_no_env_knobs.py

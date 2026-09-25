@@ -481,10 +481,22 @@ long Solver<Grid>::lastOuterIterations() const {
 
 template <class Grid>
 void Solver<Grid>::setVelocityMultigrid(bool on, int levels, int vcycles) {
+  if (on && varProps_)
+    throwVelocityMgVariableMu("set_velocity_multigrid / set_velocity_solver('multigrid')");
   useVelocityMg_ = on;
   vmgExplicit_ = true;  // an explicit choice disables the AUTO rule
   vmgLevels_ = levels < 1 ? 1 : levels;
   vmgVcycles_ = vcycles < 1 ? 1 : vcycles;
+}
+
+template <class Grid>
+void Solver<Grid>::throwVelocityMgVariableMu(const char* who) const {
+  throw std::invalid_argument(
+      std::string(who) +
+      ": the velocity multigrid takes a SCALAR viscosity and would silently solve the momentum "
+      "equation with the constant set_mu value, ignoring the variable viscosity (a 'mu' "
+      "closure or set_property_mode('variable')). Use set_velocity_solver('gauss_seidel') or "
+      "'auto' (the AUTO rule already keeps variable viscosity on the red-black smoother).");
 }
 
 template <class Grid>

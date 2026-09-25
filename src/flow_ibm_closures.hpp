@@ -122,6 +122,8 @@ template <class Grid>
 void Solver<Grid>::setPropertyModel(const std::string& target, ClosureKind kind,
                                     const std::string& in0, const std::string& in1,
                                     const std::vector<double>& params) {
+  if (target == "mu" && vmgExplicit_ && useVelocityMg_)  // before anything is registered
+    throwVelocityMgVariableMu("set_property_model('mu', ...)");
   Closure cl;
   cl.kind = kind;
   cl.out = ensureTarget(target);
@@ -280,6 +282,10 @@ void Solver<Grid>::setPressureUnderRelax(double w) {
 
 template <class Grid>
 void Solver<Grid>::setPropertyMode(bool variable, bool harmonic) {
+  // An EXPLICIT velocity multigrid is refused in either order; the AUTO rule is simply re-decided
+  // (setSolidVelocityMgAuto excludes varProps_), so only an explicit request can conflict.
+  if (variable && vmgExplicit_ && useVelocityMg_)
+    throwVelocityMgVariableMu("set_property_mode('variable')");
   varProps_ = variable;
   harmonicMu_ = harmonic;
   if (variable) {

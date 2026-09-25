@@ -440,7 +440,11 @@ class Solver {
   // Velocity (momentum) multigrid for the IBM diffusion solve (CUDA set_velocity_multigrid): the
   // STAIRCASE coarse operator (exact == RB-GS, stiff-stable at large dt). Call before set_solid;
   // built at geometry time.
+  // Refused (std::invalid_argument) with a variable viscosity: the V-cycle takes a scalar mu.
   void setVelocityMultigrid(bool on, int levels, int vcycles);
+
+  // The one message for an explicit velocity multigrid combined with a variable viscosity.
+  void throwVelocityMgVariableMu(const char* who) const;
 
 
   bool velocityMultigridActive() const;
