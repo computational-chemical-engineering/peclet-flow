@@ -169,9 +169,13 @@ HydroResult hydrostatic(double ratio, double mu, int steps, bool periodic, bool 
     s.setField("rho", fld);
     s.setDensityMode(true);
   }
-  // gravity f_z = -rho g, offset by +<rho> g in the periodic box so the pressure is periodic
-  s.setPropertyModel("force_z", ClosureKind::LinearMix, "rho", "",
-                     std::vector<double>{periodic ? rbar * g : 0.0, -g});
+  // gravity f_z = -rho g as a per-cell field (volumetric: the cell value on the collocated grid);
+  // in the periodic box the offset +<rho> g that makes the pressure periodic is a UNIFORM drive,
+  // i.e. a mean pressure gradient, so it is set_body_force (a surface force on the collocated
+  // variable-density path, doc/collocated_varrho_forces.md U1 / §5) and not part of the field.
+  s.setPropertyModel("force_z", ClosureKind::LinearMix, "rho", "", std::vector<double>{0.0, -g});
+  if (periodic)
+    s.setBodyForce(0.0, 0.0, rbar * g);
   for (int k = 0; k < steps; ++k)
     s.step();
   HydroResult r;
