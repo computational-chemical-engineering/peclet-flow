@@ -1187,6 +1187,10 @@ class CutcellMG {
     axpy(r, -1.0, Ap);
     removeMean(l0, r);  // compatibility: project rhs/residual onto the range
     const double r0 = maxabs(l0, r);
+    // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
+    // stop reference is set (setStopReference; only the balanced-force projection sets it).
+    // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
+    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
     int it = 0;
     // Env-gated convergence trace (PECLET_FLOW_MG_DEBUG>=2): |b|inf, r0 and the per-iteration
     // residual, so a decomposition-dependent iteration count can be read as a rate (preconditioner
@@ -1243,7 +1247,7 @@ class CutcellMG {
         const double rn = maxabs(l0, r);
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
-        if (rn < rtol * r0) {
+        if (rn < rtol * rref) {
           ++it;
           break;
         }
@@ -1308,6 +1312,10 @@ class CutcellMG {
     axpy(r, -1.0, Ap);
     removeMean(l0, r);  // compatibility: project rhs/residual onto the range
     const double r0 = maxabs(l0, r);
+    // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
+    // stop reference is set (setStopReference; only the balanced-force projection sets it).
+    // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
+    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
     int it = 0;
     int dbgRank = 0;
 #ifdef PECLET_FLOW_MPI
@@ -1354,7 +1362,7 @@ class CutcellMG {
         const double rn = maxabs(l0, r);
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
-        if (rn < rtol * r0) {
+        if (rn < rtol * rref) {
           ++it;
           break;
         }
@@ -2686,6 +2694,10 @@ class CutcellMG {
     axpy(r, -1.0, w);
     removeMean(l0, r);
     const double r0 = maxabs(l0, r);
+    // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
+    // stop reference is set (setStopReference; only the balanced-force projection sets it).
+    // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
+    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
     int nvc = 0;
     if (r0 > 0.0) {
       precond(z, r);
@@ -2696,7 +2708,7 @@ class CutcellMG {
         matvec(w, d);
         axpy(r, -1.0, w);
         removeMean(l0, r);  // r -= A d
-        if (maxabs(l0, r) < rtol * r0)
+        if (maxabs(l0, r) < rtol * rref)
           break;
         precond(z, r);
         ++nvc;
@@ -2708,6 +2720,26 @@ class CutcellMG {
     }
     removeMean(l0, x);
     return nvc;
+  }
+  // --- stop reference for a solve relative to the FULL right-hand side (the balanced-force
+  // projection, flow doc/collocated_varrho_forces.md §4.6 / WO-P5). ref <= 0 restores the
+  // default (stop relative to the initial residual). Callers set it around ONE solve only.
+  void setStopReference(double ref) { stopRef_ = ref; }
+  // max|b| over the fluid cells after the null-space (mean) projection -- the drivers' norm.
+  double rhsNorm(CCField b, CCField scratch) {
+    Level& l0 = lv_[0];
+    Kokkos::deep_copy(scratch, b);
+    removeMean(l0, scratch);
+    return maxabs(l0, scratch);
+  }
+  // max|b - A x| in the same norm, computed exactly as the drivers compute their r0.
+  double residualNorm(CCField b, CCField x, CCField r, CCField Ap) {
+    Level& l0 = lv_[0];
+    matvecOverlap(l0, Ap, x);
+    Kokkos::deep_copy(r, b);
+    axpy(r, -1.0, Ap);
+    removeMean(l0, r);
+    return maxabs(l0, r);
   }
   // reductions / mean removal over inner FLUID cells (AC>tiny) of a level.
   double dot(Level& lv, CCField a, CCField b) {
@@ -2889,6 +2921,7 @@ class CutcellMG {
   // scalar (a preconditioner or operator that produced NaN/Inf)? Reset at the head of
   // every solve. See `lastSolveFailed()`.
   bool solveFailed_ = false;
+  double stopRef_ = -1.0;       // see setStopReference
   std::vector<double> lvTime_;  // per-level V-cycle wall time (mgDebugLevel() >= 3)
   int lvCycles_ = 0;
   // Zero-gradient (Neumann) coarse ghost before the prolongation on wall/inflow faces — the WO-H

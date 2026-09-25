@@ -221,12 +221,11 @@ static int runCase(const Config& c, const peclet::core::decomp::BlockDecomposer<
       sumd += pd[k];
       sumr += pr[k];
     }
-    // The balanced-force count gets the SAME cost-envelope rule as the main count. Measured
-    // 2026-09-25: on the rest-state columns the per-step counts part by up to 2 at np = 2 and 4
-    // with IDENTICAL totals (250/250) -- warm-started from P_b, the solve's initial residual is the
-    // round-off of the previous X, so (as for the main projection of a rest state) the per-step
-    // count is a random walk across decompositions, while a decomposition defect would inflate it
-    // systematically. np = 1 stays exact.
+    // The balanced-force count gets the SAME cost-envelope rule as the main count. Before WO-P5
+    // (warm start, initial-residual stop) the rest-state columns parted by up to 2 per step with
+    // identical totals -- the solve worked on round-off. With the increment solve and its
+    // full-RHS stop the rest state skips after step 1 (14 iterations in 20 steps, identical at
+    // np 1/2/4), so the envelope is now slack rather than load-bearing. np = 1 stays exact.
     long bmaxd = 0, bmaxr = 0, bsumd = 0;
     for (std::size_t k = 0; k < bd.size(); ++k) {
       bmaxd = std::max(bmaxd, bd[k]);

@@ -585,12 +585,13 @@ class Solver {
   // Once per step, after the property/curvature refresh and before the momentum predictor, solve
   //   D(O c w G X) = D(O c beta),  c = rho0/rho_f^op (1 at constant rho),
   //   beta = f_const + ½(f(j) + f(j-s)) + CSF(j)  (the predictor's own face force, without rs),
-  // with the projection's OWN operator, constraint divergence and driver (warm-started from P_b),
-  // then P += X - P_b, P_b = X. P stays the total physical pressure; the predictor then sees only
+  // with the projection's OWN operator, constraint divergence and driver, as an INCREMENT on the
+  // previous split, X = P_b + dP_b, stopped relative to the full right-hand side (and skipped when
+  // P_b already meets it), then P += X - P_b, P_b = X. P stays the total physical pressure; the predictor then sees only
   // the part of the forces that drives flow, so gradient forces (hydrostatics, constant-kappa CSF)
   // are balanced exactly from step 1 at every mu, dt, density ratio and openness. The solve is
   // state-independent: stability and the converged steady state are identical ON and OFF. Cost:
-  // one extra pressure solve per step. DEFAULT (U2): ON on the collocated variable-density / CSF
+  // one extra pressure solve per step while the forces change; none for a static interface. DEFAULT (U2): ON on the collocated variable-density / CSF
   // path (V8), OFF elsewhere; an explicit setting always wins. OFF is byte-identical to a solver
   // without the option. Refused, with a named error at this setter when the configuration is
   // already known and otherwise at the next step: porous continuity, the ghost projection,
@@ -1735,6 +1736,8 @@ class Solver {
   void buildBalancedFaceForce(int c);
   // B1-B5, once per step before the Picard loop.
   void applyBalancedForceProjection();
+  // (B4) the increment solve with the full-RHS stop (WO-P5); pb1_ in/out, rhs1_ the RHS.
+  long solveBalancedForceSystem(double bref);
 
 
   void updateEpsRho();
@@ -4276,9 +4279,9 @@ class Solver {
   // (`set_pressure_geometry`) — an immersed solid still throws, at the first `project()`, and so do
   // the ghost projection and `set_rho_face_harmonic` (see requireCollocatedFaceForceScope).
   // Momentum consistency (`enable_vof_momentum`) is NOT in this rung: the collocated construction
-  // needs Favre face states, so the collocated two-phase path is rated to density ratio <= ~100 for
-  // cases WITH MOTION (a high-ratio case at REST — hydrostatic, stationary droplet — is exact
-  // either way, and is measured at ratio 1000).
+  // needs Favre face states, so the collocated two-phase path is rated to density ratio ~10 for
+  // cases WITH MOTION (WO-V3: a translating drop throws the VoF CFL cap at ratio 100 and 1000); a
+  // high-ratio case at REST — hydrostatic, stationary droplet — is exact, measured at ratio 1000.
   void setDensityMode(bool variable);
 
 

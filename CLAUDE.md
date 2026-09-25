@@ -542,8 +542,11 @@ the ablation knobs (`set_csf_mode`, `set_vof_kappa_*`, the `set_phase_change_*` 
   plain donor-cell upwind (a MUSCL slope is a density-ratio amplifier). `enable_vof_momentum` moves
   VoF advection to the head of `step()` and needs variable density, staggered layout, explicit
   advection, no solid, no porous continuity; it makes ratios above ~100 usable.
-- **Scope, and say it to users:** staggered is the reference; collocated is all-fluid, ratio ≲ 100
-  with motion. The block container is all-fluid and staggered-only for its CSF. **Colliding
+- **Scope, and say it to users:** staggered is the reference; collocated is all-fluid, ratio ~10
+  with motion (WO-V3, 2026-09-25: a translating drop tracks staggered at ratio 10 and throws the
+  Weymouth-Yue CFL cap at ratio 100 and 1000, balanced-force projection on or off; exact at rest
+  at ratio 1000). The next package re-measures it. The block container is all-fluid and
+  staggered-only for its CSF. **Colliding
   markers are rated since 2026-09-25** (`doc/vof_overlap_design.md`): the blow-up was garbage
   curvature on sub-cell *debris* one marker leaves inside another, not the SUM-force/MAX-colour
   pairing. The fix is per-step debris + sub-`wispEps` residue removal with exact return to the
@@ -561,4 +564,7 @@ Intermediate-level multigrid repartitioning at scale (the Repartition kind exist
 a weighted `dec0`; unweighted ladders are unchanged); logging the aligned rebalance's `a` in
 `scripts/check_decomposition.py --predict` (needs the weights to reach `predict_hierarchy` — a new
 public keyword, not decided); coefficient-aware coarsening for high contrast; double-diagonal
-operator storage; `vof-w4`.
+operator storage; `vof-w4`; **the collocated advecting face field `uf_` is not carried through
+`redistribute`** (pre-existing, not fixed by the V8 package): a collocated run WITH advection that
+is rebalanced at np = 1 already drifts 5.0e-8 in u from the never-rebalanced run, option off
+(measured 2026-09-25 while gating `balanced_force_mpi`, whose rebalance case is therefore Stokes).

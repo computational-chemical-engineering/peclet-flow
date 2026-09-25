@@ -31,7 +31,7 @@ step operator); mu = 1, rho_min = 1, h = 1; a small Taylor-Green cell force keep
      transient is noise, not growth).
   G3 dt-independence: walled at +-y, the Taylor-Green force, dt in {100, 10, 1}. The dt = 100 run
      marches from rest to max|du| <= 1e-12 max|u|; the dt = 10 and dt = 1 runs are WARM-STARTED
-     from the dt = 100 state (u, v, w, P) and march to the same criterion. A dt-independent fixed
+     from the dt = 100 state (u, v, w, P, and P_b when the option is on) and march to the same criterion. A dt-independent fixed
      point is then already converged (one or two steps); a dt-dependent one drifts. Pass iff
      max|u(dt_i) - u(dt_j)| <= 1e-9 max|u|. (Warm starting is what makes the ratio-1000 slab
      affordable: from rest its heavy layer relaxes at rate mu k^2/rho ~ 1e-4 per unit time.) Every
@@ -222,12 +222,20 @@ def g3(path):
     for dt in G3_DTS:
         s = path.build(dt, True)
         if state is not None:
-            for name, a in zip(("u", "v", "w", "p"), state):
+            for name, a in state.items():
+                if name == "p_balanced":
+                    s.add_field(name)
                 s.set_field(name, F(a))
                 s.diagnostics.exchange_field(name)
         u, k, conv = march(path, s)
         if state is None:
-            state = [np.asarray(s.get_field(n)) for n in ("u", "v", "w", "p")]
+            # the WHOLE state: with the balanced-force projection on, P's split P_b is state too
+            # (a fresh P_b = 0 under a transferred total P would add the balanced part twice)
+            state = {n: np.asarray(s.get_field(n)) for n in ("u", "v", "w", "p")}
+            try:
+                state["p_balanced"] = np.asarray(s.get_field("p_balanced"))
+            except IndexError:  # the option never ran: no split to carry
+                pass
         sols[dt] = u
         info.append(f"dt {dt:g}: {k} steps{'' if conv else ' (NOT converged)'}")
     scale = max(np.max(np.abs(sols[G3_DTS[0]])), 1e-300)

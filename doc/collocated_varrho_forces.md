@@ -429,15 +429,41 @@ untouched.
 
 - the β kernels and one divergence;
 - one global max-reduction;
-- one extra Poisson solve: same operator, same MG hierarchy, same Chebyshev bounds (with the B1
-  flag they are estimated once per rebuild, on the pre-projection RHS);
+- one extra Poisson solve: same operator, same MG hierarchy, same driver and rtol. It solves for
+  the INCREMENT, $A\,\delta P_b = D(Oc\beta) - A P_b^{n-1}$, with the stop relative to the FULL
+  right-hand side, $\lVert r\rVert \le \mathrm{rtol}\cdot\max(\lVert D(Oc\beta)\rVert,\,\text{tiny})$, and
+  is skipped (zero iterations) when $P_b^{n-1}$ already meets that test (WO-P5, orchestrator
+  decision 2026-09-25). Chebyshev bounds are the MAIN projection's, estimated on the main
+  right-hand side (Q9); when they are stale for the step's operator the pre-projection estimates
+  bounds of its own that the main solve never sees;
 - two copies.
 
-No new halo exchange of state. Warm-started from `Pb_`, a static interface costs about 0–1
-iteration. A moving interface is expected to cost 50–80 % of a cold solve, i.e. up to about
-1.5–1.8× the pressure stage.
+No new halo exchange of state.
 
-Gate G7 measures it. Memory: one g=2 and one g=1 field, only once the option is ON.
+**Measured [CODE] (WO-P4/P5, 32³, ratio 1000, Chebyshev rtol 1e-9, host-openmp on a loaded
+shared host; `tests/study/balanced_force_cost.py`):**
+
+| case | grid | step ON / OFF | main iterations OFF / ON | pre-projection iterations |
+|---|---|---|---|---|
+| moving drop (U = 0.02) | staggered | 1.70 | 9.9 / 9.8 | 10.2 |
+| moving drop | collocated | 1.59 | 9.8 / 9.4 | 10.2 |
+| drop at rest, height-function κ | staggered | 1.73 | 10.4 / 10.0 | 10.0 |
+| drop at rest, height-function κ | collocated | 2.13 | 10.5 / 10.6 | 10.0 |
+| drop at rest, constant κ (exact equilibrium) | staggered | 0.85 | 10.0 / 10.0 | 0.0 |
+| drop at rest, constant κ | collocated | 1.08 | 11.2 / 11.0 | 0.0 |
+| hydrostatic column, 20 steps (`balanced_force_mpi`) | both | — | — | 14 at step 1, then 0 |
+
+- A static balance costs nothing after the first step. A changing force costs a full solve: the
+  pre-projection needs about as many iterations as the main projection, so the step costs 1.6–2.1×
+  (G7's 1.5× is missed; Q3). A drop "at rest" with height-function curvature is not static: its
+  parasitic currents move the interface, and the force changes every step.
+- Main iterations are equal ON and OFF (the 2× budget of Q9 is not approached).
+- The first implementation (WO-P1..P4: warm start from `Pb_`, stop relative to the initial
+  residual) did NOT make a static interface cheap: the initial residual is the round-off of the
+  previous solve and the stop asked it to fall by rtol again, i.e. a full solve at rtol 1e-9 and
+  the iteration cap at 1e-14.
+
+Memory: one g=2 and one g=1 field, only once the option is ON.
 
 ### 4.9 Load-bearing choices for the next package (collocated solids) and amr
 
@@ -500,8 +526,9 @@ arithmetic $G_cP/\rho_c$, not from where the force sits.
 **5.3 Rating.**
 
 - Static and balanced at ratio 1000 is stable in both modes. It is exact with the option ON.
-- "Collocated ratio ≲ 100 with motion" stays until WO-V3 measures it (momentum transport is
-  untouched).
+- With motion the collocated path is rated ratio ~10 (WO-V3: a translating drop throws the VoF
+  CFL cap at ratio 100 and 1000, option ON and OFF; RT at ratio 3 and the drop at ratio 10 track
+  staggered). Momentum transport is untouched by this package.
 
 ## 6. Rejected alternatives
 
@@ -828,11 +855,11 @@ Other combinations unchanged.
 | Q1, Q2 | — | settled (U1) | — |
 | Q3 | Cost of the option | fact (WO-P4) | Accept up to 1.5×; beyond that the orchestrator asks the user about the lagged variant |
 | Q4 | Moving-interface effect of Π_ρ's O(h) interface-local weighting | fact (WO-V3) | Accept (stability requires it); report |
-| Q5 | Motion rating ≲ 100 | fact (WO-V3) | Keep until measured |
+| Q5 | Motion rating | fact (WO-V3) | MEASURED: a translating drop throws the VoF CFL cap at ratio 100 and 1000 (ON and OFF); ratio 10 tracks staggered. Collocated with motion is rated ratio ~10 until the next package re-measures |
 | Q6 | 3-D rotational margin (κλ_max < 2 is measured, not proved) | fact | G2 covers dt ≤ 100. If G2 fails with κ = μ but passes with κ = 0, stop and report; never ship a κ change without the architect |
 | Q7 | Option with inflow/outflow faces | preference (scope) + fact | Refused in v1. It needs the operator-openness vs flux-openness rule at inflow and the WO-R2 outflow planes. Next package if the porous-media drainage target needs it |
 | Q8 | Staggered VoF with the default OFF keeps WO-P's μdt² residue | preference | Resolved for V8 by U2's default ON. On staggered, the docs recommend enabling the option for static and low-Ca work (the porous-media drainage target) |
-| Q9 | Chebyshev bounds are estimated on the pre-projection RHS when ON | fact | Accept. If main iterations rise > 2×, estimate on the main RHS |
+| Q9 | Chebyshev bounds when ON | fact | RESOLVED (WO-P5): the main bounds are estimated on the MAIN right-hand side only; a pre-projection with stale bounds estimates its own, never shared. Main iterations ON = OFF (§4.8) |
 | Q10 | Pointwise formulas (L5) and the CSF pair → `core::scheme` / `core::vof`: now or when amr consumes them | preference (process) | When amr's multiphase package starts. Its WO-A0 moves them verbatim, with flow byte-identity as the gate |
 | Q11 | Two collocated families in amr (ghost single-phase, aperture-adjoint multiphase+solids) | preference | See the companion plan §3: accept for S1; revisit at S2 |
 
@@ -857,7 +884,8 @@ Other combinations unchanged.
     reconstruction weight sum W. The projection reads the momentum-weighted face velocity
     (rho_L u_L + rho_R u_R)/(rho_L + rho_R), so M*Gamma = -(D O Pi_rho)^T for any openness. Model:
     spectral radius exactly 1 in ~1200 step operators (ratio to 1e6, dt to 1e4, kappa = mu and 0,
-    immersed disk); steady state dt-independent to 1e-10. The rotational update is unchanged.
+    immersed disk); steady state dt-independent to 1e-10 (model) and <= 1e-12 relative in the
+    code (guard G3, every V8 path). The rotational update is unchanged.
 - rejected: face acceleration after the viscous solve (non-incremental; unstable with the rotational
     term); kappa = 0 (Chorin); completing centered.h with a lagged g (a Rhie-Chow-type dt-dependent
     constraint); arithmetic centre->face with the rho-weighted force (1.018/step at ratio 1e4); the
@@ -882,13 +910,17 @@ Other combinations unchanged.
     collocated variable-rho/CSF path, False elsewhere) solves, once
     per step and with the projection's own operator, constraint divergence and driver,
     D(O c w G X) = D(O c beta) (beta = the predictor's own face force: f_const + face mean of the
-    cell forces + CSF; c = rho0/rho_f^op), then P += X - P_b, P_b = X. Gradient forces (hydrostatics,
-    constant-kappa CSF) are then balanced exactly from step 1 at every mu, dt, density ratio and
-    openness. That includes immersed solids on the staggered grid, where it removes WO-P's
-    mu*dt^2 residue (model 1e-3..1e-7 -> 1e-17). It is state-independent, so stability and the
-    steady state are identical ON and OFF; OFF leaves a decaying transient (V8 constant-kappa drop
-    2.2e-4 at ratio 1 and 1.6e-5 at ratio 1000 after 30 steps, model). Staggered OFF is
-    byte-identical.
+    cell forces + CSF; c = rho0/rho_f^op), then P += X - P_b, P_b = X. X is solved as the
+    INCREMENT on P_b with the stop relative to the full right-hand side, and skipped when P_b
+    already meets it: a static interface costs no iterations, a changing force about one extra
+    pressure solve (step 1.6-2.1x at 32^3). Gradient forces (hydrostatics, constant-kappa CSF)
+    are then balanced exactly from step 1 at every mu, dt, density ratio and openness. That
+    includes immersed solids on the staggered grid, where it removes WO-P's mu*dt^2 residue
+    (code: staggered drop 2.0e-5 / 1.0e-5 at ratio 10 / 1000 -> <= 2e-17; sphere across a
+    ratio-1000 column 9.3e-4 -> 8.7e-14; sessile cap 1.0e-4 -> 2.8e-17). It is state-independent,
+    so stability and the steady state are identical ON and OFF; OFF leaves a decaying transient
+    (code, 3-D: V8 constant-kappa drop face 1.0e-4 at ratio 1 and 6.2e-5 at ratio 1000 after
+    30 steps, decaying; ON <= 2e-17). Staggered OFF is byte-identical.
 - rejected: always-on (the user asked for an option); default off on V8 (loses the settled
     constant-kappa CSF annihilation); a new staggered predictor (the existing one reads the
     total P); lagged P_b (first-order for moving interfaces)

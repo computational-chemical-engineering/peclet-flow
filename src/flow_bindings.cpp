@@ -1691,9 +1691,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "gradient) enter the implicit momentum predictor as the matching face integral "
           "rho_c * avg_faces((f - grad_f P)/rho_f); a per-cell force enters at the cell value. The "
           "pair is adjoint, so the step is stable at every dt and density ratio and its steady "
-          "state is dt-independent (doc/collocated_varrho_forces.md). Rated to density ratio ~100 "
-          "for cases WITH MOTION (momentum consistency needs Favre face states and is not in this "
-          "rung).")
+          "state is dt-independent (doc/collocated_varrho_forces.md). Rated to density ratio ~10 "
+          "for cases WITH MOTION (a translating drop exceeds the VoF CFL cap at ratio 100 and "
+          "1000; momentum consistency needs Favre face states and is not in this rung); exact at "
+          "rest at ratio 1000.")
       .def(
           "set_pressure_underrelax", [](D& diag, double w) { diag.s->setPressureUnderRelax(w); },
           nb::arg("omega"),
@@ -1910,7 +1911,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "viscosity, dt, density ratio and immersed-solid aperture. The solve does not depend "
            "on the flow state, so stability and the converged steady state are identical on and "
            "off; off leaves a decaying transient balance residue. get_p() stays the total "
-           "physical pressure. Cost: one extra pressure solve per step (warm-started). Default: "
+           "physical pressure. Cost: one extra pressure solve per step while the forces change, "
+           "solved for the increment of the previous split and skipped when that is already "
+           "converged -- a static interface costs no iterations. Default: "
            "ON on SolverColocated with variable density or surface tension, OFF otherwise; an "
            "explicit call always wins. Refused (named error) with porous continuity, the ghost projection, "
            "set_fluid_only_constraint(2), the block CSF, inflow/outflow faces, the "

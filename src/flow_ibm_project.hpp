@@ -547,8 +547,12 @@ void Solver<Grid>::applyBalancedForceProjection() {
   for (int c = 0; c < 3; ++c)
     buildBalancedFaceForce(c);
   constraintDivergence(CCConst(faceAcc_[0]), CCConst(faceAcc_[1]), CCConst(faceAcc_[2]), div_);
-  // (B4) a force with no divergence needs no pressure (and an all-zero RHS must not reach a
-  // Krylov driver); otherwise the projection's own driver, warm-started from P_b.
+  // (B4) the INCREMENT solve (WO-P5): A dP_b = D(O c beta) - A P_b^{n-1}, stopped RELATIVE TO THE
+  // FULL right-hand side, |r| <= rtol * max|D(O c beta)| -- run as the projection's own driver
+  // started from x = P_b^{n-1} with a full-RHS stop reference (the driver's first residual
+  // b - A P_b^{n-1} IS the increment's right-hand side, and x - P_b^{n-1} the increment), and
+  // skipped outright (zero iterations) when that initial residual already meets the test: a
+  // static interface costs no iterations. A force with no divergence needs no pressure at all.
   long iters = 0;
   double bmax = maxAbsInner(CCConst(div_), e_, G);
 #ifdef PECLET_FLOW_MPI
@@ -570,7 +574,10 @@ void Solver<Grid>::applyBalancedForceProjection() {
           KOKKOS_LAMBDA(std::size_t i) { r(i) = -r(i); });
     }
     copyInner(pb1_, e1_, 1, CCConst(Pb_), e_, G);
-    iters = solvePressureSystem(rhs1_, pb1_);
+    const double rtol = useChebyshev_ ? chebRtol_ : pcgRtol_;
+    const double bref = std::max(mg_.rhsNorm(rhs1_, r_), 1e-300);
+    if (mg_.residualNorm(rhs1_, pb1_, r_, Ap_) > rtol * bref)
+      iters = solveBalancedForceSystem(bref);
   }
   lastBalancedForceIters_ = iters;
   // (B5) P += X - P_b; P_b = X (one fused kernel over the inner cells), then the P ghosts the
@@ -594,6 +601,35 @@ void Solver<Grid>::applyBalancedForceProjection() {
   fillGhosts(P_);
   if (hasBc_)
     pressureBcGhost();
+}
+
+template <class Grid>
+long Solver<Grid>::solveBalancedForceSystem(double bref) {
+  // The balanced-force projection's own call path: the same operator and driver as the main
+  // projection, but the stop is relative to the full right-hand side (setStopReference, reset on
+  // every exit) and a Chebyshev solve never touches the MAIN projection's spectral bounds -- it
+  // reuses them when they are current for this operator, and otherwise estimates bounds of its own
+  // on its own right-hand side that the main solve never sees (doc §11 Q9: the main bounds are
+  // estimated on the main right-hand side).
+  struct StopRefGuard {
+    CutcellMG& mg;
+    ~StopRefGuard() { mg.setStopReference(-1.0); }
+  } guard{mg_};
+  mg_.setStopReference(bref);
+  if (useChebyshev_) {
+    double a = chebA_, b = chebB_;
+    if (!chebBoundsSet_)
+      mg_.estimateEigenvalues(CCConst(rhs1_), a, b, 15, 2, 2, 12);
+    return mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, a, b);
+  }
+  if (useFcg_) {
+    if (zp1_.extent(0) != n1_)
+      zp1_ = CCField("zp1", n1_);
+    return mg_.solveFCG(rhs1_, pb1_, r_, pp_, z_, zp1_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12, nullptr,
+                        0, C3{nx_, ny_, nz_});
+  }
+  return mg_.solvePCG(rhs1_, pb1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12, nullptr, 0,
+                      C3{nx_, ny_, nz_});
 }
 
 template <class Grid>
