@@ -113,6 +113,23 @@ peclet_require_kokkos()
 peclet_require_nanobind()
 peclet_sibling_include(peclet-core "${PECLET_CORE_TAG}" "../core" PECLET_CORE_INCLUDE)
 
+# Host floating-point contraction (doc/vof_step_performance_design.md §4.5 item 6 / §5.1, A1): on a
+# HOST Kokkos backend (no CUDA, no HIP) every flow target -- the solver library, the module and the
+# tests, which is why this is directory-scoped and precedes them -- compiles with -ffp-contract=off,
+# so no compiler default can fuse a*b+c into an FMA. Inert on today's x86-64 baseline (SSE2 has no
+# FMA instruction, so nothing is contracted either way; proved bit-identical on the state hashes and
+# the bubble-column dumps); it is what keeps a host result independent of the ISA once
+# PECLET_FLOW_HOST_ARCH (below) enables one with FMA, and it CHANGES bits on aarch64, whose GCC
+# default contracts. Device builds are untouched: nvcc keeps --fmad=true for device code.
+set(_peclet_flow_host_backend OFF)
+if(NOT Kokkos_ENABLE_CUDA AND NOT Kokkos_ENABLE_HIP)
+  set(_peclet_flow_host_backend ON)
+endif()
+if(_peclet_flow_host_backend AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>)
+  message(STATUS "flow: host backend -> -ffp-contract=off")
+endif()
+
 # The ONE compiled instantiation of Solver<Staggered> / Solver<Colocated> (QUALITY_PLAN G.8): the
 # module and every test link it instead of instantiating the ~12 k-line class template themselves.
 # PECLET_FLOW_MPI changes the class, so there is one library per configuration and each consumer
