@@ -1399,7 +1399,9 @@ class Solver {
   // `applyScalarBc` does — the halo fill runs first (and periodic-wraps the global boundary ghost),
   // the BC overwrite wins on the rank that owns the face. The former `if (!distributed_)` guard
   // keyed on the wrong predicate: it dropped the override at EVERY np including 1.
-  void fillPropGhosts(CCField f);
+  // `edges` extends the BC copy over the tangential ghost rows (the edge/corner ghosts), for a
+  // consumer that reads diagonal neighbours (the staggered cross-face viscosity).
+  void fillPropGhosts(CCField f, bool edges = false);
 
 
   void fillMuGhosts();
@@ -4432,7 +4434,7 @@ class Solver {
   void patchScalarDirichletFace(CCField AC, CCField band, double Din, int a, int side);
 
 
-  void applyScalarBcFace(CCField c, int a, int side, int type, double val);
+  void applyScalarBcFace(CCField c, int a, int side, int type, double val, bool edges = false);
 
 
 

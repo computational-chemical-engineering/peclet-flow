@@ -275,7 +275,7 @@ void Solver<Grid>::patchScalarDirichletFace(CCField AC, CCField band, double Din
 }
 
 template <class Grid>
-void Solver<Grid>::applyScalarBcFace(CCField c, int a, int side, int type, double val) {
+void Solver<Grid>::applyScalarBcFace(CCField c, int a, int side, int type, double val, bool edges) {
   const int t1 = (a + 1) % 3, t2 = (a + 2) % 3;
   const int nt1 = (t1 == 0) ? nx_ : (t1 == 1) ? ny_ : nz_;
   const int nt2 = (t2 == 0) ? nx_ : (t2 == 1) ? ny_ : nz_;
@@ -286,9 +286,13 @@ void Solver<Grid>::applyScalarBcFace(CCField c, int a, int side, int type, doubl
   const long st2 = (t2 == 0) ? sx : (t2 == 1) ? sy : sz;
   const int aInner = (side == 0) ? G : (G + na - 1);  // inner boundary cell a-index
   const int dir = (side == 0) ? -1 : +1;              // toward the ghost
+  // edges: also the tangential ghost rows (their inner-normal values are the periodic/halo fill),
+  // so the edge and corner ghosts at this face carry the BC too, not a wrap from the far side.
+  const int t0 = edges ? 0 : G, t1e = edges ? nt1 + 2 * G : G + nt1,
+            t2e = edges ? nt2 + 2 * G : G + nt2;
   CCExec space;
   Kokkos::parallel_for(
-      "peclet::flow::scalar_bc_face", MDRange2<CCExec>(space, {G, G}, {G + nt1, G + nt2}),
+      "peclet::flow::scalar_bc_face", MDRange2<CCExec>(space, {t0, t0}, {t1e, t2e}),
       KOKKOS_LAMBDA(int j1, int j2) {
         const long base = (long)aInner * sa + (long)j1 * st1 + (long)j2 * st2;
         for (int L = 1; L <= 2; ++L) {

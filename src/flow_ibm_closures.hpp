@@ -11,17 +11,19 @@
 namespace peclet::flow {
 
 template <class Grid>
-void Solver<Grid>::fillPropGhosts(CCField f) {
+void Solver<Grid>::fillPropGhosts(CCField f, bool edges) {
   fillGhosts(f);
   for (int face = 0; face < 6; ++face)
     if (bc_[face] != 0 && touchesGlobalFace(face))
-      applyScalarBcFace(f, face / 2, face % 2, 1, 0.0);  // type 1 = Neumann copy
+      applyScalarBcFace(f, face / 2, face % 2, 1, 0.0, edges);  // type 1 = Neumann copy
   vofBcPropGhosts(f);  // WO-R item 5; a no-op unless a VoF inflow colour is set
 }
 
 template <class Grid>
 void Solver<Grid>::fillMuGhosts() {
-  fillPropGhosts(muField_);
+  // edges: the staggered cross-face viscosity reads mu at i - s_c +- s_a, a diagonal ghost at a
+  // wall row -- which must be the zero-gradient copy, not the opposite wall's periodic wrap.
+  fillPropGhosts(muField_, /*edges=*/true);
 }
 
 template <class Grid>
@@ -78,9 +80,10 @@ template <class Grid>
 VarFaceProps Solver<Grid>::makeFaceProps(int c) {
   VarFaceProps fp;
   fp.haveMu = varProps_;
-  if (varProps_)
+  if (varProps_) {
     fp.mu = CCConst(muField_);
-  else
+    fp.msc = Grid::collocated ? 0 : strideOf(c);  // mu on the staggered unknown's own faces
+  } else
     fp.muC = mu_;
   fp.harmMu = harmonicMu_;
   fp.haveRho = effVarRho();

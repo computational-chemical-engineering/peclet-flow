@@ -57,6 +57,28 @@ property closure targets `"mu"`); internal flag `varProps_`.
   The harmonic mean is the correct choice across a viscosity **jump**: it is the face conductance
   for which the shear stress `μ ∂u/∂n` is continuous across the material interface (series
   resistance), and it is what reproduces the analytic two-layer Couette profile (§5).
+
+  **Placement on the MAC grid** (`VarFaceProps::beta`, fixed 2026-09-25). The staggered unknown
+  `u_c(i)` sits on the −c face of cell i, so its control volume is centred there, not on cell i,
+  and the viscosity is needed on *that* control volume's faces:
+
+  ```
+  along c   (u_c(i) – u_c(i±e_c)):  μ at the cell centre between them — μ_i, resp. μ_{i−e_c}
+  across c  (u_c(i) – u_c(i±e_a)):  the cell EDGE shared by i, i±e_a, i−e_c, i−e_c±e_a:
+                                    ½[ μ_f(i, i±e_a) + μ_f(i−e_c, i−e_c±e_a) ]
+  ```
+
+  i.e. the configured mean (arithmetic or harmonic) *across* the a-face — the series direction —
+  and arithmetic *along* c, the parallel direction. The collocated unknown is the cell, so there
+  the plain cell-face mean `μ_f(i, j)` is already right. The first implementation used
+  `μ_f(i, j)` on the MAC grid too, which puts μ half a cell towards +c for every component: first
+  order (steady manufactured Stokes, N = 16/32/64: error order 1.39, 1.05; now 1.99, 2.00), and in
+  a walled direction a mirror asymmetry — a bubble column between walls collected its bubbles at
+  the LOW wall, and so did its mirror image (`tests/python/test_mirror_symmetry.py`). A layered μ(y)
+  with a y-normal flow (the Couette study of §5) is unaffected, bitwise: there the two edge terms
+  are equal. The cross-face term reads μ at a diagonal neighbour, so `fillMuGhosts` also carries
+  the wall's zero-gradient copy into the edge and corner ghosts (`fillPropGhosts(f, edges=true)`)
+  instead of leaving the periodic wrap from the opposite wall there.
 - **Assembly**: `ibmBuildDiffusionVar<FaceProps>` (`src/cut_cell_ibm.hpp`) is a *sibling* of the
   validated constant kernel — never an edit of it (bit-exactness policy):
 
