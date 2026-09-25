@@ -26,7 +26,10 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
 - DONE: the LOW-wall asymmetry was variable-mu placement (face mean shifted h/2 towards +c): flow
   main fe377a5 (b273031 fix, 392bf9a ctest mirror_symmetry, fe377a5 velocity MG refuses variable
   mu), umbrella 5c328f2 (register). vof-mg / vof-container branches predate it: rebase at merge.
-- production column rerunning on the fix (frozen scratchpad/flow_prod4), peclet/run.
+- production column on fe377a5 DONE: drift 0.949+-0.024 vs TBF 0.778 (structure now matches: centre
+  void 0.053 vs 0.052, walls ~0.01); marker volumes 2.6e-12; data/peclet_closed.npz committed.
+  Remaining 22 %: engineer runs isolated bubble (both codes, smoothing on/off) + peclet D/h=24.
+- WO-3 DECISION: band sign (bitwise on CUDA; the note's +o·gf differed 8.8e-15 via nvcc FMA).
 - §12 E2(a) design landed (8ac2ea5). WO-E2.0 PASSED: ratio 1 -> 7.3 MG-PCG iterations (max 8) vs
   13.1 at ratio 50. E2(a) CPU model 57-95 ms/step (TBF 45): parity needs E2(b) FFT = USER decision
   (proposed: after E2(a) accuracy gates).
