@@ -1,50 +1,54 @@
-// VoF rung V8 (WO-T) — the COLLOCATED path: variable density in the ABC approximate projection,
-// forces as face accelerations with the averaged cell counterpart, colour advection from the
-// projected face field.
+// VoF rung V8 — the COLLOCATED path: variable density and surface tension in the ABC approximate
+// projection through the mass-adjoint pair (doc/collocated_varrho_forces.md), colour advection from
+// the projected face field.
 //
-// The collocated solver's pressure coupling is the approximate projection: average the cell
-// velocities onto a MAC face field, project THAT exactly, correct the cell field. Two consequences
-// drive every gate here:
+// The collocated solver's pressure coupling is the approximate projection: map the cell velocities
+// onto a MAC face field, project THAT exactly, correct the cell field. On this path
 //
-//   * the TRANSPORT half is already right — `uf_/vf_/wf_` is exactly discretely divergence-free,
-//     which is precisely what Weymouth-Yue's conservation proof needs;
-//   * the FORCE half is not: a cell-centred `g_c - grad_c(P)/rho_c` is O(1) wrong at an interface
-//     cell even when every face is exactly balanced, so every body/interfacial force becomes a FACE
-//     acceleration `dt*(f_f - (P(i)-P(i-s)))/rho_f` added after `centerToFace`, and the cell takes
-//     the AVERAGE of the two faces' total increment (Basilisk `centered.h`; Popinet JCP 2009 §3).
+//   * the TRANSPORT half: `uf_/vf_/wf_` is exactly discretely divergence-free, which is precisely
+//     what Weymouth-Yue's conservation proof needs;
+//   * the FORCE half: the pressure, the CSF and `set_body_force` (a mean pressure gradient) enter
+//     the IMPLICIT momentum predictor as the finite-volume face integral
+//     rho_c * avg_faces(o (f - (P(i)-P(i-s)))/rho_f); a per-cell force enters at the cell value
+//     times the reconstruction's weight sum; the constraint reads the MOMENTUM-weighted face
+//     velocity (rho_L u_L + rho_R u_R)/(rho_L + rho_R). Then M Gamma = -C^T: stable at every dt and
+//     ratio, dt-independent steady state (tests/python/test_collocated_stability_guard.py).
+//     The retired WO-T form -- every force a face acceleration added AFTER the viscous solve
+//     (Basilisk centered.h) -- was balanced per step but non-incremental and unstable above
+//     mu dt/(rho h^2) = 1/12; do not reintroduce it.
+//
+// Balance at rest. The pressure absorbs a gradient force only through the step: a static balance
+// (hydrostatic column, constant-kappa drop) is an exact FIXED POINT, and the transient from the
+// initial P decays. The balanced-force projection (doc §4.6) makes it exact from step 1.
 //
 // Gates, in the order they run:
 //
 //   T1 HYDROSTATIC, through a hand-set rho and through C, at ratio 1000, in a triply periodic box
-//      (zero-mean force) and in a walled column. `dP/dz == -rho_f g` and the FACE field at machine
-//      zero. Staggered and collocated columns side by side. The cell field is REPORTED, not gated
-//      at machine zero, and the reason is T1b.
+//      (the uniform offset <rho> g as set_body_force) and in a walled column. Staggered and
+//      collocated side by side. Collocated: the FACE field at round-off; the cell field and
+//      dP/dz are the decaying transient -- reported, with decay required (400 steps < 100 steps).
 //
-//   T1b THE INVISIBLE SUBSPACE, measured. A cell-field checkerboard is exactly annihilated by
-//      `centerToFace` (`½(U(i)+U(i-1))` kills the odd-even mode), so the approximate projection
-//      cannot see it and cannot remove it. It is a PRE-EXISTING property of the collocated grid,
-//      not of this rung — the control is the validated constant-density collocated path with a
-//      plain body force, and it is measured here alongside the V8 path so the comparison is a
-//      number rather than an argument.
+//   T1b THE INVISIBLE SUBSPACE, measured. A cell-field checkerboard is annihilated by the uniform
+//      centre-to-face average (`½(U(i)+U(i-1))` kills the odd-even mode), so the approximate
+//      projection cannot see it and cannot remove it -- a PRE-EXISTING property of the collocated
+//      grid, measured on the constant-density control beside the V8 column. The transient of the
+//      column lives largely in that mode, which is why it decays slowly.
 //
-//   T2 THE EXACTNESS GATE — a stationary droplet with a CONSTANT curvature: the face force is then
-//      exactly the discrete gradient of `sigma*kappa*C`, the projection must annihilate it, and the
-//      FACE field must stay at machine zero (the collocated form of V4's P1). Ratio 1 and 1000.
+//   T2 STATIONARY DROPLET with a CONSTANT curvature: the CSF is exactly a face gradient, so the
+//      balance is a fixed point; ratio 1..1000 and the ratio-1000 mu sweep must not throw, and the
+//      face field must decay (90 steps < 30 steps).
 //
-//   T3 CONSTANT-DENSITY EQUIVALENCE. At mu = 0 the collocated face-force predictor and the
-//      validated cell-force one are the SAME scheme when rho is uniform (`avg_f(P(i)-P(i-s))` IS
-//      the central difference), so a uniform-rho V8 run must reproduce the constant-density
-//      collocated run to round-off. This is what says the rung did not change the scheme where it
-//      was not supposed to.
+//   T3 CONSTANT-DENSITY EQUIVALENCE. A uniform-rho V8 run reproduces the constant-density
+//      collocated run to round-off: the face integral of a uniform rho IS the central difference.
 //
-//   T4 THE BRIDGE (G6). The colour transport on the collocated grid must be the SAME kernel on the
-//      SAME faces as on the staggered grid: `uf_(i)` sits at i-1/2, the LOW face of cell i, exactly
-//      where `flow`'s staggered `u(i)` sits, so handing a staggered solver the collocated solver's
-//      own projected face field must reproduce the collocated colour BITWISE — and so must a
-//      standalone `WyAdvector` given the same faces with the low->high index shift.
+//   T4 THE BRIDGE (G6). The colour transport on the collocated grid is the SAME kernel on the SAME
+//      faces as on the staggered grid: `uf_(i)` sits at i-1/2, exactly where the staggered `u(i)`
+//      sits, so a staggered solver handed the collocated projected face field reproduces the
+//      collocated colour BITWISE.
 //
-//   T5 SCOPE. `enable_vof` / variable density on the collocated grid with an immersed solid, with
-//      the ghost projection, or with `enable_vof_momentum`, must throw.
+//   T5 SCOPE. Variable density / VoF on the collocated grid with an immersed solid, with
+//      `enable_vof_momentum`, with `set_rho_face_harmonic` or with the non-incremental pressure,
+//      must throw.
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
@@ -195,12 +199,11 @@ HydroResult hydrostatic(double ratio, double mu, int steps, bool periodic, bool 
 
 void gateHydrostatic() {
   std::printf(
-      "\n=== T1  hydrostatic at ratio 1000, mu = 0: dP/dz == -rho_f g with the FACE field at\n"
-      "        machine zero. mu = 0 is the staggered acid test's own choice — at mu > 0 the\n"
-      "        STAGGERED balance is only approached (A = rho_f/dt - mu*Lap does not commute with\n"
-      "        the discrete gradient at variable rho; the mu*dt^2 residue of WO-P), which is a\n"
-      "        separate measurement below.\n"
-      "        (cell |u| is REPORTED, not gated — see T1b.)\n");
+      "\n=== T1  hydrostatic at ratio 1000, mu = 0: dP/dz == -rho_f g. Staggered: exact. "
+      "Collocated:\n"
+      "        the FACE field at round-off; the balance is an exact fixed point, so the cell "
+      "field\n"
+      "        and dP/dz are the transient from P = 0 -- reported, and required to DECAY.\n");
   struct Case {
     const char* name;
     bool periodic, colour;
@@ -211,25 +214,30 @@ void gateHydrostatic() {
   for (const Case& c : cases) {
     const auto st = hydrostatic<Stag>(1000.0, 0.0, 100, c.periodic, c.colour);
     const auto co = hydrostatic<Colo>(1000.0, 0.0, 100, c.periodic, c.colour);
+    const auto co4 = hydrostatic<Colo>(1000.0, 0.0, 400, c.periodic, c.colour);
     std::printf("  %s  staggered  cell %.3e  face %.3e  dP/dz %.3e  cb %.3e  it %ld\n", c.name,
                 st.cellU, st.faceU, st.pErr, st.cb, st.iters);
-    std::printf("  %s  COLLOCATED cell %.3e  face %.3e  dP/dz %.3e  cb %.3e  it %ld\n", c.name,
-                co.cellU, co.faceU, co.pErr, co.cb, co.iters);
+    std::printf(
+        "  %s  COLLOCATED cell %.3e  face %.3e  dP/dz %.3e  cb %.3e  it %ld   (400 steps: "
+        "cell %.3e  dP/dz %.3e)\n",
+        c.name, co.cellU, co.faceU, co.pErr, co.cb, co.iters, co4.cellU, co4.pErr);
     CHECK(st.faceU < 1e-12);
     CHECK(st.pErr < 1e-11);
-    // The gated quantity on the collocated grid is the FACE balance (machine zero in the walled
-    // column; the periodic box additionally carries the centerToFace LEAK of the cell
-    // checkerboard's envelope — see T1b — which decays algebraically). The pressure follows the
-    // face balance up to the accumulated potential that projects that leak away, so it is bounded
-    // and reported rather than gated at machine zero.
-    CHECK(co.faceU < (c.periodic ? 1e-8 : 1e-12));
-    CHECK(co.pErr < 1e-6);
-    CHECK(co.iters < 200);  // rule 3b: no capped solve
+    // Collocated: the FACE field is the projected field of a velocity that is itself the decaying
+    // transient, so it sits at the pressure solve's round-off of that transient (not a balance
+    // statement). FROZEN at WO-V1 (2026-09-25) at 10x the measured value (doc §9 G4
+    // measure-then-freeze; the note's 1e-12 / 1e-10 missed by 7.3x / 2.9x): walled 7.34e-12,
+    // periodic 2.94e-10 at the default Chebyshev rtol 1e-9 (7.33e-12 / 1.15e-10 at 1e-14, so not
+    // an rtol artefact: it scales with the transient's cell checkerboard, 2.9e-4 / 2.3e-1).
+    CHECK(co.faceU < (c.periodic ? 2.94e-9 : 7.4e-11));
+    CHECK(co4.cellU < co.cellU);  // the transient decays ...
+    CHECK(co4.pErr < co.pErr);    // ... in the velocity and in the pressure gradient
+    CHECK(co.iters < 200);        // rule 3b: no capped solve
   }
   std::printf(
-      "\n  The mu sweep (walled, hand-set rho, ratio 1000, 100 steps). On the collocated path the\n"
-      "  force is applied OUTSIDE the momentum operator, at the face, so mu cannot enter the\n"
-      "  balance at all; on the staggered path it does, as WO-P measured.\n");
+      "\n  The mu sweep (walled, hand-set rho, ratio 1000, 100 steps). The staggered balance is\n"
+      "  only approached at mu > 0 (A = rho_f/dt - mu*Lap does not commute with the discrete\n"
+      "  gradient at variable rho: WO-P's mu*dt^2 residue).\n");
   for (double mu : {0.0, 1e-3, 1e-2, 1e-1}) {
     const auto st = hydrostatic<Stag>(1000.0, mu, 100, false, false);
     const auto co = hydrostatic<Colo>(1000.0, mu, 100, false, false);
@@ -237,7 +245,7 @@ void gateHydrostatic() {
         "    mu = %-6g  staggered face %.3e  dP/dz %.3e   |   COLLOCATED face %.3e  "
         "dP/dz %.3e\n",
         mu, st.faceU, st.pErr, co.faceU, co.pErr);
-    CHECK(co.faceU < 1e-12);
+    CHECK(co.faceU < 7.4e-11);  // frozen at WO-V1: 10x the measured 7.08e-12 .. 7.34e-12
   }
 }
 
@@ -246,7 +254,8 @@ void gateInvisibleSubspace() {
       "\n=== T1b the invisible subspace: a CELL checkerboard is annihilated by centerToFace\n"
       "        (1/2(U(i)+U(i-1)) kills the odd-even mode), so the approximate projection cannot\n"
       "        see it and cannot remove it. CONTROL = the VALIDATED constant-density collocated\n"
-      "        path with a plain body force, where this rung is completely inert.\n");
+      "        path with a plain body force, where rung V8 is completely inert. The V8 column's\n"
+      "        transient lives largely in that mode, and must decay.\n");
   const int N = 8, NZ = 24;
   const double g = 0.1;
   for (double mu : {0.0, 0.01}) {
@@ -323,7 +332,7 @@ std::unique_ptr<S> makeDroplet(int n, double R, double sigma, double mu, double 
 }
 
 struct DropResult {
-  double cellU = 0, faceU = 0;
+  double cellU = 0, faceU = 0, face30 = 0;
   long iters = 0;
   bool threw = false;
   std::string what;
@@ -335,8 +344,11 @@ DropResult runDroplet(int n, double R, double sigma, double mu, double ratio, do
   DropResult r;
   try {
     auto s = makeDroplet<S>(n, R, sigma, mu, 1.0, ratio, kappa, dtFac);
-    for (int k = 0; k < steps; ++k)
+    for (int k = 0; k < steps; ++k) {
       s->step();
+      if (k + 1 == 30)
+        r.face30 = maxFaceVel(*s);
+    }
     r.cellU = maxVel(*s);
     r.faceU = maxFaceVel(*s);
     r.iters = s->lastPressureIterations();
@@ -351,16 +363,26 @@ void gateStaticDroplet() {
   std::printf(
       "\n=== T2  static droplet, CONSTANT kappa: the face force is exactly grad(sigma*kappa*C), "
       "so\n"
-      "        the projection must annihilate it -> the FACE field stays at machine zero.\n"
-      "        The density ratio sweep is the interesting part: on the STAGGERED grid the force\n"
-      "        goes through the momentum operator A = rho_f/dt - mu*Lap, which does not commute\n"
-      "        with the discrete gradient at variable rho, so the balance is only APPROACHED (the\n"
-      "        mu*dt^2 residue of WO-P). On the collocated grid the force is applied at the face\n"
-      "        OUTSIDE A, so that mechanism does not exist.\n");
+      "        the balance is an exact fixed point. On the STAGGERED grid the force goes through\n"
+      "        A = rho_f/dt - mu*Lap, which does not commute with the discrete gradient at "
+      "variable\n"
+      "        rho or near walls, so the balance is only approached (WO-P's mu*dt^2 residue). The\n"
+      "        collocated step (balanced-force projection OFF) no longer annihilates "
+      "constant-kappa\n"
+      "        CSF per step: a decaying transient residue remains (doc §4.6.5 model: 2.2e-4 at\n"
+      "        ratio 1 after 30 steps, 1.6e-5 at ratio 1000, decaying to 2.4e-17 / 2.1e-7 in 300\n"
+      "        steps; 1-2 decades above staggered at ratio 1000). Exact from step 1 needs the\n"
+      "        balanced-force projection. Gated here: no throw, decay 30 -> 90 steps, and the\n"
+      "        30-step face frozen at 10x its WO-V1 value.\n");
+  // FROZEN at WO-V1 (2026-09-25, host-openmp): the collocated face |uf| after 30 steps, measured
+  // 9.99e-5 / 2.40e-4 / 1.46e-4 / 6.22e-5 for ratio 1 / 10 / 100 / 1000 (mu = 0.1); the gate is
+  // 10x that (doc §9 G4-OFF).
   const double ratios[4] = {1.0, 10.0, 100.0, 1000.0};
-  for (double ratio : ratios) {
+  const double frozen30[4] = {9.99e-4, 2.40e-3, 1.46e-3, 6.22e-4};
+  for (int q = 0; q < 4; ++q) {
+    const double ratio = ratios[q];
     const auto st = runDroplet<Stag>(32, 8.0, 1.0, 0.1, ratio, 0.25, 0.5, 30);
-    const auto co = runDroplet<Colo>(32, 8.0, 1.0, 0.1, ratio, 0.25, 0.5, 30);
+    const auto co = runDroplet<Colo>(32, 8.0, 1.0, 0.1, ratio, 0.25, 0.5, 90);
     if (st.threw)
       std::printf("  ratio %6g  staggered  THREW: %.90s\n", ratio, st.what.c_str());
     else
@@ -369,35 +391,35 @@ void gateStaticDroplet() {
     if (co.threw)
       std::printf("  ratio %6g  COLLOCATED THREW: %.90s\n", ratio, co.what.c_str());
     else
-      std::printf("  ratio %6g  COLLOCATED cell %.4e  face %.4e   it %ld\n", ratio, co.cellU,
-                  co.faceU, co.iters);
-    if (ratio == 1.0) {  // the exactness statement both grids must satisfy
+      std::printf(
+          "  ratio %6g  COLLOCATED face %.4e (30 steps) -> %.4e (90 steps), cell %.4e   "
+          "it %ld\n",
+          ratio, co.face30, co.faceU, co.cellU, co.iters);
+    if (ratio == 1.0)  // the exactness statement of the staggered grid
       CHECK(!st.threw && st.faceU < 1e-14);
-      CHECK(!co.threw && co.faceU < 1e-14);
-      CHECK(!co.threw && co.cellU < 1e-14);
-    }
+    CHECK(!co.threw);
+    CHECK(co.faceU < co.face30);
+    CHECK(co.face30 <= frozen30[q]);
     CHECK(co.iters < 500);
   }
   std::printf(
-      "\n  The ratio-1000 mu sweep, which is where the collocated construction stops. The face\n"
-      "  acceleration is EXPLICIT (applied outside A), so nothing damps the high-wavenumber part "
-      "of\n"
-      "  the force the way the staggered predictor's A^-1 does. The face and the cell are then\n"
-      "  advanced by different operators — the face by the raw increment, the cell by A^-1 "
-      "followed\n"
-      "  by the AVERAGED increment — and their mismatch grows once the viscous smoothing per step\n"
-      "  mu*dt/(rho_min h^2) stops being small. At dt = 0.5*dt_sigma = 4.46 that number is 0.045 "
-      "at\n"
-      "  mu = 0.01 (stable, and four orders more accurate than staggered) and 0.45 at mu = 0.1\n"
-      "  (unstable, ~4x per step). THIS is what rates the collocated rung to density ratio "
-      "~100.\n");
-  for (double mu : {0.0, 0.01, 0.1}) {
-    const auto st = runDroplet<Stag>(32, 8.0, 1.0, mu, 1000.0, 0.25, 0.5, 40);
-    const auto co = runDroplet<Colo>(32, 8.0, 1.0, mu, 1000.0, 0.25, 0.5, 40);
-    std::printf("    ratio 1000, mu = %-5g  staggered face %.4e%s   |   COLLOCATED face %.4e%s\n",
-                mu, st.faceU, st.threw ? " (THREW)" : "", co.faceU, co.threw ? " (THREW)" : "");
-    if (mu <= 0.01)  // the rated regime: stable, and better than the staggered reference
-      CHECK(!co.threw && co.faceU < st.faceU);
+      "\n  The ratio-1000 mu sweep (the WO-T face-acceleration form went unstable at mu = 0.1,\n"
+      "  ~4x per step; the predictor form is stable at every mu dt). Decay 30 -> 90 steps.\n");
+  // FROZEN at WO-V1: 30-step collocated face for mu = 0 / 0.01 / 0.1, measured 6.74e-5 / 6.50e-5 /
+  // 6.22e-5; the gate is 10x that.
+  const double mus[3] = {0.0, 0.01, 0.1};
+  const double frozenMu[3] = {6.74e-4, 6.50e-4, 6.22e-4};
+  for (int q = 0; q < 3; ++q) {
+    const double mu = mus[q];
+    const auto st = runDroplet<Stag>(32, 8.0, 1.0, mu, 1000.0, 0.25, 0.5, 30);
+    const auto co = runDroplet<Colo>(32, 8.0, 1.0, mu, 1000.0, 0.25, 0.5, 90);
+    std::printf(
+        "    ratio 1000, mu = %-5g  staggered face %.4e%s   |   COLLOCATED face %.4e -> "
+        "%.4e%s\n",
+        mu, st.faceU, st.threw ? " (THREW)" : "", co.face30, co.faceU, co.threw ? " (THREW)" : "");
+    CHECK(!co.threw);
+    CHECK(co.faceU < co.face30);
+    CHECK(co.face30 <= frozenMu[q]);
   }
 }
 
@@ -598,6 +620,26 @@ void gateScope() {
                 threw ? "yes" : "NO");
     CHECK(threw);
   }
+  {  // the pressure force lives in the implicit predictor: the non-incremental step has none
+    Colo s(N, N, N);
+    s.setRho(1.0);
+    s.setMu(0.01);
+    s.setDt(1.0);
+    s.setPressureGeometry(std::vector<double>((std::size_t)N * N * N, 10.0));
+    s.addField("rho");
+    s.setField("rho", std::vector<double>((std::size_t)N * N * N, 1.0));
+    s.setDensityMode(true);
+    s.setIncrementalPressure(false);
+    bool threw = false;
+    try {
+      s.step();
+    } catch (const std::exception&) {
+      threw = true;
+    }
+    std::printf("  non-incremental pressure (collocated V8)     -> throws: %s\n",
+                threw ? "yes" : "NO");
+    CHECK(threw);
+  }
 }
 
 }  // namespace
@@ -617,6 +659,6 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "\n%d CHECK(s) failed\n", failures);
     return 1;
   }
-  std::printf("\nAll rung V8 (WO-T) collocated gates passed.\n");
+  std::printf("\nAll rung V8 collocated gates passed.\n");
   return 0;
 }

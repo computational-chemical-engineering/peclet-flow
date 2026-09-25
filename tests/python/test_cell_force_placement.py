@@ -139,11 +139,11 @@ def drag_case(cls, variable, N=16, U0=0.1):
     return max(np.max(np.abs(u - U0)), np.max(np.abs(v))) / U0
 
 
-# SolverColocated + variable density is rung V8: every force is a FACE acceleration added after
-# centerToFace (collocated_varrho.hpp), the cell velocity taking the mean of the two face
-# corrections -- a different architecture, not a placement choice, and a cell force that varies along
-# its own axis diverges on it at every dt tried (0.1 .. 100). Not gated here; reported.
-SKIP = {("collocated", True)}
+# SolverColocated + variable density is rung V8 (doc/collocated_varrho_forces.md): the per-cell force
+# enters its implicit predictor at the cell value (times the reconstruction's weight sum, 1 in the
+# interior), exactly like the constant-density collocated path. Gated like every other combination
+# since the WO-T face-acceleration form (which placed 1/4(1,2,1) f and diverged here) was retired.
+SKIP = set()
 
 
 def cases():

@@ -1680,14 +1680,16 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "COLLOCATED (SolverColocated, rung V8): supported since 2026-09-02, ALL-FLUID only "
           "(set_pressure_geometry; an immersed solid, the ghost projection and "
           "set_rho_face_harmonic throw). The face coefficient and the face correction are the same "
-          "as on the staggered grid, applied to the ABC projection's MAC face field; the CELL "
-          "correction is the AVERAGE OF THE TWO FACE CORRECTIONS of each axis (never a cell-centred "
-          "grad(phi)/rho_c), and every body/interfacial force is likewise a FACE acceleration "
-          "dt*(f_f - (P(i)-P(i-s)))/rho_f added after centerToFace, with the cell taking the average "
-          "of the two faces' total increment. Rated to density ratio ~100 for cases WITH MOTION "
-          "(momentum consistency needs Favre face states and is not in this rung); a high-ratio case "
-          "at REST is exact - measured 0.0 spurious velocity and an exact dP/dz = -rho_f g at ratio "
-          "1000.")
+          "as on the staggered grid, applied to the ABC projection's MAC face field, which is the "
+          "MOMENTUM-weighted map (rho_L u_L + rho_R u_R)/(rho_L + rho_R) of the cell velocities; the "
+          "CELL correction is the average of the two face corrections of each axis (never a "
+          "cell-centred grad(phi)/rho_c). The pressure, the CSF and set_body_force (a mean pressure "
+          "gradient) enter the implicit momentum predictor as the matching face integral "
+          "rho_c * avg_faces((f - grad_f P)/rho_f); a per-cell force enters at the cell value. The "
+          "pair is adjoint, so the step is stable at every dt and density ratio and its steady "
+          "state is dt-independent (doc/collocated_varrho_forces.md). Rated to density ratio ~100 "
+          "for cases WITH MOTION (momentum consistency needs Favre face states and is not in this "
+          "rung).")
       .def(
           "set_pressure_underrelax", [](D& diag, double w) { diag.s->setPressureUnderRelax(w); },
           nb::arg("omega"),
@@ -2408,8 +2410,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "COLLOCATED (SolverColocated) is supported since rung V8 (2026-09-02), ALL-FLUID only: "
           "the colour is advected by the PROJECTED face field uf_/vf_/wf_ (the field the ABC "
           "approximate projection makes exactly divergence-free, which is what Weymouth-Yue's "
-          "conservation proof needs), and every interfacial/body force is a FACE acceleration with "
-          "the cell taking the average of its two faces. An immersed solid on that grid THROWS "
+          "conservation proof needs), and the CSF enters the implicit momentum predictor as the "
+          "mass-adjoint face integral (doc/collocated_varrho_forces.md). An immersed solid on that "
+          "grid THROWS "
           "(the cut-cell colour transport of rung V5a is staggered-only), and so does "
           "enable_vof_momentum. On the collocated grid the SPURIOUS-CURRENT number to read is the "
           "FACE field (get_uf/get_vf/get_wf): the CELL field additionally carries the approximate "

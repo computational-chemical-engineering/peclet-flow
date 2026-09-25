@@ -34,7 +34,8 @@ step operator); mu = 1, rho_min = 1, h = 1; a small Taylor-Green cell force keep
      from the dt = 100 state (u, v, w, P) and march to the same criterion. A dt-independent fixed
      point is then already converged (one or two steps); a dt-dependent one drifts. Pass iff
      max|u(dt_i) - u(dt_j)| <= 1e-9 max|u|. (Warm starting is what makes the ratio-1000 slab
-     affordable: from rest its heavy layer relaxes at rate mu k^2/rho ~ 1e-4 per unit time.)
+     affordable: from rest its heavy layer relaxes at rate mu k^2/rho ~ 1e-4 per unit time.) Every
+     march must converge within G3_MAX_STEPS or the path fails.
 
 Run:  OMP_NUM_THREADS=4 OMP_PROC_BIND=false PYTHONPATH=<build> \
           python tests/python/test_collocated_stability_guard.py
@@ -50,7 +51,7 @@ except ImportError:
     print("SKIP: peclet.flow not importable")
     sys.exit(77)
 
-N, NZ = 16, 8
+N, NZ = 16, 4
 MU = 1.0
 EPS = 1e-3          # seeding amplitude (the step is affine: the amplitude only sets the floor)
 FLOOR = 1e-9        # round-off floor, relative to EPS
@@ -60,7 +61,7 @@ KAPPA = 0.25
 G2_DTS = (0.1, 1.0, 10.0, 100.0)
 G3_DTS = (100.0, 10.0, 1.0)
 G2_STEPS = 100
-G3_MAX_STEPS = 400
+G3_MAX_STEPS = 3000
 G3_TOL = 1e-12
 G3_GATE = 1e-9
 
@@ -235,7 +236,8 @@ def g3(path):
         for dj in G3_DTS[i + 1:]:
             d = float(np.max(np.abs(sols[di] - sols[dj])))
             worst = max(worst, d if np.isfinite(d) else np.inf)
-    ok = worst <= G3_GATE * scale
+    # every march must reach the criterion: an unconverged run measures the march, not the fixed point
+    ok = all("NOT" not in t for t in info) and worst <= G3_GATE * scale
     return ok, f"max|u(dt_i) - u(dt_j)|/max|u| = {worst / scale:.2e}  [{'; '.join(info)}]  " + \
         ("ok" if ok else "FAIL")
 

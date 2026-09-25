@@ -92,7 +92,7 @@ void Solver<Grid>::setPhysicalDomain(const std::array<double, 3>& extent,
   // (`fvViscousApply`, `embedViscousApply` / `embedDirichletGradient`) now march along the
   // anisotropic index-space normal `m` of doc/anisotropic_metric.md §6.1 and carry the per-axis
   // `w_a` on their face and wall terms, `starCorrectFaces` carries the same `w_a` its
-  // `projectCorrect` fix-up needs, and the V8 face acceleration weights its pressure difference.
+  // `projectCorrect` fix-up needs, and the V8 face integral weights its pressure difference.
   // `enable_vof` kept its own refusal here until PHASE 3 lifted it (see enableVof).
 }
 

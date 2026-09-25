@@ -742,15 +742,15 @@ void Solver<Grid>::enableVof() {
   // layer's normals, areas, sample distances and `V_cell` (§7).
 
   if constexpr (Grid::collocated) {
-    // Rung V8 (WO-T): allowed. The colour is advected by the PROJECTED face field uf_/vf_/wf_ —
-    // which is what the ABC approximate projection makes exactly divergence-free, i.e. precisely
-    // the field Weymouth-Yue's conservation proof needs — and every interfacial force is a face
-    // acceleration (collocated_varrho.hpp). ALL-FLUID only at this rung.
+    // Rung V8: allowed. The colour is advected by the PROJECTED face field uf_/vf_/wf_ — which is
+    // what the ABC approximate projection makes exactly divergence-free, i.e. precisely the field
+    // Weymouth-Yue's conservation proof needs — and the CSF enters the implicit predictor as the
+    // mass-adjoint face integral (collocated_varrho.hpp). ALL-FLUID only at this rung.
     if (hasSolid_)
       throw std::runtime_error(
-          "enable_vof: geometric VoF on SolverColocated (rung V8) is ALL-FLUID only — an immersed "
-          "solid needs the cut-cell face acceleration and the matching one-sided closures, which "
-          "is a later rung. Use the staggered Solver (rung V5a supports cut cells).");
+          "enable_vof: geometric VoF on SolverColocated (rung V8) is ALL-FLUID only — immersed "
+          "solids on this path are the next package (doc/collocated_multiphase_solids_plan.md). "
+          "Use the staggered Solver (rung V5a supports cut cells).");
     collocatedV8AutoFallback("geometric VoF on the collocated grid");
   }
   if (vofEnabled_)

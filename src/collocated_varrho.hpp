@@ -1,76 +1,78 @@
 /// @file
-/// @brief flow — collocated (ABC approximate-projection) variable-density + face-acceleration
-///        kernels.  Rung V8 (WO-T).
+/// @brief flow — collocated (ABC approximate-projection) variable-density kernels: the
+///        mass-adjoint pair of rung V8 (doc/collocated_varrho_forces.md).
 ///
 /// The collocated solver stores u at the cell centre and couples it to the pressure through an
-/// APPROXIMATE projection: average the cell velocities onto a MAC face field (`centerToFace`),
-/// make THAT field discretely divergence-free, then correct the cell field.  Two things follow for
-/// two-phase flow, and they are the whole of this header:
+/// APPROXIMATE projection: map the cell velocities onto a MAC face field, make THAT field
+/// discretely divergence-free, then correct the cell field. With a variable density (or the CSF of
+/// surface tension, rung V8 = `Grid::collocated && (varRho_ || csfActive())`) the step is the
+/// incremental-rotational predictor of the constant-density scheme with the weights changed so
+/// that the pressure force and the constraint stay an ADJOINT pair in the kinetic-energy inner
+/// product (§4.3):
 ///
-///  1. **Variable density.**  The face coefficient of the Poisson operator is
-///     `c_f = o_f rho0/rho_f` with the ARITHMETIC face mean `rho_f = ½(rho(i)+rho(i-s))` (the
-///     staggered `buildRhoCoeff`, unchanged), so the face correction must be
-///     `uf -= (rho0/rho_f) (phi(i) - phi(i-s))` — `projectCorrectVar`, which already exists and is
-///     already exact-adjoint on faces.  The CELL correction is then NOT a cell-centred
-///     `grad(phi)/rho_c`: it is the AVERAGE OF THE TWO FACE CORRECTIONS of each axis, i.e. the same
-///     averaging operator `projectCorrectCenter` applies to the plain phi differences, applied to
-///     the rho-weighted ones.  Anything else and the cell sees a balance its own faces do not.
+///  * the pressure, the CSF and the uniform drive `set_body_force` enter the implicit momentum
+///    predictor at the cell as the finite-volume face integral with the acceleration-continuous
+///    face pressure,  rho_c * ½ sum_faces o_f (F_f - w (P(j) - P(j-s))) / rho_f
+///    (`buildFaceAccelVar` + `addFaceAccelCsf` build the bracket / rho_f per face; the cell RHS
+///    `Solver::buildRhsColoVar` reconstructs it with `varrho::cellFromFaces`);
+///  * a per-cell volumetric force enters at the CELL VALUE times the weight sum
+///    W = ½ (o_lo + o_hi) of that reconstruction (`varrho::weightSum`), which is what balances
+///    f = rho g against the wall's Neumann pressure (§4.5);
+///  * the projection's face field is MOMENTUM-weighted, (rho_L u_L + rho_R u_R)/(rho_L + rho_R)
+///    (`centerToFaceMassWeighted`), so the pressure force is exactly -M^{-1} C^T for the constraint
+///    C = D O Pi_rho, for any openness;
+///  * the Poisson operator keeps the face coefficient c_f = o_f rho0/rho_f with the ARITHMETIC face
+///    mean (the staggered `buildRhoCoeff`), the face correction is `projectCorrectVar`, and the
+///    cell correction is the SAME face-to-cell reconstruction applied to the face corrections
+///    k(j) = w (rho0/rho_f) (phi(j) - phi(j-s)) (`correctCellFaceAverageVar`).
 ///
-///  2. **Forces are face accelerations.**  On the collocated grid every body / interfacial force
-///     enters the predictor at the CELL through a central difference.  With rho jumping across an
-///     interface the cell balance `g_c - grad_c(P)/rho_c` is O(1) wrong at interface cells even
-///     when every FACE is exactly balanced (this is the collocated form of the three-way `rho_f`
-///     consistency of `doc/variable_density_projection.md` §1/§3).  So: predict `u*` WITHOUT the
-///     pressure gradient and without any body force, then add the face acceleration
+/// At uniform density every one of these reduces to the validated constant-density collocated
+/// scheme (to round-off). The rotational (Timmermans) pressure update is unchanged. Openness is a
+/// multiplicative weight applied ONCE, in the face-to-cell reconstruction and in the divergence
+/// (§4.9 L1); the per-face arrays built here carry no openness.
 ///
-///         a_f = dt * ( f_f - (P(i) - P(i-s)) ) / rho_f ,
-///         f_f = f_const + ½(fb(i)+fb(i-s)) + sigma*kappa_f*(C(i)-C(i-s))/h
+/// HISTORY — do not reintroduce. WO-T (2026-09-02) made every force and the lagged pressure a MAC
+/// face acceleration added after the viscous solve (Basilisk centered.h; Popinet JCP 2009 §3). It
+/// was balanced but non-incremental and unstable above mu dt/(rho h^2) = 1/12, and it was retired
+/// 2026-09-25. See doc/collocated_varrho_forces.md §2 and the suite-wide register.
 ///
-///     to `uf*` AFTER `centerToFace(u*)` (Basilisk's `centered.h` pattern; Popinet JCP 2009 §3),
-///     and give the CELL the average of the two faces' TOTAL increment `a_f - (rho0/rho_f)
-///     grad_f(phi)`. A hydrostatic column and a stationary droplet are then exactly balanced on the
-///     faces, and the cell sees the average of an exact zero.
-///
-/// A face whose openness is 0 (an immersed or domain wall) contributes ZERO to the cell average —
-/// the identical rule `projectCorrectCenter` uses for phi, and the reason the near-wall cell of a
-/// hydrostatic column stays at rest rather than feeling an unbalanced half-force.
-///
-/// Every kernel here is a SIBLING: nothing on the staggered path and nothing on the
-/// constant-density collocated path reaches them (they are called only under
-/// `Grid::collocated && (varRho_ || csfActive())`, both of which used to throw).
+/// Every kernel here is reached only under `Grid::collocated && (varRho_ || csfActive())`: nothing
+/// on the staggered path and nothing on the constant-density collocated path calls them.
 #ifndef PECLET_FLOW_COLLOCATED_VARRHO_HPP
 #define PECLET_FLOW_COLLOCATED_VARRHO_HPP
 
 #include <Kokkos_Core.hpp>
 
+#include "collocated_varrho_point.hpp"
 #include "mac_cutcell.hpp"
 #include "policy.hpp"
 #include "vof/surface_tension.hpp"
 
 namespace peclet::flow {
 
-// The face acceleration increment of ONE component, in velocity units (already multiplied by dt):
+// The face acceleration of ONE component, WITHOUT the openness (the cell reconstruction applies
+// it):
 //
-//   af(i) = dt * ( fc + [½(fb(i)+fb(i-s))] - [P(i) - P(i-s)] ) / rho_f(i)
+//   af(i) = scale * ( fc + [½(fb(i)+fb(i-s))] - [w_a (P(i) - P(i-s))] ) / rho_f(i)
 //
 // `s` is the component's own face stride (the face at index `i` separates cells `i-s` and `i`, the
-// solver's low-face convention).  `rho_f` = arithmetic face mean when `haveRho`, the scalar `rhoC`
-// otherwise.
+// solver's low-face convention). `rho_f` = arithmetic face mean when `haveRho`, the scalar `rhoC`
+// otherwise. The V8 predictor calls it with `haveFb = false` (per-cell forces are volumetric: the
+// cell value times the weight sum) and `scale = 1`.
 //
-// RANGE: the inner region WIDENED BY ONE on the high side of every axis, `[g, e-g]`.  Two consumers
-// need that extra plane and both need it for the same reason the face field itself does: the
-// divergence of cell `i` reads the face at `i+s`, and so does the cell average below.  Every input
-// it reads there is a depth-1 ghost, which every property fill has already written; and because the
-// face at index `e-g` is formed from exactly the same two ghost values the neighbouring rank forms
-// its own index-`g` face from, in the same order, the plane is bitwise decomposition-independent.
-// PHASE 2 (anisotropic cells, doc/anisotropic_metric.md §1.2/§3): of the three terms only the
-// PRESSURE difference carries a metric.  `fc` is the body force already converted per axis by
-// Phase 1's `forceToInt(a)`, `fb` is a per-cell force in the same per-axis normalisation, and
-// `1/rho_f` is unit-free -- while `-grad_a P'` carries `w_a = 1/h_a'^2`, exactly as it does in the
-// staggered `buildRhs*` predictor and in `projectCorrect`.  `wa == 1.0` isotropic (exact).
+// RANGE: the face range `[g, e-g]` on every axis. The cell reconstruction of cell `i` reads the
+// face at `i+s`, so the high plane is needed; every input it reads there is a depth-1 ghost, which
+// every property fill has already written, and because the face at index `e-g` is formed from
+// exactly the same two ghost values the neighbouring rank forms its own index-`g` face from, in the
+// same order, the plane is bitwise decomposition-independent. PHASE 2 (anisotropic cells,
+// doc/anisotropic_metric.md §1.2/§3): of the three terms only the PRESSURE difference carries a
+// metric. `fc` is the body force already converted per axis by Phase 1's `forceToInt(a)`, `fb` is a
+// per-cell force in the same per-axis normalisation, and `1/rho_f` is unit-free -- while `-grad_a
+// P'` carries `w_a = 1/h_a'^2`, exactly as it does in the staggered `buildRhs*` predictor and in
+// `projectCorrect`. `wa == 1.0` isotropic (exact).
 inline void buildFaceAccelVar(CCField af, CCConst P, CCConst rho, CCConst fb, bool haveFb,
-                              CCConst o, bool haveRho, double rhoC, double fc, bool incr, double dt,
-                              long s, C3 e, int g, double wa = 1.0) {
+                              bool haveRho, double rhoC, double fc, bool incr, double scale, long s,
+                              C3 e, int g, double wa = 1.0) {
   CCExec space;
   using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
@@ -78,31 +80,27 @@ inline void buildFaceAccelVar(CCField af, CCConst P, CCConst rho, CCConst fb, bo
       MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-        if (o(i) <= 1e-12) {  // a CLOSED face (a wall) does not move: no acceleration on it, and
-          af(i) = 0.0;        // none in the cell average either (projectCorrectCenter's rule)
-          return;
-        }
         const double rf = haveRho ? 0.5 * (rho(i) + rho(i - s)) : rhoC;
         const double f = fc + (haveFb ? 0.5 * (fb(i) + fb(i - s)) : 0.0) -
                          (incr ? wa * (P(i) - P((long)i - s)) : 0.0);
-        af(i) = dt * f / rf;
+        af(i) = scale * f / rf;
       });
 }
 
-// ADDITIVE balanced-force CSF at the same face, with the same `1/rho_f` and the same `dt`:
+// ADDITIVE balanced-force CSF at the same face, with the same `1/rho_f` and the same `scale`:
 //
-//   af(i) += dt * sigma * kappa_f * (C(i) - C(i-s)) / hGrad / rho_f(i)
+//   af(i) += scale * sigma * kappa_f * (C(i) - C(i-s)) / hGrad / rho_f(i)
 //
 // `hGrad` is the axis's PRESSURE-GRADIENT WEIGHT denominator `h_a'^2` (Phase 3, V3.1 — the same
 // symbol the pressure face difference carries); 1.0 on every isotropic run.
 //
 // `kappa_f` is the V4 pairing (`vof::csfFaceCurvature`): the mean of the two cells' curvatures
-// where both carry one, the single available one where only one does.  The force is the
+// where both carry one, the single available one where only one does. The force is the
 // projection's OWN difference operator applied to `sigma*kappa*C`, so for a constant kappa it lies
-// exactly in the range of the operator the projection inverts and the projection annihilates it —
-// the V4 rule, verbatim, moved from the staggered momentum RHS to the collocated face field.
-inline void addFaceAccelCsf(CCField af, CCConst cv, CCConst kp, CCConst kb, CCConst rho, CCConst o,
-                            bool haveRho, double rhoC, double sigma, double hGrad, double dt,
+// exactly in the range of the pressure gradient and is balanced by a pressure (exactly from step 1
+// under the balanced-force projection, §4.6).
+inline void addFaceAccelCsf(CCField af, CCConst cv, CCConst kp, CCConst kb, CCConst rho,
+                            bool haveRho, double rhoC, double sigma, double hGrad, double scale,
                             long s, C3 e, int g) {
   CCExec space;
   using MD = MDRange3<CCExec>;
@@ -110,69 +108,60 @@ inline void addFaceAccelCsf(CCField af, CCConst cv, CCConst kp, CCConst kb, CCCo
       "peclet::flow::colo_face_csf", MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-        if (o(i) <= 1e-12)
-          return;  // closed face: pinned to 0 by buildFaceAccelVar
         const double dC = cv(i) - cv((long)i - s);
         if (dC == 0.0)
           return;  // no interface across this face -> no force, and no orphan either
         double kf = 0.0;
         vof::csfFaceCurvature(kp((long)i - s), kb((long)i - s), kp(i), kb(i), kf);
         const double rf = haveRho ? 0.5 * (rho(i) + rho(i - s)) : rhoC;
-        af(i) += dt * vof::csfFaceForce(sigma, kf, dC, hGrad) / rf;
+        af(i) += scale * vof::csfFaceForce(sigma, kf, dC, hGrad) / rf;
       });
 }
 
-// uf += af over the same range the increment was built on.
-inline void addFaceIncrement(CCField uf, CCConst af, C3 e, int g) {
+// The projection's constraint face field Pi_rho u: the MOMENTUM-weighted centre-to-face map
+//   uf(i) = (rho(i-s) U(i-s) + rho(i) U(i)) / (rho(i-s) + rho(i))
+// on the face range `[g, e-g]` of every axis (it reads the density's depth-1 ghosts and the cell
+// velocity ghosts, which the caller fills first). Faces outside that range are not written: the
+// divergence reads only these, and the face ghosts are re-filled after the correction.
+inline void centerToFaceMassWeighted(CCField uf, CCField vf, CCField wf, CCConst U, CCConst V,
+                                     CCConst W, CCConst rho, C3 e, int g) {
   CCExec space;
   using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
-      "peclet::flow::colo_face_add", MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
-      KOKKOS_LAMBDA(int x, int y, int z) {
-        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-        uf(i) += af(i);
-      });
-}
-
-// Turn the face acceleration into the TOTAL face velocity increment of the step by subtracting the
-// projection's own face correction:  af(i) -= (rho0/rho_f) (phi(i) - phi(i-s)).
-//
-// The expression is written EXACTLY as `projectCorrectVar` writes it (same grouping, same order),
-// so the number the cell averages is bit-for-bit the number the face received.  With `haveRho`
-// false it is the plain `projectCorrect` difference.  PHASE 2: including the per-axis weight
-// `w_a` those two kernels now apply OUTSIDE the whole expression (doc/anisotropic_metric.md §3) --
-// the pairing is the point of this kernel, so the weight has to be spelled the same way here.
-inline void faceAccelSubGradPhi(CCField af, CCConst phi, CCConst rho, CCConst o, bool haveRho,
-                                double rho0, long s, C3 e, int g, double wa = 1.0) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::colo_face_subgrad",
+      "peclet::flow::center_to_face_mass",
       MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
       KOKKOS_LAMBDA(int x, int y, int z) {
-        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-        if (o(i) <= 1e-12)
-          return;  // closed face: the total increment stays 0 (the wall holds the balance)
-        if (haveRho)
-          af(i) -= wa * (rho0 / (0.5 * (rho(i) + rho(i - s))) * (phi(i) - phi((long)i - s)));
-        else
-          af(i) -= wa * (phi(i) - phi((long)i - s));
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        uf(i) = varrho::faceMassWeighted(U(i - sx), U(i), rho(i - sx), rho(i));
+        vf(i) = varrho::faceMassWeighted(V(i - sy), V(i), rho(i - sy), rho(i));
+        wf(i) = varrho::faceMassWeighted(W(i - sz), W(i), rho(i - sz), rho(i));
       });
 }
 
-// The cell counterpart: u(i) += ½( af(i) + af(i+s) ), a face with openness 0 contributing 0.
-// This IS `projectCorrectCenter`'s averaging operator (same predicate, same ½, same closed-face
-// rule) applied to the face increments instead of to the raw phi differences.
-inline void applyCellFaceAverage(CCField u, CCConst af, CCConst o, long s, C3 e, int g) {
+// The projection's CELL correction for one component: the face-to-cell reconstruction of the face
+// corrections,
+//   u(i) -= cellFromFaces(k(i), k(i+s), o(i), o(i+s)),   k(j) = w_a (rho0/rho_f(j)) (phi(j) -
+//   phi(j-s))
+// with `k` written EXACTLY as `projectCorrectVar` writes the face correction (same grouping, same
+// order), so the cell is corrected by the transpose of what the constraint's faces received; with
+// `haveRho` false it is the plain `projectCorrect` difference. Inner cells.
+inline void correctCellFaceAverageVar(CCField u, CCConst phi, CCConst rho, CCConst o, bool haveRho,
+                                      double rho0, long s, C3 e, int g, double wa = 1.0) {
   CCExec space;
   using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
-      "peclet::flow::colo_cell_avg", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      "peclet::flow::colo_cell_corr_var", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-        const double am = (o(i) > 1e-12) ? af(i) : 0.0;
-        const double ap = (o((long)i + s) > 1e-12) ? af((long)i + s) : 0.0;
-        u(i) += 0.5 * (am + ap);
+        const long j = i + s;
+        const double kLo = haveRho
+                               ? wa * (rho0 / (0.5 * (rho(i) + rho(i - s))) * (phi(i) - phi(i - s)))
+                               : wa * (phi(i) - phi(i - s));
+        const double kHi = haveRho
+                               ? wa * (rho0 / (0.5 * (rho(j) + rho(j - s))) * (phi(j) - phi(j - s)))
+                               : wa * (phi(j) - phi(j - s));
+        u(i) -= varrho::cellFromFaces(kLo, kHi, o(i), o(j));
       });
 }
 

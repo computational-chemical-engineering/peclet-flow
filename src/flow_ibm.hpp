@@ -32,7 +32,7 @@
 
 #include "peclet/core/geom/device_scene.hpp"
 
-#include "collocated_varrho.hpp"  // rung V8 (WO-T): collocated varRho + face-acceleration kernels
+#include "collocated_varrho.hpp"  // rung V8: the collocated variable-density (mass-adjoint) kernels
 #include "face_props.hpp"
 #include "gauge_exact_gradient.hpp"
 #include "ghost_projection_debug.hpp"  // opt-in gp row forensics (PECLET_FLOW_GP_DEBUG), no-op off
@@ -1669,7 +1669,7 @@ class Solver {
   CCField effRhoField();
 
 
-  // --- rung V8 (WO-T): the collocated face-acceleration predictor --------------------------------
+  // --- rung V8: the collocated variable-density / CSF path ---------------------------------------
   //
   // TRUE exactly on the configurations that used to throw outright on this grid — variable density
   // (`set_density_mode`) and surface tension (which needs `enable_vof`) on `SolverColocated` — so
@@ -1677,9 +1677,10 @@ class Solver {
   // the colocated regression baselines) and the whole staggered solver take the same branches they
   // always did, byte for byte.
   //
-  // When it is on, the predictor drops the pressure gradient and EVERY body/interfacial force, and
-  // they are re-introduced as a face acceleration on `uf_/vf_/wf_` after `centerToFace` — see
-  // `collocated_varrho.hpp` for why the cell balance is not an option here.
+  // When it is on, the step is the mass-adjoint ABC pair of doc/collocated_varrho_forces.md: the
+  // pressure and every force inside the implicit predictor (`buildRhsColoVar`), the momentum-weighted
+  // centre-to-face map in the constraint, and the face-to-cell reconstruction of the face correction
+  // as the cell correction — see `collocated_varrho.hpp`.
   bool colocatedFaceForce() const;
 
 
@@ -2130,44 +2131,26 @@ class Solver {
 
 
 
-  // --- rung V8 (WO-T): the collocated predictor when the forces live on the faces ----------------
+  // --- rung V8: the collocated variable-density / CSF predictor ----------------------------------
   //
   // SIBLING of buildRhsVar, reached only when `colocatedFaceForce()` — i.e. only on `SolverColocated`
-  // with variable density and/or surface tension, both of which used to throw. It differs from
-  // buildRhsVar in exactly three ways, and every one of them is the point of the rung:
+  // with variable density and/or surface tension (doc/collocated_varrho_forces.md §4.2, S5-S6):
   //
-  //   * the density weight of the time term and of the advection is the CELL density `rho(i)`, not a
-  //     face mean: the collocated velocity unknown IS the cell (`Grid::offset(c) == 0`), and this is
-  //     the same placement `VarFaceProps::idiag` now uses for the operator diagonal;
-  //   * the incremental `-grad(P^n)` is DROPPED — it is re-applied at the faces, where the pressure
-  //     difference `P(i) - P(i-s)` is the projection's own operator;
-  //   * the constant body force, the per-cell body force and the CSF are DROPPED for the same
-  //     reason. The predictor solves `A u* = (rho/dt) u^n - rho*adv(u^k)` and nothing else.
+  //   b = rs [ (rho_c/dt) u^n - rho_c aK + rho_c aF + W f_c + rho_c R(Phi) ] + (bc fold | -inhom)
   //
-  // What survives verbatim: the cut-cell rescale `rs`, the domain-BC fold / IBM inhomogeneity, the
-  // Koren/SOU advection and its implicit-FOU deferred correction.
-  void buildRhsColoFF(int c);
-
-
-
-  // Add the face acceleration a_f = dt*(f_f - grad_f(P^n))/rho_f to the just-averaged face field,
-  // and REMEMBER it in faceAcc_ so the cell counterpart can average exactly the same numbers.
-  // Called from project() immediately after centerToFace, before the divergence. See
-  // collocated_varrho.hpp.
-  void applyFaceAcceleration();
-
-
-
-  // The cell counterpart of the face path: turn faceAcc_ into the TOTAL face velocity increment of
-  // this step (force acceleration minus the projection's own face correction) and give each cell the
-  // openness-gated average of its two faces. Called from project() in place of the constant-density
-  // cell-correction chain.
-  // KNOWN GAP (recorded, not guarded): at an OUTFLOW face `bcCorrectOutflow` adjusts `uf_` after
-  // `projectCorrectVar`, and that adjustment is NOT mirrored into faceAcc_, so the cell average at
-  // the last row before an outflow face would miss it. Every rung-V8 gate is periodic or walled;
-  // an open boundary on the collocated variable-density path is untested (WO-R owns the staggered
-  // `bcCorrectOutflowVar`).
-  void applyCellFaceAverageCorrection();
+  // * the density weight of the time term and of the advection is the CELL density `rho(i)`: the
+  //   collocated velocity unknown IS the cell (`Grid::offset(c) == 0`), and this is the same
+  //   placement `VarFaceProps::idiag` uses for the operator diagonal;
+  // * the pressure, the CSF and the uniform drive `set_body_force` (a mean pressure gradient) enter
+  //   as the face accelerations Phi = (f_const + CSF - w G_f P)/rho_f reconstructed at the cell,
+  //   R(Phi) = ½(o_lo Phi_lo + o_hi Phi_hi) (`varrho::cellFromFaces`);
+  // * a per-cell force enters at the cell value times the reconstruction's weight sum W
+  //   (`varrho::weightSum`, the same two openness reads).
+  //
+  // What survives verbatim from the other builders: the cut-cell rescale `rs`, the domain-BC fold /
+  // IBM inhomogeneity, the Koren/SOU advection and its implicit-FOU deferred correction. The WHY
+  // (and the retired face-acceleration form it replaces) is the comment at the definition.
+  void buildRhsColoVar(int c);
 
 
 
@@ -4228,11 +4211,12 @@ class Solver {
   // targeting "rho" (e.g. rho = LinearMix of a transported phase fraction) enables it
   // automatically. Staggered grid only (v1); the velocity multigrid (scalar-coefficient) is
   // disabled.
-  // Rung V8 (WO-T) lifted the collocated throw. On `SolverColocated` the variable-density path is
-  // the ABC approximate projection with the face coefficient `c_f = o_f rho0/rho_f`,
-  // `projectCorrectVar` on the FACE field, and a cell correction that is the AVERAGE OF THE TWO FACE
-  // CORRECTIONS (never a cell-centred grad(phi)/rho_c); every body / interfacial force becomes a
-  // face acceleration added after `centerToFace`. Scope: ALL-FLUID
+  // Rung V8 lifted the collocated throw. On `SolverColocated` the variable-density path is the ABC
+  // approximate projection with the face coefficient `c_f = o_f rho0/rho_f`, the MOMENTUM-weighted
+  // centre-to-face map in the constraint, `projectCorrectVar` on the FACE field, and a cell
+  // correction that is the face-to-cell reconstruction of the face corrections (never a
+  // cell-centred grad(phi)/rho_c); the pressure and every force enter the implicit predictor as
+  // the matching face integral (doc/collocated_varrho_forces.md). Scope: ALL-FLUID
   // (`set_pressure_geometry`) — an immersed solid still throws, at the first `project()`, and so do
   // the ghost projection and `set_rho_face_harmonic` (see requireCollocatedFaceForceScope).
   // Momentum consistency (`enable_vof_momentum`) is NOT in this rung: the collocated construction
@@ -4725,9 +4709,8 @@ class Solver {
   CCField gpRh_, gpT_, gpZ2_;  // extra BiCGStab scratch (g=1 block)
   CCField gpX2_;  // distributed BiCGStab matvec staging (g=2 solver block; overlay +/-2 halo)
   CCField uf_, vf_, wf_;    // collocated: transient face (MAC) field (approx projection)
-  CCField faceAcc_[3];      // rung V8 (WO-T): the collocated face velocity increment of
-                            // this step (force acceleration, then minus the projection's
-                            // own face correction). Allocated only on that path.
+  CCField faceAcc_[3];      // rung V8: the collocated face accelerations Phi_c of the
+                            // predictor (buildRhsColoVar). Allocated only on that path.
   CCField tgp_;             // collocated: cell pressure-gradient scratch
   CCField fvM_, fvL_, cs_;  // collocated: embed defect scratch (M·u, L_FV·u) + cell fluid fraction
   CCField xcx_, xcy_, xcz_;  // collocated: open-centroid wall distance per face (wall-aware map)

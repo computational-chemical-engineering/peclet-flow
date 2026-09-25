@@ -1,6 +1,6 @@
 /// @file
 /// @brief flow — IbmSolver pressure projection: step(), the project() stages, the buildRhs family,
-/// and the collocated face-acceleration / applyFaceAcceleration path.
+/// and the collocated variable-density (rung V8) predictor and cell correction.
 ///
 /// Out-of-line member definitions of peclet::flow::Solver (QUALITY_PLAN G.1 domain split).
 /// Declarations, docstrings and the class state live in flow_ibm.hpp, which includes this file at
@@ -98,6 +98,19 @@ void Solver<Grid>::step() {
     if (hasBc_)
       pressureBcGhost();
   }  // grad(P^n) for the incremental predictor (once)
+  // Rung V8 (S0, doc/collocated_varrho_forces.md §4.2): the collocated variable-density / CSF
+  // scope — all-fluid, no ghost projection, no harmonic rho_f, incremental pressure. Inert (no
+  // check at all) off that path.
+  if (colocatedFaceForce()) {
+    requireCollocatedFaceForceScope("step");
+    // The density ghosts under the PROPERTY ghost policy (Neumann copy at walls) — the same values
+    // the Poisson coefficient reads in projectBuildCoefficients (§4.9 L4: the operator's rho_f,
+    // the predictor's rho_f and Pi_rho's mass weights see the same cell rho). A bare halo fill
+    // wraps a wall's ghost periodically, and Pi_rho would then carry the near-wall velocity onto
+    // the closed wall face (a spurious transport flux; the constraint itself ignores that face).
+    if (effVarRho())
+      fillPropGhosts(effRhoField());
+  }
   lastOuterIters_ = 0;
   for (int outer = 0; outer < outerIters_; ++outer) {
     const double tp0 = phaseTick();
@@ -124,13 +137,14 @@ void Solver<Grid>::step() {
     // divergences). Gated on porous_ so every other path is byte-identical.
     if (porous_ && advect_)
       computeDivAdv();
-    // rung V8 (WO-T): on the collocated grid with variable density and/or surface tension the
-    // predictor carries NO force at all — every force is a face acceleration added after
-    // centerToFace (collocated_varrho.hpp). `colocatedFaceForce()` is false on the staggered path
-    // and on every validated constant-density collocated path, so this dispatch is inert there.
+    // Rung V8: on the collocated grid with variable density and/or surface tension the pressure
+    // and every force go INSIDE this implicit predictor through the mass-adjoint face integral —
+    // WHY, and why never as a face acceleration after the viscous solve: see buildRhsColoVar.
+    // `colocatedFaceForce()` is false on the staggered path and on every constant-density
+    // collocated path without CSF, so this dispatch is inert there.
     const bool coloFF = colocatedFaceForce();
     for (int c = 0; c < 3; ++c)  // RHS from u^n base + advection lagged at u^k
-      coloFF ? buildRhsColoFF(c)
+      coloFF ? buildRhsColoVar(c)
              : (vofMomEnabled_ ? buildRhsVarMom(c)
                                : (effVarRho() ? buildRhsVar(c)
                                               : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c))));
@@ -372,8 +386,8 @@ void Solver<Grid>::requireCollocatedFaceForceScope(const char* who) {
     throw std::runtime_error(
         m +
         ": variable density / surface tension on SolverColocated is rung V8 and is ALL-FLUID "
-        "only (set_pressure_geometry). An immersed solid needs the cut-cell face acceleration "
-        "and the matching one-sided closures — not this rung.");
+        "only (set_pressure_geometry). Immersed solids on this path are the next package "
+        "(doc/collocated_multiphase_solids_plan.md) — not this rung.");
   if (ghostProjection_)
     throw std::runtime_error(
         m +
@@ -382,8 +396,15 @@ void Solver<Grid>::requireCollocatedFaceForceScope(const char* who) {
   if (rhoFaceHarmonic_)
     throw std::runtime_error(
         m +
-        ": set_rho_face_harmonic is not wired into the collocated face acceleration (the "
-        "face force and the face coefficient would use different rho_f). Staggered only.");
+        ": set_rho_face_harmonic is not wired into the collocated variable-density pair (the "
+        "pressure force and the face coefficient would use different rho_f). Staggered only.");
+  if (!incremental_)
+    throw std::runtime_error(
+        m +
+        ": variable density / surface tension on SolverColocated needs the incremental pressure "
+        "(diagnostics.set_incremental_pressure(True)): the pressure force lives inside the "
+        "implicit predictor, and the non-incremental (Chorin) step has none, so its steady state "
+        "would depend on dt.");
 }
 
 template <class Grid>
@@ -659,15 +680,43 @@ void Solver<Grid>::buildRhsVarMom(int c) {
       });
 }
 
+// WHY the pressure and every force are HERE, inside the implicit predictor, and never a face
+// acceleration added after the viscous solve (the Basilisk centered.h "kick" that rung V8/WO-T
+// used until 2026-09-25): added after A^{-1}, the lagged pressure -dt*G P^n/rho_f lies exactly in
+// the range the projection removes, so P^n never reaches u (the step is non-incremental Chorin:
+// steady state scaled by (1 + dt*mu*Lambda)), and the rotational term -kappa*div then acts on it
+// as an explicit diffusion, P^{n+1} = -4*kappa*dt*S*P^n/rho (-12.0000 measured at (pi,pi,pi)).
+// Balance at a density jump comes from the operators, not the placement: the pressure force is
+// rho_c * avg_faces(G_f P / rho_f) (FV face integral, acceleration-continuous face pressure), and
+// the constraint reads the momentum-weighted face velocity, so M*Gamma = -C^T. Gates:
+// tests/python/test_collocated_stability_guard.py. Design: doc/collocated_varrho_forces.md.
 template <class Grid>
-void Solver<Grid>::buildRhsColoFF(int c) {
+void Solver<Grid>::buildRhsColoVar(int c) {
+  // (S5) the face accelerations Phi_c = (f_const + CSF - w (P(j) - P(j-s))) / rho_f on the face
+  // range [G, e-G], WITHOUT the openness (the reconstruction below applies it once). Reads the
+  // live P_ (the incremental predictor's P^n; later Picard iterations see the updated P).
+  ensureFaceAcc();
+  const bool haveRho = effVarRho();
+  const bool incr = cutcellPressure_ && incremental_;
+  const long sc = strideOf(c);
+  // Unread placeholder when the density is constant (a Kokkos View must still be a live handle).
+  CCConst rf = CCConst(haveRho ? effRhoField() : C[c].rscale);
+  buildFaceAccelVar(faceAcc_[c], CCConst(P_), rf, CCConst(C[c].rscale), /*haveFb=*/false, haveRho,
+                    rho_, f_[c], incr, /*scale=*/1.0, sc, e_, G, u_.w[c]);
+  if (csfActive())
+    addFaceAccelCsf(faceAcc_[c], CCConst(cField_), CCConst(kappaField_), CCConst(kappaBranch_), rf,
+                    haveRho, rho_, sigmaCsf_, 1.0 / u_.w[c], /*scale=*/1.0, sc, e_, G);
+  // (S6) the RHS: b = rs [ (rho_c/dt) u^n - rho_c aK + rho_c aF + W f_c + rho_c R(Phi) ] + bc/inh,
+  // R(Phi) = cellFromFaces(Phi(i), Phi(i+s), o(i), o(i+s)), W = weightSum(o(i), o(i+s)) — the SAME
+  // two openness reads, so the per-cell force balances the reconstructed pressure force exactly.
   CCExec space;
   const double idt = 1.0 / dt_, rhoIdtC = rho_ / dt_, rhoK = rho_;
   C3 e = e_;
   CCField bb = C[c].b, rs = C[c].rscale, brhs = bcBrhs_[c], inh = C[c].inhom;
-  const bool haveRho = effVarRho();
-  // Unread placeholder when the density is constant (a Kokkos View must still be a live handle).
-  CCConst rf = CCConst(haveRho ? effRhoField() : C[c].rscale);
+  CCField oax[3] = {ox_, oy_, oz_};
+  CCConst o = CCConst(oax[c]), phiF = CCConst(faceAcc_[c]);
+  const bool haveFb = hasCellForce_;
+  CCConst fb = CCConst(haveFb ? cellForce_[c] : C[c].rscale);
   const bool ufa = ufAdvVelocity();
   CCConst U = ufa ? openFaceView(0) : advVelView(0), V = ufa ? openFaceView(1) : advVelView(1),
           W = ufa ? openFaceView(2) : advVelView(2), aP = advVelView(c), un = CCConst(old_[c]);
@@ -677,7 +726,7 @@ void Solver<Grid>::buildRhsColoFF(int c) {
   const int sch = advScheme_;
   using MD = MDRange3<CCExec>;
   Kokkos::parallel_for(
-      "rhs_colo_ff", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+      "rhs_colo_var", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         const double rhoC = haveRho ? rf(i) : rhoK;
@@ -690,43 +739,14 @@ void Solver<Grid>::buildRhsColoFF(int c) {
           if (ifou)
             aF = Grid::advect_fou(c, x, y, z, Ua, Va, Wa, Fa, ufa);
         }
-        bb(i) = rs(i) * (dg * un(i) - rhoC * aK + rhoC * aF) + (bc ? brhs(i) : -inh(i));
+        const long j = i + (long)((c == 0) ? 1 : (c == 1) ? e.x : (long)e.x * e.y);
+        const double oLo = o(i), oHi = o(j);
+        const double wsum = varrho::weightSum(oLo, oHi);
+        const double fcell = haveFb ? wsum * fb(i) : 0.0;
+        const double pf = rhoC * varrho::cellFromFaces(phiF(i), phiF(j), oLo, oHi);
+        bb(i) =
+            rs(i) * (dg * un(i) - rhoC * aK + rhoC * aF + fcell + pf) + (bc ? brhs(i) : -inh(i));
       });
-}
-
-template <class Grid>
-void Solver<Grid>::applyFaceAcceleration() {
-  requireCollocatedFaceForceScope("project");
-  ensureFaceAcc();
-  const bool haveRho = effVarRho();
-  const bool incr = cutcellPressure_ && incremental_;
-  CCField fa[3] = {uf_, vf_, wf_};
-  CCField oax[3] = {ox_, oy_, oz_};
-  CCConst rho = CCConst(haveRho ? effRhoField() : C[0].rscale);
-  for (int c = 0; c < 3; ++c) {
-    const long sc = strideOf(c);
-    buildFaceAccelVar(faceAcc_[c], CCConst(P_), rho,
-                      CCConst(hasCellForce_ ? cellForce_[c] : C[c].rscale), hasCellForce_,
-                      CCConst(oax[c]), haveRho, rho_, f_[c], incr, dt_, sc, e_, G, u_.w[c]);
-    if (csfActive())
-      addFaceAccelCsf(faceAcc_[c], CCConst(cField_), CCConst(kappaField_), CCConst(kappaBranch_),
-                      rho, CCConst(oax[c]), haveRho, rho_, sigmaCsf_, 1.0 / u_.w[c], dt_, sc, e_,
-                      G);
-    addFaceIncrement(fa[c], CCConst(faceAcc_[c]), e_, G);
-  }
-}
-
-template <class Grid>
-void Solver<Grid>::applyCellFaceAverageCorrection() {
-  CCField oax[3] = {ox_, oy_, oz_};
-  const bool haveRho = effVarRho();
-  CCConst rho = CCConst(haveRho ? effRhoField() : C[0].rscale);
-  for (int c = 0; c < 3; ++c) {
-    const long sc = strideOf(c);
-    faceAccelSubGradPhi(faceAcc_[c], CCConst(phi_), rho, CCConst(oax[c]), haveRho, rho_, sc, e_, G,
-                        u_.w[c]);
-    applyCellFaceAverage(C[c].u, CCConst(faceAcc_[c]), CCConst(oax[c]), sc, e_, G);
-  }
 }
 
 template <class Grid>
@@ -787,18 +807,22 @@ void Solver<Grid>::projectAssembleDivergence() {
     // (closed walls are openness 0).
     for (int c = 0; c < 3; ++c)
       fillVelGhosts(c, 0);
-    if (faceInterp_ == 5 || faceInterp_ == 7)  // wall-aware flux map at solid (embed 5/7)
+    if (colocatedFaceForce()) {
+      // Rung V8 (S8.1): the constraint's face field is the MOMENTUM-weighted map Pi_rho u*, the
+      // adjoint partner of the predictor's pressure force (collocated_varrho.hpp; §4.3). No face
+      // acceleration: every force already went through the implicit predictor.
+      if (effVarRho())
+        centerToFaceMassWeighted(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u),
+                                 CCConst(effRhoField()), e_, G);
+      else
+        centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
+    } else if (faceInterp_ == 5 || faceInterp_ == 7)  // wall-aware flux map at solid (embed 5/7)
       centerToFaceWallAware(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u),
                             CCConst(sdf_), CCConst(xcx_), CCConst(xcy_), CCConst(xcz_), true, e_,
                             G);
     else
       centerToFace(uf_, vf_, wf_, CCConst(C[0].u), CCConst(C[1].u), CCConst(C[2].u), e_, G);
     faceFieldValid_ = true;  // ISSUES sweep item 5
-    // rung V8 (WO-T): the body / interfacial forces the predictor deliberately did NOT apply, put
-    // on the FACES where the pressure difference lives — the collocated form of the V4 balanced
-    // force (Basilisk centered.h). Inert on every constant-density collocated configuration.
-    if (colocatedFaceForce())
-      applyFaceAcceleration();
     if (ghostProjection_) {
       // Collocated ghost divergence: the SAME binary-openness + closure-delta pair as the
       // staggered path, applied to the 1/2-1/2 face-averaged field (the closures only ever read
@@ -1145,12 +1169,15 @@ void Solver<Grid>::projectCorrectVelocities() {
     // the outflow face cannot be the mass-balance closure there); a no-op without an outflow.
     buildOpenFaceField();
     if (colocatedFaceForce()) {
-      // rung V8 (WO-T): the cell sees the AVERAGE of what its two faces saw — the force
-      // acceleration minus the projection's own rho-weighted face correction — through the same
-      // averaging operator projectCorrectCenter applies to phi differences. A hydrostatic column
-      // and a stationary droplet are exactly balanced on the faces, so the cell averages an exact
-      // zero. This replaces the whole constant-density cell-correction chain below.
-      applyCellFaceAverageCorrection();
+      // Rung V8 (S8.5): the cell correction is the predictor's face-to-cell reconstruction applied
+      // to the face corrections k(j) = w (rho0/rho_f)(phi(j) - phi(j-s)) — the transpose of the
+      // constraint, so the pair stays adjoint (collocated_varrho.hpp). Replaces the whole
+      // constant-density cell-correction chain below.
+      CCField oax[3] = {ox_, oy_, oz_};
+      for (int cc = 0; cc < 3; ++cc)
+        correctCellFaceAverageVar(C[cc].u, CCConst(phi_),
+                                  CCConst(varRho_ ? rhoField_ : C[cc].rscale), CCConst(oax[cc]),
+                                  varRho_, rho_, strideOf(cc), e_, G, u_.w[cc]);
     } else if (ghostProjection_ || faceInterp_ == 9) {
       // Ghost cell correction (also the gauge-exact scheme): the directional gpCenterGrad
       // gradient of phi — 2nd-order one-sided at cut cells, never reads a decoupled

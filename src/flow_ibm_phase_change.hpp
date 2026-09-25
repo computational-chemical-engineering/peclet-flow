@@ -14,8 +14,8 @@ template <class Grid>
 void Solver<Grid>::enablePhaseChange(double rhoG, double rhoL, double hlv) {
   if constexpr (Grid::collocated)
     throw std::runtime_error(
-        "enable_phase_change: rungs P0/P1 are STAGGERED-ONLY (the collocated grid carries every "
-        "force as a face acceleration and the source deposit has not been composed with it).");
+        "enable_phase_change: rungs P0/P1 are STAGGERED-ONLY (the collocated variable-density "
+        "pair has not been composed with the divergence-source deposit).");
   enableVof();
   if (hasSolid_)
     throw std::runtime_error(
