@@ -35,11 +35,9 @@ namespace peclet::flow {
 // cells, else b - A x with the float operator accumulated in double.
 inline void residualVarPin(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC AE, FPC AS, FPC AN,
                            FPC AB, FPC AT, CCConst pin, C3 e, int g) {
-  CCExec space;
   const bool hasPin = (pin.extent(0) != 0);
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::vmg_resid", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(  // rule H (doc/vof_step_performance_design.md §4.5): host pencil, device MDRange
+      "peclet::flow::vmg_resid", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;

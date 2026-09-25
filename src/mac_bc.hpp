@@ -178,6 +178,22 @@ inline void bcVelocityColocated(BField f, B3 ext, int g, int a, int s, double wa
       });
 }
 
+// A0 cell bodies (doc/vof_step_performance_design.md §5.2) of the two pressure ghost policies
+// below: one transverse position `base` of the face, its ghost layers [lo, hi] along the stride sa.
+template <class FV>
+KOKKOS_INLINE_FUNCTION void bcNeumannGhostCell(const FV& f, long base, long sa, int bic, int lo,
+                                               int hi) {
+  const double pin = f(base + static_cast<long>(bic) * sa);
+  for (int ia = lo; ia <= hi; ++ia)
+    f(base + static_cast<long>(ia) * sa) = pin;
+}
+template <class FV>
+KOKKOS_INLINE_FUNCTION void bcZeroPressureGhostCell(const FV& phi, long base, long sa, int lo,
+                                                    int hi) {
+  for (int ia = lo; ia <= hi; ++ia)
+    phi(base + (long)ia * sa) = 0.0;
+}
+
 // Zero-gradient (Neumann) ghost on one domain face: every ghost layer = the boundary-adjacent inner
 // cell (cell-centered). Used for the collocated pressure increment phi at walls so the
 // cell-centered correction carries no spurious normal acceleration (the same role pressureBcGhost
@@ -196,10 +212,8 @@ inline void bcNeumannGhost(BField f, B3 ext, int g, int a, int s) {
   Kokkos::parallel_for(
       "peclet::flow::bc_neumann_ghost", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
-        const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
-        const double pin = f(base + static_cast<long>(bic) * sa);
-        for (int ia = lo; ia <= hi; ++ia)
-          f(base + static_cast<long>(ia) * sa) = pin;
+        bcNeumannGhostCell(f, static_cast<long>(p0) * sb + static_cast<long>(p1) * sc, sa, bic, lo,
+                           hi);
       });
 }
 
@@ -268,9 +282,7 @@ inline void bcZeroPressureGhost(BField phi, B3 ext, int g, int a, int s) {
   Kokkos::parallel_for(
       "peclet::flow::bc_zero_p_ghost", MD(space, {0, 0}, {dims[b], dims[c]}),
       KOKKOS_LAMBDA(int p0, int p1) {
-        const long base = (long)p0 * sb + (long)p1 * sc;
-        for (int ia = lo; ia <= hi; ++ia)
-          phi(base + (long)ia * sa) = 0.0;
+        bcZeroPressureGhostCell(phi, (long)p0 * sb + (long)p1 * sc, sa, lo, hi);
       });
 }
 

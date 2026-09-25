@@ -80,35 +80,40 @@ using FPC = Kokkos::View<const MReal*, CCMem>;
 
 // coarsen staggered face openness: each coarse face = average of the ratio_b*ratio_c fine sub-faces
 // it spans (mg_coarsen_open_avg_k port). gc/gf: coarse/fine block ghost widths (they can differ —
-// CA-eligible coarse levels carry g=2).
+// CA-eligible coarse levels carry g=2). The cell body is the A0 form (§5.2).
+template <class CV, class FV>
+KOKKOS_INLINE_FUNCTION void coarsenOpenAvgCell(const CV& oxc, const CV& oyc, const CV& ozc,
+                                               const FV& oxf, const FV& oyf, const FV& ozf, C3 cext,
+                                               C3 fext, int gc, int gf, C3 ratio, int icx, int icy,
+                                               int icz) {
+  const int rx = ratio.x, ry = ratio.y, rz = ratio.z;
+  const int fx0 = rx * icx + gf, fy0 = ry * icy + gf, fz0 = rz * icz + gf;
+  const long fsy = fext.x, fsz = (long)fext.x * fext.y;
+  auto F = [&](const FV& T, int x, int y, int z) {
+    return T((long)x + (long)y * fsy + (long)z * fsz);
+  };
+  double sx = 0, sy = 0, sz = 0;
+  for (int a = 0; a < ry; ++a)
+    for (int b = 0; b < rz; ++b)
+      sx += F(oxf, fx0, fy0 + a, fz0 + b);
+  for (int a = 0; a < rx; ++a)
+    for (int b = 0; b < rz; ++b)
+      sy += F(oyf, fx0 + a, fy0, fz0 + b);
+  for (int a = 0; a < rx; ++a)
+    for (int b = 0; b < ry; ++b)
+      sz += F(ozf, fx0 + a, fy0 + b, fz0);
+  const long ci =
+      (long)(icx + gc) + (long)(icy + gc) * cext.x + (long)(icz + gc) * (long)cext.x * cext.y;
+  oxc(ci) = sx / (double)(ry * rz);
+  oyc(ci) = sy / (double)(rx * rz);
+  ozc(ci) = sz / (double)(rx * ry);
+}
 inline void coarsenOpenAvg(CCField oxc, CCField oyc, CCField ozc, CCConst oxf, CCConst oyf,
                            CCConst ozf, C3 cext, C3 fext, int gc, int gf, C3 cinner, C3 ratio) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::coarsen_open", MD(space, {0, 0, 0}, {cinner.x, cinner.y, cinner.z}),
+  ccFor3(
+      "peclet::flow::coarsen_open", C3{0, 0, 0}, C3{cinner.x, cinner.y, cinner.z},
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
-        const int rx = ratio.x, ry = ratio.y, rz = ratio.z;
-        const int fx0 = rx * icx + gf, fy0 = ry * icy + gf, fz0 = rz * icz + gf;
-        const long fsy = fext.x, fsz = (long)fext.x * fext.y;
-        auto F = [&](CCConst T, int x, int y, int z) {
-          return T((long)x + (long)y * fsy + (long)z * fsz);
-        };
-        double sx = 0, sy = 0, sz = 0;
-        for (int a = 0; a < ry; ++a)
-          for (int b = 0; b < rz; ++b)
-            sx += F(oxf, fx0, fy0 + a, fz0 + b);
-        for (int a = 0; a < rx; ++a)
-          for (int b = 0; b < rz; ++b)
-            sy += F(oyf, fx0 + a, fy0, fz0 + b);
-        for (int a = 0; a < rx; ++a)
-          for (int b = 0; b < ry; ++b)
-            sz += F(ozf, fx0 + a, fy0 + b, fz0);
-        const long ci =
-            (long)(icx + gc) + (long)(icy + gc) * cext.x + (long)(icz + gc) * (long)cext.x * cext.y;
-        oxc(ci) = sx / (double)(ry * rz);
-        oyc(ci) = sy / (double)(rx * rz);
-        ozc(ci) = sz / (double)(rx * ry);
+        coarsenOpenAvgCell(oxc, oyc, ozc, oxf, oyf, ozf, cext, fext, gc, gf, ratio, icx, icy, icz);
       });
 }
 
@@ -199,7 +204,18 @@ inline void mgCoarsenFacePlane(CCField oc, CCConst of, C3 cext, C3 fext, int gc,
   (void)ci;
 }
 
-// residual r = b - A x for the float operator (mg_residual_var_k port).
+// residual r = b - A x for the float operator (mg_residual_var_k port). A0 cell body (§5.2).
+template <class RV, class XV, class BV, class OpV>
+KOKKOS_INLINE_FUNCTION void cutcellResidualCell(const RV& r, const XV& x, const BV& b,
+                                                const OpV& AC, const OpV& AW, const OpV& AE,
+                                                const OpV& AS, const OpV& AN, const OpV& AB,
+                                                const OpV& AT, long i, long xp, long xm, long yp,
+                                                long ym, long zp, long zm) {
+  const double Ax = (double)AC(i) * x(i) + (double)AE(i) * x(xp) + (double)AW(i) * x(xm) +
+                    (double)AN(i) * x(yp) + (double)AS(i) * x(ym) + (double)AT(i) * x(zp) +
+                    (double)AB(i) * x(zm);
+  r(i) = b(i) - Ax;
+}
 inline void residualCutcell(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC AE, FPC AS, FPC AN,
                             FPC AB, FPC AT, C3 e, int g) {
   ccFor3(
@@ -207,11 +223,8 @@ inline void residualCutcell(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double Ax = (double)AC(i) * x(i) + (double)AE(i) * x(i + sx) +
-                          (double)AW(i) * x(i - sx) + (double)AN(i) * x(i + sy) +
-                          (double)AS(i) * x(i - sy) + (double)AT(i) * x(i + sz) +
-                          (double)AB(i) * x(i - sz);
-        r(i) = b(i) - Ax;
+        cutcellResidualCell(r, x, b, AC, AW, AE, AS, AN, AB, AT, i, i + sx, i - sx, i + sy, i - sy,
+                            i + sz, i - sz);
       });
 }
 
@@ -227,34 +240,65 @@ inline void residualCutcellBox(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, 
           return;  // inside the skip box (already done by the interior pass)
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double Ax = (double)AC(i) * x(i) + (double)AE(i) * x(i + sx) +
-                          (double)AW(i) * x(i - sx) + (double)AN(i) * x(i + sy) +
-                          (double)AS(i) * x(i - sy) + (double)AT(i) * x(i + sz) +
-                          (double)AB(i) * x(i - sz);
-        r(i) = b(i) - Ax;
+        cutcellResidualCell(r, x, b, AC, AW, AE, AS, AN, AB, AT, i, i + sx, i - sx, i + sy, i - sy,
+                            i + sz, i - sz);
       });
 }
 
 // average restriction (coarse = mean of ratio^3 fine children; mg_restrict_k) + trilinear
 // prolongation (added to fine; mg_prolong_k). Both over inner cells. gc/gf: coarse/fine block
 // ghost widths (CA-eligible coarse levels carry g=2, so they can differ across one transfer).
+// A0 cell bodies (§5.2).
+template <class CV, class FV>
+KOKKOS_INLINE_FUNCTION void restrictAvgCell(const CV& coarse, const FV& fine, C3 cext, C3 fext,
+                                            int gc, int gf, C3 ratio, int icx, int icy, int icz) {
+  const long fsy = fext.x, fsz = (long)fext.x * fext.y;
+  double s = 0;
+  for (int dz = 0; dz < ratio.z; ++dz)
+    for (int dy = 0; dy < ratio.y; ++dy)
+      for (int dx = 0; dx < ratio.x; ++dx) {
+        const int fx = ratio.x * icx + dx + gf, fy = ratio.y * icy + dy + gf,
+                  fz = ratio.z * icz + dz + gf;
+        s += fine((long)fx + (long)fy * fsy + (long)fz * fsz);
+      }
+  const long ci =
+      (long)(icx + gc) + (long)(icy + gc) * cext.x + (long)(icz + gc) * (long)cext.x * cext.y;
+  coarse(ci) = s / (double)(ratio.x * ratio.y * ratio.z);
+}
+template <class FV, class CV>
+KOKKOS_INLINE_FUNCTION void prolongAddCell(const FV& fine, const CV& coarse, C3 fext, C3 cext,
+                                           int gf, int gc, C3 ratio, int ifx, int ify, int ifz) {
+  // coarse sample coord: coarsened axis (ratio 2) -> 0.5*ifine - 0.25 + gc; kept axis (ratio
+  // 1) -> ifine+gc
+  const double cx = (ratio.x == 2) ? 0.5 * ifx - 0.25 + gc : ifx + gc;
+  const double cy = (ratio.y == 2) ? 0.5 * ify - 0.25 + gc : ify + gc;
+  const double cz = (ratio.z == 2) ? 0.5 * ifz - 0.25 + gc : ifz + gc;
+  const double fxw = Kokkos::floor(cx), fyw = Kokkos::floor(cy), fzw = Kokkos::floor(cz);
+  const double wx = cx - fxw, wy = cy - fyw, wz = cz - fzw;
+  const int x0 = (int)fxw, y0 = (int)fyw, z0 = (int)fzw;
+  const long sy = cext.x, sz = (long)cext.x * cext.y;
+  auto C = [&](int xx, int yy, int zz) { return coarse((long)xx + (long)yy * sy + (long)zz * sz); };
+  const double c00 = C(x0, y0, z0) * (1 - wx) + C(x0 + 1, y0, z0) * wx;
+  const double c10 = C(x0, y0 + 1, z0) * (1 - wx) + C(x0 + 1, y0 + 1, z0) * wx;
+  const double c01 = C(x0, y0, z0 + 1) * (1 - wx) + C(x0 + 1, y0, z0 + 1) * wx;
+  const double c11 = C(x0, y0 + 1, z0 + 1) * (1 - wx) + C(x0 + 1, y0 + 1, z0 + 1) * wx;
+  const double c0 = c00 * (1 - wy) + c10 * wy, c1 = c01 * (1 - wy) + c11 * wy;
+  const long fi =
+      (long)(ifx + gf) + (long)(ify + gf) * fext.x + (long)(ifz + gf) * (long)fext.x * fext.y;
+  fine(fi) += c0 * (1 - wz) + c1 * wz;
+}
+// The subtract half of CutcellMG::removeMean (A0 cell body).
+template <class FV, class AV>
+KOKKOS_INLINE_FUNCTION void meanSubtractCell(const FV& f, const AV& ac, long i, double mean) {
+  if (ac(i) > 1e-30f)
+    f(i) -= mean;
+}
 inline void restrictAvg(CCField coarse, CCConst fine, C3 cext, C3 fext, int gc, int gf, C3 cinner,
                         C3 ratio) {
   ccFor3(
       "peclet::flow::restrict", C3{0, 0, 0}, C3{cinner.x, cinner.y, cinner.z},
       KOKKOS_LAMBDA(int icx, int icy, int icz) {
-        const long fsy = fext.x, fsz = (long)fext.x * fext.y;
-        double s = 0;
-        for (int dz = 0; dz < ratio.z; ++dz)
-          for (int dy = 0; dy < ratio.y; ++dy)
-            for (int dx = 0; dx < ratio.x; ++dx) {
-              const int fx = ratio.x * icx + dx + gf, fy = ratio.y * icy + dy + gf,
-                        fz = ratio.z * icz + dz + gf;
-              s += fine((long)fx + (long)fy * fsy + (long)fz * fsz);
-            }
-        const long ci =
-            (long)(icx + gc) + (long)(icy + gc) * cext.x + (long)(icz + gc) * (long)cext.x * cext.y;
-        coarse(ci) = s / (double)(ratio.x * ratio.y * ratio.z);
+        restrictAvgCell(coarse, fine, cext, fext, gc, gf, ratio, icx, icy, icz);
       });
 }
 inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, int gc, C3 finner,
@@ -262,26 +306,7 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, i
   ccFor3(
       "peclet::flow::prolong", C3{0, 0, 0}, C3{finner.x, finner.y, finner.z},
       KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
-        // coarse sample coord: coarsened axis (ratio 2) -> 0.5*ifine - 0.25 + gc; kept axis (ratio
-        // 1) -> ifine+gc
-        const double cx = (ratio.x == 2) ? 0.5 * ifx - 0.25 + gc : ifx + gc;
-        const double cy = (ratio.y == 2) ? 0.5 * ify - 0.25 + gc : ify + gc;
-        const double cz = (ratio.z == 2) ? 0.5 * ifz - 0.25 + gc : ifz + gc;
-        const double fxw = Kokkos::floor(cx), fyw = Kokkos::floor(cy), fzw = Kokkos::floor(cz);
-        const double wx = cx - fxw, wy = cy - fyw, wz = cz - fzw;
-        const int x0 = (int)fxw, y0 = (int)fyw, z0 = (int)fzw;
-        const long sy = cext.x, sz = (long)cext.x * cext.y;
-        auto C = [&](int xx, int yy, int zz) {
-          return coarse((long)xx + (long)yy * sy + (long)zz * sz);
-        };
-        const double c00 = C(x0, y0, z0) * (1 - wx) + C(x0 + 1, y0, z0) * wx;
-        const double c10 = C(x0, y0 + 1, z0) * (1 - wx) + C(x0 + 1, y0 + 1, z0) * wx;
-        const double c01 = C(x0, y0, z0 + 1) * (1 - wx) + C(x0 + 1, y0, z0 + 1) * wx;
-        const double c11 = C(x0, y0 + 1, z0 + 1) * (1 - wx) + C(x0 + 1, y0 + 1, z0 + 1) * wx;
-        const double c0 = c00 * (1 - wy) + c10 * wy, c1 = c01 * (1 - wy) + c11 * wy;
-        const long fi =
-            (long)(ifx + gf) + (long)(ify + gf) * fext.x + (long)(ifz + gf) * (long)fext.x * fext.y;
-        fine(fi) += c0 * (1 - wz) + c1 * wz;
+        prolongAddCell(fine, coarse, fext, cext, gf, gc, ratio, ifx, ify, ifz);
       });
 }
 
@@ -2818,12 +2843,10 @@ class CutcellMG {
     if (cnt == 0)
       return;
     const double mean = sum / (double)cnt;
-    Kokkos::parallel_for(
-        "mgmeans", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
+    ccFor3(
+        "mgmeans", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, KOKKOS_LAMBDA(int x, int y, int z) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          if (ac(i) > 1e-30f)
-            ff(i) -= mean;
+          meanSubtractCell(ff, ac, i, mean);
         });
   }
 

@@ -992,9 +992,8 @@ void Solver<Grid>::copyInner(CCField dst, C3 de, int dg, CCConst src, C3 se, int
 
 template <class Grid>
 void Solver<Grid>::copyBlockShifted(CCField dst, C3 de, CCConst src, C3 se, int off) {
-  CCExec space;
-  Kokkos::parallel_for(
-      "peclet::flow::copyBlockShifted", MDRange3<CCExec>(space, {0, 0, 0}, {de.x, de.y, de.z}),
+  ccFor3(  // rule H (doc/vof_step_performance_design.md §4.5): host pencil, device MDRange
+      "peclet::flow::copyBlockShifted", C3{0, 0, 0}, C3{de.x, de.y, de.z},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long di = (long)x + (long)y * de.x + (long)z * (long)de.x * de.y;
         const long si =

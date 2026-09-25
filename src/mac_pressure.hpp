@@ -18,30 +18,80 @@
 
 namespace peclet::flow {
 
+// --- A0: the per-cell bodies (doc/vof_step_performance_design.md §4.5 rule H, §5.2) -------------
+// Every launch form of these kernels -- the device MDRange, the host pencil, and the single-team
+// kernels to come -- calls the SAME inline body, so the per-cell arithmetic cannot drift between
+// them. Each expression is a verbatim copy of the kernel it came from, in the same order: a
+// rewritten expression can contract into a different FMA chain on the device (design note R1).
+// The neighbour INDICES of the field being smoothed or applied are arguments (xp = i + sx,
+// xm = i - sx, ...), so a caller can hand a periodically wrapped index instead of a ghost one; the
+// coefficients are always read at their own (unwrapped) indices.
+
 // A = -div(open grad): AC = sum of the 6 face terms (openness*gf), off-diagonal across each face =
 // -term. ox[i] is the -x face openness of cell i (== +x face of cell i-1). (mg_build_op_k port.)
-// OpV is the operator-coefficient view type (float `mreal` to match CUDA, or double).
+template <class OpV, class OV>
+KOKKOS_INLINE_FUNCTION void cutcellBuildOpCell(const OpV& AC, const OpV& AW, const OpV& AE,
+                                               const OpV& AS, const OpV& AN, const OpV& AB,
+                                               const OpV& AT, const OV& ox, const OV& oy,
+                                               const OV& oz, long i, long sx, long sy, long sz,
+                                               double gfx, double gfy, double gfz) {
+  const double tw = ox(i) * gfx, te = ox(i + sx) * gfx;
+  const double ts = oy(i) * gfy, tn = oy(i + sy) * gfy;
+  const double tb = oz(i) * gfz, tt = oz(i + sz) * gfz;
+  AW(i) = -tw;
+  AE(i) = -te;
+  AS(i) = -ts;
+  AN(i) = -tn;
+  AB(i) = -tb;
+  AT(i) = -tt;
+  AC(i) = te + tw + tn + ts + tt + tb;
+}
+// One red/black Gauss-Seidel update of cell i: phi = (b - offdiag)/AC; AC~0 (fully solid) cells are
+// decoupled and keep phi.
+template <class PV, class BV, class OpV>
+KOKKOS_INLINE_FUNCTION void cutcellSmoothCell(const PV& phi, const BV& b, const OpV& AC,
+                                              const OpV& AW, const OpV& AE, const OpV& AS,
+                                              const OpV& AN, const OpV& AB, const OpV& AT, long i,
+                                              long xp, long xm, long yp, long ym, long zp,
+                                              long zm) {
+  const double ac = AC(i);
+  if (ac < 1e-30)
+    return;  // fully closed (solid) cell: decoupled, phi stays 0
+  const double s = AE(i) * phi(xp) + AW(i) * phi(xm) + AN(i) * phi(yp) + AS(i) * phi(ym) +
+                   AT(i) * phi(zp) + AB(i) * phi(zm);
+  phi(i) = (b(i) - s) / ac;
+}
+// (A x)_i from the bands (applyCutcellOp).
+template <class XV, class OpV>
+KOKKOS_INLINE_FUNCTION double cutcellApplyCell(const XV& x, const OpV& AC, const OpV& AW,
+                                               const OpV& AE, const OpV& AS, const OpV& AN,
+                                               const OpV& AB, const OpV& AT, long i, long xp,
+                                               long xm, long yp, long ym, long zp, long zm) {
+  return AC(i) * x(i) + AE(i) * x(xp) + AW(i) * x(xm) + AN(i) * x(yp) + AS(i) * x(ym) +
+         AT(i) * x(zp) + AB(i) * x(zm);
+}
+// (A x)_i in the exact flux form from the double face openness (applyCutcellOpExact).
+template <class XV, class OV>
+KOKKOS_INLINE_FUNCTION double cutcellApplyExactCell(const XV& x, const OV& ox, const OV& oy,
+                                                    const OV& oz, long i, long sx, long sy, long sz,
+                                                    long xp, long xm, long yp, long ym, long zp,
+                                                    long zm, double gfx, double gfy, double gfz) {
+  const double xi = x(i);
+  return ox(i) * gfx * (xi - x(xm)) + ox(i + sx) * gfx * (xi - x(xp)) + oy(i) * gfy * (xi - x(ym)) +
+         oy(i + sy) * gfy * (xi - x(yp)) + oz(i) * gfz * (xi - x(zm)) +
+         oz(i + sz) * gfz * (xi - x(zp));
+}
+
 template <class OpV>
 inline void buildCutcellOp(OpV AC, OpV AW, OpV AE, OpV AS, OpV AN, OpV AB, OpV AT, CCConst ox,
                            CCConst oy, CCConst oz, C3 e, int g, double gfx, double gfy,
                            double gfz) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::cc_build_op", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::cc_build_op", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double tw = ox(i) * gfx, te = ox(i + sx) * gfx;
-        const double ts = oy(i) * gfy, tn = oy(i + sy) * gfy;
-        const double tb = oz(i) * gfz, tt = oz(i + sz) * gfz;
-        AW(i) = -tw;
-        AE(i) = -te;
-        AS(i) = -ts;
-        AN(i) = -tn;
-        AB(i) = -tb;
-        AT(i) = -tt;
-        AC(i) = te + tw + tn + ts + tt + tb;
+        cutcellBuildOpCell(AC, AW, AE, AS, AN, AB, AT, ox, oy, oz, i, sx, sy, sz, gfx, gfy, gfz);
       });
 }
 
@@ -75,14 +125,11 @@ inline void cutcellSmoothColor(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, O
       const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
       const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
       const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
-      for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
+      PECLET_FLOW_OMP_SIMD  // same-colour cells are independent (ccFor3's contract)
+          for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double ac = AC(i);
-        if (ac < 1e-30)
-          continue;  // fully closed (solid) cell: decoupled, phi stays 0
-        const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
-                         AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
-        phi(i) = (b(i) - s) / ac;
+        cutcellSmoothCell(phi, b, AC, AW, AE, AS, AN, AB, AT, i, i + sx, i - sx, i + sy, i - sy,
+                          i + sz, i - sz);
       }
     };
     if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
@@ -102,12 +149,8 @@ inline void cutcellSmoothColor(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE, O
           return;
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double ac = AC(i);
-        if (ac < 1e-30)
-          return;  // fully closed (solid) cell: decoupled, phi stays 0
-        const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
-                         AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
-        phi(i) = (b(i) - s) / ac;
+        cutcellSmoothCell(phi, b, AC, AW, AE, AS, AN, AB, AT, i, i + sx, i - sx, i + sy, i - sy,
+                          i + sz, i - sz);
       });
 }
 
@@ -138,12 +181,8 @@ inline void cutcellSmoothColorBox(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE
         if (yzSkip && lx >= slo.x && lx < shi.x)
           continue;  // inside the skip box (already swept by the interior pass)
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double ac = AC(i);
-        if (ac < 1e-30)
-          continue;
-        const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
-                         AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
-        phi(i) = (b(i) - s) / ac;
+        cutcellSmoothCell(phi, b, AC, AW, AE, AS, AN, AB, AT, i, i + sx, i - sx, i + sy, i - sy,
+                          i + sz, i - sz);
       }
     };
     if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
@@ -165,12 +204,8 @@ inline void cutcellSmoothColorBox(CCField phi, CCConst b, OpV AC, OpV AW, OpV AE
           return;
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double ac = AC(i);
-        if (ac < 1e-30)
-          return;
-        const double s = AE(i) * phi(i + sx) + AW(i) * phi(i - sx) + AN(i) * phi(i + sy) +
-                         AS(i) * phi(i - sy) + AT(i) * phi(i + sz) + AB(i) * phi(i - sz);
-        phi(i) = (b(i) - s) / ac;
+        cutcellSmoothCell(phi, b, AC, AW, AE, AS, AN, AB, AT, i, i + sx, i - sx, i + sy, i - sy,
+                          i + sz, i - sz);
       });
 }
 
@@ -183,8 +218,8 @@ inline void applyCutcellOp(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV AS,
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        y(i) = AC(i) * x(i) + AE(i) * x(i + sx) + AW(i) * x(i - sx) + AN(i) * x(i + sy) +
-               AS(i) * x(i - sy) + AT(i) * x(i + sz) + AB(i) * x(i - sz);
+        y(i) = cutcellApplyCell(x, AC, AW, AE, AS, AN, AB, AT, i, i + sx, i - sx, i + sy, i - sy,
+                                i + sz, i - sz);
       });
 }
 
@@ -196,17 +231,15 @@ inline void applyCutcellOpBox(CCField y, CCConst x, OpV AC, OpV AW, OpV AE, OpV 
                               OpV AT, C3 e, C3 rlo, C3 rhi, C3 slo, C3 shi) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::cc_apply_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
+  ccFor3(
+      "peclet::flow::cc_apply_box", C3{rlo.x, rlo.y, rlo.z}, C3{rhi.x, rhi.y, rhi.z},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
           return;
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        y(i) = AC(i) * x(i) + AE(i) * x(i + sx) + AW(i) * x(i - sx) + AN(i) * x(i + sy) +
-               AS(i) * x(i - sy) + AT(i) * x(i + sz) + AB(i) * x(i - sz);
+        y(i) = cutcellApplyCell(x, AC, AW, AE, AS, AN, AB, AT, i, i + sx, i - sx, i + sy, i - sy,
+                                i + sz, i - sz);
       });
 }
 
@@ -240,10 +273,8 @@ inline void applyCutcellOpExact(CCField y, CCConst x, CCConst ox, CCConst oy, CC
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double xi = x(i);
-        y(i) = ox(i) * gfx * (xi - x(i - sx)) + ox(i + sx) * gfx * (xi - x(i + sx)) +
-               oy(i) * gfy * (xi - x(i - sy)) + oy(i + sy) * gfy * (xi - x(i + sy)) +
-               oz(i) * gfz * (xi - x(i - sz)) + oz(i + sz) * gfz * (xi - x(i + sz));
+        y(i) = cutcellApplyExactCell(x, ox, oy, oz, i, sx, sy, sz, i + sx, i - sx, i + sy, i - sy,
+                                     i + sz, i - sz, gfx, gfy, gfz);
       });
 }
 
@@ -256,19 +287,15 @@ inline void applyCutcellOpExactBox(CCField y, CCConst x, CCConst ox, CCConst oy,
                                    double gfz) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::cc_apply_exact_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
+  ccFor3(
+      "peclet::flow::cc_apply_exact_box", C3{rlo.x, rlo.y, rlo.z}, C3{rhi.x, rhi.y, rhi.z},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
           return;
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double xi = x(i);
-        y(i) = ox(i) * gfx * (xi - x(i - sx)) + ox(i + sx) * gfx * (xi - x(i + sx)) +
-               oy(i) * gfy * (xi - x(i - sy)) + oy(i + sy) * gfy * (xi - x(i + sy)) +
-               oz(i) * gfz * (xi - x(i - sz)) + oz(i + sz) * gfz * (xi - x(i + sz));
+        y(i) = cutcellApplyExactCell(x, ox, oy, oz, i, sx, sy, sz, i + sx, i - sx, i + sy, i - sy,
+                                     i + sz, i - sz, gfx, gfy, gfz);
       });
 }
 
@@ -302,10 +329,8 @@ inline void projectCorrect(CCField u, CCField v, CCField w, CCConst phi, C3 e, i
 inline void projectCorrectVar(CCField u, CCField v, CCField w, CCConst phi, CCConst rho,
                               double rho0, C3 e, int g, double wx = 1.0, double wy = 1.0,
                               double wz = 1.0) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::correct_var", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::correct_var", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -322,10 +347,8 @@ inline void projectCorrectVar(CCField u, CCField v, CCField w, CCConst phi, CCCo
 // rho ghost ring of the g=1 block must be valid (bridged from the filled G=2 field).
 inline void buildRhoCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy, CCConst oz,
                           CCConst rho, double rho0, C3 e, int g) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::rho_coeff", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::rho_coeff", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -366,10 +389,8 @@ inline void buildRhoCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCCons
 // the flag switches BOTH kernels together (IbmSolver::project / projectVelocities).
 inline void buildRhoCoeffHarm(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy,
                               CCConst oz, CCConst rho, double rho0, C3 e, int g) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::rho_coeff_harm", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::rho_coeff_harm", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -423,10 +444,8 @@ inline void buildRhoCoeffOutflowFace(CCField ca, CCConst oa, CCConst rho, double
 inline void projectCorrectVarHarm(CCField u, CCField v, CCField w, CCConst phi, CCConst rho,
                                   double rho0, C3 e, int g, double wx = 1.0, double wy = 1.0,
                                   double wz = 1.0) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::correct_var_harm", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::correct_var_harm", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -448,10 +467,8 @@ inline void projectCorrectVarHarm(CCField u, CCField v, CCField w, CCConst phi, 
 // Reduces to divergOpen when eps == 1 everywhere (no particles).
 inline void divergOpenEps(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst oy, CCConst oz,
                           CCConst eps, CCField d, C3 e, int g) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::diverg_open_eps", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::diverg_open_eps", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -475,10 +492,8 @@ inline void divergOpenEps(CCConst u, CCConst v, CCConst w, CCConst ox, CCConst o
 // per-level ghost fill overwrites it) and every operand it reads is a ghost-filled index.
 inline void buildPorousCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy, CCConst oz,
                              CCConst eps, C3 e, int g) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::porous_coeff", MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
+  ccFor3(
+      "peclet::flow::porous_coeff", C3{g, g, g}, C3{e.x - g + 1, e.y - g + 1, e.z - g + 1},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -497,11 +512,8 @@ inline void buildPorousCoeff(CCField cx, CCField cy, CCField cz, CCConst ox, CCC
 // (projectCorrectPorousDrag) so the open*eps*w flux telescopes to A*phi.
 inline void buildPorousCoeffDrag(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy,
                                  CCConst oz, CCConst eps, CCConst beta, double idt, C3 e, int g) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::porous_coeff_drag",
-      MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
+  ccFor3(
+      "peclet::flow::porous_coeff_drag", C3{g, g, g}, C3{e.x - g + 1, e.y - g + 1, e.z - g + 1},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -523,11 +535,8 @@ inline void buildPorousCoeffDrag(CCField cx, CCField cy, CCField cz, CCConst ox,
 inline void buildPorousCoeffCons(CCField cx, CCField cy, CCField cz, CCConst ox, CCConst oy,
                                  CCConst oz, CCConst eps, CCConst beta, bool useBeta, double rhoidt,
                                  C3 e, int g) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::porous_coeff_cons",
-      MD(space, {g, g, g}, {e.x - g + 1, e.y - g + 1, e.z - g + 1}),
+  ccFor3(
+      "peclet::flow::porous_coeff_cons", C3{g, g, g}, C3{e.x - g + 1, e.y - g + 1, e.z - g + 1},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -545,10 +554,8 @@ inline void buildPorousCoeffCons(CCField cx, CCField cy, CCField cz, CCConst ox,
 inline void projectCorrectPorousCons(CCField u, CCField v, CCField w, CCConst phi, CCConst eps,
                                      CCConst beta, bool useBeta, double rhoidt, C3 e, int g,
                                      double wx = 1.0, double wy = 1.0, double wz = 1.0) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::correct_porous_cons", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::correct_porous_cons", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
@@ -568,10 +575,8 @@ inline void projectCorrectPorousCons(CCField u, CCField v, CCField w, CCConst ph
 inline void projectCorrectPorousDrag(CCField u, CCField v, CCField w, CCConst phi, CCConst beta,
                                      double idt, C3 e, int g, double wx = 1.0, double wy = 1.0,
                                      double wz = 1.0) {
-  CCExec space;
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "peclet::flow::correct_porous_drag", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+  ccFor3(
+      "peclet::flow::correct_porous_drag", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;

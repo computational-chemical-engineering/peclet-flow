@@ -290,28 +290,68 @@ inline bool hostRunSerial(long cells) {
     return false;
 }
 
-// Launch a 3-D elementwise kernel with a HOST-TUNED MDRange tiling: one full-x row per tile (the
-// Kokkos host default tiles are tiny, wrecking streaming locality — measured 5.6x on the RB-GS
-// smoother when its loop went x-contiguous). The lambda is passed through UNCHANGED, and the
-// device keeps the default MDRange tiling untouched — byte-identical results on both backends
-// (elementwise kernels are order-independent).
-template <class F>
-inline void ccFor3(const char* name, C3 lo, C3 hi, F f) {
+// The host launch rule (doc/vof_step_performance_design.md §4.5, "rule H"): a 3-D elementwise
+// kernel is ONE cell body `f(x, y, z)`, launched
+//   * on a device backend as MDRange3 with the default tiling (unchanged), and
+//   * on a host backend as a RangePolicy over the (y, z) ROWS of the box, with the x loop inside
+//     (a "pencil"), serially below kHostSerialCellCutoff cells.
+// The host MDRange it replaces (even with the {nx,2,2} row tiles this helper used to pass) cost
+// 2.4x a flat x loop in the MDRange tile machinery. The rows are statically partitioned over the
+// threads, identically for every kernel of the same box, so a thread keeps touching the same rows.
+// Elementwise kernels are order-independent, so every launch form is byte-identical.
+//
+// ccFor3 marks the x loop `omp simd`. CONTRACT (§4.5 item 4): an iteration writes only its own
+// cell(s) and reads no cell that another iteration of the same row writes (red-black colour passes
+// qualify: same-colour cells are independent). A body that breaks it -- a ghost copy whose source
+// and destination rows overlap -- uses ccForRows3, the same launch without the simd mark. With
+// -ffp-contract=off (the host flags, A1) vectorizing a non-reduction loop is bit-identical to the
+// scalar code.
+#if defined(_OPENMP)
+#define PECLET_FLOW_OMP_SIMD _Pragma("omp simd")
+#else
+#define PECLET_FLOW_OMP_SIMD
+#endif
+namespace ccdetail {
+template <bool Simd, class F>
+inline void ccRows3(const char* name, C3 lo, C3 hi, F f) {
   CCExec space;
   using MD = MDRange3<CCExec>;
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
-    if (hostRunSerial((long)(hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z))) {
-      for (int lz = lo.z; lz < hi.z; ++lz)  // too small to be worth a fork/join (bit-identical)
-        for (int ly = lo.y; ly < hi.y; ++ly)
-          for (int lx = lo.x; lx < hi.x; ++lx)
-            f(lx, ly, lz);
+    const int ny = hi.y - lo.y, nz = hi.z - lo.z;
+    if (ny <= 0 || nz <= 0 || hi.x <= lo.x)
+      return;
+    const long rows = (long)ny * nz;
+    auto row = [=](long r) {
+      const int y = lo.y + (int)(r % ny), z = lo.z + (int)(r / ny);
+      if constexpr (Simd) {
+        PECLET_FLOW_OMP_SIMD
+        for (int x = lo.x; x < hi.x; ++x)
+          f(x, y, z);
+      } else {
+        for (int x = lo.x; x < hi.x; ++x)
+          f(x, y, z);
+      }
+    };
+    if (hostRunSerial(rows * (hi.x - lo.x))) {
+      for (long r = 0; r < rows; ++r)  // too small to be worth a fork/join (bit-identical)
+        row(r);
       return;
     }
-    Kokkos::parallel_for(name,
-                         MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x - lo.x, 2, 2}), f);
+    Kokkos::parallel_for(name, Kokkos::RangePolicy<CCExec>(space, 0, rows), row);
   } else {
     Kokkos::parallel_for(name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}), f);
   }
+}
+}  // namespace ccdetail
+
+template <class F>
+inline void ccFor3(const char* name, C3 lo, C3 hi, F f) {
+  ccdetail::ccRows3<true>(name, lo, hi, f);
+}
+// ccFor3 without the `omp simd` mark on the host x loop (see the contract above).
+template <class F>
+inline void ccForRows3(const char* name, C3 lo, C3 hi, F f) {
+  ccdetail::ccRows3<false>(name, lo, hi, f);
 }
 
 // Reduction sibling of ccFor3 (same host tiling rationale). NOTE: the host tiling changes the
