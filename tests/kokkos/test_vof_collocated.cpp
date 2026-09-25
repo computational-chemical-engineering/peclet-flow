@@ -17,9 +17,11 @@
 //     (Basilisk centered.h) -- was balanced per step but non-incremental and unstable above
 //     mu dt/(rho h^2) = 1/12; do not reintroduce it.
 //
-// Balance at rest. The pressure absorbs a gradient force only through the step: a static balance
-// (hydrostatic column, constant-kappa drop) is an exact FIXED POINT, and the transient from the
-// initial P decays. The balanced-force projection (doc §4.6) makes it exact from step 1.
+// Balance at rest. With the balanced-force projection (doc §4.6; the DEFAULT on this path) a static
+// balance -- hydrostatic column, constant-kappa drop -- is exact from the first step. With it
+// explicitly OFF the balance is still an exact FIXED POINT, but the pressure absorbs a gradient
+// force only through the step, and the transient from the initial P decays. Both are gated: the
+// T1/T1b/T2 blocks below run explicitly OFF; "ON" re-runs them at the default.
 //
 // Gates, in the order they run:
 //
@@ -131,7 +133,10 @@ struct HydroResult {
 };
 
 template <class S>
-HydroResult hydrostatic(double ratio, double mu, int steps, bool periodic, bool throughColour) {
+// `bfp`: -1 = the solver's default (balanced-force projection ON on the collocated V8 path, OFF on
+// the staggered grid), 0 = explicitly OFF, 1 = explicitly ON.
+HydroResult hydrostatic(double ratio, double mu, int steps, bool periodic, bool throughColour,
+                        int bfp = -1, double chebRtol = -1.0) {
   const int N = 8, NZ = 24;
   const double g = 0.1;
   S s(N, N, NZ);
@@ -180,6 +185,10 @@ HydroResult hydrostatic(double ratio, double mu, int steps, bool periodic, bool 
   s.setPropertyModel("force_z", ClosureKind::LinearMix, "rho", "", std::vector<double>{0.0, -g});
   if (periodic)
     s.setBodyForce(0.0, 0.0, rbar * g);
+  if (bfp >= 0)
+    s.setBalancedForceProjection(bfp == 1);
+  if (chebRtol > 0.0)  // the driver last (set_density_mode re-selects Chebyshev)
+    s.setPressureChebyshev(true, 4000, chebRtol);
   for (int k = 0; k < steps; ++k)
     s.step();
   HydroResult r;
@@ -213,8 +222,8 @@ void gateHydrostatic() {
                          {"walled,   through C (frozen)  ", false, true}};
   for (const Case& c : cases) {
     const auto st = hydrostatic<Stag>(1000.0, 0.0, 100, c.periodic, c.colour);
-    const auto co = hydrostatic<Colo>(1000.0, 0.0, 100, c.periodic, c.colour);
-    const auto co4 = hydrostatic<Colo>(1000.0, 0.0, 400, c.periodic, c.colour);
+    const auto co = hydrostatic<Colo>(1000.0, 0.0, 100, c.periodic, c.colour, 0);
+    const auto co4 = hydrostatic<Colo>(1000.0, 0.0, 400, c.periodic, c.colour, 0);
     std::printf("  %s  staggered  cell %.3e  face %.3e  dP/dz %.3e  cb %.3e  it %ld\n", c.name,
                 st.cellU, st.faceU, st.pErr, st.cb, st.iters);
     std::printf(
@@ -239,7 +248,7 @@ void gateHydrostatic() {
       "  gradient at variable rho: WO-P's mu*dt^2 residue).\n");
   for (double mu : {0.0, 1e-3, 1e-2, 1e-1}) {
     const auto st = hydrostatic<Stag>(1000.0, mu, 100, false, false);
-    const auto co = hydrostatic<Colo>(1000.0, mu, 100, false, false);
+    const auto co = hydrostatic<Colo>(1000.0, mu, 100, false, false, 0);
     std::printf(
         "    mu = %-6g  staggered face %.3e  dP/dz %.3e   |   COLLOCATED face %.3e  "
         "dP/dz %.3e\n",
@@ -274,8 +283,8 @@ void gateInvisibleSubspace() {
         "  cb %.3e\n",
         mu, maxVel(s), maxFaceVel(s), checkerboardZ(s.getVelocity(2), N, N, NZ));
   }
-  const auto a = hydrostatic<Colo>(1000.0, 0.0, 100, false, false);
-  const auto b = hydrostatic<Colo>(1000.0, 0.0, 400, false, false);
+  const auto a = hydrostatic<Colo>(1000.0, 0.0, 100, false, false, 0);
+  const auto b = hydrostatic<Colo>(1000.0, 0.0, 400, false, false, 0);
   std::printf(
       "  V8 walled ratio 1000 mu = 0:  100 steps cell %.3e (cb %.3e), 400 steps cell %.3e "
       "(cb %.3e)  -> decayed %.2fx\n",
@@ -312,7 +321,7 @@ std::vector<double> sphereC(int n, double R, double cx, double cy, double cz, in
 
 template <class S>
 std::unique_ptr<S> makeDroplet(int n, double R, double sigma, double mu, double rhoG, double rhoL,
-                               double kappa, double dtFac) {
+                               double kappa, double dtFac, int bfp = -1) {
   auto s = std::make_unique<S>(n, n, n);
   s->setRho(rhoL);
   s->setMu(mu);
@@ -327,6 +336,8 @@ std::unique_ptr<S> makeDroplet(int n, double R, double sigma, double mu, double 
   if (kappa >= 0.0)
     s->setVofKappaConstant(kappa);
   s->setDt(dtFac * s->capillaryDt());
+  if (bfp >= 0)
+    s->setBalancedForceProjection(bfp == 1);
   return s;
 }
 
@@ -339,10 +350,10 @@ struct DropResult {
 
 template <class S>
 DropResult runDroplet(int n, double R, double sigma, double mu, double ratio, double kappa,
-                      double dtFac, int steps) {
+                      double dtFac, int steps, int bfp = -1) {
   DropResult r;
   try {
-    auto s = makeDroplet<S>(n, R, sigma, mu, 1.0, ratio, kappa, dtFac);
+    auto s = makeDroplet<S>(n, R, sigma, mu, 1.0, ratio, kappa, dtFac, bfp);
     for (int k = 0; k < steps; ++k) {
       s->step();
       if (k + 1 == 30)
@@ -381,7 +392,7 @@ void gateStaticDroplet() {
   for (int q = 0; q < 4; ++q) {
     const double ratio = ratios[q];
     const auto st = runDroplet<Stag>(32, 8.0, 1.0, 0.1, ratio, 0.25, 0.5, 30);
-    const auto co = runDroplet<Colo>(32, 8.0, 1.0, 0.1, ratio, 0.25, 0.5, 90);
+    const auto co = runDroplet<Colo>(32, 8.0, 1.0, 0.1, ratio, 0.25, 0.5, 90, 0);
     if (st.threw)
       std::printf("  ratio %6g  staggered  THREW: %.90s\n", ratio, st.what.c_str());
     else
@@ -411,7 +422,7 @@ void gateStaticDroplet() {
   for (int q = 0; q < 3; ++q) {
     const double mu = mus[q];
     const auto st = runDroplet<Stag>(32, 8.0, 1.0, mu, 1000.0, 0.25, 0.5, 30);
-    const auto co = runDroplet<Colo>(32, 8.0, 1.0, mu, 1000.0, 0.25, 0.5, 90);
+    const auto co = runDroplet<Colo>(32, 8.0, 1.0, mu, 1000.0, 0.25, 0.5, 90, 0);
     std::printf(
         "    ratio 1000, mu = %-5g  staggered face %.4e%s   |   COLLOCATED face %.4e -> "
         "%.4e%s\n",
@@ -419,6 +430,61 @@ void gateStaticDroplet() {
     CHECK(!co.threw);
     CHECK(co.faceU < co.face30);
     CHECK(co.face30 <= frozenMu[q]);
+  }
+}
+
+// ---------------------------------------------------------------- T1/T1b/T2 with the option ON
+//
+// The balanced-force projection (doc/collocated_varrho_forces.md §4.6) is the DEFAULT on this path
+// (U2): once per step it moves the gradient part of the forces into P with the projection's own
+// operator, so a static balance is exact from the FIRST step. These are the settled V8 exactness
+// statements (constant-kappa CSF annihilated; hydrostatic dP/dz exact) at the solver default.
+void gateBalancedOn() {
+  std::printf("\n=== T1/T1b/T2 ON (the V8 default): static balances exact from step 1\n");
+  struct Case {
+    const char* name;
+    bool periodic, colour;
+  };
+  const Case cases[3] = {{"periodic, hand-set rho, frozen", true, false},
+                         {"walled,   hand-set rho        ", false, false},
+                         {"walled,   through C (frozen)  ", false, true}};
+  // The PERIODIC box at the default Chebyshev rtol 1e-9 misses by more than 10x (after 1 step: face
+  // 5.6e-10, cell 2.0e-9, dP/dz 4.3e-11; after 100: face 9.9e-12) -- and passes at 1e-14 (face
+  // 3.0e-14, cell 8.9e-14, dP/dz 1.2e-14), so it is the solve tolerance, not the scheme (doc §9 G4:
+  // re-run at Chebyshev 1e-14; only a miss there is conceptual). It is gated at 1e-14; the walled
+  // cases pass at the default.
+  for (const Case& c : cases)
+    for (int steps : {1, 100}) {
+      const auto co = hydrostatic<Colo>(1000.0, 0.0, steps, c.periodic, c.colour, -1,
+                                        c.periodic ? 1e-14 : -1.0);
+      std::printf("  T1 %s %3d step(s)  cell %.3e  face %.3e  dP/dz %.3e  it %ld\n", c.name, steps,
+                  co.cellU, co.faceU, co.pErr, co.iters);
+      CHECK(co.faceU < 1e-12);
+      CHECK(co.cellU < 1e-10);
+      CHECK(co.pErr < 1e-10);
+    }
+  {  // T1b: the walled column's cell field is exact too (the transient never exists)
+    const auto a = hydrostatic<Colo>(1000.0, 0.0, 100, false, false);
+    std::printf("  T1b walled ratio 1000, 100 steps: cell %.3e (cb %.3e)\n", a.cellU, a.cb);
+    CHECK(a.cellU <= 1e-10);
+  }
+  const double ratios[4] = {1.0, 10.0, 100.0, 1000.0};
+  for (double ratio : ratios) {
+    const auto co = runDroplet<Colo>(32, 8.0, 1.0, 0.1, ratio, 0.25, 0.5, 30);
+    std::printf("  T2 ratio %6g  cell %.4e  face %.4e  it %ld%s\n", ratio, co.cellU, co.faceU,
+                co.iters, co.threw ? "  THREW" : "");
+    const double tol = (ratio == 1.0) ? 1e-14 : 1e-13;
+    CHECK(!co.threw && co.faceU < tol && co.cellU < tol);
+  }
+  for (double mu : {0.0, 0.01, 0.1}) {
+    const auto st = runDroplet<Stag>(32, 8.0, 1.0, mu, 1000.0, 0.25, 0.5, 30);
+    const auto co = runDroplet<Colo>(32, 8.0, 1.0, mu, 1000.0, 0.25, 0.5, 30);
+    std::printf(
+        "  T2 ratio 1000 mu %-5g  staggered (OFF) face %.4e   |   COLLOCATED face %.4e  "
+        "cell %.4e\n",
+        mu, st.faceU, co.faceU, co.cellU);
+    CHECK(!co.threw && co.faceU < 1e-13);
+    CHECK(co.faceU < st.faceU);
   }
 }
 
@@ -649,6 +715,7 @@ int main(int argc, char** argv) {
     gateHydrostatic();
     gateInvisibleSubspace();
     gateStaticDroplet();
+    gateBalancedOn();
     gateUniformReduction();
     gateBridge();
     gateScope();

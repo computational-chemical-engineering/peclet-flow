@@ -1911,7 +1911,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "on the flow state, so stability and the converged steady state are identical on and "
            "off; off leaves a decaying transient balance residue. get_p() stays the total "
            "physical pressure. Cost: one extra pressure solve per step (warm-started). Default: "
-           "off. Refused (named error) with porous continuity, the ghost projection, "
+           "ON on SolverColocated with variable density or surface tension, OFF otherwise; an "
+           "explicit call always wins. Refused (named error) with porous continuity, the ghost projection, "
            "set_fluid_only_constraint(2), the block CSF, inflow/outflow faces, the "
            "non-incremental pressure, and on the constant-density SolverColocated path (nothing "
            "to balance there).")

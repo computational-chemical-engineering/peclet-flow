@@ -590,7 +590,8 @@ class Solver {
   // the part of the forces that drives flow, so gradient forces (hydrostatics, constant-kappa CSF)
   // are balanced exactly from step 1 at every mu, dt, density ratio and openness. The solve is
   // state-independent: stability and the converged steady state are identical ON and OFF. Cost:
-  // one extra pressure solve per step. OFF (the default here) is byte-identical to a solver
+  // one extra pressure solve per step. DEFAULT (U2): ON on the collocated variable-density / CSF
+  // path (V8), OFF elsewhere; an explicit setting always wins. OFF is byte-identical to a solver
   // without the option. Refused, with a named error at this setter when the configuration is
   // already known and otherwise at the next step: porous continuity, the ghost projection,
   // set_fluid_only_constraint(2), the block CSF, any inflow/outflow face, the non-incremental
@@ -1725,7 +1726,7 @@ class Solver {
 
 
   // --- the balanced-force projection (doc/collocated_varrho_forces.md §4.6) --------------------
-  // Is it on for this step? (the explicit setting; OFF by default)
+  // Is it on for this step? (the explicit setting, else ON exactly on the V8 path)
   bool balancedForceActive() const;
   // The §4.6.4 refusals. `atStep` adds the checks that are only final once the solver is set up
   // (the cut-cell operator, the collocated density path, an AUTO-selected ghost scheme).

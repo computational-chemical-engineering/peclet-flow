@@ -433,7 +433,11 @@ long Solver<Grid>::lastBalancedForceIterations() const {
 
 template <class Grid>
 bool Solver<Grid>::balancedForceActive() const {
-  return bfpSet_ ? bfpOn_ : false;
+  // U2 (doc/collocated_varrho_forces.md §0): an explicit setting wins; the DEFAULT is ON on the
+  // collocated variable-density / CSF path (V8), where the settled constant-kappa CSF balance
+  // needs it, and OFF everywhere else (staggered and constant-density collocated stay
+  // byte-identical).
+  return bfpSet_ ? bfpOn_ : colocatedFaceForce();
 }
 
 template <class Grid>
