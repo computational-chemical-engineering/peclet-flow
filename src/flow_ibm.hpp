@@ -847,6 +847,12 @@ class Solver {
   // alignment (dem: `migrate_to_weights(w, align=...)`), or the two own different blocks.
   int rebalanceByWeights(const std::vector<peclet::core::Real>& w);
 
+  // The pressure multigrid hierarchy as built, one row per level in the format of the pure
+  // pre-flight CutcellMG::predict (flow.predict_hierarchy): global dims, ranks holding the level,
+  // this rank's block, ratio to the next level, and whether (and how) the transition out of it
+  // telescopes. Rank 0 holds every level. The test oracle for the forecast.
+  std::vector<CutcellMG::PlanRow> pressureMgPlan() const;
+
 #endif
 
   // per-face domain BC {face 0..5 = -x,+x,-y,+y,-z,+z}: type 0=periodic,1=no-slip

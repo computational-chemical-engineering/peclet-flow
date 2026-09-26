@@ -209,6 +209,11 @@ int Solver<Grid>::rebalanceByWeights(const std::vector<peclet::core::Real>& w) {
   redistribute(c.dec);
   return 1 << c.a;
 }
+
+template <class Grid>
+std::vector<CutcellMG::PlanRow> Solver<Grid>::pressureMgPlan() const {
+  return mg_.builtPlan();
+}
 #endif
 
 template <class Grid>

@@ -3596,15 +3596,27 @@ class CutcellMG {
     C3 global, block, ratio;
     int ranks;
     bool tele;
+    bool repartition = false;  // the stage out of this level is a Repartition (tele is set too)
   };
   // `decompLevels`/`maxImbalance` are the LEVEL-0 decomposition's parameters (what
   // Solver::setDecomposition takes), not the MG level count `nLevels`: predict is a pure function,
   // so a caller pre-flighting a coarse-first job must state the depth it will run with. Before the
   // env-var retirement these came from a process-global static, which is exactly why they are
   // parameters now.
+  //
+  // `weights` (optional) are per-cell weights of the global grid, x-fastest (gnx*gny*gnz) -- what
+  // Solver::rebalanceByWeights takes -- and the forecast is then the hierarchy AFTER that call:
+  // level 0 is the partition it builds, core's aligned weighted ORB `chooseAlignedWeighted(np, G,
+  // w)` at its 1.05 budget (`decompLevels` / `maxImbalance` are ignored, as the rebalance ignores
+  // Solver::setDecomposition), and the stages are those the Solver arms for a weighted dec0
+  // (setRepartition(true): `chooseStageTarget` with maxBlockCells = the largest level-0 block, so
+  // a stage may be a Repartition). `*align`, when given, receives that partition's alignment 2^a
+  // -- rebalanceByWeights' return value. Without weights the forecast is unchanged.
   static std::vector<PlanRow> predict(int gnx, int gny, int gnz, int np, int nLevels,
                                       bool telescope, int minExtent = 4, int decompLevels = 0,
-                                      double maxImbalance = 1.05) {
+                                      double maxImbalance = 1.05,
+                                      const std::vector<peclet::core::Real>* weights = nullptr,
+                                      int* align = nullptr) {
     using Dec = peclet::core::decomp::BlockDecomposer<3>;
     std::vector<PlanRow> rows;
     auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
@@ -3614,8 +3626,23 @@ class CutcellMG {
           return false;
       return true;
     };
-    Dec cur =
-        decomposition(static_cast<std::size_t>(np), gnx, gny, gnz, decompLevels, maxImbalance);
+    Dec cur;
+    peclet::core::Index maxBlockCells = 0;  // 0: sibling merges only (an unweighted dec0)
+    if (weights) {
+      if (weights->size() != (std::size_t)gnx * (std::size_t)gny * (std::size_t)gnz)
+        throw std::invalid_argument(
+            "predict: weights must hold one value per global cell (gnx*gny*gnz, x-fastest)");
+      auto c = peclet::core::decomp::chooseAlignedWeighted(
+          static_cast<std::size_t>(np), peclet::core::IVec<3>{gnx, gny, gnz}, *weights);
+      cur = std::move(c.dec);
+      maxBlockCells = peclet::core::decomp::largestBlockCells(cur);
+      if (align)
+        *align = 1 << c.a;
+    } else {
+      cur = decomposition(static_cast<std::size_t>(np), gnx, gny, gnz, decompLevels, maxImbalance);
+      if (align)
+        *align = 1;
+    }
     C3 gs{gnx, gny, gnz};
     for (int L = 0; L < nLevels; ++L) {
       PlanRow r;
@@ -3631,11 +3658,14 @@ class CutcellMG {
         const bool blocked = !liftable(cur);
         const bool tooSmall = minExtent > 0 && peclet::core::decomp::minBlockExtent(cur) <
                                                    (peclet::core::Index)minExtent;
-        // initMpi's trigger + core's policy (maxBlockCells = 0: flow's sibling-merge search)
+        // initMpi's trigger + core's policy (maxBlockCells = 0: flow's sibling-merge search,
+        // which never returns a Repartition; > 0 for a weighted dec0, as setRepartition arms it)
         if (telescope && (blocked || tooSmall) && canAny && cur.numBlocks() > 1) {
           auto t = peclet::core::decomp::chooseStageTarget(
-              cur, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable, minExtent);
-          if (t.kind == peclet::core::decomp::StageKind::SiblingMerge) {
+              cur, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable, minExtent, maxBlockCells);
+          if (t.kind == peclet::core::decomp::StageKind::SiblingMerge ||
+              t.kind == peclet::core::decomp::StageKind::Repartition) {
+            r.repartition = t.kind == peclet::core::decomp::StageKind::Repartition;
             cur = std::move(t.dec);
             r.tele = true;
           }
@@ -3658,6 +3688,25 @@ class CutcellMG {
         break;
       gs = next;
       cur = cur.coarsened(peclet::core::IVec<3>{r.ratio.x, r.ratio.y, r.ratio.z});
+    }
+    return rows;
+  }
+  // The hierarchy initMpi BUILT, in predict()'s row format -- the oracle predict is tested
+  // against. Rank 0 holds every level (it is the root of every stage), so there this is the whole
+  // table; a rank idling below a stage gets the levels it holds.
+  std::vector<PlanRow> builtPlan() const {
+    std::vector<PlanRow> rows;
+    for (const Level& l : lv_) {
+      PlanRow r;
+      r.global = l.gdim;
+      r.block = l.inner;
+      r.ratio = l.ratio;
+      r.ranks = 1;
+      if (l.comm != MPI_COMM_NULL)
+        MPI_Comm_size(l.comm, &r.ranks);
+      r.tele = (bool)l.tele;
+      r.repartition = l.tele && l.tele->repartition();
+      rows.push_back(r);
     }
     return rows;
   }
