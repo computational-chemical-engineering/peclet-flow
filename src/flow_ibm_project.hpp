@@ -737,14 +737,15 @@ long Solver<Grid>::solveBalancedForceSystem(double bref, double r0) {
       mg_.estimateEigenvalues(CCConst(rhs1_), bfpChebA_, bfpChebB_, 15, 2, 2, 12);
       bfpChebSet_ = true;
     }
-    long it = mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_, bfpChebB_);
+    long it =
+        mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_, bfpChebB_);
     if (it >= chebMaxit_) {  // never met the stop: slow, or diverging on bounds gone stale?
       const double rfin = mg_.residualNorm(rhs1_, pb1_, r_, Ap_);
       if (!(rfin <= r0)) {  // residual growth (or non-finite): re-estimate and restart once
         mg_.estimateEigenvalues(CCConst(rhs1_), bfpChebA_, bfpChebB_, 15, 2, 2, 12);
         copyInner(pb1_, e1_, 1, CCConst(Pb_), e_, G);
-        it += mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_,
-                                 bfpChebB_);
+        it +=
+            mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_, bfpChebB_);
       }
     }
     return it;

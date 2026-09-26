@@ -861,7 +861,8 @@ void Solver<Grid>::setSolidInitPressureMg() {
 #endif
     mg_.init(nx_, ny_, nz_,
              nLevels_);  // geometric multigrid on the cut-cell openness (MG-PCG pressure)
-  bfpChebSet_ = false;  // a new hierarchy: the balanced-force pre-projection re-estimates its bounds
+  bfpChebSet_ =
+      false;  // a new hierarchy: the balanced-force pre-projection re-estimates its bounds
   // Phase 2 C2 (doc/anisotropic_metric.md §1.3/§3): the per-axis pressure weight
   // w_a = 1/h_a'^2 IS `setOpenness`'s idx2/idy2/idz2 (the coarse levels already form
   // w_a/cfac_a^2).  Exactly 1.0 on the isotropic path.
