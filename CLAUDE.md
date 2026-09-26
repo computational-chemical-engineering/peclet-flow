@@ -83,14 +83,14 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 186 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 189 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-186 registered / **184 with `-LE bench`** (counted 2026-09-27): 49 from `tests/kokkos` — of
-which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 124
-from `tests/kokkos_mpi` (41 cases at np = 1, 2, 4 plus one np = 8 rung), and 13 Python ctests on
+189 registered / **187 with `-LE bench`** (counted 2026-09-27): 49 from `tests/kokkos` — of
+which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 127
+from `tests/kokkos_mpi` (42 cases at np = 1, 2, 4 plus one np = 8 rung), and 13 Python ctests on
 the module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
 `verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`, `colocated_open_boundary`,
 `cell_force_placement`, `collocated_stability_guard`, `balanced_force_restart`, `mirror_symmetry`,
@@ -376,7 +376,12 @@ deselected on its own; name the driver you want instead.
   that alignment** — dem's `migrate_to_weights(w, align=…)`, which coupling's `CfdDem.rebalance()`
   calls with the return value; a code that uses the weights alone owns different blocks. Probe
   (96³, np = 4/8, pinned, median of 5): projection ÷ momentum after the rebalance 1.05–1.10 against
-  0.98–1.07 unweighted (Repartition alone: up to 1.10; the collapse: up to 1.87).
+  0.98–1.07 unweighted (Repartition alone: up to 1.10; the collapse: up to 1.87). **Forecast it
+  without a run:** `flow.predict_hierarchy(..., weights=w)` returns `(rows, align)` — the ladder
+  after the rebalance (its partition, Repartition stages included) and the `2^a` the call will
+  return; `scripts/check_decomposition.py --predict --weights w.npy` logs both.
+  `test_predict_weighted_mpi` holds the forecast to the built hierarchy row for row, before and
+  after the rebalance (np = 1, 2, 4). `weights=None` is the old call, byte for byte.
 - **`redistribute` must carry every piece of cross-step state, and seed it AFTER the scatter.**
   Its step 3 reallocates every buffer whose block changed size (fresh zeros) and only step 4
   scatters the migrated registry fields into them, so state DERIVED from a registry field must be
@@ -569,10 +574,9 @@ The rung-by-rung record — every work order, gate number and refuted hypothesis
 ## Open items
 
 Intermediate-level multigrid repartitioning at scale (the Repartition kind exists and fires for
-a weighted `dec0`; unweighted ladders are unchanged); logging the aligned rebalance's `a` in
-`scripts/check_decomposition.py --predict` (needs the weights to reach `predict_hierarchy` — a new
-public keyword, not decided); coefficient-aware coarsening for high contrast; double-diagonal
-operator storage; `vof-w4`; **the collocated advecting face field `uf_` is not carried through
+a weighted `dec0`; unweighted ladders are unchanged); coefficient-aware coarsening for high
+contrast; double-diagonal operator storage; `vof-w4`; **the collocated advecting face field `uf_`
+is not carried through
 `redistribute`** (pre-existing, not fixed by the V8 package): a collocated run WITH advection that
 is rebalanced at np = 1 already drifts 5.0e-8 in u from the never-rebalanced run, option off
 (measured 2026-09-25 while gating `balanced_force_mpi`, whose rebalance case is therefore Stokes).

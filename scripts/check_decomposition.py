@@ -22,6 +22,9 @@ there are cores because nothing here is timed.
     # what the hierarchy looks like level by level:
     python check_decomposition.py --grid 1508,240,503 --levels 5 --np 4 --verbose
 
+    # the ladder after diagnostics.rebalance_by_weights(w), and the alignment it picks:
+    python check_decomposition.py --grid 96,96,96 --levels 8 --np 4,8 --predict --weights w.npy
+
 `--orb-only` skips constructing a Solver, so it reports the partition (balance, splits) for grids far
 too large to allocate on a host — but it cannot report the achieved level count, which needs the real
 MG init. Without it, the grid must fit in host memory (a few hundred M cells at most).
@@ -111,10 +114,20 @@ def predict(args):
     gx, gy, gz = args.grid
     for np_ in args.np:
         for tele in (False, True):
-            # --decomp-levels must reach predict_hierarchy: it is a pure function with no process
-            # state to read since flow ad917b1, so omitting it predicts the ALIGNED hierarchy.
-            rows = flow.predict_hierarchy(gx, gy, gz, np_, args.levels, tele,
-                                          decomposition_levels=args.decomp_levels)
+            if args.weights is not None:
+                # The hierarchy after diagnostics.rebalance_by_weights(w): its aligned weighted
+                # ORB replaces the set_decomposition partition, and the call returns the alignment.
+                rows, align = flow.predict_hierarchy(gx, gy, gz, np_, args.levels, tele,
+                                                     weights=args.weights)
+                if not tele:  # the partition, hence the alignment, is the same either way
+                    print(f"\n{gx}x{gy}x{gz} np={np_}: rebalance_by_weights -> aligned weighted "
+                          f"ORB, align {align} (a = {align.bit_length() - 1})")
+            else:
+                # --decomp-levels must reach predict_hierarchy: it is a pure function with no
+                # process state to read since flow ad917b1, so omitting it predicts the ALIGNED
+                # hierarchy.
+                rows = flow.predict_hierarchy(gx, gy, gz, np_, args.levels, tele,
+                                              decomposition_levels=args.decomp_levels)
             cg = rows[-1][0]
             print(f"\n{gx}x{gy}x{gz} np={np_} levels={args.levels} telescope={'ON' if tele else 'off'}"
                   f" -> {len(rows)} levels, coarsest {cg[0]}x{cg[1]}x{cg[2]}, "
@@ -138,16 +151,37 @@ def main():
     ap.add_argument("--predict", action="store_true",
                     help="use flow.predict_hierarchy (pure function, no mpirun, any np): print the "
                          "level ladder with and without coarse-level telescoping")
+    ap.add_argument("--weights", default=None,
+                    help="with --predict: a .npy of per-cell weights (what "
+                         "diagnostics.rebalance_by_weights takes: flat x-fastest, or an (nx,ny,nz) "
+                         "array) -- predict the hierarchy AFTER that rebalance and log the "
+                         "alignment its aligned weighted ORB picks")
     ap.add_argument("--decomp-levels", type=int, default=0,
                     help="Solver.set_decomposition(levels) / flow.mpi_block(levels=): 0 = the "
                          "aligned ORB, >= 2 = coarse-first with that depth")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
+    if args.weights is not None and not args.predict:
+        ap.error("--weights needs --predict")
     if getattr(args, "predict", False):
         if isinstance(args.grid, str):
             args.grid = [int(v) for v in args.grid.split(",")]
         if isinstance(args.np, str):
             args.np = [int(v) for v in args.np.split(",")]
+        if args.weights is not None:
+            import numpy as np
+
+            w = np.load(args.weights)
+            if w.ndim == 3:
+                if tuple(w.shape) != tuple(args.grid):
+                    sys.exit(f"--weights: shape {w.shape} is not the grid {tuple(args.grid)}")
+                w = w.ravel(order="F")  # x-fastest, as rebalance_by_weights takes it
+            args.weights = np.asarray(w, dtype=np.float64).ravel().tolist()
+            # The weighted ORB replaces the set_decomposition partition, so --mode does not apply.
+            print("=== weighted: diagnostics.rebalance_by_weights(w) (--mode / --decomp-levels "
+                  "ignored) ===")
+            predict(args)
+            return
         # In --predict, --mode selects the depth (it can list several). --decomp-levels is the
         # run-mode flag; honour it when the user gave it and left --mode at its default, rather
         # than silently overwriting it below.
