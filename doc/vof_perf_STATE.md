@@ -17,22 +17,18 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
   bottom solvers (host GraphAMG, GPU geometric-Krylov); tolerance changes in the case script only;
   no float V-cycle; setter names per the note.
 
-**Running.**
-- opus-implementer WO-0..WO-5 (host flags, cell bodies, face-form operator, fused wrap, no copies,
-  device Krylov scalars) — worktree ../flow-vof-mg, branch vof-mg.
-- opus-implementer WO-8/WO-9 (batched block container + statistics) — worktree
-  ../flow-vof-container, branch vof-container.
-- architect §12 E2(a) addendum — this worktree, branch vof-perf (brief doc/vof_constcoef_pressure_brief.md).
-- DONE: the LOW-wall asymmetry was variable-mu placement (face mean shifted h/2 towards +c): flow
-  main fe377a5 (b273031 fix, 392bf9a ctest mirror_symmetry, fe377a5 velocity MG refuses variable
-  mu), umbrella 5c328f2 (register). vof-mg / vof-container branches predate it: rebase at merge.
-- production column on fe377a5 DONE: drift 0.949+-0.024 vs TBF 0.778 (structure now matches: centre
-  void 0.053 vs 0.052, walls ~0.01); marker volumes 2.6e-12; data/peclet_closed.npz committed.
-  Remaining 22 %: engineer runs isolated bubble (both codes, smoothing on/off) + peclet D/h=24.
-- WO-3 DECISION: band sign (bitwise on CUDA; the note's +o·gf differed 8.8e-15 via nvcc FMA).
-- §12 E2(a) design landed (8ac2ea5). WO-E2.0 PASSED: ratio 1 -> 7.3 MG-PCG iterations (max 8) vs
-  13.1 at ratio 50. E2(a) CPU model 57-95 ms/step (TBF 45): parity needs E2(b) FFT = USER decision
-  (proposed: after E2(a) accuracy gates).
+**Running / status (2026-09-27).** Agents hit the weekly usage limit on 09-26; work resumed by hand.
+- vof-mg (WO-0..WO-5, band-sign WO-3): all committed, per-commit bitwise gates passed on CUDA/host/float
+  (pre-rebase); rebased onto flow main ed1eea1 (balanced-force projection campaign landed there);
+  rebase2 gate running: ~/Codes/bubble_column_perf/rebase2_gate.sh (vof-mg vs main ed1eea1 built in
+  ../flow-main-base, state_hash + 50-step dump, CUDA + host, then both batteries).
+- vof-container: WO-8a-d committed, each bitwise-gated; rebased onto ed1eea1 cleanly; needs its own
+  post-rebase gate. WO-9 (diagnostics only) DEFERRED; G-PERF timing not done.
+- Physics: production column on fe377a5 drift 0.949 vs TBF 0.778. Isolated bubble (scratchpad/single):
+  peclet 1.300 vs TBF-nosmooth 1.309 (4x4x4), 1.077 vs 1.122 (8x4x4); TBF default 8-11 % slower ->
+  TBF smoothing explains ~half. TBF NO-SMOOTHING column to t=150 running:
+  peclet-examples .../tbfsolver/run150_nosmooth (~2.5 h), reduce with scripts/tbf_read.py.
+- E2(a) design §12 (8ac2ea5) done; WO-E2.0 passed (7.3 vs 13.1 iterations).
 
 **Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
