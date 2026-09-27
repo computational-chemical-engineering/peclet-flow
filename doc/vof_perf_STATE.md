@@ -17,18 +17,16 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
   bottom solvers (host GraphAMG, GPU geometric-Krylov); tolerance changes in the case script only;
   no float V-cycle; setter names per the note.
 
-**Running / status (2026-09-27).** Agents hit the weekly usage limit on 09-26; work resumed by hand.
-- vof-mg (WO-0..WO-5, band-sign WO-3): all committed, per-commit bitwise gates passed on CUDA/host/float
-  (pre-rebase); rebased onto flow main ed1eea1 (balanced-force projection campaign landed there);
-  rebase2 gate running: ~/Codes/bubble_column_perf/rebase2_gate.sh (vof-mg vs main ed1eea1 built in
-  ../flow-main-base, state_hash + 50-step dump, CUDA + host, then both batteries).
-- vof-container: WO-8a-d committed, each bitwise-gated; rebased onto ed1eea1 cleanly; needs its own
-  post-rebase gate. WO-9 (diagnostics only) DEFERRED; G-PERF timing not done.
-- Physics: production column on fe377a5 drift 0.949 vs TBF 0.778. Isolated bubble (scratchpad/single):
-  peclet 1.300 vs TBF-nosmooth 1.309 (4x4x4), 1.077 vs 1.122 (8x4x4); TBF default 8-11 % slower ->
-  TBF smoothing explains ~half. TBF NO-SMOOTHING column to t=150 running:
-  peclet-examples .../tbfsolver/run150_nosmooth (~2.5 h), reduce with scripts/tbf_read.py.
-- E2(a) design §12 (8ac2ea5) done; WO-E2.0 passed (7.3 vs 13.1 iterations).
+**Status (2026-09-27 06:00).** Main line WO-0..5 + WO-8 ON FLOW MAIN 035121a (all bitwise vs main,
+CUDA + host 184/184), umbrella b27fd39 (register: face-form operator with band sign, host launch
+rule, fused wrap + device Krylov scalars, batched container). Deferred: WO-9. Not yet: WO-6 (B1
+device bottom), WO-7 (C3, core change + tag), WO-10..13, E2(a) (§12, premise passed).
+Physics (t 50-150): peclet 0.949 / TBF default 0.778 / TBF no-smoothing 0.811 (smoothing is only
++4 % in the swarm; isolated bubble peclet vs TBF-nosmooth agree 1-4 %). Circulation adds only 0.03;
+local slip peclet 0.922 vs TBF-ns 0.804 -> a SWARM (interaction) difference. Running: D/h=24 to
+t=60 for both (peclet .../peclet/run_d24 on frozen scratchpad/flow_prod5 = 035121a; TBF no-smoothing
+.../tbfsolver/run_d24_nosmooth_t60), to test whether the swarm gap is resolution (interaction films
+and wakes). Worktrees flow-vof-mg, flow-vof-container, flow-main-base can be removed (landed).
 
 **Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
