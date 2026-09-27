@@ -83,12 +83,12 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 185 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 186 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-185 registered / **183 with `-LE bench`** (counted 2026-09-25): 48 from `tests/kokkos` — of
+186 registered / **184 with `-LE bench`** (counted 2026-09-27): 49 from `tests/kokkos` — of
 which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 124
 from `tests/kokkos_mpi` (41 cases at np = 1, 2, 4 plus one np = 8 rung), and 13 Python ctests on
 the module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
