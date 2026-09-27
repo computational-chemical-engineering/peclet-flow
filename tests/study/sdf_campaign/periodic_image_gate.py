@@ -10,7 +10,7 @@ Usage: PYTHONPATH=<flow build> python periodic_image_gate.py
 """
 import numpy as np
 from peclet import flow as sdflow
-from peclet.core import geom
+from peclet import geom
 
 L, NY, U = 64, 32, 0.02
 KI_I, KI_R = 2, 17

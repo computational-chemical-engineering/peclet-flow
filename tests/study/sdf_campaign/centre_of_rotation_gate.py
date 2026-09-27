@@ -16,7 +16,7 @@ Usage: PYTHONPATH=<flow build>:<core geom build> python centre_of_rotation_gate.
 """
 import numpy as np
 from peclet import flow as sdflow
-from peclet.core import geom
+from peclet import geom
 
 N, R = 64, 6.4
 MU, DT = 1.0, 2.0          # nu dt/h^2 = 2: the 100-sweep RB-GS converges to round-off (at dt=100 it leaves a 1e-4 net force)

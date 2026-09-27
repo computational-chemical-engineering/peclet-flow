@@ -13,7 +13,7 @@ import os
 import sys
 import numpy as np
 from peclet import flow as sdflow
-from peclet.core import geom
+from peclet import geom
 
 DH = float(sys.argv[1]) if len(sys.argv) > 1 else 8.0
 RE = float(sys.argv[2]) if len(sys.argv) > 2 else 1.5

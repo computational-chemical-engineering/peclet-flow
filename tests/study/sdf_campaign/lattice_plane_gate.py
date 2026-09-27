@@ -8,7 +8,7 @@ Usage: PYTHONPATH=<flow build> python lattice_plane_gate.py
 """
 import numpy as np
 from peclet import flow as sdflow
-from peclet.core import geom
+from peclet import geom
 
 N = 32
 U = 0.05

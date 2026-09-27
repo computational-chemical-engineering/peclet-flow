@@ -18,7 +18,7 @@ import numpy as np
 
 assert os.environ.get("OMP_NUM_THREADS") == "1", "run with OMP_NUM_THREADS=1"
 
-from peclet.core import geom
+from peclet import geom
 from peclet.dem import scene_particle
 from peclet import dem as pdem
 

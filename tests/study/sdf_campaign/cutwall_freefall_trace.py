@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from peclet import flow as sdflow
 from peclet import dem as pdem
-from peclet.core import geom
+from peclet import geom
 
 plt.rcParams.update({"figure.dpi": 130, "font.size": 9, "axes.axisbelow": True,
                      "figure.facecolor": "white", "savefig.bbox": "tight"})

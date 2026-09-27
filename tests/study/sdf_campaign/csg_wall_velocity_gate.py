@@ -8,7 +8,7 @@ Usage: PYTHONPATH=<flow build> python csg_wall_velocity_gate.py
 """
 import numpy as np
 from peclet import flow as sdflow
-from peclet.core import geom
+from peclet import geom
 
 L, NY = 64, 32
 U, NU, DT = 0.02, 0.1067, 3.2

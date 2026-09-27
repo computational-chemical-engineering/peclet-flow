@@ -10,7 +10,7 @@ Two claims, both at OMP_NUM_THREADS=1 (dem's multithreaded step is nondeterminis
      baked-grid shape. Same physics, different geometry representation: positions must track to
      the grid's resolution error, not diverge.
 
-The dumbbell is authored in peclet.core.geom, mass properties measured by implicit quadrature,
+The dumbbell is authored in peclet.geom, mass properties measured by implicit quadrature,
 put in its principal frame with principal_frame() (a no-op rotation here, but the COM recentre is
 real when the lobes differ), and handed to dem BOTH ways from the SAME builder.
 """
@@ -19,7 +19,7 @@ import numpy as np
 
 assert os.environ.get("OMP_NUM_THREADS") == "1", "run with OMP_NUM_THREADS=1 (dem determinism)"
 
-from peclet.core import geom
+from peclet import geom
 from peclet import dem as pdem
 
 # --- author the particle: an ASYMMETRIC dumbbell (different lobe radii => real COM shift) -------
