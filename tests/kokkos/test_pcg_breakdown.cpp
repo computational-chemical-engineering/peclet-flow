@@ -16,6 +16,9 @@
 /// x is compared bitwise over the whole array. The problem: a single-rank periodic 16^3 box with a
 /// smoothly varying face coefficient in [0.5, 1.5] (ratio 3) and a mean-free rhs; rtol 1e-30 so the
 /// solve never converges inside the window.
+///
+/// A second case needs no poisoning: a round-off constant rhs on the agglomerated bottom, whose
+/// own CG broke down on 0/0 (see roundoffBottom).
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -109,6 +112,55 @@ int check(const char* what, const Result& got, int wantIt, bool wantFailed, cons
   return ok ? 0 : 1;
 }
 
+// The agglomerated bottom's own CG (CutcellMG::pcgAmg) on a round-off rhs. A constant rhs is pure
+// null space; the per-component projection subtracts a ROUNDED mean, and where the 8-fold sum
+// rounds it leaves an exactly constant residual one ulp wide (coupling's uniform porous bed:
+// 8 x -0x1.ffffffffffffcp-103 -> 8 x 0x1p-154). The AMG maps that to z = 0 and the CG's first
+// step was rz / pAp = 0/0: a NaN bottom correction, which the outer PCG reported as a non-finite
+// preconditioner and a CAPPED solve. The V-cycle is applied directly on a one-level 2^3 hierarchy
+// whose only level IS the agglomerated bottom, so the rhs reaches pcgAmg bit for bit; the
+// constant's low bits are swept so that some 8-fold sums round. Every correction must be finite.
+int roundoffBottom() {
+  const int n = 2, G = CutcellMG::G;
+  const C3 e{n + 2 * G, n + 2 * G, n + 2 * G};
+  const std::size_t cells = (std::size_t)e.x * e.y * e.z;
+  CCField one("one", cells);
+  Kokkos::deep_copy(one, 1.0);
+  CutcellMG mg;
+  mg.init(n, n, n, 1);
+  mg.setAgglomerationMode(1);
+  mg.setOpenness(CCConst(one), CCConst(one), CCConst(one), 1.0, 1.0, 1.0);
+  CCField r("r", cells), z("z", cells);
+  int bad = 0;
+  for (int k = 1; k <= 64; ++k) {
+    const double c = -std::ldexp(1.0 - (double)k * 0x1p-52, -102);  // k = 2: the bed's value
+    auto hr = Kokkos::create_mirror_view(r);
+    for (std::size_t i = 0; i < cells; ++i)
+      hr(i) = 0.0;
+    for (int zz = G; zz < e.z - G; ++zz)
+      for (int yy = G; yy < e.y - G; ++yy)
+        for (int xx = G; xx < e.x - G; ++xx)
+          hr((std::size_t)xx + (std::size_t)yy * e.x + (std::size_t)zz * e.x * e.y) = c;
+    Kokkos::deep_copy(r, hr);
+    mg.precondVcycle(z, r);
+    auto hz = Kokkos::create_mirror_view(z);
+    Kokkos::deep_copy(hz, z);
+    bool finite = true;
+    for (std::size_t i = 0; i < cells; ++i)
+      finite = finite && std::isfinite(hz(i));
+    if (!finite) {
+      if (bad < 4)
+        std::printf("  constant bottom rhs %a: non-finite correction\n", c);
+      ++bad;
+    }
+  }
+  std::printf(
+      "  round-off constant rhs on the agglomerated bottom: %d/64 corrections non-finite"
+      "  -> %s\n",
+      bad, bad ? "FAIL" : "PASS");
+  return bad ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -131,6 +183,7 @@ int main(int argc, char** argv) {
     fails +=
         check("NaN r^T z at the last iteration (maxit 4)", solve(P, K + 1, 2, K), K, true, refK1);
     fails += check("NaN pAp at iteration 0", solve(P, M, 1, 0), 0, true, solve(P, 0, 0, -1));
+    fails += roundoffBottom();
     std::printf("%s\n", fails ? "pcg_breakdown: FAIL" : "pcg_breakdown: PASS");
   }
   Kokkos::finalize();

@@ -2764,7 +2764,17 @@ class CutcellMG {
     int it = 0;
     for (; it < 100 && r0 > 0; ++it) {
       amgA_.apply(p, Ap);
-      const double a = rz / dot(p, Ap);
+      // CG breakdown guard (core's GraphAMG pcg has the same one): p^T A p = 0 means the search
+      // direction lies in the null space, i.e. the projected rhs has no range component left and
+      // x is already the answer. It happens when the bottom rhs is round-off on a constant: the
+      // projection's rounded mean differs from the value by an ulp and leaves an exactly CONSTANT
+      // residual (8 x -0x1.ffffffffffffcp-103 -> 8 x 0x1p-154 on the uniform periodic porous bed),
+      // the AMG maps it to z = 0, and rz / pAp = 0/0 poisoned x with NaN, which the outer PCG then
+      // reported as a non-finite preconditioner and a CAPPED solve.
+      const double pAp = dot(p, Ap);
+      if (!(pAp > 0.0))
+        break;
+      const double a = rz / pAp;
       for (std::size_t i = 0; i < n; ++i) {
         x[i] += a * p[i];
         r[i] -= a * Ap[i];
