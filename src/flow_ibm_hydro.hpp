@@ -143,7 +143,10 @@ std::vector<double> Solver<Grid>::hydroForceTorque() {
   Kokkos::deep_copy(HostV(out.data() + m, m), Td);
   Kokkos::deep_copy(HostV(out.data() + 2 * m, m), Pd);
   Kokkos::deep_copy(HostV(out.data() + 3 * m, m), Vd);
-  scaleForceTorque(out, m);
+  // ONCE: the conversion covers all four blocks (force, torque, pressure part, viscous part). A
+  // duplicated call here squared the factor -- the identity in cell units, so no cell-unit gate saw
+  // it, and 0.019x the reaction at L = 1 under a physical domain (tests/python/
+  // test_hydro_force_units.py).
   scaleForceTorque(out, m);
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {
