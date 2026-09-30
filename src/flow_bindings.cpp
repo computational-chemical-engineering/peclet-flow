@@ -179,6 +179,17 @@ struct BoundSolver final : peclet::flow::Solver<Grid>, peclet::core::python::Rel
   void release() noexcept override { peclet::core::python::destruct_bound_instance(this); }
 };
 
+/// The reconstructed-traction loads as the (4, n_instances, 3) array that both of its Python names
+/// return: `diagnostics.hydro_force_torque_traction()` (canonical) and the deprecated
+/// `hydro_force_torque()`. One helper, so the two stay bit-identical.
+template <class Grid>
+static auto traction_force_torque_array(peclet::flow::Solver<Grid>& s) {
+  std::vector<double> v = s.hydroForceTorque();
+  const std::size_t n = v.size() / 12;
+  return peclet::core::python::vector_to_ndarray(std::move(v), {4, n, 3},
+                                                 {static_cast<std::int64_t>(3 * n), 3, 1});
+}
+
 /// The developer tier: a view onto one Solver<Grid> (no state of its own). Bound as
 /// `Solver.diagnostics` / `SolverColocated.diagnostics`; the property keeps the solver alive.
 template <class Grid>
@@ -658,6 +669,24 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "instance wider than the box (set_solid_from_scene warns when nonzero): the scene "
            "evaluates the UNION of images, so a slab wider than the box refills any cavity carved "
            "from it. 0 when no instance is that wide or the images agree.")
+      .def(
+          "hydro_force_torque_traction",
+          [](D& diag) { return traction_force_torque_array<Grid>(*diag.s); },
+          "DIAGNOSTIC -- not the force on the bodies; that is "
+          "Solver.hydro_force_torque_reaction(). The reconstructed surface-TRACTION loads, shape "
+          "(4, n_instances, 3): [0] force, [1] torque about the instance centre, [2] the pressure "
+          "part, [3] the viscous part ([0] == [2] + [3]). The cut-cell surface integral of "
+          "(-p I + mu(grad u + grad u^T)) against the exact aperture wall-area vector, with a "
+          "central-difference velocity gradient that spans the wall. It UNDER-READS THE VISCOUS "
+          "PART: traction / reaction drag = 0.685-0.730 over phi 0.008-0.45 and N 24-128 "
+          "(measured 2026-09-30), i.e. ~30 % low at ANY resolution -- refinement does not fix "
+          "it. The torque is low by the same mechanism: a steadily spinning sphere reads "
+          "0.59-0.72 of 8 pi mu a^3 Omega / (1 - phi) at R/h 6-12 (the reaction: 1.019-1.027). "
+          "What it offers that the reaction does not: the pressure/viscous split, and it runs "
+          "where the reaction refuses (the collocated solver, porous, variable properties, domain "
+          "BCs, implicit advection). A consistent traction (from the momentum operator's "
+          "small-cell-robust wall reconstruction) is planned. Was Solver.hydro_force_torque() "
+          "(deprecated). Atomics: tolerance-reproducible, not bitwise.")
       .def("wall_area_probe", [](D& diag) { return diag.s->wallAreaProbe(); },
            "Diagnostic: [sum_c x_c*A_wall_x, sum_c y_c*A_wall_y, sum_c z_c*A_wall_z] over all cut "
            "cells. Must equal -V_solid componentwise if the aperture wall-area vectors are right, "
@@ -2236,35 +2265,37 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
                 std::move(v), {2, n, 3},
                 {static_cast<std::int64_t>(3 * n), 3, 1});
           },
-          "Hydrodynamic force and torque per scene instance from the DISCRETE REACTION -- the "
-          "momentum the fluid actually lost to each body, assembled from the composed step's "
+          "THE hydrodynamic force and torque on each scene instance: the DISCRETE REACTION -- "
+          "the momentum the fluid actually lost to each body, assembled from the composed step's "
           "budget (time term, body force, and the viscous fluxes at u*; the pressure telescopes "
           "inside each owner region and needs no field). Shape (2, n_instances, 3): [0] force, "
-          "[1] torque about the instance centre. This is the RECOMMENDED coupling force: exactly "
-          "conservative (sum = f * N_fluid-cells at steady state, to solver residual) and as "
-          "accurate as the flow solution it sustains. The traction integral "
-          "(hydro_force_torque) under-reads by a resolution-independent ~29% but carries the "
-          "pressure/viscous split. Staggered; EXPLICIT advection is carried (the stashed advective RHS term "
-          "is subtracted); implicit advection / porous / variable properties / domain BCs are "
-          "refused loudly (v2). Atomics: tolerance-reproducible, not bitwise.")
+          "[1] torque about the instance centre. The force is exactly conservative (sum = f * "
+          "V_fluid at steady state, to the solver residual) and as accurate as the flow solution "
+          "it sustains: Zick & Homsy's drag within 0.7 % at N = 24 (tests/python/"
+          "test_hydro_force_units.py). The torque carries the closed-form transposed-stress wall "
+          "term; measured 2026-09-30 on a steadily spinning sphere it reads 1.019-1.027 of "
+          "8 pi mu a^3 Omega / (1 - phi) at R/h 6-12 (over-reads ~2 %, falling with "
+          "resolution), and on a translating sphere whose true torque is zero it is zero to "
+          "1e-15 on a symmetric placement and |T| / (|F| R) = 5e-5 to 1e-3 off it. "
+          "diagnostics.hydro_force_torque_traction() is the surface-traction estimate: ~30 % "
+          "low, but it carries the pressure/viscous split. Staggered only; EXPLICIT advection "
+          "is carried (the stashed advective RHS term is subtracted); implicit advection / "
+          "porous / variable properties / domain BCs are refused loudly (v2); call after "
+          "step(). Atomics: tolerance-reproducible, not bitwise.")
       .def(
           "hydro_force_torque",
-          [](S& s) {
-            std::vector<double> v = s.hydroForceTorque();
-            const std::size_t n = v.size() / 12;
-            return peclet::core::python::vector_to_ndarray(
-                std::move(v), {4, n, 3},
-                {static_cast<std::int64_t>(3 * n), 3, 1});
-          },
-          "The reconstructed-TRACTION loads (the resolved CFD-DEM coupling's `force_method="
-          "'traction'`; hydro_force_torque_reaction is the recommended one), shape "
-          "(4, n_instances, 3): [0] force, [1] torque about "
-          "the instance centre, [2] the pressure part, [3] the viscous part ([0] == [2] + [3]). "
-          "The cut-cell surface integral of (-p I + mu(grad u + grad u^T)) against the exact "
-          "aperture wall-area vector; its central-difference gradient under-reads the drag by a "
-          "resolution-independent ~29% (measured; see the design note) -- it is the split into a "
-          "pressure and a viscous part that the reaction cannot give. Atomics: "
-          "tolerance-reproducible, not bitwise.")
+          [](S& s) { return traction_force_torque_array<Grid>(s); },
+          "DEPRECATED -- the canonical names are hydro_force_torque_reaction() for the force and "
+          "torque on the bodies, and diagnostics.hydro_force_torque_traction() for what this "
+          "returns. It is NOT the force on the bodies: it is the reconstructed surface-traction "
+          "integral, which under-reads the drag by ~30 % at any resolution (the viscous part; "
+          "traction / reaction 0.685-0.730 over phi 0.008-0.45, N 24-128). Returns exactly what "
+          "diagnostics.hydro_force_torque_traction() returns (shape (4, n_instances, 3): force, "
+          "torque, pressure part, viscous part); see that method for the details. Where the "
+          "reaction refuses (SolverColocated, porous, variable properties, domain BCs, implicit "
+          "advection) the traction is the only estimate there is -- call it by its diagnostic "
+          "name and allow for the under-read. Kept working under the suite's rule for a shipped "
+          "name (docs/NAMING.md section 0); removal needs a major release.")
       .def("instance_center", &S::instanceCenter, nb::arg("i"),
            "The resolved centre of rotation of instance i (world coordinates).")
       .def(

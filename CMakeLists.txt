@@ -318,7 +318,9 @@ if(PECLET_FLOW_BUILD_TESTS)
   # The hydro force/torque getters (reaction AND traction) are unit-covariant: one periodic sphere,
   # translating and spinning, in cell units and two physical systems gives the same dimensionless
   # drag, torque and traction/reaction ratio. The traction once converted twice under a physical
-  # domain (identity in cell units, so every cell-unit gate passed).
+  # domain (identity in cell units, so every cell-unit gate passed). Also gates the names (the
+  # deprecated hydro_force_torque() == diagnostics.hydro_force_torque_traction()) and the public
+  # reaction torque's accuracy (steady spinning sphere; zero on a translating one).
   add_test(NAME hydro_force_units
            COMMAND ${Python_EXECUTABLE}
                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_hydro_force_units.py

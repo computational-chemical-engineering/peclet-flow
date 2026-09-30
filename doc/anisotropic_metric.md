@@ -184,7 +184,9 @@ velocity conversion. The code's `AC += beta*rho*back` with `back` an index veloc
 anisotropic form.
 
 ### 4.4 Hydrodynamic force and torque
-*Traction integral* `hydroForceTorque()` (`~:3994`, diagnostic): with `A_a = W_a V'/h_a'` the physical
+*Traction integral* `hydroForceTorque()` (`~:3994`, diagnostic — Python
+`diagnostics.hydro_force_torque_traction()` since 2026-09-30; the old public name `hydro_force_torque()`
+is deprecated because it under-reads the viscous part by ~30 % at any resolution): with `A_a = W_a V'/h_a'` the physical
 fragment area vector in `hRef^2` (`W_a = o_{a-} - o_{a+}`), `gu[a][b] = ½(v_a(i+e_b) - v_a(i-e_b))`, and
 the total-force scale `forceTotalToPhys = rhoRef hRef^4/tRef^2` unchanged:
 
@@ -197,7 +199,8 @@ dFv_a = - mu' * sum_b W_b * (V'/h_b') * [ (h_a'/h_b') gu[a][b] + (h_b'/h_a') gu[
 The lever arm `r = rp * sm.dToInt` is a physical displacement in `hRef` units on every axis already —
 unchanged; `torqueToPhys` unchanged.
 
-*Reaction force* `hydroForceTorqueReaction()` (`~:4203`, the CFD-DEM source): the momentum row of
+*Reaction force* `hydroForceTorqueReaction()` (`~:4203`, the CFD-DEM source and the public force
+API, Python `hydro_force_torque_reaction()`): the momentum row of
 component `a` is a force density in the component-`a` normalisation, so the body force is
 `F_a = - sum_owner R_a * h_a' * V'` in `forceTotalToPhys` units (the isotropic `h_a' V' = 1`).
 

@@ -168,6 +168,16 @@ recorded decision, not a judgement call in the moment.
   the optional balanced-force projection — not through face placement. The guard is the
   stability/dt-independence gate on every collocated path, not a grep. Register: suite-wide
   "Collocated forces stay in the implicit predictor"; design: flow `doc/collocated_varrho_forces.md`.
+- **The force on a body is the discrete REACTION — `hydro_force_torque_reaction()` — never the
+  traction integral** (USER-approved 2026-09-30). The traction (`diagnostics.hydro_force_torque_traction()`)
+  differences the velocity across the wall with a central difference and under-reads the viscous
+  part: traction/reaction 0.685–0.730 over φ 0.008–0.45 and N 24–128, at every resolution; its
+  spinning-sphere torque reads 0.59–0.72 of the exact value where the reaction reads 1.019–1.027.
+  It is a diagnostic (it carries the pressure/viscous split, and runs where the reaction refuses:
+  collocated, porous, variable properties, domain BCs). Its old public name `hydro_force_torque()`
+  is DEPRECATED; do not hand it out as "the force". A one-sided difference to the wall
+  over θ is a closed dead end (17× too large as θ → 0); the planned fix is under "Open items".
+  Register: coupling "The public force API returns the reaction".
 - **The pressure solve is PCG (Krylov), not RB-GS**, for cut-cell IBM.
 - **Backward Euler is the default time integrator.** Crank–Nicolson was ported and reverted.
 - **Porous beds use ε-weighted momentum with a matched projection.** Plain incompressible continuity
@@ -581,3 +591,13 @@ is not carried through
 `redistribute`** (pre-existing, not fixed by the V8 package): a collocated run WITH advection that
 is rebalanced at np = 1 already drifts 5.0e-8 in u from the never-rebalanced run, option off
 (measured 2026-09-25 while gating `balanced_force_mpi`, whose rebalance case is therefore Stokes).
+
+**PLANNED — a consistent wall traction** (2026-09-30): the wall shear from the momentum operator's
+Robust-Scaled (small-cell-robust) wall reconstruction instead of the central difference in
+`hydroForceTorque()` (`src/flow_ibm_hydro.hpp`), so that traction → reaction under refinement.
+Unlocks wall-shear maps, the pressure/viscous split of the *accurate* force, and local surface
+fluxes; a candidate section of the M3 method paper (`~/Codes/peclet-papers` PLAN.md, item D8).
+Known dead end: the one-sided difference to the wall over the crossing distance θ — 1/θ is
+unbounded on small cut cells and the drag came out 17× too large. Gate: traction/reaction → 1 on
+`tests/python/test_hydro_force_units.py`'s spheres, with the steady spinning-sphere torque at the
+reaction's 1.02 rather than the traction's 0.59.
