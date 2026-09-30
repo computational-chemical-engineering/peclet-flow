@@ -72,7 +72,7 @@ def run(boost, wall_flux=True):
                     # residual difference below is a convergence level, not a stopping artefact
     return (np.asarray(s.get_u()), np.asarray(s.get_v()), np.asarray(s.get_w()),
             s.max_open_divergence(), s.wall_flux_imbalance(), it + 1,
-            np.asarray(s.hydro_force_torque()),
+            np.asarray(s.diagnostics.hydro_force_torque_traction()),
             np.asarray(s.hydro_force_torque_reaction()))
 
 

@@ -6,7 +6,7 @@ field must already satisfy -- BOTH evaluations:
     (fluid_momentum_cells), and it must hold to the momentum solver's residual -- this is the
     IMPLEMENTATION-COMPLETENESS check, not an accuracy check (the identity is a tautology of a
     correctly assembled budget; if it holds only to percent, a term is missing).
-  * hydro_force_torque (traction, DIAGNOSTIC): the reconstructed surface integral, kept so its
+  * diagnostics.hydro_force_torque_traction (traction, DIAGNOSTIC): the reconstructed surface integral, kept so its
     resolution-independent ~29% under-read stays visible.
 
 Setup: Stokes flow through a fixed periodic sphere array driven by a uniform body force f (force
@@ -87,7 +87,7 @@ def run(N, RF=0.18, wallgrad=False):  # wallgrad kept only for the log line
     for _ in range(STEPS):
         s.step()
     u = np.asarray(s.get_u())
-    ft = np.asarray(s.hydro_force_torque())
+    ft = np.asarray(s.diagnostics.hydro_force_torque_traction())
     Fh, Th, Fp, Fv = ft[0], ft[1], ft[2], ft[3]
     fr = np.asarray(s.hydro_force_torque_reaction())
     FR, TR = fr[0], fr[1]

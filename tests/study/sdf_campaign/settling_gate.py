@@ -81,7 +81,7 @@ def calibrate(f=1e-3, steps=None):
     # self-consistency claim is real. (With the traction the two halves used the same *biased*
     # method too, but its frame error broke the cancellation for a moving wall.)
     Fd = np.asarray(s.hydro_force_torque_reaction())[0][0]
-    Ftr = np.asarray(s.hydro_force_torque())[0][0]
+    Ftr = np.asarray(s.diagnostics.hydro_force_torque_traction())[0][0]
     Nc = s.fluid_momentum_cells()
     umean = float(u.mean())
     lam = Fd[0] / (6.0 * np.pi * MU * R * umean)

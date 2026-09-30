@@ -113,7 +113,7 @@ def main():
     lsum = float(np.sum(np.asarray(s.get_u())))
     gsum = comm.allreduce(lsum, op=MPI.SUM)
     k = MU * (gsum / float(N**3)) / F
-    Fh = np.asarray(s.hydro_force_torque())[0]     # already Allreduced across ranks in C++
+    Fh = np.asarray(s.diagnostics.hydro_force_torque_traction())[0]     # already Allreduced across ranks in C++
     FR = np.asarray(s.hydro_force_torque_reaction())[0]   # route (b), Allreduced likewise
     Nc = s.fluid_momentum_cells()
     div = s.max_open_divergence()
