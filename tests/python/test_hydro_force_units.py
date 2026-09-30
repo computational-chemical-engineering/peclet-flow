@@ -34,7 +34,8 @@ steady):
      1e-10 relative, and nonzero.
 The names:
   6. the deprecated hydro_force_torque() returns what diagnostics.hydro_force_torque_traction()
-     returns (shape (4, n, 3), equal to the atomics' round-off).
+     returns (shape (4, n, 3), equal to the atomics' round-off), and raises ONE DeprecationWarning
+     that names hydro_force_torque_reaction().
 Torque accuracy (unit system only, marched to steady Stokes):
   7. translating sphere on the vertex: the reaction torque is zero (|T| / (|F| R) < 1e-10);
   8. steadily spinning sphere, phi 0.027, N 32 (R/h 6): the reaction torque within (1.00, 1.04)
@@ -47,6 +48,7 @@ Exit 0 pass, 1 fail, 77 skipped (no module).
 """
 import math
 import sys
+import warnings
 
 import numpy as np
 
@@ -131,7 +133,11 @@ def translating(name):
     U = float(np.mean(s.get_u()))  # superficial: solid cells hold zero
     rea = np.asarray(s.hydro_force_torque_reaction())
     tra = np.asarray(s.diagnostics.hydro_force_torque_traction())
-    old = np.asarray(s.hydro_force_torque())  # deprecated name of the same traction
+    with warnings.catch_warnings(record=True) as caught:  # deprecated name of the same traction
+        warnings.simplefilter("always")
+        old = np.asarray(s.hydro_force_torque())
+    warned = [w for w in caught if issubclass(w.category, DeprecationWarning)
+              and "hydro_force_torque_reaction()" in str(w.message)]
     D = 2.0 * p["R"]
     fV = p["f"] * (p["L"] ** 3 - math.pi / 6.0 * D ** 3)
     r = dict(steps=it + 1,
@@ -142,6 +148,7 @@ def translating(name):
              tra_v_over_rea=tra[3, 0, 0] / rea[0, 0, 0],
              old_vs_tra=float(np.max(np.abs(old - tra)) / np.max(np.abs(tra))),
              old_shape=old.shape == tra.shape == (4, 1, 3),
+             old_warned=len(warned) == 1,
              T_rea_rel=float(np.linalg.norm(rea[1, 0]) / (np.linalg.norm(rea[0, 0]) * p["R"])))
     print("  %-4s steps %3d  K %.9f  F_rea/(f V_fl) %.9f  traction/reaction %.9f "
           "(pressure %.6f + viscous %.6f)" % (name, r["steps"], r["K"], r["rea_over_fV"],
@@ -223,6 +230,8 @@ for n, r in tr.items():
     check(r["old_shape"] and r["old_vs_tra"] < TOL_ATOMIC,
           "%s: deprecated hydro_force_torque() == diagnostics.hydro_force_torque_traction() "
           "(max rel diff %.1e)" % (n, r["old_vs_tra"]))
+    check(r["old_warned"], "%s: hydro_force_torque() raises one DeprecationWarning pointing at "
+          "hydro_force_torque_reaction()" % n)
 for key in ("K", "rea_over_fV", "tra_over_rea", "tra_p_over_rea", "tra_v_over_rea"):
     d = agree(tr, key)
     check(d < TOL_X, "%s identical across unit systems (max rel diff %.2e)" % (key, d))

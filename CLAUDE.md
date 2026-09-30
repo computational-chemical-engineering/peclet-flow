@@ -175,7 +175,7 @@ recorded decision, not a judgement call in the moment.
   spinning-sphere torque reads 0.59–0.72 of the exact value where the reaction reads 1.019–1.027.
   It is a diagnostic (it carries the pressure/viscous split, and runs where the reaction refuses:
   collocated, porous, variable properties, domain BCs). Its old public name `hydro_force_torque()`
-  is DEPRECATED; do not hand it out as "the force". A one-sided difference to the wall
+  is DEPRECATED and warns; do not hand it out as "the force". A one-sided difference to the wall
   over θ is a closed dead end (17× too large as θ → 0); the planned fix is under "Open items".
   Register: coupling "The public force API returns the reaction".
 - **The pressure solve is PCG (Krylov), not RB-GS**, for cut-cell IBM.

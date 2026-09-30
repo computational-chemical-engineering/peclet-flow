@@ -2284,8 +2284,22 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "step(). Atomics: tolerance-reproducible, not bitwise.")
       .def(
           "hydro_force_torque",
-          [](S& s) { return traction_force_torque_array<Grid>(s); },
-          "DEPRECATED -- the canonical names are hydro_force_torque_reaction() for the force and "
+          [](S& s) {
+            // Warns from the first release that carries the canonical names, not one release
+            // later as docs/NAMING.md section 0 has it for a respelling: the old spelling here
+            // is not harmless, it hands out a force ~30 % low under the natural name.
+            if (PyErr_WarnEx(PyExc_DeprecationWarning,
+                             "hydro_force_torque() is deprecated: it returns the traction "
+                             "integral, which under-reads the drag by ~30 % at any resolution. "
+                             "For the force and torque on the bodies call "
+                             "hydro_force_torque_reaction(); for the traction and its "
+                             "pressure/viscous split, diagnostics.hydro_force_torque_traction().",
+                             1) < 0)
+              throw nb::python_error();
+            return traction_force_torque_array<Grid>(s);
+          },
+          "DEPRECATED (warns) -- the canonical names are hydro_force_torque_reaction() for the "
+          "force and "
           "torque on the bodies, and diagnostics.hydro_force_torque_traction() for what this "
           "returns. It is NOT the force on the bodies: it is the reconstructed surface-traction "
           "integral, which under-reads the drag by ~30 % at any resolution (the viscous part; "
