@@ -24,12 +24,16 @@ device bottom), WO-7 (C3, core change + tag), WO-10..13, E2(a) (§12, premise pa
 Physics (t 50-150): peclet 0.949 / TBF default 0.778 / TBF no-smoothing 0.811; local slip 0.922 vs
 0.804. D/h=24 (t 30-60): slip peclet 0.886->0.935, TBF-ns 0.772->0.813 — the gap is NOT resolution;
 t=1..5 transient: peclet 7-10 % faster at both resolutions (column bubbles start 2 D apart in-line).
-RESULTS 10-01: (2) in-line 2 D box: peclet 1.770 vs TBF-ns 1.746 (agree 1.4 %; TBF default 1.522).
-(1) Loisy E1 free array (8 bubbles, phi 3.79 %, 96^3): peclet U/U0 0.99 (drift 1.02+-0.02, t>=30) vs
-Loisy 0.80 -> peclet ~25 % TOO FAST in free swarms (like their ORDERED array ~1.05). Overlap rare
-(dt bound ~9 % of samples). Hypothesis: lateral wake-escape too weak -> bubbles stay aligned and
-draft. opus-engineer running drafting-pair test (both codes) + Loisy alignment statistics:
-brief scratchpad/pair/BRIEF.md. PAGE BLOCKED until resolved.
+RESULTS 10-01: in-line 2 D box agrees (1.770 vs 1.746). Drafting pair (scratchpad/pair): lateral
+dynamics match TBF before contact; peclet holds a ~1.6-cell film (|r|min 0.93 vs TBF 0.74 =
+interpenetration), tumbles slowly (pass t 20 vs 12-14); single-field VoF reproduces it to 1e-5 D ->
+flow solver, not the block container. Loisy run: swarm LESS aligned than random; one periodic
+in-line chain persisted ~15 time units (0.085 of the excess); Loisy used ratios 1e-3/1e-2 and a
+single level-set field -> the 25 % is NOT like-for-like. USER-approved plan: B (film cause +
+resolution D/h 16/24/32 both codes, ablations: vof_momentum, harmonic mu) — pair agent resumed;
+A (single-field VoF at our ratios and at Loisy's 1e-3/1e-2 with enable_vof_momentum, + guard:
+enable_vof_momentum with blocks must RAISE) — brief scratchpad/loisy/BRIEF_A.md, branch
+vofmom-guard; then C (publish the page with the finding).
 
 **Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
