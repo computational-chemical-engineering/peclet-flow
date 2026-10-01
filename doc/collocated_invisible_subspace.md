@@ -342,3 +342,58 @@ $M\Gamma=-C^T$ — the variable-density form of the transpose pair of §6 (spect
 every ratio and dt in the model). At uniform ρ it *is* the constant-density scheme. Design, numbers
 and the guard: [`collocated_varrho_forces.md`](collocated_varrho_forces.md) (§2, §4.3, §7);
 gate `tests/python/test_collocated_stability_guard.py`.
+
+## 11. The slowly relaxing $(\pi,0,0)$ pressure checkerboard (2026-10-01)
+
+*Found while porting `tests/study/study_avg_velocity_spheres.py` (one sphere per periodic cell,
+$\varphi = 0.125$, $\nu\Delta t/h^2 = 6$), where the collocated column took 490 steps to its stop
+at $N = 16$ against 70 for staggered. Instrument: `tests/study/collocated_checkerboard_tail.py`,
+which marches that case and records $\langle u_x\rangle$, rms $\Delta u$ and rms $\Delta P$ per step
+plus the last iterates, and reads off the tail rate, the Fourier and wall-band content of the slow
+component, and where a stop test would halt.* [MEASURED unless marked]
+
+**Mechanism.** The fluid-only (ghost) constraint removes the exact invisible family of §4, but not a
+*nearly* invisible mode: the pressure checkerboard $p \propto (-1)^i$ along the flow axis, uniform in
+$y, z$. The central cell gradient of the bulk annihilates it, so it reaches the velocity only through
+the one-sided gradient rows at the wall, and the incremental-rotational update relaxes it by
+$\sim 0.4\,\%$ per step. 80–84 % of the late pressure increment's energy is the single Fourier mode
+$(\pi,0,0)$ (0 % at $(0,\pi,0)$, $(0,0,\pi)$, $(\pi,\pi,\pi)$) and 80 % of it lies more than $2h$
+from the wall; the velocity increment it drives has no checkerboard content and sits in the cut band
+(54 % of $|\Delta u|^2$ in $0 < \mathrm{sdf} < h$, 10 % of the cells). [INFERRED: the coupling path,
+from the structure; not separately ablated.]
+
+**Rate.** About 0.996 per step: 0.9926 / 0.9962 / 0.9955 / 0.9971 / 0.9968 at $N = 14/16/18/20/24$
+(0.9985 at $N = 32$, where the amplitude is $10^{-4}$ of $N = 16$'s). Independent of $\Delta t$:
+0.9957–0.9964 over $\nu\Delta t/h^2 = 1.5 \ldots 10^4$ at $N = 16$, while the physical modes go from
+0.68 per step to nothing. The same in the gauge-exact scheme (0.9965), and `peclet.amr` at
+$l_{\max} = 0$ reproduces the step counts exactly — a property of the cell-centred central gradient
+under the ABC projection, not of one implementation. Not the solves: pressure rtol $10^{-8} \to
+10^{-12}$ leaves it at 0.99619, and the momentum residual is $< 10^{-8}$ every step. Staggered has no
+such tail (its slow tail is a near-wall pressure mode, 0.95–0.99 per step).
+
+**When it is excited.** Only when the driven flow has its symmetry: $(-1)^i$ is odd under the
+$x$-mirror through a grid vertex, as the driven pressure is, so a sphere centred on a grid vertex with
+$N$ even feeds it. Its amplitude is $N$-dependent and not monotone (in $|\Delta\langle u_x\rangle|/
+\langle u_x\rangle$ back-projected to step 0: $7\times10^{-6}$, $1.3\times10^{-6}$,
+$1.3\times10^{-6}$, $1.1\times10^{-7}$, $3.5\times10^{-9}$ at $N = 14 \ldots 24$). Shifting the sphere
+by $h/4$ cuts it to $1.4\times10^{-7}$, by $h/2$ (cell-centred) to $2.6\times10^{-9}$. Grazing cells
+are not the cause ($N = 14$ has none and is as slow as $N = 16$; $N = 32$ grazes as badly and is not).
+
+**It does not move the answer.** The converged $\langle u\rangle$ is $\Delta t$-independent: the
+geometric limits at $\nu\Delta t/h^2 = 1.5, 3, 6, 10^4$ agree to $8\times10^{-9}$ relative, so C2
+holds and the steady state of Prop. 1 is reached. The cost is convergence speed, and a stop test that
+reads the per-step change of $\langle u_x\rangle$ is misled both ways: it waits on the tail, and it
+halts falsely where the tail and a faster mode of opposite sign cross (collocated $N = 18$ stopped at
+step 45 with $K$ off by $2.4\times10^{-4}$).
+
+**Options, and the standing position.**
+
+1. *Fix the instrument* — **done** (flow, this date): the study stops on a geometric-remainder
+   bound with a slow-rate floor, three consecutive passes and no sign change; worst measured
+   $|K_{\rm stop}/K_\infty - 1| = 7.4\times10^{-5}$ against the $10^{-4}$ target. Any steady-march
+   driver that monitors a mean should do the same.
+2. *Damp the checkerboard* (a pressure filter, a bulk diagonal gain in the update, …) — **new
+   numerics; it goes to the architect**, and must be held to C2, Prop. 1's fixed point and the
+   stability findings of §3 (the wall-banded blend's margin shows how such a term can bite).
+3. *Accelerate the outer steady iteration* (Krylov / Anderson on the march) — architectural; not
+   pursued.
