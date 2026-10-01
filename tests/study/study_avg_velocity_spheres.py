@@ -19,9 +19,23 @@ overlay; collocated and amr = AUTO, i.e. the fluid-only 'ghost' projection.
 One sphere of volume fraction phi at the centre of a periodic unit cube (on a grid vertex for even N, as in
 collocated_zh_schemes.py and amr's parity cases), rho = mu = 1, body force f = 1 along x, marched
 to a steady state with the pseudo-time step at viscous number nu dt / h^2 = 6 (the cell-unit dt 60
-at nu 0.1 the study was first run with). Steady state: the relative change of <u_x> over 5 steps
-below 1e-6, at most 600 steps (a run that hits the cap is flagged '*'). Drag:
-K = f L^3 / (6 pi mu R U_sup), error in % against the Z&H table.
+at nu 0.1 the study was first run with), at most 1500 steps (a run that hits the cap is flagged
+'*'). Drag: K = f L^3 / (6 pi mu R U_sup), error in % against the Z&H table.
+
+Steady state (march(), the same test for every column): every 5 steps, d = the change of <u_x> over
+the block and R = d / the previous block's d; a block passes when 0 < R < 1 and the geometric
+remainder |d| / (1 - max(R, 0.997^5)) is below 1e-4 |<u_x>|, and three consecutive passes stop the
+march. So the stopped K is within 1e-4 (relative; the resolution of the e% columns) of the
+converged one, provided no mode slower than max(R, 0.997 per step) carries the remainder. Checked
+against the geometric limit of 800-1200-step marches, every column at N = 14..48: the largest
+|K_stop / K_inf - 1| is 7.4e-5 (collocated N = 16; gauge-exact there 8.1e-5), all others <= 6.1e-5.
+Why a remainder test and not an increment test: the collocated march carries a slowly relaxing
+(pi,0,0) pressure checkerboard (doc/collocated_invisible_subspace.md §11; instrument
+collocated_checkerboard_tail.py) -- about 0.996 per step at N = 14..24, independent of dt, with an
+N-dependent amplitude. The old test (|d| < 1e-6 |<u_x>| over 5 steps) waited 490 steps on it at
+N = 14 and 16, and stopped falsely where two modes of opposite sign cross: collocated N = 18 at
+step 45 with K off by 2.4e-4, staggered N = 24 and 32 at 4.6e-5 and 4.8e-5. The 0.997 floor keeps
+a fast, cleanly contracting transient from hiding the slow tail beneath it.
 
 Run (from flow/, OpenMP pool bounded; the amr columns need an amr build, otherwise they print --):
 
@@ -30,14 +44,15 @@ Run (from flow/, OpenMP pool bounded; the amr columns need an amr build, otherwi
 
 Defaults phi = 0.125, N = 16,24,32,48. AMR_MAX_N (default 48) caps the N the amr column runs at.
 
-Result, 2026-10-01 (flow cd7211d + this port, amr 7bf183a, host-openmp -march=native, 8 threads),
-phi = 0.125, K_ZH = 4.292, default arguments, 3.1 min wall:
+Result, 2026-10-01 (flow 5bcf353 + this stop test, amr 7bf183a, host-openmp -march=native,
+8 threads), phi = 0.125, K_ZH = 4.292, N = 16,18,24,32,48, 3.6 min wall:
 
        N |   K_stag     e% | K_co_cel     e% | K_co_FAC     e% |    K_amr     e% | K_amrFAC     e% | steps s/c/a
-      16 |   4.2120  -1.86 |   4.2664  -0.60 |   4.2664  -0.60 |   4.2664  -0.60 |   4.2664  -0.60 | 70/490/490
-      24 |   4.2571  -0.81 |   4.2791  -0.30 |   4.2791  -0.30 |   4.2791  -0.30 |   4.2791  -0.30 | 70/85/85
-      32 |   4.2770  -0.35 |   4.2845  -0.18 |   4.2845  -0.18 |   4.2845  -0.18 |   4.2845  -0.18 | 120/135/135
-      48 |   4.2880  -0.09 |   4.2884  -0.08 |   4.2884  -0.08 |   4.2884  -0.08 |   4.2884  -0.08 | 275/280/280
+      16 |   4.2120  -1.86 |   4.2663  -0.60 |   4.2663  -0.60 |   4.2663  -0.60 |   4.2663  -0.60 | 75/395/395
+      18 |   4.2350  -1.33 |   4.2698  -0.52 |   4.2698  -0.52 |   4.2698  -0.52 |   4.2698  -0.52 | 175/335/335
+      24 |   4.2573  -0.81 |   4.2791  -0.30 |   4.2791  -0.30 |   4.2791  -0.30 |   4.2791  -0.30 | 135/90/90
+      32 |   4.2771  -0.35 |   4.2845  -0.18 |   4.2845  -0.18 |   4.2845  -0.18 |   4.2845  -0.18 | 200/145/145
+      48 |   4.2880  -0.09 |   4.2884  -0.08 |   4.2884  -0.08 |   4.2884  -0.08 |   4.2884  -0.08 | 280/280/280
 
   * Every column under-predicts K and its error falls monotonically with N. Observed orders: staggered
     2.4 (N 16 -> 32) and 3.1 (24 -> 48), collocated 1.8 and 1.8 -- about 2, as flow's ghost-projection
@@ -50,9 +65,10 @@ phi = 0.125, K_ZH = 4.292, default arguments, 3.1 min wall:
     ~1 % per grid to staggered; does the face average recover it? -- is moot for the current default,
     and on this case collocated is now the more accurate of the two at every N.
   * amr at lmax = 0 reproduces flow collocated to all printed digits (the uniform-parity result).
-  * Steady-state stop: tightening TOL 1e-6 -> 1e-9 (up to 2310 steps) moves no K by more than 2e-4
-    (<= 0.005 %): collocated N = 16 to 4.2666 (-0.59 %), staggered N = 24 to 4.2573; the rest
-    unchanged at the printed precision.
+  * Against the old stop test (5bcf353's table) K moved by at most 1e-4: collocated N = 16
+    4.2664 -> 4.2663, staggered N = 24 4.2571 -> 4.2573 and N = 32 4.2770 -> 4.2771; the steps
+    went 70/490/490 -> 75/395/395 at N = 16, and 70/85 -> 135/90 at N = 24 (staggered had
+    stopped early on a sign change there).
 
 History: written against the sdflow-era module names and the retired tpx_amr (later
 peclet.core.amr) module; ported to the physical-domain API of peclet.flow and peclet.amr and moved
@@ -76,7 +92,10 @@ ZH_K = [1.096, 1.212, 1.525, 2.008, 2.810, 4.292, 7.442, 15.4, 28.1, 42.1]
 L = 1.0                  # periodic unit cube
 RHO, MU, F = 1.0, 1.0, 1.0
 BETA = 6.0               # viscous number nu dt / h^2 of the pseudo-time march
-TOL, CHECK_EVERY, MAX_STEPS = 1e-6, 5, 600
+# Steady-state stop (march()): the change still to come in <u_x>, hence in K, below TOL_K relative
+TOL_K, CHECK_EVERY, N_PASS, MAX_STEPS = 1e-4, 5, 3, 1500
+RHO_SLOW = 0.997        # slowest per-step contraction the march has (the collocated (pi,0,0) tail)
+ROUNDOFF = 1e-11        # a block change this small (relative) is converged whatever its ratio
 
 
 def zh_ref(phi):
@@ -97,15 +116,34 @@ def drag_K(umean, phi):
 
 
 def march(step, umean):
-    """Step until <u_x> changes by less than TOL (relative) over CHECK_EVERY steps."""
-    prev = 0.0
+    """Step until the change of <u_x> still to come is below TOL_K (relative); see the docstring.
+
+    Every CHECK_EVERY steps, d = the change of <u_x> over the block and R = d / (the previous
+    block's d). A block PASSES when the increments contract without changing sign (0 < R < 1) and
+    the geometric remainder |d| / (1 - max(R, RHO_SLOW**CHECK_EVERY)) is below TOL_K |<u_x>| -- or
+    when |d| is at round-off. N_PASS consecutive passes stop the march. The RHO_SLOW floor keeps a
+    fast, cleanly contracting transient from hiding the slow tail beneath it; the sign and
+    consecutive-pass conditions reject the dip where two modes of opposite sign cross.
+    """
+    prev = dprev = None
+    passes = 0
     for it in range(MAX_STEPS):
         step()
-        if it % CHECK_EVERY == CHECK_EVERY - 1:
-            m = umean()
-            if it > 10 and abs(m - prev) < TOL * (abs(m) + 1e-30):
+        if it % CHECK_EVERY != CHECK_EVERY - 1:
+            continue
+        m = umean()
+        if prev is not None:
+            d = m - prev
+            ok = abs(d) <= ROUNDOFF * abs(m)
+            if not ok and dprev:
+                R = d / dprev
+                ok = 0.0 < R < 1.0 and \
+                    abs(d) / (1.0 - max(R, RHO_SLOW ** CHECK_EVERY)) < TOL_K * abs(m)
+            passes = passes + 1 if ok else 0
+            if passes >= N_PASS:
                 return it + 1, True
-            prev = m
+            dprev = d
+        prev = m
     return MAX_STEPS, False
 
 
