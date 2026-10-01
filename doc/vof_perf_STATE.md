@@ -24,10 +24,12 @@ device bottom), WO-7 (C3, core change + tag), WO-10..13, E2(a) (§12, premise pa
 Physics (t 50-150): peclet 0.949 / TBF default 0.778 / TBF no-smoothing 0.811; local slip 0.922 vs
 0.804. D/h=24 (t 30-60): slip peclet 0.886->0.935, TBF-ns 0.772->0.813 — the gap is NOT resolution;
 t=1..5 transient: peclet 7-10 % faster at both resolutions (column bubbles start 2 D apart in-line).
-USER: go ahead with (1) Loisy, Naso & Spelt 2017 E1 free array (paper in scratchpad/loisy; fig. 21:
-Nb=8, U/U0 ~0.80 at phi 3.8 %, U0 ~1.03 from Re0 31 -> U ~0.82): peclet run scratchpad/loisy/run_loisy.py
-(96^3, D/h 20, triply periodic, 8 bubbles, t=100) running; (2) single bubble in a 2 D tall periodic box
-(own wake at the column's spacing), both codes, scratchpad/single/run_x2.sh running.
+RESULTS 10-01: (2) in-line 2 D box: peclet 1.770 vs TBF-ns 1.746 (agree 1.4 %; TBF default 1.522).
+(1) Loisy E1 free array (8 bubbles, phi 3.79 %, 96^3): peclet U/U0 0.99 (drift 1.02+-0.02, t>=30) vs
+Loisy 0.80 -> peclet ~25 % TOO FAST in free swarms (like their ORDERED array ~1.05). Overlap rare
+(dt bound ~9 % of samples). Hypothesis: lateral wake-escape too weak -> bubbles stay aligned and
+draft. opus-engineer running drafting-pair test (both codes) + Loisy alignment statistics:
+brief scratchpad/pair/BRIEF.md. PAGE BLOCKED until resolved.
 
 **Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
