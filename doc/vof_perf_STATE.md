@@ -41,6 +41,13 @@ time units; peclet late rise converged (1.062/1.059). Harmonic mu doubles peclet
 arithmetic is the less cushioning). NEW DEFECT: enable_vof_momentum (single field, no blocks) in
 this case family accelerates an isolated bubble to 1.84 vs 1.06 and merges the pair — A2 at risk;
 Loisy agent told to check on/off first. Guard commit 9b72708 on vofmom-guard (blocks+vof_momentum raise).
+A (scratchpad/loisy): single field 0.02/0.02 U/U0 0.995 = block 0.993 (container irrelevant; one
+coalescence at t 91). Loisy's ratios 1e-3/1e-2 + vof_momentum: interim t 59 U/U0 0.87 and falling
+(Loisy 0.80) -> property ratios explain most of the earlier "25 %". vof_momentum on/off isolated
+bubble: transient lead <= 7 %, settles 1.6 % (the pair run's 1.84 did not reproduce at D/h 20 ->
+OPEN question, not a confirmed defect). Guard landed: flow main 2d0a0d0 (vof_momentum + blocks
+raise; the markers never moved), umbrella 63039e7. A2 run PID 233204 finishing; summarise with
+scratchpad/loisy/summarise.py run_a1 run_a2. Then C: the page.
 
 **Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
