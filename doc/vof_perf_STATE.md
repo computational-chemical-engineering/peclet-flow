@@ -21,12 +21,13 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
 CUDA + host 184/184), umbrella b27fd39 (register: face-form operator with band sign, host launch
 rule, fused wrap + device Krylov scalars, batched container). Deferred: WO-9. Not yet: WO-6 (B1
 device bottom), WO-7 (C3, core change + tag), WO-10..13, E2(a) (§12, premise passed).
-Physics (t 50-150): peclet 0.949 / TBF default 0.778 / TBF no-smoothing 0.811 (smoothing is only
-+4 % in the swarm; isolated bubble peclet vs TBF-nosmooth agree 1-4 %). Circulation adds only 0.03;
-local slip peclet 0.922 vs TBF-ns 0.804 -> a SWARM (interaction) difference. Running: D/h=24 to
-t=60 for both (peclet .../peclet/run_d24 on frozen scratchpad/flow_prod5 = 035121a; TBF no-smoothing
-.../tbfsolver/run_d24_nosmooth_t60), to test whether the swarm gap is resolution (interaction films
-and wakes). Worktrees flow-vof-mg, flow-vof-container, flow-main-base can be removed (landed).
+Physics (t 50-150): peclet 0.949 / TBF default 0.778 / TBF no-smoothing 0.811; local slip 0.922 vs
+0.804. D/h=24 (t 30-60): slip peclet 0.886->0.935, TBF-ns 0.772->0.813 — the gap is NOT resolution;
+t=1..5 transient: peclet 7-10 % faster at both resolutions (column bubbles start 2 D apart in-line).
+USER: go ahead with (1) Loisy, Naso & Spelt 2017 E1 free array (paper in scratchpad/loisy; fig. 21:
+Nb=8, U/U0 ~0.80 at phi 3.8 %, U0 ~1.03 from Re0 31 -> U ~0.82): peclet run scratchpad/loisy/run_loisy.py
+(96^3, D/h 20, triply periodic, 8 bubbles, t=100) running; (2) single bubble in a 2 D tall periodic box
+(own wake at the column's spacing), both codes, scratchpad/single/run_x2.sh running.
 
 **Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
