@@ -3114,7 +3114,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "advection must precede the predictor that consumes it), so the advecting field is u^n — "
           "the previous step's projected output. u at step 0 must therefore be discretely "
           "divergence-free (rest or a uniform field both are). Requires the variable-density path, "
-          "staggered layout, explicit advection, no immersed solid and no porous continuity.")
+          "staggered layout, explicit advection, no immersed solid and no porous continuity, and is "
+          "refused together with the per-bubble block container (enable_vof_blocks*, in either "
+          "order): the momentum rides the structured colour's fluxes, not the markers'.")
       .def(
           "vof_momentum_enabled", [](S& s) { return s.vofMomentumEnabled(); },
           "Whether momentum-consistent transport is on.")

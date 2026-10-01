@@ -2942,7 +2942,8 @@ class Solver {
   // projection, per-block curvature + CSF scattered UNPACK_SUM) is rung W12.
   //
   // Scope at W0: all-fluid (no immersed solid — the cut-cell block is W12), and the seeds are
-  // spheres given in CELL units.
+  // spheres given in CELL units. Not composable with `enableVofMomentum` (refused in either order:
+  // that transport advects the structured colour and skips the slot that advects the markers).
   void enableVofBlocks(const std::vector<std::array<double, 4>>& seeds);
 
 
@@ -3617,6 +3618,7 @@ class Solver {
   // instead would break the hydrostatic acid test at O(d rho) — measured and recorded in the WO-K
   // findings.
   /// `rhoGas` / `rhoLiquid` are PHYSICAL densities, the same numbers the rho closure is given.
+  /// Refused together with the block container (`enableVofBlocks*`), in either call order.
   void enableVofMomentum(double rhoGasPhys, double rhoLiquidPhys);
 
 

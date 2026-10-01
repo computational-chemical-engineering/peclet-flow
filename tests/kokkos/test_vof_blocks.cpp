@@ -28,6 +28,10 @@
 //                             speck is more than two cells from any other B colour, so it gets NO
 //                             curvature estimate at all; the clip's G1(i) gate is gate K of
 //                             test_vof_blocks_overlap, with a speck at B's own fringe.)
+//   M  momentum refused    : enable_vof_momentum and the block container are refused together,
+//                             in BOTH call orders, with the message naming the cause (the
+//                             momentum rides the structured colour's fluxes and step() then skips
+//                             the slot that advects the markers).
 //
 // Everything is compared against a plain `WyAdvector` on the whole grid seeded with the SAME exact
 // `sphereCellFraction` and driven by the SAME face field, so "bitwise" is a real statement about
@@ -38,6 +42,7 @@
 #include <cstring>
 #include <Kokkos_Core.hpp>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -1250,6 +1255,44 @@ void gateWall() {
 
 }  // namespace
 
+/// Runs `f`, returns true iff it threw a std::runtime_error naming the momentum/block conflict.
+template <class F>
+bool refusesMomentumBlocks(F&& f) {
+  try {
+    f();
+  } catch (const std::runtime_error& e) {
+    std::printf("  refused: %.70s...\n", e.what());
+    return std::strstr(e.what(), "not composable") != nullptr &&
+           std::strstr(e.what(), "block markers") != nullptr;
+  }
+  return false;
+}
+
+void gateMomentumRefused() {
+  std::printf("\n=== M  enable_vof_momentum x enable_vof_blocks: refused in either order\n");
+  const int n = 16;
+  const std::vector<std::array<double, 4>> seeds = {{8.0, 8.0, 8.0, 3.0}};
+  {  // momentum first: the block container is refused
+    peclet::flow::IbmSolver s(n, n, n);
+    s.setRho(1.0);
+    s.setMu(0.1);
+    s.enableVofMomentum(0.001, 1.0);
+    CHECK(s.vofMomentumEnabled());
+    CHECK(refusesMomentumBlocks([&] { s.enableVofBlocks(seeds); }));
+    CHECK(!s.vofBlocksEnabled());
+  }
+  {  // blocks first: momentum consistency is refused
+    peclet::flow::IbmSolver s(n, n, n);
+    s.setRho(1.0);
+    s.setMu(0.1);
+    s.enableVof();
+    s.enableVofBlocks(seeds);
+    CHECK(s.vofBlocksEnabled());
+    CHECK(refusesMomentumBlocks([&] { s.enableVofMomentum(0.001, 1.0); }));
+    CHECK(!s.vofMomentumEnabled());
+  }
+}
+
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
@@ -1263,6 +1306,7 @@ int main(int argc, char** argv) {
     gateBatched();
     gateDebrisSpeck();
     gateWall();
+    gateMomentumRefused();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
                 failures == 1 ? "" : "s");
   }

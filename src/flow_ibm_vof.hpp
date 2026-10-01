@@ -11,6 +11,18 @@
 
 namespace peclet::flow {
 
+/// enable_vof_momentum x enable_vof_blocks*: refused in EITHER call order. Momentum consistency
+/// advects rho^c u with the fluxes of the ONE structured colour field (`vofAdv_`) at the head of
+/// step() and then skips advectVof() -- which is the only slot that advects the block markers. The
+/// combination would leave every marker frozen while the momentum rode the fluxes of a union field
+/// that is not the markers' own.
+inline constexpr const char* kVofMomBlocksMsg =
+    "enable_vof_momentum and enable_vof_blocks* are not composable: momentum-consistent transport "
+    "advects rho*u with the geometric fluxes of the ONE structured colour field (at the head of "
+    "step()) and skips the colour stage that advects the block markers, so the markers would never "
+    "move and the momentum fluxes would not be theirs. Use the structured colour field with "
+    "enable_vof_momentum, or the block container without it.";
+
 template <class Grid>
 void Solver<Grid>::setVofTiming(bool on) {
   vofTiming_ = on;
@@ -1378,6 +1390,8 @@ template <class Grid>
 void Solver<Grid>::prepareVofBlocks() {
   if (!vofEnabled_)
     throw std::runtime_error("enable_vof_blocks: VoF is not enabled (call enable_vof first)");
+  if (vofMomEnabled_)
+    throw std::runtime_error(kVofMomBlocksMsg);
   if (hasSolid_)
     throw std::runtime_error(
         "enable_vof_blocks: the block container is ALL-FLUID at rung W0 (the cut-cell block is "
@@ -2241,6 +2255,8 @@ void Solver<Grid>::enableVofMomentum(double rhoGasPhys, double rhoLiquidPhys) {
         "transport both own the momentum time term; they are not composable at this rung.");
   if (!(rhoGas > 0.0) || !(rhoLiquid > 0.0))
     throw std::runtime_error("enable_vof_momentum: both phase densities must be > 0");
+  if (vofBlocks_)
+    throw std::runtime_error(kVofMomBlocksMsg);
   vofRhoG_ = rhoGas;
   vofRhoL_ = rhoLiquid;
   vofMomEnabled_ = true;
