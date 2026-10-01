@@ -34,6 +34,13 @@ resolution D/h 16/24/32 both codes, ablations: vof_momentum, harmonic mu) — pa
 A (single-field VoF at our ratios and at Loisy's 1e-3/1e-2 with enable_vof_momentum, + guard:
 enable_vof_momentum with blocks must RAISE) — brief scratchpad/loisy/BRIEF_A.md, branch
 vofmom-guard; then C (publish the page with the finding).
+B DONE (scratchpad/pair, res_b.txt): near contact is GRID-SET in both codes — peclet film 2.6 -> 1.6
+cells (0.163 -> 0.066 D) from D/h 16 -> 24 (thins faster than h, not converged lubrication); TBF
+overlaps ~0.8 cells at both resolutions (|r|min 0.74). Pass-through gap peclet-TBF 8.5 -> 5.05
+time units; peclet late rise converged (1.062/1.059). Harmonic mu doubles peclet's film (default
+arithmetic is the less cushioning). NEW DEFECT: enable_vof_momentum (single field, no blocks) in
+this case family accelerates an isolated bubble to 1.84 vs 1.06 and merges the pair — A2 at risk;
+Loisy agent told to check on/off first. Guard commit 9b72708 on vofmom-guard (blocks+vof_momentum raise).
 
 **Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
