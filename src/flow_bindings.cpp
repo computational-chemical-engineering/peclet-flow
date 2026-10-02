@@ -43,6 +43,7 @@
 #include "peclet/core/decomp/block_decomposer.hpp"
 #endif
 
+#include "anderson_accelerator.hpp"
 #include "flow_ibm.hpp"
 #include "peclet/core/python/kokkos_teardown.hpp"
 #include "peclet/core/python/ndarray_interop.hpp"
@@ -178,6 +179,62 @@ struct BoundSolver final : peclet::flow::Solver<Grid>, peclet::core::python::Rel
   using peclet::flow::Solver<Grid>::Solver;
   void release() noexcept override { peclet::core::python::destruct_bound_instance(this); }
 };
+
+// The bound Anderson accelerator (doc/steady_acceleration.md §5.2): it owns Kokkos Views (the
+// history), so it is a Releasable like the solver and is destroyed by the module's atexit hook
+// before Kokkos::finalize if it is still alive then.
+template <class Grid>
+struct BoundAccelerator final : peclet::flow::AndersonAccelerator<Grid>,
+                                peclet::core::python::Releasable {
+  using peclet::flow::AndersonAccelerator<Grid>::AndersonAccelerator;
+  void release() noexcept override { peclet::core::python::destruct_bound_instance(this); }
+};
+
+// The developer-tier Anderson accelerator of a steady march, bound as a PRIVATE class
+// (`_AndersonAccelerator` / `_AndersonAcceleratorColocated`) and created only through
+// `s.diagnostics.anderson_accelerator(...)`. The public entry is peclet.flow.march_to_steady.
+template <class Grid>
+static void bind_accelerator(nb::module_& m, const char* name) {
+  using A = BoundAccelerator<Grid>;
+  nb::class_<A>(
+      m, name,
+      "Anderson accelerator of a steady march (doc/steady_acceleration.md): type-II Anderson on "
+      "the march state (velocity + P, plus the collocated face field under projected-face "
+      "advection), velocity-only metric. Created by s.diagnostics.anderson_accelerator(); the "
+      "public driver is peclet.flow.march_to_steady. step(accelerate) is ONE call of the solver's "
+      "step() (preceded by the lazy mix when accelerate and a mix is pending); between calls the "
+      "solver always holds a genuine step output.")
+      .def("step", &A::step, nb::arg("accelerate") = true,
+           "One map evaluation: when accelerate and a mix is pending, the solver's state is "
+           "replaced by the Anderson mix first; then one solver.step(). accelerate=False is a "
+           "plain step that still records history. Raises if the configuration became "
+           "unsupported (the same refusals as the constructor).")
+      .def_prop_ro("residual", &A::residual,
+                   "Relative velocity residual ||g_u - x_u|| / ||g_u|| of the last evaluation "
+                   "(inf before the first).")
+      .def_prop_ro(
+          "status", [](const A& a) { return std::string(a.statusName()); },
+          "'active', 'disabled' (acceleration stopped; steps are plain) or 'unstable' (the "
+          "Ritz guard found the plain map locally unstable at this dt).")
+      .def_prop_ro("reason", &A::reason, "Why the status is not 'active' ('' while active).")
+      .def_prop_ro("num_restarts", &A::numRestarts, "History restarts so far.")
+      .def_prop_ro("num_resets", &A::numResets,
+                   "History resets because the state or the parameters (dt, rho, mu, body force) "
+                   "were changed from outside.")
+      .def_prop_ro("num_columns", &A::numColumns, "Window columns in use.")
+      .def_prop_ro("ritz_radius", &A::ritzRadius,
+                   "The last Ritz estimate of the plain map's local spectral radius (NaN when the "
+                   "last evaluation did not compute it).")
+      .def_prop_ro("window", &A::window, "The window m.")
+      .def_prop_ro("mixing", &A::mixing, "The mixing beta.")
+      .def_prop_ro("memory_bytes", &A::memoryBytes,
+                   "Bytes of the history: (2m+3) * n_fields * 8 * n_padded (this rank).")
+      .def_prop_ro("seconds", &A::seconds,
+                   "Cumulative wall time spent in the accelerator, solver.step() excluded "
+                   "(device-fenced), seconds, this rank.")
+      .def("reset", &A::reset, "Clear the history (the next call starts a new window).")
+      .def("disable", &A::disable, "Stop accelerating for good; step() is then a plain step.");
+}
 
 /// The reconstructed-traction loads as the (4, n_instances, 3) array that both of its Python names
 /// return: `diagnostics.hydro_force_torque_traction()` (canonical) and the deprecated
@@ -564,6 +621,20 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def("balanced_force_failures", [](D& diag) { return diag.s->balancedForceFailures(); },
            "How many balanced-force solves have failed over the solver's lifetime (see "
            "last_balanced_force_failed).")
+      .def(
+          "anderson_accelerator",
+          [](D& diag, int window, double mixing) {
+            return new BoundAccelerator<Grid>(*diag.s, window, mixing);
+          },
+          nb::arg("window") = 5, nb::arg("mixing") = 1.0, nb::rv_policy::take_ownership,
+          nb::keep_alive<0, 1>(),
+          "A new Anderson accelerator of this solver's steady march "
+          "(doc/steady_acceleration.md; the public driver is peclet.flow.march_to_steady). "
+          "window in [1, 8] (default 5), mixing in (0, 1] (default 1.0). Raises on an "
+          "unsupported configuration (a collocated scheme other than 'ghost', VoF, phase change, "
+          "scalars, porous, variable properties, drag, cell forces, moving scenes, superficial "
+          "velocity, pressure warm start, the balanced-force projection) and when the history, "
+          "(2m+3) * n_fields * 8 * n_padded bytes, does not fit. Collective under MPI.")
       .def("last_pressure_iterations", [](D& diag) { return diag.s->lastPressureIterations(); },
            "Return the pressure-solver iteration count from the last step().\n\n"
            "A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration "
@@ -3294,6 +3365,8 @@ NB_MODULE(_flow, m) {
   // Staggered MAC grid (THE flow solver) + the collocated/cell-centered variant. Same Python API.
   bind_solver<peclet::flow::Staggered>(m, "Solver", "SolverDiagnostics");
   bind_solver<peclet::flow::Colocated>(m, "SolverColocated", "SolverColocatedDiagnostics");
+  bind_accelerator<peclet::flow::Staggered>(m, "_AndersonAccelerator");
+  bind_accelerator<peclet::flow::Colocated>(m, "_AndersonAcceleratorColocated");
 
 #ifdef PECLET_FLOW_MPI
   // Module-level: this rank's ORB block of the global (gnx,gny,gnz) grid, matching the

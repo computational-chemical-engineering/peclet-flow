@@ -118,6 +118,9 @@ def drag_K(umean, phi):
 def march(step, umean):
     """Step until the change of <u_x> still to come is below TOL_K (relative); see the docstring.
 
+    The amr column's instrument. The flow column uses peclet.flow.march_to_steady(accelerate=False)
+    with the same constants, which is this loop step for step (ctest march_to_steady, G0(b)).
+
     Every CHECK_EVERY steps, d = the change of <u_x> over the block and R = d / (the previous
     block's d). A block PASSES when the increments contract without changing sign (0 < R < 1) and
     the geometric remainder |d| / (1 - max(R, RHO_SLOW**CHECK_EVERY)) is below TOL_K |<u_x>| -- or
@@ -160,7 +163,12 @@ def run_flow(flow, SolverCls, N, phi):
     c = 0.5 * L
     sdf = np.sqrt((X - c) ** 2 + (Y - c) ** 2 + (Z - c) ** 2) - sphere_radius(phi)
     s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
-    steps, ok = march(s.step, lambda: float(s.get_u().mean()))
+    # The flow column marches with the library's driver (doc/steady_acceleration.md §10 Q11): the
+    # same instrument as march() below, step for step (ctest march_to_steady, gate G0(b)).
+    res = flow.march_to_steady(s, lambda: float(s.get_u().mean()), rtol=TOL_K,
+                               max_steps=MAX_STEPS, accelerate=False, check_every=CHECK_EVERY,
+                               num_passes=N_PASS, slow_rate=RHO_SLOW, roundoff=ROUNDOFF)
+    steps, ok = res.steps, res.converged
     u, uf = s.get_u(), s.get_uf()
     if os.environ.get("STUDY_DIAG") and SolverCls is flow.SolverColocated:
         # get_uf() is the genuinely different face field, not an alias of the cell field

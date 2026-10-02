@@ -20,10 +20,12 @@
 /// The build therefore compiles this file once per configuration (peclet_flow_solver without the
 /// macro, peclet_flow_solver_mpi with it) and links each consumer against the matching one.
 #define PECLET_FLOW_INSTANTIATING 1
+#include "anderson_accelerator.hpp"  // the steady-march accelerator, compiled beside its solver
 #include "flow_ibm.hpp"
 
 namespace peclet::flow {
 
 template class Solver<Staggered>;
+template class AndersonAccelerator<Staggered>;
 
 }  // namespace peclet::flow

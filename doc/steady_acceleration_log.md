@@ -534,3 +534,65 @@ allowed.
 the box was at load 107–119 on 48 cores (other sessions' jobs), and with 8 OpenMP threads per MPI
 rank the distributed tests crawled (`velocitymg_bc_mpi_np2` 2712 s, `sdflow_mpi_np2` > 47 min).
 The battery is re-run once on the WO-4 tree with the MPI tests at 2 threads per rank (entry below).
+
+---
+
+## 2026-10-02 — WO-4: adapter, bindings, Python driver, packaging (rev 1)
+
+**What landed.** `src/anderson_accelerator.hpp` (`AndersonAccelerator<Grid>`: core's
+`AndersonCore` around `Solver::step()`, §4.3; explicitly instantiated beside the solver in
+`src/flow_solver_{staggered,colocated}.cpp`); the private classes `_AndersonAccelerator` /
+`_AndersonAcceleratorColocated` and `s.diagnostics.anderson_accelerator(window=5, mixing=1.0)`
+(Releasable, keep_alive on the solver); `packaging/flow_steady.py` → `peclet/flow/steady.py`
+(`march_to_steady`, `MarchResult`, the §7 rev-1 driver: velocity-residual target, budget
+2·(num_passes + 3), early "slow" exit; `accelerate=True` by default as the note states, pending
+the D11 rule at G2); the import in `flow_init.py`; CMake `configure_file` + `install`; ctest
+`march_to_steady`; the study `study_avg_velocity_spheres.py` flow column switched to
+`march_to_steady(accelerate=False)` (Q11). `tests/kokkos_mpi/test_anderson_mpi.cpp` (G4c) and
+`tests/study/steady_acceleration_gates.py` (the WO-5 instrument) are in the same commit.
+
+**Implementation choices (recorded so they can be reverted).**
+- DECISION: the adapter refuses to step (std::logic_error) when the solver's state buffers were
+  reallocated since construction (a redistribute / rebalance), instead of mixing into buffers
+  the solver no longer reads. Alternative: re-bind silently (would need a fresh history anyway).
+  Reversible: delete the pointer check in `AndersonAccelerator::step`.
+- DECISION: developer-tier property `acc.seconds` — cumulative accelerator wall time excluding
+  `solver.step()`, device-fenced at both ends of each part (`Kokkos::fence()`, no effect on
+  numerics) — the G8 instrument. Name not in the note's list; reversible by renaming.
+- DECISION: G4c's test runs tight inner solves (PCG 1e-12, velocity residual tolerance 1e-12) at
+  nu dt/h^2 = 0.5, so the momentum solve is RB-GS on every block size (the AUTO V-cycle needs ≥ 16
+  cells per axis per rank) and converges; the remaining np-dependence is reduction order.
+- The 12 refusals carry the hint "pass accelerate=False"; the allocation failure is re-thrown as
+  "AndersonAccelerator: <core message>; pass accelerate=False".
+
+**Gate: C++ vs oracle** (host `build_omp4`, 8 threads, §11 collocated N = 16, production, m = 5,
+30 unconditional `step(True)` on two identical solvers):
+
+    python tests/study/steady_acceleration_gates.py oracle sphere --scheme collocated --N 16 --window 5 --steps 30 --trace
+
+Max relative difference of the per-step relative velocity residual over the first 30 steps
+**2.54e-9** (step 29; ≤ 1e-6 required). Steps 1–4 agree to ≤ 2.3e-15.
+Beyond the gate: `march_to_steady` on the C++ build reproduces the revision-1 oracle table
+(log R-6) step for step — host: §11 collocated N = 16 m = 5 89 steps (39 accelerated) K
+4.2666539753, staggered 51 (21) K 4.2119983296; CUDA (WO-5 runs): every compared case equal in
+steps (§11 coll N16 395/65/89/73, N24 90/69/48/58; stag N16 75/62/51/51, N24 135/53/50/74; bed
+stag 325/111/93/90, bed coll 190/163/83/82; G7a 440 diverged / 312 / 270 / unstable at 18).
+
+**Gate: G0(b)** — `march_to_steady(accelerate=False)` vs the study's `march()`, §11 production:
+
+| scheme | N | study steps | driver steps | <u_x> identical (==) |
+|---|---|---|---|---|
+| staggered | 16 | 75 | 75 | yes (0.040607286951873406) |
+| collocated | 16 | 395 | 395 | yes (0.04009007980112628) |
+| staggered | 24 | 135 | 135 | yes (0.04017534857334543) |
+| collocated | 24 | 90 | 90 | yes (0.03997018260520385) |
+
+**Gate: ctest `march_to_steady`** (`build_omp`, 8 threads): PASS in 35.9 s — certify (i) "pass"
+after 9 blocks, (ii) "slow" at step 15, (iii) "budget" at step 60; G0(b) N = 16 both schemes;
+small G1 N = 12 tight: staggered plain 165 / accelerated 58 steps, |K_acc/K_plain − 1| = 2.76e-12,
+collocated 2035 / 106, 2.22e-10; G7a: accelerate=False diverged at 440, True diverged at 270.
+
+**G0(a) after WO-4:** state hashes (12 serial + mpi_np2) identical to the baseline.
+**G4c — ctest `anderson_mpi`** (np = 1, 2, 4; 2 threads): max|u_np − u_1|/max|u_1| = 0 / 1.3e-15 /
+2.6e-15; γ, window and status bitwise equal on all ranks after every one of the 40 steps (0
+mismatches); residual 1.323022e-09 at np = 1, 2, 4 and single-rank.
