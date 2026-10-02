@@ -122,10 +122,22 @@ void AndersonAccelerator<Grid>::step(bool accelerate) {
   // §5.3: the refusals are re-evaluated at every call (host flags only), so a feature enabled
   // after construction is refused at the next call.
   const auto ms = s_.marchState();
+  // A different number of state fields is a configuration change (review R5): on the collocated
+  // grid set_advection / the projected-face advection add or remove the face field uf/vf/wf. The
+  // history belongs to the old map, so it is invalidated, and the core cannot mix a state it was
+  // not built on, so the call is refused.
+  const auto& held = core_.state().fields;
+  if (held.size() != ms.fields.size()) {
+    core_.invalidate();
+    throw std::logic_error(
+        "AndersonAccelerator: the march state changed from " + std::to_string(held.size()) +
+        " to " + std::to_string(ms.fields.size()) +
+        " fields since construction (a configuration change: set_advection on the collocated "
+        "solver adds or removes the face field uf/vf/wf); construct a new accelerator");
+  }
   // The core mixes the buffers it was built on; a redistribute reallocates them, after which the
   // accelerator would act on buffers the solver no longer reads.
-  const auto& held = core_.state().fields;
-  bool same = held.size() == ms.fields.size();
+  bool same = true;
   for (std::size_t f = 0; same && f < held.size(); ++f)
     same = held[f].data() == ms.fields[f].data() && held[f].extent(0) == ms.fields[f].extent(0);
   if (!same)
