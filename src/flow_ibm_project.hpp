@@ -1314,6 +1314,7 @@ void Solver<Grid>::projectBuildCoefficients() {
     mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
     mg_.setOutflowCoefficient(false);
     chebBoundsSet_ = false;  // spectrum changed with the coefficients (re-estimated by the solve)
+    constCoefOpReady_ = false;  // the MG no longer holds A0 (E2(a), constCoefEnsureOperator)
   }
   // Porous continuity: the Poisson operator is eps-weighted (c_f = open_f * eps_f), same rails as
   // the density coefficient above. Rebuilt every step (eps moves with the particles). With
@@ -1353,6 +1354,7 @@ void Solver<Grid>::projectBuildCoefficients() {
     mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
     mg_.setOutflowCoefficient(false);
     chebBoundsSet_ = false;
+    constCoefOpReady_ = false;  // the MG no longer holds A0 (E2(a), constCoefEnsureOperator)
   }
 }
 
@@ -1386,6 +1388,11 @@ void Solver<Grid>::projectSolve() {
             ph((long)(x + 1) + (long)(y + 1) * e1.x + (long)(z + 1) * (long)e1.x * e1.y) = 0.0;
         });
   }
+  projectSolveTail();
+}
+
+template <class Grid>
+void Solver<Grid>::projectSolveTail() {
   copyInner(phi_, e_, G, CCConst(phi1_), e1_, 1);  // bridge phi back g=1 -> g=2
   fillGhosts(phi_);
   if (hasOutflow_) {  // hold phi=0 at the outflow ghost so grad(phi) drives the outflow face
@@ -1396,6 +1403,31 @@ void Solver<Grid>::projectSolve() {
         if (bc_[2 * a + s] == 3 && touchesGlobalFace(2 * a + s))
           bcZeroPressureGhost(phi_, e, G, a, s);
   }
+}
+
+template <class Grid>
+long Solver<Grid>::solveConstantPressure() {
+  // E2(a) S5 (doc/vof_step_performance_design.md §12.3): solve A0 phi = rhs1_ on the g=1 block,
+  // A0 = the constant openness operator constCoefEnsureOperator() put into the MG. Option (a) is
+  // projectSolve's final MG-PCG call VERBATIM, arguments included: the star overlay is
+  // unreachable without a solid, and keeping the call identical is what makes a uniform-density
+  // split step bitwise equal to an exact MG-PCG step (gate G-E2-RED).
+  // Contract for any engine (option (b) later): same input rhs1_ (fluid-cell sum zero to rtol);
+  // phi is defined up to a constant and returned in the solver's mean-removed gauge; returns the
+  // iteration count and sets lastPressureFailed_; may assume A0 is the constant 7-point operator
+  // with periodic or Neumann (wall/slip) faces and per-axis weights w_a.
+  long iters = 0;
+  switch (constCoefEngine_) {
+    case ConstCoefEngine::MgPcg:
+      if (!pwarm_)
+        Kokkos::deep_copy(phi1_, 0.0);
+      iters = mg_.solvePCG(rhs1_, phi1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
+                           fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_});
+      lastPressureFailed_ = mg_.lastSolveFailed();
+      break;
+  }
+  projectSolveTail();
+  return iters;
 }
 
 template <class Grid>

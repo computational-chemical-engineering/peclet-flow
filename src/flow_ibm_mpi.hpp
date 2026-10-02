@@ -142,6 +142,7 @@ void Solver<Grid>::redistribute(const peclet::core::decomp::BlockDecomposer<3>& 
     const bool keepBfpBounds = bfpChebSet_;
     setSolid(gatherInner(sdf_), cutcellPressure_);
     bfpChebSet_ = keepBfpBounds;
+    constCoefOpReady_ = false;  // a new hierarchy: E2(a) re-installs A0 at its next split step
   }
   for (std::size_t k = 0; k < names.size(); ++k)
     if (names[k] != "sdf")

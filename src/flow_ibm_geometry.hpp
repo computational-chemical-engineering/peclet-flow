@@ -874,6 +874,9 @@ void Solver<Grid>::setSolidInitPressureMg() {
   // ablation back to the literal 1.0; a bed clear of the open faces is byte-identical either way.
   mg_.setOutflowCoefficient(hasOutflow_ && outflowOpCoeff_);
   mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), u_.w[0], u_.w[1], u_.w[2]);
+  // A (re)initialised hierarchy: E2(a) re-installs A0 itself (constCoefEnsureOperator) rather
+  // than rely on this setOpenness, whose sequence it shares minus init.
+  constCoefOpReady_ = false;
   // Coarse-solve policy: an explicit set_pressure_graph_amg(True) forces agglomeration,
   // otherwise the mode set by set_pressure_bottom (default auto) decides.
   mg_.setAgglomerationMode(pressGraphAmg_ ? 1 : pressAgglomMode_);

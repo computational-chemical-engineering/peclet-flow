@@ -2448,6 +2448,18 @@ class Solver {
   void projectSolve();
 
 
+  // projectSolve's tail, shared with the E2(a) constant solve: bridge phi g=1 -> g=2, fill its
+  // ghosts, and hold phi = 0 at an outflow ghost.
+  void projectSolveTail();
+
+
+  // E2(a) S5, the option-(a)/(b) slot (doc/vof_step_performance_design.md §12.3): solve the
+  // constant-coefficient operator A0 phi1_ = rhs1_ with the engine `constCoefEngine_` (v1: MG-PCG
+  // at set_pressure_pcg's cap and rtol, projectSolve's own call verbatim), then projectSolveTail().
+  // Returns the iteration count and sets lastPressureFailed_. Requires constCoefEnsureOperator().
+  long solveConstantPressure();
+
+
   // The pressure-driver dispatch of projectSolve (Chebyshev with its bound estimate / ghost
   // BiCGStab / flexible CG / MG-PCG): solve the projection's own operator for `x1` (g=1 block,
   // used as the initial guess) with the right-hand side `rhs1`, at the driver's own rtol. Returns
@@ -4545,6 +4557,13 @@ class Solver {
   double lastAxNorm_ = 0.0;        // max|A u| of the last residual evaluation (scale)
   int pcgMaxit_ = 500;
   double pcgRtol_ = 1e-10;  // cut-cell pressure MG-PCG
+  // E2(a), the opt-in constant-coefficient (Dodd-Ferrante) pressure driver
+  // (doc/vof_step_performance_design.md §12): does the pressure MG hold the constant operator A0?
+  // Set true only by constCoefEnsureOperator(); every other setOpenness / MG (re)initialisation
+  // clears it. The engine of the constant solve (solveConstantPressure); v1 has MG-PCG only and
+  // no public switch.
+  bool constCoefOpReady_ = false;
+  enum class ConstCoefEngine { MgPcg } constCoefEngine_ = ConstCoefEngine::MgPcg;
   bool useChebyshev_ = false,
        chebBoundsSet_ = false;  // Chebyshev pressure driver (set_pressure_chebyshev)
   bool useFcg_ = false;         // flexible-CG pressure driver (set_pressure_fcg); OFF by default,
