@@ -206,3 +206,38 @@ Orders:
 
 **Decision.** P2F remains the conjugate method. Peters' directional scheme is recorded as a measured
 alternative.
+
+## 2026-10-02 — WO-1: core kernels (core branch `scalar-ibm`, commit `a031c6f`, not pushed)
+
+**Built** (core worktree `suite/core-scalar-ibm`, new files only; no existing core header touched):
+`include/peclet/core/scheme/cut_cell_geometry.hpp` (`triPositiveFraction`, `tetPositiveFraction`,
+`CutCellGeometry`, `cutCellGeometryFanTet`, `snapAperture`, `facetAreaVector`; plane source
+reserved), `include/peclet/core/scheme/probe_flux.hpp` (`probeSupport`, `trilinearStencil`,
+`ProbeResult`, `buildProbe`, `wallConductance`, `interfaceConductance`), ctests `cut_cell_geometry`
+(Kokkos build: the vof oracles are Kokkos headers) and `probe_flux` (host-only, plain-inline path).
+
+**Gates** (host-openmp, Release):
+
+| gate | measured | bound |
+|---|---|---|
+| (a) 1000 planar cuts, isotropic: κ / apertures / area vector ÷ h² / centroid ÷ h | 4.4e-16 / 8.9e-16 / 8.9e-16 / 1.8e-15 | 1e-14 / 1e-14 / 1e-13 / 1e-13 |
+| (a) same, random anisotropic h ∈ [0.5, 2]³ | 5.6e-16 / 3.7e-15 / 2.0e-15 / 1.7e-15 | same |
+| (b) 20000 random samples (¼ with exact zeros): PL closure ÷ max A | 5.6e-16; κ ∈ [0, 1]; κ = 0 ⇒ apertures 0 | 1e-14 |
+| (c) gap 0.3h / slab 0.3h (x-normal, centred; also oblique, off-centre) | `gap` / `thinSolid`, 2 facets, cos(n₀, n₁) = −1 (oblique −0.99934) | — |
+| (d) ladder | 1000/1000 random planar facets R0 (s ∈ [0.575, 0.953]h); covered cell → R1a (s = 0.75); wall at 0.8 s₀ → R1b (s = 0.22, 4 cells); no valid cell → R2 | — |
+| (d) linear reproduction | probe weights 4.9e-16, stencil 1.3e-15 | 1e-14 |
+
+Also: a shared face's aperture is bitwise equal from both cells (2000 random lattices, §2.2 corner
+sum); F(v) + F(−v) = 1 to 6.7e-16; a V3 (reach) failure on h = (1, 1, 10) falls to R2 without
+querying the Lookup. Core battery: plain 77/77, Kokkos host-openmp 93/93 (`-LE bench`). flow
+`build_dev` reconfigured with `-DPECLET_SIBLING_PECLET_CORE=…/core-scalar-ibm` and built clean.
+
+**Readings of the note made while implementing** (none changes a gate):
+- corner index c = bx + 2by + 4bz (x fastest; "lexicographic in (x, y, z) bits" read with the
+  suite's axis order);
+- the face fan is `ccFaceOpenMS`'s exactly: tangents t1 < t2, loop c00, c10, c11, c01, summed left
+  to right — the same bits from both cells;
+- V3 is checked on all 8 stencil cells before the Lookup is called, so nothing beyond ±2 is ever
+  read; R1b needs φ(p₀), so it is tried only when R0's stencil passed V3; R1a only when R0 failed
+  V1 alone; a piece with n·n_ref = 0 joins the reference group A (facet 0);
+- face area A_a = product of the other two spacings.
