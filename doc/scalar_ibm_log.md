@@ -120,3 +120,25 @@ is applied only as a sparse cut-cell overlay matvec.
 conservative, stable and positive, and costs nothing extra because diffusion is already an implicit
 (BiCGStab) solve per step. State redistribution (Berger–Giuliani) remains the alternative to
 compare, and the literature (L1) decides between them.
+
+## 2026-10-02 — probe-distance sweep (`jc.py probeK probe0.3 probe0.5 probe0.7`)
+
+**Context.**
+- AMReX `MLEBABecLap` (L1 digest §3) uses a two-point Dirichlet probe at
+  dx_eb = max(0.3, (κ² − ¼)/(2κ)) h along the normal from the boundary centroid, with trilinear
+  interpolation: the same family as ours.
+- With bilinear weights renormalized over valid (κ > 0) cells when the stencil touches a covered
+  cell, the results are as follows (error at ND = 128):
+
+| probe | fallbacks over the sweep | Bi = 10 | Bi = ∞ | order |
+|---|---|---|---|---|
+| AMReX κ rule | 762 | 7.3e-5 | 9.3e-5 | 0.7–1.2, erratic |
+| 0.3 h | 762 | 1.1e-4 | 1.5e-4 | 0.4–0.9, erratic |
+| 0.5 h | 301 | 3.1e-5 | 1.6e-5 | 2.0–2.2, reach 1 |
+| 0.7 h | 0 | 8.4e-6 | 3.5e-5 | 2.0, reach 2 |
+
+**Conclusions.**
+- The fallback (renormalization = local constant extrapolation) is what degrades short probes.
+- Choose the probe so that the stencil never needs it. In 2-D, 0.7 h > √2/2·h.
+- In 3-D, the guarantee that every trilinear neighbour is at least a cut cell for a planar wall
+  needs c ≥ √3/2·h ≈ 0.87 h. This is a design input.

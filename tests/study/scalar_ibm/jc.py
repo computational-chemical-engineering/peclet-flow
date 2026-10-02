@@ -27,6 +27,7 @@ def lagr(xs, x):
 
 
 REACH = [0]
+FB = [0]
 
 def build(G, k, fc=True, wall="quad"):
     n, h = G.n, G.h
@@ -104,15 +105,22 @@ def build(G, k, fc=True, wall="quad"):
                     break
                 pts.append((s, cand, lagr(np.array(coords), t)))
             if wall.startswith("probe"):
-                c = float(wall[5:] or 1.0)
+                c = (max(0.3, (G.kap[i, j]**2 - 0.25) / (2 * G.kap[i, j])) if wall[5:] == "K"
+                     else float(wall[5:] or 1.0))
                 sp_ = c * h
                 p = xw + sp_ * nn
                 fi = (p[0] - G.xc[0]) / h; fj = (p[1] - G.yc[0]) / h
                 i0, j0 = int(np.floor(fi)), int(np.floor(fj)); tx, ty = fi - i0, fj - j0
                 cand = [(i0, j0), (i0 + 1, j0), (i0, j0 + 1), (i0 + 1, j0 + 1)]
                 ww = [(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty]
-                if not all(idx[q] >= 0 for q in cand):
-                    raise RuntimeError("probe hits invalid cell")
+                okm = [idx[q] >= 0 for q in cand]
+                if not all(okm):
+                    FB[0] += 1
+                    wsum = sum(wv for o_, wv in zip(okm, ww) if o_)
+                    if wsum < 0.25:
+                        raise RuntimeError("probe hits invalid cells")
+                    cand = [q for q, o_ in zip(cand, okm) if o_]
+                    ww = [wv / wsum for wv, o_ in zip(ww, okm) if o_]
                 reach = max(max(abs(q[0] - i), abs(q[1] - j)) for q in cand)
                 REACH[0] = max(REACH[0], reach)
                 pts = [(sp_, cand, np.array(ww))]
@@ -150,8 +158,7 @@ def eig(K, M, which):
 if __name__ == "__main__":
     rng = np.random.default_rng(1); offs = rng.random((3, 2))
     NDs = [16, 32, 64, 128]
-    variants = {"JC-lin": dict(fc=False, wall="lin"), "probe1.0": dict(fc=False, wall="probe1.0"),
-                "probe1.5": dict(fc=False, wall="probe1.5"), "probe0.7": dict(fc=False, wall="probe0.7")}
+    variants = {v: dict(fc=False, wall=v) for v in (sys.argv[1:] or ["probe0.7"])}
     for Bi in (0.0, 0.1, 1.0, 10.0, 100.0, np.inf):
         ref = mu_ref(Bi); which = 1 if Bi == 0 else 0
         for tag, kw in variants.items():
@@ -165,4 +172,4 @@ if __name__ == "__main__":
                 em = np.sqrt(np.mean(np.square(e)))
                 line += f" | {ND:3d}: {np.mean(e):+9.2e}" + (f" p={np.log(prev/em)/np.log(2):4.1f}" if prev else "       ")
                 prev = em
-            print(line + f'  reach={REACH[0]}', flush=True); REACH[0] = 0
+            print(line + f'  reach={REACH[0]} fallbacks={FB[0]}', flush=True); REACH[0] = 0; FB[0] = 0
