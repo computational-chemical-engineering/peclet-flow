@@ -193,6 +193,9 @@ double Solver<Grid>::vofInterfaceArea() {
     const long sy = e3.x, sz = (long)e3.x * e3.y;
     CCConst c = CCConst(vofAdv_.colour());
     const double eps = pcEffInterfaceEps();
+    // The PHYSICAL polygon area in hRef^2 (V5.1), as the phase-change build takes it: on box cells
+    // the unit-cube `plicArea` is not an area at all. Bit-identical on cubic cells (det = s = 1).
+    const vof::VofMetric gme = u_.vofMetric();
     Kokkos::parallel_reduce(
         "peclet::flow::vof_area_plic",
         MDRange3<CCExec>(CCExec(), {g, g, g}, {g + nx_, g + ny_, g + nz_}),
@@ -207,7 +210,7 @@ double Solver<Grid>::vofInterfaceArea() {
                 st[vof::plicSt(ii + 1, jj + 1, kk + 1)] = c(i + ii + jj * sy + kk * sz);
           double m[3];
           vof::mycNormal(st, m);
-          acc += vof::plicArea(m[0], m[1], m[2], vof::plicAlpha(m[0], m[1], m[2], c(i)));
+          acc += vof::plicAreaMetric(m[0], m[1], m[2], vof::plicAlpha(m[0], m[1], m[2], c(i)), gme);
         },
         a);
     Kokkos::fence();
