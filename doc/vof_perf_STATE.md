@@ -26,13 +26,21 @@ vs ~0.80 (0.99 at ratios 0.02). GPU now 42.7 ms/step (main 035121a+). Landed sin
 vof_momentum+blocks (2d0a0d0). OPEN: vof_momentum isolated-bubble acceleration seen in the D/h 16
 pair run (1.84) but not at D/h 20 (on/off within 7 % transient, 1.6 % settled).
 
-**Running (2026-10-02, USER: "perform the clean-up and performance plan").** Cleanup DONE (~95 GB:
-TBF raw runs, superseded peclet runs, scratch; study results archived in
-/home/frankp/Codes/bubble_column_perf/studies/). Three opus-implementers, common brief
-/home/frankp/Codes/bubble_column_perf/BRIEF_MAINLINE2.md: P3 WO-6+WO-11 (device bottom; worktree
-flow-vof-b1), P4 E2(a) WO-E2.0..7 (flow-vof-e2), P5 WO-7 core half (core-pvfit, NOT tagged — ask
-release session suite-73 for a core release with it) + flow half (flow-vof-pvfit) + WO-13 D1.
-Baseline worktree flow-main-base for bitwise gates.
+**Running / results (2026-10-02 late).**
+- P3 DONE (branch vof-b1, worktree flow-vof-b1, not pushed; handoff in its doc/vof_step_performance_log.md):
+  WO-6 device geometric-Krylov bottom (tau 1e-5 via E3) + WO-11 solids — numerically clean (column
+  2e-14, identical iterations; host bitwise; bulk transfers 13/19 -> 0/2), BUT slower on the RTX 5080:
+  74 vs 50 ms/step (bottom 2.8 ms/solve; single team, FP64-weak card; measured on a 90-99 % shared
+  GPU). DECISION: land with the host GraphAMG still the GPU default, B1 opt-in, until a quiet-GPU and
+  an H100 measurement; if confirmed, back to the architect (premise R3; a device dense LU of the
+  1536-unknown bottom looks ~1-2 ms/step). CUDA battery was cut at 47/189 (0 failed): rerun at merge.
+- P5 DONE (vof-pvfit, flow-vof-pvfit; core cb4c7ba on core-pvfit, NOT pushed — release session
+  suite-73 asked to release it): WO-7b team kernel bitwise (fallbackBatch 5.37 -> 1.61 ms/launch);
+  WO-13 D1: rtol 1e-6 passes all criteria, iterations 13.9 -> 7.4, but systematic ~5e-8 volume
+  drift over production -> DECISION: published case stays 1e-10 (peclet-examples ac35a14 reverts
+  f28b2ce); D1 rerun on main scripted (~/Codes/bubble_column_perf/d1_main/run_d1_main.sh) for a
+  quiet GPU. WO-7c (persistent teams on the WO-8 batched tier-3 path, DECISION option C) running.
+- P4 E2(a) still running (vof-e2, flow-vof-e2), told to hand off past 300k context.
 
 **Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
