@@ -3808,8 +3808,10 @@ class Solver {
   /// Turn on phase change. `rhoG`/`rhoL` are the phase densities used by the regression
   /// (`dV = mdot A dt / rho_l`) and by the divergence source (`S = mdot A (1/rho_g - 1/rho_l)`);
   /// they are given EXPLICITLY rather than read off a closure, exactly as `enable_vof_momentum`
-  /// does and for the same reason. `hlv` is the latent heat (J/kg) and is only used by the thermal
-  /// mass flux. Registers "mdot" (kg m^-2 s^-1, solver units) and "pc_source" (1/s).
+  /// does and for the same reason. `hlv` is the latent heat (energy per mass) and is only used by
+  /// the thermal mass flux. All three are PHYSICAL (kept verbatim in `pc*Phys_`, converted by
+  /// `pcRefreshUnits`, so a reference scale pinned later re-derives them). Registers "mdot" and
+  /// "pc_source", which hold INTERNAL values (`mdotToInt`, `divToInt` of `UnitScales`).
   void enablePhaseChange(double rhoG, double rhoL, double hlv);
 
 
@@ -3817,17 +3819,21 @@ class Solver {
 
 
 
-  /// Prescribe a UNIFORM mass flux (P0). Overwrites "mdot" on the inner cells and its ghosts.
+  /// Prescribe a UNIFORM mass flux (P0), in mass per area per time. Overwrites "mdot" on the inner
+  /// cells and its ghosts with the INTERNAL value, so under an armed extent the reference density
+  /// and time must already be pinned (`requireScalesPinned`): the field is not re-derived later.
   void setMassFluxUniform(double v);
 
 
-  /// Prescribe a per-cell mass flux (P0), x-fastest over the inner region.
+  /// Prescribe a per-cell mass flux (P0), x-fastest over the inner region; units and call-order
+  /// rule as `setMassFluxUniform`.
   void setMassFlux(const std::vector<double>& v);
 
 
   /// P1: compute `mdot` each step from the registered scalar `tname` by the one-sided pure-cell
   /// weighted least-squares gradients of `vof/phase_change.hpp`. `Tsat` is the saturation
-  /// temperature, `kg`/`kl` the phase conductivities (W/(cell K)) and `Rint` the interfacial
+  /// temperature (never rescaled), `kg`/`kl` the phase conductivities (power per length per
+  /// kelvin, physical) and `Rint` the interfacial
   /// heat-transfer resistance of the Schrage/IHTR Robin condition `T_G = T_sat + mdot R_int`
   /// (Bureš & Sato 2021); `Rint = 0` is the hard Dirichlet and is the default.
   void setPhaseChangeThermal(const std::string& tname, double Tsat, double kg, double kl,
@@ -3903,7 +3909,7 @@ class Solver {
 
 
 
-  /// The summed interfacial area over the inner region, in h^2 (globally reduced under MPI) —
+  /// The summed interfacial area over the inner region, PHYSICAL (globally reduced under MPI) —
   /// the E7 gallery's `vof_interface_area()`. Uses the CURRENT `set_phase_change_area` geometry,
   /// so the number a page quotes and the number the phase change integrates are the same one.
   /// Needs `enable_vof`; does not need phase change.
@@ -3931,6 +3937,7 @@ class Solver {
   /// This is what stops artificial heating at a high `rho c_p` ratio: with two different fluxes the
   /// heat content carried into a mixed cell is divided by a heat capacity built from another flux,
   /// an error of order `d(rho c_p)` — 2000x at water/steam. Requires the thermal mass flux.
+  /// `rcpGas`/`rcpLiquid` are volumetric heat capacities, physical (`UnitScales::rcpToInt`).
   void setPhaseChangeEnergy(double rcpGas, double rcpLiquid);
 
 
@@ -4050,18 +4057,23 @@ class Solver {
   bool phaseChangeDepositFallback() const;
 
 
+  /// The operator's interfacial heat (power), physical.
   double phaseChangeQOperator() const;
 
 
   double phaseChangeQOrphan() const;
 
 
+  /// The carry ledger, physical: an energy with the consistent transport on, and a temperature
+  /// times a volume without it (the constant-diffusivity scalar carries no heat capacity).
   double phaseChangeCarryDeposited() const;
 
 
   double phaseChangeCarryLost() const;
 
 
+  /// The budget, physical: energies and powers with the consistent transport on, temperature x
+  /// volume (and per time) without it — see `phaseChangeCarryDeposited`.
   PhaseChangeBudget phaseChangeBudgetValues() const;
 
 
@@ -4085,6 +4097,28 @@ class Solver {
 
 
 
+  /// Re-derive the INTERNAL phase-change constants (`pcRhoG_` ... `pcRcpL_`) from the caller's
+  /// physical ones (`pc*Phys_`) with the current reference scales, and push them to the consumers
+  /// that cache them (the energy advector, the k(C)/rho c_p(C) fields). Called by every setter that
+  /// takes one and by `refreshUnitDerived`; exactly the identity in cell units.
+  void pcRefreshUnits();
+
+
+
+  /// Under an armed extent, refuse a call that writes a dimensional value into a FIELD before the
+  /// reference scales it converts with are pinned (`rho`: the first set_rho, `dt`: the first
+  /// set_dt). A field is converted once, at the call, and a scale pinned later would leave it in
+  /// the wrong units silently. A no-op in cell units.
+  void requireScalesPinned(const char* who, bool needRho) const;
+
+
+
+  /// The factor from an internal phase-change ledger entry (a per-cell sum of rcp' dT) to the
+  /// caller's units: joules with the consistent transport on, temperature x volume without it.
+  double pcLedgerEnergyToPhys() const;
+
+
+
   /// The colour block's ghost policy WITHOUT the colour-specific rules (no solid-band fill, no VoF
   /// boundary colour): the halo/periodic exchange plus the non-periodic zero-gradient clamp. This
   /// is the temperature's policy on the g=3 block.
@@ -4092,7 +4126,8 @@ class Solver {
 
 
 
-  /// A PRESCRIBED extra divergence source (1/s), x-fastest over the inner region, added to the
+  /// A PRESCRIBED extra divergence source (1/time, physical; set_dt must precede it under an
+  /// extent, `requireScalesPinned`), x-fastest over the inner region, added to the
   /// Poisson RHS exactly like the phase-change deposit: the projection then solves for
   /// `div(open u) = S_pc + S_user`. This is how a CLOSED (periodic) box is made compatible with a
   /// net vapour production: put a balancing sink somewhere the exact solution can absorb it. In a
@@ -4870,8 +4905,12 @@ class Solver {
   std::vector<ScalarField> scalars_;  // transported scalars (advection-diffusion)
   // --- phase change (WO-P01) -------------------------------------------------------------------
   bool pcEnabled_ = false, pcThermal_ = false, pcHasUser_ = false;
-  double pcRhoG_ = 1.0, pcRhoL_ = 1.0, pcHlv_ = 1.0;
+  double pcRhoG_ = 1.0, pcRhoL_ = 1.0, pcHlv_ = 1.0;  // INTERNAL (pcRefreshUnits)
   double pcTsat_ = 0.0, pcKg_ = 0.0, pcKl_ = 0.0, pcRint_ = 0.0;
+  // the caller's PHYSICAL values, kept verbatim (refreshUnitDerived re-derives the internal ones)
+  double pcRhoGPhys_ = 1.0, pcRhoLPhys_ = 1.0, pcHlvPhys_ = 1.0;
+  double pcKgPhys_ = 0.0, pcKlPhys_ = 0.0, pcRintPhys_ = 0.0;
+  double pcRcpGPhys_ = 1.0, pcRcpLPhys_ = 1.0;
   double pcInterfaceEps_ = 1e-12, pcPureEps_ = 1e-12;
   std::string pcTName_;
   CCField pcMdot_, pcSrc_, pcUser_, pcArea_, pcNrm_[3], pcDep_, pcTgt_, pcCnew_, pcDefic_;

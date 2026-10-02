@@ -31,9 +31,10 @@ void Solver<Grid>::enablePhaseChange(double rhoG, double rhoL, double hlv) {
     throw std::runtime_error("enable_phase_change: both phase densities must be > 0");
   if (!(hlv > 0.0))
     throw std::runtime_error("enable_phase_change: the latent heat h_lv must be > 0");
-  pcRhoG_ = rhoG;
-  pcRhoL_ = rhoL;
-  pcHlv_ = hlv;
+  pcRhoGPhys_ = rhoG;
+  pcRhoLPhys_ = rhoL;
+  pcHlvPhys_ = hlv;
+  pcRefreshUnits();
   // WO-P23: phase change and WO-R2 item 4's wisp guard are NOT compatible, and the measurement
   // is in the findings. `enable_vof` sets `WyAdvector::wispEps = 1e-8`, which makes the advector
   // treat a cell with `C <= 1e-8` as a PURE phase for reconstruction and flux. The phase-change
@@ -70,16 +71,56 @@ bool Solver<Grid>::phaseChangeEnabled() const {
 template <class Grid>
 void Solver<Grid>::setMassFluxUniform(double v) {
   requirePhaseChange("set_mass_flux_uniform");
-  Kokkos::deep_copy(pcMdot_, v);
+  requireScalesPinned("set_mass_flux_uniform", true);
+  Kokkos::deep_copy(pcMdot_, v * u_.mdotToInt());  // `v * 1.0` in cell units
   pcThermal_ = false;
 }
 
 template <class Grid>
 void Solver<Grid>::setMassFlux(const std::vector<double>& v) {
   requirePhaseChange("set_mass_flux");
-  scatterInner(pcMdot_, v);
+  requireScalesPinned("set_mass_flux", true);
+  const double k = u_.mdotToInt();
+  if (k != 1.0) {
+    std::vector<double> vi(v.size());
+    for (std::size_t i = 0; i < v.size(); ++i)
+      vi[i] = v[i] * k;
+    scatterInner(pcMdot_, vi);
+  } else {
+    scatterInner(pcMdot_, v);
+  }
   fillPropGhosts(pcMdot_);
   pcThermal_ = false;
+}
+
+template <class Grid>
+void Solver<Grid>::requireScalesPinned(const char* who, bool needRho) const {
+  if (!u_.physical)
+    return;
+  if (!u_.tRefSet || (needRho && !u_.rhoRefSet))
+    throw std::runtime_error(
+        std::string(who) +
+        ": under a physical domain this writes a dimensional value into a field, converted once "
+        "with the reference scales; call set_rho and set_dt first (the first of each pins the "
+        "scale, and a field converted before that would be left in the wrong units)");
+}
+
+template <class Grid>
+void Solver<Grid>::pcRefreshUnits() {
+  // Every factor is exactly 1.0 in cell units, so each line is `x = x_phys * 1.0` there.
+  pcRhoG_ = pcRhoGPhys_ * u_.rhoToInt();
+  pcRhoL_ = pcRhoLPhys_ * u_.rhoToInt();
+  pcHlv_ = pcHlvPhys_ * u_.latentToInt();
+  pcKg_ = pcKgPhys_ * u_.condToInt();
+  pcKl_ = pcKlPhys_ * u_.condToInt();
+  pcRint_ = pcRintPhys_ * u_.rintToInt();
+  pcRcpG_ = pcRcpGPhys_ * u_.rcpToInt();
+  pcRcpL_ = pcRcpLPhys_ * u_.rcpToInt();
+  if (pcEnergy_) {  // the consumers that cached the old internal values
+    if (vofEnergy_.initialized())
+      vofEnergy_.setPhaseRcp(pcRcpG_, pcRcpL_);
+    pcUpdateEnergyProps();
+  }
 }
 
 template <class Grid>
@@ -90,10 +131,11 @@ void Solver<Grid>::setPhaseChangeThermal(const std::string& tname, double Tsat, 
     throw std::runtime_error("set_phase_change_thermal: no scalar named '" + tname +
                              "' (call add_scalar first)");
   pcTName_ = tname;
-  pcTsat_ = Tsat;
-  pcKg_ = kg;
-  pcKl_ = kl;
-  pcRint_ = Rint;
+  pcTsat_ = Tsat;  // a temperature: never rescaled
+  pcKgPhys_ = kg;
+  pcKlPhys_ = kl;
+  pcRintPhys_ = Rint;
+  pcRefreshUnits();
   pcThermal_ = true;
   scalarDirichletMask(tname);  // allocate the per-cell Dirichlet mask + value fields
   pcUpdateThermalMask();
@@ -179,7 +221,7 @@ double Solver<Grid>::vofInterfaceArea() {
     a = gsum;
   }
 #endif
-  return a;
+  return a * u_.areaToPhys();  // hRef^2 -> the caller's area (exactly 1.0 in cell units)
 }
 
 template <class Grid>
@@ -221,8 +263,9 @@ void Solver<Grid>::setPhaseChangeEnergy(double rcpGas, double rcpLiquid) {
         "is for the energy scalar it names)");
   if (!(rcpGas > 0.0) || !(rcpLiquid > 0.0))
     throw std::runtime_error("set_phase_change_energy: both phase rho*c_p must be > 0");
-  pcRcpG_ = rcpGas;
-  pcRcpL_ = rcpLiquid;
+  pcRcpGPhys_ = rcpGas;
+  pcRcpLPhys_ = rcpLiquid;
+  pcRefreshUnits();  // pcEnergy_ is not yet set here, so this only derives the constants
   if (pcKcell_.extent(0) != n_) {
     pcKcell_ = CCField("pc_k", n_);
     pcRcp_ = CCField("pc_rcp", n_);
@@ -374,27 +417,50 @@ bool Solver<Grid>::phaseChangeDepositFallback() const {
 
 template <class Grid>
 double Solver<Grid>::phaseChangeQOperator() const {
-  return pcQOperator_;
+  return pcQOperator_ * u_.powerToPhys();
 }
 
 template <class Grid>
 double Solver<Grid>::phaseChangeQOrphan() const {
-  return pcQOrphan_;
+  return pcQOrphan_ * u_.powerToPhys();
 }
 
 template <class Grid>
 double Solver<Grid>::phaseChangeCarryDeposited() const {
-  return pcCarryDeposited_;
+  return pcCarryDeposited_ * pcLedgerEnergyToPhys();
 }
 
 template <class Grid>
 double Solver<Grid>::phaseChangeCarryLost() const {
-  return pcCarryLost_;
+  return pcCarryLost_ * pcLedgerEnergyToPhys();
+}
+
+template <class Grid>
+double Solver<Grid>::pcLedgerEnergyToPhys() const {
+  // A per-cell sum of rcp' (T - T_ref), cell volume left out: an energy with the consistent
+  // transport (internal energy unit x the cell volume in hRef^3), and with the constant-
+  // diffusivity scalar — whose ledgers weight by 1 instead of rho c_p — a temperature x volume.
+  return (pcEnergy_ ? u_.energyToPhys() : u_.volToPhys()) * u_.vol;
 }
 
 template <class Grid>
 typename Solver<Grid>::PhaseChangeBudget Solver<Grid>::phaseChangeBudgetValues() const {
-  return pcBudget_;
+  PhaseChangeBudget b = pcBudget_;
+  const double ke = pcLedgerEnergyToPhys();
+  // the GFM fluxes are sums of FACE fluxes k' o (dT)/theta: a power (per time: divide the
+  // energy unit by tRef), with no cell-volume factor
+  const double kq = pcEnergy_ ? u_.powerToPhys() : u_.volToPhys() * u_.divToPhys();
+  b.hOpen *= ke;
+  b.hOpenNew *= ke;
+  b.hLiquid *= ke;
+  b.hMasked *= ke;
+  b.dEoverwrite *= ke;
+  b.dEoverwriteNew *= ke;
+  b.eEnter *= ke;
+  b.eLeave *= ke;
+  b.qGfm *= kq;
+  b.qBehind *= kq;
+  return b;
 }
 
 template <class Grid>
@@ -446,9 +512,18 @@ void Solver<Grid>::pcUpdateEnergyProps() {
 
 template <class Grid>
 void Solver<Grid>::setDivergenceSource(const std::vector<double>& v) {
+  requireScalesPinned("set_divergence_source", false);
   if (pcUser_.extent(0) != n_)
     pcUser_ = addField("div_source");
-  scatterInner(pcUser_, v);
+  const double k = u_.divToInt();  // S' = S * tRef (exactly 1.0 in cell units)
+  if (k != 1.0) {
+    std::vector<double> vi(v.size());
+    for (std::size_t i = 0; i < v.size(); ++i)
+      vi[i] = v[i] * k;
+    scatterInner(pcUser_, vi);
+  } else {
+    scatterInner(pcUser_, v);
+  }
   fillPropGhosts(pcUser_);
   pcHasUser_ = true;
 }
@@ -547,6 +622,23 @@ typename Solver<Grid>::PhaseChangeDiagnostics Solver<Grid>::phaseChangeDiagnosti
   d.bandDiv = pcBandDivergence();
   if (pcEnergy_ && vofEnergy_.initialized())
     vofEnergy_.extrema(d.Tmin, d.Tmax);
+  // To the caller's units (every factor exactly 1.0 in cell units; counts, colours and
+  // temperatures are unit-free). The colour ledger is a liquid VOLUME: colour x cell volume.
+  const double km = u_.mdotToPhys(), ka = u_.areaToPhys(), kq = u_.powerToPhys(),
+               kv = u_.volToPhys() * u_.vol, kd = u_.divToPhys();
+  d.mdotMin *= km;
+  d.mdotMax *= km;
+  d.mdotMean *= km;
+  d.mdotFit *= km;
+  d.area *= ka;
+  d.areaOrphan *= ka;
+  d.qOperator *= kq;
+  d.qOrphan *= kq;
+  d.removedVolume *= kv;
+  d.redistributed *= kv;
+  d.unresolved *= kv;
+  d.sourceSum *= kd;
+  d.bandDiv *= kd;
   return d;
 }
 
@@ -613,6 +705,17 @@ void Solver<Grid>::pcBuildInterface() {
   const bool opMode =
       pcMdotOperator_ && thermal && pcGphi_.extent(0) == n_ && scT->dmask.extent(0) == n_;
   const bool opEnergy = opMode && scT->energy && scT->kcell.extent(0) == n_;
+  // UNITS. Without the consistent energy transport the operator flux below is built from the
+  // scalar's DIFFUSIVITY, i.e. it is the heat divided by an implicit rho c_p = 1 — one unit of
+  // the solver's internal system, which is a different physical heat capacity in every unit
+  // system. In cell units that is the shipped (and gated) behaviour and stays; under an armed
+  // extent it has no physical meaning, so the combination is refused rather than guessed.
+  if (opMode && !opEnergy && u_.physical)
+    throw std::runtime_error(
+        "set_phase_change_mdot_operator / set_phase_change_energy_order(2) under a physical "
+        "domain need set_phase_change_energy(True, rho_cp_gas, rho_cp_liquid): without it the "
+        "operator's interfacial heat is a diffusivity flux with an implicit rho*c_p of one "
+        "internal unit, which is not a physical heat capacity");
   if (opMode)
     pcBuildInDomain();
   CCConst mkF = CCConst(opMode ? scT->dmask : pcMdot_);
