@@ -459,6 +459,11 @@ class Solver {
   // Coarse-level (bottom) solve policy: 0 smoothed bottom (default), -1 auto (agglomerate exactly
   // when the geometric hierarchy cannot reach a small enough coarsest grid), 1 always. See CutcellMG.
   void setPressureBottomMode(int mode);
+  // Engine of an agglomerated bottom (doc/vof_step_performance_design.md §5.7, B1): 0 "auto" (the
+  // single-team geometric-Krylov bottom where eligible on a device backend, GraphAMG otherwise), 1
+  // "geometric" (raises at the bottom solve, naming the failed condition, where ineligible), 2
+  // "algebraic" (GraphAMG always). Live; independent of the geometry.
+  void setPressureBottomSolver(int engine);
 
   // Coarse-level telescoping of the pressure multigrid (mac_cutcell_mg.hpp Telescope): when a
   // per-rank block turns odd, merge ORB siblings onto fewer ranks and keep coarsening instead of

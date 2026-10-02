@@ -359,6 +359,16 @@ deselected on its own; name the driver you want instead.
   agglomerates the coarsest level into a global, decomposition-independent operator and solves it
   exactly whenever that grid exceeds `set_pressure_bottom_extent` (4) cells on any axis. Porous and
   variable-ρ rebuild it every step; avoid `auto` with a badly-factored grid there.
+- **Two engines solve an agglomerated bottom** (`doc/vof_step_performance_design.md` §4.1, §5.7):
+  the host GraphAMG (every host backend, every multi-rank run, every ineligible case) and, on a
+  GPU backend, the **geometric-Krylov bottom** — one single-team launch of flexible CG
+  preconditioned by a V-cycle over the geometric levels *below* the bottom (`CutcellMG::sub_`,
+  outside `lv_`), inner tolerance 1e-8 (relative, ∞-norm), cap 100, no host transfer. Eligible:
+  single rank, the singular operator (no outflow face), `auto`/`agglomerated` bottom, ≤ 8192 bottom
+  cells, every interior bottom face open, ≥ 1 sub-level (`geoBottomIneligible()` names the first
+  failure). `diagnostics.set_pressure_bottom_solver('auto' | 'geometric' | 'algebraic')` A/Bs them
+  on one build; `'geometric'` raises where ineligible. Host results are untouched by it; on the GPU
+  it is a recorded numerics change (the bottom's inner solve differs).
 - **Depth follows the factors of two, per axis.** An axis coarsens only while it stays even, so an
   **odd dimension never coarsens at all** (384×128×256 → 5.0 pressure iterations/step, ×255 →
   16.2), and under MPI only if *every rank's block* is even on it. **Telescoping is the default**

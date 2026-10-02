@@ -507,3 +507,66 @@ read (WO-8's ≤ 3 per container step stands), no empty teams. Host: unchanged l
 Tier 3 on the column (nsys, 20 + 3 steps, GPU at 99 % shared with P4, load ≈ 22 — indicative):
 main one-thread pass 1 **14.76 ms/call** → persistent teams **7.40 ms/call** (×2.0). Still above
 the ≤ 1.5 ms target; to be re-measured on a quiet GPU.
+
+## 2026-10-02 — WO-6: B1, the geometric-Krylov bottom on GPU backends (package P3)
+
+**Builds under test** (worktree `flow-vof-b1`, branch `vof-b1` from origin/main `7f74620`): the
+frozen modules `~/Codes/bubble_column_perf/p3/frozen_base/{cuda,omp}` (origin/main, `src/`
+unmodified) against `frozen_c4/cuda` (this commit) and the host tree of this commit. RTX 5080
+(sm_120), `PECLET_FLOW_MPI=ON`, double operator storage. Raw output: `~/Codes/bubble_column_perf/p3/g/`,
+`.../p3/phys/`, `.../p3/xfer/`. Gate driver `p3/run_gate.sh`. The GPU was shared with two other
+packages' batteries throughout (90-99 % utilisation by others): **every timing below is indicative
+only**; the bitwise and G-NUM results are unaffected.
+
+**What landed.** `CutcellMG::geoBottomSolve` (`src/mac_cutcell_mg.hpp`, `GeoBottomKernel`): one
+`TeamPolicy(1, T)` launch per bottom solve, FCG (Polak-Ribiere) on the bottom level's own operator,
+preconditioned by one symmetric V-cycle over `sub_` (the geometric levels below the bottom, built by
+init()'s `can()` + `mgChooseRatio` rule and held outside `lv_`), tau 1e-8 (relative, infinity norm,
+fluid mean removed), cap 100, pre/post/bottom 2/2/12. Eligibility = §5.7 conditions 1-7
+(`geoBottomIneligible()`), condition 6 evaluated once per hierarchy at its first setOpenness and
+cached. Selection: `diagnostics.set_pressure_bottom_solver('auto' | 'geometric' | 'algebraic')`.
+A non-finite inner scalar zeroes the bottom's x and sets a device flag that rides the A6 PCG packet
+(now 4 doubles: {pAp, rn, stop, geoFlag}) or, for the other drivers, is folded in by
+`lastSolveFailed()` (one scalar read, only when a geometric solve ran since the last read).
+T = min(1024, team_size_max) = **640** in the module build (768 in an earlier draft; it is a
+property of the compiled kernel's register use, logged under `PECLET_FLOW_MG_DEBUG`). Case:
+bottom 16x12x8, sub-levels 8x6x4, 4x3x2, 2x3x2.
+
+**Implementation choices the note did not spell out (each bitwise-neutral against the per-kernel
+V-cycle, proved by the unit gate's part (a)):** the team kernel reads periodic neighbours through
+the A3 wrapped indices where `smooth()` / `vcycleImpl` do (residual and matvec always, colour
+passes on all-even levels) instead of a fill phase; 32-bit index arithmetic; the sub-levels'
+operators are coarsened lazily, at the first geometric bottom solve after a setOpenness (same
+kernels, same inputs, so a configuration that never takes the path never pays for it); the FCG's
+own scalars (not part of M) fuse the x/r update with the sum of the new r. Tried and dropped:
+running the smallest levels on one thread (4x slower — a single thread's dependent global-memory
+round trips cost more than the barriers they save).
+
+### Gates
+
+| gate | result |
+|---|---|
+| host G-BIT: `state_hash.py` 12 cases + np2, 8 threads | **identical** to frozen_base (both files) |
+| host G-BIT: 50-step bubble column 1x8 and 1x24 | **bitwise=True**, all 24 arrays, both |
+| CUDA, `'algebraic'` (GraphAMG on this build), 50-step dump | **bitwise=True** vs frozen_base |
+| CUDA `state_hash.py` (12 cases + np2) | **all identical** to frozen_base: no hash case reaches the geometric bottom (agglomeration needs a bottom > 4 cells on an axis; np2 is distributed) — nothing to re-baseline |
+| G-NUM 1, N50 (u v w p C, 50 steps from ckpt_t43) | **max rel 1.998e-14** (v; p 9.9e-15) ≤ N50_rtol = 1.499e-11 (WO-0) — and ≤ 2.522e-09, N50 re-measured on origin/main 7f74620 (rtol 1e-9 vs 1e-10: p rel 2.522e-09, u 2.09e-10; the case now amplifies a tolerance change 170x more than at WO-0) |
+| G-NUM 2 / WO-6: per-step outer iterations vs `'algebraic'` (= base) | **identical on all 50 steps** (653 = 653, 13 x 49 + 14 x 1) |
+| G-NUM 3: per-step `max_open_divergence_projected()` | max ratio to the reference **1.000112** (≤ 2) |
+| G-NUM 4: physics (`d1_tolerance.py --cases static,hysing --rtols 1e-10`, CUDA) | static drop max\|u\| 2.552041443788365e-03 both (identical; within 5 %); Hysing case 1 (block path): v_rise max 0.28429521057944 vs ...246 (rel 2.0e-16), its time 1.0484717840861797 both, final y_c rel -1.8e-16 (all within 0.2 %); volume drift 1.71e-14 → 1.69e-14 |
+| unit gate (`geo_bottom`, CUDA and host) | (a) M with the mean removals off on both sides: **bitwise** to the per-kernel V-cycle over the same levels, periodic and walls-y (ratio-50 coefficient). (b) full M: **NOT bitwise** — 344 / 638 of 1536 cells differ by at most 4.4e-16 (2.8e-17 of max\|z\|): the exit fluid mean is a TEAM reduction (§5.7: "team reductions produce ... fluid means") and the per-kernel removeMean a Kokkos range reduction, so the summation orders differ. The note's gate as written ("M(r) equals, bitwise, the per-kernel vcycle") cannot hold; the ctest asserts (a) and a 4-eps bound on (b) and prints the strict result. **OPEN for the note's owner.** Inner FCG to tau: 13 (periodic) / 15 (walls-y) iterations, true residual 8.9e-9 / 2.1e-9 r0, no flag |
+| transfer gate (nsys, 20-step difference, `--flux device --fixdt`) | **bottom transfers gone**: H→D ≥ 1 KiB 13.05 → **0**, D→H ≥ 1 KiB 19.05 → **2.00** per step. The two left are WO-8's batched-container packets inside step() (1024 B after `vofCsfForceBatch`, 2688 B after `vofBatchBox`: 16 blocks x 8 / 21 doubles), above the gate's literal 1 KiB line; not bottom transfers |
+| run-to-run | two 50-step CUDA dumps of the same module bitwise identical |
+
+### G-PERF (indicative: GPU 90-99 % busy with other packages)
+
+`GeoBottomKernel` (nsys): **2.8-2.9 ms per bottom solve, 37-40 ms per step** at 17 inner
+iterations (the bubble column's bottoms; 13-15 on the unit problem) — against the model's
+0.2 ms / 2.5 ms (§4.1) and the target ≤ 3.5 ms per step: **missed by ~11x**. Wall: 74 ms/step
+geometric vs 50 ms/step `'algebraic'` on the same build, back to back. **Risk R3 holds and is
+larger than modelled.** The cost is per-thread FP64 throughput on the one SM, not barriers: the
+unit problem's solve time rises as T falls (default T: 150 us per FCG iteration; 512: 165; 256: 170; 128: 229;
+64: 432; 32: 732) — about 7 000 smoothing updates per V-cycle, each with an FP64 division, at the
+5080's 1/64-rate FP64 on one SM. §4.1's premise (≈ 140 kFLOP per inner iteration, ≈ 0.2 ms per
+bottom) underestimates it ~10x on this card; on H100 / MI250X (FP64 1:2) the same kernel is
+expected 20-30x cheaper (§3.3), which this session could not measure.

@@ -558,6 +558,30 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "winner of the multi-GPU ablation) or 'all' (legacy — every V-cycle level + after every "
           "matvec). Iteration counts are identical (A preserves mean-freeness); results equal "
           "within solver tolerance, not bit-identical.")
+      .def(
+          "set_pressure_bottom_solver",
+          [](D& diag, const std::string& engine) {
+            if (engine == "auto")
+              diag.s->setPressureBottomSolver(0);
+            else if (engine == "geometric")
+              diag.s->setPressureBottomSolver(1);
+            else if (engine == "algebraic")
+              diag.s->setPressureBottomSolver(2);
+            else
+              throw std::runtime_error(
+                  "set_pressure_bottom_solver: 'auto' | 'geometric' | 'algebraic'");
+          },
+          nb::arg("engine"),
+          "Engine of the AGGLOMERATED pressure bottom (set_pressure_bottom 'auto' / "
+          "'agglomerated'). 'auto' (DEFAULT): on a GPU backend, single rank, the singular "
+          "(periodic / wall) operator, a bottom of at most 8192 cells whose interior faces are "
+          "all open, with a geometric level below it, one device launch runs flexible CG "
+          "preconditioned by a V-cycle over the geometric levels below the bottom (inner "
+          "tolerance 1e-8, cap 100) -- no host transfer; everywhere else the host GraphAMG solve. "
+          "'geometric' forces the device engine and raises at the bottom solve, naming the failed "
+          "condition, where it is not eligible; 'algebraic' forces GraphAMG (the A/B instrument). "
+          "Host backends always run GraphAMG under 'auto'. "
+          "doc/vof_step_performance_design.md §4.1, §5.7.")
       .def("set_pressure_graph_amg", [](D& diag, bool on) { return diag.s->setPressureGraphAmg(on); }, nb::arg("on"),
            "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
            "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "

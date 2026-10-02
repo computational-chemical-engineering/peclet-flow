@@ -512,6 +512,11 @@ void Solver<Grid>::setPressureBottomMode(int mode) {
 }
 
 template <class Grid>
+void Solver<Grid>::setPressureBottomSolver(int engine) {
+  mg_.setBottomSolver(engine);
+}
+
+template <class Grid>
 void Solver<Grid>::setPressureTelescope(bool on) {
   mg_.setTelescope(on);
 }

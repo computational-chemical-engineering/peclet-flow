@@ -21,6 +21,10 @@ Usage:
                 VoF block's colour array (col<id>) -- compare two dumps with cmp.py (G-BIT item 2)
     --timing    per-stage breakdown from diagnostics.vof_timing()
     --levels L  pressure multigrid depth; --bottom MODE = set_pressure_bottom(MODE) (E1)
+    --bottom-solver ENGINE  diagnostics.set_pressure_bottom_solver(ENGINE): auto | geometric |
+                algebraic (B1, WO-6: the A/B of the two bottom engines on one build)
+    --div       with --dump: also store each timed step's max_open_divergence_projected() (div),
+                read after the step (G-NUM item 3)
 """
 import os
 import sys
@@ -82,6 +86,10 @@ if "--pcg" in A:
     s.set_pressure_pcg(True, 800, RTOL)
 if "--bottom" in A:
     s.set_pressure_bottom(arg("--bottom", "auto"))
+if "--bottom-solver" in A:
+    s.diagnostics.set_pressure_bottom_solver(arg("--bottom-solver", "auto"))
+DIV = "--div" in A
+divs = []
 print(f"build {time.time()-t_b:.2f} s", flush=True)
 
 S = rp.S
@@ -111,6 +119,8 @@ def one(timed):
         T["step"] += t2 - t1
         T["flux"] += t3 - t2
         iters.append(s.diagnostics.last_pressure_iterations())
+        if DIV:
+            divs.append(s.max_open_divergence_projected())
     t += dt
     return dt
 
@@ -138,5 +148,6 @@ if DUMP:
     cols = {f"col{b['id']}": np.asarray(s.vof_block_color(b["id"]))
             for b in s.diagnostics.vof_block_stats()}
     np.savez(DUMP, u=s.get_u(), v=s.get_v(), w=s.get_w(), p=s.get_field("p"), C=s.get_field("C"),
-             dts=np.array(dts), iters=np.array(iters, dtype=np.int64), **cols)
+             dts=np.array(dts), iters=np.array(iters, dtype=np.int64), **cols,
+             **({"div": np.array(divs)} if DIV else {}))
     print("dumped", DUMP, f"({len(cols)} block colours)")
