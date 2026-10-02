@@ -77,3 +77,27 @@ Error at ND = 128:
 
 The probe fallback (renormalized valid weights, then a longer probe) fired once per case, at
 ND = 16.
+
+## 2026-10-02 — round 5: solver fit (`solver.py`)
+
+**Set-up.**
+- A = the probe-flux operator (c = 0.7 h) on the disc.
+- Systems: steady, and backward-Euler with dt·D/h² = 1 or 10.
+- Preconditioner: an exact solve of a symmetric 5-point surrogate S, standing in for an ideal MG
+  V-cycle.
+
+**Lexicographic Gauss–Seidel directly on A converges.** It is as slow as GS always is on the
+steady problem (residual 0.7 after 200 sweeps at ND = 128) and reaches 5e-16 at dt·D/h² = 1. So
+the positive off-diagonal probe weights do NOT break GS.
+
+**Surrogate S = aperture FV + κ + diagonal wall term A_w/(h²(d + 1/k)).**
+
+| d in the surrogate | Bi = ∞ | Bi = 10 | Bi = 1 |
+|---|---|---|---|
+| centroid distance (= RF) | ρ(I − S⁻¹A) = 0.995; BiCGStab 59–87 it, GMRES(20) 150–368 it | BiCGStab 3–6 | BiCGStab 2–3 |
+| probe distance 0.7 h ("lumped probe": off-diagonal probe weights summed onto the diagonal) | ρ = 0.55; BiCGStab 8–9 it, GMRES(20) 15–17, mesh-independent ND 32→128 | ρ ≤ 0.27; BiCGStab 3–5 | ρ ≤ 0.05; BiCGStab 2–3 |
+
+**Conclusion.** Use BiCGStab (or GMRES/FGMRES), preconditioned by an MG V-cycle on the SPD
+lumped-probe surrogate. The surrogate is the existing aperture-weighted 7-point family plus a κ/dt
+diagonal plus a diagonal wall term, so CutcellMG-style machinery applies. The probe operator itself
+is applied only as a sparse cut-cell overlay matvec.
