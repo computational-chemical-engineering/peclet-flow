@@ -490,3 +490,64 @@ Open points for the design session (each reversible, none decided here):
   6.9e5 vs 577 off).
 - Batteries for the committed tree: `~/Codes/bubble_column_perf/e2/battery.sh` (results in
   `e2/ctest_{cuda,omp}.log`).
+
+### WO-E2.3 — second STOP (2026-10-02): §12.13's revised G-E2-BAL fails; its rate premise is false
+
+Candidate per §12.13.2 parked on the local branch `vof-e2-e23-stopped2` (60655dd, on top of
+74beb93): D-E2.8' (S7 reads div_ = D(u*)), the stage order S4' -> S3' -> S3'' (`rhs1_ += D(q)`
+through one inline face function `explicitSplitFace` shared with the velocity pre-correction),
+the three new prechecks, the revised BAL and RST at mu = 0.1. Gates (host-openmp and nvidia-cuda):
+
+| gate | result |
+|---|---|
+| G-E2-RED | bitwise, 32^3 and 32x32x16, iterations identical (mean 9.05) |
+| G-E2-REC | 1.8e-14 / 3.8e-14 (omp), 1.2e-14 / 4.2e-14 (cuda), tol 1e-9; max\|u\| <= 1.7e-14 |
+| G-E2-BAL mu = 0 | pass: 1.1e-15 / 5.9e-15, \|P - sk C - c\|/sk 9.3e-13 / 8.1e-14 |
+| G-E2-BAL mu = 0.1, in/out 50 | **FAIL** all three: max\|u_split\| 8.0e-4 at step 922 vs 1.5 x 2.37e-4 (first 10); D(1000)/D(100) = 2.56e-4/1.11e-4 = 2.3; split 2.6e-4 vs exact 5.5e-8 |
+| G-E2-BAL mu = 0.1, in/out 0.02 | no growth OK (max at step 7); **rate FAIL** 8.0e-6/8.0e-5 = 0.10 (needs 1e-2); **fixed point FAIL** 7.9e-6 vs 2 x 1.7e-7 |
+| G-E2-RST (mu = 0.1) | bitwise; negative control differs 7.6e-3; exact path's own restart bitwise |
+| column stability (300 steps, GPU) | **PASS**: max\|p\| 577.7 vs 576.5, max\|w\| 16.39 vs 16.43; PCG 8.00 its/step vs 13.32 |
+| G-BIT (default path) | PASS: state_hash 12 + np2 identical, 50-step dump bitwise (cuda; omp 1x8, 1x24) |
+
+Probes (`~/Codes/bubble_column_perf/e2/probe/`, GPU; logs beside the scripts):
+- `bal_long.py` (BAL drop, lockstep): mu 0.1 in/out 50 split max|u| 1.0e-4 (300), 2.3e-4 (600),
+  4.4e-4 (900), 1.1e-4 (1200), 4.6e-5 (1500), then 4.7e-5 (1800) -> 4.9e-5 (2300), slowly rising;
+  exact 8e-9 at 2300. Rotational term off: monotone 6.8e-5 (600) -> 1.7e-5 (1500), no bump.
+  mu 0.01: stalls at 1.7e-5–1.8e-5 from step 600 to 1500. mu 0: 3e-15 at 1500.
+- `frozen.py` (NO VoF: frozen rho = blob, no force, P(0) = 0.25 C, u = 0; both go to rest):
+  the split - exact difference decays monotonically, no growth, but far slower than §12.13.3's
+  sqrt(1 - rho0/rho_max) = 0.990/step (ln -1.0e-2): late (900 -> 1500) ln-rate per step
+  -4.5e-4 (mu 0.01), -1.4e-3 (mu 0.1; rot off -1.5e-3), -1.4e-3 (mu 0.4; -4.9e-3 over 300 -> 900);
+  in/out 0.02 at mu 0.1 -1.0e-3. D(1500)/D(300) = 0.13 (mu 0.1, in/out 50).
+
+Reading (mine; a design question, not decided here):
+1. Even in the linear, frozen-density case the late difference decays at a mu-dependent,
+   viscous-like rate, insensitive to the rotational term, 7-20x slower than the DF pressure rate.
+   Hypothesis: at mixed interface faces q = dt (1/rho_f - 1/rho0) G(theta dP) is not a gradient;
+   its solenoidal part survives the constant-coefficient projection as vorticity that decays only
+   viscously (heavy phase nu = mu/rho_max). §12.13.3's frozen-coefficient model has pure gradient
+   modes only, so the rate criterion D(1000) <= 1e-2 D(100) (model "about 1e-4") does not hold:
+   measured with live VoF 0.10 (in/out 0.02) and 2.3 (in/out 50); frozen, D(1500)/D(300) = 0.13.
+2. With live VoF at in/out 50 there is in addition a non-monotone excursion (x3.7 over steps
+   300–900) and a plateau ~5e-5 that does not decay by step 2300. Hypothesis: the split's
+   velocity moves C, P = sigma kappa C then changes in interface cells every step, and the DF
+   forced response (amplified by rho_max/rho0) feeds back — interface motion is outside the
+   model.
+3. The target case does not show it at 300 steps (column check passes, within 0.2 % of the exact
+   max|p|, max|w|). Whether A4 would pass is unknown; A1/A2 (spurious-current amplitudes) would
+   likely meet the same slow tail.
+
+Open for the design session: is BAL's rate/fixed-point criterion to be re-derived (e.g. a rate
+bound from the heavy-phase viscous decay, or a frozen-interface variant), or does the evidence
+call the split itself into question for static interfaces? WO-E2.4 … E2.7 not started.
+
+### Handoff (P4, second stop, 2026-10-02)
+
+- `vof-e2` = 74beb93 + this log (WO-E2.0–E2.2 landed, G-BIT PASS). Candidate 2 on
+  `vof-e2-e23-stopped2` (60655dd) — all §12.13 gates except G-E2-BAL (revised) pass; G-BIT PASS.
+- Resume: `git checkout vof-e2-e23-stopped2`; build `test_pressure_constant_coefficient` and
+  `peclet_flow` in `build_omp` / `build_cuda` (`~/Codes/bubble_column_perf/e2/bt.sh <tag>
+  <targets>`); ctest binary ~566 s on host 1x8, ~106 s on CUDA (the 1000-step BAL dominates; the
+  §12.13.4 120 s budget would need 24^3/R = 6 on the host); probes `probe/bal_long.py MU RIN ROUT
+  STEPS [ROT] [EVERY]`, `probe/frozen.py MU RIN ROUT STEPS ROT EVERY DT p`; column check
+  `probe/prof_cc.py 300 --pcg --constcoef --dump X.npz`.
