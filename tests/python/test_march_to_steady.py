@@ -14,6 +14,11 @@
   `converged=False` with reason "diverged" or "max_steps" for accelerate=False and for
   accelerate=True at windows 3, 5 and 8 (rev 2: no instability guard; the plain steps of the
   certification expose the growth).
+* the adapter (review R4, R5), N = 12 production, both grids: `set_dt` between calls resets the
+  history (`num_resets` + 1) and that call does not mix (bitwise the plain step of a twin solver,
+  while without `set_dt` a mix was pending); a refused feature enabled after construction
+  (`set_pressure_warmstart(True)`) is refused at the next call; collocated `set_advection(True)`
+  after construction (4 -> 7 state fields) is reported as a configuration change and resets.
 * four pure-Python tests of the driver's certification (`peclet.flow.steady._certify`) on scripted
   monitor sequences: (i) four blocks with R > 1, then a geometric tail inside the budget -> "pass";
   (ii) a clean tail at R = 0.99 that fails the remainder bound -> "slow" at the first such block;
@@ -152,6 +157,71 @@ def gate_g7a():
               f"steps={res.steps} (accelerated {res.accelerated_steps})")
 
 
+def state_of(s):
+    return [np.array(s.get_field(f)) for f in ("u", "v", "w", "p")]
+
+
+def accelerated(Cls, calls):
+    """A production N = 12 sphere solver and its accelerator after `calls` step(True) calls."""
+    s = sphere_solver(Cls, 12, tight=False)
+    acc = s.diagnostics.anderson_accelerator(window=5)
+    for _ in range(calls):
+        acc.step(True)
+    return s, acc
+
+
+def gate_adapter():
+    print("adapter: signature reset, refusal re-check, configuration change (review R4, R5)",
+          flush=True)
+    for name, Cls in SCHEMES:
+        # set_dt between calls: num_resets + 1 and NO mix on that call. Twins: four identical
+        # solvers take the same 10 accelerated calls (bit-identical trajectories). C (True) and
+        # D (False) without a dt change differ, so a mix is pending (the check is not vacuous);
+        # A (True) and B (False) after set_dt are bitwise equal, so A's call did not mix.
+        sa, aa = accelerated(Cls, 10)
+        sb, ab = accelerated(Cls, 10)
+        sc, ac = accelerated(Cls, 10)
+        sd, ad = accelerated(Cls, 10)
+        ac.step(True)
+        ad.step(False)
+        pending = any(not np.array_equal(x, y) for x, y in zip(state_of(sc), state_of(sd)))
+        r0 = aa.num_resets
+        dt2 = 2.0 * 6.0 * (L / 12) ** 2
+        sa.set_dt(dt2)
+        sb.set_dt(dt2)
+        aa.step(True)
+        ab.step(False)
+        plain = all(np.array_equal(x, y) for x, y in zip(state_of(sa), state_of(sb)))
+        check(pending and plain and aa.num_resets == r0 + 1 and aa.status == "active",
+              f"{name}: set_dt between calls -> num_resets {r0} -> {aa.num_resets}, the call is "
+              f"bitwise the plain step {plain} (a mix was pending without set_dt: {pending})")
+        # the refusals are re-checked at every call: a refused feature enabled after construction
+        s, acc = accelerated(Cls, 3)
+        s.diagnostics.set_pressure_warmstart(True)
+        try:
+            acc.step(True)
+            msg = None
+        except RuntimeError as e:
+            msg = str(e)
+        check(msg is not None and "pressure warm start" in msg and "accelerate=False" in msg,
+              f"{name}: set_pressure_warmstart(True) after construction -> refused at the next "
+              f"call: {msg!r}")
+    # a change of the field count is a configuration change, not a reallocation (collocated
+    # set_advection(True) adds the face field uf/vf/wf: 4 -> 7 fields)
+    s, acc = accelerated(pf.SolverColocated, 3)
+    r0 = acc.num_resets
+    s.set_advection(True)
+    try:
+        acc.step(True)
+        msg = None
+    except Exception as e:  # std::logic_error
+        msg = str(e)
+    check(msg is not None and "configuration change" in msg and "reallocated" not in msg
+          and acc.num_resets == r0 + 1,
+          f"collocated: set_advection(True) after construction -> {msg!r}, num_resets {r0} -> "
+          f"{acc.num_resets}")
+
+
 def scripted(values):
     """A fake step and a monitor that returns values[k] after the k-th step."""
     state = {"k": 0}
@@ -240,6 +310,7 @@ def gate_certify():
 
 def main():
     gate_certify()
+    gate_adapter()
     gate_g0b()
     gate_g1_small()
     gate_g7a()
