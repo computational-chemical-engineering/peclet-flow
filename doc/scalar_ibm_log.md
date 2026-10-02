@@ -101,3 +101,22 @@ the positive off-diagonal probe weights do NOT break GS.
 lumped-probe surrogate. The surrogate is the existing aperture-weighted 7-point family plus a κ/dt
 diagonal plus a diagonal wall term, so CutcellMG-style machinery applies. The probe operator itself
 is applied only as a sparse cut-cell overlay matvec.
+
+## 2026-10-02 — round 6: small cells under explicit advection (`advect.py`)
+
+**Set-up.**
+- Solid-body rotation in an annulus 0.4 < r < 1, both walls immersed.
+- Exact open-face stream-function fluxes, so the aperture divergence is ≤ 2e-16.
+- A Gaussian blob carried once round; full-cell CFL 0.5; FOU fluxes everywhere.
+
+| scheme | result at ND = 32 / 64 / 128 |
+|---|---|
+| explicit, κ storage | blows up at all three resolutions (min κ 2e-4, 1.3e-4, 3.8e-5) |
+| unit storage (flow today) | stable, but the physical mass Σκc drifts −12 %, −5.5 %, −2.1 % |
+| May–Berger-style split (implicit upwind on faces touching κ < ½, explicit elsewhere, κ storage) | stable at the full-cell CFL; mass to 1e-16; positive; L1 error equal to unit's (1.50 / 1.36 / 1.14; FOU diffusion dominates) |
+| fully implicit FOU | stable and conservative, but more diffusive (L1 1.63 / 1.51 / 1.33) |
+
+**Conclusion.** κ storage forces a small-cell treatment. The explicit–implicit split is
+conservative, stable and positive, and costs nothing extra because diffusion is already an implicit
+(BiCGStab) solve per step. State redistribution (Berger–Giuliani) remains the alternative to
+compare, and the literature (L1) decides between them.
