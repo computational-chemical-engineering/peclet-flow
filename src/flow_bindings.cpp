@@ -551,6 +551,23 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "The uniform velocity shift set_superficial_velocity applied at the end of the last "
            "step() (physical velocity units; 0 when it is off). Reading it synchronises with the "
            "device.")
+      .def(
+          "pressure_constant_coefficient_stats",
+          [](D& diag) {
+            const auto st = diag.s->pressureConstantCoefficientStats();
+            nb::dict d;
+            d["enabled"] = st.enabled;
+            d["last_step_split"] = st.lastStepSplit;
+            d["startup_steps_left"] = st.startupStepsLeft;
+            d["rho0"] = st.rho0;
+            d["theta"] = st.theta;
+            return d;
+          },
+          "State of set_pressure_constant_coefficient: {'enabled', 'last_step_split' (the last "
+          "projection ran the split scheme), 'startup_steps_left' (exact steps still to run), "
+          "'rho0' (the last split step's min density, physical units; NaN before the first split "
+          "step), 'theta' (its extrapolation factor min(1, dt/dt_prev); NaN before the first)}. "
+          "Reading rho0 synchronises with the device.")
       .def("last_balanced_force_iterations",
            [](D& diag) { return diag.s->lastBalancedForceIterations(); },
            "Pressure-driver iterations of the last step's balanced-force solve "
@@ -2130,6 +2147,33 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "iteration count. Unlike set_pressure_pcg this flag GENUINELY selects: on=True clears "
            "the Chebyshev selection (so it works after diagnostics.set_density_mode/set_porous), on=False "
            "returns to MG-PCG, and a later set_pressure_chebyshev(True, ...) wins over it.")
+      .def("set_pressure_constant_coefficient", &S::setPressureConstantCoefficient,
+           nb::arg("enabled"), nb::arg("startup_steps") = 2,
+           "Opt-in CONSTANT-COEFFICIENT pressure driver for variable density (Dodd & Ferrante "
+           "2014; flow doc/vof_step_performance_design.md \u00a712). Each split step adds one "
+           "explicit face pre-correction u** = u* - dt (1/rho_f - 1/rho0) grad(theta dP), built "
+           "from the last pressure increment (registry field \"p_increment\") with rho0 = the "
+           "exact global minimum of rho, and then runs the CONSTANT-density projection: the "
+           "Poisson operator no longer depends on the density, is built once, and the MG-PCG "
+           "iteration count no longer grows with the density ratio. Static balances (a "
+           "hydrostatic column, a constant-curvature drop) are exact fixed points, and the split "
+           "and exact schemes share their steady states; the splitting error is a transient one, "
+           "second order in dt with a density-ratio-sized constant. The split solve always uses "
+           "MG-PCG with set_pressure_pcg's cap and rtol; the driver you selected serves only the "
+           "`startup_steps` exact steps that run after every enabling call (they seed the "
+           "increment), so this call is order-independent of set_property_model('rho'). Scope -- "
+           "step() raises otherwise: staggered Solver (raises here on SolverColocated), all-fluid "
+           "set_pressure_geometry (no immersed solid, no scene), every domain face periodic, wall "
+           "or slip, variable density, one Picard iteration, no porous continuity, drag, phase "
+           "change or divergence source, no pressure under-relaxation, the arithmetic face density. "
+           "Restart: restore u, v, w, p, C (and any block state) and then "
+           "set_field('p_increment', ...), and call set_pressure_constant_coefficient(True, "
+           "startup_steps=0) -- bitwise continuous at constant dt; restoring 'p' only, pass "
+           "startup_steps=1. Calling it again re-arms the start-up steps and forgets the previous "
+           "dt (the extrapolation factor theta = min(1, dt/dt_prev) is 1 on the next split "
+           "step). enabled=False returns to the exact projection and keeps the field. Adopt it "
+           "per case only where its accuracy gates pass (doc/variable_density_projection.md, "
+           "'Constant-coefficient splitting').")
       .def("set_velocity_multigrid", &S::setVelocityMultigrid, nb::arg("on"), nb::arg("levels") = 4,
            nb::arg("vcycles") = 8,
            "Enable velocity (momentum) multigrid for the implicit diffusion solve.")

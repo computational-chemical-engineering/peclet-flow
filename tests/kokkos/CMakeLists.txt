@@ -238,6 +238,14 @@ target_include_directories(test_vof_surface_tension PRIVATE ${CMAKE_CURRENT_SOUR
 target_link_libraries(test_vof_surface_tension PRIVATE Kokkos::kokkos)
 add_test(NAME vof_surface_tension COMMAND test_vof_surface_tension)
 
+# E2(a) (doc/vof_step_performance_design.md §12): the opt-in constant-coefficient pressure driver,
+# set_pressure_constant_coefficient — its scope refusals, the start-up bracket and the split gates.
+add_executable(test_pressure_constant_coefficient test_pressure_constant_coefficient.cpp)
+target_include_directories(test_pressure_constant_coefficient PRIVATE
+                           ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_pressure_constant_coefficient PRIVATE Kokkos::kokkos)
+add_test(NAME pressure_constant_coefficient COMMAND test_pressure_constant_coefficient)
+
 # VoF rung V5a (WO-Q): the colour field transported THROUGH an immersed solid — the openness
 # embed (G3), conservation of sum eps_eff*C through a sphere packing (G2), and the neutral 90-degree
 # solid-band fill measured as a contact angle (G5). PECLET_VOF_CUTCELL_LONG=0 runs the full sizes.

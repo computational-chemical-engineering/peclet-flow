@@ -430,6 +430,8 @@ template <class Grid>
 double Solver<Grid>::velocityResidualTolerance() const {
   if (velResTol_ >= 0.0)
     return velResTol_;
+  if (constCoefP_)  // E2(a): the split solve's rtol, also over its exact start-up steps (§12.4)
+    return pcgRtol_;
   return useChebyshev_ ? chebRtol_ : pcgRtol_;  // FCG shares pcgRtol_; the plain V-cycle driver
                                                 // has no tolerance and takes the PCG default
 }
@@ -578,6 +580,39 @@ void Solver<Grid>::setPressurePcg(bool on, int maxit, double rtol) {
   bfpChebSet_ = false;
   pcgMaxit_ = maxit;
   pcgRtol_ = rtol;
+}
+
+template <class Grid>
+void Solver<Grid>::setPressureConstantCoefficient(bool enabled, int startupSteps) {
+  // E2(a), doc/vof_step_performance_design.md §12.7.
+  if constexpr (Grid::collocated)
+    throw std::runtime_error(
+        "set_pressure_constant_coefficient: staggered Solver only (the collocated rung V8 applies "
+        "every force as a face acceleration and corrects cells by the face-average correction; "
+        "the explicit split term would have to enter that machinery -- not implemented)");
+  if (startupSteps < 0)
+    throw std::invalid_argument("set_pressure_constant_coefficient: startup_steps must be >= 0");
+  constCoefP_ = enabled;
+  if (!enabled)
+    return;  // the exact projection rebuilds its coefficient operator next step; the field stays
+  if (pIncrement_.extent(0) != n_)
+    pIncrement_ = addField("p_increment");  // zero-initialised on first registration
+  if (constCoefRho0_.data() == nullptr)
+    constCoefRho0_ = Kokkos::View<double, CCMem>("const_coef_rho0");
+  constCoefStartupLeft_ = startupSteps;  // every call re-arms the start-up count ...
+  pIncrementDt_ = 0.0;                   // ... and forgets dt^{n-1} (theta = 1 next split step)
+}
+
+template <class Grid>
+typename Solver<Grid>::ConstCoefStats Solver<Grid>::pressureConstantCoefficientStats() const {
+  ConstCoefStats st{constCoefP_, constCoefLastSplit_, constCoefStartupLeft_,
+                    std::numeric_limits<double>::quiet_NaN(), constCoefTheta_};
+  if (constCoefRho0Valid_) {
+    double h = 0.0;
+    Kokkos::deep_copy(h, constCoefRho0_);
+    st.rho0 = h / u_.rhoToInt();
+  }
+  return st;
 }
 
 template <class Grid>

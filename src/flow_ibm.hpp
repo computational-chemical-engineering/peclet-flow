@@ -539,6 +539,37 @@ class Solver {
   void setPressureFcg(bool on, int maxit, double rtol);
 
 
+  // E2(a): the opt-in CONSTANT-COEFFICIENT (Dodd & Ferrante 2014 / Cifani 2019) pressure driver
+  // (doc/vof_step_performance_design.md §12). Under variable density each split step replaces the
+  // variable-coefficient projection div((dt/rho_f) grad dP) = div u* by one explicit face
+  // pre-correction u** = u* - dt (1/rho_f - 1/rho0) grad(theta dP^n), built from the last pressure
+  // increment ("p_increment"), followed by the CONSTANT-density projection with rho0 = min rho:
+  // the Poisson operator no longer depends on the density, is built once, and MG-PCG's iteration
+  // count no longer grows with the density ratio. The split solve is MG-PCG at set_pressure_pcg's
+  // cap and rtol whatever driver is selected; the selected driver serves the `startupSteps` exact
+  // steps that run after every enabling call (they seed the increment). Order-independent of
+  // set_property_model("rho"). Scope (step() raises otherwise, constCoefPrecheck): staggered
+  // grid, all-fluid set_pressure_geometry, periodic/wall/slip faces, variable density, one Picard
+  // iteration, no porous continuity, drag, divergence source, pressure under-relaxation or
+  // harmonic face density, incremental pressure. Throws on SolverColocated and startupSteps < 0.
+  // Restart: restore "p" and "p_increment", then enable with startupSteps = 0 (restoring "p" only:
+  // 1). `enabled = false` returns to the exact projection and keeps the field.
+  void setPressureConstantCoefficient(bool enabled, int startupSteps);
+
+  // Developer read-out of the E2(a) driver (diagnostics.pressure_constant_coefficient_stats):
+  // enabled, whether the last project() ran the split scheme, the exact start-up steps still to
+  // run, rho0 (PHYSICAL units, read from the device View; NaN before the first split step) and
+  // the extrapolation factor theta of the last split step (NaN before the first).
+  struct ConstCoefStats {
+    bool enabled;
+    bool lastStepSplit;
+    int startupStepsLeft;
+    double rho0;
+    double theta;
+  };
+  ConstCoefStats pressureConstantCoefficientStats() const;
+
+
   // EXPERIMENTAL directional ghost-cell projection (second staggered IBM, ghost_projection.hpp):
   // point-based FD divergence with wall-anchored directional closures instead of the
   // openness-weighted cut-cell projection. Call BEFORE set_solid (the overlay is built there).
@@ -2448,6 +2479,12 @@ class Solver {
   void projectSolve();
 
 
+  // E2(a): after an exact projection while the driver is enabled, turn pIncrement_ (holding the
+  // stored P^n) into Delta P = P^{n+1} - P^n over all n_ cells, record dt and count the start-up
+  // step down.
+  void constCoefRecordExactIncrement();
+
+
   // projectSolve's tail, shared with the E2(a) constant solve: bridge phi g=1 -> g=2, fill its
   // ghosts, and hold phi = 0 at an outflow ghost.
   void projectSolveTail();
@@ -2577,6 +2614,9 @@ class Solver {
   // setSuperficialVelocity's per-step shift (the tail of step()); no-op when off.
   void applySuperficialVelocity();
   void superficialVelocityPrecheck() const;
+  // E2(a): refuse a configuration outside the constant-coefficient driver's scope (§12.6), at the
+  // head of step() before the first mutator. No-op when the driver is off.
+  void constCoefPrecheck() const;
 
 
 
@@ -4564,6 +4604,14 @@ class Solver {
   // no public switch.
   bool constCoefOpReady_ = false;
   enum class ConstCoefEngine { MgPcg } constCoefEngine_ = ConstCoefEngine::MgPcg;
+  bool constCoefP_ = false;          // set_pressure_constant_coefficient
+  int constCoefStartupLeft_ = 0;     // exact steps still to run before splitting
+  bool constCoefLastSplit_ = false;  // the last project() ran the split scheme
+  double pIncrementDt_ = 0.0;        // dt of the step that produced p_increment; 0 = unknown
+  CCField pIncrement_;               // aliases the registry field "p_increment"
+  Kokkos::View<double, CCMem> constCoefRho0_;  // per-step min rho (internal), device-resident
+  bool constCoefRho0Valid_ = false;  // a split step has written constCoefRho0_ (diagnostics)
+  double constCoefTheta_ = std::numeric_limits<double>::quiet_NaN();  // theta of the last split
   bool useChebyshev_ = false,
        chebBoundsSet_ = false;  // Chebyshev pressure driver (set_pressure_chebyshev)
   bool useFcg_ = false;         // flexible-CG pressure driver (set_pressure_fcg); OFF by default,

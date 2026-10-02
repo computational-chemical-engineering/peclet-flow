@@ -23,6 +23,7 @@ void Solver<Grid>::step() {
   // mutator, so a throw leaves every field bitwise as it was on entry. No-op unless VoF is on.
   vofStepPrecheck();
   superficialVelocityPrecheck();  // its scope, before the first mutator (same reason)
+  constCoefPrecheck();            // E2(a)'s scope, likewise (no-op when the driver is off)
   // The configuration refusals of rung V8 (S0: all-fluid, no ghost projection, no harmonic rho_f,
   // incremental pressure) and of the balanced-force projection (§4.6.4), HERE beside the VoF
   // pre-check -- before advectVofMomentum, phaseChangeStep and updateProperties -- so a refused
@@ -337,6 +338,40 @@ void Solver<Grid>::superficialVelocityPrecheck() const {
     throw std::runtime_error(
         "set_superficial_velocity: an immersed solid is present; a uniform shift would move fluid "
         "through the cut faces (all-fluid domains only)");
+}
+
+template <class Grid>
+void Solver<Grid>::constCoefPrecheck() const {
+  if (!constCoefP_)
+    return;
+  auto refuse = [](const char* what) {
+    throw std::runtime_error(std::string("step(): ") + what +
+                             " under set_pressure_constant_coefficient (its scope: "
+                             "doc/vof_step_performance_design.md §12.6)");
+  };
+  if (hasSolid_)
+    refuse("an immersed solid is present; the split driver runs in solid-free boxes only");
+  if (!cutcellPressure_)
+    refuse("no pressure operator: call set_pressure_geometry with an all-fluid SDF");
+  if (porous_)
+    refuse("porous (volume-averaged) continuity is not supported");
+  if (hasDrag_)
+    refuse("a drag field is not supported");
+  if (!varRho_)
+    refuse("the density is constant (a constant-density run already solves a constant operator)");
+  for (int f = 0; f < 6; ++f)
+    if (bc_[f] == 2 || bc_[f] == 3)
+      refuse("an inflow/outflow domain face is not supported (periodic, wall and slip only)");
+  if (outerIters_ > 1)
+    refuse("Picard iterations (outer iterations > 1) are not supported");
+  if (pressUnderRelax_ != 1.0)
+    refuse("pressure under-relaxation is not supported");
+  if (rhoFaceHarmonic_)
+    refuse("the harmonic face density is not supported (the arithmetic rho_f of the predictor)");
+  if (pcEnabled_ || pcHasUser_)
+    refuse("a divergence source (phase change or set_divergence_source) is not supported");
+  if (!incremental_)
+    refuse("the non-incremental pressure is not supported");
 }
 
 template <class Grid>
@@ -1141,12 +1176,34 @@ void Solver<Grid>::filterCellField(CCField f, int axis) {
 
 template <class Grid>
 void Solver<Grid>::project() {
+  // E2(a) (doc/vof_step_performance_design.md §12.6): the split scheme once the start-up steps
+  // have run. WO-E2.2: the split is not yet implemented, so every step is exact.
+  const bool split = false;
+  constCoefLastSplit_ = split;
   projectAssembleDivergence();
   if (!coeffBuiltThisStep_)  // the balanced-force stage (B1) already built them this step
     projectBuildCoefficients();
   projectSolve();
   projectCorrectVelocities();
+  // An exact step while the driver is enabled records Delta P = stored P^{n+1} - stored P^n, the
+  // same definition the split step's own update gives it (§12.3).
+  if (constCoefP_)
+    Kokkos::deep_copy(pIncrement_, P_);
   projectPressureUpdate();
+  if (constCoefP_)
+    constCoefRecordExactIncrement();
+}
+
+template <class Grid>
+void Solver<Grid>::constCoefRecordExactIncrement() {
+  CCExec space;
+  CCField P = P_, dp = pIncrement_;
+  Kokkos::parallel_for(
+      "peclet::flow::constcoef_exact_increment", Kokkos::RangePolicy<CCExec>(space, 0, n_),
+      KOKKOS_LAMBDA(std::size_t i) { dp(i) = P(i) - dp(i); });
+  pIncrementDt_ = dt_;
+  if (constCoefStartupLeft_ > 0)
+    --constCoefStartupLeft_;
 }
 
 template <class Grid>

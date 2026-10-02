@@ -247,6 +247,7 @@ void Solver<Grid>::rebindFieldAliases() {
   bind(kappaBranch_, "kappa_branch");
   bind(rhoField_, "rho");   // property closures
   bind(Pb_, "p_balanced");  // balanced-force projection split (doc/collocated_varrho_forces.md)
+  bind(pIncrement_, "p_increment");  // E2(a) constant-coefficient driver: the pressure increment
   bind(muField_, "mu");
   bind(epsField_, "eps");  // CFD-DEM: porosity + drag
   bind(dragBeta_, "drag_beta");
