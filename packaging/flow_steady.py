@@ -12,7 +12,9 @@ acceptance test as the unaccelerated march. Phase B has a budget of ``2 * (num_p
 and an early exit when a block fails on the remainder bound alone with a ratio R in
 ``[slow_rate**check_every, 1)``. On either, the target is tightened tenfold and acceleration
 resumes with the history intact. If the plain steps grow, acceleration is disabled and the march
-finishes as the plain march would. ``Solver.step()`` itself is never changed.
+finishes as the plain march would. The same happens after a failed certification when phase A
+stagnated: its residual did not fall by ``slow_rate ** (10 * window)`` (the plain march's assumed
+rate over those calls) within ``10 * window`` calls. ``Solver.step()`` itself is never changed.
 
 ``accelerate=False`` is the plain march with the same instrument, step for step.
 
@@ -189,7 +191,12 @@ def march_to_steady(solver, monitor, rtol=1e-4, max_steps=5000, accelerate=True,
             counter.accelerated_steps += 1
             if callback is not None:
                 callback(counter.steps, "accelerate")
-            if acc.residual <= 0.5 * best:
+            # Progress is measured against the plain march's rate the instrument already assumes
+            # (slow_rate per step): stagnation means Anderson is not beating the plain march over
+            # 10 * window calls, which is what justifies handing over to it (review R1; a halving
+            # per 10 * window calls stopped acceleration on the dense bed while it was still
+            # winning).
+            if acc.residual <= slow_rate ** (10 * window) * best:
                 best, since = acc.residual, 0
             else:
                 since += 1
