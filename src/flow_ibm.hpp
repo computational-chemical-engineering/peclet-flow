@@ -2479,6 +2479,17 @@ class Solver {
   void projectSolve();
 
 
+  // E2(a) split step (doc/vof_step_performance_design.md §12.3, §12.13.2), called AFTER
+  // projectAssembleDivergence: S1 rho0 = global min rho into constCoefRho0_, S2 theta, the rho /
+  // p_increment ghost fills, the S3' explicit face pre-correction u** = u* - q with
+  // q = dt (1/rho_f - 1/rho0) G(theta Delta P^n) (projectExplicitSplit), and S3'' rhs1_ += D(q)
+  // (projectExplicitSplitRhs). div_ keeps D(u*) for S7.
+  void constCoefPrepare();
+  // Put A0 (the constant openness operator) into the pressure MG unless it already holds it.
+  void constCoefEnsureOperator();
+  // S7: P += (rho0/dt) phi - mu_r div(u*) (D-E2.8') and Delta P^{n+1} = P^{n+1} - P^n; records
+  // dt.
+  void constCoefPressureUpdate();
   // E2(a): after an exact projection while the driver is enabled, turn pIncrement_ (holding the
   // stored P^n) into Delta P = P^{n+1} - P^n over all n_ cells, record dt and count the start-up
   // step down.

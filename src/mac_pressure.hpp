@@ -540,6 +540,66 @@ inline void projectCorrectVar(CCField u, CCField v, CCField w, CCConst phi, CCCo
       });
 }
 
+// E2(a) S3', the explicit face term of the opt-in constant-coefficient pressure driver
+// (doc/vof_step_performance_design.md §12.3, §12.13.2): q_c(j) = dt (1/rho_f - 1/rho0) G_c(theta
+// Delta P) at face j of axis c (stride s), with rho_f the PREDICTOR's arithmetic face mean
+// (D-E2.3), rho0 = min rho (D-E2.4), cq = theta*dt/rho0 (D-E2.5) and o the g=2 flux openness (1
+// interior/periodic, 0 on wall and slip faces). `r0/rf - 1.0 <= 0`, and exactly 0 on a face whose
+// two cells both hold rho0, so a uniform-density field gives q = +-0 (P1). The expression shape is
+// normative (FMA reproducibility on the device; §9 R1), and the velocity pre-correction and the
+// right-hand-side adjustment below share it through this one function.
+KOKKOS_INLINE_FUNCTION double explicitSplitFace(const CCConst& dp, const CCConst& rho,
+                                                const CCConst& o, long j, long s, double r0,
+                                                double cq, double wc) {
+  return o(j) * (wc * ((r0 / (0.5 * (rho(j) + rho(j - s))) - 1.0) * (cq * (dp(j) - dp(j - s)))));
+}
+
+// S3': u** = u* - q over the inner faces. Needs the ghost rings of rho and dp filled.
+inline void projectExplicitSplit(CCField u, CCField v, CCField w, CCConst dp, CCConst rho,
+                                 CCConst ox, CCConst oy, CCConst oz,
+                                 Kokkos::View<const double, CCMem> rho0, double th, double dt, C3 e,
+                                 int g, double wx, double wy, double wz) {
+  ccFor3(
+      "peclet::flow::explicit_split", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        const double r0 = rho0();
+        const double cq = th * dt / r0;
+        u(i) -= explicitSplitFace(dp, rho, ox, i, sx, r0, cq, wx);
+        v(i) -= explicitSplitFace(dp, rho, oy, i, sy, r0, cq, wy);
+        w(i) -= explicitSplitFace(dp, rho, oz, i, sz, r0, cq, wz);
+      });
+}
+
+// S3'' (§12.13.2): rhs1 (= -D(u*) on the g=1 block, e1) += D(q) on the inner cells, so that
+// afterwards rhs1 = -D(u**) to rounding while div_ keeps D(u*) for the rotational term (D-E2.8').
+// The high face of the last inner cell reads the filled rho / dp ghosts and the high-face openness
+// divergOpen reads; under MPI both ranks form a shared face from identical inputs. The `dq != 0`
+// guard keeps rhs1 bitwise (sign of zero included) in the reduction limit.
+inline void projectExplicitSplitRhs(CCField rhs1, C3 e1, CCConst dp, CCConst rho, CCConst ox,
+                                    CCConst oy, CCConst oz, Kokkos::View<const double, CCMem> rho0,
+                                    double th, double dt, C3 e, int g, double wx, double wy,
+                                    double wz) {
+  ccFor3(
+      "peclet::flow::explicit_split_rhs", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        const double r0 = rho0();
+        const double cq = th * dt / r0;
+        const double dq = ((explicitSplitFace(dp, rho, ox, i + sx, sx, r0, cq, wx) -
+                            explicitSplitFace(dp, rho, ox, i, sx, r0, cq, wx)) +
+                           (explicitSplitFace(dp, rho, oy, i + sy, sy, r0, cq, wy) -
+                            explicitSplitFace(dp, rho, oy, i, sy, r0, cq, wy))) +
+                          (explicitSplitFace(dp, rho, oz, i + sz, sz, r0, cq, wz) -
+                           explicitSplitFace(dp, rho, oz, i, sz, r0, cq, wz));
+        if (dq != 0.0)
+          rhs1((long)(x - g + 1) + (long)(y - g + 1) * e1.x +
+               (long)(z - g + 1) * (long)e1.x * e1.y) += dq;
+      });
+}
+
 // Variable-density Poisson face coefficients on the MG (g=1) block: c_f = open_f * rho0 / rho_f,
 // rho_f = arithmetic face mean. Computed over the inner cells only — CutcellMG::setOpenness runs
 // its own periodic/halo ghost fill + non-periodic boundary re-imposition on whatever level-0 fields

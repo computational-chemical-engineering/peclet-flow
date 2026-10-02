@@ -372,6 +372,21 @@ void Solver<Grid>::constCoefPrecheck() const {
     refuse("a divergence source (phase change or set_divergence_source) is not supported");
   if (!incremental_)
     refuse("the non-incremental pressure is not supported");
+  // §12.13.3: D-E2.8' is proved stable for mu_r <= 2 mu locally, i.e. these weights <= 2.
+  if (rotWeight_ > 2.0)
+    refuse(
+        "a rotational weight above 2 (set_rotational_weight) is outside the proved-stable "
+        "region (doc/vof_step_performance_design.md §12.13.3)");
+  if (varProps_ && varRotChi_ > 2.0)
+    refuse(
+        "a variable-viscosity rotational scale chi above 2 (set_variable_rotational) is "
+        "outside the proved-stable region (doc/vof_step_performance_design.md §12.13.3)");
+  // §12.13.5 point 3: the balanced-force stage rebuilds the variable-rho operator and solves a
+  // second pressure system every step, the opposite of D-E2.7, and the pair is unvalidated.
+  if (balancedForceActive())
+    refuse(
+        "set_balanced_force_projection(True) is not supported (it rebuilds the variable-rho "
+        "operator and solves a second pressure system every step)");
 }
 
 template <class Grid>
@@ -1177,9 +1192,19 @@ void Solver<Grid>::filterCellField(CCField f, int axis) {
 template <class Grid>
 void Solver<Grid>::project() {
   // E2(a) (doc/vof_step_performance_design.md §12.6): the split scheme once the start-up steps
-  // have run. WO-E2.2: the split is not yet implemented, so every step is exact.
-  const bool split = false;
+  // have run. Inert (one flag read) when the driver is off.
+  const bool split = constCoefP_ && constCoefStartupLeft_ == 0;
   constCoefLastSplit_ = split;
+  if (split) {  // the stage order of §12.13.2 (D-E2.8': the rotational term reads div(u*))
+    projectAssembleDivergence();                   // S4': div_ = D(u*), rhs1_ = -div_, unchanged
+    constCoefPrepare();                            // S1 rho0, S2 theta, fills, S3' u** = u* - q,
+                                                   // S3'' rhs1_ += D(q) (= -D(u**) to rounding)
+    constCoefEnsureOperator();                     // A0 into the MG iff it does not hold it
+    lastPressureIters_ = solveConstantPressure();  // S5 (incl. projectSolveTail)
+    projectCorrectVelocities();                    // S6: projectCorrect (constCoefLastSplit_)
+    constCoefPressureUpdate();                     // S7: P and Delta P^{n+1}, d = div_ = D(u*)
+    return;
+  }
   projectAssembleDivergence();
   if (!coeffBuiltThisStep_)  // the balanced-force stage (B1) already built them this step
     projectBuildCoefficients();
@@ -1192,6 +1217,117 @@ void Solver<Grid>::project() {
   projectPressureUpdate();
   if (constCoefP_)
     constCoefRecordExactIncrement();
+}
+
+template <class Grid>
+void Solver<Grid>::constCoefPrepare() {
+  CCExec space;
+  const C3 e = e_;
+  // S1: rho0 = the exact minimum of rho over the inner cells (and all ranks), into the device
+  // scalar -- single-rank it never visits the host. Min is exact and order-independent, so rho0
+  // is identical on every rank and at every np.
+  {
+    CCConst rho = CCConst(rhoField_);
+    Kokkos::parallel_reduce(
+        "peclet::flow::constcoef_rho0",
+        MDRange3<CCExec>(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& m) {
+          const double r = rho((long)x + (long)y * e.x + (long)z * (long)e.x * e.y);
+          if (r < m)
+            m = r;
+        },
+        Kokkos::Min<double, CCMem>(constCoefRho0_));
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {  // the applySuperficialVelocity pattern: one scalar each way per step
+      double loc = 0.0, glob = 0.0;
+      Kokkos::deep_copy(loc, constCoefRho0_);
+      MPI_Allreduce(&loc, &glob, 1, MPI_DOUBLE, MPI_MIN, comm_);
+      Kokkos::deep_copy(constCoefRho0_, glob);
+    }
+#endif
+    constCoefRho0Valid_ = true;
+  }
+  // S2: theta = min(1, dt^n/dt^{n-1}); 1.0 exactly at constant dt or with dt^{n-1} unknown (0).
+  const double th = (pIncrementDt_ > 0 && dt_ < pIncrementDt_) ? dt_ / pIncrementDt_ : 1.0;
+  constCoefTheta_ = th;
+  // S3': the explicit face pre-correction u** = u* - q, q = dt (1/rho_f - 1/rho0) G(theta
+  // Delta P^n); S3'': rhs1_ (= -D(u*), assembled before this call) += D(q). div_ keeps D(u*).
+  fillPropGhosts(rhoField_);
+  fillGhosts(pIncrement_);
+  projectExplicitSplit(C[0].u, C[1].u, C[2].u, CCConst(pIncrement_), CCConst(rhoField_),
+                       CCConst(ox_), CCConst(oy_), CCConst(oz_), constCoefRho0_, th, dt_, e_, G,
+                       u_.w[0], u_.w[1], u_.w[2]);
+  projectExplicitSplitRhs(rhs1_, e1_, CCConst(pIncrement_), CCConst(rhoField_), CCConst(ox_),
+                          CCConst(oy_), CCConst(oz_), constCoefRho0_, th, dt_, e_, G, u_.w[0],
+                          u_.w[1], u_.w[2]);
+}
+
+template <class Grid>
+void Solver<Grid>::constCoefEnsureOperator() {
+  // A0 = the constant openness operator: the geometry path's own sequence (setSolidInitPressureMg)
+  // minus init, leaving the agglomeration mode as the geometry set it. Built once; any other
+  // setOpenness (an exact step's coefficient rebuild) or MG (re)initialisation clears the flag.
+  if (constCoefOpReady_)
+    return;
+  mg_.setBoundaryConditions(bc_);
+  mg_.setOutflowCoefficient(false);
+  mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), u_.w[0], u_.w[1], u_.w[2]);
+  constCoefOpReady_ = true;
+}
+
+template <class Grid>
+void Solver<Grid>::constCoefPressureUpdate() {
+  // S7: P^{n+1} = P^n + (rho0/dt) phi - mu_r div(u*) (D-E2.8', §12.13.2: div_ holds D(u*), the
+  // exact path's own field -- the Helmholtz-consistent term for the whole change u* -> u^{n+1};
+  // div(u**) would anti-diffuse the increment, unstable for mu_r dt k_max/rho0 >
+  // rho0/(rho_max - rho0), §12.13.3), the textual twin of projectPressureUpdate's kernels with
+  // rho_ -> rho0 (the under-relaxation is refused by the precheck), and Delta P^{n+1} = the stored
+  // pressures' own difference, over all n_ cells.
+  // The rotational coefficient follows projectPressureUpdate's branch logic unchanged (the
+  // wall-blend branch reduces to the plain one without a solid), and so does its optional
+  // filtered-rotational smoothing of div_: with it, a uniform-density split step still equals an
+  // exact step bit for bit (§12.5 P1).
+  if (rotFilter_ && rotationalP_)
+    for (int a = 0; a < 3; ++a)
+      filterCellField(div_, a);
+  CCExec space;
+  CCField P = P_, ph = phi_, d = div_, dp = pIncrement_;
+  Kokkos::View<const double, CCMem> r0v = constCoefRho0_;
+  const double dt = dt_;
+  if (varProps_) {
+    if (varRotMode_ == 1) {
+      CCConst mf = CCConst(muField_);
+      const double chi = varRotChi_;
+      Kokkos::parallel_for(
+          "constcoef_press_var_full", Kokkos::RangePolicy<CCExec>(space, 0, n_),
+          KOKKOS_LAMBDA(std::size_t i) {
+            const double ct = r0v() / dt;
+            const double p0 = P(i);
+            P(i) += ct * ph(i) - chi * mf(i) * d(i);
+            dp(i) = P(i) - p0;
+          });
+    } else {
+      const double muRot = (varRotMode_ == 2) ? 0.0 : varRotChi_ * minMuInner();
+      Kokkos::parallel_for(
+          "constcoef_press_var_min", Kokkos::RangePolicy<CCExec>(space, 0, n_),
+          KOKKOS_LAMBDA(std::size_t i) {
+            const double ct = r0v() / dt;
+            const double p0 = P(i);
+            P(i) += ct * ph(i) - muRot * d(i);
+            dp(i) = P(i) - p0;
+          });
+    }
+  } else {
+    const double mu = rotationalP_ ? rotWeight_ * mu_ : 0.0;
+    Kokkos::parallel_for(
+        "constcoef_press", Kokkos::RangePolicy<CCExec>(space, 0, n_), KOKKOS_LAMBDA(std::size_t i) {
+          const double ct = r0v() / dt;
+          const double p0 = P(i);
+          P(i) += ct * ph(i) - mu * d(i);
+          dp(i) = P(i) - p0;
+        });
+  }
+  pIncrementDt_ = dt_;
 }
 
 template <class Grid>
@@ -1668,7 +1804,9 @@ void Solver<Grid>::projectCorrectVelocities() {
     else if (varRho_ && rhoFaceHarmonic_)  // the WO-J harmonic knob: coefficient AND correction
       projectCorrectVarHarm(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
                             u_.w[0], u_.w[1], u_.w[2]);
-    else if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
+    else if (varRho_ && !constCoefLastSplit_)  // per-face 1/rho on the gradient, matching the
+                                               // operator coefficient (the E2(a) split step's
+                                               // operator is A0: plain projectCorrect below)
       projectCorrectVar(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
                         u_.w[0], u_.w[1], u_.w[2]);
     else
