@@ -406,3 +406,67 @@ Bubble column at density ratio 1 (the rho closure `[rho_l, 0]`, everything else 
 `ckpt_t43`, MG-PCG rtol 1e-10: **7.3 iterations/step on average, max 8**, against 13.1 at the
 case's ratio 50. The §12.11 R-E2.1 stop rule (>= 12 at levels 4) is not met: the premise of option
 (a) holds, and §12.8's 7–9 iterations per step is confirmed. Proceeded to WO-E2.1.
+
+### WO-E2.1, WO-E2.2 — landed on branch `vof-e2` (structural; G-BIT PASS)
+
+G-BIT against the unmodified tree (origin/main 7f74620 built in the same worktree; baselines and
+gate outputs in `~/Codes/bubble_column_perf/e2/`, script `e2/gbit.sh`): state_hash 12 cases + np2
+identical, bubble-column 50-step dump bitwise (24 arrays, iterations 13.06/13/14), on nvidia-cuda
+and host-openmp 1x8 and 1x24, for both commits. The new ctest `pressure_constant_coefficient` (SCOPE:
+13 refusals + the valid control; BRACKET: startup_steps=10**6 -> 20 steps bitwise the driver-off
+run and p_increment == P^{n+1}-P^n bitwise every step) passes on both backends.
+
+### WO-E2.3 — STOPPED: G-E2-BAL fails (the split scheme is unstable with viscosity)
+
+The candidate implementation of §12.3 is parked on the local branch `vof-e2-e23-stopped`
+(5b78816), not on `vof-e2`. Gates, identical on host-openmp and nvidia-cuda:
+
+| gate | result |
+|---|---|
+| G-E2-RED (P1) | **bitwise**: u,v,w,p,C after 20 steps and per-step iterations (mean 9.05), 32^3 rho 2.5 and 32x32x16 extent (1,1,1); rho0 == set_rho bitwise |
+| G-E2-REC (P3, 1-D) | **pass**: max |g_meas - g_pred|/max|g_0| = 1.3e-14 (ratio 3), 3.7e-14 (ratio 50), tol 1e-9; max|u| 3.7e-15 / 1.8e-14; theta exact |
+| G-E2-BAL, mu = 0, 30 steps | **pass**: max|u| 1.1e-15 (in/out 50), 5.9e-15 (0.02); |P - sigma kappa C - c|/sigma kappa 9.3e-13 / 8.1e-14 |
+| G-E2-BAL, mu = 0.1, 200 steps | **FAIL**: the split run blows up (WY CFL cap tripped at step 23 / 22); exact path 2.33e-6 / 2.91e-6 |
+| G-E2-RST | **pass** (bitwise; negative control differs 9.8e-3) — measured INVISCID, because the ratio-50 bubble at mu = 0.1 blows up the same way before step 40 |
+
+Probe (`e2/probe/bal_mu.py`: the BAL drop, ratio 50 inside, dt = 0.5 dt_sigma = 1.007, cell
+units, max|u| at step n):
+
+| mu | exact path | split (D-E2.8: div u**) | split, rotational term off | split, div(u*) (rejected alternative) |
+|---|---|---|---|---|
+| 0 | — | 1.6e-15 at 300 (stable) | | |
+| 0.001 | 8.9e-7 at 400 | 4.3e-6 at 100 -> 4.8e-6 at 400 (slowly growing) | | |
+| 0.0025 | 1.5e-6 at 400 | 1.0e-5 at 60 -> 1.6e-5 at 400 (growing) | | |
+| 0.005 | 2.4e-6 at 300 | 2.1e-5 at 60 -> 4.2e-5 at 300 (growing) | | |
+| 0.01 | 2.65e-6 at 300 | 8.2e-3 at 300 (x1.04/step) | 7.8e-5 at 300 (decaying) | 2.3e-5 at 300 (decaying) |
+| 0.1 | 2.34e-6 at 200 | blows up at step 23 | 3.4e-4 at 100 | 9.2e-5 at 200 (decaying) |
+
+Mechanism (my reading; a design question, not decided here): S7 reads div(u**) = div(u*) - div q,
+q = dt (1/rho_f - 1/rho0) G(theta Delta P^n). So Delta P^{n+1} contains
++mu_r div q = -mu_r dt theta div(|1/rho_f - 1/rho0| G Delta P^n): an explicit ANTI-diffusion of the
+increment, gain nu ~ mu_r dt lambda (1/rho0 - 1/rho_f) per step (lambda up to 4 sum w_a = 12). In
+the P3 recurrence the heavy-phase factor becomes (1 - a_f) + nu, so the scheme needs roughly
+mu_r dt lambda_max (1/rho0 - 1/rho_max) < rho0/rho_max — at ratio 50, mu_r dt/rho0 < ~1.7e-3 in
+cell units, i.e. it is unstable at any practical viscosity. P3 was derived inviscid, which is why
+G-E2-REC (mu = 0) and BAL mu = 0 pass. The rejected div(u*) removes the growth but its transient
+still decays at P3's heavy-phase rate (~0.99/step at ratio 50): 9.2e-5 at step 200 against the
+exact 2.3e-6, so BAL's "<= 2 x exact" would fail with it too.
+
+Bubble column (GPU, `e2/probe/prof_cc.py` = prof.py + `--constcoef`, `--pcg`, from ckpt_t43,
+2 exact start-up steps inside the 5 warm-up steps): 300 steps reach max|p| 6.9e5 against 577 and
+max|w| 76 against 16 (exact path) — the target case itself is unstable under the driver as
+designed. Over the first 50 timed steps (before the growth shows) the performance premise holds:
+PCG 7.96 iterations/step (max 8) against 13.06, projection 55.3 against 95.7 ms/step, total 164
+against 204 ms/step — GPU shared at 96 % utilisation with another package, load ~19: indicative
+only, the ratio is the information.
+
+Open points for the design session (each reversible, none decided here):
+1. **D-E2.8 / the viscous stability of the split** (the stop). Candidates I can see, not
+   evaluated: div(u*) plus an accuracy argument for BAL's 200-step criterion; an implicit
+   treatment of the mu_r div q part; a stability bound on mu_r dt/rho0 enforced by step().
+2. S7 applies `filterCellField(div_)` when `rotFilter_ && rotationalP_` (inferred from P1: without
+   it a uniform-density split step would not equal the exact step). Alternative: refuse it.
+3. An explicit `set_balanced_force_projection(True)` on the staggered grid is not in §12.6's
+   refusal list; the split path runs with it (re-installing A0 every step). Recommend refusing it.
+4. `pressure_constant_coefficient_stats()['theta']` is NaN before the first split step (mirrors
+   rho0; the note did not say).
