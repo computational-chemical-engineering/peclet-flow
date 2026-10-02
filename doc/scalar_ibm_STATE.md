@@ -44,13 +44,20 @@ and a divergence-free MAC face flux. Then a plan, and a step-by-step implementat
   - Gibou/Papac/hybrid "aperture + link" (no single symmetric scheme is 2nd order at all Bi);
   - centroid two-point and series-resistance wall fluxes (order 1);
   - the quadratic normal probe (erratic).
-- **Literature** (L1 cut-cell/EB, L2 interface/conjugate/VoF species, L3 particle-resolved and
-  benchmarks) is running. Digests go to the scratchpad `lit/`. Copy them into
-  `doc/scalar_ibm_literature/` when they land.
+- **Literature** is done: L1, L2, L3 plus the building-block recon R, in `doc/scalar_ibm_literature/`.
+  It corroborates the method. AMReX EB Dirichlet uses the same probe but has no EB Robin.
+  Crockett–Colella–Graves 2011 is the conjugate 2×2 form. Zhao 2026 uses the PLIC interface as an
+  EB.
+- **Architect brief** `doc/scalar_ibm_brief.md` (eb1d9b7). The architect is writing
+  `doc/scalar_ibm_design.md`.
+- **Build tree** `build_dev` (host-openmp, MPI, tests, ccache, -march=native). The baseline is
+  61/61 single-rank ctests passing; the 1-thread state hashes are in
+  `doc/scalar_ibm_baseline_hashes.txt` (77fc506).
 
 ## Next action
 
-1. Fold the literature into the design brief. Check the probe-flux FV against AMReX EB / Schwartz
+0. Read the architect's design note, then implement the work orders in order (opus-implementer).
+1. (done) Fold the literature into the design brief. Check the probe-flux FV against AMReX EB / Schwartz
    et al. 2006, Mittal image points and Bochkov–Gibou, and pick the small-cell advection treatment
    (SRD vs May–Berger explicit–implicit vs implicit upwind in cut cells). Prototype advection with
    κ storage if the literature does not settle it.
