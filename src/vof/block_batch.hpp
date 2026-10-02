@@ -761,6 +761,48 @@ inline void vofCurvHfReset(const VofCurvTable& T) {
       });
 }
 
+/// Tier 3 of the batched cascade on a DEVICE (C3, `doc/vof_step_performance_design.md` §4.7,
+/// §5.11; launch shape: coordinator decision 2026-10-02, option C). The interfacial counts stay on
+/// the device (§4.6), so the league cannot be the number of entries; instead a FIXED league of
+/// persistent warp-teams strides over the concatenated device-counted entries
+/// `g = league_rank, league_rank + league_size, ...`, each entry handled by `curvFallbackTeam` (the
+/// same body as `VofCurvature::fallbackBatch`'s team path: canonical-order accumulation, bit for
+/// bit the one-thread `curvFallbackCell`). No host read, no empty teams.
+///
+/// League size: one team per hardware warp slot, `concurrency() / kVofWarp` (on CUDA = SMs x
+/// resident threads per SM / 32), capped by `kVofTier3MaxTeams`. Teams beyond the resident
+/// number simply start later; the stride covers every entry whatever the league.
+inline constexpr int kVofTier3MaxTeams = 1 << 16;
+inline void vofCurvFallbackTeams(const VofCurvTable& T, LField list, LField start, LField end) {
+  using Policy = Kokkos::TeamPolicy<SExec>;
+  using Terms = Kokkos::View<PvTerm*, SExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
+  constexpr int side = 2 * kPvHalf + 1, nk = side * side * side;
+  const int league =
+      std::max(1, std::min(kVofTier3MaxTeams, static_cast<int>(SExec().concurrency() / kVofWarp)));
+  Policy pol(SExec(), league, kVofWarp);
+  pol.set_scratch_size(0, Kokkos::PerTeam(Terms::shmem_size(nk)));
+  Kokkos::parallel_for(
+      "vof::block::batch_curv_pv_team", pol, KOKKOS_LAMBDA(const typename Policy::member_type& tm) {
+        Terms terms(tm.team_scratch(0), nk);
+        long cum[kVofBlockBatch + 1];  // device prefix of the jobs' entry counts
+        cum[0] = 0;
+        for (int k = 0; k < T.nj; ++k)
+          cum[k + 1] = cum[k] + (end(T.base + k) - start(T.base + k));
+        for (long g = tm.league_rank(); g < cum[T.nj]; g += tm.league_size()) {
+          int k = 0;
+          while (g >= cum[k + 1])
+            ++k;
+          const VofCurvJob& J = T.job[k];
+          const long i = list(start(T.base + k) + (g - cum[k]));
+          const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+          curvFallbackTeam(tm, terms, i, VofRawField{J.c}, VofRawField{J.mx}, VofRawField{J.my},
+                           VofRawField{J.mz}, VofRawField{J.al}, VofRawField{J.kap},
+                           VofRawField{J.br}, sy, sz, kPvHalf, J.dW, J.cmin, J.ieps, J.gm);
+          tm.team_barrier();  // the single lane is done with `terms` before the next entry's map
+        }
+      });
+}
+
 /// The per-list-cell passes of the cascade over the inner interfacial list (upper bound: the inner
 /// region): `pass` 0 = tiers 1-2 (`curvHeightCell`), 1 = tier 3 (`curvFallbackCell`), 2 = the
 /// admissibility clip (its count into `cnt(8 (base + k) + 7)`), 3 = the branch census (its seven
@@ -768,6 +810,12 @@ inline void vofCurvHfReset(const VofCurvTable& T) {
 /// integer atomics: exact whatever the order.
 inline void vofCurvListPass(const VofCurvTable& T, int pass, LField list, LField start, LField end,
                             LField cnt) {
+  if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, SField::memory_space>::accessible) {
+    if (pass == 1) {  // tier 3 on a device: persistent warp-teams (C3); the host keeps the loop
+      vofCurvFallbackTeams(T, list, start, end);
+      return;
+    }
+  }
   Kokkos::parallel_for(
       "vof::block::batch_curv_list", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {

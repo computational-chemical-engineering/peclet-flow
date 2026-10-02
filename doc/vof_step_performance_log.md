@@ -487,3 +487,20 @@ follows the pressure rtol: median residual 4.7e-16 → 1.9e-9 from 1e-8 on). Ste
    −8e-10 per 1000 steps. Extrapolated to a t 50–150 production window (≈ 6.3·10⁴ steps) it is
    ≈ 5e-8 relative (1e-8: ≈ 2e-10) — far below any physical effect, but larger than the 2000-step
    criterion suggests.
+
+### WO-7c (2026-10-02): the batched container's tier 3 — persistent warp-teams (coordinator decision: option C)
+
+`vofCurvFallbackTeams` (`src/vof/block_batch.hpp`) replaces pass 1 of `vofCurvListPass` on a
+device: a fixed league of `min(concurrency()/32, 65536)` warp-teams (`kVofTier3MaxTeams`) strides
+over the concatenated device-counted interfacial entries (prefix of `end − start` per job computed
+in-kernel), each entry handled by `curvFallbackTeam`, with a team barrier between entries; no host
+read (WO-8's ≤ 3 per container step stands), no empty teams. Host: unchanged loop.
+
+| gate | result |
+|---|---|
+| 50-step column dump vs main, CUDA / host 1×8 / host 1×24 | `bitwise=True` 24/24 each (the column now runs the team kernel: 24 launches in 23 steps) |
+| `ctest -R vof_blocks` (incl. `vof_blocks_mpi` np 1/2/4/8), CUDA and host | 12/12 each |
+
+Tier 3 on the column (nsys, 20 + 3 steps, GPU at 99 % shared with P4, load ≈ 22 — indicative):
+main one-thread pass 1 **14.76 ms/call** → persistent teams **7.40 ms/call** (×2.0). Still above
+the ≤ 1.5 ms target; to be re-measured on a quiet GPU.
