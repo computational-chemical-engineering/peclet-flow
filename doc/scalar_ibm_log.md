@@ -305,3 +305,42 @@ and the cell kernel cannot drift.
   WO-3/WO-8.
 
 With the restated asserts `scalar_cutcell_geometry` passes, as do `_mpi_np{1,2,4}`.
+
+## 2026-10-03 — round 8: near-contact conjugate (`tests/study/scalar_ibm/packing2d.py`)
+
+**Set-up.**
+- Periodic square array, one cylinder per unit cell, gap g = 1 − 2R, k_f = 1, macroscopic gradient.
+- k_eff from the face-column flux.
+- Methods: PH = Peters' hybrid ladder (his `construct_flux_ibm.m` transcribed to 2-D: directional
+  quadratic where there is room, appendix series-parallel k_eff on close / very-close faces);
+  P2F = two-field probe FV, which does NOT detect a probe inside another solid; P2Fg = P2F with
+  s_f = min(0.7 h, ½·normal gap).
+- Check: k_s = k_f gives k_eff = 1 to 1e-6 (n = 16) … 1e-8 (n = 64). This needed two fixes in the
+  port: DOF validity from the apertures, and the facet sign.
+- Reference: Richardson (64, 128). All three agree to 0.05–0.2 %.
+
+**k_s = 100.** The "%" is the error vs the reference.
+
+| case | PH | P2F | P2Fg |
+|---|---|---|---|
+| g = 0.05, n = 32 | −0.2 % | −1.1 % | −1.1 % |
+| g = 0.02, n = 32 | −0.7 % | −2.2 % | −1.2 % |
+| g = 0.02, n = 16 | −1.8 % | −12 % | −3 % |
+| g = 0.01, n = 32 | −1.2 % | −7 % | −1.2 % |
+| g = 0.01, n = 16 | −2.2 % | −29 % | −3.5 % |
+
+**k_s = 0.01.**
+- PH is non-monotone in small gaps:
+  - g = 0.02: −23 % at n = 16 and n = 32;
+  - g = 0.01: 0.0645 / 0.0577 / 0.0580 / 0.0644.
+- P2F and P2Fg are smooth and monotone, ≤ 0.8 % at n = 16 in every case.
+
+**Conclusions.**
+1. Probes landing in the neighbouring body are THE near-contact failure of the probe FV for
+   conducting contacts. A gap cap at ½ the normal gap removes most of it. This supports the design's
+   ladder (φ(p0) < 0 → R1b gap-midpoint); WO-8 must gate exactly this case.
+2. Peters' series-parallel contact formula is the most robust at coarse resolution for conducting
+   contacts (≈1–2 % at 0.3 cells per gap), but fails for insulating gaps (−10 to −23 %).
+3. Possible WO-8 refinement, held: for conducting contacts with gap < ~h, a film-conduction coupling
+   of the two solid probes through the gap, k_f/δ_n in series; equivalent in spirit to Peters'
+   very-close formula. Only if the G13 gate demands it.
