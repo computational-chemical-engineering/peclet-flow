@@ -280,12 +280,28 @@ and the cell kernel cannot drift.
   the RTX 5080: facets 2657 / R0 2657 / unknowns 58051 / sealed 25, solid volume equal to the
   OpenMP build to 10 digits.
 
-**OPEN — two gate clauses fail; reported, not changed:**
+**Found while gating — two clauses of the note did not hold as written:**
 1. (e) "0 sealed" fails at every resolution: 0–11 / 38–46 / 154–159 sealed cells (iso), up to 407
    (aniso). They are genuine §2.4 sealed cells — corner slivers of fluid, κ ≤ 1.3e-5, whose three
    faces all snap to 0 at the 1e-3 floor. Their total volume is ≤ 1.9e-9 of the fluid volume, far
    under the §9 warning threshold (1e-6). The count grows like (R/h)², so no resolution reaches 0.
 2. R0 = 100 % holds on the isotropic spheres and the pipe but not on h' = (1,1,2): 1–11 facets per
-   run (≤ 2e-4) take R1b. Each is a snap artefact: a tiny facet whose A^snap is exactly ±z,
-   because the x/y faces snapped to 1 while the z face (half the area) did not, and whose probe
-   along z enters the sphere.
+   run (≤ 2.2e-4 of them) take R1b, none R2. Mechanism: on a tiny corner facet the x/y faces snapped
+   to 1 while the z face (half the area) did not, so the SNAPPED area vector points exactly along
+   ±z, and the probe along it enters the sphere.
+
+**DECISIONS (orchestrator ruling, 2026-10-03):**
+- D-WO2-1 — sealed cells. Gate (e)'s "0 sealed" is restated as: sealed volume Σκ·V over sealed cells
+  ≤ 1e-6 of the fluid volume (the §9 threshold; measured ≤ 1.9e-9). The sealed count stays in the
+  census. The sealed definition (§2.4) and the snapping rule (§2.3) are NOT changed.
+- D-WO2-2 — R0 on anisotropic grids. R0 = 100 % stays required on the isotropic sphere set and the
+  pipe set; on h' = (1,1,2) the gate is R0 ≥ 99.9 % of facets and ZERO R2 (measured: min 99.97 %,
+  R2 = 0). Held option for WO-8: probe along the UNSNAPPED PL normal while keeping the snapped area
+  for the flux magnitude.
+- The five WO-2 readings are accepted as made: `scalar_geometry` / `scalar_census` take any
+  registered scalar name until WO-3 adds the cut-cell flag, `probe_rungs = {'fluid': (R0, R1a,
+  R1b, R2)}`; facets for every cell whose PL record has them (no unknown filter); `num_cut_cells` =
+  cells carrying ≥ 1 facet; one invalidation call in `setSolidDevice`; the §9 warnings deferred to
+  WO-3/WO-8.
+
+With the restated asserts `scalar_cutcell_geometry` passes, as do `_mpi_np{1,2,4}`.
