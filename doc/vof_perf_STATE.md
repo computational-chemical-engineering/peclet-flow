@@ -26,6 +26,14 @@ vs ~0.80 (0.99 at ratios 0.02). GPU now 42.7 ms/step (main 035121a+). Landed sin
 vof_momentum+blocks (2d0a0d0). OPEN: vof_momentum isolated-bubble acceleration seen in the D/h 16
 pair run (1.84) but not at D/h 20 (on/off within 7 % transient, 1.6 % settled).
 
+**Running (2026-10-02, USER: "perform the clean-up and performance plan").** Cleanup DONE (~95 GB:
+TBF raw runs, superseded peclet runs, scratch; study results archived in
+/home/frankp/Codes/bubble_column_perf/studies/). Three opus-implementers, common brief
+/home/frankp/Codes/bubble_column_perf/BRIEF_MAINLINE2.md: P3 WO-6+WO-11 (device bottom; worktree
+flow-vof-b1), P4 E2(a) WO-E2.0..7 (flow-vof-e2), P5 WO-7 core half (core-pvfit, NOT tagged — ask
+release session suite-73 for a core release with it) + flow half (flow-vof-pvfit) + WO-13 D1.
+Baseline worktree flow-main-base for bitwise gates.
+
 **Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
 + core tag: coordinate with the release session); E2(a) per §12; register entries of design §11 as
