@@ -466,8 +466,11 @@ Pressure iterations, max per run: static 9–10 → 6 (1e-6), Hysing 18 → 10. 
 **§5.12 acceptance:** (1) static max|u| ≤ 1.05× ref — every rtol (worst 1 + 3.6e-8); (2) Hysing
 within 0.2 % — every rtol (worst 1.8e-5); (3) total drift ≤ max(1e-8, 2× ref) = 1e-8 and rise
 within 1 % — every rtol (1.6e-9; 7.8e-9). **The loosest passing rtol is 1e-6**, the loosest
-tested. Per Q8 (USER default) the solver default stays 1e-10 and only the case script changes:
-peclet-examples `run_peclet.py` (branch `bubble-column`) → 1e-6. Expected saving on the column:
+tested. Per Q8 (USER default) the solver default stays 1e-10 and only a case script may change.
+DECISION (session, 2026-10-02): the published bubble-column case KEEPS 1e-10 (peclet-examples
+ac35a14 reverts the 1e-6 change): 1e-6 adds a systematic ~5e-8 volume drift over the production
+window where the markers conserve to 1e-12, the study predates b273031, and TBFsolver solves its
+pressure exactly; revisit after the D1 rerun on main. The saving 1e-6 would give on the column:
 pressure iterations −46 % (13.85 → 7.43), the momentum solve about halved (its residual stop
 follows the pressure rtol: median residual 4.7e-16 → 1.9e-9 from 1e-8 on). Step times in the JSONs
 (146 → 84 ms median) were taken on a shared GPU at load 63–132 and are not to be quoted.
