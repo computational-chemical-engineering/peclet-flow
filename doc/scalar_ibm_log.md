@@ -25,3 +25,55 @@ brackets):
   is order 1.5; full faces give 2.0).
 - No symmetric compact scheme found is 2nd order at all Bi.
 - Papac is the best compact Robin, but its Dirichlet limit is a mask.
+
+## 2026-10-02 — round 3: Johansen–Colella / probe-flux FV (`jc.py`)
+
+**Set-up.**
+- Every κ > 0 cell is an unknown; κ mass; aperture two-point faces.
+- Wall flux from a probe point on the wall normal, with Robin eliminated per facet:
+  - D du/ds = S − β u_G;
+  - u_G = D S / (k + D β);
+  - flux into the cell = −k A_w u_G.
+
+**Variants** (relative error of the Robin eigenvalue at ND = 128; order ~2.0 at every Bi unless
+noted):
+
+| variant | Bi = 0.1 | 1 | 10 | 100 | ∞ |
+|---|---|---|---|---|---|
+| JC quadratic normal (2 column-intersection points) | 1.2e-5 | 2.8e-6 | 4.1e-5 | 7.1e-5 | 7.5e-5 |
+| JC-lin (1 point on the next column line, 3-pt quadratic transverse) | 2.8e-5 | 7.9e-5 | 1.1e-4 | 2.1e-4 | 2.1e-4 |
+| probe c = 0.7 h, bilinear (4 cells, reach 2) | 2.2e-5 | 5.6e-5 | 8.4e-6 | 3.0e-5 | 3.5e-5 |
+| probe c = 1.0 h | | | | | 1.5e-4 |
+| probe c = 1.5 h | | | | | 4.5e-4 |
+
+- The quadratic-normal variant has the smallest error, but it is erratic: signs and orders jump.
+- The face-centroid flux interpolation makes no difference (JC vs JC-nofc agree to 3 digits), so it
+  is not needed.
+
+**Conclusion.** The decisive ingredient is a wall gradient over a probe distance ≥ ~0.7 h,
+interpolated from neighbours. It never uses the cut cell's own value over its (possibly tiny)
+distance. One unknown set and one formula cover Neumann → Robin → Dirichlet at 2nd order, and the
+3-D stencil is compact: 27-point plus a reach of 2.
+
+## 2026-10-02 — round 4: conjugate probe-flux FV (`conj.py`)
+
+**Set-up.**
+- Solid core r < 0.5 (D_s, capacity g_s, partition K, contact h_c), fluid annulus, u = 0 at
+  R = 1 (immersed, probe Dirichlet).
+- Two fields on one grid; per facet a fluid probe and a solid probe; the 2×2 interface elimination
+  (pymrm `ibm_coupling` structure, in flux form) is exactly conservative.
+- Exact reference: a Bessel determinant.
+
+Error at ND = 128:
+
+| case | error | order |
+|---|---|---|
+| D_s = 10 | 1.7e-4 | 2.0 |
+| D_s = 0.1 | 9.2e-6 | 3.0 |
+| D_s = 100, g_s = 0.5 | 2.0e-4 | 2.0 |
+| K = 3 | 8.6e-5 | 2.0 |
+| h_c = 5 | 4.1e-5 | 2.1 |
+| D_s = 10, K = 0.5, h_c = 2, g_s = 2 | 7.0e-7 | (~2.5 to ND = 64) |
+
+The probe fallback (renormalized valid weights, then a longer probe) fired once per case, at
+ND = 16.
