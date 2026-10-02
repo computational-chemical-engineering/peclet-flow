@@ -1,29 +1,29 @@
 # Steady-march Anderson acceleration — STATE (rewritten in place)
 
-**Objective.** Execute `doc/steady_acceleration.md` (WO-1 … WO-6): Anderson acceleration of steady
-marches, `peclet.flow.march_to_steady`. History and every number: `doc/steady_acceleration_log.md`.
+**Objective.** Execute `doc/steady_acceleration.md` (rev 2; WO-1 … WO-8): Anderson acceleration of
+steady marches, `peclet.flow.march_to_steady`. History and every number:
+`doc/steady_acceleration_log.md`.
 
-**Where we are (2026-10-02, night).**
-- **Branch:** `anderson` (worktree `suite/flow-anderson`), not pushed. Core: `../core-anderson`
-  `9ff3bd2` (WO-3 + WO-3b), built with `-DPECLET_SIBLING_PECLET_CORE=…/core-anderson`.
-- **WO-2 DONE** (`311d0cb`), **WO-4 DONE** (`2ba357c`). G0(c): 193/193 ctests pass.
-- **WO-5 STOPPED** — gates that FAIL (numbers in the log, entry "WO-5"; note §1.3):
-  - G1 / G7c, the Ritz guard at TIGHT settings: false "unstable" on §11 coll N14 (step 64) and
-    stag N20 (step 51), readings 1.001–1.005 at residual 5–7e-9 (floor 1e-9); isolated readings
-    up to 1.012 at residual 1e-6–1.5e-5. Oracle reproduces it → design question (Q15).
-  - G1 staggered bed: |K_acc/K_plain − 1| = 1.44e-8 — the PLAIN tight certificate is premature
-    (tail ~0.9999/step vs slow_rate 0.997); the accelerated K is within ~5e-10 of a 60 000-step march.
-  - G3 staggered bed: 400 steps reach residual 1–2e-9 (not 1e-9); K spread 3.8e-7; no instability.
-  - G8 CUDA staggered: 5.3 % > 5 % (latency-bound; the §6.2 remedy is a core change).
-- **Passing:** G0, G2 (all bars; D11 → `accelerate=True`, staggered bed wall 3.4–3.9×), G4/G4c,
-  G5, G6, G7a, G7c at production (0 of 946 readings > 1.0005), G8 memory, G8 CUDA collocated.
-- **WO-6:** CLAUDE.md "Steady marches", note §1.3 "Measured", register drafts in the log (the
-  guard-scope entry marked PENDING); docs build (doxygen) exit 0, no warning from the new files.
-- Host G1 / G6 / G8 finished (log "WO-5 addendum"): same verdicts as CUDA; host G8 passes (≤ 5.5 %
-  of the 8 % host bar).
+**Where we are (2026-10-03).**
+- **Branch:** `anderson` in `suite/flow-anderson` and `suite/core-anderson`, not pushed. Flow
+  builds read core from `../core-anderson` (`-DPECLET_SIBLING_PECLET_CORE`).
+- **Done:** WO-1 … WO-6, **WO-7** (flow `d4d71b5`: no guard in driver / adapter / bindings,
+  `converged=True` = stationarity, Q18 default), **WO-3c** (core `f9956ed`, on the fusion
+  `0290998`: guard, `innerTolerance`, GG / GR deleted; pass 2 = RR and b only), **WO-8** re-gate.
+- **Gates now (log "WO-8"):** G0 (hashes 13/13, ctests 63 + 130, core 96 host + 96 CUDA) pass;
+  G1 14/14 pass (coll N14 2.7e-10, stag N20 5.8e-10; staggered bed ≤ 5.1e-10 against the long
+  plain march K∞ ∈ [98.9156994, 98.9156995], orchestrator decision 1); G2 production 42/42 step
+  counts identical to WO-5; G4 identical to WO-5; G7 a/b/c pass (G7c closed); G8 CUDA staggered
+  3.5 % (bar 5 %), collocated 1.2 %, host ≤ 4.8 %.
+- **Still FAILING (twice — reported, not tuned):** G3 staggered bed, K agreement over Δt: spread
+  3.8e-7 CUDA / 3.3e-7 host at running-min residual ≤ 1e-9 (reached at 400–426 steps; every other
+  G3 criterion passes). Supplementary 3000-step run: Δt 600 / 1e4 agree to 4.7e-10, but Δt 60 is
+  disabled by the restart rule at step 2588 (5 restarts after reaching 2.7e-12).
+- Not re-run on the new core: G5, G6 (WO-5 values stand; the guard never fired there).
 
-**Next action.** Caller / architect: the four failures above. Nothing here changes a constant.
+**Next action.** Caller: decide on the G3 bed K-agreement criterion (and the Δt-60 restarts in the
+long run); then review, register entries (log R2-7), push core → tag → flow → umbrella.
 
-**Anchors.** Note "Revision 1", D5, §4.1 (`kRitzFloorFactor`), §4.3 step 7, §1.3; core
-`AndersonCore::complete` step 7; instrument `tests/study/steady_acceleration_gates.py`; adapter
-`src/anderson_accelerator.hpp`; driver `packaging/flow_steady.py`.
+**Anchors.** Note "Revision 2", D5, §7, §8 G3, §9 WO-8; core `AndersonCore::complete` (pass 2,
+step 5 restart rule); instrument `tests/study/steady_acceleration_gates.py` (`g3 --extend-to`);
+driver `packaging/flow_steady.py`; adapter `src/anderson_accelerator.hpp`.

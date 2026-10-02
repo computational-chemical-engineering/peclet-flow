@@ -1124,3 +1124,122 @@ not measured in this state beyond the gate below).
   → **63/63** (1859 s, box load ~90 on 48 cores); `OMP_NUM_THREADS=2 ctest ... -R '_np[0-9]+$' -j4`
   → **130/130** (507 s).
 - clang-format 18.1.8 over the CI file list (154 files, the six W4 exclusions): clean.
+
+---
+
+## 2026-10-02/03 — WO-3c: core delta for revision 2 (core-anderson `f9956ed`, on `0290998`)
+
+Deleted from `solver/anderson.hpp`: `AndersonState::innerTolerance` + its check, the five Ritz
+constants, `Status::Unstable` / `Reason::Unstable`, `ritzEstimate`, `gelfandRadius`, `gg_` / `gr_`,
+`mixedCol_` / `allMixed`, `ritzCount_` / `ritzRadius_` / `ritzFloor()`, the packet's `ritzRadius`,
+the step-7 eligibility block. Pass 2 per column: `SumN<2>` {⟨dR_s,dR_j⟩, ⟨dR_j,X⟩} (reads dR_s,
+dR_j, X); packet 2·nCols + 2. Tests: U4 rewritten, U4b added, U8 / U9 / the Gelfand test deleted;
+`LinearMap`'s rotation → a general 2×2 block (U4 passes (ra, −rb, rb, ra)).
+
+    build_{omp,cuda}/tests/test_anderson     # OMP_NUM_THREADS=8 OMP_PROC_BIND=false; before = 0290998
+    OMP_NUM_THREADS=2 ctest --test-dir build_{omp,cuda} -R anderson -V
+
+- Digests, host-openmp, before → after: metric `cd696c29aa22e50f`, U1a `2f37447a92118f80`, U1b
+  `10d656ca6d5dad00`, U1c `e09920bf46c824c3`, U2 `d7ebc400601b0ba4`, U3 `ec06c8649f6a4fbf`, U5
+  `e2f51bebca930280`, U6 `be9c8cd903b7cff8`, U10 `53baa703551353e9`: **all identical**. On CUDA the
+  same nine digests are identical too (the 5 → 2 double reducer did not move them on this card).
+- U4 (unstable map, 1.02 + rotation 1.01, 400 calls): active after every call, 0 restarts, residual
+  ≤ 1e-10 at **call 154** (≤ 300; oracle 162), min residual 0 — host and CUDA identical.
+- U4b (outlier 0.5, block [[0.99, 1], [0, 0.99]], 400 calls): active, 0 restarts, ≤ 1e-10 at
+  **call 89** (≤ 150; oracle 91) — host and CUDA.
+- U7 np 1 / 2 / 4, host and CUDA: γ equal on all ranks; max|x_np − x_1|/max|x_1| = 0 / 4.3e-15 /
+  3.9e-15 (host), 0 / 4.9e-15 / 1.2e-14 (CUDA); np = 1 digest = serial digest.
+- clang-format 18.1.8 over core's CI list: clean.
+
+---
+
+## 2026-10-03 — WO-8: re-gate flow on core `f9956ed` (no code) — G1 / G7 closed; G3 bed K agreement still FAILS
+
+Builds: flow `build_omp` and `build_cuda` rebuilt at flow `d4d71b5` against core-anderson `f9956ed`.
+Queue `<scratch>/wo8/queue.sh <cuda|omp> <parts>` (the WO-5 commands; parts g1 g1min g7 g2 g2min
+g3bed g4 g8). Raw: `<scratch>/wo8/{cuda,omp}/*.jsonl`. K_plain = WO-5's plain G1 runs (the plain
+path is untouched: G0(a) below).
+
+**G1 tight, m = 5 (CUDA, all 14 cases; host the three named ones).**
+
+| case | plain (WO-5) | acc steps CUDA / host | \|K_acc/K_plain − 1\| CUDA / host |
+|---|---|---|---|
+| §11 coll N14 (WO-5 "unstable") | 2105 | **159 / 147** | **2.7e-10 / 2.6e-10** |
+| §11 stag N20 (WO-5 "unstable") | 6550 | **188 / 205** | **5.8e-10 / 1.9e-9** |
+| §11 coll N16 / N18 / N20 / N24 | 3520 / 2935 / 3715 / 2470 | 141 / 131 / 185 / 153 | 5.1e-10 / 4.0e-10 / 6.4e-10 / 6.7e-10 |
+| §11 stag N14 / N16 / N18 / N24 | 220 / 295 / 1165 / 3465 | 60 / 79 / 139 / 207 | 7.0e-12 / 1.8e-11 / 1.4e-10 / 6.9e-10 |
+| Z&H 0.343 / 0.45 N32 | 2530 / 5645 | 174 / 396 | 4.1e-10 / 1.4e-9 |
+| bed coll | 1835 | 321 | 1.75e-9 |
+| **bed stag** | see below | 536 / 536 (a376 c40 p120) | see below |
+
+**G1 staggered dense bed — orchestrator decision 1: the reference is the LONG plain march, not the
+plain certificate.** Reference: the WO-5 CUDA plain tight march to 60 000 steps (`<scratch>/wo5/
+bedref.py`, log: K = 98.9156994068078 at 60 000, per-2000-step change 6.07e-9 with ratio 0.886),
+extrapolated **K∞ ∈ [98.9156994, 98.9156995]** (geometric remainder +4.7e-8, power-law remainder
++6.3e-8: both inside). Accelerated K: CUDA 98.9156994503, host 98.9156994502 →
+**|K_acc/K∞ − 1| ≤ 5.1e-10 over the whole interval: PASS (≤ 1e-8)**. (Against the premature plain
+certificate 98.9156980268: 1.44e-8, as WO-5.) G1: **all 14 cases pass.**
+
+**G7.** (a) staggered N16 μ 0.0158, production: plain diverged at 440; m 3 diverged 312 (a57 c60
+p195), m 5 diverged 270 (a90 c60 p120), **m 8 diverged 208** (a149 c34 p25) — host = CUDA, equal to
+the rev-2 oracle; `converged=False` everywhere, no "unstable": **pass**. ctest `march_to_steady`
+(G7a at windows 3, 5, 8 + plain, scripted (iv)): pass. (b) U4, U4b: pass (WO-3c entry). (c) every
+accelerated run whose plain march converges returns `converged=True`: tight 14/14 (CUDA) + 3/3
+(host), production 42/42: **pass — G7c closed.**
+
+**Production step counts (G2 re-check).** CUDA, all 42 runs (§11 N14–24 both schemes, Z&H, both
+beds; m 3 / 5 / 8): **42/42 step counts identical to WO-5 and K bit-identical** (max |K/K_WO5 − 1|
+= 0). Host: coll N16 m5 **89**, stag N16 m5 **51**, stag bed m5 **93** — unchanged.
+
+**G4 (host `build_omp`, `mpirun --bind-to none`, 2 threads/rank), tight N32 m5:** staggered np 1 /
+2 / 4: 128 / 128 / 128 steps, K 4.27720623198430 / …198496 / …198932 (1.5e-13, 1.2e-12);
+collocated: 221 / 247 / 221, K 4.28443927102403 / …101270 / …102430 (2.6e-12, 6.3e-14) — every
+digit equal to WO-5; ≤ 1e-9 **pass**; collocated np 2 +11.8 % steps (reported, as WO-5).
+
+**G3 staggered bed — orchestrator decision 2: run until the running-min residual reaches 1e-9 or
+3000 steps; every criterion at the end.** (`g3 bed --scheme staggered --steps 400 --extend-to 3000
+--betas 60 600 1e4`)
+
+| backend | ν Δt/h² | steps | status | restarts (max / 100) | min res | final res | K |
+|---|---|---|---|---|---|---|---|
+| CUDA | 60 | 400 | active | 0 (0) | 6.26e-10 | 6.26e-10 | 98.915691841808 |
+| CUDA | 600 | 424 | active | 0 (0) | 9.65e-10 | 9.65e-10 | 98.915672009747 |
+| CUDA | 1e4 | 402 | active | 0 (0) | 9.90e-10 | 9.90e-10 | 98.915654165422 |
+| host | 60 / 600 / 1e4 | 400 / 426 / 415 | active | 0 (0) | 7.1e-10 / 9.97e-10 / 9.92e-10 | = min | 98.915685590917 / …667758219 / …652918806 |
+
+Status, restarts, depth and final ≤ 10·min: **pass**. The four-Δt (here three-Δt) K agreement:
+spread **3.8e-7 (CUDA) / 3.3e-7 (host) — FAIL** (≤ 1e-8), the same failure as WO-5 (3.8e-7 / 4.1e-7).
+A velocity residual of 1e-9 does not pin K to 1e-8 on this bed (cf. its ~0.9999 tail).
+**Twice failed → reported, not tuned.**
+
+Supplementary (outside decision 2, for the caller): the same command with `--steps 3000` (no early
+stop), CUDA:
+
+| ν Δt/h² | steps | status | restarts (max / 100) | min res | final res | K |
+|---|---|---|---|---|---|---|
+| 60 | 2588 | **disabled ("too many restarts")** | **5 (3)** | 2.72e-12 | 9.0e-5 | 98.915658553726 |
+| 600 | 3000 | active | 1 (1) | 2.74e-12 | 2.74e-12 | 98.915698957303 |
+| 1e4 | 3000 | active | 0 (0) | 1.96e-12 | 1.96e-12 | 98.915698911231 |
+
+The two that stay active agree to 4.7e-10 and sit 5.0e-9 below K∞. At Δt 60, after the residual
+has reached 2.7e-12, the restart rule (ρ > 4·ρ_min above the 1e-10 floor) fires 5 times and
+disables acceleration — a fact for the caller; nothing changed.
+
+**G8 after WO-3c** (`g8 sphere --scheme S --N 64 --window 5 --steps 50 --warmup 150`, two reps):
+
+| backend | scheme | accelerator ms/step | % of the plain step | before (`0290998`) | bar |
+|---|---|---|---|---|---|
+| CUDA | staggered | 0.506 / 0.513 | **3.50 / 3.52 %** | 4.42 / 4.43 % | ≤ 5 % pass |
+| CUDA | collocated | 0.516 / 0.523 | 1.26 / 1.21 % | 1.64 / 1.64 % | pass |
+| host | staggered | 4.06 / 5.30 | 3.90 / 4.76 % | 4.83 / 4.62 % | ≤ 8 % pass |
+| host | collocated | 4.32 / 4.40 | 0.84 / 0.77 % | 1.04 / 1.33 % | pass |
+
+`memory_bytes` = 130 803 712 = formula, both. Q19 answered: WO-3c cut the CUDA staggered overhead
+by a further ~20 % (≈ 0.64 → 0.51 ms of accelerator time; the fusion had already removed the syncs,
+so the traffic cut now shows).
+
+**Full battery (WO-8 state).** Flow host `build_omp`: G0(a) state hashes **13/13 identical** to the
+pre-WO-7 build; ctest `-LE bench` serial **63/63** (1387 s, 8 threads), MPI **130/130** (369 s,
+2 threads/rank, `--bind-to none`). Core Kokkos trees rebuilt at `f9956ed`: host-openmp **96/96**,
+CUDA **96/96** (`OMP_NUM_THREADS=2 ctest -LE bench`, MPI np 1/2/4/8 with `--bind-to none`).
+clang-format 18.1.8: flow (154 files) and core clean.
