@@ -590,3 +590,30 @@ identical, volume drift identical; p_iters_max 18 = 18. **Adopted: tau = 1e-5** 
 the three with per-step outer iterations within +1 — here within 0). `GeoBottomKernel` per step
 (nsys, GPU 98 % busy with other work, indicative): 43.5 ms at 1e-8 against 18.9 ms at 1e-5 in
 back-to-back runs; the inner-iteration ratio (17 → 11) predicts ~1.5x.
+
+## 2026-10-02 — WO-11: B1b, the geometric bottom with solids (package P3)
+
+**What landed** (§5.14). Condition 6 became component labels: `GeoLabelKernel` (one team launch at
+the first operator build of a hierarchy, one scalar read) runs Jacobi min-label propagation between
+two buffers over the faces with coefficient > 0 joining two fluid cells (AC > 1e-30) to its fixed
+point — every fluid cell ends with the smallest flat index of its component, whatever the order —
+then numbers the components in label order and counts their cells. Eligible with 1..64
+components; more (or none) go to GraphAMG. The kernel's bottom mean removals (of b, of r every
+iteration, at M's exit, of the final x) loop over the components, one team reduction per label in
+label order, then one subtraction pass; sub-level means (the "all" scope only) stay per level.
+Cells with AC <= 1e-30 keep x = 0 (the x/r update is masked) and enter r as 0 (GraphAMG's identity
+rows with a zero rhs: a solid cell's rhs would otherwise reach the coarse levels through the
+residual and make M affine). With one component the arithmetic is WO-6's exactly.
+
+### Gates (CUDA unless stated; raw output `~/Codes/bubble_column_perf/p3/{g,sol,xfer}/`)
+
+| gate | result |
+|---|---|
+| bubble column, 50 steps (1 component) | **bitwise** to WO-6 + E3 (`frozen_e3`), all 24 arrays — the per-component path reduces exactly; T unchanged (640) |
+| CUDA `state_hash.py` 12 cases | identical to origin/main: the IBM / porous hash cases are labelled (1 component) but never reach the geometric bottom (their bottoms are not agglomerated) |
+| host `state_hash.py` + np2, bubble column 1x8 | identical / **bitwise** to origin/main (host untouched) |
+| unit gate `geo_bottom` | + two B1b cases (solid sheet + 3 components, periodic and walls-y): device labels = host union-find (3); M with the means off bitwise to the per-kernel V-cycle; FCG 9 / 10 iterations to tau, true residual 5.5e-6 / 4.0e-6 r0, x = 0 exactly in solid cells, per-component mean of x <= 4e-16 |
+| G-NUM on bottoms WITH solids (`p3/solids.py`: N = 64, levels 4, bottom 8^3, PCG rtol 1e-8, 20 steps, periodic + body force; probe geometries plus two solid slabs) | `slab1` (solid coarse layers, 1 component) and `slab2` (2 components), const and variable rho: B1b engaged; outer iterations **identical on every step** (109, 436, 111, 3678); u v w max rel diff vs GraphAMG <= 6.6e-13 against the rtol-x10 floor 2.3e-12 .. 1.6e-6; divergence ratio 1.000. WO-6 + E3 on the same cases falls back to GraphAMG: bitwise to origin/main |
+| same, 1-component cut-cell beds (`cyl`, `rings`, `pack` (packing_ring.vti), const / rho slab) | iterations identical every step; velocities <= 7.8e-11 rel (floor 4e-10 .. 7e-10 on pack); fluid-cell pressure identical to 1e-15 on cyl / rings; on pack 47 cells differ by up to 1.8e-8 rel — all in 1-2-cell pockets or slivers the operator decouples, whose pressure is a free constant (velocities unaffected) |
+| `'algebraic'` on these cases | bitwise to origin/main |
+| transfer gate, packing_ring (`pack:slab`, nsys 20-step difference) | ≥ 1 KiB per step: H→D 13.20 → **0**, D→H 17.20 → **0** (small D→H 14.2 = 14.2) |

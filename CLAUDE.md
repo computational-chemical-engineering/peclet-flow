@@ -365,8 +365,9 @@ deselected on its own; name the driver you want instead.
   preconditioned by a V-cycle over the geometric levels *below* the bottom (`CutcellMG::sub_`,
   outside `lv_`), inner tolerance 1e-5 (relative, ∞-norm; E3), cap 100, no host transfer. Eligible:
   single rank, the singular operator (no outflow face), `auto`/`agglomerated` bottom, ≤ 8192 bottom
-  cells, every interior bottom face open, ≥ 1 sub-level (`geoBottomIneligible()` names the first
-  failure). `diagnostics.set_pressure_bottom_solver('auto' | 'geometric' | 'algebraic')` A/Bs them
+  cells with 1–64 fluid components (labelled on the device at geometry time; B1b removes the mean
+  per component and keeps x = 0 in solid cells), ≥ 1 sub-level (`geoBottomIneligible()` names the
+  first failure). `diagnostics.set_pressure_bottom_solver('auto' | 'geometric' | 'algebraic')` A/Bs them
   on one build; `'geometric'` raises where ineligible. Host results are untouched by it; on the GPU
   it is a recorded numerics change (the bottom's inner solve differs).
 - **Depth follows the factors of two, per axis.** An axis coarsens only while it stays even, so an

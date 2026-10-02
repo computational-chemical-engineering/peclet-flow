@@ -75,7 +75,58 @@ std::vector<double> randomInner(const CutcellMG::Level& lv, unsigned seed) {
   return v;
 }
 
-int runCase(const char* name, const int bc[6]) {
+// The bottom's fluid components on the host (union-find over the faces with coefficient > 0 between
+// two cells with AC > 1e-30, periodic wrap): an independent check of the device labels. -1 = solid.
+std::vector<int> hostComponents(const CutcellMG::Level& bt, const std::vector<double>& AC,
+                                const std::vector<double>& AX, const std::vector<double>& AY,
+                                const std::vector<double>& AZ, int& nc) {
+  const C3 e = bt.ext, n = bt.inner;
+  std::vector<long> parent(bt.n);
+  for (std::size_t i = 0; i < bt.n; ++i)
+    parent[i] = (long)i;
+  auto find = [&](long a) {
+    while (parent[a] != a)
+      a = parent[a] = parent[parent[a]];
+    return a;
+  };
+  auto idx = [&](int x, int y, int z) {
+    x = (x - 1 + n.x) % n.x + 1;
+    y = (y - 1 + n.y) % n.y + 1;
+    z = (z - 1 + n.z) % n.z + 1;
+    return (long)x + (long)y * e.x + (long)z * e.x * e.y;
+  };
+  for (int z = 1; z <= n.z; ++z)
+    for (int y = 1; y <= n.y; ++y)
+      for (int x = 1; x <= n.x; ++x) {
+        const long i = idx(x, y, z);
+        if (!(AC[i] > 1e-30))
+          continue;
+        const long nb[3] = {idx(x - 1, y, z), idx(x, y - 1, z), idx(x, y, z - 1)};
+        const double cf[3] = {AX[i], AY[i], AZ[i]};  // the LOW faces: each face once
+        for (int f = 0; f < 3; ++f)
+          if (cf[f] < 0.0 && AC[nb[f]] > 1e-30)
+            parent[find(i)] = find(nb[f]);
+      }
+  std::vector<int> comp(bt.n, -1), id(bt.n, -1);
+  nc = 0;
+  for (int z = 1; z <= n.z; ++z)
+    for (int y = 1; y <= n.y; ++y)
+      for (int x = 1; x <= n.x; ++x) {
+        const long i = idx(x, y, z);
+        if (!(AC[i] > 1e-30))
+          continue;
+        const long r = find(i);
+        if (id[r] < 0)
+          id[r] = nc++;
+        comp[i] = id[r];
+      }
+  return comp;
+}
+
+// `solids`: close fine faces so that the 16x12x8 bottom has a solid sheet (coarse x = 3: every
+// face closed, AC = 0) and three fluid components (x in [0,2], [4,7], [8,15]; the periodic wrap
+// face x = 0 and the face x = 8 are closed) -- the B1b case (§5.14).
+int runCase(const char* name, const int bc[6], bool solids = false) {
   const int nx = 32, ny = 24, nz = 16;
   CutcellMG mg;
   mg.setBoundaryConditions(bc);
@@ -94,17 +145,29 @@ int runCase(const char* name, const int bc[6]) {
         hx[i] = std::exp(lr * s) / 50.0;  // in [0.02, 1]: ratio 50
         hy[i] = std::exp(lr * t) / 50.0;
         hz[i] = std::exp(lr * (1.0 - s)) / 50.0;
+        if (solids) {
+          const int ix = x - 1;  // fine inner x (the low face of fine cell ix)
+          if (ix == 0 || ix == 16 || ix == 6 || ix == 8)
+            hx[i] = 0.0;
+          if (ix == 6 || ix == 7)
+            hy[i] = hz[i] = 0.0;
+        }
       }
   CCField ox = toDevice(hx, "ox"), oy = toDevice(hy, "oy"), oz = toDevice(hz, "oz");
   mg.setOpenness(CCConst(ox), CCConst(oy), CCConst(oz), 1.0, 1.0, 1.0);
   mg.geoForceSubForTest();
   CutcellMG::Level& bt = mg.level(mg.nLevels() - 1);
   int fails = 0;
-  printf("[%s] bottom %dx%dx%d, %d sub-levels, connected=%d, ineligible: %s\n", name, bt.inner.x,
-         bt.inner.y, bt.inner.z, mg.geoSubLevels(), mg.geoConnected() ? 1 : 0,
+  const auto AC = toHostOp(bt.AC), AX = toHostOp(bt.AFX), AY = toHostOp(bt.AFY),
+             AZ = toHostOp(bt.AFZ);
+  int ncHost = 0;
+  const std::vector<int> comp = hostComponents(bt, AC, AX, AY, AZ, ncHost);
+  printf("[%s] bottom %dx%dx%d, %d sub-levels, %d fluid component(s) (host %d), ineligible: %s\n",
+         name, bt.inner.x, bt.inner.y, bt.inner.z, mg.geoSubLevels(), mg.geoComponents(), ncHost,
          mg.geoBottomIneligible() ? mg.geoBottomIneligible() : "(eligible)");
-  if (mg.geoSubLevels() != 3 || !mg.geoConnected()) {
-    printf("[%s] FAIL: expected 3 sub-levels and a connected bottom\n", name);
+  if (mg.geoSubLevels() != 3 || !mg.geoConnected() || mg.geoComponents() != ncHost ||
+      ncHost != (solids ? 3 : 1)) {
+    printf("[%s] FAIL: expected 3 sub-levels and %d component(s)\n", name, solids ? 3 : 1);
     return 1;
   }
 
@@ -145,17 +208,27 @@ int runCase(const char* name, const int bc[6]) {
     // (b) the full M: the exit fluid mean is a TEAM reduction here and a Kokkos range reduction
     //     in the per-kernel code, so its last bits may differ (the subtracted mean differs by
     //     rounding; every cell then moves by at most a few ulp of |z|). Strict equality is
-    //     reported; the bound 4 eps max|z| is asserted.
-    compare(false, nd, dm, am);
-    const bool strict = nd == 0, bounded = dm <= 4.0 * 2.220446049250313e-16 * am;
-    printf("[%s] full M: strict bitwise %s (%ld cells differ, max|dz| %.3e = %.2e max|z|) -> %s\n",
-           name, strict ? "yes" : "no", nd, dm, am > 0 ? dm / am : 0.0,
-           bounded ? "within 4 eps" : "FAIL");
-    if (!bounded)
-      ++fails;
+    //     reported; the bound 4 eps max|z| is asserted. With several components the kernel
+    //     removes one mean per component (§5.14) and the per-kernel code one global mean, so (b)
+    //     applies to a single component only.
+    if (solids) {
+      printf("[%s] full M: per-component exit mean (not the per-kernel global one); (b) n/a\n",
+             name);
+    } else {
+      compare(false, nd, dm, am);
+      const bool strict = nd == 0, bounded = dm <= 4.0 * 2.220446049250313e-16 * am;
+      printf(
+          "[%s] full M: strict bitwise %s (%ld cells differ, max|dz| %.3e = %.2e max|z|) -> %s\n",
+          name, strict ? "yes" : "no", nd, dm, am > 0 ? dm / am : 0.0,
+          bounded ? "within 4 eps" : "FAIL");
+      if (!bounded)
+        ++fails;
+    }
   }
 
-  // 2. The inner FCG to tau within the cap.
+  // 2. The inner FCG to tau within the cap. The reference residual is the rhs with each
+  //    component's mean removed (the kernel's projection), on the fluid cells; solid cells must
+  //    keep x = 0 and every component's x must be mean-free.
   {
     const auto hb = randomInner(bt, 11);
     Kokkos::deep_copy(bt.rhs, 0.0);
@@ -166,9 +239,27 @@ int runCase(const char* name, const int bc[6]) {
     const int it = mg.geoBottomSolveForTest();
     const bool flag = mg.geoFlagForTest();
     const auto x = toHost(bt.x);
-    const auto AC = toHostOp(bt.AC), AX = toHostOp(bt.AFX), AY = toHostOp(bt.AFY),
-               AZ = toHostOp(bt.AFZ);
     const C3 be = bt.ext, bn = bt.inner;
+    std::vector<double> bsum(ncHost, 0.0), xsum(ncHost, 0.0);
+    std::vector<long> bcnt(ncHost, 0);
+    double xsolid = 0.0, xmax = 0.0;
+    for (std::size_t i = 0; i < bt.n; ++i)
+      if (comp[i] >= 0) {
+        bsum[comp[i]] += hb[i];
+        xsum[comp[i]] += x[i];
+        ++bcnt[comp[i]];
+        xmax = std::max(xmax, std::fabs(x[i]));
+      }
+    for (int z = 1; z <= bn.z; ++z)
+      for (int y = 1; y <= bn.y; ++y)
+        for (int xx = 1; xx <= bn.x; ++xx) {
+          const long i = xx + (long)y * be.x + (long)z * be.x * be.y;
+          if (comp[i] < 0)
+            xsolid = std::max(xsolid, std::fabs(x[i]));
+        }
+    double xmean = 0.0;
+    for (int c = 0; c < ncHost; ++c)
+      xmean = std::max(xmean, std::fabs(xsum[c] / (double)bcnt[c]));
     auto at = [&](int xx, int yy, int zz) {  // periodic wrap of the inner index
       xx = (xx - 1 + bn.x) % bn.x + 1;
       yy = (yy - 1 + bn.y) % bn.y + 1;
@@ -184,12 +275,18 @@ int runCase(const char* name, const int bc[6]) {
           const double Ax = AC[i] * x[i] + AX[i + 1] * at(xx + 1, y, z) + AX[i] * at(xx - 1, y, z) +
                             AY[i + sy] * at(xx, y + 1, z) + AY[i] * at(xx, y - 1, z) +
                             AZ[i + sz] * at(xx, y, z + 1) + AZ[i] * at(xx, y, z - 1);
-          r0 = std::max(r0, std::fabs(hb[i]));
-          rn = std::max(rn, std::fabs(hb[i] - Ax));
+          if (comp[i] < 0)
+            continue;
+          const double bp = hb[i] - bsum[comp[i]] / (double)bcnt[comp[i]];
+          r0 = std::max(r0, std::fabs(bp));
+          rn = std::max(rn, std::fabs(bp - Ax));
         }
-    const bool ok = it >= 1 && it < kGeoCap && !flag && rn <= 10.0 * kGeoTau * r0;
-    printf("[%s] FCG: %d iterations (cap %d), flag %d, true residual %.3e = %.3e r0 -> %s\n", name,
-           it, kGeoCap, flag ? 1 : 0, rn, rn / r0, ok ? "ok" : "FAIL");
+    const bool ok = it >= 1 && it < kGeoCap && !flag && rn <= 10.0 * kGeoTau * r0 &&
+                    xsolid == 0.0 && xmean <= 1e-12 * xmax;
+    printf(
+        "[%s] FCG: %d iterations (cap %d), flag %d, true residual %.3e = %.3e r0, "
+        "max|x| solid %.1e, max |component mean of x| %.1e -> %s\n",
+        name, it, kGeoCap, flag ? 1 : 0, rn, rn / r0, xsolid, xmean, ok ? "ok" : "FAIL");
     if (!ok)
       ++fails;
   }
@@ -206,6 +303,8 @@ int main(int argc, char** argv) {
     const int wallsY[6] = {0, 0, 1, 1, 0, 0};
     fails += runCase("periodic", periodic);
     fails += runCase("walls-y", wallsY);
+    fails += runCase("solids", periodic, /*solids=*/true);
+    fails += runCase("solids-walls-y", wallsY, /*solids=*/true);
   }
   Kokkos::finalize();
   printf(fails ? "geo_bottom: FAIL (%d)\n" : "geo_bottom: PASS\n", fails);

@@ -574,8 +574,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           nb::arg("engine"),
           "Engine of the AGGLOMERATED pressure bottom (set_pressure_bottom 'auto' / "
           "'agglomerated'). 'auto' (DEFAULT): on a GPU backend, single rank, the singular "
-          "(periodic / wall) operator, a bottom of at most 8192 cells whose interior faces are "
-          "all open, with a geometric level below it, one device launch runs flexible CG "
+          "(periodic / wall) operator, a bottom of at most 8192 cells with at most 64 fluid "
+          "components (solids allowed), with a geometric level below it, one device launch runs flexible CG "
           "preconditioned by a V-cycle over the geometric levels below the bottom (inner "
           "tolerance 1e-5, cap 100) -- no host transfer; everywhere else the host GraphAMG solve. "
           "'geometric' forces the device engine and raises at the bottom solve, naming the failed "
