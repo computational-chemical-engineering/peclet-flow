@@ -327,6 +327,9 @@ and the Python driver.
 
 ### 1.1 Evidence: a throwaway prototype (2026-10-02, measured)
 
+*Superseded as the reference numbers by §1.3, the measured C++ build (WO-5); kept as the record of
+what the design was decided on.*
+
 **What was run:**
 - A NumPy prototype of §4 without the safeguards, run on host build
   `../flow-vof-b1/build_omp` (OpenMP, 6–8 threads, an existing VoF-branch build; the single-phase
@@ -412,6 +415,46 @@ connected when the shared face's aperture is > threshold). Script and commands: 
   the monitor within 3e-5 by step 31–43, against 431 for the plain march.
 - The observation is not specific to Anderson: the plain march leaves the same pocket pressures
   unconverged when it certifies.
+
+### 1.3 Measured: the C++ build (WO-5, 2026-10-02)
+
+Host = host-openmp, 8 threads, on a shared 48-core box (load 40–120); CUDA = RTX 5080, shared.
+Every command and every number: `doc/steady_acceleration_log.md`, entry "WO-5". Step counts are
+identical on host and CUDA and equal the revision-1 oracle (log R-6) wherever both exist.
+
+**Production, window 5** (G2; plain / accelerated steps, ratios plain ÷ accelerated):
+
+| case | steps | steps ratio | wall ratio host / CUDA | pressure-iteration ratio |
+|---|---|---|---|---|
+| §11 collocated N16 | 395 / 89 | 4.44 | 4.93 / 4.57 | 4.37 |
+| §11 collocated N24 | 90 / 48 | 1.88 | 2.75 / 2.98 | 2.03 |
+| §11 staggered N16 | 75 / 51 | 1.47 | 1.41 / 0.89 | 1.49 |
+| §11 staggered N24 | 135 / 50 | 2.70 | 2.68 / 2.74 | 2.56 |
+| Z&H 0.343 / 0.45, staggered N32 | 105 / 70, 115 / 54 | 1.50, 2.13 | 1.41, 2.03 / 1.57, 2.31 | 1.50, 2.16 |
+| **dense bed φ 0.6, staggered** | 325 / 93 | **3.49** | **3.38–3.45 / 3.55–3.87** | 3.50 |
+| **dense bed φ 0.6, collocated** | 190 / 83 | 2.29 | 2.48–2.53 / 2.38–2.73 | 2.44 |
+
+N14/18/20 and m = 3/8: log. **D11 resolved by its rule: `accelerate=True`** (staggered bed ≥ 1.5×
+in wall time on both backends). Pressure iterations per step at mixed iterates equal the plain
+march's to ±3.5 % (Q12).
+
+**Tight** (G1, |K_acc/K_plain − 1|, CUDA): ≤ 1.75e-9 on 11 of 14 cases; MPI np 2/4 ≤ 2.6e-12 of np 1,
+np 1 = serial bit for bit (G4); restart ≤ 1.7e-11 (G5); finite Re ≤ 3.3e-9, 2.4× – 17.9× (G6,
+except 1.06× at Re ≈ 100 on the A1 array). **Overhead** (G8, 64³): 0.77–0.85 ms per step on
+CUDA = 5.3 % staggered / 2.0 % collocated of the plain step; `memory_bytes` equals §6.3 exactly.
+
+**Open after WO-5 (gates failed; not resolved here):**
+- *The Ritz guard at tight settings (G1, G7c).* False "unstable" on §11 collocated N14 and
+  staggered N20: readings 1.001–1.005 at residual 5–7e-9, i.e. at 5× the floor 1000·τ = 1e-9,
+  where the tight map's residual stalls; isolated readings up to 1.012 at residual 1e-6 – 1.5e-5.
+  The oracle reproduces them. Production: 0 of 946 eligible readings above 1.0005.
+- *The plain certificate on the staggered bed at rtol 1e-10 (G1).* The plain march certifies
+  1.4e-8 below the fixed point (its tail runs at ~0.9999 per step against the instrument's
+  slow_rate 0.997); the accelerated K is within ~5e-10 of a 60 000-step plain march.
+- *G3 on the staggered bed:* 400 accelerated steps reach residual 1–2e-9, not 1e-9; K spread
+  over dt 3.8e-7 (no instability: active, no restarts, residual still falling).
+- *G8 on CUDA, staggered:* 5.3 % > 5 %, latency-bound (~26 synchronising calls per step); the
+  §6.2 remedy (fuse pass 2's column reductions) is a core change.
 
 ---
 

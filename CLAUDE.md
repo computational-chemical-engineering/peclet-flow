@@ -83,20 +83,22 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 190 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 195 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-190 registered / **188 with `-LE bench`** (counted 2026-09-30): 49 from `tests/kokkos` — of
-which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 127
-from `tests/kokkos_mpi` (42 cases at np = 1, 2, 4 plus one np = 8 rung), and 14 Python ctests on
+195 registered / **193 with `-LE bench`** (counted 2026-10-02): 50 from `tests/kokkos` — of
+which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 130
+from `tests/kokkos_mpi` (43 cases at np = 1, 2, 4 plus one np = 8 rung), and 15 Python ctests on
 the module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
 `verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`, `colocated_open_boundary`,
 `cell_force_placement`, `collocated_stability_guard`, `balanced_force_restart`, `mirror_symmetry`,
-`velocity_solver_variable_mu`, `hydro_force_units`, `no_env_knobs`, `no_float_operator_casts`,
-`iteration_order`).
-Always bound the OpenMP pool — an unbounded one on a many-core host is an hour-long trap.
+`velocity_solver_variable_mu`, `hydro_force_units`, `march_to_steady`, `no_env_knobs`,
+`no_float_operator_casts`, `iteration_order`).
+Always bound the OpenMP pool — an unbounded one on a many-core host is an hour-long trap. On a
+shared, loaded host run the `_np*` tests with `OMP_NUM_THREADS=2` (threads per RANK): at 8 per rank
+and load ~110 on 48 cores, `velocitymg_bc_mpi_np2` took 45 min instead of seconds (2026-10-02).
 
 More verification lives in `scripts/verify_*_sdflow.py` and `validate_zick_homsy_sdflow.py` (the
 external ground truth), run with `PYTHONPATH=<tree>`. `tests/regression/sdflow_regression.py` is
@@ -137,7 +139,8 @@ All header-only Kokkos C++20 in `namespace peclet::flow`.
   post-repartition field-resize passes; `#ifdef PECLET_FLOW_MPI`-guarded), `flow_ibm_diagnostics.hpp`
   (state getters, divergence probes, timers, the outflow/backflow census). `src/flow_bindings.cpp`
   — the nanobind module. `src/flow_solver_staggered.cpp` / `src/flow_solver_colocated.cpp` — the
-  two explicit instantiations of the class, the only TUs that compile it (see "Build").
+  two explicit instantiations of the class, the only TUs that compile it (see "Build"), and of
+  `AndersonAccelerator<Grid>` (`src/anderson_accelerator.hpp`, the steady-march accelerator).
 - `src/mac_cutcell_mg.hpp` (`CutcellMG`, pressure MG), `src/mac_velocity_mg.hpp` (`VelocityMG`),
   the `src/mac_*.hpp` operators, `src/cut_cell_ibm.hpp` (the Robust-Scaled overlay: `poly_*`,
   K/M/X/Nbc/R, `D_rescale`), `src/staggered_advection.hpp` (`sadv::advect`),
@@ -581,6 +584,44 @@ the ablation knobs (`set_csf_mode`, `set_vof_kappa_*`, the `set_phase_change_*` 
 
 The rung-by-rung record — every work order, gate number and refuted hypothesis — is
 `doc/history/vof_workorders{,_v2,_v34,_v5,_v6}.md`.
+
+## Steady marches (`march_to_steady`)
+
+`peclet.flow.march_to_steady(solver, monitor, rtol=1e-4, max_steps=5000, accelerate=True, window=5,
+check_every=5, num_passes=3, slow_rate=0.997, roundoff=1e-11, callback=None)` marches a solver to its
+steady state and returns a frozen `MarchResult` (`converged`, `steps`, `accelerated_steps`, `reason`
+∈ {"certified", "max_steps", "unstable", "diverged"}, `num_restarts`, `monitor`). Design and every
+measured number: [`doc/steady_acceleration.md`](doc/steady_acceleration.md) (rev 1) and its log.
+
+```python
+s = peclet.flow.Solver((N, N, N), extent=(L, L, L)); ...; s.set_solid(sdf, cutcell_pressure=True)
+res = peclet.flow.march_to_steady(s, lambda: float(s.get_u().mean()))   # <u_x> along the force
+```
+
+- **The stop instrument is the study's** (geometric-remainder bound on the block change of
+  `monitor()`); `accelerate=False` is that march step for step (ctest `march_to_steady`, G0(b)).
+  Under MPI `monitor()` must return the same value on every rank (a global reduction).
+- **Acceleration is type-II Anderson on the march state** (u, v, w + P; collocated with projected-face
+  advection + uf/vf/wf), velocity-only metric. Phase A mixes until the relative velocity residual is
+  `(1 - slow_rate) * rtol`; phase B certifies on consecutive PLAIN steps with the unchanged
+  instrument (budget `2 * (num_passes + 3)` blocks, early "slow" exit, ×0.1 and resume), so the
+  reported state is a plain-march state. `Solver.step()` is untouched. Data path: core's
+  `AndersonCore` + `src/anderson_accelerator.hpp`; control path: `packaging/flow_steady.py`
+  (installed as `peclet/flow/steady.py`).
+- **Scope.** Staggered `Solver`; `SolverColocated` with the `'ghost'` scheme only. Refused with a
+  named error (`Solver::marchState()`, re-checked every step): the other collocated schemes, VoF,
+  phase change, scalars, porous continuity, variable rho/mu, `drag_beta`, cell forces, moving scenes,
+  `set_superficial_velocity`, the pressure warm start, the balanced-force projection. Pass
+  `accelerate=False` for those.
+- **Memory:** `(2 window + 3) * n_fields * 8 * n_padded` bytes per rank (`n_fields` 4, or 7 collocated
+  with face advection): 416 B per inner cell at window 5, ~7.5 M cells max on a 16 GB card beside the
+  solver. `acc.memory_bytes` reports it; an allocation that does not fit raises with the byte count.
+- **Checkpoint with `get_field`/`set_field` of u, v, w, p** — not `set_state` (velocity only, loses P).
+  The Anderson history is not checkpointed; a restart rebuilds it in a few steps.
+- Developer tier: `s.diagnostics.anderson_accelerator(window=5, mixing=1.0)` → `acc.step(accelerate)`,
+  `acc.residual`, `acc.status`, `acc.reason`, `acc.ritz_radius`, `acc.num_restarts`, `acc.num_resets`,
+  `acc.num_columns`, `acc.memory_bytes`, `acc.seconds`, `acc.reset()`, `acc.disable()`. A redistribute
+  reallocates the state buffers; the accelerator then refuses to step (construct a new one).
 
 ## Open items
 

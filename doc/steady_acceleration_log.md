@@ -786,3 +786,83 @@ fields, 4 COUNT reductions, 4 device-to-device deep_copy). The note's named firs
 (fuse pass 2's per-column reductions in pairs) is a core change — not made here. (Host G8 with
 the late-march protocol: later entry; the first host run with a 10-step warm-up read 3.8 % / 1.1 %.)
 
+---
+
+## 2026-10-02 — WO-6: register entries (DRAFTS for the caller; not committed to `../docs/`)
+
+Rev 1 changes two entries already in `../docs/decisions/flow.md` and adds three; each is a NEW
+recorded decision naming what changed. The guard-scope entry (3) is **not ready to settle**: its
+own gate (G7c) failed at tight settings in WO-5 — keep it as "pending the architect" or drop it.
+
+    ### The steady-acceleration metric is the velocity alone; P and the collocated face field are carried (rev 1)
+    - area: flow
+    - source: flow doc/steady_acceleration.md "Revision 1" R1, D3 (rev 1), §1.2, §3.2; WO-5 §1.3
+    - decided: 2026-10-02
+    - status: settled (architect rev 1; implemented flow 2ba357c, core-anderson 9ff3bd2)
+    - supersedes: the metric clause of "Steady marches are accelerated by type-II Anderson on the
+      full march state…" ("weighted c_P = h/(mu + rho h^2/dt), gauge removed")
+    - quote: |
+        The state stays (u, P [, u_f]); P and u_f are mixed, stored and differenced but not
+        measured. The residual is the relative velocity residual ||g_u - x_u|| / ||g_u||.
+    - rejected: the c_P-weighted, gauge-centred pressure term (rev 0); per-pocket gauge removal;
+      the unweighted Euclidean norm of (u, P); a metric on the face gradient of P
+    - why: on the dense bed 99.97 % of the W-residual is pressure in sealed / near-contact pockets
+      that moves no velocity (rev-0 bed gain 1.26x in steps); a pressure error is measured by the
+      velocity it drives. Measured on the C++ build: dense bed 3.49x (staggered) / 2.29x
+      (collocated) in steps, 4.44x on the collocated sphere
+
+    ### Steady-state certification after acceleration: velocity-residual handover, budget 2(num_passes + 3) blocks, early "slow" exit (rev 1)
+    - area: flow
+    - source: flow doc/steady_acceleration.md "Revision 1" R2, R4, D6 (rev 1), §7
+    - decided: 2026-10-02
+    - status: settled (architect rev 1; implemented flow 2ba357c)
+    - supersedes: in "Steady state is certified by the unchanged stop instrument on PLAIN steps…",
+      the residual (now the velocity residual) and the budget (was num_passes + 3, no early exit)
+    - quote: |
+        Phase A hands over at (1 - slow_rate) rtol on the relative velocity residual; phase B
+        certifies with the unchanged instrument on plain steps within 2 (num_passes + 3) blocks;
+        a block failing on the remainder bound with R in [slow_rate^check_every, 1) resumes
+        acceleration at once; budget or slow exit: target x 0.1, resume with the history.
+    - rejected: the 6-block budget (staggered N24 m8: 214 steps vs 135 plain; 74 at 12 blocks); no
+      budget; handing over on the monitor's own changes along the accelerated sequence
+    - why: after an Anderson iterate the monitor's block changes start near zero and change sign or
+      grow for up to five blocks before the slow tail emerges
+
+    ### The Anderson Ritz guard runs only on mixed calls over all-mixed windows above max(1e-10, 1000 tau) (rev 1) — PENDING
+    - area: flow, core
+    - source: flow doc/steady_acceleration.md "Revision 1" R3, D5 (rev 1), §4.1, §4.3 step 7
+    - decided: 2026-10-02 (architect rev 1)
+    - status: PENDING — gate G7c FAILED in WO-5 at tight settings (tau = 1e-12): false "unstable"
+      on §11 collocated N14 and staggered N20 (readings 1.001-1.005 at residual 5-7e-9 = 5x the
+      floor), isolated readings up to 1.012 at residual 1e-6 - 1.5e-5; production 0 of 946 > 1.0005
+    - quote: |
+        Evaluated only on a mixed call whose window columns were all formed at mixed calls, while
+        max(1e-10, 1000 tau) <= residual <= 1e-2; an ineligible call resets the count.
+    - rejected: evaluating on plain calls (radii 12.6-56 from near-collinear plain differences, false
+      "unstable" in 5 of 12 rev-0 runs); a stricter pseudo-inverse truncation
+    - why: below ~1000 tau the window differences are inner-solve noise
+
+    ### `march_to_steady(accelerate=)` defaults to True — the pre-registered D11 rule, measured
+    - area: flow
+    - source: flow doc/steady_acceleration.md D11, §1.3; log WO-5 G2
+    - decided: 2026-10-02 (by the user's pre-registered rule, Q1 / Q13)
+    - status: settled
+    - quote: |
+        Staggered dense bed (phi 0.6, N 64), production, window 5, wall time incl. the accelerator:
+        plain / accelerated = 3.38-3.45x on host-openmp, 3.55-3.87x on CUDA (>= 1.5) -> True.
+        Collocated bed beside it: 2.48-2.53x / 2.38-2.73x.
+    - rejected: False (opt-in acceleration)
+    - why: the rule's threshold is met by more than 2x on both backends
+
+    ### (core.md) AndersonCore carries no pressure metric: roles Velocity / Carried, `innerTolerance` (rev 1, WO-3b)
+    - area: core
+    - source: flow doc/steady_acceleration.md "Revision 1", §9 WO-3b, Q14; core-anderson 42fca87, 9ff3bd2
+    - decided: 2026-10-02
+    - status: settled (Q14 default yes; implemented on core branch anderson, not yet tagged)
+    - supersedes: the descriptor list "(state views + roles + mask + metric weight + gauge flag + comm)"
+      in "Anderson acceleration (AndersonCore) lives in core…"
+    - quote: |
+        AndersonState = padded state views + roles (Velocity = 0, Carried = 2) + extent + ghost +
+        innerTolerance + AndersonComm. The Pressure role, sdf, cP, gauged and pass 1 are deleted.
+    - rejected: keeping the unused pressure metric until after the tag (a breaking change then)
+    - why: no consumer uses it after rev 1; removes one collective per step and the sdf dependency
