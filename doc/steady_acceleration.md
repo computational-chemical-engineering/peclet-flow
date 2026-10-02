@@ -11,9 +11,10 @@ should not need to choose anything this note leaves open. Where a choice depends
 
 Each entry gives the decision, the alternative rejected and the reason. Evidence is in §1.1.
 
-**D1. Placement: the data path is C++/Kokkos inside flow; the control path is a small pure-Python
-driver.** The data path covers the state, the history, the reductions and the safeguards, in
-`AndersonCore` + `AndersonAccelerator<Grid>`. The control path covers the phases and the §3.2 stop
+**D1. Placement: the data path is C++/Kokkos (the grid-agnostic `AndersonCore` in `core`, the
+adapter in flow); the control path is a small pure-Python driver.** The data path covers the state,
+the history, the reductions and the safeguards, in `peclet::core::solver::AndersonCore` (see D13) +
+flow's `AndersonAccelerator<Grid>`. The control path covers the phases and the §3.2 stop
 instrument, in `peclet.flow.march_to_steady`.
 - *Rejected:* a pure-Python driver over `diagnostics.field_view`. Its device path would be
   CuPy-only, so it would not run on the HIP or OpenMP backends that the Kokkos source supports. It
@@ -132,6 +133,15 @@ only and loses P.
   about 2.5× (measured).
 - Unsteady or march-unstable regimes are handled by the D5 guard plus the certification-growth
   fallback (§7).
+
+
+**D13. `AndersonCore` lives in `core` (`peclet::core::solver`) from the start** (user decision,
+2026-10-02, resolving Q9). Flow keeps only the adapter `AndersonAccelerator<Grid>`, `marchState()`
+and the Python driver.
+- *Rejected:* flow-local first, promoted when amr adopts it. A later move is a second port with its
+  own bit-identity proof; the core is grid-agnostic already and sits naturally beside core's
+  `solver/` layer (BiCGStab, GraphAMG); amr's lmax = 0 march has the same (u, P) structure.
+- *Cost:* core must be tagged and published before flow ships WO-4 (suite release order).
 
 ### 1.1 Evidence: a throwaway prototype (2026-10-02, measured)
 
@@ -500,9 +510,9 @@ The bias is ≤ ln(C)/2^20 ≈ 1e-5 for C ≤ 1e6, well below `kRitzDelta`.
 
 | file | content |
 |---|---|
-| `src/anderson.hpp` | `peclet::flow::AndersonCore` — grid-agnostic: takes a `MarchState` descriptor (views + roles + metric data + comm), implements §4 (kernels MIX/COPY/DIFF/R/COUNT, the reductions, host LS, guards, MPI packets). Header-only, `inline` members; Kokkos device code in `.hpp` as everywhere in flow. No `Solver` dependency — unit-testable with synthetic maps. |
+| **core:** `include/peclet/core/solver/anderson.hpp` | `peclet::core::solver::AndersonCore` (D13) — grid-agnostic: takes a core-level descriptor `AndersonState` (state views + roles Velocity/Pressure/Carried + fluid mask + metric weight `cP` + `gauged` + ghost width `G` + optional `MPI_Comm`), implements §4 (kernels MIX/COPY/DIFF/R/COUNT, the reductions, host LS, guards, MPI packets). Header-only, `inline` members, beside `csr_bicgstab.hpp`/`vector_ops.hpp`. No flow dependency — unit-testable with synthetic maps. The parameter signature (dt, ρ, μ, F) is NOT in the core descriptor; the flow adapter checks it. |
 | `src/anderson_accelerator.hpp` | `template <class Grid> class AndersonAccelerator` — holds `Solver<Grid>&` + an `AndersonCore`; `step(bool accelerate)` = §4.3 around `solver.step()`; signature read; status accessors. Explicitly instantiated in `src/flow_solver_staggered.cpp` / `src/flow_solver_colocated.cpp` with a matching `extern template` at the end of the header (the G.8 pattern; link via `peclet_flow_solver`). |
-| `src/flow_ibm.hpp` | declare `struct MarchState` and `MarchState marchState();` (public C++, **not bound**). |
+| `src/flow_ibm.hpp` | declare `struct MarchState` (= a `core::solver::AndersonState` + the flow signature) and `MarchState marchState();` (public C++, **not bound**). |
 | `src/flow_ibm_diagnostics.hpp` | define `marchState()`: builds the field list of §3.1, roles, `sdf_` view, `e_`, `G`, `cP`, `gauged = !hasOutflow_`, the signature values, and (MPI) `comm_`/`distributed_`; throws `std::runtime_error` naming the first refusal of §5.3. |
 | `src/flow_bindings.cpp` | bind the two adapters as private classes `_AndersonAccelerator` / `_AndersonAcceleratorColocated`; add the factory `diagnostics.anderson_accelerator(window=5, mixing=1.0)` (returns a new accelerator; `nb::keep_alive` on the solver). |
 | `packaging/flow_steady.py` → installed as `peclet/flow/steady.py` | `march_to_steady` and `MarchResult` (pure Python, §7); `flow_init.py` adds `from .steady import march_to_steady, MarchResult`; `CMakeLists.txt` gets the `configure_file` (build tree) and `install` lines mirroring those for `flow_init.py` (lines 194, 353). |
@@ -757,7 +767,7 @@ The details below are fixed:
 | **G7** unstable / unsteady | (a) both drivers on a case whose plain march diverges; (b) synthetic unstable maps; (c) false-alarm census | (a) staggered §11 sphere N = 16, μ = 0.0158, dt = 1.234e-2 (plain NaN at step ≈ 435, measured); (b) core unit test U4; (c) every G1–G6 run | (a) `converged=False` for accelerate True **and** False, no K reported; (b) status "unstable" within 3m steps of engagement; (c) status never "unstable" and logged `ritz_radius` ≤ 1.0005 throughout the active range |
 | **G8** performance + memory | accelerator time (inside the adapter, excluding `solver.step()`), mean over 50 steps; `memory_bytes` | 64³ §11-type case, staggered + collocated, CUDA and host | overhead ≤ 5 % (CUDA), ≤ 8 % (host) of the mean plain step; `memory_bytes` = formula §6.3 exactly |
 
-**Core unit tests** (`tests/kokkos/test_anderson_core.cpp`, synthetic maps on Views, host and CUDA):
+**Core unit tests** (in **core**: `tests/test_anderson.cpp`, Kokkos-gated like `test_graph_amg_device.cpp`; U7 in core's MPI tests; synthetic maps on Views, host and CUDA):
 - **U1 linear contraction:** x ← Jx + c, J diagonal with 10⁴ entries in [0, 0.996]. Window 5
   reaches residual ≤ 1e-12 in ≤ 80 steps; the plain march needs > 3000 (assert both).
 - **U2 affine hull:** every g output satisfies Σx_i = S. Mixed states satisfy it to 1e-14·|S|.
@@ -799,7 +809,9 @@ run the blocking clang-format 18.1.8 check on `src/` and `tests/`. Record number
   that each §5.3 refusal throws with its own message.
 - *Gate:* G0(a) and G0(c).
 
-**WO-3 — `AndersonCore` (`src/anderson.hpp`).**
+**WO-3 — `AndersonCore` in core (`core/include/peclet/core/solver/anderson.hpp`, D13).** Done in a
+`core-anderson` worktree; core is tagged and published (`PECLET_CORE_TAG` bumped) before WO-4 lands
+on flow main, per the suite release order. Until then flow builds against the sibling `../core`.
 - Kernels, reductions and packets (§6.1), host LS/Jacobi/Gelfand (§4.4–4.6), and the state machine
   (§4.3, with the core taking a step callback or split into `prepare`/`complete` around the
   caller's step; the split form is preferred).
@@ -845,9 +857,12 @@ and has a default that work proceeds with.
 | Q6 | Largest per-GPU grid in A1 production? Runs > 7.5 M cells on a 16 GB card do not fit at m = 5 | fact | such runs pass `accelerate=False` or go to two GPUs; the constructor's error names the bytes | A1 owner |
 | Q7 | Should the collocated face field be registered (`uf`, `vf`, `wf` in the field registry) so a collocated-advection checkpoint round-trips exactly? It would also make `redistribute` carry it, fixing CLAUDE.md's open item but changing a rebalanced run's numerics | preference (changes an existing path) | **not done here**; the collocated-advection restart re-seeds u_f (a transient, same fixed point) | user, as its own recorded decision |
 | Q8 | Is float history storage acceptable (memory ÷ 2 for the history)? | fact + preference | **double** | an oracle run with float32 history: if steps-to-stop are unchanged on all WO-1 cases, the user decides |
-| Q9 | Promote `AndersonCore` to `core` for `peclet.amr`? | preference | flow-local until amr adopts it (amr's map has the same (u, P) incremental structure, and its lmax = 0 march reproduces flow's step counts exactly — §11); then promote, tagging `core` first | user, when amr work starts |
+| Q9 | Promote `AndersonCore` to `core` for `peclet.amr`? | preference | **DECIDED by the user 2026-10-02: in `core` from the start** (D13) | — |
 | Q10 | Public names `march_to_steady`, `MarchResult`, `diagnostics.anderson_accelerator` and the keyword names of §5.2 | preference | as stated (checked against NAMING §1: verbs, `num_*`, `rtol`, no cell units) | user |
 | Q11 | Is the §3.2 instrument library API from now on (`slow_rate=0.997`, `roundoff=1e-11`, `check_every=5`, `num_passes=3` as library defaults)? | preference | yes, the study's constants; the study script switches to `march_to_steady(accelerate=False)` in WO-4 (G0(b) proves equivalence) | user |
+
+**User ruling 2026-10-02:** the stated defaults of Q2–Q8, Q10 and Q11 are accepted; Q9 is
+decided the other way (D13); **Q1 (default of `accelerate`) remains open**.
 
 **Risks stated plainly:**
 - **Staggered gains are modest (≈ 1.7×).** The instrument's fixed certification cost (20–25 plain
