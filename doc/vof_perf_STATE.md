@@ -47,10 +47,9 @@ pair run (1.84) but not at D/h 20 (on/off within 7 % transient, 1.6 % settled).
   (non-gradient q at interface faces; live-interface feedback — hypotheses). RECOMMENDATION to the
   user: park E2(a) (register: failed BAL with these numbers), spend effort on B1 redesign / WO-7 /
   host MG launches / tolerance. AWAITING USER: park vs third design round; core tag.
-- Gallery publish broken since 2026-09-21 (11 pages changed without re-freeze -> CI re-executes ->
-  6 h timeout); engineer re-freezing them on branch refreeze-0921 (brief
-  /home/frankp/Codes/bubble_column_perf/BRIEF_GALLERY_REFREEZE.md). The bubble-column page goes live
-  once that lands.
+- Gallery publish FIXED: 11 stale freezes re-rendered (peclet-examples 3491f02/bb0732f), prose
+  follow-ups e01f927; deploy 2026-10-02 17:05 success (2m40s); bubble-column page LIVE.
+  Production peclet runs archived in /home/frankp/Codes/bubble_column_perf/peclet_runs/.
 - Core cb4c7ba (pvFit split) PUSHED to core main; core TAG = USER decision (v1.3.2 / v1.4.0 / wait);
   flow + amr pins still v1.3.0. WO-7b/c parked on vof-pvfit until the tag.
 
