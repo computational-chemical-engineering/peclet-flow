@@ -62,9 +62,9 @@ own gates.
 
 | WO | status |
 |---|---|
-| WO-1 core kernels (core worktree `suite/core-scalar-ibm`, branch `scalar-ibm`) | IN PROGRESS |
-| WO-2 flow geometry record | next |
-| WO-3 operator + Krylov | |
+| WO-1 core kernels (core worktree `suite/core-scalar-ibm`, branch `scalar-ibm`) | DONE: core a031c6f + b1fcb6a |
+| WO-2 flow geometry record | DONE: 9a445cb, 88f0214 (gate restated D-WO2-1/2) |
+| WO-3 operator + Krylov | NEXT, after the scalar-units merge |
 | WO-4 ScalarMG | |
 | WO-5 advection/small cells | |
 | WO-6 closures | |
