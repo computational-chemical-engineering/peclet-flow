@@ -56,27 +56,29 @@ and a divergence-free MAC face flux. Then a plan, and a step-by-step implementat
 
 ## Next action
 
-0. Read the architect's design note, then implement the work orders in order (opus-implementer).
-1. (done) Fold the literature into the design brief. Check the probe-flux FV against AMReX EB / Schwartz
-   et al. 2006, Mittal image points and Bochkov–Gibou, and pick the small-cell advection treatment
-   (SRD vs May–Berger explicit–implicit vs implicit upwind in cut cells). Prototype advection with
-   κ storage if the literature does not settle it.
-2. Write the architect brief (`doc/scalar_ibm_brief.md`) → architect design note
-   (`doc/scalar_ibm_design.md`) with work orders and gates.
-3. Implement in stages, each gated:
-   - geometry + κ;
-   - Neumann + closure;
-   - Dirichlet/Robin probe;
-   - solver;
-   - conjugate;
-   - advection small cells;
-   - MPI;
-   - GPU.
+The design note `doc/scalar_ibm_design.md` (95e4a55) is the contract. Execute its work orders WO-1 …
+WO-10 in order through the opus-implementer agent. Each WO must pass G12 (the state hashes) and its
+own gates.
 
-## Open questions (defaults)
+| WO | status |
+|---|---|
+| WO-1 core kernels (core worktree `suite/core-scalar-ibm`, branch `scalar-ibm`) | IN PROGRESS |
+| WO-2 flow geometry record | next |
+| WO-3 operator + Krylov | |
+| WO-4 ScalarMG | |
+| WO-5 advection/small cells | |
+| WO-6 closures | |
+| WO-7 conjugate | |
+| WO-8 contacts | |
+| WO-9 backends/performance | |
+| WO-10 docs/register | |
 
-- How κ and the facet centroid are obtained in 3-D. Default: plane-cube (PLIC) volume from the
-  core VoF functions.
-- The probe fallback when the stencil hits invalid cells (contacts, thin gaps). Default:
-  renormalize over valid cells → longer probe → two-point with own value.
-- Whether existing scalar paths stay bit-identical. Default: yes; the new path is opt-in per scalar.
+**Side study running:** `tests/study/scalar_ibm/packing2d.py`, near-contact conjugate (square
+cylinder array, gap 0.2→0.01, k_s = 100 and 0.01): P2F vs Peters' hybrid ladder. It feeds WO-8 /
+Q4. Results go in `pack_ks*.out` → the log.
+
+## Open decisions (defaults; DEFAULT-PENDING-USER in design §13)
+
+- **Q5** API spelling `add_scalar(..., cutcell=True)`.
+- **Q6** Leave the legacy diffusivity in internal units under an armed extent; document it.
+- **Q7** Cut-cell stays opt-in until G1–G13 pass and one release has shipped.
