@@ -80,5 +80,10 @@ Q4. Results go in `pack_ks*.out` → the log.
 ## Open decisions (defaults; DEFAULT-PENDING-USER in design §13)
 
 - **Q5** API spelling `add_scalar(..., cutcell=True)`.
-- **Q6** Leave the legacy diffusivity in internal units under an armed extent; document it.
+- **Q6 — DECIDED by Frank (2026-10-02): FIX IT.** Scope (orchestrator): the whole scalar/energy API
+  surface (add_scalar D, the phase-change thermal properties, …), converted at the API boundary at
+  use time; cell units stay bit-identical. Work is on branch `scalar-units`, worktree
+  `suite/flow-scalar-units`, off origin/main, run by an opus-engineer.
+  **MERGE ORDER:** `scalar-units` → `scalar-ibm` BEFORE WO-3. WO-3 must reuse its UnitScales helpers
+  instead of adding its own `diffToInt`. Design §1.2 / §13 Q6 are to be amended in WO-10.
 - **Q7** Cut-cell stays opt-in until G1–G13 pass and one release has shipped.
