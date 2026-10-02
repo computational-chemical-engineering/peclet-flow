@@ -596,3 +596,193 @@ collocated 2035 / 106, 2.22e-10; G7a: accelerate=False diverged at 440, True div
 **G4c — ctest `anderson_mpi`** (np = 1, 2, 4; 2 threads): max|u_np − u_1|/max|u_1| = 0 / 1.3e-15 /
 2.6e-15; γ, window and status bitwise equal on all ranks after every one of the 40 steps (0
 mismatches); residual 1.323022e-09 at np = 1, 2, 4 and single-rank.
+
+**G0(c) on the WO-4 tree** (`build_omp`, 193 ctests with `-LE bench` = the 188 existing +
+`march_state`, `march_to_steady`, `anderson_mpi_np{1,2,4}`):
+
+    OMP_NUM_THREADS=8 ctest --test-dir build_omp -LE bench -E '_np[0-9]+$' -j3    # 63 tests
+    OMP_NUM_THREADS=2 ctest --test-dir build_omp -LE bench -R '_np[0-9]+$' -j4    # 130 MPI tests
+
+**63/63 and 130/130 passed (193/193)**, 766 s + < 10 min. (2 OpenMP threads per MPI rank: with 8,
+on this shared box, the first attempt's MPI tests crawled — see the WO-2 entry.)
+
+---
+
+## 2026-10-02 — WO-5: the gate campaign (C++ build; STOPPED on G1, G3 bed, G7c, G8)
+
+**Builds.** host `build_omp` (WO-4 tree, host-openmp, MPI), CUDA `build_cuda` (RTX 5080, shared
+with another user's job at ~50–75 % utilisation), host `build_omp4` (MPI module, G4) and
+`build_omp_serial` (non-MPI module, G4's serial side), all against core-anderson `9ff3bd2`. Host
+box: 48 cores at load 40–120 from other sessions throughout — wall times are indicative; step
+counts and iterations are not affected. 8 OpenMP threads per process (2 per rank under MPI).
+**Instrument:** `tests/study/steady_acceleration_gates.py`; the queue that ran it:
+
+    Q=<scratch>/wo5/queue.sh   # wraps: G="python tests/study/steady_acceleration_gates.py"
+    $G run sphere --scheme {collocated,staggered} --N {14,16,18,20,24} --settings {production,tight} --window W
+    $G run sphere --scheme staggered --N 32 --phi {0.343,0.45} --settings {production,tight} --window W
+    $G run bed --arrangement $BED --scheme {staggered,collocated} --N 64 --settings {production,tight} --window W
+    $G g3 sphere --scheme S --N 16 --window 5 --steps 400 --betas 6 60 600 1e4
+    $G g3 bed --arrangement $BED --scheme S --N 64 --window 5 --steps 400 --betas 60 600 1e4
+    $G g5 sphere --scheme S --N 16 --settings tight --window 5 --at 25
+    $G run sphere --scheme S --N 16 --mu 0.05 --dt 3.906e-2 --advection koren --settings tight --window W
+    $G run bed --arrangement $ARR --scheme staggered --N 80 --beta 2.0 --force F --advection sou --implicit-advection --settings tight --window W
+    $G run sphere --scheme staggered --N 16 --mu 0.0158 --dt 1.234e-2 --advection sou --settings production --window W
+    $G g8 sphere --scheme S --N 64 --window 5 --steps 50 --warmup 150
+    mpirun --bind-to none -np P $G mpi sphere --scheme S --N 32 --settings tight --window 5 [--hash --steps 60 [--serial]]
+
+`BED` = the WO-1 arrangement (A1 `random_arrangement(0.6, 64, seed 0)`), `ARR` = A1
+`random_arrangement(0.3, n_spheres=64, seed=307)` (phi 0.3000, L 4.8160, N = `grid_for(16, L/D)` =
+80), F = A1 `re_scan.force_for_re(Re, 0.3, L, 64)` = 694.9558 (Re ≈ 10), 13400.17 (Re ≈ 100).
+Raw records: `<scratch>/wo5/{cuda,omp}/*.jsonl`.
+
+DECISION (Q3 reading): the A1 finite-Re configuration is `re_scan.py`'s own documented one
+(`scan --phi 0.3 --dpdx 16 --seed 307`, 64 spheres) at its steady pseudo-step `beta_steady = 2`
+with A1 `make_solver`'s implicit advection (SOU), plus the tight settings. No A1 rescan result
+exists to pin another phi. Alternative: none named by A1. Reversible: rerun G6 with another `ARR`.
+
+### G2 — production, window 5 (bars) and 3 / 8 (reported); steps identical on host and CUDA
+
+| case | plain | m = 3 / 5 / 8 | steps ratio (m 5) | wall ratio host / CUDA | pressure-iteration ratio | \|K5/K_G1 − 1\| | p-its/step plain vs accelerate phase |
+|---|---|---|---|---|---|---|---|
+| §11 coll N14 | 445 | 73 / 81 / 60 | 5.49 | 5.19 / 5.96 | 5.49 | 1.0e-5 | 6.94 / 6.88 |
+| **§11 coll N16** | 395 | 65 / **89** / 73 | **4.44** | **4.93 / 4.57** | 4.37 | 1.4e-6 | 7.97 / 7.67 |
+| §11 coll N18 | 335 | 62 / 65 / 135 | 5.15 | 5.39 / 5.00 | 5.22 | 4.5e-7 | 8.91 / 8.69 |
+| §11 coll N20 | 70 | **83** / 70 / 68 | 1.00 | 1.46 / 1.24 | 1.03 | 2.1e-6 | 7.76 / 7.27 |
+| §11 coll N24 | 90 | 69 / 48 / 58 | 1.88 | 2.75 / 2.98 | 2.03 | 1.3e-6 | 7.93 / 7.57 |
+| §11 stag N14 | 90 | 43 / 41 / 40 | 2.20 | 2.33 / 2.89 | 1.99 | 2.0e-8 | 6.08 / 6.25 |
+| §11 stag N16 | 75 | 62 / 51 / 51 | 1.47 | 1.41 / 0.89 | 1.49 | 1.6e-7 | 6.29 / 6.48 |
+| §11 stag N18 | 175 | 72 / 96 / 57 | 1.82 | 1.95 / 2.22 | 1.82 | 1.7e-6 | 6.00 / 6.00 |
+| §11 stag N20 | 165 | 51 / 48 / 47 | 3.44 | 3.08 / 3.05 | 3.17 | 1.5e-6 | 6.25 / 6.52 |
+| §11 stag N24 | 135 | 53 / 50 / 74 | 2.70 | 2.68 / 2.74 | 2.56 | 4.4e-6 | 6.36 / 6.44 |
+| Z&H 0.343 stag N32 | 105 | **163** / 70 / 59 | 1.50 | 1.41 / 1.57 | 1.50 | 2.0e-5 | 7.04 / 7.07 |
+| Z&H 0.45 stag N32 | 115 | 59 / 54 / 54 | 2.13 | 2.03 / 2.31 | 2.16 | 7.0e-6 | 6.43 / 6.62 |
+| **bed stag** | 325 | 111 / **93** / 90 | **3.49** | **3.43 / 3.71** | 3.50 | 1.4e-5 | 11.49 / 11.65 |
+| **bed coll** | 190 | 163 / **83** / 82 | **2.29** | **2.44 / 2.59** | 2.44 | 7.9e-7 | 33.26 / 32.12 |
+
+- Bars at window 5: §11 coll N16 steps 4.44 ≥ 3.0 and wall 4.93 (host) / 4.57 (CUDA) ≥ 2.7
+  **pass**; steps_acc ≤ steps_plain on every case **pass** (coll N20 70 = 70); |K5/K_G1 − 1| ≤
+  1e-4 every case **pass** (max 2.0e-5; K_G1 = the CUDA tight plain K). At m = 3 two cases take
+  more steps than the plain march (coll N20 83 vs 70, Z&H 0.343 163 vs 105) — reported, not a bar.
+  The CUDA wall ratio < 1 on stag N16 (2.74 s vs 2.43 s) is the shared GPU on a 16³ case.
+- Every step count equals the revision-1 oracle where both exist (log R-6).
+- **D11 / Q1 (Q13: the staggered bed decides).** Wall ratio, plain / m = 5, including the
+  accelerator: **host 3.38, 3.45, 3.38** (28.87/8.54, 28.05/8.14, 28.17/8.33 s), **CUDA 3.87,
+  3.55, 3.76, 3.71** (21.49/5.55, 28.66/8.07, 27.07/7.19, 29.06/7.84 s). Collocated bed beside it:
+  host 2.53, 2.48, 2.49; CUDA 2.38, 2.64, 2.73, 2.59. **≥ 1.5 → `accelerate=True` is the default**
+  of `march_to_steady` (already the code's default; nothing to change).
+- Q12 (inner work at mixed iterates): pressure iterations per step in the accelerate phase vs the
+  plain march: bed stag 11.65 vs 11.49 (+1.4 %), bed coll 32.12 vs 33.26 (−3.4 %); host time per
+  step, bed stag: 89.6 ms accelerated (incl. the accelerator) vs 86.7 ms plain (+3 %).
+
+### G1 — tight, window 5 (CUDA; host in a later entry)
+
+| case | plain steps | m = 5 steps | \|K_acc/K_plain − 1\| | verdict |
+|---|---|---|---|---|
+| §11 coll N14 | 2105 | 64 | — (converged=False: "unstable" at 64) | **FAIL** |
+| §11 coll N16 | 3520 | 141 (m 3: 149, m 8: 118) | 5.06e-10 | pass |
+| §11 coll N18 | 2935 | 131 | 4.00e-10 | pass |
+| §11 coll N20 | 3715 | 185 | 6.42e-10 | pass |
+| §11 coll N24 | 2470 | 153 | 6.67e-10 | pass |
+| §11 stag N14 | 220 | 60 | 7.0e-12 | pass |
+| §11 stag N16 | 295 | 79 (m 3: 85, m 8: 72) | 1.82e-11 | pass |
+| §11 stag N18 | 1165 | 139 | 1.42e-10 | pass |
+| §11 stag N20 | 6550 | 51 | — (converged=False: "unstable" at 51) | **FAIL** |
+| §11 stag N24 | 3465 | 207 | 6.90e-10 | pass |
+| Z&H 0.343 N32 | 2530 | 174 | 4.09e-10 | pass |
+| Z&H 0.45 N32 | 5645 | 396 | 1.44e-9 | pass |
+| bed stag | 19510 | 536 (a376 c40 p120, disabled) | **1.44e-8** | **FAIL** |
+| bed coll | 1835 | 321 | 1.75e-9 | pass |
+
+**The two false "unstable" (the Ritz guard at the tight floor).** The oracle (`--rev 1`)
+reproduces coll N14 exactly: "unstable" at step 64, readings 1.00412 / 1.00531 / 1.00527. Every
+eligible reading > 1.0005 in the tight runs, (step, residual, radius):
+- coll N14: (19, 5.47e-6, 1.0021) (20, 5.41e-6, 1.0037) (22, 5.42e-6, 1.0047) (31, 4.78e-6,
+  1.0007) (33, 4.78e-6, 1.0062) (62, 6.65e-9, 1.0041) (63, 6.16e-9, 1.0053) (64, 5.85e-9, 1.0053)
+- stag N20: (39, 5.35e-9, 1.0010) (42, 5.26e-9, 1.0015) (44, 5.25e-9, 1.0013) (47, 5.23e-9,
+  1.0026) (49, 5.23e-9, 1.0011) (50, 5.18e-9, 1.0011) (51, 5.17e-9, 1.0014) → "unstable" at 51
+- coll N12 (ctest case, m 5): (16, 1.49e-5, 1.0120); stag N18: (22, 1.73e-6, 1.0111) (23, 1.71e-6,
+  1.0047); stag N24: (58, 1.78e-8, 1.0072); Z&H 0.343 max 1.0030, Z&H 0.45 max 1.0018.
+- Reading: at tight settings the Ritz floor is 1000·τ = 1e-9, but the map's velocity residual
+  stalls at **5–7e-9** (stag N20: 5.35e-9 → 5.17e-9 over steps 39–51), so readings at 5× the
+  floor are noise, as rev 1 found for production at ≈ 2τ. Separately, isolated readings of 1.002–
+  1.012 occur at residual 1e-6 – 1.5e-5 (coll N12/N14, stag N18) — far above any floor, on a
+  stagnating stretch of phase A (coll N14: residual ≈ 5e-6 for steps 19–37). None of these maps
+  is unstable (the plain marches converge). Production: 96 accelerated runs, 946 eligible
+  readings, max 0.9825, none > 1.0005.
+
+**The bed: the plain march, not the accelerated one, is off.** A plain tight march of the
+staggered bed run to 60 000 steps (CUDA; K every 2000 steps):
+
+    step 20000 K=98.9156981196 | 30000 98.9156990401 | 40000 98.9156992810 | 50000 98.9156993670 | 60000 98.9156994068
+
+per-2000-step changes 4.3e-7 → 9.5e-8 → 2.9e-8 → 6.1e-9, ratio creeping 0.71 → 0.89 (per step
+0.99983 → 0.99994; the power-law tail of log R-1). K∞ ≈ 98.9156994–98.9156995 by geometric
+extrapolation. The accelerated K **98.9156994503** is within ~5e-10 of it; the plain march
+certified at step 19 510 with **98.9156980268**, 1.4e-8 low: the instrument assumes slow_rate
+0.997 and this tail is ~0.9999, so at rtol 1e-10 the plain certificate is premature. G1's
+reference, not the acceleration, misses 1e-8 here.
+
+### G3 — 400 unconditional accelerated steps, tight (host and CUDA agree)
+
+- §11 N16 collocated and staggered at nu dt/h² = 6, 60, 600, 1e4: status active, 0 restarts,
+  running-min residual 1e-16 – 3.5e-16, final ≤ 1.1× min; K spread over the four dt 2.2e-14
+  (coll) / 4.2e-16 (stag): **pass**.
+- bed collocated at nu dt/h² = 60, 600, 1e4: active, 0 restarts, min residual 1.0e-12 / 1.1e-11 /
+  9.3e-12, K spread 3.6e-9: **pass**.
+- bed staggered: active, 0 restarts, final = min residual (still falling), but min residual
+  6.3e-10 / **2.0e-9 / 1.0e-9** (CUDA; host 7.1e-10 / 1.7e-9 / 1.3e-9) and K spread **3.8e-7**
+  (host 4.1e-7): **FAIL** on "running min ≤ 1e-9" at 600 and 1e4 and on the 1e-8 K agreement.
+  Not instability — 400 steps do not converge this bed's slow tail to 1e-9 (cf. G1: 376
+  accelerated steps reach the 3e-17 target only with plain help).
+
+### G4 / G4c — MPI (host, kokkos_mpi build, `--bind-to none`, 2 threads per rank)
+
+| scheme N32 tight m5 | np 1 | np 2 | np 4 |
+|---|---|---|---|
+| staggered: steps / K | 128 / 4.27720623198430 | 128 / 4.27720623198496 (1.5e-13) | 128 / 4.27720623198932 (1.2e-12) |
+| collocated: steps / K | 221 / 4.28443927102403 | **247** (+11.8 %) / 4.28443927101270 (2.6e-12) | 221 / 4.28443927102430 (6.3e-14) |
+
+|K_np/K_1 − 1| ≤ 1e-9 **pass**; step counts within ±10 % except collocated np 2 (+11.8 %,
+reported). np = 1 (MPI build, `init_mpi`) vs the serial build after 60 accelerated steps: state
+hashes **identical** (staggered `42a80399…0865`, collocated `05fc177e…29c5`). G4c (ctest
+`anderson_mpi`): see the WO-4 entry — pass.
+
+### G5 — restart at step 25 (tight, m 5)
+
+| scheme | uninterrupted | get_field/set_field: total, \|ΔK\|/K | set_state: total, \|ΔK\|/K |
+|---|---|---|---|
+| collocated N16 (CUDA / host) | 141 | 148 / 150 (+7 / +9), 1.0e-11 | 173 / 173 (+32), 1.7e-11 |
+| staggered N16 (CUDA / host) | 79 | 75 / 75 (−4), 2.9e-13 | 99 / 99 (+20), 3.7e-14 |
+
+K ≤ 1e-8 **pass**; extra steps ≤ 15 with get_field/set_field **pass**; set_state reported.
+
+### G6 — finite Re, tight
+
+| case | plain | m 5 | \|K_acc/K_plain − 1\| | verdict |
+|---|---|---|---|---|
+| §11 stag N16, Re ≈ 10 (host = CUDA) | 685 | 283 | 4.6e-11 | pass (2.4×) |
+| §11 coll N16, Re ≈ 10 (n_s = 7), CUDA / host | 2885 | 1043 / 1030 (disabled → plain tail) | < 1e-10 | pass (2.8×) |
+| A1 array phi 0.3 N80, Re ≈ 10 (CUDA) | 8015 | 449 | 3.3e-9 | pass (17.9×) |
+| A1 array phi 0.3 N80, Re ≈ 100 (CUDA) | 2775 | 2630 (a300 c15 p2315, disabled) | 4e-12 | pass, 1.06× |
+
+### G7 — (a) staggered N16 mu 0.0158 dt 1.234e-2 SOU, production (host = CUDA, steps identical)
+
+plain diverged at 440; m 3 diverged 312 (a57 c60 p195); m 5 diverged 270 (a90 c60 p120);
+m 8 "unstable" at 18 (readings 1.124 …): `converged=False` everywhere **pass**. (b) core U4: pass
+(core-anderson). (c) false-alarm census: production **pass** (above); tight **FAIL** (above).
+
+### G8 — accelerator overhead and memory (64³ §11 sphere, m 5, mean over 50 steps, after 150 plain
+warm-up steps so both means are taken late in the march; two repetitions)
+
+| backend | scheme | plain step | step under acceleration | accelerator | % of plain step | bar |
+|---|---|---|---|---|---|---|
+| CUDA | staggered | 16.02 / 14.56 ms | 11.47 / 10.41 ms | 0.846 / 0.773 ms | **5.28 / 5.31 %** | ≤ 5 %: **FAIL** |
+| CUDA | collocated | 40.43 / 40.66 ms | 15.94 / 16.03 ms | 0.795 / 0.806 ms | 1.97 / 1.98 % | pass |
+
+`memory_bytes` = 130 803 712 = (2·5+3)·4·8·68³ exactly, both schemes, both backends: **pass**.
+The 0.8 ms is latency, not bandwidth (the §6.2 traffic, ~120 MB, is ~0.13 ms at 960 GB/s): one
+step makes ~26 host-synchronising Kokkos calls (3 + 15 per-column reductions for 3 velocity
+fields, 4 COUNT reductions, 4 device-to-device deep_copy). The note's named first optimisation
+(fuse pass 2's per-column reductions in pairs) is a core change — not made here. (Host G8 with
+the late-march protocol: later entry; the first host run with a 10-step warm-up read 3.8 % / 1.1 %.)
+

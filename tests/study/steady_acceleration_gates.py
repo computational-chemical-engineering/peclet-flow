@@ -17,7 +17,8 @@ Subcommands (all on the module on PYTHONPATH; bound the OpenMP pool):
            set_state, velocity only), restore into a fresh solver, march again; against the
            uninterrupted accelerated march.
   g8       G8: accelerator overhead (acc.seconds over --steps accelerated steps) against the mean
-           plain step (last_step_timers()['step']), and memory_bytes against the §6.3 formula.
+           plain step (last_step_timers()['step'], after --warmup plain steps, so both are timed
+           late in the march), and memory_bytes against the §6.3 formula.
   mpi      G4: tight march_to_steady under mpirun (flow.mpi_block + init_mpi), global <u_x>
            monitor; and --hash: the state hash after --steps accelerated steps (np = 1 against a
            serial build).
@@ -366,7 +367,7 @@ def cmd_g8(flow, a):
     case = Case(a)
     m = a.window[0]
     s = case.build(flow, a.scheme, st)
-    for _ in range(10):  # warm-up
+    for _ in range(a.warmup):  # warm-up: time plain steps late in the march, not in the transient
         s.step()
     plain = []
     for _ in range(a.steps):
@@ -388,12 +389,14 @@ def cmd_g8(flow, a):
     formula = (2 * m + 3) * ns * 8 * npad
     print(f"g8 {a.case} {a.scheme} N={a.N} m={m}: mean plain step {mp * 1e3:.3f} ms, mean step "
           f"under acceleration {ms * 1e3:.3f} ms, accelerator {over * 1e3:.3f} ms/step = "
-          f"{100 * over / mp:.2f} % of the plain step; memory_bytes {acc.memory_bytes} vs formula "
+          f"{100 * over / mp:.2f} % of the plain step ({100 * over / ms:.2f} % of the step under "
+          f"acceleration; {a.warmup} plain warm-up steps); memory_bytes {acc.memory_bytes} vs formula "
           f"{formula} ({'equal' if acc.memory_bytes == formula else 'DIFFERENT'}); "
           f"status {acc.status} engaged columns {acc.num_columns}", flush=True)
     rec = common_rec(a, case)
     rec.update(gate="g8", window=m, steps=a.steps, plain_ms=mp * 1e3, acc_step_ms=ms * 1e3,
-               overhead_ms=over * 1e3, overhead_pct=100 * over / mp,
+               overhead_ms=over * 1e3, overhead_pct=100 * over / mp, warmup=a.warmup,
+               overhead_pct_of_acc_step=100 * over / ms,
                memory_bytes=acc.memory_bytes, formula=formula)
     emit(a, rec)
 
@@ -484,6 +487,7 @@ def main():
     ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--at", type=int, default=25)
+    ap.add_argument("--warmup", type=int, default=100, help="g8: plain steps before timing")
     ap.add_argument("--serial", action="store_true")
     ap.add_argument("--hash", action="store_true")
     ap.add_argument("--trace", action="store_true")
