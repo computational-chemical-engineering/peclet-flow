@@ -397,3 +397,12 @@ per-V-cycle rhs/solution round trip, which WO-6 (B1) removes; the transfer gate 
 
 D1 (started in WO-0) finished: `~/Codes/bubble_column_perf/d1/d1.log` ends "D1 DONE" — not analysed
 here (WO-13).
+
+## 2026-10-02 — E2(a) (design §12): WO-E2.0 … WO-E2.7 (P4 implementer, worktree `flow-vof-e2`)
+
+### WO-E2.0 — the premise (measured by the session, recorded here)
+
+Bubble column at density ratio 1 (the rho closure `[rho_l, 0]`, everything else as the case), from
+`ckpt_t43`, MG-PCG rtol 1e-10: **7.3 iterations/step on average, max 8**, against 13.1 at the
+case's ratio 50. The §12.11 R-E2.1 stop rule (>= 12 at levels 4) is not met: the premise of option
+(a) holds, and §12.8's 7–9 iterations per step is confirmed. Proceeded to WO-E2.1.
