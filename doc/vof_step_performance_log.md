@@ -443,3 +443,47 @@ the per-block path, same workload both builds, 240 launches: main `fallbackBatch
 **5.37 ms/launch** → team **1.61 ms/launch** (−70 %, ×3.3) for ≈ 2.9·10³ fallback cells per
 launch. Scaled to the column's ≈ 7·10³ targets that is ≈ 3–4 ms against the ≤ 1.5 ms target — a
 miss to report, and only realised on the column once the batched pass takes the team kernel.
+
+---
+
+## 2026-10-02 — WO-13: the D1 tolerance study, analysed (P5)
+
+Raw data `~/Codes/bubble_column_perf/d1/{static,hysing,column}_rtol<R>.json` (driver
+`tests/study/vof_perf/d1_tolerance.py`, run 2026-09-25 on the frozen CUDA module of flow
+**ed05b6f**, shared GPU, load 63–132). Reference rtol 1e-10; the momentum rtol follows the
+pressure rtol (its default). Relative differences are against the reference.
+
+| rtol | static max\|u\| (4 rungs, worst) | Hysing v_max | t(v_max) | y_c final | column total vol. drift | per-bubble drift | rise, last 1000 steps | p iters/step column (min–max) | max div_proj column | momentum ms/step (median) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1e-10 | ref | ref | ref | ref | 2.8e-14 | 2.0e-13 | ref (1.002478) | 13.85 (12–16) | 1.6e-10 | 10.4 |
+| 1e-9 | 2.7e-9 | −1.6e-9 | 0 | −5.3e-10 | 2.7e-13 | 2.7e-12 | 7.2e-14 | 12.16 (11–15) | 1.7e-9 | 11.6 |
+| 1e-8 | 1.3e-8 | −1.6e-9 | 0 | −5.7e-10 | 5.6e-12 | 2.2e-11 | 7.7e-9 | 10.52 (9–12) | 1.7e-8 | 5.1 |
+| 1e-7 | 1.8e-8 | −1.4e-9 | 0 | −5.7e-10 | 1.2e-10 | 3.6e-10 | 7.7e-9 | 9.15 (8–10) | 1.7e-7 | 5.2 |
+| 1e-6 | 3.6e-8 | −1.8e-5 | 0 | −1.2e-5 | 1.6e-9 | 4.4e-9 | 7.8e-9 | 7.43 (7–9) | 1.6e-6 | 5.3 |
+
+Pressure iterations, max per run: static 9–10 → 6 (1e-6), Hysing 18 → 10. No run capped.
+
+**§5.12 acceptance:** (1) static max|u| ≤ 1.05× ref — every rtol (worst 1 + 3.6e-8); (2) Hysing
+within 0.2 % — every rtol (worst 1.8e-5); (3) total drift ≤ max(1e-8, 2× ref) = 1e-8 and rise
+within 1 % — every rtol (1.6e-9; 7.8e-9). **The loosest passing rtol is 1e-6**, the loosest
+tested. Per Q8 (USER default) the solver default stays 1e-10 and only the case script changes:
+peclet-examples `run_peclet.py` (branch `bubble-column`) → 1e-6. Expected saving on the column:
+pressure iterations −46 % (13.85 → 7.43), the momentum solve about halved (its residual stop
+follows the pressure rtol: median residual 4.7e-16 → 1.9e-9 from 1e-8 on). Step times in the JSONs
+(146 → 84 ms median) were taken on a shared GPU at load 63–132 and are not to be quoted.
+
+**Caveats (read before relying on 1e-6 for a long production run):**
+1. **Physics provenance.** ed05b6f predates b273031 (variable μ on the MAC control volume's own
+   faces), which changed the column's physics; the production column now runs on later flow. The
+   study measures rtol *sensitivity* on one build, which that fix should not move, but it is not
+   re-measured. Confirmation rerun (resumable, ~1.5–2.5 h GPU; freezes main's module first):
+   `nohup ~/Codes/bubble_column_perf/d1_main/run_d1_main.sh > ~/Codes/bubble_column_perf/d1_main/d1.log 2>&1 &`
+   — expect the same pattern: every criterion passing at 1e-6, pressure iterations ≈ 14 → ≈ 7.5.
+2. **The column window does not decorrelate.** 2000 steps from t = 43 are 3.2 time units; the
+   trajectories stay together (max|Δu_x|/max|u_x| at 1e-6: 1.0e-9 at step 100, 3.8e-9 at step 1000,
+   2.9e-6 at step 2000). Criterion (3)'s rise velocity is therefore a trajectory comparison, not a
+   statistical one: it rules out an immediate departure, not a slow statistical bias.
+3. **The volume drift at 1e-6 is systematic**, not a random walk: monotone, no sign change, about
+   −8e-10 per 1000 steps. Extrapolated to a t 50–150 production window (≈ 6.3·10⁴ steps) it is
+   ≈ 5e-8 relative (1e-8: ≈ 2e-10) — far below any physical effect, but larger than the 2000-step
+   criterion suggests.

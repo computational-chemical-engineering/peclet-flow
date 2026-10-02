@@ -713,6 +713,14 @@ cap.
     within 1 % (the column is chaotic, so this is a time average).
 - **Outcome.** The loosest passing rtol is recorded with the table. The default action (Q8) is to
   change `run_peclet.py` only; the solver's default stays 1e-10.
+- **Measured (WO-13, 2026-10-02; flow ed05b6f, table in `vof_step_performance_log.md`).** Every
+  rtol in {1e-9, …, 1e-6} passes all three criteria: static max|u| within 3.6e-8, Hysing within
+  1.8e-5, column total drift 1.6e-9 (≤ 1e-8) and rise velocity within 7.8e-9 at 1e-6. The loosest
+  passing rtol is **1e-6**; pressure iterations on the column 13.85 → 7.43 per step. The solver
+  default stays 1e-10; `run_peclet.py` takes 1e-6. Three caveats are recorded with the table: the
+  study predates the variable-μ MAC-face fix (b273031; a confirmation rerun is scripted), the
+  2000-step column window does not decorrelate, and the 1e-6 volume drift is systematic
+  (≈ 5e-8 extrapolated over a production window).
 
 ### 5.13 D3: Chebyshev bounds re-estimated from a warm start (S-ladder S2; recorded)
 - Keep the last `v_max` and `v_min` iterates of `estimateEigenvalues`.
