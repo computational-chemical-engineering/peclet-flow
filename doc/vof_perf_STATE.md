@@ -40,13 +40,13 @@ pair run (1.84) but not at D/h 20 (on/off within 7 % transient, 1.6 % settled).
   drift over production -> DECISION: published case stays 1e-10 (peclet-examples ac35a14 reverts
   f28b2ce); D1 rerun on main scripted (~/Codes/bubble_column_perf/d1_main/run_d1_main.sh) for a
   quiet GPU. WO-7c (persistent teams on the WO-8 batched tier-3 path, DECISION option C) running.
-- P4 E2(a) STOPPED at WO-E2.3 (vof-e2, flow-vof-e2; handoff in its log): E2.1/E2.2 gated (bitwise;
-  RED, REC, RST pass); G-E2-BAL FAILS with viscosity — the D-E2.8 pressure update feeds +mu_r div q
-  into the rotational increment (anti-diffusion): mu=0.01 x1.04/step, mu=0.1 blows up; bubble column
-  unstable. Without the viscous term: stable but transients decay 0.99/step (40x the exact path).
-  Benefit while stable: projection 95.7 -> 55.3 ms/step (shared GPU), PCG its 13.06 -> 7.96.
-  ARCHITECT RESUMED (the §12 author) for §12.13: stable-with-viscosity D-E2.8 (incl. TBF's
-  non-incremental form as an option), a realistic BAL threshold, impl. questions 2-4.
+- P4 E2(a) STOPPED TWICE (vof-e2 = 74beb93 + ab1f2bc handoff; candidate vof-e2-e23-stopped2
+  60655dd): with §12.13's D-E2.8' the column is STABLE (max|p| 577.7 vs 576.5, max|w| 16.39 vs 16.43,
+  PCG 8.00 vs 13.32) but the revised G-E2-BAL FAILS: static drop mu=0.1 ratio 50 split 2.6e-4 vs exact
+  5.5e-8 (ratio 0.02: 7.9e-6 vs 1.7e-7); split-exact decays 7-20x slower than the DF model
+  (non-gradient q at interface faces; live-interface feedback — hypotheses). RECOMMENDATION to the
+  user: park E2(a) (register: failed BAL with these numbers), spend effort on B1 redesign / WO-7 /
+  host MG launches / tolerance. AWAITING USER: park vs third design round; core tag.
 - Gallery publish broken since 2026-09-21 (11 pages changed without re-freeze -> CI re-executes ->
   6 h timeout); engineer re-freezing them on branch refreeze-0921 (brief
   /home/frankp/Codes/bubble_column_perf/BRIEF_GALLERY_REFREEZE.md). The bubble-column page goes live
