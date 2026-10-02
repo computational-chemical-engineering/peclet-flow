@@ -397,3 +397,49 @@ per-V-cycle rhs/solution round trip, which WO-6 (B1) removes; the transfer gate 
 
 D1 (started in WO-0) finished: `~/Codes/bubble_column_perf/d1/d1.log` ends "D1 DONE" — not analysed
 here (WO-13).
+
+---
+
+## 2026-10-02 — WO-7: C3 PV fallback, team per target (P5)
+
+**WO-7a (core, branch `pvfit`, worktree `suite/core-pvfit`, commit `cb4c7ba`; NOT tagged or pushed
+— the release session tags core).** `pvFitAdd` = `pvFitTerm` (→ `PvTerm {w, B, s[6], ok}`) +
+`pvFitAccum` (the `+=` loops verbatim). ctest `vof_pvfit`: 10⁵ random cases (800 stencils × 5³;
+random planes, frames, origins, isotropic + anisotropic metrics, cosMin, dW incl. 0; planted zero
+normals and missing planes) — a frozen copy of the pre-split `pvFitAdd` vs the new `pvFitAdd` vs
+term-to-memory + ordered fold, each in its own kernel, on the default and host spaces. Cuda and
+OpenMP: 35574 accepted / 64426 rejected, 776/800 stencils with npoly ≥ 6, **0 accumulator and 0
+flag mismatches**. A mutation (`w*(s*B)`) is caught (795 / 776 mismatching stencils).
+
+**WO-7b (flow, branch `vof-pvfit`).** `curvFallbackTeam` (one warp per target, terms in team
+scratch in the canonical k order, one lane folds + solves) behind `if constexpr` on the memory
+space in `VofCurvature::fallbackBatch` (§5.11's launch site); the host keeps the one-thread loop.
+`curvFallbackCell` now shares `curvFallbackFrame` / `curvFallbackStore` with it (expressions
+verbatim). Built with `-DPECLET_SIBLING_PECLET_CORE=…/core-pvfit`: **flow main cannot build this
+until core carries `pvFitTerm`** (tag + `PECLET_CORE_TAG` bump, or the shared `../core` at it).
+
+| gate | result |
+|---|---|
+| G-BIT 1, state_hash 12 cases + mpi np2, CUDA | identical to main (and to the WO-0 table) |
+| G-BIT 1, same, host-openmp (OMP 8) | identical to main |
+| G-BIT 2, 50-step column dump, CUDA / host 1×8 / host 1×24 (passive) | `bitwise=True`, 24/24 arrays each; iters 13.06 mean, identical |
+| team vs one-thread, CUDA (`test_vof_blocks` C1 gate: per-block path = team, batched = one-thread) | CSF force, colours, stats 0 differences; pv cells 2876 (periodic) / 2824 (y walls) |
+
+The column G-BIT does **not** exercise the team kernel: the bubble column runs the C1 batched
+container (`csfBatchEligible()`), whose tier 3 is `vofCurvListPass(T, 1, …)` in
+`vof/block_batch.hpp` (one thread per list entry, device-side counts) — WO-8 moved the production
+launch site after §5.11 was written. `fallbackBatch` now serves only the per-block container path
+(cut blocks, MPI all-reduce hook, timing, debug). **Open (for the note's author):** whether and how
+the team kernel goes into the batched pass. §5.11's league = Σ list lengths is host-known in
+`fallbackBatch` but device-resident in the batched path (§4.6: counts stay on the device; WO-8's
+≤ 3 host reads per container step). Options: (A) league = the region upper bound, teams past the
+device count exit (≈ 2·10⁵ mostly-empty 32-lane teams per call on the column, each reserving 9 kB
+scratch → occupancy-limited); (B) one more host read of the counts (breaks ≤ 3 reads); (C) a fixed
+league of persistent teams striding over the device-counted entries (no read, no empty teams; a
+new kernel shape). Recommended default: (C), else (A).
+
+G-PERF (indicative; GPU idle at sampling, load 6–10): nsys over `test_vof_blocks`, tier-3 kernel of
+the per-block path, same workload both builds, 240 launches: main `fallbackBatch` (RangePolicy)
+**5.37 ms/launch** → team **1.61 ms/launch** (−70 %, ×3.3) for ≈ 2.9·10³ fallback cells per
+launch. Scaled to the column's ≈ 7·10³ targets that is ≈ 3–4 ms against the ≤ 1.5 ms target — a
+miss to report, and only realised on the column once the batched pass takes the team kernel.

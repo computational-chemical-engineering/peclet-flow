@@ -167,6 +167,40 @@ KOKKOS_INLINE_FUNCTION void curvHeightCell(long i, SF c, SF mx, SF my, SF mz, SF
   br(i) = -1.0;  // to the fallback
 }
 
+/// Tier 3's fit frame for a target with PLIC plane `(m0, m1, m2, alpha)`: the unit PHYSICAL normal
+/// `nn` (V2.4; identity at h = 1), the tangents `t1`, `t2`, and the origin `org` = the target
+/// cell's own PLIC centroid in target-centred cell units. false when there is no normal.
+KOKKOS_INLINE_FUNCTION bool curvFallbackFrame(double m0, double m1, double m2, double alpha,
+                                              const VofMetric& g, double nn[3], double t1[3],
+                                              double t2[3], double org[3]) {
+  const double mi[3] = {m0, m1, m2};
+  nn[0] = nn[1] = nn[2] = 0.0;
+  if (!(vofPhysNormalInv(mi, g, nn) > 0.0))
+    return false;
+  curvFrame(nn, t1, t2);
+  double v[8][3], ctr[3], area;
+  const int nv = plicPolygon(m0, m1, m2, alpha, v);
+  polygonAreaCentroid(v, nv, ctr, area);
+  org[0] = ctr[0] - 0.5;
+  org[1] = ctr[1] - 0.5;
+  org[2] = ctr[2] - 0.5;
+  return true;
+}
+
+/// Tier 3's last step: solve the accumulated PV system and write the target's kappa and branch.
+template <class SF>
+KOKKOS_INLINE_FUNCTION void curvFallbackStore(long i, const PvFit& fit, SF kap, SF br) {
+  double a[6];
+  bool red = false;
+  if (!pvFitSolve(fit, a, red)) {
+    kap(i) = 0.0;
+    br(i) = static_cast<double>(kCurvNoEstimate);
+    return;
+  }
+  kap(i) = paraboloidKappa(a);
+  br(i) = static_cast<double>(red ? kCurvPvReduced : kCurvPv);
+}
+
 template <class SF>
 KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, SF c, SF mx, SF my, SF mz, SF al, SF kap,
                                              SF br, long sy, long sz, int gr, double dW,
@@ -174,22 +208,12 @@ KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, SF c, SF mx, SF my, SF mz, 
   if (br(i) >= 0.0)
     return;
 
-  const double m0 = mx(i), m1 = my(i), m2 = mz(i);
-  const double mi[3] = {m0, m1, m2};
-  double nn[3] = {0.0, 0.0, 0.0};
-  if (!(vofPhysNormalInv(mi, g, nn) > 0.0)) {  // PHYSICAL frame (V2.4); identity at h = 1
+  double nn[3], t1[3], t2[3], org[3];
+  if (!curvFallbackFrame(mx(i), my(i), mz(i), al(i), g, nn, t1, t2, org)) {
     kap(i) = 0.0;
     br(i) = static_cast<double>(kCurvNoEstimate);
     return;
   }
-  double t1[3], t2[3];
-  curvFrame(nn, t1, t2);
-
-  // Frame origin: the target cell's own PLIC centroid, in target-centred cell units.
-  double v[8][3], ctr[3], area;
-  const int nv = plicPolygon(m0, m1, m2, al(i), v);
-  polygonAreaCentroid(v, nv, ctr, area);
-  const double org[3] = {ctr[0] - 0.5, ctr[1] - 0.5, ctr[2] - 0.5};
 
   PvFit fit;
   pvFitInit(fit);
@@ -203,17 +227,61 @@ KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, SF c, SF mx, SF my, SF mz, 
                                static_cast<double>(oz)};
         pvFitAdd(fit, mx(j), my(j), mz(j), al(j), off, org, t1, t2, nn, dW, cmin, g);
       }
-
-  double a[6];
-  bool red = false;
-  if (!pvFitSolve(fit, a, red)) {
-    kap(i) = 0.0;
-    br(i) = static_cast<double>(kCurvNoEstimate);
-    return;
-  }
-  kap(i) = paraboloidKappa(a);
-  br(i) = static_cast<double>(red ? kCurvPvReduced : kCurvPv);
+  curvFallbackStore(i, fit, kap, br);
 }
+
+/// `curvFallbackCell` for one target on a whole team (C3, `doc/vof_step_performance_design.md`
+/// §4.7, §5.11): every lane computes the frame (deterministic, so no broadcast), the lanes map the
+/// `(2gr+1)^3` stencil offsets to `PvTerm`s in `terms` (team scratch) in the canonical index
+/// `k = ((oz+gr)(2gr+1) + (oy+gr))(2gr+1) + (ox+gr)`, and ONE lane folds the accepted terms in
+/// `k` order and solves. The map runs in parallel; the reduction keeps `curvFallbackCell`'s order
+/// (core's `pvFitAdd` == `pvFitTerm` + `pvFitAccum`, bitwise), so the result is bit for bit the
+/// one-thread body's. Every lane must call it (it holds a team barrier).
+template <class Member, class SF, class Scratch>
+KOKKOS_INLINE_FUNCTION void curvFallbackTeam(const Member& tm, Scratch terms, long i, SF c, SF mx,
+                                             SF my, SF mz, SF al, SF kap, SF br, long sy, long sz,
+                                             int gr, double dW, double cmin, double ieps,
+                                             VofMetric g) {
+  if (br(i) >= 0.0)  // uniform across the team: nothing writes br(i) before the barrier below
+    return;
+  double nn[3], t1[3], t2[3], org[3];
+  const bool framed = curvFallbackFrame(mx(i), my(i), mz(i), al(i), g, nn, t1, t2, org);
+  const int side = 2 * gr + 1, nk = side * side * side;
+  if (framed)
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, nk), [&](const int k) {
+      const int ox = k % side - gr, oy = (k / side) % side - gr, oz = k / (side * side) - gr;
+      const long j = i + (long)ox + (long)oy * sy + (long)oz * sz;
+      PvTerm t;
+      t.ok = false;
+      if (vofIsInterface(c(j), ieps)) {
+        const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
+                               static_cast<double>(oz)};
+        pvFitTerm(t, mx(j), my(j), mz(j), al(j), off, org, t1, t2, nn, dW, cmin, g);
+      }
+      terms(k) = t;
+    });
+  tm.team_barrier();  // the terms are in scratch, and every lane has read br(i)
+  Kokkos::single(Kokkos::PerTeam(tm), [&]() {
+    if (!framed) {
+      kap(i) = 0.0;
+      br(i) = static_cast<double>(kCurvNoEstimate);
+      return;
+    }
+    PvFit fit;
+    pvFitInit(fit);
+    for (int k = 0; k < nk; ++k)
+      if (terms(k).ok)
+        pvFitAccum(fit, terms(k));
+    curvFallbackStore(i, fit, kap, br);
+  });
+}
+
+/// The team size of a device tier-3 launch: one warp / wavefront.
+#if defined(KOKKOS_ENABLE_HIP)
+inline constexpr int kVofWarp = 64;
+#else
+inline constexpr int kVofWarp = 32;
+#endif
 
 /// A raw-pointer field accessor with the `View<double*>` call syntax, for kernels that walk SEVERAL
 /// blocks' fields in one launch (a device-side array of `View`s would carry reference counts).
@@ -545,6 +613,34 @@ class VofCurvature {
         T.off[k + 1] = T.off[T.nj];
       if (T.off[T.nj] == 0)
         continue;
+      if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace,
+                                                SField::memory_space>::accessible) {
+        // C3 (§5.11): one team (a warp) per target on a device; the host keeps one thread per
+        // target below.
+        using Policy = Kokkos::TeamPolicy<SExec>;
+        using Terms = Kokkos::View<PvTerm*, SExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
+        int gr = 0;
+        for (int k = 0; k < T.nj; ++k)
+          gr = std::max(gr, T.job[k].gr);
+        const int nk = (2 * gr + 1) * (2 * gr + 1) * (2 * gr + 1);
+        Policy pol(SExec(), T.off[T.nj], kVofWarp);
+        pol.set_scratch_size(0, Kokkos::PerTeam(Terms::shmem_size(nk)));
+        Kokkos::parallel_for(
+            "vof::curv::pv_batch_team", pol, KOKKOS_LAMBDA(const typename Policy::member_type& tm) {
+              const long t = tm.league_rank();
+              int b = 0;
+              while (t >= T.off[b + 1])
+                ++b;
+              const VofCurvFallbackJob& J = T.job[b];
+              const int side = 2 * J.gr + 1;
+              Terms terms(tm.team_scratch(0), side * side * side);
+              curvFallbackTeam(tm, terms, J.list[t - T.off[b]], VofRawField{J.c}, VofRawField{J.mx},
+                               VofRawField{J.my}, VofRawField{J.mz}, VofRawField{J.al},
+                               VofRawField{J.kap}, VofRawField{J.br}, J.sy, J.sz, J.gr, J.dW,
+                               J.cmin, J.ieps, J.gm);
+            });
+        continue;
+      }
       Kokkos::parallel_for(
           "vof::curv::pv_batch", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
           KOKKOS_LAMBDA(long t) {
