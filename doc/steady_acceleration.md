@@ -5,11 +5,135 @@ implemented. The decisions in §1 go to `../docs/decisions/flow.md` once approve
 should not need to choose anything this note leaves open. Where a choice depends on a measurement,
 §10 states the default to use and the experiment that would change it.*
 
+***Revision 1** (2026-10-02, architect pass on `doc/steady_acceleration_brief2.md`, after WO-1
+falsified three premises of revision 0). The section below lists every change and its oracle
+evidence; the body of the note is the revision-1 design. Superseded readings are kept as one-line
+"superseded by rev 1" entries. Numbers and commands: `doc/steady_acceleration_log.md`, entry
+"Revision 1".*
+
+---
+
+## Revision 1 — what changed and why
+
+WO-1's oracle (an exact NumPy implementation of revision 0) found three defects: (1) the Ritz guard
+declares "unstable" on plain certification steps (5 of 12 §11 production runs); (2) certification
+rarely passes inside its 6-block budget (9 of 24 runs); (3) on the dense random bed phase A cannot
+reach its target, so the bed gained only 1.07–1.26× in steps. Revision 1 changes five things, each
+proved on the oracle before it was written here (`tests/study/anderson_oracle.py`, whose default is
+now `--rev 1`; `--rev 0` reproduces WO-1 bit for bit — collocated N = 16, m = 5: 112 steps).
+
+**What the slow bed mode is (measured, §1.2).** Pressure in fluid cells at sphere near-contacts. On
+the A1 bed (φ 0.6, N = 64, staggered) 1,168 fluid cells sit in 1,085 pockets sealed by zero face
+apertures (almost all single cells), beside the main pore space of 103,767 cells. In the plain
+march, from step 300 to 1500, 99.97–99.996 % of the W-residual energy is pressure, and 90 % of that
+pressure energy sits in 41–105 cells. Sealed pockets carry 58–64 % of it, and cells behind faces of
+aperture ≤ 0.2 carry another 10–25 %. A sealed cell's pressure is a gauge mode with no coupling to
+any velocity. Behind a small aperture the pressure equilibrates through the tiny face flux (a
+lubrication-film mode, rate 1 − O(aperture)). Together they give the continuum of Ritz values
+0.9998–0.99999 and the power-law tail of the W-residual. Neither moves ⟨u_x⟩: the plain march
+certifies at step 325 with its W-residual at 7.1e-5 and its velocity residual at 1.1e-6. The
+collocated bed shows the same structure.
+
+**R1 — the metric is velocity only (D3 superseded).** The pressure P, and the collocated face field,
+stay in the state. They are mixed, stored and differenced, but not measured (role Carried). The
+residual becomes the relative velocity residual ‖g_u − x_u‖/‖g_u‖.
+- *Why:* a pressure error that matters shows up in the velocity it drives at the next step;
+  measured that way it is weighted by its effect. The c_P weight measured it by its size, and on a
+  dense bed that size is dominated by near-contact pockets that do not move ⟨u_x⟩.
+- *Evidence (unconditional phase A, m = 5, steps to the monitor staying within 1e-5 / to a velocity
+  residual of 3e-7):*
+
+  | case | velocity metric | W metric (rev 0) |
+  |---|---|---|
+  | §11 coll N16 | 36 / 39 | 43 / 48 |
+  | §11 stag N16 | 15 / 21 | 14 / 22 |
+  | §11 coll N24 | 14 / 23 | 15 / 24 |
+  | §11 stag N24 | 23 / 25 | 24 / 26 |
+  | Re ≈ 10 | 102 / 106 | 85 / 89 |
+  | bed stag | 76 / 68 | 52 / 104 |
+  | bed coll | 36 / 58 | 33 / 74 |
+
+- *Reading:* the velocity metric captures the collocated checkerboard as well as the c_P weight
+  did, so revision 0's reason for the weight does not hold. It reaches the handover 35 % / 22 %
+  sooner on the two beds, the use case that decides D11. Re ≈ 10 is the one case where W is faster
+  (89 vs 106). It also removes c_P, the fluid mask, the gauge pass and one collective per step.
+
+**R2 — phase A hands over on the velocity residual.** The number is unchanged:
+(1 − slow_rate)·rtol = 3e-7. Revision 0's premise ("the residual at which the slowest mode can
+carry at most rtol of remaining change") holds for the velocity residual. At the handover the
+monitor error is 2e-8 to 1.4e-5 (≤ 0.14·rtol) on all seven cases. It failed for the W-residual
+because the bed's slow pressure modes carry no monitor change.
+
+**R3 — the Ritz guard runs only where its estimate means something (D5 amended).** It runs only on
+an accelerated (mixed) call, only on a window whose every column was formed at a mixed call, and
+only while the residual is at least the Ritz floor max(1e-10, 1000·τ). Here τ is the inner-solve
+tolerance: the momentum residual tolerance in force, production 1e-8, so the floor is 1e-5. The
+consecutive count restarts at every call that is not eligible.
+- *Why:* on plain calls the window holds near-collinear plain-march differences (scaled
+  cond(XX) 1.6e-11 – 4e-11), so M = XX⁺XR amplifies inner-solve noise; radii of 12.6–56 were
+  measured. The same happens inside phase A near the map's own noise floor: the production velocity
+  residual stalls at ≈ 2e-8 = 2τ. In 42 unconditional phase-A runs, 15 had readings > 1.001. All
+  of them lie at residual ≤ 5.5e-8, apart from one isolated 1.006 at 1.4e-6 = 140τ.
+- *Evidence (revision-1 matrix):* 0 false "unstable". Every eligible reading is ≤ 0.9974, except
+  the true positive on G7a at m = 8: 1.124 at residual 9.4e-3, three in a row, so "unstable" at
+  step 18 on a map whose plain march diverges.
+
+**R4 — certification runs up to 2·(num_passes + 3) = 12 blocks, with an early "slow" exit (D6, §7
+amended).**
+- *Why:* Anderson's least squares makes the next residual small by cancelling slow-mode and
+  medium-mode contributions against each other. So after phase A the monitor's block changes
+  start near zero, then change sign or grow (R > 1) for up to five blocks before the slow tail
+  emerges. Measured |d| at those blocks is 1e-8 – 1e-10 of |m|, four orders below rtol: the state
+  is converged, but the unchanged instrument passes only on a geometric tail.
+- *Revision 0's cost:* its 6-block budget resumed phase A, which re-created the same transient.
+  An ablation kept every other revision-1 change and only the 6-block budget. Staggered N = 24,
+  m = 8 then took 214 steps against 135 plain, with 5 resumes; with 12 blocks it took 74 steps.
+- *The early exit:* a block that fails on the remainder bound with R ∈ [slow_rate^check_every, 1)
+  resumes acceleration at once. Such a tail is clean, as slow as the instrument assumes, and too
+  large. The exit keeps revision 0's reason for having a budget. It never fired in the
+  revision-1 matrix; it is insurance against a premature handover.
+
+**R5 — the window stays 5.** The pre-registered rule (m = 3 within 10 % of m = 5 on every case)
+was re-applied to the revision-1 numbers and is not met: collocated N = 24 69 vs 48; bed
+collocated 163 vs 83.
+
+**Revised step table** (steps to `converged=True`, production settings; plain / m = 3 / m = 5 /
+m = 8; ratio and pressure-iteration ratio at m = 5). Revision 0's m = 5 is in brackets.
+
+| case | plain | m = 3 | m = 5 | m = 8 | ratio m = 5 (rev 0) | pressure-iteration ratio m = 5 |
+|---|---|---|---|---|---|---|
+| §11 collocated N16 | 395 | 65 | 89 | 73 | **4.4×** (3.5×) | 4.4× |
+| §11 collocated N24 | 90 | 69 | 48 | 58 | 1.9× (0.89×) | 2.0× |
+| §11 staggered N16 | 75 | 62 | 51 | 51 | 1.47× (0.97×) | 1.49× |
+| §11 staggered N24 | 135 | 53 | 50 | 74 | 2.7× (2.3×) | 2.6× |
+| Re ≈ 10 (staggered) | 345 | 161 | 131 | 103 | 2.6× (3.0×) | 2.65× |
+| **dense bed φ 0.6, staggered** | 325 | 111 | **93** | 90 | **3.5×** (1.26×) | 3.5× |
+| **dense bed φ 0.6, collocated** | 190 | 163 | **83** | 82 | **2.3×** (1.07×) | 2.4× |
+| G7a (plain diverges) | div. | div. | div. | unstable @18 | `converged=False` everywhere | — |
+| G1 tight, collocated N16 | 3520 | 149 | 141 | 118 | \|K_acc/K_plain − 1\| ≤ 5.1e-10 | — |
+| G1 tight, staggered N16 | 295 | 85 | 79 | 72 | ≤ 1.9e-11 | — |
+
+Every bar of the brief holds: steps_acc ≤ steps_plain on every case and window; no false "unstable";
+4.4× on collocated N = 16; G1 ≤ 1e-8. **The dense bed clears 1.5× in steps on both schemes (3.5×,
+2.3×).** The pressure-solve iterations per step are the same at mixed and plain iterates
+(staggered bed 11.5 vs 11.5, collocated 31.2 vs 33.3), so the iteration ratio tracks the step ratio.
+Wall time is measured at G2 (D11).
+
+**Core delta (WO-3b, §9).** Part 1 is required. `AndersonState` gains `innerTolerance`. The Ritz
+floor gets a constant `kRitzFloorFactor = 1000`. Each window slot gets a "formed at a mixed call"
+flag, and step 7 gets the eligibility rule of R3. Part 2 is a separate commit (Q14, default yes):
+delete the Pressure role, `sdf`, `cP`, `gauged` and pass 1, which no consumer uses after R1.
+
+**Not changed:** the state (D2); type-II Anderson, its least squares and the column-drop rule (D4);
+the restart rule and its 1e-10 floor; the instrument and its constants (Q11); D7–D13 apart from
+dropping one collective; the memory formula (§6.3).
+
 ---
 
 ## 1. Decision summary (register style)
 
-Each entry gives the decision, the alternative rejected and the reason. Evidence is in §1.1.
+Each entry gives the decision, the alternative rejected and the reason. Evidence is in §1.1
+(revision 0) and §1.2 plus the "Revision 1" section (revision 1).
 
 **D1. Placement: the data path is C++/Kokkos (the grid-agnostic `AndersonCore` in `core`, the
 adapter in flow); the control path is a small pure-Python driver.** The data path covers the state,
@@ -35,16 +159,25 @@ projected-face advection on, it also includes the face field `uf_/vf_/wf_`.
 - *Reason:* Anderson accelerates a map x ↦ g(x). If g reads anything outside x, the map Anderson
   sees depends on history, and its secant model is wrong.
 
-**D3. The metric is velocity at unit weight plus pressure weighted by c_P.** The pressure term is
-c_P² times the fluid-centred, gauge-centred pressure. The face field is mixed but not measured.
-- *Rejected:* the unweighted Euclidean norm, which depends on the unit system.
-- *Rejected:* the Chorin scale Δt/(ρh), which grows without bound as Δt → ∞ and lets the pressure
-  swamp the metric.
-- *Rejected:* a metric on the face gradient of P. It would need ghost-consistent history and would
-  depend on the partition.
-- *Reason:* c_P = h/(μ + ρh²/Δt) is the velocity response of the momentum operator to a pressure
-  jump across one face. It interpolates between Chorin's scale (D → 0) and the Stokes scale
-  (D → ∞), so u and P are commensurate at every Δt (§3).
+**D3 (rev 1). The metric is the velocity at unit weight. The pressure and the face field are
+carried: mixed, stored and differenced, never measured.** The residual is the relative velocity
+residual (§3.2).
+- *Superseded by rev 1:* "velocity at unit weight plus c_P² × the fluid-centred, gauge-centred
+  pressure, c_P = h/(μ + ρh²/Δt)" (revision 0).
+- *Rejected:* the c_P-weighted pressure term (revision 0). On the dense bed 99.97 % of its residual
+  energy is pressure in near-contact cells that does not move the answer (§1.2). It made the
+  velocity-residual handover 53 % later on the staggered bed and 28 % later on the collocated bed
+  (68 vs 104 steps, 58 vs 74). The checkerboard argument made for it in revision 0 does not hold:
+  the velocity metric reaches the collocated N = 16 handover sooner, 39 steps against 48.
+- *Rejected:* gauge removal per fluid component, i.e. keeping c_P and removing each sealed pocket's
+  constant. It removes only the sealed pockets (58–64 % of the late pressure energy), not the cells
+  behind small apertures, and it needs a distributed connected-component labelling.
+- *Rejected:* the unweighted Euclidean norm of (u, P), which depends on the unit system; and a metric
+  on the face gradient of P, which needs ghost-consistent history and depends on the partition.
+- *Reason:* the velocity residual measures a pressure error by the velocity it drives at the next
+  step, that is, by its effect on the answer. A pressure error that drives no velocity (a sealed
+  pocket's constant) cannot change a velocity monitor. Every entry is a velocity, so the metric is
+  unit-free, with no c_P, no fluid mask and no gauge pass.
 
 **D4. Algorithm: type-II Anderson.** Window m = 5 (compile-time cap 8) and mixing β = 1. The least
 squares is solved by normal equations through a Jacobi-scaled eigendecomposition. The oldest column
@@ -52,31 +185,68 @@ is dropped while the scaled Gram condition exceeds 1e12, i.e. κ(ΔR) > 1e6.
 - *Rejected:* QR or TSQR. It costs m sequential reductions or a TSQR tree, and at κ ≤ 1e6 it buys
   nothing because γ only steers the path, not the fixed point.
 - *Rejected:* m = 2, which was measured insufficient on the collocated case (§1.1).
+- *Rev 1:* WO-1's pre-registered window rule (m = 3 within 10 % of m = 5 in steps on every case)
+  was re-applied to the revision-1 numbers and is not met (collocated N = 24 69 vs 48; collocated
+  bed 163 vs 83). m stays 5.
 - *Rejected:* β < 1 as the default. It slows the fast modes, and the plain step is already the
   scheme's own stable preconditioner.
 
 **D5. Safeguards.**
 - Mixing engages after two consecutive residual decreases.
 - History restarts when the residual exceeds 4× the minimum since the last restart (applied only
-  above the noise floor 1e-10).
+  above the noise floor 1e-10; unchanged in rev 1, 0 restarts in every measured run).
 - Acceleration is disabled after 5 restarts.
 - A non-finite residual or a failed pressure solve at a mixed iterate restores the last plain-map
   output and disables acceleration.
-- An instability guard watches the spectral radius of the window's Ritz matrix. If it exceeds
-  1 + 1e-3 on 3 consecutive evaluations while the residual is in [1e-10, 1e-2], the status becomes
-  "unstable" and the march returns not-converged.
+- **(rev 1)** An instability guard watches the spectral radius of the window's Ritz matrix.
+  - It is evaluated only on an **eligible** call. The call's input must be a mixed iterate, every
+    window column must have been formed at a mixed call, and the residual must lie in
+    [kRitzFloor, 1e-2].
+  - kRitzFloor = max(1e-10, 1000·τ), where τ is the inner-solve tolerance (§4.1). That is 1e-5 at
+    production settings and 1e-9 at tight ones.
+  - If the radius exceeds 1 + 1e-3 on 3 consecutive calls, all of them eligible, the status
+    becomes "unstable" and the march returns not-converged. An ineligible call resets the count.
+- *Superseded by rev 1:* "evaluated on every active call while the residual is in
+  [1e-10, 1e-2]".
+- *Rejected (rev 1):* evaluating on plain calls. Their window holds near-collinear plain-march
+  differences (scaled cond(XX) 1.6e-11 – 4e-11), and the estimate there is inner-solve noise: radii
+  of 12.6–56 gave a false "unstable" in 5 of 12 WO-1 production runs. Growth on plain steps is
+  already caught by the certification's growth exit and by the instrument itself.
+- *Rejected (rev 1):* a stricter pseudo-inverse truncation in place of the eligibility rule.
+  Truncation is a threshold tuned between 1e-11 and 1e-5 on this data, and it does not cover the
+  noise floor. Readings > 1.001 occur in phase A too, at residual ≤ 5.5e-8 ≈ 5τ.
 - *Rejected:* a tight bound on the mixing coefficients Σ|α|. Extrapolating the 0.996/step
   checkerboard needs Σ|α| ≈ 2/(1−λ) ≈ 500; a tight bound forbids the acceleration being sought.
 - *Rejected:* no instability guard. Measured: Anderson keeps marching where the plain march at the
   same Δt diverges. Anderson, like GMRES, can converge to fixed points that the plain march cannot
   reach (§1.1, §2.4).
 
-**D6. Stop interplay: two phases.**
-- Accelerate until the relative residual reaches (1 − slow_rate)·rtol.
-- Then certify with the **unchanged §3.2 instrument on consecutive plain steps**, within a budget of
-  num_passes + 3 blocks.
-- If the budget is exhausted without a pass, tighten the target ×0.1 and resume acceleration.
-- If the plain steps grow, disable acceleration and finish as the plain march would.
+**D6 (rev 1). Stop interplay: two phases.**
+- **Phase A** accelerates until the relative *velocity* residual reaches (1 − slow_rate)·rtol.
+- **Phase B** certifies with the **unchanged §3.2 instrument on consecutive plain steps**, within a
+  budget of 2·(num_passes + 3) blocks.
+- **Early "slow" exit.** Phase B ends at once when a block fails on the remainder bound with a
+  ratio R ∈ [slow_rate^check_every, 1).
+- **Budget exhausted or slow exit:** tighten the target ×0.1 and resume acceleration with the
+  history intact.
+- **Growth:** if the plain steps grow, disable acceleration and finish as the plain march would.
+- *Superseded by rev 1:* "the relative W-residual" and "a budget of num_passes + 3 blocks" with no
+  early exit.
+- *Rejected (rev 1):* keeping the 6-block budget. After an Anderson iterate the monitor's first
+  block changes start near zero, then change sign or grow (R > 1) for up to five blocks before the
+  slow tail emerges, even though |d| is 1e-8 – 1e-10 of |m|. Resuming acceleration then re-creates
+  the same transient. In the budget ablation (all other rev-1 changes in place), staggered N = 24,
+  m = 8 took 214 steps against 135 plain at 6 blocks, and 74 at 12 blocks.
+- *Rejected (rev 1):* no budget at all. A handover that leaves a clean but slow tail (R close to 1,
+  remainder above rtol) would then decay at the plain rate instead of being re-accelerated. The
+  early exit handles exactly that case and nothing else.
+- *Rejected (rev 1):* handing over on the monitor's own changes along the accelerated sequence.
+  - *Gain:* with the velocity metric the monitor stays within 1e-5 from step 66–76 (staggered bed)
+    and 32–36 (collocated bed), against the velocity target at 65–86 and 57–74. That is nothing on
+    the bed that decides D11, and about 20 steps on the other.
+  - *Cost:* Anderson's monitor sequence is not monotone (the W-metric runs jitter by ±3e-6 for 200
+    steps). A stagnating sequence would trigger false handovers, each costing ≥ 25 plain steps.
+    And phase A would depend on the caller's monitor.
 - *Rejected:* applying the §3.2 rule to the accelerated sequence. Anderson iterates are not plain
   steps. A stagnating Anderson sequence has small ⟨u_x⟩ changes far from the fixed point, which
   means false stops.
@@ -85,8 +255,9 @@ is dropped while the scaled Gram condition exceeds 1e12, i.e. κ(ΔR) > 1e6.
 
 **D7. MPI: bit-exact rank-count independence is not required.**
 - np = 1 must be bit-identical to the serial build. np > 1 must agree to tolerance.
-- Each step does one `MPI_Allreduce` of the sum packet (≤ 5m+1 doubles). A gauged pressure adds a
-  3-double pre-pass, and the inner state check adds a 1-double count.
+- Each step does one `MPI_Allreduce` of the sum packet (≤ 5m+2 doubles), and the inner state
+  check adds a 1-double count. (Rev 1 removed revision 0's 3-double gauged-pressure pre-pass with
+  the pressure metric.)
 - Rank 0 broadcasts the decision packet. **Identical γ on every rank is a correctness requirement:**
   ghosts are mixed locally, so they stay consistent only if all ranks use the same coefficients.
 - *Rejected:* reproducible (binned or integer) summation for rank-count bit-exactness. It needs a
@@ -128,6 +299,12 @@ only and loses P.
   ≥ 1.5× faster in wall time, otherwise `False`** (acceleration then opt-in, documented as for
   symmetric/collocated cases). WO-1's step ratio on the dense bed, if host-feasible, is the early
   indication only. The outcome and its numbers go to the log; nothing else may change here.
+- *Early indication (rev 1, oracle, m = 5):*
+  - staggered bed (decides, Q13): 3.5× in steps, 3.5× in pressure iterations, 2.7–3.2× in host
+    map time;
+  - collocated bed: 2.3× in steps, 2.4× in pressure iterations, 2.2× in host map time.
+
+  Rev 0 measured 1.26× and 1.07× in steps.
 - *Rejected:* an `enable_*` switch that changes what `step()` does, which would change an existing
   entry point.
 - *Rejected:* an environment variable (QUALITY_PLAN D3).
@@ -196,6 +373,46 @@ steps, with 9.2 pressure iterations per step. The prototype runs 25.7 ms/step, b
 host copies and Python-loop Gram products, which the C++ design does not have (§6.4). Even so, wall
 time to 1e-4 error is 5.4 s plain against 0.69 s accelerated.
 
+### 1.2 Evidence for revision 1: the slow mode of the dense bed (2026-10-02, measured)
+
+**Setup.** Plain march (`march_to_steady(accelerate=False)` settings, production) on the A1 bed:
+φ 0.6, 64 spheres, seed 0, N = 64, Δt = 6h², PCG(200, 1e-8). It ran for 1500 steps, recording
+the per-field residual every step and the full residual field at steps 300, 600, 1000 and 1500.
+Fluid connectivity is taken from the face apertures `get_ox/oy/oz` (two fluid-centred cells are
+connected when the shared face's aperture is > threshold). Script and commands: log, entry
+"Revision 1".
+
+**Staggered bed:**
+
+| step | W-residual | velocity residual | pressure share of W² | cells holding 90 % of P-energy | in sealed pockets | behind apertures ≤ 0.2 | plain ⟨u_x⟩ error |
+|---|---|---|---|---|---|---|---|
+| 300 | 7.9e-5 | 1.3e-6 | 0.9997 | 105 | 58 % | 69 % | 5.6e-5 |
+| 600 | 3.2e-5 | 3.1e-7 | 0.9999 | 66 | 64 % | 77 % | 1.7e-5 |
+| 1000 | 1.6e-5 | 1.2e-7 | 0.99995 | 50 | 63 % | 83 % | 7.3e-6 |
+| 1500 | 9.4e-6 | 6.0e-8 | 0.99996 | 41 | 59 % | 85 % | 3.7e-6 |
+
+- **Connectivity:** 1,086 fluid components. One main component of 103,767 cells; 1,085 pockets
+  holding 1,168 cells, nearly all single cells at sphere near-contacts, sealed by zero apertures.
+- **Decay:** the W-residual's per-step rate creeps from 0.991 (steps 100–200) to 0.999 (steps
+  1200–1500), a power-law tail rather than one eigenvalue. Successive late residuals are
+  only partly aligned (cos 0.87 → 0.96), and the velocity residual is equally localized (90 % of
+  its energy in 37–119 entries after step 1000).
+- **Collocated bed:** the same structure. The ghost scheme already decouples 216 cells in 205
+  components from its projection. The late pressure-residual energy is 74–99.9 % behind apertures
+  ≤ 0.2, and the pressure share of W² is 0.9998.
+
+**Physical reading.**
+- A sealed cell's pressure is a gauge mode with no coupling to any velocity. Each pocket adds a
+  null vector of the pressure operator, while the metric removes only the global constant, and the
+  value drifts with whatever the projection solve writes into the decoupled row.
+- A cell behind a face of small aperture a equilibrates through that face's flux at a rate
+  1 − O(a): a lubrication-film pressure.
+- Neither moves ⟨u_x⟩, and both dominate a pressure-weighted residual. That is why revision 0's
+  W-residual target was unreachable on the bed while ⟨u_x⟩ had already converged: Anderson brought
+  the monitor within 3e-5 by step 31–43, against 431 for the plain march.
+- The observation is not specific to Anderson: the plain march leaves the same pocket pressures
+  unconverged when it certifies.
+
 ---
 
 ## 2. Fixed-point argument
@@ -248,8 +465,9 @@ instrument's remainder bound of it, whichever path led there.
 settings, and → 0 at a tight stop. Gate G1 tests the tight form at ≤ 1e-8.
 
 **Gauge.** In a periodic (or wall-only) box, g(x + c·1_P) = g(x) + c·1_P. The constant P mode is
-neutral: it affects neither u nor K nor the certificate. It is removed from the metric (§3) and
-otherwise left alone.
+neutral: it affects neither u nor K nor the certificate. The same holds per sealed fluid pocket
+(§1.2). Since rev 1 the metric does not measure P at all (§3.2), so none of these modes needs
+special treatment. They are carried along by the mix and otherwise left alone.
 
 ### 2.4 What the argument does not cover (stability), and how the design handles it
 
@@ -267,6 +485,12 @@ Three defences, in the order they act:
    window, because the mode's growth dominates the secant differences. The Galerkin projection of
    J − I onto the window then has spectral radius ρ(I+M) > 1. Three consecutive detections end the
    march as not-converged ("unstable").
+   - Since rev 1 the guard reads only windows built by Anderson itself (mixed calls), and only
+     while the residual is at least 1000× the inner-solve noise.
+   - The one measured true positive (G7a, m = 8) fired at residual 9.4e-3, three decades above
+     the production floor.
+   - A growing mode that becomes visible only below the floor is left to defences 2 and 3, and to
+     the instrument, which cannot pass a tail with R ≥ 1.
 2. **Certification growth (§7).** If the plain steps grow from the accelerated state (residual
    ×10, or non-finite), acceleration is disabled and the plain march continues on its own terms.
    The outcome is then the unaccelerated outcome from that state.
@@ -303,59 +527,62 @@ right-hand side does not jump.
 
 | configuration | fields (role) | n_s |
 |---|---|---|
-| `Solver` (staggered), any advection | `C[0].u, C[1].u, C[2].u` (Velocity, on faces), `P_` (Pressure) | 4 |
-| `SolverColocated`, ghost scheme, advection off **or** `set_uf_advection(False)` | `C[0..2].u` (Velocity, cell), `P_` (Pressure) | 4 |
+| `Solver` (staggered), any advection | `C[0].u, C[1].u, C[2].u` (Velocity, on faces), `P_` (Carried) | 4 |
+| `SolverColocated`, ghost scheme, advection off **or** `set_uf_advection(False)` | `C[0..2].u` (Velocity, cell), `P_` (Carried) | 4 |
 | `SolverColocated`, ghost scheme, advection on with projected-face advection (`advect_ && ufAdvect_`, the default) | the above + `uf_, vf_, wf_` (Carried) | 7 |
 
 How to read the table:
 - **"Carried"** fields are mixed, stored and differenced like the others, but excluded from the
-  metric. They are a deterministic function of the previous step's (u*, φ), so their residual adds
-  no independent information.
+  metric.
+  - For the face field: it is a deterministic function of the previous step's (u*, φ), so its
+    residual adds no independent information.
+  - For P (rev 1; revision 0 measured it with role Pressure): a pressure error is measured through
+    the velocity it drives at the next step (§3.2, D3).
 - Decide the collocated row from the *configuration* (`advect_ && ufAdvect_`), not from
   `faceFieldValid_`.
 - Collocated Stokes: `uf_` is output-only, since every projection overwrites it and nothing reads it
   before then. It is not state.
 
-### 3.2 Metric (inner product)
+### 3.2 Metric (inner product) — rev 1: velocity only
 
 For two state vectors a and b on one rank, with inner entries I (G ≤ x < e.x−G, and likewise for y
 and z):
 
-    ⟨a,b⟩_W = Σ_{f ∈ Velocity} Σ_{i ∈ I} a_f(i) b_f(i)
-            + c_P² Σ_{i ∈ I, sdf(i) > 0} (a_P(i) − ā_P)(b_P(i) − b̄_P)
-
-    ā_P = (1/N_F) Σ_{i ∈ I, sdf(i) > 0} a_P(i)   if the pressure is gauged, else 0
+    ⟨a,b⟩ = Σ_{f ∈ Velocity} Σ_{i ∈ I} a_f(i) b_f(i)
 
 Definitions:
-- "Gauged" means the pressure has a constant nullspace, i.e. there is no Dirichlet-pressure
-  (outflow) domain face.
-- N_F is the **global** count of inner fluid-centred cells.
-- Sums are global, over ranks; inner regions partition the global grid, so each entry counts once.
-- `sdf` is the solver's cell-centred SDF (`sdf_`); only its sign is used.
+- Sums are global, over ranks. Inner regions partition the global grid, so each entry counts once.
 - Velocity entries count at every inner position, including masked solid ones, whose residual is 0.
-- Pressure counts only at fluid-centred cells. In the ghost scheme, solid-centred P is not a
-  constraint DOF. In the staggered scheme, solid-centred cut-cell P errors show up in r_u.
+- Carried fields (P, the face field) do not enter.
 
-**Pressure weight**, evaluated in the solver's internal unit system (where the registry fields
-live; h_int = 1, ρ, μ and Δt being the values that build A_u):
+*Superseded by rev 1:* the W-metric of revision 0, ⟨a,b⟩_W = ⟨a,b⟩ + c_P² Σ_{fluid cells}
+(a_P − ā_P)(b_P − b̄_P) with c_P = 1/(μ_int + ρ_int/Δt_int) and the global fluid mean removed when
+gauged. It was rejected on the dense-bed measurement of §1.2 (D3). The oracle keeps it as
+`--rev 0` / `--metric W` for ablation; the production code does not.
 
-    c_P = h / (μ + ρ h² / Δt)  =  1 / (μ_int + ρ_int / Δt_int)
-
-**Why this weight.** A pressure jump δp across one face drives a face velocity change
-δu = (δp/h) / (ρ/Δt + μ/h²) = c_P·δp, which is the grid-scale response of A_u. As D = νΔt/h² → 0
-this tends to Chorin's Δt/(ρh); as D → ∞ it tends to the Stokes h/μ. With the first `set_rho` and
-`set_dt` pinning ρ_int = Δt_int = 1, c_P = 1/(1 + D). That is 1/7 on the §11 case, the value
-measured in §1.1. Because the checkerboard is nearly invisible to the velocity, this weighting is
-what makes it visible to the least squares.
+**Why velocity only.** The plain step maps a pressure error e_P to a velocity change at the next
+step through the predictor's −G e_P term and the projection. So the velocity residual
+already contains every pressure error that can ever change a velocity monitor, each weighted by its
+effect.
+- A pressure error with no velocity effect (a gauge constant, a sealed pocket) cannot change such
+  a monitor, and is not measured.
+- One with a small effect (a pocket behind a small aperture) is measured small.
+- The collocated (π,0,0) checkerboard, the slow mode that motivated the c_P weight, is not
+  invisible. It is what makes the plain ⟨u_x⟩ slow (0.996/step), so its velocity footprint is in
+  the velocity residual. The velocity metric reaches the collocated N = 16 handover in 39 steps
+  against the W-metric's 48 ("Revision 1", R1 table).
 
 **Velocity scale and relative residual:**
 
     U² = Σ_{f ∈ Velocity} Σ_{i ∈ I} g_f(i)²          (g = the step output just computed)
-    residual = sqrt(⟨r,r⟩_W / U²)                    (r = g(x) − x; = 0 if r = 0 and U = 0; +inf if U = 0 ≠ r)
+    residual = sqrt(⟨r,r⟩ / U²)                      (r = g(x) − x; = 0 if r = 0 and U = 0; +inf if U = 0 ≠ r)
 
-**The units trap.** Everything here is internal: the fields and c_P alike. No physical conversion
-happens anywhere in the accelerator, and none is needed, because mixing is linear and the metric
-is scale-consistent.
+This is the relative *velocity* residual. It is what phase A's target, the restart test, the
+engagement rule and the Ritz floor compare against.
+
+**The units trap.** Everything here is internal. No physical conversion happens anywhere in the
+accelerator, and none is needed: mixing is linear, and the metric is a ratio of velocities, so it is
+unit-free.
 
 ---
 
@@ -369,7 +596,8 @@ is scale-consistent.
 | `kEngageDecreases` | 2 | consecutive residual decreases before mixing engages |
 | `kRestartGrowth` | 4.0 | restart if ρ_k > 4·ρ_min (since the last restart), at a mixed iterate |
 | `kMaxRestarts` | 5 | disable acceleration at the 5th restart |
-| `kNoiseFloor` | 1e-10 | below this relative residual, no restart test and no Ritz test |
+| `kNoiseFloor` | 1e-10 | below this relative residual, no restart test; also the lower bound of the Ritz floor |
+| `kRitzFloorFactor` | 1000 | **(rev 1)** Ritz floor = max(kNoiseFloor, kRitzFloorFactor·τ), τ = the descriptor's `innerTolerance` |
 | `kCondMin` | 1e-12 | minimum eigenvalue ratio of the Jacobi-scaled Gram (κ(ΔR) ≤ 1e6) |
 | `kRitzDelta` | 1e-3 | instability if ρ(I+M) > 1 + 1e-3 |
 | `kRitzHi` | 1e-2 | Ritz test only while residual ≤ 1e-2 (outside the strongly nonlinear initial transient) |
@@ -378,16 +606,34 @@ is scale-consistent.
 
 User-settable: `window` m ∈ [1, 8] (default 5), and `mixing` β ∈ (0, 1] (default 1.0).
 
+**τ, the inner-solve tolerance (rev 1).** The caller reports it in the descriptor as
+`innerTolerance`.
+- *Value:* flow sets it to `velocityResidualTolerance()` when that is > 0. Otherwise (the legacy
+  update criterion, `set_velocity_residual_tolerance(0)`) it uses the active pressure driver's
+  rtol: `chebRtol_` under Chebyshev, else `pcgRtol_`.
+- *Why this tolerance:* the momentum solve's stop is relative to max|b|, an absolute scale, so it
+  sets the map's noise floor. Measured: the production velocity residual stalls at ≈ 2e-8 = 2τ
+  with τ = 1e-8.
+- *Resulting floor:* 1e-5 at production settings, 1e-9 at tight ones. `innerTolerance = 0` means
+  unknown and gives the floor 1e-10 (revision 0's behaviour).
+- *Why 1000:* readings > 1 + kRitzDelta occur only at residual ≤ 5.5e-8 ≈ 5τ, apart from one
+  isolated 1.006 at 140τ. The true positive measured on G7a fired at 9.4e-3, about 1e6·τ.
+
 ### 4.2 Data held by `AndersonCore`
 
 - **Device:** `X`, `Rprev`, `Gprev`, `dR[0..m−1]` and `dG[0..m−1]`. Each is a set of n_s padded
   `Kokkos::View<double*>`, one per state field. That makes 2m + 3 state vectors; the history slots
   are used circularly.
-- **Host:** `mk` (columns in use); slot indices ordered oldest→newest; the m×m blocks `RR`, `GG`
-  and `GR`, where GR(i,j) = ⟨Δg_i, Δr_j⟩_W; per-column fluid P-means `mR[j]` and `mG[j]` (gauged
-  only); `havePrev`, `pending`, `gamma[m]`, `engaged`, `decCount`, `rhoPrev`, `rhoMin`,
-  `numRestarts`, `numResets`, `ritzCount`, `status` ∈ {active, disabled, unstable}, `reason`,
-  `residual`, and `ritzRadius` (last value, NaN if not computed).
+- **Host:**
+  - window bookkeeping: `mk` (columns in use); slot indices ordered oldest→newest; and **(rev 1)**
+    `mixedCol[slot]`, whether the column in that slot was formed at a mixed call;
+  - Gram blocks: the m×m blocks `RR`, `GG` and `GR`, where GR(i,j) = ⟨Δg_i, Δr_j⟩;
+  - state flags and counters: `havePrev`, `pending`, `gamma[m]`, `engaged`, `decCount`, `rhoPrev`,
+    `rhoMin`, `numRestarts`, `numResets`, `ritzCount`;
+  - status and reporting: `status` ∈ {active, disabled, unstable}, `reason`, `residual`, and
+    `ritzRadius` (last value, NaN if not computed).
+  - *Superseded by rev 1:* the per-column fluid P-means `mR[j]`, `mG[j]`; with no pressure in the
+    metric they do not exist.
 - **Signature**, for change detection: internal Δt, ρ, μ and the body force (3 components) at the
   last call.
 
@@ -424,17 +670,16 @@ decCount = ritzCount = 0; rhoMin = rhoPrev = +inf. It keeps `havePrev`.
           kernel DIFF over padded entries: r = buf − X;  dR_s = r − Rprev;  dG_s = buf − Gprev;  X = r
       else:
           kernel R: X = buf − X                     # X now holds r_k
-      # --- 4. reductions (§6.1) ---------------------------------------------------------------
-      if gauged: pass 1: fluid P-sums of X, dR_s, dG_s  -> Allreduce(3) -> means mX, mR_s, mG_s
-      pass 2: ⟨X,X⟩_W, U², and for every window column j (plus s):
-              RR(s,j), GG(s,j), GR(s,j), GR(j,s), b_j = ⟨dR_j, X⟩_W   -> Allreduce
+      # --- 4. reductions (§6.1; rev 1: velocity fields only, no pass 1) ------------------------
+      ⟨X,X⟩, U², and for every window column j (plus s):
+              RR(s,j), GG(s,j), GR(s,j), GR(j,s), b_j = ⟨dR_j, X⟩   -> Allreduce
       # --- 5. host decision (all ranks compute; rank 0's packet is broadcast and wins) ---------
-      rho = sqrt(⟨X,X⟩_W);  residual = rho / sqrt(U²)
+      rho = sqrt(⟨X,X⟩);  residual = rho / sqrt(U²)
       if not finite(rho) or (mixed and solver.pressureSolveFailed()):
           if mixed: buf = Gprev;  reason = "non-finite residual / failed pressure solve at an accelerated iterate"
           else:     reason = "non-finite residual on a plain step"
           status = disabled; reset(); havePrev = false; return
-      if havePrev: accept column s: copy the new RR/GG/GR row and column, mR[s], mG[s]; mk = min(mk+1, m)
+      if havePrev: accept column s: copy the new RR/GG/GR row and column; mixedCol[s] = mixed; mk = min(mk+1, m)
       if mixed and residual ≥ kNoiseFloor and rho > kRestartGrowth·rhoMin:
           reset(); numRestarts++; rhoMin = rho
           if numRestarts ≥ kMaxRestarts: status = disabled; reason = "too many restarts"
@@ -449,12 +694,16 @@ decCount = ritzCount = 0; rhoMin = rhoPrev = +inf. It keeps `havePrev`.
           while mk > 1 and condScaled(RR) < kCondMin: drop the oldest column (mk--)
           gamma = solveTruncated(RR, b)             # §4.4
           pending = true
-          if mk ≥ 2 and kNoiseFloor ≤ residual ≤ kRitzHi:
+          eligible = mixed and mk ≥ 2 and all(mixedCol[j] for j in window)        # rev 1
+                     and ritzFloor ≤ residual ≤ kRitzHi                          # ritzFloor: §4.1
+          if eligible:
               ritzRadius = gelfand(I + pinvTruncated(XX)·XR)   # §4.6
               ritzCount = (ritzRadius > 1 + kRitzDelta) ? ritzCount+1 : 0
               if ritzCount ≥ kRitzConsecutive:
                   status = unstable; reason = "the plain map is locally unstable at this dt (Ritz radius …)"
                   pending = false; reset()
+          else:
+              ritzCount = 0                                                        # rev 1
       broadcast (rank 0 → all): status, reason code, mk and slot order, gamma[0..mk-1], pending, residual,
                                 ritzRadius, numRestarts
 
@@ -463,7 +712,14 @@ decCount = ritzCount = 0; rhoMin = rhoPrev = +inf. It keeps `havePrev`.
   and forms no column. The residual of that first evaluation is defined (x = the initial state)
   and counts for engagement. With β = 1, the initial state never enters a mix (§2.5).
 - **A plain call** (`accelerate = False`) records history exactly like an accelerated one. A plain
-  step is an Anderson step with γ = 0. The pending mix is discarded, not deferred.
+  step is an Anderson step with γ = 0. The pending mix is discarded, not deferred. Its column is
+  flagged `mixedCol = false`, so the Ritz guard does not read a window containing it (rev 1).
+  The least squares does use it: plain-march columns capture the slowest mode well.
+- **`mixed` is rank-consistent** (`accelerate` is the same on every rank, `pending` is broadcast),
+  so `mixedCol` and the eligibility rule need no extra broadcast.
+- **The column-drop rule (cond < kCondMin) and the zero-norm drop** are unchanged. With the velocity
+  metric, a column whose velocity differences are exactly zero (only Carried fields moved) has
+  D_j = 0 and is dropped first.
 - **Restart** keeps `Rprev`/`Gprev` (step 6 still commits). The next call therefore forms a column
   at once, and mixing resumes after re-engagement (two decreases).
 - **After `status ≠ active`,** `step()` keeps working as a plain step with no history maintenance.
@@ -476,7 +732,8 @@ decCount = ritzCount = 0; rhoMin = rhoPrev = +inf. It keeps `havePrev`.
 
 ### 4.4 The least-squares solve (`solveTruncated`, host, deterministic)
 
-The goal is min_γ ‖r_k − ΔR γ‖_W, i.e. RR γ = b, with mk ≤ 8.
+The goal is min_γ ‖r_k − ΔR γ‖ in the metric of §3.2 (rev 1: velocity only), i.e. RR γ = b, with
+mk ≤ 8.
 
 1. D = diag(RR)^{1/2}. If any D_j = 0, drop that column first.
 2. A = D⁻¹ RR D⁻¹ (unit diagonal); b̃ = D⁻¹ b.
@@ -494,9 +751,14 @@ differencing). Log it; do not test it (D5).
 
 ### 4.6 The Ritz guard (host)
 
-From the cached blocks:
-- XX = GG − GR − GRᵀ + RR, i.e. ⟨Δx_i, Δx_j⟩_W with Δx = Δg − Δr.
-- XR = GR − RR, i.e. ⟨Δx_i, Δr_j⟩_W.
+Run only on an eligible call (§4.3 step 7, rev 1). From the cached blocks (rev 1: velocity inner
+products, §3.2):
+- XX = GG − GR − GRᵀ + RR, i.e. ⟨Δx_i, Δx_j⟩ with Δx = Δg − Δr.
+- XR = GR − RR, i.e. ⟨Δx_i, Δr_j⟩.
+
+Under the velocity metric the estimate is the window's action on the velocity components. A growing
+mode that Anderson suppresses must show there to matter to a velocity monitor; one with no velocity
+component at all can only blow up P, which ends in the non-finite-residual exit.
 
 Then:
 1. M = XX⁺·XR, where XX⁺ is the truncated pseudo-inverse from §4.4 with eigenvalues below
@@ -515,17 +777,24 @@ The bias is ≤ ln(C)/2^20 ≈ 1e-5 for C ≤ 1e6, well below `kRitzDelta`.
 
 | file | content |
 |---|---|
-| **core:** `include/peclet/core/solver/anderson.hpp` | `peclet::core::solver::AndersonCore` (D13) — grid-agnostic: takes a core-level descriptor `AndersonState` (state views + roles Velocity/Pressure/Carried + fluid mask + metric weight `cP` + `gauged` + ghost width `G` + optional `MPI_Comm`), implements §4 (kernels MIX/COPY/DIFF/R/COUNT, the reductions, host LS, guards, MPI packets). Header-only, `inline` members, beside `csr_bicgstab.hpp`/`vector_ops.hpp`. No flow dependency — unit-testable with synthetic maps. The parameter signature (dt, ρ, μ, F) is NOT in the core descriptor; the flow adapter checks it. |
+| **core:** `include/peclet/core/solver/anderson.hpp` | `peclet::core::solver::AndersonCore` (D13) — grid-agnostic: takes a core-level descriptor `AndersonState`, which since rev 1 holds the state views, the roles Velocity/Carried, the ghost width `G`, `innerTolerance` (§4.1) and the collectives `AndersonComm`; the rev-0 fields fluid mask, `cP` and `gauged` and the Pressure role are deleted by WO-3b part 2. It implements §4 (kernels MIX/COPY/DIFF/R/COUNT, the reductions, host LS, guards, MPI packets). Header-only, `inline` members, beside `csr_bicgstab.hpp`/`vector_ops.hpp`. No flow dependency — unit-testable with synthetic maps. The parameter signature (dt, ρ, μ, F) is NOT in the core descriptor; the flow adapter checks it. |
 | `src/anderson_accelerator.hpp` | `template <class Grid> class AndersonAccelerator` — holds `Solver<Grid>&` + an `AndersonCore`; `step(bool accelerate)` = §4.3 around `solver.step()`; signature read; status accessors. Explicitly instantiated in `src/flow_solver_staggered.cpp` / `src/flow_solver_colocated.cpp` with a matching `extern template` at the end of the header (the G.8 pattern; link via `peclet_flow_solver`). |
 | `src/flow_ibm.hpp` | declare `struct MarchState` (= a `core::solver::AndersonState` + the flow signature) and `MarchState marchState();` (public C++, **not bound**). |
-| `src/flow_ibm_diagnostics.hpp` | define `marchState()`: builds the field list of §3.1, roles, `sdf_` view, `e_`, `G`, `cP`, `gauged = !hasOutflow_`, the signature values, and (MPI) `comm_`/`distributed_`; throws `std::runtime_error` naming the first refusal of §5.3. |
+| `src/flow_ibm_diagnostics.hpp` | define `marchState()`: builds the field list and roles of §3.1 (velocity components Velocity, `P_` and the face field Carried), `e_`, `G`, `innerTolerance` (§4.1: `velocityResidualTolerance()` if > 0, else `useChebyshev_ ? chebRtol_ : pcgRtol_`), the signature values, and (MPI) `comm_`/`distributed_`; throws `std::runtime_error` naming the first refusal of §5.3. |
 | `src/flow_bindings.cpp` | bind the two adapters as private classes `_AndersonAccelerator` / `_AndersonAcceleratorColocated`; add the factory `diagnostics.anderson_accelerator(window=5, mixing=1.0)` (returns a new accelerator; `nb::keep_alive` on the solver). |
 | `packaging/flow_steady.py` → installed as `peclet/flow/steady.py` | `march_to_steady` and `MarchResult` (pure Python, §7); `flow_init.py` adds `from .steady import march_to_steady, MarchResult`; `CMakeLists.txt` gets the `configure_file` (build tree) and `install` lines mirroring those for `flow_init.py` (lines 194, 353). |
 
-`MarchState` fields: `std::vector<CCField> fields`; `std::vector<Role> roles` (Velocity / Pressure
-/ Carried); `CCConst sdf`; `C3 e`; `int G`; `double cP`; `bool gauged`; `std::array<double,6>
-signature` (dt, rho, mu, Fx, Fy, Fz, all internal); under `PECLET_FLOW_MPI`, `MPI_Comm comm` and
-`bool distributed`.
+`MarchState` fields (rev 1):
+- `std::vector<CCField> fields`;
+- `std::vector<Role> roles` (Velocity / Carried);
+- `C3 e`; `int G`;
+- `double innerTolerance`;
+- `std::array<double,6> signature` (dt, rho, mu, Fx, Fy, Fz, all internal);
+- under `PECLET_FLOW_MPI`, `MPI_Comm comm` and `bool distributed`.
+
+*Superseded by rev 1:* the fields `CCConst sdf`, `double cP`, `bool gauged` and the role Pressure.
+If WO-3b part 2 is declined (Q14), the core keeps them: `marchState()` then leaves `sdf` empty,
+`cP` at 1 and `gauged` false, and gives `P_` the role Carried, so the core never reads them.
 
 ### 5.2 Python surface
 
@@ -557,7 +826,7 @@ peclet.flow.march_to_steady(solver, monitor, rtol=1e-4, max_steps=5000, accelera
 ```python
 acc = s.diagnostics.anderson_accelerator(window=5, mixing=1.0)
 acc.step(accelerate=True)   # one map evaluation (+ the lazy mix when accelerate and engaged)
-acc.residual                # property: relative W-residual of the last evaluation (inf before the first)
+acc.residual                # property: relative velocity residual of the last evaluation (inf before the first)
 acc.status                  # "active" | "disabled" | "unstable";   acc.reason: str
 acc.num_restarts, acc.num_resets, acc.num_columns, acc.ritz_radius, acc.window, acc.mixing,
 acc.memory_bytes            # properties
@@ -613,21 +882,25 @@ Allowed:
 **Pass 2 packet layout:**
 - One fused reduction per window column j, each a 5-double `Kokkos::Sum` on a small struct:
   RR(s,j), GG(s,j), GR(s,j), GR(j,s), b_j.
-- One reduction for ⟨X,X⟩_W and U².
+- One reduction for ⟨X,X⟩ and U².
+- (rev 1) Every reduction reads the Velocity fields only; Carried fields are never read by a
+  reduction.
 - Each reduction reads at most 5 vectors (dR_s, dG_s, dR_j, dG_j, X), so its value type stays small
   enough for GPU shared memory. A single ~45-double reducer is rejected for that reason.
 - The partial results are packed into one host array of 5·mk + 2 doubles, followed by **one**
   `MPI_Allreduce(SUM)` on the solver's communicator.
 
-**Collectives per accelerated step** (all latency-bound, ≤ 45 doubles):
+**Collectives per accelerated step** (all latency-bound, ≤ 42 doubles):
 1. COUNT → `MPI_Allreduce(SUM)`, 1 double.
-2. Pass 1 (gauged only) → `MPI_Allreduce(SUM)`, 3 doubles.
-3. Pass 2 → `MPI_Allreduce(SUM)`, 5·mk + 2 doubles.
-4. The decision packet → `MPI_Bcast` from rank 0, ≤ 16 doubles plus ints.
+2. Pass 2 → `MPI_Allreduce(SUM)`, 5·mk + 2 doubles.
+3. The decision packet → `MPI_Bcast` from rank 0, ≤ 16 doubles plus ints.
+
+*Superseded by rev 1:* revision 0's pass 1, a 3-double `MPI_Allreduce` of the gauged fluid pressure
+sums, which went with the pressure metric.
 
 A step already performs dozens of collectives (MG-PCG two per iteration, the momentum stop, and so
-on), so these four add < 0.1 % at 1536 ranks. On a distributed run with ~30 µs collectives that is
-about 120 µs against a step of ~0.8 s.
+on), so these three add < 0.1 % at 1536 ranks. On a distributed run with ~30 µs collectives that is
+about 90 µs against a step of ~0.8 s.
 
 **Determinism contract:**
 
@@ -645,13 +918,12 @@ about 120 µs against a step of ~0.8 s.
 | COUNT (buf vs Gprev, inner) | 2 |
 | MIX (buf, Rprev, 2m history → buf, X) | 2m + 4 = 14 |
 | DIFF (buf, X, Rprev, Gprev → dR_s, dG_s, X) | 7 |
-| pass 1 (gauged; P part only) | ≈ 0.75 |
-| pass 2 (m+1 reductions × ≤ 5 reads) | ≈ 30 |
+| pass 2 (m+1 reductions × ≤ 5 reads, velocity fields only = ¾ of a vector) | ≈ 22.5 |
 | commit (Gprev ← buf) | 2 |
-| **total** | **≈ 56 vectors ≈ 1.8 KB per cell** |
+| **total** | **≈ 48 vectors ≈ 1.5 KB per cell** (rev 0: 56 vectors, 1.8 KB, with pass 1 and P in pass 2) |
 
 A plain step moves the equivalent of ≈ 48 KB per cell (4.7–6.2e-8 s/cell-step on an RTX 5080 at
-~960 GB/s), so the overhead is ≈ 4 % of a step. Gate G8 bounds it at 5 % on CUDA. If the gate
+~960 GB/s), so the overhead is ≈ 3 % of a step. Gate G8 bounds it at 5 % on CUDA. If the gate
 fails, the first optimisation is to fuse pass 2's per-column reductions in pairs; numerics are
 unchanged.
 
@@ -680,19 +952,25 @@ H100 the history is not binding.
 
 ---
 
-## 7. Interaction with the stop criterion
+## 7. Interaction with the stop criterion (rev 1)
 
 `march_to_steady` keeps the §3.2 instrument **verbatim** as the acceptance test. The instrument is
-`certify()` below: d = the change of `monitor()` over a block of `check_every` steps; a pass needs
-0 < R < 1 and |d|/(1 − max(R, slow_rate^check_every)) < rtol·|m|, or |d| ≤ roundoff·|m|;
-`num_passes` consecutive passes. It is applied only to runs of **consecutive plain steps**.
+`certify()` below:
+- d is the change of `monitor()` over a block of `check_every` steps;
+- a block passes if 0 < R < 1 and |d|/(1 − max(R, slow_rate^check_every)) < rtol·|m|, or if
+  |d| ≤ roundoff·|m|;
+- a stop needs `num_passes` consecutive passes.
+
+It is applied only to runs of **consecutive plain steps**. Revision 1 changes the driver around the
+instrument (target residual, budget, early exit), never the instrument.
 
     march_to_steady(solver, monitor, rtol, max_steps, accelerate, window, ...):
         steps = 0
         if not accelerate:
             return certify(solver.step, budget=None)                 # == study march(), bit for bit
         acc = solver.diagnostics.anderson_accelerator(window)        # raises on refusal / allocation
-        target = (1 - slow_rate) * rtol
+        target = (1 - slow_rate) * rtol                              # on the VELOCITY residual (rev 1)
+        budget = 2 * (num_passes + 3)                                # rev 1 (rev 0: num_passes + 3)
         while steps < max_steps:
             # ---- phase A: accelerate -----------------------------------------------------------
             best, since, stagnated = inf, 0, False
@@ -705,43 +983,73 @@ H100 the history is not binding.
             if acc.status != "active":
                 return certify(solver.step, budget=None)             # plain march from here
             # ---- phase B: certify on consecutive plain steps ----------------------------------
-            out = certify(lambda: acc.step(False), budget=num_passes + 3,
-                          growth_ref=acc.residual)                   # see below
+            out = certify(lambda: acc.step(False), budget=budget,
+                          growth_ref=acc.residual, slow_exit=True)   # see below
             if out == "pass": return MarchResult(True, steps, "certified", ...)
             if out == "max":  return MarchResult(False, steps, "max_steps", ...)
             if out == "growth" or stagnated:
                 acc.disable(); return certify(solver.step, budget=None)
-            target *= 0.1                                            # out == "budget": resume A
+            target *= 0.1                                            # "budget" or "slow": resume A
 
-The details below are fixed:
-- **`certify(step_fn, budget, growth_ref=None)`** runs the §3.2 loop with a *fresh* block state
-  (`prev = dprev = None`, `passes = 0`). Its step counter starts at 0, so `monitor()` is sampled at
-  local steps 4, 9, 14, … exactly as the study does.
-  - It returns "pass" at a stop.
-  - It returns "budget" after `budget` blocks without a stop (never when `budget is None`).
-  - It returns "max" at `max_steps`.
-  - With a `growth_ref`, it returns "growth" as soon as `acc.residual > 10·growth_ref`, or as soon
-    as the residual or the monitor is non-finite.
-  - A non-finite `monitor()` in a `budget=None` run returns `MarchResult(False, …, "diverged")`.
-    This is the one behavioural addition to the plain path; it acts only on runs that are already
-    diverging, and G0 tests converging cases.
-- **The target** is (1 − slow_rate)·rtol, i.e. 3e-7 at the defaults. It is the residual at which the
-  slowest mode the instrument assumes (rate `slow_rate`) can carry at most rtol of remaining change,
-  since its error is at most residual/(1 − slow_rate). Anderson deflates that mode, so in practice
-  the certification passes at its first eligible blocks.
-- **Why certify with a budget and resume** rather than let the plain tail run on: if the target was
-  not tight enough, the plain tail decays at the slow rate (0.996 per step on the collocated case),
-  while resuming Anderson with the history intact is ~10× faster. Plain steps through
-  `acc.step(False)` keep the history warm (§4.3).
-- **Why a growth exit returns to the plain march** rather than failing: growth means the plain map
-  at this Δt departs from the accelerated state. The honest outcome is whatever the unaccelerated
-  march does from there: converge elsewhere, oscillate until `max_steps`, or diverge.
-- **Expected cost** on the §11 collocated case, N = 16, estimated from the §1.1 residual trace: the
-  residual reaches 3e-7 at about step 57, then the certification takes 20–25 steps, giving ≈ 80
-  steps against 395 for the plain march to stop (brief §3.2). That is **≈ 5×**.
-  - Staggered: ≈ 22 + 20–25 ≈ 45 against 75, **≈ 1.7×**. The instrument's fixed cost dominates.
-  - Re ≈ 10: ≈ 150 + 20–25 against ≳ 270, **≈ 1.6×**.
-  - G2 measures all three.
+The details below are fixed.
+
+**`certify(step_fn, budget, growth_ref=None, slow_exit=False)`** runs the §3.2 loop with a *fresh*
+block state (`prev = dprev = None`, `passes = 0`). Its step counter starts at 0, so `monitor()` is
+sampled at local steps 4, 9, 14, … exactly as the study does. It returns:
+- "pass" at a stop;
+- "budget" after `budget` blocks without a stop (never when `budget is None`);
+- "max" at `max_steps`;
+- with a `growth_ref`, "growth" as soon as `acc.residual > 10·growth_ref`, or as soon as the residual
+  or the monitor is non-finite;
+- **(rev 1)** with `slow_exit`, "slow" at the first block that fails while R is defined and
+  slow_rate^check_every ≤ R < 1. Such a block failed on the remainder bound alone: its tail is
+  geometric, at least as slow as the instrument assumes, and too large. The test reads the same d,
+  R and bound the instrument just computed. It is the driver's policy, not part of the instrument.
+- A non-finite `monitor()` in a `budget=None` run returns `MarchResult(False, …, "diverged")`. This
+  is the one behavioural addition to the plain path; it acts only on runs that are already
+  diverging, and G0 tests converging cases.
+
+**The target** is (1 − slow_rate)·rtol on the relative velocity residual, i.e. 3e-7 at the
+defaults. It is the residual at which the slowest mode the instrument assumes (rate `slow_rate`) can
+carry at most rtol of remaining change, since its error is at most residual/(1 − slow_rate).
+- Measured at the handover (revision-1 oracle, all seven cases): monitor error 2e-8 – 1.4e-5, i.e.
+  ≤ 0.14·rtol.
+- *Superseded by rev 1:* the same number on the W-residual. On the dense bed that residual is
+  dominated by pressure modes that carry no monitor change (§1.2), and the target was not reached
+  in 120 accelerated steps.
+
+**Why the budget is 2·(num_passes + 3) blocks.**
+- *The transient.* An Anderson iterate's next residual is small because the slow-mode and
+  medium-mode contributions cancel, so the monitor's first block changes after phase A start near
+  zero, then change sign or grow (R > 1). The instrument needs a geometric tail, which emerges
+  only once the medium modes have decayed.
+- *Measured* (traces in the log): R > 1 or R < 0 for up to 5 blocks at |d| = 1e-8 – 1e-10 of |m|.
+  Every revision-1 production run then passed within 5–10 blocks (25–50 plain steps), except the
+  collocated bed at m = 3 (12 blocks, then one resume).
+- *Revision 0's budget* of num_passes + 3 = 6 blocks allows one failed block before a resume. The
+  resume re-creates the transient. In the ablation with every other revision-1 change in place, it
+  cost 6–140 extra steps on 6 of 21 runs and gained nothing on the others (log, budget table:
+  6 / 9 / 12 blocks).
+
+**Why the early "slow" exit, and why the resume.**
+- If the target was not tight enough for a mode slower than `slow_rate`, the plain tail decays at
+  that mode's rate. Resuming Anderson with the history intact deflates it in a few steps, and the
+  plain columns just recorded by `acc.step(False)` (§4.3) carry exactly that mode.
+- The early exit takes that path as soon as the instrument shows a clean, slow, too-large tail,
+  instead of after the whole budget.
+- It never fired in the revision-1 matrix; it is the insurance that keeps the larger budget from
+  costing 60 plain steps on such a case.
+
+**Why a growth exit returns to the plain march** rather than failing: growth means the plain map at
+this Δt departs from the accelerated state. The honest outcome is whatever the unaccelerated march
+does from there: converge elsewhere, oscillate until `max_steps`, or diverge.
+
+**Measured cost** (revision-1 oracle, production, m = 5): the full table is in "Revision 1".
+- §11 collocated N = 16: 39 accelerated + 50 certification = 89 steps against 395, **4.4×**.
+- Staggered N = 16: 21 + 30 = 51 against 75, **1.47×**. The instrument's fixed cost of at least
+  25 plain steps dominates.
+- Re ≈ 10: 106 + 25 against 345, **2.6×**.
+- Dense bed: 68 + 25 against 325 staggered, **3.5×**; 58 + 25 against 190 collocated, **2.3×**.
 
 ---
 
@@ -763,18 +1071,20 @@ The details below are fixed:
 |---|---|---|---|
 | **G0** inertness | (a) `tests/regression/state_hash.py` before/after; (b) `march_to_steady(accelerate=False)` vs the study's `march()`; (c) full ctest battery | (a) all entry paths; (b) §11 φ=0.125 N = 16, 24, collocated + staggered, production; (c) host tree, `-LE bench` | (a) identical hashes; (b) **identical step count and bit-identical ⟨u_x⟩**; (c) 188 existing + new tests all pass |
 | **G1** fixed point | K accelerated vs K plain, both `converged=True`, tight | §11 N = 14, 16, 18, 20, 24 (collocated ghost + staggered); Z&H SC array φ = 0.343 and 0.45 at N = 32 (staggered); dense random bed φ ≈ 0.6 (§10 Q2), staggered + collocated ghost | **\|K_acc/K_plain − 1\| ≤ 1e-8** every case |
-| **G2** speed-up | steps to `converged=True` and wall time incl. accelerator overhead, production | all G1 cases, host and CUDA | §11 collocated N = 16: **steps ratio ≥ 3.0 and wall ratio ≥ 2.7**; every case: steps_acc ≤ steps_plain **and** \|K_acc/K_G1 − 1\| ≤ 1e-4; report all ratios (expected ≈ 5× collocated, ≈ 1.7× staggered) |
-| **G3** no new instability | 400 unconditional `acc.step(True)` (no stop) | §11 N = 16 collocated + staggered at νΔt/h² ∈ {6, 60, 600, 1e4}; dense bed at Δt = 60 and 600 (cell units, as in `collocated_invisible_subspace.md` §3) and at νΔt/h² = 1e4 | status stays "active"; ≤ 1 restart per 100 steps; running-min residual reaches ≤ 1e-9; residual at step 400 ≤ 10 × its running min; the four-Δt K agree to 1e-8 (C2 under acceleration) |
+| **G2** speed-up | steps to `converged=True`, pressure iterations and wall time incl. accelerator overhead, production | all G1 cases, host and CUDA | §11 collocated N = 16: **steps ratio ≥ 3.0 and wall ratio ≥ 2.7**; every case: steps_acc ≤ steps_plain **and** \|K_acc/K_G1 − 1\| ≤ 1e-4; **dense bed: the D11 rule (wall ≥ 1.5×, staggered decides, Q13)**; report all ratios (rev-1 oracle at m = 5: 4.4× collocated N16, 1.47–2.7× staggered §11, 2.6× Re ≈ 10, 3.5× / 2.3× staggered / collocated bed) |
+| **G3** no new instability | 400 unconditional `acc.step(True)` (no stop), tight inner solves | §11 N = 16 collocated + staggered at νΔt/h² ∈ {6, 60, 600, 1e4}; dense bed at Δt = 60 and 600 (cell units, as in `collocated_invisible_subspace.md` §3) and at νΔt/h² = 1e4 | status stays "active"; ≤ 1 restart per 100 steps; running-min residual reaches ≤ 1e-9; residual at step 400 ≤ 10 × its running min; the four-Δt K agree to 1e-8 (C2 under acceleration) |
 | **G4** MPI | tight `march_to_steady`, kokkos_mpi tree, `mpirun --bind-to none` | §11 N = 32 collocated ghost + staggered, np = 1, 2, 4 | \|K_np/K_1 − 1\| ≤ 1e-9; np=1 (MPI build) vs serial build: identical state hash after 60 accelerated steps; step counts within ±10 % across np (report) |
 | **G4c** MPI ctest | `test_anderson_mpi` (C++, `tests/kokkos_mpi`) | staggered N = 16 sphere, 40 `acc.step(True)`, np = 1, 2, 4; plus U7 | max\|u_np − u_1\| ≤ 1e-8·max\|u_1\|; γ bitwise equal on all ranks of a run (assert after the Bcast) |
 | **G5** restart | interrupt at step 25: `get_field` u,v,w,p → fresh solver, same setup → `set_field` → `march_to_steady` | §11 N = 16 collocated + staggered, tight | K vs uninterrupted accelerated K ≤ 1e-8; total steps ≤ uninterrupted + 15 (report); variant with `set_state` (velocity only): K ≤ 1e-8, extra steps reported |
 | **G6** finite Re | tight `march_to_steady`, accelerated vs plain | staggered §11 sphere N = 16 at μ = 0.05, dt = 3.906e-2 (Re ≈ 10, measured stable); collocated ghost same case (state n_s = 7); a random array at Re ≈ 10 and ≈ 100 (§10 Q3) | \|K_acc/K_plain − 1\| ≤ 1e-8; steps_acc ≤ steps_plain; report ratios (prototype: 2.5× to 1e-4 error at Re ≈ 10) |
-| **G7** unstable / unsteady | (a) both drivers on a case whose plain march diverges; (b) synthetic unstable maps; (c) false-alarm census | (a) staggered §11 sphere N = 16, μ = 0.0158, dt = 1.234e-2 (plain NaN at step ≈ 435, measured); (b) core unit test U4; (c) every G1–G6 run | (a) `converged=False` for accelerate True **and** False, no K reported; (b) status "unstable" within 3m steps of engagement; (c) status never "unstable" and logged `ritz_radius` ≤ 1.0005 throughout the active range |
+| **G7** unstable / unsteady | (a) both drivers on a case whose plain march diverges; (b) synthetic unstable maps; (c) false-alarm census | (a) staggered §11 sphere N = 16, μ = 0.0158, dt = 1.234e-2 (plain NaN at step ≈ 435, measured); (b) core unit test U4; (c) every G1–G6 run | (a) `converged=False` for accelerate True **and** False, no K reported; (b) status "unstable" within 3m steps of engagement; (c) status never "unstable", and every **eligible** Ritz reading (§4.3 step 7, rev 1) ≤ 1.0005 (rev-1 oracle: max 0.9974 over 21 runs) |
 | **G8** performance + memory | accelerator time (inside the adapter, excluding `solver.step()`), mean over 50 steps; `memory_bytes` | 64³ §11-type case, staggered + collocated, CUDA and host | overhead ≤ 5 % (CUDA), ≤ 8 % (host) of the mean plain step; `memory_bytes` = formula §6.3 exactly |
 
 **Core unit tests** (in **core**: `tests/test_anderson.cpp`, Kokkos-gated like `test_graph_amg_device.cpp`; U7 in core's MPI tests; synthetic maps on Views, host and CUDA):
-- **U1 linear contraction:** x ← Jx + c, J diagonal with 10⁴ entries in [0, 0.996]. Window 5
-  reaches residual ≤ 1e-12 in ≤ 80 steps; the plain march needs > 3000 (assert both).
+- **U1 linear contraction**, as re-specified in core-anderson `2defc9c` (U1a: fast bulk + one
+  isolated mode 0.996 converges in 32 steps; U1b: the continuum [0, 0.996] stated as a limit of a
+  window of 5; U1c: three isolated modes). *Superseded:* this note's original U1 (a continuum in
+  ≤ 80 steps), which a window of 5 cannot meet.
 - **U2 affine hull:** every g output satisfies Σx_i = S. Mixed states satisfy it to 1e-14·|S|.
 - **U3 restore:** a map that returns NaN at the 3rd mixed iterate. Afterwards buf == Gprev
   bitwise, status "disabled", and the next `step(false)` works.
@@ -786,6 +1096,26 @@ The details below are fixed:
   increments, no mix applied). Writing only ghosts does not.
 - **U7 (MPI):** U1 distributed over np = 1, 2, 4. γ is equal on all ranks, and iterates are within
   1e-13 of np = 1 after 20 steps.
+- **U8 (rev 1) — no Ritz on plain windows.**
+  - *Setup:* x ← Jx + c + η, with J diagonal in [0, 0.999] and η a deterministic pseudo-random
+    perturbation of 1e-8·‖x‖ per evaluation (the inner-solve noise).
+  - *Plain phase:* 200 `step(false)` calls. Assert `ritzRadius` is NaN after every call and the
+    status stays "active".
+  - *Accelerated phase:* 50 `step(true)` calls with `innerTolerance = 1e-8`. Assert status never
+    "unstable".
+  - *Control:* the same accelerated sequence with eligibility forced to the rev-0 rule (a test-only
+    hook, or a recorded pre-delta build) is allowed to fail. Record it; do not assert it.
+- **U9 (rev 1) — the Ritz floor.** U4's stable twin run to a residual of 1e-12.
+  - With `innerTolerance = 1e-8`: assert `ritzRadius` is NaN on every call whose residual is
+    < 1e-5, and finite on at least one eligible call above it.
+  - With `innerTolerance = 0`: assert it is evaluated down to 1e-10.
+  - U4 itself must still report "unstable" within 3m steps of engagement (it runs only mixed
+    calls).
+- **U10 (rev 1, WO-3b part 2) — Carried fields.** A two-field state (Velocity + Carried) whose map
+  moves only the Carried field after step 10. Assert:
+  - the residual is 0 from then on;
+  - a Carried field that satisfies Σx_i = S on every output satisfies it after a mix to
+    1e-14·|S| (U2 for Carried).
 
 ---
 
@@ -795,54 +1125,112 @@ All work happens in a worktree `../flow-anderson` on branch `anderson`. Commit n
 run the blocking clang-format 18.1.8 check on `src/` and `tests/`. Record numbers in
 `doc/steady_acceleration_log.md`, which is append-only.
 
-**WO-1 — Python oracle and parameter confirmation (host only; no production code).**
-- Write `tests/study/anderson_oracle.py`. It implements §3 and §4 exactly (constants of §4.1,
-  `solveTruncated`, the Ritz guard) plus the §7 driver, in NumPy over `diagnostics.field_view` on a
-  host build of main.
-- Run it on: §11 N = 16 and 24 (collocated ghost and staggered); the Re ≈ 10 case; the G7a case; and
-  the dense bed if host-feasible. Sweep m ∈ {3, 5, 8}.
-- **Pre-registered rule:** if m = 3 is within 10 % of m = 5 in steps to `converged=True` on *every*
-  measured case, the default `window` becomes 3, recorded in the log. Nothing else may change here.
-- If any §4.1 constant causes a restart storm (> 1 per 100 steps), a false "unstable", or a missed
-  G7a, **stop and report**. Do not tune.
-- *Gate:* G1 (tight) on §11 N = 16 collocated and staggered via the oracle; G2's ≥ 3× on collocated
-  N = 16; G7a via the oracle.
+**WO-1 — Python oracle and parameter confirmation (host only; no production code). DONE.**
+- *Revision 0 run:* `tests/study/anderson_oracle.py` (`16393b9`) ran rev 0 and STOPPED on its own
+  rule, a false "unstable" (log, entry 2026-10-02 WO-1). That stop produced revision 1.
+- *Revision 1 re-run:* done with the oracle at `--rev 1`, its default since this revision (log,
+  entry "Revision 1"). Results:
+  - G1 tight: ≤ 5.1e-10 collocated, ≤ 1.9e-11 staggered.
+  - G2: 4.4× on collocated N = 16; steps_acc ≤ steps_plain on every case and window.
+  - G7a: `converged=False` for m = 3, 5 and 8 and for the plain march. At m = 8 this comes from the
+    guard ("unstable" at step 18, a true positive); otherwise from the plain tail diverging.
+  - No false "unstable"; 0 restarts.
+  - Window rule re-applied: not met, m stays 5.
+- The oracle stays the reference for WO-4's comparison. `--rev 0` reproduces WO-1.
 
-**WO-2 — `Solver::marchState()` and refusals.**
-- Declaration in `flow_ibm.hpp`, definition in `flow_ibm_diagnostics.hpp` (§5.1, §5.3).
-- `tests/kokkos/test_march_state.cpp` checks the field list and roles for the three §3.1 rows, and
-  that each §5.3 refusal throws with its own message.
+**WO-2 — `Solver::marchState()` and refusals (rev 1).**
+- Declaration in `flow_ibm.hpp`, definition in `flow_ibm_diagnostics.hpp` (§5.1, §5.3). The rev-1
+  descriptor holds roles Velocity/Carried (P and the face field Carried) and `innerTolerance`
+  (§4.1), and no `sdf`, `cP` or `gauged`.
+- `tests/kokkos/test_march_state.cpp` checks:
+  - the field list and roles for the three §3.1 rows;
+  - `innerTolerance` in three configurations: the default (= the PCG rtol); an explicit
+    `set_velocity_residual_tolerance(1e-9)` (= 1e-9); tolerance 0 under Chebyshev (= the Chebyshev
+    rtol);
+  - that each §5.3 refusal throws with its own message.
 - *Gate:* G0(a) and G0(c).
 
-**WO-3 — `AndersonCore` in core (`core/include/peclet/core/solver/anderson.hpp`, D13).** Done in a
-`core-anderson` worktree; core is tagged and published (`PECLET_CORE_TAG` bumped) before WO-4 lands
-on flow main, per the suite release order. Until then flow builds against the sibling `../core`.
-- Kernels, reductions and packets (§6.1), host LS/Jacobi/Gelfand (§4.4–4.6), and the state machine
-  (§4.3, with the core taking a step callback or split into `prepare`/`complete` around the
-  caller's step; the split form is preferred).
-- *Gate:* U1–U6 on host and CUDA; U7 at np = 1, 2, 4 in `tests/kokkos_mpi`.
+**WO-3 — `AndersonCore` in core (`core/include/peclet/core/solver/anderson.hpp`, D13). DONE** in
+`../core-anderson`, branch `anderson`: `7212582` (the descriptor), `e300e29` (the core), `2defc9c`
+(tests; U1 re-specified). U1a–U7 pass on host and CUDA, and at MPI np = 1, 2, 4. Core is tagged and
+published (`PECLET_CORE_TAG` bumped) before WO-4 lands on flow main, per the suite release order.
+Until then flow builds against the sibling core.
 
-**WO-4 — Adapter, bindings, Python driver, packaging.**
+**WO-3b — core delta for revision 1 (in `../core-anderson`, branch `anderson`; before WO-4).** Two
+commits, so that part 2 reverts on its own.
+- **Part 1 (required): the guard's scope.**
+  - `AndersonState::innerTolerance`: a `double`, default 0. `validate()` requires it finite and ≥ 0.
+    Doc: "relative tolerance of the caller's inner solves; sets the Ritz floor; 0 = unknown".
+  - `static constexpr double kRitzFloorFactor = 1000.0`, and
+    `double ritzFloor() const { return std::max(kNoiseFloor, kRitzFloorFactor * st_.innerTolerance); }`.
+  - `bool mixedCol_[kMaxWindow]`, indexed by slot. At column acceptance (step 5, beside the Gram
+    copy): `mixedCol_[s] = mixed_`. `dropColumn` and `reset` need no change, since a slot's flag is
+    rewritten whenever the slot is reused.
+  - Step 7: replace `if (mk_ >= 2 && kNoiseFloor <= residual_ && residual_ <= kRitzHi)` with
+    `eligible = mixed_ && mk_ >= 2 && allMixed() && ritzFloor() <= residual_ && residual_ <= kRitzHi`,
+    and add `else ritzCount_ = 0;` to the `if (eligible)`.
+  - The restart test is unchanged (it keeps `kNoiseFloor`).
+  - No packet change, since `mixed_` is rank-consistent.
+  - Doc comments of §4.1/§4.3 updated to match.
+- **Part 2 (simplification; Q14, default yes): delete the pressure metric.**
+  - `AndersonRole` keeps `Velocity` and `Carried`. Delete `Pressure`; keep the integer values of the
+    two that remain.
+  - Delete the descriptor fields `sdf`, `cP` and `gauged`, and from the core: pass 1 (the
+    fluid-sum reduction and its `sumAll`), `countFluid`, `numFluid_`, `pressure_`, `mR_`/`mG_`, the
+    mean subtraction in pass 2, and the Pressure branches of `validate()`.
+  - Convert or remove every test that uses the Pressure role.
+  - *Why:* after rev 1 no consumer uses it. The branch is unreleased, so this is the cheapest moment
+    (after the tag it is a breaking change). It removes one collective per step and the sdf
+    dependency. It also keeps a metric that rev 1 rejected on evidence from being re-enabled by
+    accident.
+- *Gate:*
+  - U1a–U7 give bit-identical iterates to the pre-delta build on every test that does not trip the
+    guard. Neither part changes an iterate: part 1 only changes whether the guard is evaluated;
+    part 2 only removes the pressure term, which these tests do not exercise or which is
+    converted. Compare γ sequences and final states with the pre-delta build.
+  - U4 still reports "unstable" within 3m steps of engagement.
+  - U8, U9, U10 pass, on host and CUDA; U7 at np = 1, 2, 4.
+  - The flow oracle needs no change: it already implements both parts at `--rev 1`.
+
+**WO-4 — Adapter, bindings, Python driver, packaging (rev 1).**
 - `src/anderson_accelerator.hpp`, the explicit instantiations, the bindings (§5.1–5.2),
-  `packaging/flow_steady.py` plus the `flow_init.py` import and the CMake lines.
-- `tests/python/test_march_to_steady.py`, registered as ctest `march_to_steady`. It contains G0(b)
-  at N = 16, a small G1 (§11 N = 12, collocated and staggered, tight, ≤ 1e-8), and G7a.
+  `packaging/flow_steady.py` plus the `flow_init.py` import and the CMake lines. The driver is §7
+  revision 1: velocity-residual target, budget 2·(num_passes + 3), the early "slow" exit.
+- `tests/python/test_march_to_steady.py`, registered as ctest `march_to_steady`, contains:
+  - G0(b) at N = 16;
+  - a small G1 (§11 N = 12, collocated and staggered, tight, ≤ 1e-8);
+  - G7a;
+  - **three pure-Python tests of the driver's `certify` on scripted monitor sequences.** (i) Four
+    blocks with R > 1 and then a geometric tail inside the budget → "pass". (ii) A clean tail with
+    R = 0.99 that fails the bound → "slow" at the first such block. (iii) A sequence that never
+    passes → "budget" after exactly 2·(num_passes + 3) blocks.
 - *Gate:*
   - G0(b).
-  - C++ vs oracle on host, §11 N = 16 collocated: the per-step `residual` sequences agree to 1e-6
-    relative over the first 30 steps (reduction order differs, so bit equality is not expected).
+  - C++ vs oracle (`--rev 1`) on host, §11 N = 16 collocated: the per-step velocity `residual`
+    sequences agree to 1e-6 relative over the first 30 steps (reduction order differs, so bit
+    equality is not expected).
   - The new ctest passes.
 
 **WO-5 — Gate campaign.**
 - Write `tests/study/steady_acceleration_gates.py` (an instrument, not a ctest).
-- Run G1–G8 on host and CUDA, and G4 with the kokkos_mpi tree. Log every number.
+- Run G1–G8 on host and CUDA, and G4 with the kokkos_mpi tree. Log every number, including
+  pressure iterations per step at mixed and plain iterates.
+- **D11 is decided here** on the staggered dense bed (Q13): wall ratio at G2 ≥ 1.5 → default
+  `accelerate=True`. The collocated bed is reported beside it.
 - *Gate:* all of §8.
 
 **WO-6 — Documentation.**
 - Add a CLAUDE.md subsection "Steady marches" covering usage, scope, refusals, the memory formula,
   and "checkpoint with get_field/set_field".
 - Add a "Measured" table to this note, replacing the §1.1 estimates.
-- Draft the D1–D12 entries for `../docs/decisions/flow.md`. The caller commits them once approved.
+- Draft the register entries for `../docs/decisions/flow.md` (and core.md for WO-3b); the caller
+  commits them once approved. Rev 1 changes two entries already in the register, each as a new
+  recorded decision that names what changed:
+  - "Steady marches are accelerated by type-II Anderson on the full march state…": its quoted
+    metric (c_P-weighted, gauge removed) is superseded by D3 rev 1.
+  - "Steady state is certified by the unchanged stop instrument on PLAIN steps…": its residual
+    becomes the velocity residual, its budget 2·(num_passes + 3) with the early slow exit (D6 rev 1).
+- Add a register entry for the guard's scope (D5 rev 1).
 - *Gate:* the docs build (`docs.yml`) is clean.
 
 ---
@@ -857,7 +1245,7 @@ and has a default that work proceeds with.
 | Q1 | Should `march_to_steady` default to `accelerate=True`? | preference | **DECIDED by the user 2026-10-02: pre-registered rule** — `True` iff the dense bed gains ≥ 1.5× in wall time at G2 (D11) | — |
 | Q2 | Which dense random bed (φ ≈ 0.6) and resolution is the G1/G3 reference? | fact | the smallest dense-bed configuration in `~/Codes/peclet-study-A1-drag-audit/scripts/`, at its lowest resolution | A1 owner names the file |
 | Q3 | Which random array and Δt rule for G6 at Re ≈ 10, 100? | fact | the A1 finite-Re configuration at its lowest resolution with A1's own Δt rule; if none exists, the §11 sphere at Re ≈ 10 only (measured stable), Re ≈ 100 reported as "not run" | A1 owner |
-| Q4 | Do the §4.1 safeguard constants cause false restarts/"unstable" on production beds? | fact | constants as stated; WO-1 and G7c measure; a failure stops the WO (no tuning) | WO-1/WO-5 numbers |
+| Q4 | Do the §4.1 safeguard constants cause false restarts/"unstable" on production beds? | fact | **ANSWERED by WO-1:** restarts never (0 in every run); false "unstable" yes, on plain windows (rev 0). Rev 1 fixes the guard's *scope* (D5); no constant was tuned | WO-5's G7c re-checks |
 | Q5 | Should A1 use an interim driver on the released wheel 1.2.0? | preference | **no**; A1 adopts on the flow release carrying this (the oracle is host-only and copies) | user (A1 budget vs effort) |
 | Q6 | Largest per-GPU grid in A1 production? Runs > 7.5 M cells on a 16 GB card do not fit at m = 5 | fact | such runs pass `accelerate=False` or go to two GPUs; the constructor's error names the bytes | A1 owner |
 | Q7 | Should the collocated face field be registered (`uf`, `vf`, `wf` in the field registry) so a collocated-advection checkpoint round-trips exactly? It would also make `redistribute` carry it, fixing CLAUDE.md's open item but changing a rebalanced run's numerics | preference (changes an existing path) | **not done here**; the collocated-advection restart re-seeds u_f (a transient, same fixed point) | user, as its own recorded decision |
@@ -866,21 +1254,37 @@ and has a default that work proceeds with.
 | Q10 | Public names `march_to_steady`, `MarchResult`, `diagnostics.anderson_accelerator` and the keyword names of §5.2 | preference | as stated (checked against NAMING §1: verbs, `num_*`, `rtol`, no cell units) | user |
 | Q11 | Is the §3.2 instrument library API from now on (`slow_rate=0.997`, `roundoff=1e-11`, `check_every=5`, `num_passes=3` as library defaults)? | preference | yes, the study's constants; the study script switches to `march_to_steady(accelerate=False)` in WO-4 (G0(b) proves equivalence) | user |
 
+| Q12 | Does a mixed iterate cost more inner work than a plain one (velocity sweeps; the oracle cannot count them)? | fact | proceed. Pressure iterations per step are equal (staggered bed 11.47 vs 11.49, collocated 31.2 vs 33.3). Host map time per step on a shared, loaded 48-core box: +3 % collocated bed, +10–28 % staggered bed (two repeats); map-time ratio 2.7–3.2× staggered, 2.2× collocated | G2's wall ratio on the C++ build (WO-5), host and CUDA |
+| Q13 | Which dense bed decides D11's 1.5× rule: staggered, collocated, or both? | preference | **staggered decides**: A1's solver is `peclet.flow.Solver` only (`common.make_solver`); the collocated bed is reported beside it. Both clear 1.5× in steps (3.5×, 2.3×) | user |
+| Q14 | Delete the core's Pressure role, `sdf`, `cP`, `gauged` and pass 1 (WO-3b part 2)? | preference (a tested core interface) | **yes**, as a separate commit, before the core tag. It has no consumer after rev 1, and removing it after the tag would be a breaking change | user / core owner |
+| Q15 | Is `kRitzFloorFactor = 1000` right on other configurations (GPU, MPI, large D)? | fact | 1000. Evidence: false readings only at ≤ 5τ, plus one isolated reading at 140τ; the true positive at ≈ 1e6τ | G7c census over WO-5 (every eligible reading ≤ 1.0005) |
+| Q16 | Is the certification budget 2·(num_passes + 3) enough at production resolution (N = 128 beds, CUDA)? | fact | as stated. Measured passes within 5–10 blocks; one run (collocated bed, m = 3) used 12 and resumed once | G2 at WO-5; if a case needs > 12 blocks routinely, report the d/R traces to the architect, do not raise the budget |
+| Q17 | The 1,168 sealed single-cell pockets on the A1 bed: their pressure is never converged by either march (§1.2) and `get_p()` returns arbitrary values there. Act on it? | preference (outside this campaign) | **no action here**; note it for the A1 owner. It touches neither velocity nor K. A pressure post-processing user should mask pockets | user |
+
 **User ruling 2026-10-02:** the stated defaults of Q2–Q8, Q10 and Q11 are accepted; Q9 is
-decided the other way (D13); Q1 is decided by a pre-registered measurement rule (D11).
+decided the other way (D13); Q1 is decided by a pre-registered measurement rule (D11). Q12–Q17 are
+new in rev 1 and run on their defaults until the user rules.
 
 **Risks stated plainly:**
-- **Staggered gains are modest (≈ 1.7×).** The instrument's fixed certification cost (20–25 plain
-  steps) dominates a 75-step march. A shorter certificate would mean changing the instrument; that
-  is not proposed.
-- **Finite-Re gains are modest (≈ 1.6–2.5×).** CFL-bound Δt gives a continuum of slow modes;
-  windows ≤ 8 cannot deflate a continuum.
+- **Staggered §11 gains are modest (1.47× at N = 16, 2.7× at N = 24).** The instrument's fixed
+  certification cost (≥ 25 plain steps, typically 25–50 after an Anderson iterate, §7) dominates a
+  75-step march. A shorter certificate would mean changing the instrument; that is not proposed.
+- **Step counts vary ±40 % with the window** (collocated N = 24: 69 / 48 / 58 for m = 3 / 5 / 8)
+  because the certification transient varies. Phase A itself is stable across m (e.g. 40 / 39 / 38
+  on collocated N = 16). G2's bars are per case and per window, not on the trend.
+- **Finite-Re gains are modest (2.6× at Re ≈ 10, m = 5).** CFL-bound Δt gives a continuum of slow
+  modes; windows ≤ 8 cannot deflate a continuum.
 - **Anderson can reach states the plain march at that Δt cannot** (§2.4, measured). The Ritz guard
   and the certification-growth fallback cover the cases where the plain march would visibly diverge
   or Anderson actively suppresses growth. A weakly unstable steady state can still be certified, but
   then the unaccelerated instrument would certify it too.
-- **Inner-solve cost at mixed iterates** may differ from plain iterates. G2's wall-time ratio
-  measures it; the prototype could not, since its host-copy overhead dominated at N = 16.
+- **Inner-solve cost at mixed iterates** may differ from plain iterates (Q12). Pressure
+  iterations do not differ; host map time differed by +3 % to +28 % on a loaded machine. G2's
+  wall-time ratio decides.
+- **The guard is blind below its floor** (1e-5 at production settings, rev 1). A growing mode
+  that Anderson suppresses only once the residual is below the floor is left to the certification:
+  growth exit, R ≥ 1 never passes, budget, then resume, then stagnation, then plain. That path
+  ends not-converged or diverged, never certified on a growing tail.
 - **Monitor consistency under MPI** is the caller's responsibility (documented). A monitor that
   differs across ranks can deadlock the driver, as it would the study's `march()`.
 

@@ -3,40 +3,47 @@
 **Objective.** Execute `doc/steady_acceleration.md` (WO-1 … WO-6): Anderson acceleration of steady
 marches, `peclet.flow.march_to_steady`. History and every number: `doc/steady_acceleration_log.md`.
 
-**Where we are (2026-10-02).** Branch `anderson` (worktree `suite/flow-anderson`, from main
-`f6b89fe`), not pushed. WO-1 oracle written (`tests/study/anderson_oracle.py`) and measured.
-**WO-1 is STOPPED on its own stop rule: a false "unstable"** (§9 WO-1). WO-2 … WO-6 not started
-here (WO-3 runs in `core-anderson`, separately).
+**Where we are (2026-10-02).**
+- **Branch:** `anderson` (worktree `suite/flow-anderson`, from main `f6b89fe`), not pushed.
+- **Design note:** at **revision 1** (architect pass on `doc/steady_acceleration_brief2.md`). Its
+  section "Revision 1" lists the changes:
+  - velocity-only metric, P carried;
+  - phase A hands over on the velocity residual;
+  - the Ritz guard only on mixed windows above 1000·τ;
+  - certification budget 12 blocks plus the early "slow" exit;
+  - window stays 5.
+- **WO-1:** DONE at rev 1. The oracle `tests/study/anderson_oracle.py` defaults to `--rev 1`;
+  `--rev 0` reproduces the stopped WO-1.
+- **WO-3:** DONE in `../core-anderson`. WO-3b (core delta for rev 1) is not started.
+- **Not started:** WO-2, WO-4, WO-5, WO-6.
 
-**Next action.** Architect question (the caller routes it), then re-run the WO-1 matrix:
-1. The Ritz guard (§4.3 step 7, §4.6) is evaluated on plain `acc.step(False)` calls, whose window
-   holds near-collinear plain-march differences (scaled cond(XX) 1.6e-11–4e-11 > kCondMin 1e-12);
-   radii up to 56 → "unstable" in 5/12 production §11 runs, all in phase B. Should the guard run on
-   certification steps, and with what truncation?
-2. Certification often exhausts its num_passes + 3 budget (9/24 runs): the plain monitor's block
-   ratio R starts > 1 after leaving phase A (1.8, 1.36, 1.07, 1.01 on coll N16 m5).
-3. Dense bed: phase A's W-residual target (3e-7) decouples from the ⟨u_x⟩ certificate by ~2
-   decades (plain W-residual 7.9e-5 when its monitor certifies) → 1.07–1.26× only.
+**Next action.**
+1. Route WO-3b (§9) to opus-engineer in `../core-anderson`, branch `anderson`:
+   - part 1 — `innerTolerance`, `kRitzFloorFactor`, the per-slot mixed flag, the eligibility rule;
+   - part 2 — delete the Pressure role, `sdf`, `cP`, `gauged` and pass 1 (Q14, default yes), as a
+     separate commit.
+2. Then WO-2 → WO-4 → WO-5 in flow. WO-5 decides D11 on the staggered dense bed (Q13).
 
-**Gates (WO-1, literal §4.1 constants).**
+**Gates (revision-1 oracle, production, m = 5 unless stated).**
 
 | gate | case | number | verdict |
 |---|---|---|---|
-| G1 tight | §11 N=16 coll, m 3/5/8 | \|K_acc/K_plain−1\| = 4.95e-10 | pass |
-| G1 tight | §11 N=16 stag, m 3/5/8 | 1.8e-11 | pass |
-| G2 ≥ 3× steps | §11 N=16 coll, m=5, production | 395/112 = 3.53 (K vs K_G1 3.2e-7) | pass (path includes the false "unstable") |
-| G7a | stag N=16 mu 0.0158 dt 1.234e-2 (SOU) | converged=False plain (diverged @440) and m 3/5/8 | pass |
-| restart storm | all runs | 0 restarts | none |
-| false "unstable" | §11 production, m=5/8 | 5 of 12 runs, phase B | **STOP** |
+| G1 tight | §11 N=16 coll / stag, m 3/5/8 | ≤ 5.1e-10 / ≤ 1.9e-11 | pass |
+| G2 ≥ 3× | §11 coll N16 | 395 / 89 = 4.4× (m=3 6.1×, m=8 5.4×) | pass |
+| steps_acc ≤ steps_plain | every case, m 3/5/8 | worst: bed coll m=3 163 vs 190 | pass |
+| G7a | stag N16 μ 0.0158 SOU | converged=False everywhere (m=8 via the guard at step 18) | pass |
+| false "unstable" | all runs | 0 (max eligible Ritz 0.9974) | pass |
+| dense bed (D11 early indication) | stag / coll | steps 3.5× / 2.3×; pressure iterations 3.5× / 2.4×; host map time 2.7–3.2× / 2.2× | clears 1.5× in steps |
 
-**Window rule.** Not met (m=3 vs m=5: coll N16 +11.6 %, Re≈10 +46 %); default stays 5 —
-provisional until the guard/certification answer.
+**Open decisions (defaults in force; note §10).**
+- Q12 (fact): the cost of a mixed iterate. Default: proceed; G2 wall time decides.
+- Q13 (preference): which bed decides D11. Default: staggered (A1's solver).
+- Q14 (preference): WO-3b part 2, deleting the core pressure metric. Default: yes.
+- Q15 (fact): the Ritz floor factor. Default: 1000.
+- Q16 (fact): the budget of 12 blocks. Default: as stated.
+- Q17 (preference): the A1 bed's sealed pockets. Default: no action, tell the A1 owner.
 
-**Dense bed (Q2 default: A1 phi-scan phi 0.6, 64 spheres, seed 0, D/dx 16 → N 64).** Host-feasible.
-Production m=5 step ratio 1.26× stag / 1.07× coll — the early Q1 indication is below 1.5×.
-
-**Open items.** The three questions above; the oracle cannot run collocated + advection (uf_ not
-in the registry, D1) — G6's collocated Re≈10 waits for WO-4.
-
-**Anchors.** `tests/study/anderson_oracle.py` (`AndersonOracle.step` = §4.3, `march_to_steady` = §7);
-note §4.3 step 7 (Ritz on every active call), §4.6 (pinv truncation), §7 (budget, target).
+**Anchors.**
+- The design: note "Revision 1" (top), D3/D5/D6, §4.3 step 7, §7 (driver), §9 WO-3b.
+- Oracle: `AndersonOracle.step` (§4.3), `march_to_steady(rev=1)` (§7).
+- Probes: `tests/study/anderson_rev1_probes.py` (slowmode / phase-a / certify).
