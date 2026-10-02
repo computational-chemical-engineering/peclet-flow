@@ -40,7 +40,19 @@ pair run (1.84) but not at D/h 20 (on/off within 7 % transient, 1.6 % settled).
   drift over production -> DECISION: published case stays 1e-10 (peclet-examples ac35a14 reverts
   f28b2ce); D1 rerun on main scripted (~/Codes/bubble_column_perf/d1_main/run_d1_main.sh) for a
   quiet GPU. WO-7c (persistent teams on the WO-8 batched tier-3 path, DECISION option C) running.
-- P4 E2(a) still running (vof-e2, flow-vof-e2), told to hand off past 300k context.
+- P4 E2(a) STOPPED at WO-E2.3 (vof-e2, flow-vof-e2; handoff in its log): E2.1/E2.2 gated (bitwise;
+  RED, REC, RST pass); G-E2-BAL FAILS with viscosity — the D-E2.8 pressure update feeds +mu_r div q
+  into the rotational increment (anti-diffusion): mu=0.01 x1.04/step, mu=0.1 blows up; bubble column
+  unstable. Without the viscous term: stable but transients decay 0.99/step (40x the exact path).
+  Benefit while stable: projection 95.7 -> 55.3 ms/step (shared GPU), PCG its 13.06 -> 7.96.
+  ARCHITECT RESUMED (the §12 author) for §12.13: stable-with-viscosity D-E2.8 (incl. TBF's
+  non-incremental form as an option), a realistic BAL threshold, impl. questions 2-4.
+- Gallery publish broken since 2026-09-21 (11 pages changed without re-freeze -> CI re-executes ->
+  6 h timeout); engineer re-freezing them on branch refreeze-0921 (brief
+  /home/frankp/Codes/bubble_column_perf/BRIEF_GALLERY_REFREEZE.md). The bubble-column page goes live
+  once that lands.
+- Core cb4c7ba (pvFit split) PUSHED to core main; core TAG = USER decision (v1.3.2 / v1.4.0 / wait);
+  flow + amr pins still v1.3.0. WO-7b/c parked on vof-pvfit until the tag.
 
 **Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
