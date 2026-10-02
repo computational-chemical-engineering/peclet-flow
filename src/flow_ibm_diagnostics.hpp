@@ -306,6 +306,77 @@ bool Solver<Grid>::pressureSolveFailed() const {
 }
 
 template <class Grid>
+typename Solver<Grid>::MarchState Solver<Grid>::marchState() {
+  using peclet::core::solver::AndersonRole;
+  // doc/steady_acceleration.md §5.3: each refusal has its own message. Phase change is tested
+  // before VoF because enable_phase_change turns VoF on itself, so in the note's order its own
+  // message could never be reached; drag precedes the cell forces for the same reason (it
+  // registers force_*).
+  auto refuse = [](const std::string& why) {
+    throw std::runtime_error("steady acceleration (march_to_steady / anderson_accelerator): " +
+                             why + "; pass accelerate=False");
+  };
+  if constexpr (Grid::collocated) {
+    if (!(ghostProjection_ && faceInterp_ == 0))
+      refuse(
+          "the collocated scheme is not the fluid-only 'ghost' projection -- for this scheme the "
+          "fixed point is not unique / the march is unstable (select "
+          "set_collocated_scheme('ghost') before the geometry)");
+  }
+  if (pcEnabled_)
+    refuse("phase change (enable_phase_change) has no steady fixed point");
+  if (vofEnabled_ || vofMomEnabled_ || vofBlocks_)
+    refuse("VoF (enable_vof / enable_vof_momentum / VoF blocks) is time-accurate, not steady");
+  if (!scalars_.empty())
+    refuse("a transported scalar (add_scalar) is not in the march state");
+  if (porous_)
+    refuse("the porous (volume-averaged) continuity is not supported");
+  bool propClosure = false;
+  for (const auto& cl : closures_)
+    propClosure = propClosure || cl.outName == "rho" || cl.outName == "mu";
+  if (varRho_ || varProps_ || propClosure || hasField("rho") || hasField("mu"))
+    refuse("variable density or viscosity (a property closure or a rho/mu field) is not supported");
+  if (hasDrag_)
+    refuse("a drag_beta field (implicit drag, CFD-DEM) is not supported");
+  if (hasCellForce_)
+    refuse("cell force fields (force_x/force_y/force_z) are not supported");
+  if (hasMotion_)
+    refuse("moving scene instances have no steady fixed point");
+  if (superficialAxis_ >= 0)
+    refuse("set_superficial_velocity is not supported");
+  if (pwarm_)
+    refuse("the pressure warm start (set_pressure_warmstart(True)) diverges on the steady march");
+  if (balancedForceActive())
+    refuse("the balanced-force projection is not supported");
+
+  MarchState ms;
+  for (int c = 0; c < 3; ++c) {
+    ms.fields.push_back(C[c].u);
+    ms.roles.push_back(AndersonRole::Velocity);
+  }
+  ms.fields.push_back(P_);
+  ms.roles.push_back(AndersonRole::Carried);
+  if constexpr (Grid::collocated) {
+    // §3.1 row 3, decided from the CONFIGURATION, not from faceFieldValid_.
+    if (advect_ && ufAdvect_)
+      for (CCField f : {uf_, vf_, wf_}) {
+        ms.fields.push_back(f);
+        ms.roles.push_back(AndersonRole::Carried);
+      }
+  }
+  ms.e = e_;
+  ms.G = G;
+  const double vrt = velocityResidualTolerance();
+  ms.innerTolerance = vrt > 0.0 ? vrt : (useChebyshev_ ? chebRtol_ : pcgRtol_);
+  ms.signature = {dt_, rho_, mu_, f_[0], f_[1], f_[2]};
+#ifdef PECLET_FLOW_MPI
+  ms.comm = comm_;
+  ms.distributed = distributed_;
+#endif
+  return ms;
+}
+
+template <class Grid>
 double Solver<Grid>::lastStepSeconds() const {
   return tStep_;
 }

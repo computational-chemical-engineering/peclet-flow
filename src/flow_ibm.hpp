@@ -45,6 +45,7 @@
 #include "mac_stencils.hpp"
 #include "mac_velocity_mg.hpp"
 #include "peclet/core/field/field_set.hpp"
+#include "peclet/core/solver/anderson.hpp"  // AndersonRole of the march state (MarchState)
 #include "property_closures.hpp"
 #include "scalar_transport.hpp"
 #include "staggered_advection.hpp"
@@ -1284,6 +1285,39 @@ class Solver {
   // preconditioner output / recurrence scalar)? A failing solve also reports the
   // iteration cap through `lastPressureIterations()`.
   bool pressureSolveFailed() const;
+
+
+  // The state of the steady march (doc/steady_acceleration.md §3.1, §5.1, rev 1): exactly what
+  // step() reads across steps, as the full padded G = 2 buffers, with their roles for the Anderson
+  // accelerator's metric. Velocity = the three velocity components (measured); Carried = the
+  // accumulated pressure P and, on the collocated grid with projected-face advection, the face
+  // field uf/vf/wf (mixed and differenced, never measured). `innerTolerance` is the relative
+  // tolerance of the inner solves (§4.1: the velocity residual tolerance in force when > 0, else
+  // the active pressure driver's rtol), which sets the accelerator's Ritz floor. `signature` is
+  // (dt, rho, mu, Fx, Fy, Fz), all internal: a change of any of them changes the map.
+  struct MarchState {
+    std::vector<CCField> fields;
+    std::vector<peclet::core::solver::AndersonRole> roles;
+    C3 e{0, 0, 0};
+    int G = 2;
+    double innerTolerance = 0.0;
+    std::array<double, 6> signature{};
+#ifdef PECLET_FLOW_MPI
+    MPI_Comm comm = MPI_COMM_NULL;
+    bool distributed = false;
+#endif
+  };
+
+
+  // The march state of this solver (above), for the Anderson accelerator
+  // (src/anderson_accelerator.hpp). Public C++, not bound. Throws std::runtime_error naming the
+  // FIRST configuration the steady acceleration refuses (doc/steady_acceleration.md §5.3, D10): a
+  // collocated scheme other than the fluid-only 'ghost' projection; phase change; VoF; transported
+  // scalars; porous continuity; variable density or viscosity; a drag_beta field; cell force
+  // fields; moving scene instances; a superficial-velocity target; the pressure warm start; the
+  // balanced-force projection. A re-evaluation of host flags only, so the accelerator repeats it
+  // at every step.
+  MarchState marchState();
 
 
   // Per-phase wall times of the last step() in seconds, THIS RANK (device-fenced at each phase

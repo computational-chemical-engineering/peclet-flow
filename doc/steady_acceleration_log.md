@@ -485,3 +485,52 @@ collocated N16 65 vs 89, collocated N24 69 vs 48, bed collocated 163 vs 83. The 
 - Per-step map time at mixed iterates: +10 % / +28 % staggered, +3 % collocated, at equal pressure
   iterations. Not attributable on a loaded box: the velocity-solve sweeps are not exposed, and the
   oracle's NumPy history traffic between steps leaves the cache cold. Open as Q12; G2 decides.
+
+---
+
+## 2026-10-02 — WO-2: `Solver::marchState()` and the refusals (rev 1)
+
+**Build.** Worktree `flow-anderson`, branch `anderson` (from `8a956bb`); core headers from
+`../core-anderson` at `9ff3bd2` (configure: `[peclet] peclet-core headers from
+PECLET_SIBLING_PECLET_CORE -> /home/frankp/Codes/suite/core-anderson/include`). Host tree
+`build_omp`: `-DCMAKE_PREFIX_PATH=../extern/install/host-openmp -DCMAKE_BUILD_TYPE=Release
+-DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
+-DMPIEXEC_PREFLAGS="--bind-to;none" -DCMAKE_CXX_COMPILER_LAUNCHER=ccache`. CUDA tree `build_cuda`
+(`nvidia-cuda` prefix, tests ON, MPI OFF).
+
+**What landed.** `Solver::MarchState` + `marchState()` (§5.1 rev 1: fields u, v, w Velocity; P
+Carried; collocated with `advect_ && ufAdvect_` + uf, vf, wf Carried; `innerTolerance` =
+`velocityResidualTolerance()` if > 0 else `useChebyshev_ ? chebRtol_ : pcgRtol_`; signature (dt,
+rho, mu, F) internal; MPI comm + distributed). The twelve §5.3 refusals, each with its own message
+and the hint "pass accelerate=False". ctest `march_state` (`tests/kokkos/test_march_state.cpp`).
+
+**Implementation choices (not numerics; recorded so they can be reverted).**
+- DECISION: refusal order — phase change is tested BEFORE VoF, because `enable_phase_change` calls
+  `enableVof()` itself, so in the note's list order refusal 3's message could never be reached (the
+  test of "each refusal has its own message" would be impossible). Drag precedes cell forces as
+  listed (it registers force_*). Alternative: the literal list order. Reversible by swapping two
+  `if`s in `flow_ibm_diagnostics.hpp`.
+- "Variable rho or mu" = `varRho_ || varProps_ ||` a closure whose target is "rho"/"mu" `||` a
+  registered "rho"/"mu" field. The collocated test is `ghostProjection_ && faceInterp_ == 0` (the
+  'ghost' scheme; AUTO resolves at `set_solid`).
+
+**G0(a) — state hashes, before (= `8a956bb` against core-anderson) and after.**
+
+    OMP_NUM_THREADS=1 PYTHONPATH=build_omp python tests/regression/state_hash.py
+    OMP_NUM_THREADS=1 PYTHONPATH=build_omp mpirun --bind-to none -np 2 python tests/regression/state_hash.py mpi
+
+All 13 lines identical (12 serial entry paths + `mpi_np2`; e.g. `staggered_bed bdc54811…b86e`,
+`colocated_ghost 14f3287f…93b8`, `mpi_np2 9fd78958…75a4`). Also an `.npz` of u, v, w, p after 60
+plain steps of §11 N = 16 (staggered + collocated) on both builds: `np.array_equal` True on all 8
+arrays.
+
+**ctest `march_state`:** all checks pass on host-openmp and on CUDA (RTX 5080): the three §3.1 rows
+(each field aliases the solver's buffer, padded e = n + 4), `innerTolerance` 1e-8 (default = PCG
+rtol) / 1e-9 (explicit) / 3e-7 (tolerance 0 under Chebyshev), the twelve refusals, a static scene
+allowed.
+
+**G0(c), first attempt (WO-2 tree):** `OMP_NUM_THREADS=8 ctest --test-dir build_omp -LE bench -j4`
+(189 = 188 + `march_state`): 87 of 189 run, **87 passed, 0 failed**, then stopped by hand after 2 h:
+the box was at load 107–119 on 48 cores (other sessions' jobs), and with 8 OpenMP threads per MPI
+rank the distributed tests crawled (`velocitymg_bc_mpi_np2` 2712 s, `sdflow_mpi_np2` > 47 min).
+The battery is re-run once on the WO-4 tree with the MPI tests at 2 threads per rank (entry below).
