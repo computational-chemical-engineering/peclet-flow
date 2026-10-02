@@ -180,6 +180,8 @@ void Solver<Grid>::refreshUnitDerived() {
   for (auto& sc : scalars_)
     sc.D = sc.Dphys * u_.diffToInt();  // the scalar diffusivity follows tRef like mu does
   pcRefreshUnits();                    // the phase-change densities, latent heat, k, rho c_p, R_int
+  for (auto& cl : closures_)
+    closureRefreshUnits(cl);  // rho/mu/force closure parameters
   for (int face = 0; face < 6; ++face) {
     for (int a = 0; a < 3; ++a)
       bcVel_[face][a] = bcVelPhys_[face][a] * u_.velToInt(a);

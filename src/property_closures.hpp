@@ -18,6 +18,7 @@
 #include <array>
 #include <Kokkos_Core.hpp>
 #include <string>
+#include <vector>
 
 #include "mac_cutcell.hpp"
 #include "policy.hpp"
@@ -44,6 +45,11 @@ struct Closure {
   std::array<double, 4> p{{0, 0, 0, 0}};
   CCField tabX, tabY;  // Table1D nodes (ascending tabX)
   int nTab = 0;
+  // UNITS: the caller's parameters / table values, kept verbatim so a reference scale pinned after
+  // registration re-derives `p` / `tabY` (`Solver::closureRefreshUnits`); `p` and `tabY` hold the
+  // INTERNAL values the kernel uses, identical to these in cell units.
+  std::array<double, 4> pPhys{{0, 0, 0, 0}};
+  std::vector<double> tabYPhys;
 };
 
 // Apply one closure over the inner cells (ghosts untouched — refilled by the field's own exchange).

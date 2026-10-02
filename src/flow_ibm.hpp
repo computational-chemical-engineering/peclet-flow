@@ -4113,6 +4113,23 @@ class Solver {
 
 
 
+  /// The internal-per-physical factor of a closure TARGET: rho, mu, force_x/y/z; 0.0 for any
+  /// other field (its units are not known — the caller writes it in internal units).
+  double closureTargetToInt(const std::string& target) const;
+
+
+
+  /// Re-derive a closure's internal `p` / `tabY` from its physical `pPhys` / `tabYPhys` with the
+  /// current reference scales (setPropertyModel/Table, and refreshUnitDerived for all of them).
+  void closureRefreshUnits(Closure& cl);
+
+
+  /// Under a physical domain, say on stderr that a closure on a target of unknown dimension takes
+  /// its parameters in internal units (once, at registration).
+  void closureUnitsNotice(const std::string& target) const;
+
+
+
   /// The factor from an internal phase-change ledger entry (a per-cell sum of rcp' dT) to the
   /// caller's units: joules with the consistent transport on, temperature x volume without it.
   double pcLedgerEnergyToPhys() const;
@@ -4354,6 +4371,13 @@ class Solver {
   // BoussinesqForce / ArrheniusMu. in0/in1: input field names (in1 "" if unused). params: up to 4
   // doubles (meaning per kind — property_closures.hpp). Applied at the top of step() in
   // registration order. Targeting a force component turns on the per-cell body-force RHS path.
+  // UNITS: the inputs are taken as UNSCALED fields (a phase fraction, a temperature, a
+  // concentration — never rescaled), so the output's dimension sits in the parameters: on a
+  // target "rho", "mu" or "force_a" the parameters carrying it (all of LinearMix's p0..p2,
+  // Boussinesq's rho0, Arrhenius' mu_ref, a table's ys) are PHYSICAL and convert with that target's
+  // factor (`closureTargetToInt`); the rest enter only as a product with that one (Boussinesq's
+  // g*beta) or against the unscaled input (T0, B, Tref, xs) and stay as given. Any other target
+  // is in that field's INTERNAL units (a stderr notice says so under a physical domain).
   void setPropertyModel(const std::string& target, ClosureKind kind, const std::string& in0,
                         const std::string& in1, const std::vector<double>& params);
 
@@ -4443,7 +4467,7 @@ class Solver {
 
 
   // Tabulated property: out = piecewise-linear interp of (xs, ys) at the input field (xs
-  // ascending).
+  // ascending). Units as setPropertyModel: ys in the target's physical units, xs in the input's.
   void setPropertyTable(const std::string& target, const std::string& in0,
                         const std::vector<double>& xs, const std::vector<double>& ys);
 

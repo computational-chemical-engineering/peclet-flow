@@ -134,28 +134,18 @@ void Solver<Grid>::setPropertyModel(const std::string& target, ClosureKind kind,
   cl.in0Name = in0;
   cl.in1Name = in1;
   // UNITS. A closure writes a registered field, and registered fields carry the solver's
-  // INTERNAL units. LinearMix is `out = p0 + p1*in0 + p2*in1` with a dimensionless input (a
-  // phase fraction, a normalised scalar), so a target of "rho" or "mu" scales every parameter by
-  // that property's own factor — which is what makes the documented two-phase spelling
-  // set_property_model("rho", "linear", "C", [rho_gas, rho_liquid - rho_gas]) take the caller's
-  // PHYSICAL densities. Exactly the identity in cell units. The non-linear kinds mix
-  // dimensionally different parameters in one array and are NOT converted; they say so.
-  double kp = 1.0;
-  if (target == "rho")
-    kp = u_.rhoToInt();
-  else if (target == "mu")
-    kp = u_.muToInt();
-  if (kp != 1.0 && kind != ClosureKind::LinearMix) {
-    std::fprintf(stderr,
-                 "peclet.flow set_property_model NOTICE: a physical domain is armed, but only "
-                 "the 'linear' closure on 'rho'/'mu' converts its parameters. This closure's "
-                 "parameters are in the solver's INTERNAL units (see the `unit_scales` "
-                 "property); target '%s'.\n",
-                 target.c_str());
-    kp = 1.0;
-  }
+  // INTERNAL units. Its inputs are UNSCALED fields (a phase fraction, a temperature, a
+  // concentration — the solver never rescales a transported scalar), so the output's dimension
+  // sits in the parameters, and on a target of known dimension the ones carrying it convert by
+  // that target's factor: all of LinearMix's (`out = p0 + p1*in0 + p2*in1`, which is what makes
+  // set_property_model("rho", "linear", "C", [rho_gas, rho_liquid - rho_gas]) take PHYSICAL
+  // densities), Boussinesq's rho0 (`out = rho0*g*beta*(T - T0)` into force_a), Arrhenius' mu_ref.
+  // The physical values are kept, so a scale pinned later re-derives them. Exactly the identity
+  // in cell units.
   for (int k = 0; k < 4 && k < (int)params.size(); ++k)
-    cl.p[k] = params[k] * kp;
+    cl.pPhys[k] = params[k];
+  closureUnitsNotice(target);
+  closureRefreshUnits(cl);
   closures_.push_back(cl);
   if (target == "mu")  // a closure driving mu turns on variable viscosity
     setPropertyMode(true, harmonicMu_);
@@ -330,7 +320,51 @@ void Solver<Grid>::setPropertyTable(const std::string& target, const std::string
   }
   Kokkos::deep_copy(cl.tabX, hx);
   Kokkos::deep_copy(cl.tabY, hy);
+  cl.tabYPhys.assign(ys.begin(), ys.begin() + cl.nTab);
+  closureUnitsNotice(target);
+  closureRefreshUnits(cl);  // ys are in the target's physical units (identity in cell units)
   closures_.push_back(cl);
+}
+
+template <class Grid>
+double Solver<Grid>::closureTargetToInt(const std::string& target) const {
+  if (target == "rho")
+    return u_.rhoToInt();
+  if (target == "mu")
+    return u_.muToInt();
+  if (target == "force_x" || target == "force_y" || target == "force_z")
+    return u_.forceToInt(target[6] - 'x');
+  return 0.0;
+}
+
+template <class Grid>
+void Solver<Grid>::closureUnitsNotice(const std::string& target) const {
+  if (u_.physical && closureTargetToInt(target) == 0.0)
+    std::fprintf(stderr,
+                 "peclet.flow set_property_model NOTICE: a physical domain is armed and target "
+                 "'%s' is not rho/mu/force_x/y/z, so this closure's parameters are taken in "
+                 "that field's INTERNAL units (see the `unit_scales` property).\n",
+                 target.c_str());
+}
+
+template <class Grid>
+void Solver<Grid>::closureRefreshUnits(Closure& cl) {
+  double kp = closureTargetToInt(cl.outName);
+  if (kp == 0.0)
+    kp = 1.0;  // a field of unknown dimension: the caller's numbers are internal
+  if (cl.kind == ClosureKind::Table1D) {
+    if (!u_.physical)
+      return;  // cell units: the table was uploaded verbatim at registration
+    auto hy = Kokkos::create_mirror_view(cl.tabY);
+    for (int k = 0; k < cl.nTab; ++k)
+      hy(k) = cl.tabYPhys[(std::size_t)k] * kp;
+    Kokkos::deep_copy(cl.tabY, hy);
+    return;
+  }
+  // the parameters that carry the output's dimension; the others are kept as given
+  const int nScaled = (cl.kind == ClosureKind::LinearMix) ? 3 : 1;
+  for (int k = 0; k < 4; ++k)
+    cl.p[k] = (k < nScaled) ? cl.pPhys[k] * kp : cl.pPhys[k];
 }
 
 template <class Grid>

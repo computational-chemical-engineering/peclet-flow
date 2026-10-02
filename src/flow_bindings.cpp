@@ -3189,7 +3189,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
              const std::vector<double>& y) { s.setPropertyTable(target, field, x, y); },
           nb::arg("target"), nb::arg("field"), nb::arg("x"), nb::arg("y"),
           "Register a tabulated property: target = piecewise-linear interpolation of (x, y) at the "
-          "input field value (x ascending, clamped at the ends).")
+          "input field value (x ascending, clamped at the ends). Units as set_property_model: y in "
+          "the target's physical units on 'rho'/'mu'/'force_*', x in the input field's.")
       .def(
           "update_properties", [](S& s) { s.updateProperties(); },
           "Apply all registered property/force closures now (also done at the top of step()).")
