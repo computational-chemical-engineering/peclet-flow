@@ -83,12 +83,12 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 190 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 193 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-190 registered / **188 with `-LE bench`** (counted 2026-09-30): 49 from `tests/kokkos` — of
+193 registered / **191 with `-LE bench`** (counted 2026-10-02): 52 from `tests/kokkos` — of
 which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 127
 from `tests/kokkos_mpi` (42 cases at np = 1, 2, 4 plus one np = 8 rung), and 14 Python ctests on
 the module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
@@ -278,7 +278,19 @@ u = s.get_u()                                               # [x,y,z]; get_p() =
 Everything in and out is in one consistent system of the caller's choosing — properties, `dt`,
 forces, boundary velocities and profiles, `sigma`, the slip length, the SDF and scene coordinates
 in; `get_u/v/w`, `get_p`, `get_uf`, `vof_curvature()`, `max_open_divergence()`, the hydro force and
-torque out. Under MPI the constructor takes **this rank's** block; pass the global grid as
+torque out. **The scalar/energy surface too** (since 2026-10-02 — U3 had missed it): `add_scalar`'s
+diffusivity, the phase-change densities, latent heat, conductivities, heat capacities, IHTR
+resistance, prescribed mass flux and divergence source, and the closure parameters on
+`rho`/`mu`/`force_*` (Boussinesq included) go in physical; `vof_interface_area` and the
+phase-change diagnostics/budget come out physical. A transported scalar (temperature,
+concentration) is **never rescaled**. Constants are kept verbatim and re-derived when a scale is
+pinned, so their order against `set_rho`/`set_dt` does not matter; the two FIELD setters
+(`set_mass_flux*`, `set_divergence_source`) convert once and therefore raise under an extent until
+`set_rho`/`set_dt` have run. The operator-flux `mdot` (`set_phase_change_mdot_operator`,
+`energy_order(2)`) without `set_phase_change_energy` raises under an extent: its constant-D flux
+carries an implicit ρc_p of one internal unit.
+
+Under MPI the constructor takes **this rank's** block; pass the global grid as
 `global_cells` and the global box as `extent`/`origin`. `extent=None` keeps **cell units**
 (spacing 1, origin 0) and is bit-identical to the pre-2026-09 code.
 
@@ -288,7 +300,8 @@ API boundary (`Solver::UnitScales` in `src/flow_ibm.hpp`, derivation in the comm
 operator coefficients stay O(1) in any unit system. **The raw field registry —
 `get_field`/`set_field` and `diagnostics.field_view`/`diagnostics.exchange_field` — hands out those
 INTERNAL arrays**, unlike `get_u`/`get_p`, which convert. A driver writing `force_x` or `drag_beta` directly (CFD-DEM does)
-must convert with `s.unit_scales`.
+must convert with `s.unit_scales` — and so must anyone reading `mdot`, `pc_source` or `div_source`
+(`mass_flux_to_internal`, `divergence_to_internal`).
 
 **Anisotropic cells** work on both solvers, single phase and VoF
 ([`doc/anisotropic_metric.md`](doc/anisotropic_metric.md),
