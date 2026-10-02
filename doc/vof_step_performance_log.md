@@ -617,3 +617,47 @@ residual and make M affine). With one component the arithmetic is WO-6's exactly
 | same, 1-component cut-cell beds (`cyl`, `rings`, `pack` (packing_ring.vti), const / rho slab) | iterations identical every step; velocities <= 7.8e-11 rel (floor 4e-10 .. 7e-10 on pack); fluid-cell pressure identical to 1e-15 on cyl / rings; on pack 47 cells differ by up to 1.8e-8 rel — all in 1-2-cell pockets or slivers the operator decouples, whose pressure is a free constant (velocities unaffected) |
 | `'algebraic'` on these cases | bitwise to origin/main |
 | transfer gate, packing_ring (`pack:slab`, nsys 20-step difference) | ≥ 1 KiB per step: H→D 13.20 → **0**, D→H 17.20 → **0** (small D→H 14.2 = 14.2) |
+
+## 2026-10-02 — P3 HANDOFF (WO-6, E3, WO-11): state for the next implementer
+
+**Branch `vof-b1`** (worktree `suite/flow-vof-b1`), rebased onto origin/main `4b819fb`, NOT pushed:
+`7db4a75` WO-6 (B1), `1d58d56` E3 (tau = 1e-5), `ba8f769` WO-11 (B1b), + this handoff. Gate numbers
+are in the three entries above; raw artifacts in `~/Codes/bubble_column_perf/p3/` (frozen modules
+`frozen_{base,c4,e3,w11}`, gate driver `run_gate.sh`, transfer census `xfer/xfer.sh`, solids
+driver `solids.py`, physics `phys/`).
+
+**Batteries on the rebased tree:** host-openmp `build_omp` (`OMP_NUM_THREADS=8`, `-LE bench -j6`):
+**189/189 passed** (incl. the new `geo_bottom`). CUDA `build_cuda` (`OMP_NUM_THREADS=4`, `-LE bench
+-j4`): **was still running at handoff** (44/189 passed, 0 failed so far; the GPU was 98 % busy with
+two other packages' batteries) — log `~/Codes/bubble_column_perf/p3/ctest_cuda.log`, ends `EXIT n`.
+clang-format 18.1.8 clean on the changed C++ files (`flow_bindings.cpp` / `flow_ibm.hpp` are on the
+CI exclude list).
+
+**Open for the note's owner (not decided here):**
+1. §5.7's unit gate "M(r) equals, bitwise, the per-kernel vcycle" cannot hold: §5.7 also prescribes
+   team reductions for the fluid means, whose summation order differs from the per-kernel Kokkos
+   range reduction (full M differs by <= 4.4e-16 = 2.8e-17 max|z|; with the mean removals off on
+   both sides it IS bitwise). `geo_bottom` asserts the bitwise part and a 4-eps bound on the rest.
+2. G-PERF MISSED: the bottom costs 2.8-2.9 ms per solve at tau 1e-8 (37-43 ms/step), ~19 ms/step at
+   tau 1e-5, against the target <= 3.5 ms/step (shared GPU, indicative). Cost scales with 1/T
+   (FP64 throughput on one SM of the 5080, risk R3), not with barriers. Needs a quiet-GPU and an
+   H100 measurement before any redesign; wall time is currently WORSE than GraphAMG on the 5080
+   (74 vs 50 ms/step at tau 1e-8). The coordinator should decide whether `auto` may select it on
+   FP64-weak cards.
+3. NAMING (Q15): `diagnostics.set_pressure_bottom_solver('auto'|'geometric'|'algebraic')` follows
+   `diagnostics.set_velocity_solver`; an additive row for `suite/docs/NAMING.md`'s history list is
+   not written (umbrella file).
+4. Register entries (text in the WO-6 / WO-11 commit messages) to be added by the caller.
+
+**Next commands:**
+```bash
+tail -n 3 ~/Codes/bubble_column_perf/p3/ctest_cuda.log        # CUDA battery verdict
+# if it did not finish / was killed, rerun:
+cd ~/Codes/suite/flow-vof-b1 && source ../.venv/bin/activate && export PATH=/usr/local/cuda-13.2/bin:$PATH
+OMP_NUM_THREADS=4 OMP_PROC_BIND=false ctest --test-dir build_cuda -LE bench -j4 --output-on-failure \
+  > ~/Codes/bubble_column_perf/p3/ctest_cuda.log 2>&1; tail -n 3 ~/Codes/bubble_column_perf/p3/ctest_cuda.log
+# quiet-GPU timing of the bottom (kernel ms/step), WO-11 module:
+~/Codes/bubble_column_perf/p3/xfer/xfer.sh quiet ~/Codes/bubble_column_perf/p3/frozen_w11/cuda --flux device --fixdt 1.5e-3
+```
+Untracked in the worktree (not for commit): `data/packing_ring.vti` (symlink to `../flow/data`,
+used by `p3/solids.py`'s `pack` geometry).
