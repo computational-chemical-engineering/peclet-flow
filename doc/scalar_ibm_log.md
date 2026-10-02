@@ -142,3 +142,67 @@ compare, and the literature (L1) decides between them.
 - Choose the probe so that the stencil never needs it. In 2-D, 0.7 h > √2/2·h.
 - In 3-D, the guarantee that every trilinear neighbour is at least a cut cell for a planar wall
   needs c ≥ √3/2·h ≈ 0.87 h. This is a design input.
+
+## 2026-10-02 — round 7: Frank Peters' directional conjugate IBM (`conj_peters.py`)
+
+**Sources.**
+- `~/Codes/conjugate/IBM_conjugated_transport.tex` (draft, unpublished).
+- Code: gitlab.tue.nl SMM/research_projects/eajfpeters/ibm-conjugate-transport (MATLAB, Feb 2023),
+  `conjugate_heat_conduction_cylinder_flux_ibm_new.m`.
+
+**Method.** One field, one unknown per cell; a cell belongs to the phase of its centre.
+- On a grid line that crosses the interface at ξ, T is a quadratic on each side through 2 cells +
+  T_ξ.
+- T_ξ minimizes T''(ξ⁻)² + T''(ξ⁺)²; it is k-independent and bounded as ξ → ±½.
+- Code version, faithfully ported as "DIRc":
+  - every face has k = (1 − a_s) k₁ + a_s k₂;
+  - on crossing faces the flux is k₁ (1 − a_s) T'_fluid(0) + k₂ a_s T'_solid(0), with each one-sided
+    quadratic evaluated or extrapolated to the face.
+- The tex reading ("DIR": k of the side containing the face) differs from the code.
+- The tex closed-form weights equal a generic Lagrange derivation to 1e-10.
+
+**Test** (the tex's own): disc R = 1 with k₂ in a side-5 box with k₁ = 1, exact Maxwell solution,
+Dirichlet box. Errors at cell centres.
+
+**Reproduction.** Centred grid at d/Δx = 128:
+
+| k₂ | metric | Frank's figure | DIRc |
+|---|---|---|---|
+| 100 | L1 | ≈1e-4 | 9.3e-5 |
+| 100 | L∞ | ≈5e-3 | 4.7e-3 |
+| 0.5 | L1 | 3–8e-6 | 9.0e-6 |
+| 0.5 | L∞ | ≈3e-4 | 3.6e-4 |
+
+The port reproduces the figures.
+
+**Comparison** (2 random offsets, d/Δx = 128, L1 / L∞):
+
+| k₂ | 0.01 | 0.5 | 2 | 100 |
+|---|---|---|---|---|
+| OF-a (aperture-mean one field) | 4.4e-4 / 1.5e-2 | 6.0e-5 / 2.4e-3 | 7.7e-5 / 2.4e-3 | 1.3e-3 / 1.5e-2 |
+| GFM series (= Liu–Fedkiw–Kang) | 1.2e-3 / 2.4e-2 | 7.5e-5 / 5.1e-3 | 4.5e-5 / 2.6e-3 | 2.0e-5 / 2.6e-4 |
+| DIRc (Peters, code) | 6.7e-5 / 6.0e-3 | 5.7e-6 / 4.0e-4 | 7.9e-6 / 4.3e-4 | 1.9e-4 / 8.4e-3 |
+| DIR (Peters, tex reading) | 4.8e-4 / 2.4e-2 | 4.9e-5 / 5.4e-3 | 2.8e-5 / 2.7e-3 | 8.8e-6 / 2.6e-4 |
+| DIRq (T_ξ from flux continuity) | 1.5e-3 / 9.3e-2 | 6.1e-5 / 2.4e-3 | 3.6e-5 / 1.1e-3 | 3.2e-4 / 1.1e-2 |
+| **P2F (two-field probe-flux FV)** | **9.6e-6 / 1.3e-4** | **4.1e-6 / 6.4e-5** | **5.5e-6 / 9.2e-5** | 2.0e-5 / 2.3e-4 |
+
+Orders:
+- P2F: 2.0 in L1 and 1.5–2 in L∞ at every k₂.
+- DIRc: 1.0–1.8 in L1, scattered with placement, and ~1 in L∞.
+- Every one-field scheme: ~1 in L∞.
+
+**Conclusions.**
+1. Within the directional framework, the min-curvature T_ξ beats the "obvious" flux-continuity
+   T_ξ by 2–20× in L1. It is a real element of the scheme.
+2. The one-field directional scheme imposes the jump of k ∂T/∂x along grid lines, not along the
+   interface normal. On tilted interfaces its L∞ stays first order. P2F, with the true normal,
+   probes and per-facet elimination, is 2–50× better in L∞ at every contrast and 3–10× better in
+   L1, except at k₂ = 100, where DIR (tex reading) equals it.
+3. What DIRc offers: one unknown per cell, no κ, no facet geometry, a compact 4-point line
+   stencil.
+4. What it lacks: a path to a contact resistance (T_ξ does not see the flux), a 2nd-order Neumann
+   limit (k₂ → 0 is 1st order) and Robin. A partition coefficient could enter as
+   T_ξ⁺ = K T_ξ⁻ in the min-curvature problem (not tested).
+
+**Decision.** P2F remains the conjugate method. Peters' directional scheme is recorded as a measured
+alternative.
