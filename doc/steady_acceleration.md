@@ -122,7 +122,12 @@ only and loses P.
 - Public: `peclet.flow.march_to_steady(solver, monitor, rtol=1e-4, …)`, returning a `MarchResult`.
 - Developer tier: `s.diagnostics.anderson_accelerator(window=5, mixing=1.0)`.
 - `Solver.step()` is untouched, so the unaccelerated path stays bit-identical.
-- `accelerate=True` is the default of the new function only.
+- The default of `accelerate` (new function only) is set by a **pre-registered rule** (user,
+  2026-10-02, resolving Q1): measured at G2 on the dense random bed (the G1 dense-bed case,
+  production build, wall time including accelerator overhead), **`True` if the accelerated march is
+  ≥ 1.5× faster in wall time, otherwise `False`** (acceleration then opt-in, documented as for
+  symmetric/collocated cases). WO-1's step ratio on the dense bed, if host-feasible, is the early
+  indication only. The outcome and its numbers go to the log; nothing else may change here.
 - *Rejected:* an `enable_*` switch that changes what `step()` does, which would change an existing
   entry point.
 - *Rejected:* an environment variable (QUALITY_PLAN D3).
@@ -849,7 +854,7 @@ and has a default that work proceeds with.
 
 | # | question | kind | default (proceed with this) | settles it |
 |---|---|---|---|---|
-| Q1 | Should `march_to_steady` default to `accelerate=True`? | preference | **True** (the function is new; nothing existing changes) | user; trivially reversible (one default) |
+| Q1 | Should `march_to_steady` default to `accelerate=True`? | preference | **DECIDED by the user 2026-10-02: pre-registered rule** — `True` iff the dense bed gains ≥ 1.5× in wall time at G2 (D11) | — |
 | Q2 | Which dense random bed (φ ≈ 0.6) and resolution is the G1/G3 reference? | fact | the smallest dense-bed configuration in `~/Codes/peclet-study-A1-drag-audit/scripts/`, at its lowest resolution | A1 owner names the file |
 | Q3 | Which random array and Δt rule for G6 at Re ≈ 10, 100? | fact | the A1 finite-Re configuration at its lowest resolution with A1's own Δt rule; if none exists, the §11 sphere at Re ≈ 10 only (measured stable), Re ≈ 100 reported as "not run" | A1 owner |
 | Q4 | Do the §4.1 safeguard constants cause false restarts/"unstable" on production beds? | fact | constants as stated; WO-1 and G7c measure; a failure stops the WO (no tuning) | WO-1/WO-5 numbers |
@@ -862,7 +867,7 @@ and has a default that work proceeds with.
 | Q11 | Is the §3.2 instrument library API from now on (`slow_rate=0.997`, `roundoff=1e-11`, `check_every=5`, `num_passes=3` as library defaults)? | preference | yes, the study's constants; the study script switches to `march_to_steady(accelerate=False)` in WO-4 (G0(b) proves equivalence) | user |
 
 **User ruling 2026-10-02:** the stated defaults of Q2–Q8, Q10 and Q11 are accepted; Q9 is
-decided the other way (D13); **Q1 (default of `accelerate`) remains open**.
+decided the other way (D13); Q1 is decided by a pre-registered measurement rule (D11).
 
 **Risks stated plainly:**
 - **Staggered gains are modest (≈ 1.7×).** The instrument's fixed certification cost (20–25 plain
