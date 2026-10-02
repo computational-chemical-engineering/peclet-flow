@@ -182,6 +182,40 @@ class Solver {
     // `{1,1,1}` — hence the pre-Phase-3 arithmetic exactly — whenever the cells are cubes.
     double hpMax = 1.0;               ///< max_a h_a'
     vof::VofMetric vofMetric() const { return vof::VofMetric{{hp[0], hp[1], hp[2]}}; }
+
+    // ---- Scalar transport and the phase-change energy path (2026-10-02) -----------------------
+    // The internal system is the one above: length hRef, time tRef, mass rhoRef*hRef^3.  A
+    // transported scalar (temperature, concentration) is NOT scaled — it enters every equation
+    // linearly or through an absolute value (T_sat, a Boussinesq T0, an Arrhenius 1/T) — so each
+    // factor below is the M-L-T dimension of its quantity alone, with temperature as its own unit.
+    // Every one is a product of 1.0s, i.e. EXACTLY 1.0, while `physical` is false.
+    //   diffusivity        D       L^2/T         D'    = D * tRef/hRef^2  (the cell Fourier number)
+    //   mass flux          mdot    M/(L^2 T)     mdot' = mdot * tRef/(rhoRef*hRef)
+    //   latent heat        h_lv    L^2/T^2       h'    = h_lv * tRef^2/hRef^2
+    //   conductivity       k       M L/(T^3 K)   k'    = k * tRef^3/(rhoRef*hRef^4)
+    //   heat capacity      rho c_p M/(L T^2 K)   rcp'  = rcp * tRef^2/(rhoRef*hRef^2)
+    //   IHTR resistance    R_int   K L^2 T/M     R'    = R_int * rhoRef*hRef/tRef  (T = mdot R)
+    //   divergence source  S       1/T           S'    = S * tRef
+    // so k'/rcp' = D', mdot' = k' grad'T / h' and mdot' R' = mdot R_int (a temperature): every
+    // phase-change formula holds unchanged on the internal values.  Out, per CELL SUM (the
+    // diagnostics sum per cell without the cell volume, which the caller multiplies by `vol`):
+    double diffToInt() const { return tRef / (hRef * hRef); }
+    double mdotToInt() const { return tRef / (rhoRef * hRef); }
+    double mdotToPhys() const { return rhoRef * hRef / tRef; }
+    double latentToInt() const { return (tRef * tRef) / (hRef * hRef); }
+    double condToInt() const {
+      const double h2 = hRef * hRef;
+      return tRef * tRef * tRef / (rhoRef * h2 * h2);
+    }
+    double rcpToInt() const { return tRef * tRef / (rhoRef * hRef * hRef); }
+    double rintToInt() const { return rhoRef * hRef / tRef; }
+    double divToInt() const { return tRef; }
+    double areaToPhys() const { return hRef * hRef; }
+    double volToPhys() const { return hRef * hRef * hRef; }
+    /// An internal energy (rho c_p T summed over cells of volume hRef^3) to joules: the internal
+    /// energy unit is rhoRef*hRef^5/tRef^2.
+    double energyToPhys() const { return rhoRef * volToPhys() * hRef * hRef / (tRef * tRef); }
+    double powerToPhys() const { return energyToPhys() / tRef; }
   };
 
   /// The map between the solver's INDEX coordinates and the coordinate system the analytic scene
@@ -2543,7 +2577,8 @@ class Solver {
 
 
   // --- Scalar transport (advection-diffusion) -------------------------------------------------
-  // Register a transported scalar `name` with constant diffusivity D (grid units). scheme: 0 FOU,
+  // Register a transported scalar `name` with constant diffusivity D (length^2/time in the
+  // caller's units; under no extent, cells^2 per time unit). scheme: 0 FOU,
   // 1 Koren TVD (default), 2 SOU. iters = RB-GS sweeps for the implicit diffusion solve. Its field
   // is registered in the directory (get_field/set_field/field_view). Openness (set_solid /
   // set_pressure_geometry) must be established for transport to occur.

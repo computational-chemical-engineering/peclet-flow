@@ -24,7 +24,12 @@ void Solver<Grid>::addScalar(const std::string& name, double D, int scheme, int 
   sc.AN = CCField(name + "_AN", n_);
   sc.AB = CCField(name + "_AB", n_);
   sc.AT = CCField(name + "_AT", n_);
-  sc.D = D;
+  // PHYSICAL diffusivity in (L^2/T), kept verbatim; the operator takes the cell Fourier number
+  // D' = D tRef/hRef^2, re-derived by `refreshUnitDerived` if tRef is pinned after this call
+  // (exactly D in cell units). The per-axis Laplacian weight w_a is applied where the stencil
+  // is built, as for mu.
+  sc.Dphys = D;
+  sc.D = D * u_.diffToInt();
   sc.scheme = scheme;
   sc.iters = iters < 1 ? 1 : iters;
   scalars_.push_back(sc);

@@ -1881,6 +1881,15 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
                 u.forceToInt(0), u.forceToInt(1), u.forceToInt(2)};
             d["force_to_physical"] = u.forceTotalToPhys();
             d["torque_to_physical"] = u.torqueToPhys();
+            // scalar transport + the phase-change energy path (a transported scalar itself, a
+            // temperature or a concentration, is never rescaled)
+            d["diffusivity_to_internal"] = u.diffToInt();
+            d["mass_flux_to_internal"] = u.mdotToInt();
+            d["latent_heat_to_internal"] = u.latentToInt();
+            d["conductivity_to_internal"] = u.condToInt();
+            d["heat_capacity_to_internal"] = u.rcpToInt();  // volumetric, rho*c_p
+            d["interface_resistance_to_internal"] = u.rintToInt();
+            d["divergence_to_internal"] = u.divToInt();
             return d;
           },
           "The factors between the caller's units and the ones the solver computes in.\n\n"
@@ -1889,7 +1898,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "(diagnostics.field_view / get_field / set_field) is in those INTERNAL units, unlike get_u/get_p, "
           "which convert. `identity` is True when no extent was given, and then every factor is "
           "exactly 1.0 and internal == physical. Multiply a physical value by *_to_internal, and "
-          "an internal one by force_to_physical (a total force) to come back.")
+          "an internal one by force_to_physical (a total force) to come back. The registered "
+          "'mdot' field is in mass_flux_to_internal units and 'pc_source' / 'div_source' in "
+          "divergence_to_internal units; a transported scalar is never rescaled.")
       .def_prop_ro(
           "physical_units", [](S& s) { return s.hasPhysicalDomain(); },
           "True when the solver was given an extent, i.e. lengths are physical rather than cells.")
@@ -2456,7 +2467,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           nb::arg("name"), nb::arg("diffusivity") = 0.0, nb::arg("scheme") = "koren",
           nb::arg("iters") = 50,
           "Register a transported scalar (temperature/concentration/...): constant diffusivity "
-          "(grid units), advection scheme 'fou' (first-order upwind), 'koren' (Koren TVD, the "
+          "(length^2/time, in the solver's physical units -- cells^2 per time unit without an "
+          "extent), advection scheme 'fou' (first-order upwind), 'koren' (Koren TVD, the "
           "default) or 'sou' (second-order upwind), and RB-GS diffusion sweeps. The scalar is a "
           "registered field (get_field/set_field/diagnostics.field_view). Requires geometry "
           "(set_solid/set_pressure_geometry) for the openness-weighted operators.")
@@ -2469,8 +2481,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           },
           nb::arg("name"), nb::arg("face"), nb::arg("type"), nb::arg("value") = 0.0,
           "Scalar boundary condition on a domain face ('-x', '+x', '-y', '+y', '-z', '+z'): "
-          "type 'periodic', 'neumann' (zero flux, adiabatic) or 'dirichlet' (the given value). "
-          "Single-rank.")
+          "type 'periodic', 'neumann' (zero flux, adiabatic) or 'dirichlet' (the given value, in "
+          "the scalar's own units: the solver never rescales a transported scalar). Single-rank.")
       .def(
           "has_scalar", [](S& s, const std::string& name) { return s.hasScalar(name); },
           nb::arg("name"), "Whether a transported scalar of this name is registered.")
