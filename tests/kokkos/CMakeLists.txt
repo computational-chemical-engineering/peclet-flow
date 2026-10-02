@@ -59,6 +59,15 @@ target_include_directories(test_scalar_transport PRIVATE ${CMAKE_CURRENT_SOURCE_
 target_link_libraries(test_scalar_transport PRIVATE Kokkos::kokkos)
 add_test(NAME scalar_transport COMMAND test_scalar_transport)
 
+# Cut-cell scalar geometry record (doc/scalar_ibm_design.md §2-§3, WO-2): the sdf_ ghost layers on
+# every single-rank path, G-geom (e)-(g) on spheres (isotropic + h' = (1,1,2)) and the pipe set's
+# probe rungs.
+add_executable(test_scalar_cutcell_geometry test_scalar_cutcell_geometry.cpp)
+target_include_directories(test_scalar_cutcell_geometry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_scalar_cutcell_geometry PRIVATE Kokkos::kokkos)
+add_test(NAME scalar_cutcell_geometry COMMAND test_scalar_cutcell_geometry)
+
 # Property closures + per-cell body force (LinearMix / Boussinesq / Arrhenius vs host oracle).
 add_executable(test_closures test_closures.cpp)
 target_include_directories(test_closures PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src

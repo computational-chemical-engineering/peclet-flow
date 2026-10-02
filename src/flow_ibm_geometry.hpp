@@ -109,6 +109,9 @@ void Solver<Grid>::extendSdfDomainGhosts(CCField f) {
 
 template <class Grid>
 void Solver<Grid>::setSolidDevice(CCField din, bool cutcellPressure) {
+  // Every geometry path (set_solid, set_pressure_geometry, set_solid_from_scene, redistribute)
+  // lands here: the cut-cell scalar record is stale from now on (rebuilt lazily, §2.5).
+  invalidateScalarCutGeometry();
   cutcellPressure_ = cutcellPressure;
   setSolidSelectScheme();
   setSolidUploadSdf(din);

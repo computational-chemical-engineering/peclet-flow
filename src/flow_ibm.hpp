@@ -46,6 +46,7 @@
 #include "mac_velocity_mg.hpp"
 #include "peclet/core/field/field_set.hpp"
 #include "property_closures.hpp"
+#include "scalar_cutcell_geometry.hpp"  // cut-cell scalars: the geometry record (WO-2)
 #include "scalar_transport.hpp"
 #include "staggered_advection.hpp"
 #include "vof/advect_wy.hpp"    // VoF rung V1: the Weymouth-Yue colour advector (its own g=3 block)
@@ -2562,6 +2563,23 @@ class Solver {
   // the end of step()). Exposed so a test can prescribe a velocity and transport a scalar in
   // isolation.
   void advanceScalars();
+
+
+  // --- Cut-cell scalar transport: the geometry record (doc/scalar_ibm_design.md §2, §3; WO-2) ---
+  // One record per geometry, shared by every cut-cell scalar: kappa, the snapped UNGATED scalar
+  // apertures, the fluid-unknown flags, the facet overlay with its fluid probes, and the census.
+  // Built lazily (`ensureScalarCutGeometry`) on first use after the geometry exists; invalidated by
+  // every geometry build (set_solid, set_solid_from_scene, set_pressure_geometry, redistribute --
+  // all of which reach setSolidDevice). It never reads or writes ox_/oy_/oz_, cs_ or cutOwner_.
+  void invalidateScalarCutGeometry();
+  void ensureScalarCutGeometry();
+  // The record itself (builds it if stale). For tests and the operator; the views are the block's.
+  const scg::ScalarCutGeometry& scalarCutGeometry();
+  // Inner (nx*ny*nz, x-fastest) copy of one record field: 0 kappa, 1/2/3 the snapped aperture of
+  // the -x/-y/-z face of each cell, 4 the fluid-unknown flag (1/0).
+  std::vector<double> scalarGeometryField(int which);
+  // The geometry census, summed over ranks (collective under MPI); sealedVolume physical.
+  scg::ScalarCutCensus scalarCutCensus();
   // setSuperficialVelocity's per-step shift (the tail of step()); no-op when off.
   void applySuperficialVelocity();
   void superficialVelocityPrecheck() const;
@@ -4833,6 +4851,11 @@ class Solver {
   Comp C[3];
   peclet::core::FieldSet fields_;     // named directory of all cell fields (velocity/p/sdf + user)
   std::vector<ScalarField> scalars_;  // transported scalars (advection-diffusion)
+  // Cut-cell scalar geometry record (WO-2) and the geometry version it must match: every geometry
+  // build bumps scgVersion_ (invalidateScalarCutGeometry), and ensureScalarCutGeometry rebuilds
+  // when scg_.version differs. scg_.version starts at -1, so nothing is built until first use.
+  scg::ScalarCutGeometry scg_;
+  long scgVersion_ = 0;
   // --- phase change (WO-P01) -------------------------------------------------------------------
   bool pcEnabled_ = false, pcThermal_ = false, pcHasUser_ = false;
   double pcRhoG_ = 1.0, pcRhoL_ = 1.0, pcHlv_ = 1.0;
@@ -5025,6 +5048,7 @@ using IbmSolver = Solver<Staggered>;
 #include "flow_ibm_phase_change.hpp"
 #include "flow_ibm_closures.hpp"
 #include "flow_ibm_scalars.hpp"
+#include "flow_ibm_scalars_cutcell.hpp"
 #include "flow_ibm_bc.hpp"
 #include "flow_ibm_mpi.hpp"
 #include "flow_ibm_diagnostics.hpp"

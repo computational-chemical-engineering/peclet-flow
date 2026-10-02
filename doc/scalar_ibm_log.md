@@ -241,3 +241,51 @@ querying the Lookup. Core battery: plain 77/77, Kokkos host-openmp 93/93 (`-LE b
   read; R1b needs φ(p₀), so it is tried only when R0's stencil passed V3; R1a only when R0 failed
   V1 alone; a piece with n·n_ref = 0 joins the reference group A (facet 0);
 - face area A_a = product of the other two spacings.
+
+## 2026-10-02 — WO-2: flow geometry record (flow branch `scalar-ibm`; core `b1fcb6a` adds `fanFaceAperture`)
+
+**Built.** `src/scalar_cutcell_geometry.hpp` (block kernels: apertures incl. the high face at
+ext − G, cells, scan-compacted facet overlay + cut-cell CSR, fluid probe ladder with the block
+`Lookup`, ghost-slab flag clearing, census), `src/flow_ibm_scalars_cutcell.hpp`
+(`ensureScalarCutGeometry` lazy build, `invalidateScalarCutGeometry`, getters), `flow_ibm.hpp`
+(`scg_`, `scgVersion_`, declarations, include), one invalidation call in `setSolidDevice` (every
+geometry path — set_solid, set_pressure_geometry, set_solid_from_scene, redistribute — lands
+there), bindings `diagnostics.scalar_geometry(name)` and the geometry part of
+`diagnostics.scalar_census(name)`, ctests `scalar_cutcell_geometry` and
+`scalar_cutcell_geometry_mpi_np{1,2,4}`. Core gained `fanFaceAperture` (the face fan as one
+function, used by `cutCellGeometryFanTet` itself — bitwise the old expression), so the face kernel
+and the cell kernel cannot drift.
+
+**Gates** (host-openmp; spheres SOLID, measured volume Σ(1 − κ)V; RMS over 3 offsets):
+
+| | R/h = 8 | 16 | 32 | order | bound |
+|---|---|---|---|---|---|
+| (e) volume, iso | −9.77e-3 | −2.44e-3 | −6.10e-4 | 1.997, 2.002 | 2(h/R)², ≥ 1.8 |
+| (e) area Σ\|A_φ\|, iso | −9.03e-3 | −2.25e-3 | −5.61e-4 | 2.002, 2.008 | 3(h/R)², ≥ 1.8 |
+| (g) volume, h' = (1,1,2) | −4.89e-3 | −1.22e-3 | −3.05e-4 | 1.999, 2.000 | same |
+| (g) area | −4.40e-3 | −1.10e-3 | −2.72e-4 | 2.002, 2.016 | same |
+
+- every cut cell `single`, min ρ 0.9927 (R/h = 8) → 0.9996 (32), iso and aniso;
+- (f) max |A^snap − areaPL| / max A = 1.77e-3 (bound 2e-3);
+- pipe (G7, R/h 16/32/64): R0 100 %, 0 sealed;
+- MPI np = 1, 2, 4 (periodic sphere; sphere cut by a −x wall with ±y slip): every cell field,
+  every high face and every facet (alpha, normal, centroid, body, s, rung, weights, offsets)
+  BITWISE equal to the single-rank build by global index; census equal;
+- §2.5 prerequisite: sdf_ ghost layers 1–2 exact on every face slab — single-rank periodic, wall
+  extension, slip mirror; MPI exchange + extension at np 1, 2, 4;
+- G12: 12/12 state hashes identical (OMP_NUM_THREADS=1);
+- single-rank non-bench battery 61/62: the one failure is `scalar_cutcell_geometry`, on exactly
+  the two clauses below (17 sealed checks, 6 aniso R0 checks); `_np{1,2,4}` of the new MPI test pass;
+- device: the block kernels compiled with nvcc (nvidia-cuda prefix) in a standalone TU and run on
+  the RTX 5080: facets 2657 / R0 2657 / unknowns 58051 / sealed 25, solid volume equal to the
+  OpenMP build to 10 digits.
+
+**OPEN — two gate clauses fail; reported, not changed:**
+1. (e) "0 sealed" fails at every resolution: 0–11 / 38–46 / 154–159 sealed cells (iso), up to 407
+   (aniso). They are genuine §2.4 sealed cells — corner slivers of fluid, κ ≤ 1.3e-5, whose three
+   faces all snap to 0 at the 1e-3 floor. Their total volume is ≤ 1.9e-9 of the fluid volume, far
+   under the §9 warning threshold (1e-6). The count grows like (R/h)², so no resolution reaches 0.
+2. R0 = 100 % holds on the isotropic spheres and the pipe but not on h' = (1,1,2): 1–11 facets per
+   run (≤ 2e-4) take R1b. Each is a snap artefact: a tiny facet whose A^snap is exactly ±z,
+   because the x/y faces snapped to 1 while the z face (half the area) did not, and whose probe
+   along z enters the sphere.

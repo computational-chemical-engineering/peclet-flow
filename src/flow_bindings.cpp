@@ -460,6 +460,52 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "from what the caller last set explicitly, and is only meaningful after geometry has "
            "been installed (False on a fresh solver).")
       .def(
+          "scalar_geometry",
+          [](D& diag, const std::string& name) {
+            if (!diag.s->hasScalar(name))
+              throw std::invalid_argument("scalar_geometry: no scalar named '" + name + "'");
+            nb::dict d;
+            d["kappa"] = field_out(*diag.s, diag.s->scalarGeometryField(0));
+            d["aperture_x"] = field_out(*diag.s, diag.s->scalarGeometryField(1));
+            d["aperture_y"] = field_out(*diag.s, diag.s->scalarGeometryField(2));
+            d["aperture_z"] = field_out(*diag.s, diag.s->scalarGeometryField(3));
+            d["unknown"] = field_out(*diag.s, diag.s->scalarGeometryField(4));
+            return d;
+          },
+          nb::arg("name"),
+          "The cut-cell scalar geometry record (doc/scalar_ibm_design.md §2) as F-order (nx, ny, "
+          "nz) arrays of this rank's block: 'kappa' (fluid fraction of the fan-tetrahedron PL "
+          "model), 'aperture_x/y/z' (the SNAPPED, ungated scalar aperture of the -x/-y/-z face of "
+          "each cell -- the scalar's own, never the pressure openness), 'unknown' (1 where the "
+          "cell is a fluid unknown: kappa > 1e-14 with an open face). Built on first use after "
+          "the geometry; shared by every cut-cell scalar.")
+      .def(
+          "scalar_census",
+          [](D& diag, const std::string& name) {
+            if (!diag.s->hasScalar(name))
+              throw std::invalid_argument("scalar_census: no scalar named '" + name + "'");
+            const auto c = diag.s->scalarCutCensus();
+            nb::dict d;
+            d["num_unknowns"] = c.numUnknowns;
+            d["num_cut_cells"] = c.numCutCells;
+            d["num_facets"] = c.numFacets;
+            d["num_two_sided"] = c.numTwoSided;
+            d["num_thin_solid"] = c.numThinSolid;
+            d["num_sealed"] = c.numSealed;
+            d["sealed_volume"] = c.sealedVolume;
+            nb::dict rungs;
+            rungs["fluid"] = nb::make_tuple(c.rungs[0], c.rungs[1], c.rungs[2], c.rungs[3]);
+            d["probe_rungs"] = rungs;
+            return d;
+          },
+          nb::arg("name"),
+          "Census of the cut-cell scalar (collective under MPI, summed over ranks). The geometry "
+          "part: 'num_unknowns' (fluid unknowns), 'num_cut_cells' (cells carrying a facet), "
+          "'num_facets', 'num_two_sided' (cells with two facets), 'num_thin_solid' (two-facet "
+          "cells with solid between two fluids -- a resolution warning), 'num_sealed' / "
+          "'sealed_volume' (kappa > 0 behind closed faces; physical volume), 'probe_rungs' "
+          "({'fluid': (R0, R1a, R1b, R2)} facet counts of the probe ladder).")
+      .def(
           "outflow_backflow",
           [](D& diag) {
             const auto ob = diag.s->outflowBackflow();
