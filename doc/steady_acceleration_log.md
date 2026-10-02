@@ -866,3 +866,39 @@ own gate (G7c) failed at tight settings in WO-5 — keep it as "pending the arch
         innerTolerance + AndersonComm. The Pressure role, sdf, cP, gauged and pass 1 are deleted.
     - rejected: keeping the unused pressure metric until after the tag (a breaking change then)
     - why: no consumer uses it after rev 1; removes one collective per step and the sdf dependency
+
+---
+
+## 2026-10-02 — WO-5 addendum: the host runs that finished after the WO-5 commit
+
+**G1 tight, host-openmp (8 threads)** — the same verdicts as CUDA:
+
+| case | plain | m = 5 | \|K_acc/K_plain − 1\| | note |
+|---|---|---|---|---|
+| §11 coll N14 | 2105 | 64 | — | "unstable" at 64 (max reading 1.00622) — **FAIL** |
+| §11 coll N16 / N18 / N20 / N24 | 3520 / 2935 / 3715 / 2470 | 141 / 131 / 186 / 151 | 4.9e-10 / 4.0e-10 / 6.4e-10 / 6.7e-10 | pass |
+| §11 stag N14 / N16 / N18 | 220 / 295 / 1165 | 60 / 79 / 130 | 7.0e-12 / 1.8e-11 / 1.3e-10 | pass (N18 reading 1.0111) |
+| §11 stag N20 | 6550 | 51 | — | "unstable" at 51 (max reading 1.00264) — **FAIL** |
+| §11 stag N24 | 3465 | 270 (CUDA 207) | 7.1e-10 | pass (reading 1.0079) |
+| Z&H 0.343 / 0.45 N32 | 2530 / 5645 | 190 / 333 (CUDA 174 / 396) | 4.2e-10 / 1.3e-9 | pass (readings 1.0030 / 1.0010) |
+| bed stag | 19510 | 536 (a376 c40 p120) | **1.44e-8** | **FAIL** (the plain certificate; WO-5) |
+| bed coll | 1835 | 321 | 1.75e-9 | pass |
+
+Accelerated step counts at tight settings differ between backends where phase A runs at the
+noise floor (stag N24 270 vs 207, Z&H 190/333 vs 174/396); production counts are identical.
+
+**G6, host:** the A1 array at Re ≈ 10: 8015 / 449 steps, K identical to CUDA to 10 digits
+(12.1870408213 / 12.1870408616); wall 3326.6 s / 159.4 s = 20.9×. Re ≈ 100: 2775 / 2630
+(a300 c15 p2315, disabled), K 27.4359507844 / …7845; wall 1216 s / 1130 s = 1.08×.
+
+**G8, host, late-march protocol** (`--warmup 150 --steps 50`, two repetitions):
+
+| scheme | plain step | step under acceleration | accelerator | % of plain step | bar ≤ 8 % |
+|---|---|---|---|---|---|
+| staggered | 74.0 / 79.2 ms | 57.9 / 59.1 ms | 4.10 / 4.23 ms | 5.53 / 5.34 % | pass |
+| collocated | 374.1 / 381.3 ms | 80.1 / 79.8 ms | 3.79 / 4.12 ms | 1.01 / 1.08 % | pass |
+
+`memory_bytes` = formula, both. The step under acceleration is cheaper than the plain step timed
+at steps 151–200 (collocated 4.7×): the inner solves cost less near the fixed point, so "% of the
+plain step" depends on where in the march the plain step is timed (relative to the step under
+acceleration: 7.1–7.2 % staggered, 4.7–5.2 % collocated).

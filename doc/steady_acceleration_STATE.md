@@ -19,7 +19,8 @@ marches, `peclet.flow.march_to_steady`. History and every number: `doc/steady_ac
   G5, G6, G7a, G7c at production (0 of 946 readings > 1.0005), G8 memory, G8 CUDA collocated.
 - **WO-6:** CLAUDE.md "Steady marches", note §1.3 "Measured", register drafts in the log (the
   guard-scope entry marked PENDING); docs build (doxygen) exit 0, no warning from the new files.
-- Host G1 / G6-array / G8 re-runs were still running at the time of this file (log addendum).
+- Host G1 / G6 / G8 finished (log "WO-5 addendum"): same verdicts as CUDA; host G8 passes (≤ 5.5 %
+  of the 8 % host bar).
 
 **Next action.** Caller / architect: the four failures above. Nothing here changes a constant.
 

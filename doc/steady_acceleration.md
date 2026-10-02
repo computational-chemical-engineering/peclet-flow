@@ -441,7 +441,9 @@ march's to ±3.5 % (Q12).
 **Tight** (G1, |K_acc/K_plain − 1|, CUDA): ≤ 1.75e-9 on 11 of 14 cases; MPI np 2/4 ≤ 2.6e-12 of np 1,
 np 1 = serial bit for bit (G4); restart ≤ 1.7e-11 (G5); finite Re ≤ 3.3e-9, 2.4× – 17.9× (G6,
 except 1.06× at Re ≈ 100 on the A1 array). **Overhead** (G8, 64³): 0.77–0.85 ms per step on
-CUDA = 5.3 % staggered / 2.0 % collocated of the plain step; `memory_bytes` equals §6.3 exactly.
+CUDA = 5.3 % staggered / 2.0 % collocated of the plain step (host: 4.1–4.2 ms = 5.3–5.5 % / 1.0–1.1
+%, inside the host bar of 8 %); `memory_bytes` equals §6.3 exactly. Host and CUDA give the same G1
+verdicts.
 
 **Open after WO-5 (gates failed; not resolved here):**
 - *The Ritz guard at tight settings (G1, G7c).* False "unstable" on §11 collocated N14 and
