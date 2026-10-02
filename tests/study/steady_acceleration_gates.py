@@ -14,8 +14,9 @@ Subcommands (all on the module on PYTHONPATH; bound the OpenMP pool):
            the G7c line per case: plain converged vs accelerated converged per window.
   g3       G3: --steps (400) unconditional acc.step(True) per dt (--betas), tight; status,
            restarts, running-min residual, final residual and K. With --extend-to N (WO-8): past
-           --steps, keep stepping until the running-min residual reaches the depth bar 1e-9 or
-           N steps in total; every criterion is evaluated at the end of the run.
+           --steps, keep stepping until the running-min residual reaches the depth bar (sphere
+           1e-9; bed 5e-11, review R3) or N steps in total; every criterion is evaluated at the
+           end of the run. K is sampled after the last call that did not restart (review R3).
   g5       G5: interrupt an accelerated march at step --at (25), checkpoint get_field u,v,w,p (or
            set_state, velocity only), restore into a fresh solver, march again; against the
            uninterrupted accelerated march.
@@ -283,46 +284,52 @@ def cmd_oracle(flow, a):
 
 
 # ---------------------------------------------------------------------------------------------- g3
-G3_DEPTH = 1e-9  # §8 G3: the running-min residual must reach this
+# §8 G3: the running-min residual must reach this. The dense bed's bar is set from its measured
+# K-error / velocity-residual ratio (37 - 170 along the nu dt / h^2 = 60 trajectory, review R3):
+# 5e-11 pins K to the 1e-8 agreement bar; the sphere keeps 1e-9.
+G3_DEPTH = {"sphere": 1e-9, "bed": 5e-11}
 
 
 def cmd_g3(flow, a):
     st = settings_of("tight")
     case = Case(a)
+    depth = G3_DEPTH[a.case]
     Ks = {}
     for beta in a.betas:
         s = case.build(flow, a.scheme, st, beta=beta)
         acc = s.diagnostics.anderson_accelerator(window=a.window[0])
         res, rmin, rst_steps = [], math.inf, []
+        u, u_call = math.nan, 0  # <u_x> sampled after the last NON-restart call (review R3)
         t0 = time.perf_counter()
         for k in range(max(a.steps, a.extend_to)):
-            if k >= a.steps and rmin <= G3_DEPTH:
+            if k >= a.steps and rmin <= depth:
                 break  # --extend-to: the depth bar is reached
             r0 = acc.num_restarts
             acc.step(True)
             if acc.num_restarts > r0:
                 rst_steps.append(k + 1)
+            else:
+                u, u_call = umean(s), k + 1
             res.append(acc.residual)
             rmin = min(rmin, acc.residual)
             if acc.status != "active":
                 break
         wall = time.perf_counter() - t0
-        u = umean(s)
         K = case.K(u)
         Ks[beta] = K
         per100 = max([sum(1 for q in rst_steps if lo < q <= lo + 100)
                       for lo in range(0, len(res), 100)] or [0])
-        ok = (acc.status == "active" and per100 <= 1 and rmin <= G3_DEPTH and res[-1] <= 10 * rmin)
+        ok = (acc.status == "active" and per100 <= 1 and rmin <= depth and res[-1] <= 10 * rmin)
         print(f"g3 {a.case} {a.scheme} N={a.N} beta={beta:g} m={a.window[0]}: status={acc.status} "
               f"({acc.reason}) steps={len(res)} restarts={acc.num_restarts} (max/100 {per100}) "
-              f"min_res={rmin:.3e} final_res={res[-1]:.3e} K={K:.12f} "
-              f"wall={wall:.1f}s -> {'PASS' if ok else 'FAIL'}",
+              f"min_res={rmin:.3e} (bar {depth:g}) final_res={res[-1]:.3e} K={K:.12f} "
+              f"(at call {u_call}) wall={wall:.1f}s -> {'PASS' if ok else 'FAIL'}",
               flush=True)
         rec = common_rec(a, case)
         rec.update(gate="g3", beta=beta, window=a.window[0], status=acc.status,
                    reason=acc.reason, steps=len(res), restarts=acc.num_restarts,
-                   restarts_max_per_100=per100, min_res=rmin, final_res=res[-1], K=K, u=u,
-                   ok=ok, wall_s=wall)
+                   restart_calls=rst_steps, restarts_max_per_100=per100, min_res=rmin,
+                   depth=depth, final_res=res[-1], K=K, u=u, K_call=u_call, ok=ok, wall_s=wall)
         emit(a, rec)
         del acc, s
     if len(Ks) > 1:
@@ -502,7 +509,8 @@ def main():
     ap.add_argument("--at", type=int, default=25)
     ap.add_argument("--warmup", type=int, default=100, help="g8: plain steps before timing")
     ap.add_argument("--extend-to", type=int, default=0,
-                    help="g3: past --steps, continue until the running-min residual is <= 1e-9 "
+                    help="g3: past --steps, continue until the running-min residual reaches the "
+                         "depth bar (sphere 1e-9, bed 5e-11) "
                          "or this many steps in total (0 = no extension)")
     ap.add_argument("--serial", action="store_true")
     ap.add_argument("--hash", action="store_true")
