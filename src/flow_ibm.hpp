@@ -1291,16 +1291,13 @@ class Solver {
   // step() reads across steps, as the full padded G = 2 buffers, with their roles for the Anderson
   // accelerator's metric. Velocity = the three velocity components (measured); Carried = the
   // accumulated pressure P and, on the collocated grid with projected-face advection, the face
-  // field uf/vf/wf (mixed and differenced, never measured). `innerTolerance` is the relative
-  // tolerance of the inner solves (§4.1: the velocity residual tolerance in force when > 0, else
-  // the active pressure driver's rtol), which sets the accelerator's Ritz floor. `signature` is
-  // (dt, rho, mu, Fx, Fy, Fz), all internal: a change of any of them changes the map.
+  // field uf/vf/wf (mixed and differenced, never measured). `signature` is (dt, rho, mu, Fx, Fy,
+  // Fz), all internal: a change of any of them changes the map.
   struct MarchState {
     std::vector<CCField> fields;
     std::vector<peclet::core::solver::AndersonRole> roles;
     C3 e{0, 0, 0};
     int G = 2;
-    double innerTolerance = 0.0;
     std::array<double, 6> signature{};
 #ifdef PECLET_FLOW_MPI
     MPI_Comm comm = MPI_COMM_NULL;

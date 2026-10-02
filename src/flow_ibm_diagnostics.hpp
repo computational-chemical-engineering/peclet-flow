@@ -366,8 +366,6 @@ typename Solver<Grid>::MarchState Solver<Grid>::marchState() {
   }
   ms.e = e_;
   ms.G = G;
-  const double vrt = velocityResidualTolerance();
-  ms.innerTolerance = vrt > 0.0 ? vrt : (useChebyshev_ ? chebRtol_ : pcgRtol_);
   ms.signature = {dt_, rho_, mu_, f_[0], f_[1], f_[2]};
 #ifdef PECLET_FLOW_MPI
   ms.comm = comm_;

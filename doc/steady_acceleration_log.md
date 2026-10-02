@@ -1075,3 +1075,52 @@ Replaces the PENDING guard-scope draft of the WO-6 entry.
         AndersonComm. Pass 2 reduces RR(s,j) and b_j only (2 mk + 2 doubles); no reduction reads dG.
     - rejected: keeping innerTolerance or GG/GR for a diagnostic
     - why: both existed only for the Ritz guard; the branch is untagged, so this is the cheap moment
+
+---
+
+## 2026-10-02 — G8: the pass-2 host-sync fusion (core-anderson `0290998`, measured by an engineer)
+
+Command, two repetitions per row: `python tests/study/steady_acceleration_gates.py g8 sphere
+--scheme S --N 64 --window 5 --steps 50 --warmup 150`.
+
+| backend | scheme | accelerator overhead, % of the plain step: before (`9ff3bd2`) → after (`0290998`) |
+|---|---|---|
+| CUDA | staggered | 5.28 / 5.22 % → **4.42 / 4.43 %** (bar ≤ 5 %: now passes) |
+| CUDA | collocated | 1.93 / 1.92 % → 1.64 / 1.64 % |
+| host | staggered | 4.83 / 4.62 % (after; noise-dominated, box load 15–36) |
+| host | collocated | 1.04 / 1.33 % (after; same) |
+
+- Host-synchronising calls per accelerated step: 26 → 2 (one fence in `prepare`, one in `complete`).
+- Digests identical to `9ff3bd2` on host, CUDA, and U7 at np = 1, 2, 4 (the fusion changes no
+  numerics).
+- nsys after the fusion: device time 0.50 of 0.64 ms per accelerated step — pass-2 column sums
+  0.27 ms, MIX 0.13, DIFF 0.055, self sums 0.03, COUNT 0.026.
+- **Correction to the note's §6.2 traffic estimate** (and to the WO-5 entry's "~120 MB, ~0.13 ms"):
+  ~48 state vectors × n_s = 4 fields ≈ 1.5 KB per cell × 68³ ≈ 0.47 GB per step ≈ 0.49 ms at
+  960 GB/s — the pass is bandwidth-bound once the syncs are gone, matching the 0.50 ms of device
+  time. WO-8 re-measures G8 after WO-3c (which removes 2 of the 5 reads per column).
+
+---
+
+## 2026-10-02 — WO-7: flow delta for revision 2 (no guard, no `innerTolerance`, no `ritz_radius`)
+
+Changes: `packaging/flow_steady.py` (no "unstable" return; docstring reasons {"certified",
+"max_steps", "diverged"} + the stationarity sentence, Q18 default), `src/anderson_accelerator.hpp`
+(`ritzRadius()` and the `innerTolerance` hand-over removed), `src/flow_ibm.hpp` /
+`src/flow_ibm_diagnostics.hpp` (`MarchState::innerTolerance` removed), `src/flow_bindings.cpp`
+(`status` doc, `ritz_radius` removed), `tests/kokkos/test_march_state.cpp` (the innerTolerance
+block removed), `tests/python/test_march_to_steady.py` (G7a at windows 3, 5, 8 + plain, reasons
+{"diverged", "max_steps"}; scripted test (iv)), `tests/study/steady_acceleration_gates.py` (no Ritz
+census; a G7c line per case; `g3 --extend-to` for WO-8), `CLAUDE.md` "Steady marches". Built against
+core-anderson `0290998` (the pre-WO-3c core: compiles, guard still present there at the 1e-10 floor;
+not measured in this state beyond the gate below).
+
+**Gate (host `build_omp`, host-openmp, MPI on):**
+- G0(a): `OMP_NUM_THREADS=1 PYTHONPATH=build_omp python tests/regression/state_hash.py` and
+  `... mpirun --bind-to none -np 2 python tests/regression/state_hash.py mpi`, before (the WO-4/WO-5
+  build) and after: **13 of 13 lines identical** (e.g. `mpi_np2 9fd78958…75a4`).
+- ctest `march_state` and `march_to_steady`: pass (34.5 s).
+- G0(c): `OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_omp -LE bench -E '_np[0-9]+$' -j3`
+  → **63/63** (1859 s, box load ~90 on 48 cores); `OMP_NUM_THREADS=2 ctest ... -R '_np[0-9]+$' -j4`
+  → **130/130** (507 s).
+- clang-format 18.1.8 over the CI file list (154 files, the six W4 exclusions): clean.

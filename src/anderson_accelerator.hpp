@@ -61,8 +61,6 @@ class AndersonAccelerator {
   int numRestarts() const { return core_.numRestarts(); }
   int numResets() const { return core_.numResets(); }
   int numColumns() const { return core_.numColumns(); }
-  /// Last Ritz estimate (design §4.6); NaN when the last evaluation did not compute it.
-  double ritzRadius() const { return core_.ritzRadius(); }
   int window() const { return core_.window(); }
   double mixing() const { return core_.mixing(); }
   /// Bytes of the history (= Core::memoryBytesFor(window, n_s, n_pad), design §6.3).
@@ -101,7 +99,6 @@ typename AndersonAccelerator<Grid>::Core AndersonAccelerator<Grid>::makeCore(
   st.roles = ms.roles;
   st.extent = {ms.e.x, ms.e.y, ms.e.z};
   st.ghost = ms.G;
-  st.innerTolerance = ms.innerTolerance;
 #ifdef PECLET_FLOW_MPI
   if (ms.distributed)
     st.comm = peclet::core::solver::andersonComm(ms.comm);

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """ctest `march_to_steady`: peclet.flow.march_to_steady and its Anderson accelerator
-(doc/steady_acceleration.md rev 1, work order WO-4).
+(doc/steady_acceleration.md rev 2, work orders WO-4, WO-7).
 
 * G0(b) — `march_to_steady(accelerate=False)` IS the study's march (tests/study/
   study_avg_velocity_spheres.py, the instrument copied verbatim below as `study_march`): the §11
@@ -11,11 +11,15 @@
   tolerance 1e-12, rtol 1e-10), accelerated and plain both `converged=True` with
   |K_acc / K_plain - 1| <= 1e-8, on both grids.
 * G7a — staggered N = 16 at mu = 0.0158, dt = 1.234e-2, SOU advection, whose plain march diverges:
-  `converged=False` with accelerate=True and accelerate=False.
-* three pure-Python tests of the driver's certification (`peclet.flow.steady._certify`) on scripted
+  `converged=False` with reason "diverged" or "max_steps" for accelerate=False and for
+  accelerate=True at windows 3, 5 and 8 (rev 2: no instability guard; the plain steps of the
+  certification expose the growth).
+* four pure-Python tests of the driver's certification (`peclet.flow.steady._certify`) on scripted
   monitor sequences: (i) four blocks with R > 1, then a geometric tail inside the budget -> "pass";
   (ii) a clean tail at R = 0.99 that fails the remainder bound -> "slow" at the first such block;
-  (iii) a sequence that never passes -> "budget" after exactly 2 (num_passes + 3) blocks.
+  (iii) a sequence that never passes -> "budget" after exactly 2 (num_passes + 3) blocks;
+  (iv) two passing blocks at R = 0.9, then R = 1.1 for every later block -> "budget" after exactly
+  2 (num_passes + 3) blocks, never "pass" (R >= 1 resets the pass count — what rev 2 relies on).
 
 Exit 0 pass, 1 fail, 77 skipped (no module).
 """
@@ -139,13 +143,13 @@ def gate_g1_small():
 def gate_g7a():
     print("G7a: a case whose plain march diverges -> converged=False for both drivers",
           flush=True)
-    for acc in (False, True):
+    for acc, window in ((False, 5), (True, 3), (True, 5), (True, 8)):
         s = sphere_solver(pf.Solver, 16, tight=False, mu=0.0158, dt=1.234e-2, advection="sou")
         res = pf.march_to_steady(s, lambda s=s: umean(s), rtol=1e-4, max_steps=5000,
-                                 accelerate=acc)
-        check(not res.converged and res.reason in ("diverged", "unstable", "max_steps"),
-              f"accelerate={acc}: converged={res.converged} reason={res.reason} "
-              f"steps={res.steps}")
+                                 accelerate=acc, window=window)
+        check(not res.converged and res.reason in ("diverged", "max_steps"),
+              f"accelerate={acc} window={window}: converged={res.converged} reason={res.reason} "
+              f"steps={res.steps} (accelerated {res.accelerated_steps})")
 
 
 def scripted(values):
@@ -215,6 +219,23 @@ def gate_certify():
                          growth_residual=lambda: 0.0, growth_ref=1.0)
     check(out == "budget" and steps == 5 * budget,
           f"(iii) never passing: {out} after {steps} steps (expected 'budget' at {5 * budget})")
+    # (iv) two passing blocks (R = 0.9, |d| / (1 - 0.985) < rtol |m|), then R = 1.1 for every later
+    # block: R >= 1 never passes and resets the pass count, so the third pass never comes and the
+    # run ends at the budget, never "pass".
+    blocks = [1.0]
+    d = 1e-6
+    blocks.append(blocks[-1] + d)  # first change: no ratio yet
+    for _ in range(2):
+        d *= 0.9
+        blocks.append(blocks[-1] + d)
+    for _ in range(30):
+        d *= 1.1
+        blocks.append(blocks[-1] + d)
+    out, steps = certify(per_block(blocks), budget=budget, slow_exit=True,
+                         growth_residual=lambda: 0.0, growth_ref=1.0)
+    check(out == "budget" and steps == 5 * budget,
+          f"(iv) two passes at R = 0.9, then R = 1.1: {out} after {steps} steps (expected 'budget' "
+          f"at {5 * budget}, never 'pass')")
 
 
 def main():

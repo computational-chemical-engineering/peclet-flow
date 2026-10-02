@@ -590,8 +590,10 @@ The rung-by-rung record — every work order, gate number and refuted hypothesis
 `peclet.flow.march_to_steady(solver, monitor, rtol=1e-4, max_steps=5000, accelerate=True, window=5,
 check_every=5, num_passes=3, slow_rate=0.997, roundoff=1e-11, callback=None)` marches a solver to its
 steady state and returns a frozen `MarchResult` (`converged`, `steps`, `accelerated_steps`, `reason`
-∈ {"certified", "max_steps", "unstable", "diverged"}, `num_restarts`, `monitor`). Design and every
-measured number: [`doc/steady_acceleration.md`](doc/steady_acceleration.md) (rev 1) and its log.
+∈ {"certified", "max_steps", "diverged"}, `num_restarts`, `monitor`). Design and every measured
+number: [`doc/steady_acceleration.md`](doc/steady_acceleration.md) (rev 2) and its log.
+`converged=True` certifies that the state passed the stop test on consecutive plain steps at this dt
+(stationarity); it does not certify that a plain march from the initial state would reach it.
 
 ```python
 s = peclet.flow.Solver((N, N, N), extent=(L, L, L)); ...; s.set_solid(sdf, cutcell_pressure=True)
@@ -605,9 +607,11 @@ res = peclet.flow.march_to_steady(s, lambda: float(s.get_u().mean()))   # <u_x> 
   advection + uf/vf/wf), velocity-only metric. Phase A mixes until the relative velocity residual is
   `(1 - slow_rate) * rtol`; phase B certifies on consecutive PLAIN steps with the unchanged
   instrument (budget `2 * (num_passes + 3)` blocks, early "slow" exit, ×0.1 and resume), so the
-  reported state is a plain-march state. `Solver.step()` is untouched. Data path: core's
-  `AndersonCore` + `src/anderson_accelerator.hpp`; control path: `packaging/flow_steady.py`
-  (installed as `peclet/flow/steady.py`).
+  reported state is a plain-march state. There is no instability guard (rev 2: a Ritz radius of
+  this non-normal map is no stability test); an unstable plain map shows only on plain steps
+  (growth exit, R ≥ 1 never passes, stagnation fallback). `Solver.step()` is untouched. Data
+  path: core's `AndersonCore` + `src/anderson_accelerator.hpp`; control path:
+  `packaging/flow_steady.py` (installed as `peclet/flow/steady.py`).
 - **Scope.** Staggered `Solver`; `SolverColocated` with the `'ghost'` scheme only. Refused with a
   named error (`Solver::marchState()`, re-checked every step): the other collocated schemes, VoF,
   phase change, scalars, porous continuity, variable rho/mu, `drag_beta`, cell forces, moving scenes,
@@ -619,8 +623,9 @@ res = peclet.flow.march_to_steady(s, lambda: float(s.get_u().mean()))   # <u_x> 
 - **Checkpoint with `get_field`/`set_field` of u, v, w, p** — not `set_state` (velocity only, loses P).
   The Anderson history is not checkpointed; a restart rebuilds it in a few steps.
 - Developer tier: `s.diagnostics.anderson_accelerator(window=5, mixing=1.0)` → `acc.step(accelerate)`,
-  `acc.residual`, `acc.status`, `acc.reason`, `acc.ritz_radius`, `acc.num_restarts`, `acc.num_resets`,
-  `acc.num_columns`, `acc.memory_bytes`, `acc.seconds`, `acc.reset()`, `acc.disable()`. A redistribute
+  `acc.residual`, `acc.status` ("active" | "disabled"), `acc.reason`, `acc.num_restarts`,
+  `acc.num_resets`, `acc.num_columns`, `acc.memory_bytes`, `acc.seconds`, `acc.reset()`,
+  `acc.disable()`. A redistribute
   reallocates the state buffers; the accelerator then refuses to step (construct a new one).
 
 ## Open items

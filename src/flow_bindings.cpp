@@ -214,17 +214,13 @@ static void bind_accelerator(nb::module_& m, const char* name) {
                    "(inf before the first).")
       .def_prop_ro(
           "status", [](const A& a) { return std::string(a.statusName()); },
-          "'active', 'disabled' (acceleration stopped; steps are plain) or 'unstable' (the "
-          "Ritz guard found the plain map locally unstable at this dt).")
+          "'active' or 'disabled' (acceleration stopped; steps are plain).")
       .def_prop_ro("reason", &A::reason, "Why the status is not 'active' ('' while active).")
       .def_prop_ro("num_restarts", &A::numRestarts, "History restarts so far.")
       .def_prop_ro("num_resets", &A::numResets,
                    "History resets because the state or the parameters (dt, rho, mu, body force) "
                    "were changed from outside.")
       .def_prop_ro("num_columns", &A::numColumns, "Window columns in use.")
-      .def_prop_ro("ritz_radius", &A::ritzRadius,
-                   "The last Ritz estimate of the plain map's local spectral radius (NaN when the "
-                   "last evaluation did not compute it).")
       .def_prop_ro("window", &A::window, "The window m.")
       .def_prop_ro("mixing", &A::mixing, "The mixing beta.")
       .def_prop_ro("memory_bytes", &A::memoryBytes,

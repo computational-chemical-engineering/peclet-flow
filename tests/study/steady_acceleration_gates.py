@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Gate instrument for the steady-march Anderson acceleration (doc/steady_acceleration.md, rev 1,
-work orders WO-4 and WO-5). An INSTRUMENT, not a ctest: it prints one summary line per run and,
+"""Gate instrument for the steady-march Anderson acceleration (doc/steady_acceleration.md, rev 2,
+work orders WO-4, WO-5, WO-7 and WO-8). An INSTRUMENT, not a ctest: it prints one summary line per run and,
 with --json, appends one JSON record per run. The numbers go to doc/steady_acceleration_log.md.
 
 Subcommands (all on the module on PYTHONPATH; bound the OpenMP pool):
 
   oracle   WO-4: the C++ accelerator against the NumPy oracle (tests/study/anderson_oracle.py,
-           rev 1) — the per-step relative velocity residual of unconditional step(True) calls on
+           rev 2) — the per-step relative velocity residual of unconditional step(True) calls on
            two identical solvers, max relative difference over the first --steps (30) steps.
   run      G1 / G2 / G6 / G7: march_to_steady per window (0 = accelerate=False), recording steps,
            accelerated steps, converged / reason, K, wall time, pressure iterations per step by
-           phase (mixed vs plain), the eligible Ritz readings (G7c), accelerator seconds, memory.
+           phase (mixed vs plain), accelerator seconds, memory; with window 0 among the windows,
+           the G7c line per case: plain converged vs accelerated converged per window.
   g3       G3: --steps (400) unconditional acc.step(True) per dt (--betas), tight; status,
-           restarts, running-min residual, final residual and K.
+           restarts, running-min residual, final residual and K. With --extend-to N (WO-8): past
+           --steps, keep stepping until the running-min residual reaches the depth bar 1e-9 or
+           N steps in total; every criterion is evaluated at the end of the run.
   g5       G5: interrupt an accelerated march at step --at (25), checkpoint get_field u,v,w,p (or
            set_state, velocity only), restore into a fresh solver, march again; against the
            uninterrupted accelerated march.
@@ -173,6 +176,7 @@ def cmd_run(flow, a):
     if a.max_steps:
         st["max_steps"] = a.max_steps
     case = Case(a)
+    conv = {}
     for w in a.window:
         s = case.build(flow, a.scheme, st)
         holder = {}
@@ -182,7 +186,6 @@ def cmd_run(flow, a):
             acc = holder.get("acc")
             trace.append((phase, int(s.diagnostics.last_pressure_iterations()),
                           acc.residual if acc is not None else None,
-                          acc.ritz_radius if acc is not None else None,
                           acc.status if acc is not None else None))
 
         t0 = time.perf_counter()
@@ -195,8 +198,6 @@ def cmd_run(flow, a):
         for ph in ("accelerate", "certify", "plain"):
             its = [t[1] for t in trace if t[0] == ph]
             piters[ph] = (sum(its), len(its))
-        ritz = [t[3] for t in trace if t[3] is not None and math.isfinite(t[3])]
-        unstable_at = next((k + 1 for k, t in enumerate(trace) if t[4] == "unstable"), None)
         phases = []
         for t in trace:
             if phases and phases[-1][0] == t[0]:
@@ -208,9 +209,7 @@ def cmd_run(flow, a):
                    accelerated_steps=res.accelerated_steps, num_restarts=res.num_restarts,
                    monitor=res.monitor, K=case.K(res.monitor), wall_s=wall,
                    pressure_iterations=sum(v[0] for v in piters.values()),
-                   piters_by_phase=piters, ritz_max=max(ritz) if ritz else None,
-                   ritz_n=len(ritz), ritz_over_1p0005=sum(1 for r in ritz if r > 1.0005),
-                   unstable_at=unstable_at,
+                   piters_by_phase=piters,
                    status=acc.status if acc else None, acc_reason=acc.reason if acc else None,
                    num_resets=acc.num_resets if acc else None,
                    acc_seconds=acc.seconds if acc else None,
@@ -223,12 +222,23 @@ def cmd_run(flow, a):
               f"conv={res.converged} {res.reason} steps={res.steps} acc={res.accelerated_steps} "
               f"K={rec['K']:.10f} wall={wall:.2f}s piters={rec['pressure_iterations']} "
               f"pit/step a/c/p={pi['accelerate']}/{pi['certify']}/{pi['plain']} "
-              f"ritz_max={rec['ritz_max']} n={len(ritz)} rst={res.num_restarts} "
+              f"rst={res.num_restarts} "
               f"status={rec['status']} accsec={rec['acc_seconds']} [{rec['phases']}]",
               flush=True)
         emit(a, rec)
+        conv[w] = res.converged
         del s, acc
         holder.clear()
+    if 0 in conv and len(conv) > 1:  # G7c (rev 2): plain converged vs accelerated converged
+        accw = {w: c for w, c in conv.items() if w > 0}
+        ok = (not conv[0]) or all(accw.values())
+        print(f"G7c {a.case} {a.scheme} N={a.N} {a.settings}: plain converged={conv[0]}; "
+              + " ".join(f"m={w} converged={c}" for w, c in accw.items())
+              + f" -> {'PASS' if ok else 'FAIL'}", flush=True)
+        rec = common_rec(a, case)
+        rec.update(gate="g7c", plain_converged=conv[0],
+                   accelerated_converged={str(w): c for w, c in accw.items()}, ok=ok)
+        emit(a, rec)
 
 
 # ---------------------------------------------------------------------------------------------- oracle
@@ -245,7 +255,7 @@ def cmd_oracle(flow, a):
     for _ in range(a.steps):
         acc.step(True)
         rc.append(acc.residual)
-    # oracle (rev 1: velocity metric, Ritz on mixed windows above 1000 tau)
+    # oracle (rev 2: velocity metric, no instability guard — the oracle's radius has no consequence)
     s2 = case.build(flow, a.scheme, st)
     us = s2.unit_scales
     tau = st["vel_rtol"] if st["vel_rtol"] else st["pcg"][1]
@@ -253,7 +263,7 @@ def cmd_oracle(flow, a):
                           case.mu * us["viscosity_to_internal"],
                           case.F * us["force_density_to_internal"][0], 0.0, 0.0),
                c_p=1.0, gauged=True, collocated_advection=False, cells=(a.N,) * 3, metric="V",
-               ritz_scope="mixed", inner_tolerance=tau)
+               ritz_scope="mixed", inner_tolerance=tau, ritz_action="none")
     orc = O.AndersonOracle(s2, window=m, **okw)
     ro = []
     for _ in range(a.steps):
@@ -273,6 +283,9 @@ def cmd_oracle(flow, a):
 
 
 # ---------------------------------------------------------------------------------------------- g3
+G3_DEPTH = 1e-9  # §8 G3: the running-min residual must reach this
+
+
 def cmd_g3(flow, a):
     st = settings_of("tight")
     case = Case(a)
@@ -280,17 +293,17 @@ def cmd_g3(flow, a):
     for beta in a.betas:
         s = case.build(flow, a.scheme, st, beta=beta)
         acc = s.diagnostics.anderson_accelerator(window=a.window[0])
-        res, rmin, ritz, rst_steps = [], math.inf, [], []
+        res, rmin, rst_steps = [], math.inf, []
         t0 = time.perf_counter()
-        for k in range(a.steps):
+        for k in range(max(a.steps, a.extend_to)):
+            if k >= a.steps and rmin <= G3_DEPTH:
+                break  # --extend-to: the depth bar is reached
             r0 = acc.num_restarts
             acc.step(True)
             if acc.num_restarts > r0:
                 rst_steps.append(k + 1)
             res.append(acc.residual)
             rmin = min(rmin, acc.residual)
-            if math.isfinite(acc.ritz_radius):
-                ritz.append(acc.ritz_radius)
             if acc.status != "active":
                 break
         wall = time.perf_counter() - t0
@@ -298,18 +311,18 @@ def cmd_g3(flow, a):
         K = case.K(u)
         Ks[beta] = K
         per100 = max([sum(1 for q in rst_steps if lo < q <= lo + 100)
-                      for lo in range(0, a.steps, 100)] or [0])
-        ok = (acc.status == "active" and per100 <= 1 and rmin <= 1e-9 and res[-1] <= 10 * rmin)
+                      for lo in range(0, len(res), 100)] or [0])
+        ok = (acc.status == "active" and per100 <= 1 and rmin <= G3_DEPTH and res[-1] <= 10 * rmin)
         print(f"g3 {a.case} {a.scheme} N={a.N} beta={beta:g} m={a.window[0]}: status={acc.status} "
               f"({acc.reason}) steps={len(res)} restarts={acc.num_restarts} (max/100 {per100}) "
-              f"min_res={rmin:.3e} final_res={res[-1]:.3e} K={K:.12f} ritz_max="
-              f"{max(ritz) if ritz else None} wall={wall:.1f}s -> {'PASS' if ok else 'FAIL'}",
+              f"min_res={rmin:.3e} final_res={res[-1]:.3e} K={K:.12f} "
+              f"wall={wall:.1f}s -> {'PASS' if ok else 'FAIL'}",
               flush=True)
         rec = common_rec(a, case)
         rec.update(gate="g3", beta=beta, window=a.window[0], status=acc.status,
                    reason=acc.reason, steps=len(res), restarts=acc.num_restarts,
                    restarts_max_per_100=per100, min_res=rmin, final_res=res[-1], K=K, u=u,
-                   ritz_max=max(ritz) if ritz else None, ok=ok, wall_s=wall)
+                   ok=ok, wall_s=wall)
         emit(a, rec)
         del acc, s
     if len(Ks) > 1:
@@ -488,6 +501,9 @@ def main():
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--at", type=int, default=25)
     ap.add_argument("--warmup", type=int, default=100, help="g8: plain steps before timing")
+    ap.add_argument("--extend-to", type=int, default=0,
+                    help="g3: past --steps, continue until the running-min residual is <= 1e-9 "
+                         "or this many steps in total (0 = no extension)")
     ap.add_argument("--serial", action="store_true")
     ap.add_argument("--hash", action="store_true")
     ap.add_argument("--trace", action="store_true")

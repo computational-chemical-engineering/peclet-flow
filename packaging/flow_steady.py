@@ -3,7 +3,7 @@
 March a :class:`peclet.flow.Solver` / :class:`peclet.flow.SolverColocated` to its steady state and
 certify it with the study's stop instrument (a geometric-remainder bound on the change of a scalar
 ``monitor()``), optionally accelerated by type-II Anderson mixing of the march state
-(``doc/steady_acceleration.md``, revision 1).
+(``doc/steady_acceleration.md``, revision 2).
 
 The accelerated march has two phases. Phase A applies Anderson mixing until the relative velocity
 residual reaches ``(1 - slow_rate) * rtol``. Phase B certifies with the unchanged instrument on
@@ -43,10 +43,13 @@ class MarchResult:
     """The outcome of :func:`march_to_steady`.
 
     ``converged`` is True only for ``reason == "certified"``. ``reason`` is one of ``"certified"``,
-    ``"max_steps"``, ``"unstable"`` (the accelerator found the plain map locally unstable at this
-    dt) or ``"diverged"`` (a non-finite monitor on the plain march). ``steps`` counts every solver
-    step, ``accelerated_steps`` those taken in the accelerated phase; ``monitor`` is the last value
-    of ``monitor()``.
+    ``"max_steps"`` or ``"diverged"`` (a non-finite monitor on the plain march). ``steps`` counts
+    every solver step, ``accelerated_steps`` those taken in the accelerated phase; ``monitor`` is
+    the last value of ``monitor()``.
+
+    converged=True certifies that the state passed the stop test on consecutive plain steps at this
+    dt (stationarity); it does not certify that a plain march from the initial state would reach
+    it.
     """
 
     converged: bool
@@ -186,8 +189,6 @@ def march_to_steady(solver, monitor, rtol=1e-4, max_steps=5000, accelerate=True,
             counter.accelerated_steps += 1
             if callback is not None:
                 callback(counter.steps, "accelerate")
-            if acc.status == "unstable":
-                return result(False, "unstable")
             if acc.residual <= 0.5 * best:
                 best, since = acc.residual, 0
             else:

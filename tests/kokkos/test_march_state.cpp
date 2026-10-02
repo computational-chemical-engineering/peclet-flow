@@ -1,6 +1,6 @@
 /// @file
 /// @brief ctest `march_state`: Solver::marchState(), the state descriptor of the steady march
-/// (doc/steady_acceleration.md §3.1, §4.1, §5.1, §5.3, rev 1; work order WO-2).
+/// (doc/steady_acceleration.md §3.1, §5.1, §5.3, rev 2; work orders WO-2, WO-7).
 ///
 /// Checks, single rank, on both grids:
 ///   * the field list and roles of the three §3.1 rows — staggered (u, v, w Velocity; P Carried);
@@ -8,8 +8,6 @@
 ///     AUTO scheme and through set_uf_advection(False)); collocated 'ghost' with advection and the
 ///     projected face field (+ uf, vf, wf Carried) — each field ALIASING the solver's own buffer
 ///     over the full padded box;
-///   * innerTolerance in three configurations: the default (= the PCG rtol), an explicit velocity
-///     residual tolerance (= that value), and tolerance 0 under Chebyshev (= the Chebyshev rtol);
 ///   * the internal signature (dt, rho, mu, F);
 ///   * that each §5.3 refusal throws std::runtime_error with its own message.
 #include <algorithm>
@@ -144,28 +142,6 @@ void gateRows() {
   }
 }
 
-void gateTolerance() {
-  std::printf("innerTolerance (§4.1)\n");
-  {
-    Stag s(N, N, N);
-    basics(s);  // PCG rtol 1e-8, velocity residual tolerance default (< 0: follows the driver)
-    check(s.marchState().innerTolerance == 1e-8, "default: the PCG rtol (1e-8)");
-  }
-  {
-    Stag s(N, N, N);
-    basics(s);
-    s.setVelocityResidualTolerance(1e-9);
-    check(s.marchState().innerTolerance == 1e-9, "explicit velocity residual tolerance 1e-9");
-  }
-  {
-    Stag s(N, N, N);
-    basics(s);
-    s.setPressureChebyshev(true, 120, 3e-7);
-    s.setVelocityResidualTolerance(0.0);
-    check(s.marchState().innerTolerance == 3e-7, "tolerance 0 under Chebyshev: the Chebyshev rtol");
-  }
-}
-
 /// `make` builds a solver with exactly one refused feature; marchState() must throw a message
 /// containing `token` (its own refusal) and the hint.
 template <class S, class Make>
@@ -261,7 +237,6 @@ int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
     gateRows();
-    gateTolerance();
     gateRefusals();
   }
   Kokkos::finalize();
