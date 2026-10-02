@@ -105,8 +105,11 @@ def build(G, k, fc=True, wall="quad"):
                     break
                 pts.append((s, cand, lagr(np.array(coords), t)))
             if wall.startswith("probe"):
-                c = (max(0.3, (G.kap[i, j]**2 - 0.25) / (2 * G.kap[i, j])) if wall[5:] == "K"
-                     else float(wall[5:] or 1.0))
+                if wall[5:6] == "N":  # normal-dependent support distance: sigma * 1/2 sum_a |n_a| (units of h)
+                    c = float(wall[6:] or 1.1) * 0.5 * (abs(nn[0]) + abs(nn[1]))
+                else:
+                    c = (max(0.3, (G.kap[i, j]**2 - 0.25) / (2 * G.kap[i, j])) if wall[5:] == "K"
+                         else float(wall[5:] or 1.0))
                 sp_ = c * h
                 p = xw + sp_ * nn
                 fi = (p[0] - G.xc[0]) / h; fj = (p[1] - G.yc[0]) / h
